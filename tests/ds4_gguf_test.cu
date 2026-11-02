@@ -829,7 +829,7 @@ void test_mv_rows(cudaStream_t s) {
         m.k = k;
         m.n = n;
         bool same = true;
-        for (int nc : {2, 4, 8, 16}) {
+        for (int nc : {2, 3, 4, 5, 8, 16}) {
             const size_t xcs = (size_t) k;
             std::vector<float> x(xcs * nc);
             for (auto& v : x) v = frand();
@@ -860,7 +860,7 @@ void test_mv_rows(cudaStream_t s) {
         }
         if (!same) ++g_fail;
         char what[96];
-        std::snprintf(what, sizeof(what), "mv rows %s: each of 2 / 4 / 8 / 16 alone, bit for bit",
+        std::snprintf(what, sizeof(what), "mv rows %s: each of 2 / 3 / 4 / 5 / 8 / 16 alone, bit for bit",
                       lowbit ? tn(f) : fmt == gg::kFmtBF16 ? "BF16" : fmt == gg::kFmtMXFP4 ? "MXFP4" : "Q8_0");
         std::printf("%-60s %s\n", what, same ? "ok" : "FAIL");
         cudaFree(dw);
@@ -877,7 +877,8 @@ void bench_mvq(cudaStream_t s, int type) {
     cudaEventCreate(&a);
     cudaEventCreate(&b);
     for (const Sh& sh : shapes) {
-        std::vector<uint8_t> wq = q_rand(type, sh.n, sh.k);
+        const bool q8 = type == gg::iq::kQ8_0;   // (a GGUF's dense Q8_0: kFmtQ8_0, ds4_gguf's q8_mv_kernel)
+        std::vector<uint8_t> wq = q8 ? q8_rand(sh.n, sh.k) : q_rand(type, sh.n, sh.k);
         std::vector<uint8_t*> dw;
         for (int j = 0; j < sh.jobs; ++j) dw.push_back(dev(wq));
         std::vector<x3::Mat> m((size_t) sh.jobs);
@@ -890,8 +891,8 @@ void bench_mvq(cudaStream_t s, int type) {
             std::vector<x3::MvJob> js((size_t) sh.jobs);
             for (int j = 0; j < sh.jobs; ++j) {
                 dy.push_back(dev(std::vector<float>((size_t) sh.n * nc)));
-                m[j].fmt = gg::kFmtGG;
-                m[j].gg_type = type;
+                m[j].fmt = q8 ? gg::kFmtQ8_0 : gg::kFmtGG;
+                m[j].gg_type = q8 ? 0 : type;
                 m[j].raw = dw[j];
                 m[j].k = sh.k;
                 m[j].n = sh.n;
