@@ -1265,18 +1265,18 @@ __global__ void __launch_bounds__(kThreads) mv_kernel(const Jobs J) {
             const int row = row0 + r;
             b.y[c * b.ycs + row] = b.alpha * v + (b.bias != nullptr ? b.bias[row] : 0.0f);
         }
-        return;
-    }
+    } else {
 #pragma unroll
-    for (int r = 0; r < R; ++r) {
-        if (row0 + r >= b.n) break;
-        const int row = row0 + r;
+        for (int r = 0; r < R; ++r) {
+            if (row0 + r >= b.n) break;
+            const int row = row0 + r;
 #pragma unroll
-        for (int c = 0; c < NC; ++c)
-            if (c < b.ncol) {
-                const float v = warp_sum(acc[r][c]);
-                if (lane == 0) b.y[c * b.ycs + row] = b.alpha * v + (b.bias != nullptr ? b.bias[row] : 0.0f);
-            }
+            for (int c = 0; c < NC; ++c)
+                if (c < b.ncol) {
+                    const float v = warp_sum(acc[r][c]);
+                    if (lane == 0) b.y[c * b.ycs + row] = b.alpha * v + (b.bias != nullptr ? b.bias[row] : 0.0f);
+                }
+        }
     }
 }
 

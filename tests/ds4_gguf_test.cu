@@ -877,7 +877,8 @@ void bench_mvq(cudaStream_t s, int type) {
     cudaEventCreate(&a);
     cudaEventCreate(&b);
     for (const Sh& sh : shapes) {
-        std::vector<uint8_t> wq = q_rand(type, sh.n, sh.k);
+        const bool q8 = type == gg::iq::kQ8_0;   // (a GGUF's dense Q8_0: kFmtQ8_0, ds4_gguf's q8_mv_kernel)
+        std::vector<uint8_t> wq = q8 ? q8_rand(sh.n, sh.k) : q_rand(type, sh.n, sh.k);
         std::vector<uint8_t*> dw;
         for (int j = 0; j < sh.jobs; ++j) dw.push_back(dev(wq));
         std::vector<x3::Mat> m((size_t) sh.jobs);
@@ -890,8 +891,8 @@ void bench_mvq(cudaStream_t s, int type) {
             std::vector<x3::MvJob> js((size_t) sh.jobs);
             for (int j = 0; j < sh.jobs; ++j) {
                 dy.push_back(dev(std::vector<float>((size_t) sh.n * nc)));
-                m[j].fmt = gg::kFmtGG;
-                m[j].gg_type = type;
+                m[j].fmt = q8 ? gg::kFmtQ8_0 : gg::kFmtGG;
+                m[j].gg_type = q8 ? 0 : type;
                 m[j].raw = dw[j];
                 m[j].k = sh.k;
                 m[j].n = sh.n;

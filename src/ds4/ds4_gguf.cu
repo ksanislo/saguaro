@@ -48,6 +48,35 @@ __device__ __forceinline__ float warp_sum(float v) {
     for (int o = 16; o > 0; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
     return v;
 }
+// N sums of a warp at once, each warp_sum's bits (ds4_iq.cu's warp_sum_n: a lane keeps one of a pair, sends the other):
+// sum j ends on the lanes whose bit 4 - t is bit t of j
+template <int N>
+__device__ __forceinline__ float warp_sum_n(float* v, int lane) {
+    int n = N, o = 16;
+#pragma unroll
+    for (int lv = 0; lv < 5; ++lv, o >>= 1) {
+        if (n > 1) {
+            const bool up = (lane & o) != 0;
+#pragma unroll
+            for (int m = 0; m < N / 2; ++m)
+                if (m < n / 2) {
+                    const float keep = up ? v[2 * m + 1] : v[2 * m], send = up ? v[2 * m] : v[2 * m + 1];
+                    v[m] = keep + __shfl_xor_sync(0xffffffffu, send, o);
+                }
+            n >>= 1;
+        } else {
+            v[0] += __shfl_xor_sync(0xffffffffu, v[0], o);
+        }
+    }
+    return v[0];
+}
+template <int N>
+__device__ __forceinline__ int warp_held(int lane) {
+    int j = 0;
+#pragma unroll
+    for (int t = 0; (1 << t) < N; ++t) j |= ((lane >> (4 - t)) & 1) << t;
+    return j;
+}
 
 // ---------------------------------------------------------------- BF16 matrices
 struct BfJob {
@@ -448,54 +477,86 @@ __device__ __forceinline__ float q8_words_g(const uint8_t* __restrict__ p, int* 
     return __half2float(__ushort_as_half((uint16_t) (p[0] | p[1] << 8)));
 }
 
-// grid (max rows / 8, jobs): a Q8_0 matrix's rows against the jobs' int8 activations (q8_quant's: activation c of job
-// j at xq + c k, its scales at xd + c k / 32) - a warp a row, a lane a block a step, the blocks staged (ST) or read
-template <int NC, bool ST>
+// grid (max rows / (8 R), jobs): a Q8_0 matrix's rows against the jobs' int8 activations (q8_quant's: activation c of
+// job j at xq + c k, its scales at xd + c k / 32) - a warp R rows, a lane a block a step, the blocks staged (ST) or
+// read.  R > 1 (DS4_MV_ROWS, several activations): each activation block loaded once for the R rows, each row's sums
+// the same operations; PK: the R x NC sums reduced together (warp_sum_n) - the same bits
+template <int NC, bool ST, int R = 1, bool PK = false>
 __global__ void __launch_bounds__(kThreads) q8_mv_kernel(const BfJobs J) {
     pdl_wait();
     pdl_trigger();
-    __shared__ __align__(16) uint32_t stage[kWarps][32 * kQ8Bytes / 4];
+    __shared__ __align__(16) uint32_t stage[kWarps][R][32 * kQ8Bytes / 4];
     const BfJob& b = J.j[blockIdx.y];
-    const int row = blockIdx.x * kWarps + (threadIdx.x >> 5), lane = threadIdx.x & 31;
-    if (row >= b.n) return;
-    const uint8_t* w = (const uint8_t*) b.w + (size_t) row * b.ld;
-    const int nb = b.k / 32;
-    float acc[NC];
+    const int row0 = (blockIdx.x * kWarps + (threadIdx.x >> 5)) * R, lane = threadIdx.x & 31;
+    if (row0 >= b.n) return;
+    const uint8_t* w[R];
 #pragma unroll
-    for (int c = 0; c < NC; ++c) acc[c] = 0.0f;
-    Fetch<kQ8Bytes> F;
-    if (ST) F.load(w, 0, min(32, nb));
+    for (int r = 0; r < R; ++r) w[r] = (const uint8_t*) b.w + (size_t) min(row0 + r, b.n - 1) * b.ld;
+    const int nb = b.k / 32;
+    float acc[R][NC];
+#pragma unroll
+    for (int r = 0; r < R; ++r)
+#pragma unroll
+        for (int c = 0; c < NC; ++c) acc[r][c] = 0.0f;
+    Fetch<kQ8Bytes> F[R];
+    if (ST)
+#pragma unroll
+        for (int r = 0; r < R; ++r) F[r].load(w[r], 0, min(32, nb));
     for (int b0 = 0; b0 < nb; b0 += 32) {
         const int nbk = min(32, nb - b0), kb = b0 + lane;
-        if (ST) {
-            F.store(stage[threadIdx.x >> 5]);
-            if (b0 + 32 < nb) F.load(w, b0 + 32, min(32, nb - b0 - 32));
-        }
+        if (ST)
+#pragma unroll
+            for (int r = 0; r < R; ++r) {
+                F[r].store(stage[threadIdx.x >> 5][r]);
+                if (b0 + 32 < nb) F[r].load(w[r], b0 + 32, min(32, nb - b0 - 32));
+            }
         if (lane >= nbk) continue;
-        int v[8];
-        const float dw = ST ? q8_words_s(stage[threadIdx.x >> 5], lane, v) : q8_words_g(w + (size_t) kb * kQ8Bytes, v);
+        int v[R][8];
+        float dw[R];
+#pragma unroll
+        for (int r = 0; r < R; ++r)
+            dw[r] = ST ? q8_words_s(stage[threadIdx.x >> 5][r], lane, v[r]) : q8_words_g(w[r] + (size_t) kb * kQ8Bytes, v[r]);
 #pragma unroll
         for (int c = 0; c < NC; ++c)
             if (c < b.ncol) {
                 const int4* xp = (const int4*) (b.xq + (size_t) c * b.k + (size_t) kb * 32);
                 const int4 xa = xp[0], xb = xp[1];
-                int sum = __dp4a(v[0], xa.x, 0);
-                sum = __dp4a(v[1], xa.y, sum);
-                sum = __dp4a(v[2], xa.z, sum);
-                sum = __dp4a(v[3], xa.w, sum);
-                sum = __dp4a(v[4], xb.x, sum);
-                sum = __dp4a(v[5], xb.y, sum);
-                sum = __dp4a(v[6], xb.z, sum);
-                sum = __dp4a(v[7], xb.w, sum);
-                acc[c] = fmaf(dw * b.xd[(size_t) c * nb + kb], (float) sum, acc[c]);
+                const float xd = b.xd[(size_t) c * nb + kb];
+#pragma unroll
+                for (int r = 0; r < R; ++r) {
+                    int sum = __dp4a(v[r][0], xa.x, 0);
+                    sum = __dp4a(v[r][1], xa.y, sum);
+                    sum = __dp4a(v[r][2], xa.z, sum);
+                    sum = __dp4a(v[r][3], xa.w, sum);
+                    sum = __dp4a(v[r][4], xb.x, sum);
+                    sum = __dp4a(v[r][5], xb.y, sum);
+                    sum = __dp4a(v[r][6], xb.z, sum);
+                    sum = __dp4a(v[r][7], xb.w, sum);
+                    acc[r][c] = fmaf(dw[r] * xd, (float) sum, acc[r][c]);
+                }
             }
     }
-#pragma unroll
-    for (int c = 0; c < NC; ++c)
-        if (c < b.ncol) {
-            const float v = warp_sum(acc[c]);
-            if (lane == 0) b.y[c * b.ycs + row] = b.alpha * v + (b.bias != nullptr ? b.bias[row] : 0.0f);
+    if constexpr (PK && R * NC > 1) {
+        constexpr int N = R * NC;
+        const float v = warp_sum_n<N>(&acc[0][0], lane);
+        const int j = warp_held<N>(lane), r = j / NC, c = j % NC;
+        if ((lane & (32 / N - 1)) == 0 && c < b.ncol && row0 + r < b.n) {
+            const int row = row0 + r;
+            b.y[c * b.ycs + row] = b.alpha * v + (b.bias != nullptr ? b.bias[row] : 0.0f);
         }
+    } else {
+#pragma unroll
+        for (int r = 0; r < R; ++r) {
+            if (row0 + r >= b.n) break;
+            const int row = row0 + r;
+#pragma unroll
+            for (int c = 0; c < NC; ++c)
+                if (c < b.ncol) {
+                    const float v = warp_sum(acc[r][c]);
+                    if (lane == 0) b.y[c * b.ycs + row] = b.alpha * v + (b.bias != nullptr ? b.bias[row] : 0.0f);
+                }
+        }
+    }
 }
 
 // grid (max rows / 8, jobs): bf16_mv_kernel for MXFP4 (Q8 false) or Q8_0 (Q8 true) matrices - a lane a 32-value block
@@ -1448,8 +1509,36 @@ void mv_launch(int f, const BfJobs& J, int nj, int max_n, bool vec, cudaStream_t
         if (vec) pdl_launch(mx_mv_kernel<NC, true, false>, grid, kThreads, 0, s, J);
         else pdl_launch(mx_mv_kernel<NC, false, false>, grid, kThreads, 0, s, J);
     } else if (f == 2) {   // (vec here: every row 4-byte aligned, so staged)
-        if (vec) pdl_launch(q8_mv_kernel<NC, true>, grid, kThreads, 0, s, J);
-        else pdl_launch(q8_mv_kernel<NC, false>, grid, kThreads, 0, s, J);
+        // (DS4_MV_ROWS / DS4_MV_PACK as ds4_iq's: rows a warp and the packed sums at several activations; DS4_Q8_ROWS=0:
+        //  a row a warp, a warp_sum a sum, as before - all the same bits)
+        static const int rw = [] {
+            const char* v = std::getenv("DS4_MV_ROWS");
+            const int r = v != nullptr ? std::atoi(v) : 2;
+            return r == 1 || r == 2 || r == 4 ? r : 2;
+        }();
+        static const bool on = [] {
+            const char* v = std::getenv("DS4_Q8_ROWS");
+            return v == nullptr || std::atoi(v) != 0;
+        }();
+        static const bool pk = [] {
+            const char* v = std::getenv("DS4_MV_PACK");
+            return v == nullptr || std::atoi(v) != 0;
+        }();
+        // (at <= 4 activations a row a warp when every row is longer than 4096: T4, R 2 slower there - wo_b 172 -> 193 us)
+        int kmin = 1 << 30;
+        for (int i = 0; i < nj; ++i) kmin = std::min(kmin, J.j[i].k);
+        const int R = !on || NC == 1 || (NC <= 4 && kmin > 4096) ? 1 : NC == 16 ? std::min(rw, 2) : rw;
+        const dim3 g((unsigned) ((max_n + kWarps * R - 1) / (kWarps * R)), (unsigned) nj);
+#define Q8L_(RR, P)                                                              \
+        do {                                                                     \
+            if (vec) pdl_launch(q8_mv_kernel<NC, true, RR, P>, g, kThreads, 0, s, J); \
+            else pdl_launch(q8_mv_kernel<NC, false, RR, P>, g, kThreads, 0, s, J);    \
+        } while (0)
+        if (R == 1 && !(on && pk)) Q8L_(1, false);
+        else if (R == 1) Q8L_(1, true);
+        else if (R == 2) { if (pk) Q8L_(2, true); else Q8L_(2, false); }
+        else if constexpr (NC < 16) { if (pk) Q8L_(4, true); else Q8L_(4, false); }
+#undef Q8L_
     } else {
         if (vec) pdl_launch(bf16_mv_kernel<NC, true>, grid, kThreads, 0, s, J);
         else pdl_launch(bf16_mv_kernel<NC, false>, grid, kThreads, 0, s, J);
