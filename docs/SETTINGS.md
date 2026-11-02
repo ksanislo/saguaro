@@ -1497,6 +1497,7 @@ are taken from its own node first.
 | Setting | Default | |
 | --- | --- | --- |
 | `MAYA_DS4_COPY_HUGETLB` | on when the reserved pool holds every copy | `0`: the ordinary arena; `1`: from the pool as far as it goes, the rest ordinary (a line says when it ran out) |
+| `DS4_NO_HUGEPAGES` (or `STRATA_NO_LARGEPAGES`) | off | `1`: the copies' ordinary arena (and the engine's other anonymous buffers) without `MADV_HUGEPAGE`. With transparent huge pages' defrag on `madvise` and the RAM full of page cache, each fault of such a range compacts memory first - Strata's DeepSeek engine saw a 102 GB copy fall to 54 MB/s (kcompactd at 100%) |
 | `MAYA_DS4_COPY_PIN_RO` | off | `1`: the copies pinned read-only (`cudaHostRegisterReadOnly`; the GPUs only read them), where every GPU takes it - a GeForce does not, and the log says so |
 
 ## DeepSeek: integrated GPUs

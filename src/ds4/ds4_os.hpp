@@ -501,7 +501,14 @@ inline void* anon_alloc(size_t bytes, int node, int nodes) {
 #else
     void* m = ::mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (m == MAP_FAILED) return nullptr;
-    madvise(m, bytes, MADV_HUGEPAGE);
+    // STRATA_NO_LARGEPAGES=1 / DS4_NO_HUGEPAGES=1: no MADV_HUGEPAGE (THP defrag on madvise with the RAM full of page
+    // cache compacts at every fault: Strata's 102 GB copy fell to 54 MB/s)
+    static const bool no_huge = [] {
+        for (const char* k : {"STRATA_NO_LARGEPAGES", "DS4_NO_HUGEPAGES"})
+            if (const char* v = std::getenv(k); v != nullptr && v[0] != '\0' && v[0] != '0') return true;
+        return false;
+    }();
+    if (!no_huge) madvise(m, bytes, MADV_HUGEPAGE);
     if (node >= 0 && nodes > 1) {
         unsigned long mask[4] = {0, 0, 0, 0};
         mask[node / 64] = 1ul << (node % 64);
