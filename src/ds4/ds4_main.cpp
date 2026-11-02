@@ -3039,6 +3039,34 @@ int check_multi(strata::ds4::Model& m, const std::vector<int>& ids, int n) {
     };
     said("alone", s_alone, ms_alone, steps * N);
     said("together", s_together, ms_together, steps);
+    // DS4_MC_COUNTS=2,3 (a benchmark): then the first c conversations together, fresh from their prompts, for each c
+    if (const char* cv = std::getenv("DS4_MC_COUNTS"))
+        for (const int c : parse_ids(cv)) {
+            if (c < 1 || c > N) continue;
+            for (int i = 0; i < c; ++i) {
+                if (!prompt(i)) {
+                    std::fprintf(stderr, "multi check: %s\n", err.c_str());
+                    return 1;
+                }
+                tv[(size_t) i] = m.sample(0.0f, 1.0f, 0, 0.0f, 0, 0);
+                sv[(size_t) i] = i;
+            }
+            strata::ds4::Stats sc{};
+            double ms = 0;
+            for (int k = 1; k < n; ++k) {
+                const double t0 = now_ms();
+                st0 = m.stats();
+                if (!m.step_multi(sv.data(), tv.data(), c, err) || !m.logits(lg)) {
+                    std::fprintf(stderr, "multi check: %s\n", err.empty() ? "no logits" : err.c_str());
+                    return 1;
+                }
+                for (int i = 0; i < c; ++i) tv[(size_t) i] = m.sample_multi(i, 0.0f, 1.0f, 0, 0.0f, 0, 0);
+                ms += now_ms() - t0;
+                acc(sc, st0, m.stats());
+            }
+            std::printf("multi check: %d together: %.2f tok/s in all\n", c, ms > 0 ? 1000.0 * steps * c / ms : 0.0);
+            said((std::to_string(c) + " together").c_str(), sc, ms, steps);
+        }
     // ... then with the drafter, greedy, so the tokens alone are due again - every draft verified, whatever its
     // confidence, so rejected windows are undone often: each conversation alone (draft / verify, one conversation's
     // rounds), then together (step_multi_spec / verify_multi, as the server's rounds, each conversation's drafts its
