@@ -2938,6 +2938,19 @@ int check_multi(strata::ds4::Model& m, const std::vector<int>& ids, int n) {
     std::vector<std::vector<std::vector<float>>> lg_alone((size_t) N);
     std::vector<float> lg;
     double ms_alone = 0, ms_together = 0;
+    // (each pass's decode steps: the CPU lane's time and experts a step, against the step's wall time)
+    strata::ds4::Stats sa{}, st0{};
+    const auto acc = [&](strata::ds4::Stats& a, const strata::ds4::Stats& b, const strata::ds4::Stats& e) {
+        a.tokens += e.tokens - b.tokens;
+        a.experts += e.experts - b.experts;
+        a.cpu_experts += e.cpu_experts - b.cpu_experts;
+        a.stream_experts += e.stream_experts - b.stream_experts;
+        a.cpu_ms += e.cpu_ms - b.cpu_ms;
+        a.layer_ms += e.layer_ms - b.layer_ms;
+        a.head_ms += e.head_ms - b.head_ms;
+        a.engram_ms += e.engram_ms - b.engram_ms;
+    };
+    strata::ds4::Stats s_alone{}, s_together{};
     for (int i = 0; i < N; ++i) {
         if (!prompt(i)) {
             std::fprintf(stderr, "multi check: %s\n", err.c_str());
@@ -2946,7 +2959,11 @@ int check_multi(strata::ds4::Model& m, const std::vector<int>& ids, int n) {
         int tok = m.sample(0.0f, 1.0f, 0, 0.0f, 0, 0);
         alone[(size_t) i].push_back(tok);
         const double t0 = now_ms();
+        sa = m.stats();
+        const char* pv = std::getenv("DS4_PROFILE");
+        const bool prof_a = i == 0 && pv != nullptr && std::strcmp(pv, "alone") == 0;   // (conversation 0's steps alone)
         for (int k = 1; k < n; ++k) {
+            if (prof_a && k == std::min(n - 1, 8)) cudaProfilerStart();
             if (!m.step(tok, true, err) || !m.logits(lg)) {
                 std::fprintf(stderr, "multi check: %s\n", err.c_str());
                 return 1;
@@ -2956,6 +2973,8 @@ int check_multi(strata::ds4::Model& m, const std::vector<int>& ids, int n) {
             alone[(size_t) i].push_back(tok);
         }
         ms_alone += now_ms() - t0;
+        if (prof_a) cudaProfilerStop();
+        acc(s_alone, sa, m.stats());
     }
     for (int i = 0; i < N; ++i) {
         if (!prompt(i)) {
@@ -2967,18 +2986,23 @@ int check_multi(strata::ds4::Model& m, const std::vector<int>& ids, int n) {
     long long rows = 0, same_rows = 0;
     double max_d = 0;
     std::vector<int> sv((size_t) N), tv((size_t) N);
+    const bool prof = std::getenv("DS4_PROFILE") != nullptr &&   // (nsys --capture-range=cudaProfilerApi: the steps
+                      std::strcmp(std::getenv("DS4_PROFILE"), "alone") != 0;   //  together; =alone: conversation 0's alone)
     for (int k = 1; k < n; ++k) {
+        if (prof && k == std::min(n - 1, 8)) cudaProfilerStart();
         for (int i = 0; i < N; ++i) {
             sv[(size_t) i] = i;
             tv[(size_t) i] = together[(size_t) i].back();
         }
         const double t0 = now_ms();
+        st0 = m.stats();
         if (!m.step_multi(sv.data(), tv.data(), N, err) || !m.logits(lg) || lg.size() < (size_t) N * V) {
             std::fprintf(stderr, "multi check: %s\n", err.empty() ? "no logits" : err.c_str());
             return 1;
         }
         for (int i = 0; i < N; ++i) together[(size_t) i].push_back(m.sample_multi(i, 0.0f, 1.0f, 0, 0.0f, 0, 0));
         ms_together += now_ms() - t0;
+        acc(s_together, st0, m.stats());
         for (int i = 0; i < N; ++i) {   // (while the tokens agree: the same history, so the same logits are due)
             if (together[(size_t) i][(size_t) k - 1] != alone[(size_t) i][(size_t) k - 1]) continue;
             const float* a = lg_alone[(size_t) i][(size_t) k - 1].data();
@@ -2989,6 +3013,7 @@ int check_multi(strata::ds4::Model& m, const std::vector<int>& ids, int n) {
                 for (int v = 0; v < V; ++v) max_d = std::max(max_d, (double) std::fabs(a[v] - b[v]));
         }
     }
+    if (prof) cudaProfilerStop();
     bool tokens_same = true;
     for (int i = 0; i < N; ++i) {
         size_t d = 0;
@@ -3005,6 +3030,15 @@ int check_multi(strata::ds4::Model& m, const std::vector<int>& ids, int n) {
                 N, n, same_rows, rows, max_d, tokens_same ? "yes" : "NO",
                 ms_alone > 0 ? 1000.0 * steps * N / ms_alone : 0.0, ms_together > 0 ? 1000.0 * steps * N / ms_together : 0.0,
                 ms_together > 0 ? ms_alone / ms_together : 0.0);
+    const auto said = [&](const char* what, const strata::ds4::Stats& a, double ms, double nstep) {
+        if (nstep <= 0) return;
+        std::printf("multi check: %s: %.1f ms a step (%lld tokens), the layers %.1f, the CPU lane %.1f ms a step for "
+                    "%.1f of %.1f routed experts (%.1f streamed), the head's wait %.1f, Engram %.1f\n", what,
+                    ms / nstep, (long long) a.tokens, a.layer_ms / nstep, a.cpu_ms / nstep, a.cpu_experts / nstep,
+                    a.experts / nstep, a.stream_experts / nstep, a.head_ms / nstep, a.engram_ms / nstep);
+    };
+    said("alone", s_alone, ms_alone, steps * N);
+    said("together", s_together, ms_together, steps);
     // ... then with the drafter, greedy, so the tokens alone are due again - every draft verified, whatever its
     // confidence, so rejected windows are undone often: each conversation alone (draft / verify, one conversation's
     // rounds), then together (step_multi_spec / verify_multi, as the server's rounds, each conversation's drafts its
