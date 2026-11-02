@@ -524,6 +524,33 @@ inline void* anon_alloc(size_t bytes, int node, int nodes) {
     return m;
 #endif
 }
+/// Linux, several online NUMA nodes: [p, p + bytes) (not touched yet) a page on each node in turn (MPOL_INTERLEAVE).
+/// Returns the nodes used (1: nothing done)
+inline int interleave_nodes(void* p, size_t bytes) {
+#if defined(__linux__)
+    std::FILE* f = std::fopen("/sys/devices/system/node/online", "r");
+    if (f == nullptr) return 1;
+    char buf[256] = {};
+    const bool got = std::fgets(buf, sizeof buf, f) != nullptr;
+    std::fclose(f);
+    if (!got) return 1;
+    unsigned long mask[4] = {0, 0, 0, 0};
+    int n = 0;
+    for (char* q = buf; *q != '\0' && *q != '\n';) {   // "0-1" / "0,2-3"
+        char* e = nullptr;
+        const long a = std::strtol(q, &e, 10);
+        long b = a;
+        if (*e == '-') b = std::strtol(e + 1, &e, 10);
+        for (long k = a; k <= b && k < 256; ++k, ++n) mask[k / 64] |= 1ul << (k % 64);
+        q = *e == ',' ? e + 1 : e;
+    }
+    if (n < 2) return 1;
+    return syscall(SYS_mbind, p, bytes, 3 /* MPOL_INTERLEAVE */, mask, 256, 0) == 0 ? n : 1;
+#else
+    (void) p, (void) bytes;
+    return 1;
+#endif
+}
 inline void anon_free(void* p, size_t bytes) {
     if (p == nullptr) return;
 #if defined(_WIN32)
