@@ -541,6 +541,7 @@ within the run-to-run spread.
 | Setting | Default | |
 | --- | --- | --- |
 | `MAYA_DS4_MULTI_ATTN` | on (1) | with `--parallel` above 1, a step's attention for all its requests' rows in one launch a step instead of one a request (the same bits); `0`: one a request, as before |
+| `DS4_MV_ROWS` | 2 | (environment) the dense low-bit GEMVs (a GGUF's Q5_K / Q6_K / i-quant matrices) at 2 to 16 activations - a multi step's rows, a verify window's: rows a warp (1, 2 or 4), each activation sub-block loaded and summed once for them; the same bits at any value. One activation keeps one row a warp. 4 x T4, `--parallel 4`, 4 x 48 tokens: 22.6 -> 28.8 tok/s in all (the step's dense GEMVs 69 -> 26 ms) |
 
 #### Pieces, restore points and the parts check
 

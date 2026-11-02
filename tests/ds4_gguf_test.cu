@@ -867,6 +867,59 @@ void test_mv_rows(cudaStream_t s) {
     }
 }
 
+// --bench-mvq [type]: a DeepSeek layer's dense low-bit GEMVs (Q5_K by default) at 1 / 2 / 4 / 8 activations - the
+// decode's mv and --parallel's multi step's (us a call, GB/s of weights)
+void bench_mvq(cudaStream_t s, int type) {
+    struct Sh { int n, k, jobs; const char* what; };
+    const Sh shapes[] = {{32768, 1280, 1, "wq_b"}, {1024, 4096, 8, "wo_a x8"}, {5120, 8192, 1, "wo_b"},
+                         {2304, 5120, 2, "shared w1+w3"}, {5120, 2304, 1, "shared w2"}};
+    cudaEvent_t a, b;
+    cudaEventCreate(&a);
+    cudaEventCreate(&b);
+    for (const Sh& sh : shapes) {
+        std::vector<uint8_t> wq = q_rand(type, sh.n, sh.k);
+        std::vector<uint8_t*> dw;
+        for (int j = 0; j < sh.jobs; ++j) dw.push_back(dev(wq));
+        std::vector<x3::Mat> m((size_t) sh.jobs);
+        const double bytes = (double) wq.size() * sh.jobs;
+        for (int nc : {1, 2, 4, 8}) {
+            std::vector<float> x((size_t) sh.k * nc);
+            for (auto& v : x) v = frand();
+            float* dx = dev(x);
+            std::vector<float*> dy;
+            std::vector<x3::MvJob> js((size_t) sh.jobs);
+            for (int j = 0; j < sh.jobs; ++j) {
+                dy.push_back(dev(std::vector<float>((size_t) sh.n * nc)));
+                m[j].fmt = gg::kFmtGG;
+                m[j].gg_type = type;
+                m[j].raw = dw[j];
+                m[j].k = sh.k;
+                m[j].n = sh.n;
+                js[j].m = &m[j];
+                js[j].xf = dx;
+                js[j].y = dy[j];
+                js[j].ncol = nc;
+                js[j].xf_cs = (size_t) sh.k;
+                js[j].y_cs = sh.n;
+            }
+            gg::mv(js.data(), sh.jobs, s);
+            CU(cudaStreamSynchronize(s));
+            const int reps = 50;
+            cudaEventRecord(a, s);
+            for (int i = 0; i < reps; ++i) gg::mv(js.data(), sh.jobs, s);
+            cudaEventRecord(b, s);
+            CU(cudaEventSynchronize(b));
+            float ms = 0;
+            cudaEventElapsedTime(&ms, a, b);
+            std::printf("bench mv %s %-14s %5dx%-5d %2d act %8.1f us  %6.0f GB/s\n", tn(type), sh.what, sh.n, sh.k, nc,
+                        ms * 1000 / reps, bytes / (ms / reps * 1e-3) / 1e9);
+            cudaFree(dx);
+            for (float* p : dy) cudaFree(p);
+        }
+        for (uint8_t* p : dw) cudaFree(p);
+    }
+}
+
 struct QExperts {
     int D, F, n_exp, tg, td;
     x3::ExpertLayout lay;
@@ -3063,6 +3116,10 @@ int main(int argc, char** argv) {
         test_ar2(std::atoi(argv[2]), std::atoi(argv[3]), argc >= 5 ? std::atoi(argv[4]) : 30720);
         std::printf("%s (%d failed)\n", g_fail ? "FAILED" : "ALL OK", g_fail);
         return g_fail ? 1 : 0;
+    }
+    if (argc >= 2 && std::strcmp(argv[1], "--bench-mvq") == 0) {   // [ggml type, Q5_K]: the dense low-bit GEMVs' speed
+        bench_mvq(s, argc >= 3 ? std::atoi(argv[2]) : gg::iq::kQ5_K);
+        return 0;
     }
     if (argc >= 2 && std::strcmp(argv[1], "--rows") == 0) {   // --parallel's multi step: each row's mv alone
         test_mv_rows(s);

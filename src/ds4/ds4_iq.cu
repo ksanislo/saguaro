@@ -508,6 +508,33 @@ __device__ __forceinline__ float sub_dot(const Sub& s, const int4& xa, const int
     return v;
 }
 
+// sub_dot's two halves for several rows of one activation sub-block: the activations' sums (a type with a minimum),
+// then a row's dot with them - sub_dot's operations, its bits
+__device__ __forceinline__ void act_sums(const int4& xa, const int4& xb, int& sl, int& sh) {
+    sl = __dp4a(0x01010101, xa.x, 0);
+    sl = __dp4a(0x01010101, xa.y, sl);
+    sl = __dp4a(0x01010101, xa.z, sl);
+    sl = __dp4a(0x01010101, xa.w, sl);
+    sh = __dp4a(0x01010101, xb.x, 0);
+    sh = __dp4a(0x01010101, xb.y, sh);
+    sh = __dp4a(0x01010101, xb.z, sh);
+    sh = __dp4a(0x01010101, xb.w, sh);
+}
+template <int T>
+__device__ __forceinline__ float sub_dot_s(const Sub& s, const int4& xa, const int4& xb, int sl, int sh) {
+    int lo = __dp4a(s.q[0], xa.x, 0);
+    lo = __dp4a(s.q[1], xa.y, lo);
+    lo = __dp4a(s.q[2], xa.z, lo);
+    lo = __dp4a(s.q[3], xa.w, lo);
+    int hi = __dp4a(s.q[4], xb.x, 0);
+    hi = __dp4a(s.q[5], xb.y, hi);
+    hi = __dp4a(s.q[6], xb.z, hi);
+    hi = __dp4a(s.q[7], xb.w, hi);
+    float v = fmul_no_fma(s.d, (float) (s.s0 * lo + s.s1 * hi));
+    if constexpr (Ty<T>::MIN) v = fsub_no_fma(v, fadd_no_fma(fmul_no_fma(s.m0, (float) sl), fmul_no_fma(s.m1, (float) sh)));
+    return v;
+}
+
 // values [8 p, 8 p + 8) of sub-block kb, as F32 (the prompt sets' tiles): ggml's dequantize_row_* values
 template <int T>
 __device__ __forceinline__ void deq8(const uint8_t* __restrict__ row, int kb, int p, const uint32_t* tab, float* w) {
@@ -1151,7 +1178,9 @@ constexpr int kMaxJobs = 8;
 struct Jobs {
     MvJob j[kMaxJobs];
 };
-template <int T, int NC>
+// R rows a warp (a warp's lanes over each row's sub-blocks as with one, in the same order): an activation sub-block's
+// loads, and a type with a minimum its sums, once for the R rows - each output the same operations, so the same bits
+template <int T, int NC, int R = 1>
 __global__ void __launch_bounds__(kThreads) mv_kernel(const Jobs J) {
     pdl_wait();
     pdl_trigger();
@@ -1159,29 +1188,47 @@ __global__ void __launch_bounds__(kThreads) mv_kernel(const Jobs J) {
     load_tab<T>(tab);
     __syncthreads();
     const MvJob& b = J.j[blockIdx.y];
-    const int row = blockIdx.x * kWarps + (threadIdx.x >> 5), lane = threadIdx.x & 31;
-    if (row >= b.n) return;
-    const uint8_t* w = b.w + (size_t) row * b.ld;
+    const int row0 = (blockIdx.x * kWarps + (threadIdx.x >> 5)) * R, lane = threadIdx.x & 31;
+    if (row0 >= b.n) return;
     const int nsb = b.k / 32;
-    float acc[NC];
+    float acc[R][NC];
 #pragma unroll
-    for (int c = 0; c < NC; ++c) acc[c] = 0.0f;
+    for (int r = 0; r < R; ++r)
+#pragma unroll
+        for (int c = 0; c < NC; ++c) acc[r][c] = 0.0f;
     for (int kb = lane; kb < nsb; kb += 32) {
-        Sub s;
-        decode<T>(w, kb, tab, s);
+        Sub s[R];
+#pragma unroll
+        for (int r = 0; r < R; ++r)
+            if (row0 + r < b.n) decode<T>(b.w + (size_t) (row0 + r) * b.ld, kb, tab, s[r]);
 #pragma unroll
         for (int c = 0; c < NC; ++c)
             if (c < b.ncol) {
                 const int4* xp = (const int4*) (b.xq + (size_t) c * b.k + (size_t) kb * 32);
-                acc[c] = fmaf(b.xd[(size_t) c * nsb + kb], sub_dot<T>(s, xp[0], xp[1]), acc[c]);
+                const int4 xa = xp[0], xb = xp[1];
+                const float xd = b.xd[(size_t) c * nsb + kb];
+                if constexpr (R == 1) {
+                    acc[0][c] = fmaf(xd, sub_dot<T>(s[0], xa, xb), acc[0][c]);
+                } else {
+                    int sl = 0, sh = 0;
+                    if constexpr (Ty<T>::MIN) act_sums(xa, xb, sl, sh);
+#pragma unroll
+                    for (int r = 0; r < R; ++r)
+                        if (row0 + r < b.n) acc[r][c] = fmaf(xd, sub_dot_s<T>(s[r], xa, xb, sl, sh), acc[r][c]);
+                }
             }
     }
 #pragma unroll
-    for (int c = 0; c < NC; ++c)
-        if (c < b.ncol) {
-            const float v = warp_sum(acc[c]);
-            if (lane == 0) b.y[c * b.ycs + row] = b.alpha * v + (b.bias != nullptr ? b.bias[row] : 0.0f);
-        }
+    for (int r = 0; r < R; ++r) {
+        if (row0 + r >= b.n) break;
+        const int row = row0 + r;
+#pragma unroll
+        for (int c = 0; c < NC; ++c)
+            if (c < b.ncol) {
+                const float v = warp_sum(acc[r][c]);
+                if (lane == 0) b.y[c * b.ycs + row] = b.alpha * v + (b.bias != nullptr ? b.bias[row] : 0.0f);
+            }
+    }
 }
 
 // ---------------------------------------------------------------- the prompt sets' light experts
@@ -1643,10 +1690,23 @@ bool light_set(const SetArgs& a, bool gu, cudaStream_t s) {
 
 template <int T>
 void mv_nc(const Jobs& J, int nj, int max_n, int max_c, cudaStream_t s) {
-    const dim3 grid((unsigned) ((max_n + kWarps - 1) / kWarps), (unsigned) nj);
+    // (DS4_MV_ROWS: rows a warp at 2 .. 16 activations, 1 / 2 / 4 - the same bits; one activation: one row a warp)
+    static const int rw = [] {
+        const char* v = std::getenv("DS4_MV_ROWS");
+        const int r = v != nullptr ? std::atoi(v) : 2;
+        return r == 1 || r == 2 || r == 4 ? r : 2;
+    }();
+    const int R = max_c <= 1 ? 1 : max_c > 4 ? std::min(rw, 2) : rw;   // (16 activations: R 4's registers spill)
+    const dim3 grid((unsigned) ((max_n + kWarps * R - 1) / (kWarps * R)), (unsigned) nj);
     if (max_c <= 1) pdl_launch(mv_kernel<T, 1>, grid, kThreads, 0, s, J);
-    else if (max_c <= 4) pdl_launch(mv_kernel<T, 4>, grid, kThreads, 0, s, J);
-    else pdl_launch(mv_kernel<T, 16>, grid, kThreads, 0, s, J);
+    else if (max_c <= 4) {
+        if (R == 4) pdl_launch(mv_kernel<T, 4, 4>, grid, kThreads, 0, s, J);
+        else if (R == 2) pdl_launch(mv_kernel<T, 4, 2>, grid, kThreads, 0, s, J);
+        else pdl_launch(mv_kernel<T, 4>, grid, kThreads, 0, s, J);
+    } else {
+        if (R == 2) pdl_launch(mv_kernel<T, 16, 2>, grid, kThreads, 0, s, J);
+        else pdl_launch(mv_kernel<T, 16>, grid, kThreads, 0, s, J);
+    }
 }
 
 }  // namespace
