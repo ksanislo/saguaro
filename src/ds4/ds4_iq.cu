@@ -684,6 +684,44 @@ __device__ __forceinline__ float warp_sum(float v) {
 #endif
     return v;
 }
+// N sums of a warp at once, each warp_sum's bits: while pairs remain a lane keeps one of a pair and sends the other (a
+// warp_sum partial depends on lane mod o alone, and a + b == b + a), N / 2 shuffles a level.  Sum j ends on the lanes
+// whose bit 4 - t is bit t of j (mv_held); returns the sum this lane holds
+template <int N>
+__device__ __forceinline__ float warp_sum_n(float* v, int lane) {
+    int n = N, o = 16;
+#pragma unroll
+    for (int lv = 0; lv < 5; ++lv, o >>= 1) {
+        if (n > 1) {
+            const bool up = (lane & o) != 0;
+#pragma unroll
+            for (int m = 0; m < N / 2; ++m)
+                if (m < n / 2) {
+                    const float keep = up ? v[2 * m + 1] : v[2 * m], send = up ? v[2 * m] : v[2 * m + 1];
+#if DS4_IQ_STRICT_FP
+                    v[m] = fadd_no_fma(keep, __shfl_xor_sync(0xffffffffu, send, o));
+#else
+                    v[m] = keep + __shfl_xor_sync(0xffffffffu, send, o);
+#endif
+                }
+            n >>= 1;
+        } else {
+#if DS4_IQ_STRICT_FP
+            v[0] = fadd_no_fma(v[0], __shfl_xor_sync(0xffffffffu, v[0], o));
+#else
+            v[0] += __shfl_xor_sync(0xffffffffu, v[0], o);
+#endif
+        }
+    }
+    return v[0];
+}
+template <int N>
+__device__ __forceinline__ int mv_held(int lane) {
+    int j = 0;
+#pragma unroll
+    for (int t = 0; (1 << t) < N; ++t) j |= ((lane >> (4 - t)) & 1) << t;
+    return j;
+}
 __device__ __forceinline__ float swiglu(float gv, float uv, float limit) {   // (ds4_gguf.cu's)
     if (limit > 0.0f) {
         gv = fminf(gv, limit);
@@ -1179,8 +1217,9 @@ struct Jobs {
     MvJob j[kMaxJobs];
 };
 // R rows a warp (a warp's lanes over each row's sub-blocks as with one, in the same order): an activation sub-block's
-// loads, and a type with a minimum its sums, once for the R rows - each output the same operations, so the same bits
-template <int T, int NC, int R = 1>
+// loads, and a type with a minimum its sums, once for the R rows - each output the same operations, so the same bits.
+// PK: the R x NC sums reduced together (warp_sum_n), else a warp_sum each - the same bits
+template <int T, int NC, int R = 1, bool PK = false>
 __global__ void __launch_bounds__(kThreads) mv_kernel(const Jobs J) {
     pdl_wait();
     pdl_trigger();
@@ -1217,6 +1256,16 @@ __global__ void __launch_bounds__(kThreads) mv_kernel(const Jobs J) {
                         if (row0 + r < b.n) acc[r][c] = fmaf(xd, sub_dot_s<T>(s[r], xa, xb, sl, sh), acc[r][c]);
                 }
             }
+    }
+    if constexpr (PK && R * NC > 1) {
+        constexpr int N = R * NC;
+        const float v = warp_sum_n<N>(&acc[0][0], lane);
+        const int j = mv_held<N>(lane), r = j / NC, c = j % NC;
+        if ((lane & (32 / N - 1)) == 0 && c < b.ncol && row0 + r < b.n) {
+            const int row = row0 + r;
+            b.y[c * b.ycs + row] = b.alpha * v + (b.bias != nullptr ? b.bias[row] : 0.0f);
+        }
+        return;
     }
 #pragma unroll
     for (int r = 0; r < R; ++r) {
@@ -1696,17 +1745,33 @@ void mv_nc(const Jobs& J, int nj, int max_n, int max_c, cudaStream_t s) {
         const int r = v != nullptr ? std::atoi(v) : 2;
         return r == 1 || r == 2 || r == 4 ? r : 2;
     }();
-    const int R = max_c <= 1 ? 1 : max_c > 4 ? std::min(rw, 2) : rw;   // (16 activations: R 4's registers spill)
+    // (DS4_MV_PACK=0: 4 or 16 columns and a warp_sum a sum, as before; else 2 / 4 / 8 / 16 columns, the sums reduced
+    //  together - the same bits)
+    static const bool pk = [] {
+        const char* v = std::getenv("DS4_MV_PACK");
+        return v == nullptr || std::atoi(v) != 0;
+    }();
+    const int R = max_c <= 1 ? 1 : max_c > (pk ? 8 : 4) ? std::min(rw, 2) : rw;   // (16 activations: R 4's registers spill)
     const dim3 grid((unsigned) ((max_n + kWarps * R - 1) / (kWarps * R)), (unsigned) nj);
-    if (max_c <= 1) pdl_launch(mv_kernel<T, 1>, grid, kThreads, 0, s, J);
-    else if (max_c <= 4) {
-        if (R == 4) pdl_launch(mv_kernel<T, 4, 4>, grid, kThreads, 0, s, J);
-        else if (R == 2) pdl_launch(mv_kernel<T, 4, 2>, grid, kThreads, 0, s, J);
-        else pdl_launch(mv_kernel<T, 4>, grid, kThreads, 0, s, J);
-    } else {
-        if (R == 2) pdl_launch(mv_kernel<T, 16, 2>, grid, kThreads, 0, s, J);
-        else pdl_launch(mv_kernel<T, 16>, grid, kThreads, 0, s, J);
-    }
+#define MVL_(NC, RR, P) pdl_launch(mv_kernel<T, NC, RR, P>, grid, kThreads, 0, s, J)
+#define MVR_(NC, P)                       \
+    do {                                  \
+        if (R == 4) MVL_(NC, 4, P);       \
+        else if (R == 2) MVL_(NC, 2, P);  \
+        else MVL_(NC, 1, P);              \
+    } while (0)
+    if (max_c <= 1) MVL_(1, 1, false);
+    else if (!pk) {
+        if (max_c <= 4) MVR_(4, false);
+        else if (R == 2) MVL_(16, 2, false);
+        else MVL_(16, 1, false);
+    } else if (max_c <= 2) MVR_(2, true);
+    else if (max_c <= 4) MVR_(4, true);
+    else if (max_c <= 8) MVR_(8, true);
+    else if (R == 2) MVL_(16, 2, true);
+    else MVL_(16, 1, true);
+#undef MVR_
+#undef MVL_
 }
 
 }  // namespace

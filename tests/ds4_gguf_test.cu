@@ -829,7 +829,7 @@ void test_mv_rows(cudaStream_t s) {
         m.k = k;
         m.n = n;
         bool same = true;
-        for (int nc : {2, 4, 8, 16}) {
+        for (int nc : {2, 3, 4, 5, 8, 16}) {
             const size_t xcs = (size_t) k;
             std::vector<float> x(xcs * nc);
             for (auto& v : x) v = frand();
@@ -860,7 +860,7 @@ void test_mv_rows(cudaStream_t s) {
         }
         if (!same) ++g_fail;
         char what[96];
-        std::snprintf(what, sizeof(what), "mv rows %s: each of 2 / 4 / 8 / 16 alone, bit for bit",
+        std::snprintf(what, sizeof(what), "mv rows %s: each of 2 / 3 / 4 / 5 / 8 / 16 alone, bit for bit",
                       lowbit ? tn(f) : fmt == gg::kFmtBF16 ? "BF16" : fmt == gg::kFmtMXFP4 ? "MXFP4" : "Q8_0");
         std::printf("%-60s %s\n", what, same ? "ok" : "FAIL");
         cudaFree(dw);
