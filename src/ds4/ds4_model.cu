@@ -1349,6 +1349,7 @@ struct Model::Impl {
     // the CPU lane's experts read in place from the model's files (one part, the files' layout; the page cache keeps
     // what fits) instead of copied into RAM, and how much of them the load reads ahead (the most-routed first)
     bool file_experts = false;
+    bool copy_il = false;   // (DS4_COPY_INTERLEAVE=1) the copies one part interleaved over the nodes, one pool over all cores
     uint64_t warm_bytes = 0;
     // DS4_TP_GGUF_UNEVEN=1: a GGUF group's members take its experts' FFN in whole blocks of tp_blk values, as even as
     // they go (splitb, the odd blocks going round the members layer by layer) instead of only even shares
@@ -7794,6 +7795,9 @@ struct Model::Impl {
         if (const char* v = std::getenv("DS4_COPY_NUMA"))   // (0 / 1: one part; 2-4: that many, a node each; more
             nh = std::max(1, std::min(kMaxNH, std::atoi(v)));   // than the host's nodes: a test on fewer)
         if (g.ff % nh != 0 || g.dim % nh != 0) nh = 1;
+        // DS4_COPY_INTERLEAVE=1 (a test of the layout): one part, its pages interleaved over the nodes, one pool over every core
+        copy_il = cores.size() > 1 && tri_of(ds4_env("DS4_COPY_INTERLEAVE")) == 1;
+        if (copy_il) nh = 1;
         // DS4_COPY_HUGETLB: the copies on explicit 2 MB pages out of the kernel's reserved pool (`sysctl
         // vm.nr_hugepages=N`), so a pin of them (cp_pin, zc_pin) registers 2 MB pages - a transparent-huge-page arena
         // pinned is registered in 4 KB pages, the DMA's translations 512 times as many.  Unset: on only when the
@@ -7905,8 +7909,10 @@ struct Model::Impl {
                                          "vm.nr_hugepages=N) - the rest in the ordinary arena\n");
                     huge_short = true;
                 }
-                if (base[(size_t) X] == nullptr) base[(size_t) X] = (uint8_t*) node_map(bytes, X, NH);
-                else huge_got += (double) got;
+                if (base[(size_t) X] == nullptr) {
+                    base[(size_t) X] = (uint8_t*) node_map(bytes, X, NH);
+                    if (copy_il && base[(size_t) X] != nullptr) os::interleave_nodes(base[(size_t) X], bytes);
+                } else huge_got += (double) got;
                 ok = base[(size_t) X] != nullptr;
                 if (ok) {
                     ram_chunks.push_back(base[(size_t) X]);
@@ -8017,8 +8023,9 @@ struct Model::Impl {
         if (!cp_pin_last()) cp_pin();   // (else at the load's end: #589)
         double cb = 0;
         for (const Job& j : jobs) cb += (double) L[(size_t) j.layer].blob;
-        char hp[64] = "";
+        char hp[96] = "";
         if (huge_got > 0) std::snprintf(hp, sizeof hp, ", %.1f GB on 2 MB huge pages", huge_got / 1e9);
+        if (copy_il) std::snprintf(hp + std::strlen(hp), sizeof hp - std::strlen(hp), ", interleaved over the nodes");
         std::fprintf(stderr, "ds4: %zu of the CPU lane's %zu experts copied into RAM (%.1f GB, %d NUMA part%s%s) in %.1f s%s\n",
                      jobs.size(), hot.size(), cb / 1e9, NH, NH > 1 ? "s" : "", hp, (now_ms() - t0) / 1000.0,
                      jobs.size() < hot.size() ? "; the others read in place" : "");
@@ -8637,7 +8644,7 @@ struct Model::Impl {
             parts.assign((size_t) NH, {});
             for (size_t i = 0; i < all.size(); ++i) parts[i * (size_t) NH / all.size()].push_back(all[i]);
         }
-        const bool one_over_all = file_experts && NH == 1 && parts.size() > 1;
+        const bool one_over_all = (file_experts || copy_il) && NH == 1 && parts.size() > 1;
         if (one_over_all)
             for (size_t Y = 1; Y < parts.size(); ++Y) parts[0].insert(parts[0].end(), parts[Y].begin(), parts[Y].end());
         parts.resize((size_t) std::max(1, std::min((int) parts.size(), std::max(NH, 1))));
