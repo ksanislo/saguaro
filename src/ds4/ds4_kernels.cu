@@ -3746,6 +3746,34 @@ void moe_sort(const int* idx, int T, int k, const int* vs, int n_vs, int* bounds
     pdl_launch(bounds_scan_kernel, 1, 32, 0, s, bounds, n_vs);
     pdl_launch(moe_sort_kernel<true>, n_vs, kThreads, 0, s, idx, T, k, vs, bounds, row_tok, pos);
 }
+__global__ void moe_combine_rows_kernel(float* acc, const float* __restrict__ y, const int* __restrict__ pos,
+                                        const int* __restrict__ row_tok, const float* __restrict__ w, int k, int r0,
+                                        int r1, int dim) {
+    pdl_wait();
+    pdl_trigger();
+    const int e = blockIdx.x * blockDim.x + threadIdx.x, r = r0 + (int) blockIdx.y;
+    if (e >= dim) return;
+    const int t = row_tok[r];
+    int first = -1;   // (the token's first pick in the range: its block adds every pick in it, as moe_combine_kernel)
+    for (int i = 0; i < k && first < 0; ++i) {
+        const int p = pos[(size_t) t * kPicks + i];
+        if (p >= r0 && p < r1) first = p;
+    }
+    if (first != r) return;
+    float a = acc[(size_t) t * dim + e];
+    for (int i = 0; i < k; ++i) {
+        const int p = pos[(size_t) t * kPicks + i];
+        if (p < r0 || p >= r1) continue;
+        a = __fmaf_rn(w[(size_t) t * kPicks + i], y[(size_t) (p - r0) * dim + e], a);
+    }
+    acc[(size_t) t * dim + e] = a;
+}
+void moe_combine_rows(float* acc, const float* y, const int* pos, const int* row_tok, const float* w, int k, int r0,
+                      int r1, int dim, cudaStream_t s) {
+    if (r1 > r0)
+        pdl_launch(moe_combine_rows_kernel, dim3(cdiv(dim, kThreads), r1 - r0), kThreads, 0, s, acc, y, pos, row_tok, w,
+                   k, r0, r1, dim);
+}
 void moe_combine(float* acc, const float* y, const int* pos, const float* w, int T, int k, int r0, int r1, int dim,
                  cudaStream_t s) {
     if (r1 > r0 && T > 0) pdl_launch(moe_combine_kernel, dim3(cdiv(dim, kThreads), T), kThreads, 0, s, acc, y, pos, w, k, r0, r1, dim);
