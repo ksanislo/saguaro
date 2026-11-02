@@ -1795,7 +1795,9 @@ __device__ __forceinline__ int attn_tile_offset(int row, int col) {
     return row * 512 + col;
 }
 
-template <int G, bool Swizzle = false>
+// (kB16: the few-queries path's rows - query t's selected rows BF16 already, the scratch's rows t * sel_stride .., as
+//  sparse_attn_kernel<true> reads them; G heads a block share each row's loads)
+template <int G, bool Swizzle = false, bool kB16 = false>
 __global__ void __launch_bounds__(kThreads) sparse_attn_packed_kernel(const float* __restrict__ q,
                                                                       const uint16_t* __restrict__ win,
                                                                       const uint8_t* __restrict__ ckv,
@@ -1842,7 +1844,7 @@ __global__ void __launch_bounds__(kThreads) sparse_attn_packed_kernel(const floa
         const int j = s0 + sr;
         if constexpr (Swizzle) {
             uint4 decoded[4];
-            if (t0 + j < n_win) {
+            if (kB16 || t0 + j < n_win) {
                 const uint4* src = (const uint4*) (rows[j] + part * 64);
 #pragma unroll
                 for (int i = 0; i < 4; ++i) decoded[i] = src[i];
@@ -1855,7 +1857,7 @@ __global__ void __launch_bounds__(kThreads) sparse_attn_packed_kernel(const floa
             return;
         }
         uint4* dst = (uint4*) (tile + sr * d + part * 32);
-        if (t0 + j < n_win) {   // a window row: BF16 already
+        if (kB16 || t0 + j < n_win) {   // a window row (or a scratch row): BF16 already
             const uint4* src = (const uint4*) (rows[j] + part * 64);
             dst[0] = src[0];
             dst[1] = src[1];
@@ -1870,7 +1872,9 @@ __global__ void __launch_bounds__(kThreads) sparse_attn_packed_kernel(const floa
         const int nt = min(kAttTile, total - t0);
         if (threadIdx.x < nt) {
             const int j = t0 + threadIdx.x;
-            rows[threadIdx.x] = j < n_win ? (const uint8_t*) (wbase + (size_t) j * d) : ckv + (size_t) sl[j - n_win] * crow;
+            rows[threadIdx.x] = j < n_win ? (const uint8_t*) (wbase + (size_t) j * d)
+                                : kB16 ? (const uint8_t*) ((const uint16_t*) ckv + ((size_t) t * sel_stride + (j - n_win)) * d)
+                                       : ckv + (size_t) sl[j - n_win] * crow;
         }
         __syncthreads();
         for (int s0 = 0; s0 < nt; s0 += kStage) {   // the dots
@@ -4362,6 +4366,39 @@ static bool attn_mma_now() {
 #endif
 }
 
+// DS4_ATTN_GH=<G> (1, 2, 4, 8; default 1): the few-queries path's rows (decoded to the scratch) through the packed
+// kernel's form, G heads a block sharing each row's loads, at as many heads a block as still leaves two blocks a
+// multiprocessor - one query (64 heads) keeps a head a block; each head the same operations as sparse_attn_kernel's,
+// so the same bits at any G.  1 (default): sparse_attn_kernel always, as before.  set_attn_gh: tests
+static int g_attn_gh = -1;
+void set_attn_gh(int g) { g_attn_gh = g; }
+static int attn_gh(int heads, int T) {
+    if (g_attn_gh < 0) {
+        const char* v = std::getenv("DS4_ATTN_GH");
+        const int x = v != nullptr ? std::atoi(v) : 1;
+        g_attn_gh = x == 1 || x == 2 || x == 4 || x == 8 ? x : 1;
+    }
+    int G = g_attn_gh;
+    while (G > 1 && (heads % G != 0 || (heads / G) * T < 2 * sm_count())) G /= 2;
+    return G;
+}
+static bool attn_gh_launch(const float* q, const uint16_t* win, const uint16_t* rows, int cap, const AttnRows& a,
+                           const float* sink, int heads, int T, float scale, float* out, cudaStream_t s) {
+#if !defined(STRATA_USE_HIP)
+    const int G = attn_gh(heads, T);
+    if (G <= 1) return false;
+    const dim3 grid((unsigned) (heads / G), (unsigned) T);
+    const uint8_t* c = (const uint8_t*) rows;
+    if (G == 8) pdl_launch(sparse_attn_packed_kernel<8, false, true>, grid, kThreads, 0, s, q, win, c, nullptr, cap, a, sink, heads, scale, out);
+    else if (G == 4) pdl_launch(sparse_attn_packed_kernel<4, false, true>, grid, kThreads, 0, s, q, win, c, nullptr, cap, a, sink, heads, scale, out);
+    else pdl_launch(sparse_attn_packed_kernel<2, false, true>, grid, kThreads, 0, s, q, win, c, nullptr, cap, a, sink, heads, scale, out);
+    return true;
+#else
+    (void) q, (void) win, (void) rows, (void) cap, (void) a, (void) sink, (void) heads, (void) T, (void) scale, (void) out, (void) s;
+    return false;
+#endif
+}
+
 // the few-queries path's scratch takes T queries of sel_stride rows
 static bool attn_scr_fits(int T, int sel_stride, const AttnScratch* scr) {
     return scr != nullptr && scr->rows != nullptr && T <= scr->max_t && sel_stride <= scr->cap;
@@ -4409,6 +4446,7 @@ void sparse_attn(const float* q, const uint16_t* win, const void* ckv, const int
     if (few && attn_scr_fits(T, sel_stride, scr)) {
         pdl_launch(unpack_sel_kernel, dim3(cdiv(sel_stride, kStage), T), kThreads, 0, s, (const uint8_t*) ckv, sel, sel_stride, a,
                    scr->cap, scr->rows);
+        if (attn_gh_launch(q, win, scr->rows, scr->cap, a, sink, heads, T, scale, out, s)) return;
 #if !defined(STRATA_USE_HIP)
         if (T == 1)   // (V100: the loads ahead pay for the decode's kernel at one query, not at more)
             pdl_launch(sparse_attn_kernel<true, 8>, dim3(heads, T), kThreads, 0, s, q, win, scr->rows, nullptr, scr->cap, a, sink,
@@ -4452,6 +4490,7 @@ bool sparse_attn_rows(const float* q, const uint16_t* win, const AttnCkv& c, con
     if (d != 512 || a.gen != 0 || T < 1 || T > kWin || !attn_scr_fits(T, sel_stride, scr)) return false;
     pdl_launch(unpack_sel_rows_kernel, dim3(cdiv(sel_stride, kStage), T), kThreads, 0, s, c, sel, sel_stride, a, scr->cap,
                scr->rows);
+    if (attn_gh_launch(q, win, scr->rows, scr->cap, a, sink, heads, T, scale, out, s)) return true;
 #if !defined(STRATA_USE_HIP)
     if (one)
         pdl_launch(sparse_attn_kernel<true, 8>, dim3(heads, T), kThreads, 0, s, q, win, scr->rows, nullptr, scr->cap, a, sink,

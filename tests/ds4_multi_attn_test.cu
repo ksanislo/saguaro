@@ -342,8 +342,12 @@ int main(int argc, char** argv) {
         {"drafter 2 x 8", std::vector<int>(8, 2), {1, 10, 100, 126, 127, 128, 129, 50000}, true},
     };
     int bad = 0;
+    // (gh: DS4_ATTN_GH's heads a block for the shared way; the per-conversation way's one-query launches keep a head a
+    //  block - so each case also checks the G-heads kernel against sparse_attn_kernel bit for bit)
+    for (int gh : {1, 2, 8})
     for (int rep = 0; rep < 2; ++rep)
         for (const Case& c : cases) {
+            set_attn_gh(1);
             int T = 0;
             int rseq[kMaRows];
             int64_t rpos[kMaRows];
@@ -361,6 +365,7 @@ int main(int argc, char** argv) {
             std::vector<int> nsel;
             fill(c, b, rng, T, nsel);
             per_run(c, p, nsel.data(), b, rpos, s);
+            set_attn_gh(gh);
             int spans = 0;
             if (!shared(c, p, nsel.data(), b, rpos, s, &spans)) {
                 std::printf("FAIL %s: a launch refused\n", c.name.c_str());
@@ -377,10 +382,11 @@ int main(int argc, char** argv) {
                 e += same(("ring " + std::to_string(k)).c_str(), host(b.ringa[(size_t) k], ring_bytes()).data(),
                           host(b.ringb[(size_t) k], ring_bytes()).data(), ring_bytes());
             if (c.spec) e += same("the rings' backups", host(b.baka, (size_t) T * rb).data(), host(b.bakb, (size_t) T * rb).data(), (size_t) T * rb);
-            std::printf("%s %s: %d rows, %d runs, %d attention launch%s\n", e ? "FAIL" : "ok  ", c.name.c_str(), T, p.nrun,
-                        c.mtp ? 1 : spans, (c.mtp || spans == 1) ? "" : "es");
+            std::printf("%s %s (heads a block %d): %d rows, %d runs, %d attention launch%s\n", e ? "FAIL" : "ok  ",
+                        c.name.c_str(), gh, T, p.nrun, c.mtp ? 1 : spans, (c.mtp || spans == 1) ? "" : "es");
             bad += e != 0;
         }
+    set_attn_gh(-1);
     if (time) {   // a decode step's attention launches (q's rotation to the output's finish), N conversations
         cudaEvent_t e0, e1;
         CK(cudaEventCreate(&e0));

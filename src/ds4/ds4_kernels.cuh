@@ -257,6 +257,8 @@ bool attn_few(int T, int sel_stride, const AttnScratch* scr);
 struct AttnCkv {
     const void* ckv[kWin] = {};
 };
+/// (tests) DS4_ATTN_GH's heads a block for the calls after it (1: sparse_attn_kernel; -1: the environment's again)
+void set_attn_gh(int g);
 bool sparse_attn_rows(const float* q, const uint16_t* win, const AttnCkv& c, const int* sel, int sel_stride,
                       const AttnRows& a, const float* sink, int heads, int d, int T, float scale, float* out,
                       cudaStream_t s, bool one, const AttnScratch* scr);
