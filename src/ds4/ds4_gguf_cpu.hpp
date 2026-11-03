@@ -77,6 +77,8 @@ const char* mx_tier_name(int t);
 /// iq_avx1_kern.inc: ggml-cpu's numbers bit for bit, checked against its dot on first use;
 /// DS4_IQ_OWN=0 turns them off) rather than ggml's / the GLM lane's.
 bool iq_cpu_own_rows(int type);
+/// Load-time preparation of the same guarded one/multi CPU row selection/parity checks.
+void iq_cpu_prepare_rows(int type);
 /// IQ1_S's own multi-token rows (the same bits as ggml-cpu's dot): allowed by default; the engine turns them off where
 /// the one-GPU decode path is off (Model::Impl::one_gpu_path), so those setups keep ggml's rows as before.
 void iq_cpu_iq1s_rows(bool on);
