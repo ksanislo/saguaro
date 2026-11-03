@@ -491,9 +491,11 @@ inline void drop_cached(const std::vector<std::pair<uint8_t*, size_t>>& maps, co
 /// Anonymous memory on NUMA node `node` of `nodes` (node < 0 or nodes < 2: wherever the first touch puts it), on huge
 /// pages where the OS gives them; nullptr if it cannot be had.  Linux: the node is preferred, not required
 /// (MPOL_PREFERRED) - a node that fills up (locked Engram tables, another program's memory) lends the rest from the
-/// other nodes, where MPOL_BIND had the kernel end the process with RAM free on the other node (#507)
-inline void* anon_alloc(size_t bytes, int node, int nodes) {
+/// other nodes, where MPOL_BIND had the kernel end the process with RAM free on the other node (#507).
+/// thp: 1 MADV_HUGEPAGE (as before), 0 no advice (the system's THP policy), -1 MADV_NOHUGEPAGE
+inline void* anon_alloc(size_t bytes, int node, int nodes, int thp = 1) {
 #if defined(_WIN32)
+    (void) thp;
     if (node >= 0 && nodes > 1)
         return VirtualAllocExNuma(GetCurrentProcess(), nullptr, bytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE,
                                   (DWORD) node);
@@ -508,7 +510,8 @@ inline void* anon_alloc(size_t bytes, int node, int nodes) {
             if (const char* v = std::getenv(k); v != nullptr && v[0] != '\0' && v[0] != '0') return true;
         return false;
     }();
-    if (!no_huge) madvise(m, bytes, MADV_HUGEPAGE);
+    if (thp > 0 && !no_huge) madvise(m, bytes, MADV_HUGEPAGE);
+    else if (thp < 0) madvise(m, bytes, MADV_NOHUGEPAGE);
     if (node >= 0 && nodes > 1) {
         unsigned long mask[4] = {0, 0, 0, 0};
         mask[node / 64] = 1ul << (node % 64);
