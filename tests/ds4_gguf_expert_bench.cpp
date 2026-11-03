@@ -5,7 +5,9 @@
 //
 // Reads the layer's first 64 experts from the shard (gate / up / down _exps, any types the lane takes) - far past the
 // L3, so each comes from DRAM like a RAM-tier pick - and times gate/up then down in 64-row jobs on a pool (the caller
-// helping), as the lane runs them.  DS4_IQ_OWN=0 STRATA_NO_IQ128=1: ggml-cpu's dots, to compare.
+// helping), as the lane runs them.  DS4_IQ_OWN=0 STRATA_NO_IQ128=1: ggml-cpu's dots, to compare.  MXFP4 experts (all
+// three roles): gg::mx_rows on mx_quant's activations; DS4_MX_TIER=<name> picks the tier.  DS4_BENCH_EXPERTS=<n>: fewer
+// experts (default 64).
 #include "../src/ds4/ds4_gguf_cpu.hpp"
 #include "../src/ds4/ds4_pool.hpp"
 #include "strata/kernels/cpu/native_expert.hpp"
@@ -61,10 +63,16 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "gate %s and up %s differ\n", ggml_type_name((ggml_type) ty[0]), ggml_type_name((ggml_type) ty[1]));
         return 1;
     }
-    const int E = (int) ne[0][0], FF = (int) ne[0][1], n_exp = (int) std::min<int64_t>(64, ne[0][2]);
+    const char* ne_env = std::getenv("DS4_BENCH_EXPERTS");
+    const int E = (int) ne[0][0], FF = (int) ne[0][1],
+              n_exp = (int) std::min<int64_t>(ne_env ? std::max(1, std::atoi(ne_env)) : 64, ne[0][2]);
+    const bool mx = ty[0] == GGML_TYPE_MXFP4 && ty[2] == GGML_TYPE_MXFP4;
     gg::IqCpu f;
     std::string err;
-    if (!gg::iq_cpu_fmt(ty[0], ty[2], E, FF, f, err)) {
+    if (mx) {
+        f.gu_row = (size_t) E / 32 * 17, f.d_row = (size_t) FF / 32 * 17;
+        f.act_bytes = gg::mx_act_bytes(E), f.h_bytes = gg::mx_act_bytes(FF);
+    } else if (!gg::iq_cpu_fmt(ty[0], ty[2], E, FF, f, err)) {
         std::fprintf(stderr, "%s\n", err.c_str());
         return 1;
     }
@@ -93,7 +101,10 @@ int main(int argc, char** argv) {
     std::vector<float*> fp(K), dp(K);
     for (int k = 0; k < K; ++k) {
         for (int i = 0; i < E; ++i) x[(size_t) i] = std::sin(0.37f * (float) i + 0.11f * (float) k) * 0.5f;
-        gg::iq_cpu_quant(f.gu_act, x.data(), E, act.data() + (size_t) k * f.act_bytes);
+        if (mx)
+            gg::mx_quant(x.data(), E, act.data() + (size_t) k * f.act_bytes);
+        else
+            gg::iq_cpu_quant(f.gu_act, x.data(), E, act.data() + (size_t) k * f.act_bytes);
         ap[k] = act.data() + (size_t) k * f.act_bytes;
         hp[k] = hq.data() + (size_t) k * f.h_bytes;
         fp[k] = ff.data() + (size_t) k * FF;
@@ -102,6 +113,7 @@ int main(int argc, char** argv) {
     std::vector<int> counts;
     for (int i = 3; i < argc; ++i) counts.push_back(std::atoi(argv[i]));
     if (counts.empty()) counts = {1, 5};
+    if (mx) std::printf("MXFP4 rows: tier %s (%s)\n", gg::mx_tier_name(gg::mx_tier()), gg::mx_tier_report());
     std::printf("layer %d: gate/up %s, down %s, %d x %d, expert %.2f MB, %d experts cycled from DRAM; own rows gate/up %s "
                 "down %s, native multi-token rows gate/up %s down %s\n", layer, ggml_type_name((ggml_type) ty[0]),
                 ggml_type_name((ggml_type) ty[2]), E, FF, (double) eb / 1e6, n_exp, gg::iq_cpu_own_rows(ty[0]) ? "on" : "off",
@@ -118,13 +130,33 @@ int main(int argc, char** argv) {
                 const uint8_t* b = blobs.data() + eb * (size_t) (rep % n_exp);
                 const auto t0 = std::chrono::steady_clock::now();
                 pool.run((FF + RB - 1) / RB, [&](int j) {
-                    gg::iq_cpu_gate_up(f, b, b + gub, ap.data(), nt, fp.data(), j * RB, std::min(FF, (j + 1) * RB), 10.0f);
+                    const int r0 = j * RB, r1 = std::min(FF, (j + 1) * RB);
+                    if (!mx) return gg::iq_cpu_gate_up(f, b, b + gub, ap.data(), nt, fp.data(), r0, r1, 10.0f);
+                    float* gp[16];
+                    float* up[16];
+                    float gbuf[16][RB], ubuf[16][RB];
+                    for (int k = 0; k < nt; ++k) gp[k] = gbuf[k], up[k] = ubuf[k];
+                    gg::mx_rows(b, f.gu_row, E, r0, r1, ap.data(), nt, gp);
+                    gg::mx_rows(b + gub, f.gu_row, E, r0, r1, ap.data(), nt, up);
+                    for (int k = 0; k < nt; ++k)
+                        for (int r = r0; r < r1; ++r) {
+                            const float g = gbuf[k][r - r0];
+                            fp[k][r] = g / (1.0f + std::exp(-g)) * ubuf[k][r - r0];
+                        }
                 });
                 const auto t1 = std::chrono::steady_clock::now();
-                for (int k = 0; k < nt; ++k) gg::iq_cpu_quant(f.d_act, fp[k], FF, (void*) hp[k]);
+                for (int k = 0; k < nt; ++k)
+                    if (mx)
+                        gg::mx_quant(fp[k], FF, (void*) hp[k]);
+                    else
+                        gg::iq_cpu_quant(f.d_act, fp[k], FF, (void*) hp[k]);
                 const auto t2 = std::chrono::steady_clock::now();
                 pool.run((E + RB - 1) / RB, [&](int j) {
-                    gg::iq_cpu_down(f, b + 2 * gub, hp.data(), nt, dp.data(), j * RB, std::min(E, (j + 1) * RB));
+                    const int r0 = j * RB, r1 = std::min(E, (j + 1) * RB);
+                    if (!mx) return gg::iq_cpu_down(f, b + 2 * gub, hp.data(), nt, dp.data(), r0, r1);
+                    float* yp[16];
+                    for (int k = 0; k < nt; ++k) yp[k] = dp[k] + r0;
+                    gg::mx_rows(b + 2 * gub, f.d_row, FF, r0, r1, hp.data(), nt, yp);
                 });
                 const auto t3 = std::chrono::steady_clock::now();
                 if (rep < n_exp) continue;   // (the first lap warms the pool and the clocks)
