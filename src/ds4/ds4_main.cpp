@@ -2013,7 +2013,11 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
             const int x = v != nullptr ? std::atoi(v) : 0;
             return x > 0 ? x : dflt;
         };
-        const size_t read_piece = m.prompt_chunk() > 0 ? (size_t) m.prompt_chunk() * (size_t) m.pipeline_stages() *
+        // (MAYA_DS4_READ_PIECE_TOKENS=<n>: pieces of n tokens instead, below a chunk a stage too - the answers write
+        //  between them that much more often, each piece its own run through the stages; opt-in, to measure)
+        const size_t read_piece = env_count("MAYA_DS4_READ_PIECE_TOKENS", 0) > 0
+                                      ? (size_t) env_count("MAYA_DS4_READ_PIECE_TOKENS", 0)
+                                  : m.prompt_chunk() > 0 ? (size_t) m.prompt_chunk() * (size_t) m.pipeline_stages() *
                                                              (size_t) env_count("MAYA_DS4_READ_PIECE", kReadPieceChunks)
                                                        : (size_t) m.feed_unit();
         const int read_rounds = env_count("MAYA_DS4_READ_ROUNDS", kReadRounds);

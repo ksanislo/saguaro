@@ -432,6 +432,10 @@ void moe_sort(const int* idx, int T, int k, const int* vs, int n_vs, int* bounds
 /// acc[t] += w[t][i] * y[pos[t][i] - r0] for each pick of t (in pick order) whose sorted row is in [r0, r1).
 void moe_combine(float* acc, const float* y, const int* pos, const float* w, int T, int k, int r0, int r1, int dim,
                  cudaStream_t s);
+/// moe_combine over the tokens of rows [r0, r1) only (row_tok): a block a row, the row that is its token's first pick
+/// in the range adds them all - the same sums in the same order, a launch the range's size, not the chunk's
+void moe_combine_rows(float* acc, const float* y, const int* pos, const int* row_tok, const float* w, int k, int r0,
+                      int r1, int dim, cudaStream_t s);
 /// rows[t][0] = 1, the rest 0 (the first layer's pre-mix: stream 0).
 void init_pre(float* pre, int T, cudaStream_t s);
 

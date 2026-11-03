@@ -759,6 +759,7 @@ struct Chunk {
     // i % ring_n; the compute takes the items as they land, in runs of what has.
     struct Item {
         int il = 0, k = 0, e = 0, v = 0, stage = -1;   // layer, chunk, expert, virtual slot, staging slot (-1: RAM)
+        int direct = -1;                               // (DS4_FLOW_DIRECT) its pinned copy's slot: DMA'd from its NUMA parts
         int mi = 0;                                    // the device's member index in the layer's group
         const uint8_t* src[3] = {nullptr, nullptr, nullptr};   // where its gate / up / down (its parts) lie once read
         const uint8_t* ram = nullptr;                  // its RAM-tier blob, copied into staging (not pinned there)
@@ -5849,6 +5850,14 @@ struct Model::Impl {
             ++c.it_ram;
             return;
         }
+        // (DS4_FLOW_DIRECT=1: a pinned copy (cp_dma) DMA'd in place from its NUMA parts, as copy_streamed does off the
+        //  flow - no reader's memcpy into staging first; the same bytes in the ring)
+        static const bool direct = std::getenv("DS4_FLOW_DIRECT") != nullptr && std::atoi(std::getenv("DS4_FLOW_DIRECT")) != 0;
+        if (direct && in_ram && copy_mode && l.nm == 1 && stream_direct(l, e)) {
+            it.direct = l.ram[(size_t) e];
+            ++c.it_ram;
+            return;
+        }
         if (in_ram)   // (copied into staging by io, then DMA'd; copy_mode: from its NH parts, flow_pump)
             it.ram = copy_mode ? ram_part[(size_t) l.ram[(size_t) e]][0] : ram_slots[(size_t) l.ram[(size_t) e]];
         it.dpart = down_part && l.nm > 1 && !(in_ram && copy_mode);   // (DS4_FLOW_DOWN_PART: through staging)
@@ -6156,7 +6165,20 @@ struct Model::Impl {
                 ++c.chk_n;
             }
             // (staging holds the member's gate / up rows only - a read's and, since #377, a copy's)
-            if (!flow_copy(l, it.mi, it.src, false, c.ring + r * c.ring_stride, c.down, c.cs, it.dpart)) {
+            if (it.direct >= 0) {   // (DS4_FLOW_DIRECT) each matrix's rows from the NUMA part holding them
+                uint8_t* dst = c.ring + r * c.ring_stride;
+                for (int m = 0; m < 3; ++m) {
+                    const size_t nb = (size_t) (mx_n(m) / NH) * mx_row_b(l, m);
+                    for (int X = 0; X < NH; ++X)
+                        if (cudaMemcpyAsync(dst + l.lay.trellis[m] + (size_t) X * nb,
+                                            ram_part[(size_t) it.direct][(size_t) X] + cp_lay[(size_t) l.il][(size_t) m], nb,
+                                            cudaMemcpyHostToDevice, c.cs) != cudaSuccess) {
+                            err = "the flow's in-place copy of layer " + std::to_string(it.il) + " expert " +
+                                  std::to_string(it.e) + ": " + cudaGetErrorString(cudaGetLastError());
+                            return false;
+                        }
+                }
+            } else if (!flow_copy(l, it.mi, it.src, false, c.ring + r * c.ring_stride, c.down, c.cs, it.dpart)) {
                 const cudaError_t e = cudaGetLastError();   // (none: the uneven split's member without its down scratch)
                 err = "the flow's copy of layer " + std::to_string(it.il) + " expert " + std::to_string(it.e) + ": " +
                       (e != cudaSuccess ? cudaGetErrorString(e) : "no down scratch for the uneven split's member");
@@ -6322,7 +6344,12 @@ struct Model::Impl {
                     std::fwrite(yv.data(), 4, yv.size(), dump_y);
                     std::fflush(dump_y);
                 }
-                moe_combine(c.acc, c.y, c.pos, c.rw, T, l.k_exp, a, a + nrows, D, d.st);
+                // (DS4_COMBINE_ROWS=1: over the set's own tokens - a launch the set's rows, not the chunk's tokens;
+                //  the same sums.  A small ring's sets of one expert paid the chunk's tokens each: CUDA1 ~8 s a 28K read)
+                static const bool comb_rows = std::getenv("DS4_COMBINE_ROWS") != nullptr &&
+                                              std::atoi(std::getenv("DS4_COMBINE_ROWS")) != 0;
+                if (comb_rows) moe_combine_rows(c.acc, c.y, c.pos, c.row_tok, c.rw, l.k_exp, a, a + nrows, D, d.st);
+                else moe_combine(c.acc, c.y, c.pos, c.rw, T, l.k_exp, a, a + nrows, D, d.st);
             }
             i0 = j;
         }
@@ -18868,8 +18895,13 @@ struct Model::Impl {
         if (yl <= 0 || !L[(size_t) yl].kv_src) return -1;
         const bool one = yoco_one_gpu(), suffix = !one && yoco_suffix_gpu(yl);
         const bool tp = !one && !suffix && yoco_tp_group();   // (DS4_YOCO_TP: the flow too)
+        // (DS4_YOCO_FLOW=1: a layer split of single-GPU layers on the flow skips too, the cut at a chunk's start as off
+        //  the flow - flow_next / run_dev_chunks already leave out the skipped (chunk, layer)s)
+        static const bool yflow = std::getenv("DS4_YOCO_FLOW") != nullptr && std::atoi(std::getenv("DS4_YOCO_FLOW")) != 0;
+        bool split1 = yflow;
+        for (int il = 0; il < g.nl && split1; ++il) split1 = L[(size_t) il].nm == 1;
         for (const auto& c : chunks)
-            if (!one && !suffix && !tp && c != nullptr && c->flow) return -1;
+            if (!one && !suffix && !tp && !split1 && c != nullptr && c->flow) return -1;
         for (int il = 0; il < g.nl; ++il) {
             const Layer& l = L[(size_t) il];
             if (il > yl && (g.ratios[(size_t) il] != 1 || l.kv_src)) return -1;

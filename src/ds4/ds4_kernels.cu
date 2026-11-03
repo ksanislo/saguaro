@@ -3829,6 +3829,34 @@ void moe_sort(const int* idx, int T, int k, const int* vs, int n_vs, int* bounds
     pdl_launch(bounds_scan_kernel, 1, 32, 0, s, bounds, n_vs);
     pdl_launch(moe_sort_kernel<true>, n_vs, kThreads, 0, s, idx, T, k, vs, bounds, row_tok, pos);
 }
+__global__ void moe_combine_rows_kernel(float* acc, const float* __restrict__ y, const int* __restrict__ pos,
+                                        const int* __restrict__ row_tok, const float* __restrict__ w, int k, int r0,
+                                        int r1, int dim) {
+    pdl_wait();
+    pdl_trigger();
+    const int e = blockIdx.x * blockDim.x + threadIdx.x, r = r0 + (int) blockIdx.y;
+    if (e >= dim) return;
+    const int t = row_tok[r];
+    int first = -1;   // (the token's first pick in the range: its block adds every pick in it, as moe_combine_kernel)
+    for (int i = 0; i < k && first < 0; ++i) {
+        const int p = pos[(size_t) t * kPicks + i];
+        if (p >= r0 && p < r1) first = p;
+    }
+    if (first != r) return;
+    float a = acc[(size_t) t * dim + e];
+    for (int i = 0; i < k; ++i) {
+        const int p = pos[(size_t) t * kPicks + i];
+        if (p < r0 || p >= r1) continue;
+        a = __fmaf_rn(w[(size_t) t * kPicks + i], y[(size_t) (p - r0) * dim + e], a);
+    }
+    acc[(size_t) t * dim + e] = a;
+}
+void moe_combine_rows(float* acc, const float* y, const int* pos, const int* row_tok, const float* w, int k, int r0,
+                      int r1, int dim, cudaStream_t s) {
+    if (r1 > r0)
+        pdl_launch(moe_combine_rows_kernel, dim3(cdiv(dim, kThreads), r1 - r0), kThreads, 0, s, acc, y, pos, row_tok, w,
+                   k, r0, r1, dim);
+}
 void moe_combine(float* acc, const float* y, const int* pos, const float* w, int T, int k, int r0, int r1, int dim,
                  cudaStream_t s) {
     if (r1 > r0 && T > 0) pdl_launch(moe_combine_kernel, dim3(cdiv(dim, kThreads), T), kThreads, 0, s, acc, y, pos, w, k, r0, r1, dim);
@@ -4300,6 +4328,248 @@ __global__ void __launch_bounds__(kV7Threads, 1) sparse_attn_v7_kernel(const flo
     __trap();
 #endif
 }
+// DS4_ATTN_V7_T4=1: sparse_attn_v7_kernel's math in sm_75's 64 KB - the same fetches, scalings, MMAs in the same order
+// and the same one-pass FP32 softmax; each round's score tile kept in registers until Q and the key rows are done
+// (S then over their room), the V rows 16 a round after P (v7: 32 in Q's room).  58 KB against v7's 93 KB
+constexpr int kV7T4Rounds = (kV7Max + kV7Rows1 - 1) / kV7Rows1, kV7T4RowsV = 16;
+constexpr size_t kV7T4Smem = std::max({kV7RegA + kV7RegB, kV7RegC + (size_t) kV7T4RowsV * kV7LdQ * 2, (size_t) 16 * 512 * 4});
+static_assert(kV7T4Smem + 256 <= 64 * 1024, "sm_75's shared memory");
+__global__ void __launch_bounds__(kV7Threads, 1) sparse_attn_v7t4_kernel(const float* __restrict__ q,
+                                                                       const uint16_t* __restrict__ win,
+                                                                       const uint8_t* __restrict__ ckv,
+                                                                       const int* __restrict__ sel, int sel_stride,
+                                                                       AttnRows ar, const float* __restrict__ sink,
+                                                                       int heads, float scale, float* __restrict__ out) {
+    pdl_wait();
+    pdl_trigger();
+#if !defined(STRATA_USE_HIP) && (!defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 700)
+    namespace wm = nvcuda::wmma;
+    constexpr int d = 512, NW = kV7Threads / 32;
+    extern __shared__ __align__(32) unsigned char v7_smem[];
+    __half* Qh = (__half*) v7_smem;                         // (phase 1: Q, then the key rows)
+    __half* Ql = Qh + 16 * kV7LdQ;
+    __half* Ks = (__half*) (v7_smem + kV7RegA);
+    float* S = (float*) v7_smem;                            // (after phase 1: S, then P, then O)
+    __half* Ph = (__half*) v7_smem;
+    __half* Pl = Ph + 16 * kV7LdS;
+    __half* Vs = (__half*) (v7_smem + kV7RegC);             // (phase 3: 16 rows after P)
+    float* Os = (float*) v7_smem;
+    __shared__ float qf[16], den_s[16];
+    const int hb = blockIdx.x * 16, t = blockIdx.y;
+    const int tid = (int) threadIdx.x, lane = tid & 31, warp = tid >> 5;
+    int n_win, n_sel, w0;
+    if (ar.gen) {
+        const long long ta = ar.t0 + t, pa = ar.p0 + ta;
+        const long long first = max((long long) ar.win - ar.p0, ta + 1);
+        w0 = (int) first;
+        n_win = (int) (ar.win + ta - first + 1);
+        n_sel = ar.R > 0 ? (int) min((long long) ar.kcap, (pa + 1) / ar.R) : 0;
+    } else {
+        n_win = ar.nwin[t], n_sel = ar.nsel[t], w0 = ar.win0[t];
+    }
+    const int total = n_win + n_sel;   // (<= kV7Max: the caller's check)
+    const uint16_t* wbase = win + (size_t) w0 * d;
+    const int* sl = sel + (size_t) t * sel_stride;
+    const size_t crow = kv_row_bytes(kKvFp4, d);
+    {   // head `warp`'s query: to a largest value of ~2^12, as FP16 high + low
+        const float* qr = q + ((size_t) t * heads + hb + warp) * d;
+        float a = 0.0f;
+        for (int c = lane; c < d; c += 32) a = fmaxf(a, fabsf(qr[c]));
+        for (int o = 16; o > 0; o >>= 1) a = fmaxf(a, __shfl_xor_sync(0xffffffffu, a, o));
+        const int e = a > 0.0f ? (int) ((__float_as_uint(a) >> 23) & 0xffu) - 127 : 0;
+        const float up = ldexpf(1.0f, 12 - e);
+        for (int c = lane; c < d; c += 32) {
+            const float v = qr[c] * up;
+            const __half hi = __float2half_rn(v);
+            Qh[warp * kV7LdQ + c] = hi;
+            Ql[warp * kV7LdQ + c] = __float2half_rn(v - __half2float(hi));
+        }
+        if (lane == 0) qf[warp] = scale / (up * kV7RowScale);   // (S as computed -> the scaled score)
+    }
+    // row j's values [v0, v0 + N): fetched into registers (in flight while the tensor cores work), then as FP16 times
+    // 2^-4 into shared memory; zeros past the rows.  N 16 (both phases here)
+    struct Raw {
+        uint4 a[4];
+        uint32_t sc;
+        int kind;   // 0 none, 1 a window row (BF16), 2 a compressed row (FP4 codes, E4M3 scales a 16 values)
+    };
+    auto fetch = [&](int j, int v0, int N, Raw& r) {
+        if (j >= total) {
+            r.kind = 0;
+        } else if (j < n_win) {
+            const uint4* src = (const uint4*) (wbase + (size_t) j * d + v0);
+            r.kind = 1;
+            for (int i = 0; i < N / 8; ++i) r.a[i] = src[i];
+        } else {
+            const uint8_t* rr = ckv + (size_t) sl[j - n_win] * crow;
+            r.kind = 2;
+            if (N == 32) {
+                r.a[0] = *(const uint4*) (rr + v0 / 2);
+                r.sc = (uint32_t) rr[256 + v0 / 16] | ((uint32_t) rr[256 + v0 / 16 + 1] << 8);
+            } else {
+                const uint2 c = *(const uint2*) (rr + v0 / 2);
+                r.a[0] = make_uint4(c.x, c.y, 0u, 0u);
+                r.sc = rr[256 + v0 / 16];
+            }
+        }
+    };
+    auto put = [&](const Raw& r, int N, __half* dst) {   // (8 values a 16-byte store: fewer and wider stores)
+        union H8 {
+            uint4 v;
+            __half2 h[4];
+        };
+        if (r.kind == 1) {
+            const uint16_t* bv = (const uint16_t*) r.a;
+            for (int g = 0; g < N; g += 8) {
+                H8 u;
+#pragma unroll
+                for (int i = 0; i < 4; ++i)
+                    u.h[i] = __floats2half2_rn(bf16f(bv[g + 2 * i]) * kV7RowScale, bf16f(bv[g + 2 * i + 1]) * kV7RowScale);
+                *(uint4*) (dst + g) = u.v;
+            }
+        } else if (r.kind == 2) {   // (unpack32's values: exact in BF16 and in FP16)
+            const float k0 = e4m3_value((uint8_t) (r.sc & 0xffu)) * (16384.0f * kV7RowScale),
+                        k1 = e4m3_value((uint8_t) (r.sc >> 8)) * (16384.0f * kV7RowScale);
+            const uint32_t wv[4] = {r.a[0].x, r.a[0].y, r.a[0].z, r.a[0].w};
+            for (int g = 0; g < N / 8; ++g) {   // (a word: 8 codes, 8 values)
+                const float ks = g < 2 ? k0 : k1;
+                H8 u;
+#pragma unroll
+                for (int i = 0; i < 4; ++i) {
+                    const uint32_t b = wv[g] >> (8 * i);
+                    u.h[i] = __floats2half2_rn(e2m1_val14(b) * ks, e2m1_val14(b >> 4) * ks);
+                }
+                *(uint4*) (dst + 8 * g) = u.v;
+            }
+        } else {
+            for (int i = 0; i < N; i += 8) *(uint4*) (dst + i) = make_uint4(0u, 0u, 0u, 0u);
+        }
+    };
+    // 1. the scores: a round of 256 rows, a warp 16 of them, the 512 values in passes of 32 (a step: a pass of a
+    // round; its rows fetched during the step before)
+    {
+        constexpr int P1 = d / 32;
+        const int steps = (total + kV7Rows1 - 1) / kV7Rows1 * P1;
+        Raw rw;
+        if (steps > 0) fetch(tid >> 1, (tid & 1) * 16, 16, rw);
+        wm::fragment<wm::accumulator, 16, 16, 16, float> acc, accl;   // (the low parts' own chain)
+        wm::fragment<wm::accumulator, 16, 16, 16, float> sres[kV7T4Rounds];   // (each round's tile, stored at the end)
+        wm::fill_fragment(acc, 0.0f);
+        wm::fill_fragment(accl, 0.0f);
+        for (int st = 0; st < steps; ++st) {
+            const int r0 = st / P1 * kV7Rows1, kc = st % P1 * 32;
+            __syncthreads();   // (the step before's MMAs done with Ks)
+            put(rw, 16, Ks + (tid >> 1) * kV7LdK + (tid & 1) * 16);
+            __syncthreads();
+            if (st + 1 < steps) fetch((st + 1) / P1 * kV7Rows1 + (tid >> 1), (st + 1) % P1 * 32 + (tid & 1) * 16, 16, rw);
+            if (r0 + warp * 16 < total) {
+#pragma unroll
+                for (int kk = 0; kk < 32; kk += 16) {
+                    wm::fragment<wm::matrix_a, 16, 16, 16, __half, wm::row_major> ah, al;
+                    wm::fragment<wm::matrix_b, 16, 16, 16, __half, wm::col_major> b;
+                    wm::load_matrix_sync(ah, Qh + kc + kk, kV7LdQ);
+                    wm::load_matrix_sync(al, Ql + kc + kk, kV7LdQ);
+                    wm::load_matrix_sync(b, Ks + warp * 16 * kV7LdK + kk, kV7LdK);
+                    wm::mma_sync(acc, ah, b, acc);
+                    wm::mma_sync(accl, al, b, accl);
+                }
+            }
+            if (kc == d - 32) {
+                if (r0 + warp * 16 < total) {
+#pragma unroll
+                    for (int i = 0; i < acc.num_elements; ++i) acc.x[i] += accl.x[i];
+#pragma unroll
+                    for (int rd = 0; rd < kV7T4Rounds; ++rd)
+                        if (rd == r0 / kV7Rows1) sres[rd] = acc;
+                }
+                wm::fill_fragment(acc, 0.0f);
+                wm::fill_fragment(accl, 0.0f);
+            }
+        }
+        __syncthreads();   // (every warp done with Q and the key rows: S over them)
+#pragma unroll
+        for (int rd = 0; rd < kV7T4Rounds; ++rd)
+            if (rd * kV7Rows1 + warp * 16 < total)
+                wm::store_matrix_sync(S + rd * kV7Rows1 + warp * 16, sres[rd], kV7LdS, wm::mem_row_major);
+    }
+    __syncthreads();
+    // 2. the softmax of head `warp`, FP32: a lane its 20 columns in registers (S's room becomes P's)
+    constexpr int PL = kV7Max / 32;
+    float pv[PL];
+    {
+        float m = -INFINITY;
+#pragma unroll
+        for (int i = 0; i < PL; ++i) {
+            const int j = lane + 32 * i;
+            pv[i] = j < total ? S[warp * kV7LdS + j] * qf[warp] : -INFINITY;
+            m = fmaxf(m, pv[i]);
+        }
+        for (int o = 16; o > 0; o >>= 1) m = fmaxf(m, __shfl_xor_sync(0xffffffffu, m, o));
+        float s = 0.0f;
+#pragma unroll
+        for (int i = 0; i < PL; ++i) {
+            pv[i] = lane + 32 * i < total ? expf(pv[i] - m) : 0.0f;
+            s += pv[i];
+        }
+        for (int o = 16; o > 0; o >>= 1) s += __shfl_xor_sync(0xffffffffu, s, o);
+        if (lane == 0) den_s[warp] = s + expf(sink[hb + warp] - m);
+    }
+    __syncthreads();
+#pragma unroll
+    for (int i = 0; i < PL; ++i) {
+        const int j = lane + 32 * i;
+        const float v = pv[i] * kV7PScale;
+        const __half hi = __float2half_rn(v);
+        Ph[warp * kV7LdS + j] = hi;
+        Pl[warp * kV7LdS + j] = __float2half_rn(v - __half2float(hi));
+    }
+    if (lane < kV7LdS - kV7Max) Ph[warp * kV7LdS + kV7Max + lane] = Pl[warp * kV7LdS + kV7Max + lane] = __float2half_rn(0.0f);
+    // 3. O = P V: a round of 32 rows; a warp its 32 of the 512 columns (2 accumulators, and 2 for the low parts)
+    wm::fragment<wm::accumulator, 16, 16, 16, float> o[2], ol[2];
+    for (int f = 0; f < 2; ++f) {
+        wm::fill_fragment(o[f], 0.0f);
+        wm::fill_fragment(ol[f], 0.0f);
+    }
+    {
+        const int r = tid >> 5, v0 = (tid & 31) * 16;
+        Raw rv;
+        if (total > 0) fetch(r, v0, 16, rv);
+        for (int r0 = 0; r0 < total; r0 += kV7T4RowsV) {
+            __syncthreads();   // (the V rows' room free: the last round's MMAs / phase 2's writes done)
+            put(rv, 16, Vs + r * kV7LdQ + v0);
+            __syncthreads();
+            if (r0 + kV7T4RowsV < total) fetch(r0 + kV7T4RowsV + r, v0, 16, rv);
+#pragma unroll
+            for (int rt = 0; rt < kV7T4RowsV; rt += 16) {
+                if (r0 + rt >= total) break;
+                wm::fragment<wm::matrix_a, 16, 16, 16, __half, wm::row_major> ah, al;
+                wm::load_matrix_sync(ah, Ph + r0 + rt, kV7LdS);
+                wm::load_matrix_sync(al, Pl + r0 + rt, kV7LdS);
+#pragma unroll
+                for (int f = 0; f < 2; ++f) {
+                    wm::fragment<wm::matrix_b, 16, 16, 16, __half, wm::row_major> b;
+                    wm::load_matrix_sync(b, Vs + rt * kV7LdQ + warp * 32 + f * 16, kV7LdQ);
+                    wm::mma_sync(o[f], ah, b, o[f]);
+                    wm::mma_sync(ol[f], al, b, ol[f]);
+                }
+            }
+        }
+    }
+    __syncthreads();
+    for (int f = 0; f < 2; ++f) {
+#pragma unroll
+        for (int i = 0; i < o[f].num_elements; ++i) o[f].x[i] += ol[f].x[i];
+        wm::store_matrix_sync(Os + warp * 32 + f * 16, o[f], 512, wm::mem_row_major);
+    }
+    __syncthreads();
+    for (int i = tid; i < 16 * d; i += kV7Threads) {
+        const int h = i / d, c = i % d;
+        out[((size_t) t * heads + hb + h) * d + c] = Os[i] / (kV7RowScale * kV7PScale) / den_s[h];
+    }
+#else
+    __trap();
+#endif
+}
 // sparse_attn_v7_kernel's device: compute capability 7.x (V100, RTX 20) on CUDA, unless DS4_ATTN_V7=0
 static bool attn_v7_now() {
 #if !defined(STRATA_USE_HIP)
@@ -4316,6 +4586,30 @@ static bool attn_v7_now() {
                 ? 2 : 1;
         cudaGetLastError();
         if (v == 2) std::fprintf(stderr, "ds4: CUDA%d prompt attention on the tensor cores (sm_%d%d, FP16)\n", dev, p.major, p.minor);
+        known[dev].store(v, std::memory_order_relaxed);
+    }
+    return v == 2;
+#else
+    return false;
+#endif
+}
+
+// sparse_attn_v7t4_kernel's device: compute capability 7.x where v7's 93 KB does not fit (T4), DS4_ATTN_V7_T4=1 (opt-in)
+static bool attn_v7t4_now() {
+#if !defined(STRATA_USE_HIP)
+    static const bool on = std::getenv("DS4_ATTN_V7_T4") != nullptr && std::atoi(std::getenv("DS4_ATTN_V7_T4")) != 0;
+    static std::atomic<int> known[64];
+    int dev = 0;
+    if (!on || cudaGetDevice(&dev) != cudaSuccess || dev < 0 || dev >= 64) return false;
+    int v = known[dev].load(std::memory_order_relaxed);
+    if (v == 0) {
+        cudaDeviceProp p{};
+        v = cudaGetDeviceProperties(&p, dev) == cudaSuccess && p.major == 7 &&
+                    cudaFuncSetAttribute(sparse_attn_v7t4_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                         (int) kV7T4Smem) == cudaSuccess
+                ? 2 : 1;
+        cudaGetLastError();
+        if (v == 2) std::fprintf(stderr, "ds4: CUDA%d prompt attention on the tensor cores (sm_%d%d, FP16, v7 in %zu KB: DS4_ATTN_V7_T4)\n", dev, p.major, p.minor, kV7T4Smem >> 10);
         known[dev].store(v, std::memory_order_relaxed);
     }
     return v == 2;
@@ -4430,6 +4724,11 @@ void sparse_attn(const float* q, const uint16_t* win, const void* ckv, const int
         if (a.gen && a.kcap + a.win <= kV7Max && heads % 16 == 0 && attn_v7_now()) {
             pdl_launch(sparse_attn_v7_kernel, dim3(heads / 16, T), kV7Threads, kV7Smem, s, q, win, (const uint8_t*) ckv, sel,
                        sel_stride, a, sink, heads, scale, out);
+            return;
+        }
+        if (a.gen && a.kcap + a.win <= kV7Max && heads % 16 == 0 && attn_v7t4_now()) {
+            pdl_launch(sparse_attn_v7t4_kernel, dim3(heads / 16, T), kV7Threads, kV7T4Smem, s, q, win, (const uint8_t*) ckv,
+                       sel, sel_stride, a, sink, heads, scale, out);
             return;
         }
         if (attn_mma_now() && heads % 16 == 0) {
