@@ -8373,11 +8373,16 @@ bool Glm5Model::decode_spec(strata::kernels::SamplerParams& sp, int64_t max_new,
         last_tok_ = y;
         return true;
     };
+    // a draft that is no token id would go on into spec_head's embedding lookup past the table's end: the confirmed
+    // token in its place (glmfast::draft_id - a real id passes through untouched)
+    const auto draft_ok = [&](int d, int32_t next) -> int {
+        return glmfast::draft_id(d, next, g.n_vocab, "glm spec");
+    };
     const auto draft = [&](int64_t p, int32_t next, int& d) -> bool {
         cudaSetDevice(TL->dev_);
         if (!TL->fast_mtp(p, next, err)) return false;
         if (!glmfast::wait_event(TL->fast_->ev_mtp, "glm spec draft", err) || !TL->fast_->route_ok(err)) return false;
-        d = TL->fast_->mtp_tok_h[0];
+        d = draft_ok(TL->fast_->mtp_tok_h[0], next);
         have_draft = true;
         return true;
     };
@@ -8507,7 +8512,7 @@ bool Glm5Model::decode_spec(strata::kernels::SamplerParams& sp, int64_t max_new,
         if (cancel) fast_->spec_cancellable = true;   // q+3 with the new draft: speculative
         cudaSetDevice(TL->dev_);
         if (!glmfast::wait_event(TL->fast_->ev_mtp, "glm spec draft", err)) { tail_join(); ok = false; break; }
-        int d2 = TL->fast_->mtp_tok_h[0];
+        int d2 = draft_ok(TL->fast_->mtp_tok_h[0], y2);
         if (!tail_async && !TL->fast_->route_ok(err)) { ok = false; break; }
         lap(1);
         have_draft = true;
@@ -8535,6 +8540,7 @@ bool Glm5Model::decode_spec(strata::kernels::SamplerParams& sp, int64_t max_new,
             ok = false;
         }
     }
+    if (ok) glmfast::argmax_nonfinite_note(TL->dev_, "glm spec");   // (the drafts' and the tail's picks; said once)
     cudaSetDevice(dev_);
     for (Glm5Model* m = this; m != nullptr; m = m->split_next_.get()) m->pos_ = TL->pos_;
     // the head's recurrent states back to the tail's position (the backup after q+1): the whole model then stands at
