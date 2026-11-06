@@ -168,6 +168,7 @@ inline ConversationCheckpoint copy_checkpoint_beating(const ConversationCheckpoi
     o.tails = copy_beating(c.tails);
     o.dead = copy_beating(c.dead);
     o.block_pos = copy_beating(c.block_pos);
+    o.rope_level = c.rope_level;   // the level of the K/V it continues: a parked image must not read as plain
     o.used = c.used;
     o.pinned = c.pinned;
     o.stage_parts.reserve(c.stage_parts.size());

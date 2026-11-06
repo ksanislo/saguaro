@@ -23,6 +23,12 @@ SavedConversation image(std::initializer_list<int32_t> ids, bool cvec = true) {
 }
 
 int main() {
+    {   // STRATA_YARN_ELASTIC: what a request that stays plain passes over (default: 32768 tokens saved is enough)
+        check(!yarn_plain_skips(0, 100, 1000), "a plain checkpoint is never passed over");
+        check(yarn_plain_skips(1, 12000, 600000), "a short YaRN start inside a conversation is read again");
+        check(!yarn_plain_skips(1, 137864, 617000), "a long YaRN prefix is resumed");
+        check(!yarn_plain_skips(1, 1000, 1000), "the deepest checkpoint is that conversation going on");
+    }
     {
         ConversationBuffer bytes;
         const size_t first = ConversationBuffer::segment_bytes + 17;
@@ -491,7 +497,11 @@ int main() {
         const auto original = checks;
         const uint8_t* gdn0 = checks[0].gdn.data();
         const uint8_t* part1 = checks[2].stage_parts[1].gdn.data();
+        checks[2].rope_level = 1;
+        for (auto& p : checks[2].stage_parts) p.rope_level = 1;
         auto split = conversation_checkpoints_split(std::move(checks), 2);
+        check(split.stage0[1].rope_level == 1 && split.parts[0][1].rope_level == 1 && split.parts[1][1].rope_level == 1,
+              "split: every stage part keeps its RoPE level");
         check(checks.empty() && split.stage0.size() == 2 && split.rest.size() == 1 && split.parts.size() == 2 &&
               split.parts[0].size() == 2 && split.parts[1].size() == 2, "split: complete checkpoints apart, the other aside");
         check(split.stage0[0].stage_parts.empty() && split.parts[1][1].ids == original[2].ids &&

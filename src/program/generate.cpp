@@ -15059,7 +15059,7 @@ int main(int argc, char** argv) {
                 for (const ConvCheckpoint& c : sl.checks) deepest = std::max(deepest, c.ids.size());
                 for (const ConvCheckpoint& c : sl.checks)
                     if (c.imgs.empty() && c.stage_parts.size() == stages.size() && (int64_t) c.ids.size() > j.resume &&
-                        !(plain && c.rope_level != 0 && c.ids.size() < deepest) && pre(c.ids)) {
+                        !(plain && strata::core::yarn_plain_skips(c.rope_level, c.ids.size(), deepest)) && pre(c.ids)) {
                         j.resume = (int64_t) c.ids.size();
                         j.ck = &c;
                     }
@@ -17378,9 +17378,10 @@ int main(int argc, char** argv) {
             // conversation (its live state, its deepest checkpoint), not from a shared start inside it
             const bool yarn_plain = yarn_rows && n <= yarn_thr;
             auto yarn_skip = [&](const ConvCheckpoint& c, const std::vector<ConvCheckpoint>& all) {
-                if (!yarn_plain || c.rope_level == 0) return false;
-                for (const ConvCheckpoint& d : all) if (d.ids.size() > c.ids.size()) return true;
-                return false;
+                if (!yarn_plain) return false;
+                size_t deepest = 0;
+                for (const ConvCheckpoint& d : all) deepest = std::max(deepest, d.ids.size());
+                return strata::core::yarn_plain_skips(c.rope_level, c.ids.size(), deepest);
             };
             if (o.prompt_cache > 0 && want_cvec == cvec_cached) {
                 if (live_ok && starts_with(live, live_imgs)) { resume = (int64_t) live.size(); from_live = true; }

@@ -8,6 +8,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <deque>
 #include <memory>
 #include <utility>
@@ -116,6 +117,7 @@ inline ConversationCheckpointSplit conversation_checkpoints_split(std::vector<Co
         for (size_t k = 0; k < stages; ++k) {
             ConversationCheckpoint part;
             part.ids = c.ids; part.imgs = c.imgs; part.used = c.used; part.pinned = c.pinned;
+            part.rope_level = c.stage_parts[k].rope_level;
             out.parts[k].push_back(std::move(part));
         }
     }
@@ -204,6 +206,24 @@ int64_t conversation_prefix(const ConversationCheckpoint& c, const std::vector<T
     return (int64_t) n;
 }
 
+/// STRATA_YARN_PLAIN_REUSE (tokens, default 32768; 0 = never): a prompt under the YaRN threshold resumes a YaRN checkpoint
+/// inside a longer conversation when that saves at least this much reading - a compaction summary of the conversation's
+/// own history.  A shorter shared start (a system prompt) is read again at plain RoPE, as before.
+inline size_t yarn_plain_reuse_min() {
+    static const size_t v = [] {
+        const char* t = std::getenv("STRATA_YARN_PLAIN_REUSE");
+        return t != nullptr ? (size_t) std::strtoull(t, nullptr, 10) : (size_t) 32768;
+    }();
+    return v;
+}
+/// Whether a request that stays plain passes over a checkpoint of `tokens` at `rope_level`, `deepest` being the longest
+/// of its conversation (the deepest one is that conversation going on, which it always may take).
+inline bool yarn_plain_skips(int rope_level, size_t tokens, size_t deepest) {
+    if (rope_level == 0 || tokens >= deepest) return false;
+    const size_t min = yarn_plain_reuse_min();
+    return min == 0 || tokens < min;
+}
+
 class ConversationCache {
 public:
     struct Match {
@@ -270,7 +290,8 @@ public:
     }
 
     // plain (STRATA_YARN_ELASTIC): a request that stays at plain RoPE takes a YaRN state only where it goes on with
-    // that conversation (its live state or deepest checkpoint), never one borrowed from inside it
+    // that conversation (its live state or deepest checkpoint) or where the checkpoint saves a long read
+    // (yarn_plain_keeps); it then runs at YaRN, the level of the K/V it continues
     template<class Token>
     Match best(const std::vector<Token>& prompt, const std::vector<ConversationImageKey>& images, bool cvec,
                bool plain = false) const {
@@ -283,7 +304,7 @@ public:
             size_t deepest = 0;
             for (const auto& c : e.checkpoints) deepest = std::max(deepest, c.ids.size());
             auto consider = [&](const ConversationCheckpoint& c, bool live) {
-                if (plain && c.rope_level != 0 && !live && c.ids.size() < deepest) return;
+                if (plain && !live && yarn_plain_skips(c.rope_level, c.ids.size(), deepest)) return;
                 const int64_t n = conversation_prefix(c, prompt, images);
                 if (n > best.tokens) best = {i, n, live, serials_[i]};
             };
