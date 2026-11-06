@@ -7,6 +7,7 @@
 
 #include "strata/core/conversation_file.hpp"
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
@@ -44,6 +45,7 @@ public:
         // ("sess_event=<what> sess_tokens=N sess_bytes=B sess_ms=T sess_why=<why>") and, after every change, the
         // folder's state as JSON ("sess_json={...}", no spaces).  Called with the folder's lock held.
         std::function<void(const std::string&)> event;
+        std::function<void()> write_block;     // tests: called on the writer thread after each block of a background write
     };
     explicit SessionDir(Options o);
     ~SessionDir();                             // stops the preload, writes every queued image, then stops
@@ -64,7 +66,8 @@ public:
     bool write_now(const SavedConversation& meta, const std::vector<SessionKvSource>& kv,
                    const std::vector<std::vector<SessionKvSource>>& stage_kv, size_t& bytes, std::string& error,
                    const std::vector<ConversationCheckpoint>* chain = nullptr);
-    // Before the caller moves `image` out (take): a queued write of it is dropped, a running one is waited for.
+    // Before the caller moves `image` out (take): a queued write of it is dropped, a running one is waited for, with a
+    // watchdog beat each time that write moves.
     void claim(const SavedConversation* image);
     // The images the preload has read, for the caller's cache (each file's image once).
     std::vector<SavedConversation> take_preloaded();
@@ -122,6 +125,8 @@ private:
     Options o_;
     mutable std::mutex mu_;
     std::condition_variable cv_;
+    std::atomic<uint64_t> write_moved_{0};      // the background write's blocks and blocking steps so far
+    std::atomic<uint64_t> write_blocking_{0};   // the bytes of the blocking step it is in, 0: streaming
     std::vector<Entry> entries_;
     std::deque<Job> jobs_;
     std::vector<Ready> ready_;

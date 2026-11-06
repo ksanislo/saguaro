@@ -1,5 +1,6 @@
 // --session-dir: a folder of session files, one per conversation (session_dir.hpp).
 #include "strata/core/session_dir.hpp"
+#include "strata/core/progress.hpp"
 
 #include <algorithm>
 #include <cinttypes>
@@ -142,7 +143,23 @@ void SessionDir::claim(const SavedConversation* image) {
     std::unique_lock<std::mutex> lk(mu_);
     jobs_.erase(std::remove_if(jobs_.begin(), jobs_.end(), [&](const Job& j) { return j.image.get() == image; }),
                 jobs_.end());
-    cv_.wait(lk, [&] { return writing_ != image; });
+    if (writing_ != image) return;
+    // A big conversation's write outlasts the engine's watchdog (838K tokens: 71 s) and the request waits here on the
+    // engine's own thread.  It beats only when the write moved, so a write that hangs still ends in the watchdog; a
+    // step that blocks in one call (the file's flush) gets its allowance, as in the SAVE command.
+    progress_at("request: waiting for its session file write");
+    uint64_t seen = UINT64_MAX;
+    while (writing_ == image) {
+        const uint64_t moved = write_moved_.load(std::memory_order_relaxed);
+        if (moved != seen) {
+            seen = moved;
+            const uint64_t blocking = write_blocking_.load(std::memory_order_relaxed);
+            progress_allow(blocking != 0 ? session_phase_limit_s(blocking) : 0);
+        }
+        cv_.wait_for(lk, std::chrono::seconds(1));
+    }
+    progress_allow(0);
+    progress_at("request");
 }
 
 void SessionDir::flush() {
@@ -187,6 +204,15 @@ void SessionDir::writer_loop() {
         SessionWriteOptions wo;
         wo.deepest_checkpoint_only = true;
         wo.min_free_bytes = o_.min_free_bytes;
+        wo.progress = [this](uint64_t, uint64_t) {
+            write_blocking_.store(0, std::memory_order_relaxed);
+            write_moved_.fetch_add(1, std::memory_order_relaxed);
+            if (o_.write_block) o_.write_block();
+        };
+        wo.phase = [this](const char*, uint64_t bytes) {
+            write_blocking_.store(bytes, std::memory_order_relaxed);
+            write_moved_.fetch_add(1, std::memory_order_relaxed);
+        };
         size_t written = 0;
         std::string err;
         SessionStatus st;

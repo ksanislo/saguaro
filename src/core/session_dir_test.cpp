@@ -1,11 +1,14 @@
 // CPU-only tests for --session-dir (include/strata/core/session_dir.hpp): write-behind, supersede, claim, caps,
 // fetch, preload, foreign files.  Built with -DSTRATA_BUILD_CONVERSATION_TESTS=ON; no CUDA, no model.
 #include "strata/core/session_dir.hpp"
+#include "strata/core/progress.hpp"
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <memory>
 #include <mutex>
@@ -129,6 +132,27 @@ int main() {
         sd2.claim(c.get());
         sd2.flush();
         check(session_files(dir) == 2, "claim drops a queued write");
+
+        // claim during a running write: the wait beats while the write moves, and the write finishes first
+        {
+            std::atomic<bool> writing{false};
+            SessionDir::Options moving = opts(dir, id);
+            moving.write_delay = std::chrono::milliseconds(0);
+            moving.write_block = [&] {
+                writing = true;
+                std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+            };
+            SessionDir sd3(moving);
+            sd3.open();
+            auto w = std::make_shared<SavedConversation>(conv(tokens(90000, 2000), 4));
+            sd3.write(w);
+            while (!writing) std::this_thread::yield();
+            const uint64_t beats = progress().beats.load();
+            sd3.claim(w.get());
+            check(progress().beats.load() > beats, "claim beats while a running write moves");
+            check(session_files(dir) == 3, "claim returns after the running write finished");
+            check(std::strcmp(progress().where.load(), "request") == 0, "claim puts the stage back");
+        }
     }
     // a parked conversation still inside its write delay at exit: written by flush, and by the destructor alone
     {
