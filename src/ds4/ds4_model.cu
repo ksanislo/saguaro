@@ -9095,6 +9095,12 @@ struct Model::Impl {
     void mark(bool shared) {
         if (Check* c = mark_room(pos, shared)) snap_into(*c);
     }
+    void marks_touch(const std::vector<int64_t>& asked, int64_t shared, int64_t from) {
+        for (Check& x : mk)
+            if (x.pos > 0 && x.pos <= from &&
+                (x.pos == shared || std::find(asked.begin(), asked.end(), x.pos) != asked.end()))
+                x.used = ++mark_clock;
+    }
     // the restore point at position `at` to fill (nullptr: none kept, or one there already - in use again)
     Check* mark_room(int64_t at, bool shared) {
         if (marks_cap() <= 0 || at <= 0) return nullptr;
@@ -21565,6 +21571,7 @@ bool Model::restore(int64_t limit) { return p_->restore(limit); }
 void Model::pin() { p_->pin(); }
 void Model::mark(bool shared) { p_->mark(shared); }
 int Model::marks_cap() const { return Impl::marks_cap(); }
+void Model::marks_touch(const std::vector<int64_t>& asked, int64_t shared, int64_t from) { p_->marks_touch(asked, shared, from); }
 size_t Model::check_bytes() const { return p_->check_bytes(); }
 std::vector<int64_t> Model::check_positions() const { return p_->check_positions(); }
 int64_t Model::restorable(int64_t limit) const { return p_->restorable(limit); }

@@ -1613,6 +1613,7 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
         if ((!asked.empty() || r.shared >= 0) && m.marks_cap() > 0) {
             std::vector<std::pair<int64_t, int64_t>> spans;
             for (const Pic& q : pics) spans.push_back({q.start, (int64_t) q.len});
+            m.marks_touch(asked, r.shared, (int64_t) from);   // (asked again behind the read: kept, no stop)
             cuts = strata::ds4::mark_plan(asked, r.shared, (int64_t) from, (int64_t) r.ids.size(), m.marks_cap(), 16, spans);
             for (const strata::ds4::MarkAt& c : cuts)
                 if (c.pos == (int64_t) r.tail && c.pos > (int64_t) from) P.tail_at = c.pos;   // (the plan kept it there)

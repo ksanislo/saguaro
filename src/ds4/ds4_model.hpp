@@ -325,6 +325,9 @@ public:
     /// (MAYA_DS4_RESTORE_POINTS, 4; 0: none kept), the least recently used giving way; each check_bytes() of host RAM.
     void mark(bool shared = false);
     int marks_cap() const;
+    /// The held restore points at or before `from` that a request asked for again (marks= / shared=): their
+    /// least-recently-used clock moves on, nothing else (a grid point the read already passed stays kept).
+    void marks_touch(const std::vector<int64_t>& asked, int64_t shared, int64_t from);
     size_t check_bytes() const;
     /// The positions restore() can go back to, latest first (a slot keeps them: it can be taken back at any of them).
     std::vector<int64_t> check_positions() const;
