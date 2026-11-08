@@ -335,6 +335,66 @@ int main() {
         check(!SessionDir::supersedes(head(tokens(1, 150), 1), {head(tokens(1, 60), 2)}, shared_root),
               "supersedes: a branch whose deepest checkpoint the newer chain does not hold is kept");
     }
+    // 4q: a conversation the cache evicted before its file was written is taken back from the writer, not read again
+    {
+        const fs::path d2 = dir / "evicted";
+        fs::create_directories(d2);
+        const auto e = tokens(120000, 3000);
+        auto ep = e; ep.push_back(5);
+        int64_t t = 0;
+        {   // queued (inside write_delay), the cache let go of it: taken whole (every checkpoint), never written
+            SessionDir::Options slow = opts(d2, id);
+            slow.write_delay = std::chrono::milliseconds(600000);
+            SessionDir sd(slow);
+            sd.open();
+            sd.write(std::make_shared<SavedConversation>(conv(e, 6)));   // (no reference kept: evicted)
+            auto got = sd.fetch(ep, {}, false, 0, t);
+            check(got && got->live.ids == e && t == (int64_t) e.size(), "fetch: an evicted queued conversation is taken back");
+            check(got->checkpoints.size() == 2, "taken back whole, every checkpoint");
+            check(!got->kv.empty() && got->kv[0].k.size() == 1006, "its K/V moved out");
+            sd.flush();
+            check(session_files(d2) == 0, "a conversation taken back from the queue is not written");
+            // its deepest checkpoint matches a rewritten tail too
+            sd.write(std::make_shared<SavedConversation>(conv(e, 6)));
+            auto rw = std::vector<int32_t>(e.begin(), e.begin() + 2000); rw.push_back(-3);
+            got = sd.fetch(rw, {}, false, 0, t);
+            check(got && t == (int64_t) e.size() / 2, "an evicted queued conversation serves a rewritten tail from a checkpoint");
+            check(!sd.fetch(ep, {}, false, 0, t), "taken once");
+            // still held by the cache: left alone (the cache gives it), and still written
+            auto held = std::make_shared<SavedConversation>(conv(e, 6));
+            sd.write(held);
+            check(!sd.fetch(ep, {}, false, 0, t), "a queued conversation the cache still holds is not taken");
+            sd.flush();
+            check(session_files(d2) == 1, "and its write goes on");
+            // a file at least as long beats nothing: a queued image only wins when it continues further
+            check(!sd.fetch(ep, {}, false, (int64_t) e.size(), t), "not taken when the caller already has as much");
+        }
+        fs::remove_all(d2);
+        fs::create_directories(d2);
+        {   // being written, the cache let go of it: the write is cancelled and the conversation taken back
+            std::atomic<bool> writing{false};
+            SessionDir::Options moving = opts(d2, id);
+            moving.write_block = [&] {
+                writing = true;
+                std::this_thread::sleep_for(std::chrono::milliseconds(300));
+            };
+            SessionDir sd(moving);
+            sd.open();
+            sd.write(std::make_shared<SavedConversation>(conv(e, 7)));   // (evicted)
+            while (!writing) std::this_thread::yield();
+            const auto t0 = std::chrono::steady_clock::now();
+            auto got = sd.fetch(ep, {}, false, 0, t);
+            const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+            check(got && got->live.ids == e && got->checkpoints.size() == 2, "fetch: an evicted conversation being written is taken back");
+            check(got->kv[0].k.size() == 1007, "the right image");
+            check(ms < 1500.0, "within about one block");
+            check(std::strcmp(progress().where.load(), "request") == 0, "fetch puts the stage back");
+            sd.flush();
+            const size_t n = std::distance(fs::directory_iterator(d2), fs::directory_iterator{});
+            check(session_files(d2) == 0 && n == 0, "its write left no file");
+        }
+        fs::remove_all(d2);
+    }
     fs::remove_all(dir);
     std::printf("session_dir_test: %d checks passed\n", checks);
     return 0;

@@ -149,8 +149,13 @@ void SessionDir::claim(const SavedConversation* image) {
     // the conversation back sat here.  What is left to wait for is one block, or a flush or publish already started.
     // It beats only when the write moved, so a write that hangs still ends in the watchdog; a step that blocks in one
     // call (the file's flush) gets its allowance, as in the SAVE command.
+    wait_write_locked(lk, image, "request: waiting for its session file write to stop");
+}
+
+// claim / fetch: the running write of `image` cancelled and waited for until it has stopped (see claim)
+void SessionDir::wait_write_locked(std::unique_lock<std::mutex>& lk, const SavedConversation* image, const char* what) {
     write_cancel_.store(image, std::memory_order_relaxed);
-    progress_at("request: waiting for its session file write to stop");
+    progress_at(what);
     uint64_t seen = UINT64_MAX;
     while (writing_ == image) {
         const uint64_t moved = write_moved_.load(std::memory_order_relaxed);
@@ -202,6 +207,7 @@ void SessionDir::writer_loop() {
         Job job = std::move(jobs_.front());
         jobs_.pop_front();
         writing_ = job.image.get();
+        writing_img_ = job.image;
         lk.unlock();
 
         const std::string path = (fs::path(o_.dir) / random_name()).string();
@@ -228,6 +234,7 @@ void SessionDir::writer_loop() {
 
         lk.lock();
         writing_ = nullptr;
+        writing_img_.reset();
         if (ok) {
             add_written_locked(path, *job.image, written, s, "wrote");
         } else if (write_cancel_.load(std::memory_order_relaxed) == job.image.get()) {
@@ -352,6 +359,14 @@ int64_t SessionDir::match(const Entry& e, const std::vector<int32_t>& ids, const
     return t > 0 ? t : conversation_prefix(e.peek.deepest, ids, imgs);
 }
 
+int64_t SessionDir::match_image(const SavedConversation& s, const std::vector<int32_t>& ids,
+                                const std::vector<ConversationImageKey>& imgs, bool cvec) const {
+    if (s.cvec != cvec) return 0;
+    int64_t t = conversation_prefix(s.live, ids, imgs);
+    for (const auto& c : s.checkpoints) t = std::max(t, conversation_prefix(c, ids, imgs));
+    return t;
+}
+
 std::optional<SavedConversation> SessionDir::fetch(const std::vector<int32_t>& ids,
                                                    const std::vector<ConversationImageKey>& imgs, bool cvec,
                                                    int64_t beat, int64_t& tokens) {
@@ -362,6 +377,46 @@ std::optional<SavedConversation> SessionDir::fetch(const std::vector<int32_t>& i
         for (size_t i = 0; i < entries_.size(); ++i) {
             const int64_t t = match(entries_[i], ids, imgs, cvec);
             if (t > best_t) { best = i; best_t = t; }
+        }
+        // A conversation the cache evicted while its write was still queued (write_delay) or running: only the
+        // writer holds it (measured 11-08: parked, evicted by the cache's count cap 24 s later, asked for 5 s after
+        // that, its file done 11 s later still - the request read 425K tokens from 0 in 397 s).  Taken only when
+        // nothing else holds it (the job's reference, writing_img_'s, this one): an image still in the cache is the
+        // cache's to give, and its write goes on.
+        std::shared_ptr<const SavedConversation> mem;
+        int64_t mem_t = best_t;
+        bool mem_running = false;
+        for (const Job& j : jobs_) {
+            const int64_t t = match_image(*j.image, ids, imgs, cvec);
+            if (t > mem_t && j.image.use_count() == 1) { mem = j.image; mem_t = t; mem_running = false; }
+        }
+        if (writing_img_ && writing_img_.get() == writing_) {
+            const int64_t t = match_image(*writing_img_, ids, imgs, cvec);
+            // (the writer's job + writing_img_)
+            if (t > mem_t && writing_img_.use_count() == 2) { mem = writing_img_; mem_t = t; mem_running = true; }
+        }
+        if (mem) {
+            const auto t0 = std::chrono::steady_clock::now();
+            if (mem_running) {
+                wait_write_locked(lk, mem.get(), "request: stopping the write of the conversation it takes back");
+            } else {
+                jobs_.erase(std::remove_if(jobs_.begin(), jobs_.end(), [&](const Job& j) { return j.image == mem; }),
+                            jobs_.end());
+            }
+            // (the writer let go of it under this lock: the only reference left is `mem`)
+            if (mem.use_count() == 1) {
+                SavedConversation out = std::move(const_cast<SavedConversation&>(*mem));
+                mem.reset();
+                const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+                char b[200];
+                std::snprintf(b, sizeof b, "took %zu tokens back from the %s (it had left the cache before its file was "
+                              "written; %.0f ms)", out.live.ids.size(), mem_running ? "running write" : "write queue", ms);
+                say(b);
+                note_locked("taken_back", out.live.ids.size(), 0, ms, mem_running ? "running" : "queued");
+                tokens = mem_t;
+                return out;
+            }
+            continue;   // (someone took a reference meanwhile: look again)
         }
         if (best == entries_.size()) return std::nullopt;
         Entry& e = entries_[best];

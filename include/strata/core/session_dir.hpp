@@ -75,6 +75,9 @@ public:
     std::vector<SavedConversation> take_preloaded();
     // The on-disk conversation that continues `ids` furthest when it beats `beat` tokens, read now (or waited for
     // while the preload reads it).  nullopt when none beats it, or the read failed (logged; the file is deleted).
+    // A conversation the caller's cache let go of before its file was written (queued behind write_delay, or being
+    // written) is not lost: it lives on in the writer's queue, and is taken from there when it beats the files - a
+    // queued write is dropped, a running one cancelled (claim) - and returned whole (every checkpoint, no read).
     std::optional<SavedConversation> fetch(const std::vector<int32_t>& ids, const std::vector<ConversationImageKey>& imgs,
                                            bool cvec, int64_t beat, int64_t& tokens);
     // The engine is quitting: writes from here on are labelled as the shutdown's.
@@ -121,6 +124,9 @@ private:
     void note_locked(const char* what, uint64_t tokens, uint64_t bytes, double ms, const char* why);
     void state_locked();
     void enforce_caps_locked();
+    int64_t match_image(const SavedConversation& s, const std::vector<int32_t>& ids,
+                        const std::vector<ConversationImageKey>& imgs, bool cvec) const;
+    void wait_write_locked(std::unique_lock<std::mutex>& lk, const SavedConversation* image, const char* what);
     int64_t match(const Entry& e, const std::vector<int32_t>& ids, const std::vector<ConversationImageKey>& imgs,
                   bool cvec) const;
 
@@ -135,6 +141,7 @@ private:
     std::deque<Job> jobs_;
     std::vector<Ready> ready_;
     const SavedConversation* writing_ = nullptr;
+    std::shared_ptr<const SavedConversation> writing_img_;   // the running write's image (fetch can take it back)
     uint64_t seq_ = 0, preloaded_bytes_ = 0;
     size_t preloaded_files_ = 0;
     bool stop_ = false, flushing_ = false, fetching_ = false, exiting_ = false;
