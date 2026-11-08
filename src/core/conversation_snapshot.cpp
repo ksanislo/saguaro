@@ -129,12 +129,18 @@ bool host_both(const void* dst, const void* src) {
     };
     return host(a) && host(b);
 }
-bool host_copy_threaded(void* dst, const void* src, size_t n) {
+struct CopyJob { void* dst; const void* src; size_t n; };
+// jobs whose both ends are host memory, together 64 MiB or more, on N threads (default 8; 0 / 1: off).  The parked
+// image's buffers are 16 MiB segments, so a K/V part arrives as many jobs (one memcpy runs at one core's DDR3 speed).
+bool host_copy_threaded(const std::vector<CopyJob>& jobs) {
     static const int nt = [] {
         const char* e = std::getenv("STRATA_SNAPSHOT_COPY_THREADS");
         return e != nullptr ? std::atoi(e) : 8;
     }();
-    if (nt <= 1 || n < ((size_t) 64 << 20) || !host_both(dst, src)) return false;
+    size_t total = 0;
+    for (const CopyJob& j : jobs) total += j.n;
+    if (nt <= 1 || jobs.empty() || total < ((size_t) 64 << 20) || !host_both(jobs.front().dst, jobs.front().src) ||
+        !host_both(jobs.back().dst, jobs.back().src)) return false;
     {   // ordered after this thread's copies already queued on its private stream (as copy_nonblocking was)
         cudaStream_t ps = nullptr;
         if (conversation_detail::private_stream(ps) != cudaSuccess || cudaStreamSynchronize(ps) != cudaSuccess) {
@@ -142,32 +148,31 @@ bool host_copy_threaded(void* dst, const void* src, size_t n) {
             return false;
         }
     }
-    // 16 MiB slices taken in turn; this thread beats the watchdog while they move (#2049: paged-out parked state
-    // copies at the drive's speed, and a silent copy past 60 s looks like a stall)
-    constexpr size_t kSlice = (size_t) 16 << 20;
-    const size_t slices = (n + kSlice - 1) / kSlice;
     constexpr size_t kStep = (size_t) 1 << 20;   // (#2049: a beat per MiB that lands, as copy_checkpoint_beating)
     std::atomic<size_t> next{0}, done{0}, moved{0};
     std::vector<std::thread> th;
     for (int t = 0; t < nt; ++t)
         th.emplace_back([&] {
-            for (size_t i; (i = next.fetch_add(1)) < slices; done.fetch_add(1)) {
-                const size_t at = i * kSlice, len = std::min(kSlice, n - at);
-                for (size_t o = 0; o < len; o += kStep) {
-                    const size_t m = std::min(kStep, len - o);
-                    std::memcpy(static_cast<uint8_t*>(dst) + at + o, static_cast<const uint8_t*>(src) + at + o, m);
+            for (size_t i; (i = next.fetch_add(1)) < jobs.size(); done.fetch_add(1)) {
+                const CopyJob& j = jobs[i];
+                for (size_t o = 0; o < j.n; o += kStep) {
+                    const size_t m = std::min(kStep, j.n - o);
+                    std::memcpy(static_cast<uint8_t*>(j.dst) + o, static_cast<const uint8_t*>(j.src) + o, m);
                     moved.fetch_add(m, std::memory_order_relaxed);
                 }
             }
         });
     size_t seen = 0;
-    while (done.load() < slices) {
+    while (done.load() < jobs.size()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
         if (const size_t d = moved.load(std::memory_order_relaxed); d != seen) { seen = d; core::progress_beat(); }
     }
     for (auto& x : th) x.join();
     core::progress_beat();
     return true;
+}
+bool host_copy_threaded(void* dst, const void* src, size_t n) {
+    return host_copy_threaded(std::vector<CopyJob>{{dst, src, n}});
 }
 bool transfer(void* dst, const void* src, size_t n, std::string& error) {
     if (!n) return true;
@@ -178,6 +183,13 @@ bool transfer(void* dst, const void* src, size_t n, std::string& error) {
     if (e == cudaSuccess) return true;
     error = std::string("conversation snapshot copy: ") + cudaGetErrorString(e);
     return false;
+}
+// the jobs together on threads when they can be (host_copy_threaded), else one by one as transfer()
+bool transfer_jobs(const std::vector<CopyJob>& jobs, std::string& error) {
+    if (host_copy_threaded(jobs)) return true;
+    for (const CopyJob& j : jobs)
+        if (!transfer(j.dst, j.src, j.n, error)) return false;
+    return true;
 }
 } // namespace
 
@@ -232,9 +244,12 @@ bool conversation_kv_save(ConversationKv& image, const QsaState& st, const Model
                                   : l.cells ? (sizes[i] / size_t(l.cells)) * size_t(whole_cells) : 0;
         if (keep > dst[i]->size()) { error = "conversation snapshot: missing reusable prefix"; return false; }
         dst[i]->resize(sizes[i]);
+        std::vector<CopyJob> jobs;
         if (!dst[i]->visit(keep, sizes[i] - keep, [&](uint8_t* p, size_t n, size_t at) {
-                return transfer(p, src[i] ? static_cast<const uint8_t*>(src[i]) + at : nullptr, n, error);
-            })) return false;
+                if (!src[i]) { error = "conversation snapshot: missing state buffer"; return false; }
+                jobs.push_back({p, static_cast<const uint8_t*>(src[i]) + at, n});
+                return true;
+            }) || !transfer_jobs(jobs, error)) return false;
         if (reused_bytes) *reused_bytes += keep;
     }
     return true;
@@ -317,9 +332,13 @@ bool conversation_kv_restore(const ConversationKv& image, const QsaState& st, co
     const std::array<const ConversationBuffer*,5> src = {&image.k, &image.v, &image.k_scale, &image.v_scale, &image.pooled};
     const auto dst = pools(st);
     for (size_t i = 0; i < src.size(); ++i)
+    {
+        std::vector<CopyJob> jobs;
         if (!src[i]->visit(0, src[i]->size(), [&](const uint8_t* p, size_t n, size_t at) {
-                return transfer(static_cast<uint8_t*>(dst[i]) + at, p, n, error);
-            })) return false;
+                jobs.push_back({static_cast<uint8_t*>(dst[i]) + at, p, n});
+                return true;
+            }) || !transfer_jobs(jobs, error)) return false;
+    }
     return refresh_residency(st, g, upto, error);
 }
 
@@ -338,9 +357,13 @@ bool conversation_kv_restore_prefix(const ConversationKv& image, const QsaState&
         if (sizes[i] > src[i]->size()) { error = "conversation snapshot: prefix beyond the K/V payload"; return false; }
     const auto dst = pools(st);
     for (size_t i = 0; i < src.size(); ++i)
+    {
+        std::vector<CopyJob> jobs;
         if (!src[i]->visit(0, sizes[i], [&](const uint8_t* p, size_t n, size_t at) {
-                return transfer(static_cast<uint8_t*>(dst[i]) + at, p, n, error);
-            })) return false;
+                jobs.push_back({static_cast<uint8_t*>(dst[i]) + at, p, n});
+                return true;
+            }) || !transfer_jobs(jobs, error)) return false;
+    }
     return refresh_residency(st, g, upto, error);
 }
 
