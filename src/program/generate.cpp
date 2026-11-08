@@ -16093,6 +16093,7 @@ int main(int argc, char** argv) {
                     if (j == nullptr || waiting >= br_max) break;
                     const int64_t a = j->at;
                     int64_t z = std::min(j->n - 1, a + P);
+                    if (j->msg_at > a && z > j->msg_at) z = j->msg_at;   // (a piece ends at the message checkpoint too)
                     const bool ck = j->turn_at > a;
                     if (ck && z > j->turn_at) z = j->turn_at;
                     j->inflight.fetch_add(1);
@@ -16123,6 +16124,7 @@ int main(int argc, char** argv) {
                     if (j == nullptr) return;
                     const int64_t a = j->at;
                     int64_t z = std::min(j->n - 1, a + P);
+                    if (j->msg_at > a && z > j->msg_at) z = j->msg_at;   // (a piece ends at the message checkpoint too)
                     const bool ck = j->turn_at > a;
                     if (ck && z > j->turn_at) z = j->turn_at;
                     j->inflight.fetch_add(1);
@@ -16186,6 +16188,8 @@ int main(int argc, char** argv) {
                                 j->rows0 = pipe_rows;
                                 j->parts.assign(n_st, ConvCheckpoint{});
                                 j->part_ok.assign(n_st, 0);
+                                j->mparts.assign(n_st, ConvCheckpoint{});   // (STRATA_CACHE_MESSAGE_BOUNDARY)
+                                j->mpart_ok.assign(n_st, 0);
                             }
                             j->t_fed = Clock::now();
                         } else if (j->setup_ok && j->at < j->n - 1) {
