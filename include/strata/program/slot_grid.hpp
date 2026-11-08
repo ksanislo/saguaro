@@ -14,7 +14,7 @@
 // further.  Each bucket keeps its oldest and its newest checkpoint, so a checkpoint ages outward from bucket to bucket
 // as the conversation grows instead of being replaced by the next one (a bucket that kept only its newest would never
 // let one reach the far buckets).  Simulated over growth steps of 2K-150K up to 1M with cuts 40K-250K back: with 6
-// buckets at most 10 checkpoints are held and the re-read below a cut is at most 0.71x (average ~0.22x) of the cut's
+// buckets at most 12 can be held (10 in the simulation) and the re-read below a cut is at most 0.71x (average ~0.22x) of the cut's
 // distance from the end.  Each checkpoint holds the GDN state (~118 MB with Qwen3.8-Flash-Next).  Positions are
 // multiples of `every`, so the points a slot keeps recur turn after turn.
 namespace strata::program {

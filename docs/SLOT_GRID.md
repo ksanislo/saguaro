@@ -18,10 +18,10 @@ prefix request reused 0 and read for 60 s, where the same request on a solo conv
   multiples of `--prompt-cache-every` (16384). A slot keeps them by distance from the conversation's end: one bucket
   for the last 16K, then one per doubling, and the last bucket takes everything further. Each bucket keeps its
   oldest and its newest, so a checkpoint ages outward from bucket to bucket instead of being replaced.
-- **Simulated coverage.** Growth steps of 2K-150K up to 1M, cuts 40K-250K back. With 6 buckets at most 10
-  checkpoints are held, and the re-read below a cut is at most 0.71x (average ~0.22x) of the cut's distance.
+- **Simulated coverage.** Growth steps of 2K-150K up to 1M, cuts 40K-250K back. With 6 buckets up to 12 can be held
+  (10 were in the simulation), and the re-read below a cut is at most 0.71x (average ~0.22x) of the cut's distance.
 - **Memory.** Each checkpoint holds the GDN state (~118 MB with Qwen3.8-Flash-Next), so a long conversation in a
-  slot holds up to ~1.2 GB more host RAM, and a parked image grows by the same.
+  slot holds up to ~1.4 GB more host RAM, and a parked image grows by the same.
 - **Saving.** An admission's read saves only the multiples that the thinning keeps at the prompt's end, beside what
   the slot already holds. A fresh 424K read saves 10, an incremental 23K turn 1-2.
   - Path A (whole read on its own thread) stops at each one, as it does for the message and turn checkpoints.

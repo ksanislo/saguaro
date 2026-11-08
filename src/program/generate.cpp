@@ -14978,7 +14978,7 @@ int main(int argc, char** argv) {
             std::atomic<int64_t> setup_us{-1};   // after t_take
         };
         std::vector<std::unique_ptr<AdmJob>> cy_held;   // STRATA_READ_YIELD: reads held at a piece boundary
-        // STRATA_SLOT_GRID=N (buckets, 0 = off; 6 keeps at most 10): a batch slot's conversation keeps grid checkpoints
+        // STRATA_SLOT_GRID=N (buckets, 0 = off; 6 keeps at most 12, two per bucket): a batch slot's conversation keeps grid checkpoints
         // every --prompt-cache-every tokens, thinned by distance from its end (slot_grid.hpp), so a request that keeps
         // only a prefix of it (an agent's compaction summary, an older turn rewritten) resumes near its cut.  An
         // admission keeps the slot's earlier checkpoints that the new prompt still starts with (at or below where it
