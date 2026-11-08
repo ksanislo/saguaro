@@ -9612,7 +9612,9 @@ struct Model::Impl {
         constexpr int kSlotFormat = 1;
         static const bool by_engine = ds4_env("DS4_SLOT_ID_ENGINE") != nullptr && std::atoi(ds4_env("DS4_SLOT_ID_ENGINE")) != 0;
         if (by_engine) id << "maya-ds4-session-2 engine=" << STRATA_VERSION;
-        else id << "maya-ds4-session-3 fmt=" << kSlotFormat << " check=" << check_bytes();
+        else   // (the row sizes a slot body is written in: window ring, compressed KV, indexer keys, restore point)
+            id << "maya-ds4-session-3 fmt=" << kSlotFormat << " rows=" << win_rb() << "," << ckv_rb() << "," << ik_rb()
+               << "," << check_bytes() << " srcs=" << srcs.size();
         id << " mtp=" << g.n_mtp << " dim=" << g.dim << " hd=" << g.hd
            << " win=" << g.win << " ratios=";
         for (int r : g.ratios) id << r << ",";
