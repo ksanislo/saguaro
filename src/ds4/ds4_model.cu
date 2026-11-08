@@ -9234,13 +9234,13 @@ struct Model::Impl {
                 err = "rewind: the tokens differ from the state's at " + std::to_string(i);
                 return false;
             }
-        if (rw_scr.empty() || rw_rows < (size_t) chunk) {
+        if (rw_scr.empty() || rw_rows < x_cap()) {
             for (size_t di = 0; di < rw_scr.size(); ++di) {
                 cudaSetDevice(devs[di].id);
                 cudaFree(rw_scr[di]);
             }
             rw_scr.assign(devs.size(), nullptr);
-            rw_rows = (size_t) std::max(chunk, 1);
+            rw_rows = x_cap();   // (a chunk's new source rows at most)
             for (size_t di = 0; di < devs.size(); ++di) {
                 cudaSetDevice(devs[di].id);
                 if (cudaMalloc((void**) &rw_scr[di], rw_rows * (ckv_rb() + ik_rb())) != cudaSuccess) {
@@ -9267,10 +9267,67 @@ struct Model::Impl {
         rw_upto = -1;
         if (!ok || pos != p) {
             if (ok) err = "rewind: the re-read ended at " + std::to_string(pos);
+            std::fprintf(stderr, "maya ds4: rewind to %lld failed (%s): the conversation is dropped\n", (long long) p,
+                         err.c_str());
             reset();
             return false;
         }
         return true;
+    }
+
+    // (tests) a slot's rows: the bytes of each source's compressed rows and index keys that differ between slots a
+    // and b over the rows both have; -1 when a slot's layout is not this model's.  slot_save's walk, exactly.
+    int64_t slot_rows_diff(const std::vector<uint8_t>& a, const std::vector<uint8_t>& b, int64_t& rings_diff) const {
+        const auto head = [](const std::vector<uint8_t>& v, size_t& o) -> bool {
+            uint64_t il = 0, nt = 0, np = 0;
+            o = 8;
+            if (v.size() < 24) return false;
+            std::memcpy(&il, v.data() + o, 8);
+            o += 8 + il;
+            if (o + 8 > v.size()) return false;
+            std::memcpy(&nt, v.data() + o, 8);
+            o += 8 + nt * 4;
+            if (o + 8 > v.size()) return false;
+            std::memcpy(&np, v.data() + o, 8);
+            o += 8 + np * 24;
+            return o <= v.size();
+        };
+        size_t oa = 0, ob = 0;
+        if (!head(a, oa) || !head(b, ob)) return -1;
+        rings_diff = 0;
+        for (size_t i = 0; i < L.size(); ++i) {
+            const uint64_t wb = (uint64_t) g.win * win_rb();
+            const uint64_t cb = L[i].c_kv ? 2 * (uint64_t) L[i].ratio * g.hd * 4 : 0;
+            uint64_t x = 0, y = 0;
+            std::memcpy(&x, a.data() + oa, 8);
+            std::memcpy(&y, b.data() + ob, 8);
+            if (x != wb || y != wb || oa + 16 + wb + cb > a.size() || ob + 16 + wb + cb > b.size()) return -1;
+            for (uint64_t k = 0; k < wb; ++k) rings_diff += a[oa + 8 + k] != b[ob + 8 + k];
+            oa += 8 + wb;
+            ob += 8 + wb;
+            std::memcpy(&x, a.data() + oa, 8);
+            std::memcpy(&y, b.data() + ob, 8);
+            if (x * 8 != cb || y * 8 != cb) return -1;
+            for (uint64_t k = 0; k < cb; ++k) rings_diff += a[oa + 8 + k] != b[ob + 8 + k];
+            oa += 8 + cb;
+            ob += 8 + cb;
+        }
+        int64_t d = 0;
+        for (size_t j = 0; j < srcs.size(); ++j) {
+            uint64_t ra = 0, rb = 0;
+            if (oa + 8 > a.size() || ob + 8 > b.size()) return -1;
+            std::memcpy(&ra, a.data() + oa, 8);
+            std::memcpy(&rb, b.data() + ob, 8);
+            oa += 8;
+            ob += 8;
+            const uint64_t n = std::min(ra, rb);
+            if (oa + ra * (ckv_rb() + ik_rb()) > a.size() || ob + rb * (ckv_rb() + ik_rb()) > b.size()) return -1;
+            for (uint64_t k = 0; k < n * ckv_rb(); ++k) d += a[oa + k] != b[ob + k];
+            for (uint64_t k = 0; k < n * ik_rb(); ++k) d += a[oa + ra * ckv_rb() + k] != b[ob + rb * ckv_rb() + k];
+            oa += ra * (ckv_rb() + ik_rb());
+            ob += rb * (ckv_rb() + ik_rb());
+        }
+        return d;
     }
 
     // ---- the kept conversations (a slot): the state out of the model and back, through a file or a host buffer.
@@ -21648,6 +21705,9 @@ void Model::reset() { p_->reset(); }
 void Model::checkpoint(int slot) { p_->checkpoint(slot); }
 bool Model::restore(int64_t limit) { return p_->restore(limit); }
 int64_t Model::rewind_from(int64_t p) const { return p_->rewind_from(p); }
+int64_t Model::slot_rows_diff(const std::vector<uint8_t>& a, const std::vector<uint8_t>& b, int64_t& rings_diff) const {
+    return p_->slot_rows_diff(a, b, rings_diff);
+}
 bool Model::rewind(const int* ids, int64_t p, int after, std::string& err) {
     Impl& pi = *p_;
     if (!feed_release(err)) return false;   // (as feed(): a prompt's room kept between its parts handed back first)

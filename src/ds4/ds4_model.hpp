@@ -321,6 +321,9 @@ public:
     /// re-read's start, -1 when p is too close to the start (or past the state).  A failed rewind resets the state.
     int64_t rewind_from(int64_t p) const;
     bool rewind(const int* ids, int64_t p, int after, std::string& err);
+    /// (tests) the bytes of the compressed rows + index keys that differ between two slots over the rows both hold
+    /// (rings_diff: the window rings' and partial groups' differing bytes); -1: not this model's layout
+    int64_t slot_rows_diff(const std::vector<uint8_t>& a, const std::vector<uint8_t>& b, int64_t& rings_diff) const;
     int64_t restorable(int64_t limit) const;
     /// Checkpoint 1 also becomes the anchor (kept until a restore goes before it): the position before the end of the
     /// first prompt of a run that continued in place, where a re-rendered history (earlier reasoning dropped) splits.

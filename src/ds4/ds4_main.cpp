@@ -3477,20 +3477,6 @@ int check_rewind(strata::ds4::Model& m, const std::vector<int>& ids, int n) {
         const int64_t h = N / 2;
         ps = {h - h % 128, h - h % 128 + 2, h - h % 128 + 65, N - 1000};   // (on a group, mid ratio-4, mid ratio-128, near the end)
     }
-    // the slot's layout (slot_save): header, then per layer a ring (8 + wb) and a partial group (8 [+ 2 cn * 4]),
-    // then the rows to its last 16 bytes (no checkpoints in these states: their count 0 + the magic)
-    const auto split = [](const std::vector<uint8_t>& b, size_t& rows_at) -> bool {
-        size_t o = 8;
-        uint64_t il = 0, nt = 0, np = 0;
-        std::memcpy(&il, b.data() + o, 8);
-        o += 8 + il;
-        std::memcpy(&nt, b.data() + o, 8);
-        o += 8 + nt * 4;
-        std::memcpy(&np, b.data() + o, 8);
-        o += 8 + np * 24;
-        rows_at = o;
-        return o < b.size();
-    };
     int bad = 0;
     for (const int64_t p : ps) {
         if (p <= 0 || p >= N - 1) {
@@ -3518,6 +3504,8 @@ int check_rewind(strata::ds4::Model& m, const std::vector<int>& ids, int n) {
             std::printf("rewind check p=%lld: too close to the start (falls back, as it should)\n", (long long) p);
             continue;
         }
+        std::vector<uint8_t> C;   // (the full read's own state: its rows up to p are what the rewind must leave)
+        if (m.slot_save(C, err) == 0) break;
         const double t2 = now_ms();
         if (!m.rewind(ids.data(), p, N - (int) p, err)) break;
         const double t3 = now_ms();
@@ -3530,25 +3518,10 @@ int check_rewind(strata::ds4::Model& m, const std::vector<int>& ids, int n) {
         const double t1 = now_ms();
         m.reset();
         if (!m.feed(ids.data(), (int) p, 0, err, N - (int) p) || !rest(la, ta)) break;
-        size_t ra = 0, rb = 0;
-        const bool lay = A.size() == B.size() && split(A, ra) && split(B, rb) && ra == rb;
-        // the layer part: walk it to find where the rows start
-        size_t o = ra, ring_diff = 0, ring_bytes = 0;
-        bool walk = lay;
-        while (walk && o + 8 <= A.size()) {
-            uint64_t wb = 0, cn = 0;
-            std::memcpy(&wb, A.data() + o, 8);
-            if (wb == 0 || wb > (1u << 28)) break;   // (past the layers: a source's row count)
-            for (size_t i = o + 8; i < o + 8 + wb; ++i) ring_diff += A[i] != B[i];
-            ring_bytes += wb;
-            o += 8 + wb;
-            std::memcpy(&cn, A.data() + o, 8);
-            for (size_t i = o + 8; i < o + 8 + 2 * cn * 4; ++i) ring_diff += A[i] != B[i];
-            ring_bytes += 2 * cn * 4;
-            o += 8 + 2 * cn * 4;
-        }
-        size_t row_diff = 0;
-        for (size_t i = o; lay && i + 16 < A.size(); ++i) row_diff += A[i] != B[i];
+        int64_t ring_diff = 0, ring_cb = 0;
+        const int64_t row_diff = m.slot_rows_diff(C, B, ring_cb);    // nothing wrote them
+        const int64_t row_ab = m.slot_rows_diff(A, B, ring_diff);    // (a read to p: also its chunks' rounding)
+        const bool lay = row_diff >= 0 && row_ab >= 0;
         double md = la.size() == lb.size() ? 0.0 : 1e30, klv = 0.0;
         if (la.size() == lb.size()) {
             double za = 0, zb = 0, mxa = -1e30, mxb = -1e30;
@@ -3570,10 +3543,11 @@ int check_rewind(strata::ds4::Model& m, const std::vector<int>& ids, int n) {
         while (same < (int) ta.size() && same < (int) tb.size() && ta[same] == tb[same]) ++same;
         const bool ok = lay && row_diff == 0 && same == (int) ta.size();
         bad += !ok;
-        std::printf("rewind check p=%lld (from %lld): slot %s, rows %s (%zu bytes differ), rings+groups %zu of %zu bytes "
-                    "differ; logits max diff %.3g KL %.3g; %d/%zu greedy tokens the same; read to p %.0f ms, rewind %.0f ms%s\n",
-                    (long long) p, (long long) q, lay ? "layout same" : "LAYOUT DIFFERS",
-                    row_diff == 0 ? "the same" : "DIFFER", row_diff, ring_diff, ring_bytes, md, klv, same, ta.size(),
+        std::printf("rewind check p=%lld (from %lld): rows vs the full read's %s (%lld bytes differ), vs a read to p %lld "
+                    "bytes differ; rings+groups vs a read to p %lld bytes differ; logits max diff %.3g KL %.3g; %d/%zu greedy "
+                    "tokens the same; read to p %.0f ms, rewind %.0f ms%s\n",
+                    (long long) p, (long long) q, !lay ? "LAYOUT DIFFERS" : row_diff == 0 ? "the same" : "DIFFER",
+                    (long long) row_diff, (long long) row_ab, (long long) ring_diff, md, klv, same, ta.size(),
                     t1 - t0, t3 - t2, ok ? "" : "  <-- FAIL");
         std::fflush(stdout);
     }
@@ -3850,8 +3824,8 @@ int main(int argc, char** argv) {
         else if (a == "--parallel") o.seqs = (int) num("--parallel", 1, 8, true);   // (--serve: conversations at once)
         else if (a == "--multi-check") multi_check = true;   // (tests: --parallel's rows against each alone)
         else if (a == "--parts-check") parts_check = true;   // (tests: a prompt in parts against one call)
-        else if (a == "--marks-check") marks_check = true;
-        else if (a == "--rewind-check") rewind_check = true;   // (tests: rewind(p) against a read to p)   // (tests: restore points kept in one read, or stopping at each)
+        else if (a == "--marks-check") marks_check = true;   // (tests: restore points kept in one read, or stopping at each)
+        else if (a == "--rewind-check") rewind_check = true;   // (tests: rewind(p) against a read to p)
         else if (a == "--pack-info") describe = true;
         else if (a == "--profile-run") prof_run = val("--profile-run");
         else if (a == "--profile-out") prof_out = val("--profile-out");
