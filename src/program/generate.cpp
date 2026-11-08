@@ -14913,6 +14913,12 @@ int main(int argc, char** argv) {
             bool yarn_mv = false;                 //   reached from plain at `resume` (moved at the set-up)
             bool started = false, have_ck = false;
             ConvCheckpoint turn_ck;
+            // STRATA_CACHE_MESSAGE_BOUNDARY: one more checkpoint at the turn boundary before the last message (msg_at)
+            int64_t msg_at = -1;
+            bool have_msg = false;
+            ConvCheckpoint msg_ck;
+            std::vector<ConvCheckpoint> mparts;
+            std::vector<char> mpart_ok;
             Clock::time_point t_bgen{};
             double wait_ms = 0.0, read_ms = 0.0;
             int64_t rows = 0;
@@ -15084,6 +15090,14 @@ int main(int argc, char** argv) {
             }
             j.turn_at = o.prompt_cache > 0 && j.r.ckpt
                 ? strata::program::admit_turn_cut(j.r.ids, j.resume, o.turn_token, o.tail_role_token) : -1;
+            {
+                static const bool msg_on = [] {
+                    const char* e = std::getenv("STRATA_CACHE_MESSAGE_BOUNDARY");
+                    return e != nullptr && std::atoi(e) != 0;
+                }();
+                j.msg_at = msg_on && j.turn_at > 0
+                    ? strata::program::message_checkpoint_boundary(j.r.ids, j.resume, j.turn_at, o.turn_token) : -1;
+            }
             sl.cached = false;
             sl.partial = false;
             sl.reading = true;
@@ -15275,6 +15289,27 @@ int main(int argc, char** argv) {
                     paused = stopped >= 0;
                     return true;
                 };
+                if (j.msg_at > j.at) {
+                    if (!run(j.msg_at)) return false;
+                    if (paused) return true;
+                    if (!sync_stages()) { err = "a device sync before the slot's message checkpoint failed"; return false; }
+                    j.msg_ck = ConvCheckpoint{};
+                    j.msg_ck.ids.assign(ids.begin(), ids.begin() + j.msg_at);
+                    bool mk_ok = true;
+                    for (size_t k = 0; k < n_st && mk_ok; ++k) {
+                        const strata::core::OnDevice on(k == 0 ? adm_main_dev : stages[k - 1]->dev);
+                        ConvCheckpoint part;
+                        part.ids = j.msg_ck.ids;
+                        if (!checkpoint_save(k == 0 ? j.msg_ck : part, *bslot_ss[k][(size_t) b], g)) {
+                            if (!checkpoint_failure_is_survivable()) { err = "saving the slot's message checkpoint failed"; return false; }
+                            mk_ok = false;
+                            break;
+                        }
+                        if (k > 0) j.msg_ck.stage_parts.push_back(std::move(part));
+                    }
+                    if (mk_ok) j.have_msg = true;
+                    else j.msg_ck = ConvCheckpoint{};
+                }
                 if (j.turn_at > j.at) {
                     if (!run(j.turn_at)) return false;
                     if (paused) return true;
@@ -15370,6 +15405,7 @@ int main(int argc, char** argv) {
             sl.t0 = Clock::now();
             sl.ids.assign(ids.begin(), ids.end() - 1);
             sl.cvec = cvec_cached;
+            if (j.have_msg) sl.checks.push_back(std::move(j.msg_ck));
             if (j.have_ck) sl.checks.push_back(std::move(j.turn_ck));
             sl.adm_log = true;
             sl.adm_t0 = j.t_bgen;
@@ -15830,6 +15866,20 @@ int main(int argc, char** argv) {
                     strata::core::progress_beat();
                     return true;
                 };
+                if (j.msg_at > j.resume && z == j.msg_at && (int64_t) jp->mparts.size() == (int64_t) n_st)
+                    for (size_t k = 0; k < n_st; ++k)   // stage k's part of the message checkpoint, as it reaches it
+                        pj->on_stage_chunk.push_back([&, jp, k, b](int64_t done, std::string& err) -> bool {
+                            if (done != jp->msg_at) return true;
+                            ConvCheckpoint& part = jp->mparts[k];
+                            part.ids.assign(jp->r.ids.begin(), jp->r.ids.begin() + jp->msg_at);
+                            if (!checkpoint_save(part, *bslot_ss[k][(size_t) b], g)) {
+                                if (!checkpoint_failure_is_survivable()) { err = "saving the slot's message checkpoint failed"; return false; }
+                                part = ConvCheckpoint{};
+                                return true;
+                            }
+                            jp->mpart_ok[k] = 1;
+                            return true;
+                        });
                 if (ck && z == j.turn_at)
                     for (size_t k = 0; k < n_st; ++k)   // stage k's part of the turn checkpoint, as it reaches it
                         pj->on_stage_chunk.push_back([&, jp, k, b](int64_t done, std::string& err) -> bool {
@@ -15865,10 +15915,14 @@ int main(int argc, char** argv) {
                 j.rows0 = pipe_rows;
                 j.parts.assign(n_st, ConvCheckpoint{});
                 j.part_ok.assign(n_st, 0);
+                j.mparts.assign(n_st, ConvCheckpoint{});
+                j.mpart_ok.assign(n_st, 0);
                 const bool ck = j.turn_at > j.at;
+                const bool mk = j.msg_at > j.at;
                 std::vector<std::pair<int64_t, int64_t>> cuts;
                 for (int64_t a = j.at; a < j.n - 1;) {
                     int64_t z = std::min(j.n - 1, a + P);
+                    if (mk && a < j.msg_at && z > j.msg_at) z = j.msg_at;
                     if (ck && a < j.turn_at && z > j.turn_at) z = j.turn_at;
                     cuts.emplace_back(a, z);
                     a = z;
@@ -15932,6 +15986,13 @@ int main(int argc, char** argv) {
                     turn_ck = std::move(j.parts[0]);
                     for (size_t k = 1; k < n_st; ++k) turn_ck.stage_parts.push_back(std::move(j.parts[k]));
                 }
+                bool have_msg = j.msg_at > j.resume && j.mpart_ok.size() == n_st;
+                for (size_t k = 0; k < n_st && have_msg; ++k) have_msg = j.mpart_ok[k] != 0;
+                ConvCheckpoint msg_ck;
+                if (have_msg) {
+                    msg_ck = std::move(j.mparts[0]);
+                    for (size_t k = 1; k < n_st; ++k) msg_ck.stage_parts.push_back(std::move(j.mparts[k]));
+                }
                 if (ckpt_pool.on())
                     for (ConvCheckpoint& c : sl.checks) ckpt_pool.give(std::move(c));
                 sl = BSlot{};
@@ -15943,6 +16004,7 @@ int main(int argc, char** argv) {
                 sl.t0 = Clock::now();
                 sl.ids.assign(ids.begin(), ids.end() - 1);
                 sl.cvec = cvec_cached;
+                if (have_msg) sl.checks.push_back(std::move(msg_ck));
                 if (have_ck) sl.checks.push_back(std::move(turn_ck));
                 sl.adm_log = true;
                 sl.adm_t0 = j.t_bgen;
@@ -18761,7 +18823,7 @@ int main(int argc, char** argv) {
                 return e != nullptr && std::atoi(e) != 0;
             }();
             // Only add a snapshot; the existing token and image checks still decide reuse.
-            const int64_t message_at = message_checkpoint && !multi_gpu && o.prompt_cache > 0
+            const int64_t message_at = message_checkpoint && o.prompt_cache > 0
                 ? strata::program::message_checkpoint_boundary(ids, resume, turn_at, o.turn_token) : -1;
             // pin=N (opt-in): one more place the prompt is read to and checkpointed.  One pinned prefix at a time: a
             // new pin replaces the old; it needs room for the root, the pin and a rotating checkpoint

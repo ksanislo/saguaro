@@ -15,7 +15,8 @@ token and image-prefix validation in charge of reuse.
 Set `STRATA_CACHE_MESSAGE_BOUNDARY=1` before starting the engine.
 It is off by default, requires prompt caching and a valid turn token, and
 only selects prefixes of at least 8,192 tokens with a tail of at most 1,024.
-Layer-split execution is excluded (`multi_gpu`); helper-expert GPUs still work.
+Layer-split execution is covered too: the solo path through checkpoint_at (its stage parts), the batch slots
+through their admission reads (both the whole read and the queued pieces); every part keeps its rope_level.
 It can split prefill chunks and add snapshot cost to a fresh request.
 
 ## Validation environment
