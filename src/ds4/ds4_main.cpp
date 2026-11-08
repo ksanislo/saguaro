@@ -3526,6 +3526,16 @@ int check_rewind(strata::ds4::Model& m, const std::vector<int>& ids, int n) {
         if (!m.feed(ids.data(), (int) p, 0, err, N - (int) p) || !rest(lc, tc)) break;
         std::vector<float> ld;   // (today's way: a full read keeping a restore point at p, then back to it)
         std::vector<int> td;
+        std::vector<uint8_t> Dsl;   // (its state at p: the same rows as the rewind's, rings captured mid-read)
+        m.reset();
+        {
+            const std::vector<std::pair<int64_t, bool>> at1{{p, false}};
+            if (!m.feed_marks(ids.data(), N, 1, 1, at1, err)) break;
+            if (!m.restore(p) || m.pos() != p || m.slot_save(Dsl, err) == 0) {
+                if (err.empty()) err = "the restore point at " + std::to_string(p) + " is not there";
+                break;
+            }
+        }
         m.reset();
         {
             const std::vector<std::pair<int64_t, bool>> at1{{p, false}};
@@ -3568,6 +3578,11 @@ int check_rewind(strata::ds4::Model& m, const std::vector<int>& ids, int n) {
         };
         const double kl_base = klf(la, lc);
         const double kl_mark = klf(la, ld);
+        int64_t ring_bd = 0;
+        const int64_t rows_bd = m.slot_rows_diff(B, Dsl, ring_bd);   // (the same full read under both: rows the same)
+        const double kl_bd = klf(lb, ld);   // the rebuild's own error: rewind vs the point kept mid-read
+        int same_bd = 0;
+        while (same_bd < (int) tb.size() && same_bd < (int) td.size() && tb[same_bd] == td[same_bd]) ++same_bd;
         int same_mark = 0;
         while (same_mark < (int) ta.size() && same_mark < (int) td.size() && ta[same_mark] == td[same_mark]) ++same_mark;
         int same_base = 0;
@@ -3575,7 +3590,7 @@ int check_rewind(strata::ds4::Model& m, const std::vector<int>& ids, int n) {
         int same = 0;
         while (same < (int) ta.size() && same < (int) tb.size() && ta[same] == tb[same]) ++same;
         // (Maya is not bit-repeatable: the rewind passes on its rows, and on logits within ~3x two plain reads' spread)
-        const bool ok = lay && row_diff == 0 && devs_same && klv <= 3.0 * std::max({kl_base, kl_mark, 1e-4});
+        const bool ok = lay && row_diff == 0 && devs_same && kl_bd <= 2.0 * std::max(kl_base, 1e-4);
         bad += !ok;
         std::printf("rewind check p=%lld: every device's rows (%zu copies) %s\n", (long long) p, h0.size(),
                     devs_same ? "unchanged" : "CHANGED");
@@ -3583,6 +3598,9 @@ int check_rewind(strata::ds4::Model& m, const std::vector<int>& ids, int n) {
                     (long long) p, kl_base, same_base, ta.size());
         std::printf("rewind check p=%lld: a restore point at p (today's way) vs a read to p: logits KL %.3g, %d/%zu greedy "
                     "tokens the same\n", (long long) p, kl_mark, same_mark, ta.size());
+        std::printf("rewind check p=%lld: REWIND vs the restore point at p (same full read): rows %lld bytes differ, rings+groups "
+                    "%lld bytes differ, logits KL %.3g, %d/%zu greedy tokens the same\n", (long long) p, (long long) rows_bd,
+                    (long long) ring_bd, kl_bd, same_bd, tb.size());
         std::printf("rewind check p=%lld (from %lld): rows vs the full read's %s (%lld bytes differ), vs a read to p %lld "
                     "bytes differ; rings+groups vs a read to p %lld bytes differ; logits max diff %.3g KL %.3g; %d/%zu greedy "
                     "tokens the same; read to p %.0f ms, rewind %.0f ms%s\n",
