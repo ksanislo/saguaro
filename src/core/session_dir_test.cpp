@@ -160,8 +160,9 @@ int main() {
             const size_t entries_after = std::distance(fs::directory_iterator(dir), fs::directory_iterator{});
             check(entries_after == entries_before, "a cancelled write leaves no temporary file");
             check(std::strcmp(progress().where.load(), "request") == 0, "claim puts the stage back");
-            // the next write of the same folder is not cancelled by the old claim
-            auto w2 = std::make_shared<SavedConversation>(conv(tokens(91000, 2000), 4));
+            // the same conversation written again later is not cancelled by the old claim (and leaves the folder as
+            // the caps test below expects it: A, B and this one)
+            auto w2 = std::make_shared<SavedConversation>(conv(tokens(90000, 2000), 4));   // (the same conversation again)
             sd3.write(w2);
             sd3.flush();
             check(session_files(dir) == 3, "a write after a cancelled one completes");
