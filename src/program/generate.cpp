@@ -15295,6 +15295,7 @@ int main(int argc, char** argv) {
                     if (!sync_stages()) { err = "a device sync before the slot's message checkpoint failed"; return false; }
                     j.msg_ck = ConvCheckpoint{};
                     j.msg_ck.ids.assign(ids.begin(), ids.begin() + j.msg_at);
+                    j.msg_ck.msg_tail = true;
                     bool mk_ok = true;
                     for (size_t k = 0; k < n_st && mk_ok; ++k) {
                         const strata::core::OnDevice on(k == 0 ? adm_main_dev : stages[k - 1]->dev);
@@ -15302,6 +15303,8 @@ int main(int argc, char** argv) {
                         part.ids = j.msg_ck.ids;
                         if (!checkpoint_save(k == 0 ? j.msg_ck : part, *bslot_ss[k][(size_t) b], g)) {
                             if (!checkpoint_failure_is_survivable()) { err = "saving the slot's message checkpoint failed"; return false; }
+                            std::fprintf(stderr, "strata serve: slot %d: message checkpoint at %lld skipped: its state could "
+                                                 "not be copied out (see above)\n", b, (long long) j.msg_at);
                             mk_ok = false;
                             break;
                         }
@@ -15874,6 +15877,8 @@ int main(int argc, char** argv) {
                             part.ids.assign(jp->r.ids.begin(), jp->r.ids.begin() + jp->msg_at);
                             if (!checkpoint_save(part, *bslot_ss[k][(size_t) b], g)) {
                                 if (!checkpoint_failure_is_survivable()) { err = "saving the slot's message checkpoint failed"; return false; }
+                                std::fprintf(stderr, "strata serve: slot %d: message checkpoint part %zu skipped: its state could "
+                                                     "not be copied out (see above)\n", b, k);
                                 part = ConvCheckpoint{};
                                 return true;
                             }
@@ -15991,6 +15996,7 @@ int main(int argc, char** argv) {
                 ConvCheckpoint msg_ck;
                 if (have_msg) {
                     msg_ck = std::move(j.mparts[0]);
+                    msg_ck.msg_tail = true;
                     for (size_t k = 1; k < n_st; ++k) msg_ck.stage_parts.push_back(std::move(j.mparts[k]));
                 }
                 if (ckpt_pool.on())
@@ -17761,12 +17767,29 @@ int main(int argc, char** argv) {
                     } else {
                         live = bs[(size_t) slot_source].ids;
                     }
+                    const bool gave_msg = slot_ck != nullptr && checks.back().msg_tail;
+                    {   // a slot's message checkpoint becomes the chain's one tail checkpoint (as the solo path's)
+                        ptrdiff_t last = -1;
+                        for (size_t i = 0; i < checks.size(); ++i)
+                            if (checks[i].msg_tail) last = (ptrdiff_t) i;
+                        if (last >= 0) {
+                            const int64_t L = (int64_t) checks[(size_t) last].ids.size(), old_tail = tail_ckpt_len;
+                            auto drop = [&](const ConvCheckpoint& k) {
+                                const int64_t kl = (int64_t) k.ids.size();
+                                return (k.msg_tail && kl != L) || (!k.msg_tail && old_tail >= 0 && kl == old_tail && kl != L);
+                            };
+                            if (ckpt_pool.on()) ckpt_pool.erase_if(checks, drop);
+                            else checks.erase(std::remove_if(checks.begin(), checks.end(), drop), checks.end());
+                            for (ConvCheckpoint& k : checks) k.msg_tail = false;
+                            tail_ckpt_len = L;
+                        }
+                    }
                     live_imgs.clear();
                     resume = slot_tokens;
                     from_live = true;
                     std::fprintf(stderr, "strata batch: slot %d gave back %lld tokens of this conversation (%s) in "
                                  "%.1f ms\n", slot_source, (long long) slot_tokens,
-                                 slot_ck != nullptr ? "its turn checkpoint" : "all it holds",
+                                 slot_ck == nullptr ? "all it holds" : gave_msg ? "its message checkpoint" : "its turn checkpoint",
                                  std::chrono::duration<double, std::milli>(Clock::now() - t0).count());
                 }
             }
