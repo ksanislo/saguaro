@@ -176,10 +176,10 @@ class RestorePoints(unittest.TestCase):
             us = [j for j, t in enumerate(ids_i) if t == self.svc.ds_user_id]
             now = sorted(self.points(ids_i, spacing=sp, turns=6)["marks"])
             near_i = min((p for p in now if p != us[-1]), key=lambda p: abs(len(ids_i) - 100000 - p))
-            grid_i = [p for p in now if p != us[-1]]
+            grid_i = [p for p in now if p not in (us[-1], near_i)]   # (the near point moves every turn by design)
             if prev:
-                gone = [p for p in prev[:-1] if p not in grid_i]   # (the newest of the last turn may move)
-                self.assertLessEqual(len(gone), 2, (gone, prev, grid_i, i))   # (the capped window slides; most stay)
+                gone = [p for p in prev[:-1] if p not in grid_i and p != near_i]   # (the newest of the last turn may move)
+                self.assertTrue(len(gone) <= 1 and all(p < min(grid_i) for p in gone), (gone, prev, grid_i, i))   # (only the oldest slides off)
             prev = grid_i
         self.assertEqual(pts["marks"], sorted(pts["marks"]))
         self.assertEqual(self.points(ids, turns=0)["marks"], [users[-1]])
