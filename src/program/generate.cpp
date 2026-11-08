@@ -96,6 +96,7 @@
 #include "strata/program/prefill_plan.hpp"
 #include "strata/program/draft_kv_plan.hpp"
 #include "strata/program/message_boundary.hpp"
+#include "strata/program/slot_grid.hpp"
 #include "strata/spec/draft_policy.hpp"
 #include "strata/spec/draft_source.hpp"
 #include "strata/spec/suffix_drafter.hpp"
@@ -288,6 +289,14 @@ bool ckpt_threads_env() {
         return v && v[0] != '0';
     }();
     return on;
+}
+// STRATA_SLOT_GRID=N: a batch slot's grid checkpoints in N distance buckets (slot_grid.hpp); 0 or unset: off
+int slot_grid_buckets_env() {
+    static const int v = [] {
+        const char* e = std::getenv("STRATA_SLOT_GRID");
+        return e != nullptr ? std::max(0, std::atoi(e)) : 0;
+    }();
+    return v;
 }
 // STRATA_SLOT_CKPT_MOVE=1 (read once; off by default): a batch admission MOVES its own turn checkpoint into the slot
 // instead of copying it (~112 MB of host vectors).  The main session's chain no longer holds it, so the request path
@@ -14936,6 +14945,12 @@ int main(int argc, char** argv) {
             ConvCheckpoint msg_ck;
             std::vector<ConvCheckpoint> mparts;
             std::vector<char> mpart_ok;
+            // STRATA_SLOT_GRID: the grid checkpoints this read saves (slot_grid.hpp): path A's whole ones, path B's
+            // stage parts (one entry per position, made before the pieces are queued; each stage writes its own part)
+            std::vector<int64_t> grid_at;
+            std::vector<ConvCheckpoint> grid_ck;
+            std::map<int64_t, std::vector<ConvCheckpoint>> gparts;
+            std::map<int64_t, std::vector<char>> gpart_ok;
             Clock::time_point t_bgen{};
             double wait_ms = 0.0, read_ms = 0.0;
             int64_t rows = 0;
@@ -14963,6 +14978,45 @@ int main(int argc, char** argv) {
             std::atomic<int64_t> setup_us{-1};   // after t_take
         };
         std::vector<std::unique_ptr<AdmJob>> cy_held;   // STRATA_READ_YIELD: reads held at a piece boundary
+        // STRATA_SLOT_GRID=N (buckets, 0 = off; 6 keeps at most 10): a batch slot's conversation keeps grid checkpoints
+        // every --prompt-cache-every tokens, thinned by distance from its end (slot_grid.hpp), so a request that keeps
+        // only a prefix of it (an agent's compaction summary, an older turn rewritten) resumes near its cut.  An
+        // admission keeps the slot's earlier checkpoints that the new prompt still starts with (at or below where it
+        // resumes) beside the new ones; the solo path's hand-off to a slot copies the chain's kept ones.
+        const int slot_grid_buckets = slot_grid_buckets_env();
+        // the slot's checkpoints after an admission: its old ones the prompt still starts with (at or below `resume`)
+        // and the new grid ones, thinned; the rest go back to the pool (STRATA_SLOT_GRID off: none are kept)
+        auto slot_grid_settle = [&](std::vector<ConvCheckpoint>& old, int64_t resume, const std::vector<int64_t>& ids,
+                                    std::vector<ConvCheckpoint>& fresh) -> std::vector<ConvCheckpoint> {
+            std::vector<ConvCheckpoint> cand, out;
+            for (ConvCheckpoint& c : old) {
+                const int64_t L = (int64_t) c.ids.size();
+                bool ok = slot_grid_buckets >= 2 && L > 0 && L <= resume && L <= (int64_t) ids.size() && c.imgs.empty() &&
+                          c.stage_parts.size() == stages.size();
+                for (int64_t i = 0; ok && i < L; ++i) ok = c.ids[(size_t) i] == (int32_t) ids[(size_t) i];
+                if (ok) {
+                    c.msg_tail = false;   // (an old message checkpoint is a grid candidate now; the new one is the tail)
+                    cand.push_back(std::move(c));
+                } else if (ckpt_pool.on()) {
+                    ckpt_pool.give(std::move(c));
+                }
+            }
+            old.clear();
+            for (ConvCheckpoint& c : fresh) cand.push_back(std::move(c));
+            fresh.clear();
+            std::vector<int64_t> lens;
+            for (const ConvCheckpoint& c : cand) lens.push_back((int64_t) c.ids.size());
+            const std::vector<size_t> keep =
+                strata::program::slot_grid_keep(lens, (int64_t) ids.size(), o.prompt_cache_every, slot_grid_buckets);
+            for (size_t i = 0; i < cand.size(); ++i) {
+                if (std::binary_search(keep.begin(), keep.end(), i)) out.push_back(std::move(cand[i]));
+                else if (ckpt_pool.on()) ckpt_pool.give(std::move(cand[i]));
+            }
+            std::sort(out.begin(), out.end(), [](const ConvCheckpoint& a, const ConvCheckpoint& b) {
+                return a.ids.size() < b.ids.size();
+            });
+            return out;
+        };
         // a held read a BSTOP reached: it ends there (nothing of it is in flight), before its slot is admitted again
         auto cy_drop_stopped = [&] {
             for (auto it = cy_held.begin(); it != cy_held.end();) {
@@ -15114,6 +15168,14 @@ int main(int argc, char** argv) {
                 }();
                 j.msg_at = msg_on && j.turn_at > 0
                     ? strata::program::message_checkpoint_boundary(j.r.ids, j.resume, j.turn_at, o.turn_token) : -1;
+            }
+            j.grid_at.clear();   // STRATA_SLOT_GRID: where this read saves grid checkpoints
+            if (slot_grid_buckets >= 2 && o.prompt_cache > 0 && o.prompt_cache_every > 0 && j.r.ckpt && !j.r.img) {
+                std::vector<int64_t> held;   // the slot's checkpoints the admission keeps (slot_grid_settle's rule)
+                for (const ConvCheckpoint& c : sl.checks)
+                    if ((int64_t) c.ids.size() <= j.resume && c.imgs.empty() && pre(c.ids)) held.push_back((int64_t) c.ids.size());
+                for (const int64_t gp : strata::program::slot_grid_new(j.at, n, o.prompt_cache_every, slot_grid_buckets, held))
+                    if (gp != j.msg_at && gp != j.turn_at && gp < n - 1) j.grid_at.push_back(gp);
             }
             sl.cached = false;
             sl.partial = false;
@@ -15306,6 +15368,36 @@ int main(int argc, char** argv) {
                     paused = stopped >= 0;
                     return true;
                 };
+                // STRATA_SLOT_GRID: the grid checkpoints at or below `lim` this read has not passed, in order (each one a
+                // stop like the message and turn checkpoints'); the caller checks `paused` after it
+                auto grid_upto = [&](int64_t lim) -> bool {
+                    for (const int64_t gp : j.grid_at) {
+                        if (gp <= j.at || gp > lim) continue;
+                        if (!run(gp)) return false;
+                        if (paused) return true;
+                        if (!sync_stages()) { err = "a device sync before the slot's grid checkpoint failed"; return false; }
+                        ConvCheckpoint gc;
+                        gc.ids.assign(ids.begin(), ids.begin() + gp);
+                        bool gk_ok = true;
+                        for (size_t k = 0; k < n_st && gk_ok; ++k) {
+                            const strata::core::OnDevice on(k == 0 ? adm_main_dev : stages[k - 1]->dev);
+                            ConvCheckpoint part;
+                            part.ids = gc.ids;
+                            if (!checkpoint_save(k == 0 ? gc : part, *bslot_ss[k][(size_t) b], g)) {
+                                if (!checkpoint_failure_is_survivable()) { err = "saving the slot's grid checkpoint failed"; return false; }
+                                std::fprintf(stderr, "strata serve: slot %d: grid checkpoint at %lld skipped: its state could "
+                                                     "not be copied out (see above)\n", b, (long long) gp);
+                                gk_ok = false;
+                                break;
+                            }
+                            if (k > 0) gc.stage_parts.push_back(std::move(part));
+                        }
+                        if (gk_ok) j.grid_ck.push_back(std::move(gc));
+                    }
+                    return true;
+                };
+                if (!grid_upto(j.msg_at > j.at ? j.msg_at : j.turn_at > j.at ? j.turn_at : n - 1)) return false;
+                if (paused) return true;
                 if (j.msg_at > j.at) {
                     if (!run(j.msg_at)) return false;
                     if (paused) return true;
@@ -15330,6 +15422,8 @@ int main(int argc, char** argv) {
                     if (mk_ok) j.have_msg = true;
                     else j.msg_ck = ConvCheckpoint{};
                 }
+                if (!grid_upto(j.turn_at > j.at ? j.turn_at : n - 1)) return false;
+                if (paused) return true;
                 if (j.turn_at > j.at) {
                     if (!run(j.turn_at)) return false;
                     if (paused) return true;
@@ -15354,6 +15448,8 @@ int main(int argc, char** argv) {
                     if (ck_ok) j.have_ck = true;
                     else j.turn_ck = ConvCheckpoint{};
                 }
+                if (!grid_upto(n - 1)) return false;
+                if (paused) return true;
                 return run(n - 1);
             };
             std::thread reader([&] {
@@ -15414,6 +15510,7 @@ int main(int argc, char** argv) {
                                      "admission (it goes on from its slot after it)\n", b, (long long) j.at, (long long) n);
                 return AdmEnd::paused;
             }
+            std::vector<ConvCheckpoint> grid = slot_grid_settle(sl.checks, j.resume, ids, j.grid_ck);   // STRATA_SLOT_GRID
             if (ckpt_pool.on())
                 for (ConvCheckpoint& c : sl.checks) ckpt_pool.give(std::move(c));
             sl = BSlot{};
@@ -15425,6 +15522,7 @@ int main(int argc, char** argv) {
             sl.t0 = Clock::now();
             sl.ids.assign(ids.begin(), ids.end() - 1);
             sl.cvec = cvec_cached;
+            for (ConvCheckpoint& c : grid) sl.checks.push_back(std::move(c));
             if (j.have_msg) sl.checks.push_back(std::move(j.msg_ck));
             if (j.have_ck) sl.checks.push_back(std::move(j.turn_ck));
             sl.adm_log = true;
@@ -15902,6 +16000,23 @@ int main(int argc, char** argv) {
                             jp->mpart_ok[k] = 1;
                             return true;
                         });
+                if (jp->gparts.count(z) != 0)   // STRATA_SLOT_GRID: stage k's part of the grid checkpoint at z
+                    for (size_t k = 0; k < n_st; ++k)
+                        pj->on_stage_chunk.push_back([&, jp, k, b, z](int64_t done, std::string& err) -> bool {
+                            if (done != z) return true;
+                            // (the map's entries were made before the pieces were queued: only this stage writes [k])
+                            ConvCheckpoint& part = jp->gparts.at(z)[k];
+                            part.ids.assign(jp->r.ids.begin(), jp->r.ids.begin() + z);
+                            if (!checkpoint_save(part, *bslot_ss[k][(size_t) b], g)) {
+                                if (!checkpoint_failure_is_survivable()) { err = "saving the slot's grid checkpoint failed"; return false; }
+                                std::fprintf(stderr, "strata serve: slot %d: grid checkpoint at %lld, part %zu skipped: its state "
+                                                     "could not be copied out (see above)\n", b, (long long) z, k);
+                                part = ConvCheckpoint{};
+                                return true;
+                            }
+                            jp->gpart_ok.at(z)[k] = 1;
+                            return true;
+                        });
                 if (ck && z == j.turn_at)
                     for (size_t k = 0; k < n_st; ++k)   // stage k's part of the turn checkpoint, as it reaches it
                         pj->on_stage_chunk.push_back([&, jp, k, b](int64_t done, std::string& err) -> bool {
@@ -15939,6 +16054,13 @@ int main(int argc, char** argv) {
                 j.part_ok.assign(n_st, 0);
                 j.mparts.assign(n_st, ConvCheckpoint{});
                 j.mpart_ok.assign(n_st, 0);
+                j.gparts.clear();
+                j.gpart_ok.clear();
+                for (const int64_t gp : j.grid_at)
+                    if (gp > j.at) {
+                        j.gparts[gp].assign(n_st, ConvCheckpoint{});
+                        j.gpart_ok[gp].assign(n_st, 0);
+                    }
                 const bool ck = j.turn_at > j.at;
                 const bool mk = j.msg_at > j.at;
                 std::vector<std::pair<int64_t, int64_t>> cuts;
@@ -15946,6 +16068,8 @@ int main(int argc, char** argv) {
                     int64_t z = std::min(j.n - 1, a + P);
                     if (mk && a < j.msg_at && z > j.msg_at) z = j.msg_at;
                     if (ck && a < j.turn_at && z > j.turn_at) z = j.turn_at;
+                    for (const auto& gpe : j.gparts)   // STRATA_SLOT_GRID: a piece ends at each grid position (ascending)
+                        if (gpe.first > a && gpe.first < z) { z = gpe.first; break; }
                     cuts.emplace_back(a, z);
                     a = z;
                 }
@@ -16016,6 +16140,19 @@ int main(int argc, char** argv) {
                     msg_ck.msg_tail = true;
                     for (size_t k = 1; k < n_st; ++k) msg_ck.stage_parts.push_back(std::move(j.mparts[k]));
                 }
+                std::vector<ConvCheckpoint> grid_new;   // STRATA_SLOT_GRID: the grid checkpoints whose parts are all there
+                for (auto& [gp, gparts] : j.gparts) {
+                    const std::vector<char>& okv = j.gpart_ok[gp];
+                    bool all = gp > j.resume && gparts.size() == n_st && okv.size() == n_st;
+                    for (size_t k = 0; k < n_st && all; ++k) all = okv[k] != 0;
+                    if (!all) continue;   // an incomplete set: no checkpoint there
+                    ConvCheckpoint gc = std::move(gparts[0]);
+                    for (size_t k = 1; k < n_st; ++k) gc.stage_parts.push_back(std::move(gparts[k]));
+                    grid_new.push_back(std::move(gc));
+                }
+                j.gparts.clear();
+                j.gpart_ok.clear();
+                std::vector<ConvCheckpoint> grid = slot_grid_settle(sl.checks, j.resume, ids, grid_new);
                 if (ckpt_pool.on())
                     for (ConvCheckpoint& c : sl.checks) ckpt_pool.give(std::move(c));
                 sl = BSlot{};
@@ -16027,6 +16164,7 @@ int main(int argc, char** argv) {
                 sl.t0 = Clock::now();
                 sl.ids.assign(ids.begin(), ids.end() - 1);
                 sl.cvec = cvec_cached;
+                for (ConvCheckpoint& c : grid) sl.checks.push_back(std::move(c));
                 if (have_msg) sl.checks.push_back(std::move(msg_ck));
                 if (have_ck) sl.checks.push_back(std::move(turn_ck));
                 sl.adm_log = true;
@@ -16096,6 +16234,8 @@ int main(int argc, char** argv) {
                     if (j->msg_at > a && z > j->msg_at) z = j->msg_at;   // (a piece ends at the message checkpoint too)
                     const bool ck = j->turn_at > a;
                     if (ck && z > j->turn_at) z = j->turn_at;
+                    for (const auto& gpe : j->gparts)   // STRATA_SLOT_GRID: a piece ends at each grid position
+                        if (gpe.first > a && gpe.first < z) { z = gpe.first; break; }
                     j->inflight.fetch_add(1);
                     batch.push_back(make_piece(*j, a, z, ck));
                     fed.push_back(j->r.slot);
@@ -16127,6 +16267,8 @@ int main(int argc, char** argv) {
                     if (j->msg_at > a && z > j->msg_at) z = j->msg_at;   // (a piece ends at the message checkpoint too)
                     const bool ck = j->turn_at > a;
                     if (ck && z > j->turn_at) z = j->turn_at;
+                    for (const auto& gpe : j->gparts)   // STRATA_SLOT_GRID: a piece ends at each grid position
+                        if (gpe.first > a && gpe.first < z) { z = gpe.first; break; }
                     j->inflight.fetch_add(1);
                     sp.enqueue(make_piece(*j, a, z, ck));
                     j->at = z;
@@ -16190,6 +16332,11 @@ int main(int argc, char** argv) {
                                 j->part_ok.assign(n_st, 0);
                                 j->mparts.assign(n_st, ConvCheckpoint{});   // (STRATA_CACHE_MESSAGE_BOUNDARY)
                                 j->mpart_ok.assign(n_st, 0);
+                                for (const int64_t gp : j->grid_at)   // STRATA_SLOT_GRID (the feeders end a piece at each)
+                                    if (gp > j->at) {
+                                        j->gparts[gp].assign(n_st, ConvCheckpoint{});
+                                        j->gpart_ok[gp].assign(n_st, 0);
+                                    }
                             }
                             j->t_fed = Clock::now();
                         } else if (j->setup_ok && j->at < j->n - 1) {
@@ -20688,9 +20835,47 @@ int main(int argc, char** argv) {
                             sl.checks.push_back(*best);
                         }
                     }
+                    // STRATA_SLOT_GRID: the chain's checkpoints of this conversation that the slot's thinning keeps go
+                    // with it (copies: the solo session still holds the conversation), so a request that keeps only a
+                    // prefix of it finds one near its cut while the conversation lives in the slot
+                    size_t grid_copied = 0;
+                    const int slot_grid_buckets = slot_grid_buckets_env();
+                    if (slot_grid_buckets >= 2 && !sl.img && o.prompt_cache_every > 0) {
+                        std::vector<int64_t> lens;
+                        for (const ConvCheckpoint& c : sl.checks) lens.push_back((int64_t) c.ids.size());
+                        const size_t own = lens.size();
+                        std::vector<const ConvCheckpoint*> cand;
+                        for (const ConvCheckpoint& c : checks)
+                            if (c.ids.size() < live.size() && c.imgs.empty() && c.stage_parts.size() == stages.size() &&
+                                std::find(lens.begin(), lens.end(), (int64_t) c.ids.size()) == lens.end() &&
+                                std::equal(c.ids.begin(), c.ids.end(), live.begin())) {
+                                cand.push_back(&c);
+                                lens.push_back((int64_t) c.ids.size());
+                            }
+                        for (const size_t i : strata::program::slot_grid_keep(lens, (int64_t) live.size(), o.prompt_cache_every,
+                                                                               slot_grid_buckets)) {
+                            if (i < own) continue;
+                            if (ckpt_pool.on()) {
+                                ConvCheckpoint c = ckpt_pool.take();
+                                c = *cand[i - own];
+                                c.pinned = false;
+                                c.msg_tail = false;
+                                sl.checks.push_back(std::move(c));
+                            } else {
+                                sl.checks.push_back(*cand[i - own]);
+                                sl.checks.back().pinned = false;
+                                sl.checks.back().msg_tail = false;
+                            }
+                            ++grid_copied;
+                        }
+                        std::sort(sl.checks.begin(), sl.checks.end(), [](const ConvCheckpoint& a, const ConvCheckpoint& b) {
+                            return a.ids.size() < b.ids.size();
+                        });
+                    }
                     const auto tc4 = Clock::now();
-                    std::fprintf(stderr, "strata batch: slot %d takes %lld tokens (copied in %.1f ms)\n", admit_slot,
-                                 (long long) live.size(), std::chrono::duration<double, std::milli>(tc4 - tc0).count());
+                    std::fprintf(stderr, "strata batch: slot %d takes %lld tokens (copied in %.1f ms)%s\n", admit_slot,
+                                 (long long) live.size(), std::chrono::duration<double, std::milli>(tc4 - tc0).count(),
+                                 grid_copied > 0 ? (" with " + std::to_string(grid_copied) + " grid checkpoint(s) (STRATA_SLOT_GRID)").c_str() : "");
                     if (trace) {   // STRATA_TRACE: the admission's phases (ms), from the drain before BGEN to this copy
                         auto span = [](Clock::time_point a, Clock::time_point b) {
                             return std::chrono::duration<double, std::milli>(b - a).count();
