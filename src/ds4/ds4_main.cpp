@@ -3506,9 +3506,11 @@ int check_rewind(strata::ds4::Model& m, const std::vector<int>& ids, int n) {
         }
         std::vector<uint8_t> C;   // (the full read's own state: its rows up to p are what the rewind must leave)
         if (m.slot_save(C, err) == 0) break;
+        const std::vector<uint64_t> h0 = m.rows_hash(p);   // (every device's copy, the readers' too)
         const double t2 = now_ms();
         if (!m.rewind(ids.data(), p, N - (int) p, err)) break;
         const double t3 = now_ms();
+        const bool devs_same = m.rows_hash(p) == h0;
         if (m.slot_save(B, err) == 0) break;
         m.reset();   // (slot_save marked the state set aside: reset clears it)
         if (!m.feed(ids.data(), N, 0, err) || !m.rewind(ids.data(), p, N - (int) p, err) || !rest(lb, tb)) break;
@@ -3541,8 +3543,10 @@ int check_rewind(strata::ds4::Model& m, const std::vector<int>& ids, int n) {
         }
         int same = 0;
         while (same < (int) ta.size() && same < (int) tb.size() && ta[same] == tb[same]) ++same;
-        const bool ok = lay && row_diff == 0 && same == (int) ta.size();
+        const bool ok = lay && row_diff == 0 && devs_same && same == (int) ta.size();
         bad += !ok;
+        std::printf("rewind check p=%lld: every device's rows (%zu copies) %s\n", (long long) p, h0.size(),
+                    devs_same ? "unchanged" : "CHANGED");
         std::printf("rewind check p=%lld (from %lld): rows vs the full read's %s (%lld bytes differ), vs a read to p %lld "
                     "bytes differ; rings+groups vs a read to p %lld bytes differ; logits max diff %.3g KL %.3g; %d/%zu greedy "
                     "tokens the same; read to p %.0f ms, rewind %.0f ms%s\n",

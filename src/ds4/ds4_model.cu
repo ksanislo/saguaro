@@ -9275,6 +9275,31 @@ struct Model::Impl {
         return true;
     }
 
+    // (tests) a hash of every device's copy of each source's first rows (those of positions < p): compressed rows,
+    // index keys - the readers' copies too, which a slot (the owner's) does not show
+    std::vector<uint64_t> rows_hash(int64_t p) {
+        std::vector<uint64_t> h;
+        std::vector<uint8_t> buf;
+        for (Dev& d : devs) {
+            cudaSetDevice(d.id);
+            cudaStreamSynchronize(d.st);
+        }
+        for (const Src& sr : srcs) {
+            const size_t rows = (size_t) (p / std::max(1, sr.ratio));
+            for (size_t di = 0; di < devs.size(); ++di)
+                for (int k = 0; k < 2; ++k) {
+                    const uint8_t* b = k == 0 ? sr.ckv[di] : sr.ik[di];
+                    if (b == nullptr || rows == 0) continue;
+                    buf.resize(rows * (k == 0 ? ckv_rb() : ik_rb()));
+                    cudaSetDevice(devs[di].id);
+                    uint64_t x = 1469598103934665603ull;
+                    if (cudaMemcpy(buf.data(), b, buf.size(), cudaMemcpyDeviceToHost) != cudaSuccess) x = 0;
+                    for (uint8_t c : buf) x = (x ^ c) * 1099511628211ull;
+                    h.push_back(x);
+                }
+        }
+        return h;
+    }
     // (tests) a slot's rows: the bytes of each source's compressed rows and index keys that differ between slots a
     // and b over the rows both have; -1 when a slot's layout is not this model's.  slot_save's walk, exactly.
     int64_t slot_rows_diff(const std::vector<uint8_t>& a, const std::vector<uint8_t>& b, int64_t& rings_diff) const {
@@ -21705,6 +21730,7 @@ void Model::reset() { p_->reset(); }
 void Model::checkpoint(int slot) { p_->checkpoint(slot); }
 bool Model::restore(int64_t limit) { return p_->restore(limit); }
 int64_t Model::rewind_from(int64_t p) const { return p_->rewind_from(p); }
+std::vector<uint64_t> Model::rows_hash(int64_t p) { return p_->rows_hash(p); }
 int64_t Model::slot_rows_diff(const std::vector<uint8_t>& a, const std::vector<uint8_t>& b, int64_t& rings_diff) const {
     return p_->slot_rows_diff(a, b, rings_diff);
 }
