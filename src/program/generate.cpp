@@ -17472,6 +17472,10 @@ int main(int argc, char** argv) {
             if (o.prompt_cache > 0 && want_cvec == cvec_cached) {
                 if (live_ok && starts_with(live, live_imgs)) { resume = (int64_t) live.size(); from_live = true; }
                 for (const ConvCheckpoint& c : checks)
+                    if ((int64_t) c.ids.size() > resume && yarn_skip(c, checks) && starts_with(c.ids, c.imgs))
+                        std::fprintf(stderr, "strata serve: STRATA_YARN_ELASTIC: a plain prompt passes over a YaRN "
+                                             "checkpoint of %zu tokens (STRATA_YARN_PLAIN_REUSE)\n", c.ids.size());
+                for (const ConvCheckpoint& c : checks)
                     if ((int64_t) c.ids.size() > resume && !yarn_skip(c, checks) && starts_with(c.ids, c.imgs)) {
                         resume = (int64_t) c.ids.size();
                         from_live = false;

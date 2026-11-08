@@ -1,6 +1,7 @@
 // CPU-only ownership and matching policy for --serve's parked conversations.
 // Token equality, image identity, and steering mode are all required for reuse.
 #pragma once
+#include <cstdio>
 
 #include "strata/core/conversation_buffer.hpp"
 
@@ -307,7 +308,12 @@ public:
             size_t deepest = 0;
             for (const auto& c : e.checkpoints) deepest = std::max(deepest, c.ids.size());
             auto consider = [&](const ConversationCheckpoint& c, bool live) {
-                if (plain && !live && yarn_plain_skips(c.rope_level, c.ids.size(), deepest)) return;
+                if (plain && !live && yarn_plain_skips(c.rope_level, c.ids.size(), deepest)) {
+                    if (conversation_prefix(c, prompt, images) == (int64_t) c.ids.size())   // (it did match: say so)
+                        std::fprintf(stderr, "strata serve: STRATA_YARN_ELASTIC: a plain prompt passes over a parked YaRN "
+                                             "checkpoint of %zu tokens (STRATA_YARN_PLAIN_REUSE)\n", c.ids.size());
+                    return;
+                }
                 const int64_t n = conversation_prefix(c, prompt, images);
                 if (n > best.tokens) best = {i, n, live, serials_[i]};
             };
