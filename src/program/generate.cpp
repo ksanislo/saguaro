@@ -1598,6 +1598,7 @@ static int glm_pack_generate(const Options& o) {
         note(m);
     };
     // the longest slot this prompt continues, back in the model: the tokens it covers (0: none)
+    bool slot_load_failed = false;   // (a slot_load that failed may have written part of the bound context's rows)
     const auto slot_take = [&](const std::vector<int32_t>& prompt) -> size_t {
         if (slot_max <= 0) return 0;
       for (;;) {   // the longest slot this prompt continues; one that will not load (saved by another model layout, a
@@ -1620,6 +1621,7 @@ static int glm_pack_generate(const Options& o) {
                               : model.slot_load(slots[best].path, (int64_t) len, e);
         if (!back) {
             note("taking a conversation back failed (" + e + ") - trying the next slot or checkpoint");
+            slot_load_failed = true;
             slot_drop(best);
             snap_tokens.clear();
             continue;
@@ -1891,8 +1893,10 @@ static int glm_pack_generate(const Options& o) {
                         slot_len = sl.tokens.size();
             std::string ce;
             if (slot_len > ck_len) {   // the slot first; when none loads (another layout, a damaged file) the checkpoint
-                reuse = slot_take(prompt);   // below is used instead of reading from token 0
-                if (reuse > 0) ckpt_drop_past(0);   // another conversation's state now
+                slot_load_failed = false;    // below is used instead of reading from token 0 - unless a failed load
+                reuse = slot_take(prompt);   // wrote over this context's rows: its checkpoints stand on them
+                if (reuse > 0 || slot_load_failed) ckpt_drop_past(0);   // (another conversation's state now)
+                slot_load_failed = false;
             }
             if (reuse > 0) {
             } else if (model.ckpt_restore(ckpt_base + ck, ce)) {
@@ -3270,6 +3274,7 @@ static int glm_pack_generate(const Options& o) {
             bind_ctx(v);
             slot_put(" (its context's memory went to another conversation)");
             snap_tokens.clear();
+            ckpts.clear();   // (MULTI_CKPTS: they stand on the DSA rows the release hands back)
             model.seq_release(v, true);
             std::fprintf(stderr, "glm elastic: context %d released for another conversation\n", v);
         }
@@ -3312,6 +3317,7 @@ static int glm_pack_generate(const Options& o) {
             bind_ctx(order[i]);
             slot_put(" (an idle context's memory went back to the experts)");
             snap_tokens.clear();
+            ckpts.clear();   // (MULTI_CKPTS: they stand on the DSA rows the release hands back)
             model.seq_release(order[i], true);
         }
         model.pool_take_back_all();
