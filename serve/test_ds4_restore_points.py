@@ -65,8 +65,9 @@ class RestorePoints(unittest.TestCase):
         msgs, schemas, kw = openai_to_messages(request, deepseek=True)
         return self.svc.prepare(msgs, schemas, kw, 100)[0]
 
-    def points(self, ids, tail=512):
-        return deepseek_restore_points(ids, self.svc.ds_user_id, self.svc.ds_system_id, tail)
+    def points(self, ids, tail=512, turns=0, **kw):
+        return deepseek_restore_points(ids, self.svc.ds_user_id, self.svc.ds_system_id, tail,
+                                       assistant_id=self.svc.ds_assistant_id, turns=turns, **kw)
 
     def chat(self, last="And how did region 3 do in the last quarter?", system=SYSTEM):
         return [{"role": "system", "content": system},
@@ -151,14 +152,22 @@ class RestorePoints(unittest.TestCase):
             msgs += [{"role": "user", "content": f"Turn {i}: " + DOC}, {"role": "assistant", "content": f"Done {i}."}]
         msgs.append({"role": "user", "content": "And now?"})
         ids = self.ids(msgs)
-        pts = self.points(ids)
-        starts = [i for i, t in enumerate(ids) if t == self.svc.ds_user_id][1:]
-        self.assertEqual(max(pts["marks"]), starts[-1])          # the last user turn, as before
-        self.assertEqual(len(pts["marks"]), 7)                   # + 6 earlier ones (MAYA_DS4_RESTORE_TURNS)
+        sp = max(2048, len(ids) // 10)   # (a grid this test's ~len/10-token spacing fills)
+        pts = self.points(ids, spacing=sp, turns=6)
+        users = [i for i, t in enumerate(ids) if t == self.svc.ds_user_id]
+        starts = users[1:] + [i for i, t in enumerate(ids) if t == self.svc.ds_assistant_id and i > users[0]]
+        self.assertEqual(max(pts["marks"]), users[-1])           # the last user turn, as before
+        self.assertEqual(len(pts["marks"]), 7)                   # + 6 earlier message starts (MAYA_DS4_RESTORE_TURNS)
         self.assertTrue(all(p in starts for p in pts["marks"]))
+        near = min((p for p in starts if p != users[-1]), key=lambda p: abs(len(ids) - 100000 - p))
+        self.assertIn(near, pts["marks"])                        # (the one nearest the context engines' fresh tail)
+        # stable: the same history one turn later keeps every earlier grid point it asked for
+        more = msgs + [{"role": "assistant", "content": "Fine."}, {"role": "user", "content": "Next: " + DOC}]
+        later = self.points(self.ids(more), spacing=sp, turns=6)["marks"]
+        grid0 = [p for p in pts["marks"] if p not in (near, users[-1])]
+        self.assertTrue(set(grid0[:-1]) <= set(later), (grid0, later))   # (the newest may move with the re-rendered end)
         self.assertEqual(pts["marks"], sorted(pts["marks"]))
-        with unittest.mock.patch("serve.server.restore_turns", return_value=0):
-            self.assertEqual(self.points(ids)["marks"], [starts[-1]])
+        self.assertEqual(self.points(ids, turns=0)["marks"], [users[-1]])
 
     def test_settings(self):
         self.assertEqual(restore_point_settings({}), (True, 512))   # (on by default: 4)
@@ -182,7 +191,7 @@ class RestorePoints(unittest.TestCase):
 
     def test_the_engine_line(self):
         ids, sampling = self.run_request(self.chat(), {ON: "4"})
-        pts = self.points(ids)
+        pts = self.points(ids, turns=None)   # (the service reads MAYA_DS4_RESTORE_TURNS)
         self.assertEqual(sampling["_restore"], pts)
         keys = StrataEngine.sampling_keys(sampling).split()
         self.assertIn("marks=" + ",".join(str(p) for p in pts["marks"]), keys)
