@@ -782,7 +782,7 @@ def deepseek_restore_points(ids, user_id, system_id=None, tail=512, least=RESTOR
     # MAYA_DS4_RESTORE_TURNS (6): up to that many earlier turn starts besides the last, spread over the conversation
     # (a compaction or chain summary that keeps the history up to one of them reads only what follows it)
     k = restore_turns() if turns is None else turns
-    early = [p for p in starts if p >= least and p != last]
+    early = [p for p in starts if p >= least and last is not None and p < last]   # (not the reply's own opener)
     if k > 0 and early:
         # the start nearest `recent` tokens before the end first (where a context engine keeping its fresh tail cuts),
         # the rest spread over the conversation
