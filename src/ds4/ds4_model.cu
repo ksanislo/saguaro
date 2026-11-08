@@ -9108,7 +9108,11 @@ struct Model::Impl {
         if ((int) k >= marks_cap()) {
             std::vector<MarkUse> u;
             for (const Check& x : mk) u.push_back({x.pos, x.shared, x.used});
-            k = (size_t) mark_victim(u);
+            static const int keep_early = [] {
+                const char* v = ds4_env("DS4_RESTORE_KEEP_EARLY");
+                return v != nullptr ? std::max(0, std::atoi(v)) : 2;
+            }();
+            k = (size_t) mark_victim(u, std::min(keep_early, marks_cap() - 1));
         } else
             mk.emplace_back();
         Check& c = mk[k];   // (one given up: its buffers taken over)

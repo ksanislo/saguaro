@@ -125,12 +125,23 @@ struct MarkUse {
 };
 
 // the restore point that gives way to a new one when a conversation holds its cap: the least recently used of those
-// that are not a shared start, else the least recently used; -1: none held
-inline int mark_victim(const std::vector<MarkUse>& v) {
-    for (int pass = 0; pass < 2; ++pass) {
+// that are neither a shared start nor one of the `keep_early` earliest others (an agent's compaction keeps the
+// conversation's head and goes back to its first turns: MAYA_DS4_RESTORE_KEEP_EARLY, 2), else of those that are not
+// a shared start, else the least recently used; -1: none held
+inline int mark_victim(const std::vector<MarkUse>& v, int keep_early = 0) {
+    std::vector<char> early(v.size(), 0);
+    for (int k = 0; k < keep_early; ++k) {
+        int e = -1;
+        for (size_t i = 0; i < v.size(); ++i)
+            if (!v[i].shared && !early[i] && (e < 0 || v[i].pos < v[(size_t) e].pos)) e = (int) i;
+        if (e < 0) break;
+        early[(size_t) e] = 1;
+    }
+    for (int pass = 0; pass < 3; ++pass) {
         int b = -1;
         for (size_t i = 0; i < v.size(); ++i)
-            if ((pass == 1 || !v[i].shared) && (b < 0 || v[i].used < v[(size_t) b].used)) b = (int) i;
+            if ((pass == 2 || !v[i].shared) && (pass >= 1 || !early[i]) && (b < 0 || v[i].used < v[(size_t) b].used))
+                b = (int) i;
         if (b >= 0) return b;
     }
     return -1;
