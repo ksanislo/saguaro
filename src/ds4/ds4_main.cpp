@@ -1496,15 +1496,39 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
             const int64_t limit = (int64_t) std::min(c, r.ids.size() - 1);
             const int64_t rs = m.restorable(limit);
             bool whole = false;
+            // REWIND (MAYA_DS4_REWIND=1): the conversation in the model goes back to `limit` itself (its compressed
+            // KV kept, ~5.4K tokens read again for the rings) when that reads less than going back to a restore
+            // point - an agent's compaction cut or an edit far past its last restore point.  Not across a picture.
+            static const bool rw_on = [] { const char* v = ds4_env("DS4_REWIND"); return v != nullptr && std::atoi(v) > 0; }();
+            int64_t rw = -1;
+            if (rw_on && !state_is_prefix && n_state > 0 && (size_t) limit <= n_state) {
+                const int64_t q = m.rewind_from(limit);
+                bool pic_in = false;
+                for (const Pic& pq : pics)
+                    if (q >= 0 && pq.start < limit && pq.start + (int64_t) pq.len > q) pic_in = true;
+                if (q >= 0 && !pic_in && limit - q + 2048 < limit - std::max<int64_t>(rs, 0)) rw = limit;
+            }
             // (a kept shared start, when it covers more than the state itself can go back to; a kept conversation
             //  only when it covers more than either)
             const int pi = prefix_find(r.ids, pics, rs > 0 ? (size_t) rs : 0);
             const size_t plen = pi >= 0 ? prefixes[(size_t) pi].tokens.size() : 0;
-            const size_t back = slot_take(r.ids, pics, std::max(rs > 0 ? (size_t) rs : 0, plen), whole);
+            const size_t back = slot_take(r.ids, pics, std::max({rs > 0 ? (size_t) rs : 0, plen, rw > 0 ? (size_t) rw : 0}), whole);
             beat();
             if (back > 0) {
                 from = back;
                 continued = whole;
+            } else if (rw > 0 && (int64_t) plen < rw && [&] {
+                           const double t0 = now_ms();
+                           const int64_t q = m.rewind_from(rw);
+                           std::string e;
+                           const bool ok = m.rewind(r.ids.data(), rw, (int) ((int64_t) r.ids.size() - rw), e);
+                           std::fprintf(stderr, "maya ds4 serve: rewind to %lld (re-read %lld..%lld, %.0f ms; a restore point "
+                                                "would read from %lld)%s%s%s\n", (long long) rw, (long long) q,
+                                        (long long) rw, now_ms() - t0, (long long) rs, ok ? "" : " FAILED: ",
+                                        ok ? "" : e.c_str(), m.seq_count() > 1 ? " [parallel]" : "");
+                           return ok;
+                       }()) {
+                from = (size_t) rw;
             } else if (pi >= 0 && prefix_take(pi)) {
                 from = plen;
                 held.clear();
@@ -3435,6 +3459,131 @@ int check_parts(strata::ds4::Model& m, const std::vector<int>& ids, int n) {
 // chunks: the last row's logits must be the same bit for bit, the n greedy tokens after them the same, and from each
 // point the prompt's rest read again must give the same logits too (the state kept there is the same).
 // (--no-expert-cache keeps the experts where the load put them.)
+// --rewind-check (tests): for each p (DS4_REWIND_AT=p,p,..., default 4 spots), the state at p two ways - a read of
+// [0, p) as a prompt's first part, and a read of all N tokens then rewind(p) - compared: the slot bytes (compressed rows
+// + index keys must be the same bit for bit; window rings + partial groups: how many bytes differ), then the rest
+// [p, N) read on each and its last row's logits (max diff, KL) and n greedy tokens.  Exit 0: rows the same, tokens the same.
+int check_rewind(strata::ds4::Model& m, const std::vector<int>& ids, int n) {
+    std::string err;
+    const int N = (int) ids.size();
+    std::vector<int64_t> ps;
+    if (const char* v = std::getenv("DS4_REWIND_AT")) {
+        for (const char* c = v; *c;) {
+            ps.push_back(std::atoll(c));
+            while (*c && *c != ',') ++c;
+            if (*c) ++c;
+        }
+    } else {
+        const int64_t h = N / 2;
+        ps = {h - h % 128, h - h % 128 + 2, h - h % 128 + 65, N - 1000};   // (on a group, mid ratio-4, mid ratio-128, near the end)
+    }
+    // the slot's layout (slot_save): header, then per layer a ring (8 + wb) and a partial group (8 [+ 2 cn * 4]),
+    // then the rows to its last 16 bytes (no checkpoints in these states: their count 0 + the magic)
+    const auto split = [](const std::vector<uint8_t>& b, size_t& rows_at) -> bool {
+        size_t o = 8;
+        uint64_t il = 0, nt = 0, np = 0;
+        std::memcpy(&il, b.data() + o, 8);
+        o += 8 + il;
+        std::memcpy(&nt, b.data() + o, 8);
+        o += 8 + nt * 4;
+        std::memcpy(&np, b.data() + o, 8);
+        o += 8 + np * 24;
+        rows_at = o;
+        return o < b.size();
+    };
+    int bad = 0;
+    for (const int64_t p : ps) {
+        if (p <= 0 || p >= N - 1) {
+            std::printf("rewind check p=%lld: not inside the %d tokens\n", (long long) p, N);
+            continue;
+        }
+        std::vector<uint8_t> A, B;
+        std::vector<float> la, lb;
+        std::vector<int> ta, tb;
+        const auto rest = [&](std::vector<float>& lg, std::vector<int>& tk) -> bool {
+            if (!m.feed(ids.data() + p, N - (int) p, 1, err) || !m.logits(lg)) return false;
+            int tok = m.sample(0.0f, 1.0f, 0, 0.0f, 0, 0);
+            tk.push_back(tok);
+            for (int k = 1; k < n; ++k) {
+                if (!m.step(tok, true, err)) return false;
+                tok = m.sample(0.0f, 1.0f, 0, 0.0f, 0, 0);
+                tk.push_back(tok);
+            }
+            return true;
+        };
+        m.reset();
+        if (!m.feed(ids.data(), N, 0, err)) break;
+        const int64_t q = m.rewind_from(p);
+        if (q < 0) {
+            std::printf("rewind check p=%lld: too close to the start (falls back, as it should)\n", (long long) p);
+            continue;
+        }
+        const double t2 = now_ms();
+        if (!m.rewind(ids.data(), p, N - (int) p, err)) break;
+        const double t3 = now_ms();
+        if (m.slot_save(B, err) == 0) break;
+        m.reset();   // (slot_save marked the state set aside: reset clears it)
+        if (!m.feed(ids.data(), N, 0, err) || !m.rewind(ids.data(), p, N - (int) p, err) || !rest(lb, tb)) break;
+        m.reset();
+        const double t0 = now_ms();
+        if (!m.feed(ids.data(), (int) p, 0, err, N - (int) p) || m.slot_save(A, err) == 0) break;
+        const double t1 = now_ms();
+        m.reset();
+        if (!m.feed(ids.data(), (int) p, 0, err, N - (int) p) || !rest(la, ta)) break;
+        size_t ra = 0, rb = 0;
+        const bool lay = A.size() == B.size() && split(A, ra) && split(B, rb) && ra == rb;
+        // the layer part: walk it to find where the rows start
+        size_t o = ra, ring_diff = 0, ring_bytes = 0;
+        bool walk = lay;
+        while (walk && o + 8 <= A.size()) {
+            uint64_t wb = 0, cn = 0;
+            std::memcpy(&wb, A.data() + o, 8);
+            if (wb == 0 || wb > (1u << 28)) break;   // (past the layers: a source's row count)
+            for (size_t i = o + 8; i < o + 8 + wb; ++i) ring_diff += A[i] != B[i];
+            ring_bytes += wb;
+            o += 8 + wb;
+            std::memcpy(&cn, A.data() + o, 8);
+            for (size_t i = o + 8; i < o + 8 + 2 * cn * 4; ++i) ring_diff += A[i] != B[i];
+            ring_bytes += 2 * cn * 4;
+            o += 8 + 2 * cn * 4;
+        }
+        size_t row_diff = 0;
+        for (size_t i = o; lay && i + 16 < A.size(); ++i) row_diff += A[i] != B[i];
+        double md = la.size() == lb.size() ? 0.0 : 1e30, klv = 0.0;
+        if (la.size() == lb.size()) {
+            double za = 0, zb = 0, mxa = -1e30, mxb = -1e30;
+            for (size_t i = 0; i < la.size(); ++i) {
+                md = std::max(md, (double) std::fabs(la[i] - lb[i]));
+                mxa = std::max(mxa, (double) la[i]);
+                mxb = std::max(mxb, (double) lb[i]);
+            }
+            for (size_t i = 0; i < la.size(); ++i) {
+                za += std::exp(la[i] - mxa);
+                zb += std::exp(lb[i] - mxb);
+            }
+            for (size_t i = 0; i < la.size(); ++i) {
+                const double pa = std::exp(la[i] - mxa) / za, lpa = la[i] - mxa - std::log(za), lpb = lb[i] - mxb - std::log(zb);
+                klv += pa * (lpa - lpb);
+            }
+        }
+        int same = 0;
+        while (same < (int) ta.size() && same < (int) tb.size() && ta[same] == tb[same]) ++same;
+        const bool ok = lay && row_diff == 0 && same == (int) ta.size();
+        bad += !ok;
+        std::printf("rewind check p=%lld (from %lld): slot %s, rows %s (%zu bytes differ), rings+groups %zu of %zu bytes "
+                    "differ; logits max diff %.3g KL %.3g; %d/%zu greedy tokens the same; read to p %.0f ms, rewind %.0f ms%s\n",
+                    (long long) p, (long long) q, lay ? "layout same" : "LAYOUT DIFFERS",
+                    row_diff == 0 ? "the same" : "DIFFER", row_diff, ring_diff, ring_bytes, md, klv, same, ta.size(),
+                    t1 - t0, t3 - t2, ok ? "" : "  <-- FAIL");
+        std::fflush(stdout);
+    }
+    if (!err.empty()) {
+        std::fprintf(stderr, "rewind check: %s\n", err.c_str());
+        return 1;
+    }
+    return bad ? 1 : 0;
+}
+
 int check_marks(strata::ds4::Model& m, const std::vector<int>& ids, int n) {
     std::string err;
     const int N = (int) ids.size(), C = m.prompt_chunk();
@@ -3592,6 +3741,7 @@ int main(int argc, char** argv) {
     bool dspark_on_asked = false;   // (--dspark on given: a pack without drafter blocks is then told)
     float temp = 0.0f;   // the CLI's sampling (0: greedy)
     unsigned long long cli_seed = 1;
+    bool rewind_check = false;
     bool serve_mode = false, multi_check = false, parts_check = false, marks_check = false, describe = false, dspark_set = false;
     std::string prof_run, prof_out, spec_eval_path;
     int sampler_n = 0;
@@ -3700,7 +3850,8 @@ int main(int argc, char** argv) {
         else if (a == "--parallel") o.seqs = (int) num("--parallel", 1, 8, true);   // (--serve: conversations at once)
         else if (a == "--multi-check") multi_check = true;   // (tests: --parallel's rows against each alone)
         else if (a == "--parts-check") parts_check = true;   // (tests: a prompt in parts against one call)
-        else if (a == "--marks-check") marks_check = true;   // (tests: restore points kept in one read, or stopping at each)
+        else if (a == "--marks-check") marks_check = true;
+        else if (a == "--rewind-check") rewind_check = true;   // (tests: rewind(p) against a read to p)   // (tests: restore points kept in one read, or stopping at each)
         else if (a == "--pack-info") describe = true;
         else if (a == "--profile-run") prof_run = val("--profile-run");
         else if (a == "--profile-out") prof_out = val("--profile-out");
@@ -3817,6 +3968,7 @@ int main(int argc, char** argv) {
     if (multi_check) return check_multi(m, parse_ids(ids_s), std::max(2, n));
     if (parts_check) return check_parts(m, parse_ids(ids_s), std::max(2, n));
     if (marks_check) return check_marks(m, parse_ids(ids_s), std::max(2, n));
+    if (rewind_check) return check_rewind(m, parse_ids(ids_s), std::max(2, n));
     if (!ppl.empty()) {   // --ppl FILE: a line a sequence of ids (BOS + text), each in one forward, tokens 2.. scored
         std::ifstream in(ppl);
         std::string line;

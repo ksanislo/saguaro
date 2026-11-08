@@ -1486,6 +1486,11 @@ struct Model::Impl {
     std::vector<Check> mk;
     uint64_t mark_clock = 0;
     bool slot_held = false;           // slot_save took this state and nothing has changed it since
+    // REWIND (MAYA_DS4_REWIND): while a rewind re-reads [q, p), the compressed rows and index keys of the groups p
+    // completed (g < p / ratio) already hold the exact values - their writes go to a scratch (rw_scr) instead
+    int64_t rw_upto = -1;
+    std::vector<uint8_t*> rw_scr;   // per device: chunk rows of ckv, then chunk rows of index keys
+    size_t rw_rows = 0;
     // --parallel (Options::seqs > 1): every conversation's state.  The bound one's host state lives in the fields above
     // (pos, toks, ctoks, ck, mk, slot_held) and its device buffers in the layers and the sources; seq_park() moves that
     // host state here (a multi step reads every conversation's from here), seq_unpark() back.  Every conversation's
@@ -4787,6 +4792,12 @@ struct Model::Impl {
     size_t win_rb() const { return kv_row_bytes(kKvFp8, g.hd); }
     size_t ckv_rb() const { return kv_row_bytes(kKvFp4, g.hd); }
     size_t ik_rb() const { return kv_row_bytes(kKvFp4p, g.ix_hd); }
+    // where groups g_first.. of a source's rows (ckv: ik = false; index keys: true) go on device di: the cache, or
+    // during a rewind's re-read the scratch (their cached rows are already exact)
+    uint8_t* row_dst(uint8_t* base, int R, int64_t g_first, bool ik, int di) const {
+        if (rw_upto < 0 || g_first >= rw_upto / std::max(1, R)) return base + (size_t) g_first * (ik ? ik_rb() : ckv_rb());
+        return rw_scr[(size_t) di] + (ik ? rw_rows * ckv_rb() : 0);
+    }
 
     // ---- the prompt path's GEMMs warmed up at load (DS4_PROMPT_WARM=0: not)
     // A process's first cuBLAS products pay the library's start - its kernels loaded into the context on first use,
@@ -9200,6 +9211,65 @@ struct Model::Impl {
         mk.erase(std::remove_if(mk.begin(), mk.end(), [this](const Check& x) { return x.pos > pos; }), mk.end());
         for (Check& x : mk)   // (a mark gone back to: in use)
             if (x.pos == pos) x.used = ++mark_clock;
+        return true;
+    }
+
+    // REWIND: the state back to position p of the conversation in it, without a restore point at p.  The compressed
+    // rows and index keys of [0, p) stay as they are (append-only, exact); the window rings and the compressors'
+    // partial groups at p are rebuilt by reading [q, p) again from the stale ones at q: a layer-k ring is right
+    // again g.win * (k + 1) tokens on, so q = p - kWin * (layers + 2), on a 128 boundary (no group straddles q).
+    // The re-read's own rows go to a scratch (row_dst).  The chunked path only (the one row_dst covers).
+    int64_t rewind_from(int64_t p) const {
+        const int64_t q = ((p - (int64_t) g.win * ((int64_t) L.size() + 2)) / 128) * 128;
+        return q > 0 && p - q >= chunk_min && chunk > 0 && p <= pos ? q : -1;
+    }
+    bool rewind(const int* ids, int64_t p, int after, std::string& err) {   // (ids: the prompt from token 0)
+        const int64_t q = rewind_from(p);
+        if (q < 0) {
+            err = "rewind: no room before " + std::to_string(p);
+            return false;
+        }
+        for (int64_t i = q; i < p; ++i)
+            if (toks[(size_t) i] != ids[i]) {
+                err = "rewind: the tokens differ from the state's at " + std::to_string(i);
+                return false;
+            }
+        if (rw_scr.empty() || rw_rows < (size_t) chunk) {
+            for (size_t di = 0; di < rw_scr.size(); ++di) {
+                cudaSetDevice(devs[di].id);
+                cudaFree(rw_scr[di]);
+            }
+            rw_scr.assign(devs.size(), nullptr);
+            rw_rows = (size_t) std::max(chunk, 1);
+            for (size_t di = 0; di < devs.size(); ++di) {
+                cudaSetDevice(devs[di].id);
+                if (cudaMalloc((void**) &rw_scr[di], rw_rows * (ckv_rb() + ik_rb())) != cudaSuccess) {
+                    cudaGetLastError();
+                    for (uint8_t*& b : rw_scr) {
+                        if (b) cudaFree(b);
+                        b = nullptr;
+                    }
+                    rw_scr.clear();
+                    err = "rewind: no room for its scratch rows";
+                    return false;
+                }
+            }
+        }
+        for (Check& o2 : ck)   // (as restore(): points past p saw tokens the state is leaving)
+            if (o2.pos > p) o2.pos = -1;
+        mk.erase(std::remove_if(mk.begin(), mk.end(), [p](const Check& x) { return x.pos > p; }), mk.end());
+        pos = q;
+        toks.resize((size_t) q);
+        ctoks.resize((size_t) q);
+        slot_held = false;
+        rw_upto = p;
+        const bool ok = forward_chunks(ids + q, (int) (p - q), 0, err, -1, nullptr, 0, 0, after);
+        rw_upto = -1;
+        if (!ok || pos != p) {
+            if (ok) err = "rewind: the re-read ended at " + std::to_string(pos);
+            reset();
+            return false;
+        }
         return true;
     }
 
@@ -17032,7 +17102,7 @@ struct Model::Impl {
                     fi.pos_step = R;
                     fi.freqs = freqs;
                     fi.quant = 3;
-                    fi.pdst = ks.ik[(size_t) l.dev] + (size_t) g_first * ik_rb();
+                    fi.pdst = row_dst(ks.ik[(size_t) l.dev], R, g_first, true, l.dev);
                     fi.pdst_stride = (long long) ik_rb();
                     finish(c.ikr, ng, g.ix_hd, g.ix_hd, fi, s);
                 }
@@ -17094,7 +17164,7 @@ struct Model::Impl {
                 fc.pos_step = R;
                 fc.freqs = freqs;
                 fc.quant = 2;
-                fc.pdst = sr.ckv[(size_t) l.dev] + (size_t) g_first * ckv_rb();
+                fc.pdst = row_dst(sr.ckv[(size_t) l.dev], R, g_first, false, l.dev);
                 fc.pdst_stride = (long long) ckv_rb();
                 finish(const_cast<float*>(latent), ng, HD, HD, fc, s);
                 if (mi == 0 && sr.remote) {   // the new rows for the other groups' readers (slot k % 2, once
@@ -17107,7 +17177,7 @@ struct Model::Impl {
                     x.bytes[0] = (size_t) ng * ckv_rb();
                     x.n = 1;
                     if (l.owns_k && srcs[(size_t) l.ik_src].ik[(size_t) l.dev] != nullptr) {
-                        x.src[1] = srcs[(size_t) l.ik_src].ik[(size_t) l.dev] + (size_t) g_first * ik_rb();
+                        x.src[1] = row_dst(srcs[(size_t) l.ik_src].ik[(size_t) l.dev], R, g_first, true, l.dev);
                         x.dst[1] = sr.stage(slot) + x_cap() * ckv_rb();
                         x.bytes[1] = (size_t) ng * ik_rb();
                         x.n = 2;
@@ -17910,12 +17980,12 @@ struct Model::Impl {
                     Xfer x;
                     if (ng > 0 && sr.ckv[(size_t) di] != nullptr) {
                         x.src[x.n] = sr.stage(slot);
-                        x.dst[x.n] = sr.ckv[(size_t) di] + (size_t) g_first * ckv_rb();
+                        x.dst[x.n] = row_dst(sr.ckv[(size_t) di], sr.ratio, g_first, false, (int) di);
                         x.bytes[x.n++] = (size_t) ng * ckv_rb();
                     }
                     if (ng > 0 && sr.ik[(size_t) di] != nullptr) {
                         x.src[x.n] = sr.stage(slot) + x_cap() * ckv_rb();
-                        x.dst[x.n] = sr.ik[(size_t) di] + (size_t) g_first * ik_rb();
+                        x.dst[x.n] = row_dst(sr.ik[(size_t) di], sr.ratio, g_first, true, (int) di);
                         x.bytes[x.n++] = (size_t) ng * ik_rb();
                     }
                     if (x.n > 0) xfer_get(x, sr.flag(slot), wp.win, s);
@@ -21577,6 +21647,17 @@ bool Model::verify_multi(int i, const std::vector<int>& d, float t, float tp, in
 void Model::reset() { p_->reset(); }
 void Model::checkpoint(int slot) { p_->checkpoint(slot); }
 bool Model::restore(int64_t limit) { return p_->restore(limit); }
+int64_t Model::rewind_from(int64_t p) const { return p_->rewind_from(p); }
+bool Model::rewind(const int* ids, int64_t p, int after, std::string& err) {
+    Impl& pi = *p_;
+    if (!feed_release(err)) return false;   // (as feed(): a prompt's room kept between its parts handed back first)
+    pi.main_at.store("rewinding a conversation", std::memory_order_relaxed);
+    pi.pm.last = -1;
+    pi.halted = false;
+    const int64_t q = pi.rewind_from(p);
+    pi.fed_n = q >= 0 ? (int) (p - q) : 0;
+    return pi.rewind(ids, p, after, err);
+}
 void Model::pin() { p_->pin(); }
 void Model::mark(bool shared) { p_->mark(shared); }
 int Model::marks_cap() const { return Impl::marks_cap(); }

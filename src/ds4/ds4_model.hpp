@@ -315,6 +315,12 @@ public:
     /// restore(limit) goes back to the latest one at or before limit (-1: none).
     void checkpoint(int slot = 0);
     bool restore(int64_t limit);
+    /// Rewind (no restore point needed): the conversation in the model back to its token p - the compressed KV of
+    /// [0, p) kept, the window rings and partial groups rebuilt by reading [rewind_from(p), p) again.  `ids`: the
+    /// prompt from token 0 (it agrees with the state up to p); `after`: the prompt's tokens past p.  rewind_from: the
+    /// re-read's start, -1 when p is too close to the start (or past the state).  A failed rewind resets the state.
+    int64_t rewind_from(int64_t p) const;
+    bool rewind(const int* ids, int64_t p, int after, std::string& err);
     int64_t restorable(int64_t limit) const;
     /// Checkpoint 1 also becomes the anchor (kept until a restore goes before it): the position before the end of the
     /// first prompt of a run that continued in place, where a re-rendered history (earlier reasoning dropped) splits.
