@@ -348,8 +348,11 @@ int main() {
             SessionDir sd(slow);
             sd.open();
             sd.write(std::make_shared<SavedConversation>(conv(e, 6)));   // (no reference kept: evicted)
+            check(sd.best_tokens(ep, {}, false) == (int64_t) e.size(), "best_tokens sees a queued image");
+            check(sd.best_tokens(ep, {}, true) == 0, "best_tokens: another steering mode does not match");
             auto got = sd.fetch(ep, {}, false, 0, t);
             check(got && got->live.ids == e && t == (int64_t) e.size(), "fetch: an evicted queued conversation is taken back");
+            check(sd.best_tokens(ep, {}, false) == 0, "best_tokens: nothing once it was taken");
             check(got->checkpoints.size() == 2, "taken back whole, every checkpoint");
             check(!got->kv.empty() && got->kv[0].k.size() == 1006, "its K/V moved out");
             sd.flush();
@@ -366,6 +369,7 @@ int main() {
             check(!sd.fetch(ep, {}, false, 0, t), "a queued conversation the cache still holds is not taken");
             sd.flush();
             check(session_files(d2) == 1, "and its write goes on");
+            check(sd.best_tokens(ep, {}, false) == (int64_t) e.size(), "best_tokens sees a file");
             // a file at least as long beats nothing: a queued image only wins when it continues further
             check(!sd.fetch(ep, {}, false, (int64_t) e.size(), t), "not taken when the caller already has as much");
         }

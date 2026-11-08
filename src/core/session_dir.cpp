@@ -367,6 +367,16 @@ int64_t SessionDir::match_image(const SavedConversation& s, const std::vector<in
     return t;
 }
 
+int64_t SessionDir::best_tokens(const std::vector<int32_t>& ids, const std::vector<ConversationImageKey>& imgs,
+                                bool cvec) const {
+    std::lock_guard<std::mutex> lk(mu_);
+    int64_t t = 0;
+    for (const auto& e : entries_) t = std::max(t, match(e, ids, imgs, cvec));
+    for (const Job& j : jobs_) t = std::max(t, match_image(*j.image, ids, imgs, cvec));
+    if (writing_img_) t = std::max(t, match_image(*writing_img_, ids, imgs, cvec));
+    return t;
+}
+
 std::optional<SavedConversation> SessionDir::fetch(const std::vector<int32_t>& ids,
                                                    const std::vector<ConversationImageKey>& imgs, bool cvec,
                                                    int64_t beat, int64_t& tokens, bool* in_ram) {

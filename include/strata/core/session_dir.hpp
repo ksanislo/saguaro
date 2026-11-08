@@ -81,6 +81,10 @@ public:
     // *in_ram says which: true for such an image (it has no file: a caller that cannot use it should keep it).
     std::optional<SavedConversation> fetch(const std::vector<int32_t>& ids, const std::vector<ConversationImageKey>& imgs,
                                            bool cvec, int64_t beat, int64_t& tokens, bool* in_ram = nullptr);
+    // How far the folder - its files, and the writer's queued and running images - continues `ids`, without reading
+    // anything (the index and the images' tokens only): for a caller deciding where a request goes (a batch slot's
+    // admission takes the path that fetches only when this beats what the slots hold).
+    int64_t best_tokens(const std::vector<int32_t>& ids, const std::vector<ConversationImageKey>& imgs, bool cvec) const;
     // The engine is quitting: writes from here on are labelled as the shutdown's.
     void begin_exit();
     // Write every queued image now and wait until they are on disk.

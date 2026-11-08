@@ -14824,6 +14824,17 @@ int main(int argc, char** argv) {
                     for (const ConvCheckpoint& c : checks)
                         if (c.imgs.empty()) other = std::max(other, pre(c.ids));
                     other = std::max<int64_t>(other, (int64_t) conversations.best(r.ids, {}, cvec_cached).tokens);
+                    // --session-dir: a file, or a conversation the cache let go of while its write is queued or
+                    // running - only the old way's path fetches them (SessionDir::fetch); beside the slots the prompt
+                    // would be read from the slot's own state (11-08: a 425K return read from 0 in 397 s)
+                    if (sdir) {
+                        const std::vector<int32_t> ids32(r.ids.begin(), r.ids.end());
+                        const int64_t on_disk = sdir->best_tokens(ids32, {}, cvec_cached);
+                        if (trace && on_disk > other)
+                            std::fprintf(stderr, "strata trace: BGEN %d: the session dir holds %lld of its tokens\n",
+                                         r.slot, (long long) on_disk);
+                        other = std::max(other, on_disk);
+                    }
                 }
                 direct = strata::program::slot_admit_direct(batch_on() || pipe_inflight() || adm_active || cy_held_n > 0, false, own,
                                                              other, adm_gain);
