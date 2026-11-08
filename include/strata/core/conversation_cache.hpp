@@ -119,7 +119,7 @@ inline ConversationCheckpointSplit conversation_checkpoints_split(std::vector<Co
         if (c.stage_parts.size() != stages) continue;
         for (size_t k = 0; k < stages; ++k) {
             ConversationCheckpoint part;
-            part.ids = c.ids; part.imgs = c.imgs; part.used = c.used; part.pinned = c.pinned;
+            part.ids = c.ids; part.imgs = c.imgs; part.used = c.used; part.pinned = c.pinned; part.msg_tail = c.msg_tail;
             part.rope_level = c.stage_parts[k].rope_level;
             out.parts[k].push_back(std::move(part));
         }

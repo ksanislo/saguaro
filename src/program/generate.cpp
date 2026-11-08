@@ -10105,6 +10105,23 @@ int main(int argc, char** argv) {
         CheckpointPool ckpt_pool(ckpt_pool_env() || slot_ckpt_move_env());
         uint64_t check_clock = 0;   // the checkpoints' LRU clock; creation and every use advance it
         int64_t tail_ckpt_len = -1;   // --prompt-cache-tail: the length of the one tail checkpoint alive (-1 = none)
+        // STRATA_CACHE_MESSAGE_BOUNDARY: checkpoints marked msg_tail (a batch slot's message checkpoint, handed back or
+        // restored from a park) - the last becomes the chain's one tail checkpoint, as the solo path's as_tail one
+        auto adopt_msg_tail = [&](std::vector<ConvCheckpoint>& cs) {
+            ptrdiff_t last = -1;
+            for (size_t i = 0; i < cs.size(); ++i)
+                if (cs[i].msg_tail) last = (ptrdiff_t) i;
+            if (last < 0) return;
+            const int64_t L = (int64_t) cs[(size_t) last].ids.size(), old_tail = tail_ckpt_len;
+            auto drop = [&](const ConvCheckpoint& k) {
+                const int64_t kl = (int64_t) k.ids.size();
+                return (k.msg_tail && kl != L) || (!k.msg_tail && old_tail >= 0 && kl == old_tail && kl != L);
+            };
+            if (ckpt_pool.on()) ckpt_pool.erase_if(cs, drop);
+            else cs.erase(std::remove_if(cs.begin(), cs.end(), drop), cs.end());
+            for (ConvCheckpoint& k : cs) k.msg_tail = false;
+            tail_ckpt_len = L;
+        };
         // --prefill-pipe: the plan of the prompt segment being read (read_part sets it around its runs), for the
         // checkpoints taken inside it
         ConvCheckpoint::PromptPlan seg_plan;
@@ -17768,22 +17785,7 @@ int main(int argc, char** argv) {
                         live = bs[(size_t) slot_source].ids;
                     }
                     const bool gave_msg = slot_ck != nullptr && checks.back().msg_tail;
-                    {   // a slot's message checkpoint becomes the chain's one tail checkpoint (as the solo path's)
-                        ptrdiff_t last = -1;
-                        for (size_t i = 0; i < checks.size(); ++i)
-                            if (checks[i].msg_tail) last = (ptrdiff_t) i;
-                        if (last >= 0) {
-                            const int64_t L = (int64_t) checks[(size_t) last].ids.size(), old_tail = tail_ckpt_len;
-                            auto drop = [&](const ConvCheckpoint& k) {
-                                const int64_t kl = (int64_t) k.ids.size();
-                                return (k.msg_tail && kl != L) || (!k.msg_tail && old_tail >= 0 && kl == old_tail && kl != L);
-                            };
-                            if (ckpt_pool.on()) ckpt_pool.erase_if(checks, drop);
-                            else checks.erase(std::remove_if(checks.begin(), checks.end(), drop), checks.end());
-                            for (ConvCheckpoint& k : checks) k.msg_tail = false;
-                            tail_ckpt_len = L;
-                        }
-                    }
+                    adopt_msg_tail(checks);   // a slot's message checkpoint: the chain's one tail checkpoint
                     live_imgs.clear();
                     resume = slot_tokens;
                     from_live = true;
@@ -17876,6 +17878,7 @@ int main(int argc, char** argv) {
                     for (auto& si : incoming->stage_images) cs.parts.push_back(std::move(si.checkpoints));
                     if (!strata::core::conversation_checkpoints_merge(std::move(cs), checks)) checks.clear();
                 }
+                adopt_msg_tail(checks);   // (one parked with a message checkpoint)
                 cvec_cached = incoming->cvec;
                 resume = incoming_tokens;
                 from_live = incoming_live;

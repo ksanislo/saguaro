@@ -171,6 +171,7 @@ inline ConversationCheckpoint copy_checkpoint_beating(const ConversationCheckpoi
     o.rope_level = c.rope_level;   // the level of the K/V it continues: a parked image must not read as plain
     o.used = c.used;
     o.pinned = c.pinned;
+    o.msg_tail = c.msg_tail;   // (a batch slot's message checkpoint stays the chain's tail kind after a park)
     o.stage_parts.reserve(c.stage_parts.size());
     for (const auto& part : c.stage_parts) o.stage_parts.push_back(copy_checkpoint_beating(part));
     return o;

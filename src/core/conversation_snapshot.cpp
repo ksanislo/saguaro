@@ -135,23 +135,35 @@ bool host_copy_threaded(void* dst, const void* src, size_t n) {
         return e != nullptr ? std::atoi(e) : 8;
     }();
     if (nt <= 1 || n < ((size_t) 64 << 20) || !host_both(dst, src)) return false;
+    {   // ordered after this thread's copies already queued on its private stream (as copy_nonblocking was)
+        cudaStream_t ps = nullptr;
+        if (conversation_detail::private_stream(ps) != cudaSuccess || cudaStreamSynchronize(ps) != cudaSuccess) {
+            cudaGetLastError();
+            return false;
+        }
+    }
     // 16 MiB slices taken in turn; this thread beats the watchdog while they move (#2049: paged-out parked state
     // copies at the drive's speed, and a silent copy past 60 s looks like a stall)
     constexpr size_t kSlice = (size_t) 16 << 20;
     const size_t slices = (n + kSlice - 1) / kSlice;
-    std::atomic<size_t> next{0}, done{0};
+    constexpr size_t kStep = (size_t) 1 << 20;   // (#2049: a beat per MiB that lands, as copy_checkpoint_beating)
+    std::atomic<size_t> next{0}, done{0}, moved{0};
     std::vector<std::thread> th;
     for (int t = 0; t < nt; ++t)
         th.emplace_back([&] {
             for (size_t i; (i = next.fetch_add(1)) < slices; done.fetch_add(1)) {
                 const size_t at = i * kSlice, len = std::min(kSlice, n - at);
-                std::memcpy(static_cast<uint8_t*>(dst) + at, static_cast<const uint8_t*>(src) + at, len);
+                for (size_t o = 0; o < len; o += kStep) {
+                    const size_t m = std::min(kStep, len - o);
+                    std::memcpy(static_cast<uint8_t*>(dst) + at + o, static_cast<const uint8_t*>(src) + at + o, m);
+                    moved.fetch_add(m, std::memory_order_relaxed);
+                }
             }
         });
     size_t seen = 0;
     while (done.load() < slices) {
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
-        if (const size_t d = done.load(); d != seen) { seen = d; core::progress_beat(); }
+        if (const size_t d = moved.load(std::memory_order_relaxed); d != seen) { seen = d; core::progress_beat(); }
     }
     for (auto& x : th) x.join();
     core::progress_beat();
