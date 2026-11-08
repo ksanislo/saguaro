@@ -734,6 +734,15 @@ def restore_point_settings(env=None) -> tuple[bool, int]:
     return whole("MAYA_DS4_RESTORE_POINTS", 4) > 0, whole("MAYA_DS4_RESTORE_TAIL", 512)
 
 
+def restore_turns(env=None) -> int:
+    """MAYA_DS4_RESTORE_TURNS (6; 0: only the last user turn, as before)."""
+    env = os.environ if env is None else env
+    try:
+        return max(0, int(str(env.get(maya_names.read_as("MAYA_DS4_RESTORE_TURNS"), 6)).strip()))
+    except ValueError:
+        return 6
+
+
 def deepseek_restore_points(ids, user_id, system_id=None, tail=512, least=RESTORE_LEAST) -> dict:
     """Where the DeepSeek engine keeps restore points for this prompt -> {"marks": [pos, ...], "tail": pos, "shared":
     pos} (any may be missing; {}: none).  From the prompt's ids as the template wrote them: a turn opens with its role's special
@@ -749,17 +758,29 @@ def deepseek_restore_points(ids, user_id, system_id=None, tail=512, least=RESTOR
     if user_id is None or len(ids) < 2:
         return {}
     first = last = None
+    starts = []   # every turn start after the first (an agent's context engine goes back to any of them)
     for i, t in enumerate(ids):
         if t == user_id:
+            if first is not None:
+                starts.append(i)
             first = i if first is None else first
             last = i
         elif t == system_id and first is not None:
+            starts.append(i)
             last = i
     marks, out = [], {}
     if first is not None and first >= least:
         out["shared"] = first
     if last is not None and last >= least and last != first:
         marks.append(last)
+    # MAYA_DS4_RESTORE_TURNS (6): up to that many earlier turn starts besides the last, spread over the conversation
+    # (a compaction or chain summary that keeps the history up to one of them reads only what follows it)
+    k = restore_turns()
+    early = [p for p in starts if p >= least and p != last]
+    if k > 0 and early:
+        pick = early if len(early) <= k else [early[(j * (len(early) - 1)) // (k - 1)] for j in range(k)] if k > 1 else [early[-1]]
+        marks.extend(p for p in pick if p not in marks)
+        marks.sort()
     t = len(ids) - tail
     if tail > 0 and t >= least and (last is None or t > last):
         out["tail"] = t

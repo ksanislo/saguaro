@@ -138,9 +138,27 @@ class RestorePoints(unittest.TestCase):
         late = self.chat() + [{"role": "assistant", "content": "Region 3 rose."},
                               {"role": "system", "content": "From now on answer in French."}]
         ids = self.ids(late)
-        (boundary,) = self.points(ids)["marks"]
+        marks = self.points(ids)["marks"]
+        boundary = max(marks)
         self.assertEqual(ids[boundary], self.svc.ds_system_id)
         self.assertGreater(boundary, len(ids) - 60)
+        for p in marks[:-1]:   # (MAYA_DS4_RESTORE_TURNS: the earlier turn starts too)
+            self.assertIn(ids[p], (self.svc.ds_user_id, self.svc.ds_system_id))
+
+    def test_earlier_turn_starts(self):
+        msgs = self.chat()[:3]
+        for i in range(12):   # a long agent session: 12 more user turns, each with a reply
+            msgs += [{"role": "user", "content": f"Turn {i}: " + DOC}, {"role": "assistant", "content": f"Done {i}."}]
+        msgs.append({"role": "user", "content": "And now?"})
+        ids = self.ids(msgs)
+        pts = self.points(ids)
+        starts = [i for i, t in enumerate(ids) if t == self.svc.ds_user_id][1:]
+        self.assertEqual(max(pts["marks"]), starts[-1])          # the last user turn, as before
+        self.assertEqual(len(pts["marks"]), 7)                   # + 6 earlier ones (MAYA_DS4_RESTORE_TURNS)
+        self.assertTrue(all(p in starts for p in pts["marks"]))
+        self.assertEqual(pts["marks"], sorted(pts["marks"]))
+        with unittest.mock.patch("serve.server.restore_turns", return_value=0):
+            self.assertEqual(self.points(ids)["marks"], [starts[-1]])
 
     def test_settings(self):
         self.assertEqual(restore_point_settings({}), (True, 512))   # (on by default: 4)
