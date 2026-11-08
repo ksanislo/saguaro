@@ -156,6 +156,10 @@ struct SessionWriteOptions {
     SessionPhase phase;
     // tests: return an errno value to make a step fail ("write", "file_flush", "rename", "dir_flush"), 0 to go on
     std::function<int(const char* step)> fault;
+    // asked before each block is written and before the file's flush: true stops the write there (it fails with
+    // ECANCELED and its temporary file is removed, as any failure before the rename).  --session-dir: the
+    // conversation was taken back while its file was being written, so the file is not needed (session_dir.cpp)
+    std::function<bool()> cancelled;
 };
 
 // Writes a temporary file beside `path` (a unique hidden name, created exclusively: never an existing file or link;

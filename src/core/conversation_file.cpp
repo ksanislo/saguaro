@@ -562,6 +562,7 @@ public:
         if (ok && used_ && progress) (*progress)(total_, expected);   // the last, partial block
         ok = ok && (padded == used_ || f_.truncate(total_));
         if (ok && durable && phase) phase("flush", total_);
+        if (ok && cancelled && cancelled()) { fail_with(ECANCELED); ok = false; }   // (before the flush, which can be long)
         if (ok && durable && flush_fault) { fail_with(flush_fault); ok = false; }
         ok = ok && (!durable || f_.sync());
         ok = f_.close() && ok;
@@ -571,10 +572,12 @@ public:
     SessionPhase phase;
     uint64_t expected = 0;
     int write_fault = 0, flush_fault = 0;   // tests: errno values injected at the first block write / the file flush
+    std::function<bool()> cancelled;        // SessionWriteOptions::cancelled
 private:
     void fail_with(int e) { fault_ = true; fault_kind_ = errno_kind(e); fault_msg_ = std::strerror(e); }
     bool drain() {
         if (write_fault) { fail_with(write_fault); return false; }
+        if (cancelled && cancelled()) { fail_with(ECANCELED); return false; }
         if (!f_.write_all(buf_.get(), used_)) return false;
         used_ = 0;
         if (progress) (*progress)(total_, expected);
@@ -1173,6 +1176,7 @@ bool write_impl(const std::string& path, const SavedConversation& image, const s
     const std::function<int(const char*)>* fault = opt.fault ? &opt.fault : nullptr;
     f.write_fault = injected(fault, "write");
     f.flush_fault = injected(fault, "file_flush");
+    f.cancelled = opt.cancelled;
     uint8_t h[kHeader];
     header_bytes(h, id, payload, version);
     bool ok = f.write(h, kHeader);

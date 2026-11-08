@@ -66,8 +66,10 @@ public:
     bool write_now(const SavedConversation& meta, const std::vector<SessionKvSource>& kv,
                    const std::vector<std::vector<SessionKvSource>>& stage_kv, size_t& bytes, std::string& error,
                    const std::vector<ConversationCheckpoint>* chain = nullptr);
-    // Before the caller moves `image` out (take): a queued write of it is dropped, a running one is waited for, with a
-    // watchdog beat each time that write moves.
+    // Before the caller moves `image` out (take): a queued write of it is dropped; a running one is cancelled - it stops
+    // at its next block and its temporary file is removed (the conversation is in RAM again, its file is not needed) -
+    // and waited for until it has stopped, with a watchdog beat each time it moves.  A write already in its flush or
+    // publish is waited for to the end (it still reads the image to index the file).
     void claim(const SavedConversation* image);
     // The images the preload has read, for the caller's cache (each file's image once).
     std::vector<SavedConversation> take_preloaded();
@@ -127,6 +129,8 @@ private:
     std::condition_variable cv_;
     std::atomic<uint64_t> write_moved_{0};      // the background write's blocks and blocking steps so far
     std::atomic<uint64_t> write_blocking_{0};   // the bytes of the blocking step it is in, 0: streaming
+    // claim: the image whose running write is to stop at its next block (its file is not needed: it was taken back)
+    std::atomic<const SavedConversation*> write_cancel_{nullptr};
     std::vector<Entry> entries_;
     std::deque<Job> jobs_;
     std::vector<Ready> ready_;

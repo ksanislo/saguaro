@@ -133,25 +133,38 @@ int main() {
         sd2.flush();
         check(session_files(dir) == 2, "claim drops a queued write");
 
-        // claim during a running write: the wait beats while the write moves, and the write finishes first
+        // claim during a running write: the write is cancelled at its next block, leaves no file (temporary or
+        // published), and claim returns long before the write would have ended
         {
             std::atomic<bool> writing{false};
+            std::atomic<int> blocks{0};
             SessionDir::Options moving = opts(dir, id);
             moving.write_delay = std::chrono::milliseconds(0);
             moving.write_block = [&] {
                 writing = true;
-                std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+                ++blocks;
+                std::this_thread::sleep_for(std::chrono::milliseconds(300));
             };
             SessionDir sd3(moving);
             sd3.open();
             auto w = std::make_shared<SavedConversation>(conv(tokens(90000, 2000), 4));
+            const size_t entries_before = std::distance(fs::directory_iterator(dir), fs::directory_iterator{});
             sd3.write(w);
             while (!writing) std::this_thread::yield();
-            const uint64_t beats = progress().beats.load();
+            const auto t0 = std::chrono::steady_clock::now();
             sd3.claim(w.get());
-            check(progress().beats.load() > beats, "claim beats while a running write moves");
-            check(session_files(dir) == 3, "claim returns after the running write finished");
+            const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+            check(ms < 1500.0, "claim stops a running write within about one block");
+            check(blocks.load() <= 3, "the cancelled write stops at its next block");
+            check(session_files(dir) == 2, "a cancelled write publishes no file");
+            const size_t entries_after = std::distance(fs::directory_iterator(dir), fs::directory_iterator{});
+            check(entries_after == entries_before, "a cancelled write leaves no temporary file");
             check(std::strcmp(progress().where.load(), "request") == 0, "claim puts the stage back");
+            // the next write of the same folder is not cancelled by the old claim
+            auto w2 = std::make_shared<SavedConversation>(conv(tokens(91000, 2000), 4));
+            sd3.write(w2);
+            sd3.flush();
+            check(session_files(dir) == 3, "a write after a cancelled one completes");
         }
     }
     // a parked conversation still inside its write delay at exit: written by flush, and by the destructor alone

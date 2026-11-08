@@ -144,10 +144,13 @@ void SessionDir::claim(const SavedConversation* image) {
     jobs_.erase(std::remove_if(jobs_.begin(), jobs_.end(), [&](const Job& j) { return j.image.get() == image; }),
                 jobs_.end());
     if (writing_ != image) return;
-    // A big conversation's write outlasts the engine's watchdog (838K tokens: 71 s) and the request waits here on the
-    // engine's own thread.  It beats only when the write moved, so a write that hangs still ends in the watchdog; a
-    // step that blocks in one call (the file's flush) gets its allowance, as in the SAVE command.
-    progress_at("request: waiting for its session file write");
+    // The running write is cancelled: it stops before its next block (or before its flush) and removes its temporary
+    // file.  It used to be waited for to the end - 81 s for a 611K conversation (9 GB) - while the request that took
+    // the conversation back sat here.  What is left to wait for is one block, or a flush or publish already started.
+    // It beats only when the write moved, so a write that hangs still ends in the watchdog; a step that blocks in one
+    // call (the file's flush) gets its allowance, as in the SAVE command.
+    write_cancel_.store(image, std::memory_order_relaxed);
+    progress_at("request: waiting for its session file write to stop");
     uint64_t seen = UINT64_MAX;
     while (writing_ == image) {
         const uint64_t moved = write_moved_.load(std::memory_order_relaxed);
@@ -158,6 +161,7 @@ void SessionDir::claim(const SavedConversation* image) {
         }
         cv_.wait_for(lk, std::chrono::seconds(1));
     }
+    write_cancel_.store(nullptr, std::memory_order_relaxed);
     progress_allow(0);
     progress_at("request");
 }
@@ -213,6 +217,8 @@ void SessionDir::writer_loop() {
             write_blocking_.store(bytes, std::memory_order_relaxed);
             write_moved_.fetch_add(1, std::memory_order_relaxed);
         };
+        const SavedConversation* const img = job.image.get();
+        wo.cancelled = [this, img] { return write_cancel_.load(std::memory_order_relaxed) == img; };
         size_t written = 0;
         std::string err;
         SessionStatus st;
@@ -224,6 +230,10 @@ void SessionDir::writer_loop() {
         writing_ = nullptr;
         if (ok) {
             add_written_locked(path, *job.image, written, s, "wrote");
+        } else if (write_cancel_.load(std::memory_order_relaxed) == job.image.get()) {
+            say("write of " + std::to_string(job.image->live.ids.size()) + " tokens stopped after " +
+                std::to_string((long long) (s * 1000.0)) + " ms: the conversation was taken back");
+            note_locked("write_cancelled", job.image->live.ids.size(), 0, s * 1000.0, "claim");
         } else {
             say("write failed: " + err);
             note_locked("write_failed", job.image->live.ids.size(), 0, s * 1000.0, "error");
