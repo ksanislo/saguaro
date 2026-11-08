@@ -240,6 +240,8 @@ class Engine:
             pass
         with open(self.err_path, encoding="utf-8", errors="replace") as f:
             lines = f.read().splitlines()
+        if os.environ.get("DS4_TEST_SHOW_ERR"):   # (the engine's last lines, for a run that ended early)
+            print("\n".join(lines[-40:]), file=sys.stderr)
         try:
             os.unlink(self.err_path)
         except OSError:
