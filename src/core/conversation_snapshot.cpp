@@ -8,6 +8,12 @@
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <cstdlib>
+#include <thread>
+#include <atomic>
+#include <chrono>
+#include <algorithm>
+#include <vector>
 
 namespace strata::core {
 namespace {
@@ -110,9 +116,51 @@ bool valid(const QsaState& st, const Layout& l, int64_t upto, std::string& error
     return true;
 }
 
+// a host-to-host copy (parked image <-> the pinned host K/V copy under KV streaming) of 64 MiB or more on several
+// threads: one memcpy runs at one core's DDR3 speed (~2 GB/s).  STRATA_SNAPSHOT_COPY_THREADS=N (default 8, 0/1 off)
+bool host_both(const void* dst, const void* src) {
+    cudaPointerAttributes a{}, b{};
+    if (cudaPointerGetAttributes(&a, dst) != cudaSuccess || cudaPointerGetAttributes(&b, src) != cudaSuccess) {
+        cudaGetLastError();
+        return false;
+    }
+    auto host = [](const cudaPointerAttributes& x) {
+        return x.type == cudaMemoryTypeUnregistered || x.type == cudaMemoryTypeHost;
+    };
+    return host(a) && host(b);
+}
+bool host_copy_threaded(void* dst, const void* src, size_t n) {
+    static const int nt = [] {
+        const char* e = std::getenv("STRATA_SNAPSHOT_COPY_THREADS");
+        return e != nullptr ? std::atoi(e) : 8;
+    }();
+    if (nt <= 1 || n < ((size_t) 64 << 20) || !host_both(dst, src)) return false;
+    // 16 MiB slices taken in turn; this thread beats the watchdog while they move (#2049: paged-out parked state
+    // copies at the drive's speed, and a silent copy past 60 s looks like a stall)
+    constexpr size_t kSlice = (size_t) 16 << 20;
+    const size_t slices = (n + kSlice - 1) / kSlice;
+    std::atomic<size_t> next{0}, done{0};
+    std::vector<std::thread> th;
+    for (int t = 0; t < nt; ++t)
+        th.emplace_back([&] {
+            for (size_t i; (i = next.fetch_add(1)) < slices; done.fetch_add(1)) {
+                const size_t at = i * kSlice, len = std::min(kSlice, n - at);
+                std::memcpy(static_cast<uint8_t*>(dst) + at, static_cast<const uint8_t*>(src) + at, len);
+            }
+        });
+    size_t seen = 0;
+    while (done.load() < slices) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        if (const size_t d = done.load(); d != seen) { seen = d; core::progress_beat(); }
+    }
+    for (auto& x : th) x.join();
+    core::progress_beat();
+    return true;
+}
 bool transfer(void* dst, const void* src, size_t n, std::string& error) {
     if (!n) return true;
     if (!src || !dst) { error = "conversation snapshot: missing state buffer"; return false; }
+    if (host_copy_threaded(dst, src, n)) return true;
     // Default handles both device allocations and device-mapped host pool aliases.
     const cudaError_t e = conversation_detail::copy_nonblocking(dst, src, n);
     if (e == cudaSuccess) return true;
