@@ -78,8 +78,9 @@ public:
     // A conversation the caller's cache let go of before its file was written (queued behind write_delay, or being
     // written) is not lost: it lives on in the writer's queue, and is taken from there when it beats the files - a
     // queued write is dropped, a running one cancelled (claim) - and returned whole (every checkpoint, no read).
+    // *in_ram says which: true for such an image (it has no file: a caller that cannot use it should keep it).
     std::optional<SavedConversation> fetch(const std::vector<int32_t>& ids, const std::vector<ConversationImageKey>& imgs,
-                                           bool cvec, int64_t beat, int64_t& tokens);
+                                           bool cvec, int64_t beat, int64_t& tokens, bool* in_ram = nullptr);
     // The engine is quitting: writes from here on are labelled as the shutdown's.
     void begin_exit();
     // Write every queued image now and wait until they are on disk.

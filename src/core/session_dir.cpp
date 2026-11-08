@@ -369,7 +369,8 @@ int64_t SessionDir::match_image(const SavedConversation& s, const std::vector<in
 
 std::optional<SavedConversation> SessionDir::fetch(const std::vector<int32_t>& ids,
                                                    const std::vector<ConversationImageKey>& imgs, bool cvec,
-                                                   int64_t beat, int64_t& tokens) {
+                                                   int64_t beat, int64_t& tokens, bool* in_ram) {
+    if (in_ram) *in_ram = false;
     std::unique_lock<std::mutex> lk(mu_);
     for (;;) {
         size_t best = entries_.size();
@@ -414,6 +415,7 @@ std::optional<SavedConversation> SessionDir::fetch(const std::vector<int32_t>& i
                 say(b);
                 note_locked("taken_back", out.live.ids.size(), 0, ms, mem_running ? "running" : "queued");
                 tokens = mem_t;
+                if (in_ram) *in_ram = true;
                 return out;
             }
             continue;   // (someone took a reference meanwhile: look again)

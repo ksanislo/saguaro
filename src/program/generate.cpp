@@ -17722,12 +17722,13 @@ int main(int argc, char** argv) {
             }
             std::optional<strata::core::SavedConversation> fetched;   // --session-dir: a file this prompt continues
             int64_t from_disk = 0;
+            bool fetched_ram = false;   // (taken back from the writer: no file behind it - see SessionDir::fetch)
             if (sdir && o.prompt_cache > 0) {
                 for (auto& im : sdir->take_preloaded()) conversations.put(std::move(im));
                 const auto held_best = conversations.best(ids, req_imgs, want_cvec, yarn_plain);
                 const std::vector<int32_t> ids32(ids.begin(), ids.end());   // the files hold 32-bit token ids
                 fetched = sdir->fetch(ids32, req_imgs, want_cvec, std::max({resume, slot_tokens, held_best.tokens}),
-                                      from_disk);
+                                      from_disk, &fetched_ram);
             }
             const auto parked = conversations.best(ids, req_imgs, want_cvec, yarn_plain);
             std::optional<strata::core::SavedConversation> incoming;
@@ -17746,7 +17747,8 @@ int main(int argc, char** argv) {
                 // straight to the cards, not through the cache: its K/V are views into the file (no RAM copy), so
                 // this works with parking off too (low RAM)
                 incoming = std::move(fetched);
-                incoming_src = "disk";
+                fetched.reset();
+                incoming_src = fetched_ram ? "ram" : "disk";
                 incoming_tokens = from_disk;
                 incoming_live = strata::core::conversation_prefix(incoming->live, ids, req_imgs) == from_disk;
                 borrow = false;
@@ -17757,6 +17759,11 @@ int main(int argc, char** argv) {
                 incoming_tokens = parked.tokens;
                 incoming_live = parked.live;
             }
+            // (an image taken back from the session dir's writer and not used here has no file: into the cache with it)
+            if (fetched && fetched_ram && !conversations.put(std::move(*fetched)))
+                std::fprintf(stderr, "strata serve: conversation cache: could not keep a conversation taken back from "
+                                     "the session dir's writer\n");
+            fetched.reset();
             if (incoming || borrow) slot_source = -1;
             // Reject the entire image before parking/overwriting the outgoing
             // state. Invalid entries can safely fall back to its existing prefix.
