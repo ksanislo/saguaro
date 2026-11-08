@@ -1370,7 +1370,18 @@ static int glm_pack_generate(const Options& o) {
     // sizes) and whether the draft block is loaded.  The split itself is checked by slot_load (each part's layers).
     const std::string slot_identity = [&] {
         std::ostringstream id;
-        id << "maya-session-2 engine=" << STRATA_VERSION << " mtp=" << (model.has_mtp() ? 1 : 0);
+        // the state's layout, not the build (every version bump dropped every kept conversation): kSlotFormat moves
+        // when a slot's bytes change meaning; the geometry and the latent's storage are in it too.
+        // MAYA_GLM_SLOT_ID_ENGINE=1: the build's version in it as before.
+        constexpr int kSlotFormat = 1;
+        if (env_num("STRATA_GLM_SLOT_ID_ENGINE", 0) != 0) id << "maya-session-2 engine=" << STRATA_VERSION;
+        else {
+            const auto& gg = model.geometry();
+            id << "maya-session-3 fmt=" << kSlotFormat << " kv8=" << (getenv("STRATA_GLM_KV_INT8") != nullptr ? 1 : 0)
+               << " geo=" << gg.n_embd << "," << gg.n_layers << "," << gg.kv_lora << "," << gg.idx_key << ","
+               << gg.idx_kpool << "," << gg.kda_head_dim << "," << gg.d_conv << "," << gg.hc;
+        }
+        id << " mtp=" << (model.has_mtp() ? 1 : 0);
         std::error_code ec;
         for (const char* f : {"index.txt", "dense.bin", "native_experts.txt"})
             id << " " << f << ":" << (unsigned long long) fs::file_size(fs::path(o.glm_pack) / f, ec);
