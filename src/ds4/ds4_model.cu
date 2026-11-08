@@ -9606,7 +9606,14 @@ struct Model::Impl {
             return ec ? 0ull : (unsigned long long) s;
         };
         std::ostringstream id;
-        id << "maya-ds4-session-2 engine=" << STRATA_VERSION << " mtp=" << g.n_mtp << " dim=" << g.dim << " hd=" << g.hd
+        // the state's layout, not the build (#: every version bump dropped every kept conversation): kSlotFormat moves
+        // when a slot's bytes change meaning, and the sizes of its parts are in the identity too, so a layout change
+        // that forgets the bump still does not load.  MAYA_DS4_SLOT_ID_ENGINE=1: the build's version in it as before.
+        constexpr int kSlotFormat = 1;
+        static const bool by_engine = ds4_env("DS4_SLOT_ID_ENGINE") != nullptr && std::atoi(ds4_env("DS4_SLOT_ID_ENGINE")) != 0;
+        if (by_engine) id << "maya-ds4-session-2 engine=" << STRATA_VERSION;
+        else id << "maya-ds4-session-3 fmt=" << kSlotFormat << " check=" << check_bytes();
+        id << " mtp=" << g.n_mtp << " dim=" << g.dim << " hd=" << g.hd
            << " win=" << g.win << " ratios=";
         for (int r : g.ratios) id << r << ",";
         id << " kv=";
