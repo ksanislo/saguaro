@@ -3520,6 +3520,22 @@ int check_rewind(strata::ds4::Model& m, const std::vector<int>& ids, int n) {
         const double t1 = now_ms();
         m.reset();
         if (!m.feed(ids.data(), (int) p, 0, err, N - (int) p) || !rest(la, ta)) break;
+        std::vector<float> lc;   // (a second read to p: the run-to-run spread the rewind is judged against)
+        std::vector<int> tc;
+        m.reset();
+        if (!m.feed(ids.data(), (int) p, 0, err, N - (int) p) || !rest(lc, tc)) break;
+        std::vector<float> ld;   // (today's way: a full read keeping a restore point at p, then back to it)
+        std::vector<int> td;
+        m.reset();
+        {
+            const std::vector<std::pair<int64_t, bool>> at1{{p, false}};
+            if (!m.feed_marks(ids.data(), N, 1, 1, at1, err)) break;
+            if (!m.restore(p) || m.pos() != p) {
+                err = "the restore point at " + std::to_string(p) + " is not there";
+                break;
+            }
+            if (!rest(ld, td)) break;
+        }
         int64_t ring_diff = 0, ring_cb = 0;
         const int64_t row_diff = m.slot_rows_diff(C, B, ring_cb);    // nothing wrote them
         const int64_t row_ab = m.slot_rows_diff(A, B, ring_diff);    // (a read to p: also its chunks' rounding)
@@ -3541,12 +3557,32 @@ int check_rewind(strata::ds4::Model& m, const std::vector<int>& ids, int n) {
                 klv += pa * (lpa - lpb);
             }
         }
+        const auto klf = [](const std::vector<float>& x, const std::vector<float>& y) {
+            if (x.size() != y.size() || x.empty()) return 1e30;
+            double mx = -1e30, my = -1e30, zx = 0, zy = 0, k = 0;
+            for (size_t i = 0; i < x.size(); ++i) mx = std::max(mx, (double) x[i]), my = std::max(my, (double) y[i]);
+            for (size_t i = 0; i < x.size(); ++i) zx += std::exp(x[i] - mx), zy += std::exp(y[i] - my);
+            for (size_t i = 0; i < x.size(); ++i)
+                k += std::exp(x[i] - mx) / zx * ((x[i] - mx - std::log(zx)) - (y[i] - my - std::log(zy)));
+            return k;
+        };
+        const double kl_base = klf(la, lc);
+        const double kl_mark = klf(la, ld);
+        int same_mark = 0;
+        while (same_mark < (int) ta.size() && same_mark < (int) td.size() && ta[same_mark] == td[same_mark]) ++same_mark;
+        int same_base = 0;
+        while (same_base < (int) ta.size() && same_base < (int) tc.size() && ta[same_base] == tc[same_base]) ++same_base;
         int same = 0;
         while (same < (int) ta.size() && same < (int) tb.size() && ta[same] == tb[same]) ++same;
-        const bool ok = lay && row_diff == 0 && devs_same && same == (int) ta.size();
+        // (Maya is not bit-repeatable: the rewind passes on its rows, and on logits within ~3x two plain reads' spread)
+        const bool ok = lay && row_diff == 0 && devs_same && klv <= 3.0 * std::max({kl_base, kl_mark, 1e-4});
         bad += !ok;
         std::printf("rewind check p=%lld: every device's rows (%zu copies) %s\n", (long long) p, h0.size(),
                     devs_same ? "unchanged" : "CHANGED");
+        std::printf("rewind check p=%lld: two plain reads to p: logits KL %.3g, %d/%zu greedy tokens the same (the spread)\n",
+                    (long long) p, kl_base, same_base, ta.size());
+        std::printf("rewind check p=%lld: a restore point at p (today's way) vs a read to p: logits KL %.3g, %d/%zu greedy "
+                    "tokens the same\n", (long long) p, kl_mark, same_mark, ta.size());
         std::printf("rewind check p=%lld (from %lld): rows vs the full read's %s (%lld bytes differ), vs a read to p %lld "
                     "bytes differ; rings+groups vs a read to p %lld bytes differ; logits max diff %.3g KL %.3g; %d/%zu greedy "
                     "tokens the same; read to p %.0f ms, rewind %.0f ms%s\n",
