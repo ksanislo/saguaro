@@ -792,7 +792,7 @@ def deepseek_restore_points(ids, user_id, system_id=None, tail=512, least=RESTOR
         grid = []
         for g in range(spacing, len(ids), spacing):
             q = [p for p in early if p <= g]
-            if q and q[-1] != near and q[-1] not in grid:
+            if q and q[-1] not in grid:   # (the near point may be one too: the window does not shift)
                 grid.append(q[-1])
         pick = [near] + grid[::-1][:k - 1]
         marks.extend(p for p in pick if p not in marks)

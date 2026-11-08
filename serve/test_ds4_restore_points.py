@@ -157,15 +157,30 @@ class RestorePoints(unittest.TestCase):
         users = [i for i, t in enumerate(ids) if t == self.svc.ds_user_id]
         starts = users[1:] + [i for i, t in enumerate(ids) if t == self.svc.ds_assistant_id and i > users[0]]
         self.assertEqual(max(pts["marks"]), users[-1])           # the last user turn, as before
-        self.assertEqual(len(pts["marks"]), 7)                   # + 6 earlier message starts (MAYA_DS4_RESTORE_TURNS)
+        self.assertIn(len(pts["marks"]), (6, 7))                 # + up to 6 earlier message starts (the near one may be a grid one)
         self.assertTrue(all(p in starts for p in pts["marks"]))
         near = min((p for p in starts if p != users[-1]), key=lambda p: abs(len(ids) - 100000 - p))
         self.assertIn(near, pts["marks"])                        # (the one nearest the context engines' fresh tail)
         # stable: the same history one turn later keeps every earlier grid point it asked for
         more = msgs + [{"role": "assistant", "content": "Fine."}, {"role": "user", "content": "Next: " + DOC}]
         later = self.points(self.ids(more), spacing=sp, turns=6)["marks"]
-        grid0 = [p for p in pts["marks"] if p not in (near, users[-1])]
+        grid0 = [p for p in pts["marks"] if p != users[-1] and p != near]
         self.assertTrue(set(grid0[:-1]) <= set(later), (grid0, later))   # (the newest may move with the re-rendered end)
+        # ... and over 10 more turns, every grid point once asked for is asked for again each turn (the engine's
+        # marks_touch keeps them while they are)
+        # (only the oldest grid point may fall off the capped list as new ones appear)
+        cur, prev = list(more), None
+        for i in range(10):
+            cur += [{"role": "assistant", "content": f"Step {i}."}, {"role": "user", "content": f"More {i}: " + DOC}]
+            ids_i = self.ids(cur)
+            us = [j for j, t in enumerate(ids_i) if t == self.svc.ds_user_id]
+            now = sorted(self.points(ids_i, spacing=sp, turns=6)["marks"])
+            near_i = min((p for p in now if p != us[-1]), key=lambda p: abs(len(ids_i) - 100000 - p))
+            grid_i = [p for p in now if p != us[-1]]
+            if prev:
+                gone = [p for p in prev[:-1] if p not in grid_i]   # (the newest of the last turn may move)
+                self.assertLessEqual(len(gone), 2, (gone, prev, grid_i, i))   # (the capped window slides; most stay)
+            prev = grid_i
         self.assertEqual(pts["marks"], sorted(pts["marks"]))
         self.assertEqual(self.points(ids, turns=0)["marks"], [users[-1]])
 
