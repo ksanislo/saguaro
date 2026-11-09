@@ -10505,8 +10505,37 @@ int main(int argc, char** argv) {
         };
         // #752: the whole park (the checkpoint split included) is under one try, so a host OOM skips parking instead of
         // ending the server
+        // A request that keeps no conversation ("strata_checkpoint": false) leaves the session past the conversation it
+        // continued, so live_ok is false - but the chain's checkpoints are prefixes of what the session holds (a
+        // request keeps only the ones at or below where it resumed and rewrites only the cells past that).  The
+        // deepest one's running state goes back and its tokens become the live conversation, so it is parked instead
+        // of dropped with all its checkpoints.  Not when the cache already holds that prefix (a borrowed image: a
+        // second copy would only take its room), and not after non-finite logits (#879: every checkpoint goes).
+        auto live_from_checks = [&]() {
+            if (live_ok || nan_flush || o.prompt_cache <= 0 || checks.empty()) return;
+            const ConvCheckpoint* c = nullptr;
+            for (const ConvCheckpoint& k : checks)
+                if (!k.ids.empty() && k.ids.size() <= live.size() && std::equal(k.ids.begin(), k.ids.end(), live.begin()) &&
+                    (c == nullptr || k.ids.size() > c->ids.size()))
+                    c = &k;
+            if (c == nullptr || c->stage_parts.size() != stages.size()) return;
+            if ((size_t) conversations.best(c->ids, c->imgs, cvec_cached).tokens >= c->ids.size()) return;
+            if (!checkpoint_restore(*c, ss, g)) return;
+            for (size_t i = 0; i < stages.size(); ++i) {
+                const strata::core::OnDevice on(stages[i]->dev);
+                if (!checkpoint_restore(c->stage_parts[i], stages[i]->ss, g)) return;
+            }
+            std::fprintf(stderr, "strata serve: conversation cache: the last request kept no conversation; its deepest "
+                                 "checkpoint (%zu of the session's %zu tokens) goes on as the live one\n",
+                         c->ids.size(), live.size());
+            const size_t n = c->ids.size();
+            live.resize(n);   // (c's tokens: checked above)
+            live_imgs = c->imgs;
+            live_ok = true;
+        };
         auto park_current = [&](size_t held) -> bool {
             try {
+                live_from_checks();
                 if (!live_ok || live.empty()) return true;
                 return park_body(ParkFrom{live, live_imgs, checks, cvec_cached, -1}, held);
             }
