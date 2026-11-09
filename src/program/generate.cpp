@@ -17779,10 +17779,9 @@ int main(int argc, char** argv) {
             // A checkpoint inside ANOTHER parked conversation (a sibling subagent's system prompt and tools, say) is
             // borrowed: its K/V up to there and the checkpoint come over, and that conversation stays parked for its
             // own next turn (ConversationCache::borrows).  Everything else is taken whole, as before.
-            // (a layer split restores whole stage images only, so it never borrows; a batch slot that holds a longer
-            // start of this prompt wins as before)
-            bool borrow = stages.empty() && parked.tokens > std::max(resume, slot_tokens) &&
-                          conversations.borrows(parked);
+            // (a layer split borrows stage by stage: each stage image's K/V up to there and the checkpoint's parts;
+            // a batch slot that holds a longer start of this prompt wins as before)
+            bool borrow = parked.tokens > std::max(resume, slot_tokens) && conversations.borrows(parked);
             if (fetched && from_disk > std::max({resume, slot_tokens, parked.tokens})) {
                 // straight to the cards, not through the cache: its K/V are views into the file (no RAM copy), so
                 // this works with parking off too (low RAM)
@@ -17873,9 +17872,21 @@ int main(int argc, char** argv) {
             }
             if (borrow) {
                 const strata::core::SavedConversation* donor = conversations.find(parked.serial);
-                if (donor == nullptr ||
-                    !strata::core::conversation_snapshot_validate(*donor, ss, g, use_mtp ? &mtp.kv_state() : nullptr,
-                                                                  err)) {
+                // (a layer split: every stage image, and its checkpoints in line with the first stage's - the
+                // checkpoint mounted at parked.tokens needs all its parts)
+                bool stages_ok = donor != nullptr && donor->stage_images.size() == stages.size();
+                for (size_t i = 0; stages_ok && i < stages.size(); ++i) {
+                    const auto& sc = donor->stage_images[i].checkpoints;
+                    stages_ok = sc.size() == donor->checkpoints.size();
+                    for (size_t j = 0; stages_ok && j < sc.size(); ++j) stages_ok = sc[j].ids == donor->checkpoints[j].ids;
+                    if (!stages_ok) { err = "its stage images' checkpoints do not line up"; break; }
+                    const strata::core::OnDevice on(stages[i]->dev);
+                    stages_ok = strata::core::conversation_snapshot_validate(donor->stage_images[i], stages[i]->ss, g,
+                        use_mtp && !mtp_first && i + 1 == stages.size() ? &mtp.kv_state() : nullptr, err);
+                }
+                if (donor == nullptr || !stages_ok ||
+                    !strata::core::conversation_snapshot_validate(*donor, ss, g,
+                        use_mtp && (stages.empty() || mtp_first) ? &mtp.kv_state() : nullptr, err)) {
                     std::fprintf(stderr, "strata serve: conversation cache: cannot borrow from a parked conversation "
                                          "(%s)\n", err.empty() ? "gone" : err.c_str());
                     borrow = false;
@@ -18010,9 +18021,17 @@ int main(int argc, char** argv) {
             if (borrow) {
                 const auto t0 = Clock::now();
                 const strata::core::SavedConversation* donor = conversations.find(parked.serial);   // still parked
-                if (donor == nullptr ||
+                bool stages_ok = donor != nullptr && donor->stage_images.size() == stages.size();
+                for (size_t i = 0; stages_ok && i < stages.size(); ++i) {   // the later stages' parts
+                    const strata::core::OnDevice on(stages[i]->dev);
+                    stages_ok = strata::core::conversation_snapshot_restore_prefix(donor->stage_images[i], parked.tokens,
+                                    stages[i]->ss, g, use_mtp && !mtp_first && i + 1 == stages.size() ? &mtp.kv_state() : nullptr,
+                                    err) == strata::core::ConversationRestore::restored &&
+                                strata::core::device_sync() == cudaSuccess;
+                }
+                if (donor == nullptr || !stages_ok ||
                     strata::core::conversation_snapshot_restore_prefix(*donor, parked.tokens, ss, g,
-                                                                       use_mtp ? &mtp.kv_state() : nullptr, err) !=
+                        use_mtp && (stages.empty() || mtp_first) ? &mtp.kv_state() : nullptr, err) !=
                         strata::core::ConversationRestore::restored) {
                     // validated above and guarded while parking: a failure here is fatal, as for a whole restore
                     std::printf("ERR restoring a borrowed conversation prefix: %s\n",
@@ -18022,8 +18041,20 @@ int main(int argc, char** argv) {
                 // the donor's checkpoints on this prompt's path, copied: the donor keeps its own (the one at
                 // parked.tokens is mounted below, as for any checkpoint resume)
                 checks.clear();
-                for (const ConvCheckpoint& c : donor->checkpoints)
-                    if ((int64_t) c.ids.size() <= parked.tokens && starts_with(c.ids, c.imgs)) checks.push_back(c);
+                if (stages.empty()) {
+                    for (const ConvCheckpoint& c : donor->checkpoints)
+                        if ((int64_t) c.ids.size() <= parked.tokens && starts_with(c.ids, c.imgs)) checks.push_back(c);
+                } else {   // a layer split: each checkpoint with its stage parts (copies; validated above to line up)
+                    strata::core::ConversationCheckpointSplit cs;
+                    cs.parts.resize(stages.size());
+                    for (size_t j = 0; j < donor->checkpoints.size(); ++j) {
+                        const ConvCheckpoint& c = donor->checkpoints[j];
+                        if ((int64_t) c.ids.size() > parked.tokens || !starts_with(c.ids, c.imgs)) continue;
+                        cs.stage0.push_back(c);
+                        for (size_t i = 0; i < stages.size(); ++i) cs.parts[i].push_back(donor->stage_images[i].checkpoints[j]);
+                    }
+                    if (!strata::core::conversation_checkpoints_merge(std::move(cs), checks)) checks.clear();
+                }
                 for (const ConvCheckpoint& c : checks)
                     if ((int64_t) c.ids.size() == parked.tokens) { live = c.ids; live_imgs = c.imgs; }
                 cvec_cached = donor->cvec;

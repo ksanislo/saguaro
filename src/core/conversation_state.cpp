@@ -468,11 +468,8 @@ ConversationRestore conversation_snapshot_restore_prefix(const SavedConversation
 ConversationRestore conversation_snapshot_restore_prefix(const SavedConversation& image, int64_t upto,
                                                           SessionState& ss, const ModelGeometry& g,
                                                           const QsaState* draft, std::string& error) {
-    // a layer split's image (stage images) is restored stage by stage, never in part
-    if (!image.stage_images.empty()) {
-        fail(error, "a layer split's image restored as a single session");
-        return ConversationRestore::invalid;
-    }
+    // a layer split's image: this restores the first stage's layers (`image.kv`) only, as conversation_snapshot_restore
+    // does; the caller restores each of `image.stage_images` into its stage's session with the same `upto`
     if (!conversation_snapshot_validate(image, ss, g, draft, error)) return ConversationRestore::invalid;
     const int64_t captured = (int64_t) image.live.ids.size();
     if (upto < 1 || upto > captured) {
