@@ -3521,6 +3521,13 @@ int check_rewind(strata::ds4::Model& m, const std::vector<int>& ids, int n) {
         const double t1 = now_ms();
         m.reset();
         if (!m.feed(ids.data(), (int) p, 0, err, N - (int) p) || !rest(la, ta)) break;
+        std::vector<uint8_t> A2;   // (peer, 4u: a second identical read to p - do two plain reads already differ in rows?)
+        m.reset();
+        if (!m.feed(ids.data(), (int) p, 0, err, N - (int) p) || m.slot_save(A2, err) == 0) break;
+        int64_t ring_aa = 0;
+        const int64_t rows_aa = m.slot_rows_diff(A, A2, ring_aa);
+        std::printf("rewind check p=%lld: two identical plain reads to p: rows %lld bytes differ, rings+groups %lld bytes differ\n",
+                    (long long) p, (long long) rows_aa, (long long) ring_aa);
         std::vector<float> lc;   // (a second read to p: the run-to-run spread the rewind is judged against)
         std::vector<int> tc;
         m.reset();
