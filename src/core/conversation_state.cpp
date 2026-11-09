@@ -236,6 +236,7 @@ bool conversation_checkpoint_copy(const SessionState& from, SessionState& to, co
         owned_qsa(from) != owned_qsa(to) || (from.ple_hist != nullptr) != (to.ple_hist != nullptr))
         return fail(error, "direct copy between differently carved sessions");
     auto acopy = [&](void* dst, const void* src, size_t bytes) { return copy(dst, src, bytes, error, queued); };
+    to.rope_level = from.rope_level;   // (as save + restore carry it: a conversation past 262K is at the YaRN level)
     if (!acopy(to.gdn_state, from.gdn_state, zf.gdn) ||
         !acopy(to.ple_hist, from.ple_hist, from.ple_hist ? zf.ple : 0)) return false;
     for (size_t j = 0; j < owned_qsa(from); ++j) {
