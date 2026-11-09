@@ -3525,6 +3525,12 @@ int check_rewind(strata::ds4::Model& m, const std::vector<int>& ids, int n) {
         std::vector<int> tc;
         m.reset();
         if (!m.feed(ids.data(), (int) p, 0, err, N - (int) p) || !rest(lc, tc)) break;
+        std::vector<float> le;   // (control E, peer: a plain read to p in two pieces [0, q) + [q, p), no rewind)
+        std::vector<int> te;
+        m.reset();
+        if (!m.feed(ids.data(), (int) q, 0, err, N - (int) q) || !m.feed(ids.data() + q, (int) (p - q), 0, err, N - (int) p) ||
+            !rest(le, te))
+            break;
         std::vector<float> ld;   // (today's way: a full read keeping a restore point at p, then back to it)
         std::vector<int> td;
         std::vector<uint8_t> Dsl;   // (its state at p: the same rows as the rewind's, rings captured mid-read)
@@ -3582,6 +3588,9 @@ int check_rewind(strata::ds4::Model& m, const std::vector<int>& ids, int n) {
         int64_t ring_bd = 0;
         const int64_t rows_bd = m.slot_rows_diff(B, Dsl, ring_bd);   // (the same full read under both: rows the same)
         const double kl_bd = klf(lb, ld);   // the rebuild's own error: rewind vs the point kept mid-read
+        const double kl_be = klf(lb, le), kl_ae = klf(la, le);
+        int same_be = 0;
+        while (same_be < (int) tb.size() && same_be < (int) te.size() && tb[same_be] == te[same_be]) ++same_be;
         int same_bd = 0;
         while (same_bd < (int) tb.size() && same_bd < (int) td.size() && tb[same_bd] == td[same_bd]) ++same_bd;
         int same_mark = 0;
@@ -3599,6 +3608,9 @@ int check_rewind(strata::ds4::Model& m, const std::vector<int>& ids, int n) {
                     (long long) p, kl_base, same_base, ta.size());
         std::printf("rewind check p=%lld: a restore point at p (today's way) vs a read to p: logits KL %.3g, %d/%zu greedy "
                     "tokens the same\n", (long long) p, kl_mark, same_mark, ta.size());
+        std::printf("rewind check p=%lld: CONTROL E (a read to p in pieces [0,%lld)+[%lld,p)): REWIND vs E logits KL %.3g, %d/%zu "
+                    "greedy the same; a one-piece read to p vs E KL %.3g\n", (long long) p, (long long) q, (long long) q,
+                    kl_be, same_be, tb.size(), kl_ae);
         std::printf("rewind check p=%lld: REWIND vs the restore point at p (same full read): rows %lld bytes differ, rings+groups "
                     "%lld bytes differ, logits KL %.3g, %d/%zu greedy tokens the same\n", (long long) p, (long long) rows_bd,
                     (long long) ring_bd, kl_bd, same_bd, tb.size());
