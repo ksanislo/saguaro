@@ -1500,19 +1500,20 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
             // KV kept, ~5.4K tokens read again for the rings) when that reads less than going back to a restore
             // point - an agent's compaction cut or an edit far past its last restore point.  Not across a picture.
             static const bool rw_on = [] { const char* v = ds4_env("DS4_REWIND"); return v != nullptr && std::atoi(v) > 0; }();
-            int64_t rw = -1;
+            int64_t rw = -1, rw_q = -1;
             if (rw_on && !state_is_prefix && n_state > 0 && (size_t) limit <= n_state) {
                 const int64_t q = m.rewind_from(limit);
                 bool pic_in = false;
                 for (const Pic& pq : pics)
                     if (q >= 0 && pq.start < limit && pq.start + (int64_t) pq.len > q) pic_in = true;
-                if (q >= 0 && !pic_in && limit - q + 2048 < limit - std::max<int64_t>(rs, 0)) rw = limit;
+                if (q >= 0 && !pic_in && limit - q + 2048 < limit - std::max<int64_t>(rs, 0)) rw = limit, rw_q = q;
             }
             // (a kept shared start, when it covers more than the state itself can go back to; a kept conversation
             //  only when it covers more than either)
             const int pi = prefix_find(r.ids, pics, rs > 0 ? (size_t) rs : 0);
             const size_t plen = pi >= 0 ? prefixes[(size_t) pi].tokens.size() : 0;
-            const size_t back = slot_take(r.ids, pics, std::max({rs > 0 ? (size_t) rs : 0, plen, rw > 0 ? (size_t) rw : 0}), whole);
+            // (a kept conversation still wins when its point reads less than the rewind would: past the rewind's start)
+            const size_t back = slot_take(r.ids, pics, std::max({rs > 0 ? (size_t) rs : 0, plen, rw_q > 0 ? (size_t) rw_q : 0}), whole);
             beat();
             if (back > 0) {
                 from = back;
