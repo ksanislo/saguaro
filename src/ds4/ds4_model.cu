@@ -3660,27 +3660,29 @@ struct Model::Impl {
             const size_t hold = (size_t) std::max(0, mv != nullptr ? std::atoi(mv) : 1024) << 20;
             // the owner: its landed partial (and DS4_READ_HELP_CHECK's sum + blob), 192 MB each
             const size_t own_hold = (size_t) (read_help_check() ? 384 : 192) << 20;
-            auto hold_on = [&](int id, size_t bytes) {
-                for (Dev& d : devs)
-                    if (d.id == id && std::none_of(read_help_hold.begin(), read_help_hold.end(),
-                                                   [id](const std::pair<int, void*>& q) { return q.first == id; })) {
-                        void* ptr = nullptr;
-                        CK(cudaSetDevice(d.id));
-                        if (cudaMalloc(&ptr, bytes) == cudaSuccess) {
-                            read_help_hold.push_back({id, ptr});
-                            CK(mem_info(&d.free0, &d.total));
-                        } else
-                            cudaGetLastError();
-                    }
-            };
+            std::vector<std::pair<int, size_t>> want;   // (device id, bytes): helpers first, then owners
             for (const char* p = rh; hold > 0 && *p != '\0';) {
                 const char* c = std::strchr(p, ':');
                 if (c == nullptr) break;
-                hold_on(std::atoi(c + 1), hold);
-                hold_on(std::atoi(p), own_hold);
+                want.push_back({std::atoi(c + 1), hold});
+                want.push_back({std::atoi(p), own_hold});
                 const char* n = std::strchr(c, ',');
                 p = n != nullptr ? n + 1 : c + std::strlen(c);
             }
+            for (const auto& w : want)
+                for (Dev& d : devs) {
+                    if (d.id != w.first) continue;
+                    bool held = false;
+                    for (const auto& q : read_help_hold) held = held || q.first == w.first;
+                    if (held) continue;
+                    void* ptr = nullptr;
+                    CK(cudaSetDevice(d.id));
+                    if (cudaMalloc(&ptr, w.second) == cudaSuccess) {
+                        read_help_hold.push_back({w.first, ptr});
+                        CK(mem_info(&d.free0, &d.total));
+                    } else
+                        cudaGetLastError();
+                }
         }
         // the groups' width: o.tp, less while the experts' blocks do not split in it (a member takes n_ff / tp of each
         // expert: the down's inputs in whole blocks - a GGUF's 256-value types split n_ff 2304 in 1, 3 or 9 parts)
