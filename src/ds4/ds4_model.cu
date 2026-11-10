@@ -5446,6 +5446,13 @@ struct Model::Impl {
             }
             CK(cudaStreamCreateWithFlags(&r.hs, cudaStreamNonBlocking));
             CK(cudaStreamCreateWithFlags(&r.hcs, cudaStreamNonBlocking));
+            // (the kernels' per-stream scratch now: a cudaMalloc on first use, mid-read beside the card's spinning
+            //  hand-off kernel, stalled the first helped read - watchdog 600 s, 11-09)
+            cudaSetDevice(hd.id);
+            if (!x3::prepare(r.hs) || (pk.gguf && !gg::prepare(r.hs))) {
+                cudaSetDevice(od.id);
+                return off("the helper stream's kernel scratch");
+            }
             for (cudaEvent_t* e : {&r.h_a, &r.h_i, &r.h_c, &r.done, &r.b0, &r.b1}) CK(cudaEventCreate(e));
             r.fill.resize((size_t) R);
             r.freed.resize((size_t) R);
