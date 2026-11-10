@@ -18522,7 +18522,21 @@ struct Model::Impl {
         };
         std::future<void> eg_next;
         if (!egs.empty() && eg_src == di) eg_next = std::async(std::launch::async, read_eg, 0);
+        // DS4_READ_HELP: a helper device's host starts chunk k only once chunk k - 1 is through - run ahead (5 chunks of
+        // launches waiting on hand-offs) it fills the card's launch queue, and the owner's launches of its share onto
+        // the card then block in cuLaunchKernel: a deadlock (stacks 11-09)
+        const bool help_dev = std::any_of(read_helps.begin(), read_helps.end(),
+                                          [di](const std::unique_ptr<ReadHelp>& r) { return r->hlp == (int) di; });
         for (int k = 0; k < nk; ++k) {
+            if (help_dev && k >= 1 && (size_t) (k - 1) < chunk_done.size()) {
+                const int back = k - 1;
+                while (!(chunk_rec[(size_t) back].load(std::memory_order_acquire) &&
+                         cudaEventQuery(chunk_done[(size_t) back]) == cudaSuccess)) {
+                    if (eg_abort.load(std::memory_order_acquire) || past_halt(k) || halt.load(std::memory_order_acquire))
+                        break;
+                    std::this_thread::sleep_for(std::chrono::microseconds(100));
+                }
+            }
             if (run_yields) {
                 const int back = k - ((int) groups.size() + kYieldSlack);
                 if (back >= 0)
