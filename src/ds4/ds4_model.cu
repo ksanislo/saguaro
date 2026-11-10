@@ -2130,6 +2130,7 @@ struct Model::Impl {
     // ... and a run of chunks' (prof_chunk): a layer's start, after its attention, after the routing and the shared
     // expert, after its experts (the streamed ones' waits for their reads in it); printed after the run
     bool prof_chunk = false;
+    std::vector<std::array<double, 8>> cprof_dev;   // (DS4_PROF, a prompt's run: the same stages per CUDA device)
     double cprof_ms[8] = {};   // (4, 5: the attention's projections, its compression and indexer; 6, 7: its q, its
                                // sparse attention - 1 then its output's projections)
     double hprof_ms[8] = {}, hprof_last = 0;   // (the host's time between the same marks: one GPU)
@@ -2213,6 +2214,10 @@ struct Model::Impl {
                         break;
                     }
                     sample_ms[m.stage] += ms;
+                    if (chunk_sample) {
+                        if (cprof_dev.size() <= (size_t) m.dev) cprof_dev.resize((size_t) m.dev + 1, std::array<double, 8>{});
+                        cprof_dev[(size_t) m.dev][(size_t) m.stage] += ms;
+                    }
                     it->second = m.ev;
                 } else {
                     last.push_back({m.dev, m.ev});
@@ -19541,6 +19546,14 @@ struct Model::Impl {
                          "ds4 prompt attention GPU time: Engram + mixing + projections %.0f ms, compression + indexer "
                          "%.0f ms, q %.0f ms, sparse attention %.0f ms, output projections %.0f ms\n",
                          cprof_ms[4], cprof_ms[5], cprof_ms[6], cprof_ms[7], cprof_ms[1]);
+            for (size_t dv = 0; dv < cprof_dev.size(); ++dv) {   // (per card: which one sets a read's pace)
+                const auto& c = cprof_dev[dv];
+                const double sum = c[0] + c[1] + c[2] + c[3] + c[4] + c[5] + c[6] + c[7];
+                if (sum <= 0) continue;
+                std::fprintf(stderr, "ds4 prompt GPU time CUDA%zu: %.0f ms - attention %.0f, routing + shared %.0f, experts %.0f, "
+                                     "between layers %.0f\n", dv, sum, c[4] + c[5] + c[6] + c[7] + c[1], c[2], c[3], c[0]);
+            }
+            cprof_dev.clear();
             std::fprintf(stderr,
                          "ds4 prompt host time between the same marks: attention %.0f ms, routing + shared expert %.0f ms, "
                          "experts %.0f ms, between layers %.0f ms\n",
