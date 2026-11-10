@@ -6600,7 +6600,7 @@ struct Model::Impl {
                 }();
                 auto lent_v = [&](size_t i) {
                     const int e = fit(c, i).e, sl = L0.slot[(size_t) e];
-                    return lent && sl >= L0.pv_n && sl < L0.n_slots;
+                    return lent && L0.nm == 1 && sl >= L0.pv_n && sl < L0.n_slots;   // (one-GPU layers: L0's slot map)
                 };
                 bool any = false;
                 if (fat_lent)
