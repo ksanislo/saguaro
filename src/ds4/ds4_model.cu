@@ -19614,7 +19614,7 @@ struct Model::Impl {
                                                      : ("; MISMATCH: " + std::to_string(differ.load()) +
                                                         " parts differ - their experts to the CPU lane").c_str())
                                : "");
-        } else if (o.verbose || n_bad > 0 || check) {
+        } else if (o.verbose || n_bad > 0 || check || (!jobs.empty() && devs.size() > 1)) {   // (4 cards: every hand-back)
             std::fprintf(stderr, "ds4: the prompt path's room handed back: %zu experts (%.2f GB) read into VRAM again in %.0f ms%s%s\n",
                          jobs.size(), bytes / 1e9, now_ms() - t0,
                          n_bad > 0 ? (", " + std::to_string(n_bad) + " of them not (to the CPU lane)").c_str() : "",
