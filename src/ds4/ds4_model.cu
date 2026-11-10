@@ -3658,21 +3658,26 @@ struct Model::Impl {
             // DS4_READ_HELP: hold the helpers' scratch room (DS4_READ_HELP_MIB, 1024) before expert placement sizes the pools
             const char* mv = ds4_env("DS4_READ_HELP_MIB");
             const size_t hold = (size_t) std::max(0, mv != nullptr ? std::atoi(mv) : 1024) << 20;
-            for (const char* p = rh; hold > 0 && *p != '\0';) {
-                const char* c = std::strchr(p, ':');
-                if (c == nullptr) break;
-                const int h = std::atoi(c + 1);
+            // the owner: its landed partial (and DS4_READ_HELP_CHECK's sum + blob), 192 MB each
+            const size_t own_hold = (size_t) (read_help_check() ? 384 : 192) << 20;
+            auto hold_on = [&](int id, size_t bytes) {
                 for (Dev& d : devs)
-                    if (d.id == h && std::none_of(read_help_hold.begin(), read_help_hold.end(),
-                                                  [h](const std::pair<int, void*>& q) { return q.first == h; })) {
+                    if (d.id == id && std::none_of(read_help_hold.begin(), read_help_hold.end(),
+                                                   [id](const std::pair<int, void*>& q) { return q.first == id; })) {
                         void* ptr = nullptr;
                         CK(cudaSetDevice(d.id));
-                        if (cudaMalloc(&ptr, hold) == cudaSuccess) {
-                            read_help_hold.push_back({h, ptr});
+                        if (cudaMalloc(&ptr, bytes) == cudaSuccess) {
+                            read_help_hold.push_back({id, ptr});
                             CK(mem_info(&d.free0, &d.total));
                         } else
                             cudaGetLastError();
                     }
+            };
+            for (const char* p = rh; hold > 0 && *p != '\0';) {
+                const char* c = std::strchr(p, ':');
+                if (c == nullptr) break;
+                hold_on(std::atoi(c + 1), hold);
+                hold_on(std::atoi(p), own_hold);
                 const char* n = std::strchr(c, ',');
                 p = n != nullptr ? n + 1 : c + std::strlen(c);
             }
@@ -5460,7 +5465,8 @@ struct Model::Impl {
                 for (cudaEvent_t& e : *vv) CK(cudaEventCreateWithFlags(&e, cudaEventDisableTiming));
             CK(mem_info(&fr1, &tot));
             cudaSetDevice(od.id);
-            if (!dalloc(od, r.oacc, C * D, err)) {
+            if (!dalloc(od, r.oacc, C * D, err) ||
+                (read_help_check() && (!dalloc(od, r.chk, C * D, err) || !dalloc(od, r.chk_blob, oc.ring_stride, err)))) {
                 cudaGetLastError();
                 return off("the owner's partial buffer: " + err);
             }
