@@ -5614,6 +5614,12 @@ struct Model::Impl {
     // multiply (iq::f16_rows), the library's GEMM takes them at its own speed.  DS4_FAT_ROWS=N (default 64; 0: off)
     // takes the experts of N rows or more; the same products, only the sums' order differs
     // (3x V100, Maya-XS: 64 rows +6-8% on 8K / 32K prompts; KL vs the reference 0.276, the stock path 0.285 - the same)
+    // DS4_FAT_RING=1 (a test reference, slow): every streamed set on the fat path too - with DS4_FAT_ROWS=1 every expert
+    // of a read through the FP16 GEMM whatever its placement
+    static bool fat_ring_all() {
+        static const bool on = std::getenv("DS4_FAT_RING") != nullptr && std::atoi(std::getenv("DS4_FAT_RING")) != 0;
+        return on;
+    }
     static int fat_rows() {
         static const int n = std::getenv("DS4_FAT_ROWS") ? std::max(0, std::atoi(std::getenv("DS4_FAT_ROWS"))) : 64;
         return n;
@@ -6983,7 +6989,7 @@ struct Model::Impl {
                 const bool ringed = wbase >= c.ring && wbase < c.ring + (size_t) c.ring_n * c.ring_stride;
                 // (low-bit experts only, both roles: the MXFP4 tiles take every row of a set)
                 if (sa.lay.fmt == gg::kFmtMXFP4 && gg::expert_type(sa.lay, 0) != gg::kTypeMXFP4 &&
-                    gg::expert_type(sa.lay, 2) != gg::kTypeMXFP4 && sa.mix.n == 0 && (!ringed || ring_fat) &&
+                    gg::expert_type(sa.lay, 2) != gg::kTypeMXFP4 && sa.mix.n == 0 && (!ringed || ring_fat || fat_ring_all()) &&
                     fat_ready(d, c, D, FF)) {
                     int rest = 0;
                     for (int i = i0; i < j; ++i) {
