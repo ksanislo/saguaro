@@ -1276,6 +1276,14 @@ struct Model::Impl {
         std::atomic<const char*> at{"idle"};        // (Model::where)
     };
     std::vector<std::unique_ptr<ReadHelp>> read_helps;
+    std::vector<std::pair<int, void*>> read_help_hold;   // (device id, a placeholder kept out of expert placement)
+    void read_help_release() {
+        for (auto& h : read_help_hold) {
+            cudaSetDevice(h.first);
+            cudaFree(h.second);
+        }
+        read_help_hold.clear();
+    }
     ReadHelp* read_help_for(int di) const {
         for (const auto& r : read_helps)
             if (r->own == di) return r.get();
@@ -3646,6 +3654,29 @@ struct Model::Impl {
                 CK(mem_info(&d.free0, &d.total));   // early chunk/split estimates must see the reserved helper pool too
             }
         }
+        if (const char* rh = ds4_env("DS4_READ_HELP"); rh != nullptr && rh[0] != '\0') {
+            // DS4_READ_HELP: hold the helpers' scratch room (DS4_READ_HELP_MIB, 1024) before expert placement sizes the pools
+            const char* mv = ds4_env("DS4_READ_HELP_MIB");
+            const size_t hold = (size_t) std::max(0, mv != nullptr ? std::atoi(mv) : 1024) << 20;
+            for (const char* p = rh; hold > 0 && *p != '\0';) {
+                const char* c = std::strchr(p, ':');
+                if (c == nullptr) break;
+                const int h = std::atoi(c + 1);
+                for (Dev& d : devs)
+                    if (d.id == h && std::none_of(read_help_hold.begin(), read_help_hold.end(),
+                                                  [h](const std::pair<int, void*>& q) { return q.first == h; })) {
+                        void* ptr = nullptr;
+                        CK(cudaSetDevice(d.id));
+                        if (cudaMalloc(&ptr, hold) == cudaSuccess) {
+                            read_help_hold.push_back({h, ptr});
+                            CK(mem_info(&d.free0, &d.total));
+                        } else
+                            cudaGetLastError();
+                    }
+                const char* n = std::strchr(c, ',');
+                p = n != nullptr ? n + 1 : c + std::strlen(c);
+            }
+        }
         // the groups' width: o.tp, less while the experts' blocks do not split in it (a member takes n_ff / tp of each
         // expert: the down's inputs in whole blocks - a GGUF's 256-value types split n_ff 2304 in 1, 3 or 9 parts)
         int tp = o.tp;
@@ -5321,6 +5352,7 @@ struct Model::Impl {
     // DS4_READ_HELP / DS4_READ_HELP_SHARE at load (after the flow and the copies' pins): the pairs checked, each its
     // scratch; anything that does not fit turns the feature off with a line (a load never fails for it)
     bool read_help_setup(std::string& err) {
+        read_help_release();   // (the room held since load: the scratch below takes it)
         const char* v = ds4_env("DS4_READ_HELP");
         if (v == nullptr || v[0] == '\0') return true;
         auto off = [&](const std::string& why) {
@@ -5385,7 +5417,7 @@ struct Model::Impl {
             const Chunk& oc = *chunks[(size_t) r.own];
             const size_t FF = (size_t) std::max(oc.FF, g.ff), stride = oc.ring_stride;
             const size_t need = C * D * 4 * 3 + C * D * 2 + C * FF * 2 + C * kPicks * 4 * 3 + nbc * 4 + (size_t) R * stride +
-                                (size_t) 8 << 20;
+                                ((size_t) 8 << 20);
             size_t fr0 = 0, tot = 0, fr1 = 0;
             cudaSetDevice(hd.id);
             CK(mem_info(&fr0, &tot));
