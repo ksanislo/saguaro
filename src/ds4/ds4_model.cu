@@ -785,6 +785,7 @@ struct Chunk {
     std::vector<int64_t> stage_item;         // staging slot -> the item last read into it (-1: none)
     std::vector<cudaEvent_t> stage_ev, ring_fill, ring_free;   // a staging slot's DMA out; a ring slot's DMA in, its use
     int spec_k = -1, spec_il = -1, n_spec = 0;   // the likely items queued last: (chunk, layer), how many, from where
+    int help_v0 = -1;   // (DS4_READ_HELP) the spec'd layer's first virtual slot the helper runs (-1: none)
     size_t spec_begin = 0;
     std::vector<int> fl_layers, fl_T;        // the device's trunk layers in order; the run's chunk sizes
     int fl_yoco = -1, fl_cut_k = 0, fl_cut_r = 0;   // Run::yoco / cut_k / cut_r: what a layer's chunk streams for
@@ -1223,6 +1224,17 @@ struct Model::Impl {
     // such copy fails as a failed read would; =check: the first compared item's file bytes altered, the check must
     // fail the prompt
     bool flow_helper = ds4_env("DS4_FLOW_HELPER") != nullptr && std::atoi(ds4_env("DS4_FLOW_HELPER")) != 0;
+    // DS4_READ_HELP=owner:helper[,..] (CUDA ids) + DS4_READ_HELP_SHARE=s: during a prompt's run the helper card runs a
+    // fixed share s of the owner's layers' streamed (RAM-tier) experts (logs/maya/DESIGN-ds4-read-helper-20261109.md)
+    std::vector<int> read_help_of;   // by CUDA id: the helper's CUDA id, or -1
+    double read_help_share = 0.0;
+    // the expert's share: fixed by (layer, expert), so the sums' order is the same run after run
+    bool read_help_takes(int il, int e) const {
+        if (read_help_share <= 0.0) return false;
+        uint64_t h = (uint64_t) il * 0x9E3779B97F4A7C15ull ^ (uint64_t) e * 0xC2B2AE3D27D4EB4Full;
+        h ^= h >> 29; h *= 0xBF58476D1CE4E5B9ull; h ^= h >> 32;
+        return (double) (h % 10000) < read_help_share * 10000.0;
+    }
     const int flow_check_runs =
         ds4_env("DS4_FLOW_HELPER_CHECK") ? std::max(0, std::atoi(ds4_env("DS4_FLOW_HELPER_CHECK"))) : 0;
     int flow_check_done = 0;          // (the main thread's) the runs checked so far
@@ -5949,8 +5961,13 @@ struct Model::Impl {
         // 21 of 1568, the early reads 9-12% faster there)
         static const double waste = std::getenv("DS4_SPEC_WASTE") ? std::atof(std::getenv("DS4_SPEC_WASTE")) : 0.2;
         const bool early = c.it_spec < 2u * (uint64_t) c.ring_n || (double) c.it_spec_unused <= waste * (double) c.it_spec;
+        // (DS4_READ_HELP: this device's helper runs its share of the layer's CPU-lane experts - their virtual slots last,
+        //  after the owner's, so the owner's batches stay contiguous and the helper's rows are one range)
+        const int own_dev = devs[(size_t) member(l, mi).dev].id;
+        const bool helped = !read_help_of.empty() && (size_t) own_dev < read_help_of.size() && read_help_of[(size_t) own_dev] >= 0;
         for (int e : l.host_list) {
             if (!early) break;
+            if (helped && read_help_takes(il, e)) continue;
             const double p = sum > 0 ? pr[e] / sum : 0.0;
             const double q = p >= 1.0 ? 1.0 : 1.0 - std::exp(picks * std::log1p(-p));
             if (q >= spec_q && spec_q <= 1.0) cand.push_back({q, e});
@@ -5966,7 +5983,14 @@ struct Model::Impl {
             is[(size_t) x.second] = 1;
         }
         for (int e : l.host_list)
-            if (!is[(size_t) e]) vs[e] = l.pv_n + j++;
+            if (!is[(size_t) e] && !(helped && read_help_takes(il, e))) vs[e] = l.pv_n + j++;
+        c.help_v0 = -1;
+        if (helped) {
+            c.help_v0 = l.pv_n + j;
+            for (int e : l.host_list)
+                if (read_help_takes(il, e)) vs[e] = l.pv_n + j++;
+            if (c.help_v0 == l.pv_n + j) c.help_v0 = -1;   // (no expert of the share in this layer)
+        }
         for (const auto& x : cand) flow_push(c, l, mi, k, x.second, vs[x.second]);
         c.n_spec = (int) cand.size();
         c.it_spec += cand.size();
@@ -5982,6 +6006,7 @@ struct Model::Impl {
         }
         for (int e : l.host_list) {   // (index order: their virtual slots ascending)
             const int v = vs[e];
+            if (c.help_v0 >= 0 && v >= c.help_v0) continue;   // (DS4_READ_HELP: the helper's)
             if (v >= l.pv_n + c.n_spec && b[(size_t) v + 1] > b[(size_t) v]) flow_push(c, l, mi, k, e, v);
         }
     }
