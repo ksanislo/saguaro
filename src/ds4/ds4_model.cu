@@ -679,6 +679,8 @@ struct Dev {
     uint8_t* tail = nullptr;
     size_t tail_bytes = 0, tail_step = 0;
     int tail_k = 0;
+    uint8_t* shadow = nullptr;   // (DS4_LEND_SHADOW) pinned: the tail's lent bytes as they were, copied back at the end
+    size_t shadow_cut = SIZE_MAX;   // (this run's lent region [shadow_cut, tail_bytes); SIZE_MAX: none saved)
     size_t help_bytes = 0;   // (DS4_READ_HELP with DS4_BORROW) the pairs' buffers in the tail, below the prompt path's
     // (--parallel) a multi step's new compressed rows of each row's conversation gathered for the other groups' readers:
     // kWin ckv rows, then kWin index-key rows
@@ -1297,6 +1299,10 @@ struct Model::Impl {
     // the experts keep between prompts; the share is taken only while they are laid out
     bool read_help_tail = false;
     std::atomic<bool> read_help_live{false};
+    static bool lend_shadow() {
+        static const bool on = std::getenv("DS4_LEND_SHADOW") != nullptr && std::atoi(std::getenv("DS4_LEND_SHADOW")) != 0;
+        return on;
+    }
     static bool read_help_borrow_env() {
         const char* v = std::getenv("DS4_BORROW");
         return v != nullptr && std::atoi(v) != 0;
@@ -19292,6 +19298,20 @@ struct Model::Impl {
             // (the clear writes over slots still mapped: a failure leaves them unknown - sticky, no later request runs;
             //  a device lent before this one is handed back by the caller's guard)
             cudaError_t e = cudaSetDevice(d.id);
+            // DS4_LEND_SHADOW=1: the lent region's bytes (the helper's room too) saved to pinned host memory first -
+            // borrow_end copies them back instead of reading ~8 GB of experts from the model's files (~4 s a read)
+            d.shadow_cut = SIZE_MAX;
+            if (e == cudaSuccess && lend_shadow() && !c.tp_lend) {
+                const size_t cut = d.help_bytes > 0 && read_help_tail ? (b0 - d.help_bytes) & ~(size_t) 255 : b0;
+                if (d.shadow == nullptr && cudaHostAlloc((void**) &d.shadow, d.tail_bytes, cudaHostAllocPortable) != cudaSuccess) {
+                    cudaGetLastError();
+                    d.shadow = nullptr;
+                }
+                if (d.shadow != nullptr) {
+                    e = cudaMemcpyAsync(d.shadow + cut, d.tail + cut, d.tail_bytes - cut, cudaMemcpyDeviceToHost, d.st);
+                    if (e == cudaSuccess) d.shadow_cut = cut;
+                }
+            }
             if (e == cudaSuccess) e = cudaMemsetAsync(d.tail + b0, 0, d.tail_bytes - b0, d.st);
             if (e == cudaSuccess) e = cudaStreamSynchronize(d.st);
             if (e != cudaSuccess) {
@@ -19552,8 +19572,47 @@ struct Model::Impl {
         std::atomic<int> differ{0};
         static const bool check = std::getenv("DS4_CHECK_LEND") != nullptr;   // (each one read back, against the file)
         std::vector<char> bad(jobs.size(), 0);
+        // DS4_LEND_SHADOW: every lending device saved its region at borrow_begin - copied back (all at once), no reads
+        bool sh = lend_shadow();
+        for (size_t di = 0; di < devs.size() && sh; ++di)
+            if (di < chunks.size() && chunks[di] != nullptr && chunks[di]->borrow && !chunks[di]->tp_lend &&
+                devs[di].tail != nullptr && devs[di].shadow_cut == SIZE_MAX)
+                sh = false;
+        if (sh) {
+            for (Dev& d : devs) {
+                if (d.shadow_cut == SIZE_MAX) continue;
+                if (cudaSetDevice(d.id) != cudaSuccess ||
+                    cudaMemcpyAsync(d.tail + d.shadow_cut, d.shadow + d.shadow_cut, d.tail_bytes - d.shadow_cut,
+                                    cudaMemcpyHostToDevice, d.st) != cudaSuccess)
+                    broken = true;
+            }
+            for (Dev& d : devs) {
+                if (d.shadow_cut == SIZE_MAX) continue;
+                if (cudaSetDevice(d.id) != cudaSuccess || cudaStreamSynchronize(d.st) != cudaSuccess) broken = true;
+                dev_bytes[(size_t) (&d - devs.data())].fetch_add(d.tail_bytes - d.shadow_cut);
+                d.shadow_cut = SIZE_MAX;
+            }
+            if (check && !broken && !rf_stage.empty()) {   // (each one restored, against the model file)
+                std::vector<uint8_t> back;
+                for (size_t i = 0; i < jobs.size(); ++i) {
+                    const Layer& l = L[(size_t) jobs[i].layer];
+                    const int e = jobs[i].e;
+                    if (l.nm > 1 || l.blob > rf_bytes) continue;
+                    back.resize(l.blob);
+                    const bool read = read_mx_file(l, e, rf_stage[0]);
+                    const bool got = cudaSetDevice(devs[(size_t) l.dev].id) == cudaSuccess &&
+                                     cudaMemcpy(back.data(), sat(l, l, l.slot[(size_t) e], l.blob), l.blob,
+                                                cudaMemcpyDeviceToHost) == cudaSuccess;
+                    if (!got) broken = true;
+                    if (read && (!got || std::memcmp(back.data(), rf_stage[0], l.blob) != 0)) {
+                        differ.fetch_add(1);
+                        bad[i] = 1;
+                    }
+                }
+            }
+        }
         std::vector<std::thread> th;
-        for (int t = 0; t < (int) n_th; ++t)
+        for (int t = 0; t < (int) n_th && !sh; ++t)
             th.emplace_back([&, t] {
                 uint8_t* stage = rf_stage[(size_t) t];
                 std::vector<uint8_t> back;
