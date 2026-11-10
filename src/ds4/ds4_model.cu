@@ -666,6 +666,7 @@ struct Dev {
     uint8_t* tail = nullptr;
     size_t tail_bytes = 0, tail_step = 0;
     int tail_k = 0;
+    size_t help_bytes = 0;   // (DS4_READ_HELP with DS4_BORROW) the pairs' buffers in the tail, below the prompt path's
     // (--parallel) a multi step's new compressed rows of each row's conversation gathered for the other groups' readers:
     // kWin ckv rows, then kWin index-key rows
     uint8_t* mstage = nullptr;
@@ -1237,6 +1238,7 @@ struct Model::Impl {
     // the expert's share: fixed by (layer, expert), so the sums' order is the same run after run
     bool read_help_takes(int il, int e) const {
         if (read_help_share <= 0.0 || !read_help_ok(il, e)) return false;
+        if (read_help_tail && !read_help_live.load(std::memory_order_acquire)) return false;   // (not laid out: the owner's)
         uint64_t h = (uint64_t) il * 0x9E3779B97F4A7C15ull ^ (uint64_t) e * 0xC2B2AE3D27D4EB4Full;
         h ^= h >> 29; h *= 0xBF58476D1CE4E5B9ull; h ^= h >> 32;
         return (double) (h % 10000) < read_help_share * 10000.0;
@@ -1273,10 +1275,74 @@ struct Model::Impl {
         int pk = -1, pil = -1, pT = 0, pv0 = -1;
         double cur_mb = 0;                          // the pending layer-chunk's blobs
         int n_lc = 0;                               // this run's layer-chunks helped
+        size_t lC = 0, lD = 0, lFF = 0, lnbc = 0, lstride = 0;   // (tail mode) read_help_lay's sizes
         double s_mb = 0, s_blob = 0, s_in = 0, s_comp = 0, s_back = 0, s_wait = 0;
         std::atomic<const char*> at{"idle"};        // (Model::where)
     };
     std::vector<std::unique_ptr<ReadHelp>> read_helps;
+    // DS4_BORROW=1 too: the pairs' buffers in the cards' tails of expert slots, laid out per run (borrow_begin) - VRAM
+    // the experts keep between prompts; the share is taken only while they are laid out
+    bool read_help_tail = false;
+    std::atomic<bool> read_help_live{false};
+    static bool read_help_borrow_env() {
+        const char* v = std::getenv("DS4_BORROW");
+        return v != nullptr && std::atoi(v) != 0;
+    }
+    // the env's pairs as devs indices (owner, helper) - no checks (read_help_setup checks them)
+    std::vector<std::pair<int, int>> read_help_pairs_env() const {
+        std::vector<std::pair<int, int>> out;
+        const char* v = ds4_env("DS4_READ_HELP");
+        const char* sv = ds4_env("DS4_READ_HELP_SHARE");
+        if (v == nullptr || v[0] == '\0' || sv == nullptr || !(std::atof(sv) > 0.0)) return out;
+        auto at = [&](int id) {
+            for (size_t i = 0; i < devs.size(); ++i)
+                if (devs[i].id == id) return (int) i;
+            return -1;
+        };
+        for (const char* p = v; *p != '\0';) {
+            const char* c = std::strchr(p, ':');
+            if (c == nullptr) break;
+            const int o = at(std::atoi(p)), h = at(std::atoi(c + 1));
+            if (o >= 0 && h >= 0 && o != h) out.push_back({o, h});
+            const char* n = std::strchr(c, ',');
+            p = n != nullptr ? n + 1 : c + std::strlen(c);
+        }
+        return out;
+    }
+    // a pair's buffers on its helper (helper) or owner from base, their bytes (base nullptr: the bytes alone)
+    size_t read_help_lay(ReadHelp* r, bool helper, uint8_t* base, size_t C, size_t D, size_t FF, size_t nbc, int R,
+                         size_t stride) const {
+        size_t n = 0;
+        auto take = [&](auto*& p, size_t cnt) {
+            using T = std::remove_reference_t<decltype(*p)>;
+            if (base != nullptr) p = (T*) (base + n);
+            n += align256(cnt * sizeof(T));
+        };
+        float *f0 = nullptr;
+        uint16_t* u0 = nullptr;
+        int* i0 = nullptr;
+        uint8_t* b0 = nullptr;
+        Chunk* h = r != nullptr && r->hc ? r->hc.get() : nullptr;
+        if (helper) {
+            take(h ? h->x : f0, C * D);
+            take(h ? h->x16 : u0, C * D);
+            take(h ? h->acc : f0, C * D);
+            take(h ? h->y : f0, C * D + 32);
+            take(h ? h->h16 : u0, C * FF);
+            take(h ? h->row_tok : i0, C * kPicks);
+            take(h ? h->pos : i0, C * kPicks);
+            take(h ? h->rw : f0, C * kPicks);
+            take(r ? r->bc_dev : i0, nbc);
+            take(h ? h->ring : b0, (size_t) R * stride);
+        } else {
+            take(r ? r->oacc : f0, C * D);
+            if (read_help_check()) {
+                take(r ? r->chk : f0, C * D);
+                take(r ? r->chk_blob : b0, stride);
+            }
+        }
+        return n;
+    }
     std::vector<std::pair<int, void*>> read_help_hold;   // (device id, a placeholder kept out of expert placement)
     void read_help_release() {
         for (auto& h : read_help_hold) {
@@ -3655,8 +3721,8 @@ struct Model::Impl {
                 CK(mem_info(&d.free0, &d.total));   // early chunk/split estimates must see the reserved helper pool too
             }
         }
-        if (const char* rh = ds4_env("DS4_READ_HELP"); rh != nullptr && rh[0] != '\0') {
-            // DS4_READ_HELP: hold the helpers' scratch room (DS4_READ_HELP_MIB, 1024) before expert placement sizes the pools
+        if (const char* rh = ds4_env("DS4_READ_HELP"); rh != nullptr && rh[0] != '\0' && !read_help_borrow_env()) {
+            // DS4_READ_HELP (not DS4_BORROW: then the tails hold its buffers): hold the helpers' scratch room (DS4_READ_HELP_MIB, 1024) before expert placement sizes the pools
             const char* mv = ds4_env("DS4_READ_HELP_MIB");
             const size_t hold = (size_t) std::max(0, mv != nullptr ? std::atoi(mv) : 1024) << 20;
             // the owner: its landed partial (and DS4_READ_HELP_CHECK's sum + blob), 192 MB each
@@ -5427,9 +5493,19 @@ struct Model::Impl {
             const size_t need = C * D * 4 * 3 + C * D * 2 + C * FF * 2 + C * kPicks * 4 * 3 + nbc * 4 + (size_t) R * stride +
                                 ((size_t) 8 << 20);
             size_t fr0 = 0, tot = 0, fr1 = 0;
+            // (DS4_BORROW: both cards' tails sized for the pair's buffers in place_experts - laid out per run)
+            const bool tail = hd.help_bytes > 0 && od.help_bytes > 0 && chunks[(size_t) r.hlp] != nullptr &&
+                              chunks[(size_t) r.hlp]->borrow && !chunks[(size_t) r.hlp]->tp_lend && oc.borrow &&
+                              !oc.tp_lend;
+            if (&q != &pairs.front() && tail != read_help_tail) {
+                cudaSetDevice(od.id);
+                return off("some pairs' buffers in the tails, some not");
+            }
+            read_help_tail = tail;
+            r.lC = C, r.lD = D, r.lFF = FF, r.lnbc = nbc, r.lstride = stride;
             cudaSetDevice(hd.id);
             CK(mem_info(&fr0, &tot));
-            if (fr0 < need + ((size_t) o.reserve_mib << 20)) {
+            if (!tail && fr0 < need + ((size_t) o.reserve_mib << 20)) {
                 cudaSetDevice(od.id);
                 return off("CUDA" + std::to_string(hd.id) + " has " + std::to_string(fr0 >> 20) + " MB free, the scratch needs " +
                            std::to_string(need >> 20) + " MB (+ --reserve-mib)");
@@ -5443,11 +5519,11 @@ struct Model::Impl {
             h.ring_n = R;
             h.ring_stride = stride;
             r.R = R;
-            if (!dalloc(hd, h.x, C * D, err) || !dalloc(hd, h.x16, C * D, err) || !dalloc(hd, h.acc, C * D, err) ||
+            if (!tail && (!dalloc(hd, h.x, C * D, err) || !dalloc(hd, h.x16, C * D, err) || !dalloc(hd, h.acc, C * D, err) ||
                 !dalloc(hd, h.y, C * D + 32, err) || !dalloc(hd, h.h16, C * FF, err) ||
                 !dalloc(hd, h.row_tok, C * kPicks, err) || !dalloc(hd, h.pos, C * kPicks, err) ||
                 !dalloc(hd, h.rw, C * kPicks, err) || !dalloc(hd, r.bc_dev, nbc, err) ||
-                !dalloc(hd, h.ring, (size_t) R * stride, err)) {
+                !dalloc(hd, h.ring, (size_t) R * stride, err))) {
                 cudaGetLastError();
                 cudaSetDevice(od.id);
                 return off("the helper's scratch: " + err);
@@ -5468,8 +5544,8 @@ struct Model::Impl {
                 for (cudaEvent_t& e : *vv) CK(cudaEventCreateWithFlags(&e, cudaEventDisableTiming));
             CK(mem_info(&fr1, &tot));
             cudaSetDevice(od.id);
-            if (!dalloc(od, r.oacc, C * D, err) ||
-                (read_help_check() && (!dalloc(od, r.chk, C * D, err) || !dalloc(od, r.chk_blob, oc.ring_stride, err)))) {
+            if (!tail && (!dalloc(od, r.oacc, C * D, err) ||
+                (read_help_check() && (!dalloc(od, r.chk, C * D, err) || !dalloc(od, r.chk_blob, oc.ring_stride, err))))) {
                 cudaGetLastError();
                 return off("the owner's partial buffer: " + err);
             }
@@ -5479,6 +5555,13 @@ struct Model::Impl {
             if (!halloc(r.hx, C * D, err) || !halloc(r.hpart, C * D, err) || !halloc(r.hrw, C * kPicks, err) ||
                 !halloc(r.hpos, C * kPicks, err) || !halloc(r.hrt, C * kPicks, err) || !halloc(r.hbc, nbc, err))
                 return off("pinned buffers: " + err);
+            if (tail)
+                std::fprintf(stderr, "ds4: DS4_READ_HELP CUDA%d -> CUDA%d: its buffers in the cards' tails of expert slots "
+                                     "during a run (DS4_BORROW): %.0f MB on CUDA%d, %.0f MB on CUDA%d\n",
+                             od.id, hd.id, (double) read_help_lay(nullptr, true, nullptr, C, D, FF, nbc, R, stride) / 1048576.0,
+                             hd.id, (double) read_help_lay(nullptr, false, nullptr, C, D, FF, nbc, R, stride) / 1048576.0,
+                             od.id);
+            else
             std::fprintf(stderr, "ds4: DS4_READ_HELP CUDA%d -> CUDA%d: helper scratch %.0f MB (ring %d x %.1f MB), CUDA%d "
                                  "free %.0f -> %.0f MB; owner %.0f MB; pinned %.0f MB\n",
                          od.id, hd.id, (double) (fr0 - fr1) / 1048576.0, R, (double) stride / 1048576.0, hd.id,
@@ -7697,7 +7780,25 @@ struct Model::Impl {
                     step += align256(unit(l));
                     min_slots = std::min(min_slots, std::min(l.n_vram, l.n_exp));
                 }
-            const size_t need = lay_chunk(c, chunk, nullptr, 2) + 256;
+            // (DS4_READ_HELP with DS4_BORROW: the pairs' buffers on this device in the tail too, below the prompt path's)
+            size_t help = 0;
+            if (read_help_borrow_env()) {
+                const char* rv = ds4_env("DS4_READ_HELP_RING");
+                const int R = std::max(2, rv != nullptr ? std::atoi(rv) : 8);
+                int n_exp_max = 0;
+                for (const Layer& l : L) n_exp_max = std::max(n_exp_max, l.n_exp);
+                for (const auto& q : read_help_pairs_env()) {
+                    if ((size_t) q.first >= chunks.size() || chunks[(size_t) q.first] == nullptr) continue;
+                    const Chunk& oc = *chunks[(size_t) q.first];
+                    const size_t FF = (size_t) std::max(oc.FF, g.ff), nbc = (size_t) 2 * n_exp_max + 4;
+                    if ((size_t) q.second == di)
+                        help += read_help_lay(nullptr, true, nullptr, chunk, g.dim, FF, nbc, R, oc.ring_stride) + 256;
+                    if ((size_t) q.first == di)
+                        help += read_help_lay(nullptr, false, nullptr, chunk, g.dim, FF, nbc, R, oc.ring_stride) + 256;
+                }
+            }
+            d.help_bytes = help;
+            const size_t need = lay_chunk(c, chunk, nullptr, 2) + 256 + help;
             // (the first device's tail is a picture's room too, kVisTail: as many slots a layer as that takes, when it
             //  is more - the tail stays expert slots between prompts and pictures, so it costs the decode nothing)
             const size_t vneed = di == 0 && vis_mode == kVisTail ? vt.room_bytes() + 256 : 0;
@@ -7710,6 +7811,7 @@ struct Model::Impl {
                                      "a picture takes %.0f MiB of free memory while it is read\n",
                              d.id, min_slots, (double) vt.room_bytes() / (1 << 20));
             if (cap < need) {   // (a device with few VRAM slots a layer: chunks as large as its tail holds)
+                d.help_bytes = 0;   // (DS4_READ_HELP: no tail room for its buffers - read_help_setup allocates them)
                 int c2 = chunk;
                 while (c2 > 256 && lay_chunk(c, c2, nullptr, 2) + 256 > cap) c2 = (c2 - 1) / 256 * 256;
                 if (lay_chunk(c, c2, nullptr, 2) + 256 > cap) {
@@ -19101,7 +19203,7 @@ struct Model::Impl {
             const Dev& d = devs[di];
             const size_t need = lay_chunk(*chunks[di], C, nullptr, 2);
             // (the flow streams the lent slots' experts; an EXL3 lender's are the cache's, which the streams copy from RAM)
-            if (d.tail == nullptr || (!chunks[di]->flow && !chunks[di]->x3_lend) || need + 256 > d.tail_bytes) {
+            if (d.tail == nullptr || (!chunks[di]->flow && !chunks[di]->x3_lend) || need + 256 + d.help_bytes > d.tail_bytes) {
                 err = "the prompt path's room on CUDA" + std::to_string(d.id) + ": " + std::to_string(need >> 20) +
                       " MiB for chunks of " + std::to_string(C) + " tokens, " + std::to_string(d.tail_bytes >> 20) +
                       " lent";
@@ -19161,15 +19263,29 @@ struct Model::Impl {
                 lent = true;
                 continue;
             }
+            // (DS4_READ_HELP in the tail: the pairs' buffers just below the prompt path's - their slots lent too)
+            const size_t hb0 = d.help_bytes > 0 && read_help_tail ? (b0 - d.help_bytes) & ~(size_t) 255 : b0;
+            if (hb0 < b0) {
+                size_t at = hb0;
+                for (const auto& rp : read_helps)
+                    if (rp->hlp == (int) di)
+                        at += align256(read_help_lay(rp.get(), true, d.tail + at, rp->lC, rp->lD, rp->lFF, rp->lnbc,
+                                                     rp->R, rp->lstride));
+                for (const auto& rp : read_helps)
+                    if (rp->own == (int) di)
+                        at += align256(read_help_lay(rp.get(), false, d.tail + at, rp->lC, rp->lD, rp->lFF, rp->lnbc,
+                                                     rp->R, rp->lstride));
+            }
             for (Layer& l : L) {
                 if (l.dev != (int) di || l.mtp || l.n_main >= l.n_slots) continue;
                 const size_t off = (size_t) (l.xbase - d.tail), u = align256(unit(l));
                 int keep = 0;   // (the slots wholly before the buffers)
-                while (l.n_main + keep < l.n_slots && off + (size_t) keep * d.tail_step + u <= b0) ++keep;
+                while (l.n_main + keep < l.n_slots && off + (size_t) keep * d.tail_step + u <= hb0) ++keep;
                 l.pv_n = l.n_main + keep;
             }
             lent = true;
         }
+        if (read_help_tail && lent) read_help_live.store(true, std::memory_order_release);
         return true;
     }
     // expert e's table entry on every member of l's group from its slot (-1: 0), synchronously - with nothing queued
@@ -19258,6 +19374,7 @@ struct Model::Impl {
     // CPU lane too (nothing reads those slots), and the caller fails the prompt before any decode - or a device
     // selection, sync, copy into a slot or table write failed: lend_broken (sticky), no later request runs
     bool borrow_end() {
+        read_help_live.store(false, std::memory_order_release);   // (DS4_READ_HELP in the tails: laid out no more)
         if (!lent) return true;
         lend_unhold();   // (a prompt read in parts kept it: its experts back in their slots' books first)
         lent = false;
