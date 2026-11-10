@@ -1230,10 +1230,25 @@ struct Model::Impl {
     double read_help_share = 0.0;
     // the expert's share: fixed by (layer, expert), so the sums' order is the same run after run
     bool read_help_takes(int il, int e) const {
-        if (read_help_share <= 0.0) return false;
+        if (read_help_share <= 0.0 || !read_help_ok(il, e)) return false;
         uint64_t h = (uint64_t) il * 0x9E3779B97F4A7C15ull ^ (uint64_t) e * 0xC2B2AE3D27D4EB4Full;
         h ^= h >> 29; h *= 0xBF58476D1CE4E5B9ull; h ^= h >> 32;
         return (double) (h % 10000) < read_help_share * 10000.0;
+    }
+    // (the helper DMAs it from its pinned NUMA parts itself: a copy-mode RAM-tier expert of a one-GPU layer)
+    bool read_help_ok(int il, int e) const {
+        const Layer& l = L[(size_t) il];
+        return l.nm == 1 && copy_mode && stream_direct(l, e);
+    }
+    // a pair's state (owner = devs index): the helper's scratch, streams and events, driven by the owner's thread
+    struct ReadHelp {
+        int own = -1, hlp = -1;   // devs indices
+    };
+    std::vector<std::unique_ptr<ReadHelp>> read_helps;
+    ReadHelp* read_help_for(int di) const {
+        for (const auto& r : read_helps)
+            if (r->own == di) return r.get();
+        return nullptr;
     }
     const int flow_check_runs =
         ds4_env("DS4_FLOW_HELPER_CHECK") ? std::max(0, std::atoi(ds4_env("DS4_FLOW_HELPER_CHECK"))) : 0;
@@ -4784,6 +4799,7 @@ struct Model::Impl {
                 workers.back()->start();
             }
         if (cp_pin_last()) cp_pin();   // (#589: after every pinned buffer above, before the paths are timed)
+        if (!read_help_setup(err)) return false;   // (DS4_READ_HELP: needs the copies' pins)
 #if defined(STRATA_USE_HIP) || defined(DS4_CUDA_PEER_AR)
         if (!init_peer_ar(err)) return false; // after expert placement: optional scratch does not shrink the expert cache
 #endif
@@ -5269,6 +5285,70 @@ struct Model::Impl {
             d.prompt += d.scratch - s0;
             d.scratch = s0;
         }
+        return true;
+    }
+    // DS4_READ_HELP / DS4_READ_HELP_SHARE at load (after the flow and the copies' pins): the pairs checked, each its
+    // scratch; anything that does not fit turns the feature off with a line (a load never fails for it)
+    bool read_help_setup(std::string& err) {
+        const char* v = ds4_env("DS4_READ_HELP");
+        if (v == nullptr || v[0] == '\0') return true;
+        auto off = [&](const std::string& why) {
+            std::fprintf(stderr, "ds4: DS4_READ_HELP=%s off: %s\n", v, why.c_str());
+            read_help_of.clear();
+            read_help_share = 0.0;
+            read_helps.clear();
+            return true;
+        };
+        const char* sv = ds4_env("DS4_READ_HELP_SHARE");
+        const double share = sv != nullptr ? std::atof(sv) : 0.0;
+        if (!(share > 0.0 && share <= 1.0)) return off("DS4_READ_HELP_SHARE not in (0, 1]");
+        if (flow_helper) return off("DS4_FLOW_HELPER is on (one helper scheme at a time)");
+        if (chunk <= 0) return off("no chunked prompt path");
+        if (!copy_mode || !cp_dma) return off("the RAM tier's copies are not pinned (copy mode, DS4_COPY_PIN)");
+        auto dev_of = [&](int id) {
+            for (size_t i = 0; i < devs.size(); ++i)
+                if (devs[i].id == id) return (int) i;
+            return -1;
+        };
+        std::vector<std::pair<int, int>> pairs;   // (owner, helper) devs indices
+        for (const char* p = v; *p != '\0';) {
+            char* e1 = nullptr;
+            const long o = std::strtol(p, &e1, 10);
+            if (e1 == p || *e1 != ':') return off("not owner:helper[,owner:helper]");
+            char* e2 = nullptr;
+            const long h = std::strtol(e1 + 1, &e2, 10);
+            if (e2 == e1 + 1 || (*e2 != ',' && *e2 != '\0')) return off("not owner:helper[,owner:helper]");
+            const int od = dev_of((int) o), hd = dev_of((int) h);
+            if (od < 0 || hd < 0 || od == hd)
+                return off("CUDA" + std::to_string(o) + ":" + std::to_string(h) + " is not a pair of loaded devices");
+            for (const auto& q : pairs)
+                if (q.first == od) return off("CUDA" + std::to_string(o) + " named twice as an owner");
+            if ((size_t) od >= chunks.size() || chunks[(size_t) od] == nullptr || !chunks[(size_t) od]->flow ||
+                chunks[(size_t) od]->ring == nullptr)
+                return off("CUDA" + std::to_string(o) + "'s prompts do not take the flow");
+            for (const Layer& l : L)
+                if (!l.mtp)
+                    for (int m = 0; m < l.nm; ++m)
+                        if (member(l, m).dev == od && l.nm > 1)
+                            return off("CUDA" + std::to_string(o) + "'s layer " + std::to_string(l.il) +
+                                       " is a tensor-parallel group's");
+            pairs.push_back({od, hd});
+            p = *e2 == ',' ? e2 + 1 : e2;
+        }
+        if (pairs.empty()) return off("no pair");
+        for (const auto& q : pairs) {
+            read_helps.push_back(std::make_unique<ReadHelp>());
+            read_helps.back()->own = q.first;
+            read_helps.back()->hlp = q.second;
+        }
+        std::string on;
+        for (const auto& q : pairs)
+            on += (on.empty() ? "CUDA" : ", CUDA") + std::to_string(devs[(size_t) q.first].id) + " helped by CUDA" +
+                  std::to_string(devs[(size_t) q.second].id);
+        std::fprintf(stderr, "ds4: DS4_READ_HELP parsed: %s, share %.2f (not run yet: the data path is the next step)\n",
+                     on.c_str(), share);
+        read_helps.clear();
+        (void) err;
         return true;
     }
 
