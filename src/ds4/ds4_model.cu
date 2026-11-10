@@ -6591,8 +6591,34 @@ struct Model::Impl {
             if (bc[n] > bc[0]) {
                 CK(cudaStreamWaitEvent(s, c.ring_fill[(i1 - 1) % R], 0));
                 CK(cudaMemcpyAsync(bcd, bc, (size_t) (n + 1) * 4, cudaMemcpyHostToDevice, s));
-                if (!run_set(d, c, vx, c.ring + (i0 % R) * c.ring_stride, 0, c.ring_stride, bcd, bc, 0, n, T, err))
-                    return false;
+                // DS4_FAT_LENT=1 (DS4_BORROW): a lent VRAM expert streamed for this read takes the path it takes from
+                // VRAM (the fat FP16 GEMM for its busy rows), so lending does not change the read's sums' kind - the
+                // batch run in pieces, lent and not, as the tiles skip every busy expert of a set the fat path has
+                static const bool fat_lent = [] {
+                    const char* v = std::getenv("DS4_FAT_LENT");
+                    return v != nullptr && std::atoi(v) != 0;
+                }();
+                auto lent_v = [&](size_t i) {
+                    const int e = fit(c, i).e, sl = L0.slot[(size_t) e];
+                    return lent && sl >= L0.pv_n && sl < L0.n_slots;
+                };
+                bool any = false;
+                if (fat_lent)
+                    for (size_t i = i0; i < i1 && !any; ++i) any = lent_v(i);
+                if (!any) {
+                    if (!run_set(d, c, vx, c.ring + (i0 % R) * c.ring_stride, 0, c.ring_stride, bcd, bc, 0, n, T, err))
+                        return false;
+                } else
+                    for (int m0 = 0; m0 < n;) {
+                        const bool f = lent_v(i0 + (size_t) m0);
+                        int m1 = m0 + 1;
+                        while (m1 < n && lent_v(i0 + (size_t) m1) == f) ++m1;
+                        if (bc[m1] > bc[m0] &&
+                            !run_set(d, c, vx, c.ring + ((i0 + (size_t) m0) % R) * c.ring_stride, 0, c.ring_stride,
+                                     bcd + m0, bc + m0, 0, m1 - m0, T, err, nullptr, f))
+                            return false;
+                        m0 = m1;
+                    }
             }
             for (size_t i = i0; i < i1; ++i) CK(cudaEventRecord(c.ring_free[i % R], s));
             kick(s);
@@ -6920,7 +6946,7 @@ struct Model::Impl {
     // over the chunk's rows, in pieces of at most C rows, each added into acc in pick order
     // (st: the stream its kernels go on - d.st when null; DS4_READ_HELP's helper passes its own)
     bool run_set(Dev& d, Chunk& c, const Layer& l, const uint8_t* wbase, int wb0, size_t stride, const int* d_bounds,
-                 const int* b, int i0, int i1, int T, std::string& err, cudaStream_t st = nullptr) {
+                 const int* b, int i0, int i1, int T, std::string& err, cudaStream_t st = nullptr, bool ring_fat = false) {
         const cudaStream_t ss = st != nullptr ? st : d.st;
         const int D = g.dim, FF = l.ffn;
         while (i0 < i1) {
@@ -6957,7 +6983,8 @@ struct Model::Impl {
                 const bool ringed = wbase >= c.ring && wbase < c.ring + (size_t) c.ring_n * c.ring_stride;
                 // (low-bit experts only, both roles: the MXFP4 tiles take every row of a set)
                 if (sa.lay.fmt == gg::kFmtMXFP4 && gg::expert_type(sa.lay, 0) != gg::kTypeMXFP4 &&
-                    gg::expert_type(sa.lay, 2) != gg::kTypeMXFP4 && sa.mix.n == 0 && !ringed && fat_ready(d, c, D, FF)) {
+                    gg::expert_type(sa.lay, 2) != gg::kTypeMXFP4 && sa.mix.n == 0 && (!ringed || ring_fat) &&
+                    fat_ready(d, c, D, FF)) {
                     int rest = 0;
                     for (int i = i0; i < j; ++i) {
                         const int r = b[i + 1] - b[i];
