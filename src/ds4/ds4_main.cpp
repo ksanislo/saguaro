@@ -3754,6 +3754,8 @@ int main(int argc, char** argv) {
     // spins on a hand-off that waits for the launching thread (two threads in cuLaunchKernel, the read stopped; 11-09)
     if (const char* rh = std::getenv("DS4_READ_HELP"); rh != nullptr && rh[0] != '\0' && std::getenv("CUDA_MODULE_LOADING") == nullptr)
         setenv("CUDA_MODULE_LOADING", "EAGER", 0);
+    if (const char* rh = std::getenv("DS4_READ_HELP"); rh != nullptr && rh[0] != '\0')
+        setenv("DS4_XFER_WAIT1", "1", 0);   // (the helper's kernels need SMs beside a card's hand-off waits)
 #if defined(__linux__)
     // the kernel's NUMA balancing (kernel.numa_balancing=1) scans memory whose policy migrates on fault: every thread
     // then takes hinting faults - the launch thread hundreds a second, the CPU lane's workers on their shared scratch,

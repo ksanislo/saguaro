@@ -3137,6 +3137,13 @@ __global__ void __launch_bounds__(kThreads) xfer_get_kernel(const Xfer x, const 
     xfer_copy(x, true);
 }
 
+// DS4_XFER_WAIT1: the copy alone, after a one-block wait_flags_kernel (its pdl_trigger follows the wait)
+__global__ void __launch_bounds__(kThreads) xfer_copy_kernel(const Xfer x) {
+    pdl_wait();
+    pdl_trigger();
+    xfer_copy(x, true);
+}
+
 __global__ void wait_flags_kernel(const unsigned* flags, int n, int stride, unsigned seq) {
     pdl_wait();
     if (threadIdx.x != 0) return;
@@ -4933,6 +4940,17 @@ void win_submit(cudaStream_t s) {
 void xfer_get(const Xfer& x, const unsigned* flag, unsigned seq, cudaStream_t s) {
     const size_t total = xfer_units(x);
     const int blocks = (int) std::max<size_t>(1, std::min<size_t>(64, (total + kThreads - 1) / kThreads));
+    // DS4_XFER_WAIT1=1: one 32-thread block spins on the flag, then the copy - the 64 spinning blocks otherwise sit on
+    // every SM of a card waiting for its hand-off, and another stream's kernels there (DS4_READ_HELP) never start
+    static const bool wait1 = [] {
+        const char* v = std::getenv("DS4_XFER_WAIT1");
+        return v != nullptr && std::atoi(v) != 0;
+    }();
+    if (wait1) {
+        pdl_launch(wait_flags_kernel, 1, 32, 0, s, flag, 1, 0, seq);
+        pdl_launch(xfer_copy_kernel, blocks, kThreads, 0, s, x);
+        return;
+    }
     pdl_launch(xfer_get_kernel, blocks, kThreads, 0, s, x, flag, seq);
 }
 void wait_flags(const unsigned* flags, int n, int stride, unsigned seq, cudaStream_t s) {

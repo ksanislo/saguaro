@@ -18555,7 +18555,7 @@ struct Model::Impl {
         // launches waiting on hand-offs) it fills the card's launch queue, and the owner's launches of its share onto
         // the card then block in cuLaunchKernel: a deadlock (stacks 11-09)
         const bool help_dev = std::any_of(read_helps.begin(), read_helps.end(),
-                                          [di](const std::unique_ptr<ReadHelp>& r) { return r->hlp == (int) di; });
+                                          [di](const std::unique_ptr<ReadHelp>& r) { return r->hlp == (int) di && r->hlp > r->own; });   // (a later stage only: an earlier one would serialize the pipeline)
         for (int k = 0; k < nk; ++k) {
             if (help_dev && k >= 1 && (size_t) (k - 1) < chunk_done.size()) {
                 const int back = k - 1;
