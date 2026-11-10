@@ -6759,8 +6759,12 @@ struct Model::Impl {
                 if (now_ms() - last > 5000) {
                     last = now_ms();
                     auto q = [](cudaEvent_t e) { return cudaEventQuery(e) == cudaSuccess ? 1 : 0; };
-                    std::fprintf(stderr, "ds4: DS4_READ_HELP_CHECK waiting %.0f s: routed %d in %d | helper inputs %d blobs %d compute %d done %d | back %d\n",
-                                 (last - t0) / 1000.0, q(r.routed), q(r.in), q(r.h_i), q(r.b1), q(r.h_c), q(r.done), q(r.back));
+                    int nf = 0, nr = 0;
+                    for (cudaEvent_t e : r.fill) nf += q(e);
+                    for (cudaEvent_t e : r.freed) nr += q(e);
+                    std::fprintf(stderr, "ds4: DS4_READ_HELP_CHECK waiting %.0f s: routed %d in %d | helper inputs %d blobs %d compute %d done %d | back %d | %zu blobs of the share, ring %d: filled %d freed %d, n_it %llu, start %d\n",
+                                 (last - t0) / 1000.0, q(r.routed), q(r.in), q(r.h_i), q(r.b1), q(r.h_c), q(r.done), q(r.back),
+                                 r.its.size(), r.R, nf, nr, (unsigned long long) r.n_it, q(r.b0));
                 }
                 std::this_thread::sleep_for(std::chrono::milliseconds(2));
             }
