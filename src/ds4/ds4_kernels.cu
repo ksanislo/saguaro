@@ -4888,6 +4888,15 @@ void engram_gate(float* h, const float* kv, const float* w, int hc, int dim, int
 void gather_rows(const float* x, const Gather& g, int n, int cols, float* out, cudaStream_t s) {
     if (n > 0) pdl_launch(gather_kernel, dim3(cdiv(cols, kThreads), n), kThreads, 0, s, x, g, cols, out);
 }
+__global__ void add_f32_kernel(float* __restrict__ y, const float* __restrict__ x, size_t n) {
+    for (size_t i = (size_t) blockIdx.x * blockDim.x + threadIdx.x; i < n; i += (size_t) gridDim.x * blockDim.x)
+        y[i] += x[i];
+}
+void add_f32(float* y, const float* x, size_t n, cudaStream_t s) {
+    if (n == 0) return;
+    const unsigned nb = (unsigned) std::min<size_t>(4096, (n + kThreads - 1) / kThreads);
+    add_f32_kernel<<<nb, kThreads, 0, s>>>(y, x, n);
+}
 void gather_cols(const uint8_t* src, size_t pitch, size_t col0, size_t width, int rows, uint8_t* out, cudaStream_t s) {
     if (rows <= 0 || width == 0) return;
     const unsigned bx = (unsigned) std::min(4, cdiv((int) width, kThreads));

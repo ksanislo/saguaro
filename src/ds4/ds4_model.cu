@@ -1164,6 +1164,12 @@ struct Model::Impl {
                           c.at_k.load(std::memory_order_relaxed), c.at_il.load(std::memory_order_relaxed));
             s += b;
         }
+        for (const auto& r : read_helps) {   // (DS4_READ_HELP: the pair's place)
+            char b[192];
+            std::snprintf(b, sizeof b, "; read help CUDA%d -> CUDA%d: %s", devs[(size_t) r->own].id,
+                          devs[(size_t) r->hlp].id, r->at.load(std::memory_order_relaxed));
+            s += b;
+        }
         return s;
     }
     std::vector<cudaEvent_t> chunk_done;     // on the last layer's device: chunk k through every layer
@@ -1243,6 +1249,31 @@ struct Model::Impl {
     // a pair's state (owner = devs index): the helper's scratch, streams and events, driven by the owner's thread
     struct ReadHelp {
         int own = -1, hlp = -1;   // devs indices
+        // the helper's scratch as run_set reads it (C, x, x16, h16, y, acc = the partial, row_tok, pos, rw, ring):
+        // its own dalloc'd buffers, never borrowed, not in chunks[]
+        std::unique_ptr<Chunk> hc;
+        cudaStream_t hs = nullptr, hcs = nullptr;   // the helper's compute, its copies of its experts' blobs
+        cudaStream_t ost = nullptr;                 // the owner's side stream: the inputs out, the partial in
+        cudaEvent_t routed = nullptr, in = nullptr, back = nullptr;   // owner: routed (d.st), inputs out, partial in (E2)
+        cudaEvent_t h_a = nullptr, h_i = nullptr, h_c = nullptr, done = nullptr;   // helper: start, inputs in,
+                                                                                   // computed, partial out (E)
+        cudaEvent_t b0 = nullptr, b1 = nullptr, o0 = nullptr, o1 = nullptr;   // the blobs' span; d.st's wait on E2
+        std::vector<cudaEvent_t> fill, freed;       // the ring's slots: copied in, used
+        int R = 0;
+        float *hx = nullptr, *hrw = nullptr, *hpart = nullptr;   // pinned: x, rw, the partial
+        int *hpos = nullptr, *hrt = nullptr, *hbc = nullptr;    // pinned: pos, the range's row_tok, batches' bounds
+        int* bc_dev = nullptr;                      // (helper) the batches' bounds
+        float* oacc = nullptr;                      // (owner) the partial landed
+        float* chk = nullptr;                       // (owner, DS4_READ_HELP_CHECK) its own sums of the range
+        uint8_t* chk_blob = nullptr;
+        uint64_t n_it = 0;                          // blobs through the ring so far
+        std::vector<std::pair<int, int>> its;       // the pending layer-chunk's (virtual slot, expert) with rows
+        bool pending = false, timed = false, checked = false;
+        int pk = -1, pil = -1, pT = 0, pv0 = -1;
+        double cur_mb = 0;                          // the pending layer-chunk's blobs
+        int n_lc = 0;                               // this run's layer-chunks helped
+        double s_mb = 0, s_blob = 0, s_in = 0, s_comp = 0, s_back = 0, s_wait = 0;
+        std::atomic<const char*> at{"idle"};        // (Model::where)
     };
     std::vector<std::unique_ptr<ReadHelp>> read_helps;
     ReadHelp* read_help_for(int di) const {
@@ -5336,19 +5367,89 @@ struct Model::Impl {
             p = *e2 == ',' ? e2 + 1 : e2;
         }
         if (pairs.empty()) return off("no pair");
+        // the scratch at chunk = C rows: helper x C*D*4 + x16 C*D*2 + acc C*D*4 + y C*D*4 + h16 C*FF*2 + row_tok / pos /
+        // rw C*kPicks*4 each + the ring R*stride; owner C*D*4 (the partial landed); pinned 2*C*D*4 + 3*C*kPicks*4
+        const char* rv = ds4_env("DS4_READ_HELP_RING");
+        const int R = std::max(2, rv != nullptr ? std::atoi(rv) : 8);
+        const size_t C = (size_t) chunk, D = (size_t) g.dim;
+        int n_exp_max = 0;
+        for (const Layer& l : L) n_exp_max = std::max(n_exp_max, l.n_exp);
+        const size_t nbc = (size_t) 2 * n_exp_max + 4;
         for (const auto& q : pairs) {
             read_helps.push_back(std::make_unique<ReadHelp>());
-            read_helps.back()->own = q.first;
-            read_helps.back()->hlp = q.second;
+            ReadHelp& r = *read_helps.back();
+            r.own = q.first;
+            r.hlp = q.second;
+            Dev& od = devs[(size_t) r.own];
+            Dev& hd = devs[(size_t) r.hlp];
+            const Chunk& oc = *chunks[(size_t) r.own];
+            const size_t FF = (size_t) std::max(oc.FF, g.ff), stride = oc.ring_stride;
+            const size_t need = C * D * 4 * 3 + C * D * 2 + C * FF * 2 + C * kPicks * 4 * 3 + nbc * 4 + (size_t) R * stride +
+                                (size_t) 8 << 20;
+            size_t fr0 = 0, tot = 0, fr1 = 0;
+            cudaSetDevice(hd.id);
+            CK(mem_info(&fr0, &tot));
+            if (fr0 < need + ((size_t) o.reserve_mib << 20)) {
+                cudaSetDevice(od.id);
+                return off("CUDA" + std::to_string(hd.id) + " has " + std::to_string(fr0 >> 20) + " MB free, the scratch needs " +
+                           std::to_string(need >> 20) + " MB (+ --reserve-mib)");
+            }
+            r.hc = std::make_unique<Chunk>();
+            Chunk& h = *r.hc;
+            h.C = chunk;
+            h.FF = (int) FF;
+            h.dev = r.hlp;
+            h.fat_off = true;   // (its blobs are ringed: the tiles take them, as the owner's streamed ones)
+            h.ring_n = R;
+            h.ring_stride = stride;
+            r.R = R;
+            if (!dalloc(hd, h.x, C * D, err) || !dalloc(hd, h.x16, C * D, err) || !dalloc(hd, h.acc, C * D, err) ||
+                !dalloc(hd, h.y, C * D + 32, err) || !dalloc(hd, h.h16, C * FF, err) ||
+                !dalloc(hd, h.row_tok, C * kPicks, err) || !dalloc(hd, h.pos, C * kPicks, err) ||
+                !dalloc(hd, h.rw, C * kPicks, err) || !dalloc(hd, r.bc_dev, nbc, err) ||
+                !dalloc(hd, h.ring, (size_t) R * stride, err)) {
+                cudaGetLastError();
+                cudaSetDevice(od.id);
+                return off("the helper's scratch: " + err);
+            }
+            CK(cudaStreamCreateWithFlags(&r.hs, cudaStreamNonBlocking));
+            CK(cudaStreamCreateWithFlags(&r.hcs, cudaStreamNonBlocking));
+            for (cudaEvent_t* e : {&r.h_a, &r.h_i, &r.h_c, &r.done, &r.b0, &r.b1}) CK(cudaEventCreate(e));
+            r.fill.resize((size_t) R);
+            r.freed.resize((size_t) R);
+            for (auto* vv : {&r.fill, &r.freed})
+                for (cudaEvent_t& e : *vv) CK(cudaEventCreateWithFlags(&e, cudaEventDisableTiming));
+            CK(mem_info(&fr1, &tot));
+            cudaSetDevice(od.id);
+            if (!dalloc(od, r.oacc, C * D, err)) {
+                cudaGetLastError();
+                return off("the owner's partial buffer: " + err);
+            }
+            CK(cudaStreamCreateWithFlags(&r.ost, cudaStreamNonBlocking));
+            for (cudaEvent_t* e : {&r.routed, &r.in, &r.back}) CK(cudaEventCreateWithFlags(e, cudaEventDisableTiming));
+            for (cudaEvent_t* e : {&r.o0, &r.o1}) CK(cudaEventCreate(e));
+            if (!halloc(r.hx, C * D, err) || !halloc(r.hpart, C * D, err) || !halloc(r.hrw, C * kPicks, err) ||
+                !halloc(r.hpos, C * kPicks, err) || !halloc(r.hrt, C * kPicks, err) || !halloc(r.hbc, nbc, err))
+                return off("pinned buffers: " + err);
+            std::fprintf(stderr, "ds4: DS4_READ_HELP CUDA%d -> CUDA%d: helper scratch %.0f MB (ring %d x %.1f MB), CUDA%d "
+                                 "free %.0f -> %.0f MB; owner %.0f MB; pinned %.0f MB\n",
+                         od.id, hd.id, (double) (fr0 - fr1) / 1048576.0, R, (double) stride / 1048576.0, hd.id,
+                         (double) fr0 / 1048576.0, (double) fr1 / 1048576.0, (double) (C * D * 4) / 1048576.0,
+                         (double) (2 * C * D * 4 + 3 * C * kPicks * 4) / 1048576.0);
         }
+        int max_id = 0;
+        for (const Dev& dv : devs) max_id = std::max(max_id, dv.id);
+        read_help_of.assign((size_t) max_id + 1, -1);
         std::string on;
-        for (const auto& q : pairs)
+        for (const auto& q : pairs) {
+            read_help_of[(size_t) devs[(size_t) q.first].id] = devs[(size_t) q.second].id;
             on += (on.empty() ? "CUDA" : ", CUDA") + std::to_string(devs[(size_t) q.first].id) + " helped by CUDA" +
                   std::to_string(devs[(size_t) q.second].id);
-        std::fprintf(stderr, "ds4: DS4_READ_HELP parsed: %s, share %.2f (not run yet: the data path is the next step)\n",
-                     on.c_str(), share);
-        read_helps.clear();
-        (void) err;
+        }
+        read_help_share = share;
+        std::fprintf(stderr, "ds4: DS4_READ_HELP on: %s, share %.2f of the owner's streamed experts during a prompt's "
+                             "run (decode untouched)%s\n",
+                     on.c_str(), share, "");
         return true;
     }
 
@@ -6367,6 +6468,7 @@ struct Model::Impl {
             v_done = v_to;
         }
         if (!run_vram(d, c, L0, vx, vx, b.data(), v_done, L0.pv_n, T, err)) return false;
+        if (!read_help_join(d, c, L0, k, T, b, err)) return false;   // (DS4_READ_HELP: the helper's partial)
         while (c.base < c.n_comp && c.items.size() > 4096) {   // (done with: read, copied and used)
             flow_unpin(c.items.front());
             c.items.pop_front();
@@ -6375,18 +6477,245 @@ struct Model::Impl {
         return true;
     }
 
+    // ---- DS4_READ_HELP's data path, driven by the owner's thread; every wait between the cards is on the GPUs (events),
+    // never the host's, which keeps pumping the owner's flow.  (A decode on the helper's card during a read shares it
+    // with the share's kernels, which still finish: yielding to it is future work)
+    // the helper's blobs: each matrix's rows from the NUMA part holding them, as flow_pump's DS4_FLOW_DIRECT items
+    bool read_help_blob(const Layer& l, int e, uint8_t* dst, cudaStream_t s, double& bytes) const {
+        const int rs = l.ram[(size_t) e];
+        for (int m = 0; m < 3; ++m) {
+            const size_t nb = (size_t) (mx_n(m) / NH) * mx_row_b(l, m);
+            for (int X = 0; X < NH; ++X) {
+                if (cudaMemcpyAsync(dst + l.lay.trellis[m] + (size_t) X * nb,
+                                    ram_part[(size_t) rs][(size_t) X] + cp_lay[(size_t) l.il][(size_t) m], nb,
+                                    cudaMemcpyHostToDevice, s) != cudaSuccess)
+                    return false;
+                bytes += (double) nb;
+            }
+        }
+        return true;
+    }
+    // the last helped layer-chunk's times into the run's totals - its events done by now (the owner's d.st passed o1,
+    // which followed them all), a failed helper stream failing the request
+    bool read_help_collect(ReadHelp& r, std::string& err) {
+        if (!r.timed) return true;
+        r.timed = false;
+        const int hid = devs[(size_t) r.hlp].id, oid = devs[(size_t) r.own].id;
+        auto el = [](cudaEvent_t a, cudaEvent_t z, double& acc) {
+            float ms = 0;
+            if (cudaEventElapsedTime(&ms, a, z) == cudaSuccess) acc += ms;
+            else cudaGetLastError();
+        };
+        auto bad = [&](cudaError_t q) {
+            err = "DS4_READ_HELP: CUDA" + std::to_string(hid) + "'s share of CUDA" + std::to_string(oid) +
+                  "'s experts failed: " + cudaGetErrorString(q);
+            cudaSetDevice(oid);
+            return false;
+        };
+        cudaSetDevice(hid);
+        for (cudaEvent_t e : {r.done, r.b1})
+            if (const cudaError_t q = cudaEventSynchronize(e); q != cudaSuccess) return bad(q);
+        el(r.b0, r.b1, r.s_blob);
+        el(r.h_a, r.h_i, r.s_in);
+        el(r.h_i, r.h_c, r.s_comp);
+        el(r.h_c, r.done, r.s_back);
+        cudaSetDevice(oid);
+        if (const cudaError_t q = cudaEventSynchronize(r.o1); q != cudaSuccess) return bad(q);
+        el(r.o0, r.o1, r.s_wait);
+        r.s_mb += r.cur_mb;
+        ++r.n_lc;
+        return true;
+    }
+    // (chunk k, layer L0) routed on the owner (d.st idle, b its bounds by virtual slot): the helper's range
+    // [b[help_v0], b[n_vs]) - x, pos, rw and the range's row_tok - out to the helper, which streams the share's picked
+    // blobs itself and sums them into its zeroed partial, then ships it back (E = r.done)
+    bool read_help_issue(Dev& d, Chunk& c, Layer& L0, int k, int T, const std::vector<int>& b, std::string& err) {
+        ReadHelp* rp = read_help_for(c.dev);
+        if (rp == nullptr) return true;
+        ReadHelp& r = *rp;
+        if (!read_help_collect(r, err)) return false;
+        r.pending = false;
+        if (c.spec_k != k || c.spec_il != L0.il || c.help_v0 < 0) return true;   // (flow_layer reports a mismatch)
+        const Layer& l = L0;   // (nm 1: read_help_setup)
+        const int v0 = c.help_v0, n_vs = l.pv_n + (int) l.host_list.size();
+        const int a = b[(size_t) v0], z = b[(size_t) n_vs];
+        if (z <= a) return true;   // (none of the share picked)
+        Chunk& h = *r.hc;
+        if (T > h.C) {
+            err = "DS4_READ_HELP: a chunk of " + std::to_string(T) + " rows, the helper's scratch holds " + std::to_string(h.C);
+            return false;
+        }
+        r.at.store("issuing the helper's share", std::memory_order_relaxed);
+        std::vector<std::pair<int, int>>& its = r.its;   // (virtual slot, expert) of the share with rows, ascending
+        its.clear();
+        for (int e : l.host_list)
+            if (read_help_takes(l.il, e)) {
+                const int v = l.vs_pin[e];
+                if (v < v0) {
+                    err = "DS4_READ_HELP: layer " + std::to_string(l.il) + " expert " + std::to_string(e) +
+                          " of the share has an owner's slot";
+                    return false;
+                }
+                if (b[(size_t) v + 1] > b[(size_t) v]) its.push_back({v, e});
+            }
+        std::sort(its.begin(), its.end());
+        // the batches: at most R / 2 blobs, never across the ring's end, their bounds side by side (the slots between
+        // the picked ones have no rows, as flow_layer's bc)
+        struct Bt {
+            size_t i0, n, off;
+        };
+        std::vector<Bt> bts;
+        const size_t R = (size_t) r.R, bmax = std::max<size_t>(1, R / 2);
+        size_t off = 0;
+        for (size_t i = 0; i < its.size();) {
+            const size_t n = std::min({bmax, its.size() - i, R - (r.n_it + i) % R});
+            int* bc = r.hbc + off;
+            for (size_t m = 0; m < n; ++m) bc[m] = b[(size_t) its[i + m].first];
+            bc[n] = b[(size_t) its[i + n - 1].first + 1];
+            bts.push_back({i, n, off});
+            off += n + 1;
+            i += n;
+        }
+        const size_t D = (size_t) g.dim, TD = (size_t) T * D, TP = (size_t) T * kPicks;
+        struct Back {
+            int id;
+            ~Back() { cudaSetDevice(id); }
+        } back_{d.id};
+        // the owner: the inputs out once routed
+        CK(cudaEventRecord(r.routed, d.st));
+        CK(cudaStreamWaitEvent(r.ost, r.routed, 0));
+        CK(cudaMemcpyAsync(r.hx, c.x, TD * 4, cudaMemcpyDeviceToHost, r.ost));
+        CK(cudaMemcpyAsync(r.hpos, c.pos, TP * 4, cudaMemcpyDeviceToHost, r.ost));
+        CK(cudaMemcpyAsync(r.hrw, c.rw, TP * 4, cudaMemcpyDeviceToHost, r.ost));
+        CK(cudaMemcpyAsync(r.hrt + a, c.row_tok + a, (size_t) (z - a) * 4, cudaMemcpyDeviceToHost, r.ost));
+        CK(cudaEventRecord(r.in, r.ost));
+        kick(r.ost);
+        // the helper: its blobs from now (the ring's slots as they free), the inputs in once out
+        const Dev& hd = devs[(size_t) r.hlp];
+        CK(cudaSetDevice(hd.id));
+        CK(cudaEventRecord(r.h_a, r.hs));
+        CK(cudaStreamWaitEvent(r.hs, r.in, 0));
+        CK(cudaMemcpyAsync(h.x, r.hx, TD * 4, cudaMemcpyHostToDevice, r.hs));
+        CK(cudaMemcpyAsync(h.pos, r.hpos, TP * 4, cudaMemcpyHostToDevice, r.hs));
+        CK(cudaMemcpyAsync(h.rw, r.hrw, TP * 4, cudaMemcpyHostToDevice, r.hs));
+        CK(cudaMemcpyAsync(h.row_tok + a, r.hrt + a, (size_t) (z - a) * 4, cudaMemcpyHostToDevice, r.hs));
+        CK(cudaMemcpyAsync(r.bc_dev, r.hbc, off * 4, cudaMemcpyHostToDevice, r.hs));
+        x3::rows_f16(h.x, (int) D, nullptr, T, (int) D, h.x16, r.hs);   // (the owner's x16: the same rounding of x)
+        CK(cudaMemsetAsync(h.acc, 0, TD * 4, r.hs));
+        CK(cudaEventRecord(r.h_i, r.hs));
+        CK(cudaEventRecord(r.b0, r.hcs));
+        double bytes = 0;
+        for (const Bt& bt : bts) {
+            const uint64_t g0 = r.n_it;
+            for (size_t m = 0; m < bt.n; ++m) {
+                const uint64_t gi = g0 + m;
+                const size_t sl = (size_t) (gi % R);
+                if (gi >= R) CK(cudaStreamWaitEvent(r.hcs, r.freed[sl], 0));
+                if (!read_help_blob(l, its[bt.i0 + m].second, h.ring + sl * h.ring_stride, r.hcs, bytes)) {
+                    err = "DS4_READ_HELP: the helper's copy of layer " + std::to_string(l.il) + " expert " +
+                          std::to_string(its[bt.i0 + m].second) + ": " + cudaGetErrorString(cudaGetLastError());
+                    return false;
+                }
+                CK(cudaEventRecord(r.fill[sl], r.hcs));
+            }
+            CK(cudaStreamWaitEvent(r.hs, r.fill[(size_t) ((g0 + bt.n - 1) % R)], 0));
+            if (!run_set(devs[(size_t) r.hlp], h, l, h.ring + (size_t) (g0 % R) * h.ring_stride, 0, h.ring_stride,
+                         r.bc_dev + bt.off, r.hbc + bt.off, 0, (int) bt.n, T, err, r.hs))
+                return false;
+            for (size_t m = 0; m < bt.n; ++m) CK(cudaEventRecord(r.freed[(size_t) ((g0 + m) % R)], r.hs));
+            r.n_it += bt.n;
+            kick(r.hcs);
+        }
+        CK(cudaEventRecord(r.b1, r.hcs));
+        CK(cudaEventRecord(r.h_c, r.hs));
+        CK(cudaMemcpyAsync(r.hpart, h.acc, TD * 4, cudaMemcpyDeviceToHost, r.hs));
+        CK(cudaEventRecord(r.done, r.hs));
+        CK(cudaGetLastError());   // (a launch on the helper that failed)
+        kick(r.hs);
+        kick(r.hcs);
+        r.pending = true;
+        r.pk = k;
+        r.pil = l.il;
+        r.pT = T;
+        r.pv0 = v0;
+        r.cur_mb = bytes / 1048576.0;
+        r.at.store("the helper's share issued (its streams run it)", std::memory_order_relaxed);
+        return true;
+    }
+    // the end of flow_layer (the owner's own experts all issued): the helper's partial in on the side stream once E,
+    // d.st waiting for that (E2) on the GPU, then added into acc - before the caller's hc_post
+    bool read_help_join(Dev& d, Chunk& c, const Layer& L0, int k, int T, const std::vector<int>& b, std::string& err) {
+        ReadHelp* rp = read_help_for(c.dev);
+        if (rp == nullptr || !rp->pending) return true;
+        ReadHelp& r = *rp;
+        r.pending = false;
+        if (r.pk != k || r.pil != L0.il || r.pT != T) {
+            err = "DS4_READ_HELP: the helper's partial is out of step (layer " + std::to_string(L0.il) + ")";
+            return false;
+        }
+        const size_t TD = (size_t) T * g.dim;
+        r.at.store("the owner's stream waits for the helper's partial", std::memory_order_relaxed);
+        CK(cudaStreamWaitEvent(r.ost, r.done, 0));
+        CK(cudaMemcpyAsync(r.oacc, r.hpart, TD * 4, cudaMemcpyHostToDevice, r.ost));
+        CK(cudaEventRecord(r.back, r.ost));
+        kick(r.ost);
+        CK(cudaEventRecord(r.o0, d.st));
+        CK(cudaStreamWaitEvent(d.st, r.back, 0));
+        CK(cudaEventRecord(r.o1, d.st));
+        (void) c, (void) b;
+        add_f32(c.acc, r.oacc, TD, d.st);
+        CK(cudaGetLastError());
+        r.timed = true;
+        return true;
+    }
+    // a run's start / end on the owner (devs index di): its totals reset; the pair's line, one a run
+    void read_help_start(int di) {
+        ReadHelp* rp = read_help_for(di);
+        if (rp == nullptr) return;
+        ReadHelp& r = *rp;
+        if (r.pending) {   // (a run that failed between issue and join: its helper streams drained first)
+            cudaSetDevice(devs[(size_t) r.hlp].id);
+            cudaStreamSynchronize(r.hs);
+            cudaStreamSynchronize(r.hcs);
+            cudaGetLastError();
+            cudaSetDevice(devs[(size_t) di].id);
+        }
+        r.pending = r.timed = r.checked = false;
+        r.n_lc = 0;
+        r.s_mb = r.s_blob = r.s_in = r.s_comp = r.s_back = r.s_wait = 0;
+        r.at.store("idle", std::memory_order_relaxed);
+    }
+    bool read_help_end(int di, std::string& err) {
+        ReadHelp* rp = read_help_for(di);
+        if (rp == nullptr) return true;
+        ReadHelp& r = *rp;
+        if (!read_help_collect(r, err)) return false;
+        if (r.n_lc > 0)
+            std::fprintf(stderr, "ds4 read help CUDA%d -> CUDA%d: %d layer-chunks; the helper's blobs %.0f MB in %.0f ms "
+                                 "(copy span), waits for its inputs %.0f ms (with their H2D), computes %.0f ms (with "
+                                 "waits for blobs), ships back %.0f ms; the owner's stream waited %.0f ms on the partials\n",
+                         devs[(size_t) di].id, devs[(size_t) r.hlp].id, r.n_lc, r.s_mb, r.s_blob, r.s_in, r.s_comp,
+                         r.s_back, r.s_wait);
+        r.n_lc = 0;
+        r.s_mb = r.s_blob = r.s_in = r.s_comp = r.s_back = r.s_wait = 0;
+        r.at.store("idle", std::memory_order_relaxed);
+        return true;
+    }
+
     // a run's VRAM experts [i0, i1) of layer L0 (its own slots, then the tail's it kept: their blobs at member x's
     // vram_base and xbase), through run_set with layer l's layout
     bool run_vram(Dev& d, Chunk& c, const Layer& L0, const Layer& l, const Layer& x, const int* b, int i0, int i1, int T,
-                  std::string& err) {
+                  std::string& err, cudaStream_t st = nullptr) {
         const int m = std::min(i1, L0.n_main), t0 = std::max(i0, L0.n_main);
-        if (i0 < m && !run_set(d, c, l, x.vram_base, 0, unit(x), c.bounds, b, i0, m, T, err)) return false;
-        return t0 >= i1 || run_set(d, c, l, x.xbase, L0.n_main, x.xstep, c.bounds, b, t0, i1, T, err);
+        if (i0 < m && !run_set(d, c, l, x.vram_base, 0, unit(x), c.bounds, b, i0, m, T, err, st)) return false;
+        return t0 >= i1 || run_set(d, c, l, x.xbase, L0.n_main, x.xstep, c.bounds, b, t0, i1, T, err, st);
     }
     // the experts [i0, i1) of a sorted set (blobs at wbase + i * stride; bounds b on the host, d_bounds on the device)
     // over the chunk's rows, in pieces of at most C rows, each added into acc in pick order
+    // (st: the stream its kernels go on - d.st when null; DS4_READ_HELP's helper passes its own)
     bool run_set(Dev& d, Chunk& c, const Layer& l, const uint8_t* wbase, int wb0, size_t stride, const int* d_bounds,
-                 const int* b, int i0, int i1, int T, std::string& err) {
+                 const int* b, int i0, int i1, int T, std::string& err, cudaStream_t st = nullptr) {
+        const cudaStream_t ss = st != nullptr ? st : d.st;
         const int D = g.dim, FF = l.ffn;
         while (i0 < i1) {
             int j = i0 + 1;
@@ -6436,25 +6765,25 @@ struct Model::Impl {
                 }
                 if (sa.lay.fmt == gg::kFmtMXFP4) {
                     if (sa.max_rows > 0)
-                        gg::set_gate_up(sa, c.x, D, c.row_tok + a, c.h16, FF, d.st, c.x16);   // (c.x16: rows_f16 of c.x)
+                        gg::set_gate_up(sa, c.x, D, c.row_tok + a, c.h16, FF, ss, c.x16);   // (c.x16: rows_f16 of c.x)
                     for (const int i : fat)
                         if (!fat_gate_up(c, sa, sa.wbase + (size_t) (i - i0) * stride, b[i], b[i + 1] - b[i], a, D, FF,
-                                         d.st, err))
+                                         ss, err))
                             return false;
-                    if (sa.max_rows > 0) gg::set_down(sa, c.h16, FF, c.y, D, d.st);
+                    if (sa.max_rows > 0) gg::set_down(sa, c.h16, FF, c.y, D, ss);
                     for (const int i : fat)
                         if (!fat_down(c, sa, sa.wbase + (size_t) (i - i0) * stride, b[i] - a, b[i + 1] - b[i], D, FF,
-                                      d.st, err))
+                                      ss, err))
                             return false;
                 } else {
-                    x3::set_gate_up(sa, c.x, D, c.row_tok + a, c.h16, FF, d.st);
-                    x3::set_down(sa, c.h16, FF, c.y, D, d.st);
+                    x3::set_gate_up(sa, c.x, D, c.row_tok + a, c.h16, FF, ss);
+                    x3::set_down(sa, c.h16, FF, c.y, D, ss);
                 }
                 if (dump_y != nullptr && (dump_y_layer < 0 || l.il == dump_y_layer)) {
                     std::vector<int> bb(b + i0, b + j + 1);
                     std::vector<uint16_t> hv((size_t) nrows * FF);
                     std::vector<float> yv((size_t) nrows * D);
-                    CK(cudaStreamSynchronize(d.st));
+                    CK(cudaStreamSynchronize(ss));
                     CK(cudaMemcpy(hv.data(), c.h16, hv.size() * 2, cudaMemcpyDeviceToHost));
                     CK(cudaMemcpy(yv.data(), c.y, yv.size() * 4, cudaMemcpyDeviceToHost));
                     std::lock_guard<std::mutex> lk(dump_mu);
@@ -6470,8 +6799,8 @@ struct Model::Impl {
                 //  the same sums.  A small ring's sets of one expert paid the chunk's tokens each: CUDA1 ~8 s a 28K read)
                 static const bool comb_rows = std::getenv("DS4_COMBINE_ROWS") != nullptr &&
                                               std::atoi(std::getenv("DS4_COMBINE_ROWS")) != 0;
-                if (comb_rows) moe_combine_rows(c.acc, c.y, c.pos, c.row_tok, c.rw, l.k_exp, a, a + nrows, D, d.st);
-                else moe_combine(c.acc, c.y, c.pos, c.rw, T, l.k_exp, a, a + nrows, D, d.st);
+                if (comb_rows) moe_combine_rows(c.acc, c.y, c.pos, c.row_tok, c.rw, l.k_exp, a, a + nrows, D, ss);
+                else moe_combine(c.acc, c.y, c.pos, c.rw, T, l.k_exp, a, a + nrows, D, ss);
             }
             i0 = j;
         }
@@ -17531,6 +17860,7 @@ struct Model::Impl {
             }
         }
         if (c.flow) {
+            if (!read_help_issue(d, c, L0, wp.k, T, b, err)) return false;   // (DS4_READ_HELP: the helper's range out)
             if (!flow_layer(d, c, L0, mi, wp.k, T, b, err)) return false;
             static const bool flow_ar_dma = [] {
                 const char* on = ds4_env("DS4_FLOW_AR_DMA");
@@ -17933,6 +18263,7 @@ struct Model::Impl {
             }
             lm_layers.store((int) li + 1, std::memory_order_release);
         }
+        if (c.flow && !read_help_end((int) di, err)) return false;
         S.report_prefill(d.id, std::accumulate(run.T.begin(), run.T.end(), 0), chunk, c.stream_bytes - stream_start);
         return true;
     }
@@ -17990,6 +18321,7 @@ struct Model::Impl {
             c.fl_cut_k = run.cut_k;
             c.fl_cut_r = run.cut_r;
             c.spec_k = c.spec_il = -1;
+            read_help_start((int) di);
             c.wait_ms = 0;
             c.it_file = c.it_ram = c.it_spec = c.it_spec_unused = c.it_lc = c.it_helper = c.chk_n = 0;
             c.lc_il = -1;
@@ -18255,6 +18587,7 @@ struct Model::Impl {
             for (cudaEvent_t e : tr_ev)
                 if (e) cudaEventDestroy(e);
         }
+        if (c.flow && !read_help_end((int) di, err)) return false;
         S.report_prefill(d.id, std::accumulate(run.T.begin(), run.T.end(), 0), chunk, c.stream_bytes - stream_start);
         if (!c.flow && S.copied + S.skipped > 0 && std::getenv("DS4_FLOW_STATS") != nullptr)
             std::fprintf(stderr, "ds4 prompt batches, CUDA%d: %zu experts copied, %zu unpicked experts skipped\n",
