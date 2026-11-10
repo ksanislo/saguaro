@@ -1255,6 +1255,7 @@ struct Model::Impl {
         cudaStream_t hs = nullptr, hcs = nullptr;   // the helper's compute, its copies of its experts' blobs
         cudaStream_t ost = nullptr;                 // the owner's side stream: the inputs out, the partial in
         cudaEvent_t routed = nullptr, in = nullptr, back = nullptr;   // owner: routed (d.st), inputs out, partial in (E2)
+        cudaEvent_t c0 = nullptr, k0 = nullptr;   // (the CHECK poll: the first batch's copies / its compute)
         cudaEvent_t h_a = nullptr, h_i = nullptr, h_c = nullptr, done = nullptr;   // helper: start, inputs in,
                                                                                    // computed, partial out (E)
         cudaEvent_t b0 = nullptr, b1 = nullptr, o0 = nullptr, o1 = nullptr;   // the blobs' span; d.st's wait on E2
@@ -5460,7 +5461,7 @@ struct Model::Impl {
                 cudaSetDevice(od.id);
                 return off("the helper stream's kernel scratch");
             }
-            for (cudaEvent_t* e : {&r.h_a, &r.h_i, &r.h_c, &r.done, &r.b0, &r.b1}) CK(cudaEventCreate(e));
+            for (cudaEvent_t* e : {&r.h_a, &r.h_i, &r.h_c, &r.done, &r.b0, &r.b1, &r.c0, &r.k0}) CK(cudaEventCreate(e));
             r.fill.resize((size_t) R);
             r.freed.resize((size_t) R);
             for (auto* vv : {&r.fill, &r.freed})
@@ -6669,10 +6670,12 @@ struct Model::Impl {
                 }
                 CK(cudaEventRecord(r.fill[sl], r.hcs));
             }
+            if (&bt == &bts.front()) CK(cudaEventRecord(r.c0, r.hcs));
             CK(cudaStreamWaitEvent(r.hs, r.fill[(size_t) ((g0 + bt.n - 1) % R)], 0));
             if (!run_set(devs[(size_t) r.hlp], h, l, h.ring + (size_t) (g0 % R) * h.ring_stride, 0, h.ring_stride,
                          r.bc_dev + bt.off, r.hbc + bt.off, 0, (int) bt.n, T, err, r.hs))
                 return false;
+            if (&bt == &bts.front()) CK(cudaEventRecord(r.k0, r.hs));
             for (size_t m = 0; m < bt.n; ++m) CK(cudaEventRecord(r.freed[(size_t) ((g0 + m) % R)], r.hs));
             r.n_it += bt.n;
             kick(r.hcs);
@@ -6762,9 +6765,9 @@ struct Model::Impl {
                     int nf = 0, nr = 0;
                     for (cudaEvent_t e : r.fill) nf += q(e);
                     for (cudaEvent_t e : r.freed) nr += q(e);
-                    std::fprintf(stderr, "ds4: DS4_READ_HELP_CHECK waiting %.0f s: routed %d in %d | helper inputs %d blobs %d compute %d done %d | back %d | %zu blobs of the share, ring %d: filled %d freed %d, n_it %llu, start %d\n",
+                    std::fprintf(stderr, "ds4: DS4_READ_HELP_CHECK waiting %.0f s: routed %d in %d | helper inputs %d blobs %d compute %d done %d | back %d | %zu blobs of the share, ring %d: filled %d freed %d, n_it %llu, start %d, first copies %d first compute %d\n",
                                  (last - t0) / 1000.0, q(r.routed), q(r.in), q(r.h_i), q(r.b1), q(r.h_c), q(r.done), q(r.back),
-                                 r.its.size(), r.R, nf, nr, (unsigned long long) r.n_it, q(r.b0));
+                                 r.its.size(), r.R, nf, nr, (unsigned long long) r.n_it, q(r.b0), q(r.c0), q(r.k0));
                 }
                 std::this_thread::sleep_for(std::chrono::milliseconds(2));
             }
