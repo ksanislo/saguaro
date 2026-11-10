@@ -5449,8 +5449,12 @@ struct Model::Impl {
         read_help_share = share;
         std::fprintf(stderr, "ds4: DS4_READ_HELP on: %s, share %.2f of the owner's streamed experts during a prompt's "
                              "run (decode untouched)%s\n",
-                     on.c_str(), share, "");
+                     on.c_str(), share, read_help_check() ? "; DS4_READ_HELP_CHECK: the first helped layer-chunk compared" : "");
         return true;
+    }
+    static bool read_help_check() {
+        static const bool on = ds4_env("DS4_READ_HELP_CHECK") != nullptr && std::atoi(ds4_env("DS4_READ_HELP_CHECK")) != 0;
+        return on;
     }
 
     // y[r][c] = x16[r] . W[:, c] (+ beta y) for r < rows: W reconstructed to FP16 in whole 128-column blocks, cuBLAS
@@ -6662,10 +6666,61 @@ struct Model::Impl {
         CK(cudaEventRecord(r.o0, d.st));
         CK(cudaStreamWaitEvent(d.st, r.back, 0));
         CK(cudaEventRecord(r.o1, d.st));
-        (void) c, (void) b;
+        if (read_help_check() && !r.checked) {
+            r.checked = true;
+            if (!read_help_compare(d, c, L0, T, b, r, err)) return false;
+        }
         add_f32(c.acc, r.oacc, TD, d.st);
         CK(cudaGetLastError());
         r.timed = true;
+        return true;
+    }
+    // DS4_READ_HELP_CHECK: the owner sums the helper's range itself (its blobs one at a time from the same NUMA parts,
+    // the tiles as the helper's take them) and compares with the helper's partial - the host waits here (a test)
+    bool read_help_compare(Dev& d, Chunk& c, const Layer& L0, int T, const std::vector<int>& b, ReadHelp& r,
+                           std::string& err) {
+        const size_t TD = (size_t) T * g.dim;
+        if (r.chk == nullptr &&
+            (!dalloc(d, r.chk, (size_t) chunk * g.dim, err) || !dalloc(d, r.chk_blob, c.ring_stride, err)))
+            return false;
+        CK(cudaMemsetAsync(r.chk, 0, TD * 4, d.st));
+        float* const acc0 = c.acc;
+        const bool fat0 = c.fat_off;
+        c.acc = r.chk;
+        c.fat_off = true;
+        const int n_vs = L0.pv_n + (int) L0.host_list.size();
+        bool ok = true;
+        int n_e = 0;
+        double bytes = 0;
+        for (const auto& ve : r.its) {   // (the issue's (slot, expert): flow_spec may have planned the next chunk since)
+            const int v = ve.first;
+            if (!ok) break;
+            ok = read_help_blob(L0, ve.second, r.chk_blob, d.st, bytes) &&
+                 run_set(d, c, L0, r.chk_blob, v, c.ring_stride, c.bounds, b.data(), v, v + 1, T, err);
+            ++n_e;
+        }
+        c.acc = acc0;
+        c.fat_off = fat0;
+        if (!ok) {
+            if (err.empty()) err = "DS4_READ_HELP_CHECK: the owner's copy of a blob failed";
+            return false;
+        }
+        CK(cudaStreamSynchronize(d.st));
+        std::vector<float> hp(TD), mine(TD);
+        CK(cudaMemcpy(hp.data(), r.oacc, TD * 4, cudaMemcpyDeviceToHost));
+        CK(cudaMemcpy(mine.data(), r.chk, TD * 4, cudaMemcpyDeviceToHost));
+        double mx = 0, ref = 0, d2 = 0, r2 = 0;
+        for (size_t i = 0; i < TD; ++i) {
+            const double dd = std::fabs((double) hp[i] - (double) mine[i]);
+            mx = std::max(mx, dd);
+            ref = std::max(ref, std::fabs((double) mine[i]));
+            d2 += dd * dd;
+            r2 += (double) mine[i] * mine[i];
+        }
+        std::fprintf(stderr, "ds4: DS4_READ_HELP_CHECK CUDA%d -> CUDA%d, layer %d: %d rows of %d experts - the helper's "
+                             "partial vs the owner's own: max-abs %.3g (max |own| %.3g), relative L2 %.3g%s\n",
+                     d.id, devs[(size_t) r.hlp].id, L0.il, b[(size_t) n_vs] - b[(size_t) r.pv0], n_e, mx, ref,
+                     r2 > 0 ? std::sqrt(d2 / r2) : 0.0, mx == 0 ? " (bit-identical)" : "");
         return true;
     }
     // a run's start / end on the owner (devs index di): its totals reset; the pair's line, one a run
