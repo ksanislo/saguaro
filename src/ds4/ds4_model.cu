@@ -6752,6 +6752,20 @@ struct Model::Impl {
             if (err.empty()) err = "DS4_READ_HELP_CHECK: the owner's copy of a blob failed";
             return false;
         }
+        {   // (the chain's stages while waiting: which never ends)
+            const double t0 = now_ms();
+            double last = t0;
+            while (cudaStreamQuery(d.st) == cudaErrorNotReady) {
+                if (now_ms() - last > 5000) {
+                    last = now_ms();
+                    auto q = [](cudaEvent_t e) { return cudaEventQuery(e) == cudaSuccess ? 1 : 0; };
+                    std::fprintf(stderr, "ds4: DS4_READ_HELP_CHECK waiting %.0f s: routed %d in %d | helper inputs %d blobs %d compute %d done %d | back %d\n",
+                                 (last - t0) / 1000.0, q(r.routed), q(r.in), q(r.h_i), q(r.b1), q(r.h_c), q(r.done), q(r.back));
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+            cudaGetLastError();
+        }
         CK(cudaStreamSynchronize(d.st));
         std::vector<float> hp(TD), mine(TD);
         CK(cudaMemcpy(hp.data(), r.oacc, TD * 4, cudaMemcpyDeviceToHost));
