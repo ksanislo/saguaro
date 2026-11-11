@@ -1060,6 +1060,29 @@ static std::pair<int64_t, int64_t> weight_scratch(const Glm5Geometry& g, bool ha
 }
 static constexpr size_t kPfWorkspace = (size_t) 16 << 20;   // cuBLAS
 
+// STRATA_GLM_PREFILL_CPU_DEVS=<CUDA ordinals, comma-separated>: only these cards may give PROMPT experts to the CPU lane
+// (still under the gate); unset = every card. Decode, the lane plan and calibration are untouched.
+static const char* prompt_cpu_devs() {
+    static const char* v = getenv("STRATA_GLM_PREFILL_CPU_DEVS");
+    return v;
+}
+static bool prompt_cpu_dev_ok(int dev) {
+    static const std::vector<int> devs = [] {
+        std::vector<int> d;
+        const char* v = prompt_cpu_devs();
+        if (v == nullptr) return d;
+        for (const char* c = v; *c;) {
+            char* end = nullptr;
+            const long n = std::strtol(c, &end, 10);
+            if (end == c) { ++c; continue; }
+            d.push_back((int) n);
+            c = end;
+        }
+        return d;
+    }();
+    return prompt_cpu_devs() == nullptr || std::find(devs.begin(), devs.end(), dev) != devs.end();
+}
+
 // ---------------------------------------------------------------- setup
 bool Glm5Model::prefill_setup(std::string& err) {
     (void) err;
@@ -1445,6 +1468,9 @@ bool Glm5Model::prefill_setup(std::string& err) {
                                  "silences it)\n", dev_);
         }
     }
+    if (prompt_cpu_devs() != nullptr)
+        std::fprintf(stderr, "glm prefill: CUDA%d prompt CPU lane %s (STRATA_GLM_PREFILL_CPU_DEVS=%s)\n", dev_,
+                     prompt_cpu_dev_ok(dev_) ? "allowed" : "excluded", prompt_cpu_devs());
     std::fprintf(stderr, "glm prefill: CUDA%d chunks of %d tokens (--prefill %s; mixer sub-batches of %d), borrowing "
                          "%.0f MB of the expert pool while a prompt runs (activations %.0f, weight scratch %.0f, expert "
                          "staging %.0f, prestage %.0f: %d experts); disk landing ring %d experts (%.0f MB pinned)\n",
@@ -2424,8 +2450,9 @@ bool Glm5Model::prefill_half(int64_t p0, int T, std::string& err, const int32_t*
         const char* v = getenv("STRATA_GLM_PREFILL_CPU_GATE");
         return v != nullptr ? std::atof(v) : 2.0;
     }();
+    const bool pf_cpu_dev = prompt_cpu_dev_ok(dev_);   // STRATA_GLM_PREFILL_CPU_DEVS
     const auto cpu_lane = [&](int il) {
-        return pf_cpu && F->cpu_pool && F->cpu_c_ms > 0.0 && F->cpu_p_ms > pf_cpu_gate * F->cpu_c_ms &&
+        return pf_cpu && pf_cpu_dev && F->cpu_pool && F->cpu_c_ms > 0.0 && F->cpu_p_ms > pf_cpu_gate * F->cpu_c_ms &&
                (size_t) il < F->cpu_fmt.size() && F->cpu_fmt[(size_t) il].n_ff > 0;
     };
     // the CPU lane's stream (x down, the rows' tokens down) and its pinned buffers
