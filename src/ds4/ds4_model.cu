@@ -16,6 +16,7 @@
 #include "ds4_ablate.hpp"
 #include "ds4_engram_io.hpp"
 #include "ds4_draft_placement.hpp"
+#include "ds4_elastic.hpp"
 
 #include "ds4_gguf.cuh"
 #if defined(STRATA_USE_HIP)
@@ -1686,6 +1687,8 @@ struct Model::Impl {
         std::vector<std::vector<uint8_t*>> ckv, ik;   // [source][device]
     };
     std::vector<SeqState> sqs;   // empty: one conversation (Options::seqs 1)
+    // DS4_ELASTIC_CONV=1: conversations 1..n-1's ckv / ik backed as they grow (ds4_elastic.hpp); null: allocated whole
+    std::unique_ptr<elastic::Pool> el;
     int sq_bound = 0;
     std::vector<int> sq_base;
     std::vector<int> mrows;      // the last multi step's rows' conversations (sample_multi)
@@ -9692,6 +9695,16 @@ struct Model::Impl {
             nmem += L[i].nm;
         }
         sqs.assign((size_t) n, SeqState{});
+        if (el_wanted()) {
+            std::vector<int> ids;
+            for (const Dev& d : devs) ids.push_back(d.id);
+            el = std::make_unique<elastic::Pool>();
+            if (!el->init(ids, n)) {
+                el.reset();
+                std::fprintf(stderr, "ds4: DS4_ELASTIC_CONV: no virtual memory on these GPUs - every conversation's "
+                                     "KV allocated whole, as without it\n");
+            }
+        }
         std::vector<size_t> before(devs.size());
         for (size_t di = 0; di < devs.size(); ++di) before[di] = devs[di].caches;
         for (int s = 0; s < n; ++s) {
@@ -9726,6 +9739,16 @@ struct Model::Impl {
                         continue;
                     }
                     Dev& d = devs[di];
+                    if (el != nullptr) {   // (DS4_ELASTIC_CONV: a reservation of the whole context, backed as used)
+                        if ((sr.ckv[di] != nullptr &&
+                             (q.ckv[j][di] = el->add(s, (int) di, ckv_rb(), sr.ratio, sr.cap)) == nullptr) ||
+                            (sr.ik[di] != nullptr &&
+                             (q.ik[j][di] = el->add(s, (int) di, ik_rb(), sr.ratio, sr.cap)) == nullptr)) {
+                            err = "DS4_ELASTIC_CONV: no address space for conversation " + std::to_string(s) + "'s KV";
+                            return false;
+                        }
+                        continue;
+                    }
                     if (sr.ckv[di] != nullptr && !dalloc(d, q.ckv[j][di], (size_t) sr.cap * ckv_rb(), err, &d.caches))
                         return false;
                     if (sr.ik[di] != nullptr && !dalloc(d, q.ik[j][di], (size_t) sr.cap * ik_rb(), err, &d.caches))
@@ -9746,11 +9769,109 @@ struct Model::Impl {
             std::fprintf(stderr, "ds4: a multi step's attention for all its rows in one launch a step, %.1f MB a GPU "
                                  "(DS4_MULTI_ATTN)\n",
                          ((double) ma_rows_max(g.win) * g.hd + (double) kWin * topk_stride() * g.hd) * 2 / 1e6);
+        if (el != nullptr && !el_fill(n, err)) return false;
         double more = 0;
         for (size_t di = 0; di < devs.size(); ++di) more += (double) (devs[di].caches - before[di]);
         std::fprintf(stderr, "ds4: --parallel %d: %d conversations at once, each its own rings and KV (%.2f GB more "
                              "VRAM for the other %d, from the experts' room)\n", n, n, more / 1e9, n - 1);
         return true;
+    }
+    // ---- DS4_ELASTIC_CONV=1 (--parallel): conversations 1..n-1's compressed KV and index keys backed as they grow,
+    // out of a pool made here (DS4_ELASTIC_CONV_TOKENS positions of theirs in all, 1048576 by default) - the rest of
+    // their whole contexts' VRAM goes to the experts.  Conversation 0 keeps its whole context
+    static bool el_wanted() {
+        const char* v = ds4_env("DS4_ELASTIC_CONV");
+        return v != nullptr && std::atoi(v) != 0;
+    }
+    static int64_t el_budget_tokens() {
+        const char* v = ds4_env("DS4_ELASTIC_CONV_TOKENS");
+        return v != nullptr && std::atoll(v) > 0 ? std::atoll(v) : 1048576;
+    }
+    bool el_fill(int n, std::string& err) {
+        const int64_t T = std::min<int64_t>(el_budget_tokens(), (int64_t) (n - 1) * o.max_context);
+        double whole = 0;
+        for (size_t di = 0; di < devs.size(); ++di) {
+            // (T positions of one conversation's buffers on this device, and two granules of slack a buffer each)
+            size_t bytes = 0;
+            int nb = 0;
+            for (const auto& b : el->seqs[1].b)
+                if (b.di == (int) di) bytes += el->up(b.bytes_for(T)), ++nb;
+            for (int s = 1; s < n; ++s)
+                for (const auto& b : el->seqs[(size_t) s].b)
+                    if (b.di == (int) di) whole += (double) b.max_rows * b.rb;
+            bytes += (size_t) nb * (size_t) (n - 1) * 2 * el->gran;
+            cudaSetDevice(devs[di].id);
+            if (!el->fill((int) di, bytes)) {
+                err = "DS4_ELASTIC_CONV: CUDA" + std::to_string(devs[di].id) + " could not make its pool of " +
+                      std::to_string(bytes >> 20) + " MiB";
+                return false;
+            }
+            devs[di].caches += el->made[di] * el->gran;
+        }
+        const double pool = (double) el->made_bytes();
+        std::fprintf(stderr, "ds4: elastic conversations: %d, %.2f GB held back for the experts, taken on demand "
+                             "(DS4_ELASTIC_CONV: their whole contexts %.2f GB; a pool of %.2f GB for %lld of their "
+                             "positions in all, %.2f MB a 1K; conversation 0 keeps its whole context)\n",
+                     n - 1, std::max(0.0, whole - pool) / 1e9, whole / 1e9, pool / 1e9, (long long) T,
+                     el_bytes_per_k());
+        return true;
+    }
+    double el_bytes_per_k() const {
+        double b = 0;
+        for (const auto& x : el->seqs[1].b) b += 1024.0 / (double) x.ratio * (double) x.rb;
+        return b / 1e6;
+    }
+    bool elastic() const { return el != nullptr; }
+    // positions conversation s holds now (its whole context: not elastic, or conversation 0)
+    int64_t seq_backed(int s) const {
+        if (el == nullptr || s <= 0 || s >= (int) sqs.size()) return o.max_context;
+        return std::min<int64_t>(el->seqs[(size_t) s].tokens, o.max_context);
+    }
+    bool seq_can_back(int s, int64_t tokens) const {
+        return seq_backed(s) >= tokens || el->can(s, std::min<int64_t>(tokens, o.max_context));
+    }
+    // the model's own guard: what conversation s is about to write backed (a step past it when the pool has it)
+    bool el_cover(int s, int64_t tokens, std::string& err) {
+        if (el == nullptr || seq_backed(s) >= tokens + 64) return true;
+        return seq_reserve(s, tokens + 64 + kElStep, err) || seq_reserve(s, tokens + 64, err);
+    }
+    static constexpr int64_t kElStep = 8192;   // (positions backed past what a write needs, when the pool has them)
+    // conversation s backed to `tokens` positions (false: the pool is short - nothing taken)
+    bool seq_reserve(int s, int64_t tokens, std::string& err) {
+        tokens = std::min<int64_t>(tokens, o.max_context);
+        if (seq_backed(s) >= tokens) return true;
+        const double t0 = now_ms();
+        size_t added = 0;
+        int cur = 0;
+        cudaGetDevice(&cur);
+        const bool ok = el->grow(s, tokens, added);
+        cudaSetDevice(cur);
+        if (!ok) {
+            cudaGetLastError();
+            err = "DS4_ELASTIC_CONV: conversation " + std::to_string(s) + " to " + std::to_string(tokens) +
+                  " positions: the pool has " + std::to_string(el->idle_bytes() >> 20) + " MiB free, too little";
+            return false;
+        }
+        std::fprintf(stderr, "ds4: elastic conversation %d takes %.0f MB: %lld positions backed (%.0f MB), the pool "
+                             "%.0f of %.0f MB free (%.1f ms)\n",
+                     s, added / 1e6, (long long) el->seqs[(size_t) s].tokens, el->held(s) / 1e6, el->idle_bytes() / 1e6,
+                     el->made_bytes() / 1e6, now_ms() - t0);
+        return true;
+    }
+    // conversation s's backing back to the pool and its state cleared (the caller set it aside first)
+    void seq_release(int s) {
+        if (el == nullptr || s <= 0 || s >= (int) sqs.size() || el->held(s) == 0) return;
+        const int b = sq_bound;
+        seq_bind(s);
+        reset();
+        for (Dev& d : devs) {   // (nothing in flight may read the rows unmapped below)
+            cudaSetDevice(d.id);
+            cudaDeviceSynchronize();
+        }
+        const size_t freed = el->release(s);
+        seq_bind(b);
+        std::fprintf(stderr, "ds4: elastic conversation %d returns %.0f MB to the pool (%.0f of %.0f MB free)\n", s,
+                     freed / 1e6, el->idle_bytes() / 1e6, el->made_bytes() / 1e6);
     }
     int seq_count() const { return sqs.empty() ? 1 : (int) sqs.size(); }
     // the bound conversation's host state into its SeqState (park) and back (unpark)
@@ -10266,6 +10387,7 @@ struct Model::Impl {
     }
 
     bool slot_load(const uint8_t* data, size_t bytes, int64_t n_pos, std::string& err, std::vector<PicMark>* pics) {
+        if (!el_cover(sq_bound, n_pos, err)) return false;   // (DS4_ELASTIC_CONV: its rows backed first)
         size_t off = 0;
         bool wrote = false, ok = false;
         // a load that stops after some of another conversation's state went into the layers leaves a state no
@@ -20061,6 +20183,7 @@ struct Model::Impl {
             err = "the context is full";
             return false;
         }
+        if (!el_cover(sq_bound, pos + n, err)) return false;
         for (int t = 0; t < n; ++t)
             if (tk[t] < 0 || tk[t] >= g.vocab) {
                 err = "token " + std::to_string(tk[t]) + " out of range";
@@ -20682,6 +20805,7 @@ struct Model::Impl {
             err = "the context is full";
             return false;
         }
+        if (!el_cover(sq_bound, pos + T, err)) return false;
         for (int t = 0; t < T; ++t)
             if (tk[t] < 0 || tk[t] >= g.vocab) {
                 err = "token " + std::to_string(tk[t]) + " out of range";
@@ -21948,6 +22072,7 @@ struct Model::Impl {
                 err = "the context is full";
                 return false;
             }
+            if (!el_cover(sv[i], seq_pos(sv[i]) + lens[i], err)) return false;
         }
         seq_park();   // (every conversation's host state in sqs while the rows run)
         WinPlan& wp = wplan;
@@ -22577,6 +22702,11 @@ const std::vector<int32_t>& Model::tokens() const { return p_->toks; }
 int Model::seq_count() const { return p_->seq_count(); }
 void Model::seq_bind(int s) { p_->seq_bind(s); }
 int Model::seq_bound() const { return p_->sq_bound; }
+bool Model::elastic() const { return p_->elastic(); }
+int64_t Model::seq_backed(int s) const { return p_->seq_backed(s); }
+bool Model::seq_can_back(int s, int64_t tokens) const { return p_->seq_can_back(s, tokens); }
+bool Model::seq_reserve(int s, int64_t tokens, std::string& err) { return p_->seq_reserve(s, tokens, err); }
+void Model::seq_release(int s) { p_->seq_release(s); }
 int64_t Model::seq_pos(int s) const { return p_->seq_pos(s); }
 const std::vector<int32_t>& Model::seq_tokens(int s) const { return p_->seq_tokens(s); }
 bool Model::step_multi(const int* seqs, const int* tokens, int n, std::string& err) {

@@ -2077,6 +2077,30 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
             held = std::move(held_of[(size_t) s]);
             held_of[(size_t) s].clear();
         };
+        // DS4_ELASTIC_CONV: conversation s backed to `tokens` positions (a step past them when the pool has it) - where
+        // the pool is short, idle conversations give theirs back, the least recently used first, each set aside first
+        const auto el_room = [&](int s, int64_t tokens) -> bool {
+            if (!m.elastic() || m.seq_backed(s) >= tokens) return true;
+            std::string e;
+            for (;;) {
+                if (m.seq_reserve(s, tokens + 8192, e) || m.seq_reserve(s, tokens, e)) return true;
+                int v = -1;
+                for (int k = 1; k < nseq; ++k)
+                    if (k != s && seq_rid[(size_t) k] < 0 && m.seq_backed(k) > 0 &&
+                        (v < 0 || seq_used[(size_t) k] < seq_used[(size_t) v]))
+                        v = k;
+                if (v < 0) {
+                    std::fprintf(stderr, "maya ds4 serve: %s\n", e.c_str());
+                    return false;
+                }
+                const int b = m.seq_bound();
+                bind(v);
+                slot_put(" (its memory went back to the elastic pool)");
+                held.clear();
+                bind(b);
+                m.seq_release(v);
+            }
+        };
         const auto penalties = [&](const Req& r) {   // (and its logit_bias: the request's picks, set before each)
             m.set_penalties(r.pen_n < 0 ? INT_MAX : r.pen_n,
                             std::isfinite(r.pen_repeat) && r.pen_repeat > 0.0f ? r.pen_repeat : 1.0f,
@@ -2165,19 +2189,19 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
             read_line.insert(at, a);
         };
         // a GEN line into a free conversation: its prompt begun, and read in turn (arrival, or with pictures: whole now)
-        const auto admit = [&](const std::string& ln) {
+        const auto admit = [&](const std::string& ln) -> bool {   // (false: it waits, put back first in line)
             const bool geni = ln.rfind("GENI ", 0) == 0;
             auto a = std::make_unique<Act>();
             Req& r = a->r;
             if (!parse_gen(ln, r, geni)) {
                 std::printf("ERR expected: GEN <max_new> [keys] <id,id,...> or GENI <max_new> [keys] <file> <id,id,...>\n");
                 std::fflush(stdout);
-                return;
+                return true;
             }
             if (r.rid < 0) {
                 std::printf("ERR this engine runs several conversations: GEN needs rid=<id>\n");
                 std::fflush(stdout);
-                return;
+                return true;
             }
             // the conversation: the idle one the prompt reuses the most of (its whole state continued, else a
             // checkpoint it can go back to), else an empty one, else the least recently used
@@ -2200,7 +2224,18 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
             }
             if (best < 0) {   // (the server gives each conversation one request: a request over that waits)
                 waiting.push_front(ln);
-                return;
+                return false;
+            }
+            // DS4_ELASTIC_CONV: its prompt backed before it is read; one the pool cannot hold goes to conversation 0
+            // (its whole context) when that one is idle, else waits for a running request to end
+            if (m.elastic() && best > 0 && !el_room(best, (int64_t) r.ids.size() + 64)) {
+                if (seq_rid[0] >= 0) {
+                    std::fprintf(stderr, "maya ds4 serve: request %lld (%zu tokens) waits: the elastic pool holds too "
+                                         "little and conversation 0 is busy\n", r.rid, r.ids.size());
+                    waiting.push_front(ln);
+                    return false;
+                }
+                best = 0;
             }
             bind(best);
             seq_used[(size_t) best] = ++use_clock;
@@ -2209,7 +2244,7 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
             if (!prompt_begin(r, geni, " " + std::to_string(rid), a->P)) {
                 in.forget(rid);
                 end_if_broken();
-                return;
+                return true;
             }
             a->seq = best;
             a->reading = true;
@@ -2221,7 +2256,7 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
                 if (a->ended) {
                     in.forget(rid);
                     end_if_broken();
-                    return;
+                    return true;
                 }
             }
             seq_rid[(size_t) best] = rid;
@@ -2233,6 +2268,7 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
             }
             if (a->reading) join_read(a.get());
             acts.push_back(std::move(a));
+            return true;
         };
         // the loop's events (ds4_evt.hpp, rig's evt), run one at a time on this thread: the reader's lines, then the
         // turns - a token of every answer running (a round), or the next prompt's piece, in turn.  A line outranks a
@@ -2255,7 +2291,7 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
             while (!quit && !waiting.empty() && std::find(seq_rid.begin(), seq_rid.end(), -1LL) != seq_rid.end()) {
                 const std::string g = waiting.front();
                 waiting.pop_front();
-                admit(g);
+                if (!admit(g)) break;   // (DS4_ELASTIC_CONV: no room yet - a running request's end tries again)
                 beat();
             }
         };
@@ -2297,6 +2333,13 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
                         break;
                     }
                     if (a.produced >= a.limit || m.seq_pos(a.seq) >= m.max_context()) {
+                        a.done = true;
+                        break;
+                    }
+                    if (!el_room(a.seq, m.seq_pos(a.seq) + 128)) {   // (DS4_ELASTIC_CONV: its next round's rows)
+                        std::fprintf(stderr, "maya ds4 serve: request %lld ends at %lld positions: the elastic pool "
+                                             "holds no more (DS4_ELASTIC_CONV_TOKENS)\n",
+                                     a.r.rid, (long long) m.seq_pos(a.seq));
                         a.done = true;
                         break;
                     }

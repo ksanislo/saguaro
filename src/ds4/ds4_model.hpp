@@ -283,6 +283,15 @@ public:
     int seq_count() const;
     void seq_bind(int s);
     int seq_bound() const;
+    /// DS4_ELASTIC_CONV=1: conversations 1..n-1's KV backed as they grow, out of a pool made at load (conversation 0
+    /// keeps its whole context).  seq_backed: the positions s holds now (max_context where not elastic);
+    /// seq_can_back: whether the pool could back s to `tokens` now; seq_reserve: s backed to `tokens` (false: the pool
+    /// is short, nothing taken); seq_release: s's backing back to the pool and its state cleared (set it aside first).
+    bool elastic() const;
+    int64_t seq_backed(int s) const;
+    bool seq_can_back(int s, int64_t tokens) const;
+    bool seq_reserve(int s, int64_t tokens, std::string& err);
+    void seq_release(int s);
     int64_t seq_pos(int s) const;
     const std::vector<int32_t>& seq_tokens(int s) const;
     /// One token into each of n conversations (distinct, n <= 16, each at its own next position) through the model
