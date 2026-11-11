@@ -206,6 +206,8 @@ int run_case(int64_t ctx, int64_t nq, int reps, int64_t capacity) {
     // against the warp kernel's 7e-8, i.e. FP32-accumulated TF32-split products; 1e-5 keeps ten times that margin and is still
     // two orders below a plain single-TF32 product (~1e-3), which is the error this gate exists to catch.
     double err_old = 0, err_new = 0, scale = 0, rel_old = 0, rel_new = 0;
+    double bias_old = 0, bias_new = 0, rbias_old = 0, rbias_new = 0;   // signed means: (score - FP64) / scale, / |FP64|
+    int64_t n_rb = 0;
     std::vector<double> refs;
     std::vector<std::pair<float, float>> got;
     {
@@ -232,10 +234,17 @@ int run_case(int64_t ctx, int64_t nq, int reps, int64_t capacity) {
         }
         // relative error per score, for scores of at least 1e-3 of the scale (a relu sum near 0 has no useful one)
         for (size_t n = 0; n < refs.size(); ++n) {
+            bias_old += ((double) got[n].first - refs[n]) / std::max(scale, 1e-300);
+            bias_new += ((double) got[n].second - refs[n]) / std::max(scale, 1e-300);
             if (std::fabs(refs[n]) < 1e-3 * scale) continue;
+            rbias_old += ((double) got[n].first - refs[n]) / std::fabs(refs[n]);
+            rbias_new += ((double) got[n].second - refs[n]) / std::fabs(refs[n]);
+            ++n_rb;
             rel_old = std::max(rel_old, std::fabs(refs[n] - (double) got[n].first) / std::fabs(refs[n]));
             rel_new = std::max(rel_new, std::fabs(refs[n] - (double) got[n].second) / std::fabs(refs[n]));
         }
+        if (!refs.empty()) { bias_old /= (double) refs.size(); bias_new /= (double) refs.size(); }
+        if (n_rb) { rbias_old /= (double) n_rb; rbias_new /= (double) n_rb; }
     }
     const bool acc_ok = !have_tc || err_new <= std::max(4.0 * err_old, 1e-5 * scale);
     // time
@@ -269,6 +278,8 @@ int run_case(int64_t ctx, int64_t nq, int reps, int64_t capacity) {
                     rel_old, rel_new, 1000.0 * (double) (nq - same_sel) / (double) nq, (long long) (nq - same_sel),
                     (long long) flips_fast_right, (long long) flips_warp_right, (long long) flips_even, flip_gap_max,
                     t_old + t_tk2, t_new + t_tk2, (t_old + t_tk2) / (t_new + t_tk2));
+        std::printf("  vs FP64 signed mean error (bias): warp %+.3g, fast %+.3g of scale; per score (>= 1e-3 of scale) "
+                    "warp %+.3g, fast %+.3g\n", bias_old, bias_new, rbias_old, rbias_new);
     }
     cudaFree((void*) d_pooled); cudaFree((void*) d_dead); cudaFree((void*) d_q); cudaFree((void*) d_steps);
     cudaFree(sc_old); cudaFree(sc_new); cudaFree(ids_old); cudaFree(ids_new); cudaFree(ids_reg);
