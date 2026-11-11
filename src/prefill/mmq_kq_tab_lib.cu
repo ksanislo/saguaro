@@ -63,11 +63,11 @@ STRATA_KQ_EXPORT int strata_kq_tab_has(int type) { return dispatch(nullptr, (ggm
 
 STRATA_KQ_EXPORT int strata_kq_tab_run(int device, int type, const void* args, const void* const* ptrs, void* stream) {
     if (device < 0 || device >= GGML_CUDA_MAX_DEVICES) return -1;
-    if (cudaSetDevice(device) != cudaSuccess) return (int) cudaGetLastError();
+    if (const cudaError_t e = cudaSetDevice(device); e != cudaSuccess) return (int) e;
     sm::mmq_x_tab tab{};
     for (int z = 0; z < 16; ++z) tab.p[z] = (const char*) ptrs[z];
     const int r = dispatch(ctx_for(device), (ggml_type) type, (const mmq_args*) args, &tab, (cudaStream_t) stream);
     if (r < 0) return -1;
-    if (r == 0) return 1;
+    if (r == 0) return -2;   // not covered: never 1, which is cudaErrorInvalidValue
     return (int) cudaGetLastError();
 }

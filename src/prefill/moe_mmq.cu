@@ -355,7 +355,7 @@ bool run_tab(ggml_backend_cuda_context* ctx, const mmq_args* a, const mmq_x_tab*
 #if defined(STRATA_KQ_DSO)
     if (ctx == nullptr) return kq::tab_has((int) t);
     const int e = kq::tab_run((int) t, a, (const void* const*) tab->p, s);
-    if (e > 1) {
+    if (e > 0) {   // a cudaError_t (ABI 2: not covered is -2, no instance -1)
         std::fprintf(stderr, "prefill mmq: the pointer-table K-quant library failed on type %d (error %d)\n", (int) t, e);
         std::exit(1);
     }

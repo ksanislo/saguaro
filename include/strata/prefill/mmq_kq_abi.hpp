@@ -3,7 +3,7 @@
 // meaning changes; the argument block (ggml's mmq_args) is checked by its size.
 #pragma once
 
-#define STRATA_KQ_ABI_VERSION 1
+#define STRATA_KQ_ABI_VERSION 2   // 2: strata_kq_tab_run's "not covered" is -2 (was 1 == cudaErrorInvalidValue)
 
 #if defined(_WIN32)
 #define STRATA_KQ_LIB_NAME "strata_kq.dll"
@@ -23,8 +23,8 @@ typedef int (*strata_kq_abi_fn)();
 typedef int (*strata_kq_init_fn)(int device);
 typedef int (*strata_kq_run_fn)(int device, int ggml_type, const void* mmq_args, void* stream);
 // strata_kq_tab: strata_kq_tab_abi / strata_kq_tab_init (as above), whether a type has an instance (1/0), and one
-// product with expert z's matrix at ptrs[z] (16 pointers): 0 = launched, 1 = not covered (rows % 128), -1 = no
-// instance for the type, else the cudaError_t of the launch
+// product with expert z's matrix at ptrs[z] (16 pointers): 0 = launched, -2 = not covered (rows % 128), -1 = no
+// instance for the type (or no such device), > 0 = the cudaError_t of the launch (disjoint from the other codes)
 typedef int (*strata_kq_tab_has_fn)(int ggml_type);
 typedef int (*strata_kq_tab_run_fn)(int device, int ggml_type, const void* mmq_args, const void* const* ptrs, void* stream);
 }
