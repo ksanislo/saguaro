@@ -9,6 +9,7 @@
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 #include <algorithm>
+#include <atomic>
 
 #include <algorithm>
 #include <cfloat>
@@ -2612,6 +2613,33 @@ void gdn_conv(float* history, const float* qkv, const float* conv_w, float* h, i
     gdn_l2_kernel<<<dim3(2 * HK, (unsigned) T), S, 0, (cudaStream_t) stream>>>(h, eps);
     check("gdn_conv");
 }
+#if !defined(__HIPCC__)
+// gdn_rec_chunked_sm75 with the proof that it ran: per device, a line at the first call and at every doubling of the
+// tokens it took from 64K on ("GDN sm75 recurrence ran: N tokens in M calls on CUDAx"), and one line the first time
+// it refused (the error: the default kernel ran instead)
+bool gdn_rec_chunked_sm75_logged(float* state, const float* h, const float* gate, const float* beta, float* y, int64_t T,
+                                 void* stream) {
+    static std::atomic<int64_t> toks[64], calls[64], next_log[64];
+    static std::atomic<bool> refused[64];
+    int dev = 0;
+    if (cudaGetDevice(&dev) != cudaSuccess || dev < 0 || dev >= 64) { cudaGetLastError(); dev = 63; }
+    const cudaError_t e = gdn_rec_chunked_sm75(state, h, gate, beta, y, T, (cudaStream_t) stream);
+    if (e != cudaSuccess) {
+        if (!refused[dev].exchange(true))
+            std::fprintf(stderr, "strata: CUDA%d GDN sm75 recurrence refused a %lld-token call (%s): the default kernel "
+                                 "runs\n", dev, (long long) T, cudaGetErrorString(e));
+        return false;
+    }
+    const int64_t c = calls[dev].fetch_add(1) + 1, n = toks[dev].fetch_add(T) + T;
+    int64_t nl = next_log[dev].load();
+    if (c == 1 || n >= std::max<int64_t>(nl, 65536)) {
+        next_log[dev].store(std::max<int64_t>(n, 32768) * 2);
+        std::fprintf(stderr, "strata: CUDA%d GDN sm75 recurrence ran: %lld tokens in %lld calls (this call %lld)\n", dev,
+                     (long long) n, (long long) c, (long long) T);
+    }
+    return true;
+}
+#endif
 void gdn_recurrence_variant(int variant, float* state, const float* h, const float* gate, const float* beta,
                             const float* z, const float* gamma, float eps, float* y, uint16_t* y16, int64_t T,
                             void* stream, int64_t ld16) {
@@ -2718,8 +2746,7 @@ void gdn_recurrence_variant(int variant, float* state, const float* h, const flo
         // STRATA_GDN_CHUNKED_SM75=1 (opt-in): the same on FP16 tensor cores with hi/lo splits (sm_75+, other bits)
         static const bool chunked75 = [] { const char* v = std::getenv("STRATA_GDN_CHUNKED_SM75"); return v != nullptr && std::atoi(v) != 0; }();
         if (chunked && T >= kGdnChunkedMin && gdn_rec_chunked(state, h, gate, beta, y, T, (cudaStream_t) stream) == cudaSuccess) {
-        } else if (chunked75 && T >= kGdnChunkedMin &&
-                   gdn_rec_chunked_sm75(state, h, gate, beta, y, T, (cudaStream_t) stream) == cudaSuccess) {
+        } else if (chunked75 && T >= kGdnChunkedMin && gdn_rec_chunked_sm75_logged(state, h, gate, beta, y, T, stream)) {
         } else if (pipe && gdn_keyhead_ok())   // the value heads of a key head in one thread (same bits)
             gdn_rec_kh_kernel<<<HK * NCB, dim3(CB, RG), 0, (cudaStream_t) stream>>>(state, h, gate, beta, y, T);
         else
