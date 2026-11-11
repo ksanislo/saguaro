@@ -241,13 +241,16 @@ public:
     /// STRATA_GLM_SLOT_FAST=1: slot_save's bytes copied out of every part at once into a host image, then written to
     /// `tmp` by a background thread, renamed to `path` when whole and after(bytes) run there (false: path removed).
     /// The bytes, or 0 + err (nothing queued).  slot_load(path) waits for that write; slot_cancel drops it (a write
-    /// under way: its file removed when it ends); slot_flush waits for every write queued.
+    /// under way: its file removed when it ends); slot_flush waits for every write queued (logged when it waited).
+    /// Queued images are capped at STRATA_GLM_SLOT_FAST_QUEUE_MB (8192): a save past it waits for the writer.
     static bool slot_fast();
     uint64_t slot_save_bg(const std::string& tmp, const std::string& path, const std::function<bool(uint64_t)>& after,
                           std::string& err);
     static void slot_wait(const std::string& path);
     static void slot_cancel(const std::string& path);
     static void slot_flush();
+    /// the final paths whose background write or commit failed since the last call (their slots are gone)
+    static std::vector<std::string> slot_failed_writes();
     /// Runs the engine's sampler on the last forward's logits and returns the picked token id
     /// (-1 + err on failure).  Handles the device bookkeeping: with a split the logits (and the
     /// sampler buffer) live on the tail half's device, where peer reads are not available.

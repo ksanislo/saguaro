@@ -1524,6 +1524,16 @@ static int glm_pack_generate(const Options& o) {
         }
         slots.erase(slots.begin() + (long) i);
     };
+    // STRATA_GLM_SLOT_FAST: slots whose background write or commit failed leave the list (their files are gone)
+    const auto slot_reap = [&] {
+        if (slots.empty()) return;
+        for (const std::string& f : strata::core::Glm5Model::slot_failed_writes())
+            for (size_t i = slots.size(); i-- > 0;)
+                if (!slots[i].data && slots[i].path == f) {
+                    note("a conversation's background write failed - it is no longer kept");
+                    slot_drop(i);
+                }
+    };
     const auto slot_lru = [&](size_t keep) {   // the least recently used slot other than `keep`
         size_t lru = SIZE_MAX;
         for (size_t i = 0; i < slots.size(); ++i)
@@ -1532,6 +1542,7 @@ static int glm_pack_generate(const Options& o) {
     };
     // the conversation in the model (its snapshot, snap_tokens) into a slot
     const auto slot_put = [&](const char* why) {
+        slot_reap();
         if (slot_max <= 0 || snap_in_slot || snap_tokens.size() < slot_min) return;
         // an earlier state of this conversation is superseded (the same pictures: the same tokens with other
         // pictures are another conversation)
@@ -1630,6 +1641,7 @@ static int glm_pack_generate(const Options& o) {
     bool slot_load_failed = false;   // (a slot_load that failed may have written part of the bound context's rows)
     const auto slot_take = [&](const std::vector<int32_t>& prompt) -> size_t {
         if (slot_max <= 0) return 0;
+        slot_reap();
       for (;;) {   // the longest slot this prompt continues; one that will not load (saved by another model layout, a
                    // damaged file) is dropped and the next-longest tried - before, the first failure read the whole
                    // prompt from token 0 although a shorter slot or a checkpoint held most of it
@@ -1662,6 +1674,7 @@ static int glm_pack_generate(const Options& o) {
         slots[best].anchor = false;
         if (slot_keep && !slots[best].data) {   // its age counts from its last use (a file slot's only)
             std::error_code ec;
+            strata::core::Glm5Model::slot_wait(slots[best].path);   // (its .meta committed: slot_load waited too)
             fs::last_write_time(meta_of(slots[best].path), fs::file_time_type::clock::now(), ec);
         }
         char m[160];

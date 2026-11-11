@@ -491,8 +491,12 @@ static void* numa_pinned(size_t bytes, const RowLayout* rl = nullptr, int par_pa
                     arena_threads(2 * per, cpus, [&](int i) { return i < per ? 0 : 1; }, [&](int i) {
                         const bool second = i >= per;
                         const int t = second ? i - per : i;
+                        // every page that holds a byte of [off, off + len) (a page astride two halves: touched by
+                        // both nodes' threads, faulted once, placed by its policy as ever)
                         const auto touch = [&](size_t off, size_t len) {
-                            for (size_t q = 0; q < len; q += 4096) ((volatile char*) p)[off + q] = 0;
+                            if (len == 0) return;
+                            for (size_t q = off & ~(size_t) 4095; q < off + len && q < bytes; q += 4096)
+                                ((volatile char*) p)[q] = 0;
                         };
                         for (size_t sl = (size_t) t; sl < slots; sl += (size_t) per) {
                             const size_t o = sl * rl->stride;
@@ -507,6 +511,7 @@ static void* numa_pinned(size_t bytes, const RowLayout* rl = nullptr, int par_pa
                             }
                         }
                     });
+                    for (size_t o = slots * rl->stride; o < bytes; o += 4096) ((volatile char*) p)[o] = 0;   // (none: whole slots)
                 } else {
                     for (size_t o = 0; o < bytes; o += 4096) ((volatile char*) p)[o] = 0;   // placed now, by the policies
                 }
@@ -8076,11 +8081,24 @@ struct SlotWriter {
     std::condition_variable cv;
     std::deque<std::shared_ptr<Job>> q;
     std::vector<std::shared_ptr<Job>> pending;
+    std::vector<std::string> failed;   // final paths whose write or commit failed, until failures() takes them
+    size_t queued = 0;                 // bytes of the pending jobs' images
     std::thread th;
     bool stop = false;
+    // a save's turn to take an image of `bytes`: while the pending images and it exceed STRATA_GLM_SLOT_FAST_QUEUE_MB
+    // (8192), wait for the writer (an empty queue always admits one); the seconds waited
+    double admit(size_t bytes) {
+        static const size_t cap = (size_t) std::max(0.0, getenv("STRATA_GLM_SLOT_FAST_QUEUE_MB")
+                                                             ? std::atof(getenv("STRATA_GLM_SLOT_FAST_QUEUE_MB")) : 8192.0) << 20;
+        const auto t0 = std::chrono::steady_clock::now();
+        std::unique_lock<std::mutex> lk(mu);
+        cv.wait(lk, [&] { return pending.empty() || queued + bytes <= cap; });
+        return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    }
     void push(std::shared_ptr<Job> j) {
         std::lock_guard<std::mutex> lk(mu);
         if (!th.joinable()) th = std::thread([this] { run(); });
+        queued += j->bytes;
         q.push_back(j);
         pending.push_back(std::move(j));
         cv.notify_all();
@@ -8092,6 +8110,7 @@ struct SlotWriter {
     }
     void done(const std::shared_ptr<Job>& j) {   // (mu held)
         pending.erase(std::find(pending.begin(), pending.end(), j));
+        queued -= j->bytes;
         hostbuf_put(j->buf);
         j->buf = {};
         cv.notify_all();
@@ -8112,9 +8131,18 @@ struct SlotWriter {
         for (const auto& j : pending)
             if (j->path == path) j->cancelled = true;   // being written: removed when the write ends
     }
-    void flush() {
+    // (jobs, bytes) waited for
+    std::pair<size_t, size_t> flush() {
         std::unique_lock<std::mutex> lk(mu);
+        const std::pair<size_t, size_t> r{pending.size(), queued};
         cv.wait(lk, [&] { return pending.empty(); });
+        return r;
+    }
+    std::vector<std::string> failures() {
+        std::lock_guard<std::mutex> lk(mu);
+        std::vector<std::string> r;
+        r.swap(failed);
+        return r;
     }
     void run() {
         std::unique_lock<std::mutex> lk(mu);
@@ -8135,14 +8163,18 @@ struct SlotWriter {
             std::error_code ec;
             if (!ok || j->cancelled) {
                 std::filesystem::remove(j->tmp, ec);
-                if (!ok) std::fprintf(stderr, "glm slots: background write of %s failed (disk full?) - not kept\n",
-                                      j->path.c_str());
+                if (!ok) {
+                    std::fprintf(stderr, "glm slots: background write of %s failed (disk full?) - not kept\n",
+                                 j->path.c_str());
+                    failed.push_back(j->path);
+                }
             } else {
                 std::filesystem::rename(j->tmp, j->path, ec);
                 if (ec || (j->after && !j->after((uint64_t) j->bytes))) {
                     std::filesystem::remove(j->tmp, ec);
                     std::filesystem::remove(j->path, ec);
                     std::fprintf(stderr, "glm slots: committing %s failed - not kept\n", j->path.c_str());
+                    failed.push_back(j->path);
                 } else {
                     std::fprintf(stderr, "glm slots: fast save written in the background: %.2f GB in %.1f s (%.2f GB/s)\n",
                                  j->bytes / 1e9, s, s > 0 ? j->bytes / 1e9 / s : 0.0);
@@ -8252,7 +8284,9 @@ uint64_t Glm5Model::slot_save_bg(const std::string& tmp, const std::string& path
     auto j = std::make_shared<SlotWriter::Job>();
     double ms = 0;
     const auto t0 = std::chrono::steady_clock::now();
+    double waited = 0;
     const uint64_t bytes = slot_image([&](uint64_t total, bool& pinned) {
+        waited = slot_writer().admit((size_t) total);   // (bounded: the images waiting for the disk)
         j->buf = hostbuf_get((size_t) total);
         pinned = j->buf.pinned;
         return j->buf.p;
@@ -8267,9 +8301,9 @@ uint64_t Glm5Model::slot_save_bg(const std::string& tmp, const std::string& path
     j->after = after;
     const bool pinned = j->buf.pinned;
     slot_writer().push(std::move(j));
-    std::fprintf(stderr, "glm slots: fast save %lld positions, %.2f GB - parts copied at once in %.0f ms (%s), %.0f ms in "
-                 "all; the file is written in the background\n", (long long) snap_pos_, bytes / 1e9, ms,
-                 pinned ? "pinned image" : "pageable image, double-buffered",
+    std::fprintf(stderr, "glm slots: fast save %lld positions, %.2f GB - parts copied at once in %.0f ms (%s), queue wait "
+                 "%.0f ms, %.0f ms in all; the file is written in the background\n", (long long) snap_pos_, bytes / 1e9,
+                 ms, pinned ? "pinned image" : "pageable image, double-buffered", waited * 1000.0,
                  std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
     return bytes;
 }
@@ -8277,7 +8311,14 @@ uint64_t Glm5Model::slot_save_bg(const std::string& tmp, const std::string& path
 bool Glm5Model::slot_fast() { return slot_fast_on(); }
 void Glm5Model::slot_wait(const std::string& path) { slot_writer().wait(path); }
 void Glm5Model::slot_cancel(const std::string& path) { slot_writer().cancel(path); }
-void Glm5Model::slot_flush() { slot_writer().flush(); }
+void Glm5Model::slot_flush() {
+    const auto t0 = std::chrono::steady_clock::now();
+    const auto w = slot_writer().flush();
+    if (w.first > 0)
+        std::fprintf(stderr, "glm slots: waited %.1f s at exit for %zu background write(s), %.2f GB\n",
+                     std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(), w.first, w.second / 1e9);
+}
+std::vector<std::string> Glm5Model::slot_failed_writes() { return slot_writer().failures(); }
 
 uint64_t Glm5Model::slot_save(const std::string& path, std::string& err) {
     std::vector<Glm5Model*> halves;
