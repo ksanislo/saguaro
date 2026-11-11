@@ -2,6 +2,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <numeric>
 #include <vector>
 
@@ -53,6 +54,20 @@ int main() {
         check(bytes == copy, "equality ignores differing segmentation after rewind and regrowth");
         check(!bytes.read(tail.data(), bytes.size()-1, 2), "range check rejects a truncated payload");
         check(bytes.allocation_peak(SIZE_MAX) == SIZE_MAX, "allocation estimate rejects overflow");
+    }
+    {   // STRATA_PARK_FAST: resize_for_overwrite grows like resize (same segments and reserve), only without the fill
+        ConversationBuffer a, b;
+        const size_t n = 2 * ConversationBuffer::segment_bytes + 333;
+        a.resize(1000, 5); b.resize(1000, 5);
+        a.resize(n, 0); b.resize_for_overwrite(n);
+        check(a.size() == b.size() && a.bytes() == b.bytes(), "resize_for_overwrite allocates as resize does");
+        check(b.visit(1000, n - 1000, [](uint8_t* p, size_t c, size_t) { std::memset(p, 0, c); return true; }) && a == b,
+              "resize_for_overwrite keeps the prefix and its new bytes are writable in place");
+        a.resize(n + 70000, 0); b.resize_for_overwrite(n + 70000);
+        b.visit(n, 70000, [](uint8_t* p, size_t c, size_t) { std::memset(p, 0, c); return true; });
+        check(a.bytes() == b.bytes() && a == b, "a reserve extension grows alike");
+        b.resize_for_overwrite(10);
+        check(b.size() == 10, "resize_for_overwrite shrinks as resize does");
     }
     {
         ConversationBuffer bytes;

@@ -12,6 +12,8 @@
 #include <random>
 #include <string>
 #include <vector>
+#include <atomic>
+#include <memory>
 
 static int fails = 0;
 #define CHECK(c) do { if (!(c)) { std::printf("FAIL %s:%d %s\n", __FILE__, __LINE__, #c); ++fails; } } while (0)
@@ -88,9 +90,12 @@ int main(int argc, char** argv) {
     CHECK(st.ok && st.bytes == total);
     for (const std::vector<int>& nodes : {std::vector<int>{}, std::vector<int>{0, 0, 0, 1, 1, 1}}) {
         std::fill(got.begin(), got.end(), 0);
-        const auto sp = strata::core::load_experts_gguf_parallel(a, got.data(), lay, nodes, 3);
+        std::unique_ptr<std::atomic<uint8_t>[]> done(new std::atomic<uint8_t>[(size_t) lay.n_layers]);
+        for (int64_t l = 0; l < lay.n_layers; ++l) done[(size_t) l].store(0);
+        const auto sp = strata::core::load_experts_gguf_parallel(a, got.data(), lay, nodes, 3, nullptr, done.get());
         CHECK(sp.ok && sp.bytes == total);
         CHECK(std::memcmp(ref.data(), got.data(), total) == 0);
+        for (int64_t l = 0; l < lay.n_layers; ++l) CHECK(done[(size_t) l].load() == 1);   // (overlap's progress)
     }
     const auto bad = strata::core::load_experts_gguf_parallel(dir + "/no-such.gguf", got.data(), lay, {}, 2);
     CHECK(!bad.ok && !bad.error.empty());

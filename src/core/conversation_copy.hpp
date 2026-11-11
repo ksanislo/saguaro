@@ -10,7 +10,9 @@
 #include <atomic>
 #include <chrono>
 #include <cstddef>
+#include <cstdio>
 #include <cstdlib>
+#include <exception>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -145,6 +147,22 @@ inline long test_slow_copy_us() {
     return v;
 }
 
+/// STRATA_PARK_FAST=1 (default off): a parked K/V buffer grows without the zero fill (the copy writes every new byte
+/// and is the pages' first touch, on the copy threads), the threaded host copy starts at 4 MiB instead of 64 and its
+/// caller wakes when the last job lands instead of on the next 20 ms tick, and a park's prompt checkpoints are copied
+/// on several threads.  The same bytes either way.
+inline bool park_fast() {
+    static const bool on = [] {
+        const char* e = std::getenv("STRATA_PARK_FAST");
+        const bool v = e != nullptr && e[0] == '1';
+        if (v)
+            std::fprintf(stderr, "strata: conversation park: STRATA_PARK_FAST on (no zero fill, threaded copies from "
+                                 "4 MiB woken on completion, checkpoints copied in parallel)\n");
+        return v;
+    }();
+    return on;
+}
+
 template<class T>
 inline std::vector<T> copy_beating(const std::vector<T>& src) {
     std::vector<T> out;
@@ -179,6 +197,26 @@ inline ConversationCheckpoint copy_checkpoint_beating(const ConversationCheckpoi
 
 inline std::vector<ConversationCheckpoint> copy_checkpoints_beating(const std::vector<ConversationCheckpoint>& cs) {
     std::vector<ConversationCheckpoint> out;
+    if (park_fast() && cs.size() >= 2) {   // each checkpoint whole on one of up to 8 threads, into its own slot
+        out.resize(cs.size());
+        std::atomic<size_t> next{0};
+        std::mutex mu;
+        std::exception_ptr failed;   // (a host OOM in a thread is the park's bad_alloc, as on one thread)
+        std::vector<std::thread> th;
+        for (size_t t = 0; t < std::min<size_t>(8, cs.size()); ++t)
+            th.emplace_back([&] {
+                try {
+                    for (size_t i; (i = next.fetch_add(1)) < cs.size();) out[i] = copy_checkpoint_beating(cs[i]);
+                } catch (...) {
+                    next.store(cs.size());
+                    std::lock_guard<std::mutex> g(mu);
+                    if (!failed) failed = std::current_exception();
+                }
+            });
+        for (auto& x : th) x.join();
+        if (failed) std::rethrow_exception(failed);
+        return out;
+    }
     out.reserve(cs.size());
     for (const auto& c : cs) out.push_back(copy_checkpoint_beating(c));
     return out;

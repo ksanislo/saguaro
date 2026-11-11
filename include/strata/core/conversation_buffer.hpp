@@ -111,6 +111,30 @@ public:
         }
     }
     void pop_back() { resize(size_ - 1); }
+    // resize() without the fill: bytes past the old size are left as the allocator gives them (untouched pages, so
+    // the caller's copy is their first touch).  For a caller that overwrites every one of them before any read.
+    void resize_for_overwrite(size_t n) {
+        if (ext_ || n <= size_) { resize(n); return; }
+        const size_t held = size_;
+        const bool growing = held != 0;
+        const size_t spare = segments_.empty() ? 0 : segments_.back().capacity() - segments_.back().size();
+        const size_t extend = std::min(n - size_, spare);
+        const size_t extra = n - size_ - extend;
+        segments_.reserve(segments_.size() + extra / segment_bytes + (extra % segment_bytes != 0));
+        if (extend) {
+            segments_.back().resize(segments_.back().size() + extend);
+            size_ += extend;
+        }
+        while (size_ < n) {
+            const size_t count = std::min(segment_bytes, n - size_);
+            const size_t previous = segments_.empty() ? 0 : segments_.back().capacity();
+            Segment segment;
+            segment.reserve(segment_capacity(count, previous, growing, held));
+            segment.resize(count);   // default-init: no write
+            segments_.push_back(std::move(segment));
+            size_ += count;
+        }
+    }
 
     // fn(pointer, count, absolute_offset); false aborts a transfer immediately.
     template<class Fn> bool visit(size_t offset, size_t count, Fn fn) {
@@ -150,7 +174,15 @@ public:
     }
 
 private:
-    using Segment = std::vector<uint8_t>;
+    // value-initializes only when asked: resize(n, v) fills as before, resize(n) (resize_for_overwrite) leaves the bytes
+    template<class T> struct DefaultInit : std::allocator<T> {
+        template<class U> struct rebind { using other = DefaultInit<U>; };
+        DefaultInit() = default;
+        template<class U> DefaultInit(const DefaultInit<U>&) noexcept {}
+        template<class U> void construct(U* p) noexcept(std::is_nothrow_default_constructible_v<U>) { ::new ((void*) p) U; }
+        template<class U, class... A> void construct(U* p, A&&... a) { ::new ((void*) p) U(std::forward<A>(a)...); }
+    };
+    using Segment = std::vector<uint8_t, DefaultInit<uint8_t>>;
     // A fresh capture allocates exactly its payload. Later appends reserve
     // geometrically growing segments, bounded by 16 MiB. Small chat turns then
     // extend the final allocation instead of adding one transfer per turn.

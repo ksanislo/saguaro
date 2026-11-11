@@ -14,6 +14,9 @@
 #include <chrono>
 #include <algorithm>
 #include <vector>
+#include <condition_variable>
+#include <mutex>
+#include <cstdio>
 
 namespace strata::core {
 namespace {
@@ -130,6 +133,7 @@ bool host_both(const void* dst, const void* src) {
     return host(a) && host(b);
 }
 struct CopyJob { void* dst; const void* src; size_t n; };
+using conversation_detail::park_fast;
 // jobs whose both ends are host memory, together 64 MiB or more, on N threads (default 8; 0 / 1: off).  The parked
 // image's buffers are 16 MiB segments, so a K/V part arrives as many jobs (one memcpy runs at one core's DDR3 speed).
 bool host_copy_threaded(const std::vector<CopyJob>& jobs) {
@@ -139,7 +143,8 @@ bool host_copy_threaded(const std::vector<CopyJob>& jobs) {
     }();
     size_t total = 0;
     for (const CopyJob& j : jobs) total += j.n;
-    if (nt <= 1 || jobs.empty() || total < ((size_t) 64 << 20) || !host_both(jobs.front().dst, jobs.front().src) ||
+    const bool fast = park_fast();
+    if (nt <= 1 || jobs.empty() || total < ((size_t) (fast ? 4 : 64) << 20) || !host_both(jobs.front().dst, jobs.front().src) ||
         !host_both(jobs.back().dst, jobs.back().src)) return false;
     {   // ordered after this thread's copies already queued on its private stream (as copy_nonblocking was)
         cudaStream_t ps = nullptr;
@@ -150,21 +155,32 @@ bool host_copy_threaded(const std::vector<CopyJob>& jobs) {
     }
     constexpr size_t kStep = (size_t) 1 << 20;   // (#2049: a beat per MiB that lands, as copy_checkpoint_beating)
     std::atomic<size_t> next{0}, done{0}, moved{0};
+    std::mutex mu;
+    std::condition_variable cv;
     std::vector<std::thread> th;
-    for (int t = 0; t < nt; ++t)
+    for (int t = 0; t < (fast ? std::min<int>(nt, (int) jobs.size()) : nt); ++t)
         th.emplace_back([&] {
-            for (size_t i; (i = next.fetch_add(1)) < jobs.size(); done.fetch_add(1)) {
+            for (size_t i; (i = next.fetch_add(1)) < jobs.size();) {
                 const CopyJob& j = jobs[i];
                 for (size_t o = 0; o < j.n; o += kStep) {
                     const size_t m = std::min(kStep, j.n - o);
                     std::memcpy(static_cast<uint8_t*>(j.dst) + o, static_cast<const uint8_t*>(j.src) + o, m);
                     moved.fetch_add(m, std::memory_order_relaxed);
                 }
+                if (done.fetch_add(1) + 1 == jobs.size() && fast) {
+                    std::lock_guard<std::mutex> g(mu);
+                    cv.notify_all();
+                }
             }
         });
     size_t seen = 0;
     while (done.load() < jobs.size()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        if (fast) {
+            std::unique_lock<std::mutex> lk(mu);
+            cv.wait_for(lk, std::chrono::milliseconds(20), [&] { return done.load() >= jobs.size(); });
+        } else {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
         if (const size_t d = moved.load(std::memory_order_relaxed); d != seen) { seen = d; core::progress_beat(); }
     }
     for (auto& x : th) x.join();
@@ -243,7 +259,10 @@ bool conversation_kv_save(ConversationKv& image, const QsaState& st, const Model
         const size_t keep = i == 4 ? (index ? size_t(unchanged_tokens / strata::kernels::qsa_real_shapes().idx_block) * g.idx_key_dim * 4 : 0)
                                   : l.cells ? (sizes[i] / size_t(l.cells)) * size_t(whole_cells) : 0;
         if (keep > dst[i]->size()) { error = "conversation snapshot: missing reusable prefix"; return false; }
-        dst[i]->resize(sizes[i]);
+        // (STRATA_PARK_FAST: no fill - every byte past the old size lies in [keep, sizes[i]), which the jobs below
+        // overwrite; a failed copy fails the capture and the image is dropped)
+        if (park_fast()) dst[i]->resize_for_overwrite(sizes[i]);
+        else dst[i]->resize(sizes[i]);
         std::vector<CopyJob> jobs;
         if (!dst[i]->visit(keep, sizes[i] - keep, [&](uint8_t* p, size_t n, size_t at) {
                 if (!src[i]) { error = "conversation snapshot: missing state buffer"; return false; }

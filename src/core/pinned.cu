@@ -345,10 +345,12 @@ bool clear_error() { (void) cudaGetLastError(); return true; }
 
 std::vector<strata::platform::NumaSpan> g_numa_plan;
 // STRATA_NUMA_PLACE: before the registration faults the pages in, bind the planned spans to their nodes
-void apply_numa_plan(void* base, uint64_t bytes, PageBacking backing, std::string& note) {
+// returns the bytes bound (all of them: every page's node is the policy's, whichever thread faults it)
+uint64_t apply_numa_plan(void* base, uint64_t bytes, PageBacking backing, std::string& note) {
     std::vector<strata::platform::NumaSpan> plan;
     plan.swap(g_numa_plan);
-    if (base == nullptr || plan.empty()) return;
+    if (base == nullptr || plan.empty()) return 0;
+    uint64_t covered = 0;
     const bool strict = strata::platform::numa_place_mode() == 2;
     std::string bound, err;
     for (const auto& sp : plan) {
@@ -357,11 +359,13 @@ void apply_numa_plan(void* base, uint64_t bytes, PageBacking backing, std::strin
         if (backing == PageBacking::LargePages && sp.off + n == bytes) n = (n + (2ull << 20) - 1) & ~((2ull << 20) - 1);   // a hugetlb VMA splits at 2 MiB only
         if (!strata::platform::numa_bind((uint8_t*) base + sp.off, n, sp.node, strict, &err)) {
             note = "NUMA placement refused (" + err + "); " + note;
-            return;
+            return 0;
         }
+        covered += std::min<uint64_t>(n, bytes - sp.off);
         bound += (bound.empty() ? "" : ", ") + std::to_string(n >> 20) + " MiB node " + std::to_string(sp.node);
     }
     note = "NUMA " + std::string(strict ? "bound" : "preferred") + ": " + bound + "; " + note;
+    return covered;
 }
 }  // namespace
 
@@ -453,7 +457,8 @@ PinnedArena::PinnedArena(uint64_t bytes, const std::vector<uint64_t>& bounds, Fi
         mapping_base = base;
         mapping_bytes = bytes;
     }
-    apply_numa_plan(base, bytes, backing, note);   // (STRATA_NUMA_PLACE: bound before the fill threads touch a page)
+    // (STRATA_NUMA_PLACE: bound before the fill threads touch a page)
+    numa_whole = base != nullptr && apply_numa_plan(base, bytes, backing, note) == bytes;
 }
 
 void PinnedArena::register_filled() { register_now(bounds_, fill_first_cap_); }

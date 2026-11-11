@@ -1364,10 +1364,15 @@ LoadStats load_experts_gguf(const std::string& native, uint8_t* dst, const strat
 /// fills that node's layers), or `threads_per_node` unpinned threads over every layer when `layer_nodes` is empty.
 LoadStats load_experts_gguf_parallel(const std::string& native, uint8_t* dst,
                                      const strata::kernels::cpu::ExpertLayout& lay, const std::vector<int>& layer_nodes,
-                                     int threads_per_node, const PadMap* pad = nullptr);
+                                     int threads_per_node, const PadMap* pad = nullptr,
+                                     std::atomic<uint8_t>* layer_done = nullptr);
 /// STRATA_PARALLEL_LOAD: 0 off (default), 1 on.  STRATA_PARALLEL_LOAD_REGISTER=first keeps the registration before
 /// the fill (only the fill is parallel); default: the arena is filled first and registered after.
+/// STRATA_PARALLEL_LOAD_REGISTER=overlap: the same one whole-arena registration, started on a thread while the fill
+/// still runs, once the filled prefix of the arena is long enough that it should not overtake the readers (only
+/// with STRATA_NUMA_PLACE's policy over the whole arena: then a page's node does not depend on who faults it).
 int parallel_load_mode();
 bool parallel_load_register_first();
+bool parallel_load_register_overlap();
 
 }  // namespace strata::core

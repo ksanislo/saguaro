@@ -5692,10 +5692,16 @@ bool parallel_load_register_first() {
     return v != nullptr && std::string(v) == "first";
 }
 
+bool parallel_load_register_overlap() {
+    const char* v = std::getenv("STRATA_PARALLEL_LOAD_REGISTER");
+    return v != nullptr && std::string(v) == "overlap";
+}
+
 LoadStats load_experts_gguf_parallel(const std::string& gguf, uint8_t* dst, const strata::kernels::cpu::ExpertLayout& lay,
-                                     const std::vector<int>& layer_nodes, int threads_per_node, const PadMap* pad) {
+                                     const std::vector<int>& layer_nodes, int threads_per_node, const PadMap* pad,
+                                     std::atomic<uint8_t>* layer_done) {
 #if !defined(__linux__)
-    (void) layer_nodes;
+    (void) layer_nodes; (void) layer_done;
     return load_experts_gguf(gguf, dst, lay, threads_per_node, false, nullptr, pad);
 #else
     LoadStats st;
@@ -5761,6 +5767,7 @@ LoadStats load_experts_gguf_parallel(const std::string& gguf, uint8_t* dst, cons
                     }
                 }
             }
+            if (layer_done != nullptr && !bad) layer_done[(size_t) l].store(1, std::memory_order_release);
         }
         if (fd >= 0) ::close(fd);
     };
@@ -6027,18 +6034,81 @@ bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int6
     if (par) {
         const char* tv = std::getenv("STRATA_PARALLEL_LOAD_THREADS");   // per node (or in all, unpinned)
         const int per_node = tv != nullptr && std::atoi(tv) > 0 ? std::atoi(tv) : 8;
-        st = load_experts_gguf_parallel(gguf_, a->data(), lay, load_nodes_, per_node, nullptr);
-        if (st.ok && fill_first) {
+        // STRATA_PARALLEL_LOAD_REGISTER=overlap: the one whole-arena registration (register_filled, unchanged) runs on
+        // a thread beside the fill.  It walks the arena in address order and faults in (on its one thread) any page
+        // no reader has touched yet, so it starts only once the filled prefix P is long enough to stay behind the
+        // readers: P / R >= unfilled / fill rate, R = STRATA_PARALLEL_LOAD_REGISTER_GBS (default 10 GB/s, the
+        // registration's measured pace over resident pages).  Exact: the registration pins pages, it writes none;
+        // a page either thread faults first lands on the node the NUMA policy names (required over the whole arena).
+        std::string ov_note;
+        bool overlap = fill_first && parallel_load_register_overlap();
+        if (overlap && !a->numa_whole) {
+            overlap = false;
+            ov_note = " (overlap off: STRATA_NUMA_PLACE does not cover the whole arena, first touch decides the node)";
+        } else if (overlap && (max_pinned_bytes != 0 || arena_pin_cap_gib() > 0 || arena_no_register())) {
+            overlap = false;
+            ov_note = " (overlap off: a capped or no registration)";
+        }
+        std::unique_ptr<std::atomic<uint8_t>[]> done;
+        std::atomic<int> fill_state{0};   // 0 filling, 1 filled, -1 failed
+        std::thread overlap_reg;
+        double reg_start_s = -1.0, reg_end_s = -1.0;
+        const auto tf = std::chrono::steady_clock::now();
+        if (overlap) {
+            done.reset(new std::atomic<uint8_t>[(size_t) n_layers]);
+            for (int64_t l = 0; l < n_layers; ++l) done[(size_t) l].store(0);
+            const char* rv = std::getenv("STRATA_PARALLEL_LOAD_REGISTER_GBS");
+            const double rate = (rv != nullptr && std::atof(rv) > 0 ? std::atof(rv) : 10.0) * 1e9;
+            int dev = 0;
+            cudaGetDevice(&dev);
+            overlap_reg = std::thread([&, dev, rate] {
+                cudaSetDevice(dev);
+                for (;;) {
+                    const int fs = fill_state.load(std::memory_order_acquire);
+                    if (fs < 0) return;   // the load failed: nothing to register (the arena is dropped)
+                    if (fs > 0) break;
+                    uint64_t prefix = 0, filled = 0;
+                    bool gap = false;
+                    for (int64_t l = 0; l < n_layers; ++l) {
+                        if (!done[(size_t) l].load(std::memory_order_acquire)) { gap = true; continue; }
+                        filled += lbytes[(size_t) l];
+                        if (!gap) prefix = loff[(size_t) l] + lbytes[(size_t) l];
+                    }
+                    const double el = std::chrono::duration<double>(std::chrono::steady_clock::now() - tf).count();
+                    if (filled > 0 && el > 0.0) {
+                        const double fill_rate = (double) filled / el;
+                        if ((double) prefix / rate >= (double) (want > filled ? want - filled : 0) / fill_rate) break;
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                }
+                reg_start_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - tf).count();
+                a->register_filled();
+                reg_end_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - tf).count();
+            });
+        }
+        st = load_experts_gguf_parallel(gguf_, a->data(), lay, load_nodes_, per_node, nullptr, done.get());
+        const double fill_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - tf).count();
+        if (overlap) {
+            fill_state.store(st.ok ? 1 : -1, std::memory_order_release);
+            overlap_reg.join();
+        }
+        if (st.ok && fill_first && !overlap) {
             const auto tr = std::chrono::steady_clock::now();
             a->register_filled();
             register_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - tr).count();
         }
         char pn[200];
         std::snprintf(pn, sizeof pn, "parallel load (STRATA_PARALLEL_LOAD): %d threads per node, filled in %.1f s%s",
-                      per_node, st.seconds, fill_first ? ", registered after it in " : ", registered before it");
-        char rs[32] = "";
-        if (register_s >= 0.0) std::snprintf(rs, sizeof rs, "%.1f s", register_s);
-        a->note = std::string(pn) + rs + "; " + a->note;
+                      per_node, st.seconds,
+                      overlap ? "" : fill_first ? ", registered after it in " : ", registered before it");
+        char rs[300] = "";
+        if (overlap && reg_end_s >= 0.0)
+            std::snprintf(rs, sizeof rs, ", registered beside it (STRATA_PARALLEL_LOAD_REGISTER=overlap): started %.1f s "
+                          "into the fill, done %.1f s after it began (%.1f s after the fill ended, %.1f s registering)",
+                          reg_start_s, reg_end_s, std::max(0.0, reg_end_s - fill_s), reg_end_s - reg_start_s);
+        else if (register_s >= 0.0)
+            std::snprintf(rs, sizeof rs, "%.1f s", register_s);
+        a->note = std::string(pn) + rs + ov_note + "; " + a->note;
     } else if (from_gguf) {
         st = load_experts_gguf(gguf_, a->data(), lay, readers, unbuffered, rp, padded_ ? &pad_ : nullptr);
     } else {

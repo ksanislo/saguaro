@@ -96,6 +96,9 @@ struct PinnedArena {
     struct FillFirst {};
     PinnedArena(uint64_t bytes, const std::vector<uint64_t>& bounds, FillFirst, uint64_t max_pinned_bytes = 0);
     void register_filled();
+    /// FillFirst: STRATA_NUMA_PLACE's policy covers every byte of the arena, so a page lands on its planned node
+    /// whichever thread faults it in (the fill's readers or the registration)
+    bool numa_whole = false;
     std::vector<uint64_t> bounds_;
     std::vector<uint64_t> slice_starts;
     void* mapping_base = nullptr;     ///< actual mapping start; differs from base when a shared-file header exists
