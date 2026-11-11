@@ -2732,6 +2732,15 @@ void gdn_recurrence_variant(int variant, float* state, const float* h, const flo
     }
     check("gdn_recurrence");
 }
+void gdn_recurrence_reserve() {
+#if !defined(__HIPCC__)
+    const char* v = std::getenv("STRATA_GDN_CHUNKED_SM75");
+    if (v == nullptr || std::atoi(v) == 0) return;
+    if (gdn_chunked_sm75_ok() && gdn_chunk_t_scratch() == nullptr)
+        std::fprintf(stderr, "strata: GDN chunked recurrence (STRATA_GDN_CHUNKED_SM75=1): no room for its 8.1 MB scratch; "
+                             "the default kernel runs\n");
+#endif
+}
 void gdn_recurrence(float* state, const float* h, const float* gate, const float* beta, const float* z,
                     const float* gamma, float eps, float* y, uint16_t* y16, int64_t T, void* stream, int64_t ld16) {
     // Aurora (S23): four lanes per column + the grid-stride norm, the same bits (tests/hip/gdn_rec_head.cpp);

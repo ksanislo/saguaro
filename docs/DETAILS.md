@@ -2035,7 +2035,8 @@ the pairs in which the switched arm won). They are here so you can try them on y
   `STRATA_GDN_CHUNKED_SM75=1` is the same recurrence for Turing (Tesla T4, sm_75) and newer cards: FP16 tensor-core
   products with every operand split into fp16 hi + lo (FP32-level, other bits), a warp per value head and 16 columns,
   32 KB of shared memory a block (`src/prefill/gdn_chunk_sm75.cuh`; `gdn_rec_parity` checks it against the default
-  kernel and FP64 and times it). Not measured on a card yet.
+  kernel and FP64 and times it). Tesla T4, one layer's recurrence: 1.74x at 2K-8K tokens, 2.0x at 32K
+  (`gdn_rec_parity`: within 1.1e-6 of the default kernel); not yet measured as prompt time or KL.
 - **`STRATA_FS_SLOTS=N`: the Foresight swap space** (q8atnight, #1348): N VRAM slots per layer, refilled on a copy stream
   with the experts that just missed and with the ones the next layer's router predicts (`STRATA_FS_AHEAD=0` for the
   misses only), so that an expert the cache lacks can be computed on the GPU instead of by the CPU. The model's own router
