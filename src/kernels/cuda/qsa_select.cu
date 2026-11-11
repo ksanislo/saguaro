@@ -8,7 +8,11 @@
 #include "strata/kernels/gfx_arch.hpp"
 
 #include <cuda_runtime.h>
+#if !defined(__HIPCC__)
+#include <cuda_fp16.h>
+#endif
 
+#include <algorithm>
 #include <atomic>
 #include <cfloat>
 #include <cstdio>
@@ -285,6 +289,180 @@ __global__ void __launch_bounds__(128) block_scores_tc_kernel(const float* __res
         }
     }
 }
+
+#if !defined(__HIPCC__)
+// ---- QSA select on Turing tensor cores (sm_75, opt-in STRATA_SELECT_SM75=1): the GEMM above on mma.m16n8k8 FP16
+// with FP32 accumulation.  Every (query, head) row and every key row is first scaled by an exact power of two putting
+// its largest |x| in [2^14, 2^15), then split x = hi + lo (hi = fp16(x), lo = fp16(x - hi): 22 bits, as TF32 hi + lo)
+// and the products lo.hi + hi.lo + hi.hi are accumulated (lo.lo, ~2^-22 of the product, dropped) - the sm_80 3xTF32
+// kernel's accuracy class; the scale is undone (exact) before the relu.  Not bitwise: another summation order, and
+// Turing's MMA adds its products with its own rounding.  Blocks < n_bid only; the tail block is
+// block_scores_tail_kernel's.
+//   CTA: 8 warps x 4 queries (an m16 tile = 4 queries x 4 heads, row = query * 4 + head), the query fragments split
+//   once into registers; key tiles of 32 blocks split into shared memory (hi, lo; 272-byte rows: conflict-free
+//   ldmatrix) and read as B fragments.  Grid x = query tiles (the fastest index: the CTAs of one key range run
+//   together and share its keys in L2), grid y = key ranges of `tpc` tiles.
+constexpr int S75_QT = 32;               // queries per CTA
+constexpr int S75_NB = 32;               // key blocks per shared-memory tile
+constexpr int S75_KS = IDX_DIM + 8;      // halves per staged key row
+
+// a power of two putting m (>= 0) in [2^14, 2^15) and its inverse, both exact; 1 for 0 or a subnormal m
+__device__ __forceinline__ float s75_p2_scale(float m, float& inv) {
+    const int e = (int) ((__float_as_uint(m) >> 23) & 0xff) - 127;
+    const int s = e == -127 ? 0 : max(-100, min(100, 14 - e));
+    inv = __uint_as_float((uint32_t) (127 - s) << 23);
+    return __uint_as_float((uint32_t) (127 + s) << 23);
+}
+__device__ __forceinline__ void s75_split2(float x0, float x1, uint32_t& hi, uint32_t& lo) {
+    const __half2 h = __floats2half2_rn(x0, x1);
+    const float2 b = __half22float2(h);
+    const __half2 l = __floats2half2_rn(x0 - b.x, x1 - b.y);
+    hi = *reinterpret_cast<const uint32_t*>(&h);
+    lo = *reinterpret_cast<const uint32_t*>(&l);
+}
+__device__ __forceinline__ void s75_mma(float (&d)[4], uint32_t a0, uint32_t a1, uint32_t b) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 750
+    asm volatile("mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32 {%0,%1,%2,%3}, {%4,%5}, {%6}, {%0,%1,%2,%3};\n"
+                 : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3])
+                 : "r"(a0), "r"(a1), "r"(b));
+#else
+    __trap();
+#endif
+}
+__device__ __forceinline__ void s75_ldsm4(uint32_t (&r)[4], const __half* p) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 750
+    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
+                 : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3])
+                 : "r"((unsigned) __cvta_generic_to_shared(p))
+                 : "memory");
+#else
+    r[0] = r[1] = r[2] = r[3] = 0u;
+    __trap();
+#endif
+}
+
+__global__ void __launch_bounds__(256, 2) block_scores_sm75_kernel(const float* __restrict__ pooled,
+                                                                   const float* __restrict__ q_idx,
+                                                                   const int32_t* __restrict__ steps, int64_t nq,
+                                                                   int64_t max_blocks, int64_t reach, int tpc,
+                                                                   float* __restrict__ out) {
+    __shared__ __align__(16) __half skh[S75_NB * S75_KS];
+    __shared__ __align__(16) __half skl[S75_NB * S75_KS];
+    __shared__ float sinv[S75_NB];
+    __shared__ int s_nbid[S75_QT];
+    const int t = threadIdx.x, lane = t & 31, warp = t >> 5, gid = lane >> 2, tig = lane & 3;
+    const int64_t q0 = (int64_t) blockIdx.x * S75_QT;
+    if (t < S75_QT) s_nbid[t] = q0 + t < nq ? steps[(q0 + t) * kStepCount + kStepNBid] : 0;
+
+    // the warp's A fragments: rows gid and gid + 8 = (query gid / 4 [+ 2], head gid % 4), k = 8 kk + 2 tig, +1
+    uint32_t ah[16][2], al[16][2];
+    float inv_q[2];
+#pragma unroll
+    for (int half = 0; half < 2; ++half) {
+        const int64_t qg = q0 + warp * 4 + (gid >> 2) + 2 * half;
+        const bool live = qg < nq;
+        const float* src = q_idx + (live ? qg : 0) * IDX_HEADS * IDX_DIM + (gid & 3) * IDX_DIM + 2 * tig;
+        float m = 0.0f;
+#pragma unroll
+        for (int kk = 0; kk < 16; ++kk) {
+            const float2 v = live ? *reinterpret_cast<const float2*>(src + 8 * kk) : make_float2(0.f, 0.f);
+            m = fmaxf(m, fmaxf(fabsf(v.x), fabsf(v.y)));
+        }
+        m = fmaxf(m, __shfl_xor_sync(0xffffffffu, m, 1));
+        m = fmaxf(m, __shfl_xor_sync(0xffffffffu, m, 2));
+        const float sc = s75_p2_scale(m, inv_q[half]);
+#pragma unroll
+        for (int kk = 0; kk < 16; ++kk) {
+            const float2 v = live ? *reinterpret_cast<const float2*>(src + 8 * kk) : make_float2(0.f, 0.f);
+            s75_split2(v.x * sc, v.y * sc, ah[kk][half], al[kk][half]);
+        }
+    }
+    __syncthreads();
+    int hi_nbid = 0;
+    for (int i = 0; i < S75_QT; ++i) hi_nbid = max(hi_nbid, s_nbid[i]);
+    int64_t lim = reach < (int64_t) hi_nbid ? reach : (int64_t) hi_nbid;
+    if (lim > max_blocks) lim = max_blocks;
+
+    const int srow = t >> 3, ssub = t & 7;   // staging: 8 threads per key row, float4 units ssub + 8 i
+    for (int it = 0; it < tpc; ++it) {
+        const int64_t b0 = ((int64_t) blockIdx.y * tpc + it) * S75_NB;
+        if (b0 >= lim) break;
+        __syncthreads();   // the previous tile's ldmatrix reads are done
+        {
+            float4 v[4];
+            const bool live = b0 + srow < lim;
+            const float4* src = reinterpret_cast<const float4*>(pooled + (live ? b0 + srow : 0) * IDX_DIM);
+            float m = 0.0f;
+#pragma unroll
+            for (int i = 0; i < 4; ++i) {
+                v[i] = live ? src[ssub + 8 * i] : make_float4(0.f, 0.f, 0.f, 0.f);
+                m = fmaxf(m, fmaxf(fmaxf(fabsf(v[i].x), fabsf(v[i].y)), fmaxf(fabsf(v[i].z), fabsf(v[i].w))));
+            }
+            m = fmaxf(m, __shfl_xor_sync(0xffffffffu, m, 1));
+            m = fmaxf(m, __shfl_xor_sync(0xffffffffu, m, 2));
+            m = fmaxf(m, __shfl_xor_sync(0xffffffffu, m, 4));
+            float inv;
+            const float sc = s75_p2_scale(m, inv);
+            if (ssub == 0) sinv[srow] = inv;
+#pragma unroll
+            for (int i = 0; i < 4; ++i) {
+                uint2 h, l;
+                s75_split2(v[i].x * sc, v[i].y * sc, h.x, l.x);
+                s75_split2(v[i].z * sc, v[i].w * sc, h.y, l.y);
+                const int o = srow * S75_KS + 4 * (ssub + 8 * i);
+                *reinterpret_cast<uint2*>(skh + o) = h;
+                *reinterpret_cast<uint2*>(skl + o) = l;
+            }
+        }
+        __syncthreads();
+        // hi.hi and the two corrections in separate accumulators: Turing's MMA adds into its accumulator with its own
+        // (truncating) alignment, so the small terms are summed at their own scale and meet hi.hi once, at the end
+        float acc[4][4], cor[4][4];
+#pragma unroll
+        for (int c = 0; c < 4; ++c)
+#pragma unroll
+            for (int e = 0; e < 4; ++e) acc[c][e] = cor[c][e] = 0.f;
+#pragma unroll
+        for (int g = 0; g < 4; ++g) {
+#pragma unroll
+            for (int c = 0; c < 4; ++c) {
+                // lanes 8 i .. 8 i + 7 address the rows of matrix i = k-step 4 g + i of the n8 chunk c
+                const int o = (c * 8 + (lane & 7)) * S75_KS + g * 32 + (lane >> 3) * 8;
+                uint32_t bh[4], bl[4];
+                s75_ldsm4(bh, skh + o);
+                s75_ldsm4(bl, skl + o);
+#pragma unroll
+                for (int i = 0; i < 4; ++i) {
+                    const int kk = 4 * g + i;
+                    s75_mma(cor[c], al[kk][0], al[kk][1], bh[i]);
+                    s75_mma(cor[c], ah[kk][0], ah[kk][1], bl[i]);
+                    s75_mma(acc[c], ah[kk][0], ah[kk][1], bh[i]);
+                }
+            }
+        }
+        // unscale, relu per head, the 4 heads of a query (lanes gid ^ 1, ^ 2 of the same tig) summed by shuffles
+#pragma unroll
+        for (int c = 0; c < 4; ++c) {
+#pragma unroll
+            for (int j = 0; j < 2; ++j) {
+                const int n = c * 8 + 2 * tig + j;
+                const float ik = sinv[n];
+                const int64_t b = b0 + n;
+#pragma unroll
+                for (int half = 0; half < 2; ++half) {
+                    const float d = ((acc[c][half * 2 + j] + cor[c][half * 2 + j]) * inv_q[half]) * ik;
+                    float r = d > 0.0f ? d : 0.0f;
+                    r += __shfl_xor_sync(0xffffffffu, r, 4);
+                    r += __shfl_xor_sync(0xffffffffu, r, 8);
+                    const int ql = warp * 4 + (gid >> 2) + 2 * half;
+                    if ((gid & 3) == 0 && q0 + ql < nq && b < s_nbid[ql] && b < lim)
+                        out[(q0 + ql) * max_blocks + b] = r;
+                }
+            }
+        }
+    }
+}
+#endif
 
 #if defined(__HIPCC__)
 // ---- gfx12 (RDNA4: gfx1200 / gfx1201) scorer on v_wmma_f32_16x16x16_bf16 (wave32).  Same GEMM as above: for a tile of 16
@@ -1821,6 +1999,46 @@ void qsa_block_scores_rows(const QsaScoreRows& rows, const float* q_idx, const i
     if (e != cudaSuccess) { std::fprintf(stderr, "qsa_block_scores_rows: %s\n", cudaGetErrorString(e)); std::exit(1); }
 }
 
+#if !defined(__HIPCC__)
+// STRATA_SELECT_SM75=1: block_scores_sm75_kernel on a card of compute capability 7.5 or newer (opt-in: not the warp
+// kernel's bits, see the kernel).  STRATA_SELECT_SM75_TPC=n fixes the key tiles per CTA (default: enough CTAs for
+// eight per SM, 1..16 tiles).  False (the caller's kernels) when off or on an older card.
+static bool block_scores_sm75(const float* pooled, const float* dead, const float* q_idx, const int32_t* steps, int64_t nq,
+                              int64_t max_blocks, float* scores, cudaStream_t stream, int64_t active_blocks) {
+    static const bool on = [] { const char* v = std::getenv("STRATA_SELECT_SM75"); return v != nullptr && v[0] == '1'; }();
+    if (!on) return false;
+    static int ok[64] = {};   // 0 unknown, else the SM count (-1: no)
+    int dev = 0;
+    if (cudaGetDevice(&dev) != cudaSuccess || dev < 0 || dev >= 64) { cudaGetLastError(); return false; }
+    if (ok[dev] == 0) {
+        int major = 0, minor = 0, sms = 0;
+        cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev);
+        cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, dev);
+        cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev);
+        cudaGetLastError();
+        ok[dev] = (major > 7 || (major == 7 && minor >= 5)) && sms > 0 ? sms : -1;
+    }
+    if (ok[dev] < 0) return false;
+    const int64_t reach = active_blocks > 0 && active_blocks < max_blocks ? active_blocks : max_blocks;
+    const int64_t qtiles = (nq + S75_QT - 1) / S75_QT, ktiles = (reach + S75_NB - 1) / S75_NB;
+    static const int tpc_env = [] { const char* v = std::getenv("STRATA_SELECT_SM75_TPC"); return v ? std::atoi(v) : 0; }();
+    int64_t tpc = tpc_env > 0 ? tpc_env : (ktiles * qtiles + 8 * ok[dev] - 1) / (8 * (int64_t) ok[dev]);
+    tpc = std::max<int64_t>(1, std::min<int64_t>(tpc_env > 0 ? 1 << 20 : 16, tpc));
+    const int64_t kranges = (ktiles + tpc - 1) / tpc;
+    if (qtiles > 0x7fffffff || kranges > 65535) return false;
+    static std::atomic<bool> said{false};
+    if (!said.exchange(true))
+        std::fprintf(stderr, "qsa select: sm_75 FP16 hi/lo tensor-core scorer (STRATA_SELECT_SM75=1; nq=%lld reach=%lld "
+                             "blocks, %lld key tiles per CTA)\n", (long long) nq, (long long) reach, (long long) tpc);
+    const dim3 grid((unsigned) qtiles, (unsigned) kranges);
+    block_scores_sm75_kernel<<<grid, 256, 0, stream>>>(pooled, q_idx, steps, nq, max_blocks, reach, (int) tpc, scores);
+    block_scores_tail_kernel<<<(unsigned) nq, 32, 0, stream>>>(dead, q_idx, steps, max_blocks, scores);
+    const cudaError_t e = cudaGetLastError();
+    if (e != cudaSuccess) { std::fprintf(stderr, "qsa_block_scores (sm75): %s\n", cudaGetErrorString(e)); std::exit(1); }
+    return true;
+}
+#endif
+
 bool qsa_block_scores_tc(const float* pooled, const float* dead, const float* q_idx, const int32_t* steps, int64_t nq,
                          int64_t max_blocks, const QsaShapes& s, float* scores, void* stream, int64_t active_blocks) {
     if (nq <= 0) return true;
@@ -1873,6 +2091,9 @@ bool qsa_block_scores_tc(const float* pooled, const float* dead, const float* q_
             const char* w = std::getenv("STRATA_QSA_WARP");
             cc_major[dev] = w && (!std::strcmp(w, "1") || !std::strcmp(w, "select")) ? 7 : strata::cc_major_of(major);
         }
+        if (cc_major[dev] < 8 && block_scores_sm75(pooled, dead, q_idx, steps, nq, max_blocks, scores,
+                                                   (cudaStream_t) stream, active_blocks))
+            return true;
         if (cc_major[dev] < 8) {
             // no TF32 tensor cores: the FP32 tiled kernel, opt-in (STRATA_SELECT_SIMT=1): its sum order differs from the
             // warp kernel's, so the default stays the caller's warp kernel and the output bytes stay the same
