@@ -3,6 +3,7 @@
 // which the engine does before it sizes the expert cache (src/program/generate.cpp).  Without the library, or with an
 // interface of another version, the K-quants keep the FP16 prompt path and the engine says so once.
 #include "strata/prefill/mmq_kq_abi.hpp"
+#include "strata/prefill/moe_mmq.hpp"
 
 #include <cuda_runtime.h>
 
@@ -29,6 +30,9 @@ namespace {
 struct Lib {
     bool ok = false;
     strata_kq_run_fn run = nullptr;
+    // STRATA_MMQ_DIRECT=1: strata_kq_tab, opened with this library (null: no pointer table for these types)
+    strata_kq_tab_has_fn tab_has = nullptr;
+    strata_kq_tab_run_fn tab_run = nullptr;
 };
 
 std::string own_folder() {
@@ -55,14 +59,55 @@ void* sym(void* h, const char* name) {
 #endif
 }
 
+void* open_path(const std::string& path) {
+#if defined(_WIN32)
+    return (void*) LoadLibraryA(path.c_str());
+#else
+    return dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
+#endif
+}
+
+// STRATA_MMQ_DIRECT=1: the pointer-table instances for these types, started on every GPU now (before the expert
+// cache is sized, like strata_kq's); without them the resident K-quant experts keep the gather
+void open_tab(Lib& L, int n_dev) {
+    const std::string path = own_folder() + STRATA_KQ_TAB_LIB_NAME;
+    void* h = open_path(path);
+    if (h == nullptr) {
+        std::fprintf(stderr, "strata: STRATA_MMQ_DIRECT=1: %s not found next to the engine - the K-quant experts are "
+                             "gathered as before\n", STRATA_KQ_TAB_LIB_NAME);
+        return;
+    }
+    const auto abi = (strata_kq_abi_fn) sym(h, "strata_kq_tab_abi");
+    const auto init = (strata_kq_init_fn) sym(h, "strata_kq_tab_init");
+    const auto has = (strata_kq_tab_has_fn) sym(h, "strata_kq_tab_has");
+    const auto run = (strata_kq_tab_run_fn) sym(h, "strata_kq_tab_run");
+    if (abi == nullptr || init == nullptr || has == nullptr || run == nullptr || abi() / 100000 != STRATA_KQ_ABI_VERSION ||
+        abi() % 100000 != abi_args_size()) {
+        std::fprintf(stderr, "strata: STRATA_MMQ_DIRECT=1: %s is from another engine version - the K-quant experts are "
+                             "gathered as before\n", path.c_str());
+        return;
+    }
+    int cur = 0;
+    cudaGetDevice(&cur);
+    for (int d = 0; d < n_dev; ++d) {
+        const int e = init(d);
+        if (e != 0) {
+            std::fprintf(stderr, "strata: STRATA_MMQ_DIRECT=1: %s did not start on GPU %d (CUDA error %d) - the K-quant "
+                                 "experts are gathered as before\n", path.c_str(), d, e);
+            cudaSetDevice(cur);
+            return;
+        }
+    }
+    cudaSetDevice(cur);
+    L.tab_has = has;
+    L.tab_run = run;
+    std::fprintf(stderr, "strata: pointer-table K-quant prompt kernels from %s (STRATA_MMQ_DIRECT=1)\n", path.c_str());
+}
+
 Lib open_lib() {
     Lib L;
     const std::string path = own_folder() + STRATA_KQ_LIB_NAME;
-#if defined(_WIN32)
-    void* h = (void*) LoadLibraryA(path.c_str());
-#else
-    void* h = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
-#endif
+    void* h = open_path(path);
     if (h == nullptr) {
         std::fprintf(stderr, "strata: K-quant prompt kernels (STRATA_MMQ_KQ=1): %s not found next to the engine - "
                              "these experts take the FP16 prompt path\n", STRATA_KQ_LIB_NAME);
@@ -95,6 +140,7 @@ Lib open_lib() {
     cudaSetDevice(cur);
     std::fprintf(stderr, "strata: K-quant prompt kernels from %s (STRATA_MMQ_KQ=1)\n", path.c_str());
     L.ok = true;
+    if (direct_mode() == 1) open_tab(L, n);
     return L;
 }
 
@@ -119,6 +165,14 @@ int run(int type, const void* args, void* stream) {
     int dev = 0;
     cudaGetDevice(&dev);
     return lib().ok ? lib().run(dev, type, args, stream) : -1;
+}
+
+bool tab_has(int type) { return available() && lib().tab_has != nullptr && lib().tab_has(type) != 0; }
+
+int tab_run(int type, const void* args, const void* const* ptrs, void* stream) {
+    int dev = 0;
+    cudaGetDevice(&dev);
+    return available() && lib().tab_run != nullptr ? lib().tab_run(dev, type, args, ptrs, stream) : -1;
 }
 
 }  // namespace strata::prefill::mmq::kq

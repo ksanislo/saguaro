@@ -106,6 +106,14 @@ option(STRATA_ORCA_Q4KS_MMQ "Build the GGML Q5_0 MMQ instance for OrcaRouter Q4_
 # only (not HIP, not gfx906); switched off at configure time when the llama.cpp tree's mmq.cuh is not one the copy
 # was verified against.
 option(STRATA_MMQ_TAB "Build the pointer-table prompt MMQ for STRATA_MMQ_DIRECT=1 (CUDA; ~37 MiB VRAM per GPU)" OFF)
+# Which types get a pointer table: STRATA_MMQ_TAB_TYPES in the engine itself (loaded at start, switch on or off), and
+# STRATA_MMQ_TAB_KQ_TYPES in strata_kq_tab, a library next to strata_kq opened only with STRATA_MMQ_KQ=1 and
+# STRATA_MMQ_DIRECT=1 (CUDA, not gfx906).  A K-quant model wants its down type there too (q8_0 for UD-Q4_K_XL) and
+# may empty the engine's list: then a build with the option on costs no VRAM while the switch is off.
+set(STRATA_MMQ_TAB_TYPES "q2_0;iq2_xxs;iq2_xs;iq2_s;iq3_xxs;iq3_s;iq4_nl;iq4_xs;q8_0" CACHE STRING
+    "STRATA_MMQ_TAB: pointer-table MMQ types compiled into the engine (subset of the nine native-pack types)")
+set(STRATA_MMQ_TAB_KQ_TYPES "q4_k;q5_k;q5_1;q6_k" CACHE STRING
+    "STRATA_MMQ_TAB: pointer-table MMQ types in strata_kq_tab (q4_k q5_k q5_1 q6_k q8_0)")
 if(STRATA_PREFILL_MMQ AND NOT STRATA_ENABLE_HIP)
   message(FATAL_ERROR "STRATA_PREFILL_MMQ requires STRATA_ENABLE_HIP=ON")
 endif()
@@ -2017,16 +2025,20 @@ if(STRATA_NATIVE_EXPERTS)
     endif()
     if(_strata_mmq_tab_on)
       set(_strata_tab_cuh ${CMAKE_CURRENT_SOURCE_DIR}/src/prefill/moe_mmq_tab.cuh)
-      # the native packs' nine types, the ones prefill_mmq_tab_test checks bit for bit; the optional Q5_0 / K-quant
-      # instances (STRATA_ORCA_Q4KS_MMQ, STRATA_MMQ_KQUANTS) get no pointer table and keep the gather
-      set(_strata_mmq_tab_types q2_0 iq2_xxs iq2_xs iq2_s iq3_xxs iq3_s iq4_nl iq4_xs q8_0)
+      # the engine's instances: of the native packs' nine types (STRATA_MMQ_TAB_TYPES), the ones prefill_mmq_tab_test
+      # checks bit for bit; the K-quants (and optionally Q8_0) go to strata_kq_tab below; Q5_0 keeps the gather
+      set(_strata_mmq_tab_types ${STRATA_MMQ_TAB_TYPES})
       foreach(_t IN LISTS _strata_mmq_tab_types)
+        if(NOT _t MATCHES "^(q2_0|iq2_xxs|iq2_xs|iq2_s|iq3_xxs|iq3_s|iq4_nl|iq4_xs|q8_0)$")
+          message(FATAL_ERROR "STRATA_MMQ_TAB_TYPES: ${_t} is not one of the nine native-pack types")
+        endif()
         string(TOUPPER ${_t} _strata_tab_T)
         configure_file(src/prefill/mmq_tab_instance.cu.in ${CMAKE_BINARY_DIR}/mmq_tab/mmq-tab-${_t}.cu @ONLY)
         target_sources(strata_mmq PRIVATE ${CMAKE_BINARY_DIR}/mmq_tab/mmq-tab-${_t}.cu)
+        target_compile_definitions(strata_mmq PRIVATE STRATA_MMQ_TAB_HAS_${_strata_tab_T}=1)
       endforeach()
       target_compile_definitions(strata_mmq PRIVATE STRATA_MMQ_TAB=1)
-      message(STATUS "STRATA_MMQ_TAB on: pointer-table MMQ for ${_strata_mmq_tab_types}")
+      message(STATUS "STRATA_MMQ_TAB on: pointer-table MMQ in the engine for ${_strata_mmq_tab_types}")
     endif()
     target_include_directories(strata_mmq PRIVATE ${_strata_gg}/include ${_strata_gg}/src ${_strata_mmq}
                                PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -2070,6 +2082,39 @@ if(STRATA_NATIVE_EXPERTS)
         target_link_libraries(strata_kq PRIVATE CUDA::cuda_driver)
       endif()
       add_dependencies(strata_mmq strata_kq)
+      # STRATA_MMQ_DIRECT=1 for these types: strata_kq_tab, the pointer-table MMQ (moe_mmq_tab.cuh) built exactly as
+      # strata_kq is (same mmq.cuh, flags, architectures), opened by mmq_kq_loader.cpp with strata_kq when the switch
+      # is on; without the file those experts keep the gather
+      set(_strata_kq_tab_types "")
+      if(_strata_mmq_tab_on)
+        set(_strata_kq_tab_types ${STRATA_MMQ_TAB_KQ_TYPES})
+      endif()
+      if(_strata_kq_tab_types)
+        add_library(strata_kq_tab SHARED src/prefill/mmq_kq_tab_lib.cu src/prefill/ggml_cuda_host.cu)
+        foreach(_t IN LISTS _strata_kq_tab_types)
+          if(NOT _t MATCHES "^(q4_k|q5_k|q5_1|q6_k|q8_0)$")
+            message(FATAL_ERROR "STRATA_MMQ_TAB_KQ_TYPES: ${_t} is not one of q4_k q5_k q5_1 q6_k q8_0")
+          endif()
+          string(TOUPPER ${_t} _strata_tab_T)
+          configure_file(src/prefill/mmq_tab_instance.cu.in ${CMAKE_BINARY_DIR}/mmq_tab_kq/mmq-tab-${_t}.cu @ONLY)
+          target_sources(strata_kq_tab PRIVATE ${CMAKE_BINARY_DIR}/mmq_tab_kq/mmq-tab-${_t}.cu)
+          target_compile_definitions(strata_kq_tab PRIVATE STRATA_KQ_TAB_HAS_${_strata_tab_T}=1)
+        endforeach()
+        target_include_directories(strata_kq_tab PRIVATE ${_strata_gg}/include ${_strata_gg}/src ${_strata_mmq}
+                                   ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/src/prefill)
+        target_compile_options(strata_kq_tab PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda -use_fast_math>)
+        if(MSVC)
+          target_compile_options(strata_kq_tab PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/bigobj>)
+        endif()
+        set_target_properties(strata_kq_tab PROPERTIES CUDA_RUNTIME_LIBRARY Static POSITION_INDEPENDENT_CODE ON
+                              CXX_VISIBILITY_PRESET hidden CUDA_VISIBILITY_PRESET hidden)
+        target_link_libraries(strata_kq_tab PRIVATE ggml-base)
+        if(TARGET CUDA::cuda_driver)
+          target_link_libraries(strata_kq_tab PRIVATE CUDA::cuda_driver)
+        endif()
+        add_dependencies(strata_mmq strata_kq_tab)
+        message(STATUS "STRATA_MMQ_TAB on: pointer-table MMQ in strata_kq_tab for ${_strata_kq_tab_types}")
+      endif()
     endif()
     if(STRATA_ORCA_Q4KS_MMQ)
       target_compile_definitions(strata_mmq PRIVATE STRATA_ORCA_Q4KS_MMQ=1)
@@ -2101,8 +2146,17 @@ if(STRATA_NATIVE_EXPERTS)
       # STRATA_MMQ_DIRECT: the pointer-table MMQ bit for bit against the gathered MMQ (exit 77 below sm_80)
       add_executable(prefill_mmq_tab_test tests/cuda/prefill_mmq_tab_test.cu)
       target_link_libraries(prefill_mmq_tab_test PRIVATE strata_mmq ggml-base ${_strata_gpu_runtime_target})
+      # the types that must have a pointer table (the engine's, and strata_kq_tab's when it is built)
+      set(_strata_tab_test_types ${_strata_mmq_tab_types})
+      if(_strata_kq_tab_types)
+        list(APPEND _strata_tab_test_types ${_strata_kq_tab_types})
+      endif()
+      string(REPLACE ";" "," _strata_tab_test_types "${_strata_tab_test_types}")
+      target_compile_definitions(prefill_mmq_tab_test PRIVATE "STRATA_TAB_TEST_TYPES=\"${_strata_tab_test_types}\"")
       add_test(NAME prefill_mmq_tab_test COMMAND prefill_mmq_tab_test)
-      set_tests_properties(prefill_mmq_tab_test PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 600)
+      # strata_kq_tab opens only with both switches (and strata_kq next to the test)
+      set_tests_properties(prefill_mmq_tab_test PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900
+                           ENVIRONMENT "STRATA_MMQ_KQ=1;STRATA_MMQ_DIRECT=1")
     endif()
     if(STRATA_BUILD_TESTS AND STRATA_MMQ_KQUANTS)
       # the UD-Q4_K_XL expert formats through MMQ against ggml's dequantized weights (synthetic, a few seconds)

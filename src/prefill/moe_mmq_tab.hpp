@@ -26,5 +26,10 @@ extern template bool mul_mat_q_tab_case<GGML_TYPE_IQ3_S>(ggml_backend_cuda_conte
 extern template bool mul_mat_q_tab_case<GGML_TYPE_IQ4_NL>(ggml_backend_cuda_context&, const mmq_args&, const mmq_x_tab&, cudaStream_t);
 extern template bool mul_mat_q_tab_case<GGML_TYPE_IQ4_XS>(ggml_backend_cuda_context&, const mmq_args&, const mmq_x_tab&, cudaStream_t);
 extern template bool mul_mat_q_tab_case<GGML_TYPE_Q8_0>(ggml_backend_cuda_context&, const mmq_args&, const mmq_x_tab&, cudaStream_t);
+// the K-quant experts' types: instanced in strata_kq_tab (mmq_kq_tab_lib.cu), next to strata_kq's gathered ones
+extern template bool mul_mat_q_tab_case<GGML_TYPE_Q4_K>(ggml_backend_cuda_context&, const mmq_args&, const mmq_x_tab&, cudaStream_t);
+extern template bool mul_mat_q_tab_case<GGML_TYPE_Q5_K>(ggml_backend_cuda_context&, const mmq_args&, const mmq_x_tab&, cudaStream_t);
+extern template bool mul_mat_q_tab_case<GGML_TYPE_Q5_1>(ggml_backend_cuda_context&, const mmq_args&, const mmq_x_tab&, cudaStream_t);
+extern template bool mul_mat_q_tab_case<GGML_TYPE_Q6_K>(ggml_backend_cuda_context&, const mmq_args&, const mmq_x_tab&, cudaStream_t);
 
 }  // namespace strata::prefill::mmq

@@ -207,24 +207,54 @@ __global__ void prep_group_kernel(GuardTab g, int64_t guard, uint8_t* tail_gu, u
     }
 }
 
-// the pointer-table MMQ per type: the native packs' nine types (CMake's _strata_mmq_tab_types, all of them checked
-// bit for bit by prefill_mmq_tab_test).  false: no instance - the optional Q5_0 and K-quant experts keep the gather
+// the pointer-table MMQ per type: the engine's own instances (CMake's STRATA_MMQ_TAB_TYPES, by default the native
+// packs' nine, all checked bit for bit by prefill_mmq_tab_test), then strata_kq_tab's (STRATA_MMQ_TAB_KQ_TYPES: the
+// K-quant experts, next to strata_kq's gathered ones).  false: no instance - that type keeps the gather
 bool run_tab(ggml_backend_cuda_context* ctx, const mmq_args* a, const mmq_x_tab* tab, cudaStream_t s) {
     const ggml_type t = a ? a->type_x : GGML_TYPE_COUNT;
 #define STRATA_TAB_CASE(T) case T: return ctx == nullptr || mul_mat_q_tab_case<T>(*ctx, *a, *tab, s)
     switch (t) {
+#if defined(STRATA_MMQ_TAB_HAS_Q2_0)
         STRATA_TAB_CASE(GGML_TYPE_Q2_0);
+#endif
+#if defined(STRATA_MMQ_TAB_HAS_IQ2_XXS)
         STRATA_TAB_CASE(GGML_TYPE_IQ2_XXS);
+#endif
+#if defined(STRATA_MMQ_TAB_HAS_IQ2_XS)
         STRATA_TAB_CASE(GGML_TYPE_IQ2_XS);
+#endif
+#if defined(STRATA_MMQ_TAB_HAS_IQ2_S)
         STRATA_TAB_CASE(GGML_TYPE_IQ2_S);
+#endif
+#if defined(STRATA_MMQ_TAB_HAS_IQ3_XXS)
         STRATA_TAB_CASE(GGML_TYPE_IQ3_XXS);
+#endif
+#if defined(STRATA_MMQ_TAB_HAS_IQ3_S)
         STRATA_TAB_CASE(GGML_TYPE_IQ3_S);
+#endif
+#if defined(STRATA_MMQ_TAB_HAS_IQ4_NL)
         STRATA_TAB_CASE(GGML_TYPE_IQ4_NL);
+#endif
+#if defined(STRATA_MMQ_TAB_HAS_IQ4_XS)
         STRATA_TAB_CASE(GGML_TYPE_IQ4_XS);
+#endif
+#if defined(STRATA_MMQ_TAB_HAS_Q8_0)
         STRATA_TAB_CASE(GGML_TYPE_Q8_0);
-        default: return false;
+#endif
+        default: break;
     }
 #undef STRATA_TAB_CASE
+#if defined(STRATA_KQ_DSO)
+    if (ctx == nullptr) return kq::tab_has((int) t);
+    const int e = kq::tab_run((int) t, a, (const void* const*) tab->p, s);
+    if (e > 1) {
+        std::fprintf(stderr, "prefill mmq: the pointer-table K-quant library failed on type %d (error %d)\n", (int) t, e);
+        std::exit(1);
+    }
+    return e == 0;
+#else
+    return false;
+#endif
 }
 // whether run_tab has an instance for type t (no launch)
 bool tab_has_type(int t) {

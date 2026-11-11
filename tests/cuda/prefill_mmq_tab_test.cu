@@ -20,7 +20,11 @@
 // once with the full groups in row-count order (mmq_resident_sort_rows, the partial group kept): every token's
 // product row bitwise equal, when mmq::whole_tiles says so for this card (else only reported). Sorting the partial
 // group too (STRATA_MMQ_RESIDENT_SORT_NE) is reported, not required.
-// Exit 77 without a CUDA device of sm_80 or newer or without the pointer-table build.
+// The K-quant experts' types (Q4_K / Q5_K / Q6_K gate/up, Q5_1 down, and the Q4_K + Q5_1 / Q4_K + Q8_0 / Q5_K + Q8_0
+// pairs of UD-Q4_K_XL) get the same parts when the build has their pointer table (strata_kq_tab, run with
+// STRATA_MMQ_KQ=1 STRATA_MMQ_DIRECT=1); every type is checked only if CMake's STRATA_TAB_TEST_TYPES lists it, and a
+// listed type without a table, or an unlisted one with a table, fails.
+// Exit 77 without a CUDA device of sm_75 or newer or without the pointer-table build.
 #include "strata/prefill/moe_mmq.hpp"
 
 #include "ggml.h"
@@ -30,6 +34,7 @@
 #include <cuda_runtime.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -61,18 +66,44 @@ struct Dev {
     uint8_t* b() const { return (uint8_t*) p; }
 };
 
-// random blocks with a sane fp16 scale at each block's start (every format here begins with it)
+// random blocks with a sane fp16 scale where each format keeps it: at the block's start for most, then the min too
+// (Q4_K / Q5_K dmin, Q5_1 m), and at the end for Q6_K
 void fill_matrix(uint8_t* m, ggml_type t, int64_t rows, int64_t cols, std::mt19937& rng) {
     const size_t bs = ggml_type_size(t), nb = (size_t) rows * (size_t) (cols / ggml_blck_size(t));
     std::uniform_int_distribution<int> byte(0, 255);
     const float lo = t == GGML_TYPE_Q8_0 ? 0.0001f : t == GGML_TYPE_IQ3_S ? 0.0004f : t == GGML_TYPE_IQ4_XS ? 0.00005f
                    : t == GGML_TYPE_IQ4_NL ? 0.0002f : t == GGML_TYPE_Q2_0 ? 0.004f : 0.0008f;
     std::uniform_real_distribution<float> sc(lo, 6.0f * lo);
+    const bool two = t == GGML_TYPE_Q4_K || t == GGML_TYPE_Q5_K || t == GGML_TYPE_Q5_1;
+    const size_t at = t == GGML_TYPE_Q6_K ? bs - 2 : 0;
     for (size_t i = 0; i < nb * bs; ++i) m[i] = (uint8_t) byte(rng);
     for (size_t b = 0; b < nb; ++b) {
         const ggml_fp16_t h = ggml_fp32_to_fp16(sc(rng));
-        std::memcpy(m + b * bs, &h, 2);
+        std::memcpy(m + b * bs + at, &h, 2);
+        if (two) {
+            const ggml_fp16_t h2 = ggml_fp32_to_fp16(sc(rng));
+            std::memcpy(m + b * bs + 2, &h2, 2);
+        }
     }
+}
+
+// CMake's STRATA_TAB_TEST_TYPES: the types this build must have a pointer table for (ggml names, any case)
+bool tab_expected(ggml_type t) {
+#if defined(STRATA_TAB_TEST_TYPES)
+    std::string list = STRATA_TAB_TEST_TYPES, name = ggml_type_name(t);
+    for (auto& c : list) c = (char) std::tolower((unsigned char) c);
+    for (auto& c : name) c = (char) std::tolower((unsigned char) c);
+    size_t i = 0;
+    while (i <= list.size()) {
+        size_t j = list.find(',', i);
+        if (j == std::string::npos) j = list.size();
+        if (list.compare(i, j - i, name) == 0) return true;
+        i = j + 1;
+    }
+    return false;
+#else
+    return t != GGML_TYPE_Q5_0 && t != GGML_TYPE_Q4_K && t != GGML_TYPE_Q5_K && t != GGML_TYPE_Q5_1 && t != GGML_TYPE_Q6_K;
+#endif
 }
 
 // host -> device, finished before any work on the (non-blocking) test stream starts: a pageable cudaMemcpy returns
@@ -516,8 +547,8 @@ int main() {
     try {
         int dev = 0;
         cudaDeviceProp prop{};
-        if (cudaGetDevice(&dev) != cudaSuccess || cudaGetDeviceProperties(&prop, dev) != cudaSuccess || prop.major < 8) {
-            std::printf("needs a CUDA device of sm_80 or newer: skipped\n");
+        if (cudaGetDevice(&dev) != cudaSuccess || cudaGetDeviceProperties(&prop, dev) != cudaSuccess || prop.major * 10 + prop.minor < 75) {
+            std::printf("needs a CUDA device of sm_75 or newer: skipped\n");
             return 77;
         }
         if (!mmq::built() || !mmq::tab_built()) {
@@ -533,10 +564,14 @@ int main() {
         const Shape main_shapes[] = {{GGML_TYPE_IQ3_S, 1280, 2560, "gate/up"},
                                      {GGML_TYPE_IQ4_NL, 2560, 640, "down"},
                                      {GGML_TYPE_Q8_0, 2560, 640, "down"}};
-        // the types without a pointer table (the optional Q5_0 / K-quant instances) must keep the gather
-        for (const ggml_type t : {GGML_TYPE_Q5_0, GGML_TYPE_Q4_K, GGML_TYPE_Q5_K, GGML_TYPE_Q5_1, GGML_TYPE_Q6_K}) {
-            if (mmq::tab_fits((int) t, 1280) || mmq::tab_fits((int) t, 2560)) {
-                std::printf("FAIL: %s reports a pointer table (only the nine tested types have one)\n", ggml_type_name(t));
+        // exactly the listed types report a pointer table (the others keep the gather)
+        for (const ggml_type t : {GGML_TYPE_Q2_0, GGML_TYPE_IQ2_XXS, GGML_TYPE_IQ2_XS, GGML_TYPE_IQ2_S, GGML_TYPE_IQ3_XXS,
+                                  GGML_TYPE_IQ3_S, GGML_TYPE_IQ4_NL, GGML_TYPE_IQ4_XS, GGML_TYPE_Q8_0, GGML_TYPE_Q5_0,
+                                  GGML_TYPE_Q4_K, GGML_TYPE_Q5_K, GGML_TYPE_Q5_1, GGML_TYPE_Q6_K}) {
+            const bool has = mmq::tab_fits((int) t, 1280) || mmq::tab_fits((int) t, 2560);
+            if (has != tab_expected(t)) {
+                std::printf("FAIL: %s %s a pointer table (STRATA_TAB_TEST_TYPES %s it)\n", ggml_type_name(t),
+                            has ? "reports" : "has no", tab_expected(t) ? "lists" : "does not list");
                 return 1;
             }
         }
@@ -546,6 +581,7 @@ int main() {
         const size_t want_over[] = {0, 72, 136};
         for (size_t i = 0; i < 3; ++i) {
             const Shape& sh = main_shapes[i];
+            if (!tab_expected(sh.t)) continue;
             const size_t ov = mmq::overread_bytes((int) sh.t, sh.cols);
             if (ov > mmq::kSlotGuard || (prop.major == 8 && prop.minor == 6 && ov != want_over[i])) {
                 std::printf("FAIL: %s over-read %zu B (want %zu, at most %zu)\n", ggml_type_name(sh.t), ov, want_over[i],
@@ -554,6 +590,7 @@ int main() {
             }
         }
         for (const Shape& sh : main_shapes) {
+            if (!tab_expected(sh.t)) continue;
             if (!mmq::tab_fits((int) sh.t, sh.rows)) {
                 std::printf("FAIL: no pointer-table MMQ for %s\n", ggml_type_name(sh.t));
                 return 1;
@@ -565,9 +602,25 @@ int main() {
         const Shape other[] = {{GGML_TYPE_IQ2_XXS, 1280, 2560, "gate/up"}, {GGML_TYPE_IQ2_XS, 1280, 2560, "gate/up"},
                                {GGML_TYPE_IQ2_S, 1280, 2560, "gate/up"},   {GGML_TYPE_IQ3_XXS, 1280, 2560, "gate/up"},
                                {GGML_TYPE_IQ4_XS, 1280, 2560, "gate/up"},  {GGML_TYPE_Q8_0, 1280, 2560, "gate/up"},
-                               {GGML_TYPE_IQ4_NL, 1280, 2560, "gate/up"},  {GGML_TYPE_Q2_0, 2560, 640, "down"}};
+                               {GGML_TYPE_IQ4_NL, 1280, 2560, "gate/up"},  {GGML_TYPE_Q2_0, 2560, 640, "down"},
+                               {GGML_TYPE_Q5_K, 1280, 2560, "gate/up"},    {GGML_TYPE_Q6_K, 1280, 2560, "gate/up"},
+                               {GGML_TYPE_Q5_1, 1280, 2560, "gate/up"}};
+        // the K-quant experts' main shapes (UD-Q4_K_XL: Q4_K gate/up, Q5_1 down), fully
+        const Shape kq_shapes[] = {{GGML_TYPE_Q4_K, 1280, 2560, "gate/up"}, {GGML_TYPE_Q5_1, 2560, 640, "down"}};
+        for (const Shape& sh : kq_shapes) {
+            if (!tab_expected(sh.t)) continue;
+            if (!mmq::tab_fits((int) sh.t, sh.rows) || mmq::overread_bytes((int) sh.t, sh.cols) > mmq::kSlotGuard) {
+                std::printf("FAIL: no pointer-table MMQ for %s %s (or its over-read exceeds the guard)\n",
+                            ggml_type_name(sh.t), sh.role);
+                return 1;
+            }
+            std::printf("%-8s %-7s over-read past the matrix: %zu B\n", ggml_type_name(sh.t), sh.role,
+                        mmq::overread_bytes((int) sh.t, sh.cols));
+            sweep(ctx, sh, true, rng, s);
+        }
         for (const Shape& sh : other) {
-            if (!mmq::tab_fits((int) sh.t, sh.rows)) {   // all nine types have an instance (CMake's tab types)
+            if (!tab_expected(sh.t)) continue;
+            if (!mmq::tab_fits((int) sh.t, sh.rows)) {   // every listed type has an instance (CMake's tab types)
                 std::printf("FAIL: no pointer-table MMQ for %s %s\n", ggml_type_name(sh.t), sh.role);
                 return 1;
             }
@@ -575,7 +628,10 @@ int main() {
         }
         // Part 3
         const int f0 = g_fail, c0 = g_cases;
-        for (const Pair pr : {Pair{GGML_TYPE_IQ3_S, GGML_TYPE_IQ4_NL}, Pair{GGML_TYPE_IQ3_S, GGML_TYPE_Q8_0}}) {
+        for (const Pair pr : {Pair{GGML_TYPE_IQ3_S, GGML_TYPE_IQ4_NL}, Pair{GGML_TYPE_IQ3_S, GGML_TYPE_Q8_0},
+                              Pair{GGML_TYPE_Q4_K, GGML_TYPE_Q5_1}, Pair{GGML_TYPE_Q4_K, GGML_TYPE_Q8_0},
+                              Pair{GGML_TYPE_Q5_K, GGML_TYPE_Q8_0}}) {
+            if (!tab_expected(pr.gu) || !tab_expected(pr.d)) continue;
             for (int gg = 0; gg < 2; ++gg) {
                 const bool group_gather = gg == 1;
                 // alternating direct / gathered, last entry direct
@@ -607,6 +663,7 @@ int main() {
         const Shape order_shapes[] = {{GGML_TYPE_IQ3_S, 1280, 2560, "gate/up"}, {GGML_TYPE_IQ4_XS, 1280, 2560, "gate/up"},
                                       {GGML_TYPE_IQ4_NL, 2560, 640, "down"},   {GGML_TYPE_Q8_0, 2560, 640, "down"}};
         for (const Shape& sh : order_shapes) {
+            if (!tab_expected(sh.t)) continue;
             const bool whole = mmq::whole_tiles((int) sh.t, sh.rows, G);
             std::printf("%-8s %-7s whole_tiles(%d experts): %s\n", ggml_type_name(sh.t), sh.role, G, whole ? "yes" : "no");
             order_case(ctx, sh, skewed_counts(147, 1, 40, rng), whole, rng, s, "150-token prompt");

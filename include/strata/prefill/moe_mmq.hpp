@@ -141,7 +141,9 @@ void set_bounds(int32_t* dst, int32_t rows, void* stream);
 /// llama.cpp tree matched the mirrored scheduler's fingerprint).  false under HIP, gfx906, SYCL and builds without MMQ.
 bool tab_built();
 /// `tab_built`, `fits`, rows a multiple of 128 (no fallback tiles) and a pointer-table instance for the type (the
-/// native packs' nine: Q2_0 IQ2_XXS IQ2_XS IQ2_S IQ3_XXS IQ3_S IQ4_NL IQ4_XS Q8_0; not Q5_0 or the K-quants).
+/// engine's: CMake's STRATA_MMQ_TAB_TYPES, by default the native packs' nine Q2_0 IQ2_XXS IQ2_XS IQ2_S IQ3_XXS IQ3_S
+/// IQ4_NL IQ4_XS Q8_0; then strata_kq_tab's, open with STRATA_MMQ_KQ=1 STRATA_MMQ_DIRECT=1: Q4_K Q5_K Q5_1 Q6_K and
+/// optionally Q8_0, STRATA_MMQ_TAB_KQ_TYPES; never Q5_0).
 bool tab_fits(int ggml_type, int64_t w_rows);
 /// The bytes past a [rows, cols] matrix that its last row's final K tile reads (the largest over-read of any
 /// config on any visible GPU): 72 for IQ4_NL and 136 for Q8_0 at 640 columns, 0 for IQ3_S at 2560 (sm_86).  0 without MMQ.

@@ -2102,8 +2102,13 @@ the pairs in which the switched arm won). They are here so you can try them on y
   read where it is; streamed, peer-GPU and other experts are still copied. The launch (tile size, stream-k split,
   fixup) is the one MMQ makes for the copied group and the tile code is llama.cpp's own, so the answers are the same
   bits (`prefill_mmq_tab_test`: 874 products bitwise equal to the copied path, all nine types - Q2_0, IQ2_XXS, IQ2_XS,
-  IQ2_S, IQ3_XXS, IQ3_S, IQ4_NL, IQ4_XS, Q8_0 - and every tile size; the optional Q5_0 and K-quant experts get no
-  pointer table and keep the copy). Each sized cache slot keeps 256 bytes after its expert, because MMQ reads up to
+  IQ2_S, IQ3_XXS, IQ3_S, IQ4_NL, IQ4_XS, Q8_0 - and every tile size; the optional Q5_0 experts get no pointer table
+  and keep the copy). The K-quant experts (UD-Q4/Q5/Q6_K_XL: Q4_K, Q5_K, Q6_K, Q5_1, and their Q8_0 downs) get
+  theirs from `strata_kq_tab`, a library next to `strata_kq` built the same way (same `mmq.cuh`, flags and
+  architectures as the gathered products' library) and opened with it only when `STRATA_MMQ_KQ=1` and
+  `STRATA_MMQ_DIRECT=1` are both set; its types are the CMake list `STRATA_MMQ_TAB_KQ_TYPES` (default `q4_k;q5_k;q5_1;q6_k`,
+  add `q8_0` for UD-Q4_K_XL's Q8_0 downs), and `STRATA_MMQ_TAB_TYPES` picks the engine's own (default the nine; empty
+  keeps the engine's kernels, and its VRAM, as without the option). Each sized cache slot keeps 256 bytes after its expert, because MMQ reads up to
   136 bytes past a 640-wide down matrix; they are zeroed before each group. That is about 2.3 MiB over 9,300 slots (one
   slot fewer out of 6,998 on one RTX 3090). `STRATA_MMQ_DIRECT=2` keeps that layout but copies as before (an A/B
   reference); 0 or unset is the default path, byte for byte. `STRATA_MMQ_DIRECT_LOG=1` adds each stage's count of experts
