@@ -1299,6 +1299,33 @@ struct Model::Impl {
     // the experts keep between prompts; the share is taken only while they are laid out
     bool read_help_tail = false;
     std::atomic<bool> read_help_live{false};
+    // DS4_LEND_SHADOW: every lending device's shadow pinned at load, all at once (a thread each: pinning is host work)
+    void lend_shadow_pin() {
+        if (!lend_shadow()) return;
+        const double ts = now_ms();
+        std::vector<std::thread> th;
+        for (Dev& d : devs)
+            if (d.tail != nullptr && d.shadow == nullptr)
+                th.emplace_back([&d] {
+                    cudaSetDevice(d.id);
+                    if (cudaHostAlloc((void**) &d.shadow, d.tail_bytes, cudaHostAllocPortable) != cudaSuccess) {
+                        cudaGetLastError();
+                        d.shadow = nullptr;
+                    }
+                });
+        for (auto& t : th) t.join();
+        double gb = 0;
+        int n = 0, bad = 0;
+        for (const Dev& d : devs)
+            if (d.tail != nullptr) {
+                ++n;
+                if (d.shadow != nullptr) gb += d.tail_bytes / 1e9;
+                else ++bad;
+            }
+        if (n > 0)
+            std::fprintf(stderr, "ds4: DS4_LEND_SHADOW: %d tail shadows, %.2f GB pinned in %.0f ms (in parallel)%s\n", n - bad,
+                         gb, now_ms() - ts, bad ? " - some NOT pinned: those reads hand back from the files" : "");
+    }
     static bool lend_shadow() {
         static const bool on = std::getenv("DS4_LEND_SHADOW") != nullptr && std::atoi(std::getenv("DS4_LEND_SHADOW")) != 0;
         return on;
@@ -4713,6 +4740,7 @@ struct Model::Impl {
         // the experts: VRAM slots in what each device has left (after the PCIe lane's staging slots), the rest on the host
         if (!lane_alloc(err)) return false;
         if (!place_experts(err)) return false;
+        lend_shadow_pin();   // (DS4_LEND_SHADOW: the tails' shadows, pinned in parallel)
         if (helper_id >= 0 && !helper_select(err)) return false;
         if (!load_experts(err)) return false;
         if (copy_swap && copy_mode) {   // (DS4_COPY_SWAP: after the copies)
@@ -7884,15 +7912,6 @@ struct Model::Impl {
             d.tail_bytes = cap;
             d.tail_step = step;
             d.tail_k = k;
-            if (lend_shadow() && d.shadow == nullptr) {   // (DS4_LEND_SHADOW: pinned once at load, not in a read)
-                const double ts = now_ms();
-                if (cudaHostAlloc((void**) &d.shadow, cap, cudaHostAllocPortable) != cudaSuccess) {
-                    cudaGetLastError();
-                    d.shadow = nullptr;
-                }
-                std::fprintf(stderr, "ds4: DS4_LEND_SHADOW: CUDA%d's %.2f GB tail shadow %s in %.0f ms\n", d.id, cap / 1e9,
-                             d.shadow ? "pinned" : "NOT pinned (no shadow)", now_ms() - ts);
-            }
             d.experts += cap;
             size_t xoff = 0;
             for (Layer& l : L)
@@ -19296,6 +19315,24 @@ struct Model::Impl {
             }
         if (tp)
             for (Layer& l : L) l.pv_n = l.n_slots;
+        // DS4_LEND_SHADOW: every lending device's lent region saved first, the copies of all devices at once (each device's
+        // clear below follows its copy on the same stream)
+        const double t_sh = now_ms();
+        double sh_gb = 0;
+        for (size_t di = 0; di < chunks.size(); ++di) {
+            devs[di].shadow_cut = SIZE_MAX;
+            if (!lend_shadow() || chunks[di] == nullptr || !chunks[di]->borrow || chunks[di]->tp_lend) continue;
+            Dev& d = devs[di];
+            if (d.shadow == nullptr) continue;   // (not pinned at load: this device hands back from the files)
+            const size_t b0 = (d.tail_bytes - lay_chunk(*chunks[di], C, nullptr, 2)) & ~(size_t) 255;
+            const size_t cut = d.help_bytes > 0 && read_help_tail ? (b0 - d.help_bytes) & ~(size_t) 255 : b0;
+            if (cudaSetDevice(d.id) == cudaSuccess &&
+                cudaMemcpyAsync(d.shadow + cut, d.tail + cut, d.tail_bytes - cut, cudaMemcpyDeviceToHost, d.st) == cudaSuccess) {
+                d.shadow_cut = cut;
+                sh_gb += (d.tail_bytes - cut) / 1e9;
+            } else
+                cudaGetLastError();
+        }
         for (size_t di = 0; di < chunks.size(); ++di) {
             if (chunks[di] == nullptr || !chunks[di]->borrow) continue;
             Dev& d = devs[di];
@@ -19309,22 +19346,7 @@ struct Model::Impl {
             cudaError_t e = cudaSetDevice(d.id);
             // DS4_LEND_SHADOW=1: the lent region's bytes (the helper's room too) saved to pinned host memory first -
             // borrow_end copies them back instead of reading ~8 GB of experts from the model's files (~4 s a read)
-            d.shadow_cut = SIZE_MAX;
-            if (e == cudaSuccess && lend_shadow() && !c.tp_lend) {
-                const size_t cut = d.help_bytes > 0 && read_help_tail ? (b0 - d.help_bytes) & ~(size_t) 255 : b0;
-                if (d.shadow == nullptr && cudaHostAlloc((void**) &d.shadow, d.tail_bytes, cudaHostAllocPortable) != cudaSuccess) {
-                    cudaGetLastError();
-                    d.shadow = nullptr;
-                }
-                if (d.shadow != nullptr) {
-                    const double ts = now_ms();
-                    e = cudaMemcpyAsync(d.shadow + cut, d.tail + cut, d.tail_bytes - cut, cudaMemcpyDeviceToHost, d.st);
-                    if (e == cudaSuccess) e = cudaStreamSynchronize(d.st);   // (timed: its cost is the read's)
-                    if (e == cudaSuccess) d.shadow_cut = cut;
-                    std::fprintf(stderr, "ds4: DS4_LEND_SHADOW: CUDA%d saved %.2f GB in %.0f ms\n", d.id,
-                                 (d.tail_bytes - cut) / 1e9, now_ms() - ts);
-                }
-            }
+            (void) c;   // (DS4_LEND_SHADOW: its save was queued in the pass above, ahead of this clear on the same stream)
             if (e == cudaSuccess) e = cudaMemsetAsync(d.tail + b0, 0, d.tail_bytes - b0, d.st);
             if (e == cudaSuccess) e = cudaStreamSynchronize(d.st);
             if (e != cudaSuccess) {
@@ -19371,6 +19393,8 @@ struct Model::Impl {
             lent = true;
         }
         if (read_help_tail && lent) read_help_live.store(true, std::memory_order_release);
+        if (sh_gb > 0)
+            std::fprintf(stderr, "ds4: DS4_LEND_SHADOW: %.2f GB saved in %.0f ms (all devices at once)\n", sh_gb, now_ms() - t_sh);
         return true;
     }
     // expert e's table entry on every member of l's group from its slot (-1: 0), synchronously - with nothing queued
