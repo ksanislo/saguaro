@@ -1225,6 +1225,8 @@ __global__ void __launch_bounds__(256) index_score_tc_kernel(const float* __rest
     __trap();
 #endif
 }
+// (25.6 / 35.8 / 41 / 51 KB for QT 1 / 2 / 4 / 6; sm_75 registers 125 / 162 / 254 / 255: on a T4 two blocks an SM for
+// QT 1, one for QT >= 2 - index_score sizes its grid by the occupancy it asked for)
 template <int QT>
 constexpr size_t index_tc_smem() { return (size_t) (128 + QT * 32) * (128 + 16) + (size_t) (128 + QT * 32) * 4 * 4; }
 template <int QT>
@@ -4078,13 +4080,13 @@ void index_score(const float* q, const float* w, const void* k, int heads, int h
     if (n <= 0) return;
     // (opt-in, DS4_INDEX_TC=1: its sums differ from the CUDA cores' in the last bits - perplexity the same, 7.5366 on
     // 4 x 1024 tokens, but a long greedy run's tokens part after a while)
-    // DS4_INDEX_TC_SM75=1: the same on compute capability 7.5 (T4: each m16n8k32 as four m8n8k16 - the same integers,
-    // so the sm_80 kernel's bits; again not the CUDA cores')
+    // DS4_INDEX_TC_SM75 on compute capability 7.5 (each m16n8k32 as four m8n8k16: the sm_80 kernel's bits): 1 a
+    // prompt's slabs only (T > kWin: 4 queries a block, 1 with candidates), 2 the decode windows too
     static const bool tc_ok = std::getenv("DS4_INDEX_TC") != nullptr && std::atoi(std::getenv("DS4_INDEX_TC")) != 0;
-    static const bool tc75_ok = std::getenv("DS4_INDEX_TC_SM75") != nullptr && std::atoi(std::getenv("DS4_INDEX_TC_SM75")) != 0;
-    if (tc && (tc_ok || tc75_ok) && kfmt == kKvFp4p) {   // (the tensor cores: a block a tile, looping, ~2 blocks an SM)
-        static std::atomic<uint64_t> opted{0}, capable{0};   // (capable: compute capability 8.0+ (7.5 opted), CUDA)
-        static int sms[64] = {};
+    static const int tc75 = std::getenv("DS4_INDEX_TC_SM75") != nullptr ? std::atoi(std::getenv("DS4_INDEX_TC_SM75")) : 0;
+    if (tc && (tc_ok || tc75 > 0) && kfmt == kKvFp4p) {   // (the tensor cores: a block a tile, looping)
+        static std::atomic<uint64_t> opted{0}, capable{0}, sm75{0};   // (capable: 8.0+ (7.5 opted), CUDA, attributes set)
+        static int sms[64] = {}, occ[64][7] = {};   // (occ: blocks an SM by QT - 1 on a T4's 64 KB for QT >= 2)
         int dev = 0;
         cudaGetDevice(&dev);
         if (!(opted.load(std::memory_order_relaxed) >> dev & 1u)) {
@@ -4092,16 +4094,32 @@ void index_score(const float* q, const float* w, const void* k, int heads, int h
             cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev);
             cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, dev);
 #if !defined(STRATA_USE_HIP)
-            if ((major >= 8 && tc_ok) || (major == 7 && minor >= 5 && tc75_ok)) {
-                cudaFuncSetAttribute(index_score_tc_kernel<1>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) index_tc_smem<1>());
-                cudaFuncSetAttribute(index_score_tc_kernel<2>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) index_tc_smem<2>());
-                cudaFuncSetAttribute(index_score_tc_kernel<3>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) index_tc_smem<3>());
-                cudaFuncSetAttribute(index_score_tc_kernel<4>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) index_tc_smem<4>());
-                cudaFuncSetAttribute(index_score_tc_kernel<5>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) index_tc_smem<5>());
-                cudaFuncSetAttribute(index_score_tc_kernel<6>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) index_tc_smem<6>());
-                capable.fetch_or(1ull << dev);
-                std::fprintf(stderr, "ds4: indexer scores on the int8 tensor cores on CUDA%d (sm_%d%d%s)\n", dev, major, minor,
-                             major >= 8 ? ", m16n8k32" : ", m8n8k16 x4");
+            const bool is75 = major == 7 && minor >= 5;
+            if ((major >= 8 && tc_ok) || (is75 && tc75 > 0)) {
+                cudaError_t e = cudaSuccess;
+                auto set = [&](auto kern, size_t sm, int qt) {
+                    cudaError_t r = cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) sm);
+                    if (r == cudaSuccess) r = cudaOccupancyMaxActiveBlocksPerMultiprocessor(&occ[dev & 63][qt], kern, 256, sm);
+                    if (r != cudaSuccess && e == cudaSuccess) e = r;
+                };
+                set(index_score_tc_kernel<1>, index_tc_smem<1>(), 1);
+                set(index_score_tc_kernel<2>, index_tc_smem<2>(), 2);
+                set(index_score_tc_kernel<3>, index_tc_smem<3>(), 3);
+                set(index_score_tc_kernel<4>, index_tc_smem<4>(), 4);
+                set(index_score_tc_kernel<5>, index_tc_smem<5>(), 5);
+                set(index_score_tc_kernel<6>, index_tc_smem<6>(), 6);
+                if (e != cudaSuccess) {
+                    (void) cudaGetLastError();
+                    std::fprintf(stderr, "ds4: indexer tensor cores off on CUDA%d (%s): the CUDA cores' scores\n", dev,
+                                 cudaGetErrorString(e));
+                } else {
+                    if (is75) sm75.fetch_or(1ull << dev);
+                    capable.fetch_or(1ull << dev);
+                    std::fprintf(stderr, "ds4: indexer scores on the int8 tensor cores on CUDA%d (sm_%d%d, %s; %s)\n", dev,
+                                 major, minor, major >= 8 ? "m16n8k32" : "m8n8k16 x4",
+                                 !is75 ? "every call" : tc75 >= 2 ? "DS4_INDEX_TC_SM75=2: prompt slabs and decode windows"
+                                                                  : "DS4_INDEX_TC_SM75=1: prompt slabs only");
+                }
             }
 #else
             (void) major;
@@ -4110,10 +4128,11 @@ void index_score(const float* q, const float* w, const void* k, int heads, int h
             cudaDeviceGetAttribute(&sms[dev & 63], cudaDevAttrMultiProcessorCount, dev);
             opted.fetch_or(1ull << dev);
         }
-        if (capable.load(std::memory_order_relaxed) >> dev & 1u) {   // (else the CUDA cores' kernel below)
+        const bool on75 = sm75.load(std::memory_order_relaxed) >> dev & 1u;
+        if ((capable.load(std::memory_order_relaxed) >> dev & 1u) && (!on75 || tc75 >= 2 || T > kWin)) {
             // queries a block: 1 with candidates (each its own rows); else a decode window's all (up to 6), a slab's 4
             const int qt = cand != nullptr ? 1 : T <= 6 ? T : 4, qg = (T + qt - 1) / qt, ntiles = (n + 127) / 128;
-            const int gx = std::max(1, std::min(ntiles, 2 * sms[dev & 63] / qg));
+            const int gx = std::max(1, std::min(ntiles, std::max(1, occ[dev & 63][qt]) * sms[dev & 63] / qg));
             const uint8_t* kp = (const uint8_t*) k;
             switch (qt) {
             case 1: index_tc_launch<1>(gx, qg, s, q, w, kp, heads, n, T, cand, cand_stride, blk, lim, out, out_stride, ntiles); break;

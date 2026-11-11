@@ -8,7 +8,8 @@
 //   nvcc -O3 -std=c++17 -arch=native -I include -I src/ds4 tests/ds4_index_score_tc.cu src/ds4/ds4_kernels.cu \
 //        src/ds4/ds4_host_ar.cpp -Xcompiler -mavx2,-mfma,-mf16c -o build/ds4_index_score_tc
 //   DS4_INDEX_TC=1 build/ds4_index_score_tc   (the engine's default is the CUDA cores' kernel; on compute capability
-//   7.5 DS4_INDEX_TC_SM75=1 - the run prints "ds4: indexer scores on the int8 tensor cores" when it is taken)
+//   7.5 DS4_INDEX_TC_SM75=2 for every case; =1 takes the prompt slabs' cases alone (T > 16) - the run prints "ds4:
+//   indexer scores on the int8 tensor cores" when it is taken)
 #include "ds4_kernels.cuh"
 
 #include <algorithm>

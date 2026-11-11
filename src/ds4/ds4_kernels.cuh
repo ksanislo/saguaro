@@ -198,7 +198,8 @@ struct Rows {
 /// query's candidates) -> -inf.  q rows heads * hd apart, w rows 64, cand rows cand_stride, out rows out_stride; the keys
 /// k rows of format kfmt (the cache's kKvFp4p, or kKvBf16).
 /// With kKvFp4p keys and DS4_INDEX_TC=1 (and tc) the tensor cores' kernel: the same products, FP32 sums in another
-/// order; on compute capability 7.5 DS4_INDEX_TC_SM75=1 instead (the same kernel's bits, from m8n8k16).
+/// order; on compute capability 7.5 DS4_INDEX_TC_SM75=1 instead for a prompt's slabs (T > kWin), =2 for every call
+/// (the same kernel's bits, from m8n8k16).
 void index_score(const float* q, const float* w, const void* k, int heads, int hd, int T, int n, const int* cand,
                  int cand_stride, int blk, const Rows& lim, float* out, long long out_stride, cudaStream_t s,
                  int kfmt = kKvFp4p, bool tc = true);
