@@ -4886,15 +4886,24 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                                 gu.y_scale = mmq::fp4_activations(mmq_gt) ? m.Xscale : nullptr;
                                 if (direct) gu.tab = &tgu;
                                 m.mmq_ctx->run(gu, m.cs);
-                                if (lay.native && lay.fmt[(size_t) l].tail_off)   // gate/up scales applied as read
-                                    mmq::swiglu_scaled(m.GU + r0 * 1280, m.H + r0 * 640, nr, 640, m.bounds_dev + j0, ngx,
-                                                       m.grp_tail, r0, m.cs);
-                                else
-                                    mmq::swiglu(m.GU + r0 * 1280, m.H + r0 * 640, nr, 640, !lay.native, m.cs);
-                                if (had_d)
-                                    strata::kernels::hadamard_rows(m.H + r0 * 640, m.H + r0 * 640, nr, 640, had_block, had_sh, m.cs);
-                                pt.mark(kPfGemmD, cs);
-                                mmq::quantize(m.H + r0 * 640, nullptr, m.Hq, mmq_dt, 640, 640, nr, m.cs, m.Hscale);
+                                const bool gu_tail = lay.native && lay.fmt[(size_t) l].tail_off;
+                                // STRATA_MMQ_SWIGLU_Q8=1: swiglu + quantize in one pass, the same q8_1 bytes (no H)
+                                if (had_d || !mmq::swiglu_q8_requested() ||
+                                    !mmq::swiglu_quantize(m.GU + r0 * 1280, m.Hq, mmq_dt, nr, 640, !lay.native,
+                                                          gu_tail ? m.bounds_dev + j0 : nullptr, ngx,
+                                                          gu_tail ? m.grp_tail : nullptr, r0, m.cs)) {
+                                    if (gu_tail)   // gate/up scales applied as read
+                                        mmq::swiglu_scaled(m.GU + r0 * 1280, m.H + r0 * 640, nr, 640, m.bounds_dev + j0, ngx,
+                                                           m.grp_tail, r0, m.cs);
+                                    else
+                                        mmq::swiglu(m.GU + r0 * 1280, m.H + r0 * 640, nr, 640, !lay.native, m.cs);
+                                    if (had_d)
+                                        strata::kernels::hadamard_rows(m.H + r0 * 640, m.H + r0 * 640, nr, 640, had_block, had_sh, m.cs);
+                                    pt.mark(kPfGemmD, cs);
+                                    mmq::quantize(m.H + r0 * 640, nullptr, m.Hq, mmq_dt, 640, 640, nr, m.cs, m.Hscale);
+                                } else {
+                                    pt.mark(kPfGemmD, cs);
+                                }
                                 mmq::Product dn;
                                 dn.w = m.grp_d; dn.type = mmq_dt; dn.w_rows = N; dn.w_cols = 640; dn.expert_bytes = mmq_db;
                                 dn.n = ngx; dn.xq = m.Hq; dn.bounds = m.bounds_dev + n + 1 + g * (MMQ_GROUP + 1);
@@ -5065,7 +5074,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                         const int64_t gpu_rows = T * K - rows_cpu;
                         const int64_t bgu = fused_l ? 0 : bad(m.GU, gpu_rows * 1280), bdm = bad(m.Dm, T * K * N),
                                       bbo = bad(m.bo, T * N);
-                        const int64_t bh = m.H && !fused_l ? bad(m.H, gpu_rows * 640) : -1;
+                        const int64_t bh = m.H && !fused_l && !mmq::swiglu_q8_requested() ? bad(m.H, gpu_rows * 640) : -1;
                         static int64_t reported = -1;
                         if ((bgu || bdm || bbo || bh > 0) && reported != stats_.chunks) {
                             reported = stats_.chunks;

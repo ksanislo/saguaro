@@ -125,6 +125,13 @@ void swiglu(const float* gu, float* h, int64_t rows, int64_t n_ff, bool interlea
 /// swiglu of an NVFP4 group's gate/up rows (split halves) with scale_gu_rows' scales applied as they are read.
 void swiglu_scaled(const float* gu, float* h, int64_t rows, int64_t n_ff, const int32_t* bounds, int n,
                    const float* tails, int64_t row0, void* stream);
+/// STRATA_MMQ_SWIGLU_Q8=1 (read once; logs when on): the down product's activations straight from GU.
+bool swiglu_q8_requested();
+/// swiglu (tails null) or swiglu_scaled (tails, bounds, n, row0 as there) of `rows` GU rows, written as quantize(h, nullptr,
+/// xq, t, n_ff, n_ff, rows) writes it - the same bytes, without h.  false (nothing written) where it does not apply:
+/// NVFP4 W4A4 activations, HIP, an unknown q8_1 layout.
+bool swiglu_quantize(const float* gu, void* xq, int ggml_type, int64_t rows, int64_t n_ff, bool interleaved,
+                     const int32_t* bounds, int n, const float* tails, int64_t row0, void* stream);
 /// sd[r] = the s_down of row r's expert (group-local bounds): the combine applies it as it reads the row.
 void down_row_scales(float* sd, const int32_t* bounds, int n, const float* tails, int64_t nrows, void* stream);
 

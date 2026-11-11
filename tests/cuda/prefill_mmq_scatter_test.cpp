@@ -3,6 +3,8 @@
 // q8_1 bytes, the whole buffer, for every q8_1 layout MMQ uses (D4: Q2_0 Q8_0 IQ2_XS, DS4: Q4_1, D2S6: Q2_K), on a
 // routing built the way Prefill builds it (10 of 512 experts a token, rows grouped by expert), with an all-zero
 // token and token counts that are not multiples of anything.  --bench: both at 2K, 8K and 32K tokens.
+// Also STRATA_MMQ_SWIGLU_Q8's fused kernel (mmq::swiglu_quantize) against swiglu / swiglu_scaled + quantize: the same
+// q8_1 bytes for the down product's activations (n_ff 640, split / interleaved / scaled gate-up rows), every layout.
 #include "strata/prefill/moe_mmq.hpp"
 
 #include "ggml.h"
@@ -88,6 +90,46 @@ int check(ggml_type t, int64_t T, uint32_t seed) {
     return diff ? 1 : 0;
 }
 
+// mode 0 split, 1 interleaved, 2 split with per-expert gate/up scales (bounds of 3 experts)
+int check_swiglu(ggml_type t, int64_t rows, int mode, uint32_t seed) {
+    constexpr int64_t n_ff = 640;
+    std::mt19937 rng(seed);
+    std::normal_distribution<float> nd(0.0f, 1.0f);
+    std::vector<float> gu((size_t) (rows * 2 * n_ff));
+    for (float& v : gu) v = nd(rng) * 3.0f;
+    if (rows > 3) std::fill(gu.begin() + 2 * 2 * n_ff, gu.begin() + 3 * 2 * n_ff, 0.0f);   // an all-zero row
+    if (rows > 5) for (int64_t k = 0; k < n_ff; ++k) gu[(size_t) (4 * 2 * n_ff + k)] = -90.0f;   // silu underflows
+    const int32_t b[4] = {0, (int32_t) (rows / 3), (int32_t) (rows / 2), (int32_t) rows};
+    const float tails[12] = {0.5f, 1.75f, 1.0f, 0.0f, 2.0f, 0.03125f, 1.0f, 0.0f, 1.0f, 1.0f, 1.0f, 0.0f};
+    const size_t qb = mmq::q8_bytes(rows, n_ff);
+    Dev dgu(gu.size() * 4), dh((size_t) (rows * n_ff * 4)), qa(qb), qf(qb), db(sizeof b), dt(sizeof tails);
+    ck(cudaMemcpy(dgu.p, gu.data(), gu.size() * 4, cudaMemcpyHostToDevice), "gu");
+    ck(cudaMemcpy(db.p, b, sizeof b, cudaMemcpyHostToDevice), "bounds");
+    ck(cudaMemcpy(dt.p, tails, sizeof tails, cudaMemcpyHostToDevice), "tails");
+    ck(cudaMemset(qa.p, 0xA5, qb), "memset");
+    ck(cudaMemset(qf.p, 0x5A, qb), "memset");
+    if (mode == 2) mmq::swiglu_scaled((const float*) dgu.p, (float*) dh.p, rows, n_ff, (const int32_t*) db.p, 3,
+                                      (const float*) dt.p, 0, nullptr);
+    else mmq::swiglu((const float*) dgu.p, (float*) dh.p, rows, n_ff, mode == 1, nullptr);
+    mmq::quantize((const float*) dh.p, nullptr, qa.p, (int) t, n_ff, n_ff, rows, nullptr);
+    const bool ok = mmq::swiglu_quantize((const float*) dgu.p, qf.p, (int) t, rows, n_ff, mode == 1,
+                                         mode == 2 ? (const int32_t*) db.p : nullptr, 3,
+                                         mode == 2 ? (const float*) dt.p : nullptr, 0, nullptr);
+    ck(cudaDeviceSynchronize(), "swiglu");
+    if (!ok) {
+        std::printf("FAIL swiglu_quantize refused %s mode %d\n", ggml_type_name(t), mode);
+        return 1;
+    }
+    std::vector<uint8_t> a(qb), f(qb);
+    ck(cudaMemcpy(a.data(), qa.p, qb, cudaMemcpyDeviceToHost), "back");
+    ck(cudaMemcpy(f.data(), qf.p, qb, cudaMemcpyDeviceToHost), "back");
+    size_t diff = 0;
+    for (size_t i = 0; i < qb; ++i) diff += a[i] != f[i];
+    std::printf("%s swiglu+q8_1 %-7s mode %d rows=%-5lld %zu of %zu bytes differ\n", diff ? "FAIL" : "ok  ",
+                ggml_type_name(t), mode, (long long) rows, diff, qb);
+    return diff ? 1 : 0;
+}
+
 void bench(ggml_type t, int64_t T) {
     std::mt19937 rng(7);
     std::vector<int32_t> slot, src;
@@ -133,6 +175,10 @@ int main(int argc, char** argv) {
         uint32_t seed = 11;
         for (ggml_type t : types)
             for (int64_t T : {1, 2, 7, 600, 2099}) fails += check(t, T, seed++);
+        // the down product's types (Q5_1: DS4, Q8_0 / Q5_0 / IQ4_NL: D4) and D2S6 (Q2_K)
+        for (ggml_type t : {GGML_TYPE_Q5_1, GGML_TYPE_Q8_0, GGML_TYPE_IQ4_NL, GGML_TYPE_Q4_1, GGML_TYPE_Q2_K})
+            for (int mode = 0; mode < 3; ++mode)
+                for (int64_t rows : {1, 7, 600, 20990}) fails += check_swiglu(t, rows, mode, seed++);
         if (do_bench) {
             std::printf("--bench (median of 20):\n");
             for (ggml_type t : {GGML_TYPE_IQ2_XS, GGML_TYPE_Q2_0}) {

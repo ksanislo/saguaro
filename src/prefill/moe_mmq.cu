@@ -158,6 +158,114 @@ __global__ void swiglu_scaled_kernel(const float* __restrict__ gu, float* __rest
     const float g = row[k] * tails[4 * q], u = row[n_ff + k] * tails[4 * q + 1];
     h[i] = g / (1.0f + __expf(-g)) * u;
 }
+#if !defined(GGML_USE_HIP)
+// STRATA_MMQ_SWIGLU_Q8=1: swiglu_kernel / swiglu_scaled_kernel and ggml's quantize_mmq_q8_1 (quantize.cu, the
+// non-scatter, ids-less instance quantize() launches) in one pass, without the FP32 H.  Each value is computed by the
+// swiglu kernels' expression and the rest is quantize_mmq_q8_1 line for line (same grid, block layout, scale and
+// rounding, the same shuffle order for amax and the sum), so the q8_1 bytes are identical.  The empty asm keeps each
+// h a finished FP32 value: without it -use_fast_math (--fmad) could contract `* u` into the sum's adds as an FFMA.
+// mode: 0 split halves, 1 interleaved, 2 split with the NVFP4 gate/up scales (swiglu_scaled_kernel)
+template <int mode>
+__device__ __forceinline__ float swiglu_q8_value(const float* __restrict__ row, int64_t n_ff, int64_t k, float sg, float su) {
+    float g, u;
+    if (mode == 2) {
+        g = row[k] * sg;
+        u = row[n_ff + k] * su;
+    } else {
+        g = mode == 1 ? row[2 * k] : row[k];
+        u = mode == 1 ? row[2 * k + 1] : row[n_ff + k];
+    }
+    float h = g / (1.0f + __expf(-g)) * u;
+    asm volatile("" : "+f"(h));
+    return h;
+}
+template <mmq_q8_1_ds_layout ds_layout, int mode>
+__global__ void swiglu_quantize_q8_1_kernel(const float* __restrict__ gu, void* __restrict__ vy, int64_t n_ff,
+                                            int64_t ne0, int ne1, const int32_t* __restrict__ bounds, int n,
+                                            const float* __restrict__ tails, int64_t row0) {
+    constexpr int vals_per_scale = ds_layout == MMQ_Q8_1_DS_LAYOUT_D2S6 ? 64 : 32;
+    constexpr int vals_per_sum   = ds_layout == MMQ_Q8_1_DS_LAYOUT_D2S6 ? 16 : 32;
+
+    const int64_t i0 = ((int64_t) blockDim.x * blockIdx.y + threadIdx.x) * 4;
+    if (i0 >= ne0) return;
+
+    float sg = 1.0f, su = 1.0f;
+    if (mode == 2) {
+        const int64_t ra = row0 + blockIdx.x;
+        int q = 0;
+        while (q + 1 < n && ra >= bounds[q + 1]) ++q;
+        sg = tails[4 * q];
+        su = tails[4 * q + 1];
+    }
+    const float* row = gu + (int64_t) blockIdx.x * 2 * n_ff;
+    block_q8_1_mmq* y = (block_q8_1_mmq*) vy;
+
+    const int64_t k_block = i0 / QK8_1_MMQ;
+    const int64_t iqs     = i0 % QK8_1_MMQ;
+
+    float4 xi = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+    if (i0 < n_ff) {   // n_ff % 4 == 0: the 4 values are all inside or all past the row (quantize()'s ne00 test)
+        xi.x = swiglu_q8_value<mode>(row, n_ff, i0 + 0, sg, su);
+        xi.y = swiglu_q8_value<mode>(row, n_ff, i0 + 1, sg, su);
+        xi.z = swiglu_q8_value<mode>(row, n_ff, i0 + 2, sg, su);
+        xi.w = swiglu_q8_value<mode>(row, n_ff, i0 + 3, sg, su);
+    }
+    float amax = fabsf(xi.x);
+    amax = fmaxf(amax, fabsf(xi.y));
+    amax = fmaxf(amax, fabsf(xi.z));
+    amax = fmaxf(amax, fabsf(xi.w));
+#pragma unroll
+    for (int offset = vals_per_scale/8; offset > 0; offset >>= 1) {
+        amax = fmaxf(amax, __shfl_xor_sync(0xFFFFFFFF, amax, offset, WARP_SIZE));
+    }
+    float sum;
+    if (ds_layout != MMQ_Q8_1_DS_LAYOUT_D4) {
+        sum = xi.x + xi.y + xi.z + xi.w;
+#pragma unroll
+        for (int offset = vals_per_sum/8; offset > 0; offset >>= 1) {
+            sum += __shfl_xor_sync(0xFFFFFFFF, sum, offset, WARP_SIZE);
+        }
+    }
+    const float d_inv = 127.0f / amax;
+    char4 q;
+    q.x = roundf(xi.x*d_inv);
+    q.y = roundf(xi.y*d_inv);
+    q.z = roundf(xi.z*d_inv);
+    q.w = roundf(xi.w*d_inv);
+    const float d = 1.0f / d_inv;
+
+    const int64_t ib = k_block*ne1 + blockIdx.x;
+    char4* yqs4 = (char4*) y[ib].qs;
+    yqs4[iqs/4] = q;
+    if (ds_layout == MMQ_Q8_1_DS_LAYOUT_D2S6) {
+        if (iqs % 16 == 0 && iqs < 96) {
+            y[ib].d2s6[2 + iqs/16] = sum;
+            if (iqs % 64 == 0) {
+                y[ib].d2s6[iqs/64] = d;
+            }
+        }
+    } else if (iqs % 32 == 0) {
+        if (ds_layout == MMQ_Q8_1_DS_LAYOUT_DS4) {
+            y[ib].ds4[iqs/32] = make_half2(d, sum);
+        } else {
+            y[ib].d4[iqs/32] = d;
+        }
+    }
+}
+template <mmq_q8_1_ds_layout ds_layout>
+void swiglu_quantize_launch(int mode, const float* gu, void* xq, int64_t n_ff, int64_t ne0, int64_t rows,
+                            const int32_t* bounds, int n, const float* tails, int64_t row0, cudaStream_t s) {
+    const int64_t block_num_y = (ne0 + 4*CUDA_QUANTIZE_BLOCK_SIZE_MMQ - 1) / (4*CUDA_QUANTIZE_BLOCK_SIZE_MMQ);
+    const dim3 nb((unsigned) rows, (unsigned) block_num_y, 1), bs(CUDA_QUANTIZE_BLOCK_SIZE_MMQ, 1, 1);
+    if (mode == 2)
+        swiglu_quantize_q8_1_kernel<ds_layout, 2><<<nb, bs, 0, s>>>(gu, xq, n_ff, ne0, (int) rows, bounds, n, tails, row0);
+    else if (mode == 1)
+        swiglu_quantize_q8_1_kernel<ds_layout, 1><<<nb, bs, 0, s>>>(gu, xq, n_ff, ne0, (int) rows, bounds, n, tails, row0);
+    else
+        swiglu_quantize_q8_1_kernel<ds_layout, 0><<<nb, bs, 0, s>>>(gu, xq, n_ff, ne0, (int) rows, bounds, n, tails, row0);
+}
+#endif
+
 __global__ void down_row_scales_kernel(float* __restrict__ sd, const int32_t* __restrict__ bounds, int n,
                                        const float* __restrict__ tails, int64_t nrows) {
     const int64_t r = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
@@ -687,6 +795,46 @@ void down_row_scales(float* sd, const int32_t* bounds, int n, const float* tails
     if (nrows <= 0 || n <= 0) return;
     down_row_scales_kernel<<<blocks(nrows), 256, 0, (cudaStream_t) stream>>>(sd, bounds, n, tails, nrows);
     ck(cudaGetLastError(), "down_row_scales");
+}
+
+bool swiglu_q8_requested() {
+    static const bool on = [] {
+        const char* v = std::getenv("STRATA_MMQ_SWIGLU_Q8");
+        const bool r = v != nullptr && std::atoi(v) != 0;
+        if (r) std::fprintf(stderr, "strata: prompt MMQ fuses SwiGLU into the down product's q8_1 quantize (STRATA_MMQ_SWIGLU_Q8=1)\n");
+        return r;
+    }();
+    return on;
+}
+
+bool swiglu_quantize(const float* gu, void* xq, int t, int64_t rows, int64_t n_ff, bool interleaved, const int32_t* bounds,
+                     int n, const float* tails, int64_t row0, void* stream) {
+#if defined(GGML_USE_HIP)
+    (void) gu; (void) xq; (void) t; (void) rows; (void) n_ff; (void) interleaved; (void) bounds; (void) n; (void) tails;
+    (void) row0; (void) stream;
+    return false;
+#else
+    if (fp4_activations(t) || n_ff % 4 != 0 || (tails != nullptr && interleaved)) return false;
+    if (rows <= 0) return true;
+    const int mode = tails != nullptr ? 2 : interleaved ? 1 : 0;
+    const int64_t ne0 = pad512(n_ff);
+    const cudaStream_t s = (cudaStream_t) stream;
+    switch (mmq_get_q8_1_ds_layout((ggml_type) t)) {
+        case MMQ_Q8_1_DS_LAYOUT_D4:
+            swiglu_quantize_launch<MMQ_Q8_1_DS_LAYOUT_D4>(mode, gu, xq, n_ff, ne0, rows, bounds, n, tails, row0, s);
+            break;
+        case MMQ_Q8_1_DS_LAYOUT_DS4:
+            swiglu_quantize_launch<MMQ_Q8_1_DS_LAYOUT_DS4>(mode, gu, xq, n_ff, ne0, rows, bounds, n, tails, row0, s);
+            break;
+        case MMQ_Q8_1_DS_LAYOUT_D2S6:
+            swiglu_quantize_launch<MMQ_Q8_1_DS_LAYOUT_D2S6>(mode, gu, xq, n_ff, ne0, rows, bounds, n, tails, row0, s);
+            break;
+        default:
+            return false;
+    }
+    ck(cudaGetLastError(), "swiglu_quantize");
+    return true;
+#endif
 }
 
 void swiglu(const float* gu, float* h, int64_t rows, int64_t n_ff, bool interleaved, void* stream) {
