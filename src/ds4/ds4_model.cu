@@ -8750,6 +8750,13 @@ struct Model::Impl {
         std::atomic<bool> bad{false};
         std::atomic<int64_t> done_b{0};
         const bool drop_cache = load_drop_cache();
+        // DS4_PIN_OVERLAP=1: the copies pinned while they are filled (the RAM's NUMA policy is set already, the pin faults
+        // the pages in by it) - the pin's ~12 s hidden under the ~46 s of copying, joined below where it ran before
+        std::thread pin_th;
+        if (pin_overlap() && !cp_pin_last() && !zc_allowed() && chunk > 0) {
+            cp_pin_early = true;
+            pin_th = std::thread([this] { cp_pin(); });
+        }
         std::vector<std::thread> th;
         for (int t = 0; t < 12 && !jobs.empty(); ++t)
             th.emplace_back([&] {
@@ -8792,6 +8799,7 @@ struct Model::Impl {
                 }
             });
         for (auto& t : th) t.join();
+        if (pin_th.joinable()) pin_th.join();
         if (bad.load()) {
             err = "copying the CPU lane's experts from the model's files failed";
             return false;
@@ -8812,7 +8820,8 @@ struct Model::Impl {
         copy_mode = true;
         ram_held = (int) jobs.size();
         zc_pin();
-        if (!cp_pin_last()) cp_pin();   // (else at the load's end: #589)
+        if (cp_pin_early) cp_pin_early = false;   // (pinned beside the copy, above)
+        else if (!cp_pin_last()) cp_pin();   // (else at the load's end: #589)
         double cb = 0;
         for (const Job& j : jobs) cb += (double) L[(size_t) j.layer].blob;
         char hp[96] = "";
@@ -9079,8 +9088,13 @@ struct Model::Impl {
     // tp 8 (orcarouter's Mix-256G), the 72 readers ~33 GB/s together, the prompt's limit (nsys: each member's thread
     // staging ~20 of 38 s).  All or none (DS4_COPY_PIN=0: none - the staging, as before); zc_pin's chunks count
     bool cp_dma = false;
+    bool cp_pin_early = false;   // (DS4_PIN_OVERLAP: cp_pin runs beside the copy, before copy_mode is set)
+    static bool pin_overlap() {
+        static const bool on = std::getenv("DS4_PIN_OVERLAP") != nullptr && std::atoi(std::getenv("DS4_PIN_OVERLAP")) != 0;
+        return on;
+    }
     void cp_pin() {
-        if (!copy_mode || chunk <= 0 || ram_chunks.empty()) return;
+        if ((!copy_mode && !cp_pin_early) || chunk <= 0 || ram_chunks.empty()) return;
         if (const char* v = std::getenv("DS4_COPY_PIN"); v != nullptr && std::atoi(v) == 0) return;
         const double t0 = now_ms();
         const size_t nc = ram_chunks.size();
@@ -9089,7 +9103,8 @@ struct Model::Impl {
         const unsigned pin_fl = copy_pin_flags(cudaHostRegisterPortable);
         std::atomic<size_t> next{0};
         std::vector<std::thread> th;
-        for (int t = 0; t < 8; ++t)   // (pinning is the kernel's walk of the pages, ~0.6 GB/s a thread)
+        static const int n_pin = std::getenv("DS4_PIN_THREADS") ? std::max(1, std::min(32, std::atoi(std::getenv("DS4_PIN_THREADS")))) : 8;
+        for (int t = 0; t < n_pin; ++t)   // (pinning is the kernel's walk of the pages, ~0.6 GB/s a thread)
             th.emplace_back([&] {
                 for (size_t c; (c = next.fetch_add(1)) < nc;)
                     if (!zc_chunk[c])
