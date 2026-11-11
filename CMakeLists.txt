@@ -537,6 +537,11 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
     add_test(NAME qsa_select_bench COMMAND qsa_select_bench 32768 256 3 262144)
     add_test(NAME qsa_select_bench_fp32_tiled COMMAND qsa_select_bench 131072 256 3 262144)
     set_tests_properties(qsa_select_bench_fp32_tiled PROPERTIES ENVIRONMENT "STRATA_QSA_WARP=1;STRATA_SELECT_SIMT=1")
+    # Turing's FP16 hi/lo tensor-core scorer (STRATA_SELECT_SM75=1; sm_80+ cards run their 3xTF32 one): FP64 gate,
+    # flips per 1000 queries at 32K-256K
+    add_test(NAME qsa_select_bench_sm75 COMMAND qsa_select_bench --parity)
+    set_tests_properties(qsa_select_bench_sm75 PROPERTIES ENVIRONMENT "STRATA_SELECT_SM75=1;STRATA_SCORES_THREAD=1"
+                         TIMEOUT 600)
   endif()
   if(STRATA_BUILD_TESTS AND STRATA_ENABLE_CUDA)   # the prompt attention on a recorded selection (STRATA_QSA_DUMP)
     add_executable(pa_bench tests/cuda/pa_bench.cpp)

@@ -3,6 +3,13 @@
 // (the warp kernel and the fast one: tensor cores, or the FP32 tiled kernel on CUDA below sm_80) and top-k, for a batch of consecutive queries at a given context, and
 // the two scorers compared: score difference and how many selections differ (GPU, synthetic, no model).
 // Usage: qsa_select_bench [context=131072] [queries=256] [reps=10] [capacity_cells]
+//        qsa_select_bench --bench    the scorers timed at 8K / 32K / 128K (256 queries, capacity 262144)
+//        qsa_select_bench --parity   accuracy at 32K / 64K / 128K / 256K (1024 queries): max error against FP64, selections
+//                                    differing from the warp kernel's per 1000 queries, and FP64's verdict on each flip
+// QSA_BENCH_VALUES=wide: every key and query row scaled by 2^U(-12, 12), one value in 16 exactly 0 (the fast scorers'
+// per-row scaling under stress).  The warp scorer is the thread kernel when it is on (STRATA_SCORES_THREAD=1 or
+// STRATA_SM75_PERF=1 on Turing), the same bits.  The fast scorer: sm_80+ 3xTF32, sm_75 STRATA_SELECT_SM75=1, else
+// STRATA_SELECT_SIMT=1.
 // capacity_cells (the engine's --max-context): the score buffers and the top-k dispatch follow the CAPACITY
 // (max_blocks = capacity / 4 + 2), the work follows the context. Default: capacity = context (max_blocks = ctx / 4 + 1).
 #include "strata/kernels/qsa.hpp"
@@ -15,7 +22,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <iterator>
 #include <random>
+#include <utility>
 #include <vector>
 
 namespace k = strata::kernels;
@@ -32,12 +41,9 @@ template <typename T> T* up(const std::vector<T>& h) {
 }
 }  // namespace
 
-int main(int argc, char** argv) {
-    const int64_t ctx = argc > 1 ? std::atoll(argv[1]) : 131072;
-    const int64_t nq = argc > 2 ? std::atoll(argv[2]) : 256;
-    const int reps = argc > 3 ? std::atoi(argv[3]) : 10;
+namespace {
+int run_case(int64_t ctx, int64_t nq, int reps, int64_t capacity) {
     const k::QsaShapes s = k::qsa_real_shapes();
-    const int64_t capacity = argc > 4 ? std::atoll(argv[4]) : 0;
     const int64_t max_blocks = capacity > 0 ? capacity / 4 + 2 : ctx / 4 + 1, cap = k::qsa_selection_width(k::kTopkMaxCells, s);
     std::mt19937 rng(7);
     std::normal_distribution<float> nd(0.f, 1.f);
@@ -51,6 +57,17 @@ int main(int argc, char** argv) {
     for (auto& x : dead) x = nd(rng);
     for (int64_t i = 0; i < nq; ++i)
         for (int d = 0; d < 512; ++d) q[(size_t) (i * 512 + d)] = 0.2f * dir[d % 128] + 0.1f * nd(rng);
+    if (const char* vm = std::getenv("QSA_BENCH_VALUES"); vm && !std::strcmp(vm, "wide")) {
+        std::uniform_int_distribution<int> ex(-12, 12), z(0, 15);
+        for (int64_t b = 0; b < max_blocks; ++b) {
+            const float f = std::ldexp(1.0f, ex(rng));
+            for (int d = 0; d < 128; ++d) { float& x = pooled[(size_t) (b * 128 + d)]; x = z(rng) ? x * f : 0.0f; }
+        }
+        for (int64_t r = 0; r < nq * 4; ++r) {
+            const float f = std::ldexp(1.0f, ex(rng));
+            for (int d = 0; d < 128; ++d) { float& x = q[(size_t) (r * 128 + d)]; x = z(rng) ? x * f : 0.0f; }
+        }
+    }
     std::vector<int32_t> steps((size_t) (nq * k::kStepCount));
     for (int64_t i = 0; i < nq; ++i) {   // qsa_step_fill's arithmetic (kept here so the bench links only qsa_select)
         int32_t* st = steps.data() + i * k::kStepCount;
@@ -139,14 +156,30 @@ int main(int argc, char** argv) {
     }
     double max_rel = 0, sum_rel = 0, n_rel = 0;
     int64_t same_sel = 0, cells_diff = 0, cells_all = 0;
+    // a flip (the two selections differ): the FP64 scores of the blocks only one side took; the fast side is right
+    // when FP64 rates its blocks higher in sum (the same number of cells on each side); gap = the FP64 spread of
+    // those blocks over the query's largest score (a near-tie flip: a gap at the scorers' rounding, ~1e-6)
+    auto fp64_score = [&](int64_t i, int64_t j) {
+        double ref = 0;
+        for (int h = 0; h < 4; ++h) {
+            double d = 0;
+            for (int c = 0; c < 128; ++c) d += (double) q[(size_t) (i * 512 + h * 128 + c)] * (double) pooled[(size_t) (j * 128 + c)];
+            ref += d > 0 ? d : 0;
+        }
+        return ref;
+    };
+    int64_t flips_fast_right = 0, flips_warp_right = 0, flips_even = 0;
+    double flip_gap_max = 0;
     for (int64_t i = 0; i < nq; ++i) {
         const int32_t* st = steps.data() + i * k::kStepCount;
+        double qmax = 0;
         for (int64_t j = 0; j <= st[k::kStepNBid]; ++j) {
             const double x = a[(size_t) (i * max_blocks + j)], y = b[(size_t) (i * max_blocks + j)];
             const double r = std::fabs(x - y) / std::max(1e-6, std::fabs(x));
             max_rel = std::max(max_rel, r);
             sum_rel += r;
             n_rel += 1;
+            if (j < st[k::kStepNBid]) qmax = std::max(qmax, std::fabs(x));
         }
         const int64_t w = st[k::kStepWidth];
         std::vector<int32_t> x(ia.begin() + i * cap, ia.begin() + i * cap + w), y(ib.begin() + i * cap, ib.begin() + i * cap + w);
@@ -155,6 +188,16 @@ int main(int argc, char** argv) {
         std::set_symmetric_difference(x.begin(), x.end(), y.begin(), y.end(), std::back_inserter(d));
         cells_diff += (int64_t) d.size() / 2;
         cells_all += w;
+        if (x != y) {
+            std::vector<int32_t> xo, yo;
+            std::set_difference(x.begin(), x.end(), y.begin(), y.end(), std::back_inserter(xo));
+            std::set_difference(y.begin(), y.end(), x.begin(), x.end(), std::back_inserter(yo));
+            double sx = 0, sy = 0, lo = 1e300, hi = -1e300;
+            for (const int32_t cell : xo) { const double v = fp64_score(i, cell / 4); sx += v; lo = std::min(lo, v); hi = std::max(hi, v); }
+            for (const int32_t cell : yo) { const double v = fp64_score(i, cell / 4); sy += v; lo = std::min(lo, v); hi = std::max(hi, v); }
+            if (sy > sx) ++flips_fast_right; else if (sx > sy) ++flips_warp_right; else ++flips_even;
+            if (hi >= lo && qmax > 0) flip_gap_max = std::max(flip_gap_max, (hi - lo) / qmax);
+        }
     }
     // accuracy against an FP64 host reference on a sample (blocks below n_bid; the tail block is the warp kernel's own
     // arithmetic in both scorers). Gate, as the prompt-attention harness's: the scorer under test is no worse than 4x
@@ -162,10 +205,14 @@ int main(int argc, char** argv) {
     // reference it sits at 1.0e-6 of the scale (RTX 5070 sm_120, ctx 32K: 0.99e-6, which a 1e-6 floor failed by rounding; 131K: 0.97e-6)
     // against the warp kernel's 7e-8, i.e. FP32-accumulated TF32-split products; 1e-5 keeps ten times that margin and is still
     // two orders below a plain single-TF32 product (~1e-3), which is the error this gate exists to catch.
-    double err_old = 0, err_new = 0, scale = 0;
+    double err_old = 0, err_new = 0, scale = 0, rel_old = 0, rel_new = 0;
+    double bias_old = 0, bias_new = 0, rbias_old = 0, rbias_new = 0;   // signed means: (score - FP64) / scale, / |FP64|
+    int64_t n_rb = 0;
+    std::vector<double> refs;
+    std::vector<std::pair<float, float>> got;
     {
         std::mt19937 srng(11);
-        const int64_t nqs = std::min<int64_t>(nq, 32);
+        const int64_t nqs = std::min<int64_t>(nq, 64);
         for (int64_t qs = 0; qs < nqs; ++qs) {
             const int64_t i = qs * nq / nqs;
             const int64_t nbid = steps[(size_t) (i * k::kStepCount + k::kStepNBid)];
@@ -181,8 +228,23 @@ int main(int argc, char** argv) {
                 scale = std::max(scale, std::fabs(ref));
                 err_old = std::max(err_old, std::fabs(ref - (double) a[(size_t) (i * max_blocks + j)]));
                 err_new = std::max(err_new, std::fabs(ref - (double) b[(size_t) (i * max_blocks + j)]));
+                refs.push_back(ref);
+                got.emplace_back(a[(size_t) (i * max_blocks + j)], b[(size_t) (i * max_blocks + j)]);
             }
         }
+        // relative error per score, for scores of at least 1e-3 of the scale (a relu sum near 0 has no useful one)
+        for (size_t n = 0; n < refs.size(); ++n) {
+            bias_old += ((double) got[n].first - refs[n]) / std::max(scale, 1e-300);
+            bias_new += ((double) got[n].second - refs[n]) / std::max(scale, 1e-300);
+            if (std::fabs(refs[n]) < 1e-3 * scale) continue;
+            rbias_old += ((double) got[n].first - refs[n]) / std::fabs(refs[n]);
+            rbias_new += ((double) got[n].second - refs[n]) / std::fabs(refs[n]);
+            ++n_rb;
+            rel_old = std::max(rel_old, std::fabs(refs[n] - (double) got[n].first) / std::fabs(refs[n]));
+            rel_new = std::max(rel_new, std::fabs(refs[n] - (double) got[n].second) / std::fabs(refs[n]));
+        }
+        if (!refs.empty()) { bias_old /= (double) refs.size(); bias_new /= (double) refs.size(); }
+        if (n_rb) { rbias_old /= (double) n_rb; rbias_new /= (double) n_rb; }
     }
     const bool acc_ok = !have_tc || err_new <= std::max(4.0 * err_old, 1e-5 * scale);
     // time
@@ -209,5 +271,36 @@ int main(int argc, char** argv) {
                 "mean %.2g max %.2g; selections identical %lld/%lld, cells differing %.4f%%\n", (long long) ctx,
                 (long long) nq, (long long) active, t_old, t_new, t_old / t_new, t_tk, sum_rel / std::max(1.0, n_rel),
                 max_rel, (long long) same_sel, (long long) nq, cells_all ? 100.0 * (double) cells_diff / (double) cells_all : 0.0);
+    if (have_tc) {
+        std::printf("  vs FP64: max rel err (scores >= 1e-3 of scale) warp %.3g, fast %.3g; flips %.1f per 1000 queries "
+                    "(%lld: FP64 sides with the fast scorer %lld, the warp scorer %lld, even %lld; max FP64 gap of a flip "
+                    "%.2g of the query's top score); select stage (scores + top-k) %.3f -> %.3f ms (%.2fx)\n",
+                    rel_old, rel_new, 1000.0 * (double) (nq - same_sel) / (double) nq, (long long) (nq - same_sel),
+                    (long long) flips_fast_right, (long long) flips_warp_right, (long long) flips_even, flip_gap_max,
+                    t_old + t_tk2, t_new + t_tk2, (t_old + t_tk2) / (t_new + t_tk2));
+        std::printf("  vs FP64 signed mean error (bias): warp %+.3g, fast %+.3g of scale; per score (>= 1e-3 of scale) "
+                    "warp %+.3g, fast %+.3g\n", bias_old, bias_new, rbias_old, rbias_new);
+    }
+    cudaFree((void*) d_pooled); cudaFree((void*) d_dead); cudaFree((void*) d_q); cudaFree((void*) d_steps);
+    cudaFree(sc_old); cudaFree(sc_new); cudaFree(ids_old); cudaFree(ids_new); cudaFree(ids_reg);
+    cudaEventDestroy(e0); cudaEventDestroy(e1);
     return acc_ok && reg_same == nq ? 0 : 1;
+}
+}  // namespace
+
+int main(int argc, char** argv) {
+    if (argc > 1 && (!std::strcmp(argv[1], "--bench") || !std::strcmp(argv[1], "--parity"))) {
+        const bool bench = !std::strcmp(argv[1], "--bench");
+        const int64_t ctxs_b[] = {8192, 32768, 131072}, ctxs_p[] = {32768, 65536, 131072, 262144};
+        int rc = 0;
+        if (bench) for (const int64_t c : ctxs_b) rc |= run_case(c, 256, 20, 262144);
+        else for (const int64_t c : ctxs_p) rc |= run_case(c, 1024, 2, 262144);
+        std::printf("%s\n", rc ? "FAIL" : "PASS");
+        return rc;
+    }
+    const int64_t ctx = argc > 1 ? std::atoll(argv[1]) : 131072;
+    const int64_t nq = argc > 2 ? std::atoll(argv[2]) : 256;
+    const int reps = argc > 3 ? std::atoi(argv[3]) : 10;
+    const int64_t capacity = argc > 4 ? std::atoll(argv[4]) : 0;
+    return run_case(ctx, nq, reps, capacity);
 }
