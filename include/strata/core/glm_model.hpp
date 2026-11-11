@@ -238,6 +238,16 @@ public:
     /// state and the snapshot; false + err on a mismatch or a truncated buffer.
     uint64_t slot_save(std::vector<uint8_t>& data, std::string& err);
     bool slot_load(const std::vector<uint8_t>& data, int64_t n_pos, std::string& err);
+    /// STRATA_GLM_SLOT_FAST=1: slot_save's bytes copied out of every part at once into a host image, then written to
+    /// `tmp` by a background thread, renamed to `path` when whole and after(bytes) run there (false: path removed).
+    /// The bytes, or 0 + err (nothing queued).  slot_load(path) waits for that write; slot_cancel drops it (a write
+    /// under way: its file removed when it ends); slot_flush waits for every write queued.
+    static bool slot_fast();
+    uint64_t slot_save_bg(const std::string& tmp, const std::string& path, const std::function<bool(uint64_t)>& after,
+                          std::string& err);
+    static void slot_wait(const std::string& path);
+    static void slot_cancel(const std::string& path);
+    static void slot_flush();
     /// Runs the engine's sampler on the last forward's logits and returns the picked token id
     /// (-1 + err on failure).  Handles the device bookkeeping: with a split the logits (and the
     /// sampler buffer) live on the tail half's device, where peer reads are not available.
@@ -622,6 +632,7 @@ public:
     KvStream* kv_stream_make(int64_t cells, int64_t ctx, std::string& err);
     void kv_stream_free(KvStream* K);
     uint64_t kv_stage_bytes_ = 0;                            // the prompt path's staging copy (the first sequence's)
+    uint64_t slot_image(const std::function<uint8_t*(uint64_t, bool&)>& alloc, std::string& err, double* ms);
     void kv_stream_reset_maps();                             // nothing resident (reset, slot_load)
     float* snap_pool_ = nullptr;
     std::vector<int> dsa_layers() const;                   // this half's DSA layers (NextN block first), slot order

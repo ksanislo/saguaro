@@ -1416,6 +1416,11 @@ static int glm_pack_generate(const Options& o) {
         fs::rename(tmp, path, ec);
         return !ec;
     };
+    // STRATA_GLM_SLOT_FAST: slot files are written in the background (their .meta too, by meta_write above): every
+    // one queued is written before this scope's locals go
+    struct SlotFlush {
+        ~SlotFlush() { strata::core::Glm5Model::slot_flush(); }
+    } slot_flush_guard;
     // a .meta of this model -> its tokens, the slot's size and its pictures' hash (false: foreign, damaged or not
     // this model's)
     const auto meta_read = [&](const std::string& path, std::vector<int32_t>& toks, uint64_t& bytes,
@@ -1513,6 +1518,7 @@ static int glm_pack_generate(const Options& o) {
             slots[i].data.reset();
         else {
             std::error_code ec;
+            strata::core::Glm5Model::slot_cancel(slots[i].path);   // (a background write still under way: dropped)
             std::filesystem::remove(slots[i].path, ec);
             std::filesystem::remove(meta_of(slots[i].path), ec);
         }
@@ -1580,9 +1586,21 @@ static int glm_pack_generate(const Options& o) {
         const std::string path = (slot_dir / ("slot-" + std::to_string(stamp) + "-" + std::to_string(++slot_seq) +
                                               ".bin")).string();
         std::string e;
-        const uint64_t bytes = model.slot_save(path + ".tmp", e);
-        if (bytes == 0 || (std::filesystem::rename(path + ".tmp", path, ec), ec) ||
-            !meta_write(meta_of(path), snap_tokens, bytes, snap_img_hash)) {
+        // STRATA_GLM_SLOT_FAST: the file and its .meta written in the background, renamed in place when whole
+        const bool bg = strata::core::Glm5Model::slot_fast();
+        uint64_t bytes = 0;
+        if (bg) {
+            const std::string mp = meta_of(path);
+            const std::vector<int32_t> toks = snap_tokens;
+            const uint64_t img = snap_img_hash;
+            bytes = model.slot_save_bg(path + ".tmp", path, [&meta_write, mp, toks, img](uint64_t b) {
+                return meta_write(mp, toks, b, img);
+            }, e);
+        } else {
+            bytes = model.slot_save(path + ".tmp", e);
+        }
+        if (bytes == 0 || (!bg && ((std::filesystem::rename(path + ".tmp", path, ec), ec) ||
+                                   !meta_write(meta_of(path), snap_tokens, bytes, snap_img_hash)))) {
             std::filesystem::remove(path + ".tmp", ec);
             std::filesystem::remove(path, ec);
             std::fprintf(stderr, "glm slots: setting the conversation aside failed (%s)\n",

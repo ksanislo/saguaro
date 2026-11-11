@@ -7862,7 +7862,422 @@ std::vector<std::pair<float*, int64_t>> slot_dsa_runs(const Glm5Geometry& g, boo
         if (!g.is_recr(il)) dsa((size_t) il);
     return r;
 }
+
+// STRATA_GLM_SLOT_FAST=1 (default off): a slot's state moves for all parts at once (a thread a part), through pinned
+// memory (a cached host image, or a double buffer a part when the image is pageable), and a disk slot's file is
+// written by a background thread (temporary name, renamed when whole; a reader of that slot waits for it).  The same
+// bytes move: only who copies them, and when, changes.
+bool slot_fast_on() {
+    static const bool on = [] { const char* v = getenv("STRATA_GLM_SLOT_FAST"); return v != nullptr && std::atoi(v) != 0; }();
+    return on;
+}
+
+// a slot's host image: pinned while the cache (STRATA_GLM_SLOT_FAST_PIN_MB, 4096) has room, else malloc'd
+struct HostBuf {
+    uint8_t* p = nullptr;
+    size_t cap = 0;
+    bool pinned = false;
+};
+std::mutex g_pin_mu;
+std::vector<HostBuf> g_pin_free;
+size_t g_pin_total = 0;
+HostBuf hostbuf_get(size_t bytes) {
+    static const size_t cap = (size_t) std::max(0.0, getenv("STRATA_GLM_SLOT_FAST_PIN_MB")
+                                                         ? std::atof(getenv("STRATA_GLM_SLOT_FAST_PIN_MB")) : 4096.0) << 20;
+    {
+        std::lock_guard<std::mutex> lk(g_pin_mu);
+        size_t best = SIZE_MAX;
+        for (size_t i = 0; i < g_pin_free.size(); ++i)
+            if (g_pin_free[i].cap >= bytes && (best == SIZE_MAX || g_pin_free[i].cap < g_pin_free[best].cap)) best = i;
+        if (best != SIZE_MAX) {
+            const HostBuf b = g_pin_free[best];
+            g_pin_free.erase(g_pin_free.begin() + (long) best);
+            return b;
+        }
+        if (g_pin_total + bytes > cap) {   // the idle buffers are all too small for this one: room for it instead
+            for (const HostBuf& b : g_pin_free) {
+                cudaFreeHost(b.p);
+                g_pin_total -= b.cap;
+            }
+            g_pin_free.clear();
+        }
+        if (g_pin_total + bytes <= cap) {
+            void* p = nullptr;
+            if (cudaHostAlloc(&p, bytes, cudaHostAllocPortable) == cudaSuccess) {
+                g_pin_total += bytes;
+                return {(uint8_t*) p, bytes, true};
+            }
+            cudaGetLastError();
+        }
+    }
+    return {(uint8_t*) std::malloc(bytes), bytes, false};
+}
+void hostbuf_put(const HostBuf& b) {
+    if (b.p == nullptr) return;
+    if (!b.pinned) {
+        std::free(b.p);
+        return;
+    }
+    std::lock_guard<std::mutex> lk(g_pin_mu);
+    g_pin_free.push_back(b);
+}
+
+// a part's double buffer for pageable images (2 x 32 MB pinned, events on its device), made once
+constexpr size_t kStageBytes = (size_t) 32 << 20;
+struct Stage {
+    uint8_t* b[2] = {nullptr, nullptr};
+    cudaEvent_t ev[2] = {nullptr, nullptr};
+};
+std::mutex g_stage_mu;
+std::deque<std::pair<const void*, Stage>> g_stage;   // (a deque: the pointers handed out stay valid)
+const Stage* stage_of(const void* key) {   // (the part's device current)
+    std::lock_guard<std::mutex> lk(g_stage_mu);
+    for (const auto& s : g_stage)
+        if (s.first == key) return &s.second;
+    Stage st;
+    for (int k = 0; k < 2; ++k)
+        if (cudaHostAlloc((void**) &st.b[k], kStageBytes, cudaHostAllocPortable) != cudaSuccess ||
+            cudaEventCreateWithFlags(&st.ev[k], cudaEventDisableTiming) != cudaSuccess) {
+            cudaGetLastError();
+            for (int j = 0; j < 2; ++j) {
+                if (st.b[j] != nullptr) cudaFreeHost(st.b[j]);
+                if (st.ev[j] != nullptr) cudaEventDestroy(st.ev[j]);
+            }
+            return nullptr;
+        }
+    g_stage.push_back({key, st});
+    return &g_stage.back().second;
+}
+
+// how far a slot file has been read into its image (the copies of the bytes before `avail` may start)
+struct ReadProgress {
+    std::mutex mu;
+    std::condition_variable cv;
+    size_t avail = 0;
+    bool failed = false;
+    bool wait_for(size_t end) {
+        std::unique_lock<std::mutex> lk(mu);
+        cv.wait(lk, [&] { return avail >= end || failed; });
+        return avail >= end;
+    }
+};
+
+// one run of floats between the host image (at byte `off`) and a part's memory (`dev`: its state, or a KV-streamed
+// layer's pinned host copy - cudaMemcpyDefault, as before)
+struct SlotCopy {
+    const void* key;        // the part
+    int device;
+    cudaStream_t cs;        // its compute stream: synchronized before the part's first copy, as before
+    float* dev;
+    size_t off;
+    int64_t floats;
+};
+
+// every part's copies on a thread of its own, in order, on the legacy default stream (the same ordering against the
+// part's other streams as the blocking cudaMemcpy they replace).  to_dev: image -> part (take), else part -> image.
+// rp: the image is still being read - a copy waits for its bytes.  The longest part's time in *ms.
+bool slot_copy_run(const std::vector<SlotCopy>& tasks, uint8_t* host, bool pinned, bool to_dev, ReadProgress* rp,
+                   double* ms) {
+    std::vector<const void*> keys;
+    for (const auto& t : tasks)
+        if (std::find(keys.begin(), keys.end(), t.key) == keys.end()) keys.push_back(t.key);
+    std::vector<char> ok(keys.size(), 1);
+    std::vector<double> part_ms(keys.size(), 0.0);
+    int prev_dev = 0;
+    cudaGetDevice(&prev_dev);
+    std::vector<std::thread> th;
+    for (size_t gi = 0; gi < keys.size(); ++gi)
+        th.emplace_back([&, gi] {
+            const auto t0 = std::chrono::steady_clock::now();
+            const void* key = keys[gi];
+            bool first = true, good = true;
+            const Stage* st = nullptr;
+            struct Pend { size_t off = 0, n = 0; bool on = false; } pend[2];
+            size_t ci = 0;
+            const auto drain = [&](int k) {
+                if (!pend[k].on) return;
+                if (cudaEventSynchronize(st->ev[k]) != cudaSuccess) good = false;
+                else std::memcpy(host + pend[k].off, st->b[k], pend[k].n);
+                pend[k].on = false;
+            };
+            for (const auto& t : tasks) {
+                if (t.key != key || !good) continue;
+                if (first) {
+                    cudaSetDevice(t.device);
+                    cudaStreamSynchronize(t.cs);
+                    if (!pinned) st = stage_of(key);
+                    first = false;
+                }
+                const size_t bytes = (size_t) t.floats * sizeof(float);
+                const size_t step = pinned || st == nullptr ? (size_t) 64 << 20 : kStageBytes;
+                for (size_t at = 0; at < bytes && good; at += step, ++ci) {
+                    const size_t n = std::min(step, bytes - at);
+                    uint8_t* h = host + t.off + at;
+                    uint8_t* d = (uint8_t*) t.dev + at;
+                    if (rp != nullptr && !rp->wait_for(t.off + at + n)) {
+                        good = false;
+                        break;
+                    }
+                    cudaError_t e = cudaSuccess;
+                    if (pinned) {
+                        e = to_dev ? cudaMemcpyAsync(d, h, n, cudaMemcpyDefault, cudaStreamLegacy)
+                                   : cudaMemcpyAsync(h, d, n, cudaMemcpyDefault, cudaStreamLegacy);
+                    } else if (st == nullptr) {   // (no double buffer: the plain blocking copy)
+                        e = to_dev ? cudaMemcpy(d, h, n, cudaMemcpyDefault) : cudaMemcpy(h, d, n, cudaMemcpyDefault);
+                    } else {
+                        const int k = (int) (ci & 1);
+                        if (to_dev) {
+                            if ((e = cudaEventSynchronize(st->ev[k])) == cudaSuccess) {
+                                std::memcpy(st->b[k], h, n);
+                                e = cudaMemcpyAsync(d, st->b[k], n, cudaMemcpyDefault, cudaStreamLegacy);
+                                if (e == cudaSuccess) e = cudaEventRecord(st->ev[k], cudaStreamLegacy);
+                            }
+                        } else {
+                            drain(k);
+                            e = cudaMemcpyAsync(st->b[k], d, n, cudaMemcpyDefault, cudaStreamLegacy);
+                            if (e == cudaSuccess) e = cudaEventRecord(st->ev[k], cudaStreamLegacy);
+                            pend[k] = {(size_t) (h - host), n, e == cudaSuccess};
+                        }
+                    }
+                    if (e != cudaSuccess) good = false;
+                }
+            }
+            if (!first) {
+                if (cudaStreamSynchronize(cudaStreamLegacy) != cudaSuccess) good = false;
+                if (st != nullptr && !to_dev) {   // (the older one first)
+                    const int k = (int) (ci & 1);
+                    drain(k);
+                    drain(k ^ 1);
+                }
+                if (!good) cudaGetLastError();
+            }
+            ok[gi] = good;
+            part_ms[gi] = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        });
+    for (auto& t : th) t.join();
+    cudaSetDevice(prev_dev);
+    if (ms != nullptr) *ms = part_ms.empty() ? 0.0 : *std::max_element(part_ms.begin(), part_ms.end());
+    for (char o : ok)
+        if (!o) return false;
+    return true;
+}
+
+// the background writer of slot files: one job at a time, in order.  A job is pending by its final path until it is
+// renamed there (+ its after() run) or abandoned (cancelled, or the write failed: the temporary file removed).
+struct SlotWriter {
+    struct Job {
+        std::string tmp, path;
+        HostBuf buf;
+        size_t bytes = 0;
+        std::function<bool(uint64_t)> after;
+        bool cancelled = false;
+    };
+    std::mutex mu;
+    std::condition_variable cv;
+    std::deque<std::shared_ptr<Job>> q;
+    std::vector<std::shared_ptr<Job>> pending;
+    std::thread th;
+    bool stop = false;
+    void push(std::shared_ptr<Job> j) {
+        std::lock_guard<std::mutex> lk(mu);
+        if (!th.joinable()) th = std::thread([this] { run(); });
+        q.push_back(j);
+        pending.push_back(std::move(j));
+        cv.notify_all();
+    }
+    bool is_pending(const std::string& path) {
+        for (const auto& j : pending)
+            if (j->path == path) return true;
+        return false;
+    }
+    void done(const std::shared_ptr<Job>& j) {   // (mu held)
+        pending.erase(std::find(pending.begin(), pending.end(), j));
+        hostbuf_put(j->buf);
+        j->buf = {};
+        cv.notify_all();
+    }
+    void wait(const std::string& path) {
+        std::unique_lock<std::mutex> lk(mu);
+        cv.wait(lk, [&] { return !is_pending(path); });
+    }
+    void cancel(const std::string& path) {
+        std::lock_guard<std::mutex> lk(mu);
+        for (size_t i = 0; i < q.size(); ++i)
+            if (q[i]->path == path) {   // not started: gone
+                const auto j = q[i];
+                q.erase(q.begin() + (long) i);
+                done(j);
+                return;
+            }
+        for (const auto& j : pending)
+            if (j->path == path) j->cancelled = true;   // being written: removed when the write ends
+    }
+    void flush() {
+        std::unique_lock<std::mutex> lk(mu);
+        cv.wait(lk, [&] { return pending.empty(); });
+    }
+    void run() {
+        std::unique_lock<std::mutex> lk(mu);
+        for (;;) {
+            cv.wait(lk, [&] { return stop || !q.empty(); });
+            if (q.empty()) return;
+            const auto j = q.front();
+            q.pop_front();
+            lk.unlock();
+            const auto t0 = std::chrono::steady_clock::now();
+            bool ok = false;
+            if (FILE* f = std::fopen(j->tmp.c_str(), "wb")) {
+                ok = std::fwrite(j->buf.p, 1, j->bytes, f) == j->bytes;
+                ok = std::fclose(f) == 0 && ok;
+            }
+            const double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+            lk.lock();
+            std::error_code ec;
+            if (!ok || j->cancelled) {
+                std::filesystem::remove(j->tmp, ec);
+                if (!ok) std::fprintf(stderr, "glm slots: background write of %s failed (disk full?) - not kept\n",
+                                      j->path.c_str());
+            } else {
+                std::filesystem::rename(j->tmp, j->path, ec);
+                if (ec || (j->after && !j->after((uint64_t) j->bytes))) {
+                    std::filesystem::remove(j->tmp, ec);
+                    std::filesystem::remove(j->path, ec);
+                    std::fprintf(stderr, "glm slots: committing %s failed - not kept\n", j->path.c_str());
+                } else {
+                    std::fprintf(stderr, "glm slots: fast save written in the background: %.2f GB in %.1f s (%.2f GB/s)\n",
+                                 j->bytes / 1e9, s, s > 0 ? j->bytes / 1e9 / s : 0.0);
+                }
+            }
+            j->after = nullptr;
+            done(j);
+        }
+    }
+    ~SlotWriter() {
+        {
+            std::unique_lock<std::mutex> lk(mu);
+            cv.wait(lk, [&] { return q.empty(); });   // (what was queued is written: a normal exit keeps it)
+            stop = true;
+            cv.notify_all();
+        }
+        if (th.joinable()) th.join();
+    }
+};
+SlotWriter& slot_writer() {
+    static SlotWriter w;
+    return w;
+}
 }  // namespace
+
+// STRATA_GLM_SLOT_FAST: the slot's byte stream (as slot_save writes it) built in a host image that alloc(total, pinned)
+// hands out, every part copying its runs at once; the image's size, or 0 + err
+uint64_t Glm5Model::slot_image(const std::function<uint8_t*(uint64_t, bool&)>& alloc, std::string& err, double* ms) {
+    std::vector<Glm5Model*> halves;
+    for (Glm5Model* m = this; m != nullptr; m = m->split_next_.get()) {
+        if (m->fast_ == nullptr || m->snap_pos_ < 0 || m->snap_pos_ != snap_pos_) {
+            err = "no snapshot to save";
+            return 0;
+        }
+        halves.push_back(m);
+    }
+    const int64_t n = snap_pos_;
+    std::vector<uint8_t> head;   // the headers, placed in the image below
+    const auto put = [&](size_t at, const void* p, size_t bytes) {
+        if (head.size() < at + bytes) head.resize(at + bytes);
+        std::memcpy(head.data() + at, p, bytes);
+    };
+    std::vector<std::pair<size_t, size_t>> head_runs;   // (offset, bytes) of each header piece in the image
+    std::vector<SlotCopy> tasks;
+    size_t pos = 0, hpos = 0;
+    const auto put_h = [&](const void* p, size_t bytes) {
+        put(hpos, p, bytes);
+        head_runs.push_back({pos, bytes});
+        hpos += bytes;
+        pos += bytes;
+    };
+    const uint32_t nh = (uint32_t) halves.size();
+    put_h(&kSlotMagic, 8);
+    put_h(&nh, 4);
+    put_h(&n, 8);
+    for (Glm5Model* m : halves) {
+        const Glm5Geometry& g = m->g_;
+        const int64_t run = (int64_t) g.d_inner() * g.kda_head_dim + (int64_t) 3 * g.d_inner() * (g.d_conv - 1);
+        int32_t n_rec = 0;
+        for (int il = m->l0_; il < m->l1_; ++il) n_rec += g.is_recr(il);
+        const auto runs = slot_dsa_runs(g, m->fast_mode_, m->lat_q8_, m->l0_, m->l1_, m->mtp_il_, m->state_,
+                                        m->kv_ != nullptr ? &m->kv_->host : nullptr, m->dsa_lat_, m->dsa_ik_,
+                                        m->dsa_ig_, m->dsa_pool_, n);
+        const int64_t pool_rows = (int64_t) m->dsa_layers().size() * 2 * (g.idx_kpool - 1) * g.idx_key;
+        const int32_t hdr[4] = {m->l0_, m->l1_, n_rec, (int32_t) runs.size()};
+        put_h(hdr, sizeof(hdr));
+        put_h(&run, 8);
+        for (const auto& r : runs) put_h(&r.second, 8);
+        std::vector<std::pair<float*, int64_t>> src;
+        if (n_rec > 0) src.push_back({m->snap_, (int64_t) n_rec * run});
+        if (pool_rows > 0) src.push_back({m->snap_pool_, pool_rows});
+        for (const auto& r : runs) src.push_back(r);
+        for (const auto& sr : src) {
+            tasks.push_back({m, m->dev_, m->fast_->cs, sr.first, pos, sr.second});
+            pos += (size_t) sr.second * sizeof(float);
+        }
+    }
+    bool pinned = false;
+    uint8_t* img = nullptr;
+    try {
+        img = alloc((uint64_t) pos, pinned);
+    } catch (const std::bad_alloc&) {
+        img = nullptr;
+    }
+    if (img == nullptr) {
+        char m[160];
+        std::snprintf(m, sizeof m, "the slot's image does not fit (%.1f GB)", (double) pos / 1e9);
+        err = m;
+        return 0;
+    }
+    size_t hp = 0;
+    for (const auto& hr : head_runs) {
+        std::memcpy(img + hr.first, head.data() + hp, hr.second);
+        hp += hr.second;
+    }
+    if (!slot_copy_run(tasks, img, pinned, false, nullptr, ms)) {
+        cudaSetDevice(dev_);
+        err = "the state did not copy back";
+        return 0;
+    }
+    cudaSetDevice(dev_);
+    return (uint64_t) pos;
+}
+
+uint64_t Glm5Model::slot_save_bg(const std::string& tmp, const std::string& path,
+                                 const std::function<bool(uint64_t)>& after, std::string& err) {
+    auto j = std::make_shared<SlotWriter::Job>();
+    double ms = 0;
+    const auto t0 = std::chrono::steady_clock::now();
+    const uint64_t bytes = slot_image([&](uint64_t total, bool& pinned) {
+        j->buf = hostbuf_get((size_t) total);
+        pinned = j->buf.pinned;
+        return j->buf.p;
+    }, err, &ms);
+    if (bytes == 0) {
+        hostbuf_put(j->buf);
+        return 0;
+    }
+    j->tmp = tmp;
+    j->path = path;
+    j->bytes = (size_t) bytes;
+    j->after = after;
+    const bool pinned = j->buf.pinned;
+    slot_writer().push(std::move(j));
+    std::fprintf(stderr, "glm slots: fast save %lld positions, %.2f GB - parts copied at once in %.0f ms (%s), %.0f ms in "
+                 "all; the file is written in the background\n", (long long) snap_pos_, bytes / 1e9, ms,
+                 pinned ? "pinned image" : "pageable image, double-buffered",
+                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+    return bytes;
+}
+
+bool Glm5Model::slot_fast() { return slot_fast_on(); }
+void Glm5Model::slot_wait(const std::string& path) { slot_writer().wait(path); }
+void Glm5Model::slot_cancel(const std::string& path) { slot_writer().cancel(path); }
+void Glm5Model::slot_flush() { slot_writer().flush(); }
 
 uint64_t Glm5Model::slot_save(const std::string& path, std::string& err) {
     std::vector<Glm5Model*> halves;
@@ -7945,6 +8360,7 @@ uint64_t Glm5Model::slot_save(const std::string& path, std::string& err) {
 // goes to the part that runs that layer now - a start that splits the layers differently (they follow the free VRAM)
 // still takes back the conversations kept before it.
 bool Glm5Model::slot_load(const std::string& path, int64_t n_pos, std::string& err) {
+    slot_writer().wait(path);   // (STRATA_GLM_SLOT_FAST: its background write, if one is still running)
     ckpt_join();   // (ckpt_save_snapshot reads snap_ / snap_pool_)
     dflash_reset();   // another conversation's state: the drafter's cached positions are not its
     std::ifstream f(path, std::ios::binary);
@@ -7952,6 +8368,24 @@ bool Glm5Model::slot_load(const std::string& path, int64_t n_pos, std::string& e
         err = "cannot read " + path;
         return false;
     }
+    // STRATA_GLM_SLOT_FAST: the headers are read here and the runs only noted (copy_in); the file is then read into a
+    // host image by a thread of its own while every part copies its runs out of it as their bytes arrive
+    HostBuf img;
+    size_t img_bytes = 0;   // (the file's size; a cached image may be larger)
+    std::vector<SlotCopy> tasks;
+    if (slot_fast_on()) {
+        std::error_code ec;
+        const uintmax_t fsize = std::filesystem::file_size(path, ec);
+        if (!ec && fsize > 0) {
+            img = hostbuf_get((size_t) fsize);
+            img_bytes = (size_t) fsize;
+        }
+    }
+    struct ImgGuard {
+        HostBuf& b;
+        ~ImgGuard() { hostbuf_put(b); }
+    } img_guard{img};
+    const bool fast = img.p != nullptr;
     const auto get = [&](void* p, size_t bytes) { return (bool) f.read((char*) p, (std::streamsize) bytes); };
     uint64_t magic = 0;
     uint32_t nh = 0;
@@ -8006,6 +8440,12 @@ bool Glm5Model::slot_load(const std::string& path, int64_t n_pos, std::string& e
     };
     std::vector<float> buf;
     const auto copy_in = [&](Glm5Model* m, float* dst, int64_t floats) -> bool {
+        if (fast) {
+            const std::streamoff at = f.tellg();
+            if (at < 0 || (uint64_t) at + (uint64_t) floats * sizeof(float) > img_bytes) return false;
+            tasks.push_back({m, m->dev_, m->fast_->cs, dst, (size_t) at, floats});
+            return (bool) f.seekg((std::streamoff) floats * (std::streamoff) sizeof(float), std::ios::cur);
+        }
         cudaSetDevice(m->dev_);
         constexpr int64_t kChunk = (int64_t) 16 << 20;
         for (int64_t at = 0; at < floats; at += kChunk) {
@@ -8078,6 +8518,44 @@ bool Glm5Model::slot_load(const std::string& path, int64_t n_pos, std::string& e
         }
     }
     if (kda_seen != kda_want || dsa_seen != dsa_want) return differs();
+    if (fast) {
+        const auto t0 = std::chrono::steady_clock::now();
+        ReadProgress rp;
+        std::thread reader([&] {
+            std::ifstream rf(path, std::ios::binary);
+            constexpr size_t kRead = (size_t) 64 << 20;
+            size_t at = 0;
+            bool good = (bool) rf;
+            while (good && at < img_bytes) {
+                const size_t c = std::min(kRead, img_bytes - at);
+                good = (bool) rf.read((char*) img.p + at, (std::streamsize) c);
+                if (good) at += c;
+                {
+                    std::lock_guard<std::mutex> lk(rp.mu);
+                    rp.avail = at;
+                    rp.failed = !good;
+                }
+                rp.cv.notify_all();
+            }
+            if (at < img_bytes) {   // (not opened: the copies waiting for it give up)
+                std::lock_guard<std::mutex> lk(rp.mu);
+                rp.failed = true;
+            }
+            rp.cv.notify_all();
+        });
+        double ms = 0;
+        const bool ok = slot_copy_run(tasks, img.p, img.pinned, true, &rp, &ms);
+        reader.join();
+        if (!ok) {
+            cudaSetDevice(dev_);
+            err = "the slot did not read back";
+            return false;
+        }
+        std::fprintf(stderr, "glm slots: fast take %lld positions, %.2f GB - read and copied at once in %.0f ms (%s)\n",
+                     (long long) n, img_bytes / 1e9,
+                     std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(),
+                     img.pinned ? "pinned image" : "pageable image, double-buffered");
+    }
     for (Glm5Model* m : parts) {
         m->kv_stream_reset_maps();   // KV streaming: the slots held the other conversation's blocks
         m->snap_pos_ = n;
@@ -8130,6 +8608,20 @@ uint64_t Glm5Model::slot_save(std::vector<uint8_t>& data, std::string& err) {
         for (const auto& r : h.runs) payload += r.second;
         total += 16 + 8 + 8 * (uint64_t) h.runs.size() + (uint64_t) payload * sizeof(float);
         hs.push_back(std::move(h));
+    }
+    if (slot_fast_on()) {   // (the same bytes, every part at once)
+        double ms = 0;
+        const auto t0 = std::chrono::steady_clock::now();
+        const uint64_t got = slot_image([&](uint64_t bytes, bool& pinned) {
+            if (data.size() < bytes) data.resize(bytes);
+            pinned = false;
+            return data.data();
+        }, err, &ms);
+        if (got != 0)
+            std::fprintf(stderr, "glm slots: fast save %lld positions to RAM, %.2f GB - parts copied at once in %.0f ms, "
+                         "%.0f ms in all\n", (long long) n, got / 1e9, ms,
+                         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+        return got;
     }
     if (data.size() < total) {
         try {
@@ -8204,6 +8696,8 @@ bool Glm5Model::slot_load(const std::vector<uint8_t>& data, int64_t n_pos, std::
     int64_t n = 0;
     std::vector<Glm5Model*> halves;
     for (Glm5Model* m = this; m != nullptr; m = m->split_next_.get()) halves.push_back(m);
+    const bool fast = slot_fast_on();   // (STRATA_GLM_SLOT_FAST: every part's runs at once, after the headers)
+    std::vector<SlotCopy> tasks;
     if (!get(&magic, 8) || !get(&nh, 4) || !get(&n, 8) || magic != kSlotMagic || nh != halves.size() || n != n_pos ||
         n <= 0 || n > max_ctx_) {
         err = "not a slot of this model";
@@ -8259,6 +8753,18 @@ bool Glm5Model::slot_load(const std::vector<uint8_t>& data, int64_t n_pos, std::
             dst.push_back({m->snap_pool_, pool_rows});
         }
         for (const auto& r : runs) dst.push_back({r.first, r.second});
+        if (fast) {   // (noted here, copied below with every other part's)
+            for (const auto& d : dst) {
+                if ((uint64_t) pos + (uint64_t) d.second * sizeof(float) > data.size()) {
+                    cudaSetDevice(dev_);
+                    err = "the slot did not read back";
+                    return false;
+                }
+                tasks.push_back({m, m->dev_, m->fast_->cs, d.first, pos, d.second});
+                pos += (size_t) d.second * sizeof(float);
+            }
+            continue;
+        }
         for (const auto& d : dst) {
             constexpr int64_t kChunk = (int64_t) 16 << 20;
             for (int64_t at = 0; at < d.second; at += kChunk) {
@@ -8276,6 +8782,22 @@ bool Glm5Model::slot_load(const std::vector<uint8_t>& data, int64_t n_pos, std::
         }
         m->kv_stream_reset_maps();   // KV streaming: the slots held the other conversation's blocks
         m->snap_pos_ = n;
+    }
+    if (fast) {
+        double ms = 0;
+        const auto t0 = std::chrono::steady_clock::now();
+        if (!slot_copy_run(tasks, const_cast<uint8_t*>(data.data()), false, true, nullptr, &ms)) {
+            cudaSetDevice(dev_);
+            err = "the slot did not read back";
+            return false;
+        }
+        for (Glm5Model* m : halves) {
+            m->kv_stream_reset_maps();
+            m->snap_pos_ = n;
+        }
+        std::fprintf(stderr, "glm slots: fast take %lld positions from RAM, %.2f GB - parts copied at once in %.0f ms\n",
+                     (long long) n, pos / 1e9,
+                     std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
     }
     cudaSetDevice(dev_);
     // the KDA states go from the snapshot into the live state, as snapshot_restore does (it also sets the position)
