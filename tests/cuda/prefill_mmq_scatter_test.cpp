@@ -107,7 +107,7 @@ int check_swiglu(ggml_type t, int64_t rows, int mode, uint32_t seed) {
     ck(cudaMemcpy(db.p, b, sizeof b, cudaMemcpyHostToDevice), "bounds");
     ck(cudaMemcpy(dt.p, tails, sizeof tails, cudaMemcpyHostToDevice), "tails");
     ck(cudaMemset(qa.p, 0xA5, qb), "memset");
-    ck(cudaMemset(qf.p, 0x5A, qb), "memset");
+    ck(cudaMemset(qf.p, 0xA5, qb), "memset");   // same fill: q8_bytes' 128-block slack is written by neither
     if (mode == 2) mmq::swiglu_scaled((const float*) dgu.p, (float*) dh.p, rows, n_ff, (const int32_t*) db.p, 3,
                                       (const float*) dt.p, 0, nullptr);
     else mmq::swiglu((const float*) dgu.p, (float*) dh.p, rows, n_ff, mode == 1, nullptr);
@@ -123,8 +123,10 @@ int check_swiglu(ggml_type t, int64_t rows, int mode, uint32_t seed) {
     std::vector<uint8_t> a(qb), f(qb);
     ck(cudaMemcpy(a.data(), qa.p, qb, cudaMemcpyDeviceToHost), "back");
     ck(cudaMemcpy(f.data(), qf.p, qb, cudaMemcpyDeviceToHost), "back");
-    size_t diff = 0;
-    for (size_t i = 0; i < qb; ++i) diff += a[i] != f[i];
+    size_t diff = 0, first = qb;
+    for (size_t i = 0; i < qb; ++i)
+        if (a[i] != f[i]) { ++diff; first = std::min(first, i); }
+    if (diff) std::printf("  first differing byte %zu: %02x vs %02x\n", first, a[first], f[first]);
     std::printf("%s swiglu+q8_1 %-7s mode %d rows=%-5lld %zu of %zu bytes differ\n", diff ? "FAIL" : "ok  ",
                 ggml_type_name(t), mode, (long long) rows, diff, qb);
     return diff ? 1 : 0;
