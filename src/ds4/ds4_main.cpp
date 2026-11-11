@@ -2226,6 +2226,31 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
                 waiting.push_front(ln);
                 return false;
             }
+            // DS4_DBG_BIND_FILE=<path> (debug, an identity test at a fixed placement): a file there holds the
+            // conversation this request goes to - read and deleted, that conversation's state cleared first
+            static const char* dbg_bind = std::getenv("DS4_DBG_BIND_FILE");
+            if (dbg_bind != nullptr && *dbg_bind != '\0') {
+                if (std::FILE* f = std::fopen(dbg_bind, "r")) {
+                    int n = -1;
+                    const bool got = std::fscanf(f, "%d", &n) == 1;
+                    std::fclose(f);
+                    std::remove(dbg_bind);
+                    if (!got || n < 0 || n >= nseq)
+                        std::fprintf(stderr, "ds4: DEBUG: DS4_DBG_BIND_FILE: no conversation 0..%d in %s - request %lld "
+                                             "binds as usual\n", nseq - 1, dbg_bind, r.rid);
+                    else if (seq_rid[(size_t) n] >= 0)
+                        std::fprintf(stderr, "ds4: DEBUG: DS4_DBG_BIND_FILE: conversation %d is busy (request %lld) - "
+                                             "request %lld binds as usual\n", n, seq_rid[(size_t) n], r.rid);
+                    else {
+                        bind(n);
+                        m.reset();
+                        held.clear();
+                        best = n;
+                        std::fprintf(stderr, "ds4: DEBUG: request %lld forced onto conversation %d (DS4_DBG_BIND_FILE)\n",
+                                     r.rid, n);
+                    }
+                }
+            }
             // DS4_ELASTIC_CONV: its prompt backed before it is read; one the pool cannot hold (idle conversations
             // given back first) waits for a running request to end.  With none running the read goes ahead: every
             // other conversation gave its memory back, and a prompt the whole pool cannot hold fails in its read
