@@ -49,6 +49,8 @@
 #include "mmq.cuh"
 #include "moe_mmq_tab.hpp"
 
+#include <cstdio>
+#include <cstdlib>
 #include <type_traits>
 
 namespace strata::prefill::mmq {
@@ -82,8 +84,125 @@ static_assert(std::is_same<decltype(&mul_mat_q_stream_k_fixup<GGML_TYPE_Q8_0, 8,
     (t).p[0], (t).p[1], (t).p[2], (t).p[3], (t).p[4], (t).p[5], (t).p[6], (t).p[7], (t).p[8], (t).p[9],        \
     (t).p[10], (t).p[11], (t).p[12], (t).p[13], (t).p[14], (t).p[15]
 
+// STRATA_MMQ_KTAIL=1 (deviation 3): mul_mat_q_process_tile's text with one change - an iteration's second 128-value
+// half is skipped when it starts at or past kb0_stop.  K = 640 (the down product, 20 blocks of 32) runs three
+// 256-wide iterations, the last half of the third (values 640..767) entirely past the row: its q8_1 activations are
+// the quantizer's zero padding (qs 0, d 0, s 0), so every term it adds is C*dA*dB with C == 0 (and dB == 0), an exact
+// +-0 added to a sum that is never -0 (it starts at +0.0f): leaving it out changes no bit.  Within a CTA kb0_stop is
+// either the row end or a multiple of blocks_per_iter (the stream-k split rounds kbc down to one), so only the row
+// end's half is ever skipped.  Types whose block is wider than 128 values (the K-quants) have no such half.
+template <ggml_type type, int J, bool fallback, bool fixup>
+static __device__ __forceinline__ void mul_mat_q_process_tile_ktail(
+        const char * __restrict__ x, const int offset_x, const int * __restrict__ y,
+        const int * __restrict__ ids_dst, float * __restrict__ dst, float * __restrict__ tmp_fixup,
+        const float * __restrict__ y_scale,
+        const int stride_row_x, const int ncols_y, const int stride_col_dst,
+        const int tile_x_max_i, const int tile_y_max_j, const int kb0_start, const int kb0_stop) {
+
+    constexpr int              warp_size  = ggml_cuda_get_physical_warp_size();
+    constexpr int              nwarps     = ggml_cuda_mmq_get_nthreads(type, J, fallback) / warp_size;
+    constexpr int              qk         = ggml_cuda_type_traits<type>::qk;
+    constexpr int              I          = ggml_cuda_mmq_get_I(type, J, fallback);
+    constexpr ggml_cuda_mmq_load_tiles_t load_tiles = ggml_cuda_mmq_get_load_tiles<type, J, fallback>();
+    constexpr ggml_cuda_mmq_vec_dot_t    vec_dot    = ggml_cuda_mmq_get_vec_dot<type, J, fallback>();
+    constexpr ggml_cuda_mmq_write_back_t write_back = ggml_cuda_mmq_get_write_back<type, J, fallback>();
+
+    extern __shared__ int data_mul_mat_q[];
+    int * tile_y = data_mul_mat_q + J;
+    int * tile_x = tile_y + GGML_PAD(J*MMQ_TILE_Y_K, nwarps*warp_size);
+
+    constexpr int ne_block = QK8_1_MMQ;   // upstream: QK8_1_MMQ for every non-FP4 type on every arch (FP4 never takes ktail)
+    static_assert(qk <= ne_block && ne_block % qk == 0, "STRATA_MMQ_KTAIL: only types with blocks of <= 128 values");
+    constexpr int half_blocks = ne_block / qk;   // the blocks of one 128-value half
+
+    constexpr int ITER_K          = ggml_cuda_mmq_get_K_vram(type, J, fallback);
+    constexpr int blocks_per_iter = ITER_K / qk;
+
+    float sum[J*I / (nwarps*warp_size)] = {0.0f};
+
+    constexpr int sz = sizeof(block_q8_1_mmq) / sizeof(int);
+
+    for (int kb0 = kb0_start; kb0 < kb0_stop; kb0 += blocks_per_iter) {
+        load_tiles(x, tile_x, offset_x + kb0, tile_x_max_i, stride_row_x);
+        {
+            const int * by0 = y + ncols_y * (kb0 * qk / ne_block) * sz;
+#pragma unroll
+            for (int l0 = 0; l0 < J * MMQ_TILE_Y_K; l0 += nwarps * warp_size) {
+                int l = l0 + threadIdx.y*warp_size + threadIdx.x;
+
+                tile_y[l] = by0[l];
+            }
+        }
+
+        __syncthreads();
+
+        vec_dot(tile_x, tile_y, sum, 0);
+
+        __syncthreads();
+
+        if (kb0 + half_blocks >= kb0_stop) {   // STRATA: the half is past the row (uniform across the CTA)
+            continue;
+        }
+
+        {
+            const int * by0 = y + ncols_y * ((kb0 * qk / ne_block) * sz + sz);
+#pragma unroll
+            for (int l0 = 0; l0 < J * MMQ_TILE_Y_K; l0 += nwarps * warp_size) {
+                int l = l0 + threadIdx.y*warp_size + threadIdx.x;
+
+                tile_y[l] = by0[l];
+            }
+        }
+
+        __syncthreads();
+
+        vec_dot(tile_x, tile_y, sum, MMQ_TILE_NE_K);
+
+        __syncthreads();
+    }
+
+    if (fixup) {
+        write_back(sum, ids_dst, tmp_fixup + blockIdx.x*(J*I), y_scale, I, I, J);
+    } else {
+        write_back(sum, ids_dst, dst, y_scale, stride_col_dst, tile_x_max_i, tile_y_max_j);
+    }
+}
+// upstream's mul_mat_q_process_tile, or the copy above in the ktail instances
+template <ggml_type type, int J, bool fallback, bool fixup, bool ktail>
+static __device__ __forceinline__ void tab_process_tile(
+        const char * __restrict__ x, const int offset_x, const int * __restrict__ y,
+        const int * __restrict__ ids_dst, float * __restrict__ dst, float * __restrict__ tmp_fixup,
+        const float * __restrict__ y_scale,
+        const int stride_row_x, const int ncols_y, const int stride_col_dst,
+        const int tile_x_max_i, const int tile_y_max_j, const int kb0_start, const int kb0_stop) {
+    if constexpr (ktail) {
+        mul_mat_q_process_tile_ktail<type, J, fallback, fixup>(x, offset_x, y, ids_dst, dst, tmp_fixup, y_scale, stride_row_x,
+                                                               ncols_y, stride_col_dst, tile_x_max_i, tile_y_max_j,
+                                                               kb0_start, kb0_stop);
+    } else {
+        mul_mat_q_process_tile<type, J, fallback, fixup>(x, offset_x, y, ids_dst, dst, tmp_fixup, y_scale, stride_row_x,
+                                                         ncols_y, stride_col_dst, tile_x_max_i, tile_y_max_j,
+                                                         kb0_start, kb0_stop);
+    }
+}
+// STRATA_MMQ_KTAIL=1, read once per library; the launcher logs once when a product actually has the skipped half
+inline bool tab_ktail_requested() {
+    static const bool on = [] {
+        const char* v = std::getenv("STRATA_MMQ_KTAIL");
+        return v != nullptr && std::atoi(v) != 0;
+    }();
+    return on;
+}
+inline void tab_ktail_log(const char* type, int64_t k, int blocks, int padded) {
+    static bool logged = false;   // once per library (the first product it applies to), not per type and J
+    if (logged) return;
+    logged = true;
+    std::fprintf(stderr, "strata: prompt MMQ (pointer table) skips the zero K tail (STRATA_MMQ_KTAIL=1): %s K = %lld "
+                 "multiplies %d of %d blocks per row\n", type, (long long) k, blocks, padded);
+}
+
 // ---- mirrored: mul_mat_q (fallback = false, per-expert base from `tab`) ----
-template <ggml_type type, int J>
+template <ggml_type type, int J, bool ktail = false>   // STRATA: ktail, see mul_mat_q_process_tile_ktail
 __launch_bounds__(ggml_cuda_mmq_get_nthreads(type, J, false), ggml_cuda_mmq_get_occupancy(type, J, false))
 static __global__ void mul_mat_q_tab(
         STRATA_MMQ_TAB_PARAMS, const int * __restrict__ y, const int32_t * __restrict__ ids_dst,
@@ -188,7 +307,7 @@ static __global__ void mul_mat_q_tab(
         const int offset_x = fastdiv(wt, sample_ratio)*stride_sample_x + it*I*stride_row_x;
 
         constexpr bool fixup = false;
-        mul_mat_q_process_tile<type, J, fallback, fixup>
+        tab_process_tile<type, J, fallback, fixup, ktail>
             (xz, offset_x, y + offset_y, ids_dst_shared, dst + offset_dst, tmp_fixup, y_scale_tile,
              stride_row_x, ncols_y, stride_col_dst,
              tile_x_max_i, tile_y_max_j, 0, blocks_per_ne00.z);
@@ -283,7 +402,7 @@ static __global__ void mul_mat_q_tab(
         const int offset_x = fastdiv(wt, sample_ratio)*stride_sample_x + it*I*stride_row_x;
 
         constexpr bool fixup = false; // All but (potentially) the last iterations write their data to dst rather than the fixup buffer.
-        mul_mat_q_process_tile<type, J, fallback, fixup>
+        tab_process_tile<type, J, fallback, fixup, ktail>
             (xz, offset_x, y + offset_y, ids_dst_shared, dst + offset_dst, tmp_fixup, y_scale_tile,
              stride_row_x, ncols_y, stride_col_dst,
              tile_x_max_i, tile_y_max_j, kb0_start, kb0_stop);
@@ -368,15 +487,15 @@ static __global__ void mul_mat_q_tab(
     const int offset_x = fastdiv(wt, sample_ratio)*stride_sample_x + it*I*stride_row_x;
 
     constexpr bool fixup = true; // Last index writes its data to fixup buffer to avoid data races with other blocks.
-    mul_mat_q_process_tile<type, J, fallback, fixup>
+    tab_process_tile<type, J, fallback, fixup, ktail>
         (xz, offset_x, y + offset_y, ids_dst_shared, dst + offset_dst, tmp_fixup, y_scale_tile,
          stride_row_x, ncols_y, stride_col_dst,
          tile_x_max_i, tile_y_max_j, kb0_start, kb0_stop);
 }
 
 // ---- mirrored: launch_mul_mat_q (fallback = false) ----
-template <ggml_type type, int J>
-static void launch_mul_mat_q_tab(ggml_backend_cuda_context & ctx, const mmq_args & args, const mmq_x_tab & tab, cudaStream_t stream) {
+template <ggml_type type, int J, bool ktail>
+static void launch_mul_mat_q_tab_k(ggml_backend_cuda_context & ctx, const mmq_args & args, const mmq_x_tab & tab, cudaStream_t stream) {
     constexpr bool fallback = false;
     const int id = ggml_cuda_get_device();
     const int cc = ggml_cuda_info().devices[id].cc;
@@ -390,7 +509,7 @@ static void launch_mul_mat_q_tab(ggml_backend_cuda_context & ctx, const mmq_args
 
     const dim3 block_dims(warp_size, nwarps, 1);
 
-    CUDA_SET_SHARED_MEMORY_LIMIT((mul_mat_q_tab<type, J>), nbytes_shared);  // STRATA: no fallback=true line
+    CUDA_SET_SHARED_MEMORY_LIMIT((mul_mat_q_tab<type, J, ktail>), nbytes_shared);  // STRATA: no fallback=true line
 
     const int nty  = (args.nrows_x   + config.I - 1) / config.I;
     const int ntx  = (args.ncols_max + config.J - 1) / config.J;
@@ -410,7 +529,7 @@ static void launch_mul_mat_q_tab(ggml_backend_cuda_context & ctx, const mmq_args
     const uint3 sample_ratio_fd    = init_fastdiv_values(sample_ratio);
 
     if (!ggml_cuda_mmq_get_stream_k(type, J, fallback, cc)) {
-        mul_mat_q_tab<type, J><<<block_nums_xy_tiling, block_dims, nbytes_shared, stream>>>
+        mul_mat_q_tab<type, J, ktail><<<block_nums_xy_tiling, block_dims, nbytes_shared, stream>>>
             (STRATA_MMQ_TAB_ARGS(tab), args.y, args.ids_dst, args.expert_bounds, args.dst, nullptr, args.y_scale,
              blocks_per_ne00_fd, args.nrows_x, args.ncols_dst, args.stride_row_x, args.ncols_y, args.nrows_dst,
              channel_ratio_fd, nchannels_y_fd, args.stride_channel_x, args.stride_channel_y, args.stride_channel_dst,
@@ -439,7 +558,7 @@ static void launch_mul_mat_q_tab(ggml_backend_cuda_context & ctx, const mmq_args
     const dim3 block_nums_fixup(block_nums_stream_k.x, config.I/warp_size, 1);
     const dim3 block_dims_fixup(block_dims.x, block_dims.y/2, block_dims.z);
 
-    mul_mat_q_tab<type, J><<<block_nums_stream_k, block_dims, nbytes_shared, stream>>>
+    mul_mat_q_tab<type, J, ktail><<<block_nums_stream_k, block_dims, nbytes_shared, stream>>>
         (STRATA_MMQ_TAB_ARGS(tab), args.y, args.ids_dst, args.expert_bounds, args.dst, tmp_fixup.ptr, args.y_scale,
          blocks_per_ne00_fd, args.nrows_x, args.ncols_dst, args.stride_row_x, args.ncols_y, args.nrows_dst,
          channel_ratio_fd, nchannels_y_fd, args.stride_channel_x, args.stride_channel_y, args.stride_channel_dst,
@@ -455,6 +574,27 @@ static void launch_mul_mat_q_tab(ggml_backend_cuda_context & ctx, const mmq_args
         (args.ids_dst, args.expert_bounds, args.dst, tmp_fixup.ptr, blocks_per_ne00_fd, args.nrows_x, args.ncols_dst,
          args.nrows_dst, nchannels_y_fd, args.stride_channel_dst, nsamples_y_fd, args.stride_sample_dst,
          ntx_fd);
+}
+
+// STRATA_MMQ_KTAIL=1: the ktail instance for a product whose last iteration has a second half past the row
+// (K = 640: the down product); every other product, and every product without the switch, runs the mirror above
+template <ggml_type type, int J>
+static void launch_mul_mat_q_tab(ggml_backend_cuda_context & ctx, const mmq_args & args, const mmq_x_tab & tab, cudaStream_t stream) {
+    constexpr int qk = ggml_cuda_type_traits<type>::qk;
+    if constexpr (qk <= QK8_1_MMQ && QK8_1_MMQ % qk == 0 && type != GGML_TYPE_MXFP4 && type != GGML_TYPE_NVFP4) {
+        if (tab_ktail_requested()) {
+            const int cc   = ggml_cuda_info().devices[ggml_cuda_get_device()].cc;
+            const int bpn  = (int) (args.ncols_x / qk);
+            const int bpi  = ggml_cuda_mmq_get_K_vram(type, J, false, cc) / qk;
+            const int rest = bpn % bpi;
+            if (rest != 0 && rest <= QK8_1_MMQ / qk) {
+                tab_ktail_log(ggml_type_name(type), args.ncols_x, bpn, (bpn + bpi - 1) / bpi * bpi);
+                launch_mul_mat_q_tab_k<type, J, true>(ctx, args, tab, stream);
+                return;
+            }
+        }
+    }
+    launch_mul_mat_q_tab_k<type, J, false>(ctx, args, tab, stream);
 }
 
 // ---- mirrored: mul_mat_q_switch_J (fallback = false) ----

@@ -195,6 +195,17 @@ bool any_nonfinite(const Dev& d, size_t floats) {
     return false;
 }
 
+// STRATA_MMQ_KTAIL=1 (moe_mmq_tab.cuh): a K whose last 256-wide iteration ends in a 128-value half past the row
+// (K = 640 for blocks of <= 128 values) skips that half, which is where the over-read lands
+bool ktail_skips(const Shape& sh) {
+    const char* v = std::getenv("STRATA_MMQ_KTAIL");
+    if (v == nullptr || std::atoi(v) == 0) return false;
+    const int64_t qk = ggml_blck_size(sh.t);
+    if (qk > 128 || 128 % qk != 0) return false;
+    const int64_t rest = (sh.cols / qk) % (256 / qk);
+    return rest != 0 && rest <= 128 / qk;
+}
+
 // Part 1 + 2: one product, `cnt` rows per expert
 void product_case(mmq::Context& ctx, const Shape& sh, const std::vector<int>& cnt, int64_t max_rows, std::mt19937& rng,
                   cudaStream_t s, bool negative, const char* label) {
@@ -250,6 +261,10 @@ void product_case(mmq::Context& ctx, const Shape& sh, const std::vector<int>& cn
     std::snprintf(what, sizeof what, "%s %s n=%d rows=%lld max_rows=%lld (%s)", ggml_type_name(sh.t), sh.role, n,
                   (long long) a.total, (long long) max_rows, label);
     if (!negative) {
+        same_bits(ref, got, out, what);
+        return;
+    }
+    if (ktail_skips(sh)) {   // STRATA_MMQ_KTAIL=1: the half holding the over-read is never multiplied
         same_bits(ref, got, out, what);
         return;
     }
@@ -317,7 +332,8 @@ void sweep(mmq::Context& ctx, const Shape& sh, bool full, std::mt19937& rng, cud
         product_case(ctx, sh, {3, 64, 0, 17}, 64, rng, s, true, "negative");
         product_case(ctx, sh, {200}, 200, rng, s, true, "negative");
         std::printf("%-8s %-7s negative control (guards not zeroed): %s\n", ggml_type_name(sh.t), sh.role,
-                    g_fail == f1 ? "non-finite output, as required" : "FAILED");
+                    g_fail != f1 ? "FAILED" : ktail_skips(sh) ? "bitwise identical: STRATA_MMQ_KTAIL never multiplies them"
+                                                              : "non-finite output, as required");
     }
 }
 
