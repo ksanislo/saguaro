@@ -283,8 +283,8 @@ public:
     int seq_count() const;
     void seq_bind(int s);
     int seq_bound() const;
-    /// DS4_ELASTIC_CONV=1: conversations 1..n-1's KV backed as they grow, out of a pool made at load (conversation 0
-    /// keeps its whole context).  seq_backed: the positions s holds now (max_context where not elastic);
+    /// DS4_ELASTIC_CONV=1 (--parallel): every conversation's KV backed as it grows, out of one pool made at load.
+    /// seq_backed: the positions s holds now (max_context where not elastic);
     /// seq_can_back: whether the pool could back s to `tokens` now; seq_reserve: s backed to `tokens` (false: the pool
     /// is short, nothing taken); seq_release: s's backing back to the pool and its state cleared (set it aside first).
     bool elastic() const;
