@@ -7884,6 +7884,15 @@ struct Model::Impl {
             d.tail_bytes = cap;
             d.tail_step = step;
             d.tail_k = k;
+            if (lend_shadow() && d.shadow == nullptr) {   // (DS4_LEND_SHADOW: pinned once at load, not in a read)
+                const double ts = now_ms();
+                if (cudaHostAlloc((void**) &d.shadow, cap, cudaHostAllocPortable) != cudaSuccess) {
+                    cudaGetLastError();
+                    d.shadow = nullptr;
+                }
+                std::fprintf(stderr, "ds4: DS4_LEND_SHADOW: CUDA%d's %.2f GB tail shadow %s in %.0f ms\n", d.id, cap / 1e9,
+                             d.shadow ? "pinned" : "NOT pinned (no shadow)", now_ms() - ts);
+            }
             d.experts += cap;
             size_t xoff = 0;
             for (Layer& l : L)
@@ -19308,8 +19317,12 @@ struct Model::Impl {
                     d.shadow = nullptr;
                 }
                 if (d.shadow != nullptr) {
+                    const double ts = now_ms();
                     e = cudaMemcpyAsync(d.shadow + cut, d.tail + cut, d.tail_bytes - cut, cudaMemcpyDeviceToHost, d.st);
+                    if (e == cudaSuccess) e = cudaStreamSynchronize(d.st);   // (timed: its cost is the read's)
                     if (e == cudaSuccess) d.shadow_cut = cut;
+                    std::fprintf(stderr, "ds4: DS4_LEND_SHADOW: CUDA%d saved %.2f GB in %.0f ms\n", d.id,
+                                 (d.tail_bytes - cut) / 1e9, now_ms() - ts);
                 }
             }
             if (e == cudaSuccess) e = cudaMemsetAsync(d.tail + b0, 0, d.tail_bytes - b0, d.st);
