@@ -2018,18 +2018,37 @@ static bool block_scores_sm75(const float* pooled, const float* dead, const floa
         cudaGetLastError();
         ok[dev] = (major > 7 || (major == 7 && minor >= 5)) && sms > 0 ? sms : -1;
     }
-    if (ok[dev] < 0) return false;
+    static std::atomic<bool> refused{false};
+    if (ok[dev] < 0) {
+        if (!refused.exchange(true))
+            std::fprintf(stderr, "qsa select: STRATA_SELECT_SM75=1 but CUDA%d is below sm_75: not used\n", dev);
+        return false;
+    }
     const int64_t reach = active_blocks > 0 && active_blocks < max_blocks ? active_blocks : max_blocks;
     const int64_t qtiles = (nq + S75_QT - 1) / S75_QT, ktiles = (reach + S75_NB - 1) / S75_NB;
     static const int tpc_env = [] { const char* v = std::getenv("STRATA_SELECT_SM75_TPC"); return v ? std::atoi(v) : 0; }();
     int64_t tpc = tpc_env > 0 ? tpc_env : (ktiles * qtiles + 8 * ok[dev] - 1) / (8 * (int64_t) ok[dev]);
     tpc = std::max<int64_t>(1, std::min<int64_t>(tpc_env > 0 ? 1 << 20 : 16, tpc));
     const int64_t kranges = (ktiles + tpc - 1) / tpc;
-    if (qtiles > 0x7fffffff || kranges > 65535) return false;
-    static std::atomic<bool> said{false};
-    if (!said.exchange(true))
-        std::fprintf(stderr, "qsa select: sm_75 FP16 hi/lo tensor-core scorer (STRATA_SELECT_SM75=1; nq=%lld reach=%lld "
-                             "blocks, %lld key tiles per CTA)\n", (long long) nq, (long long) reach, (long long) tpc);
+    if (qtiles > 0x7fffffff || kranges > 65535) {
+        if (!refused.exchange(true)) std::fprintf(stderr, "qsa select: sm75 scorer: grid too large, not used\n");
+        return false;
+    }
+    // proof it ran: a line per device at its 1st, 16th, 256th, ... launch and at exit (queries scored, calls)
+    static std::atomic<long long> calls[64], queries[64];
+    static std::atomic<bool> at_exit{false};
+    if (!at_exit.exchange(true))
+        std::atexit([] {
+            for (int d = 0; d < 64; ++d)
+                if (const long long c = calls[d].load())
+                    std::fprintf(stderr, "qsa select: sm75 scorer used for %lld queries (%lld calls) on CUDA%d (at exit)\n",
+                                 queries[d].load(), c, d);
+        });
+    const long long nc = calls[dev].fetch_add(1) + 1, nqs = queries[dev].fetch_add(nq) + nq;
+    if ((nc & (nc - 1)) == 0 && (__builtin_ctzll((unsigned long long) nc) % 4) == 0)
+        std::fprintf(stderr, "qsa select: sm75 scorer used for %lld queries (%lld calls) on CUDA%d (STRATA_SELECT_SM75=1, "
+                             "FP16 hi/lo tensor cores; this call nq=%lld reach=%lld blocks, %lld key tiles per CTA)\n",
+                     nqs, nc, dev, (long long) nq, (long long) reach, (long long) tpc);
     const dim3 grid((unsigned) qtiles, (unsigned) kranges);
     block_scores_sm75_kernel<<<grid, 256, 0, stream>>>(pooled, q_idx, steps, nq, max_blocks, reach, (int) tpc, scores);
     block_scores_tail_kernel<<<(unsigned) nq, 32, 0, stream>>>(dead, q_idx, steps, max_blocks, scores);
