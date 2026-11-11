@@ -136,6 +136,10 @@ struct GateW {
 /// the token, window and chunk paths get the same bits.
 void gemv_f32(const float* W, const float* x, int n, int k, int T, float* y, int ldy, cudaStream_t s);
 void gemv_f32(GateW W, const float* x, int n, int k, int T, float* y, int ldy, cudaStream_t s);
+/// (tests) gemv_f32's rows kernel for T tokens with tt tokens a block and rw rows a warp (DS4_ROUTER_T / DS4_ROUTER_RW;
+/// 8 and 1 the default kernel) - the same bits for every pair; *covered false (nothing launched) for a pair not built
+void gemv_f32_rows_with(GateW W, const float* x, int n, int k, int T, float* y, int ldy, cudaStream_t s, int tt, int rw,
+                        bool* covered = nullptr);
 /// (DS4_ROUTE_FUSE) gemv_f32 for one token (T 1) of two matrices on the same x in one launch: y0 = x W0 (n0 rows), y1 =
 /// x W1 (n1 rows), each row gemv_f32's bits.  k a multiple of 4, else false and nothing launched; false too when the
 /// launch did not go in.  (=2) T up to kWin tokens: x's rows k apart, y0's and y1's ldy apart (ldy >= n0, n1).
@@ -194,7 +198,7 @@ struct Rows {
 /// query's candidates) -> -inf.  q rows heads * hd apart, w rows 64, cand rows cand_stride, out rows out_stride; the keys
 /// k rows of format kfmt (the cache's kKvFp4p, or kKvBf16).
 /// With kKvFp4p keys and DS4_INDEX_TC=1 (and tc) the tensor cores' kernel: the same products, FP32 sums in another
-/// order.
+/// order; on compute capability 7.5 DS4_INDEX_TC_SM75=1 instead (the same kernel's bits, from m8n8k16).
 void index_score(const float* q, const float* w, const void* k, int heads, int hd, int T, int n, const int* cand,
                  int cand_stride, int blk, const Rows& lim, float* out, long long out_stride, cudaStream_t s,
                  int kfmt = kKvFp4p, bool tc = true);

@@ -2310,10 +2310,10 @@ struct Model::Impl {
     // ... and a run of chunks' (prof_chunk): a layer's start, after its attention, after the routing and the shared
     // expert, after its experts (the streamed ones' waits for their reads in it); printed after the run
     bool prof_chunk = false;
-    std::vector<std::array<double, 8>> cprof_dev;   // (DS4_PROF, a prompt's run: the same stages per CUDA device)
-    double cprof_ms[8] = {};   // (4, 5: the attention's projections, its compression and indexer; 6, 7: its q, its
-                               // sparse attention - 1 then its output's projections)
-    double hprof_ms[8] = {}, hprof_last = 0;   // (the host's time between the same marks: one GPU)
+    std::vector<std::array<double, 9>> cprof_dev;   // (DS4_PROF, a prompt's run: the same stages per CUDA device)
+    double cprof_ms[9] = {};   // (4, 5: the attention's projections, its compression and indexer; 6, 7: its q, its
+                               // sparse attention - 1 then its output's projections; 8: the indexer's scores + top-k)
+    double hprof_ms[9] = {}, hprof_last = 0;   // (the host's time between the same marks: one GPU)
     void prof_mark(const Dev& d, int stage) {
         if (!prof_window && !prof_chunk) return;
         std::lock_guard<std::mutex> lk(prof_mu);
@@ -2363,7 +2363,7 @@ struct Model::Impl {
         std::lock_guard<std::mutex> lk(prof_mu);
         const bool chunk_sample = prof_chunk;
         bool sample_ok = !prof_failed;
-        double sample_ms[8] = {};
+        double sample_ms[9] = {};
         std::vector<std::pair<int, cudaEvent_t>> last;
         int current_dev = -1;
         if (sample_ok) {
@@ -2395,7 +2395,7 @@ struct Model::Impl {
                     }
                     sample_ms[m.stage] += ms;
                     if (chunk_sample) {
-                        if (cprof_dev.size() <= (size_t) m.dev) cprof_dev.resize((size_t) m.dev + 1, std::array<double, 8>{});
+                        if (cprof_dev.size() <= (size_t) m.dev) cprof_dev.resize((size_t) m.dev + 1, std::array<double, 9>{});
                         cprof_dev[(size_t) m.dev][(size_t) m.stage] += ms;
                     }
                     it->second = m.ev;
@@ -2406,7 +2406,7 @@ struct Model::Impl {
         }
         if (sample_ok) {
             double* total = chunk_sample ? cprof_ms : st.prof_ms;
-            const int stages = chunk_sample ? 8 : 6;
+            const int stages = chunk_sample ? 9 : 6;
             for (int i = 0; i < stages; ++i) total[i] += sample_ms[i];
             for (const ProfMark& m : prof_marks) prof_pool[(size_t) m.dev].push_back(m.ev);
             prof_marks.clear();
@@ -17982,6 +17982,7 @@ struct Model::Impl {
                         int* cd = c.cand + (size_t) a0 * cand_stride();
                         const float* iw = c.iw + (size_t) a0 * 64;
                         if (nlast <= 0) continue;
+                        prof_mark(d, 5);   // (DS4_PROF: the scores and their top-k apart, stage 8)
                         if (l.uses_cand && (nlast + g.cand_blk - 1) / g.cand_blk > g.cand_topk) {
                             Rows cl = lim;
                             cl.gen = 2;
@@ -18001,6 +18002,7 @@ struct Model::Impl {
                             }
                             topk(c.scores, ss, na, lim, nullptr, 0, 1, tk, (int) topk_stride(), s);
                         }
+                        prof_mark(d, 8);
                     }
                 }
             }
@@ -20395,24 +20397,25 @@ struct Model::Impl {
             std::fprintf(stderr,
                          "ds4 prompt GPU time, %d tokens: attention %.0f ms, routing + shared expert %.0f ms, experts %.0f ms "
                          "(with the waits for streamed ones), between layers %.0f ms\n",
-                         n, cprof_ms[4] + cprof_ms[5] + cprof_ms[6] + cprof_ms[7] + cprof_ms[1], cprof_ms[2],
+                         n, cprof_ms[4] + cprof_ms[5] + cprof_ms[8] + cprof_ms[6] + cprof_ms[7] + cprof_ms[1], cprof_ms[2],
                          cprof_ms[3], cprof_ms[0]);
             std::fprintf(stderr,
                          "ds4 prompt attention GPU time: Engram + mixing + projections %.0f ms, compression + indexer "
-                         "%.0f ms, q %.0f ms, sparse attention %.0f ms, output projections %.0f ms\n",
-                         cprof_ms[4], cprof_ms[5], cprof_ms[6], cprof_ms[7], cprof_ms[1]);
+                         "%.0f ms (scores + top-k %.0f ms of it), q %.0f ms, sparse attention %.0f ms, output projections "
+                         "%.0f ms\n",
+                         cprof_ms[4], cprof_ms[5] + cprof_ms[8], cprof_ms[8], cprof_ms[6], cprof_ms[7], cprof_ms[1]);
             for (size_t dv = 0; dv < cprof_dev.size(); ++dv) {   // (per card: which one sets a read's pace)
                 const auto& c = cprof_dev[dv];
-                const double sum = c[0] + c[1] + c[2] + c[3] + c[4] + c[5] + c[6] + c[7];
+                const double sum = c[0] + c[1] + c[2] + c[3] + c[4] + c[5] + c[6] + c[7] + c[8];
                 if (sum <= 0) continue;
                 std::fprintf(stderr, "ds4 prompt GPU time CUDA%zu: %.0f ms - attention %.0f, routing + shared %.0f, experts %.0f, "
-                                     "between layers %.0f\n", dv, sum, c[4] + c[5] + c[6] + c[7] + c[1], c[2], c[3], c[0]);
+                                     "between layers %.0f\n", dv, sum, c[4] + c[5] + c[8] + c[6] + c[7] + c[1], c[2], c[3], c[0]);
             }
             cprof_dev.clear();
             std::fprintf(stderr,
                          "ds4 prompt host time between the same marks: attention %.0f ms, routing + shared expert %.0f ms, "
                          "experts %.0f ms, between layers %.0f ms\n",
-                         hprof_ms[4] + hprof_ms[5] + hprof_ms[6] + hprof_ms[7] + hprof_ms[1], hprof_ms[2],
+                         hprof_ms[4] + hprof_ms[5] + hprof_ms[8] + hprof_ms[6] + hprof_ms[7] + hprof_ms[1], hprof_ms[2],
                          hprof_ms[3], hprof_ms[0]);
             for (double& v : cprof_ms) v = 0;
             for (double& v : hprof_ms) v = 0;

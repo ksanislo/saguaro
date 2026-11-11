@@ -781,6 +781,63 @@ __global__ void __launch_bounds__(kThreads) gemv_f32_rows_kernel(const TW* __res
             if (lane == 0) y[(size_t) (t0 + t) * ldy + row] = s;
         }
 }
+// (DS4_ROUTER_T / DS4_ROUTER_RW) the rows kernel with TT tokens a block and RW rows a warp (8 RW rows a block): W
+// read once per TT tokens, x once per 8 RW rows.  Each (token, row) is still one lane's fmaf chain over c = lane + 32 j
+// ascending (the chunk size KC a multiple of 32 does not change that order), then warp_sum - gemv_f32_rows_kernel's bits
+template <typename TW, int TT, int RW>
+__global__ void __launch_bounds__(kThreads) gemv_f32_rows_tt_kernel(const TW* __restrict__ W, const float* __restrict__ x,
+                                                                    int n, int k, int T, float* __restrict__ y, int ldy) {
+    constexpr int KC = 2048 / TT < 128 ? 2048 / TT : 128;   // (xs 32 KB)
+    static_assert(KC % 32 == 0, "a lane's float4s in the one-token kernel's order");
+    pdl_wait();
+    pdl_trigger();
+    __shared__ float4 xs[TT][KC];
+    const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31, t0 = blockIdx.y * TT, nt = min(TT, T - t0), k4 = k / 4;
+    const int row0 = blockIdx.x * (kThreads / 32) * RW + warp * RW;
+    const TW* w[RW];
+#pragma unroll
+    for (int r = 0; r < RW; ++r) w[r] = W + (size_t) min(row0 + r, n - 1) * k;
+    float acc[TT][RW];
+#pragma unroll
+    for (int t = 0; t < TT; ++t)
+#pragma unroll
+        for (int r = 0; r < RW; ++r) acc[t][r] = 0.0f;
+    for (int c0 = 0; c0 < k4; c0 += KC) {
+        const int nc = min(KC, k4 - c0);
+        __syncthreads();
+        for (int i = (int) threadIdx.x; i < TT * KC; i += kThreads) {
+            const int t = i / KC, c = i % KC;
+            if (t < nt && c < nc) xs[t][c] = ((const float4*) (x + (size_t) (t0 + t) * k))[c0 + c];
+        }
+        __syncthreads();
+        for (int c = lane; c < nc; c += 32) {
+            float4 a[RW];
+#pragma unroll
+            for (int r = 0; r < RW; ++r) a[r] = gate_ld(w[r], c0 + c);
+#pragma unroll
+            for (int t = 0; t < TT; ++t) {
+                const float4 b = xs[t][c];
+#pragma unroll
+                for (int r = 0; r < RW; ++r) {
+                    acc[t][r] = fmaf(a[r].x, b.x, acc[t][r]);
+                    acc[t][r] = fmaf(a[r].y, b.y, acc[t][r]);
+                    acc[t][r] = fmaf(a[r].z, b.z, acc[t][r]);
+                    acc[t][r] = fmaf(a[r].w, b.w, acc[t][r]);
+                }
+            }
+        }
+    }
+#pragma unroll
+    for (int r = 0; r < RW; ++r) {
+        if (row0 + r >= n) break;
+#pragma unroll
+        for (int t = 0; t < TT; ++t)
+            if (t < nt) {
+                const float s = warp_sum(acc[t][r]);
+                if (lane == 0) y[(size_t) (t0 + t) * ldy + row0 + r] = s;
+            }
+    }
+}
 // (DS4_ROUTE_FUSE=2, a decode window: T 2 .. kWin) two gemv_f32_rows_kernel launches in one grid - its first
 // cdiv(n0, 8) blocks are W0's rows into y0, the rest W1's into y1, each block gemv_f32_rows_kernel's code for its
 // kGemvT tokens (blockIdx.y) - so each (token, row) the rows kernel's bits, the one-token kernel's.  The old kernel
@@ -1002,7 +1059,7 @@ __global__ void __launch_bounds__(256) index_score_tc_kernel(const float* __rest
                                                              int ntiles) {
     pdl_wait();
     pdl_trigger();
-#if !defined(STRATA_USE_HIP) && (!defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 800)   // (mma.sync's int8 shape)
+#if !defined(STRATA_USE_HIP) && (!defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 750)   // (mma.sync's int8 shapes)
     constexpr int HD = 128, KT = 128, LD = HD + 16, NQ = QT * 32, NB = HD / 32;
     constexpr size_t RB = kv_row_bytes(kKvFp4p, HD);   // (a packed key row: its codes, its scales, padded to 16)
     extern __shared__ __align__(16) int8_t tc_smem[];   // Ks [KT][LD], Qs [NQ][LD] (int8), ek [KT][NB], eq [NQ][NB]
@@ -1115,10 +1172,21 @@ __global__ void __launch_bounds__(256) index_score_tc_kernel(const float* __rest
                 const int8_t* qr = Qs + (nt * 8 + g) * LD + b * 32 + tg * 4;
                 const uint32_t b0 = *(const uint32_t*) qr, b1 = *(const uint32_t*) (qr + 16);
                 int c0 = 0, c1 = 0, c2 = 0, c3 = 0;
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 800
                 asm volatile("mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, "
                              "{%0,%1,%2,%3};\n"
                              : "+r"(c0), "+r"(c1), "+r"(c2), "+r"(c3)
                              : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
+#else   // (sm_75: the m16n8k32 tile as four m8n8k16 - rows g / g + 8, k 0-15 / 16-31 - the same integer sums)
+                asm volatile("mma.sync.aligned.m8n8k16.row.col.s32.s8.s8.s32 {%0,%1}, {%2}, {%3}, {%0,%1};\n"
+                             : "+r"(c0), "+r"(c1) : "r"(a0), "r"(b0));
+                asm volatile("mma.sync.aligned.m8n8k16.row.col.s32.s8.s8.s32 {%0,%1}, {%2}, {%3}, {%0,%1};\n"
+                             : "+r"(c0), "+r"(c1) : "r"(a2), "r"(b1));
+                asm volatile("mma.sync.aligned.m8n8k16.row.col.s32.s8.s8.s32 {%0,%1}, {%2}, {%3}, {%0,%1};\n"
+                             : "+r"(c2), "+r"(c3) : "r"(a1), "r"(b0));
+                asm volatile("mma.sync.aligned.m8n8k16.row.col.s32.s8.s8.s32 {%0,%1}, {%2}, {%3}, {%0,%1};\n"
+                             : "+r"(c2), "+r"(c3) : "r"(a3), "r"(b1));
+#endif
                 const int q0 = eq[col * NB + b], q1 = eq[(col + 1) * NB + b];
                 acc[nt][0] += (float) c0 * __int_as_float((127 + ea + q0) << 23);
                 acc[nt][1] += (float) c1 * __int_as_float((127 + ea + q1) << 23);
@@ -1152,7 +1220,7 @@ __global__ void __launch_bounds__(256) index_score_tc_kernel(const float* __rest
         __syncthreads();   // (the next tile's rows over these)
     }
 #elif defined(STRATA_USE_HIP)
-    __builtin_trap();   // (index_score takes it on CUDA devices of compute capability 8.0 and up alone)
+    __builtin_trap();   // (index_score takes it on CUDA devices of compute capability 7.5 and up alone)
 #else
     __trap();
 #endif
@@ -3891,13 +3959,58 @@ static bool gemv_f32_pair_t(const TW* W0, int n0, float* y0, const TW* W1, int n
                                                                                           T, ldy);
     return cudaGetLastError() == cudaSuccess;
 }
+// a prompt's router rows with tt tokens a block (8: gemv_f32_rows_kernel; 16, 32, 64) and rw rows a warp (1; 2) - the
+// same bits for any; false (nothing launched) for a pair not covered
+template <typename TW>
+static bool gemv_f32_rows_tt(const TW* W, const float* x, int n, int k, int T, float* y, int ldy, cudaStream_t s, int tt,
+                             int rw) {
+    if (T < 1) return true;
+    const dim3 grid(cdiv(n, (kThreads / 32) * rw), cdiv(T, tt));
+    if (tt == kGemvT && rw == 1) {
+        pdl_launch(gemv_f32_rows_kernel<TW>, grid, kThreads, 0, s, W, x, n, k, T, y, ldy);
+        return true;
+    }
+#define DS4_ROWS_TT(A, B)                                                                                                \
+    if (tt == A && rw == B) {                                                                                          \
+        pdl_launch(gemv_f32_rows_tt_kernel<TW, A, B>, grid, kThreads, 0, s, W, x, n, k, T, y, ldy);                   \
+        return true;                                                                                                   \
+    }
+    DS4_ROWS_TT(16, 1)
+    DS4_ROWS_TT(32, 1)
+    DS4_ROWS_TT(64, 1)
+    DS4_ROWS_TT(16, 2)
+    DS4_ROWS_TT(32, 2)
+#undef DS4_ROWS_TT
+    return false;
+}
+// DS4_ROUTER_T / DS4_ROUTER_RW: the prompt's (T > kWin) tokens a block and rows a warp (8 and 1: the kernel as it was)
+static void router_rows_env(int& tt, int& rw) {
+    static const int t_env = std::getenv("DS4_ROUTER_T") ? std::atoi(std::getenv("DS4_ROUTER_T")) : kGemvT;
+    static const int r_env = std::getenv("DS4_ROUTER_RW") ? std::atoi(std::getenv("DS4_ROUTER_RW")) : 1;
+    static std::atomic<bool> said{false};
+    tt = t_env, rw = r_env;
+    if ((tt != kGemvT || rw != 1) && !said.exchange(true)) {
+        const bool ok = (tt == 8 || tt == 16 || tt == 32 || tt == 64) && (rw == 1 || rw == 2) && !(tt == 8 && rw == 2) &&
+                        !(tt == 64 && rw == 2);
+        std::fprintf(stderr, "ds4: prompt router rows: %d tokens a block, %d rows a warp (DS4_ROUTER_T/RW)%s\n", tt, rw,
+                     ok ? "" : " - not covered: 8 and 1");
+    }
+}
 template <typename TW>
 static void gemv_f32_t(const TW* W, const float* x, int n, int k, int T, float* y, int ldy, cudaStream_t s) {
     if (T == 1 || (T > 0 && std::getenv("DS4_ROUTER_ROWS") != nullptr && std::atoi(std::getenv("DS4_ROUTER_ROWS")) == 0))
         pdl_launch(gemv_f32_kernel<TW>, dim3(cdiv(n, kThreads / 32), T), kThreads, 0, s, W, x, n, k, y, ldy);
-    else if (T > 1)   // (DS4_ROUTER_ROWS=0: a launch a token, as before - the same bits)
-        pdl_launch(gemv_f32_rows_kernel<TW>, dim3(cdiv(n, kThreads / 32), cdiv(T, kGemvT)), kThreads, 0, s, W, x, n, k,
-                   T, y, ldy);
+    else if (T > 1) {   // (DS4_ROUTER_ROWS=0: a launch a token, as before - the same bits)
+        int tt = kGemvT, rw = 1;
+        if (T > kWin) router_rows_env(tt, rw);
+        if (!gemv_f32_rows_tt(W, x, n, k, T, y, ldy, s, tt, rw)) gemv_f32_rows_tt(W, x, n, k, T, y, ldy, s, kGemvT, 1);
+    }
+}
+void gemv_f32_rows_with(GateW W, const float* x, int n, int k, int T, float* y, int ldy, cudaStream_t s, int tt, int rw,
+                        bool* covered) {
+    const bool ok = W.h != nullptr ? gemv_f32_rows_tt(W.h, x, n, k, T, y, ldy, s, tt, rw)
+                                   : gemv_f32_rows_tt(W.f, x, n, k, T, y, ldy, s, tt, rw);
+    if (covered != nullptr) *covered = ok;
 }
 bool gemv_f32_pair(const float* W0, int n0, float* y0, const float* W1, int n1, float* y1, const float* x, int k,
                    cudaStream_t s, int T, int ldy) {
@@ -3965,17 +4078,21 @@ void index_score(const float* q, const float* w, const void* k, int heads, int h
     if (n <= 0) return;
     // (opt-in, DS4_INDEX_TC=1: its sums differ from the CUDA cores' in the last bits - perplexity the same, 7.5366 on
     // 4 x 1024 tokens, but a long greedy run's tokens part after a while)
+    // DS4_INDEX_TC_SM75=1: the same on compute capability 7.5 (T4: each m16n8k32 as four m8n8k16 - the same integers,
+    // so the sm_80 kernel's bits; again not the CUDA cores')
     static const bool tc_ok = std::getenv("DS4_INDEX_TC") != nullptr && std::atoi(std::getenv("DS4_INDEX_TC")) != 0;
-    if (tc && tc_ok && kfmt == kKvFp4p) {   // (the tensor cores: a block a tile, looping, ~2 blocks an SM)
-        static std::atomic<uint64_t> opted{0}, capable{0};   // (capable: compute capability 8.0+, CUDA - mma's int8)
+    static const bool tc75_ok = std::getenv("DS4_INDEX_TC_SM75") != nullptr && std::atoi(std::getenv("DS4_INDEX_TC_SM75")) != 0;
+    if (tc && (tc_ok || tc75_ok) && kfmt == kKvFp4p) {   // (the tensor cores: a block a tile, looping, ~2 blocks an SM)
+        static std::atomic<uint64_t> opted{0}, capable{0};   // (capable: compute capability 8.0+ (7.5 opted), CUDA)
         static int sms[64] = {};
         int dev = 0;
         cudaGetDevice(&dev);
         if (!(opted.load(std::memory_order_relaxed) >> dev & 1u)) {
-            int major = 0;
+            int major = 0, minor = 0;
             cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev);
+            cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, dev);
 #if !defined(STRATA_USE_HIP)
-            if (major >= 8) {
+            if ((major >= 8 && tc_ok) || (major == 7 && minor >= 5 && tc75_ok)) {
                 cudaFuncSetAttribute(index_score_tc_kernel<1>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) index_tc_smem<1>());
                 cudaFuncSetAttribute(index_score_tc_kernel<2>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) index_tc_smem<2>());
                 cudaFuncSetAttribute(index_score_tc_kernel<3>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) index_tc_smem<3>());
@@ -3983,9 +4100,12 @@ void index_score(const float* q, const float* w, const void* k, int heads, int h
                 cudaFuncSetAttribute(index_score_tc_kernel<5>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) index_tc_smem<5>());
                 cudaFuncSetAttribute(index_score_tc_kernel<6>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) index_tc_smem<6>());
                 capable.fetch_or(1ull << dev);
+                std::fprintf(stderr, "ds4: indexer scores on the int8 tensor cores on CUDA%d (sm_%d%d%s)\n", dev, major, minor,
+                             major >= 8 ? ", m16n8k32" : ", m8n8k16 x4");
             }
 #else
             (void) major;
+            (void) minor;
 #endif
             cudaDeviceGetAttribute(&sms[dev & 63], cudaDevAttrMultiProcessorCount, dev);
             opted.fetch_or(1ull << dev);
