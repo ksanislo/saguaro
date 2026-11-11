@@ -40,6 +40,7 @@
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
+#include <deque>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -392,7 +393,53 @@ static int cpu_node_now() {
 #endif
 }
 
-static void* numa_pinned(size_t bytes, const RowLayout* rl = nullptr) {
+// STRATA_GLM_ARENA_PAR=1 (default off): a RAM arena's pages faulted in from several threads (STRATA_GLM_ARENA_THREADS,
+// default 16 split over the parts pinning at once), each pinned to the node its pages are placed on, instead of one
+// thread.  The node comes from the range's mbind policy, not from the faulting thread, so the arena's bytes and
+// placement are unchanged; used only where get_mempolicy shows a policy over the whole range, else one thread.
+#ifdef __linux__
+static int arena_par_threads(int parts) {
+    const char* v = getenv("STRATA_GLM_ARENA_PAR");
+    if (v == nullptr || std::atoi(v) == 0) return 1;
+    const char* t = getenv("STRATA_GLM_ARENA_THREADS");
+    if (t != nullptr && std::atoi(t) > 0) return std::min(64, std::atoi(t));
+    const int cpus = (int) std::max(1u, std::thread::hardware_concurrency());
+    return std::max(2, std::min(16, cpus / std::max(1, parts)));
+}
+// every sampled page of [p, p + bytes) under a non-default policy (the VMA's, MPOL_F_ADDR)
+static bool arena_policy_covers(void* p, size_t bytes) {
+    const size_t pages = bytes / 4096;
+    if (pages == 0) return false;
+    const size_t step = std::max<size_t>(1, pages / 4096);
+    for (size_t i = 0;; i += step) {
+        const size_t pg = std::min(i, pages - 1);
+        int mode = 0;
+        if (syscall(SYS_get_mempolicy, &mode, nullptr, 0ul, (char*) p + pg * 4096, 2ul /* MPOL_F_ADDR */) != 0 ||
+            mode == 0 /* MPOL_DEFAULT */)
+            return false;
+        if (pg == pages - 1) return true;
+    }
+}
+// run fn(thread, of) on n threads, thread i pinned to the CPUs of node_cpus[node_of(i)] (no pin when unknown)
+static void arena_threads(int n, const std::vector<std::vector<int>>& node_cpus, const std::function<int(int)>& node_of,
+                          const std::function<void(int)>& fn) {
+    std::vector<std::thread> th;
+    for (int i = 0; i < n; ++i)
+        th.emplace_back([&, i] {
+            const int k = node_of(i);
+            if (k >= 0 && k < (int) node_cpus.size() && !node_cpus[(size_t) k].empty()) {
+                cpu_set_t set;
+                CPU_ZERO(&set);
+                for (int c : node_cpus[(size_t) k]) CPU_SET(c, &set);
+                sched_setaffinity(0, sizeof set, &set);
+            }
+            fn(i);
+        });
+    for (auto& t : th) t.join();
+}
+#endif
+
+static void* numa_pinned(size_t bytes, const RowLayout* rl = nullptr, int par_parts = 1) {
 #ifdef __linux__
     const char* v = getenv("STRATA_GLM_NUMA");
     const auto nodes = numa_nodes();
@@ -429,12 +476,50 @@ static void* numa_pinned(size_t bytes, const RowLayout* rl = nullptr) {
                      bind(o + rl->doff, dh, n0) && bind(o + rl->doff + dh, rl->stride - rl->doff - dh, n1);
             if (ok) {
                 madvise(p, bytes, MADV_NOHUGEPAGE);
-                for (size_t o = 0; o < bytes; o += 4096) ((volatile char*) p)[o] = 0;   // placed now, by the policies
+                const auto tf = std::chrono::steady_clock::now();
+                int nt = arena_par_threads(par_parts);
+                const auto cpus = numa_node_cpu_lists();
+                if (nt > 1 && (cpus.size() < 2 || !arena_policy_covers(p, bytes))) {
+                    std::fprintf(stderr, "glm fast: CUDA%d arena: no policy over the whole range - faulted from one "
+                                         "thread\n", dev);
+                    nt = 1;
+                }
+                if (nt > 1) {
+                    // half the threads on each node, each faulting its node's halves of every nt/2-th slot
+                    const int per = std::max(1, nt / 2);
+                    const size_t slots = bytes / rl->stride;
+                    arena_threads(2 * per, cpus, [&](int i) { return i < per ? 0 : 1; }, [&](int i) {
+                        const bool second = i >= per;
+                        const int t = second ? i - per : i;
+                        const auto touch = [&](size_t off, size_t len) {
+                            for (size_t q = 0; q < len; q += 4096) ((volatile char*) p)[off + q] = 0;
+                        };
+                        for (size_t sl = (size_t) t; sl < slots; sl += (size_t) per) {
+                            const size_t o = sl * rl->stride;
+                            if (!second) {
+                                touch(o, gh);
+                                touch(o + rl->gu, gh);
+                                touch(o + rl->doff, dh);
+                            } else {
+                                touch(o + gh, gh);
+                                touch(o + rl->gu + gh, gh);
+                                touch(o + rl->doff + dh, rl->stride - rl->doff - dh);
+                            }
+                        }
+                    });
+                } else {
+                    for (size_t o = 0; o < bytes; o += 4096) ((volatile char*) p)[o] = 0;   // placed now, by the policies
+                }
+                const auto tr = std::chrono::steady_clock::now();
                 if (cudaHostRegister(p, bytes, cudaHostRegisterPortable | cudaHostRegisterMapped) != cudaSuccess) {
                     cudaGetLastError();
                     munmap(p, bytes);
                     return nullptr;
                 }
+                std::fprintf(stderr, "glm fast: CUDA%d arena pin %.2f GB: fault-in %.1f s (%d thread%s), cudaHostRegister "
+                             "%.1f s\n", dev, bytes / 1073741824.0,
+                             std::chrono::duration<double>(tr - tf).count(), nt, nt > 1 ? "s" : "",
+                             std::chrono::duration<double>(std::chrono::steady_clock::now() - tr).count());
                 const int i = g_rh_n.load();
                 if (i < 32) {
                     g_rh[i] = {(const uint8_t*) p, (const uint8_t*) p + bytes, *rl, n0, n1};
@@ -477,7 +562,8 @@ static void* numa_pinned(size_t bytes, const RowLayout* rl = nullptr) {
         }
         std::fclose(bf);
     }
-    if (!huge_known || huge_free >= bytes + ((size_t) 1 << 30)) madvise(p, bytes, MADV_HUGEPAGE);
+    const bool huge = !huge_known || huge_free >= bytes + ((size_t) 1 << 30);
+    if (huge) madvise(p, bytes, MADV_HUGEPAGE);
     // (the registration faults the pages in, one thread: faulting them from 16 threads first started ~40 s sooner but
     // left fewer huge pages - the CPU lane read its experts 6-8% slower, 2-socket Xeon 6152)
     // fault in before registering: cudaHostRegister holds the driver lock, stalling other parts' copies
@@ -485,15 +571,36 @@ static void* numa_pinned(size_t bytes, const RowLayout* rl = nullptr) {
         munmap(p, bytes);
         return nullptr;
     }
-    for (size_t o = 0; o < bytes; o += 4096) ((volatile char*) p)[o] = 0;
+    const auto tf = std::chrono::steady_clock::now();
+    // (huge pages: one thread - see above; the interleave places a page by its offset, not by who faults it)
+    int nt = huge ? 1 : arena_par_threads(par_parts);
+    const auto cpus = numa_node_cpu_lists();
+    if (nt > 1 && (cpus.size() < 2 || !arena_policy_covers(p, bytes))) nt = 1;
+    if (nt > 1) {
+        const size_t pages = bytes / 4096;
+        arena_threads(nt, cpus, [&](int i) { return i % (int) cpus.size(); }, [&](int i) {
+            const size_t a = pages * (size_t) i / (size_t) nt, b = pages * (size_t) (i + 1) / (size_t) nt;
+            for (size_t q = a; q < b; ++q) ((volatile char*) p)[q * 4096] = 0;
+        });
+        for (size_t o = pages * 4096; o < bytes; o += 4096) ((volatile char*) p)[o] = 0;
+    } else {
+        for (size_t o = 0; o < bytes; o += 4096) ((volatile char*) p)[o] = 0;
+    }
+    const auto tr = std::chrono::steady_clock::now();
     if (cudaHostRegister(p, bytes, cudaHostRegisterPortable | cudaHostRegisterMapped) != cudaSuccess) {
         cudaGetLastError();
         munmap(p, bytes);
         return nullptr;
     }
+    std::fprintf(stderr, "glm fast: CUDA%d arena pin %.2f GB (interleaved%s): fault-in %.1f s (%d thread%s), "
+                 "cudaHostRegister %.1f s\n", dev, bytes / 1073741824.0, huge ? ", huge pages" : "",
+                 std::chrono::duration<double>(tr - tf).count(), nt, nt > 1 ? "s" : "",
+                 std::chrono::duration<double>(std::chrono::steady_clock::now() - tr).count());
     return p;
 #else
     (void) bytes;
+    (void) rl;
+    (void) par_parts;
     return nullptr;
 #endif
 }
@@ -1861,7 +1968,18 @@ bool Glm5Model::fast_setup(std::string& err) {
             // ... and then pin one after another, in part order: near a pinning cap (Windows) parts pinning at once
             // raced for the room under it - a 2x RTX 3080 box's first part shrank to 13.1 of its planned 21.5 GB while
             // the second pinned all of its 22.5 (#105).  In turn, only the part that reaches the cap gives way
-            split_load_->wait_pin(part_);
+            // (Linux, STRATA_GLM_ARENA_PAR=1: no cap to race for - the parts pin at once)
+#ifdef __linux__
+            if (arena_par_threads(n_parts_) > 1) {
+                std::fprintf(stderr, "glm fast: CUDA%d pins beside the other parts (arena par)\n", dev_);
+            } else
+#endif
+            {
+                const auto tw = std::chrono::steady_clock::now();
+                split_load_->wait_pin(part_);
+                std::fprintf(stderr, "glm fast: CUDA%d pin turn after %.1f s\n", dev_,
+                             std::chrono::duration<double>(std::chrono::steady_clock::now() - tw).count());
+            }
         }
         // the small pinned buffers first - the table updates and the disk reads' staging (an expert a routed entry):
         // where the driver caps what can be pinned (Windows: an RTX 5090 Laptop with 64 GB, the cap reached at a 45.3
@@ -1947,7 +2065,8 @@ bool Glm5Model::fast_setup(std::string& err) {
                         rl = {R.stride, F->L[(size_t) il2].gu_bytes, F->L[(size_t) il2].down_off, F->L[(size_t) il2].blob};
                         break;
                     }
-                if ((p = numa_pinned((size_t) n * R.stride, rl.gu > 0 ? &rl : nullptr)) != nullptr) {   // (over every socket: numa_pinned)
+                if ((p = numa_pinned((size_t) n * R.stride, rl.gu > 0 ? &rl : nullptr,
+                                     split_load_ != nullptr ? n_parts_ : 1)) != nullptr) {   // (over every socket: numa_pinned)
                     R.registered = true;
                     R.per_part = 0;   // (one mapping)
                     break;
