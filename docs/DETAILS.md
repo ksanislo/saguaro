@@ -2032,6 +2032,10 @@ the pairs in which the switched arm won). They are here so you can try them on y
   chunks keep the existing path. It changes rounding too (first-token KL against the default 0.006-0.007 on average, the same top
   token in 12 of 12 prompts); on a Radeon 8060S (gfx1151) the layer's recurrence is 1.6x faster and a 4K-128K prompt after a warm-up prompt 1.4-2.1%; see
   [the HIP conditions and numerical checks](AMD_HIP.md#opt-in-chunked-prompt-gdn-on-gfx11).
+  `STRATA_GDN_CHUNKED_SM75=1` is the same recurrence for Turing (Tesla T4, sm_75) and newer cards: FP16 tensor-core
+  products with every operand split into fp16 hi + lo (FP32-level, other bits), a warp per value head and 16 columns,
+  32 KB of shared memory a block (`src/prefill/gdn_chunk_sm75.cuh`; `gdn_rec_parity` checks it against the default
+  kernel and FP64 and times it). Not measured on a card yet.
 - **`STRATA_FS_SLOTS=N`: the Foresight swap space** (q8atnight, #1348): N VRAM slots per layer, refilled on a copy stream
   with the experts that just missed and with the ones the next layer's router predicts (`STRATA_FS_AHEAD=0` for the
   misses only), so that an expert the cache lacks can be computed on the GPU instead of by the CPU. The model's own router

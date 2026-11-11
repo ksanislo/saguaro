@@ -1218,6 +1218,7 @@ cudaError_t gdn_rec_chunked(float* state, const float* h, const float* gate, con
     }
     return cudaSuccess;   // launch errors surface at the caller's check; an error above means nothing ran
 }
+#include "gdn_chunk_sm75.cuh"   // STRATA_GDN_CHUNKED_SM75=1: the chunked recurrence on Turing tensor cores
 #endif
 #if defined(__HIPCC__)   // the Aurora (gfx11) recurrence kernels: AMD builds only
 // Aurora (S23): the recurrence with the column-split grid of gdn_rec_cols_pipe_kernel (four 32-column blocks per value
@@ -2714,7 +2715,11 @@ void gdn_recurrence_variant(int variant, float* state, const float* h, const flo
         // STRATA_GDN_CHUNKED=1 (opt-in): the recurrence in chunks for prompt chunks of kGdnChunkedMin+ tokens (other
         // bits; a shorter chunk, a card it does not fit or a failed scratch allocation takes the kernels below)
         static const bool chunked = [] { const char* v = std::getenv("STRATA_GDN_CHUNKED"); return v != nullptr && std::atoi(v) != 0; }();
+        // STRATA_GDN_CHUNKED_SM75=1 (opt-in): the same on FP16 tensor cores with hi/lo splits (sm_75+, other bits)
+        static const bool chunked75 = [] { const char* v = std::getenv("STRATA_GDN_CHUNKED_SM75"); return v != nullptr && std::atoi(v) != 0; }();
         if (chunked && T >= kGdnChunkedMin && gdn_rec_chunked(state, h, gate, beta, y, T, (cudaStream_t) stream) == cudaSuccess) {
+        } else if (chunked75 && T >= kGdnChunkedMin &&
+                   gdn_rec_chunked_sm75(state, h, gate, beta, y, T, (cudaStream_t) stream) == cudaSuccess) {
         } else if (pipe && gdn_keyhead_ok())   // the value heads of a key head in one thread (same bits)
             gdn_rec_kh_kernel<<<HK * NCB, dim3(CB, RG), 0, (cudaStream_t) stream>>>(state, h, gate, beta, y, T);
         else

@@ -8,7 +8,8 @@
 // output, the state after it and the FP16 output must be the same bits.  STRATA_GDN_CHUNKED=1's recurrence in chunks
 // (copied below too) sums in another order: it must stay within 1e-4 of gdn_rec_kh_kernel (largest |difference| over
 // largest |value|, the output and the state), also at T = 8192 and 32768; up to 8192 both are also measured against
-// the recurrence in FP64.
+// the recurrence in FP64.  STRATA_GDN_CHUNKED_SM75=1's tensor-core version (src/prefill/gdn_chunk_sm75.cuh, included,
+// so this is the engine's code) is held to the same 1e-4, also at 2048, 8192 and 32768 tokens, and --bench times it.
 //
 // Synthetic inputs of the model's shape (q/k L2-normalized per key head as gdn_l2_kernel leaves them), no model.
 //   gdn_rec_parity            the bit checks (T from 1 to 4099, a non-zero state as after an earlier chunk)
@@ -590,6 +591,7 @@ cudaError_t gdn_rec_chunked(float* state, const float* h, const float* gate, con
     }
     return cudaSuccess;   // launch errors surface at the caller's check; an error above means nothing ran
 }
+#include "gdn_chunk_sm75.cuh"   // STRATA_GDN_CHUNKED_SM75=1: the chunked recurrence on Turing tensor cores
 // the output norm over a head's 128 columns, into the FP16 copy the out projection reads (the FP32 output before the
 // norm stays in its scratch buffer)
 __global__ void __launch_bounds__(S) gdn_out_norm_kernel(const float* __restrict__ z, const float* __restrict__ gamma,
@@ -894,6 +896,54 @@ int check_chunked(int64_t T, uint64_t seed) {
     return bad ? 1 : 0;
 }
 
+// STRATA_GDN_CHUNKED_SM75=1's recurrence (FP16 tensor cores, hi/lo splits; src/prefill/gdn_chunk_sm75.cuh) against
+// gdn_rec_kh_kernel, held to the same 1e-4 as the FP32 chunked one, and against FP64 up to 8192 tokens
+int check_chunked_sm75(int64_t T, uint64_t seed) {
+    Inputs in(T, seed);
+    const size_t st = (size_t) S * HV * S, oc_n = (size_t) T * HV * S;
+    float* s0 = dalloc<float>(st);
+    float* s1 = dalloc<float>(st);
+    float* o0 = dalloc<float>(oc_n);
+    float* o1 = dalloc<float>(oc_n);
+    ck(cudaMemcpy(s0, in.state0, st * 4, cudaMemcpyDeviceToDevice), "state copy");
+    ck(cudaMemcpy(s1, in.state0, st * 4, cudaMemcpyDeviceToDevice), "state copy");
+    ck(cudaMemset(o1, 0xff, oc_n * 4), "output poison");   // NaN: an output the kernel misses fails the check
+    gdn_rec_kh_kernel<<<HK * NCB, dim3(CB, RG)>>>(s0, in.h, in.gate, in.beta, o0, in.T);
+    const cudaError_t e = gdn_rec_chunked_sm75(s1, in.h, in.gate, in.beta, o1, in.T, 0);
+    if (e == cudaErrorNotSupported) {
+        std::printf("     T=%-6lld chunked sm75: not on this card (sm_75+)\n", (long long) T);
+        cudaFree(s0); cudaFree(s1); cudaFree(o0); cudaFree(o1);
+        return 0;
+    }
+    ck(e, "chunked sm75");
+    ck(cudaDeviceSynchronize(), "chunked sm75 run");
+    const double eo = max_rel(o0, o1, oc_n), es = max_rel(s0, s1, st);
+    size_t nonfinite = 0;   // max_rel's std::max skips NaN
+    {
+        std::vector<float> x(oc_n), y(st);
+        ck(cudaMemcpy(x.data(), o1, oc_n * 4, cudaMemcpyDeviceToHost), "copy");
+        ck(cudaMemcpy(y.data(), s1, st * 4, cudaMemcpyDeviceToHost), "copy");
+        for (const float v : x) nonfinite += !std::isfinite(v);
+        for (const float v : y) nonfinite += !std::isfinite(v);
+    }
+    if (nonfinite) std::printf("FAIL T=%-6lld chunked sm75: %zu outputs / state values not finite\n", (long long) T, nonfinite);
+    const bool bad = !(eo < 1e-4) || !(es < 1e-4) || nonfinite > 0;
+    std::printf("%s T=%-6lld chunked sm75 (STRATA_GDN_CHUNKED_SM75): output %.2e, state %.2e (max |diff| / max |value|)\n",
+                bad ? "FAIL" : "    ", (long long) T, eo, es);
+    if (T <= 8192) {
+        double* sd = dalloc<double>(st);
+        double* od = dalloc<double>(oc_n);
+        to_f64<<<1024, 256>>>(in.state0, sd, (int64_t) st);
+        gdn_rec_f64_kernel<<<HV, S>>>(sd, in.h, in.gate, in.beta, od, in.T);
+        ck(cudaDeviceSynchronize(), "FP64 run");
+        std::printf("            against FP64: gdn_rec_kh_kernel output %.2e, state %.2e; chunked sm75 output %.2e, state %.2e\n",
+                    max_rel_f64(o0, od, oc_n), max_rel_f64(s0, sd, st), max_rel_f64(o1, od, oc_n), max_rel_f64(s1, sd, st));
+        cudaFree(sd); cudaFree(od);
+    }
+    cudaFree(s0); cudaFree(s1); cudaFree(o0); cudaFree(o1);
+    return bad ? 1 : 0;
+}
+
 float median(std::vector<float> v) {
     std::sort(v.begin(), v.end());
     return v.empty() ? 0.0f : v[v.size() / 2];
@@ -949,6 +999,18 @@ void bench(int64_t T) {
             });
             if (i >= warm) t_kc[v].push_back(ms);
         }
+    std::vector<float> t_kt[2];   // gdn_rec_kh_kernel and the sm75 chunked recurrence, alternating
+    const bool can_t = gdn_rec_chunked_sm75(state, in.h, in.gate, in.beta, oc, in.T, 0) == cudaSuccess &&
+                       cudaDeviceSynchronize() == cudaSuccess;
+    for (int i = 0; can_t && i < warm + rounds; ++i)
+        for (int j = 0; j < 2; ++j) {
+            const int v = (i + j) % 2;
+            const float ms = timed([&] {
+                if (v == 0) gdn_rec_kh_kernel<<<HK * NCB, dim3(CB, RG)>>>(state, in.h, in.gate, in.beta, oc, in.T);
+                else ck(gdn_rec_chunked_sm75(state, in.h, in.gate, in.beta, oc, in.T, 0), "chunked sm75");
+            });
+            if (i >= warm) t_kt[v].push_back(ms);
+        }
     const float r0 = median(t_rec[kBefore]), r1 = median(t_rec[kKeyHead]), n0 = median(t_norm[0]), n1 = median(t_norm[1]);
     std::printf("  T = %lld tokens, one layer (48 value heads), medians of %d alternating runs:\n", (long long) T, rounds);
     std::printf("    recurrence, before (gdn_rec_cols_pipe_kernel)  %8.2f ms  (%.3f us per token)\n", r0,
@@ -959,6 +1021,11 @@ void bench(int64_t T) {
         const float kh = median(t_kc[0]), kc = median(t_kc[1]);
         std::printf("    recurrence, chunked (STRATA_GDN_CHUNKED=1)     %8.2f ms  (%.3f us per token)  %.2fx gdn_rec_kh_kernel\n",
                     kc, 1000.0f * kc / (float) T, kh / kc);
+    }
+    if (can_t) {
+        const float kh = median(t_kt[0]), kt = median(t_kt[1]);
+        std::printf("    recurrence, chunked sm75 (_CHUNKED_SM75=1)     %8.2f ms  (%.3f us per token)  %.2fx gdn_rec_kh_kernel"
+                    " (%.2f ms)\n", kt, 1000.0f * kt / (float) T, kh / kt, kh);
     }
     std::printf("    output norm, before (FP32 and FP16 store)      %8.2f ms\n", n0);
     std::printf("    output norm, FP16 store only                   %8.2f ms  %.2fx\n", n1, n0 / n1);
@@ -1377,6 +1444,8 @@ int main(int argc, char** argv) {
     }
     for (const int64_t T : Ts) fails += check_chunked(T, seed++);
     for (const int64_t T : {(int64_t) 8192, (int64_t) 32768}) fails += check_chunked(T, seed++);
+    for (const int64_t T : Ts) fails += check_chunked_sm75(T, seed++);
+    for (const int64_t T : {(int64_t) 2048, (int64_t) 8192, (int64_t) 32768}) fails += check_chunked_sm75(T, seed++);
     if (do_bench) {
         std::printf("--bench: the prompt path's DeltaNet recurrence\n");
         bench(2048);
