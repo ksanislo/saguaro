@@ -488,7 +488,12 @@ bool Glm5Model::seq_activate(int s, std::string& err) {
     }
     cudaSetDevice(dev_);
     if (!e.back(0, e.fixed, e.hfixed)) {
-        err = "glm elastic: CUDA" + std::to_string(dev_) + " could not back a conversation's state";
+        size_t fr = 0, tot = 0;
+        cudaMemGetInfo(&fr, &tot);
+        cudaGetLastError();
+        err = "glm elastic: CUDA" + std::to_string(dev_) + " could not back a conversation's state (" +
+              std::to_string(e.fixed >> 20) + " MB; " + std::to_string(fr >> 20) + " MB free on the card, budget " +
+              std::to_string((el_budget_ - el_backed_) >> 20) + " MB left)";
         return false;
     }
     cudaMemset((void*) e.base, 0, e.fixed);

@@ -8198,6 +8198,22 @@ SlotWriter& slot_writer() {
     static SlotWriter w;
     return w;
 }
+
+// each card's free VRAM in MiB, " CUDA0 676 CUDA1 684 ..." (the fast slot lines print it before and after: the fast
+// path allocates no VRAM, so a drop there is someone else's)
+std::string vram_free_mib(const std::vector<int>& devs) {
+    int cur = 0;
+    cudaGetDevice(&cur);
+    std::string r;
+    for (int d : devs) {
+        size_t fr = 0, tot = 0;
+        cudaSetDevice(d);
+        if (cudaMemGetInfo(&fr, &tot) != cudaSuccess) cudaGetLastError();
+        r += " CUDA" + std::to_string(d) + " " + std::to_string(fr >> 20);
+    }
+    cudaSetDevice(cur);
+    return r;
+}
 }  // namespace
 
 // STRATA_GLM_SLOT_FAST: the slot's byte stream (as slot_save writes it) built in a host image that alloc(total, pinned)
@@ -8283,6 +8299,9 @@ uint64_t Glm5Model::slot_save_bg(const std::string& tmp, const std::string& path
                                  const std::function<bool(uint64_t)>& after, std::string& err) {
     auto j = std::make_shared<SlotWriter::Job>();
     double ms = 0;
+    std::vector<int> devs;
+    for (Glm5Model* m = this; m != nullptr; m = m->split_next_.get()) devs.push_back(m->dev_);
+    const std::string vb = vram_free_mib(devs);
     const auto t0 = std::chrono::steady_clock::now();
     double waited = 0;
     const uint64_t bytes = slot_image([&](uint64_t total, bool& pinned) {
@@ -8301,6 +8320,7 @@ uint64_t Glm5Model::slot_save_bg(const std::string& tmp, const std::string& path
     j->after = after;
     const bool pinned = j->buf.pinned;
     slot_writer().push(std::move(j));
+    std::fprintf(stderr, "glm slots: fast save VRAM free MiB before%s, after%s\n", vb.c_str(), vram_free_mib(devs).c_str());
     std::fprintf(stderr, "glm slots: fast save %lld positions, %.2f GB - parts copied at once in %.0f ms (%s), queue wait "
                  "%.0f ms, %.0f ms in all; the file is written in the background\n", (long long) snap_pos_, bytes / 1e9,
                  ms, pinned ? "pinned image" : "pageable image, double-buffered", waited * 1000.0,
@@ -8560,6 +8580,9 @@ bool Glm5Model::slot_load(const std::string& path, int64_t n_pos, std::string& e
     }
     if (kda_seen != kda_want || dsa_seen != dsa_want) return differs();
     if (fast) {
+        std::vector<int> devs;
+        for (Glm5Model* m : parts) devs.push_back(m->dev_);
+        const std::string vb = vram_free_mib(devs);
         const auto t0 = std::chrono::steady_clock::now();
         ReadProgress rp;
         std::thread reader([&] {
@@ -8596,6 +8619,8 @@ bool Glm5Model::slot_load(const std::string& path, int64_t n_pos, std::string& e
                      (long long) n, img_bytes / 1e9,
                      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(),
                      img.pinned ? "pinned image" : "pageable image, double-buffered");
+        std::fprintf(stderr, "glm slots: fast take VRAM free MiB before%s, after%s\n", vb.c_str(),
+                     vram_free_mib(devs).c_str());
     }
     for (Glm5Model* m : parts) {
         m->kv_stream_reset_maps();   // KV streaming: the slots held the other conversation's blocks
