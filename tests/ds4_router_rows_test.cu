@@ -2,8 +2,8 @@
 // rows a warp (DS4_ROUTER_T / DS4_ROUTER_RW) against the 8-token kernel: every logit bit for bit (F32 and BF16
 // weights), the one-token kernel's bits on a few tokens too, and each variant's time at 4096 and 8192 tokens
 // (DeepSeek-V4.1's router: 384 rows of 5120; the arms interleaved, their order rotated).
-//   nvcc -O3 -std=c++17 -arch=sm_75 -I include -I src/ds4 tests/ds4_router_rows_test.cu src/ds4/ds4_kernels.cu \
-//        src/ds4/ds4_host_ar.cpp -Xcompiler -mavx2,-mfma,-mf16c -o build/ds4_router_rows_test
+//   ninja -C build ds4_router_rows_test   (a CMake target, EXCLUDE_FROM_ALL: the project's CPU flags - no -mavx2/-mfma,
+//   which an AVX1 host (Ivy Bridge) cannot run)
 //   CUDA_VISIBLE_DEVICES=0 build/ds4_router_rows_test [n] [k] [reps]
 #include "ds4_kernels.cuh"
 

@@ -726,6 +726,13 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
                                        src/ds4/ds4_host_ar.cpp)
     target_include_directories(ds4_multi_attn_test PRIVATE ${_strata_gpu_include_directories} include)
     target_link_libraries(ds4_multi_attn_test PRIVATE ${_strata_gpu_runtime_target})
+    # the indexer's tensor-core scores against the CUDA cores' (DS4_INDEX_TC / DS4_INDEX_TC_SM75) and the prompt's
+    # router rows (DS4_ROUTER_T / RW) bit for bit (need a GPU, no model; built by name - the project's CPU flags)
+    foreach(_t ds4_index_score_tc ds4_router_rows_test)
+      add_executable(${_t} EXCLUDE_FROM_ALL tests/${_t}.cu src/ds4/ds4_kernels.cu src/ds4/ds4_host_ar.cpp)
+      target_include_directories(${_t} PRIVATE ${_strata_gpu_include_directories} include)
+      target_link_libraries(${_t} PRIVATE ${_strata_gpu_runtime_target})
+    endforeach()
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/ds4_packinfo_test.cpp")
       # maya-ds4 --pack-info on packs written for it (healthy, dead, short, a type no kernel takes, a drafter its
       # metadata leaves out, a profile of another size): host code only, no GPU
