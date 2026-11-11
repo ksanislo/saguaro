@@ -27,6 +27,11 @@ static float fp4h(unsigned c) {   // (fp4v on the host)
 }
 
 int main() {
+    int ndev = 0;
+    if (cudaGetDeviceCount(&ndev) != cudaSuccess || ndev < 1) {   // (no GPU: no result, not a pass)
+        std::printf("no CUDA device - FAIL\n");
+        return 2;
+    }
     std::mt19937 rng(11);
     std::uniform_int_distribution<int> code(0, 15), sexp(-6, 3), cbyte(121, 130);
     std::normal_distribution<float> nd;
@@ -150,6 +155,10 @@ int main() {
         cudaFree(o1);
         cudaFree(o2);
         if (dc) cudaFree(dc);
+    }
+    if (cudaDeviceSynchronize() != cudaSuccess || cudaGetLastError() != cudaSuccess) {
+        std::printf("CUDA error\n");
+        ++fails;
     }
     std::printf("%s\n", fails == 0 ? "PASS" : "FAIL");
     return fails == 0 ? 0 : 1;

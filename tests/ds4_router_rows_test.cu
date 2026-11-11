@@ -16,6 +16,11 @@
 using namespace strata::ds4;
 
 int main(int argc, char** argv) {
+    int ndev = 0;
+    if (cudaGetDeviceCount(&ndev) != cudaSuccess || ndev < 1) {   // (no GPU: no result, not a pass)
+        std::printf("no CUDA device - FAIL\n");
+        return 2;
+    }
     const int n = argc > 1 ? std::atoi(argv[1]) : 384, k = argc > 2 ? std::atoi(argv[2]) : 5120;
     const int reps = argc > 3 ? std::atoi(argv[3]) : 20, ldy = 1024;
     const int Ts[] = {4096, 8192, 4093};
