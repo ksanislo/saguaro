@@ -2947,7 +2947,7 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
         bg_end = [&] {
             InGate ig(gp);
             if (bg_th.joinable()) bg_th.join();
-            Act* a = bg;
+            Act* a = bg;   // (compared only: dereferenced only once found in acts - settle leaves an act with bg set)
             bool found = false;
             for (const auto& x : acts) found = found || x.get() == a;
             const double ms = now_ms() - bs.t0;
