@@ -9850,6 +9850,7 @@ struct Model::Impl {
     };
     std::vector<ElTake> elt;      // [device]
     std::vector<size_t> el_rmax;  // [device] the take room asked for
+    std::vector<size_t> el_hold_g;   // [device] DS4_DBG_TAKE_HOLD: the forced take's granules, never given back
     std::vector<std::vector<uint8_t>> el_mark;   // [layer][expert] taken
     static bool el_budget_mode() {
         const char* a = ds4_env("DS4_ELASTIC_CONV_MB");
@@ -10299,9 +10300,10 @@ struct Model::Impl {
         if (el == nullptr || elt.empty()) return;
         const size_t H = idle ? 0 : el_env_mb("DS4_ELASTIC_HYST_MB", 128) / el->gran;
         for (size_t di = 0; di < devs.size(); ++di) {
-            const size_t taken = el->taken_in[di];
+            const size_t hold = di < el_hold_g.size() ? el_hold_g[di] : 0;   // (DS4_DBG_TAKE_HOLD: kept)
+            const size_t taken = el->taken_in[di] > hold ? el->taken_in[di] - hold : 0;
             if (taken == 0) continue;
-            const size_t total = el->made[di] + taken, free = el->idle[di].size();
+            const size_t total = el->made[di] + el->taken_in[di], free = el->idle[di].size();
             const size_t backed = el->held_dev((int) di);
             if (free + backed != total) {
                 std::fprintf(stderr, "ds4: elastic: CUDA%d: POOL BOOKS WRONG (%zu owned, %zu free, %zu held) - nothing "
@@ -23355,8 +23357,15 @@ void Model::el_give_back_surplus(bool idle) { p_->el_give_back_surplus(idle); }
 size_t Model::el_force_take(size_t mb) {
     size_t n = 0;
     if (p_->el == nullptr) return 0;
-    for (size_t di = 0; di < p_->devs.size(); ++di)
-        n += p_->el_take(di, std::max<size_t>(1, (mb << 20) / p_->el->gran), "DS4_DBG_TAKE_AT");
+    const char* hv = std::getenv("DS4_DBG_TAKE_HOLD");
+    const bool hold = hv != nullptr && std::atoi(hv) != 0;
+    if (hold) p_->el_hold_g.resize(p_->devs.size(), 0);
+    for (size_t di = 0; di < p_->devs.size(); ++di) {
+        const size_t g = p_->el_take(di, std::max<size_t>(1, (mb << 20) / p_->el->gran), "DS4_DBG_TAKE_AT");
+        if (hold) p_->el_hold_g[di] += g;
+        n += g;
+    }
+    if (hold) std::fprintf(stderr, "ds4: DEBUG: DS4_DBG_TAKE_HOLD: the forced take is kept\n");
     return n;
 }
 int64_t Model::seq_pos(int s) const { return p_->seq_pos(s); }
