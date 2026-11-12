@@ -9809,6 +9809,12 @@ struct Model::Impl {
         const int64_t T = std::min<int64_t>(el_budget_tokens(), (int64_t) n * o.max_context);
         el_whole_dev.assign(devs.size(), 0.0);
         el_pool_dev.assign(devs.size(), 0.0);
+        // DS4_ELASTIC_CONV_MB=<MB> (a test's knob): the pool's bytes in all instead, no slack - each card its share of
+        // a whole context's bytes
+        const char* mbv = ds4_env("DS4_ELASTIC_CONV_MB");
+        const double mb = mbv != nullptr ? std::atof(mbv) : 0.0;
+        double ctx_all = 0;
+        for (const auto& b : el->seqs[0].b) ctx_all += (double) b.max_rows * b.rb;
         for (size_t di = 0; di < devs.size(); ++di) {
             // (T positions of one conversation's buffers on this device, and two granules of slack a buffer each)
             size_t bytes = 0;
@@ -9819,6 +9825,12 @@ struct Model::Impl {
                 for (const auto& b : el->seqs[(size_t) s].b)
                     if (b.di == (int) di) el_whole_dev[di] += (double) b.max_rows * b.rb;
             bytes += (size_t) nb * (size_t) n * 2 * el->gran;
+            if (mb > 0) {
+                double ctx_dev = 0;
+                for (const auto& b : el->seqs[0].b)
+                    if (b.di == (int) di) ctx_dev += (double) b.max_rows * b.rb;
+                bytes = (size_t) std::ceil(mb * 1e6 * (ctx_all > 0 ? ctx_dev / ctx_all : 0.0));
+            }
             cudaSetDevice(devs[di].id);
             if (!el->fill((int) di, bytes)) {
                 err = "DS4_ELASTIC_CONV: CUDA" + std::to_string(devs[di].id) + " could not make its pool of " +
@@ -9853,12 +9865,19 @@ struct Model::Impl {
             std::snprintf(b, sizeof b, "%sCUDA%d %.0f (~%.0f without)", per.empty() ? "" : ", ", devs[di].id, n, was);
             per += b;
         }
+        const char* mbv = ds4_env("DS4_ELASTIC_CONV_MB");
+        const std::string sized =
+            mbv != nullptr && std::atof(mbv) > 0
+                ? std::string("DS4_ELASTIC_CONV_MB=") + mbv
+                : std::to_string((long long) std::min<int64_t>(el_budget_tokens(), (int64_t) el->seqs.size() * o.max_context)) +
+                      " positions + 2 granules a buffer a conversation";
         std::fprintf(stderr, "ds4: elastic conversations: %d, %.2f GB held back for the experts, taken on demand "
-                             "(DS4_ELASTIC_CONV: their whole contexts %.2f GB -> a shared pool of %.2f GB for %lld "
-                             "positions in all, %.2f MB a 1K); experts in VRAM a card: %s\n",
-                     (int) el->seqs.size(), std::max(0.0, whole - pool) / 1e9, whole / 1e9, pool / 1e9,
-                     (long long) std::min<int64_t>(el_budget_tokens(), (int64_t) el->seqs.size() * o.max_context),
-                     el_bytes_per_k(), per.c_str());
+                             "(DS4_ELASTIC_CONV: their whole contexts %.2f GB -> a shared pool of %.0f MB (%s), %.2f MB "
+                             "a 1K positions, a conversation at least %.0f MB: a %.0f MB granule for each of its %zu "
+                             "buffers); experts in VRAM a card: %s\n",
+                     (int) el->seqs.size(), std::max(0.0, whole - pool) / 1e9, whole / 1e9, pool / 1e6, sized.c_str(),
+                     el_bytes_per_k(), (double) (el->seqs[0].b.size() * el->gran) / 1e6, el->gran / 1e6,
+                     el->seqs[0].b.size(), per.c_str());
     }
     double el_bytes_per_k() const {
         double b = 0;
