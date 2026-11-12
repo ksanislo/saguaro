@@ -9828,7 +9828,8 @@ struct Model::Impl {
     // loop's turns.  The expert cache leaves a taken expert alone (el_mark); a layer whose spare slot is taken parks it
     struct ElRec {
         int il, e, slot;
-        size_t off;   // (its slot's offset in the tail)
+        size_t off;    // (its slot's offset in the tail)
+        int ram = -1;  // (the RAM copy tier's slot it computes from while taken; -1: the file)
     };
     struct ElTake {
         bool on = false;
@@ -9838,6 +9839,13 @@ struct Model::Impl {
         std::vector<uint64_t> sum;           // DS4_CHECK_ELASTIC: [granule] the bytes' hash when given
         std::vector<size_t> bad;             // (granules whose bytes did not come back: their experts stay on the CPU lane)
         std::string why;                     // (not on: why)
+        // the taken experts' RAM: copy-tier slots of its own (ram_part, appended at the first take), one for each tail
+        // slot [floor, top) touches - a taken expert computes from its VRAM bytes copied there (the cache's swap-out to
+        // RAM: D2H, blob_to_ram), as any copied CPU-lane expert; without the copy tier, from the file
+        bool ram_tried = false;
+        uint8_t* ram = nullptr;
+        std::vector<int> ram_free;
+        size_t ram_bytes = 0;
     };
     std::vector<ElTake> elt;      // [device]
     std::vector<size_t> el_rmax;  // [device] the take room asked for
@@ -9903,6 +9911,78 @@ struct Model::Impl {
     size_t el_taken_g(size_t di) const {
         return di < elt.size() && elt[di].on ? (elt[di].top - elt[di].lo) / el->gran : 0;
     }
+    // (the first take on card di) its taken experts' RAM slots: false - none, they compute from the file
+    bool el_ram_ready(size_t di) {
+        ElTake& t = elt[di];
+        if (t.ram_tried) return t.ram != nullptr;
+        t.ram_tried = true;
+        if (!copy_mode || cp_lay.size() < L.size()) return false;
+        Dev& d = devs[di];
+        int n = 0;
+        size_t sb = 0;
+        for (const Layer& l : L) {
+            if (l.dev != (int) di || l.mtp || l.n_main >= l.n_slots || l.ram.empty()) continue;
+            const size_t u = align256(unit(l)), base = (size_t) (l.xbase - d.tail);
+            for (int sl = l.n_main; sl < l.n_slots; ++sl) {
+                const size_t off = base + (size_t) (sl - l.n_main) * d.tail_step;
+                if (off < t.top && off + u > t.floor) ++n;
+            }
+            sb = std::max(sb, align256(cp_lay[(size_t) l.il][3]));
+        }
+        if (n == 0 || sb == 0) return false;
+        std::string e2;
+        if (!halloc(t.ram, (size_t) n * (size_t) NH * sb, e2)) {
+            t.ram = nullptr;
+            std::fprintf(stderr, "ds4: elastic: CUDA%d: no pinned RAM for its taken experts (%s) - they compute from the "
+                                 "file\n", d.id, e2.c_str());
+            return false;
+        }
+        t.ram_bytes = (size_t) n * (size_t) NH * sb;
+        for (int i = 0; i < n; ++i) {
+            std::array<uint8_t*, kMaxNH> parts{};
+            for (int X = 0; X < NH; ++X) parts[(size_t) X] = t.ram + ((size_t) i * (size_t) NH + (size_t) X) * sb;
+            t.ram_free.push_back((int) ram_part.size());
+            ram_part.push_back(parts);
+        }
+        if (!zc_slot.empty()) {   // (not pinned for the zero-copy pulls: a layer with one taken pulls as without them)
+            zc_slot.resize(ram_part.size(), 0);
+            zc_delta.resize(ram_part.size(), 0);
+        }
+        std::fprintf(stderr, "ds4: elastic: CUDA%d's taken experts compute from RAM: %d copy-tier slots of their own, "
+                             "%.0f MB pinned\n", d.id, n, t.ram_bytes / 1e6);
+        return true;
+    }
+    // a taken expert's VRAM bytes into one of card di's RAM slots (-1: none - it computes from the file);
+    // DS4_CHECK_ELASTIC: each matrix part against the file's bytes
+    int el_to_ram(size_t di, Layer& l, int e, int sl, std::vector<uint8_t>& blob) {
+        ElTake& t = elt[di];
+        if (!el_ram_ready(di) || t.ram_free.empty() || l.ram.empty() || l.ram[(size_t) e] >= 0) return -1;
+        const int rs = t.ram_free.back();
+        blob.resize(l.blob);
+        if (cudaMemcpy(blob.data(), sat(l, l, sl, unit(l)), unit(l), cudaMemcpyDeviceToHost) != cudaSuccess) {
+            cudaGetLastError();
+            return -1;
+        }
+        blob_to_ram(l, blob.data(), rs);
+        if (el_check())
+            for (int r = 0; r < 3; ++r) {
+                const size_t nb = (size_t) (mx_n(r) / NH) * mx_row_b(l, r);
+                const uint8_t* f = pk.at(l.mx_file[r], l.mx_off[r] + (uint64_t) e * l.mx_stride[r]);
+                for (int X = 0; X < NH; ++X)
+                    if (f == nullptr || std::memcmp(ram_part[(size_t) rs][(size_t) X] + cp_lay[(size_t) l.il][(size_t) r],
+                                                    f + (size_t) X * nb, nb) != 0) {
+                        ++el_ram_bad;
+                        std::fprintf(stderr, "ds4: elastic: DS4_CHECK_ELASTIC: layer %d expert %d's RAM copy is NOT the "
+                                             "file's (matrix %d part %d) - it computes from the file\n", l.il, e, r, X);
+                        return -1;
+                    }
+                ++el_ram_ok;
+            }
+        t.ram_free.pop_back();
+        l.ram[(size_t) e] = rs;
+        return rs;
+    }
+    size_t el_ram_ok = 0, el_ram_bad = 0;   // (DS4_CHECK_ELASTIC: matrices compared)
     // card di gives the pool up to n granules of its tail (the cards quiet); the granules given
     size_t el_take(size_t di, size_t n, const char* why) {
         if (di >= elt.size() || !elt[di].on || n == 0 || elt[di].lo < elt[di].floor + el->gran) return 0;
@@ -9912,7 +9992,8 @@ struct Model::Impl {
         const size_t G = el->gran;
         const double t0 = now_ms();
         size_t got = 0;
-        int nexp = 0, npark = 0;
+        int nexp = 0, npark = 0, nram = 0;
+        std::vector<uint8_t> blob;
         cudaSetDevice(d.id);
         while (got < n && t.lo >= t.floor + G) {
             const size_t a = t.lo - G;
@@ -9932,6 +10013,8 @@ struct Model::Impl {
                     for (int x = 0; x < l.n_exp && e < 0; ++x)
                         if (l.slot[(size_t) x] == sl) e = x;
                     if (e < 0) continue;   // (none in it, or taken with the granule above)
+                    const int rs = el_to_ram(di, l, e, sl, blob);   // (its bytes still mapped: this granule is not given yet)
+                    nram += rs >= 0;
                     l.slot[(size_t) e] = -1;
                     l.host[(size_t) e] = (uint8_t*) mx_mat(l, e, 0);
                     --l.n_vram;
@@ -9944,7 +10027,7 @@ struct Model::Impl {
                             if (l.mx_file[r] >= 0)
                                 os::advise(pk.fds[(size_t) l.mx_file[r]], l.mx_off[r] + (uint64_t) e * l.mx_stride[r],
                                            mx_part_bytes(l, r), true);
-                    t.rec.push_back({l.il, e, sl, off});
+                    t.rec.push_back({l.il, e, sl, off, rs});
                     ++nexp;
                 }
             }
@@ -9968,8 +10051,8 @@ struct Model::Impl {
         }
         if (got > 0)
             std::fprintf(stderr, "ds4: elastic: CUDA%d experts give %.0f MB to the conversations (%s): %d experts to the "
-                                 "CPU lane%s; taken %.0f of %.0f MB (%.0f ms)\n",
-                         d.id, (double) (got * G) / 1e6, why, nexp,
+                                 "CPU lane (%d computing from RAM, %d from the file)%s; taken %.0f of %.0f MB (%.0f ms)\n",
+                         d.id, (double) (got * G) / 1e6, why, nexp, nram, nexp - nram,
                          npark > 0 ? (", " + std::to_string(npark) + " spare slots parked").c_str() : "",
                          (double) (t.top - t.lo) / 1e6, (double) (t.top - t.floor) / 1e6, now_ms() - t0);
         return got;
@@ -10023,6 +10106,10 @@ struct Model::Impl {
             if (bad_in(r.off, align256(unit(l)))) {   // (its bytes not back: it stays on the CPU lane, its slot unused)
                 ++kept;
             } else if (l.slot[(size_t) r.e] < 0) {
+                if (r.ram >= 0 && !l.ram.empty() && l.ram[(size_t) r.e] == r.ram) {   // (its RAM slot free again)
+                    l.ram[(size_t) r.e] = -1;
+                    t.ram_free.push_back(r.ram);
+                }
                 l.slot[(size_t) r.e] = r.slot;
                 l.host[(size_t) r.e] = nullptr;
                 ++l.n_vram;
@@ -10049,7 +10136,10 @@ struct Model::Impl {
                          d.id, (double) (got * G) / 1e6, why, nexp,
                          nbad > 0 ? (" - " + std::to_string(nbad) + " granules NOT as given (" + std::to_string(kept) +
                                      " experts stay on the CPU lane)").c_str()
-                                  : el_check() ? " (DS4_CHECK_ELASTIC: every byte as given)" : "",
+                                  : el_check() ? (" (DS4_CHECK_ELASTIC: every byte as given; RAM copies vs the file: " +
+                                                  std::to_string(el_ram_ok) + " matrices equal, " +
+                                                  std::to_string(el_ram_bad) + " not)").c_str()
+                                               : "",
                          (double) (t.top - t.lo) / 1e6, (double) (t.top - t.floor) / 1e6, now_ms() - t0);
         return got;
     }
@@ -13012,7 +13102,8 @@ struct Model::Impl {
             if (rb < 0) continue;
             int rc = -1;
             for (int e = 0; e < l.n_exp; ++e)
-                if (l.ram[(size_t) e] >= 0 && (rc < 0 || l.heat[(size_t) e] < l.heat[(size_t) rc])) rc = e;
+                if (l.ram[(size_t) e] >= 0 && !el_taken(l, e) && (rc < 0 || l.heat[(size_t) e] < l.heat[(size_t) rc]))
+                    rc = e;
             const bool room = ram_free.size() > 1;   // (slots VRAM freed: filled at once)
             if (!room && !(rc >= 0 && l.heat[(size_t) rb] > l.heat[(size_t) rc] * 1.25f + 1.0f)) continue;
             RamSwap rs;
