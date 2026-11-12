@@ -20483,11 +20483,17 @@ struct Model::Impl {
         lend_held.store(true, std::memory_order_relaxed);
         bool ok = true;
         size_t n_sh = 0, n_file = 0;
+        std::vector<unsigned long long> tab;
         for (Layer& l : L) {
             if (l.mtp || l.pv_n >= l.n_slots) continue;
             if (l.lend_mark.size() != (size_t) l.n_exp) l.lend_mark.assign((size_t) l.n_exp, 0);
             if (l.lend_src.size() != (size_t) l.n_exp) l.lend_src.assign((size_t) l.n_exp, nullptr);
             const Dev& d = devs[(size_t) l.dev];
+            // (the layer's table read once, its held entries set to 0, written back once - a synchronous copy an
+            //  expert cost ~0.5 s a run's start for ~900 of them, the answers waiting)
+            tab.resize((size_t) l.n_exp);
+            ok = cudaSetDevice(d.id) == cudaSuccess &&
+                 cudaMemcpy(tab.data(), l.vram_tab, tab.size() * 8, cudaMemcpyDeviceToHost) == cudaSuccess && ok;
             for (int e = 0; e < l.n_exp; ++e) {
                 const int sl = l.slot[(size_t) e];
                 if (sl < l.pv_n) continue;
@@ -20500,9 +20506,10 @@ struct Model::Impl {
                 l.slot[(size_t) e] = -1;
                 l.host[(size_t) e] = (uint8_t*) mx_mat(l, e, 0);
                 --l.n_vram;
-                ok = tab_entry(l, e) && ok;
+                tab[(size_t) e] = 0ull;
                 ++(sh ? n_sh : n_file);
             }
+            ok = cudaMemcpy(l.vram_tab, tab.data(), tab.size() * 8, cudaMemcpyHostToDevice) == cudaSuccess && ok;
         }
         held_seq = -1;   // (never a feed_part's `cont`)
         held_at = -1;
@@ -21098,6 +21105,8 @@ struct Model::Impl {
             err = kLendBroken;
             return false;
         }
+        const double rd_fc0 = now_ms();   // (DS4_READER: the run's exclusive start and end, timed)
+        double rd_borrow_ms = 0;
         if (rd_live.load(std::memory_order_acquire)) {   // (DS4_READER: one run of chunks at a time)
             err = "a prompt's run of chunks is in flight beside the answers";
             return false;
@@ -21178,8 +21187,12 @@ struct Model::Impl {
             lend_unhold();
             cache_drain();
             if (ln_one || ln_land) rc_drain();
-        } else if (!borrow_begin(per, err))
-            return false;
+        } else {
+            const double b0 = now_ms();
+            const bool lent_ok = borrow_begin(per, err);
+            rd_borrow_ms = now_ms() - b0;
+            if (!lent_ok) return false;
+        }
         plan_streams();
         // the states the layers keep on the way: feed_marks' restore points inside the run, then feed_mark's state
         // before the run's last row - a set of buffers each
@@ -21219,9 +21232,12 @@ struct Model::Impl {
         // (one GPU with DS4_ENGRAM_PREFETCH: its EgPrefetch is one context - exclusive)
         const bool eg_pf_one = devs.size() == 1 && std::getenv("DS4_ENGRAM_PREFETCH") != nullptr &&
                                std::atoi(std::getenv("DS4_ENGRAM_PREFETCH")) > 0;
+        const double rd_h0 = now_ms();
         const bool bgr = rd_ok && rd_release && rd_acquire && whole == nullptr && !logits_all && !lm && !prof_on &&
                          !eg_pf_one && !sqs.empty() && (!lent || rd_hold());
+        const double rd_hold_ms = now_ms() - rd_h0;
         const int rd_nl = n_logits;
+        double rd_end0 = 0;
         const bool rd_la = logits_all;
         if (bgr) {
             rd_toks.assign(toks.begin() + (long) pos, toks.end());
@@ -21387,6 +21403,10 @@ struct Model::Impl {
         main_at.store("a run of chunks: waiting for the devices", std::memory_order_relaxed);
         if (bgr) {
             rd_live.store(true, std::memory_order_release);
+            const double ex = now_ms() - rd_fc0;   // (DS4_READER: the run's start, exclusive - over 0.4 s: its parts)
+            if (ex > 400.0)
+                std::fprintf(stderr, "ds4: DS4_READER: a run's start held the answers %.0f ms (the room lent %.0f ms, its "
+                                     "experts held out %.0f ms)\n", ex, rd_borrow_ms, rd_hold_ms);
             rd_release(false);
         }
         size_t reported = 0;
@@ -21426,6 +21446,7 @@ struct Model::Impl {
             }
             rd_acquire();
             rd_live.store(false, std::memory_order_release);
+            rd_end0 = now_ms();
             st.engram_ms += (double) rd_eg_us.exchange(0) / 1000.0;
             n_logits = rd_nl;
             logits_all = rd_la;
@@ -21478,6 +21499,9 @@ struct Model::Impl {
                                 "prompt is not answered (those experts went to the CPU lane)";
             return false;
         }
+        if (bgr && now_ms() - rd_end0 > 400.0)
+            std::fprintf(stderr, "ds4: DS4_READER: a run's end held the answers %.0f ms up to the room's hand-back\n",
+                         now_ms() - rd_end0);
         st.layer_ms += now_ms() - tl;
         eg_stats();
         Dev& d = devs[(size_t) head_dev];

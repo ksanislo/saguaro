@@ -2141,6 +2141,7 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
             const char* v = std::getenv("DS4_CHECK_READER");
             return v != nullptr && std::atoi(v) != 0;
         }();
+        int64_t eg_last_end[6] = {-1, 0, 0, 0, 0, 0};   // (Engram counters at the last read's end)
         Gate gate;
         Gate* const gp = bg_reader ? &gate : nullptr;
         Act* bg = nullptr;                 // the act whose prompt the reader thread reads (one at a time)
@@ -2927,6 +2928,17 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
             bs.t0 = now_ms();
             bs.tokens0 = busy_n;
             m.reader_eg_counts(bs.eg0);
+            // (every answer's gap and KV hash from this read on: a round of the last read's is no gap of this one's)
+            for (auto& x : acts) {
+                x->last_round = 0;
+                x->last_bnd = -1;
+                x->kvh_pos = -1;
+            }
+            if (eg_last_end[0] >= 0 && bs.eg0[0] > eg_last_end[0])   // (decode's Engram between two reads: the base)
+                std::fprintf(stderr, "maya ds4 serve: reader: Engram since the last read (no read beside) - %lld lookups, "
+                                     "%.1f %% from the row cache (decode, and the prompts read meanwhile)\n",
+                             (long long) (bs.eg0[0] - eg_last_end[0]),
+                             100.0 * (double) (bs.eg0[1] - eg_last_end[1]) / (double) (bs.eg0[0] - eg_last_end[0]));
             if (bg_check) {
                 for (int s = 0; s < nseq; ++s)
                     if (s != a->seq && seq_rid[(size_t) s] < 0 && m.seq_pos(s) > 0)
@@ -3045,6 +3057,7 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
                                         .c_str()
                                   : "");
             if (found) a->bg = false;
+            m.reader_eg_counts(eg_last_end);
             bg = nullptr;
             bg_stalled = false;
             admit_waiting();
