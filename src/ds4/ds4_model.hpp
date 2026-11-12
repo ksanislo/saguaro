@@ -293,7 +293,9 @@ public:
     /// DS4_CHECK_READER=1: a hash of conversation s's compressed KV rows (every source, every card) for positions
     /// [0, upto) - read beside a run (legacy-stream copies: never waits on it)
     uint64_t kv_hash(int s, int64_t upto);
-    size_t reader_check_notes() const;   // (device-wide syncs / off-thread run calls counted while a run was in flight)
+    size_t reader_check_notes() const;
+    /// Engram lookups so far: decode's rows / hits / reads, then the background reads' (out[0..5])
+    void reader_eg_counts(int64_t out[6]) const;   // (device-wide syncs / off-thread run calls counted while a run was in flight)
     /// DS4_ELASTIC_CONV=1 (--parallel): every conversation's KV backed as it grows, out of one pool made at load.
     /// seq_backed: the positions s holds now (max_context where not elastic);
     /// seq_can_back: whether the pool could back s to `tokens` now; seq_reserve: s backed to `tokens` (false: the pool

@@ -2131,6 +2131,7 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
             double t0 = 0, mid_max = 0, mid_sum = 0, bnd_max = 0, bnd_sum = 0, pause_max = 0, pause_sum = 0;
             long long mid_n = 0, bnd_n = 0, over_1s = 0, rounds = 0, tokens0 = 0, pauses = 0, bad = 0;
             uint64_t read_h = 0;
+            int64_t eg0[6] = {0, 0, 0, 0, 0, 0};   // (Engram lookups at its start: decode's, the reads')
             int64_t read_h_pos = -1;
             std::vector<std::pair<int, uint64_t>> idle_h;   // (DS4_CHECK_READER: the idle conversations' at its start)
         } bs;
@@ -2892,6 +2893,7 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
             bs = BgStat();
             bs.t0 = now_ms();
             bs.tokens0 = busy_n;
+            m.reader_eg_counts(bs.eg0);
             if (bg_check) {
                 for (int s = 0; s < nseq; ++s)
                     if (s != a->seq && seq_rid[(size_t) s] < 0 && m.seq_pos(s) > 0)
@@ -2958,6 +2960,18 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
                         std::fprintf(stderr, "ds4: DS4_CHECK_READER: idle conversation %d's KV CHANGED across a read\n",
                                      ih.first);
                     }
+            {   // (Engram during the read: decode's lookups and row-cache hits beside it, the read's own)
+                int64_t e1[6];
+                m.reader_eg_counts(e1);
+                const int64_t dr = e1[0] - bs.eg0[0], dh = e1[1] - bs.eg0[1], rr = e1[3] - bs.eg0[3],
+                              rh = e1[4] - bs.eg0[4];
+                if (dr + rr > 0)
+                    std::fprintf(stderr, "maya ds4 serve: reader: Engram during the read - decode %lld lookups, %.1f %% "
+                                         "from the row cache, %lld read; the read %lld lookups, %.1f %% cached, %lld "
+                                         "read\n", (long long) dr, dr > 0 ? 100.0 * (double) dh / (double) dr : 0.0,
+                                 (long long) (e1[2] - bs.eg0[2]), (long long) rr,
+                                 rr > 0 ? 100.0 * (double) rh / (double) rr : 0.0, (long long) (e1[5] - bs.eg0[5]));
+            }
             for (auto& x : acts)   // (an answer still waiting for pool space: its wait so far)
                 if (x->pause_t0 > 0) {
                     const double pm = now_ms() - x->pause_t0;

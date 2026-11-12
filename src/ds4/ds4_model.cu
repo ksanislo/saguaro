@@ -2377,6 +2377,11 @@ struct Model::Impl {
         cudaSetDevice(cur);
         return h;
     }
+    // the run's compressed ids from rd_ctok0 (its Engram n-grams look back from the read's start); Engram counters
+    std::vector<int32_t> rd_ctoks;
+    int64_t rd_ctok0 = 0;
+    std::atomic<int64_t> rd_eg_us{0}, rd_eg_rows{0}, rd_eg_hits{0}, rd_eg_reads{0};
+    std::atomic<size_t> rd_eg_bad{0};
     int32_t rd_tok(int64_t p) const { return g_rd_seq >= 0 ? rd_toks[(size_t) (p - rd_tok0)] : toks[(size_t) p]; }
     static bool keep_lend_on() {
         static const bool on = [] {
@@ -11680,7 +11685,13 @@ struct Model::Impl {
     //  read ahead before they are fed: eg_ahead_start)
     void eg_issue(int64_t p0, int T, int li, uint8_t* dst, EgBatch& b, bool account = true, bool submit = true,
                   bool defer_dups = false, const WinPlan* rows = nullptr, const int32_t* cts = nullptr,
-                  int64_t cts_p0 = 0) {
+                  int64_t cts_p0 = 0, bool rd = false) {
+        // (DS4_READER: a read's lookups carry its own compressed ids (cts) - with neither cts nor rows this is the
+        //  bound conversation's, which a decode round changes while the run is in flight)
+        if (rd_check() && rd_live.load(std::memory_order_acquire) && cts == nullptr && rows == nullptr &&
+            (rd || dst != nullptr))
+            std::fprintf(stderr, "ds4: DS4_CHECK_READER: Engram rows looked up from the bound conversation's ids while "
+                                 "a read's device run is in flight (#%zu)\n", ++rd_eg_bad);
         const int cols = (pk.eg_ngram - 1) * pk.eg_heads, hd = pk.eg_hd;
         const size_t per = (size_t) cols * (hd + hd / 32);
         b.clear();
@@ -11761,12 +11772,16 @@ struct Model::Impl {
             }
         }
         b.lookups = hits + (int64_t) b.reads.size() + (int64_t) b.dups.size();
-        if (account) {
+        if (account && rd) {   // (DS4_READER: the read's own, apart from decode's)
+            rd_eg_rows += b.lookups;
+            rd_eg_hits += hits + (int64_t) b.dups.size();
+            rd_eg_reads += (int64_t) b.reads.size();
+        } else if (account) {
             eg_rows_n += b.lookups;
             eg_hits_n += hits + (int64_t) b.dups.size();
             eg_reads_n += (int64_t) b.reads.size();
         }
-        if (submit) eg_io.submit(b);
+        if (submit) eg_io.submit(b, rd);   // (a read's behind decode's in the readers' queue)
     }
     // b's rows all in place (any thread; a group's members may ask at once: one finishes, the others wait for it)
     void eg_finish(EgBatch& b, bool account = true) {
@@ -11877,9 +11892,10 @@ struct Model::Impl {
         eg_pre.reset();
     }
     // the chunked prompt path: rows of Engram layer `only` into dst, now (a helper thread, a chunk ahead)
-    void engram_rows(int64_t p0, int T, int only, uint8_t* dst, bool account = true) {
+    void engram_rows(int64_t p0, int T, int only, uint8_t* dst, bool account = true, const int32_t* cts = nullptr,
+                     int64_t cts_p0 = 0, bool rd = false) {
         EgBatch b;
-        eg_issue(p0, T, only, dst, b, account);
+        eg_issue(p0, T, only, dst, b, account, true, false, nullptr, cts, cts_p0, rd);
         eg_finish(b, account);
     }
 
@@ -19608,7 +19624,11 @@ struct Model::Impl {
             }
             return true;
         };
-        auto read_eg = [this, &c, &run, &egs, eg_per, &eg_mates, &eg_wait_seq](int k) {
+        // (DS4_READER: the read's compressed ids passed explicitly - this runs on threads of std::async's own)
+        const int32_t* eg_cts = on_rd() ? rd_ctoks.data() : nullptr;
+        const int64_t eg_cts0 = rd_ctok0;
+        const bool eg_rd = on_rd();
+        auto read_eg = [this, &c, &run, &egs, eg_per, &eg_mates, &eg_wait_seq, eg_cts, eg_cts0, eg_rd](int k) {
             const int sl = k % 2;
             if (k >= 2)
                 for (int j : eg_mates) {
@@ -19618,7 +19638,8 @@ struct Model::Impl {
                 }
             for (int li : egs) {
                 if (eg_pf != nullptr) eg_pf->wait_unit(li, k);
-                engram_rows(run.p0[(size_t) k], run.T[(size_t) k], li, c.eg_host[sl] + (size_t) li * c.C * eg_per);
+                engram_rows(run.p0[(size_t) k], run.T[(size_t) k], li, c.eg_host[sl] + (size_t) li * c.C * eg_per, true,
+                            eg_cts, eg_cts0, eg_rd);
                 if (eg_pf != nullptr) eg_pf->finish_unit(li, k);
             }
             if (eg_pf != nullptr) eg_pf->finish_chunk(k);
@@ -19671,7 +19692,8 @@ struct Model::Impl {
                         return false;
                     }
                 }
-                if (d.mi == 0) st.engram_ms += now_ms() - te;
+                if (d.mi == 0 && on_rd()) rd_eg_us += (int64_t) ((now_ms() - te) * 1000.0);   // (st: decode's now)
+                else if (d.mi == 0) st.engram_ms += now_ms() - te;
             }
             c.at.store("putting the chunk's layers on its streams", std::memory_order_relaxed);
             WinPlan wp;
@@ -20400,7 +20422,6 @@ struct Model::Impl {
     void rd_setup() {
         if (chunk <= 0) rd_why = "no chunked prompt path";
         else if (sqs.size() < 2) rd_why = "one conversation (--parallel 2 or more)";
-        else if (!g.eg_layers.empty()) rd_why = "Engram layers";
         for (const Layer& l : L)
             if (rd_why.empty() && l.nm > 1) rd_why = "a tensor-parallel layer";
         if (!rd_why.empty()) {
@@ -21188,13 +21209,18 @@ struct Model::Impl {
         const bool lm = lm_begin(run);
         // DS4_READER: the run's device part beside the answers (the serve loop's gate out until the devices are done),
         // everything before and after it exclusive; the experts under its buffers held out for decode (rd_hold)
+        // (one GPU with DS4_ENGRAM_PREFETCH: its EgPrefetch is one context - exclusive)
+        const bool eg_pf_one = devs.size() == 1 && std::getenv("DS4_ENGRAM_PREFETCH") != nullptr &&
+                               std::atoi(std::getenv("DS4_ENGRAM_PREFETCH")) > 0;
         const bool bgr = rd_ok && rd_release && rd_acquire && whole == nullptr && !logits_all && !lm && !prof_on &&
-                         !sqs.empty() && (!lent || rd_hold());
+                         !eg_pf_one && !sqs.empty() && (!lent || rd_hold());
         const int rd_nl = n_logits;
         const bool rd_la = logits_all;
         if (bgr) {
             rd_toks.assign(toks.begin() + (long) pos, toks.end());
             rd_tok0 = pos;
+            rd_ctok0 = std::max<int64_t>(0, pos - std::max(1, pk.eg_ngram));
+            rd_ctoks.assign(ctoks.begin() + (long) rd_ctok0, ctoks.end());
         }
         struct LmEnd {   // (every way out: its host memory freed once the device is done with it)
             Impl* p;
@@ -21393,6 +21419,7 @@ struct Model::Impl {
             }
             rd_acquire();
             rd_live.store(false, std::memory_order_release);
+            st.engram_ms += (double) rd_eg_us.exchange(0) / 1000.0;
             n_logits = rd_nl;
             logits_all = rd_la;
         }
@@ -23657,7 +23684,17 @@ void Model::set_reader_gate(std::function<void()> release, std::function<void()>
 }
 bool Model::reader_live() const { return p_->rd_live.load(std::memory_order_acquire); }
 uint64_t Model::kv_hash(int s, int64_t upto) { return p_->rd_kv_hash(s, upto); }
-size_t Model::reader_check_notes() const { return p_->rd_sync_n.load() + p_->rd_off_n.load(); }
+size_t Model::reader_check_notes() const {
+    return p_->rd_sync_n.load() + p_->rd_off_n.load() + p_->rd_eg_bad.load();
+}
+void Model::reader_eg_counts(int64_t out[6]) const {
+    out[0] = p_->eg_rows_n.load();
+    out[1] = p_->eg_hits_n.load();
+    out[2] = p_->eg_reads_n.load();
+    out[3] = p_->rd_eg_rows.load();
+    out[4] = p_->rd_eg_hits.load();
+    out[5] = p_->rd_eg_reads.load();
+}
 bool Model::elastic() const { return p_->elastic(); }
 int64_t Model::seq_backed(int s) const { return p_->seq_backed(s); }
 bool Model::seq_can_back(int s, int64_t tokens) const { return p_->seq_can_back(s, tokens); }
