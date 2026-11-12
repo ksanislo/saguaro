@@ -2028,6 +2028,50 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
             std::vector<int> got;             // a round's tokens still to write, the last first
             strata::ds4::LogprobRow tok_lp;   // (logprobs=<k>: tok's row, and got's rows as got)
             std::vector<strata::ds4::LogprobRow> got_lp;
+            // (DS4_READER) its prompt read on the reader thread; the pool short for its next round (it waits a round);
+            // its last round's end and the reader's exclusive sections by then (the stall log); DS4_CHECK_READER: its
+            // KV's hash after its last round, over positions [0, kvh_pos)
+            bool bg = false, el_wait = false;
+            double last_round = 0, pause_t0 = 0;
+            long long last_bnd = -1;
+            uint64_t kvh = 0;
+            int64_t kvh_pos = -1;
+        };
+        // DS4_READER: the gate the serve loop holds for each event it runs and the reader thread for everything of a
+        // read but its runs' device part; a reader that wants it goes first
+        struct Gate {
+            std::mutex mu;
+            std::condition_variable cv;
+            bool held = false;
+            int want = 0;
+            void serve_enter() {
+                std::unique_lock<std::mutex> lk(mu);
+                cv.wait(lk, [&] { return !held && want == 0; });
+                held = true;
+            }
+            void read_enter() {
+                std::unique_lock<std::mutex> lk(mu);
+                ++want;
+                cv.wait(lk, [&] { return !held; });
+                --want;
+                held = true;
+            }
+            void leave() {
+                {
+                    std::lock_guard<std::mutex> lk(mu);
+                    held = false;
+                }
+                cv.notify_all();
+            }
+        };
+        struct InGate {   // (an event's body: the gate held throughout, when on)
+            Gate* g;
+            explicit InGate(Gate* x) : g(x) {
+                if (g != nullptr) g->serve_enter();
+            }
+            ~InGate() {
+                if (g != nullptr) g->leave();
+            }
         };
         const int nseq = m.seq_count();
         std::vector<long long> seq_rid((size_t) nseq, -1);   // the request in each conversation (-1: idle)
@@ -2063,6 +2107,37 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
         std::atomic<long long> lines_posted{0};
         long long lines_taken = 0;
         long long lk_owner = -1;           // the request the prompt lookup's history follows (its rounds alone)
+        // DS4_READER=1 (logs/maya/PLAN-ds4-reader.md): a prompt of DS4_READER_MIN (a chunk a stage) tokens or more,
+        // with an answer running, is read on a thread of its own in pieces of DS4_READER_PIECE_TOKENS (a piece's
+        // tokens): each piece's run goes through the cards while the answers keep decoding; between two pieces the
+        // loop admits the requests that came and reads the prompts whole in one piece, as at a piece boundary
+        const bool bg_reader = m.reader_on();
+        const size_t bg_min = env_count("DS4_READER_MIN", m.prompt_chunk() > 0 ? m.prompt_chunk() : 8192);
+        const size_t bg_piece = env_count("DS4_READER_PIECE_TOKENS", (int) read_piece);
+        static const bool bg_check = [] {
+            const char* v = std::getenv("DS4_CHECK_READER");
+            return v != nullptr && std::atoi(v) != 0;
+        }();
+        Gate gate;
+        Gate* const gp = bg_reader ? &gate : nullptr;
+        Act* bg = nullptr;                 // the act whose prompt the reader thread reads (one at a time)
+        std::thread bg_th;
+        std::atomic<long long> bnd_seq{0};   // (the reader's exclusive sections entered: a run's start and end)
+        bool bg_point_on = false, bg_stalled = false;
+        std::mutex pt_mu;
+        std::condition_variable pt_cv;
+        bool pt_done = false;
+        struct BgStat {   // (one background read's stall log)
+            double t0 = 0, mid_max = 0, mid_sum = 0, bnd_max = 0, bnd_sum = 0, pause_max = 0, pause_sum = 0;
+            long long mid_n = 0, bnd_n = 0, over_1s = 0, rounds = 0, tokens0 = 0, pauses = 0, bad = 0;
+            uint64_t read_h = 0;
+            int64_t read_h_pos = -1;
+            std::vector<std::pair<int, uint64_t>> idle_h;   // (DS4_CHECK_READER: the idle conversations' at its start)
+        } bs;
+        if (bg_reader)
+            std::fprintf(stderr, "maya ds4 serve: DS4_READER: prompts of %zu tokens or more read beside the running "
+                                 "answers, in pieces of %zu tokens%s\n", bg_min, bg_piece,
+                         bg_check ? " (DS4_CHECK_READER: KV hashes around every round)" : "");
         // the Monitor's counters: over everything written since the engine was last idle
         double busy_t1 = 0;
         long long busy_n = 0, busy_io = -1;
@@ -2361,6 +2436,7 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
             return rounds > 0 && rounds_ms >= piece_ms * read_share / (1.0 - read_share);
         };
         const auto admit_waiting = [&] {
+            if (bg != nullptr && !bg_point_on) return;   // (DS4_READER: between a background read's pieces only)
             while (!quit && !waiting.empty() && std::find(seq_rid.begin(), seq_rid.end(), -1LL) != seq_rid.end()) {
                 const std::string g = waiting.front();
                 waiting.pop_front();
@@ -2393,7 +2469,7 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
                 return v != nullptr ? std::atoll(v) : 0LL;
             }();
             static bool dbg_take_done = false;
-            if (m.elastic() && dbg_take > 0 && !dbg_take_done)
+            if (m.elastic() && dbg_take > 0 && !dbg_take_done && bg == nullptr)
                 for (const auto& x : acts)
                     if (!x->reading && !x->done && m.seq_backed(x->seq) > dbg_take) {
                         dbg_take_done = true;
@@ -2406,7 +2482,34 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
                         std::fprintf(stderr, "ds4: DEBUG: DS4_DBG_TAKE_AT: %zu granules taken\n", g);
                         break;
                     }
-            if (m.elastic())
+            // (DS4_READER, a background read in flight: the pool's free granules only - no idle conversation given back,
+            //  no take; short, the answer waits this round instead of ending)
+            for (auto& ap : acts) ap->el_wait = false;
+            if (m.elastic() && bg != nullptr)
+                for (auto& ap : acts) {
+                    Act& a = *ap;
+                    if (a.reading || a.done) continue;
+                    const int64_t need = m.seq_pos(a.seq) + 128;
+                    std::string e;
+                    a.el_wait = !(m.seq_backed(a.seq) >= need || m.seq_reserve(a.seq, need + 8192, e) ||
+                                  m.seq_reserve(a.seq, need, e));
+                    if (a.el_wait && a.pause_t0 == 0) {
+                        a.pause_t0 = now_ms();
+                        ++bs.pauses;
+                        std::fprintf(stderr, "maya ds4 serve: request %lld waits for pool space until the read beside it "
+                                             "ends\n", a.r.rid);
+                    } else if (!a.el_wait && a.pause_t0 > 0) {
+                        const double ms = now_ms() - a.pause_t0;
+                        bs.pause_sum += ms;
+                        bs.pause_max = std::max(bs.pause_max, ms);
+                        a.pause_t0 = 0;
+                    }
+                }
+            if (bg != nullptr)   // (none can run: no turn until the reader's next piece boundary or its end)
+                bg_stalled = std::none_of(acts.begin(), acts.end(), [](const std::unique_ptr<Act>& x) {
+                    return !x->reading && !x->done && !x->el_wait;
+                });
+            if (m.elastic() && bg == nullptr)
                 for (size_t i = 0; i < acts.size(); ++i) {
                     Act& a = *acts[i];
                     if (a.reading || a.done) continue;
@@ -2447,9 +2550,60 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
                         }
                     }
                 }
+            // (DS4_READER: each answer's gap since its last round, mid-run or across the reader's exclusive part;
+            //  DS4_CHECK_READER: its KV as its last round left it, and the read's rows before this round)
+            const double r_t0 = now_ms();
+            const long long bnd_now = bnd_seq.load();
+            if (bg != nullptr)
+                for (auto& ap : acts) {
+                    Act& a = *ap;
+                    if (a.reading || a.done || a.el_wait || a.last_round <= 0) continue;
+                    const double gap = r_t0 - a.last_round;
+                    if (a.last_bnd != bnd_now) {
+                        ++bs.bnd_n;
+                        bs.bnd_sum += gap;
+                        bs.bnd_max = std::max(bs.bnd_max, gap);
+                    } else {
+                        ++bs.mid_n;
+                        bs.mid_sum += gap;
+                        bs.mid_max = std::max(bs.mid_max, gap);
+                    }
+                    bs.over_1s += gap > 1000.0;
+                    if (bg_check && a.kvh_pos >= 0 && m.kv_hash(a.seq, a.kvh_pos) != a.kvh) {
+                        ++bs.bad;
+                        std::fprintf(stderr, "ds4: DS4_CHECK_READER: request %lld's KV CHANGED between two of its rounds "
+                                             "while a read ran beside it\n", a.r.rid);
+                    }
+                }
+            const int64_t rd_from = bg != nullptr && bg_check ? (int64_t) bg->P.done : -1;
+            const uint64_t rd_h0 = rd_from > 0 ? m.kv_hash(bg->seq, rd_from) : 0;
+            const std::function<void()> bg_after = [&] {   // (the round's end)
+                if (bg == nullptr) return;
+                ++bs.rounds;
+                const double t = now_ms();
+                for (auto& ap : acts) {
+                    Act& a = *ap;
+                    if (a.reading || a.done || a.el_wait) continue;
+                    a.last_round = t;
+                    a.last_bnd = bnd_seq.load();
+                    if (bg_check) {
+                        a.kvh_pos = m.seq_pos(a.seq);
+                        a.kvh = m.kv_hash(a.seq, a.kvh_pos);
+                    }
+                }
+                if (rd_from > 0 && m.kv_hash(bg->seq, rd_from) != rd_h0) {
+                    ++bs.bad;
+                    std::fprintf(stderr, "ds4: DS4_CHECK_READER: the reading conversation's KV before position %lld "
+                                         "CHANGED across a decode round\n", (long long) rd_from);
+                }
+            };
+            struct AfterRound {
+                const std::function<void()>& f;
+                ~AfterRound() { f(); }
+            } after_round_{bg_after};
             for (auto& ap : acts) {
                 Act& a = *ap;
-                if (a.reading || a.done) continue;
+                if (a.reading || a.done || a.el_wait) continue;
                 for (;;) {
                     if (in.stopped(a.r.rid)) {
                         a.finish = "cancel";
@@ -2727,16 +2881,133 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
             }
         };
         std::function<void()> settle;
+        // DS4_READER: the reader thread - act a's prompt in pieces; each piece's runs release the gate for their device
+        // part; between two pieces an event of the loop's admits the requests that came (bg_point); at its end kRead
+        // (bg_end).  STOP, ERR and the first token are read_turn's own, inside the gate
+        std::function<void()> bg_point, bg_end;
+        const auto bg_start = [&](Act* a) {
+            bg = a;
+            a->bg = true;
+            bg_stalled = false;
+            bs = BgStat();
+            bs.t0 = now_ms();
+            bs.tokens0 = busy_n;
+            if (bg_check) {
+                for (int s = 0; s < nseq; ++s)
+                    if (s != a->seq && seq_rid[(size_t) s] < 0 && m.seq_pos(s) > 0)
+                        bs.idle_h.push_back({s, m.kv_hash(s, m.seq_pos(s))});
+            }
+            if (bg_th.joinable()) bg_th.join();
+            bg_th = std::thread([&, a] {
+                gate.read_enter();
+                ++bnd_seq;
+                for (;;) {
+                    bind(a->seq);
+                    m.set_reader_gate([&] { gate.leave(); },
+                                      [&, a] {
+                                          gate.read_enter();
+                                          ++bnd_seq;
+                                          bind(a->seq);
+                                      });
+                    read_turn(*a, bg_piece, false);
+                    m.set_reader_gate(nullptr, nullptr);
+                    if (!a->reading || a->done) break;
+                    std::unique_lock<std::mutex> lk(pt_mu);   // (a piece boundary: the loop's turn to admit)
+                    pt_done = false;
+                    eng.add([&] { bg_point(); }, kLine);
+                    gate.leave();
+                    pt_cv.wait(lk, [&] { return pt_done; });
+                    lk.unlock();
+                    gate.read_enter();
+                    ++bnd_seq;
+                }
+                gate.leave();
+                eng.add([&] { bg_end(); }, kLine);
+            });
+        };
+        bg_point = [&] {
+            InGate ig(gp);
+            bg_point_on = true;
+            bg_stalled = false;
+            admit_waiting();
+            // (the prompts whole in one piece in line read now, as at a piece boundary)
+            while (!read_line.empty() && one_piece(read_line.front())) {
+                Act* x = read_line.front();
+                read_line.pop_front();
+                if (!x->done) read_turn(*x, x->r.ids.size(), false);
+            }
+            bg_point_on = false;
+            {
+                std::lock_guard<std::mutex> lk(pt_mu);
+                pt_done = true;
+            }
+            pt_cv.notify_all();
+            settle();
+        };
+        bg_end = [&] {
+            InGate ig(gp);
+            if (bg_th.joinable()) bg_th.join();
+            Act* a = bg;
+            bool found = false;
+            for (const auto& x : acts) found = found || x.get() == a;
+            const double ms = now_ms() - bs.t0;
+            if (bg_check)
+                for (const auto& ih : bs.idle_h)
+                    if (seq_rid[(size_t) ih.first] < 0 && m.kv_hash(ih.first, m.seq_pos(ih.first)) != ih.second) {
+                        ++bs.bad;
+                        std::fprintf(stderr, "ds4: DS4_CHECK_READER: idle conversation %d's KV CHANGED across a read\n",
+                                     ih.first);
+                    }
+            for (auto& x : acts)   // (an answer still waiting for pool space: its wait so far)
+                if (x->pause_t0 > 0) {
+                    const double pm = now_ms() - x->pause_t0;
+                    bs.pause_sum += pm;
+                    bs.pause_max = std::max(bs.pause_max, pm);
+                    x->pause_t0 = 0;
+                }
+            std::fprintf(stderr,
+                         "maya ds4 serve: reader: request %lld's read beside the answers ended after %.1f s (%s); %lld "
+                         "rounds, %lld tokens written meanwhile; gaps between an answer's rounds - mid-run %lld, max "
+                         "%.0f ms, total %.0f ms; across a run's start or end %lld, max %.0f ms, total %.0f ms; over 1 s "
+                         "%lld; pool-space waits %lld, max %.0f ms, total %.0f ms%s\n",
+                         found ? a->r.rid : -1LL, ms / 1000.0, !found || a->done ? "stopped or failed" : "read",
+                         bs.rounds, busy_n - bs.tokens0, bs.mid_n, bs.mid_max, bs.mid_sum, bs.bnd_n, bs.bnd_max,
+                         bs.bnd_sum, bs.over_1s, bs.pauses, bs.pause_max, bs.pause_sum,
+                         bg_check ? (std::string("; DS4_CHECK_READER: ") + std::to_string(bs.bad) + " KV changes, " +
+                                     std::to_string(m.reader_check_notes()) + " syncs or off-thread run calls in all")
+                                        .c_str()
+                                  : "");
+            if (found) a->bg = false;
+            bg = nullptr;
+            bg_stalled = false;
+            admit_waiting();
+            settle();
+        };
         // the next turn: a piece once the rounds since the last one are due (piece_due) while a prompt is being read,
         // else a round while an answer runs
         const auto queue_turn = [&] {
             if (turn_queued || acts.empty()) return;
+            if (bg != nullptr && (bg_stalled || std::none_of(acts.begin(), acts.end(), [](const std::unique_ptr<Act>& x) {
+                                      return !x->reading;
+                                  })))
+                return;   // (DS4_READER: nothing to write beside the read - the reader's events wake the loop)
             turn_queued = true;
             eng.add([&] {
+                InGate ig(gp);
                 turn_queued = false;
                 const bool answering = std::any_of(acts.begin(), acts.end(),
                                                    [](const std::unique_ptr<Act>& a) { return !a->reading; });
-                if (!read_line.empty() && (!answering || piece_due())) {
+                // DS4_READER: a long prompt next in line, an answer running - read beside it
+                if (bg_reader && bg == nullptr && answering && !read_line.empty() && !read_line.front()->done &&
+                    read_line.front()->P.pics.empty() &&
+                    read_line.front()->r.ids.size() - read_line.front()->P.done >= bg_min) {
+                    Act* a = read_line.front();
+                    read_line.pop_front();
+                    bg_start(a);
+                }
+                if (bg != nullptr) {
+                    if (answering && !bg_stalled) round_turn();
+                } else if (!read_line.empty() && (!answering || piece_due())) {
                     const double t = now_ms();
                     read_turn_next(answering);
                     if (answering) piece_ms = now_ms() - t;
@@ -2754,11 +3025,11 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
         // after every event: a STOP of a prompt waiting for its turn (ended now, the conversation before it kept), the
         // requests ended (their conversations to the requests waiting), then the next turn - or, none running, idle
         settle = [&] {
-            for (auto& ap : acts)
-                if (ap->reading && !ap->done && in.stopped(ap->r.rid)) read_turn(*ap, 0, false);
+            for (auto& ap : acts)   // (a background read's STOP is its run's cancel)
+                if (ap->reading && !ap->done && !ap->bg && in.stopped(ap->r.rid)) read_turn(*ap, 0, false);
             bool freed = false;
             for (size_t i = 0; i < acts.size();) {
-                if (!acts[i]->done) {
+                if (!acts[i]->done || acts[i]->bg) {   // (the reader's: erased once bg_end ran)
                     ++i;
                     continue;
                 }
@@ -2791,6 +3062,7 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
         // a line: a request (admitted when a conversation is free), QUIT (every request stopped, the engine's end once
         // they are), anything else answered at once (STOP <rid> is the reader's)
         const auto on_line = [&](const std::string& ln) {
+            InGate ig(gp);
             ++lines_taken;
             g_busy.store(true);
             beat();
@@ -2822,6 +3094,7 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
         });
         eng.run();
         reader.join();
+        if (bg_th.joinable()) bg_th.join();
         // Each idle sequence still owns its conversation when the parallel scheduler exits.
         if (slot_max > 0) {
             for (int s = 0; s < nseq; ++s) {
