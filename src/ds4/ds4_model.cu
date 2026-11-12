@@ -2379,6 +2379,40 @@ struct Model::Impl {
         return h;
     }
     // the run's compressed ids from rd_ctok0 (its Engram n-grams look back from the read's start); Engram counters
+    std::vector<std::pair<unsigned long long*, size_t>> rd_tab;   // [device] rd_hold's tab_set input (host-mapped)
+    std::atomic<size_t> rd_tab_bad{0};
+    // DS4_CHECK_READER: every layer's device table against the books - an expert with a VRAM slot points at it, a held
+    // one is 0 (the CPU lane's others - recent slots, helper - not compared).  A mismatch: loud, counted
+    void rd_tab_check(const char* when) {
+        std::vector<unsigned long long> t;
+        size_t bad = 0;
+        for (const Layer& l : L) {
+            if (l.mtp || l.vram_tab == nullptr || l.nm != 1) continue;
+            t.resize((size_t) l.n_exp);
+            if (cudaSetDevice(devs[(size_t) l.dev].id) != cudaSuccess ||
+                cudaMemcpy(t.data(), l.vram_tab, t.size() * 8, cudaMemcpyDeviceToHost) != cudaSuccess) {
+                cudaGetLastError();
+                ++bad;
+                continue;
+            }
+            for (int e = 0; e < l.n_exp; ++e) {
+                const int sl = l.slot[(size_t) e];
+                const bool held = held_out(l, e);
+                if (sl < 0 && !held) continue;
+                const unsigned long long want = held ? 0ull : (unsigned long long) sat(l, l, sl, unit(l));
+                if (t[(size_t) e] != want) {
+                    if (bad < 8)
+                        std::fprintf(stderr, "ds4: DS4_CHECK_READER: layer %d expert %d's table entry %s (%s): %#llx, "
+                                             "the books say %#llx\n", l.il, e, held ? "HELD" : "in VRAM", when,
+                                     t[(size_t) e], want);
+                    ++bad;
+                }
+            }
+        }
+        rd_tab_bad += bad;
+        if (bad > 0)
+            std::fprintf(stderr, "ds4: DS4_CHECK_READER: %zu expert table entries NOT as the books say (%s)\n", bad, when);
+    }
     std::vector<int32_t> rd_ctoks;
     int64_t rd_ctok0 = 0;
     std::atomic<int64_t> rd_eg_us{0}, rd_eg_rows{0}, rd_eg_hits{0}, rd_eg_reads{0};
@@ -20483,17 +20517,15 @@ struct Model::Impl {
         lend_held.store(true, std::memory_order_relaxed);
         bool ok = true;
         size_t n_sh = 0, n_file = 0;
-        std::vector<unsigned long long> tab;
+        // (the held entries only, (address, 0) pairs a device, in one tab_set on the stream the cache's table writes
+        //  take - after any still queued there - then a sync: no other entry touched; a synchronous copy an expert
+        //  cost ~0.5 s a run's start for ~900 of them)
+        std::vector<std::vector<unsigned long long>> pairs(devs.size());
         for (Layer& l : L) {
             if (l.mtp || l.pv_n >= l.n_slots) continue;
             if (l.lend_mark.size() != (size_t) l.n_exp) l.lend_mark.assign((size_t) l.n_exp, 0);
             if (l.lend_src.size() != (size_t) l.n_exp) l.lend_src.assign((size_t) l.n_exp, nullptr);
             const Dev& d = devs[(size_t) l.dev];
-            // (the layer's table read once, its held entries set to 0, written back once - a synchronous copy an
-            //  expert cost ~0.5 s a run's start for ~900 of them, the answers waiting)
-            tab.resize((size_t) l.n_exp);
-            ok = cudaSetDevice(d.id) == cudaSuccess &&
-                 cudaMemcpy(tab.data(), l.vram_tab, tab.size() * 8, cudaMemcpyDeviceToHost) == cudaSuccess && ok;
             for (int e = 0; e < l.n_exp; ++e) {
                 const int sl = l.slot[(size_t) e];
                 if (sl < l.pv_n) continue;
@@ -20506,11 +20538,29 @@ struct Model::Impl {
                 l.slot[(size_t) e] = -1;
                 l.host[(size_t) e] = (uint8_t*) mx_mat(l, e, 0);
                 --l.n_vram;
-                tab[(size_t) e] = 0ull;
+                pairs[(size_t) l.dev].push_back((unsigned long long) (l.vram_tab + e));   // (nm 1: member 0's table)
+                pairs[(size_t) l.dev].push_back(0ull);
                 ++(sh ? n_sh : n_file);
             }
-            ok = cudaMemcpy(l.vram_tab, tab.data(), tab.size() * 8, cudaMemcpyHostToDevice) == cudaSuccess && ok;
         }
+        if (rd_tab.size() != devs.size()) rd_tab.assign(devs.size(), {nullptr, 0});
+        for (size_t di = 0; di < devs.size() && ok; ++di) {
+            std::vector<unsigned long long>& u = pairs[di];
+            if (u.empty()) continue;
+            std::string e2;
+            if (rd_tab[di].second < u.size()) {   // (host-mapped, as the cache's rc_upd: grown once to a run's size)
+                unsigned long long* p = nullptr;
+                ok = hmap(p, u.size(), e2);
+                if (ok) rd_tab[di] = {p, u.size()};
+            }
+            ok = ok && cudaSetDevice(devs[di].id) == cudaSuccess;
+            if (ok) {
+                std::memcpy(rd_tab[di].first, u.data(), u.size() * 8);
+                tab_set(rd_tab[di].first, (int) (u.size() / 2), devs[di].st);
+                ok = cudaStreamSynchronize(devs[di].st) == cudaSuccess;
+            }
+        }
+        if (ok && rd_check()) rd_tab_check("held out for a run");
         held_seq = -1;   // (never a feed_part's `cont`)
         held_at = -1;
         held_k = -1;
@@ -21499,6 +21549,7 @@ struct Model::Impl {
                                 "prompt is not answered (those experts went to the CPU lane)";
             return false;
         }
+        if (bgr && rd_check()) rd_tab_check("handed back after a run");
         if (bgr && now_ms() - rd_end0 > 400.0)
             std::fprintf(stderr, "ds4: DS4_READER: a run's end held the answers %.0f ms up to the room's hand-back\n",
                          now_ms() - rd_end0);
@@ -23716,7 +23767,7 @@ void Model::set_reader_gate(std::function<void(bool)> release, std::function<voi
 bool Model::reader_live() const { return p_->rd_live.load(std::memory_order_acquire); }
 uint64_t Model::kv_hash(int s, int64_t upto) { return p_->rd_kv_hash(s, upto); }
 size_t Model::reader_check_notes() const {
-    return p_->rd_sync_n.load() + p_->rd_off_n.load() + p_->rd_eg_bad.load();
+    return p_->rd_sync_n.load() + p_->rd_off_n.load() + p_->rd_eg_bad.load() + p_->rd_tab_bad.load();
 }
 void Model::reader_eg_counts(int64_t out[6]) const {
     out[0] = p_->eg_rows_n.load();
