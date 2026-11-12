@@ -2039,27 +2039,50 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
         };
         // DS4_READER: the gate the serve loop holds for each event it runs and the reader thread for everything of a
         // read but its runs' device part; a reader that wants it goes first
+        // (read_enter after a hand-back - read_leave(true) - first lets an event that waits for the gate run, so a read
+        //  in windows (decode-like, exclusive) gives the answers a round between two windows; the reader's longest
+        //  exclusive stretch since reset, for the stall lines)
         struct Gate {
             std::mutex mu;
             std::condition_variable cv;
             bool held = false;
-            int want = 0;
+            int want = 0, serve_waiting = 0;
+            long long serve_cycles = 0, cycles_at_leave = -1;
+            double r_in = 0;
+            std::atomic<long long> excl_max_us{0};
             void serve_enter() {
                 std::unique_lock<std::mutex> lk(mu);
+                ++serve_waiting;
                 cv.wait(lk, [&] { return !held && want == 0; });
+                --serve_waiting;
                 held = true;
+            }
+            void serve_leave() {
+                {
+                    std::lock_guard<std::mutex> lk(mu);
+                    held = false;
+                    ++serve_cycles;
+                }
+                cv.notify_all();
             }
             void read_enter() {
                 std::unique_lock<std::mutex> lk(mu);
+                if (cycles_at_leave >= 0 && serve_waiting > 0)   // (an event waits: it runs first)
+                    cv.wait(lk, [&] { return serve_cycles > cycles_at_leave || serve_waiting == 0; });
+                cycles_at_leave = -1;
                 ++want;
                 cv.wait(lk, [&] { return !held; });
                 --want;
                 held = true;
+                r_in = now_ms();
             }
-            void leave() {
+            void read_leave(bool yield = false) {
                 {
                     std::lock_guard<std::mutex> lk(mu);
                     held = false;
+                    cycles_at_leave = yield ? serve_cycles : -1;
+                    const long long us = (long long) ((now_ms() - r_in) * 1000.0);
+                    if (us > excl_max_us.load()) excl_max_us.store(us);
                 }
                 cv.notify_all();
             }
@@ -2070,7 +2093,7 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
                 if (g != nullptr) g->serve_enter();
             }
             ~InGate() {
-                if (g != nullptr) g->leave();
+                if (g != nullptr) g->serve_leave();
             }
         };
         const int nseq = m.seq_count();
@@ -2387,6 +2410,10 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
                 return false;
             }
             bind(best);
+            if (bg != nullptr)   // (DS4_CHECK_READER: a conversation taken at a piece boundary is no longer an idle one)
+                bs.idle_h.erase(std::remove_if(bs.idle_h.begin(), bs.idle_h.end(),
+                                               [best](const std::pair<int, uint64_t>& x) { return x.first == best; }),
+                                bs.idle_h.end());
             seq_used[(size_t) best] = ++use_clock;
             if (acts.empty()) m.begin_request();   // (DISK_SKIP_AUTO: between requests only - none runs now)
             const long long rid = r.rid;
@@ -2570,6 +2597,11 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
                         bs.mid_max = std::max(bs.mid_max, gap);
                     }
                     bs.over_1s += gap > 1000.0;
+                    if (gap > 1000.0)
+                        std::fprintf(stderr, "maya ds4 serve: reader: request %lld waited %.0f ms between two rounds (%s; "
+                                             "the reader's longest exclusive stretch in it %.0f ms)\n", a.r.rid, gap,
+                                     a.last_bnd != bnd_now ? "across a run's start or end" : "mid-run",
+                                     (double) gate.excl_max_us.load() / 1000.0);
                     if (bg_check && a.kvh_pos >= 0 && m.kv_hash(a.seq, a.kvh_pos) != a.kvh) {
                         ++bs.bad;
                         std::fprintf(stderr, "ds4: DS4_CHECK_READER: request %lld's KV CHANGED between two of its rounds "
@@ -2581,6 +2613,7 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
             const std::function<void()> bg_after = [&] {   // (the round's end)
                 if (bg == nullptr) return;
                 ++bs.rounds;
+                gate.excl_max_us.store(0);
                 const double t = now_ms();
                 for (auto& ap : acts) {
                     Act& a = *ap;
@@ -2903,27 +2936,53 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
             bg_th = std::thread([&, a] {
                 gate.read_enter();
                 ++bnd_seq;
-                for (;;) {
-                    bind(a->seq);
-                    m.set_reader_gate([&] { gate.leave(); },
-                                      [&, a] {
+                Act* cur = a;   // (the act being read: the long one, or a short one that came - its conversation bound)
+                // (set only while this thread holds the gate: bg_point's admissions run on the loop's thread - a
+                //  rewind there is a run of chunks of its own, exclusive)
+                const auto gate_on = [&] {
+                    m.set_reader_gate([&](bool yield) { gate.read_leave(yield); },
+                                      [&] {
                                           gate.read_enter();
                                           ++bnd_seq;
-                                          bind(a->seq);
+                                          bind(cur->seq);
                                       });
+                };
+                gate_on();
+                for (;;) {
+                    cur = a;
+                    bind(a->seq);
                     read_turn(*a, bg_piece, false);
-                    m.set_reader_gate(nullptr, nullptr);
                     if (!a->reading || a->done) break;
                     std::unique_lock<std::mutex> lk(pt_mu);   // (a piece boundary: the loop's turn to admit)
                     pt_done = false;
+                    m.set_reader_gate(nullptr, nullptr);
                     eng.add([&] { bg_point(); }, kLine);
-                    gate.leave();
+                    gate.read_leave();
                     pt_cv.wait(lk, [&] { return pt_done; });
                     lk.unlock();
                     gate.read_enter();
                     ++bnd_seq;
+                    gate_on();
+                    // the prompts whole in one piece that came: read now, here - their runs beside the answers too
+                    // (as at a piece boundary, without holding the answers for their whole read)
+                    bool any = false;
+                    while (!read_line.empty() && one_piece(read_line.front())) {
+                        Act* x = read_line.front();
+                        read_line.pop_front();
+                        if (x->done) continue;
+                        x->bg = true;
+                        cur = x;
+                        read_turn(*x, x->r.ids.size(), false);
+                        x->bg = false;
+                        any = true;
+                    }
+                    if (any) eng.add([&] {   // (their answers start, or their ends are settled)
+                        InGate ig(gp);
+                        settle();
+                    }, kLine);
                 }
-                gate.leave();
+                m.set_reader_gate(nullptr, nullptr);
+                gate.read_leave();
                 eng.add([&] { bg_end(); }, kLine);
             });
         };
@@ -2931,13 +2990,7 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
             InGate ig(gp);
             bg_point_on = true;
             bg_stalled = false;
-            admit_waiting();
-            // (the prompts whole in one piece in line read now, as at a piece boundary)
-            while (!read_line.empty() && one_piece(read_line.front())) {
-                Act* x = read_line.front();
-                read_line.pop_front();
-                if (!x->done) read_turn(*x, x->r.ids.size(), false);
-            }
+            admit_waiting();   // (their prompts in one piece: the reader reads them next)
             bg_point_on = false;
             {
                 std::lock_guard<std::mutex> lk(pt_mu);

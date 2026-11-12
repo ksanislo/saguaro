@@ -288,7 +288,8 @@ public:
     /// calls release() once the run's device part is under way and acquire() (the gate back, the read's conversation
     /// bound again) before the rest; null: every run exclusive, as without it.  reader_live: a device run in flight.
     bool reader_on() const;
-    void set_reader_gate(std::function<void()> release, std::function<void()> acquire);
+    /// (release(true): a hand-back between two windows of a read in windows - an event waiting for the gate runs first)
+    void set_reader_gate(std::function<void(bool)> release, std::function<void()> acquire);
     bool reader_live() const;
     /// DS4_CHECK_READER=1: a hash of conversation s's compressed KV rows (every source, every card) for positions
     /// [0, upto) - read beside a run (legacy-stream copies: never waits on it)

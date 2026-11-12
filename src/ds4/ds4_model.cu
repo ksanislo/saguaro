@@ -2308,7 +2308,8 @@ struct Model::Impl {
     std::vector<std::unique_ptr<Worker>> rworkers;   // the device run's threads (decode keeps `workers`)
     float* rd_h_taps = nullptr;                      // pinned: the run's drafter taps (h_taps is decode's)
     std::atomic<bool> rd_live{false};                // a device run in flight beside decode
-    std::function<void()> rd_release, rd_acquire;    // (Model::set_reader_gate) the gate out and back in
+    std::function<void(bool)> rd_release;           // (Model::set_reader_gate) the gate out and back in
+    std::function<void()> rd_acquire;
     std::vector<int32_t> rd_toks;                    // the run's prompt tokens from position rd_tok0 (its embeddings)
     int64_t rd_tok0 = 0;
     bool on_rd() const { return g_rd_seq >= 0; }
@@ -20100,6 +20101,12 @@ struct Model::Impl {
         for (int a = 0; a < n; a += kWin) {
             const int T = std::min(kWin, n - a);
             if (!forward(tokens + a, T, a + T == n ? logits_rows : 0, err)) return false;
+            // (DS4_READER: a read in windows on the reader thread - decode-like, so exclusive - hands the gate back
+            //  between two windows: the answers write a round there instead of waiting for the whole read)
+            if (rd_release && rd_acquire && a + T < n) {
+                rd_release(true);
+                rd_acquire();
+            }
         }
         return true;
     }
@@ -21380,7 +21387,7 @@ struct Model::Impl {
         main_at.store("a run of chunks: waiting for the devices", std::memory_order_relaxed);
         if (bgr) {
             rd_live.store(true, std::memory_order_release);
-            rd_release();
+            rd_release(false);
         }
         size_t reported = 0;
         for (;;) {
@@ -23678,7 +23685,7 @@ int Model::seq_count() const { return p_->seq_count(); }
 void Model::seq_bind(int s) { p_->seq_bind(s); }
 int Model::seq_bound() const { return p_->sq_bound; }
 bool Model::reader_on() const { return p_->rd_ok; }
-void Model::set_reader_gate(std::function<void()> release, std::function<void()> acquire) {
+void Model::set_reader_gate(std::function<void(bool)> release, std::function<void()> acquire) {
     p_->rd_release = std::move(release);
     p_->rd_acquire = std::move(acquire);
 }
