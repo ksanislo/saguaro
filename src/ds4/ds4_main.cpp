@@ -2329,8 +2329,9 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
             // DS4_ELASTIC_CONV: every running answer's next round backed (its rows and a verify window: +128), the
             // oldest request first; where the pool is short after the idle conversations gave theirs back, the newest
             // running answer ends ("length", its conversation set aside first) - the request itself when none is newer
-            // (DS4_DBG_GIVEWAY_AT=<positions>, debug: with 2+ answers running, one backed past that many positions
-            //  makes this round's pool short once for it - the give-way below runs as it would; once a request)
+            // (DS4_DBG_GIVEWAY_AT=<positions>, debug: with 2+ answers running, el_room below reports a short pool once
+            //  where it in fact succeeded, for an answer backed past that many positions - the give-way runs as it
+            //  would; each running request takes part once)
             static const long long dbg_gw = [] {
                 const char* v = std::getenv("DS4_DBG_GIVEWAY_AT");
                 return v != nullptr ? std::atoll(v) : 0LL;
@@ -2340,19 +2341,23 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
                 for (size_t i = 0; i < acts.size(); ++i) {
                     Act& a = *acts[i];
                     if (a.reading || a.done) continue;
-                    bool forced = false;
-                    if (dbg_gw > 0 && m.seq_backed(a.seq) > dbg_gw && !dbg_gw_done.count(a.r.rid) &&
-                        std::count_if(acts.begin(), acts.end(),
-                                      [](const std::unique_ptr<Act>& x) { return !x->reading && !x->done; }) >= 2) {
-                        forced = true;
+                    bool armed = dbg_gw > 0 && !dbg_gw_done.count(a.r.rid) &&
+                                 std::count_if(acts.begin(), acts.end(), [](const std::unique_ptr<Act>& x) {
+                                     return !x->reading && !x->done;
+                                 }) >= 2;
+                    const auto room = [&]() -> bool {
+                        const bool ok = el_room(a.seq, m.seq_pos(a.seq) + 128);
+                        const bool fire = ok && armed && m.seq_backed(a.seq) > dbg_gw;
+                        armed = false;
+                        if (!fire) return ok;
                         for (const auto& x : acts)
                             if (!x->reading && !x->done) dbg_gw_done.insert(x->r.rid);
                         std::fprintf(stderr, "ds4: DEBUG: DS4_DBG_GIVEWAY_AT=%lld: forcing a pool shortage this round "
                                              "(request %lld backed to %lld positions)\n",
                                      dbg_gw, a.r.rid, (long long) m.seq_backed(a.seq));
-                    }
-                    while (!a.done && (forced || !el_room(a.seq, m.seq_pos(a.seq) + 128))) {
-                        forced = false;
+                        return false;
+                    };
+                    while (!a.done && !room()) {
                         Act* v = &a;
                         for (size_t j = acts.size(); j-- > i + 1;)
                             if (!acts[j]->reading && !acts[j]->done) {
