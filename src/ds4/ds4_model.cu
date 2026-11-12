@@ -10053,6 +10053,32 @@ struct Model::Impl {
                          (double) (t.top - t.lo) / 1e6, (double) (t.top - t.floor) / 1e6, now_ms() - t0);
         return got;
     }
+    // the loan guard: a loan about to lay bytes from `low` on card di must stay at or above top (the given part lies below
+    // it) - where it would not, the given granules come back first (the cards quiet: no loan is laid yet), else the
+    // loan is refused.  Every time loudly, counted ("LOAN GUARD #n")
+    size_t el_guard_n = 0;
+    bool el_loan_guard(size_t di, size_t low, const char* what, std::string& err) {
+        if (di >= elt.size() || !elt[di].on || low >= elt[di].top) return true;
+        ElTake& t = elt[di];
+        const int id = devs[di].id;
+        ++el_guard_n;
+        if (t.lo >= t.top) {   // (nothing given now: the loan may go - but top was wrong; a take waits for its end)
+            std::fprintf(stderr, "ds4: elastic: LOAN GUARD #%zu: CUDA%d %s lays bytes from %.1f MB, below top %.1f MB "
+                                 "(nothing given now)\n", el_guard_n, id, what, low / 1e6, t.top / 1e6);
+            return true;
+        }
+        std::fprintf(stderr, "ds4: elastic: LOAN GUARD #%zu: CUDA%d %s would lay bytes from %.1f MB, inside the "
+                             "conversations' given [%.1f, %.1f) MB - giving it back first\n",
+                     el_guard_n, id, what, low / 1e6, t.lo / 1e6, t.top / 1e6);
+        el_give_back(di, (t.top - t.lo) / el->gran, "LOAN GUARD");
+        if (t.lo < t.top && low < t.top) {
+            std::fprintf(stderr, "ds4: elastic: LOAN GUARD #%zu: CUDA%d refuses %s: %.1f MB still given (the "
+                                 "conversations hold it)\n", el_guard_n, id, what, (t.top - t.lo) / 1e6);
+            err = "the elastic loan guard on CUDA" + std::to_string(id) + ": " + what + " would reach the conversations' memory";
+            return false;
+        }
+        return true;
+    }
     // conversation s to `tokens` positions: each card short of free granules takes them (at least a step), as far as
     // its floor allows; true when the pool then backs it
     bool el_take_for(int s, int64_t tokens) {
@@ -11196,6 +11222,10 @@ struct Model::Impl {
     bool lend_tail(size_t need, uint8_t*& p) {
         Dev& d = devs[0];
         if (lent || d.tail == nullptr || need + 256 > d.tail_bytes) return false;
+        {
+            std::string e2;
+            if (!el_loan_guard(0, (d.tail_bytes - need) & ~(size_t) 255, "a picture's room", e2)) return false;
+        }
         const bool x3 = !chunks.empty() && chunks[0] != nullptr && chunks[0]->x3_lend;
         struct Unflush {
             std::atomic<bool>& f;
@@ -19815,6 +19845,11 @@ struct Model::Impl {
                       " MiB for chunks of " + std::to_string(C) + " tokens, " + std::to_string(d.tail_bytes >> 20) +
                       " lent";
                 return false;
+            }
+            {   // (DS4_ELASTIC_TAKE: its buffers and the read help's below them - the lowest byte this run lays)
+                const size_t b0 = (d.tail_bytes - need) & ~(size_t) 255;
+                const size_t low = d.help_bytes > 0 && b0 > d.help_bytes ? (b0 - d.help_bytes) & ~(size_t) 255 : b0;
+                if (!el_loan_guard(di, low, "a prompt's chunks (and the read help's buffers)", err)) return false;
             }
         }
         static const bool check = std::getenv("DS4_CHECK_LEND") != nullptr;

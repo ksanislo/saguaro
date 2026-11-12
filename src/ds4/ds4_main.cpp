@@ -2127,13 +2127,13 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
                 el_release(v);
             }
         };
-        // the engine idle: idle conversations past the DS4_ELASTIC_KEEP (1) most recently used give theirs back (each
+        // the engine idle: idle conversations past the DS4_ELASTIC_KEEP (2) most recently used give theirs back (each
         // set aside first), and the cards take back all the pool holds past its budget (GLM's idle_trim)
         const auto el_idle_trim = [&] {
             if (!m.elastic()) return;
             static const int keep = [] {
                 const char* v = std::getenv("DS4_ELASTIC_KEEP");
-                return v != nullptr ? std::max(0, std::atoi(v)) : 1;
+                return v != nullptr ? std::max(0, std::atoi(v)) : 2;
             }();
             std::vector<int> order;
             for (int k = 0; k < nseq; ++k)
