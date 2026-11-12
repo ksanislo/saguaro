@@ -1214,6 +1214,8 @@ struct Model::Impl {
     int pick_len = 0;
     static constexpr int kWarmRows = 32;     // (warm_after: the run's last rows whose picks it reads ahead)
     static constexpr int kPickMax = 2048;   // (from here on the flow: windows' work grows with every 16 tokens)
+    int pick_max = kPickMax;                 // DS4_PICK_MAX=N (1..kPickMax): the flow from N tokens, the timing pick below
+    const bool pick_log = ds4_env("DS4_PICK_LOG") != nullptr && std::atoi(ds4_env("DS4_PICK_LOG")) != 0;
     static constexpr double kPickRes = 0.9;  // (this share of the CPU-lane experts in RAM: windows if predicted faster)
     std::atomic<int> lm_layers{0};           // (layer-major) the layers every chunk went through
     WinPlan wplan;
@@ -5023,8 +5025,14 @@ struct Model::Impl {
         if (pick_len > 0)
             std::fprintf(stderr, "ds4: a prompt's path by its length (DS4_PROMPT_PICK): the chunked pass from %d tokens, "
                                  "windows of %d below\n", std::max(pick_len, chunk_min), kWin);
-        else
+        else {
+            if (const char* v = ds4_env("DS4_PICK_MAX")) {
+                pick_max = std::clamp(std::atoi(v), 1, kPickMax);
+                std::fprintf(stderr, "ds4: a prompt's path: the flow from %d tokens, pick_path below (DS4_PICK_MAX)\n",
+                             pick_max);
+            }
             calibrate_paths();
+        }
         lane_setup();
         one_gpu_plan();   // (#496: the one-GPU path kept only where something streams)
         if (o.verbose) std::fprintf(stderr, "ds4: loaded in %.1f s\n%s", (now_ms() - t0) / 1000.0, describe().c_str());
@@ -19877,8 +19885,14 @@ struct Model::Impl {
     // same prompt would give other logits after other requests than in a fresh process
     bool pick_path(int n) {
         pm.last = -1;
-        if (pick_len > 0) return prompt_by_length(n, pick_len);   // (DS4_PROMPT_PICK=length)
-        if (!pm.on || n >= kPickMax || !o.expert_cache) return true;
+        if (pick_len > 0) return pick_said(n, prompt_by_length(n, pick_len), "DS4_PROMPT_PICK=length");
+        if (!pm.on) return pick_said(n, true, "paths not timed");
+        if (!o.expert_cache) return pick_said(n, true, "--no-expert-cache");
+        if (n >= pick_max) {
+            char why[48];
+            std::snprintf(why, sizeof why, pick_max < kPickMax ? "DS4_PICK_MAX %d" : "n >= kPickMax %d", pick_max);
+            return pick_said(n, true, why);
+        }
         double f_res = 0, f_cold = 0, w = 0;
         const int nw = n / kWin, rem = n % kWin;
         for (int il = 0; il < g.nl; ++il) {
@@ -19927,6 +19941,16 @@ struct Model::Impl {
                          "experts' %.1f GB in RAM)\n",
                          n, flow ? "the flow" : "windows", flow ? pf : pw, flow ? "windows" : "the flow", flow ? pw : pf,
                          100.0 * res_share, (f_res + f_cold) / 1e9);
+        if (pick_log) {
+            char why[64];
+            std::snprintf(why, sizeof why, "pick_path predicted %.2f s vs %.2f s", flow ? pf : pw, flow ? pw : pf);
+            pick_said(n, flow, why);
+        }
+        return flow;
+    }
+    // DS4_PICK_LOG=1: one line per prompt-path decision, n, the path and why (no --verbose needed)
+    bool pick_said(int n, bool flow, const char* why) const {
+        if (pick_log) std::fprintf(stderr, "ds4: path pick: %d tokens -> %s (%s)\n", n, flow ? "the flow" : "windows", why);
         return flow;
     }
     // a prompt's size class for pm.flow: 2-31, 32-127, 128-511, 512 tokens and more
