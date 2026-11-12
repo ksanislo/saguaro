@@ -691,6 +691,12 @@ struct Dev {
     uint16_t* mext = nullptr;
     AttnScratch mscr;
     MaPlan mplan;
+    // (DS4_READER) a prompt's device run beside decode: its own compute stream (least priority), xfer_put counter,
+    // attention scratch and drafter taps - decode keeps st / xcnt / attn_scr / tap
+    cudaStream_t rst = nullptr;
+    unsigned* rxcnt = nullptr;
+    AttnScratch rattn_scr;
+    float* rtap = nullptr;
 };
 
 // the chunked prompt path's buffers on a device: a chunk of C tokens through a layer at once (the attention in slabs of
@@ -934,6 +940,7 @@ struct Layer {
     // a prompt read in parts that keeps its lend between them (lend_hold): expert -> 1 while its slot lies under the
     // buffers and its table entries are 0 - on the CPU lane between the parts, back in VRAM at the hand-back
     std::vector<uint8_t> lend_mark;
+    std::vector<const uint8_t*> lend_src;       // (DS4_READER) a held expert's bytes in its device's LEND_SHADOW copy
     std::vector<int> last_picks;                // the picks of a run's last rows through the layer, kPicks a row (warm_after)
     std::array<uint8_t*, 4> spare_host = {nullptr, nullptr, nullptr, nullptr};
     std::vector<float> heat;
@@ -988,6 +995,8 @@ struct Src {
     uint8_t* x_stage1 = nullptr;
     unsigned* x_flag1 = nullptr;
     unsigned* x_ack = nullptr;
+    uint8_t* x_stage_r = nullptr;   // (DS4_READER) the background read's slot 0 and its flag (decode keeps x_stage)
+    unsigned* x_flag_r = nullptr;
     std::vector<int> readers;
     uint8_t* stage(int slot) const { return slot ? x_stage1 : x_stage; }
     unsigned* flag(int slot) const { return slot ? x_flag1 : x_flag; }
@@ -1083,6 +1092,9 @@ struct WinPlan {
     unsigned seq[kMaxL] = {};
     int topk[kMaxL][kWin] = {}, cand[kMaxL][kWin] = {};
 };
+
+// (DS4_READER) the conversation a background prompt read's device run writes, on its threads; -1 everywhere else
+static thread_local int g_rd_seq = -1;
 
 }  // namespace
 
@@ -2282,6 +2294,90 @@ struct Model::Impl {
     std::vector<Held> held_list;
     int held_seq = -1, held_k = -1, held_per = 0;   // (the plan it belongs to: its conversation, next chunk, chunk)
     int64_t held_at = -1;
+    // ---- DS4_READER=1: a prompt's device run (run_dev_chunks on every card) beside decode, the rest of the read
+    // exclusive (the serve loop's gate) - logs/maya/PLAN-ds4-reader.md
+    static bool reader_env() {
+        static const bool on = [] {
+            const char* v = ds4_env("DS4_READER");
+            return v != nullptr && std::atoi(v) != 0;
+        }();
+        return on;
+    }
+    bool rd_ok = false;      // (load) its streams, buffers and threads made, and the model fit for it
+    std::string rd_why;      // (not: why)
+    std::vector<std::unique_ptr<Worker>> rworkers;   // the device run's threads (decode keeps `workers`)
+    float* rd_h_taps = nullptr;                      // pinned: the run's drafter taps (h_taps is decode's)
+    std::atomic<bool> rd_live{false};                // a device run in flight beside decode
+    std::function<void()> rd_release, rd_acquire;    // (Model::set_reader_gate) the gate out and back in
+    std::vector<int32_t> rd_toks;                    // the run's prompt tokens from position rd_tok0 (its embeddings)
+    int64_t rd_tok0 = 0;
+    bool on_rd() const { return g_rd_seq >= 0; }
+    cudaStream_t cst(const Dev& d) const { return g_rd_seq >= 0 ? d.rst : d.st; }
+    unsigned* cxcnt(const Dev& d) const { return g_rd_seq >= 0 ? d.rxcnt : d.xcnt; }
+    uint8_t* kv_win(const Layer& l) const {
+        return g_rd_seq >= 0 ? sqs[(size_t) g_rd_seq].win[(size_t) sq_base[(size_t) l.il] + (size_t) l.mi] : l.win;
+    }
+    float* kv_ckv(const Layer& l) const {
+        return g_rd_seq >= 0 ? sqs[(size_t) g_rd_seq].c_kv[(size_t) sq_base[(size_t) l.il] + (size_t) l.mi] : l.c_kv;
+    }
+    float* kv_csc(const Layer& l) const {
+        return g_rd_seq >= 0 ? sqs[(size_t) g_rd_seq].c_score[(size_t) sq_base[(size_t) l.il] + (size_t) l.mi] : l.c_score;
+    }
+    uint8_t* src_ckv(int j, int di) const {
+        return g_rd_seq >= 0 ? sqs[(size_t) g_rd_seq].ckv[(size_t) j][(size_t) di] : srcs[(size_t) j].ckv[(size_t) di];
+    }
+    uint8_t* src_ik(int j, int di) const {
+        return g_rd_seq >= 0 ? sqs[(size_t) g_rd_seq].ik[(size_t) j][(size_t) di] : srcs[(size_t) j].ik[(size_t) di];
+    }
+    uint8_t* sstage(const Src& sr, int slot) const { return slot == 0 && g_rd_seq >= 0 ? sr.x_stage_r : sr.stage(slot); }
+    unsigned* sflag(const Src& sr, int slot) const { return slot == 0 && g_rd_seq >= 0 ? sr.x_flag_r : sr.flag(slot); }
+    // DS4_CHECK_READER=1: the read's isolation checked (ds4_main: KV hashes) and counted here - a device-wide sync or
+    // allocation, or the run's own path (layer_chunk / run_dev_chunks) off the run's threads, while a run is in flight
+    static bool rd_check() {
+        static const bool on = [] {
+            const char* v = ds4_env("DS4_CHECK_READER");
+            return v != nullptr && std::atoi(v) != 0;
+        }();
+        return on;
+    }
+    std::atomic<size_t> rd_sync_n{0}, rd_off_n{0};
+    void rd_sync_note(const char* where) {
+        if (!rd_check() || !rd_live.load(std::memory_order_acquire) || on_rd()) return;
+        std::fprintf(stderr, "ds4: DS4_CHECK_READER: %s while a read's device run is in flight (#%zu)\n", where,
+                     ++rd_sync_n);
+    }
+    void rd_off_note(const char* where) {
+        if (!rd_check() || !rd_live.load(std::memory_order_acquire) || on_rd()) return;
+        std::fprintf(stderr, "ds4: DS4_CHECK_READER: %s OFF the read's threads while its device run is in flight - it "
+                             "would use the bound conversation's KV (#%zu)\n", where, ++rd_off_n);
+    }
+    uint64_t rd_kv_hash(int s, int64_t upto) {
+        if (s < 0 || s >= (int) sqs.size()) return 0;
+        upto = std::min<int64_t>(upto, seq_backed(s));
+        uint64_t h = 1469598103934665603ull;
+        std::vector<uint8_t> buf;
+        int cur = 0;
+        cudaGetDevice(&cur);
+        for (size_t j = 0; j < srcs.size(); ++j)
+            for (size_t di = 0; di < devs.size(); ++di)
+                for (int ik = 0; ik < 2; ++ik) {
+                    const uint8_t* p = ik ? sqs[(size_t) s].ik[j][di] : sqs[(size_t) s].ckv[j][di];
+                    if (p == nullptr) continue;
+                    const size_t bytes = (size_t) (upto / std::max(1, srcs[j].ratio)) * (ik ? ik_rb() : ckv_rb());
+                    buf.resize(bytes);
+                    if (bytes == 0) continue;
+                    if (cudaSetDevice(devs[di].id) != cudaSuccess ||
+                        cudaMemcpy(buf.data(), p, bytes, cudaMemcpyDeviceToHost) != cudaSuccess) {
+                        cudaGetLastError();
+                        h ^= 0xdeadull;
+                        continue;
+                    }
+                    h = (h ^ el_hash(buf.data(), bytes)) * 1099511628211ull;
+                }
+        cudaSetDevice(cur);
+        return h;
+    }
+    int32_t rd_tok(int64_t p) const { return g_rd_seq >= 0 ? rd_toks[(size_t) (p - rd_tok0)] : toks[(size_t) p]; }
     static bool keep_lend_on() {
         static const bool on = [] {
             const char* v = ds4_env("DS4_PROMPT_KEEP_LEND");
@@ -2477,6 +2573,7 @@ struct Model::Impl {
         eg_ahead_end();   // (its reads in flight: done before the reader stops)
         eg_io.stop();   // (its threads write into h_eg)
         for (auto& w : workers) w->stop();
+        for (auto& w : rworkers) w->stop();
         for (size_t i = 0; i < chunks.size(); ++i)
             if (chunks[i] && chunks[i]->blas) {
                 cudaSetDevice(devs[i].id);
@@ -2566,6 +2663,7 @@ struct Model::Impl {
 
     template <class T>
     bool dalloc(Dev& d, T*& p, size_t n, std::string& err, size_t* acct = nullptr) {
+        rd_sync_note("cudaMalloc");
         void* v = nullptr;
         cudaSetDevice(d.id);
         const size_t b = align256(n * sizeof(T));
@@ -2744,6 +2842,7 @@ struct Model::Impl {
     }
     template <class T>
     bool halloc(T*& p, size_t n, std::string& err) {
+        rd_sync_note("a pinned allocation");
         void* v = nullptr;
         if (cudaHostAlloc(&v, n * sizeof(T) + 64, cudaHostAllocPortable) != cudaSuccess) {
             err = "cudaHostAlloc " + std::to_string((n * sizeof(T)) >> 20) + " MiB failed";
@@ -3250,6 +3349,8 @@ struct Model::Impl {
         return true;
     }
     const uint8_t* mx_mat(const Layer& l, int e, int r) const {   // expert e's matrix r: its RAM-tier slot, else the file's
+        if (!l.lend_src.empty() && l.lend_src[(size_t) e] != nullptr && held_out(l, e))   // (DS4_READER: the shadow)
+            return l.lend_src[(size_t) e] + l.lay.trellis[r];
         if (!l.ram.empty() && l.ram[(size_t) e] >= 0)   // (a copy with NH > 1: part 0's rows only - whole: read_mx)
             return copy_mode ? ram_part[(size_t) l.ram[(size_t) e]][0] + cp_lay[(size_t) l.il][(size_t) r]
                              : ram_slots[(size_t) l.ram[(size_t) e]] + l.lay.trellis[r];
@@ -5015,6 +5116,7 @@ struct Model::Impl {
                 workers.push_back(std::make_unique<Worker>());
                 workers.back()->start();
             }
+        if (reader_env()) rd_setup();   // (DS4_READER)
         if (cp_pin_last()) cp_pin();   // (#589: after every pinned buffer above, before the paths are timed)
         if (!read_help_setup(err)) return false;   // (DS4_READ_HELP: needs the copies' pins)
 #if defined(STRATA_USE_HIP) || defined(DS4_CUDA_PEER_AR)
@@ -5682,9 +5784,9 @@ struct Model::Impl {
         const int cols = std::max(128, (int) std::min<size_t>((size_t) m.n, c.w16_elems / (size_t) m.k) / 128 * 128);
         for (int c0 = 0; c0 < m.n; c0 += cols) {
             const int nc = std::min(cols, m.n - c0);
-            if (m.fmt != 0) gg::rows(nc == m.n ? m : gg::view(m, c0, nc), c.w16, false, d.st);   // (a GGUF's)
-            else x3::reconstruct_rows(nc == m.n ? m : x3::view(m, c0, nc), c.w16, false, d.st);
-            if (beta == 0.0f && lt::gemm(d.st, c.w16, nc, m.k, x16, ldx, rows, y + c0, ldy)) continue;   // (AMD)
+            if (m.fmt != 0) gg::rows(nc == m.n ? m : gg::view(m, c0, nc), c.w16, false, cst(d));   // (a GGUF's)
+            else x3::reconstruct_rows(nc == m.n ? m : x3::view(m, c0, nc), c.w16, false, cst(d));
+            if (beta == 0.0f && lt::gemm(cst(d), c.w16, nc, m.k, x16, ldx, rows, y + c0, ldy)) continue;   // (AMD)
             const float one = 1.0f;
             const cublasStatus_t st = cublasGemmEx(c.blas, CUBLAS_OP_T, CUBLAS_OP_N, nc, rows, m.k, &one, c.w16, CUDA_R_16F,
                                                    m.k, x16, CUDA_R_16F, ldx, &beta, y + c0, CUDA_R_32F, ldy,
@@ -5803,7 +5905,7 @@ struct Model::Impl {
             err = "cublasSgemm (mHC mixes)";
             return false;
         }
-        hc_mix_scale(h, hcd, n_mix, T, g.eps, mixes, d.st);
+        hc_mix_scale(h, hcd, n_mix, T, g.eps, mixes, cst(d));
         return true;
     }
 
@@ -6645,7 +6747,7 @@ struct Model::Impl {
     // layer L0 of chunk k routed (bounds b, the device's copy d_bounds): its streamed experts as they land, the VRAM
     // ones in shares between them (the device works while the reads run)
     bool flow_layer(Dev& d, Chunk& c, Layer& L0, int mi, int k, int T, const std::vector<int>& b, std::string& err) {
-        cudaStream_t s = d.st;
+        cudaStream_t s = cst(d);
         const Layer& vx = member(L0, mi);   // (a member's: its part of each VRAM expert, L0's slots)
         if (c.spec_k != k || c.spec_il != L0.il) {
             err = "the prompt path's expert stream is out of step (layer " + std::to_string(L0.il) + ")";
@@ -6693,7 +6795,8 @@ struct Model::Impl {
                 }();
                 auto lent_v = [&](size_t i) {
                     const int e = fit(c, i).e, sl = L0.slot[(size_t) e];
-                    return lent && L0.nm == 1 && sl >= L0.pv_n && sl < L0.n_slots;   // (one-GPU layers: L0's slot map)
+                    // (DS4_READER: a held expert's slot is -1 in the books while the run lends it)
+                    return lent && L0.nm == 1 && ((sl >= L0.pv_n && sl < L0.n_slots) || held_out(L0, e));   // (one-GPU layers: L0's slot map)
                 };
                 bool any = false;
                 if (fat_lent)
@@ -6836,7 +6939,7 @@ struct Model::Impl {
             ~Back() { cudaSetDevice(id); }
         } back_{d.id};
         // the owner: the inputs out once routed
-        CK(cudaEventRecord(r.routed, d.st));
+        CK(cudaEventRecord(r.routed, cst(d)));
         CK(cudaStreamWaitEvent(r.ost, r.routed, 0));
         CK(cudaMemcpyAsync(r.hx, c.x, TD * 4, cudaMemcpyDeviceToHost, r.ost));
         CK(cudaMemcpyAsync(r.hpos, c.pos, TP * 4, cudaMemcpyDeviceToHost, r.ost));
@@ -6915,14 +7018,14 @@ struct Model::Impl {
         CK(cudaMemcpyAsync(r.oacc, r.hpart, TD * 4, cudaMemcpyHostToDevice, r.ost));
         CK(cudaEventRecord(r.back, r.ost));
         kick(r.ost);
-        CK(cudaEventRecord(r.o0, d.st));
-        CK(cudaStreamWaitEvent(d.st, r.back, 0));
-        CK(cudaEventRecord(r.o1, d.st));
+        CK(cudaEventRecord(r.o0, cst(d)));
+        CK(cudaStreamWaitEvent(cst(d), r.back, 0));
+        CK(cudaEventRecord(r.o1, cst(d)));
         if (read_help_check() && !r.checked) {
             r.checked = true;
             if (!read_help_compare(d, c, L0, T, b, r, err)) return false;
         }
-        add_f32(c.acc, r.oacc, TD, d.st);
+        add_f32(c.acc, r.oacc, TD, cst(d));
         CK(cudaGetLastError());
         r.timed = true;
         return true;
@@ -6935,7 +7038,7 @@ struct Model::Impl {
         if (r.chk == nullptr &&
             (!dalloc(d, r.chk, (size_t) chunk * g.dim, err) || !dalloc(d, r.chk_blob, c.ring_stride, err)))
             return false;
-        CK(cudaMemsetAsync(r.chk, 0, TD * 4, d.st));
+        CK(cudaMemsetAsync(r.chk, 0, TD * 4, cst(d)));
         float* const acc0 = c.acc;
         const bool fat0 = c.fat_off;
         c.acc = r.chk;
@@ -6947,7 +7050,7 @@ struct Model::Impl {
         for (const auto& ve : r.its) {   // (the issue's (slot, expert): flow_spec may have planned the next chunk since)
             const int v = ve.first;
             if (!ok) break;
-            ok = read_help_blob(L0, ve.second, r.chk_blob, d.st, bytes) &&
+            ok = read_help_blob(L0, ve.second, r.chk_blob, cst(d), bytes) &&
                  run_set(d, c, L0, r.chk_blob, v, c.ring_stride, c.bounds, b.data(), v, v + 1, T, err);
             ++n_e;
         }
@@ -6960,7 +7063,7 @@ struct Model::Impl {
         {   // (the chain's stages while waiting: which never ends)
             const double t0 = now_ms();
             double last = t0;
-            while (cudaStreamQuery(d.st) == cudaErrorNotReady) {
+            while (cudaStreamQuery(cst(d)) == cudaErrorNotReady) {
                 if (now_ms() - last > 5000) {
                     last = now_ms();
                     auto q = [](cudaEvent_t e) { return cudaEventQuery(e) == cudaSuccess ? 1 : 0; };
@@ -6975,7 +7078,7 @@ struct Model::Impl {
             }
             cudaGetLastError();
         }
-        CK(cudaStreamSynchronize(d.st));
+        CK(cudaStreamSynchronize(cst(d)));
         std::vector<float> hp(TD), mine(TD);
         CK(cudaMemcpy(hp.data(), r.oacc, TD * 4, cudaMemcpyDeviceToHost));
         CK(cudaMemcpy(mine.data(), r.chk, TD * 4, cudaMemcpyDeviceToHost));
@@ -7040,7 +7143,7 @@ struct Model::Impl {
     // (st: the stream its kernels go on - d.st when null; DS4_READ_HELP's helper passes its own)
     bool run_set(Dev& d, Chunk& c, const Layer& l, const uint8_t* wbase, int wb0, size_t stride, const int* d_bounds,
                  const int* b, int i0, int i1, int T, std::string& err, cudaStream_t st = nullptr, bool ring_fat = false) {
-        const cudaStream_t ss = st != nullptr ? st : d.st;
+        const cudaStream_t ss = st != nullptr ? st : cst(d);
         const int D = g.dim, FF = l.ffn;
         while (i0 < i1) {
             int j = i0 + 1;
@@ -9915,7 +10018,7 @@ struct Model::Impl {
         if ((lent || lend_held.load(std::memory_order_relaxed)) && !borrow_end()) return false;
         cache_drain();
         for (Dev& d : devs)
-            if (cudaSetDevice(d.id) != cudaSuccess || cudaDeviceSynchronize() != cudaSuccess) return false;
+            if (cudaSetDevice(d.id) != cudaSuccess || (rd_sync_note("el_quiet's cudaDeviceSynchronize"), cudaDeviceSynchronize()) != cudaSuccess) return false;
         return true;
     }
     size_t el_taken_g(size_t di) const {
@@ -10101,6 +10204,7 @@ struct Model::Impl {
     // card di gives the pool up to n granules of its tail (the cards quiet); the granules given
     size_t el_take(size_t di, size_t n, const char* why) {
         if (di >= elt.size() || !elt[di].on || n == 0 || elt[di].lo < elt[di].floor + el->gran) return 0;
+        if (rd_live.load(std::memory_order_acquire)) return 0;   // (DS4_READER: never under a read's device run)
         if (!el_quiet()) return 0;
         ElTake& t = elt[di];
         Dev& d = devs[di];
@@ -10178,6 +10282,7 @@ struct Model::Impl {
     // card di takes back up to n granules from the pool's free ones, their experts in VRAM again (the cards quiet)
     size_t el_give_back(size_t di, size_t n, const char* why) {
         if (di >= elt.size() || !elt[di].on || n == 0 || elt[di].lo >= elt[di].top) return 0;
+        if (rd_live.load(std::memory_order_acquire)) return 0;   // (DS4_READER: never under a read's device run)
         if (!el_quiet()) return 0;
         ElTake& t = elt[di];
         Dev& d = devs[di];
@@ -10294,6 +10399,7 @@ struct Model::Impl {
     // its floor allows; true when the pool then backs it
     bool el_take_for(int s, int64_t tokens) {
         if (el == nullptr || elt.empty() || s < 0 || s >= (int) el->seqs.size()) return false;
+        if (rd_live.load(std::memory_order_acquire)) return false;
         tokens = std::min<int64_t>(tokens, o.max_context);
         const size_t step = std::max<size_t>(1, el_env_mb("DS4_ELASTIC_TAKE_STEP_MB", 64) / el->gran);
         for (size_t di = 0; di < devs.size(); ++di) {
@@ -10305,7 +10411,7 @@ struct Model::Impl {
     // what the cards took back to the experts: the free granules past max(budget, backed + hysteresis); idle: no
     // hysteresis (the engine has nothing running)
     void el_give_back_surplus(bool idle) {
-        if (el == nullptr || elt.empty()) return;
+        if (el == nullptr || elt.empty() || rd_live.load(std::memory_order_acquire)) return;
         const size_t H = idle ? 0 : el_env_mb("DS4_ELASTIC_HYST_MB", 128) / el->gran;
         for (size_t di = 0; di < devs.size(); ++di) {
             const size_t hold = di < el_hold_g.size() ? el_hold_g[di] : 0;   // (DS4_DBG_TAKE_HOLD: kept)
@@ -10495,6 +10601,7 @@ struct Model::Impl {
         const int b = sq_bound;
         seq_bind(s);
         reset();
+        rd_sync_note("seq_release's cudaDeviceSynchronize");
         for (Dev& d : devs) {   // (nothing in flight may read the rows unmapped below)
             cudaSetDevice(d.id);
             cudaDeviceSynchronize();
@@ -18600,7 +18707,8 @@ struct Model::Impl {
         Dev& d = devs[(size_t) l.dev];
         Chunk& c = *chunks[(size_t) l.dev];
         cudaSetDevice(d.id);
-        cudaStream_t s = d.st;
+        rd_off_note("layer_chunk");
+        cudaStream_t s = cst(d);
         prof_mark(d, 0);
         const int nm = L0.nm;
         const int D = g.dim, H = g.hc, HD = g.hd, NHL = l.ahn, HQ = NHL * HD, OG = l.ogn, FF = l.ffn;
@@ -18641,7 +18749,7 @@ struct Model::Impl {
             finish(c.qr, T, g.q_lora, g.q_lora, fq, s);
             x3::rows_f16(c.qr, g.q_lora, nullptr, T, g.q_lora, c.qr16, s);
             // the window rows: the ring's (positions p0 - win ..) then the chunk's
-            ring_to_ext(l.win, c.ext, p0, g.win, HD, s);
+            ring_to_ext(kv_win(l), c.ext, p0, g.win, HD, s);
             Finish fk;
             fk.w = l.kv_norm;
             fk.eps = g.eps;
@@ -18657,10 +18765,10 @@ struct Model::Impl {
             for (int i = 0; snap && i < wp.snap_n; ++i) {
                 uint8_t* sw = L0.snap_win[wp.snap_ix[i]];
                 if (sw == nullptr) continue;
-                CK(cudaMemcpyAsync(sw, l.win, (size_t) g.win * win_rb(), cudaMemcpyDeviceToDevice, s));
+                CK(cudaMemcpyAsync(sw, kv_win(l), (size_t) g.win * win_rb(), cudaMemcpyDeviceToDevice, s));
                 if (wp.snap_t[i] > 0) ext_to_ring(c.ext, sw, p0, g.win, wp.snap_t[i], HD, s, nullptr);
             }
-            ext_to_ring(c.ext, l.win, p0, g.win, T, HD, s, nullptr);
+            ext_to_ring(c.ext, kv_win(l), p0, g.win, T, HD, s, nullptr);
         }
         const uint8_t* ckv = nullptr;
         const long long ss = (long long) o.max_context + 64;
@@ -18684,13 +18792,13 @@ struct Model::Impl {
                         const int64_t ps = p0 + wp.snap_t[i];
                         for (int sl = 0; sl < R; ++sl) {
                             const int64_t q = ps - 1 - (((ps - 1 - sl) % R) + R) % R;
-                            const float* kv = q >= p0 ? c.ckr + (size_t) (q - p0) * HD : l.c_kv + (size_t) sl * HD;
-                            const float* sc = q >= p0 ? c.cgr + (size_t) (q - p0) * HD : l.c_score + (size_t) sl * HD;
+                            const float* kv = q >= p0 ? c.ckr + (size_t) (q - p0) * HD : kv_ckv(l) + (size_t) sl * HD;
+                            const float* sc = q >= p0 ? c.cgr + (size_t) (q - p0) * HD : kv_csc(l) + (size_t) sl * HD;
                             CK(cudaMemcpyAsync(skv + (size_t) sl * HD, kv, (size_t) HD * 4, cudaMemcpyDeviceToDevice, s));
                             CK(cudaMemcpyAsync(ssc + (size_t) sl * HD, sc, (size_t) HD * 4, cudaMemcpyDeviceToDevice, s));
                         }
                     }
-                    compress_win(c.ckr, c.cgr, l.c_kv, l.c_score, R, (int) p0, T, HD, l.c_norm, g.eps, c.latent, s);
+                    compress_win(c.ckr, c.cgr, kv_ckv(l), kv_csc(l), R, (int) p0, T, HD, l.c_norm, g.eps, c.latent, s);
                 }
             }
             const int clen_max = (int) ((p0 + T) / R);
@@ -18707,7 +18815,7 @@ struct Model::Impl {
                     fi.pos_step = R;
                     fi.freqs = freqs;
                     fi.quant = 3;
-                    fi.pdst = row_dst(ks.ik[(size_t) l.dev], R, g_first, true, l.dev);
+                    fi.pdst = row_dst(src_ik(l.ik_src, l.dev), R, g_first, true, l.dev);
                     fi.pdst_stride = (long long) ik_rb();
                     finish(c.ikr, ng, g.ix_hd, g.ix_hd, fi, s);
                 }
@@ -18744,13 +18852,13 @@ struct Model::Impl {
                         if (l.uses_cand && (nlast + g.cand_blk - 1) / g.cand_blk > g.cand_topk) {
                             Rows cl = lim;
                             cl.gen = 2;
-                            index_score(c.iq, iw, ks.ik[(size_t) l.dev], g.ix_heads, g.ix_hd, na, g.cand_topk * g.cand_blk,
+                            index_score(c.iq, iw, src_ik(l.ik_src, l.dev), g.ix_heads, g.ix_hd, na, g.cand_topk * g.cand_blk,
                                         cd, (int) cand_stride(), g.cand_blk, cl, c.scores, ss, s);
                             Rows tr = lim;
                             tr.gen = 3;
                             topk(c.scores, ss, na, tr, cd, (int) cand_stride(), g.cand_blk, tk, (int) topk_stride(), s);
                         } else {
-                            index_score(c.iq, iw, ks.ik[(size_t) l.dev], g.ix_heads, g.ix_hd, na, nlast, nullptr, 0, 1,
+                            index_score(c.iq, iw, src_ik(l.ik_src, l.dev), g.ix_heads, g.ix_hd, na, nlast, nullptr, 0, 1,
                                         lim, c.scores, ss, s);
                             if (l.cand_src) {
                                 Rows cr = lim;
@@ -18771,7 +18879,7 @@ struct Model::Impl {
                 fc.pos_step = R;
                 fc.freqs = freqs;
                 fc.quant = 2;
-                fc.pdst = row_dst(sr.ckv[(size_t) l.dev], R, g_first, false, l.dev);
+                fc.pdst = row_dst(src_ckv(l.src, l.dev), R, g_first, false, l.dev);
                 fc.pdst_stride = (long long) ckv_rb();
                 finish(const_cast<float*>(latent), ng, HD, HD, fc, s);
                 if (mi == 0 && sr.remote) {   // the new rows for the other groups' readers (slot k % 2, once
@@ -18780,19 +18888,19 @@ struct Model::Impl {
                         for (int r : sr.readers) wait_flags(sr.x_ack + ((size_t) slot * devs.size() + r) * 32, 1, 32, wp.win - 2, s);
                     Xfer x;
                     x.src[0] = fc.pdst;
-                    x.dst[0] = sr.stage(slot);
+                    x.dst[0] = sstage(sr, slot);
                     x.bytes[0] = (size_t) ng * ckv_rb();
                     x.n = 1;
-                    if (l.owns_k && srcs[(size_t) l.ik_src].ik[(size_t) l.dev] != nullptr) {
-                        x.src[1] = row_dst(srcs[(size_t) l.ik_src].ik[(size_t) l.dev], R, g_first, true, l.dev);
-                        x.dst[1] = sr.stage(slot) + x_cap() * ckv_rb();
+                    if (l.owns_k && src_ik(l.ik_src, l.dev) != nullptr) {
+                        x.src[1] = row_dst(src_ik(l.ik_src, l.dev), R, g_first, true, l.dev);
+                        x.dst[1] = sstage(sr, slot) + x_cap() * ckv_rb();
                         x.bytes[1] = (size_t) ng * ik_rb();
                         x.n = 2;
                     }
-                    xfer_put(x, sr.flag(slot), wp.win, d.xcnt, s);
+                    xfer_put(x, sflag(sr, slot), wp.win, cxcnt(d), s);
                 }
             }
-            ckv = sr.ckv[(size_t) l.dev];
+            ckv = src_ckv(l.src, l.dev);
         }
         prof_mark(d, 5);
         if (kv_only) {   // (DS4_PROF: its time the attention's - it ends where the attention would start)
@@ -18834,7 +18942,7 @@ struct Model::Impl {
             ar.kcap = g.ix_topk;
             sparse_attn(c.q, c.ext, ckv, c.topk + (size_t) a0 * topk_stride(), (int) topk_stride(), ar, l.sink, NHL, HD,
                         na, 1.0f / std::sqrt((float) HD), c.o, s, kKvFp4, na > kAttnScratchT ? kAttnWmma : 0,
-                        &d.attn_scr);   // (a short last slab: the scratch)
+                        on_rd() ? &d.rattn_scr : &d.attn_scr);   // (a short last slab: the scratch)
             prof_mark(d, 7);
             Finish fo;
             fo.rd = g.rd;
@@ -18956,7 +19064,7 @@ struct Model::Impl {
             if (nm > 1) {
                 // The DMA helper uses the same FP16 sums; keep F32 and two-member reductions unchanged.
                 if (flow_ar_dma && nm > 2) chunk_allreduce(d, c, ab, mi, T * D, s);
-                else allreduce(c.acc, T * D, ab, mi, ++c.arb_seq, d.xcnt, s);
+                else allreduce(c.acc, T * D, ab, mi, ++c.arb_seq, cxcnt(d), s);
             }
             ablate(d, c.acc, T, s);
             hc_post_inplace(c.acc, c.h, c.f_post, c.f_comb, D, H, T, s);
@@ -19354,6 +19462,7 @@ struct Model::Impl {
         return true;
     }
     bool run_dev_chunks(int di, const Run& run, std::string& err) {
+        rd_off_note("run_dev_chunks");
         Dev& d = devs[(size_t) di];
         Chunk& c = *chunks[(size_t) di];
         // A selected helper/drafter-only device has no trunk chunks to admit.
@@ -19372,7 +19481,7 @@ struct Model::Impl {
         c.at_il.store(-1, std::memory_order_relaxed);
         c.at.store("starting a run of chunks", std::memory_order_relaxed);
         cudaSetDevice(d.id);
-        cudaStream_t s = d.st;
+        cudaStream_t s = cst(d);
         const int D = g.dim, H = g.hc, nk = (int) run.T.size();
         Streamer S;
         const double stream_start = c.stream_bytes;
@@ -19462,7 +19571,10 @@ struct Model::Impl {
         }
         std::atomic<bool> ra_stop{false};
         std::thread ra;
-        if (file_experts && !S.b.empty()) ra = std::thread([this, &S, di, &ra_stop] { read_ahead(S, di, ra_stop); });
+        if (file_experts && !S.b.empty()) ra = std::thread([this, &S, di, &ra_stop, rs = g_rd_seq] {
+            g_rd_seq = rs;
+            read_ahead(S, di, ra_stop);
+        });
         struct Join {   // (every way out of the run: the read-ahead ends before S does)
             std::atomic<bool>& stop;
             std::thread& th;
@@ -19529,7 +19641,8 @@ struct Model::Impl {
                     std::this_thread::sleep_for(std::chrono::microseconds(100));
                 }
             }
-            if (run_yields) {
+            if (run_yields || on_rd()) {   // (DS4_READER: never more chunks queued than a yield allows - a card's launch
+                                           //  queue full of waiting read kernels would hold decode's launches)
                 const int back = k - ((int) groups.size() + kYieldSlack);
                 if (back >= 0)
                     while (!(chunk_rec[(size_t) back].load(std::memory_order_acquire) &&
@@ -19582,7 +19695,7 @@ struct Model::Impl {
                     if (il == 0) {
                         if (k >= 2) CK(cudaEventSynchronize(c.emb_ev[slot]));
                         for (int t = 0; t < T; ++t)
-                            std::memcpy(c.emb_host[slot] + (size_t) t * D, emb_row(p0 + t, toks[(size_t) (p0 + t)]),
+                            std::memcpy(c.emb_host[slot] + (size_t) t * D, emb_row(p0 + t, rd_tok(p0 + t)),
                                         (size_t) D * 2);
                         CK(cudaMemcpyAsync(c.emb, c.emb_host[slot], (size_t) T * D * 2, cudaMemcpyHostToDevice, s));
                         CK(cudaEventRecord(c.emb_ev[slot], s));
@@ -19602,17 +19715,17 @@ struct Model::Impl {
                     const int64_t g_first = p0 / sr.ratio;
                     const int ng = (int) std::max<int64_t>(0, (p0 + T) / sr.ratio - g_first);
                     Xfer x;
-                    if (ng > 0 && sr.ckv[(size_t) di] != nullptr) {
-                        x.src[x.n] = sr.stage(slot);
-                        x.dst[x.n] = row_dst(sr.ckv[(size_t) di], sr.ratio, g_first, false, (int) di);
+                    if (ng > 0 && src_ckv(sidx, (int) di) != nullptr) {
+                        x.src[x.n] = sstage(sr, slot);
+                        x.dst[x.n] = row_dst(src_ckv(sidx, (int) di), sr.ratio, g_first, false, (int) di);
                         x.bytes[x.n++] = (size_t) ng * ckv_rb();
                     }
-                    if (ng > 0 && sr.ik[(size_t) di] != nullptr) {
-                        x.src[x.n] = sr.stage(slot) + x_cap() * ckv_rb();
-                        x.dst[x.n] = row_dst(sr.ik[(size_t) di], sr.ratio, g_first, true, (int) di);
+                    if (ng > 0 && src_ik(sidx, (int) di) != nullptr) {
+                        x.src[x.n] = sstage(sr, slot) + x_cap() * ckv_rb();
+                        x.dst[x.n] = row_dst(src_ik(sidx, (int) di), sr.ratio, g_first, true, (int) di);
                         x.bytes[x.n++] = (size_t) ng * ik_rb();
                     }
-                    if (x.n > 0) xfer_get(x, sr.flag(slot), wp.win, s);
+                    if (x.n > 0) xfer_get(x, sflag(sr, slot), wp.win, s);
                     set_flag(sr.x_ack + ((size_t) slot * devs.size() + di) * 32, wp.win, s);   // (taken, or none)
                 }
                 if (last_k && mi == 0 && g.n_mtp > 0) {   // the drafter's taps: the last chunk's last rows
@@ -19620,9 +19733,10 @@ struct Model::Impl {
                     if (it != g.d_targets.end()) {
                         const size_t j = (size_t) (it - g.d_targets.begin()), nt = g.d_targets.size();
                         const int nr = std::min(T, tap_cap);
-                        hc_mean(c.h + (size_t) (T - nr) * H * D, nr, H, D, d.tap, D, s);
-                        if (!wait_seed(s, err)) return false;
-                        CK(cudaMemcpy2DAsync(h_taps + j * D, nt * D * 4, d.tap, (size_t) D * 4, (size_t) D * 4,
+                        float* tp = on_rd() ? d.rtap : d.tap;   // (DS4_READER: its own; the epilogue hands them over)
+                        hc_mean(c.h + (size_t) (T - nr) * H * D, nr, H, D, tp, D, s);
+                        if (!on_rd() && !wait_seed(s, err)) return false;
+                        CK(cudaMemcpy2DAsync((on_rd() ? rd_h_taps : h_taps) + j * D, nt * D * 4, tp, (size_t) D * 4, (size_t) D * 4,
                                              (size_t) nr, cudaMemcpyDeviceToHost, s));
                     }
                 }
@@ -19638,7 +19752,7 @@ struct Model::Impl {
                     const int nnext = L[(size_t) il + 1].nm;
                     if (k >= 2 && run.runs(k - 2, il + 1))
                         wait_flags(c.hand_ack + (size_t) slot * 8 * 32, nnext, 32, wp.win - 2, s);
-                    xfer_put(chunk_xfer(c.hand[slot], c, T, true), c.hand_flag[slot], wp.win, d.xcnt, s);
+                    xfer_put(chunk_xfer(c.hand[slot], c, T, true), c.hand_flag[slot], wp.win, cxcnt(d), s);
                 }
             }
             if (trace && !c.flow && tr_ev.size() == 3 + 2 * (size_t) k) tr_rec(s);   // (DS4_RUN_TRACE: chunk k's end)
@@ -19648,7 +19762,8 @@ struct Model::Impl {
                 CK(cudaEventRecord(chunk_done[(size_t) k], s));
                 chunk_rec[(size_t) k].store(1, std::memory_order_release);
             }
-            if (d.grp == devs[(size_t) head_dev].grp) {   // the head group: each member its share of the logits
+            // (DS4_READER: no head in the device run - the epilogue runs it, exclusive, on d.st)
+            if (!on_rd() && d.grp == devs[(size_t) head_dev].grp) {   // the head group: each member its share of the logits
                 if (logits_all) {   // every row's logits (tests): the head over the chunk's rows, 16 at a time
                     const size_t base = (size_t) (p0 - run.p0[0]) * g.vocab;
                     for (int r0 = 0; r0 < T; r0 += kWin) {
@@ -20227,6 +20342,7 @@ struct Model::Impl {
         for (size_t di = 0; di < devs.size(); ++di) {   // (the run's work done: nothing writes the buffers now)
             cudaError_t e = cudaSetDevice(devs[di].id);
             if (e == cudaSuccess) e = cudaStreamSynchronize(devs[di].st);
+            if (e == cudaSuccess && devs[di].rst != nullptr) e = cudaStreamSynchronize(devs[di].rst);
             if (e == cudaSuccess && di < chunks.size() && chunks[di] != nullptr && chunks[di]->cs != nullptr)
                 e = cudaStreamSynchronize(chunks[di]->cs);
             if (e != cudaSuccess) {
@@ -20273,10 +20389,109 @@ struct Model::Impl {
             Layer& l = L[(size_t) h.layer];
             l.slot[(size_t) h.e] = h.slot;
             l.host[(size_t) h.e] = nullptr;
+            if (!l.lend_src.empty()) l.lend_src[(size_t) h.e] = nullptr;
             ++l.n_vram;
         }
         held_list.clear();
         lend_held.store(false, std::memory_order_relaxed);
+    }
+    // (DS4_READER) the device run's own streams, buffers and threads (load, after the windows' threads); off with a
+    // reason where the model does not fit the split (logs/maya/PLAN-ds4-reader.md)
+    void rd_setup() {
+        if (chunk <= 0) rd_why = "no chunked prompt path";
+        else if (sqs.size() < 2) rd_why = "one conversation (--parallel 2 or more)";
+        else if (!g.eg_layers.empty()) rd_why = "Engram layers";
+        for (const Layer& l : L)
+            if (rd_why.empty() && l.nm > 1) rd_why = "a tensor-parallel layer";
+        if (!rd_why.empty()) {
+            std::fprintf(stderr, "ds4: DS4_READER: off (%s) - prompts read between the answers' rounds, as without it\n",
+                         rd_why.c_str());
+            return;
+        }
+        std::string err;
+        bool ok = true;
+        for (Dev& d : devs) {
+            cudaSetDevice(d.id);
+            int least = 0, greatest = 0;
+            if (cudaDeviceGetStreamPriorityRange(&least, &greatest) != cudaSuccess) {
+                cudaGetLastError();
+                least = 0;
+            }
+            ok = ok && cudaStreamCreateWithPriority(&d.rst, cudaStreamNonBlocking, least) == cudaSuccess &&
+                 dalloc(d, d.rxcnt, 4, err);
+            d.rattn_scr.max_t = d.attn_scr.max_t;
+            d.rattn_scr.cap = d.attn_scr.cap;
+            if (ok && d.attn_scr.rows != nullptr)
+                ok = dalloc(d, d.rattn_scr.rows, (size_t) kAttnScratchT * topk_stride() * g.hd, err);
+            if (ok && d.tap != nullptr) ok = dalloc(d, d.rtap, (size_t) tap_cap * g.dim, err);
+        }
+        if (ok && h_taps != nullptr) ok = halloc(rd_h_taps, (size_t) tap_cap * g.d_targets.size() * g.dim, err);
+        for (Src& sr : srcs)
+            if (ok && sr.x_stage != nullptr)
+                ok = hmap(sr.x_stage_r, x_cap() * (ckv_rb() + ik_rb()), err) && hmap(sr.x_flag_r, 32, err);
+        if (!ok) {
+            rd_why = err.empty() ? "a stream or buffer could not be made" : err;
+            std::fprintf(stderr, "ds4: DS4_READER: off (%s)\n", rd_why.c_str());
+            return;
+        }
+        for (size_t di = 0; di < devs.size(); ++di) {
+            rworkers.push_back(std::make_unique<Worker>());
+            rworkers.back()->start();
+        }
+        rd_ok = true;
+        std::fprintf(stderr, "ds4: DS4_READER: on - a long prompt's run of chunks goes through the cards beside the "
+                             "running answers (its own threads and least-priority streams; the experts under its buffers "
+                             "on the CPU lane from the shadow copy%s)\n",
+                     lend_shadow() ? "" : " - DS4_LEND_SHADOW off: from the file");
+    }
+    // (DS4_READER) before a device run beside decode: the experts under its buffers held out as lend_hold holds them
+    // between a prompt's parts (slot -1, table entries 0, the cache still), computing from the LEND_SHADOW copy of
+    // their slot (null: the file).  The run itself keeps plan_streams' view.  false: a layer lend_hold cannot hold
+    bool rd_hold() {
+        if (!lent || lend_held.load(std::memory_order_relaxed)) return false;
+        for (const Layer& l : L)
+            if (!l.mtp && l.pv_n < l.n_slots && (l.lay.fmt != gg::kFmtMXFP4 || !l.maddr.empty() || l.nm > 1)) return false;
+        held_list.clear();
+        lend_held.store(true, std::memory_order_relaxed);
+        bool ok = true;
+        size_t n_sh = 0, n_file = 0;
+        for (Layer& l : L) {
+            if (l.mtp || l.pv_n >= l.n_slots) continue;
+            if (l.lend_mark.size() != (size_t) l.n_exp) l.lend_mark.assign((size_t) l.n_exp, 0);
+            if (l.lend_src.size() != (size_t) l.n_exp) l.lend_src.assign((size_t) l.n_exp, nullptr);
+            const Dev& d = devs[(size_t) l.dev];
+            for (int e = 0; e < l.n_exp; ++e) {
+                const int sl = l.slot[(size_t) e];
+                if (sl < l.pv_n) continue;
+                held_list.push_back({l.il, e, sl});
+                const size_t off = (size_t) (sat(l, l, sl, unit(l)) - d.tail), u = unit(l);
+                const bool sh = d.shadow != nullptr && d.shadow_cut != SIZE_MAX && off >= d.shadow_cut &&
+                                off + u <= d.tail_bytes;
+                l.lend_src[(size_t) e] = sh ? d.shadow + off : nullptr;
+                l.lend_mark[(size_t) e] = 1;
+                l.slot[(size_t) e] = -1;
+                l.host[(size_t) e] = (uint8_t*) mx_mat(l, e, 0);
+                --l.n_vram;
+                ok = tab_entry(l, e) && ok;
+                ++(sh ? n_sh : n_file);
+            }
+        }
+        held_seq = -1;   // (never a feed_part's `cont`)
+        held_at = -1;
+        held_k = -1;
+        held_per = 0;
+        st.lend_kept += (int64_t) held_list.size();
+        if (!ok) {
+            lend_broken = true;
+            std::fprintf(stderr, "ds4: DS4_READER: a table write failed holding the read's experts - the device's state "
+                                 "unknown; no further request runs\n");
+        }
+        static bool said = false;
+        if (!said)
+            std::fprintf(stderr, "ds4: DS4_READER: %zu experts under a read's buffers compute on the CPU lane while it "
+                                 "runs (%zu from the shadow copy, %zu from the file)\n", held_list.size(), n_sh, n_file);
+        said = true;
+        return true;
     }
     // after the run (every device done with its buffers): the experts under them read back into their slots, in file
     // order by a few threads - one that cannot be read leaves VRAM for the CPU lane (the decode finds every other one
@@ -20307,6 +20522,7 @@ struct Model::Impl {
         for (size_t di = 0; di < devs.size() && !broken; ++di) {
             cudaError_t e = cudaSetDevice(devs[di].id);
             if (e == cudaSuccess) e = cudaStreamSynchronize(devs[di].st);
+            if (e == cudaSuccess && devs[di].rst != nullptr) e = cudaStreamSynchronize(devs[di].rst);
             if (e == cudaSuccess && di < chunks.size() && chunks[di] != nullptr && chunks[di]->cs != nullptr)
                 e = cudaStreamSynchronize(chunks[di]->cs);
             if (e != cudaSuccess) {
@@ -20854,6 +21070,10 @@ struct Model::Impl {
             err = kLendBroken;
             return false;
         }
+        if (rd_live.load(std::memory_order_acquire)) {   // (DS4_READER: one run of chunks at a time)
+            err = "a prompt's run of chunks is in flight beside the answers";
+            return false;
+        }
         if (n < 1) return true;
         if (pos + n > o.max_context) {
             err = "the context is full";
@@ -20966,6 +21186,16 @@ struct Model::Impl {
         prof_chunk = prof_on;
         hprof_last = 0;
         const bool lm = lm_begin(run);
+        // DS4_READER: the run's device part beside the answers (the serve loop's gate out until the devices are done),
+        // everything before and after it exclusive; the experts under its buffers held out for decode (rd_hold)
+        const bool bgr = rd_ok && rd_release && rd_acquire && whole == nullptr && !logits_all && !lm && !prof_on &&
+                         !sqs.empty() && (!lent || rd_hold());
+        const int rd_nl = n_logits;
+        const bool rd_la = logits_all;
+        if (bgr) {
+            rd_toks.assign(toks.begin() + (long) pos, toks.end());
+            rd_tok0 = pos;
+        }
         struct LmEnd {   // (every way out: its host memory freed once the device is done with it)
             Impl* p;
             bool on;
@@ -21090,7 +21320,19 @@ struct Model::Impl {
         //  this thread only waits for the devices meanwhile)
         const bool ahead_next = whole != nullptr && !run_end;
         for (size_t di = 0; di < devs.size(); ++di)
-            workers[di]->submit([this, di, &run, &errs] {
+            (bgr ? rworkers : workers)[di]->submit([this, di, &run, &errs, rs = bgr ? sq_bound : -1] {
+                g_rd_seq = rs;   // (DS4_READER: this thread works for the read - its conversation, its streams)
+                Chunk* cb = rs >= 0 && di < chunks.size() ? chunks[di].get() : nullptr;
+                if (cb != nullptr && cb->blas != nullptr) cublasSetStream(cb->blas, devs[di].rst);
+                struct Back {
+                    Impl* p;
+                    Chunk* cb;
+                    size_t di;
+                    ~Back() {
+                        if (cb != nullptr && cb->blas != nullptr) cublasSetStream(cb->blas, p->devs[di].st);
+                        g_rd_seq = -1;
+                    }
+                } back_{this, cb, di};
                 std::string e;
                 if (!run_dev_chunks((int) di, run, e)) {
                     errs[di] = e.empty() ? "a device's thread failed" : e;
@@ -21110,14 +21352,18 @@ struct Model::Impl {
             });
         if (ahead_next) eg_ahead_start(*whole, tk - x0, k1);
         main_at.store("a run of chunks: waiting for the devices", std::memory_order_relaxed);
+        if (bgr) {
+            rd_live.store(true, std::memory_order_release);
+            rd_release();
+        }
         size_t reported = 0;
         for (;;) {
             bool all = true;
-            for (auto& w : workers) all = all && w->idle();
+            for (auto& w : (bgr ? rworkers : workers)) all = all && w->idle();
             // a Stop, or a yield (a chunk run layer by layer has no chunk to end at; every row's logits: tests): the
             // devices end the run early
             const bool stop = !all && !stopping && cancel && cancel();
-            const bool yield = !all && !halting && !lm && !logits_all && yield_to && yield_to();
+            const bool yield = !bgr && !all && !halting && !lm && !logits_all && yield_to && yield_to();
             if (stop || yield) {
                 stopping = stopping || stop;
                 yielding.store(!stopping, std::memory_order_release);
@@ -21139,6 +21385,16 @@ struct Model::Impl {
             }
             if (all) break;
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        if (bgr) {   // (the devices done: the gate back, the read's conversation bound again)
+            for (Dev& dv : devs) {
+                cudaSetDevice(dv.id);
+                cudaStreamSynchronize(dv.rst);   // (an error: borrow_end's syncs report it)
+            }
+            rd_acquire();
+            rd_live.store(false, std::memory_order_release);
+            n_logits = rd_nl;
+            logits_all = rd_la;
         }
         main_at.store("a run of chunks: the devices done, the head next", std::memory_order_relaxed);
 #if defined(STRATA_USE_HIP) || defined(DS4_CUDA_PEER_AR)
@@ -21167,6 +21423,15 @@ struct Model::Impl {
         fed_n = took;
         // (before the cache looks at the slots again; no decode after a mismatch or a failure) - or, a part of a prompt
         // read in parts with more to come, its room kept for the next part (DS4_PROMPT_KEEP_LEND=0: handed back)
+        if (bgr && took == n && n_logits > 0) {   // (DS4_READER: the head the device run left out, from its last rows)
+            Dev& hd = devs[(size_t) head_dev];
+            Chunk& hc = *chunks[(size_t) head_dev];
+            cudaSetDevice(hd.id);
+            const int t0 = T_last - n_logits;
+            hc_pre_norm(hc.h + (size_t) t0 * g.hc * g.dim, hc.pre + (size_t) t0 * 8, hd.norm_w, g.dim, g.hc, n_logits,
+                        g.eps, hd.x, hd.st);
+            if (!head_share(hd, hd.mi, hd.x, n_logits, err)) return false;
+        }
         if (took == n && !run_end && whole != nullptr && keep_lend_on() && lend_hold(fp.at, k1, per)) {
             lent_.keep = true;
             if (lend_broken) {
@@ -21289,6 +21554,13 @@ struct Model::Impl {
         // run wholly KV-only past the skip (a piece of a longer prompt, `after`: the piece that ends it seeds it)
         const bool kv_only = fp.skip >= 0 && fp.cut_k >= k1;
         const int nr = std::min(T_last, tap_cap);
+        if (bgr && run_end && took == n && !kv_only && rd_h_taps != nullptr) {   // (DS4_READER: the run's taps)
+            for (Dev& dv : devs) {   // (the drafter's last reads of h_taps done)
+                cudaSetDevice(dv.id);
+                CK(cudaStreamSynchronize(dv.st));
+            }
+            std::memcpy(h_taps, rd_h_taps, (size_t) tap_cap * g.d_targets.size() * g.dim * sizeof(float));
+        }
         if (run_end && took == n && !kv_only && !seed_drafter(pos - nr, nr, 0, err)) return false;
         // feed_marks' restore points the run went past (a yield's: those before where it stopped), in order, as mark()
         // keeps them; then feed_mark's checkpoint `snap_slot` - each from what the layers kept of it
@@ -23378,6 +23650,14 @@ const std::vector<int32_t>& Model::tokens() const { return p_->toks; }
 int Model::seq_count() const { return p_->seq_count(); }
 void Model::seq_bind(int s) { p_->seq_bind(s); }
 int Model::seq_bound() const { return p_->sq_bound; }
+bool Model::reader_on() const { return p_->rd_ok; }
+void Model::set_reader_gate(std::function<void()> release, std::function<void()> acquire) {
+    p_->rd_release = std::move(release);
+    p_->rd_acquire = std::move(acquire);
+}
+bool Model::reader_live() const { return p_->rd_live.load(std::memory_order_acquire); }
+uint64_t Model::kv_hash(int s, int64_t upto) { return p_->rd_kv_hash(s, upto); }
+size_t Model::reader_check_notes() const { return p_->rd_sync_n.load() + p_->rd_off_n.load(); }
 bool Model::elastic() const { return p_->elastic(); }
 int64_t Model::seq_backed(int s) const { return p_->seq_backed(s); }
 bool Model::seq_can_back(int s, int64_t tokens) const { return p_->seq_can_back(s, tokens); }
