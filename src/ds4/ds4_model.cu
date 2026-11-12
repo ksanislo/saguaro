@@ -10313,6 +10313,12 @@ struct Model::Impl {
             const size_t keep = std::max(el->made[di], backed + H);
             if (total > keep) el_give_back(di, std::min(taken, total - keep), idle ? "the engine is idle" : "a request ended");
         }
+        if (idle)   // (each card's leftover: what the kept conversations hold there past its budget)
+            for (size_t di = 0; di < devs.size(); ++di)
+                std::fprintf(stderr, "ds4: elastic: CUDA%d after the idle give-back: kept conversations hold %.0f MB here, "
+                                     "budget %.0f MB, taken %.0f MB\n",
+                             devs[di].id, (double) (el->held_dev((int) di) * el->gran) / 1e6,
+                             (double) (el->made[di] * el->gran) / 1e6, (double) (el->taken_in[di] * el->gran) / 1e6);
     }
     static bool el_wanted() {
         const char* v = ds4_env("DS4_ELASTIC_CONV");
