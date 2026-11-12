@@ -2115,6 +2115,14 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
                     el_release(v);
                     continue;
                 }
+                // (DS4_DBG_TAKE_NO_READ=1, debug: no take while a prompt is being read - a request waits for it instead)
+                static const bool no_read = std::getenv("DS4_DBG_TAKE_NO_READ") != nullptr &&
+                                            std::atoi(std::getenv("DS4_DBG_TAKE_NO_READ")) != 0;
+                if (!took && no_read &&
+                    std::any_of(acts.begin(), acts.end(), [](const std::unique_ptr<Act>& x) { return x->reading; })) {
+                    took = true;
+                    std::fprintf(stderr, "ds4: DEBUG: DS4_DBG_TAKE_NO_READ: no take while a prompt is read\n");
+                }
                 if (!took) {
                     took = true;
                     if (m.el_take_for(s, tokens + 8192) || m.seq_can_back(s, tokens)) continue;

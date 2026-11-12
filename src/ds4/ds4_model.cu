@@ -4773,6 +4773,7 @@ struct Model::Impl {
         el_report();         // (DS4_ELASTIC_CONV: what the pool left the experts)
         if (helper_id >= 0 && !helper_select(err)) return false;
         if (!load_experts(err)) return false;
+        el_ram_reserve();   // (DS4_ELASTIC_TAKE: the taken experts' copy-tier slots, so ram_part never reallocates)
         if (copy_swap && copy_mode) {   // (DS4_COPY_SWAP: after the copies)
             if (const char* v = cs_env("COPY_SWAP_MARGIN")) cs_margin = (float) std::atof(v);
             if (const char* v = cs_env("COPY_SWAP_EVERY")) cs_every = std::max(1, std::atoi(v));
@@ -9911,6 +9912,106 @@ struct Model::Impl {
     size_t el_taken_g(size_t di) const {
         return di < elt.size() && elt[di].on ? (elt[di].top - elt[di].lo) / el->gran : 0;
     }
+    // the pool's books for a log line: "pool: B MB backed, F MB free" - backed = what it owns (its granules and the
+    // tails' given to it) less the free ones, which must equal what the conversations hold; DS4_CHECK_ELASTIC: and
+    // every granule in one place only (Pool::audit).  Never wraps: a disagreement is said loudly
+    std::string el_books() const {
+        const size_t total = el->total_bytes(), free = el->idle_bytes();
+        size_t held = 0;
+        for (size_t di = 0; di < devs.size(); ++di) held += el->held_dev((int) di) * el->gran;
+        char b[160];
+        std::snprintf(b, sizeof b, "pool: %.0f MB backed, %.0f MB free", (double) held / 1e6, (double) free / 1e6);
+        std::string r = b;
+        if (free > total || total - free != held)
+            r += " - POOL BOOKS WRONG: owns " + std::to_string(total >> 20) + " MiB, " + std::to_string(free >> 20) +
+                 " MiB free, " + std::to_string(held >> 20) + " MiB held";
+        if (el_check()) {
+            const std::string a = el->audit();
+            if (!a.empty()) r += " - POOL AUDIT FAILED:" + a;
+        }
+        return r;
+    }
+    // DS4_CHECK_ELASTIC: a hash of every conversation's rows [0, pos) on every card (seq, buffer -> hash)
+    std::vector<uint64_t> el_kv_sums() {
+        std::vector<uint64_t> out;
+        std::vector<uint8_t> h;
+        int cur = 0;
+        cudaGetDevice(&cur);
+        for (size_t s = 0; s < el->seqs.size(); ++s) {
+            const int64_t p = seq_pos((int) s);
+            for (const auto& b : el->seqs[s].b) {
+                const size_t n = std::min(b.h.size() * el->gran, p > 0 ? b.bytes_for(p - 1) : 0);
+                h.resize(n);
+                uint64_t v = 0;
+                if (n > 0 && cudaSetDevice(devs[(size_t) b.di].id) == cudaSuccess &&
+                    cudaMemcpy(h.data(), (const void*) b.va, n, cudaMemcpyDeviceToHost) == cudaSuccess)
+                    v = el_hash(h.data(), n) ^ n;
+                cudaGetLastError();
+                out.push_back(v);
+            }
+        }
+        cudaSetDevice(cur);
+        return out;
+    }
+    void el_kv_compare(const std::vector<uint64_t>& a, const char* what) {
+        const std::vector<uint64_t> b = el_kv_sums();
+        size_t i = 0, bad = 0;
+        for (size_t s = 0; s < el->seqs.size(); ++s)
+            for (const auto& x : el->seqs[s].b) {
+                if (i < a.size() && i < b.size() && a[i] != b[i]) {
+                    ++bad;
+                    std::fprintf(stderr, "ds4: elastic: DS4_CHECK_ELASTIC: conversation %zu's KV on CUDA%d CHANGED across "
+                                         "%s\n", s, devs[(size_t) x.di].id, what);
+                }
+                ++i;
+            }
+        if (bad == 0)
+            std::fprintf(stderr, "ds4: elastic: DS4_CHECK_ELASTIC: every conversation's KV as before across %s\n", what);
+    }
+    // DS4_CHECK_ELASTIC=2: a hash of each card's mapped tail ([0, lo) and [top, end)) - before a prompt's loan, after
+    // its hand-back (they must agree: the loan's bytes come back, nothing below top is touched)
+    static int el_check_level() {
+        static const int n = ds4_env("DS4_CHECK_ELASTIC") != nullptr ? std::atoi(ds4_env("DS4_CHECK_ELASTIC")) : 0;
+        return n;
+    }
+    std::vector<uint64_t> el_tail_sum0;
+    uint64_t el_tail_sum(size_t di) {
+        Dev& d = devs[di];
+        if (d.tail == nullptr) return 0;
+        const bool on = di < elt.size() && elt[di].on;
+        const size_t lo = on ? elt[di].lo : d.tail_bytes, top = on ? elt[di].top : d.tail_bytes;
+        std::vector<uint8_t> h;
+        uint64_t v = 0;
+        cudaSetDevice(d.id);
+        for (const auto& r : {std::pair<size_t, size_t>{0, lo}, {top, d.tail_bytes}}) {
+            if (r.second <= r.first) continue;
+            h.resize(r.second - r.first);
+            if (cudaMemcpy(h.data(), d.tail + r.first, h.size(), cudaMemcpyDeviceToHost) != cudaSuccess) {
+                cudaGetLastError();
+                return 1;
+            }
+            v = v * 31 + el_hash(h.data(), h.size());
+        }
+        return v;
+    }
+    // the slots each card's taken experts may need ([floor, top) touches), reserved in ram_part after the copy tier
+    void el_ram_reserve() {
+        if (!copy_mode || elt.empty()) return;
+        size_t n = 0;
+        for (size_t di = 0; di < elt.size() && di < devs.size(); ++di) {
+            if (!elt[di].on) continue;
+            const Dev& d = devs[di];
+            for (const Layer& l : L) {
+                if (l.dev != (int) di || l.mtp || l.n_main >= l.n_slots || l.ram.empty()) continue;
+                const size_t u = align256(unit(l)), base = (size_t) (l.xbase - d.tail);
+                for (int sl = l.n_main; sl < l.n_slots; ++sl) {
+                    const size_t off = base + (size_t) (sl - l.n_main) * d.tail_step;
+                    if (off < elt[di].top && off + u > elt[di].floor) ++n;
+                }
+            }
+        }
+        ram_part.reserve(ram_part.size() + n);
+    }
     // (the first take on card di) its taken experts' RAM slots: false - none, they compute from the file
     bool el_ram_ready(size_t di) {
         ElTake& t = elt[di];
@@ -9930,6 +10031,11 @@ struct Model::Impl {
             sb = std::max(sb, align256(cp_lay[(size_t) l.il][3]));
         }
         if (n == 0 || sb == 0) return false;
+        if (ram_part.capacity() < ram_part.size() + (size_t) n) {   // (reserved at load: ram_part never moves now)
+            std::fprintf(stderr, "ds4: elastic: CUDA%d: the copy tier's slot table has no room reserved for its taken "
+                                 "experts - they compute from the file\n", d.id);
+            return false;
+        }
         std::string e2;
         if (!halloc(t.ram, (size_t) n * (size_t) NH * sb, e2)) {
             t.ram = nullptr;
@@ -9994,6 +10100,7 @@ struct Model::Impl {
         size_t got = 0;
         int nexp = 0, npark = 0, nram = 0;
         std::vector<uint8_t> blob;
+        const std::vector<uint64_t> kv0 = el_check() ? el_kv_sums() : std::vector<uint64_t>{};
         cudaSetDevice(d.id);
         while (got < n && t.lo >= t.floor + G) {
             const size_t a = t.lo - G;
@@ -10049,12 +10156,14 @@ struct Model::Impl {
             t.lo = a;
             ++got;
         }
+        if (el_check() && got > 0) el_kv_compare(kv0, "a take");
         if (got > 0)
             std::fprintf(stderr, "ds4: elastic: CUDA%d experts give %.0f MB to the conversations (%s): %d experts to the "
-                                 "CPU lane (%d computing from RAM, %d from the file)%s; taken %.0f of %.0f MB (%.0f ms)\n",
+                                 "CPU lane (%d computing from RAM, %d from the file)%s; taken %.0f of %.0f MB (%.0f ms); %s\n",
                          d.id, (double) (got * G) / 1e6, why, nexp, nram, nexp - nram,
                          npark > 0 ? (", " + std::to_string(npark) + " spare slots parked").c_str() : "",
-                         (double) (t.top - t.lo) / 1e6, (double) (t.top - t.floor) / 1e6, now_ms() - t0);
+                         (double) (t.top - t.lo) / 1e6, (double) (t.top - t.floor) / 1e6, now_ms() - t0,
+                         el_books().c_str());
         return got;
     }
     // card di takes back up to n granules from the pool's free ones, their experts in VRAM again (the cards quiet)
@@ -10067,6 +10176,7 @@ struct Model::Impl {
         const double t0 = now_ms();
         size_t got = 0;
         int nbad = 0;
+        const std::vector<uint64_t> kv0 = el_check() ? el_kv_sums() : std::vector<uint64_t>{};
         cudaSetDevice(d.id);
         std::vector<uint8_t> chk;
         while (got < n && t.lo < t.top) {
@@ -10130,9 +10240,10 @@ struct Model::Impl {
             t.park[i] = t.park.back();
             t.park.pop_back();
         }
+        if (el_check() && got > 0) el_kv_compare(kv0, "a give-back");
         if (got > 0)
             std::fprintf(stderr, "ds4: elastic: CUDA%d conversations give back %.0f MB to the experts (%s): %d experts in "
-                                 "VRAM again%s; taken %.0f of %.0f MB (%.0f ms)\n",
+                                 "VRAM again%s; taken %.0f of %.0f MB (%.0f ms); %s\n",
                          d.id, (double) (got * G) / 1e6, why, nexp,
                          nbad > 0 ? (" - " + std::to_string(nbad) + " granules NOT as given (" + std::to_string(kept) +
                                      " experts stay on the CPU lane)").c_str()
@@ -10140,7 +10251,8 @@ struct Model::Impl {
                                                   std::to_string(el_ram_ok) + " matrices equal, " +
                                                   std::to_string(el_ram_bad) + " not)").c_str()
                                                : "",
-                         (double) (t.top - t.lo) / 1e6, (double) (t.top - t.floor) / 1e6, now_ms() - t0);
+                         (double) (t.top - t.lo) / 1e6, (double) (t.top - t.floor) / 1e6, now_ms() - t0,
+                         el_books().c_str());
         return got;
     }
     // the loan guard: a loan about to lay bytes from `low` on card di must stay at or above top (the given part lies below
@@ -10187,9 +10299,15 @@ struct Model::Impl {
         if (el == nullptr || elt.empty()) return;
         const size_t H = idle ? 0 : el_env_mb("DS4_ELASTIC_HYST_MB", 128) / el->gran;
         for (size_t di = 0; di < devs.size(); ++di) {
-            const size_t taken = el_taken_g(di);
+            const size_t taken = el->taken_in[di];
             if (taken == 0) continue;
-            const size_t total = el->made[di] + taken, free = el->idle[di].size(), backed = total - free;
+            const size_t total = el->made[di] + taken, free = el->idle[di].size();
+            const size_t backed = el->held_dev((int) di);
+            if (free + backed != total) {
+                std::fprintf(stderr, "ds4: elastic: CUDA%d: POOL BOOKS WRONG (%zu owned, %zu free, %zu held) - nothing "
+                                     "given back\n", devs[di].id, total, free, backed);
+                continue;
+            }
             const size_t keep = std::max(el->made[di], backed + H);
             if (total > keep) el_give_back(di, std::min(taken, total - keep), idle ? "the engine is idle" : "a request ended");
         }
@@ -10349,10 +10467,9 @@ struct Model::Impl {
                   " positions: the pool has " + std::to_string(el->idle_bytes() >> 20) + " MiB free, too little";
             return false;
         }
-        std::fprintf(stderr, "ds4: elastic conversation %d takes %.0f MB: %lld positions backed (%.0f MB) (%.1f ms); "
-                             "pool: %.0f MB backed, %.0f MB free\n",
+        std::fprintf(stderr, "ds4: elastic conversation %d takes %.0f MB: %lld positions backed (%.0f MB) (%.1f ms); %s\n",
                      s, added / 1e6, (long long) el->seqs[(size_t) s].tokens, el->held(s) / 1e6, now_ms() - t0,
-                     (el->made_bytes() - el->idle_bytes()) / 1e6, el->idle_bytes() / 1e6);
+                     el_books().c_str());
         return true;
     }
     // conversation s's backing back to the pool and its state cleared (the caller set it aside first)
@@ -10367,8 +10484,7 @@ struct Model::Impl {
         }
         const size_t freed = el->release(s);
         seq_bind(b);
-        std::fprintf(stderr, "ds4: elastic conversation %d returns %.0f MB; pool: %.0f MB backed, %.0f MB free\n", s,
-                     freed / 1e6, (el->made_bytes() - el->idle_bytes()) / 1e6, el->idle_bytes() / 1e6);
+        std::fprintf(stderr, "ds4: elastic conversation %d returns %.0f MB; %s\n", s, freed / 1e6, el_books().c_str());
     }
     int seq_count() const { return sqs.empty() ? 1 : (int) sqs.size(); }
     // the bound conversation's host state into its SeqState (park) and back (unpark)
@@ -19962,6 +20078,11 @@ struct Model::Impl {
             }
         if (tp)
             for (Layer& l : L) l.pv_n = l.n_slots;
+        if (el_check_level() >= 2 && el != nullptr) {   // (DS4_CHECK_ELASTIC=2: each tail as the loan finds it)
+            el_tail_sum0.assign(devs.size(), 0);
+            for (size_t di = 0; di < devs.size(); ++di)
+                if (di < chunks.size() && chunks[di] != nullptr && chunks[di]->borrow) el_tail_sum0[di] = el_tail_sum(di);
+        }
         // DS4_LEND_SHADOW: every lending device's lent region saved first, the copies of all devices at once (each device's
         // clear below follows its copy on the same stream)
         const double t_sh = now_ms();
@@ -20130,6 +20251,20 @@ struct Model::Impl {
     // CPU lane too (nothing reads those slots), and the caller fails the prompt before any decode - or a device
     // selection, sync, copy into a slot or table write failed: lend_broken (sticky), no later request runs
     bool borrow_end() {
+        const bool was = lent;
+        const bool ok = borrow_end_core();
+        if (was && el_check_level() >= 2 && !el_tail_sum0.empty()) {   // (DS4_CHECK_ELASTIC=2: the tails as the loan found them)
+            for (size_t di = 0; di < devs.size() && di < el_tail_sum0.size(); ++di) {
+                if (el_tail_sum0[di] == 0) continue;
+                const bool same = el_tail_sum(di) == el_tail_sum0[di];
+                std::fprintf(stderr, "ds4: elastic: DS4_CHECK_ELASTIC=2: CUDA%d's tail (all but the given part) %s across "
+                                     "a prompt's loan\n", devs[di].id, same ? "as before" : "CHANGED");
+            }
+            el_tail_sum0.clear();
+        }
+        return ok;
+    }
+    bool borrow_end_core() {
         read_help_live.store(false, std::memory_order_release);   // (DS4_READ_HELP in the tails: laid out no more)
         if (!lent) return true;
         lend_unhold();   // (a prompt read in parts kept it: its experts back in their slots' books first)

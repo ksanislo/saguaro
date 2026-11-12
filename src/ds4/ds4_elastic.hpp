@@ -88,6 +88,7 @@ struct Pool {
     std::vector<int> ids;                                        // [device index] the CUDA device
     std::vector<std::vector<CUmemGenericAllocationHandle>> idle;  // [device index] granules no buffer holds
     std::vector<size_t> made;                                    // [device index] granules made at load
+    std::vector<size_t> taken_in;                                // [device index] tail granules given to it (DS4_ELASTIC_TAKE)
     std::vector<Seq> seqs;                                       // [conversation] (0: none - its own memory)
     size_t gran = 0;
 
@@ -101,6 +102,7 @@ struct Pool {
         }
         idle.assign(ids.size(), {});
         made.assign(ids.size(), 0);
+        taken_in.assign(ids.size(), 0);
         seqs.assign((size_t) n_seqs, Seq{});
         return gran > 0;
     }
@@ -208,6 +210,44 @@ struct Pool {
         for (size_t m : made) n += m * gran;
         return n;
     }
+    // what the pool owns now: its own granules and the tails' given to it; what the conversations hold of it
+    size_t total_bytes() const {
+        size_t n = made_bytes();
+        for (size_t m : taken_in) n += m * gran;
+        return n;
+    }
+    size_t held_dev(int di) const {
+        size_t n = 0;
+        for (const Seq& q : seqs)
+            for (const Buf& b : q.b)
+                if (b.di == di) n += b.h.size();
+        return n;
+    }
+    // the books against the granules (empty: they agree): per device, owned = idle + held by the conversations; and
+    // every handle in one place only - a tail's mapped granules, a conversation's, the free list
+    std::string audit() const {
+        std::string err;
+        std::vector<CUmemGenericAllocationHandle> all;
+        for (size_t di = 0; di < ids.size(); ++di) {
+            const size_t own = made[di] + taken_in[di], held = held_dev((int) di);
+            if (idle[di].size() + held != own)
+                err += " CUDA" + std::to_string(ids[di]) + ": owns " + std::to_string(own) + " granules, " +
+                       std::to_string(idle[di].size()) + " free + " + std::to_string(held) + " held;";
+            all.insert(all.end(), idle[di].begin(), idle[di].end());
+        }
+        for (const Seq& q : seqs)
+            for (const Buf& b : q.b) all.insert(all.end(), b.h.begin(), b.h.end());
+        for (const Tail& t : tails)
+            for (CUmemGenericAllocationHandle h : t.h)
+                if (h != 0) all.push_back(h);
+        std::sort(all.begin(), all.end());
+        for (size_t i = 1; i < all.size(); ++i)
+            if (all[i] == all[i - 1]) {
+                err += " a granule in two places;";
+                break;
+            }
+        return err;
+    }
     // DS4_ELASTIC_TAKE: a card's expert tail in granules of its own (Tail::h[i]: 0 while given to the conversations)
     struct Tail {
         CUdeviceptr va = 0;
@@ -259,6 +299,7 @@ struct Pool {
         if (t.h[i] == 0 || vmm().unmap(t.va + i * gran, gran) != CUDA_SUCCESS) return false;
         idle[(size_t) di].push_back(t.h[i]);
         t.h[i] = 0;
+        ++taken_in[(size_t) di];
         return true;
     }
     // a free granule of the pool back into tail granule i (its bytes as they were left: the caller copies them in)
@@ -268,6 +309,7 @@ struct Pool {
         if (t.h[i] != 0 || pool.empty() || !map_at(di, t.va + i * gran, pool.back())) return false;
         t.h[i] = pool.back();
         pool.pop_back();
+        --taken_in[(size_t) di];
         return true;
     }
     ~Pool() {
@@ -301,10 +343,12 @@ struct Pool {   // (HIP: no virtual memory calls here - init refuses, every conv
         std::vector<Buf> b;
         int64_t tokens = 0;
     };
-    std::vector<size_t> made;
+    std::vector<size_t> made, taken_in;
     std::vector<Seq> seqs;
     size_t gran = 0;
     bool init(const std::vector<int>&, int) { return false; }
+    size_t total_bytes() const { return 0; }
+    std::string audit() const { return ""; }
     size_t up(size_t b) const { return b; }
     uint8_t* add(int, int, size_t, int64_t, int64_t) { return nullptr; }
     bool fill(int, size_t) { return false; }
