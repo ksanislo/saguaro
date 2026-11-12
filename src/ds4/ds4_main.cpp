@@ -2078,29 +2078,69 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
             held = std::move(held_of[(size_t) s]);
             held_of[(size_t) s].clear();
         };
-        // DS4_ELASTIC_CONV: conversation s backed to `tokens` positions (a step past them when the pool has it) - where
-        // the pool is short, idle conversations give theirs back, the least recently used first, each set aside first
+        // DS4_ELASTIC_CONV: conversation s backed to `tokens` positions (a step past them when the pool has it).  Where
+        // the pool is short (GLM's order): conversations idle for DS4_ELASTIC_HOLD_S (120 s) give theirs back, then
+        // the cards take expert slots (DS4_ELASTIC_TAKE, down to their floor), then any idle conversation gives its
+        // back - the least recently used first, each set aside first.  Between turns only: every card is quiet here
+        std::vector<double> seq_idle_t((size_t) nseq, 0.0);   // (when each went idle)
+        const double el_hold_ms = [] {
+            const char* v = std::getenv("DS4_ELASTIC_HOLD_S");
+            return (v != nullptr ? std::max(0.0, std::atof(v)) : 120.0) * 1000.0;
+        }();
+        const auto el_release = [&](int v) {
+            const int b = m.seq_bound();
+            bind(v);
+            slot_put(" (its memory went back to the elastic pool)");
+            held.clear();
+            bind(b);
+            m.seq_release(v);
+        };
+        const auto el_idle_victim = [&](int s, double older_than_ms) {   // (-1: none)
+            int v = -1;
+            const double now = now_ms();
+            for (int k = 0; k < nseq; ++k)
+                if (k != s && seq_rid[(size_t) k] < 0 && m.seq_backed(k) > 0 && now - seq_idle_t[(size_t) k] >= older_than_ms &&
+                    (v < 0 || seq_used[(size_t) k] < seq_used[(size_t) v]))
+                    v = k;
+            return v;
+        };
         const auto el_room = [&](int s, int64_t tokens) -> bool {
             if (!m.elastic() || m.seq_backed(s) >= tokens) return true;
             std::string e;
+            bool took = false;
             for (;;) {
                 if (m.seq_reserve(s, tokens + 8192, e) || m.seq_reserve(s, tokens, e)) return true;
-                int v = -1;
-                for (int k = 0; k < nseq; ++k)
-                    if (k != s && seq_rid[(size_t) k] < 0 && m.seq_backed(k) > 0 &&
-                        (v < 0 || seq_used[(size_t) k] < seq_used[(size_t) v]))
-                        v = k;
+                int v = el_idle_victim(s, el_hold_ms);
+                if (v >= 0) {
+                    el_release(v);
+                    continue;
+                }
+                if (!took) {
+                    took = true;
+                    if (m.el_take_for(s, tokens + 8192) || m.seq_can_back(s, tokens)) continue;
+                }
+                v = el_idle_victim(s, 0.0);
                 if (v < 0) {
                     std::fprintf(stderr, "maya ds4 serve: %s\n", e.c_str());
                     return false;
                 }
-                const int b = m.seq_bound();
-                bind(v);
-                slot_put(" (its memory went back to the elastic pool)");
-                held.clear();
-                bind(b);
-                m.seq_release(v);
+                el_release(v);
             }
+        };
+        // the engine idle: idle conversations past the DS4_ELASTIC_KEEP (1) most recently used give theirs back (each
+        // set aside first), and the cards take back all the pool holds past its budget (GLM's idle_trim)
+        const auto el_idle_trim = [&] {
+            if (!m.elastic()) return;
+            static const int keep = [] {
+                const char* v = std::getenv("DS4_ELASTIC_KEEP");
+                return v != nullptr ? std::max(0, std::atoi(v)) : 1;
+            }();
+            std::vector<int> order;
+            for (int k = 0; k < nseq; ++k)
+                if (seq_rid[(size_t) k] < 0 && m.seq_backed(k) > 0) order.push_back(k);
+            std::sort(order.begin(), order.end(), [&](int a, int b) { return seq_used[(size_t) a] > seq_used[(size_t) b]; });
+            for (size_t i = (size_t) keep; i < order.size(); ++i) el_release(order[i]);
+            m.el_give_back_surplus(true);
         };
         const auto penalties = [&](const Req& r) {   // (and its logit_bias: the request's picks, set before each)
             m.set_penalties(r.pen_n < 0 ? INT_MAX : r.pen_n,
@@ -2125,6 +2165,7 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
         const auto release = [&](const Act& a) {   // (its conversation free for the next request)
             seq_rid[(size_t) a.seq] = -1;
             seq_used[(size_t) a.seq] = ++use_clock;
+            seq_idle_t[(size_t) a.seq] = now_ms();
             in.forget(a.r.rid);
             if (lk_owner == a.r.rid) lk_owner = -1;
         };
@@ -2337,6 +2378,26 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
                 return v != nullptr ? std::atoll(v) : 0LL;
             }();
             static std::set<long long> dbg_gw_done;
+            // (DS4_DBG_TAKE_AT=<positions>, debug: once, when a running answer is backed past that many positions,
+            //  every card gives DS4_DBG_TAKE_MB (64) of expert slots through the real take - given back when idle)
+            static const long long dbg_take = [] {
+                const char* v = std::getenv("DS4_DBG_TAKE_AT");
+                return v != nullptr ? std::atoll(v) : 0LL;
+            }();
+            static bool dbg_take_done = false;
+            if (m.elastic() && dbg_take > 0 && !dbg_take_done)
+                for (const auto& x : acts)
+                    if (!x->reading && !x->done && m.seq_backed(x->seq) > dbg_take) {
+                        dbg_take_done = true;
+                        const char* mv = std::getenv("DS4_DBG_TAKE_MB");
+                        const size_t mb = mv != nullptr && std::atoi(mv) > 0 ? (size_t) std::atoi(mv) : 64;
+                        std::fprintf(stderr, "ds4: DEBUG: DS4_DBG_TAKE_AT=%lld: request %lld backed to %lld positions - "
+                                             "every card gives %zu MB of expert slots now\n",
+                                     dbg_take, x->r.rid, (long long) m.seq_backed(x->seq), mb);
+                        const size_t g = m.el_force_take(mb);
+                        std::fprintf(stderr, "ds4: DEBUG: DS4_DBG_TAKE_AT: %zu granules taken\n", g);
+                        break;
+                    }
             if (m.elastic())
                 for (size_t i = 0; i < acts.size(); ++i) {
                     Act& a = *acts[i];
@@ -2702,10 +2763,14 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
             }
             if (freed) end_if_broken();   // (the other conversations' state is the same GPUs': lost with it)
             if (freed) admit_waiting();
+            if (freed && !acts.empty() &&   // (DS4_ELASTIC_TAKE: past the hysteresis; not while a prompt holds its room)
+                std::none_of(acts.begin(), acts.end(), [](const std::unique_ptr<Act>& x) { return x->reading; }))
+                m.el_give_back_surplus(false);
             if (!acts.empty()) {
                 queue_turn();
                 return;
             }
+            if (freed) el_idle_trim();
             if (quit) {
                 eng.stop();
                 return;

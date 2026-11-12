@@ -208,9 +208,79 @@ struct Pool {
         for (size_t m : made) n += m * gran;
         return n;
     }
+    // DS4_ELASTIC_TAKE: a card's expert tail in granules of its own (Tail::h[i]: 0 while given to the conversations)
+    struct Tail {
+        CUdeviceptr va = 0;
+        size_t bytes = 0;
+        std::vector<CUmemGenericAllocationHandle> h;
+    };
+    std::vector<Tail> tails;   // [device index] (va 0: a plain allocation, nothing taken)
+    // device di's tail: `bytes` of address space, every granule backed and zeroed (null: no memory / no address space)
+    uint8_t* tail_alloc(int di, size_t bytes) {
+        if (tails.size() < ids.size()) tails.resize(ids.size());
+        Tail& t = tails[(size_t) di];
+        const Vmm& v = vmm();
+        t.bytes = up(bytes);
+        if (v.reserve(&t.va, t.bytes, gran, 0, 0) != CUDA_SUCCESS) {
+            t.va = 0;
+            return nullptr;
+        }
+        t.h.assign(t.bytes / gran, 0);
+        const CUmemAllocationProp p = prop(ids[(size_t) di]);
+        for (size_t i = 0; i < t.h.size(); ++i) {
+            CUmemGenericAllocationHandle h = 0;
+            if (v.create(&h, gran, &p, 0) != CUDA_SUCCESS || !map_at(di, t.va + i * gran, h)) {
+                if (h != 0) v.release(h);
+                return nullptr;   // (the destructor frees what was made)
+            }
+            t.h[i] = h;
+        }
+        if (cudaSetDevice(ids[(size_t) di]) != cudaSuccess || cudaMemset((void*) t.va, 0, t.bytes) != cudaSuccess ||
+            cudaDeviceSynchronize() != cudaSuccess)
+            return nullptr;
+        return (uint8_t*) t.va;
+    }
+    bool map_at(int di, CUdeviceptr at, CUmemGenericAllocationHandle h) const {
+        const Vmm& v = vmm();
+        const CUmemAllocationProp p = prop(ids[(size_t) di]);
+        CUmemAccessDesc ad{};
+        ad.location = p.location;
+        ad.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+        if (v.map(at, gran, 0, h, 0) != CUDA_SUCCESS) return false;
+        if (v.access(at, gran, &ad, 1) != CUDA_SUCCESS) {
+            v.unmap(at, gran);
+            return false;
+        }
+        return true;
+    }
+    // tail granule i of device di to the conversations' pool (the caller: nothing in flight reads it)
+    bool tail_give(int di, size_t i) {
+        Tail& t = tails[(size_t) di];
+        if (t.h[i] == 0 || vmm().unmap(t.va + i * gran, gran) != CUDA_SUCCESS) return false;
+        idle[(size_t) di].push_back(t.h[i]);
+        t.h[i] = 0;
+        return true;
+    }
+    // a free granule of the pool back into tail granule i (its bytes as they were left: the caller copies them in)
+    bool tail_take_back(int di, size_t i) {
+        Tail& t = tails[(size_t) di];
+        auto& pool = idle[(size_t) di];
+        if (t.h[i] != 0 || pool.empty() || !map_at(di, t.va + i * gran, pool.back())) return false;
+        t.h[i] = pool.back();
+        pool.pop_back();
+        return true;
+    }
     ~Pool() {
         const Vmm& v = vmm();
         if (!v.ok) return;
+        for (Tail& t : tails) {
+            for (size_t i = 0; i < t.h.size(); ++i)
+                if (t.h[i] != 0) {
+                    v.unmap(t.va + i * gran, gran);
+                    v.release(t.h[i]);
+                }
+            if (t.va != 0) v.addr_free(t.va, t.bytes);
+        }
         for (size_t s = 0; s < seqs.size(); ++s) release((int) s);
         for (Seq& q : seqs)
             for (Buf& b : q.b)
@@ -244,6 +314,14 @@ struct Pool {   // (HIP: no virtual memory calls here - init refuses, every conv
     size_t held(int) const { return 0; }
     size_t idle_bytes() const { return 0; }
     size_t made_bytes() const { return 0; }
+    struct Tail {
+        size_t bytes = 0;
+    };
+    std::vector<Tail> tails;
+    std::vector<std::vector<int>> idle;
+    uint8_t* tail_alloc(int, size_t) { return nullptr; }
+    bool tail_give(int, size_t) { return false; }
+    bool tail_take_back(int, size_t) { return false; }
 };
 #endif
 

@@ -292,6 +292,12 @@ public:
     bool seq_can_back(int s, int64_t tokens) const;
     bool seq_reserve(int s, int64_t tokens, std::string& err);
     void seq_release(int s);
+    /// DS4_ELASTIC_TAKE: the cards short of free pool granules for s at `tokens` take expert slots (true: the pool
+    /// backs it now); el_give_back_surplus: the free granules past the budget (and a hysteresis unless idle) back to the
+    /// experts; el_force_take: (debug) every card gives `mb` MB, the granules given.  Between turns only (quiet cards).
+    bool el_take_for(int s, int64_t tokens);
+    void el_give_back_surplus(bool idle);
+    size_t el_force_take(size_t mb);
     int64_t seq_pos(int s) const;
     const std::vector<int32_t>& seq_tokens(int s) const;
     /// One token into each of n conversations (distinct, n <= 16, each at its own next position) through the model

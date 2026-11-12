@@ -7915,7 +7915,11 @@ struct Model::Impl {
             const size_t vneed = di == 0 && vis_mode == kVisTail ? vt.room_bytes() + 256 : 0;
             // (an EXL3 lender: the cache's slots alone - the spare and the recent ones, whose experts RAM holds)
             const int kmax = c.x3_lend ? std::min(min_slots - 1, recent_n) : min_slots - 1;
-            const int k = (int) std::min<size_t>((std::max(need, vneed) + step - 1) / step, (size_t) std::max(0, kmax));
+            // (DS4_ELASTIC_TAKE: the tail as much larger as the conversations may take below the prompt path's room)
+            std::string el_no = el != nullptr && di < el_rmax.size() && el_rmax[di] > 0 ? el_take_refusal(di, c) : "-";
+            const size_t take_room = el_no.empty() ? el_rmax[di] : 0;
+            const int k =
+                (int) std::min<size_t>((std::max(need, vneed) + take_room + step - 1) / step, (size_t) std::max(0, kmax));
             const size_t cap = (size_t) k * step;
             if (vneed > cap)
                 std::fprintf(stderr, "ds4: CUDA%d keeps too few experts in VRAM (%d a layer) to lend a picture its room: "
@@ -7937,12 +7941,31 @@ struct Model::Impl {
                 chunk = c2;
             }
             uint8_t* t = nullptr;
-            if (!dalloc(d, t, cap, err)) return false;
+            if (take_room > 0 && (t = el->tail_alloc((int) di, cap)) == nullptr) {
+                cudaGetLastError();
+                el_no = "its tail could not be made in granules";
+            }
+            if (t == nullptr && !dalloc(d, t, cap, err)) return false;
             d.tail = t;
             d.tail_bytes = cap;
             d.tail_step = step;
             d.tail_k = k;
             d.experts += cap;
+            if (el != nullptr && di < elt.size()) {   // (DS4_ELASTIC_TAKE: [floor, top) below the lowest byte any loan lays)
+                ElTake& et = elt[di];
+                if (el_no.empty() && di < el->tails.size() && el->tails[di].va != 0) {
+                    size_t low = (cap - lay_chunk(c, chunk, nullptr, 2)) & ~(size_t) 255;
+                    low = d.help_bytes > 0 && low > d.help_bytes ? (low - d.help_bytes) & ~(size_t) 255 : low;
+                    if (vneed > 0 && cap > vt.room_bytes()) low = std::min(low, (cap - vt.room_bytes()) & ~(size_t) 255);
+                    const size_t G = el->gran;
+                    et.top = low / G * G;
+                    et.floor = et.top - std::min(et.top, (el_rmax[di] + G - 1) / G * G);
+                    et.lo = et.top;
+                    et.on = et.top > et.floor;
+                    if (!et.on) et.why = "no room below the prompt path's";
+                } else
+                    et.why = el_no == "-" ? "" : el_no;
+            }
             size_t xoff = 0;
             for (Layer& l : L)
                 if (l.dev == (int) di && !l.mtp) {
@@ -9797,6 +9820,264 @@ struct Model::Impl {
     // ---- DS4_ELASTIC_CONV=1 (--parallel): conversations 1..n-1's compressed KV and index keys backed as they grow,
     // out of a pool made here (DS4_ELASTIC_CONV_TOKENS positions of theirs in all, 1048576 by default) - the rest of
     // their whole contexts' VRAM goes to the experts.  Conversation 0 keeps its whole context
+    // ---- DS4_ELASTIC_TAKE (on unless =0, where the pool is the budget - DS4_ELASTIC_BUDGET_MB a card, 256): a card
+    // whose budget runs short takes granules of its expert tail just below the prompt path's room (QFN's elastic slots:
+    // [lo, top) given, lo down to the floor - one whole context's buffers past the budget), their experts to the CPU
+    // lane from the files (as lend_hold's), their bytes kept in the tail's pinned shadow (or a stash of its own) and
+    // copied back when the conversations give the granules back.  Only on quiet cards (el_quiet): between the serve
+    // loop's turns.  The expert cache leaves a taken expert alone (el_mark); a layer whose spare slot is taken parks it
+    struct ElRec {
+        int il, e, slot;
+        size_t off;   // (its slot's offset in the tail)
+    };
+    struct ElTake {
+        bool on = false;
+        size_t top = 0, floor = 0, lo = 0;   // tail offsets: [lo, top) given, lo >= floor
+        uint8_t* stash = nullptr;            // pinned copy of [floor, top) when the tail has no shadow
+        std::vector<ElRec> rec, park;        // taken experts; parked spare slots (e -1)
+        std::vector<uint64_t> sum;           // DS4_CHECK_ELASTIC: [granule] the bytes' hash when given
+        std::vector<size_t> bad;             // (granules whose bytes did not come back: their experts stay on the CPU lane)
+        std::string why;                     // (not on: why)
+    };
+    std::vector<ElTake> elt;      // [device]
+    std::vector<size_t> el_rmax;  // [device] the take room asked for
+    std::vector<std::vector<uint8_t>> el_mark;   // [layer][expert] taken
+    static bool el_budget_mode() {
+        const char* a = ds4_env("DS4_ELASTIC_CONV_MB");
+        const char* b = ds4_env("DS4_ELASTIC_CONV_TOKENS");
+        return !(a != nullptr && std::atof(a) > 0) && !(b != nullptr && std::atoll(b) > 0);
+    }
+    static size_t el_budget_bytes() {
+        const char* v = ds4_env("DS4_ELASTIC_BUDGET_MB");
+        return (size_t) ((v != nullptr && std::atof(v) > 0 ? std::atof(v) : 256.0) * 1048576.0);
+    }
+    static bool el_take_env() {
+        const char* v = ds4_env("DS4_ELASTIC_TAKE");
+        return v == nullptr || std::atoi(v) != 0;
+    }
+    static size_t el_env_mb(const char* name, double dflt) {
+        const char* v = ds4_env(name);
+        return (size_t) ((v != nullptr && std::atof(v) >= 0 ? std::atof(v) : dflt) * 1048576.0);
+    }
+    bool el_taken(const Layer& l, int e) const {
+        return !el_mark.empty() && (size_t) l.il < el_mark.size() && !el_mark[(size_t) l.il].empty() &&
+               el_mark[(size_t) l.il][(size_t) e] != 0;
+    }
+    // (place_experts, a lending card's tail) why device di cannot give (empty: it can)
+    std::string el_take_refusal(size_t di, const Chunk& c) const {
+        if (el == nullptr || el_rmax.size() <= di || el_rmax[di] == 0) return "no take room asked";
+        if (c.tp_lend || c.x3_lend) return "a tensor-parallel or EXL3 lender";
+        if (recent_n > 0) return "DS4_RECENT's slots";
+        if (copy_swap) return "DS4_COPY_SWAP";
+        for (const Layer& l : L)
+            if (l.dev == (int) di && !l.mtp && (l.nm != 1 || l.n_cls != 1 || l.lay.fmt != gg::kFmtMXFP4 || !l.maddr.empty()))
+                return "layer " + std::to_string(l.il) + " is not a one-GPU GGUF layer";
+        return "";
+    }
+    static uint64_t el_hash(const uint8_t* p, size_t n) {
+        uint64_t h = 1469598103934665603ull;
+        for (size_t i = 0; i < n; i += 8) {
+            uint64_t w = 0;
+            std::memcpy(&w, p + i, std::min<size_t>(8, n - i));
+            h = (h ^ w) * 1099511628211ull;
+        }
+        return h;
+    }
+    static bool el_check() {
+        static const bool on = ds4_env("DS4_CHECK_ELASTIC") != nullptr && std::atoi(ds4_env("DS4_CHECK_ELASTIC")) != 0;
+        return on;
+    }
+    uint8_t* el_stash_at(size_t di, size_t off) {
+        Dev& d = devs[di];
+        return d.shadow != nullptr ? d.shadow + off : elt[di].stash + (off - elt[di].floor);
+    }
+    // every card quiet: a prompt's room handed back, the expert cache's moves landed, nothing in flight
+    bool el_quiet() {
+        if (lend_broken) return false;
+        if ((lent || lend_held.load(std::memory_order_relaxed)) && !borrow_end()) return false;
+        cache_drain();
+        for (Dev& d : devs)
+            if (cudaSetDevice(d.id) != cudaSuccess || cudaDeviceSynchronize() != cudaSuccess) return false;
+        return true;
+    }
+    size_t el_taken_g(size_t di) const {
+        return di < elt.size() && elt[di].on ? (elt[di].top - elt[di].lo) / el->gran : 0;
+    }
+    // card di gives the pool up to n granules of its tail (the cards quiet); the granules given
+    size_t el_take(size_t di, size_t n, const char* why) {
+        if (di >= elt.size() || !elt[di].on || n == 0 || elt[di].lo < elt[di].floor + el->gran) return 0;
+        if (!el_quiet()) return 0;
+        ElTake& t = elt[di];
+        Dev& d = devs[di];
+        const size_t G = el->gran;
+        const double t0 = now_ms();
+        size_t got = 0;
+        int nexp = 0, npark = 0;
+        cudaSetDevice(d.id);
+        while (got < n && t.lo >= t.floor + G) {
+            const size_t a = t.lo - G;
+            for (Layer& l : L) {
+                if (l.dev != (int) di || l.mtp || l.n_main >= l.n_slots) continue;
+                const size_t u = align256(unit(l)), base = (size_t) (l.xbase - d.tail);
+                for (int sl = l.n_main; sl < l.n_slots; ++sl) {
+                    const size_t off = base + (size_t) (sl - l.n_main) * d.tail_step;
+                    if (off >= a + G || off + u <= a) continue;
+                    if (sl == l.spare_vram) {   // (the cache's spare: parked, no swaps in this layer meanwhile)
+                        t.park.push_back({l.il, -1, sl, off});
+                        l.spare_vram = -1;
+                        ++npark;
+                        continue;
+                    }
+                    int e = -1;
+                    for (int x = 0; x < l.n_exp && e < 0; ++x)
+                        if (l.slot[(size_t) x] == sl) e = x;
+                    if (e < 0) continue;   // (none in it, or taken with the granule above)
+                    l.slot[(size_t) e] = -1;
+                    l.host[(size_t) e] = (uint8_t*) mx_mat(l, e, 0);
+                    --l.n_vram;
+                    if (el_mark.size() < L.size()) el_mark.resize(L.size());
+                    if (el_mark[(size_t) l.il].empty()) el_mark[(size_t) l.il].assign((size_t) l.n_exp, 0);
+                    el_mark[(size_t) l.il][(size_t) e] = 1;
+                    if (!tab_entry(l, e)) lend_broken = true;
+                    if (l.ram.empty() || l.ram[(size_t) e] < 0)   // (its pages read ahead: the CPU lane reads them now)
+                        for (int r = 0; r < 3; ++r)
+                            if (l.mx_file[r] >= 0)
+                                os::advise(pk.fds[(size_t) l.mx_file[r]], l.mx_off[r] + (uint64_t) e * l.mx_stride[r],
+                                           mx_part_bytes(l, r), true);
+                    t.rec.push_back({l.il, e, sl, off});
+                    ++nexp;
+                }
+            }
+            cudaSetDevice(d.id);
+            uint8_t* st = el_stash_at(di, a);
+            if (cudaMemcpy(st, d.tail + a, G, cudaMemcpyDeviceToHost) != cudaSuccess) {
+                cudaGetLastError();
+                std::fprintf(stderr, "ds4: elastic: CUDA%d: saving a tail granule failed - it stays\n", d.id);
+                break;   // (its experts stay on the CPU lane, the granule mapped: harmless)
+            }
+            if (el_check()) {
+                if (t.sum.size() < (t.top - t.floor) / G) t.sum.assign((t.top - t.floor) / G, 0);
+                t.sum[(a - t.floor) / G] = el_hash(st, G);
+            }
+            if (!el->tail_give((int) di, a / G)) {
+                std::fprintf(stderr, "ds4: elastic: CUDA%d: unmapping a tail granule failed - it stays\n", d.id);
+                break;
+            }
+            t.lo = a;
+            ++got;
+        }
+        if (got > 0)
+            std::fprintf(stderr, "ds4: elastic: CUDA%d experts give %.0f MB to the conversations (%s): %d experts to the "
+                                 "CPU lane%s; taken %.0f of %.0f MB (%.0f ms)\n",
+                         d.id, (double) (got * G) / 1e6, why, nexp,
+                         npark > 0 ? (", " + std::to_string(npark) + " spare slots parked").c_str() : "",
+                         (double) (t.top - t.lo) / 1e6, (double) (t.top - t.floor) / 1e6, now_ms() - t0);
+        return got;
+    }
+    // card di takes back up to n granules from the pool's free ones, their experts in VRAM again (the cards quiet)
+    size_t el_give_back(size_t di, size_t n, const char* why) {
+        if (di >= elt.size() || !elt[di].on || n == 0 || elt[di].lo >= elt[di].top) return 0;
+        if (!el_quiet()) return 0;
+        ElTake& t = elt[di];
+        Dev& d = devs[di];
+        const size_t G = el->gran;
+        const double t0 = now_ms();
+        size_t got = 0;
+        int nbad = 0;
+        cudaSetDevice(d.id);
+        std::vector<uint8_t> chk;
+        while (got < n && t.lo < t.top) {
+            const size_t a = t.lo;
+            if (!el->tail_take_back((int) di, a / G)) break;
+            if (cudaMemcpy(d.tail + a, el_stash_at(di, a), G, cudaMemcpyHostToDevice) != cudaSuccess) {
+                cudaGetLastError();
+                t.bad.push_back(a);
+                ++nbad;
+            } else if (el_check() && !t.sum.empty()) {   // (DS4_CHECK_ELASTIC: the bytes as they were given)
+                chk.resize(G);
+                if (cudaMemcpy(chk.data(), d.tail + a, G, cudaMemcpyDeviceToHost) != cudaSuccess ||
+                    el_hash(chk.data(), G) != t.sum[(a - t.floor) / G]) {
+                    cudaGetLastError();
+                    t.bad.push_back(a);
+                    ++nbad;
+                }
+            }
+            t.lo = a + G;
+            ++got;
+        }
+        // the experts whole in VRAM again (none of their bytes in [lo, top), the part still given) go back to their slots
+        int nexp = 0, kept = 0;
+        const auto whole = [&](size_t off, size_t u) { return t.lo >= t.top || off + u <= t.lo || off >= t.top; };
+        const auto bad_in = [&](size_t off, size_t u) {
+            for (size_t b : t.bad)
+                if (off < b + G && off + u > b) return true;
+            return false;
+        };
+        for (size_t i = 0; i < t.rec.size();) {
+            const ElRec r = t.rec[i];
+            Layer& l = L[(size_t) r.il];
+            if (!whole(r.off, align256(unit(l)))) {
+                ++i;
+                continue;
+            }
+            if (bad_in(r.off, align256(unit(l)))) {   // (its bytes not back: it stays on the CPU lane, its slot unused)
+                ++kept;
+            } else if (l.slot[(size_t) r.e] < 0) {
+                l.slot[(size_t) r.e] = r.slot;
+                l.host[(size_t) r.e] = nullptr;
+                ++l.n_vram;
+                if (!tab_entry(l, r.e)) lend_broken = true;
+                ++nexp;
+            }
+            el_mark[(size_t) r.il][(size_t) r.e] = bad_in(r.off, align256(unit(l))) ? 1 : 0;
+            t.rec[i] = t.rec.back();
+            t.rec.pop_back();
+        }
+        for (size_t i = 0; i < t.park.size();) {
+            Layer& l = L[(size_t) t.park[i].il];
+            if (!whole(t.park[i].off, align256(unit(l)))) {
+                ++i;
+                continue;
+            }
+            if (l.spare_vram < 0) l.spare_vram = t.park[i].slot;
+            t.park[i] = t.park.back();
+            t.park.pop_back();
+        }
+        if (got > 0)
+            std::fprintf(stderr, "ds4: elastic: CUDA%d conversations give back %.0f MB to the experts (%s): %d experts in "
+                                 "VRAM again%s; taken %.0f of %.0f MB (%.0f ms)\n",
+                         d.id, (double) (got * G) / 1e6, why, nexp,
+                         nbad > 0 ? (" - " + std::to_string(nbad) + " granules NOT as given (" + std::to_string(kept) +
+                                     " experts stay on the CPU lane)").c_str()
+                                  : el_check() ? " (DS4_CHECK_ELASTIC: every byte as given)" : "",
+                         (double) (t.top - t.lo) / 1e6, (double) (t.top - t.floor) / 1e6, now_ms() - t0);
+        return got;
+    }
+    // conversation s to `tokens` positions: each card short of free granules takes them (at least a step), as far as
+    // its floor allows; true when the pool then backs it
+    bool el_take_for(int s, int64_t tokens) {
+        if (el == nullptr || elt.empty() || s < 0 || s >= (int) el->seqs.size()) return false;
+        tokens = std::min<int64_t>(tokens, o.max_context);
+        const size_t step = std::max<size_t>(1, el_env_mb("DS4_ELASTIC_TAKE_STEP_MB", 64) / el->gran);
+        for (size_t di = 0; di < devs.size(); ++di) {
+            const size_t lack = el->lack(s, (int) di, tokens), have = el->idle[di].size();
+            if (lack > have) el_take(di, std::max(lack - have, step), "a conversation grows");
+        }
+        return el->can(s, tokens);
+    }
+    // what the cards took back to the experts: the free granules past max(budget, backed + hysteresis); idle: no
+    // hysteresis (the engine has nothing running)
+    void el_give_back_surplus(bool idle) {
+        if (el == nullptr || elt.empty()) return;
+        const size_t H = idle ? 0 : el_env_mb("DS4_ELASTIC_HYST_MB", 128) / el->gran;
+        for (size_t di = 0; di < devs.size(); ++di) {
+            const size_t taken = el_taken_g(di);
+            if (taken == 0) continue;
+            const size_t total = el->made[di] + taken, free = el->idle[di].size(), backed = total - free;
+            const size_t keep = std::max(el->made[di], backed + H);
+            if (total > keep) el_give_back(di, std::min(taken, total - keep), idle ? "the engine is idle" : "a request ended");
+        }
+    }
     static bool el_wanted() {
         const char* v = ds4_env("DS4_ELASTIC_CONV");
         return v != nullptr && std::atoi(v) != 0;
@@ -9813,6 +10094,8 @@ struct Model::Impl {
         // a whole context's bytes
         const char* mbv = ds4_env("DS4_ELASTIC_CONV_MB");
         const double mb = mbv != nullptr ? std::atof(mbv) : 0.0;
+        el_rmax.assign(devs.size(), 0);
+        elt.assign(devs.size(), ElTake{});
         double ctx_all = 0;
         for (const auto& b : el->seqs[0].b) ctx_all += (double) b.max_rows * b.rb;
         for (size_t di = 0; di < devs.size(); ++di) {
@@ -9830,6 +10113,12 @@ struct Model::Impl {
                 for (const auto& b : el->seqs[0].b)
                     if (b.di == (int) di) ctx_dev += (double) b.max_rows * b.rb;
                 bytes = (size_t) std::ceil(mb * 1e6 * (ctx_all > 0 ? ctx_dev / ctx_all : 0.0));
+            } else if (el_budget_mode()) {   // (the budget; taking: one whole context's buffers past it, at most)
+                bytes = el_budget_bytes();
+                size_t whole0 = 0;
+                for (const auto& b : el->seqs[0].b)
+                    if (b.di == (int) di) whole0 += el->up((size_t) b.max_rows * b.rb) + el->gran;
+                el_rmax[di] = el_take_env() && whole0 > bytes ? el->up(whole0 - bytes) : 0;
             }
             cudaSetDevice(devs[di].id);
             if (!el->fill((int) di, bytes)) {
@@ -9867,10 +10156,33 @@ struct Model::Impl {
         }
         const char* mbv = ds4_env("DS4_ELASTIC_CONV_MB");
         const std::string sized =
-            mbv != nullptr && std::atof(mbv) > 0
-                ? std::string("DS4_ELASTIC_CONV_MB=") + mbv
+            mbv != nullptr && std::atof(mbv) > 0 ? std::string("DS4_ELASTIC_CONV_MB=") + mbv
+            : el_budget_mode()
+                ? std::to_string(el_budget_bytes() >> 20) + " MiB a card, DS4_ELASTIC_BUDGET_MB"
                 : std::to_string((long long) std::min<int64_t>(el_budget_tokens(), (int64_t) el->seqs.size() * o.max_context)) +
                       " positions + 2 granules a buffer a conversation";
+        std::string tk;   // (DS4_ELASTIC_TAKE: each card's take room, or why it has none)
+        for (size_t di = 0; di < devs.size() && di < elt.size(); ++di) {
+            ElTake& et = elt[di];
+            if (et.on && devs[di].shadow == nullptr) {   // (no shadow: a pinned stash of its own for the given bytes)
+                std::string e2;
+                if (!halloc(et.stash, et.top - et.floor, e2)) {
+                    et.on = false;
+                    et.why = "no pinned stash (" + e2 + ")";
+                }
+            }
+            char b[160];
+            if (et.on)
+                std::snprintf(b, sizeof b, "%sCUDA%d up to %.0f MB (tail %.0f..%.0f MB, its prompt room above)",
+                              tk.empty() ? "" : ", ", devs[di].id, (double) (et.top - et.floor) / 1e6, et.floor / 1e6,
+                              et.top / 1e6);
+            else
+                std::snprintf(b, sizeof b, "%sCUDA%d none (%s)", tk.empty() ? "" : ", ", devs[di].id,
+                              et.why.empty() ? "not asked" : et.why.c_str());
+            tk += b;
+        }
+        if (!tk.empty())
+            std::fprintf(stderr, "ds4: elastic: the conversations may take expert slots (DS4_ELASTIC_TAKE): %s\n", tk.c_str());
         std::fprintf(stderr, "ds4: elastic conversations: %d, %.2f GB held back for the experts, taken on demand "
                              "(DS4_ELASTIC_CONV: their whole contexts %.2f GB -> a shared pool of %.0f MB (%s), %.2f MB "
                              "a 1K positions, a conversation at least %.0f MB: a %.0f MB granule for each of its %zu "
@@ -12607,6 +12919,7 @@ struct Model::Impl {
                 // (never one of the helper's either: its picks are its own, in one place - the sync path's hits can
                 //  name them)
                 if (!filling && l.slot[(size_t) e] < 0 && !helper_owned(l, e) && !(l.hr_n > 0 && hr_filling(l, e)) &&
+                    !el_taken(l, e) &&
                     (best < 0 || l.heat[(size_t) e] > l.heat[(size_t) best]))
                     best = e;
             }
@@ -12664,7 +12977,7 @@ struct Model::Impl {
             int rb = -1;   // RAM: the hottest read from the file, in place of the layer's coldest held (or a free slot)
             for (int e : hits)
                 if (e != vin && l.slot[(size_t) e] < 0 && l.ram[(size_t) e] < 0 && !helper_owned(l, e) &&
-                    (rb < 0 || l.heat[(size_t) e] > l.heat[(size_t) rb]))
+                    !el_taken(l, e) && (rb < 0 || l.heat[(size_t) e] > l.heat[(size_t) rb]))
                     rb = e;
             if (rb < 0) continue;
             int rc = -1;
@@ -22776,6 +23089,15 @@ int64_t Model::seq_backed(int s) const { return p_->seq_backed(s); }
 bool Model::seq_can_back(int s, int64_t tokens) const { return p_->seq_can_back(s, tokens); }
 bool Model::seq_reserve(int s, int64_t tokens, std::string& err) { return p_->seq_reserve(s, tokens, err); }
 void Model::seq_release(int s) { p_->seq_release(s); }
+bool Model::el_take_for(int s, int64_t tokens) { return p_->el_take_for(s, tokens); }
+void Model::el_give_back_surplus(bool idle) { p_->el_give_back_surplus(idle); }
+size_t Model::el_force_take(size_t mb) {
+    size_t n = 0;
+    if (p_->el == nullptr) return 0;
+    for (size_t di = 0; di < p_->devs.size(); ++di)
+        n += p_->el_take(di, std::max<size_t>(1, (mb << 20) / p_->el->gran), "DS4_DBG_TAKE_AT");
+    return n;
+}
 int64_t Model::seq_pos(int s) const { return p_->seq_pos(s); }
 const std::vector<int32_t>& Model::seq_tokens(int s) const { return p_->seq_tokens(s); }
 bool Model::step_multi(const int* seqs, const int* tokens, int n, std::string& err) {
