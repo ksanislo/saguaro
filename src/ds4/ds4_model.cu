@@ -1877,6 +1877,34 @@ struct Model::Impl {
     std::mutex pf_mu;
     std::condition_variable pf_cv;
     std::vector<std::pair<const void*, size_t>> pf_q;
+    // DS4_PREFETCH=<1|2> (opt-in): decode's guessed CPU-lane experts of the next 1 (2) layers on the same GPU copied
+    // from their RAM copies into a staging ring there (DS4_PREFETCH_SLOTS) and mapped for one routing - the GPU
+    // computes the ones it guessed right, the CPU lane the rest; DS4_PREFETCH_MAX copies a request, _LOG rows a line
+    int xp_dist = 0, xp_nslots = 16, xp_max = 2, xp_rank = 6, xp_log = 512;
+    struct XpDev {
+        uint8_t* ring = nullptr;
+        size_t stride = 0;
+        int n = 0;
+        cudaStream_t cs = nullptr;
+        XpSlot* d_slot = nullptr;    // device [n] (xp_map / xp_clear)
+        unsigned* freed = nullptr;   // host-mapped [n]: the gen of each slot's last free
+        std::vector<unsigned> gen;   // the gen each slot was last issued with (free: freed == gen)
+        std::vector<int> lay, ex;
+    };
+    std::vector<XpDev> xp_dev;
+    struct XpJob {
+        int layer, e, a;
+        unsigned seq;
+    };
+    std::mutex xp_mu;
+    std::condition_variable xp_cv;
+    std::deque<XpJob> xp_q;
+    std::thread xp_th;
+    unsigned xp_gen = 0;
+    std::atomic<unsigned> svc_next{0};
+    std::atomic<int64_t> xp_issued{0}, xp_stale{0}, xp_full{0}, xp_fail{0};
+    int64_t xp_used = 0, xp_miss = 0, xp_guessed = 0, xp_rows = 0, xp_rows0 = 0;   // (the service thread's)
+    int64_t xp_l_used = 0, xp_l_miss = 0, xp_l_guessed = 0, xp_l_iss = 0;
     // Windows only: the in-place experts' pages this process's own reads bring into its working set (the CPU lane's
     // computes, the lookahead's prefetches) are counted in use until trimmed, unlike Linux where the same pages sit in
     // the page cache and count as available - a long decode on a warm-capped pack drains every free GiB that way
@@ -2651,6 +2679,11 @@ struct Model::Impl {
         }
         pf_cv.notify_all();
         if (pf_th.joinable()) pf_th.join();
+        {
+            std::lock_guard<std::mutex> lk(xp_mu);
+        }
+        xp_cv.notify_all();
+        if (xp_th.joinable()) xp_th.join();
         if (ip_th.joinable()) ip_th.join();   // (the in-place trimmer: its own quit check is the loop's sleep)
         {
             std::lock_guard<std::mutex> lk(sw_mu);
@@ -4911,6 +4944,7 @@ struct Model::Impl {
         }
         // the experts: VRAM slots in what each device has left (after the PCIe lane's staging slots), the rest on the host
         if (!lane_alloc(err)) return false;
+        if (!xp_alloc(err)) return false;   // (DS4_PREFETCH's rings: off, nothing)
         if (!place_experts(err)) return false;
         lend_shadow_pin();   // (DS4_LEND_SHADOW: the tails' shadows, pinned in parallel)
         el_report();         // (DS4_ELASTIC_CONV: what the pool left the experts)
@@ -5110,6 +5144,7 @@ struct Model::Impl {
                 serve_lane();
             });
             if (ahead_mode > 0) pf_th = std::thread([this] { prefetch_loop(); });
+            if (xp_dist > 0) xp_th = std::thread([this] { xp_loop(); });
 #if defined(_WIN32)
             if (file_experts && ip_trim_gb > 0) {   // (the in-place pages' working-set trimmer - see its note by ip_ring)
                 ip_base_ws = os::working_set_bytes();
@@ -13495,6 +13530,7 @@ struct Model::Impl {
         if (n.dev != l0.dev || n.mtp != l0.mtp || n.lay.fmt != gg::kFmtMXFP4 || n.gate_w == nullptr || n.n_exp > 1024 ||
             (int) n.slot.size() < n.n_exp)
             return nullptr;
+        if (a <= xp_dist && xp_layer_ok(n)) return &n;   // (DS4_PREFETCH: its guesses whatever the files hold)
         for (int e = 0; e < n.n_exp; ++e)
             if (file_read(n, e)) return &n;
         return nullptr;
@@ -13545,6 +13581,175 @@ struct Model::Impl {
             pf_q.insert(pf_q.end(), pf_want.begin(), pf_want.end());
         }
         pf_cv.notify_one();
+    }
+
+    // ---- DS4_PREFETCH (see xp_dist): a layer whose CPU-lane experts may be staged - a trunk GGUF layer of one GPU,
+    // one expert class (its slots' blob layout)
+    int xp_first = -1;
+    static bool xp_layer_ok(const Layer& l) {
+        return !l.mtp && l.nm == 1 && l.lay.fmt == gg::kFmtMXFP4 && l.maddr.empty() && l.n_cls <= 1 && l.blob > 0;
+    }
+    bool xp_paused() const {   // (a prompt's device run or its kept room: the links are the read's)
+        return rd_live.load(std::memory_order_acquire) || lend_held.load(std::memory_order_acquire) ||
+               copy_flush.load(std::memory_order_acquire);
+    }
+    // the ring before place_experts (the experts take what it leaves), its stream, flags; off: nothing allocated
+    bool xp_alloc(std::string& err) {
+        const char* v = ds4_env("DS4_PREFETCH");
+        xp_dist = v != nullptr ? std::max(0, std::min(2, std::atoi(v))) : 0;
+        if (xp_dist == 0) return true;
+        const char* why = !pk.gguf ? "not a GGUF" : !moe_token_path || sync_decode ? "no host-routed decode"
+                        : helper_id >= 0 ? "DS4_HELPER is on" : nullptr;
+        if (why != nullptr) {
+            std::fprintf(stderr, "ds4: DS4_PREFETCH off: %s\n", why);
+            xp_dist = 0;
+            return true;
+        }
+        auto envi = [&](const char* k, int d, int lo, int hi) {
+            const char* x = ds4_env(k);
+            return std::max(lo, std::min(hi, x != nullptr ? std::atoi(x) : d));
+        };
+        xp_nslots = envi("DS4_PREFETCH_SLOTS", 16, 1, 32);
+        xp_max = envi("DS4_PREFETCH_MAX", 2, 1, 16);
+        xp_rank = envi("DS4_PREFETCH_RANK", 6, 1, kPicks);
+        xp_log = envi("DS4_PREFETCH_LOG", 512, 1, 1 << 30);
+        xp_dev.assign(devs.size(), XpDev{});
+        std::string per;
+        for (size_t di = 0; di < devs.size(); ++di) {
+            size_t stride = 0;
+            for (const Layer& l : L)
+                if (l.dev == (int) di && xp_layer_ok(l)) {
+                    stride = std::max(stride, align256(l.blob));
+                    if (xp_first < 0 || l.il < xp_first) xp_first = l.il;
+                }
+            if (stride == 0) continue;
+            Dev& d = devs[di];
+            XpDev& X = xp_dev[di];
+            if (!dalloc(d, X.ring, (size_t) xp_nslots * stride, err) || !dalloc(d, X.d_slot, (size_t) xp_nslots, err) ||
+                !hmap(X.freed, (size_t) xp_nslots, err))
+                return false;
+            CK(cudaMemset(X.d_slot, 0, sizeof(XpSlot) * (size_t) xp_nslots));
+            int lo = 0, hi = 0;
+            CK(cudaDeviceGetStreamPriorityRange(&lo, &hi));
+            CK(cudaStreamCreateWithPriority(&X.cs, cudaStreamNonBlocking, lo));   // (lo: the least urgent)
+            X.stride = stride;
+            X.n = xp_nslots;
+            X.gen.assign((size_t) X.n, 0u);
+            X.lay.assign((size_t) X.n, -1);
+            X.ex.assign((size_t) X.n, -1);
+            char b[64];
+            std::snprintf(b, sizeof b, "%sCUDA%d %.0f MB", per.empty() ? "" : ", ", d.id, X.n * stride / 1e6);
+            per += b;
+        }
+        std::fprintf(stderr, "ds4: DS4_PREFETCH=%d: decode's guessed CPU-lane experts of the next %s on the same GPU "
+                             "staged from RAM, at most %d a request of the top %d guesses; rings of %d slots (%s, from "
+                             "the experts' VRAM); off while a prompt's run holds the links\n",
+                     xp_dist, xp_dist == 1 ? "layer" : "2 layers", xp_max, xp_rank, xp_nslots, per.c_str());
+        return true;
+    }
+    // (serve_lane) request seq of layer li: its guesses for the next layers, the ones neither in VRAM nor queued or held
+    // (rank order, a layer nearer first) to the copy thread.  No GPU call
+    bool xp_held(int layer, int e) const {
+        for (const XpJob& j : xp_q)
+            if (j.layer == layer && j.e == e) return true;
+        const XpDev& X = xp_dev[(size_t) L[(size_t) layer].dev];
+        for (int i = 0; i < X.n; ++i)
+            if (X.lay[(size_t) i] == layer && X.ex[(size_t) i] == e &&
+                *(volatile const unsigned*) &X.freed[i] != X.gen[(size_t) i])
+                return true;
+        return false;
+    }
+    void xp_ask(int li, const Req& r, unsigned seq, int T) {
+        if (xp_paused() || li < 0 || li >= (int) L.size()) return;
+        int n = 0;
+        {
+            std::lock_guard<std::mutex> lk(xp_mu);
+            for (int a = 1; a <= xp_dist && n < xp_max; ++a) {
+                const int m = std::min(std::min(r.na[a - 1], a == 1 ? kAhead1 : kPicks), xp_rank), j = li + a;
+                if (m <= 0 || j >= (int) L.size()) continue;
+                const Layer& nx = L[(size_t) j];
+                if (!xp_layer_ok(nx) || nx.dev != L[(size_t) li].dev || xp_dev[(size_t) nx.dev].n == 0 || nx.ram.empty() ||
+                    nx.vram_tab == nullptr)
+                    continue;
+                for (int i = 0; i < m && n < xp_max; ++i)
+                    for (int t = 0; t < T && n < xp_max; ++t) {
+                        const int e = r.ahead[t][(a - 1) * kAhead1 + i];
+                        if (e < 0 || e >= nx.n_exp || nx.slot[(size_t) e] >= 0 || nx.ram[(size_t) e] < 0 || e == nx.sw_in ||
+                            xp_held(j, e))
+                            continue;
+                        xp_q.push_back({j, e, a, seq});
+                        ++n;
+                    }
+            }
+        }
+        if (n > 0) xp_cv.notify_one();
+    }
+    // the copy thread: a job's slot (a free one), its expert's RAM copy into it on the ring's stream, then its mapping
+    // (xp_map) - all GPU calls here, never on the service thread
+    void xp_loop() {
+        std::string err;
+        for (;;) {
+            XpJob j{};
+            int i = -1;
+            unsigned gen = 0;
+            {
+                std::unique_lock<std::mutex> lk(xp_mu);
+                xp_cv.wait(lk, [&] { return quit.load(std::memory_order_relaxed) || !xp_q.empty(); });
+                if (quit.load(std::memory_order_relaxed)) return;
+                j = xp_q.front();
+                xp_q.pop_front();
+                const Layer& n = L[(size_t) j.layer];
+                // (stale: the target layer's request seen - its routing read the table already)
+                if (xp_paused() || (int) (svc_next.load(std::memory_order_acquire) - (j.seq + (unsigned) j.a)) > 0 ||
+                    n.slot[(size_t) j.e] >= 0 || n.ram[(size_t) j.e] < 0 || j.e == n.sw_in) {
+                    ++xp_stale;
+                    continue;
+                }
+                XpDev& X = xp_dev[(size_t) n.dev];
+                for (int q = 0; q < X.n && i < 0; ++q)
+                    if (*(volatile const unsigned*) &X.freed[q] == X.gen[(size_t) q]) i = q;
+                if (i < 0) {
+                    ++xp_full;
+                    continue;
+                }
+                gen = ++xp_gen;
+                if (gen == 0) gen = ++xp_gen;
+                X.gen[(size_t) i] = gen;
+                X.lay[(size_t) i] = j.layer;
+                X.ex[(size_t) i] = j.e;
+            }
+            const Layer& n = L[(size_t) j.layer];
+            XpDev& X = xp_dev[(size_t) n.dev];
+            uint8_t* dst = X.ring + (size_t) i * X.stride;
+            cudaSetDevice(devs[(size_t) n.dev].id);
+            if (!stream_expert(n, 0, j.e, dst, X.cs, err)) {   // (nothing mapped: the slot free again)
+                cudaGetLastError();
+                *(volatile unsigned*) &X.freed[i] = gen;
+                ++xp_fail;
+                continue;
+            }
+            xp_map(X.d_slot, i, n.vram_tab, n.il, j.e, gen, (unsigned long long) dst, X.freed, X.cs);
+            ++xp_issued;
+        }
+    }
+    // (serve_lane) every DS4_PREFETCH_LOG rows of the first staged layer: the window's counters
+    void xp_line() {
+        const int64_t iss = xp_issued.load(), used = xp_used - xp_l_used, miss = xp_miss - xp_l_miss,
+                      gs = xp_guessed - xp_l_guessed, di = iss - xp_l_iss;
+        const double per = st.cpu_experts > 0 ? st.cpu_ms / (double) st.cpu_experts : 0.0;
+        std::fprintf(stderr, "ds4: DS4_PREFETCH: %lld rows: CPU-lane misses %lld (guessed %.1f%%), %lld copies, %lld used "
+                             "(%.1f%% of the misses, %.1f%% of the copies), %lld wasted; ~%.1f ms of CPU-lane time saved "
+                             "(%.3f ms an expert); all along %lld stale, %lld ring full, %lld failed\n",
+                     (long long) (xp_rows - xp_rows0), (long long) miss, miss > 0 ? 100.0 * (double) gs / (double) miss : 0.0,
+                     (long long) di, (long long) used, miss > 0 ? 100.0 * (double) used / (double) miss : 0.0,
+                     di > 0 ? 100.0 * (double) used / (double) di : 0.0, (long long) std::max<int64_t>(0, di - used),
+                     (double) used * per, per, (long long) xp_stale.load(), (long long) xp_full.load(),
+                     (long long) xp_fail.load());
+        xp_rows0 = xp_rows;
+        xp_l_used = xp_used;
+        xp_l_miss = xp_miss;
+        xp_l_guessed = xp_guessed;
+        xp_l_iss = iss;
     }
 
     // (the in-place trimmer, above) a range of a file's mapping this process is about to read or has just read: noted
@@ -16211,6 +16416,10 @@ struct Model::Impl {
                 const bool dsk = dsk_rule && (!disk_skip_auto || aon);
                 const bool rsk = ram_skip_w > 0.0f && !l.mtp && li >= disk_skip_from && li < g.nl;
                 int heavy = 0, cold = 0, heavy_cpu = 0;
+                const bool xpl = xp_dist > 0 && xp_layer_ok(l);
+                const uint8_t* xfl = xpl && !ahead_for.empty() && ahead_for[(size_t) li] == next
+                                         ? ahead_fl.data() + (size_t) li * 1024 : nullptr;
+                if (xpl && li == xp_first) xp_rows += T;
                 for (int t = 0; t < T; ++t) {
                     float wsum = 0.0f;   // (DISK_SKIP_W: the token's route weights)
                     if (dsk || rsk)
@@ -16241,6 +16450,14 @@ struct Model::Impl {
                                 continue;
                             }
                             l.cpu_hits.push_back(e);
+                            if (xpl) {   // (DS4_PREFETCH: a miss; the device's plan says which lane computes it)
+                                ++xp_miss;
+                                xp_guessed += xfl != nullptr && (xfl[e] & 6) != 0;
+                                if (r.gpu[t][i]) {
+                                    ++xp_used;
+                                    continue;
+                                }
+                            }
                             if ((light && !in_ram(l, e)) || (rsk && r.w[t][i] < ram_skip_w * wsum)) {
                                 ++st.skipped;
                                 continue;
@@ -16293,6 +16510,7 @@ struct Model::Impl {
                     }
                 }
                 if (ahead_mode > 0 && !ahead_for.empty()) ahead_ask(li, r, next, T);
+                if (xp_dist > 0) xp_ask(li, r, next, T);
                 // the PCIe lane (a decoded token on a layer that streams): the picks it takes leave the CPU lane's, their
                 // copies start now (lane_take)
                 const int lc = T == 1 ? lane_class(li) : (ln_win && T <= kWin) ? lane_win_class(li) : -1;
@@ -16367,6 +16585,10 @@ struct Model::Impl {
             *(volatile unsigned*) &rp.seq = next;
             *(volatile unsigned*) lane_done = next;
             ++next;
+            if (xp_dist > 0) {
+                svc_next.store(next, std::memory_order_release);
+                if (xp_rows - xp_rows0 >= xp_log) xp_line();
+            }
             last = std::chrono::steady_clock::now();
         }
     }
@@ -22776,6 +22998,15 @@ struct Model::Impl {
                 rp.a_n = nx1->n_exp;
                 rp.m = m1;
                 rp.T = T;
+                rp.pf = xp_dist > 0 ? 1 : 0;
+                // (DS4_PREFETCH=2: the layer after's guesses too, written before route_pair publishes them)
+                const Layer* nx2 = xp_dist >= 2 ? ahead_layer(L0, 2) : nullptr;
+                if (nx2 != nullptr && route_fusable(l, nx1, m1, D)) {
+                    float* gl2 = d.glog_a + (size_t) kWin * 1024;
+                    gemv_f32(nx2->gate_w, d.x, nx2->n_exp, D, T, gl2, 1024, s);
+                    route_ahead(gl2, nx2->gate_bias, nx2->n_exp, std::min(kPicks, nx2->k_exp), T, reqs + slot, kAhead1, s);
+                    rp.na1 = std::min(kPicks, nx2->k_exp);
+                }
             }
             if (route_fusable(l, nx1, m1, D)) {   // (a GEMV not gone in reaches no routing; a routing, no publish)
                 if (!gemv_f32_pair(l.gate_w, l.n_exp, d.glog, nx1->gate_w, nx1->n_exp, d.glog_a, d.x, D, s, T,
@@ -22788,7 +23019,7 @@ struct Model::Impl {
                 gemv_f32(l.gate_w, d.x, l.n_exp, D, T, d.glog, 1024, s);
                 // lookahead: the next layers' guesses (their gate on this FFN input), published below
                 int na[2] = {0, 0};
-                for (int a = 1; lead && a <= std::min(2, ahead_mode); ++a) {
+                for (int a = 1; lead && a <= std::min(2, std::max(ahead_mode, xp_dist)); ++a) {
                     const Layer* nx = ahead_layer(L0, a);
                     if (nx == nullptr) break;
                     const int m = a == 1 ? std::max(1, std::min(kAhead1, nx->k_exp + ahead_extra))
@@ -22802,7 +23033,7 @@ struct Model::Impl {
                 route_publish(d.glog, l.gate_bias, l.n_exp, l.k_exp, T, g.route_scale, l.vram_tab, d.x, D, d.ridx, d.rw,
                               d.plan_ptr, lead ? reqs + slot : nullptr, sq, s, l.gate_bias_vl, l.mtp ? 0u : wp.vl,
                               na[0], na[1], lead && self_answer ? resps + slot : nullptr, d.cpu_any,
-                              lane_done);
+                              lane_done, xp_dist > 0 ? 1 : 0);
             }
             {
                 x3::MvJob js[2] = {job(l.s1, d.x, d.sg, T, D, FF), job(l.s3, d.x, d.su, T, D, FF)};
@@ -22895,6 +23126,10 @@ struct Model::Impl {
                     err = "exl3 win_experts failed";
                     return false;
                 }
+            }
+            if (lead && xp_dist > 0 && !l.mtp && xp_dev[(size_t) l.dev].n > 0) {   // (DS4_PREFETCH: done with its slots)
+                const XpDev& X = xp_dev[(size_t) l.dev];
+                xp_clear(X.d_slot, X.n, l.il, X.freed, s);
             }
             if (mi == 0) st.experts += (int64_t) T * l.k_exp;
             if (mi == 0 && l.mtp) st.draft_experts += (int64_t) T * l.k_exp;

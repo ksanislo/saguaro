@@ -2843,7 +2843,7 @@ __global__ void __launch_bounds__(512) route_publish_kernel(const float* __restr
                                                             const float* __restrict__ x, int dim, int* idx, float* w,
                                                             unsigned long long* plan_ptr, Req* req,
                                                             const float* __restrict__ bias_vl, unsigned vl,
-                                                            int* cpu_any, float rs_w, int rs_k) {
+                                                            int* cpu_any, float rs_w, int rs_k, int pf) {
     pdl_wait();
     pdl_trigger();
     __shared__ float sc[1024], bs[1024];
@@ -2895,11 +2895,13 @@ __global__ void __launch_bounds__(512) route_publish_kernel(const float* __restr
             const float wv = kept ? sc[pick[r]] / (sk + 1e-20f) * route_scale : 0.0f;
             idx[(size_t) t * kPicks + r] = pick[r];
             w[(size_t) t * kPicks + r] = wv;
-            plan_ptr[(size_t) t * kPicks + r] = kept ? vram[pick[r]] : 0ull;
-            cpu |= kept && vram[pick[r]] == 0ull;
+            const unsigned long long v = kept ? *(volatile const unsigned long long*) &vram[pick[r]] : 0ull;
+            plan_ptr[(size_t) t * kPicks + r] = v;
+            cpu |= kept && v == 0ull;
             if (req != nullptr) {
                 req->ids[t][r] = kept ? pick[r] : -1;
                 req->w[t][r] = wv;
+                if (pf) req->gpu[t][r] = v != 0ull;
             }
         }
         on_cpu = cpu;
@@ -3011,11 +3013,13 @@ __global__ void __launch_bounds__(512) route_pair_kernel(const RoutePair a) {
                 const float wv = kept ? sc[pick[r]] / (sk + 1e-20f) * a.route_scale : 0.0f;
                 a.idx[(size_t) t * kPicks + r] = pick[r];
                 a.w[(size_t) t * kPicks + r] = wv;
-                a.plan_ptr[(size_t) t * kPicks + r] = kept ? a.vram[pick[r]] : 0ull;
-                cpu |= kept && a.vram[pick[r]] == 0ull;
+                const unsigned long long v = kept ? *(volatile const unsigned long long*) &a.vram[pick[r]] : 0ull;
+                a.plan_ptr[(size_t) t * kPicks + r] = v;
+                cpu |= kept && v == 0ull;
                 if (a.req != nullptr) {
                     a.req->ids[t][r] = kept ? pick[r] : -1;
                     a.req->w[t][r] = wv;
+                    if (a.pf) a.req->gpu[t][r] = v != 0ull;
                 }
             }
             on_cpu = cpu;
@@ -3797,12 +3801,12 @@ ResidentSkip resident_skip() {
 void route_publish(const float* logits, const float* bias, int n, int k, int T, float route_scale,
                    const unsigned long long* vram, const float* x, int dim, int* idx, float* w,
                    unsigned long long* plan_ptr, Req* req, unsigned seq, cudaStream_t s, const float* bias_vl,
-                   unsigned vl, int na0, int na1, Resp* resp, int* cpu_any, const unsigned* host_done) {
+                   unsigned vl, int na0, int na1, Resp* resp, int* cpu_any, const unsigned* host_done, int pf) {
     if (req == nullptr || host_done == nullptr) resp = nullptr;
     if (resp == nullptr) cpu_any = nullptr;
     const ResidentSkip rs = resident_skip();
     pdl_launch(route_publish_kernel, T, 512, 0, s, logits, bias, n, k, route_scale, vram, x, dim, idx, w, plan_ptr, req,
-               vl != 0 ? bias_vl : nullptr, vl, cpu_any, rs.w, rs.k);
+               vl != 0 ? bias_vl : nullptr, vl, cpu_any, rs.w, rs.k, pf);
     if (req != nullptr) pdl_launch(publish_kernel, 1, 1, 0, s, req, T, seq, na0, na1, resp, cpu_any, host_done);
 }
 void route_ahead(const float* logits, const float* bias, int n, int m, int T, Req* req, int off, cudaStream_t s) {
@@ -3820,6 +3824,42 @@ bool route_pair(const RoutePair& a, cudaStream_t s) {
     if (cudaGetLastError() != cudaSuccess) return false;   // (a routing that did not go in is never published)
     publish_kernel<<<1, 1, 0, s>>>(a.req, a.T, a.seq, a.na0, a.na1, nullptr, nullptr, nullptr);
     return cudaGetLastError() == cudaSuccess;
+}
+__global__ void xp_map_kernel(XpSlot* slots, int i, unsigned long long* tab, int layer, int e, unsigned gen,
+                              unsigned long long addr, unsigned* freed) {
+    XpSlot* q = slots + i;
+    if (atomicCAS(tab + e, 0ull, addr) == 0ull) {
+        q->tab = tab;
+        q->addr = addr;
+        q->layer = layer;
+        q->e = e;
+        q->gen = gen;
+        __threadfence();
+        *(volatile int*) &q->mapped = 1;
+        return;
+    }
+    *(volatile unsigned*) &freed[i] = gen;   // (a swap or an earlier copy gave it an entry: the slot unused)
+    __threadfence_system();
+}
+__global__ void xp_clear_kernel(XpSlot* slots, int n, int layer, unsigned* freed) {
+    const int i = threadIdx.x;
+    if (i >= n) return;
+    XpSlot* q = slots + i;
+    if (*(volatile int*) &q->mapped == 0) return;
+    __threadfence();
+    if (q->layer > layer) return;   // (a later layer's still to come; an earlier one's landed late)
+    atomicCAS(q->tab + q->e, q->addr, 0ull);   // (an entry a swap wrote since stays)
+    q->mapped = 0;
+    __threadfence();
+    *(volatile unsigned*) &freed[i] = q->gen;
+    __threadfence_system();
+}
+void xp_map(XpSlot* slots, int i, unsigned long long* tab, int layer, int e, unsigned gen, unsigned long long addr,
+            unsigned* freed, cudaStream_t s) {
+    xp_map_kernel<<<1, 1, 0, s>>>(slots, i, tab, layer, e, gen, addr, freed);
+}
+void xp_clear(XpSlot* slots, int n, int layer, unsigned* freed, cudaStream_t s) {
+    xp_clear_kernel<<<1, 32, 0, s>>>(slots, n, layer, freed);
 }
 void wait_seq(const unsigned* seq_ptr, unsigned seq, cudaStream_t s) { pdl_launch(wait_seq_kernel, 1, 32, 0, s, seq_ptr, seq); }
 void helper_take(const Req* req, unsigned seq, int k, int dim, const unsigned long long* tab, int n,

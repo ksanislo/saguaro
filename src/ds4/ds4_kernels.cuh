@@ -372,6 +372,7 @@ struct Req {
     int ids[kWin][kPicks];
     float w[kWin][kPicks];
     int ahead[kWin][kAhead];
+    unsigned char gpu[kWin][kPicks];   // (DS4_PREFETCH) 1: the device planned pick i on itself, its table entry read once
     float x[kWin][kMaxDim];
 };
 struct Resp {
@@ -389,7 +390,7 @@ void route_publish(const float* logits, const float* bias, int n, int k, int T, 
                    const unsigned long long* vram, const float* x, int dim, int* idx, float* w,
                    unsigned long long* plan_ptr, Req* req, unsigned seq, cudaStream_t s, const float* bias_vl = nullptr,
                    unsigned vl = 0, int na0 = 0, int na1 = 0, Resp* resp = nullptr, int* cpu_any = nullptr,
-                   const unsigned* host_done = nullptr);
+                   const unsigned* host_done = nullptr, int pf = 0);
 /// Lookahead: the m picks a later layer will likely make (its gate's logits on this layer's FFN input, the routing's
 /// score + bias, the m best of n) into req->ahead[t][off ..) for the T tokens - before route_publish, which publishes them.
 void route_ahead(const float* logits, const float* bias, int n, int m, int T, Req* req, int off, cudaStream_t s);
@@ -419,8 +420,23 @@ struct RoutePair {
     int T = 1;   // (=2: a window's rows, 1 .. kWin)
     float rs_w = 0.0f;   // (route_pair sets these from STRATA_DS4_RESIDENT_SKIP_W / _TOPK)
     int rs_k = 0;
+    int pf = 0;   // (DS4_PREFETCH) req->gpu written too
 };
 bool route_pair(const RoutePair& a, cudaStream_t s);
+/// DS4_PREFETCH's staging ring on a device: slot i holds `e` of layer `layer` mapped into `tab` at `addr` (mapped 1)
+struct XpSlot {
+    unsigned long long* tab;
+    unsigned long long addr;
+    int layer, e;
+    unsigned gen;
+    int mapped;
+};
+/// After slot i's copy (same stream): tab[e] 0 -> addr, the slot mapped; else (the expert has an entry) freed[i] = gen
+void xp_map(XpSlot* slots, int i, unsigned long long* tab, int layer, int e, unsigned gen, unsigned long long addr,
+            unsigned* freed, cudaStream_t s);
+/// After layer `layer`'s experts (its stream): every slot mapped for it or an earlier layer unmapped (only an entry
+/// still its own) and freed
+void xp_clear(XpSlot* slots, int n, int layer, unsigned* freed, cudaStream_t s);
 /// Waits (one thread, on the device) until *seq_ptr == seq.
 void wait_seq(const unsigned* seq_ptr, unsigned seq, cudaStream_t s);
 /// The helper GPU's share of request seq (DS4_HELPER): waits on the device until req holds it - or a later one, or
