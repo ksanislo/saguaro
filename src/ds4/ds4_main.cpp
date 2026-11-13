@@ -2300,6 +2300,11 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
         };
         // its prompt read: its first token picked, and it writes from the next turn on
         const auto start_answer = [&](Act& a) {
+            if (bg_check)   // (every read's rows, alone or beside: two reads of one prompt compared bit for bit)
+                std::fprintf(stderr, "ds4: DS4_CHECK_READER: request %lld's read ended: KV hash %016llx over %zu "
+                                     "positions%s\n", a.r.rid,
+                             (unsigned long long) m.kv_hash(a.seq, (int64_t) a.P.done), a.P.done,
+                             a.bg ? " (read beside the answers)" : "");
             prompt_end(a.P);
             a.reading = false;
             a.t1 = now_ms();
