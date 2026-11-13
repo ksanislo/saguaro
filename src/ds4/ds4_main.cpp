@@ -2032,6 +2032,7 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
             // its last round's end and the reader's exclusive sections by then (the stall log); DS4_CHECK_READER: its
             // KV's hash after its last round, over positions [0, kvh_pos)
             bool bg = false, el_wait = false;
+            int bg_rounds = 0;   // (DS4_DBG_READ_PAUSE: its rounds beside background reads)
             double last_round = 0, pause_t0 = 0;
             long long last_bnd = -1;
             uint64_t kvh = 0;
@@ -2527,6 +2528,18 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
                     std::string e;
                     a.el_wait = !(m.seq_backed(a.seq) >= need || m.seq_reserve(a.seq, need + 8192, e) ||
                                   m.seq_reserve(a.seq, need, e));
+                    // (DS4_DBG_READ_PAUSE=<n>, debug: after n of its rounds beside a background read, an answer's room
+                    //  check fails once, as a short pool would - the real wait path; each request once)
+                    static const int dbg_rp = [] {
+                        const char* v = std::getenv("DS4_DBG_READ_PAUSE");
+                        return v != nullptr ? std::atoi(v) : 0;
+                    }();
+                    static std::set<long long> dbg_rp_done;
+                    if (dbg_rp > 0 && !a.el_wait && ++a.bg_rounds > dbg_rp && dbg_rp_done.insert(a.r.rid).second) {
+                        a.el_wait = true;
+                        std::fprintf(stderr, "ds4: DEBUG: DS4_DBG_READ_PAUSE: request %lld's room check fails once (read "
+                                             "beside)\n", a.r.rid);
+                    }
                     if (a.el_wait && a.pause_t0 == 0) {
                         a.pause_t0 = now_ms();
                         ++bs.pauses;
