@@ -4888,10 +4888,12 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                                 m.mmq_ctx->run(gu, m.cs);
                                 const bool gu_tail = lay.native && lay.fmt[(size_t) l].tail_off;
                                 // STRATA_MMQ_SWIGLU_Q8=1: swiglu + quantize in one pass, the same q8_1 bytes (no H)
-                                if (had_d || !mmq::swiglu_q8_requested() ||
+                                const bool sw_q8 = mmq::swiglu_q8_requested();
+                                if (had_d || !sw_q8 ||
                                     !mmq::swiglu_quantize(m.GU + r0 * 1280, m.Hq, mmq_dt, nr, 640, !lay.native,
                                                           gu_tail ? m.bounds_dev + j0 : nullptr, ngx,
                                                           gu_tail ? m.grp_tail : nullptr, r0, m.cs)) {
+                                    if (sw_q8) ++stats_.swiglu_h;
                                     if (gu_tail)   // gate/up scales applied as read
                                         mmq::swiglu_scaled(m.GU + r0 * 1280, m.H + r0 * 640, nr, 640, m.bounds_dev + j0, ngx,
                                                            m.grp_tail, r0, m.cs);
@@ -4902,6 +4904,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                                     pt.mark(kPfGemmD, cs);
                                     mmq::quantize(m.H + r0 * 640, nullptr, m.Hq, mmq_dt, 640, 640, nr, m.cs, m.Hscale);
                                 } else {
+                                    ++stats_.swiglu_fused;
                                     pt.mark(kPfGemmD, cs);
                                 }
                                 mmq::Product dn;
@@ -5771,6 +5774,14 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                                  "streamed (STRATA_MMQ_DIRECT, totals)\n", (long long) p->stage_lb_,
                          (long long) p->stage_le_, (long long) p->stats_.experts_direct,
                          (long long) p->stats_.experts_resident, (long long) p->stats_.experts_streamed);
+    }
+    // STRATA_MMQ_SWIGLU_Q8=1 with STRATA_MMQ_SWIGLU_Q8_LOG=1: each stage's groups fused vs written through H, totals so far
+    if (mmq::swiglu_q8_requested()) {
+        static const bool log = [] { const char* v = std::getenv("STRATA_MMQ_SWIGLU_Q8_LOG"); return v && std::atoi(v) != 0; }();
+        for (const Prefill* p = this; log && p != nullptr; p = p->next_)
+            std::fprintf(stderr, "strata prefill: layers %lld..%lld: %lld expert groups fused SwiGLU into q8_1, %lld wrote H "
+                                 "(STRATA_MMQ_SWIGLU_Q8, totals)\n", (long long) p->stage_lb_, (long long) p->stage_le_,
+                         (long long) p->stats_.swiglu_fused, (long long) p->stats_.swiglu_h);
     }
     return true;
 }

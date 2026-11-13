@@ -39,6 +39,8 @@ struct PrefillStats {
     int64_t experts_dma = 0;        ///< ...of which straight from the pinned arena (no CPU copy)
     int64_t experts_resident = 0;   ///< expert-layer groups served from the VRAM tier
     int64_t experts_direct = 0;     ///< ...of which MMQ read in their cache slots, not gathered (STRATA_MMQ_DIRECT=1)
+    int64_t swiglu_fused = 0;       ///< STRATA_MMQ_SWIGLU_Q8=1: expert groups whose down input was quantized in the fused pass
+    int64_t swiglu_h = 0;           ///< ...and groups that fell back to writing H (switch on, fused pass not applicable)
     int64_t experts_cpu = 0;        ///< ...computed on the CPU pool instead of streamed (STRATA_PREFILL_CPU_SHARE)
     double cpu_share = 0;           ///< ...the share of the streamed ones it took last (measured by default)
     double ms_ple = 0;
