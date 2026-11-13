@@ -68,7 +68,8 @@ void* open_path(const std::string& path) {
 }
 
 // STRATA_MMQ_DIRECT=1: the pointer-table instances for these types, started on every GPU now (before the expert
-// cache is sized, like strata_kq's); without them the resident K-quant experts keep the gather
+// cache is sized, like strata_kq's); without them the resident K-quant experts keep the gather.  =2 (the gathering
+// reference) opens it too, so both arms size the same cache and only the arithmetic path differs.
 void open_tab(Lib& L, int n_dev) {
     const std::string path = own_folder() + STRATA_KQ_TAB_LIB_NAME;
     void* h = open_path(path);
@@ -101,7 +102,8 @@ void open_tab(Lib& L, int n_dev) {
     cudaSetDevice(cur);
     L.tab_has = has;
     L.tab_run = run;
-    std::fprintf(stderr, "strata: pointer-table K-quant prompt kernels from %s (STRATA_MMQ_DIRECT=1)\n", path.c_str());
+    std::fprintf(stderr, "strata: pointer-table K-quant prompt kernels from %s (STRATA_MMQ_DIRECT=%d)\n", path.c_str(),
+                 direct_mode());
 }
 
 Lib open_lib() {
@@ -140,7 +142,7 @@ Lib open_lib() {
     cudaSetDevice(cur);
     std::fprintf(stderr, "strata: K-quant prompt kernels from %s (STRATA_MMQ_KQ=1)\n", path.c_str());
     L.ok = true;
-    if (direct_mode() == 1) open_tab(L, n);
+    if (direct_mode() != 0) open_tab(L, n);
     return L;
 }
 

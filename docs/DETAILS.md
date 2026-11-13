@@ -2110,8 +2110,8 @@ the pairs in which the switched arm won). They are here so you can try them on y
   add `q8_0` for UD-Q4_K_XL's Q8_0 downs), and `STRATA_MMQ_TAB_TYPES` picks the engine's own (default the nine; empty
   keeps the engine's kernels, and its VRAM, as without the option). Each sized cache slot keeps 256 bytes after its expert, because MMQ reads up to
   136 bytes past a 640-wide down matrix; they are zeroed before each group. That is about 2.3 MiB over 9,300 slots (one
-  slot fewer out of 6,998 on one RTX 3090). `STRATA_MMQ_DIRECT=2` keeps that layout but copies as before (an A/B
-  reference); 0 or unset is the default path, byte for byte. `STRATA_MMQ_DIRECT_LOG=1` adds each stage's count of experts
+  slot fewer out of 6,998 on one RTX 3090). `STRATA_MMQ_DIRECT=2` keeps that layout, and opens `strata_kq_tab` as
+  =1 does, but copies as before (an A/B reference with the same cache size); 0 or unset is the default path, byte for byte. `STRATA_MMQ_DIRECT_LOG=1` adds each stage's count of experts
   read in place to the log after every prompt. Under HIP, on a build without `STRATA_MMQ_TAB`, or when CMake turned
   that option off (it does so, with a message, when the llama.cpp tree's `mmq.cuh` differs from the one the copy
   mirrors), the variable is ignored.
