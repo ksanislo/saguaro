@@ -1895,6 +1895,8 @@ struct Model::Impl {
     struct XpJob {
         int layer, e, a;
         unsigned seq;
+        unsigned g0 = 0, gg0 = 0;   // (xp_loop: the epochs at its pick)
+        int ram0 = -1;
     };
     std::mutex xp_mu;
     std::condition_variable xp_cv;
@@ -1902,7 +1904,34 @@ struct Model::Impl {
     std::thread xp_th;
     unsigned xp_gen = 0;
     std::atomic<unsigned> svc_next{0};
-    std::atomic<int64_t> xp_issued{0}, xp_stale{0}, xp_full{0}, xp_fail{0};
+    std::atomic<int64_t> xp_issued{0}, xp_stale{0}, xp_full{0}, xp_fail{0}, xp_late{0};
+    // a layer's slot[] / ram[] edits (xp_gep: lends, reader holds, elastic take / give-back - every layer's): busy
+    // while one runs, gen bumped at its start and end; a copy maps only if its layer's and the global gen held still
+    struct XpEp {
+        std::atomic<int> busy{0};
+        std::atomic<unsigned> gen{0};
+    };
+    std::unique_ptr<XpEp[]> xp_ep;   // [layer]; null: DS4_PREFETCH off, no edit counted
+    XpEp xp_gep;
+    struct XpEdit {
+        XpEp* p;
+        explicit XpEdit(XpEp* q) : p(q) {
+            if (p != nullptr) {
+                p->busy.fetch_add(1);
+                p->gen.fetch_add(1);
+            }
+        }
+        ~XpEdit() {
+            if (p != nullptr) {
+                p->gen.fetch_add(1);
+                p->busy.fetch_sub(1);
+            }
+        }
+        XpEdit(const XpEdit&) = delete;
+        XpEdit& operator=(const XpEdit&) = delete;
+    };
+    XpEp* xp_lay(int il) { return xp_ep ? &xp_ep[(size_t) il] : nullptr; }
+    XpEp* xp_all() { return xp_ep ? &xp_gep : nullptr; }
     int64_t xp_used = 0, xp_miss = 0, xp_guessed = 0, xp_rows = 0, xp_rows0 = 0;   // (the service thread's)
     int64_t xp_l_used = 0, xp_l_miss = 0, xp_l_guessed = 0, xp_l_iss = 0;
     // Windows only: the in-place experts' pages this process's own reads bring into its working set (the CPU lane's
@@ -10281,6 +10310,7 @@ struct Model::Impl {
         if (di >= elt.size() || !elt[di].on || n == 0 || elt[di].lo < elt[di].floor + el->gran) return 0;
         if (rd_live.load(std::memory_order_acquire)) return 0;   // (DS4_READER: never under a read's device run)
         if (!el_quiet()) return 0;
+        XpEdit xe(xp_all());   // (DS4_PREFETCH: experts leave VRAM, take RAM slots)
         ElTake& t = elt[di];
         Dev& d = devs[di];
         const size_t G = el->gran;
@@ -10359,6 +10389,7 @@ struct Model::Impl {
         if (di >= elt.size() || !elt[di].on || n == 0 || elt[di].lo >= elt[di].top) return 0;
         if (rd_live.load(std::memory_order_acquire)) return 0;   // (DS4_READER: never under a read's device run)
         if (!el_quiet()) return 0;
+        XpEdit xe(xp_all());   // (DS4_PREFETCH: their RAM slots released)
         ElTake& t = elt[di];
         Dev& d = devs[di];
         const size_t G = el->gran;
@@ -12924,6 +12955,7 @@ struct Model::Impl {
             for (int i = 0; i < l.rc_n; ++i) {   // the window's landings (rc_land): the slot's old expert out, the new in
                 const int e = l.rc_land[(size_t) i];
                 if (e < 0) continue;
+                XpEdit xe(xp_lay(l.il));
                 l.rc_land[(size_t) i] = -1;
                 const int old = l.rc_exp[(size_t) i];
                 if (old >= 0 && l.slot[(size_t) old] == l.rc_base + i) {   // (its bytes are gone either way)
@@ -12959,6 +12991,7 @@ struct Model::Impl {
                 if (e < 0 || rc_done[(size_t) (l.rc_off + i)].load(std::memory_order_acquire) != l.rc_gen[(size_t) i]) continue;
                 l.rc_fill[(size_t) i] = -1;
                 if (l.slot[(size_t) e] >= 0) continue;
+                XpEdit xe(xp_lay(l.il));
                 l.slot[(size_t) e] = l.rc_base + i;
                 l.rc_exp[(size_t) i] = e;
                 l.rc_stamp[(size_t) i] = now;
@@ -13028,6 +13061,7 @@ struct Model::Impl {
                             v = i;
                 if (v < 0) break;
                 if (l.rc_exp[(size_t) v] >= 0) {   // (out: its table entry, before the next window)
+                    XpEdit xe(xp_lay(l.il));
                     const int old = l.rc_exp[(size_t) v];
                     l.slot[(size_t) old] = -1;
                     set_tab(old, -1);
@@ -13203,6 +13237,7 @@ struct Model::Impl {
         }
         for (const CSwap& c : rd) {
             Layer& l = L[(size_t) c.layer];
+            XpEdit xe(xp_lay(c.layer));
             --cs_inflight;
             if (!c.ok || l.ram[(size_t) c.in] >= 0 || l.slot[(size_t) c.in] >= 0 || l.ram[(size_t) c.out] < 0 ||
                 l.slot[(size_t) c.out] >= 0 || l.swap_pending) {
@@ -13291,6 +13326,7 @@ struct Model::Impl {
         for (const RamSwap& rs : rready) {   // (nothing reads the tier between windows)
             --ram_inflight;
             Layer& l = L[(size_t) rs.layer];
+            XpEdit xe(xp_lay(rs.layer));
             if (rs.in < 0 || l.ram[(size_t) rs.in] >= 0 || l.slot[(size_t) rs.in] >= 0) {
                 ram_free.push_back(rs.slot);
                 continue;
@@ -13304,6 +13340,7 @@ struct Model::Impl {
         }
         for (const Swap& sw : ready) {
             Layer& l = L[(size_t) sw.layer];
+            XpEdit xe(xp_lay(sw.layer));
             const int old_slot = l.slot[(size_t) sw.out];
             const std::array<uint8_t*, 4> old_parts = l.hh[(size_t) sw.in];
             if (copy_mode) {   // (`out` takes the RAM place `in` leaves: through the spare, which `in`'s slot becomes)
@@ -13557,7 +13594,7 @@ struct Model::Impl {
                     if (e < 0 || e >= n.n_exp || e >= (int) n.slot.size()) continue;
                     fl[e] |= a == 2 ? 4 : (i < n.k_exp ? 3 : 2);
                     if (a == 1 && (rk[e] == 0 || rk[e] > i + 1)) rk[e] = (uint8_t) (i + 1);
-                    if ((fl[e] & 8) || !file_read(n, e)) continue;
+                    if ((fl[e] & 8) || a > ahead_mode || !file_read(n, e)) continue;   // (a > ahead_mode: DS4_PREFETCH's)
                     // (the RAM store's experts: never read ahead into the page cache - a guess in the store's queue
                     //  with DS4_STORE_AHEAD=1, else nothing)
                     const bool sto = store && store->covers(j);
@@ -13613,6 +13650,7 @@ struct Model::Impl {
         xp_max = envi("DS4_PREFETCH_MAX", 2, 1, 16);
         xp_rank = envi("DS4_PREFETCH_RANK", 6, 1, kPicks);
         xp_log = envi("DS4_PREFETCH_LOG", 512, 1, 1 << 30);
+        xp_ep.reset(new XpEp[L.size()]);
         xp_dev.assign(devs.size(), XpDev{});
         std::string per;
         for (size_t di = 0; di < devs.size(); ++di) {
@@ -13699,9 +13737,15 @@ struct Model::Impl {
                 j = xp_q.front();
                 xp_q.pop_front();
                 const Layer& n = L[(size_t) j.layer];
+                // (the epochs first: an edit under way, or one after this, shows at the re-check)
+                XpEp& ep = xp_ep[(size_t) j.layer];
+                j.g0 = ep.gen.load();
+                j.gg0 = xp_gep.gen.load();
+                const bool busy = ep.busy.load() != 0 || xp_gep.busy.load() != 0;
+                j.ram0 = *(volatile const int*) &n.ram[(size_t) j.e];
                 // (stale: the target layer's request seen - its routing read the table already)
-                if (xp_paused() || (int) (svc_next.load(std::memory_order_acquire) - (j.seq + (unsigned) j.a)) > 0 ||
-                    n.slot[(size_t) j.e] >= 0 || n.ram[(size_t) j.e] < 0 || j.e == n.sw_in) {
+                if (busy || xp_paused() || (int) (svc_next.load(std::memory_order_acquire) - (j.seq + (unsigned) j.a)) > 0 ||
+                    *(volatile const int*) &n.slot[(size_t) j.e] >= 0 || j.ram0 < 0 || j.e == n.sw_in) {
                     ++xp_stale;
                     continue;
                 }
@@ -13722,10 +13766,27 @@ struct Model::Impl {
             XpDev& X = xp_dev[(size_t) n.dev];
             uint8_t* dst = X.ring + (size_t) i * X.stride;
             cudaSetDevice(devs[(size_t) n.dev].id);
-            if (!stream_expert(n, 0, j.e, dst, X.cs, err)) {   // (nothing mapped: the slot free again)
+            // (waited for here: its RAM slot may be released and refilled the moment the re-check below lets go)
+            if (!stream_expert(n, 0, j.e, dst, X.cs, err) || cudaStreamSynchronize(X.cs) != cudaSuccess) {
                 cudaGetLastError();
-                *(volatile unsigned*) &X.freed[i] = gen;
+                *(volatile unsigned*) &X.freed[i] = gen;   // (nothing mapped: the slot free again)
                 ++xp_fail;
+                continue;
+            }
+            bool ok;
+            {   // the bytes are e's only if no edit of its layer (or of all) ran since the pick
+                std::lock_guard<std::mutex> lk(xp_mu);
+                const int ram1 = *(volatile const int*) &n.ram[(size_t) j.e], slot1 = *(volatile const int*) &n.slot[(size_t) j.e];
+                std::atomic_thread_fence(std::memory_order_seq_cst);
+                const XpEp& ep = xp_ep[(size_t) j.layer];
+                ok = ep.gen.load() == j.g0 && xp_gep.gen.load() == j.gg0 && ep.busy.load() == 0 &&
+                     xp_gep.busy.load() == 0 && ram1 == j.ram0 && slot1 < 0 &&
+                     (int) (svc_next.load(std::memory_order_acquire) - (j.seq + (unsigned) j.a)) <= 0;
+            }
+            if (!ok) {
+                *(volatile unsigned*) &X.freed[i] = gen;
+                ++xp_stale;
+                ++xp_late;
                 continue;
             }
             xp_map(X.d_slot, i, n.vram_tab, n.il, j.e, gen, (unsigned long long) dst, X.freed, X.cs);
@@ -13739,11 +13800,11 @@ struct Model::Impl {
         const double per = st.cpu_experts > 0 ? st.cpu_ms / (double) st.cpu_experts : 0.0;
         std::fprintf(stderr, "ds4: DS4_PREFETCH: %lld rows: CPU-lane misses %lld (guessed %.1f%%), %lld copies, %lld used "
                              "(%.1f%% of the misses, %.1f%% of the copies), %lld wasted; ~%.1f ms of CPU-lane time saved "
-                             "(%.3f ms an expert); all along %lld stale, %lld ring full, %lld failed\n",
+                             "(%.3f ms an expert); all along %lld stale (%lld moved during the copy), %lld ring full, %lld failed\n",
                      (long long) (xp_rows - xp_rows0), (long long) miss, miss > 0 ? 100.0 * (double) gs / (double) miss : 0.0,
                      (long long) di, (long long) used, miss > 0 ? 100.0 * (double) used / (double) miss : 0.0,
                      di > 0 ? 100.0 * (double) used / (double) di : 0.0, (long long) std::max<int64_t>(0, di - used),
-                     (double) used * per, per, (long long) xp_stale.load(), (long long) xp_full.load(),
+                     (double) used * per, per, (long long) xp_stale.load(), (long long) xp_late.load(), (long long) xp_full.load(),
                      (long long) xp_fail.load());
         xp_rows0 = xp_rows;
         xp_l_used = xp_used;
@@ -20638,6 +20699,7 @@ struct Model::Impl {
             }
         }
         held_list.clear();
+        XpEdit xe(xp_all());   // (DS4_PREFETCH: experts out of VRAM, read from the files)
         bool ok = true;
         for (Layer& l : L) {
             if (l.mtp || l.pv_n >= l.n_slots) continue;
@@ -20670,6 +20732,7 @@ struct Model::Impl {
     // until the hand-back (no decode before it: a run reads its slots by pv_n)
     void lend_unhold() {
         if (!lend_held.load(std::memory_order_relaxed)) return;
+        XpEdit xe(xp_all());   // (DS4_PREFETCH: their shadow sources dropped)
         for (const Held& h : held_list) {
             Layer& l = L[(size_t) h.layer];
             l.slot[(size_t) h.e] = h.slot;
@@ -20736,6 +20799,7 @@ struct Model::Impl {
         for (const Layer& l : L)
             if (!l.mtp && l.pv_n < l.n_slots && (l.lay.fmt != gg::kFmtMXFP4 || !l.maddr.empty() || l.nm > 1)) return false;
         held_list.clear();
+        XpEdit xe(xp_all());   // (DS4_PREFETCH: experts out of VRAM, read from the shadow)
         lend_held.store(true, std::memory_order_relaxed);
         bool ok = true;
         size_t n_sh = 0, n_file = 0;
@@ -20822,6 +20886,7 @@ struct Model::Impl {
     bool borrow_end_core() {
         read_help_live.store(false, std::memory_order_release);   // (DS4_READ_HELP in the tails: laid out no more)
         if (!lent) return true;
+        XpEdit xe(xp_all());   // (DS4_PREFETCH: experts back in VRAM, or to the CPU lane)
         lend_unhold();   // (a prompt read in parts kept it: its experts back in their slots' books first)
         lent = false;
         std::atomic<bool> broken{false};   // (a runtime failure: the expert tables can no longer be vouched for)

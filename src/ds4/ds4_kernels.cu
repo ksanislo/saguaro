@@ -3847,11 +3847,14 @@ __global__ void xp_clear_kernel(XpSlot* slots, int n, int layer, unsigned* freed
     XpSlot* q = slots + i;
     if (*(volatile int*) &q->mapped == 0) return;
     __threadfence();
-    if (q->layer > layer) return;   // (a later layer's still to come; an earlier one's landed late)
-    atomicCAS(q->tab + q->e, q->addr, 0ull);   // (an entry a swap wrote since stays)
-    q->mapped = 0;
+    const volatile XpSlot* v = q;   // (written by xp_map on the ring's stream)
+    if (v->layer > layer) return;   // (a later layer's still to come; an earlier one's landed late)
+    unsigned long long* tab = v->tab;
+    const unsigned gen = v->gen;
+    atomicCAS(tab + v->e, v->addr, 0ull);   // (an entry a swap wrote since stays)
+    *(volatile int*) &q->mapped = 0;
     __threadfence();
-    *(volatile unsigned*) &freed[i] = q->gen;
+    *(volatile unsigned*) &freed[i] = gen;
     __threadfence_system();
 }
 void xp_map(XpSlot* slots, int i, unsigned long long* tab, int layer, int e, unsigned gen, unsigned long long addr,
