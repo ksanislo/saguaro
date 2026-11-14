@@ -1203,6 +1203,8 @@ struct Model::Impl {
     }
     std::vector<cudaEvent_t> chunk_done;     // on the last layer's device: chunk k through every layer
     std::unique_ptr<std::atomic<int>[]> chunk_rec;   // chunk k's event recorded
+    // (DS4_READ_HELP) by device: the last chunk whose layers its thread has put on its streams (-1: none this run)
+    std::unique_ptr<std::atomic<int>[]> chunk_put;
     // a prompt the flow could take: the flow or windows of 16, whichever this PC runs it faster (pick_path) - this
     // PC's speeds measured at load (calibrate_paths), each path's predictions scaled by how long it really took
     struct PathModel {
@@ -19968,7 +19970,17 @@ struct Model::Impl {
         // the card then block in cuLaunchKernel: a deadlock (stacks 11-09)
         const bool help_dev = std::any_of(read_helps.begin(), read_helps.end(),
                                           [di](const std::unique_ptr<ReadHelp>& r) { return r->hlp == (int) di && r->hlp > r->own; });   // (a later stage only: an earlier one would serialize the pipeline)
+        // ... and only once its owners have put all of chunk k's layers (their shares too): its own chunk-k work waits
+        // on their hand-offs, and queued while they issue it blocks their launches onto this card (7,7,13,13, 11-13)
+        std::vector<int> help_owns;
+        for (const auto& r : read_helps)
+            if (r->hlp == (int) di && r->hlp > r->own) help_owns.push_back(r->own);
         for (int k = 0; k < nk; ++k) {
+            for (int o : help_owns)
+                while (chunk_put[(size_t) o].load(std::memory_order_acquire) < k) {
+                    if (eg_abort.load(std::memory_order_acquire) || past_halt(k)) break;
+                    std::this_thread::sleep_for(std::chrono::microseconds(100));
+                }
             if (help_dev && k >= 1 && (size_t) (k - 1) < chunk_done.size()) {
                 const int back = k - 1;
                 while (!(chunk_rec[(size_t) back].load(std::memory_order_acquire) &&
@@ -20093,6 +20105,7 @@ struct Model::Impl {
                     xfer_put(chunk_xfer(c.hand[slot], c, T, true), c.hand_flag[slot], wp.win, cxcnt(d), s);
                 }
             }
+            chunk_put[di].store(k, std::memory_order_release);   // (DS4_READ_HELP: a helper after it may start chunk k)
             if (trace && !c.flow && tr_ev.size() == 3 + 2 * (size_t) k) tr_rec(s);   // (DS4_RUN_TRACE: chunk k's end)
             // (chunk k's copies out of its Engram slot issued, their event recorded: the reader may refill it)
             if (!egs.empty()) c.eg_copied_seq[slot].store(wp.win, std::memory_order_release);
@@ -21558,6 +21571,8 @@ struct Model::Impl {
             }
             chunk_rec.reset(new std::atomic<int>[chunk_done.size()]);
             for (size_t i = 0; i < chunk_done.size(); ++i) chunk_rec[i].store(0);
+            chunk_put.reset(new std::atomic<int>[devs.size()]);
+            for (size_t i = 0; i < devs.size(); ++i) chunk_put[i].store(-1);
         }
         prof_chunk = prof_on;
         hprof_last = 0;
