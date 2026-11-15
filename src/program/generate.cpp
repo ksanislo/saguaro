@@ -1081,6 +1081,7 @@ struct ConvAlloc {
     std::chrono::steady_clock::time_point last_pub{};
     std::vector<int> slots;
     std::vector<size_t> blob;
+    const strata::core::Glm5Model* model = nullptr;
 
     static double num(const char* k, double d) {
         const char* v = getenv(k);
@@ -1101,8 +1102,7 @@ struct ConvAlloc {
         eps = num("STRATA_GLM_CONV_EPS", 0.1);
         tick_s = num("STRATA_GLM_CONV_TICK_S", 2.0);
         slack = (int) num("STRATA_GLM_CONV_SLACK", 4);
-        slots = m.layer_slots();
-        blob = m.layer_blob();
+        model = &m;
         glob.assign((size_t) kL * kE, 0.0f);
         std::fprintf(stderr, "glm conv: %s - open %.1f s, floor %d, w_open %.2f, closed: w %.2f / recall cap %d (half %.0f s), "
                      "eps %.2f, tick %.1f s, slack %d\n", on ? "allocation on" : "open window only (live rule)", open_s, k0,
@@ -1202,6 +1202,10 @@ struct ConvAlloc {
         strata::core::Glm5Model::conv_others_set(open);   // (CONV_OPEN_S alone: =live's "alone")
         last_pub = now;
         if (!on) return;
+        if (std::none_of(slots.begin(), slots.end(), [](int k) { return k > 0; })) {   // (the pools as loaded: at the first use)
+            slots = model->layer_slots();
+            blob = model->layer_blob();
+        }
         std::vector<uint8_t> nf((size_t) kL * kE, 0);
         std::vector<double> w(convs.size());
         std::vector<int> rk(convs.size(), 0);   // closed: its recalled experts kept as floor, a layer
