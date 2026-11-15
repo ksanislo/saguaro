@@ -3534,6 +3534,7 @@ static int glm_pack_generate(const Options& o) {
         }
         admit_stop.store(false);
         admitting_rid.store(rid);
+        strata::core::Glm5Model::live_seqs_set((int) gens.size() + 1);   // (MAYA_GLM_VRAM_EVICT=live: it and those decoding)
         int rc = 0;
         // (upstream's in-thread modes, STRATA_GLM_PREFILL_GAPS / _INTERLEAVE, read it themselves when set)
         if (!gens.empty() && model.fast() && !prefill_fg && !use_gaps && !prompt_piece && model.prefill_beside_ok()) {
@@ -3640,7 +3641,12 @@ static int glm_pack_generate(const Options& o) {
             reader_finish();
             return;
         }
-        strata::core::Glm5Model::live_seqs_set((int) gens.size());
+        {   // (a prompt being admitted counts: on the Reader it is in gens already, read in-thread it is not yet)
+            const int arid = admitting_rid.load();
+            const bool extra = arid >= 0 && std::none_of(gens.begin(), gens.end(),
+                                                         [arid](const std::unique_ptr<Gen>& p) { return p->rid == arid; });
+            strata::core::Glm5Model::live_seqs_set((int) gens.size() + (extra ? 1 : 0));
+        }
         Gen* only = gens.size() == 1 ? gens[0].get() : nullptr;
         static const bool spec_win_env = [] {
             const char* e = getenv("STRATA_GLM_SPEC_WIN");
