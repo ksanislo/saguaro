@@ -3640,6 +3640,7 @@ static int glm_pack_generate(const Options& o) {
             reader_finish();
             return;
         }
+        strata::core::Glm5Model::live_seqs_set((int) gens.size());
         Gen* only = gens.size() == 1 ? gens[0].get() : nullptr;
         static const bool spec_win_env = [] {
             const char* e = getenv("STRATA_GLM_SPEC_WIN");

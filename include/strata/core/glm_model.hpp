@@ -860,6 +860,7 @@ public:
 
     int cur_seq_ = 0;
     int seq_count() const { return seq_.empty() ? 1 : (int) seq_.size(); }
+    static void live_seqs_set(int n);                     // the scheduler: requests running now (MAYA_GLM_VRAM_EVICT=live)
     int seq_bound() const { return cur_seq_; }
     void seq_bind(int s);                                  // this part
     void seq_bind_all(int s);                              // every part of the split

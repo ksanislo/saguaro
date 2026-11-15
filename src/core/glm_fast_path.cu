@@ -138,6 +138,9 @@ static __global__ void glm_link_wake(unsigned long long ns) {
 
 namespace strata::core {
 
+static std::atomic<int> g_live_seqs{1};
+void Glm5Model::live_seqs_set(int n) { g_live_seqs.store(n, std::memory_order_relaxed); }
+
 using glmfast::cpu_relax;
 using glmfast::Workers;
 
@@ -5619,8 +5622,18 @@ bool Glm5Model::fast_boundary(std::string& err) {
             // there (+2.6%) and on Maya-S over 3x V100-16GB with an NVMe tier (24.8 -> 26.1 tok/s, interleaved runs).
             // With several conversations at once (--parallel) the default stays the aged counts: they take turns, and
             // the most recent one's experts pushed out what all of them use, and decode slowed there
+            // (=live: lru while at most one request runs, the aged counts while several - a solo request under
+            // MAYA_GLM_SEQS=8 evicts as SEQS=1 does)
             static const char* const ve = getenv("STRATA_GLM_VRAM_EVICT");
-            const bool vram_lru = ve == nullptr ? seq_count() <= 1 : std::strcmp(ve, "lru") == 0;
+            const bool vram_lru = ve == nullptr                   ? seq_count() <= 1
+                                  : std::strcmp(ve, "live") == 0 ? g_live_seqs.load(std::memory_order_relaxed) <= 1
+                                                                 : std::strcmp(ve, "lru") == 0;
+            if (ve != nullptr && std::strcmp(ve, "live") == 0) {
+                static std::atomic<int> said{-1};
+                if (said.exchange(vram_lru ? 1 : 0) != (vram_lru ? 1 : 0))
+                    std::fprintf(stderr, "glm vram evict: live - %s (%d request(s) running)\n", vram_lru ? "lru" : "least",
+                                 g_live_seqs.load(std::memory_order_relaxed));
+            }
             int v = -1;
             uint32_t bc = UINT32_MAX;
             uint64_t bt = UINT64_MAX;
