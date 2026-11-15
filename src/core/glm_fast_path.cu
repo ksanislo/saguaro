@@ -4094,6 +4094,20 @@ std::mutex g_route_mu;
 std::FILE* g_route_file = nullptr;
 }  // namespace
 bool route_dumping() { return g_route_file != nullptr; }
+namespace {
+std::atomic<uint32_t> g_rc[2][kRcLayers * kRcExperts];
+}  // namespace
+bool route_counting() {
+    static const bool on = [] {
+        const char* v = getenv("STRATA_GLM_ROUTE_DUMP");
+        return v != nullptr && *v != '\0';
+    }();
+    return on;
+}
+void route_count(int kind, int layer, int expert, unsigned n) {
+    if (layer < 0 || layer >= kRcLayers || expert < 0 || expert >= kRcExperts) return;
+    g_rc[kind & 1][layer * kRcExperts + expert].fetch_add(n, std::memory_order_relaxed);
+}
 void route_dump(int layer, int k, const int* ids, const float* w) {
     const int32_t rec[2] = {(int32_t) layer, (int32_t) k};
     std::lock_guard<std::mutex> lk(g_route_mu);
@@ -4103,6 +4117,22 @@ void route_dump(int layer, int k, const int* ids, const float* w) {
     std::fwrite(w, sizeof(float), (size_t) k, g_route_file);
 }
 }  // namespace glmfast
+
+bool Glm5Model::route_counting() { return glmfast::route_counting(); }
+void Glm5Model::route_counts(std::vector<uint32_t>& out) {
+    constexpr size_t n = (size_t) glmfast::kRcLayers * glmfast::kRcExperts;
+    out.resize(2 * n);
+    for (int k = 0; k < 2; ++k)
+        for (size_t i = 0; i < n; ++i) out[(size_t) k * n + i] = glmfast::g_rc[k][i].load(std::memory_order_relaxed);
+}
+std::vector<int> Glm5Model::layer_slots() const {
+    std::vector<int> v((size_t) g_.n_layers, 0);
+    for (const Glm5Model* m = this; m != nullptr; m = m->split_next_.get())
+        if (m->fast_ != nullptr)
+            for (int il = m->l0_; il < m->lt_ && il < (int) v.size() && il < (int) m->fast_->lp.size(); ++il)
+                v[(size_t) il] = m->fast_->lp[(size_t) il].n_main;
+    return v;
+}
 
 bool Glm5Model::set_routing_dump(const std::string& path, std::string& err) {
     std::lock_guard<std::mutex> lk(glmfast::g_route_mu);
@@ -4923,6 +4953,8 @@ void Glm5Model::fast_service() {
             int ids[8];
             for (int i = 0; i < K; ++i) ids[i] = rq->ids[i];
             if (glmfast::route_dumping()) glmfast::route_dump(il, K, ids, rq->w);   // --dump-routing
+            if (glmfast::route_counting())   // STRATA_GLM_ROUTE_DUMP: the decode's routes
+                for (int i = 0; i < K; ++i) glmfast::route_count(1, il, ids[i]);
             // STRATA_GLM_ROUTE_LOG=<prefix>: "layer e0 .. e7 tier-mask" per route into <prefix>.<device> (cache studies)
             // - the tier masks are fetch, miss and cpu (bits over e0..e7), then " | n0 .. n15": the near misses, the
             //   route's next ranks after the top k, best first

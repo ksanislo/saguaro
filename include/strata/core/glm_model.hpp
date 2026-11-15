@@ -212,6 +212,11 @@ public:
     /// --dump-routing: every route (the decode's and the prompt's) appended to `path` as Strata's trace records -
     /// int32 layer, int32 k, then k int32 expert ids and k float weights - tools/make_profile.py's input.
     static bool set_routing_dump(const std::string& path, std::string& err);
+    /// STRATA_GLM_ROUTE_DUMP=<dir> (the serve loop writes the files): the host's cumulative route counts, prompt then
+    /// decode, each [kRcLayers=128][kRcExperts=512]; layer_slots: each layer's VRAM expert slots (main) on its card
+    static bool route_counting();
+    static void route_counts(std::vector<uint32_t>& out);
+    std::vector<int> layer_slots() const;
     bool snapshot_restore();
     int64_t snapshot_pos() const { return snap_pos_; }
     /// Conversation CHECKPOINTS (host RAM, `slot` 0, 1, ...): every half's KDA states + conv histories and its open

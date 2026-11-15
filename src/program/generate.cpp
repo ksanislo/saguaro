@@ -2665,6 +2665,10 @@ static int glm_pack_generate(const Options& o) {
         std::vector<int32_t> prompt, emitted;
         std::vector<int32_t> pen;   // the penalties' history (sp.host_history): the prompt, then every token written
         strata::kernels::LpHold lp;   // logprobs=<k>: its rows (sp.lp)
+        // STRATA_GLM_ROUTE_DUMP: the route counters at admission and at its first token; shared: another request ran beside
+        std::vector<uint32_t> rc0, rc1;
+        bool rc_shared = false;
+        std::chrono::steady_clock::time_point ta;
         bool in_think = false;
         int64_t think_budget = 0;
         int32_t think_end = -1;
@@ -2895,10 +2899,52 @@ static int glm_pack_generate(const Options& o) {
         }
         deferred_pauses.clear();
     };
+    // STRATA_GLM_ROUTE_DUMP=<dir>: a request's routes, <dir>/routes-<unix ms>-r<rid>-c<ctx>.txt - a header, then
+    // "P layer expert n" (its prompt read) and "D layer expert n" (its decode; mixed with others' when shared=1);
+    // <dir>/slots.txt: each layer's VRAM expert slots
+    const auto route_file = [&](Gen& g, std::chrono::steady_clock::time_point t2) {
+        static const std::string dir = getenv("STRATA_GLM_ROUTE_DUMP");
+        static bool slots_done = false;
+        if (!slots_done) {
+            slots_done = true;
+            if (std::FILE* f = std::fopen((dir + "/slots.txt").c_str(), "w")) {
+                const std::vector<int> sl = model.layer_slots();
+                for (size_t i = 0; i < sl.size(); ++i) std::fprintf(f, "%zu %d\n", i, sl[i]);
+                std::fclose(f);
+            }
+        }
+        std::vector<uint32_t> rc2;
+        strata::core::Glm5Model::route_counts(rc2);
+        const size_t n = rc2.size() / 2;
+        if (g.rc0.size() != rc2.size()) return;
+        if (g.rc1.size() != rc2.size()) g.rc1 = rc2;   // (never reached its first token: no decode)
+        const auto ms = [](auto a, auto b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+        const long long unix_ms = (long long) std::chrono::duration_cast<std::chrono::milliseconds>(
+                                      std::chrono::system_clock::now().time_since_epoch()).count();
+        const std::string path = dir + "/routes-" + std::to_string(unix_ms) + "-r" + std::to_string(g.rid) + "-c" +
+                                 std::to_string(g.ctx) + ".txt";
+        std::FILE* f = std::fopen(path.c_str(), "w");
+        if (f == nullptr) return;
+        const bool got1 = g.t1 >= g.ta;
+        std::fprintf(f, "# rid=%d ctx=%d prompt=%zu reuse=%zu produced=%lld shared=%d finish=%s read_to_first_ms=%.1f "
+                     "decode_ms=%.1f unix_ms=%lld kexp=%d\n", g.rid, g.ctx, g.prompt.size(), g.reuse, (long long) g.produced,
+                     g.rc_shared ? 1 : 0, g.finish, got1 ? ms(g.ta, g.t1) : -1.0, got1 ? ms(g.t1, t2) : -1.0, unix_ms,
+                     (int) model.geometry().n_expert);
+        for (int k = 0; k < 2; ++k) {
+            const std::vector<uint32_t>& a = k == 0 ? g.rc0 : g.rc1;
+            const std::vector<uint32_t>& b = k == 0 ? g.rc1 : rc2;
+            for (size_t i = (size_t) k * n; i < (size_t) (k + 1) * n; ++i)
+                if (b[i] != a[i])
+                    std::fprintf(f, "%c %zu %zu %u\n", k == 0 ? 'P' : 'D', (i - (size_t) k * n) / 512, (i - (size_t) k * n) % 512,
+                                 b[i] - a[i]);
+        }
+        std::fclose(f);
+    };
     // a request's end: its DONE line (the engine's counters over its lifetime are shared with the others running
     // meanwhile), the paused state kept, its context idle again
     const auto gen_finish = [&](Gen& g) {
         const auto t2 = std::chrono::steady_clock::now();
+        if (strata::core::Glm5Model::route_counting()) route_file(g, t2);
         const double prompt_ms = std::chrono::duration<double, std::milli>(g.t1 - g.t0).count();
         const double decode_ms = std::chrono::duration<double, std::milli>(t2 - g.t1).count();
         const auto st2 = model.fast_stats();
@@ -3177,6 +3223,7 @@ static int glm_pack_generate(const Options& o) {
         // a STOP <rid> during its prompt; a bare STOP stays set and also ends the running requests
         if (admit_stop.exchange(false) || stop_req.load()) g.finish = "cancel";
         g.t1 = std::chrono::steady_clock::now();
+        if (strata::core::Glm5Model::route_counting()) strata::core::Glm5Model::route_counts(g.rc1);
         g.st1 = model.fast_stats();
         g.spec_steps0 = model.spec_steps_;
         g.spec_hits0 = model.spec_hits_;
@@ -3556,6 +3603,14 @@ static int glm_pack_generate(const Options& o) {
         admit_stop.store(false);
         admitting_rid.store(rid);
         strata::core::Glm5Model::live_seqs_set((int) gens.size() + 1);   // (MAYA_GLM_VRAM_EVICT=live: it and those decoding)
+        g->ta = std::chrono::steady_clock::now();
+        if (strata::core::Glm5Model::route_counting()) {
+            strata::core::Glm5Model::route_counts(g->rc0);
+            if (!gens.empty()) {
+                g->rc_shared = true;
+                for (auto& o2 : gens) o2->rc_shared = true;
+            }
+        }
         int rc = 0;
         // (upstream's in-thread modes, STRATA_GLM_PREFILL_GAPS / _INTERLEAVE, read it themselves when set)
         if (!gens.empty() && model.fast() && !prefill_fg && !use_gaps && !prompt_piece && model.prefill_beside_ok()) {
@@ -3667,6 +3722,8 @@ static int glm_pack_generate(const Options& o) {
             const bool extra = arid >= 0 && std::none_of(gens.begin(), gens.end(),
                                                          [arid](const std::unique_ptr<Gen>& p) { return p->rid == arid; });
             strata::core::Glm5Model::live_seqs_set((int) gens.size() + (extra ? 1 : 0));
+            if (gens.size() + (extra ? 1 : 0) > 1 && strata::core::Glm5Model::route_counting())
+                for (auto& o2 : gens) o2->rc_shared = true;
         }
         Gen* only = gens.size() == 1 ? gens[0].get() : nullptr;
         static const bool spec_win_env = [] {

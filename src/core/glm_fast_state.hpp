@@ -367,6 +367,10 @@ int64_t zfs_arc_reclaimable();
 // decode's CPU-lane threads (one per half) and the prompt path write to the same file
 bool route_dumping();
 void route_dump(int layer, int k, const int* ids, const float* w);
+// STRATA_GLM_ROUTE_DUMP=<dir>: host-side route counts, the prompt's (kind 0) and the decode's (kind 1) apart
+constexpr int kRcLayers = 128, kRcExperts = 512;
+bool route_counting();
+void route_count(int kind, int layer, int expert, unsigned n = 1);
 
 // The expert usage file (opt-in, as Strata keeps nothing between starts but --expert-profile-save's profile):
 // STRATA_GLM_USAGE=<file>; unset or 0, none - the warm-up and the split search then go by the expert profile
