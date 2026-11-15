@@ -139,7 +139,49 @@ static __global__ void glm_link_wake(unsigned long long ns) {
 namespace strata::core {
 
 static std::atomic<int> g_live_seqs{1};
-void Glm5Model::live_seqs_set(int n) { g_live_seqs.store(n, std::memory_order_relaxed); }
+// STRATA_GLM_VRAM_EVICT_SOLO_AFTER=<n> | <t>s (=live only): lru only once at most one request has run for n first-part
+// decode boundaries (a solo stint is ONE scheduler step of up to 4096 tokens: steps would not tick) or t seconds; unset: 0
+static std::atomic<long> g_live_quiet{0};
+static std::atomic<int64_t> g_live_since{0};   // (steady ns when the count fell to <= 1; -1 while several run)
+struct LiveHold {
+    long n = 0;
+    double s = 0.0;
+};
+static const LiveHold& live_hold() {
+    static const LiveHold h = [] {
+        LiveHold r;
+        const char* v = getenv("STRATA_GLM_VRAM_EVICT_SOLO_AFTER");
+        if (v == nullptr || *v == '\0') return r;
+        const size_t n = std::strlen(v);
+        if (v[n - 1] == 's') r.s = std::max(0.0, std::atof(v));
+        else r.n = std::max(0L, std::atol(v));
+        return r;
+    }();
+    return h;
+}
+static int64_t live_now() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+static bool live_lru() {
+    if (g_live_seqs.load(std::memory_order_relaxed) > 1) return false;
+    const LiveHold& h = live_hold();
+    if (h.n > 0 && g_live_quiet.load(std::memory_order_relaxed) < h.n) return false;
+    if (h.s > 0.0) {
+        const int64_t t0 = g_live_since.load(std::memory_order_relaxed);
+        if (t0 < 0 || (double) (live_now() - t0) < h.s * 1e9) return false;
+    }
+    return true;
+}
+void Glm5Model::live_seqs_set(int n) {
+    g_live_seqs.store(n, std::memory_order_relaxed);
+    if (n >= 2) {   // (a second request, admitting included: least at once)
+        g_live_quiet.store(0, std::memory_order_relaxed);
+        g_live_since.store(-1, std::memory_order_relaxed);
+    } else {
+        int64_t was = -1;
+        g_live_since.compare_exchange_strong(was, live_now(), std::memory_order_relaxed);
+    }
+}
 
 using glmfast::cpu_relax;
 using glmfast::Workers;
@@ -5432,6 +5474,40 @@ bool Glm5Model::fast_boundary(std::string& err) {
     // Also catches an asynchronous failure before waiting for routes that may never have been published.
     if (!glmfast::cuda_ok(cudaStreamSynchronize(F->cs), "glm boundary compute", err) || !F->route_ok(err))
         return false;
+    // the first part: =live ticks the hold and logs the rule's flips; every STRATA_GLM_VRAM_EVICT_LOG boundaries (100 under
+    // =live, else off unless set: any arm) the cumulative VRAM expert hits / lookups of every part, unix time for the phases
+    static const char* const ve_live = getenv("STRATA_GLM_VRAM_EVICT");
+    static const bool live = ve_live != nullptr && std::strcmp(ve_live, "live") == 0;
+    static const long every = [] {
+        const char* v = getenv("STRATA_GLM_VRAM_EVICT_LOG");
+        return v != nullptr ? std::max(0L, std::atol(v)) : (live ? 100L : 0L);
+    }();
+    if ((live || every > 0) && l0_ == 0) {
+        static std::atomic<uint64_t> ticks{0};
+        static std::atomic<int> said{-1};
+        if (live && g_live_seqs.load(std::memory_order_relaxed) <= 1 &&
+            g_live_quiet.load(std::memory_order_relaxed) < live_hold().n)
+            g_live_quiet.fetch_add(1, std::memory_order_relaxed);
+        const bool lru = live && live_lru();
+        const uint64_t tk = ++ticks;
+        const bool flip = live && said.exchange(lru ? 1 : 0) != (lru ? 1 : 0);
+        if (flip || (every > 0 && tk % (uint64_t) every == 0)) {
+            uint64_t h = 0, l = 0;
+            for (const Glm5Model* m = this; m != nullptr; m = m->split_next_.get())
+                if (m->fast_ != nullptr) {
+                    const uint64_t hm = m->fast_->hits.load();
+                    h += hm;
+                    l += hm + m->fast_->misses.load();
+                }
+            const double unix_s =
+                std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
+            std::fprintf(stderr, "glm vram evict: %s - %s (%d request(s) running, solo_after %ld/%.1fs)%s vram_hits=%llu "
+                         "lookups=%llu boundary=%llu t=%.3f\n", live ? "live" : "count",
+                         live ? (lru ? "lru" : "least") : "unchanged", g_live_seqs.load(std::memory_order_relaxed),
+                         live_hold().n, live_hold().s, flip ? "" : " [count]", (unsigned long long) h,
+                         (unsigned long long) l, (unsigned long long) tk, unix_s);
+        }
+    }
     // a prompt beside the decode: no plan of its between choosing experts and queuing their work, and that work done
     std::unique_lock<std::mutex> plan_lk(F->plan_mu, std::defer_lock);
     if (F->pf_bg.load(std::memory_order_acquire)) {
@@ -5626,14 +5702,8 @@ bool Glm5Model::fast_boundary(std::string& err) {
             // MAYA_GLM_SEQS=8 evicts as SEQS=1 does)
             static const char* const ve = getenv("STRATA_GLM_VRAM_EVICT");
             const bool vram_lru = ve == nullptr                   ? seq_count() <= 1
-                                  : std::strcmp(ve, "live") == 0 ? g_live_seqs.load(std::memory_order_relaxed) <= 1
+                                  : std::strcmp(ve, "live") == 0 ? live_lru()
                                                                  : std::strcmp(ve, "lru") == 0;
-            if (ve != nullptr && std::strcmp(ve, "live") == 0) {
-                static std::atomic<int> said{-1};
-                if (said.exchange(vram_lru ? 1 : 0) != (vram_lru ? 1 : 0))
-                    std::fprintf(stderr, "glm vram evict: live - %s (%d request(s) running)\n", vram_lru ? "lru" : "least",
-                                 g_live_seqs.load(std::memory_order_relaxed));
-            }
             int v = -1;
             uint32_t bc = UINT32_MAX;
             uint64_t bt = UINT64_MAX;
