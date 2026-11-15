@@ -1323,8 +1323,9 @@ struct Model::Impl {
         std::vector<std::thread> th;
         for (Dev& d : devs)
             if (d.tail != nullptr && d.shadow == nullptr)
-                th.emplace_back([&d] {
+                th.emplace_back([this, &d] {
                     cudaSetDevice(d.id);
+                    if ((d.shadow = (uint8_t*) ns_alloc(d.tail_bytes, ns_node(d), false)) != nullptr) return;   // (DS4_NUMA_STAGE)
                     if (cudaHostAlloc((void**) &d.shadow, d.tail_bytes, cudaHostAllocPortable) != cudaSuccess) {
                         cudaGetLastError();
                         d.shadow = nullptr;
@@ -2742,7 +2743,7 @@ struct Model::Impl {
             if (d.ev) cudaEventDestroy(d.ev);
         }
         if (!helper_keep)
-            for (void* p : host_allocs) cudaFreeHost(p);
+            for (void* p : host_allocs) hfree(p);
         for (Layer& l : L)
             for (uint8_t* b : l.host)
                 if (b != nullptr) {
@@ -2825,11 +2826,79 @@ struct Model::Impl {
         while (na > 1 && (g.heads % na != 0 || g.o_groups % na != 0)) --na;
         return na;
     }
+    // DS4_NUMA_STAGE=1: a card's own pinned hand-off / staging buffers on its NUMA node (mbind, first touch, then
+    // registered) - not wherever the allocating thread ran under MPOL_LOCAL.  Placement only
+    static bool numa_stage() {
+        static const bool on = [] {
+            const char* v = ds4_env("DS4_NUMA_STAGE");
+            return v != nullptr && std::atoi(v) != 0;
+        }();
+        return on;
+    }
+    std::mutex ns_mu;
+    std::map<void*, size_t> ns_maps;   // (registered mappings: freed by hfree, not cudaFreeHost)
+    double ns_bytes = 0;
+    size_t ns_n = 0, ns_pg = 0, ns_pg_on = 0;
+    // device d's node for its own buffers (-1: DS4_NUMA_STAGE off, one node, or unknown)
+    int ns_node(const Dev& d) const {
+        if (!numa_stage() || cores_by_node().size() < 2) return -1;
+        return dev_numa_node(d.id);
+    }
+    static const std::vector<std::vector<os::Core>>& cores_by_node() {
+        static const std::vector<std::vector<os::Core>> n = node_threads();
+        return n;
+    }
+    void* ns_alloc(size_t bytes, int node, bool mapped) {
+#if defined(__linux__)
+        if (node < 0) return nullptr;
+        bytes = (bytes + 4095) & ~(size_t) 4095;
+        void* m = os::anon_alloc(bytes, node, (int) cores_by_node().size(), 0);
+        if (m == nullptr) return nullptr;
+        std::memset(m, 0, bytes);
+        void* dp = nullptr;
+        if (cudaHostRegister(m, bytes, cudaHostRegisterPortable | (mapped ? cudaHostRegisterMapped : 0)) != cudaSuccess ||
+            (mapped && (cudaHostGetDevicePointer(&dp, m, 0) != cudaSuccess || dp != m))) {   // (kernels take the host address)
+            cudaGetLastError();
+            cudaHostUnregister(m);
+            cudaGetLastError();
+            os::anon_free(m, bytes);
+            return nullptr;
+        }
+        size_t on = 0, all = 0;   // (sampled: where the pages are)
+        const size_t pages = bytes >> 12, step = std::max<size_t>(1, pages / 64);
+        std::vector<void*> pv;
+        for (size_t i = 0; i < pages; i += step) pv.push_back((uint8_t*) m + (i << 12));
+        std::vector<int> st(pv.size(), -1);
+        if (syscall(SYS_move_pages, 0, pv.size(), pv.data(), nullptr, st.data(), 0) == 0)
+            for (int x : st) all += 1, on += x == node;
+        std::lock_guard<std::mutex> lk(ns_mu);
+        ns_maps[m] = bytes;
+        ns_bytes += (double) bytes, ++ns_n, ns_pg += all, ns_pg_on += on;
+        return m;
+#else
+        (void) bytes, (void) node, (void) mapped;
+        return nullptr;
+#endif
+    }
+    void hfree(void* p) {
+        size_t b = 0;
+        {
+            std::lock_guard<std::mutex> lk(ns_mu);
+            auto it = ns_maps.find(p);
+            if (it != ns_maps.end()) b = it->second, ns_maps.erase(it);
+        }
+        if (b == 0) {
+            cudaFreeHost(p);
+            return;
+        }
+        cudaHostUnregister(p);
+        os::anon_free(p, b);
+    }
     // host-mapped memory (the same address on the host and every device), zeroed
     template <class T>
-    bool hmap(T*& p, size_t n, std::string& err) {
-        void* v = nullptr;
-        if (cudaHostAlloc(&v, n * sizeof(T) + 64, cudaHostAllocMapped | cudaHostAllocPortable) != cudaSuccess) {
+    bool hmap(T*& p, size_t n, std::string& err, int node = -1) {
+        void* v = ns_alloc(n * sizeof(T) + 64, node, true);
+        if (v == nullptr && cudaHostAlloc(&v, n * sizeof(T) + 64, cudaHostAllocMapped | cudaHostAllocPortable) != cudaSuccess) {
             err = "host-mapped memory (" + std::to_string((n * sizeof(T)) >> 20) + " MiB)";
             return false;
         }
@@ -2936,10 +3005,10 @@ struct Model::Impl {
         p2p_todo.clear();
     }
     template <class T>
-    bool halloc(T*& p, size_t n, std::string& err) {
+    bool halloc(T*& p, size_t n, std::string& err, int node = -1) {
         rd_sync_note("a pinned allocation");
-        void* v = nullptr;
-        if (cudaHostAlloc(&v, n * sizeof(T) + 64, cudaHostAllocPortable) != cudaSuccess) {
+        void* v = ns_alloc(n * sizeof(T) + 64, node, false);
+        if (v == nullptr && cudaHostAlloc(&v, n * sizeof(T) + 64, cudaHostAllocPortable) != cudaSuccess) {
             err = "cudaHostAlloc " + std::to_string((n * sizeof(T)) >> 20) + " MiB failed";
             return false;
         }
@@ -4566,7 +4635,8 @@ struct Model::Impl {
             if ((decode_trim & 2) && !(dalloc(d, d.qrq8, (size_t) kWin * g.q_lora, err) &&
                                        dalloc(d, d.qrd8, (size_t) kWin * g.q_lora / 32, err)))
                 return false;
-            if ((decode_trim & 8) && g.n_mtp > 0 && !(hmap(d.dhand, dhand_bytes(), err) && hmap(d.dhand_flag, 8, err)))
+            if ((decode_trim & 8) && g.n_mtp > 0 &&
+                !(hmap(d.dhand, dhand_bytes(), err, ns_node(d)) && hmap(d.dhand_flag, 8, err, ns_node(d))))
                 return false;   // (hmap zeroes them: the flag starts below every sequence)
             if (hc_fuse && !(dalloc(d, d.xq8, (size_t) (hc_fuse_win ? kWin : 1) * D, err) &&   // (=2: a window's rows)
                              dalloc(d, d.xd8, (size_t) (hc_fuse_win ? kWin : 1) * D / 32, err)))
@@ -4578,9 +4648,11 @@ struct Model::Impl {
                 if (!ok) return false;
             }
             if ((int) di == head_dev && !dalloc(d, d.logits, (size_t) kWin * g.vocab, err)) return false;
-            if (!halloc(d.bounce, bounce_bytes(), err)) return false;
-            if (!dalloc(d, d.xcnt, 4, err) || !dalloc(d, d.hc_cnt, 2 * W, err) || !hmap(d.hand, bounce_bytes(), err) ||
-                !hmap(d.hand_flag, 32, err) || !dalloc(d, d.grp_ptr, P, err) || !dalloc(d, d.grp_start, P + 1, err) ||
+            // (DS4_NUMA_STAGE: a hand-off on its writer's node - d puts, the next group gets)
+            if (!halloc(d.bounce, bounce_bytes(), err, ns_node(d))) return false;
+            if (!dalloc(d, d.xcnt, 4, err) || !dalloc(d, d.hc_cnt, 2 * W, err) ||
+                !hmap(d.hand, bounce_bytes(), err, ns_node(d)) || !hmap(d.hand_flag, 32, err, ns_node(d)) ||
+                !dalloc(d, d.grp_ptr, P, err) || !dalloc(d, d.grp_start, P + 1, err) ||
                 !dalloc(d, d.grp_ent, P, err) || !dalloc(d, d.n_groups, 4, err))
                 return false;
             if (g.n_mtp > 0 && !dalloc(d, d.tap, (size_t) tap_cap * D, err)) return false;
@@ -4615,11 +4687,12 @@ struct Model::Impl {
             }
         }
         for (Src& sr : srcs) {
-            if (sr.remote && (!hmap(sr.x_stage, x_cap() * (ckv_rb() + ik_rb()), err) || !hmap(sr.x_flag, 32, err)))
+            const int sn = ns_node(devs[(size_t) L[(size_t) sr.layer].dev]);   // (the source layer's card writes them)
+            if (sr.remote && (!hmap(sr.x_stage, x_cap() * (ckv_rb() + ik_rb()), err, sn) || !hmap(sr.x_flag, 32, err, sn)))
                 return false;
             if (sr.remote && chunk > 0 &&
-                (!hmap(sr.x_stage1, x_cap() * (ckv_rb() + ik_rb()), err) || !hmap(sr.x_flag1, 32, err) ||
-                 !hmap(sr.x_ack, (size_t) 2 * devs.size() * 32, err)))
+                (!hmap(sr.x_stage1, x_cap() * (ckv_rb() + ik_rb()), err, sn) || !hmap(sr.x_flag1, 32, err, sn) ||
+                 !hmap(sr.x_ack, (size_t) 2 * devs.size() * 32, err, sn)))
                 return false;
             const int sg = L[(size_t) sr.layer].grp;
             for (size_t di = 0; di < devs.size(); ++di)
@@ -5050,7 +5123,7 @@ struct Model::Impl {
                     if (fl)   // (each part read unbuffered from its offset rounded down: a page more each)
                         cp->stage_stride = std::max(cp->stage_stride, flow_stride());
                     cp->S = cp->ring_n;
-                    if (!halloc(cp->stage, (size_t) cp->S * cp->stage_stride, err)) return false;
+                    if (!halloc(cp->stage, (size_t) cp->S * cp->stage_stride, err, ns_node(devs[di]))) return false;
                     cp->readers = std::make_unique<Pool>(n_readers - 1, std::vector<int>{}, 50);
                     if (!fl) continue;
                     cudaSetDevice(devs[di].id);
@@ -5067,7 +5140,7 @@ struct Model::Impl {
                     // layer's bounds wait, which every copy from it precedes)
                     cp->bc_n = n_exp_max + 2;
                     cp->bc_w = cp->ring_n + 1;
-                    if (!halloc(cp->bc_pin, (size_t) cp->bc_n * cp->bc_w, err) ||
+                    if (!halloc(cp->bc_pin, (size_t) cp->bc_n * cp->bc_w, err, ns_node(devs[di])) ||
                         !dalloc(devs[di], cp->bc_dev, (size_t) cp->bc_n * cp->bc_w, err))
                         return false;
                 }
@@ -5234,6 +5307,9 @@ struct Model::Impl {
         }
         lane_setup();
         one_gpu_plan();   // (#496: the one-GPU path kept only where something streams)
+        if (numa_stage())
+            std::fprintf(stderr, "ds4: DS4_NUMA_STAGE: %zu pinned hand-off/staging buffers, %.1f MB on their cards' nodes "
+                                 "(%zu of %zu sampled pages there)\n", ns_n, ns_bytes / 1e6, ns_pg_on, ns_pg);
         if (o.verbose) std::fprintf(stderr, "ds4: loaded in %.1f s\n%s", (now_ms() - t0) / 1000.0, describe().c_str());
         reset();
         blas_warm_start();
@@ -5510,7 +5586,7 @@ struct Model::Impl {
                 (void) cudaGetLastError();
             }
             while (host_allocs.size() > h0) {
-                cudaFreeHost(host_allocs.back());
+                hfree(host_allocs.back());
                 host_allocs.pop_back();
             }
             (void) cudaGetLastError();
@@ -5690,13 +5766,16 @@ struct Model::Impl {
             // (the hand-offs between groups: none where one group holds every layer - a chunk's h alone is 80 KB a row)
             const bool hands = d.mi == 0 && groups.size() > 1;
             for (int sl = 0; sl < 2; ++sl) {
-                if (hands && (!hmap(c.hand[sl], chunk_hand_bytes(), err) || !hmap(c.hand_flag[sl], 32, err))) return false;
-                if (has_first && !halloc(c.emb_host[sl], C * D, err)) return false;
-                if (has_eg && !halloc(c.eg_host[sl], C * pk.eg_layers * (size_t) cols * (ehd + ehd / 32), err)) return false;
+                if (hands && (!hmap(c.hand[sl], chunk_hand_bytes(), err, ns_node(d)) ||
+                              !hmap(c.hand_flag[sl], 32, err, ns_node(d))))
+                    return false;
+                if (has_first && !halloc(c.emb_host[sl], C * D, err, ns_node(d))) return false;
+                if (has_eg && !halloc(c.eg_host[sl], C * pk.eg_layers * (size_t) cols * (ehd + ehd / 32), err, ns_node(d)))
+                    return false;
                 CK(cudaEventCreateWithFlags(&c.emb_ev[sl], cudaEventDisableTiming));
                 CK(cudaEventCreateWithFlags(&c.eg_ev[sl], cudaEventDisableTiming));
             }
-            if (hands && !hmap(c.hand_ack, (size_t) 2 * 8 * 32, err)) return false;
+            if (hands && !hmap(c.hand_ack, (size_t) 2 * 8 * 32, err, ns_node(d))) return false;
             CK(cudaStreamCreateWithFlags(&c.ar_aux.s2, cudaStreamNonBlocking));
             for (cudaEvent_t& e : c.ar_aux.ev) CK(cudaEventCreateWithFlags(&e, cudaEventDisableTiming));
             CK(cudaStreamCreateWithFlags(&c.ar_s, cudaStreamNonBlocking));
