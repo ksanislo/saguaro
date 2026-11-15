@@ -1666,6 +1666,10 @@ bool Glm5Model::prefill_lend(std::string& err) {
     // chunk - which is exactly what the flatten-to-smallest rule then spreads to all four parts.
     const uint64_t dropped_before = S->dropped;
     if (!lend_tail(S->need + kMmqSlab, S->moved, S->dropped, err)) return false;
+    if (conv_preload_on()) {   // STRATA_GLM_CONV_PREFETCH: the read's start kicks the preload (it never waits for it)
+        std::lock_guard<std::mutex> lk(F->mu);
+        conv_preload_locked(2);
+    }
     {
         const size_t base = (size_t) (S->region + S->need);
         const size_t end = std::min((size_t) (S->region + S->need + kMmqSlab), F->lend_end);
@@ -1782,6 +1786,7 @@ bool Glm5Model::lend_slots(const std::function<bool(int, int)>& sel, uint64_t& m
     // background moves in flight land first and no new ones start (fast_boundary step 5): a slot with a copy on its
     // way would otherwise be lent under it
     F->bg_hold = true;
+    conv_preload_sync();   // (STRATA_GLM_CONV_PREFETCH: its moves are in F->bg too)
     // Retire metadata as well as DMA. With the hold set, the boundary cannot start replacement moves.
     if (!glmfast::cuda_ok(cudaStreamSynchronize(F->copy), "glm lending copies", err) || !fast_boundary(err))
         return false;
@@ -1887,10 +1892,14 @@ bool Glm5Model::lend_slots(const std::function<bool(int, int)>& sel, uint64_t& m
             // colder than it (a device copy) - the prompt costs the decode its coldest experts, not whichever sat in
             // the borrowed tail (a chat turn used to drop up to ~145 warm experts to disk)
             std::vector<std::pair<uint64_t, int>> cold;   // (count << 32 | recency rank, slot)
+            // (STRATA_GLM_CONV_EXPERTS: the allocation's level above the count - its experts are the last to go)
+            const auto lend_key = [&](int l, int e) {
+                return ((uint64_t) conv_level_of(l, e) << 40) | (uint64_t) F->cnt[(size_t) l * NE + e];
+            };
             if (!lend_drop)
                 for (int s = 0; s < P.n_main; ++s)
                     if (P.st[(size_t) s] == FastState::kResident && P.key[(size_t) s] >= 0 && !sel(il, s))
-                        cold.push_back({(uint64_t) F->cnt[(size_t) il * NE + P.key[(size_t) s]], s});
+                        cold.push_back({lend_key(il, P.key[(size_t) s]), s});
             std::sort(cold.begin(), cold.end(), [&](const auto& a, const auto& b) {
                 return a.first != b.first ? a.first < b.first : P.tick[(size_t) a.second] < P.tick[(size_t) b.second];
             });
@@ -1903,8 +1912,8 @@ bool Glm5Model::lend_slots(const std::function<bool(int, int)>& sel, uint64_t& m
                     static const bool lru_ties = getenv("STRATA_GLM_LEND_PARK_LRU") == nullptr ||
                                                  std::atoi(getenv("STRATA_GLM_LEND_PARK_LRU")) != 0;
                     if (ci < cold.size() &&
-                        (cold[ci].first < (uint64_t) F->cnt[(size_t) key] ||
-                         (lru_ties && cold[ci].first == (uint64_t) F->cnt[(size_t) key] &&
+                        (cold[ci].first < lend_key(il, P.key[(size_t) s]) ||
+                         (lru_ties && cold[ci].first == lend_key(il, P.key[(size_t) s]) &&
                           P.tick[(size_t) cold[ci].second] < P.tick[(size_t) s]))) {
                         const int v = cold[ci++].second;   // the coldest: it goes, this expert takes its slot
                         const int vkey = il * NE + P.key[(size_t) v];

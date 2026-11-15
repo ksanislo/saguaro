@@ -1052,6 +1052,277 @@ static bool cuda_context_broken(const std::string& why) {
     return false;
 }
 
+// STRATA_GLM_CONV_EXPERTS=1: one VRAM expert allocation a layer over the live conversations (bench/glm-conv/replay*.py):
+// every running / OPEN conversation's top K0 (the floor), the rest by sum_c w_c share_c(e) + recall + eps global share;
+// published as level flags (Glm5Model::conv_publish) - the engine's victims go lowest level first, its preload highest.
+// A conversation = the prompts that extend one another past the system prompt (contexts change between turns).
+namespace {
+struct ConvAlloc {
+    static constexpr int kL = 128, kE = 512;
+    struct Conv {
+        int id = 0;
+        std::vector<int32_t> tokens;   // its last prompt + answer
+        std::vector<float> cnt;        // decode routes, x DECAY a turn
+        std::vector<float> turn;       // this turn's
+        std::vector<float> recall;     // recalled experts (brought in at its last resume, then hit): their share there
+        std::vector<uint8_t> brought;  // this resume's experts that were outside the allocation before it
+        std::chrono::steady_clock::time_point last{};
+        int running = 0;
+        size_t lcp = 0;
+    };
+    bool on = false, open_only = false;
+    double open_s = 5.0, w_open = 0.25, w_closed = 0.0, half_s = 60.0, eps = 0.1, decay = 0.5, tick_s = 2.0;
+    int k0 = 16, recall_cap = 0, slack = 4, max_convs = 16, next_id = 1;
+    std::vector<Conv> convs;
+    std::vector<float> glob;
+    double glob_since = 0;
+    std::vector<uint32_t> rc_prev;
+    std::vector<uint8_t> flags;   // the last published allocation
+    std::chrono::steady_clock::time_point last_pub{};
+    std::vector<int> slots;
+    std::vector<size_t> blob;
+
+    static double num(const char* k, double d) {
+        const char* v = getenv(k);
+        return v != nullptr && *v != '\0' ? std::atof(v) : d;
+    }
+    void init(const strata::core::Glm5Model& m) {
+        on = num("STRATA_GLM_CONV_EXPERTS", 0) != 0;
+        open_only = !on && getenv("STRATA_GLM_CONV_OPEN_S") != nullptr;
+        if (!on && !open_only) return;
+        open_s = num("STRATA_GLM_CONV_OPEN_S", 5.0);
+        k0 = (int) num("STRATA_GLM_CONV_FLOOR", 16);
+        w_open = num("STRATA_GLM_CONV_W_OPEN", 0.25);
+        // past the window: its shares at W_CLOSED halving every HALF_S, and up to RECALL_CAP of its recalled experts a
+        // layer kept as floor (the cap halving every HALF_S) - both 0 = closed is closed (bench/glm-conv replay3-5)
+        w_closed = num("STRATA_GLM_CONV_W_CLOSED", 0.0);
+        recall_cap = (int) num("STRATA_GLM_CONV_RECALL_CAP", 0);
+        half_s = num("STRATA_GLM_CONV_HALF_S", 60.0);
+        eps = num("STRATA_GLM_CONV_EPS", 0.1);
+        tick_s = num("STRATA_GLM_CONV_TICK_S", 2.0);
+        slack = (int) num("STRATA_GLM_CONV_SLACK", 4);
+        slots = m.layer_slots();
+        blob = m.layer_blob();
+        glob.assign((size_t) kL * kE, 0.0f);
+        std::fprintf(stderr, "glm conv: %s - open %.1f s, floor %d, w_open %.2f, closed: w %.2f / recall cap %d (half %.0f s), "
+                     "eps %.2f, tick %.1f s, slack %d\n", on ? "allocation on" : "open window only (live rule)", open_s, k0,
+                     w_open, w_closed, recall_cap, half_s, eps, tick_s, slack);
+    }
+    double age(const Conv& c, std::chrono::steady_clock::time_point now) const {
+        return std::chrono::duration<double>(now - c.last).count();
+    }
+    // the conversation this prompt continues (past the system prompt), else a new one
+    int admit(const std::vector<int32_t>& prompt, std::chrono::steady_clock::time_point now) {
+        const size_t sys = strata::core::system_prompt_end(prompt.data(), prompt.size(), 154827);
+        int best = -1;
+        size_t bl = 0;
+        for (int i = 0; i < (int) convs.size(); ++i) {
+            const auto& t = convs[(size_t) i].tokens;
+            size_t l = 0;
+            const size_t n = std::min(t.size(), prompt.size());
+            while (l < n && t[l] == prompt[l]) ++l;
+            if (l > bl && l > sys + 16 && 2 * l >= t.size()) {
+                bl = l;
+                best = i;
+            }
+        }
+        if (best < 0) {
+            if ((int) convs.size() >= max_convs) {   // the least recently active one goes
+                size_t o = 0;
+                for (size_t i = 1; i < convs.size(); ++i)
+                    if (convs[i].running == 0 && (convs[o].running > 0 || convs[i].last < convs[o].last)) o = i;
+                convs.erase(convs.begin() + (long) o);
+            }
+            Conv c;
+            c.id = next_id++;
+            c.cnt.assign((size_t) kL * kE, 0.0f);
+            c.recall.assign((size_t) kL * kE, 0.0f);
+            convs.push_back(std::move(c));
+            best = (int) convs.size() - 1;
+        } else {
+            for (float& x : convs[(size_t) best].cnt) x *= (float) decay;
+        }
+        Conv& c = convs[(size_t) best];
+        c.tokens = prompt;
+        c.turn.assign((size_t) kL * kE, 0.0f);
+        c.brought.clear();
+        c.lcp = bl;
+        c.last = now;
+        return c.id;
+    }
+    // the running conversations (the serve loop's requests, an admitting one included): counted afresh at each publish
+    void set_running(const std::vector<int>& ids) {
+        for (auto& c : convs) c.running = 0;
+        for (int id : ids)
+            if (Conv* c = find(id)) ++c->running;
+    }
+    Conv* find(int id) {
+        for (auto& c : convs)
+            if (c.id == id) return &c;
+        return nullptr;
+    }
+    // the decode's route counts since the last call, split evenly over the conversations decoding now
+    void attribute(const std::vector<int>& decoding) {
+        std::vector<uint32_t> rc;
+        strata::core::Glm5Model::route_counts(rc);
+        const size_t n = rc.size() / 2;
+        if (rc_prev.size() != rc.size()) {
+            rc_prev = rc;
+            return;
+        }
+        std::vector<Conv*> ds;
+        for (int id : decoding)
+            if (Conv* c = find(id)) ds.push_back(c);
+        double added = 0;
+        for (size_t i = 0; i < n; ++i) {
+            const uint32_t d = rc[n + i] - rc_prev[n + i];
+            if (d == 0) continue;
+            glob[i] += (float) d;
+            added += d;
+            for (Conv* c : ds) {
+                c->cnt[i] += (float) d / (float) ds.size();
+                c->turn[i] += (float) d / (float) ds.size();
+            }
+        }
+        rc_prev.swap(rc);
+        glob_since += added;
+        while (glob_since >= 4.0 * 32768) {   // (the engine's aging pace)
+            glob_since -= 4.0 * 32768;
+            for (float& x : glob) x *= 0.5f;
+        }
+    }
+    // the allocation: floors, then the fill by score; levels 1..64 by score, the floor flagged
+    void publish(const char* why, std::chrono::steady_clock::time_point now) {
+        const double unix_s = std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
+        int open = 0, running = 0;
+        for (const auto& c : convs) {
+            running += c.running > 0;
+            open += c.running == 0 && age(c, now) <= open_s;
+        }
+        strata::core::Glm5Model::conv_others_set(open);   // (CONV_OPEN_S alone: =live's "alone")
+        last_pub = now;
+        if (!on) return;
+        std::vector<uint8_t> nf((size_t) kL * kE, 0);
+        std::vector<double> w(convs.size());
+        std::vector<int> rk(convs.size(), 0);   // closed: its recalled experts kept as floor, a layer
+        std::vector<char> fl(convs.size());
+        for (size_t i = 0; i < convs.size(); ++i) {
+            const Conv& c = convs[i];
+            const double a = age(c, now);
+            const double dk = half_s > 0 ? std::pow(0.5, std::max(0.0, a - open_s) / half_s) : 0.0;
+            w[i] = c.running > 0 ? 1.0 : a <= open_s ? w_open : w_closed * dk;
+            if (w[i] < 1e-3) w[i] = 0.0;
+            fl[i] = c.running > 0 || a <= open_s;
+            if (!fl[i] && recall_cap > 0) rk[i] = (int) std::lround(recall_cap * dk);
+        }
+        size_t n_floor = 0, n_fill = 0, bytes = 0;
+        std::vector<std::pair<double, int>> sc;
+        std::vector<double> score(kE);
+        for (int il = 0; il < (int) slots.size() && il < kL; ++il) {
+            const int K = slots[(size_t) il] - slack;
+            if (K <= 0) continue;
+            std::fill(score.begin(), score.end(), 0.0);
+            std::vector<char> in(kE, 0), fm(kE, 0);
+            int taken = 0;
+            const auto layer_sum = [&](const std::vector<float>& v) {
+                double s = 0;
+                for (int e = 0; e < kE; ++e) s += v[(size_t) il * kE + e];
+                return s;
+            };
+            for (size_t i = 0; i < convs.size(); ++i) {
+                const Conv& c = convs[i];
+                const double s = layer_sum(c.cnt);
+                if (s > 0 && w[i] > 0)
+                    for (int e = 0; e < kE; ++e) score[e] += w[i] * c.cnt[(size_t) il * kE + e] / s;
+                if (rk[i] > 0) {   // (a closed one's recalled experts, best share first)
+                    sc.clear();
+                    for (int e = 0; e < kE; ++e)
+                        if (c.recall[(size_t) il * kE + e] > 0) sc.push_back({c.recall[(size_t) il * kE + e], e});
+                    const size_t k = std::min(sc.size(), (size_t) rk[i]);
+                    std::partial_sort(sc.begin(), sc.begin() + (long) k, sc.end(), std::greater<>());
+                    for (size_t j = 0; j < k && taken < K; ++j)
+                        if (!in[sc[j].second]) {
+                            in[sc[j].second] = fm[sc[j].second] = 1;
+                            ++taken;
+                        }
+                }
+                if (!fl[i] || s <= 0 || k0 <= 0) continue;
+                sc.clear();
+                for (int e = 0; e < kE; ++e)
+                    if (c.cnt[(size_t) il * kE + e] > 0) sc.push_back({c.cnt[(size_t) il * kE + e], e});
+                const size_t k = std::min(sc.size(), (size_t) k0);
+                std::partial_sort(sc.begin(), sc.begin() + (long) k, sc.end(), std::greater<>());
+                for (size_t j = 0; j < k && taken < K; ++j)
+                    if (!in[sc[j].second]) {
+                        in[sc[j].second] = fm[sc[j].second] = 1;
+                        ++taken;
+                    }
+            }
+            const double gs = layer_sum(glob);
+            if (gs > 0)
+                for (int e = 0; e < kE; ++e) score[e] += eps * glob[(size_t) il * kE + e] / gs;
+            sc.clear();
+            double mx = 0;
+            for (int e = 0; e < kE; ++e) {
+                if (score[e] > 0 && !in[e]) sc.push_back({score[e], e});
+                mx = std::max(mx, score[e]);
+            }
+            std::sort(sc.begin(), sc.end(), std::greater<>());
+            for (size_t j = 0; j < sc.size() && taken < K; ++j) {
+                in[sc[j].second] = 1;
+                ++taken;
+            }
+            for (int e = 0; e < kE; ++e) {
+                if (!in[e]) continue;
+                const int lv = mx > 0 ? std::min(63, (int) std::lround(63.0 * score[e] / mx)) : 0;
+                nf[(size_t) il * kE + e] = (uint8_t) (1u | (fm[e] ? 2u : 0u) | ((unsigned) lv << 2));
+                (fm[e] ? n_floor : n_fill) += 1;
+                bytes += il < (int) blob.size() ? blob[(size_t) il] : 0;
+            }
+        }
+        // a resume: the experts its own share puts in that were not in the last allocation (recall candidates)
+        for (auto& c : convs)
+            if (c.running > 0 && c.brought.empty() && !flags.empty()) {
+                c.brought.assign((size_t) kL * kE, 0);
+                for (size_t i = 0; i < nf.size(); ++i) c.brought[i] = (nf[i] & 1u) && !(flags[i] & 1u) && c.cnt[i] > 0;
+            }
+        flags.swap(nf);
+        strata::core::Glm5Model::conv_publish(flags);
+        std::string list;
+        for (size_t i = 0; i < convs.size(); ++i)
+            if (w[i] > 0 || fl[i] || rk[i] > 0)
+                list += " " + std::to_string(convs[i].id) + ":" + (convs[i].running ? "run" : fl[i] ? "open" : "closed");
+        std::fprintf(stderr, "glm conv: alloc (%s) - %d running, %d open; floor %zu + fill %zu experts (%.2f GB) |%s t=%.3f\n",
+                     why, running, open, n_floor, n_fill, (double) bytes / 1e9, list.c_str(), unix_s);
+    }
+    // a request's end: its answer joins the conversation; a resume's recalled experts (brought in, then hit) are noted
+    void end(int id, const std::vector<int32_t>& emitted, std::chrono::steady_clock::time_point now) {
+        Conv* c = find(id);
+        if (c == nullptr) return;
+        c->tokens.insert(c->tokens.end(), emitted.begin(), emitted.end());
+        c->last = now;
+        if (recall_cap > 0 && !c->brought.empty()) {
+            std::fill(c->recall.begin(), c->recall.end(), 0.0f);
+            size_t n = 0;
+            for (int il = 0; il < kL; ++il) {
+                double s = 0;
+                for (int e = 0; e < kE; ++e) s += c->turn[(size_t) il * kE + e];
+                if (s <= 0) continue;
+                for (int e = 0; e < kE; ++e) {
+                    const size_t i = (size_t) il * kE + e;
+                    if (c->brought[i] && c->turn[i] > 0) {
+                        c->recall[i] = (float) (c->turn[i] / s);
+                        ++n;
+                    }
+                }
+            }
+            std::fprintf(stderr, "glm conv: conversation %d - %zu recalled experts\n", c->id, n);
+        }
+        c->brought.clear();
+    }
+};
+}  // namespace
+
 static int glm_pack_generate(const Options& o) {
 #if !defined(_WIN32)
     // serving: the server ends the engine with QUIT (or by closing its input), and the engine then sets the conversation
@@ -2668,6 +2939,8 @@ static int glm_pack_generate(const Options& o) {
         // STRATA_GLM_ROUTE_DUMP: the route counters at admission and at its first token; shared: another request ran beside
         std::vector<uint32_t> rc0, rc1;
         bool rc_shared = false;
+        int conv = -1;   // STRATA_GLM_CONV_*: its conversation
+        uint64_t pf0[4] = {0, 0, 0, 0};   // ... the preload counters at its admission
         std::chrono::steady_clock::time_point ta;
         bool in_think = false;
         int64_t think_budget = 0;
@@ -2696,6 +2969,31 @@ static int glm_pack_generate(const Options& o) {
         uint64_t mtp_steps = 0, mtp_drafts = 0, mtp_acc = 0;
     };
     std::vector<std::unique_ptr<Gen>> gens;
+    ConvAlloc conv;
+    conv.init(model);
+    int admitting_conv = -1;   // (the request being admitted's conversation)
+    // STRATA_GLM_VRAM_EVICT_LOG (any arm) or the conversation switches: the cumulative VRAM expert hits at each admission,
+    // first token and end (the per-phase readout's edges; the n2 phases' boundaries come every 64 steps)
+    static const bool ev_log = getenv("STRATA_GLM_VRAM_EVICT_LOG") != nullptr || conv.on || conv.open_only;
+    const auto ev_line = [&](const char* what, int rid) {
+        const auto st = model.fast_stats();
+        std::fprintf(stderr, "glm vram evict: event - %s r%d (%zu running) vram_hits=%llu lookups=%llu boundary=0 t=%.3f\n",
+                     what, rid, gens.size(), (unsigned long long) st.hits, (unsigned long long) (st.hits + st.misses),
+                     std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count());
+    };
+    const auto conv_running = [&](int extra, int skip_rid) {   // (the allocation's running ones)
+        std::vector<int> ids;
+        for (const auto& p : gens)
+            if (!p->done && p->conv >= 0 && p->rid != skip_rid) ids.push_back(p->conv);
+        if (extra >= 0) ids.push_back(extra);
+        conv.set_running(ids);
+    };
+    const auto conv_decoding = [&] {
+        std::vector<int> ids;
+        for (const auto& p : gens)
+            if (!p->done && !p->reading && p->t1 >= p->ta && p->conv >= 0) ids.push_back(p->conv);
+        return ids;
+    };
     std::deque<Gen*> flight;     // issued, oldest first
     std::deque<int> flight_groups;   // split rows: the sizes of the issued groups, oldest first
     // THE PROMPT BESIDE THE DECODE: a request admitted while others decode reads its prompt's batched part on a thread
@@ -2945,6 +3243,14 @@ static int glm_pack_generate(const Options& o) {
     const auto gen_finish = [&](Gen& g) {
         const auto t2 = std::chrono::steady_clock::now();
         if (strata::core::Glm5Model::route_counting()) route_file(g, t2);
+        if (ev_log) ev_line("end", g.rid);
+        if (g.conv >= 0) {
+            if (conv.on) conv.attribute(conv_decoding());
+            conv.end(g.conv, g.emitted, t2);
+            g.conv = -1;
+            conv_running(-1, g.rid);
+            conv.publish("end", t2);
+        }
         const double prompt_ms = std::chrono::duration<double, std::milli>(g.t1 - g.t0).count();
         const double decode_ms = std::chrono::duration<double, std::milli>(t2 - g.t1).count();
         const auto st2 = model.fast_stats();
@@ -3224,6 +3530,15 @@ static int glm_pack_generate(const Options& o) {
         if (admit_stop.exchange(false) || stop_req.load()) g.finish = "cancel";
         g.t1 = std::chrono::steady_clock::now();
         if (strata::core::Glm5Model::route_counting()) strata::core::Glm5Model::route_counts(g.rc1);
+        if (ev_log) ev_line("first", g.rid);
+        if (conv.on && strata::core::Glm5Model::conv_preload_on()) {
+            uint64_t pf[4];
+            strata::core::Glm5Model::conv_prefetch_counts(pf);
+            std::fprintf(stderr, "glm conv: r%d first token after %.2f s: preload since admission up %llu, down %llu, landed "
+                         "%llu (%.2f GB)\n", g.rid, std::chrono::duration<double>(g.t1 - g.ta).count(),
+                         (unsigned long long) (pf[0] - g.pf0[0]), (unsigned long long) (pf[1] - g.pf0[1]),
+                         (unsigned long long) (pf[2] - g.pf0[2]), (double) (pf[3] - g.pf0[3]) / 1e9);
+        }
         g.st1 = model.fast_stats();
         g.spec_steps0 = model.spec_steps_;
         g.spec_hits0 = model.spec_hits_;
@@ -3604,6 +3919,17 @@ static int glm_pack_generate(const Options& o) {
         admitting_rid.store(rid);
         strata::core::Glm5Model::live_seqs_set((int) gens.size() + 1);   // (MAYA_GLM_VRAM_EVICT=live: it and those decoding)
         g->ta = std::chrono::steady_clock::now();
+        if (ev_log) ev_line("admit", rid);
+        if (conv.on || conv.open_only) {   // its conversation, and the allocation before its read (the preload's kick)
+            if (conv.on) conv.attribute(conv_decoding());
+            g->conv = admitting_conv = conv.admit(g->prompt, g->ta);
+            const auto* cv = conv.find(g->conv);
+            std::fprintf(stderr, "glm conv: r%d conversation %d (%s, %zu tokens shared)\n", rid, g->conv,
+                         cv != nullptr && cv->lcp > 0 ? "resumed" : "new", cv != nullptr ? cv->lcp : (size_t) 0);
+            strata::core::Glm5Model::conv_prefetch_counts(g->pf0);
+            conv_running(g->conv, -1);
+            conv.publish("admit", g->ta);
+        }
         if (strata::core::Glm5Model::route_counting()) {
             strata::core::Glm5Model::route_counts(g->rc0);
             if (!gens.empty()) {
@@ -3724,6 +4050,18 @@ static int glm_pack_generate(const Options& o) {
             strata::core::Glm5Model::live_seqs_set((int) gens.size() + (extra ? 1 : 0));
             if (gens.size() + (extra ? 1 : 0) > 1 && strata::core::Glm5Model::route_counting())
                 for (auto& o2 : gens) o2->rc_shared = true;
+        }
+        if (conv.on || conv.open_only) {   // every TICK_S while decoding (an open window's expiry included)
+            const auto now = std::chrono::steady_clock::now();
+            if (std::chrono::duration<double>(now - conv.last_pub).count() >= conv.tick_s) {
+                if (conv.on) conv.attribute(conv_decoding());
+                const int arid = admitting_rid.load();
+                int extra = -1;   // (an in-thread read is not in gens yet)
+                if (arid >= 0 && std::none_of(gens.begin(), gens.end(), [arid](const std::unique_ptr<Gen>& p) { return p->rid == arid; }))
+                    extra = admitting_conv;
+                conv_running(extra, -1);
+                conv.publish("tick", now);
+            }
         }
         Gen* only = gens.size() == 1 ? gens[0].get() : nullptr;
         static const bool spec_win_env = [] {

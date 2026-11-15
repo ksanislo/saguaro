@@ -217,6 +217,16 @@ public:
     static bool route_counting();
     static void route_counts(std::vector<uint32_t>& out);
     std::vector<int> layer_slots() const;
+    std::vector<size_t> layer_blob() const;   // each layer's expert bytes (0: no routed experts on a card)
+    /// STRATA_GLM_CONV_*: the serve loop's allocation flags [kRcLayers][kRcExperts] (1 in it, 2 a floor, bits 2-7 its level),
+    /// the OPEN conversations besides the running ones, the preload counters (issued up, issued down, landed up, landed bytes)
+    static void conv_publish(const std::vector<uint8_t>& flags);
+    static void conv_others_set(int n);
+    static void conv_prefetch_counts(uint64_t out[4]);
+    static bool conv_preload_on();
+    static uint32_t conv_level_of(int il, int e);   // 0 outside the allocation, else 1..65 (the floor highest)
+    void conv_preload_sync();   // this part: its preload copies landed (before lending)
+    void conv_preload_locked(int mode);   // F->mu held; 0 a boundary, 1 beside a prompt read, 2 a read's start
     bool snapshot_restore();
     int64_t snapshot_pos() const { return snap_pos_; }
     /// Conversation CHECKPOINTS (host RAM, `slot` 0, 1, ...): every half's KDA states + conv histories and its open

@@ -162,8 +162,69 @@ static const LiveHold& live_hold() {
 static int64_t live_now() {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
+// STRATA_GLM_CONV_*: the serve loop's VRAM allocation over the live conversations, [kRcLayers][kRcExperts]: bit 0 in
+// it, bit 1 an open conversation's floor, bits 2-7 its score level (victims go lowest level first, preloads highest first)
+static std::atomic<uint8_t> g_conv_flag[glmfast::kRcLayers * glmfast::kRcExperts];
+static std::atomic<bool> g_conv_held_any{false}, g_conv_tgt_any{false};
+static std::atomic<int> g_conv_others{0};   // OPEN conversations besides the running ones
+static std::atomic<uint64_t> g_conv_pf[4];   // prefetch: issued up, issued down, landed up, landed bytes
+static cudaStream_t g_conv_pf_stream[64];    // ... its copy stream a device (lending waits for it)
+static double env_dbl(const char* k, double d) {
+    const char* v = getenv(k);
+    return v != nullptr && *v != '\0' ? std::atof(v) : d;
+}
+static bool env_on(const char* k) {
+    const char* v = getenv(k);
+    return v != nullptr && *v != '\0' && std::atoi(v) != 0;
+}
+static bool conv_sets_on() {
+    static const bool on = env_on("STRATA_GLM_CONV_EXPERTS");
+    return on;
+}
+static bool conv_pf_on() {
+    static const bool on = conv_sets_on() && env_on("STRATA_GLM_CONV_PREFETCH");
+    return on;
+}
+// CONV_OPEN_S without the sets: =live's "alone" also means no other OPEN conversation (with them, theirs are held)
+static bool conv_open_only() {
+    static const bool on = !conv_sets_on() && getenv("STRATA_GLM_CONV_OPEN_S") != nullptr;
+    return on;
+}
+static inline uint8_t conv_flag(int il, int e) {
+    if (il < 0 || il >= glmfast::kRcLayers || e < 0 || e >= glmfast::kRcExperts) return 0;
+    return g_conv_flag[il * glmfast::kRcExperts + e].load(std::memory_order_relaxed);
+}
+// 0 outside the allocation (and with the switch off), else 1 + its score level (1..64), the floor above every fill
+static inline uint32_t conv_level(int il, int e) {
+    if (!conv_sets_on() || !g_conv_held_any.load(std::memory_order_relaxed)) return 0;
+    const uint8_t f = conv_flag(il, e);
+    return (f & 1u) == 0 ? 0u : (f & 2u) != 0 ? 65u : 1u + (f >> 2);
+}
+void Glm5Model::conv_publish(const std::vector<uint8_t>& flags) {
+    constexpr size_t n = (size_t) glmfast::kRcLayers * glmfast::kRcExperts;
+    bool held = false, tgt = false;
+    for (size_t i = 0; i < n; ++i) {
+        const uint8_t f = i < flags.size() ? flags[i] : 0;
+        held = held || (f & 1u);
+        g_conv_flag[i].store(f, std::memory_order_relaxed);
+    }
+    tgt = held;
+    g_conv_held_any.store(held, std::memory_order_relaxed);
+    g_conv_tgt_any.store(tgt, std::memory_order_release);
+}
+bool Glm5Model::conv_preload_on() { return conv_pf_on(); }
+uint32_t Glm5Model::conv_level_of(int il, int e) { return conv_level(il, e); }
+void Glm5Model::conv_preload_sync() {
+    if (conv_pf_on() && dev_ >= 0 && dev_ < 64 && g_conv_pf_stream[dev_] != nullptr)
+        cudaStreamSynchronize(g_conv_pf_stream[dev_]);
+}
+void Glm5Model::conv_others_set(int n) { g_conv_others.store(n, std::memory_order_relaxed); }
+void Glm5Model::conv_prefetch_counts(uint64_t out[4]) {
+    for (int i = 0; i < 4; ++i) out[i] = g_conv_pf[i].load(std::memory_order_relaxed);
+}
 static bool live_lru() {
     if (g_live_seqs.load(std::memory_order_relaxed) > 1) return false;
+    if (conv_open_only() && g_conv_others.load(std::memory_order_relaxed) > 0) return false;
     const LiveHold& h = live_hold();
     if (h.n > 0 && g_live_quiet.load(std::memory_order_relaxed) < h.n) return false;
     if (h.s > 0.0) {
@@ -4133,6 +4194,14 @@ std::vector<int> Glm5Model::layer_slots() const {
                 v[(size_t) il] = m->fast_->lp[(size_t) il].n_main;
     return v;
 }
+std::vector<size_t> Glm5Model::layer_blob() const {
+    std::vector<size_t> v((size_t) g_.n_layers, 0);
+    for (const Glm5Model* m = this; m != nullptr; m = m->split_next_.get())
+        if (m->fast_ != nullptr)
+            for (int il = m->l0_; il < m->lt_ && il < (int) v.size() && il < (int) m->fast_->L.size(); ++il)
+                if (m->fast_->L[(size_t) il].moe) v[(size_t) il] = m->fast_->L[(size_t) il].blob;
+    return v;
+}
 
 bool Glm5Model::set_routing_dump(const std::string& path, std::string& err) {
     std::lock_guard<std::mutex> lk(glmfast::g_route_mu);
@@ -4953,7 +5022,7 @@ void Glm5Model::fast_service() {
             int ids[8];
             for (int i = 0; i < K; ++i) ids[i] = rq->ids[i];
             if (glmfast::route_dumping()) glmfast::route_dump(il, K, ids, rq->w);   // --dump-routing
-            if (glmfast::route_counting())   // STRATA_GLM_ROUTE_DUMP: the decode's routes
+            if (glmfast::route_counting() || conv_sets_on())   // ROUTE_DUMP / CONV_EXPERTS: the decode's routes
                 for (int i = 0; i < K; ++i) glmfast::route_count(1, il, ids[i]);
             // STRATA_GLM_ROUTE_LOG=<prefix>: "layer e0 .. e7 tier-mask" per route into <prefix>.<device> (cache studies)
             // - the tier masks are fetch, miss and cpu (bits over e0..e7), then " | n0 .. n15": the near misses, the
@@ -5493,6 +5562,107 @@ void Glm5Model::fast_ahead_reader() {
     }
 }
 
+// STRATA_GLM_CONV_PREFETCH=1 (F->mu held): the allocation's experts not in VRAM come up from the RAM tier, highest level
+// first, into a free slot, else over a resident CHURN levels lower (it goes down first). Never blocking: its own stream,
+// a boundary's only while the copy stream is idle, RATE experts/s (READ_RATE beside a prompt read, KICK at a read's start)
+void Glm5Model::conv_preload_locked(int mode) {
+    FastState* F = fast_;
+    const Glm5Geometry& g = g_;
+    if (F == nullptr || !g_conv_tgt_any.load(std::memory_order_acquire) || dev_ < 0 || dev_ >= 64) return;
+    static const double pf_rate = env_dbl("STRATA_GLM_CONV_PREFETCH_RATE", 275.0);
+    static const double pf_rrate = env_dbl("STRATA_GLM_CONV_PREFETCH_READ_RATE", 64.0);
+    static const double pf_burst = env_dbl("STRATA_GLM_CONV_PREFETCH_BURST", 32.0);
+    static const double pf_kick = env_dbl("STRATA_GLM_CONV_PREFETCH_KICK", 64.0);
+    static const uint32_t churn = (uint32_t) env_dbl("STRATA_GLM_CONV_CHURN", 4.0);
+    static double credit[64];
+    static int64_t last[64];
+    static cudaStream_t pf_s[64];
+    const int64_t now = live_now();
+    const double dt = last[dev_] == 0 ? 0.0 : std::min(1.0, (double) (now - last[dev_]) / 1e9);
+    last[dev_] = now;
+    // mode 0: a boundary, 1: a boundary beside a prompt read, 2: a prompt read's start (its kick)
+    credit[dev_] = mode == 2 ? std::max(credit[dev_], pf_kick)
+                             : std::min(pf_burst, credit[dev_] + dt * (mode == 1 ? pf_rrate : pf_rate));
+    if (pf_s[dev_] == nullptr) cudaStreamCreateWithPriority(&pf_s[dev_], cudaStreamNonBlocking, 0);
+    g_conv_pf_stream[dev_] = pf_s[dev_];
+    const int NE = g.n_expert;
+    if (pf_s[dev_] != nullptr && credit[dev_] >= 1.0 && (mode == 2 || cudaStreamQuery(F->copy) == cudaSuccess) &&
+        (int) F->bg.size() < 128) {
+        struct T {
+            uint32_t lv;
+            int il, e;
+        };
+        std::vector<T> ts;
+        for (int il = l0_; il < lt_; ++il) {
+            if (!F->L[(size_t) il].moe || F->layer_rc[(size_t) il] < 0) continue;
+            const auto& R = F->rc[(size_t) F->layer_rc[(size_t) il]];
+            for (int e = 0; e < NE; ++e) {
+                const uint32_t lv = conv_level(il, e);
+                const size_t key = (size_t) il * NE + e;
+                if (lv == 0 || F->slot_of[key] >= 0 || F->helper.owns((int) key)) continue;
+                const int rs = F->ram_of[key];
+                if (rs >= 0 && R.st[(size_t) rs] == FastState::kRHold) ts.push_back(T{lv, il, e});
+            }
+        }
+        std::stable_sort(ts.begin(), ts.end(), [](const T& a, const T& b) { return a.lv > b.lv; });
+        for (const T& t : ts) {
+            if (credit[dev_] < 1.0) break;
+            auto& P = F->lp[(size_t) t.il];
+            const int rc = F->layer_rc[(size_t) t.il];
+            auto& R = F->rc[(size_t) rc];
+            const int key = t.il * NE + t.e;
+            const int rs = F->ram_of[(size_t) key];
+            if (rs < 0 || R.st[(size_t) rs] != FastState::kRHold) continue;
+            int fs = -1, vs = -1;
+            uint32_t vl = UINT32_MAX, vc = UINT32_MAX;
+            uint64_t vt = UINT64_MAX;
+            for (int s2 = 0; s2 < P.n_main; ++s2) {
+                const char st = P.st[(size_t) s2];
+                if (st == FastState::kFree) {
+                    fs = s2;
+                    break;
+                }
+                if (st != FastState::kResident || P.key[(size_t) s2] < 0) continue;
+                const uint32_t lv = conv_level(t.il, P.key[(size_t) s2]);
+                const uint32_t c = F->cnt[(size_t) t.il * NE + P.key[(size_t) s2]];
+                if (lv < vl || (lv == vl && (c < vc || (c == vc && P.tick[(size_t) s2] < vt)))) {
+                    vl = lv;
+                    vc = c;
+                    vt = P.tick[(size_t) s2];
+                    vs = s2;
+                }
+            }
+            if (fs >= 0) {   // up now; it goes live when its copy landed (step a)
+                P.st[(size_t) fs] = FastState::kLanding;
+                R.st[(size_t) rs] = FastState::kRPin;
+                cudaMemcpyAsync(P.slot_ptr(fs), R.slot((size_t) rs), F->L[(size_t) t.il].blob,
+                                cudaMemcpyHostToDevice, pf_s[dev_]);
+                cudaEvent_t ev = F->get_event();
+                cudaEventRecord(ev, pf_s[dev_]);
+                F->bg.push_back(FastState::BgMove{t.il, fs, key, rc, rs, true, ev, true});
+                g_conv_pf[0].fetch_add(1, std::memory_order_relaxed);
+                credit[dev_] -= 1.0;
+            } else if (vs >= 0 && (vl == 0 || vl + churn <= t.lv)) {   // the victim down first: its slot is free a boundary later
+                int fr = -1;
+                for (int s2 = 0; s2 < R.n && fr < 0; ++s2)
+                    if (R.st[(size_t) s2] == FastState::kRFree) fr = s2;
+                if (fr < 0) continue;
+                const int vkey = t.il * NE + P.key[(size_t) vs];
+                P.st[(size_t) vs] = FastState::kDraining;   // (still live in VRAM until the copy landed)
+                R.st[(size_t) fr] = FastState::kRDemote;
+                R.key[(size_t) fr] = vkey;
+                cudaMemcpyAsync(R.slot((size_t) fr), P.slot_ptr(vs), F->L[(size_t) t.il].blob,
+                                cudaMemcpyDeviceToHost, pf_s[dev_]);
+                cudaEvent_t ev = F->get_event();
+                cudaEventRecord(ev, pf_s[dev_]);
+                F->bg.push_back(FastState::BgMove{t.il, vs, vkey, rc, fr, false, ev});
+                g_conv_pf[1].fetch_add(1, std::memory_order_relaxed);
+                credit[dev_] -= 1.0;
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------- between tokens
 //
 // Every device idle, the service thread caught up: (1) RAM slots of promoted experts free up, disk reads of the
@@ -5514,16 +5684,22 @@ bool Glm5Model::fast_boundary(std::string& err) {
         const char* v = getenv("STRATA_GLM_VRAM_EVICT_LOG");
         return v != nullptr ? std::max(0L, std::atol(v)) : (live ? 100L : 0L);
     }();
-    if ((live || every > 0) && l0_ == 0) {
+    // STRATA_GLM_VRAM_EVICT_LOG_S=<s>: also a line once s seconds passed (the 2-chat decode's boundaries are 64 steps apart)
+    static const double every_s = env_dbl("STRATA_GLM_VRAM_EVICT_LOG_S", 0.0);
+    if ((live || every > 0 || every_s > 0) && l0_ == 0) {
         static std::atomic<uint64_t> ticks{0};
         static std::atomic<int> said{-1};
+        static std::atomic<int64_t> said_t{0};
         if (live && g_live_seqs.load(std::memory_order_relaxed) <= 1 &&
             g_live_quiet.load(std::memory_order_relaxed) < live_hold().n)
             g_live_quiet.fetch_add(1, std::memory_order_relaxed);
         const bool lru = live && live_lru();
         const uint64_t tk = ++ticks;
         const bool flip = live && said.exchange(lru ? 1 : 0) != (lru ? 1 : 0);
-        if (flip || (every > 0 && tk % (uint64_t) every == 0)) {
+        const int64_t tn = every_s > 0 ? live_now() : 0;
+        const bool due_s = every_s > 0 && (double) (tn - said_t.load(std::memory_order_relaxed)) >= every_s * 1e9;
+        if (flip || due_s || (every > 0 && tk % (uint64_t) every == 0)) {
+            if (every_s > 0) said_t.store(tn, std::memory_order_relaxed);
             uint64_t h = 0, l = 0;
             for (const Glm5Model* m = this; m != nullptr; m = m->split_next_.get())
                 if (m->fast_ != nullptr) {
@@ -5739,10 +5915,13 @@ bool Glm5Model::fast_boundary(std::string& err) {
             int v = -1;
             uint32_t bc = UINT32_MAX;
             uint64_t bt = UINT64_MAX;
+            uint32_t bl = UINT32_MAX;   // (STRATA_GLM_CONV_EXPERTS: the lowest allocation level first, then the rule)
             for (int s2 = 0; s2 < P.n; ++s2) {
                 if (P.st[(size_t) s2] != FastState::kResident) continue;
+                const uint32_t lv = conv_level(il, P.key[(size_t) s2]);
                 const uint32_t c = vram_lru ? 0u : F->cnt[(size_t) il * g.n_expert + P.key[(size_t) s2]];
-                if (c < bc || (c == bc && P.tick[(size_t) s2] < bt)) {
+                if (lv < bl || (lv == bl && (c < bc || (c == bc && P.tick[(size_t) s2] < bt)))) {
+                    bl = lv;
                     bc = c;
                     bt = P.tick[(size_t) s2];
                     v = s2;
@@ -5862,6 +6041,10 @@ bool Glm5Model::fast_boundary(std::string& err) {
                 if (F->ram_of[(size_t) m.key] == m.rslot) F->ram_of[(size_t) m.key] = -1;
                 upd(F->rtab_key((size_t) m.key), 0ull);
                 ++F->bg_up;
+                if (m.pf) {
+                    g_conv_pf[2].fetch_add(1, std::memory_order_relaxed);
+                    g_conv_pf[3].fetch_add(F->L[(size_t) m.il].blob, std::memory_order_relaxed);
+                }
             } else {
                 upd(F->tab_key((size_t) m.key), 0ull);
                 if (F->slot_of[(size_t) m.key] == m.vslot) F->slot_of[(size_t) m.key] = -1;
@@ -5878,6 +6061,7 @@ bool Glm5Model::fast_boundary(std::string& err) {
             F->ev_free.push_back(m.ev);
         }
         F->bg.swap(keep);
+        if (conv_pf_on() && !F->bg_hold) conv_preload_locked(F->pf_bg.load(std::memory_order_acquire) ? 1 : 0);
         static const int bg_n = [] {
             const char* v = getenv("STRATA_GLM_PROMOTE");
             return v != nullptr ? std::max(0, std::atoi(v)) : 8;
@@ -5927,7 +6111,8 @@ bool Glm5Model::fast_boundary(std::string& err) {
                 for (int s2 = 0; s2 < P.n; ++s2) {
                     if (P.st[(size_t) s2] == FastState::kFree) {
                         if (nfree < (bg_fill > 0 ? 8 : 1)) frees[nfree++] = s2;
-                    } else if (P.st[(size_t) s2] == FastState::kResident && P.key[(size_t) s2] >= 0) {
+                    } else if (P.st[(size_t) s2] == FastState::kResident && P.key[(size_t) s2] >= 0 &&
+                               conv_level(il, P.key[(size_t) s2]) == 0) {   // (CONV_EXPERTS: never one of the allocation)
                         const uint32_t c = F->cnt[(size_t) il * NE + P.key[(size_t) s2]];
                         if (c < cold) {
                             cold = c;

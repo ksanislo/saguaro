@@ -668,6 +668,7 @@ struct Glm5Model::FastState {
         int il, vslot, key, rclass, rslot;
         bool up;
         cudaEvent_t ev;
+        bool pf = false;   // STRATA_GLM_CONV_PREFETCH's
     };
     std::vector<BgMove> bg;
     bool bg_hold = false;   // lend_tail: no new moves while the pool's tail is lent
