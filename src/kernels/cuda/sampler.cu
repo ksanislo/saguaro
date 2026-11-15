@@ -14,12 +14,16 @@
 // `sampler_kernel` runs the sampled chain as `top_k` block-argmax rounds followed by the top_p / temperature /
 // draw chain (its header says why the selection must be parallel and why the tie rule keeps the semantics).
 #include "strata/kernels/sampler.hpp"
+#include "strata/kernels/logprobs.hpp"
 
 #include <cuda_runtime.h>
 
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <mutex>
+#include <string>
+#include <vector>
 
 namespace strata::kernels {
 namespace {
@@ -578,6 +582,165 @@ void sample_verify(const float* logits, int n_tokens, int n_vocab, const Sampler
         logits, n_vocab, n_tokens, pen ? history : nullptr, pen ? history_len : 0, p, out, const_cast<SpecList*>(q),
         draft);
     spec_launched("sample_verify", stream);
+}
+
+// ---- logprobs (logprobs.hpp): DS4's logprob_rows kernel (ds4_kernels.cu), each row also writing its key
+namespace {
+using strata::ds4::LpStride;
+using strata::ds4::lp_before;
+using strata::ds4::lp_penalized;
+using strata::ds4::lse_merge;
+constexpr int kLpThreads = 256;
+
+__global__ void __launch_bounds__(kLpThreads) logprob_rows_kernel(const float* __restrict__ logits, int V,
+                                                                  const int* __restrict__ hist, int h, float repeat,
+                                                                  float freq, float present, const int* __restrict__ ids,
+                                                                  int k, LogprobRow* __restrict__ out,
+                                                                  int64_t* __restrict__ keys, int64_t key0) {
+    extern __shared__ unsigned lp_bits[];
+    __shared__ float sm[32], ss[32];
+    __shared__ int si[32];
+    __shared__ float lse_sh, wv_sh;
+    __shared__ int wi_sh;
+    const int t = blockIdx.x, tid = threadIdx.x, nt = blockDim.x, lane = tid & 31, w = tid >> 5, nw = nt >> 5;
+    const float* l = logits + (size_t) t * V;
+    const int* hr = hist != nullptr && h > 0 ? hist + (size_t) t * h : nullptr;
+    if (hr != nullptr) {
+        for (int i = tid; i < (V + 31) >> 5; i += nt) lp_bits[i] = 0u;
+        __syncthreads();
+        for (int i = tid; i < h; i += nt)
+            if (hr[i] >= 0 && hr[i] < V) atomicOr(&lp_bits[hr[i] >> 5], 1u << (hr[i] & 31));
+        __syncthreads();
+    }
+    const auto val = [&](int v) {
+        float x = l[v];
+        if (hr != nullptr && ((lp_bits[v >> 5] >> (v & 31)) & 1u)) {
+            int c = 0;
+            for (int i = 0; i < h; ++i) c += hr[i] == v;
+            x = lp_penalized(x, c, repeat, freq, present);
+        }
+        return x;
+    };
+    LpStride st;
+    for (int v = tid; v < V; v += nt) st.push(val(v), v, k);
+    float m = st.m, s = st.s;
+    for (int o = 16; o > 0; o >>= 1) lse_merge(m, s, __shfl_xor_sync(0xffffffffu, m, o), __shfl_xor_sync(0xffffffffu, s, o));
+    if (lane == 0) sm[w] = m, ss[w] = s;
+    __syncthreads();
+    if (tid == 0) {
+        for (int i = 1; i < nw; ++i) lse_merge(m, s, sm[i], ss[i]);
+        lse_sh = m == -INFINITY ? -INFINITY : m + logf(s);
+    }
+    __syncthreads();
+    const float lse = lse_sh;
+    LogprobRow& o = out[t];
+    if (tid == 0) {
+        const int id = ids[t];
+        o.id = id;
+        o.lp = id >= 0 && id < V ? val(id) - lse : __int_as_float(0x7fc00000);
+    }
+    int n = 0, hp = 0;
+    for (; n < k; ++n) {
+        float bv = hp < st.tn ? st.tv[hp] : -INFINITY;
+        int bi = hp < st.tn ? st.ti[hp] : 0x7fffffff;
+        for (int q = 16; q > 0; q >>= 1) {
+            const float ov = __shfl_xor_sync(0xffffffffu, bv, q);
+            const int oi = __shfl_xor_sync(0xffffffffu, bi, q);
+            if (lp_before(ov, oi, bv, bi)) bv = ov, bi = oi;
+        }
+        if (lane == 0) sm[w] = bv, si[w] = bi;
+        __syncthreads();
+        if (tid == 0) {
+            for (int i = 1; i < nw; ++i)
+                if (lp_before(sm[i], si[i], bv, bi)) bv = sm[i], bi = si[i];
+            wv_sh = bv, wi_sh = bi;
+        }
+        __syncthreads();
+        bv = wv_sh, bi = wi_sh;
+        if (bi == 0x7fffffff) break;   // (every finite value listed)
+        if (tid == 0) o.top[n] = bi, o.top_lp[n] = bv - lse;
+        if (hp < st.tn && st.ti[hp] == bi) ++hp;   // (an id is in one thread's stride only)
+    }
+    if (tid == 0) {
+        o.n = n;
+        __threadfence_system();   // (the row before its key: the host checks the key)
+        keys[t] = key0 + t;
+    }
+}
+
+std::mutex lp_pool_mu;
+std::vector<LpSink*> lp_pool;
+uint64_t lp_uses = 0;
+}  // namespace
+
+LpSink* lp_sink_get(int k, std::string& err) {
+    LpSink* s = nullptr;
+    {
+        std::lock_guard<std::mutex> lk(lp_pool_mu);
+        if (!lp_pool.empty()) {
+            s = lp_pool.back();
+            lp_pool.pop_back();
+        }
+        if (s == nullptr) {
+            s = new LpSink();
+            const unsigned fl = cudaHostAllocMapped | cudaHostAllocPortable;
+            if (cudaHostAlloc((void**) &s->rows, LpSink::kRing * sizeof(LogprobRow), fl) != cudaSuccess ||
+                cudaHostAlloc((void**) &s->keys, LpSink::kRing * sizeof(int64_t), fl) != cudaSuccess) {
+                cudaGetLastError();
+                if (s->rows != nullptr) cudaFreeHost(s->rows);
+                delete s;
+                err = "logprobs: the rows' pinned memory did not allocate";
+                return nullptr;
+            }
+        }
+        s->tag = (++lp_uses) & 0x7fffffull;
+    }
+    s->k = k < 0 ? 0 : (k > kTopLogprobs ? kTopLogprobs : k);
+    for (int i = 0; i < LpSink::kRing; ++i) s->want[i] = -1, s->seq[i] = 0, s->keys[i] = -1;
+    s->n = 0;
+    s->next = 0;
+    return s;
+}
+
+void lp_sink_put(LpSink* s) {
+    if (s == nullptr) return;
+    std::lock_guard<std::mutex> lk(lp_pool_mu);
+    lp_pool.push_back(s);
+}
+
+void logprob_pick(LpSink* s, const float* logits, int T, int n_vocab, const int* hist, int h, float repeat, float freq,
+                  float present, const int* ids, int64_t pos0, void* stream) {
+    if (s == nullptr || T < 1 || T > LpSink::kRing || pos0 < 0) return;
+    int r;
+    {
+        std::lock_guard<std::mutex> lk(s->mu);
+        r = s->next + T > LpSink::kRing ? 0 : s->next;
+        s->next = r + T;
+        for (int t = 0; t < T; ++t) s->want[r + t] = s->key(pos0 + t), s->seq[r + t] = ++s->n;
+    }
+    LogprobRow* rows = nullptr;
+    int64_t* keys = nullptr;
+    cudaHostGetDevicePointer((void**) &rows, s->rows + r, 0);
+    cudaHostGetDevicePointer((void**) &keys, s->keys + r, 0);
+    const size_t bits = hist != nullptr && h > 0 ? (size_t) ((n_vocab + 31) / 32) * sizeof(unsigned) : 0;
+    logprob_rows_kernel<<<T, kLpThreads, bits, (cudaStream_t) stream>>>(
+        logits, n_vocab, hist, h, repeat, freq, present, ids, s->k, rows, keys, s->key(pos0));
+    const cudaError_t e = cudaGetLastError();
+    if (e != cudaSuccess) std::fprintf(stderr, "logprobs: the rows' launch: %s\n", cudaGetErrorString(e));
+    if (stream == nullptr) cudaDeviceSynchronize();
+}
+
+std::string logprob_line(LpSink* s, long long rid, int64_t pos, int tok) {
+    if (s == nullptr) return "";
+    const int64_t key = s->key(pos);
+    std::lock_guard<std::mutex> lk(s->mu);
+    int best = -1;
+    for (int i = 0; i < LpSink::kRing; ++i)
+        if (s->want[i] == key && (best < 0 || s->seq[i] > s->seq[best])) best = i;
+    if (best < 0 || *(volatile int64_t*) &s->keys[best] != key) return "";
+    const LogprobRow row = s->rows[best];
+    if (row.id != tok) return "";
+    return strata::ds4::lp_line(rid, row);
 }
 
 }  // namespace strata::kernels

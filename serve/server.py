@@ -466,7 +466,7 @@ def think_boundary(text: str) -> bool:
     after it."""
     return bool(_THINK_BOUNDARY.search(text))
 
-# ---- log-probabilities (OpenAI's `logprobs` / `top_logprobs`; the DeepSeek engine's GEN logprobs=<n> and LP lines).
+# ---- log-probabilities (OpenAI's `logprobs` / `top_logprobs`; the DeepSeek and GLM engines' GEN logprobs=<n> and LP lines).
 # The engine reports, for each token it writes, the token's logprob and its row's n most likely, from the model's
 # softmax after the request's penalties, at temperature 1 and before top_k / top_p / min_p (OpenAI's convention: the
 # same numbers whatever the request's temperature).  Only a request that asks gets them; an engine that does not say
@@ -2255,7 +2255,7 @@ class Service:
             bias = {**bias, **{t: -100.0 for t in sorted(self.stop_ids | self.eos_ids)}}
         if "logit_bias" in req or ignore:
             req["logit_bias"] = bias
-        # logprobs need an engine that writes them (INFO logprobs=<n>: the DeepSeek engine); another would answer
+        # logprobs need an engine that writes them (INFO logprobs=<n>: the DeepSeek and GLM engines); another would answer
         # without them, which a client that asked could not tell from a bug
         n = logprobs_of(req)
         if isinstance(req.get("top_logprobs"), str):
@@ -2263,7 +2263,7 @@ class Service:
         top = (getattr(self.engine, "info", None) or {}).get("logprobs")
         if n is not None and not (isinstance(top, int) and top >= n):
             raise ValueError("logprobs: this model's engine does not report token log-probabilities (the DeepSeek "
-                             "engine does - update Maya (./maya.sh --setup) if it is that one)")
+                             "and GLM engines do - update Maya (./maya.sh --setup) if it is that one)")
 
     def render_ids(self, messages, tools, kwargs, suffix="") -> list[int]:
         """The template rendered for `messages` and `tools` (+ `suffix`, text the server appends to the prompt) and

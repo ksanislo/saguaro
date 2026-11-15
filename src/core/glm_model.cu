@@ -22,6 +22,7 @@
 #include "strata/kernels/glm_fast.hpp"
 #include "strata/kernels/glm_ffn.hpp"
 #include "strata/kernels/glm_hc.hpp"
+#include "strata/kernels/logprobs.hpp"
 #include "strata/kernels/glm_kda.hpp"
 #include "strata/kernels/router_sigmoid.hpp"
 #include "strata/kernels/native_mmvq.hpp"
@@ -1137,11 +1138,18 @@ void Glm5Model::pen_free() {   // (on this part's device)
 void Glm5Model::pick_tokens(const float* logits, int T, const strata::kernels::SamplerParams& sp, const int32_t* win,
                             int n0, int* out, cudaStream_t s) {
     const int V = (int) g_.n_vocab;
+    const std::vector<int32_t>* H = sp.host_history;
+    // logprobs=<k>: the rows of this pick's tokens beside it, keyed by their positions (H's length + the drafts before)
+    const auto lp = [&](const int* hist, int h) {
+        if (sp.lp != nullptr && H != nullptr)
+            strata::kernels::logprob_pick(sp.lp, logits, T, V, hist, h, sp.penalty_repeat, sp.penalty_freq,
+                                          sp.penalty_present, out, (int64_t) H->size() + n0, s);
+    };
     if (sp.penalty_last_n <= 0) {   // no penalties: the call every site made before, nothing else
         strata::kernels::sample_tokens(logits, T, V, nullptr, 0, sp, out, s);
+        lp(nullptr, 0);
         return;
     }
-    const std::vector<int32_t>* H = sp.host_history;
     const int h = std::min(sp.penalty_last_n, kPenCap);
     std::string why;
     std::unique_lock<std::mutex> lk(pen_mu_);
@@ -1157,6 +1165,7 @@ void Glm5Model::pick_tokens(const float* logits, int T, const strata::kernels::S
         strata::kernels::SamplerParams q = sp;
         q.penalty_last_n = 0;
         strata::kernels::sample_tokens(logits, T, V, nullptr, 0, q, out, s);
+        lp(nullptr, 0);
         return;
     }
     // a window's first token is the history's last (what the state was fed last): a caller that lets them part would
@@ -1189,6 +1198,7 @@ void Glm5Model::pick_tokens(const float* logits, int T, const strata::kernels::S
     strata::kernels::SamplerParams q = sp;
     q.penalty_last_n = h;
     strata::kernels::sample_tokens(logits, T, V, dev, h, q, out, s);
+    lp(dev, h);
     for (int i = r; i < r + T; ++i) cudaEventRecord(pen_ev_[i], s);
 }
 

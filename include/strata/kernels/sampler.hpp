@@ -13,6 +13,8 @@
 
 namespace strata::kernels {
 
+struct LpSink;   // logprobs.hpp
+
 struct SamplerParams {
     int top_k = 20;              // sampled path: 1..64 as given; 0 (off) or more than 64 keep the widest list, 64
     float top_p = 0.95f;         // 1.0 disables the filter
@@ -33,6 +35,9 @@ struct SamplerParams {
     // fed so far, oldest first - its prompt, then each token it wrote.  Glm5Model::pick_tokens hands each pick the last
     // penalty_last_n of them (a verify window's row t: these, then the window's drafts 1..t).  nullptr = none
     const std::vector<int32_t>* host_history = nullptr;
+    // GEN logprobs=<k> (GLM): lp_k the request's top alternatives (-1: none); lp its sink, every pick's rows (pick_tokens)
+    int lp_k = -1;
+    LpSink* lp = nullptr;
 };
 
 // logits (n_tokens, n_vocab) -> one sampled token id per row in `out`.

@@ -32,6 +32,7 @@
 #include "strata/kernels/ngram.hpp"
 #include "strata/kernels/s2_expert_grouped.hpp"
 #include "strata/kernels/sampler.hpp"
+#include "strata/kernels/logprobs.hpp"
 #include "strata/kernels/verify_kernels.hpp"
 #include "strata/kernels/shared_expert.hpp"
 #include "strata/kernels/native_moe.hpp"
@@ -1102,13 +1103,13 @@ static int glm_pack_generate(const Options& o) {
         // threads a request's cpu_threads gets - its pool's size)
         std::printf("INFO context=%lld kv=%s kv_resident=%lld expert_slots=%lld expert_cache_mib=%lld engine_kind=glm-fast "
                     "experts=%d vram_slots=%lld vram_gb=%.1f ram_slots=%lld ram_gb=%.1f mtp=%d dflash=%d vision_lend=%zu "
-                    "cpu_threads=%d cpu_threads_max=%d pcie_share=%.2f logit_bias=1\n",
+                    "cpu_threads=%d cpu_threads_max=%d pcie_share=%.2f logit_bias=1 logprobs=%d\n",
                     (long long) o.max_context, model.kv_int8() ? "int8" : "fp16", (long long) model.kv_resident(),
                     (long long) st.pool_slots,
                     (long long) (st.pool_gb * 1024.0), model.geometry().n_expert * (model.geometry().n_layers - model.geometry().dense_lead),
                     (long long) st.pool_slots, st.pool_gb, (long long) st.ram_slots, st.ram_gb, model.has_mtp() ? 1 : 0,
                     model.dflash_ready() ? 1 : 0, model.vision_lend_bytes(), model.cpu_lane_threads(),
-                    model.cpu_lane_threads_max(), model.pcie_share());
+                    model.cpu_lane_threads_max(), model.pcie_share(), strata::kernels::kTopLogprobs);
         // the Monitor's map of each GPU: what each part holds on its card, in bytes (Glm5Model::VramReport) - the
         // server finds the card NVML numbers by its PCI address and adds what NVML sees besides
         for (const auto& r : model.vram_report())
@@ -2298,6 +2299,12 @@ static int glm_pack_generate(const Options& o) {
     const auto run_request = [&](const std::vector<int64_t>& ids, int64_t max_new,
                                  const strata::kernels::SamplerParams& rq_in) -> int {
         strata::kernels::SamplerParams sp = rq_in;   // per request (the server sends sampling keys per GEN)
+        strata::kernels::LpHold lp_hold;   // logprobs=<k>: this request's rows
+        if (sp.lp_k >= 0) {
+            std::string le;
+            lp_hold.reset(sp.lp = strata::kernels::lp_sink_get(sp.lp_k, le));
+            if (sp.lp == nullptr) std::fprintf(stderr, "glm: %s - this request's tokens without them\n", le.c_str());
+        }
         stop_req.store(false);
         pause_req.store(false);
         pause_keep.store(false);
@@ -2359,6 +2366,10 @@ static int glm_pack_generate(const Options& o) {
         };
         const auto on_token = [&](int tok) -> bool {
             std::printf("T %d\n", tok);
+            if (sp.lp != nullptr) {
+                const std::string l = strata::kernels::logprob_line(sp.lp, -1, (int64_t) pen_hist.size(), tok);
+                if (!l.empty()) std::printf("%s\n", l.c_str());
+            }
             ++produced;
             emitted.push_back((int32_t) tok);
             if (sp.host_history != nullptr) pen_hist.push_back((int32_t) tok);   // (fed next: the picks after count it)
@@ -2653,6 +2664,7 @@ static int glm_pack_generate(const Options& o) {
         int64_t max_new = 0, produced = 0;
         std::vector<int32_t> prompt, emitted;
         std::vector<int32_t> pen;   // the penalties' history (sp.host_history): the prompt, then every token written
+        strata::kernels::LpHold lp;   // logprobs=<k>: its rows (sp.lp)
         bool in_think = false;
         int64_t think_budget = 0;
         int32_t think_end = -1;
@@ -2771,6 +2783,10 @@ static int glm_pack_generate(const Options& o) {
     // on_token), the stop conditions.  false: the request ends here (g.finish says why)
     const auto gen_token = [&](Gen& g, int tok) -> bool {
         std::printf("T %d %d\n", g.rid, tok);
+        if (g.sp.lp != nullptr) {
+            const std::string l = strata::kernels::logprob_line(g.sp.lp, g.rid, (int64_t) g.pen.size(), tok);
+            if (!l.empty()) std::printf("%s\n", l.c_str());
+        }
         ++g.produced;
         ++multi_n;
         g.emitted.push_back((int32_t) tok);
@@ -3408,6 +3424,11 @@ static int glm_pack_generate(const Options& o) {
         if (g->sp.penalty_last_n > 0) {   // its penalties' history (#273; the Gen lives behind a unique_ptr: it stays put)
             g->pen = g->prompt;
             g->sp.host_history = &g->pen;
+        }
+        if (g->sp.lp_k >= 0) {
+            std::string le;
+            g->lp.reset(g->sp.lp = strata::kernels::lp_sink_get(g->sp.lp_k, le));
+            if (g->sp.lp == nullptr) std::fprintf(stderr, "glm multi: request %d: %s\n", rid, le.c_str());
         }
         // the context: an idle one that holds the prompt and the room after it, and whose snapshot - or one of its
         // conversation checkpoints (STRATA_GLM_MULTI_CKPTS: an edited last message, a cancelled answer sent again
@@ -4848,6 +4869,10 @@ static int glm_pack_generate(const Options& o) {
                 else if (k == "penalty_repeat") { pen_repeat = std::strtof(v.c_str(), nullptr); }
                 else if (k == "penalty_freq") { pen_freq = std::strtof(v.c_str(), nullptr); }
                 else if (k == "penalty_present") { pen_present = std::strtof(v.c_str(), nullptr); }
+                else if (k == "logprobs") {   // <k>: an LP line after each T line (logprobs.hpp); no sampler key
+                    const int n = std::atoi(v.c_str());
+                    rq.lp_k = n < 0 ? -1 : std::min(n, strata::kernels::kTopLogprobs);
+                }
             }
             if (any_key) rq.greedy = false;   // any sampler key switches the request to the sampled path
             if (greedy_req) rq.greedy = true;
@@ -4865,6 +4890,14 @@ static int glm_pack_generate(const Options& o) {
                 rq.penalty_repeat = pen_repeat;
                 rq.penalty_freq = pen_freq;
                 rq.penalty_present = pen_present;
+            }
+            else if (rq.lp_k >= 0) {
+                // logprobs: neutral penalties, so every shortcut leaves the picks to pick_tokens (the same tokens) and
+                // the request keeps its history (the rows' positions)
+                rq.penalty_last_n = 1;
+                rq.penalty_repeat = 1.0f;
+                rq.penalty_freq = 0.0f;
+                rq.penalty_present = 0.0f;
             }
             if (!bias_err.empty()) {
                 if (multi && req_rid >= 0) std::printf("ERR %d %s\n", req_rid, bias_err.c_str());
