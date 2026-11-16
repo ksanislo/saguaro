@@ -17,6 +17,7 @@
 #include <cuda.h>
 #endif
 
+#include <climits>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -321,6 +322,11 @@ void Glm5Model::pool_take_back() {
     }
 }
 
+int Glm5Model::el_live(int il) const {
+    if (elp_ == nullptr || il < 0 || il >= (int) elp_->L.size()) return INT_MAX;
+    return elp_->L[(size_t) il].live;
+}
+
 void Glm5Model::pool_take_back_all() {
     for (Glm5Model* m = this; m != nullptr; m = m->split_next_.get()) m->pool_take_back();
     cudaSetDevice(dev_);
@@ -362,6 +368,7 @@ bool Glm5Model::pool_give(size_t, std::string& err) {
 }
 void Glm5Model::pool_take_back() {}
 void Glm5Model::pool_take_back_all() {}
+int Glm5Model::el_live(int) const { return INT_MAX; }
 bool Glm5Model::seq_reserve_all(int s, int64_t tokens, std::string& err) { return seq_grow_all(s, tokens, err); }
 #endif
 

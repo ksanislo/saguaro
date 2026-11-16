@@ -5585,7 +5585,9 @@ void Glm5Model::fast_ahead_reader() {
 void Glm5Model::conv_preload_into(int il, int slot) {
     FastState* F = fast_;
     const int NE = g_.n_expert;
-    if (F == nullptr || dev_ < 0 || dev_ >= 64 || g_conv_pf_stream[dev_] == nullptr || F->layer_rc[(size_t) il] < 0) return;
+    if (F == nullptr || F->bg_hold || dev_ < 0 || dev_ >= 64 || g_conv_pf_stream[dev_] == nullptr ||
+        F->layer_rc[(size_t) il] < 0 || slot >= el_live(il))
+        return;
     auto& P = F->lp[(size_t) il];
     const int rc = F->layer_rc[(size_t) il];
     auto& R = F->rc[(size_t) rc];
@@ -5616,7 +5618,7 @@ void Glm5Model::conv_preload_into(int il, int slot) {
 void Glm5Model::conv_preload_locked(int mode) {
     FastState* F = fast_;
     const Glm5Geometry& g = g_;
-    if (F == nullptr || !g_conv_tgt_any.load(std::memory_order_acquire) || dev_ < 0 || dev_ >= 64) return;
+    if (F == nullptr || F->bg_hold || !g_conv_tgt_any.load(std::memory_order_acquire) || dev_ < 0 || dev_ >= 64) return;
     static const double pf_rate = env_dbl("STRATA_GLM_CONV_PREFETCH_RATE", 275.0);
     static const double pf_rrate = env_dbl("STRATA_GLM_CONV_PREFETCH_READ_RATE", 64.0);
     static const double pf_burst = env_dbl("STRATA_GLM_CONV_PREFETCH_BURST", 32.0);
@@ -5665,7 +5667,8 @@ void Glm5Model::conv_preload_locked(int mode) {
             int fs = -1, vs = -1;
             uint32_t vl = UINT32_MAX, vc = UINT32_MAX;
             uint64_t vt = UINT64_MAX;
-            for (int s2 = 0; s2 < P.n_main; ++s2) {
+            const int top = std::min(P.n_main, el_live(t.il));   // (elastic: a slot past the mapped ones is no slot)
+            for (int s2 = 0; s2 < top; ++s2) {
                 const char st = P.st[(size_t) s2];
                 if (st == FastState::kFree) {
                     fs = s2;
@@ -6114,7 +6117,8 @@ bool Glm5Model::fast_boundary(std::string& err) {
             F->ev_free.push_back(m.ev);
         }
         F->bg.swap(keep);
-        for (const auto& ps : pair_slots) conv_preload_into(ps.first, ps.second);
+        if (!F->bg_hold)   // (lending holds the moves: its slot stays free for the lending to take)
+            for (const auto& ps : pair_slots) conv_preload_into(ps.first, ps.second);
         if (conv_pf_on() && !F->bg_hold) conv_preload_locked(F->pf_bg.load(std::memory_order_acquire) ? 1 : 0);
         static const int bg_n = [] {
             const char* v = getenv("STRATA_GLM_PROMOTE");

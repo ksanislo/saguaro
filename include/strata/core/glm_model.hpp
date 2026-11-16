@@ -866,6 +866,7 @@ public:
     // caches - the coldest layer top first - and taken back when the contexts let go
     struct ElPool;
     ElPool* elp_ = nullptr;
+    int el_live(int il) const;   // the elastic pool's mapped slots of layer il (INT_MAX: no elastic pool)
     size_t el_budget0_ = 0;                                       // the budget before any expert gave way
     uint8_t* el_pool_alloc(const std::vector<std::array<size_t, 3>>& layers, std::vector<size_t>& offs, std::string& err);
     void el_pool_free();

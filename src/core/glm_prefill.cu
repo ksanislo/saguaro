@@ -1792,6 +1792,7 @@ bool Glm5Model::lend_slots(const std::function<bool(int, int)>& sel, uint64_t& m
         return false;
     if (!F->bg.empty() || !F->draining.empty()) {
         err = "glm lending: tier moves were not retired";
+        F->bg_hold = false;   // (the lending did not happen: the moves go on)
         return false;
     }
     const int NE = g_.n_expert;
