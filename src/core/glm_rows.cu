@@ -652,7 +652,7 @@ bool Glm5Model::rows_moe(int il, RowSeq* rw, int n, std::string& err) {
         return false;
     };
     const auto& Ly = F->L[(size_t) il];
-    if (glmfast::route_counting()) {   // STRATA_GLM_ROUTE_DUMP's tags: the rows as issued (an MTP window's are several a seq)
+    if (glmfast::route_seq_counting()) {   // STRATA_GLM_ROUTE_DUMP's / CONV_UNION's tags: the rows as issued (an MTP window's are several a seq)
         row_seq_.resize((size_t) n);
         for (int i = 0; i < n; ++i) row_seq_[(size_t) i] = rw[i].seq;
     }

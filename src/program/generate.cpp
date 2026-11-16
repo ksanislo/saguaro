@@ -1069,8 +1069,18 @@ struct ConvAlloc {
         std::chrono::steady_clock::time_point last{};
         int running = 0;
         size_t lcp = 0;
+        // CONV_UNION: its own decode routes (the route tags), decayed in time; when it last decoded; its tokens
+        std::chrono::steady_clock::time_point decayed{}, decoded{};
+        double tok = 0;
     };
     bool on = false, open_only = false;
+    // STRATA_GLM_CONV_UNION=1 (bench/glm-conv/replay-rec.py's winner, alpha 0): the target a layer = the top slots of
+    // sum_c w_c (its own decode share + BETA x the global share / (1 + its tokens / TOK0)) + 0.01 x the global share;
+    // w_c = 1 while it decodes or reads, then halving every IDLE_HALF_S, 0 after DROP_S; its counts halve every H_S
+    bool uni = false;
+    double u_h = 30.0, u_idle_half = 5.0, u_drop = 35.0, u_beta = 1.0, u_tok0 = 50.0;
+    int u_layers = 0;
+    std::vector<std::vector<uint32_t>> seq_prev;   // (each sequence's tagged counts at the last attribution)
     double open_s = 5.0, w_open = 0.25, w_closed = 0.0, half_s = 60.0, eps = 0.1, decay = 0.5, tick_s = 2.0;
     int k0 = 16, recall_cap = 0, closed_floor = 0, slack = 4, max_convs = 16, next_id = 1;
     std::vector<Conv> convs;
@@ -1105,6 +1115,15 @@ struct ConvAlloc {
         eps = num("STRATA_GLM_CONV_EPS", 0.1);
         tick_s = num("STRATA_GLM_CONV_TICK_S", 2.0);
         slack = (int) num("STRATA_GLM_CONV_SLACK", 4);
+        uni = num("STRATA_GLM_CONV_UNION", 0) != 0 && on;
+        u_h = num("STRATA_GLM_CONV_UNION_H_S", 30.0);
+        u_idle_half = num("STRATA_GLM_CONV_UNION_IDLE_HALF_S", 5.0);
+        u_drop = num("STRATA_GLM_CONV_UNION_DROP_S", 35.0);
+        u_beta = num("STRATA_GLM_CONV_UNION_BETA", 1.0);
+        u_tok0 = num("STRATA_GLM_CONV_UNION_TOK0", 50.0);
+        if (uni)
+            std::fprintf(stderr, "glm conv: union on - counts halving every %.0f s, weight halving every %.0f s idle, 0 after "
+                         "%.0f s, global prior %.2f / (1 + tokens / %.0f)\n", u_h, u_idle_half, u_drop, u_beta, u_tok0);
         model = &m;
         glob.assign((size_t) kL * kE, 0.0f);
         std::fprintf(stderr, "glm conv: %s - open %.1f s, floor %d, w_open %.2f, closed: w %.2f / recall cap %d (half %.0f s), "
@@ -1165,7 +1184,50 @@ struct ConvAlloc {
         return nullptr;
     }
     // the decode's route counts since the last call, split evenly over the conversations decoding now
-    void attribute(const std::vector<int>& decoding) {
+    // CONV_UNION: a sequence's tagged counts from now on belong to the conversation admitted into it
+    void seq_mark(int ctx) {
+        if (!uni || ctx < 0) return;
+        if ((int) seq_prev.size() <= ctx) seq_prev.resize((size_t) ctx + 1);
+        strata::core::Glm5Model::route_counts_seq(ctx, seq_prev[(size_t) ctx]);
+    }
+    void attribute(const std::vector<std::pair<int, int>>& decoding_ctx) {
+        std::vector<int> decoding;
+        for (const auto& d : decoding_ctx) decoding.push_back(d.first);
+        if (uni) {   // each decoding conversation's OWN routes (its sequence's tagged counts), decayed in time
+            const auto now = std::chrono::steady_clock::now();
+            if (u_layers == 0)
+                for (int k : slots) u_layers += k > 0;
+            std::vector<uint32_t> rs;
+            for (const auto& d : decoding_ctx) {
+                Conv* c = find(d.first);
+                const int ctx = d.second;
+                if (c == nullptr || ctx < 0) continue;
+                if ((int) seq_prev.size() <= ctx) seq_prev.resize((size_t) ctx + 1);
+                strata::core::Glm5Model::route_counts_seq(ctx, rs);
+                auto& pv = seq_prev[(size_t) ctx];
+                if (pv.size() != rs.size()) pv.assign(rs.size(), 0);
+                const double dt = c->decayed.time_since_epoch().count() == 0
+                                      ? 0.0 : std::chrono::duration<double>(now - c->decayed).count();
+                c->decayed = now;
+                if (dt > 0 && u_h > 0) {
+                    const float f = (float) std::pow(0.5, dt / u_h);
+                    for (float& x : c->cnt) x *= f;
+                }
+                double sum = 0;
+                for (size_t i = 0; i < rs.size() && i < c->cnt.size(); ++i) {
+                    const uint32_t dd = rs[i] - pv[i];
+                    if (dd == 0) continue;
+                    c->cnt[i] += (float) dd;
+                    c->turn[i] += (float) dd;
+                    sum += dd;
+                }
+                if (sum > 0) {
+                    c->decoded = now;
+                    c->tok += sum / (8.0 * std::max(1, u_layers));
+                }
+                pv.swap(rs);
+            }
+        }
         std::vector<uint32_t> rc;
         strata::core::Glm5Model::route_counts(rc);
         const size_t n = rc.size() / 2;
@@ -1182,10 +1244,11 @@ struct ConvAlloc {
             if (d == 0) continue;
             glob[i] += (float) d;
             added += d;
-            for (Conv* c : ds) {
-                c->cnt[i] += (float) d / (float) ds.size();
-                c->turn[i] += (float) d / (float) ds.size();
-            }
+            if (!uni)
+                for (Conv* c : ds) {
+                    c->cnt[i] += (float) d / (float) ds.size();
+                    c->turn[i] += (float) d / (float) ds.size();
+                }
         }
         rc_prev.swap(rc);
         glob_since += added;
@@ -1208,6 +1271,10 @@ struct ConvAlloc {
         if (std::none_of(slots.begin(), slots.end(), [](int k) { return k > 0; })) {   // (the pools as loaded: at the first use)
             slots = model->layer_slots();
             blob = model->layer_blob();
+        }
+        if (uni) {
+            publish_union(why, now, unix_s, running, open);
+            return;
         }
         std::vector<uint8_t> nf((size_t) kL * kE, 0);
         std::vector<double> w(convs.size());
@@ -1322,6 +1389,64 @@ struct ConvAlloc {
                 list += " " + std::to_string(convs[i].id) + ":" + (convs[i].running ? "run" : fl[i] ? "open" : "closed");
         std::fprintf(stderr, "glm conv: alloc (%s) - %d running, %d open; floor %zu + fill %zu experts (%.2f GB) |%s t=%.3f\n",
                      why, running, open, n_floor, n_fill, (double) bytes / 1e9, list.c_str(), unix_s);
+    }
+    // CONV_UNION's target: the top slots of the weighted union of the conversations' own lists + the global prior
+    void publish_union(const char* why, std::chrono::steady_clock::time_point now, double unix_s, int running, int open) {
+        std::vector<uint8_t> nf((size_t) kL * kE, 0);
+        std::vector<double> w(convs.size()), prior(convs.size());
+        std::string list;
+        for (size_t i = 0; i < convs.size(); ++i) {
+            const Conv& c = convs[i];
+            const double idle = c.decoded.time_since_epoch().count() == 0 ? age(c, now)
+                                                                         : std::chrono::duration<double>(now - c.decoded).count();
+            const double ia = std::min(idle, age(c, now));   // (a conversation admitted again is active from its admission)
+            w[i] = c.running > 0 ? 1.0 : ia <= u_drop && u_idle_half > 0 ? std::pow(0.5, ia / u_idle_half) : 0.0;
+            if (w[i] < 1e-3) w[i] = 0.0;
+            prior[i] = u_beta / (1.0 + c.tok / std::max(1.0, u_tok0));
+            if (w[i] > 0) {
+                char b[64];
+                std::snprintf(b, sizeof b, " %d:%.2f", c.id, w[i]);
+                list += b;
+            }
+        }
+        size_t n_in = 0, bytes = 0;
+        std::vector<double> score(kE);
+        std::vector<std::pair<double, int>> sc;
+        for (int il = 0; il < (int) slots.size() && il < kL; ++il) {
+            const int K = slots[(size_t) il] - slack;
+            if (K <= 0) continue;
+            double gs = 0;
+            for (int e = 0; e < kE; ++e) gs += glob[(size_t) il * kE + e];
+            for (int e = 0; e < kE; ++e) score[e] = gs > 0 ? 0.01 * glob[(size_t) il * kE + e] / gs : 0.0;
+            for (size_t i = 0; i < convs.size(); ++i) {
+                if (w[i] <= 0) continue;
+                const Conv& c = convs[i];
+                double s = 0;
+                for (int e = 0; e < kE; ++e) s += c.cnt[(size_t) il * kE + e];
+                for (int e = 0; e < kE; ++e)
+                    score[e] += w[i] * ((s > 0 ? c.cnt[(size_t) il * kE + e] / s : 0.0) +
+                                        (gs > 0 ? prior[i] * glob[(size_t) il * kE + e] / gs : 0.0));
+            }
+            sc.clear();
+            double mx = 0;
+            for (int e = 0; e < kE; ++e)
+                if (score[e] > 0) {
+                    sc.push_back({score[e], e});
+                    mx = std::max(mx, score[e]);
+                }
+            const size_t k = std::min(sc.size(), (size_t) K);
+            std::partial_sort(sc.begin(), sc.begin() + (long) k, sc.end(), std::greater<>());
+            for (size_t j = 0; j < k; ++j) {
+                const int lv = mx > 0 ? std::min(63, (int) std::lround(63.0 * sc[j].first / mx)) : 0;
+                nf[(size_t) il * kE + sc[j].second] = (uint8_t) (1u | ((unsigned) lv << 2));
+                ++n_in;
+                bytes += il < (int) blob.size() ? blob[(size_t) il] : 0;
+            }
+        }
+        flags.swap(nf);
+        strata::core::Glm5Model::conv_publish(flags);
+        std::fprintf(stderr, "glm conv: alloc (%s) - union, %d running, %d open; %zu experts (%.2f GB) | weights%s t=%.3f\n",
+                     why, running, open, n_in, (double) bytes / 1e9, list.c_str(), unix_s);
     }
     // a request's end: its answer joins the conversation; a resume's recalled experts (brought in, then hit) are noted
     void end(int id, const std::vector<int32_t>& emitted, std::chrono::steady_clock::time_point now) {
@@ -3017,10 +3142,10 @@ static int glm_pack_generate(const Options& o) {
         if (extra >= 0) ids.push_back(extra);
         conv.set_running(ids);
     };
-    const auto conv_decoding = [&] {
-        std::vector<int> ids;
+    const auto conv_decoding = [&] {   // (conversation, its sequence)
+        std::vector<std::pair<int, int>> ids;
         for (const auto& p : gens)
-            if (!p->done && !p->reading && p->t1 >= p->ta && p->conv >= 0) ids.push_back(p->conv);
+            if (!p->done && !p->reading && p->t1 >= p->ta && p->conv >= 0) ids.push_back({p->conv, p->ctx});
         return ids;
     };
     std::deque<Gen*> flight;     // issued, oldest first
@@ -4025,6 +4150,7 @@ static int glm_pack_generate(const Options& o) {
             std::fprintf(stderr, "glm conv: r%d conversation %d (%s, %zu tokens shared)\n", rid, g->conv,
                          cv != nullptr && cv->lcp > 0 ? "resumed" : "new", cv != nullptr ? cv->lcp : (size_t) 0);
             strata::core::Glm5Model::conv_prefetch_counts(g->pf0);
+            conv.seq_mark(g->ctx);   // (CONV_UNION: its sequence's counts from here on are this conversation's)
             conv_running(g->conv, -1);
             conv.publish("admit", g->ta);
         }

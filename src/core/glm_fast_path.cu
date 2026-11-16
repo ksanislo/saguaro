@@ -4209,6 +4209,14 @@ void route_count_seq(int seq, int layer, int expert) {
     if (seq < 0 || seq >= kRcSeqs || layer < 0 || layer >= kRcLayers || expert < 0 || expert >= kRcExperts) return;
     g_rcs[seq][layer * kRcExperts + expert].fetch_add(1, std::memory_order_relaxed);
 }
+// the per-sequence decode counts (the route tags): ROUTE_DUMP, or STRATA_GLM_CONV_UNION's per-conversation lists
+bool route_seq_counting() {
+    static const bool on = route_counting() || [] {
+        const char* v = getenv("STRATA_GLM_CONV_UNION");
+        return v != nullptr && std::atoi(v) != 0;
+    }();
+    return on;
+}
 bool route_counting() {
     static const bool on = [] {
         const char* v = getenv("STRATA_GLM_ROUTE_DUMP");
@@ -4231,6 +4239,7 @@ void route_dump(int layer, int k, const int* ids, const float* w) {
 }  // namespace glmfast
 
 bool Glm5Model::route_counting() { return glmfast::route_counting(); }
+bool Glm5Model::route_seq_counting() { return glmfast::route_seq_counting(); }
 void Glm5Model::route_totals(uint64_t& tagged, uint64_t& global) {
     constexpr size_t n = (size_t) glmfast::kRcLayers * glmfast::kRcExperts;
     tagged = global = 0;
@@ -5088,7 +5097,7 @@ void Glm5Model::fast_service() {
             if (glmfast::route_dumping()) glmfast::route_dump(il, K, ids, rq->w);   // --dump-routing
             if (glmfast::route_counting() || conv_sets_on())   // ROUTE_DUMP / CONV_EXPERTS: the decode's routes
                 for (int i = 0; i < K; ++i) glmfast::route_count(1, il, ids[i]);
-            if (glmfast::route_counting() && rq->pad_ > 0)   // ... and by the route's sequence (its tag)
+            if (glmfast::route_seq_counting() && rq->pad_ > 0)   // ... and by the route's sequence (its tag)
                 for (int i = 0; i < K; ++i) glmfast::route_count_seq(rq->pad_ - 1, il, ids[i]);
             // STRATA_GLM_ROUTE_LOG=<prefix>: "layer e0 .. e7 tier-mask" per route into <prefix>.<device> (cache studies)
             // - the tier masks are fetch, miss and cpu (bits over e0..e7), then " | n0 .. n15": the near misses, the
@@ -5642,6 +5651,8 @@ void Glm5Model::conv_preload_into(int il, int slot) {
     const int rc = F->layer_rc[(size_t) il];
     auto& R = F->rc[(size_t) rc];
     if (P.st[(size_t) slot] != FastState::kFree) return;
+    static const bool read_off = env_dbl("STRATA_GLM_CONV_PREFETCH_READ_RATE", 64.0) <= 0.0;
+    if (read_off && F->pf_bg.load(std::memory_order_acquire)) return;   // (no preload while a prompt reads beside)
     int best = -1;
     uint32_t bl = 0;
     for (int e = 0; e < NE; ++e) {
@@ -5679,7 +5690,9 @@ void Glm5Model::conv_preload_locked(int mode) {
     static int64_t last[64];
     static cudaStream_t pf_s[64];
     const int64_t now = live_now();
-    const double dt = last[dev_] == 0 ? 0.0 : std::min(1.0, (double) (now - last[dev_]) / 1e9);
+    static const double dt_max = env_dbl("STRATA_GLM_CONV_PREFETCH_DT_MAX", 1.0);   // (the boundaries' spacing it credits)
+    static const int inflight = (int) env_dbl("STRATA_GLM_CONV_PREFETCH_INFLIGHT", 128.0);
+    const double dt = last[dev_] == 0 ? 0.0 : std::min(dt_max, (double) (now - last[dev_]) / 1e9);
     last[dev_] = now;
     // mode 0: a boundary, 1: a boundary beside a prompt read, 2: a prompt read's start (its kick)
     credit[dev_] = mode == 2 ? std::max(credit[dev_], pf_kick)
@@ -5688,7 +5701,7 @@ void Glm5Model::conv_preload_locked(int mode) {
     g_conv_pf_stream[dev_] = pf_s[dev_];
     const int NE = g.n_expert;
     if (pf_s[dev_] != nullptr && credit[dev_] >= 1.0 && (mode == 2 || cudaStreamQuery(F->copy) == cudaSuccess) &&
-        (int) F->bg.size() < 128) {
+        (int) F->bg.size() < inflight) {
         struct T {
             uint32_t lv;
             int il, e;
@@ -6591,7 +6604,7 @@ void Glm5Model::fast_moe_route(int il, const MoeIo& io, const gf::MoeDev& md, vo
                       return il >= from ? w : 0.0f;
                   }(), win_rows, il != mtp_il_,
                   // STRATA_GLM_ROUTE_DUMP: 1 + the route's sequence (a rows step's row, else the bound one)
-                  !glmfast::route_counting() ? 0
+                  !glmfast::route_seq_counting() ? 0
                   : route_tag_ > 0             ? route_tag_
                   : win_rows > 0 && win >= 0 && win < (int) row_seq_.size() ? 1 + row_seq_[(size_t) win]
                                                                              : 1 + (seq_.empty() ? 0 : cur_seq_));
