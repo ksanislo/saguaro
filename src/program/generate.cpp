@@ -3307,10 +3307,21 @@ static int glm_pack_generate(const Options& o) {
             if (rs2[i] != g.rs1[i]) std::fprintf(f, "D %zu %zu %u\n", i / 512, i % 512, rs2[i] - g.rs1[i]);
         std::fclose(f);
         // conservation: every decode route tagged with a sequence (the sum over sequences == the global count)
-        uint64_t tagged = 0, global = 0;
+        // "<unix ms> <rid> <tagged> <global> <others running>": with none running, the counts are read until two reads
+        // agree (routes of steps still in flight land first), so such a line must be exact
+        size_t others = 0;
+        for (const auto& p : gens) others += !p->done && p->rid != g.rid;
+        uint64_t tagged = 0, global = 0, t0 = 1, g0 = 1;
         strata::core::Glm5Model::route_totals(tagged, global);
+        for (int i = 0; others == 0 && i < 50 && (tagged != t0 || global != g0); ++i) {
+            t0 = tagged;
+            g0 = global;
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            strata::core::Glm5Model::route_totals(tagged, global);
+        }
         if (std::FILE* fc = std::fopen((dir + "/conservation.txt").c_str(), "a")) {
-            std::fprintf(fc, "%lld %d %llu %llu\n", unix_ms, g.rid, (unsigned long long) tagged, (unsigned long long) global);
+            std::fprintf(fc, "%lld %d %llu %llu %zu\n", unix_ms, g.rid, (unsigned long long) tagged, (unsigned long long) global,
+                         others);
             std::fclose(fc);
         }
     };
