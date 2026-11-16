@@ -219,6 +219,7 @@ public:
     /// ... the decode's route counts of one sequence (each route tagged with its row's sequence: no blending when several
     /// decode together), [kRcLayers][kRcExperts]; the prompt's chunks go to <dir>/prompt-chunks.txt as they are read
     static void route_counts_seq(int seq, std::vector<uint32_t>& out);
+    static void route_totals(uint64_t& tagged, uint64_t& global);   // decode routes: summed over the sequences / in all
     std::vector<int> layer_slots() const;
     std::vector<size_t> layer_blob() const;   // each layer's expert bytes (0: no routed experts on a card)
     /// STRATA_GLM_CONV_*: the serve loop's allocation flags [kRcLayers][kRcExperts] (1 in it, 2 a floor, bits 2-7 its level),

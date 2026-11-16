@@ -4231,6 +4231,13 @@ void route_dump(int layer, int k, const int* ids, const float* w) {
 }  // namespace glmfast
 
 bool Glm5Model::route_counting() { return glmfast::route_counting(); }
+void Glm5Model::route_totals(uint64_t& tagged, uint64_t& global) {
+    constexpr size_t n = (size_t) glmfast::kRcLayers * glmfast::kRcExperts;
+    tagged = global = 0;
+    for (size_t i = 0; i < n; ++i) global += glmfast::g_rc[1][i].load(std::memory_order_relaxed);
+    for (int s = 0; s < glmfast::kRcSeqs; ++s)
+        for (size_t i = 0; i < n; ++i) tagged += glmfast::g_rcs[s][i].load(std::memory_order_relaxed);
+}
 void Glm5Model::route_counts_seq(int seq, std::vector<uint32_t>& out) {
     constexpr size_t n = (size_t) glmfast::kRcLayers * glmfast::kRcExperts;
     out.assign(n, 0);
@@ -6314,7 +6321,16 @@ bool Glm5Model::fast_boundary(std::string& err) {
                 cudaEventCreate(&p.e1);
             }
             const auto& R = F->rc[0];
-            if (p.buf == nullptr && R.stride > 0 && cudaMalloc(&p.buf, R.stride) == cudaSuccess) p.cap = R.stride;
+            if (p.buf == nullptr && R.stride > 0) {   // (once: the free VRAM before / after logged)
+                size_t f0 = 0, f1 = 0, tot = 0;
+                cudaMemGetInfo(&f0, &tot);
+                if (cudaMalloc(&p.buf, R.stride) == cudaSuccess) p.cap = R.stride;
+                else p.buf = nullptr;
+                cudaMemGetInfo(&f1, &tot);
+                std::fprintf(stderr, "glm copy probe: CUDA%d scratch %.1f MB %s; VRAM free %.1f -> %.1f MB\n", dev_,
+                             (double) R.stride / 1e6, p.buf != nullptr ? "allocated" : "NOT allocated (probe off here)",
+                             (double) f0 / 1e6, (double) f1 / 1e6);
+            }
             if (p.buf != nullptr && p.cap >= R.stride) {
                 cudaGetLastError();
                 cudaEventRecord(p.e0, p.s);

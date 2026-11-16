@@ -257,7 +257,6 @@ bool Glm5Model::rows_bind(const int* seqs, int n, RowSeq* rw, std::string& err) 
         r.kin = nullptr;
         r.kin_t = 0;
     }
-    row_seq_.assign(seqs, seqs + n);   // (the grouped rows path's route tags: row -> sequence)
     return true;
 }
 
@@ -653,7 +652,10 @@ bool Glm5Model::rows_moe(int il, RowSeq* rw, int n, std::string& err) {
         return false;
     };
     const auto& Ly = F->L[(size_t) il];
-    (void) rw;
+    if (glmfast::route_counting()) {   // STRATA_GLM_ROUTE_DUMP's tags: the rows as issued (an MTP window's are several a seq)
+        row_seq_.resize((size_t) n);
+        for (int i = 0; i < n; ++i) row_seq_[(size_t) i] = rw[i].seq;
+    }
     const float* no_bias[gf::kAhead] = {nullptr, nullptr, nullptr, nullptr};
     bool pf_pending = false;   // (no prefetch in a batched step)
     // the router and the shared expert's gate / up for every row, then each row's routed experts (and the

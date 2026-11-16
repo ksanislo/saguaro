@@ -3306,6 +3306,13 @@ static int glm_pack_generate(const Options& o) {
         for (size_t i = 0; i < rs2.size(); ++i)
             if (rs2[i] != g.rs1[i]) std::fprintf(f, "D %zu %zu %u\n", i / 512, i % 512, rs2[i] - g.rs1[i]);
         std::fclose(f);
+        // conservation: every decode route tagged with a sequence (the sum over sequences == the global count)
+        uint64_t tagged = 0, global = 0;
+        strata::core::Glm5Model::route_totals(tagged, global);
+        if (std::FILE* fc = std::fopen((dir + "/conservation.txt").c_str(), "a")) {
+            std::fprintf(fc, "%lld %d %llu %llu\n", unix_ms, g.rid, (unsigned long long) tagged, (unsigned long long) global);
+            std::fclose(fc);
+        }
     };
     // a request's end: its DONE line (the engine's counters over its lifetime are shared with the others running
     // meanwhile), the paused state kept, its context idle again
