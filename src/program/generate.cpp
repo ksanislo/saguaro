@@ -3248,6 +3248,13 @@ static int glm_pack_generate(const Options& o) {
         const auto t2 = std::chrono::steady_clock::now();
         if (strata::core::Glm5Model::route_counting()) route_file(g, t2);
         if (ev_log) ev_line("end", g.rid);
+        if (g.conv >= 0 && conv.on && strata::core::Glm5Model::conv_preload_on()) {
+            uint64_t pf[4];
+            strata::core::Glm5Model::conv_prefetch_counts(pf);
+            std::fprintf(stderr, "glm conv: r%d end: preload since admission up %llu, down %llu, landed %llu (%.2f GB)\n", g.rid,
+                         (unsigned long long) (pf[0] - g.pf0[0]), (unsigned long long) (pf[1] - g.pf0[1]),
+                         (unsigned long long) (pf[2] - g.pf0[2]), (double) (pf[3] - g.pf0[3]) / 1e9);
+        }
         if (g.conv >= 0) {
             if (conv.on) conv.attribute(conv_decoding());
             conv.end(g.conv, g.emitted, t2);
