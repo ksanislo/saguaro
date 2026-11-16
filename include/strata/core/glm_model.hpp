@@ -227,6 +227,7 @@ public:
     static uint32_t conv_level_of(int il, int e);   // 0 outside the allocation, else 1..65 (the floor highest)
     void conv_preload_sync();   // this part: its preload copies landed (before lending)
     void conv_preload_locked(int mode);   // F->mu held; 0 a boundary, 1 beside a prompt read, 2 a read's start
+    void conv_preload_into(int il, int slot);   // F->mu held (CONV_PAIR): a freed slot's own preload
     bool snapshot_restore();
     int64_t snapshot_pos() const { return snap_pos_; }
     /// Conversation CHECKPOINTS (host RAM, `slot` 0, 1, ...): every half's KDA states + conv histories and its open
