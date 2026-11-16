@@ -371,6 +371,8 @@ void route_dump(int layer, int k, const int* ids, const float* w);
 constexpr int kRcLayers = 128, kRcExperts = 512;
 bool route_counting();
 void route_count(int kind, int layer, int expert, unsigned n = 1);
+void route_count_seq(int seq, int layer, int expert);
+void prompt_chunk_log(int seq, int64_t p0, int T, int layer, const int* counts, int n_expert);
 
 // The expert usage file (opt-in, as Strata keeps nothing between starts but --expert-profile-save's profile):
 // STRATA_GLM_USAGE=<file>; unset or 0, none - the warm-up and the split search then go by the expert profile

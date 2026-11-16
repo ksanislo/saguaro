@@ -3931,6 +3931,7 @@ struct RouteArgs {
                                 // whose share of the route's weights is below this is left out (0: none) ...
     int res_k;                  // ... STRATA_GLM_RESIDENT_TOPK: only the res_k heaviest of the route's experts run
                                 // (0: all); the top-1 always runs, the kept weights are renormalised when the model's are
+    int tag;                    // into the request's pad_ (STRATA_GLM_ROUTE_DUMP: 1 + its sequence; 0 = none)
 };
 
 __global__ void __launch_bounds__(ROUTE_THREADS) moe_route_kernel(const STRATA_GRID_CONSTANT RouteArgs a) {
@@ -4093,6 +4094,7 @@ __global__ void __launch_bounds__(ROUTE_THREADS) moe_route_kernel(const STRATA_G
             rq->win = a.win;
             rq->win_n = a.win_n;
             rq->win_rows = a.win_rows;
+            rq->pad_ = a.tag;
             __threadfence_system();
             rq->seq = seq;
             __threadfence_system();
@@ -4398,7 +4400,7 @@ __global__ void __launch_bounds__(ROUTE_THREADS) moe_route_kernel(const STRATA_G
             q->win = a.win;
             q->win_n = a.win_n;
             q->win_rows = a.win_rows;
-            q->pad_ = 0;
+            q->pad_ = a.tag;
             q->skip_mask = s_skip;
             q->pf_n = s_npf;
             rq->layer = a.layer;
@@ -4430,7 +4432,7 @@ __global__ void __launch_bounds__(ROUTE_THREADS) moe_route_kernel(const STRATA_G
         q->win = a.win;
         q->win_n = a.win_n;
         q->win_rows = a.win_rows;
-        q->pad_ = 0;
+        q->pad_ = a.tag;
         q->skip_mask = s_skip;
         for (int i = 0; i < 8; ++i) {
             const bool on = i < a.k;   // (the entries past k as the host never reads them: zero)
@@ -6580,7 +6582,7 @@ void moe_route(const float* logits, const float* bias, int n_expert, int k, floa
                int max_prefetch, const float* ahead_logits, const float* const* ahead_bias, int n_ahead,
                int skip_from, unsigned long long cpu_plan, int promote_min, int pf_rank, int near_n, int win,
                unsigned int* scr_used, int win_n, int disk_skip_from, float disk_skip_w, float miss_skip_w,
-               int win_rows, bool resident_ok) {
+               int win_rows, bool resident_ok, int tag) {
     RouteArgs a{logits, bias, n_expert, k, w_scale, norm_w ? 1 : 0, layer, x, n_embd, d,
                 sh_gate, sh_up, sh_limit, n_ff_sh, (block_q8_1*) sh_hq, pred_logits, pred_bias, max_prefetch,
                 ahead_logits, {}, 0, skip_from, d.cpu_seq != nullptr ? cpu_plan : 0ull, promote_min,
@@ -6591,6 +6593,7 @@ void moe_route(const float* logits, const float* bias, int n_expert, int k, floa
         return v ? std::max(0.0f, (float) std::atof(v)) : 0.0f;
     }();
     a.affinity = affinity;
+    a.tag = tag;
     // STRATA_GLM_RESIDENT_SKIP_W / STRATA_GLM_RESIDENT_TOPK (changes the answers; Turbo): read once; 0 = off
     static const float res_w = [] {
         const char* v = getenv("STRATA_GLM_RESIDENT_SKIP_W");

@@ -216,6 +216,9 @@ public:
     /// decode, each [kRcLayers=128][kRcExperts=512]; layer_slots: each layer's VRAM expert slots (main) on its card
     static bool route_counting();
     static void route_counts(std::vector<uint32_t>& out);
+    /// ... the decode's route counts of one sequence (each route tagged with its row's sequence: no blending when several
+    /// decode together), [kRcLayers][kRcExperts]; the prompt's chunks go to <dir>/prompt-chunks.txt as they are read
+    static void route_counts_seq(int seq, std::vector<uint32_t>& out);
     std::vector<int> layer_slots() const;
     std::vector<size_t> layer_blob() const;   // each layer's expert bytes (0: no routed experts on a card)
     /// STRATA_GLM_CONV_*: the serve loop's allocation flags [kRcLayers][kRcExperts] (1 in it, 2 a floor, bits 2-7 its level),
@@ -876,6 +879,8 @@ public:
     void pool_take_back_all();
 
     int cur_seq_ = 0;
+    int route_tag_ = 0;              // STRATA_GLM_ROUTE_DUMP: 1 + the sequence of the routes being issued (0: cur_seq_)
+    std::vector<int> row_seq_;       // ... a batched rows step's sequences, by row (rows_bind)
     int seq_count() const { return seq_.empty() ? 1 : (int) seq_.size(); }
     static void live_seqs_set(int n);                     // the scheduler: requests running now (MAYA_GLM_VRAM_EVICT=live)
     int seq_bound() const { return cur_seq_; }

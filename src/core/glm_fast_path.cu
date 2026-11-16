@@ -4185,7 +4185,30 @@ std::FILE* g_route_file = nullptr;
 bool route_dumping() { return g_route_file != nullptr; }
 namespace {
 std::atomic<uint32_t> g_rc[2][kRcLayers * kRcExperts];
+constexpr int kRcSeqs = 16;
+std::atomic<uint32_t> g_rcs[kRcSeqs][kRcLayers * kRcExperts];   // the decode's, by the route's sequence
 }  // namespace
+// the prompt's chunk counts by sequence, timestamped: "C <unix ms> <seq> <first position> <tokens> <layer> e:n ..."
+void prompt_chunk_log(int seq, int64_t p0, int T, int layer, const int* counts, int n_expert) {
+    static std::mutex mu;
+    static std::FILE* f = [] {
+        const char* d = getenv("STRATA_GLM_ROUTE_DUMP");
+        return d != nullptr && *d != '\0' ? std::fopen((std::string(d) + "/prompt-chunks.txt").c_str(), "a") : nullptr;
+    }();
+    if (f == nullptr) return;
+    const long long ms = (long long) std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::system_clock::now().time_since_epoch()).count();
+    std::lock_guard<std::mutex> lk(mu);
+    std::fprintf(f, "C %lld %d %lld %d %d", ms, seq, (long long) p0, T, layer);
+    for (int e = 0; e < n_expert; ++e)
+        if (counts[e] > 0) std::fprintf(f, " %d:%d", e, counts[e]);
+    std::fputc('\n', f);
+    std::fflush(f);
+}
+void route_count_seq(int seq, int layer, int expert) {
+    if (seq < 0 || seq >= kRcSeqs || layer < 0 || layer >= kRcLayers || expert < 0 || expert >= kRcExperts) return;
+    g_rcs[seq][layer * kRcExperts + expert].fetch_add(1, std::memory_order_relaxed);
+}
 bool route_counting() {
     static const bool on = [] {
         const char* v = getenv("STRATA_GLM_ROUTE_DUMP");
@@ -4208,6 +4231,12 @@ void route_dump(int layer, int k, const int* ids, const float* w) {
 }  // namespace glmfast
 
 bool Glm5Model::route_counting() { return glmfast::route_counting(); }
+void Glm5Model::route_counts_seq(int seq, std::vector<uint32_t>& out) {
+    constexpr size_t n = (size_t) glmfast::kRcLayers * glmfast::kRcExperts;
+    out.assign(n, 0);
+    if (seq < 0 || seq >= glmfast::kRcSeqs) return;
+    for (size_t i = 0; i < n; ++i) out[i] = glmfast::g_rcs[seq][i].load(std::memory_order_relaxed);
+}
 void Glm5Model::route_counts(std::vector<uint32_t>& out) {
     constexpr size_t n = (size_t) glmfast::kRcLayers * glmfast::kRcExperts;
     out.resize(2 * n);
@@ -5052,6 +5081,8 @@ void Glm5Model::fast_service() {
             if (glmfast::route_dumping()) glmfast::route_dump(il, K, ids, rq->w);   // --dump-routing
             if (glmfast::route_counting() || conv_sets_on())   // ROUTE_DUMP / CONV_EXPERTS: the decode's routes
                 for (int i = 0; i < K; ++i) glmfast::route_count(1, il, ids[i]);
+            if (glmfast::route_counting() && rq->pad_ > 0)   // ... and by the route's sequence (its tag)
+                for (int i = 0; i < K; ++i) glmfast::route_count_seq(rq->pad_ - 1, il, ids[i]);
             // STRATA_GLM_ROUTE_LOG=<prefix>: "layer e0 .. e7 tier-mask" per route into <prefix>.<device> (cache studies)
             // - the tier masks are fetch, miss and cpu (bits over e0..e7), then " | n0 .. n15": the near misses, the
             //   route's next ranks after the top k, best first
@@ -6251,6 +6282,57 @@ bool Glm5Model::fast_boundary(std::string& err) {
             }
         }
     }
+    // STRATA_GLM_COPY_PROBE=<n> (measurement): every STRATA_GLM_COPY_PROBE_S (20) s, n RAM-tier experts copied to a scratch
+    // buffer on a stream of their own beside the decode; a later boundary logs the pinned RAM -> VRAM rate
+    static const int probe_n = (int) env_dbl("STRATA_GLM_COPY_PROBE", 0.0);
+    if (probe_n > 0 && dev_ >= 0 && dev_ < 64) {
+        struct Probe {
+            cudaStream_t s = nullptr;
+            cudaEvent_t e0 = nullptr, e1 = nullptr;
+            uint8_t* buf = nullptr;
+            size_t cap = 0, bytes = 0;
+            int n = 0;
+            bool pending = false;
+            int64_t last = 0;
+        };
+        static Probe pr[64];
+        Probe& p = pr[dev_];
+        static const double every = env_dbl("STRATA_GLM_COPY_PROBE_S", 20.0);
+        const int64_t now = live_now();
+        if (p.pending && cudaEventQuery(p.e1) == cudaSuccess) {
+            float ms = 0.0f;
+            cudaEventElapsedTime(&ms, p.e0, p.e1);
+            std::fprintf(stderr, "glm copy probe: CUDA%d %d experts, %.1f MB in %.2f ms = %.2f GB/s (%.0f experts/s), %d request(s) "
+                         "running\n", dev_, p.n, (double) p.bytes / 1e6, ms, (double) p.bytes / 1e6 / std::max(1e-3f, ms),
+                         1000.0 * p.n / std::max(1e-3f, ms), g_live_seqs.load(std::memory_order_relaxed));
+            p.pending = false;
+        } else if (!p.pending && (p.last == 0 || (double) (now - p.last) >= every * 1e9) && !F->rc.empty()) {
+            p.last = now;
+            if (p.s == nullptr) {
+                cudaStreamCreateWithFlags(&p.s, cudaStreamNonBlocking);
+                cudaEventCreate(&p.e0);
+                cudaEventCreate(&p.e1);
+            }
+            const auto& R = F->rc[0];
+            if (p.buf == nullptr && R.stride > 0 && cudaMalloc(&p.buf, R.stride) == cudaSuccess) p.cap = R.stride;
+            if (p.buf != nullptr && p.cap >= R.stride) {
+                cudaGetLastError();
+                cudaEventRecord(p.e0, p.s);
+                p.n = 0;
+                p.bytes = 0;
+                for (int s2 = 0; s2 < R.n && p.n < probe_n; ++s2)
+                    if (R.st[(size_t) s2] == FastState::kRHold) {
+                        cudaMemcpyAsync(p.buf, R.slot((size_t) s2), R.stride, cudaMemcpyHostToDevice, p.s);
+                        p.bytes += R.stride;
+                        ++p.n;
+                    }
+                cudaEventRecord(p.e1, p.s);
+                p.pending = p.n > 0;
+            } else {
+                cudaGetLastError();
+            }
+        }
+    }
     flush();
     if (ok && !fast_helper_adapt(err)) return false;
     F->check_resident(l0_, lt_, g.n_expert);   // (the tables as the next token's routes find them)
@@ -6491,7 +6573,12 @@ void Glm5Model::fast_moe_route(int il, const MoeIo& io, const gf::MoeDev& md, vo
                       const float w = F->miss_w_req >= 0.0f ? F->miss_w_req : F->miss_w;
                       const int from = F->miss_from_req >= 0 ? F->miss_from_req : F->miss_from;
                       return il >= from ? w : 0.0f;
-                  }(), win_rows, il != mtp_il_);
+                  }(), win_rows, il != mtp_il_,
+                  // STRATA_GLM_ROUTE_DUMP: 1 + the route's sequence (a rows step's row, else the bound one)
+                  !glmfast::route_counting() ? 0
+                  : route_tag_ > 0             ? route_tag_
+                  : win_rows > 0 && win >= 0 && win < (int) row_seq_.size() ? 1 + row_seq_[(size_t) win]
+                                                                             : 1 + (seq_.empty() ? 0 : cur_seq_));
 }
 
 bool Glm5Model::fast_moe_experts(int il, const MoeIo& io, bool pred, int n_ah, const float* const* ah_bias,

@@ -2966,6 +2966,7 @@ static int glm_pack_generate(const Options& o) {
         strata::kernels::LpHold lp;   // logprobs=<k>: its rows (sp.lp)
         // STRATA_GLM_ROUTE_DUMP: the route counters at admission and at its first token; shared: another request ran beside
         std::vector<uint32_t> rc0, rc1;
+        std::vector<uint32_t> rs1, rs_tl;   // ... its own sequence's decode counts at its first token / the last timeline line
         bool rc_shared = false;
         int conv = -1;   // STRATA_GLM_CONV_*: its conversation
         uint64_t pf0[4] = {0, 0, 0, 0};   // ... the preload counters at its admission
@@ -3125,8 +3126,34 @@ static int glm_pack_generate(const Options& o) {
         conv_running(extra, -1);
         conv.publish("tick", now);
     };
+    // STRATA_GLM_ROUTE_DUMP: <dir>/timeline.txt, every second while decoding, each running request's own decode routes since
+    // its last line: "T <unix ms> <rid> <ctx> <tokens so far> <requests running> layer:expert:n ..."
+    const auto route_timeline = [&] {
+        static std::chrono::steady_clock::time_point last{};
+        const auto now = std::chrono::steady_clock::now();
+        if (std::chrono::duration<double>(now - last).count() < 1.0) return;
+        last = now;
+        static std::FILE* f = std::fopen((std::string(getenv("STRATA_GLM_ROUTE_DUMP")) + "/timeline.txt").c_str(), "a");
+        if (f == nullptr) return;
+        const long long unix_ms = (long long) std::chrono::duration_cast<std::chrono::milliseconds>(
+                                      std::chrono::system_clock::now().time_since_epoch()).count();
+        size_t running = 0;
+        for (const auto& p : gens) running += !p->done;
+        std::vector<uint32_t> rs;
+        for (auto& p : gens) {
+            if (p->done || p->t1 < p->ta || p->rs_tl.empty()) continue;
+            strata::core::Glm5Model::route_counts_seq(p->ctx, rs);
+            std::fprintf(f, "T %lld %d %d %lld %zu", unix_ms, p->rid, p->ctx, (long long) p->produced, running);
+            for (size_t i = 0; i < rs.size(); ++i)
+                if (rs[i] != p->rs_tl[i]) std::fprintf(f, " %zu:%zu:%u", i / 512, i % 512, rs[i] - p->rs_tl[i]);
+            std::fputc('\n', f);
+            p->rs_tl.swap(rs);
+        }
+        std::fflush(f);
+    };
     const auto gen_token = [&](Gen& g, int tok) -> bool {
         conv_tick();
+        if (strata::core::Glm5Model::route_counting()) route_timeline();
         std::printf("T %d %d\n", g.rid, tok);
         if (g.sp.lp != nullptr) {
             const std::string l = strata::kernels::logprob_line(g.sp.lp, g.rid, (int64_t) g.pen.size(), tok);
@@ -3271,14 +3298,13 @@ static int glm_pack_generate(const Options& o) {
                      "decode_ms=%.1f unix_ms=%lld kexp=%d\n", g.rid, g.ctx, g.prompt.size(), g.reuse, (long long) g.produced,
                      g.rc_shared ? 1 : 0, g.finish, got1 ? ms(g.ta, g.t1) : -1.0, got1 ? ms(g.t1, t2) : -1.0, unix_ms,
                      (int) model.geometry().n_expert);
-        for (int k = 0; k < 2; ++k) {
-            const std::vector<uint32_t>& a = k == 0 ? g.rc0 : g.rc1;
-            const std::vector<uint32_t>& b = k == 0 ? g.rc1 : rc2;
-            for (size_t i = (size_t) k * n; i < (size_t) (k + 1) * n; ++i)
-                if (b[i] != a[i])
-                    std::fprintf(f, "%c %zu %zu %u\n", k == 0 ? 'P' : 'D', (i - (size_t) k * n) / 512, (i - (size_t) k * n) % 512,
-                                 b[i] - a[i]);
-        }
+        for (size_t i = 0; i < n; ++i)   // the prompt's (one prompt is read at a time)
+            if (g.rc1[i] != g.rc0[i]) std::fprintf(f, "P %zu %zu %u\n", i / 512, i % 512, g.rc1[i] - g.rc0[i]);
+        std::vector<uint32_t> rs2;   // the decode's: its own sequence's routes (tagged), not the others' beside it
+        strata::core::Glm5Model::route_counts_seq(g.ctx, rs2);
+        if (g.rs1.size() != rs2.size()) g.rs1 = rs2;
+        for (size_t i = 0; i < rs2.size(); ++i)
+            if (rs2[i] != g.rs1[i]) std::fprintf(f, "D %zu %zu %u\n", i / 512, i % 512, rs2[i] - g.rs1[i]);
         std::fclose(f);
     };
     // a request's end: its DONE line (the engine's counters over its lifetime are shared with the others running
@@ -3579,7 +3605,11 @@ static int glm_pack_generate(const Options& o) {
         // a STOP <rid> during its prompt; a bare STOP stays set and also ends the running requests
         if (admit_stop.exchange(false) || stop_req.load()) g.finish = "cancel";
         g.t1 = std::chrono::steady_clock::now();
-        if (strata::core::Glm5Model::route_counting()) strata::core::Glm5Model::route_counts(g.rc1);
+        if (strata::core::Glm5Model::route_counting()) {
+            strata::core::Glm5Model::route_counts(g.rc1);
+            strata::core::Glm5Model::route_counts_seq(g.ctx, g.rs1);
+            g.rs_tl = g.rs1;
+        }
         if (ev_log) ev_line("first", g.rid);
         if (conv.on && strata::core::Glm5Model::conv_preload_on()) {
             uint64_t pf[4];

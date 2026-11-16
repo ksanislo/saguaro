@@ -257,6 +257,7 @@ bool Glm5Model::rows_bind(const int* seqs, int n, RowSeq* rw, std::string& err) 
         r.kin = nullptr;
         r.kin_t = 0;
     }
+    row_seq_.assign(seqs, seqs + n);   // (the grouped rows path's route tags: row -> sequence)
     return true;
 }
 
@@ -670,7 +671,10 @@ bool Glm5Model::rows_moe(int il, RowSeq* rw, int n, std::string& err) {
     for (int i = 0; !grouped && i < n; ++i) {
         const MoeIo io = {rows(S->x, E, i), rows_q(S->xq, E, i), rows(S->rlog, g.n_expert, i),
                           rows(S->sh_g, FFs, i), rows(S->sh_u, FFs, i), rows(S->ffn, E, i)};
-        if (!fast_moe_experts(il, io, false, 0, no_bias, pf_pending, err, true)) return false;
+        route_tag_ = 1 + rw[i].seq;   // (STRATA_GLM_ROUTE_DUMP's tag: this row's sequence)
+        const bool ok = fast_moe_experts(il, io, false, 0, no_bias, pf_pending, err, true);
+        route_tag_ = 0;
+        if (!ok) return false;
     }
     return true;
 }

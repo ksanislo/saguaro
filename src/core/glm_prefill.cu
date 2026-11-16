@@ -2888,9 +2888,11 @@ bool Glm5Model::prefill_half(int64_t p0, int T, std::string& err, const int32_t*
                   std::to_string(counted) + " of " + std::to_string(T * K) + " routes)";
             return false;
         }
-        if (glmfast::route_counting())   // STRATA_GLM_ROUTE_DUMP: the prompt's routes, this chunk's counts
+        if (glmfast::route_counting()) {   // STRATA_GLM_ROUTE_DUMP: the prompt's routes, this chunk's counts
             for (int e = 0; e < NE; ++e)
                 if (S->h_counts[e] > 0) glmfast::route_count(0, il, e, (unsigned) S->h_counts[e]);
+            glmfast::prompt_chunk_log(V.seq < 0 ? 0 : V.seq, p0, T, il, S->h_counts, NE);
+        }
         if (glmfast::route_dumping()) {   // --dump-routing: the chunk's routes at this layer, position by position
             std::vector<int> hid((size_t) T * K);
             std::vector<float> hw((size_t) T * K);
