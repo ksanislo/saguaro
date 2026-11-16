@@ -222,6 +222,7 @@ public:
     static bool route_seq_counting();   // ... counted (ROUTE_DUMP or STRATA_GLM_CONV_UNION)
     static void route_totals(uint64_t& tagged, uint64_t& global);   // decode routes: summed over the sequences / in all
     std::vector<int> layer_slots() const;
+    std::vector<int> layer_usable_slots() const;   // ... at most the elastic pool's mapped slots (it gives some to contexts)
     std::vector<size_t> layer_blob() const;   // each layer's expert bytes (0: no routed experts on a card)
     /// STRATA_GLM_CONV_*: the serve loop's allocation flags [kRcLayers][kRcExperts] (1 in it, 2 a floor, bits 2-7 its level),
     /// the OPEN conversations besides the running ones, the preload counters (issued up, issued down, landed up, landed bytes)

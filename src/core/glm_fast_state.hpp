@@ -371,6 +371,7 @@ void route_dump(int layer, int k, const int* ids, const float* w);
 constexpr int kRcLayers = 128, kRcExperts = 512;
 bool route_counting();
 bool route_seq_counting();
+bool conv_union_set();
 void route_count(int kind, int layer, int expert, unsigned n = 1);
 void route_count_seq(int seq, int layer, int expert);
 void prompt_chunk_log(int seq, int64_t p0, int T, int layer, const int* counts, int n_expert);

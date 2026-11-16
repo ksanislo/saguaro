@@ -1115,7 +1115,7 @@ struct ConvAlloc {
         eps = num("STRATA_GLM_CONV_EPS", 0.1);
         tick_s = num("STRATA_GLM_CONV_TICK_S", 2.0);
         slack = (int) num("STRATA_GLM_CONV_SLACK", 4);
-        uni = num("STRATA_GLM_CONV_UNION", 0) != 0 && on;
+        uni = (int) num("STRATA_GLM_CONV_UNION", 0) != 0 && (int) num("STRATA_GLM_CONV_EXPERTS", 0) != 0;   // (as the engine)
         u_h = num("STRATA_GLM_CONV_UNION_H_S", 30.0);
         u_idle_half = num("STRATA_GLM_CONV_UNION_IDLE_HALF_S", 5.0);
         u_drop = num("STRATA_GLM_CONV_UNION_DROP_S", 35.0);
@@ -1161,7 +1161,7 @@ struct ConvAlloc {
             c.recall.assign((size_t) kL * kE, 0.0f);
             convs.push_back(std::move(c));
             best = (int) convs.size() - 1;
-        } else {
+        } else if (!uni) {   // (the union decays in time instead)
             for (float& x : convs[(size_t) best].cnt) x *= (float) decay;
         }
         Conv& c = convs[(size_t) best];
@@ -1392,6 +1392,7 @@ struct ConvAlloc {
     }
     // CONV_UNION's target: the top slots of the weighted union of the conversations' own lists + the global prior
     void publish_union(const char* why, std::chrono::steady_clock::time_point now, double unix_s, int running, int open) {
+        const std::vector<int> usable = model->layer_usable_slots();   // (the elastic pool may have given slots away)
         std::vector<uint8_t> nf((size_t) kL * kE, 0);
         std::vector<double> w(convs.size()), prior(convs.size());
         std::string list;
@@ -1412,8 +1413,8 @@ struct ConvAlloc {
         size_t n_in = 0, bytes = 0;
         std::vector<double> score(kE);
         std::vector<std::pair<double, int>> sc;
-        for (int il = 0; il < (int) slots.size() && il < kL; ++il) {
-            const int K = slots[(size_t) il] - slack;
+        for (int il = 0; il < (int) usable.size() && il < kL; ++il) {
+            const int K = usable[(size_t) il] - slack;
             if (K <= 0) continue;
             double gs = 0;
             for (int e = 0; e < kE; ++e) gs += glob[(size_t) il * kE + e];
@@ -3754,6 +3755,7 @@ static int glm_pack_generate(const Options& o) {
             g.rs_tl = g.rs1;
         }
         if (ev_log) ev_line("first", g.rid);
+        if (g.conv >= 0) conv.seq_mark(g.ctx);   // (CONV_UNION: its sequence's counts from its first token on are its own)
         if (conv.on && strata::core::Glm5Model::conv_preload_on()) {
             uint64_t pf[4];
             strata::core::Glm5Model::conv_prefetch_counts(pf);
@@ -4150,7 +4152,6 @@ static int glm_pack_generate(const Options& o) {
             std::fprintf(stderr, "glm conv: r%d conversation %d (%s, %zu tokens shared)\n", rid, g->conv,
                          cv != nullptr && cv->lcp > 0 ? "resumed" : "new", cv != nullptr ? cv->lcp : (size_t) 0);
             strata::core::Glm5Model::conv_prefetch_counts(g->pf0);
-            conv.seq_mark(g->ctx);   // (CONV_UNION: its sequence's counts from here on are this conversation's)
             conv_running(g->conv, -1);
             conv.publish("admit", g->ta);
         }

@@ -4210,11 +4210,17 @@ void route_count_seq(int seq, int layer, int expert) {
     g_rcs[seq][layer * kRcExperts + expert].fetch_add(1, std::memory_order_relaxed);
 }
 // the per-sequence decode counts (the route tags): ROUTE_DUMP, or STRATA_GLM_CONV_UNION's per-conversation lists
-bool route_seq_counting() {
-    static const bool on = route_counting() || [] {
-        const char* v = getenv("STRATA_GLM_CONV_UNION");
-        return v != nullptr && std::atoi(v) != 0;
+// STRATA_GLM_CONV_UNION=<int != 0> with STRATA_GLM_CONV_EXPERTS=<int != 0> (generate.cpp's ConvAlloc reads them alike)
+bool conv_union_set() {
+    static const bool on = [] {
+        const char* u = getenv("STRATA_GLM_CONV_UNION");
+        const char* x = getenv("STRATA_GLM_CONV_EXPERTS");
+        return u != nullptr && std::atoi(u) != 0 && x != nullptr && std::atoi(x) != 0;
     }();
+    return on;
+}
+bool route_seq_counting() {
+    static const bool on = route_counting() || conv_union_set();
     return on;
 }
 bool route_counting() {
@@ -4258,6 +4264,12 @@ void Glm5Model::route_counts(std::vector<uint32_t>& out) {
     out.resize(2 * n);
     for (int k = 0; k < 2; ++k)
         for (size_t i = 0; i < n; ++i) out[(size_t) k * n + i] = glmfast::g_rc[k][i].load(std::memory_order_relaxed);
+}
+std::vector<int> Glm5Model::layer_usable_slots() const {   // min(main slots, the elastic pool's mapped ones)
+    std::vector<int> v = layer_slots();
+    for (const Glm5Model* m = this; m != nullptr; m = m->split_next_.get())
+        for (int il = m->l0_; il < m->lt_ && il < (int) v.size(); ++il) v[(size_t) il] = std::min(v[(size_t) il], m->el_live(il));
+    return v;
 }
 std::vector<int> Glm5Model::layer_slots() const {
     std::vector<int> v((size_t) g_.n_layers, 0);
@@ -5651,7 +5663,7 @@ void Glm5Model::conv_preload_into(int il, int slot) {
     const int rc = F->layer_rc[(size_t) il];
     auto& R = F->rc[(size_t) rc];
     if (P.st[(size_t) slot] != FastState::kFree) return;
-    static const bool read_off = env_dbl("STRATA_GLM_CONV_PREFETCH_READ_RATE", 64.0) <= 0.0;
+    static const bool read_off = glmfast::conv_union_set() && env_dbl("STRATA_GLM_CONV_PREFETCH_READ_RATE", 64.0) <= 0.0;
     if (read_off && F->pf_bg.load(std::memory_order_acquire)) return;   // (no preload while a prompt reads beside)
     int best = -1;
     uint32_t bl = 0;
@@ -5720,7 +5732,7 @@ void Glm5Model::conv_preload_locked(int mode) {
         }
         std::stable_sort(ts.begin(), ts.end(), [](const T& a, const T& b) { return a.lv > b.lv; });
         for (const T& t : ts) {
-            if (credit[dev_] < 1.0) break;
+            if (credit[dev_] < 1.0 || (int) F->bg.size() >= inflight) break;   // (lending waits for these: keep it short)
             auto& P = F->lp[(size_t) t.il];
             const int rc = F->layer_rc[(size_t) t.il];
             auto& R = F->rc[(size_t) rc];
@@ -5758,7 +5770,8 @@ void Glm5Model::conv_preload_locked(int mode) {
                 F->bg.push_back(FastState::BgMove{t.il, fs, key, rc, rs, true, ev, true});
                 g_conv_pf[0].fetch_add(1, std::memory_order_relaxed);
                 credit[dev_] -= 1.0;
-            } else if (vs >= 0 && (vl == 0 || vl + churn <= t.lv)) {   // the victim down first: its slot is free a boundary later
+            } else if (vs >= 0 && (vl == 0 || (!glmfast::conv_union_set() && vl + churn <= t.lv))) {   // (union: only
+                                                                                               //  experts outside the target go)   // the victim down first: its slot is free a boundary later
                 int fr = -1;
                 for (int s2 = 0; s2 < R.n && fr < 0; ++s2)
                     if (R.st[(size_t) s2] == FastState::kRFree) fr = s2;
