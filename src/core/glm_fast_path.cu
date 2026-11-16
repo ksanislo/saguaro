@@ -5692,6 +5692,13 @@ void Glm5Model::conv_preload_locked(int mode) {
     FastState* F = fast_;
     const Glm5Geometry& g = g_;
     if (F == nullptr || F->bg_hold || !g_conv_tgt_any.load(std::memory_order_acquire) || dev_ < 0 || dev_ >= 64) return;
+    int cur_dev = -1;   // (its stream and copies are this part's card's, whatever the caller left current)
+    cudaGetDevice(&cur_dev);
+    struct DevBack {
+        int d;
+        ~DevBack() { if (d >= 0) cudaSetDevice(d); }
+    } dev_back{cur_dev != dev_ ? cur_dev : -1};
+    if (cur_dev != dev_) cudaSetDevice(dev_);
     static const double pf_rate = env_dbl("STRATA_GLM_CONV_PREFETCH_RATE", 275.0);
     static const double pf_rrate = env_dbl("STRATA_GLM_CONV_PREFETCH_READ_RATE", 64.0);
     static const double pf_burst = env_dbl("STRATA_GLM_CONV_PREFETCH_BURST", 32.0);
@@ -5732,7 +5739,8 @@ void Glm5Model::conv_preload_locked(int mode) {
         }
         std::stable_sort(ts.begin(), ts.end(), [](const T& a, const T& b) { return a.lv > b.lv; });
         for (const T& t : ts) {
-            if (credit[dev_] < 1.0 || (int) F->bg.size() >= inflight) break;   // (lending waits for these: keep it short)
+            if (credit[dev_] < 1.0 || (glmfast::conv_union_set() && (int) F->bg.size() >= inflight)) break;   // (union: lending
+                                                                                                          //  waits for these)
             auto& P = F->lp[(size_t) t.il];
             const int rc = F->layer_rc[(size_t) t.il];
             auto& R = F->rc[(size_t) rc];
