@@ -1072,7 +1072,7 @@ struct ConvAlloc {
     };
     bool on = false, open_only = false;
     double open_s = 5.0, w_open = 0.25, w_closed = 0.0, half_s = 60.0, eps = 0.1, decay = 0.5, tick_s = 2.0;
-    int k0 = 16, recall_cap = 0, slack = 4, max_convs = 16, next_id = 1;
+    int k0 = 16, recall_cap = 0, closed_floor = 0, slack = 4, max_convs = 16, next_id = 1;
     std::vector<Conv> convs;
     std::vector<float> glob;
     double glob_since = 0;
@@ -1098,6 +1098,9 @@ struct ConvAlloc {
         // layer kept as floor (the cap halving every HALF_S) - both 0 = closed is closed (bench/glm-conv replay3-5)
         w_closed = num("STRATA_GLM_CONV_W_CLOSED", 0.0);
         recall_cap = (int) num("STRATA_GLM_CONV_RECALL_CAP", 0);
+        // CLOSED_FLOOR: a closed conversation keeps its top n a layer as floor, n halving every HALF_S (at most K0 a layer
+        // for all of them, the most recently active first)
+        closed_floor = (int) num("STRATA_GLM_CONV_CLOSED_FLOOR", 0);
         half_s = num("STRATA_GLM_CONV_HALF_S", 60.0);
         eps = num("STRATA_GLM_CONV_EPS", 0.1);
         tick_s = num("STRATA_GLM_CONV_TICK_S", 2.0);
@@ -1105,8 +1108,8 @@ struct ConvAlloc {
         model = &m;
         glob.assign((size_t) kL * kE, 0.0f);
         std::fprintf(stderr, "glm conv: %s - open %.1f s, floor %d, w_open %.2f, closed: w %.2f / recall cap %d (half %.0f s), "
-                     "eps %.2f, tick %.1f s, slack %d\n", on ? "allocation on" : "open window only (live rule)", open_s, k0,
-                     w_open, w_closed, recall_cap, half_s, eps, tick_s, slack);
+                     "eps %.2f, tick %.1f s, slack %d, closed floor %d\n", on ? "allocation on" : "open window only (live rule)",
+                     open_s, k0, w_open, w_closed, recall_cap, half_s, eps, tick_s, slack, closed_floor);
     }
     double age(const Conv& c, std::chrono::steady_clock::time_point now) const {
         return std::chrono::duration<double>(now - c.last).count();
@@ -1209,6 +1212,7 @@ struct ConvAlloc {
         std::vector<uint8_t> nf((size_t) kL * kE, 0);
         std::vector<double> w(convs.size());
         std::vector<int> rk(convs.size(), 0);   // closed: its recalled experts kept as floor, a layer
+        std::vector<int> cf(convs.size(), 0);   // closed: its own top kept as floor, a layer (CLOSED_FLOOR)
         std::vector<char> fl(convs.size());
         for (size_t i = 0; i < convs.size(); ++i) {
             const Conv& c = convs[i];
@@ -1218,7 +1222,12 @@ struct ConvAlloc {
             if (w[i] < 1e-3) w[i] = 0.0;
             fl[i] = c.running > 0 || a <= open_s;
             if (!fl[i] && recall_cap > 0) rk[i] = (int) std::lround(recall_cap * dk);
+            if (!fl[i] && closed_floor > 0) cf[i] = (int) std::lround(closed_floor * dk);
         }
+        std::vector<size_t> cf_order;   // (closed floors: the most recently active conversation first)
+        for (size_t i = 0; i < convs.size(); ++i)
+            if (cf[i] > 0) cf_order.push_back(i);
+        std::sort(cf_order.begin(), cf_order.end(), [&](size_t a, size_t b) { return convs[a].last > convs[b].last; });
         size_t n_floor = 0, n_fill = 0, bytes = 0;
         std::vector<std::pair<double, int>> sc;
         std::vector<double> score(kE);
@@ -1262,6 +1271,21 @@ struct ConvAlloc {
                         ++taken;
                     }
             }
+            int cft = 0;   // (CLOSED_FLOOR: at most K0 a layer in all)
+            for (size_t i : cf_order) {
+                const Conv& c = convs[i];
+                sc.clear();
+                for (int e = 0; e < kE; ++e)
+                    if (c.cnt[(size_t) il * kE + e] > 0) sc.push_back({c.cnt[(size_t) il * kE + e], e});
+                const size_t k = std::min(sc.size(), (size_t) cf[i]);
+                std::partial_sort(sc.begin(), sc.begin() + (long) k, sc.end(), std::greater<>());
+                for (size_t j = 0; j < k && taken < K && cft < k0; ++j)
+                    if (!in[sc[j].second]) {
+                        in[sc[j].second] = fm[sc[j].second] = 1;
+                        ++taken;
+                        ++cft;
+                    }
+            }
             const double gs = layer_sum(glob);
             if (gs > 0)
                 for (int e = 0; e < kE; ++e) score[e] += eps * glob[(size_t) il * kE + e] / gs;
@@ -1294,7 +1318,7 @@ struct ConvAlloc {
         strata::core::Glm5Model::conv_publish(flags);
         std::string list;
         for (size_t i = 0; i < convs.size(); ++i)
-            if (w[i] > 0 || fl[i] || rk[i] > 0)
+            if (w[i] > 0 || fl[i] || rk[i] > 0 || cf[i] > 0)
                 list += " " + std::to_string(convs[i].id) + ":" + (convs[i].running ? "run" : fl[i] ? "open" : "closed");
         std::fprintf(stderr, "glm conv: alloc (%s) - %d running, %d open; floor %zu + fill %zu experts (%.2f GB) |%s t=%.3f\n",
                      why, running, open, n_floor, n_fill, (double) bytes / 1e9, list.c_str(), unix_s);
