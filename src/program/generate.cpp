@@ -3087,7 +3087,22 @@ static int glm_pack_generate(const Options& o) {
     };
     // one written token of a request: its T line, the loop guard and the thinking budget (as run_request's
     // on_token), the stop conditions.  false: the request ends here (g.finish says why)
+    // STRATA_GLM_CONV_*: every TICK_S while decoding - each scheduler round and each written token (a solo stint is one
+    // round of up to 4096 tokens): the shares, the open windows' expiry, the allocation
+    const auto conv_tick = [&] {
+        if (!conv.on && !conv.open_only) return;
+        const auto now = std::chrono::steady_clock::now();
+        if (std::chrono::duration<double>(now - conv.last_pub).count() < conv.tick_s) return;
+        if (conv.on) conv.attribute(conv_decoding());
+        const int arid = admitting_rid.load();
+        int extra = -1;   // (an in-thread read is not in gens yet)
+        if (arid >= 0 && std::none_of(gens.begin(), gens.end(), [arid](const std::unique_ptr<Gen>& p) { return p->rid == arid; }))
+            extra = admitting_conv;
+        conv_running(extra, -1);
+        conv.publish("tick", now);
+    };
     const auto gen_token = [&](Gen& g, int tok) -> bool {
+        conv_tick();
         std::printf("T %d %d\n", g.rid, tok);
         if (g.sp.lp != nullptr) {
             const std::string l = strata::kernels::logprob_line(g.sp.lp, g.rid, (int64_t) g.pen.size(), tok);
@@ -4062,18 +4077,7 @@ static int glm_pack_generate(const Options& o) {
             if (gens.size() + (extra ? 1 : 0) > 1 && strata::core::Glm5Model::route_counting())
                 for (auto& o2 : gens) o2->rc_shared = true;
         }
-        if (conv.on || conv.open_only) {   // every TICK_S while decoding (an open window's expiry included)
-            const auto now = std::chrono::steady_clock::now();
-            if (std::chrono::duration<double>(now - conv.last_pub).count() >= conv.tick_s) {
-                if (conv.on) conv.attribute(conv_decoding());
-                const int arid = admitting_rid.load();
-                int extra = -1;   // (an in-thread read is not in gens yet)
-                if (arid >= 0 && std::none_of(gens.begin(), gens.end(), [arid](const std::unique_ptr<Gen>& p) { return p->rid == arid; }))
-                    extra = admitting_conv;
-                conv_running(extra, -1);
-                conv.publish("tick", now);
-            }
-        }
+        conv_tick();
         Gen* only = gens.size() == 1 ? gens[0].get() : nullptr;
         static const bool spec_win_env = [] {
             const char* e = getenv("STRATA_GLM_SPEC_WIN");
