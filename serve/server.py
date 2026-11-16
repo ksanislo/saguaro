@@ -206,8 +206,8 @@ REPEAT_STOP_TOKENS = 256
 # its text differs, and a thinking budget's stop keeps the tokens the engine generated past it, so neither re-reads the
 # reply.  Off: every prompt is a fresh encode, as before.
 REPLY_REUSE = os.environ.get("STRATA_REPLY_REUSE", "") == "1"
-# Opt-in STRATA_BATCH_WRAP_SPILL=1 (with REPLY_REUSE): under --batch too, the tokens the engine generated past a budget's
-# stop reach the wrap-up (they did on the solo path only, so the continuation read the whole thinking again)
+# Opt-in STRATA_BATCH_WRAP_SPILL=1 (server env or the config's "env"): the tokens the engine generated past a budget's stop
+# join the wrap-up under --batch too, so the continuation extends what the slot holds instead of reading it all again
 BATCH_WRAP_SPILL = os.environ.get("STRATA_BATCH_WRAP_SPILL", "") == "1"
 ANSWER_ROOM_MIN_CAP = 1024    # 0.1.45: from this max_tokens on, thinking without a budget is closed early enough to leave room to answer
 DS41_DEFAULT_BUDGET = 32768   # DeepSeek-V4.1 only: the thinking budget when neither the request nor the config names one
@@ -2364,7 +2364,7 @@ class StrataEngine:
             # a consumer that left early (or an error): keep the engine and this server in step
             btrace("finally phase", phase, "slot", slot, "holding", holding)
             # STRATA_BATCH_WRAP_SPILL: a next pass follows (a budget's wrap-up): collect what the engine ran past the stop
-            spill = [] if BATCH_WRAP_SPILL and REPLY_REUSE and getattr(self._next_pass, "on", False) else None
+            spill = [] if BATCH_WRAP_SPILL and getattr(self._next_pass, "on", False) else None
             try:
                 if phase in ("solo", "admit") and (self.gen != born or not self.alive()):
                     phase = "none"                      # #1012: its engine is gone: nothing to stop or drain
@@ -5993,15 +5993,15 @@ class Service:
                         # was generated plus the wrap-up, so the engine continues from the prefix it already holds.
                         # A forced call (tool_choice) is opened the same way: after the wrap-up, or where the
                         # thinking ended, after the blank line the template puts before a call.
-                        if wrap and REPLY_REUSE:
+                        if wrap and (REPLY_REUSE or BATCH_WRAP_SPILL):
                             # The engine had generated a few tokens past the budget's stop before the STOP reached
                             # it, and its session holds them.  Dropped, the wrap-up continuation left the session
                             # there and the engine read the whole thinking again (a reply has no checkpoint inside
                             # it).  They join the thinking - when they are plain text: no stop or tag, no split
                             # character - so the continuation extends the engine's own state.
                             take = getattr(self.engine, "take_spill", None) if BATCH_WRAP_SPILL else None
-                            spill = take() if take is not None else None
-                            spill = list((spill if spill is not None else getattr(self.engine, "drained", None)) or [])
+                            spill = list((take() if take is not None else None) or getattr(self.engine, "drained", None)
+                                         or [])   # (an empty batch spill falls back to the solo path's drained)
                             spill_text = self.tok.decode(spill) if spill else ""
                             if spill and not any(t in self.stop_ids for t in spill) and "<" not in spill_text \
                                     and "�" not in spill_text and max_new - n - len(spill) > 1:
@@ -9245,6 +9245,11 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
     if isinstance(rs, bool) or not isinstance(rs, int) or rs < 0:
         raise SystemExit(f"[strata] config \"repeat_stop_tokens\" must be a whole number >= 0 (0 = off), not {rs!r}")
     svc.repeat_stop_tokens = rs
+    global BATCH_WRAP_SPILL                             # (the config's "env" otherwise reaches only the engine)
+    if str((cfg.get("env") or {}).get("STRATA_BATCH_WRAP_SPILL", "")) == "1":
+        BATCH_WRAP_SPILL = True
+    if BATCH_WRAP_SPILL:
+        print("[strata] STRATA_BATCH_WRAP_SPILL: a budget wrap-up keeps the tokens run past its stop", flush=True)
     svc.effort_end = bool(effort_end)                   # #458: "effort_position": "end" with an engine that has it
     if cfg.get("reasoning_budget_tokens") is not None:  # #123: a default thinking budget for every request
         svc.reasoning_budget_configured = True

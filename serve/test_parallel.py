@@ -452,6 +452,40 @@ class FakeEngineCase(unittest.TestCase):
         return res
 
 
+class WrapSpillService(FakeEngineCase):
+    """STRATA_BATCH_WRAP_SPILL end to end: two requests in batch slots reach a thinking budget; after its BSTOP the fake
+    slot emits one more token (as the engine runs ahead), which the wrap-up pass must carry."""
+
+    def wrapped_prompts(self, on):
+        import serve.server as server
+        with mock.patch.object(server, "BATCH_WRAP_SPILL", on), mock.patch.object(server, "REPLY_REUSE", False):
+            self.start(2)
+            out = {}
+
+            def go(k, text):
+                body = {"messages": [{"role": "user", "content": text}], "max_tokens": 200,
+                        "reasoning_budget_tokens": 10}
+                req = urllib.request.Request(self.base + "/v1/chat/completions", data=json.dumps(body).encode(),
+                                             headers={"Content-Type": "application/json"})
+                with urllib.request.urlopen(req, timeout=60) as r:
+                    out[k] = json.loads(r.read().decode())
+            ts = [threading.Thread(target=go, args=(k, f"LONGREPLY {k}")) for k in ("a", "b")]
+            ts[0].start(); time.sleep(0.15); ts[1].start()
+            [t.join(60) for t in ts]
+        rows = [l.split() for l in self.log.read_text().splitlines() if l.startswith(("GEN", "BGEN"))]
+        return out, [int(r[2]) for r in rows]
+
+    def test_the_wrap_up_carries_the_slot_run_ahead_with_the_switch(self):
+        out_off, n_off = self.wrapped_prompts(False)
+        self.tearDown()
+        out_on, n_on = self.wrapped_prompts(True)
+        for out in (out_off, out_on):
+            self.assertTrue(all("long enough" in (o["choices"][0]["message"].get("reasoning_content") or "")
+                                for o in out.values()), out)
+        # the passes' prompt lengths: with the switch the wrap-up passes are longer by the run-ahead tokens
+        self.assertGreater(sum(n_on), sum(n_off), (n_off, n_on))
+
+
 class ParallelService(FakeEngineCase):
     """The real StrataEngine and Service over HTTP, the fake engine behind them: slots, queues, benchmarks, telemetry.
     The yielding, restart and failure tests are in serve/test_parallel_yield.py (this file alone ran past 100 s)."""

@@ -4325,12 +4325,13 @@ class ThinkingBudget(unittest.TestCase):
         self.assertEqual(msg["content"], ThinkingEngine.ANSWER)
         self.assertEqual(second, first + self.tok.encode(ThinkingEngine.THOUGHT[:23]) + extra)
 
-    def batch_spilled(self, on):
+    def batch_spilled(self, on, engine=None):
         from unittest import mock
         from serve.server import REASONING_WRAP_UP
-        self.engine = BatchSpillingThinkingEngine(self.tok)
+        self.engine = engine or BatchSpillingThinkingEngine(self.tok)
         self.svc.engine = self.engine
-        with mock.patch("serve.server.REPLY_REUSE", True), mock.patch("serve.server.BATCH_WRAP_SPILL", on):
+        # (live: REPLY_REUSE off - the config's env never reached the server process)
+        with mock.patch("serve.server.REPLY_REUSE", False), mock.patch("serve.server.BATCH_WRAP_SPILL", on):
             code, b = self.openai(reasoning_budget_tokens=20)
         self.assertEqual(code, 200, b)
         first, second = self.engine.prompts
@@ -4338,6 +4339,14 @@ class ThinkingBudget(unittest.TestCase):
 
     def test_batch_spill_joins_the_thinking_with_the_switch(self):
         first, second, extra = self.batch_spilled(True)
+        self.assertEqual(second, first + self.tok.encode(ThinkingEngine.THOUGHT[:23]) + extra)
+
+    def test_an_empty_batch_spill_falls_back_to_drained(self):
+        """take_spill() [] (a solo leg that collected nothing) must not hide the solo path's own drained tokens."""
+        class EmptyTake(SpillingThinkingEngine):
+            def take_spill(self):
+                return []
+        first, second, extra = self.batch_spilled(True, EmptyTake(self.tok))
         self.assertEqual(second, first + self.tok.encode(ThinkingEngine.THOUGHT[:23]) + extra)
 
     def test_batch_spill_is_not_read_without_the_switch(self):
