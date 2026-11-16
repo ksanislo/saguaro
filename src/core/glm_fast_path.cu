@@ -185,10 +185,22 @@ static bool conv_pf_on() {
     static const bool on = conv_sets_on() && env_on("STRATA_GLM_CONV_PREFETCH");
     return on;
 }
+// CONV_PROTECT=live: as 1, but the non-floor victims go by the aged counts (least) while two requests or more run (lru
+// only alone: =live's rule; cv2: lru with 2 running cost n2 -12.5 %)
+static bool conv_protect_live() {
+    static const bool on = [] {
+        const char* v = getenv("STRATA_GLM_CONV_PROTECT");
+        return conv_sets_on() && v != nullptr && std::strcmp(v, "live") == 0;
+    }();
+    return on;
+}
+// the non-floor victims' rule under CONV_PROTECT: lru (true) or the aged counts (live, with several running)
+static bool live_lru();
+static bool conv_protect_lru() { return !conv_protect_live() || live_lru(); }
 // CONV_PROTECT=1: the allocation only protects (the open conversations' floors are never victims) and orders the preload;
 // every other victim is plain lru (a request adapts as with lru alone)
 static bool conv_protect_on() {
-    static const bool on = conv_sets_on() && env_on("STRATA_GLM_CONV_PROTECT");
+    static const bool on = conv_sets_on() && (env_on("STRATA_GLM_CONV_PROTECT") || conv_protect_live());
     return on;
 }
 // CONV_PAIR=1: a preload's victim, once down, hands its slot straight to the layer's best missing expert (no other taker)
@@ -5677,7 +5689,7 @@ void Glm5Model::conv_preload_locked(int mode) {
                 if (st != FastState::kResident || P.key[(size_t) s2] < 0) continue;
                 const uint32_t lv = conv_level(t.il, P.key[(size_t) s2]);
                 if (conv_protect_on() && (lv == 65u || (lv != 0 && lv + churn > t.lv))) continue;   // (lru among the rest)
-                const uint32_t c = conv_protect_on() ? 0u : F->cnt[(size_t) t.il * NE + P.key[(size_t) s2]];
+                const uint32_t c = conv_protect_on() && conv_protect_lru() ? 0u : F->cnt[(size_t) t.il * NE + P.key[(size_t) s2]];
                 if (lv < vl || (lv == vl && (c < vc || (c == vc && P.tick[(size_t) s2] < vt)))) {
                     vl = lv;
                     vc = c;
@@ -5962,7 +5974,7 @@ bool Glm5Model::fast_boundary(std::string& err) {
             // (=live: lru while at most one request runs, the aged counts while several - a solo request under
             // MAYA_GLM_SEQS=8 evicts as SEQS=1 does)
             static const char* const ve = getenv("STRATA_GLM_VRAM_EVICT");
-            const bool vram_lru = conv_protect_on()               ? true
+            const bool vram_lru = conv_protect_on()               ? conv_protect_lru()
                                   : ve == nullptr                 ? seq_count() <= 1
                                   : std::strcmp(ve, "live") == 0 ? live_lru()
                                                                  : std::strcmp(ve, "lru") == 0;
