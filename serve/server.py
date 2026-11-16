@@ -2421,8 +2421,15 @@ class StrataEngine:
                     self.slot_held[slot] = []
                     stream = (list(prompt) + out[gen0:] if phase == "slot" and gen0 is not None and len(out) > gen0
                               else None)
+                    t_wait = time.monotonic()
                     after = self._release_slot_when_done(slot, stream, sync_s=10.0 if spill is not None and stream
                                                          else 0.0)   # freed at its BDONE (or, queued: at its BRA 0)
+                    if spill is not None and stream:
+                        print(f"[strata] wrap spill: waited {(time.monotonic() - t_wait) * 1000:.0f} ms for slot {slot}'s "
+                              f"BDONE ({'none: background wait' if after is None else f'{len(after)} tokens'})", flush=True)
+                        with self.slot_cv:              # the keep runs from the wait's end, not from before it
+                            if slot in self.slot_kept:
+                                self.slot_kept[slot] = (self.slot_kept[slot][0], time.monotonic() + self.SLOT_KEEP_S)
                     if after is not None and spill is not None:
                         self._next_pass.spill = after
                     self.slot_claims.discard(slot)                # (the BDONE wait owns it now)
