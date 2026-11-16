@@ -4158,6 +4158,24 @@ class SpillingThinkingEngine(ThinkingEngine):
                 self.drained = toks[i + 1:i + 4] if self.spill is None else self.tok.encode(self.spill)
 
 
+class BatchSpillingThinkingEngine(SpillingThinkingEngine):
+    """STRATA_BATCH_WRAP_SPILL: under --batch the run-ahead tokens come from take_spill(), `drained` stays empty."""
+
+    def generate(self, ids, max_new, sampling, cancel, embeddings=None):
+        self._spill = None
+        yield from super().generate(ids, max_new, sampling, cancel, embeddings)
+
+    def __setattr__(self, k, v):
+        if k == "drained" and v:                    # what the solo path would have drained goes to take_spill()
+            object.__setattr__(self, "_spill", list(v))
+            v = []
+        object.__setattr__(self, k, v)
+
+    def take_spill(self):
+        s, self._spill = getattr(self, "_spill", None), None
+        return s
+
+
 class EndsInsideThinkingEngine(ThinkingEngine):
     """The #1053 reply: one sentence of reasoning, then the end-of-turn token, no </think>.  A prompt that ends the
     thinking (the retry) gets the answer."""
@@ -4306,6 +4324,25 @@ class ThinkingBudget(unittest.TestCase):
         self.assertEqual(msg["reasoning_content"], ThinkingEngine.THOUGHT[:23] + REASONING_WRAP_UP.split("</think>")[0])
         self.assertEqual(msg["content"], ThinkingEngine.ANSWER)
         self.assertEqual(second, first + self.tok.encode(ThinkingEngine.THOUGHT[:23]) + extra)
+
+    def batch_spilled(self, on):
+        from unittest import mock
+        from serve.server import REASONING_WRAP_UP
+        self.engine = BatchSpillingThinkingEngine(self.tok)
+        self.svc.engine = self.engine
+        with mock.patch("serve.server.REPLY_REUSE", True), mock.patch("serve.server.BATCH_WRAP_SPILL", on):
+            code, b = self.openai(reasoning_budget_tokens=20)
+        self.assertEqual(code, 200, b)
+        first, second = self.engine.prompts
+        return first, second, self.tok.encode(REASONING_WRAP_UP, parse_special=True)
+
+    def test_batch_spill_joins_the_thinking_with_the_switch(self):
+        first, second, extra = self.batch_spilled(True)
+        self.assertEqual(second, first + self.tok.encode(ThinkingEngine.THOUGHT[:23]) + extra)
+
+    def test_batch_spill_is_not_read_without_the_switch(self):
+        first, second, extra = self.batch_spilled(False)
+        self.assertEqual(second, first + self.tok.encode(ThinkingEngine.THOUGHT[:20]) + extra)
 
     def test_drained_tokens_with_a_tag_are_left_out(self):
         msg, first, second, extra = self.spilled(spill="</th")

@@ -206,6 +206,9 @@ REPEAT_STOP_TOKENS = 256
 # its text differs, and a thinking budget's stop keeps the tokens the engine generated past it, so neither re-reads the
 # reply.  Off: every prompt is a fresh encode, as before.
 REPLY_REUSE = os.environ.get("STRATA_REPLY_REUSE", "") == "1"
+# Opt-in STRATA_BATCH_WRAP_SPILL=1 (with REPLY_REUSE): under --batch too, the tokens the engine generated past a budget's
+# stop reach the wrap-up (they did on the solo path only, so the continuation read the whole thinking again)
+BATCH_WRAP_SPILL = os.environ.get("STRATA_BATCH_WRAP_SPILL", "") == "1"
 ANSWER_ROOM_MIN_CAP = 1024    # 0.1.45: from this max_tokens on, thinking without a budget is closed early enough to leave room to answer
 DS41_DEFAULT_BUDGET = 32768   # DeepSeek-V4.1 only: the thinking budget when neither the request nor the config names one
 DS41_SMALL_CAP_MIN = 48       # DeepSeek-V4.1 only: from this max_tokens up to ANSWER_ROOM_MIN_CAP, thinking is capped at half of it
@@ -1743,7 +1746,7 @@ class StrataEngine:
         f = (getattr(self, "_last_done", None) or "").split()
         return f[5] if len(f) > 5 else None
 
-    def _drain_control(self, until: str, timeout: float = 300.0, born: int | None = None):
+    def _drain_control(self, until: str, timeout: float = 300.0, born: int | None = None, collect: list | None = None):
         """After a consumer left early: read the control lines up to the next `until` line (DONE or BADM) so the next
         request does not read this one's leftovers.  Returns that line (None: the engine ended or never answered).
         `born`: the engine process (self.gen) the request started on; once that one is gone there is nothing to
@@ -1759,6 +1762,8 @@ class StrataEngine:
                 continue
             if line is None:
                 return None
+            if collect is not None and line.startswith("T "):
+                collect.append(int(line[2:]))
             if line.startswith("DONE"):
                 self._parse_done(line)
             if line.startswith(until) or line.startswith("ERR"):
@@ -1790,12 +1795,14 @@ class StrataEngine:
                 return line
         return None
 
-    def _release_slot_when_done(self, slot: int, stream: list[int] | None = None):
+    def _release_slot_when_done(self, slot: int, stream: list[int] | None = None, sync_s: float = 0.0):
         """A slot whose consumer left (a stop token, a stop string, a disconnect): BSTOP it and free it once the engine
         says BDONE (in the background).  `stream`: the prompt and every token of it so far - with the tokens still to
-        come before BDONE, all but the last are what the slot holds then (the next turn of its conversation)."""
+        come before BDONE, all but the last are what the slot holds then (the next turn of its conversation).
+        `sync_s` > 0: wait up to that long here and return the tokens that came after `stream` (None: not done in time,
+        the wait goes on in the background)."""
         if slot >= len(self.slot_q):                    # the engine restarted with fewer slots: this one is gone
-            return
+            return None
         try:
             self._send(f"BSTOP {slot}")
         except EngineDied:
@@ -1804,12 +1811,14 @@ class StrataEngine:
         releasing = self.slot_releasing
         releasing.add(slot)
 
-        def wait():
-            end = time.monotonic() + 600.0
-            tail = list(stream or [])
-            while time.monotonic() < end:
+        tail = list(stream or [])
+        end = time.monotonic() + 600.0
+
+        def wait(until=None):
+            nonlocal tail
+            while time.monotonic() < (end if until is None else min(end, until)):
                 try:
-                    line = q.get(timeout=5.0)
+                    line = q.get(timeout=5.0 if until is None else max(0.05, min(5.0, until - time.monotonic())))
                 except queue.Empty:
                     continue
                 if line is None:
@@ -1827,14 +1836,29 @@ class StrataEngine:
                 if line.startswith("BRE ") or (line.startswith("BRA ") and line.split()[2:3] == ["0"]):
                     tail = []                       # STRATA_SLOT_ADMIT: an admission that never started
                     break
+            else:
+                if until is not None:
+                    return False                    # not done in time: the background wait goes on
             held[slot] = tail[:-1] if stream and tail else []
             with self.slot_cv:
                 busy[slot] = False
                 releasing.discard(slot)
                 self.slot_cv.notify_all()
+            return True
+        if sync_s > 0 and wait(time.monotonic() + sync_s):
+            return tail[len(stream or []):] if stream and len(tail) >= len(stream) else []
         threading.Thread(target=wait, daemon=True).start()
+        return None
 
     SLOT_KEEP_S = 5.0        # how long a slot waits for its request's next pass (it comes within milliseconds)
+
+    def take_spill(self) -> list[int] | None:
+        """STRATA_BATCH_WRAP_SPILL: the tokens the engine generated past this thread's last stop (None: not collected)."""
+        tl = getattr(self, "_next_pass", None)
+        spill = getattr(tl, "spill", None) if tl is not None else None
+        if tl is not None:
+            tl.spill = None
+        return spill
 
     def keep_slot_for_next(self, on: bool = True) -> None:
         """The pass this thread is closing has a next one: its slot waits for it (see slot_kept)."""
@@ -1995,6 +2019,8 @@ class StrataEngine:
         admission to its BADM, a slot is BSTOPped and freed at its BDONE."""
         if not self.alive():
             raise EngineDied("the engine is unavailable; this request was not sent")
+        if BATCH_WRAP_SPILL:
+            self._next_pass.spill = None                # (a pass's spill is read right after it, never by a later one)
         self.progress, self.progress_ms, self.reused = None, 0, 0
         born = self.gen                                 # the engine process this request is sent to
         keys = self.sampling_keys(sampling or {})
@@ -2337,6 +2363,8 @@ class StrataEngine:
         finally:
             # a consumer that left early (or an error): keep the engine and this server in step
             btrace("finally phase", phase, "slot", slot, "holding", holding)
+            # STRATA_BATCH_WRAP_SPILL: a next pass follows (a budget's wrap-up): collect what the engine ran past the stop
+            spill = [] if BATCH_WRAP_SPILL and REPLY_REUSE and getattr(self._next_pass, "on", False) else None
             try:
                 if phase in ("solo", "admit") and (self.gen != born or not self.alive()):
                     phase = "none"                      # #1012: its engine is gone: nothing to stop or drain
@@ -2344,7 +2372,11 @@ class StrataEngine:
                     phase = "none"                      # #1059: it ended on the engine's ERR: no DONE to wait 300 s for
                 if phase == "solo":
                     self._send("STOP")
-                    self._drain_control("DONE", born=born)
+                    if spill is not None:
+                        spill.extend(pending)           # read but not passed on: the session holds them too
+                    self._drain_control("DONE", born=born, collect=spill)
+                    if spill is not None:
+                        self._next_pass.spill = spill
                 elif phase == "admit":
                     line = self._drain_control("BADM", born=born)
                     if line and line.startswith("BADM ") and line.split()[2:3] == ["1"]:
@@ -2389,7 +2421,10 @@ class StrataEngine:
                     self.slot_held[slot] = []
                     stream = (list(prompt) + out[gen0:] if phase == "slot" and gen0 is not None and len(out) > gen0
                               else None)
-                    self._release_slot_when_done(slot, stream)    # freed at its BDONE (or, queued: at its BRA 0)
+                    after = self._release_slot_when_done(slot, stream, sync_s=10.0 if spill is not None and stream
+                                                         else 0.0)   # freed at its BDONE (or, queued: at its BRA 0)
+                    if after is not None and spill is not None:
+                        self._next_pass.spill = after
                     self.slot_claims.discard(slot)                # (the BDONE wait owns it now)
                 else:
                     with self.slot_cv:
@@ -5957,7 +5992,9 @@ class Service:
                             # there and the engine read the whole thinking again (a reply has no checkpoint inside
                             # it).  They join the thinking - when they are plain text: no stop or tag, no split
                             # character - so the continuation extends the engine's own state.
-                            spill = list(getattr(self.engine, "drained", None) or [])
+                            take = getattr(self.engine, "take_spill", None) if BATCH_WRAP_SPILL else None
+                            spill = take() if take is not None else None
+                            spill = list((spill if spill is not None else getattr(self.engine, "drained", None)) or [])
                             spill_text = self.tok.decode(spill) if spill else ""
                             if spill and not any(t in self.stop_ids for t in spill) and "<" not in spill_text \
                                     and "�" not in spill_text and max_new - n - len(spill) > 1:
