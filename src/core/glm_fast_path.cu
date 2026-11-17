@@ -5894,9 +5894,43 @@ void Glm5Model::conv_preload_locked(int mode) {
 // (3) every layer's spares are refilled - from free slots, else by evicting the layer's least-used resident
 // (demoted into the RAM tier when it beats the RAM tier's least-used, dropped otherwise); (4) the RAM tier keeps
 // a few free slots for disk reads.  The table edits ride one small update kernel at the head of the next token.
+// STRATA_GLM_BOUNDARY_TIMING=1 (diagnostic): per card, boundaries beside a prompt read [1] or not [0]: the time in each
+// stage (prompt wait, processed wait, lock, shadow target, the rest), and spare refill victims inside the target / all
+namespace {
+struct BtStat { std::atomic<uint64_t> n{0}, ns[5]{}, vin{0}, vall{0}; };
+BtStat g_bt[8][2];
+bool bt_on() { static const bool on = getenv("STRATA_GLM_BOUNDARY_TIMING") != nullptr; return on; }
+}
 bool Glm5Model::fast_boundary(std::string& err) {
     FastState* F = fast_;
     if (F == nullptr || F->lp.empty() || F->rc.empty()) return true;
+    const bool bt = bt_on();
+    const int bt_rd = F->pf_bg.load(std::memory_order_acquire) ? 1 : 0;
+    BtStat& BS = g_bt[dev_ & 7][bt_rd];
+    using bt_clk = std::chrono::steady_clock;
+    bt_clk::time_point bt_t[5];
+    int bt_k = 0;
+    const auto bt_mark = [&] { if (bt && bt_k < 5) bt_t[bt_k++] = bt_clk::now(); };
+    struct BtEnd {
+        const bool on; BtStat& S; bt_clk::time_point* t; int& k; int dev; int rd;
+        ~BtEnd() {
+            if (!on || k == 0) return;
+            const auto now = bt_clk::now();
+            for (int i = 0; i < 5; ++i) {
+                const auto a = t[std::min(i, k - 1)], b = i + 1 < k ? t[i + 1] : now;
+                if (i < k) S.ns[i] += (uint64_t) std::chrono::duration_cast<std::chrono::nanoseconds>(b - a).count();
+            }
+            const uint64_t n = ++S.n;
+            if (n % 256 == 0) {
+                const double d = (double) n * 1e3;
+                std::fprintf(stderr, "glm boundary timing CUDA%d %s: n %llu, us prompt-wait %.1f proc-wait %.1f lock %.1f "
+                             "shadow %.1f rest %.1f, refill victims in target %llu / %llu t=%.3f\n", dev, rd ? "read" : "dec",
+                             (unsigned long long) n, S.ns[0] / d, S.ns[1] / d, S.ns[2] / d, S.ns[3] / d, S.ns[4] / d,
+                             (unsigned long long) S.vin.load(), (unsigned long long) S.vall.load(),
+                             std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count());
+            }
+        }
+    } bt_end{bt, BS, bt_t, bt_k, dev_, bt_rd};
     // Also catches an asynchronous failure before waiting for routes that may never have been published.
     if (!glmfast::cuda_ok(cudaStreamSynchronize(F->cs), "glm boundary compute", err) || !F->route_ok(err))
         return false;
@@ -5941,6 +5975,7 @@ bool Glm5Model::fast_boundary(std::string& err) {
         }
     }
     // a prompt beside the decode: no plan of its between choosing experts and queuing their work, and that work done
+    bt_mark();
     std::unique_lock<std::mutex> plan_lk(F->plan_mu, std::defer_lock);
     if (F->pf_bg.load(std::memory_order_acquire)) {
         plan_lk.lock();
@@ -5949,9 +5984,13 @@ bool Glm5Model::fast_boundary(std::string& err) {
             return false;
     }
     const Glm5Geometry& g = g_;
+    bt_mark();
     while (F->processed.load(std::memory_order_acquire) < F->expected) cpu_relax();
+    bt_mark();
     std::lock_guard<std::mutex> lk(F->mu);
+    bt_mark();
     if (glmfast::conv_shadow_set()) shadow_target();   // (CONV_SHADOW: this part's layers' target from the running sets)
+    bt_mark();
     int nu = 0;
     bool ok = true;
     const auto flush = [&] {
@@ -6154,6 +6193,7 @@ bool Glm5Model::fast_boundary(std::string& err) {
                 }
             }
             if (v < 0) break;
+            if (bt) { ++BS.vall; if (bl > 0) ++BS.vin; }
             const int vkey = il * g.n_expert + P.key[(size_t) v];
             // demote it into the RAM tier: a free slot, else the RAM tier's victim (if colder than it)
             int rs = -1;
