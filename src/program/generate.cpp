@@ -3219,6 +3219,14 @@ static int glm_pack_generate(const Options& o) {
     // context with this much left after it, and its max tokens are cut to that context
     static const int64_t multi_room = (int64_t) env_num("STRATA_GLM_MULTI_ROOM", 16384);
     static const int multi_boundary_every = (int) env_num("STRATA_GLM_MULTI_BOUNDARY", 32);
+    // STRATA_GLM_MULTI_BOUNDARY_READ=N: N steps between boundaries while any prompt is read (each boundary waits on its chunk)
+    static const int multi_boundary_read = (int) env_num("STRATA_GLM_MULTI_BOUNDARY_READ", 0);
+    const auto mb_every = [&] {
+        if (multi_boundary_read > 0)
+            for (const auto& p : gens)
+                if (!p->done && (p->reading || p->t1 < p->ta)) return multi_boundary_read;
+        return multi_boundary_every;
+    };
     static const bool multi_spec = env_num("STRATA_GLM_MULTI_SPEC", 1) != 0;
     static const int split_rows = strata::core::Glm5Model::split_rows_setting();
     // STRATA_GLM_EVEN_GROUPS=1: the split's groups cut evenly from all the running requests, two at least, instead of
@@ -4483,7 +4491,7 @@ static int glm_pack_generate(const Options& o) {
                 return;
             }
             if (multi_boundary_every > 0 &&
-                since_boundary >= multi_boundary_every * (int) std::max<size_t>(1, gens.size())) {
+                since_boundary >= mb_every() * (int) std::max<size_t>(1, gens.size())) {
                 since_boundary = 0;
                 if (!multi_drain() || !model.multi_boundary(err)) {
                     multi_fail(err);
@@ -4582,7 +4590,7 @@ static int glm_pack_generate(const Options& o) {
             }
             since_boundary += k;
             if (multi_boundary_every > 0 && !in_read_gap &&
-                since_boundary >= multi_boundary_every * (int) std::max<size_t>(1, gens.size())) {
+                since_boundary >= mb_every() * (int) std::max<size_t>(1, gens.size())) {
                 since_boundary = 0;
                 if (!multi_drain() || !model.multi_boundary(err)) { multi_fail(err); return; }
             }
@@ -4615,7 +4623,7 @@ static int glm_pack_generate(const Options& o) {
             return;
         }
         gen_took(g, tok);
-        if (multi_boundary_every > 0 && ++since_boundary >= multi_boundary_every * (int) std::max<size_t>(1, gens.size())) {
+        if (multi_boundary_every > 0 && ++since_boundary >= mb_every() * (int) std::max<size_t>(1, gens.size())) {
             since_boundary = 0;
             if (!multi_drain() || !model.multi_boundary(err)) {
                 multi_fail(err);
