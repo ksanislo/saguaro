@@ -5897,7 +5897,7 @@ void Glm5Model::conv_preload_locked(int mode) {
 // STRATA_GLM_BOUNDARY_TIMING=1 (diagnostic): per card, boundaries beside a prompt read [1] or not [0]: the time in each
 // stage (prompt wait, processed wait, lock, shadow target, the rest), and spare refill victims inside the target / all
 namespace {
-struct BtStat { std::atomic<uint64_t> n{0}, ns[5]{}, vin{0}, vall{0}; };
+struct BtStat { std::atomic<uint64_t> n{0}, ns[10]{}, vin{0}, vall{0}; };
 BtStat g_bt[8][2];
 bool bt_on() { static const bool on = getenv("STRATA_GLM_BOUNDARY_TIMING") != nullptr; return on; }
 }
@@ -5908,24 +5908,24 @@ bool Glm5Model::fast_boundary(std::string& err) {
     const int bt_rd = F->pf_bg.load(std::memory_order_acquire) ? 1 : 0;
     BtStat& BS = g_bt[dev_ & 7][bt_rd];
     using bt_clk = std::chrono::steady_clock;
-    bt_clk::time_point bt_t[5];
+    bt_clk::time_point bt_t[10];
     int bt_k = 0;
-    const auto bt_mark = [&] { if (bt && bt_k < 5) bt_t[bt_k++] = bt_clk::now(); };
+    const auto bt_mark = [&] { if (bt && bt_k < 10) bt_t[bt_k++] = bt_clk::now(); };
     struct BtEnd {
         const bool on; BtStat& S; bt_clk::time_point* t; int& k; int dev; int rd;
         ~BtEnd() {
             if (!on || k == 0) return;
             const auto now = bt_clk::now();
-            for (int i = 0; i < 5; ++i) {
-                const auto a = t[std::min(i, k - 1)], b = i + 1 < k ? t[i + 1] : now;
-                if (i < k) S.ns[i] += (uint64_t) std::chrono::duration_cast<std::chrono::nanoseconds>(b - a).count();
-            }
+            for (int i = 0; i < k; ++i)
+                S.ns[i] += (uint64_t) std::chrono::duration_cast<std::chrono::nanoseconds>((i + 1 < k ? t[i + 1] : now) - t[i]).count();
             const uint64_t n = ++S.n;
             if (n % 256 == 0) {
                 const double d = (double) n * 1e3;
                 std::fprintf(stderr, "glm boundary timing CUDA%d %s: n %llu, us prompt-wait %.1f proc-wait %.1f lock %.1f "
-                             "shadow %.1f rest %.1f, refill victims in target %llu / %llu t=%.3f\n", dev, rd ? "read" : "dec",
+                             "shadow %.1f gc %.1f refill %.1f ramfree+landed %.1f preload %.1f moves %.1f rest %.1f, "
+                             "refill victims in target %llu / %llu t=%.3f\n", dev, rd ? "read" : "dec",
                              (unsigned long long) n, S.ns[0] / d, S.ns[1] / d, S.ns[2] / d, S.ns[3] / d, S.ns[4] / d,
+                             S.ns[5] / d, S.ns[6] / d, S.ns[7] / d, S.ns[8] / d, S.ns[9] / d,
                              (unsigned long long) S.vin.load(), (unsigned long long) S.vall.load(),
                              std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count());
             }
@@ -5989,7 +5989,15 @@ bool Glm5Model::fast_boundary(std::string& err) {
     bt_mark();
     std::lock_guard<std::mutex> lk(F->mu);
     bt_mark();
-    if (glmfast::conv_shadow_set()) shadow_target();   // (CONV_SHADOW: this part's layers' target from the running sets)
+    if (glmfast::conv_shadow_set()) {   // (CONV_SHADOW: this part's layers' target; _EVERY=N: at most every N boundaries)
+        static const int every = std::max(1, (int) env_dbl("STRATA_GLM_CONV_SHADOW_EVERY", 1.0));
+        const uint32_t run = glmfast::g_shadow_run.load(std::memory_order_relaxed);
+        if (run != shadow_run_ || ++shadow_since_ >= every) {
+            shadow_target();
+            shadow_run_ = run;
+            shadow_since_ = 0;
+        }
+    }
     bt_mark();
     int nu = 0;
     bool ok = true;
@@ -6136,6 +6144,7 @@ bool Glm5Model::fast_boundary(std::string& err) {
     }
     F->draining.swap(still);
     // (3)
+    bt_mark();
     for (int il = l0_; il < lt_; ++il) {
         if (F->bg_hold) break;   // lending retires moves without starting spare-refill demotions
         auto& P = F->lp[(size_t) il];
@@ -6253,6 +6262,7 @@ bool Glm5Model::fast_boundary(std::string& err) {
             }
         }
     }
+    bt_mark();
     // (4) a few free RAM slots per class for the next token's disk reads (and its reads ahead); RAM-resident
     // mode plans no disk reads, so no residents are evicted to keep landing room either
     static const char* kf = getenv("STRATA_GLM_RAM_FREE");
@@ -6329,9 +6339,11 @@ bool Glm5Model::fast_boundary(std::string& err) {
             F->ev_free.push_back(m.ev);
         }
         F->bg.swap(keep);
+        bt_mark();
         if (!F->bg_hold)   // (lending holds the moves: its slot stays free for the lending to take)
             for (const auto& ps : pair_slots) conv_preload_into(ps.first, ps.second);
         if (conv_pf_on() && !F->bg_hold) conv_preload_locked(F->pf_bg.load(std::memory_order_acquire) ? 1 : 0);
+        bt_mark();
         static const int bg_n = [] {
             const char* v = getenv("STRATA_GLM_PROMOTE");
             return v != nullptr ? std::max(0, std::atoi(v)) : 8;
@@ -6451,6 +6463,7 @@ bool Glm5Model::fast_boundary(std::string& err) {
             }
         }
     }
+    bt_mark();
     // STRATA_GLM_COPY_PROBE=<n> (measurement): every STRATA_GLM_COPY_PROBE_S (20) s, n RAM-tier experts copied to a scratch
     // buffer on a stream of their own beside the decode; a later boundary logs the pinned RAM -> VRAM rate
     static const int probe_n = (int) env_dbl("STRATA_GLM_COPY_PROBE", 0.0);
