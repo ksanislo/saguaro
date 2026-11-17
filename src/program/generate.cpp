@@ -1072,12 +1072,14 @@ struct ConvAlloc {
         // CONV_UNION: its own decode routes (the route tags), decayed in time; when it last decoded; its tokens
         std::chrono::steady_clock::time_point decayed{}, decoded{};
         double tok = 0;
+        std::vector<uint32_t> frozen;   // CONV_SHADOW: its sequence's lru clocks when its last request ended
     };
     bool on = false, open_only = false;
     // STRATA_GLM_CONV_UNION=1 (bench/glm-conv/replay-rec.py's winner, alpha 0): the target a layer = the top slots of
     // sum_c w_c (its own decode share + BETA x the global share / (1 + its tokens / TOK0)) + 0.01 x the global share;
     // w_c = 1 while it decodes or reads, then halving every IDLE_HALF_S, 0 after DROP_S; its counts halve every H_S
     bool uni = false;
+    bool shadow = false;   // STRATA_GLM_CONV_SHADOW=1: the engine computes the target (Glm5Model::shadow_target)
     double u_h = 30.0, u_idle_half = 5.0, u_drop = 35.0, u_beta = 1.0, u_tok0 = 50.0;
     int u_layers = 0;
     std::vector<std::vector<uint32_t>> seq_prev;   // (each sequence's tagged counts at the last attribution)
@@ -1116,6 +1118,11 @@ struct ConvAlloc {
         tick_s = num("STRATA_GLM_CONV_TICK_S", 2.0);
         slack = (int) num("STRATA_GLM_CONV_SLACK", 4);
         uni = (int) num("STRATA_GLM_CONV_UNION", 0) != 0 && (int) num("STRATA_GLM_CONV_EXPERTS", 0) != 0;   // (as the engine)
+        shadow = (int) num("STRATA_GLM_CONV_SHADOW", 0) != 0 && (int) num("STRATA_GLM_CONV_EXPERTS", 0) != 0;
+        if (shadow) {
+            uni = false;
+            std::fprintf(stderr, "glm conv: shadow on - each conversation's own lru set, the running ones merged by recency rank\n");
+        }
         u_h = num("STRATA_GLM_CONV_UNION_H_S", 30.0);
         u_idle_half = num("STRATA_GLM_CONV_UNION_IDLE_HALF_S", 5.0);
         u_drop = num("STRATA_GLM_CONV_UNION_DROP_S", 35.0);
@@ -1267,7 +1274,7 @@ struct ConvAlloc {
         }
         strata::core::Glm5Model::conv_others_set(open);   // (CONV_OPEN_S alone: =live's "alone")
         last_pub = now;
-        if (!on) return;
+        if (!on || shadow) return;   // (CONV_SHADOW: the engine's boundaries compute the target)
         if (std::none_of(slots.begin(), slots.end(), [](int k) { return k > 0; })) {   // (the pools as loaded: at the first use)
             slots = model->layer_slots();
             blob = model->layer_blob();
@@ -3127,6 +3134,7 @@ static int glm_pack_generate(const Options& o) {
     ConvAlloc conv;
     conv.init(model);
     int admitting_conv = -1;   // (the request being admitted's conversation)
+    int admitting_ctx = -1;    // ... and its sequence (CONV_SHADOW)
     // STRATA_GLM_VRAM_EVICT_LOG (any arm) or the conversation switches: the cumulative VRAM expert hits at each admission,
     // first token and end (the per-phase readout's edges; the n2 phases' boundaries come every 64 steps)
     static const bool ev_log = getenv("STRATA_GLM_VRAM_EVICT_LOG") != nullptr || conv.on || conv.open_only;
@@ -3136,12 +3144,18 @@ static int glm_pack_generate(const Options& o) {
                      what, rid, gens.size(), (unsigned long long) st.hits, (unsigned long long) (st.hits + st.misses),
                      std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count());
     };
-    const auto conv_running = [&](int extra, int skip_rid) {   // (the allocation's running ones)
+    const auto conv_running = [&](int extra, int skip_rid, int extra_ctx = -1) {   // (the allocation's running ones)
         std::vector<int> ids;
+        uint32_t mask = 0;   // (CONV_SHADOW: the running sequences, a reading one included)
         for (const auto& p : gens)
-            if (!p->done && p->conv >= 0 && p->rid != skip_rid) ids.push_back(p->conv);
+            if (!p->done && p->conv >= 0 && p->rid != skip_rid) {
+                ids.push_back(p->conv);
+                if (p->ctx >= 0 && p->ctx < 32) mask |= 1u << p->ctx;
+            }
         if (extra >= 0) ids.push_back(extra);
+        if (extra_ctx >= 0 && extra_ctx < 32) mask |= 1u << extra_ctx;
         conv.set_running(ids);
+        if (conv.shadow) strata::core::Glm5Model::shadow_running_set(mask);
     };
     const auto conv_decoding = [&] {   // (conversation, its sequence)
         std::vector<std::pair<int, int>> ids;
@@ -3249,7 +3263,7 @@ static int glm_pack_generate(const Options& o) {
         int extra = -1;   // (an in-thread read is not in gens yet)
         if (arid >= 0 && std::none_of(gens.begin(), gens.end(), [arid](const std::unique_ptr<Gen>& p) { return p->rid == arid; }))
             extra = admitting_conv;
-        conv_running(extra, -1);
+        conv_running(extra, -1, extra >= 0 ? admitting_ctx : -1);
         conv.publish("tick", now);
     };
     // STRATA_GLM_ROUTE_DUMP: <dir>/timeline.txt, every second while decoding, each running request's own decode routes since
@@ -3466,6 +3480,8 @@ static int glm_pack_generate(const Options& o) {
         }
         if (g.conv >= 0) {
             if (conv.on) conv.attribute(conv_decoding());
+            if (conv.shadow)   // (its lru set freezes as it was: the target when it resumes)
+                if (auto* cv0 = conv.find(g.conv)) strata::core::Glm5Model::shadow_seq_save(g.ctx, cv0->frozen);
             conv.end(g.conv, g.emitted, t2);
             g.conv = -1;
             conv_running(-1, g.rid);
@@ -4148,11 +4164,14 @@ static int glm_pack_generate(const Options& o) {
         if (conv.on || conv.open_only) {   // its conversation, and the allocation before its read (the preload's kick)
             if (conv.on) conv.attribute(conv_decoding());
             g->conv = admitting_conv = conv.admit(g->prompt, g->ta);
+            admitting_ctx = g->ctx;
+            if (conv.shadow)   // (its frozen lru set back into its sequence; a new conversation starts empty)
+                if (auto* cv0 = conv.find(g->conv)) strata::core::Glm5Model::shadow_seq_load(g->ctx, cv0->frozen);
             const auto* cv = conv.find(g->conv);
             std::fprintf(stderr, "glm conv: r%d conversation %d (%s, %zu tokens shared)\n", rid, g->conv,
                          cv != nullptr && cv->lcp > 0 ? "resumed" : "new", cv != nullptr ? cv->lcp : (size_t) 0);
             strata::core::Glm5Model::conv_prefetch_counts(g->pf0);
-            conv_running(g->conv, -1);
+            conv_running(g->conv, -1, g->ctx);
             conv.publish("admit", g->ta);
         }
         if (strata::core::Glm5Model::route_counting()) {

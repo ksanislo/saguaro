@@ -4219,9 +4219,30 @@ bool conv_union_set() {
     }();
     return on;
 }
-bool route_seq_counting() {
-    static const bool on = route_counting() || conv_union_set();
+// STRATA_GLM_CONV_SHADOW=<int != 0> with CONV_EXPERTS: each conversation's own lru set (its sequence's routes by their
+// tags), the running ones' sets merged by recency rank = the VRAM target (bench/glm-conv compare-rec2.out's winner)
+bool conv_shadow_set() {
+    static const bool on = [] {
+        const char* u = getenv("STRATA_GLM_CONV_SHADOW");
+        const char* x = getenv("STRATA_GLM_CONV_EXPERTS");
+        return u != nullptr && std::atoi(u) != 0 && x != nullptr && std::atoi(x) != 0;
+    }();
     return on;
+}
+bool conv_target_set() { return conv_union_set() || conv_shadow_set(); }   // (a computed target: the move rules)
+bool route_seq_counting() {
+    static const bool on = route_counting() || conv_union_set() || conv_shadow_set();
+    return on;
+}
+// CONV_SHADOW: each sequence's last use of every (layer, expert), a route clock (0 = never)
+std::atomic<uint32_t> g_seq_last[kRcSeqs][kRcLayers * kRcExperts];
+std::atomic<uint32_t> g_shadow_clock{0};
+std::atomic<uint32_t> g_shadow_run{0};   // the running (decoding or reading) sequences, a bit each
+void shadow_touch(int seq, int layer, const int* ids, int k) {
+    if (seq < 0 || seq >= kRcSeqs || layer < 0 || layer >= kRcLayers) return;
+    const uint32_t c = g_shadow_clock.fetch_add(1, std::memory_order_relaxed) + 1;
+    for (int i = 0; i < k; ++i)
+        if (ids[i] >= 0 && ids[i] < kRcExperts) g_seq_last[seq][layer * kRcExperts + ids[i]].store(c, std::memory_order_relaxed);
 }
 bool route_counting() {
     static const bool on = [] {
@@ -4245,6 +4266,18 @@ void route_dump(int layer, int k, const int* ids, const float* w) {
 }  // namespace glmfast
 
 bool Glm5Model::route_counting() { return glmfast::route_counting(); }
+void Glm5Model::shadow_running_set(uint32_t mask) { glmfast::g_shadow_run.store(mask, std::memory_order_relaxed); }
+void Glm5Model::shadow_seq_save(int seq, std::vector<uint32_t>& out) {
+    constexpr size_t n = (size_t) glmfast::kRcLayers * glmfast::kRcExperts;
+    out.assign(n, 0);
+    if (seq < 0 || seq >= glmfast::kRcSeqs) return;
+    for (size_t i = 0; i < n; ++i) out[i] = glmfast::g_seq_last[seq][i].load(std::memory_order_relaxed);
+}
+void Glm5Model::shadow_seq_load(int seq, const std::vector<uint32_t>& in) {   // (empty: a new conversation, no set)
+    constexpr size_t n = (size_t) glmfast::kRcLayers * glmfast::kRcExperts;
+    if (seq < 0 || seq >= glmfast::kRcSeqs) return;
+    for (size_t i = 0; i < n; ++i) glmfast::g_seq_last[seq][i].store(i < in.size() ? in[i] : 0u, std::memory_order_relaxed);
+}
 bool Glm5Model::route_seq_counting() { return glmfast::route_seq_counting(); }
 void Glm5Model::route_totals(uint64_t& tagged, uint64_t& global) {
     constexpr size_t n = (size_t) glmfast::kRcLayers * glmfast::kRcExperts;
@@ -5111,6 +5144,7 @@ void Glm5Model::fast_service() {
                 for (int i = 0; i < K; ++i) glmfast::route_count(1, il, ids[i]);
             if (glmfast::route_seq_counting() && rq->pad_ > 0)   // ... and by the route's sequence (its tag)
                 for (int i = 0; i < K; ++i) glmfast::route_count_seq(rq->pad_ - 1, il, ids[i]);
+            if (glmfast::conv_shadow_set() && rq->pad_ > 0) glmfast::shadow_touch(rq->pad_ - 1, il, ids, K);   // (its lru set)
             // STRATA_GLM_ROUTE_LOG=<prefix>: "layer e0 .. e7 tier-mask" per route into <prefix>.<device> (cache studies)
             // - the tier masks are fetch, miss and cpu (bits over e0..e7), then " | n0 .. n15": the near misses, the
             //   route's next ranks after the top k, best first
@@ -5649,6 +5683,54 @@ void Glm5Model::fast_ahead_reader() {
     }
 }
 
+// CONV_SHADOW (F->mu held): per layer of this part, each running sequence's own lru set (its last K used experts by the
+// route clock; a sequence with none: the aged counts' top K), scored 1 - rank / K and summed; the target = the top K
+// (K = min(main slots, the elastic pool's mapped) - CONV_SLACK), published as levels by score for the preload and victims
+void Glm5Model::shadow_target() {
+    FastState* F = fast_;
+    const uint32_t run = glmfast::g_shadow_run.load(std::memory_order_relaxed);
+    if (F == nullptr || run == 0) return;   // (nothing running: the last target stays, the sets frozen)
+    static const int slack = (int) env_dbl("STRATA_GLM_CONV_SLACK", 4.0);
+    const int NE = std::min(g_.n_expert, glmfast::kRcExperts);
+    std::vector<float> score((size_t) NE);
+    std::vector<std::pair<uint32_t, int>> v;
+    std::vector<std::pair<float, int>> sv;
+    for (int il = l0_; il < lt_ && il < glmfast::kRcLayers; ++il) {
+        if (!F->L[(size_t) il].moe) continue;
+        const int K = std::min(F->lp[(size_t) il].n_main, el_live(il)) - slack;
+        if (K <= 0) continue;
+        std::fill(score.begin(), score.end(), 0.0f);
+        for (int s = 0; s < glmfast::kRcSeqs; ++s) {
+            if (!((run >> s) & 1u)) continue;
+            v.clear();
+            for (int e = 0; e < NE; ++e) {
+                const uint32_t t = glmfast::g_seq_last[s][il * glmfast::kRcExperts + e].load(std::memory_order_relaxed);
+                if (t) v.push_back({t, e});
+            }
+            if (v.empty())   // (a brand-new conversation: the aged counts)
+                for (int e = 0; e < NE; ++e) v.push_back({F->cnt[(size_t) il * g_.n_expert + e], e});
+            const size_t k = std::min(v.size(), (size_t) K);
+            std::partial_sort(v.begin(), v.begin() + (long) k, v.end(), std::greater<>());
+            for (size_t j = 0; j < k; ++j) score[(size_t) v[j].second] += 1.0f - (float) j / (float) K;
+        }
+        sv.clear();
+        float mx = 0.0f;
+        for (int e = 0; e < NE; ++e)
+            if (score[(size_t) e] > 0) {
+                sv.push_back({score[(size_t) e], e});
+                mx = std::max(mx, score[(size_t) e]);
+            }
+        const size_t k = std::min(sv.size(), (size_t) K);
+        std::partial_sort(sv.begin(), sv.begin() + (long) k, sv.end(), std::greater<>());
+        for (int e = 0; e < glmfast::kRcExperts; ++e) g_conv_flag[il * glmfast::kRcExperts + e].store(0, std::memory_order_relaxed);
+        for (size_t j = 0; j < k; ++j) {
+            const int lv = mx > 0 ? std::min(63, (int) std::lround(63.0 * sv[j].first / mx)) : 0;
+            g_conv_flag[il * glmfast::kRcExperts + sv[j].second].store((uint8_t) (1u | ((unsigned) lv << 2)), std::memory_order_relaxed);
+        }
+    }
+    g_conv_held_any.store(true, std::memory_order_relaxed);
+    g_conv_tgt_any.store(true, std::memory_order_release);
+}
 // STRATA_GLM_CONV_PREFETCH=1 (F->mu held): the allocation's experts not in VRAM come up from the RAM tier, highest level
 // first, into a free slot, else over a resident CHURN levels lower (it goes down first). Never blocking: its own stream,
 // a boundary's only while the copy stream is idle, RATE experts/s (READ_RATE beside a prompt read, KICK at a read's start)
@@ -5663,7 +5745,7 @@ void Glm5Model::conv_preload_into(int il, int slot) {
     const int rc = F->layer_rc[(size_t) il];
     auto& R = F->rc[(size_t) rc];
     if (P.st[(size_t) slot] != FastState::kFree) return;
-    static const bool read_off = glmfast::conv_union_set() && env_dbl("STRATA_GLM_CONV_PREFETCH_READ_RATE", 64.0) <= 0.0;
+    static const bool read_off = glmfast::conv_target_set() && env_dbl("STRATA_GLM_CONV_PREFETCH_READ_RATE", 64.0) <= 0.0;
     if (read_off && F->pf_bg.load(std::memory_order_acquire)) return;   // (no preload while a prompt reads beside)
     int best = -1;
     uint32_t bl = 0;
@@ -5739,7 +5821,7 @@ void Glm5Model::conv_preload_locked(int mode) {
         }
         std::stable_sort(ts.begin(), ts.end(), [](const T& a, const T& b) { return a.lv > b.lv; });
         for (const T& t : ts) {
-            if (credit[dev_] < 1.0 || (glmfast::conv_union_set() && (int) F->bg.size() >= inflight)) break;   // (union: lending
+            if (credit[dev_] < 1.0 || (glmfast::conv_target_set() && (int) F->bg.size() >= inflight)) break;   // (union: lending
                                                                                                           //  waits for these)
             auto& P = F->lp[(size_t) t.il];
             const int rc = F->layer_rc[(size_t) t.il];
@@ -5778,7 +5860,7 @@ void Glm5Model::conv_preload_locked(int mode) {
                 F->bg.push_back(FastState::BgMove{t.il, fs, key, rc, rs, true, ev, true});
                 g_conv_pf[0].fetch_add(1, std::memory_order_relaxed);
                 credit[dev_] -= 1.0;
-            } else if (vs >= 0 && (vl == 0 || (!glmfast::conv_union_set() && vl + churn <= t.lv))) {   // (union: only
+            } else if (vs >= 0 && (vl == 0 || (!glmfast::conv_target_set() && vl + churn <= t.lv))) {   // (union: only
                                                                                                //  experts outside the target go)   // the victim down first: its slot is free a boundary later
                 int fr = -1;
                 for (int s2 = 0; s2 < R.n && fr < 0; ++s2)
@@ -5864,6 +5946,7 @@ bool Glm5Model::fast_boundary(std::string& err) {
     const Glm5Geometry& g = g_;
     while (F->processed.load(std::memory_order_acquire) < F->expected) cpu_relax();
     std::lock_guard<std::mutex> lk(F->mu);
+    if (glmfast::conv_shadow_set()) shadow_target();   // (CONV_SHADOW: this part's layers' target from the running sets)
     int nu = 0;
     bool ok = true;
     const auto flush = [&] {
