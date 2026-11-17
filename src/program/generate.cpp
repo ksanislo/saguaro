@@ -1072,7 +1072,7 @@ struct ConvAlloc {
         // CONV_UNION: its own decode routes (the route tags), decayed in time; when it last decoded; its tokens
         std::chrono::steady_clock::time_point decayed{}, decoded{};
         double tok = 0;
-        std::vector<uint32_t> frozen;   // CONV_SHADOW: its sequence's lru clocks when its last request ended
+        std::vector<uint64_t> frozen;   // CONV_SHADOW: its sequence's lru clocks when its last request ended
     };
     bool on = false, open_only = false;
     // STRATA_GLM_CONV_UNION=1 (bench/glm-conv/replay-rec.py's winner, alpha 0): the target a layer = the top slots of

@@ -230,8 +230,8 @@ public:
     static void conv_others_set(int n);
     /// CONV_SHADOW: the running sequences (a bit each); a sequence's lru clocks out (a conversation's frozen set) / in
     static void shadow_running_set(uint32_t mask);
-    static void shadow_seq_save(int seq, std::vector<uint32_t>& out);
-    static void shadow_seq_load(int seq, const std::vector<uint32_t>& in);
+    static void shadow_seq_save(int seq, std::vector<uint64_t>& out);
+    static void shadow_seq_load(int seq, const std::vector<uint64_t>& in);
     void shadow_target();   // (F->mu held, fast_boundary)
     static void conv_prefetch_counts(uint64_t out[4]);
     static bool conv_preload_on();

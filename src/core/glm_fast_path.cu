@@ -4235,12 +4235,12 @@ bool route_seq_counting() {
     return on;
 }
 // CONV_SHADOW: each sequence's last use of every (layer, expert), a route clock (0 = never)
-std::atomic<uint32_t> g_seq_last[kRcSeqs][kRcLayers * kRcExperts];
-std::atomic<uint32_t> g_shadow_clock{0};
+std::atomic<uint64_t> g_seq_last[kRcSeqs][kRcLayers * kRcExperts];   // (64-bit: a route clock never wraps)
+std::atomic<uint64_t> g_shadow_clock{0};
 std::atomic<uint32_t> g_shadow_run{0};   // the running (decoding or reading) sequences, a bit each
 void shadow_touch(int seq, int layer, const int* ids, int k) {
     if (seq < 0 || seq >= kRcSeqs || layer < 0 || layer >= kRcLayers) return;
-    const uint32_t c = g_shadow_clock.fetch_add(1, std::memory_order_relaxed) + 1;
+    const uint64_t c = g_shadow_clock.fetch_add(1, std::memory_order_relaxed) + 1;
     for (int i = 0; i < k; ++i)
         if (ids[i] >= 0 && ids[i] < kRcExperts) g_seq_last[seq][layer * kRcExperts + ids[i]].store(c, std::memory_order_relaxed);
 }
@@ -4267,13 +4267,13 @@ void route_dump(int layer, int k, const int* ids, const float* w) {
 
 bool Glm5Model::route_counting() { return glmfast::route_counting(); }
 void Glm5Model::shadow_running_set(uint32_t mask) { glmfast::g_shadow_run.store(mask, std::memory_order_relaxed); }
-void Glm5Model::shadow_seq_save(int seq, std::vector<uint32_t>& out) {
+void Glm5Model::shadow_seq_save(int seq, std::vector<uint64_t>& out) {
     constexpr size_t n = (size_t) glmfast::kRcLayers * glmfast::kRcExperts;
     out.assign(n, 0);
     if (seq < 0 || seq >= glmfast::kRcSeqs) return;
     for (size_t i = 0; i < n; ++i) out[i] = glmfast::g_seq_last[seq][i].load(std::memory_order_relaxed);
 }
-void Glm5Model::shadow_seq_load(int seq, const std::vector<uint32_t>& in) {   // (empty: a new conversation, no set)
+void Glm5Model::shadow_seq_load(int seq, const std::vector<uint64_t>& in) {   // (empty: a new conversation, no set)
     constexpr size_t n = (size_t) glmfast::kRcLayers * glmfast::kRcExperts;
     if (seq < 0 || seq >= glmfast::kRcSeqs) return;
     for (size_t i = 0; i < n; ++i) glmfast::g_seq_last[seq][i].store(i < in.size() ? in[i] : 0u, std::memory_order_relaxed);
@@ -5693,7 +5693,7 @@ void Glm5Model::shadow_target() {
     static const int slack = (int) env_dbl("STRATA_GLM_CONV_SLACK", 4.0);
     const int NE = std::min(g_.n_expert, glmfast::kRcExperts);
     std::vector<float> score((size_t) NE);
-    std::vector<std::pair<uint32_t, int>> v;
+    std::vector<std::pair<uint64_t, int>> v;
     std::vector<std::pair<float, int>> sv;
     for (int il = l0_; il < lt_ && il < glmfast::kRcLayers; ++il) {
         if (!F->L[(size_t) il].moe) continue;
@@ -5704,11 +5704,12 @@ void Glm5Model::shadow_target() {
             if (!((run >> s) & 1u)) continue;
             v.clear();
             for (int e = 0; e < NE; ++e) {
-                const uint32_t t = glmfast::g_seq_last[s][il * glmfast::kRcExperts + e].load(std::memory_order_relaxed);
+                const uint64_t t = glmfast::g_seq_last[s][il * glmfast::kRcExperts + e].load(std::memory_order_relaxed);
                 if (t) v.push_back({t, e});
             }
-            if (v.empty())   // (a brand-new conversation: the aged counts)
-                for (int e = 0; e < NE; ++e) v.push_back({F->cnt[(size_t) il * g_.n_expert + e], e});
+            if (v.empty())   // (a brand-new conversation: the aged counts, those used at all)
+                for (int e = 0; e < NE; ++e)
+                    if (F->cnt[(size_t) il * g_.n_expert + e] > 0) v.push_back({F->cnt[(size_t) il * g_.n_expert + e], e});
             const size_t k = std::min(v.size(), (size_t) K);
             std::partial_sort(v.begin(), v.begin() + (long) k, v.end(), std::greater<>());
             for (size_t j = 0; j < k; ++j) score[(size_t) v[j].second] += 1.0f - (float) j / (float) K;
