@@ -5697,6 +5697,7 @@ void Glm5Model::shadow_target() {
     std::vector<float> score((size_t) NE);
     std::vector<std::pair<uint64_t, int>> v;
     std::vector<std::pair<float, int>> sv;
+    const bool one = (run & (run - 1)) == 0;
     for (int il = l0_; il < lt_ && il < glmfast::kRcLayers; ++il) {
         if (!F->L[(size_t) il].moe) continue;
         const int K = std::min(F->lp[(size_t) il].n_main, el_live(il)) - slack;
@@ -5718,13 +5719,20 @@ void Glm5Model::shadow_target() {
         }
         sv.clear();
         float mx = 0.0f;
-        for (int e = 0; e < NE; ++e)
-            if (score[(size_t) e] > 0) {
-                sv.push_back({score[(size_t) e], e});
-                mx = std::max(mx, score[(size_t) e]);
-            }
-        const size_t k = std::min(sv.size(), (size_t) K);
-        std::partial_sort(sv.begin(), sv.begin() + (long) k, sv.end(), std::greater<>());
+        size_t k = 0;
+        if (one) {   // (one running sequence: its own order is the merged one)
+            k = std::min(v.size(), (size_t) K);
+            for (size_t j = 0; j < k; ++j) sv.push_back({1.0f - (float) j / (float) K, v[j].second});
+            mx = k > 0 ? 1.0f : 0.0f;
+        } else {
+            for (int e = 0; e < NE; ++e)
+                if (score[(size_t) e] > 0) {
+                    sv.push_back({score[(size_t) e], e});
+                    mx = std::max(mx, score[(size_t) e]);
+                }
+            k = std::min(sv.size(), (size_t) K);
+            std::partial_sort(sv.begin(), sv.begin() + (long) k, sv.end(), std::greater<>());
+        }
         for (int e = 0; e < glmfast::kRcExperts; ++e) g_conv_flag[il * glmfast::kRcExperts + e].store(0, std::memory_order_relaxed);
         for (size_t j = 0; j < k; ++j) {
             const int lv = mx > 0 ? std::min(63, (int) std::lround(63.0 * sv[j].first / mx)) : 0;
@@ -6001,15 +6009,28 @@ bool Glm5Model::fast_boundary(std::string& err) {
     bt_mark();
     int nu = 0;
     bool ok = true;
+    // STRATA_GLM_TAB_ZC=1: the update kernel reads the pinned buffers in place (no copy queued behind the expert moves)
+    static const bool tab_zc = env_dbl("STRATA_GLM_TAB_ZC", 0.0) != 0.0;
     const auto flush = [&] {
         if (nu > 0 && ok) {
-            ok = glmfast::cuda_ok(cudaMemcpyAsync(F->upd_key_d, F->upd_key_h, (size_t) nu * sizeof(int),
-                                                  cudaMemcpyHostToDevice, F->cs), "glm table keys", err) &&
-                 glmfast::cuda_ok(cudaMemcpyAsync(F->upd_val_d, F->upd_val_h,
-                                                  (size_t) nu * sizeof(unsigned long long), cudaMemcpyHostToDevice,
-                                                  F->cs), "glm table values", err);
+            int* kd = nullptr;
+            unsigned long long* vd = nullptr;
+            if (tab_zc && (cudaHostGetDevicePointer((void**) &kd, F->upd_key_h, 0) != cudaSuccess ||
+                           cudaHostGetDevicePointer((void**) &vd, F->upd_val_h, 0) != cudaSuccess)) {
+                cudaGetLastError();
+                kd = nullptr;
+            }
+            if (kd == nullptr || vd == nullptr) {
+                kd = F->upd_key_d;
+                vd = F->upd_val_d;
+                ok = glmfast::cuda_ok(cudaMemcpyAsync(F->upd_key_d, F->upd_key_h, (size_t) nu * sizeof(int),
+                                                      cudaMemcpyHostToDevice, F->cs), "glm table keys", err) &&
+                     glmfast::cuda_ok(cudaMemcpyAsync(F->upd_val_d, F->upd_val_h,
+                                                      (size_t) nu * sizeof(unsigned long long), cudaMemcpyHostToDevice,
+                                                      F->cs), "glm table values", err);
+            }
             if (ok) {
-                gf::tab_update(F->tab, F->upd_key_d, F->upd_val_d, nu, F->cs);
+                gf::tab_update(F->tab, kd, vd, nu, F->cs);
                 ok = glmfast::cuda_ok(cudaGetLastError(), "glm table update", err);
             }
             // Pinned sources belong to the DMA until THIS stream completes, including the final batch.
