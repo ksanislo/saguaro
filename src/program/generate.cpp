@@ -3230,7 +3230,13 @@ static int glm_pack_generate(const Options& o) {
     const auto mb_every = [&] {
         if (multi_boundary_read > 0)
             for (const auto& p : gens)
-                if (!p->done && (p->reading || p->t1 < p->ta)) return multi_boundary_read;
+                if (!p->done && (p->reading || p->t1 < p->ta)) {
+                    static uint64_t n_read = 0;   // (proof it engaged: logged at 1, 10, 100, ...)
+                    if (++n_read == 1 || n_read == 10 || n_read == 100 || n_read == 1000 || n_read == 10000)
+                        std::fprintf(stderr, "glm multi: boundary every %d while a prompt reads (check %llu)\n",
+                                     multi_boundary_read, (unsigned long long) n_read);
+                    return multi_boundary_read;
+                }
         return multi_boundary_every;
     };
     static const bool multi_spec = env_num("STRATA_GLM_MULTI_SPEC", 1) != 0;
