@@ -4240,6 +4240,12 @@ bool route_seq_counting() {
 std::atomic<uint64_t> g_seq_last[kRcSeqs][kRcLayers * kRcExperts];   // (64-bit: a route clock never wraps)
 std::atomic<uint64_t> g_shadow_clock{0};
 std::atomic<uint32_t> g_shadow_run{0};   // the running (decoding or reading) sequences, a bit each
+std::atomic<uint32_t> g_seq_gen[kRcSeqs];   // (bumped when a sequence's clocks are replaced: its order is rebuilt)
+// each (sequence, layer)'s experts by last use, newest first (ties: the higher id), kept by the layer's part at its boundary
+uint16_t g_ord[kRcSeqs][kRcLayers][kRcExperts];
+uint16_t g_ord_n[kRcSeqs][kRcLayers];
+uint64_t g_ord_hi[kRcSeqs][kRcLayers];
+uint32_t g_ord_gen[kRcSeqs][kRcLayers];
 void shadow_touch(int seq, int layer, const int* ids, int k) {
     if (seq < 0 || seq >= kRcSeqs || layer < 0 || layer >= kRcLayers) return;
     const uint64_t c = g_shadow_clock.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -4279,6 +4285,7 @@ void Glm5Model::shadow_seq_load(int seq, const std::vector<uint64_t>& in) {   //
     constexpr size_t n = (size_t) glmfast::kRcLayers * glmfast::kRcExperts;
     if (seq < 0 || seq >= glmfast::kRcSeqs) return;
     for (size_t i = 0; i < n; ++i) glmfast::g_seq_last[seq][i].store(i < in.size() ? in[i] : 0u, std::memory_order_relaxed);
+    glmfast::g_seq_gen[seq].fetch_add(1, std::memory_order_release);
 }
 bool Glm5Model::route_seq_counting() { return glmfast::route_seq_counting(); }
 void Glm5Model::route_totals(uint64_t& tagged, uint64_t& global) {
@@ -5698,6 +5705,14 @@ void Glm5Model::shadow_target() {
     std::vector<std::pair<uint64_t, int>> v;
     std::vector<std::pair<float, int>> sv;
     const bool one = (run & (run - 1)) == 0;
+    std::vector<int> top;
+    std::vector<uint8_t> mark((size_t) glmfast::kRcExperts, 0);
+    std::vector<uint16_t> tmp((size_t) glmfast::kRcExperts);
+    // STRATA_GLM_CONV_SHADOW_CHECK=N (debug): the first N targets of each card also sort the clocks and compare
+    static const long check_n = (long) env_dbl("STRATA_GLM_CONV_SHADOW_CHECK", 0.0);
+    static std::atomic<uint64_t> chk_n[64], chk_bad[64];
+    static long chk_calls[64];
+    const long check_left = check_n > 0 && chk_calls[dev_ & 63] < check_n ? check_n - chk_calls[dev_ & 63]++ : 0;
     for (int il = l0_; il < lt_ && il < glmfast::kRcLayers; ++il) {
         if (!F->L[(size_t) il].moe) continue;
         const int K = std::min(F->lp[(size_t) il].n_main, el_live(il)) - slack;
@@ -5705,24 +5720,68 @@ void Glm5Model::shadow_target() {
         std::fill(score.begin(), score.end(), 0.0f);
         for (int s = 0; s < glmfast::kRcSeqs; ++s) {
             if (!((run >> s) & 1u)) continue;
+            // the order kept up to date: the experts used since the last boundary (clock past hi) go in front
+            const std::atomic<uint64_t>* last = &glmfast::g_seq_last[s][il * glmfast::kRcExperts];
+            uint16_t* o = glmfast::g_ord[s][il];
+            int n = glmfast::g_ord_n[s][il];
+            uint64_t& hi = glmfast::g_ord_hi[s][il];
+            const uint32_t gen = glmfast::g_seq_gen[s].load(std::memory_order_acquire);
+            const bool full = gen != glmfast::g_ord_gen[s][il];
+            if (full) {
+                n = 0;
+                hi = 0;
+                glmfast::g_ord_gen[s][il] = gen;
+            }
             v.clear();
             for (int e = 0; e < NE; ++e) {
-                const uint64_t t = glmfast::g_seq_last[s][il * glmfast::kRcExperts + e].load(std::memory_order_relaxed);
-                if (t) v.push_back({t, e});
+                const uint64_t t = last[e].load(std::memory_order_relaxed);
+                if (t > hi) v.push_back({t, e});
             }
-            if (v.empty())   // (a brand-new conversation: the aged counts, those used at all)
+            if (!v.empty()) {
+                std::sort(v.begin(), v.end(), std::greater<>());
+                for (const auto& x : v) mark[(size_t) x.second] = 1;
+                int m = 0;
+                for (const auto& x : v) tmp[(size_t) m++] = (uint16_t) x.second;
+                for (int j = 0; j < n; ++j)
+                    if (!mark[o[j]]) tmp[(size_t) m++] = o[j];
+                for (const auto& x : v) mark[(size_t) x.second] = 0;
+                std::copy(tmp.begin(), tmp.begin() + m, o);
+                n = m;
+                hi = v.front().first;
+            }
+            glmfast::g_ord_n[s][il] = (uint16_t) n;
+            top.clear();
+            if (n > 0) {
+                top.assign(o, o + std::min(n, K));
+            } else {   // (a brand-new conversation: the aged counts, those used at all)
+                v.clear();
                 for (int e = 0; e < NE; ++e)
                     if (F->cnt[(size_t) il * g_.n_expert + e] > 0) v.push_back({F->cnt[(size_t) il * g_.n_expert + e], e});
-            const size_t k = std::min(v.size(), (size_t) K);
-            std::partial_sort(v.begin(), v.begin() + (long) k, v.end(), std::greater<>());
-            for (size_t j = 0; j < k; ++j) score[(size_t) v[j].second] += 1.0f - (float) j / (float) K;
+                const size_t k = std::min(v.size(), (size_t) K);
+                std::partial_sort(v.begin(), v.begin() + (long) k, v.end(), std::greater<>());
+                for (size_t j = 0; j < k; ++j) top.push_back(v[j].second);
+            }
+            if (check_left > 0 && n > 0) {   // (CONV_SHADOW_CHECK: the order against the sort of the clocks)
+                v.clear();
+                for (int e = 0; e < NE; ++e) {
+                    const uint64_t t = last[e].load(std::memory_order_relaxed);
+                    if (t) v.push_back({t, e});
+                }
+                const size_t k = std::min(v.size(), (size_t) K);
+                std::partial_sort(v.begin(), v.begin() + (long) k, v.end(), std::greater<>());
+                bool same = k == top.size();
+                for (size_t j = 0; same && j < k; ++j) same = v[j].second == top[j];
+                ++chk_n[dev_ & 63];
+                if (!same) ++chk_bad[dev_ & 63];
+            }
+            for (size_t j = 0; j < top.size(); ++j) score[(size_t) top[j]] += 1.0f - (float) j / (float) K;
         }
         sv.clear();
         float mx = 0.0f;
         size_t k = 0;
         if (one) {   // (one running sequence: its own order is the merged one)
-            k = std::min(v.size(), (size_t) K);
-            for (size_t j = 0; j < k; ++j) sv.push_back({1.0f - (float) j / (float) K, v[j].second});
+            k = top.size();
+            for (size_t j = 0; j < k; ++j) sv.push_back({1.0f - (float) j / (float) K, top[j]});
             mx = k > 0 ? 1.0f : 0.0f;
         } else {
             for (int e = 0; e < NE; ++e)
@@ -5739,6 +5798,10 @@ void Glm5Model::shadow_target() {
             g_conv_flag[il * glmfast::kRcExperts + sv[j].second].store((uint8_t) (1u | ((unsigned) lv << 2)), std::memory_order_relaxed);
         }
     }
+    if (check_left > 0 && (check_left == 1 || chk_calls[dev_ & 63] % 256 == 0))
+        std::fprintf(stderr, "glm conv: shadow check CUDA%d: %ld targets, %llu layer orders compared, %llu differ\n", dev_,
+                     chk_calls[dev_ & 63], (unsigned long long) chk_n[dev_ & 63].load(),
+                     (unsigned long long) chk_bad[dev_ & 63].load());
     g_conv_held_any.store(true, std::memory_order_relaxed);
     g_conv_tgt_any.store(true, std::memory_order_release);
 }
@@ -5997,15 +6060,7 @@ bool Glm5Model::fast_boundary(std::string& err) {
     bt_mark();
     std::lock_guard<std::mutex> lk(F->mu);
     bt_mark();
-    if (glmfast::conv_shadow_set()) {   // (CONV_SHADOW: this part's layers' target; _EVERY=N: at most every N boundaries)
-        static const int every = std::max(1, (int) env_dbl("STRATA_GLM_CONV_SHADOW_EVERY", 1.0));
-        const uint32_t run = glmfast::g_shadow_run.load(std::memory_order_relaxed);
-        if (run != shadow_run_ || ++shadow_since_ >= every) {
-            shadow_target();
-            shadow_run_ = run;
-            shadow_since_ = 0;
-        }
-    }
+    if (glmfast::conv_shadow_set()) shadow_target();   // (CONV_SHADOW: this part's layers' target from the running sets)
     bt_mark();
     int nu = 0;
     bool ok = true;

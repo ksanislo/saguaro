@@ -379,8 +379,6 @@ public:
     // next half continue through its own layers (and, if it is the last, the head).
     int l0_ = 0, l1_ = 0;
     int dev_ = 0;
-    uint32_t shadow_run_ = 0;   // (CONV_SHADOW_EVERY: the running mask at the last target, boundaries since)
-    int shadow_since_ = 0;
     int n_parts_ = 1;                                      // the devices the layers are split across (the CPU lane's share)
     int part_ = 0;                                         // ... and which of them this one is (0 = the first layers)
     // THE HEAD SPLIT (an EXL3 pack on 3+ parts; STRATA_GLM_HEAD_SPLIT=0: off): a pipelined window's pick on the last
