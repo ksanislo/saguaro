@@ -3156,6 +3156,12 @@ static int glm_pack_generate(const Options& o) {
         if (extra_ctx >= 0 && extra_ctx < 32) mask |= 1u << extra_ctx;
         conv.set_running(ids);
         if (conv.shadow) strata::core::Glm5Model::shadow_running_set(mask);
+        if (conv.shadow || conv.uni) {   // (the prompts being read: admitted, no first token yet; an in-thread one is not in gens)
+            int rd = extra >= 0 && extra_ctx >= 0 ? 1 : 0;
+            for (const auto& p : gens)
+                if (!p->done && p->rid != skip_rid && p->t1 < p->ta) ++rd;
+            strata::core::Glm5Model::conv_reading_set(rd);
+        }
     };
     const auto conv_decoding = [&] {   // (conversation, its sequence)
         std::vector<std::pair<int, int>> ids;
@@ -3771,6 +3777,12 @@ static int glm_pack_generate(const Options& o) {
             g.rs_tl = g.rs1;
         }
         if (ev_log) ev_line("first", g.rid);
+        if (conv.shadow || conv.uni) {   // (its read is over)
+            int rd = 0;
+            for (const auto& p : gens)
+                if (!p->done && p.get() != &g && p->t1 < p->ta) ++rd;
+            strata::core::Glm5Model::conv_reading_set(rd);
+        }
         if (g.conv >= 0) conv.seq_mark(g.ctx);   // (CONV_UNION: its sequence's counts from its first token on are its own)
         if (conv.on && strata::core::Glm5Model::conv_preload_on()) {
             uint64_t pf[4];

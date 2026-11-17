@@ -167,6 +167,7 @@ static int64_t live_now() {
 static std::atomic<uint8_t> g_conv_flag[glmfast::kRcLayers * glmfast::kRcExperts];
 static std::atomic<bool> g_conv_held_any{false}, g_conv_tgt_any{false};
 static std::atomic<int> g_conv_others{0};   // OPEN conversations besides the running ones
+static std::atomic<int> g_conv_reading{0};  // prompts being read now (the serve loop: in-thread reads too)
 static std::atomic<uint64_t> g_conv_pf[4];   // prefetch: issued up, issued down, landed up, landed bytes
 static cudaStream_t g_conv_pf_stream[64];    // ... its copy stream a device (lending waits for it)
 static double env_dbl(const char* k, double d) {
@@ -247,6 +248,7 @@ void Glm5Model::conv_preload_sync() {
         cudaStreamSynchronize(g_conv_pf_stream[dev_]);
 }
 void Glm5Model::conv_others_set(int n) { g_conv_others.store(n, std::memory_order_relaxed); }
+void Glm5Model::conv_reading_set(int n) { g_conv_reading.store(n, std::memory_order_relaxed); }
 void Glm5Model::conv_prefetch_counts(uint64_t out[4]) {
     for (int i = 0; i < 4; ++i) out[i] = g_conv_pf[i].load(std::memory_order_relaxed);
 }
@@ -5747,7 +5749,8 @@ void Glm5Model::conv_preload_into(int il, int slot) {
     auto& R = F->rc[(size_t) rc];
     if (P.st[(size_t) slot] != FastState::kFree) return;
     static const bool read_off = glmfast::conv_target_set() && env_dbl("STRATA_GLM_CONV_PREFETCH_READ_RATE", 64.0) <= 0.0;
-    if (read_off && F->pf_bg.load(std::memory_order_acquire)) return;   // (no preload while a prompt reads beside)
+    if (read_off && (F->pf_bg.load(std::memory_order_acquire) || g_conv_reading.load(std::memory_order_relaxed) > 0))
+        return;   // (no preload while a prompt is read - beside on the Reader, or in the serve thread)
     int best = -1;
     uint32_t bl = 0;
     for (int e = 0; e < NE; ++e) {
@@ -5788,6 +5791,7 @@ void Glm5Model::conv_preload_locked(int mode) {
     static const double pf_kick = env_dbl("STRATA_GLM_CONV_PREFETCH_KICK", 64.0);
     static const uint32_t churn = (uint32_t) env_dbl("STRATA_GLM_CONV_CHURN", 4.0);
     if ((mode == 1 && pf_rrate <= 0.0) || (mode == 2 && pf_kick <= 0.0)) return;   // (none while a prompt is read)
+    if (glmfast::conv_target_set() && pf_rrate <= 0.0 && g_conv_reading.load(std::memory_order_relaxed) > 0) return;   // (in-thread reads)
     static double credit[64];
     static int64_t last[64];
     static cudaStream_t pf_s[64];

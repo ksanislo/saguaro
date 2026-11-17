@@ -228,6 +228,7 @@ public:
     /// the OPEN conversations besides the running ones, the preload counters (issued up, issued down, landed up, landed bytes)
     static void conv_publish(const std::vector<uint8_t>& flags);
     static void conv_others_set(int n);
+    static void conv_reading_set(int n);   // prompts being read now (a computed target's preload waits for them)
     /// CONV_SHADOW: the running sequences (a bit each); a sequence's lru clocks out (a conversation's frozen set) / in
     static void shadow_running_set(uint32_t mask);
     static void shadow_seq_save(int seq, std::vector<uint64_t>& out);
