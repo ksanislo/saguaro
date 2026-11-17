@@ -3146,6 +3146,12 @@ static int glm_pack_generate(const Options& o) {
     };
     const auto conv_running = [&](int extra, int skip_rid, int extra_ctx = -1) {   // (the allocation's running ones)
         std::vector<int> ids;
+        const int arid = admitting_rid.load();   // (an in-thread read is not in gens: counted whoever calls)
+        if (extra < 0 && arid >= 0 && arid != skip_rid &&
+            std::none_of(gens.begin(), gens.end(), [arid](const std::unique_ptr<Gen>& p) { return p->rid == arid; })) {
+            extra = admitting_conv;
+            extra_ctx = admitting_ctx;
+        }
         uint32_t mask = 0;   // (CONV_SHADOW: the running sequences, a reading one included)
         for (const auto& p : gens)
             if (!p->done && p->conv >= 0 && p->rid != skip_rid) {
@@ -3933,6 +3939,7 @@ static int glm_pack_generate(const Options& o) {
         if (rc != 0) {
             ctxs[(size_t) g.ctx].busy = false;
             g.done = true;
+            if (conv.shadow || conv.uni) conv_running(-1, g.rid);   // (its read is over)
             gen_sweep();
             return;
         }
@@ -4246,6 +4253,7 @@ static int glm_pack_generate(const Options& o) {
         tag.clear();
         if (rc != 0) {
             ctxs[(size_t) best].busy = false;
+            if (conv.shadow || conv.uni) conv_running(-1, rid);   // (its read is over)
             admit_stop.store(false);
             std::lock_guard<std::mutex> lk(ctl_mu);   // (a STOP for it that came during its prompt: nothing to stop now)
             ctl.erase(rid);
