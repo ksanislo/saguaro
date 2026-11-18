@@ -3290,11 +3290,13 @@ class Service:
                 given["_blocked"] = {**(given["_blocked"] or {}), "_keep": keep + (loop_guard.said_before(asked),)}
         ids = self.render_ids(messages, tools, kwargs, prefill)
         # the reply's opening: the tokens the generation prompt (and a thinking-off close or a forced call) adds
+        # (not DeepSeek: maya-ds4 has no gt= key, so its prompts skip this second render)
         given["_gen_tail"] = 0
         try:
-            bare = self.render_ids(messages, tools, {**kwargs, "add_generation_prompt": False}, "")
-            if 0 < len(bare) < len(ids) and ids[:len(bare)] == bare:
-                given["_gen_tail"] = len(ids) - len(bare)
+            if not getattr(self.template, "deepseek", False):
+                bare = self.render_ids(messages, tools, {**kwargs, "add_generation_prompt": False}, "")
+                if 0 < len(bare) < len(ids) and ids[:len(bare)] == bare:
+                    given["_gen_tail"] = len(ids) - len(bare)
         except Exception:   # a template that cannot render without the generation prompt: the last token only
             pass
         self.embeddings.path = None
