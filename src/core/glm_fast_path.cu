@@ -6097,8 +6097,7 @@ bool Glm5Model::fast_boundary(std::string& err) {
                 if (run != 0) {
                     if (!warm_on_ && warm_mv_ != UINT64_MAX) mv_rel[dev_ & 63] += moves() - warm_mv_;
                     const uint64_t ne = ++n_ev;   // (proof: no target work and no moves between the events)
-                    if (ne <= 16 || ne % 64 == 0)
-                        std::fprintf(stderr, "glm conv: shadow warm event CUDA%d %llu: targets so far %llu, moves while "
+                    std::fprintf(stderr, "glm conv: shadow warm event CUDA%d %llu: targets so far %llu, moves while "
                                      "released %llu\n", dev_, (unsigned long long) ne, (unsigned long long) n_tgt.load(),
                                      (unsigned long long) mv_rel[dev_ & 63].load());
                     ++n_tgt;
@@ -6117,8 +6116,7 @@ bool Glm5Model::fast_boundary(std::string& err) {
                 static std::atomic<uint64_t> n_rel{0}, n_win{0};
                 const bool win = (long) (tok - warm_t0_) >= warm;
                 const uint64_t nr = ++n_rel, nw = win ? ++n_win : n_win.load();
-                if (nr <= 8 || nr % 64 == 0)
-                    std::fprintf(stderr, "glm conv: shadow warm released CUDA%d after %llu tokens (%s), release %llu (window "
+                std::fprintf(stderr, "glm conv: shadow warm released CUDA%d after %llu tokens (%s), release %llu (window "
                                  "%llu, landed %llu)\n", dev_, (unsigned long long) (tok - warm_t0_), win ? "window" : "landed",
                                  (unsigned long long) nr, (unsigned long long) nw, (unsigned long long) (nr - nw));
             }
