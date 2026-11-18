@@ -8326,7 +8326,17 @@ bool Glm5Model::decode_spec(strata::kernels::SamplerParams& sp, int64_t max_new,
         std::string tail_err;
         bool tail_ok = true, tail_async = false;
         if (tail_thread && !cancel) {
-            tail_worker.run([&, q] { tail_ok = B->spec_tail(hl, q + 2, tail_err); });
+            tail_worker.run([&, q] {
+                try {
+                    tail_ok = B->spec_tail(hl, q + 2, tail_err);
+                } catch (const std::exception& e) {   // (an exception on the worker must not terminate the engine)
+                    tail_err = std::string("glm spec tail thread: ") + e.what();
+                    tail_ok = false;
+                } catch (...) {
+                    tail_err = "glm spec tail thread: an exception";
+                    tail_ok = false;
+                }
+            });
             tail_async = true;
         } else if (!B->spec_tail(hl, q + 2, err)) {
             ok = false;
