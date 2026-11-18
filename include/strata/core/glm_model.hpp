@@ -386,6 +386,7 @@ public:
     uint64_t warm_t0_ = 0;
     bool warm_on_ = false;
     uint64_t warm_mv_ = UINT64_MAX;   // (the preload moves at the release)
+    uint64_t warm_mv0_ = 0, warm_rp0_ = 0;   // (the moves and re-evictions at the event)
     int n_parts_ = 1;                                      // the devices the layers are split across (the CPU lane's share)
     int part_ = 0;                                         // ... and which of them this one is (0 = the first layers)
     // THE HEAD SPLIT (an EXL3 pack on 3+ parts; STRATA_GLM_HEAD_SPLIT=0: off): a pipelined window's pick on the last

@@ -170,6 +170,16 @@ static std::atomic<int> g_conv_others{0};   // OPEN conversations besides the ru
 static std::atomic<int> g_conv_reading{0};  // prompts being read now (the serve loop: in-thread reads too)
 static std::atomic<uint64_t> g_conv_pf[4];   // prefetch: issued up, issued down, landed up, landed bytes
 static std::atomic<uint64_t> g_conv_pf_dev[64];   // (moves issued, by card)
+// CONV_SHADOW_WARM (logging): experts the warm preload moved in this window, by card, and those evicted again in it
+static std::vector<uint8_t> g_warm_in[64];
+static std::atomic<uint64_t> g_warm_reprom[64];
+static inline void warm_evicted(int dev, size_t key) {
+    auto& w = g_warm_in[dev & 63];
+    if (key < w.size() && w[key]) {
+        w[key] = 0;
+        g_warm_reprom[dev & 63].fetch_add(1, std::memory_order_relaxed);
+    }
+}
 static cudaStream_t g_conv_pf_stream[64];    // ... its copy stream a device (lending waits for it)
 static double env_dbl(const char* k, double d) {
     const char* v = getenv(k);
@@ -5944,6 +5954,11 @@ void Glm5Model::conv_preload_locked(int mode) {
                 }
             }
             if (fs >= 0) {   // up now; it goes live when its copy landed (step a)
+                if (conv_warm_on()) {
+                    auto& w = g_warm_in[dev_ & 63];
+                    if (w.size() != F->cnt.size()) w.assign(F->cnt.size(), 0);
+                    w[(size_t) key] = 1;
+                }
                 P.st[(size_t) fs] = FastState::kLanding;
                 R.st[(size_t) rs] = FastState::kRPin;
                 cudaMemcpyAsync(P.slot_ptr(fs), R.slot((size_t) rs), F->L[(size_t) t.il].blob,
@@ -6101,6 +6116,9 @@ bool Glm5Model::fast_boundary(std::string& err) {
                                      "released %llu\n", dev_, (unsigned long long) ne, (unsigned long long) n_tgt.load(),
                                      (unsigned long long) mv_rel[dev_ & 63].load());
                     ++n_tgt;
+                    std::fill(g_warm_in[dev_ & 63].begin(), g_warm_in[dev_ & 63].end(), 0);
+                    warm_rp0_ = g_warm_reprom[dev_ & 63].load(std::memory_order_relaxed);
+                    warm_mv0_ = moves();
                     shadow_target();
                     warm_t0_ = tok;
                     warm_on_ = true;
@@ -6117,8 +6135,11 @@ bool Glm5Model::fast_boundary(std::string& err) {
                 const bool win = (long) (tok - warm_t0_) >= warm;
                 const uint64_t nr = ++n_rel, nw = win ? ++n_win : n_win.load();
                 std::fprintf(stderr, "glm conv: shadow warm released CUDA%d after %llu tokens (%s), release %llu (window "
-                                 "%llu, landed %llu)\n", dev_, (unsigned long long) (tok - warm_t0_), win ? "window" : "landed",
-                                 (unsigned long long) nr, (unsigned long long) nw, (unsigned long long) (nr - nw));
+                                 "%llu, landed %llu), window moves %llu, re-evicted %llu\n", dev_,
+                                 (unsigned long long) (tok - warm_t0_), win ? "window" : "landed",
+                                 (unsigned long long) nr, (unsigned long long) nw, (unsigned long long) (nr - nw),
+                                 (unsigned long long) (moves() - warm_mv0_),
+                                 (unsigned long long) (g_warm_reprom[dev_ & 63].load(std::memory_order_relaxed) - warm_rp0_));
             }
         }
     }
@@ -6341,6 +6362,7 @@ bool Glm5Model::fast_boundary(std::string& err) {
             if (v < 0) break;
             if (bt) { ++BS.vall; if (bl > 0) ++BS.vin; }
             const int vkey = il * g.n_expert + P.key[(size_t) v];
+            if (warm_on_) warm_evicted(dev_, (size_t) vkey);
             // demote it into the RAM tier: a free slot, else the RAM tier's victim (if colder than it)
             int rs = -1;
             uint32_t rc_min = UINT32_MAX;
@@ -6472,6 +6494,7 @@ bool Glm5Model::fast_boundary(std::string& err) {
                 F->ram_of[(size_t) m.key] = m.rslot;
                 upd(F->rtab_key((size_t) m.key), (unsigned long long) (R.slot((size_t) m.rslot)));
                 ++F->bg_down;
+                if (warm_on_) warm_evicted(dev_, (size_t) m.key);
             }
             F->ev_free.push_back(m.ev);
         }
