@@ -64,6 +64,47 @@ inline void cpu_relax() {
 // STRATA_GLM_FLUSH=<n>: the decode submits after its first layer and then every n layers (submit_every), 0: never -
 // the default: on the 8065S (Maya-S, drafting with the MTP rework) a submission every 4 layers lost ~4% of the decode
 // (26.5 against 27.7 tok/s, same answers); the runtime's own batching plus the service thread's kick keep the GPU fed.
+// one persistent worker thread running one job at a time: run() hands it a job, wait() returns once it finished
+struct OneJob {
+    std::mutex mu;
+    std::condition_variable cv;
+    std::function<void()> job;
+    bool busy = false, quit = false;
+    std::thread th;
+    void run(std::function<void()> f) {
+        std::unique_lock<std::mutex> lk(mu);
+        if (!th.joinable()) th = std::thread([this] { loop(); });
+        job = std::move(f);
+        busy = true;
+        cv.notify_all();
+    }
+    void wait() {
+        std::unique_lock<std::mutex> lk(mu);
+        cv.wait(lk, [this] { return !busy; });
+    }
+    void loop() {
+        std::unique_lock<std::mutex> lk(mu);
+        for (;;) {
+            cv.wait(lk, [this] { return quit || (busy && job); });
+            if (quit) return;
+            auto f = std::move(job);
+            job = nullptr;
+            lk.unlock();
+            f();
+            lk.lock();
+            busy = false;
+            cv.notify_all();
+        }
+    }
+    ~OneJob() {
+        {
+            std::lock_guard<std::mutex> lk(mu);
+            quit = true;
+            cv.notify_all();
+        }
+        if (th.joinable()) th.join();
+    }
+};
 inline void submit_queued(cudaStream_t s) {
 #if defined(_WIN32) && defined(STRATA_USE_HIP)
     if (cudaPeekAtLastError() != cudaSuccess) return;

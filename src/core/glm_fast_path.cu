@@ -8318,15 +8318,34 @@ bool Glm5Model::decode_spec(strata::kernels::SamplerParams& sp, int64_t max_new,
         cudaSetDevice(TL->dev_);
         if (!TL->fast_mtp(dp, y2, err)) { ok = false; break; }
         // (4) the tail's next position goes in first: it waits for the head's hop on the device and starts its
-        //     layers while the host waits for the draft (and the head group's next enqueue)
-        if (!B->spec_tail(hl, q + 2, err)) { ok = false; break; }
+        //     layers while the host waits for the draft (and the head group's next enqueue).  STRATA_GLM_SPEC_TAIL_THREAD=1:
+        //     a second host thread enqueues it, so the head's next pass is not queued behind it (the tail's pass waits
+        //     on the head's q+2 hop slot, which the q+3 pass does not record; each part keeps its own streams)
+        static const bool tail_thread = env_dbl("STRATA_GLM_SPEC_TAIL_THREAD", 0.0) != 0.0;
+        static glmfast::OneJob tail_worker;   // (one persistent thread: its thread-local launch state stays warm)
+        std::string tail_err;
+        bool tail_ok = true, tail_async = false;
+        if (tail_thread && !cancel) {
+            tail_worker.run([&, q] { tail_ok = B->spec_tail(hl, q + 2, tail_err); });
+            tail_async = true;
+        } else if (!B->spec_tail(hl, q + 2, err)) {
+            ok = false;
+            break;
+        }
+        const auto tail_join = [&]() -> bool {
+            if (!tail_async) return true;
+            tail_worker.wait();
+            tail_async = false;
+            if (!tail_ok && ok) err = tail_err;
+            return tail_ok;
+        };
         lap(3);
         kda_all(false);
         if (cancel) fast_->spec_cancellable = true;   // q+3 with the new draft: speculative
         cudaSetDevice(TL->dev_);
-        if (!glmfast::wait_event(TL->fast_->ev_mtp, "glm spec draft", err)) { ok = false; break; }
+        if (!glmfast::wait_event(TL->fast_->ev_mtp, "glm spec draft", err)) { tail_join(); ok = false; break; }
         int d2 = TL->fast_->mtp_tok_h[0];
-        if (!TL->fast_->route_ok(err)) { ok = false; break; }
+        if (!tail_async && !TL->fast_->route_ok(err)) { ok = false; break; }
         lap(1);
         have_draft = true;
         // (3) the head's speculative position q+2 stood iff its draft was y2 (redone above otherwise)
@@ -8334,7 +8353,8 @@ bool Glm5Model::decode_spec(strata::kernels::SamplerParams& sp, int64_t max_new,
         if (!wrong) ++spec_hits_;
         // (5) the head's next speculative position (its boundary waits for the head's current one)
         cudaSetDevice(dev_);
-        if (!spec_head(q + 3, d2, err)) { ok = false; break; }
+        if (!spec_head(q + 3, d2, err)) { tail_join(); ok = false; break; }
+        if (!tail_join() || !TL->fast_->route_ok(err)) { ok = false; break; }   // (the tail's checks after its thread)
         lap(4);
         ++np;
         if (!check()) { ok = false; break; }
