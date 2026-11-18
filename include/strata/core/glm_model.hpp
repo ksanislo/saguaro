@@ -383,6 +383,7 @@ public:
     uint32_t warm_run_ = 0;    // (CONV_SHADOW_WARM: the running set at the last event, its token count, warming)
     uint64_t warm_t0_ = 0;
     bool warm_on_ = false;
+    uint64_t warm_mv_ = UINT64_MAX;   // (the preload moves at the release)
     int n_parts_ = 1;                                      // the devices the layers are split across (the CPU lane's share)
     int part_ = 0;                                         // ... and which of them this one is (0 = the first layers)
     // THE HEAD SPLIT (an EXL3 pack on 3+ parts; STRATA_GLM_HEAD_SPLIT=0: off): a pipelined window's pick on the last

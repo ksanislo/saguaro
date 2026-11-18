@@ -169,6 +169,7 @@ static std::atomic<bool> g_conv_held_any{false}, g_conv_tgt_any{false};
 static std::atomic<int> g_conv_others{0};   // OPEN conversations besides the running ones
 static std::atomic<int> g_conv_reading{0};  // prompts being read now (the serve loop: in-thread reads too)
 static std::atomic<uint64_t> g_conv_pf[4];   // prefetch: issued up, issued down, landed up, landed bytes
+static std::atomic<uint64_t> g_conv_pf_dev[64];   // (moves issued, by card)
 static cudaStream_t g_conv_pf_stream[64];    // ... its copy stream a device (lending waits for it)
 static double env_dbl(const char* k, double d) {
     const char* v = getenv(k);
@@ -5849,6 +5850,7 @@ void Glm5Model::conv_preload_into(int il, int slot) {
     cudaEventRecord(ev, g_conv_pf_stream[dev_]);
     F->bg.push_back(FastState::BgMove{il, slot, key, rc, rs, true, ev, true});
     g_conv_pf[0].fetch_add(1, std::memory_order_relaxed);
+    g_conv_pf_dev[dev_ & 63].fetch_add(1, std::memory_order_relaxed);
 }
 void Glm5Model::conv_preload_locked(int mode) {
     FastState* F = fast_;
@@ -5943,6 +5945,7 @@ void Glm5Model::conv_preload_locked(int mode) {
                 cudaEventRecord(ev, pf_s[dev_]);
                 F->bg.push_back(FastState::BgMove{t.il, fs, key, rc, rs, true, ev, true});
                 g_conv_pf[0].fetch_add(1, std::memory_order_relaxed);
+                g_conv_pf_dev[dev_ & 63].fetch_add(1, std::memory_order_relaxed);
                 credit[dev_] -= 1.0;
             } else if (vs >= 0 && (vl == 0 || (!glmfast::conv_target_set() && vl + churn <= t.lv))) {   // (union: only
                                                                                                //  experts outside the target go)   // the victim down first: its slot is free a boundary later
@@ -5960,6 +5963,7 @@ void Glm5Model::conv_preload_locked(int mode) {
                 cudaEventRecord(ev, pf_s[dev_]);
                 F->bg.push_back(FastState::BgMove{t.il, vs, vkey, rc, fr, false, ev, conv_pair_on()});
                 g_conv_pf[1].fetch_add(1, std::memory_order_relaxed);
+                g_conv_pf_dev[dev_ & 63].fetch_add(1, std::memory_order_relaxed);
                 credit[dev_] -= 1.0;
             }
         }
@@ -6077,9 +6081,18 @@ bool Glm5Model::fast_boundary(std::string& err) {
         } else {
             const uint32_t run = glmfast::g_shadow_run.load(std::memory_order_relaxed);
             const uint64_t tok = glmfast::g_warm_tok.load(std::memory_order_relaxed);
+            static std::atomic<uint64_t> n_ev{0}, n_tgt{0}, mv_rel[64];
+            const auto moves = [this] { return g_conv_pf_dev[dev_ & 63].load(std::memory_order_relaxed); };
             if (run != warm_run_) {
                 warm_run_ = run;
                 if (run != 0) {
+                    if (!warm_on_ && warm_mv_ != UINT64_MAX) mv_rel[dev_ & 63] += moves() - warm_mv_;
+                    const uint64_t ne = ++n_ev;   // (proof: no target work and no moves between the events)
+                    if (ne <= 16 || ne % 64 == 0)
+                        std::fprintf(stderr, "glm conv: shadow warm event CUDA%d %llu: targets so far %llu, moves while "
+                                     "released %llu\n", dev_, (unsigned long long) ne, (unsigned long long) n_tgt.load(),
+                                     (unsigned long long) mv_rel[dev_ & 63].load());
+                    ++n_tgt;
                     shadow_target();
                     warm_t0_ = tok;
                     warm_on_ = true;
@@ -6091,6 +6104,7 @@ bool Glm5Model::fast_boundary(std::string& err) {
                     for (int e = 0; e < glmfast::kRcExperts; ++e)
                         g_conv_flag[il * glmfast::kRcExperts + e].store(0, std::memory_order_relaxed);
                 warm_on_ = false;
+                warm_mv_ = moves();
                 static std::atomic<uint64_t> n_rel{0};
                 const uint64_t nr = ++n_rel;
                 if (nr <= 8 || nr % 64 == 0)
