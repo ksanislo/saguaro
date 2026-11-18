@@ -249,6 +249,7 @@ void Glm5Model::conv_preload_sync() {
         cudaStreamSynchronize(g_conv_pf_stream[dev_]);
 }
 void Glm5Model::conv_others_set(int n) { g_conv_others.store(n, std::memory_order_relaxed); }
+void Glm5Model::shadow_event() { glmfast::g_warm_ev.fetch_add(1, std::memory_order_release); }
 void Glm5Model::shadow_token() {
     if (g_conv_reading.load(std::memory_order_relaxed) == 0) glmfast::g_warm_tok.fetch_add(1, std::memory_order_relaxed);
 }
@@ -4245,6 +4246,7 @@ std::atomic<uint64_t> g_seq_last[kRcSeqs][kRcLayers * kRcExperts];   // (64-bit:
 std::atomic<uint64_t> g_shadow_clock{0};
 std::atomic<uint32_t> g_shadow_run{0};   // the running (decoding or reading) sequences, a bit each
 std::atomic<uint64_t> g_warm_tok{0};   // (CONV_SHADOW_WARM: decoded tokens while no prompt is read)
+std::atomic<uint64_t> g_warm_ev{0};    // (CONV_SHADOW_WARM: admissions and request ends)
 std::atomic<uint8_t> g_warm_landed[64];   // (a card's warm target all in VRAM)
 std::atomic<uint32_t> g_seq_gen[kRcSeqs];   // (bumped when a sequence's clocks are replaced: its order is rebuilt)
 // each (sequence, layer)'s experts by last use, newest first (ties: the higher id), kept by the layer's part at its boundary
@@ -6083,8 +6085,10 @@ bool Glm5Model::fast_boundary(std::string& err) {
             const uint64_t tok = glmfast::g_warm_tok.load(std::memory_order_relaxed);
             static std::atomic<uint64_t> n_ev{0}, n_tgt{0}, mv_rel[64];
             const auto moves = [this] { return g_conv_pf_dev[dev_ & 63].load(std::memory_order_relaxed); };
-            if (run != warm_run_) {
+            const uint64_t ev = glmfast::g_warm_ev.load(std::memory_order_acquire);
+            if (run != warm_run_ || ev != warm_ev_) {   // (an event: the set changed, or a request came or went)
                 warm_run_ = run;
+                warm_ev_ = ev;
                 if (run != 0) {
                     if (!warm_on_ && warm_mv_ != UINT64_MAX) mv_rel[dev_ & 63] += moves() - warm_mv_;
                     const uint64_t ne = ++n_ev;   // (proof: no target work and no moves between the events)

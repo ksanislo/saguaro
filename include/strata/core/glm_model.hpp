@@ -232,6 +232,7 @@ public:
     /// CONV_SHADOW: the running sequences (a bit each); a sequence's lru clocks out (a conversation's frozen set) / in
     static void shadow_running_set(uint32_t mask);
     static void shadow_token();   // (CONV_SHADOW_WARM: a decoded token while no prompt is read)
+    static void shadow_event();   // (CONV_SHADOW_WARM: an admission or a request end)
     static void shadow_seq_save(int seq, std::vector<uint64_t>& out);
     static void shadow_seq_load(int seq, const std::vector<uint64_t>& in);
     void shadow_target();   // (F->mu held, fast_boundary)
@@ -380,6 +381,7 @@ public:
     // next half continue through its own layers (and, if it is the last, the head).
     int l0_ = 0, l1_ = 0;
     int dev_ = 0;
+    uint64_t warm_ev_ = 0;
     uint32_t warm_run_ = 0;    // (CONV_SHADOW_WARM: the running set at the last event, its token count, warming)
     uint64_t warm_t0_ = 0;
     bool warm_on_ = false;
