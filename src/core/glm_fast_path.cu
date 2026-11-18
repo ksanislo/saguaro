@@ -249,10 +249,6 @@ void Glm5Model::conv_preload_sync() {
         cudaStreamSynchronize(g_conv_pf_stream[dev_]);
 }
 void Glm5Model::conv_others_set(int n) { g_conv_others.store(n, std::memory_order_relaxed); }
-void Glm5Model::shadow_event() { glmfast::g_warm_ev.fetch_add(1, std::memory_order_release); }
-void Glm5Model::shadow_token() {
-    if (g_conv_reading.load(std::memory_order_relaxed) == 0) glmfast::g_warm_tok.fetch_add(1, std::memory_order_relaxed);
-}
 void Glm5Model::conv_reading_set(int n) { g_conv_reading.store(n, std::memory_order_relaxed); }
 void Glm5Model::conv_prefetch_counts(uint64_t out[4]) {
     for (int i = 0; i < 4; ++i) out[i] = g_conv_pf[i].load(std::memory_order_relaxed);
@@ -4282,6 +4278,10 @@ void route_dump(int layer, int k, const int* ids, const float* w) {
 }  // namespace glmfast
 
 bool Glm5Model::route_counting() { return glmfast::route_counting(); }
+void Glm5Model::shadow_event() { glmfast::g_warm_ev.fetch_add(1, std::memory_order_release); }
+void Glm5Model::shadow_token() {
+    if (g_conv_reading.load(std::memory_order_relaxed) == 0) glmfast::g_warm_tok.fetch_add(1, std::memory_order_relaxed);
+}
 void Glm5Model::shadow_running_set(uint32_t mask) { glmfast::g_shadow_run.store(mask, std::memory_order_relaxed); }
 void Glm5Model::shadow_seq_save(int seq, std::vector<uint64_t>& out) {
     constexpr size_t n = (size_t) glmfast::kRcLayers * glmfast::kRcExperts;
