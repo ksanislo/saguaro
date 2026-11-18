@@ -3569,6 +3569,7 @@ static int glm_pack_generate(const Options& o) {
     };
     // the token a request takes after one came back: forced, else as sampled
     const auto gen_took = [&](Gen& g, int tok) {
+        if (conv.shadow) strata::core::Glm5Model::shadow_token();
         if (g.force >= 0) {
             tok = g.force;
             g.force = -1;

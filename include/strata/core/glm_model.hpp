@@ -231,6 +231,7 @@ public:
     static void conv_reading_set(int n);   // prompts being read now (a computed target's preload waits for them)
     /// CONV_SHADOW: the running sequences (a bit each); a sequence's lru clocks out (a conversation's frozen set) / in
     static void shadow_running_set(uint32_t mask);
+    static void shadow_token();   // (CONV_SHADOW_WARM: a decoded token while no prompt is read)
     static void shadow_seq_save(int seq, std::vector<uint64_t>& out);
     static void shadow_seq_load(int seq, const std::vector<uint64_t>& in);
     void shadow_target();   // (F->mu held, fast_boundary)
@@ -379,6 +380,9 @@ public:
     // next half continue through its own layers (and, if it is the last, the head).
     int l0_ = 0, l1_ = 0;
     int dev_ = 0;
+    uint32_t warm_run_ = 0;    // (CONV_SHADOW_WARM: the running set at the last event, its token count, warming)
+    uint64_t warm_t0_ = 0;
+    bool warm_on_ = false;
     int n_parts_ = 1;                                      // the devices the layers are split across (the CPU lane's share)
     int part_ = 0;                                         // ... and which of them this one is (0 = the first layers)
     // THE HEAD SPLIT (an EXL3 pack on 3+ parts; STRATA_GLM_HEAD_SPLIT=0: off): a pipelined window's pick on the last

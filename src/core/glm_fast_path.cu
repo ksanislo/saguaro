@@ -248,6 +248,9 @@ void Glm5Model::conv_preload_sync() {
         cudaStreamSynchronize(g_conv_pf_stream[dev_]);
 }
 void Glm5Model::conv_others_set(int n) { g_conv_others.store(n, std::memory_order_relaxed); }
+void Glm5Model::shadow_token() {
+    if (g_conv_reading.load(std::memory_order_relaxed) == 0) glmfast::g_warm_tok.fetch_add(1, std::memory_order_relaxed);
+}
 void Glm5Model::conv_reading_set(int n) { g_conv_reading.store(n, std::memory_order_relaxed); }
 void Glm5Model::conv_prefetch_counts(uint64_t out[4]) {
     for (int i = 0; i < 4; ++i) out[i] = g_conv_pf[i].load(std::memory_order_relaxed);
@@ -4240,6 +4243,8 @@ bool route_seq_counting() {
 std::atomic<uint64_t> g_seq_last[kRcSeqs][kRcLayers * kRcExperts];   // (64-bit: a route clock never wraps)
 std::atomic<uint64_t> g_shadow_clock{0};
 std::atomic<uint32_t> g_shadow_run{0};   // the running (decoding or reading) sequences, a bit each
+std::atomic<uint64_t> g_warm_tok{0};   // (CONV_SHADOW_WARM: decoded tokens while no prompt is read)
+std::atomic<uint8_t> g_warm_landed[64];   // (a card's warm target all in VRAM)
 std::atomic<uint32_t> g_seq_gen[kRcSeqs];   // (bumped when a sequence's clocks are replaced: its order is rebuilt)
 // each (sequence, layer)'s experts by last use, newest first (ties: the higher id), kept by the layer's part at its boundary
 uint16_t g_ord[kRcSeqs][kRcLayers][kRcExperts];
@@ -5849,6 +5854,8 @@ void Glm5Model::conv_preload_locked(int mode) {
     FastState* F = fast_;
     const Glm5Geometry& g = g_;
     if (F == nullptr || F->bg_hold || !g_conv_tgt_any.load(std::memory_order_acquire) || dev_ < 0 || dev_ >= 64) return;
+    static const bool warm = glmfast::conv_shadow_set() && env_dbl("STRATA_GLM_CONV_SHADOW_WARM", 0.0) > 0;
+    if (warm && !warm_on_) return;   // (CONV_SHADOW_WARM: released - the live rules alone until the next event)
     int cur_dev = -1;   // (its stream and copies are this part's card's, whatever the caller left current)
     cudaGetDevice(&cur_dev);
     struct DevBack {
@@ -5895,6 +5902,7 @@ void Glm5Model::conv_preload_locked(int mode) {
                 if (rs >= 0 && R.st[(size_t) rs] == FastState::kRHold) ts.push_back(T{lv, il, e});
             }
         }
+        if (ts.empty()) glmfast::g_warm_landed[dev_ & 63].store(1, std::memory_order_relaxed);
         std::stable_sort(ts.begin(), ts.end(), [](const T& a, const T& b) { return a.lv > b.lv; });
         for (const T& t : ts) {
             if (credit[dev_] < 1.0 || (glmfast::conv_target_set() && (int) F->bg.size() >= inflight)) break;   // (union: lending
@@ -6060,7 +6068,38 @@ bool Glm5Model::fast_boundary(std::string& err) {
     bt_mark();
     std::lock_guard<std::mutex> lk(F->mu);
     bt_mark();
-    if (glmfast::conv_shadow_set()) shadow_target();   // (CONV_SHADOW: this part's layers' target from the running sets)
+    if (glmfast::conv_shadow_set()) {   // (CONV_SHADOW: this part's layers' target from the running sets)
+        // CONV_SHADOW_WARM=N: the target only at an event (the running set changed), moved in, then released to the live
+        // rules after N decoded tokens or once it all landed
+        static const long warm = (long) env_dbl("STRATA_GLM_CONV_SHADOW_WARM", 0.0);
+        if (warm <= 0) {
+            shadow_target();
+        } else {
+            const uint32_t run = glmfast::g_shadow_run.load(std::memory_order_relaxed);
+            const uint64_t tok = glmfast::g_warm_tok.load(std::memory_order_relaxed);
+            if (run != warm_run_) {
+                warm_run_ = run;
+                if (run != 0) {
+                    shadow_target();
+                    warm_t0_ = tok;
+                    warm_on_ = true;
+                    glmfast::g_warm_landed[dev_ & 63].store(0, std::memory_order_relaxed);
+                }
+            } else if (warm_on_ && ((long) (tok - warm_t0_) >= warm ||
+                                    glmfast::g_warm_landed[dev_ & 63].load(std::memory_order_relaxed))) {
+                for (int il = l0_; il < lt_ && il < glmfast::kRcLayers; ++il)
+                    for (int e = 0; e < glmfast::kRcExperts; ++e)
+                        g_conv_flag[il * glmfast::kRcExperts + e].store(0, std::memory_order_relaxed);
+                warm_on_ = false;
+                static std::atomic<uint64_t> n_rel{0};
+                const uint64_t nr = ++n_rel;
+                if (nr <= 8 || nr % 64 == 0)
+                    std::fprintf(stderr, "glm conv: shadow warm released CUDA%d after %llu tokens (%s), release %llu\n", dev_,
+                                 (unsigned long long) (tok - warm_t0_),
+                                 (long) (tok - warm_t0_) >= warm ? "window" : "landed", (unsigned long long) nr);
+            }
+        }
+    }
     bt_mark();
     int nu = 0;
     bool ok = true;
