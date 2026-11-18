@@ -135,6 +135,10 @@ MX_AVX2 void rows_avx2(const uint8_t* w, size_t rb, int k, int r0, int r1, const
 #define MXK_VNNI 1
 #include "ds4_mx_kern.inc"
 #endif
+#define MXK_NS mx_avx1
+#define MXK_ATTR MX_TARGET("avx")
+#define MXK_128 1
+#include "ds4_mx_kern.inc"
 #define MXK_NS mx_avx512
 #define MXK_ATTR MX_TARGET("avx512f,avx512bw,fma")
 #define MXK_512 1
@@ -210,7 +214,7 @@ void rows_q_scalar(const uint8_t* w, size_t rb, int k, int r0, int r1, const voi
 
 // ---- which tiers this CPU runs
 struct Cpu {
-    bool avx2 = false, vnni256 = false, avx512 = false, vnni512 = false, vbmi = false, bmi2 = false;
+    bool avx1 = false, avx2 = false, vnni256 = false, avx512 = false, vnni512 = false, vbmi = false, bmi2 = false;
 };
 Cpu detect() {
     Cpu c;
@@ -230,7 +234,8 @@ Cpu detect() {
     if (max_leaf < 7) return c;
     cpuid(1, 0);
     const bool fma = (r[2] >> 12) & 1u, osxsave = (r[2] >> 27) & 1u, avx = (r[2] >> 28) & 1u;
-    if (!fma || !osxsave || !avx) return c;
+    const bool ssse3 = (r[2] >> 9) & 1u;
+    if (!osxsave || !avx) return c;
 #if defined(_MSC_VER)
     const unsigned long long xcr0 = _xgetbv(0);
 #else
@@ -239,6 +244,8 @@ Cpu detect() {
     const unsigned long long xcr0 = ((unsigned long long) hi << 32) | lo;
 #endif
     if ((xcr0 & 0x6) != 0x6) return c;   // the OS saves the YMM state
+    c.avx1 = ssse3;
+    if (!fma) return c;
     cpuid(7, 0);
     const unsigned b7 = r[1], c7 = r[2];
     c.avx2 = (b7 >> 5) & 1u;
@@ -272,7 +279,7 @@ int pick_tier() {
             }
     std::vector<int> cand;
     for (int t = 1; t < kMxTiers; ++t)
-        if (mx_tier_ok(t)) cand.push_back(t);
+        if (mx_tier_ok(t) && !(t == kMxAvx1 && cpu().avx2)) cand.push_back(t);   // (AVX1's: for CPUs without AVX2)
     if (cand.empty()) return kMxScalar;
     if (cand.size() == 1) return cand[0];
     return measure_tier(cand);
@@ -354,6 +361,7 @@ bool mx_tier_ok(int t) {
 #endif
         case kMxAvx512: return cpu().avx512;
         case kMxAvx512Vnni: return cpu().vnni512;
+        case kMxAvx1: return cpu().avx1;
         default: return false;
     }
 }
@@ -364,6 +372,7 @@ const char* mx_tier_name(int t) {
         case kMxAvxVnni: return "avxvnni";
         case kMxAvx512: return "avx512";
         case kMxAvx512Vnni: return "avx512vnni";
+        case kMxAvx1: return "avx1";
         default: return "?";
     }
 }
@@ -400,6 +409,7 @@ void mx_rows_tier(int t, const uint8_t* w, size_t rb, int k, int r0, int r1, con
 #endif
         case kMxAvx512: return mx_avx512::rows(w, rb, k, r0, r1, act, n, y, tb, pf);
         case kMxAvx512Vnni: return mx_avx512vnni::rows(w, rb, k, r0, r1, act, n, y, tb, pf);
+        case kMxAvx1: return mx_avx1::rows(w, rb, k, r0, r1, act, n, y, tb, pf);
         default: break;
     }
 #endif

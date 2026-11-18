@@ -752,7 +752,20 @@ def restore_point_settings(env=None) -> tuple[bool, int]:
     return whole("MAYA_DS4_RESTORE_POINTS", 4) > 0, whole("MAYA_DS4_RESTORE_TAIL", 512)
 
 
-def deepseek_restore_points(ids, user_id, system_id=None, tail=512, least=RESTORE_LEAST) -> dict:
+def restore_turns(env=None) -> int:
+    """MAYA_DS4_RESTORE_TURNS (6; 0: only the last user turn, as before)."""
+    env = os.environ if env is None else env
+    try:
+        return max(0, int(str(env.get(maya_names.read_as("MAYA_DS4_RESTORE_TURNS"), 6)).strip()))
+    except ValueError:
+        return 6
+
+
+RESTORE_RECENT = 100000   # the agent context engines' fresh tail (hermes-lcm: 32 messages, at most 100K tokens)
+
+
+def deepseek_restore_points(ids, user_id, system_id=None, tail=512, least=RESTORE_LEAST, assistant_id=None,
+                            recent=RESTORE_RECENT, spacing=65536, turns=None) -> dict:
     """Where the DeepSeek engine keeps restore points for this prompt -> {"marks": [pos, ...], "tail": pos, "shared":
     pos} (any may be missing; {}: none).  From the prompt's ids as the template wrote them: a turn opens with its role's special
     token (<｜User｜>, a tool result's turn too; <｜System｜> for a system message after the first user turn), and text
@@ -767,17 +780,41 @@ def deepseek_restore_points(ids, user_id, system_id=None, tail=512, least=RESTOR
     if user_id is None or len(ids) < 2:
         return {}
     first = last = None
-    for i, t in enumerate(ids):
+    starts = []   # every message start after the first user turn (an agent's context engine cuts at any of them: a
+    for i, t in enumerate(ids):   # tool loop is one user turn of many assistant / tool messages)
+        if t == assistant_id and first is not None:
+            starts.append(i)
         if t == user_id:
+            if first is not None:
+                starts.append(i)
             first = i if first is None else first
             last = i
         elif t == system_id and first is not None:
+            starts.append(i)
             last = i
     marks, out = [], {}
     if first is not None and first >= least:
         out["shared"] = first
     if last is not None and last >= least and last != first:
         marks.append(last)
+    # MAYA_DS4_RESTORE_TURNS (6): up to that many earlier turn starts besides the last, spread over the conversation
+    # (a compaction or chain summary that keeps the history up to one of them reads only what follows it)
+    k = restore_turns() if turns is None else turns
+    early = [p for p in starts if p >= least and last is not None and p < last]   # (not the reply's own opener)
+    if k > 0 and early:
+        # the start nearest `recent` tokens before the end first (where a context engine keeping its fresh tail cuts),
+        # the rest spread over the conversation
+        # the rest on a fixed grid (the last message start at or before each multiple of `spacing`), newest first: the
+        # same positions turn after turn, so an incremental turn finds them held and asks for no new read stops
+        near = min(early, key=lambda p: abs((len(ids) - recent) - p))
+        grid = []
+        for g in range(spacing, len(ids), spacing):
+            q = [p for p in early if p <= g]
+            if q and q[-1] not in grid:   # (the near point may be one too: the window does not shift)
+                grid.append(q[-1])
+        pick = [near] + grid[::-1][:k - 1]
+        marks.extend(p for p in pick if p not in marks)
+        marks.sort()
     t = len(ids) - tail
     if tail > 0 and t >= least and (last is None or t > last):
         out["tail"] = t
@@ -965,6 +1002,13 @@ class StrataEngine:
             if line.startswith("VRAM "):
                 self._vram_line(line)
                 continue
+            # END (maya-ds4, ahead of a request's DONE): a GPU's state is unknown and the engine ends once that DONE
+            # is out - taken as ended now, so the next request, even one already waiting, starts a fresh engine
+            # instead of writing to this one while it exits
+            if line.startswith("END "):
+                print("[maya] " + line[4:].strip(), flush=True)
+                self.ended = True
+                continue
             if self.multi and self._route(line):
                 continue
             self.lines.put(line)
@@ -1005,7 +1049,8 @@ class StrataEngine:
         return False
 
     def death_note(self) -> str:
-        """Why the engine most likely ended, from the end of its log: its own watchdog (issue #29), else RAM."""
+        """Why the engine most likely ended, from the end of its log: its own watchdog (issue #29), a GPU's fault it
+        caught after a request (exit 3), else RAM."""
         tail = ""
         try:
             with open(self.log_path, "rb") as f:
@@ -1018,6 +1063,11 @@ class StrataEngine:
             if "issue #29" in line:
                 return ("The engine stopped itself because it had stopped making progress - a hang it caught. Its log "
                         "line: " + line.strip() + " - please report it at github.com/mw00/project-maya/issues.")
+            if "a GPU's state is unknown" in line:
+                return ("The engine stopped itself because a GPU took a fault inside a kernel (an illegal address or "
+                        "the like), after which that GPU's state is lost; a fresh engine starts with the next request. "
+                        "Its log line: " + line.strip() + " - the lines above it name the GPU and the error; please "
+                        "report it at github.com/mw00/project-maya/issues.")
         if getattr(getattr(self, "proc", None), "returncode", None) in (-2, -15):   # (#539: read as a lack of RAM)
             return ("A signal from outside ended it (SIGINT or SIGTERM: Ctrl+C, kill, a service manager), not a lack "
                     "of RAM.")
@@ -2210,6 +2260,7 @@ class Service:
         # DeepSeek's turn openers: where its last user turn starts and its system prompt ends (MAYA_DS4_RESTORE_POINTS)
         self.ds_user_id = (_special_ids("<｜User｜>") or [None])[0]
         self.ds_system_id = (_special_ids("<｜System｜>") or [None])[0]
+        self.ds_assistant_id = (_special_ids("<｜Assistant｜>") or [None])[0]
         # ... and a model that spells a role marker out of ordinary pieces ('<|', 'user', '|>') has ended its turn just
         # the same: the text stops there.  Only markers that are special tokens in this vocabulary count.
         self.stop_texts = [s for s in ("<|user|>", "<|observation|>", "<|endoftext|>", "<｜end▁of▁sentence｜>", "<｜User｜>",
@@ -4001,8 +4052,10 @@ class Service:
                     sampling = {k: v for k, v in sampling.items() if k != "_restore"}
                 on, tail = restore_point_settings()
                 if on and not emb and getattr(self.template, "deepseek", False):
-                    pts = deepseek_restore_points(ids, self.ds_user_id, self.ds_system_id, tail)
+                    pts = deepseek_restore_points(ids, self.ds_user_id, self.ds_system_id, tail,
+                                                  assistant_id=self.ds_assistant_id)
                     if pts:
+                        print(f"[maya] restore points asked: {pts}", file=sys.stderr, flush=True)
                         sampling = {**(sampling or {}), "_restore": pts}
 
                 def attempts(prompt, left):

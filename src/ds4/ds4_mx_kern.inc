@@ -4,7 +4,8 @@
 //   MXK_ATTR  the tier's instruction set as a function attribute (GCC / Clang: target(...); MSVC: nothing - it takes
 //             any intrinsic) on every function here, so the file is built for the baseline and each tier's code runs
 //             only where ds4_gguf_cpu.cpp's CPU check says it can
-//   MXK_256 or MXK_512, and MXK_VNNI (vpdpbusd; else vpmaddubsw + vpmaddwd)
+//   MXK_256 or MXK_512, and MXK_VNNI (vpdpbusd; else vpmaddubsw + vpmaddwd); or MXK_128 (AVX without AVX2 or FMA:
+//             128-bit integer dots, the FMA in double, see below)
 // and gets MXK_NS::rows(...) (and with MXK_256 and no MXK_VNNI, MXK_NS::quant(...)); the macros are undefined at the end.
 //
 // The arithmetic is the device's (ds4_gguf.cu, mx_dot) - a block's 32 codes times the int8 activations summed exactly
@@ -151,6 +152,102 @@ MXK_ATTR inline void quant(const float* x, int b0, int b1, uint8_t* act, int k) 
 #endif
 #endif  // MXK_256
 
+#if defined(MXK_128)
+// ---------------------------------------------------------------- AVX1: 128-bit integers, a block a step
+// The blocks' totals as the other tiers (pmaddubsw + pmaddwd, exact), then acc = fma(total, dw dx, acc) without an FMA
+// unit: total x (dw dx) is exact in double (16 + 24 bits), the sum with acc rounds once to double and TwoSum gives what
+// it lost; with nothing lost the one rounding to float is fma's.  A lane that lost something (acc far above the
+// product, inf / NaN: rare) takes std::fma itself, as the scalar tier.
+MXK_ATTR inline __m128 fma_half(__m128i tot, __m128 s, __m128 acc, __m256d& bad) {
+    const __m256d p = _mm256_mul_pd(_mm256_cvtepi32_pd(tot), _mm256_cvtps_pd(s));
+    const __m256d a = _mm256_cvtps_pd(acc);
+    const __m256d sum = _mm256_add_pd(p, a);
+    const __m256d bb = _mm256_sub_pd(sum, a);
+    const __m256d e = _mm256_add_pd(_mm256_sub_pd(a, _mm256_sub_pd(sum, bb)), _mm256_sub_pd(p, bb));
+    bad = _mm256_or_pd(bad, _mm256_cmp_pd(e, _mm256_setzero_pd(), _CMP_NEQ_UQ));
+    return _mm256_cvtpd_ps(sum);
+}
+
+// the 8 lanes as rows_q_scalar takes them, std::fma each (out of line: the loop keeps its registers)
+#if defined(_MSC_VER)
+__declspec(noinline)
+#else
+__attribute__((noinline))
+#endif
+MXK_ATTR void fma_slow(__m128i t0, __m128i t1, __m128 s0, __m128 s1, __m128* acc) {
+    alignas(16) int32_t ti[8];
+    alignas(16) float si[8], ai[8];
+    _mm_store_si128((__m128i*) ti, t0), _mm_store_si128((__m128i*) (ti + 4), t1);
+    _mm_store_ps(si, s0), _mm_store_ps(si + 4, s1);
+    _mm_store_ps(ai, acc[0]), _mm_store_ps(ai + 4, acc[1]);
+    for (int l = 0; l < 8; ++l) ai[l] = std::fma((float) ti[l], si[l], ai[l]);
+    acc[0] = _mm_load_ps(ai), acc[1] = _mm_load_ps(ai + 4);
+}
+
+template <int N>
+MXK_ATTR inline void rows_n(const uint8_t* w, size_t rb, int k, int r0, int r1, const void* const* act, float* const* y,
+                            const float* e8, int pf) {
+    const __m128i lut = _mm_setr_epi8(12, 13, 14, 15, 16, 18, 20, 24, 12, 11, 10, 9, 8, 6, 4, 0);
+    const __m128i m4 = _mm_set1_epi8(0x0f), one = _mm_set1_epi16(1);
+    const int ng = k / 256;
+    const int8_t* xq[N];
+    const float* xd[N];
+    const int32_t* xc[N];
+    for (int i = 0; i < N; ++i) {
+        const uint8_t* a = (const uint8_t*) act[i];
+        xq[i] = (const int8_t*) a;
+        xd[i] = (const float*) (a + k);
+        xc[i] = (const int32_t*) (a + k + k / 8);
+    }
+    for (int r = r0; r < r1; ++r) {
+        const uint8_t* p = w + (size_t) r * rb;
+        __m128 acc[N][2];
+        for (int i = 0; i < N; ++i) acc[i][0] = acc[i][1] = _mm_setzero_ps();
+        for (int G = 0; G < ng; ++G, p += 8 * kBlockBytes) {
+            if (pf > 0) _mm_prefetch((const char*) p + pf, _MM_HINT_T0);
+            const __m256 dw = group_dw(p, e8);
+            // the group's 8 blocks decoded once (values 0..15, 16..31 as w + 12), then each activation in turn
+            __m128i c1[8], c2[8];
+            for (int b = 0; b < 8; ++b) {
+                const __m128i c = _mm_loadu_si128((const __m128i*) (p + b * kBlockBytes + 1));
+                c1[b] = _mm_shuffle_epi8(lut, _mm_and_si128(c, m4));
+                c2[b] = _mm_shuffle_epi8(lut, _mm_and_si128(_mm_srli_epi16(c, 4), m4));
+            }
+            for (int i = 0; i < N; ++i) {
+                const int8_t* xg0 = xq[i] + G * 256;   // block b's values 0..15 at (b / 4) 128 + 16 (b % 4), 16..31 64 further
+                __m128i h[8];             // a block's 8 int16 pair sums (|.| <= 2 x 2 x 24 x 128 = 12288)
+                for (int b = 0; b < 8; ++b) {
+                    const int8_t* xb = xg0 + (b >> 2) * 128 + 16 * (b & 3);
+                    h[b] = _mm_add_epi16(_mm_maddubs_epi16(c1[b], _mm_loadu_si128((const __m128i*) xb)),
+                                         _mm_maddubs_epi16(c2[b], _mm_loadu_si128((const __m128i*) (xb + 64))));
+                }
+                // two blocks' halves side by side (<= 24576), to int32, then the blocks' totals in lane order
+                const __m128i v02 = _mm_madd_epi16(_mm_hadd_epi16(h[0], h[2]), one);
+                const __m128i v46 = _mm_madd_epi16(_mm_hadd_epi16(h[4], h[6]), one);
+                const __m128i v13 = _mm_madd_epi16(_mm_hadd_epi16(h[1], h[3]), one);
+                const __m128i v57 = _mm_madd_epi16(_mm_hadd_epi16(h[5], h[7]), one);
+                const __m128i t0 = _mm_add_epi32(_mm_hadd_epi32(v02, v46), _mm_loadu_si128((const __m128i*) (xc[i] + 8 * G)));
+                const __m128i t1 = _mm_add_epi32(_mm_hadd_epi32(v13, v57), _mm_loadu_si128((const __m128i*) (xc[i] + 8 * G + 4)));
+                const __m256 s = _mm256_mul_ps(dw, _mm256_loadu_ps(xd[i] + 8 * G));
+                const __m128 s0 = _mm256_castps256_ps128(s), s1 = _mm256_extractf128_ps(s, 1);
+                __m256d bad = _mm256_setzero_pd();
+                const __m128 n0 = fma_half(t0, s0, acc[i][0], bad), n1 = fma_half(t1, s1, acc[i][1], bad);
+                if (_mm256_movemask_pd(bad) != 0) {
+                    fma_slow(t0, t1, s0, s1, acc[i]);
+                } else {
+                    acc[i][0] = n0, acc[i][1] = n1;
+                }
+            }
+        }
+        for (int i = 0; i < N; ++i) {   // hsum256's tree
+            const __m128 a = _mm_add_ps(acc[i][0], acc[i][1]);
+            const __m128 b = _mm_add_ps(a, _mm_movehl_ps(a, a));
+            y[i][r - r0] = _mm_cvtss_f32(_mm_add_ss(b, _mm_shuffle_ps(b, b, 1)));
+        }
+    }
+}
+#endif  // MXK_128
+
 #if defined(MXK_512)
 // ---------------------------------------------------------------- 512-bit: a quad of blocks a step
 MXK_ATTR inline __m512i quad_dot(__m512i a1, __m512i a2, __m512i x1, __m512i x2) {
@@ -245,5 +342,6 @@ MXK_ATTR inline void rows(const uint8_t* w, size_t rb, int k, int r0, int r1, co
 #undef MXK_NS
 #undef MXK_ATTR
 #undef MXK_256
+#undef MXK_128
 #undef MXK_512
 #undef MXK_VNNI

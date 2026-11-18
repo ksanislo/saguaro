@@ -173,6 +173,10 @@ int main() {
     assert(mark_victim({{10, false, 5}, {20, false, 3}, {30, false, 9}}) == 1);
     assert(mark_victim({{10, true, 1}, {20, false, 3}, {30, false, 2}}) == 2);
     assert(mark_victim({{10, true, 4}, {20, true, 3}}) == 1);
+    // keep_early: the two earliest non-shared points stay while a later one can go
+    assert(mark_victim({{10, false, 1}, {20, false, 2}, {30, false, 3}}, 2) == 2);
+    assert(mark_victim({{5, true, 0}, {10, false, 1}, {20, false, 2}, {30, false, 9}, {40, false, 4}}, 2) == 4);
+    assert(mark_victim({{10, false, 1}, {20, false, 2}}, 2) == 0);   // (only early ones: the LRU of them)
 
     // ---- the cases, as the serve loop runs them
     const std::vector<int> sys = run(1000, 3000);   // a system prompt and its tools: 3,000 tokens

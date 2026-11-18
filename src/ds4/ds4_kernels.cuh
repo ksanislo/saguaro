@@ -6,6 +6,7 @@
 // What differs from query to query (its window, how much of the compressed KV it sees, how many rows it selects) is
 // known on the host and passed by value.
 #pragma once
+#include "ds4_peer_cuda_compat.cuh"
 
 #include <cstddef>
 #include <cstdint>
@@ -135,6 +136,10 @@ struct GateW {
 /// the token, window and chunk paths get the same bits.
 void gemv_f32(const float* W, const float* x, int n, int k, int T, float* y, int ldy, cudaStream_t s);
 void gemv_f32(GateW W, const float* x, int n, int k, int T, float* y, int ldy, cudaStream_t s);
+/// (tests) gemv_f32's rows kernel for T tokens with tt tokens a block and rw rows a warp (DS4_ROUTER_T / DS4_ROUTER_RW;
+/// 8 and 1 the default kernel) - the same bits for every pair; *covered false (nothing launched) for a pair not built
+void gemv_f32_rows_with(GateW W, const float* x, int n, int k, int T, float* y, int ldy, cudaStream_t s, int tt, int rw,
+                        bool* covered = nullptr);
 /// (DS4_ROUTE_FUSE) gemv_f32 for one token (T 1) of two matrices on the same x in one launch: y0 = x W0 (n0 rows), y1 =
 /// x W1 (n1 rows), each row gemv_f32's bits.  k a multiple of 4, else false and nothing launched; false too when the
 /// launch did not go in.  (=2) T up to kWin tokens: x's rows k apart, y0's and y1's ldy apart (ldy >= n0, n1).
@@ -193,7 +198,8 @@ struct Rows {
 /// query's candidates) -> -inf.  q rows heads * hd apart, w rows 64, cand rows cand_stride, out rows out_stride; the keys
 /// k rows of format kfmt (the cache's kKvFp4p, or kKvBf16).
 /// With kKvFp4p keys and DS4_INDEX_TC=1 (and tc) the tensor cores' kernel: the same products, FP32 sums in another
-/// order.
+/// order; on compute capability 7.5 DS4_INDEX_TC_SM75=1 instead for a prompt's slabs (T > kWin), =2 for every call
+/// (the same kernel's bits, from m8n8k16).
 void index_score(const float* q, const float* w, const void* k, int heads, int hd, int T, int n, const int* cand,
                  int cand_stride, int blk, const Rows& lim, float* out, long long out_stride, cudaStream_t s,
                  int kfmt = kKvFp4p, bool tc = true);
@@ -257,6 +263,8 @@ bool attn_few(int T, int sel_stride, const AttnScratch* scr);
 struct AttnCkv {
     const void* ckv[kWin] = {};
 };
+/// (tests) DS4_ATTN_GH's heads a block for the calls after it (1: sparse_attn_kernel; -1: the environment's again)
+void set_attn_gh(int g);
 bool sparse_attn_rows(const float* q, const uint16_t* win, const AttnCkv& c, const int* sel, int sel_stride,
                       const AttnRows& a, const float* sink, int heads, int d, int T, float scale, float* out,
                       cudaStream_t s, bool one, const AttnScratch* scr);
@@ -338,6 +346,8 @@ struct Gather {
 void gather_rows(const float* x, const Gather& g, int n, int cols, float* out, cudaStream_t s);
 // bytes [col0, col0 + width) of each of `rows` rows of a matrix `pitch` bytes a row, side by side into out
 void gather_cols(const uint8_t* src, size_t pitch, size_t col0, size_t width, int rows, uint8_t* out, cudaStream_t s);
+/// y[i] += x[i], i < n (DS4_READ_HELP: a helper's partial MoE sum into the owner's)
+void add_f32(float* y, const float* x, size_t n, cudaStream_t s);
 /// The MoE's sum, token t: out[t] = sum_j w[t][j] ed[row[t][j]] (its VRAM experts, in pick order) + cpu[t] (when its
 /// cpu flag is set) + sh[t].
 struct Combine {
@@ -362,6 +372,7 @@ struct Req {
     int ids[kWin][kPicks];
     float w[kWin][kPicks];
     int ahead[kWin][kAhead];
+    unsigned char gpu[kWin][kPicks];   // (DS4_PREFETCH) 1: the device planned pick i on itself, its table entry read once
     float x[kWin][kMaxDim];
 };
 struct Resp {
@@ -379,7 +390,7 @@ void route_publish(const float* logits, const float* bias, int n, int k, int T, 
                    const unsigned long long* vram, const float* x, int dim, int* idx, float* w,
                    unsigned long long* plan_ptr, Req* req, unsigned seq, cudaStream_t s, const float* bias_vl = nullptr,
                    unsigned vl = 0, int na0 = 0, int na1 = 0, Resp* resp = nullptr, int* cpu_any = nullptr,
-                   const unsigned* host_done = nullptr);
+                   const unsigned* host_done = nullptr, int pf = 0);
 /// Lookahead: the m picks a later layer will likely make (its gate's logits on this layer's FFN input, the routing's
 /// score + bias, the m best of n) into req->ahead[t][off ..) for the T tokens - before route_publish, which publishes them.
 void route_ahead(const float* logits, const float* bias, int n, int m, int T, Req* req, int off, cudaStream_t s);
@@ -409,8 +420,23 @@ struct RoutePair {
     int T = 1;   // (=2: a window's rows, 1 .. kWin)
     float rs_w = 0.0f;   // (route_pair sets these from STRATA_DS4_RESIDENT_SKIP_W / _TOPK)
     int rs_k = 0;
+    int pf = 0;   // (DS4_PREFETCH) req->gpu written too
 };
 bool route_pair(const RoutePair& a, cudaStream_t s);
+/// DS4_PREFETCH's staging ring on a device: slot i holds `e` of layer `layer` mapped into `tab` at `addr` (mapped 1)
+struct XpSlot {
+    unsigned long long* tab;
+    unsigned long long addr;
+    int layer, e;
+    unsigned gen;
+    int mapped;
+};
+/// After slot i's copy (same stream): tab[e] 0 -> addr, the slot mapped; else (the expert has an entry) freed[i] = gen
+void xp_map(XpSlot* slots, int i, unsigned long long* tab, int layer, int e, unsigned gen, unsigned long long addr,
+            unsigned* freed, cudaStream_t s);
+/// After layer `layer`'s experts (its stream): every slot mapped for it or an earlier layer unmapped (only an entry
+/// still its own) and freed
+void xp_clear(XpSlot* slots, int n, int layer, unsigned* freed, cudaStream_t s);
 /// Waits (one thread, on the device) until *seq_ptr == seq.
 void wait_seq(const unsigned* seq_ptr, unsigned seq, cudaStream_t s);
 /// The helper GPU's share of request seq (DS4_HELPER): waits on the device until req holds it - or a later one, or
@@ -429,6 +455,10 @@ void moe_sort(const int* idx, int T, int k, const int* vs, int n_vs, int* bounds
 /// acc[t] += w[t][i] * y[pos[t][i] - r0] for each pick of t (in pick order) whose sorted row is in [r0, r1).
 void moe_combine(float* acc, const float* y, const int* pos, const float* w, int T, int k, int r0, int r1, int dim,
                  cudaStream_t s);
+/// moe_combine over the tokens of rows [r0, r1) only (row_tok): a block a row, the row that is its token's first pick
+/// in the range adds them all - the same sums in the same order, a launch the range's size, not the chunk's
+void moe_combine_rows(float* acc, const float* y, const int* pos, const int* row_tok, const float* w, int k, int r0,
+                      int r1, int dim, cudaStream_t s);
 /// rows[t][0] = 1, the rest 0 (the first layer's pre-mix: stream 0).
 void init_pre(float* pre, int T, cudaStream_t s);
 
@@ -504,7 +534,7 @@ constexpr int kAr2Piece = 8192;   // (float4s a piece: 128 KB of F32 rows, 64 KB
 void tab_set(const unsigned long long* pairs, int n, cudaStream_t s);
 /// A group of two with pflags (DS4_AR2): ar2_kernel, the put and the sums in one pipelined launch
 void allreduce(float* x, int n, const ArGroup& a, int mi, unsigned seq, unsigned* cnt, cudaStream_t s);
-#if defined(STRATA_USE_HIP)
+#if defined(STRATA_USE_HIP) || defined(DS4_CUDA_PEER_AR)
 constexpr int kPeerArBlocks = 64, kPeerArFlagStride = 32;
 // Optional diagnostic written only by the first block to set the timeout bit.
 struct PeerArFailure {
@@ -530,6 +560,8 @@ struct PeerAr {
     uint64_t timeout_ticks = 0; // HIP wall_clock64 ticks, calibrated with hipDeviceAttributeWallClockRate.
 };
 bool allreduce_peer(float* x, int n, const PeerAr& a, int mi, unsigned seq, cudaStream_t s);
+/// load the transports' kernels on the current device before any of them spins (CUDA lazy loading; HIP: no-op)
+void peer_ar_preload();
 enum class PeerTransport { host, ar2, peer };
 struct PeerCalibration {
     PeerTransport selected = PeerTransport::host;

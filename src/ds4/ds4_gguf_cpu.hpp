@@ -45,10 +45,11 @@ void iq_cpu_rows(int type, const uint8_t* w, size_t rb, int k, const void* const
 /// The CPU lane's MXFP4 rows in the device's arithmetic (ds4_gguf.cu's mx_dot): the activations rounded to int8 per 32
 /// values as the device rounds them (q8_round's q and scale), each block's products summed exactly in integers, then
 /// times (weight scale x activation scale) into F32 sums - the same numbers as the device up to the order of the
-/// blocks' sums.  The vector tiers (ds4_mx_kern.inc): AVX2 vpmaddubsw, AVX-VNNI and AVX-512 (VNNI) vpdpbusd; the CPU's
+/// blocks' sums.  The vector tiers (ds4_mx_kern.inc): AVX2 vpmaddubsw, AVX-VNNI and AVX-512 (VNNI) vpdpbusd, AVX1
+/// (no AVX2: 128-bit pmaddubsw, the FMA emulated exactly in double); the CPU's
 /// fastest is taken at run time (DS4_MX_TIER=<name> picks another one it runs).  Every tier, the scalar one included,
 /// sums in the same order: they give the same bits, so the choice never changes an answer.
-enum MxTier { kMxScalar = 0, kMxAvx2, kMxAvxVnni, kMxAvx512, kMxAvx512Vnni, kMxTiers };
+enum MxTier { kMxScalar = 0, kMxAvx2, kMxAvxVnni, kMxAvx512, kMxAvx512Vnni, kMxAvx1, kMxTiers };
 /// Bytes of an activation of k values (k % 32 == 0) for mx_rows: the int8 values in quads of blocks, then a scale and
 /// an offset correction a block in groups of 8 (ds4_mx_kern.inc) - 1.25 k for k % 256 == 0.
 inline size_t mx_act_bytes(int k) {

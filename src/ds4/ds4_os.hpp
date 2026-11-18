@@ -491,9 +491,11 @@ inline void drop_cached(const std::vector<std::pair<uint8_t*, size_t>>& maps, co
 /// Anonymous memory on NUMA node `node` of `nodes` (node < 0 or nodes < 2: wherever the first touch puts it), on huge
 /// pages where the OS gives them; nullptr if it cannot be had.  Linux: the node is preferred, not required
 /// (MPOL_PREFERRED) - a node that fills up (locked Engram tables, another program's memory) lends the rest from the
-/// other nodes, where MPOL_BIND had the kernel end the process with RAM free on the other node (#507)
-inline void* anon_alloc(size_t bytes, int node, int nodes) {
+/// other nodes, where MPOL_BIND had the kernel end the process with RAM free on the other node (#507).
+/// thp: 1 MADV_HUGEPAGE (as before), 0 no advice (the system's THP policy), -1 MADV_NOHUGEPAGE
+inline void* anon_alloc(size_t bytes, int node, int nodes, int thp = 1) {
 #if defined(_WIN32)
+    (void) thp;
     if (node >= 0 && nodes > 1)
         return VirtualAllocExNuma(GetCurrentProcess(), nullptr, bytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE,
                                   (DWORD) node);
@@ -501,7 +503,15 @@ inline void* anon_alloc(size_t bytes, int node, int nodes) {
 #else
     void* m = ::mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (m == MAP_FAILED) return nullptr;
-    madvise(m, bytes, MADV_HUGEPAGE);
+    // STRATA_NO_LARGEPAGES=1 / DS4_NO_HUGEPAGES=1: no MADV_HUGEPAGE (THP defrag on madvise with the RAM full of page
+    // cache compacts at every fault: Strata's 102 GB copy fell to 54 MB/s)
+    static const bool no_huge = [] {
+        for (const char* k : {"STRATA_NO_LARGEPAGES", "DS4_NO_HUGEPAGES"})
+            if (const char* v = std::getenv(k); v != nullptr && v[0] != '\0' && v[0] != '0') return true;
+        return false;
+    }();
+    if (thp > 0 && !no_huge) madvise(m, bytes, MADV_HUGEPAGE);
+    else if (thp < 0) madvise(m, bytes, MADV_NOHUGEPAGE);
     if (node >= 0 && nodes > 1) {
         unsigned long mask[4] = {0, 0, 0, 0};
         mask[node / 64] = 1ul << (node % 64);
@@ -515,6 +525,33 @@ inline void* anon_alloc(size_t bytes, int node, int nodes) {
         }
     }
     return m;
+#endif
+}
+/// Linux, several online NUMA nodes: [p, p + bytes) (not touched yet) a page on each node in turn (MPOL_INTERLEAVE).
+/// Returns the nodes used (1: nothing done)
+inline int interleave_nodes(void* p, size_t bytes) {
+#if defined(__linux__)
+    std::FILE* f = std::fopen("/sys/devices/system/node/online", "r");
+    if (f == nullptr) return 1;
+    char buf[256] = {};
+    const bool got = std::fgets(buf, sizeof buf, f) != nullptr;
+    std::fclose(f);
+    if (!got) return 1;
+    unsigned long mask[4] = {0, 0, 0, 0};
+    int n = 0;
+    for (char* q = buf; *q != '\0' && *q != '\n';) {   // "0-1" / "0,2-3"
+        char* e = nullptr;
+        const long a = std::strtol(q, &e, 10);
+        long b = a;
+        if (*e == '-') b = std::strtol(e + 1, &e, 10);
+        for (long k = a; k <= b && k < 256; ++k, ++n) mask[k / 64] |= 1ul << (k % 64);
+        q = *e == ',' ? e + 1 : e;
+    }
+    if (n < 2) return 1;
+    return syscall(SYS_mbind, p, bytes, 3 /* MPOL_INTERLEAVE */, mask, 256, 0) == 0 ? n : 1;
+#else
+    (void) p, (void) bytes;
+    return 1;
 #endif
 }
 inline void anon_free(void* p, size_t bytes) {

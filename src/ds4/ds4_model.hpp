@@ -261,6 +261,10 @@ public:
     /// prompt's start is then not usable: restore() a checkpoint kept before the feed, or reset().
     void set_cancel(std::function<bool()> f);
     bool cancelled() const;   // the last feed() / feed_mark() ended early on a Stop
+    /// After a request: true when no later one can trust this process - a layer GPU took a fault inside a kernel (its
+    /// context returns that error from then on) or the prompt path's room was not handed back.  The serve loop then
+    /// ends the engine (exit 3) once the request's DONE is out, and the server starts a fresh one for the next request.
+    bool broken();
     /// Asked while a run of chunks goes through the layers: true (a yield) ends it at a chunk every GPU reaches, as a
     /// Stop does, but keeps the chunks read - feed() / feed_mark() return true having taken fed() of their tokens (the
     /// rest a later feed's; feed_mark's checkpoint then not kept).  Not on a run that goes layer by layer.
@@ -279,6 +283,35 @@ public:
     int seq_count() const;
     void seq_bind(int s);
     int seq_bound() const;
+    /// DS4_READER=1 (--parallel): a long prompt's run of chunks goes through the cards beside the running answers.
+    /// set_reader_gate: for the duration of a background read the reading thread passes the serve loop's gate - feed*
+    /// calls release() once the run's device part is under way and acquire() (the gate back, the read's conversation
+    /// bound again) before the rest; null: every run exclusive, as without it.  reader_live: a device run in flight.
+    bool reader_on() const;
+    /// (release(true): a hand-back between two windows of a read in windows - an event waiting for the gate runs first)
+    void set_reader_gate(std::function<void(bool)> release, std::function<void()> acquire);
+    bool reader_live() const;
+    /// DS4_CHECK_READER=1: a hash of conversation s's compressed KV rows (every source, every card) for positions
+    /// [0, upto) - read beside a run (legacy-stream copies: never waits on it)
+    uint64_t kv_hash(int s, int64_t upto);
+    size_t reader_check_notes() const;
+    /// Engram lookups so far: decode's rows / hits / reads, then the background reads' (out[0..5])
+    void reader_eg_counts(int64_t out[6]) const;   // (device-wide syncs / off-thread run calls counted while a run was in flight)
+    /// DS4_ELASTIC_CONV=1 (--parallel): every conversation's KV backed as it grows, out of one pool made at load.
+    /// seq_backed: the positions s holds now (max_context where not elastic);
+    /// seq_can_back: whether the pool could back s to `tokens` now; seq_reserve: s backed to `tokens` (false: the pool
+    /// is short, nothing taken); seq_release: s's backing back to the pool and its state cleared (set it aside first).
+    bool elastic() const;
+    int64_t seq_backed(int s) const;
+    bool seq_can_back(int s, int64_t tokens) const;
+    bool seq_reserve(int s, int64_t tokens, std::string& err);
+    void seq_release(int s);
+    /// DS4_ELASTIC_TAKE: the cards short of free pool granules for s at `tokens` take expert slots (true: the pool
+    /// backs it now); el_give_back_surplus: the free granules past the budget (and a hysteresis unless idle) back to the
+    /// experts; el_force_take: (debug) every card gives `mb` MB, the granules given.  Between turns only (quiet cards).
+    bool el_take_for(int s, int64_t tokens);
+    void el_give_back_surplus(bool idle);
+    size_t el_force_take(size_t mb);
     int64_t seq_pos(int s) const;
     const std::vector<int32_t>& seq_tokens(int s) const;
     /// One token into each of n conversations (distinct, n <= 16, each at its own next position) through the model
@@ -311,6 +344,17 @@ public:
     /// restore(limit) goes back to the latest one at or before limit (-1: none).
     void checkpoint(int slot = 0);
     bool restore(int64_t limit);
+    /// Rewind (no restore point needed): the conversation in the model back to its token p - the compressed KV of
+    /// [0, p) kept, the window rings and partial groups rebuilt by reading [rewind_from(p), p) again.  `ids`: the
+    /// prompt from token 0 (it agrees with the state up to p); `after`: the prompt's tokens past p.  rewind_from: the
+    /// re-read's start, -1 when p is too close to the start (or past the state).  A failed rewind resets the state.
+    int64_t rewind_from(int64_t p) const;
+    bool rewind(const int* ids, int64_t p, int after, std::string& err);
+    /// (tests) the bytes of the compressed rows + index keys that differ between two slots over the rows both hold
+    /// (rings_diff: the window rings' and partial groups' differing bytes); -1: not this model's layout
+    int64_t slot_rows_diff(const std::vector<uint8_t>& a, const std::vector<uint8_t>& b, int64_t& rings_diff) const;
+    /// (tests) a hash of every device's copy of each source's rows of positions < p (readers' copies too)
+    std::vector<uint64_t> rows_hash(int64_t p);
     int64_t restorable(int64_t limit) const;
     /// Checkpoint 1 also becomes the anchor (kept until a restore goes before it): the position before the end of the
     /// first prompt of a run that continued in place, where a re-rendered history (earlier reasoning dropped) splits.
@@ -321,6 +365,9 @@ public:
     /// (MAYA_DS4_RESTORE_POINTS, 4; 0: none kept), the least recently used giving way; each check_bytes() of host RAM.
     void mark(bool shared = false);
     int marks_cap() const;
+    /// The held restore points at or before `from` that a request asked for again (marks= / shared=): their
+    /// least-recently-used clock moves on, nothing else (a grid point the read already passed stays kept).
+    void marks_touch(const std::vector<int64_t>& asked, int64_t shared, int64_t from);
     size_t check_bytes() const;
     /// The positions restore() can go back to, latest first (a slot keeps them: it can be taken back at any of them).
     std::vector<int64_t> check_positions() const;

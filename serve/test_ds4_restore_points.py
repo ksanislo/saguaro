@@ -65,8 +65,9 @@ class RestorePoints(unittest.TestCase):
         msgs, schemas, kw = openai_to_messages(request, deepseek=True)
         return self.svc.prepare(msgs, schemas, kw, 100)[0]
 
-    def points(self, ids, tail=512):
-        return deepseek_restore_points(ids, self.svc.ds_user_id, self.svc.ds_system_id, tail)
+    def points(self, ids, tail=512, turns=0, **kw):
+        return deepseek_restore_points(ids, self.svc.ds_user_id, self.svc.ds_system_id, tail,
+                                       assistant_id=self.svc.ds_assistant_id, turns=turns, **kw)
 
     def chat(self, last="And how did region 3 do in the last quarter?", system=SYSTEM):
         return [{"role": "system", "content": system},
@@ -138,9 +139,50 @@ class RestorePoints(unittest.TestCase):
         late = self.chat() + [{"role": "assistant", "content": "Region 3 rose."},
                               {"role": "system", "content": "From now on answer in French."}]
         ids = self.ids(late)
-        (boundary,) = self.points(ids)["marks"]
+        marks = self.points(ids)["marks"]
+        boundary = max(marks)
         self.assertEqual(ids[boundary], self.svc.ds_system_id)
         self.assertGreater(boundary, len(ids) - 60)
+        for p in marks[:-1]:   # (MAYA_DS4_RESTORE_TURNS: the earlier turn starts too)
+            self.assertIn(ids[p], (self.svc.ds_user_id, self.svc.ds_system_id))
+
+    def test_earlier_turn_starts(self):
+        msgs = self.chat()[:3]
+        for i in range(12):   # a long agent session: 12 more user turns, each with a reply
+            msgs += [{"role": "user", "content": f"Turn {i}: " + DOC}, {"role": "assistant", "content": f"Done {i}."}]
+        msgs.append({"role": "user", "content": "And now?"})
+        ids = self.ids(msgs)
+        sp = max(2048, len(ids) // 10)   # (a grid this test's ~len/10-token spacing fills)
+        pts = self.points(ids, spacing=sp, turns=6)
+        users = [i for i, t in enumerate(ids) if t == self.svc.ds_user_id]
+        starts = users[1:] + [i for i, t in enumerate(ids) if t == self.svc.ds_assistant_id and i > users[0]]
+        self.assertEqual(max(pts["marks"]), users[-1])           # the last user turn, as before
+        self.assertIn(len(pts["marks"]), (6, 7))                 # + up to 6 earlier message starts (the near one may be a grid one)
+        self.assertTrue(all(p in starts for p in pts["marks"]))
+        near = min((p for p in starts if p != users[-1]), key=lambda p: abs(len(ids) - 100000 - p))
+        self.assertIn(near, pts["marks"])                        # (the one nearest the context engines' fresh tail)
+        # stable: the same history one turn later keeps every earlier grid point it asked for
+        more = msgs + [{"role": "assistant", "content": "Fine."}, {"role": "user", "content": "Next: " + DOC}]
+        later = self.points(self.ids(more), spacing=sp, turns=6)["marks"]
+        grid0 = [p for p in pts["marks"] if p != users[-1] and p != near]
+        self.assertTrue(set(grid0[:-1]) <= set(later), (grid0, later))   # (the newest may move with the re-rendered end)
+        # ... and over 10 more turns, every grid point once asked for is asked for again each turn (the engine's
+        # marks_touch keeps them while they are)
+        # (only the oldest grid point may fall off the capped list as new ones appear)
+        cur, prev = list(more), None
+        for i in range(10):
+            cur += [{"role": "assistant", "content": f"Step {i}."}, {"role": "user", "content": f"More {i}: " + DOC}]
+            ids_i = self.ids(cur)
+            us = [j for j, t in enumerate(ids_i) if t == self.svc.ds_user_id]
+            now = sorted(self.points(ids_i, spacing=sp, turns=6)["marks"])
+            near_i = min((p for p in now if p != us[-1]), key=lambda p: abs(len(ids_i) - 100000 - p))
+            grid_i = [p for p in now if p not in (us[-1], near_i)]   # (the near point moves every turn by design)
+            if prev:
+                gone = [p for p in prev[:-1] if p not in grid_i and p != near_i]   # (the newest of the last turn may move)
+                self.assertTrue(len(gone) <= 1 and all(p < min(grid_i) for p in gone), (gone, prev, grid_i, i))   # (only the oldest slides off)
+            prev = grid_i
+        self.assertEqual(pts["marks"], sorted(pts["marks"]))
+        self.assertEqual(self.points(ids, turns=0)["marks"], [users[-1]])
 
     def test_settings(self):
         self.assertEqual(restore_point_settings({}), (True, 512))   # (on by default: 4)
@@ -164,7 +206,7 @@ class RestorePoints(unittest.TestCase):
 
     def test_the_engine_line(self):
         ids, sampling = self.run_request(self.chat(), {ON: "4"})
-        pts = self.points(ids)
+        pts = self.points(ids, turns=None)   # (the service reads MAYA_DS4_RESTORE_TURNS)
         self.assertEqual(sampling["_restore"], pts)
         keys = StrataEngine.sampling_keys(sampling).split()
         self.assertIn("marks=" + ",".join(str(p) for p in pts["marks"]), keys)
