@@ -6114,12 +6114,13 @@ bool Glm5Model::fast_boundary(std::string& err) {
                         g_conv_flag[il * glmfast::kRcExperts + e].store(0, std::memory_order_relaxed);
                 warm_on_ = false;
                 warm_mv_ = moves();
-                static std::atomic<uint64_t> n_rel{0};
-                const uint64_t nr = ++n_rel;
+                static std::atomic<uint64_t> n_rel{0}, n_win{0};
+                const bool win = (long) (tok - warm_t0_) >= warm;
+                const uint64_t nr = ++n_rel, nw = win ? ++n_win : n_win.load();
                 if (nr <= 8 || nr % 64 == 0)
-                    std::fprintf(stderr, "glm conv: shadow warm released CUDA%d after %llu tokens (%s), release %llu\n", dev_,
-                                 (unsigned long long) (tok - warm_t0_),
-                                 (long) (tok - warm_t0_) >= warm ? "window" : "landed", (unsigned long long) nr);
+                    std::fprintf(stderr, "glm conv: shadow warm released CUDA%d after %llu tokens (%s), release %llu (window "
+                                 "%llu, landed %llu)\n", dev_, (unsigned long long) (tok - warm_t0_), win ? "window" : "landed",
+                                 (unsigned long long) nr, (unsigned long long) nw, (unsigned long long) (nr - nw));
             }
         }
     }
