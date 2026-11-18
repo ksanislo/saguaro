@@ -226,7 +226,12 @@ static inline uint32_t conv_level(int il, int e) {
     return (f & 1u) == 0 ? 0u : (f & 2u) != 0 ? 65u : 1u + (f >> 2);
 }
 // the eviction order's level: the allocation level, or under CONV_PROTECT 1 for a floor and 0 for the rest
+static bool conv_warm_on() {   // CONV_SHADOW_WARM: the warm target only moves experts in, the live rules evict
+    static const bool on = glmfast::conv_shadow_set() && env_dbl("STRATA_GLM_CONV_SHADOW_WARM", 0.0) > 0;
+    return on;
+}
 static inline uint32_t conv_evict_level(int il, int e) {
+    if (conv_warm_on()) return 0u;
     if (!conv_protect_on()) return conv_level(il, e);
     return conv_level(il, e) == 65u ? 1u : 0u;
 }
@@ -5761,7 +5766,7 @@ void Glm5Model::shadow_target() {
             top.clear();
             if (n > 0) {
                 top.assign(o, o + std::min(n, K));
-            } else {   // (a brand-new conversation: the aged counts, those used at all)
+            } else if (!conv_warm_on()) {   // (a brand-new conversation: the aged counts, those used at all; WARM: none)
                 v.clear();
                 for (int e = 0; e < NE; ++e)
                     if (F->cnt[(size_t) il * g_.n_expert + e] > 0) v.push_back({F->cnt[(size_t) il * g_.n_expert + e], e});
