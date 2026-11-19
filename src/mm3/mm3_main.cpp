@@ -713,6 +713,7 @@ int serve(mm3::Model& m, const std::vector<int>& eos, int chunk, bool spec_on, f
         }
         const double t1 = now() * 1e3;
         m.set_images({});
+        m.read_end();
         if (!ok) {
             std::printf("ERR %s\n", err.c_str());
             std::printf("DONE 0 %zu 0.0 0.0 cancel 0 0 0 0 0\n", r.ids.size());
@@ -1408,6 +1409,7 @@ int serve_multi(mm3::Model& m, const std::vector<int>& eos, int chunk, const std
             if (between && !run.empty()) step();   // (the running requests' next token)
         }
         m.set_images({});
+        m.read_end();
         g.t1 = now() * 1e3;
         if (!ok) {
             std::printf("ERR %d %s\n", g.rid, err.c_str());

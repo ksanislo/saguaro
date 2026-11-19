@@ -166,6 +166,8 @@ public:
     int ctx_room(int s) const;
     bool ctx_fit(int s, int n, std::string& err);
     bool ctx_give(double budget_s);
+    /// A prompt read done: the VRAM it borrowed (MAYA_MM3_KV_GATHER's slots) given back to the experts before the decode.
+    void read_end();
     int pipe_stages() const;
     int pipe_busy() const;
     bool pipe_tick(const int* ids, const int* seq, const int* pos, int R, int tag, std::string& err);

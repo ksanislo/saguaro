@@ -672,6 +672,24 @@ struct Model::Impl {
         }
         return true;
     }
+    // a prompt read's end: its gather slots unmapped and the experts they displaced copied back before the decode
+    void read_end() {
+        bool any = false;
+        for (Dev& d : D) any |= d.kgr[0].mapped > 0;
+        if (!any) return;
+        for (Dev& d : D)
+            if (d.kgr[0].mapped > 0) {
+                cudaSetDevice(d.id);
+                cudaDeviceSynchronize();
+                for (vmm::Range& r : d.kgr) {
+                    acct[d.id][kAKV] -= r.mapped;
+                    r.shrink(0);
+                }
+                d.kg_slots = 0;
+            }
+        while (ctx_give(1.0)) {
+        }
+    }
     bool ctx_give(double budget_s) {
         if (el_pos <= 0) return false;
         const double t0 = now();
@@ -4510,6 +4528,9 @@ bool Model::ctx_fit(int s, int n, std::string& err) {
     return p->ctx_ensure(s, n, p->pipe_busy() == 0, err);
 }
 bool Model::ctx_give(double budget_s) { return !tpe && p->ctx_give(budget_s); }
+void Model::read_end() {
+    if (!tpe) p->read_end();
+}
 bool Model::pipe_tick(const int* ids, const int* seq, const int* pos, int R, int tag, std::string& err) {
     if (pipe_stages() < 2) {
         err = "pipe_tick: no pipeline here (one GPU, or one sequence)";
