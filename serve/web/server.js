@@ -337,7 +337,7 @@ export function syncShared() {
 
 // ------------------------------------------------------------------ updates
 // the server asks GitHub for the latest release (at most every six hours) and says whether this folder can update itself
-// (a git checkout without local changes, started by maya.sh / START-MAYA.bat); else the steps by hand
+// (a git checkout without local changes, started by saguaro.sh / START-SAGUARO.bat); else the steps by hand
 export async function loadUpdate(force = false) {
   try {
     const r = await fetch(force ? "api/update?force=1" : "api/update", {headers: headers()});

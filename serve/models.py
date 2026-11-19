@@ -1,4 +1,4 @@
-"""serve/models.py - the web app's Models page: the run configs the setup wrote (maya-<model>.json beside maya.py), what
+"""serve/models.py - the web app's Models page: the run configs the setup wrote (maya-<model>.json beside saguaro.py), what
 each one runs with, the engine settings the page changes in them, and a model deleted (delete_plan, delete).
 
 A config's settings, as the page shows them (None: the engine's own default, or "auto"):
@@ -28,12 +28,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 import maya_names  # noqa: E402  (tools/) a setting under either of its names
 import maya_quants  # noqa: E402  (tools/) the quants' names users see, and each config's family
 
-SWITCH_FILE = ".maya-switch.json"           # the server's note to maya.py: start this config next (a switch)
+SWITCH_FILE = ".maya-switch.json"           # the server's note to saguaro.py: start this config next (a switch)
 DELETE_FILE = ".maya-delete.json"           # ... and to the next server: delete this config (it was the one running)
 CONTEXTS = [8192, 32768, 65536, 131072]       # the setup's choices (a config's own size is offered too)
-DS4_CONTEXTS = [32768, 65536, 131072, 262144, 524288, 1048576]   # ... for DeepSeek (maya.py's DS4_CONTEXTS)
-MM3_CONTEXTS = DS4_CONTEXTS                                       # ... and MiniMax (maya.py's MM3_CONTEXTS)
-QWEN_CONTEXTS = [32768, 65536, 131072, 262144]                    # ... and CYBER-FROST (maya.py's QWEN_CONTEXTS)
+DS4_CONTEXTS = [32768, 65536, 131072, 262144, 524288, 1048576]   # ... for DeepSeek (saguaro.py's DS4_CONTEXTS)
+MM3_CONTEXTS = DS4_CONTEXTS                                       # ... and MiniMax (saguaro.py's MM3_CONTEXTS)
+QWEN_CONTEXTS = [32768, 65536, 131072, 262144]                    # ... and CYBER-FROST (saguaro.py's QWEN_CONTEXTS)
 CONTEXT_MIN = 4096          # the dashboard's Context size: the smallest it offers ...
 CONTEXT_FALLBACK_MAX = 262144   # ... and the largest when the model file does not say what it was trained for
 # the largest context the dashboard offers without an "untested" warning, by engine: maya-ds4 its model's own 1M; the
@@ -104,7 +104,7 @@ def _float(v, default=None):
 
 
 def family(cfg: dict) -> str:
-    """"minimax", "deepseek", "qwen" or "glm" (maya_quants.family_of, as maya.py and the server read it)."""
+    """"minimax", "deepseek", "qwen" or "glm" (maya_quants.family_of, as saguaro.py and the server read it)."""
     return maya_quants.family_of(cfg)
 
 
@@ -235,7 +235,7 @@ def qwen_mtp(cfg: dict) -> Path | None:
 
 def mm3_pack_has(cfg: dict, key: str) -> bool:
     """MiniMax's pack indexes `key` (mm3.txt: "dspark.num_hidden_layers" its drafter, "vision.hidden_size" its vision
-    tower - maya.py's checks)."""
+    tower - saguaro.py's checks)."""
     pack = pack_of(cfg)
     try:
         return any(line.startswith(key + " ")
@@ -555,7 +555,7 @@ def command(cfg: dict) -> dict:
 
 # ------------------------------------------------------------------ the list
 def config_paths(root: Path) -> list:
-    """The installed models' configs, the most recently used first (maya.py's configs())."""
+    """The installed models' configs, the most recently used first (saguaro.py's configs())."""
     try:
         found = [p for p in Path(root).glob("maya-*.json") if not p.name.endswith(".shared-settings.json")]
         return sorted(found, key=lambda p: p.stat().st_mtime, reverse=True)
@@ -603,7 +603,7 @@ def quant_label(cfg: dict, path: Path) -> str:
 
 
 def missing(cfg: dict) -> str | None:
-    """What keeps a config from starting (maya.py stops at it - a switch to it would leave no model running): None when
+    """What keeps a config from starting (saguaro.py stops at it - a switch to it would leave no model running): None when
     its engine and pack are named and the pack is on this PC."""
     pack = pack_of(cfg)
     if not cfg.get("exe") or pack is None:
