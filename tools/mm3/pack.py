@@ -10,7 +10,7 @@ writes <model>/maya-mm3/:
   tensors.txt   every tensor of the model's safetensors and of dspark/'s: `file <i> <path>` lines (paths relative to
                 the model directory), then `t <name> <dtype> <file> <offset> <bytes> <dims...>` - the draft's names
                 prefixed `dspark.`
-  tokenizer/    the server's tokenizer (tools/strata_tokenizer.py's layout, pre "minimax") and Maya's chat template
+  tokenizer/    the server's tokenizer (tools/strata_tokenizer.py's layout, pre "minimax") and Saguaro's chat template
                 (this directory's chat_template.jinja: MiniMax's own plus thinking turned off - the same for every
                 quant, whichever template its files carry)
 
@@ -29,7 +29,7 @@ HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from st import SafeTensors  # noqa: E402
 
-TEMPLATE = HERE / "chat_template.jinja"     # (Maya's: MiniMax's own template plus thinking off)
+TEMPLATE = HERE / "chat_template.jinja"     # (Saguaro's: MiniMax's own template plus thinking off)
 MUL1 = 0x83DCD12D                          # the mul1 codebook multiplier, the one the engine decodes
 P = "language_model.model."
 

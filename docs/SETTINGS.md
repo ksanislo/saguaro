@@ -440,10 +440,10 @@ model (GLM, DeepSeek, MiniMax) - beside the GLM engine's own check for short pat
   inside a tool call's arguments - is text too; a marker spelled out of ordinary pieces in the answer's prose still
   ends it, and so does the engine's EOS token there (a call cut off by it is incomplete, not failed).
 
-The server window gets a line for each loop broken (`[maya] loop guard: a 19-token block 5 times in the answer at
+The server window gets a line for each loop broken (`[saguaro] loop guard: a 19-token block 5 times in the answer at
 token 1,763: repeats dropped, a short repetition penalty`); the dashboard's Monitor marks that request (Loop guard,
 on hover what it did) and counts the loops since the start, as do `/metrics` (`loop_guard`) and
-`/metrics/prometheus` (`maya:loop_guard_*_total`; the notes across turns: `[maya] loop guard: `bash` 3 times with the
+`/metrics/prometheus` (`maya:loop_guard_*_total`; the notes across turns: `[saguaro] loop guard: `bash` 3 times with the
 same arguments and result: a note after it`, `maya:loop_guard_tool_repeats_total`).
 
 Off for the server: `MAYA_LOOP_GUARD=0`, or `"loop_guard": false` in the run config. A request can choose for itself
@@ -1655,7 +1655,7 @@ The client sends each assistant turn's `reasoning_content` back with the turn, a
 prompt differs from the state and nothing is reused - no error and no log line.
 
 The engine's log says what happened (`ds4 slots: saved/took back/wrote ...`; the server shows those lines as
-`[maya] sessions: ...`). A slot's identity is the engine's version, the model's geometry and files and whether the
+`[saguaro] sessions: ...`). A slot's identity is the engine's version, the model's geometry and files and whether the
 DSpark blocks are loaded, so a slot from another model, another pack or an engine that changed the state's layout is
 refused rather than read.
 

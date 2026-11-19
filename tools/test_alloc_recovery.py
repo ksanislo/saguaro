@@ -131,7 +131,7 @@ class AllocRecovery(unittest.TestCase):
         ids = tok.encode(text)
         cls.ids = ids[:PROMPT_TOKENS]
         cls.cfg_path = cfg_path
-        # the engine needs the whole GPU: with another Maya (or a test) running it cannot load, and the test would
+        # the engine needs the whole GPU: with another Saguaro (or a test) running it cannot load, and the test would
         # fail for a reason that is not its own - so it skips
         plain = Engine(cls.cfg_path, {})
         try:

@@ -435,7 +435,7 @@
   }
  },
  "maya": {
-  "_": "Maya's quants of DeepSeek-V4.1-Flash-1017 (tools/maya_quant: per-expert statistics from the model itself, error-feedback rounding of the experts), each one GGUF split with everything in it - the Engram tables too, in Q6_K (made from DeepSeek's released weights). The files are listed here once they are uploaded, with the commit they were uploaded at. \"memory_gb\": the VRAM + RAM that hold a quant - its files but the Engram tables, which stay on the SSD, and its drafter - by which the setup recommends the context.",
+  "_": "Saguaro's quants of DeepSeek-V4.1-Flash-1017 (tools/maya_quant: per-expert statistics from the model itself, error-feedback rounding of the experts), each one GGUF split with everything in it - the Engram tables too, in Q6_K (made from DeepSeek's released weights). The files are listed here once they are uploaded, with the commit they were uploaded at. \"memory_gb\": the VRAM + RAM that hold a quant - its files but the Engram tables, which stay on the SSD, and its drafter - by which the setup recommends the context.",
   "repo": "peasantsmith/DeepSeek-V4.1-Flash-1017-Maya-GGUF",
   "revision": "c33d87b8c7a3b7d55e71324dc82395587a870b0b",
   "quants": {
@@ -588,7 +588,7 @@
    }
   },
   "drafter": {
-   "_": "The DSpark drafter Maya ships: DeepSeek's FP4 experts as released, its FP8 dense weights in Q8_0 (the engine's formats: used as it is, beside the quants' folders as dspark/); the shards + drafter_pack.py path (\"drafter\" below) is the fallback while this is not pinned.",
+   "_": "The DSpark drafter Saguaro ships: DeepSeek's FP4 experts as released, its FP8 dense weights in Q8_0 (the engine's formats: used as it is, beside the quants' folders as dspark/); the shards + drafter_pack.py path (\"drafter\" below) is the fallback while this is not pinned.",
    "files": {
     "dspark/dspark.bin": [
      7967616768,

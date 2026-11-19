@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """tools/ds4/slot_api_image_test.py - pictures in the kept conversations, through a RUNNING server's API (the real
-path: server -> resize (serve/ds4_vision.py) -> GENI -> engine slot).  Meant for the running Maya (port 8090); it reads
+path: server -> resize (serve/ds4_vision.py) -> GENI -> engine slot).  Meant for the running Saguaro (port 8090); it reads
 maya-ds4.log for the engine's own lines.
 
     python tools/ds4/slot_api_image_test.py             (URL/LOG at the top of this file)

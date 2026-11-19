@@ -19,8 +19,8 @@ packer leaves those where they are and writes:
                            half-integer K (1.5 / 2.5 / 3.5: 24 / 40 / 56 words a tile, mul1 only), which an engine
                            from before half-integer K refuses instead of misreading
   pack/native_experts.txt  the header naming maya-exl3.gguf (no rows: the experts are in exl3.txt)
-  pack/tokenizer/          from the model's tokenizer.json, typed as llama.cpp's converter types it, with Maya's
-                           GLM-5.3 chat template (tools/glm_chat_template.jinja: the one Maya's own GGUFs carry - images,
+  pack/tokenizer/          from the model's tokenizer.json, typed as llama.cpp's converter types it, with Saguaro's
+                           GLM-5.3 chat template (tools/glm_chat_template.jinja: the one Saguaro's own GGUFs carry - images,
                            video and audio, clear_thinking, the tool-result ordering fixes); --model-template keeps the
                            model directory's chat_template.jinja instead
 
@@ -722,7 +722,7 @@ def main() -> int:
     ap.add_argument("--check-only", action="store_true", help="--check without writing the pack")
     ap.add_argument("--no-mtp", action="store_true", help="leave the NextN (MTP) draft block out")
     ap.add_argument("--model-template", action="store_true",
-                    help="the model directory's chat_template.jinja instead of Maya's GLM template")
+                    help="the model directory's chat_template.jinja instead of Saguaro's GLM template")
     a = ap.parse_args()
     d = pathlib.Path(a.model).expanduser().absolute()
     out = pathlib.Path(a.out).expanduser().absolute() if a.out else d / "pack"

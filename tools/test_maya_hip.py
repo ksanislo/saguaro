@@ -1,4 +1,4 @@
-"""Maya's HIP setup regressions; no GPU, network or model downloads required."""
+"""Saguaro's HIP setup regressions; no GPU, network or model downloads required."""
 import json
 import os
 from pathlib import Path

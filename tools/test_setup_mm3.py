@@ -311,7 +311,7 @@ class Config(unittest.TestCase):
         self.assertEqual(CDS.profile_copy(c, self.root)["args"], c["args"])  # (it only reads its --profile)
 
     def test_template_in_the_pack_tools(self):
-        """A change to Maya's MiniMax template rebuilds the pack (its tokenizer folder carries the template)."""
+        """A change to Saguaro's MiniMax template rebuilds the pack (its tokenizer folder carries the template)."""
         self.assertIn("tools/mm3/chat_template.jinja", maya.MM3_PACK_TOOLS)
         self.assertTrue((Path(maya.__file__).parent / "tools" / "mm3" / "chat_template.jinja").exists())
 
@@ -342,7 +342,7 @@ class Config(unittest.TestCase):
 
 
 class Gguf(unittest.TestCase):
-    """Maya's GGUF quants of MiniMax: the manifest (unpublished: no revision, no sha256), the choice, AMD allowed for
+    """Saguaro's GGUF quants of MiniMax: the manifest (unpublished: no revision, no sha256), the choice, AMD allowed for
     them (and the EXL3 quant, experimental), the folder and the pack's tool."""
 
     def test_manifest(self):

@@ -635,7 +635,7 @@ class Gguf(unittest.TestCase):
             ud.write_bytes(b"x")
             self.assertIsNone(maya.ds4_shared_tables("maya-s", d, models, full))     # (unsloth's shard damaged)
             ud.write_bytes(b"unsloth table")
-            for n in pair:                                                              # (Maya's own pair is there)
+            for n in pair:                                                              # (Saguaro's own pair is there)
                 man["maya"]["quants"]["Maya-S"]["files"][n] = mk(d / Path(n).name, b"mine" + n.encode())
             self.assertIsNone(maya.ds4_shared_tables("maya-s", d, models, maya.ds4_gguf_model("maya-s")))
 
@@ -1225,7 +1225,7 @@ class Vision(unittest.TestCase):
 
 
 class MayaQuants(unittest.TestCase):
-    """Maya's quants of DeepSeek: offered once download_gguf.json lists their files, downloaded into
+    """Saguaro's quants of DeepSeek: offered once download_gguf.json lists their files, downloaded into
     <...-GGUF>/Maya-S, their Engram tables Maya's own in Q6_K from the same repo into <...-GGUF>/Engram-Q6_K - or
     unsloth's MXFP8 shard of them in <...-GGUF>/Engram, kept while it is whole (a setup before v1.1.17 put it there)."""
 

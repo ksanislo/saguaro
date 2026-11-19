@@ -1,4 +1,4 @@
-"""Maya's Metal (Apple Silicon) setup regressions; no GPU, Mac, network or model downloads required."""
+"""Saguaro's Metal (Apple Silicon) setup regressions; no GPU, Mac, network or model downloads required."""
 import json
 import os
 import sys

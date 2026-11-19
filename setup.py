@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The helpers Project Maya's installer (saguaro.py) uses, from Strata's setup (MIT): the PC checks (GPUs, CPU,
+"""The helpers Saguaro's installer (saguaro.py) uses, from Strata's setup (MIT): the PC checks (GPUs, CPU,
 RAM, the page file), the Python packages, llama.cpp's source at the pinned commit, resumable downloads, the
 engine's source hash, the shards check and the console messages.  Importing it runs nothing; ./setup.sh and
 START-SAGUARO.bat start saguaro.py."""
@@ -32,7 +32,7 @@ PY_PACKAGES = ["numpy", "jinja2", "regex", "pyyaml", "tqdm", "requests", "cmake"
 
 
 # ------------------------------------------------------------------------------------------------ output
-# A screen of the setup's own while it runs (Project Maya's tools/setup_tui.py): these functions hand it what they
+# A screen of the setup's own while it runs (Saguaro's tools/setup_tui.py): these functions hand it what they
 # would print, ask and run.  Each of its methods returns something false when it did not take it (the screen has
 # closed): then it is printed as without it.
 UI = None
@@ -130,7 +130,7 @@ _JOBS = []     # (Windows) the job objects of end_with_me: open while this proce
 
 
 def end_with_me(proc) -> bool:
-    """Windows: `proc` - and every process it starts (Maya's server: its engine, its vision encoder) - ends when this
+    """Windows: `proc` - and every process it starts (Saguaro's server: its engine, its vision encoder) - ends when this
     process ends, however it ends: Task Manager or taskkill /F, the console window closed, a crash.  A job object
     that kills its processes when its last handle - this process's, never closed here - closes.  Elsewhere nothing
     to do (POSIX: the server's --parent-pipe).  False when it could not be set up."""
@@ -813,7 +813,7 @@ def calibrate_config(cfg_path: Path) -> bool:
     import calibrate as CAL
     cfg = json.loads(cfg_path.read_text(encoding="utf-8-sig"))
     say()
-    say("  Tuning Maya for this PC: the output speed is measured with a few engine settings (the PCIe share, the")
+    say("  Tuning Saguaro for this PC: the output speed is measured with a few engine settings (the PCIe share, the")
     say("  draft depth, the CPU threads). It takes about 5-10 minutes; the PC is busy meanwhile.")
     try:
         res = CAL.run(cfg, say=say)

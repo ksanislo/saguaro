@@ -42,7 +42,7 @@ def is_gguf(path: Path) -> bool:
 
 def files_under(folder: Path) -> list:
     """Every file under folder (links followed), each real file once: (the path it was found by, its real path).  A
-    link (a Hugging Face cache's snapshot -> blob) is found by its link's name; Maya's own bookkeeping is skipped."""
+    link (a Hugging Face cache's snapshot -> blob) is found by its link's name; Saguaro's own bookkeeping is skipped."""
     seen, out = {}, []
     for root, dirs, names in os.walk(folder, followlinks=True):
         dirs.sort()
