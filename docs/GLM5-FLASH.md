@@ -1,10 +1,10 @@
-# Running GLM-5.3-Flash - the study behind Maya's engine
+# Running GLM-5.3-Flash - the study behind Saguaro's engine
 
 What it would take for [zai-org/GLM-5.3-Flash](https://huggingface.co/zai-org/GLM-5.3-Flash) to run on this
 engine, component by component, with every number the decision needs. Written 2026-09-29 against engine
 0.1.27 (`main`); all `file:line` references are to that tree.
 
-The engine Maya started from is not a general inference engine: it is a native implementation of one architecture -
+The engine Saguaro started from is not a general inference engine: it is a native implementation of one architecture -
 Qwen3.8-Flash-Next ("qwen4exp") - with its memory tiers (VRAM expert cache / pinned RAM / mapped SSD) and
 its speculation stack built around that one shape. GLM-5.3-Flash is the same *kind* of model (a 3:1
 linear-attention/sparse-attention hybrid MoE with hyper-connections and an MTP layer), which is why a port
@@ -37,7 +37,7 @@ GGUFs already exist: [unsloth/GLM-5.3-Flash-GGUF](https://huggingface.co/unsloth
 (dynamic quants; ~120 GB at their 3-bit, ~180 GB at 4-bit). llama.cpp has the building blocks this
 architecture needs (KDA chunked + recurrent kernels, NoPE-MLA, DSA lightning indexer from the DeepSeek
 V3.2 work, nextn/MTP), which matters twice: it proves the kernels are portable, and `third_party/ggml`
-is the pinned dependency Maya builds its native path and `maya-vision` against.
+is the pinned dependency Saguaro builds its native path and `maya-vision` against.
 
 ## 2. What the engine already is
 

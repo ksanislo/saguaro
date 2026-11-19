@@ -1,4 +1,4 @@
-# Project Maya quants of GLM-5.3-Flash - the plan
+# Saguaro quants of GLM-5.3-Flash - the plan
 
 Two quants of our own, made from the official weights with error-feedback rounding and scale refinement sized to what we can run:
 
@@ -18,7 +18,7 @@ Two quants of our own, made from the official weights with error-feedback roundi
   4096 x 2048, gate/up/down) plus one shared expert. Attention is 34 KDA (linear) layers and 11 DSA/MLA layers.
   There are mHC 4-stream residuals and one NextN (MTP) layer. Routed experts are 304.4B of the 321B parameters; one
   expert is 25.2M parameters.
-- **The engine's development file** (before Maya's own quants): a 1.6-bit GGUF with experts of ~84 GB.
+- **The engine's development file** (before Saguaro's own quants): a 1.6-bit GGUF with experts of ~84 GB.
 
 ## Machines
 
@@ -105,7 +105,7 @@ Every tensor is quantized at each candidate GGUF type with **error-feedback roun
   error times its layer's sensitivity, with sensitivity from small perturbation runs). Then score the top
   2-3 allocations in our engine against the FP8 reference and keep the best. RCO proper uses gradients of the true
   KL; this approximates it with measured errors plus measured KL checks.
-- **Maya-specific: per-expert bits.** Our engine loads its own pack, so experts don't all need the same type.
+- **Saguaro-specific: per-expert bits.** Our engine loads its own pack, so experts don't all need the same type.
   - Hot experts (high routing frequency and saliency) get more bits; the long tail gets fewer.
   - The GGUF version keeps one type per tensor so it still loads in llama.cpp.
   - Usage on real text is very skewed (that is why Mercury's VRAM tier hits 97%), so this should buy more quality
@@ -130,7 +130,7 @@ checks and the loop test. My expectation is that light or no pruning wins and pe
 ### 6. Assembly
 
 - **GGUF**: standard types, one type per tensor, loads in llama.cpp. Metadata comes from today's GGUF.
-- **Maya pack**: what our engine loads, including per-expert types when used.
+- **Saguaro pack**: what our engine loads, including per-expert types when used.
 - **Vision**: the mmproj stays BF16 (1.2 GB) for the day the engine gets vision.
 
 ### 7. Evaluation (each candidate, the same text)

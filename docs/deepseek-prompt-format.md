@@ -11,7 +11,7 @@ message-local tool declarations, tool call/result IDs and text-block boundaries.
 Parallel results render in call order. Integer reasoning budgets 1–100 are accepted;
 `low`/`high`/`max` mean 50/75/100, and the existing `medium`/`xhigh` aliases mean
 75/100. These are prompt conditioning, not completion token limits. Anthropic
-`thinking.budget_tokens` still maps to Maya's existing low/high/max levels.
+`thinking.budget_tokens` still maps to Saguaro's existing low/high/max levels.
 
 DSML parameter `string` flags determine argument types. Leading answer newlines are
 preserved. OpenAI tool responses use the reference's bare `function.name` and optional

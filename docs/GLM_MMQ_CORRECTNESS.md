@@ -18,7 +18,7 @@ tile. Padded shared-memory entries now receive zero instead of reading an unused
 ID. The output stores already exclude these padded columns.
 
 The changes live in `third_party/ggml/mmq-fused-swiglu.patch`, which CMake applies
-to its build-tree copy of the pinned GGML sources. Rebuild Maya after updating;
+to its build-tree copy of the pinned GGML sources. Rebuild Saguaro after updating;
 editing the installed Python server alone cannot correct the native kernels.
 
 ## Measurements

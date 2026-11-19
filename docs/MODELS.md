@@ -1,7 +1,8 @@
 # The models
 
-Maya runs three models, each on an engine built for it. This page has each one's files, what they need and what is
-special about it. Back to the [README](../README.md).
+Saguaro runs three quant families, each on an engine built for it; its fourth model family is Qwen-3.8-Flash-Next
+(CYBER-FROST) on the `maya-qfn` engine (`engines/qfn`, from Strata) - [its settings](SETTINGS.md#qwen-38-flash-next-cyber-frost).
+This page has each one's files, what they need and what is special about it. Back to the [README](../README.md).
 
 - [How the quants are named](#how-the-quants-are-named)
 - [GLM-5.3-Flash](#glm-53-flash)
@@ -11,7 +12,7 @@ special about it. Back to the [README](../README.md).
 
 ## How the quants are named
 
-Every Maya quant is named after its model first, then its tier - XS, S, M or L, by how many bits its experts keep - so
+Every Saguaro quant is named after its model first, then its tier - XS, S, M or L, by how many bits its experts keep - so
 "GLM-5.3 · Maya-S" and "MiniMax M3.1 · Maya-S" never get mixed up. The setup asks which one to download; to pick one
 yourself, give its setup id: `./setup.sh --model glm-maya-s24`. The names used before (`--model Maya-S24`,
 `--ds4-quant maya-xs`, ...) keep working.
@@ -19,9 +20,9 @@ yourself, give its setup id: `./setup.sh --model glm-maya-s24`. The names used b
 ## GLM-5.3-Flash
 
 **[GLM-5.3-Flash](https://huggingface.co/zai-org/GLM-5.3-Flash)** (zai-org, MIT license; 321 B parameters, about 18 B
-active per token, a context of up to 1 M tokens), on Maya's first engine (`maya`).
+active per token, a context of up to 1 M tokens), on Saguaro's first engine (`maya`).
 
-Project Maya's own quants of GLM-5.3-Flash, made from Z.ai's FP8 release with statistics from the FP8 model. Each keeps
+Saguaro's own quants of GLM-5.3-Flash, made from Z.ai's FP8 release with statistics from the FP8 model. Each keeps
 the model's MTP block, which drafts tokens ahead.
 
 | Model | Setup id | Size | Made for | Against the FP8 model |
@@ -41,7 +42,7 @@ On AMD, GLM-5.3-Flash reads pictures too (experimental): setup builds its image 
 
 ### GLM-5.3-Flash's options
 
-- **Several requests at once:** `./maya.sh --parallel 4` (Windows: `START-MAYA.bat --parallel 4`; up to 8) keeps it in
+- **Several requests at once:** `./saguaro.sh --parallel 4` (Windows: `START-SAGUARO.bat --parallel 4`; up to 8) keeps it in
   the config, and the dashboard shows how many answers are being written. Each extra request keeps its own context in
   VRAM, so a few fewer experts fit there ([how](SETTINGS.md#several-requests-at-once)). They add up: on one GPU a
   token of each goes through the model together, so the dense weights are read once for all of them. In tokens per
@@ -50,9 +51,9 @@ On AMD, GLM-5.3-Flash reads pictures too (experimental): setup builds its image 
   8065S, 160 GB for the GPU) that holds every expert in GPU memory. The more of the model VRAM holds, the more it
   gains.
 - **Long contexts:** new setups keep each attention layer's cache in RAM with a window of it in VRAM
-  (`--kv-streaming on`; `./maya.sh --setup` adds it to an existing config), so the VRAM holds more experts - at 512K
+  (`--kv-streaming on`; `./saguaro.sh --setup` adds it to an existing config), so the VRAM holds more experts - at 512K
   on an RTX 3090, prompts 4-9x faster and decode +5%; 1M context fits one 3090 ([how](SETTINGS.md)).
-- **Faster answers with a DFlash2 drafter:** `./maya.sh --setup --draft dflash2` (NVIDIA RTX 30 / A100 and newer,
+- **Faster answers with a DFlash2 drafter:** `./saguaro.sh --setup --draft dflash2` (NVIDIA RTX 30 / A100 and newer,
   and one AMD Ryzen AI Max APU) downloads a small drafter that drafts up to 7 tokens a round and gives the same answers
   - Maya-L +44% on nine GPUs and +12% on two (against the MTP block), +19% on one RTX 3090, +9% on a Radeon 8060S
   with unsloth's UD-IQ2_XXS ([how](SETTINGS.md#drafting-with-dflash2)). How much
@@ -71,19 +72,19 @@ results. See [the prompt format notes](deepseek-prompt-format.md) for API detail
 
 | Files | Size | Runs on |
 | --- | ---: | --- |
-| **[DeepSeek V4.1 · Maya-S](https://huggingface.co/peasantsmith/DeepSeek-V4.1-Flash-1017-Maya-GGUF)** (`deepseek-maya-s`), Project Maya's own quant (default): the experts in 2-3 bits, 92.6% the same next token as the original | 340 GB, with the Engram tables (Q6_K) | NVIDIA from Volta (V100) on, and AMD; Linux and Windows |
+| **[DeepSeek V4.1 · Maya-S](https://huggingface.co/peasantsmith/DeepSeek-V4.1-Flash-1017-Maya-GGUF)** (`deepseek-maya-s`), Saguaro's own quant (default): the experts in 2-3 bits, 92.6% the same next token as the original | 340 GB, with the Engram tables (Q6_K) | NVIDIA from Volta (V100) on, and AMD; Linux and Windows |
 | **[DeepSeek V4.1 · Maya-XS](https://huggingface.co/peasantsmith/DeepSeek-V4.1-Flash-1017-Maya-GGUF)** (`deepseek-maya-xs`): the experts in ~1.6 bits, with its own 2-bit drafter - the whole model in a 128 GB PC's memory (the Engram tables stay on the SSD) | 277 GB, with the Engram tables (Q6_K) | the same |
-| unsloth's [UD-IQ1_M GGUF](https://huggingface.co/unsloth/DeepSeek-V4.1-Flash-1017-GGUF) (`--ds4-quant gguf-iq1_m`): for PCs with about 150 GB of VRAM + RAM | 301 GB, with Maya's n-gram tables | the same |
-| unsloth's [UD-IQ3_S GGUF](https://huggingface.co/unsloth/DeepSeek-V4.1-Flash-1017-GGUF) (`--ds4-quant gguf-iq3_s`): close to Q8's quality, for PCs with about 270 GB of VRAM + RAM; shares its n-gram tables with Maya's quants | 424 GB, with the n-gram tables | the same |
-| unsloth's [UD-Q8_K_XL GGUF](https://huggingface.co/unsloth/DeepSeek-V4.1-Flash-1017-GGUF) (`--ds4-quant gguf-q8`; DeepSeek's own formats): the closest to the original, for PCs with about 310 GB of VRAM + RAM | 467 GB, with Maya's n-gram tables | the same |
+| unsloth's [UD-IQ1_M GGUF](https://huggingface.co/unsloth/DeepSeek-V4.1-Flash-1017-GGUF) (`--ds4-quant gguf-iq1_m`): for PCs with about 150 GB of VRAM + RAM | 301 GB, with Saguaro's n-gram tables | the same |
+| unsloth's [UD-IQ3_S GGUF](https://huggingface.co/unsloth/DeepSeek-V4.1-Flash-1017-GGUF) (`--ds4-quant gguf-iq3_s`): close to Q8's quality, for PCs with about 270 GB of VRAM + RAM; shares its n-gram tables with Saguaro's quants | 424 GB, with the n-gram tables | the same |
+| unsloth's [UD-Q8_K_XL GGUF](https://huggingface.co/unsloth/DeepSeek-V4.1-Flash-1017-GGUF) (`--ds4-quant gguf-q8`; DeepSeek's own formats): the closest to the original, for PCs with about 310 GB of VRAM + RAM | 467 GB, with Saguaro's n-gram tables | the same |
 | LibertAIDAI's [EXL3 2.9 bpw](https://huggingface.co/LibertAIDAI/DeepSeek-V4.1-Flash-1017-EXL3-2.9bpw) + DeepSeek's Engram tables | 414 GB | NVIDIA from Volta (V100) on; pictures from RTX 30 / A100 on; AMD experimental |
 | LibertAIDAI's [EXL3 3.5 bpw](https://huggingface.co/LibertAIDAI/DeepSeek-V4.1-Flash-1017-EXL3-3.5bpw) + the same Engram tables (`--ds4-quant exl3-3.5`: closer to the original, ~280 GB of VRAM + RAM) | 461 GB | the same |
-| orcarouter's [Abliterated GGUFs](https://huggingface.co/orcarouter/DeepSeek-V4.1-Flash-1017-abliterated-GGUF), the model with its refusals removed: Mix-128G (`--ds4-quant abliterated-128g`, ~114 GB of VRAM + RAM) or Mix-256G (`abliterated-256g`, ~236 GB); `abliterated` picks the one your PC holds. Their n-gram table is left out and Maya's Q6_K tables are read instead (once for both). A gated repo: accept its terms, then `HF_TOKEN` or `hf auth login` | 275 / 397 GB, with the 161 GB of n-gram tables shared with Maya's DeepSeek quants (downloaded once) | NVIDIA from Volta (V100) on (AMD not tried yet) |
+| orcarouter's [Abliterated GGUFs](https://huggingface.co/orcarouter/DeepSeek-V4.1-Flash-1017-abliterated-GGUF), the model with its refusals removed: Mix-128G (`--ds4-quant abliterated-128g`, ~114 GB of VRAM + RAM) or Mix-256G (`abliterated-256g`, ~236 GB); `abliterated` picks the one your PC holds. Their n-gram table is left out and Saguaro's Q6_K tables are read instead (once for both). A gated repo: accept its terms, then `HF_TOKEN` or `hf auth login` | 275 / 397 GB, with the 161 GB of n-gram tables shared with Saguaro's DeepSeek quants (downloaded once) | NVIDIA from Volta (V100) on (AMD not tried yet) |
 
 - **Any amount of memory:** the most-used experts go to the GPUs, the others are read in place from the model's files -
   from RAM where they fit, from the SSD otherwise. More VRAM and RAM is faster; keep the files on an NVMe SSD. The
   setup recommends a 256K context where your VRAM and RAM hold the model, 64K otherwise.
-- **The DSpark drafter:** with the GGUFs the setup also fetches the model's own drafter (8 GB from Maya's repo:
+- **The DSpark drafter:** with the GGUFs the setup also fetches the model's own drafter (8 GB from Saguaro's repo:
   DeepSeek's FP4 experts, its dense weights in 8-bit) and measures whether drafting makes your PC faster; it keeps it
   only where it does.
 - **Pictures:** with the GGUFs the setup fetches DeepSeek's vision tower (1 GB of its checkpoint). It waits in RAM
@@ -93,13 +94,13 @@ results. See [the prompt format notes](deepseek-prompt-format.md) for API detail
   files' formats allow), its thinking levels (Off, Low, High, Max) in the chat, and its own numbers in the monitor.
 - **Strix Halo / Gorgon Halo on Windows:** Windows counts the GPU's share of the memory against its page file, so the
   setup asks for a page file big enough to keep every expert on the GPU and says the size
-  ([AMD_MAYA.md](AMD_MAYA.md)).
+  ([AMD_SAGUARO.md](AMD_SAGUARO.md)).
 
 ### DeepSeek's options
 
 All of these are optional; the details and every setting are in [SETTINGS.md](SETTINGS.md).
 
-- **Several requests at once:** `./maya.sh --parallel 4` (Windows: `START-MAYA.bat --parallel 4`; up to 8), as for
+- **Several requests at once:** `./saguaro.sh --parallel 4` (Windows: `START-SAGUARO.bat --parallel 4`; up to 8), as for
   GLM-5.3-Flash: each conversation keeps its own state, and a token of each goes through the model together. In tokens
   per second for all of them together: x1.57 for two and x1.26 for four on a V100 with most of Maya-XS's experts in
   RAM, against the same questions one after another with the DSpark drafter
@@ -138,11 +139,11 @@ non-commercial use, commercial use has conditions) on an engine of its own (`may
 
 | Files | Size | Runs on |
 | --- | ---: | --- |
-| **[MiniMax M3.1 · Maya-XS](https://huggingface.co/peasantsmith/MiniMax-M3.1-Flash-Maya-GGUF)** (`minimax-maya-xs`), Project Maya's own quant: the experts in ~1.6 bits - the whole model in a 128 GB PC's memory | 93 GB | NVIDIA V100 / RTX 20 and newer, and AMD; Linux and Windows |
+| **[MiniMax M3.1 · Maya-XS](https://huggingface.co/peasantsmith/MiniMax-M3.1-Flash-Maya-GGUF)** (`minimax-maya-xs`), Saguaro's own quant: the experts in ~1.6 bits - the whole model in a 128 GB PC's memory | 93 GB | NVIDIA V100 / RTX 20 and newer, and AMD; Linux and Windows |
 | **[MiniMax M3.1 · Maya-S](https://huggingface.co/peasantsmith/MiniMax-M3.1-Flash-Maya-GGUF)** (`minimax-maya-s`): the experts in ~2.1 bits, closer to the original; 87.6% the same next token as the original (the average over its categories) | 122 GB | the same |
 | Mia-AiLab's [EXL3 3.5 bpw](https://huggingface.co/Mia-AiLab/MiniMax-M3.1-Flash-EXL3-EAQ-v1-3.5-bpw), with MiniMax's DSpark drafter and vision tower | 197 GB | NVIDIA V100 / RTX 20 and newer, Linux and Windows |
 
-With Maya's quants the setup fetches the vision tower and the DSpark drafter from the EXL3 repo (about 4 GB) for
+With Saguaro's quants the setup fetches the vision tower and the DSpark drafter from the EXL3 repo (about 4 GB) for
 pictures and drafting, on NVIDIA and AMD alike.
 
 - **Set up for your PC:** the experts that do not fit in VRAM are computed on the CPU from RAM; the context (up to the
@@ -151,7 +152,7 @@ pictures and drafting, on NVIDIA and AMD alike.
 - **MiniMax's own settings:** the model card's sampling (temperature 1.0, top-p 0.95) and its thinking levels - Auto
   (the default: it decides whether to think), the five efforts Low to Max, and Off - with MiniMax's own prompt format.
 - **Pictures:** on from the start, the model's vision tower running in the engine; `--no-vision` leaves it out.
-- **Several requests at once:** `./maya.sh --parallel 4` (up to 8) keeps it in the config. Each conversation has its
+- **Several requests at once:** `./saguaro.sh --parallel 4` (up to 8) keeps it in the config. Each conversation has its
   own KV cache in VRAM, so KV streaming and the DSpark drafter are off while it is above 1, and the setup recommends a
   context that leaves the caches room ([how](SETTINGS.md#several-requests-at-once)).
 - **Tool calls, the OpenAI- and Anthropic-compatible API and the dashboard** work as for the other models, with its
@@ -161,7 +162,7 @@ Its engine settings: [SETTINGS.md](SETTINGS.md#minimax-m31-flash).
 
 ## Community quants of GLM-5.3-Flash
 
-These also run on Maya:
+These also run on Saguaro:
 
 | Model | Size | How | Notes |
 | --- | ---: | --- | --- |

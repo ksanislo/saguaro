@@ -1,4 +1,4 @@
-# Maya on Apple Silicon (Metal)
+# Saguaro on Apple Silicon (Metal)
 
 Back to the [README](../README.md).
 
@@ -10,28 +10,28 @@ DeepSeek-V4.1-Flash, MiniMax-M3.1-Flash and Qwen-3.8-Flash-Next are NVIDIA / AMD
 
 **Status: experimental.** Mac support is a community contribution. Every change is built and unit-tested on GitHub's
 Apple Silicon runners (the `macos` workflow: the engine, its sampler and the small synthetic-model tests), but the
-Maya team has no Mac and has not run it with the real model. If you try it on a Mac, please tell us how it went in a
+Saguaro team has no Mac and has not run it with the real model. If you try it on a Mac, please tell us how it went in a
 [GitHub issue](https://github.com/mw00/project-maya/issues): the chip and its unified memory, the model, the speed
-`./maya.sh --bench` prints, and anything that went wrong (`./maya.sh --report` collects the details).
+`./saguaro.sh --bench` prints, and anything that went wrong (`./saguaro.sh --report` collects the details).
 
 ```sh
-./maya.sh --backend metal --check            # this Mac: chip, unified memory, Xcode's compiler, CMake
-./maya.sh --backend metal --setup            # build maya-metal, download the model, write the config
-./maya.sh                                    # start it: dashboard at http://127.0.0.1:8080
+./saguaro.sh --backend metal --check            # this Mac: chip, unified memory, Xcode's compiler, CMake
+./saguaro.sh --backend metal --setup            # build maya-metal, download the model, write the config
+./saguaro.sh                                    # start it: dashboard at http://127.0.0.1:8080
 ```
 
 You need macOS on Apple Silicon (M1 or newer), the Xcode Command Line Tools (`xcode-select --install`), CMake 3.24+
-(`brew install cmake`) and Python 3.10+. On a Mac `./maya.sh` picks the Metal backend by itself when nothing is set
+(`brew install cmake`) and Python 3.10+. On a Mac `./saguaro.sh` picks the Metal backend by itself when nothing is set
 up yet.
 
 ## How it runs
 
 `maya-metal` (src/metal) is its own engine. It runs the whole forward pass as ggml graphs on ggml's Metal backend,
-from the pinned llama.cpp that Maya already builds against, with the GGUF read directly: no pack. Its graph follows
+from the pinned llama.cpp that Saguaro already builds against, with the GGUF read directly: no pack. Its graph follows
 llama.cpp's `glm5-next` model op for op (the mHC streams, the KDA linear-attention layers, the k-pool sparse indexer
-and the nope MLA, the MoE), and the numbers are ggml's, the same kernels Maya's CUDA engine was validated against.
+and the nope MLA, the MoE), and the numbers are ggml's, the same kernels Saguaro's CUDA engine was validated against.
 
-What is Maya's own is the memory plan. A Mac has one pool of unified memory, usually smaller than the model:
+What is Saguaro's own is the memory plan. A Mac has one pool of unified memory, usually smaller than the model:
 
 - **Dense weights, the KV cache and the recurrent state stay resident** (about 14 GB for Maya-S, plus the context).
 - **The routed experts (95 % of the model) live in a slot pool.** If every expert fits (128 GB Macs and up for the
@@ -49,14 +49,14 @@ not resident, and so on the SSD.
 
 ## Speed
 
-Not measured by the Maya team yet (no Mac): your `./maya.sh --bench` numbers are welcome in an issue. What to expect:
+Not measured by the Saguaro team yet (no Mac): your `./saguaro.sh --bench` numbers are welcome in an issue. What to expect:
 with less unified memory than the model, part of the experts come from the SSD as a conversation needs them, and decode
 is bound by those reads rather than by the GPU - so MTP drafting is off then (`MAYA_GLM_MTP_DECODE=1` turns it on). A
 Mac that holds every expert (128 GB and more for the smaller quants) decodes from memory, where drafting pays.
 
-The pool takes no more than the Mac has free when Maya starts, less `MAYA_GLM_RAM_HEADROOM_GB` (6 GB): unified memory
+The pool takes no more than the Mac has free when Saguaro starts, less `MAYA_GLM_RAM_HEADROOM_GB` (6 GB): unified memory
 is shared with every other program, and a pool past it would be swapped (a slice that reads swapped experts stalls
-for seconds). Close other large programs before starting Maya for the most experts in memory.
+for seconds). Close other large programs before starting Saguaro for the most experts in memory.
 
 ## Drafting
 

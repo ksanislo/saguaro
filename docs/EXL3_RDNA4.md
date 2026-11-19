@@ -21,12 +21,12 @@ is required.
 Turn it on with `EXL3_WMMA_GFX12=1`; 16 rows is the default tile. The explicit
 settings below do that.
 
-First check the GPUs with `./maya.sh --backend hip --check`. Stop any running
+First check the GPUs with `./saguaro.sh --backend hip --check`. Stop any running
 server before setting up again or editing its configuration. To save the
 settings through setup, for example with DeepSeek's 3.5-bit EXL3 quant:
 
 ```sh
-./maya.sh --backend hip --setup \
+./saguaro.sh --backend hip --setup \
   --model DeepSeek-V4.1-Flash-1017 --ds4-quant exl3-3.5 \
   --env EXL3_WMMA_GFX12=1 --env EXL3_WMMA_ROWS=16 --env EXL3_WMMA=1 \
   --no-start
@@ -55,7 +55,7 @@ library reads them directly. The same names can be exported for a native
 1. Confirm setup selected a HIP build for your RDNA4 GPU. An older binary
    without this implementation cannot run the RDNA4 matrix path.
 2. Check that the saved configuration contains the entries above, then start
-   that configuration: `./maya.sh --config /path/to/maya-ds4-hip.json`.
+   that configuration: `./saguaro.sh --config /path/to/maya-ds4-hip.json`.
    Use the actual config path printed by setup. A shell variable alone does
    not override a conflicting value already saved in the configuration.
 3. To check kernel execution independently, build `exl3_test` and run the

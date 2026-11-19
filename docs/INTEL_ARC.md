@@ -1,9 +1,9 @@
 # Intel Arc: the Maya-XS DeepSeek GGUFs on llama.cpp's SYCL backend
 
-**This is outside Maya.** Maya's engine has no Intel backend ([#37](https://github.com/mw00/project-maya/issues/37)),
+**This is outside Saguaro.** Saguaro's engine has no Intel backend ([#37](https://github.com/mw00/project-maya/issues/37)),
 and we have not tested anything on this page: it is what @Jumbomuffin777 reported in
 [#401](https://github.com/mw00/project-maya/issues/401), written down so others with an Intel Arc card can find it.
-The setup, the dashboard, DSpark drafting and the other Maya features do not run on this path.
+The setup, the dashboard, DSpark drafting and the other Saguaro features do not run on this path.
 
 ## What was reported
 
@@ -11,7 +11,7 @@ The Maya-XS DeepSeek-V4.1 GGUFs run on Intel Arc through llama.cpp's SYCL backen
 [ggml-org/llama.cpp#30817](https://github.com/ggml-org/llama.cpp/pull/30817) (closed unmerged on October 27, 2026), after
 a small patch to that pull request's model loader:
 
-- Maya's GGUFs store the Engram metadata as `deepseek41.engram.*` with u32 offsets and primes, one Engram table per
+- Saguaro's GGUFs store the Engram metadata as `deepseek41.engram.*` with u32 offsets and primes, one Engram table per
   layer (`blk.1/14.engram_embd`, with local offsets) and no `hash_layer_count`.
 - That pull request's loader expects `ple.*` keys and one global `per_layer_token_embd`.
 - The patch accepts both layouts; files from the pull request's own converter load as before.
