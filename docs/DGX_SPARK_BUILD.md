@@ -29,7 +29,7 @@ This pull request carries the two code changes and their tests and docs:
 | Model | `GLM-5.3-Flash-Maya-S-v2-IQ2_XXS`, 89.83 GiB, 320.76 B parameters (18 B active), 46 layers, 288 experts (8 used), 1M-token context, run at 131072 |
 | Result | 21.1 tokens/s decoding with the DFlash2 drafter (16.8 without it), 769 tokens/s reading a 16K-token prompt, every expert resident, 99.97% cache hit |
 
-The one thing that makes a DGX Spark different from every machine Maya ran on before: **the GPU has no VRAM of its
+The one thing that makes a DGX Spark different from every machine Saguaro ran on before: **the GPU has no VRAM of its
 own**. Its memory is the system's RAM, so the expert pool, the prompt buffers, the pinned tiers and the desktop all
 draw on the same 120 GB. That single fact drives most of the port.
 
@@ -37,20 +37,20 @@ draw on the same 120 GB. That single fact drives most of the port.
 
 ## 2. Where every component comes from
 
-Maya's engine is a C++/CUDA program built from several independent code bases. This is what each one is and what it
+Saguaro's engine is a C++/CUDA program built from several independent code bases. This is what each one is and what it
 provides; the licence notices stay with every copy (`third_party/*/LICENSE`).
 
-### What Maya's own code is (`src/`, `serve/`, `tools/`, `ref/`)
+### What Saguaro's own code is (`src/`, `serve/`, `tools/`, `ref/`)
 
 | Component | What it is |
 | --- | --- |
-| `src/core/`, `src/kernels/` | **Maya's own engine**: the GLM-5.3-Flash (llama.cpp's `glm5-next` architecture) implementation, the expert pool with its VRAM / RAM / SSD tiers, the layer split, MTP and speculative decoding, the verify windows, the prompt (prefill) path |
+| `src/core/`, `src/kernels/` | **Saguaro's own engine**: the GLM-5.3-Flash (llama.cpp's `glm5-next` architecture) implementation, the expert pool with its VRAM / RAM / SSD tiers, the layer split, MTP and speculative decoding, the verify windows, the prompt (prefill) path |
 | `src/program/generate.cpp` | the engine's command line and its `--serve` protocol (`GEN` / `GENI` / `DONE` / `ERR` over stdin/stdout) |
-| `serve/server.py` | **Maya's own HTTP server**: the OpenAI- and Anthropic-compatible API, the dashboard, the streaming, the request queue |
-| `tools/` | the packer (`iq_pack.py`), the installer (`maya.py`, `setup.py`), the benchmark, the parity tests |
-| `ref/glm.py`, `ref/load.py` | **Maya's own Python reference forward pass** for the architecture, one op at a time - the specification the C++ kernels are parity-tested against (it is written from the upstream snapshot below) |
+| `serve/server.py` | **Saguaro's own HTTP server**: the OpenAI- and Anthropic-compatible API, the dashboard, the streaming, the request queue |
+| `tools/` | the packer (`iq_pack.py`), the installer (`saguaro.py`, `setup.py`), the benchmark, the parity tests |
+| `ref/glm.py`, `ref/load.py` | **Saguaro's own Python reference forward pass** for the architecture, one op at a time - the specification the C++ kernels are parity-tested against (it is written from the upstream snapshot below) |
 
-Maya's engine started from **Strata** ([Niko1221/Strata](https://github.com/Niko1221/Strata), MIT) and was rewritten
+Saguaro's engine started from **Strata** ([Niko1221/Strata](https://github.com/Niko1221/Strata), MIT) and was rewritten
 for GLM-5.3-Flash; its server and dashboard grew from Strata's too.
 
 ### What is taken from other projects
@@ -66,7 +66,7 @@ for GLM-5.3-Flash; its server and dashboard grew from Strata's too.
 
 ### The model files
 
-- **GLM-5.3-Flash** by zai-org (MIT, Hugging Face) - the released weights Maya's quant and the image encoder are made
+- **GLM-5.3-Flash** by zai-org (MIT, Hugging Face) - the released weights Saguaro's quant and the image encoder are made
   from.
 - **Maya-S-v2-IQ2_XXS** - the quant used here: 89.83 GiB across three GGUF shards, packed by `tools/iq_pack.py` into
   `pack/` (the dense weights, the native expert blobs and the tokenizer).
@@ -81,14 +81,14 @@ for GLM-5.3-Flash; its server and dashboard grew from Strata's too.
 This build stands on work by many people. The order below is "what this build needed, and whose it was".
 
 **The project itself.** Project Maya is created and led by **Peasant Smith** ([@mw00](https://github.com/mw00)), who
-owns the project, the name and the Maya models. **@needmorevram** is the co-maintainer and contributed the parts this
+owns the project, the name and the Saguaro models. **@needmorevram** is the co-maintainer and contributed the parts this
 build leans on hardest: **the expert tiers across VRAM, RAM and SSD** (the pool our port sizes differently), **the
 CPU expert kernels**, the expert profile, the layer split, KV streaming, conversation checkpoints, MTP decoding and
 DFlash2 drafting.
 
-**The AMD (HIP) port, and the unified-memory policy.** Before this build, Maya already ran on a machine whose GPU
+**The AMD (HIP) port, and the unified-memory policy.** Before this build, Saguaro already ran on a machine whose GPU
 memory is the system's RAM: **AMD's Ryzen AI Max / Strix Halo APUs on Linux** (the experimental HIP path, measured and
-documented in `docs/AMD_MAYA.md`). That port established the policy this build reuses - size the expert pool from
+documented in `docs/AMD_SAGUARO.md`). That port established the policy this build reuses - size the expert pool from
 `/proc/meminfo`'s `MemAvailable` rather than the runtime's free figure, because on a unified device the runtime
 counts the model's page cache as used. Our change lifts that policy from "AMD only" to "any device whose memory is
 the system's, including a GB10". Contributors to the AMD path are credited across the CHANGELOG (@rkarp, @izabera,
@@ -100,7 +100,7 @@ on an 8K prompt) reproduces it on the same hardware, which is what makes the por
 
 **llama.cpp's own implementation of this architecture.** Upstream llama.cpp master carries `glm5-next` - the same
 GLM-5.3-Flash architecture - so it can run the same GGUF. We built it for `sm_121a` on this machine and measured it:
-it was the baseline of this port's measurements (Maya reads a prompt up to 3.2x faster there; the decode is a tie at
+it was the baseline of this port's measurements (Saguaro reads a prompt up to 3.2x faster there; the decode is a tie at
 a short context and 3-7% faster at a long one); the DGX Spark rows are in the README's [speed tables](../README.md#how-fast-is-it). The snapshot in `ref/upstream-llama.cpp` is that
 implementation, and it is also the specification `ref/glm.py` follows.
 
@@ -128,7 +128,7 @@ paths instead.
 | `src/core/glm_fast_path.cu`, `glm_fast_state.hpp` | **the unified-memory policy for CUDA**: a device whose memory is the system's sizes its pool from `MemAvailable`, and the RAM-tier headroom is 16 GB there | the runtime's free figure counts the model's page cache as used - it read ~2 GB free with the 90 GB pack cached, so the pool came out at 5 slots a layer and the start failed. `cudaDevAttrIntegrated` is 1 on a GB10, so this is now a device property, not an AMD-only branch |
 | `CMakeLists.txt` | `STRATA_CPU_X86`; the x86-only sources, flags, tests and benchmarks gated on it; `GGML_NATIVE` off on ARM with `GGML_CPU_ARM_ARCH` | the x86 kernels are compiled with `-mavx512f...`; on aarch64 ggml-cpu needs its own arch string |
 | `setup.py` | `ARM`, `arm_cpu_arch()` (from `/proc/cpuinfo`'s features), `cpu_info()`, and `unified_memory_pci_ids()` (a GPU with no memory BAR of its own) | the installer must recognise the machine, pick ggml's `-march` (`armv8.6-a+dotprod+i8mm+fp16` on the GB10) and report "120 GB shared with the system" instead of "120 GB of VRAM" |
-| `maya.py` | the ARM branch in `check_pc`, the GPU label, and `-DGGML_CPU_ARM_ARCH` passed to the engine and vision builds | the setup's checks and messages |
+| `saguaro.py` | the ARM branch in `check_pc`, the GPU label, and `-DGGML_CPU_ARM_ARCH` passed to the engine and vision builds | the setup's checks and messages |
 | `tools/vision/CMakeLists.txt` | the same ggml arch handling | the image encoder builds for aarch64 too (verified: `build-vision/bin/maya-vision`) |
 | `src/kernels/cpu/expert_multi_test.cpp`, `src/platform/memory_test.cpp`, `tests/exl3_test.cu` | skip where the kernel or the lock limit is missing | a test that cannot run must say so instead of failing |
 | `serve/server.py` | `STRATA_HTTP_MAX_CONNECTIONS` (64) and `STRATA_HTTP_READ_TIMEOUT_S` (30 s) | a stuck client held a handler for ever; a stalled body is now a 408 and an over-limit request a 503 with `Retry-After: 1` |
@@ -143,7 +143,7 @@ hit, a 42-second restart - matching @ericoh88's reported numbers on the same har
 
 - `docs/DGX_SPARK.md` (**new**, 214 lines): the machine, the setup, running it, what the port changed, how the pool
   is sized on a unified device, the measured numbers, what is still missing, troubleshooting.
-- `maya.py`: the setup now **refuses the DeepSeek EXL3 quants on an ARM CPU** (their expert kernels are x86-only),
+- `saguaro.py`: the setup now **refuses the DeepSeek EXL3 quants on an ARM CPU** (their expert kernels are x86-only),
   offering the GGUF quant instead - so nobody downloads ~300 GB of weights that cannot run.
 - `README.md`, `docs/SETTINGS.md`: links.
 
@@ -154,8 +154,8 @@ hit, a 42-second restart - matching @ericoh88's reported numbers on the same har
   given size. It drives the engine alone, the way the dashboard starts it.
 - `BENCHMARK.md` (**new**): the numbers on this machine, and **the same GGUF on the same GPU with upstream
   llama.cpp** (`272aad8b9`, built here for `sm_121a`). Prefill: 754 vs 239 tokens/s at 32K tokens (**3.16x**).
-  Decode: a tie at a short context (17.4 vs 17.7) and 1.03-1.07x Maya's way as the context grows (upstream loses
-  ~12% of its rate between an empty context and 2K tokens, Maya ~4%).
+  Decode: a tie at a short context (17.4 vs 17.7) and 1.03-1.07x Saguaro's way as the context grows (upstream loses
+  ~12% of its rate between an empty context and 2K tokens, Saguaro ~4%).
 
 ### 4.4 Allocation-failure recovery (`e6f317c`, 16 files)
 
@@ -191,7 +191,7 @@ invariant checks in `moe_fused_rdna4.cu` are untouched.
 git log --oneline f26d8ba..HEAD      # the four commits
 git diff --stat f26d8ba..HEAD        # 43 files, +1960 / -132
 
-./maya.sh --check                    # the PC checks: the GB10, CUDA 13, the ARM CPU, 120 GB shared
+./saguaro.sh --check                    # the PC checks: the GB10, CUDA 13, the ARM CPU, 120 GB shared
 ./serve-maya.sh start                 # ~42 s to load and warm the tiers
 curl http://127.0.0.1:8080/v1/models
 

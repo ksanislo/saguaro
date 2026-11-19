@@ -1,4 +1,4 @@
-# R9700 / RX 9070: experimental Maya HIP
+# R9700 / RX 9070: experimental Saguaro HIP
 
 The Linux HIP installer accepts RX 7900 XT/XTX (`gfx1100`) and RX 9070 /
 Radeon AI PRO R9700 (`gfx1201`). It uses one GPU, text input, and system ROCm 7.
@@ -8,12 +8,12 @@ The R9700 runs the full model (Maya-S, about 20 tok/s answers and 490-560 tok/s
 prompts, every expert in VRAM or a pinned RAM tier).
 
 ```sh
-./maya.sh --backend hip --gpu 1 --check
+./saguaro.sh --backend hip --gpu 1 --check
 ```
 
 Use the KFD GPU number printed by setup; the example machine has a 7900 XT
 at GPU 0 and an R9700 at GPU 1. Setup chooses the supported card with the most
-VRAM when `--gpu` is omitted. See [AMD_MAYA.md](AMD_MAYA.md) for model setup.
+VRAM when `--gpu` is omitted. See [AMD_SAGUARO.md](AMD_SAGUARO.md) for model setup.
 
 ## One binary, three code targets
 
@@ -27,7 +27,7 @@ Its diagnostics print the actual architecture and the compiled targets.
 setup does not enable that APU here. Unified-memory accounting and hardware
 validation are separate requirements.
 
-A manual build, using Maya's existing pinned llama.cpp checkout:
+A manual build, using Saguaro's existing pinned llama.cpp checkout:
 
 ```sh
 maya_rocm_root="$(realpath "${ROCM_PATH:-/opt/rocm}")"
@@ -73,7 +73,7 @@ tests pass. Selecting the uncompiled gfx1036 iGPU is refused before a kernel
 launch. CUDA was not compile-checked because the test host has no `nvcc`.
 
 The copied gfx1201 hipBLASLt tables match versions `100202` and `100500`.
-They serve the inherited tuning loader. Maya's GLM prompt projections can now
+They serve the inherited tuning loader. Saguaro's GLM prompt projections can now
 use the separate `gfx1201-glm-hipblaslt-100202.txt` table through that loader;
 shapes without a tuned row continue through hipBLAS. Its quantized expert path
 still uses GGML MMQ.

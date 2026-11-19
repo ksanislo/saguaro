@@ -18,7 +18,7 @@ tags:
 # GLM-5.3-Flash · Maya-S (IQ2_XXS mix, 90 GB)
 
 A GGUF quantization of [zai-org/GLM-5.3-Flash](https://huggingface.co/zai-org/GLM-5.3-Flash) (321 B parameters,
-a mixture of experts with about 18 B active per token), made for **Project Maya**: the whole model in 64 GB of RAM
+a mixture of experts with about 18 B active per token), made for **Saguaro**: the whole model in 64 GB of RAM
 plus one 32 GB GPU, or two GPUs, at chat speed.
 
 It is made from Z.ai's own FP8 release (the precision the model is served at), not from a re-quantized file.
@@ -30,7 +30,7 @@ It is made from Z.ai's own FP8 release (the precision the model is served at), n
 | `GLM-5.3-Flash-Maya-S-IQ2_XXS-00001-of-00002.gguf` | TBD |
 | `GLM-5.3-Flash-Maya-S-IQ2_XXS-00002-of-00002.gguf` | TBD |
 
-The model's NextN (MTP) layer is included, so engines that draft with it (Project Maya does) get speculative decoding.
+The model's NextN (MTP) layer is included, so engines that draft with it (Saguaro does) get speculative decoding.
 
 ## What is in it
 
@@ -71,7 +71,7 @@ plan in Portuguese, a proof): TBD.
 
 ## Running it
 
-- **Project Maya** (one or two NVIDIA GPUs, the rest of the model in RAM and on the SSD): see the project's README.
+- **Saguaro** (one or two NVIDIA GPUs, the rest of the model in RAM and on the SSD): see the project's README.
 - **llama.cpp**: a build with GLM-5.3-Flash (`glm5next`) support loads it as any GGUF.
 
 ## License

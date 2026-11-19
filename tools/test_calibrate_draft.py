@@ -1,4 +1,4 @@
-"""Tests for the speed calibration (tools/calibrate_draft.py, and maya.py's speed_calibration around it) without a GPU:
+"""Tests for the speed calibration (tools/calibrate_draft.py, and saguaro.py's speed_calibration around it) without a GPU:
 stand-in engines whose decode speed depends on whether their config drafts with DFlash2.
 
     python -m unittest tools.test_calibrate_draft
@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT))
 import calibrate_draft as CD  # noqa: E402
-import maya  # noqa: E402
+import saguaro as maya  # noqa: E402
 
 
 class FakeEngine:

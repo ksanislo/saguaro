@@ -35,7 +35,7 @@ function Banners({m}) {
   }
   const eng = m.engine || {};
   if (eng.gpu_commit_capped_gb > 0) {   // (DeepSeek on a Windows APU: the page file kept experts off the GPU)
-    out.push(["warn", `${fmt(eng.gpu_commit_capped_gb)} GB of experts stay off the GPU: Windows' page file is too small to hold them there. A page file of ${fmt(eng.pagefile_hint_gb)} GB keeps them on the GPU (System > About > Advanced system settings > Performance > Advanced > Virtual memory), then restart Maya.`]);
+    out.push(["warn", `${fmt(eng.gpu_commit_capped_gb)} GB of experts stay off the GPU: Windows' page file is too small to hold them there. A page file of ${fmt(eng.pagefile_hint_gb)} GB keeps them on the GPU (System > About > Advanced system settings > Performance > Advanced > Virtual memory), then restart Saguaro.`]);
   }
   const gpus = (m.hardware || {}).gpus || [{index: null, temp: (m.hardware || {}).gpu_temp}];
   for (const g of gpus) {

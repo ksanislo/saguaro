@@ -1,4 +1,4 @@
-"""Maya's Metal (Apple Silicon) setup regressions; no GPU, Mac, network or model downloads required."""
+"""Saguaro's Metal (Apple Silicon) setup regressions; no GPU, Mac, network or model downloads required."""
 import json
 import os
 import sys
@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import maya
+import saguaro as maya
 
 
 class MetalSetupTests(unittest.TestCase):
@@ -73,7 +73,7 @@ class MetalSetupTests(unittest.TestCase):
 
     def test_first_run_on_a_mac_picks_metal(self):
         with patch.object(maya, "configs", return_value=[]), patch.dict(os.environ, MAYA_SH="1"), \
-             patch.object(sys, "argv", ["maya.py", "--check"]), \
+             patch.object(sys, "argv", ["saguaro.py", "--check"]), \
              patch.object(maya, "check_pc", return_value={"gpus": [{"index": 0}]}) as check, \
              patch.object(maya, "say"):
             self.assertEqual(maya.main(), 0)

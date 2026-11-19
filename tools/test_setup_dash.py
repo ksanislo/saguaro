@@ -1,5 +1,5 @@
-"""tools/test_setup_dash.py - Maya's dashboard on its screen (setup_dash.py): the Monitor's numbers from a GET /metrics
-like the server's, the screen's switch from the setup to the dashboard and its log, and ./maya.sh's start on the screen
+"""tools/test_setup_dash.py - Saguaro's dashboard on its screen (setup_dash.py): the Monitor's numbers from a GET /metrics
+like the server's, the screen's switch from the setup to the dashboard and its log, and ./saguaro.sh's start on the screen
 (the real engine's server, no setup steps).  No GPU, no network; needs Textual (skipped without it)."""
 from pathlib import Path
 import io
@@ -12,7 +12,7 @@ import unittest
 from unittest.mock import patch
 
 sys.path[:0] = [str(Path(__file__).resolve().parents[1]), str(Path(__file__).resolve().parent)]
-import maya  # noqa: E402
+import saguaro as maya  # noqa: E402
 import setup as S  # noqa: E402
 from setup_bridge import Bridge  # noqa: E402
 try:
@@ -55,7 +55,7 @@ def text(renderable, width: int = 120) -> str:
     return console.export_text()
 
 
-@unittest.skipIf(T is None, "Textual is not installed (./maya.sh --setup installs it)")
+@unittest.skipIf(T is None, "Textual is not installed (./saguaro.sh --setup installs it)")
 class Boxes(unittest.TestCase):
     """Each box from GET /metrics, as the web Monitor computes it (serve/web/app.js)."""
 
@@ -137,7 +137,7 @@ class Boxes(unittest.TestCase):
         self.assertIn("107.8 GB pinned for …", text(D.hardware(m, 96)))         # (a card too narrow: cut, marked)
 
 
-@unittest.skipIf(T is None, "Textual is not installed (./maya.sh --setup installs it)")
+@unittest.skipIf(T is None, "Textual is not installed (./saguaro.sh --setup installs it)")
 class Screen(unittest.IsolatedAsyncioTestCase):
     async def test_maya_running_shows_the_dashboard_and_tab_its_log(self):
         server = "import time\nprint('ready: http://127.0.0.1:9/v1')\nprint('[strata] a log line')\ntime.sleep(30)"
@@ -147,7 +147,7 @@ class Screen(unittest.IsolatedAsyncioTestCase):
             bridge = Bridge(Path(d) / "setup.log")
             S.UI = bridge
             env = dict(os.environ, PYTHONUNBUFFERED="1")
-            app = T.SetupApp(bridge, lambda: S.UI.serve([sys.executable, "-c", server], env, info), "1.0", "./maya.sh",
+            app = T.SetupApp(bridge, lambda: S.UI.serve([sys.executable, "-c", server], env, info), "1.0", "./saguaro.sh",
                              Path(d) / "setup.log")
             try:
                 async with app.run_test(size=(120, 40)) as pilot:
@@ -177,9 +177,9 @@ class Screen(unittest.IsolatedAsyncioTestCase):
                 bridge.log.close()
 
 
-@unittest.skipIf(T is None, "Textual is not installed (./maya.sh --setup installs it)")
+@unittest.skipIf(T is None, "Textual is not installed (./saguaro.sh --setup installs it)")
 class IdleScreen(unittest.IsolatedAsyncioTestCase):
-    """Issue #685: a screen with Maya ready and no request does as little as it shows - the card's clock once a second
+    """Issue #685: a screen with Saguaro ready and no request does as little as it shows - the card's clock once a second
     (not the spinner's eight), the setup's events looked for less often, and a new reading of the dashboard's boxes
     drawn without laying the whole screen out again."""
 
@@ -191,7 +191,7 @@ class IdleScreen(unittest.IsolatedAsyncioTestCase):
             bridge = Bridge(Path(d) / "setup.log")
             S.UI = bridge
             app = T.SetupApp(bridge, lambda: S.UI.serve([sys.executable, "-c", server], dict(os.environ, PYTHONUNBUFFERED="1"),
-                                                        info), "1.0", "./maya.sh", Path(d) / "setup.log")
+                                                        info), "1.0", "./saguaro.sh", Path(d) / "setup.log")
             try:
                 async with app.run_test(size=(120, 40)) as pilot:
                     t0 = time.time()
@@ -234,7 +234,7 @@ class IdleScreen(unittest.IsolatedAsyncioTestCase):
                 bridge.log.close()
 
 
-@unittest.skipIf(T is None, "Textual is not installed (./maya.sh --setup installs it)")
+@unittest.skipIf(T is None, "Textual is not installed (./saguaro.sh --setup installs it)")
 class Loading(unittest.TestCase):
     """The model's start in the loading box: the engine log's warm-up of each GPU's experts as one share (by GB; the
     GPUs not started yet count as the mean), from where the log stood when the start began."""
@@ -286,9 +286,9 @@ class Loading(unittest.TestCase):
         self.assertIn("so far", text(D.loading(blind, 60)))
 
 
-@unittest.skipIf(T is None, "Textual is not installed (./maya.sh --setup installs it)")
+@unittest.skipIf(T is None, "Textual is not installed (./saguaro.sh --setup installs it)")
 class Start(unittest.IsolatedAsyncioTestCase):
-    """./maya.sh on an installed Maya: the real engine (server.py --engine maya) on the screen - its dashboard and
+    """./saguaro.sh on an installed Saguaro: the real engine (server.py --engine maya) on the screen - its dashboard and
     log, without the setup's steps or its log; --plain (or no terminal): in the terminal as before."""
 
     async def test_a_start_runs_the_engine_on_the_screen(self):
@@ -323,10 +323,10 @@ class Start(unittest.IsolatedAsyncioTestCase):
 
         def body():
             rc = S.UI.serve([sys.executable, "-c", server], dict(os.environ, PYTHONUNBUFFERED="1"), info)
-            S.fail(f"Maya stopped: its server ended with exit code {rc}", "the reason is in its output")
+            S.fail(f"Saguaro stopped: its server ended with exit code {rc}", "the reason is in its output")
         bridge = Bridge(None)
         S.UI = bridge
-        app = T.SetupApp(bridge, body, "1.0", "./maya.sh", None, steps=False)
+        app = T.SetupApp(bridge, body, "1.0", "./saguaro.sh", None, steps=False)
         try:
             async with app.run_test(size=(120, 40)) as pilot:
                 async def until(cond):
@@ -345,7 +345,7 @@ class Start(unittest.IsolatedAsyncioTestCase):
                 await until(lambda: app.pending is not None)               # the server ended: the failure ...
                 self.assertEqual(app.view, T.LOG)                          # ... on the log's page, in sight
                 self.assertTrue(app.query_one("#page").display)
-                self.assertIn("Maya stopped", str(app.query_one("#ask").border_title))   # (not the setup)
+                self.assertIn("Saguaro stopped", str(app.query_one("#ask").border_title))   # (not the setup)
                 await pilot.press("enter")
             self.assertEqual(app.return_value[0], "fail")
         finally:
@@ -373,11 +373,11 @@ class Start(unittest.IsolatedAsyncioTestCase):
         out = io.StringIO()
         try:
             with patch.object(T, "SetupApp", return_value=app), patch("sys.stdout", out), self.assertRaises(SystemExit):
-                T.run(lambda: None, "1.0", None, "./maya.sh", steps=False)
+                T.run(lambda: None, "1.0", None, "./saguaro.sh", steps=False)
         finally:
             S.UI = None
         self.assertIn("pack: out of memory", out.getvalue())
-        self.assertNotIn("Setup stopped", out.getvalue())          # (Maya's server stopped, not the setup)
+        self.assertNotIn("Setup stopped", out.getvalue())          # (Saguaro's server stopped, not the setup)
 
     async def test_only_maya_s_tabs_and_starting_maya_before_it_runs(self):
         server = "import time\nprint('ready: http://127.0.0.1:9/v1')\ntime.sleep(30)"
@@ -385,15 +385,15 @@ class Start(unittest.IsolatedAsyncioTestCase):
                 "api": "http://127.0.0.1:9/v1", "log": None, "key": ""}
 
         def body():
-            time.sleep(0.5)                                     # (what runs before Maya: an engine update's compile)
+            time.sleep(0.5)                                     # (what runs before Saguaro: an engine update's compile)
             return S.UI.serve([sys.executable, "-c", server], dict(os.environ, PYTHONUNBUFFERED="1"), info)
         bridge = Bridge(None)
         S.UI = bridge
-        app = T.SetupApp(bridge, body, "1.0", "./maya.sh", None, steps=False)
+        app = T.SetupApp(bridge, body, "1.0", "./saguaro.sh", None, steps=False)
         try:
             async with app.run_test(size=(120, 40)) as pilot:
                 await pilot.pause(0.2)
-                self.assertIn("Starting Maya", app.query_one("#card").plain)
+                self.assertIn("Starting Saguaro", app.query_one("#card").plain)
                 t0 = time.time()
                 while app.state[T.SERVE] != "ready":
                     self.assertLess(time.time() - t0, 20, "the stand-in server did not get ready")

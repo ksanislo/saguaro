@@ -1,6 +1,6 @@
-# Experimental Maya on RX 7900 XT / XTX, R9700 / RX 9070 and Strix Halo / Gorgon Halo
+# Experimental Saguaro on RX 7900 XT / XTX, R9700 / RX 9070 and Strix Halo / Gorgon Halo
 
-This branch adds a Linux HIP build and installer path for Maya's GLM-5.3-Flash
+This branch adds a Linux HIP build and installer path for Saguaro's GLM-5.3-Flash
 engine on `gfx1100`, `gfx1201` and `gfx1151` (Strix Halo, Gorgon Halo). It uses one GPU, or two supported GPUs that split the
 layers (see [Two GPUs](#two-gpus)), and reads pictures too: setup builds the image encoder for the GPU
 (ggml's HIP backend), started only while a picture is encoded, as on NVIDIA; `--no-vision` leaves it out. The
@@ -10,15 +10,15 @@ Windows: see [Windows](#windows).
 Use a system ROCm 7 installation with its HIP compiler and hipBLAS, Python
 3.10+, CMake 3.24+, and a C++20 compiler. `ROCM_PATH` selects an installation
 outside `/opt/rocm`. Versioned LLVM slots, as Gentoo's
-`<root>/lib/llvm/22/bin/clang++`, are accepted too. Everything Maya downloads
+`<root>/lib/llvm/22/bin/clang++`, are accepted too. Everything Saguaro downloads
 goes into the project or its model-data folder; setup does not install system
 packages.
 
 ```sh
-./maya.sh --backend hip --gpu 0 --check
-./maya.sh --backend hip --gpu 0 --context 8192 --no-vision --yes \
+./saguaro.sh --backend hip --gpu 0 --check
+./saguaro.sh --backend hip --gpu 0 --context 8192 --no-vision --yes \
   --download-model --no-start --port 8099 --env MAYA_GLM_RAM_GB=60
-./maya.sh --backend hip --port 8099
+./saguaro.sh --backend hip --port 8099
 ```
 
 The first setup downloads about 96.5 GB of weights and verifies the SHA-256
@@ -37,9 +37,9 @@ installation needs its library kernels (hipBLAS) for `gfx1030`.
 Configs are named `maya-<quant>-hip.json` and
 select the AMD device through `HIP_VISIBLE_DEVICES`.
 
-`--bench` and `--report` work on HIP: `./maya.sh --backend hip --bench` uses
-`build-hip/maya` and the config's GPU order and environment; run it with Maya
-stopped. `./maya.sh --backend hip --report` includes AMD GPU details from
+`--bench` and `--report` work on HIP: `./saguaro.sh --backend hip --bench` uses
+`build-hip/maya` and the config's GPU order and environment; run it with Saguaro
+stopped. `./saguaro.sh --backend hip --report` includes AMD GPU details from
 `rocm-smi` or `amd-smi` when available (KFD topology otherwise), the ROCm path
 and version, and the engine's speed lines. Add `--config /path/to/maya-hip.json`
 to either command to select a particular installed config.
@@ -56,10 +56,10 @@ amount.
 
 HIP setup builds a GPU image encoder (above); instead, the server can use a CPU-only
 `maya-vision` helper alongside the HIP text engine. This is an explicit manual
-setup. Stop Maya before building or changing the config.
+setup. Stop Saguaro before building or changing the config.
 
 After HIP setup has fetched its pinned `third_party/llama.cpp` checkout, run
-these commands from the Maya project root. If you used `--llama-dir`, use that
+these commands from the Saguaro project root. If you used `--llama-dir`, use that
 same directory for both the patch and `LLAMA_DIR` below. Use a separate build
 directory to keep any existing CUDA image encoder intact.
 
@@ -72,7 +72,7 @@ cmake --build build-vision-cpu --target maya-vision -j 2
 ```
 
 The idempotent patch above adds GLM-5.3-Flash support to the pinned llama.cpp
-image library. It is the same patch used by Maya's CUDA vision installer.
+image library. It is the same patch used by Saguaro's CUDA vision installer.
 Download the matching vision files into your model-data directory (about
 1.14 GB). This example uses the artifact revision tested with Maya v1.1.5:
 
@@ -101,7 +101,7 @@ with your project path. If your model-data directory differs, use its paths:
 }
 ```
 
-Start with `./maya.sh --config /path/to/your-hip-config.json --port 8099`.
+Start with `./saguaro.sh --config /path/to/your-hip-config.json --port 8099`.
 Check that `/health` reports `images: true`, then send an actual image through
 `/v1/chat/completions`. Keep the manually edited config if running setup again;
 the HIP installer still writes a text-only config.
@@ -213,15 +213,15 @@ expert of Maya-L fits in HBM next to a 1M-token context; with that much room, `"
 `"args"` keeps the whole latent cache on the card too.
 
 ```sh
-./maya.sh --backend hip --gpu 0 --context 1048576 --no-vision --yes --model Maya-L --download-model
+./saguaro.sh --backend hip --gpu 0 --context 1048576 --no-vision --yes --model Maya-L --download-model
 ```
 
-`./maya.sh --bench` on one MI325X (v1.1.27, Maya-L, 1M context, `--kv-streaming off`): answers at 84.0 tokens/s,
+`./saguaro.sh --bench` on one MI325X (v1.1.27, Maya-L, 1M context, `--kv-streaming off`): answers at 84.0 tokens/s,
 prompts at 1307 tokens/s (2K tokens) and 1663 tokens/s (8K tokens). Not tried yet: the MI300X itself, more than one GPU.
 
 ## Windows
 
-`START-MAYA.bat --backend hip` sets Maya up natively on Windows 10/11 for the same GPUs, Strix Halo and Gorgon Halo
+`START-SAGUARO.bat --backend hip` sets Saguaro up natively on Windows 10/11 for the same GPUs, Strix Halo and Gorgon Halo
 included (Ryzen AI Max 300 / 400, Radeon 8050S / 8060S / 8065S, all `gfx1151`). It compiles the engine with ROCm's
 clang in Visual Studio's environment, with Ninja, as `tools\hip\build_maya_windows.bat` does (#54). The download, the
 pack and the dashboard are the same as on an NVIDIA PC.
@@ -236,13 +236,13 @@ pack and the dashboard are the same as on an NVIDIA PC.
 3. Then:
 
    ```bat
-   START-MAYA.bat --backend hip --gpu 0 --check
-   START-MAYA.bat --backend hip --gpu 0 --setup --model glm-maya-l
+   START-SAGUARO.bat --backend hip --gpu 0 --check
+   START-SAGUARO.bat --backend hip --gpu 0 --setup --model glm-maya-l
    ```
 
-The setup takes the ROCm it finds first: `ROCM_PATH`, TheRock's `rocm-sdk` (`ROCM_VENV`, Maya's `.venv` or PATH), AMD's
+The setup takes the ROCm it finds first: `ROCM_PATH`, TheRock's `rocm-sdk` (`ROCM_VENV`, Saguaro's `.venv` or PATH), AMD's
 HIP SDK (`HIP_PATH`, else the newest in `C:\Program Files\AMD\ROCm`). With none it offers AMD's ROCm SDK wheels in
-Maya's `.venv` (pip, from `repo.amd.com/rocm/whl-multi-arch`: `rocm[libraries,devel,device-<arch>]==7.14.1`, the first
+Saguaro's `.venv` (pip, from `repo.amd.com/rocm/whl-multi-arch`: `rocm[libraries,devel,device-<arch>]==7.14.1`, the first
 with Gorgon Halo); `--check` prints that command instead. GPU numbers are hipInfo's (HIP's own order); without
 hipInfo, Windows' AMD display adapters in the registry's order.
 
@@ -322,7 +322,7 @@ table keeps only the rows that were at least 2% faster.
 ## What changed
 
 - Added HIP GPU detection, compilation, rebuild stamps, and serving configs to
-  `maya.py`, with separate CUDA and HIP build directories.
+  `saguaro.py`, with separate CUDA and HIP build directories.
 - Completed the CUDA-shaped runtime/BLAS mappings needed by GLM, excluded
   NVIDIA's profiling ranges from HIP, and linked the GLM prompt path to HIP MMQ
   and hipBLAS.
@@ -333,18 +333,18 @@ table keeps only the rows that were at least 2% faster.
   memory (34 KB), within RDNA's 64 KiB workgroup limit.
 - Fixed the KDA parity fixture to initialize its recurrence state explicitly;
   its numerical tolerance is unchanged.
-- The HIP post-store system fences in both shared doorbell kernels and Maya's
+- The HIP post-store system fences in both shared doorbell kernels and Saguaro's
   fused routing signal (backported from Strata) arrived separately in v1.0.7
   (#2); the validation below includes them.
 
 Upstream Strata was inspected at `d5ea713` (0.1.40.3). Its AMD backend documents
 runtime selection, memory limits, desktop VRAM headroom, and newer packed-byte
-optimizations. Maya's GLM engine is separate from Strata's current Qwen engine,
-so Strata's model benchmarks do not establish Maya performance.
+optimizations. Saguaro's GLM engine is separate from Strata's current Qwen engine,
+so Strata's model benchmarks do not establish Saguaro performance.
 
 ## Validation
 
-Test host: RX 7900 XT 20 GiB, Ryzen 7 9800X3D, 192 GB installed DDR5, native Ubuntu Linux, system ROCm 7.2.1 / Clang 22, plus AI PRO R9700 32 GiB. Maya base v1.0.10 (`e4bd57e`).
+Test host: RX 7900 XT 20 GiB, Ryzen 7 9800X3D, 192 GB installed DDR5, native Ubuntu Linux, system ROCm 7.2.1 / Clang 22, plus AI PRO R9700 32 GiB. Saguaro base v1.0.10 (`e4bd57e`).
 
 The HIP engine and selected test targets build. All 14 selected GPU checks
 pass: device allocation, expert upload staging, packed-byte/shuffle
@@ -395,5 +395,5 @@ RAM tier; the prompt speeds above were measured there.
 
 
 ### Confirmed working 
--  Test host: RX 7900 XT 20 GiB, Ryzen 9 7900X, 96 GB installed DDR5, decokerized Ubuntu Linux, system ROCm 7.2.4, Maya base v1.1.46 (`3589d6f`). 
+-  Test host: RX 7900 XT 20 GiB, Ryzen 9 7900X, 96 GB installed DDR5, decokerized Ubuntu Linux, system ROCm 7.2.4, Saguaro base v1.1.46 (`3589d6f`). 
 - Model : Maya-S24, 1M context

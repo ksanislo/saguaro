@@ -11,7 +11,7 @@ import tempfile
 import unittest
 
 sys.path[:0] = [str(Path(__file__).resolve().parents[1]), str(Path(__file__).resolve().parent)]
-import maya  # noqa: E402
+import saguaro as maya  # noqa: E402
 import maya_names as N  # noqa: E402
 
 

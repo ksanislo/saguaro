@@ -1,4 +1,4 @@
-"""tools/maya_quants.py - Maya's quants by the names users see: the model first, then the tier by its routed experts'
+"""tools/maya_quants.py - Saguaro's quants by the names users see: the model first, then the tier by its routed experts'
 bits, the same meaning for every model - XS ~1.6-1.7, S ~2-2.5, M ~3-3.5, L ~4+ (a rebuild: -v2, -v3).
 
     on screen       "MiniMax M3.1 · Maya-XS"                        shown(family, key), config_label(cfg)
@@ -26,9 +26,9 @@ SEP = " · "
 
 # Each model's own defaults - what its config gets (the setup, the dashboard's switch to it) and what a config without
 # them runs with: its sampling as its developer publishes it (no top-k, min-p or penalties unless they name one) and the
-# thinking level a request without one gets.  Every quant of a model the same (Maya's, unsloth's, orcarouter's, EXL3).
+# thinking level a request without one gets.  Every quant of a model the same (Saguaro's, unsloth's, orcarouter's, EXL3).
 #   GLM-5.3-Flash: zai-org/GLM-5.3-Flash generation_config.json - temperature 1.0, top_p 0.95; the level its card's
-#     default, Max (the owner, 2026-10-27; it was Maya's High)
+#     default, Max (the owner, 2026-10-27; it was Saguaro's High)
 #   DeepSeek-V4.1-Flash-1017: deepseek-ai's card ("Recommended sampling parameters") - temperature 1.0, top_p 1.0;
 #     the level its encoder's default, high (a reasoning effort of 75); orcarouter's card names none (its base's)
 #   MiniMax-M3.1-Flash: MiniMaxAI's card and generation_config.json (54e4e69) - temperature 1.0, top_p 0.95; no
@@ -101,7 +101,7 @@ def check_thinking_budget(value) -> int:
         raise ValueError(f"the thinking budget is 0 (no limit) or {THINK_BUDGET_MIN} to {THINK_BUDGET_MAX} tokens")
     return value
 
-# Maya's own quants: (family, the setup's key for it, its tier, its setup id).  The key is what the setup and the
+# Saguaro's own quants: (family, the setup's key for it, its tier, its setup id).  The key is what the setup and the
 # configs' installer records use: a GLM download's MODELS key, a --ds4-quant / --mm3-quant value
 QUANTS = (
     ("glm", "Maya-S-v2-IQ2_XXS", "Maya-S", "glm-maya-s"),
@@ -168,7 +168,7 @@ def config_stem(family: str, key: str | None) -> str | None:
 
 
 def resolve(name: str, glm_downloads=()) -> tuple | None:
-    """(family, the setup's key) for a model named on the command line, or None for a name Maya does not know:
+    """(family, the setup's key) for a model named on the command line, or None for a name Saguaro does not know:
     a setup id (glm-maya-s, deepseek-maya-xs, minimax-maya-xs ...) or a quant's full name (MiniMax-M3.1-Flash-Maya-XS),
     any case; a GLM download by its name before (glm_downloads: the setup's MODELS keys, Maya-S24 ...); or a model's
     own name (DeepSeek-V4.1-Flash-1017, MiniMax-M3.1-Flash: its files then asked, or --ds4-quant / --mm3-quant) -

@@ -57,7 +57,7 @@ def ds4_cfg(d: Path, name="maya-gguf-q8.json", drafter=True, vision=False, quant
 
 
 def mm3_cfg(d: Path, name="maya-mm3.json", drafter=True, vision=True) -> Path:
-    """MiniMax's config as maya.py's write_config_mm3 writes it."""
+    """MiniMax's config as saguaro.py's write_config_mm3 writes it."""
     pack = d / "MiniMax-M3.1-Flash-EXL3-3.5bpw" / "pack"
     pack.mkdir(parents=True, exist_ok=True)
     (pack / "mm3.txt").write_text("hidden_size 3072\nmax_position_embeddings 1048576\n" +
@@ -457,7 +457,7 @@ class Page(Served):
         s, b = self.req("POST", "/api/models/switch", {"file": self.other.name})
         self.assertEqual((s, b["to"], b["restarts"]), (202, self.other.name, False))
         self.assertGreater(self.other.stat().st_mtime, old + 900)            # (the next start picks it)
-        self.assertFalse((self.d / M.SWITCH_FILE).exists())                   # (no restart: no note for maya.py)
+        self.assertFalse((self.d / M.SWITCH_FILE).exists())                   # (no restart: no note for saguaro.py)
         os.environ["MAYA_RESTART_ON_UPDATE"] = "1"
         with mock.patch.object(SV.os, "_exit") as ex, mock.patch.object(self.svc, "close_for_restart"):
             s, b = self.req("POST", "/api/models/switch", {"file": self.other.name})
@@ -493,7 +493,7 @@ class Page(Served):
         self.assertEqual(s, 403)
 
     def test_files_gone(self):
-        # a config whose model was deleted: listed as such, and no switch to it (maya.py would stop there, no model
+        # a config whose model was deleted: listed as such, and no switch to it (saguaro.py would stop there, no model
         # running)
         gone = glm_cfg(self.d, "maya-gone.json")
         cfg = json.loads(gone.read_text())

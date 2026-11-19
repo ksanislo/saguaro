@@ -4,7 +4,7 @@ Everything on this page is optional: the engine sizes itself for the PC it runs 
 [README](../README.md).
 
 The settings below are environment variables named `MAYA_*`: set them before a start, or keep them in the config
-with `./maya.sh --setup --env MAYA_NAME=value`. Their earlier `STRATA_*` spellings still work; where both are set, the
+with `./saguaro.sh --setup --env MAYA_NAME=value`. Their earlier `STRATA_*` spellings still work; where both are set, the
 `MAYA_` one counts.
 
 The switches that turn something off - `MAYA_GLM_NO_SPEC` (no drafting on a split: token by token), `MAYA_GLM_NO_MTP`
@@ -20,7 +20,7 @@ The engine sizes itself: it splits the layers across the GPUs it is given (up to
 takes layers in proportion to its free VRAM), fills each GPU's free VRAM with experts, sizes its RAM tier from the
 free RAM, and measures the CPU against the PCIe link at start to decide how many RAM experts the CPU computes itself.
 
-**Tuning for your PC** (`./maya.sh --calibrate`, also offered at the end of the setup): that start-up guess times one
+**Tuning for your PC** (`./saguaro.sh --calibrate`, also offered at the end of the setup): that start-up guess times one
 expert each way; the tuning measures the real output speed instead, in one engine run (about 10-15 minutes, most of
 it loading the model), with a few splits of the RAM-tier experts between the CPU and the PCIe link and with fewer CPU
 threads - more threads than the memory can feed only wait, and on a hybrid CPU the efficiency cores can hold the rest
@@ -50,7 +50,7 @@ These settings change what the engine chooses (put them in the config with `--en
 
 | Setting | Default | |
 | --- | --- | --- |
-| `MAYA_GLM_EXPERT_HELPER` | unset (off) | Experimental native-GGUF expert helper: the visible GPU index (`1`, not a Boolean). GPU 0 keeps the trunk and MTP; the helper owns a complementary expert cache, with heat-coordinated replacement and GPU quantization/reduction. Alone: `MAYA_GLM_SPLIT=0`, without `--layer-split`. Beside a layer split (`MAYA_GLM_SPLIT=auto` or boundaries): the helper's device is left out of the split and each part owns its own share of the helper over its own layers - two cards and a Ryzen AI Max APU as the unified-memory helper; `MAYA_GLM_DEVS` may name the split's devices (never the helper's). Unset this variable to disable. UMA helpers alias the pinned RAM tier; discrete helpers use their VRAM. See [AMD helper setup and scope](AMD_MAYA.md#experimental-expert-helper) |
+| `MAYA_GLM_EXPERT_HELPER` | unset (off) | Experimental native-GGUF expert helper: the visible GPU index (`1`, not a Boolean). GPU 0 keeps the trunk and MTP; the helper owns a complementary expert cache, with heat-coordinated replacement and GPU quantization/reduction. Alone: `MAYA_GLM_SPLIT=0`, without `--layer-split`. Beside a layer split (`MAYA_GLM_SPLIT=auto` or boundaries): the helper's device is left out of the split and each part owns its own share of the helper over its own layers - two cards and a Ryzen AI Max APU as the unified-memory helper; `MAYA_GLM_DEVS` may name the split's devices (never the helper's). Unset this variable to disable. UMA helpers alias the pinned RAM tier; discrete helpers use their VRAM. See [AMD helper setup and scope](AMD_SAGUARO.md#experimental-expert-helper) |
 | `MAYA_GLM_HELPER_CHECK` | unset (off) | A load-time self-check of the expert helper, on a sample: of every MoE layer it serves, up to N (1-8) of its experts - their RAM-tier bytes against the pack's, then their weighted sum on a fixed input by the helper and by the part's own GPU with the same kernels. A differing byte or a sum beyond 1e-5 relative fails the start; a layer split checks each part's helper once all of them are open. One `glm helper check:` line per part, counting its MoE layers, those holding helper experts and those checked (or saying NO helper / NO expert) |
 | `MAYA_GLM_HELPER_ZEROCOPY` | on for an integrated helper | An integrated (unified-memory) expert helper reads each call's input and plan from, and writes its result into, one mapped pinned block - four copies fewer a call; `0` makes the copies (a discrete helper always copies). With `MAYA_GLM_PROF` set, each helper prints a `glm helper prof` line at the end: its calls, experts a call, host time (enqueue, wait, the result's copy), each stage's GPU time and the bandwidth its kernels read the experts at |
 | `MAYA_GLM_RAM_HEADROOM_GB` | 6 | RAM left free for the system when the RAM tier is sized (Apple Silicon: unified memory left free beside maya-metal's expert pool, from what is free when it starts); it also takes one more GPU's prompt buffers, pinned after the measurement - a split of three or more GPUs sets the others' aside on top, and each later GPU measures again and leaves at least half of it free. The pinned tier can't be swapped out, so a Linux desktop whose kernel starts swapping with more free (several displays, a busy session) wants more: a 128 GB desktop with three GPUs and three displays stayed responsive at 16, and swapped at 12 (#77) |
@@ -440,10 +440,10 @@ model (GLM, DeepSeek, MiniMax) - beside the GLM engine's own check for short pat
   inside a tool call's arguments - is text too; a marker spelled out of ordinary pieces in the answer's prose still
   ends it, and so does the engine's EOS token there (a call cut off by it is incomplete, not failed).
 
-The server window gets a line for each loop broken (`[maya] loop guard: a 19-token block 5 times in the answer at
+The server window gets a line for each loop broken (`[saguaro] loop guard: a 19-token block 5 times in the answer at
 token 1,763: repeats dropped, a short repetition penalty`); the dashboard's Monitor marks that request (Loop guard,
 on hover what it did) and counts the loops since the start, as do `/metrics` (`loop_guard`) and
-`/metrics/prometheus` (`maya:loop_guard_*_total`; the notes across turns: `[maya] loop guard: `bash` 3 times with the
+`/metrics/prometheus` (`maya:loop_guard_*_total`; the notes across turns: `[saguaro] loop guard: `bash` 3 times with the
 same arguments and result: a note after it`, `maya:loop_guard_tool_repeats_total`).
 
 Off for the server: `MAYA_LOOP_GUARD=0`, or `"loop_guard": false` in the run config. A request can choose for itself
@@ -454,15 +454,15 @@ with `"loop_guard": false` (or `true`) beside its sampling fields (Chat Completi
 This is a setting of **GLM-5.3-Flash**, **DeepSeek-V4.1-Flash** ([DeepSeek's below](#deepseek-v41-flash-several-requests-at-once))
 and **MiniMax-M3.1-Flash**. A saved conversation slot reuses earlier state; it does not decode requests at the same time.
 
-**MiniMax-M3.1-Flash:** `maya-mm3 --parallel N` (the setup and `START-MAYA.bat --parallel 4` write it into the config)
+**MiniMax-M3.1-Flash:** `maya-mm3 --parallel N` (the setup and `START-SAGUARO.bat --parallel 4` write it into the config)
 gives every conversation its own KV cache, always in VRAM: KV streaming and the DSpark drafter are off while N is above
 1 (the engine says so with a NOTE; the config keeps both settings for the day N is 1 again), and `--tp` runs the layer
 split. The cache takes about 61 KB a position with INT8, so N conversations of a context need N x 61 KB x context of
 VRAM: the setup recommends the context at which they take a third of the GPUs' memory (4 conversations: 128K on three
 32 GB cards), and the engine shortens a context that does not fit beside the model, with a NOTE.
 
-`--parallel N` (1-8, default 1). `./maya.sh --parallel 4` (Windows:
-`START-MAYA.bat --parallel 4`) keeps it in the config's `"args"` (the dashboard's Models page: Answers at once). Maya
+`--parallel N` (1-8, default 1). `./saguaro.sh --parallel 4` (Windows:
+`START-SAGUARO.bat --parallel 4`) keeps it in the config's `"args"` (the dashboard's Models page: Answers at once). Saguaro
 then answers up to N requests at the same time, and the ones after them wait their turn. The dashboard shows how many
 answers are being written, and `/v1/status` reports N as its concurrency.
 - **One GPU:** a token of each request goes through the model together. Every dense weight (the attention
@@ -600,7 +600,7 @@ in RAM need few threads, so it matters most for Engram tables on an SSD.
 
 ## Drafting with DFlash2
 
-`./maya.sh --setup --draft dflash2` downloads the drafter (0.7 GB,
+`./saguaro.sh --setup --draft dflash2` downloads the drafter (0.7 GB,
 [on Hugging Face](https://huggingface.co/Anbeeld/GLM-5.3-Flash-DFlash2-GGUF); its license is CC BY-NC-ND 4.0:
 non-commercial use only) and passes it as `--dflash GGUF` in the config's `"args"`; NVIDIA GPUs and one AMD Ryzen AI
 Max APU, one request at a time (`--parallel 1`). The setup offers it on RTX 30 / A100 and newer (sm_80): on Tesla V100s
@@ -659,7 +659,7 @@ One RTX 3090 (the MTP block is not loaded on one GPU: plain decode), and the 309
 | 3090 + 5060 Ti, DFlash2 (three runs) | 23.2 | 24.2 | 25.8 | 19.4 | 19.2 | **22.1 (+12%)** |
 
 One Radeon 8060S (a Ryzen AI MAX+ 395, 108 GB of its memory for the GPU, every expert of unsloth's UD-IQ2_XXS in it;
-there the MTP block drafts on one GPU, `MAYA_GLM_MTP_DECODE`), `./maya.sh --bench` (greedy, up to 256 tokens):
+there the MTP block drafts on one GPU, `MAYA_GLM_MTP_DECODE`), `./saguaro.sh --bench` (greedy, up to 256 tokens):
 
 | | code | explanation | HTML | all |
 | --- | --- | --- | --- | --- |
@@ -677,14 +677,14 @@ hidden states' cosine 0.9947 or more).
 ### The speed calibration
 
 When the setup drafts with DFlash2 - and once, at the first start after an update, for a config that already drafts
-with it - Maya measures it on your PC against the MTP block (one GPU: against decoding without drafting - on a Ryzen
+with it - Saguaro measures it on your PC against the MTP block (one GPU: against decoding without drafting - on a Ryzen
 AI Max APU that is the MTP block's one-GPU decode, `MAYA_GLM_MTP_DECODE`) and keeps
 the faster. It loads the model twice, the same config without and with `--dflash`. Each time it reads a long document
 (about 8,000 tokens, the depth of a real conversation) and answers once to warm up - not counted - then answers fresh
 questions about it, sampled as the dashboard samples (the same questions and seeds both times), until about 1,500
 tokens are written. The sustained speed - all those tokens over all the time spent writing them - decides: DFlash2
 stays only when it is more than 5% faster. It takes 5-20 minutes and shows each step as it goes. The result is kept in
-the config (`installer.speed_calibration`); `./maya.sh --speed-calibration` measures again (new GPUs, more RAM).
+the config (`installer.speed_calibration`); `./saguaro.sh --speed-calibration` measures again (new GPUs, more RAM).
 DeepSeek-V4.1's DSpark drafter gets the same check against decoding without drafting (10-30 minutes).
 
 You can also choose yourself and skip the measuring: the setup asks first (m = measure, y = draft with the drafter,
@@ -700,7 +700,7 @@ the size class that produced them: 2-31, 32-127, 128-511, or 512 and more tokens
 calibration, so a slow tiny warm-up does not inflate a larger prompt's flow estimate. Windows remain available when
 predicted faster; reads of at least 2,048 new tokens use flow when that path is available.
 
-This learning is automatic. `./maya.sh --calibrate` separately tunes GPU grouping and CPU threads under the config's
+This learning is automatic. `./saguaro.sh --calibrate` separately tunes GPU grouping and CPU threads under the config's
 memory policy. The Models page's **Experts VRAM does not hold** choice remains unchanged: **Auto** copies them when
 they fit, **From the files** leaves them file-backed, and **In RAM** copies as many as the budget permits.
 `DS4_PATH_PICK=0` is a diagnostic override that selects flow and skips the startup path calibration. It is not needed
@@ -981,7 +981,7 @@ precision, the GPU selection or the VRAM reserve.
 
 **Locked-memory limit.** MXFP8 / native FP8 tables for 1017 occupy about 202.76 GB decimal; Q6_K depends on the pack.
 The process's soft and hard `RLIMIT_MEMLOCK` must cover the page-rounded mappings. Set the limit for the account
-or service that actually starts Maya (for systemd, the user manager's hard limit matters as well as the service's
+or service that actually starts Saguaro (for systemd, the user manager's hard limit matters as well as the service's
 `LimitMEMLOCK`). An unlimited limit does not supply RAM. A failed `mlock`, invalid range or unsupported table type
 stops initialization with the reason; the engine does not silently fall back to disk.
 
@@ -1196,10 +1196,10 @@ no consistent prompt-speed difference.
 | `--ablate-layer N` | the adapter's, or a one-direction file's | which `direction.N` of a control vector (1-4096) |
 | `--ablate-scale F` | the adapter's `abliterate.scale` (x `adapter.lora.alpha`), else 1 | s, 1e-6 to 1e6; 1 removes the component along r, above 1 over-projects |
 
-## DeepSeek: tensor parallel 2 on Maya's own quants
+## DeepSeek: tensor parallel 2 on Saguaro's own quants
 
 `--tp n` splits each expert's FFN between the group's GPUs, and a GGUF's experts split only in whole blocks of their
-type: Maya's quants use 256-value blocks, n_ff 2304 = 9 blocks, so `--tp 2` (or 4 or 8) falls back to 1 with
+type: Saguaro's quants use 256-value blocks, n_ff 2304 = 9 blocks, so `--tp 2` (or 4 or 8) falls back to 1 with
 "tensor parallel 2 -> 1". `MAYA_DS4_TP_GGUF_UNEVEN=1` lets a member take whole blocks as even as they go, 5 + 4 for
 two GPUs, with the odd block going round the members layer by layer, as EXL3's split128 does. Each member loads,
 streams and swaps its own range, the shared expert is split at the same range, and each member's exact expert bytes
@@ -1655,7 +1655,7 @@ The client sends each assistant turn's `reasoning_content` back with the turn, a
 prompt differs from the state and nothing is reused - no error and no log line.
 
 The engine's log says what happened (`ds4 slots: saved/took back/wrote ...`; the server shows those lines as
-`[maya] sessions: ...`). A slot's identity is the engine's version, the model's geometry and files and whether the
+`[saguaro] sessions: ...`). A slot's identity is the engine's version, the model's geometry and files and whether the
 DSpark blocks are loaded, so a slot from another model, another pack or an engine that changed the state's layout is
 refused rather than read.
 
@@ -1760,7 +1760,7 @@ v1.1.31.
 
 ## MiniMax-M3.1-Flash
 
-`./maya.sh --setup --model MiniMax-M3.1-Flash` writes `maya-mm3.json` (Maya's GGUF quants: their own, below) with what fits this PC: the context (below), the
+`./saguaro.sh --setup --model MiniMax-M3.1-Flash` writes `maya-mm3.json` (Saguaro's GGUF quants: their own, below) with what fits this PC: the context (below), the
 model's pictures on, the tensor-parallel groups from the GPU count, and the DSpark drafter only where this PC's speed
 calibration (or your answer at the setup) says drafting is faster. A setup again keeps every engine option listed
 here that the config already has.
@@ -1775,7 +1775,7 @@ whether to think, as MiniMax's template does by default. The levels:
 | `low`, `medium`, `high`, `xhigh`, `max` | the same, with that effort (the card's five); the model still decides whether to think |
 | `none` | thinking off: the turn opens with `</mm:think>`, the system prompt says thinking is disabled (MiniMax-M3's words) |
 
-The prompt is Maya's own copy of MiniMax's template (`tools/mm3/chat_template.jinja`, used by every MiniMax pack):
+The prompt is Saguaro's own copy of MiniMax's template (`tools/mm3/chat_template.jinja`, used by every MiniMax pack):
 byte for byte MiniMax's for every level but `none`. Change the default with `"reasoning_effort"` in the config.
 
 **The context.** The setup offers 32K to 1M (the model's own reach) and recommends the largest, up to 256K, whose KV
@@ -1795,7 +1795,7 @@ Engine options, in the config's `"args"`:
 | `--kv-rot` | `on` | the cache's rows rotated before they are rounded (outliers spread over the row); `--kv-rotate` is the same option |
 | `--vision` | `on` (the setup) | the model's vision tower in the engine (~1.9 GB on its GPU); `off` frees it for experts (`--no-vision` at the setup) |
 | `--vision-gpu` | 0 | which of the config's GPUs holds the vision tower |
-| `--dspark` | `off` until measured | `on`: the DSpark drafter proposes tokens, the model checks them (the same tokens); `./maya.sh --speed-calibration` measures which is faster here |
+| `--dspark` | `off` until measured | `on`: the DSpark drafter proposes tokens, the model checks them (the same tokens); `./saguaro.sh --speed-calibration` measures which is faster here |
 | `--dspark-conf` | 0.7 | a draft is verified only while its confidence is at least this (the dashboard's Models page: Draft confidence) |
 | `--tp` | from the GPU count | tensor parallel: the GPUs in groups of 4 or 2 (the first alone when the others make whole groups); `0`: layers split across the GPUs |
 | `--cache-gb` | 1.5 | (the dashboard's Models page: Expert cache) with `--tp`: each GPU's expert cache, out of its experts in VRAM - at least this; where the GPU memory is tight the engine makes it larger by itself (a NOTE), and when `--tp` does not fit at all it runs the layer split instead (a NOTE) |
@@ -1806,14 +1806,14 @@ Engine options, in the config's `"args"`:
 | `--reserve-gb` | 1.0 (0.3 with `--tp`) | VRAM each GPU keeps free beyond the plan (the dashboard's Models page: VRAM kept free) |
 | `--resident-cap` | as many as fit | routed experts kept in VRAM, a layer at most |
 | `--chunk` | the prefill calibration's (1024 before it) | prompt tokens a forward takes at most; given here, the calibration's is not taken (the dashboard's Models page: Prompt chunk) |
-| `--prefill-gemm` | the prefill calibration's (`blas` before it) | Maya's GGUF quants: the prompt's dense matrix products through the BLAS (cuBLAS / hipBLAS) or, on AMD, `hipblaslt` (each shape's fastest kernel timed on this GPU once, kept beside the model in `lt-picks.txt`); `auto`: the calibration's |
+| `--prefill-gemm` | the prefill calibration's (`blas` before it) | Saguaro's GGUF quants: the prompt's dense matrix products through the BLAS (cuBLAS / hipBLAS) or, on AMD, `hipblaslt` (each shape's fastest kernel timed on this GPU once, kept beside the model in `lt-picks.txt`); `auto`: the calibration's |
 | `--no-prefill-tune` | - | the engine's defaults instead of this PC's prefill calibration (`--prefill-tune FILE`: another file than the pack's `prefill-tune.txt`) |
 | `--staging` | 48 | expert staging slots a GPU |
 | `--profile` | `data/expert-profile-mm3.bin` | the routing profile: the most-routed experts are placed in VRAM |
 | `--parallel` | 1 | up to N conversations at once (1-8): a KV cache each (the context the engine fits is for every one of them), a token of each running conversation through the model together - the dense matrices read once for all of them, each conversation's attention over its own cache, so each answer is the one it gets alone (greedy, the CPU lane off). On a layer split the GPUs work as a pipeline, each on a different group of the conversations. Above 1: no DSpark drafting, no KV streaming, and `--tp` runs the layer split |
 
-**Maya's GGUF quants.** `./maya.sh --setup --model minimax-maya-xs` (or `minimax-maya-s`; before:
-`--model MiniMax-M3.1-Flash --mm3-quant gguf-xs`, which still works) sets up Project Maya's own quants instead of the
+**Saguaro's GGUF quants.** `./saguaro.sh --setup --model minimax-maya-xs` (or `minimax-maya-s`; before:
+`--model MiniMax-M3.1-Flash --mm3-quant gguf-xs`, which still works) sets up Saguaro's own quants instead of the
 EXL3 one: MiniMax M3.1 · Maya-XS (the experts in about 1.6 bits, ~93 GB: the whole model in a 128 GB PC's memory) or
 MiniMax M3.1 · Maya-S (about 2.1 bits, ~122 GB), from
 [peasantsmith/MiniMax-M3.1-Flash-Maya-GGUF](https://huggingface.co/peasantsmith/MiniMax-M3.1-Flash-Maya-GGUF)
@@ -1821,16 +1821,16 @@ MiniMax M3.1 · Maya-S (about 2.1 bits, ~122 GB), from
 gets a config of its own, `maya-minimax-maya-xs.json` / `maya-minimax-maya-s.json`. They run on NVIDIA
 from V100 on and on AMD, Linux and Windows. The files follow llama.cpp's MiniMax-M3 layout; the sparse-attention
 indexers of the first three layers sit in a small file of their own beside them (`...-maya-indexers.bin`, a GGUF; `.gguf` up to v1.1.30, renamed by the setup), which
-Maya loads so the model runs as MiniMax defines it - keep it with the other files. Pictures and the DSpark drafter
+Saguaro loads so the model runs as MiniMax defines it - keep it with the other files. Pictures and the DSpark drafter
 come from the EXL3 repo's own files (its vision tower and its draft, about 4 GB, downloaded into
 `MiniMax-M3.1-Flash-companions` beside the model, or taken from an EXL3 download already there), on NVIDIA and on
 AMD alike. The options above apply, but for `--tp` (the GGUFs run the layer split) and `--cache-gb`;
 `tools/mm3/pack_gguf.py --model <folder>` builds the pack by hand (`--text-only`: without the companions).
 
 **The prefill calibration.** How a PC reads prompts fastest depends on its GPU, so it is measured there: the setup
-(step 9), `./maya.sh --calibrate` and the first start of a MiniMax config set up before it run the engine once over a
+(step 9), `./saguaro.sh --calibrate` and the first start of a MiniMax config set up before it run the engine once over a
 ~4K-token text (`maya-mm3 --calibrate-prefill`, tools/calibrate_mm3_prefill.py) with a few settings - the chunk of
-tokens a step takes and, with Maya's GGUF quants on AMD, the matrix products' library - and keep the fastest. A larger
+tokens a step takes and, with Saguaro's GGUF quants on AMD, the matrix products' library - and keep the fastest. A larger
 chunk's buffers take VRAM from the experts: where every expert still fits it is simply taken when faster; where most
 experts stay in RAM (each chunk then copies them over PCIe, so a larger one reads prompts much faster) a second start
 with the default chunk measures the decode too, and the larger chunk is kept only when it reads prompts at least 25%
@@ -1872,7 +1872,7 @@ host thread, device and stream, and keeps the existing path during graph capture
 
 ## Qwen-3.8-Flash-Next (CYBER-FROST)
 
-`./maya.sh --setup --model cyber-frost` sets up Qwen-3.8-Flash-Next (CYBER-FROST): peasantsmith's GGUF of Blackfrost-AI's
+`./saguaro.sh --setup --model cyber-frost` sets up Qwen-3.8-Flash-Next (CYBER-FROST): peasantsmith's GGUF of Blackfrost-AI's
 CYBER-FROST-3.8 (a fine-tune of
 Qwen3.8-Flash-Next: 512 experts, 10 a token, GatedDeltaNet and sparse-attention layers, an n-gram table, an MTP block;
 the Qwen Community License 1.0, `LICENSE.qwen-community-1.0`). One 112.5 GB file, downloaded from the commit
@@ -1916,7 +1916,7 @@ INT8 (26 KB in FP16), in VRAM; the setup recommends the largest context whose ca
 
 **Drafting.** The MTP drafter proposes up to three tokens a window; the model checks them, so the answer is the same.
 The setup measures whether it is faster on this PC (it is, by far, where most experts run on the GPU and on code; less
-where most run on the CPU) and keeps it only then; `./maya.sh --speed-calibration` measures again.
+where most run on the CPU) and keeps it only then; `./saguaro.sh --speed-calibration` measures again.
 
 Engine options, in the config's `"args"`:
 

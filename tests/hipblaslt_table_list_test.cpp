@@ -28,7 +28,7 @@ int main() {
     expect("rel/x.txt:z.txt", false, {"rel/x.txt", "z.txt"});
     expect("", false, {});
 
-    // Windows: ';' (what maya.py writes), the drive prefix kept whole
+    // Windows: ';' (what saguaro.py writes), the drive prefix kept whole
     expect("C:\\Maya\\tools\\hip\\x.txt", true, {"C:\\Maya\\tools\\hip\\x.txt"});
     expect("C:\\a\\x.txt;D:\\b\\y.txt", true, {"C:\\a\\x.txt", "D:\\b\\y.txt"});
     expect("c:/a/x.txt;d:/b/y.txt;", true, {"c:/a/x.txt", "d:/b/y.txt"});

@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import maya
+import saguaro as maya
 
 
 class ParallelOptionTests(unittest.TestCase):
@@ -132,7 +132,7 @@ class ParallelOptionTests(unittest.TestCase):
             with self.subTest(action=action):
                 self.config("minimax")
                 with patch.dict(os.environ, MAYA_SH="1"), \
-                        patch.object(sys, "argv", ["maya.py", "--config", str(self.path),
+                        patch.object(sys, "argv", ["saguaro.py", "--config", str(self.path),
                                                    "--parallel", "4", action, "--no-start"]), \
                         patch.object(maya, "stop_signals"), \
                         patch.object(maya, mocked, return_value=True) as run:

@@ -84,7 +84,7 @@ not codebooks, activations or actual DRAM transaction bytes.
 ## RX 7900 XT results, 2026-10-08
 
 ROCm 7.2.1, Release, all three requested architectures compiled. GPU 0 only;
-the existing Maya server stayed running. No clocks or other processes were
+the existing Saguaro server stayed running. No clocks or other processes were
 changed. These are synthetic decode measurements, not Strix Halo results.
 
 | Kernel | Original us/call | New us/call | Original GB/s | New GB/s | Latency reduction |

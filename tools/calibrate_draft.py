@@ -1,12 +1,12 @@
 """The speed calibration: does the DFlash2 drafter make THIS PC faster than the MTP block?  (The setup when DFlash2 is
-chosen, the first start after an update for a config that drafts with it, ./maya.sh --speed-calibration.)
+chosen, the first start after an update for a config that drafts with it, ./saguaro.sh --speed-calibration.)
 
 DFlash2 drafts up to 7 tokens a round and the model checks them in one pass.  Where the model's experts sit in VRAM
 that pass is cheap and DFlash2 wins (#106: +44% on nine GPUs, +12% on two, +19% on one RTX 3090); where most of them
 come from RAM, the CPU lane computes the experts of every drafted token and the pass costs more than the drafts save
 (#127: an RTX 3090 + 3060 with Maya-M decoded at half the MTP block's speed; Tesla V100s were slower too).  Which kind
 of PC this is depends on its GPUs' memory, the model, the context, the CPU and the RAM - so it is measured here, the
-way Maya is used, and only the sustained speed counts:
+way Saguaro is used, and only the sustained speed counts:
 
   - the config twice, with and without --dflash: one engine start each, nothing else different (one GPU has no MTP
     block - there the other side decodes without drafting);
@@ -22,7 +22,7 @@ The engine works on a copy of this PC's expert usage file (calibrate_glm.usage_c
 or routing trace (calibrate_glm.without_writes) and keeps no conversations aside (STRATA_GLM_SLOTS=0): the
 calibration's answers neither lead the next start's warm-up nor take the place of this PC's kept conversations.
 
-    python tools/calibrate_draft.py maya-<model>.json     # measure and print; ./maya.sh --speed-calibration applies it
+    python tools/calibrate_draft.py maya-<model>.json     # measure and print; ./saguaro.sh --speed-calibration applies it
 """
 from __future__ import annotations
 
@@ -76,7 +76,7 @@ def with_dflash(cfg: dict, drafter) -> dict:
 
 def requests(cfg: dict) -> tuple[list[int], list[list[int]], int]:
     """(the warm-up's ids, one list of ids per question, the document's tokens): chats as the server renders them -
-    the model's template at the config's thinking level - each a document made of Maya's own docs, then a question
+    the model's template at the config's thinking level - each a document made of Saguaro's own docs, then a question
     about it.  Every request opens with the same document, so the engine reads it once and keeps it."""
     import strata_tokenizer as ST
     from serve.frontend import ChatTemplate, effort_kwargs

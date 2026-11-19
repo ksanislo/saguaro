@@ -1,4 +1,4 @@
-"""The dashboard on Maya's screen once it runs (setup_tui.py): the web Monitor's numbers (serve/web/app.js, render) from
+"""The dashboard on Saguaro's screen once it runs (setup_tui.py): the web Monitor's numbers (serve/web/app.js, render) from
 the server's GET /metrics, read once a second - the throughput, where the experts live, the GPUs, the hardware and the
 recent requests - in binsider's boxes and the dashboard's colours (setup_look.py).  While the model loads, a box of its
 own instead: how far the start is (the engine log's warm-up of each GPU's experts), which GPU, how long."""

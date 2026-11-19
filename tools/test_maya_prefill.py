@@ -1,4 +1,4 @@
-"""Maya's prompt-chunk setting in the configs it writes (Strata's --prefill engine arg: auto, kept when edited),
+"""Saguaro's prompt-chunk setting in the configs it writes (Strata's --prefill engine arg: auto, kept when edited),
 Strata's --prefill tips, and KV streaming (--kv-streaming on in every config); no GPU, network or
 model downloads required.
 
@@ -16,7 +16,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
-import maya
+import saguaro as maya
 from gguf_writer import GGUFWriter
 
 

@@ -1,4 +1,4 @@
-"""tools/maya_names.py - Maya's settings by the names users see, MAYA_*, and the older STRATA_* names the code still
+"""tools/maya_names.py - Saguaro's settings by the names users see, MAYA_*, and the older STRATA_* names the code still
 reads: the environment and a config's "env" take either; on disk and on screen they are MAYA_*.
 
     alias_env(os.environ)    every MAYA_X also sets STRATA_X (MAYA_X wins), so what a program reads and what it starts

@@ -1,4 +1,4 @@
-"""Maya's HIP setup regressions; no GPU, network or model downloads required."""
+"""Saguaro's HIP setup regressions; no GPU, network or model downloads required."""
 import json
 import os
 from pathlib import Path
@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import maya
+import saguaro as maya
 
 
 class HipSetupTests(unittest.TestCase):
@@ -567,7 +567,7 @@ class HipSetupTests(unittest.TestCase):
         hip = self.installed_config()
         cuda = self.installed_config(backend="cuda")
         with patch.object(maya, "configs", return_value=[cuda, hip]), \
-                patch.object(sys, "argv", ["maya.py", "--backend", "hip", "--bench"]), \
+                patch.object(sys, "argv", ["saguaro.py", "--backend", "hip", "--bench"]), \
                 patch.object(maya, "bench", return_value=0) as bench:
             self.assertEqual(maya.main(), 0)
         bench.assert_called_once_with(hip, (maya.HERE / "VERSION").read_text().strip())
@@ -576,14 +576,14 @@ class HipSetupTests(unittest.TestCase):
         path = self.installed_config()
         for action in ("bench", "report"):
             with self.subTest(action=action), \
-                    patch.object(sys, "argv", ["maya.py", "--backend", "hip", f"--{action}", "--config", str(path)]), \
+                    patch.object(sys, "argv", ["saguaro.py", "--backend", "hip", f"--{action}", "--config", str(path)]), \
                     patch.object(maya, action, return_value=0) as run:
                 self.assertEqual(maya.main(), 0)
                 self.assertIn(path, run.call_args.args)
 
     def test_cli_backend_never_benchmarks_cuda_config_as_hip(self):
         self.installed_config(backend="cuda")
-        with patch.object(sys, "argv", ["maya.py", "--backend", "hip", "--bench"]), \
+        with patch.object(sys, "argv", ["saguaro.py", "--backend", "hip", "--bench"]), \
                 patch.object(maya, "bench", side_effect=AssertionError("must not start the CUDA engine")):
             with self.assertRaises(SystemExit):
                 maya.main()
@@ -591,7 +591,7 @@ class HipSetupTests(unittest.TestCase):
     def first_run_backend(self, nvidia, amd):
         with patch.object(maya, "configs", return_value=[]), \
                 patch.dict(os.environ, MAYA_SH="1"), \
-                patch.object(sys, "argv", ["maya.py", "--check"]), \
+                patch.object(sys, "argv", ["saguaro.py", "--check"]), \
                 patch.object(maya.S, "gpus", return_value=nvidia), \
                 patch.object(maya.S, "amd_gpus", return_value=amd), \
              patch.object(maya, "apple_silicon", return_value=False), \
@@ -668,7 +668,7 @@ ROCM_DEVICES_MISSING, FIND_VCVARS = maya.rocm_devices_missing, maya.S.find_vcvar
 
 
 class WindowsHipSetupTests(unittest.TestCase):
-    """START-MAYA.bat --backend hip on a Strix Halo / Gorgon Halo PC, with TheRock's ROCm wheels."""
+    """START-SAGUARO.bat --backend hip on a Strix Halo / Gorgon Halo PC, with TheRock's ROCm wheels."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

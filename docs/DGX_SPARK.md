@@ -1,4 +1,4 @@
-# Maya on an NVIDIA DGX Spark (GB10) and Grace
+# Saguaro on an NVIDIA DGX Spark (GB10) and Grace
 
 A single DGX Spark runs Maya-S (GLM-5.3-Flash) at its full context, with every expert in the GPU's own pool. The
 catch is that a DGX Spark has no VRAM: the GB10 draws on the system's RAM, so the expert pool, the prompt buffers and
@@ -35,8 +35,8 @@ takes the ordinary discrete path - the unified-memory rules below apply only whe
 The installer is the same one every platform uses; nothing about the setup is DGX-specific.
 
 ```sh
-./maya.sh --check                 # the PC checks only
-./maya.sh --setup --yes --gpu 0 --context 131072 --no-vision --download-model
+./saguaro.sh --check                 # the PC checks only
+./saguaro.sh --setup --yes --gpu 0 --context 131072 --no-vision --download-model
 ```
 
 `--check` prints what the engine will do with the hardware:
@@ -139,7 +139,7 @@ glm fast: CUDA0 all experts fit in the GPU pool; RAM tier is staging only
 ```
 
 - `headroom 16.00 GB` is `MAYA_GLM_RAM_HEADROOM_GB` - the RAM left free for the system (the desktop, the file
-  cache, everything else that is not Maya). Raise it on a busy machine; lower it when the pool is short.
+  cache, everything else that is not Saguaro). Raise it on a busy machine; lower it when the pool is short.
 - `1024 MB reserve` is the VRAM kept free beside the pool for the driver, the sampler and what is allocated later (a
   unified device uses 1024 MiB, a discrete card 700).
 - Nothing is checked after the pool is written: the free figure moves with the page cache, so a second check would
@@ -163,7 +163,7 @@ takes none at all (`glm fast: CUDA0 CPU lane off: the RAM tier holds no expert`)
 
 ## Measured
 
-`./maya.sh --bench` with Maya stopped (the standard measurement: three greedy answers of 256 tokens with the
+`./saguaro.sh --bench` with Saguaro stopped (the standard measurement: three greedy answers of 256 tokens with the
 thinking off, and a prompt read at 2048 and 8192 tokens). This is the baseline without drafting - the config this
 setup installs drafts with DFlash2, which takes the decode to 21.1 tokens/s
 ([Drafting and several requests](#drafting-dflash2-and-several-requests-at-once)):
@@ -198,7 +198,7 @@ MAYA_GLM_SEQS=%d`), so each lives in its own config and only one runs at a time.
 
 ### DFlash2 - the default config
 
-`./maya.sh --setup --draft dflash2 --no-vision` downloads the drafter (0.7 GB,
+`./saguaro.sh --setup --draft dflash2 --no-vision` downloads the drafter (0.7 GB,
 [on Hugging Face](https://huggingface.co/Anbeeld/GLM-5.3-Flash-DFlash2-GGUF); license CC BY-NC-ND 4.0, non-commercial
 use only) and writes `--dflash <GGUF>` into the config's `"args"`. A GB10 (sm_121) is eligible - DFlash2 is offered on
 NVIDIA from sm_80 (RTX 30 / A100) on. The setup then runs the speed calibration, which measured both sides here (the
@@ -209,7 +209,7 @@ model loaded twice, 1536 tokens a side after a warm-up, the config's own samplin
 | no drafting | 16.1 | |
 | DFlash2 | 17.4 | +8%, 92% of the drafts accepted |
 
-`./maya.sh --bench` (greedy, the engine alone, thinking off): **decode mean 21.1 tokens/s** over three 256-token
+`./saguaro.sh --bench` (greedy, the engine alone, thinking off): **decode mean 21.1 tokens/s** over three 256-token
 answers against 16.8 without it (+26%); prefill is unchanged (614 / 732 tokens/s at 2048 / 8192 against 597 / 730) -
 the drafter only changes decode. The greedy gain is the larger one because every draft is then accepted. The drafter
 costs nothing here: the pool is sized from `MemAvailable`, and every expert still fits beside it (12 096 of 12 096,
@@ -222,7 +222,7 @@ glm fast: CUDA0 all experts fit in the GPU pool; RAM tier is staging only
 ```
 
 The result is kept in the config (`installer.speed_calibration`: the two speeds, the kept choice), so a start does not
-measure again by itself; `./maya.sh --speed-calibration` measures again at any time (the GPUs to itself, 5-20
+measure again by itself; `./saguaro.sh --speed-calibration` measures again at any time (the GPUs to itself, 5-20
 minutes).
 
 ### Several requests at once - the parallel-4 config
@@ -276,7 +276,7 @@ the size): with four running, the VRAM hit was 99.8% and a token saw 0.67 disk r
   ```
   [X]  DeepSeek-V4.1-Flash-1017's EXL3 quant needs the x86 expert kernels (AVX2/AVX-512), which this ARM CPU does not
        have
-       set up its GGUF instead: ./maya.sh --setup --model DeepSeek-V4.1-Flash-1017 --ds4-quant gguf-q8
+       set up its GGUF instead: ./saguaro.sh --setup --model DeepSeek-V4.1-Flash-1017 --ds4-quant gguf-q8
   ```
 - **The image encoder** builds for aarch64 (`tools/vision`, CUDA sm_121) and its files exist, but this setup
   deliberately leaves it out (`--no-vision`): 1.1 GB of files and ~320 MB on the GPU for pictures this box does not

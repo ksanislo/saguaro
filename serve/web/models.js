@@ -90,14 +90,14 @@ async function switchTo(m) {
         "level: a model's are not another's.</li>" +
         `<li>Apps using the API get a “try again” until it is back, then the model name <code>${esc(m.model)}</code>.</li>` +
         (S.anyBusy ? "<li>The answer being written finishes first.</li>" : "") + "</ul>"
-      : `<p><b>${esc(titleOf(m))}</b> becomes the model Saguaro starts next. This server was not started by maya.sh or ` +
-        "START-MAYA.bat, so it cannot start again by itself: stop it and start Saguaro again.</p>"),
+      : `<p><b>${esc(titleOf(m))}</b> becomes the model Saguaro starts next. This server was not started by saguaro.sh or ` +
+        "START-SAGUARO.bat, so it cannot start again by itself: stop it and start Saguaro again.</p>"),
     restarts ? "Switch model" : "Start it next");
   if (!ok) return;
   try {
     const out = await api("api/models/switch", {method: "POST", body: {file: m.file}});
     if (!out.restarts) {
-      toast("success", "Saved as the next model", `${titleOf(m)} starts the next time Saguaro starts (./maya.sh or START-MAYA.bat).`, 8000);
+      toast("success", "Saved as the next model", `${titleOf(m)} starts the next time Saguaro starts (./saguaro.sh or START-SAGUARO.bat).`, 8000);
       loadModels();
       return;
     }
@@ -192,7 +192,7 @@ async function saveSettings(m) {
     closeEditor();
     if (out.restarts) { watchRestart({why: "settings", file: m.file, name: titleOf(m)}); return; }
     toast("success", "Engine settings saved", m.running
-      ? `Saved into ${m.file}. They apply from Saguaro's next start (./maya.sh or START-MAYA.bat starts it again by itself).`
+      ? `Saved into ${m.file}. They apply from Saguaro's next start (./saguaro.sh or START-SAGUARO.bat starts it again by itself).`
       : `Saved into ${m.file}. ${titleOf(m)} starts with them when you switch to it.`, 8000);
     loadModels();
   } catch (e) {
@@ -356,7 +356,7 @@ function fieldsOf(m, d) {
 }
 
 // MiniMax's (maya-mm3: it stops at a flag it does not know, so only its own are offered).  Its KV cache's pinned RAM a
-// context token, by format (maya.py's MM3_KV_BYTES)
+// context token, by format (saguaro.py's MM3_KV_BYTES)
 const MM3_KV = [{id: "bf16", label: "BF16", bytes: 122880}, {id: "int8", label: "INT8", bytes: 63360},
                 {id: "fp8", label: "FP8", bytes: 63360}, {id: "fp4", label: "FP4", bytes: 34560}];
 function mm3Fields(m, d, s, ch, images, gpus) {
@@ -419,7 +419,7 @@ function mm3Fields(m, d, s, ch, images, gpus) {
 }
 
 // CYBER-FROST's (the `maya` engine's Qwen path; pictures through maya-vision and the base model's mmproj).  Its KV cache's VRAM a context token, by format: 12 attention
-// layers' K and V plus the sparse attention's pooled keys (maya.py's QWEN_KV_BYTES for FP16)
+// layers' K and V plus the sparse attention's pooled keys (saguaro.py's QWEN_KV_BYTES for FP16)
 const QWEN_KV = [{id: "fp16", label: "FP16", bytes: 26112}, {id: "int8", label: "INT8", bytes: 14208},
                  {id: "k8v4", label: "K8 V4", bytes: 11328}, {id: "q4_0", label: "Q4_0", bytes: 8448}];
 function qwenFields(m, d, s, ch, gpus) {
@@ -540,7 +540,7 @@ function Editor({m}) {
     ${MS.check ? html`<div class="mdl-warn mdl-warn--err" role="alert">${MS.check}</div>` : null}
     ${changed.length ? html`<p class="mdl-note">${restarts
       ? `Saguaro starts again with these settings after the answer being written; the model loads again (a few minutes). The settings before stay in ${m.file}.prev.`
-      : m.running ? `Saved into ${m.file}; they apply from Saguaro's next start (this server was not started by maya.sh or START-MAYA.bat).`
+      : m.running ? `Saved into ${m.file}; they apply from Saguaro's next start (this server was not started by saguaro.sh or START-SAGUARO.bat).`
       : `Saved into ${m.file}; ${titleOf(m)} starts with them when you switch to it.`}</p>` : null}
     <div class="mdl-edit__foot">
       <span class=${`mdl-count${changed.length ? " is-on" : ""}`}>${changed.length ? `${changed.length} change${changed.length === 1 ? "" : "s"}` : "No changes"}</span>
@@ -804,7 +804,7 @@ function Card({m}) {
         : html`<button type="button" class="btn btn--secondary btn--sm" disabled=${!!r} onClick=${() => switchTo(m)}><${Icon} name="swap" sm/>Switch to this</button>`}
     </div>
     <div class="mdl-chips">${chips.map(([k, v]) => html`<span class="mdl-chip"><span>${k}</span><b>${v}</b></span>`)}</div>
-    ${m.missing && !m.running ? html`<div class="mdl-warn">It can't start: ${m.missing}. Run the setup again to repair it (<code>./maya.sh --setup</code>).</div>` : null}
+    ${m.missing && !m.running ? html`<div class="mdl-warn">It can't start: ${m.missing}. Run the setup again to repair it (<code>./saguaro.sh --setup</code>).</div>` : null}
     <div class="mdl-card__foot">
       <span class="mdl-card__file"><code>${m.file}</code><span>·</span><span>${m.running ? "running now" : m.used ? `last used ${relTime(m.used * 1000)}` : ""}</span></span>
       <span class="mdl-card__acts">
@@ -850,7 +850,7 @@ function SupervisedModels() {
 export function ModelsPage() {
   useEffect(() => { if (!S.health.supervisor) loadModels(); }, []);
   const phone = isPhone(), D = MS.data, r = MS.restart;
-  const cmds = [["Linux and macOS", "./maya.sh --setup"], ["Windows", "START-MAYA.bat --setup"]];
+  const cmds = [["Linux and macOS", "./saguaro.sh --setup"], ["Windows", "START-SAGUARO.bat --setup"]];
   return html`<main class="mon mdl">
     ${phone ? html`<header class="chat-head chat-head--float">
         <button type="button" class="glass-btn" aria-label="Chats" onClick=${() => { S.drawer = true; emit(); }}><${Icon} name="menu"/></button>
@@ -883,12 +883,12 @@ export function ModelsPage() {
           <button type="button" class="icon-btn icon-btn--sm" aria-label="Dismiss" onClick=${() => { MS.gone = null; emit(); }}><${Icon} name="close" sm/></button></div>` : null}
       ${MS.err && !D ? html`<div class="card mon__wait">${MS.err}</div>`
         : !D ? html`<div class="card mon__wait">Reading the models…</div>`
-        : !D.models.length ? html`<div class="card mon__wait">No model is set up in this folder yet. The setup writes one: <code>./maya.sh --setup</code> (Windows: <code>START-MAYA.bat --setup</code>)</div>`
+        : !D.models.length ? html`<div class="card mon__wait">No model is set up in this folder yet. The setup writes one: <code>./saguaro.sh --setup</code> (Windows: <code>START-SAGUARO.bat --setup</code>)</div>`
         : D.models.map((m) => html`<${Card} m=${m} key=${m.file}/>`)}
       ${D ? html`<${Leftovers} L=${D.leftovers}/>` : null}
       ${D && D.models.length ? html`<p class="mdl-foot"><${Icon} name="info" sm/><span>${D.restarts
         ? "Switching, or saving the running model's engine settings, starts Saguaro again through its start script, as a port change does. Each model keeps its own chat settings."
-        : "This server was not started by maya.sh or START-MAYA.bat, so it cannot start again by itself: a switch or new settings apply from Saguaro's next start."}</span></p>` : null}`}
+        : "This server was not started by saguaro.sh or START-SAGUARO.bat, so it cannot start again by itself: a switch or new settings apply from Saguaro's next start."}</span></p>` : null}`}
     </div></div>
     ${MS.del ? html`<${DeleteDialog} key=${MS.del.m.file}/>` : null}
   </main>`;

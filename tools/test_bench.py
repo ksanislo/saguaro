@@ -1,4 +1,4 @@
-"""tools/test_bench.py - --bench's choice of engine binary on HIP (maya.py). No GPU, no network, no engine process.
+"""tools/test_bench.py - --bench's choice of engine binary on HIP (saguaro.py). No GPU, no network, no engine process.
 
     python -m unittest tools.test_bench -v
 """
@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch
 
 sys.path[:0] = [str(Path(__file__).resolve().parents[1]), str(Path(__file__).resolve().parent)]
-import maya  # noqa: E402
+import saguaro as maya  # noqa: E402
 
 
 class ExeForTarget(unittest.TestCase):

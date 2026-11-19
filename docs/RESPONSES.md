@@ -1,6 +1,6 @@
 # Responses API
 
-Maya accepts `POST /v1/responses`, with JSON or SSE output, using the same model,
+Saguaro accepts `POST /v1/responses`, with JSON or SSE output, using the same model,
 authentication, CORS policy, context limit, and generation engine as Chat Completions.
 This includes GLM models served by `maya` and DeepSeek-V4.1 models served by
 `maya-ds4`, with their configured chat templates, tool syntax and vision paths.
@@ -108,7 +108,7 @@ live record and event history as described below.
 
 ### Retention and Isolation
 
-- Storage is **in memory**, per running Maya service; it does not survive a restart.
+- Storage is **in memory**, per running Saguaro service; it does not survive a restart.
 - At most **128 cached responses** and **64 MiB of serialized unique item blocks,
   response metadata and item references** are kept by default. Python object
   overhead, request-owned expanded histories and background records are separate.
@@ -242,7 +242,7 @@ error rather than claiming successful cancellation.
 ## Settings and Metrics
 
 All values are integer server settings, read at Service creation. Put them in the
-config's `env` block, or export them before starting Maya. Names below have the
+config's `env` block, or export them before starting Saguaro. Names below have the
 prefix **`MAYA_GLM_RESPONSES_`** (legacy `STRATA_GLM_RESPONSES_` spellings also work;
 the `MAYA_` spelling wins when both are set). Owner cache quotas default to 0 (disabled); all
 other values must be positive. Byte values count serialized data, not process RSS.
@@ -288,5 +288,5 @@ Unsupported parameters and item types return HTTP 400 before generation. In part
 - token-level constrained decoding, unsupported JSON Schema keywords, automatic
   input truncation, and non-default service tiers. Namespace tools remain unsupported.
 
-Use `/v1/chat/completions` for Maya-specific extensions such as `return_progress`
+Use `/v1/chat/completions` for Saguaro-specific extensions such as `return_progress`
 and `strata_mcp`. The `/v1/status` dialect list advertises the Responses endpoint.

@@ -4,7 +4,7 @@ maya-ds4 keeps its routed-expert hit counts in <pack>/expert-profile.bin (uint32
 then the drafter's when it was loaded): read at load to place the most-routed experts in VRAM and read the next ones
 ahead, counted on as it runs and saved after each answer.  A pack without one starts with every count at zero - the
 first answers then run from an arbitrary placement until the expert cache has moved the used experts in.  The setup
-copies the shipped profile into a pack that has none (maya.py ds4_seed_profile).
+copies the shipped profile into a pack that has none (saguaro.py ds4_seed_profile).
 
     make     the shipped profile from engine-saved ones (each an engine run over representative text: maya-ds4
              --profile-run CORPUS.ids --profile-out RUN.bin, a line of token ids each - that run's counts alone, the

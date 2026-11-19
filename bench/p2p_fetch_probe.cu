@@ -2,7 +2,7 @@
 //
 //   nvcc -O2 -arch=sm_86 -o p2p_fetch_probe p2p_fetch_probe.cu && ./p2p_fetch_probe
 //
-// Copies a pinned host buffer (8.6 MB "experts", 16 of them) into card 0's VRAM with Maya's fetch-kernel pattern
+// Copies a pinned host buffer (8.6 MB "experts", 16 of them) into card 0's VRAM with Saguaro's fetch-kernel pattern
 // (grid-stride 16-byte loads from host-mapped memory):
 //   A. card 0 alone (its own x8 link)          - today's fetch
 //   B. a kernel on card 1 writing card 0's VRAM through peer access (card 1's link, then NVLink)

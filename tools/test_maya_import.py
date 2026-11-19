@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import maya
+import saguaro as maya
 import maya_import as MI
 
 
@@ -77,7 +77,7 @@ class ImportTests(unittest.TestCase):
         self.assertFalse(a.exists() or b.exists())                 # same drive: moved, not copied
         self.assertEqual((self.src / "other/same-size-wrong.bin").read_bytes(), b"C" * len(BIG))
         self.assertTrue((self.src / "other/notes.txt").exists())   # what did not match is untouched
-        # recorded as verified: Maya's own check does not read the file again
+        # recorded as verified: Saguaro's own check does not read the file again
         with patch.object(maya, "sha256_ok", side_effect=AssertionError("read again")), patch.object(maya, "say"):
             self.assertTrue(maya.sha256_checked(self.models / "Model-A/a-00001.safetensors", sha(BIG)))
 

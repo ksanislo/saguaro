@@ -11,12 +11,12 @@ Strata [issue #697](https://github.com/Niko1221/Strata/issues/697) reports that
 the mapped-memory doorbell store can remain invisible to the CPU until stream
 synchronization on gfx1201. Upstream uses a volatile ring store and a HIP-only
 `__threadfence_system()` after the store in both shared doorbell kernels.
-Maya now has those changes. The earlier payload fences remain.
+Saguaro now has those changes. The earlier payload fences remain.
 
-Maya's `glm_fast.cu` has a separate routing request ring. Its `rq->seq` is
+Saguaro's `glm_fast.cu` has a separate routing request ring. Its `rq->seq` is
 already volatile, but also lacked a post-store fence. The same HIP-only fence
 now follows that signal. This is an application of the same publication rule
-to Maya's code, not a copied Qwen kernel.
+to Saguaro's code, not a copied Qwen kernel.
 
 Validation on native Linux / system ROCm 7.2.1:
 
@@ -38,17 +38,17 @@ See [AMD_RDNA4.md](AMD_RDNA4.md) for build and validation commands.
 | --- | --- |
 | `cmake/hip_backend.cmake` | Applied: upstream architecture lists, semicolon/space parsing, and compiled architecture metadata. Normalization also removes empty entries and duplicates before compiler use. |
 | `src/core/device.cu` and `include/strata/core/device.hpp` | Applied: exact base-architecture checks against the compiled list, wave32 check, and actual/build architecture diagnostics. Broader upstream device-list helpers are separate. |
-| `include/strata/hip_compat/` | Use the upstream headers as the base, retaining Maya's GLM mappings for occupancy, stream legacy, profiling, SGEMM/batched SGEMM, error codes and `__grid_constant__`. Replacing them without those additions breaks GLM compilation. |
+| `include/strata/hip_compat/` | Use the upstream headers as the base, retaining Saguaro's GLM mappings for occupancy, stream legacy, profiling, SGEMM/batched SGEMM, error codes and `__grid_constant__`. Replacing them without those additions breaks GLM compilation. |
 | `intrinsics.hpp` | Applied: upstream RDNA4 dot4 guard, byte permutation, SWAR byte operations and older-HIP warp synchronization. Packed-byte and GLM reference checks pass on both discrete cards. |
-| AMD setup detection | Applied: gfx1201 eligibility and fallback name; Maya uses the shared supported-architecture list. Unified-memory detection and wider installer helper consolidation are separate. |
-| hipBLASLt table loader and tables | Added upstream gfx1201 tables for versions 100202/100500. The loader keeps its architecture/version checks. Maya's GLM prompt projections now reuse that loader with separate per-architecture GLM tables. |
+| AMD setup detection | Applied: gfx1201 eligibility and fallback name; Saguaro uses the shared supported-architecture list. Unified-memory detection and wider installer helper consolidation are separate. |
+| hipBLASLt table loader and tables | Added upstream gfx1201 tables for versions 100202/100500. The loader keeps its architecture/version checks. Saguaro's GLM prompt projections now reuse that loader with separate per-architecture GLM tables. |
 
 The runtime query `hipblasLtGetVersion` on this host returns `100202`, or
 **1.2.2**, and the installed header agrees. This is the value the loader
 compares, regardless of a package's version label. Upstream includes both
 `gfx1100-hipblaslt-100202.txt` and `gfx1201-hipblaslt-100202.txt`.
 
-Maya's GLM dense prompt products in `src/core/glm_prefill.cu` still use SGEMM
+Saguaro's GLM dense prompt products in `src/core/glm_prefill.cu` still use SGEMM
 and batched SGEMM through hipBLAS where appropriate. Its FP16 prompt
 projections now reuse the inherited hipBLASLt loader in `src/prefill/gemm.cu`
 when `MAYA_HIPBLASLT_TUNING` names a matching GLM table. Shapes absent from
@@ -61,11 +61,11 @@ with them.
 
 Strata [issue #1180](https://github.com/Niko1221/Strata/issues/1180) concerns
 its fused native expert prompt kernel and `waves_per_eu(8)`. That source is
-absent from Maya, and no such setting was found in Maya's source tree. It is
-not a reason to disable Maya's different GLM kernels without evidence.
+absent from Saguaro, and no such setting was found in Saguaro's source tree. It is
+not a reason to disable Saguaro's different GLM kernels without evidence.
 The synthetic GPU checks do not establish full-model quantized-expert
 or draft verification correctness. The first real request remains necessary.
 
 Strata [issue #1389](https://github.com/Niko1221/Strata/issues/1389) measures
 Qwen prompt performance. Its profiling and tuning method is useful once GLM
-runs; its token rates are not Maya benchmarks.
+runs; its token rates are not Saguaro benchmarks.

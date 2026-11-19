@@ -1,9 +1,9 @@
-# Maya on Windows
+# Saguaro on Windows
 
 Back to the [README](../README.md).
 
-Experimental: the same installer sets Maya up natively on Windows 10/11 (64-bit), and the engine and the image
-encoder compile there with Visual Studio 2022 and CUDA 12.8 (CUDA 13 works for RTX 20 and newer). Maya is developed
+Experimental: the same installer sets Saguaro up natively on Windows 10/11 (64-bit), and the engine and the image
+encoder compile there with Visual Studio 2022 and CUDA 12.8 (CUDA 13 works for RTX 20 and newer). Saguaro is developed
 and measured on Linux; on Windows 11 a user runs Maya-L on an RTX 4090, built with CUDA 13.4 (the speed table above,
 [#63](https://github.com/mw00/project-maya/issues/63)). Tell us how it runs on yours.
 
@@ -27,24 +27,24 @@ and measured on Linux; on Windows 11 a user runs Maya-L on an RTX 4090, built wi
    ```powershell
    git clone https://github.com/mw00/project-maya.git
    cd project-maya
-   .\START-MAYA.bat --check
+   .\START-SAGUARO.bat --check
    ```
 
    `--check` reports the GPUs, toolkit, compiler, RAM and page file without downloading the model or building the
-   engine. Maya finds Visual Studio's compiler environment itself; a Developer Command Prompt is not needed.
+   engine. Saguaro finds Visual Studio's compiler environment itself; a Developer Command Prompt is not needed.
 3. Start the setup, putting the model on an NVMe SSD with enough [free space](../README.md#what-you-need) for the chosen model.
    Change the drive and folder to suit your PC:
 
    ```powershell
-   .\START-MAYA.bat --setup --models-dir "D:\Maya-models"
+   .\START-SAGUARO.bat --setup --models-dir "D:\Maya-models"
    ```
 
    Choose the model and context when asked. The launcher creates its own `.venv`; setup installs its Python
    packages, CMake and Ninja there, builds the engine, and asks before downloading the model. Later, run
-   `.\START-MAYA.bat` (or double-click it) to start the installed model, then open `http://127.0.0.1:8080`.
-   All `./maya.sh` options also work here; PowerShell needs the leading `.\`. Add `--plain` for plain-text setup.
+   `.\START-SAGUARO.bat` (or double-click it) to start the installed model, then open `http://127.0.0.1:8080`.
+   All `./saguaro.sh` options also work here; PowerShell needs the leading `.\`. Add `--plain` for plain-text setup.
 
-- **Check the page-file size, even with "System managed" enabled.** Windows' GPU allocations and Maya's pinned
+- **Check the page-file size, even with "System managed" enabled.** Windows' GPU allocations and Saguaro's pinned
   RAM tier consume commit capacity (RAM + page file). A small page file can keep the RAM tier below the free RAM
   available, leaving more experts on the SSD. `--check` recommends roughly the selected GPUs' total VRAM plus
   9 GB of page-file capacity (about 57 GB for a 48 GB card). If it warns, set a custom size at least as large as it
@@ -52,7 +52,7 @@ and measured on Linux; on Windows 11 a user runs Maya-L on an RTX 4090, built wi
   Advanced > Virtual memory. Restart Windows after changing it. "System managed" can remain too small on a
   large-RAM PC ([#20](https://github.com/mw00/project-maya/issues/20)). On an AMD APU (Strix Halo, Gorgon Halo)
   the page file needs to be at least about the GPU's share of the memory: see
-  [AMD_MAYA.md](AMD_MAYA.md#windows) ("The page file on a Windows APU").
+  [AMD_SAGUARO.md](AMD_SAGUARO.md#windows) ("The page file on a Windows APU").
 - **A GPU filled to the brim pages instead of failing.** Windows' driver moves GPU memory to system RAM when the card
   runs out, and decode then falls to a few tokens per second. The expert pool checks the free VRAM again once it is
   written (`--expert-cache auto`, the default), and the engine log says at start how much is free on each GPU
@@ -61,15 +61,15 @@ and measured on Linux; on Windows 11 a user runs Maya-L on an RTX 4090, built wi
   again with `--vram-reserve-mib 1500` ([the expert pool's size](SETTINGS.md#the-expert-pools-size)).
 - With several CUDA toolkits installed, setup chooses the newest compatible one. To select one explicitly, add
   `--nvcc "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8\bin\nvcc.exe"` to the setup command.
-- After setup, stop any running Maya server and run `.\START-MAYA.bat --calibrate --no-start` to tune the CPU/PCIe
-  split and thread count for your PC. Then start Maya normally. See [Tuning](SETTINGS.md) for the optional RAM-resident
+- After setup, stop any running Saguaro server and run `.\START-SAGUARO.bat --calibrate --no-start` to tune the CPU/PCIe
+  split and thread count for your PC. Then start Saguaro normally. See [Tuning](SETTINGS.md) for the optional RAM-resident
   tier and other settings, and [Something went wrong?](../README.md#something-went-wrong) for `--bench` / `--report`.
-- Not WSL2: WSL2's GPU driver pins only about 1 GB of RAM, and Maya pins tens of GB. Run
-  `START-MAYA.bat` in Windows itself.
+- Not WSL2: WSL2's GPU driver pins only about 1 GB of RAM, and Saguaro pins tens of GB. Run
+  `START-SAGUARO.bat` in Windows itself.
 - A Tesla V100 runs it too, built with CUDA 12.4 ([#57](https://github.com/mw00/project-maya/issues/57)). Run
-  `--calibrate` once: it tunes Maya for your PC, and a setup for another context keeps its settings.
-- AMD on Windows (more experimental still), Strix Halo / Gorgon Halo included: `START-MAYA.bat --backend hip --gpu 0
+  `--calibrate` once: it tunes Saguaro for your PC, and a setup for another context keeps its settings.
+- AMD on Windows (more experimental still), Strix Halo / Gorgon Halo included: `START-SAGUARO.bat --backend hip --gpu 0
   --setup` builds the HIP engine with AMD's HIP SDK, or offers AMD's ROCm SDK wheels in `.venv` when there is none
-  ([docs/AMD_MAYA.md](AMD_MAYA.md#windows)).
+  ([docs/AMD_SAGUARO.md](AMD_SAGUARO.md#windows)).
   `tools\hip\build_maya_windows.bat` builds it by hand (an RX 7900 XTX,
   [#54](https://github.com/mw00/project-maya/pull/54)).

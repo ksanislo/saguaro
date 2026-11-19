@@ -1,5 +1,5 @@
 """The speed calibration for DeepSeek-V4.1 (maya-ds4) and MiniMax-M3.1 (maya-mm3): does the DSpark drafter make THIS
-PC faster?  (The setup, the first start of a config that has the drafter and no calibration yet, ./maya.sh
+PC faster?  (The setup, the first start of a config that has the drafter and no calibration yet, ./saguaro.sh
 --speed-calibration.)
 
 DSpark drafts up to 5 tokens a round and the model checks them in one window.  Where the model's experts sit in the
@@ -19,7 +19,7 @@ sustained speed):
 The engine reads a copy of this PC's expert profile and writes back to the copy only: the calibration's answers do not
 lead the next start's placement.
 
-    python tools/calibrate_ds4.py maya-ds4.json      # measure and print; ./maya.sh --speed-calibration applies it
+    python tools/calibrate_ds4.py maya-ds4.json      # measure and print; ./saguaro.sh --speed-calibration applies it
 """
 from __future__ import annotations
 

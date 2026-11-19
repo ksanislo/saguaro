@@ -1,5 +1,5 @@
-"""Every way of stopping maya.py stops Saguaro's server and its engine (v1.1.18): the server's stop signals, --parent-pipe
-(its stdin a pipe from maya.py: EOF when maya.py ends, however it ends), the orphan check, and maya.run_server - with
+"""Every way of stopping saguaro.py stops Saguaro's server and its engine (v1.1.18): the server's stop signals, --parent-pipe
+(its stdin a pipe from saguaro.py: EOF when saguaro.py ends, however it ends), the orphan check, and maya.run_server - with
 the real server and serve/fake_multi_engine.py as its engine (a process that ends on QUIT or when its input closes), in
 real processes.  No GPU needed; psutil (setup installs it) finds the processes."""
 from __future__ import annotations
@@ -262,8 +262,8 @@ class ServerStops(unittest.TestCase):
 DRIVER = """
 import sys
 sys.path.insert(0, {root!r})
-sys.argv = ["maya.py"]
-import maya
+sys.argv = ["saguaro.py"]
+import saguaro as maya
 maya.stop_signals()
 print("maya pid", flush=True)
 sys.exit(maya.run_server({cmd!r}, wait_s=60))
@@ -272,7 +272,7 @@ sys.exit(maya.run_server({cmd!r}, wait_s=60))
 
 @unittest.skipIf(psutil is None, "psutil is not installed")
 class MayaStops(unittest.TestCase):
-    """maya.run_server as maya.py runs it: a stop of maya.py alone - SIGTERM, SIGHUP, even SIGKILL / Task Manager -
+    """maya.run_server as saguaro.py runs it: a stop of saguaro.py alone - SIGTERM, SIGHUP, even SIGKILL / Task Manager -
     ends the server and its engine."""
 
     def setUp(self):
@@ -337,7 +337,7 @@ def listening(port: int, timeout: float = 60) -> bool:
 @unittest.skipIf(psutil is None, "psutil is not installed")
 class ScreenStops(unittest.TestCase):
     """The server on the setup's screen (Bridge.serve: in a session / process group of its own, out of reach of the
-    terminal's signals) ends with maya.py too when maya.py is ended by force."""
+    terminal's signals) ends with saguaro.py too when saguaro.py is ended by force."""
 
     def test_maya_killed(self):
         with tempfile.TemporaryDirectory() as d:

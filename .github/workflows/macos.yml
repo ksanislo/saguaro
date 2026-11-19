@@ -61,14 +61,14 @@ jobs:
             echo "::warning::No Metal GPU on this runner: the GPU tests are skipped, only the build and the CPU tests run"
             echo "gpu=no" >> "$GITHUB_OUTPUT"
           fi
-      # a venv, as installs run; numpy etc. for the setup tests (tools/test_maya_metal.py imports maya.py and the server)
+      # a venv, as installs run; numpy etc. for the setup tests (tools/test_maya_metal.py imports saguaro.py and the server)
       - name: Python packages
         run: |
           python -m venv "$RUNNER_TEMP/venv"
           "$RUNNER_TEMP/venv/bin/python" -m pip install --quiet numpy jinja2 regex pyyaml tqdm psutil 'jsonschema>=4.18,<5'
-      - name: Metal setup tests (maya.py on a Mac)
+      - name: Metal setup tests (saguaro.py on a Mac)
         run: '"$RUNNER_TEMP/venv/bin/python" -m unittest tools.test_maya_metal tools.test_setup_download -v'
-      # as ./maya.sh --backend metal configures it, with the parity tests on and no -mcpu=native
+      # as ./saguaro.sh --backend metal configures it, with the parity tests on and no -mcpu=native
       - name: Configure maya-metal
         run: |
           cmake -S . -B build-metal -DCMAKE_BUILD_TYPE=Release -DMAYA_ENABLE_METAL=ON -DMAYA_METAL_TESTS=ON \

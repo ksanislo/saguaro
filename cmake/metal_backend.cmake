@@ -1,4 +1,4 @@
-# Maya's Metal build (Apple Silicon): maya-metal runs GLM-5.3-Flash through the pinned llama.cpp's ggml with its Metal
+# Saguaro's Metal build (Apple Silicon): maya-metal runs GLM-5.3-Flash through the pinned llama.cpp's ggml with its Metal
 # backend.  It needs none of the CUDA/HIP engine and none of the x86 CPU kernels (AVX-512/AVX2, cpuid), so this build
 # is its own short list of targets; the top-level CMakeLists.txt returns right after including it.
 #
@@ -102,7 +102,7 @@ else()
   add_subdirectory(${_maya_gg} ${CMAKE_BINARY_DIR}/ggml EXCLUDE_FROM_ALL)
 endif()
 
-# the engine reports Maya's release (VERSION) as its version
+# the engine reports Saguaro's release (VERSION) as its version
 file(STRINGS ${CMAKE_CURRENT_SOURCE_DIR}/VERSION _maya_version LIMIT_COUNT 1)
 add_library(maya_metal STATIC src/metal/glm_metal.cpp src/metal/glm_metal_load.cpp src/metal/expert_pool.cpp
                               src/metal/glm_metal_dflash.cpp src/metal/spec.cpp src/metal/sampler.cpp)

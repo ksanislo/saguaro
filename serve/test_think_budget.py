@@ -96,7 +96,7 @@ class GlmMayaXS(unittest.TestCase):
         self.assertEqual(Q.default_thinking_budget(GLM), 8192)
 
     def test_entry(self):
-        import maya
+        import saguaro as maya
         m = maya.MODELS["Maya-XS-IQ1_S"]
         self.assertEqual(m["revision"], "6728cf78a5b198a6a6f84b7fb88956a17ec56521")
         self.assertEqual(maya.shard_names(m), ["GLM-5.3-Flash-Maya-XS-IQ1_S-0000%d-of-00002.gguf" % i for i in (1, 2)])

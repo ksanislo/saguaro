@@ -27,7 +27,7 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "tools")]
-import maya  # noqa: E402
+import saguaro as maya  # noqa: E402
 from gguf_writer import GGUFWriter  # noqa: E402
 
 
@@ -342,7 +342,7 @@ class GlmExl3Folder(Tmp):
                 patch.object(maya, "put_template") as put:
             maya.pack_step(self.a, self.root, [self.root / "config.json"], self.root, pinned)
         step.assert_called_once()
-        put.assert_not_called()                                              # (Maya's GLM template, as before)
+        put.assert_not_called()                                              # (Saguaro's GLM template, as before)
 
     def test_a_gguf_without_a_template_gets_glm5s_a_gguf_with_one_keeps_it(self):
         pack = self.root / "pack"

@@ -1,4 +1,4 @@
-"""Tune maya-ds4 for this PC (./maya.sh --calibrate on a DeepSeek-V4.1-Flash-1017 config).
+"""Tune maya-ds4 for this PC (./saguaro.sh --calibrate on a DeepSeek-V4.1-Flash-1017 config).
 
 The engine balances its layers across the GPUs itself, but two of its settings depend on the PC, the quant and what it
 serves, and the setup only guesses them:
@@ -18,7 +18,7 @@ rates decide together (two starts of one setting differ by a few percent: the ex
 Effective groups come from each GPU's VRAM tp_n field, not --tp: fallback duplicates close before inference and are
 not ranked as different settings. Incomplete grouping telemetry preserves the config's TP rather than guessing.
 
-    python tools/calibrate_ds4_tp.py maya-ds4.json     # measure and print; ./maya.sh --calibrate also saves it
+    python tools/calibrate_ds4_tp.py maya-ds4.json     # measure and print; ./saguaro.sh --calibrate also saves it
 """
 from __future__ import annotations
 
