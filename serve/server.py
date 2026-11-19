@@ -6903,7 +6903,8 @@ def main() -> int:
     svc.gpu_index = (gpu_list(cfg) or [0])[0]           # the Monitor reads the card the engine runs on (issue #51)
     svc.gpu_indices = gpu_list(cfg)                     # ... or every card of a layer split (issue #112)
     svc.backend = cfg.get("backend")                    # the Monitor's GPU reader: sysfs on AMD/HIP, NVML otherwise
-    svc.model_label = maya_quants.config_label(cfg)     # (configs of every release: by their installer record)
+    svc.model_label = cfg.get("label") or (maya_quants.config_label(cfg)   # (configs of every release: their installer record)
+                                          if (cfg.get("installer") or {}).get("written") else None)   # (else the id)
     if a.config:
         svc.config_path = str(Path(a.config).resolve())  # a context change from the dashboard is saved there
         p = Path(svc.config_path)                        # the tokens it serves, and what its API would have charged
