@@ -4,6 +4,22 @@ Every release is on GitHub (Releases) with these notes; every published change m
 page's Settings › About and updates (About > Update before the redesign; from v1.0.18), or `git pull`, then `./setup.sh` (Windows: `START-MAYA.bat`) - it recompiles
 only what changed and starts; the model is not downloaded again.
 
+## Saguaro
+
+This project is **Saguaro** now: a fork that unites Project Maya's engines (GLM-5.3-Flash, DeepSeek-V4.1-Flash,
+MiniMax-M3.1-Flash) and Strata's Qwen3.8-Flash-Next engine (`engines/qfn`) behind one server and one web UI, tuned for
+older multi-GPU hardware (NVIDIA Turing T4 - sm_75 tensor cores, Xeon AVX1 CPUs). GitHub:
+[ksanislo/saguaro](https://github.com/ksanislo/saguaro).
+
+- **Renamed:** the README and docs, the installers (`./saguaro.sh`, `saguaro.py`, `START-SAGUARO.bat` - `./maya.sh`,
+  `maya.py` and `START-MAYA.bat` still work and run the new ones), the setup and dashboard text.
+  `docs/AMD_MAYA.md` is now `docs/AMD_SAGUARO.md`.
+- **Kept for compatibility:** the `MAYA_*` / `STRATA_*` / `DS4_*` settings, the engine binaries (`maya`, `maya-ds4`,
+  `maya-mm3`, `maya-qfn`), the quant names (Maya-XS to Maya-L), the config, log, report and storage file names
+  (`maya-<model>.json`, `maya-report.txt`, the `maya.*` browser keys), session formats and this version line.
+- **Credits:** built on Project Maya ([mw00/project-maya](https://github.com/mw00/project-maya)) and Strata (MIT) -
+  see NOTICE.md. Everything below is upstream Project Maya history.
+
 ## [UNRELEASED]
 
 - **ROCm installs with versioned LLVM slots:** `hip_clang` finds a distribution's LLVM slot (`<root>/lib/llvm/<version>/bin/clang++`,
