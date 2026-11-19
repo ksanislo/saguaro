@@ -3,8 +3,8 @@
 // each one's engine settings, edited in its card (POST /api/models/settings - a dry run first for the command they make);
 // and deleting one (POST /api/models/delete: off the list, and with its downloaded files if asked; the running one after a
 // switch to another); and the files in the models folders no model uses (POST /api/models/leftovers deletes one).
-import {html, useEffect, useRef} from "./preact.js";
-import {api, ctxfmt, esc, fmt, isPhone, modelName, relTime} from "./lib.js";
+import {html, useEffect, useRef, useState} from "./preact.js";
+import {api, ctxfmt, esc, fmt, headers, isPhone, modelName, relTime} from "./lib.js";
 import {S, confirmDialog, copyText, emit, toast} from "./state.js";
 import {newChat} from "./chats.js";
 import {setSide, showView} from "./sidebar.js";
@@ -825,8 +825,30 @@ function Card({m}) {
 }
 
 // ------------------------------------------------------------------ the page
+// under a supervisor (llama-swap): its model list - each model's own page loads it (llama-swap swaps it in)
+function SupervisedModels() {
+  const [list, setList] = useState(null), [err, setErr] = useState(null);
+  const sup = S.health.supervisor, here = S.health.model;
+  // (this page is llama-swap's /upstream/<model>/: its own /v1/models two levels up)
+  const root = location.pathname.replace(/\/upstream\/[^/]+\/.*$/, "/");
+  useEffect(() => {
+    fetch(`${root}v1/models`, {headers: headers()}).then((r) => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
+      .then((j) => setList((j.data || []).map((m) => m.id).sort())).catch((e) => setErr(e.message));
+  }, []);
+  return html`<section class="card" aria-label="Models">
+    <div class="card__head"><span class="card__title">Models (${sup})</span>
+      <span class="card__sub">${sup} starts, stops and switches the models; one runs at a time on the GPUs</span></div>
+    <p class="set-note">Opening another model's page loads it there (${sup} unloads this one first, a minute or two). Apps
+      pick a model by its id - nothing to switch here.</p>
+    ${err ? html`<p class="set-note">The model list did not load (${err}).</p>` : !list ? html`<p class="set-note">Loading…</p>`
+      : html`<div class="table-wrap"><table class="table"><tbody>${list.map((id) => html`<tr>
+          <td class="l"><${ModelLogo} model=${id} size=${24}/> <b>${id}</b>${id === here ? html` <span class="pill pill--ok">this page</span>` : null}</td>
+          <td>${id === here ? "running" : html`<a href=${`${root}upstream/${encodeURIComponent(id)}/`}>open</a>`}</td></tr>`)}</tbody></table></div>`}
+  </section>`;
+}
+
 export function ModelsPage() {
-  useEffect(() => { loadModels(); }, []);
+  useEffect(() => { if (!S.health.supervisor) loadModels(); }, []);
   const phone = isPhone(), D = MS.data, r = MS.restart;
   const cmds = [["Linux and macOS", "./maya.sh --setup"], ["Windows", "START-MAYA.bat --setup"]];
   return html`<main class="mon mdl">
@@ -838,6 +860,7 @@ export function ModelsPage() {
         <button type="button" class="icon-btn" aria-label="Open the sidebar" title="Open the sidebar" onClick=${() => setSide(true)}><${Icon} name="panel-left"/></button>
         <button type="button" class="icon-btn" aria-label="New chat" title="New chat" onClick=${newChat}><${Icon} name="new-chat"/></button></div></header>` : null}
     <div class="mon__scroll"><div class="mon__page mdl__page">
+      ${S.health.supervisor ? html`<div class="mon__head"><div><h1>Models</h1></div></div><${SupervisedModels}/>` : html`
       <div class="mon__head">
         <div><h1>Models</h1><p>The models set up on this machine. Saguaro runs one at a time.</p></div>
         <div class="mon__acts"><button type="button" class=${`btn btn--secondary btn--sm${MS.add ? " is-on" : ""}`} aria-expanded=${String(MS.add)}
@@ -865,7 +888,7 @@ export function ModelsPage() {
       ${D ? html`<${Leftovers} L=${D.leftovers}/>` : null}
       ${D && D.models.length ? html`<p class="mdl-foot"><${Icon} name="info" sm/><span>${D.restarts
         ? "Switching, or saving the running model's engine settings, starts Saguaro again through its start script, as a port change does. Each model keeps its own chat settings."
-        : "This server was not started by maya.sh or START-MAYA.bat, so it cannot start again by itself: a switch or new settings apply from Saguaro's next start."}</span></p>` : null}
+        : "This server was not started by maya.sh or START-MAYA.bat, so it cannot start again by itself: a switch or new settings apply from Saguaro's next start."}</span></p>` : null}`}
     </div></div>
     ${MS.del ? html`<${DeleteDialog} key=${MS.del.m.file}/>` : null}
   </main>`;

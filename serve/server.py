@@ -2302,6 +2302,7 @@ class Service:
         self.savings = None                              # serve/savings.py's Ledger: what the API would have charged
         self.model_dir = None                            # the model's folder (free disk on the dashboard)
         self.model_label = None                          # what runs, as users see it: "MiniMax M3.1 · Maya-XS"
+        self.supervisor = None                           # (llama-swap: it owns starts, stops, switches and configs)
         self.trained_context = None                      # what the model was trained for (its GGUF): the slider's top
         self.lookup = None                               # DeepSeek's prompt lookup (--suffix-draft above 0); the others' INFO says
         self.dspark = None                               # DeepSeek's: drafts with its DSpark blocks (its engine's INFO
@@ -3179,7 +3180,9 @@ class Service:
                                                "cpu", "ram", "disk_mb", "engram_ms")}}   # (the last four: DeepSeek's)
         hw = dict(tel["now"])
         cards = hw.pop("vram", None)                      # (each card's processes: for the GPU map only)
-        return {"engine": engine, "live": live, "tiers": tiers, "gpu_map": self._gpu_map(cards),
+        gmap = self._gpu_map(cards)
+        return {"engine": engine, "live": live, "tiers": tiers, "gpu_map": gmap,
+                "gpu_plain": gmap is None and callable(getattr(self.engine, "vram", None)),   # (QFN: NVML's per-card use)
                 "requests": hist[::-1][:None if all_requests else 12],
                 "requests_kept": len(hist), "totals": totals, "loop_guard": guard, "hardware": hw,
                 "hardware_static":
@@ -5697,7 +5700,7 @@ def make_handler(svc: Service):
                                  "model_label": svc.model_label,   # (the model first: "GLM-5.3 · Maya-S24")
                                  "images": svc.vision is not None, "api_key": bool(svc.api_key), "defaults": rec,
                                  "version": MAYA_VERSION, "mcp_tools": bool(svc.mcp), "unloaded": svc.unloaded,
-                                 "capabilities": svc.capabilities()})
+                                 "capabilities": svc.capabilities(), "supervisor": svc.supervisor})
             elif path == "/api/context":
                 # the dashboard's Context size: the range, the measured cost of the current size, a reload's state
                 if self._authorized():
@@ -5827,6 +5830,16 @@ def make_handler(svc: Service):
                     return
                 if path == "/v1/strata/cancel":
                     self._job_cancel()
+                    return
+                # under a supervisor (llama-swap: it starts, stops and switches the models, and owns their configs):
+                # what would restart this server, move it or rewrite a config is refused - said, not attempted
+                if svc.supervisor and path in ("/api/port", "/api/update", "/api/models/settings", "/api/models/switch",
+                                               "/api/models/delete", "/api/models/leftovers", "/api/context",
+                                               "/api/turbo", "/api/pull", "/api/delete"):
+                    self._body()
+                    self._json(409, {"error": {"type": "invalid_request_error", "message":
+                                     f"this server runs under {svc.supervisor}, which starts, stops and switches the "
+                                     "models: change models there (pick another model id), not here"}})
                     return
                 if path == "/api/context":
                     self._context()
@@ -6683,6 +6696,16 @@ def tee_server_log(path: str) -> None:
     sys.stdout = ServerLogTee(sys.stdout, handle)
 
 
+def supervisor_name() -> str | None:
+    """The program that started this server when it is a model switcher that owns its lifecycle (llama-swap: our
+    parent after its /bin/sh exec'd us), else None.  SAGUARO_SUPERVISOR=<name> says it outright (""): none."""
+    try:
+        comm = Path(f"/proc/{os.getppid()}/comm").read_text().strip()
+    except OSError:
+        return None
+    return "llama-swap" if comm.startswith("llama-swap") else None
+
+
 def start_qfn(cfg: dict, tok):
     """Qwen3.8-Flash-Next's engine (engines/qfn) under this server: QFN's own driver (serve/qfn_engine.py - its arguments,
     environment and batch protocol: the server-side slot admission, BGEN / BDONE, wrap spill, session files) behind this
@@ -6962,6 +6985,10 @@ def main() -> int:
     svc.gpu_index = (gpu_list(cfg) or [0])[0]           # the Monitor reads the card the engine runs on (issue #51)
     svc.gpu_indices = gpu_list(cfg)                     # ... or every card of a layer split (issue #112)
     svc.backend = cfg.get("backend")                    # the Monitor's GPU reader: sysfs on AMD/HIP, NVML otherwise
+    svc.supervisor = os.environ.get("SAGUARO_SUPERVISOR") or supervisor_name()
+    if svc.supervisor:
+        print(f"[saguaro] started by {svc.supervisor}: model switching, updates, port and config changes are its own",
+              flush=True)
     svc.engine_kind = {"qfn": "qfn"}.get(a.engine) or (maya_quants.family_of(cfg) if cfg else "mock")
     svc.model_label = cfg.get("label") or (maya_quants.config_label(cfg)   # (configs of every release: their installer record)
                                           if (cfg.get("installer") or {}).get("written") else None)   # (else the id)

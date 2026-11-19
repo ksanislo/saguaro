@@ -105,6 +105,7 @@ export async function setTurbo(on) {
 
 // the button: a small flame that burns while Turbo is on (turbo.css)
 export function TurboButton() {
+  if (S.health && S.health.supervisor) return null;   // (under llama-swap the engine settings are its config)
   const t = S.turbo;
   if (t.unavailable) return null;
   const tip = t.on ? "Turbo ON: trades quality for maximum speed (greedy decoding, no thinking, expert skipping, aggressive drafting). Click to put your settings back."

@@ -82,13 +82,15 @@ function Model() {
   return html`<h3>Model</h3>
     <div class="model-card"><${ModelLogo} model=${h.model} size=${36}/>
       <span><b>${modelName(h.model)}</b><span>${[h.model, engine, h.version ? `Saguaro v${h.version}` : ""].filter(Boolean).join(" · ")}</span></span></div>
-    ${c ? html`<div class="set-block">
+    ${h.supervisor ? html`<p class="set-note">This server runs under ${h.supervisor}: it starts, stops and switches the models,
+      and their context sizes, ports and engine settings are its configuration. Pick another model by its id in your app.</p>`
+    : c ? html`<div class="set-block">
       <${CtxSlider} id="set-ctx" value=${v} now=${c.context} stops=${stops} disabled=${!!S.reload} hint=${est}
         onChange=${(n) => setCtx(stops.indexOf(n))}/>
       ${changed ? html`<div class="callout callout--warn"><span>${warns.join(" ")}</span>
         <button type="button" class="btn btn--primary btn--sm" onClick=${reload}>Reload with ${ctxfmt(v)}</button></div>` : null}
     </div>` : html`<p class="set-note">This server does not say its context range, so it can't be changed from here.</p>`}
-    ${pi && pi.port && pi.saved ? html`
+    ${!h.supervisor && pi && pi.port && pi.saved ? html`
       <${Row} label="Port" htmlFor="set-port" sub="Where this page and the API listen. A new port starts Saguaro again there, and this page follows.">
         <input id="set-port" class="input input--num" inputmode="numeric" value=${port} onInput=${(ev) => setPort(ev.target.value)}/><//>
       ${portChanged ? html`<div class="callout callout--warn">
@@ -437,7 +439,7 @@ function About() {
     try { setLog(await fetchReport()); } catch (e) { toast("error", "No report", e.message, 5000); }
   };
   return html`<h3>About and updates</h3>
-    <${UpdateCard}/>
+    ${S.health.supervisor ? null : html`<${UpdateCard}/>`}
     <dl class="facts">${facts().map(([k, v]) => html`<dt>${k}</dt><dd>${v}</dd>`)}</dl>
     <div class="set-row set-row--top">
       <span class="set-row__text"><span class="set-row__label">Troubleshooting</span>
