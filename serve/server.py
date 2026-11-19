@@ -3190,7 +3190,7 @@ class Service:
         """What fills each GPU (serve/gpu_map.py): the engine's VRAM lines and NVML's cards, with the engine's and the
         vision encoder's processes told apart from other programs; None for an engine without VRAM lines."""
         report = getattr(self.engine, "vram", None)
-        if not report:
+        if not report or callable(report):              # (QFN's engine: vram() is its VRAM give-back call, no lines)
             return None
         proc = getattr(self.engine, "proc", None)
         v = self.vision
@@ -3588,7 +3588,8 @@ class Service:
             k = len(self.current_requests)
             if k > 1:
                 stat.shared_max = max(stat.shared_max, k)
-                if n % 8 == 0:                          # (the engine's total every 8 tokens: cheap enough)
+                if now - getattr(stat, "eng_t", 0.0) >= 0.5:   # (the engine's total twice a second: cheap enough)
+                    stat.eng_t = now
                     stat.eng_sum += sum(r.tok_s(now) for r in self.current_requests)
                     stat.eng_n += 1
             for ev in evs:
@@ -4847,16 +4848,17 @@ JOBS: dict[str, StreamJob] = {}
 JOBS_LOCK = threading.Lock()
 
 
-def jobs_put(job: StreamJob) -> None:
-    """Keeps the live answers and the finished ones of the last 15 minutes (at most 8)."""
+def jobs_put(job: StreamJob, places: int = 1) -> None:
+    """Keeps the live answers and the finished ones of the last 15 minutes (at most 8, or the engine's places + 4)."""
     with JOBS_LOCK:
         now = time.time()
-        for j in JOBS.values():                    # a new answer: one still running with nobody reading it goes
-            if not j.done and j.readers == 0:
-                j.cancel.set()
+        if places <= 1:                            # one answer at a time: a new one ends one nobody reads any more
+            for j in JOBS.values():                # (several at once: each chat's answer runs on - an unread one
+                if not j.done and j.readers == 0:  #  ends after StreamJob.ORPHAN_S - a reconnecting page is not cut)
+                    j.cancel.set()
         for k in [k for k, j in JOBS.items() if j.done and now - (j.ended or now) > 900]:
             del JOBS[k]
-        while len(JOBS) >= 8:
+        while len(JOBS) >= max(8, places + 4):
             old = min(JOBS.values(), key=lambda j: (not j.done, j.ended or now))
             del JOBS[old.id]
         JOBS[job.id] = job
@@ -5648,7 +5650,12 @@ def make_handler(svc: Service):
             if path == "/metrics":
                 if self._authorized():
                     # the last 12 requests; `?requests=all` every one kept (the Monitor's "Show all", issue #35)
-                    self._json(200, svc.metrics(all_requests="requests=all" in self.path))
+                    try:
+                        m = svc.metrics(all_requests="requests=all" in self.path)
+                    except Exception:   # (said in the log - the handler's own traceback goes to a pipe nobody reads)
+                        print("[maya] /metrics failed:\n" + traceback.format_exc(), flush=True)
+                        raise
+                    self._json(200, m)
                 return
             if path == "/metrics/prometheus":
                 if self._authorized():
@@ -6195,7 +6202,7 @@ def make_handler(svc: Service):
                 first = next(chunks)
                 job = StreamJob(first["id"], itertools.chain(
                     [first], carry_embeddings(svc.embeddings, getattr(svc.embeddings, "path", None), chunks)), cancel)
-                jobs_put(job)
+                jobs_put(job, svc.fifo.capacity)
                 self._sse()
                 self._stream_job(job, 0)
                 return
