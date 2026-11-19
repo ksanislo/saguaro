@@ -3,7 +3,9 @@
 # the live QFN build's options (bench/qfn-exact3/build.sh, build-x3b), so the code is the live engine's bit for bit.
 # Output: <dir>/maya-qfn (= the strata target), libstrata_kq.so + libstrata_kq_tab.so (one set, ABI 2, loaded from the
 # binary's folder). The version string stays Strata's 0.1.49.2 (saved QFN conversations are keyed on it).
-# VISION=1 also builds <dir>-vision/bin/maya-qfn-vision (= strata-vision) from engines/qfn/tools/vision.
+# VISION=1 also builds <dir>-vision/bin/maya-qfn-vision (= strata-vision) from engines/qfn/tools/vision, NATIVE
+# (-DSTRATA_PORTABLE=OFF: its default ON forces AVX2/FMA/F16C/BMI2, which this Ivy Bridge host lacks - review 11-18).
+# (Live keeps the 11-09 strata-vision for now; this one is not installed.)
 set -eu
 R=$(cd "$(dirname "$0")/../.." && pwd); S=$R/engines/qfn; B=${1:?build dir}
 GGML=${QFN_GGML_DIR:-/data/llm/strata-main/third_party/llama.cpp}   # (3cf03257f, the pin of both trees)
@@ -15,7 +17,7 @@ cmake -S $S -B $B -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_COMPILER=/usr
 nice -n 5 ninja -C $B ${QFN_TARGETS:-strata strata_kq strata_kq_tab} > $B.build.log 2>&1 || { tail -30 $B.build.log; exit 1; }
 cp -p $B/strata $B/maya-qfn
 if [ "${VISION:-0}" = 1 ]; then
-  cmake -G Ninja -S $S/tools/vision -B $B-vision -DCMAKE_BUILD_TYPE=Release -DLLAMA_DIR=$GGML -DSTRATA_VISION_CUDA=ON \
+  cmake -G Ninja -S $S/tools/vision -B $B-vision -DCMAKE_BUILD_TYPE=Release -DLLAMA_DIR=$GGML -DSTRATA_VISION_CUDA=ON -DSTRATA_PORTABLE=OFF \
     -DCMAKE_CUDA_ARCHITECTURES=75 -DCMAKE_CUDA_COMPILER=/usr/local/cuda-13.1/bin/nvcc > $B-vision.cmake.log 2>&1
   ninja -C $B-vision > $B-vision.build.log 2>&1 || { tail -30 $B-vision.build.log; exit 1; }
   V=$(ls $B-vision/bin/strata-vision $B-vision/strata-vision 2>/dev/null | head -1); cp -p $V $(dirname $V)/maya-qfn-vision
