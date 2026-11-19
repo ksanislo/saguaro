@@ -2560,8 +2560,7 @@ class Service:
             reload = dict(self.reload) if self.reload else None
         # a streamed cache's RAM (KV streaming: maya-mm3's VRAM lines' kv_ram - every position's K / V in pinned RAM,
         # the engine's own count at this context) and the RAM free now: the dashboard scales the one against the other
-        lines = getattr(self.engine, "vram", None)        # (QFN's driver has a vram() method, not VRAM lines)
-        kv_ram = sum(int(p.get("kv_ram") or 0) for p in lines) if isinstance(lines, list) else 0
+        kv_ram = sum(int(p.get("kv_ram") or 0) for p in getattr(self.engine, "vram", None) or [])
         ram = {}
         if kv_ram:
             try:
@@ -3181,9 +3180,7 @@ class Service:
                                                "cpu", "ram", "disk_mb", "engram_ms")}}   # (the last four: DeepSeek's)
         hw = dict(tel["now"])
         cards = hw.pop("vram", None)                      # (each card's processes: for the GPU map only)
-        gmap = self._gpu_map(cards)
-        return {"engine": engine, "live": live, "tiers": tiers, "gpu_map": gmap,
-                "gpu_plain": gmap is None and callable(getattr(self.engine, "vram", None)),   # (QFN: NVML's per-card use)
+        return {"engine": engine, "live": live, "tiers": tiers, "gpu_map": self._gpu_map(cards),
                 "requests": hist[::-1][:None if all_requests else 12],
                 "requests_kept": len(hist), "totals": totals, "loop_guard": guard, "hardware": hw,
                 "hardware_static":
@@ -3194,7 +3191,7 @@ class Service:
         """What fills each GPU (serve/gpu_map.py): the engine's VRAM lines and NVML's cards, with the engine's and the
         vision encoder's processes told apart from other programs; None for an engine without VRAM lines."""
         report = getattr(self.engine, "vram", None)
-        if not report or callable(report):              # (QFN's engine: vram() is its VRAM give-back call, no lines)
+        if not report:
             return None
         proc = getattr(self.engine, "proc", None)
         v = self.vision
@@ -6743,11 +6740,29 @@ def _qfn_engine_class():
         """QFN's driver as this server's engine: several conversations at once are its batch slots (the FIFO's places);
         the fair-slice PAUSE of the GLM engine does not apply (QFN admits and yields slots itself)."""
         can_pause = False
+        vram_reserve = QE.StrataEngine.vram   # the VRAM give-back command; self.vram (below) is the Monitor's lines
 
         def __init__(self, *a, **kw):
             self._tls = threading.local()                # (this request's own prompt progress: Service._progress)
             self._reader = None                          # the thread reading its prompt now (QFN: one at a time)
+            self.vram = []                               # the engine's start-up "VRAM dev=..." lines (gpu_map.parse)
             super().__init__(*a, **kw)
+
+        def _ready_pump(self, proc, out, note=None):
+            """The driver's start-up reader wrapped: the engine's VRAM lines become self.vram (the base class reads up
+            to READY and ignores what it is not); every line still passes through, and so does a VRAM answer after."""
+            self.vram = []
+            seen: queue.Queue = queue.Queue()
+            threading.Thread(target=QE.StrataEngine._ready_pump, args=(proc, seen, note), daemon=True).start()
+            while True:
+                line = seen.get()
+                if line is not None and line.startswith("VRAM "):
+                    part = gpu_map.parse(line)
+                    if part:
+                        self.vram.append(part)
+                out.put(line)
+                if line is None or line.startswith("READY"):
+                    return
 
         def _take_control(self, *a, **kw):
             got = yield from super()._take_control(*a, **kw)

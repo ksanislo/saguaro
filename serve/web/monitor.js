@@ -348,7 +348,7 @@ function GpuMap({m}) {
   let map = m.gpu_map;
   const reads = (m.hardware || {}).gpus || [];
   const plain = !map || !map.length;   // (no VRAM lines: NVML's memory in use, from five GPUs)
-  if (plain && (reads.length >= GPU_PLAIN_FROM || m.gpu_plain)) {   // (gpu_plain: an engine without VRAM lines - QFN's)
+  if (plain && reads.length >= GPU_PLAIN_FROM) {
     const names = ((m.hardware_static || {}).gpu_name || "").split(" + ");
     map = reads.map((r, i) => ({index: r.index, name: names.length === reads.length ? names[i] : "", total: r.mem_total || 0,
                                 free: Math.max(0, (r.mem_total || 0) - (r.mem_used || 0)), parts: {used: r.mem_used || 0}}));
@@ -565,7 +565,7 @@ export function MonitorPage() {
   };
   // the GPU card's rows carry each GPU's readings (several GPUs): the hardware cards then keep their totals
   const reads = (m && (m.hardware || {}).gpus) || [];
-  const rowsN = (m && m.gpu_map && m.gpu_map.length) || (reads.length >= GPU_PLAIN_FROM || (m && m.gpu_plain) ? reads.length : 0);
+  const rowsN = (m && m.gpu_map && m.gpu_map.length) || (reads.length >= GPU_PLAIN_FROM ? reads.length : 0);
   const gpuEach = rowsN > 1 && reads.length > 1;
   return html`<main class="mon">
     ${phone ? html`<header class="chat-head chat-head--float">
