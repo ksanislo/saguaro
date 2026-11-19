@@ -14,6 +14,7 @@
 #include <cuda_runtime.h>
 #if !defined(STRATA_USE_HIP)
 #include <cuda_bf16.h>
+#include <cuda_fp16.h>
 #endif
 #include "../ds4/ds4_numerics.cuh"   // (BF16 on HIP: the same bits in plain arithmetic)
 
@@ -168,11 +169,31 @@ __global__ void softmax_kernel(float* s, int n) {
 
 int blocks_for(size_t n) { return (int) std::min<size_t>((n + 255) / 256, 65535); }
 
+#if !defined(STRATA_USE_HIP)
+// Turing (no BF16 tensor cores): a GEMM's BF16 operands to FP16 in place - exact for |v| <= 65504 (FP16 has the longer
+// mantissa); beyond it saturated and counted (g_vis_sat, reported after the picture), below 2^-24 flushed
+__device__ unsigned g_vis_sat = 0;
+__global__ void bf16_to_f16_inplace(uint16_t* __restrict__ x, size_t n) {
+    for (size_t i = blockIdx.x * (size_t) blockDim.x + threadIdx.x; i < n; i += (size_t) gridDim.x * blockDim.x) {
+        float v = __uint_as_float((uint32_t) x[i] << 16);
+        if (fabsf(v) > 65504.0f) {
+            atomicAdd(&g_vis_sat, 1u);
+            v = copysignf(65504.0f, v);
+        }
+        x[i] = __half_as_ushort(__float2half_rn(v));
+    }
+}
+void to16(const void* x, size_t n, cudaStream_t s) {
+    bf16_to_f16_inplace<<<(int) std::min<size_t>((n + 255) / 256, 4096), 256, 0, s>>>((uint16_t*) x, n);
+}
+#endif
+
 }  // namespace
 
 struct Vision::Impl {
     VisionGeo g;
     int dev = -1;
+    bool f16 = false;   // (Turing: the BF16 GEMMs on FP16 tensor cores; MAYA_MM3_VISION_F16=0 keeps BF16, the reference)
     cudaStream_t s = nullptr, cs = nullptr;   // the encode's stream, the weights' copy stream
     cublasHandle_t blas = nullptr;
     cudaEvent_t ev_up[2] = {nullptr, nullptr};     // a slot's stage copied in (its bounce buffer free again)
@@ -285,6 +306,14 @@ struct Vision::Impl {
     // C [rows][ldc] F32 (columns [0, N) of it) = X [rows][K] BF16 . W [N][K]^T BF16
     bool gemm(const uint8_t* W, int N, int K, const bf16_t* X, int rows, float* C, int ldc, std::string& err) {
         const float one = 1.0f, zero = 0.0f;
+#if !defined(STRATA_USE_HIP)
+        if (f16) {   // (W: this stage's slot, used once; X: made FP16 by xr() after the kernel that wrote it)
+            to16(W, (size_t) N * K, s);
+            VB(cublasGemmEx(blas, CUBLAS_OP_T, CUBLAS_OP_N, N, rows, K, &one, W, CUDA_R_16F, K, X, CUDA_R_16F, K, &zero,
+                            C, CUDA_R_32F, ldc, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+            return true;
+        }
+#endif
         VB(cublasGemmEx(blas, CUBLAS_OP_T, CUBLAS_OP_N, N, rows, K, &one, W, CUDA_R_16BF, K, X, CUDA_R_16BF, K, &zero,
                         C, CUDA_R_32F, ldc, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT));
         return true;
@@ -293,6 +322,14 @@ struct Vision::Impl {
     bool load(const Pack& pk, int dev_, std::string& err) {
         dev = dev_;
         VK(cudaSetDevice(dev));
+#if !defined(STRATA_USE_HIP)
+        {
+            cudaDeviceProp pr{};
+            const char* fv = std::getenv("MAYA_MM3_VISION_F16");
+            f16 = fv != nullptr ? std::atoi(fv) != 0 : cudaGetDeviceProperties(&pr, dev) == cudaSuccess && pr.major < 8;
+            if (f16) std::fprintf(stderr, "maya-mm3: vision: GEMMs on FP16 tensor cores (BF16 -> FP16, exact in range)\n");
+        }
+#endif
         g.dim = (int) pk.num("vision.hidden_size", 1280);
         g.heads = (int) pk.num("vision.num_attention_heads", 16);
         g.hd = g.dim / g.heads;
@@ -542,6 +579,18 @@ struct Vision::Impl {
         int* pos = (int*) (base + y.pos);
         float* pre = fp(y.pre);
         auto pv = [&](size_t o) { return (float*) ((uint8_t*) pre + o); };
+        auto xr = [&](const bf16_t* X, size_t n) {   // (a GEMM input just written: FP16 for the FP16 GEMMs)
+#if !defined(STRATA_USE_HIP)
+            if (f16) to16(X, n, s);
+#endif
+            (void) X, (void) n;
+        };
+#if !defined(STRATA_USE_HIP)
+        if (f16) {
+            const unsigned z = 0;
+            VK(cudaMemcpyToSymbolAsync(g_vis_sat, &z, sizeof z, 0, cudaMemcpyHostToDevice, s));
+        }
+#endif
         VB(cublasSetWorkspace(blas, base + y.ws, kWs));
         VK(cudaMemcpyAsync(pre, pre_h.data(), pre_h.size(), cudaMemcpyHostToDevice, s));
         VK(cudaMemcpyAsync(px, hp.data(), hp.size() * 4, cudaMemcpyHostToDevice, s));
@@ -586,6 +635,7 @@ struct Vision::Impl {
             const LOff& l = lo[(size_t) li];
             auto lf = [&](size_t o) { return (float*) (sb + o); };
             layernorm_kernel<<<N, 256, 0, s>>>(h, lf(l.ln1w), lf(l.ln1b), D, g.eps, x16);
+            xr(x16, ND);
             if (!gemm(sb + l.wqkv, 3 * D, D, x16, N, qkv, 3 * D, err)) return false;
             qkv_rope_kernel<<<N, 256, 0, s>>>(qkv, lf(l.bqkv), pos, pv(o_inv), D, g.heads, g.hd, nf);
             // attention, kHeadChunk heads at a time: S = scale Q K^T (q, k, v read in place from qkv), softmax, S V
@@ -600,11 +650,14 @@ struct Vision::Impl {
                                              att + h0 * g.hd, D, g.hd, nh));
             }
             to_bf16_kernel<<<blocks_for(ND), 256, 0, s>>>(att, ND, x16);
+            xr(x16, ND);
             if (!gemm(sb + l.wo, D, D, x16, N, big, D, err)) return false;
             residual_kernel<<<blocks_for(ND), 256, 0, s>>>(h, big, lf(l.bo), ND, D);
             layernorm_kernel<<<N, 256, 0, s>>>(h, lf(l.ln2w), lf(l.ln2b), D, g.eps, x16);
+            xr(x16, ND);
             if (!gemm(sb + l.w1, F, D, x16, N, big, F, err)) return false;
             bias_act_kernel<<<blocks_for((size_t) N * F), 256, 0, s>>>(big, lf(l.b1), (size_t) N * F, F, 1, nullptr, x16);
+            xr(x16, (size_t) N * F);
             if (!gemm(sb + l.w2, D, F, x16, N, att, D, err)) return false;
             residual_kernel<<<blocks_for(ND), 256, 0, s>>>(h, att, lf(l.b2), ND, D);
             if (!done(li)) return false;
@@ -623,20 +676,31 @@ struct Vision::Impl {
         };
         const int Pj = g.proj, O = g.out_dim, NB = N / (g.merge * g.merge);
         to_bf16_kernel<<<blocks_for(ND), 256, 0, s>>>(h, ND, x16);
+        xr(x16, ND);
         if (!mat(0, x16, N, big)) return false;
         bias_act_kernel<<<blocks_for((size_t) N * Pj), 256, 0, s>>>(big, pv(o_pb1), (size_t) N * Pj, Pj, 1, nullptr, x16);
+        xr(x16, (size_t) N * Pj);
         if (!mat(1, x16, N, big)) return false;
         bias_act_kernel<<<blocks_for((size_t) N * O), 256, 0, s>>>(big, pv(o_pb2), (size_t) N * O, O, 0, nullptr, x16);
+        xr(x16, (size_t) N * O);
         bf16_t* m16 = (bf16_t*) qkv;   // (free now: [NB][Pj] BF16)
         if (!mat(2, x16, NB, big)) return false;
         bias_act_kernel<<<blocks_for((size_t) NB * Pj), 256, 0, s>>>(big, pv(o_pmb1), (size_t) NB * Pj, Pj, 1, nullptr,
                                                                    m16);
+        xr(m16, (size_t) NB * Pj);
         if (!mat(3, m16, NB, out)) return false;
         bias_act_kernel<<<blocks_for((size_t) NB * O), 256, 0, s>>>(out, pv(o_pmb2), (size_t) NB * O, O, 0, out, nullptr);
         rows.resize((size_t) NB * O);
         VK(cudaMemcpyAsync(rows.data(), out, rows.size() * 4, cudaMemcpyDeviceToHost, s));
         VK(cudaStreamSynchronize(s));
         VK(cudaGetLastError());
+#if !defined(STRATA_USE_HIP)
+        if (f16) {
+            unsigned sat = 0;
+            VK(cudaMemcpyFromSymbol(&sat, g_vis_sat, sizeof sat));
+            if (sat) std::fprintf(stderr, "maya-mm3: NOTE: vision: %u activations beyond FP16's range saturated\n", sat);
+        }
+#endif
         return true;
     }
 };
