@@ -197,7 +197,7 @@ export async function confirmContext(n, chatTokens) {
                  "<ul><li>Your chats stay here; the next answer reads the chat again.</li>" +
                  "<li>Requests from other apps get a “try again” until the model is back.</li>" +
                  "<li>If the new size does not fit, the current one comes back by itself.</li>" +
-                 (S.busy ? "<li>The answer being written finishes first.</li>" : "") + "</ul>"];
+                 (S.anyBusy ? "<li>The answer being written finishes first.</li>" : "") + "</ul>"];
   if (e && e.ram) parts.push(`<p class="muted">Its cost here: about ${esc(fmt(e.gb, 1))} GB of RAM, kept pinned for the context.</p>`);
   else if (e) parts.push(`<p class="muted">Its cost here: about ${esc(fmt(e.gb, 1))} GB of GPU memory` +
                     (e.experts ? `, ${esc(fmt(Math.abs(e.experts)))} ${e.experts > 0 ? "fewer" : "more"} experts in VRAM than now.` : ".") + "</p>");
@@ -278,7 +278,7 @@ export async function confirmPort(n) {
     `<p>Maya listens on port <b>${esc(String(now))}</b> now. ` + (S.portInfo.restarts
       ? `Saving starts it again on the new port: the model loads again, ${esc(loadTime())}.</p>` +
         "<ul><li>This page moves to <b>" + esc(url) + "</b> when Maya is back.</li>" +
-        "<li>Apps that use the API need the new port.</li>" + (S.busy ? "<li>The answer being written finishes first.</li>" : "") + "</ul>"
+        "<li>Apps that use the API need the new port.</li>" + (S.anyBusy ? "<li>The answer being written finishes first.</li>" : "") + "</ul>"
       : "The new port is saved and applies from the next start.</p>"), `Use port ${n}`);
   if (!ok) return false;
   try {

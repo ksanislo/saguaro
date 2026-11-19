@@ -2211,6 +2211,14 @@ class RequestStat:
         # what the Monitor shows of this request (several answer at once: each its own, not the shared status's)
         self.phase, self.generated, self.prompt_tokens, self.max_tokens = "waiting", 0, 0, None
         self.started, self.progress, self.prefill_tok_s = None, None, None
+        # shared with other answers (several at once): the most decoding beside it, and the engine's total rate
+        # (summed over them) sampled while it decoded - "this chat 7 tok/s · engine 14 tok/s across 2 chats"
+        self.shared_max, self.eng_sum, self.eng_n = 1, 0.0, 0
+
+    def shared(self) -> dict | None:
+        if self.shared_max < 2 or not self.eng_n:
+            return None
+        return {"chats_max": self.shared_max, "engine_tok_s": round(self.eng_sum / self.eng_n, 1)}
 
     def view(self, now) -> dict:
         """One row of the Monitor's Conversations: reading (with its own progress), writing or between its turns."""
@@ -2378,8 +2386,24 @@ class Service:
             req["top_logprobs"] = n
         top = (getattr(self.engine, "info", None) or {}).get("logprobs")
         if n is not None and not (isinstance(top, int) and top >= n):
-            raise ValueError("logprobs: this model's engine does not report token log-probabilities (the DeepSeek, "
-                             "GLM and MiniMax engines do)")
+            # (an engine without them - QFN's: the answer comes without logprobs, as Strata's server did; /health's
+            #  capabilities say so - a 400 would break clients that always ask)
+            req.pop("logprobs", None)
+            req.pop("top_logprobs", None)
+            if not getattr(self, "_lp_said", False):
+                self._lp_said = True
+                print("[maya] logprobs asked, but this engine does not report them: answered without", flush=True)
+
+    def capabilities(self) -> dict:
+        """What this engine does, for the web app and clients (the same keys for every engine): logprobs (how many
+        alternatives, 0: none), images, conversations at once, the engine's kind."""
+        info = getattr(self.engine, "info", None) or {}
+        top = info.get("logprobs")
+        return {"engine": getattr(self, "engine_kind", None) or "maya",
+                "logprobs": top if isinstance(top, int) else 0,
+                "images": self.vision is not None,
+                "parallel": max(1, int(getattr(self.engine, "multi", 0) or 1)),
+                "max_context": getattr(self.engine, "max_context", None)}
 
     def render_ids(self, messages, tools, kwargs, suffix="") -> list[int]:
         """The template rendered for `messages` and `tools` (+ `suffix`, text the server appends to the prompt) and
@@ -3561,6 +3585,12 @@ class Service:
                 self.current_requests.add(stat)
             stat.note(now, n)                           # this request's window over the last RATE_WINDOW_S
             stat.generated = n
+            k = len(self.current_requests)
+            if k > 1:
+                stat.shared_max = max(stat.shared_max, k)
+                if n % 8 == 0:                          # (the engine's total every 8 tokens: cheap enough)
+                    stat.eng_sum += sum(r.tok_s(now) for r in self.current_requests)
+                    stat.eng_n += 1
             for ev in evs:
                 if ev.kind == "reasoning":
                     s["phase"] = "thinking"
@@ -4440,6 +4470,8 @@ class Service:
                     fresh = getattr(self.engine, "last", None)
                     if fresh is not None and fresh is not before:      # the engine's clock for THIS request
                         timings = request_timings(len(ids), n, last)
+                        if timings is not None and stat.shared():
+                            timings["shared"] = stat.shared()
                         self.last_timings = dict(timings, at=int(time.time())) if timings else None
                     self.last_request_at = time.time()
                     now = time.time()
@@ -5657,7 +5689,8 @@ def make_handler(svc: Service):
                                  "max_text_file": text_file_limit(svc.engine.max_context),
                                  "model_label": svc.model_label,   # (the model first: "GLM-5.3 · Maya-S24")
                                  "images": svc.vision is not None, "api_key": bool(svc.api_key), "defaults": rec,
-                                 "version": MAYA_VERSION, "mcp_tools": bool(svc.mcp), "unloaded": svc.unloaded})
+                                 "version": MAYA_VERSION, "mcp_tools": bool(svc.mcp), "unloaded": svc.unloaded,
+                                 "capabilities": svc.capabilities()})
             elif path == "/api/context":
                 # the dashboard's Context size: the range, the measured cost of the current size, a reload's state
                 if self._authorized():
@@ -6680,6 +6713,25 @@ def _qfn_engine_class():
         the fair-slice PAUSE of the GLM engine does not apply (QFN admits and yields slots itself)."""
         can_pause = False
 
+        def __init__(self, *a, **kw):
+            self._tls = threading.local()                # (this request's own prompt progress: Service._progress)
+            self._reader = None                          # the thread reading its prompt now (QFN: one at a time)
+            super().__init__(*a, **kw)
+
+        def _take_control(self, *a, **kw):
+            got = yield from super()._take_control(*a, **kw)
+            if got is not False:
+                self._reader = threading.get_ident()
+            return got
+
+        def generate(self, ids, max_new, sampling, cancel, embeddings=None):
+            me = threading.get_ident()
+            self._tls.own_pp = None
+            for t in super().generate(ids, max_new, sampling, cancel, embeddings):
+                if self._reader == me and self.progress:
+                    self._tls.own_pp = (self.progress, self.prefill_tok_s_mean)
+                yield t
+
         @property
         def multi(self) -> int:
             return int(getattr(self, "batch", 0) or 0)
@@ -6903,6 +6955,7 @@ def main() -> int:
     svc.gpu_index = (gpu_list(cfg) or [0])[0]           # the Monitor reads the card the engine runs on (issue #51)
     svc.gpu_indices = gpu_list(cfg)                     # ... or every card of a layer split (issue #112)
     svc.backend = cfg.get("backend")                    # the Monitor's GPU reader: sysfs on AMD/HIP, NVML otherwise
+    svc.engine_kind = {"qfn": "qfn"}.get(a.engine) or (maya_quants.family_of(cfg) if cfg else "mock")
     svc.model_label = cfg.get("label") or (maya_quants.config_label(cfg)   # (configs of every release: their installer record)
                                           if (cfg.get("installer") or {}).get("written") else None)   # (else the id)
     if a.config:

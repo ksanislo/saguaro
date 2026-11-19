@@ -89,7 +89,7 @@ async function switchTo(m) {
         `<li>Your chats stay here. The chat settings start at ${esc(titleOf(m))}'s own standard parameters and thinking ` +
         "level: a model's are not another's.</li>" +
         `<li>Apps using the API get a “try again” until it is back, then the model name <code>${esc(m.model)}</code>.</li>` +
-        (S.busy ? "<li>The answer being written finishes first.</li>" : "") + "</ul>"
+        (S.anyBusy ? "<li>The answer being written finishes first.</li>" : "") + "</ul>"
       : `<p><b>${esc(titleOf(m))}</b> becomes the model Maya starts next. This server was not started by maya.sh or ` +
         "START-MAYA.bat, so it cannot start again by itself: stop it and start Maya again.</p>"),
     restarts ? "Switch model" : "Start it next");
@@ -182,7 +182,7 @@ async function saveSettings(m) {
       `<p>Maya saves them into <code>${esc(m.file)}</code> and loads the model again with them. That takes a few minutes.</p>` +
       "<ul><li>Your chats stay here; the next answer reads the chat again.</li>" +
       "<li>Apps using the API get a “try again” until it is back.</li>" +
-      (S.busy ? "<li>The answer being written finishes first.</li>" : "") + "</ul>", "Save and restart");
+      (S.anyBusy ? "<li>The answer being written finishes first.</li>" : "") + "</ul>", "Save and restart");
     if (!ok) return;
   }
   MS.saving = true;

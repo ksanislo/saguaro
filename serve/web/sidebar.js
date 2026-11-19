@@ -59,7 +59,7 @@ function ChatRow({c, indent}) {
   const btn = useRef(null);
   const close = () => { setOpen(false); if (btn.current) btn.current.focus(); };   // (a dialog then returns here)
   const cur = c === S.current && S.view === "chat";
-  const writing = S.busy && S.busy.chat === c;
+  const writing = S.running.has(c);
   return html`<div class=${`row${cur ? " is-current" : ""}${open ? " is-menu" : ""}`}>
     <button type="button" class=${`row__open${indent ? " row__open--in" : ""}`} title=${chatTitle(c)} aria-current=${cur ? "page" : undefined}
       onClick=${() => openChat(c)}>${chatTitle(c)}</button>

@@ -108,7 +108,7 @@ export function newChat() {
   focusInput();
 }
 export async function deleteChat(c) {
-  if (S.busy && S.busy.chat === c) { toast("warn", "Still writing", "Stop the answer first."); return; }
+  if (S.running.has(c)) { toast("warn", "Still writing", "Stop the answer first."); return; }
   S.chats = S.chats.filter((x) => x !== c);
   try { if (!dbBroken) await db.del(c.id); } catch (e) { /* ignore */ }
   if (dbBroken) {
@@ -335,7 +335,10 @@ function answerMeta(m, n, secs) {
   if (n) {
     const t = m.timings || {};
     const r = t.predicted_per_second || (secs > 0.25 ? n / secs : null);
-    parts.push(`${fmt(n)} tokens${r ? ` · ${fmt(r, 1)} tok/s` : ""}`);
+    // (written beside other answers: its own rate, then the engine's total - one is not the other)
+    const sh = t.shared;
+    parts.push(`${fmt(n)} tokens${r ? ` · ${fmt(r, 1)} tok/s${sh ? " this chat" : ""}` : ""}` +
+               (sh ? ` · engine ${fmt(sh.engine_tok_s, 1)} tok/s across ${sh.chats_max} chats` : ""));
     if (t.prompt_n != null && t.prompt_ms) {
       parts.push(`read ${fmt(t.prompt_n)} new prompt tokens in ${fmt(t.prompt_ms / 1000, 1)} s` +
                  (t.cache_n ? ` (${fmt(t.cache_n)} reused)` : ""));
@@ -367,7 +370,8 @@ export async function answer(resumeJob = null) {
     messages.push(m);
   }
   const controller = new AbortController();
-  S.busy = {controller, msg: m, chat, job: resumeJob || undefined};
+  const busy = {controller, msg: m, chat, job: resumeJob || undefined};
+  S.running.set(chat, busy);
   emit();
   scrollDown(true);
 
@@ -427,7 +431,7 @@ export async function answer(resumeJob = null) {
         nRecv++;
         if (j.id && !jobId) {
           jobId = j.id;
-          S.busy.job = jobId;
+          busy.job = jobId;
           m.job = jobId;
           m.pending = true;
           saveChat(chat);                                     // a reload can take this answer back up
@@ -513,7 +517,7 @@ export async function answer(resumeJob = null) {
   delete m.job;
   if (m._md) m._md = null;
   ended = true;
-  S.busy = null;
+  S.running.delete(chat);
   saveChat(chat);
   emit();
   if (chat === S.current) { scrollDown(); updateCtxMeter(); }

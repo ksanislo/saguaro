@@ -71,7 +71,7 @@ function Throughput({m}) {
     ? {hour: "2-digit", minute: "2-digit"} : {weekday: "short", hour: "2-digit", minute: "2-digit"}) : "";
   return html`<section class="card card--wide" aria-label="Throughput">
     <div class="speeds">
-      <div class="speed"><span class="speed__label"><i class="key key--line"></i>Decode · ${many ? `${live.writing} writing` : gen ? "writing now" : live.state === "reading" ? "reading the prompt" : last ? "last request" : "waiting for a request"}</span>
+      <div class="speed"><span class="speed__label"><i class="key key--line"></i>Decode · ${many ? `engine total, ${live.writing} chats writing` : gen ? "writing now" : live.state === "reading" ? "reading the prompt" : last ? "last request" : "waiting for a request"}</span>
         <div class="speed__row"><span class="speed__big num">${speed == null ? "–" : fmt(speed, 1)}<small>tok/s</small></span>
           ${/* the peak beside the live Decode (below it on a phone), small: a reference, not a second headline */ ""}
           <span class="speed__peak num" title=${peak ? `The highest decode speed since Maya started: ${fmt(peak.tok_s, 1)} tok/s at ${at}, ${fmt(peak.tokens)} tokens into the answer. Live speeds and finished answers count, from 32 tokens on.`
@@ -549,7 +549,7 @@ function Conversations({m}) {
     <div class="card__head"><span class="card__title">Conversations</span>
       <span class="card__sub">${convs.length ? `${convs.length} with the engine now` : "none running"}</span></div>
     <div class="table-wrap"><table class="table num">
-      <thead><tr><th class="l">Now</th><th>Prompt</th><th>Output</th><th title="Answer tokens per second (prompt tokens while it reads)">Speed</th><th>Time</th></tr></thead>
+      <thead><tr><th class="l">Now</th><th>Prompt</th><th>Output</th><th title="This conversation's own answer tokens per second (prompt tokens while it reads) - the engine's total is Decode above">Speed (this chat)</th><th>Time</th></tr></thead>
       <tbody>${convs.map((c) => row(c, false))}${ended.slice(0, Math.max(0, 6 - convs.length)).map((c) => row(c, true))}</tbody>
     </table></div>
   </section>`;

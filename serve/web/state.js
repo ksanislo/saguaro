@@ -29,7 +29,11 @@ export const S = {
 
   // the chats (chats.js)
   chats: [], current: null, folders: store.get("folders", []), folderOpen: store.get("folders-open", {}),
-  busy: null, editIndex: null, attachments: [], draft: "", hint: "",
+  // the answers being written: chat -> {controller, msg, chat, job} - several chats at once (the engine's places)
+  running: new Map(),
+  get busy() { return this.running.get(this.current) || null; },   // (the open chat's answer)
+  get anyBusy() { return this.running.size > 0; },
+  editIndex: null, attachments: [], draft: "", hint: "",
   ctx: {tokens: null, approx: false, why: ""},
 };
 
