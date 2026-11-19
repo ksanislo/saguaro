@@ -1,4 +1,4 @@
-"""tools/test_setup_mm3.py - the setup's MiniMax-M3.1-Flash (maya.py): where its EXL3 quant is offered, the context it
+"""tools/test_setup_mm3.py - the setup's MiniMax-M3.1-Flash (saguaro.py): where its EXL3 quant is offered, the context it
 recommends by the PC's memory (and its warnings), its config - the model card's sampling, the thinking level, pictures
 on - and what a setup again keeps.  No GPU, no network.
 
@@ -13,7 +13,7 @@ import unittest
 from unittest.mock import patch
 
 sys.path[:0] = [str(Path(__file__).resolve().parents[1]), str(Path(__file__).resolve().parent)]
-import maya  # noqa: E402
+import saguaro as maya  # noqa: E402
 
 
 class Failed(Exception):

@@ -18,7 +18,7 @@ from tokenizers import Tokenizer
 
 from loop_test import EOS, THINK_END, repeats
 
-FACT = "Note for whoever reads this archive: the launch code for Project Maya is ORCHID-7342-KESTREL."
+FACT = "Note for whoever reads this archive: the launch code for Saguaro is ORCHID-7342-KESTREL."
 QUESTION = ("Above is a long archive of documents. At its very beginning there is a note with a launch code. "
             "What is the launch code? Reply with the code and one sentence about where you found it.")
 

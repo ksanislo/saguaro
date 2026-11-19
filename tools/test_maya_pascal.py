@@ -1,4 +1,4 @@
-"""Pascal (compute capability 6.x) in Maya's setup: accepted as experimental, built with CUDA 12 for its own arch like
+"""Pascal (compute capability 6.x) in Saguaro's setup: accepted as experimental, built with CUDA 12 for its own arch like
 Volta, and anything older still refused (#212, #214).  No GPU needed."""
 from pathlib import Path
 import sys
@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import maya
+import saguaro as maya
 
 
 def gpu(index, arch, name, vram):

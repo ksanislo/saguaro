@@ -1,5 +1,5 @@
 """The speed calibration: does the DFlash2 drafter make THIS PC faster than the MTP block?  (The setup when DFlash2 is
-chosen, the first start after an update for a config that drafts with it, ./maya.sh --speed-calibration.)
+chosen, the first start after an update for a config that drafts with it, ./saguaro.sh --speed-calibration.)
 
 DFlash2 drafts up to 7 tokens a round and the model checks them in one pass.  Where the model's experts sit in VRAM
 that pass is cheap and DFlash2 wins (#106: +44% on nine GPUs, +12% on two, +19% on one RTX 3090); where most of them
@@ -22,7 +22,7 @@ The engine works on a copy of this PC's expert usage file (calibrate_glm.usage_c
 or routing trace (calibrate_glm.without_writes) and keeps no conversations aside (STRATA_GLM_SLOTS=0): the
 calibration's answers neither lead the next start's warm-up nor take the place of this PC's kept conversations.
 
-    python tools/calibrate_draft.py maya-<model>.json     # measure and print; ./maya.sh --speed-calibration applies it
+    python tools/calibrate_draft.py maya-<model>.json     # measure and print; ./saguaro.sh --speed-calibration applies it
 """
 from __future__ import annotations
 

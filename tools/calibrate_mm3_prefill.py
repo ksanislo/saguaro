@@ -16,7 +16,7 @@ and the driver, which every later start reads (a new GPU or driver: the defaults
 config's own settings (context, KV cache, pictures, drafter) stay as they are, so the memory measured is the one the
 model runs with.
 
-    python tools/calibrate_mm3_prefill.py maya-mm3.json     # measure and print; ./maya.sh --calibrate does it too
+    python tools/calibrate_mm3_prefill.py maya-mm3.json     # measure and print; ./saguaro.sh --calibrate does it too
 """
 from __future__ import annotations
 

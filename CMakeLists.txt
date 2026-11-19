@@ -62,7 +62,7 @@ endif()
 # build without it does not link (found by @boxwrench in #17)
 if(STRATA_ENABLE_HIP AND NOT STRATA_PREFILL_MMQ)
   message(FATAL_ERROR "A HIP build needs -DSTRATA_PREFILL_MMQ=ON: the GLM prompt path multiplies its experts with "
-                      "MMQ (./maya.sh --backend hip sets it)")
+                      "MMQ (./saguaro.sh --backend hip sets it)")
 endif()
 if(STRATA_ENABLE_CUDA AND STRATA_ENABLE_HIP)
   message(FATAL_ERROR "STRATA_ENABLE_CUDA and STRATA_ENABLE_HIP are separate backends; enable only one")
@@ -140,7 +140,7 @@ if(STRATA_ENABLE_CUDA)
   foreach(_a IN LISTS CMAKE_CUDA_ARCHITECTURES)
     string(REGEX REPLACE "-.*$" "" _base "${_a}")     # 120-real / 120-virtual are still 120
     # Developed on sm_120 (RTX 50) and Volta (sm_70: GLM, maya-ds4 and maya-mm3 run on V100s); GLM also builds for
-    # Pascal (sm_6x, experimental - maya.py's MIN_CC).  Below sm_60 is refused.  maya-mm3 is built for sm_70 and
+    # Pascal (sm_6x, experimental - saguaro.py's MIN_CC).  Below sm_60 is refused.  maya-mm3 is built for sm_70 and
     # newer only (its kernels take more than Pascal's 4 KB of parameters: _mm3_archs below).
     if(_base STREQUAL "native" OR _base STREQUAL "all" OR _base STREQUAL "all-major")
       continue()
@@ -152,7 +152,7 @@ if(STRATA_ENABLE_CUDA)
     endif()
   endforeach()
   message(STATUS "Maya: CUDA enabled, arch ${CMAKE_CUDA_ARCHITECTURES}")
-  # Pascal (sm_6x - a "native" build on a Tesla P40, as maya.py's arch_setting() asks for below sm_75): GP102 / GP104
+  # Pascal (sm_6x - a "native" build on a Tesla P40, as saguaro.py's arch_setting() asks for below sm_75): GP102 / GP104
   # cache global loads in L2 only unless the code is compiled to cache them in L1 as well, and the decode's GEMVs - many
   # small loads of weights, scales and the q8_1 activations every warp of a block reads - starve there (Maya-L's Q6_K
   # dense GEMV ran at a quarter of a P40's bandwidth or less).  -dlcm=ca caches them in L1, as Volta and newer do by

@@ -1,4 +1,4 @@
-"""tools/mm3/pack_gguf.py on a synthetic MiniMax-M3 GGUF set (llama.cpp's minimax-m3 layout, two shards and the Maya
+"""tools/mm3/pack_gguf.py on a synthetic MiniMax-M3 GGUF set (llama.cpp's minimax-m3 layout, two shards and the Saguaro
 indexers side file, tiny dimensions): the geometry, the checkpoint's names, the experts an entry each at their bytes,
 the side file's indexers, and the refusals (no side file, a shard missing).
 
@@ -197,7 +197,7 @@ class PackGguf(unittest.TestCase):
             self.assertEqual(len(set(blob)), 1)
             tok = json.loads((pack / "tokenizer" / "tokenizer.json").read_text())
             self.assertEqual(tok, {"pre": "minimax", "special_ids": {"bos": 4, "eos": 5}})
-            self.assertTrue((pack / "tokenizer" / "chat_template.jinja").read_text(encoding="utf-8").startswith("{#- Project Maya"))
+            self.assertTrue((pack / "tokenizer" / "chat_template.jinja").read_text(encoding="utf-8").startswith("{#- Saguaro"))
 
     def test_companions(self):
         """The EXL3 repo's vision tower and DSpark draft beside the GGUF: indexed with pack.py's keys, relative paths;

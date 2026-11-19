@@ -1,4 +1,4 @@
-"""tools/mm3/pack_gguf.py - the engine's pack for a MiniMax-M3.1-Flash GGUF set (Project Maya's MiniMax-M3.1-Flash-Maya-XS /
+"""tools/mm3/pack_gguf.py - the engine's pack for a MiniMax-M3.1-Flash GGUF set (Saguaro's MiniMax-M3.1-Flash-Maya-XS /
 -S: llama.cpp's `minimax-m3` layout, dense matrices in Q4_K..Q8_0, routed experts in IQ1_S..IQ3_XXS), beside the model's
 files (no weights copied).
 
@@ -11,11 +11,11 @@ writes <model>/maya-mm3/ in pack.py's format, so maya-mm3 reads both:
                 `file <i> <name>` lines, then `t <name> <dtype> <file> <offset> <bytes> <dims...>` - dims outermost first
                 (a matrix [out][in]), dtype ggml's type name (Q6_K, IQ1_S, F32 ...); the routed experts an entry each
                 (layers.N.block_sparse_moe.experts.E.w1.weight: expert E's slice of the GGUF's stacked tensor)
-  tokenizer/    the server's tokenizer from the GGUF's vocabulary and merges (pre "minimax"), and Maya's chat template
+  tokenizer/    the server's tokenizer from the GGUF's vocabulary and merges (pre "minimax"), and Saguaro's chat template
                 (this directory's chat_template.jinja - the same for every MiniMax pack)
 
 MiniMax-M3.1 runs its sparse attention's indexer in all 60 layers; stock llama.cpp's `minimax-m3` (M3) creates indexers
-only from the first MoE layer on, so the Maya sets keep layers 0-2's (12 tensors) in a side file beside the shards,
+only from the first MoE layer on, so the Saguaro sets keep layers 0-2's (12 tensors) in a side file beside the shards,
 <name>-maya-indexers.bin (a GGUF; .gguf before v1.1.31 - the Hub took a lone .gguf for the model): this pack takes
 it (--indexers names another).  Without it the pack stops: the engine runs
 the model as MiniMax defines it, never those layers on full attention in silence.
@@ -52,7 +52,7 @@ import pack as exl3_pack  # noqa: E402  (tools/mm3/pack.py: its mm3.txt writer f
 from st import SafeTensors  # noqa: E402
 
 COMPANIONS = "MiniMax-M3.1-Flash-companions"   # (the setup's folder of the EXL3 repo's vision tower and DSpark draft)
-EXL3_DIR = "MiniMax-M3.1-Flash-EXL3-3.5bpw"    # (a whole EXL3 download: maya.py's MM3_DIR)
+EXL3_DIR = "MiniMax-M3.1-Flash-EXL3-3.5bpw"    # (a whole EXL3 download: saguaro.py's MM3_DIR)
 
 
 def st_tensors(path: pathlib.Path) -> list:
@@ -186,7 +186,7 @@ def geometry(kv: dict, vocab: int, shared_ff: int) -> dict:
 
 def write_tokenizer(out: pathlib.Path, kv: dict) -> dict:
     """pack.py's layout from the GGUF's vocabulary: vocab.json (id order), merges.txt, token_type.json,
-    tokenizer.json {pre minimax, special_ids}, and Maya's chat template."""
+    tokenizer.json {pre minimax, special_ids}, and Saguaro's chat template."""
     tokens = kv["tokenizer.ggml.tokens"]
     types = kv.get("tokenizer.ggml.token_type") or [1] * len(tokens)
     merges = kv.get("tokenizer.ggml.merges") or []
@@ -306,7 +306,7 @@ def main() -> int:
     if lacking:
         raise SystemExit(
             "the sparse-attention indexer of layer%s %s is not in the set%s: MiniMax-M3.1 runs it in every layer. The "
-            "Maya sets keep layers 0-2's in <name>-maya-indexers.bin beside the shards - download it into %s (or name "
+            "Saguaro sets keep layers 0-2's in <name>-maya-indexers.bin beside the shards - download it into %s (or name "
             "it with --indexers)" % ("s" if len(lacking) > 1 else "", ", ".join(map(str, lacking[:8])),
                                       "" if sg is None else " nor in " + side.name, model))
     # the EXL3 repo's vision tower and DSpark draft beside the GGUF's weights (the same files, any quant)

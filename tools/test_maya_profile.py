@@ -1,4 +1,4 @@
-"""Maya's expert profile in the configs it writes (Strata's --expert-profile engine arg: the shipped
+"""Saguaro's expert profile in the configs it writes (Strata's --expert-profile engine arg: the shipped
 data/expert-profile-glm.bin, a hand-wired one and --expert-profile-save kept); no GPU, network or model downloads
 required.
 
@@ -16,7 +16,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
-import maya
+import saguaro as maya
 from gguf_writer import GGUFWriter
 
 

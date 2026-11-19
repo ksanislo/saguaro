@@ -1,4 +1,4 @@
-"""Tune the GLM engine's CPU lane for this PC (./maya.sh --calibrate) - Strata's tools/calibrate.py, for GLM-5.3-Flash.
+"""Tune the GLM engine's CPU lane for this PC (./saguaro.sh --calibrate) - Strata's tools/calibrate.py, for GLM-5.3-Flash.
 
 On one or two GPUs most of a token's experts are not in VRAM; the CPU LANE computes the ones in the RAM tier while the
 GPU runs the rest.  Two of its settings depend on the PC more than on the model:
@@ -25,7 +25,7 @@ tiers, and the engine works on a copy of this PC's expert usage file (usage_copy
 A setting is kept only when it beats the engine's own by more than MIN_GAIN in an interleaved re-measurement - the
 expert tiers follow the text and the OS adds noise, so single measurements differ by a few percent.
 
-    python tools/calibrate_glm.py maya-<model>.json      # measure and print; ./maya.sh --calibrate also saves it
+    python tools/calibrate_glm.py maya-<model>.json      # measure and print; ./saguaro.sh --calibrate also saves it
 """
 from __future__ import annotations
 

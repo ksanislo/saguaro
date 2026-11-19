@@ -1,6 +1,6 @@
 # DS4 prefill expert statistics
 
-Set `DS4_PREFILL_STATS=1` when starting Maya to print one `DS4_PREFILL` line per
+Set `DS4_PREFILL_STATS=1` when starting Saguaro to print one `DS4_PREFILL` line per
 participating GPU after each successful prefill run. This is optional diagnostic
 output; it does not change routing, cache policy, or model arithmetic.
 

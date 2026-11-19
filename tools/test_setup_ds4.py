@@ -1,4 +1,4 @@
-"""tools/test_setup_ds4.py - the setup's two models: GLM-5.3-Flash or DeepSeek-V4.1-Flash-1017 (maya.py; DeepSeek at 2.9 or
+"""tools/test_setup_ds4.py - the setup's two models: GLM-5.3-Flash or DeepSeek-V4.1-Flash-1017 (saguaro.py; DeepSeek at 2.9 or
 3.5 bits) - which one the options pick, the DeepSeek downloads' manifests and URLs, the Engram tables shared between the
 quants, its config (what a setup again keeps) and its start command.
 No GPU, no network.
@@ -17,7 +17,7 @@ import unittest
 from unittest.mock import patch
 
 sys.path[:0] = [str(Path(__file__).resolve().parents[1]), str(Path(__file__).resolve().parent)]
-import maya  # noqa: E402
+import saguaro as maya  # noqa: E402
 
 
 def args(**kw):
@@ -249,7 +249,7 @@ class Config(unittest.TestCase):
         self.assertEqual(c["gpu"], [0, 1, 2])
         self.assertEqual(c["installer"]["family"], "deepseek")
         self.assertEqual(maya.config_family(c), "deepseek")
-        self.assertIn("maya.py", (self.root / ("run-maya-ds4" + (".bat" if maya.WIN else ".sh"))).read_text())
+        self.assertIn("saguaro.py", (self.root / ("run-maya-ds4" + (".bat" if maya.WIN else ".sh"))).read_text())
 
     def test_exl3_pictures_on_v100(self):
         """The EXL3 quant's vision tower is the GGUF's (the same BF16 cuBLAS GEMMs): pictures on V100s too, and a setup
@@ -359,7 +359,7 @@ class Config(unittest.TestCase):
 
 
 class Calibrate(unittest.TestCase):
-    """./maya.sh --calibrate on a DeepSeek config: tools/calibrate_ds4_tp.py's result into the config and the store."""
+    """./saguaro.sh --calibrate on a DeepSeek config: tools/calibrate_ds4_tp.py's result into the config and the store."""
 
     def setUp(self):
         self.root = Path(tempfile.mkdtemp())

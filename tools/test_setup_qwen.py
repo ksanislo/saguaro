@@ -16,7 +16,7 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "tools")]
-import maya  # noqa: E402
+import saguaro as maya  # noqa: E402
 import maya_quants as Q  # noqa: E402
 
 TEMPLATE = ("{%- set enable_thinking = true %}{%- for m in messages %}"

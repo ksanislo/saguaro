@@ -13,7 +13,7 @@ What differs from DeepSeek's:
 - --dspark none - and with it, the same questions; kept only when it wins by more than its MIN_GAIN); maya-mm3 takes
 --dspark none / off / on and --expert-profile as maya-ds4 does, so the measure is DeepSeek's as it is.
 
-The result goes into the config's args (the caller - ./maya.sh --calibrate - writes it); the engine's own choice is
+The result goes into the config's args (the caller - ./saguaro.sh --calibrate - writes it); the engine's own choice is
 left as no flag.
 
     python tools/mm3/calibrate.py maya-mm3.json            # --tp and --cpu-threads: measure and print

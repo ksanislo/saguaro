@@ -95,7 +95,7 @@ def styled(kind: str, text: str) -> Text:
         return Text.assemble(("› ", ACCENT_TEXT), (line, ACCENT_TEXT))
     if kind == "out":
         return Text.from_ansi(text, style=MUTED)
-    if kind == "live":                                  # Maya's server: "ready:", warnings, errors stand out
+    if kind == "live":                                  # Saguaro's server: "ready:", warnings, errors stand out
         return Text.from_ansi(text, style=f"bold {OK}" if text.startswith("ready:") else WARN if "WARNING" in text
                               else DANGER if re.search(r"\berror\b|Traceback", text, re.I) else INK_SOFT)
     if line.startswith("> "):                           # a command as it runs
@@ -143,11 +143,11 @@ class Card(Vertical):
 
 def setup_card(app, spin: str) -> Text:
     """The card while the setup runs (setup_tui.SetupApp): its step, what runs now, the progress - or, for a
-    start without a setup, what runs before Maya does (a compile after an update)."""
+    start without a setup, what runs before Saguaro does (a compile after an update)."""
     n = app.cur
-    name = app.titles.get(n, "Starting" if app.steps else "Starting Maya")
+    name = app.titles.get(n, "Starting" if app.steps else "Starting Saguaro")
     if app.pending is not None:
-        stopped = "Maya stopped" if app.serving is not None else "The setup stopped"
+        stopped = "Saguaro stopped" if app.serving is not None else "The setup stopped"
         now = Text(f"{stopped} (below)", f"bold {DANGER}") if app.pending[2] == "fail" else \
             Text("Waiting for your answer (below)", f"bold {WARN}")
     else:
@@ -164,7 +164,7 @@ def setup_card(app, spin: str) -> Text:
 
 
 def serving_card(s: dict, spin: str) -> Text:
-    """The card while Maya runs on the screen: `s` is what the screen knows of its server (setup_tui, ev_serve)."""
+    """The card while Saguaro runs on the screen: `s` is what the screen knows of its server (setup_tui, ev_serve)."""
     took = clock(time.monotonic() - s["since"])
     if s["state"] == "ready":
         status = Text.assemble(("● ", OK), ("Ready", f"bold {OK}"), (f" for {took}", MUTED),
@@ -224,7 +224,7 @@ STOP_CSS = """
 
 
 class StopScreen(ModalScreen):
-    """Ctrl+C: stop the setup - or Maya, once it runs?  (Ctrl+C again: yes.)"""
+    """Ctrl+C: stop the setup - or Saguaro, once it runs?  (Ctrl+C again: yes.)"""
 
     CSS = STOP_CSS
     BINDINGS = [Binding("escape", "dismiss(False)", show=False)]
@@ -238,11 +238,11 @@ class StopScreen(ModalScreen):
             yield Static(Text(f"The dashboard and the API close, and the model leaves the GPUs. {self.me} starts it "
                               "again." if self.serving else f"Everything finished so far is kept: {self.me} continues "
                               "where it stopped. The command running now ends.", INK_SOFT))
-            yield OptionList(*(("Keep running", "Stop Maya") if self.serving else ("Keep going", "Stop the setup")))
+            yield OptionList(*(("Keep running", "Stop Saguaro") if self.serving else ("Keep going", "Stop the setup")))
 
     def on_mount(self) -> None:
         box = self.query_one("#box")
-        box.border_title = title("Stop Maya?" if self.serving else "Stop the setup?")
+        box.border_title = title("Stop Saguaro?" if self.serving else "Stop the setup?")
         box.border_subtitle = hints(("Enter", "Choose"), ("Esc", "Back"))
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:

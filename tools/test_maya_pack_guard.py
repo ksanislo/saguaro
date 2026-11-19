@@ -1,4 +1,4 @@
-"""Maya's guard against a pack whose model files changed after it was built (#155: built while a download manager was
+"""Saguaro's guard against a pack whose model files changed after it was built (#155: built while a download manager was
 still filling preallocated files): the record in the pack, the check of packs from before it, the sha256 a model file
 is checked against once, and the setup building such a pack again; no GPU, network or model downloads required.
 
@@ -13,7 +13,7 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import maya
+import saguaro as maya
 
 
 class PackGuardTests(unittest.TestCase):

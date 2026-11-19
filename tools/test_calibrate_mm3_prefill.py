@@ -1,4 +1,4 @@
-"""tools/test_calibrate_mm3_prefill.py - MiniMax's prefill calibration (tools/calibrate_mm3_prefill.py, maya.py's
+"""tools/test_calibrate_mm3_prefill.py - MiniMax's prefill calibration (tools/calibrate_mm3_prefill.py, saguaro.py's
 prefill_calibration): the engine's command (the config's arguments, the calibration's own flags replaced, the prompt's
 tokens), its JSON taken, a failed run raised; the setup's record in the config, a start measuring once, --calibrate
 measuring again.  No GPU, no engine.
@@ -15,7 +15,7 @@ from unittest.mock import patch
 
 sys.path[:0] = [str(Path(__file__).resolve().parents[1]), str(Path(__file__).resolve().parent)]
 import calibrate_mm3_prefill as CPF  # noqa: E402
-import maya  # noqa: E402
+import saguaro as maya  # noqa: E402
 
 
 def mm3_cfg(**kw):

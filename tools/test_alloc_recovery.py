@@ -111,7 +111,7 @@ class Engine:
         return self.log_path.read_text(encoding="utf-8", errors="replace")
 
 
-@unittest.skipIf(config_path() is None, "no installed model (run ./maya.sh --setup)")
+@unittest.skipIf(config_path() is None, "no installed model (run ./saguaro.sh --setup)")
 @unittest.skipIf(not gpu_present(), "no NVIDIA GPU")
 class AllocRecovery(unittest.TestCase):
     @classmethod

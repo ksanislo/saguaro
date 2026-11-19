@@ -15,7 +15,7 @@ import unittest
 from unittest.mock import patch
 
 sys.path[:0] = [str(Path(__file__).resolve().parents[1]), str(Path(__file__).resolve().parent)]
-import maya  # noqa: E402
+import saguaro as maya  # noqa: E402
 import maya_quants as Q  # noqa: E402
 
 # old name -> (family, the setup's key): every --model / --ds4-quant / --mm3-quant value of v1.1.29 and before
@@ -147,7 +147,7 @@ class ModelOption(unittest.TestCase):
 
     def test_errors(self):
         why, _ = self.run_opt(model="Maya-XS")
-        self.assertIn("not a model Maya knows", why)
+        self.assertIn("not a model Saguaro knows", why)
         self.assertIn("minimax-maya-xs", why)
         why, _ = self.run_opt(model="minimax-maya-xs", mm3_quant="gguf-s")
         self.assertIn("give one of them", why)
@@ -159,7 +159,7 @@ class ModelOption(unittest.TestCase):
         r = subprocess.run([sys.executable, str(Path(maya.__file__)), "--model", "glm-maya-zz", "--check"],
                            capture_output=True, text=True, timeout=120, env=dict(maya.os.environ, MAYA_SH="1"))
         self.assertEqual(r.returncode, 2, r.stderr)
-        self.assertIn("not a model Maya knows", r.stderr)
+        self.assertIn("not a model Saguaro knows", r.stderr)
 
 
 def v1129_configs(root: Path) -> dict:
@@ -235,7 +235,7 @@ class OldConfigs(unittest.TestCase):
         """The setup's screen shows what runs model first (server_command's "label"); without one as before."""
         try:
             from setup_look import serving_card
-        except ImportError:   # (Textual / rich: from Maya's own wheels, in .venv)
+        except ImportError:   # (Textual / rich: from Saguaro's own wheels, in .venv)
             self.skipTest("the setup screen's libraries are not installed here")
         s = {"model": "glm-5.3-flash", "quant": "Maya-S24", "context": "65536", "dashboard": "http://127.0.0.1:9/",
              "api": "http://127.0.0.1:9/v1", "state": "ready", "since": 0, "speed": None}
