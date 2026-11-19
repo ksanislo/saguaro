@@ -608,6 +608,7 @@ struct Model::Impl {
         }
         for (auto& kv : ov_events)
             for (cudaEvent_t e : kv.second) cudaEventDestroy(e);
+        for (auto& kv : help_ev) cudaEventDestroy(kv.second);
         if (pool && node_pools.empty()) cudaFreeHost(pool);
         for (auto& np : node_pools) {
             cudaHostUnregister(np.first);
@@ -2729,6 +2730,41 @@ struct Model::Impl {
     // the routed experts of layer l for this chunk: top [T][K] on the host -> y rows (by the sorted rows' order) and
     // invrow; a pass over the resident experts (by resident slot), then one a batch of the staged experts (by staging
     // slot: an expert already in a slot keeps it, the others take the least recently used slots)
+    // MAYA_MM3_READ_HELP=1 (with STAGE_OVERLAP, a prompt's chunk): the card beside d on its NUMA node stages and computes
+    // half of the layer's staged experts over its own PCIe link - the rows (xn, xn16) copied to it, its experts' output
+    // rows copied back before the combine.  The same kernels on the same rows: the same bits.
+    int helper_of(const Dev& d) {
+        static const bool on = [] {
+            const char* v = ::mm3::env("MM3_READ_HELP");
+            return v != nullptr && std::atoi(v) != 0;
+        }();
+        if (!on) return -1;
+        auto it = helper_cache.find(d.id);
+        if (it != helper_cache.end()) return it->second;
+        int best = -1;
+        const int nd = dev_node(d.id);
+        for (size_t i = 0; i < D.size(); ++i) {
+            const Dev& c = D[i];
+            if (c.id == d.id || c.n_slots < 2 || c.cs == nullptr || c.xn == nullptr || c.y == nullptr) continue;
+            if (dev_node(c.id) != nd) continue;
+            best = (int) i;
+            break;
+        }
+        helper_cache[d.id] = best;
+        return best;
+    }
+    std::map<int, int> helper_cache;
+    std::map<int, cudaEvent_t> help_ev;   // (per helper card: its output rows copied back)
+    cudaEvent_t helper_event(Dev& c) {
+        auto it = help_ev.find(c.id);
+        if (it != help_ev.end()) return it->second;
+        cudaEvent_t e = nullptr;
+        cudaSetDevice(c.id);
+        cudaEventCreateWithFlags(&e, cudaEventDisableTiming);
+        help_ev[c.id] = e;
+        return e;
+    }
+
     bool experts(Layer& l, Dev& d, int T, const std::vector<int>& top, std::string& err) {
         const int K = g.k_exp;
         std::vector<std::vector<int>> rows_of((size_t) g.n_exp);   // expert -> its (t * K + slot) entries
@@ -2744,9 +2780,14 @@ struct Model::Impl {
             int row0 = 0, rows = 0, max_rows = 0;
             std::vector<int> bounds;
             bool staged = false;
+            Dev* dev = nullptr;             // (the card that computes it: d, or the read helper)
+            int half = 0;
         };
         std::vector<Pass> passes;
-        if (!l.res_ids.empty()) passes.push_back({l.res_base, l.blob, l.res_ids});
+        if (!l.res_ids.empty()) {
+            passes.push_back({l.res_base, l.blob, l.res_ids});
+            passes.back().dev = &d;
+        }
         const long long lid = (long long) (&l - L.data());
         // MAYA_MM3_STAGE_OVERLAP=1 (a prompt's chunk): the staging slots in two halves - a pass's copies (on the copy
         // stream) into one half while the pass before computes from the other - instead of copy, compute, wait
@@ -2755,36 +2796,48 @@ struct Model::Impl {
             return v != nullptr && std::atoi(v) != 0;
         }();
         const bool ov = ov_on && T > kWin && d.cs != nullptr && d.n_slots >= 2;
-        const int cap = ov ? d.n_slots / 2 : d.n_slots;
-        int half = 0;
-        for (size_t si = 0; si < staged.size();) {
-            const int s0 = ov ? half * cap : 0, s1 = s0 + cap;
-            std::vector<int> se((size_t) d.n_slots, -1), fresh;
-            for (int n = 0; si < staged.size() && n < cap; ++si, ++n) {
-                const int e = staged[si];
-                int at = -1;
-                for (int s = s0; s < s1; ++s)
-                    if (d.slot_owner[(size_t) s] == lid * 1024 + e) at = s;
-                if (at >= 0 && se[(size_t) at] < 0) se[(size_t) at] = e;
-                else fresh.push_back(e);
-            }
-            half ^= 1;
-            for (size_t fi = 0; fi < fresh.size(); ++fi) {
-                int best = -1;
-                for (int s = s0; s < s1; ++s)
-                    if (se[(size_t) s] < 0 && d.slot_pend[(size_t) s] < 0 &&
-                        (best < 0 || d.slot_used[(size_t) s] < d.slot_used[(size_t) best]))
-                        best = s;
-                if (best < 0) {   // (every free slot pending: the rest first in the next batch)
-                    staged.insert(staged.begin() + (long) si, fresh.begin() + (long) fi, fresh.end());
-                    break;
+        const int hi = ov && gguf && staged.size() >= 8 ? helper_of(d) : -1;
+        Dev* hd = hi >= 0 && D[(size_t) hi].slot_bytes >= l.blob ? &D[(size_t) hi] : nullptr;   // (its slots: sized by
+                                                                   //  its own layers' blobs - a larger one does not fit)
+        std::vector<int> mine, theirs;
+        for (size_t i = 0; i < staged.size(); ++i) (hd && (i & 1) ? theirs : mine).push_back(staged[i]);
+        auto build = [&](Dev& c, std::vector<int>& list) {
+            const int cap = ov ? c.n_slots / 2 : c.n_slots;
+            int half = 0;
+            for (size_t si = 0; si < list.size();) {
+                const int s0 = ov ? half * cap : 0, s1 = s0 + cap;
+                std::vector<int> se((size_t) c.n_slots, -1), fresh;
+                for (int n = 0; si < list.size() && n < cap; ++si, ++n) {
+                    const int e = list[si];
+                    int at = -1;
+                    for (int s = s0; s < s1; ++s)
+                        if (c.slot_owner[(size_t) s] == lid * 1024 + e) at = s;
+                    if (at >= 0 && se[(size_t) at] < 0) se[(size_t) at] = e;
+                    else fresh.push_back(e);
                 }
-                se[(size_t) best] = fresh[fi];
+                for (size_t fi = 0; fi < fresh.size(); ++fi) {
+                    int best = -1;
+                    for (int s = s0; s < s1; ++s)
+                        if (se[(size_t) s] < 0 && c.slot_pend[(size_t) s] < 0 &&
+                            (best < 0 || c.slot_used[(size_t) s] < c.slot_used[(size_t) best]))
+                            best = s;
+                    if (best < 0) {   // (every free slot pending: the rest first in the next batch)
+                        list.insert(list.begin() + (long) si, fresh.begin() + (long) fi, fresh.end());
+                        break;
+                    }
+                    se[(size_t) best] = fresh[fi];
+                }
+                Pass p{c.stg, c.slot_bytes, std::move(se)};
+                p.staged = true;
+                p.dev = &c;
+                p.half = half;
+                passes.push_back(std::move(p));
+                half ^= 1;
             }
-            Pass p{d.stg, d.slot_bytes, std::move(se)};
-            p.staged = true;
-            passes.push_back(std::move(p));
-        }
+        };
+        build(d, mine);
+        const size_t first_help = passes.size();
+        if (hd) build(*hd, theirs);
         std::vector<int> rowidx, invrow((size_t) T * K, -1);
         rowidx.reserve((size_t) T * K);
         for (Pass& p : passes) {
@@ -2807,35 +2860,55 @@ struct Model::Impl {
         }
         CK(cudaMemcpyAsync(d.rowidx, rowidx.data(), rowidx.size() * 4, cudaMemcpyHostToDevice, d.s));
         CK(cudaMemcpyAsync(d.invrow, invrow.data(), invrow.size() * 4, cudaMemcpyHostToDevice, d.s));
-        int hk = 0;   // (STAGE_OVERLAP: the half this staged pass uses)
-        for (const Pass& p : passes) {
-            if (p.rows == 0) {
-                if (p.staged) hk ^= 1;
-                continue;
+        const int help_row0 = first_help < passes.size() ? passes[first_help].row0 : T * K;
+        if (hd && help_row0 < T * K) {   // the helper: d's normed rows (both forms) and the row index, after d wrote them
+            cudaEvent_t ex = helper_event(d);
+            CK(cudaEventRecord(ex, d.s));
+            CK(cudaSetDevice(hd->id));
+            CK(cudaStreamWaitEvent(hd->s, ex, 0));
+            if (!copy_peer(hd->xn, *hd, d.xn, d, (size_t) T * g.dim * 4, hd->s, err) ||
+                !copy_peer(hd->xn16, *hd, d.xn16, d, (size_t) T * g.dim * 2, hd->s, err))
+                return false;
+            CK(cudaMemcpyAsync(hd->rowidx, rowidx.data(), rowidx.size() * 4, cudaMemcpyHostToDevice, hd->s));
+            CK(cudaSetDevice(d.id));
+        }
+        // the passes: the helper's interleaved with d's (each card's own streams), so both links copy at once
+        std::vector<size_t> order;
+        {
+            size_t a = 0, b = first_help;
+            while (a < first_help || b < passes.size()) {
+                if (a < first_help) order.push_back(a++);
+                if (b < passes.size()) order.push_back(b++);
             }
+        }
+        for (size_t oi : order) {
+            const Pass& p = passes[oi];
+            if (p.rows == 0) continue;
+            Dev& c = *p.dev;
+            if (&c != &d) CK(cudaSetDevice(c.id));
             if (p.staged) {
-                if (ov) CK(cudaStreamWaitEvent(d.cs, ov_ev(d, 2 + hk), 0));   // (its half's last pass computed)
-                for (int s = 0; s < d.n_slots; ++s) {
+                if (ov) CK(cudaStreamWaitEvent(c.cs, ov_ev(c, 2 + p.half), 0));   // (its half's last pass computed)
+                for (int s = 0; s < c.n_slots; ++s) {
                     const int e = p.slot_expert[(size_t) s];
                     if (e < 0) continue;
-                    if (d.slot_owner[(size_t) s] != lid * 1024 + e) {
-                        if (!(ov ? stage_on(l, d, e, s, d.cs, err) : stage(l, d, e, s, err))) return false;
-                        d.slot_owner[(size_t) s] = lid * 1024 + e;
+                    if (c.slot_owner[(size_t) s] != lid * 1024 + e) {
+                        if (!(ov ? stage_on(l, c, e, s, c.cs, err) : stage(l, c, e, s, err))) return false;
+                        c.slot_owner[(size_t) s] = lid * 1024 + e;
                     }
-                    d.slot_used[(size_t) s] = fwd;
+                    c.slot_used[(size_t) s] = fwd;
                 }
                 if (ov) {
-                    CK(cudaEventRecord(ov_ev(d, hk), d.cs));
-                    CK(cudaStreamWaitEvent(d.s, ov_ev(d, hk), 0));
+                    CK(cudaEventRecord(ov_ev(c, p.half), c.cs));
+                    CK(cudaStreamWaitEvent(c.s, ov_ev(c, p.half), 0));
                 }
             }
-            CK(cudaMemcpyAsync(d.bounds, p.bounds.data(), p.bounds.size() * 4, cudaMemcpyHostToDevice, d.s));
+            CK(cudaMemcpyAsync(c.bounds, p.bounds.data(), p.bounds.size() * 4, cudaMemcpyHostToDevice, c.s));
             x3::SetArgs sa;
             sa.wbase = p.wbase;
             sa.stride = p.stride;
             sa.lay = l.lay;
             sa.n_exp = (int) p.slot_expert.size();
-            sa.bounds = d.bounds;
+            sa.bounds = c.bounds;
             sa.row0 = p.row0;
             sa.max_rows = p.max_rows;
             sa.n_embd = g.dim;
@@ -2844,22 +2917,29 @@ struct Model::Impl {
             sa.hbounds = p.bounds.data();   // (before sm_80: the busy experts through the FP16 GEMM)
             if (gguf) {   // (the rows also as FP16 - rms' xn16 - and the gate's sums of a layer whose gate and up differ
                           //  in type in this pass's own y rows, which its down writes only after them)
-                sa.x16 = d.xn16;
-                sa.graw = d.y + (size_t) p.row0 * g.dim;
+                sa.x16 = c.xn16;
+                sa.graw = c.y + (size_t) p.row0 * g.dim;
             }
-            x3::set_gate_up(sa, d.xn, g.dim, d.rowidx + p.row0, d.h16, g.ff, d.s);
-            x3::set_down(sa, d.h16, g.ff, d.y + (size_t) p.row0 * g.dim, g.dim, d.s);
+            x3::set_gate_up(sa, c.xn, g.dim, c.rowidx + p.row0, c.h16, g.ff, c.s);
+            x3::set_down(sa, c.h16, g.ff, c.y + (size_t) p.row0 * g.dim, g.dim, c.s);
+            if (&c != &d) CK(cudaSetDevice(d.id));
             if (ov) {   // (stream order keeps the bounds and h16 of the next pass after this one; the host keeps p.bounds
                         //  until the end - a staged pass's half is free once its event is passed)
-                if (p.staged) {
-                    CK(cudaEventRecord(ov_ev(d, 2 + hk), d.s));
-                    hk ^= 1;
-                }
+                if (p.staged) CK(cudaEventRecord(ov_ev(c, 2 + p.half), c.s));
                 continue;
             }
-            if (p.staged) hk ^= 1;
             // (the next pass rewrites the bounds and h16: let this one finish with them)
             CK(cudaStreamSynchronize(d.s));
+        }
+        if (hd && help_row0 < T * K) {   // the helper's output rows back into d's y, before d's combine
+            CK(cudaSetDevice(hd->id));
+            if (!copy_peer(d.y + (size_t) help_row0 * g.dim, d, hd->y + (size_t) help_row0 * g.dim, *hd,
+                           (size_t) (T * K - help_row0) * g.dim * 4, hd->s, err))
+                return false;
+            cudaEvent_t ey = helper_event(*hd);
+            CK(cudaEventRecord(ey, hd->s));
+            CK(cudaSetDevice(d.id));
+            CK(cudaStreamWaitEvent(d.s, ey, 0));
         }
         return true;
     }
