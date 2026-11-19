@@ -73,7 +73,7 @@ from urllib.parse import parse_qs, urlsplit
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT))   # run as a script (run-<model>.bat) as well as a module
-from serve import ds4_vision, gpu_map, loop_guard, mm3_vision, model_api, model_pull, models, savings  # noqa: E402
+from serve import ds4_vision, gpu_map, logctx, loop_guard, mm3_vision, model_api, model_pull, models, savings  # noqa: E402
 
 ENGINE_VISION = (ds4_vision.Vision, mm3_vision.Vision)   # the engines that run their vision tower themselves
 from serve.frontend import (CALL_END, CALL_START, MINIMAX_NS, ChatTemplate, Event, OutputParser,  # noqa: E402
@@ -6670,7 +6670,7 @@ class StampedStdout:
             out = []
             for seg in text.splitlines(keepends=True):
                 if self.at_start and seg.startswith("[saguaro]"):
-                    out.append(time.strftime("%H:%M:%S "))
+                    out.append(logctx.stamp(ms=True) + " ")   # (the engine's lines' format: one clock in the log)
                 out.append(seg)
                 self.at_start = seg.endswith(chr(10)) or seg.endswith(chr(13))
             if out:
@@ -6685,7 +6685,7 @@ def tee_server_log(path: str) -> None:
     """This server's own lines (`[saguaro] ...`) go to `path` as well as this terminal (STRATA_SERVER_LOG=0: terminal
     only).  The engine's stderr is already appended there, so the file tells both sides of a request."""
     path = os.path.abspath(path)
-    if not path or isinstance(sys.stdout, ServerLogTee):
+    if not path or isinstance(sys.stdout, ServerLogTee) or isinstance(getattr(sys.stdout, "stream", None), ServerLogTee):
         return
     try:
         handle = open(path, "a", encoding="utf-8", buffering=1)
@@ -6693,7 +6693,10 @@ def tee_server_log(path: str) -> None:
         print(f"[saguaro] this server's lines cannot also go to {path} ({e}): they stay on this terminal", flush=True)
         return
     print(f"[saguaro] this server's lines go to {path} too", flush=True)
-    sys.stdout = ServerLogTee(sys.stdout, handle)
+    if isinstance(sys.stdout, StampedStdout):           # (the tee under the stamps: the file gets the times too)
+        sys.stdout.stream = ServerLogTee(sys.stdout.stream, handle)
+    else:
+        sys.stdout = ServerLogTee(sys.stdout, handle)
 
 
 def supervisor_name() -> str | None:

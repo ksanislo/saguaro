@@ -67,7 +67,9 @@ def main():
         while s > 0 and L[s - 1].startswith("#"):
             s -= 1
         out.append("\n".join(L[s:n.end_lineno]) + ("\n" if isinstance(n, (ast.FunctionDef, ast.ClassDef)) else ""))
-    OUT.write_text("\n".join(out) + "\n", encoding="utf-8")
+    text = "\n".join(out) + "\n"
+    text = text.replace("[strata]", "[saguaro]")   # (one log prefix for the whole server; the engine's own lines keep theirs)
+    OUT.write_text(text, encoding="utf-8")
     print(f"{OUT}: {sum(1 for _ in out) - 1} definitions from {SRC}")
 
 

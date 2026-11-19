@@ -84,7 +84,7 @@ def end_leftover_engines(exe: str) -> None:
         procs.end_leftovers(say=say)
         procs.end_orphans(exe, say=say)
     except Exception as e:  # noqa: BLE001 - a failed check must not stop a start
-        print(f"[strata] could not check for engines left by an earlier run: {type(e).__name__}", flush=True)
+        print(f"[saguaro] could not check for engines left by an earlier run: {type(e).__name__}", flush=True)
 
 # Opt-in STRATA_BATCH_WRAP_SPILL=1 (server env or the config's "env"): the tokens the engine generated past a budget's stop
 # join the wrap-up under --batch too, so the continuation extends what the slot holds instead of reading it all again
@@ -372,7 +372,7 @@ def transient_start_failure(log: str | None, offset: int, elapsed_s: float, rc: 
     except (OSError, ValueError):
         return False
     lines = [x.strip() for x in text.splitlines() if x.strip()]
-    engine_lines = [x for x in lines if not logctx.unstamp(x).startswith("[strata]")]
+    engine_lines = [x for x in lines if not logctx.unstamp(x).startswith("[saguaro]")]
     if any(m in text for m in TRANSIENT_START_MARKS):
         return all(x.startswith("terminate called") or x.startswith("what()") or
                    any(m in x for m in TRANSIENT_START_MARKS) for x in engine_lines)
@@ -400,7 +400,7 @@ def echo_requests(log_path: str, offset: int) -> None:
             m = ENGINE_REQUEST.search(line)
             if m:
                 read_ms, gen_ms = float(m["read"]), float(m["gen_ms"])
-                print("[strata] request prompt %s cached %s output %s prompt_read %.0f ms total %.0f ms prefill %s "
+                print("[saguaro] request prompt %s cached %s output %s prompt_read %.0f ms total %.0f ms prefill %s "
                       "tok/s decode %s tok/s" % (m["prompt"], m["reused"], m["gen"], read_ms, read_ms + gen_ms, m["pp"],
                                                  m["tg"]), flush=True)
 
@@ -447,7 +447,7 @@ def narrate_start(log_path: str, offset: int, args: list, done: threading.Event,
             last = time.time()
             print(text, flush=True)
 
-    say("weights", "[strata] starting the engine: reading the model's weights ...")
+    say("weights", "[saguaro] starting the engine: reading the model's weights ...")
     pos = offset
     while not done.wait(0.5):
         try:
@@ -461,21 +461,21 @@ def narrate_start(log_path: str, offset: int, args: list, done: threading.Event,
             pos += cut
             for line in chunk[:cut].decode("utf-8", "replace").splitlines():
                 if "PLE on" in line or "expert arena:" in line or "experts via mmap" in line:   # #505: mapped
-                    say("arena", f"[strata] {loading}\n"
+                    say("arena", f"[saguaro] {loading}\n"
                                  "         YOUR PC CAN BE SLOW OR STOP RESPONDING FOR 1-3 MINUTES NOW - this is normal.\n"
                                  "         Please wait and don't close this window"
                                  + ("; the browser opens when it is ready." if OPENS_BROWSER else "; the server says when it is ready."))
                 elif " loaded " in line and "GiB at" in line:
-                    say("loaded", "[strata] experts loaded: " + line.split(" loaded ", 1)[1].strip() +
+                    say("loaded", "[saguaro] experts loaded: " + line.split(" loaded ", 1)[1].strip() +
                         f" ({time.time() - t0:.0f} s so far)")
                 elif "expert cache " in line and " slots, " in line and "auto" not in line:
                     n = line.split("expert cache ", 1)[1].split(";")[0].replace(" slots,", " experts,").strip()
-                    say("cache", f"[strata] filling the GPU's expert cache ({n}) ...")
+                    say("cache", f"[saguaro] filling the GPU's expert cache ({n}) ...")
                 elif "session is up" in line:
-                    say("up", "[strata] almost ready ...")
+                    say("up", "[saguaro] almost ready ...")
         if time.time() - last > heartbeat:
             last = time.time()
-            print(f"[strata] still starting ({time.time() - t0:.0f} s) - please wait ...", flush=True)
+            print(f"[saguaro] still starting ({time.time() - t0:.0f} s) - please wait ...", flush=True)
 
 _BTRACE = bool(os.environ.get("STRATA_BATCH_TRACE"))
 def btrace(*a):
@@ -690,7 +690,7 @@ class StrataEngine:
                 threading.Thread(target=echo_requests, args=(log, os.path.getsize(log)), daemon=True).start()
         if log:                                          # #779: when an engine started (a crash report has the time)
             try:
-                self.log.write(f"[strata] {time.strftime('%Y-%m-%d %H:%M:%S')} engine started: {exe} --serve "
+                self.log.write(f"[saguaro] {time.strftime('%Y-%m-%d %H:%M:%S')} engine started: {exe} --serve "
                                f"{' '.join(args)}\n")
                 self.log.flush()
             except OSError:
@@ -703,7 +703,7 @@ class StrataEngine:
         if nice:
             say_nice = pin.get("preexec_fn")
             pin["preexec_fn"] = lambda: (say_nice() if say_nice else None, os.nice(nice))[0]
-            print(f"[strata] engine priority: nice +{nice} (this PC has built-in Radeon graphics that usually draw the desktop; "
+            print(f"[saguaro] engine priority: nice +{nice} (this PC has built-in Radeon graphics that usually draw the desktop; "
                   "STRATA_ENGINE_NICE=0 turns it off)", flush=True)
         end_leftover_engines(exe)                        # one an earlier run lost still holds the GPU and the memory
         spawned_at = time.monotonic()
@@ -764,12 +764,12 @@ class StrataEngine:
                 wait_s = 2.0 * (2 ** _attempt)              # 2, 4, 8 s: the previous process's GPU queues go away
                 exit_words = engine_exit_words(self.proc.returncode)
                 if start_log_marks(log, log_start):         # the runtime said so itself (hsa_exception ...)
-                    print(f"[strata] the engine stopped while the GPU runtime was starting (most often right after "
+                    print(f"[saguaro] the engine stopped while the GPU runtime was starting (most often right after "
                           f"another engine exited, whose GPU queues were still being released"
                           f"{'; ' + exit_words if exit_words else ''}): starting it again in {wait_s:.0f} s "
                           f"(try {_attempt + 2} of {START_RETRIES + 1})", flush=True)
                 else:                                       # an exit with nothing in the log: say only what is known
-                    print(f"[strata] the engine exited before it wrote anything to its log"
+                    print(f"[saguaro] the engine exited before it wrote anything to its log"
                           f"{' (' + exit_words + ')' if exit_words else ''}; it may be a GPU runtime that was not "
                           f"ready yet: starting it again in {wait_s:.0f} s (try {_attempt + 2} of {START_RETRIES + 1})",
                           flush=True)
@@ -783,7 +783,7 @@ class StrataEngine:
             note = "" if timed_out else start_exit_note(self.proc.returncode, exe)
             tail = start_log_tail(log, log_start)
             lines = [x for x in tail.split("\n")[2:] if x.strip()]
-            if tail and lines and all(logctx.unstamp(x.strip()).startswith("[strata]") for x in lines):
+            if tail and lines and all(logctx.unstamp(x.strip()).startswith("[saguaro]") for x in lines):
                 tail += "\n  (those are the launcher's own lines: the engine itself wrote nothing)"
             raise EngineDied(why + (f" (see {log})" if log else "") + note +
                              start_failure_hint(log, log_start) + tail)
@@ -805,7 +805,7 @@ class StrataEngine:
         asked = next((int(args[args.index(k) + 1]) for k in ("--batch", "--slots") if k in args), 0)
         self.batch = int(self.info.get("batch_slots") or 0)
         if asked and self.batch != asked:
-            print(f"[strata] parallel requests: {asked} asked, the engine runs {self.batch or 'one at a time'} "
+            print(f"[saguaro] parallel requests: {asked} asked, the engine runs {self.batch or 'one at a time'} "
                   "(its log says why)", flush=True)
         _bg = args[args.index("--batch-groups") + 1] if "--batch-groups" in args else "default"
         # no `--batch-groups` (the default on a layer split) or `auto`: the engine picks the groups and says so
@@ -878,7 +878,7 @@ class StrataEngine:
                 pass
             if line.startswith("ERR") and hasattr(log, "write"):   # stdout only: the log shows why a request or the engine failed
                 try:
-                    log.write(f"[strata] engine said: {line.rstrip()}\n")
+                    log.write(f"[saguaro] engine said: {line.rstrip()}\n")
                     log.flush()
                 except (OSError, ValueError):
                     pass
@@ -971,11 +971,11 @@ class StrataEngine:
             self.last_ctx = {"source": f.get("ctx_source"), "reused": int(f.get("ctx_reused") or 0),
                              "prompt": int(f.get("ctx_prompt") or 0), "at": time.time()}
             if self.last_ctx["source"] == "none" and self.last_ctx["prompt"] > 0:   # nothing to bring back in
-                print(f"[strata] sessions: new conversation, {self.last_ctx['prompt']:,} tokens to read", flush=True)
+                print(f"[saguaro] sessions: new conversation, {self.last_ctx['prompt']:,} tokens to read", flush=True)
             return True
         msg = session_event_text(f, self.sessions)
         if msg:
-            print(f"[strata] sessions: {msg}", flush=True)
+            print(f"[saguaro] sessions: {msg}", flush=True)
         ev = getattr(self, "events", None)
         if ev is not None and "sess_event" in f:        # parked, restored, written ... (the event log)
             ev.write("session", **{k.removeprefix("sess_"): v for k, v in f.items()})
@@ -1079,7 +1079,7 @@ class StrataEngine:
                         pass
                     if i == tries - 1:
                         raise
-                    print(f"[strata] the engine did not start (try {i + 1} of {tries}); again in "
+                    print(f"[saguaro] the engine did not start (try {i + 1} of {tries}); again in "
                           f"{self.RESTART_RETRY_S:g} s", flush=True)
                     time.sleep(self.RESTART_RETRY_S)
         finally:
@@ -1471,7 +1471,7 @@ class StrataEngine:
             else:
                 self._orphan_seen.pop(b, None)
         if freed:
-            print(f"[strata] parallel: slot(s) {', '.join(map(str, freed))} were marked busy with no request using them "
+            print(f"[saguaro] parallel: slot(s) {', '.join(map(str, freed))} were marked busy with no request using them "
                   "(issue #1603); freed, the waiting request goes on", flush=True)
             self.slot_cv.notify_all()
         return freed
@@ -1706,7 +1706,7 @@ class StrataEngine:
                                         if not admit_said:
                                             admit_said = True
                                             busy = [b for b, v in enumerate(self.slot_busy) if v]
-                                            print(f"[strata] parallel: a request has waited {time.monotonic() - admit_since:.0f} s "
+                                            print(f"[saguaro] parallel: a request has waited {time.monotonic() - admit_since:.0f} s "
                                                   f"for a free slot (busy: {busy}, in use: {sorted(self.slot_claims)}, "
                                                   f"ending: {sorted(self.slot_releasing)}) (issue #1603)", flush=True)
                                     self._reap_orphan_slots()
@@ -1783,7 +1783,7 @@ class StrataEngine:
                         if not (self._ctl_erred and str(e).startswith("BGEN:") and left >= 1 and not cancel.is_set()):
                             raise
                         refused += 1
-                        print(f"[strata] parallel: the engine refused slot {slot} ({e}); trying another slot "
+                        print(f"[saguaro] parallel: the engine refused slot {slot} ({e}); trying another slot "
                               f"({refused}/{self.BGEN_REFUSALS_MAX}) (issue #1994)", flush=True)
                         if refused > self.BGEN_REFUSALS_MAX:
                             raise GpuBusy("the engine's batch slots are not free right now; try again in a moment",
@@ -1829,7 +1829,7 @@ class StrataEngine:
                             alone = not any(v for b, v in enumerate(self.slot_busy) if b != slot) and self.waiting == 0
                         if not alone or cancel.is_set() or int(max_new) - len(out) <= 1:
                             raise_bad_finish("ram")
-                        print(f"[strata] slot {slot} has no RAM for this conversation: it goes on in the solo session",
+                        print(f"[saguaro] slot {slot} has no RAM for this conversation: it goes on in the solo session",
                               flush=True)
                         carry_leg(carry, self.last)
                         self.slot_live[slot] = None
@@ -1983,7 +1983,7 @@ class StrataEngine:
                     after = self._release_slot_when_done(slot, stream, sync_s=10.0 if spill is not None and stream
                                                          else 0.0)   # freed at its BDONE (or, queued: at its BRA 0)
                     if spill is not None and stream:
-                        print(f"[strata] wrap spill: waited {(time.monotonic() - t_wait) * 1000:.0f} ms for slot {slot}'s "
+                        print(f"[saguaro] wrap spill: waited {(time.monotonic() - t_wait) * 1000:.0f} ms for slot {slot}'s "
                               f"BDONE ({'none: background wait' if after is None else f'{len(after)} tokens'})", flush=True)
                         with self.slot_cv:              # the keep runs from the wait's end, not from before it
                             if slot in self.slot_kept:
@@ -2290,7 +2290,7 @@ class StrataEngine:
             state["base"], state["next"] = now, age + stall_s
             if not state.get("warned"):
                 state["warned"] = True
-                print(f"[strata] the engine has said nothing for {age:.0f} s but is still working; it is not ended (the "
+                print(f"[saguaro] the engine has said nothing for {age:.0f} s but is still working; it is not ended (the "
                       "limit is engine_silence_s). If it is stuck, \"engine_silence_s\" can be set lower.", flush=True)
         else:
             state["next"] = float("inf")   # no reading (psutil missing): nothing to decide on
@@ -2613,7 +2613,7 @@ class Vision:
             if fallback is None:
                 raise
             why = " ".join(str(e).split())[:240]
-            print(f"[strata] the GPU picture reader did not start ({why}); pictures are read on the CPU", flush=True)
+            print(f"[saguaro] the GPU picture reader did not start ({why}); pictures are read on the CPU", flush=True)
             self.spawn, self.fallback = fallback, None
             self._start_reader()
 
@@ -2824,7 +2824,7 @@ class Vision:
         stderr has the warm-up line).  A reader built before the limit was enforced inside it (strata-vision refuses these now) still lets them by."""
         limit = getattr(self, "max_tokens", 0)
         if limit and tokens > 4 * limit:
-            print(f"[strata] images: one picture became {tokens} image tokens, more than 4 times the limit of {limit} (vision.max_tokens); "
+            print(f"[saguaro] images: one picture became {tokens} image tokens, more than 4 times the limit of {limit} (vision.max_tokens); "
                   "the picture reader is not applying its limit. Update the engine, and send the line 'strata-vision: warmed up at N image "
                   "tokens' from the reader's log with the report", flush=True)
 
@@ -2908,10 +2908,10 @@ def effort_end_args(cfg: dict, exe: str, tok) -> list[str] | None:
         known = False
     role = tok.encode("system", parse_special=True)
     if not known or len(role) != 1:
-        print("[strata] effort_position \"end\" needs engine 0.1.39 or newer (--tail-role-token): the reasoning "
+        print("[saguaro] effort_position \"end\" needs engine 0.1.39 or newer (--tail-role-token): the reasoning "
               "effort stays at the top of the prompt", flush=True)
         return None
-    print("[strata] effort_position end: a request's non-default reasoning effort goes right before the answer, so "
+    print("[saguaro] effort_position end: a request's non-default reasoning effort goes right before the answer, so "
           "changing it keeps the cached conversation", flush=True)
     return ["--tail-role-token", str(role[0])]
 
@@ -3003,15 +3003,15 @@ def engine_args(cfg: dict) -> list[str]:
         args = shaped["args"]
         drafting.remember_note(decision.note)
         if decision.note:
-            print(f"[strata] drafting: {decision.note}", flush=True)
+            print(f"[saguaro] drafting: {decision.note}", flush=True)
         elif decision.flags:
-            print(f"[strata] drafting: DFlash2 ({' '.join(decision.flags[:2])})", flush=True)
+            print(f"[saguaro] drafting: DFlash2 ({' '.join(decision.flags[:2])})", flush=True)
     # "mtp": false (the Models settings, `strata launch --mtp off`, or by hand): no draft layer, whatever the args say.  A setup run
     # that writes --mtp back into the args cannot undo it, because this is applied at every start.
     if draft_layer.is_off(cfg):
         args, removed = draft_layer.strip(args)
         if removed:
-            print(f'[strata] "mtp": false - starting without the draft layer ({" ".join(removed)} left out)', flush=True)
+            print(f'[saguaro] "mtp": false - starting without the draft layer ({" ".join(removed)} left out)', flush=True)
     # #1322: a config with a "vision" section but without --vision in its args (written by an older setup run, or edited by
     # hand) advertised images and then refused every picture ("this engine was started without --vision").  The section
     # says images are wanted: start the engine with them, and keep the encoder's VRAM free as setup does for a GPU encoder
@@ -3022,7 +3022,7 @@ def engine_args(cfg: dict) -> list[str]:
         if cfg["vision"].get("gpu") and "--vram-reserve-mib" not in args:
             args += ["--vram-reserve-mib", "700"]
             note += " and --vram-reserve-mib 700"
-        print(f'[strata] the config has a "vision" section but no --vision in its args: {note} (run setup again with '
+        print(f'[saguaro] the config has a "vision" section but no --vision in its args: {note} (run setup again with '
               "--vision to write them)", flush=True)
     if layer_split_of(cfg) and "--layer-split" not in args:
         args += ["--layer-split", layer_split_value(cfg)]
@@ -3051,13 +3051,13 @@ def parallel_args(cfg: dict, args: list[str]) -> list[str]:
     if n is None or n is False:
         return []
     if isinstance(n, bool) or not isinstance(n, int):
-        print(f'[strata] "parallel" must be a whole number of requests (2..{PARALLEL_MAX}), not {n!r}: ignored',
+        print(f'[saguaro] "parallel" must be a whole number of requests (2..{PARALLEL_MAX}), not {n!r}: ignored',
               flush=True)
         return []
     if n <= 1:
         return []
     if n > PARALLEL_MAX and "--batch-mtp" not in args and os.environ.get("STRATA_BATCH_MTP", "0") in ("", "0"):
-        print(f'[strata] "parallel": {n} - the engine runs at most {PARALLEL_MAX} requests together; it will use '
+        print(f'[saguaro] "parallel": {n} - the engine runs at most {PARALLEL_MAX} requests together; it will use '
               f"{PARALLEL_MAX}", flush=True)
     return ["--batch", str(n)]
 
@@ -3079,7 +3079,7 @@ def pool_cores_args(cfg: dict, args: list[str]) -> list[str]:
     else:
         text = ""
     if not _POOL_CORES_OK.match(text):
-        print(f'[strata] "pool_cores" must be logical processor numbers like "0,2,4,6" or "2-14:2", not {value!r}: ignored '
+        print(f'[saguaro] "pool_cores" must be logical processor numbers like "0,2,4,6" or "2-14:2", not {value!r}: ignored '
               "(the CPU workers keep their default placement)", flush=True)
         return []
     return ["--pool-cores", text]
@@ -3270,7 +3270,7 @@ def ordered_gpus(cfg: dict, scores=None, vrams=None, archs=None) -> list[int]:
                 rest = sorted(rest, key=lambda i: sc0[i]) if max(sc0[i] for i in rest) >= 1.05 * min(sc0[i] for i in rest) else rest
             out = [i for i in gl if i in ig] + rest
             if out != gl:
-                print(f"[strata] layer split: card order {','.join(map(str, out))} (GPU {','.join(str(i) for i in sorted(ig))} is built-in "
+                print(f"[saguaro] layer split: card order {','.join(map(str, out))} (GPU {','.join(str(i) for i in sorted(ig))} is built-in "
                       f"graphics: it takes the first layers, never the last stage; \"gpu_order\": \"as_given\" keeps {','.join(map(str, gl))})",
                       flush=True)
             return out
@@ -3283,11 +3283,11 @@ def ordered_gpus(cfg: dict, scores=None, vrams=None, archs=None) -> list[int]:
     if out != gl:
         vram = vrams if vrams is not None else (None if scores is not None else gpu_vram_mib(gl, hip))
         if vram is not None and all(i in vram for i in gl) and vram[out[-1]] < vram[gl[-1]]:
-            print(f"[strata] layer split: keeping card order {','.join(map(str, gl))} - the faster card has "
+            print(f"[saguaro] layer split: keeping card order {','.join(map(str, gl))} - the faster card has "
                   f"less VRAM than the one the split ends on ({vram[out[-1]]} vs {vram[gl[-1]]} MiB, #1576)",
                   flush=True)
             return gl
-        print(f"[strata] layer split: card order {','.join(map(str, out))} (the faster card last; "
+        print(f"[saguaro] layer split: card order {','.join(map(str, out))} (the faster card last; "
               f'"gpu_order": "as_given" keeps {",".join(map(str, gl))}, #1352)', flush=True)
     return out
 
@@ -3318,7 +3318,7 @@ def hip_no_card_message(devices: list[dict]) -> str:
     """The plain line when the engine has code for none of the computer's cards."""
     cards = ", ".join(f"{d['name'] or 'graphics card'} ({d['arch'] or 'unknown'}{', integrated' if d['integrated'] else ''})" for d in devices)
     built = next((m.group(1) for d in devices for m in [re.search(r"compiled for \(([^)]*)\)", d["cannot_run"] or "")] if m), "")
-    text = f"[strata] none of this computer's graphics cards has code in this Strata engine{f' (it is built for {built})' if built else ''}. Cards found: {cards}."
+    text = f"[saguaro] none of this computer's graphics cards has code in this Strata engine{f' (it is built for {built})' if built else ''}. Cards found: {cards}."
     note = engine_component.no_package_note([d["arch"] for d in devices])
     return text + (f" {note}" if note else "")
 
@@ -3364,7 +3364,7 @@ def hip_auto_devices(cfg: dict, env: dict) -> list[int] | None:
         raise SystemExit(problem)
     if visible:
         d = next(x for x in devices if x["index"] == visible[0])
-        print(f"[strata] automatic GPU choice: GPU {d['index']} ({d['name']}, {d['arch']}); the engine skips cards it has no code for and "
+        print(f"[saguaro] automatic GPU choice: GPU {d['index']} ({d['name']}, {d['arch']}); the engine skips cards it has no code for and "
               f"integrated chips while a card of its own can run", flush=True)
     return visible
 
@@ -3475,7 +3475,7 @@ def vision_card_off_igpu(env: dict, archs: dict[int, str] | None = None) -> int 
     own = [i for i in idx if i not in ig and ar and i in ar]
     if not ig or not own:
         return None
-    print(f"[strata] the picture reader runs on GPU {own[-1]}, not on the built-in graphics (GPU {','.join(str(i) for i in sorted(ig))}) "
+    print(f"[saguaro] the picture reader runs on GPU {own[-1]}, not on the built-in graphics (GPU {','.join(str(i) for i in sorted(ig))}) "
           "that draws the desktop; \"vision\": {\"cuda_device\": N} chooses another card", flush=True)
     return own[-1]
 
