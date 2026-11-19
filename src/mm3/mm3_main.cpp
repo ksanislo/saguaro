@@ -995,9 +995,14 @@ int serve(mm3::Model& m, const std::vector<int>& eos, int chunk, bool spec_on, f
 // greedy, each request's tokens are its tokens alone (the CPU lane's experts aside: their last bits differ from the
 // GPU's, and which experts the CPU lane takes depends on what runs beside).  No DSpark drafting.
 int serve_multi(mm3::Model& m, const std::vector<int>& eos, int chunk, const std::string& kv_fmt,
-                const std::string& profile_out) {
+                const std::string& profile_out, const std::string& pack = "") {
     const int N = m.seqs();
     serve_header(m, false, kv_fmt);
+    SlotStore slots;   // (each conversation's cache: saved / read back as serve()'s one, the sequence bound first)
+    if (const char* sd = ::mm3::env("MM3_SLOT_DIR")) {
+        if (m.state_ok()) slots.open(sd, m.state_id() + " pack=" + pack);
+        else SlotStore::note("conversations are saved with KV streaming only (MAYA_MM3_SLOT_DIR ignored)");
+    }
     const bool abl_default = m.ablating();   // (a GEN without ablate=: as the engine started)
     std::printf("READY %d stop multi=%d\n", m.max_ctx(), N);
     std::fflush(stdout);
@@ -1307,6 +1312,22 @@ int serve_multi(mm3::Model& m, const std::vector<int>& eos, int chunk, const std
         if (stages > 1) drain();   // (the pipeline empty: the prompt's forwards and its pictures use every GPU)
         if (run.empty()) in.stop.store(false);   // (a STOP for all before this request: nothing it could stop)
         Seq& S = seqs[(size_t) best];
+        size_t bfrom2 = bfrom;
+        if (slots.on && !abl && pics.empty()) {   // (as serve(): the cache it drops saved, a saved one read back)
+            m.bind(best);
+            if (bfrom + slots.min_tokens / 2 < S.state.size() && S.held.empty()) slots.save(m, S.state);
+            std::vector<int> got;
+            const int lr = slots.load(m, r.ids, bfrom, got);
+            if (lr > 0) {
+                S.state = std::move(got);
+                S.held.clear();
+                bfrom2 = S.state.size();
+            } else if (lr < 0) {
+                S.state.clear();
+                S.held.clear();
+                bfrom2 = 0;
+            }
+        }
         S.busy = true;
         auto gp = std::make_unique<Gen>();
         Gen& g = *gp;
@@ -1314,9 +1335,9 @@ int serve_multi(mm3::Model& m, const std::vector<int>& eos, int chunk, const std
         g.seq = best;
         g.r = std::move(r);
         g.t0 = now() * 1e3;
-        g.from = bfrom;
+        g.from = bfrom2;
         const std::vector<int>& ids = g.r.ids;
-        S.state.resize(bfrom);
+        S.state.resize(bfrom2);
         S.held.clear();
         S.abl = abl;
         m.bind(best);
@@ -1324,7 +1345,7 @@ int serve_multi(mm3::Model& m, const std::vector<int>& eos, int chunk, const std
         std::vector<mm3::Model::Image> rows;
         if (!(pics.empty() && std::find(ids.begin(), ids.end(), m.vision() ? m.vision()->image_token : -1) ==
                                   ids.end()) &&
-            !picture_rows(m, pics, ids, bfrom, rows, err)) {
+            !picture_rows(m, pics, ids, bfrom2, rows, err)) {
             release(best);
             return refuse(err);
         }
@@ -1334,7 +1355,7 @@ int serve_multi(mm3::Model& m, const std::vector<int>& eos, int chunk, const std
         m.set_images(std::move(rows));
         const int C = std::max(1, m.chunk() > 0 ? m.chunk() : chunk);
         bool ok = true, cancel = false;
-        for (size_t a = bfrom; a < ids.size();) {
+        for (size_t a = bfrom2; a < ids.size();) {
             const int T = (int) std::min<size_t>((size_t) C, ids.size() - a);
             const bool last = a + (size_t) T == ids.size();
             if (last) g.use_c = !full_env && cands_for(g.r, ids, {}, g.cd);   // (the first token's history: the prompt)
@@ -1347,7 +1368,7 @@ int serve_multi(mm3::Model& m, const std::vector<int>& eos, int chunk, const std
             a += (size_t) T;
             const double ms = now() * 1e3 - g.t0;
             std::printf("PP %d %zu %zu %.1f %.1f %zu\n", g.rid, a, ids.size(), ms,
-                        ms > 0 ? 1000.0 * (double) (a - bfrom) / ms : 0.0, bfrom);
+                        ms > 0 ? 1000.0 * (double) (a - bfrom2) / ms : 0.0, bfrom2);
             std::fflush(stdout);
             if (last) break;
             if (in.stop.load() || in.stopped(g.rid)) {
@@ -1369,7 +1390,7 @@ int serve_multi(mm3::Model& m, const std::vector<int>& eos, int chunk, const std
             return;
         }
         if (cancel) {
-            std::printf("DONE %d 0 %zu %.1f 0.0 cancel 0 0 %zu 0 0\n", g.rid, ids.size(), g.t1 - g.t0, bfrom);
+            std::printf("DONE %d 0 %zu %.1f 0.0 cancel 0 0 %zu 0 0\n", g.rid, ids.size(), g.t1 - g.t0, bfrom2);
             std::fflush(stdout);
             release(best);
             in.forget(g.rid);
@@ -1421,6 +1442,14 @@ int serve_multi(mm3::Model& m, const std::vector<int>& eos, int chunk, const std
         }
         if (!run.empty()) stages > 1 ? pipe_step() : step();
         else if (waiting.empty() && in.ended()) break;
+    }
+    if (slots.on) {   // (the engine ends - the server's unload: each idle conversation's cache saved for the next start)
+        if (stages > 1) drain();
+        for (int s = 0; s < N; ++s)
+            if (!seqs[(size_t) s].busy && seqs[(size_t) s].held.empty() && !seqs[(size_t) s].abl) {
+                m.bind(s);
+                slots.save(m, seqs[(size_t) s].state);
+            }
     }
     return 0;
 }
@@ -2144,7 +2173,7 @@ int main(int argc, char** argv) {
         std::vector<int> eos = eos_arg.empty() ? std::vector<int>{m.eos()} : parse_list(eos_arg);
         const std::string kvf = o.kv_k == o.kv_v ? std::string(mm3::k::kv_name(o.kv_k))
                                                  : std::string(mm3::k::kv_name(o.kv_k)) + "," + mm3::k::kv_name(o.kv_v);
-        if (m.seqs() > 1) return serve_multi(m, eos, o.chunk, kvf, profile_out);
+        if (m.seqs() > 1) return serve_multi(m, eos, o.chunk, kvf, profile_out, o.pack);
         return serve(m, eos, o.chunk, o.dspark, dspark_conf, dspark_cost, kvf, profile_out, suffix_draft, o.pack);
     }
     const auto& st = m.stats();

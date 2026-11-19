@@ -105,6 +105,7 @@ struct Layer {
     struct SeqKv {
         uint16_t *kc = nullptr, *vc = nullptr, *ic = nullptr;
         k::KvQ kvq;
+        k::KvHost kvh;   // (KV streaming: this conversation's ring tags and host rows)
     };
     std::vector<SeqKv> sk;
     x3::ExpertLayout lay;
@@ -452,6 +453,7 @@ struct Model::Impl {
             l.vc = c.vc;
             l.ic = c.ic;
             l.kvq = c.kvq;
+            if (c.kvh.ring > 0) l.kvh = c.kvh;
         }
         bound = s;
     }
@@ -1199,7 +1201,7 @@ struct Model::Impl {
         }
         // KV streaming's host cache: every position of every layer, pinned
         if (ring > 0) {
-            const double per = (double) g.n_layers * (double) kvpos;
+            const double per = (double) g.n_layers * (double) kvpos * (double) std::max(1, o.seqs);
             const double avail = (double) os::ram_avail() - ram_headroom();
             if (os::ram_avail() > 0 && (double) ctx * per > avail) {
                 int c2 = (int) std::max(0.0, std::floor(avail / per / 4096.0) * 4096.0);
@@ -1240,7 +1242,14 @@ struct Model::Impl {
                 o.dspark = false;
                 info.push_back("NOTE: " + par + "no DSpark draft - the conversations decode together without it");
             }
-            if (o.kv_resident > 0) {
+            static const bool ps = [] {   // (MAYA_MM3_PAR_STREAM=1: each conversation its own ring + host rows)
+                const char* v = ::mm3::env("MM3_PAR_STREAM");
+                return v != nullptr && std::atoi(v) != 0;
+            }();
+            if (o.kv_resident > 0 && ps) {
+                info.push_back("--parallel " + std::to_string(o.seqs) + " with KV streaming: each conversation's ring of "
+                               "the last positions in VRAM, all of them in host memory");
+            } else if (o.kv_resident > 0) {
                 o.kv_resident = 0;
                 info.push_back("NOTE: " + par + "no KV streaming - each conversation's K / V in VRAM (a shorter "
                                               "context where they do not fit)");
@@ -1472,9 +1481,12 @@ struct Model::Impl {
                 l.ic = l.sk[0].ic;
                 l.kvq = l.sk[0].kvq;
                 if (kv_ring > 0) {
-                    l.kvh.ring = kv_ring;
-                    if (!A(l.kvh.tag, (size_t) kv_ring)) return false;
-                    CK(cudaMemset(l.kvh.tag, 0xff, (size_t) kv_ring * 4));
+                    for (Layer::SeqKv& c : l.sk) {
+                        c.kvh.ring = kv_ring;
+                        if (!A(c.kvh.tag, (size_t) kv_ring)) return false;
+                        CK(cudaMemset(c.kvh.tag, 0xff, (size_t) kv_ring * 4));
+                    }
+                    l.kvh = l.sk[0].kvh;
                 }
                 acat = kAAct;
             }
@@ -1530,7 +1542,7 @@ struct Model::Impl {
             const size_t rows = (size_t) o.max_ctx * g.n_kv;
             const size_t nb = k::kv_bytes(o.kv_k, o.kv_v, rows);
             size_t total = 0;
-            for (const Layer& l : L) total += l.kvh.ring > 0 ? nb : 0;
+            for (const Layer& l : L) total += l.kvh.ring > 0 ? nb * l.sk.size() : 0;
             CK(cudaSetDevice(D[0].id));
             if (cudaHostAlloc((void**) &kv_host, total, cudaHostAllocMapped | cudaHostAllocPortable) != cudaSuccess) {
                 kv_host = nullptr;
@@ -1540,9 +1552,12 @@ struct Model::Impl {
             size_t off = 0;
             for (Layer& l : L) {
                 if (l.kvh.ring <= 0) continue;
-                k::kv_carve(kv_host + off, rows, o.kv_k, o.kv_v, o.kv_rot ? 3 : 0, l.kvh.kc, l.kvh.vc, l.kvh.q);
-                off += nb;
-                acct_kvh[D[(size_t) l.dev].id] += nb;
+                for (Layer::SeqKv& c : l.sk) {
+                    k::kv_carve(kv_host + off, rows, o.kv_k, o.kv_v, o.kv_rot ? 3 : 0, c.kvh.kc, c.kvh.vc, c.kvh.q);
+                    off += nb;
+                    acct_kvh[D[(size_t) l.dev].id] += nb;
+                }
+                l.kvh = l.sk[(size_t) std::max(0, bound)].kvh;
             }
             st.kv_ring = kv_ring;
             st.kv_host_gb = (double) total / (1u << 30);
@@ -2180,7 +2195,7 @@ struct Model::Impl {
                 const Layer::SeqKv& c = l.sk[(size_t) rseq[(size_t) r]];
                 k::qk_norm_rope(d.q + (size_t) r * Q, d.k + (size_t) r * KV, d.v + (size_t) r * KV, l.qn1, l.kn1,
                                 d.pos + r, 1, g.n_head, g.n_kv, g.hd, g.n_rot, inv_dev[(size_t) di], g.eps, c.kc, c.vc,
-                                d.s, 0, c.kvq);
+                                d.s, 0, c.kvq, c.kvh);
             }
         pmark(d, kPAttnIn);
         join(d);
@@ -2193,7 +2208,7 @@ struct Model::Impl {
                 const Layer::SeqKv& c = l.sk[(size_t) rseq[(size_t) r]];
                 k::sparse_attn(d.q + (size_t) r * Q, c.kc, c.vc, d.kept + (size_t) r * g.ix_heads * g.topk, d.pos + r, 1,
                                g.n_head, g.n_kv, g.topk, g.blk, 1.0f / std::sqrt((float) g.hd), d.att + (size_t) r * Q,
-                               d.s, c.kvq, k::KvHost{}, attn_splits, d.attp);
+                               d.s, c.kvq, c.kvh, attn_splits, d.attp);
             }
         pmark(d, kPAttn);
         const x3::MvJob oj = job(l.o, d.att, Q, d.ao, g.dim);
@@ -3742,7 +3757,7 @@ bool Model::load(const Options& o_in, std::string& err) {
     return true;
 }
 bool Model::state_ok() const {
-    if (tpe || p->L.empty() || seqs() != 1 || p->draftm) return false;
+    if (tpe || p->L.empty() || p->draftm) return false;   // (--parallel: the bound conversation's)
     for (const auto& l : p->L)
         if (l.kvh.ring <= 0) return false;
     return true;
