@@ -281,16 +281,16 @@ class FairSlicesParallel(unittest.TestCase):
         self.engine = ResumingEngine(self.tok, {**self.LONGS, "short": self.SHORT}, delay_s=0.003)
         self.svc = Service(self.engine, self.tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
         self.svc.fifo.set_capacity(4)
-        self.env = os.environ.get("MAYA_FAIR_SLICE_S")
+        self.env = os.environ.get("STRATA_FAIR_SLICE_S")
 
     def tearDown(self):
         if self.env is None:
-            os.environ.pop("MAYA_FAIR_SLICE_S", None)
+            os.environ.pop("STRATA_FAIR_SLICE_S", None)
         else:
-            os.environ["MAYA_FAIR_SLICE_S"] = self.env
+            os.environ["STRATA_FAIR_SLICE_S"] = self.env
 
     def test_one_short_request_cuts_one_long_answer(self):
-        os.environ["MAYA_FAIR_SLICE_S"] = "0.3"
+        os.environ["STRATA_FAIR_SLICE_S"] = "0.3"
         out, threads = {}, []
         for user in self.LONGS:
             th = threading.Thread(target=collect, args=(self.svc, user, 4096, out))
