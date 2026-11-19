@@ -2,6 +2,7 @@
 #include "mm3_kernels.cuh"
 
 #include <cuda_fp16.h>
+#include <vector>
 #if !defined(STRATA_USE_HIP)
 #include <cuda_bf16.h>
 #include <cuda_fp8.h>
@@ -2241,6 +2242,194 @@ void select_blocks(const float* bs, const int* pos, int T, int Hi, int nblk, int
     check("select_blocks");
 }
 
+// ---- Turing tensor cores (sm_75: mma.m16n8k16 FP16, F32 sums) for a prompt's queries over int8 K / V: one warp a
+// (query, KV group) - its 16 query heads are the MMA's 16 rows - over 32-key tiles of the kept blocks, online softmax
+// in F32 as sparse_attn_kernel's.  The int8 codes are exact in FP16; a key's scale multiplies its scores after the
+// product, a value's multiplies its row (FP16, the PV product's operand) - not the same bits as the
+// CUDA-core kernel (the queries and probabilities rounded to FP16).  MAYA_MM3_ATTN_TC=0: that kernel.
+constexpr int kTcKeys = 32, kTcWarps = 4;
+__device__ __forceinline__ uint32_t h2pack(float a, float b) {
+    const __half2 h = __floats2half2_rn(a, b);
+    return *(const uint32_t*) &h;
+}
+__device__ __forceinline__ uint32_t i8pair(int8_t a, int8_t b) {   // (two int8 codes as a half2: exact)
+    const __half2 h = __halves2half2(__int2half_rn((int) a), __int2half_rn((int) b));
+    return *(const uint32_t*) &h;
+}
+__device__ __forceinline__ void mma16816(float* c, const uint32_t* a, uint32_t b0, uint32_t b1) {
+    asm volatile("mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32 {%0,%1,%2,%3}, {%4,%5}, {%6}, {%0,%1,%2,%3};\n"
+                 : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3]) : "r"(a[0]), "r"(a[1]), "r"(b0));
+    asm volatile("mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32 {%0,%1,%2,%3}, {%4,%5}, {%6}, {%0,%1,%2,%3};\n"
+                 : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3]) : "r"(a[2]), "r"(a[3]), "r"(b1));
+}
+
+__global__ void __launch_bounds__(kTcWarps * 32) sparse_attn_tc_kernel(const float* q, const int* kept, const int* pos,
+                                                                       int T, int Hq, int Hkv, int topk, int blk,
+                                                                       float scale, float* out, KvQ kq, KvHost hs) {
+    // a warp's tiles: its K and V rows (int8), which also hold its queries first and its output last (F32 [16][132])
+    __shared__ __align__(16) int8_t kvbuf[kTcWarps][2][kTcKeys][128 + 16];
+    __shared__ float ksc[kTcWarps][kTcKeys], vsc[kTcWarps][kTcKeys];
+    const int wp = threadIdx.x >> 5, lane = threadIdx.x & 31, gid = lane >> 2, tig = lane & 3;
+    int8_t (*ks)[128 + 16] = kvbuf[wp][0];
+    int8_t (*vs)[128 + 16] = kvbuf[wp][1];
+    float (*qo)[128 + 4] = (float (*)[128 + 4]) &kvbuf[wp][0][0][0];
+    static_assert(sizeof(float) * kG * (128 + 4) <= 2 * kTcKeys * (128 + 16), "the queries fit in a warp's tiles");
+    const int t = blockIdx.x * kTcWarps + wp, g = blockIdx.y;
+    if (t >= T) return;
+    const int p = pos[t];
+    const bool krot = kq.rot & 1, vrot = kq.rot & 2;
+    for (int h = 0; h < kG; ++h) {   // the queries (scaled; rotated as the keys)
+        float x[4];
+#pragma unroll
+        for (int i = 0; i < 4; ++i) x[i] = q[((size_t) t * Hq + g * kG + h) * 128 + lane * 4 + i] * scale;
+        if (krot) had128w(x, lane);
+#pragma unroll
+        for (int i = 0; i < 4; ++i) qo[h][lane * 4 + i] = x[i];
+    }
+    __syncwarp();
+    uint32_t qa[8][4];   // A fragments: rows = heads, k = 128 dims in 8 steps of 16
+#pragma unroll
+    for (int kk = 0; kk < 8; ++kk) {
+        const int c = kk * 16 + tig * 2;
+        qa[kk][0] = h2pack(qo[gid][c], qo[gid][c + 1]);
+        qa[kk][1] = h2pack(qo[gid + 8][c], qo[gid + 8][c + 1]);
+        qa[kk][2] = h2pack(qo[gid][c + 8], qo[gid][c + 9]);
+        qa[kk][3] = h2pack(qo[gid + 8][c + 8], qo[gid + 8][c + 9]);
+    }
+    float o[16][4];   // O: rows = heads, 128 dims in 16 tiles of 8
+#pragma unroll
+    for (int n = 0; n < 16; ++n) o[n][0] = o[n][1] = o[n][2] = o[n][3] = 0.0f;
+    float m0 = -INFINITY, m1 = -INFINITY, l0 = 0.0f, l1 = 0.0f;   // (rows gid and gid + 8)
+    const int* kb = kept + ((size_t) g * T + t) * topk;
+    for (int bi = 0; bi < topk; ++bi) {
+        const int b = kb[bi];
+        if (b < 0) continue;
+        for (int sub = 0; sub < blk / kTcKeys; ++sub) {
+            const int k0 = b * blk + sub * kTcKeys;
+            if (k0 > p) break;
+            __syncwarp();
+            for (int i = lane; i < kTcKeys * 32; i += 32) {   // 32 keys x 32 words of 4 int8 (a key's row: one warp read)
+                const int j = i >> 5, c = i & 31;
+                const int kp = k0 + j;
+                uint32_t wk = 0, wv = 0;
+                if (kp <= p) {
+                    bool fh = false;
+                    const size_t r = kv_row(hs, kp, fh);
+                    wk = *(const uint32_t*) ((fh ? hs.q.kc : kq.kc) + (r * Hkv + g) * 128 + c * 4);
+                    wv = *(const uint32_t*) ((fh ? hs.q.vc : kq.vc) + (r * Hkv + g) * 128 + c * 4);
+                }
+                *(uint32_t*) &ks[j][c * 4] = wk;
+                *(uint32_t*) &vs[j][c * 4] = wv;
+            }
+            {
+                const int kp = k0 + lane;
+                float a = 0.0f, v = 0.0f;
+                if (kp <= p) {
+                    bool fh = false;
+                    const size_t r = kv_row(hs, kp, fh);
+                    a = *(const float*) ((fh ? hs.q.ks : kq.ks) + (r * Hkv + g) * 4);
+                    v = *(const float*) ((fh ? hs.q.vs : kq.vs) + (r * Hkv + g) * 4);
+                }
+                ksc[wp][lane] = a;
+                vsc[wp][lane] = v;
+            }
+            __syncwarp();
+            float sc[4][4];   // S: rows = heads, 32 keys in 4 tiles of 8
+#pragma unroll
+            for (int n = 0; n < 4; ++n) {
+                sc[n][0] = sc[n][1] = sc[n][2] = sc[n][3] = 0.0f;
+                const int key = n * 8 + gid;   // (B: k = dims, n = keys - this lane's key column)
+#pragma unroll
+                for (int kk = 0; kk < 8; ++kk) {
+                    const int c = kk * 16 + tig * 2;
+                    const uint32_t b0 = i8pair(ks[key][c], ks[key][c + 1]);
+                    const uint32_t b1 = i8pair(ks[key][c + 8], ks[key][c + 9]);
+                    mma16816(sc[n], qa[kk], b0, b1);
+                }
+            }
+            // scale, mask, the rows' new max (a row's 32 keys over the quad's 4 lanes)
+            float mx0 = m0, mx1 = m1;
+#pragma unroll
+            for (int n = 0; n < 4; ++n)
+#pragma unroll
+                for (int e = 0; e < 2; ++e) {
+                    const int j = n * 8 + tig * 2 + e;
+                    const bool ok = k0 + j <= p;
+                    sc[n][e] = ok ? sc[n][e] * ksc[wp][j] : -INFINITY;
+                    sc[n][e + 2] = ok ? sc[n][e + 2] * ksc[wp][j] : -INFINITY;
+                    mx0 = fmaxf(mx0, sc[n][e]);
+                    mx1 = fmaxf(mx1, sc[n][e + 2]);
+                }
+#pragma unroll
+            for (int x = 1; x < 4; x <<= 1) {
+                mx0 = fmaxf(mx0, __shfl_xor_sync(0xffffffffu, mx0, x));
+                mx1 = fmaxf(mx1, __shfl_xor_sync(0xffffffffu, mx1, x));
+            }
+            const float a0 = m0 == -INFINITY ? 0.0f : expf(m0 - mx0), a1 = m1 == -INFINITY ? 0.0f : expf(m1 - mx1);
+            m0 = mx0;
+            m1 = mx1;
+            float s0 = 0.0f, s1 = 0.0f;
+            uint32_t pa[2][4];   // P as the PV product's A: 32 keys = 2 k-steps of 16
+#pragma unroll
+            for (int n = 0; n < 4; ++n) {
+                float e[4];
+#pragma unroll
+                for (int x = 0; x < 2; ++x) {
+                    e[x] = sc[n][x] == -INFINITY ? 0.0f : expf(sc[n][x] - m0);
+                    e[x + 2] = sc[n][x + 2] == -INFINITY ? 0.0f : expf(sc[n][x + 2] - m1);
+                    s0 += e[x];
+                    s1 += e[x + 2];
+                }
+                pa[n >> 1][(n & 1) * 2 + 0] = h2pack(e[0], e[1]);
+                pa[n >> 1][(n & 1) * 2 + 1] = h2pack(e[2], e[3]);
+            }
+#pragma unroll
+            for (int x = 1; x < 4; x <<= 1) {
+                s0 += __shfl_xor_sync(0xffffffffu, s0, x);
+                s1 += __shfl_xor_sync(0xffffffffu, s1, x);
+            }
+            l0 = l0 * a0 + s0;
+            l1 = l1 * a1 + s1;
+#pragma unroll
+            for (int n = 0; n < 16; ++n) {
+                o[n][0] *= a0;
+                o[n][1] *= a0;
+                o[n][2] *= a1;
+                o[n][3] *= a1;
+                const int d = n * 8 + gid;   // (B: k = keys, n = dims - this lane's dim column)
+#pragma unroll
+                for (int ks2 = 0; ks2 < 2; ++ks2) {
+                    const int j = ks2 * 16 + tig * 2;
+                    // (the values' scales on V itself: folded into P they fell under FP16's normal range)
+                    const uint32_t b0 = h2pack(vs[j][d] * vsc[wp][j], vs[j + 1][d] * vsc[wp][j + 1]);
+                    const uint32_t b1 = h2pack(vs[j + 8][d] * vsc[wp][j + 8], vs[j + 9][d] * vsc[wp][j + 9]);
+                    mma16816(o[n], pa[ks2], b0, b1);
+                }
+            }
+        }
+    }
+    // the output: O / l (rows gid, gid + 8; dims n * 8 + tig * 2 + {0, 1}), rotated back when V was stored rotated
+    const float i0 = l0 > 0.0f ? 1.0f / l0 : 0.0f, i1 = l1 > 0.0f ? 1.0f / l1 : 0.0f;
+    __syncwarp();
+#pragma unroll
+    for (int n = 0; n < 16; ++n) {
+        const int d = n * 8 + tig * 2;
+        qo[gid][d] = o[n][0] * i0;
+        qo[gid][d + 1] = o[n][1] * i0;
+        qo[gid + 8][d] = o[n][2] * i1;
+        qo[gid + 8][d + 1] = o[n][3] * i1;
+    }
+    __syncwarp();
+    for (int h = 0; h < kG; ++h) {
+        float x[4];
+#pragma unroll
+        for (int i = 0; i < 4; ++i) x[i] = qo[h][lane * 4 + i];
+        if (vrot) had128w(x, lane);
+#pragma unroll
+        for (int i = 0; i < 4; ++i) out[((size_t) t * Hq + g * kG + h) * 128 + lane * 4 + i] = x[i];
+    }
+}
+
 void sparse_attn(const float* q, const uint16_t* kc, const uint16_t* vc, const int* kept, const int* pos, int T,
                  int Hq, int Hkv, int topk, int blk, float scale, float* out, cudaStream_t s, const KvQ& kq,
                  const KvHost& hs, int splits, float* part) {
@@ -2253,6 +2442,43 @@ void sparse_attn(const float* q, const uint16_t* kc, const uint16_t* vc, const i
         return v == nullptr || std::atoi(v) != 0;
     }();
     const bool wide = wide_on && T <= kWideT;
+    // (a prompt's queries over int8 K and V, unsplit: the tensor-core kernel - MAYA_MM3_ATTN_TC=0: the CUDA cores')
+    static const bool tc_on = [] {
+        const char* v = std::getenv("MAYA_MM3_ATTN_TC");
+        return v == nullptr || std::atoi(v) != 0;
+    }();
+    if (tc_on && !wide && S == 1 && kq.kf == kKvI8 && kq.vf == kKvI8 && Hq == Hkv * kG && blk % kTcKeys == 0) {
+        sparse_attn_tc_kernel<<<dim3((unsigned) ((T + kTcWarps - 1) / kTcWarps), (unsigned) Hkv), kTcWarps * 32, 0, s>>>(
+            q, kept, pos, T, Hq, Hkv, topk, blk, scale, out, kq, hs);
+        check("sparse_attn_tc");
+        static int checks = std::getenv("MAYA_MM3_ATTN_TC_CHECK") ? std::atoi(std::getenv("MAYA_MM3_ATTN_TC_CHECK")) : 0;
+        if (checks > 0) {   // (debugging: the CUDA cores' kernel on the same inputs, the largest difference said)
+            --checks;
+            const size_t n = (size_t) T * Hq * 128;
+            float* ref = nullptr;
+            cudaMalloc(&ref, n * 4);
+            sparse_attn_kernel<kKvI8, kKvI8><<<dim3((unsigned) T, (unsigned) Hkv, 1), 128, 0, s>>>(
+                q, kc, vc, kept, pos, T, Hq, Hkv, topk, blk, scale, ref, kq, hs, 1, nullptr);
+            std::vector<float> a(n), b(n);
+            cudaMemcpyAsync(a.data(), ref, n * 4, cudaMemcpyDeviceToHost, s);
+            cudaMemcpyAsync(b.data(), out, n * 4, cudaMemcpyDeviceToHost, s);
+            cudaStreamSynchronize(s);
+            cudaFree(ref);
+            double md = 0, mx = 0;
+            size_t at = 0;
+            for (size_t i = 0; i < n; ++i) {
+                const double d = std::fabs((double) a[i] - b[i]);
+                if (d > md) md = d, at = i;
+                mx = std::max(mx, (double) std::fabs(a[i]));
+            }
+            static int call = 0;
+            ++call;
+            if (md > 1e-2 * mx || call % 60 == 1)
+                std::fprintf(stderr, "attn tc check %d: T %d, max |ref| %g, max diff %g at %zu (ref %g, tc %g), rot %d, "
+                             "pos %d..\n", call, T, mx, md, at, a[at], b[at], kq.rot, -1);
+        }
+        return;
+    }
 #define MM3_ATTN(KK, VV)                                                                                             \
     case KK * 4 + VV:                                                                                                \
         if (wide)                                                                                                    \

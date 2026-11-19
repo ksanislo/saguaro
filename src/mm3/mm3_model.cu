@@ -1887,7 +1887,7 @@ struct Model::Impl {
             CK(cudaDeviceSynchronize());
         }
         if (const char* pv = ::mm3::env("MM3_PROF")) {
-            pf.on = std::atoi(pv) != 0 && D.size() == 1;
+            pf.on = std::atoi(pv) != 0 && (D.size() == 1 || std::atoi(pv) == 2);   // (several GPUs: the host-timed mode)
             pf.sync = std::atoi(pv) == 2;
         }
         for (size_t di = 0; di < D.size(); ++di)   // (the pipeline's stages: the GPUs holding layers)
