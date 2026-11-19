@@ -22,12 +22,13 @@ talks to it over stdin/stdout; `MockEngine` is a scripted stand-in that makes ev
 """
 from __future__ import annotations
 
-# ---- one server for every engine (Saguaro phase 3): `--engine qfn` is Qwen3.8-Flash-Next's engine (engines/qfn, Strata's tree),
-# whose server speaks that engine's own batch protocol: the process becomes engines/qfn/serve/server.py with the same
-# arguments (--engine qfn -> strata, its name there) - os.execv keeps the PID a supervisor (llama-swap) watches; nothing of
-# this server is loaded.  Every other engine continues below.
+# ---- `--engine qfn` (Qwen3.8-Flash-Next's engine, engines/qfn) runs in THIS server (serve/qfn_engine.py: its batch-protocol
+# driver).  SAGUARO_QFN_SHIM=1 keeps the old way - the process becomes engines/qfn/serve/server.py (Strata's server and
+# web UI) with the same arguments (os.execv: the PID llama-swap watches stays).
 def _qfn_dispatch():
     import os as _os, sys as _sys
+    if _os.environ.get("SAGUARO_QFN_SHIM") != "1":
+        return
     a = _sys.argv[1:]
     for i, x in enumerate(a):
         if (x == "--engine" and i + 1 < len(a) and a[i + 1] == "qfn") or x == "--engine=qfn":
@@ -2377,8 +2378,8 @@ class Service:
             req["top_logprobs"] = n
         top = (getattr(self.engine, "info", None) or {}).get("logprobs")
         if n is not None and not (isinstance(top, int) and top >= n):
-            raise ValueError("logprobs: this model's engine does not report token log-probabilities (the DeepSeek "
-                             "and GLM engines do - update Maya (./maya.sh --setup) if it is that one)")
+            raise ValueError("logprobs: this model's engine does not report token log-probabilities (the DeepSeek, "
+                             "GLM and MiniMax engines do)")
 
     def render_ids(self, messages, tools, kwargs, suffix="") -> list[int]:
         """The template rendered for `messages` and `tools` (+ `suffix`, text the server appends to the prompt) and
@@ -6642,9 +6643,68 @@ def tee_server_log(path: str) -> None:
     sys.stdout = ServerLogTee(sys.stdout, handle)
 
 
+def start_qfn(cfg: dict, tok):
+    """Qwen3.8-Flash-Next's engine (engines/qfn) under this server: QFN's own driver (serve/qfn_engine.py - its arguments,
+    environment and batch protocol: the server-side slot admission, BGEN / BDONE, wrap spill, session files) behind this
+    server's engine interface, and its picture encoder (vision-qfn: the same ENC protocol as maya-vision) resident."""
+    from serve import qfn_engine as QE
+    if not cfg:
+        raise SystemExit("--engine qfn needs --config")
+    env = QE.child_env(cfg)
+    QE.configure_batch_telemetry_env(env, cfg, None)
+    sampling_defaults = sampling_defaults_from_config(cfg)
+    vision = None
+    vcfg = cfg.get("vision") or None
+    if vcfg:
+        print("loading the vision encoder ...", flush=True)
+        vision = Vision(dict(vcfg), log=open(cfg["log"], "a", encoding="utf-8") if cfg.get("log") else None,
+                        env=QE.vision_env(cfg, env))
+    print("loading the model (the first start takes a minute or two) ...", flush=True)
+    exe = cfg["exe"] if os.path.isabs(cfg["exe"]) else os.path.abspath(os.path.join(cfg.get("cwd") or ".", cfg["exe"]))
+    QE.apply_ready_timeout(cfg)
+    silence = QE.engine_silence_s(cfg)
+    effort_end = QE.effort_end_args(cfg, exe, tok) or []
+    t0 = time.time()
+    engine = _qfn_engine_class()(exe, QE.engine_args(cfg) + effort_end, cwd=cfg.get("cwd"), log=cfg.get("log"), env=env)
+    engine.silence_s = silence
+    engine.load_s = round(time.time() - t0, 1)
+    warn_tight_ram(engine.info.get("arena_mib"))
+    return engine, vision, sampling_defaults
+
+
+def _qfn_engine_class():
+    from serve import qfn_engine as QE
+
+    class QfnEngine(QE.StrataEngine):
+        """QFN's driver as this server's engine: several conversations at once are its batch slots (the FIFO's places);
+        the fair-slice PAUSE of the GLM engine does not apply (QFN admits and yields slots itself)."""
+        can_pause = False
+
+        @property
+        def multi(self) -> int:
+            return int(getattr(self, "batch", 0) or 0)
+
+        def pause(self, keep: bool = False):
+            pass
+
+        def waiting_behind(self, seconds: float) -> set:
+            return set()
+
+        def started(self, rids) -> bool:
+            return True
+
+        def set_context(self, n: int):
+            raise ValueError("this engine's context is set in its config (--max-context)")
+
+        def stop(self, timeout: float = 60.0):
+            pass   # (each request stops its own slot - BSTOP - when its consumer goes; no engine-wide STOP)
+
+    return QfnEngine
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--engine", choices=["mock", "maya", "strata"], default="mock")   # (strata: the old name, kept for older scripts)
+    ap.add_argument("--engine", choices=["mock", "maya", "strata", "qfn"], default="mock")   # (strata: the old name, kept for older scripts)
     ap.add_argument("--config", help="maya engine config (JSON: exe, args, cwd, tokenizer, model_name), "
                                      "written by setup.py")
     ap.add_argument("--host", default=None,
@@ -6703,7 +6763,7 @@ def main() -> int:
         a.tokenizer = cfg["tokenizer"]
     tok = ByteTokenizer()
     tpath = Path(a.tokenizer)
-    if a.engine == "maya" and not (tpath / "vocab.json").exists():
+    if a.engine in ("maya", "qfn") and not (tpath / "vocab.json").exists():
         ap.error(f"the model's tokenizer is missing ({tpath / 'vocab.json'}); run setup again")
     if (tpath / "vocab.json").exists():
         import strata_tokenizer as ST
@@ -6785,6 +6845,8 @@ def main() -> int:
                 print("[maya] images: the model cannot lend the vision encoder its GPU memory here - the encoder "
                       "runs on the CPU", flush=True)
                 vision = Vision(dict(vcfg, gpu=False), log=vlog, env=venv)
+    elif a.engine == "qfn":
+        engine, vision, sampling_defaults = start_qfn(cfg, tok)
     else:
         engine, vision, sampling_defaults = MockEngine(tok, a.script or [
             "Thinking about it.</think>\n\nHello from the mock engine."],
@@ -6820,6 +6882,7 @@ def main() -> int:
               f"{'' if level in (svc.default_effort, f'{svc.default_effort} of 100') else f' (the config says {svc.default_effort})'}",
               flush=True)
     svc.think_budget = int(cfg["thinking_budget"] if cfg.get("thinking_budget") is not None else
+                           cfg["reasoning_budget_tokens"] if a.engine == "qfn" and cfg.get("reasoning_budget_tokens") else
                            maya_quants.default_thinking_budget(cfg) if a.engine == "maya" else 32768)         if svc.think_end_id is not None else 0
     svc.idle_unload_s = max(0.0, a.idle_unload if a.idle_unload is not None else float(cfg.get("idle_unload_s") or 0))
     if svc.think_budget:
