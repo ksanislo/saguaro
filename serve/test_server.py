@@ -50,7 +50,7 @@ class StampedLog(unittest.TestCase):
         print("maya ds4 serve: request 926: prompt 100 tokens", file=out)
         print("  [saguaro] indented is not stamped", file=out)
         lines = buf.getvalue().splitlines()
-        stamp = r"\d\d:\d\d:\d\d "
+        stamp = r"\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d{3} "
         self.assertRegex(lines[0], "^" + stamp + r"\[saguaro\] request 1 done$")
         self.assertRegex(lines[1], "^" + stamp + r"\[saguaro\] in pieces - one line$")
         self.assertEqual(lines[2:], ["maya ds4 serve: request 926: prompt 100 tokens", "  [saguaro] indented is not stamped"])
