@@ -821,6 +821,17 @@ __device__ __forceinline__ size_t kv_row(const KvHost& hs, int kp, bool& host) {
     host = hs.tag[r] != kp;
     return host ? (size_t) kp : (size_t) r;
 }
+// (int8) a host key's bytes: kv_gather's VRAM copy when it made one (r its row there), else the host row r
+__device__ __forceinline__ const KvQ& kv_src(const KvHost& hs, int kp, size_t& r) {
+    if (hs.gmap != nullptr) {
+        const int b = kp >> 7, sl = hs.gmap[b];
+        if (sl >= 0) {
+            r = (size_t) sl * 128 + (size_t) (kp & 127);
+            return hs.gq;
+        }
+    }
+    return hs.q;
+}
 
 __device__ __forceinline__ uint32_t bf2pack(float a, float b) {
     return (uint32_t) f2bf(a) | ((uint32_t) f2bf(b) << 16);
@@ -856,8 +867,13 @@ __device__ __forceinline__ void load_tile(int k0, int p, int g, int Hkv, const K
             uint32_t w = 0;
             if (kp <= p) {
                 bool fh = false;
-                const size_t r = kv_row(hs, kp, fh);
-                w = *(const uint32_t*) ((fh ? hcq : cq) + (r * Hkv + g) * 128 + c * 4);
+                size_t r = kv_row(hs, kp, fh);
+                const uint8_t* src = cq;
+                if (fh) {
+                    const KvQ& h = kv_src(hs, kp, r);
+                    src = is_k ? h.kc : h.vc;
+                }
+                w = *(const uint32_t*) (src + (r * Hkv + g) * 128 + c * 4);
             }
             *(uint32_t*) &t8[j][c * 4] = w;
         }
@@ -866,8 +882,13 @@ __device__ __forceinline__ void load_tile(int k0, int p, int g, int Hkv, const K
             float a = 0.0f;
             if (kp <= p) {
                 bool fh = false;
-                const size_t r = kv_row(hs, kp, fh);
-                a = *(const float*) ((fh ? hsq : sq) + (r * Hkv + g) * 4);
+                size_t r = kv_row(hs, kp, fh);
+                const uint8_t* src = sq;
+                if (fh) {
+                    const KvQ& h = kv_src(hs, kp, r);
+                    src = is_k ? h.ks : h.vs;
+                }
+                a = *(const float*) (src + (r * Hkv + g) * 4);
             }
             tsc[tid] = a;
         }
@@ -2536,9 +2557,10 @@ __global__ void __launch_bounds__(kTcWarps * 32) sparse_attn_tc_kernel(const flo
                 uint32_t wk = 0, wv = 0;
                 if (kp <= p) {
                     bool fh = false;
-                    const size_t r = kv_row(hs, kp, fh);
-                    wk = *(const uint32_t*) ((fh ? hs.q.kc : kq.kc) + (r * Hkv + g) * 128 + c * 4);
-                    wv = *(const uint32_t*) ((fh ? hs.q.vc : kq.vc) + (r * Hkv + g) * 128 + c * 4);
+                    size_t r = kv_row(hs, kp, fh);
+                    const KvQ& src = fh ? kv_src(hs, kp, r) : kq;
+                    wk = *(const uint32_t*) (src.kc + (r * Hkv + g) * 128 + c * 4);
+                    wv = *(const uint32_t*) (src.vc + (r * Hkv + g) * 128 + c * 4);
                 }
                 *(uint32_t*) &ks[j][c * 4] = wk;
                 *(uint32_t*) &vs[j][c * 4] = wv;
@@ -2548,9 +2570,10 @@ __global__ void __launch_bounds__(kTcWarps * 32) sparse_attn_tc_kernel(const flo
                 float a = 0.0f, v = 0.0f;
                 if (kp <= p) {
                     bool fh = false;
-                    const size_t r = kv_row(hs, kp, fh);
-                    a = *(const float*) ((fh ? hs.q.ks : kq.ks) + (r * Hkv + g) * 4);
-                    v = *(const float*) ((fh ? hs.q.vs : kq.vs) + (r * Hkv + g) * 4);
+                    size_t r = kv_row(hs, kp, fh);
+                    const KvQ& src = fh ? kv_src(hs, kp, r) : kq;
+                    a = *(const float*) (src.ks + (r * Hkv + g) * 4);
+                    v = *(const float*) (src.vs + (r * Hkv + g) * 4);
                 }
                 ksc[wp][lane] = a;
                 vsc[wp][lane] = v;
@@ -2650,6 +2673,58 @@ __global__ void __launch_bounds__(kTcWarps * 32) sparse_attn_tc_kernel(const flo
 #pragma unroll
         for (int i = 0; i < 4; ++i) out[((size_t) t * Hq + g * kG + h) * 128 + lane * 4 + i] = x[i];
     }
+}
+
+// kv_gather: the kept blocks marked (-2), then each marked block with a host key past the ring check (its first and
+// last key below pmax and the ring's tags) given a slot, then each slotted block's rows copied (16-byte words)
+__global__ void kv_mark_kernel(const int* kept, int n, int nblk, int* gmap) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const int b = kept[i];
+    if (b >= 0 && b < nblk) gmap[b] = -2;
+}
+__global__ void kv_slot_kernel(int nblk, int blk, int pmax, KvHost hs, int* gmap, int cap, int* cnt) {
+    const int b = blockIdx.x * blockDim.x + threadIdx.x;
+    if (b >= nblk || gmap[b] != -2) return;
+    bool host = false;
+    const int e = min(b * blk + blk - 1, pmax);
+    for (int kp = b * blk; kp <= e && !host; ++kp) host = hs.tag[kp % hs.ring] != kp;
+    int sl = -1;
+    if (host) {
+        sl = atomicAdd(cnt, 1);
+        if (sl >= cap) sl = -1;
+    }
+    gmap[b] = sl;
+}
+__global__ void kv_copy_kernel(int blk, int Hkv, int pmax, KvHost hs, const int* gmap) {
+    const int b = blockIdx.x, sl = gmap[b];
+    if (sl < 0) return;
+    const int n = min(blk, pmax + 1 - b * blk);   // (positions of the block written so far)
+    if (n <= 0) return;
+    const size_t cb = (size_t) n * Hkv * 128 / 16, sb = (size_t) n * Hkv * 4 / 16;
+    const size_t hc = (size_t) b * blk * Hkv * 128, gc = (size_t) sl * blk * Hkv * 128;
+    const size_t hsb = (size_t) b * blk * Hkv * 4, gsb = (size_t) sl * blk * Hkv * 4;
+    for (size_t i = threadIdx.x; i < cb; i += blockDim.x) {
+        ((uint4*) (hs.gq.kc + gc))[i] = ((const uint4*) (hs.q.kc + hc))[i];
+        ((uint4*) (hs.gq.vc + gc))[i] = ((const uint4*) (hs.q.vc + hc))[i];
+    }
+    for (size_t i = threadIdx.x; i < sb; i += blockDim.x) {
+        ((uint4*) (hs.gq.ks + gsb))[i] = ((const uint4*) (hs.q.ks + hsb))[i];
+        ((uint4*) (hs.gq.vs + gsb))[i] = ((const uint4*) (hs.q.vs + hsb))[i];
+    }
+}
+void kv_gather(const int* kept, int T, int Hkv, int topk, int nblk, int blk, int pmax, KvHost& hs, int* gmap, int cap,
+               int* cnt, cudaStream_t s) {
+    hs.gmap = nullptr;
+    if (hs.ring <= 0 || cap <= 0 || nblk <= 0 || blk != 128 || pmax < hs.ring) return;
+    cudaMemsetAsync(gmap, 0xff, (size_t) nblk * 4, s);
+    cudaMemsetAsync(cnt, 0, 4, s);
+    const int n = Hkv * T * topk;
+    kv_mark_kernel<<<(n + 255) / 256, 256, 0, s>>>(kept, n, nblk, gmap);
+    kv_slot_kernel<<<(nblk + 127) / 128, 128, 0, s>>>(nblk, blk, pmax, hs, gmap, cap, cnt);
+    kv_copy_kernel<<<nblk, 256, 0, s>>>(blk, Hkv, pmax, hs, gmap);
+    check("kv_gather");
+    hs.gmap = gmap;
 }
 
 void sparse_attn(const float* q, const uint16_t* kc, const uint16_t* vc, const int* kept, const int* pos, int T,

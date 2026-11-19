@@ -80,7 +80,15 @@ struct KvHost {
     int* tag = nullptr;
     uint16_t *kc = nullptr, *vc = nullptr;
     KvQ q;
+    // (int8, a prompt chunk: kv_gather's copy) block b's host rows at slot gmap[b] of gq ([slot][blk][Hkv] rows; -1: none)
+    const int* gmap = nullptr;
+    KvQ gq;
 };
+/// (int8 K / V, KV streaming) every host block a prompt chunk's kept blocks need (kept [Hkv][T][topk]; a key not in the
+/// ring) copied once into hs.gq's slots (at most cap; the rest read from the host as before), gmap [nblk] set - the
+/// attention then reads the same bytes from VRAM.  cnt: one int of device scratch.
+void kv_gather(const int* kept, int T, int Hkv, int topk, int nblk, int blk, int pmax, KvHost& hs, int* gmap, int cap,
+               int* cnt, cudaStream_t s);
 
 /// q [T][Hq][hd] in place: the per-head RMSNorm (one [hd] weight w1 = 1 + w for every head) then NeoX RoPE on the
 /// first n_rot dims at pos[t]; k [T][Hkv][hd] the same and v as it is, both written to the caches at row pos[t] as

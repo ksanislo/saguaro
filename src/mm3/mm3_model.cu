@@ -140,6 +140,11 @@ struct Dev {
     std::vector<int> layers;
     size_t free0 = 0;
     size_t el_floor = 0;   // (MAYA_MM3_ELASTIC: the VRAM kept free - the load's free less a slack)
+    // (MAYA_MM3_KV_GATHER, elastic + KV streaming int8) a prompt chunk's host K / V blocks copied into VRAM once: the
+    // four arrays' ranges (slots of [blk][Hkv] rows each, mapped as a read gets deeper), the block map, a counter
+    vmm::Range kgr[4];
+    int kg_slots = 0;
+    int *kg_map = nullptr, *kg_cnt = nullptr;
     // staging
     uint8_t* stg = nullptr;
     size_t slot_bytes = 0;
@@ -628,10 +633,59 @@ struct Model::Impl {
     }
     // (an idle engine) experts back into the regions while VRAM is free past the floor, the most routed first - for at
     // most budget_s seconds; true: more to give
+    // MAYA_MM3_KV_GATHER: 1 (default) on, 0 off, 2 every other prompt chunk (a speed check in one load)
+    static int kv_gather_mode() {
+        static const int m = [] {
+            const char* v = ::mm3::env("MM3_KV_GATHER");
+            return v ? std::atoi(v) : 1;
+        }();
+        return m;
+    }
+    long kg_chunk = 0;
+    // a prompt chunk up to pmax: the gather's slots for every block past the ring mapped on each GPU
+    bool kvg_ensure(int pmax, std::string& err) {
+        for (Dev& d : D) d.kg_slots = 0;
+        if (el_pos <= 0 || L.empty() || L[0].kvh.ring <= 0 || pmax < L[0].kvh.ring) return true;
+        if (kv_gather_mode() == 2 && (kg_chunk++ & 1)) return true;
+        for (Dev& d : D) {
+            if (d.kgr[0].base == 0) continue;
+            const int want = std::min((int) d.nblk, (pmax + 1 - L[0].kvh.ring) / g.blk + 2);
+            const size_t rb[4] = {128, 128, 4, 4};
+            size_t need = 0;
+            for (int a = 0; a < 4; ++a) {
+                const size_t w = d.kgr[a].round((size_t) want * g.blk * g.n_kv * rb[a]);
+                if (w > d.kgr[a].mapped) need += w - d.kgr[a].mapped;
+            }
+            if (need > 0) {
+                CK(cudaSetDevice(d.id));
+                size_t fr = 0, tot = 0;
+                CK(cudaMemGetInfo(&fr, &tot));
+                d.el_floor = std::max(el_min, std::min(d.el_floor, fr));
+                if (fr < need + d.el_floor && !ctx_take(d, need + d.el_floor - fr, err)) return false;
+                for (int a = 0; a < 4; ++a) {
+                    const size_t m0 = d.kgr[a].mapped;
+                    if (!d.kgr[a].grow((size_t) want * g.blk * g.n_kv * rb[a], err)) return false;
+                    acct[d.id][kAKV] += d.kgr[a].mapped - m0;
+                }
+            }
+            d.kg_slots = want;
+        }
+        return true;
+    }
     bool ctx_give(double budget_s) {
         if (el_pos <= 0) return false;
         const double t0 = now();
         bool more = false;
+        for (Dev& d : D)   // (a deep read's gather slots given back first)
+            if (d.kgr[0].mapped > 0) {
+                cudaSetDevice(d.id);
+                cudaDeviceSynchronize();
+                for (vmm::Range& r : d.kgr) {
+                    acct[d.id][kAKV] -= r.mapped;
+                    r.shrink(0);
+                }
+                d.kg_slots = 0;
+            }
         for (Dev& d : D) {
             cudaSetDevice(d.id);
             long n = 0;
@@ -798,6 +852,15 @@ struct Model::Impl {
         ++pf.fwd[kind];
         pf.tok[kind] += T;
         pf.wall[kind] += wall_s;
+        static const bool each = ::mm3::env("MM3_PROF_EACH") != nullptr;   // (each prompt chunk's own line)
+        if (each && kind == 2) {
+            std::fprintf(stderr, "MM3 PROF chunk at %d:", cur_pos);
+            preport();
+            for (int i = 0; i < kPN; ++i) pf.ms[2][i] = 0;
+            pf.fwd[2] = 0;
+            pf.tok[2] = 0;
+            pf.wall[2] = 0;
+        }
     }
     void preport() const {
         if (!pf.on) return;
@@ -824,6 +887,13 @@ struct Model::Impl {
                          st.help_experts, st.cpu_experts);
         graphs_clear();
         for (cudaEvent_t e : pf.ev) cudaEventDestroy(e);
+        for (Dev& d : D)
+            for (vmm::Range& r : d.kgr)
+                if (r.base) {
+                    cudaSetDevice(d.id);
+                    cudaDeviceSynchronize();
+                    r.close();
+                }
         for (Layer& l : L) {   // (elastic ranges)
             if (l.resv.base || std::any_of(l.sk.begin(), l.sk.end(), [](const Layer::SeqKv& c) { return c.icv.base != 0; })) {
                 cudaSetDevice(D[(size_t) l.dev].id);
@@ -1832,6 +1902,15 @@ struct Model::Impl {
                 l.kvh = l.sk[(size_t) std::max(0, bound)].kvh;
             }
             st.kv_ring = kv_ring;
+            if (el_pos > 0 && kv_gather_mode() > 0 && o.kv_k == k::kKvI8 && o.kv_v == k::kKvI8)
+                for (Dev& d : D) {
+                    CK(cudaSetDevice(d.id));
+                    const size_t rows = (size_t) d.nblk * g.blk * g.n_kv;
+                    const size_t by[4] = {rows * 128, rows * 128, rows * 4, rows * 4};
+                    for (int a = 0; a < 4; ++a)
+                        if (!d.kgr[a].open(d.id, by[a], err)) return false;
+                    if (!dalloc(d.id, d.kg_map, d.nblk, err) || !dalloc(d.id, d.kg_cnt, 1, err)) return false;
+                }
             st.kv_host_gb = (double) total / (1u << 30);
         }
         if (ic_rows() < o.max_ctx) {   // the index cache's host tier: every position (rows below rv unused), pinned, mapped
@@ -3415,8 +3494,37 @@ struct Model::Impl {
                 std::fclose(f);
             }
         }
+        k::KvHost hs = l.kvh;
+        if (d.kg_slots > 0 && hs.ring > 0) {   // (the chunk's host blocks into VRAM once)
+            hs.gq.kc = d.kgr[0].ptr();
+            hs.gq.vc = d.kgr[1].ptr();
+            hs.gq.ks = d.kgr[2].ptr();
+            hs.gq.vs = d.kgr[3].ptr();
+            k::kv_gather(d.kept, T, g.n_kv, g.topk, nblk, g.blk, pmax, hs, d.kg_map, d.kg_slots, d.kg_cnt, d.s);
+            static int checks = ::mm3::env("MM3_KV_GATHER_CHECK") ? std::atoi(::mm3::env("MM3_KV_GATHER_CHECK")) : 0;
+            if (checks > 0 && hs.gmap) {   // (debugging: the attention without the copy, compared bit for bit)
+                --checks;
+                const size_t n = (size_t) T * g.n_head * g.hd;
+                float* ref = nullptr;
+                CK(cudaMalloc(&ref, n * 4));
+                k::sparse_attn(d.q, l.kc, l.vc, d.kept, d.pos, T, g.n_head, g.n_kv, g.topk, g.blk,
+                               1.0f / std::sqrt((float) g.hd), ref, d.s, l.kvq, l.kvh);
+                k::sparse_attn(d.q, l.kc, l.vc, d.kept, d.pos, T, g.n_head, g.n_kv, g.topk, g.blk,
+                               1.0f / std::sqrt((float) g.hd), d.att, d.s, l.kvq, hs);
+                std::vector<float> a(n), b(n);
+                int used = 0;
+                CK(cudaMemcpyAsync(a.data(), ref, n * 4, cudaMemcpyDeviceToHost, d.s));
+                CK(cudaMemcpyAsync(b.data(), d.att, n * 4, cudaMemcpyDeviceToHost, d.s));
+                CK(cudaMemcpyAsync(&used, d.kg_cnt, 4, cudaMemcpyDeviceToHost, d.s));
+                CK(cudaStreamSynchronize(d.s));
+                cudaFree(ref);
+                std::fprintf(stderr, "maya-mm3: kv gather check layer %d pos %d: %d host blocks copied (%d slots), %s\n",
+                             li, pmax, used, d.kg_slots,
+                             std::memcmp(a.data(), b.data(), n * 4) == 0 ? "BIT-IDENTICAL" : "DIFFERENT");
+            }
+        }
         k::sparse_attn(d.q, l.kc, l.vc, d.kept, d.pos, T, g.n_head, g.n_kv, g.topk, g.blk, 1.0f / std::sqrt((float) g.hd),
-                       d.att, d.s, l.kvq, l.kvh);
+                       d.att, d.s, l.kvq, hs);
         pmark(d, kPAttn);
         k::to_f16(d.att, T, g.n_head * g.hd, g.n_head * g.hd, d.att16, g.n_head * g.hd, d.s);
         gemm_acc(l.o, d.att16, g.n_head * g.hd);   // h += attn Wo
@@ -4318,6 +4426,7 @@ bool Model::forward(const int* ids, int n, int pos0, int want, float* logits_out
             err = "internal: logits rows";
             return false;
         }
+        if (T > 16 && !p->kvg_ensure(pos0 + a + T - 1, err)) return false;
         if (!p->chunk(ids + a, T, pos0 + a, w, w > 0 ? logits_out + (size_t) (w0 - first) * p->g.vocab : nullptr,
                       err))
             return false;
