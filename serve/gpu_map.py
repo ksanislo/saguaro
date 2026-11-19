@@ -95,8 +95,10 @@ def view(report: list[dict], cards: list[dict] | None, engine_pid, vision_pid=No
         parts = {"weights": r.get("weights", 0), "kv": r.get("kv", 0), "act": r.get("act", 0),
                  "prompt": r.get("prompt", 0), "tp": r.get("tp", 0),
                  "drafter": r.get("drafter", 0) + r.get("window", 0), "pool": pool, "helper": r.get("helper", 0)}
-        engine = sum(parts.values())
         own, enc = held_by(procs, mine), held_by(procs, enc_pids)
+        if r.get("act_own") and own is not None:         # (QFN: its act is a whole-card residual - NVML's figure for
+            parts["act"] = max(0, own - (sum(parts.values()) - parts["act"]))   # the engine's process is exact)
+        engine = sum(parts.values())
         inside = r.get("vision_own", 0) if enc is None else 0   # (a vision tower in the engine's own process)
         engine += inside
         vision = enc if enc is not None else r.get("tail", 0) if lent else inside

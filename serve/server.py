@@ -6761,6 +6761,7 @@ def _qfn_engine_class():
                 if line is not None and line.startswith("VRAM "):
                     part = gpu_map.parse(line)
                     if part:
+                        part["act_own"] = 1              # (act: everything else on the card - gpu_map.view uses NVML)
                         self.vram.append(part)
                 out.put(line)
                 if line is None or line.startswith("READY"):
