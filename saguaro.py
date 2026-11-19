@@ -1205,7 +1205,7 @@ def check_hip_pc(a, installed=False, text_only=True) -> dict:
         # not RAM it counts (a Radeon 8065S: the free commit fell by each one): the engine fills the GPU's share, the
         # RAM holds Windows and the other programs, so the page file needs the GPU's share and the margin both
         # engines keep free for the others, max(8 GB, 10% of the RAM) - with less, experts stay off the GPU or the
-        # other programs run out of memory while the model runs (docs/AMD_MAYA.md, "The page file on a Windows APU")
+        # other programs run out of memory while the model runs (docs/AMD_SAGUARO.md, "The page file on a Windows APU")
         pf = S.page_file_gb()
         need_pf = math.ceil(vram + max(8.0, 0.1 * total))
         if pf is not None and pf < need_pf:
@@ -6934,7 +6934,7 @@ def main() -> int:
             ap.error(f"{a.config}: config backend does not match --backend {a.backend}")
     if not WIN and sys.prefix == sys.base_prefix and not os.environ.get("MAYA_SH"):
         # started as `python3 saguaro.py`: a system Python takes no pip installs (PEP 668, "externally-managed-
-        # environment") - maya.sh makes the private .venv and runs this file with its Python
+        # environment") - saguaro.sh makes the private .venv and runs this file with its Python
         say("Starting through ./saguaro.sh, which runs Saguaro with its own Python environment (.venv) ...")
         sys.stdout.flush()
         os.execve("/bin/sh", ["/bin/sh", str(HERE / "saguaro.sh"), *sys.argv[1:]], dict(os.environ, MAYA_SH="1"))
