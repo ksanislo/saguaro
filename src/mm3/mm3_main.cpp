@@ -1172,7 +1172,19 @@ int serve_multi(mm3::Model& m, const std::vector<int>& eos, int chunk, const std
     };
     // a decode step: the written tokens of every request going on read together (Model::forward_rows)
     std::vector<int> ids_, sq_, ps_;
-    auto feed = [&](const std::vector<Gen*>& rows) {
+    // (MAYA_MM3_ELASTIC) a row whose conversation needs index keys the GPUs cannot give: that request alone fails
+    auto room = [&](std::vector<Gen*>& rows) {
+        std::string err;
+        rows.erase(std::remove_if(rows.begin(), rows.end(), [&](Gen* gp) {
+                       const int pos = (int) seqs[(size_t) gp->seq].state.size();
+                       if (m.ctx_room(gp->seq) > pos || m.ctx_fit(gp->seq, pos + 1, err)) return false;
+                       std::fprintf(stderr, "mm3: %s\n", err.c_str());
+                       failed(*gp, err);
+                       return true;
+                   }), rows.end());
+    };
+    auto feed = [&](std::vector<Gen*> rows) {
+        room(rows);
         if (rows.empty()) return;
         rows_of(rows, ids_, sq_, ps_);
         lg.resize(rows.size() * (size_t) V);
@@ -1231,11 +1243,15 @@ int serve_multi(mm3::Model& m, const std::vector<int>& eos, int chunk, const std
     auto pipe_step = [&]() {
         show();
         std::vector<Gen*> rows = ready();
-        for (Gen* gp : rows)   // (MAYA_MM3_ELASTIC: index keys to map past the experts' VRAM - the pipeline empty first)
-            if (m.pipe_busy() > 0 && m.ctx_room(gp->seq) <= (int) seqs[(size_t) gp->seq].state.size()) {
+        for (Gen* gp : rows) {   // (MAYA_MM3_ELASTIC: index keys past the free VRAM - the pipeline empty first)
+            const int pos = (int) seqs[(size_t) gp->seq].state.size();
+            std::string err;
+            if (m.pipe_busy() > 0 && m.ctx_room(gp->seq) <= pos && !m.ctx_fit(gp->seq, pos + 1, err)) {
                 drain();
                 return;
             }
+        }
+        if (m.pipe_busy() == 0) room(rows);
         if (m.pipe_busy() == 0 && rows.size() <= 1) {   // (a request alone: the token path)
             feed(rows);
             sweep();

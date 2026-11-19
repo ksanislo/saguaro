@@ -525,6 +525,7 @@ struct Model::Impl {
                     const size_t more = std::min(r.round(want), r.cap) - r.mapped + d.el_floor;
                     err.clear();
                     if (!can_take || !ctx_take(d, more, err) || !r.grow(want, err)) {
+                        acct[d.id][kAKV] += r.mapped - m0;
                         err = "elastic context: " + err;
                         return false;
                     }
@@ -656,7 +657,7 @@ struct Model::Impl {
                 const size_t at = l.res_ids.size() * l.blob;
                 const size_t need = l.resv.round(at + l.blob) - l.resv.mapped;
                 size_t fr = 0, tot = 0;
-                if (cudaMemGetInfo(&fr, &tot) != cudaSuccess || fr < need + d.el_floor + l.resv.gran * 8) break;
+                if (cudaMemGetInfo(&fr, &tot) != cudaSuccess || fr < need + std::max(d.el_floor, 2 * el_min) + l.resv.gran * 8) break;
                 std::string err;
                 if (!l.resv.grow(at + l.blob, err)) break;
                 if (n == 0) cudaDeviceSynchronize();   // (d.pin and the streams idle)
