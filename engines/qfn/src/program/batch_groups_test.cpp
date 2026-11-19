@@ -1,0 +1,235 @@
+// src/program/batch_groups_test.cpp - how many pipelined slot groups --batch runs with (header-only, CPU).
+//
+//   1. `auto` picks the most groups, at most one per stage, that divide the slots;
+//   2. a layer split with --batch >= 2 and no --batch-groups means `auto` (0.1.41);
+//   3. --batch-mtp (or --adapt-async 1) turns that default into one group, and says which feature did it;
+//   4. a number or `auto` given explicitly is honoured, with or without those features;
+//   5. no layer split: the number given (1) stays.
+#include "strata/program/batch_groups.hpp"
+#include "strata/core/batch_rows.hpp"
+
+#include <cstdio>
+#include <utility>
+#include <initializer_list>
+
+namespace bg = strata::program::batch_groups;
+
+namespace {
+int g_fail = 0;
+void check(bool ok, const char* what) {
+    std::printf("  %-78s %s\n", what, ok ? "ok" : "FAIL");
+    if (!ok) ++g_fail;
+}
+bg::Input in(int batch, int stages) {
+    bg::Input i;
+    i.batch = batch;
+    i.later_stages = stages;
+    return i;
+}
+}  // namespace
+
+int main() {
+    std::printf("batch_groups_test\n");
+    check(bg::auto_groups(0, 4) == 1, "auto: no layer split, one group");
+    check(bg::auto_groups(1, 2) == 2 && bg::auto_groups(1, 4) == 2 && bg::auto_groups(1, 3) == 1,
+          "auto: two GPUs, 2 groups when the slots divide by 2");
+    check(bg::auto_groups(3, 8) == 4 && bg::auto_groups(3, 6) == 3 && bg::auto_groups(3, 2) == 2,
+          "auto: at most one group per GPU, and a divisor of the slots");
+
+    {   // the 0.1.41 default
+        const auto r = bg::resolve(in(2, 1));
+        check(r.groups == 2 && r.from_auto && r.serial == bg::Serial::None, "layer split, --batch 2, nothing given: 2 groups");
+    }
+    {
+        const auto r = bg::resolve(in(1, 1));
+        check(r.groups == 1 && !r.from_auto, "--batch 1: no default");
+    }
+    {
+        const auto r = bg::resolve(in(2, 0));
+        check(r.groups == 1 && !r.from_auto, "no layer split: one group");
+    }
+
+    {   // the production shape: parallel 2 on a 2-GPU split with --batch-mtp
+        bg::Input i = in(2, 1);
+        i.batch_mtp = true;
+        auto r = bg::resolve(i);
+        check(r.groups == 2 && r.from_auto && r.serial == bg::Serial::None && r.mtp_dropped,
+              "--batch-mtp, nothing given: the pipeline wins, --batch-mtp is dropped");
+        i.mtp_serial = true;
+        r = bg::resolve(i);
+        check(r.groups == 1 && r.from_auto && r.serial == bg::Serial::BatchMtp && r.would_be == 2 && !r.mtp_dropped,
+              "STRATA_BATCH_MTP_SERIAL: one group, because of --batch-mtp");
+        check(bg::serial_what(r.serial)[0] == '-', "the reason names the feature");
+    }
+    {
+        bg::Input i = in(2, 1);
+        i.adapt_async = true;
+        const auto r = bg::resolve(i);
+        check(r.groups == 1 && r.serial == bg::Serial::AdaptAsync, "--adapt-async 1, nothing given: one group");
+    }
+    {
+        bg::Input i = in(2, 1);
+        i.batch_mtp = true;
+        i.adapt_async = true;
+        check(bg::resolve(i).serial == bg::Serial::AdaptAsync, "both: --adapt-async 1 still gives one group");
+        i.mtp_serial = true;
+        check(bg::resolve(i).serial == bg::Serial::BatchMtp, "both with STRATA_BATCH_MTP_SERIAL: --batch-mtp is named");
+    }
+    {   // nothing to give way: the slots do not divide, so auto is one group anyway and there is nothing to say
+        bg::Input i = in(3, 1);
+        i.batch_mtp = true;
+        const auto r = bg::resolve(i);
+        check(r.groups == 1 && r.serial == bg::Serial::None && r.would_be == 1, "auto would be 1 group anyway: no reason");
+    }
+    {   // PROPOSED NVIDIA default: two cards, nothing given: serial windows (measured +12..16% on 2x A4000)
+        bg::Input i = in(4, 1);
+        i.nv_serial_faster = true;
+        auto r = bg::resolve(i);
+        check(r.groups == 1 && r.from_auto && r.serial == bg::Serial::TwoCardsSerialFaster && r.would_be == 2,
+              "nv_serial_faster, 2 cards, 4 slots, nothing given: one group, named");
+        check(bg::serial_what(r.serial)[0] == 's', "the reason names the measurement");
+        check(bg::resolve(in(4, 1)).groups == 2, "flag off: the pipeline default stays");
+        i = in(8, 1); i.nv_serial_faster = true;   // measured too: +15%
+        check(bg::resolve(i).groups == 1, "8 slots (measured +15%): serial too");
+        i = in(4, 3); i.nv_serial_faster = true;
+        check(bg::resolve(i).groups == 4, "4 cards (not measured): the pipeline stays");
+        i = in(4, 1); i.nv_serial_faster = true; i.batch_mtp = true;
+        check(bg::resolve(i).groups == 2 && bg::resolve(i).mtp_dropped, "with --batch-mtp the 0.1.43.1 rule is unchanged");
+        i = in(4, 1); i.nv_serial_faster = true; i.set = true; i.auto_given = true;
+        check(bg::resolve(i).groups == 2, "--batch-groups auto given: the pipeline");
+        i.auto_given = false; i.given = 2;
+        check(bg::resolve(i).groups == 2, "--batch-groups 2 given: 2");
+    }
+    {   // explicit values are honoured
+        bg::Input i = in(4, 1);
+        i.set = true;
+        i.given = 2;
+        i.batch_mtp = true;
+        i.adapt_async = true;
+        const auto r = bg::resolve(i);
+        check(r.groups == 2 && !r.from_auto && r.serial == bg::Serial::None, "--batch-groups 2 with --batch-mtp: 2");
+        i.given = 1;
+        check(bg::resolve(i).groups == 1, "--batch-groups 1: 1 (the opt-out)");
+        i.given = 4;   // not checked here: generate.cpp refuses what does not divide
+        check(bg::resolve(i).groups == 4, "--batch-groups 4 is returned as given");
+    }
+    {
+        bg::Input i = in(2, 1);
+        i.set = true;
+        i.auto_given = true;
+        i.batch_mtp = true;
+        const auto r = bg::resolve(i);
+        check(r.groups == 2 && r.from_auto && r.serial == bg::Serial::None,
+              "--batch-groups auto with --batch-mtp: auto asked for the pipeline, 2 groups");
+    }
+    {
+        bg::Input i = in(2, 0);
+        i.set = true;
+        i.given = 2;
+        check(bg::resolve(i).groups == 2, "an explicit number without a split is returned (the engine warns)");
+    }
+
+    // ---- STRATA_PIPED_MTP
+    {   // the default pipeline keeps --batch-mtp instead of dropping it
+        bg::Input i = in(4, 3);
+        i.batch_mtp = true;
+        i.piped_mtp = true;
+        const auto r = bg::resolve(i);
+        check(r.groups == 4 && !r.mtp_dropped && r.serial == bg::Serial::None, "STRATA_PIPED_MTP: 4 groups, MTP kept");
+        i.piped_mtp = false;
+        check(bg::resolve(i).mtp_dropped, "without it the pipeline drops --batch-mtp");
+    }
+    check(bg::piped_mtp_on(1, 2) && bg::piped_mtp_on(2, 2) && !bg::piped_mtp_on(3, 2), "gate: at most 2 conversations");
+    check(!bg::piped_mtp_on(0, 0) && bg::piped_mtp_on(4, 4), "gate: 0 is never, the number otherwise");
+    check(bg::piped_mtp_group_rows(1, 3, 8) == 4 && bg::piped_mtp_group_rows(2, 3, 8) == 8 &&
+          bg::piped_mtp_group_rows(4, 3, 8) == 8 && bg::piped_mtp_group_rows(2, 1, 8) == 4,
+          "group rows: 1 + drafts per slot, at most the window");
+    check(bg::piped_mtp_hbase(3, 4) == 12 && bg::piped_mtp_handoff_rows(4, 4, 8) == 16 &&
+          bg::piped_mtp_handoff_rows(2, 2, 8) == 8, "hbase and hand-off rows");
+    {   // groups never share a hand-off row and all fit the hand-off
+        for (int batch : {2, 4, 6, 8, 12, 16})
+            for (int groups : {2, 3, 4})
+                for (int d : {1, 2, 3})
+                    if (batch % groups == 0) {
+                        const int gs = batch / groups, gr = bg::piped_mtp_group_rows(gs, d, 8);
+                        const int rows = bg::piped_mtp_handoff_rows(groups, gr, 8);
+                        for (int gi = 0; gi < groups; ++gi)
+                            check(bg::piped_mtp_hbase(gi, gr) + gr <= rows &&
+                                      (gi == 0 || bg::piped_mtp_hbase(gi - 1, gr) + gr <= bg::piped_mtp_hbase(gi, gr)),
+                                  "hand-off ranges disjoint and in range");
+                    }
+    }
+    {
+        const bool act[4] = {true, false, true, true};
+        const int nd[4] = {3, 3, 0, 3};
+        int32_t dr[32] = {};
+        for (int t = 0; t < 4; ++t)
+            for (int j = 0; j < 8; ++j) dr[t * 8 + j] = 20 + 10 * t + j;
+        const int32_t x[4] = {10, 11, 12, 13};
+        const int64_t p[4] = {100, 0, 200, 300}, left[4] = {50, 50, 50, 50};
+        auto L = bg::piped_mtp_layout(4, 4, act, nd, x, dr, p, left, true, 1, 8, 1000);
+        check(L.S == 5 && L.active == 3 && L.drafts, "layout, 1 draft: 2 + 1 + 2 rows, idle slot skipped");
+        check(L.rows[0] == 4 && L.rows[1] == 4 && L.rows[2] == 6 && L.rows[3] == 7 && L.rows[4] == 7, "layout: row slots");
+        check(L.tok[0] == 10 && L.tok[1] == 20 && L.pos[1] == 101 && L.tok[2] == 12 && L.tok[4] == 50 && L.pos[4] == 301,
+              "layout: token then draft at p + 1");
+        check(L.first[0] == 0 && L.n[0] == 2 && L.first[1] == -1 && L.first[2] == 2 && L.n[2] == 1 && L.first[3] == 3,
+              "layout: each slot's rows");
+        check(strata::core::batch_rows_error(L.rows, L.S, L.pos, 8, 8, 8, true, 16) == nullptr, "layout: valid rows");
+        L = bg::piped_mtp_layout(4, 4, act, nd, x, dr, p, left, false, 3, 8, 1000);
+        check(L.S == 3 && !L.drafts, "layout off: one row per live slot");
+        L = bg::piped_mtp_layout(4, 4, act, nd, x, dr, p, left, true, 3, 8, 1000);
+        check(L.S == 8 && L.n[0] == 4 && L.n[2] == 1 && L.n[3] == 3, "layout, 3 drafts, 3 slots in 8 rows: shared in turn");
+        check(L.tok[1] == 20 && L.tok[2] == 21 && L.pos[2] == 102, "layout: drafts in order at p + 1 + j");
+        check(strata::core::batch_rows_error(L.rows, L.S, L.pos, 8, 8, 8, true, 16) == nullptr, "layout: valid rows (3)");
+        const bool one[4] = {true, false, false, false};
+        L = bg::piped_mtp_layout(0, 4, one, nd, x, dr, p, left, true, 3, 4, 1000);
+        check(L.S == 4 && L.n[0] == 4 && L.tok[3] == 22 && L.pos[3] == 103, "layout: one slot, 3 drafts, 4 rows");
+        const int64_t left2[4] = {2, 50, 50, 50};
+        L = bg::piped_mtp_layout(0, 4, one, nd, x, dr, p, left2, true, 3, 8, 1000);
+        check(L.n[0] == 2, "layout: no more drafts than tokens left");
+        L = bg::piped_mtp_layout(0, 4, one, nd, x, dr, p, left, true, 3, 8, 103);
+        check(L.n[0] == 2, "layout: no more drafts than the context holds (p + k + 1 <= max)");
+        L = bg::piped_mtp_layout(4, 4, act, nd, x, dr, p, left, true, 3, 4, 1000);
+        check(L.S == 4 && L.n[0] == 2 && L.n[3] == 1, "layout: 3 live slots in 4 rows: one draft, to the first");
+    }
+    {
+        const int32_t pick[4] = {5, 6, 7, 8}, tok[4] = {1, 5, 6, 9};
+        const bool no[4] = {false, false, false, false}, e1[4] = {false, true, false, false};
+        check(bg::piped_mtp_keep(4, pick, tok, no, false, 10, 100, 50, 1000) == 3, "keep: two drafts picked, third not");
+        check(bg::piped_mtp_keep(2, pick, tok, no, false, 10, 100, 50, 1000) == 2, "keep: one draft picked");
+        check(bg::piped_mtp_keep(1, pick, tok, no, false, 10, 100, 50, 1000) == 1, "keep: no draft row");
+        check(bg::piped_mtp_keep(4, pick, tok, e1, false, 10, 100, 50, 1000) == 2, "keep: stops after an end pick");
+        check(bg::piped_mtp_keep(4, pick, tok, no, true, 10, 100, 50, 1000) == 1, "keep: stopped");
+        check(bg::piped_mtp_keep(4, pick, tok, no, false, 98, 100, 50, 1000) == 2, "keep: tokens left");
+        check(bg::piped_mtp_keep(4, pick, tok, no, false, 10, 100, 997, 1000) == 2, "keep: context's end");
+        const int32_t t1[2] = {1, 6};
+        check(bg::piped_mtp_keep(2, pick, t1, no, false, 10, 100, 50, 1000) == 1, "keep: draft rejected");
+    }
+    {   // STRATA_REGROUP: 4 groups of 2; slots 0,1 decode in group 0, 2 in group 1, 7 reads (not free) in group 3
+        bool live[8] = {true, true, true, false, false, false, false, false};
+        bool fr[8] = {false, false, false, true, true, true, true, false};
+        bg::Regroup m = bg::regroup_pick(4, 2, live, fr);
+        check(m.from == 0 && m.from_t == 1 && m.to == 2 && m.to_t == 0, "regroup: a second live slot goes to an idle group");
+        live[1] = false;
+        fr[1] = true;
+        check(bg::regroup_pick(4, 2, live, fr).from < 0, "regroup: one live slot per group: no move");
+        bool l2[8] = {true, true, true, true, true, false, true, false};   // 2,2,1,1: a move would not even it out
+        bool f2[8] = {false, false, false, false, false, true, false, true};
+        check(bg::regroup_pick(4, 2, l2, f2).from < 0, "regroup: two apart at least");
+        bool l3[4] = {true, true, false, false}, f3[4] = {false, false, false, false};   // the other group is reading
+        check(bg::regroup_pick(2, 2, l3, f3).from < 0, "regroup: no free slot to trade with");
+        // a trade applied to the members table, then a layout over them: the rows are the members' slots
+        int mem[8] = {0, 1, 2, 3, 4, 5, 6, 7};
+        std::swap(mem[m.from * 2 + m.from_t], mem[m.to * 2 + m.to_t]);
+        const bool act2[2] = {true, false};
+        const int nd2[2] = {0, 0};
+        const int32_t x2[2] = {7, 0}, dr2[16] = {};
+        const int64_t p2[2] = {40, 0}, left2b[2] = {9, 9};
+        bg::Layout L = bg::piped_mtp_layout(0, 2, act2, nd2, x2, dr2, p2, left2b, false, 0, 4, 1000);
+        bg::remap_rows(L, mem + m.to * 2);
+        check(L.S == 1 && L.rows[0] == 1 && mem[4] == 1 && mem[1] == 4, "regroup: group 2's window carries slot 1");
+    }
+
+    std::printf("%s\n", g_fail == 0 ? "batch_groups_test: all passed" : "batch_groups_test: FAILED");
+    return g_fail == 0 ? 0 : 1;
+}

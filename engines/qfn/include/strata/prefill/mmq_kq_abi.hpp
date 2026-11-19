@@ -1,0 +1,47 @@
+// include/strata/prefill/mmq_kq_abi.hpp - the interface between the engine (src/prefill/moe_mmq.cu) and strata_kq, the
+// shared library with the K-quant MMQ prompt kernels (src/prefill/mmq_kq_lib.cu).  Bump the version when a function's
+// meaning changes; the argument block (ggml's mmq_args) is checked by its size.
+#pragma once
+
+#define STRATA_KQ_ABI_VERSION 2   // 2: strata_kq_tab_run's "not covered" is -2 (was 1 == cudaErrorInvalidValue)
+
+#if defined(_WIN32)
+#define STRATA_KQ_LIB_NAME "strata_kq.dll"
+#else
+#define STRATA_KQ_LIB_NAME "libstrata_kq.so"
+#endif
+// STRATA_MMQ_DIRECT=1: strata_kq_tab (src/prefill/mmq_kq_tab_lib.cu), the pointer-table MMQ for these types, opened
+// with strata_kq only when the switch is on (its kernels cost VRAM only then)
+#if defined(_WIN32)
+#define STRATA_KQ_TAB_LIB_NAME "strata_kq_tab.dll"
+#else
+#define STRATA_KQ_TAB_LIB_NAME "libstrata_kq_tab.so"
+#endif
+
+extern "C" {
+typedef int (*strata_kq_abi_fn)();
+typedef int (*strata_kq_init_fn)(int device);
+typedef int (*strata_kq_run_fn)(int device, int ggml_type, const void* mmq_args, void* stream);
+// strata_kq_tab: strata_kq_tab_abi / strata_kq_tab_init (as above), whether a type has an instance (1/0), and one
+// product with expert z's matrix at ptrs[z] (16 pointers): 0 = launched, -2 = not covered (rows % 128), -1 = no
+// instance for the type (or no such device), > 0 = the cudaError_t of the launch (disjoint from the other codes)
+typedef int (*strata_kq_tab_has_fn)(int ggml_type);
+typedef int (*strata_kq_tab_run_fn)(int device, int ggml_type, const void* mmq_args, const void* const* ptrs, void* stream);
+}
+
+// the engine's side (src/prefill/mmq_kq_loader.cpp)
+namespace strata::prefill::mmq::kq {
+/// STRATA_MMQ_KQ=1: the K-quant experts' prompt products through MMQ (opt-in: other rounding than the FP16 path).
+bool wanted();
+/// wanted() and the library is open and started on every GPU (the first call opens it and says what happened).
+bool available();
+/// One product on the current GPU: 0 = launched, else an error (-1: no library or not this type).
+int run(int ggml_type, const void* mmq_args, void* stream);
+/// sizeof(mmq_args) on the engine's side (moe_mmq.cu), checked against the library's.
+int abi_args_size();
+/// STRATA_MMQ_DIRECT=1: whether strata_kq_tab (opened with strata_kq, when available()) has a pointer-table
+/// instance for the type.
+bool tab_has(int ggml_type);
+/// One pointer-table product (expert z at ptrs[z], 16 entries): the codes of strata_kq_tab_run_fn.
+int tab_run(int ggml_type, const void* mmq_args, const void* const* ptrs, void* stream);
+}  // namespace strata::prefill::mmq::kq
