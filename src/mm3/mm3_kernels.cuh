@@ -91,15 +91,29 @@ void qk_norm_rope(float* q, const float* k, const float* v, const float* qn1, co
 /// (ring > 0: the caches are rings of that many rows, position p at row p % ring - the DSpark draft's window.  Hq 0:
 ///  K and V alone)
 
+/// The index cache, tiered (MAYA_MM3_IC_STREAM): positions below rv in VRAM (v), the rest in mapped host memory (h,
+/// indexed by position too); bmn / bmx [blocks][128] F32: each 128-key block's per-dimension min / max (an exact upper
+/// bound of its scores, so a token reads only the host blocks that can make its top-k).  rv INT_MAX: all in v.
+struct IcRef {
+    uint16_t* v = nullptr;
+    uint16_t* h = nullptr;
+    int rv = 0x7fffffff;
+    float *bmn = nullptr, *bmx = nullptr;
+    float *bc = nullptr, *br = nullptr;   // (each block's centroid [128] and radius: a second bound, the smaller kept)
+    IcRef() = default;
+    IcRef(uint16_t* p) : v(p) {}   // (a plain VRAM cache)
+};
 /// The indexer's queries iq [T][Hi][D] in place (norm, RoPE, rounded through BF16 as the model dtype keeps them) and
 /// its key ik [T][D] (norm, RoPE) into the index cache ic at row pos[t] (BF16).
 void index_norm_rope(float* iq, const float* ik, const float* qn1, const float* kn1, const int* pos, int T, int Hi,
-                     int D, int n_rot, const float* inv, float eps, uint16_t* ic, cudaStream_t s);
+                     int D, int n_rot, const float* inv, float eps, IcRef ic, cudaStream_t s);
 
 /// bs [Hi][T][nblk]: for query t (at pos[t]) and index head h, block b's score = max over the keys j of block b with
 /// j <= pos[t] of iq[t][h] . ic[j] (F32); -inf for a block past the query.  D = 128.
-void block_scores(const float* iq, const uint16_t* ic, const int* pos, int T, int Hi, int nblk, int blk, float* bs,
-                  cudaStream_t s);
+/// (tiered) every block's bounds below position n again - after a saved conversation's rows were read back
+void ic_bounds_all(IcRef ic, int n, cudaStream_t s);
+void block_scores(const float* iq, IcRef ic, const int* pos, int T, int Hi, int nblk, int blk, float* bs,
+                  cudaStream_t s, int topk = 0);   // (topk > 0, a token over a tiered cache: host blocks pruned exactly)
 
 /// kept [Hi][T][topk]: the query's own block (pos / blk) and the topk - 1 best of the blocks before it (ties: the lower
 /// block), -1 past the valid ones - MiniMaxM3VLIndexer's selection with sparse_local_block 1, as a set.

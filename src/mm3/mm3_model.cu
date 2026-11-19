@@ -99,11 +99,13 @@ struct Layer {
     //  prompt path decodes them into Dev::wtmp for its F32 GEMM: the F32 values either way, a quarter of the bytes)
     const uint8_t *wiq8 = nullptr, *wik8 = nullptr;
     uint16_t *kc = nullptr, *vc = nullptr, *ic = nullptr;
+    k::IcRef icr;   // (the index cache as the kernels take it: ic, or tiered VRAM / host - MAYA_MM3_IC_STREAM)
     k::KvQ kvq;   // (--kv-cache: K's / V's quantized caches - a format other than BF16 instead of kc / vc)
     k::KvHost kvh;   // (--kv-streaming: the caches above a ring, every position in host memory too)
     // (--parallel) every sequence's caches - kc / vc / ic / kvq above are the bound one's (Model::bind)
     struct SeqKv {
         uint16_t *kc = nullptr, *vc = nullptr, *ic = nullptr;
+        k::IcRef icr;
         k::KvQ kvq;
         k::KvHost kvh;   // (KV streaming: this conversation's ring tags and host rows)
     };
@@ -452,6 +454,7 @@ struct Model::Impl {
             l.kc = c.kc;
             l.vc = c.vc;
             l.ic = c.ic;
+            l.icr = c.icr;
             l.kvq = c.kvq;
             if (c.kvh.ring > 0) l.kvh = c.kvh;
         }
@@ -465,6 +468,13 @@ struct Model::Impl {
     std::map<int, std::array<size_t, kAN>> acct;
     std::map<int, size_t> acct_kvh;
     uint8_t* kv_host = nullptr;      // KV streaming: every layer's whole K / V cache (pinned, mapped)
+    uint8_t* ic_host = nullptr;      // (MAYA_MM3_IC_STREAM) the index cache's host tier
+    // the index cache's VRAM rows a layer: all (o.max_ctx) unless MAYA_MM3_IC_STREAM=<positions> tiers it
+    int ic_rows() const {
+        const char* v = ::mm3::env("MM3_IC_STREAM");
+        const int n = v ? std::atoi(v) : 0;
+        return n >= 4096 && n < o.max_ctx ? n / 128 * 128 : o.max_ctx;
+    }
     std::vector<uint32_t> prof;      // routings [layer][expert]: the loaded profile's plus this run's
     std::vector<uint32_t> cpu_seen;  // (MM3_MISS_STATS: the CPU lane's computations [layer][expert] this run)
     // the promotions' scores: an expert not in VRAM, each use (on the CPU lane, or from a slot) adds 1, decayed by
@@ -620,6 +630,7 @@ struct Model::Impl {
             numa_unmap(np.first, np.second);
         }
         if (kv_host) cudaFreeHost(kv_host);
+        if (ic_host) cudaFreeHost(ic_host);
         for (auto& d : D) {
             cudaSetDevice(d.id);
             if (d.cs) cudaStreamSynchronize(d.cs);
@@ -1167,7 +1178,10 @@ struct Model::Impl {
         };
         auto kv_of = [&](size_t di, int ctx, int ring) {   // (--parallel: a cache for each conversation)
             const double n = (double) D[di].layers.size() * (double) std::max(1, o.seqs);
-            return n * ((double) (ring > 0 ? ring : ctx) * (double) kvpos + (double) ctx * (double) idxpos);
+            const char* icv = ::mm3::env("MM3_IC_STREAM");   // (tiered index cache: its VRAM rows + the bounds)
+            const double icn = icv && std::atoi(icv) >= 4096 ? std::min<double>(ctx, std::atoi(icv)) : (double) ctx;
+            const double bounds = icn < ctx ? (double) ctx * 8.0 : 0.0;
+            return n * ((double) (ring > 0 ? ring : ctx) * (double) kvpos + icn * (double) idxpos + bounds);
         };
         auto fits = [&](int ctx, int ring, int slots, std::string* worst) {
             bool ok = true;
@@ -1201,7 +1215,8 @@ struct Model::Impl {
         }
         // KV streaming's host cache: every position of every layer, pinned
         if (ring > 0) {
-            const double per = (double) g.n_layers * (double) kvpos * (double) std::max(1, o.seqs);
+            const double per = (double) g.n_layers * (double) (kvpos + (::mm3::env("MM3_IC_STREAM") ? idxpos : 0)) *
+                               (double) std::max(1, o.seqs);
             const double avail = (double) os::ram_avail() - ram_headroom();
             if (os::ram_avail() > 0 && (double) ctx * per > avail) {
                 int c2 = (int) std::max(0.0, std::floor(avail / per / 4096.0) * 4096.0);
@@ -1474,11 +1489,19 @@ struct Model::Impl {
                     uint8_t* kvb = nullptr;
                     if (!A(kvb, k::kv_bytes(o.kv_k, o.kv_v, kvrows))) return false;
                     k::kv_carve(kvb, kvrows, o.kv_k, o.kv_v, o.kv_rot ? 3 : 0, c.kc, c.vc, c.kvq);
-                    if (!A(c.ic, (size_t) o.max_ctx * g.ix_dim)) return false;
+                    if (!A(c.ic, (size_t) ic_rows() * g.ix_dim)) return false;
+                    c.icr = k::IcRef(c.ic);
+                    if (ic_rows() < o.max_ctx) {   // (tiered: the rest in host memory - below; the blocks' bounds here)
+                        const size_t nb = (size_t) (o.max_ctx + 127) / 128 * 128;
+                        if (!A(c.icr.bmn, nb) || !A(c.icr.bmx, nb) || !A(c.icr.bc, nb) || !A(c.icr.br, nb / 128))
+                            return false;
+                        c.icr.rv = ic_rows();
+                    }
                 }
                 l.kc = l.sk[0].kc;
                 l.vc = l.sk[0].vc;
                 l.ic = l.sk[0].ic;
+                l.icr = l.sk[0].icr;
                 l.kvq = l.sk[0].kvq;
                 if (kv_ring > 0) {
                     for (Layer::SeqKv& c : l.sk) {
@@ -1561,6 +1584,29 @@ struct Model::Impl {
             }
             st.kv_ring = kv_ring;
             st.kv_host_gb = (double) total / (1u << 30);
+        }
+        if (ic_rows() < o.max_ctx) {   // the index cache's host tier: every position (rows below rv unused), pinned, mapped
+            const size_t per = (size_t) o.max_ctx * g.ix_dim * 2;
+            size_t total = 0;
+            for (const Layer& l : L) total += per * l.sk.size();
+            CK(cudaSetDevice(D[0].id));
+            if (cudaHostAlloc((void**) &ic_host, total, cudaHostAllocMapped | cudaHostAllocPortable) != cudaSuccess) {
+                ic_host = nullptr;
+                err = "index cache tier: " + std::to_string(total >> 20) + " MB of pinned host memory not allocated";
+                return false;
+            }
+            size_t off = 0;
+            for (Layer& l : L) {
+                for (Layer::SeqKv& c : l.sk) {
+                    c.icr.h = (uint16_t*) (ic_host + off);
+                    off += per;
+                }
+                l.icr = l.sk[(size_t) std::max(0, bound)].icr;
+            }
+            info.push_back("index cache: " + std::to_string(ic_rows()) + " positions a layer in VRAM, all " +
+                           std::to_string(o.max_ctx) + " in host memory (" + std::to_string(total >> 30) +
+                           " GB pinned; a token reads only the blocks whose bound reaches its top " +
+                           std::to_string(g.topk) + ")");
         }
         // the DSpark draft on the head's GPU, before the experts take the memory
         tap_of.assign((size_t) g.n_layers, -1);
@@ -2162,9 +2208,9 @@ struct Model::Impl {
             index_proj(l, d, T, xs);
             if (!rows) {
                 k::index_norm_rope(d.iq, d.ik, l.iqn1, l.ikn1, d.pos, T, g.ix_heads, g.ix_dim, g.n_rot,
-                                   inv_dev[(size_t) di], g.eps, l.ic, xs);
+                                   inv_dev[(size_t) di], g.eps, l.icr, xs);
                 const int nblk = cur_pos / g.blk + 1;
-                k::block_scores(d.iq, l.ic, d.pos, T, g.ix_heads, nblk, g.blk, d.bs, xs);
+                k::block_scores(d.iq, l.icr, d.pos, T, g.ix_heads, nblk, g.blk, d.bs, xs);
                 k::select_blocks(d.bs, d.pos, T, g.ix_heads, nblk, g.blk, g.topk, d.kept, xs);
             } else {
                 for (int r = 0; r < T; ++r) {
@@ -2173,8 +2219,8 @@ struct Model::Impl {
                     float* iq = d.iq + (size_t) r * IQ;
                     float* bs = d.bs + (size_t) r * g.ix_heads * d.nblk;
                     k::index_norm_rope(iq, d.ik + (size_t) r * g.ix_dim, l.iqn1, l.ikn1, d.pos + r, 1, g.ix_heads,
-                                       g.ix_dim, g.n_rot, inv_dev[(size_t) di], g.eps, c.ic, xs);
-                    k::block_scores(iq, c.ic, d.pos + r, 1, g.ix_heads, nb, g.blk, bs, xs);
+                                       g.ix_dim, g.n_rot, inv_dev[(size_t) di], g.eps, c.icr, xs);
+                    k::block_scores(iq, c.icr, d.pos + r, 1, g.ix_heads, nb, g.blk, bs, xs, g.topk);
                     k::select_blocks(bs, d.pos + r, 1, g.ix_heads, nb, g.blk, g.topk,
                                      d.kept + (size_t) r * g.ix_heads * g.topk, xs);
                 }
@@ -2611,9 +2657,9 @@ struct Model::Impl {
             const cudaStream_t xs = fork(d, !l.hf);
             index_proj(l, d, 1, xs);
             k::index_norm_rope(d.iq, d.ik, l.iqn1, l.ikn1, d.pos, 1, g.ix_heads, g.ix_dim, g.n_rot,
-                               inv_dev[(size_t) di], g.eps, l.ic, xs);
+                               inv_dev[(size_t) di], g.eps, l.icr, xs);
             const int nblk = cur_pos / g.blk + 1;
-            k::block_scores(d.iq, l.ic, d.pos, 1, g.ix_heads, nblk, g.blk, d.bs, xs);
+            k::block_scores(d.iq, l.icr, d.pos, 1, g.ix_heads, nblk, g.blk, d.bs, xs, g.topk);
             k::select_blocks(d.bs, d.pos, 1, g.ix_heads, nblk, g.blk, g.topk, d.kept, xs);
         }
         const x3::MvJob qkv[3] = {job(l.q, d.xn, d.q), job(l.k, d.xn, d.k), job(l.v, d.xn, d.v)};
@@ -3088,10 +3134,10 @@ struct Model::Impl {
         CB(cublasSgemm(d.blas, CUBLAS_OP_T, CUBLAS_OP_N, g.ix_dim, T, g.dim, &one, l.wik8 ? d.wtmp : l.wik, g.dim, d.xn, g.dim, &zero,
                        d.ik, g.ix_dim));
         k::index_norm_rope(d.iq, d.ik, l.iqn1, l.ikn1, d.pos, T, g.ix_heads, g.ix_dim, g.n_rot, inv_dev[(size_t) di],
-                           g.eps, l.ic, d.s);
+                           g.eps, l.icr, d.s);
         pmark(d, kPIxProj);
         const int nblk = pmax / g.blk + 1;
-        k::block_scores(d.iq, l.ic, d.pos, T, g.ix_heads, nblk, g.blk, d.bs, d.s);
+        k::block_scores(d.iq, l.icr, d.pos, T, g.ix_heads, nblk, g.blk, d.bs, d.s, T == 1 ? g.topk : 0);
         pmark(d, kPIndex);
         k::select_blocks(d.bs, d.pos, T, g.ix_heads, nblk, g.blk, g.topk, d.kept, d.s);
         pmark(d, kPIxSel);
@@ -3801,7 +3847,9 @@ bool Model::state_save(int n, std::FILE* f, std::string& err) {
             return false;
         }
         cudaSetDevice(I.D[(size_t) l.dev].id);
-        if (cudaMemcpy(ic.data(), l.ic, ic.size() * 2, cudaMemcpyDeviceToHost) != cudaSuccess ||
+        const size_t nv = (size_t) std::min(n, l.icr.rv) * I.g.ix_dim;   // (tiered: the rest from the host tier)
+        if (nv < ic.size()) std::memcpy(ic.data() + nv, l.icr.h + nv, (ic.size() - nv) * 2);
+        if (cudaMemcpy(ic.data(), l.ic, nv * 2, cudaMemcpyDeviceToHost) != cudaSuccess ||
             std::fwrite(ic.data(), 2, ic.size(), f) != ic.size()) {
             err = "saved conversations: the index keys not written";
             return false;
@@ -3838,10 +3886,14 @@ bool Model::state_load(int n, std::FILE* f, std::string& err, int n_file) {
         }
         Dev& d = I.D[(size_t) l.dev];
         cudaSetDevice(d.id);
-        if (cudaMemcpy(l.ic, ic.data(), ic.size() * 2, cudaMemcpyHostToDevice) != cudaSuccess) {
+        const size_t nv = (size_t) std::min(n, l.icr.rv) * I.g.ix_dim;
+        if (nv < ic.size()) std::memcpy(l.icr.h + nv, ic.data() + nv, (ic.size() - nv) * 2);
+        if (cudaMemcpy(l.ic, ic.data(), nv * 2, cudaMemcpyHostToDevice) != cudaSuccess) {
             err = "saved conversations: the index keys not uploaded";
             return false;
         }
+        k::ic_bounds_all(l.icr, n, d.s);   // (tiered: the blocks' bounds from the rows read back)
+        cudaStreamSynchronize(d.s);
         // the VRAM ring: the last positions' rows, every other row's tag none
         const int R = l.kvh.ring;
         std::vector<int> tag((size_t) R, -1);

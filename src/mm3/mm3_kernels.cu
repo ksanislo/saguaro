@@ -379,8 +379,11 @@ __global__ void qk_kernel(float* q, const float* k, const float* v, const float*
     if (host && is_k && kh == 0 && d == 0) hs.tag[row] = p;
 }
 
+__device__ __forceinline__ uint16_t* ic_row(const IcRef& r, int p) {
+    return (p < r.rv ? r.v : r.h) + (size_t) p * 128;
+}
 __global__ void index_kernel(float* iq, const float* ik, const float* qn1, const float* kn1, const int* pos, int Hi,
-                             int n_rot, const float* inv, float eps, uint16_t* ic) {
+                             int n_rot, const float* inv, float eps, IcRef ic) {
     __shared__ float red[33], sh[128];
     const int t = blockIdx.x, h = blockIdx.y, d = threadIdx.x, D = blockDim.x;
     const int p = pos[t];
@@ -388,7 +391,7 @@ __global__ void index_kernel(float* iq, const float* ik, const float* qn1, const
         float* x = iq + ((size_t) t * Hi + h) * D;
         x[d] = bf2f(f2bf(norm_rope(x[d], qn1, p, n_rot, inv, eps, sh, red)));
     } else {
-        ic[(size_t) p * D + d] = f2bf(norm_rope(ik[(size_t) t * D + d], kn1, p, n_rot, inv, eps, sh, red));
+        ic_row(ic, p)[d] = f2bf(norm_rope(ik[(size_t) t * D + d], kn1, p, n_rot, inv, eps, sh, red));
     }
 }
 
@@ -399,7 +402,7 @@ __global__ void index_kernel(float* iq, const float* ik, const float* qn1, const
 // thread group's dot products and max whatever the tiles and spans, so the scores are the same bits for any T or span
 // (the spans: a decode window's few queries over many blocks - one block walking them all left the GPU idle).
 constexpr int kBsV = 16, kKP = 136;   // (key rows padded to 136 halves in shared memory)
-__global__ void __launch_bounds__(256) block_scores_kernel(const float* iq, const uint16_t* ic, const int* pos, int T,
+__global__ void __launch_bounds__(256) block_scores_kernel(const float* iq, IcRef ic, const int* pos, int T,
                                                            int Hi, int nblk, int blk, int span, float* bs) {
     __shared__ float qv[kBsV][129];
     __shared__ __align__(16) uint16_t kt[128][kKP];
@@ -423,7 +426,7 @@ __global__ void __launch_bounds__(256) block_scores_kernel(const float* iq, cons
             const int j = i >> 4, c = i & 15;
             const int kp = b * blk + j;
             uint4 w = make_uint4(0, 0, 0, 0);
-            if (kp <= pmax) w = *(const uint4*) (ic + (size_t) kp * 128 + c * 8);
+            if (kp <= pmax) w = *(const uint4*) (ic_row(ic, kp) + c * 8);
             *(uint4*) &kt[j][c * 8] = w;
         }
         __syncthreads();
@@ -450,7 +453,7 @@ __global__ void __launch_bounds__(256) block_scores_kernel(const float* iq, cons
 // L1), the query from shared memory; each dot the same fmaf chain over d = 0 .. 127, the max over the block's keys
 // exact in any order - so block_scores_kernel's bits, with every thread of the GPU's blocks busy instead of a quarter
 // of 4 blocks' walking the keys
-__global__ void __launch_bounds__(256) block_scores_tok_kernel(const float* iq, const uint16_t* ic, const int* pos, int Hi,
+__global__ void __launch_bounds__(256) block_scores_tok_kernel(const float* iq, IcRef ic, const int* pos, int Hi,
                                                                int nblk, int blk, float* bs) {
     __shared__ __align__(16) float qv[4][128];
     __shared__ float red[8];
@@ -466,7 +469,7 @@ __global__ void __launch_bounds__(256) block_scores_tok_kernel(const float* iq, 
         for (int jj = 0; jj < 2; ++jj) {
             const int j = j0 + 64 * jj, kp = b * blk + j;
             if (j >= blk || kp > p) continue;
-            const uint4* kr = (const uint4*) (ic + (size_t) kp * 128);
+            const uint4* kr = (const uint4*) ic_row(ic, kp);
             float dot = 0.0f;
 #pragma unroll 4
             for (int c = 0; c < 16; ++c) {
@@ -497,6 +500,152 @@ __global__ void __launch_bounds__(256) block_scores_tok_kernel(const float* iq, 
     if (tid < Hi) bs[(size_t) tid * nblk + b] = fmaxf(red[2 * tid], red[2 * tid + 1]);
 #endif
 }
+__device__ __forceinline__ bool ic_better(float a, int ia, float b, int ib) { return a > b || (a == b && ia < ib); }
+// MAYA_MM3_IC_STREAM: block b's per-dimension min / max over its rows written so far (one block of 128 threads a
+// touched row's block: the dims; a block touched by several rows of the call is done by each of them - the same values)
+// block b's bounds from its rows [b * 128, end): per-dimension min / max, and the centroid + radius (max distance)
+__device__ void ic_block_bounds(IcRef& ic, int b, int end) {
+    __shared__ float red[4];
+    const int d = threadIdx.x;
+    float mn = INFINITY, mx = -INFINITY, sum = 0.0f;
+    const int n = end - b * 128;
+    for (int j = b * 128; j < end; ++j) {
+        const float x = __uint_as_float((uint32_t) ic_row(ic, j)[d] << 16);
+        mn = fminf(mn, x);
+        mx = fmaxf(mx, x);
+        sum += x;
+    }
+    ic.bmn[(size_t) b * 128 + d] = mn;
+    ic.bmx[(size_t) b * 128 + d] = mx;
+    if (ic.bc == nullptr || n <= 0) return;
+    const float c = sum / (float) n;
+    ic.bc[(size_t) b * 128 + d] = c;
+    float r2max = 0.0f;
+    for (int j = b * 128; j < end; ++j) {
+        const float x = __uint_as_float((uint32_t) ic_row(ic, j)[d] << 16) - c;
+        float v = x * x;
+        for (int o = 16; o > 0; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
+        __syncthreads();
+        if ((d & 31) == 0) red[d >> 5] = v;
+        __syncthreads();
+        r2max = fmaxf(r2max, red[0] + red[1] + red[2] + red[3]);
+    }
+    if (d == 0) ic.br[b] = sqrtf(r2max) * 1.0001f + 1e-6f;
+}
+__global__ void ic_bounds_kernel(IcRef ic, const int* pos, int T) {
+    const int t = blockIdx.x, p = pos[t], b = p / 128, d = threadIdx.x;
+    if (t + 1 < T && pos[t + 1] / 128 == b) return;   // (the call's last row in this block writes it: all rows <= it)
+    (void) d;
+    ic_block_bounds(ic, b, p + 1);
+}
+__global__ void ic_bounds_all_kernel(IcRef ic, int n) { ic_block_bounds(ic, blockIdx.x, min(n, blockIdx.x * 128 + 128)); }
+// the threshold of each index head (warp h): the (topk - 1)-th best of the VRAM blocks' scores, in select_kernel's
+// order (score desc, block asc) - into bs[h][qb] (the query's own block: select_blocks never reads its score)
+__global__ void ic_thresh_kernel(const int* pos, int Hi, int nblk, int nv, int topk, float* bs) {
+    const int h = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    if (h >= Hi) return;
+    const int qb = min(pos[0] / 128, nblk - 1);
+    const float* row = bs + (size_t) h * nblk;
+    float prev = INFINITY, t = -INFINITY;
+    int pi = -1;
+    for (int r = 0; r < topk - 1; ++r) {
+        float bv = -INFINITY;
+        int bi = 0x7fffffff;
+        for (int x = lane; x < nv; x += 32) {
+            const float sv = row[x];
+            if (ic_better(prev, pi, sv, x) && ic_better(sv, x, bv, bi)) {
+                bv = sv;
+                bi = x;
+            }
+        }
+        for (int o = 16; o > 0; o >>= 1) {
+            const float ov = __shfl_xor_sync(0xffffffffu, bv, o);
+            const int oi = __shfl_xor_sync(0xffffffffu, bi, o);
+            if (ic_better(ov, oi, bv, bi)) {
+                bv = ov;
+                bi = oi;
+            }
+        }
+        prev = bv;
+        pi = bi;
+        t = bv;
+    }
+    if (lane == 0) bs[(size_t) h * nblk + qb] = t;
+}
+// a token's host blocks (block nv + blockIdx.x), each index head: the bound sum_d max(q mn, q mx) (+ a rounding margin);
+// where it reaches the head's threshold - the topk-1-th best VRAM block's score - the block's keys read from host
+// memory and its exact score (the same fmaf chain as block_scores_tok_kernel), else -inf
+__global__ void __launch_bounds__(128) ic_prune_kernel(const float* iq, IcRef ic, const int* pos, int Hi, int nblk,
+                                                       int nv, int topk, float* bs) {
+    __shared__ float qv[4][128];
+    __shared__ float th[4];
+    __shared__ int need[4];
+    __shared__ float red[4][4];
+    const int b = nv + blockIdx.x, tid = threadIdx.x, p = pos[0];
+    const int qb = min(p / 128, nblk - 1);
+    if (b >= qb) return;   // (its own block holds the threshold; past it: select_blocks skips them)
+    for (int i = tid; i < Hi * 128; i += 128) qv[i / 128][i % 128] = iq[i];
+    if (tid < Hi) th[tid] = bs[(size_t) tid * nblk + qb];
+    __syncthreads();
+    // the bound: thread d's term for each head, summed over the block's 128 dims
+    const float mn = ic.bmn[(size_t) b * 128 + tid], mx = ic.bmx[(size_t) b * 128 + tid];
+    const float cc = ic.bc ? ic.bc[(size_t) b * 128 + tid] : 0.0f;
+    __shared__ float red2[4][4], red3[4][4];
+    for (int h = 0; h < Hi; ++h) {
+        const float q = qv[h][tid];
+        float u = fmaxf(q * mn, q * mx) + 1e-5f * fabsf(q) * fmaxf(fabsf(mn), fabsf(mx)) + 1e-30f;
+        float qc = q * cc, qq = q * q;
+        for (int o = 16; o > 0; o >>= 1) {
+            u += __shfl_xor_sync(0xffffffffu, u, o);
+            qc += __shfl_xor_sync(0xffffffffu, qc, o);
+            qq += __shfl_xor_sync(0xffffffffu, qq, o);
+        }
+        if ((tid & 31) == 0) {
+            red[h][tid >> 5] = u;
+            red2[h][tid >> 5] = qc;
+            red3[h][tid >> 5] = qq;
+        }
+    }
+    __syncthreads();
+    if (tid < Hi) {
+        float u = red[tid][0] + red[tid][1] + red[tid][2] + red[tid][3];
+        if (ic.bc) {   // (the ball: q . c + |q| r, its rounding margin added)
+            const float qc = red2[tid][0] + red2[tid][1] + red2[tid][2] + red2[tid][3];
+            const float qn = sqrtf(red3[tid][0] + red3[tid][1] + red3[tid][2] + red3[tid][3]);
+            const float ub = qc + qn * ic.br[b] + 1e-4f * (fabsf(qc) + qn * ic.br[b]) + 1e-20f;
+            u = fminf(u, ub);
+        }
+        need[tid] = u >= th[tid];
+    }
+    __syncthreads();
+    for (int h = 0; h < Hi; ++h) {
+        if (!need[h]) {
+            if (tid == 0) bs[(size_t) h * nblk + b] = -INFINITY;
+            continue;
+        }
+        // the exact score: thread j the key j of the block (block_scores_tok_kernel's fmaf chain over d)
+        const uint4* kr = (const uint4*) ic_row(ic, b * 128 + tid);
+        float dot = 0.0f;
+        for (int c = 0; c < 16; ++c) {
+            const uint4 w = kr[c];
+            const float4 qa = *(const float4*) &qv[h][c * 8], qb4 = *(const float4*) &qv[h][c * 8 + 4];
+            dot = fmaf(qa.x, __uint_as_float(w.x << 16), dot);
+            dot = fmaf(qa.y, __uint_as_float(w.x & 0xffff0000u), dot);
+            dot = fmaf(qa.z, __uint_as_float(w.y << 16), dot);
+            dot = fmaf(qa.w, __uint_as_float(w.y & 0xffff0000u), dot);
+            dot = fmaf(qb4.x, __uint_as_float(w.z << 16), dot);
+            dot = fmaf(qb4.y, __uint_as_float(w.z & 0xffff0000u), dot);
+            dot = fmaf(qb4.z, __uint_as_float(w.w << 16), dot);
+            dot = fmaf(qb4.w, __uint_as_float(w.w & 0xffff0000u), dot);
+        }
+        for (int o = 16; o > 0; o >>= 1) dot = fmaxf(dot, __shfl_xor_sync(0xffffffffu, dot, o));
+        __syncthreads();
+        if ((tid & 31) == 0) red[h][tid >> 5] = dot;
+        __syncthreads();
+        if (tid == 0) bs[(size_t) h * nblk + b] = fmaxf(fmaxf(red[h][0], red[h][1]), fmaxf(red[h][2], red[h][3]));
+    }
+}
+
 // A prompt's: a block takes 64 vectors (64 / Hi queries x Hi heads) and a key block's keys 64 at a time, thread
 // (tv = tid / 16, tk = tid % 16) the dot products of vectors 4 tv .. 4 tv + 3 with keys tk + 16 i (i < 4) of each 64 -
 // every dot the same fmaf chain over d = 0 .. 127 as block_scores_kernel's, so the same bits (the max over a block's
@@ -508,7 +657,7 @@ constexpr int kBwK = 64;
 #else
 constexpr int kBwK = 32;
 #endif
-__global__ void __launch_bounds__(256) block_scores_wide_kernel(const float* iq, const uint16_t* ic, const int* pos,
+__global__ void __launch_bounds__(256) block_scores_wide_kernel(const float* iq, IcRef ic, const int* pos,
                                                                 int T, int Hi, int nblk, int blk, int span, float* bs) {
     constexpr int KI = kBwK / 16;   // (keys a thread a step)
     __shared__ float qv[kBwV][kBwP];
@@ -540,7 +689,7 @@ __global__ void __launch_bounds__(256) block_scores_wide_kernel(const float* iq,
                 const int j = i >> 5, c = i & 31;
                 const int kp = b * blk + k0 + j;
                 uint2 w = make_uint2(0u, 0u);
-                if (kp <= pmax) w = *(const uint2*) (ic + (size_t) kp * 128 + c * 4);
+                if (kp <= pmax) w = *(const uint2*) (ic_row(ic, kp) + c * 4);
                 *(uint2*) &kt[j][c * 4] = w;
             }
             __syncthreads();
@@ -2167,18 +2316,91 @@ void qk_norm_rope(float* q, const float* k, const float* v, const float* qn1, co
     check("qk_norm_rope");
 }
 void index_norm_rope(float* iq, const float* ik, const float* qn1, const float* kn1, const int* pos, int T, int Hi,
-                     int D, int n_rot, const float* inv, float eps, uint16_t* ic, cudaStream_t s) {
+                     int D, int n_rot, const float* inv, float eps, IcRef ic, cudaStream_t s) {
     if (T <= 0) return;
     index_kernel<<<dim3(T, Hi + 1), D, 0, s>>>(iq, ik, qn1, kn1, pos, Hi, n_rot, inv, eps, ic);
     check("index_norm_rope");
+    if (ic.bmn != nullptr) {   // (tiered: the touched blocks' bounds again, from all their rows so far)
+        ic_bounds_kernel<<<dim3(T), 128, 0, s>>>(ic, pos, T);
+        check("ic_bounds");
+    }
 }
 
 // (MM3_MSA_OLD=1: the spans and the staging off - the kernels as before, for timing them; the same bits)
 const bool msa_old = std::getenv("MM3_MSA_OLD") != nullptr;
 
-void block_scores(const float* iq, const uint16_t* ic, const int* pos, int T, int Hi, int nblk, int blk, float* bs,
-                  cudaStream_t s) {
+void ic_bounds_all(IcRef ic, int n, cudaStream_t s) {
+    if (ic.bmn == nullptr || n <= 0) return;
+    ic_bounds_all_kernel<<<(unsigned) ((n + 127) / 128), 128, 0, s>>>(ic, n);
+    check("ic_bounds_all");
+}
+
+void block_scores(const float* iq, IcRef ic, const int* pos, int T, int Hi, int nblk, int blk, float* bs,
+                  cudaStream_t s, int topk) {
     if (T <= 0 || nblk <= 0 || kBsV % Hi) return;
+    // a token over a tiered cache past its VRAM part: the VRAM blocks exactly, the threshold (the topk-1-th best of
+    // them), then each host block's bound - read and scored only where the bound reaches the threshold (exact: a block
+    // left out cannot beat topk - 1 blocks already scored)
+    const int nv = ic.rv / blk;
+    if (T == 1 && topk > 1 && ic.h != nullptr && ic.bmn != nullptr && Hi <= 4 && blk == 128 && nv >= 2 * topk &&
+        nblk > nv) {
+        block_scores_tok_kernel<<<(unsigned) nv, 256, 0, s>>>(iq, ic, pos, Hi, nblk, blk, bs);
+        ic_thresh_kernel<<<1, 32 * Hi, 0, s>>>(pos, Hi, nblk, nv, topk, bs);
+        ic_prune_kernel<<<(unsigned) (nblk - nv), 128, 0, s>>>(iq, ic, pos, Hi, nblk, nv, topk, bs);
+        check("block_scores (tiered)");
+        static int checks = std::getenv("MAYA_MM3_IC_CHECK") ? std::atoi(std::getenv("MAYA_MM3_IC_CHECK")) : 0;
+        if (checks > 0) {   // (debugging: every block scored as before, both selections compared)
+            --checks;
+            float* full = nullptr;
+            int *k1 = nullptr, *k2 = nullptr;
+            cudaMalloc(&full, (size_t) Hi * nblk * 4);
+            cudaMalloc(&k1, (size_t) Hi * topk * 4);
+            cudaMalloc(&k2, (size_t) Hi * topk * 4);
+            block_scores_tok_kernel<<<(unsigned) nblk, 256, 0, s>>>(iq, ic, pos, Hi, nblk, blk, full);
+            select_blocks(bs, pos, 1, Hi, nblk, blk, topk, k1, s);
+            select_blocks(full, pos, 1, Hi, nblk, blk, topk, k2, s);
+            std::vector<int> a1((size_t) Hi * topk), a2((size_t) Hi * topk);
+            cudaMemcpyAsync(a1.data(), k1, a1.size() * 4, cudaMemcpyDeviceToHost, s);
+            cudaMemcpyAsync(a2.data(), k2, a2.size() * 4, cudaMemcpyDeviceToHost, s);
+            std::vector<float> f((size_t) Hi * nblk), t((size_t) Hi * nblk);
+            cudaMemcpyAsync(f.data(), full, f.size() * 4, cudaMemcpyDeviceToHost, s);
+            cudaMemcpyAsync(t.data(), bs, t.size() * 4, cudaMemcpyDeviceToHost, s);
+            cudaStreamSynchronize(s);
+            int pruned = 0, scored = 0;
+            for (int h = 0; h < Hi; ++h)
+                for (int b2 = nv; b2 < nblk - 1; ++b2) (std::isinf(t[(size_t) h * nblk + b2]) ? pruned : scored) += 1;
+            std::fprintf(stderr, "ic check: nblk %d nv %d, host blocks scored %d pruned %d, kept %s\n", nblk, nv, scored,
+                         pruned, a1 == a2 ? "SAME" : "DIFFERENT");
+            static int detail = 3;
+            if (detail-- > 0) {   // (head 0: the threshold, a few host blocks' exact score and box / ball bounds)
+                std::vector<float> q(128), mn((size_t) nblk * 128), mx((size_t) nblk * 128), c((size_t) nblk * 128),
+                    r((size_t) nblk);
+                int p0 = 0;
+                cudaMemcpy(&p0, pos, 4, cudaMemcpyDeviceToHost);
+                cudaMemcpy(q.data(), iq, 512, cudaMemcpyDeviceToHost);
+                cudaMemcpy(mn.data(), ic.bmn, mn.size() * 4, cudaMemcpyDeviceToHost);
+                cudaMemcpy(mx.data(), ic.bmx, mx.size() * 4, cudaMemcpyDeviceToHost);
+                if (ic.bc) cudaMemcpy(c.data(), ic.bc, c.size() * 4, cudaMemcpyDeviceToHost);
+                if (ic.br) cudaMemcpy(r.data(), ic.br, r.size() * 4, cudaMemcpyDeviceToHost);
+                const int qb = std::min(p0 / 128, nblk - 1);
+                std::fprintf(stderr, "ic detail: th %g (bs[qb])\n", t[(size_t) qb]);
+                for (int b2 = nv; b2 < std::min(nv + 4, qb); ++b2) {
+                    double box = 0, qc = 0, qq = 0;
+                    for (int d = 0; d < 128; ++d) {
+                        box += std::max(q[d] * mn[(size_t) b2 * 128 + d], q[d] * mx[(size_t) b2 * 128 + d]);
+                        qc += q[d] * c[(size_t) b2 * 128 + d];
+                        qq += (double) q[d] * q[d];
+                    }
+                    std::fprintf(stderr, "ic detail: block %d exact %g box %g ball %g (r %g |q| %g)\n", b2,
+                                 f[(size_t) b2], box, qc + std::sqrt(qq) * r[(size_t) b2], r[(size_t) b2], std::sqrt(qq));
+                }
+            }
+            cudaFree(full);
+            cudaFree(k1);
+            cudaFree(k2);
+        }
+        return;
+    }
     // a prompt's (MAYA_MM3_MSA_WIDE=0: the token kernel for them too - the same bits either way)
     static const bool wide_on = [] {
         const char* v = std::getenv("MAYA_MM3_MSA_WIDE");
