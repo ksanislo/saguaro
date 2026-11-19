@@ -13,10 +13,13 @@
 #include <cublas_v2.h>
 #include "ds4_numerics.cuh"
 #include <cuda_runtime.h>
+#include <cuda_fp16.h>
 
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 namespace strata::ds4 {
@@ -181,10 +184,47 @@ int cdiv(int a, int b) { return (a + b - 1) / b; }
 
 // y[r][o] = alpha * sum_k x[r][k] W[o][k] (row-major W [out][in] with row stride ldw, x [rows][ldx], y [rows][ldy])
 bool gemm(cublasHandle_t h, const uint16_t* W, int ldw, const uint16_t* x, int ldx, void* y, cudaDataType yt, int ldy,
-          int rows, int in, int out, float alpha, std::string& err) {
+          int rows, int in, int out, float alpha, std::string& err, bool f16 = false) {
     const float beta = 0.0f;
-    VB(cublasGemmEx(h, CUBLAS_OP_T, CUBLAS_OP_N, out, rows, in, &alpha, W, CUDA_R_16BF, ldw, x, CUDA_R_16BF, ldx, &beta,
-                    y, yt, ldy, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT));
+    const cudaDataType t = f16 ? CUDA_R_16F : CUDA_R_16BF;
+    VB(cublasGemmEx(h, CUBLAS_OP_T, CUBLAS_OP_N, out, rows, in, &alpha, W, t, ldw, x, t, ldx, &beta, y, yt, ldy,
+                    CUBLAS_COMPUTE_32F, f16 ? CUBLAS_GEMM_DEFAULT_TENSOR_OP : CUBLAS_GEMM_DEFAULT));
+    return true;
+}
+
+// Turing (no BF16 tensor cores): BF16 -> FP16 in place before a GEMM - exact for |v| <= 65504 (FP16 has more mantissa);
+// beyond it saturated and counted (g_vis_sat, reported after the encode), below 2^-24 flushed (no weight in a sum)
+__device__ unsigned g_vis_sat = 0;
+__global__ void bf16_to_f16_inplace(uint16_t* __restrict__ x, size_t n) {
+    for (size_t i = blockIdx.x * (size_t) blockDim.x + threadIdx.x; i < n; i += (size_t) gridDim.x * blockDim.x) {
+        float v = bf(x[i]);
+        if (fabsf(v) > 65504.0f) {
+            atomicAdd(&g_vis_sat, 1u);
+            v = copysignf(65504.0f, v);
+        }
+        x[i] = __half_as_ushort(__float2half_rn(v));
+    }
+}
+void to16(uint16_t* x, size_t n, cudaStream_t s) {
+    const int b = (int) std::min<size_t>((n + kT - 1) / kT, 4096);
+    bf16_to_f16_inplace<<<b, kT, 0, s>>>(x, n);
+}
+// host weights BF16 -> FP16 in place; false (nothing changed) when one is beyond FP16's range
+bool host_to16(uint16_t* w, size_t n, size_t& flushed) {
+    for (size_t i = 0; i < n; ++i) {
+        uint32_t u = (uint32_t) w[i] << 16;
+        float v;
+        std::memcpy(&v, &u, 4);
+        if (std::fabs(v) > 65504.0f) return false;
+    }
+    for (size_t i = 0; i < n; ++i) {
+        uint32_t u = (uint32_t) w[i] << 16;
+        float v;
+        std::memcpy(&v, &u, 4);
+        const __half hv = __float2half_rn(v);
+        if (v != 0.0f && __half2float(hv) == 0.0f) ++flushed;
+        w[i] = __half_as_ushort(hv);
+    }
     return true;
 }
 
@@ -395,6 +435,21 @@ bool VisionTower::load(const VisionGeo& g, int device, const Reader& read, std::
         copied_[i] = a;
         used_[i] = b;
     }
+    {   // Turing and older: FP16 tensor cores instead of BF16 cuBLAS (MAYA_DS4_VISION_F16=0: BF16, the reference)
+        cudaDeviceProp pr{};
+        const char* fv = std::getenv("MAYA_DS4_VISION_F16");
+        const bool want = fv != nullptr ? std::atoi(fv) != 0
+                                        : cudaGetDeviceProperties(&pr, device) == cudaSuccess && pr.major < 8;
+        size_t fl = 0;
+        const size_t pe_n = (size_t) D * 3 * P * P;
+        if (want && host_to16(host_, host_n, fl) && host_to16((uint16_t*) (pre_host_ + lay_.pe_w), pe_n, fl)) {
+            f16_ = true;
+            std::fprintf(stderr, "vision: GEMMs on FP16 tensor cores (weights BF16 -> FP16 exact, %zu tiny values flushed)\n", fl);
+        } else if (want) {
+            err = "vision: a weight beyond FP16's range - MAYA_DS4_VISION_F16=0 runs the BF16 GEMMs";
+            return false;
+        }
+    }
     dev_ = device;
     return true;
 }
@@ -501,7 +556,12 @@ bool VisionTower::run(const uint8_t* rgb, int width, int height, uint8_t* room, 
     // the patches
     VK(cudaMemcpyAsync(rgb_, rgb, (size_t) N * 3 * P * P, cudaMemcpyHostToDevice, s));
     patchify_kernel<<<N, 3 * P * P, 0, s>>>(rgb_, width, gw, P, patch_);
-    if (!gemm(h, pe_w_, 3 * P * P, patch_, 3 * P * P, x_, CUDA_R_32F, D, N, 3 * P * P, D, 1.0f, err)) return false;
+    if (f16_) {
+        const unsigned z = 0;
+        VK(cudaMemcpyToSymbolAsync(g_vis_sat, &z, sizeof z, 0, cudaMemcpyHostToDevice, s));
+        to16(patch_, (size_t) N * 3 * P * P, s);
+    }
+    if (!gemm(h, pe_w_, 3 * P * P, patch_, 3 * P * P, x_, CUDA_R_32F, D, N, 3 * P * P, D, 1.0f, err, f16_)) return false;
     add_rows_kernel<<<N, kT, 0, s>>>(x_, nullptr, 0, pe_b_, D);
 
     const float scale = 1.0f / std::sqrt((float) hd);
@@ -511,34 +571,41 @@ bool VisionTower::run(const uint8_t* rgb, int width, int height, uint8_t* room, 
         if (wqkv == nullptr) return false;
         const uint16_t *wo = wqkv + (size_t) H3 * D, *w1 = wo + (size_t) D * D, *w2 = w1 + (size_t) 2 * I * D;
         rmsnorm_kernel<<<N, kT, 0, s>>>(x_, n1_[l], D, g.eps, xn_);
+        if (f16_) to16(xn_, (size_t) N * D, s);
         for (int r0 = 0; r0 < N; r0 += rb_) {
             const int nr = std::min(rb_, N - r0);
-            if (!gemm(h, wqkv, D, xn_ + (size_t) r0 * D, D, y_, CUDA_R_32F, H3, nr, D, H3, 1.0f, err)) return false;
+            if (!gemm(h, wqkv, D, xn_ + (size_t) r0 * D, D, y_, CUDA_R_32F, H3, nr, D, H3, 1.0f, err, f16_)) return false;
             qkv_rope_kernel<<<nr, kT, 0, s>>>(y_, bqkv_[l], r0, gw, inv_freq_, g.heads, hd, qkv_);
         }
+        if (f16_) to16(qkv_, (size_t) N * H3, s);
+        const cudaDataType at = f16_ ? CUDA_R_16F : CUDA_R_16BF;
+        const cublasGemmAlgo_t aa = f16_ ? CUBLAS_GEMM_DEFAULT_TENSOR_OP : CUBLAS_GEMM_DEFAULT;
         for (int q0 = 0; q0 < N; q0 += qb) {
             const int nq = std::min(qb, N - q0);
             const float one = 1.0f, zero = 0.0f;
             for (int hh = 0; hh < g.heads; ++hh) {
                 // S^T (keys x queries, column-major) = K Q^T: row-major S [query][key]
-                VB(cublasGemmEx(h, CUBLAS_OP_T, CUBLAS_OP_N, N, nq, hd, &scale, qkv_ + D + hh * hd, CUDA_R_16BF, H3,
-                                qkv_ + (size_t) q0 * H3 + hh * hd, CUDA_R_16BF, H3, &zero, s_, CUDA_R_32F, N,
-                                CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT));
+                VB(cublasGemmEx(h, CUBLAS_OP_T, CUBLAS_OP_N, N, nq, hd, &scale, qkv_ + D + hh * hd, at, H3,
+                                qkv_ + (size_t) q0 * H3 + hh * hd, at, H3, &zero, s_, CUDA_R_32F, N,
+                                CUBLAS_COMPUTE_32F, aa));
                 softmax_kernel<<<nq, kSmT, 0, s>>>(s_, N, p_);
+                if (f16_) to16(p_, (size_t) nq * N, s);
                 // O^T (hd x queries) = V^T P^T: row-major O [query][head's hd] at column hh * hd
-                VB(cublasGemmEx(h, CUBLAS_OP_N, CUBLAS_OP_N, hd, nq, N, &one, qkv_ + 2 * D + hh * hd, CUDA_R_16BF, H3,
-                                p_, CUDA_R_16BF, N, &zero, o_ + hh * hd, CUDA_R_16BF, D, CUBLAS_COMPUTE_32F,
-                                CUBLAS_GEMM_DEFAULT));
+                // (FP16: O written in FP16 - only the wo GEMM reads it)
+                VB(cublasGemmEx(h, CUBLAS_OP_N, CUBLAS_OP_N, hd, nq, N, &one, qkv_ + 2 * D + hh * hd, at, H3,
+                                p_, at, N, &zero, o_ + hh * hd, at, D, CUBLAS_COMPUTE_32F, aa));
             }
-            if (!gemm(h, wo, D, o_, D, y_, CUDA_R_32F, D, nq, D, D, 1.0f, err)) return false;
+            if (!gemm(h, wo, D, o_, D, y_, CUDA_R_32F, D, nq, D, D, 1.0f, err, f16_)) return false;
             add_rows_kernel<<<nq, kT, 0, s>>>(x_ + (size_t) q0 * D, y_, D, bo_[l], D);
         }
         rmsnorm_kernel<<<N, kT, 0, s>>>(x_, n2_[l], D, g.eps, xn_);
+        if (f16_) to16(xn_, (size_t) N * D, s);
         for (int r0 = 0; r0 < N; r0 += rb_) {
             const int nr = std::min(rb_, N - r0);
-            if (!gemm(h, w1, D, xn_ + (size_t) r0 * D, D, y_, CUDA_R_32F, 2 * I, nr, D, 2 * I, 1.0f, err)) return false;
+            if (!gemm(h, w1, D, xn_ + (size_t) r0 * D, D, y_, CUDA_R_32F, 2 * I, nr, D, 2 * I, 1.0f, err, f16_)) return false;
             silu_mul_kernel<<<dim3(cdiv(I, kT), nr), kT, 0, s>>>(y_, I, mid_);
-            if (!gemm(h, w2, I, mid_, I, y_, CUDA_R_32F, D, nr, I, D, 1.0f, err)) return false;
+            if (f16_) to16(mid_, (size_t) nr * I, s);
+            if (!gemm(h, w2, I, mid_, I, y_, CUDA_R_32F, D, nr, I, D, 1.0f, err, f16_)) return false;
             add_rows_kernel<<<nr, kT, 0, s>>>(x_ + (size_t) r0 * D, y_, D, nullptr, D);
         }
         done();
@@ -547,18 +614,20 @@ bool VisionTower::run(const uint8_t* rgb, int width, int height, uint8_t* room, 
 
     // the aligner
     unfold_kernel<<<L, kT, 0, s>>>(xn_, gh, gw, M, D, n_w, un_);
+    if (f16_) to16(un_, (size_t) L * in1, s);
     for (int o0 = 0; o0 < g.out; o0 += r1) {
         const uint16_t* w = take();
         if (w == nullptr) return false;
-        if (!gemm(h, w, in1, un_, in1, y_ + o0, CUDA_R_32F, g.out, L, in1, std::min(r1, g.out - o0), 1.0f, err))
+        if (!gemm(h, w, in1, un_, in1, y_ + o0, CUDA_R_32F, g.out, L, in1, std::min(r1, g.out - o0), 1.0f, err, f16_))
             return false;
         done();
     }
     bias_act_kernel<<<dim3(cdiv(g.out, kT), L), kT, 0, s>>>(y_, al1_b_, g.out, 1, a16_);
+    if (f16_) to16(a16_, (size_t) L * g.out, s);
     for (int o0 = 0; o0 < g.out; o0 += r2) {
         const uint16_t* w = take();
         if (w == nullptr) return false;
-        if (!gemm(h, w, g.out, a16_, g.out, y_ + o0, CUDA_R_32F, g.out, L, g.out, std::min(r2, g.out - o0), 1.0f, err))
+        if (!gemm(h, w, g.out, a16_, g.out, y_ + o0, CUDA_R_32F, g.out, L, g.out, std::min(r2, g.out - o0), 1.0f, err, f16_))
             return false;
         done();
     }
@@ -567,6 +636,11 @@ bool VisionTower::run(const uint8_t* rgb, int width, int height, uint8_t* room, 
     VK(cudaMemcpyAsync(rows.data(), outb_, rows.size() * 2, cudaMemcpyDeviceToHost, s));
     VK(cudaStreamSynchronize(s));
     VK(cudaGetLastError());
+    if (f16_) {
+        unsigned sat = 0;
+        VK(cudaMemcpyFromSymbol(&sat, g_vis_sat, sizeof sat));
+        if (sat) std::fprintf(stderr, "vision: NOTE %u activations beyond FP16's range were saturated\n", sat);
+    }
     return true;
 }
 

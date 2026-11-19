@@ -73,6 +73,7 @@ private:
              int& n_w, std::string& err);
     VisionGeo g_;
     int dev_ = -1, at_ = -1, max_n_ = 0, qb_ = 0, rb_ = 0;   // (at_: the device its streams are on)
+    bool f16_ = false;   // (Turing: the GEMMs on FP16 tensor cores - weights and activations BF16 -> FP16, exact in range)
     size_t room_ = 0, cur_ = 0, slot_n_ = 0, host_b_ = 0;
     Lay lay_;
     uint16_t* host_ = nullptr;          // pinned: every block's [wqkv, wo, w1, w2], then aligner w1, w2
