@@ -1670,3 +1670,26 @@ if(STRATA_BUILD_TESTS)
     add_subdirectory(tests)
   endif()
 endif()
+
+# ---- saguaro-qfn: Qwen3.8-Flash-Next's engine (engines/qfn, Strata's tree with its own CMake project - its targets share
+# names with this project's, so it builds as an external project) with the live QFN build's options (tools/qfn/build.sh;
+# the same compiler, flags, ggml checkout and kq-library types, so the same compiled code). Output in <build>/qfn:
+# saguaro-qfn (= its strata target), libstrata_kq.so + libstrata_kq_tab.so (one set, loaded from the binary's folder).
+option(SAGUARO_QFN "Build the QFN engine (engines/qfn) as saguaro-qfn" OFF)
+set(SAGUARO_QFN_GGML_DIR "/data/llm/strata-main/third_party/llama.cpp" CACHE PATH "the llama.cpp checkout engines/qfn takes ggml from")
+if(SAGUARO_QFN AND STRATA_ENABLE_CUDA)
+  include(ExternalProject)
+  ExternalProject_Add(qfn_engine
+    SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/engines/qfn
+    BINARY_DIR ${CMAKE_CURRENT_BINARY_DIR}/qfn
+    CMAKE_GENERATOR Ninja
+    CMAKE_ARGS -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_COMPILER=${CMAKE_CUDA_COMPILER} -DCMAKE_CUDA_ARCHITECTURES=75
+               -DSTRATA_ENABLE_CUDA=ON -DSTRATA_ISA_FLOOR=avx -DSTRATA_BUILD_DSV41=ON -DSTRATA_BUILD_TESTS=ON
+               -DSTRATA_BUILD_CONVERSATION_TESTS=ON -DSTRATA_GGML_DIR=${SAGUARO_QFN_GGML_DIR} -DSTRATA_MMQ_TAB=ON
+               -DSTRATA_MMQ_TAB_TYPES= "-DSTRATA_MMQ_TAB_KQ_TYPES=q4_k$<SEMICOLON>q5_k$<SEMICOLON>q5_1$<SEMICOLON>q8_0"
+    BUILD_COMMAND ${CMAKE_COMMAND} --build <BINARY_DIR> --target strata strata_kq strata_kq_tab
+    INSTALL_COMMAND ${CMAKE_COMMAND} -E copy_if_different <BINARY_DIR>/strata <BINARY_DIR>/saguaro-qfn
+    BUILD_ALWAYS ON
+    EXCLUDE_FROM_ALL ON)
+  add_custom_target(saguaro-qfn DEPENDS qfn_engine)
+endif()

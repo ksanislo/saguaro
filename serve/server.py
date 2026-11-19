@@ -22,6 +22,24 @@ talks to it over stdin/stdout; `MockEngine` is a scripted stand-in that makes ev
 """
 from __future__ import annotations
 
+# ---- one server for every engine (Saguaro phase 3): `--engine qfn` is Qwen3.8-Flash-Next's engine (engines/qfn, Strata's tree),
+# whose server speaks that engine's own batch protocol: the process becomes engines/qfn/serve/server.py with the same
+# arguments (--engine qfn -> strata, its name there) - os.execv keeps the PID a supervisor (llama-swap) watches; nothing of
+# this server is loaded.  Every other engine continues below.
+def _qfn_dispatch():
+    import os as _os, sys as _sys
+    a = _sys.argv[1:]
+    for i, x in enumerate(a):
+        if (x == "--engine" and i + 1 < len(a) and a[i + 1] == "qfn") or x == "--engine=qfn":
+            rest = a[:i] + (["--engine", "strata"] + a[i + 2:] if x == "--engine" else ["--engine=strata"] + a[i + 1:])
+            root = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), "engines", "qfn")
+            _os.chdir(root)
+            _os.execv(_sys.executable, [_sys.executable, "-m", "serve.server", *rest])
+
+
+_qfn_dispatch()
+
+
 import argparse
 import collections
 import contextlib
