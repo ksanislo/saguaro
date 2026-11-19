@@ -606,6 +606,8 @@ struct Model::Impl {
             cudaSetDevice(owned_dev[i]);
             cudaFree(owned[i]);
         }
+        for (auto& kv : ov_events)
+            for (cudaEvent_t e : kv.second) cudaEventDestroy(e);
         if (pool && node_pools.empty()) cudaFreeHost(pool);
         for (auto& np : node_pools) {
             cudaHostUnregister(np.first);
@@ -2004,6 +2006,35 @@ struct Model::Impl {
     }
 
     // expert e of layer l into staging slot s of d (in stream order: the slot's earlier readers are before it)
+    // STAGE_OVERLAP: device d's events - [0] / [1] a half's copies done (copy stream), [2] / [3] its last pass computed
+    std::map<int, std::array<cudaEvent_t, 4>> ov_events;
+    cudaEvent_t ov_ev(Dev& d, int i) {
+        auto it = ov_events.find(d.id);
+        if (it == ov_events.end()) {
+            std::array<cudaEvent_t, 4> a{};
+            cudaSetDevice(d.id);
+            for (auto& e : a) {
+                cudaEventCreateWithFlags(&e, cudaEventDisableTiming);
+                cudaEventRecord(e, d.s);   // (passed: nothing to wait for yet)
+            }
+            it = ov_events.emplace(d.id, a).first;
+        }
+        return it->second[(size_t) i];
+    }
+    // stage on stream `cs` (STAGE_OVERLAP): a blob not in the pinned pool is assembled into d.pin once the copy
+    // stream's copies from it are done
+    bool stage_on(const Layer& l, Dev& d, int e, int s, cudaStream_t cs, std::string& err) {
+        const uint8_t* src = l.host_blob.empty() ? nullptr : l.host_blob[(size_t) e];
+        if (src == nullptr) {
+            CK(cudaStreamSynchronize(cs));
+            assemble(l, e, d.pin);
+            src = d.pin;
+        }
+        CK(cudaMemcpyAsync(d.stg + (size_t) s * d.slot_bytes, src, l.blob, cudaMemcpyHostToDevice, cs));
+        ++st.staged;
+        return true;
+    }
+
     bool stage(const Layer& l, Dev& d, int e, int s, std::string& err) {
         const uint8_t* src = l.host_blob.empty() ? nullptr : l.host_blob[(size_t) e];
         if (src == nullptr) {
@@ -2717,19 +2748,30 @@ struct Model::Impl {
         std::vector<Pass> passes;
         if (!l.res_ids.empty()) passes.push_back({l.res_base, l.blob, l.res_ids});
         const long long lid = (long long) (&l - L.data());
+        // MAYA_MM3_STAGE_OVERLAP=1 (a prompt's chunk): the staging slots in two halves - a pass's copies (on the copy
+        // stream) into one half while the pass before computes from the other - instead of copy, compute, wait
+        static const bool ov_on = [] {
+            const char* v = ::mm3::env("MM3_STAGE_OVERLAP");
+            return v != nullptr && std::atoi(v) != 0;
+        }();
+        const bool ov = ov_on && T > kWin && d.cs != nullptr && d.n_slots >= 2;
+        const int cap = ov ? d.n_slots / 2 : d.n_slots;
+        int half = 0;
         for (size_t si = 0; si < staged.size();) {
+            const int s0 = ov ? half * cap : 0, s1 = s0 + cap;
             std::vector<int> se((size_t) d.n_slots, -1), fresh;
-            for (int n = 0; si < staged.size() && n < d.n_slots; ++si, ++n) {
+            for (int n = 0; si < staged.size() && n < cap; ++si, ++n) {
                 const int e = staged[si];
                 int at = -1;
-                for (int s = 0; s < d.n_slots; ++s)
+                for (int s = s0; s < s1; ++s)
                     if (d.slot_owner[(size_t) s] == lid * 1024 + e) at = s;
                 if (at >= 0 && se[(size_t) at] < 0) se[(size_t) at] = e;
                 else fresh.push_back(e);
             }
+            half ^= 1;
             for (size_t fi = 0; fi < fresh.size(); ++fi) {
                 int best = -1;
-                for (int s = 0; s < d.n_slots; ++s)
+                for (int s = s0; s < s1; ++s)
                     if (se[(size_t) s] < 0 && d.slot_pend[(size_t) s] < 0 &&
                         (best < 0 || d.slot_used[(size_t) s] < d.slot_used[(size_t) best]))
                         best = s;
@@ -2765,17 +2807,26 @@ struct Model::Impl {
         }
         CK(cudaMemcpyAsync(d.rowidx, rowidx.data(), rowidx.size() * 4, cudaMemcpyHostToDevice, d.s));
         CK(cudaMemcpyAsync(d.invrow, invrow.data(), invrow.size() * 4, cudaMemcpyHostToDevice, d.s));
+        int hk = 0;   // (STAGE_OVERLAP: the half this staged pass uses)
         for (const Pass& p : passes) {
-            if (p.rows == 0) continue;
+            if (p.rows == 0) {
+                if (p.staged) hk ^= 1;
+                continue;
+            }
             if (p.staged) {
+                if (ov) CK(cudaStreamWaitEvent(d.cs, ov_ev(d, 2 + hk), 0));   // (its half's last pass computed)
                 for (int s = 0; s < d.n_slots; ++s) {
                     const int e = p.slot_expert[(size_t) s];
                     if (e < 0) continue;
                     if (d.slot_owner[(size_t) s] != lid * 1024 + e) {
-                        if (!stage(l, d, e, s, err)) return false;
+                        if (!(ov ? stage_on(l, d, e, s, d.cs, err) : stage(l, d, e, s, err))) return false;
                         d.slot_owner[(size_t) s] = lid * 1024 + e;
                     }
                     d.slot_used[(size_t) s] = fwd;
+                }
+                if (ov) {
+                    CK(cudaEventRecord(ov_ev(d, hk), d.cs));
+                    CK(cudaStreamWaitEvent(d.s, ov_ev(d, hk), 0));
                 }
             }
             CK(cudaMemcpyAsync(d.bounds, p.bounds.data(), p.bounds.size() * 4, cudaMemcpyHostToDevice, d.s));
@@ -2798,6 +2849,15 @@ struct Model::Impl {
             }
             x3::set_gate_up(sa, d.xn, g.dim, d.rowidx + p.row0, d.h16, g.ff, d.s);
             x3::set_down(sa, d.h16, g.ff, d.y + (size_t) p.row0 * g.dim, g.dim, d.s);
+            if (ov) {   // (stream order keeps the bounds and h16 of the next pass after this one; the host keeps p.bounds
+                        //  until the end - a staged pass's half is free once its event is passed)
+                if (p.staged) {
+                    CK(cudaEventRecord(ov_ev(d, 2 + hk), d.s));
+                    hk ^= 1;
+                }
+                continue;
+            }
+            if (p.staged) hk ^= 1;
             // (the next pass rewrites the bounds and h16: let this one finish with them)
             CK(cudaStreamSynchronize(d.s));
         }
