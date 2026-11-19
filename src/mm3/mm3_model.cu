@@ -28,6 +28,11 @@
 #include <sstream>
 #include <thread>
 #include <tuple>
+#if defined(__linux__)
+#include <sys/mman.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+#endif
 
 #include "../core/ablate_capture.hpp"   // (MAYA_ABLATE_CAPTURE: the direction fitting's read-out)
 #include "mm3_ablate.hpp"
@@ -353,6 +358,63 @@ std::string tune_key_of(const std::vector<int>& gpus) {
 
 }  // namespace
 
+// MAYA_MM3_NUMA_POOL=1 (Linux, several NUMA nodes): the pinned pool split by the cards' NUMA nodes - the experts of a
+// card's layers in RAM on that card's node (mbind MPOL_PREFERRED, then registered), so its staging copies do not cross
+// the socket link (DS4_NUMA_STAGE's lesson on this 2 + 2 box).  Placement only: the same values, the same tokens.
+static int numa_nodes_online() {
+#if defined(__linux__)
+    int n = 0;
+    for (int k = 0; k < 64; ++k) {
+        const std::string pth = "/sys/devices/system/node/node" + std::to_string(k);
+        if (std::FILE* f = std::fopen((pth + "/cpulist").c_str(), "r")) {
+            std::fclose(f);
+            ++n;
+        }
+    }
+    return n;
+#else
+    return 1;
+#endif
+}
+static int dev_node(int dev) {
+    char bus[32] = {};
+    if (cudaDeviceGetPCIBusId(bus, sizeof bus, dev) != cudaSuccess) return -1;
+    std::string id(bus);
+    for (char& c : id) c = (char) std::tolower((unsigned char) c);
+    std::FILE* f = std::fopen(("/sys/bus/pci/devices/" + id + "/numa_node").c_str(), "r");
+    if (f == nullptr) return -1;
+    int node = -1;
+    if (std::fscanf(f, "%d", &node) != 1) node = -1;
+    std::fclose(f);
+    return node;
+}
+static uint8_t* numa_map(size_t bytes, int node) {
+#if defined(__linux__)
+    void* m = ::mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (m == MAP_FAILED) return nullptr;
+    unsigned long mask[4] = {0, 0, 0, 0};
+    mask[node / 64] = 1ul << (node % 64);
+    if (syscall(SYS_mbind, m, bytes, 1 /* MPOL_PREFERRED */, mask, 256, 0) != 0)
+        std::fprintf(stderr, "maya-mm3: NOTE: mbind to NUMA node %d failed: the pool's pages go where they are touched\n", node);
+    if (cudaHostRegister(m, bytes, cudaHostRegisterPortable) != cudaSuccess) {
+        cudaGetLastError();
+        ::munmap(m, bytes);
+        return nullptr;
+    }
+    return (uint8_t*) m;
+#else
+    (void) bytes, (void) node;
+    return nullptr;
+#endif
+}
+static void numa_unmap(uint8_t* p, size_t bytes) {
+#if defined(__linux__)
+    if (p) ::munmap(p, bytes);
+#else
+    (void) p, (void) bytes;
+#endif
+}
+
 struct Model::Impl {
     Options o;
     Pack pk;
@@ -410,6 +472,7 @@ struct Model::Impl {
     static constexpr float kDecay = 0.95f, kPromote = 1.8f;
     static constexpr int kMaxPending = 4;
     uint8_t* pool = nullptr;         // the pinned pool
+    std::vector<std::pair<uint8_t*, size_t>> node_pools;   // (MAYA_MM3_NUMA_POOL: a pool a NUMA node, mapped + registered)
     std::unique_ptr<CpuLane> lane;
     std::unique_ptr<Draft> draftm;   // the DSpark draft (on the head's GPU)
     double draft_plan = 0.0;         // plan_memory's room for it (bytes: the draft, its taps, a margin)
@@ -543,7 +606,11 @@ struct Model::Impl {
             cudaSetDevice(owned_dev[i]);
             cudaFree(owned[i]);
         }
-        if (pool) cudaFreeHost(pool);
+        if (pool && node_pools.empty()) cudaFreeHost(pool);
+        for (auto& np : node_pools) {
+            cudaHostUnregister(np.first);
+            numa_unmap(np.first, np.second);
+        }
         if (kv_host) cudaFreeHost(kv_host);
         for (auto& d : D) {
             cudaSetDevice(d.id);
@@ -1719,7 +1786,31 @@ struct Model::Impl {
                 want += b;
             }
             CK(cudaSetDevice(D[0].id));
-            while (want > 0 && cudaHostAlloc((void**) &pool, want, cudaHostAllocPortable) != cudaSuccess) {
+            // (MAYA_MM3_NUMA_POOL=1: one pool a node - the first nw candidates by their layer's card's node)
+            std::map<int, size_t> by_node;
+            const char* nv = ::mm3::env("MM3_NUMA_POOL");
+            if (nv != nullptr && std::atoi(nv) != 0 && numa_nodes_online() > 1 && want > 0) {
+                for (size_t i = 0; i < nw; ++i) {
+                    const Layer& l = L[(size_t) cand[i].li];
+                    by_node[dev_node(D[(size_t) l.dev].id)] += l.blob;
+                }
+                if (by_node.count(-1)) by_node.clear();   // (a card's node unknown: the one pool)
+                for (auto& kv : by_node) {
+                    uint8_t* m = numa_map(kv.second, kv.first);
+                    if (m == nullptr) {
+                        for (auto& np : node_pools) {
+                            cudaHostUnregister(np.first);
+                            numa_unmap(np.first, np.second);
+                        }
+                        node_pools.clear();
+                        by_node.clear();
+                        break;
+                    }
+                    node_pools.push_back({m, kv.second});
+                }
+            }
+            if (!node_pools.empty()) pool = node_pools[0].first;   // (the pool is there: its experts below, by node)
+            while (want > 0 && node_pools.empty() && cudaHostAlloc((void**) &pool, want, cudaHostAllocPortable) != cudaSuccess) {
                 pool = nullptr;
                 cudaGetLastError();
                 const size_t next = want / 4 * 3;
@@ -1738,12 +1829,23 @@ struct Model::Impl {
             } else {
                 std::vector<std::pair<int, int>> todo;
                 size_t off = 0;
+                std::map<int, std::pair<uint8_t*, size_t>> at;   // (node pools: each node's base and offset)
+                {
+                    size_t k = 0;
+                    for (auto& kv : by_node) at[kv.first] = {node_pools[k++].first, 0};
+                }
                 for (Layer& l : L)
                     if (l.moe) l.host_blob.assign((size_t) g.n_exp, nullptr);
                 for (size_t i = 0; i < nw; ++i) {
                     Layer& l = L[(size_t) cand[i].li];
-                    l.host_blob[(size_t) cand[i].e] = pool + off;
-                    off += l.blob;
+                    if (!node_pools.empty()) {
+                        auto& a = at[dev_node(D[(size_t) l.dev].id)];
+                        l.host_blob[(size_t) cand[i].e] = a.first + a.second;
+                        a.second += l.blob;
+                    } else {
+                        l.host_blob[(size_t) cand[i].e] = pool + off;
+                        off += l.blob;
+                    }
                     todo.push_back({cand[i].li, cand[i].e});
                 }
                 std::atomic<size_t> next{0};
@@ -1759,6 +1861,11 @@ struct Model::Impl {
                     });
                 for (auto& t : th) t.join();
                 st.pinned_gb = (double) want / (1u << 30);
+                if (!node_pools.empty()) {
+                    std::string w = "pinned pool by NUMA node (MAYA_MM3_NUMA_POOL):";
+                    for (auto& kv : by_node) w += " node " + std::to_string(kv.first) + " " + std::to_string(kv.second >> 30) + " GB";
+                    info.push_back(w);
+                }
                 st.pooled = (long) todo.size();
                 if (nw < cand.size())
                     info.push_back("pinned pool: " + std::to_string(nw) + " of the " + std::to_string(cand.size()) +
