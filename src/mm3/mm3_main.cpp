@@ -1225,9 +1225,17 @@ int serve_multi(mm3::Model& m, const std::vector<int>& eos, int chunk, const std
             groups.erase(it);
         }
     };
+    auto drain = [&]() {   // (before a prompt's read: every group out of the pipeline)
+        while (m.pipe_busy() > 0) tick({});
+    };
     auto pipe_step = [&]() {
         show();
         std::vector<Gen*> rows = ready();
+        for (Gen* gp : rows)   // (MAYA_MM3_ELASTIC: index keys to map past the experts' VRAM - the pipeline empty first)
+            if (m.pipe_busy() > 0 && m.ctx_room(gp->seq) <= (int) seqs[(size_t) gp->seq].state.size()) {
+                drain();
+                return;
+            }
         if (m.pipe_busy() == 0 && rows.size() <= 1) {   // (a request alone: the token path)
             feed(rows);
             sweep();
@@ -1240,9 +1248,6 @@ int serve_multi(mm3::Model& m, const std::vector<int>& eos, int chunk, const std
         tick(rows);
         std::fflush(stdout);
         sweep();
-    };
-    auto drain = [&]() {   // (before a prompt's read: every group out of the pipeline)
-        while (m.pipe_busy() > 0) tick({});
     };
     auto idle_seq = [&]() {
         for (const Seq& s : seqs)
@@ -1340,6 +1345,15 @@ int serve_multi(mm3::Model& m, const std::vector<int>& eos, int chunk, const std
         S.state.resize(bfrom2);
         S.held.clear();
         S.abl = abl;
+        if (!m.ctx_fit(best, (int) ids.size(), err)) {   // (MAYA_MM3_ELASTIC: its index keys' VRAM, the rest given back)
+            std::printf("ERR %d %s\n", g.rid, err.c_str());
+            std::printf("DONE %d 0 %zu 0.0 0.0 cancel 0 0 0 0 0\n", g.rid, ids.size());
+            std::fflush(stdout);
+            S.state.clear();
+            release(best);
+            in.forget(g.rid);
+            return;
+        }
         m.bind(best);
         m.set_ablate(abl);
         std::vector<mm3::Model::Image> rows;
@@ -1429,7 +1443,7 @@ int serve_multi(mm3::Model& m, const std::vector<int>& eos, int chunk, const std
     };
     std::string line;
     while (!quit) {
-        if (run.empty() && waiting.empty()) {   // (idle: wait for a line)
+        if (run.empty() && waiting.empty() && !m.ctx_give(0.25)) {   // (idle: experts back, then wait for a line)
             if (!in.next(line)) break;
             handle(line);
         }

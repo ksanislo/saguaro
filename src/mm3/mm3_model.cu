@@ -49,6 +49,7 @@
 #include "mm3_os.hpp"
 #include "mm3_tp.hpp"
 #include "mm3_vision.hpp"
+#include "mm3_vmm.hpp"
 #include "mm3_wscan.hpp"
 
 namespace mm3 {
@@ -106,6 +107,7 @@ struct Layer {
     struct SeqKv {
         uint16_t *kc = nullptr, *vc = nullptr, *ic = nullptr;
         k::IcRef icr;
+        vmm::Range icv;   // (MAYA_MM3_ELASTIC: ic's range, mapped as the conversation grows)
         k::KvQ kvq;
         k::KvHost kvh;   // (KV streaming: this conversation's ring tags and host rows)
     };
@@ -117,6 +119,8 @@ struct Layer {
     std::vector<int> res_slot;     // expert -> its slot in the resident region (-1: none)
     std::vector<int> res_ids;      // slot -> expert
     uint8_t* res_base = nullptr;   // the resident region: res_ids.size() blobs, blob bytes apart
+    vmm::Range resv;               // (MAYA_MM3_ELASTIC: the region's range - its tail given to the index keys)
+    int res_cap = 0;               // (... its slots at the load)
     std::vector<const uint8_t*> host_blob;   // expert -> its assembled blob in the pinned pool (null: none)
     // host-free (every routed expert of the layer in VRAM): the decode's plan made on the device from exp_tab (expert ->
     // its blob's device address) - no wait for the routing, no round trip through the host
@@ -135,6 +139,7 @@ struct Dev {
     cudaEvent_t fev = nullptr, jev = nullptr;
     std::vector<int> layers;
     size_t free0 = 0;
+    size_t el_floor = 0;   // (MAYA_MM3_ELASTIC: the VRAM kept free - the load's free less a slack)
     // staging
     uint8_t* stg = nullptr;
     size_t slot_bytes = 0;
@@ -475,6 +480,217 @@ struct Model::Impl {
         const int n = v ? std::atoi(v) : 0;
         return n >= 4096 && n < o.max_ctx ? n / 128 * 128 : o.max_ctx;
     }
+    // ---- elastic index keys (MAYA_MM3_ELASTIC=<positions>): each conversation's index cache an address range of
+    // o.max_ctx rows, el_pos of them mapped at the load and the rest as it grows - VRAM short, the coldest resident
+    // experts of that GPU give their slots (ctx_take); an idle engine takes them back (ctx_give).  0: off
+    int el_pos = 0;
+    long el_taken = 0, el_given = 0;
+    size_t el_min = (size_t) 256 << 20;   // (VRAM always left free: MAYA_MM3_ELASTIC_MIN_FREE_MB)
+    size_t ic_row_bytes() const { return (size_t) g.ix_dim * 2; }
+    int ctx_room(int s) const {
+        if (el_pos <= 0 || L.empty() || s < 0 || s >= (int) L[0].sk.size()) return o.max_ctx;
+        size_t m = SIZE_MAX;
+        for (const Layer& l : L) m = std::min(m, l.sk[(size_t) s].icv.mapped);
+        return (int) std::min<size_t>((size_t) o.max_ctx, m / ic_row_bytes());
+    }
+    // sequence s's index keys mapped for positions 0 .. n - 1 (can_take: the GPUs idle between calls - experts may
+    // give their slots)
+    bool ctx_ensure(int s, int n, bool can_take, std::string& err) {
+        if (el_pos <= 0 || L.empty() || s < 0 || s >= (int) L[0].sk.size()) return true;
+        const size_t want = (size_t) std::min(n, o.max_ctx) * ic_row_bytes();
+        for (Dev& d : D) {
+            size_t need = 0;
+            for (int li : d.layers) {
+                const vmm::Range& r = L[(size_t) li].sk[(size_t) s].icv;
+                const size_t w = std::min(r.round(want), r.cap);
+                if (w > r.mapped) need += w - r.mapped;
+            }
+            if (need == 0) continue;
+            CK(cudaSetDevice(d.id));
+            size_t fr = 0, tot = 0;
+            CK(cudaMemGetInfo(&fr, &tot));
+            // (the floor follows what the forwards' lazy buffers left free - never below el_min)
+            d.el_floor = std::max(el_min, std::min(d.el_floor, fr));
+            if (fr < need + d.el_floor) {
+                if (!can_take) {
+                    err = "elastic context: CUDA" + std::to_string(d.id) + " needs its experts' VRAM with work in flight";
+                    return false;
+                }
+                if (!ctx_take(d, need + d.el_floor - fr, err)) return false;
+            }
+            for (int li : d.layers) {
+                vmm::Range& r = L[(size_t) li].sk[(size_t) s].icv;
+                const size_t m0 = r.mapped;
+                if (!r.grow(want, err)) {
+                    const size_t more = std::min(r.round(want), r.cap) - r.mapped + d.el_floor;
+                    err.clear();
+                    if (!can_take || !ctx_take(d, more, err) || !r.grow(want, err)) {
+                        err = "elastic context: " + err;
+                        return false;
+                    }
+                }
+                acct[d.id][kAKV] += r.mapped - m0;
+            }
+        }
+        return true;
+    }
+    // sequence s's index keys past position n (at least el_pos) unmapped: its rows there are not read again
+    void ctx_trim(int s, int n) {
+        if (el_pos <= 0 || L.empty() || s < 0 || s >= (int) L[0].sk.size()) return;
+        const size_t keep = (size_t) std::max(n, el_pos) * ic_row_bytes();
+        for (Dev& d : D) {
+            bool any = false;
+            for (int li : d.layers) any |= L[(size_t) li].sk[(size_t) s].icv.mapped > L[(size_t) li].sk[(size_t) s].icv.round(keep);
+            if (!any) continue;
+            cudaSetDevice(d.id);
+            cudaDeviceSynchronize();
+            for (int li : d.layers) {
+                vmm::Range& r = L[(size_t) li].sk[(size_t) s].icv;
+                const size_t m0 = r.mapped;
+                r.shrink(keep);
+                acct[d.id][kAKV] -= m0 - r.mapped;
+            }
+        }
+    }
+    // at least `bytes` of d's VRAM freed: the coldest resident experts (the profile's and this run's routings) leave
+    // VRAM - each layer's kept ones moved into the slots below its new end, the region's tail unmapped.  A layer keeps
+    // a quarter of its load's experts; a host-free layer keeps all
+    bool ctx_take(Dev& d, size_t bytes, std::string& err) {
+        struct C {
+            uint32_t n;
+            int li, e;
+        };
+        std::vector<C> c;
+        for (int li : d.layers) {
+            const Layer& l = L[(size_t) li];
+            if (!l.moe || l.hf || l.resv.base == 0) continue;
+            for (int e : l.res_ids) c.push_back({prof[(size_t) li * g.n_exp + e], li, e});
+        }
+        std::stable_sort(c.begin(), c.end(), [](const C& a, const C& b) { return a.n < b.n; });
+        std::map<int, std::vector<int>> pick;
+        auto freed_of = [&](int li, size_t k) {
+            const Layer& l = L[(size_t) li];
+            return l.resv.mapped - std::min(l.resv.mapped, l.resv.round((l.res_ids.size() - k) * l.blob));
+        };
+        size_t freed = 0;
+        for (const C& x : c) {
+            if (freed >= bytes) break;
+            const Layer& l = L[(size_t) x.li];
+            std::vector<int>& v = pick[x.li];
+            if ((int) (l.res_ids.size() - v.size()) <= std::max(1, l.res_cap / 4)) continue;
+            const size_t before = freed_of(x.li, v.size());
+            v.push_back(x.e);
+            freed += freed_of(x.li, v.size()) - before;
+        }
+        if (freed < bytes) {
+            err = "CUDA" + std::to_string(d.id) + ": no VRAM for the context (" + std::to_string(bytes >> 20) +
+                  " MB wanted, the experts that may leave give " + std::to_string(freed >> 20) + " MB)";
+            return false;
+        }
+        CK(cudaSetDevice(d.id));
+        CK(cudaDeviceSynchronize());
+        long n = 0;
+        for (auto& kv : pick) {
+            Layer& l = L[(size_t) kv.first];
+            if (kv.second.empty()) continue;
+            const size_t n0 = l.res_ids.size(), n1 = n0 - kv.second.size();
+            std::vector<char> gone((size_t) g.n_exp, 0);
+            for (int e : kv.second) gone[(size_t) e] = 1;
+            std::vector<size_t> holes, movers;
+            for (size_t s = 0; s < n1; ++s)
+                if (gone[(size_t) l.res_ids[s]]) holes.push_back(s);
+            for (size_t s = n1; s < n0; ++s)
+                if (!gone[(size_t) l.res_ids[s]]) movers.push_back(s);
+            for (size_t i = 0; i < holes.size(); ++i) {
+                const int e = l.res_ids[movers[i]];
+                CK(cudaMemcpyAsync(l.res_base + holes[i] * l.blob, l.res_base + movers[i] * l.blob, l.blob,
+                                   cudaMemcpyDeviceToDevice, d.s));
+                l.res_ids[holes[i]] = e;
+                l.res_slot[(size_t) e] = (int) holes[i];
+            }
+            for (int e : kv.second) l.res_slot[(size_t) e] = -1;
+            l.res_ids.resize(n1);
+            n += (long) kv.second.size();
+            st.resident -= (long) kv.second.size();
+            st.vram_gb -= (double) (kv.second.size() * l.blob) / (1u << 30);
+        }
+        CK(cudaStreamSynchronize(d.s));
+        for (auto& kv : pick) {
+            Layer& l = L[(size_t) kv.first];
+            l.resv.shrink(l.res_ids.size() * l.blob);
+        }
+        graphs_clear();
+        el_taken += n;
+        std::fprintf(stderr, "maya-mm3: elastic context: CUDA%d gave %ld experts' VRAM (%zu MB) to the index keys\n",
+                     d.id, n, freed >> 20);
+        return true;
+    }
+    // (an idle engine) experts back into the regions while VRAM is free past the floor, the most routed first - for at
+    // most budget_s seconds; true: more to give
+    bool ctx_give(double budget_s) {
+        if (el_pos <= 0) return false;
+        const double t0 = now();
+        bool more = false;
+        for (Dev& d : D) {
+            cudaSetDevice(d.id);
+            long n = 0;
+            for (;;) {
+                int bl = -1, be = -1;
+                uint32_t bn = 0;
+                for (int li : d.layers) {
+                    const Layer& l = L[(size_t) li];
+                    if (!l.moe || l.resv.base == 0 || (int) l.res_ids.size() >= l.res_cap) continue;
+                    for (int e = 0; e < g.n_exp; ++e)
+                        if (l.res_slot[(size_t) e] < 0 && (bl < 0 || prof[(size_t) li * g.n_exp + e] > bn)) {
+                            bl = li;
+                            be = e;
+                            bn = prof[(size_t) li * g.n_exp + e];
+                        }
+                }
+                if (bl < 0) break;
+                if (now() - t0 > budget_s) {
+                    more = true;
+                    break;
+                }
+                Layer& l = L[(size_t) bl];
+                const size_t at = l.res_ids.size() * l.blob;
+                const size_t need = l.resv.round(at + l.blob) - l.resv.mapped;
+                size_t fr = 0, tot = 0;
+                if (cudaMemGetInfo(&fr, &tot) != cudaSuccess || fr < need + d.el_floor + l.resv.gran * 8) break;
+                std::string err;
+                if (!l.resv.grow(at + l.blob, err)) break;
+                if (n == 0) cudaDeviceSynchronize();   // (d.pin and the streams idle)
+                const uint8_t* src = pooled(l, be) ? l.host_blob[(size_t) be] : nullptr;
+                std::vector<uint8_t> pg;
+                if (src == nullptr) {
+                    uint8_t* dst = d.pin;
+                    if (dst == nullptr) {
+                        pg.resize(l.blob);
+                        dst = pg.data();
+                    }
+                    assemble(l, be, dst);
+                    src = dst;
+                }
+                if (cudaMemcpy(l.res_base + at, src, l.blob, cudaMemcpyHostToDevice) != cudaSuccess) {
+                    cudaGetLastError();
+                    l.resv.shrink(at);
+                    break;
+                }
+                l.res_slot[(size_t) be] = (int) l.res_ids.size();
+                l.res_ids.push_back(be);
+                ++n;
+                ++st.resident;
+                st.vram_gb += (double) l.blob / (1u << 30);
+            }
+            if (n > 0) {
+                graphs_clear();
+                el_given += n;
+                std::fprintf(stderr, "maya-mm3: elastic context: CUDA%d took %ld experts back into VRAM\n", d.id, n);
+            }
+            if (more) break;
+        }
+        return more;
+    }
     std::vector<uint32_t> prof;      // routings [layer][expert]: the loaded profile's plus this run's
     std::vector<uint32_t> cpu_seen;  // (MM3_MISS_STATS: the CPU lane's computations [layer][expert] this run)
     // the promotions' scores: an expert not in VRAM, each use (on the CPU lane, or from a slot) adds 1, decayed by
@@ -607,6 +823,14 @@ struct Model::Impl {
                          st.help_experts, st.cpu_experts);
         graphs_clear();
         for (cudaEvent_t e : pf.ev) cudaEventDestroy(e);
+        for (Layer& l : L) {   // (elastic ranges)
+            if (l.resv.base || std::any_of(l.sk.begin(), l.sk.end(), [](const Layer::SeqKv& c) { return c.icv.base != 0; })) {
+                cudaSetDevice(D[(size_t) l.dev].id);
+                cudaDeviceSynchronize();
+            }
+            for (Layer::SeqKv& c : l.sk) c.icv.close();
+            l.resv.close();
+        }
         if (::mm3::env("MM3_MISS_STATS") && !cpu_seen.empty()) {
             long tot = 0, distinct = 0, twice = 0;
             for (uint32_t c : cpu_seen) {
@@ -1179,8 +1403,9 @@ struct Model::Impl {
         auto kv_of = [&](size_t di, int ctx, int ring) {   // (--parallel: a cache for each conversation)
             const double n = (double) D[di].layers.size() * (double) std::max(1, o.seqs);
             const char* icv = ::mm3::env("MM3_IC_STREAM");   // (tiered index cache: its VRAM rows + the bounds)
-            const double icn = icv && std::atoi(icv) >= 4096 ? std::min<double>(ctx, std::atoi(icv)) : (double) ctx;
+            double icn = icv && std::atoi(icv) >= 4096 ? std::min<double>(ctx, std::atoi(icv)) : (double) ctx;
             const double bounds = icn < ctx ? (double) ctx * 8.0 : 0.0;
+            if (el_pos > 0) icn = std::min<double>(ctx, el_pos);   // (elastic: the rest taken from experts as it grows)
             return n * ((double) (ring > 0 ? ring : ctx) * (double) kvpos + icn * (double) idxpos + bounds);
         };
         auto fits = [&](int ctx, int ring, int slots, std::string* worst) {
@@ -1329,6 +1554,20 @@ struct Model::Impl {
             d.free0 = fr;
             D.push_back(std::move(d));
         }
+        if (const char* ev = ::mm3::env("MM3_ELASTIC"); ev != nullptr && std::atoi(ev) > 0) {
+            const size_t gr = vmm::granule(D[0].id), rb = (size_t) g.ix_dim * 2;
+            const int step = gr > 0 && gr % rb == 0 ? (int) (gr / rb) : 0;
+            if (step == 0 || ::mm3::env("MM3_IC_STREAM") || o.tp > 0) {
+                info.push_back("NOTE: MAYA_MM3_ELASTIC: off (no virtual memory API, MAYA_MM3_IC_STREAM or --tp)");
+            } else {
+                el_pos = (std::atoi(ev) + step - 1) / step * step;
+                if (const char* mv = ::mm3::env("MM3_ELASTIC_MIN_FREE_MB")) el_min = (size_t) std::max(0, std::atoi(mv)) << 20;
+                if (el_pos >= o.max_ctx) el_pos = 0;
+                else
+                    info.push_back("elastic context: index keys for " + std::to_string(el_pos) + " positions a "
+                                   "conversation at the load, more taken from the coldest resident experts as one grows");
+            }
+        }
         // the layers over the GPUs by what each needs against each GPU's free memory: a layer's dense weights, its routed
         // experts and its caches, the last GPU's room less the output head (and the DSpark draft) - so every GPU keeps
         // about the same share of its memory over (the dense layers hold no experts: by layer count the first GPU kept
@@ -1341,7 +1580,8 @@ struct Model::Impl {
             for (int li = 0; li < g.n_layers && !old; ++li)
                 w[(size_t) li] = (double) dense_bytes(li) +
                                  (g.moe[(size_t) li] ? (double) g.n_exp * (double) blob_estimate(li) : 0.0) +
-                                 ns * (kvr * (double) k::kv_bytes(o.kv_k, o.kv_v, (size_t) g.n_kv) + ctx * g.ix_dim * 2.0);
+                                 ns * (kvr * (double) k::kv_bytes(o.kv_k, o.kv_v, (size_t) g.n_kv) +
+                                       (el_pos > 0 ? std::min<double>(ctx, el_pos) : ctx) * g.ix_dim * 2.0);
             double total = 0, wsum = 0;
             for (size_t i = 0; i < D.size(); ++i) {
                 cap[i] = (double) D[i].free0;
@@ -1489,7 +1729,15 @@ struct Model::Impl {
                     uint8_t* kvb = nullptr;
                     if (!A(kvb, k::kv_bytes(o.kv_k, o.kv_v, kvrows))) return false;
                     k::kv_carve(kvb, kvrows, o.kv_k, o.kv_v, o.kv_rot ? 3 : 0, c.kc, c.vc, c.kvq);
-                    if (!A(c.ic, (size_t) ic_rows() * g.ix_dim)) return false;
+                    if (el_pos > 0) {
+                        const size_t rb = (size_t) g.ix_dim * 2;
+                        if (!c.icv.open(dv, (size_t) o.max_ctx * rb, err) || !c.icv.grow((size_t) el_pos * rb, err))
+                            return false;
+                        c.ic = (uint16_t*) c.icv.ptr();
+                        acct[dv][kAKV] += c.icv.mapped;
+                    } else if (!A(c.ic, (size_t) ic_rows() * g.ix_dim)) {
+                        return false;
+                    }
                     c.icr = k::IcRef(c.ic);
                     if (ic_rows() < o.max_ctx) {   // (tiered: the rest in host memory - below; the blocks' bounds here)
                         const size_t nb = (size_t) (o.max_ctx + 127) / 128 * 128;
@@ -1739,6 +1987,7 @@ struct Model::Impl {
                 if (!err.empty()) return false;
             }
             size_t budget = fr > reserve ? fr - reserve : 0;
+            if (el_pos > 0) budget -= std::min(budget, moe_layers.size() * vmm::granule(d.id));   // (each range's last granule)
             std::vector<int> nres(moe_layers.size(), 0);
             const int cap = o.resident_cap < 0 ? g.n_exp : std::min(o.resident_cap, g.n_exp);
             std::vector<std::vector<int>> chosen(moe_layers.size());
@@ -1777,7 +2026,14 @@ struct Model::Impl {
                 Layer& l = L[(size_t) moe_layers[i]];
                 l.res_slot.assign((size_t) g.n_exp, -1);
                 l.res_ids.clear();
-                if (nres[i] > 0 && !dalloc(d.id, l.res_base, (size_t) nres[i] * l.blob, err)) return false;
+                if (nres[i] > 0 && el_pos > 0) {   // (elastic: a range, its tail given away and mapped back)
+                    if (!l.resv.open(d.id, (size_t) nres[i] * l.blob, err) || !l.resv.grow((size_t) nres[i] * l.blob, err))
+                        return false;
+                    l.res_base = l.resv.ptr();
+                    l.res_cap = nres[i];
+                } else if (nres[i] > 0 && !dalloc(d.id, l.res_base, (size_t) nres[i] * l.blob, err)) {
+                    return false;
+                }
                 for (int sl = 0; sl < nres[i]; ++sl) {
                     const int e = have_prof ? chosen[i][(size_t) sl] : sl;
                     l.res_slot[(size_t) e] = sl;
@@ -2036,6 +2292,7 @@ struct Model::Impl {
             CK(cudaMemGetInfo(&fr, &tot));
             int nr = 0;
             for (int li : d.layers) nr += (int) L[(size_t) li].res_ids.size();
+
             info.push_back("CUDA" + std::to_string(d.id) + ": layers " + std::to_string(d.layers.front()) + "-" +
                            std::to_string(d.layers.back()) + ", " + std::to_string(nr) + " experts resident, " +
                            std::to_string(d.n_slots) + " staging slots, " + std::to_string(fr >> 20) + " MB free");
@@ -2062,10 +2319,15 @@ struct Model::Impl {
         }
         // the Monitor's map of each GPU: the dense weights, the KV caches, the scratch, the DSpark draft, the routed
         // experts' slots (resident and staging), the vision tower
-        for (const Dev& d : D) {
+        for (Dev& d : D) {
             cudaSetDevice(d.id);
             size_t fr = 0, tot = 0;
             cudaMemGetInfo(&fr, &tot);
+            if (el_pos > 0) {   // (what the load left free stays free, less a slack the index keys may use first)
+                const char* sv = ::mm3::env("MM3_ELASTIC_SLACK_MB");
+                const size_t slack = (size_t) (sv ? std::max(0, std::atoi(sv)) : 128) << 20;
+                d.el_floor = fr > slack ? fr - slack : 0;
+            }
             std::array<size_t, kAN> a{};
             if (auto it = acct.find(d.id); it != acct.end()) a = it->second;
             const bool head = &d - D.data() == head_dev;
@@ -3865,6 +4127,7 @@ bool Model::state_load(int n, std::FILE* f, std::string& err, int n_file) {
         return false;
     }
     auto& I = *p;
+    if (!I.ctx_ensure(I.bound, n, true, err)) return false;
     for (auto& d : I.D) {
         cudaSetDevice(d.id);
         cudaDeviceSynchronize();
@@ -4041,6 +4304,7 @@ bool Model::save_profile(const std::string& path, std::string& err) const {
 bool Model::forward(const int* ids, int n, int pos0, int want, float* logits_out, std::string& err) {
     if (tpe) return tpe->forward(ids, n, pos0, want, logits_out, err);
     p->last_done = 0;
+    if (!p->ctx_ensure(p->bound, pos0 + n, true, err)) return false;
     want = std::min(want, n);
     const int C = p->run_chunk();
     for (int a = 0; a < n; a += C) {
@@ -4111,6 +4375,8 @@ bool Model::forward_rows(const int* ids, const int* seq, const int* pos, int R, 
         }
         return true;
     }
+    for (int r = 0; r < R; ++r)
+        if (!p->ctx_ensure(seq[r], pos[r] + 1, true, err)) return false;
     p->rseq.assign(seq, seq + R);
     p->rpos.assign(pos, pos + R);
     p->last_done = 0;
@@ -4127,11 +4393,20 @@ int Model::pipe_stages() const {
     return (int) p->stage_dev.size();
 }
 int Model::pipe_busy() const { return tpe ? 0 : p->pipe_busy(); }
+int Model::ctx_room(int s) const { return tpe ? max_ctx() : p->ctx_room(s); }
+bool Model::ctx_fit(int s, int n, std::string& err) {
+    if (tpe) return true;
+    if (p->pipe_busy() == 0) p->ctx_trim(s, n);
+    return p->ctx_ensure(s, n, p->pipe_busy() == 0, err);
+}
+bool Model::ctx_give(double budget_s) { return !tpe && p->ctx_give(budget_s); }
 bool Model::pipe_tick(const int* ids, const int* seq, const int* pos, int R, int tag, std::string& err) {
     if (pipe_stages() < 2) {
         err = "pipe_tick: no pipeline here (one GPU, or one sequence)";
         return false;
     }
+    for (int r = 0; r < R; ++r)
+        if (!p->ctx_ensure(seq[r], pos[r] + 1, p->pipe_busy() == 0, err)) return false;
     return p->pipe_tick(ids, seq, pos, R, tag, err);
 }
 bool Model::pipe_take(int& tag, std::vector<float>& logits) {

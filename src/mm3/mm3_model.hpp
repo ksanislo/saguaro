@@ -160,6 +160,12 @@ public:
     /// GPU on; a group past the last GPU: its logits [R][vocab] for pipe_take (oldest first, with its tag).  Each row
     /// the same bits as forward_rows'.  A sequence is in one group at most; forward / forward_rows only with none in
     /// flight (pipe_busy() 0); pipe_drop() forgets them (after an error).
+    /// MAYA_MM3_ELASTIC: the positions sequence s's index keys hold in VRAM now (max_ctx() without it); ctx_fit maps
+    /// them for n positions (VRAM short: the coldest resident experts give theirs) and gives back what is past n; an
+    /// idle server calls ctx_give (true: more to do, for at most budget_s a call) to take the experts back.
+    int ctx_room(int s) const;
+    bool ctx_fit(int s, int n, std::string& err);
+    bool ctx_give(double budget_s);
     int pipe_stages() const;
     int pipe_busy() const;
     bool pipe_tick(const int* ids, const int* seq, const int* pos, int R, int tag, std::string& err);
