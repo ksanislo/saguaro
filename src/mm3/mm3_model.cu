@@ -3647,6 +3647,115 @@ bool Model::load(const Options& o_in, std::string& err) {
                                              : std::string()));
     return true;
 }
+bool Model::state_ok() const {
+    if (tpe || p->L.empty() || seqs() != 1 || p->draftm) return false;
+    for (const auto& l : p->L)
+        if (l.kvh.ring <= 0) return false;
+    return true;
+}
+std::string Model::state_id() const {
+    const auto& g = p->g;
+    return "mm3-state-1 layers=" + std::to_string(g.n_layers) + " kv=" + std::to_string(g.n_kv) + " ix=" +
+           std::to_string(g.ix_dim) + " kf=" + std::to_string(p->o.kv_k) + " vf=" + std::to_string(p->o.kv_v) +
+           " rot=" + std::to_string(p->o.kv_rot ? 1 : 0);
+}
+namespace {
+// one cache array's rows [0, n) (row bytes rb) of the host copy to / from f
+bool rows_io(std::FILE* f, uint8_t* host, size_t n, size_t rb, bool save) {
+    const size_t b = n * rb;
+    if (b == 0) return true;
+    return save ? std::fwrite(host, 1, b, f) == b : std::fread(host, 1, b, f) == b;
+}
+}  // namespace
+bool Model::state_save(int n, std::FILE* f, std::string& err) {
+    if (!state_ok() || n <= 0 || n > p->o.max_ctx) {
+        err = "saved conversations: not with this model's settings";
+        return false;
+    }
+    auto& I = *p;
+    for (auto& d : I.D) {
+        cudaSetDevice(d.id);
+        cudaDeviceSynchronize();
+    }
+    const int H = I.g.n_kv;
+    std::vector<uint16_t> ic((size_t) n * I.g.ix_dim);
+    for (auto& l : I.L) {
+        const auto& q = l.kvh.q;
+        const size_t kcb = k::kv_code_bytes(I.o.kv_k) * H, ksb = k::kv_scale_bytes(I.o.kv_k) * H;
+        const size_t vcb = k::kv_code_bytes(I.o.kv_v) * H, vsb = k::kv_scale_bytes(I.o.kv_v) * H;
+        uint8_t* kc = I.o.kv_k == k::kKvBf16 ? (uint8_t*) l.kvh.kc : q.kc;
+        uint8_t* vc = I.o.kv_v == k::kKvBf16 ? (uint8_t*) l.kvh.vc : q.vc;
+        if (!rows_io(f, kc, (size_t) n, kcb, true) || (ksb && !rows_io(f, q.ks, (size_t) n, ksb, true)) ||
+            !rows_io(f, vc, (size_t) n, vcb, true) || (vsb && !rows_io(f, q.vs, (size_t) n, vsb, true))) {
+            err = "saved conversations: a write failed";
+            return false;
+        }
+        cudaSetDevice(I.D[(size_t) l.dev].id);
+        if (cudaMemcpy(ic.data(), l.ic, ic.size() * 2, cudaMemcpyDeviceToHost) != cudaSuccess ||
+            std::fwrite(ic.data(), 2, ic.size(), f) != ic.size()) {
+            err = "saved conversations: the index keys not written";
+            return false;
+        }
+    }
+    return true;
+}
+bool Model::state_load(int n, std::FILE* f, std::string& err) {
+    if (!state_ok() || n <= 0 || n > p->o.max_ctx) {
+        err = "saved conversations: not with this model's settings";
+        return false;
+    }
+    auto& I = *p;
+    for (auto& d : I.D) {
+        cudaSetDevice(d.id);
+        cudaDeviceSynchronize();
+    }
+    const int H = I.g.n_kv;
+    std::vector<uint16_t> ic((size_t) n * I.g.ix_dim);
+    for (auto& l : I.L) {
+        auto& q = l.kvh.q;
+        const size_t kcb = k::kv_code_bytes(I.o.kv_k) * H, ksb = k::kv_scale_bytes(I.o.kv_k) * H;
+        const size_t vcb = k::kv_code_bytes(I.o.kv_v) * H, vsb = k::kv_scale_bytes(I.o.kv_v) * H;
+        uint8_t* kc = I.o.kv_k == k::kKvBf16 ? (uint8_t*) l.kvh.kc : q.kc;
+        uint8_t* vc = I.o.kv_v == k::kKvBf16 ? (uint8_t*) l.kvh.vc : q.vc;
+        if (!rows_io(f, kc, (size_t) n, kcb, false) || (ksb && !rows_io(f, q.ks, (size_t) n, ksb, false)) ||
+            !rows_io(f, vc, (size_t) n, vcb, false) || (vsb && !rows_io(f, q.vs, (size_t) n, vsb, false)) ||
+            std::fread(ic.data(), 2, ic.size(), f) != ic.size()) {
+            err = "saved conversations: a read failed";
+            return false;
+        }
+        Dev& d = I.D[(size_t) l.dev];
+        cudaSetDevice(d.id);
+        if (cudaMemcpy(l.ic, ic.data(), ic.size() * 2, cudaMemcpyHostToDevice) != cudaSuccess) {
+            err = "saved conversations: the index keys not uploaded";
+            return false;
+        }
+        // the VRAM ring: the last positions' rows, every other row's tag none
+        const int R = l.kvh.ring;
+        std::vector<int> tag((size_t) R, -1);
+        const int p0 = std::max(0, n - R);
+        uint8_t* vk = I.o.kv_k == k::kKvBf16 ? (uint8_t*) l.kc : l.kvq.kc;
+        uint8_t* vv = I.o.kv_v == k::kKvBf16 ? (uint8_t*) l.vc : l.kvq.vc;
+        for (int a = p0; a < n;) {
+            const int r = a % R, m = std::min(n - a, R - r);   // (a run of positions to the ring's end)
+            struct Arr { uint8_t* dst; const uint8_t* src; size_t rb; };
+            const Arr arrs[4] = {{vk, kc, kcb}, {l.kvq.ks, q.ks, ksb}, {vv, vc, vcb}, {l.kvq.vs, q.vs, vsb}};
+            for (const Arr& x : arrs)
+                if (x.rb && x.dst && cudaMemcpy(x.dst + (size_t) r * x.rb, x.src + (size_t) a * x.rb, (size_t) m * x.rb,
+                                                cudaMemcpyHostToDevice) != cudaSuccess) {
+                    err = "saved conversations: the ring not filled";
+                    return false;
+                }
+            for (int i = 0; i < m; ++i) tag[(size_t) (r + i)] = a + i;
+            a += m;
+        }
+        if (cudaMemcpy(l.kvh.tag, tag.data(), tag.size() * 4, cudaMemcpyHostToDevice) != cudaSuccess) {
+            err = "saved conversations: the ring's tags not set";
+            return false;
+        }
+    }
+    return true;
+}
+
 int Model::chunk() const { return tpe ? 0 : p->run_chunk(); }
 int Model::chunk_max() const { return tpe ? 0 : p->o.chunk; }
 void Model::set_chunk(int c) { p->chunk_run = c; }

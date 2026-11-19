@@ -28,6 +28,7 @@
 #include <cmath>
 #include <atomic>
 #include <chrono>
+#include <filesystem>
 #include <condition_variable>
 #include <csignal>
 #include <cstdio>
@@ -360,9 +361,204 @@ struct Lookup {
     Lookup(int min_match, size_t cap) : sfx(min_match, 64, cap), policy(kMaxT), buf((size_t) kMaxT) {}
 };
 
+// ---- saved conversations (MAYA_MM3_SLOT_DIR, one conversation at a time with KV streaming: Model::state_ok): the
+// conversation in the cache is written to the folder when a request that does not continue it would drop it (it is at
+// least MAYA_MM3_SLOT_MIN tokens, 1024) and when the engine ends (QUIT: the server's unload), and a request whose
+// prompt continues a saved one (all of its tokens, more than the cache shares with the request) reads it back instead
+// of reading those tokens again - across model swaps and restarts.  A conversation: conv-<hash>.bin (Model::state_save)
+// and .meta (this model's identity, the tokens), written under temporary names first; a newer save of a conversation
+// removes its older, shorter ones.  The folder's .bin files are kept under MAYA_MM3_SLOT_GB (64), least recently used
+// first out; older than MAYA_MM3_SLOT_DAYS (7) days: removed at start.  Conversations with pictures are not saved.
+struct SlotStore {
+    struct Slot {
+        std::string bin;
+        std::vector<int> toks;
+        uint64_t bytes = 0;
+    };
+    std::filesystem::path dir;
+    std::string ident;
+    std::vector<Slot> slots;
+    size_t min_tokens = 1024;
+    uint64_t cap = 64ull << 30;
+    bool on = false;
+    static constexpr uint64_t kMagic = 0x3154415453334d4dull;   // "MM3STAT1"
+    static uint64_t fnv(const std::vector<int>& t) {
+        uint64_t h = 1469598103934665603ull;
+        for (int x : t) {
+            h ^= (uint32_t) x;
+            h *= 1099511628211ull;
+        }
+        return h;
+    }
+    static void note(const std::string& m) {
+        std::fprintf(stderr, "mm3 sessions: %s\n", m.c_str());
+        std::printf("NOTE sessions: %s\n", m.c_str());
+        std::fflush(stdout);
+    }
+    bool meta_read(const std::string& path, std::vector<int>& toks) const {
+        std::ifstream f(path, std::ios::binary);
+        uint64_t m0 = 0, il = 0, nt = 0, m1 = 0;
+        if (!f.read((char*) &m0, 8) || m0 != kMagic || !f.read((char*) &il, 8) || il != ident.size()) return false;
+        std::string id(il, '\0');
+        if (!f.read(id.data(), (std::streamsize) il) || id != ident || !f.read((char*) &nt, 8) || nt == 0 ||
+            nt > (64ull << 20))
+            return false;
+        toks.resize(nt);
+        if (!f.read((char*) toks.data(), (std::streamsize) (nt * 4)) || !f.read((char*) &m1, 8) || m1 != kMagic)
+            return false;
+        return true;
+    }
+    void open(const std::string& d, const std::string& id) {
+        namespace fs = std::filesystem;
+        ident = id;
+        dir = d;
+        if (const char* v = ::mm3::env("MM3_SLOT_MIN")) min_tokens = (size_t) std::max(1, std::atoi(v));
+        if (const char* v = ::mm3::env("MM3_SLOT_GB")) cap = (uint64_t) (std::atof(v) * 1073741824.0);
+        const double days = ::mm3::env("MM3_SLOT_DAYS") ? std::atof(::mm3::env("MM3_SLOT_DAYS")) : 7.0;
+        std::error_code ec;
+        fs::create_directories(dir, ec);
+        if (!fs::is_directory(dir, ec)) {
+            note("folder " + dir.string() + " not usable: conversations are not saved");
+            return;
+        }
+        on = true;
+        for (const auto& de : fs::directory_iterator(dir, ec)) {
+            const std::string pth = de.path().string();
+            if (de.path().extension() == ".tmp") {
+                fs::remove(de.path(), ec);
+                continue;
+            }
+            if (de.path().extension() != ".bin") continue;
+            const std::string meta = pth.substr(0, pth.size() - 4) + ".meta";
+            Slot sl;
+            sl.bin = pth;
+            const auto age = std::chrono::duration<double>(fs::file_time_type::clock::now() -
+                                                           fs::last_write_time(de.path(), ec)).count() / 86400.0;
+            if (!meta_read(meta, sl.toks) || age > days) {
+                fs::remove(de.path(), ec);
+                fs::remove(meta, ec);
+                continue;
+            }
+            sl.bytes = (uint64_t) fs::file_size(de.path(), ec);
+            slots.push_back(std::move(sl));
+        }
+        trim("");
+        note("folder " + dir.string() + ": " + std::to_string(slots.size()) + " saved conversation(s)");
+    }
+    void drop(size_t i) {
+        std::error_code ec;
+        std::filesystem::remove(slots[i].bin, ec);
+        std::filesystem::remove(slots[i].bin.substr(0, slots[i].bin.size() - 4) + ".meta", ec);
+        slots.erase(slots.begin() + (long) i);
+    }
+    void trim(const std::string& keep) {   // (least recently written first out while over the cap)
+        namespace fs = std::filesystem;
+        for (;;) {
+            uint64_t tot = 0;
+            for (const Slot& x : slots) tot += x.bytes;
+            if (tot <= cap || slots.size() <= 1) return;
+            size_t old = (size_t) -1;
+            std::error_code ec;
+            for (size_t i = 0; i < slots.size(); ++i) {
+                if (slots[i].bin == keep) continue;
+                if (old == (size_t) -1 || fs::last_write_time(slots[i].bin, ec) < fs::last_write_time(slots[old].bin, ec))
+                    old = i;
+            }
+            if (old == (size_t) -1) return;
+            drop(old);
+        }
+    }
+    static bool prefix_of(const std::vector<int>& a, const std::vector<int>& b) {   // a is a prefix of b
+        return a.size() <= b.size() && std::equal(a.begin(), a.end(), b.begin());
+    }
+    // the conversation in the cache (state, n tokens) to the folder
+    void save(mm3::Model& m, const std::vector<int>& state) {
+        if (!on || state.size() < min_tokens) return;
+        for (const Slot& x : slots)
+            if (prefix_of(state, x.toks)) return;   // (already there, or a longer save of it)
+        const double t0 = now();
+        char nm[64];
+        std::snprintf(nm, sizeof nm, "conv-%016llx", (unsigned long long) fnv(state));
+        const std::string bin = (dir / (std::string(nm) + ".bin")).string(), meta = (dir / (std::string(nm) + ".meta")).string();
+        std::string err;
+        {
+            std::FILE* f = std::fopen((bin + ".tmp").c_str(), "wb");
+            bool ok = f != nullptr && m.state_save((int) state.size(), f, err);
+            if (f != nullptr && std::fclose(f) != 0) ok = false;
+            if (!ok) {
+                std::error_code ec;
+                std::filesystem::remove(bin + ".tmp", ec);
+                note("a conversation not saved: " + (err.empty() ? std::string("the file") : err));
+                return;
+            }
+        }
+        {
+            std::ofstream f(meta + ".tmp", std::ios::binary | std::ios::trunc);
+            const uint64_t il = ident.size(), nt = state.size();
+            f.write((const char*) &kMagic, 8);
+            f.write((const char*) &il, 8);
+            f.write(ident.data(), (std::streamsize) il);
+            f.write((const char*) &nt, 8);
+            f.write((const char*) state.data(), (std::streamsize) (nt * 4));
+            f.write((const char*) &kMagic, 8);
+        }
+        std::error_code ec;
+        std::filesystem::rename(bin + ".tmp", bin, ec);
+        std::filesystem::rename(meta + ".tmp", meta, ec);
+        for (size_t i = slots.size(); i-- > 0;)   // (its older, shorter saves)
+            if (prefix_of(slots[i].toks, state)) drop(i);
+        Slot sl;
+        sl.bin = bin;
+        sl.toks = state;
+        sl.bytes = (uint64_t) std::filesystem::file_size(bin, ec);
+        slots.push_back(std::move(sl));
+        trim(bin);
+        char msg[160];
+        std::snprintf(msg, sizeof msg, "saved a conversation of %zu tokens (%.2f GB) in %.1f s", state.size(),
+                      (double) slots.back().bytes / 1e9, now() - t0);
+        note(msg);
+    }
+    // the saved conversation the request continues best, past `from` tokens: read back (its tokens into state)
+    // (1: read back; 0: none fits; -1: a read failed - the cache's rows may be part-written)
+    int load(mm3::Model& m, const std::vector<int>& ids, size_t from, std::vector<int>& state) {
+        if (!on) return 0;
+        int best = -1;
+        for (size_t i = 0; i < slots.size(); ++i) {
+            const auto& t = slots[i].toks;
+            if (t.size() <= from + 256 || t.size() + 1 > ids.size() || !std::equal(t.begin(), t.end(), ids.begin()))
+                continue;
+            if (best < 0 || t.size() > slots[(size_t) best].toks.size()) best = (int) i;
+        }
+        if (best < 0) return 0;
+        const double t0 = now();
+        Slot& sl = slots[(size_t) best];
+        std::string err;
+        std::FILE* f = std::fopen(sl.bin.c_str(), "rb");
+        const bool ok = f != nullptr && m.state_load((int) sl.toks.size(), f, err);
+        if (f != nullptr) std::fclose(f);
+        if (!ok) {
+            note("a saved conversation not read (" + (err.empty() ? std::string("the file") : err) + "): removed");
+            drop((size_t) best);
+            return -1;
+        }
+        std::error_code ec;
+        std::filesystem::last_write_time(sl.bin, std::filesystem::file_time_type::clock::now(), ec);   // (recently used)
+        state = sl.toks;
+        char msg[160];
+        std::snprintf(msg, sizeof msg, "read back a saved conversation of %zu tokens in %.1f s", state.size(), now() - t0);
+        note(msg);
+        return 1;
+    }
+};
+
 int serve(mm3::Model& m, const std::vector<int>& eos, int chunk, bool spec_on, float conf_floor, float draft_cost,
-          const std::string& kv_fmt, const std::string& profile_out, int suffix_draft) {
+          const std::string& kv_fmt, const std::string& profile_out, int suffix_draft, const std::string& pack = "") {
     serve_header(m, spec_on, kv_fmt);
+    SlotStore slots;
+    if (const char* sd = ::mm3::env("MM3_SLOT_DIR")) {
+        if (m.state_ok()) slots.open(sd, m.state_id() + " pack=" + pack);
+        else SlotStore::note("conversations are saved with KV streaming and one conversation at a time only (MAYA_MM3_SLOT_DIR ignored)");
+    }
     // (the prompt lookup: one policy over every request of this run)
     std::unique_ptr<Lookup> lk;
     auto lookup_for = [&](const Req& rq) -> Lookup* {
@@ -394,7 +590,10 @@ int serve(mm3::Model& m, const std::vector<int>& eos, int chunk, bool spec_on, f
     unsigned long long counter = 0;
     std::string line, err;
     while (in.next(line)) {
-        if (line == "QUIT") break;
+        if (line == "QUIT") {
+            if (held.empty()) slots.save(m, state);   // (the conversation in the cache: the next start reads on)
+            break;
+        }
         if (line.rfind("GEN ", 0) != 0 && line.rfind("GENI ", 0) != 0) {
             std::printf("ERR unsupported command '%s' (GEN, GENI, STOP and QUIT)\n",
                         line.substr(0, line.find(' ')).c_str());
@@ -440,6 +639,22 @@ int serve(mm3::Model& m, const std::vector<int>& eos, int chunk, bool spec_on, f
         const bool abl = m.ablate_loaded() && (r.ablate >= 0 ? r.ablate != 0 : abl_default);
         if (m.ablate_loaded() && abl != m.ablating()) from = 0;
         m.set_ablate(abl);
+        if (slots.on && !abl && pics.empty()) {
+            // the conversation in the cache, about to be dropped past `from`: saved first; then a saved one the request
+            // continues further than the cache does, read back
+            if (from + slots.min_tokens / 2 < state.size() && held.empty()) slots.save(m, state);
+            std::vector<int> got;
+            const int lr = slots.load(m, r.ids, from, got);
+            if (lr > 0) {
+                state = std::move(got);
+                held.clear();
+                from = state.size();
+            } else if (lr < 0) {
+                state.clear();   // (nothing in the cache trusted: read from the start)
+                held.clear();
+                from = 0;
+            }
+        }
         state.resize(from);
         held.clear();
         std::vector<mm3::Model::Image> rows;
@@ -1929,7 +2144,7 @@ int main(int argc, char** argv) {
         const std::string kvf = o.kv_k == o.kv_v ? std::string(mm3::k::kv_name(o.kv_k))
                                                  : std::string(mm3::k::kv_name(o.kv_k)) + "," + mm3::k::kv_name(o.kv_v);
         if (m.seqs() > 1) return serve_multi(m, eos, o.chunk, kvf, profile_out);
-        return serve(m, eos, o.chunk, o.dspark, dspark_conf, dspark_cost, kvf, profile_out, suffix_draft);
+        return serve(m, eos, o.chunk, o.dspark, dspark_conf, dspark_cost, kvf, profile_out, suffix_draft, o.pack);
     }
     const auto& st = m.stats();
     std::fprintf(stderr, "maya-mm3: loaded in %.1f s, %ld of %ld experts in VRAM, %.1f GB pinned pool\n", st.load_s,

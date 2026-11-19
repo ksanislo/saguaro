@@ -6,6 +6,8 @@
 // token routes to them.  One forward (the prompt path) runs any number of tokens at once, a decode step included.
 #pragma once
 
+#include <cstdio>
+
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -121,6 +123,13 @@ public:
     Model& operator=(const Model&) = delete;
 
     bool load(const Options& o, std::string& err);
+    /// Saved conversations (MAYA_MM3_SLOT_DIR): the cache of positions 0 .. n - 1 written to / read from f (KV streaming,
+    /// one sequence only - state_ok()): every layer's K / V rows from the host copy and its index keys; a load also
+    /// fills the VRAM ring with the last positions.  `id`: what makes a file this model's (the formats, the layers).
+    bool state_ok() const;
+    std::string state_id() const;
+    bool state_save(int n, std::FILE* f, std::string& err);
+    bool state_load(int n, std::FILE* f, std::string& err);
     /// Runs ids at positions pos0 .. pos0 + n - 1 (the cache holds every position before pos0), in chunks of at most
     /// Options::chunk; logits_out (if given) gets the logits of the last `want` positions of this call, [want][vocab]
     /// F32, row-major.
