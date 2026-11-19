@@ -3661,10 +3661,11 @@ std::string Model::state_id() const {
 }
 namespace {
 // one cache array's rows [0, n) (row bytes rb) of the host copy to / from f
-bool rows_io(std::FILE* f, uint8_t* host, size_t n, size_t rb, bool save) {
+bool rows_io(std::FILE* f, uint8_t* host, size_t n, size_t rb, bool save, size_t skip = 0) {
     const size_t b = n * rb;
     if (b == 0) return true;
-    return save ? std::fwrite(host, 1, b, f) == b : std::fread(host, 1, b, f) == b;
+    if (save) return std::fwrite(host, 1, b, f) == b;
+    return std::fread(host, 1, b, f) == b && (skip == 0 || fseeko(f, (off_t) (skip * rb), SEEK_CUR) == 0);
 }
 }  // namespace
 bool Model::state_save(int n, std::FILE* f, std::string& err) {
@@ -3699,7 +3700,9 @@ bool Model::state_save(int n, std::FILE* f, std::string& err) {
     }
     return true;
 }
-bool Model::state_load(int n, std::FILE* f, std::string& err) {
+bool Model::state_load(int n, std::FILE* f, std::string& err, int n_file) {
+    if (n_file < n) n_file = n;
+    const size_t sk = (size_t) (n_file - n);   // (the file's rows past the n read: skipped)
     if (!state_ok() || n <= 0 || n > p->o.max_ctx) {
         err = "saved conversations: not with this model's settings";
         return false;
@@ -3717,9 +3720,10 @@ bool Model::state_load(int n, std::FILE* f, std::string& err) {
         const size_t vcb = k::kv_code_bytes(I.o.kv_v) * H, vsb = k::kv_scale_bytes(I.o.kv_v) * H;
         uint8_t* kc = I.o.kv_k == k::kKvBf16 ? (uint8_t*) l.kvh.kc : q.kc;
         uint8_t* vc = I.o.kv_v == k::kKvBf16 ? (uint8_t*) l.kvh.vc : q.vc;
-        if (!rows_io(f, kc, (size_t) n, kcb, false) || (ksb && !rows_io(f, q.ks, (size_t) n, ksb, false)) ||
-            !rows_io(f, vc, (size_t) n, vcb, false) || (vsb && !rows_io(f, q.vs, (size_t) n, vsb, false)) ||
-            std::fread(ic.data(), 2, ic.size(), f) != ic.size()) {
+        if (!rows_io(f, kc, (size_t) n, kcb, false, sk) || (ksb && !rows_io(f, q.ks, (size_t) n, ksb, false, sk)) ||
+            !rows_io(f, vc, (size_t) n, vcb, false, sk) || (vsb && !rows_io(f, q.vs, (size_t) n, vsb, false, sk)) ||
+            std::fread(ic.data(), 2, ic.size(), f) != ic.size() ||
+            (sk && fseeko(f, (off_t) (sk * (size_t) I.g.ix_dim * 2), SEEK_CUR) != 0)) {
             err = "saved conversations: a read failed";
             return false;
         }

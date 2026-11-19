@@ -129,7 +129,7 @@ public:
     bool state_ok() const;
     std::string state_id() const;
     bool state_save(int n, std::FILE* f, std::string& err);
-    bool state_load(int n, std::FILE* f, std::string& err);
+    bool state_load(int n, std::FILE* f, std::string& err, int n_file = 0);   // (n_file: the file's rows, n of them read)
     /// Runs ids at positions pos0 .. pos0 + n - 1 (the cache holds every position before pos0), in chunks of at most
     /// Options::chunk; logits_out (if given) gets the logits of the last `want` positions of this call, [want][vocab]
     /// F32, row-major.

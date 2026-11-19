@@ -523,18 +523,19 @@ struct SlotStore {
     int load(mm3::Model& m, const std::vector<int>& ids, size_t from, std::vector<int>& state) {
         if (!on) return 0;
         int best = -1;
+        size_t bl = 0;   // (the shared start with the request: what is read back - the last token always read again)
         for (size_t i = 0; i < slots.size(); ++i) {
             const auto& t = slots[i].toks;
-            if (t.size() <= from + 256 || t.size() + 1 > ids.size() || !std::equal(t.begin(), t.end(), ids.begin()))
-                continue;
-            if (best < 0 || t.size() > slots[(size_t) best].toks.size()) best = (int) i;
+            size_t n = 0;
+            while (n < t.size() && n + 1 < ids.size() && t[n] == ids[n]) ++n;
+            if (n > from + 256 && n >= min_tokens / 2 && n > bl) best = (int) i, bl = n;
         }
         if (best < 0) return 0;
         const double t0 = now();
         Slot& sl = slots[(size_t) best];
         std::string err;
         std::FILE* f = std::fopen(sl.bin.c_str(), "rb");
-        const bool ok = f != nullptr && m.state_load((int) sl.toks.size(), f, err);
+        const bool ok = f != nullptr && m.state_load((int) bl, f, err, (int) sl.toks.size());
         if (f != nullptr) std::fclose(f);
         if (!ok) {
             note("a saved conversation not read (" + (err.empty() ? std::string("the file") : err) + "): removed");
@@ -543,7 +544,7 @@ struct SlotStore {
         }
         std::error_code ec;
         std::filesystem::last_write_time(sl.bin, std::filesystem::file_time_type::clock::now(), ec);   // (recently used)
-        state = sl.toks;
+        state.assign(sl.toks.begin(), sl.toks.begin() + (long) bl);
         char msg[160];
         std::snprintf(msg, sizeof msg, "read back a saved conversation of %zu tokens in %.1f s", state.size(), now() - t0);
         note(msg);
