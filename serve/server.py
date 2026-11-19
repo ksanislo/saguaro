@@ -2223,6 +2223,8 @@ class RequestStat:
     def view(self, now) -> dict:
         """One row of the Monitor's Conversations: reading (with its own progress), writing or between its turns."""
         pr = self.progress
+        if pr and self.first_token and pr[1]:            # (the engines' last PP is n-1: the last prompt token is read
+            pr = (pr[1], pr[1])                          #  by the first answer step) - once answering, all n are read
         return {"state": "writing" if self.first_token else "reading" if self.started else "waiting",
                 "phase": self.phase, "prompt_tokens": self.prompt_tokens, "generated": self.generated,
                 "max_tokens": self.max_tokens, "prompt_read": pr[0] if pr else None, "prompt_total": pr[1] if pr else None,
