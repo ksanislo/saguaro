@@ -1,4 +1,4 @@
-/* Project Maya UI - the Settings dialog: its sections on the left, the open one on the right (on a phone: full screen,
+/* Saguaro UI - the Settings dialog: its sections on the left, the open one on the right (on a phone: full screen,
    the sections a row across the top). */
 
 .settings { width: min(920px, 100%); height: min(700px, calc(100vh - 48px)); max-height: none; }

@@ -1,4 +1,4 @@
-"""serve/test_model_api.py - Maya's model API: /api/tags, /api/ps, /api/show, /api/chat, /api/generate, /api/pull,
+"""serve/test_model_api.py - Saguaro's model API: /api/tags, /api/ps, /api/show, /api/chat, /api/generate, /api/pull,
 /api/delete, the swap on request and keep_alive - against the mock engine, no GPU.
 
     python -m unittest serve.test_model_api -v

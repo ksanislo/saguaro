@@ -1,11 +1,11 @@
 {
- "name": "Project Maya",
- "short_name": "Maya",
- "description": "GLM-5.3-Flash on your own machine",
+ "name": "Saguaro",
+ "short_name": "Saguaro",
+ "description": "GLM, DeepSeek, Qwen and MiniMax models on your own machine",
  "start_url": "../",
  "scope": "../",
  "display": "standalone",
- "background_color": "#19191d",
- "theme_color": "#19191d",
+ "background_color": "#1c1714",
+ "theme_color": "#1c1714",
  "icons": [{"src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any"}]
 }

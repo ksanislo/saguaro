@@ -145,7 +145,7 @@ class Puller:
         ident = str(ident or "").strip().lower()
         ident = ident.removesuffix(":latest")
         if ident not in known:
-            raise ValueError(f"{ident!r} is not in Maya's catalog (GET /api/catalog lists the ids)")
+            raise ValueError(f"{ident!r} is not in Saguaro's catalog (GET /api/catalog lists the ids)")
         with self._lock:
             if self.current is not None and self.current.active():
                 raise ValueError(f"{self.current.id} is downloading; wait for it or cancel it")

@@ -1,5 +1,5 @@
 // serve/web/turbo.js - the Turbo button (Settings > Chat defaults, beside the model's parameters).  On: greedy decoding and
-// the fastest thinking level in this browser's settings, and - in the engine's run config, the same "settings saved, Maya
+// the fastest thinking level in this browser's settings, and - in the engine's run config, the same "settings saved, Saguaro
 // starts again" flow as the Models page - a 32K context (GLM, MiniMax), expert skipping and the fastest drafting where the
 // engine has them.  Off: every one of those back as it was.  The snapshot of the page's settings is kept here (localStorage);
 // the engine's is in the run config (serve/models.py).
@@ -68,7 +68,7 @@ async function followRestart(on) {
   }
   S.turbo = {...S.turbo, busy: false, restarting: false};
   emit();
-  toast("error", "Maya is not back yet", "The terminal it runs in shows why. This page reconnects when it is.", 30000);
+  toast("error", "Saguaro is not back yet", "The terminal it runs in shows why. This page reconnects when it is.", 30000);
 }
 
 export async function setTurbo(on) {
@@ -79,7 +79,7 @@ export async function setTurbo(on) {
   if (on && t.engine && t.restarts && lines.length) {
     const ok = await confirmDialog("Switch Turbo on?",
       `<p>Greedy decoding, no thinking and the fastest settings the engine has: <b>${esc(lines.join(", "))}</b>.</p>` +
-      `<p>Maya starts again with them, which takes ${esc(loadTime())}. Switching Turbo off puts everything back as it is now.</p>` +
+      `<p>Saguaro starts again with them, which takes ${esc(loadTime())}. Switching Turbo off puts everything back as it is now.</p>` +
       "<ul><li>Your chats stay here; the next answer reads the chat again.</li>" +
       "<li>Apps using the API get a “try again” until it is back.</li></ul>", "Switch Turbo on");
     if (!ok) return;
@@ -94,7 +94,7 @@ export async function setTurbo(on) {
     emit();
     if (out.restarting_now) { followRestart(on); return; }
     toast("success", on ? "Turbo is on" : "Turbo is off",
-          out.changed ? "The engine settings apply from Maya's next start." : on ? "Greedy decoding and the fastest thinking." : "Your settings are back.", 4000);
+          out.changed ? "The engine settings apply from Saguaro's next start." : on ? "Greedy decoding and the fastest thinking." : "Your settings are back.", 4000);
   } catch (e) {
     if (on) leavePrefs();                                      // (the engine said no: nothing stays half on)
     S.turbo = {...S.turbo, busy: false};

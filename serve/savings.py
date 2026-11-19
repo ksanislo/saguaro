@@ -1,4 +1,4 @@
-"""serve/savings.py - what the tokens Maya served would have cost on the model's own API: the web app's "Saved" line.
+"""serve/savings.py - what the tokens Saguaro served would have cost on the model's own API: the web app's "Saved" line.
 
 Every finished request adds its tokens to the running model's count: the prompt it read new, the prompt it reused from
 its own cache (an API bills that as cached input, far cheaper) and what it wrote.  The count is kept per model (per run
@@ -194,7 +194,7 @@ class Ledger:
             self.save_failed = False
         except OSError as e:
             if not self.save_failed:
-                print(f"[maya] could not save the token count ({self.path.name}): {e}; the count is kept in memory "
+                print(f"[saguaro] could not save the token count ({self.path.name}): {e}; the count is kept in memory "
                       "(MAYA_SAVINGS_PATH names another file, 'off' keeps none)", flush=True)
             self.save_failed = True
 

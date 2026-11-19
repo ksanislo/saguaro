@@ -1,4 +1,4 @@
-"""Maya's model API (phase 1): the names, keep_alive, the request/answer translation between the native
+"""Saguaro's model API (phase 1): the names, keep_alive, the request/answer translation between the native
 chat API (/api/chat, /api/generate) and the OpenAI path the server already runs, and the model listings (/api/tags,
 /api/ps, /api/show).  Pure functions: serve/server.py does the I/O, serve/model_pull.py the downloads."""
 from __future__ import annotations

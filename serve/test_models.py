@@ -543,7 +543,7 @@ def glm_quant(d: Path, quant: str, folder: Path | None = None, pack_name="pack",
 
 
 class Delete(unittest.TestCase):
-    """A model off the list, and with its files: what its setup downloaded for it and the pack Maya built - never what
+    """A model off the list, and with its files: what its setup downloaded for it and the pack Saguaro built - never what
     another model runs from, nor a GGUF of your own."""
 
     def setUp(self):
@@ -705,7 +705,7 @@ class DeletePage(Served):
         for f in (self.cfg.name, "../maya-x.json", "maya-none.json", None):
             s, _ = self.req("POST", "/api/models/delete", {"file": f})
             self.assertEqual(s, 400, f)
-        # the running one with a model to switch to: only where Maya can start again by itself
+        # the running one with a model to switch to: only where Saguaro can start again by itself
         s, b = self.req("POST", "/api/models/delete", {"file": self.cfg.name, "then": self.other.name})
         self.assertEqual(s, 400)
         self.assertIn("cannot switch", b["error"]["message"])

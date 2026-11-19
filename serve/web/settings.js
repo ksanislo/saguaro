@@ -41,7 +41,7 @@ function General() {
     <${Row} label="Theme" sub="System follows your computer's light or dark setting.">
       <${Seg} label="Theme" value=${themeChoice()} onChange=${setTheme}
         options=${[{id: "system", label: "System"}, {id: "dark", label: "Dark"}, {id: "light", label: "Light"}]}/><//>
-    <${Row} label="Colours" sub="Default: neutral greys with violet as the accent. Violet: violet-tinted surfaces and a soft glow.">
+    <${Row} label="Colours" sub="Default: desert - sand and adobe with saguaro green, a sunset orange beside it. Violet: the earlier violet-tinted surfaces and glow.">
       <${Seg} label="Colours" value=${schemeChoice()} onChange=${setScheme}
         options=${[{id: "default", label: "Default"}, {id: "violet", label: "Violet"}]}/><//>
     <${Row} label="Show thinking as it's written" sub="It folds away into “Thought for …” once the answer starts.">
@@ -81,7 +81,7 @@ function Model() {
   };
   return html`<h3>Model</h3>
     <div class="model-card"><${ModelLogo} model=${h.model} size=${36}/>
-      <span><b>${modelName(h.model)}</b><span>${[h.model, engine, h.version ? `Project Maya v${h.version}` : ""].filter(Boolean).join(" · ")}</span></span></div>
+      <span><b>${modelName(h.model)}</b><span>${[h.model, engine, h.version ? `Saguaro v${h.version}` : ""].filter(Boolean).join(" · ")}</span></span></div>
     ${c ? html`<div class="set-block">
       <${CtxSlider} id="set-ctx" value=${v} now=${c.context} stops=${stops} disabled=${!!S.reload} hint=${est}
         onChange=${(n) => setCtx(stops.indexOf(n))}/>
@@ -89,12 +89,12 @@ function Model() {
         <button type="button" class="btn btn--primary btn--sm" onClick=${reload}>Reload with ${ctxfmt(v)}</button></div>` : null}
     </div>` : html`<p class="set-note">This server does not say its context range, so it can't be changed from here.</p>`}
     ${pi && pi.port && pi.saved ? html`
-      <${Row} label="Port" htmlFor="set-port" sub="Where this page and the API listen. A new port starts Maya again there, and this page follows.">
+      <${Row} label="Port" htmlFor="set-port" sub="Where this page and the API listen. A new port starts Saguaro again there, and this page follows.">
         <input id="set-port" class="input input--num" inputmode="numeric" value=${port} onInput=${(ev) => setPort(ev.target.value)}/><//>
       ${portChanged ? html`<div class="callout callout--warn">
         <span>${pv < 1024 || pv > 65535 ? "Use a number from 1024 to 65535."
-          : pi.restarts ? `Maya starts again on port ${pv} (${loadTime()}). Apps that use the API need the new address too.`
-                        : `Saved for the next start: this server was not started by Maya's start script, so it stays on ${pi.port} until then.`}</span>
+          : pi.restarts ? `Saguaro starts again on port ${pv} (${loadTime()}). Apps that use the API need the new address too.`
+                        : `Saved for the next start: this server was not started by Saguaro's start script, so it stays on ${pi.port} until then.`}</span>
         ${pv >= 1024 && pv <= 65535 ? html`<button type="button" class="btn btn--primary btn--sm" onClick=${() => confirmPort(pv)}>Move to ${pv}</button>` : null}
       </div>` : null}` : null}`;
 }
@@ -224,7 +224,7 @@ function Tools() {
         </div>`;
       })}</div>`
     : html`<p class="set-note">No MCP servers are set up. Add them to the run config (“mcpServers”, as Claude Desktop writes them)
-        or start Maya with --mcp-config, and their tools appear here.</p>`}`;
+        or start Saguaro with --mcp-config, and their tools appear here.</p>`}`;
 }
 
 // ------------------------------------------------------------------ Connect your tools
@@ -311,12 +311,12 @@ function Savings() {
   useEffect(() => { api("api/savings").then(setR).catch((e) => setErr(e.message)); }, []);
   const reset = async () => {
     if (!await confirmDialog("Start over from $0?", "<p>Every model's count of tokens and what they would have cost goes back to zero. The prices stay. This cannot be undone.</p>", "Start over", true)) return;
-    try { setR(await api("api/savings/reset", {method: "POST", body: {}})); toast("success", "Started over", "Maya counts from $0 again."); }
+    try { setR(await api("api/savings/reset", {method: "POST", body: {}})); toast("success", "Started over", "Saguaro counts from $0 again."); }
     catch (e) { toast("error", "Not reset", e.message, 6000); }
   };
   const since = r && r.since ? new Date(r.since * 1000).toLocaleDateString([], {month: "short", day: "numeric"}) : "";
   return html`<h3>Savings</h3>
-    <p class="set-intro">The sidebar's Saved line: what each model's own API would have charged for the same tokens. Change a price when the API's changes, or give one to a model without it. Maya keeps the tokens, so every total is counted again with the new prices.</p>
+    <p class="set-intro">The sidebar's Saved line: what each model's own API would have charged for the same tokens. Change a price when the API's changes, or give one to a model without it. Saguaro keeps the tokens, so every total is counted again with the new prices.</p>
     ${err ? html`<p class="set-note">${err}</p>` : !r ? html`<p class="set-note">Reading the prices…</p>`
       : !(r.price_list || []).length ? html`<p class="set-note">Nothing is counted on this server: it runs without a model config.</p>`
       : html`<div class="prices">${r.price_list.map((p) => html`<${PriceCard} key=${p.model} p=${p} onSaved=${setR}/>`)}</div>
@@ -337,8 +337,8 @@ function UpdateCard() {
     const to = w ? w.to : state.to;
     tone = "accent"; icon = "download";
     title = `Updating to v${to}…`;
-    text = w && w.down ? "Maya is starting again: it compiles what changed in the engine and loads the model (a few minutes; the terminal shows the progress). This page reloads when it is back."
-                       : "Maya finishes the answer it is writing, then downloads the update.";
+    text = w && w.down ? "Saguaro is starting again: it compiles what changed in the engine and loads the model (a few minutes; the terminal shows the progress). This page reloads when it is back."
+                       : "Saguaro finishes the answer it is writing, then downloads the update.";
   } else if (state && state.state === "failed") {
     tone = "danger"; icon = "error";
     title = "The update did not happen";
@@ -346,14 +346,14 @@ function UpdateCard() {
     acts = html`${notes}${u.can_update ? html`<button type="button" class="btn btn--primary btn--sm" onClick=${startUpdate}>Try again</button>` : null}`;
   } else if (u.newer) {
     tone = "accent"; icon = "download";
-    title = `Project Maya v${latest.version} is out`;
+    title = `Saguaro v${latest.version} is out`;
     text = latest.summary || "";
     if (!u.can_update) how = `Update by hand: ${u.by_hand}. This page can't, because ${u.blocker}.`;
     acts = html`${notes}${u.can_update ? html`<button type="button" class="btn btn--primary btn--sm" onClick=${startUpdate}>Update to v${latest.version}</button>` : null}`;
   } else if (u.error) {
     icon = "warning";
     title = "Couldn't check for updates";
-    text = `${u.error}. Project Maya v${u.current || "?"} is running.`;
+    text = `${u.error}. Saguaro v${u.current || "?"} is running.`;
     acts = again("Try again");
   } else if (u.latest) {
     tone = "ok"; icon = "check";
@@ -403,7 +403,7 @@ function facts() {
                                   : gpus.map((g) => `GPU ${g.index}: ${link(g)}`).join(" · "))
              : (hw.gpu_pcie_gen_max || hw.gpu_pcie_gen) ? `Gen${hw.gpu_pcie_gen_max || hw.gpu_pcie_gen}${hw.gpu_pcie_width ? ` x${hw.gpu_pcie_width}` : ""}` : null;
   return [
-    ["Version", ver ? `Project Maya v${ver}${eng.version ? ` · engine ${eng.version}` : ""}` : null],
+    ["Version", ver ? `Saguaro v${ver}${eng.version ? ` · engine ${eng.version}` : ""}` : null],
     ["Model", eng.model || S.health.model],
     ["Engine", eng.engine_kind ? (ENGINES[eng.engine_kind] || eng.engine_kind) : null],
     ["Context", eng.max_context ? `${fmt(eng.max_context)} tokens` : null],

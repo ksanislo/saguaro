@@ -1,4 +1,4 @@
-/* Project Maya UI - the Models page: one card a model set up here, the running one outlined; its engine settings open
+/* Saguaro UI - the Models page: one card a model set up here, the running one outlined; its engine settings open
    in its own card, a tab at a time. */
 
 .mdl__page { max-width: 880px; gap: 16px; }
@@ -134,7 +134,7 @@
 .mdl-del__top b { font-weight: 600; }
 .mdl-del__size { flex: none; font-variant-numeric: tabular-nums; }
 .mdl-del__text code { font-family: var(--st-font-mono); font-size: var(--st-fs-xs); color: var(--st-ink-soft); overflow-wrap: anywhere; }
-/* ... the running one: the model Maya switches to first, a radio each */
+/* ... the running one: the model Saguaro switches to first, a radio each */
 .mdl-del__to { display: flex; flex-direction: column; gap: 8px; }
 .mdl-del__box--radio .mdl-del__check { border-radius: 50%; }
 .mdl-del__box--radio.is-on { border-color: color-mix(in srgb, var(--st-accent) 55%, var(--st-line)); background: var(--st-accent-tint); }

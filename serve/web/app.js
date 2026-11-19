@@ -1,4 +1,4 @@
-// serve/web/app.js - the Project Maya web app: the chat, the Monitor and Settings, built with Preact + htm (web/preact.js,
+// serve/web/app.js - the Saguaro web app: the chat, the Monitor and Settings, built with Preact + htm (web/preact.js,
 // local: the page needs nothing from the network).  The state lives in state.js; the server's side in server.js; the chats
 // in chats.js.
 import {html, render, useEffect, useRef, useState} from "./preact.js";

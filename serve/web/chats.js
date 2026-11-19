@@ -150,7 +150,7 @@ export function pinChat(c, on) {
 
 // ------------------------------------------------------------------ folders ({id, name}, in this browser)
 export async function newFolder(c = null) {
-  const name = await promptDialog({title: "New folder", label: "Name", placeholder: "e.g. Maya engine", okLabel: "Create"});
+  const name = await promptDialog({title: "New folder", label: "Name", placeholder: "e.g. Saguaro engine", okLabel: "Create"});
   if (name == null || !name.trim()) return null;
   const f = {id: uid(), name: name.trim().slice(0, 60)};
   S.folders = [...S.folders, f];

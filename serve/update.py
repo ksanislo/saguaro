@@ -1,9 +1,9 @@
-"""The dashboard's About > Updates: is a newer Project Maya release out, and updating this folder to it.
+"""The dashboard's About > Updates: is a newer Saguaro release out, and updating this folder to it.
 
 The check asks GitHub for the latest release of the repository this folder was cloned from (git's origin; else
 mw00/project-maya) - only when the dashboard asks, at most every six hours (MAYA_UPDATE_CHECK=0 turns it off).
 Updating fast-forwards the git checkout to that release's tag, then the server ends with UPDATE_EXIT: maya.sh /
-START-MAYA.bat (maya.py) start Maya again, which compiles what changed in the engine and loads the model.  A folder
+START-MAYA.bat (maya.py) start Saguaro again, which compiles what changed in the engine and loads the model.  A folder
 that can't do that (no git, local changes, a server started some other way) gets the reason and the steps by hand."""
 import json
 import os
@@ -130,7 +130,7 @@ class Updater:
         return {"current": self.current, "enabled": self.enabled(), "latest": self.latest, "newer": newer,
                 "checked": self.checked or None, "error": self.error, "can_update": newer and why is None,
                 "blocker": why, "state": state,
-                "by_hand": ("git pull, then start Maya again (./setup.sh or START-MAYA.bat)" if (self.root / ".git").exists()
+                "by_hand": ("git pull, then start Saguaro again (./setup.sh or START-MAYA.bat)" if (self.root / ".git").exists()
                             else "download the new release from GitHub into a new folder")}
 
     def busy(self) -> bool:
@@ -144,7 +144,7 @@ class Updater:
                 raise ValueError("this is the latest version")
             why = self.blocker()
             if why:
-                raise ValueError(f"Maya can't update itself here: {why}")
+                raise ValueError(f"Saguaro can't update itself here: {why}")
             if self.busy():
                 raise ValueError("an update is already running")
             self.state = {"state": "updating", "to": self.latest["version"], "started": time.time(), "error": None}
@@ -154,7 +154,7 @@ class Updater:
 
     def _update(self, svc, tag: str):
         with svc.fifo:                                  # the request in flight finishes first
-            print(f"[maya] updating Project Maya to {tag} ...", flush=True)
+            print(f"[saguaro] updating Saguaro to {tag} ...", flush=True)
             before = None
             try:
                 before = git(self.root, "rev-parse", "HEAD", timeout=20).stdout.strip()
@@ -167,10 +167,10 @@ class Updater:
                                        "update it by hand: git pull")
             except (OSError, subprocess.SubprocessError, RuntimeError) as e:
                 err = str(e)
-                print(f"[maya] the update did not happen: {err}", flush=True)
+                print(f"[saguaro] the update did not happen: {err}", flush=True)
                 self.state.update(state="failed", error=err, ended=time.time())
                 return
-            print(f"[maya] updated the files {before[:9] if before else ''} -> {tag}; Maya starts again (maya.py "
+            print(f"[saguaro] updated the files {before[:9] if before else ''} -> {tag}; Saguaro starts again (maya.py "
                   "compiles what changed in the engine, then loads the model) ...", flush=True)
             svc.close_for_restart()
             os._exit(UPDATE_EXIT)

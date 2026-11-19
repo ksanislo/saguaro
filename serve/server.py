@@ -91,7 +91,7 @@ from serve.update import RESTART_EXIT, Updater  # noqa: E402
 import maya_names  # noqa: E402  (tools/) the settings' names users see (MAYA_*) and the older ones the code reads
 import maya_quants  # noqa: E402  (tools/) the quants' names users see (the model first: "GLM-5.3 · Maya-S")
 
-try:                        # Project Maya's release (the dashboard's About; the engine's INFO carries none)
+try:                        # Saguaro's release (the dashboard's About; the engine's INFO carries none)
     MAYA_VERSION = (ROOT / "VERSION").read_text(encoding="utf-8").strip() or None
 except OSError:
     MAYA_VERSION = None
@@ -142,10 +142,10 @@ def wait_gpu_release(pid: int, timeout: float = 60.0):
             return
         if pid not in pids:
             if time.time() - t0 > 1:
-                print(f"[maya] the GPUs freed the engine's memory in {time.time() - t0:.0f} s", flush=True)
+                print(f"[saguaro] the GPUs freed the engine's memory in {time.time() - t0:.0f} s", flush=True)
             return
         time.sleep(0.5)
-    print(f"[maya] the GPUs still list the old engine after {timeout:.0f} s; starting anyway", flush=True)
+    print(f"[saguaro] the GPUs still list the old engine after {timeout:.0f} s; starting anyway", flush=True)
 
 
 def nvml_pids(pid: int | None, listed: set) -> set:
@@ -273,7 +273,7 @@ class FairLock:
         with self._cv:
             n = max(1, int(n))
             if n != self.capacity:
-                print(f"[maya] the engine's places: {self.capacity} -> {n} ({self._used} in use)", flush=True)
+                print(f"[saguaro] the engine's places: {self.capacity} -> {n} ({self._used} in use)", flush=True)
             self.capacity = n
             # A place held for "all of them" was sized by the old capacity: a smaller engine cannot hold more than it
             # has, or the FIFO would stay jammed (waiting for a place that is never free) - the releases that follow
@@ -372,7 +372,7 @@ class FairLock:
                 # A capacity that shrank under a "all places" holder (the engine restarted with fewer conversations)
                 # gives back what it has: raising here would leave the place held for ever - and the next release
                 # would too, with every request behind it waiting for a place that never comes.
-                print(f"[maya] a place was given back that is not held ({k} of {self._used} in use, capacity "
+                print(f"[saguaro] a place was given back that is not held ({k} of {self._used} in use, capacity "
                       f"{self.capacity}): the engine's conversations changed while it ran", flush=True)
                 k = self._used
             self._used -= k
@@ -909,7 +909,7 @@ def narrate_start(log_path: str, offset: int, args: list, done: threading.Event,
             last = time.time()
             print(text, flush=True)
 
-    say("weights", "[maya] starting the engine: reading the model's weights ...")
+    say("weights", "[saguaro] starting the engine: reading the model's weights ...")
     pos = offset
     while not done.wait(0.5):
         try:
@@ -923,22 +923,22 @@ def narrate_start(log_path: str, offset: int, args: list, done: threading.Event,
             pos += cut
             for line in chunk[:cut].decode("utf-8", "replace").splitlines():
                 if "PLE on" in line or "expert arena:" in line:
-                    say("arena", f"[maya] loading the experts into RAM ({size}) and locking part of them for the GPU.\n"
+                    say("arena", f"[saguaro] loading the experts into RAM ({size}) and locking part of them for the GPU.\n"
                                  "         YOUR PC CAN BE SLOW OR STOP RESPONDING FOR 1-3 MINUTES NOW - this is normal.\n"
                                  "         Please wait and don't close this window; the browser opens when it is ready.")
                 elif " loaded " in line and "GiB at" in line:
-                    say("loaded", "[maya] experts loaded: " + line.split(" loaded ", 1)[1].strip() +
+                    say("loaded", "[saguaro] experts loaded: " + line.split(" loaded ", 1)[1].strip() +
                         f" ({time.time() - t0:.0f} s so far)")
                 elif "expert cache " in line and " slots, " in line and "auto" not in line:
                     n = line.split("expert cache ", 1)[1].split(";")[0].replace(" slots,", " experts,").strip()
-                    say("cache", f"[maya] filling the GPU's expert cache ({n}) ...")
+                    say("cache", f"[saguaro] filling the GPU's expert cache ({n}) ...")
                 elif "session is up" in line:
-                    say("up", "[maya] almost ready ...")
+                    say("up", "[saguaro] almost ready ...")
                 elif "WARNING - " in line:   # the engine's own (e.g. Windows' commit limit capping the RAM tier)
-                    print("[maya] WARNING: " + line.split("WARNING - ", 1)[1].strip(), flush=True)
+                    print("[saguaro] WARNING: " + line.split("WARNING - ", 1)[1].strip(), flush=True)
         if time.time() - last > heartbeat:
             last = time.time()
-            print(f"[maya] still starting ({time.time() - t0:.0f} s) - please wait ...", flush=True)
+            print(f"[saguaro] still starting ({time.time() - t0:.0f} s) - please wait ...", flush=True)
 
 
 class StrataEngine:
@@ -987,7 +987,7 @@ class StrataEngine:
             self.info["version"] = None
         for line in self.proc.stdout:
             if line.startswith("NOTE "):
-                print("[maya] " + line[5:].strip(), flush=True)
+                print("[saguaro] " + line[5:].strip(), flush=True)
             if line.startswith("INFO "):
                 for kv in line.split()[1:]:
                     k, _, v = kv.partition("=")
@@ -1071,7 +1071,7 @@ class StrataEngine:
             # is out - taken as ended now, so the next request, even one already waiting, starts a fresh engine
             # instead of writing to this one while it exits
             if line.startswith("END "):
-                print("[maya] " + line[4:].strip(), flush=True)
+                print("[saguaro] " + line[4:].strip(), flush=True)
                 self.ended = True
                 continue
             if self.multi and self._route(line):
@@ -1109,7 +1109,7 @@ class StrataEngine:
             self._parse_stat(line)
             return True
         if line.startswith("NOTE "):
-            print("[maya] " + line[5:].strip(), flush=True)
+            print("[saguaro] " + line[5:].strip(), flush=True)
             return True
         return False
 
@@ -1176,7 +1176,7 @@ class StrataEngine:
 
     def _end(self, why: str):
         """End a stuck engine now; the next request starts it again (Service.run)."""
-        print(f"[maya] {why}", flush=True)
+        print(f"[saguaro] {why}", flush=True)
         self.ended = True
         try:
             self.proc.kill()
@@ -1487,7 +1487,7 @@ class StrataEngine:
                 elif line.startswith("STAT "):
                     self._parse_stat(line)
                 elif line.startswith("NOTE "):                # what happens to the kept conversations
-                    print("[maya] " + line[5:].strip(), flush=True)
+                    print("[saguaro] " + line[5:].strip(), flush=True)
                 elif line.startswith("DONE"):
                     self._parse_done(line)
                     done = True
@@ -1520,7 +1520,7 @@ class StrataEngine:
                     # (looked at on every line too: a prompt's progress lines go on while its chunk is read)
                     if not said and time.monotonic() - t0 >= DRAIN_S:
                         said = True
-                        print(f"[maya] stopped, and the engine has not said the request ended after {DRAIN_S:.0f} s "
+                        print(f"[saguaro] stopped, and the engine has not said the request ended after {DRAIN_S:.0f} s "
                               "(STRATA_DRAIN_S) - it is still working on it (a long prompt is stopped between its "
                               "chunks); waiting for it", flush=True)
                     if quiet:
@@ -1543,7 +1543,7 @@ class StrataEngine:
                     if line.startswith("DONE"):
                         self._parse_done(line)
                         if said:
-                            print(f"[maya] the stopped request ended after {heard - t0:.0f} s", flush=True)
+                            print(f"[saguaro] the stopped request ended after {heard - t0:.0f} s", flush=True)
                         break
 
     # How long, after an ERR, the reader waits for the DONE that may follow it: maya-ds4 and maya-mm3 print one right
@@ -1568,7 +1568,7 @@ class StrataEngine:
             if line.startswith("STAT "):
                 self._parse_stat(line)
             elif line.startswith("NOTE "):
-                print("[maya] " + line[5:].strip(), flush=True)
+                print("[saguaro] " + line[5:].strip(), flush=True)
             else:
                 return                                  # (not this request's end: dropped, as before)
 
@@ -1647,7 +1647,7 @@ class StrataEngine:
                     if REQUEST_QUIET_S > 0 and quiet >= REQUEST_QUIET_S:
                         # The engine is alive (the other requests' lines reach them), so silence for this rid is this
                         # request's loss: end it here rather than hold the FIFO place for a line that is not coming.
-                        print(f"[maya] request {rid}: the engine has said nothing of it for {quiet:.0f} s - stopping it "
+                        print(f"[saguaro] request {rid}: the engine has said nothing of it for {quiet:.0f} s - stopping it "
                               f"and giving its place in the queue back (STRATA_REQUEST_QUIET_S={REQUEST_QUIET_S:.0f})",
                               flush=True)
                         try:
@@ -1717,7 +1717,7 @@ class StrataEngine:
                     try:
                         line = q.get(timeout=max(0.05, end - time.monotonic()))
                     except queue.Empty:
-                        print(f"[maya] request {rid}: stopped, and the engine did not say it had ended within "
+                        print(f"[saguaro] request {rid}: stopped, and the engine did not say it had ended within "
                               f"{DRAIN_S:.0f} s (STRATA_DRAIN_S) - going on; the engine may still be writing it",
                               flush=True)
                         break
@@ -1790,10 +1790,10 @@ class StrataEngine:
                 if not line:
                     break
                 if line.startswith("NOTE "):
-                    print("[maya] " + line[5:].strip(), flush=True)
+                    print("[saguaro] " + line[5:].strip(), flush=True)
             self.proc.wait(timeout=max(0.1, end - time.monotonic()))
         except Exception:
-            print(f"[maya] the engine did not end within {wait:.0f} s: stopped", flush=True)
+            print(f"[saguaro] the engine did not end within {wait:.0f} s: stopped", flush=True)
             self.proc.kill()
 
 
@@ -1861,7 +1861,7 @@ class Vision:
                 if self.settle():
                     return
                 time.sleep(0.25)
-            print("[maya] the vision encoder's GPU memory is not back yet: prompts are read token by token until "
+            print("[saguaro] the vision encoder's GPU memory is not back yet: prompts are read token by token until "
                   "it is", flush=True)
 
     def settle(self) -> bool:
@@ -1981,10 +1981,10 @@ class Vision:
         import shutil
         if not (shutil.which("ffmpeg") and shutil.which("ffprobe")):
             raise ValueError("videos need ffmpeg and ffprobe on this PC (Linux: sudo apt install ffmpeg; Windows: winget "
-                             "install Gyan.FFmpeg; macOS: brew install ffmpeg), then restart Maya")
+                             "install Gyan.FFmpeg; macOS: brew install ffmpeg), then restart Saguaro")
         data = self.load(source)
         if self.video_container(data) is None:
-            raise ValueError("this video's format is not one Maya reads: send MP4, MOV, WebM, MKV or AVI")
+            raise ValueError("this video's format is not one Saguaro reads: send MP4, MOV, WebM, MKV or AVI")
         key = hashlib.sha256(data).hexdigest()[:32]
         with self.lock:
             if key in self.cache:
@@ -1997,7 +1997,7 @@ class Vision:
             if seconds is not None and seconds * self.VIDEO_FPS > limit:
                 vid.unlink(missing_ok=True)
                 raise ValueError(f"the video is {seconds:.0f} s long: {seconds * self.VIDEO_FPS:.0f} frames at "
-                                 f"{self.VIDEO_FPS:g} a second, more than the {limit} Maya reads (MAYA_VIDEO_MAX_FRAMES "
+                                 f"{self.VIDEO_FPS:g} a second, more than the {limit} Saguaro reads (MAYA_VIDEO_MAX_FRAMES "
                                  f"sets it; every frame takes an image's share of the context)")
             if self.proc is None:
                 self._start()
@@ -2057,7 +2057,7 @@ def vision_footprint(vcfg: dict, env: dict, cache_file: Path, gpu: int) -> tuple
         if m is None:
             args = [vcfg["exe"], "--mmproj", vcfg["mmproj"], "--model", vcfg["model"], "--gpu", "--max-tokens", str(cap),
                     "--measure"] + (["--no-flash-attn"] if vcfg.get("no_flash_attn") else [])
-            print(f"[maya] images: measuring the vision encoder on this GPU ({cap} image tokens) ...", flush=True)
+            print(f"[saguaro] images: measuring the vision encoder on this GPU ({cap} image tokens) ...", flush=True)
             try:
                 r = subprocess.run(args, capture_output=True, text=True, timeout=600, env=env)
                 # only a measurement that ran to its end (an encoder whose warm-up failed exits 1 without one)
@@ -2361,7 +2361,7 @@ class Service:
         check_request_sampling(req)
         bias = logit_bias_of(req.get("logit_bias"), len(getattr(self.tok, "tokens", None) or ()) or None)
         if bias and (getattr(self.engine, "info", None) or {}).get("logit_bias") != 1:
-            raise ValueError("logit_bias: this engine does not apply token biases - update Maya (./maya.sh --setup)")
+            raise ValueError("logit_bias: this engine does not apply token biases - update Saguaro (./maya.sh --setup)")
         # ignore_eos (vLLM's and llama.cpp's): the tokens that end an answer are banned, so it runs to max_tokens - as
         # llama.cpp does it, through the logit bias, so the text past the model's natural end stays text it would write
         ignore = req.get("ignore_eos")
@@ -2375,7 +2375,7 @@ class Service:
             if limit <= 0:
                 raise ValueError("ignore_eos: needs max_tokens (the answer would run until the context is full)")
             if (getattr(self.engine, "info", None) or {}).get("logit_bias") != 1:
-                raise ValueError("ignore_eos: this engine does not apply token biases - update Maya (./maya.sh --setup)")
+                raise ValueError("ignore_eos: this engine does not apply token biases - update Saguaro (./maya.sh --setup)")
             bias = {**bias, **{t: -100.0 for t in sorted(self.stop_ids | self.eos_ids)}}
         if "logit_bias" in req or ignore:
             req["logit_bias"] = bias
@@ -2392,7 +2392,7 @@ class Service:
             req.pop("top_logprobs", None)
             if not getattr(self, "_lp_said", False):
                 self._lp_said = True
-                print("[maya] logprobs asked, but this engine does not report them: answered without", flush=True)
+                print("[saguaro] logprobs asked, but this engine does not report them: answered without", flush=True)
 
     def capabilities(self) -> dict:
         """What this engine does, for the web app and clients (the same keys for every engine): logprobs (how many
@@ -2431,7 +2431,7 @@ class Service:
                 else:
                     Path(self.shared_path).unlink(missing_ok=True)
             except OSError as e:
-                print(f"[maya] could not save the shared settings: {e}", flush=True)
+                print(f"[saguaro] could not save the shared settings: {e}", flush=True)
         return self.shared
 
     def with_shared(self, req: dict, api: str) -> dict:
@@ -2463,7 +2463,7 @@ class Service:
                 if part is not None and hasattr(part, "close"):
                     part.close()
             except Exception as e:  # noqa: BLE001 - ending anyway
-                print(f"[maya] stopping {type(part).__name__}: {e}", flush=True)
+                print(f"[saguaro] stopping {type(part).__name__}: {e}", flush=True)
 
     def ensure_engine(self):
         """The engine running (the caller holds the FIFO): started again after an idle unload, or after it died in an
@@ -2475,10 +2475,10 @@ class Service:
             if self.engine.alive():                      # (another request started it meanwhile)
                 return
             if self.unloaded:
-                print("[maya] loading the model again after an idle unload (a minute or so) ...", flush=True)
+                print("[saguaro] loading the model again after an idle unload (a minute or so) ...", flush=True)
             else:
                 code = self.engine.exit_code() if hasattr(self.engine, "exit_code") else None
-                print(f"[maya] the engine had stopped (exit code {code}); starting it again "
+                print(f"[saguaro] the engine had stopped (exit code {code}); starting it again "
                       "(a minute or two) ...", flush=True)
             self.engine.restart()
             self.unloaded = False
@@ -2487,7 +2487,7 @@ class Service:
             places = max(1, int(getattr(self.engine, "multi", 0) or 1))
             if places != self.fifo.capacity:
                 self.fifo.set_capacity(places)
-            print("[maya] the engine is running again", flush=True)
+            print("[saguaro] the engine is running again", flush=True)
 
     def unload(self, idle_for: float | None = None) -> str:
         """End the engine between requests: "unloaded", "not loaded", "busy" (a request is running or waiting, a context
@@ -2514,7 +2514,7 @@ class Service:
             if pid is not None:
                 wait_gpu_release(pid)
             self.unloaded = True
-            print(f"[maya] model unloaded{f' after {idle_for:.0f} s idle' if idle_for else ''} (GPU memory and the "
+            print(f"[saguaro] model unloaded{f' after {idle_for:.0f} s idle' if idle_for else ''} (GPU memory and the "
                   "RAM tier given back); the next request loads it again", flush=True)
             return "unloaded"
         finally:
@@ -2532,7 +2532,7 @@ class Service:
         if not hasattr(self.engine, "close"):
             return
         if self.idle_unload_s:
-            print(f"[maya] the model unloads after {self.idle_unload_s:g} s without requests", flush=True)
+            print(f"[saguaro] the model unloads after {self.idle_unload_s:g} s without requests", flush=True)
 
         def loop():
             while True:
@@ -2544,7 +2544,7 @@ class Service:
                 try:
                     self.unload(idle_for=limit)
                 except Exception as e:  # noqa: BLE001 - tried again at the next turn; the thread keeps running
-                    print(f"[maya] idle unload: {e}", flush=True)
+                    print(f"[saguaro] idle unload: {e}", flush=True)
         threading.Thread(target=loop, daemon=True).start()
 
     def reloading(self) -> bool:
@@ -2604,7 +2604,7 @@ class Service:
         with self.fifo:                                  # the request in flight finishes first
             with self.status_lock:
                 self.reload["state"] = "running"
-            print(f"[maya] reloading the model with a {n}-token context (was {old}) ...", flush=True)
+            print(f"[saguaro] reloading the model with a {n}-token context (was {old}) ...", flush=True)
             err = None
             t0 = time.time()
             try:
@@ -2612,7 +2612,7 @@ class Service:
                 self.engine.load_s = round(time.time() - t0, 1)
             except Exception as e:  # noqa: BLE001 - any failed start: put the old context back
                 err = f"the engine did not start with a {n}-token context ({e})"
-                print(f"[maya] {err}; starting it again with {old} ...", flush=True)
+                print(f"[saguaro] {err}; starting it again with {old} ...", flush=True)
                 try:
                     self._restart_with(old)
                 except Exception as e2:  # noqa: BLE001
@@ -2622,7 +2622,7 @@ class Service:
                 self.fifo.set_capacity(places)
             if err is None:
                 self._save_context(n)
-                print(f"[maya] the model runs with a {n}-token context now", flush=True)
+                print(f"[saguaro] the model runs with a {n}-token context now", flush=True)
             with self.status_lock:
                 self.reload.update(state="failed" if err else "done", error=err, ended=time.time(),
                                    context=self.engine.max_context)
@@ -2647,7 +2647,7 @@ class Service:
             tmp.write_text(json.dumps(cfg, indent=1), encoding="utf-8")
             os.replace(tmp, p)
         except (OSError, ValueError) as e:
-            print(f"[maya] could not save the new context in {self.config_path}: {e}", flush=True)
+            print(f"[saguaro] could not save the new context in {self.config_path}: {e}", flush=True)
 
     def think_budget_info(self) -> dict:
         """The dashboard's Thinking budget: tokens (0 = no limit), whether this model has a think block at all."""
@@ -2672,7 +2672,7 @@ class Service:
             tmp.write_text(json.dumps(cfg, indent=1), encoding="utf-8")
             os.replace(tmp, p)
             saved = True
-        print(f"[maya] thinking budget: {n or 'no limit'}" + (" (saved)" if saved else ""), flush=True)
+        print(f"[saguaro] thinking budget: {n or 'no limit'}" + (" (saved)" if saved else ""), flush=True)
         return {"budget": n, "supported": True, "saved": saved}
 
     def port_info(self) -> dict:
@@ -2683,18 +2683,18 @@ class Service:
                 "saved": bool(self.config_path), "restarting": getattr(self, "port_restart", None)}
 
     def set_port(self, n: int) -> dict:
-        """The dashboard's Port: n saved into the run config (and Maya's start scripts for it), then - when maya.py
+        """The dashboard's Port: n saved into the run config (and Saguaro's start scripts for it), then - when maya.py
         started this server - the server ends with RESTART_EXIT after the request in flight, and maya.py starts it again
         on n.  The port must be free on this server's address now (a busy one: an error, nothing saved)."""
         host, port = getattr(self, "listen", None) or ("127.0.0.1", None)
         if not 1024 <= n <= 65535:
             raise ValueError("the port must be a number from 1024 to 65535")
         if n == port:
-            raise ValueError(f"Maya listens on {n} already")
+            raise ValueError(f"Saguaro listens on {n} already")
         if not self.config_path:
             raise ValueError("this server runs without a config, so a port cannot be saved: start it with --port")
         if getattr(self, "port_restart", None):
-            raise ValueError("Maya is already moving to another port")
+            raise ValueError("Saguaro is already moving to another port")
         import socket
         try:
             with socket.socket(socket.AF_INET6 if ":" in host else socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -2706,19 +2706,19 @@ class Service:
         if restarts:
             self.port_restart = n
             threading.Thread(target=self._restart_on_port, args=(n,), daemon=True).start()
-        print(f"[maya] the port {n} is saved" + (": Maya starts again on it" if restarts else
+        print(f"[saguaro] the port {n} is saved" + (": Saguaro starts again on it" if restarts else
               " - it applies from the next start"), flush=True)
         return {"port": n, "restarts": restarts}
 
     def _restart_on_port(self, n: int):
         time.sleep(0.5)                                  # (the answer to the page goes out first)
         with self.fifo:                                  # the request in flight finishes first
-            print(f"[maya] starting again on port {n} ...", flush=True)
+            print(f"[saguaro] starting again on port {n} ...", flush=True)
             self.close_for_restart()
             os._exit(RESTART_EXIT)
 
     def _save_port(self, n: int):
-        """"port" in the run config, and --port in Maya's start scripts beside it that start this config (setup writes
+        """"port" in the run config, and --port in Saguaro's start scripts beside it that start this config (setup writes
         run-maya-<model>.bat / .sh with the port then chosen; a script would otherwise move it back)."""
         p = Path(self.config_path)
         cfg = json.loads(p.read_text(encoding="utf-8-sig"))
@@ -2735,7 +2735,7 @@ class Service:
                 if new != raw:
                     script.write_bytes(new)
             except OSError as e:
-                print(f"[maya] could not change the port in {script.name}: {e}", flush=True)
+                print(f"[saguaro] could not change the port in {script.name}: {e}", flush=True)
 
     # -------------------------------------------------------------- the Models page (serve/models.py)
     def models_root(self) -> Path:
@@ -2744,7 +2744,7 @@ class Service:
 
     def models_info(self) -> dict:
         """The configs the setup wrote, the running one marked, each with its engine settings; whether a switch or a
-        change to the running one can start Maya again at once (maya.py started this server)."""
+        change to the running one can start Saguaro again at once (maya.py started this server)."""
         out = models.listing(self.models_root(), self.config_path)
         out.update(restarts=bool(os.environ.get("MAYA_RESTART_ON_UPDATE")),
                    running=Path(self.config_path).name if self.config_path else None,
@@ -2769,18 +2769,18 @@ class Service:
 
     def _restart_busy(self):
         if getattr(self, "model_restart", None) or getattr(self, "port_restart", None):
-            raise ValueError("Maya is already starting again")
+            raise ValueError("Saguaro is already starting again")
         if self.reloading() or self.updater.busy():
-            raise ValueError("Maya is reloading or updating; try again when it is done")
+            raise ValueError("Saguaro is reloading or updating; try again when it is done")
 
     def model_settings(self, name, settings, dry_run: bool = False) -> dict:
         """The engine settings of the config `name` (the Models page): checked, and unless dry_run saved into it.  The
-        running model's start Maya again with them (when maya.py started this server), after the request in flight;
+        running model's start Saguaro again with them (when maya.py started this server), after the request in flight;
         another model's apply when it is switched to.  dry_run: the command they make, nothing saved."""
         p = self._model_path(name)
         cfg = models.read(p)
         if not cfg:
-            raise ValueError(f"{p.name}: not a config Maya can read")
+            raise ValueError(f"{p.name}: not a config Saguaro can read")
         new = models.apply(cfg, settings)                 # (a ValueError: what is wrong, nothing saved)
         if dry_run:
             return {"command": models.command(new), "settings": models.shown_settings(new)}
@@ -2791,7 +2791,7 @@ class Service:
         restarts = bool(running and out["changed"] and os.environ.get("MAYA_RESTART_ON_UPDATE"))
         if restarts:
             self._restart_into(p, "settings")
-        print(f"[maya] {p.name}: engine settings saved" + (": Maya starts again with them" if restarts else
+        print(f"[saguaro] {p.name}: engine settings saved" + (": Saguaro starts again with them" if restarts else
               " - they apply from its next start" if out["changed"] else " (nothing changed)"), flush=True)
         return {**out, "running": running, "restarts": restarts}
 
@@ -2809,7 +2809,7 @@ class Service:
 
     def set_turbo(self, on: bool) -> dict:
         """Turbo on or off.  The engine's part (models.turbo_enable / turbo_disable: the context, the expert skipping, the
-        drafting, written into the run config) starts Maya again as a saved engine setting does, after the request in
+        drafting, written into the run config) starts Saguaro again as a saved engine setting does, after the request in
         flight; nothing to restart where the engine already runs so (or without a run config)."""
         if not self.config_path:
             self.turbo_mem = bool(on)
@@ -2820,7 +2820,7 @@ class Service:
         restarts = bool(out["changed"] and os.environ.get("MAYA_RESTART_ON_UPDATE"))
         if restarts:
             self._restart_into(p, "settings")
-        print(f"[maya] Turbo {'on' if on else 'off'}: {p.name}" + (": Maya starts again" if restarts else
+        print(f"[saguaro] Turbo {'on' if on else 'off'}: {p.name}" + (": Saguaro starts again" if restarts else
               " - the engine settings apply from its next start" if out["changed"] else " (the engine needs no restart)"),
               flush=True)
         return {**self.turbo_info(), "restarting_now": restarts, "changed": out["changed"]}
@@ -2838,37 +2838,37 @@ class Service:
             raise ValueError(f"{p.name} cannot start: {why} - run the setup again to repair it")
         self._restart_busy()
         if models.own_defaults(p):                       # (its model's own sampling and level, as the setup writes)
-            print(f"[maya] {p.name}: its model's own sampling and thinking level written into it", flush=True)
+            print(f"[saguaro] {p.name}: its model's own sampling and thinking level written into it", flush=True)
         os.utime(p)
         restarts = bool(os.environ.get("MAYA_RESTART_ON_UPDATE"))
         if restarts:
             self._restart_into(p, "switch")
-        print(f"[maya] {p.name} is the model to start" + (": Maya starts again with it" if restarts else
+        print(f"[saguaro] {p.name} is the model to start" + (": Saguaro starts again with it" if restarts else
               " next (a start without --config picks it)"), flush=True)
         return {"to": p.name, "model": cfg.get("model_name") or "", "restarts": restarts}
 
     def delete_model(self, name, files: bool = False, dry_run: bool = False, then=None) -> dict:
         """The Models page's Delete: the config `name` off the list (models.delete), with `files` what its setup
-        downloaded for it as well.  Not while Maya starts again.  The model running: Maya switches to `then` first, and
+        downloaded for it as well.  Not while Saguaro starts again.  The model running: Saguaro switches to `then` first, and
         the next server deletes it (models.DELETE_FILE) once the engine that ran from it is gone.  dry_run: what would
         go (models.delete_plan), nothing deleted."""
         p = self._model_path(name)
         running = self._is_running(p)
         if getattr(self, "model_restart", None):
-            raise ValueError("Maya is starting again; try again when it is done")
+            raise ValueError("Saguaro is starting again; try again when it is done")
         if dry_run:
             return {"file": p.name, "running": running, **models.delete_plan(self.models_root(), p)}
         if running:
             return self._delete_running(p, files, then)
         out = models.delete(self.models_root(), p, bool(files))
-        print(f"[maya] {p.name} deleted" + (f", and its files ({out['freed'] / 2**30:.1f} GB)" if files else
+        print(f"[saguaro] {p.name} deleted" + (f", and its files ({out['freed'] / 2**30:.1f} GB)" if files else
               " (its files stay)") + "".join(f"; {n} drafts with MTP now (its DFlash2 drafter was deleted)"
                                              for n in out["drafter_users"]), flush=True)
         return out
 
     def _delete_running(self, p: Path, files: bool, then) -> dict:
         if not then:
-            raise ValueError(f"{p.name} is the model running now: pick the model Maya switches to first")
+            raise ValueError(f"{p.name} is the model running now: pick the model Saguaro switches to first")
         if not os.environ.get("MAYA_RESTART_ON_UPDATE"):
             raise ValueError("this server was not started by maya.sh or START-MAYA.bat, so it cannot switch to another "
                              f"model by itself: start another model, then delete {p.name}")
@@ -2886,7 +2886,7 @@ class Service:
         except BaseException:
             note.unlink(missing_ok=True)
             raise
-        print(f"[maya] {p.name} is deleted once {out['to']} runs" + (", with its files" if files else ""), flush=True)
+        print(f"[saguaro] {p.name} is deleted once {out['to']} runs" + (", with its files" if files else ""), flush=True)
         return {"deleting": p.name, "to": out["to"], "files": bool(files), "restarts": True}
 
     def finish_delete(self):
@@ -2903,16 +2903,16 @@ class Service:
             return                                       # (stale, gone already, or not one of these configs)
         if self._is_running(p):                          # (the switch did not happen: it runs again)
             self.deleted = {"file": p.name, "error": "it is the model running now", "time": time.time()}
-            print(f"[maya] {p.name} not deleted: it is the model running now", flush=True)
+            print(f"[saguaro] {p.name} not deleted: it is the model running now", flush=True)
             return
         try:
             out = models.delete(self.models_root(), p, bool(note.get("files")))
         except (OSError, ValueError) as e:
             self.deleted = {"file": p.name, "error": str(e), "time": time.time()}
-            print(f"[maya] {p.name} not deleted: {e}", flush=True)
+            print(f"[saguaro] {p.name} not deleted: {e}", flush=True)
             return
         self.deleted = {**out, "model": note.get("model") or "", "quant": note.get("quant") or "", "time": time.time()}
-        print(f"[maya] {p.name} deleted" + (f", and its files ({out['freed'] / 2**30:.1f} GB)" if out["files"] else
+        print(f"[saguaro] {p.name} deleted" + (f", and its files ({out['freed'] / 2**30:.1f} GB)" if out["files"] else
               " (its files stay)"), flush=True)
 
     def pull_slot(self):
@@ -2953,7 +2953,7 @@ class Service:
     def delete_leftover(self, path) -> dict:
         """The Models page's files no model uses: one deleted (models.delete_leftover)."""
         out = models.delete_leftover(self.models_root(), path)
-        print(f"[maya] {out['deleted']} deleted ({out['freed'] / 2**30:.1f} GB): no model here used it", flush=True)
+        print(f"[saguaro] {out['deleted']} deleted ({out['freed'] / 2**30:.1f} GB): no model here used it", flush=True)
         return out
 
     def _restart_into(self, p: Path, why: str):
@@ -2966,8 +2966,8 @@ class Service:
     def _restart_for_models(self, name: str, why: str):
         time.sleep(0.5)                                  # (the answer to the page goes out first)
         with self.fifo:                                  # the request in flight finishes first
-            print(f"[maya] starting again with {name} ..." if why == "switch" else
-                  f"[maya] starting again with {name}'s new engine settings ...", flush=True)
+            print(f"[saguaro] starting again with {name} ..." if why == "switch" else
+                  f"[saguaro] starting again with {name}'s new engine settings ...", flush=True)
             self.close_for_restart()
             os._exit(RESTART_EXIT)
 
@@ -2989,7 +2989,7 @@ class Service:
         hw, st = tel.get("now") or {}, tel.get("static") or {}
         gib = lambda b: f"{b / 2**30:.1f} GB" if isinstance(b, (int, float)) else "?"  # noqa: E731
         import platform
-        out = [f"Project Maya {MAYA_VERSION or '?'} - report of {time.strftime('%Y-%m-%d %H:%M')}",
+        out = [f"Saguaro {MAYA_VERSION or '?'} - report of {time.strftime('%Y-%m-%d %H:%M')}",
                f"System: {platform.platform()}, Python {platform.python_version()}",
                f"GPU: {st.get('gpu_name') or 'not readable'} ({gib(hw.get('gpu_mem_total'))} VRAM)",
                f"CPU: {st.get('cpu_name') or '?'}, {st.get('threads') or '?'} threads; RAM {gib(hw.get('ram_total'))}",
@@ -3064,7 +3064,7 @@ class Service:
                     active = self.active
                 doing = (f"a request is running ({s.get('phase') or 'working'}, {s.get('generated')} tokens so far)"
                          if s.get("busy") else "nothing is running")
-                print(f"[maya] WARNING: {waiting} request(s) have waited for the engine for up to {oldest:.0f} s and "
+                print(f"[saguaro] WARNING: {waiting} request(s) have waited for the engine for up to {oldest:.0f} s and "
                       f"{doing}; {self.fifo.held_by()}, {active} request(s) counted active. A request that holds the "
                       f"engine and waits on it for ever stops every request behind it - STRATA_REQUEST_QUIET_S / "
                       f"STRATA_DRAIN_S bound those waits, so this line is what a wedged FIFO would look like. "
@@ -3572,7 +3572,7 @@ class Service:
         whole body in the server window (#613)."""
         while parser.malformed:
             body = parser.malformed.pop(0)
-            print(f"[maya] a malformed tool call, sent on as written instead of failing the answer "
+            print(f"[saguaro] a malformed tool call, sent on as written instead of failing the answer "
                   f"({len(body)} characters): {body!r}", flush=True)
 
     def _note(self, n, evs, stat):
@@ -3624,10 +3624,10 @@ class Service:
         if stat.first_token is None:
             pr = stat.progress or getattr(self.engine, "progress", None)   # (position reached, prompt tokens): a reused
             done = f"{pr[0]:,} of {pr[1]:,}" if pr and pr[1] else f"{r['prompt_tokens']:,}"   # prefix counts as read (#29)
-            print(f"[maya] reading the prompt: {done} tokens, {el:.0f} s so far", flush=True)
+            print(f"[saguaro] reading the prompt: {done} tokens, {el:.0f} s so far", flush=True)
         else:
             rate = r["generated"] / max(1e-6, now - stat.first_token)
-            print(f"[maya] {r['phase']}: {r['generated']} of max {r['max_tokens']} tokens, {rate:.1f} tok/s, "
+            print(f"[saguaro] {r['phase']}: {r['generated']} of max {r['max_tokens']} tokens, {rate:.1f} tok/s, "
                   f"{el:.0f} s", flush=True)
         return now
 
@@ -3733,7 +3733,7 @@ class Service:
                 p = self.template.render(head, tools=tools, **{**kwargs, "add_generation_prompt": False})
                 f = self.template.render(head + tail, tools=tools, **kwargs)
             except Exception as e:                  # (a template that wants more than this: notes only)
-                print(f"[maya] loop guard: cannot block `{rep.name}` with this template ({e})", flush=True)
+                print(f"[saguaro] loop guard: cannot block `{rep.name}` with this template ({e})", flush=True)
                 return None
             if kwargs.get("enable_thinking") is False and f.endswith("<think>"):
                 f += "</think>"                     # (as render_ids)
@@ -3774,7 +3774,7 @@ class Service:
         c = loop_guard.collapse(messages)
         if c is None:
             return messages
-        print(f"[maya] loop guard: the conversation repeats itself - left out of the prompt: {c.paragraphs} pieces "
+        print(f"[saguaro] loop guard: the conversation repeats itself - left out of the prompt: {c.paragraphs} pieces "
               f"of the model's own text it had written before, {c.rounds} tool rounds that repeat earlier ones",
               flush=True)
         with self.status_lock:
@@ -3782,13 +3782,13 @@ class Service:
         return c.messages
 
     def _kept_going(self, kept, text):
-        print(f"[maya] loop guard: the model would end its turn with nothing ({' '.join(text.split())[:80]!r}): "
+        print(f"[saguaro] loop guard: the model would end its turn with nothing ({' '.join(text.split())[:80]!r}): "
               f"kept going ({kept}. time in this answer)", flush=True)
         with self.status_lock:
             self.loop_guard_counts["kept_going"] += 1
 
     def _tool_blocked(self, rep, tries):
-        print(f"[maya] loop guard: `{rep.name}` again after {loop_guard.TOOL_NUDGES} notes ({rep.times} runs, the same "
+        print(f"[saguaro] loop guard: `{rep.name}` again after {loop_guard.TOOL_NUDGES} notes ({rep.times} runs, the same "
               f"result): blocked ({tries}. time in this answer), not run - a note, the thinking steered away and on",
               flush=True)
         with self.status_lock:
@@ -3803,7 +3803,7 @@ class Service:
         rep = loop_guard.tool_repeat(messages)
         if rep is None:
             return messages
-        print(f"[maya] loop guard: `{rep.name}` {rep.times} times with the same arguments and result: a note after it",
+        print(f"[saguaro] loop guard: `{rep.name}` {rep.times} times with the same arguments and result: a note after it",
               flush=True)
         with self.status_lock:
             self.loop_guard_counts["tool_repeats"] += 1
@@ -3811,7 +3811,7 @@ class Service:
 
     def _loop_noted(self, act, written: int):
         """A loop the guard broke: a line in the server window, and the Monitor's count."""
-        print(f"[maya] loop guard: {act.describe()}"
+        print(f"[saguaro] loop guard: {act.describe()}"
               f"{' (now ' + format(written, ',') + ' tokens)' if act.kind != loop_guard.STOP else ''}", flush=True)
         with self.status_lock:
             c = self.loop_guard_counts
@@ -3873,7 +3873,7 @@ class Service:
                             if paused_for:
                                 self.engine.pause()
                                 pausing = True
-                                print(f"[maya] fair read: {pp[0]:,} of {pp[1]:,} prompt tokens read, paused for "
+                                print(f"[saguaro] fair read: {pp[0]:,} of {pp[1]:,} prompt tokens read, paused for "
                                       f"{len(paused_for)} waiting request(s); the rest after they started", flush=True)
                         continue
                     produced.append(t)
@@ -3925,7 +3925,7 @@ class Service:
                 yield think_end
                 if guard is not None:
                     guard.thinking_closed(produced)
-                print(f"[maya] thinking reached its budget ({soft} tokens): closed at the end of a sentence or line, "
+                print(f"[saguaro] thinking reached its budget ({soft} tokens): closed at the end of a sentence or line, "
                       f"{len(produced) - 1 - soft} tokens later; answering", flush=True)
                 if cancel.is_set() or self.stopping:
                     break
@@ -3961,7 +3961,7 @@ class Service:
             waiting = self.fifo.waiting()
             place = self.fifo.yield_place(units=1)      # in line, and the place free, in one step: behind whoever waits now
             hold[0] = False
-            print(f"[maya] fair slice: {len(produced)} tokens written, the engine goes to the next request "
+            print(f"[saguaro] fair slice: {len(produced)} tokens written, the engine goes to the next request "
                   f"({waiting} waiting); this one continues after it", flush=True)
             try:
                 while not self.fifo.wait_turn(place, timeout=0.1):
@@ -3990,7 +3990,7 @@ class Service:
             if self.stopping or cancel.is_set():
                 break
             if hasattr(self.engine, "alive") and not self.engine.alive():   # it died in the request in between
-                print("[maya] the engine had stopped; starting it again (a minute or two) ...", flush=True)
+                print("[saguaro] the engine had stopped; starting it again (a minute or two) ...", flush=True)
                 self.engine.restart()
             cur, left = list(ids) + produced, max_new - len(produced)
             smp = self._resumed_sampling(sampling, produced)   # (the thinking budget counts from where it got to)
@@ -4096,7 +4096,7 @@ class Service:
                     queued = False
                 waited = time.monotonic() - asked
                 if waited >= QUEUE_LOG_S:               # a long wait is worth a line: it is what a wedged FIFO looked like
-                    print(f"[maya] this request waited {waited:.0f} s for the engine "
+                    print(f"[saguaro] this request waited {waited:.0f} s for the engine "
                           f"({self.fifo.waiting()} request(s) behind it)", flush=True)
                 if cancel.is_set():
                     yield "done", {"finish": "cancel", "completion_tokens": 0}
@@ -4163,7 +4163,7 @@ class Service:
                     pts = deepseek_restore_points(ids, self.ds_user_id, self.ds_system_id, tail,
                                                   assistant_id=self.ds_assistant_id)
                     if pts:
-                        print(f"[maya] restore points asked: {pts}", file=sys.stderr, flush=True)
+                        print(f"[saguaro] restore points asked: {pts}", file=sys.stderr, flush=True)
                         sampling = {**(sampling or {}), "_restore": pts}
 
                 def attempts(prompt, left):
@@ -4184,7 +4184,7 @@ class Service:
                         except ValueError as e:
                             if again or got or NONFINITE not in str(e):
                                 raise
-                            print(f"[maya] the engine's numbers went non-finite before the answer started ({e}): "
+                            print(f"[saguaro] the engine's numbers went non-finite before the answer started ({e}): "
                                   "running the request again from token 0", flush=True)
                         finally:
                             sliced.close()
@@ -4248,7 +4248,7 @@ class Service:
                         if end_think:
                             in_think = False
                             if think_budget > 0 and n == think_budget + 1:
-                                print(f"[maya] thinking reached its budget ({think_budget} tokens"
+                                print(f"[saguaro] thinking reached its budget ({think_budget} tokens"
                                       f"{f', {soft} + {think_budget - soft} without a sentence end' if soft else ''})"
                                       ": closed, answering", flush=True)
                         text, stopped = detok.push(t), False
@@ -4267,7 +4267,7 @@ class Service:
                                 finish = "stop"
                                 break
                             think_restarts += 1
-                            print(f"[maya] thinking: an end-of-turn marker inside it is a quote - going on with the "
+                            print(f"[saguaro] thinking: an end-of-turn marker inside it is a quote - going on with the "
                                   f"thinking ({think_restarts}. of {THINK_RESTARTS})", flush=True)
                             ids_k, thinks = think_resume
                             steer = self.tok.encode(loop_guard.keep_steer(think_restarts)) if thinks else []
@@ -4395,7 +4395,7 @@ class Service:
                 except EngineDied as e:
                     finish = "error"
                     note = self.engine.death_note() if hasattr(self.engine, "death_note") else ""
-                    print(f"[maya] {e}. {note} The next request starts the engine again."
+                    print(f"[saguaro] {e}. {note} The next request starts the engine again."
                           f"{' Its log: ' + self.engine.log_path if getattr(self.engine, 'log_path', None) else ''}",
                           flush=True)
                     raise
@@ -4404,7 +4404,7 @@ class Service:
                         # an answer already under way: it ends here (what was sent stands), and the engine has
                         # dropped the conversation's state, so the next turn reads it from token 0
                         finish = "length"
-                        print(f"[maya] the engine's numbers went non-finite after {n} tokens ({e}): the answer ends "
+                        print(f"[saguaro] the engine's numbers went non-finite after {n} tokens ({e}): the answer ends "
                               "there", flush=True)
                         yield from flush()
                         if held:
@@ -4414,9 +4414,9 @@ class Service:
                             held = ""
                     else:
                         finish = "error"
-                        print(f"[maya] the engine reported an error: {e}", flush=True)
+                        print(f"[saguaro] the engine reported an error: {e}", flush=True)
                         if getattr(e, "body", None):                    # (a malformed tool call: the whole of it, #613)
-                            print(f"[maya] the malformed tool call, whole ({len(e.body)} characters): {e.body!r}", flush=True)
+                            print(f"[saguaro] the malformed tool call, whole ({len(e.body)} characters): {e.body!r}", flush=True)
                         raise
                 finally:
                     gen.close()                         # STOP+drain to THIS request's DONE while still holding the
@@ -4483,10 +4483,10 @@ class Service:
                     rate = last["generated"] / (last["decode_ms"] / 1000) if n and last.get("generated") and \
                         last.get("decode_ms") else (n - 1) / (now - ft) if ft and n > 1 and now > ft else 0.0
                     hit_msg = f", expert cache {hit_rate*100:.1f}% hit" if hit_rate is not None else ""
-                    print(f"[maya] done: {n} tokens in {el:.0f} s ({rate:.1f} tok/s) "
+                    print(f"[saguaro] done: {n} tokens in {el:.0f} s ({rate:.1f} tok/s) "
                           f"({finish}, cancel={cancel.is_set()}){hit_msg}", flush=True)
                     if os.environ.get("STRATA_DEBUG") and raw_ids:
-                        print(f"[maya] raw: {self.tok.decode(raw_ids)!r}", flush=True)
+                        print(f"[saguaro] raw: {self.tok.decode(raw_ids)!r}", flush=True)
                 if queued:                              # never started (a cancel, an error while waiting): not waiting now
                     self.status["queued"] -= 1
                 if hold[1]:
@@ -4543,7 +4543,7 @@ def _debug_req(api, req, messages, tools, max_new, thinking, prompt_tokens):
     if isinstance(body, list):
         body = " ".join(p.get("text", "") for p in body if isinstance(p, dict))
     preview = (str(body or "")[:80]).replace("\n", " ")
-    print(f"[maya] req {api}: msgs={len(messages)} tools={len(tools or [])} "
+    print(f"[saguaro] req {api}: msgs={len(messages)} tools={len(tools or [])} "
           f"max_tokens_raw={req.get('max_tokens')!r}/{req.get('max_completion_tokens')!r} "
           f"max_new={max_new} thinking={thinking} stream={bool(req.get('stream'))} "
           f"prompt_tokens={prompt_tokens} last={last.get('role')!r}:{preview!r}", flush=True)
@@ -4622,7 +4622,7 @@ def run_with_mcp(svc: Service, hub, messages, tools, kw, ids, thinking, max_new,
             if "r" not in box:
                 break
             r = box["r"]
-            print(f"[maya] tool {c.name}: {'ok' if r['ok'] else 'error'}, {r['chars']:,} characters in "
+            print(f"[saguaro] tool {c.name}: {'ok' if r['ok'] else 'error'}, {r['chars']:,} characters in "
                   f"{r['ms'] / 1000:.1f} s{' (truncated for the model)' if r['truncated'] else ''}", flush=True)
             results.append(r["text"])
             yield "mcp", {"event": "result", "id": c.id, **{k: r[k] for k in ("ok", "text", "chars", "truncated", "ms")}}
@@ -4813,7 +4813,7 @@ class StreamJob:
             with self.cv:
                 orphan = not self.done and self.readers == 0 and time.time() - self.unread_since > self.ORPHAN_S
             if orphan:
-                print(f"[maya] nobody read answer {self.id} for {self.ORPHAN_S} s: stopped", flush=True)
+                print(f"[saguaro] nobody read answer {self.id} for {self.ORPHAN_S} s: stopped", flush=True)
                 self.cancel.set()
                 return
 
@@ -5296,7 +5296,7 @@ def make_handler(svc: Service):
 
         def _mapi_target(self, name) -> bool:
             """The model a chat / generate names: True when it is the one running (or none named); otherwise the answer
-            is sent - 404, or the swap to that installed model (Maya starts again with it: a 503 + Retry-After says so)."""
+            is sent - 404, or the swap to that installed model (Saguaro starts again with it: a 503 + Retry-After says so)."""
             run = next((m for m in svc.model_listing() if m["running"]), None)
             if not name or run is None:
                 return True
@@ -5318,7 +5318,7 @@ def make_handler(svc: Service):
                 except ValueError as e:
                     self._json(409, {"error": str(e)})
                     return False
-            body = json.dumps({"error": f"loading model {model_api.public_name(p)}: Maya starts again with it (a big model "
+            body = json.dumps({"error": f"loading model {model_api.public_name(p)}: Saguaro starts again with it (a big model "
                                         "takes minutes); retry this request, GET /api/ps shows when it is loaded",
                                "loading": model_api.public_name(p) + ":latest"}).encode()
             self.send_response(503)
@@ -5653,7 +5653,7 @@ def make_handler(svc: Service):
                     try:
                         m = svc.metrics(all_requests="requests=all" in self.path)
                     except Exception:   # (said in the log - the handler's own traceback goes to a pipe nobody reads)
-                        print("[maya] /metrics failed:\n" + traceback.format_exc(), flush=True)
+                        print("[saguaro] /metrics failed:\n" + traceback.format_exc(), flush=True)
                         raise
                     self._json(200, m)
                 return
@@ -5752,7 +5752,7 @@ def make_handler(svc: Service):
             elif path in ("/v1/models", "/models"):
                 if self._authorized():
                     loaded = not hasattr(svc.engine, "alive") or svc.engine.alive()
-                    model = {"id": svc.model, "object": "model",
+                    model = {"id": svc.model, "object": "model", "owned_by": "saguaro",
                              "status": {"value": "loaded" if loaded else "unloaded"},
                              "meta": {"n_ctx": svc.engine.max_context},
                              # (the same capacity under the name generic OpenAI-compatible
@@ -5803,7 +5803,7 @@ def make_handler(svc: Service):
         def _fail(self, code, kind, message):
             """An error as JSON, while nothing was sent; once an answer has begun (a stream), only the log has it."""
             if self.answer_started:
-                print(f"[maya] request failed mid-answer: {message}", file=sys.stderr, flush=True)
+                print(f"[saguaro] request failed mid-answer: {message}", file=sys.stderr, flush=True)
                 self.close_connection = True
                 return
             self._json(code, {"error": {"type": kind, "message": message}})
@@ -5897,8 +5897,8 @@ def make_handler(svc: Service):
                     self._json(200, svc.detokenize(req))
                     return
                 if path in ("/v1/chat/completions", "/v1/responses", "/v1/messages") and (svc.reloading() or svc.updater.busy()):
-                    # a context change is reloading the model, or Maya is updating: say so, and when to try again
-                    why = ("Project Maya is updating and starts again in a few minutes" if svc.updater.busy() else
+                    # a context change is reloading the model, or Saguaro is updating: say so, and when to try again
+                    why = ("Saguaro is updating and starts again in a few minutes" if svc.updater.busy() else
                            "the model is reloading with a new context size; try again in a minute")
                     body = json.dumps({"error": {"type": "overloaded_error", "message": why}}).encode()
                     self.send_response(503)
@@ -5966,7 +5966,7 @@ def make_handler(svc: Service):
                 return False
             origin = self.headers.get("Origin")
             if origin and origin.split("://", 1)[-1] != self.headers.get("Host", ""):
-                self._json(403, {"error": {"message": f"{what} only from Maya's own page"}})
+                self._json(403, {"error": {"message": f"{what} only from Saguaro's own page"}})
                 return False
             return True
 
@@ -6060,8 +6060,8 @@ def make_handler(svc: Service):
             except ValueError as e:
                 self._json(400, {"error": {"type": "invalid_request_error", "message": str(e)}})
                 return
-            print("[maya] other apps now use the Chat settings: " + ", ".join(f"{k}={v}" for k, v in shared.items())
-                  if shared else "[maya] other apps use their own settings again", flush=True)
+            print("[saguaro] other apps now use the Chat settings: " + ", ".join(f"{k}={v}" for k, v in shared.items())
+                  if shared else "[saguaro] other apps use their own settings again", flush=True)
             self._json(200, {"shared": bool(shared), "defaults": shared})
 
         def _sse(self):
@@ -6371,7 +6371,7 @@ def warn_tight_ram(arena_mib) -> None:
         return
     left = total / 2**30 - arena_mib / 1024
     if left < 6:
-        print(f"[maya] WARNING: RAM is tight - the model's experts take {arena_mib / 1024:.1f} GB of this PC's "
+        print(f"[saguaro] WARNING: RAM is tight - the model's experts take {arena_mib / 1024:.1f} GB of this PC's "
               f"{total / 2**30:.0f} GB, leaving {left:.1f} GB for everything else. "
               + ("Linux may stop the engine in the middle of an answer. " if os.name != "nt" else
                  "Windows will slow down (paging to disk). ")
@@ -6486,48 +6486,48 @@ def sampling_defaults_from_config(cfg: dict) -> dict:
         number = isinstance(value, (int, float)) and not isinstance(value, bool)
         if key == "temperature":
             if not number or value < 0:
-                raise SystemExit(f"[maya] config sampling.temperature={value!r}: expected a number >= 0 (0 = greedy)")
+                raise SystemExit(f"[saguaro] config sampling.temperature={value!r}: expected a number >= 0 (0 = greedy)")
             out[key] = float(value)
         elif key == "top_p":
             if not number or not 0 < value <= 1:
-                raise SystemExit(f"[maya] config sampling.top_p={value!r}: expected 0 < top_p <= 1")
+                raise SystemExit(f"[saguaro] config sampling.top_p={value!r}: expected 0 < top_p <= 1")
             out[key] = float(value)
         elif key == "min_p":
             if not number or not 0 <= value <= 1:
-                raise SystemExit(f"[maya] config sampling.min_p={value!r}: expected 0 <= min_p <= 1")
+                raise SystemExit(f"[saguaro] config sampling.min_p={value!r}: expected 0 <= min_p <= 1")
             out[key] = float(value)
         elif key == "top_k":
             if not number or value != int(value) or not 1 <= value <= 64:
-                raise SystemExit(f"[maya] config sampling.top_k={value!r}: the sampled path takes an integer 1..64")
+                raise SystemExit(f"[saguaro] config sampling.top_k={value!r}: the sampled path takes an integer 1..64")
             out[key] = int(value)
         elif key == "presence_penalty":
             if not number or value < 0:
-                raise SystemExit(f"[maya] config sampling.presence_penalty={value!r}: expected a number >= 0")
+                raise SystemExit(f"[saguaro] config sampling.presence_penalty={value!r}: expected a number >= 0")
             out[key] = float(value)
         elif key == "frequency_penalty":
             if not number or value < 0:
-                raise SystemExit(f"[maya] config sampling.frequency_penalty={value!r}: expected a number >= 0")
+                raise SystemExit(f"[saguaro] config sampling.frequency_penalty={value!r}: expected a number >= 0")
             out[key] = float(value)
         elif key == "repetition_penalty":
             if not number or value <= 0:
-                raise SystemExit(f"[maya] config sampling.repetition_penalty={value!r}: expected a number > 0 (1 = off)")
+                raise SystemExit(f"[saguaro] config sampling.repetition_penalty={value!r}: expected a number > 0 (1 = off)")
             out[key] = float(value)
         elif key == "penalty_last_n":
             if not number or value != int(value) or value < -1:
-                raise SystemExit(f"[maya] config sampling.penalty_last_n={value!r}: expected an integer >= -1 (0 = no "
+                raise SystemExit(f"[saguaro] config sampling.penalty_last_n={value!r}: expected an integer >= -1 (0 = no "
                                  "penalties, -1 = the whole context)")
             out[key] = int(value)
         elif key == "seed":
             if not number or value != int(value) or value <= 0:
-                raise SystemExit(f"[maya] config sampling.seed={value!r}: expected a positive integer")
+                raise SystemExit(f"[saguaro] config sampling.seed={value!r}: expected a positive integer")
             out[key] = int(value)
         elif key == "experimental_speed_projection":
             if not isinstance(value, bool):
-                raise SystemExit(f"[maya] config sampling.experimental_speed_projection={value!r}: expected true or "
+                raise SystemExit(f"[saguaro] config sampling.experimental_speed_projection={value!r}: expected true or "
                                  "false (the default for requests that leave it out, when the engine has the vector)")
             out[key] = value
         else:
-            print(f"[maya] config sampling.{key}={value!r}: unknown key, ignored", flush=True)
+            print(f"[saguaro] config sampling.{key}={value!r}: unknown key, ignored", flush=True)
     return out
 
 
@@ -6535,7 +6535,7 @@ def request_stop(stop: threading.Event, why: str) -> None:
     """The server's stop, once: main() wraps up the request in progress and ends the engine."""
     if not stop.is_set():
         stop.set()
-        print(f"[maya] stopping ({why}): the engine ends", flush=True)
+        print(f"[saguaro] stopping ({why}): the engine ends", flush=True)
 
 
 def wait_for_stop(stop: threading.Event, step: float = 0.5) -> None:
@@ -6646,7 +6646,7 @@ class ServerLogTee:
 
 
 class StampedStdout:
-    """stdout with a local `HH:MM:SS ` before each of this server's own lines (`[maya] ...`, #783); the engine's lines and
+    """stdout with a local `HH:MM:SS ` before each of this server's own lines (`[saguaro] ...`, #783); the engine's lines and
     any other text pass through as they are.  A line is stamped when it starts, whatever pieces print() writes it in."""
 
     def __init__(self, stream):
@@ -6656,7 +6656,7 @@ class StampedStdout:
         with self.lock:
             out = []
             for seg in text.splitlines(keepends=True):
-                if self.at_start and seg.startswith("[maya]"):
+                if self.at_start and seg.startswith("[saguaro]"):
                     out.append(time.strftime("%H:%M:%S "))
                 out.append(seg)
                 self.at_start = seg.endswith(chr(10)) or seg.endswith(chr(13))
@@ -6669,7 +6669,7 @@ class StampedStdout:
 
 
 def tee_server_log(path: str) -> None:
-    """This server's own lines (`[maya] ...`) go to `path` as well as this terminal (STRATA_SERVER_LOG=0: terminal
+    """This server's own lines (`[saguaro] ...`) go to `path` as well as this terminal (STRATA_SERVER_LOG=0: terminal
     only).  The engine's stderr is already appended there, so the file tells both sides of a request."""
     path = os.path.abspath(path)
     if not path or isinstance(sys.stdout, ServerLogTee):
@@ -6677,9 +6677,9 @@ def tee_server_log(path: str) -> None:
     try:
         handle = open(path, "a", encoding="utf-8", buffering=1)
     except OSError as e:
-        print(f"[maya] this server's lines cannot also go to {path} ({e}): they stay on this terminal", flush=True)
+        print(f"[saguaro] this server's lines cannot also go to {path} ({e}): they stay on this terminal", flush=True)
         return
-    print(f"[maya] this server's lines go to {path} too", flush=True)
+    print(f"[saguaro] this server's lines go to {path} too", flush=True)
     sys.stdout = ServerLogTee(sys.stdout, handle)
 
 
@@ -6801,7 +6801,7 @@ def main() -> int:
     maya_names.alias_env(os.environ)   # (MAYA_* settings under the names the code and the engine read)
     cfg = maya_names.env_in(json.loads(Path(a.config).read_text(encoding="utf-8-sig"))) if a.config else {}   # (a BOM: Notepad)
     apply_server_env(cfg)
-    if not isinstance(sys.stdout, StampedStdout):       # (#783: a time before each [maya] line, in the log too)
+    if not isinstance(sys.stdout, StampedStdout):       # (#783: a time before each [saguaro] line, in the log too)
         sys.stdout = StampedStdout(sys.stdout)
     # the server's own lines go to the run's log as well (the engine writes its stderr there): a run whose terminal
     # was closed leaves the record a stuck queue needs (STRATA_SERVER_LOG=0 keeps them on the terminal only)
@@ -6816,7 +6816,7 @@ def main() -> int:
     try:                                                # before the minutes of loading: is the port free?
         Server((a.host, a.port), BaseHTTPRequestHandler).server_close()
     except OSError:
-        ap.error(f"port {a.port} is already in use - is Maya (or another server) already running? "
+        ap.error(f"port {a.port} is already in use - is Saguaro (or another server) already running? "
                  f"Close it, or start this one with a different --port")
     if cfg.get("tokenizer"):
         a.tokenizer = cfg["tokenizer"]
@@ -6838,7 +6838,7 @@ def main() -> int:
             sampling_defaults = maya_quants.model_defaults(cfg)[0]
         if sampling_defaults:
             pretty = ", ".join(f"{k}={v}" for k, v in sampling_defaults.items())
-            print(f"[maya] sampling defaults from the {'config' if 'sampling' in cfg else 'model'}: {pretty}",
+            print(f"[saguaro] sampling defaults from the {'config' if 'sampling' in cfg else 'model'}: {pretty}",
                   flush=True)
         vcfg = cfg.get("vision") or None
         vlog = (open(cfg["log"], "a", encoding="utf-8") if cfg.get("log") else None) if vcfg else None
@@ -6854,20 +6854,20 @@ def main() -> int:
             fp = vision_footprint(vcfg, venv, Path(a.config).resolve().with_name("vision-memory.json"),
                                   (gpu_list(cfg) or [0])[0])
             if fp is None:
-                print("[maya] images: the vision encoder could not be measured on the GPU - it runs on the CPU",
+                print("[saguaro] images: the vision encoder could not be measured on the GPU - it runs on the CPU",
                       flush=True)
                 vcfg, on_demand = dict(vcfg, gpu=False), False
             else:
                 vcfg = dict(vcfg, max_tokens=fp[0])
                 engine_env = dict(env, STRATA_GLM_VISION_LEND_MB=str((fp[1] >> 20) + 1))
-                print(f"[maya] images: the vision encoder needs {fp[1] / 2**30:.2f} GB on this GPU at up to {fp[0]} "
+                print(f"[saguaro] images: the vision encoder needs {fp[1] / 2**30:.2f} GB on this GPU at up to {fp[0]} "
                       "image tokens", flush=True)
         if vcfg and not on_demand:
             print("loading the vision encoder ...", flush=True)
             vision = Vision(vcfg, log=vlog, env=venv)
         print("loading the model (the first start takes a minute or two) ...", flush=True)
         if len(gpu_list(cfg)) > 1:
-            print(f"[maya] layer split across GPUs {gpu_list(cfg)} ({cfg.get('layer_split') or 'auto'})", flush=True)
+            print(f"[saguaro] layer split across GPUs {gpu_list(cfg)} ({cfg.get('layer_split') or 'auto'})", flush=True)
         t0 = time.time()
         engine = StrataEngine(cfg["exe"], engine_args(cfg), cwd=cfg.get("cwd"), log=cfg.get("log"), env=engine_env)
         engine.load_s = round(time.time() - t0, 1)      # (the dashboard's estimate of a reload: this start's time)
@@ -6880,17 +6880,17 @@ def main() -> int:
             where = (f"{engine.info.get('vision_mib')} MiB kept" if room in (None, "resident") else
                      f"none between pictures, ~{engine.info.get('vision_room_mib')} MiB while one is read, lent by "
                      + {"chunk": "the prompt buffers", "tail": "expert slots", "free": "free memory"}.get(room, room))
-            print(f"[maya] images: the model's vision tower runs in the engine (GPU {engine.info.get('vision_gpu')}: "
+            print(f"[saguaro] images: the model's vision tower runs in the engine (GPU {engine.info.get('vision_gpu')}: "
                   f"{where}), up to {vision.g.max_tokens} tokens a picture", flush=True)
         elif vision is None and not vcfg and engine.info.get("vision") == "mm3":
             # MiniMax-M3.1-Flash: the engine's own vision tower; the server resizes the pictures
             vision = mm3_vision.Vision(mm3_vision.Geometry.from_info(engine.info),
                                        Path(tempfile.mkdtemp(prefix="maya-mm3-pictures-")), Vision.load)
-            print(f"[maya] images: the model's vision tower runs in the engine, up to {vision.g.max_pixels} pixels "
+            print(f"[saguaro] images: the model's vision tower runs in the engine, up to {vision.g.max_pixels} pixels "
                   f"({vision.g.max_tokens} tokens) a picture", flush=True)
         elif vision is None and not vcfg and engine.info.get("vision") == "off":
             # (DeepSeek-V4.1: its tower did not load - the engine's NOTE line above says why; no pictures offered)
-            print("[maya] images: OFF - pictures are refused until the vision tower loads (see the line above)",
+            print("[saguaro] images: OFF - pictures are refused until the vision tower loads (see the line above)",
                   flush=True)
         if on_demand:
             lent = int(engine.info.get("vision_lend") or 0)
@@ -6898,10 +6898,10 @@ def main() -> int:
                 vision = Vision(vcfg, log=vlog, env=venv, start=False)
                 vision.lend = lambda: engine.command("VLEND", "VLENT")
                 vision.reclaim = lambda: engine.command("VRECLAIM", "VRECLAIMED")
-                print(f"[maya] images: the vision encoder starts when a picture arrives, in {lent / 2**30:.2f} GB "
+                print(f"[saguaro] images: the vision encoder starts when a picture arrives, in {lent / 2**30:.2f} GB "
                       "the model lends it", flush=True)
             else:   # the model's GPU memory is too small to lend that much (or an engine without lending)
-                print("[maya] images: the model cannot lend the vision encoder its GPU memory here - the encoder "
+                print("[saguaro] images: the model cannot lend the vision encoder its GPU memory here - the encoder "
                       "runs on the CPU", flush=True)
                 vision = Vision(dict(vcfg, gpu=False), log=vlog, env=venv)
     elif a.engine == "qfn":
@@ -6922,14 +6922,14 @@ def main() -> int:
                   fit_max_tokens=a.fit_max_tokens or cfg.get("fit_max_tokens") is True)
     if getattr(engine, "multi", 0) > 1:                 # n conversations at once: n places in the FIFO
         svc.fifo.set_capacity(engine.multi)
-        print(f"[maya] {engine.multi} conversations at once (--parallel)", flush=True)
+        print(f"[saguaro] {engine.multi} conversations at once (--parallel)", flush=True)
     if "reasoning_effort" not in cfg and a.engine == "maya":   # (a config without one: the model's own level)
         cfg = dict(cfg, reasoning_effort=maya_quants.model_defaults(cfg)[1])
     if cfg.get("reasoning_effort") or (svc.template.deepseek and cfg.get("reasoning_effort") is not None):
         try:
             (deepseek_effort_kwargs if svc.template.deepseek else effort_kwargs)(cfg["reasoning_effort"])
         except ValueError as e:
-            raise SystemExit(f"[maya] config reasoning_effort: {e}")
+            raise SystemExit(f"[saguaro] config reasoning_effort: {e}")
         svc.default_effort = cfg["reasoning_effort"]
         # (#363: DeepSeek's 1..100 budget is a level of its own - it was shown as "none")
         level = (effort_name if svc.template.minimax else effort_level)(svc.default_effort) or \
@@ -6937,7 +6937,7 @@ def main() -> int:
                                                      else "none")
         if getattr(svc.template, "forced_thinking", False):   # (CYBER-FROST: Qwen's words, low / medium / xhigh)
             level = QWEN_EFFORT.get(level, level)
-        print(f"[maya] thinking level when a request names none: {level}"
+        print(f"[saguaro] thinking level when a request names none: {level}"
               f"{'' if level in (svc.default_effort, f'{svc.default_effort} of 100') else f' (the config says {svc.default_effort})'}",
               flush=True)
     svc.think_budget = int(cfg["thinking_budget"] if cfg.get("thinking_budget") is not None else
@@ -6945,20 +6945,20 @@ def main() -> int:
                            maya_quants.default_thinking_budget(cfg) if a.engine == "maya" else 32768)         if svc.think_end_id is not None else 0
     svc.idle_unload_s = max(0.0, a.idle_unload if a.idle_unload is not None else float(cfg.get("idle_unload_s") or 0))
     if svc.think_budget:
-        print(f"[maya] thinking budget: {svc.think_budget} tokens (then the answer)", flush=True)
+        print(f"[saguaro] thinking budget: {svc.think_budget} tokens (then the answer)", flush=True)
     svc.model_management = model_management_setting(cfg)   # ("model_management": true: llama.cpp's load/unload/sse)
     if svc.model_management:
-        print("[maya] model management: on (/models/load, /models/unload, /models/sse)", flush=True)
+        print("[saguaro] model management: on (/models/load, /models/unload, /models/sse)", flush=True)
     svc.loop_guard = loop_guard_setting(cfg)            # (MAYA_LOOP_GUARD=0 or "loop_guard": false: off)
     if not svc.loop_guard:
-        print("[maya] loop guard: off (a request's \"loop_guard\": true turns it on for that request)", flush=True)
+        print("[saguaro] loop guard: off (a request's \"loop_guard\": true turns it on for that request)", flush=True)
     svc.api_key = a.api_key or cfg.get("api_key", "")
     try:
         svc.cors_origins = parse_cors_origins(cfg.get("cors_origins"))
     except ValueError as e:
         raise SystemExit(f"config: {e}")
     if svc.cors_origins:
-        print("[maya] browser pages allowed to call /v1/* (CORS): " + ", ".join(svc.cors_origins), flush=True)
+        print("[saguaro] browser pages allowed to call /v1/* (CORS): " + ", ".join(svc.cors_origins), flush=True)
     svc.gpu_index = (gpu_list(cfg) or [0])[0]           # the Monitor reads the card the engine runs on (issue #51)
     svc.gpu_indices = gpu_list(cfg)                     # ... or every card of a layer split (issue #112)
     svc.backend = cfg.get("backend")                    # the Monitor's GPU reader: sysfs on AMD/HIP, NVML otherwise
@@ -6992,14 +6992,14 @@ def main() -> int:
         try:
             svc.shared = clean_shared_defaults(json.loads(Path(svc.shared_path).read_text(encoding="utf-8")))
             if svc.shared:
-                print("[maya] other apps use the Chat settings: " +
+                print("[saguaro] other apps use the Chat settings: " +
                       ", ".join(f"{k}={v}" for k, v in svc.shared.items()), flush=True)
         except (OSError, ValueError):
             svc.shared = {}
     if hub is not None:
         import atexit
         svc.mcp = hub
-        print(f"[maya] starting {len(hub.servers)} MCP server{'s' * (len(hub.servers) != 1)} for the web app's "
+        print(f"[saguaro] starting {len(hub.servers)} MCP server{'s' * (len(hub.servers) != 1)} for the web app's "
               f"chat: {', '.join(hub.servers)}", flush=True)
         hub.start()
         atexit.register(hub.close)                      # the servers Strata started end with it
@@ -7022,7 +7022,7 @@ def main() -> int:
                   "to the config (clients send it as their API key; the web page asks for it)", flush=True)
         if os.name == "nt":
             print("       nothing arrives? Windows Firewall blocks it until allowed: accept its prompt for Python, or run "
-                  "in an admin PowerShell:\n         New-NetFirewallRule -DisplayName \"Maya " + str(a.port) + "\" "
+                  "in an admin PowerShell:\n         New-NetFirewallRule -DisplayName \"Saguaro " + str(a.port) + "\" "
                   "-Direction Inbound -Protocol TCP -LocalPort " + str(a.port) + " -Action Allow -Profile Private\n"
                   "       (and set this network to Private in Windows' network settings)", flush=True)
     if a.open:
@@ -7049,14 +7049,14 @@ def main() -> int:
         svc.stopping = True
         wrap_s = float(os.environ.get("STRATA_ENGINE_WRAP_S", "40") or 0)
         if wrap_s > 0 and hasattr(engine, "wrap") and svc.status.get("busy"):
-            print(f"[maya] stopping: the request in progress closes its thinking and answers (up to {wrap_s:.0f} s)",
+            print(f"[saguaro] stopping: the request in progress closes its thinking and answers (up to {wrap_s:.0f} s)",
                   flush=True)
             engine.wrap()
             if svc.fifo.acquire(timeout=wrap_s):
                 svc.fifo.release()
-                print("[maya] stopping: the request in progress finished", flush=True)
+                print("[saguaro] stopping: the request in progress finished", flush=True)
             else:
-                print(f"[maya] stopping: the answer was not done after {wrap_s:.0f} s - cut there", flush=True)
+                print(f"[saguaro] stopping: the answer was not done after {wrap_s:.0f} s - cut there", flush=True)
                 engine.stop()
                 # the cut request ends at its next step (DONE, or an error if the engine died): only then QUIT, so its
                 # last lines are read by the request and not by close()
@@ -7069,7 +7069,7 @@ def main() -> int:
         if hub is not None:
             hub.close()
     except KeyboardInterrupt:                          # a second Ctrl+C: at once
-        print("[maya] stopped at once: the engine ends as its input closes", flush=True)
+        print("[saguaro] stopped at once: the engine ends as its input closes", flush=True)
         return 130
     return 0
 

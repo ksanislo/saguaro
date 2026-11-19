@@ -1,5 +1,5 @@
 // serve/web/models.js - the Models page: the models set up on this machine (the run configs the setup wrote, GET
-// /api/models), the running one marked; switching to another (POST /api/models/switch: Maya starts again with it) and
+// /api/models), the running one marked; switching to another (POST /api/models/switch: Saguaro starts again with it) and
 // each one's engine settings, edited in its card (POST /api/models/settings - a dry run first for the command they make);
 // and deleting one (POST /api/models/delete: off the list, and with its downloaded files if asked; the running one after a
 // switch to another); and the files in the models folders no model uses (POST /api/models/leftovers deletes one).
@@ -55,7 +55,7 @@ const shortGpu = (n) => (n || "").replace(/^NVIDIA /, "").replace(/^GeForce /, "
 const tpChoices = (n, ...own) => [...new Set([1, 2, ...[4, 8, 16].filter((t) => t <= n), Math.max(1, n), ...own.map(Number)])]
   .filter((t) => t >= 1).sort((a, b) => a - b);
 
-// ------------------------------------------------------------------ Maya starting again (a switch, or new settings)
+// ------------------------------------------------------------------ Saguaro starting again (a switch, or new settings)
 async function watchRestart(r) {
   MS.restart = r;
   emit();
@@ -69,14 +69,14 @@ async function watchRestart(r) {
     } catch (e) { h = null; }
     if (!h) { down = true; continue; }
     if (down && h.status === "ok") {                   // back: the page starts over with the model that runs now
-      toast("success", r.why === "switch" ? `${r.name} is running` : "Maya is back", "Reloading the page…", 3000);
+      toast("success", r.why === "switch" ? `${r.name} is running` : "Saguaro is back", "Reloading the page…", 3000);
       setTimeout(() => location.reload(), 900);
       return;
     }
   }
   MS.restart = null;
   emit();
-  toast("error", "Maya is not back yet", "The terminal it runs in shows why. This page reconnects when it is.", 30000);
+  toast("error", "Saguaro is not back yet", "The terminal it runs in shows why. This page reconnects when it is.", 30000);
 }
 
 async function switchTo(m) {
@@ -84,20 +84,20 @@ async function switchTo(m) {
   const restarts = MS.data.restarts;
   const ok = await confirmDialog(`Switch to ${titleOf(m)}?`,
     (restarts
-      ? `<p>Maya stops <b>${esc(run ? titleOf(run) : "the model running now")}</b> and loads <b>${esc(titleOf(m))}</b> from ` +
+      ? `<p>Saguaro stops <b>${esc(run ? titleOf(run) : "the model running now")}</b> and loads <b>${esc(titleOf(m))}</b> from ` +
         `<code>${esc(m.file)}</code>. That takes a few minutes.</p><ul>` +
         `<li>Your chats stay here. The chat settings start at ${esc(titleOf(m))}'s own standard parameters and thinking ` +
         "level: a model's are not another's.</li>" +
         `<li>Apps using the API get a “try again” until it is back, then the model name <code>${esc(m.model)}</code>.</li>` +
         (S.anyBusy ? "<li>The answer being written finishes first.</li>" : "") + "</ul>"
-      : `<p><b>${esc(titleOf(m))}</b> becomes the model Maya starts next. This server was not started by maya.sh or ` +
-        "START-MAYA.bat, so it cannot start again by itself: stop it and start Maya again.</p>"),
+      : `<p><b>${esc(titleOf(m))}</b> becomes the model Saguaro starts next. This server was not started by maya.sh or ` +
+        "START-MAYA.bat, so it cannot start again by itself: stop it and start Saguaro again.</p>"),
     restarts ? "Switch model" : "Start it next");
   if (!ok) return;
   try {
     const out = await api("api/models/switch", {method: "POST", body: {file: m.file}});
     if (!out.restarts) {
-      toast("success", "Saved as the next model", `${titleOf(m)} starts the next time Maya starts (./maya.sh or START-MAYA.bat).`, 8000);
+      toast("success", "Saved as the next model", `${titleOf(m)} starts the next time Saguaro starts (./maya.sh or START-MAYA.bat).`, 8000);
       loadModels();
       return;
     }
@@ -176,10 +176,10 @@ function setDraft(patch) {
 
 async function saveSettings(m) {
   if (MS.saving) return;
-  // the running model's, where Maya starts again by itself: the reload is said and confirmed first, as a switch is
+  // the running model's, where Saguaro starts again by itself: the reload is said and confirmed first, as a switch is
   if (m.running && MS.data.restarts) {
     const ok = await confirmDialog(`Restart ${titleOf(m)} with these engine settings?`,
-      `<p>Maya saves them into <code>${esc(m.file)}</code> and loads the model again with them. That takes a few minutes.</p>` +
+      `<p>Saguaro saves them into <code>${esc(m.file)}</code> and loads the model again with them. That takes a few minutes.</p>` +
       "<ul><li>Your chats stay here; the next answer reads the chat again.</li>" +
       "<li>Apps using the API get a “try again” until it is back.</li>" +
       (S.anyBusy ? "<li>The answer being written finishes first.</li>" : "") + "</ul>", "Save and restart");
@@ -192,7 +192,7 @@ async function saveSettings(m) {
     closeEditor();
     if (out.restarts) { watchRestart({why: "settings", file: m.file, name: titleOf(m)}); return; }
     toast("success", "Engine settings saved", m.running
-      ? `Saved into ${m.file}. They apply from Maya's next start (./maya.sh or START-MAYA.bat starts it again by itself).`
+      ? `Saved into ${m.file}. They apply from Saguaro's next start (./maya.sh or START-MAYA.bat starts it again by itself).`
       : `Saved into ${m.file}. ${titleOf(m)} starts with them when you switch to it.`, 8000);
     loadModels();
   } catch (e) {
@@ -533,14 +533,14 @@ function Editor({m}) {
                 onClick=${() => setEnv(rows.filter((_, j) => j !== i))}><${Icon} name="close" sm/></button></div>`)}
             <button type="button" class="btn btn--ghost btn--sm mdl-link" onClick=${() => setEnv([...rows, ["", ""]])}><${Icon} name="plus" sm/>Add a variable</button></div>`}/>
         <div class="mdl-field mdl-field--last"><span class="mdl-field__text"><span class="mdl-field__name"><span>The engine's command</span></span>
-          <span class="mdl-field__hint">What Maya runs from this config, changes in purple. A setup run again keeps these settings.</span></span>
+          <span class="mdl-field__hint">What Saguaro runs from this config, changes in purple. A setup run again keeps these settings.</span></span>
           <${Command} c=${MS.preview} saved=${m.command}/></div>`
       : tabs[tab].rows}
     </div>
     ${MS.check ? html`<div class="mdl-warn mdl-warn--err" role="alert">${MS.check}</div>` : null}
     ${changed.length ? html`<p class="mdl-note">${restarts
-      ? `Maya starts again with these settings after the answer being written; the model loads again (a few minutes). The settings before stay in ${m.file}.prev.`
-      : m.running ? `Saved into ${m.file}; they apply from Maya's next start (this server was not started by maya.sh or START-MAYA.bat).`
+      ? `Saguaro starts again with these settings after the answer being written; the model loads again (a few minutes). The settings before stay in ${m.file}.prev.`
+      : m.running ? `Saved into ${m.file}; they apply from Saguaro's next start (this server was not started by maya.sh or START-MAYA.bat).`
       : `Saved into ${m.file}; ${titleOf(m)} starts with them when you switch to it.`}</p>` : null}
     <div class="mdl-edit__foot">
       <span class=${`mdl-count${changed.length ? " is-on" : ""}`}>${changed.length ? `${changed.length} change${changed.length === 1 ? "" : "s"}` : "No changes"}</span>
@@ -593,7 +593,7 @@ async function deleteModel() {
   emit();
   try {
     const out = await api("api/models/delete", {method: "POST", body: {file: d.m.file, files: d.files, then: d.then}});
-    if (out.deleting) {                              // (the running one: Maya switches, the next start deletes it)
+    if (out.deleting) {                              // (the running one: Saguaro switches, the next start deletes it)
       MS.del = null;
       watchRestart({why: "switch", file: out.to, name: nameOf(out.to)});
       return;
@@ -613,11 +613,11 @@ async function deleteModel() {
   }
 }
 
-// its files, said: "Its 3 GGUF files, the pack Maya built from them, its image encoder and its DFlash2 drafter (0.7 GB)."
+// its files, said: "Its 3 GGUF files, the pack Saguaro built from them, its image encoder and its DFlash2 drafter (0.7 GB)."
 function filesSaid(p) {
   const parts = [];
   if (p.gguf) parts.push(p.gguf === 1 ? "its GGUF file" : `its ${p.gguf} GGUF files`);
-  if (p.pack) parts.push(p.gguf ? "the pack Maya built from them" : "the pack Maya built");
+  if (p.pack) parts.push(p.gguf ? "the pack Saguaro built from them" : "the pack Saguaro built");
   if (p.vision) parts.push("its image encoder");
   if (p.drafter != null) parts.push(`its DFlash2 drafter (${bytes(p.drafter)})`);
   const s = and(parts);
@@ -645,9 +645,9 @@ function DeleteDialog() {
       <div class="dialog__head"><h2 id="mdl-del-title">Delete ${titleOf(m)}?</h2>
         <button type="button" class="icon-btn dialog__close" aria-label="Close" onClick=${closeDelete}><${Icon} name="close"/></button></div>
       <div class="dialog__body">
-        <p>Maya takes it off this list: its config <code>${m.file}</code>${m.script ? html` and its start script <code>${m.script}</code>` : null}. Your chats stay.</p>
+        <p>Saguaro takes it off this list: its config <code>${m.file}</code>${m.script ? html` and its start script <code>${m.script}</code>` : null}. Your chats stay.</p>
         ${m.running ? html`<div class="mdl-del__to" role="radiogroup" aria-labelledby="mdl-del-to">
-          <p id="mdl-del-to">It is running now. Maya switches to another model first (a few minutes), then deletes it:</p>
+          <p id="mdl-del-to">It is running now. Saguaro switches to another model first (a few minutes), then deletes it:</p>
           ${to.map((x) => html`<button type="button" role="radio" aria-checked=${String(d.then === x.file)} key=${x.file} disabled=${d.busy}
             class=${`mdl-del__box mdl-del__box--radio${d.then === x.file ? " is-on" : ""}`} onClick=${() => { d.then = x.file; emit(); }}>
             <span class="mdl-del__check" aria-hidden="true"></span>
@@ -751,10 +751,10 @@ function Download() {
 
 // ------------------------------------------------------------------ files no model uses (POST /api/models/leftovers)
 async function deleteLeftover(x) {
-  const what = [x.pack ? "a pack Maya built" : null, x.hub ? "a download from Hugging Face" : null].filter(Boolean);
+  const what = [x.pack ? "a pack Saguaro built" : null, x.hub ? "a download from Hugging Face" : null].filter(Boolean);
   const ok = await confirmDialog(`Delete ${x.name}?`,
-    `<p>Maya deletes ${x.folder ? "this folder and everything in it" : "this file"}: <b>${esc(bytes(x.bytes))}</b> at ` +
-    `<code>${esc(x.path)}</code>.</p><p>${what.length ? `It holds ${esc(and(what))}. ` : "Maya's setup may not have made it. "}` +
+    `<p>Saguaro deletes ${x.folder ? "this folder and everything in it" : "this file"}: <b>${esc(bytes(x.bytes))}</b> at ` +
+    `<code>${esc(x.path)}</code>.</p><p>${what.length ? `It holds ${esc(and(what))}. ` : "Saguaro's setup may not have made it. "}` +
     "No model on this list runs from it. This cannot be undone.</p>", `Delete ${bytes(x.bytes)}`, true);
   if (!ok) return;
   try {
@@ -771,10 +771,10 @@ function Leftovers({L}) {
   return html`<section class="card mdl-left" aria-labelledby="mdl-left-title">
     <div class="mdl-left__head"><b id="mdl-left-title">Files no model uses</b><b class="mdl-del__size">${bytes(L.bytes)}</b></div>
     <span class="mdl-left__sub">In ${and(L.folders)}, and no model on this list runs from them: a model deleted by hand, or set up
-      again somewhere else. Maya may not have downloaded all of them, so look before you delete.</span>
+      again somewhere else. Saguaro may not have downloaded all of them, so look before you delete.</span>
     <ul class="mdl-left__list">${L.items.map((x) => html`<li key=${x.path}>
       <span class="mdl-left__text"><span class="mdl-left__name"><${Icon} name=${x.folder ? "folder" : "disk"} sm/><b>${x.name}</b>
-        ${x.pack ? html`<span class="mdl-badge">Maya pack</span>` : null}${x.hub ? html`<span class="mdl-badge">Hugging Face</span>` : null}</span>
+        ${x.pack ? html`<span class="mdl-badge">Saguaro pack</span>` : null}${x.hub ? html`<span class="mdl-badge">Hugging Face</span>` : null}</span>
         <code>${x.path}</code><span>${bytes(x.bytes)} · changed ${relTime(x.modified * 1000)}</span></span>
       <button type="button" class="btn btn--ghost btn--sm" aria-label=${`Delete ${x.name}`} disabled=${!!MS.restart}
         onClick=${() => deleteLeftover(x)}><${Icon} name="trash" sm/>Delete</button></li>`)}</ul>
@@ -839,7 +839,7 @@ export function ModelsPage() {
         <button type="button" class="icon-btn" aria-label="New chat" title="New chat" onClick=${newChat}><${Icon} name="new-chat"/></button></div></header>` : null}
     <div class="mon__scroll"><div class="mon__page mdl__page">
       <div class="mon__head">
-        <div><h1>Models</h1><p>The models set up on this machine. Maya runs one at a time.</p></div>
+        <div><h1>Models</h1><p>The models set up on this machine. Saguaro runs one at a time.</p></div>
         <div class="mon__acts"><button type="button" class=${`btn btn--secondary btn--sm${MS.add ? " is-on" : ""}`} aria-expanded=${String(MS.add)}
           onClick=${() => { MS.add = !MS.add; emit(); if (MS.add) loadCatalog(); }}><${Icon} name="plus" sm/>Add a model</button></div>
       </div>
@@ -852,7 +852,7 @@ export function ModelsPage() {
       </section>` : null}
       ${r ? html`<div class="callout callout--info" role="status"><${Icon} name="info" sm/><span>
           <b>${r.why === "switch" ? `Switching to ${r.name}.` : `Restarting ${r.name} with the new engine settings.`}</b>
-          ${" "}Maya finishes the answer it is writing, then loads the model (a few minutes). This page reloads when it is back.</span></div>` : null}
+          ${" "}Saguaro finishes the answer it is writing, then loads the model (a few minutes). This page reloads when it is back.</span></div>` : null}
       ${MS.gone ? html`<div class="callout callout--ok" role="status"><${Icon} name="check" sm/><span>
           <b>${MS.gone.name} is deleted.</b>${" "}${MS.gone.files ? `${bytes(MS.gone.freed)} freed on the disk.`
             : MS.gone.folder ? `Its files stay in ${MS.gone.folder}.` : ""}${MS.gone.users.length
@@ -864,8 +864,8 @@ export function ModelsPage() {
         : D.models.map((m) => html`<${Card} m=${m} key=${m.file}/>`)}
       ${D ? html`<${Leftovers} L=${D.leftovers}/>` : null}
       ${D && D.models.length ? html`<p class="mdl-foot"><${Icon} name="info" sm/><span>${D.restarts
-        ? "Switching, or saving the running model's engine settings, starts Maya again through its start script, as a port change does. Each model keeps its own chat settings."
-        : "This server was not started by maya.sh or START-MAYA.bat, so it cannot start again by itself: a switch or new settings apply from Maya's next start."}</span></p>` : null}
+        ? "Switching, or saving the running model's engine settings, starts Saguaro again through its start script, as a port change does. Each model keeps its own chat settings."
+        : "This server was not started by maya.sh or START-MAYA.bat, so it cannot start again by itself: a switch or new settings apply from Saguaro's next start."}</span></p>` : null}
     </div></div>
     ${MS.del ? html`<${DeleteDialog} key=${MS.del.m.file}/>` : null}
   </main>`;

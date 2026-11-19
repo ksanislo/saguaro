@@ -1,4 +1,4 @@
-"""serve/test_minimax_frontend.py - MiniMax-M3.1-Flash in the frontend: Maya's chat template (tools/mm3/chat_template.jinja)
+"""serve/test_minimax_frontend.py - MiniMax-M3.1-Flash in the frontend: Saguaro's chat template (tools/mm3/chat_template.jinja)
 rendered as MiniMax's own template renders it, its thinking levels, and the model's output (reasoning, answer, tool
 calls) parsed from any split of the stream.
 

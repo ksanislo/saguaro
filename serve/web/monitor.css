@@ -1,4 +1,4 @@
-/* Project Maya UI - the Monitor: the speed and what runs now, the experts' tiers, what fills each GPU, the hardware and
+/* Saguaro UI - the Monitor: the speed and what runs now, the experts' tiers, what fills each GPU, the hardware and
    the recent requests. */
 
 .mon__scroll { flex: 1; min-height: 0; overflow-y: auto; }

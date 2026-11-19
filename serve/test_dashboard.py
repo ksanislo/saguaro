@@ -202,7 +202,7 @@ class Dashboard(unittest.TestCase):
         s, h, b = self.req("GET", "/api/report")
         text = b.decode()
         self.assertEqual(s, 200)
-        self.assertIn("Project Maya", text)
+        self.assertIn("Saguaro", text)
         self.assertIn("MAYA_GLM_RAM_GB", text)   # (a config's settings under the names users see)
         self.assertNotIn("secret", text)
 
@@ -303,8 +303,8 @@ class Dashboard(unittest.TestCase):
 
 
 class Port(unittest.TestCase):
-    """The dashboard's Port: saved into the config and Maya's start script for it; a busy, a reserved or the same port is
-    refused with nothing saved; only Maya's own page may move the server.  (No restart here: maya.py did not start this
+    """The dashboard's Port: saved into the config and Saguaro's start script for it; a busy, a reserved or the same port is
+    refused with nothing saved; only Saguaro's own page may move the server.  (No restart here: maya.py did not start this
     server, so the port applies from the next start - the restart itself is maya.py's RESTART_EXIT, tested there.)"""
 
     def setUp(self):

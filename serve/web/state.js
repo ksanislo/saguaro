@@ -115,7 +115,7 @@ export function applyTheme() {
   const t = c === "system" ? (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark") : c;
   document.documentElement.dataset.theme = t;
   const meta = document.querySelector('meta[name="theme-color"]');
-  if (meta) meta.content = t === "dark" ? "#19191d" : "#ffffff";
+  if (meta) meta.content = t === "dark" ? "#1c1714" : "#fcf8f2";
 }
 export function setTheme(c) {
   try { localStorage.setItem("maya.theme", c); localStorage.removeItem("maya.ui-theme"); } catch (e) { /* ignore */ }

@@ -262,7 +262,7 @@ export async function saveThinkBudget(text) {
   }
 }
 
-// ------------------------------------------------------------------ the port (Maya starts again on it)
+// ------------------------------------------------------------------ the port (Saguaro starts again on it)
 export async function loadPortInfo() {
   try {
     const r = await fetch("api/port", {headers: headers()});
@@ -274,24 +274,24 @@ export async function loadPortInfo() {
 export async function confirmPort(n) {
   const now = S.portInfo.port, url = `${location.protocol}//${location.hostname}:${n}${location.pathname}`;
   if (n < 1024 || n > 65535) { toast("error", "The port did not change", "Use a number from 1024 to 65535.", 6000); return false; }
-  const ok = await confirmDialog(`Move Maya to port ${n}?`,
-    `<p>Maya listens on port <b>${esc(String(now))}</b> now. ` + (S.portInfo.restarts
+  const ok = await confirmDialog(`Move Saguaro to port ${n}?`,
+    `<p>Saguaro listens on port <b>${esc(String(now))}</b> now. ` + (S.portInfo.restarts
       ? `Saving starts it again on the new port: the model loads again, ${esc(loadTime())}.</p>` +
-        "<ul><li>This page moves to <b>" + esc(url) + "</b> when Maya is back.</li>" +
+        "<ul><li>This page moves to <b>" + esc(url) + "</b> when Saguaro is back.</li>" +
         "<li>Apps that use the API need the new port.</li>" + (S.anyBusy ? "<li>The answer being written finishes first.</li>" : "") + "</ul>"
       : "The new port is saved and applies from the next start.</p>"), `Use port ${n}`);
   if (!ok) return false;
   try {
     const out = await api("api/port", {method: "POST", body: {port: n}});
-    if (!out.restarts) { toast("success", "Port saved", `Maya uses port ${n} from its next start.`, 6000); loadPortInfo(); return true; }
+    if (!out.restarts) { toast("success", "Port saved", `Saguaro uses port ${n} from its next start.`, 6000); loadPortInfo(); return true; }
   } catch (err) {
     toast("error", "The port did not change", err.message, 6000);
     return false;
   }
-  S.hint = `Moving Maya to port ${n}…`;
+  S.hint = `Moving Saguaro to port ${n}…`;
   emit();
-  toast("info", "Starting again", `Maya moves to port ${n}; this page follows when it is back.`, 8000);
-  // the new address answers once Maya is back (no-cors: another port is another origin; an answer at all is enough)
+  toast("info", "Starting again", `Saguaro moves to port ${n}; this page follows when it is back.`, 8000);
+  // the new address answers once Saguaro is back (no-cors: another port is another origin; an answer at all is enough)
   for (let i = 0; i < 300; i++) {
     await new Promise((res) => setTimeout(res, 2000));
     try {
@@ -302,7 +302,7 @@ export async function confirmPort(n) {
   }
   S.hint = "";
   emit();
-  toast("error", "Maya is not back yet", `Open ${url} when it is.`, 30000);
+  toast("error", "Saguaro is not back yet", `Open ${url} when it is.`, 30000);
   return true;
 }
 
@@ -349,9 +349,9 @@ export async function loadUpdate(force = false) {
 export async function startUpdate() {
   const v = S.update && S.update.latest && S.update.latest.version;
   if (!v) return;
-  const ok = await confirmDialog(`Update Project Maya to v${v}?`,
-    "<p>Only Maya's code is updated: <b>the model is not downloaded again</b>, and its files, your settings and the " +
-    "chats in this browser stay.</p><p>Maya finishes the answer it is writing, downloads the new code (git), compiles " +
+  const ok = await confirmDialog(`Update Saguaro to v${v}?`,
+    "<p>Only Saguaro's code is updated: <b>the model is not downloaded again</b>, and its files, your settings and the " +
+    "chats in this browser stay.</p><p>Saguaro finishes the answer it is writing, downloads the new code (git), compiles " +
     "only the engine files that changed (usually a few minutes; the terminal shows the progress) and loads the model " +
     "again. Apps using the API are asked to try again meanwhile.</p>", `Update to v${v}`);
   if (!ok) return;
@@ -390,7 +390,7 @@ export async function watchUpdate(to) {
     S.updateWatch = null;
     await loadUpdate();
     if (!restarted) toast("error", "The update did not happen", (S.update && S.update.state && S.update.state.error) || "", 9000);
-    else toast("warn", "Maya started again on the same version", "The update's files did not arrive; the terminal shows why.", 9000);
+    else toast("warn", "Saguaro started again on the same version", "The update's files did not arrive; the terminal shows why.", 9000);
     return;
   }
 }

@@ -143,7 +143,7 @@ function useSavings() {
 function SavedBody({r, setR, close, sheet}) {
   const reset = async () => {
     if (!await confirmDialog("Start over from $0?", "<p>Every model's count of tokens and what they would have cost goes back to zero. This cannot be undone.</p>", "Start over", true)) return;
-    try { setR(await api("api/savings/reset", {method: "POST", body: {}})); toast("success", "Started over", "Maya counts from $0 again."); }
+    try { setR(await api("api/savings/reset", {method: "POST", body: {}})); toast("success", "Started over", "Saguaro counts from $0 again."); }
     catch (e) { toast("error", "Not reset", e.message, 6000); }
   };
   if (!r) return html`<p class="saved-pop__note">Counting…</p>`;
@@ -155,7 +155,7 @@ function SavedBody({r, setR, close, sheet}) {
   const since = r.since ? new Date(r.since * 1000).toLocaleDateString([], {month: "short", day: "numeric"}) : null;
   const prices = r.prices && r.prices.length ? html`
     ${r.prices.map((p) => html`<div class="saved-pop__price"><span>${modelName(p.model)} (${p.custom ? "your prices" : p.api})</span><span>${dollars(p.input)} · ${dollars(p.cached)} · ${dollars(p.output)}</span></div>`)}
-    <span>${r.prices.some((p) => p.peak) ? "DeepSeek charges twice that at its peak hours (weekdays 01–04 and 06–10 UTC), and Maya counts those tokens at that price. " : ""}The prompt Maya reads again from its own cache counts at the cached price. Electricity is not counted.</span>` : null;
+    <span>${r.prices.some((p) => p.peak) ? "DeepSeek charges twice that at its peak hours (weekdays 01–04 and 06–10 UTC), and Saguaro counts those tokens at that price. " : ""}The prompt Saguaro reads again from its own cache counts at the cached price. Electricity is not counted.</span>` : null;
   const change = () => { close(); openSettings("savings"); };
   return html`
     <div class="saved-pop__head">${sheet ? null : html`<span>Saved, compared with the API</span>`}<b>${usd(r.usd)}</b>
@@ -293,10 +293,10 @@ export function Sidebar({drawer, open}) {
       if (back) back.focus({preventScroll: true});
     };
   }, [shown]);
-  return html`<nav ref=${nav} class=${`side${drawer ? " side--drawer" : ""}`} aria-label="Maya" role=${shown ? "dialog" : undefined}
+  return html`<nav ref=${nav} class=${`side${drawer ? " side--drawer" : ""}`} aria-label="Saguaro" role=${shown ? "dialog" : undefined}
     aria-modal=${shown ? "true" : undefined} inert=${drawer && !open}>
     <div class="side__head" ref=${head}>
-      <span class="side__brand"><${MayaMark}/><span>Maya</span></span>
+      <span class="side__brand"><${MayaMark}/><span>Saguaro</span></span>
       ${drawer
         ? html`<button type="button" class="icon-btn" aria-label="Close the chats" onClick=${() => { S.drawer = false; emit(); }}><${Icon} name="close"/></button>`
         : html`<button type="button" class="icon-btn" aria-label="Close the sidebar" title="Close the sidebar" onClick=${() => setSide(false)}>

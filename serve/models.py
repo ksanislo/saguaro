@@ -717,13 +717,13 @@ def save(path: Path, settings: dict) -> dict:
     first time the page changes it, what the setup wrote: installer.as_set_up, the page's Reset)."""
     cfg = read(path)
     if not cfg:
-        raise ValueError(f"{Path(path).name}: not a config Maya can read")
+        raise ValueError(f"{Path(path).name}: not a config Saguaro can read")
     return _commit(path, cfg, apply(cfg, settings))
 
 
 # ------------------------------------------------------------------ Turbo (the page's Turbo button)
 # The fastest settings the engine has, for people who play with speed and run benchmarks.  What the engine needs a start
-# for is written into the config (the same "settings saved, Maya starts again" flow); the config keeps a "turbo" note:
+# for is written into the config (the same "settings saved, Saguaro starts again" flow); the config keeps a "turbo" note:
 # what it was before, so that switching Turbo off puts every one of these back.  The request-level half (greedy
 # decoding, the fastest thinking level, coding prompts) lives in the page (serve/web/turbo-core.js).
 TURBO_CONTEXT = 32768                               # GLM and MiniMax: a smaller context leaves VRAM to the experts ...
@@ -809,7 +809,7 @@ def turbo_enable(path: Path) -> dict:
     must start again."""
     cfg = read(path)
     if not cfg:
-        raise ValueError(f"{Path(path).name}: not a config Maya can read")
+        raise ValueError(f"{Path(path).name}: not a config Saguaro can read")
     if turbo_on(cfg):
         raise ValueError("Turbo is already on")
     cur, patch = settings_of(cfg), turbo_patch(cfg)
@@ -827,7 +827,7 @@ def turbo_disable(path: Path) -> dict:
     back to what they were."""
     cfg = read(path)
     if not cfg:
-        raise ValueError(f"{Path(path).name}: not a config Maya can read")
+        raise ValueError(f"{Path(path).name}: not a config Saguaro can read")
     note = cfg.get("turbo")
     if not isinstance(note, dict):
         raise ValueError("Turbo is not on")
@@ -846,8 +846,8 @@ def turbo_disable(path: Path) -> dict:
 
 
 # ------------------------------------------------------------------ deleting a model (the page's Delete)
-# Off the list: its config, its start scripts and what Maya keeps beside it.  With its files: what the setup downloaded
-# for it and the pack Maya built - never a file another model here runs from, nor one outside the models folder the
+# Off the list: its config, its start scripts and what Saguaro keeps beside it.  With its files: what the setup downloaded
+# for it and the pack Saguaro built - never a file another model here runs from, nor one outside the models folder the
 # setup downloaded into (a GGUF of your own stays; its pack goes).  Its DFlash2 drafter goes too: another model drafting
 # with the same file drafts with MTP from then on (its --dflash taken out).
 GGUF_PART = re.compile(r"^(.*)-(\d{5})-of-(\d{5})\.gguf$", re.I)
@@ -971,7 +971,7 @@ def delete_plan(root: Path, path: Path) -> dict:
     models = _res((cfg.get("installer") or {}).get("models_dir"))
     pack = _res(pack_of(cfg))
     if models is None or pack is None:
-        out["why"] = "Maya's setup did not download this model's files, so it does not know which ones are its own"
+        out["why"] = "Saguaro's setup did not download this model's files, so it does not know which ones are its own"
         return out
     folder = pack.parent
     out["folder"] = str(folder)
@@ -1000,7 +1000,7 @@ def delete_plan(root: Path, path: Path) -> dict:
                 if not shared(f):
                     add(f, "gguf")
         else:
-            out["kept"].append(f"Your own model files in {folder} stay; only the pack Maya built from them goes.")
+            out["kept"].append(f"Your own model files in {folder} stay; only the pack Saguaro built from them goes.")
     for v in map(_res, vision_files(cfg)):
         if v is not None and _within(v, models) and not shared(v):
             add(v, "vision")
@@ -1087,7 +1087,7 @@ def delete(root: Path, path: Path, files: bool = False) -> dict:
 # folder or a file of 100 MB or more (a download's log is not listed), and one level down in a folder another model
 # runs from only a folder with a pack of its own (GLM's quants side by side in GLM-5.3-Flash/: DeepSeek's dspark/ and
 # vision/ beside its GGUF folder are read through the pack, so a folder without one is never taken for unused).  Never
-# a hidden one, the project or the home folder.  Maya may not have downloaded it: the page says what is in it, and
+# a hidden one, the project or the home folder.  Saguaro may not have downloaded it: the page says what is in it, and
 # deletes one at a time.
 LEFTOVER_MIN = 10 ** 8
 PACK_MARKS = ("sources.json", "tensors.txt", "mm3.txt", "ds4.txt", "native_experts.txt", "index.txt")
@@ -1108,7 +1108,7 @@ def models_dirs(root: Path) -> list:
 
 
 def _has_pack(p: Path) -> bool:
-    """A pack Maya built is in `p` (or `p` is one), two folders deep at most."""
+    """A pack Saguaro built is in `p` (or `p` is one), two folders deep at most."""
     try:
         return any(next(p.glob(pat + m), None) is not None for pat in ("", "*/", "*/*/") for m in PACK_MARKS)
     except OSError:
@@ -1117,7 +1117,7 @@ def _has_pack(p: Path) -> bool:
 
 def leftovers(root: Path) -> dict:
     """{"folders": the models folders, "items": [{"path", "name", "bytes", "folder" (a folder, else a file), "pack" (a
-    pack Maya built is in it), "hub" (downloaded from the Hugging Face Hub), "modified"}], "bytes"}: what no model here
+    pack Saguaro built is in it), "hub" (downloaded from the Hugging Face Hub), "modified"}], "bytes"}: what no model here
     runs from, largest first."""
     project, home = _res(root), Path.home().resolve()
     refs = [r for p in config_paths(root) for r in runs_from(read(p))]

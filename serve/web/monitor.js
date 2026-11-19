@@ -63,7 +63,7 @@ function Throughput({m}) {
   const a = sparkPath(h.tok_s), b = sparkPath(h.prefill_tok_s_mean);
   // (the drafters on, and the share of their drafts the model kept: live from the engine's STAT lines, else the last answer's)
   const spec = speculationView(m);
-  // the highest Decode figure since Maya started - live or a finished answer's (the server's, kept as each reading beats
+  // the highest Decode figure since Saguaro started - live or a finished answer's (the server's, kept as each reading beats
   // it; from 32 tokens on: a few tokens' speed says little)
   const peak = m.totals && m.totals.peak_decode;
   const when = peak ? new Date(peak.time * 1000) : null;
@@ -74,8 +74,8 @@ function Throughput({m}) {
       <div class="speed"><span class="speed__label"><i class="key key--line"></i>Decode · ${many ? `engine total, ${live.writing} chats writing` : gen ? "writing now" : live.state === "reading" ? "reading the prompt" : last ? "last request" : "waiting for a request"}</span>
         <div class="speed__row"><span class="speed__big num">${speed == null ? "–" : fmt(speed, 1)}<small>tok/s</small></span>
           ${/* the peak beside the live Decode (below it on a phone), small: a reference, not a second headline */ ""}
-          <span class="speed__peak num" title=${peak ? `The highest decode speed since Maya started: ${fmt(peak.tok_s, 1)} tok/s at ${at}, ${fmt(peak.tokens)} tokens into the answer. Live speeds and finished answers count, from 32 tokens on.`
-              : "The highest decode speed since Maya started. Live speeds and finished answers count, from 32 tokens on."}>Peak ${peak ? `${fmt(peak.tok_s, 1)} tok/s` : "–"}</span></div></div>
+          <span class="speed__peak num" title=${peak ? `The highest decode speed since Saguaro started: ${fmt(peak.tok_s, 1)} tok/s at ${at}, ${fmt(peak.tokens)} tokens into the answer. Live speeds and finished answers count, from 32 tokens on.`
+              : "The highest decode speed since Saguaro started. Live speeds and finished answers count, from 32 tokens on."}>Peak ${peak ? `${fmt(peak.tok_s, 1)} tok/s` : "–"}</span></div></div>
       <div class="speed" title="Prompt tokens read per second (the prefill), counting only the tokens read - not the ones reused from the conversation cache">
         <span class="speed__label"><i class="key key--dash"></i>Prefill · ${live.state === "reading" ? "reading now" : gen ? "this request" : last ? "last request" : "waiting"}</span>
         <span class="speed__mid num">${prefill == null ? "–" : fmt(prefill)}<small>tok/s</small></span></div>
@@ -333,7 +333,7 @@ function gpuDetail(g, segs, m) {
     helper: "separate helper expert pool; CPU backing available for fallback",
     vision: g.vision_lent ? "the pool's tail, while it encodes" : g.vision_own ? "the vision tower, in the engine's process" : "its own process",
     rest: "the driver's reserve and context, conversation snapshots and small buffers",
-    other: "processes that are not Maya's",
+    other: "processes that are not Saguaro's",
     free: (g.free || 0) < 1.5 * GIB ? "kept free for the driver and the sampler" : "unused",
     used: "",
   };
@@ -433,7 +433,7 @@ function GpuMap({m}) {
 // ------------------------------------------------------------------ the hardware cards
 const METRICS = [
   {key: "gpu", label: "GPU active", unit: "%", series: "gpu_util", max: 100,
-   tip: "NVIDIA's counter: the share of time any GPU kernel is running. While Maya answers it reads 100% - between bursts of work the GPU waits (inside a kernel) for experts from RAM and the CPU. Power shows how hard it really works."},
+   tip: "NVIDIA's counter: the share of time any GPU kernel is running. While Saguaro answers it reads 100% - between bursts of work the GPU waits (inside a kernel) for experts from RAM and the CPU. Power shows how hard it really works."},
   {key: "vram", label: "VRAM", series: "gpu_mem_used"},
   {key: "power", label: "Power", unit: "W", series: "gpu_power"},
   {key: "temp", label: "GPU temp", unit: "°C", series: "gpu_temp", tone: "warn"},

@@ -101,7 +101,7 @@ class ChatTemplate:
             # MiniMax's card: "set reasoning_effort in the chat template: low, medium, high, xhigh or max" - its
             # template has one thinking mode, adaptive (the model decides whether to think), and writes the effort
             # beside it; none named (Auto) is the template's default.  Off is thinking_mode "disabled" (MiniMax-M3's
-            # words, the turn opened with </mm:think>) - the one place Maya's prompt differs from MiniMax's template.
+            # words, the turn opened with </mm:think>) - the one place Saguaro's prompt differs from MiniMax's template.
             off = kwargs.pop("enable_thinking", None) is False
             level = kwargs.pop("reasoning_effort", None)
             level = name or level

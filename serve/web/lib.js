@@ -23,7 +23,7 @@ export function ago(s) {
 export const timeStr = (t) => new Date(t).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"});
 export const rate = (mb) => (mb == null ? "–" : mb >= 1000 ? `${fmt(mb / 1024, 1)} GB/s` : `${fmt(mb, mb < 10 ? 1 : 0)} MB/s`);
 
-// settings in localStorage ("maya.<key>", JSON); the names of releases before Maya ("strata.<key>") are still read
+// settings in localStorage ("maya.<key>", JSON); the names of releases before Saguaro ("strata.<key>") are still read
 export const store = {
   get(k, d) {
     try {

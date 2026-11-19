@@ -1,4 +1,4 @@
-/* Project Maya UI - the building blocks: the page's base, icons, buttons, inputs, switches, segmented choices, menus,
+/* Saguaro UI - the building blocks: the page's base, icons, buttons, inputs, switches, segmented choices, menus,
    dialogs, toasts, badges, chips, callouts, and an answer's Markdown with its code blocks.  Colours: tokens.css. */
 
 *, *::before, *::after { box-sizing: border-box; }
@@ -31,9 +31,9 @@ a:hover { color: var(--st-ink); }
 .gauge { width: 18px; height: 18px; flex: none; stroke-width: 1.75; color: var(--st-accent-text); }
 .gauge path:last-child { transition: transform 220ms var(--st-ease); }
 
-/* the Maya mark (the gradient's one place) and a model's logo */
-.maya-mark { display: inline-grid; place-items: center; flex: none; border-radius: 8px; color: #fff;
-             background: linear-gradient(135deg, #8b7cff, #38bdf8); }
+/* the Saguaro mark (the gradient's one place) and a model's logo */
+.maya-mark { display: inline-grid; place-items: center; flex: none; border-radius: 8px; color: #0f2a1a;
+             background: linear-gradient(180deg, #f59e0b, #f2643c 55%, #e8508a); }   /* a saguaro at sunset */
 .model-logo { display: inline-grid; place-items: center; flex: none; border-radius: 9px; background: var(--st-surface-2); color: var(--st-ink); }
 .model-logo img { display: block; }
 [data-theme="dark"] .model-logo img.is-mono, :root:not([data-theme="light"]) .model-logo img.is-mono { filter: invert(1); }

@@ -36,7 +36,7 @@ class RecordingEngine(MockEngine):
 
 
 class StampedLog(unittest.TestCase):
-    """#783: a time before each of the server's own `[maya]` lines; the engine's lines and other text are untouched."""
+    """#783: a time before each of the server's own `[saguaro]` lines; the engine's lines and other text are untouched."""
 
     def test_only_maya_lines_get_a_time(self):
         import io
@@ -44,16 +44,16 @@ class StampedLog(unittest.TestCase):
         from serve.server import StampedStdout
         buf = io.StringIO()
         out = StampedStdout(buf)
-        print("[maya] request 1 done", file=out)
-        print("[maya] in", "pieces", end="", file=out)
+        print("[saguaro] request 1 done", file=out)
+        print("[saguaro] in", "pieces", end="", file=out)
         print(" - one line", file=out)
         print("maya ds4 serve: request 926: prompt 100 tokens", file=out)
-        print("  [maya] indented is not stamped", file=out)
+        print("  [saguaro] indented is not stamped", file=out)
         lines = buf.getvalue().splitlines()
         stamp = r"\d\d:\d\d:\d\d "
-        self.assertRegex(lines[0], "^" + stamp + r"\[maya\] request 1 done$")
-        self.assertRegex(lines[1], "^" + stamp + r"\[maya\] in pieces - one line$")
-        self.assertEqual(lines[2:], ["maya ds4 serve: request 926: prompt 100 tokens", "  [maya] indented is not stamped"])
+        self.assertRegex(lines[0], "^" + stamp + r"\[saguaro\] request 1 done$")
+        self.assertRegex(lines[1], "^" + stamp + r"\[saguaro\] in pieces - one line$")
+        self.assertEqual(lines[2:], ["maya ds4 serve: request 926: prompt 100 tokens", "  [saguaro] indented is not stamped"])
         self.assertEqual(len(re.findall(stamp, buf.getvalue())), 2)
 
 

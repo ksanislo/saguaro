@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
-<meta name="theme-color" content="#19191d">
-<title>Project Maya</title>
+<meta name="theme-color" content="#1c1714">
+<title>Saguaro</title>
 <link rel="manifest" href="web/manifest.webmanifest">
 <link rel="icon" href="web/icon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="web/tokens.css">
@@ -16,7 +16,7 @@
 <link rel="stylesheet" href="web/turbo.css">
 <link rel="modulepreload" href="web/preact.js">
 <script>
-  // the theme before the first paint: the saved choice ("maya.theme": dark, light or system), else dark (Maya's default).
+  // the theme before the first paint: the saved choice ("maya.theme": dark, light or system), else dark (Saguaro's default).
   // (The dashboard before the redesign kept its own in "maya.ui-theme": not carried over, so every browser starts dark.)
   try {
     let t = localStorage.getItem("maya.theme") || "dark";
@@ -29,7 +29,7 @@
 </head>
 <body>
 <div id="app"></div>
-<noscript><p style="padding:24px;font-family:system-ui,sans-serif">Project Maya's page needs JavaScript. The API works without it.</p></noscript>
+<noscript><p style="padding:24px;font-family:system-ui,sans-serif">Saguaro's page needs JavaScript. The API works without it.</p></noscript>
 <script type="module" src="web/app.js"></script>
 </body>
 </html>
