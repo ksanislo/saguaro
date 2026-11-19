@@ -304,14 +304,14 @@ class Dashboard(unittest.TestCase):
 
 class Port(unittest.TestCase):
     """The dashboard's Port: saved into the config and Saguaro's start script for it; a busy, a reserved or the same port is
-    refused with nothing saved; only Saguaro's own page may move the server.  (No restart here: maya.py did not start this
-    server, so the port applies from the next start - the restart itself is maya.py's RESTART_EXIT, tested there.)"""
+    refused with nothing saved; only Saguaro's own page may move the server.  (No restart here: saguaro.py did not start this
+    server, so the port applies from the next start - the restart itself is saguaro.py's RESTART_EXIT, tested there.)"""
 
     def setUp(self):
         os.environ.pop("MAYA_RESTART_ON_UPDATE", None)
         Dashboard.setUp(self)
         self.script = Path(self.tmp.name) / "run-maya-test.bat"
-        self.script.write_bytes(b"@echo off\r\npython maya.py --config " + str(self.cfg).encode() + b" --port 8080 %*\r\n")
+        self.script.write_bytes(b"@echo off\r\npython saguaro.py --config " + str(self.cfg).encode() + b" --port 8080 %*\r\n")
 
     tearDown = Dashboard.tearDown
     req = Dashboard.req

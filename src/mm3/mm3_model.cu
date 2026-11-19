@@ -4184,7 +4184,7 @@ bool Model::load(const Options& o_in, std::string& err) {
         p->info.push_back("prefill: this PC's calibration (" + p->tfile + "): chunk " + std::to_string(p->o.chunk) +
                           (p->gguf ? std::string(", ") + (gg::gemm_backend() == 1 ? "hipBLASLt" : "BLAS") + " GEMMs" : ""));
     else if (o.tune && o.tp <= 0)
-        p->info.push_back("NOTE: prefill not calibrated on this PC (./maya.sh --calibrate measures it): chunk " +
+        p->info.push_back("NOTE: prefill not calibrated on this PC (./saguaro.sh --calibrate measures it): chunk " +
                           std::to_string(p->o.chunk) +
                           (other_calibration ? std::string("; ") + p->tfile + " holds a calibration of other GPUs, "
                                                "another GPU list or another runtime / driver: run it again for this setup"

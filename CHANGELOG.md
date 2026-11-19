@@ -11,8 +11,7 @@ MiniMax-M3.1-Flash) and Strata's Qwen3.8-Flash-Next engine (`engines/qfn`) behin
 older multi-GPU hardware (NVIDIA Turing T4 - sm_75 tensor cores, Xeon AVX1 CPUs). GitHub:
 [ksanislo/saguaro](https://github.com/ksanislo/saguaro).
 
-- **Renamed:** the README and docs, the installers (`./saguaro.sh`, `saguaro.py`, `START-SAGUARO.bat` - `./maya.sh`,
-  `maya.py` and `START-MAYA.bat` still work and run the new ones), the setup and dashboard text.
+- **Renamed:** the README and docs, the installers (`./saguaro.sh`, `saguaro.py`, `START-SAGUARO.bat`; the old names are gone), the setup and dashboard text.
   `docs/AMD_MAYA.md` is now `docs/AMD_SAGUARO.md`.
 - **Kept for compatibility:** the `MAYA_*` / `STRATA_*` / `DS4_*` settings, the engine binaries (`maya`, `maya-ds4`,
   `maya-mm3`, `maya-qfn`), the quant names (Maya-XS to Maya-L), the config, log, report and storage file names

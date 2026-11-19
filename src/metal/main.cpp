@@ -1,6 +1,6 @@
 // src/metal/main.cpp - maya-metal: GLM-5.3-Flash on Apple Silicon.
 //
-//   maya-metal --gguf MODEL.gguf --serve [--max-context N] ...   the engine `maya.py` / serve/server.py drive
+//   maya-metal --gguf MODEL.gguf --serve [--max-context N] ...   the engine `saguaro.py` / serve/server.py drive
 //   maya-metal --gguf MODEL.gguf --ids 1,2,3 [--n 64]            greedy continuation of token ids, with timings
 #include "glm_metal.hpp"
 #include "spec.hpp"

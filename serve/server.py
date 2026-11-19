@@ -167,7 +167,7 @@ def nvml_pids(pid: int | None, listed: set) -> set:
 # the dashboard's Context size range (serve/models.py: the Models page's Engine settings offer the same one)
 CONTEXT_MIN, CONTEXT_FALLBACK_MAX = models.CONTEXT_MIN, models.CONTEXT_FALLBACK_MAX
 CONTEXT_TESTED, CONTEXT_TESTED_DEFAULT = models.CONTEXT_TESTED, models.CONTEXT_TESTED_DEFAULT
-# the engine log's lines a report carries (maya.py's --report reads the same ones)
+# the engine log's lines a report carries (saguaro.py's --report reads the same ones)
 REPORT_LINES = re.compile(r"glm fast:|glm prefill: (?:CUDA|HIP)|glm split|glm stat|glm slots|glm vram|ds4 serve: prompt read|glm prefill: \d|ERR|error|"
                           r"failed|out of memory|WARNING", re.I)
 IM_END = "<|im_end|>"
@@ -2364,7 +2364,7 @@ class Service:
         check_request_sampling(req)
         bias = logit_bias_of(req.get("logit_bias"), len(getattr(self.tok, "tokens", None) or ()) or None)
         if bias and (getattr(self.engine, "info", None) or {}).get("logit_bias") != 1:
-            raise ValueError("logit_bias: this engine does not apply token biases - update Saguaro (./maya.sh --setup)")
+            raise ValueError("logit_bias: this engine does not apply token biases - update Saguaro (./saguaro.sh --setup)")
         # ignore_eos (vLLM's and llama.cpp's): the tokens that end an answer are banned, so it runs to max_tokens - as
         # llama.cpp does it, through the logit bias, so the text past the model's natural end stays text it would write
         ignore = req.get("ignore_eos")
@@ -2378,7 +2378,7 @@ class Service:
             if limit <= 0:
                 raise ValueError("ignore_eos: needs max_tokens (the answer would run until the context is full)")
             if (getattr(self.engine, "info", None) or {}).get("logit_bias") != 1:
-                raise ValueError("ignore_eos: this engine does not apply token biases - update Saguaro (./maya.sh --setup)")
+                raise ValueError("ignore_eos: this engine does not apply token biases - update Saguaro (./saguaro.sh --setup)")
             bias = {**bias, **{t: -100.0 for t in sorted(self.stop_ids | self.eos_ids)}}
         if "logit_bias" in req or ignore:
             req["logit_bias"] = bias
@@ -2679,15 +2679,15 @@ class Service:
         return {"budget": n, "supported": True, "saved": saved}
 
     def port_info(self) -> dict:
-        """The dashboard's Port: where the server listens, and whether a new port can apply at once (maya.py started
+        """The dashboard's Port: where the server listens, and whether a new port can apply at once (saguaro.py started
         this server and starts it again on the saved port) or only from the next start."""
         host, port = getattr(self, "listen", None) or ("127.0.0.1", None)
         return {"port": port, "host": host, "restarts": bool(os.environ.get("MAYA_RESTART_ON_UPDATE")),
                 "saved": bool(self.config_path), "restarting": getattr(self, "port_restart", None)}
 
     def set_port(self, n: int) -> dict:
-        """The dashboard's Port: n saved into the run config (and Saguaro's start scripts for it), then - when maya.py
-        started this server - the server ends with RESTART_EXIT after the request in flight, and maya.py starts it again
+        """The dashboard's Port: n saved into the run config (and Saguaro's start scripts for it), then - when saguaro.py
+        started this server - the server ends with RESTART_EXIT after the request in flight, and saguaro.py starts it again
         on n.  The port must be free on this server's address now (a busy one: an error, nothing saved)."""
         host, port = getattr(self, "listen", None) or ("127.0.0.1", None)
         if not 1024 <= n <= 65535:
@@ -2742,12 +2742,12 @@ class Service:
 
     # -------------------------------------------------------------- the Models page (serve/models.py)
     def models_root(self) -> Path:
-        """Where the configs are: beside this server's own (maya.py's folder)."""
+        """Where the configs are: beside this server's own (saguaro.py's folder)."""
         return Path(self.config_path).parent if self.config_path else ROOT
 
     def models_info(self) -> dict:
         """The configs the setup wrote, the running one marked, each with its engine settings; whether a switch or a
-        change to the running one can start Saguaro again at once (maya.py started this server)."""
+        change to the running one can start Saguaro again at once (saguaro.py started this server)."""
         out = models.listing(self.models_root(), self.config_path)
         out.update(restarts=bool(os.environ.get("MAYA_RESTART_ON_UPDATE")),
                    running=Path(self.config_path).name if self.config_path else None,
@@ -2778,7 +2778,7 @@ class Service:
 
     def model_settings(self, name, settings, dry_run: bool = False) -> dict:
         """The engine settings of the config `name` (the Models page): checked, and unless dry_run saved into it.  The
-        running model's start Saguaro again with them (when maya.py started this server), after the request in flight;
+        running model's start Saguaro again with them (when saguaro.py started this server), after the request in flight;
         another model's apply when it is switched to.  dry_run: the command they make, nothing saved."""
         p = self._model_path(name)
         cfg = models.read(p)
@@ -2830,13 +2830,13 @@ class Service:
 
     def switch_model(self, name) -> dict:
         """The Models page's Switch: the config `name` becomes the most recently used one (a start without --config
-        picks it), and when maya.py started this server it ends with RESTART_EXIT after the request in flight, leaving
-        maya.py a note (models.SWITCH_FILE) to start that config, on this port."""
+        picks it), and when saguaro.py started this server it ends with RESTART_EXIT after the request in flight, leaving
+        saguaro.py a note (models.SWITCH_FILE) to start that config, on this port."""
         p = self._model_path(name)
         if self._is_running(p):
             raise ValueError(f"{p.name} is the model running now")
         cfg = models.read(p)
-        why = models.missing(cfg)                        # (maya.py would stop at it: no model would run)
+        why = models.missing(cfg)                        # (saguaro.py would stop at it: no model would run)
         if why:
             raise ValueError(f"{p.name} cannot start: {why} - run the setup again to repair it")
         self._restart_busy()
@@ -2873,7 +2873,7 @@ class Service:
         if not then:
             raise ValueError(f"{p.name} is the model running now: pick the model Saguaro switches to first")
         if not os.environ.get("MAYA_RESTART_ON_UPDATE"):
-            raise ValueError("this server was not started by maya.sh or START-MAYA.bat, so it cannot switch to another "
+            raise ValueError("this server was not started by saguaro.sh or START-SAGUARO.bat, so it cannot switch to another "
                              f"model by itself: start another model, then delete {p.name}")
         if files:                                        # (checked now: the next server only reports)
             plan = models.delete_plan(self.models_root(), p)
@@ -5313,8 +5313,8 @@ def make_handler(svc: Service):
                 return False
             if not getattr(svc, "model_restart", None):
                 if not os.environ.get("MAYA_RESTART_ON_UPDATE"):
-                    self._json(409, {"error": f"{p.name} is installed, but this server was not started by maya.sh or "
-                                              "START-MAYA.bat, so it cannot switch models itself: start it with that model"})
+                    self._json(409, {"error": f"{p.name} is installed, but this server was not started by saguaro.sh or "
+                                              "START-SAGUARO.bat, so it cannot switch models itself: start it with that model"})
                     return False
                 try:
                     svc.switch_model(p.name)
@@ -6582,7 +6582,7 @@ def stop_signals(stop: threading.Event) -> None:
 
 
 def watch_parent(stop, stdin=None, getppid=None, poll: float = 1.0) -> None:
-    """--parent-pipe: stdin is a pipe from the program that started the server (maya.py), which writes nothing and
+    """--parent-pipe: stdin is a pipe from the program that started the server (saguaro.py), which writes nothing and
     holds it open while it runs.  Its end - however that program ended: a crash, SIGKILL, Task Manager - closes it,
     and the EOF stops the server (`stop(why)`) as Ctrl+C does.  On POSIX a new parent process does too (the parent
     ended and init or a subreaper took the server).  Both watch from threads of their own."""
@@ -6837,7 +6837,7 @@ def main() -> int:
                                          "{...}}); the web app's chat can use their tools (also \"mcp_servers\" in "
                                          "the config)")
     ap.add_argument("--parent-pipe", action="store_true",
-                    help="stdin is a pipe from the program that started this server (maya.py), open while it runs: "
+                    help="stdin is a pipe from the program that started this server (saguaro.py), open while it runs: "
                          "when it closes - that program ended, however it ended - the server stops as on Ctrl+C "
                          "(on Linux also when its parent process ends)")
     a = ap.parse_args()
@@ -7078,7 +7078,7 @@ def main() -> int:
         import webbrowser
         webbrowser.open(f"http://{'127.0.0.1' if a.host in ('0.0.0.0', '') else a.host}:{a.port}/")
     # SIGTERM (llama-swap's cmdStop, systemd), SIGHUP (the terminal closed), Ctrl+C, Windows' Ctrl+Break and - with
-    # --parent-pipe - the end of maya.py (watch_parent) end the server alike: the engine gets QUIT and time to keep its
+    # --parent-pipe - the end of saguaro.py (watch_parent) end the server alike: the engine gets QUIT and time to keep its
     # conversation.  A second signal while that runs (systemd signals the whole group, then the supervisor again) is
     # ignored instead of cutting it short - except a second Ctrl+C, which ends the server at once (the engine then ends
     # when its input closes).
