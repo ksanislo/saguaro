@@ -2560,7 +2560,8 @@ class Service:
             reload = dict(self.reload) if self.reload else None
         # a streamed cache's RAM (KV streaming: maya-mm3's VRAM lines' kv_ram - every position's K / V in pinned RAM,
         # the engine's own count at this context) and the RAM free now: the dashboard scales the one against the other
-        kv_ram = sum(int(p.get("kv_ram") or 0) for p in getattr(self.engine, "vram", None) or [])
+        lines = getattr(self.engine, "vram", None)        # (QFN's driver has a vram() method, not VRAM lines)
+        kv_ram = sum(int(p.get("kv_ram") or 0) for p in lines) if isinstance(lines, list) else 0
         ram = {}
         if kv_ram:
             try:
