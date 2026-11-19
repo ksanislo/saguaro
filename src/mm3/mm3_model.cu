@@ -590,6 +590,9 @@ struct Model::Impl {
 
     ~Impl() {
         preport();
+        if (st.help_experts > 0)
+            std::fprintf(stderr, "maya-mm3: decode help: %ld experts computed by the card beside (CPU lane %ld)\n",
+                         st.help_experts, st.cpu_experts);
         graphs_clear();
         for (cudaEvent_t e : pf.ev) cudaEventDestroy(e);
         if (::mm3::env("MM3_MISS_STATS") && !cpu_seen.empty()) {
@@ -801,6 +804,37 @@ struct Model::Impl {
 
     // of m such experts (each in the pool), how many to stage: the fewest that bring max(CPU lane, copies) down by more
     // than a tenth
+    // two links (DECODE_HELP): how many of m to stage when the copies split between d's link and the helper's
+    int lane_split2(int m) const {
+        if (lane_copy <= 0 || m <= 0) return 0;
+        const auto cpu = [&](int c) { return c > 0 ? lane_cpu1 + (c - 1) * lane_cpu_add : 0.0; };
+        int best = 0;
+        double bt = cpu(m);
+        for (int s = 1; s <= m; ++s) {
+            const double t = std::max(cpu(m - s), ((s + 1) / 2) * lane_copy + 0.1);   // (+0.1 ms: the helper's hand-offs)
+            if (t < bt * 0.9) {
+                bt = t;
+                best = s;
+            }
+        }
+        return best;
+    }
+    int helper_of_any(const Dev& d) {   // (the card beside d on its NUMA node, whatever MM3_READ_HELP says)
+        auto it = dhelper_cache.find(d.id);
+        if (it != dhelper_cache.end()) return it->second;
+        int best = -1;
+        const int nd = dev_node(d.id);
+        for (size_t i = 0; i < D.size() && best < 0; ++i) {
+            const Dev& c = D[i];
+            if (c.id != d.id && c.n_slots >= 2 && c.xn != nullptr && c.out != nullptr && c.xh_h != nullptr &&
+                c.plan_h != nullptr && dev_node(c.id) == nd)
+                best = (int) i;
+        }
+        dhelper_cache[d.id] = best;
+        return best;
+    }
+    std::map<int, int> dhelper_cache;
+
     int lane_split(int m) const {
         if (lane_copy <= 0 || m <= 0) return 0;
         const auto cpu = [&](int c) { return c > 0 ? lane_cpu1 + (c - 1) * lane_cpu_add : 0.0; };
@@ -2670,15 +2704,36 @@ struct Model::Impl {
         float* pw = (float*) (d.plan_h + 8);
         std::vector<CpuExpert> cpu;
         // (of the experts the CPU lane would take, lane_split's - ones in the pinned pool - to staging slots instead)
-        int to_stage = 0;
+        int to_stage = 0, to_help = 0;
+        // MAYA_MM3_DECODE_HELP=1: the card beside d (its NUMA node) stages and computes some of them over its own link
+        Dev* hd = nullptr;
         if (lane && lane_copy > 0) {
             int cand = 0;
             for (int i = 0; i < g.k_exp; ++i)
                 cand += on_cpu(l, d, top[i]) && pooled(l, top[i]);
-            to_stage = lane_split(cand);
+            static const bool dh_on = [] {
+                const char* v = ::mm3::env("MM3_DECODE_HELP");
+                return v != nullptr && std::atoi(v) != 0;
+            }();
+            const int hi = dh_on && cand >= 2 ? helper_of_any(d) : -1;
+            if (hi >= 0 && D[(size_t) hi].slot_bytes >= l.blob) {
+                hd = &D[(size_t) hi];
+                const int s2 = lane_split2(cand);   // (two links: the copies split between them)
+                to_help = s2 / 2;
+                to_stage = s2 - to_help;
+            } else {
+                to_stage = lane_split(cand);
+            }
         }
+        int help_e[8], help_n = 0;
         for (int i = 0; i < g.k_exp; ++i) {
             pw[i] = w[i] * g.scale;
+            if (hd && on_cpu(l, d, top[i]) && to_help > 0 && pooled(l, top[i])) {
+                --to_help;   // (the helper's: off d's plan)
+                help_e[help_n++] = i;
+                ph[i] = 0;
+                continue;
+            }
             if (lane && on_cpu(l, d, top[i]) && to_stage > 0 && pooled(l, top[i])) {
                 --to_stage;   // (staged: locate below)
             } else if (lane && on_cpu(l, d, top[i])) {   // (not in VRAM nor in a staging slot: the CPU lane's)
@@ -2690,6 +2745,38 @@ struct Model::Impl {
                 continue;
             }
             if (!locate(l, d, top[i], busy, ph[i], err)) return false;
+        }
+        if (help_n > 0) {   // the helper: d's normed input (on the host already), its experts staged, their sum
+            Dev& c = *hd;
+            CK(cudaSetDevice(c.id));
+            unsigned long long* hph = c.plan_h;
+            float* hpw = (float*) (c.plan_h + 8);
+            for (int i = 0; i < 8; ++i) {
+                hph[i] = 0;
+                hpw[i] = 0.0f;
+            }
+            CK(cudaMemcpyAsync(c.xn, d.xh_h, (size_t) g.dim * 4, cudaMemcpyHostToDevice, c.s));
+            std::vector<char> hbusy((size_t) c.n_slots, 0);
+            for (int k2 = 0; k2 < help_n; ++k2) {
+                const int i = help_e[k2];
+                if (!locate(l, c, top[i], hbusy, hph[i], err)) return false;
+                hpw[i] = pw[i];
+            }
+            CK(cudaMemcpyAsync(c.plan_d, hph, 16 * sizeof(unsigned long long), cudaMemcpyHostToDevice, c.s));
+            x3::MoeArgs ha;
+            ha.plan_ptr = c.plan_d;
+            ha.plan_w = (const float*) (c.plan_d + 8);
+            ha.lay = l.lay;
+            ha.k = g.k_exp;
+            ha.n_embd = g.dim;
+            ha.n_ff = g.ff;
+            ha.limit = g.limit;
+            x3::moe_gate_up(ha, c.xn, nullptr, c.s);
+            x3::moe_down(ha, nullptr, nullptr, c.out, c.s);
+            CK(cudaMemcpyAsync(c.xh_h, c.out, (size_t) g.dim * 4, cudaMemcpyDeviceToHost, c.s));
+            CK(cudaEventRecord(helper_event(c), c.s));
+            CK(cudaSetDevice(d.id));
+            st.help_experts += help_n;
         }
         CK(cudaMemcpyAsync(d.plan_d, ph, 16 * sizeof(unsigned long long), cudaMemcpyHostToDevice, d.s));
         x3::MoeArgs a;
@@ -2712,6 +2799,13 @@ struct Model::Impl {
                 flag = 1;
                 st.cpu_experts += (long) cpu.size();
                 if (lane_copy > 0) lane_retime((int) cpu.size(), 1e3 * dt);
+            }
+            if (help_n > 0) {   // (the helper's experts' sum joins the CPU lane's part)
+                if (cpu.empty()) std::memset(part, 0, (size_t) g.dim * 4);
+                CK(cudaEventSynchronize(helper_event(*hd)));
+                const float* hp = hd->xh_h;
+                for (int j = 0; j < g.dim; ++j) part[j] += hp[j];
+                flag = 1;
             }
             std::memcpy(part + g.dim, &flag, 4);
             CK(cudaMemcpyAsync(d.cpu_d, part, (size_t) (g.dim + 1) * 4, cudaMemcpyHostToDevice, d.s));

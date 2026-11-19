@@ -92,6 +92,7 @@ struct Stats {
     double kv_host_gb = 0;        // ... and the host memory holding every position
     long profiled = 0;            // routings counted (save_profile writes them)
     long cpu_experts = 0;         // routed experts the CPU lane computed
+    long help_experts = 0;        // (MAYA_MM3_DECODE_HELP) routed experts the card beside computed for a token
     int cpu_threads = 0;          // the CPU lane's threads (0: no CPU lane)
     long promoted = 0;            // experts copied into a staging slot because they kept coming back
     double t_promo = 0;           // a forward's start waiting for those copies
