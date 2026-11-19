@@ -237,6 +237,54 @@ class ParallelArgs(unittest.TestCase):
         self.assertEqual(args[-2:], ["--batch", "2"])
 
 
+class WrapSpill(unittest.TestCase):
+    """STRATA_BATCH_WRAP_SPILL: a slot (or solo leg) stopped for a wrap-up gives back the tokens it ran past the stop."""
+
+    def engine(self):
+        import queue as q
+        e = StrataEngine("missing-executable", [], lazy=True)
+        e.slot_q, e.slot_busy, e.slot_held = [q.Queue()], [True], [[]]
+        e.slot_releasing, e.slot_cv = set(), threading.Condition()
+        e.sent = []
+        e._send = e.sent.append
+        return e
+
+    def test_sync_release_returns_the_run_ahead_tokens(self):
+        e = self.engine()
+        for line in ("BT 0 7", "BT 0 8", "BDONE 0 9 cancel 1.0"):
+            e.slot_q[0].put(line)
+        self.assertEqual(e._release_slot_when_done(0, [1, 2, 3], sync_s=2.0), [7, 8])
+        self.assertEqual(e.sent, ["BSTOP 0"])
+        self.assertEqual((e.slot_held[0], e.slot_busy[0]), ([1, 2, 3, 7], False))   # all but the last fed
+
+    def test_sync_release_gives_way_to_the_background_wait(self):
+        e = self.engine()
+        self.assertIsNone(e._release_slot_when_done(0, [1, 2, 3], sync_s=0.2))
+        self.assertTrue(e.slot_busy[0])                     # still the background wait's
+        e.slot_q[0].put("BDONE 0 3 cancel 1.0")
+        deadline = time.monotonic() + 10
+        while e.slot_busy[0] and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertEqual((e.slot_held[0], e.slot_busy[0]), ([1, 2], False))
+
+    def test_dropped_state_gives_no_spill(self):
+        e = self.engine()
+        for line in ("BT 0 7", "BDONE 0 4 nonfinite 1.0"):
+            e.slot_q[0].put(line)
+        self.assertEqual(e._release_slot_when_done(0, [1, 2, 3], sync_s=2.0), [])
+        self.assertEqual(e.slot_held[0], [])
+
+    def test_drain_control_collects_tokens(self):
+        import queue as q
+        e = StrataEngine("missing-executable", [], lazy=True)
+        e.lines = q.Queue()
+        for line in ("T 5", "T 6", "DONE 2 10 5.0 1.0 cancel 0 0 0"):
+            e.lines.put(line)
+        got = []
+        self.assertTrue(e._drain_control("DONE", timeout=5.0, collect=got).startswith("DONE"))
+        self.assertEqual(got, [5, 6])
+
+
 class PickSlot(unittest.TestCase):
     def engine(self, n):
         e = StrataEngine("missing-executable", [], lazy=True)
@@ -402,6 +450,40 @@ class FakeEngineCase(unittest.TestCase):
         go(second)
         a.join(30)
         return res
+
+
+class WrapSpillService(FakeEngineCase):
+    """STRATA_BATCH_WRAP_SPILL end to end: two requests in batch slots reach a thinking budget; after its BSTOP the fake
+    slot emits one more token (as the engine runs ahead), which the wrap-up pass must carry."""
+
+    def wrapped_prompts(self, on):
+        import serve.server as server
+        with mock.patch.object(server, "BATCH_WRAP_SPILL", on), mock.patch.object(server, "REPLY_REUSE", False):
+            self.start(2)
+            out = {}
+
+            def go(k, text):
+                body = {"messages": [{"role": "user", "content": text}], "max_tokens": 200,
+                        "reasoning_budget_tokens": 10}
+                req = urllib.request.Request(self.base + "/v1/chat/completions", data=json.dumps(body).encode(),
+                                             headers={"Content-Type": "application/json"})
+                with urllib.request.urlopen(req, timeout=60) as r:
+                    out[k] = json.loads(r.read().decode())
+            ts = [threading.Thread(target=go, args=(k, f"LONGREPLY {k}")) for k in ("a", "b")]
+            ts[0].start(); time.sleep(0.15); ts[1].start()
+            [t.join(60) for t in ts]
+        rows = [l.split() for l in self.log.read_text().splitlines() if l.startswith(("GEN", "BGEN"))]
+        return out, [int(r[2]) for r in rows]
+
+    def test_the_wrap_up_carries_the_slot_run_ahead_with_the_switch(self):
+        out_off, n_off = self.wrapped_prompts(False)
+        self.tearDown()
+        out_on, n_on = self.wrapped_prompts(True)
+        for out in (out_off, out_on):
+            self.assertTrue(all("long enough" in (o["choices"][0]["message"].get("reasoning_content") or "")
+                                for o in out.values()), out)
+        # the passes' prompt lengths: with the switch the wrap-up passes are longer by the run-ahead tokens
+        self.assertGreater(sum(n_on), sum(n_off), (n_off, n_on))
 
 
 class ParallelService(FakeEngineCase):
