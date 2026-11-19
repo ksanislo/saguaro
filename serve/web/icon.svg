@@ -2,13 +2,14 @@
   <!-- Saguaro at sunset: line-art stalk and three arms, four points up (the four T4s) -->
   <defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#f59e0b"/><stop offset=".55" stop-color="#f2643c"/><stop offset="1" stop-color="#e8508a"/></linearGradient>
     <path id="la" d="M18.5 19.5V32.5a7.5 7.5 0 0 0 7.5 7.5H30"/>
-    <path id="ra" d="M45.5 22V30.5a6.5 6.5 0 0 1-6.5 6.5H34"/>
+    <path id="ra" d="M47 21V30a7 7 0 0 1-7 7H34"/>
     <path id="tr" d="M32 54.5V9.5"/>
-    <path id="fa" d="M40 29V37.5a5.5 5.5 0 0 1-5.5 5.5H33"/></defs>
+    <path id="fa" d="M39.5 30V38a5 5 0 0 1-5 5H33"/>
+    <mask id="cut" maskUnits="userSpaceOnUse" x="0" y="0" width="64" height="64"><rect width="64" height="64" fill="#fff"/><use href="#fa" fill="none" stroke="#000" stroke-width="10.4" stroke-linecap="round" stroke-linejoin="round"/></mask></defs>
   <rect width="64" height="64" rx="16" fill="url(#g)"/>
   <g fill="none" stroke-linecap="round" stroke-linejoin="round">
     <use href="#la" stroke="#0f2a1a" stroke-width="7.4"/><use href="#la" stroke="#fdf0d8" stroke-width="4.6"/><use href="#la" stroke="#0f2a1a" stroke-width=".8"/>
-    <use href="#ra" stroke="#0f2a1a" stroke-width="7.4"/><use href="#ra" stroke="#fdf0d8" stroke-width="4.6"/><use href="#ra" stroke="#0f2a1a" stroke-width=".8"/>
+    <g mask="url(#cut)"><use href="#ra" stroke="#0f2a1a" stroke-width="7.4"/><use href="#ra" stroke="#fdf0d8" stroke-width="4.6"/><use href="#ra" stroke="#0f2a1a" stroke-width=".8"/></g>
     <use href="#tr" stroke="#0f2a1a" stroke-width="9"/><use href="#tr" stroke="#fdf0d8" stroke-width="6.2"/>
     <path d="M30.2 11V55M33.8 11V55" stroke="#0f2a1a" stroke-width=".8"/>
     <use href="#fa" stroke="#0f2a1a" stroke-width="7.4"/><use href="#fa" stroke="#fdf0d8" stroke-width="4.6"/><use href="#fa" stroke="#0f2a1a" stroke-width=".8"/>
