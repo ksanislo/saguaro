@@ -161,7 +161,7 @@ class PeakPrefill(unittest.TestCase):
             peak = svc.totals["peak_prefill"]
             self.assertEqual((peak["tok_s"], peak["tokens"]), (250.0, 1000))
             t[0] += 2.0                                      # nothing read since: the window's mean falls
-            self.assertAlmostEqual(svc._prefill_tok_s(), 900 / 5.0)   # the 900 counted since the window's start
+            self.assertAlmostEqual(svc._prefill_tok_s(), 850 / 5.0)   # 800 inside + half of the straddling 100-token step
             self.assertEqual(svc.totals["peak_prefill"]["tok_s"], 250.0)   # the peak keeps the higher
 
     def test_a_finished_read_records_it(self):
@@ -575,3 +575,21 @@ class OnReadTakesTheProvisionalFlag(unittest.TestCase):
         line = next(x for x in src.splitlines() if "tls.on_read = lambda" in x)
         self.assertIn("prov=False, st=stat", line)
         self.assertIn("self._note_read_safe(st, n, ts, ex, prov)", line)
+
+
+class StraddlingStepIsSpread(unittest.TestCase):
+    """Live 11-20 15:23: steps 8192 (t=0) -> 16384 (t=4.1) -> 21595 (t=7.7); a 5 s window at t=7.7 must read ~1740 tok/s
+    (13403 tokens over 7.7 s, the straddling step counted for its share), never 13403 / 5 = 2680."""
+
+    def test_window_counts_only_the_part_inside(self):
+        w0, steps = 7.7 - 5.0, [(0.0, 8192), (4.1, 16384), (7.7, 21595)]
+        lo_n, lo_t, first_in = 0, 0.0, None
+        for te, ne in steps:
+            if te > w0:
+                first_in = (te, ne); break
+            lo_n, lo_t = ne, te
+        te1, ne1 = first_in
+        part = (ne1 - lo_n) * ((te1 - max(lo_t, w0)) / (te1 - lo_t))
+        rate = ((steps[-1][1] - ne1) + part) / 5.0
+        self.assertLess(rate, 2000)
+        self.assertGreater(rate, 1500)

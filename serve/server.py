@@ -3396,12 +3396,19 @@ class Service:
                 e = st.read_cur
                 if e is None or e[2] is not None or e[1] > now or not e[4] or e[4][-1][0] <= w0:
                     continue
-                lo_n, lo_t = 0, e[1]
+                lo_n, lo_t, first_in = 0, e[1], None
                 for te, ne in e[4]:
                     if te > w0:
+                        first_in = (te, ne)
                         break
                     lo_n, lo_t = ne, te
-                c = e[4][-1][1] - lo_n
+                if first_in is None:
+                    continue
+                # the step that straddles the window's start counts only its share inside it (steps are spread
+                # evenly over their own time, like a finished read over its span)
+                te1, ne1 = first_in
+                part = (ne1 - lo_n) * ((te1 - max(lo_t, w0)) / (te1 - lo_t)) if te1 > lo_t else (ne1 - lo_n)
+                c = (e[4][-1][1] - ne1) + part
                 if c <= 0:
                     continue
                 n += c
