@@ -2574,6 +2574,9 @@ class Service:
         return {"context": self.engine.max_context, **rng,
                 "kv_gb": info.get("kv_gb"), "kv_ctx": info.get("kv_ctx"),
                 "kv_resident": info.get("kv_resident") or 0,
+                # the engine's own K/V bytes of one position (every layer, the dtype it runs), and the pinned host
+                # K/V it holds now (streaming engines; 0 when allocated lazily) - the dashboard scales these, never a constant
+                "kv_bytes_token": info.get("kv_bytes_token"), "kv_ram_bytes": info.get("kv_ram_bytes"),
                 "kv_ram_gb": round(kv_ram / 2**30, 3) if kv_ram else None, **ram,
                 "vram_gb": info.get("vram_gb"), "vram_slots": info.get("vram_slots"), "reload": reload,
                 "load_s": getattr(self.engine, "load_s", None)}   # (the engine's last load: what a reload takes here)

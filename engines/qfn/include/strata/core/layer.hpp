@@ -319,6 +319,9 @@ int64_t qsa_kv_resident();
 int64_t qsa_kv_resident_min();
 /// Pinned host bytes the streamed states hold (their host copies).
 uint64_t qsa_kv_host_bytes();
+/// The K/V bytes of ONE position in one QSA layer at the K/V dtype in use (the pool arrays: codes and scales;
+/// the indexer's pooled keys are not K/V and not in it).  The server's context card says what a position costs.
+uint64_t qsa_kv_bytes_per_cell(const ModelGeometry& g);
 /// The host copies' addresses (pinned or not): what a host copy pinned whole would take.
 uint64_t qsa_kv_host_reserved_bytes();
 /// STRATA_KV_HOST_ELASTIC: the states qsa_state_init makes from now on with a streamed host copy (not only the elastic

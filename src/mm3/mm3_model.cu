@@ -1930,6 +1930,7 @@ struct Model::Impl {
                     if (!dalloc(d.id, d.kg_map, d.nblk, err) || !dalloc(d.id, d.kg_cnt, 1, err)) return false;
                 }
             st.kv_host_gb = (double) total / (1u << 30);
+            st.kv_host_bytes = (long long) total;   // (the INFO's kv_ram_bytes: pinned now, this load)
         }
         if (ic_rows() < o.max_ctx) {   // the index cache's host tier: every position (rows below rv unused), pinned, mapped
             const size_t per = (size_t) o.max_ctx * g.ix_dim * 2;
@@ -2402,10 +2403,10 @@ struct Model::Impl {
             calibrate_lane();
         }
         {
+            st.kv_pos_bytes = (long long) (k::kv_bytes(o.kv_k, o.kv_v, (size_t) g.n_kv) * (size_t) g.n_layers);
             std::string kv = std::string("KV cache: K ") + k::kv_name(o.kv_k) + ", V " + k::kv_name(o.kv_v) +
                              (o.kv_rot && (o.kv_k || o.kv_v) ? " (rows rotated)" : "") + ", " +
-                             std::to_string(k::kv_bytes(o.kv_k, o.kv_v, (size_t) g.n_kv) * g.n_layers / 1024) +
-                             " KB a position";
+                             std::to_string(st.kv_pos_bytes / 1024) + " KB a position";
             if (o.seqs > 1)
                 kv += ", " + std::to_string(o.seqs) + " conversations at once (--parallel): a cache of " +
                       std::to_string(o.max_ctx) + " positions each";

@@ -1208,6 +1208,14 @@ int64_t qsa_kv_resident() { return g_kv_resident; }
 int64_t qsa_kv_resident_min() { return 20480; }
 uint64_t qsa_kv_host_bytes() { return g_kv_host_bytes.load(); }
 uint64_t qsa_kv_host_reserved_bytes() { return g_kv_host_reserved.load(); }
+uint64_t qsa_kv_bytes_per_cell(const ModelGeometry& g) {
+    // the same arrays qsa_state_init carves (kv_per_slot's order), per page over the K/V dtype's codes and scales
+    const strata::kernels::QsaShapes s = qsa_shapes(g);
+    const bool hybrid = g_kv_hybrid;
+    uint64_t per_page = 0;
+    for (const uint64_t b : kv_per_slot(s, hybrid, !hybrid && g_kv_q4, !hybrid && g_kv_int8 && !g_kv_q4)) per_page += b;
+    return per_page / (uint64_t) (s.page_size > 0 ? s.page_size : 1);
+}
 void qsa_set_vram_elastic_main(bool on) { g_vram_main = on; }
 bool qsa_host_pin_failed() {
 #ifndef _WIN32

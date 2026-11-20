@@ -6,7 +6,7 @@ import {MOD, api, ctxfmt, fmt, gb, isPhone, modelName, store} from "./lib.js";
 import {DEFAULTS, LEVELS, P, PENALTIES, PRESETS, S, confirmDialog, copyText, emit, presetOf, resetPrefs, savePrefs, schemeChoice, setScheme, setTheme,
         themeChoice, thinkTitles, toast} from "./state.js";
 import {usd} from "./sidebar.js";
-import {GLM_KV_BYTES, confirmContext, confirmPort, ctxEstimate, ctxHint, ctxStops, fetchReport, loadCtxInfo, loadMcp, loadPortInfo, loadShared,
+import {confirmContext, confirmPort, ctxEstimate, ctxHint, ctxStops, fetchReport, loadCtxInfo, loadMcp, loadPortInfo, loadShared,
         budgetError, loadThinkBudget, saveThinkBudget, loadTime, loadUpdate, saveShared, startUpdate, syncShared} from "./server.js";
 import {chatInstructions, clearBrowser, estimateTokens, updateCtxMeter} from "./chats.js";
 import {codeBlock, onCodeClick} from "./md.js";
@@ -59,10 +59,10 @@ function Model() {
   const v = ctx != null && stops[ctx] ? stops[ctx] : c && c.context;
   const changed = c && v !== c.context && !S.reload;
   const e = c ? ctxEstimate(v) : null;
-  // (the same line as the Models page's slider: the engine's measurement; GLM's streamed cache: 12 KB a token in RAM)
+  // (the same line as the Models page's slider: the engine's measurement; a streamed cache: the engine's own bytes a token in RAM)
   const glmWin = eng.engine_kind === "glm-fast" && c && +c.kv_resident > 0 ? +c.kv_resident : 0;
   const est = S.reload ? `Reloading with a ${ctxfmt(S.reload.to)} context…`
-    : ctxHint(v, {live: true, now: c && c.context, win: glmWin, whole: true, ram: glmWin ? GLM_KV_BYTES : 0});
+    : ctxHint(v, {live: true, now: c && c.context, win: glmWin, whole: true, ram: glmWin ? +c.kv_bytes_token || 0 : 0});
   const warns = [];
   if (c && changed) {
     const tested = c.tested || 262144;   // (the largest context run end to end on this engine)

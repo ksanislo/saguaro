@@ -159,12 +159,17 @@ function ContextCard({m}) {
                 {k: "fresh", label: r == null ? "Prompt" : "Read new", n: prompt - (r || 0)}, {k: "written", label: "Written", n: written}];
   const used = Math.min(max, prompt + written), free = Math.max(0, max - used), pct = (100 * used) / max;
   const win = +eng.kv_resident || 0, showWin = win > 0 && win < max;
-  // (the VRAM window is KV streaming's --kv-resident: Models > Engine settings > Prompts and cache, GLM and MiniMax alike)
+  // the size of a streamed cache: the engine's own K/V bytes of a position (its INFO); one it does not report is not sized
+  const kvTok = +eng.kv_bytes_token || 0;
+  // (the VRAM window is KV streaming's --kv-resident: Models > Engine settings > Prompts and cache, GLM and MiniMax alike -
+  // under a supervisor that menu is gone and the window lives in the model's config file)
+  const sup = S.health && S.health.supervisor;
   const W = ctxfmt(win), where = showWin
-    ? "The window is a setting: Models › Engine settings › Prompts and cache › Positions each layer keeps in VRAM."
+    ? (sup ? `The window is a setting in this model's config file: ${sup} starts the engine with it.`
+           : "The window is a setting: Models › Engine settings › Prompts and cache › Positions each layer keeps in VRAM.")
     : "The size is a setting: Settings › Model › Context size.";
   const note = !running && !last ? "No conversation yet: the context fills as a chat goes on, with every message, file and tool result in it."
-    : showWin ? (used > win ? `This chat is past the ${W} VRAM window: its cache is kept in RAM (about ${fmt((used * 12288) / 1e9, 1)} GB), ${W} tokens of it in GPU memory and the rest copied in when needed.`
+    : showWin ? (used > win ? `This chat is past the ${W} VRAM window: its cache is kept in RAM${kvTok ? ` (about ${fmt((used * kvTok) / 1e9, 1)} GB)` : ""}, ${W} tokens of it in GPU memory and the rest copied in when needed.`
                             : `VRAM window: a chat up to ${W} tokens keeps its whole cache in GPU memory. A longer one keeps it in RAM, ${W} tokens of it in GPU memory and the rest copied in when needed.`)
     : "What the model holds at once: the chat, its files and tool results. A chat longer than this is refused: start a new one, or give the model a bigger context.";
   const aria = `${fmt(used)} of ${fmt(max)} tokens in use` + segs.map((s) => `, ${s.label.toLowerCase()} ${fmt(s.n)}`).join("");

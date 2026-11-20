@@ -525,6 +525,18 @@ void qsa_set_kv_resident(int64_t cells) { g_kv_resident = cells > 0 ? cells : 0;
 int64_t qsa_kv_resident() { return g_kv_resident; }
 int64_t qsa_kv_resident_min() { return 20480; }
 uint64_t qsa_kv_host_bytes() { return g_kv_host_bytes; }
+uint64_t qsa_kv_bytes_per_cell(const ModelGeometry& g) {
+    // one cell's rows of the arrays kv_pool_bytes sizes (its +64 pool ends are not per-cell): per cell == per page / page_size
+    const QsaShapes s = qsa_shapes(g);
+    if (g_kv_q4) return strata::kernels::kv_q4_bytes_per_cell(s);
+    if (g_kv_hybrid) {   // K8V4: INT8 K + its scales + the rotated Q4_0 V (816 B at head_dim 256)
+        const uint64_t rows = (uint64_t) s.n_head_kv;
+        return rows * (uint64_t) s.head_dim + rows * (uint64_t) (s.head_dim / strata::kernels::KV_Q8_GROUP) * 2 +
+               rows * strata::kernels::kv_q4_bytes_per_head((int) s.head_dim);
+    }
+    if (g_kv_int8) return strata::kernels::kv_q8_bytes_per_cell(s);
+    return (uint64_t) s.n_head_kv * s.head_dim * 2 * 2;   // FP16 K and V
+}
 
 uint64_t qsa_state_bytes(const ModelGeometry& g, int64_t max_cells, bool with_rope, int64_t ring_cells) {
     const QsaShapes s = qsa_shapes(g);
