@@ -148,20 +148,54 @@ inline long test_slow_copy_us() {
     return v;
 }
 
-/// SAGUARO_PARK_FAST=1 (default off): a parked K/V buffer grows without the zero fill (the copy writes every new byte
-/// and is the pages' first touch, on the copy threads), the threaded host copy starts at 4 MiB instead of 64 and its
-/// caller wakes when the last job lands instead of on the next 20 ms tick, and a park's prompt checkpoints are copied
-/// on several threads.  The same bytes either way.
+/// SAGUARO_PARK_FAST (on by default since the read-stall work of 11-19; =0 turns it back off): a parked K/V buffer
+/// grows without the zero fill (the copy writes every new byte and is the pages' first touch, on the copy threads),
+/// the threaded host copy starts at 4 MiB instead of 64 and its caller wakes when the last job lands instead of on
+/// the next 20 ms tick, and a park's prompt checkpoints are copied on several threads.  The same bytes either way -
+/// the single-core parks measured at 3-5 s for 5 GB (one half-busy thread) are the zero fill plus one memcpy; this
+/// is the multi-threaded, fault-once copy the same evidence asked for.
 inline bool park_fast() {
     static const bool on = [] {
         const char* e = std::getenv("SAGUARO_PARK_FAST");
-        const bool v = e != nullptr && e[0] == '1';
-        if (v)
-            std::fprintf(stderr, "strata: conversation park: SAGUARO_PARK_FAST on (no zero fill, threaded copies from "
-                                 "4 MiB woken on completion, checkpoints copied in parallel)\n");
+        const bool v = e == nullptr || std::atoi(e) != 0;
+        std::fprintf(stderr, "strata: conversation park: SAGUARO_PARK_FAST %s (%s)\n", v ? "on" : "off",
+                     v ? "no zero fill, threaded copies from 4 MiB woken on completion, checkpoints copied in parallel"
+                       : "the pre-11-19 path: zero-filled growth, 64 MiB threaded threshold");
         return v;
     }();
     return on;
+}
+
+/// The park/restore split (output only, #read-stall): how the snapshot copies spent their time -
+/// alloc (buffer growth), copy (the threaded or single host transfers), sync (the device syncs around them) and
+/// checkpoints - with the bytes moved and how many copies ran threaded vs as one runtime memcpy each.  The caller
+/// (the serve loop's park / restore log) takes and prints it; every snapshot function adds into the current
+/// thread's record.
+struct SnapshotSplit {
+    double alloc_ms = 0.0, copy_ms = 0.0, sync_ms = 0.0, ckpt_ms = 0.0;
+    size_t copy_bytes = 0;
+    long threaded = 0, plain = 0;
+};
+inline SnapshotSplit& snapshot_split() {
+    thread_local SnapshotSplit s;
+    return s;
+}
+inline SnapshotSplit take_snapshot_split() {
+    SnapshotSplit s = snapshot_split();
+    snapshot_split() = SnapshotSplit{};
+    return s;
+}
+inline std::string snapshot_split_note(const SnapshotSplit& s) {
+    char b[256];
+    std::snprintf(b, sizeof b, "split: alloc %.0f ms, copy %.0f ms (%.2f GB, %ld threaded / %ld single memcpy), "
+                               "sync %.0f ms, checkpoints %.0f ms",
+                  s.alloc_ms, s.copy_ms, (double) s.copy_bytes / 1073741824.0, s.threaded, s.plain, s.sync_ms, s.ckpt_ms);
+    return b;
+}
+/// ms between two clock points (the split's timers).
+template<class T>
+inline double split_ms(T a, T b) {
+    return std::chrono::duration<double, std::milli>(b - a).count();
 }
 
 template<class T>

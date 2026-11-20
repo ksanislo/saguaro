@@ -5,14 +5,57 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <initializer_list>
 #include <memory>
+#include <mutex>
 #include <type_traits>
 #include <utility>
 #include <vector>
 
 namespace strata::core {
+
+// The pool of whole 16 MiB snapshot segments (used by ConversationBuffer's allocator below, read-stall 11-19):
+// parks and drops no longer hand these blocks back to the allocator every switch - the pages stay mapped and the
+// next park's copy is their first writer.  SAGUARO_PARK_POOL_MIB bounds what it holds (default 8192, 0: off).
+// The freed blocks are not counted as cache RAM (they are invisible to the cache's own bytes()); the pool's cap is
+// the guard, and the RAM admission checks keep running on real availability.
+inline size_t parked_block_pool_cap() {
+    static const size_t cap = [] {
+        const char* e = std::getenv("SAGUARO_PARK_POOL_MIB");
+        const size_t mib = e != nullptr ? (size_t) std::atoll(e) : (size_t) 8192;
+        return mib << 20;
+    }();
+    return cap;
+}
+struct ParkedBlockPool {
+    static constexpr size_t block = 16u << 20;
+    std::mutex mu;
+    std::vector<void*> free;
+    size_t held = 0;
+};
+inline ParkedBlockPool& parked_block_pool() {
+    static ParkedBlockPool p;
+    return p;
+}
+inline void* parked_block_pool_take() {
+    ParkedBlockPool& P = parked_block_pool();
+    std::lock_guard<std::mutex> lk(P.mu);
+    if (P.free.empty()) return nullptr;
+    void* p = P.free.back();
+    P.free.pop_back();
+    P.held -= ParkedBlockPool::block;
+    return p;
+}
+inline bool parked_block_pool_give(void* p) {
+    ParkedBlockPool& P = parked_block_pool();
+    std::lock_guard<std::mutex> lk(P.mu);
+    if (P.held + ParkedBlockPool::block > parked_block_pool_cap()) return false;
+    P.free.push_back(p);
+    P.held += ParkedBlockPool::block;
+    return true;
+}
 
 // Snapshot-owned host storage. Appending never relocates existing payloads;
 // only the small segment directory can move. No sharing or copy-on-write is
@@ -181,6 +224,19 @@ private:
         template<class U> DefaultInit(const DefaultInit<U>&) noexcept {}
         template<class U> void construct(U* p) noexcept(std::is_nothrow_default_constructible_v<U>) { ::new ((void*) p) U; }
         template<class U, class... A> void construct(U* p, A&&... a) { ::new ((void*) p) U(std::forward<A>(a)...); }
+        // The read-stall work (11-19): a park allocates and a drop frees ~16 MiB segments every conversation switch,
+        // and fresh pages cost faults (the single-threaded 3-5 s parks).  Whole 16 MiB blocks round-trip through a
+        // small process-wide pool so the pages stay mapped; the cap bounds the RAM it holds (SAGUARO_PARK_POOL_MIB,
+        // 0: off).  Only this buffer's exact segment size is pooled; everything else allocates as before.
+        T* allocate(size_t n) {
+            if (n * sizeof(T) == segment_bytes && parked_block_pool_cap() > 0)
+                if (void* p = parked_block_pool_take()) return static_cast<T*>(p);
+            return std::allocator<T>::allocate(n);
+        }
+        void deallocate(T* p, size_t n) {
+            if (n * sizeof(T) != segment_bytes || !parked_block_pool_give(p))
+                std::allocator<T>::deallocate(p, n);
+        }
     };
     using Segment = std::vector<uint8_t, DefaultInit<uint8_t>>;
     // A fresh capture allocates exactly its payload. Later appends reserve

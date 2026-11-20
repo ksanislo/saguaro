@@ -121,14 +121,16 @@ bool valid(const QsaState& st, const Layout& l, int64_t upto, std::string& error
 
 // a host-to-host copy (parked image <-> the pinned host K/V copy under KV streaming) of 64 MiB or more on several
 // threads: one memcpy runs at one core's DDR3 speed (~2 GB/s).  SAGUARO_SNAPSHOT_COPY_THREADS=N (default 8, 0/1 off)
+// The pointers being host memory is the condition, and an allocation the CUDA runtime does not know about IS host
+// memory: the attribute call fails or reports Unregistered for plain malloc'd buffers, and it used to end the test
+// then - so every park copied its whole conversation on ONE thread at ~2 GB/s (read-stall, 11-19: the 3-5 s parks).
+// Only a pointer known to lie in device or managed memory keeps the threaded path off.
 bool host_both(const void* dst, const void* src) {
     cudaPointerAttributes a{}, b{};
-    if (cudaPointerGetAttributes(&a, dst) != cudaSuccess || cudaPointerGetAttributes(&b, src) != cudaSuccess) {
-        cudaGetLastError();
-        return false;
-    }
+    if (cudaPointerGetAttributes(&a, dst) != cudaSuccess) cudaGetLastError();   // (unknown: host memory)
+    if (cudaPointerGetAttributes(&b, src) != cudaSuccess) cudaGetLastError();
     auto host = [](const cudaPointerAttributes& x) {
-        return x.type == cudaMemoryTypeUnregistered || x.type == cudaMemoryTypeHost;
+        return x.type != cudaMemoryTypeDevice && x.type != cudaMemoryTypeManaged;
     };
     return host(a) && host(b);
 }
