@@ -3439,6 +3439,17 @@ class Service:
         r[2] = max(r[1], (time.time() if at is None else at) - 0.0)   #  slice's next leg starts from the held prefix)
         self._read_prune(time.time())
 
+    def _read_exact(self, stat, tokens):
+        """(status_lock held) the engine's exact new tokens for this request's read stand as its count, spread over
+        the read's real span (the engine taking it -> its first token) - progress steps only ever previewed it."""
+        if not tokens or stat.engine_t0 is None or stat.first_token is None or stat.first_token <= stat.engine_t0:
+            return
+        mine = [r for r in self.reads if r[0] is stat]
+        r = mine[-1] if mine else None
+        if r is None:
+            return
+        r[1], r[2], r[3] = stat.engine_t0, stat.first_token, tokens
+
     def _read_prune(self, now):
         """(status_lock held) closed reads no window can reach anymore leave the list; an open one always stays."""
         while self.reads and self.reads[0][2] is not None and self.reads[0][2] < now - 2 * RATE_WINDOW_S:
@@ -5099,6 +5110,7 @@ class Service:
                     # first token (restores, queueing in the engine and pauses for other chats included) - one count
                     pf_s = round(read_n / (stat.first_token - stat.engine_t0), 1) \
                         if read_n and stat.engine_t0 and stat.first_token and stat.first_token > stat.engine_t0 else None
+                    self._read_exact(stat, read_n)      # (status_lock held: the live window's record, the exact count)
                     # the wall clock of its read (first read step to first token): the engine's prompt_ms leaves out
                     # the time its read paused for other chats, so its rate can be 2-3x the real one - never shown above it
                     wall_pf = round(read_n / (stat.first_token - stat.read_t0), 1) \
@@ -7573,11 +7585,15 @@ def _qfn_engine_class():
                 if (self._reader == me or solo) and self.progress:
                     self._tls.own_pp = (self.progress, self.prefill_tok_s_mean)
                     if cb and self.progress[0] > seen:  # the PP line's steps, counted from where this read starts:
-                        if base is None:                # RESUME's reused prefix, else the first PP's position (a
-                            r = int(getattr(self, "reused", 0) or 0)   # restored conversation has no RESUME - its
-                            base = r if 0 < r <= self.progress[0] else self.progress[0]   # positions are not reads)
-                        seen = self.progress[0]
-                        cb(max(0, seen - base))
+                        if base is None:                # only from RESUME's reused prefix: without it (a restored
+                            r = int(getattr(self, "reused", 0) or 0)   # conversation) where the read starts is
+                            if not 0 < r <= self.progress[0]:          # unknown - count nothing until the exact
+                                continue_count = False                 # figures at its end (Service._read_exact)
+                            else:
+                                base, continue_count = r, True
+                        if base is not None:
+                            seen = self.progress[0]
+                            cb(max(0, seen - base))
                 yield t
 
         def _admission_wait(self, slot, cancel, live):

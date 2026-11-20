@@ -593,3 +593,16 @@ class StraddlingStepIsSpread(unittest.TestCase):
         rate = ((steps[-1][1] - ne1) + part) / 5.0
         self.assertLess(rate, 2000)
         self.assertGreater(rate, 1500)
+
+
+class RestoredConversationIsNotARead(unittest.TestCase):
+    """Live 11-20 15:30: a 200,520-token conversation read back from disk, then 3,155 new tokens; without a RESUME
+    the solo path must not count positions (it counted 33,112 -> a 6,622 tok/s peak); the exact count lands at the end."""
+
+    def test_no_resume_no_counting(self):
+        import inspect
+        from serve import server as S
+        src = inspect.getsource(S)
+        i = src.index("only from RESUME's reused prefix")
+        self.assertIn("if base is not None:", src[i:i + 900])
+        self.assertIn("def _read_exact(self, stat, tokens):", src)
