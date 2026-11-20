@@ -264,7 +264,8 @@ export function liveCtx() {
   const live = S.metrics && S.metrics.live;
   if (!S.busy || S.busy.chat !== S.current || !live || live.state === "idle" || live.prompt_tokens == null) return null;
   // several chats at once: the server's single "live" request may be another chat's - this chat counts its own
-  if ((live.chats || []).length > 1 || (live.active || 0) > 1) return null;
+  if ((live.chats || []).length > 1 || (live.active || 0) > 1)
+    return S.busy.promptTok != null ? {tokens: S.busy.promptTok + (S.busy.recv || 0), approx: true, why: "This chat"} : null;
   return {tokens: live.prompt_tokens + (live.generated || 0), approx: false, why: "This request"};
 }
 export function updateCtxMeter() {
@@ -372,7 +373,8 @@ export async function answer(resumeJob = null) {
     messages.push(m);
   }
   const controller = new AbortController();
-  const busy = {controller, msg: m, chat, job: resumeJob || undefined};
+  const busy = {controller, msg: m, chat, job: resumeJob || undefined,
+                promptTok: S.ctx && S.ctx.tokens != null ? S.ctx.tokens : null, recv: 0};   // (this chat's own count)
   S.running.set(chat, busy);
   emit();
   scrollDown(true);
@@ -431,6 +433,7 @@ export async function answer(resumeJob = null) {
         let j;
         try { j = JSON.parse(data); } catch (e) { continue; }
         nRecv++;
+        busy.recv = nRecv;                         // (the answer's pieces so far: this chat's live context)
         if (j.id && !jobId) {
           jobId = j.id;
           busy.job = jobId;
