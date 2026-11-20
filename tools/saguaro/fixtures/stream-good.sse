@@ -1,0 +1,9 @@
+: keep-alive
+
+data: {"id":"chatcmpl-1","object":"chat.completion.chunk","model":"Qwen3.8-Flash-Next-Q8_0","choices":[{"index":0,"delta":{"role":"assistant","content":"Hello"},"logprobs":null,"finish_reason":null}]}
+
+data: {"choices":[{"index":0,"delta":{"content":" there."},"logprobs":null,"finish_reason":null}]}
+
+data: {"choices":[{"index":0,"delta":{},"logprobs":null,"finish_reason":"stop"}]}
+
+data: [DONE]

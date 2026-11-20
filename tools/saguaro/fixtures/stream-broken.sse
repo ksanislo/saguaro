@@ -1,0 +1,4 @@
+data: {"choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":"stop"}]}
+this-is-not-an-sse-field
+data: {broken json
+data: [DONE]

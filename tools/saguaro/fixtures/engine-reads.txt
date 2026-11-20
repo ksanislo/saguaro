@@ -1,0 +1,8 @@
+2026-11-19 10:00:00 strata generate: the startup reads are done: experts.bin mapped again (420 ms)
+2026-11-19 10:00:01 strata batch: slot 0 admitted beside the decoding slots: 4096 prompt tokens (1024 reused) read in 2000 ms after 12 ms queued; the other slots decoded 10 rows during the read; first token 2050 ms after its BGEN
+2026-11-19 10:00:02 [req aaaaa1 conv bbbbbb11 slot 0] [saguaro] done: 40 tokens in 5 s (8.0 tok/s) (stop, cancel=False), expert cache 12.3% hit
+2026-11-19 10:00:03 VRAM dev=0 total=24564 used=18012 free=6552 kv=17408 kv_resident=32768
+2026-11-19 10:00:09 strata batch: read 512 tokens on a thread of its own in 3000 ms (concurrent, to 512 of 512); the slots decoded 60 rows meanwhile (20.0 rows/s; stage 0: 2 windows, 1400.0 ms host each)
+2026-11-19 10:00:10 strata batch: slot 1 admitted beside the decoding slots: 1024 prompt tokens (1024 reused) read in 15 ms after 3 ms queued; the other slots decoded 4 rows during the read; first token 18 ms after its BGEN
+2026-11-19 10:00:20 strata batch: read 4096 tokens on a thread of its own in 4000 ms (concurrent, to 4096 of 4096); the slots decoded 80 rows meanwhile (20.0 rows/s; stage 0: 3 windows, 1300.0 ms host each)
+2026-11-19 10:00:21 [req cccccc22 conv dddddd33 slot 1] [saguaro] done: 100 tokens in 25 s (4.0 tok/s) (stop, cancel=False)
