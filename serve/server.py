@@ -211,6 +211,7 @@ def text_file_limit(context: int) -> int:
 # token (the Monitor showed five-digit numbers) and then undershoots for the first second of every answer.  5 s: drafted
 # tokens come in bursts of 1-4 a step, and over 2 s the rate swung +-25% around the engine's steady one
 RATE_WINDOW_S = 5.0
+PEAK_MIN_SPAN_S = 2.0     # a peak only from an answer or read this old: younger windows read bursts as rates
 RATE_MIN_SPAN_S = 0.25      # younger than this there is no rate yet: the mean so far, with the span floored here
 # A request that waited this long in the FIFO gets a line in the server window when its turn comes: with nothing else
 # logged, a queue that had stopped moving (and requests piling up behind it) was indistinguishable from a busy server.
@@ -3260,7 +3261,9 @@ class Service:
             now = time.time()
             rate = sum(r.tok_s(now) for r in self.current_requests)
             n = sum((r.samples[-1] if r.samples else r.base or (0, 0))[1] for r in self.current_requests)
-            self._note_peak(rate, n, now)
+            # a peak only from answers past their first PEAK_MIN_SPAN_S: a young window reads a burst as a rate
+            if all(r.first_token is not None and now - r.first_token >= PEAK_MIN_SPAN_S for r in self.current_requests):
+                self._note_peak(rate, n, now)
             return rate
 
     def _note_peak(self, tok_s, tokens, when):
@@ -3301,10 +3304,13 @@ class Service:
                 return 0.0
             now = time.time()
             total = sum(max(0.0, r.read_avg if r.read_avg is not None else r.read_last or 0.0) for r in readers)
+            sure = sum(max(0.0, r.read_avg if r.read_avg is not None else r.read_last or 0.0) for r in readers
+                       if not getattr(r, "read_prov", False))   # (BRP rates count positions: shown, never a peak)
             while self.read_events and self.read_events[0][0] <= now - RATE_WINDOW_S:
                 self.read_base = self.read_events.popleft()
             tokens = self.read_events[-1][1] - (self.read_base[1] if self.read_base else 0) if self.read_events else 0
-            self._note_peak_read(total, tokens, now)
+            if sure == total:
+                self._note_peak_read(total, tokens, now)
             return total
 
     def _note_read_safe(self, *a):
@@ -3332,8 +3338,10 @@ class Service:
                 stat.read_t1 = now
                 if tok_s is not None:
                     stat.read_avg = tok_s
+                    stat.read_prov = True
                 return
             if exact:
+                stat.read_prov = False                  # (the engine's own count and clock from here)
                 if sum(1 for r in self.running if r.at_engine and r.first_token is None) > 1:
                     stat.read_shared = True             # (two admissions read at once: label the request's own rate)
                 if tok_s is not None:
@@ -4837,7 +4845,11 @@ class Service:
                         "loop_guard": guards[0].summary() if guards and guards[0].events else None}
                     self.history.append(row)
                     t = self.totals
-                    self._note_peak(row["decode_tok_s"], n, started)
+                    ft = stat.first_token
+                    if not int(getattr(self.engine, "batch", 0) or 0):
+                        self._note_peak(row["decode_tok_s"], n, started)   # (a solo engine's own decode clock)
+                    elif n and ft is not None and time.time() - ft >= PEAK_MIN_SPAN_S:   # (QFN batch: its decode_ms
+                        self._note_peak(n / (time.time() - ft), n, started)            # is partial - the server's clock)
                     self._note_peak_read(pf_s, read_n, started)   # (the same for the read, from PEAK_MIN_READ_TOKENS on)
                     t["requests"] += 1
                     t["prompt_tokens"] += len(ids)
