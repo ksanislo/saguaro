@@ -3317,6 +3317,12 @@ class Service:
                 self._note_peak_read(total, n, now)
             return total
 
+    def _read_start(self, stat):
+        """A batch request's BGEN went out after its wait for a slot: its read (and the window's count) start here."""
+        with self.status_lock:
+            stat.engine_t0 = time.time()
+            self.read_events.append((stat.engine_t0, self.read_sum))
+
     def _note_read_safe(self, *a):
         """_note_read for the drivers' read callbacks: a Monitor figure must never fail the request it watches."""
         try:
@@ -4493,6 +4499,7 @@ class Service:
                     tls = getattr(self.engine, "_tls", None)   # this request's thread reads the engine's lines: its
                     if tls is not None:                        # PP steps count into the engine-total read rate
                         tls.on_read = lambda n, ts=None, ex=False, prov=False, st=stat: self._note_read_safe(st, n, ts, ex, prov)
+                        tls.on_read_start = lambda st=stat: self._read_start(st)
                         tls.read_leg_base = 0                  # (this request's read counting starts from nothing)
                     self.running.add(stat)
                     self.active += 1
@@ -7263,14 +7270,17 @@ def _qfn_engine_class():
             me = threading.get_ident()
             self._tls.own_pp = None
             cb = getattr(self._tls, "on_read", None)     # (engine-total read rate: Service._note_read)
-            seen = 0
+            seen, base = 0, None
             solo = not int(getattr(self, "batch", 0) or 0)
             for t in super().generate(ids, max_new, sampling, cancel, embeddings):
                 if (self._reader == me or solo) and self.progress:
                     self._tls.own_pp = (self.progress, self.prefill_tok_s_mean)
-                    if cb and self.progress[0] > seen:  # the PP line's steps: RESUME's reused prefix stays out
+                    if cb and self.progress[0] > seen:  # the PP line's steps, counted from where this read starts:
+                        if base is None:                # RESUME's reused prefix, else the first PP's position (a
+                            r = int(getattr(self, "reused", 0) or 0)   # restored conversation has no RESUME - its
+                            base = r if 0 < r <= self.progress[0] else self.progress[0]   # positions are not reads)
                         seen = self.progress[0]
-                        cb(max(0, seen - int(getattr(self, "reused", 0) or 0)), self.prefill_tok_s_mean)
+                        cb(max(0, seen - base))
                 yield t
 
         def _admission_wait(self, slot, cancel, live):
@@ -7279,6 +7289,9 @@ def _qfn_engine_class():
             own figures.  The queue view below feeds both into the engine-total read rate - what gets counted is
             what the engine counted (N - R new tokens over its own M ms; the BRP steps carry the engine's live
             tok/s for the meantime) - and passes every line through untouched."""
+            start = getattr(self._tls, "on_read_start", None)
+            if start is not None:
+                start()                                  # (its BGEN is out: the engine's read starts now, not the slot wait)
             cb = getattr(self._tls, "on_read", None)
             if cb is None:
                 return (yield from super()._admission_wait(slot, cancel, live))

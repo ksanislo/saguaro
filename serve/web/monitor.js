@@ -56,9 +56,7 @@ function Throughput({m}) {
   // while only writing, this request's own figure as before, and when idle the last request's
   const readingN = live.reading_n || 0;
   const prefill = readingN ? (live.prefill_tok_s || 0)
-    : live.state !== "idle" ? live.prefill_tok_s_mean
-    : last ? (last.prefill_tok_s != null ? last.prefill_tok_s
-              : last.prompt_ms > 0 ? Math.max(0, last.prompt_tokens - (last.reused || 0)) / (last.prompt_ms / 1000) : null)
+    : last ? last.prefill_tok_s   // (not reading now: the last finished read's real rate - no engine-reported means)
     : null;
   const fresh = tn && tn.time && Date.now() / 1000 - tn.time <= 30;
   const ms = gen && tn && tn.ms_tok ? tn.ms_tok : speed ? 1000 / speed : null;
