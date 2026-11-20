@@ -1832,8 +1832,17 @@ int64_t Prefill::stage_cells() const { return impl_->stage_cells; }
 int64_t Prefill::stage_cells_for(const core::SessionState& ss, int64_t reach) {
     const int64_t full = ss.qsa_states[ss.qsa_primary()].max_cells;
     if (reach <= 0 || stage_reach_off()) return 0;
+    // read-stall (11-19): a loan sized to exactly the read's reach re-lends the moment the conversation grows one
+    // turn past it - a re-lend stops the groups for lend + refill (measured 2 s on 4 cards).  Lay it out for the
+    // conversation's length plus a quarter rounded up to the grid so a growing agent chat keeps the loan it has
+    // (stage_covers/adm_lend_covers keep it while it covers).  SAGUARO_STAGE_HEADROOM=0: the old exact size.
+    static const bool headroom = [] {
+        const char* e = std::getenv("SAGUARO_STAGE_HEADROOM");
+        return e == nullptr || std::atoi(e) != 0;
+    }();
+    const int64_t want = headroom ? std::min(full, reach + std::max<int64_t>(65536, reach / 4)) : reach;
     const int64_t base = 262144, step = 131072;
-    return reach <= base ? std::min(full, base) : std::min(full, (reach + step - 1) / step * step);
+    return want <= base ? std::min(full, base) : std::min(full, (want + step - 1) / step * step);
 }
 
 void Prefill::set_session(core::SessionState& ss) { if (impl_ != nullptr) impl_->ss = &ss; }
