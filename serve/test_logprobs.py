@@ -1,7 +1,7 @@
 """serve/test_logprobs.py - OpenAI's logprobs / top_logprobs over the engine protocol (GEN logprobs=<n>, LP lines) and the
 APIs: the request fields, the GEN key, the LP lines read on one conversation and on several (serve/fake_multi_engine.py),
-the chat completion's choice logprobs (streamed and whole), the Responses API's output_text logprobs, and the refusal
-by an engine that does not report them.  No GPU, no pack: the engines are scripted.
+the chat completion's choice logprobs (streamed and whole), the Responses API's output_text logprobs, and answering
+without them for an engine that does not report them.  No GPU, no pack: the engines are scripted.
 
     python3 -m unittest serve.test_logprobs -v
 """
@@ -267,11 +267,13 @@ class Api(Http):
         self.assertIn("top_logprobs", out["error"]["message"])
         status, out = self.post("/v1/chat/completions", self.chat(logprobs=True, top_logprobs=30))
         self.assertEqual(status, 400)
-        # an engine that does not say INFO logprobs= (GLM's, MiniMax's): a 400, not an answer without them
+        # an engine that does not say INFO logprobs= (GLM's, MiniMax's, QFN's): answered without them - not a 400,
+        # which would break clients that always ask (/health's capabilities say logprobs: 0 instead)
         self.engine.info = {"logit_bias": 1}
         status, out = self.post("/v1/chat/completions", self.chat(logprobs=True))
-        self.assertEqual(status, 400)
-        self.assertIn("log-probabilities", out["error"]["message"])
+        self.assertEqual(status, 200)
+        self.assertNotIn("logprobs", out["choices"][0])
+        self.assertNotIn("logprobs", self.engine.sampling)          # (the GEN line asked for none)
         status, out = self.post("/v1/chat/completions", self.chat())   # (not asked: served as ever)
         self.assertEqual(status, 200)
 
