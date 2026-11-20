@@ -552,18 +552,33 @@ class GpuMap(unittest.TestCase):
 
     def test_later_lines_follow_a_picture(self):
         """maya-ds4 prints its VRAM lines again when a picture's room is lent to its vision tower and when it is given
-        back: the map of that GPU follows them, the others stay."""
+        back: the map of that GPU follows them, the others stay.  The stamp on the entry says how fresh that card's
+        split is (PLAN-vram-live: every engine re-prints a line whose split moved)."""
         from types import SimpleNamespace
         from serve.server import StrataEngine
         other = dict(self.r, dev=1, pci="0000:02:00")
         eng = SimpleNamespace(vram=[self.r, other])
+        plain = lambda vs: [{k: v for k, v in p.items() if k != "at"} for p in vs]   # noqa: E731
         lent = LINE.replace("vision=0", "vision=0 vision_own=334495744").replace("pool=15536793108", "pool=15202297364")
         StrataEngine._vram_line(eng, lent)
         self.assertEqual((eng.vram[0]["vision_own"], eng.vram[0]["pool"], eng.vram[1]), (334495744, 15202297364, other))
         StrataEngine._vram_line(eng, LINE)
-        self.assertEqual(eng.vram, [self.r, other])
-        StrataEngine._vram_line(eng, "VRAM nonsense\n")      # (not a GPU's line: nothing changes)
-        self.assertEqual(eng.vram, [self.r, other])
+        self.assertEqual(plain(eng.vram), [self.r, other])
+        self.assertIsNotNone(eng.vram[0].get("at"))              # (the followed card carries its stamp, the rest not)
+        self.assertNotIn("at", eng.vram[1])
+        StrataEngine._vram_line(eng, "VRAM nonsense\n")          # (not a GPU's line: nothing changes)
+        self.assertEqual(plain(eng.vram), [self.r, other])
+
+    def test_split_age_says_how_fresh_the_split_is(self):
+        """(PLAN-vram-live) the card's title shows the age of its split: the stamp of the line the entry holds, of a
+        merged card the older part's; no stamp or no clock: no age."""
+        r = dict(self.r, at=1000.0)
+        self.assertEqual(self.gm.view([r], [], 100, now=1003.4)[0]["split_age"], 3.4)
+        self.assertIsNone(self.gm.view([r], [], 100)[0]["split_age"])              # (the server asked without a clock)
+        self.assertIsNone(self.gm.view([self.r], [], 100, now=1003.4)[0]["split_age"])   # (a line never re-printed)
+        b = dict(self.r, layers=[46, 47], at=1001.0)
+        self.assertEqual(self.gm.merge([r, b])[0]["at"], 1000.0)                    # (as old as its oldest part)
+        self.assertEqual(self.gm.view([r, b], [], 100, now=1010.0)[0]["split_age"], 10.0)
 
 
 class GpuRelease(unittest.TestCase):
