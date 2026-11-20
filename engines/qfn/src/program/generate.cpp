@@ -9144,8 +9144,9 @@ int main(int argc, char** argv) {
             return strata::program::split_lend_slots(xc.slots(), xc.bytes(), xc.slot_offsets(),
                                                      (uint64_t) strata::kernels::cpu::expert_layout().max_blob, need);
         };
-        auto part_slots = [&](const PfPart& p, int64_t c, int64_t stage_cells = 0) -> int64_t {
-            return cache_slots_for(*p.cache, strata::prefill::Prefill::bytes_needed(g, *p.ses, c, srcp != nullptr, stage_cells));
+        auto part_slots = [&](const PfPart& p, int64_t c, int64_t stage_cells = 0, int keep = -1) -> int64_t {
+            return cache_slots_for(*p.cache, strata::prefill::Prefill::bytes_needed(g, *p.ses, c, srcp != nullptr,
+                                                                                    stage_cells, keep));
         };
         auto part_bytes = [&](const PfPart& p, int32_t first) -> uint64_t {
             strata::core::ExpertCache& xc = *p.cache;
@@ -14872,6 +14873,7 @@ int main(int argc, char** argv) {
         auto refill_issue = [&](PfPart& p, std::string& e) -> bool {
             tr("refill start", (long long) p.lent.size());
             const strata::core::OnDevice on(p.dev);
+            p.sp->kv_keep_invalidate();   // the loan's slots are about to hold experts: the kept prefixes in them are gone
             for (const auto& [i, slot] : p.lent) {   // D-4: queued, one wait (SAGUARO_REFILL_BLOCKING=1: each)
                 strata::core::BlobPart parts[3];
                 const int np = refill_parts && !refill_blocking() ? srcp->blob_parts(i / g.n_expert, i % g.n_expert, parts) : 0;
@@ -14971,6 +14973,7 @@ int main(int argc, char** argv) {
                     e = "the lazy refill: no stream";
                     return false;
                 }
+                p.sp->kv_keep_invalidate();   // the loan's slots are about to hold experts: the kept prefixes in them are gone
                 for (const auto& [i, slot] : p.lent) {
                     strata::core::BlobPart parts[3];
                     const int np = refill_parts ? srcp->blob_parts(i / g.n_expert, i % g.n_expert, parts) : 0;
@@ -15051,6 +15054,15 @@ int main(int argc, char** argv) {
                 const strata::core::OnDevice on(p.dev);
                 int64_t want_p = want;
                 int32_t first = p.first_now;
+                // read-prefix keep (kv_prefix_keep.hpp): a loan that holds one staging region per QSA layer lets
+                // a read copy only the blocks that are new; when this cache cannot lend such a region, the loan
+                // is laid out as before (one shared pool, whole prefix restaged per layer and chunk).
+                int keep_p = 0;
+                if (cells > 0 && strata::prefill::Prefill::kv_keep_wanted()) {
+                    const int64_t nk = part_slots(p, want, cells, 1);
+                    const int64_t room_k = give_on ? p.cache->slots() - give_top(p.cache) : p.cache->slots();
+                    if (nk > 0 && nk + 128 <= p.cache->slots() && (!give_on || nk <= room_k)) keep_p = 1;
+                }
                 // --prefill-head-alias: the loan laid out at start (slot 1 on) is kept; a hybrid layout cannot relayout
                 if (!o.prefill_head_alias) {
                     // #2090: the loan a chunk needs is NOT monotonic in the chunk: a chunk above the scan's small_max
@@ -15058,12 +15070,12 @@ int main(int argc, char** argv) {
                     // a request's smaller chunk can need MORE slots than the auto chunk's region (p.first) holds.  The
                     // loan starts where the chunk itself needs it (the 128-slot floor aside); a chunk that cannot be
                     // lent even then is halved until it can, instead of ending the engine.
-                    int64_t need_p = part_slots(p, want_p, cells);
+                    int64_t need_p = part_slots(p, want_p, cells, keep_p);
                     // SAGUARO_ELASTIC_SLOTS_GIVE: a loan stays above the slots the cache may give the batch slots
                     const int64_t room_p = give_on ? p.cache->slots() - give_top(p.cache) : p.cache->slots();
                     while ((need_p <= 0 || need_p + 128 > p.cache->slots() || (give_on && need_p > room_p)) && want_p > 256) {
                         want_p = std::max<int64_t>(256, want_p / 2 / 256 * 256);
-                        need_p = part_slots(p, want_p, cells);
+                        need_p = part_slots(p, want_p, cells, keep_p);
                     }
                     if (need_p <= 0 || need_p + 128 > p.cache->slots() || (give_on && need_p > room_p)) {
                         e = "prefill: no chunk of this request fits the slots that can be lent (#2090)";
@@ -15081,7 +15093,8 @@ int main(int argc, char** argv) {
                 }
                 if (want_p != p.sp->chunk() || first != p.first_now || (!o.prefill_head_alias && !stage_covers(p, reach))) {
                     const int64_t had = p.sp->stage_cells();
-                    if (!p.sp->relayout(want_p, p.cache->device_slot(first), part_bytes(p, first), e, cells)) return false;
+                    if (!p.sp->relayout(want_p, p.cache->device_slot(first), part_bytes(p, first), e, cells,
+                                        keep_p)) return false;
                     if (p.sp->stage_cells() != had && p.sp->stage_cells() > 0)
                         std::fprintf(stderr, "strata serve: CUDA%d: the prompt path's K/V staging holds %lld cells (a loan of "
                                      "%lld slots, chunk %lld)\n", p.dev < 0 ? 0 : p.dev, (long long) p.sp->stage_cells(),

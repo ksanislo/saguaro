@@ -2431,6 +2431,11 @@ if(STRATA_BUILD_TESTS)
   add_executable(warm_policy_test src/prefill/warm_policy_test.cpp)
   target_include_directories(warm_policy_test PRIVATE include)
   add_test(NAME warm_policy_test COMMAND warm_policy_test)
+  # read-prefix keep: what one layer pass copies into a kept staging region, and every way the record goes stale
+  # (pure bookkeeping, no GPU - include/strata/prefill/kv_prefix_keep.hpp)
+  add_executable(kv_prefix_keep_test src/prefill/kv_prefix_keep_test.cpp)
+  target_include_directories(kv_prefix_keep_test PRIVATE include)
+  add_test(NAME kv_prefix_keep_test COMMAND kv_prefix_keep_test)
   # issue #29: tiny batches with sleeping workers, as on a big-VRAM card; a hang fails it
   add_executable(pool_stress src/kernels/cpu/pool_stress.cpp)
   target_link_libraries(pool_stress PRIVATE strata_kernels_cpu)

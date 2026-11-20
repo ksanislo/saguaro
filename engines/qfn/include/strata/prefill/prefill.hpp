@@ -132,10 +132,22 @@ public:
     /// With borrowed buffers: lay them out again for chunks of `chunk` tokens (at most `init`'s) in `borrow` - a
     /// request lends only the slots its prompt needs.  The stream must be idle (between prompts).
     /// `stage_cells` (KV streaming): the K/V staging covers this many cells (stage_cells_for), 0 = the whole context.
-    bool relayout(int64_t chunk, void* borrow, uint64_t borrow_bytes, std::string& err, int64_t stage_cells = 0);
+    /// `keep` (read-prefix keep, kv_prefix_keep.hpp): -1 = SAGUARO_KV_PREFIX_KEEP, 0 = one shared staging pool
+    /// (stage the whole prefix per layer and chunk), 1 = lay out a staging region per QSA layer of this stage -
+    /// when the region fits `borrow` (it never inflates the loan: 1 says the loan was priced for it).
+    bool relayout(int64_t chunk, void* borrow, uint64_t borrow_bytes, std::string& err, int64_t stage_cells = 0,
+                  int keep = -1);
     int64_t chunk() const;
-    /// The cells the K/V staging holds as laid out now (0: no staging - the K/V is resident).
+    /// The cells the K/V staging holds as laid out now (0: no staging - the K/V is resident). With the keep on
+    /// this is one QSA layer's region (every region covers the same cells).
     int64_t stage_cells() const;
+    /// The keep's watermark records are stale once the loan they live in was refilled with experts (or its
+    /// memory handed to anyone): the next read stages every layer again.
+    void kv_keep_invalidate();
+    /// SAGUARO_KV_PREFIX_KEEP (default on): the reads keep each QSA layer's staged prefix on the card while the
+    /// staging loan holds, and copy only what is new. The layout only pays when the loan holds a region per
+    /// QSA layer (`bytes_needed` says so for `stage_cells` > 0); where it does not fit, the keep turns itself off.
+    static bool kv_keep_wanted();
     /// The staging cells a loan for reads reaching `reach` cells lays out: 262144 (or the whole context, if less) up
     /// to there, past it the reach rounded up to 131072; 0 (the whole context) for reach <= 0 or SAGUARO_KV_STAGE_REACH=0.
     static int64_t stage_cells_for(const core::SessionState& ss, int64_t reach);
@@ -188,9 +200,12 @@ public:
     static void set_ring_budget(int slots, int64_t small_max);
 
     /// Device bytes `init` needs for a chunk of `chunk` tokens (what a borrowed region must hold).  `src`: init gets an
-    /// ExpertSource (carve picks the fused MoE layout only then).
+    /// ExpertSource (carve picks the fused MoE layout only then).  `keep`: -1 = SAGUARO_KV_PREFIX_KEEP, 0/1 force it;
+    /// with it on and `stage_cells` > 0 the K/V staging is counted once per QSA layer of the model (what the keep's
+    /// regions take; a stage's carve lays out only its own layers' regions, so this can over-count a layer split -
+    /// the safe direction).
     static uint64_t bytes_needed(const core::ModelGeometry& g, const core::SessionState& ss, int64_t chunk,
-                                 bool src = true, int64_t stage_cells = 0);
+                                 bool src = true, int64_t stage_cells = 0, int keep = -1);
 
     /// The same without the streamed ring: what the chunk's own buffers cost.  The auto chunk scan sizes the chunk
     /// first and hands the ring what the chunk leaves over, so it needs the chunk priced on its own.
@@ -379,7 +394,7 @@ public:
 
 private:
     static uint64_t bytes_needed_impl(const core::ModelGeometry& g, const core::SessionState& ss, int64_t chunk,
-                                      bool owned_pages, bool src, int64_t stage_cells = 0);
+                                      bool owned_pages, bool src, int64_t stage_cells = 0, int keep = -1);
     kernels::cpu::ExpertPool* cpu_pool_ = nullptr;   ///< set_cpu_pool
     // Stage-1 pipeline: intermediate stages return after handing their chunk to
     // the direct successor. The public run() drains the chain once at prompt end.
