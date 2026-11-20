@@ -341,3 +341,21 @@ class InfoAfterReady(unittest.TestCase):
         self.assertEqual(info.get("vision_lend"), 1)
         self.assertEqual(lines.get_nowait(), "T 0 42")
         self.assertTrue(lines.empty())
+
+
+class MapWhileLent(unittest.TestCase):
+    """While the encoder holds VRAM the engine gave up (VLEND), CUDA0's engine parts shrink to the engine's NVML total:
+    the card is never drawn fuller than it is (it showed 16/16 live)."""
+
+    def test_parts_follow_the_engine_total(self):
+        from serve import gpu_map
+        G = 1 << 20
+        rep = [{"dev": 0, "pci": "0000:01:00", "total": 15360 * G, "free": 200 * G, "weights": 4000 * G,
+                "kv": 2000 * G, "act": 0, "pool": 9000 * G, "act_own": 1}]
+        cards = [{"pci": "0000:01:00", "index": 0, "total": 15360 * G, "used": 15200 * G,
+                  "procs": {10: 13634 * G, 11: 1196 * G}}]
+        v = gpu_map.view(rep, cards, 10, 11)[0]
+        p = v["parts"]
+        self.assertEqual(p["weights"] + p["kv"] + p["pool"] + p["act"], 13634 * G)   # the engine as NVML lists it
+        self.assertEqual(p["vision"], 1196 * G)
+        self.assertLessEqual(sum(p.values()), 15360 * G)
