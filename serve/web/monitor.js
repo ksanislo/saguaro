@@ -381,12 +381,11 @@ const gpuAge = (g) => (g.split_age == null ? "" : g.split_age < 90 ? `split as o
 const gpuGb = (b) => `${gb(b, b < GIB ? 2 : 1)} GB`;
 const gpuList = (gs) => gs.length === 1 ? gpuLabel(gs[0])
   : `GPUs ${gs.slice(0, -1).map((g) => g.index ?? g.dev).join(", ")} and ${gs[gs.length - 1].index ?? gs[gs.length - 1].dev}`;
-// the layers a GPU holds: the GLM engine's VRAM lines say [first, end), DeepSeek's and MiniMax's (maya-ds4, maya-mm3)
-// [first, last]
+// the layers a GPU holds: the GLM engine's VRAM lines say [first, end); QFN's, DeepSeek's and MiniMax's [first, last]
 const dsparkEngine = (eng) => eng.engine_kind === "ds4" || eng.engine_kind === "mm3";
 function gpuLayers(g, eng) {
   if (!g.layers) return "";
-  const [a, b] = g.layers, last = dsparkEngine(eng) ? b : b - 1;
+  const [a, b] = g.layers, last = String(eng.engine_kind || "").startsWith("glm") ? b - 1 : b;   // (only GLM's end is exclusive)
   return a < 0 || last < a ? "" : last > a ? `layers ${a}–${last}` : `layer ${a}`;
 }
 // the KV cache streams from RAM only beyond its VRAM window (DeepSeek's engine: a window as long as the context)
