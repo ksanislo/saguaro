@@ -60,6 +60,7 @@
 #include "mm3_sample.hpp"
 #include "mm3_slots.hpp"
 #include "mm3_vision.hpp"
+#include "strata/program/vram_live.hpp"
 #include "strata/spec/draft_policy.hpp"
 #include "strata/spec/suffix_drafter.hpp"
 #if defined(_WIN32)
@@ -314,6 +315,20 @@ bool parse_gen(const std::string& line, Req& r) {
 void serve_header(mm3::Model& m, bool spec_on, const std::string& kv_fmt) {
     for (const std::string& l : m.info_lines()) std::printf("NOTE %s\n", l.c_str());
     for (const std::string& l : m.vram_lines()) std::printf("%s\n", l.c_str());   // (the Monitor's GPU map)
+    // PLAN-vram-live: SAGUARO_MM3_ELASTIC maps a conversation's index keys as it grows and the coldest resident
+    // experts give their slots (ctx_take) and take them back (ctx_give), and a prompt's read borrows gather slots -
+    // the Monitor's map follows: a card whose bookkeeping moved re-prints its VRAM lines (dirty a card at most every
+    // SAGUARO_VRAM_REPORT_S s, every card every 60 s; strata/program/vram_live.hpp). The first print is seconds away,
+    // READY is already out; the beat thread is outside every request's path.
+    if (strata::program::vram_report_s() > 0) {
+        static strata::program::VramLive vram_live;   // (the beat thread below owns it for the process)
+        strata::program::VramLive::beat([&m] {
+            vram_live.tick(m.vram_live_fp(), [&](size_t) {   // (the device is asked only on a print round)
+                for (const std::string& l : m.vram_lines_live()) std::printf("%s\n", l.c_str());
+                std::fflush(stdout);
+            });
+        });
+    }
     const auto& st0 = m.stats();
     std::printf("INFO engine=mm3 engine_kind=mm3 model=MiniMax-M3.1-Flash experts_vram=%ld experts=%ld "
                 "expert_slots=%ld ram_slots=%ld dspark=%d kv=%s cpu_threads=%d cpu_experts=%ld ctx=%d", st0.resident,

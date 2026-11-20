@@ -31,6 +31,7 @@
 #include "ds4_watchdog.hpp"
 #include "strata/core/vram_mark.hpp"
 #include "strata/platform/idle_gate.hpp"
+#include "strata/program/vram_live.hpp"
 #include "strata/spec/draft_policy.hpp"
 #include "strata/spec/suffix_drafter.hpp"
 
@@ -783,11 +784,24 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
     const int img_tok = m.image_token();
     // the vision tower's room taken for a request's pictures and given back: the VRAM lines again, so the server's
     // Monitor shows the tower only while it reads them
-    m.set_vision_note([&m] {
+    const auto print_vram_lines = [&m] {
         for (const std::string& l : m.info_lines())
             if (l.rfind("VRAM ", 0) == 0) std::printf("%s\n", l.c_str());
         std::fflush(stdout);
-    });
+    };
+    m.set_vision_note(print_vram_lines);
+    // PLAN-vram-live: DS4_ELASTIC_CONV: the conversations take the pool's backed room and the coldest expert slots as
+    // they grow and give them back when they end - the Monitor's map follows: a card whose bookkeeping moved re-prints
+    // its VRAM lines (dirty a card at most every SAGUARO_VRAM_REPORT_S s, every card every 60 s; the beat thread is
+    // outside every request's path, like the watchdog above; strata/program/vram_live.hpp).
+    if (strata::program::vram_report_s() > 0) {
+        static strata::program::VramLive vram_live;   // (the beat thread below owns it for the process)
+        strata::program::VramLive::beat([&m, print_vram_lines] {
+            // (info_lines is the lines' only source: one print round re-prints every card's, the server's map
+            //  replaces each entry - a line that did not move replaces itself with itself)
+            vram_live.tick(m.vram_live_fp(), [&](size_t) { print_vram_lines(); });
+        });
+    }
     // CONVERSATION SLOTS: a request that does not continue the conversation in the model first sets that one aside
     // (Model::slot_save: its window rings, the compressors' partial groups and every source's compressed KV and index
     // keys), then takes back the kept conversation this prompt does continue (slot_load) - chats, and an agent's side

@@ -327,6 +327,21 @@ int Glm5Model::el_live(int il) const {
     return elp_->L[(size_t) il].live;
 }
 
+// PLAN-vram-live (the VRAM line re-report): the pool's bytes still mapped, and the bytes the contexts hold
+size_t Glm5Model::el_pool_mapped() const {
+    if (elp_ == nullptr) return 0;
+    size_t b = 0;
+    for (const auto& y : elp_->L) b += y.mapped;
+    return b;
+}
+
+size_t Glm5Model::el_held() const {
+    if (el_.empty()) return 0;
+    // el_backed_ counts what seq_activate / seq_grow backed; the first context's fixed part was backed at the load
+    // (el_create), never added to it, and never given back - hold it too.
+    return el_backed_ + el_.front()->fixed;
+}
+
 void Glm5Model::pool_take_back_all() {
     for (Glm5Model* m = this; m != nullptr; m = m->split_next_.get()) m->pool_take_back();
     cudaSetDevice(dev_);
@@ -369,6 +384,8 @@ bool Glm5Model::pool_give(size_t, std::string& err) {
 void Glm5Model::pool_take_back() {}
 void Glm5Model::pool_take_back_all() {}
 int Glm5Model::el_live(int) const { return INT_MAX; }
+size_t Glm5Model::el_pool_mapped() const { return 0; }
+size_t Glm5Model::el_held() const { return 0; }
 bool Glm5Model::seq_reserve_all(int s, int64_t tokens, std::string& err) { return seq_grow_all(s, tokens, err); }
 #endif
 

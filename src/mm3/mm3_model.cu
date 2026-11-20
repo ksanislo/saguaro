@@ -490,6 +490,7 @@ struct Model::Impl {
     // experts of that GPU give their slots (ctx_take); an idle engine takes them back (ctx_give).  0: off
     int el_pos = 0;
     long el_taken = 0, el_given = 0;
+    std::vector<size_t> el_load;   // (PLAN-vram-live) each layer's resident region as the load mapped it (bytes)
     size_t el_min = (size_t) 256 << 20;   // (VRAM always left free: SAGUARO_MM3_ELASTIC_MIN_FREE_MB)
     size_t ic_row_bytes() const { return (size_t) g.ix_dim * 2; }
     int ctx_room(int s) const {
@@ -763,6 +764,60 @@ struct Model::Impl {
             if (more) break;
         }
         return more;
+    }
+    // (PLAN-vram-live) the Monitor's lines as the books stand now: the elastic index keys and a prompt's gather slots
+    // hold what they have mapped (ctx_ensure / kvg_ensure keep `acct`'s KV term live), and ctx_take gives a resident
+    // region's tail while ctx_give maps it back.  The same fields and format as the load's lines; the device is
+    // asked (cudaMemGetInfo, the PCI id) only here, at print time.
+    std::vector<std::string> vram_lines_live() const {
+        std::vector<std::string> out;
+        for (const Dev& d : D) {
+            cudaSetDevice(d.id);
+            size_t fr = 0, tot = 0;
+            if (cudaMemGetInfo(&fr, &tot) != cudaSuccess) { (void) cudaGetLastError(); continue; }
+            std::array<size_t, kAN> a{};
+            if (auto it = acct.find(d.id); it != acct.end()) a = it->second;
+            const bool head = &d - D.data() == (size_t) head_dev;
+            const size_t drafter = a[kADraft] + (head && draftm ? draftm->bytes() : 0);
+            const size_t vision = vis && vis->device() == d.id ? vis->bytes() : 0;
+            long long slots = d.n_slots;
+            size_t given = 0;
+            for (int li : d.layers) {
+                slots += (long long) L[(size_t) li].res_ids.size();
+                if ((size_t) li < el_load.size() && L[(size_t) li].resv.mapped < el_load[(size_t) li])
+                    given += el_load[(size_t) li] - L[(size_t) li].resv.mapped;
+            }
+            const size_t pool = a[kAPool] > given ? a[kAPool] - given : 0;
+            const size_t kvh = acct_kvh.count(d.id) ? acct_kvh.at(d.id) : 0;
+            char pci[32] = "-";
+            if (cudaDeviceGetPCIBusId(pci, sizeof pci, d.id) != cudaSuccess) std::snprintf(pci, sizeof pci, "-");
+            char b[512];
+            std::snprintf(b, sizeof b,
+                          "VRAM dev=%d pci=%s total=%zu free=%zu weights=%zu kv=%zu kv_ram=%zu act=%zu drafter=%zu "
+                          "window=0 pool=%zu tail=0 borrow=0 vision=0 vision_own=%zu prompt=0 tp=0 tp_n=1 slots=%lld "
+                          "ctx=%d layers=%d-%d",
+                          d.id, pci, tot, fr, a[kAW], a[kAKV], kvh, a[kAAct], drafter, pool, vision, slots, o.max_ctx,
+                          d.layers.front(), d.layers.back());
+            out.push_back(b);
+        }
+        return out;
+    }
+    // ... and the cheap version the beat asks between the steps: the bookkeeping the lines follow, a card
+    // (the KV the elastic holds, the resident bytes given up) - no device call, no locks.
+    std::vector<std::string> vram_live_fp() const {
+        std::vector<std::string> out;
+        for (const Dev& d : D) {
+            std::array<size_t, kAN> a{};
+            if (auto it = acct.find(d.id); it != acct.end()) a = it->second;
+            size_t given = 0;
+            for (int li : d.layers)
+                if ((size_t) li < el_load.size() && L[(size_t) li].resv.mapped < el_load[(size_t) li])
+                    given += el_load[(size_t) li] - L[(size_t) li].resv.mapped;
+            char b[96];
+            std::snprintf(b, sizeof b, "%d:%zu:%zu", d.id, a[kAKV], given);
+            out.push_back(b);
+        }
+        return out;
     }
     std::vector<uint32_t> prof;      // routings [layer][expert]: the loaded profile's plus this run's
     std::vector<uint32_t> cpu_seen;  // (MM3_MISS_STATS: the CPU lane's computations [layer][expert] this run)
@@ -2445,6 +2500,10 @@ struct Model::Impl {
                           drafter, a[kAPool], vision, slots, o.max_ctx, d.layers.front(), d.layers.back());
             vram.push_back(b);
         }
+        // (PLAN-vram-live) remember the resident regions as the load mapped them: what ctx_take gives the index keys
+        // afterwards is the difference the re-printed VRAM lines show as a smaller pool
+        el_load.assign(L.size(), 0);
+        for (size_t li = 0; li < L.size(); ++li) el_load[li] = L[(size_t) li].resv.mapped;
         // the load's work on the legacy stream (cudaMemset of the KV rings' tags, the copies) done before the first
         // forward's on the non-blocking streams: nothing else orders the two (Windows + AMD submit queued work only when
         // the host waits - a pending memset there read as done)
@@ -4353,6 +4412,9 @@ int Model::eos() const { return tpe ? tpe->eos() : p->g.eos; }
 const Stats& Model::stats() const { return tpe ? tpe->stats() : p->st; }
 std::vector<std::string> Model::info_lines() const { return tpe ? tpe->info_lines() : p->info; }
 std::vector<std::string> Model::vram_lines() const { return tpe ? tpe->vram_lines() : p->vram; }
+std::vector<std::string> Model::vram_lines_live() const { return tpe ? vram_lines() : p->vram_lines_live(); }
+// (--tp has no elastic context: its split never moves, so its fingerprint never changes and only the heartbeat prints)
+std::vector<std::string> Model::vram_live_fp() const { return tpe ? std::vector<std::string>{} : p->vram_live_fp(); }
 
 int Model::draft_block() const {
     if (tpe) return tpe->draft_block();

@@ -4998,6 +4998,10 @@ std::vector<Glm5Model::VramReport> Glm5Model::vram_report() const {
             r.tail = F->xpool_bytes;
             r.slots = F->pool_slots;
         }
+        if (m->elastic()) {   // (PLAN-vram-live, SAGUARO_GLM_ELASTIC: the contexts are backed as they grow and the
+            r.kv = m->el_held();   //  expert pool gives way - the line says what the card holds of them NOW, so the
+            if (m->elp_ != nullptr) r.pool = m->el_pool_mapped();   //  re-printed one follows the giving and taking)
+        }
         r.borrow = m->prefill_borrow_bytes();
         r.vision = m->vision_lend_bytes();
         r.ctx = m->max_ctx_;
@@ -5006,6 +5010,23 @@ std::vector<Glm5Model::VramReport> Glm5Model::vram_report() const {
         out.push_back(r);
     }
     cudaSetDevice(cur);
+    return out;
+}
+
+std::vector<std::array<uint64_t, 5>> Glm5Model::vram_fingerprint() const {
+    // (PLAN-vram-live) the same bytes the VRAM lines carry, read from the bookkeeping alone - no device call, so
+    // asking "did a card's split move?" between the steps costs nothing.  Same order as vram_report's parts.
+    std::vector<std::array<uint64_t, 5>> out;
+    for (const Glm5Model* m = this; m != nullptr; m = m->split_next_.get()) {
+        const FastState* F = m->fast_;
+        std::array<uint64_t, 5> r;
+        r[0] = m->elastic() ? m->el_held() : m->state_bytes_;
+        r[1] = m->elp_ != nullptr ? m->el_pool_mapped() : (F != nullptr ? F->pool_bytes : 0);
+        r[2] = m->kv_ != nullptr ? m->kv_->host_bytes : 0;
+        r[3] = m->prefill_borrow_bytes();
+        r[4] = m->vision_lend_bytes();
+        out.push_back(r);
+    }
     return out;
 }
 

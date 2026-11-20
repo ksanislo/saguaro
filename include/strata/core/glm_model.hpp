@@ -154,6 +154,10 @@ public:
         int l0 = 0, l1 = 0;
     };
     std::vector<VramReport> vram_report() const;
+    /// (PLAN-vram-live) the bytes behind each part's VRAM line, read from the bookkeeping alone - no device calls,
+    /// so the engine can ask "did this card's split move?" between its steps: {state held, expert pool mapped,
+    /// KV in RAM, the prompt's borrow, the vision encoder's room}, one row a part (the split's part order).
+    std::vector<std::array<uint64_t, 5>> vram_fingerprint() const;
     /// Every GPU's expert pool as it was sized (part order): the device, the VRAM kept free beside it (MiB), whether the
     /// default reserve was lowered so a small card's pool holds its floor, and --expert-cache N (0: auto) - for the
     /// driver's free-VRAM lines, which name the setting that leaves room
@@ -892,6 +896,8 @@ public:
     struct ElPool;
     ElPool* elp_ = nullptr;
     int el_live(int il) const;   // the elastic pool's mapped slots of layer il (INT_MAX: no elastic pool)
+    size_t el_pool_mapped() const;   // (PLAN-vram-live) the elastic pool's bytes mapped now (0: no elastic pool)
+    size_t el_held() const;          // ... and the bytes the elastic contexts hold now
     size_t el_budget0_ = 0;                                       // the budget before any expert gave way
     uint8_t* el_pool_alloc(const std::vector<std::array<size_t, 3>>& layers, std::vector<size_t>& offs, std::string& err);
     void el_pool_free();
