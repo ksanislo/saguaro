@@ -38,7 +38,7 @@ HAS_SAGUARO = re.compile(r"\b" + "SAGUARO" + r"_([A-Z0-9_]+)\b")
 
 SKIP_DIR_NAMES = {".git", "third_party", "node_modules", "__pycache__", ".venv", "venv", ".mypy_cache", ".scons"}
 SKIP_DIR_RE = re.compile(r"^(build[^/\\]*|.*-build|cmake-build.*)$", re.I)
-SKIP_PATHS = ("ref-configs/", "engines/qfn/bench/results/", "tools/saguaro/")
+SKIP_PATHS = ("ref-configs/", "bench/results/", "engines/qfn/bench/results/", "tools/saguaro/")
 SKIP_NAME_RE = re.compile(r"^(CHANGELOG\.md|(PLAN|REPORT)-.*\.md)$")
 SKIP_SUFFIXES = {".log", ".jsonl", ".patch", ".orig"}
 CONF_SUFFIXES = {".json", ".yaml", ".yml"}
@@ -283,7 +283,8 @@ def collect(paths):
     return out
 
 
-BARE_NAME = re.compile(r"[\x27\x22]([A-Z][A-Z0-9_]{2,})[\x27\x22]")
+BARE_NAME = re.compile(r"([\x27\x22])([A-Z][A-Z0-9_]{2,})\1")
+ENV_DIRECT = re.compile(r"(?i)(?:\w*env\w*|environ\.get|environ|getenv\w*|setenv|putenv_s|--env|ENVIRONMENT)[\s]*[\(\[]?\s*$")
 
 
 def main() -> int:
@@ -307,9 +308,9 @@ def main() -> int:
             continue
         reg = regs[rel]
         for m in BARE_NAME.finditer(text):
-            s = m.start()
-            if reg is not None and reg[0][s] and ENV_NAME_CTX.search(text[max(0, s - 60):s]):
-                sufs.add(m.group(1))
+            s, e = m.start(), m.end()
+            if reg is not None and reg[0][s] and ENV_DIRECT.search(text[max(0, s - 30):s]):
+                sufs.add(m.group(2))          # only a string an env call READS directly: ds4_env("DS4_X"), not ROOT / "VERSION"
     occ = {rel: [(m.start(), m.end(), m.group(0), m.group(2),
                   *decide(text, fam, m, regs[rel], sufs)) for m in NAME.finditer(text)]
            for rel, (p, fam, text, bom) in files.items()}
