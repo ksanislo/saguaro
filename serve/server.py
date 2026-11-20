@@ -3511,7 +3511,7 @@ class Service:
         stream = bool(kbt) and 0 < win < self.engine.max_context
         rows = []
         for st in sorted(self.waiting, key=lambda r: r.queued_at or 0.0):
-            rows.append({"id": st.id, "label": st.api, "conv": st.conv.id if st.conv else None,
+            rows.append({"id": st.id, "cid": getattr(st, "cid", None), "label": st.api, "conv": st.conv.id if st.conv else None,
                          "state": "queued", "phase": None,
                          "prompt_tokens": st.prompt_tokens or None, "prompt_read": None, "prompt_total": None,
                          "generated": 0, "max_tokens": st.max_tokens, "tok_s": None, "prefill_tok_s": None,
@@ -4659,6 +4659,7 @@ class Service:
         stat = RequestStat()                            # this request's live figures
         stat.spec_off = request_spec_off(sampling)
         stat.id, stat.api = next(self._req_ids), (sampling or {}).get("_api")
+        stat.cid = (sampling or {}).get("_cid")
         stat.prompt_tokens, stat.max_tokens, stat.queued_at = len(ids), max_new, my_started
         conv_tail = (sampling or {}).get("_gen_tail")   # the reply's opening tokens (prepare's gt=): not the opening
         conv_tail = conv_tail if isinstance(conv_tail, int) and not isinstance(conv_tail, bool) and conv_tail > 0 else 0
@@ -5289,6 +5290,8 @@ def openai_chunks(svc: Service, req: dict, ids, thinking, tools, max_new, cancel
     """`run`: the events to send instead of Service.run's (run_with_mcp); its ("mcp", {...}) items become chunks with
     an empty delta and a `strata_mcp` field, which only the web app reads."""
     cid, created = "chatcmpl-" + uuid.uuid4().hex[:24], int(time.time())
+    if isinstance(req, dict):
+        req["_cid"] = cid                                # (its Monitor row carries it: the web app finds its own chat)
 
     def chunk(delta, finish=None):
         return {"id": cid, "object": "chat.completion.chunk", "created": created, "model": svc.model,
