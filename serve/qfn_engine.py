@@ -10,6 +10,7 @@ _QFN = str(_P(__file__).resolve().parents[1] / "engines" / "qfn")
 if _QFN not in _sys.path:
     _sys.path.append(_QFN)   # (strata_control: QFN's own package; appended, so the shared tools/ come first)
 
+import collections
 import base64
 import hashlib
 import json
@@ -936,6 +937,9 @@ class StrataEngine:
                 if cards and self.proc is proc:
                     self.info["slot_memory"] = cards
                 continue
+            if line.startswith("STAT "):              # the batch windows' Monitor line (tiers: vram_hit, the drafts):
+                self._parse_stat(line)                 # the Monitor's, never a request's line
+                continue
             if line.startswith(SLOT_LINES) and slot_q:   # --batch: a batch slot's own lines
                 try:
                     slot_q[int(line.split()[1])].put(line)
@@ -1111,6 +1115,25 @@ class StrataEngine:
                     self.last[key] = int(value)
                 except ValueError:
                     pass
+
+    stat = None       # the engine's latest STAT line (the batch windows' Monitor line: vram_hit, the MTP drafts)
+
+    def _parse_stat(self, line):
+        """`STAT key=value ...` (the engine while its batch windows run, at most once a second): the live expert-tier
+        counters for the Monitor, kept like the GLM driver does - the latest reading and a recent history."""
+        st = {}
+        for kv in line.split()[1:]:
+            k, _, v = kv.partition("=")
+            try:
+                st[k] = float(v)
+            except ValueError:
+                st[k] = v
+        st["time"] = time.time()
+        self.stat = st
+        hist = getattr(self, "stat_history", None)
+        if hist is None:
+            hist = self.stat_history = collections.deque(maxlen=120)
+        hist.append(st)
 
     def vram(self, reserve_mib: int | None, timeout: float = 120.0) -> dict:
         """#533: `VRAM <reserve_mib>` between requests (the caller holds the service's FIFO): the engine shrinks its
@@ -1329,10 +1352,17 @@ class StrataEngine:
         return None
 
     def _apply_bdone(self, f: list[str]) -> None:
-        """`BDONE <slot> <produced> <finish> <ms>` into this request's figures."""
+        """`BDONE <slot> <produced> <finish> <ms> [<hits> <lookups> <drafts accepted> <drafts offered>]` into this
+        request's figures (the last four: the slot's own, engine 0.1.50+; an older engine's line has only the five)."""
         if len(f) >= 5 and isinstance(self.last, dict):
             self.last = {**self.last, "finish": f[3], "decode_ms": float(f[4]),
                          "generated": int(f[2]) if f[2].isdigit() else self.last.get("generated")}
+            if len(f) >= 9:
+                try:
+                    self.last.update(hits=int(f[5]), lookups=int(f[6]),
+                                     drafts_accepted=int(f[7]), drafts_offered=int(f[8]))
+                except ValueError:
+                    pass
 
     def _bdone_after_eos(self, slot: int, wait_s: float = 2.0):
         """#1869: a request in a slot whose consumer left at the stop token has its BDONE right behind it (the engine prints it
