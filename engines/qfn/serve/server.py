@@ -3005,13 +3005,16 @@ class Vision:
         self.stopped = True
         self.lock = threading.Lock()
         self.cache: dict[str, tuple[Path, int]] = {}
-        # opt-in (the vision section's "elastic": true, with the config's "vram_elastic"): the encoder starts with the
-        # first picture and stops after elastic_idle_s without one; while it runs, the engine's expert cache keeps
-        # elastic_mib of VRAM free for it (Service._vision_up / _vision_idle_down)
+        # opt-in (the vision section's "elastic": true, with the engine lending its room): the encoder starts with the
+        # first picture and stops after elastic_idle_s without one (VRAM back at once, VLEND/VRECLAIM); its weight
+        # files stay hot in the OS file cache for elastic_keep_s after that, so the next restart loads from RAM -
+        # the cheap-restart state costs no VRAM, so it may outlive the idle stop (0: off)
         self.max_tokens = self.token_limit(cfg)
         self.elastic = cfg.get("elastic") is True
         self.elastic_mib = int(cfg.get("elastic_mib") or 2048)
-        self.elastic_idle_s = float(cfg.get("elastic_idle_s") or 120)
+        self.elastic_idle_s = float(cfg.get("elastic_idle_s") or 30)
+        self.elastic_keep_s = float(600 if cfg.get("elastic_keep_s") is None else cfg.get("elastic_keep_s"))
+        self.weights = [p if os.path.isabs(p) else os.path.abspath(p) for p in (cfg.get("mmproj"), cfg.get("model")) if p]
         if not lazy and not self.elastic:
             self._start()
 
@@ -3043,6 +3046,8 @@ class Vision:
             args += ["--max-tokens", str(limit)]
         if cfg.get("min_tokens"):                       # #767: mtmd's image_min_tokens (a hand-edited key)
             args += ["--min-tokens", str(cfg["min_tokens"])]
+        if cfg.get("elastic") is True:                  # a cold picture waits on this start: warm up after the first one
+            args.append("--warmup-lazy")
         return args
 
     def _ensure_dir(self):
@@ -3092,6 +3097,14 @@ class Vision:
                 pass
             if code is None:
                 code = getattr(proc, "returncode", None)
+            if "--warmup-lazy" in args and (code == 2 or "unknown argument" in line):
+                # a picture reader from before --warmup-lazy exists (unknown argument, exit 2): start it without,
+                # so an elastic encoder is never held hostage by the older binary
+                print("[strata] the picture reader does not know --warmup-lazy; it warms up before READY again", flush=True)
+                a2, l2, e2 = self.spawn
+                self.spawn = ([a for a in a2 if a != "--warmup-lazy"], l2, e2)
+                self._start_reader()
+                return
             raise RuntimeError(vision_start_error(line, log, code))
         self.stopped = False
 
@@ -3135,6 +3148,42 @@ class Vision:
         self.proc = None
         self.stopped = True
         self._start()
+
+    def keep_hot(self):
+        """After the idle stop: hold the encoder's weight files in the OS file cache for elastic_keep_s, so the next
+        start loads them from RAM.  A cheap stand-by inside the reader is not something vision-qfn can do - its
+        protocol is READY / ENC / QUIT and mtmd's only release is mtmd_free (all or nothing) - so the cheap-restart
+        state is the hot page cache itself, and it costs no VRAM."""
+        if not self.elastic or self.elastic_keep_s <= 0:
+            return
+        keeper = getattr(self, "_hot", None)
+        if keeper is not None and keeper.is_alive():
+            return
+        def hold():
+            end = time.monotonic() + self.elastic_keep_s
+            while time.monotonic() < end and not self.alive():
+                for p in self.weights:
+                    self._touch_weights(p)
+                time.sleep(min(60.0, max(1.0, self.elastic_keep_s / 4.0)))
+        self._hot = threading.Thread(target=hold, daemon=True)
+        self._hot.start()
+
+    @staticmethod
+    def _touch_weights(path):
+        """Ask the OS to keep one weight file's pages (no read when they are cached): fadvise where it exists, a
+        plain re-open elsewhere (Windows caches what it has just read)."""
+        try:
+            fd = os.open(path, os.O_RDONLY)
+        except OSError:
+            return
+        try:
+            if hasattr(os, "posix_fadvise"):
+                n = os.fstat(fd).st_size
+                for at in range(0, n, 1 << 20):
+                    os.posix_fadvise(fd, at, min(1 << 20, n - at), os.POSIX_FADV_WILLNEED)
+        except OSError:
+            pass
+        os.close(fd)
 
     @staticmethod
     def load(source: str) -> bytes:

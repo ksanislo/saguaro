@@ -62,6 +62,29 @@ class ElasticVision(unittest.TestCase):
             self.reclaim_calls.append(True)
             return {"cache_mib": 12544}
 
+    class PausingLendEngine(LendEngine):
+        """A QFN engine whose batch slots keep decoding: its give step runs at the next CUDA0 window boundary
+        (PLAN-vision-fast-start's pause), so vision_lend is answered one window later - not when decoding stops."""
+
+        window_s = 0.1
+
+        def __init__(self, tok, log):
+            super().__init__(tok, log)
+            self.ticks, self.stop = 0, threading.Event()
+            threading.Thread(target=self.decode, daemon=True).start()
+
+        def decode(self):
+            while not self.stop.wait(self.window_s):
+                self.ticks += 1                     # (the fake slots' windows: the pipeline is never all-quiet)
+
+        def vision_lend(self, mib, timeout=45.0):
+            self.log.append(("lend", mib))
+            self.lend_calls.append(mib)
+            t = self.ticks                          # (the engine pauses CUDA0 at the next boundary and answers there)
+            while not self.stop.is_set() and self.ticks == t:
+                self.stop.wait(0.02)
+            return {"free_mib": 1700, "cache_mib": 11008}
+
     class Reader:
         """The elastic encoder: alive/restart/unload, the elastic numbers, an encode that records; no active()."""
 
@@ -74,6 +97,7 @@ class ElasticVision(unittest.TestCase):
             self.elastic_mib = 1536
             self.elastic_idle_s = elastic_idle_s
             self.running = False
+            self.kept = 0
 
         def alive(self):
             return self.running
@@ -85,6 +109,9 @@ class ElasticVision(unittest.TestCase):
         def unload(self):
             self.log.append(("unload",))
             self.running = False
+
+        def keep_hot(self):
+            self.kept += 1        # (not in the log: the recorded order is the stop's protocol, this is its side)
 
         def encode(self, source):
             self.log.append(("encode",))
@@ -266,6 +293,45 @@ class ElasticVision(unittest.TestCase):
         self.assertEqual(svc.engine.reclaim_calls, [True])      # stopped and reclaimed by the thread, not by us
         self.assertFalse(svc.vision.running)
         self.assertFalse(svc.vision_held)
+
+    def test_lend_answer_arrives_within_the_pause_budget_while_slots_decode(self):
+        # PLAN-vision-fast-start: the engine pauses CUDA0 at the next window boundary and answers VLEND there -
+        # the encoder starts within the pause budget while the seven batch slots keep decoding (it never waits
+        # for the pipeline to go quiet on its own, which once cost 17 s)
+        tok = ByteTokenizer()
+        log, d = [], tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        eng, vision = self.PausingLendEngine(tok, log), self.Reader(d.name, log)
+        self.addCleanup(eng.stop.set)
+        svc = Service(eng, tok, ChatTemplate(ROOT / "serve/chat_template.jinja"), vision=vision)
+        self.addCleanup(lambda: getattr(svc.embeddings, "path", None) and svc.embeddings.path.unlink(missing_ok=True))
+        svc.fifo.set_capacity(8)
+        for _ in range(7):                                      # seven conversations decode
+            self.assertTrue(svc.fifo.acquire(units=1))
+        try:
+            ticks0 = eng.ticks
+            t0 = time.monotonic()
+            self.picture(svc)                                   # the eighth place: the picture turn, VLEND included
+            took = time.monotonic() - t0
+        finally:
+            for _ in range(7):
+                svc.fifo.release(units=1)
+        self.assertLess(took, 1.0)                              # the pause budget: a window boundary, not the decode
+        self.assertGreater(eng.ticks, ticks0)                   # ... the fake slots kept decoding through it
+        self.assertEqual([e[0] for e in log], ["lend", "start", "encode"])
+
+    def test_the_idle_stop_keeps_the_weights_hot_for_a_cheap_restart(self):
+        svc, log = self.make(lend=True)                         # VRAM back at elastic_idle_s, the hot file cache kept
+        self.picture(svc)
+        self.assertEqual(svc.vision.kept, 0)                    # while it runs there is nothing to keep hot
+        self.assertEqual(svc._vision_idle_down(force=True), "down")
+        self.assertEqual(svc.vision.kept, 1)                    # the cheap-restart state outlives the stop
+
+    def test_the_vram_path_stop_keeps_the_weights_hot_too(self):
+        svc, log = self.make()                                  # the old reserve path gets the same cheap restart
+        self.picture(svc)
+        self.assertEqual(svc._vision_idle_down(force=True), "down")
+        self.assertEqual(svc.vision.kept, 1)
 
 
 class LendProtocol(unittest.TestCase):
