@@ -1373,7 +1373,9 @@ class LiveRate(unittest.TestCase):
         self.svc.status.update(busy=True)
         self.svc.latest_request = RequestStat()     # it has the engine; no answer token yet
         self.assertEqual(self.metrics()["live"]["prefill_tok_s_mean"], 1000.0)
-        self.assertNotIn("prefill_tok_s", self.metrics()["live"])
+        # the engine-total read rate (the Monitor's live Prefill now): 0.0 - this read went straight to the engine,
+        # the service saw no read step of its own (run() wires the PP hook; here there is no run())
+        self.assertEqual(self.metrics()["live"]["prefill_tok_s"], 0.0)
         self.assertEqual(self.svc._prefill_tok_s_mean(), 1000.0)
         self.svc.latest_request.first_token = time.time()
         self.svc.current_requests.add(self.svc.latest_request)

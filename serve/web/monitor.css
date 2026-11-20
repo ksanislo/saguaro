@@ -92,6 +92,25 @@
 .ctxbar__fresh, .sw.sw--fresh { background: var(--st-info); }
 .ctxbar__written, .sw.sw--written { background: var(--st-ok); }
 
+/* Right now: one compact row per chat (a busy batch), and the per-chat cache bars on the Context card */
+.now__summary { display: block; margin: 2px 0 4px; font-size: var(--st-fs-sm); color: var(--st-ink-muted); }
+.now__chat { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; align-items: start; margin-top: 8px; }
+.now__chat__body { min-width: 0; }
+.now__chat .bar--sm { height: 4px; margin-bottom: 3px; }
+.now__chat__row { display: flex; gap: 8px; align-items: baseline; min-width: 0; flex-wrap: wrap; }
+.now__more { margin-top: 10px; }
+.ctx__chats { margin-top: 12px; display: grid; gap: 6px; }
+.ctx__chats__tot { margin: 0 0 2px; font-size: var(--st-fs-sm); color: var(--st-ink-soft); }
+.ctx__chat { display: grid; grid-template-columns: minmax(56px, auto) minmax(0, 1fr) auto; gap: 8px; align-items: center; font-size: var(--st-fs-sm); }
+.ctx__chat__who { color: var(--st-ink-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ctx__chat__bar { display: flex; gap: 2px; height: 8px; border-radius: var(--st-r-pill); overflow: hidden; background: var(--st-surface-3); }
+.ctx__chat__bar > i { flex: 0 1 0; min-width: 0; }
+.ctx__chat__vram { background: var(--st-accent); }
+.ctx__chat__ram { background: var(--st-info); }
+.ctx__chat__nums { color: var(--st-ink-soft); white-space: nowrap; }
+.ctx__chats__lgd { margin: 2px 0 0; display: flex; gap: 12px; font-size: 11px; color: var(--st-ink-muted); }
+.ctx__chats__lgd i { display: inline-block; width: 8px; height: 8px; border-radius: 3px; margin-right: 4px; vertical-align: -1px; }
+
 /* the experts' tiers */
 .tierbar { display: flex; gap: 2px; height: 14px; border-radius: var(--st-r-pill); overflow: hidden; background: var(--st-surface-3); }
 .tierbar > span { flex: 0 1 0; min-width: 0; transition: flex-grow 400ms var(--st-ease); }
