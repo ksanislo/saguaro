@@ -263,6 +263,8 @@ export function estimateTokens(msgs, c = S.current) {   // an older server witho
 export function liveCtx() {
   const live = S.metrics && S.metrics.live;
   if (!S.busy || S.busy.chat !== S.current || !live || live.state === "idle" || live.prompt_tokens == null) return null;
+  // several chats at once: the server's single "live" request may be another chat's - this chat counts its own
+  if ((live.chats || []).length > 1 || (live.active || 0) > 1) return null;
   return {tokens: live.prompt_tokens + (live.generated || 0), approx: false, why: "This request"};
 }
 export function updateCtxMeter() {
