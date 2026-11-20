@@ -16,6 +16,9 @@ __pycache__/
 .pytest_cache/
 *.pyc
 
+# working scratch of a deploy check run (PLAN-deploy-checks.md)
+scratch/
+
 # plan v0.3 P1 (repository hygiene, review E1): profiler captures and large diagnostic dumps stay out of git.
 *.nsys-rep
 *.sqlite

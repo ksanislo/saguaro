@@ -1,0 +1,5 @@
+data: {"choices":[{"index":0,"delta":{"content":"Sure. T 0 123.4 strata: VRAM dev=0 used=18012 PP 512 of 4096 BRP 2 100 300 20"}}]}
+
+data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: [DONE]
