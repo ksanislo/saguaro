@@ -2633,11 +2633,20 @@ class Service:
             # the engine may hold its raised floor after ANY VLEND (a refusal can leave the give half-done), so the
             # idle stop must send VRECLAIM even when the lend itself was refused
             self.vision_held = True
+            # PLAN-vision-fast-start review 3: WHEN the command goes out and when its answer comes back - the line
+            # pairs with the engine's "read by the serve loop" line, so a wait between the two can be placed
+            t_lend = time.monotonic()
+            print(f"[saguaro] images: VLEND {v.elastic_mib} MiB sent to the engine (its VLENT line answers)",
+                  flush=True)
             try:
                 out = self.engine.vision_lend(v.elastic_mib)     # waits for the engine's VLENT line
+                print(f"[saguaro] images: VLENT after {(time.monotonic() - t_lend) * 1000:.0f} ms "
+                      f"({out.get('cache_mib')} MiB mapped)", flush=True)
                 room = (f"the expert cache keeps {v.elastic_mib} MiB free for it "
                         f"({out.get('cache_mib')} MiB left mapped); ")
             except ValueError as e:
+                print(f"[saguaro] images: the lend was refused after {(time.monotonic() - t_lend) * 1000:.0f} ms "
+                      f"({e})", flush=True)
                 room = f"the expert cache did not make room for it ({e}); "
         elif hasattr(self.engine, "vram_reserve") and self._engine_ready():
             try:
