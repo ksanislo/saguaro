@@ -650,7 +650,7 @@ function Conversations({m}) {
     const out = t ? html`${fmt(t.generated)}${t.max_tokens ? html`<span class="muted small"> / ${fmt(t.max_tokens)}</span>` : ""}` : fmt(c.out_last);
     const speed = !t ? (c.decode_tok_s != null ? `${fmt(c.decode_tok_s, 1)} tok/s` : "–")
       : t.state === "reading" ? (t.prefill_tok_s != null ? `${fmt(t.prefill_tok_s)} prefill${t.prefill_shared ? " (shared clock)" : ""}` : "–")
-      : t.tok_s != null ? fmt(t.tok_s, 1) : "–";
+      : t.tok_s != null ? `${fmt(t.tok_s, 1)} tok/s` : "–";
     return html`<tr class=${t ? "" : "muted"}><td class="l nowrap"><span class=${`badge badge--${tone}`}>${text}</span></td>
       <td class="l"><span class="conv__who">${who}</span><span class="conv__meta muted small num">${under.join(" · ")}</span></td>
       <td>${read}</td><td>${out}</td>
