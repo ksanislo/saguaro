@@ -112,9 +112,62 @@ function drafterName(name) {
   return parts.length ? parts.join(" + ") : name || "";
 }
 
+const CHAT_STATES = {queued: ["muted", "Queued"], reading: ["info", "Reading"], thinking: ["accent", "Thinking"],
+                     writing: ["accent", "Writing"], tool: ["warn", "Tool call"]};
+
+// the "Right now" rows from /metrics' live.chats, pure (a page-logic test can run it): newest-queued first, a
+// summary like "3 writing, 1 reading, 2 waiting", and the first six with the rest counted (+N more)
+export function chatsModel(m) {
+  const chats = ((m && m.live) || {}).chats || [];
+  if (chats.length < 2) return null;
+  const rows = [...chats].sort((a, b) => (b.elapsed_s || 0) - (a.elapsed_s || 0));
+  const n = {writing: 0, reading: 0, queued: 0};
+  for (const c of rows) n[c.state === "queued" ? "queued" : c.state === "reading" ? "reading" : "writing"]++;
+  const summary = [[n.writing, "writing"], [n.reading, "reading"], [n.queued, "waiting"]]
+    .filter(([k]) => k).map(([k, w]) => `${k} ${w}`).join(", ");
+  return {rows, summary, shown: rows.slice(0, 6), more: Math.max(0, rows.length - 6)};
+}
+
 function RightNow({m}) {
   const live = m.live || {}, last = (m.requests || [])[0], eng = m.engine || {};
+  const [open, setOpen] = useState(false);            // the "+N more" chats of a busy batch expanded
   const took = (s) => (s == null ? "" : s < 90 ? ` · ${fmt(s, s < 10 ? 1 : 0)} s` : ` · ${fmt(Math.floor(s / 60))} min ${fmt(s % 60)} s`);
+  const model = S.reload ? null : chatsModel(m);     // several chats: a row each; one chat: exactly as before
+  if (model) {
+    const chatRow = (c) => {
+      const [tone, text] = CHAT_STATES[c.state] || ["muted", c.state];
+      const who = API_NAMES[c.label] || c.label || `chat ${c.id != null ? c.id : ""}`.trim();
+      let pct = null, ptone = "accent", detail;
+      if (c.state === "reading") {
+        ptone = "info";
+        if (c.prompt_total) pct = Math.min(100, (100 * (c.prompt_read || 0)) / c.prompt_total);
+        detail = (c.prompt_total ? `${fmt(c.prompt_read)} / ${fmt(c.prompt_total)} prompt tokens`
+                : `${fmt(c.prompt_tokens)} prompt tokens`) + (c.prefill_tok_s ? ` · ${fmt(c.prefill_tok_s)} tok/s` : "") + took(c.elapsed_s);
+      } else if (c.state === "queued") {
+        detail = `waiting${took(c.elapsed_s)}${c.prompt_tokens ? ` · ${fmt(c.prompt_tokens)} prompt tokens` : ""}`;
+      } else {
+        pct = c.max_tokens ? Math.min(100, (100 * (c.generated || 0)) / c.max_tokens) : null;
+        detail = `${fmt(c.generated || 0)}${c.max_tokens ? ` / ${fmt(c.max_tokens)}` : ""} tokens` +
+                 `${c.tok_s ? ` · ${fmt(c.tok_s, 1)} tok/s` : ""}${took(c.elapsed_s)}`;
+      }
+      return html`<div class="now__chat" title=${c.state === "reading" && c.prefill_shared
+        ? "it reads beside another chat: shared engine clock" : null}>
+        <${Badge} tone=${tone}>${text}<//>
+        <div class="now__chat__body">
+          ${pct != null ? html`<div class="bar bar--sm" role="progressbar" data-tone=${ptone} aria-valuenow=${Math.round(pct)}
+            aria-valuemin="0" aria-valuemax="100" aria-label=${who}><span style=${`width:${pct}%`}></span></div>` : null}
+          <span class="now__chat__row"><span class="muted small">${who}</span><span class="now__detail num">${detail}</span></span>
+        </div></div>`;
+    };
+    const vis = open ? model.rows : model.shown;
+    return html`<section class="card card--side" aria-label="Right now">
+      <span class="card__title">Right now</span>
+      <span class="now__summary num">${model.summary}</span>
+      ${vis.map(chatRow)}
+      ${model.more ? html`<button type="button" class="btn btn--secondary btn--sm now__more" onClick=${() => setOpen(!open)}>
+        ${open ? "Show fewer" : `+${model.more} more`}</button>` : null}
+    </section>`;
+  }
   let label = "Idle", tone = "muted", detail = "waiting for a request", pct = null, ptone = "accent";
   if (S.reload) {
     label = "Reloading"; tone = "info"; ptone = "info"; detail = `a ${ctxfmt(S.reload.to)} context`;
@@ -165,12 +218,37 @@ function ContextCard({m}) {
   const used = Math.min(max, prompt + written), free = Math.max(0, max - used), pct = (100 * used) / max;
   const win = +eng.kv_resident || 0, showWin = win > 0 && win < max;
   // (the VRAM window is KV streaming's --kv-resident: Models > Engine settings > Prompts and cache, GLM and MiniMax alike)
+  // what a chat's cache costs, live from its size: the engine's own bytes per token (QFN Q8: 12672 = 12 QSA
+  // layers x 1056 B); without that report no size is claimed (the load-time kv_ram_bytes is a snapshot, not live)
+  const kbt = +eng.kv_bytes_token || 0;
+  const GBb = (b) => `${fmt(b / GIB, b >= 10 * GIB ? 1 : 2)} GB`;
+  const actChats = ((live.chats || []).filter((c) => c.state !== "queued"));
+  const manyChats = running && actChats.length > 1;
+  let cacheTot = null;
+  if (kbt && manyChats) {
+    const v = actChats.reduce((a, c) => a + (c.cache_vram_bytes || 0), 0);
+    const rm = actChats.reduce((a, c) => a + (c.cache_ram_bytes || 0), 0);
+    cacheTot = {n: actChats.length, all: GBb(v + rm), vram: GBb(v), ram: GBb(rm)};
+  }
+  const chatBar = (c) => {
+    const who = API_NAMES[c.label] || c.label || `chat ${c.id != null ? c.id : ""}`;
+    const cv = c.cache_vram_bytes || 0, cr = c.cache_ram_bytes || 0, ctot = cv + cr;
+    return html`<div class="ctx__chat" title=${`${who}: ${fmt(c.context_used)} of ${fmt(max)} positions`}>
+      <span class="ctx__chat__who">${who}</span>
+      <span class="ctx__chat__bar" role="img" aria-label=${`${fmt(c.context_used)} tokens${kbt && ctot ? `, ${GBb(ctot)} of K/V: ${GBb(cv)} in VRAM, ${GBb(cr)} in RAM` : ""}`}>
+        <i class="ctx__chat__vram" style=${`flex-grow:${Math.max(ctot ? cv : (c.context_used || 0), 1)}`}></i>
+        ${ctot && cr ? html`<i class="ctx__chat__ram" style=${`flex-grow:${cr}`}></i>` : null}</span>
+      <span class="ctx__chat__nums num">${fmt(c.context_used)}${kbt && ctot ? ` · ${GBb(ctot)}` : ""}</span></div>`;
+  };
   const W = ctxfmt(win), where = showWin
     ? "The window is a setting: Models › Engine settings › Prompts and cache › Positions each layer keeps in VRAM."
     : "The size is a setting: Settings › Model › Context size.";
+  const pastNote = used > win ? (kbt ? `This chat is past the ${W} VRAM window: about ${GBb(used * kbt)} of K/V, `
+                                       + `${GBb(win * kbt)} in GPU memory and ${GBb((used - win) * kbt)} kept in RAM.`
+                            : `This chat is past the ${W} VRAM window: its cache is kept in RAM (about ${fmt((used * 12288) / 1e9, 1)} GB), ${W} tokens of it in GPU memory and the rest copied in when needed.`)
+    : `VRAM window: a chat up to ${W} tokens keeps its whole cache in GPU memory. A longer one keeps it in RAM, ${W} tokens of it in GPU memory and the rest copied in when needed.`;
   const note = !running && !last ? "No conversation yet: the context fills as a chat goes on, with every message, file and tool result in it."
-    : showWin ? (used > win ? `This chat is past the ${W} VRAM window: its cache is kept in RAM (about ${fmt((used * 12288) / 1e9, 1)} GB), ${W} tokens of it in GPU memory and the rest copied in when needed.`
-                            : `VRAM window: a chat up to ${W} tokens keeps its whole cache in GPU memory. A longer one keeps it in RAM, ${W} tokens of it in GPU memory and the rest copied in when needed.`)
+    : showWin ? pastNote
     : "What the model holds at once: the chat, its files and tool results. A chat longer than this is refused: start a new one, or give the model a bigger context.";
   const aria = `${fmt(used)} of ${fmt(max)} tokens in use` + segs.map((s) => `, ${s.label.toLowerCase()} ${fmt(s.n)}`).join("");
   return html`<section class="card" aria-label="Context">
@@ -183,6 +261,10 @@ function ContextCard({m}) {
         <span style=${`flex-grow:${free}`}></span></div></div>
     <div class="legend">${segs.map((s) => html`<span><i class=${`sw sw--${s.k}`}></i>${s.label} <b class="num">${fmt(s.n)}</b></span>`)}
       <span><i class="sw sw--free"></i>Free <b class="num">${fmt(free)}</b></span></div>
+    ${cacheTot || manyChats ? html`<div class="ctx__chats">
+      ${cacheTot ? html`<p class="ctx__chats__tot num">${fmt(cacheTot.n)} chats: ${cacheTot.all} of K/V, ${cacheTot.vram} in VRAM, ${cacheTot.ram} in RAM</p>` : null}
+      ${actChats.map(chatBar)}
+      <p class="ctx__chats__lgd"><span><i class="ctx__chat__vram"></i>VRAM window</span><span><i class="ctx__chat__ram"></i>in RAM</span></p></div>` : null}
     <p class="card__note card__note--tip">${note} ${where}</p>
   </section>`;
 }

@@ -2225,6 +2225,8 @@ class RequestStat:
         self.read_avg = None                            # the engine's mean over its read, from its last progress line
         self.read_last, self.read_prev_t, self.read_prev_n = None, None, 0   # its last observed read interval
         self.at_engine = False                            # it holds an engine place now (a fair slice lets it go)
+        # who this request is in the Monitor's "Right now": a stable id, the client it came from and when it queued
+        self.id, self.api, self.queued_at = None, None, None
         # shared with other answers (several at once): the most decoding beside it, and the engine's total rate
         # (summed over them) sampled while it decoded - "this chat 7 tok/s · engine 14 tok/s across 2 chats"
         self.shared_max, self.eng_sum, self.eng_n = 1, 0.0, 0
@@ -2299,6 +2301,8 @@ class Service:
         self.current_requests: set[RequestStat] = set()  # the requests decoding now: first token to the end of run()
         self.latest_request: RequestStat | None = None  # the request that last got the engine
         self.running: set[RequestStat] = set()          # every request with the engine now, reading or writing
+        self.waiting: set[RequestStat] = set()          # requests in the FIFO for their first turn (the "Right now" rows)
+        self._req_ids = itertools.count(1)              # stable per-request ids for the Monitor (live.chats)
         self.ended = collections.deque(maxlen=6)        # the last few that ended (the Monitor's Conversations)
         self.history = collections.deque(maxlen=500)    # the last finished requests, newest last (GET /metrics)
         # since the server started (the Monitor's totals, issue #35)
@@ -3253,6 +3257,40 @@ class Service:
         decode_s = self.decode_wall_s + (now - self.decode_wall_since if self.decode_wall_since is not None else 0.0)
         return round(read_s, 3), round(decode_s, 3)
 
+    def _chats_list(self, now):
+        """The Monitor's "Right now": one row per request queued or with the engine, built from the per-request
+        state (not the single shared status), both drivers - ids stable for the request's life.  Each row: its
+        own read/write progress and rates, and - when the engine reports kv_bytes_token - the cache its context
+        costs now, split VRAM / RAM where the cache streams (kv_resident positions in VRAM, the rest pinned RAM)."""
+        info = getattr(self.engine, "info", None) or {}
+        kbt = info.get("kv_bytes_token")
+        kbt = float(kbt) if isinstance(kbt, (int, float)) and not isinstance(kbt, bool) and kbt > 0 else None
+        win = info.get("kv_resident") if isinstance(info.get("kv_resident"), (int, float)) else 0
+        stream = bool(kbt) and 0 < win < self.engine.max_context
+        rows = []
+        for st in sorted(self.waiting, key=lambda r: r.queued_at or 0.0):
+            rows.append({"id": st.id, "label": st.api, "state": "queued", "phase": None,
+                         "prompt_tokens": st.prompt_tokens or None, "prompt_read": None, "prompt_total": None,
+                         "generated": 0, "max_tokens": st.max_tokens, "tok_s": None, "prefill_tok_s": None,
+                         "prefill_shared": False, "context_used": st.prompt_tokens or 0,
+                         "elapsed_s": round(now - st.queued_at, 1) if st.queued_at else None})
+        for st in sorted(self.running, key=lambda r: r.started or 0.0):
+            v = st.view(now)
+            state, ph = v["state"], v["phase"] or ""
+            if state == "writing":                # (the same phase detection the single live.phase uses, per request)
+                state = "thinking" if ph == "thinking" else \
+                    "tool" if ph.startswith("writing a tool call") or ph == "tool call complete" else "writing"
+            rate = st.read_avg if st.read_avg is not None else (st.read_last or 0.0)
+            entry = dict(v, id=st.id, label=st.api, state=state,
+                         prefill_tok_s=round(max(0.0, rate), 1) if state == "reading" and rate else None)
+            used = (st.prompt_tokens or 0) + (st.generated or 0)
+            entry["context_used"] = used
+            if kbt:
+                entry["cache_vram_bytes"] = int(min(used, win) * kbt) if stream else int(used * kbt)
+                entry["cache_ram_bytes"] = int(max(0, used - win) * kbt) if stream else 0
+            rows.append(entry)
+        return rows
+
     def metrics(self, all_requests=False) -> dict:
         """GET /metrics: what the Monitor tab shows - the engine's facts, what it is doing, the last requests, and
         the hardware (with a minute of history per series)."""
@@ -3262,7 +3300,6 @@ class Service:
             s = dict(self.status)
             reading_n = sum(1 for r in self.running if r.at_engine and r.first_token is None)
             read_s, decode_s = self._wall_seconds()     # (the totals line divides by these, not by summed prompt_ms)
-            answering = self.latest_request in self.current_requests
             hist = list(self.history)
             totals = dict(self.totals, read_s=read_s, decode_s=decode_s)
             guard = dict(self.loop_guard_counts, on=bool(self.loop_guard))   # (what the loop guard did since start)
@@ -3272,9 +3309,10 @@ class Service:
             now = time.time()
             convs = sorted((r.view(now) for r in self.running), key=lambda v: -(v["elapsed_s"] or 0))
             ended = list(self.ended)
+            chats = self._chats_list(now)               # (every chat queued or with the engine, its own figures)
         progress = getattr(self.engine, "progress", None)
-        if s.get("busy") and not answering:
-            state = "reading"
+        if s.get("busy") and reading_n:
+            state = "reading"                           # (aggregate for older code: any chat reading is reading)
         elif s.get("busy"):
             state = "generating"
         else:
@@ -3286,23 +3324,26 @@ class Service:
                 "prompt_read": None, "prompt_total": None, "generated": s.get("generated") if s.get("busy") else None,
                 "max_tokens": s.get("max_tokens") if s.get("busy") else None,
                 "elapsed_s": round(now - s["started"], 1) if s.get("busy") and s.get("started") else None,
-                "tok_s": round(rate, 1) if state == "generating" else None,
+                "tok_s": round(rate, 1) if s.get("busy") and writing else None,
                 "tok_s_mean": round(self._tok_s_mean(), 1) if state == "generating" else None,
                 "prefill_tok_s_mean": getattr(self.engine, "prefill_tok_s_mean", None) if s.get("busy") else None,
                 # the engine-total read rate (every chat reading, both drivers) and how many are: the Monitor's live
                 # Prefill figure and its label - the mean above stays what one chat's engine reported (as before)
                 "prefill_tok_s": round(pre_rate, 1) if s.get("busy") else None,
                 "reading_n": reading_n,
-                "tok_s_window_s": RATE_WINDOW_S if state == "generating" else None}
-        if state == "reading" and progress:
-            live["prompt_read"], live["prompt_total"] = progress[0], progress[1]
+                "chats": chats,                         # (every chat queued or with the engine: the "Right now" rows)
+                "tok_s_window_s": RATE_WINDOW_S if s.get("busy") and writing else None}
+        progress = getattr(self.engine, "progress", None)
+        if state == "reading":
+            rd = [c for c in chats if c["state"] == "reading" and c.get("prompt_total")]
+            if rd:
+                live["prompt_read"], live["prompt_total"] = rd[-1]["prompt_read"], rd[-1]["prompt_total"]
+            elif reading_n == 1 and progress:           # (its PP line has not reached the view yet: the engine's own)
+                live["prompt_read"], live["prompt_total"] = progress[0], progress[1]
         # several at once: each request's own figures (Conversations), and the counts summed over them
         live["conversations"], live["ended"] = convs, ended
         if len(convs) > 1:
             live["generated"] = sum(v["generated"] for v in convs)
-            reading = [v for v in convs if v["state"] == "reading" and v["prompt_total"]]
-            if reading:
-                live["prompt_read"], live["prompt_total"] = reading[-1]["prompt_read"], reading[-1]["prompt_total"]
         # the prompt the conversation cache already held (the Monitor's Context bar), from the engine's PP lines
         live["prompt_reused"] = progress[2] if s.get("busy") and progress and len(progress) > 2 else None
         engine = {"model": self.model, "model_label": self.model_label, "max_context": self.engine.max_context,
@@ -4237,8 +4278,11 @@ class Service:
         counted, my_started, my_first, queued = False, time.time(), None, False
         stat = RequestStat()                            # this request's live figures
         stat.spec_off = request_spec_off(sampling)
+        stat.id, stat.api = next(self._req_ids), (sampling or {}).get("_api")
+        stat.prompt_tokens, stat.max_tokens, stat.queued_at = len(ids), max_new, my_started
         with self.status_lock:
             self.status["queued"] += 1
+            self.waiting.add(stat)                      # (the Monitor's "Right now": queued until its turn comes)
             queued = True                               # counted as waiting until its turn comes (below, or in finally)
         hold = [False, False]                           # holds the FIFO (fair slices let go of it); counts as active
         asked = time.monotonic()
@@ -4263,6 +4307,7 @@ class Service:
                 with self.status_lock:
                     self.status.update(busy=True, phase="reading the prompt", prompt_tokens=len(ids), generated=0,
                                        started=time.time(), tool=None, tail="", max_tokens=max_new)
+                    self.waiting.discard(stat)          # (out of the queue: its turn, and a row of its own now)
                     self.latest_request = stat
                     stat.phase, stat.prompt_tokens, stat.max_tokens = "reading the prompt", len(ids), max_new
                     stat.started = self.status["started"]
@@ -4591,6 +4636,7 @@ class Service:
             book = None                                 # (the savings' count: after the lock, it writes a file)
             with self.status_lock:
                 stat.at_engine = False
+                self.waiting.discard(stat)
                 self.current_requests.discard(stat)
                 if stat in self.running:
                     self.running.discard(stat)
@@ -6980,6 +7026,7 @@ def _qfn_engine_class():
                             if f[:2] == ["BRP", str(slot)] and len(f) >= 4 and f[2].isdigit() and f[3].isdigit():
                                 rate = float(f[5]) if len(f) >= 6 else None
                                 cb(base + int(f[2]), rate, False, True)     # (provisional: progress, not a count)
+                                tls.own_pp = ((int(f[2]), int(f[3])), rate)  # (this chat's row shows its own read)
                             elif f[:2] == ["BRA", str(slot)] and f[2:3] == ["1"]:
                                 kv = dict(x.partition("=")[::2] for x in f[3:] if "=" in x)
                                 new = max(0, int(kv["prompt"]) - int(kv.get("reused") or 0))
