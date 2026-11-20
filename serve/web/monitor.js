@@ -56,8 +56,7 @@ function Throughput({m}) {
   // while only writing, this request's own figure as before, and when idle the last request's
   const readingN = live.reading_n || 0;
   const prefill = readingN ? (live.prefill_tok_s || 0)
-    : last ? last.prefill_tok_s   // (not reading now: the last finished read's real rate - no engine-reported means)
-    : null;
+    : null;                       // (nothing reads now: no live figure - the last read's rate goes in the label)
   const fresh = tn && tn.time && Date.now() / 1000 - tn.time <= 30;
   const ms = gen && tn && tn.ms_tok ? tn.ms_tok : speed ? 1000 / speed : null;
   const hit = fresh && tn.vram_hit != null ? 100 * tn.vram_hit : last && last.hit_rate != null ? 100 * last.hit_rate : null;
@@ -77,7 +76,7 @@ function Throughput({m}) {
           <span class="speed__peak num" title=${peak ? `The highest decode speed since Saguaro started: ${fmt(peak.tok_s, 1)} tok/s at ${at(peak)}, ${fmt(peak.tokens)} tokens into the answer. Live speeds and finished answers count, from 32 tokens on.`
               : "The highest decode speed since Saguaro started. Live speeds and finished answers count, from 32 tokens on."}>Peak ${peak ? `${fmt(peak.tok_s, 1)} tok/s` : "–"}</span></div></div>
       <div class="speed" title="Prompt tokens read per second (the prefill), counting only the tokens read - not the ones reused from the conversation cache">
-        <span class="speed__label"><i class="key key--dash"></i>Prefill · ${readingN > 1 ? `engine total, ${readingN} chats reading` : readingN === 1 ? "reading now" : gen ? "this request" : last ? "last request" : "waiting"}</span>
+        <span class="speed__label"><i class="key key--dash"></i>Prefill · ${readingN ? (readingN > 1 ? `engine total, ${readingN} chats reading` : "reading now") : last && last.prefill_tok_s != null ? `not reading · last read ${fmt(last.prefill_tok_s)} tok/s` : "not reading"}</span>
         <div class="speed__row"><span class="speed__mid num">${prefill == null ? "–" : fmt(prefill)}<small>tok/s</small></span>
           ${/* the peak read beside it, like Decode's: the server keeps it, from 512 tokens read on */ ""}
           <span class="speed__peak num" title=${ppeak ? `The highest prompt read speed since Saguaro started: ${fmt(ppeak.tok_s, 1)} tok/s at ${at(ppeak)}, a read of ${fmt(ppeak.tokens)} tokens. Live read rates and finished reads count, from 512 tokens read on.`
