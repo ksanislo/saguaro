@@ -13067,6 +13067,10 @@ int main(int argc, char** argv) {
         // arms a pause, the next CUDA0 window boundary holds back new windows, steps toward the target and resumes
         bool vlen_pause_armed = false;           // the next CUDA0 window boundary pauses for the pending step
         Clock::time_point vlen_pause_t{};        // pause open since (its length is logged when it closes)
+        // review 3 (live, 11-20): where a pending step waited cannot be placed without saying what the pause did - a
+        // refused attempt is said once per reason, the first three per pending step (the pump ticks a thousand a second)
+        int vlen_refused_logged = 0;             // refused pause attempts said for this pending step
+        std::string vlen_refuse_said;            // the last refused reason said (a new reason gets a new line)
         auto floor_of = [&](size_t k) -> int64_t {   // bytes
             const strata::core::Verifier& vk = k == 0 ? ver : stages[k - 1]->ver;
             const size_t lim = vk.batch_graph_limit(), held = vk.batch_layouts();
@@ -14450,16 +14454,39 @@ int main(int argc, char** argv) {
                 pin.may_step = !conc_serving;
                 pin.blocked = conc_serving || in_prompt_read || share_live;   // (a read owns CUDA0: its own settles answer)
                 const auto po = strata::program::vlen_pause::decide(pin);
-                if (po.arm_now) { vlen_pause_armed = false; vlen_pause_t = Clock::now(); }   // (the boundary is taken)
+                if (po.arm_now) {   // (the boundary is taken)
+                    vlen_pause_armed = false; vlen_pause_t = Clock::now();
+                    std::fprintf(stderr, "strata serve: VLEND: the pause is armed at a window boundary (new CUDA0 "
+                                         "windows are held back until the step comes due)\n");
+                }
                 if (po.run_step) elastic_idle((size_t) 0, !in_prompt_read, -1);   // (the give / take-back runs there)
                 vlen_hold = po.hold && pin.pending;
                 if (vlen_hold && pin.stage_quiet)
                     std::this_thread::sleep_for(std::chrono::milliseconds(1));   // (CUDA0 drained, the step still coming: poll)
+                // review 3: the step is pending and this tick armed nothing, ran no step, and closed nothing - the
+                // pause was refused here; said with its reason, once per reason and at most three per pending step
+                if (pin.pending && !po.arm_now && !po.run_step && !po.close && vlen_refused_logged < 3) {
+                    const char* why;
+                    if (pin.blocked)
+                        why = conc_serving ? "the concurrent doorbell thread serves CUDA0 (its settles answer the step)"
+                            : in_prompt_read ? "a prompt read owns CUDA0 (its own settles answer the step)"
+                                             : "a read holds the pools (SAGUARO_SHORT_READS: its settles answer)";
+                    else if (!pin.armed && !pin.is_open)
+                        why = "step_open false: no pause is armed (the arm was taken; a quiet settle keeps at the step)";
+                    else
+                        why = "stage busy: CUDA0 has a window in flight (new ones held back, the step waits for it to drain)";
+                    if (vlen_refuse_said != why) {
+                        vlen_refuse_said = why;
+                        std::fprintf(stderr, "strata serve: VLEND: the pause is refused this tick: %s\n", why);
+                    }
+                    ++vlen_refused_logged;
+                }
                 if (po.close) {
                     std::fprintf(stderr, "strata serve: VLEND: CUDA0's pipeline paused %.0f ms at a window boundary%s\n",
                                  pin.open_ms, po.due ? " (the step came due)"
                                                       : " (the step is not done: a quiet settle keeps at it)");
                     vlen_pause_t = {};
+                    vlen_refused_logged = 0; vlen_refuse_said.clear();   // (a next pending step gets its own three)
                 }
             }
             // start waiting groups on free stages, the longest waiting first; a new step on stage 0 round-robin
@@ -17315,6 +17342,10 @@ int main(int argc, char** argv) {
             // VRECLAIMED cache_mib=<n>.
             if (line.rfind("VLEND", 0) == 0 || line.rfind("VRECLAIM", 0) == 0) {
                 const bool lend = line.rfind("VLEND", 0) == 0;
+                // review 3: the serve loop took the command off stdin now - with the server's "VLEND sent" / "VLENT
+                // after" lines this places any wait: before the read (a command queued behind the engine's work) or
+                // after it (the step waiting for a quiet CUDA0)
+                std::fprintf(stderr, "strata serve: %s read by the serve loop\n", line.c_str());
                 char* ve = nullptr;
                 long long vmib = 0;
                 if (lend) {
@@ -17348,6 +17379,7 @@ int main(int argc, char** argv) {
                     vlen_rdeadline = Clock::now() + std::chrono::seconds(120);
                 }
                 vlen_pause_armed = true;   // (if this tick cannot answer it, the next CUDA0 window boundary pauses for it)
+                vlen_refused_logged = 0; vlen_refuse_said.clear();   // (this step gets its own refused lines)
                 vlen_tick();   // (between windows here too: usually the answer, or the first give, comes on this line)
                 if (!lend) {   // VRECLAIMED is answered at once; the take-back goes on in the loop (vlen_tick)
                     std::printf("VRECLAIMED cache_mib=%lld\n", (long long) (gv[0].cache->mapped_bytes() >> 20));
