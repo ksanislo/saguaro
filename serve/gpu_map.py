@@ -56,6 +56,9 @@ def merge(lines: list[dict]) -> list[dict]:
                 d[k] = d.get(k, 0) + r.get(k, 0)
         d["slots"] = d.get("slots", 0) + r.get("slots", 0)
         d["free"] = min(d.get("free", 0), r.get("free", 0))
+        at = [x for x in (d.get("at"), r.get("at")) if x is not None]   # (the card's split is as old as its oldest part)
+        if at:
+            d["at"] = min(at)
         if d.get("layers") and r.get("layers"):
             d["layers"] = [min(d["layers"][0], r["layers"][0]), max(d["layers"][1], r["layers"][1])]
     return [by[k] for k in sorted(by)]
@@ -73,13 +76,15 @@ def held_by(procs: dict, pids: set) -> int | None:
 
 
 def view(report: list[dict], cards: list[dict] | None, engine_pid, vision_pid=None,
-         vision_lent: bool = False) -> list[dict]:
+         vision_lent: bool = False, now: float | None = None) -> list[dict]:
     """Each GPU the engine reports, as the Monitor draws it: its NVML number and name, the total, and the bytes of each
     part - the engine's (weights, kv, act, prompt, tp, drafter + window, pool), the vision encoder's, the CUDA context
     and the rest, other programs, free.  `cards`: the telemetry's per-card readings ([] without NVML: the start's
     measurement only); `engine_pid`, `vision_pid`: the pid - or the pids: a launcher and what it started - NVML may
     list the engine's and the encoder's process under; `vision_lent`: the on-demand encoder has the first GPU's pool
-    tail now (the engine freed it).  A card that lists none of the engine's pids (NVML can't list processes, or names
+    tail now (the engine freed it); `now` (a clock matching the lines' "at"): the split's age in seconds the card's
+    title shows, so a stale split is visible (PLAN-vram-live: engines re-print their lines as the split moves).
+    A card that lists none of the engine's pids (NVML can't list processes, or names
     them in a pid namespace the server does not share) is drawn from the start's measurement."""
     cards = cards or []
     mine, enc_pids = as_pids(engine_pid), as_pids(vision_pid)
@@ -133,5 +138,7 @@ def view(report: list[dict], cards: list[dict] | None, engine_pid, vision_pid=No
                     "vision_own": inside,
                     "slots": r.get("slots", 0), "layers": r.get("layers"), "ctx": r.get("ctx", 0),
                     "tp_n": r.get("tp_n", 0),
-                    "kv_ram": r.get("kv_ram", 0), "measured": "nvml" if own is not None else "start"})
+                    "kv_ram": r.get("kv_ram", 0), "measured": "nvml" if own is not None else "start",
+                    "split_age": (max(0.0, round(now - r["at"], 1)) if now is not None and r.get("at") is not None
+                                  else None)})
     return out

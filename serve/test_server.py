@@ -2598,6 +2598,64 @@ for line in sys.stdin:
         self.assertEqual(self.run_gen(3), [66, 67])
 
 
+class VramLinesFollowTheCards(unittest.TestCase):
+    """PLAN-vram-live: an engine re-prints a card's `VRAM dev=...` line mid-answer when its split moves (the elastic
+    parts). The driver replaces that card's entry - and never takes the line for a token line - so /metrics' GPU map
+    follows the card, with the split's age on it."""
+
+    ENGINE = r'''
+import sys
+K0, K1 = 665719603, 134217728
+def line(kv):
+    return (f"VRAM dev=0 pci=0000:01:00.0 total=25296896000 free=751828992 weights=6678575104 kv={kv} kv_ram=0 "
+            f"act=107374182 drafter=751828992 window=0 pool=15536793108 tail=0 borrow=0 vision=0 slots=1231 "
+            f"ctx=32768 layers=0-45")
+print(line(K0), flush=True)
+print("READY 4096 stop", flush=True)
+for line_ in sys.stdin:
+    if not line_.startswith("GEN"):
+        continue
+    print("T 66", flush=True)
+    print(line(K1), flush=True)        # the card's split moved mid-answer: the line comes again, between tokens
+    print("T 67", flush=True)
+    print("DONE 2 3 1.0 1.0 stop 0 0 0 0 0", flush=True)
+'''
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.TemporaryDirectory()
+        exe = Path(self.tmp.name) / "engine"
+        exe.write_text(f"#!{sys.executable}\n" + self.ENGINE)
+        exe.chmod(0o755)
+        self.eng = StrataEngine(str(exe), [])
+
+    def tearDown(self):
+        self.eng.proc.kill()
+        self.eng.proc.wait()
+        self.tmp.cleanup()
+
+    def test_map_follows_the_mid_answer_line(self):
+        from types import SimpleNamespace
+        tok = ByteTokenizer()
+        svc = Service(self.eng, tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        svc.telemetry = SimpleNamespace(snapshot=lambda: {"now": {}, "history": {}, "static": {}})
+        self.assertEqual(self.eng.vram[0]["kv"], 665719603)        # (its start line, read up to READY)
+        toks = [t for t in self.eng.generate([1, 2, 3], 16, {}, threading.Event()) if t is not None]
+        self.assertEqual(toks, [66, 67])                           # (the VRAM line never became a token)
+        self.assertEqual(self.eng.vram[0]["kv"], 134217728)        # (and it replaced the card's entry)
+        g = svc.metrics()["gpu_map"][0]
+        self.assertEqual(g["parts"]["kv"], 134217728)
+        self.assertIsNotNone(g["split_age"])
+        self.assertLess(g["split_age"], 30.0)
+
+    def test_another_card_joins_without_touching_this_one(self):
+        other = ("VRAM dev=1 pci=0000:02:00.0 total=8000000000 free=100000000 weights=1 kv=2 kv_ram=0 act=3 "
+                 "drafter=0 window=0 pool=4 tail=0 borrow=0 vision=0 slots=0 ctx=32768 layers=46-47\n")
+        StrataEngine._vram_line(self.eng, other)
+        self.assertEqual([v["dev"] for v in self.eng.vram], [0, 1])   # (the kept card joins, the start's stays)
+        self.assertEqual(self.eng.vram[0]["kv"], 665719603)
+
+
 class ThinkTok(ByteTokenizer):
     SPECIALS = ByteTokenizer.SPECIALS + ["<think>", "</think>"]
 

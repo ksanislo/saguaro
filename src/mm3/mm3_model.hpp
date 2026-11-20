@@ -194,6 +194,10 @@ public:
     std::vector<std::string> info_lines() const;
     /// The Monitor's map of each GPU (serve/gpu_map.py's VRAM lines): what each part holds there, measured at the load.
     std::vector<std::string> vram_lines() const;
+    /// (PLAN-vram-live) the same lines as the books stand now (SAGUARO_MM3_ELASTIC: index keys mapped, gather slots,
+    /// resident experts given way) - and the cheap per-card fingerprint that says when one moved (no device call).
+    std::vector<std::string> vram_lines_live() const;
+    std::vector<std::string> vram_live_fp() const;
     /// The prefill calibration (maya-mm3 --calibrate-prefill): the prompt chunk a forward takes (at most the chunk the
     /// load sized its buffers for: chunk_max) and the prompt path's GEMM backend, changed between forwards.
     int chunk() const;

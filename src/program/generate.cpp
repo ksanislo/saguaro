@@ -17,6 +17,7 @@
 #include "strata/core/expert_cache.hpp"
 #include "strata/platform/idle_gate.hpp"
 #include "strata/platform/env_report.hpp"
+#include "strata/program/vram_live.hpp"
 #include "strata/kernels/glm_fast.hpp"
 #include "strata/core/expert_source.hpp"
 #include "strata/core/remote_experts.hpp"
@@ -1527,6 +1528,18 @@ static int glm_pack_generate(const Options& o) {
     const int64_t n_vocab = model.geometry().n_vocab;
     // the driver samples on the device (sample_token), so the fast path never downloads the logits
     model.set_host_logits(false);
+    // the Monitor's `VRAM dev=...` line, from Glm5Model::vram_report: the start prints it and the split moving
+    // later gets it re-printed (PLAN-vram-live, below READY), so it is a lambda.
+    const auto print_vram = [](const strata::core::Glm5Model::VramReport& r) {
+        std::printf("VRAM dev=%d pci=%s total=%llu free=%llu weights=%llu kv=%llu kv_ram=%llu act=%llu drafter=%llu "
+                    "window=%llu pool=%llu tail=%llu borrow=%llu vision=%llu slots=%lld ctx=%lld layers=%d-%d\n",
+                    r.dev, r.pci.empty() ? "-" : r.pci.c_str(), (unsigned long long) r.total,
+                    (unsigned long long) r.free, (unsigned long long) r.weights, (unsigned long long) r.kv,
+                    (unsigned long long) r.kv_ram, (unsigned long long) r.act, (unsigned long long) r.drafter,
+                    (unsigned long long) r.window, (unsigned long long) r.pool, (unsigned long long) r.tail,
+                    (unsigned long long) r.borrow, (unsigned long long) r.vision, (long long) r.slots,
+                    (long long) r.ctx, r.l0, r.l1);
+    };
     if (model.fast()) {
         // INFO facts for the server's Monitor tab (strata app): the expert tiers this engine runs with
         const auto st = model.fast_stats();
@@ -1546,16 +1559,8 @@ static int glm_pack_generate(const Options& o) {
                     model.dflash_ready() ? 1 : 0, model.vision_lend_bytes(), model.cpu_lane_threads(),
                     model.cpu_lane_threads_max(), model.pcie_share(), strata::kernels::kTopLogprobs);
         // the Monitor's map of each GPU: what each part holds on its card, in bytes (Glm5Model::VramReport) - the
-        // server finds the card NVML numbers by its PCI address and adds what NVML sees besides
-        for (const auto& r : model.vram_report())
-            std::printf("VRAM dev=%d pci=%s total=%llu free=%llu weights=%llu kv=%llu kv_ram=%llu act=%llu drafter=%llu "
-                        "window=%llu pool=%llu tail=%llu borrow=%llu vision=%llu slots=%lld ctx=%lld layers=%d-%d\n",
-                        r.dev, r.pci.empty() ? "-" : r.pci.c_str(), (unsigned long long) r.total,
-                        (unsigned long long) r.free, (unsigned long long) r.weights, (unsigned long long) r.kv,
-                        (unsigned long long) r.kv_ram, (unsigned long long) r.act, (unsigned long long) r.drafter,
-                        (unsigned long long) r.window, (unsigned long long) r.pool, (unsigned long long) r.tail,
-                        (unsigned long long) r.borrow, (unsigned long long) r.vision, (long long) r.slots,
-                        (long long) r.ctx, r.l0, r.l1);
+        // server finds the card NVML numbers by its PCI address and adds what NVML sees besides.
+        for (const auto& r : model.vram_report()) print_vram(r);
         // (Windows on an APU: the commit - the page file - kept experts off the GPU; the server's log, Monitor and
         // /v1/status say so, as for DeepSeek's engine)
         if (const auto cc = model.commit_capped(); cc.first > 0) {
@@ -5331,6 +5336,23 @@ static int glm_pack_generate(const Options& o) {
     // "pause": PAUSE keeps the written state; "multi=<n>": n conversations at once (GEN rid=<id>, see gen_admit)
     if (multi) std::printf("READY %lld stop pause multi=%d\n", (long long) o.max_context, model.seq_count());
     else std::printf("READY %lld stop pause\n", (long long) o.max_context);
+    // PLAN-vram-live: the elastic contexts back their KV as they grow and the expert pool gives way and takes back
+    // (glm_multi.cu), a prompt borrows the pool's tail, VLEND lends it to the encoder - the Monitor's map of a GPU
+    // follows: a card whose bookkeeping bytes moved re-prints its `VRAM dev=...` line (dirty at most every
+    // SAGUARO_VRAM_REPORT_S s, every card every 60 s; strata/program/vram_live.hpp). The fingerprint asks no device.
+    if (model.fast() && strata::program::vram_report_s() > 0) {
+        static strata::program::VramLive vram_live;   // (the beat thread below owns it for the process)
+        strata::program::VramLive::beat([&model, print_vram] {
+            std::vector<std::string> fp;
+            for (const auto& p : model.vram_fingerprint())
+                fp.push_back(std::to_string(p[0]) + ":" + std::to_string(p[1]) + ":" + std::to_string(p[2]) + ":" +
+                             std::to_string(p[3]) + ":" + std::to_string(p[4]));
+            vram_live.tick(fp, [&](size_t i) {   // (vram_report: the same part order as the fingerprint; the device
+                const auto rep = model.vram_report();   //  is asked only when a card prints)
+                if (i < rep.size()) print_vram(rep[i]);
+            });
+        });
+    }
     std::fprintf(stderr, "maya generate: glm5-next serve (M3.1): GEN <max_new> [keys] <ids>, GENI <max_new> [keys] "
                          "<embeddings> <ids>; QUIT to end\n");
     // GENI: the embeddings file is one or more maya-vision records (int32 'SVE1', n, nx, ny, n_embd, then n x n_embd

@@ -10245,6 +10245,21 @@ struct Model::Impl {
     size_t el_taken_g(size_t di) const {
         return di < elt.size() && elt[di].on ? (elt[di].top - elt[di].lo) / el->gran : 0;
     }
+    // PLAN-vram-live: the bytes the VRAM lines follow, a card - what the conversations hold of the pool, what the
+    // expert tail has given it, and whether the vision tower's room stands taken.  Bookkeeping only, no device call,
+    // so the engine can ask between its steps whether a card's split moved (and re-print the line when it did).
+    std::vector<std::string> vram_live_fp() const {
+        std::vector<std::string> out;
+        for (size_t di = 0; di < devs.size(); ++di) {
+            const size_t held = el != nullptr ? el->held_dev((int) di) : 0;
+            const size_t taken = el != nullptr && di < el->taken_in.size() ? el->taken_in[di] : 0;
+            char b[96];
+            std::snprintf(b, sizeof b, "%d:%zu:%zu:%d", devs[di].id, held, taken,
+                          (vis_room != nullptr || vis_res != nullptr) && vt.device() == devs[di].id ? 1 : 0);
+            out.push_back(b);
+        }
+        return out;
+    }
     // the pool's books for a log line: "pool: B MB backed, F MB free" - backed = what it owns (its granules and the
     // tails' given to it) less the free ones, which must equal what the conversations hold; DS4_CHECK_ELASTIC: and
     // every granule in one place only (Pool::audit).  Never wraps: a disagreement is said loudly
@@ -23937,21 +23952,30 @@ struct Model::Impl {
             mtp_exp = std::min(mtp_exp, d.experts);
             const size_t tn = groups[(size_t) d.grp].mem.size();
             const size_t tp_w = std::min(d.tp_w, d.weights - mtp_dense), tp_kv = tn > 1 ? d.caches / tn * (tn - 1) : 0;
+            // PLAN-vram-live (DS4_ELASTIC_CONV): the conversations' KV is backed out of the pool as they grow, the
+            // expert tail gives the pool granules and takes them back - the line says what the card holds of each
+            // NOW: the pool's idle granules are not mapped (less kv), its taken ones left the experts (less pool).
+            const size_t di2 = (size_t) (&d - devs.data());
+            const size_t made_g = el != nullptr ? el->made[di2] * el->gran : 0, held_g = el != nullptr ? el->held_dev((int) di2) * el->gran : 0;
+            const size_t taken_g = el != nullptr && di2 < el->taken_in.size() ? el->taken_in[di2] * el->gran : 0;
             // the vision tower: its room while a picture is read (its lender's part less by as much), else nothing -
             // or the room it keeps for the run (kVisResident)
             const bool vdev = img_tok >= 0 && vt.device() == d.id;
             const size_t vis = !vdev ? 0 : vis_res != nullptr ? vis_acct : vis_room != nullptr ? vt.room_bytes() : 0;
             const size_t v_prompt = vdev && vis_room != nullptr && vis_src == kVisChunk ? std::min(vis, d.prompt) : 0;
             const size_t v_pool = vdev && vis_room != nullptr && vis_src == kVisTail ? std::min(vis, d.experts - mtp_exp) : 0;
+            const size_t kv_now = (d.caches > tp_kv + made_g ? d.caches - tp_kv - made_g : 0) + held_g;
+            const size_t pool_base = d.experts > mtp_exp + v_pool ? d.experts - mtp_exp - v_pool : 0;
+            const size_t pool_now = pool_base > taken_g ? pool_base - taken_g : 0;
             char pci[32] = "-";
             if (cudaDeviceGetPCIBusId(pci, sizeof pci, d.id) != cudaSuccess) std::snprintf(pci, sizeof pci, "-");
             std::snprintf(b, sizeof b,
                           "VRAM dev=%d pci=%s total=%zu free=%zu weights=%zu kv=%zu kv_ram=0 act=%zu drafter=%zu window=0 "
                           "pool=%zu helper=%zu tail=0 borrow=0 vision=0 vision_own=%zu prompt=%zu tp=%zu tp_n=%zu slots=%lld ctx=%lld "
                           "layers=%d-%d",
-                          d.id, pci, tot, fr, d.weights - mtp_dense - tp_w, d.caches - tp_kv, d.scratch, mtp_dense + mtp_exp,
-                          d.experts - mtp_exp - v_pool, d.id == helper_id ? helper_bytes : 0, vis, d.prompt - v_prompt,
-                          tp_w + tp_kv, tn, slots,
+                           d.id, pci, tot, fr, d.weights - mtp_dense - tp_w, kv_now, d.scratch, mtp_dense + mtp_exp,
+                           pool_now, d.id == helper_id ? helper_bytes : 0, vis, d.prompt - v_prompt,
+                           tp_w + tp_kv, tn, slots,
                           (long long) o.max_context, a, z);
             v.push_back(b);
             helper_reported = helper_reported || d.id == helper_id;
@@ -24299,6 +24323,8 @@ void Model::save_profile() const { p_->save_profile(); }
 const Stats& Model::stats() const { return p_->st; }
 std::string Model::describe() const { return p_->describe(); }
 std::vector<std::string> Model::info_lines() const { return p_->info_lines(); }
+// (PLAN-vram-live) the per-card bookkeeping the VRAM lines follow - see Impl::vram_live_fp
+std::vector<std::string> Model::vram_live_fp() const { return p_->vram_live_fp(); }
 Model::Tiers Model::tiers() const {
     const Impl& m = *p_;
     Tiers t;

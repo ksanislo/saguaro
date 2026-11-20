@@ -409,6 +409,48 @@ class InfoAfterReady(unittest.TestCase):
         self.assertTrue(lines.empty())
 
 
+class VramLinesFollowTheCards(unittest.TestCase):
+    """PLAN-vram-live: the engine re-prints `VRAM dev=...` mid-batch when a card's split moves.  The adapter diverts
+    those lines into the Monitor's GPU map, the way it diverts the VLEND answers: they never reach a request's line
+    stream, and they are never taken for the answer to a `VRAM <mib>` command (whose own answer carries no dev=)."""
+
+    @staticmethod
+    def engine():
+        import queue
+        from serve.server import _VlenLines, _qfn_engine_class
+
+        base = _qfn_engine_class()
+
+        class Stub(base):                           # (no engine process here: only the line plumbing)
+            def __init__(self):
+                self.vlen_lines = queue.Queue()
+                self.info = {}
+                self.vram = []
+                self.lines = _VlenLines(self.vlen_lines, self.info, self._vram_follow)
+
+        return Stub()
+
+    def line(self, kv, pool):
+        G = 1 << 20
+        return (f"VRAM dev=0 pci=0000:01:00.0 total={15360 * G} free={100 * G} weights={4000 * G} kv={kv * G} "
+                f"kv_ram=0 act={200 * G} drafter=0 window=0 pool={pool * G} tail=0 borrow=0 vision=0 slots=1231 "
+                f"ctx=32768 layers=0-45\n")
+
+    def test_mid_batch_line_follows_the_map_and_misses_the_requests(self):
+        eng = self.engine()
+        eng._vram_follow(self.line(1000, 9000))      # (the start-up line, as _ready_pump took it)
+        eng.lines.put("T 0 42")
+        eng.lines.put(self.line(1500, 8500))         # the card's split moved: CUDA0's cache gave the slots room
+        eng.lines.put("T 0 43")
+        self.assertEqual([eng.lines.get_nowait(), eng.lines.get_nowait()], ["T 0 42", "T 0 43"])
+        self.assertTrue(eng.lines.empty())           # (no request ever sees the VRAM line)
+        self.assertEqual(eng.vram[0]["kv"], 1500 * (1 << 20))
+        self.assertEqual(eng.vram[0]["pool"], 8500 * (1 << 20))
+        self.assertIsNotNone(eng.vram[0].get("at"))  # (the map knows how fresh the split is)
+        eng.lines.put("VRAM reserve_mib=700 expert_slots=900 vram_free_mib=123\n")   # the command's own answer
+        self.assertTrue(eng.lines.get_nowait().startswith("VRAM reserve_mib="))      # still reaches vram()
+
+
 class MapWhileLent(unittest.TestCase):
     """While the encoder holds VRAM the engine gave up (VLEND), CUDA0's engine parts shrink to the engine's NVML total:
     the card is never drawn fuller than it is (it showed 16/16 live)."""

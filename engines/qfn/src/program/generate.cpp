@@ -89,6 +89,7 @@
 #include "strata/program/conv_cache.hpp"
 #include "strata/program/slot_idle.hpp"
 #include "strata/program/split_rules.hpp"
+#include "strata/program/vram_live.hpp"
 #include "strata/prefill/share_rules.hpp"
 #include "strata/platform/host_limits.hpp"
 #include "strata/program/split_ring.hpp"
@@ -12273,6 +12274,112 @@ int main(int argc, char** argv) {
         strata::core::pin_reserve_release_hard();   // the load is over: nothing else needs the headroom
         std::printf("READY %lld stop\n", (long long) o.max_context);   // "stop": this engine honours STOP
         std::fflush(stdout);
+        // PLAN-vram-live: the Monitor's "what fills the GPUs" follows the cards.  The elastic parts move VRAM after
+        // the start (the caches give the slot budget whole chunks and take them back, VLEND, the KV grown or trimmed,
+        // the streamed host copies): a card whose bookkeeping bytes moved re-prints its `VRAM dev=...` line - the
+        // same format as the start-up lines, from this engine's own figures.  Cadence (SAGUARO_VRAM_REPORT_S, dirty
+        // cards every 5 s, every card every 60 s) and the 1 s beat thread: strata/program/vram_live.hpp.
+        if (strata::program::vram_report_s() > 0) {
+            struct VLCard {
+                int dev = 0;
+                char pci[32] = "-";
+                uint64_t w = 0, dft = 0, solo = 0, slotf = 0, pool0 = 0;
+                int64_t sl = 0, l0 = 0, l1 = 0;
+                strata::core::ExpertCache* xc = nullptr;   // mapped bytes of this card's cache = pool now; null: static
+                size_t slot = (size_t) -1;                 // its bslot_ss column ((size_t) -1): a card with no sessions
+                bool eslot = false;                        // its slot sessions are elastic (backed by the budget)
+            };
+            auto vl_mapped = [](strata::core::ExpertCache& xc) -> uint64_t {
+                if (strata::core::VmmRange* r = xc.vmm_range()) return (uint64_t) r->mapped_count() * r->granularity();
+                return (uint64_t) xc.mapped_bytes();
+            };
+            auto vl_mtp_on = [&](int dev) -> uint64_t {   // (the start-up line's drafter term for this card)
+                if (o.mtp.empty() || mtp.device() != dev) return 0;
+                uint64_t b = mtp.vram_bytes();
+                for (const auto& d : slot_mtp) b += d->vram_bytes();
+                return b;
+            };
+            const int64_t vl_hi0 = multi_gpu ? split_at[0] : -1;
+            auto vl_slotf = [&](size_t k, int dev, int64_t lo, int64_t hi) -> uint64_t {
+                if (k >= bslot_ss.size() || bslot_ss[k].empty()) return 0;
+                const int kind = elastic_slots_mode() == 0 ? 0
+                               : elastic_slots_mode() == 2 && strata::core::vmm_available(dev) ? 2 : 1;
+                return (uint64_t) bslot_ss[k].size() * strata::core::session_bytes(g, o.max_context, K, lo, hi, kind);
+            };
+            std::vector<VLCard> vl;
+            auto vl_add = [&](int dev, uint64_t w, uint64_t dft, uint64_t solo, uint64_t slotf, uint64_t pool0,
+                              int64_t sl, int64_t l0, int64_t l1, strata::core::ExpertCache* xc, size_t slot) {
+                VLCard c;
+                c.dev = dev;
+                if (cudaDeviceGetPCIBusId(c.pci, (int) sizeof c.pci, dev) != cudaSuccess) std::snprintf(c.pci, sizeof c.pci, "-");
+                c.w = w; c.dft = dft; c.solo = solo; c.slotf = slotf; c.pool0 = pool0; c.sl = sl; c.l0 = l0; c.l1 = l1;
+                c.xc = xc; c.slot = slot;
+                c.eslot = slot < bslot_ss.size() && !bslot_ss[slot].empty() && bslot_ss[slot][0]->slot_cells >= 0;
+                vl.push_back(c);
+            };
+            vl_add(primary_device, wt.report().arena_bytes + native_dense.allocated_bytes() +
+                       (native_head.loaded() ? native_head.weight_bytes() : 0),
+                   vl_mtp_on(primary_device), strata::core::session_bytes(g, o.max_context, K, 0, vl_hi0),
+                   vl_slotf(0, primary_device, 0, vl_hi0), (uint64_t) xcache.bytes(), (int64_t) xcache.slots(), 0,
+                   (int64_t) (vl_hi0 < 0 ? g.n_layers : vl_hi0) - 1, &xcache, 0);
+            for (size_t i = 0; i < stages.size(); ++i) {
+                GpuStage& st = *stages[i];   // (non-const: the line's `pool` asks its cache's VMM range)
+                vl_add(st.dev, st.wt.report().arena_bytes + st.dense.allocated_bytes() +
+                           (st.head.loaded() ? st.head.weight_bytes() : 0),
+                       vl_mtp_on(st.dev), strata::core::session_bytes(g, o.max_context, K, st.lb, st.le),
+                       vl_slotf(i + 1, st.dev, st.lb, st.le), (uint64_t) st.cache.bytes(), (int64_t) st.cache.slots(),
+                       st.lb, st.le - 1, &st.cache, i + 1);
+            }
+            for (int r = 0; r < 3; ++r)
+                if (o.expert_cache_remote[(size_t) r] > 0)
+                    vl_add(remote_dev[r], 0, 0, 0, 0, (uint64_t) (remote_experts[(size_t) r].gib() * 1073741824.0),
+                           remote_experts[(size_t) r].resident(), -1, -1, nullptr, (size_t) -1);
+            if (peer.valid())
+                vl_add(peer.device(), 0, 0, 0, 0, (uint64_t) (peer.gib() * 1073741824.0), peer.resident(), -1, -1,
+                       nullptr, (size_t) -1);
+            const bool vl_kv_host = g.n_qsa_layers() > 0 && ss.qsa_states[ss.qsa_primary()].kv_mode == 1;
+            const bool vl_kv_grow = strata::core::qsa_kv_elastic();
+            const int64_t vl_ctx = o.max_context;
+            auto vl_split = [&](const VLCard& c, uint64_t& kv, uint64_t& pool, uint64_t& kvram) {
+                kv = c.eslot ? c.solo : c.solo + c.slotf;
+                if (c.eslot && c.slot < bslot_ss.size())
+                    for (const auto& u : bslot_ss[c.slot]) kv += strata::core::session_slot_backed(*u);
+                if (c.slot == 0 && vl_kv_grow)   // (--kv-grow: the solo K/V keeps what the cache gave up for it)
+                    kv = kv - strata::core::qsa_kv_elastic_full_bytes() + strata::core::qsa_kv_elastic_mapped_bytes();
+                pool = c.xc != nullptr ? vl_mapped(*c.xc) : c.pool0;
+                kvram = c.slot == 0 && vl_kv_host ? strata::core::qsa_kv_host_bytes() : 0;
+            };
+            static strata::program::VramLive vram_live;   // (the beat thread below owns it for the process)
+            strata::program::VramLive::beat([vl, vl_split, vl_ctx] {
+                std::vector<std::string> fp;
+                fp.reserve(vl.size());
+                for (const VLCard& c : vl) {
+                    uint64_t kv = 0, pool = 0, kvram = 0;
+                    vl_split(c, kv, pool, kvram);
+                    char b[96];
+                    std::snprintf(b, sizeof b, "%d:%llu:%llu:%llu", c.dev, (unsigned long long) kv,
+                                  (unsigned long long) pool, (unsigned long long) kvram);
+                    fp.emplace_back(b);
+                }
+                vram_live.tick(fp, [&](size_t i) {   // (a card's line: one printf and fflush; the device is asked only here)
+                    const VLCard& c = vl[i];
+                    uint64_t kv = 0, pool = 0, kvram = 0;
+                    vl_split(c, kv, pool, kvram);
+                    const strata::core::OnDevice on(c.dev);
+                    size_t vf = 0, vt = 0;
+                    if (cudaMemGetInfo(&vf, &vt) != cudaSuccess) { (void) cudaGetLastError(); return; }
+                    const uint64_t used = vt > vf ? (uint64_t) (vt - vf) : 0, known = c.w + kv + pool + c.dft;
+                    std::printf("VRAM dev=%d pci=%s total=%llu free=%llu weights=%llu kv=%llu kv_ram=%llu act=%llu drafter=%llu "
+                                "window=0 pool=%llu tail=0 borrow=0 vision=0 slots=%lld ctx=%lld layers=%lld-%lld\n",
+                                c.dev, c.pci, (unsigned long long) vt, (unsigned long long) vf,
+                                (unsigned long long) c.w, (unsigned long long) kv, (unsigned long long) kvram,
+                                (unsigned long long) (used > known ? used - known : 0), (unsigned long long) c.dft,
+                                (unsigned long long) pool, (long long) (c.xc != nullptr ? c.xc->slots() : c.sl),
+                                (long long) vl_ctx, (long long) c.l0, (long long) c.l1);
+                    std::fflush(stdout);
+                });
+            });
+        }
         std::string line;
         int64_t rounds = 0;
         const int S = o.spec;

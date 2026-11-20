@@ -375,6 +375,10 @@ const GPU_PLAIN_FROM = 5;
 const gpuKey = (g) => String(g.index != null ? g.index : `d${g.dev}`);
 const gpuLabel = (g) => `GPU ${g.index ?? g.dev}`;
 const gpuName = (g) => (g.name || "").replace(/^NVIDIA /, "").replace(/^GeForce /, "").replace(/^AMD /, "").replace(/^Radeon /, "");
+// how fresh the engine's split of this card is (PLAN-vram-live): an engine re-prints its VRAM lines when a card's
+// split moves, so the age says a stale split - "as measured at the start" only ever stays on a card that cannot move
+const gpuAge = (g) => (g.split_age == null ? "" : g.split_age < 90 ? `split as of ${Math.max(1, Math.round(g.split_age))} s ago`
+  : `split as of ${Math.round(g.split_age / 60)} min ago`);
 const gpuGb = (b) => `${gb(b, b < GIB ? 2 : 1)} GB`;
 const gpuList = (gs) => gs.length === 1 ? gpuLabel(gs[0])
   : `GPUs ${gs.slice(0, -1).map((g) => g.index ?? g.dev).join(", ")} and ${gs[gs.length - 1].index ?? gs[gs.length - 1].dev}`;
@@ -499,9 +503,9 @@ function GpuMap({m}) {
         const g = r.g, p = g.parts || {}, o = isOpen(r);
         const lent = reading && !g.vision_lent && g.borrow > 0 && p.pool > 0 ? Math.min(100, (100 * g.borrow) / p.pool) : 0;
         const line = html`
-          <span class="gpurow__name"><b>${gpuLabel(g)}</b><span>${[gpuName(g), gpuLayers(g, eng)].filter(Boolean).join(" · ")}</span></span>
+          <span class="gpurow__name" title=${gpuAge(g)}><b>${gpuLabel(g)}</b><span>${[gpuName(g), gpuLayers(g, eng), gpuAge(g)].filter(Boolean).join(" · ")}</span></span>
           <span class="gpurow__track"><span class="gpubar" role="img" onPointerMove=${(e) => move(e, r)}
-              aria-label=${`${gpuLabel(g)}: ` + r.segs.map((s) => `${s.label} ${gpuGb(s.bytes)}`).join(", ")}>
+              aria-label=${`${gpuLabel(g)}: ` + r.segs.map((s) => `${s.label} ${gpuGb(s.bytes)}`).join(", ") + (gpuAge(g) ? `, ${gpuAge(g)}` : "")}>
               ${r.segs.map((s) => html`<span class="gpubar__seg" data-k=${s.key} style=${`--gm-c:var(--gm-${s.key});flex-grow:${s.bytes / (g.total || 1)}`}>
                 ${s.key === "pool" ? html`<i class="gpubar__lent" style=${`width:${lent}%`}></i>` : null}</span>`)}</span>
             ${one ? null : html`<${GpuStats} r=${r.read}/>`}</span>

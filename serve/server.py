@@ -1029,6 +1029,7 @@ class StrataEngine:
             if line.startswith("VRAM "):
                 part = gpu_map.parse(line)
                 if part:
+                    part["at"] = time.monotonic()   # (the Monitor says how fresh each card's split is)
                     self.vram.append(part)
             if line.startswith("READY"):
                 f = line.split()
@@ -1118,11 +1119,16 @@ class StrataEngine:
                 q.put(None)
 
     def _vram_line(self, line: str) -> None:
-        """A VRAM line after the start (maya-ds4: its vision tower's room taken for a request's pictures, then given
-        back): the Monitor's map of that GPU follows it."""
+        """A VRAM line after the start (the engine's periodic re-print of a card whose split moved - elastic
+        contexts, VLEND, a picture's room; PLAN-vram-live): the Monitor's map of that GPU follows it."""
         part = gpu_map.parse(line)
         if part:
-            self.vram = [part if v.get("dev") == part["dev"] else v for v in self.vram]
+            part["at"] = time.monotonic()
+            hit = [v for v in self.vram if v.get("dev") == part["dev"]]
+            if hit:
+                self.vram = [part if v.get("dev") == part["dev"] else v for v in self.vram]
+            else:
+                self.vram = self.vram + [part]      # (a card that only appears at runtime: the map gains it)
 
     _TAGGED = ("T ", "LP ", "PP ", "DONE ", "ERR ")
 
@@ -3745,7 +3751,7 @@ class Service:
         lent = v is not None and getattr(v, "lend", None) is not None and (vproc is not None or getattr(v, "owed", False))
         listed = {pid for c in cards or [] for pid in c.get("procs") or {}}
         return gpu_map.view(report, cards, nvml_pids(proc.pid if proc is not None else None, listed),
-                            nvml_pids(vproc.pid if vproc is not None else None, listed), lent)
+                            nvml_pids(vproc.pid if vproc is not None else None, listed), lent, now=time.monotonic())
 
     # the GLM engine's live STAT values (StrataEngine._parse_stat) exported as gauges: key -> help
     PROM_STAT = {"tok_s": "Decode rate over the running request, tokens/s",
@@ -7360,13 +7366,19 @@ def start_qfn(cfg: dict, tok):
 class _VlenLines(queue.Queue):
     """serve/qfn_engine's line queue with the VLEND / VRECLAIM answers diverted: the engine answers those commands
     while batch requests run, so VLENT / VRECLAIMED (and their ERR lines) go to the lend queue - never into a
-    request's line stream."""
+    request's line stream.  PLAN-vram-live: the engine's periodic `VRAM dev=...` lines (its split follows the cards)
+    go to `vram_cb` the same way - they are neither a token line nor an answer to the `VRAM <mib>` command, whose
+    own answer carries no dev= and still reaches the driver."""
 
-    def __init__(self, vlen: queue.Queue, info: dict | None = None):
+    def __init__(self, vlen: queue.Queue, info: dict | None = None, vram_cb=None):
         super().__init__()
-        self.vlen, self.info = vlen, info
+        self.vlen, self.info, self.vram_cb = vlen, info, vram_cb
 
     def put(self, item, block: bool = True, timeout: float | None = None):
+        if isinstance(item, str) and item.startswith("VRAM ") and " dev=" in item:
+            if self.vram_cb is not None:
+                self.vram_cb(item)
+            return
         if isinstance(item, str) and item.startswith(("VLENT ", "VRECLAIMED ", "ERR VLEND:", "ERR VRECLAIM:")):
             self.vlen.put(item, block, timeout)
             return
@@ -7401,7 +7413,7 @@ def _qfn_engine_class():
             if getattr(self, "vlen_lines", None) is None:
                 self.vlen_lines = queue.Queue()
             if not isinstance(self.lines, _VlenLines):
-                wrapped = _VlenLines(self.vlen_lines, self.info)
+                wrapped = _VlenLines(self.vlen_lines, self.info, self._vram_follow)
                 while True:                              # (whatever the driver queued between start and here)
                     try:
                         wrapped.put_nowait(self.lines.get_nowait())
@@ -7409,6 +7421,20 @@ def _qfn_engine_class():
                         break
                 self.lines = wrapped
             super()._pump()
+
+        def _vram_follow(self, line: str) -> None:
+            """A `VRAM dev=...` line at any time (PLAN-vram-live: the engine's split follows the cards): the Monitor's
+            map of that GPU follows it, as the GLM driver's _vram_line does - never a request's line, never the
+            answer to a `VRAM <mib>` command (whose own answer carries no dev=)."""
+            part = gpu_map.parse(line)
+            if not part:
+                return
+            part["at"] = time.monotonic()
+            hit = [v for v in self.vram if v.get("dev") == part["dev"]]
+            if hit:
+                self.vram = [part if v.get("dev") == part["dev"] else v for v in self.vram]
+            else:
+                self.vram = self.vram + [part]
 
         def vision_lend(self, mib: int, timeout: float = 45.0) -> dict:
             """`VLEND <mib>` (the engine's INFO says vision_lend=1): CUDA0 lends the picture encoder that much VRAM -
@@ -7464,6 +7490,7 @@ def _qfn_engine_class():
                     part = gpu_map.parse(line)
                     if part:
                         part["act_own"] = 1              # (act: everything else on the card - gpu_map.view uses NVML)
+                        part["at"] = time.monotonic()    # (the Monitor says how fresh each card's split is)
                         self.vram.append(part)
                 out.put(line)
                 if line is None or line.startswith("READY"):
