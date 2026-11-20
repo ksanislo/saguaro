@@ -12581,8 +12581,12 @@ int main(int argc, char** argv) {
         };
         std::vector<Give> gv;
         const int64_t give_floor = 128;
+        std::string give_off_why;   // why the give path is off (what VLEND / VRECLAIM answer then)
         const bool give_on = [&] {
-            if (!elastic_give_env() || !eslots_on) return false;
+            if (!elastic_give_env() || !eslots_on) {
+                give_off_why = elastic_give_env() ? "no --batch slot budget to give to" : "STRATA_ELASTIC_SLOTS_GIVE is off";
+                return false;
+            }
             const char* why = srcp != &arena_src ? "the experts are not all in the RAM arena"
                             : ajob ? "--adapt-async is on"
                             : o.prefill_head_alias ? "--prefill-head-alias is on"
@@ -12593,6 +12597,7 @@ int main(int argc, char** argv) {
                 if (xc.vmm_range() == nullptr || xc.segmented()) why = "an expert cache is not in VMM";
             }
             if (why != nullptr) {
+                give_off_why = why;
                 std::fprintf(stderr, "strata batch: STRATA_ELASTIC_SLOTS_GIVE is off: %s\n", why);
                 return false;
             }
@@ -12619,6 +12624,10 @@ int main(int argc, char** argv) {
             }
             return true;
         }();
+        if (give_on) {   // VLEND / VRECLAIM are accepted in this configuration (the server starts its encoder on them)
+            std::printf("INFO vision_lend=1\n");
+            std::fflush(stdout);
+        }
         // STRATA_ELASTIC_IDLE without a cache that gives: the slots get their whole budget after all (what VRAM is left)
         if (eslots_on && !give_on && elastic_idle_env())
             for (size_t k = 0; k < bslot_ss.size(); ++k) {
@@ -12921,17 +12930,26 @@ int main(int argc, char** argv) {
         const int64_t vram_floor_mib = env_mib("STRATA_VRAM_FLOOR_MIB", o.batch > 0 ? 160 : 0);
         const int64_t floor_graph_mib = env_mib("STRATA_BATCH_GRAPH_MIB", 16);
         const int64_t floor_max_mib = env_mib("STRATA_VRAM_FLOOR_MAX_MIB", 1024);
+        // VLEND (PLAN-qfn-vision-lend): what CUDA0 keeps free for the picture encoder on top of its normal floor;
+        // VRECLAIM drops it again.  The once-a-second floor check gives it back / the cache takes it back.
+        std::atomic<int64_t> vlen_extra_b{0};
+        // the commands answer asynchronously (review 1): they set this and the loop's settles work toward it
+        bool vlen_pending = false;               // a VLEND still awaits its VLENT / ERR VLEND
+        bool vlen_reclaim_pending = false;       // a VRECLAIM answered; its take-back goes on in the loop
+        Clock::time_point vlen_deadline{};       // VLEND's 30 s fuse, VRECLAIM's take-back fuse
+        Clock::time_point vlen_rdeadline{};
         auto floor_of = [&](size_t k) -> int64_t {   // bytes
             const strata::core::Verifier& vk = k == 0 ? ver : stages[k - 1]->ver;
             const size_t lim = vk.batch_graph_limit(), held = vk.batch_layouts();
             const int64_t pair = vk.batch_graph_bytes() > 0 ? (int64_t) vk.batch_graph_bytes() : floor_graph_mib << 20;
             const int64_t want = (vram_floor_mib << 20) + (lim > held ? (int64_t) (lim - held) * pair : 0);
-            return std::min(want, std::max(vram_floor_mib, floor_max_mib) << 20);
+            return std::min(want, std::max(vram_floor_mib, floor_max_mib) << 20) +
+                   (k == 0 ? vlen_extra_b.load(std::memory_order_relaxed) : 0);   // the encoder's share: over the cap
         };
         std::vector<Clock::time_point> floor_seen(bslot_ss.size());
         std::vector<uint8_t> floor_said(bslot_ss.size(), 0);
         auto vram_floor = [&](size_t k) {
-            if (vram_floor_mib <= 0 || !give_on) return;
+            if (!give_on || (vram_floor_mib <= 0 && vlen_extra_b.load(std::memory_order_relaxed) <= 0)) return;
             const auto now = Clock::now();
             if (now - floor_seen[k] < std::chrono::seconds(1)) return;
             floor_seen[k] = now;
@@ -12954,6 +12972,84 @@ int main(int argc, char** argv) {
             }
             floor_said[k] = 1;
         };
+        // VLEND / VRECLAIM pending work (PLAN-qfn-vision-lend review 1): the commands only set this state and go back
+        // to the command loop; every settle of card 0 (and the idle tick) runs one step toward it on a quiet CUDA0,
+        // giving toward VLEND's target or growing the cache back after a VRECLAIM.  The answer line prints once,
+        // here; the serve thread alone touches this state and writes these lines.
+        const std::thread::id vlen_thread = std::this_thread::get_id();
+        auto vlen_tick = [&]() {
+            if (!vlen_pending && !vlen_reclaim_pending) return;
+            if (std::this_thread::get_id() != vlen_thread) return;   // (an allocation hook may settle a card too)
+            const int vdev = eslot_dev(0);
+            const strata::core::OnDevice on0(vdev);
+            strata::core::ExpertCache& xc = *gv[0].cache;
+            const uint64_t G = strata::core::vmm_granularity(vdev);
+            size_t fb = 0, tb = 0;
+            auto bad_vram = [&] {
+                (void) cudaGetLastError();
+                if (vlen_pending) {
+                    vlen_pending = false;
+                    std::printf("ERR VLEND: CUDA0's free VRAM cannot be read\n");
+                    std::fflush(stdout);
+                }
+                vlen_reclaim_pending = false;
+            };
+            if (G == 0 || cudaMemGetInfo(&fb, &tb) != cudaSuccess) { bad_vram(); return; }
+            const int64_t floor_b = floor_of(0);   // VLEND's target: CUDA0's floor with the encoder's share
+            if (vlen_pending) {
+                int64_t got = -1;
+                if ((int64_t) fb < floor_b) {
+                    const int64_t short_b = floor_b - (int64_t) fb;
+                    got = free_to_driver((size_t) 0, (short_b + (int64_t) G - 1) / (int64_t) G, true);
+                    if (cudaMemGetInfo(&fb, &tb) != cudaSuccess) { bad_vram(); return; }
+                }
+                if ((int64_t) fb >= floor_b) {   // (the floor stays raised until VRECLAIM)
+                    vlen_pending = false;
+                    std::fprintf(stderr, "strata serve: VLEND: CUDA0 at %zu MiB free (its floor is %lld MiB with the "
+                                         "encoder's share); the expert cache maps %lld of %lld MiB, %lld of %lld slots\n",
+                                 fb >> 20, (long long) (floor_b >> 20), (long long) (xc.mapped_bytes() >> 20),
+                                 (long long) (xc.full_bytes() >> 20), (long long) xc.slots(),
+                                 (long long) xc.full_slots());
+                    std::printf("VLENT free_mib=%lld cache_mib=%lld\n", (long long) (fb >> 20),
+                                (long long) (xc.mapped_bytes() >> 20));
+                    std::fflush(stdout);
+                    return;
+                }
+                int64_t fr = 0;
+                strata::core::qsa_slot_budget_chunks(vdev, &fr, nullptr);
+                if (got == 0 && gv[0].lo <= give_floor && fr <= slots_low_water(0)) {
+                    vlen_pending = false;   // (the floor stays: the server sends VRECLAIM after any VLEND)
+                    std::printf("ERR VLEND: CUDA0's expert cache is at its smallest size of %lld slots: %zu of "
+                                "%lld MiB free\n", (long long) give_floor, fb >> 20, (long long) (floor_b >> 20));
+                    std::fflush(stdout);
+                    return;
+                }
+                if (Clock::now() > vlen_deadline) {
+                    vlen_pending = false;   // (the floor stays for the same reason: a later settle may free more)
+                    std::printf("ERR VLEND: timed out with %zu of %lld MiB free after 30 s\n", fb >> 20,
+                                (long long) (floor_b >> 20));
+                    std::fflush(stdout);
+                }
+                return;
+            }
+            // VRECLAIM: CUDA0's cache grows back over the VRAM the encoder gave up (the free VRAM goes into the slot
+            // budget here; the settle above / the loop's elastic_idle takes it back into the cache, refilled).
+            int64_t fr = 0, made = 0;
+            strata::core::qsa_slot_budget_chunks(vdev, &fr, &made);
+            const int64_t keep = budget_keep(0, made) + slots_low_water(0) + 32;   // chunks the slots keep
+            const int64_t holes = (int64_t) ((xc.bytes_of(gv[0].top) - xc.bytes_of(gv[0].lo)) / G);
+            const int64_t room = (int64_t) fb > floor_b ? ((int64_t) fb - floor_b) / (int64_t) G : 0;
+            if (holes <= 0 || Clock::now() > vlen_rdeadline || (room <= 0 && fr <= keep)) {
+                vlen_reclaim_pending = false;   // (whole again, nothing left to take, or it is not coming)
+                std::fprintf(stderr, "strata serve: VRECLAIM: the expert cache maps %lld of %lld MiB, %lld of %lld "
+                                     "slots%s\n", (long long) (xc.mapped_bytes() >> 20),
+                             (long long) (xc.full_bytes() >> 20), (long long) xc.slots(),
+                             (long long) xc.full_slots(), holes > 0 ? " (the rest goes back as the slots let go)" : "");
+                return;
+            }
+            if (room > 0 && fr <= budget_keep(0, made) + slots_low_water(0))
+                (void) strata::core::qsa_slot_budget_add(vdev, (uint64_t) std::min(room, holes) * G);
+        };
         auto elastic_idle = [&](size_t k, bool may_give, int skip) {
             if (!eslots_on) return;
             const strata::core::OnDevice on_k(eslot_dev(k));
@@ -12974,6 +13070,7 @@ int main(int argc, char** argv) {
             const int64_t low = slots_low_water(k);
             if (!may_give) return;
             vram_floor(k);   // (first: the budget it leaves is what is settled below)
+            if (k == 0) vlen_tick();   // (VLEND / VRECLAIM step toward their target on this quiet settle)
             strata::core::qsa_slot_budget_chunks(eslot_dev(k), &fr, &made);
             if (fr < low && gv[k].lo > give_floor) {
                 give(k, low - fr + 16);
@@ -16746,6 +16843,9 @@ int main(int argc, char** argv) {
                 if (big) due.push_back((int) b);
             }
             if (conc_serving || in_prompt_read || share_live || cy_held_n > 0 || adm_active) return true;
+            if ((vlen_pending || vlen_reclaim_pending) && !pipe_inflight() && !batch_on())
+                for (size_t k = 0; k < bslot_ss.size(); ++k)   // (idle: without this the floor path would never run)
+                    elastic_idle(k, true, -1);
             if (due.empty()) {   // nothing running: budget chunks a slot let go of go back to the expert caches
                 if (pipe_inflight() || batch_on()) return true;
                 for (size_t k = 0; k < bslot_ss.size(); ++k) {
@@ -16953,6 +17053,53 @@ int main(int argc, char** argv) {
                 adm_bstop(std::atoi(line.c_str() + 6));
                 continue;
             }
+            // VLEND <mib> / VRECLAIM (PLAN-qfn-vision-lend, review 1): CUDA0 lends the picture encoder's process
+            // VRAM from its expert cache / slot budget and takes it back - while batch slots decode.  ASYNCHRONOUS:
+            // the command sets the pending state, works one quiet step here at once, and goes back to the command
+            // loop; every settle of card 0 (and the idle tick) runs vlen_tick until the answer is due:
+            // VLENT free_mib=<n> cache_mib=<n> / ERR VLEND: <why> / VRECLAIMED cache_mib=<n>.
+            if (line.rfind("VLEND", 0) == 0 || line.rfind("VRECLAIM", 0) == 0) {
+                const bool lend = line.rfind("VLEND", 0) == 0;
+                char* ve = nullptr;
+                long long vmib = 0;
+                if (lend) {
+                    vmib = std::strtoll(line.c_str() + 5, &ve, 10);
+                    if (ve == line.c_str() + 5 || vmib < 0) {
+                        std::printf("ERR VLEND: expected: VLEND <mib>\n");
+                        std::fflush(stdout);
+                        continue;
+                    }
+                }
+                if (!give_on || gv.empty()) {
+                    std::printf("ERR %s: no expert cache that gives (%s)\n", lend ? "VLEND" : "VRECLAIM",
+                                give_off_why.empty() ? "no --batch slots" : give_off_why.c_str());
+                    std::fflush(stdout);
+                    continue;
+                }
+                if (vlen_pending && !lend) {   // (the server gave up on the lend: close the pair, then reclaim)
+                    vlen_pending = false;
+                    std::printf("ERR VLEND: superseded by VRECLAIM\n");
+                    std::fflush(stdout);
+                }
+                if (lend) {
+                    vlen_extra_b.store((int64_t) vmib << 20, std::memory_order_relaxed);
+                    vlen_pending = true;
+                    vlen_reclaim_pending = false;
+                    vlen_deadline = Clock::now() + std::chrono::seconds(30);
+                } else {
+                    vlen_extra_b.store(0, std::memory_order_relaxed);
+                    vlen_pending = false;
+                    vlen_reclaim_pending = true;
+                    vlen_rdeadline = Clock::now() + std::chrono::seconds(120);
+                }
+                vlen_tick();   // (between windows here too: usually the answer, or the first give, comes on this line)
+                if (!lend) {   // VRECLAIMED is answered at once; the take-back goes on in the loop (vlen_tick)
+                    std::printf("VRECLAIMED cache_mib=%lld\n", (long long) (gv[0].cache->mapped_bytes() >> 20));
+                    std::fflush(stdout);
+                }
+                continue;
+            }
+
             // STRATA_PICTURE_SERIAL=1 (the old way: one position table for every slot, which a picture request rewrites):
             // a picture request starts when no slot decodes, a text one when no picture conversation does
             if (picture_serial && slot_admit && o.vision && !adm_direct) {
