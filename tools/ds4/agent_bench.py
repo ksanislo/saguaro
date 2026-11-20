@@ -132,7 +132,7 @@ def run(exe: str, a, tok, plan: list[dict], settings: dict) -> dict:
     tmp = tempfile.mkdtemp(prefix="ds4-agents-")
     # (--serial: the kept conversations on, as a harness runs --parallel 1 - each agent's turn takes its conversation
     #  back instead of reading it again; with lanes a conversation stays in its own)
-    env.update({"MAYA_DS4_SLOT_DIR": tmp, "MAYA_DS4_SLOT_KEEP": "1" if a.serial else "0"})
+    env.update({"SAGUARO_DS4_SLOT_DIR": tmp, "SAGUARO_DS4_SLOT_KEEP": "1" if a.serial else "0"})
     args = [*(("--gpus", a.gpus) if a.gpus else ()), "--pack", a.pack, "--max-context", str(a.ctx), "--dspark", a.dspark, *(("--tp", str(a.tp)) if a.tp else ()),
             "--threads", "on", *(() if a.serial else ("--parallel", str(len(plan)))), "--vision", "off",
             "--expert-profile", "none", "--serve"]   # (--serial: no --parallel at all - a build before it runs too)
@@ -210,7 +210,7 @@ def main() -> int:
     ap.add_argument("--exe", action="append", required=True,
                     help="an engine, PATH or PATH:K=V,K=V (its own settings); repeat to compare")
     ap.add_argument("--gpus", default="", help="the GPUs (default: every visible one, the engine's own split)")
-    ap.add_argument("--config", default="", help="a model config (maya-ds4.json): its DS4_/MAYA_DS4_ settings")
+    ap.add_argument("--config", default="", help="a model config (maya-ds4.json): its DS4_/SAGUARO_DS4_ settings")
     ap.add_argument("--env", action="append", default=[], help="K=V on every engine (repeatable)")
     ap.add_argument("--ctx", type=int, default=131072, help="--max-context")
     ap.add_argument("--agents", type=int, default=4, help="agents at once (the engine's --parallel)")

@@ -1,5 +1,5 @@
 #pragma once
-// Foresight swap space (opt-in: STRATA_FS_SLOTS > 0; unset = nothing here exists and the engine is unchanged).
+// Foresight swap space (opt-in: SAGUARO_FS_SLOTS > 0; unset = nothing here exists and the engine is unchanged).
 //
 // A few VRAM slots per layer on each card, apart from the expert cache, refilled on their own copy stream with experts
 // that just missed.  The verify pool asks, for every expert it would otherwise give the CPU, whether that expert sits
@@ -9,16 +9,16 @@
 //
 // Safety: a slot is refilled only when every window that may have read it has finished: each plan reference stamps
 // the slot with the count of finished verify windows, and a slot is reusable once `depth` more windows finished
-// (STRATA_FS_DEPTH, default 4; --pipeline-windows 2 keeps at most two windows in flight).  A copy that has not landed
-// is simply not used (the CPU computes the expert as before).  Not with STRATA_VERIFY_DEVICE_PLAN (the device would
+// (SAGUARO_FS_DEPTH, default 4; --pipeline-windows 2 keeps at most two windows in flight).  A copy that has not landed
+// is simply not used (the CPU computes the expert as before).  Not with SAGUARO_VERIFY_DEVICE_PLAN (the device would
 // plan resident layers without the host).
 //
-// With STRATA_FS_AHEAD=1 (default 1 when the swap space is on) the router look-ahead (RouterLookahead, one layer ahead on the
+// With SAGUARO_FS_AHEAD=1 (default 1 when the swap space is on) the router look-ahead (RouterLookahead, one layer ahead on the
 // previous layer's MoE input) also feeds the slots, not only the page warming of the file tier.
 //
-// Switches: STRATA_FS_SLOTS (per layer and card), STRATA_FS_BUDGET (copies per card per finished window, default 32),
-// STRATA_FS_ADMIT (misses within the last 4 windows before an expert is copied, default 1), STRATA_FS_DEPTH,
-// STRATA_FS_VERIFY=1 (test mode: every slot is read back and compared with its source the first time it is used).
+// Switches: SAGUARO_FS_SLOTS (per layer and card), SAGUARO_FS_BUDGET (copies per card per finished window, default 32),
+// SAGUARO_FS_ADMIT (misses within the last 4 windows before an expert is copied, default 1), SAGUARO_FS_DEPTH,
+// SAGUARO_FS_VERIFY=1 (test mode: every slot is read back and compared with its source the first time it is used).
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
@@ -50,7 +50,7 @@ struct ForesightSwap {
     int64_t n_layers = 0, n_expert = 0;
     std::unique_ptr<Slot[]> slot;            ///< n_layers x slots
     std::vector<int16_t> where;              ///< (layer, expert) -> slot in its layer, -1
-    std::vector<uint8_t> miss_cnt;           ///< STRATA_FS_ADMIT > 1: recent misses per (layer, expert)
+    std::vector<uint8_t> miss_cnt;           ///< SAGUARO_FS_ADMIT > 1: recent misses per (layer, expert)
     std::vector<uint64_t> miss_at;
     std::vector<int> layer_card, layer_dev;
     std::vector<void*> card_stream;          ///< cudaStream_t per card
@@ -62,7 +62,7 @@ struct ForesightSwap {
     std::atomic<bool> failed{false};
     // counters (dispatch thread)
     uint64_t hits = 0, copies = 0, busy = 0, over_budget = 0, pending = 0, predicted = 0;   // (under smu_)
-    bool verify = false;                     ///< STRATA_FS_VERIFY=1: read every landed slot back and compare (slow, tests)
+    bool verify = false;                     ///< SAGUARO_FS_VERIFY=1: read every landed slot back and compare (slow, tests)
     uint64_t verify_ok = 0, verify_bad = 0;
     uint64_t dropped = 0;                    ///< slots dropped because an exchange moved their expert's bytes (under smu_)
     static constexpr int16_t kHeld = -2;     ///< `where`: an exchange is moving this expert's bytes, no copy now (#2134)

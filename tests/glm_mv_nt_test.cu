@@ -2,7 +2,7 @@
 // (mv), bit for bit: every weight type the decode reads, 2 to 8 activations, a launch of mixed types (the typed and
 // the generic kernels), a scale and a bias.  Synthetic weights from ggml's own quantizers; no model needed.
 //
-//   glm_mv_nt_test           the parity checks (ctest; with STRATA_GLM_MV_GENERIC=1 too: the generic kernel only)
+//   glm_mv_nt_test           the parity checks (ctest; with SAGUARO_GLM_MV_GENERIC=1 too: the generic kernel only)
 //   glm_mv_nt_test --bench   the time of one Q6_K 4096 x 12288 GEMV (the dense FFN's gate) for 1..8 activations
 #include "strata/kernels/glm_fast.hpp"
 
@@ -285,6 +285,6 @@ int main(int argc, char** argv) {
         return 1;
     }
     std::printf("glm_mv_nt_test: %d cases, every output bit for bit the one-activation GEMV's%s\n", cases,
-                std::getenv("STRATA_GLM_MV_GENERIC") ? " (the generic kernel)" : "");
+                std::getenv("SAGUARO_GLM_MV_GENERIC") ? " (the generic kernel)" : "");
     return 0;
 }

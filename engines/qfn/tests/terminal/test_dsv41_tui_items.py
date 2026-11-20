@@ -52,7 +52,7 @@ class Presets(unittest.TestCase):
     def test_a_saved_preset_is_read_from_where_it_is_written_whatever_the_data_dir(self):
         import tempfile
         from strata_cli.launch import settings as S, store
-        with tempfile.TemporaryDirectory() as d, mock.patch.dict("os.environ", {"STRATA_LAUNCH_PRESET_DIR": d}):
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict("os.environ", {"SAGUARO_LAUNCH_PRESET_DIR": d}):
             s = S.LaunchSettings(family="deepseek41", model="IST-DAS-2.00bpw", data_dir=str(Path(d) / "elsewhere"), name="DS 8K")
             store.save(s, "DS 8K")
             self.assertEqual([p.name for p in store.list_presets()], ["DS 8K"])
@@ -72,7 +72,7 @@ class PlanEngine(unittest.TestCase):
             fake.s.data_dir = d
             fake.catalog.data_dir.return_value = Path(d)
             fake.catalog.strata.setup_module.side_effect = RuntimeError("no setup")
-            with mock.patch.dict("os.environ", {"STRATA_DSV41_EXE": ""}),                     mock.patch("strata_control.engine_component.status", return_value={"usable": False}):
+            with mock.patch.dict("os.environ", {"SAGUARO_DSV41_EXE": ""}),                     mock.patch("strata_control.engine_component.status", return_value={"usable": False}):
                 found, known = R.Runner.dsv41_engine_found(fake)
             self.assertEqual(found, exe)
             self.assertTrue(known)
@@ -201,7 +201,7 @@ class WhichInstallsEngine(unittest.TestCase):
     def found(self, own, root):
         from strata_cli.launch import runner as R
         f = self.runner(own, root)
-        with mock.patch.dict("os.environ", {"STRATA_DSV41_EXE": "", "STRATA_INSTALL_DIR": ""}), \
+        with mock.patch.dict("os.environ", {"SAGUARO_DSV41_EXE": "", "SAGUARO_INSTALL_DIR": ""}), \
                 mock.patch("strata_control.engine_component.status", return_value={"usable": False}):
             out = R.Runner.dsv41_engine_found(f)
         return out[0], getattr(f, "dsv41_choice", None)

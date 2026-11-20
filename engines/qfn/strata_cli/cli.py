@@ -133,7 +133,7 @@ def parser() -> argparse.ArgumentParser:
         "engine", help="which engine package in the local component folder this PC would start (never downloads)")
     components_engine.add_argument("--backend", default=None, help="ask for one backend family instead of detecting it")
     components_engine.add_argument("--components-dir", default=None,
-                                   help="the component folder (default: STRATA_COMPONENTS_DIR or the per-user folder)")
+                                   help="the component folder (default: SAGUARO_COMPONENTS_DIR or the per-user folder)")
     components_engine.add_argument("--full", action="store_true", help="hash every file, not only the entrypoint")
     components_engine.add_argument("--output", choices=("human", "json"), default="human")
     from strata_cli import update_cmd
@@ -309,7 +309,7 @@ def parser() -> argparse.ArgumentParser:
     bench_run.add_argument("--out", metavar="NEW_DIRECTORY",
                            help="new output directory (required for serving suites). Standard suite: a new folder "
                                 "<date>-standard-<gpu>-<run id> under ./bench/results or ./bench-results")
-    bench_run.add_argument("--credential-env", default="STRATA_API_KEY")
+    bench_run.add_argument("--credential-env", default="SAGUARO_API_KEY")
     bench_run.add_argument("--telemetry-credential-env", default=None)
     bench_run.add_argument("--output", choices=("human", "json"), default="human")
     standard = bench_run.add_argument_group("standard suite (docs/BENCHMARK_PROTOCOL.md)")
@@ -359,12 +359,12 @@ def parser() -> argparse.ArgumentParser:
     ts_run.add_argument("--revise-command", default=None,
                         help="the command that performs ONE revision attempt. It runs with the "
                              "candidate directory as its working directory, receives the prompt in "
-                             "STRATA_TIMESKIP_PROMPT and the attempt number in "
-                             "STRATA_TIMESKIP_ATTEMPT, and must not touch the workspace. Without it "
+                             "SAGUARO_TIMESKIP_PROMPT and the attempt number in "
+                             "SAGUARO_TIMESKIP_ATTEMPT, and must not touch the workspace. Without it "
                              "no revision is attempted, which yields an inconclusive run rather than "
                              "a fabricated improvement.")
     ts_run.add_argument("--state-dir", default=None,
-                        help="where runs are recorded (default: $STRATA_TIMESKIP_DIR or "
+                        help="where runs are recorded (default: $SAGUARO_TIMESKIP_DIR or "
                              "$XDG_STATE_HOME/strata/time-skip, %%LOCALAPPDATA%%\\Strata\\time-skip on Windows)")
     ts_run.add_argument("--output", choices=("human", "json"), default="human")
 
@@ -758,8 +758,8 @@ def _effective(cfg: dict, saved: dict | None, cli: argparse.Namespace | None = N
             value, origin = overrides[key], "saved_profile"
         elif key in cfg:
             value, origin = cfg[key], "run_config"
-        elif key == "batch_telemetry" and "STRATA_BATCH_TELEMETRY" in os.environ:
-            value, origin = os.environ["STRATA_BATCH_TELEMETRY"] == "1", "environment"
+        elif key == "batch_telemetry" and "SAGUARO_BATCH_TELEMETRY" in os.environ:
+            value, origin = os.environ["SAGUARO_BATCH_TELEMETRY"] == "1", "environment"
         else:
             value, origin = default, "default"
         values[key], origins[key] = value, origin
@@ -784,7 +784,7 @@ def _launch_plan(ref: str, cli: argparse.Namespace | None = None) -> tuple[dict,
     values, origins = _effective(cfg, saved, cli)
     host = values["host"]
     from serve.server import api_key_of, explicit_no_key, key_list
-    raw_key = os.environ.get("STRATA_API_KEY") or cfg.get("api_key", "")
+    raw_key = os.environ.get("SAGUARO_API_KEY") or cfg.get("api_key", "")
     if not explicit_no_key(raw_key):
         try:
             key_list(api_key_of(raw_key))
@@ -1476,7 +1476,7 @@ def _timeskip(a: argparse.Namespace) -> int:
     def state_root() -> Path:
         if getattr(a, "state_dir", None):
             return Path(a.state_dir)
-        env = os.environ.get("STRATA_TIMESKIP_DIR")
+        env = os.environ.get("SAGUARO_TIMESKIP_DIR")
         if env:
             return Path(env)
         from strata_control.paths import state_base
@@ -1572,8 +1572,8 @@ def _timeskip(a: argparse.Namespace) -> int:
     def revise(candidate: Path, prompt: str, attempt: int):
         if not a.revise_command:
             return None
-        env = {**os.environ, "STRATA_TIMESKIP_PROMPT": prompt,
-               "STRATA_TIMESKIP_ATTEMPT": str(attempt)}
+        env = {**os.environ, "SAGUARO_TIMESKIP_PROMPT": prompt,
+               "SAGUARO_TIMESKIP_ATTEMPT": str(attempt)}
         proc = subprocess.run(a.revise_command, shell=True, cwd=str(candidate), env=env,
                               capture_output=True, text=True)
         if proc.returncode != 0:
@@ -1643,7 +1643,7 @@ def _tune(a: argparse.Namespace) -> int:
     def state_root() -> Path:
         if getattr(a, "state_dir", None):
             return Path(a.state_dir)
-        env = os.environ.get("STRATA_TUNE_DIR")
+        env = os.environ.get("SAGUARO_TUNE_DIR")
         if env:
             return Path(env)
         from strata_control.paths import state_base
@@ -2065,19 +2065,19 @@ def _install(a: argparse.Namespace) -> int:
     """The one place the terminal acquires anything: it hands over to the installer (setup.py) of a full Strata
     folder, which is where pip, the engine and the models are fetched. A folder without it (the terminal archive)
     says so and names what to do instead."""
-    installer = Path(os.environ.get("STRATA_INSTALL_DIR") or ROOT) / "setup.py"
+    installer = Path(os.environ.get("SAGUARO_INSTALL_DIR") or ROOT) / "setup.py"
     if not installer.is_file():
         return _error("this folder has no installer (setup.py). Engines, models and updates are installed from a "
                       "full Strata folder with SETUP.bat / ./setup.sh and UPDATE.bat / ./update.sh; "
-                      "set STRATA_INSTALL_DIR to that folder to run it from here. To update the engine and Control "
+                      "set SAGUARO_INSTALL_DIR to that folder to run it from here. To update the engine and Control "
                       "from the signed update feed, run `strata update`", 5)
     extra = [x for x in a.setup_args if x != "--"]
     env = dict(os.environ)
     if (ROOT / "python").is_dir() and (ROOT / "VERSION").is_file():
         # the Terminal bundle: its installer only downloads and prepares the model (no pip, no engine fetch, no compiler)
-        env["STRATA_CONTROL_INSTALL"] = "1"
+        env["SAGUARO_CONTROL_INSTALL"] = "1"
         from strata_cli.launch.catalog import install_root
-        env.setdefault("STRATA_INSTALL_DIR", str(install_root()))
+        env.setdefault("SAGUARO_INSTALL_DIR", str(install_root()))
     return subprocess.call([sys.executable, str(installer), "--update" if a.update else "--setup", *extra],
                            cwd=str(installer.parent), env=env)
 

@@ -1,6 +1,6 @@
 """Tests for serve/server.py's effort_end_args (#458): "effort_position": "end" is used when the engine binary knows
 --tail-role-token.  With the Intel launcher (sycl/serve/strata-sycl.sh) as the configured exe, the check reads the
-binary the launcher runs (STRATA_SYCL_BIN, default build-sycl-aot/strata), not the shell script, which never names
+binary the launcher runs (SAGUARO_SYCL_BIN, default build-sycl-aot/strata), not the shell script, which never names
 the option.  Fake files in a temp repo - nothing is built or run.
 
     python -m unittest tools.test_effort_end_args
@@ -36,7 +36,7 @@ class EffortEndArgs(unittest.TestCase):
         self.repo = Path(self.tmp.name) / "engine-repo"
         (self.repo / "sycl" / "serve").mkdir(parents=True)
         self.launcher = self.repo / "sycl" / "serve" / "strata-sycl.sh"
-        self.launcher.write_text("#!/usr/bin/env bash\nexec ${STRATA_SYCL_BIN:-build-sycl-aot/strata}\n")
+        self.launcher.write_text("#!/usr/bin/env bash\nexec ${SAGUARO_SYCL_BIN:-build-sycl-aot/strata}\n")
         (self.repo / "build-sycl-aot").mkdir()
 
     def tearDown(self):
@@ -44,7 +44,7 @@ class EffortEndArgs(unittest.TestCase):
 
     def call(self, cfg, exe):
         with contextlib.redirect_stdout(io.StringIO()), mock.patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("STRATA_SYCL_BIN", None)
+            os.environ.pop("SAGUARO_SYCL_BIN", None)
             return S.effort_end_args(cfg, str(exe), Tok())
 
     def test_sycl_launcher_reads_the_binary(self):
@@ -59,7 +59,7 @@ class EffortEndArgs(unittest.TestCase):
         (self.repo / "build-sycl-aot" / "strata").write_bytes(ENGINE_WITHOUT)
         (self.repo / "other").mkdir()
         (self.repo / "other" / "strata").write_bytes(ENGINE_WITH)
-        cfg = {"effort_position": "end", "env": {"STRATA_SYCL_BIN": "other/strata"}}
+        cfg = {"effort_position": "end", "env": {"SAGUARO_SYCL_BIN": "other/strata"}}
         self.assertEqual(self.call(cfg, self.launcher), ["--tail-role-token", "42"])
 
     def test_sycl_binary_missing_falls_back_to_the_launcher(self):

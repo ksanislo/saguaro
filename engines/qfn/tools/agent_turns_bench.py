@@ -1,6 +1,6 @@
 """Decode A/B on coding-agent turns over this repository: arms restarted per round, per-turn ratios.
 
-    python tools/agent_turns_bench.py strata-iq2_xs.json base: hcq8:STRATA_HC_Q8=2 [--rounds 2]
+    python tools/agent_turns_bench.py strata-iq2_xs.json base: hcq8:SAGUARO_HC_Q8=2 [--rounds 2]
 
 The workload is five simulated coding-agent sessions over this repository's own files (README, serve/, setup.py, the
 expert cache, the hyper-connection kernels, the tokenizer): a system prompt, four tools, a task (three in English, two

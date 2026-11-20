@@ -818,17 +818,17 @@ __global__ void __launch_bounds__(128) mmvq_kernel(const uint8_t* __restrict__ w
 // scale as a float) and `apply` (the activation loads, the dp4a chain in the same order, the same integer scale
 // step and the same float expression).  `apply(load(...))` does the dot's integer and float operations in the same
 // order on the same values, so a column of the kernels below is BITWISE equal to the same column of mmvq_kernel /
-// native_gu_kernel / native_down_kernel (iq_multi_parity checks it; STRATA_OLD_IQ_MMVQ=1 keeps the old kernels).
+// native_gu_kernel / native_down_kernel (iq_multi_parity checks it; SAGUARO_OLD_IQ_MMVQ=1 keeps the old kernels).
 template<int TY> struct Split;
 // Formats with a Split below take the decode-once kernels; the others (Q4_K, Q5_K, Q5_1, Q8_0: UD-Q4_K_XL) the
 // per-entry ones, which call Fmt<TY>::dot per column exactly as before #242 (the launchers test kSplit at compile
 // time, so the multi kernels are never instantiated for a type without a Split).
 template<int TY> inline constexpr bool kSplit = false;
 // The K-quant / Q8_0 / Q5_1 formats (UD-Q4_K_XL) have Split traits (SplitK below), but their decode-once multi kernels
-// run only with STRATA_KQ_SPLIT=1 until the A/B on the measured cards decides (bitwise the old kernels either way).
+// run only with SAGUARO_KQ_SPLIT=1 until the A/B on the measured cards decides (bitwise the old kernels either way).
 template<int TY> inline constexpr bool kq_type = (TY == 12 || TY == 13 || TY == 8);   // not Q5_1: its Split apply is not bitwise the old dot (FMA contraction), see notes-151-amd
-// read at first use, not at load: the sm_75 table (nv_defaults, STRATA_SM75_STACK) sets it in main
-inline bool kq_split_on() { static const bool on = [] { const char* v = std::getenv("STRATA_KQ_SPLIT"); return v != nullptr && v[0] == '1'; }(); return on; }
+// read at first use, not at load: the sm_75 table (nv_defaults, SAGUARO_SM75_STACK) sets it in main
+inline bool kq_split_on() { static const bool on = [] { const char* v = std::getenv("SAGUARO_KQ_SPLIT"); return v != nullptr && v[0] == '1'; }(); return on; }
 template<int TY> inline bool split_off() { return kq_type<TY> && !kq_split_on(); }
 template<int TY> inline constexpr bool kTqType = (TY == 144 || TY == 145 || TY == 146);
 // the trellis types stage their int8 codebook (4 KB) too, but only where it pays: tq_stage_on() below (compute capability 6.0)
@@ -1331,7 +1331,7 @@ template<> struct S27<8> {   // Q8_0
 // K-quants and Q5_1 / Q8_0 (UD-Q4_K_XL): the S27 load / apply (below the same file used them first for the V2K
 // grouped kernels) as Split traits, so the generic multi-column kernels decode a weight once per call for these
 // formats too.  Bitwise the old per-column Fmt<TY>::dot (the S27 apply is that dot's own expression; iq_multi_parity).
-// STRATA_OLD_IQ_MMVQ=1 keeps the old kernels; STRATA_KQ_SPLIT=0 keeps them for these four formats only.
+// SAGUARO_OLD_IQ_MMVQ=1 keeps the old kernels; SAGUARO_KQ_SPLIT=0 keeps them for these four formats only.
 template<int TY> struct SplitK : S27<TY> {
     template<bool STAGE_GRID = false>
     __device__ static typename S27<TY>::W load(const void* __restrict__ vbq, int kbx, int iqs, const uint32_t* __restrict__ = nullptr) {
@@ -1681,7 +1681,7 @@ __device__ __forceinline__ void row_dot2_80_sub16(const uint8_t* ra, const uint8
 // The sign-mask tables that follow the codebook words in a staged IQ3_XXS / IQ3_S table (see stage_iq_grid): the byte
 // masks of every 7-bit sign field (IQ3_XXS, 2 x 128 words at +256) and of a sign byte's bits 0-3 and 4-7 (IQ3_S, 2 x 256
 // words at +512).  Split<18>::load<true> and Split<21>::load<true> read them, so every kernel that stages these two
-// codebooks (the default kernels through stage_iq_grid, the STRATA_EXPDEC window kernels through EdGrid) fills them too.
+// codebooks (the default kernels through stage_iq_grid, the SAGUARO_EXPDEC window kernels through EdGrid) fills them too.
 __device__ __forceinline__ void stage_iq3xxs_masks(uint32_t* s_buf, int tid, int nthreads) {
     for (int u = tid; u < 128; u += nthreads) {
         const uint32_t s = (uint32_t) u | ((__popc((uint32_t) u) & 1u) << 7);   // 8th sign = parity of the 7
@@ -2336,7 +2336,7 @@ __global__ void __launch_bounds__(256) native_down_multi_kernel(const unsigned l
     }
 }
 
-// ---------------------------------------------------------------- EXPDEC (STRATA_EXPDEC=1): the group's activations
+// ---------------------------------------------------------------- EXPDEC (SAGUARO_EXPDEC=1): the group's activations
 // in shared memory, R rows per lane
 //
 // native_gu_multi_kernel / native_down_multi_kernel decode each weight part once and apply it to every entry of the
@@ -2347,12 +2347,12 @@ __global__ void __launch_bounds__(256) native_down_multi_kernel(const unsigned l
 // words are two 16-byte loads (gate/up, Q2_0 down: the block's two halves in separate planes, conflict-free) or two
 // 8-byte loads (IQ4_NL down), the fp16 block scale already a float; every lane computes R rows at once, so the
 // activation words are loaded once per R rows; the IQ3_XXS / IQ3_S codebooks are staged too (IQ2_* already were),
-// and a block takes `rb` rows (auto: the most that keep ~STRATA_EXPDEC_MINBLK blocks in flight) instead of 16.
+// and a block takes `rb` rows (auto: the most that keep ~SAGUARO_EXPDEC_MINBLK blocks in flight) instead of 16.
 // Each (row, entry) sum is the default kernel's sum tree (row_dot_80_sub16 / row_dot_40_sub8 / row_dot_20_sub16: the
 // same lane does the same calls in the same order with the same operations, `apply_u` = `apply` on the block's
 // words), so the output is bitwise the same (expdec_bench checks it; docs/EXPERTDEC.md).
 #ifndef STRATA_EXPDEC_MINB
-#define STRATA_EXPDEC_MINB 4   // gate/up __launch_bounds__ min blocks per SM by default (STRATA_EXPDEC_MINB at runtime): 4 = up to 64
+#define STRATA_EXPDEC_MINB 4   // gate/up __launch_bounds__ min blocks per SM by default (SAGUARO_EXPDEC_MINB at runtime): 4 = up to 64
                                // registers, as the default kernels (bench: equal on the 2080 Ti, 0.87-0.95 on the 3060); 2 = up to 128
 #endif
 constexpr int ED_NC = GRP_NC;   // entries staged at once
@@ -2756,7 +2756,7 @@ __global__ void __launch_bounds__(256) swiglu_q8_1_entries_kernel(const float* _
     }
 }
 
-// 147-verify (STRATA_GU_SWIGLU=1): native_gu_multi_kernel's 16-lane gate and up rows, SwiGLU and the q8_1 blocks in ONE
+// 147-verify (SAGUARO_GU_SWIGLU=1): native_gu_multi_kernel's 16-lane gate and up rows, SwiGLU and the q8_1 blocks in ONE
 // launch.  A block owns 32 consecutive hidden columns r of a group: its 32 sub-warps each compute gate row r and up row
 // r (the same row_dot_80_sub16 calls, entries GRP_NC at a time, the same NVFP4 tail scale), so the product
 // h = silu(gate) * up is formed in the block and warp k quantizes entry k's 32 values with q8_1_store - the q8_1 block
@@ -3284,30 +3284,30 @@ bool env_on(const char* name) {
     const char* v = std::getenv(name);
     return v != nullptr && v[0] != '\0' && v[0] != '0';
 }
-// STRATA_OLD_IQ_MMVQ=1 keeps the per-column kernels (bitwise equal to the new ones; kept for A/B timing)
-bool g_old_kernels = env_on("STRATA_OLD_IQ_MMVQ");
-bool g_no_sub16_gu = env_on("STRATA_NO_SUB16_GU");
-// STRATA_IQ_STAGE_GRID=0 disables staging 64-bit i-quant codebook tables into shared memory
+// SAGUARO_OLD_IQ_MMVQ=1 keeps the per-column kernels (bitwise equal to the new ones; kept for A/B timing)
+bool g_old_kernels = env_on("SAGUARO_OLD_IQ_MMVQ");
+bool g_no_sub16_gu = env_on("SAGUARO_NO_SUB16_GU");
+// SAGUARO_IQ_STAGE_GRID=0 disables staging 64-bit i-quant codebook tables into shared memory
 bool g_stage_grid = [] {
-    const char* v = std::getenv("STRATA_IQ_STAGE_GRID");
+    const char* v = std::getenv("SAGUARO_IQ_STAGE_GRID");
     return v == nullptr || v[0] == '\0' || v[0] != '0';
 }();
 // The single-matrix mmvq (128-thread blocks, one per 4 rows) pays the 2-8 KB staging per block: on the RTX 5070 its
 // IQ2_XS / IQ2_S / IQ1_M calls were 10-20% slower staged at 3-8 columns (iq_multi_parity --bench), while the grouped
-// expert kernels gain.  So mmvq stages only with STRATA_IQ_STAGE_GRID_MMVQ=1 (bitwise the same either way).
+// expert kernels gain.  So mmvq stages only with SAGUARO_IQ_STAGE_GRID_MMVQ=1 (bitwise the same either way).
 bool g_stage_grid_mmvq = g_stage_grid && [] {
-    const char* v = std::getenv("STRATA_IQ_STAGE_GRID_MMVQ");
+    const char* v = std::getenv("SAGUARO_IQ_STAGE_GRID_MMVQ");
     return v != nullptr && v[0] == '1';
 }();
 // IQ3_XXS's and IQ3_S's codebooks and sign-mask tables staged in shared memory by the grouped expert kernels (the
-// single-matrix mmvq does not): bitwise the same either way.  OPT-IN: STRATA_IQ_STAGE_TABLES=1.  The PR (#1424) made it
+// single-matrix mmvq does not): bitwise the same either way.  OPT-IN: SAGUARO_IQ_STAGE_TABLES=1.  The PR (#1424) made it
 // the default on compute capability 6.0 (GP100: no __dp4a, these kernels decode-bound at 70-140 GB/s); on a Tesla P100
 // (IQ3_XXS and IQ3_S packs, 5-6 interleaved pairs each) the decode was 0.97-1.03x of the unstaged kernels, noise, so
 // it is not on by default.  On an RTX 3090 Ti, forced on, the IQ3_S layers took 3-13% longer.
 bool stage_tables_on() {
     if (!g_stage_grid) return false;
     static const bool on = [] {
-        const char* v = std::getenv("STRATA_IQ_STAGE_TABLES");
+        const char* v = std::getenv("SAGUARO_IQ_STAGE_TABLES");
         return v && v[0] && v[0] != '0';
     }();
     return on;
@@ -3316,9 +3316,9 @@ bool stage_tables_on() {
 // The trellis types (Gyro: TQ2_T / TQK6 / TQK7) read a 4 KB int8 codebook with 8 random lookups per 16 weights.  The
 // grouped expert kernels stage it in shared memory on compute capability 6.0 (Tesla P100: no dp4a, ~28 ALU ops per
 // weight in the decode, the global lookups are replayed per distinct line) and leave it in global memory elsewhere
-// (the newer cards' L1 absorbs it).  STRATA_TQ_STAGE=1 / 0 forces it either way; bitwise the same result both ways.
+// (the newer cards' L1 absorbs it).  SAGUARO_TQ_STAGE=1 / 0 forces it either way; bitwise the same result both ways.
 bool tq_stage_on() {
-    static const int env = [] { const char* v = std::getenv("STRATA_TQ_STAGE"); return v != nullptr && v[0] != '\0' ? (v[0] != '0' ? 1 : 0) : -1; }();
+    static const int env = [] { const char* v = std::getenv("SAGUARO_TQ_STAGE"); return v != nullptr && v[0] != '\0' ? (v[0] != '0' ? 1 : 0) : -1; }();
     if (env >= 0) return env == 1 && g_stage_grid;
 #if defined(__HIPCC__)
     return false;
@@ -3339,25 +3339,25 @@ bool tq_stage_on() {
 }
 // Everywhere but cc 6.0 (tq_stage_on) the trellis kernels stage the codebook too, and the 160-dot gate/up rows are 8-lane rows (4 per
 // warp, 32 per block, row_dot_160_sub8) while the down rows are the staged 8-lane rows above: on an RTX 3060 (Gyro-M, 24 groups of one
-// token) gate/up 221 -> 140 us and down 182 -> 86 us.  Bitwise the same sums as before.  STRATA_TQ_STAGE=0 or STRATA_TQ_SUB8=0 turn it off
-// (CUDA only: the AMD builds keep the old kernels), STRATA_IQ_STAGE_GRID=0 as for every staged table.
+// token) gate/up 221 -> 140 us and down 182 -> 86 us.  Bitwise the same sums as before.  SAGUARO_TQ_STAGE=0 or SAGUARO_TQ_SUB8=0 turn it off
+// (CUDA only: the AMD builds keep the old kernels), SAGUARO_IQ_STAGE_GRID=0 as for every staged table.
 bool tq_sub8_on() {
 #if defined(__HIPCC__)
     return false;
 #else
     static const bool on = [] {
-        const char* v = std::getenv("STRATA_TQ_STAGE");
+        const char* v = std::getenv("SAGUARO_TQ_STAGE");
         if (v != nullptr && v[0] == '0') return false;
-        v = std::getenv("STRATA_TQ_SUB8");
+        v = std::getenv("SAGUARO_TQ_SUB8");
         return !(v != nullptr && v[0] == '0');
     }();
     return on && g_stage_grid && !g_no_sub16_gu && !tq_stage_on();
 #endif
 }
-// row chunks per block of the staged trellis gate/up and down kernels (STRATA_TQ_ROWCH, default 4)
+// row chunks per block of the staged trellis gate/up and down kernels (SAGUARO_TQ_ROWCH, default 4)
 int tq_row_chunks() {
     static const int n = [] {
-        const char* v = std::getenv("STRATA_TQ_ROWCH");
+        const char* v = std::getenv("SAGUARO_TQ_ROWCH");
         const int k = v != nullptr ? std::atoi(v) : 4;
         return k < 1 ? 1 : k > 32 ? 32 : k;
     }();
@@ -3399,7 +3399,7 @@ void launch_mmvq(const uint8_t* W, size_t rb, const block_q8_1* X, float* y, int
 }
 
 
-// ---------------------------------------------------------------- S26 STRATA_EXPERT_V2=1 (opt-in): IQ3_S gate/up + IQ4_NL down
+// ---------------------------------------------------------------- S26 SAGUARO_EXPERT_V2=1 (opt-in): IQ3_S gate/up + IQ4_NL down
 // Bitwise equal to native_gu_multi_kernel / native_down_multi_kernel (S26 harness, real UD-IQ4_XS expert blobs, T 1-3,
 // memcmp of every output): each row's lane sums and warp_sum are the same; a warp interleaves RPW rows (more loads in
 // flight) and reads the chunk's activation rows from LDS and, for IQ3_S, the grid table from LDS (the same values).
@@ -3742,8 +3742,8 @@ void s26_launch_l(const NativeExpertLayout& L, int64_t cap_groups, cudaStream_t 
     s26_down_l_kernel<LX, RD, SL, TS, BD><<<gd, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_dst, hq, L, out);
 }
 // ---------------------------------------------------------------- stream B: UD-Q4_K_XL grouped decode experts
-// STRATA_EXPERT_V2K=1: s26_gu_l_kernel / s26_down_l_kernel's structure (4 interleaved rows per warp, the chunk's q8_1
-// activation rows in LDS, SwiGLU + q8_1 fused, optionally STRATA_TSUM's transposed butterfly) for Q4_K / Q5_K gate/up
+// SAGUARO_EXPERT_V2K=1: s26_gu_l_kernel / s26_down_l_kernel's structure (4 interleaved rows per warp, the chunk's q8_1
+// activation rows in LDS, SwiGLU + q8_1 fused, optionally SAGUARO_TSUM's transposed butterfly) for Q4_K / Q5_K gate/up
 // and Q5_1 / Q8_0 down, which otherwise run native_gu_kernel / native_down_kernel (one entry at a time, the weight
 // words re-read per column).  Each Fmt<TY>::dot is split into S27<TY>::load (everything that depends on the weight) and
 // apply (the activation words and the same integer / float expression), the same impl functions, so a row's lane-strided
@@ -3947,18 +3947,18 @@ int env_int_or(const char* name, int dflt) {
 }
 // read at first use (not at load), so a per-architecture default set at start (nv_defaults.hpp) is seen; native_expert_set_expdec overrides
 int g_expdec = -1;
-int expdec_mode() { if (g_expdec < 0) g_expdec = env_on("STRATA_EXPDEC") ? 1 : 0; return g_expdec; }
-int g_expdec_r = env_int_or("STRATA_EXPDEC_R", 1);          // gate/up rows per lane: 1, 2 (bench: R=1 wins on the 2080 Ti)
-int g_expdec_dr = env_int_or("STRATA_EXPDEC_DR", 4);        // down rows per lane: 1, 2, 4 (Q2_0: R=4 wins on both cards)
-int g_expdec_minb = env_int_or("STRATA_EXPDEC_MINB", STRATA_EXPDEC_MINB);   // gate/up __launch_bounds__ min blocks: 2 (<= 128 regs) or 4 (<= 64)
-int g_expdec_d20 = env_int_or("STRATA_EXPDEC_D20", 0);      // 1: EXPDEC also for the IQ4_NL down (bench: no gain, default kernel)
+int expdec_mode() { if (g_expdec < 0) g_expdec = env_on("SAGUARO_EXPDEC") ? 1 : 0; return g_expdec; }
+int g_expdec_r = env_int_or("SAGUARO_EXPDEC_R", 1);          // gate/up rows per lane: 1, 2 (bench: R=1 wins on the 2080 Ti)
+int g_expdec_dr = env_int_or("SAGUARO_EXPDEC_DR", 4);        // down rows per lane: 1, 2, 4 (Q2_0: R=4 wins on both cards)
+int g_expdec_minb = env_int_or("SAGUARO_EXPDEC_MINB", STRATA_EXPDEC_MINB);   // gate/up __launch_bounds__ min blocks: 2 (<= 128 regs) or 4 (<= 64)
+int g_expdec_d20 = env_int_or("SAGUARO_EXPDEC_D20", 0);      // 1: EXPDEC also for the IQ4_NL down (bench: no gain, default kernel)
 // 1: EXPDEC for the down too (Q2_0; IQ4_NL with _D20).  Default 0: in the engine (nsys of a 131k decode) the Q2_0 down
 // with EXPDEC was ~10% slower than the default kernel although the bench alone had it at 0.78, so by default EXPDEC
 // takes the gate/up only (-20/-23% at T >= 2 on an RTX 2080 Ti in the engine).
-int g_expdec_down = env_int_or("STRATA_EXPDEC_DOWN", 0);
-int g_expdec_rb = env_int_or("STRATA_EXPDEC_RB", 0);        // gate/up rows per block (0 = auto)
-int g_expdec_drb = env_int_or("STRATA_EXPDEC_DRB", 0);      // down rows per block (0 = auto)
-int g_expdec_minblk = env_int_or("STRATA_EXPDEC_MINBLK", 800);   // auto: the most rows per block that keep this many blocks
+int g_expdec_down = env_int_or("SAGUARO_EXPDEC_DOWN", 0);
+int g_expdec_rb = env_int_or("SAGUARO_EXPDEC_RB", 0);        // gate/up rows per block (0 = auto)
+int g_expdec_drb = env_int_or("SAGUARO_EXPDEC_DRB", 0);      // down rows per block (0 = auto)
+int g_expdec_minblk = env_int_or("SAGUARO_EXPDEC_MINBLK", 800);   // auto: the most rows per block that keep this many blocks
 int expdec_r() { return g_expdec_r == 2 ? 2 : 1; }
 int expdec_dr() { return g_expdec_dr == 1 || g_expdec_dr == 2 ? g_expdec_dr : 4; }
 
@@ -4005,7 +4005,7 @@ void expdec_gu_t(int64_t gy, int64_t cap_groups, cudaStream_t s, const unsigned 
         else expdec_gu_r<TG, 1, 2>(gy, cap_groups, s, grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up);
     }
 }
-// One line on stderr per (role, format, taken or not), the first time STRATA_EXPDEC=1 meets it: the proof in the
+// One line on stderr per (role, format, taken or not), the first time SAGUARO_EXPDEC=1 meets it: the proof in the
 // engine's log that the EXPDEC kernels are the ones launched (or captured into the window's graph), with the
 // choices in force.
 void expdec_note(const NativeExpertLayout& L, bool gu, bool taken, cudaStream_t s, int64_t gy, int64_t cap_groups) {
@@ -4080,7 +4080,7 @@ bool expdec_down(const NativeExpertLayout& L, int64_t gy, int64_t cap_groups, cu
     return true;
 }
 
-// ---------------------------------------------------------------- STRATA_KQL: UD-Q4_K_XL / Q8_0 experts, rows staged
+// ---------------------------------------------------------------- SAGUARO_KQL: UD-Q4_K_XL / Q8_0 experts, rows staged
 // The default Q4_K / Q5_K / Q5_1 / Q8_0 rows loop one call per lane at a time (a DRAM round trip per step, 2-byte loads
 // for Q8_0).  Here a warp first copies its P consecutive rows into shared memory with 16-byte loads, all in flight at
 // once, then runs Fmt<TY>::dot on them: each original lane's calls in its order, then warp_sum's butterfly (the levels
@@ -4091,17 +4091,17 @@ template<> struct KqlBlk<13> { static constexpr int bytes = sizeof(block_q5_K); 
 template<> struct KqlBlk<7> { static constexpr int bytes = sizeof(block_q5_1); };
 template<> struct KqlBlk<8> { static constexpr int bytes = sizeof(block_q8_0); };
 
-// rows per warp: gate/up 1 | 2 (STRATA_KQL_GU_P), down 1 | 2 | 4 (STRATA_KQL_D_P); warps per block 4 | 8 (STRATA_KQL_WARPS)
+// rows per warp: gate/up 1 | 2 (SAGUARO_KQL_GU_P), down 1 | 2 | 4 (SAGUARO_KQL_D_P); warps per block 4 | 8 (SAGUARO_KQL_WARPS)
 int g_kql_force = -1;   // native_expert_set_mode: 9 on, any other mode off, -1 the env
-int kql_bits() {   // STRATA_KQL: 1 gate/up, 2 down, 3 both
-    static const int env = env_int_or("STRATA_KQL", 0);
+int kql_bits() {   // SAGUARO_KQL: 1 gate/up, 2 down, 3 both
+    static const int env = env_int_or("SAGUARO_KQL", 0);
     return g_kql_force < 0 ? env : g_kql_force ? 3 : 0;
 }
 // unset: 2 for Q4_K / Q5_K (09-kq-layout: gu -20..-30%), 1 for Q8_0 (2 was +7-9%)
-int kql_gu_rows(int gt) { static const int v = env_int_or("STRATA_KQL_GU_P", 0); return v == 1 || v == 2 ? v : gt == 8 ? 1 : 2; }
+int kql_gu_rows(int gt) { static const int v = env_int_or("SAGUARO_KQL_GU_P", 0); return v == 1 || v == 2 ? v : gt == 8 ? 1 : 2; }
 // unset: 4 for Q5_1 (80 registers), 2 for Q8_0 (4 takes 128: two blocks an SM)
-int kql_d_rows(int dt) { static const int v = env_int_or("STRATA_KQL_D_P", 0); return v == 1 || v == 2 || v == 4 ? v : dt == 8 ? 2 : 4; }
-int kql_warps() { static const int v = env_int_or("STRATA_KQL_WARPS", 8); return v == 4 ? 4 : 8; }
+int kql_d_rows(int dt) { static const int v = env_int_or("SAGUARO_KQL_D_P", 0); return v == 1 || v == 2 || v == 4 ? v : dt == 8 ? 2 : 4; }
+int kql_warps() { static const int v = env_int_or("SAGUARO_KQL_WARPS", 8); return v == 4 ? 4 : 8; }
 
 // One warp: rows src[0 .. P) (contiguous, P * RB bytes) into s_w, 16 bytes a lane-load when aligned.
 template<int BYTES>
@@ -4351,12 +4351,12 @@ void launch_gu(dim3 grid, cudaStream_t s, const unsigned long long* grp_ptr, con
     }
 }
 
-// 147-verify: STRATA_GU_SWIGLU=1 runs gate/up, SwiGLU and the q8_1 blocks as native_gu_swiglu_kernel, where launch_gu would
+// 147-verify: SAGUARO_GU_SWIGLU=1 runs gate/up, SwiGLU and the q8_1 blocks as native_gu_swiglu_kernel, where launch_gu would
 // run native_gu_multi_kernel's 16-lane path (n_embd 2560, the split formats); bitwise the same hq.  Unset: on for a compute
 // capability 12.0 card (sm120_series.hpp; RTX PRO 5000, 6 pairs: decode +0.6% story, +0.9% code, +0.5% 8K, 6/6 each, the
-// same tokens), off elsewhere; STRATA_GU_SWIGLU=0 turns it off.
+// same tokens), off elsewhere; SAGUARO_GU_SWIGLU=0 turns it off.
 bool gu_swiglu_on() {
-    static const int env = [] { const char* v = std::getenv("STRATA_GU_SWIGLU"); return v != nullptr ? (std::atoi(v) != 0 ? 1 : 0) : -1; }();
+    static const int env = [] { const char* v = std::getenv("SAGUARO_GU_SWIGLU"); return v != nullptr ? (std::atoi(v) != 0 ? 1 : 0) : -1; }();
     if (env >= 0) return env != 0;
 #if defined(__HIPCC__)
     return false;
@@ -4606,9 +4606,9 @@ size_t native_expert_scratch_bytes(int64_t cap, int64_t n_ff) {
 }
 
 
-// The AMD layouts below (STRATA_EXP_MODE) also build for CUDA: Volta takes mode 8 by default (exp_mode), every
+// The AMD layouts below (SAGUARO_EXP_MODE) also build for CUDA: Volta takes mode 8 by default (exp_mode), every
 // other CUDA card keeps mode 0, the CUDA layout above.
-#if 1  // dflash2-kern: the layouts build for every HIP arch too (default mode stays 0 off gfx906; STRATA_EXP_MODE picks one)
+#if 1  // dflash2-kern: the layouts build for every HIP arch too (default mode stays 0 off gfx906; SAGUARO_EXP_MODE picks one)
 #define STRATA_EXP_LAYOUTS 1
 #else
 #define STRATA_EXP_LAYOUTS 0
@@ -4623,7 +4623,7 @@ constexpr int kExpFallback = 0;   // ... the CUDA layout (V100, IQ2_XXS gate/up:
 constexpr bool kExpLds16 = true;  // IQ2_XXS gate/up in LDS too
 #endif
 #if STRATA_EXP_LAYOUTS
-// ---- AMD layouts for the grouped native experts (STRATA_EXP_MODE; 0 = the CUDA one above).
+// ---- AMD layouts for the grouped native experts (SAGUARO_EXP_MODE; 0 = the CUDA one above).
 // 1 (W64): a row per 64-lane wavefront - 4x the wavefronts, ~1-2 calls per lane, a 64-lane butterfly.
 // 2 (R2):  a 32-lane logical warp computes TWO rows in one loop - two independent load chains in flight.
 // Either way a (row, entry) sum does not depend on the window size.
@@ -5198,13 +5198,13 @@ __global__ void __launch_bounds__(256) native_gu_fused_kernel(const unsigned lon
 
 // dflash2-kern: Strix Halo (gfx1151) takes mode 8 (gate/up + SwiGLU + q8_1 in one launch, the group's activations in LDS) for the
 // IQ packs' gate/up: native_expert_bench on the IQ3_S pack's real rows, 45 groups of one entry (a 8-token verify window's call),
-// gate/up -25% (IQ2_S), -8% (IQ3_XXS), -6% (IQ3_S), bitwise equal to mode 0.  STRATA_GFX1151_EXP8=0 keeps the old layout.
+// gate/up -25% (IQ2_S), -8% (IQ3_XXS), -6% (IQ3_S), bitwise equal to mode 0.  SAGUARO_GFX1151_EXP8=0 keeps the old layout.
 bool gfx1151_exp8(int dev) {
 #if defined(__HIPCC__) && !defined(STRATA_HIP_GFX906)
     static int per_dev[64];   // 0 unknown, 1 no, 2 yes
     if (dev < 0 || dev >= 64) return false;
     if (!per_dev[dev]) {
-        const char* v = std::getenv("STRATA_GFX1151_EXP8");
+        const char* v = std::getenv("SAGUARO_GFX1151_EXP8");
         cudaDeviceProp p;
         per_dev[dev] = !(v != nullptr && v[0] == '0') && cudaGetDeviceProperties(&p, dev) == cudaSuccess &&
                                strata::kernels::gfx_arch_is_gfx1151(p.gcnArchName) ? 2 : 1;
@@ -5216,9 +5216,9 @@ bool gfx1151_exp8(int dev) {
     return false;
 #endif
 }
-int g_exp_mode = -1;   // native_expert_set_mode (the bench); -1 = STRATA_EXP_MODE, else the card's default
+int g_exp_mode = -1;   // native_expert_set_mode (the bench); -1 = SAGUARO_EXP_MODE, else the card's default
 int exp_mode() {
-    static const int m = [] { const char* v = std::getenv("STRATA_EXP_MODE"); return v ? std::atoi(v) : -1; }();
+    static const int m = [] { const char* v = std::getenv("SAGUARO_EXP_MODE"); return v ? std::atoi(v) : -1; }();
     if (g_exp_mode >= 0) return g_exp_mode;
     if (m >= 0) return m;
 #if defined(STRATA_HIP_GFX906)
@@ -5234,21 +5234,21 @@ int exp_mode() {
         int major = 0, minor = 0;
         cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev);
         cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, dev);
-        const char* sm70 = std::getenv("STRATA_SM70_TABLE");   // PR 1401: Volta's mode 8 is opt-in until confirmed on a V100
+        const char* sm70 = std::getenv("SAGUARO_SM70_TABLE");   // PR 1401: Volta's mode 8 is opt-in until confirmed on a V100
         // Pascal GP100 (sm_60): mode 8 too, on by default (Tesla P100: bitwise equal on the model's layers, the down
-        // projection 116 -> 94 us and IQ3_S gate/up 360 -> 229 us in a 28-group VRAM call); STRATA_SM60_TABLE=0 keeps the CUDA layout
-        const char* sm60 = std::getenv("STRATA_SM60_TABLE");
+        // projection 116 -> 94 us and IQ3_S gate/up 360 -> 229 us in a 28-group VRAM call); SAGUARO_SM60_TABLE=0 keeps the CUDA layout
+        const char* sm60 = std::getenv("SAGUARO_SM60_TABLE");
         const bool p100 = major == 6 && minor == 0 && (sm60 == nullptr || std::atoi(sm60) != 0);
         // Pascal with dp4a (sm_61): mode 8 as well, on by default (Tesla P40, native_expert_bench on the IQ3_S pack's
         // layers, an 18-group call at 2 tokens: IQ3_S 390 -> 255 us, IQ3_XXS 345 -> 252 us, IQ2_S 290 -> 238 us,
-        // IQ4_XS 328 -> 261 us, bitwise equal); STRATA_SM61_TABLE=0 keeps the CUDA layout
-        const char* sm61 = std::getenv("STRATA_SM61_TABLE");
+        // IQ4_XS 328 -> 261 us, bitwise equal); SAGUARO_SM61_TABLE=0 keeps the CUDA layout
+        const char* sm61 = std::getenv("SAGUARO_SM61_TABLE");
         const bool p40 = major == 6 && minor == 1 && (sm61 == nullptr || std::atoi(sm61) != 0);
         // Turing (sm_75): mode 4 (native_expert_bench, real Q2_0 rows of Flash-Next, bitwise equal to mode 0 on an RTX
         // 2080 Ti: 10 experts x 1 entry 47.3 -> 41.4 us, 30 x 1 120.2 -> 100.2 us); the down projection keeps the CUDA
-        // layout in windows of 4+ tokens (sm75_down_em below).  STRATA_SM75_EXP=0 keeps the CUDA layout.
-        // (off unless STRATA_SM75_PERF=1; STRATA_SM75_EXP=0 / 1 forces it off / on)
-        const bool turing = strata::sm75_switch("STRATA_SM75_EXP", major, minor);
+        // layout in windows of 4+ tokens (sm75_down_em below).  SAGUARO_SM75_EXP=0 keeps the CUDA layout.
+        // (off unless SAGUARO_SM75_PERF=1; SAGUARO_SM75_EXP=0 / 1 forces it off / on)
+        const bool turing = strata::sm75_switch("SAGUARO_SM75_EXP", major, minor);
         per_dev[dev] = 1 + ((major == 7 && minor == 0 && sm70 != nullptr && std::atoi(sm70) != 0) || p100 || p40 ? 8 : turing ? 4 : kExpModeDefault);
     }
     return per_dev[dev] - 1;
@@ -5260,7 +5260,7 @@ int g_exp_phase = 0;   // the bench: 0 all, 1 gate/up + swiglu + quantize only, 
 // The down projection's mode on Turing's default: mode 4 is slower than the CUDA layout once groups have 3+ entries
 // (12 x 3: 36.5 -> 40.8 us, 16 x 4: 56.9 -> 68.9) - windows of 4+ tokens (cap_groups > 30) keep mode 0 there.
 int sm75_down_em(int em0, int64_t cap_groups) {
-    if (em0 != 4 || g_exp_mode >= 0 || std::getenv("STRATA_EXP_MODE") != nullptr || cap_groups <= 30) return em0;
+    if (em0 != 4 || g_exp_mode >= 0 || std::getenv("SAGUARO_EXP_MODE") != nullptr || cap_groups <= 30) return em0;
     int dev = 0, major = 0, minor = 0;
     if (cudaGetDevice(&dev) != cudaSuccess) return em0;
     cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev);
@@ -5272,7 +5272,7 @@ int sm75_down_em(int em0, int64_t) { return em0; }
 #endif
 
 void native_expert_set_mode(int mode, int phase) {
-    g_kql_force = mode == 9 ? 1 : mode >= 0 ? 0 : -1;   // 9: STRATA_KQL=3 on the CUDA layout (native_expert_bench)
+    g_kql_force = mode == 9 ? 1 : mode >= 0 ? 0 : -1;   // 9: SAGUARO_KQL=3 on the CUDA layout (native_expert_bench)
     if (mode == 9) mode = 0;
 #if STRATA_EXP_LAYOUTS
     g_exp_mode = mode;
@@ -5283,7 +5283,7 @@ void native_expert_set_mode(int mode, int phase) {
 }
 
 namespace {
-bool g_grouped_v1 = env_on("STRATA_GROUPED_V1");
+bool g_grouped_v1 = env_on("SAGUARO_GROUPED_V1");
 }  // namespace
 
 void native_grouped_set_v1(bool v1) { g_grouped_v1 = v1; }
@@ -5331,10 +5331,10 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
     float* h = (float*) ((uint8_t*) scratch + 2 * fa);
     block_q8_1* hq = (block_q8_1*) ((uint8_t*) scratch + 3 * fa);
     const auto* X = (const block_q8_1*) x_q8_1;
-    static const bool v2 = [] { const char* v = std::getenv("STRATA_EXPERT_V2"); return v && v[0] == '1'; }();
+    static const bool v2 = [] { const char* v = std::getenv("SAGUARO_EXPERT_V2"); return v && v[0] == '1'; }();
     if (v2 && L.gu_type == 21 && L.d_type == 20 && L.n_embd == 2560 && L.n_ff == 640) {   // S26: see s26_gu_l_kernel
-        // S26 STRATA_TSUM=1: the sums as one transposed butterfly per warp (s26_tsum.cuh; bitwise the same values)
-        static const bool ts = [] { const char* v = std::getenv("STRATA_TSUM"); return v && v[0] == '1'; }();
+        // S26 SAGUARO_TSUM=1: the sums as one transposed butterfly per warp (s26_tsum.cuh; bitwise the same values)
+        static const bool ts = [] { const char* v = std::getenv("SAGUARO_TSUM"); return v && v[0] == '1'; }();
         // (+ down rows' items spread evenly over the lanes, one load group: bitwise, harness 1.09-1.12x vs 1.03-1.06x;
         // the same for gate / up was 0.6-0.8x)
         if (ts) s26_launch_l<true, true, 4, 4, true, true, true, 1>(L, cap_groups, s, grp_ptr, grp_start, n_groups, ent_dst, ent_tok, X, gate, up, h,
@@ -5344,7 +5344,7 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
         check("native_expert_grouped (v2)");
         return;
     }
-    // STRATA_KQL (kql_gu_kernel above): either half alone, the other on the kernels below; bitwise the same outputs
+    // SAGUARO_KQL (kql_gu_kernel above): either half alone, the other on the kernels below; bitwise the same outputs
     const bool kgu = kql_gu_fits(L), kdn = kql_down_fits(L);
     if (kgu || kdn) {
         const int64_t gy = (g_grouped_v1 || grid_groups <= 0 || grid_groups > cap_groups) ? cap_groups : grid_groups;
@@ -5388,10 +5388,10 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
     }
     // stream B: UD-Q4_K_XL's Q4_K / Q5_K gate/up and Q5_1 / Q8_0 down (see S27 above)
     // MODEL-UPDATE: on by default on gfx12 (every output the old kernels' bits; R9700, UD-Q4_K_XL decode, 5 interleaved
-    // pairs: story +1.2% 5/5, code +0.8% 5/5, after 6K +0.2% 4/5); STRATA_EXPERT_V2K=0 turns it off, =1 turns it on
+    // pairs: story +1.2% 5/5, code +0.8% 5/5, after 6K +0.2% 4/5); SAGUARO_EXPERT_V2K=0 turns it off, =1 turns it on
     // elsewhere (not measured on other cards)
     static const bool v2k = [] {
-        const char* v = std::getenv("STRATA_EXPERT_V2K");
+        const char* v = std::getenv("SAGUARO_EXPERT_V2K");
         if (v != nullptr && v[0] != '\0') return v[0] == '1';
 #if defined(__HIPCC__) && !defined(STRATA_HIP_GFX906)
         int dev = 0;
@@ -5408,7 +5408,7 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
     const bool q36geo = L.n_embd == 2048 && L.n_ff == 512 && L.d_type == 13;
     if (v2k && (L.gu_type == 12 || L.gu_type == 13) &&
         (((L.d_type == 7 || L.d_type == 8) && L.n_embd == 2560 && L.n_ff == 640) || q36geo)) {
-        static const bool ts = [] { const char* v = std::getenv("STRATA_TSUM"); return v && v[0] == '1'; }();
+        static const bool ts = [] { const char* v = std::getenv("SAGUARO_TSUM"); return v && v[0] == '1'; }();
         const long long nh = (long long) cap_entries * L.n_ff;
 #define STRATA_V2K(G, D) s27_launch_ts<G, D>(ts, L, cap_groups, s, grp_ptr, grp_start, n_groups, ent_dst, ent_tok, X, gate, up, h, hq, out, nh)
         if (q36geo) {
@@ -5460,7 +5460,7 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
         check("native_expert_grouped/gu fused");
     }
 #endif
-    // 147-verify STRATA_GU_SWIGLU=1: gate/up + SwiGLU + q8_1 in one launch where the CUDA layout's 16-lane kernel would run
+    // 147-verify SAGUARO_GU_SWIGLU=1: gate/up + SwiGLU + q8_1 in one launch where the CUDA layout's 16-lane kernel would run
     bool gs_done = false;
 #if STRATA_EXP_LAYOUTS
     const bool gs_layout = !fused_gu && em0 == 0;
@@ -5511,7 +5511,7 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
     } else
 #undef STRATA_GU_AMD
 #endif
-    if (!expdec_gu(L, gy, cap_groups, s, grp_ptr, grp_start, n_groups, ent_tok, X, gate, up))   // STRATA_EXPDEC=1
+    if (!expdec_gu(L, gy, cap_groups, s, grp_ptr, grp_start, n_groups, ent_tok, X, gate, up))   // SAGUARO_EXPDEC=1
     switch (L.gu_type) {
 #define STRATA_GU(T) case T: launch_gu<T>(ggu, s, grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up); break;
         STRATA_GU_FMTS(STRATA_GU)
@@ -5525,8 +5525,8 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
     const long long nh = (long long) cap_entries * L.n_ff;
 #if defined(STRATA_HIP_GFX906)
     // gfx906: the separate SwiGLU and q8_1 passes stay the default (the A/B baseline); the RDNA one-pass
-    // kernel (bitwise the same) with STRATA_HIP_SWIGLU_FUSED=1
-    static const bool sw_fused = env_on("STRATA_HIP_SWIGLU_FUSED");
+    // kernel (bitwise the same) with SAGUARO_HIP_SWIGLU_FUSED=1
+    static const bool sw_fused = env_on("SAGUARO_HIP_SWIGLU_FUSED");
     const bool sw_v1 = v1 || !sw_fused;
 #else
     const bool sw_v1 = v1;
@@ -5577,7 +5577,7 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
     } else
 #undef STRATA_D_AMD
 #endif
-    if (!expdec_down(L, gy, cap_groups, s, grp_ptr, grp_start, n_groups, ent_dst, hq, out))   // STRATA_EXPDEC=1
+    if (!expdec_down(L, gy, cap_groups, s, grp_ptr, grp_start, n_groups, ent_dst, hq, out))   // SAGUARO_EXPDEC=1
     switch (L.d_type) {
 #define STRATA_DOWN(T) case T: launch_down<T>(gd, s, grp_ptr, grp_start, n_groups, ent_dst, hq, L, out); break;
         STRATA_D_FMTS(STRATA_DOWN)
@@ -5589,7 +5589,7 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
 
 }  // namespace strata::kernels
 
-// ---- Volta prompt experts (STRATA_PF_WMMA): a group's experts as one launch of FP16 tensor-core tiles, the weights
+// ---- Volta prompt experts (SAGUARO_PF_WMMA): a group's experts as one launch of FP16 tensor-core tiles, the weights
 // dequantized into shared memory by dq_dispatch (the FP16 path's own formulas), the activations FP16, FP32 sums.
 // Replaces MMQ's dp4a products on sm_70, and the FP16 path's dequantize-to-global + one cuBLAS call per expert.
 #if !defined(__HIPCC__)
@@ -5733,7 +5733,7 @@ __global__ void __launch_bounds__(WG_THREADS) gemm_iq_f16_grouped_kernel(int ty,
 #endif
 }
 
-// ---- STRATA_PF_WMMA2=1 (opt-in): IQ2_S gate/up and IQ4_NL down, tiled like a Volta MoE kernel in the
+// ---- SAGUARO_PF_WMMA2=1 (opt-in): IQ2_S gate/up and IQ4_NL down, tiled like a Volta MoE kernel in the
 // PR author's own unpublished llama.cpp patches.
 // A block: W2_RB = 128 weight rows of one expert x W2_CB = 64 of its sorted rows, K stages of W2_KT = 64. Thread t dequantizes
 // row t % 128, 32-value sub-block t / 128 of each K stage from the raw stage in shared memory (one IQ2_S super-block or four IQ4_NL
@@ -5933,7 +5933,7 @@ __global__ void __launch_bounds__(W2_NT, 2) gemm_iq_f16_w2_kernel(const uint8_t*
 }
 
 bool w2_on() {
-    static const bool v = [] { const char* e = std::getenv("STRATA_PF_WMMA2"); return e && e[0] == '1'; }();
+    static const bool v = [] { const char* e = std::getenv("SAGUARO_PF_WMMA2"); return e && e[0] == '1'; }();
     return v;
 }
 }  // namespace
@@ -5947,7 +5947,7 @@ bool gemm_iq_f16_grouped(int ty, const void* W, size_t expert_bytes, int n_out, 
             major < 7)
             return false;
     }
-    // STRATA_PF_WMMA2=1 (opt-in): IQ2_S gate/up and IQ4_NL down through gemm_iq_f16_w2_kernel (above)
+    // SAGUARO_PF_WMMA2=1 (opt-in): IQ2_S gate/up and IQ4_NL down through gemm_iq_f16_w2_kernel (above)
     if (w2_on() && n_out % W2_RB == 0 && ldx % 8 == 0 && ldy % 8 == 0 && (uintptr_t) X % 16 == 0 && (uintptr_t) Y % 32 == 0 &&
         (uintptr_t) W % 4 == 0 && expert_bytes % 4 == 0 && ((ty == 22 && K % 512 == 0) || (ty == 20 && K % 128 == 0))) {
         const size_t rb = iq_row_bytes(ty, K);

@@ -25,13 +25,13 @@ let failed = false;
 const record = (name, ok, detail = '') => { steps.push({ name, ok: !!ok, detail: String(detail).slice(0, 400) }); console.log(`${ok ? 'ok  ' : 'FAIL'} ${name}${detail ? '  ' + String(detail).slice(0, 300) : ''}`); if (!ok) failed = true; };
 const freePort = async () => { const s = createServer(); await new Promise(r => s.listen(0, '127.0.0.1', r)); const p = s.address().port; await new Promise(r => s.close(r)); return p; };
 
-const env = { ...process.env, STRATA_COMPONENTS_DIR: dirs.components, STRATA_PROFILE_DIR: dirs.profiles, STRATA_RUNTIME_DIR: dirs.runtime, STRATA_INSTALL_DIR: dirs.install, STRATA_HOME: dirs.home, STRATA_MODELS_DIR: join(root, 'Strata-data'), STRATA_ENGINE_BACKEND: args.backend ?? 'cuda', XDG_CONFIG_HOME: dirs.xdg, APPDATA: dirs.appdata, PYTHONDONTWRITEBYTECODE: '1' };
-delete env.STRATA_API_KEY;
+const env = { ...process.env, SAGUARO_COMPONENTS_DIR: dirs.components, SAGUARO_PROFILE_DIR: dirs.profiles, SAGUARO_RUNTIME_DIR: dirs.runtime, SAGUARO_INSTALL_DIR: dirs.install, SAGUARO_HOME: dirs.home, SAGUARO_MODELS_DIR: join(root, 'Strata-data'), SAGUARO_ENGINE_BACKEND: args.backend ?? 'cuda', XDG_CONFIG_HOME: dirs.xdg, APPDATA: dirs.appdata, PYTHONDONTWRITEBYTECODE: '1' };
+delete env.SAGUARO_API_KEY;
 const port = await freePort();
 const base = `http://127.0.0.1:${port}`;
 const host = spawn(join(app, 'node', 'node'), [join(app, 'host', 'server', 'index.mjs')], { cwd: join(app, 'host'), stdio: ['ignore', 'pipe', 'pipe'], detached: false,
-  env: { ...env, STRATA_PORT: String(port), STRATA_DIST: join(app, 'host', 'dist'), NODE_ENV: 'production', STRATA_PACKAGED: '1', STRATA_REAL_ENGINE: '1', STRATA_NO_ACQUIRE: '1', STRATA_EXIT_WITH_PARENT: '1',
-    STRATA_SHARE_PORT: String(await freePort()), STRATA_TUNNEL_PORT: String(await freePort()), STRATA_WORKSPACE: join(root, 'workspace') } });
+  env: { ...env, SAGUARO_PORT: String(port), SAGUARO_DIST: join(app, 'host', 'dist'), NODE_ENV: 'production', SAGUARO_PACKAGED: '1', SAGUARO_REAL_ENGINE: '1', SAGUARO_NO_ACQUIRE: '1', SAGUARO_EXIT_WITH_PARENT: '1',
+    SAGUARO_SHARE_PORT: String(await freePort()), SAGUARO_TUNNEL_PORT: String(await freePort()), SAGUARO_WORKSPACE: join(root, 'workspace') } });
 mkdirSync(join(root, 'workspace'), { recursive: true });
 let hostLog = ''; host.stdout.on('data', c => { hostLog += c; }); host.stderr.on('data', c => { hostLog += c; });
 const call = async (path, method = 'GET', body) => { const r = await fetch(base + path, { method, headers: { 'content-type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) }); return { status: r.status, body: await r.json().catch(() => null) }; };

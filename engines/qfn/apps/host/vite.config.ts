@@ -27,7 +27,7 @@ export default defineConfig({
     strictPort: true,
     proxy: {
       '/api': {
-        target: process.env.STRATA_HOST ?? 'http://127.0.0.1:8791',
+        target: process.env.SAGUARO_HOST ?? 'http://127.0.0.1:8791',
         changeOrigin: true,
         ws: true,
       },

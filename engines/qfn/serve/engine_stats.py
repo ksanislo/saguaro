@@ -158,9 +158,9 @@ class EngineLog:
     BESIDE = re.compile(r"(\d+) admissions? read beside the slots in ([\d.]+) ms.*?(?:yielded with (\d+) held.*?)?"
                         r"decoded (\d+) rows")
     STOPPED = re.compile(r"the groups stopped (\d+) ms for the loan")
-    Y_WAIT = re.compile(r"STRATA_READ_YIELD: a text request waits.*?\((\d+) pieces? taken back\)")
-    Y_HELD = re.compile(r"STRATA_READ_YIELD: (\d+) reads? held at a piece boundary")
-    Y_GO = re.compile(r"STRATA_READ_YIELD: (\d+) held reads? go on")
+    Y_WAIT = re.compile(r"SAGUARO_READ_YIELD: a text request waits.*?\((\d+) pieces? taken back\)")
+    Y_HELD = re.compile(r"SAGUARO_READ_YIELD: (\d+) reads? held at a piece boundary")
+    Y_GO = re.compile(r"SAGUARO_READ_YIELD: (\d+) held reads? go on")
     NOGRAPH = re.compile(r"no VRAM for a new window graph: freed the graphs of (\d+) older")
     FREE = re.compile(r"(?:(CUDA\d+|HIP\d+|GPU\d+): )?(\d+) MiB of VRAM free")
 
@@ -257,7 +257,7 @@ class EngineLog:
                                 "held": int(m.group(3)) if m.group(3) else 0, "decoded_rows": int(m.group(4)),
                                 "loan_stop_ms": int(stop.group(1)) if stop else None, "at": now}
             return
-        if "STRATA_READ_YIELD" in line:
+        if "SAGUARO_READ_YIELD" in line:
             m = self.Y_WAIT.search(line)
             if m:
                 c["read_yields"] += 1

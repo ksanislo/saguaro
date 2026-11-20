@@ -139,8 +139,8 @@ class ElevatedRunLockoutTests(unittest.TestCase):
             self.lock_out(item)
         with self.assertRaises(PermissionError):
             (folder / "a.json").read_bytes()
-        os.environ["STRATA_HOME"] = str(self.root)
-        self.addCleanup(os.environ.pop, "STRATA_HOME", None)
+        os.environ["SAGUARO_HOME"] = str(self.root)
+        self.addCleanup(os.environ.pop, "SAGUARO_HOME", None)
         report = pf.repair_known_roots()
         self.assertGreaterEqual(report["repaired"], 1)
         self.assertEqual(report["failed"], 0)
@@ -168,8 +168,8 @@ class ElevatedRunLockoutTests(unittest.TestCase):
 
     def test_a_profile_that_was_locked_loads(self):
         from strata_control import profiles
-        os.environ["STRATA_PROFILE_DIR"] = str(self.root / "profiles")
-        self.addCleanup(os.environ.pop, "STRATA_PROFILE_DIR", None)
+        os.environ["SAGUARO_PROFILE_DIR"] = str(self.root / "profiles")
+        self.addCleanup(os.environ.pop, "SAGUARO_PROFILE_DIR", None)
         directory = self.root / "profiles"
         directory.mkdir()
         run_config = self.root / "strata-x.json"

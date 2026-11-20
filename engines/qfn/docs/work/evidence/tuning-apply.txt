@@ -20,7 +20,7 @@
      before c7b5a4970be860d2  after da90fb62b8c3e7e5
      rollback: strata tune rollback 20261015T052436Z-aa873d11c569
 
-   env.STRATA_TOKEN and aliases survive untouched. The command states plainly that the
+   env.SAGUARO_TOKEN and aliases survive untouched. The command states plainly that the
    candidate was not verified against a running model, because no supported model fits this
    machine.
 

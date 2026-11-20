@@ -1262,7 +1262,7 @@ int sm_count() {
 }
 
 // Whether the current device decodes with v1.1.8's kernels (exl3_legacy.cu): NVIDIA before sm_80, where this file's
-// tiles run on the CUDA cores and were slower; STRATA_GLM_EXL3_DECODE=legacy | new picks one on any GPU (A/B).  The
+// tiles run on the CUDA cores and were slower; SAGUARO_GLM_EXL3_DECODE=legacy | new picks one on any GPU (A/B).  The
 // token path and the verify windows take the same family on a device, so a window stays bit for bit its token path.
 // Asked once per device.
 bool use_legacy() {
@@ -1277,7 +1277,7 @@ bool use_legacy() {
     if (c == 0) {
         int major = 0;
         cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev);
-        const char* v = std::getenv("STRATA_GLM_EXL3_DECODE");
+        const char* v = std::getenv("SAGUARO_GLM_EXL3_DECODE");
         c = v != nullptr && std::strcmp(v, "legacy") == 0 ? 1 : v != nullptr && std::strcmp(v, "new") == 0 ? 2
             : major < 8                                    ? 1
                                                            : 2;

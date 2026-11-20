@@ -29,7 +29,7 @@ class StatePaths(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             env = {"LOCALAPPDATA": d, "XDG_STATE_HOME": d}
             with mock.patch.dict(os.environ, env):
-                os.environ.pop("STRATA_RUNTIME_DIR", None)
+                os.environ.pop("SAGUARO_RUNTIME_DIR", None)
                 self.assertEqual(runtime.runtime_dir(), paths.state_base() / "runtime")
                 self.assertEqual(runtime.runtime_dir().parent.parent, Path(d))
 
@@ -37,7 +37,7 @@ class StatePaths(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             env = {"LOCALAPPDATA": d, "XDG_STATE_HOME": d}
             with mock.patch.dict(os.environ, env):
-                for var in ("STRATA_TUNE_DIR", "STRATA_TIMESKIP_DIR"):
+                for var in ("SAGUARO_TUNE_DIR", "SAGUARO_TIMESKIP_DIR"):
                     os.environ.pop(var, None)
                 self.assertEqual(main(["tune", "list", "--output", "json"]), 0)
                 self.assertEqual(main(["timeskip", "list", "--output", "json"]), 0)

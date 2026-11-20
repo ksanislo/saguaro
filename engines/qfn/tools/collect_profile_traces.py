@@ -8,7 +8,7 @@ generated text:
 
 CONFIG.json is a run config setup wrote (strata-*.json: "exe", "args", "env", "tokenizer", "cwd").  The engine is run as
 `exe args... --tokens-file F --max-new N --greedy` (--serve and --batch are dropped).  `--mode usage` (default) is the
-SYCL engine's STRATA_USAGE_DUMP=PATH, which counts on the device and works with STRATA_VERIFY_NO_HOST; `--mode routing`
+SYCL engine's SAGUARO_USAGE_DUMP=PATH, which counts on the device and works with SAGUARO_VERIFY_NO_HOST; `--mode routing`
 adds `--dump-routing PATH` (the CUDA/HIP engines and the SYCL host path).  Then, for example:
 
     python tools/make_profile_mix.py OUTDIR/c*.trace:1 --out data/expert-profile-new.bin
@@ -77,7 +77,7 @@ def main():
         cmd = [cfg["exe"]] + args + ["--tokens-file", str(tf), "--max-new", str(a.max_new), "--greedy"]
         env = dict(env0)
         if a.mode == "usage":
-            env["STRATA_USAGE_DUMP"] = str(trace)
+            env["SAGUARO_USAGE_DUMP"] = str(trace)
         else:
             cmd += ["--dump-routing", str(trace)]
         print(f"[{n + 1}/{len(corpus)}] {c['d']}: {len(ids)} prompt tokens", flush=True)

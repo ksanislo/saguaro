@@ -3,7 +3,7 @@
 // src/kernels/cuda/exl3_legacy.cu - v1.1.8's EXL3 decode kernels, kept for NVIDIA GPUs before sm_80 (V100, T4,
 // RTX 20): #180's decode kernels run the tiles on the tensor cores from sm_80 on, and their CUDA-core fallback was
 // slower here than these (a V100 with EXL3-3.05bpw: decode 4.9 -> 4.4 tok/s).  exl3.cu's mv / moe_gate_up / moe_down
-// / win_experts / prepare / several_ok call these on such a GPU (STRATA_GLM_EXL3_DECODE=legacy|new picks one on any
+// / win_experts / prepare / several_ok call these on such a GPU (SAGUARO_GLM_EXL3_DECODE=legacy|new picks one on any
 // GPU); the prompt path is exl3.cu's on every GPU.  The code below is v1.1.8's as it was, the prompt path's kernels
 // left out.
 //

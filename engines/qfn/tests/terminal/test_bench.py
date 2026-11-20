@@ -119,7 +119,7 @@ class BenchTests(unittest.TestCase):
             self.assertEqual(stat.S_IMODE((output / "progress.json").stat().st_mode), 0o600)
 
     def test_saved_profile_benchmark_lease_refuses_overlap(self):
-        with mock.patch.dict(os.environ, {"STRATA_PROFILE_DIR": str(self.root / "profiles")}):
+        with mock.patch.dict(os.environ, {"SAGUARO_PROFILE_DIR": str(self.root / "profiles")}):
             output = self.root / "leased-run"
             self.assertEqual(benchmarking.benchmark_activity("local", output), "untracked")
             with benchmarking.benchmark_lease("local", output):
@@ -140,7 +140,7 @@ class BenchTests(unittest.TestCase):
     def test_operator_cancel_stops_live_stream_and_saves_distinct_evidence(self):
         output = self.root / "operator-stopped"
         self.service.engine.delay = 0.15
-        with mock.patch.dict(os.environ, {"STRATA_PROFILE_DIR": str(self.root / "profiles")}), \
+        with mock.patch.dict(os.environ, {"SAGUARO_PROFILE_DIR": str(self.root / "profiles")}), \
                 ThreadPoolExecutor(max_workers=1) as pool:
             def execute():
                 with benchmarking.benchmark_lease("local", output):
@@ -186,7 +186,7 @@ class BenchTests(unittest.TestCase):
             bench.run(self.inference, self.telemetry, output, concurrency=1)
         request = {"schema_version": 1, "action": "bench.progress", "profile": "local",
                    "params": {"path": str(output / "results.json")}}
-        with mock.patch.dict(os.environ, {"STRATA_PROFILE_DIR": str(self.root / "profiles")}), \
+        with mock.patch.dict(os.environ, {"SAGUARO_PROFILE_DIR": str(self.root / "profiles")}), \
                 mock.patch("strata_control.profiles.load", return_value=({"id": "local"}, "a" * 16)):
             with benchmarking.benchmark_lease("local", output):
                 active = management.dispatch(request)
@@ -208,7 +208,7 @@ class BenchTests(unittest.TestCase):
         planned = {"profile_revision": revision, "source_sha256": source,
                    "owner_id": "d" * 32, "instance_id": instance}
         (self.root / "profiles").mkdir(mode=0o700)
-        with mock.patch.dict(os.environ, {"STRATA_PROFILE_DIR": str(self.root / "profiles")}), \
+        with mock.patch.dict(os.environ, {"SAGUARO_PROFILE_DIR": str(self.root / "profiles")}), \
                 mock.patch("strata_control.profiles.load", return_value=({"id": "local"}, revision)), \
                 mock.patch.object(benchmarking, "_settings", return_value=settings), \
                 mock.patch.object(benchmarking, "plan", return_value=planned), \
@@ -273,7 +273,7 @@ class BenchTests(unittest.TestCase):
     def test_process_death_releases_exact_run_lease(self):
         output = self.root / "child-run"
         ready = self.root / "child-ready"
-        environment = {**os.environ, "STRATA_PROFILE_DIR": str(self.root / "profiles")}
+        environment = {**os.environ, "SAGUARO_PROFILE_DIR": str(self.root / "profiles")}
         code = ("from pathlib import Path\n"
                 "from strata_control.benchmarking import benchmark_lease\n"
                 "from time import sleep\n"
@@ -291,7 +291,7 @@ class BenchTests(unittest.TestCase):
                 self.fail("benchmark lease child did not become ready: " +
                           (process.stderr.read().decode("utf-8", "replace") if process.poll() is not None else
                            "timed out"))
-            with mock.patch.dict(os.environ, {"STRATA_PROFILE_DIR": environment["STRATA_PROFILE_DIR"]}):
+            with mock.patch.dict(os.environ, {"SAGUARO_PROFILE_DIR": environment["SAGUARO_PROFILE_DIR"]}):
                 self.assertEqual(benchmarking.benchmark_activity("local", output), "active")
                 if os.name == "nt":
                     # a venv's python.exe is a launcher that runs the real interpreter as its child
@@ -393,7 +393,7 @@ class BenchTests(unittest.TestCase):
     def test_run_cli_records_an_operator_condition(self):
         out = self.root / "cli-baseline"
         output = io.StringIO()
-        with mock.patch.dict(os.environ, {"STRATA_API_KEY": self.service.api_key}), redirect_stdout(output):
+        with mock.patch.dict(os.environ, {"SAGUARO_API_KEY": self.service.api_key}), redirect_stdout(output):
             code = main(["bench", "run", "--suite", "serving-smoke", "--url", self.url, "--condition", "baseline",
                          "--concurrency", "1", "--out", str(out), "--output", "json"])
         self.assertEqual(code, 0)
@@ -484,8 +484,8 @@ class BenchTests(unittest.TestCase):
                 mock.patch("strata_control.runtime.status", side_effect=lambda _: {
                     **owner, "owner_id": owner_id[0]}), \
                 mock.patch("strata_control.runtime.plan_restart", return_value=restart), \
-                mock.patch.dict(os.environ, {"STRATA_API_KEY": self.service.api_key,
-                                             "STRATA_TELEMETRY_KEY": self.service.telemetry_key}):
+                mock.patch.dict(os.environ, {"SAGUARO_API_KEY": self.service.api_key,
+                                             "SAGUARO_TELEMETRY_KEY": self.service.telemetry_key}):
             reviewed = send("bench.run.plan", settings)["plan"]
             self.assertEqual(reviewed["planned_requests"], 5)
             self.assertEqual(reviewed["instance_id"], instance)

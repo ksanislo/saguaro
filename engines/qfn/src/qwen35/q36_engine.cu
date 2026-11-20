@@ -1009,7 +1009,7 @@ bool load(const std::string& path, Model& m, std::string& err, bool want_mtp) {
         CK(cudaMemcpy(d, gm.shard(s).tensor_data(*t), nb, cudaMemcpyHostToDevice));
         bytes += nb;
         w.d = d;
-        // STRATA_Q8_PACKED (on by default here): the lossless qs / d plane copy the Q8_0 decode kernels read instead,
+        // SAGUARO_Q8_PACKED (on by default here): the lossless qs / d plane copy the Q8_0 decode kernels read instead,
         // bitwise the same outputs
         if (w.type == 8 && K::native_q8_0_packed_enabled() && K::native_q8_0_packed_eligible(w.n_in, w.n_out)) {
             std::vector<uint8_t> packed(nb);
@@ -1371,7 +1371,7 @@ struct Engine {
         k16 = dalloc_t<__half>((size_t) g.n_head_kv * ctx * g.head_dim);
         v16 = dalloc_t<__half>((size_t) g.n_head_kv * ctx * g.head_dim);
         q16 = dalloc_t<__half>(T * g.n_head * g.head_dim);
-        use_mmq = MMQ::built() && std::getenv("STRATA_Q36_NO_MMQ") == nullptr;
+        use_mmq = MMQ::built() && std::getenv("SAGUARO_Q36_NO_MMQ") == nullptr;
         auto mmq_ok = [&](const Layer& L) {
             return MMQ::supported(L.L.gu_type) && MMQ::supported(L.L.d_type) && MMQ::fits(L.L.gu_type, 2 * g.n_ff) &&
                    MMQ::fits(L.L.d_type, g.n_embd);
@@ -1536,7 +1536,7 @@ struct Engine {
             k_gemv_f32<<<dim3(rows8(n_out), T), kThreads, 0, st>>>(W, xin, out, n_in, n_out);
             return;
         }
-        static const bool blas_f32 = std::getenv("STRATA_Q36_BLAS_F32") != nullptr;   // the hipBLAS / cuBLAS SGEMM (A/B)
+        static const bool blas_f32 = std::getenv("SAGUARO_Q36_BLAS_F32") != nullptr;   // the hipBLAS / cuBLAS SGEMM (A/B)
         if (!blas_f32 && n_in % 4 == 0) {
             // K split so that about 128 blocks run (the partials summed in a fixed order: deterministic); TM = 4 rows per
             // thread for the 256-wide router, 1 for the narrow ones (alpha / beta 32, the gate 1)
@@ -1573,9 +1573,9 @@ struct Engine {
     }
     /// x [T][n] -> its q8_1 image (T contiguous columns: one vector of T * n), for every matrix that reads x.
     void quant(const float* xin, int n, int T, void* q) { K::native_quantize_q8_1(xin, q, n * T, 1, st); }
-    // ---- decode kernels of this engine (q36_kernels.cuh), each the old kernel's bits (STRATA_Q36_VERIFY=1 compares)
-    bool fast_k = std::getenv("STRATA_Q36_OLD_KERNELS") == nullptr;
-    bool verify_k = std::getenv("STRATA_Q36_VERIFY") != nullptr;
+    // ---- decode kernels of this engine (q36_kernels.cuh), each the old kernel's bits (SAGUARO_Q36_VERIFY=1 compares)
+    bool fast_k = std::getenv("SAGUARO_Q36_OLD_KERNELS") == nullptr;
+    bool verify_k = std::getenv("SAGUARO_Q36_VERIFY") != nullptr;
     float* vbuf = nullptr;                       // verify scratch
     long long v_calls = 0, v_bad = 0;
     std::map<std::string, long long> v_by;   // mismatches per check
@@ -1636,7 +1636,7 @@ struct Engine {
         K::native_quantize_q8_1(hsrc, vq, N * T, 1, st);
         const long long before = v_bad;
         verify_cmp(what, (const float*) xq, (const float*) vq, qb * (size_t) T / 4, tag);
-        if (v_bad != before && std::getenv("STRATA_Q36_VDEBUG") && v_by[what] <= 2) {   // a mismatching block, on the host
+        if (v_bad != before && std::getenv("SAGUARO_Q36_VDEBUG") && v_by[what] <= 2) {   // a mismatching block, on the host
             std::vector<uint8_t> a(qb * (size_t) T), b(qb * (size_t) T);
             std::vector<float> hv((size_t) N * T);
             CK(cudaMemcpy(a.data(), xq, a.size(), cudaMemcpyDeviceToHost));
@@ -2004,7 +2004,7 @@ struct Engine {
         const bool one = T == 1;
         // a decode batch of up to 8 rows takes the router and the shared expert's gate in one product too (rows of 257) when the fused
         // router follows; the prompt chunks and the checks keep the separate products
-        const bool ext = one || (fast_k && std::getenv("STRATA_Q36_NO_EXT") == nullptr && !verify_k && T <= kGemmT && g.n_expert == 256 && Kp == 8);
+        const bool ext = one || (fast_k && std::getenv("SAGUARO_Q36_NO_EXT") == nullptr && !verify_k && T <= kGemmT && g.n_expert == 256 && Kp == 8);
         if (ext) f32mm(L.router_ext, h, logits_r, N, (int) g.n_expert + 1, T);
         else f32mm(L.router, h, logits_r, N, (int) g.n_expert, T);
         // the hybrid rows path: a batch of up to hybrid_t rows; when only the MTP block is hybrid, its every batch
@@ -2176,9 +2176,9 @@ struct Engine {
         const Layer& L = layer_at(stream_seq[(size_t) i]);
         CK(cudaStreamWaitEvent(cst, ev_used[b], 0));
         // the experts with a VRAM slot come from it (device to device, at VRAM speed), only the others over PCIe; runs
-        // of consecutive experts from the same source in one copy each.  STRATA_Q36_STREAM_ALL=1: the whole layer from
+        // of consecutive experts from the same source in one copy each.  SAGUARO_Q36_STREAM_ALL=1: the whole layer from
         // host memory (the first version: PCIe-bound)
-        static const bool all = std::getenv("STRATA_Q36_STREAM_ALL") != nullptr;
+        static const bool all = std::getenv("SAGUARO_Q36_STREAM_ALL") != nullptr;
         const int ne = (int) m->g.n_expert;
         const Hy& H = hy[(size_t) stream_seq[(size_t) i]];
         // fewer than half the experts resident (a 12 GB card): the one whole-layer copy is faster than many small ones
@@ -2297,7 +2297,7 @@ struct Engine {
     /// The slots to the experts the routing used most (the counts halved each time): at most max_swaps replacements
     /// over all layers, between forwards (the copies are on the engine's stream).
     void rebalance(int max_swaps) {
-        static const bool off = std::getenv("STRATA_Q36_FIXED_SLOTS") != nullptr;   // the slots as placed (tests)
+        static const bool off = std::getenv("SAGUARO_Q36_FIXED_SLOTS") != nullptr;   // the slots as placed (tests)
         if (!m->hybrid || off || warming) return;
         const int64_t ne = m->g.n_expert;
         int left = max_swaps;
@@ -2814,17 +2814,17 @@ bool place_experts(Model& m, Engine& E, double vram_gib, int threads, int hybrid
                                         : (fr > reserve ? fr - reserve : 0);
     // every expert fits once the packed Q8_0 decode copies are given back (a file a few GiB larger than the card's
     // room, UD-Q6_K_XL on 32 GB): drop them - the decode reads the GGUF layout then, bitwise the same outputs, a little
-    // slower - rather than run the hybrid mode with its CPU share and streamed prompt layers.  STRATA_Q36_KEEP_PACKED=1
+    // slower - rather than run the hybrid mode with its CPU share and streamed prompt layers.  SAGUARO_Q36_KEEP_PACKED=1
     // keeps them (and the hybrid mode).
     size_t packed_bytes = 0;
     for (const auto& pk : m.packed) packed_bytes += std::get<2>(pk);
     size_t main_need = 0;   // the main layers' experts (the MTP block's can go to the CPU, see below)
     for (Layer& L : m.layers) main_need += L.stride * (size_t) ne + kMmqTail;
     const size_t slack = ((size_t) 512 << 20) + (E.kAttScoreFloats - ((size_t) 16 << 20)) * 6;   // reserve + scores
-    const bool mtp_cpu_ok = m.has_mtp && std::getenv("STRATA_Q36_NO_MTP_CPU") == nullptr;
+    const bool mtp_cpu_ok = m.has_mtp && std::getenv("SAGUARO_Q36_NO_MTP_CPU") == nullptr;
     if (slots <= 0 && vram_gib < 0 && total > budget && packed_bytes > 0 &&
         (total <= budget + packed_bytes || (mtp_cpu_ok && main_need <= budget + packed_bytes + slack)) &&
-        std::getenv("STRATA_Q36_KEEP_PACKED") == nullptr) {
+        std::getenv("SAGUARO_Q36_KEEP_PACKED") == nullptr) {
         CK(cudaDeviceSynchronize());
         for (const auto& pk : m.packed) {
             K::native_q8_0_packed_unregister(std::get<0>(pk));
@@ -2834,7 +2834,7 @@ bool place_experts(Model& m, Engine& E, double vram_gib, int threads, int hybrid
         E.reset_graphs();
         CK(cudaMemGetInfo(&fr, &tot));
         std::fprintf(stderr, "strata-q36: the packed Q8_0 decode copies (%.2f GiB) given back so that every routed "
-                     "expert fits in VRAM (STRATA_Q36_KEEP_PACKED=1 keeps them and runs the hybrid mode)\n",
+                     "expert fits in VRAM (SAGUARO_Q36_KEEP_PACKED=1 keeps them and runs the hybrid mode)\n",
                      (double) packed_bytes / (1 << 30));
     }
     size_t budget2 = vram_gib >= 0 ? budget : (fr > reserve ? fr - reserve : 0);
@@ -2842,11 +2842,11 @@ bool place_experts(Model& m, Engine& E, double vram_gib, int threads, int hybrid
     // text is the all-in-VRAM text, the decode graph stays - and the MTP block's experts on slots + the CPU pool (its
     // drafts only).  When that needs it: the attention scores buffer at 64 MB instead of 256 MB (more, smaller
     // slices in a long prompt) and the reserve at 256 MiB instead of 768 (said in the log; --expert-vram sets the
-    // budget instead).  STRATA_Q36_NO_MTP_CPU=1: the plain hybrid mode for every layer.
+    // budget instead).  SAGUARO_Q36_NO_MTP_CPU=1: the plain hybrid mode for every layer.
     size_t total_main = 0;
     for (Layer& L : m.layers) total_main += L.stride * (size_t) ne + kMmqTail;
     bool mtp_only = false;
-    if (slots <= 0 && vram_gib < 0 && m.has_mtp && total > budget2 && std::getenv("STRATA_Q36_NO_MTP_CPU") == nullptr) {
+    if (slots <= 0 && vram_gib < 0 && m.has_mtp && total > budget2 && std::getenv("SAGUARO_Q36_NO_MTP_CPU") == nullptr) {
         const size_t att_save = (E.kAttScoreFloats - ((size_t) 16 << 20)) * 6;   // att_s (4 B) + att_p16 (2 B)
         const size_t small_reserve = (size_t) 256 << 20;
         const size_t room = fr + att_save > small_reserve ? fr + att_save - small_reserve : 0;
@@ -2883,7 +2883,7 @@ bool place_experts(Model& m, Engine& E, double vram_gib, int threads, int hybrid
     (void) threads;
     (void) hybrid_t;
     err = "the routed experts (" + std::to_string(total >> 20) + " MiB) do not fit in VRAM, and this build has no CPU "
-          "expert pool (STRATA_NATIVE_EXPERTS=OFF)";
+          "expert pool (SAGUARO_NATIVE_EXPERTS=OFF)";
     return false;
 #else
     namespace C = strata::kernels::cpu;
@@ -3173,12 +3173,12 @@ struct Serve {
     std::vector<Slot> slots;
     int n_active = 0;
     std::vector<float> lg;
-    // decode windows of the other slots between two chunks of a prompt read: STRATA_Q36_READ_WINDOWS (default 1; a chunk
+    // decode windows of the other slots between two chunks of a prompt read: SAGUARO_Q36_READ_WINDOWS (default 1; a chunk
     // takes ~0.15 s at 512 tokens, a window ~0.012 s: more windows give the decoding slots more of the time a read takes)
     int read_windows = 1;
 
     explicit Serve(Engine& e) : E(e), slots((size_t) e.n_sess) {
-        if (const char* v = std::getenv("STRATA_Q36_READ_WINDOWS")) read_windows = std::max(0, std::min(64, std::atoi(v)));
+        if (const char* v = std::getenv("SAGUARO_Q36_READ_WINDOWS")) read_windows = std::max(0, std::min(64, std::atoi(v)));
     }
 
     /// BSTOP / BYIELD lines among the queued ones: applied now (a window is a moment away at most).
@@ -3784,11 +3784,11 @@ int strata::qwen35::run(int argc, char** argv) {
     if (model.empty()) { std::fprintf(stderr, "strata-q36: --model is required\n"); return 2; }
 #if !defined(_WIN32)
     setenv("CUDA_MODULE_LOADING", "EAGER", 0);   // every kernel loaded with the context, not in the first prompt
-    setenv("STRATA_Q8_PACKED", "1", 0);   // the packed Q8_0 decode copy unless STRATA_Q8_PACKED is set otherwise
-    setenv("STRATA_MMQ_KQ", "1", 0);      // the K-quant MMQ prompt kernels (every expert of this family is a K-quant)
+    setenv("SAGUARO_Q8_PACKED", "1", 0);   // the packed Q8_0 decode copy unless SAGUARO_Q8_PACKED is set otherwise
+    setenv("SAGUARO_MMQ_KQ", "1", 0);      // the K-quant MMQ prompt kernels (every expert of this family is a K-quant)
 #else
-    if (std::getenv("STRATA_MMQ_KQ") == nullptr) _putenv_s("STRATA_MMQ_KQ", "1");
-    if (std::getenv("STRATA_Q8_PACKED") == nullptr) _putenv_s("STRATA_Q8_PACKED", "1");   // as on Linux (it was missing here)
+    if (std::getenv("SAGUARO_MMQ_KQ") == nullptr) _putenv_s("SAGUARO_MMQ_KQ", "1");
+    if (std::getenv("SAGUARO_Q8_PACKED") == nullptr) _putenv_s("SAGUARO_Q8_PACKED", "1");   // as on Linux (it was missing here)
     if (std::getenv("CUDA_MODULE_LOADING") == nullptr) _putenv_s("CUDA_MODULE_LOADING", "EAGER");
 #endif
     if (mtp_d < 0 || mtp_d > 7) { std::fprintf(stderr, "strata-q36: --mtp takes 0 .. 7 drafts\n"); return 2; }
@@ -3842,8 +3842,8 @@ int strata::qwen35::run(int argc, char** argv) {
             const double fr_gib = (double) fr / GiB;
             chunk = fr_gib >= 7.5 ? 2048 : fr_gib >= 5.5 ? 1024 : 512;
         }
-        if (const char* cv = std::getenv("STRATA_Q36_CHUNK")) chunk = std::max(256, std::min(4096, std::atoi(cv)));   // force a chunk (512: the old default)
-        if (std::getenv("STRATA_Q36_PLACE_DEBUG"))
+        if (const char* cv = std::getenv("SAGUARO_Q36_CHUNK")) chunk = std::max(256, std::min(4096, std::atoi(cv)));   // force a chunk (512: the old default)
+        if (std::getenv("SAGUARO_Q36_PLACE_DEBUG"))
             std::fprintf(stderr, "strata-q36: chunk rule: free %.2f GiB (raw %.2f, with %.2f packed), main experts %.2f GiB, chunk %d\n",
                          fr / 1073741824.0, fr_raw / 1073741824.0, packed / 1073741824.0, experts / 1073741824.0, chunk);
     }
@@ -3868,9 +3868,9 @@ int strata::qwen35::run(int argc, char** argv) {
     } report{E};
     E.reset();
     E.mtp_d = m.has_mtp ? mtp_d : 0;
-    if (draft_vocab < 0 && std::getenv("STRATA_Q36_DRAFT_VOCAB") != nullptr) draft_vocab = std::atoi(std::getenv("STRATA_Q36_DRAFT_VOCAB"));
+    if (draft_vocab < 0 && std::getenv("SAGUARO_Q36_DRAFT_VOCAB") != nullptr) draft_vocab = std::atoi(std::getenv("SAGUARO_Q36_DRAFT_VOCAB"));
     E.draft_n = std::max(0, draft_vocab);
-    E.bmtp = (batch_mtp || (std::getenv("STRATA_BATCH_MTP") != nullptr && std::string(std::getenv("STRATA_BATCH_MTP")) != "0")) && E.n_sess > 1 && E.mtp_d > 0;
+    E.bmtp = (batch_mtp || (std::getenv("SAGUARO_BATCH_MTP") != nullptr && std::string(std::getenv("SAGUARO_BATCH_MTP")) != "0")) && E.n_sess > 1 && E.mtp_d > 0;
     if (batch_mtp && !E.bmtp) std::fprintf(stderr, "strata-q36: --batch-mtp needs --batch N (2 or more) and --mtp N: ignored\n");
     if (warm) E.warmup();
     if (serve_mode) return serve(E);

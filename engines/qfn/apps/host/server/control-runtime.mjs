@@ -25,7 +25,7 @@ export function bundledPython(dir, platform = process.platform) {
 
 /** The per-user component folder, the same rule as strata_control/engine_component.py components_dir(). */
 export function componentsDirectory({ env = process.env, platform = process.platform, home = homedir() } = {}) {
-  if (env.STRATA_COMPONENTS_DIR) return env.STRATA_COMPONENTS_DIR;
+  if (env.SAGUARO_COMPONENTS_DIR) return env.SAGUARO_COMPONENTS_DIR;
   if (platform === 'win32') return join(env.LOCALAPPDATA || join(home, 'AppData', 'Local'), 'Strata', 'components');
   return join(env.XDG_DATA_HOME || join(home, '.local', 'share'), 'strata', 'components');
 }
@@ -50,7 +50,7 @@ function newer(a, b) {
 }
 
 /**
- * Is there a Control component to use? STRATA_CONTROL_DIR names one (the Tauri shell sets it to the bundled one), the
+ * Is there a Control component to use? SAGUARO_CONTROL_DIR names one (the Tauri shell sets it to the bundled one), the
  * `control` folder beside `host` is the installed app's, and `<components>/control/active.json` is one the component
  * updater installed. Each must be whole; the newest version wins, so an app update that ships a newer Control is never
  * held back by an older updated one, and an updated Control is never lost to an older bundled one. A tie goes to the first
@@ -58,7 +58,7 @@ function newer(a, b) {
  */
 export function findControl({ env = process.env, platform = process.platform, exists = existsSync, hostDir = resolve(HERE, '..'), components = null } = {}) {
   const updated = updatedControlDirectory({ env, platform, components });
-  const candidates = [{ dir: env.STRATA_CONTROL_DIR }, { dir: join(hostDir, '..', 'control') }, ...(updated ? [updated] : [])]
+  const candidates = [{ dir: env.SAGUARO_CONTROL_DIR }, { dir: join(hostDir, '..', 'control') }, ...(updated ? [updated] : [])]
     .filter(c => c.dir).map(c => ({ ...c, dir: resolve(c.dir) }));
   let best = null;
   for (const candidate of candidates) {
@@ -77,18 +77,18 @@ export function findControl({ env = process.env, platform = process.platform, ex
 /** The environment Control runs in: nothing from the user's Python, and acquiring forbidden. */
 export function controlEnvironment(control, { env = process.env, components = componentsDirectory({ env }), acquire = false } = {}) {
   const next = { ...env };
-  for (const key of ['PYTHONHOME', 'PYTHONPATH', 'PYTHONSTARTUP', 'VIRTUAL_ENV', 'STRATA_PYTHON', 'STRATA_NATIVE_PYTHON', 'STRATA_API_KEY']) delete next[key];
+  for (const key of ['PYTHONHOME', 'PYTHONPATH', 'PYTHONSTARTUP', 'VIRTUAL_ENV', 'SAGUARO_PYTHON', 'SAGUARO_NATIVE_PYTHON', 'SAGUARO_API_KEY']) delete next[key];
   const result = {
     ...next,
     PYTHONNOUSERSITE: '1', PYTHONUTF8: '1', PYTHONUNBUFFERED: '1', PYTHONIOENCODING: 'utf-8',
-    STRATA_NO_ACQUIRE: '1', STRATA_COMPONENTS_DIR: components,
+    SAGUARO_NO_ACQUIRE: '1', SAGUARO_COMPONENTS_DIR: components,
     // The app's own settings file, beside its components: Control and the installer never read or write the file an older
     // command-line Strata keeps in %APPDATA% / ~/.config (its list of Strata folders), so an old install is never adopted.
-    ...(components ? { STRATA_SETTINGS_FILE: env.STRATA_SETTINGS_FILE || join(dirname(components), 'app-settings.json') } : {}),
-    ...(control?.dir ? { STRATA_CONTROL_DIR: control.dir } : {}),
+    ...(components ? { SAGUARO_SETTINGS_FILE: env.SAGUARO_SETTINGS_FILE || join(dirname(components), 'app-settings.json') } : {}),
+    ...(control?.dir ? { SAGUARO_CONTROL_DIR: control.dir } : {}),
   };
   // Only the explicit update step (`strata update`) may acquire; every other Control process keeps the switch on.
-  if (acquire) delete result.STRATA_NO_ACQUIRE;
+  if (acquire) delete result.SAGUARO_NO_ACQUIRE;
   return result;
 }
 
@@ -97,7 +97,7 @@ export function controlEnvironment(control, { env = process.env, components = co
  * itself. Only the install job it starts when the user asks to download a model lifts that for its own children.
  */
 export function installerEnvironment(control, { env = process.env, installDir, components = componentsDirectory({ env }) } = {}) {
-  return { ...controlEnvironment(control, { env, components }), STRATA_CONTROL_INSTALL: '1', ...(installDir ? { STRATA_INSTALL_DIR: installDir } : {}) };
+  return { ...controlEnvironment(control, { env, components }), SAGUARO_CONTROL_INSTALL: '1', ...(installDir ? { SAGUARO_INSTALL_DIR: installDir } : {}) };
 }
 
 export class ControlError extends Error {
@@ -167,14 +167,14 @@ export function createControl({ control = findControl(), env = process.env, run 
     version: control.bundle?.version ?? null,
     /**
      * The explicit update step. These are the only calls that let Control reach the network: `acquire` removes
-     * STRATA_NO_ACQUIRE for that one process. Starting, serving, listing and rolling back never do.
+     * SAGUARO_NO_ACQUIRE for that one process. Starting, serving, listing and rolling back never do.
      */
-    async updateCheck({ feed = env.STRATA_UPDATE_FEED ?? null, appVersion = env.STRATA_APP_VERSION ?? null } = {}) {
+    async updateCheck({ feed = env.SAGUARO_UPDATE_FEED ?? null, appVersion = env.SAGUARO_APP_VERSION ?? null } = {}) {
       const result = await call(['update', '--check', '--output', 'json', ...feedArgs(feed), ...(appVersion ? ['--app-version', appVersion] : [])], { timeoutMs: 90_000, acquire: true });
       if (result.json?.ok) return result.json;
       throw failure(result, 'The update check failed.');
     },
-    async update({ feed = env.STRATA_UPDATE_FEED ?? null, engine = true, control: withControl = true, appVersion = env.STRATA_APP_VERSION ?? null, force = false, onEvent = null, signal = null } = {}) {
+    async update({ feed = env.SAGUARO_UPDATE_FEED ?? null, engine = true, control: withControl = true, appVersion = env.SAGUARO_APP_VERSION ?? null, force = false, onEvent = null, signal = null } = {}) {
       const args = ['update', '--output', 'jsonl', ...feedArgs(feed), ...(engine ? [] : ['--no-engine']), ...(withControl ? [] : ['--no-control']),
         ...(appVersion ? ['--app-version', appVersion] : []), ...(force ? ['--force'] : [])];
       const result = await call(args, { timeoutMs: 3 * 3600_000, acquire: true, onLine: onEvent ?? (() => {}), signal });

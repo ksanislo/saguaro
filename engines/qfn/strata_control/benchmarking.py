@@ -212,9 +212,9 @@ def _settings(profile: str, params: dict) -> tuple[dict, dict, Endpoint, Endpoin
     host = "127.0.0.1" if host in ("0.0.0.0", "::") else host
     authority = f"[{host}]" if ":" in host and not host.startswith("[") else host
     url = f"http://{authority}:{launch['effective']['port']}"
-    key = os.environ.get("STRATA_API_KEY")
+    key = os.environ.get("SAGUARO_API_KEY")
     endpoint = Endpoint(url, key, timeout=10)
-    telemetry = Endpoint(url, os.environ.get("STRATA_TELEMETRY_KEY") or key, timeout=3)
+    telemetry = Endpoint(url, os.environ.get("SAGUARO_TELEMETRY_KEY") or key, timeout=3)
     identity = {"profile": profile, "revision": revision, "source_config": str(source),
                 "source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
                 "model_name": cfg.get("model_name"), "gpu": cfg.get("gpu")}
@@ -271,7 +271,7 @@ def plan(profile: str, params: dict) -> dict:
             "request_timeout": params["request_timeout"], "condition": params["condition"],
             "path": str(path), "phases": list(bench.SUITES[suite]),
             "planned_requests": requests, "managed_match": True,
-            "api_credential_env": "STRATA_API_KEY", "telemetry_credential_env": "STRATA_TELEMETRY_KEY"}
+            "api_credential_env": "SAGUARO_API_KEY", "telemetry_credential_env": "SAGUARO_TELEMETRY_KEY"}
 
 
 def create_job(profile: str, params: dict) -> dict:

@@ -629,7 +629,7 @@ bool GlmMetal::Impl::run_slice(const int32_t* tok, int T, std::vector<float>& lo
             err = "cannot allocate the compute graph";
             return false;
         }
-        if (gpu && std::getenv("MAYA_METAL_SPLITS")) {   // which nodes did not land on the GPU (debug)
+        if (gpu && std::getenv("SAGUARO_METAL_SPLITS")) {   // which nodes did not land on the GPU (debug)
             std::fprintf(stderr, "graph: %d nodes, %d splits\n", ggml_graph_n_nodes(b.gf), ggml_backend_sched_get_n_splits(sched));
             for (int i = 0; i < ggml_graph_n_nodes(b.gf); ++i) {
                 ggml_tensor* t = ggml_graph_node(b.gf, i);
@@ -649,7 +649,7 @@ bool GlmMetal::Impl::run_slice(const int32_t* tok, int T, std::vector<float>& lo
             return false;
         }
         st.gpu_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-        if (std::getenv("MAYA_METAL_PROFILE"))
+        if (std::getenv("SAGUARO_METAL_PROFILE"))
             std::fprintf(stderr, "slice T=%d%s nodes %d tensors %zu/%zu %.1f ms\n", T, window ? " window" : "",
                          ggml_graph_n_nodes(b.gf), ggml_used_mem(ctx) / ggml_tensor_overhead(), nodes,
                          std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
@@ -892,7 +892,7 @@ bool GlmMetal::Impl::compute(ggml_cgraph* gf, const std::vector<std::pair<ggml_t
     }
     const double dt = std::chrono::duration<double>(std::chrono::steady_clock::now() - t1).count();
     st.gpu_seconds += dt;
-    if (std::getenv("MAYA_METAL_PROFILE"))
+    if (std::getenv("SAGUARO_METAL_PROFILE"))
         std::fprintf(stderr, "graph %d nodes %.1f ms\n", ggml_graph_n_nodes(gf), dt * 1e3);
     return true;
 }
@@ -954,7 +954,7 @@ int64_t GlmMetal::snapshot_position() const { return p_->snap_pos; }
 size_t GlmMetal::grow_pool() {
     Impl& m = *p_;
     if (m.pool.all_resident() || m.o.pool_slots > 0) return 0;
-    const char* hv = std::getenv("MAYA_GLM_RAM_HEADROOM_GB");
+    const char* hv = std::getenv("SAGUARO_GLM_RAM_HEADROOM_GB");
     const double head_gb = hv && *hv ? std::atof(hv) : 6.0;
     const size_t avail = free_memory(), head = (size_t) (head_gb * (double) (1ull << 30));
     if (avail <= head + ((size_t) 1 << 30)) return 0;   // less than 1 GB to gain: not worth a NOTE

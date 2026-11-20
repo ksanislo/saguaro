@@ -195,8 +195,8 @@ class EngineBeforeModel(unittest.TestCase):
         with mock.patch.object(Runner, "installed_state", return_value=(None, None)), mock.patch.object(Runner, "_spawn", spawn):
             with self.assertRaises(Boom):
                 r.ensure_model()
-        self.assertEqual(seen["env"].get("STRATA_ALLOW_NO_ENGINE"), "1")
-        self.assertNotIn("STRATA_NEED_ENGINE", seen["env"])
+        self.assertEqual(seen["env"].get("SAGUARO_ALLOW_NO_ENGINE"), "1")
+        self.assertNotIn("SAGUARO_NEED_ENGINE", seen["env"])
 
     def test_a_failed_update_still_reports_the_old_message(self):
         spawns, err = self.run_ensure([UNUSABLE], [{"event": "error", "error": {"message": "cannot reach the feed"}}], code=6)
@@ -212,7 +212,7 @@ class SetupControlStep(unittest.TestCase):
         import importlib.util
         spec = importlib.util.spec_from_file_location("setup_control_copy", ROOT / "setup.py")
         module = importlib.util.module_from_spec(spec)
-        with mock.patch.dict(os.environ, {"STRATA_CONTROL_INSTALL": "1"}):
+        with mock.patch.dict(os.environ, {"SAGUARO_CONTROL_INSTALL": "1"}):
             spec.loader.exec_module(module)
         return module
 
@@ -231,25 +231,25 @@ class SetupControlStep(unittest.TestCase):
 
     def test_wrong_family_stops_before_the_download_for_launch(self):
         exc = ec.EngineMissing("nothing matched", Path("/c"), notice=WRONG_FAMILY)
-        res, out = self.step(exc, {"STRATA_NEED_ENGINE": "1"})
+        res, out = self.step(exc, {"SAGUARO_NEED_ENGINE": "1"})
         self.assertIsInstance(res, SystemExit)
         self.assertIn("Ask for the RX 9000 build.", out)
         self.assertIn("nothing was downloaded", out)
 
     def test_wrong_family_goes_on_with_a_warning_when_launch_said_go_on(self):
         exc = ec.EngineMissing("nothing matched", Path("/c"), notice=WRONG_FAMILY)
-        res, out = self.step(exc, {"STRATA_ALLOW_NO_ENGINE": "1"})
+        res, out = self.step(exc, {"SAGUARO_ALLOW_NO_ENGINE": "1"})
         self.assertNotIsInstance(res, SystemExit)
         self.assertIn("no engine is installed for this PC yet", out)
         self.assertIn("The model is downloaded and prepared now", out)
 
     def test_no_engine_for_launch_still_stops_setup_when_run_on_its_own(self):
-        res, out = self.step(ec.EngineMissing("the component folder holds no engine package", Path("/c")), {"STRATA_NEED_ENGINE": "1"})
+        res, out = self.step(ec.EngineMissing("the component folder holds no engine package", Path("/c")), {"SAGUARO_NEED_ENGINE": "1"})
         self.assertIsInstance(res, SystemExit)
 
     def test_the_app_with_a_wrong_family_engine_warns_and_still_downloads(self):
         """Owner decision 2026-10-18: the app downloads the model anyway and warns (its card says so)."""
-        env = {k: v for k, v in os.environ.items() if k != "STRATA_NEED_ENGINE"}
+        env = {k: v for k, v in os.environ.items() if k != "SAGUARO_NEED_ENGINE"}
         exc = ec.EngineMissing("nothing matched", Path("/c"), notice=WRONG_FAMILY)
         with mock.patch.dict(os.environ, env, clear=True):
             res, out = self.step(exc, {})
@@ -258,11 +258,11 @@ class SetupControlStep(unittest.TestCase):
         self.assertIn("The model is downloaded and prepared now", out)
 
     def test_no_engine_stops_before_the_download_for_launch(self):
-        res, out = self.step(ec.EngineMissing("the component folder holds no engine package", Path("/c")), {"STRATA_NEED_ENGINE": "1"})
+        res, out = self.step(ec.EngineMissing("the component folder holds no engine package", Path("/c")), {"SAGUARO_NEED_ENGINE": "1"})
         self.assertIsInstance(res, SystemExit)
 
     def test_the_app_without_an_engine_keeps_its_order(self):
-        env = {k: v for k, v in os.environ.items() if k != "STRATA_NEED_ENGINE"}
+        env = {k: v for k, v in os.environ.items() if k != "SAGUARO_NEED_ENGINE"}
         with mock.patch.dict(os.environ, env, clear=True):
             res, out = self.step(ec.EngineMissing("the component folder holds no engine package", Path("/c")), {})
         self.assertNotIsInstance(res, SystemExit)

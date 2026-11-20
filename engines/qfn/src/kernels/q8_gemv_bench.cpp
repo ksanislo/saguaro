@@ -6,7 +6,7 @@
 //     build/q8_gemv_bench [--cols 1,2,3,4,6] [--iters 50] [--bw GB/s] [--gguf a.gguf[,b.gguf]] [--ab]
 //
 // --gguf: the files' own Q8_0 matrices (n_out >= 64) by shape instead of random ones.  --ab: each shape and column count
-// on the default kernel and on STRATA_SM75_Q8G's (A B B A), with both outputs compared bit for bit.
+// on the default kernel and on SAGUARO_SM75_Q8G's (A B B A), with both outputs compared bit for bit.
 #include "strata/artifact/gguf_reader.hpp"
 #include "strata/kernels/native_mmvq.hpp"
 
@@ -66,7 +66,7 @@ int main(int argc, char** argv) {
     }
     cudaDeviceProp prop;
     ck(cudaGetDeviceProperties(&prop, 0), "props");
-    std::printf("q8_gemv_bench: %s%s\n", prop.name, ab ? "  (A = default kernel, B = STRATA_SM75_Q8G)" : "");
+    std::printf("q8_gemv_bench: %s%s\n", prop.name, ab ? "  (A = default kernel, B = SAGUARO_SM75_Q8G)" : "");
     std::mt19937 rng(7);
 
     // the matrices of each shape: real ones from --gguf, else random weights at the engine's shapes

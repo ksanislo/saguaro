@@ -77,7 +77,7 @@ class Dockerfiles(unittest.TestCase):
             self.assertIn("STOPSIGNAL SIGTERM", text, f.name)
             self.assertIn('ENTRYPOINT ["/usr/bin/tini", "--", "/opt/strata/entrypoint.sh"]', text, f.name)
             self.assertIn("VOLUME [\"/data\"]", text, f.name)
-            self.assertIn("STRATA_COMPONENTS_DIR=/opt/strata/components", text, f.name)
+            self.assertIn("SAGUARO_COMPONENTS_DIR=/opt/strata/components", text, f.name)
 
     def test_component_image_checks_the_package_before_use(self):
         text = (DOCKER / "Dockerfile").read_text(encoding="utf-8")
@@ -103,7 +103,7 @@ class Compose(unittest.TestCase):
             self.assertEqual(svc["ulimits"]["memlock"], {"soft": -1, "hard": -1}, name)
             self.assertEqual(svc["shm_size"], "2gb", name)
             self.assertEqual(svc["stop_grace_period"], "2m", name)
-            self.assertTrue(svc["ports"][0].startswith("${STRATA_BIND:-127.0.0.1}:"), f"{name}: the port must default to this computer only")
+            self.assertTrue(svc["ports"][0].startswith("${SAGUARO_BIND:-127.0.0.1}:"), f"{name}: the port must default to this computer only")
             for var in ("MODEL", "MODEL_PATH", "CONTEXT", "PARALLEL", "VISION", "TUNE", "API_KEY"):
                 self.assertIn(var, svc["environment"], f"{name}: {var}")
             self.assertIn("strata-data", self.load(name)["volumes"], name)
@@ -132,7 +132,7 @@ class Document(unittest.TestCase):
         for line in section.splitlines():
             if line.startswith("| `"):
                 names.update(re.findall(r"`([A-Z][A-Z_]+)`", line.split("|")[1]))
-        self.assertTrue({"MODEL", "CONTEXT", "API_KEY", "TUNE", "VISION", "MODEL_PATH", "STRATA_SET"} <= names, names)
+        self.assertTrue({"MODEL", "CONTEXT", "API_KEY", "TUNE", "VISION", "MODEL_PATH", "SAGUARO_SET"} <= names, names)
         for name in sorted(names):
             self.assertIn(name, entry, f"docs/DOCKER.md lists {name} but docker/entrypoint.sh does not read it")
 

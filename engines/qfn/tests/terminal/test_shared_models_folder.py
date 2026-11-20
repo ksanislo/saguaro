@@ -77,7 +77,7 @@ class SharedModelsFolder(GuiLayout):
         mine, app = self.files()
         self.put(mine, self.base / "t", 9000)
         self.put(app, self.base / "a", 1000)
-        os.environ["STRATA_SETTINGS_FILE"] = str(app)
+        os.environ["SAGUARO_SETTINGS_FILE"] = str(app)
         self.assertIsNone(discovery.sync_data_dir())
         self.assertEqual(Path(self.read(app)["data_dir"]), self.base / "a")
 

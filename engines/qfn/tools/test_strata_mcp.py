@@ -827,7 +827,7 @@ class MixedGraphics(unittest.TestCase):
         igpu = [{"index": 0, "name": "AMD Radeon(TM) Graphics", "vram_gb": 0.5, "arch": "gfx90c", "uma": True}]
         patches = (mock.patch.object(M.sys, "platform", "linux"), mock.patch.object(M, "WIN", False),
                    mock.patch.object(S, "amd_gpus", lambda: [dict(g) for g in igpu]), mock.patch.object(S, "amd_problem", lambda g: "integrated graphics"),
-                   mock.patch.dict(M.os.environ, {"STRATA_EXPERIMENTAL_SM60": ""}), mock.patch.object(S, "OLD_GPUS", None))
+                   mock.patch.dict(M.os.environ, {"SAGUARO_EXPERIMENTAL_SM60": ""}), mock.patch.object(S, "OLD_GPUS", None))
         with mock.patch.object(S, "gpus", lambda: [dict(g) for g in pascal]):
             for p in patches:
                 p.start()
@@ -944,7 +944,7 @@ class DiskUsageTest(unittest.TestCase):
         for p in (self.root, self.data / "models" / "gyro-Gyro-S", self.data / "packs" / "swift-iq2_xs", self.data / "mtp" / "rt", self.own):
             p.mkdir(parents=True)
         (d / "settings.json").write_text(json.dumps({"data_dir": str(self.data)}), encoding="utf-8")
-        env = mock.patch.dict(os.environ, {"STRATA_SETTINGS_FILE": str(d / "settings.json")})
+        env = mock.patch.dict(os.environ, {"SAGUARO_SETTINGS_FILE": str(d / "settings.json")})
         env.start()
         self.addCleanup(env.stop)
 

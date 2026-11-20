@@ -26,7 +26,7 @@ def cpuinfo(flags: str):
 
 class FloorTest(unittest.TestCase):
     def setUp(self):
-        self.env = mock.patch.dict(os.environ, {"STRATA_ISA_FLOOR": ""})
+        self.env = mock.patch.dict(os.environ, {"SAGUARO_ISA_FLOOR": ""})
         self.env.start()
 
     def tearDown(self):
@@ -52,9 +52,9 @@ class FloorTest(unittest.TestCase):
 
     def test_env_asks_for_a_floor_build_on_any_cpu(self):
         for v in ("avx", "none", "AVX"):
-            with mock.patch.dict(os.environ, {"STRATA_ISA_FLOOR": v}):
+            with mock.patch.dict(os.environ, {"SAGUARO_ISA_FLOOR": v}):
                 self.assertEqual(setup.cpu_floor(True), v.lower())
-        with mock.patch.dict(os.environ, {"STRATA_ISA_FLOOR": "bogus"}):
+        with mock.patch.dict(os.environ, {"SAGUARO_ISA_FLOOR": "bogus"}):
             self.assertEqual(setup.cpu_floor(True), "")
 
     @unittest.skipUnless(os.name == "nt", "the CPUID stub runs on Windows")

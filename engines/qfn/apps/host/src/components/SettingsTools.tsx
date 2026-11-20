@@ -179,7 +179,7 @@ export function SettingsTools({ preview }: { preview?: ToolsState }) {
         {draft.kind === 'instructions' ? <label className="input-field"><span>{tr('Instructions')}</span><textarea className="st-input" rows={6} aria-label={tr('Instructions')} value={draft.instructions} placeholder={tr('Write what the assistant should do when it uses this tool.')} onChange={e => setDraft({ ...draft, instructions: e.target.value })} /></label> : null}
         {draft.kind === 'command' ? <>
           <label className="input-field"><span>{tr('Command to run')}</span><input className="st-input" aria-label={tr('Command to run')} value={draft.command} placeholder={tr('For example: curl -I https://example.com')} spellCheck={false} onChange={e => setDraft({ ...draft, command: e.target.value })} /></label>
-          <p className="small muted">{tr('The assistant can pass text to the command. The command reads it from the STRATA_INPUT setting. Its printed output goes back to the assistant.')}</p>
+          <p className="small muted">{tr('The assistant can pass text to the command. The command reads it from the SAGUARO_INPUT setting. Its printed output goes back to the assistant.')}</p>
         </> : null}
         {draft.kind === 'server' ? <>
           <label className="input-field"><span>{tr('Web address or program')}</span><input className="st-input" aria-label={tr('Web address or program')} value={draft.address} placeholder={tr('https://… or the program that starts the server')} spellCheck={false} onChange={e => setDraft({ ...draft, address: e.target.value })} /></label>

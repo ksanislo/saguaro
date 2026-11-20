@@ -929,14 +929,14 @@ __global__ void __launch_bounds__(kThreads) mx_set_wmma_kernel(const SetK a) {
     }
 }
 #endif
-bool tc_ok() {   // sm_70 and later (WMMA F16) / AMD gfx11, gfx12 (wave32 WMMA); STRATA_DS4_NO_TC=1 keeps the F32 kernel
+bool tc_ok() {   // sm_70 and later (WMMA F16) / AMD gfx11, gfx12 (wave32 WMMA); SAGUARO_DS4_NO_TC=1 keeps the F32 kernel
 #if defined(STRATA_USE_HIP)
     static const bool ok = [] {
         int dev = 0;
         cudaGetDevice(&dev);
         cudaDeviceProp prop{};
         if (cudaGetDeviceProperties(&prop, dev) != cudaSuccess) return false;
-        const char* v = std::getenv("STRATA_DS4_NO_TC");
+        const char* v = std::getenv("SAGUARO_DS4_NO_TC");
         if (v != nullptr && v[0] == '1') return false;
         const char* arch = prop.gcnArchName;
         for (const char* p : {"gfx1100", "gfx1101", "gfx1102", "gfx1103", "gfx1150", "gfx1151", "gfx1152", "gfx1200", "gfx1201"})
@@ -949,7 +949,7 @@ bool tc_ok() {   // sm_70 and later (WMMA F16) / AMD gfx11, gfx12 (wave32 WMMA);
         int dev = 0, major = 0;
         cudaGetDevice(&dev);
         cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev);
-        const char* v = std::getenv("STRATA_DS4_NO_TC");
+        const char* v = std::getenv("SAGUARO_DS4_NO_TC");
         return major >= 7 && !(v != nullptr && v[0] == '1');
     }();
     return ok;

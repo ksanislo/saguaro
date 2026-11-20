@@ -84,23 +84,23 @@ const HERE = fileURLToPath(new URL('.', import.meta.url));
 const ROOT = resolve(HERE, '..');
 const argv = process.argv.slice(2);
 const distFlag = argv.indexOf('--dist');
-// `STRATA_DIST` exists for carriers that load this module directly rather than starting it as its
+// `SAGUARO_DIST` exists for carriers that load this module directly rather than starting it as its
 // own process (the Electron app does that). Such a carrier cannot rely on `--dist`: when the host
 // runs as the Electron main process, `process.argv` is Chromium's switch list and the host's own
 // flags are not reliably present. An explicit environment variable is unambiguous, and the CLI
 // `--dist` form keeps working unchanged.
-const DIST = process.env.STRATA_DIST
-  ? resolve(process.env.STRATA_DIST)
+const DIST = process.env.SAGUARO_DIST
+  ? resolve(process.env.SAGUARO_DIST)
   : distFlag >= 0
     ? resolve(argv[distFlag + 1] ?? join(ROOT, 'dist'))
     : join(ROOT, 'dist');
-const PORT = Number(process.env.STRATA_PORT ?? 8791);
-const HOST = process.env.STRATA_BIND ?? '127.0.0.1';
+const PORT = Number(process.env.SAGUARO_PORT ?? 8791);
+const HOST = process.env.SAGUARO_BIND ?? '127.0.0.1';
 /* The folder chats work in when nothing else is chosen. It is never the app's own folder (the host is started inside its install
    directory, so `process.cwd()` was "host" in the sidebar and the agent could read and write the app): the person's own
-   Documents\Strata\Workspace (the models folder is next to it, not in it), created on first use, unless STRATA_WORKSPACE names one. */
+   Documents\Strata\Workspace (the models folder is next to it, not in it), created on first use, unless SAGUARO_WORKSPACE names one. */
 function defaultWorkspace() {
-  if (process.env.STRATA_WORKSPACE) return resolve(process.env.STRATA_WORKSPACE);
+  if (process.env.SAGUARO_WORKSPACE) return resolve(process.env.SAGUARO_WORKSPACE);
   const user = process.env.USERPROFILE ?? process.env.HOME ?? homedir();
   for (const base of [join(user, 'Documents'), user]) {
     const dir = join(base, 'Strata', 'Workspace');
@@ -109,7 +109,7 @@ function defaultWorkspace() {
   return user;
 }
 const WORKSPACE = defaultWorkspace();
-const WORKSPACE_NAME = process.env.STRATA_WORKSPACE ? basename(WORKSPACE) : 'Strata';
+const WORKSPACE_NAME = process.env.SAGUARO_WORKSPACE ? basename(WORKSPACE) : 'Strata';
 /** True for the app's own install/source folder or anything inside it. */
 const insideApp = path => { const rel = relative(ROOT, resolve(path)); return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel)); };
 
@@ -120,17 +120,17 @@ const imageModels = createImageModels({ dataDir: store.DATA_DIR, modelsDir: () =
 const CONTROL = findControl();
 const control = createControl({ control: CONTROL });
 // Files a run as administrator made in Strata's own folders (owner Administrators) are given back to the user at every start; best effort, never blocks.
-if (control && process.platform === 'win32' && !process.env.STRATA_NO_REPAIR_ACCESS) void control.repairAccess().catch(() => {});
+if (control && process.platform === 'win32' && !process.env.SAGUARO_NO_REPAIR_ACCESS) void control.repairAccess().catch(() => {});
 /* Which window shows the page (the app window or, when that cannot run, a browser tab) and what only the app window can do: app-ui.mjs. */
 const appUi = createAppUi({ shutdown: () => shutdown() });
-/* The app's version has one source: the desktop shell passes it (STRATA_APP_VERSION, from apps/desktop/src-tauri/Cargo.toml). Outside the app it is read from the same file in a checkout, else 'dev'. */
+/* The app's version has one source: the desktop shell passes it (SAGUARO_APP_VERSION, from apps/desktop/src-tauri/Cargo.toml). Outside the app it is read from the same file in a checkout, else 'dev'. */
 function appVersion() { return appVersionFrom({ env: process.env, here: HERE }); }
 const appUpdater = appUi.updater;
 /* The engine that ships inside the installer is put in the components folder when this PC has none (or an older one); no network, hashes checked. The model list waits for it. */
-const bundledEngine = control && !process.env.STRATA_NO_BUNDLED_ENGINE
-  ? installBundledEngine({ bundleDir: process.env.STRATA_ENGINE_BUNDLE_DIR || resolve(HERE, '..', '..', 'engine-bundle'), components: componentsDirectory(), log: line => console.log(line) })
+const bundledEngine = control && !process.env.SAGUARO_NO_BUNDLED_ENGINE
+  ? installBundledEngine({ bundleDir: process.env.SAGUARO_ENGINE_BUNDLE_DIR || resolve(HERE, '..', '..', 'engine-bundle'), components: componentsDirectory(), log: line => console.log(line) })
   : Promise.resolve({ action: 'none' });
-let bundledEngineSettled = !(control && !process.env.STRATA_NO_BUNDLED_ENGINE);
+let bundledEngineSettled = !(control && !process.env.SAGUARO_NO_BUNDLED_ENGINE);
 bundledEngine.then(() => { bundledEngineSettled = true; }, () => { bundledEngineSettled = true; });
 /* A build made for another make of graphics card is not unpacked; Control's answer then carries the plain sentence (with the right download) instead of its own. */
 let bundledWrongMake = null;
@@ -144,7 +144,7 @@ if (control) {
 }
 const native=createNativeControl({control,ready:bundledEngine,appUpdater,hardwareProbe:()=>(hardware.cachedHardware()?.gpus??[]).map((g,n)=>({index:g.index??n,vram_gb:g.vramGb})),directory:store.DATA_DIR,modelsDirectory:()=>store.MODELS_DIR,nativeDataDirectory:store.nativeDataDirectory,beforeLoad:async()=>{if(models.REAL&&models.library().loaded){if(serving.state().requests.some(r=>runtimeModels.state().instances.some(i=>i.id===r.instanceId)&&["queued","generating"].includes(r.state)))throw new Error("Finish requests before switching engines.");await models.unload();runtimeState();}},requests:()=>serving.state().requests,changed:value=>hub.send('native',value)});
 /* The agent: chats become DeepSeek Harness sessions when that component is installed. It is a separate
-   pinned component (STRATA_HARNESS_DIR), not part of this host, so its absence is a visible capability
+   pinned component (SAGUARO_HARNESS_DIR), not part of this host, so its absence is a visible capability
    state and the chat falls back to the direct path with a notice, never silently to another model. */
 // What the person chose in Settings -> Tools (tool groups, web search service and key, the browser, their own tools).
 const llmProxy = createLlmProxy({ targetOf: key => agent.llmTarget(key), samplingNow: () => samplingFromExpert(store.get().expert) });
@@ -231,7 +231,7 @@ function runtimeState(){
   return runtimeModels.state();
 }
 
-const startupModelId = process.env.STRATA_REAL_ENGINE === '1' ? (store.get().loaded ?? store.get().current) : null;
+const startupModelId = process.env.SAGUARO_REAL_ENGINE === '1' ? (store.get().loaded ?? store.get().current) : null;
 if (startupModelId) {
   monitor.setModel(startupModelId);
   const lastId = startupModelId;
@@ -259,7 +259,7 @@ const backend = await detectBackend({ force: true });
 
 console.log(`strata host  ·  http://${HOST}:${PORT}`);
 console.log(`hardware     ·  ${boot.accelerator.label} / ${boot.accelerator.backend} / ${boot.cpu.cores} cores / ${Math.round(boot.memory.totalGb)} GB`);
-const printInference = engine => console.log(`inference    ·  ${models.REAL ? inferenceLine({ backend, engine, settled: bundledEngineSettled }) : 'simulated (design iteration) — set STRATA_REAL_ENGINE=1 for a real engine'}`);
+const printInference = engine => console.log(`inference    ·  ${models.REAL ? inferenceLine({ backend, engine, settled: bundledEngineSettled }) : 'simulated (design iteration) — set SAGUARO_REAL_ENGINE=1 for a real engine'}`);
 if (models.REAL && control && backend.kind === 'unavailable' && bundledEngineSettled) void control.engine().catch(() => null).then(printInference);
 else printInference(null);
 console.log(`models dir   ·  ${store.MODELS_DIR}`);
@@ -753,7 +753,7 @@ const REVISE_SCRIPT = resolve(REPO_ROOT, 'integrations', 'harness', 'revise_once
 // The default revision step is the app's own assistant (server/timeskip-revise.mjs, run by Node), not the Harness's Python bridge, which
 // needs a Harness build next to the checkout that the installed app does not have.
 const REVISE_NODE_SCRIPT = resolve(HERE, 'timeskip-revise.mjs');
-const TIMESKIP_REVISE = process.env.STRATA_TIMESKIP_REVISE
+const TIMESKIP_REVISE = process.env.SAGUARO_TIMESKIP_REVISE
   ?? `"${process.execPath}" "${REVISE_NODE_SCRIPT}"`;
 /** Proves a revision request comes from a job this host started, not from some other program on this PC. */
 const INTERNAL_SECRET = randomBytes(24).toString('hex');
@@ -818,7 +818,7 @@ function createTuning({ repoRoot, python, pythonArgs = [], env = process.env } =
   function runCli(args) {
     return new Promise((resolve) => {
       const child = spawn(python, [...pythonArgs, cli, ...args, '--output', 'json'], {
-        cwd: repoRoot, windowsHide: true, env: { ...env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8', STRATA_TUNE_DIR: stateDir() },
+        cwd: repoRoot, windowsHide: true, env: { ...env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8', SAGUARO_TUNE_DIR: stateDir() },
         stdio: ['ignore', 'pipe', 'pipe'],
       });
       let out = '', err = '';
@@ -887,15 +887,15 @@ const timeskip = createTimeSkip({
   repoRoot: REPO_ROOT,
   python: TS_PYTHON,
   pythonArgs: PYTHON.args,
-  env: { ...process.env, STRATA_TIMESKIP_DIR: process.env.STRATA_TIMESKIP_DIR ?? '' },
+  env: { ...process.env, SAGUARO_TIMESKIP_DIR: process.env.SAGUARO_TIMESKIP_DIR ?? '' },
 });
 
 const runAgentTask = createAgentTaskRunner({
   agent, workspace: WORKSPACE,
-  // The loaded local model. (STRATA_TASK_REMOTE_MODEL="<connection id>:<model id>" lets a developer or an API-only setup name a saved API model instead.)
+  // The loaded local model. (SAGUARO_TASK_REMOTE_MODEL="<connection id>:<model id>" lets a developer or an API-only setup name a saved API model instead.)
   choice: () => {
     try { return { instanceId: native.resolveInstance(native.state().defaultId).id }; } catch { /* no local model is ready */ }
-    const [connectionId, ...rest] = String(process.env.STRATA_TASK_REMOTE_MODEL ?? '').split(':');
+    const [connectionId, ...rest] = String(process.env.SAGUARO_TASK_REMOTE_MODEL ?? '').split(':');
     return connectionId && rest.length ? { connectionId, modelId: rest.join(':') } : null;
   },
 });
@@ -921,9 +921,9 @@ const taskTimer = setInterval(() => tasks.tick(), 15000);
 taskTimer.unref();
 
 // The share and tunnel listeners take a free port (the next ones above the host's own) instead of a fixed PORT+1 / PORT+2 that Docker, WSL or Hyper-V may hold or reserve.
-const sharePort = await findFreePort(Number(process.env.STRATA_SHARE_PORT ?? PORT + 1), '0.0.0.0', { skip: [PORT] });
+const sharePort = await findFreePort(Number(process.env.SAGUARO_SHARE_PORT ?? PORT + 1), '0.0.0.0', { skip: [PORT] });
 const localShare = createLocalShare({ handle: openai, hasKey: () => !!store.get().serving?.apiKey, port: sharePort, changed: () => serving.setSharing(localShare.state()) });
-const tunnelPort = await findFreePort(Number(process.env.STRATA_TUNNEL_PORT ?? PORT + 2), '127.0.0.1', { skip: [PORT, sharePort] });
+const tunnelPort = await findFreePort(Number(process.env.SAGUARO_TUNNEL_PORT ?? PORT + 2), '127.0.0.1', { skip: [PORT, sharePort] });
 const tunnelOrigin = createLocalShare({ handle: openai, hasKey: () => !!store.get().serving?.apiKey, host: '127.0.0.1', port: tunnelPort });
 const connector = createConnectorInstaller({ directory: join(store.HOME, 'engine', 'cloudflare'), componentDirectory: join(componentsDirectory(), 'cloudflared') });
 const cloudflare = createCloudflare({ origin: tunnelOrigin, originUrl: `http://127.0.0.1:${tunnelPort}`, hasKey: () => !!store.get().serving?.apiKey, changed: serving.setTunnel, locate: connector.locate, prepareConnector: connector.ensure, connectorInfo: connector.connector, findRunning: findRunningConnector });
@@ -998,7 +998,7 @@ async function api(req, res, path, method, url) {
    for(const l of native.logs())lines.push(`${l.at} ${l.instanceId}: ${l.line}`);
    lines.push('','== Operations ==');for(const j of native.state().jobs)lines.push(`${j.startedAt} ${j.kind} ${j.state}${j.error?`: ${j.error}`:''}${j.details?`${NL}  ${j.details}`:''}`);
    try{const logs=join(dirname(componentsDirectory()),'logs');const names=readdirSync(logs).filter(n=>/^desktop-.*\.log$/.test(n)).sort();const crash=names.filter(n=>n.startsWith('desktop-crash-')).slice(-3).reverse();const runs=names.filter(n=>!n.startsWith('desktop-crash-')).slice(-2).reverse();lines.push('',`== Desktop shell: window crash logs (${crash.length} newest) ==`);for(const n of crash)lines.push('',`-- ${n}`,readFileSync(join(logs,n),'utf8'));lines.push('',`== Desktop shell: last lines of the newest ${runs.length} run logs ==`);for(const n of runs)lines.push('',`-- ${n}`,...readFileSync(join(logs,n),'utf8').split(NL).slice(-300));}catch{/* no desktop logs (not the Linux app, or no crash) */}
-   try{const runtime=process.env.STRATA_RUNTIME_DIR??join(dirname(componentsDirectory()),'runtime');for(const name of readdirSync(runtime).filter(n=>n.endsWith('.server.log'))){lines.push('',`== ${name} (last lines) ==`,...readFileSync(join(runtime,name),'utf8').split(NL).slice(-200));}}catch{/* no server logs yet */}
+   try{const runtime=process.env.SAGUARO_RUNTIME_DIR??join(dirname(componentsDirectory()),'runtime');for(const name of readdirSync(runtime).filter(n=>n.endsWith('.server.log'))){lines.push('',`== ${name} (last lines) ==`,...readFileSync(join(runtime,name),'utf8').split(NL).slice(-200));}}catch{/* no server logs yet */}
    const folder=join(process.env.USERPROFILE??process.env.HOME??homedir(),'Downloads');mkdirSync(folder,{recursive:true});
    const file=join(folder,`strata-diagnostics-${new Date().toISOString().replace(/[:.]/g,'-').slice(0,19)}.txt`);writeFileSync(file,lines.join(NL),'utf8');
    return json(res,200,{path:file});}
@@ -1140,7 +1140,7 @@ async function api(req, res, path, method, url) {
       workspace, prompt,
       attempts: body.attempts ?? 1,
       reviseCommand,
-      extraEnv: { STRATA_HOST_URL: `http://127.0.0.1:${PORT}`, STRATA_INTERNAL_SECRET: INTERNAL_SECRET },
+      extraEnv: { SAGUARO_HOST_URL: `http://127.0.0.1:${PORT}`, SAGUARO_INTERNAL_SECRET: INTERNAL_SECRET },
     });
     if (!result.ok) return error(res, result.code === 2 ? 400 : 502, result.error);
     const chatId = typeof body.sessionId === 'string' && body.sessionId ? body.sessionId : null;
@@ -1273,17 +1273,17 @@ async function api(req, res, path, method, url) {
     // the first start copies the engine that came with the app (about a minute): say so instead of "no engine"
     if (engine && !engine.usable && !bundledEngineSettled) engine.notice = 'The engine that came with the app is being set up. This takes a minute the first time.';
     return json(res, 200, {
-      packaged: process.env.STRATA_PACKAGED === '1',
+      packaged: process.env.SAGUARO_PACKAGED === '1',
       control: CONTROL ? { dir: CONTROL.dir, python: CONTROL.python, version: control.version, bundle: CONTROL.bundle } : null,
       engine,
       engineSetup: !bundledEngineSettled,
       componentsDir: componentsDirectory(),
-      acquisition: { forbidden: acquisitionForbidden(), env: process.env.STRATA_NO_ACQUIRE ?? null },
+      acquisition: { forbidden: acquisitionForbidden(), env: process.env.SAGUARO_NO_ACQUIRE ?? null },
     });
   }
   // The shell (and nothing else) holds the secret that lets it end the host or tell it which window is in use.
   const fromShell = () => {
-    const token = process.env.STRATA_SHUTDOWN_TOKEN ?? '';
+    const token = process.env.SAGUARO_SHUTDOWN_TOKEN ?? '';
     const given = String(req.headers['x-strata-shutdown'] ?? '');
     return token.length >= 32 && given.length === token.length && timingSafeEqual(Buffer.from(given), Buffer.from(token));
   };
@@ -1327,7 +1327,7 @@ async function api(req, res, path, method, url) {
   }
 
   if (path === '/api/setup' && method === 'GET') return json(res, 200, setupState());
-  if (path === '/api/updates/check' && method === 'GET' && control?.updateCheck) return json(res, 200, await checkComponentUpdates({ control, appUpdater, appVersion: process.env.STRATA_APP_VERSION || null }));
+  if (path === '/api/updates/check' && method === 'GET' && control?.updateCheck) return json(res, 200, await checkComponentUpdates({ control, appUpdater, appVersion: process.env.SAGUARO_APP_VERSION || null }));
   if (path === '/api/updates/check' && method === 'GET') return json(res, 200, await checkUpdates({ appVersion:appVersionToShow(setupState().app.version,native.state().version), engineVersion:native.state().available?(native.state().installed?.engine?.version??null):(await engine.config()).engine.version }));
 
   if (path === '/api/setup/step' && method === 'POST') {
@@ -1946,7 +1946,7 @@ async function api(req, res, path, method, url) {
     /* Agent turn, when the component is there and this request can use it. A client that disappears
        detaches from the turn (it keeps running in the Harness); Stop is its own request. */
     const chatId = typeof body.sessionId === 'string' && body.sessionId ? body.sessionId : null;
-    const agentSkip = process.env.STRATA_AGENT === 'off' ? 'The agent is turned off (STRATA_AGENT=off).'
+    const agentSkip = process.env.SAGUARO_AGENT === 'off' ? 'The agent is turned off (SAGUARO_AGENT=off).'
       : body.agent === false || body.tools === false ? 'This chat runs without the agent.'
       : !chatId ? 'This request did not name a chat.'
       : !(body.remoteModel || native.hasLive()) ? 'The agent needs a loaded Strata model or an API model.'
@@ -1961,7 +1961,7 @@ async function api(req, res, path, method, url) {
         return undefined;
       }
       res.write(`${JSON.stringify({ type: 'notice', code: 'agent-unavailable', message: `${capability.reason}`, ...(capability.detail ? { details: capability.detail } : {}) })}\n`);
-    } else if (agentSkip && chatId && body.agent !== false && body.tools !== false && process.env.STRATA_AGENT !== 'off') {
+    } else if (agentSkip && chatId && body.agent !== false && body.tools !== false && process.env.SAGUARO_AGENT !== 'off') {
       res.write(`${JSON.stringify({ type: 'notice', code: 'agent-skipped', message: agentSkip })}\n`);
     }
 
@@ -2207,7 +2207,7 @@ server.on('error', error => {
 server.listen(PORT, HOST, () => {
   if (process.send) process.send({ type: 'strata-ready', port: PORT });
   // Engines a lost owner left behind (an earlier crash, an older version): ended after a PID + start time + command-line check.
-  if (control && process.env.STRATA_PACKAGED === '1') control.cleanup().catch(() => {});
+  if (control && process.env.SAGUARO_PACKAGED === '1') control.cleanup().catch(() => {});
 });
 
 let stopping=false;
@@ -2223,7 +2223,7 @@ const shutdown = async () => {
 for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK']) { try { process.on(signal, shutdown); } catch { /* not on this platform */ } }
 // Started by the desktop shell: when the shell is gone (killed, crashed, logged off) stop what this app started and leave.
 // POSIX re-parents us (ppid changes); Windows keeps the old ppid, so the pid is probed (signal 0 never signals).
-if (process.env.STRATA_EXIT_WITH_PARENT === '1') {
+if (process.env.SAGUARO_EXIT_WITH_PARENT === '1') {
   const parent = process.ppid;
   const gone = () => {
     if (process.ppid !== parent) return true;

@@ -47,7 +47,7 @@ apps/desktop/scripts/fetch-node.sh --check         # verify what is installed
 The script refuses an archive whose SHA-256 does not match the digest recorded for that target. The
 digests are taken from nodejs.org's own `SHASUMS256.txt` for the pinned version, so they are not
 derived from the same response as the payload. **To bump the Node version: change
-`STRATA_NODE_VERSION`, add the new digests, and re-run `--check`** — the script will refuse an
+`SAGUARO_NODE_VERSION`, add the new digests, and re-run `--check`** — the script will refuse an
 unknown target's archive rather than installing it unverified.
 
 ## Desktop app
@@ -85,7 +85,7 @@ The installer carries two things that start a model, and neither fetches anythin
 
 **Control** (`<install>/control`, built by `apps/desktop/scripts/stage-control.py`): the same bundle as the Terminal
 archive, the pinned CPython 3.12.15, the hash-locked wheels, `strata_control`, `strata_cli` and `serve`, plus a
-`BUNDLE.json` with the interpreter and lock digests. The host finds it beside itself (or through `STRATA_CONTROL_DIR`),
+`BUNDLE.json` with the interpreter and lock digests. The host finds it beside itself (or through `SAGUARO_CONTROL_DIR`),
 runs it on its own interpreter (`PYTHONNOUSERSITE=1`, no `PYTHONHOME`/`PYTHONPATH`) and starts a model with
 `strata profile create|use-config` + `strata runtime start`, so the engine runs under the owner runtime (loopback TCP and a
 256-bit token on Windows, a private socket elsewhere; a Job Object / process group; leases) and a second client (the
@@ -97,7 +97,7 @@ single instance: a second launch focuses the open window. One app can run severa
 docs/CLOSING.md has every close path and how each is tested.
 
 **The engine** comes with the installer (`<install>/engine-bundle/<package folder>`, the same layout as below); the first start checks it against its own manifest and copies it into the per-user component folder, where Control finds it like any engine that `strata update` installed. It is a component in the per-user component folder
-(`%LOCALAPPDATA%\Strata\components`, `$XDG_DATA_HOME/strata/components`, or `STRATA_COMPONENTS_DIR`):
+(`%LOCALAPPDATA%\Strata\components`, `$XDG_DATA_HOME/strata/components`, or `SAGUARO_COMPONENTS_DIR`):
 
     components/engine/<version>-<platform>-<backend>/
         engine-component.json     schema 2: id/name "strata-engine", version, platform, backend, archs, min_driver,
@@ -106,7 +106,7 @@ docs/CLOSING.md has every close path and how each is tested.
         strata[.exe]  *.dll | *.so   the binary and the GPU runtime libraries beside it
 
 A run config names it as `"exe": "component:strata-engine"`; at start `strata_control/engine_component.py` picks the package
-for this PC (platform, then the backend its GPU needs: nvidia-smi / rocminfo / sycl-ls, or `STRATA_ENGINE_BACKEND`; CUDA
+for this PC (platform, then the backend its GPU needs: nvidia-smi / rocminfo / sycl-ls, or `SAGUARO_ENGINE_BACKEND`; CUDA
 architectures, `min_driver` and `min_runtime` are checked; the newest version wins), checks every file's size and
 SHA-256 (a start hashes the whole package; a mismatch is `EngineIntegrityError` and nothing starts) and puts the package
 folder first on the library path.
@@ -115,7 +115,7 @@ while it starts or serves", and no fetch. That is the start itself. Everything b
 words that it could not find an engine for this computer, asks whether to go on (Enter means yes), downloads the model and ends with the next step
 (exit code 0, nothing started), and the app shows the same warning with an "Update engine" button in Settings. `packaging/package_engine.py` makes a local package from a build folder.
 
-**No acquisition at run time.** `STRATA_NO_ACQUIRE=1` (set by the Tauri shell for the host, and for Control by the host)
+**No acquisition at run time.** `SAGUARO_NO_ACQUIRE=1` (set by the Tauri shell for the host, and for Control by the host)
 makes `strata_control/acquisition.py` refuse pip, downloads and compiles; on the host side `server/acquisition.mjs`
 refuses the llama.cpp and cloudflared fetches (a connector placed in `components/cloudflared/` is used as it is). Models the
 user chooses to download are a separate, explicit action. `apps/host/tests/no-acquire.test.mjs` runs the host under

@@ -3,11 +3,11 @@
 #include <cstdint>
 #include <cstdlib>
 
-// STRATA_SHORT_READS=1 (opt-in): a prompt read of a few hundred new tokens on a layer split without its fixed costs.
+// SAGUARO_SHORT_READS=1 (opt-in): a prompt read of a few hundred new tokens on a layer split without its fixed costs.
 // Header-only rules, tested on the CPU (tests/program/short_reads_test.cpp).
 //
 //  1. The CPU prefill share on a layer split: a staged chunk hands the idle CPU pool the non-resident experts few of
-//     its tokens route to (prefill.cpp, STRATA_PREFILL_CPU_SHARE), instead of every stage streaming each routed
+//     its tokens route to (prefill.cpp, SAGUARO_PREFILL_CPU_SHARE), instead of every stage streaming each routed
 //     expert it does not hold over its PCIe link, one stage after another.  Chunks below `share_max` are staged.
 //  2. The lazy refill: the slots the prompt path borrowed are copied back on a stream of their own while the reply
 //     decodes; an expert counts as resident again only once its copy has landed (until then the pool computes it).
@@ -15,15 +15,15 @@ namespace strata::program::short_reads {
 
 inline bool env_on(const char* v) { return v != nullptr && v[0] != 0 && v[0] != '0'; }
 
-/// The staged-chunk limit the split's share takes: STRATA_PREFILL_CPU_SHARE_MAX when set (at least 1024), else 3072.
+/// The staged-chunk limit the split's share takes: SAGUARO_PREFILL_CPU_SHARE_MAX when set (at least 1024), else 3072.
 inline int64_t share_max(const char* env_max) {
     if (env_max == nullptr) return 3072;
     const int64_t v = std::atoll(env_max);
     return v < 1024 ? 1024 : v;
 }
 
-/// Whether STRATA_SHORT_READS arms the share by default on a layer split (one GPU has its own default rule).
-///   explicit_set: STRATA_PREFILL_CPU_SHARE is set (Prefill honours it whatever this says)
+/// Whether SAGUARO_SHORT_READS arms the share by default on a layer split (one GPU has its own default rule).
+///   explicit_set: SAGUARO_PREFILL_CPU_SHARE is set (Prefill honours it whatever this says)
 inline bool split_share_default(bool on, bool multi_gpu, bool share_pool, bool explicit_set, bool has_work, bool memory_ok) {
     return on && multi_gpu && share_pool && !explicit_set && has_work && memory_ok;
 }
@@ -39,7 +39,7 @@ struct LazySetup {
     bool head_alias = false;   ///< --prefill-head-alias: the loan is the output head
     bool adapt_async = false;  ///< --adapt-async: the tier's round runs beside the windows
     bool evict_sync = false;   ///< the tier's lagging evictions patch the device tables per launch
-    bool ram_adapt = false;    ///< STRATA_RAM_ADAPT: RAM residency follows host_res between windows
+    bool ram_adapt = false;    ///< SAGUARO_RAM_ADAPT: RAM residency follows host_res between windows
     bool foresight = false;    ///< the foresight swap moves experts between windows
 };
 inline const char* lazy_off(const LazySetup& s) {
@@ -51,7 +51,7 @@ inline const char* lazy_off(const LazySetup& s) {
     if (s.head_alias) return "--prefill-head-alias";
     if (s.adapt_async) return "--adapt-async";
     if (s.evict_sync) return "the lagging adaptive tier";
-    if (s.ram_adapt) return "STRATA_RAM_ADAPT";
+    if (s.ram_adapt) return "SAGUARO_RAM_ADAPT";
     if (s.foresight) return "the foresight swap";
     return nullptr;
 }

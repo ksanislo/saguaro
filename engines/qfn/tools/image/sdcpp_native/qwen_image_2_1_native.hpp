@@ -81,11 +81,11 @@ namespace Qwen {
                                 std::shared_ptr<RunnerWeightManager> weight_manager, const char* model_args,
                                 std::string dit_path)
             : QwenImage21Runner(backend, weights, prefix, weight_manager, model_args), dit_path(std::move(dit_path)) {
-            timing = getenv("STRATA_QI_TIMING") != nullptr;
-            qsplit     = getenv("STRATA_QI_QSPLIT") != nullptr;      // measured: no accuracy gain, +7% step time
-            exact_attn = getenv("STRATA_QI_EXACT_ATTN") != nullptr;
-            fuse_qkv   = getenv("STRATA_QI_NO_QKV_FUSE") == nullptr;
-            fast_ln    = getenv("STRATA_QI_FAST_LN") != nullptr;    // measured: no gain on the 3060 (2.10 vs 2.10 s/step)
+            timing = getenv("SAGUARO_QI_TIMING") != nullptr;
+            qsplit     = getenv("SAGUARO_QI_QSPLIT") != nullptr;      // measured: no accuracy gain, +7% step time
+            exact_attn = getenv("SAGUARO_QI_EXACT_ATTN") != nullptr;
+            fuse_qkv   = getenv("SAGUARO_QI_NO_QKV_FUSE") == nullptr;
+            fast_ln    = getenv("SAGUARO_QI_FAST_LN") != nullptr;    // measured: no gain on the 3060 (2.10 vs 2.10 s/step)
             gbuf.resize(64 << 20);
         }
 
@@ -333,7 +333,7 @@ namespace Qwen {
             const int64_t kvt = prefix ? n : L + n;       // keys per head in the work K/V
             const bool use_wmma = !prefix && wmma_attn && !exact_attn;
             // fp16 queries carry ~5e-4 relative error into logits that reach the tens here: the low half of each
-            // query (q - fp16(q)) goes through a second WMMA (STRATA_QI_QSPLIT=0 drops it).  It sits in the fp32-sized
+            // query (q - fp16(q)) goes through a second WMMA (SAGUARO_QI_QSPLIT=0 drops it).  It sits in the fp32-sized
             // q16 buffer right after the fp16 high half.
             const size_t qlo_off = (size_t) H * n * D * sizeof(ggml_fp16_t);
             float* X = (float*) x->data;
@@ -389,7 +389,7 @@ namespace Qwen {
                     }
                     if (rc) break;
                     if (exact_attn) {
-                        // reference: fp32 attention (fp16 K/V as every path has them), slow; STRATA_QI_EXACT_ATTN=1
+                        // reference: fp32 attention (fp16 K/V as every path has them), slow; SAGUARO_QI_EXACT_ATTN=1
                         rc = qi21_attn_causal(s, (const float*) q16->data, (int) n, kw->data, vw->data, (int) kvt,
                                               (float*) att->data, (int) H, (int) n, (int) kvt, 0);
                     } else if (use_wmma) {
@@ -467,7 +467,7 @@ namespace Qwen {
             }
             const auto t0 = std::chrono::steady_clock::now();
             if (!loaded) {
-                wmma_attn = qi21_has_wmma_attn(runtime_backend) && getenv("STRATA_QI_GGML_ATTN") == nullptr;
+                wmma_attn = qi21_has_wmma_attn(runtime_backend) && getenv("SAGUARO_QI_GGML_ATTN") == nullptr;
                 if (!load_weights()) {
                     fail("could not load the DiT weights onto the GPU");
                     return QwenImage21Runner::compute(n_threads, inputs);

@@ -7,7 +7,7 @@
  *
  * It speaks the Model Context Protocol over stdio (newline-delimited JSON-RPC), the transport the Harness's MCP client uses for a program
  * it starts. The file is re-read on every request, so a change in Settings is seen without restarting anything. The assistant's text for
- * a command tool reaches the command in the STRATA_INPUT environment variable (never spliced into the command line, so it cannot add
+ * a command tool reaches the command in the SAGUARO_INPUT environment variable (never spliced into the command line, so it cannot add
  * commands of its own). A command runs in the shell that suits it (PowerShell for a Windows command that reads as PowerShell, cmd.exe for
  * the rest, sh elsewhere), in its own folder or the one the assistant names, gets 2 minutes unless its tool allows more (up to an hour) and
  * 20,000 characters of output (custom-command-run.mjs).

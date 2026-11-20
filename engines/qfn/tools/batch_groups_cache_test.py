@@ -3,7 +3,7 @@
 (or the conversation cache) on every later turn instead of reading their prompt from token 0.
 
   python3 tools/batch_groups_cache_test.py CFG OUT.json
-  STRATA_EXTRA_ARGS="--batch 2 --batch-groups 2 --prompt-cache 4 --conversation-cache-mib 4096 --conversation-cache-slots 3"
+  SAGUARO_EXTRA_ARGS="--batch 2 --batch-groups 2 --prompt-cache 4 --conversation-cache-mib 4096 --conversation-cache-slots 3"
 
 Three rounds; each round runs conversation A and conversation B at the same time (so both go through the batch slots),
 the next round continues each one (prompt + its answer + a new user turn).  The engine log says per request how many
@@ -13,7 +13,7 @@ prompt.  The answers (token ids) are written to OUT.json to compare two runs.
 import json, os, re, sys, threading
 from pathlib import Path
 
-REPO = Path(os.environ.get("STRATA_REPO", Path(__file__).resolve().parent.parent))
+REPO = Path(os.environ.get("SAGUARO_REPO", Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(REPO / "tools")); sys.path.insert(0, str(REPO))
 import strata_tokenizer as ST
 from serve.server import StrataEngine, child_env, engine_args
@@ -28,9 +28,9 @@ tok = ST.Tokenizer(toks, (tp / "merges.txt").read_text().split("\n"), json.loads
 if os.environ.get("GPUS"):   # e.g. GPUS=0,1: a layer split over those cards (SPLIT=auto)
     cfg["gpu"] = [int(x) for x in os.environ["GPUS"].split(",")]
     cfg["layer_split"] = os.environ.get("SPLIT", "auto")
-args = engine_args(cfg) + os.environ.get("STRATA_EXTRA_ARGS", "").split()
+args = engine_args(cfg) + os.environ.get("SAGUARO_EXTRA_ARGS", "").split()
 log = os.environ.get("SMOKE_LOG", cfg["log"])
-eng = StrataEngine(os.environ.get("STRATA_EXE", cfg["exe"]), args, cwd=cfg.get("cwd"), log=log, env=child_env(cfg))
+eng = StrataEngine(os.environ.get("SAGUARO_EXE", cfg["exe"]), args, cwd=cfg.get("cwd"), log=log, env=child_env(cfg))
 GEN = "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
 
 

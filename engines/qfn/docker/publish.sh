@@ -24,7 +24,7 @@
 #   --push               push the images (default: build only)
 #   --no-latest          do not tag / push latest-<flavor>
 #   --keep-images        do not remove the local images after the run (default: removed only when this script pushed them)
-# Environment: STRATA_DOCKER_BUILD_OPTS adds options to `docker build` (see build.sh).
+# Environment: SAGUARO_DOCKER_BUILD_OPTS adds options to `docker build` (see build.sh).
 set -eu
 
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)

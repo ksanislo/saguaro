@@ -28,7 +28,7 @@ bool cpu_avx2_ok() { return false; }
 #else
 bool cpu_avx512_ok() {
     static const bool ok = [] {
-        if (const char* f = std::getenv("STRATA_FORCE_AVX2"); f != nullptr && f[0] == '1') return false;
+        if (const char* f = std::getenv("SAGUARO_FORCE_AVX2"); f != nullptr && f[0] == '1') return false;
         unsigned r[4] = {0, 0, 0, 0};
         auto cpuid = [&](unsigned leaf, unsigned sub) {
 #if defined(_MSC_VER)
@@ -60,7 +60,7 @@ bool cpu_avx512_ok() {
 
 bool cpu_avx512bw_ok() {
     static const bool ok = [] {
-        if (const char* f = std::getenv("STRATA_FORCE_AVX2"); f != nullptr && f[0] == '1') return false;
+        if (const char* f = std::getenv("SAGUARO_FORCE_AVX2"); f != nullptr && f[0] == '1') return false;
         unsigned r[4] = {0, 0, 0, 0};
         auto cpuid = [&](unsigned leaf, unsigned sub) {
 #if defined(_MSC_VER)
@@ -124,12 +124,12 @@ bool cpu_avx2_ok() {
     return ok;
 }
 
-#endif  // STRATA_X86
+#endif  // SAGUARO_X86
 
 // A CPU without AVX2 (and without AVX-512) has no kernel for these: say so instead of an illegal instruction.
-// Run with the CPU expert lane off (STRATA_GLM_CPU_LANE=0) so the GPUs compute every expert.
+// Run with the CPU expert lane off (SAGUARO_GLM_CPU_LANE=0) so the GPUs compute every expert.
 [[noreturn]] static void no_simd_kernel(const char* what) {
-    std::fprintf(stderr, "maya: %s needs AVX2 or AVX-512 and this CPU has neither; run with MAYA_GLM_CPU_LANE=0\n", what);
+    std::fprintf(stderr, "maya: %s needs AVX2 or AVX-512 and this CPU has neither; run with SAGUARO_GLM_CPU_LANE=0\n", what);
     std::abort();
 }
 
@@ -169,7 +169,7 @@ bool expert_layout_load(const std::string& pack_dir, int64_t n_layers, int64_t n
         return true;
     }
 #if !defined(STRATA_NATIVE_EXPERTS)
-    err = "this pack has native (IQ) experts but the engine was built without MAYA_NATIVE_EXPERTS";
+    err = "this pack has native (IQ) experts but the engine was built without SAGUARO_NATIVE_EXPERTS";
     return false;
 #else
     L.native = true;

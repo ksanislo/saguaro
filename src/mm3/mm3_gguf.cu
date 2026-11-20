@@ -150,7 +150,7 @@ void q8s(const float* x, size_t ldx, int rows, int k, int8_t* q, float* d, int* 
     q8s_kernel<<<dim3((unsigned) ((k / 32 + kWarps - 1) / kWarps), (unsigned) rows), kThreads, 0, s>>>(x, ldx, k, q, d,
                                                                                                       sums);
 }
-bool iq_q8k() {   // MAYA_MM3_IQ_Q8K=0: the experts' activations a scale a 32 (the dense GEMVs' rounding)
+bool iq_q8k() {   // SAGUARO_MM3_IQ_Q8K=0: the experts' activations a scale a 32 (the dense GEMVs' rounding)
     static const bool on = [] {
         const char* v = ::mm3::env("MM3_IQ_Q8K");
         return v == nullptr || std::atoi(v) != 0;

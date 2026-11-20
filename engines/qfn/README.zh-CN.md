@@ -282,12 +282,12 @@ strata doctor                              # check the installed files
 
 - 在 `"args"` 列表中加入 `"--adapt-async", "1"`。这样专家缓存会在辅助线程上更新，不会让回答暂停。在 RTX 5070
   （Windows，Q2_0）上测得：解码快 4-5%，代码和长文档快 7-10%。回答可能与默认设置略有不同，但每次运行的结果保持一致。
-- 在 `"env"` 块中加入 `"STRATA_PIN_BY_NEED": "1"`（Windows）。Windows 只能为显卡锁定大约一半的内存，
+- 在 `"env"` 块中加入 `"SAGUARO_PIN_BY_NEED": "1"`（Windows）。Windows 只能为显卡锁定大约一半的内存，
   这个设置会优先锁定显卡最先需要的专家。在 RTX 5070 上测得：读取提示词快 4.4%。
 
 ```json
 "args": [ ..., "--adapt-async", "1" ],
-"env": { "STRATA_PIN_BY_NEED": "1" }
+"env": { "SAGUARO_PIN_BY_NEED": "1" }
 ```
 
 修改后请重启 Strata。要撤销，删除这两项即可。

@@ -36,7 +36,7 @@ def add_tune_auto(tune_sp: argparse._SubParsersAction) -> None:
     p.add_argument("--name", default=None, help="the preset's name (default: model, context and your wish)")
     p.add_argument("--time", dest="minutes", type=float, default=None, help="time to spend, in minutes")
     p.add_argument("--no-save", action="store_true", help="measure and report, but do not save a preset")
-    p.add_argument("--gpu-lock", default=os.environ.get("STRATA_TUNE_GPU_LOCK"),
+    p.add_argument("--gpu-lock", default=os.environ.get("SAGUARO_TUNE_GPU_LOCK"),
                    help="a lock file held around every engine run (shared boxes)")
     p.add_argument("--no-quiet-check", action="store_true", help="do not wait for other engines or a busy CPU")
     p.add_argument("--serve-dir", default=None, help="the folder that holds serve/ (default: this installation)")
@@ -82,7 +82,7 @@ def add_presets(sp: argparse._SubParsersAction) -> None:
     rc = common(psp.add_parser("recheck", help="a short check (about 2 minutes) that a preset is still as fast"))
     rc.add_argument("preset")
     rc.add_argument("target", help="the profile name or run configuration the preset belongs to")
-    rc.add_argument("--gpu-lock", default=os.environ.get("STRATA_TUNE_GPU_LOCK"))
+    rc.add_argument("--gpu-lock", default=os.environ.get("SAGUARO_TUNE_GPU_LOCK"))
     rc.add_argument("--serve-dir", default=None)
     rc.add_argument("--work-dir", default=None)
     rc.add_argument("--status-file", default=None)

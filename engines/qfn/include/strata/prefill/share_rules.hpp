@@ -2,7 +2,7 @@
 //
 // The share hands the idle CPU pool experts the GPU would otherwise stream over PCIe.  With every expert resident in
 // the GPU's cache nothing is streamed, so there is nothing to take; arming the default only moves the staged-chunk
-// limit and costs ~5% at 1,000 tokens (#1595: V100, 3 rounds x 3 runs).  An explicit STRATA_PREFILL_CPU_SHARE is
+// limit and costs ~5% at 1,000 tokens (#1595: V100, 3 rounds x 3 runs).  An explicit SAGUARO_PREFILL_CPU_SHARE is
 // honoured by Prefill::arm_cpu_share whatever this says.
 #pragma once
 
@@ -18,10 +18,10 @@ constexpr bool default_share_has_work(int64_t resident_slots, int64_t total_pair
 }
 
 
-// ---- memory (0.1.41 report, RTX 5090, tight RAM: chats failed and the engine restarted until STRATA_PREFILL_CPU_SHARE=0) ----
+// ---- memory (0.1.41 report, RTX 5090, tight RAM: chats failed and the engine restarted until SAGUARO_PREFILL_CPU_SHARE=0) ----
 // The default share reads experts with the CPU and keeps two pinned buffers on the host.  When the host has little
 // memory left, or the experts it would read are file pages the RAM cannot keep (each is a page-in on a worker thread),
-// the default is not armed.  An explicit STRATA_PREFILL_CPU_SHARE is the user's: it is armed and the engine only warns.
+// the default is not armed.  An explicit SAGUARO_PREFILL_CPU_SHARE is the user's: it is armed and the engine only warns.
 constexpr uint64_t kShareRamMargin = 3ull << 30;     // RAM kept free beside the share's own buffers and the file pages
 constexpr uint64_t kShareCommitFloor = 4ull << 30;   // Windows commit kept free (the #1607 floor)
 constexpr uint64_t kUnknown = ~uint64_t{0};

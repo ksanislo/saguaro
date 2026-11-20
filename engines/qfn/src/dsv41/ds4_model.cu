@@ -1017,7 +1017,7 @@ struct Model::Impl {
     // files): RAM slots of one expert blob each, filled at load with the hottest experts VRAM does not hold, so the
     // CPU lane reads them from RAM; between windows (cache_tick) a hotter expert from the files takes the place of the
     // layer's coldest held one - read into a free slot by ram_th, switched while nothing reads them.  Opt-in
-    // (STRATA_DS4_RAM_TIER=1): on a V100 with 64 GB of RAM it was slower than the page cache alone (1.4 against 2.2-2.4
+    // (SAGUARO_DS4_RAM_TIER=1): on a V100 with 64 GB of RAM it was slower than the page cache alone (1.4 against 2.2-2.4
     // tokens/s sampled) - the cache follows a conversation's experts at once, the tier's moves lag behind.
     struct RamSwap {
         int layer = 0, in = -1, out = -1, slot = -1;
@@ -1033,19 +1033,19 @@ struct Model::Impl {
     std::condition_variable ram_cv;
     std::thread ram_th;
     int ram_inflight = 0, ram_held = 0;
-    bool ram_tier = std::getenv("STRATA_DS4_RAM_TIER") != nullptr && std::atoi(std::getenv("STRATA_DS4_RAM_TIER")) != 0;
-    // STRATA_DS4_DISK_SKIP_W (experimental opt-in, CHANGES THE ANSWERS; 0 = off): on the small windows (decode, a
+    bool ram_tier = std::getenv("SAGUARO_DS4_RAM_TIER") != nullptr && std::atoi(std::getenv("SAGUARO_DS4_RAM_TIER")) != 0;
+    // SAGUARO_DS4_DISK_SKIP_W (experimental opt-in, CHANGES THE ANSWERS; 0 = off): on the small windows (decode, a
     // draft's check - never the prompt path) the CPU lane leaves out a routed expert whose share of its token's route
     // weights is below this and whose pages are not in RAM now (the page cache or the RAM tier; os::in_ram - Linux every
     // page, Windows sampled pages of the working set), so a token waits on the SSD only for the experts that weigh; the
-    // weight it carried is lost (no renormalisation).  On layers from STRATA_DS4_DISK_SKIP_FROM (0) on.  An expert left
+    // weight it carried is lost (no renormalisation).  On layers from SAGUARO_DS4_DISK_SKIP_FROM (0) on.  An expert left
     // out still counts as used (the expert cache, the profile).
     const float disk_skip_w = [] {
-        const char* v = std::getenv("STRATA_DS4_DISK_SKIP_W");
+        const char* v = std::getenv("SAGUARO_DS4_DISK_SKIP_W");
         return v != nullptr ? std::max(0.0f, (float) std::atof(v)) : 0.0f;
     }();
     const int disk_skip_from = [] {
-        const char* v = std::getenv("STRATA_DS4_DISK_SKIP_FROM");
+        const char* v = std::getenv("SAGUARO_DS4_DISK_SKIP_FROM");
         return v != nullptr ? std::max(0, std::atoi(v)) : 0;
     }();
     // the RAM store (--ssd-cache): the CPU lane's experts in slots a policy owns, read unbuffered (null: off)
@@ -4685,7 +4685,7 @@ struct Model::Impl {
             for (size_t i = 0; i < all.size(); ++i) cs[i * (size_t) NH / all.size()].push_back(all[i]);
         }
         static const int lane_free = [] {
-            const char* v = std::getenv("STRATA_DS4_LANE_FREE");
+            const char* v = std::getenv("SAGUARO_DS4_LANE_FREE");
             return v != nullptr ? std::max(0, std::atoi(v)) : 2;
         }();
         size_t lane_cpus = 0;
@@ -4700,7 +4700,7 @@ struct Model::Impl {
             // (and waits on the device) and whatever else the PC runs: with a worker spinning on every other logical CPU
             // that thread waits for a core (Project Maya #359, a 20-core Windows 11 PC: decode 28.3 -> 55.5 tok/s).  Only
             // when the lane would take every logical CPU and --cpu-threads is not given.
-            // STRATA_DS4_LANE_FREE: the cores left free (2 by default, 0: as before)
+            // SAGUARO_DS4_LANE_FREE: the cores left free (2 by default, 0: as before)
             if (X == 0 && o.cpu_threads <= 0 && lane_free > 0 && (int) c.size() > lane_free + 1 && lane_takes_all)
                 c.resize(c.size() - (size_t) lane_free);
             int nw = (int) c.size();
@@ -7915,13 +7915,13 @@ struct Model::Impl {
 
     // the first layer of a long prompt's second half (forward_chunks' two passes), or -1: the first with compress ratio 1
     // (V4.1: 20), every one after it ratio 1 too and owning no compressed KV or index keys of its own (they read its),
-    // every trunk layer on one GPU.  The settings' MAYA_DS4_PROMPT_SKIP (STRATA_DS4_PROMPT_SKIP; DS4_YOCO for tests):
+    // every trunk layer on one GPU.  The settings' SAGUARO_DS4_PROMPT_SKIP (SAGUARO_DS4_PROMPT_SKIP; DS4_YOCO for tests):
     // 1 (the default) the skip, 2 DeepSeek's own serving's (the last 128 rows only: faster, the answers shift a
     // little), 0 off
     static int yoco_mode() {
         static const int m = [] {
             const char* v = std::getenv("DS4_YOCO");
-            if (v == nullptr) v = std::getenv("STRATA_DS4_PROMPT_SKIP");
+            if (v == nullptr) v = std::getenv("SAGUARO_DS4_PROMPT_SKIP");
             return v != nullptr ? std::atoi(v) : 1;
         }();
         return m;

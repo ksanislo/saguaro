@@ -61,7 +61,7 @@ Dflash2Drafter::~Dflash2Drafter() {
     if (ev_b_) cudaEventDestroy(ev_b_);
 }
 
-// STRATA_DF2_PROFILE=1 (measurement only): the round runs without its graph and an event follows every stage; the per-stage averages print at exit
+// SAGUARO_DF2_PROFILE=1 (measurement only): the round runs without its graph and an event follows every stage; the per-stage averages print at exit
 struct Dflash2Drafter::Prof {
     std::vector<cudaEvent_t> ev;
     std::vector<std::string> name;
@@ -74,9 +74,9 @@ void Dflash2Drafter::prof_free() {
     prof_ = nullptr;
 }
 
-// STRATA_DF2_SKIP=attn,head,ctx,mlp,qkvo (measurement only): leaves those parts out of the round, so the graph's GPU time without them can be read
+// SAGUARO_DF2_SKIP=attn,head,ctx,mlp,qkvo (measurement only): leaves those parts out of the round, so the graph's GPU time without them can be read
 static bool skip_part(const char* what) {
-    static const std::string list = [] { const char* e = std::getenv("STRATA_DF2_SKIP"); return std::string(e ? e : ""); }();
+    static const std::string list = [] { const char* e = std::getenv("SAGUARO_DF2_SKIP"); return std::string(e ? e : ""); }();
     return !list.empty() && list.find(what) != std::string::npos;
 }
 
@@ -193,15 +193,15 @@ bool Dflash2Drafter::load(const std::string& path, int device, std::string& err)
         }
     }
     // the draft round runs while the verifier's async commit still has work on the card: a high-priority stream keeps it from queueing behind that
-    // (CUDA by default; on HIP only with STRATA_DF2_PRIO=1, where the engine's other streams keep the default priority)
+    // (CUDA by default; on HIP only with SAGUARO_DF2_PRIO=1, where the engine's other streams keep the default priority)
     int prio_lo = 0, prio_hi = 0;
 #if defined(STRATA_USE_HIP)
-    static const bool hi_prio = [] { const char* e = std::getenv("STRATA_DF2_PRIO"); return e && e[0] == '1'; }();
+    static const bool hi_prio = [] { const char* e = std::getenv("SAGUARO_DF2_PRIO"); return e && e[0] == '1'; }();
     if (hi_prio) hipDeviceGetStreamPriorityRange(&prio_lo, &prio_hi);
     if (hipStreamCreateWithPriority(&cs_, hipStreamNonBlocking, hi_prio ? prio_hi : 0) != cudaSuccess ||
         hipStreamCreateWithPriority(&cs2_, hipStreamNonBlocking, hi_prio ? prio_hi : 0) != cudaSuccess) {
 #else
-    static const bool hi_prio = [] { const char* e = std::getenv("STRATA_DF2_PRIO"); return !(e && e[0] == '0'); }();
+    static const bool hi_prio = [] { const char* e = std::getenv("SAGUARO_DF2_PRIO"); return !(e && e[0] == '0'); }();
     cudaDeviceGetStreamPriorityRange(&prio_lo, &prio_hi);
     if (cudaStreamCreateWithPriority(&cs_, cudaStreamNonBlocking, hi_prio ? prio_hi : 0) != cudaSuccess ||
         cudaStreamCreateWithPriority(&cs2_, cudaStreamNonBlocking, hi_prio ? prio_hi : 0) != cudaSuccess) {
@@ -215,8 +215,8 @@ bool Dflash2Drafter::load(const std::string& path, int device, std::string& err)
     }
     for (int l = 0; l < 8; ++l)
         if (cudaEventCreateWithFlags(&ev_ctx_[l], cudaEventDisableTiming) != cudaSuccess) { err = "dflash2: events"; return false; }
-    if (const char* e = std::getenv("STRATA_DF2_PROFILE"); e && e[0] == '1') prof_ = new Prof();
-    if (const char* e = std::getenv("STRATA_DF2_TIMING"); e && e[0] == '1') {
+    if (const char* e = std::getenv("SAGUARO_DF2_PROFILE"); e && e[0] == '1') prof_ = new Prof();
+    if (const char* e = std::getenv("SAGUARO_DF2_TIMING"); e && e[0] == '1') {
         timing_ = true;
         cudaEventCreate(&ev_a_);
         cudaEventCreate(&ev_b_);
@@ -442,13 +442,13 @@ bool Dflash2Drafter::capture(int n, const float* taps, std::string& err) {
     if (cudaStreamBeginCapture(cs_, cudaStreamCaptureModeThreadLocal) != cudaSuccess) { err = "dflash2: begin capture"; return false; }
     kernels::copy_i32_from_mapped(d_meta_, m_meta_, 32, cs_);
     // the context update (fc, the keys and values) and the block's front run side by side: they meet before each layer's attention
-    // measured: -0.3 ms a round on an RTX 3060, +0.0..0.7 on a Strix Halo (gfx1151), so the HIP builds keep one stream (STRATA_DF2_FORK=1 / 0 overrides)
+    // measured: -0.3 ms a round on an RTX 3060, +0.0..0.7 on a Strix Halo (gfx1151), so the HIP builds keep one stream (SAGUARO_DF2_FORK=1 / 0 overrides)
 #if defined(STRATA_USE_HIP)
     static const bool fork_default = false;
 #else
     static const bool fork_default = true;
 #endif
-    static const bool fork_on = [] { const char* e = std::getenv("STRATA_DF2_FORK"); return e && e[0] ? e[0] == '1' : fork_default; }();
+    static const bool fork_on = [] { const char* e = std::getenv("SAGUARO_DF2_FORK"); return e && e[0] ? e[0] == '1' : fork_default; }();
     fork_ = fork_on && prof_ == nullptr && cs2_ != nullptr;
     if (fork_) {
         cudaEventRecord(ev_fork_, cs_);

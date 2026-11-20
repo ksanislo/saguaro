@@ -1,11 +1,11 @@
-// STRATA_HCD_EXACT's kernel against hipBLASLt, bit for bit.  Gemm::bf16_hcd_exact (the hyper-connection read's down
+// SAGUARO_HCD_EXACT's kernel against hipBLASLt, bit for bit.  Gemm::bf16_hcd_exact (the hyper-connection read's down
 // projection, N 320 x K 10240, BF16 in, FP32 out) reproduces hipBLASLt solutions 1176 / 1177's k order, StaggerU
 // included; it launches only when the tuning table makes hipBLASLt take one of them for the shape.  This test runs both
 // for several chunk sizes T on the same random inputs (the activations at the token stride the engine uses, K + 64) and
 // requires every output to be equal: a hipBLASLt update that renumbers its solutions or changes their order shows up
 // here as a mismatch (or as the kernel declining, which is reported).
 //
-// Needs STRATA_HIPBLASLT_TUNING (the gfx1151 table in tools/hip) on a gfx11 card: exit 77 (SKIP) otherwise, or when no
+// Needs SAGUARO_HIPBLASLT_TUNING (the gfx1151 table in tools/hip) on a gfx11 card: exit 77 (SKIP) otherwise, or when no
 // T is taken by the kernel at all.
 #include <cuda_runtime.h>
 
@@ -29,8 +29,8 @@
 } while (0)
 
 int main() {
-    if (std::getenv("STRATA_HIPBLASLT_TUNING") == nullptr) {
-        std::printf("SKIP: STRATA_HIPBLASLT_TUNING is not set (the kernel runs only where the table picks solution 1176 / 1177)\n");
+    if (std::getenv("SAGUARO_HIPBLASLT_TUNING") == nullptr) {
+        std::printf("SKIP: SAGUARO_HIPBLASLT_TUNING is not set (the kernel runs only where the table picks solution 1176 / 1177)\n");
         return 77;
     }
     hipDeviceProp_t prop{};

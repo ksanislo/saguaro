@@ -132,7 +132,7 @@ class Api(Served):
         msg = [{"role": "user", "content": "hi"}]
         s, b = self.req("POST", "/api/chat", {"model": other, "messages": msg})
         self.assertEqual(s, 409)                                 # (not started by saguaro.sh: cannot switch itself)
-        os.environ["MAYA_RESTART_ON_UPDATE"] = "1"
+        os.environ["SAGUARO_RESTART_ON_UPDATE"] = "1"
         with mock.patch.object(Service, "_restart_into") as restart:
             s, body, h = self.raw("POST", "/api/chat", {"model": other, "messages": msg})
             self.assertEqual((s, h["Retry-After"]), (503, "30"))
@@ -201,8 +201,8 @@ class Pull(Api):
 
     def hook(self, script=None, code=0):
         script = (script or self.SCRIPT) + (f"sys.exit({code})\n" if code else "")
-        os.environ["MAYA_PULL_COMMAND"] = json.dumps([sys.executable, "-c", script])
-        self.addCleanup(os.environ.pop, "MAYA_PULL_COMMAND", None)
+        os.environ["SAGUARO_PULL_COMMAND"] = json.dumps([sys.executable, "-c", script])
+        self.addCleanup(os.environ.pop, "SAGUARO_PULL_COMMAND", None)
 
     def test_catalog_and_pull_stream(self):
         s, b = self.req("GET", "/api/catalog")

@@ -51,14 +51,14 @@ class ExistingInstallIsFoundInPlace(unittest.TestCase):
         for d in (self.appdata, self.old, self.data, self.terminal):
             d.mkdir()
         env = mock.patch.dict(os.environ, {"APPDATA": str(self.appdata), "XDG_CONFIG_HOME": str(self.appdata),
-                                           "STRATA_PROFILE_DIR": str(self.profiles),
-                                           "STRATA_RUNTIME_DIR": str(base / "runtime"),
+                                           "SAGUARO_PROFILE_DIR": str(self.profiles),
+                                           "SAGUARO_RUNTIME_DIR": str(base / "runtime"),
                                            # the desktop app's folders of whoever runs the tests are not part of this fixture
                                            "LOCALAPPDATA": str(base / "local"), "XDG_DATA_HOME": str(base / "localshare"),
-                                           "STRATA_COMPONENTS_DIR": ""})
+                                           "SAGUARO_COMPONENTS_DIR": ""})
         env.start()
         self.addCleanup(env.stop)
-        os.environ.pop("STRATA_INSTALL_DIR", None)
+        os.environ.pop("SAGUARO_INSTALL_DIR", None)
 
         exe_name = "strata.exe" if os.name == "nt" else "strata"
         (self.old / "engine").mkdir()
@@ -149,7 +149,7 @@ class ExistingInstallIsFoundInPlace(unittest.TestCase):
         self.assertEqual(models.resolve_install(), (self.terminal, "here"))
         (self.terminal / "strata-local.json").unlink()
         self.assertEqual(models.resolve_install(str(self.old)), (self.old.resolve(), "explicit"))
-        with mock.patch.dict(os.environ, {"STRATA_INSTALL_DIR": str(self.old)}):
+        with mock.patch.dict(os.environ, {"SAGUARO_INSTALL_DIR": str(self.old)}):
             self.assertEqual(models.resolve_install()[1], "explicit")
 
     def test_nothing_remembered_means_this_folder_and_no_error(self):

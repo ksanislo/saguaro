@@ -1,4 +1,4 @@
-// tests/program/stage_cores_test.cpp - STRATA_STAGE_SERVE's core plan (header-only, CPU).
+// tests/program/stage_cores_test.cpp - SAGUARO_STAGE_SERVE's core plan (header-only, CPU).
 //
 //   1. 4 GPUs 2+2 over two 10-core nodes, the host on core 0: node 0's 9 cores go 4/5 to stages 0/1 by their layers;
 //   2. --pool-workers caps the workers of all stages together, by weight;

@@ -784,7 +784,7 @@ ResourceWarning: Enable tracemalloc to get the object allocation traceback
 [strata] done: 10 tokens in 1 s (35.4 tok/s) (stop, cancel=False)
 [strata] done: 10 tokens in 1 s (30.6 tok/s) (stop, cancel=False)
 .......................................[strata] model unloaded; the next request loads it again
-..[strata] refused a request for Host 'rebind.example.com' from 127.0.0.1: not a name this server answers to (add it to "allowed_hosts" in the config or STRATA_ALLOWED_HOSTS, or set an API key)
+..[strata] refused a request for Host 'rebind.example.com' from 127.0.0.1: not a name this server answers to (add it to "allowed_hosts" in the config or SAGUARO_ALLOWED_HOSTS, or set an API key)
 ....[strata] model unloaded; the next request loads it again
 [strata] loading the model again (it was unloaded) ...
 [strata] the engine is running again

@@ -6,7 +6,7 @@
 # downloads nothing.
 #
 # Search order:
-#   1. $STRATA_PYTHON                        — an explicit override, always wins
+#   1. $SAGUARO_PYTHON                        — an explicit override, always wins
 #   2. <this dir>/python/bin/python3         — the private runtime shipped with the distribution
 #   3. A Python 3.10+ found on PATH          — a developer convenience, never a requirement
 #
@@ -29,9 +29,9 @@ done
 HERE=$(CDPATH= cd -- "$(dirname -- "$self")" && pwd -P)
 
 pick_python() {
-  if [ -n "${STRATA_PYTHON:-}" ]; then
-    if [ -x "$STRATA_PYTHON" ]; then printf '%s\n' "$STRATA_PYTHON"; return 0; fi
-    echo "strata: STRATA_PYTHON=$STRATA_PYTHON is not executable" >&2
+  if [ -n "${SAGUARO_PYTHON:-}" ]; then
+    if [ -x "$SAGUARO_PYTHON" ]; then printf '%s\n' "$SAGUARO_PYTHON"; return 0; fi
+    echo "strata: SAGUARO_PYTHON=$SAGUARO_PYTHON is not executable" >&2
     return 1
   fi
 
@@ -81,7 +81,7 @@ This distribution is meant to run on its own. If you are seeing this, the privat
 missing from the install and no Python 3.10+ is on your PATH.
 
   * Reinstall the distribution, which restores the bundled runtime, or
-  * set STRATA_PYTHON=/path/to/python3 (3.10 or newer), or
+  * set SAGUARO_PYTHON=/path/to/python3 (3.10 or newer), or
   * install Python 3.10+ and run this launcher again.
 MSG
   exit 5

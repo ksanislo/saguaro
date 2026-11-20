@@ -33,14 +33,14 @@ int main() {
     // layer split, nobody decoding: pieces of 8 chunks - the BYIELD of a shorter request can be taken (it was one run)
     CHECK(batch_read_piece(true, false, true, false, 2048, 8) == 8 * 2048);
     CHECK(batch_read_piece(true, false, true, false, 1024, 4) == 4096);
-    // STRATA_BATCH_YIELD_CHUNKS=0 keeps the old single run
+    // SAGUARO_BATCH_YIELD_CHUNKS=0 keeps the old single run
     CHECK(batch_read_piece(true, false, true, false, 2048, 0) == 0);
     // a degenerate chunk never gives a zero piece
     CHECK(batch_read_piece(true, false, false, false, 0, 8) == 1);
     // a piece is always a multiple of the chunk
     for (int64_t c : {256, 1000, 2048, 4096})
         for (int64_t k : {1, 3, 8, 16}) CHECK(batch_read_piece(true, false, true, false, c, k) % c == 0);
-    // concurrent_read_off (STRATA_PIPED_CONCURRENT): runs with nothing set; each setting alone keeps it off, named
+    // concurrent_read_off (SAGUARO_PIPED_CONCURRENT): runs with nothing set; each setting alone keeps it off, named
     CHECK(concurrent_read_off({}) == nullptr);
     bool ConcurrentReadSetup::*const each[] = {
         &ConcurrentReadSetup::prefill_help, &ConcurrentReadSetup::split_mtp_batch, &ConcurrentReadSetup::fs_slots,
@@ -55,7 +55,7 @@ int main() {
         CHECK(named[i] != nullptr);
         for (size_t j = 0; j < i; ++j) CHECK(!same(named[i], named[j]));   // a reason of its own
     }
-    CHECK(same(named[0], "STRATA_PREFILL_HELP"));
+    CHECK(same(named[0], "SAGUARO_PREFILL_HELP"));
     CHECK(same(named[3], "--pcie-mode dma"));
     // with several, the first in the struct's order is named
     for (size_t i = 0; i < std::size(each); ++i) {
@@ -86,7 +86,7 @@ int main() {
     CHECK(!piped_read_lead_in(true, true, -1.0, 400.0));
     CHECK(!piped_read_lead_in(false, true, 0.0, 400.0));
     CHECK(!piped_read_lead_in(true, false, 0.0, 400.0));
-    // slot_admit_off (STRATA_SLOT_ADMIT): needs the switch and the pipelined groups; each blocker named
+    // slot_admit_off (SAGUARO_SLOT_ADMIT): needs the switch and the pipelined groups; each blocker named
     {
         SlotAdmitSetup s;
         CHECK(slot_admit_off(s) != nullptr);

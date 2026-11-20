@@ -30,7 +30,7 @@ const RING_LINES: usize = 300;
 
 /// `<data>/` : where Strata keeps its engine, runtime and logs on this system.
 pub fn data_dir() -> PathBuf {
-    if let Some(dir) = std::env::var_os("STRATA_DESKTOP_DATA_DIR") {
+    if let Some(dir) = std::env::var_os("SAGUARO_DESKTOP_DATA_DIR") {
         return PathBuf::from(dir);
     }
     platform_data_dir()
@@ -361,9 +361,9 @@ pub fn run_log() -> Option<Log> {
 }
 
 /// Open the run log and install the panic hook. Call it first in `main`: nothing that can fail runs before it. `dialog` is false for
-/// the self-test (no person to read a message box); `STRATA_NO_DIALOG` does the same for scripted runs.
+/// the self-test (no person to read a message box); `SAGUARO_NO_DIALOG` does the same for scripted runs.
 pub fn init_startup(dialog: bool) {
-    let dialog = dialog && std::env::var_os("STRATA_NO_DIALOG").is_none();
+    let dialog = dialog && std::env::var_os("SAGUARO_NO_DIALOG").is_none();
     let log = Log::open();
     log.line("shell", &system_line());
     if RUN.set(Run { log, dialog }).is_ok() {
@@ -553,7 +553,7 @@ mod tests {
     fn logs_are_pruned_and_saved_into_one_file() {
         let dir = std::env::temp_dir().join(format!("strata-desktoplog-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        std::env::set_var("STRATA_DESKTOP_DATA_DIR", &dir);
+        std::env::set_var("SAGUARO_DESKTOP_DATA_DIR", &dir);
         let logs = logs_dir();
         std::fs::create_dir_all(&logs).unwrap();
         for i in 0..14 {
@@ -570,7 +570,7 @@ mod tests {
         let saved = save_logs(&dir.join("out")).unwrap();
         let text = std::fs::read_to_string(saved).unwrap();
         assert!(text.contains("crash 13") && text.contains("run 13") && text.contains("engine line"));
-        std::env::remove_var("STRATA_DESKTOP_DATA_DIR");
+        std::env::remove_var("SAGUARO_DESKTOP_DATA_DIR");
         let _ = std::fs::remove_dir_all(&dir);
     }
     #[test]

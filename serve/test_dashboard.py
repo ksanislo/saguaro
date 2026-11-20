@@ -18,7 +18,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from serve.frontend import ChatTemplate  # noqa: E402
-from serve.server import (CONTEXT_MIN, MAYA_VERSION, ByteTokenizer, MockEngine, Service, StrataEngine, serve,  # noqa: E402
+from serve.server import (CONTEXT_MIN, SAGUARO_VERSION, ByteTokenizer, MockEngine, Service, StrataEngine, serve,  # noqa: E402
                           trained_context_ds4)
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -26,14 +26,14 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class Dashboard(unittest.TestCase):
     def setUp(self):
-        os.environ["STRATA_MOCK_RELOAD_S"] = "0.3"
+        os.environ["SAGUARO_MOCK_RELOAD_S"] = "0.3"
         tok = ByteTokenizer()
         self.engine = MockEngine(tok, "</think>\n\nhello", max_context=32768)
         self.svc = Service(self.engine, tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
         self.tmp = tempfile.TemporaryDirectory()
         self.cfg = Path(self.tmp.name) / "maya-test.json"
         self.cfg.write_text(json.dumps({"exe": "strata", "args": ["--glm-pack", "/x/pack", "--max-context", "32768"],
-                                        "env": {"STRATA_GLM_RAM_GB": "20", "MY_API_KEY": "secret"}}, indent=1))
+                                        "env": {"SAGUARO_GLM_RAM_GB": "20", "MY_API_KEY": "secret"}}, indent=1))
         self.svc.config_path = str(self.cfg)
         self.httpd = serve(self.svc, port=0)
         self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
@@ -67,7 +67,7 @@ class Dashboard(unittest.TestCase):
 
     def test_health_has_the_version(self):
         s, _, b = self.req("GET", "/health")
-        self.assertEqual(json.loads(b)["version"], MAYA_VERSION)
+        self.assertEqual(json.loads(b)["version"], SAGUARO_VERSION)
 
     def test_context_range(self):
         s, _, b = self.req("GET", "/api/context")
@@ -116,7 +116,7 @@ class Dashboard(unittest.TestCase):
         self.assertEqual((j["reload"]["state"], j["context"]), ("done", 65536))
         args = json.loads(self.cfg.read_text())["args"]
         self.assertEqual(args[args.index("--max-context") + 1], "65536")
-        self.assertEqual(json.loads(self.cfg.read_text())["env"]["STRATA_GLM_RAM_GB"], "20")   # the rest kept
+        self.assertEqual(json.loads(self.cfg.read_text())["env"]["SAGUARO_GLM_RAM_GB"], "20")   # the rest kept
         self.assertGreaterEqual(j["load_s"], 0.3)       # (how long that load took: the page's estimate of the next)
         # the setup's own size is kept for the Models page's "Reset to the setup's values", through later reloads
         self.assertEqual(json.loads(self.cfg.read_text())["installer"]["as_set_up"]["context"], 32768)
@@ -185,7 +185,7 @@ class Dashboard(unittest.TestCase):
         self.assertFalse(row["spec_off"])
 
     def test_chat_gets_503_while_reloading(self):
-        os.environ["STRATA_MOCK_RELOAD_S"] = "1.5"
+        os.environ["SAGUARO_MOCK_RELOAD_S"] = "1.5"
         self.req("POST", "/api/context", {"max_context": 16384})
         s, h, b = self.req("POST", "/v1/chat/completions", {"model": "m", "messages": [{"role": "user", "content": "hi"}]})
         self.assertEqual(s, 503)
@@ -214,7 +214,7 @@ class Dashboard(unittest.TestCase):
         text = b.decode()
         self.assertEqual(s, 200)
         self.assertIn("Saguaro", text)
-        self.assertIn("MAYA_GLM_RAM_GB", text)   # (a config's settings under the names users see)
+        self.assertIn("SAGUARO_GLM_RAM_GB", text)   # (a config's settings under the names users see)
         self.assertNotIn("secret", text)
 
     def test_token_count_matches_the_prompt(self):
@@ -319,7 +319,7 @@ class Port(unittest.TestCase):
     server, so the port applies from the next start - the restart itself is saguaro.py's RESTART_EXIT, tested there.)"""
 
     def setUp(self):
-        os.environ.pop("MAYA_RESTART_ON_UPDATE", None)
+        os.environ.pop("SAGUARO_RESTART_ON_UPDATE", None)
         Dashboard.setUp(self)
         self.script = Path(self.tmp.name) / "run-maya-test.bat"
         self.script.write_bytes(b"@echo off\r\npython saguaro.py --config " + str(self.cfg).encode() + b" --port 8080 %*\r\n")

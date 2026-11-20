@@ -128,19 +128,19 @@ Install what it names (links are printed), then run it again. Everything already
   `CXX=g++-14 ./setup.sh` (CC, CXX and CUDAHOSTCXX name the build's compilers; setup passes them to CMake itself,
   so an already-configured build folder picks them up too, #1645).
 - glibc 2.43 with CUDA 12.9: the toolkit's math headers clash with glibc's, already in CMake's first test compile.
-  Use CUDA 12.8 or 13.x instead. Setup takes the newest toolkit it finds; `STRATA_NVCC=/usr/local/cuda-12.8/bin/nvcc
+  Use CUDA 12.8 or 13.x instead. Setup takes the newest toolkit it finds; `SAGUARO_NVCC=/usr/local/cuda-12.8/bin/nvcc
   ./setup.sh` makes it use that one (only that one).
 
 **The first start takes minutes.**
 It is reading 34-55 GB into RAM; the second start is faster while the files are in the OS cache. Started from Task
 Scheduler, it can be 24x slower: see [Running it at startup](DETAILS.md#running-it-at-startup-task-scheduler).
 On Linux the engine now asks the kernel to read the model files ahead (a cold start went from ~920 s to 70 s on one
-PC); `STRATA_READ_AHEAD=0` turns that off. On Linux with transparent huge pages on `always`, the arena no longer asks
-for `MADV_HUGEPAGE` on top (a fragmented machine spent minutes compacting memory, #771); `STRATA_NO_ARENA_THP=1` skips
+PC); `SAGUARO_READ_AHEAD=0` turns that off. On Linux with transparent huge pages on `always`, the arena no longer asks
+for `MADV_HUGEPAGE` on top (a fragmented machine spent minutes compacting memory, #771); `SAGUARO_NO_ARENA_THP=1` skips
 that request on any setting.
 
 **Setup says the engine does not match GitHub's checksum.**
-Setup checks the downloaded ready-made engine against the SHA-256 GitHub publishes. On a mismatch the file is corrupt or was changed on the way, so setup deletes it and stops; run setup again to download it afresh. If GitHub gives no checksum (offline, rate limited, your own mirror), setup warns and installs anyway. `STRATA_SKIP_SHA256=1` skips the check, only if you insist.
+Setup checks the downloaded ready-made engine against the SHA-256 GitHub publishes. On a mismatch the file is corrupt or was changed on the way, so setup deletes it and stops; run setup again to download it afresh. If GitHub gives no checksum (offline, rate limited, your own mirror), setup warns and installs anyway. `SAGUARO_SKIP_SHA256=1` skips the check, only if you insist.
 
 ## While it answers
 
@@ -164,10 +164,10 @@ its rated speed (enable EXPO/XMP in the BIOS) slows the CPU half.
 
 **An earlier reply that came back empty is gone from the chat history (0.1.40, #843).**
 The server leaves out finished assistant turns that have no text, so the next reply does not copy the empty ones.
-`STRATA_KEEP_EMPTY_TURNS=1` in the server's environment renders them as before.
+`SAGUARO_KEEP_EMPTY_TURNS=1` in the server's environment renders them as before.
 
 **A Turing card (RTX 20) reads prompts above ~90K tokens differently (0.1.40, #743).**
-The prompt's top-k selection takes a wider kernel there, with the same ids. `STRATA_TOPK_STREAM=0` restores the old one.
+The prompt's top-k selection takes a wider kernel there, with the same ids. `SAGUARO_TOPK_STREAM=0` restores the old one.
 
 **Decode is several times slower with `--expert-cache N` than with `auto` (#781, #831).**
 An explicit N is a byte budget that is not checked against the free VRAM once the slots are written. On a card it
@@ -175,7 +175,7 @@ fills (the log says `0 MiB of VRAM free with everything loaded - LOW`), Windows 
 from 100 to 14 tok/s with only a few hundred slots too many. Use `--expert-cache auto`, or a smaller N.
 
 **A low-RAM PC (about 32 GB) stalls with `--resident-budget-gib N` (#649).**
-The budget is pinned (locked) in RAM, which leaves the OS and the CPU workers little room. `STRATA_RESIDENT_PIN=0` keeps
+The budget is pinned (locked) in RAM, which leaves the OS and the CPU workers little room. `SAGUARO_RESIDENT_PIN=0` keeps
 it pageable; a smaller budget works too.
 
 **Decode got slower in 0.1.40 on a 32 GB PC with `--resident-budget-gib N`, and the drive is read hard (#1194, #1116, #1085).**
@@ -183,7 +183,7 @@ The start line "the file tier reads unbuffered" means the experts outside the RA
 0.1.40 chose that whenever the free RAM could not hold all of them; but the same few come back token after token, and
 a cache a twentieth of their size serves most of the repeats. 0.1.40.2 asks for that much (at least 1.5 GiB beside the
 4 GiB headroom) and reads through the cache otherwise, which measured 7% to 118% faster decode with a third to a sixth of
-the drive traffic on a 20 to 32 GB box. On 0.1.40 / 0.1.40.1: `STRATA_UNBUFFERED_LOAD=0` does the same, `=1` forces the
+the drive traffic on a 20 to 32 GB box. On 0.1.40 / 0.1.40.1: `SAGUARO_UNBUFFERED_LOAD=0` does the same, `=1` forces the
 unbuffered reads.
 
 **Linux: the start is OOM-killed while the engine allocates the page-locked expert copy (#1250).**
@@ -192,8 +192,8 @@ model files' cache in the way (little really free RAM, much "available") the hos
 cached pages of the model files it mapped before it page-locks the copy; when the really free RAM still does not cover it,
 it takes the pages in 1 GiB steps while the RAM available (cgroup limits included) stays above the headroom, page-locks
 what it has, and keeps the rest resident but pageable with a warning ("only N of M GiB could be page-locked"): the answers
-are the same, only the copies of the pageable part to the GPU go through the CPU. `STRATA_PIN_GUARD=0` turns this off,
-`STRATA_PIN_RESERVE_GIB=N` sets the RAM that must stay free (default: `STRATA_RESIDENT_HEADROOM_GIB`, 4 GiB).
+are the same, only the copies of the pageable part to the GPU go through the CPU. `SAGUARO_PIN_GUARD=0` turns this off,
+`SAGUARO_PIN_RESERVE_GIB=N` sets the RAM that must stay free (default: `SAGUARO_RESIDENT_HEADROOM_GIB`, 4 GiB).
 
 **The Windows display driver resets, then the PC blue-screens (0x141, then 0x116 in `nvlddmkm`) during an answer (#961).**
 This is the NVIDIA driver, not Strata: the report shows the same wedge with other CUDA programs on that driver (610.88,
@@ -203,7 +203,7 @@ RTX 4080 SUPER). Try another driver (a Studio one, or an older one) and a lower 
 **An RTX 50 card (a source build with CUDA 13.2) answers with nonsense, or reads prompts wrongly (#892, #968).**
 CUDA 13.2.0 and 13.2.1's compiler (nvcc 13.2.51) miscompile some of the engine's kernels for sm_120: on our RTX 5070 the IQ2_S and IQ3_S
 products are wrong (relative error 0.5 to 1.0 in the tests) with 13.2 and right with 13.0. The ready-made engine is built
-with 13.0. If you compile it yourself, use CUDA 13.0, 13.1 or 13.2.2 (13.2.2, nvcc build 13.2.86, fixes it; an older one can sit next to a newer: `STRATA_NVCC=<path to its nvcc>`);
+with 13.0. If you compile it yourself, use CUDA 13.0, 13.1 or 13.2.2 (13.2.2, nvcc build 13.2.86, fixes it; an older one can sit next to a newer: `SAGUARO_NVCC=<path to its nvcc>`);
 setup warns when it finds 13.2.0 or 13.2.1 for such a card, and takes an older 13.x when one is installed.
 
 **Pictures are refused, or slow.**
@@ -244,10 +244,10 @@ in order, one at a time, and tell us what changed:
    version, and the exact steps (context size, how long the prompt was, which app sent it). If Windows wrote a
    dump, the newest `.dmp` in `C:\Windows\LiveKernelReports\WATCHDOG` (or `C:\Windows\Minidump`) helps; it holds no
    chats, only the driver state.
-2. **Find the step that hangs:** add `"STRATA_PF_STEP_SYNC": "1"` to the `"env"` block of `strata-<model>.json`
+2. **Find the step that hangs:** add `"SAGUARO_PF_STEP_SYNC": "1"` to the `"env"` block of `strata-<model>.json`
    and restart. The prompt path then waits for the GPU after each step and logs any step over 250 ms, so the log names
    the step. It is slower; use it to diagnose, then take it out.
-3. **`"STRATA_KV_HOST_DMA": "1"`** in the same `"env"` block: no GPU kernel writes the RAM copy of the K/V during a
+3. **`"SAGUARO_KV_HOST_DMA": "1"`** in the same `"env"` block: no GPU kernel writes the RAM copy of the K/V during a
    prompt, it is copied by DMA instead. Same answers.
 4. **No KV streaming:** run setup again and pick 32K context (or remove `--kv-resident` and its number from
    `"args"` in the JSON, with a context that fits the VRAM).

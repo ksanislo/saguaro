@@ -5,7 +5,7 @@
 Each case runs a small "server" process (a fresh interpreter) that starts a sleeping child through
 `lifeline.popen`, then ends that server the hard way (kill -9 / TerminateProcess), and checks that the child
 is gone. The mechanism under test is Windows' job object, Linux's PR_SET_PDEATHSIG, or the portable watcher
-(forced with STRATA_LIFELINE=watcher so it is proven on every POSIX box, not only on macOS).
+(forced with SAGUARO_LIFELINE=watcher so it is proven on every POSIX box, not only on macOS).
 """
 import json
 import os
@@ -103,7 +103,7 @@ class Lifeline(unittest.TestCase):
 
     @unittest.skipUnless(POSIX, "the portable watcher is the POSIX path")
     def test_the_portable_watcher_ends_the_child_when_the_server_is_killed(self):
-        self.assertEqual(self._killed_parent_takes_the_child(STRATA_LIFELINE="watcher"), "watcher")
+        self.assertEqual(self._killed_parent_takes_the_child(SAGUARO_LIFELINE="watcher"), "watcher")
 
     @unittest.skipUnless(sys.platform.startswith("linux"), "PR_SET_PDEATHSIG is Linux")
     def test_a_child_started_on_a_request_thread_outlives_that_thread_but_not_the_server(self):

@@ -36,7 +36,7 @@ class Handover(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.comp = Path(self.temp.name) / "components"
         self.comp.mkdir()
-        self.env = {"STRATA_COMPONENTS_DIR": str(self.comp), handover.ENV_CHECKOUT: "1"}
+        self.env = {"SAGUARO_COMPONENTS_DIR": str(self.comp), handover.ENV_CHECKOUT: "1"}
         self.calls, self.warnings = [], []
 
     def go(self, running="0.1.46", env=None, argv=("status",)):
@@ -68,15 +68,15 @@ class Handover(unittest.TestCase):
         self.assertEqual(Path(python), handover.bundled_python(d))
         self.assertEqual(command[1:], [str(d / "strata.py"), "serve", "--port", "1"])
         env = kwargs.get("env") or args[2]
-        self.assertEqual(env["STRATA_HANDOVER"], "1")
+        self.assertEqual(env["SAGUARO_HANDOVER"], "1")
         if WINDOWS:
             self.assertEqual(result, 7, "the exit code of the newer Control is passed through")
         self.assertEqual(self.warnings, [])
 
     def test_no_loop_when_already_handed_over(self):
         make_control(self.comp, "0.1.46.1")
-        self.assertIsNone(self.go(env={"STRATA_HANDOVER": "1"}))
-        self.assertIsNone(self.go(env={"STRATA_NO_HANDOVER": "1"}))
+        self.assertIsNone(self.go(env={"SAGUARO_HANDOVER": "1"}))
+        self.assertIsNone(self.go(env={"SAGUARO_NO_HANDOVER": "1"}))
         self.assertEqual(self.calls, [])
 
     def test_a_broken_target_falls_back_with_one_warning(self):
@@ -147,22 +147,22 @@ class Handover(unittest.TestCase):
         py = handover.bundled_python(newer)
         py.write_text('#!/bin/sh\nexec "%s" "$@"\n' % sys.executable, encoding="utf-8")
         py.chmod(py.stat().st_mode | stat.S_IXUSR)
-        (newer / "strata.py").write_text("import os,sys\nprint('control 99', os.environ.get('STRATA_HANDOVER'), sys.argv[1:])\nraise SystemExit(3)\n",
+        (newer / "strata.py").write_text("import os,sys\nprint('control 99', os.environ.get('SAGUARO_HANDOVER'), sys.argv[1:])\nraise SystemExit(3)\n",
                                          encoding="utf-8")
         done = subprocess.run([sys.executable, str(ROOT / "strata.py"), "--version"], capture_output=True, text=True,
-                              env={**os.environ, "STRATA_COMPONENTS_DIR": str(self.comp), handover.ENV_CHECKOUT: "1"})
+                              env={**os.environ, "SAGUARO_COMPONENTS_DIR": str(self.comp), handover.ENV_CHECKOUT: "1"})
         self.assertEqual(done.returncode, 3, done.stderr)
         self.assertIn("control 99 1 ['--version']", done.stdout)
         # with the guard set the current Control runs, and says its own version
         done = subprocess.run([sys.executable, str(ROOT / "strata.py"), "--version"], capture_output=True, text=True,
-                              env={**os.environ, "STRATA_COMPONENTS_DIR": str(self.comp), "STRATA_HANDOVER": "1"})
+                              env={**os.environ, "SAGUARO_COMPONENTS_DIR": str(self.comp), "SAGUARO_HANDOVER": "1"})
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertTrue(done.stdout.startswith("strata "), done.stdout)
 
     def test_the_entry_point_falls_back_when_the_target_is_broken(self):
         make_control(self.comp, "99.0.0", whole=False)
         done = subprocess.run([sys.executable, str(ROOT / "strata.py"), "--version"], capture_output=True, text=True,
-                              env={**os.environ, "STRATA_COMPONENTS_DIR": str(self.comp), handover.ENV_CHECKOUT: "1"})
+                              env={**os.environ, "SAGUARO_COMPONENTS_DIR": str(self.comp), handover.ENV_CHECKOUT: "1"})
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertTrue(done.stdout.startswith("strata "), done.stdout)
         self.assertEqual(len(done.stderr.strip().splitlines()), 1, done.stderr)

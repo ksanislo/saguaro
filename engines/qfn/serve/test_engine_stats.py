@@ -117,17 +117,17 @@ strata verify: capturing the 4-token window (CUDA1: 518 MiB of VRAM free)
 strata verify: captured the 4-token window (upload no error, sync no error)
 strata verify: captured the batch window over slots 0,1,2
 strata verify: no VRAM for a new window graph: freed the graphs of 2 older batch slot layouts, 1 kept (a larger --vram-reserve-mib keeps more)
-strata batch: CUDA0: 372 MiB of VRAM free, below its floor of 544 MiB (STRATA_VRAM_FLOOR_MIB; 0 of 24 batch layouts held, 0.0 MiB a graph pair): 172 MiB of expert cache / slot budget given back
+strata batch: CUDA0: 372 MiB of VRAM free, below its floor of 544 MiB (SAGUARO_VRAM_FLOOR_MIB; 0 of 24 batch layouts held, 0.0 MiB a graph pair): 172 MiB of expert cache / slot budget given back
 strata batch (pipelined, 4 groups of 2): 30 group-steps, 82 rows in 7323 ms = 11.2 rows/s (admissions included)
 strata batch (pipelined): MTP proposals accepted 91 of 114 (79.8%); 58 windows of 2.97 rows avg, 188.6 ms launch to picks, drafts 6.0 ms after; 2.57 tokens per window
 strata serve: decode expert cache hit rate: 65.2% (13967 hits / 21415 lookups); 2105 more read by the GPU over PCIe or from another GPU (8.9% of all 23520 routed)
 strata serve: decode expert cache hit rate: 96.9% (465 hits / 480 lookups)
 strata batch: read 6220 tokens on a thread of its own in 11914 ms (concurrent, to 6220 of 30000); the slots decoded 12 rows meanwhile (1.0 rows/s; stage 1: 0 windows, 0.0 ms host each)
-strata batch: 4 admissions read beside the slots in 34687 ms (queued, STRATA_SLOT_ADMIT_MULTI); the groups stopped 1 ms for the loan (lend, refill) and decoded 113 rows (stage 1: 42 windows, pool 29.0 ms each)
-strata batch: 5 admissions read beside the slots in 54666 ms (queued, STRATA_SLOT_ADMIT_MULTI); yielded with 3 held, the loan kept; decoded 116 rows (stage 1: 44 windows, pool 24.9 ms each)
-strata batch: STRATA_READ_YIELD: a text request waits: the reads beside the slots stop at their next piece boundary (1 piece taken back)
-strata batch: STRATA_READ_YIELD: a text request waits: the reads beside the slots stop at their next piece boundary (0 pieces taken back)
-strata batch: STRATA_READ_YIELD: 3 reads held at a piece boundary (loan kept): slot 2 at 16384/18344 slot 4 at 8192/20498
+strata batch: 4 admissions read beside the slots in 34687 ms (queued, SAGUARO_SLOT_ADMIT_MULTI); the groups stopped 1 ms for the loan (lend, refill) and decoded 113 rows (stage 1: 42 windows, pool 29.0 ms each)
+strata batch: 5 admissions read beside the slots in 54666 ms (queued, SAGUARO_SLOT_ADMIT_MULTI); yielded with 3 held, the loan kept; decoded 116 rows (stage 1: 44 windows, pool 24.9 ms each)
+strata batch: SAGUARO_READ_YIELD: a text request waits: the reads beside the slots stop at their next piece boundary (1 piece taken back)
+strata batch: SAGUARO_READ_YIELD: a text request waits: the reads beside the slots stop at their next piece boundary (0 pieces taken back)
+strata batch: SAGUARO_READ_YIELD: 3 reads held at a piece boundary (loan kept): slot 2 at 16384/18344 slot 4 at 8192/20498
 """
 
 
@@ -161,7 +161,7 @@ class Log(unittest.TestCase):
             self.assertEqual((c["read_yields"], c["pieces_taken_back"]), (2, 1))
             self.assertEqual(lt["reads_held"], 3)
             with open(path, "a") as f:                       # the partial line ends; more comes
-                f.write("\nstrata batch: STRATA_READ_YIELD: 3 held reads go on\n")
+                f.write("\nstrata batch: SAGUARO_READ_YIELD: 3 held reads go on\n")
             v = el.poll(path, start)
             self.assertEqual(v["latest"]["reads_held"], 0)
             self.assertEqual(v["counts"]["held_reads_resumed"], 3)

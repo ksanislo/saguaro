@@ -34,7 +34,7 @@ the kernel's amdgpu driver (no ROCm install needed):
   gfx1030, `gfx1151` for Strix Halo. The version is chosen per family: 7.10.0a20251120 where that is on the index,
   7.13.0a20260515 for `gfx103X-all` (its index starts at 7.13, #1103) and 7.14.0a20260608 for `gfx1151` (the 7.10 wheel
   segfaults on kernel 7.2.8, #1267). When the index no longer offers the version, setup warns and takes the newest of
-  the same 7.x line, else of the same major. `STRATA_ROCM_VERSION` / `STRATA_ROCM_INDEX` override them; the gfx1030
+  the same 7.x line, else of the same major. `SAGUARO_ROCM_VERSION` / `SAGUARO_ROCM_INDEX` override them; the gfx1030
   wheels are unvalidated (a system ROCm 7 is the tested path there).
 - **Engine:** compiled on your PC for the card's architecture (10-20 minutes, once; again after a `git pull` that
   changes it, or when you pick a card of another architecture). This needs a C++ compiler and git
@@ -125,9 +125,9 @@ What was run on real hardware:
   why and the dense matrix products stay on plain hipBLAS. **A table changes which GEMM algorithm runs the prompt, so the rounding differs: the
   answers are not bit-identical to plain hipBLAS** (first-token KL 0.016 on an R9700, see below). Packaged engines therefore use the table by
   default only on Strix Halo (gfx1151), where a community A/B measured prompts 2.11x faster with it (251 to 529 tokens/s); every other card
-  uses it only when you ask: `STRATA_HIPBLASLT_TABLE=on` (or `"hipblaslt_table": true` in the run config) uses it, `off` never does (on Strix
+  uses it only when you ask: `SAGUARO_HIPBLASLT_TABLE=on` (or `"hipblaslt_table": true` in the run config) uses it, `off` never does (on Strix
   Halo too), and the start log
-  says which table was taken or why none was (`hipBLASLt tuning table: ...`). A `STRATA_HIPBLASLT_TUNING` you set yourself is always kept.
+  says which table was taken or why none was (`hipBLASLt tuning table: ...`). A `SAGUARO_HIPBLASLT_TUNING` you set yourself is always kept.
   A source build is unchanged (see [Tuning table](#tuning-table)). Testers on Strix Halo and RX 7000 cards: please send that log line and a
   prompt-speed run with `on` and `off`.
 
@@ -170,7 +170,7 @@ On a PC with no NVIDIA card Strata can use, the AMD card is chosen by itself; wi
   does not subtract what the desktop and other programs hold on the card, so `--expert-cache auto` filled the card
   past what Windows keeps in VRAM and decode fell from 41 to 30 tok/s. The engine now lowers that free figure by
   what Windows' video memory budget for the process withholds (logged once: `strata: Windows budgets N of this
-  card's M MiB ...`; `STRATA_WDDM_BUDGET=0` turns it off). And the PCIe probe times its copies on the host clock
+  card's M MiB ...`; `SAGUARO_WDDM_BUDGET=0` turns it off). And the PCIe probe times its copies on the host clock
   there, since HIP's events read impossible speeds (3,300-26,000 GB/s), so a slow link now gets a smaller
   `pcie_frac` as on NVIDIA.
 
@@ -226,25 +226,25 @@ host this was `/usr/lib64/rocm/llvm/bin/clang++`. Use the compiler and libraries
 from the same ROCm installation. Do not enable both GPU backends in one build.
 
 Native IQ experts are enabled by default. CMake fetches the llama.cpp revision
-pinned by this repository. For an offline build, point `STRATA_GGML_DIR` at a
+pinned by this repository. For an offline build, point `SAGUARO_GGML_DIR` at a
 checkout of that exact revision; using an arbitrary newer checkout changes the
 dependency being tested.
 
 ## Opt-in chunked prompt GDN on gfx11
 
-`STRATA_GDN_CHUNKED=1` runs the prompt's gated DeltaNet recurrence in 16-token chunks on the gfx11 matrix cores,
+`SAGUARO_GDN_CHUNKED=1` runs the prompt's gated DeltaNet recurrence in 16-token chunks on the gfx11 matrix cores,
 with FP16 operands and FP32 accumulation, and fuses the output norm. It is off by default: rounding differs from
 the token-by-token FP32 recurrence. The CUDA switch of the same name uses a separate FP32 implementation.
 
 The HIP path accepts gfx1100, gfx1101, gfx1102, gfx1150 and gfx1151, and prompt chunks of at least 64 tokens.
-Other cards, shorter chunks, an output row stride not divisible by eight, and `STRATA_GDN_REC_HEADS` use the
+Other cards, shorter chunks, an output row stride not divisible by eight, and `SAGUARO_GDN_REC_HEADS` use the
 existing recurrence. Runtime measurements and numerical checks were run on gfx1151 only; building for another
 target does not validate its speed or answers. The synthetic test compares the FP16 output and carried FP32 state
 against the existing recurrence, and short cases against a double-precision CPU calculation. It covers partial
 chunks, padded rows, weak decay and a split request; the off/default tests require identical output and state bits.
 It does not establish model answer equivalence.
 
-`STRATA_GDN_CHUNKED=2`, which on CUDA skips the SM-count test, is the same as 1 here.
+`SAGUARO_GDN_CHUNKED=2`, which on CUDA skips the SM-count test, is the same as 1 here.
 
 Measured on a Ryzen AI Max+ 395 (gfx1151, ROCm 7.14.1), UD-IQ4_XS. One layer's recurrence and norm take 1.60x less time than
 gfx1151's default kernels at 16K and 32K tokens (`hip_gdn_chunked --bench` against `--bench-default`, three runs each: 20.92 ->
@@ -254,7 +254,7 @@ tokens). Each engine reads a discarded 4K prompt first, because the first prompt
 prompts the same pairs gave 95% intervals of [1.004, 1.032] and [0.981, 1.015]); the prompts follow each other once
 `/proc/vmstat`'s page-migration and direct-reclaim counters have stood still for 3 s, and a pair in which either prompt still
 met page migration or direct reclaim was dropped and measured again (3 of the 69 pairs, all 32K with the switch on; kept in, 32K
-gives 1.020 and 1.015). "Section 5" is the nine variables of `STRIX_HALO.md` section 5 (with `STRATA_PF_SWITCH_MIN_T=2048`);
+gives 1.020 and 1.015). "Section 5" is the nine variables of `STRIX_HALO.md` section 5 (with `SAGUARO_PF_SWITCH_MIN_T=2048`);
 "defaults" is the engine without them (section 4's gfx1151 defaults stay). Times are medians; the ratio is the geometric mean of
 the 11 off / on ratios with a 95% bootstrap interval; "faster" counts the pairs in which the switch was faster:
 
@@ -285,7 +285,7 @@ for i in 1 2 3; do ./build-hip/hip_gdn_chunked --bench-default; ./build-hip/hip_
 ```
 
 Each benchmark run reports the GPU-event median of seven runs after two warmups, the same nonzero initial state every run:
-`--bench` this path, `--bench-default` gfx1151's default kernels (`STRATA_GDN_PP=2`, `STRATA_GDN_NOY=1`). The switch is read
+`--bench` this path, `--bench-default` gfx1151's default kernels (`SAGUARO_GDN_PP=2`, `SAGUARO_GDN_NOY=1`). The switch is read
 once per process, so the two are separate runs. It times one layer's recurrence and norm, not a whole prompt.
 
 ## Model and serving configuration
@@ -338,28 +338,28 @@ compositor fails with "Failed to pin framebuffer with error -12".
 The installer supports this backend (see "Install with setup" above). Pictures are on by default. They are read on the CPU (`strata-vision`) under 24 GB of VRAM and on the card (`strata-vision-hip`) from 24 GB, the same rule as on NVIDIA; if the engine has no card reader, or it cannot start, the CPU reader is used.
 Setup installs one AMD card, or several with `--gpus` (the engine's layer split; see RDNA4 below).
 
-**Opt-in switches for RDNA2 prompts and hangs (0.1.40, off by default):** `STRATA_DENSE_MMQ=1` (#820, HIP) runs the
+**Opt-in switches for RDNA2 prompts and hangs (0.1.40, off by default):** `SAGUARO_DENSE_MMQ=1` (#820, HIP) runs the
 prompt's dense GGUF projections through the int8 MMQ kernels instead of dequantize + hipBLAS: on the RX 6900 XT a 4K
 prompt read 436 -> 757 tok/s (greedy text diverges from the default after a few dozen tokens: the q8_1 activation
-rounding). `STRATA_HIP_ADAPT_KERNEL_COPY=1` (#884) copies the adaptive tier's swaps with a kernel instead of the SDMA
+rounding). `SAGUARO_HIP_ADAPT_KERNEL_COPY=1` (#884) copies the adaptive tier's swaps with a kernel instead of the SDMA
 engine, a workaround for the gfx1030 hang seen with the MMQ prompt path and adaptive swaps (untested on the reporter's
 machine). Windows HIP: the doorbell kernels fence their store (#697), and the shared-expert fork is off on HIP (#816).
 
-**The shared-expert stream fork (`STRATA_SH_STREAM`):** it is off by default on HIP, except for the gfx1151 table, and
+**The shared-expert stream fork (`SAGUARO_SH_STREAM`):** it is off by default on HIP, except for the gfx1151 table, and
 that default stays. The measurements disagree by platform. 2x RX 6900 XT on Linux (#1272): turning it off costs 5-13%
 of decode (one card 47.5 / 46.9 / 48.3 -> 50.5 / 48.5 / 51.3 tok/s with it on). RX 6800 on Windows (#816,
 `bench/results/2026-10-04-community-rx-6800-windows`): on was 12-22% slower. 4x R9700: fork off was 13-45% faster.
-Linux RX 6000 users can try `STRATA_SH_STREAM=1`; the output is identical either way. Since the same card goes
+Linux RX 6000 users can try `SAGUARO_SH_STREAM=1`; the output is identical either way. Since the same card goes
 both ways on different PCs, `./setup.sh --calibrate` measures it on yours (off against on, a restart each) and writes
-`STRATA_SH_STREAM=1` into the config's `"env"` only when it wins by more than 3%; a later calibration that finds it no
+`SAGUARO_SH_STREAM=1` into the config's `"env"` only when it wins by more than 3%; a later calibration that finds it no
 longer faster removes it again.
 
-**The draft's side stream (`STRATA_MTP_SIDE_STREAM`):** HIP does not use the MTP drafter's branch stream, and since
+**The draft's side stream (`SAGUARO_MTP_SIDE_STREAM`):** HIP does not use the MTP drafter's branch stream, and since
 0.1.40.2 it does not create it (#1240: an R9700 lost prompt speed with it). gfx103x is the exception and creates it: on
-an RX 6800 under Windows (`STRATA_HIP_PROMPT_F16=1`, IQ3_XXS, two runs each) a 7.9K-token prompt reads at 798-808 tok/s
-with the stream and 584-596 without, and a 30.4K-token one at 855-863 against 553-600; `STRATA_PREFILL_TIMING=1` puts
+an RX 6800 under Windows (`SAGUARO_HIP_PROMPT_F16=1`, IQ3_XXS, two runs each) a 7.9K-token prompt reads at 798-808 tok/s
+with the stream and 584-596 without, and a 30.4K-token one at 855-863 against 553-600; `SAGUARO_PREFILL_TIMING=1` puts
 the whole difference in the "wait copy" phase (3,081 -> 75 ms and 12,642 -> 288 ms). Decode and the output are the same.
-`STRATA_MTP_SIDE_STREAM=0` turns it off on gfx103x, `=1` creates it on another HIP card. Measured on one card and one
+`SAGUARO_MTP_SIDE_STREAM=0` turns it off on gfx103x, `=1` creates it on another HIP card. Measured on one card and one
 OS; a Linux gfx103x number is welcome.
 
 **Long prompts on a big card: check the lend-coverage line (#1389, measured by the reporter on an RX 7900 XTX, gfx1100,
@@ -369,11 +369,11 @@ must also sit in RAM. After the first request of a start the engine prints
 experts not covered are read from the pack during the prompt (now also a `WARNING` line). A 74K prompt routes through
 nearly all experts, so the misses repeat: the reporter saw `wait copy` at 0.2% and 2,583 tok/s with 6201 of 6201, and
 36.8% and 1,810 tok/s with 5093 of 6202 (same binary, only the start differed). Short prompts (25K) read the same either
-way. The resident set is sized from `MemAvailable` at start, minus `STRATA_RESIDENT_HEADROOM_GIB` (default 4, in GiB; the
+way. The resident set is sized from `MemAvailable` at start, minus `SAGUARO_RESIDENT_HEADROOM_GIB` (default 4, in GiB; the
 `--resident-experts` switch and `--resident-budget-gib` read it). If the line is short, lower the headroom a little and
 restart; if the machine then swaps or stalls, raise it again. Re-check the line after a ROCm update: the reporter's newer
 runtime kept about 1 GiB more host RAM, which moved the best value from 8 to 7. Other levers from the same report (his
-numbers, not re-measured here): `STRATA_PF_FUSED=1 STRATA_PF_GEMM=1 STRATA_PF_SWITCH_MIN_T=4096` 925 -> 1,092 tok/s,
+numbers, not re-measured here): `SAGUARO_PF_FUSED=1 SAGUARO_PF_GEMM=1 SAGUARO_PF_SWITCH_MIN_T=4096` 925 -> 1,092 tok/s,
 `--resident-experts` 1,092 -> 2,503 tok/s, `--prefill auto:32768` +23% at 74K. The engine uses a hipBLASLt tuning table
 only when its version matches the installed library; otherwise it prefills on plain hipBLAS (about 45% slower for a 131K
 prompt), so keep the table and the library paired. Not worth trying (measured flat): `--kv-resident` changes, a prefill
@@ -381,9 +381,9 @@ chunk above 32768, `--spec` above 4.
 
 ## Exact long-prompt QSA scorer (gfx1100 opt-in, gfx12 default)
 
-`STRATA_SCORES_THREAD=1` at engine startup enables a HIP port of #1825's score kernel on gfx1100, for batches of
+`SAGUARO_SCORES_THREAD=1` at engine startup enables a HIP port of #1825's score kernel on gfx1100, for batches of
 at least 64 queries with at least 16,385 live index blocks. On gfx12 (RDNA4) it is on by default for those batches and
-`STRATA_SCORES_THREAD=0` turns it off (0.1.45): on an R9700 `qsa_scores_gfx1100_parity --full` compares 223,664,777 scores and
+`SAGUARO_SCORES_THREAD=0` turns it off (0.1.45): on an R9700 `qsa_scores_gfx1100_parity --full` compares 223,664,777 scores and
 11,895,800 ids bitwise equal to the warp scorer, the scorer stage with 256 queries is 3.6x faster at 131K and 4.0x at 240K, and a
 fresh prompt of 131K tokens reads 8.7% faster (4 of 4 pairs) and one of 230K tokens 16.4% faster (3 of 3), with the same answer tokens and byte-identical `exact_pp` residual dumps at 70K and 131K tokens (prompts under 65K cells never reach the bound). The default, short-prompt and decode paths keep the
 existing scorer. On one RX 7900 XTX / 7950X3D / ROCm 10.0.0, three paired runs of a tuned 0.1.40.3 engine reduced
@@ -391,7 +391,7 @@ fresh one-token request time by 10.45% at 130,978 prompt tokens and 22.64% at 23
 pair measured 12.85% and 21.71%. Cached follow-ups did not show a repeatable large gain, and a two-task coding pilot
 was 3.27% slower overall. This is opt-in, not a general coding-speed recommendation. The
 [report, per-run data and standalone score/ID check](../bench/results/2026-10-11-gfx1100-qsa-scores/README.md)
-give the settings, exact-parity checks and limits. `STRATA_SCORES_THREAD_TRACE=1` prints an engagement line.
+give the settings, exact-parity checks and limits. `SAGUARO_SCORES_THREAD_TRACE=1` prints an engagement line.
 
 ## Deep contexts: the prompt's top-k selection (0.1.45, #1749)
 
@@ -399,7 +399,7 @@ Past ~135K cells (and from ~90K cells on a prompt read) the prompt's top-k selec
 reference radix that every deep context on HIP paid; the same ids (`qsa_select_bench` compares them with the reference). On an R9700 the
 selection of a 256-query batch is 0.29 -> 0.21 ms at 98K, 1.16 -> 0.49 ms at 262K and 22.0 -> 0.93 ms at 524K; a fresh prompt reads 1.3% faster at
 230K tokens and 34% faster at 500K (716 -> 962 tok/s; 1,284 tok/s with the exact scorer above, 79% in all), with the same answer tokens.
-`STRATA_TOPK_OLD=1` runs the original kernel, `STRATA_TOPK_STREAM=0` the register kernel in the 90K-135K band.
+`SAGUARO_TOPK_OLD=1` runs the original kernel, `SAGUARO_TOPK_STREAM=0` the register kernel in the 90K-135K band.
 
 ## Linux: verify timeouts while the kernel reclaims host memory (experimental workarounds)
 
@@ -415,7 +415,7 @@ speed claim, and neither is known to matter on Windows or on other ROCm versions
   16.63 s), without the 29.8 s and 42.2 s outliers; solo requests were a little slower (3.55 s to 3.69 s).
 - **`--mmap-experts` (#920, RX 6800 gfx1030, ROCm 7.2.4, 31 GiB RAM, IQ3_XXS):** every run stalled until
   `GPU_PINNED_MIN_XFER_SIZE=1048576` was in the `env`, and none has since. HIP pins the pageable source pages of large
-  copies, here the mapped expert file. (The engine already sets this variable for `STRATA_ARENA_MMAP=1`.)
+  copies, here the mapped expert file. (The engine already sets this variable for `SAGUARO_ARENA_MMAP=1`.)
 
 ```json
 "env": { "GPU_PINNED_MIN_XFER_SIZE": "1048576" }
@@ -493,12 +493,12 @@ an RX 9070 XT 16 GB and a Radeon AI PRO R9700 32 GB (both gfx1201), a Ryzen 9 39
     tokens (5 + 5 starts). Decode: 62.4 -> 70.0 tok/s on the R9700 and +4% on the 9070 XT in one A/B here (ROCm 10.2
     nightly); a user's repeated A/B/A/B with setup's TheRock 7.10 wheels and an i5-12600K measured +1-4%, inside a
     12-20% run-to-run spread (#432) - how much it gains depends on how much of decode the router is on that setup.
-    `STRATA_HIP_ROUTER_OLD=1` runs the portable kernel.
-  - `STRATA_HIP_WMMA` (on by default on gfx12 with an int8 KV since 148-amd, `STRATA_HIP_WMMA=0` turns it off; gfx11: opt-in with `=1`): the prompt path's QSA attention on RDNA4 matrix cores (the engine says so once, at the first prompt)
+    `SAGUARO_HIP_ROUTER_OLD=1` runs the portable kernel.
+  - `SAGUARO_HIP_WMMA` (on by default on gfx12 with an int8 KV since 148-amd, `SAGUARO_HIP_WMMA=0` turns it off; gfx11: opt-in with `=1`): the prompt path's QSA attention on RDNA4 matrix cores (the engine says so once, at the first prompt)
     (`v_wmma_f32_16x16x16_f16`, FP16 hi + lo halves like the CUDA tensor-core kernel; `hip_prompt_attn_wmma` bounds it
     against the FP32 kernel and FP64). 7.2-7.5x the portable kernel; R9700 prompts 4K 1,784 -> 2,427 tok/s, 16K
     1,797 -> 2,700 (a user with TheRock 7.10: +29-34%, #432). Not bitwise: greedy text differs from token ~50 on, as with the CUDA tensor-core attention. With it
-    the prompt path's expert ring is 96 slots (as STRATA_PREFILL_RING=96): with the default 384 the 9070 XT's 4K
+    the prompt path's expert ring is 96 slots (as SAGUARO_PREFILL_RING=96): with the default 384 the 9070 XT's 4K
     prompts fell to 718 tok/s; with 96 they gain (1,017 -> 1,211; 16K 1,518 -> 2,032). PR #329
     (bsorensen110) contributed an equivalent gfx12 WMMA kernel of the same speed (within 1%); this one also masks KV
     pages that KV streaming has not made resident, as the decode kernel does. On my R9700 (engine 0.1.40,
@@ -507,27 +507,27 @@ an RX 9070 XT 16 GB and a Radeon AI PRO R9700 32 GB (both gfx1201), a Ryzen 9 39
     what the model runs at, not what these prompts reach - three matched trials each, the first fresh prompt after
     each start left out: 1,571 -> 2,064 and 1,568 -> 2,065 tok/s at 8,830 tokens (+31.4 and +31.7%) and 1,699 ->
     1,990 at 4,210 (+17.1%), medians 1,571 -> 2,064 and a 1.27x geometric mean over those three. decode
-    89.8 -> 86.9 tok/s, unchanged. `STRATA_SELECT_WMMA=1` on top changed nothing at those lengths (2,026 tok/s);
+    89.8 -> 86.9 tok/s, unchanged. `SAGUARO_SELECT_WMMA=1` on top changed nothing at those lengths (2,026 tok/s);
     its +1.5% is a 16K/262K-ctx number. `hip_prompt_attn_wmma` passes on that card.
-    **Default on gfx12 on Linux (148-amd).** Windows: opt-in until tested on Windows (`STRATA_HIP_WMMA=1` turns it on; the engine says so in its log at the first prompt). Quality on an R9700 (Q2_0, int8 KV, fixed expert cache so that the default against itself is bit-identical):
-    teacher-forced KL against the old kernel through the real serve decode path (STRATA_FOLLOW, 28 prompts, 6,024 positions) 0.0003 (p99 0.006, top-1
+    **Default on gfx12 on Linux (148-amd).** Windows: opt-in until tested on Windows (`SAGUARO_HIP_WMMA=1` turns it on; the engine says so in its log at the first prompt). Quality on an R9700 (Q2_0, int8 KV, fixed expert cache so that the default against itself is bit-identical):
+    teacher-forced KL against the old kernel through the real serve decode path (SAGUARO_FOLLOW, 28 prompts, 6,024 positions) 0.0003 (p99 0.006, top-1
     99.8%, perplexity of the forced text x1.0003), and 0.0014 over 1,760 positions of eight 6K-token documents (top-1 98.9%, x1.0009); HumanEval 157/164
     (default 156 and 156), reasoning 25/30 (24 and 26), agent 6/6, needles at 32K and 125K x three depths 6/6, CJK 8/8, tool calls 5/5. Prompt speed,
     interleaved pairs on a quiet R9700, Q2_0 32 GB: see the 148-amd table below. The first-token KL against the FP16 prompt path cannot rank it (0.0296 against 0.0280 for the old
     kernel, a paired difference of +0.0016 +- 0.0026): on a 2-bit pack any change of the prompt numerics, even `--prefill 4096`, moves the first token by about 0.025.
-  - `STRATA_HIP_WMMA=auto`: the same kernel, chosen per call: on a gfx12 card with int8 KV and a prompt batch of
-    `STRATA_HIP_WMMA_MIN_Q` (64) or more queries it runs the matrix-core kernel, everything else the FP32 one (`=1` forces it
+  - `SAGUARO_HIP_WMMA=auto`: the same kernel, chosen per call: on a gfx12 card with int8 KV and a prompt batch of
+    `SAGUARO_HIP_WMMA_MIN_Q` (64) or more queries it runs the matrix-core kernel, everything else the FP32 one (`=1` forces it
     on every call and on gfx11, `=0` keeps the FP32 kernel; unset is the gfx12 default above: the matrix-core kernel on every call). A launch error switches the matrix-core
     kernel off for the rest of the process and the FP32 kernel runs (before, the engine exited). Kernel timing on an R9700
     (`hip_prompt_attn_wmma`, context 1.5K-32K, 64-2,048 queries): 6.9-8.4x the FP32 kernel at every shape, error against FP64
     3e-6 of the output scale (FP32: 2e-6). Engine, Q2_0 pack, 6 interleaved pairs, equal slots, fixed flags
-    (`--pcie-frac 0 --adapt-every 0`, `STRATA_PREFILL_CPU_SHARE=0`, `STRATA_ROUTE_TAIL_SKIP=0`): 20K prompt x1.46 (`=1`) /
+    (`--pcie-frac 0 --adapt-every 0`, `SAGUARO_PREFILL_CPU_SHARE=0`, `SAGUARO_ROUTE_TAIL_SKIP=0`): 20K prompt x1.46 (`=1`) /
     x1.54 (`auto`), 4K x1.33 / x1.34 (6/6 pairs; the noise arm of that run read +6.4-6.9%, so read them as +40-50% and
     +30%); the 8-token answers were the default's in every run.
   - The first prompt after a start pays two one-time hipBLAS library loads (the first BF16 product 1.2 s, the first FP16
-    product 1.0 s on an R9700 with the gfx120X wheel's hipBLASLt 1.2.0; `STRATA_COLD_TRACE=1` times the first 80 dense
+    product 1.0 s on an R9700 with the gfx120X wheel's hipBLASLt 1.2.0; `SAGUARO_COLD_TRACE=1` times the first 80 dense
     projections to show them). The engine now runs one tiny BF16 and one tiny FP16 product on a thread of its own while the
-    expert arena loads, so the first request does not carry them (`STRATA_PREFILL_WARM=0` turns it off; the outputs go to
+    expert arena loads, so the first request does not carry them (`SAGUARO_PREFILL_WARM=0` turns it off; the outputs go to
     scratch buffers, nothing changes; start-up time is the same, the arena load takes longer than the thread). First
     721-token prompt after the 33-token warm request, 5 interleaved pairs: 154 -> 673 tok/s. The next 4K prompt reads
     ~1,090 tok/s either way (the "cold" first-prompt numbers above are about this).
@@ -538,7 +538,7 @@ an RX 9070 XT 16 GB and a Radeon AI PRO R9700 32 GB (both gfx1201), a Ryzen 9 39
     event hand-offs per 4K prompt). The runtime opens its queues in the order the loader threads reach them, which changes
     every start; when both busy queues land on the same compute pipe of the card (the card has two for this process), every
     hand-off waits for a queue switch. The engine now opens two queues at normal priority (more queues cost decode: five cost 2 to 3.6%) one
-    after the other on the main thread before any other thread starts (`STRATA_HIP_QUEUE_PRIME=0` turns it off; any other
+    after the other on the main thread before any other thread starts (`SAGUARO_HIP_QUEUE_PRIME=0` turns it off; any other
     value is a list of `n` / `h` letters for tests). gfx1200 and gfx1201 on Linux only; nothing else changes (the answers
     are identical). Not clocks, not memory placement (read speed over the expert cache was 637-640 GB/s in both kinds of
     start), not CPU placement, not the MTP stream itself.
@@ -548,14 +548,14 @@ an RX 9070 XT 16 GB and a Radeon AI PRO R9700 32 GB (both gfx1201), a Ryzen 9 39
     a noise arm x1.031), so none is shipped: the dense projections are ~10% of a 20K prompt here.
   - The prompt path's QSA top-k picks its kernel by the blocks a query actually has, not the cache's capacity (#337,
     bsorensen110): the same ids, on by default with AMD (NVIDIA keeps its capacity rule: there the 64K prompts read
-    1-3% slower with it). `STRATA_SELECT_WMMA=1` (opt-in, gfx12) adds #337's
+    1-3% slower with it). `SAGUARO_SELECT_WMMA=1` (opt-in, gfx12) adds #337's
     matrix-core block scorer; it selects slightly differently (254 of 256 queries the same) and gained +1.5% on 16K
     prompts at a 262K context on the R9700.
-  - `STRATA_PF_FUSED=1` (opt-in, gfx1200 / gfx1201, the native IQ packs, #1277): the prompt's experts run on int8
+  - `SAGUARO_PF_FUSED=1` (opt-in, gfx1200 / gfx1201, the native IQ packs, #1277): the prompt's experts run on int8
     matrix-core kernels (`v_wmma_i32_16x16x16_iu8`: the gfx11 kernels with gfx12's lane layout) instead of MMQ. Earlier
     engines ignored the flag on RDNA4 (MMQ stayed, no banner); now the engine prints `strata: prompt experts on the fused
-    int8 kernels (STRATA_PF_FUSED=1, #136)` once, at the first prompt. It is not an arch default: it rounds differently
-    from MMQ, and those defaults hold only bit-identical switches. `STRATA_PF_FUSED_NATIVE=0` keeps MMQ with the flag set
+    int8 kernels (SAGUARO_PF_FUSED=1, #136)` once, at the first prompt. It is not an arch default: it rounds differently
+    from MMQ, and those defaults hold only bit-identical switches. `SAGUARO_PF_FUSED_NATIVE=0` keeps MMQ with the flag set
     (for an A/B). R9700 (gfx1201, ROCm 7.14, Coder IQ1_M pack), prompt time as the server reports it, alternating
     starts per arm: 4K 1,612 -> 1,353 ms (+19.1%), 16K 5,579 -> 5,147 ms (+8.4%), 32K 11,890 -> 10,962 ms (+8.5%); a
     second run of 3 starts per arm gave +12% to +16% at 4K (it depends on the start) and +8.3% at 16K; the
@@ -563,9 +563,9 @@ an RX 9070 XT 16 GB and a Radeon AI PRO R9700 32 GB (both gfx1201), a Ryzen 9 39
     at 4K (48 prompts) is 1.10x MMQ's, which that sample cannot tell apart from MMQ's; top-1 agreed on 48 of 48 (every
     prompt's top token was the same one, so that check says little); 4 of 4 long-context retrieval checks passed.
     0.1.42 re-check on an R9700 (Linux, ROCm 7.14), 12 prompts of 1.5K-24K tokens, first-token KL against the FP16 prompt path (MMQ / fused): IQ3_S 0.00332 / 0.00284, top-1 12 of 12 for both; IQ3_XXS 0.00335 / 0.00452 on one sample and 0.00344 / 0.00323 on a second (24 prompts pooled: 0.00340 / 0.00388, top-1 24 of 24 for both); the Q2_0 pack does not take these kernels on gfx12 (output bit-identical to MMQ). Because the IQ3_XXS pool is not at or below MMQ's, the flag stays opt-in. Measured on Linux only.
-    gfx1200 builds the same kernels and was not run; Windows and K-quant packs (`STRATA_PF_FUSED_KQ=1`) were not measured.
-    **Q2_0 gate/up (148-amd).** Windows: opt-in until tested on Windows (`STRATA_PF_FUSED=1`); the default below is Linux only. The native Q2_0 pack's gate/up (64-value blocks) take the same kernels and are in the gfx12 default set with IQ3_S and
-    IQ3_XXS (`STRATA_PF_FUSED=0` keeps MMQ). One layer, 2,048 tokens x top 10 over 512 experts: MMQ 24.5 ms, fused 4.4 ms; 8,192 tokens 31.7 vs 13.2 ms
+    gfx1200 builds the same kernels and was not run; Windows and K-quant packs (`SAGUARO_PF_FUSED_KQ=1`) were not measured.
+    **Q2_0 gate/up (148-amd).** Windows: opt-in until tested on Windows (`SAGUARO_PF_FUSED=1`); the default below is Linux only. The native Q2_0 pack's gate/up (64-value blocks) take the same kernels and are in the gfx12 default set with IQ3_S and
+    IQ3_XXS (`SAGUARO_PF_FUSED=0` keeps MMQ). One layer, 2,048 tokens x top 10 over 512 experts: MMQ 24.5 ms, fused 4.4 ms; 8,192 tokens 31.7 vs 13.2 ms
     (`hip_prefill_fused_iq`, fused against MMQ rel. RMS 1.6e-5). Engine, R9700 Q2_0 32 GB, 5 interleaved pairs: prompt 4K +16.7%, 20K +19.0% (noise arm 1.001 / 0.999).
     Quality: teacher-forced KL against MMQ 0.0004 (6,022 positions, top-1 99.5%) and 0.0016 (1,760 long-document positions, top-1 98.2%), the same tasks as
     above unchanged (156/164, 24/30, 6/6, 6/6, 8/8, 5/5). IQ2_XXS / IQ2_XS / IQ2_S gate/up stay opt-in on gfx12.
@@ -573,18 +573,18 @@ an RX 9070 XT 16 GB and a Radeon AI PRO R9700 32 GB (both gfx1201), a Ryzen 9 39
     bits, so decode texts differ from the first differing token on and decode is compared with both switched off instead: 95.23 vs 95.28, same ids):
     Q2_0 32 GB, 5 pairs: 4K 1,151 -> 2,286 (a slower start mode gives 1,988), 20K 1,384 -> 2,751 (2,481); with one lever each (3 pairs): WMMA 4K x1.35 / 20K x1.46,
     Q2_0 fused experts x1.28 / x1.19, both x1.73 / x1.79. IQ3_XXS 32 GB, 5 pairs (only the attention is new): 4K 1,369 -> 1,436 (the base starts in a 1,170 or a
-    1,370 mode), 20K 1,576 -> 1,997 (x1.27). The identity gate with both switched off (STRATA_HIP_WMMA=0, STRATA_PF_FUSED=0): 10 of 10 prompts and the
+    1,370 mode), 20K 1,576 -> 1,997 (x1.27). The identity gate with both switched off (SAGUARO_HIP_WMMA=0, SAGUARO_PF_FUSED=0): 10 of 10 prompts and the
     4K / 20K residual dumps identical on both packs.
-  - **`STRATA_PF_GEMM` / `STRATA_PF_PAD` are gfx11 only** (0.1.46): their product is `strata_pf_gemm_f16_ld`,
+  - **`SAGUARO_PF_GEMM` / `SAGUARO_PF_PAD` are gfx11 only** (0.1.46): their product is `strata_pf_gemm_f16_ld`,
     built into the gfx11 matrix-core block of `wmma_gemm.cu`, so an RDNA4 card runs neither. Until 0.1.46 the padded
-    half was worse than inert: `STRATA_PF_PAD=1 STRATA_PF_GEMM=1` let the two K 6144 producers write row stride 6,208
+    half was worse than inert: `SAGUARO_PF_PAD=1 SAGUARO_PF_GEMM=1` let the two K 6144 producers write row stride 6,208
     into a GEMM that only the gfx11 kernel takes, and `Gemm::native` ended the engine (`prefill gemm: a padded X (ldx
-    6208, K 6144) needs STRATA_PF_PAD's path`, exit code 1 - under `serve/` an engine restart loop per request).
+    6208, K 6144) needs SAGUARO_PF_PAD's path`, exit code 1 - under `serve/` an engine restart loop per request).
     Measured on an RX 9070 (gfx1201, 16 GB, system ROCm 7.2.4, kernel 7.2.11, 31 GiB RAM, Coder IQ1_M): 3 of 3 starts
     exited that way at `--vram-reserve-mib` 700 and 1,536, so it was not the VRAM guard. Now the producer asks
     `strata_pf_padded_gemm_available()` and does not pad where no kernel reads the stride (one line at the first prompt),
     and `Gemm::native` copies a padded X's rows unpadded and runs the ordinary paths instead of exiting - checked with
-    the gate forced off on that card: 4K prompt answers byte-identical to the unpadded run, no exit. `STRATA_PF_GEMM=1`
+    the gate forced off on that card: 4K prompt answers byte-identical to the unpadded run, no exit. `SAGUARO_PF_GEMM=1`
     alone is inert there too (4K 1,247 against 1,243 tok/s, 8K 1,330 against 1,321, medians of 3 starts, i.e. noise).
 - **Known:** rarely (about 1 start in 10) a HIP run's greedy output differs from another start's at some token, on
   one card or two and on engine 0.1.29 as well; not yet explained.
@@ -599,30 +599,30 @@ an RX 9070 XT 16 GB and a Radeon AI PRO R9700 32 GB (both gfx1201), a Ryzen 9 39
 
 On a Radeon that shares the computer's memory (the Ryzen mini PCs: Radeon 780M / 760M `gfx1103`, 890M / 880M `gfx1150`,
 Strix Halo `gfx1151`) the matrix-core prompt set below is on by default on the Radeon 780M (`gfx1103`, Linux) and opt-in
-(`STRATA_IGPU_PROMPT_SET=1`) on the others: it changes bits, and only the 780M was measured. The engine picks the set from the device's own "integrated" flag and
+(`SAGUARO_IGPU_PROMPT_SET=1`) on the others: it changes bits, and only the 780M was measured. The engine picks the set from the device's own "integrated" flag and
 the architecture, not from the name: a discrete card (an RX 7900 XTX `gfx1100`, an R9700 `gfx1201`, any other) never gets it,
 and neither does a computer that also holds a discrete card next to the iGPU. The engine prints one line at start-up that names
 what it set.
 
 | Switch | What it does |
 |---|---|
-| `STRATA_HIP_WMMA=1` | the prompt attention on the matrix cores (needs `--kv int8`) |
-| `STRATA_PF_GEMM=1` | the prompt's FP16 projections on the 128 x 256 WMMA GEMM |
-| `STRATA_PA_FAST=1` | the prompt attention with single FP16 q and p |
-| `STRATA_SELECT_WMMA=1` | the block scorer on the matrix cores |
-| `STRATA_HC_UPMIX=1` | the hyper-connection up projection with its epilogue |
+| `SAGUARO_HIP_WMMA=1` | the prompt attention on the matrix cores (needs `--kv int8`) |
+| `SAGUARO_PF_GEMM=1` | the prompt's FP16 projections on the 128 x 256 WMMA GEMM |
+| `SAGUARO_PA_FAST=1` | the prompt attention with single FP16 q and p |
+| `SAGUARO_SELECT_WMMA=1` | the block scorer on the matrix cores |
+| `SAGUARO_HC_UPMIX=1` | the hyper-connection up projection with its epilogue |
 
 **Why.** (148-amd first measurement; 021-minipc repeated it with 6 interleaved pairs: prompt x1.60 at 1K, x2.03 at 4K, decode x0.999, identical greedy ids.) The dense projections are 63% of a prompt's GPU time on a 12-CU iGPU (the experts only 16%), and they are what these
 switches speed up. Radeon 780M (P2006, Ryzen 7 255, Q2_0, `--kv int8`, 4K prompt, one run each; 148-amd): 109.5 tok/s with
-none of them, 214.7 with the first four (+96%), 233 with `STRATA_HC_UPMIX` as well (+111%); decode is the same (16.6 against 17-19
+none of them, 214.7 with the first four (+96%), 233 with `SAGUARO_HC_UPMIX` as well (+111%); decode is the same (16.6 against 17-19
 tok/s, inside the run-to-run noise). The prompt switches do not touch the decode kernels.
 
 **What it costs.** They round differently from the old path (another summation order, half-precision intermediates), so the answers
 differ in the last bits. Measured on an R9700 with the same kernels (Q2_0): teacher-forced KL 0.0003 (28 prompts) / 0.0014 (eight
 ~6K-token documents), and the task sets inside their run-to-run noise.
 
-**Turning it on and off.** `STRATA_IGPU_PROMPT_SET=0` turns the whole set off, `=1` turns it on where it is not the default; each switch keeps `=0` as its off switch
-(`STRATA_HC_UPMIX=0`); `STRATA_IGPU_DEFAULTS=0` turns the set off whatever else is set. A switch you set yourself, to anything, is never overridden. Put them in the server config's `env`, or in the shell.
+**Turning it on and off.** `SAGUARO_IGPU_PROMPT_SET=0` turns the whole set off, `=1` turns it on where it is not the default; each switch keeps `=0` as its off switch
+(`SAGUARO_HC_UPMIX=0`); `SAGUARO_IGPU_DEFAULTS=0` turns the set off whatever else is set. A switch you set yourself, to anything, is never overridden. Put them in the server config's `env`, or in the shell.
 
 **Windows.** The same code applies, but it has not been tested on Windows (there was no Windows iGPU machine to run it on).
 
@@ -632,7 +632,7 @@ were already its "maintainers' fast configuration". The set was measured on the 
 **The 780M resets its GPU.** On the 780M's current Ubuntu firmware (gc 11.0.1 MES) a GPU reset can follow when the kernel evicts the
 process's GPU queues while a kernel with barriers is running ([RADEON_780M.md](RADEON_780M.md), `notes-minipc.md`). It is
 not caused by the prompt set: the default build without it resets the same way (forced compaction every 10 s killed 2 of 2 runs).
-`STRATA_ARENA_PIN_GIB=none` (experimental, exact) leaves the expert arena unregistered, so that the kernel's page migration has
+`SAGUARO_ARENA_PIN_GIB=none` (experimental, exact) leaves the expert arena unregistered, so that the kernel's page migration has
 no big GPU mapping to invalidate; the experts then reach the GPU by copy. Measured on the 780M (30 interleaved runs, 021-minipc): the
 eviction time drops from about 6 s to about 0.13 s per run, but resets still happened (4 of 20 runs against 1 of 10), and prompts/decode
 were 1-4% slower, so it is not the default. A newer `linux-firmware` (MES) is the likely cure and is a host change the engine does not make.
@@ -703,11 +703,11 @@ run it; the report below is from a community machine: an RX 6900 XT 16 GB (gfx10
 - **hipBLASLt:** ROCm's hipBLASLt ships no gfx1030 kernels, so there is no table and the plain hipBLAS path runs.
 - **Prompt GEMMs in FP16 (#835):** rocBLAS on gfx1030 has tuned kernels for FP16-in / FP16-out GEMMs only; the prompt
   path's FP16-in / FP32-out and BF16 products ran generic kernels about 6.6x slower (5.6 and ~5.3 TFLOPS against 37.7 at
-  N = 10240, T = 7313, K = 2560). `STRATA_HIP_PROMPT_F16=1` (opt-in, off by default; the engine prints a tip on gfx103x) runs the 16-bit prompt GEMMs FP16 in and out;
-  unset is the old path. `STRATA_DBG_NAN=1` also counts the non-finite FP16 outputs (a sum past 65504). The output is not bit-identical to it (an FP16 rounding of each GEMM's output replaces the BF16 rounding of
+  N = 10240, T = 7313, K = 2560). `SAGUARO_HIP_PROMPT_F16=1` (opt-in, off by default; the engine prints a tip on gfx103x) runs the 16-bit prompt GEMMs FP16 in and out;
+  unset is the old path. `SAGUARO_DBG_NAN=1` also counts the non-finite FP16 outputs (a sum past 65504). The output is not bit-identical to it (an FP16 rounding of each GEMM's output replaces the BF16 rounding of
   the BF16 GEMMs' activations); what the distribution check showed and did not show is in
   [bench/results/2026-10-04-rdna2-fp16-prompt](../bench/results/2026-10-04-rdna2-fp16-prompt/README.md). FP16 ends at
-  65504: `STRATA_F16_RANGE=1` prints, per prompt, the largest value that entered or left FP16 and how many were beyond
+  65504: `SAGUARO_F16_RANGE=1` prints, per prompt, the largest value that entered or left FP16 and how many were beyond
   the range (466K tokens there: outputs peak at 410, activations at 112, none beyond; the image writers saturate, a GEMM
   output beyond the range would be Inf and is what the counter is for). Measured on a
   second community machine - 2x RX 6900 XT 16 GB (one card for these numbers), Ryzen 5 5600X (6 cores, AVX2), 128 GB,
@@ -717,13 +717,13 @@ run it; the report below is from a community machine: an RX 6900 XT 16 GB (gfx10
   matrix cores; `hip_prefill_hipblaslt_gemm`, no hipBLASLt table) and 3 that fail for reasons outside the engine
   (`ple_parity` needs a Q2_0 PLE file that is not on that machine, `expert_multi_test` refuses the CPU without AVX-512,
   `platform_memory_test` cannot `mlock` at the shell's default `ulimit -l`).
-- **The verifier's hyper-connection read as one persistent kernel:** `STRATA_HC_PERSIST=1` (opt-in, HIP, 32-lane
+- **The verifier's hyper-connection read as one persistent kernel:** `SAGUARO_HC_PERSIST=1` (opt-in, HIP, 32-lane
   waves) runs the read of 1-8 tokens as one kernel of 80 blocks with two grid barriers instead of three launches; a
   start-up run per token count with a barrier timeout decides where it is resident, and one `strata hc:` line per card
   says so. On 2x RX 6900 XT (ROCm 10.0, layer split): the read 1.35-2.10x, ms per verify window -4.2 % / -2.8 % at
   4K / 32K (6 rounds), not bit-identical (as close to a double-accumulation reference as the default read):
   [bench/results/2026-10-12-hc-persist-gfx1030](../bench/results/2026-10-12-hc-persist-gfx1030/README.md). Other
-  RDNA cards are untested; the `strata hc:` line and a `STRATA_DECODE_TIMING` run from one are welcome. Not offered on gfx11 and
+  RDNA cards are untested; the `strata hc:` line and a `SAGUARO_DECODE_TIMING` run from one are welcome. Not offered on gfx11 and
   gfx12 (RDNA3, RDNA4): the barrier timeout needs `s_memrealtime`, which gfx1100 and gfx1200 / gfx1201 do not have, and an R9700 (#2226 thread) measured the
   read +0.7 % / +1.0 % per window slower than the default one; the start-up line says so. A barrier that times out at run time
   (never seen in a working run) leaves the partial outputs of that read in place and every later persistent read of the
@@ -731,7 +731,7 @@ run it; the report below is from a community machine: an RX 6900 XT 16 GB (gfx10
 - **Prompt GEMMs as SGEMMs (engine 0.1.39 + `Gemm::rdna2_sgemm`):** the rocBLAS in setup's ROCm (10.2.0a20260930)
   has tuned gfx1030 kernels for FP16 -> FP16, int8 and FP32 -> FP32 only. The prompt path's dense GEMMs take FP16 or
   BF16 inputs and write FP32 (rocBLAS's HS / BS types), which run its fallback kernels at about 5 TFLOPS. With
-  `STRATA_RDNA2_SGEMM=1` (opt-in; `=all` forces it on any AMD card) the engine widens both inputs to FP32 (exact) and runs SGEMM,
+  `SAGUARO_RDNA2_SGEMM=1` (opt-in; `=all` forces it on any AMD card) the engine widens both inputs to FP32 (exact) and runs SGEMM,
   which accumulates in FP32 like the native call (`src/prefill/gemm.cu`; N < 64 keeps the native call). The author ran it
   as the gfx103x default; here it is a switch because it is not bit-identical to the native call (below). Measured on an RX 6800 16 GB over OCuLink (PCIe 4.0 x4, 7.1 GB/s), Ryzen 7 8845HS, 28.8 GB RAM, Windows 11,
   Coder IQ1_M with setup's arguments (64K context, MTP), fresh 12K-token prompts, 4 per arm, A/B in one binary:
@@ -739,7 +739,7 @@ run it; the report below is from a community machine: an RX 6900 XT 16 GB (gfx10
   | | native GEMMs | SGEMM route |
   |---|---|---|
   | prompt | 312 tok/s | 452 tok/s |
-  | prompt GPU timeline (`STRATA_PREFILL_TIMING`) | 37.2 s | 25.5 s |
+  | prompt GPU timeline (`SAGUARO_PREFILL_TIMING`) | 37.2 s | 25.5 s |
   | of which gdn / qsa proj / hc read | 9.4 / 3.6 / 3.85 s | 2.8 / 1.4 / 2.84 s |
   | decode | 29-34 tok/s | 29-35 tok/s |
 
@@ -748,20 +748,20 @@ run it; the report below is from a community machine: an RX 6900 XT 16 GB (gfx10
   [-1, 1], the SGEMM route is as close as or closer than the native call on all 10 FP16 / BF16 shapes checked; the
   two differ by at most 4.3e-6 of the largest output. A 9-task code-repair benchmark (the model patches seeded bugs
   in a browser game until 38 browser checks pass) solved 9/9 on the first try with both, model time 458 -> 374 s.
-  With the switch on and `STRATA_HIP_PROMPT_F16` unset the SGEMM route runs; with `STRATA_HIP_PROMPT_F16=1`
+  With the switch on and `SAGUARO_HIP_PROMPT_F16` unset the SGEMM route runs; with `SAGUARO_HIP_PROMPT_F16=1`
   the FP16 route above runs first and the SGEMM route takes the products it leaves (`beta != 0`). Same RX 6800, one
-  session, fresh 12K-token prompts: native 310, SGEMM 439, FP16 (#835) 494 tok/s; `STRATA_F16_RANGE=1` on the Coder
+  session, fresh 12K-token prompts: native 310, SGEMM 439, FP16 (#835) 494 tok/s; `SAGUARO_F16_RANGE=1` on the Coder
   IQ1_M peaked at 105.3 (activations) and 424.8 (FP16 outputs) with nothing beyond 65504, and the repair benchmark
   solved 9/9 on the first try with both (model time 374 s SGEMM, 307 s FP16). The SGEMM route is the slower of the
   two; no value passes through FP16, so it has no 65504 limit to stay under. It is not bit-identical to the native
   call (at most 4.3e-6 of the largest output apart), which can flip a near-tied greedy token like any such change.
-- **rocBLAS solution table** (for the `STRATA_HIP_PROMPT_F16=1` route above; with it off, nothing runs through the
+- **rocBLAS solution table** (for the `SAGUARO_HIP_PROMPT_F16=1` route above; with it off, nothing runs through the
   table): rocBLAS picks the kernel for each of those FP16 GEMMs from its own table by shape, and
   on gfx1030 that pick is far from the best kernel the library holds for some shapes: the GDN input projection
   (N = 10240, K = 2560) below about 1,150 tokens runs at 5 TFLOPS where the best of rocBLAS's own 237 solutions for the
   same shape runs at 32-38 (7x; the kernel choice flips at T = 1152). `tools/hip/tune_rocblas` enumerates the library's
   solutions per shape and token bucket, checks each against the default kernel's output and writes the winners as
-  `tools/hip/<arch>-rocblas-<version>.txt`; the engine reads the table through `STRATA_ROCBLAS_TUNING` (a file, or
+  `tools/hip/<arch>-rocblas-<version>.txt`; the engine reads the table through `SAGUARO_ROCBLAS_TUNING` (a file, or
   the directory, from which it takes the file of its own rocBLAS build) and runs those solutions in place of rocBLAS's
   choice, the default kernel for every shape without a row. Solution indices are valid for one architecture and one
   rocBLAS build (the full version string, `5.6.0.8d1ae90e` for ROCm 10.0.0's), and the engine refuses any other
@@ -771,14 +771,14 @@ run it; the report below is from a community machine: an RX 6900 XT 16 GB (gfx10
   `tune_rocblas` makes one in about 5 minutes ([Tuning table](#tuning-table)), and a report of what it changed is welcome. Setup
   points the engine at the directory when a table for the card's architecture exists, and the engine's log says
   `rocBLAS tuning enabled (... rows ...)` or why not. Measured on the 2x RX 6900 XT machine above (one card, #835 +
-  this, `STRATA_PREFILL_TIMING=1`, temperature 0, the same answers with and without): a 799-token prompt's GPU time
+  this, `SAGUARO_PREFILL_TIMING=1`, temperature 0, the same answers with and without): a 799-token prompt's GPU time
   3,329 -> 2,985 ms (the GDN projections 443 -> 177 ms, `hc read` 270 -> 77), 495 tokens 2,477 -> 2,139 ms (365 ->
   146), 8,874 tokens 11,978 -> 11,459 ms (the 682-token tail chunk's projections, `hc read` 1,200 -> 898); a
   1,108-token prompt did not change (3,391 -> 3,395 ms): its GDN time fell 598 -> 201 ms and the whole saving
   reappeared as `wait copy`, the experts' PCIe transfer, which bounds that prompt. Per-run lines and the tuner's
   summary: [bench/results/2026-10-05-rdna2-rocblas-table](../bench/results/2026-10-05-rdna2-rocblas-table/README.md). Decode does not use these GEMMs and is unchanged. See [Tuning
   table](#tuning-table) for making a table for another rocBLAS build.
-- **QSA block scores on the FP32 tiled scorer (`STRATA_SELECT_SIMT=1`, opt-in, as on CUDA below sm_80):** without
+- **QSA block scores on the FP32 tiled scorer (`SAGUARO_SELECT_SIMT=1`, opt-in, as on CUDA below sm_80):** without
   matrix cores the prompt path's QSA selection scores every (query, KV block) pair on the warp kernel, the one prompt
   term that grows with the context. The switch runs the FP32 tiled scorer instead (FP32 in another summation order:
   not bitwise the warp kernel, so off by default), tiled 32/128/16/8 on gfx103x. `qsa_select_bench`, 256 queries:
@@ -789,7 +789,7 @@ run it; the report below is from a community machine: an RX 6900 XT 16 GB (gfx10
   1,861 and 1,727 -> 1,858 tok/s (+7.4%), 32K +0.8%; decode is not affected (the text changes with the scores' order,
   so its speed is not compared). Measurements:
   [bench/results/2026-10-07-rdna2-qsa-select-simt](../bench/results/2026-10-07-rdna2-qsa-select-simt/README.md).
-- **File-tier cache rule on gfx906 (`STRATA_FILE_CACHE_OLD_RULE`):** on an MI50 ROCm queues are suspended while the kernel reclaims around the process's HMM-tracked arena (#1752, KevinX8: stalls, prompt 46 -> 360 tok/s once the file tier stops churning the page cache). The gfx906 backend therefore keeps the old rule (the file cache is used only when the room left is at least the bytes read from the files); other HIP cards keep the current rule. `STRATA_FILE_CACHE_OLD_RULE=1` forces the old rule on any Linux build, `=0` the current one.
+- **File-tier cache rule on gfx906 (`SAGUARO_FILE_CACHE_OLD_RULE`):** on an MI50 ROCm queues are suspended while the kernel reclaims around the process's HMM-tracked arena (#1752, KevinX8: stalls, prompt 46 -> 360 tok/s once the file tier stops churning the page cache). The gfx906 backend therefore keeps the old rule (the file cache is used only when the room left is at least the bytes read from the files); other HIP cards keep the current rule. `SAGUARO_FILE_CACHE_OLD_RULE=1` forces the old rule on any Linux build, `=0` the current one.
 - **Windows** (the report above): setup's ready-made Windows engine 0.1.39 runs the RX 6800 beside a 780M iGPU
   (HIP numbers the RX 6800 1; setup points the engine at it), and `tools/hip/build_windows.bat` with
   `STRATA_HIP_ARCHS=gfx1030` builds a working engine from the `gfx103X-all` 10.2.0a20260930 wheels.
@@ -806,7 +806,7 @@ run it; the report below is from a community machine: an RX 6900 XT 16 GB (gfx10
   hipBLASLt; 3.6K tokens 124 -> 216 tok/s, 7K 130 -> 226 tok/s, decode unchanged):
   [bench/results/2026-10-07-community-gfx1150](../bench/results/2026-10-07-community-gfx1150/README.md).
   Setup does not install for it yet (an integrated Radeon other than Strix Halo is named and not supported): build by hand with `-DCMAKE_HIP_ARCHITECTURES=gfx1150`
-  and point `STRATA_HIPBLASLT_TUNING` at the table yourself.
+  and point `SAGUARO_HIPBLASLT_TUNING` at the table yourself.
 - **gfx1152** (Radeon 860M / 840M, Ryzen AI 300 "Krackan", #1625): in CMake's unvalidated list like gfx1150, so
   `-DCMAKE_HIP_ARCHITECTURES=gfx1152` builds with a warning. It runs the portable kernels (the matrix-core guards name
   gfx1150 and gfx1151 only), no card has reported on it, and setup does not install for it (an integrated Radeon other
@@ -826,7 +826,7 @@ gfx906 is wave64 and has no WMMA and no packed byte arithmetic, so the wave32 ba
 (32-wide shuffles, a ballot of its own half). The hot kernels have wave64 layouts of their own (below). Setup does
 not build it yet: build by hand, and run `serve/server.py` with a config as on any other card.
 
-**Community-tested, opt-in (0.1.42).** The gfx906 build is maintained with its users: we have no gfx906 card, so what is here was measured by community members on their MI50s (the attention switches `STRATA_GFX906_ATTN_QUERY_SWIZZLE=1` and `STRATA_GFX906_ATTN_REDUCE12=1`, PRs #1661 and #1718 by 0FL01, are off by default and compiled only into this build) and the engine here is checked to compile for gfx906, nothing more. Nothing in it changes the builds for other cards. A wave32 card seen by this build is refused at start with a message (#1728). Please report how it runs on your card.
+**Community-tested, opt-in (0.1.42).** The gfx906 build is maintained with its users: we have no gfx906 card, so what is here was measured by community members on their MI50s (the attention switches `SAGUARO_GFX906_ATTN_QUERY_SWIZZLE=1` and `SAGUARO_GFX906_ATTN_REDUCE12=1`, PRs #1661 and #1718 by 0FL01, are off by default and compiled only into this build) and the engine here is checked to compile for gfx906, nothing more. Nothing in it changes the builds for other cards. A wave32 card seen by this build is refused at start with a message (#1728). Please report how it runs on your card.
 
 **ROCm.** AMD's current ROCm releases no longer ship gfx906 libraries. The build and the measurements below used
 HIP 7.14 from the community image [`mixa3607/rocm-gfx906:7.14-complete`](https://hub.docker.com/r/mixa3607/rocm-gfx906)
@@ -855,12 +855,12 @@ layer does not map and its kernels assume 32-lane warps. `strata --families` lis
 
 | | gfx906 | switch |
 |---|---|---|
-| grouped native experts | mode 7: signs as `dp4a(g ^ m, u) - dp4a(m, u)` (no byte SIMD), grids and activations in LDS, one weight load per group; the IQ formats only (Unsloth's K-quant / Q5_1 / Q8_0 experts take the CUDA layout) | `STRATA_EXP_MODE=2` (previous AMD layout) |
-| MMVQ | one wavefront per row, 64-lane butterfly, no LDS | `STRATA_MMVQ_WAVE=0` |
+| grouped native experts | mode 7: signs as `dp4a(g ^ m, u) - dp4a(m, u)` (no byte SIMD), grids and activations in LDS, one weight load per group; the IQ formats only (Unsloth's K-quant / Q5_1 / Q8_0 experts take the CUDA layout) | `SAGUARO_EXP_MODE=2` (previous AMD layout) |
+| MMVQ | one wavefront per row, 64-lane butterfly, no LDS | `SAGUARO_MMVQ_WAVE=0` |
 | router top-10 | one wavefront, register argmax | - |
-| verify-window routing (256-expert router) | the window's tokens in one multi-column BF16 projection + one top-k, ~3 ms of a ~55 ms window | `STRATA_ROUTE_PER_TOKEN=1` |
-| hyper-connection read | norm loads in flight, 8 lanes per row for `up` | `STRATA_GR_FAST=0` |
-| `gr_down_multi`, opt-in | split along K (8 rows x 5 slices of 2048), ~3% per window; sums in another order than the single-token read, so off by default | `STRATA_GR_SPLIT=1` |
+| verify-window routing (256-expert router) | the window's tokens in one multi-column BF16 projection + one top-k, ~3 ms of a ~55 ms window | `SAGUARO_ROUTE_PER_TOKEN=1` |
+| hyper-connection read | norm loads in flight, 8 lanes per row for `up` | `SAGUARO_GR_FAST=0` |
+| `gr_down_multi`, opt-in | split along K (8 rows x 5 slices of 2048), ~3% per window; sums in another order than the single-token read, so off by default | `SAGUARO_GR_SPLIT=1` |
 | IQ4 table lookup | llama.cpp's `v_perm_b32` sequence (HIP's `__byte_perm` is a scratch array) | - |
 | QSA prompt attention | the FP32 kernel (no tensor cores / WMMA) | - |
 
@@ -870,7 +870,7 @@ Every switch above was checked bitwise against the layout it replaces: the parit
 **Measured** on 2x Instinct MI50 16 GB (85 W power limit each, PCIe 3.0 x16 both, peer access between them),
 Xeon E5-2666 v3 (10 cores, AVX2), 32 GB DDR4, SATA SSD; Coder IQ1_M (`--native` pack), 131,072-token context,
 `--kv int8 --kv-resident 32768`, `--layer-split 27`, `--prefill 4096`, MTP `--spec 4 --spec-min-p 0.5`,
-`--pcie-frac 0`, `STRATA_ARENA_MMAP=1`. Measured on the port this build was cut from (builds on the 0.1.30 and 0.1.33 bases, the same
+`--pcie-frac 0`, `SAGUARO_ARENA_MMAP=1`. Measured on the port this build was cut from (builds on the 0.1.30 and 0.1.33 bases, the same
 kernels, plus the layer-split weight trim and the mapped arena, which are separate pull requests):
 
 - all 12,288 experts held in VRAM across the two cards;
@@ -909,7 +909,7 @@ CASES=$(awk 'NR>2 {printf " --case %s,%s,%s,%s,%s", $1, $5, $2, $3, $4}' tools/h
 ```
 
 The file's second line names the architecture and version (`STRATA_HIPBLASLT_TUNING_V1 gfx1201 100401`); save it
-as `tools/hip/<arch>-hipblaslt-<version>.txt` for setup, or point `STRATA_HIPBLASLT_TUNING` at it. Compare the
+as `tools/hip/<arch>-hipblaslt-<version>.txt` for setup, or point `SAGUARO_HIPBLASLT_TUNING` at it. Compare the
 prompt speed with and without it before keeping it. For an engine package, `packaging/stage_tuning.py` (Linux builds) and
 `tools/hip/package_windows.py` copy the tables that match the bundled hipBLASLt into the package's `tuning/` folder.
 
@@ -935,7 +935,7 @@ Shipped tables:
   `tune_hipblaslt` from the same tree and the engine's 32 MiB workspace: `f16 1280 2560 1280` (the
   small-T expert GEMM, T=8..999) and `bf16 10240 2560 10240`. A prompt on Qwen3.8-Flash-Next GSQ-RCO
   IQ2_XS at 192000 ctx otherwise falls back on the expert GEMM for nearly every launch:
-  `STRATA_HIPBLASLT_VERBOSE=1` reported 642 fallbacks over 642 distinct T values (1..1873) with the
+  `SAGUARO_HIPBLASLT_VERBOSE=1` reported 642 fallbacks over 642 distinct T values (1..1873) with the
   26-row table. Adding the rows measured 711 -> 938 tok/s (+31.9 %, mean of 3 interleaved pairs:
   +36.0 / +32.4 / +27.6 %) at a 3151-token prompt, decode unchanged (58.6 -> 60.6 tok/s, inside this
   box's 2.3 % run drift), and `fallbacks=0`. The lookup takes the nearest T bucket for a matching
@@ -951,18 +951,18 @@ Shipped tables:
   (AMD's `gfx120X-all` nightly, hipBLASLt 1.5.0, library build `d3164197`). 16 dense GEMM geometries at T=4096 and
   T=8192, 32 rows. setup uses it only when the installed hipBLASLt reports 1.5.0 (it is found in `/opt/rocm`
   when that is a system ROCm 7 or newer). The version number is the only thing the engine can check, so another
-  1.5.0 build could number its solutions differently. `hip_prefill_hipblaslt_gemm` (with `STRATA_HIPBLASLT_TUNING`
+  1.5.0 build could number its solutions differently. `hip_prefill_hipblaslt_gemm` (with `SAGUARO_HIPBLASLT_TUNING`
   set) is a smoke test: it refuses a table for another architecture or version and checks that one BF16 and one
   F16 row exist and agree with hipBLASEx, which covers 2 of the 32 rows. It does not prove that a solution id is
   valid: the engine falls back to hipBLASEx for an id the library rejects, and the test still passes. Run it with
-  `STRATA_HIPBLASLT_VERBOSE=1` and look for `fallbacks=0` in its summary line, and recalibrate with
+  `SAGUARO_HIPBLASLT_VERBOSE=1` and look for `fallbacks=0` in its summary line, and recalibrate with
   `tune_hipblaslt` before using this table with a different 1.5.0 build.
 - `gfx1151-hipblaslt-100400.txt`: Radeon 8060S (Ryzen AI Max+ 395, gfx1151, 128 GB; Fedora 44, kernel 7.2.8),
   calibrated with the ROCm 7.14.0a20260608 wheels that setup installs for gfx1151 since 0.1.40.2 (#1267): their
   hipBLASLt is 1.4.0 (version number 100400), so neither `gfx1151-hipblaslt-100401.txt` nor `-100500.txt` applied and
   setup's engine read the prompt through plain hipBLAS. The same 90 rows as the 100401 table (its geometries, the
   prompt shapes at `--prefill 16384` included), calibrated with `tune_hipblaslt --workspace-mib 32` and that table's
-  cases: 3.1x to 14.1x faster than plain hipBLAS per shape (median 6.2x). With `STRATA_HIPBLASLT_TUNING` set,
+  cases: 3.1x to 14.1x faster than plain hipBLAS per shape (median 6.2x). With `SAGUARO_HIPBLASLT_TUNING` set,
   `hip_prefill_hipblaslt_gemm` passes (`launches=4 fallbacks=0`), `hip_prefill_hcd_exact_parity` passes (solutions
   1176 / 1177 at 9 chunk sizes, 0 outputs differ, `fallbacks=0`), and the HIP ctest passes 61 of 62 (`ple_parity`
   needs the Q2_0 model fixture). setup uses it only when the installed hipBLASLt reports 1.4.0. The prompt speed
@@ -973,9 +973,9 @@ Shipped tables:
   Qwen3.8-Flash-Next prompt logs on that card (the same 16 as the gfx1201 100500 table) at T = 64, 128, ..., 16384: 144 rows. Two
   `tune_hipblaslt` passes back to back; each row keeps the solution with the lowest median of all six repetitions, because one
   repetition stalled now and then (a 100 ms call read up to 1.6 s) and the tool's mean-of-three picks differed in 26 rows between
-  the passes. Every row beats plain hipBLAS, 1.55-22.6x per GEMM (geometric mean 4.5x), and `STRATA_HIPBLASLT_VERBOSE=1` reported
+  the passes. Every row beats plain hipBLAS, 1.55-22.6x per GEMM (geometric mean 4.5x), and `SAGUARO_HIPBLASLT_VERBOSE=1` reported
   no fallbacks over prompts of 28-7,880 tokens. Setup does not use it (it does not install for gfx1150): point
-  `STRATA_HIPBLASLT_TUNING` at it. Measurements and the per-row timings:
+  `SAGUARO_HIPBLASLT_TUNING` at it. Measurements and the per-row timings:
   [bench/results/2026-10-07-community-gfx1150](../bench/results/2026-10-07-community-gfx1150/README.md).
 - `gfx1103-hipblaslt-100401.txt`: Radeon 780M (gfx1103, RDNA3, 12 CUs, unified memory), calibrated with ROCm 10.1
   (`rocm/dev-ubuntu-24.04:10.1.0-full`, hipBLASLt 1.4.1, version number 100401) and the engine's 32 MiB workspace. The
@@ -988,7 +988,7 @@ Shipped tables:
   full 128K read at 198-221 tok/s, its last ~14K at ~206, and decode at ~10 tok/s at that depth; the numbers are in
   the report folder. `hip_prefill_hipblaslt_gemm` reports `fallbacks=0`;
   `hip_prefill_hcd_exact_parity` skips, because the table picks no 1176 / 1177 for the HC down GEMM (the skip the
-  gfx1150 table gets too). Setup installs for gfx1103 only with `STRATA_EXPERIMENTAL_GFX1103=1` and then uses the
+  gfx1150 table gets too). Setup installs for gfx1103 only with `SAGUARO_EXPERIMENTAL_GFX1103=1` and then uses the
   table when the installed hipBLASLt reports 1.4.1. Measurements:
   [bench/results/2026-10-12-community-gfx1103](../bench/results/2026-10-12-community-gfx1103/README.md).
 
@@ -1037,10 +1037,10 @@ smaller, odd token counts, and writes one row per shape and bucket: the winning 
 default by `--min-gain` (1.05), `default` otherwise - a `default` row is what keeps a neighbouring bucket's solution from
 reaching token counts where rocBLAS's own choice measured best. The file's header names the architecture and version
 (`STRATA_ROCBLAS_TUNING_V1 gfx1030 5.6.0.8d1ae90e`); save it as `tools/hip/<arch>-rocblas-<version>.txt` (the version
-with trailing dots dropped) for setup, or point `STRATA_ROCBLAS_TUNING` at the file. `STRATA_ROCBLAS_VERBOSE=1` prints
+with trailing dots dropped) for setup, or point `SAGUARO_ROCBLAS_TUNING` at the file. `SAGUARO_ROCBLAS_VERBOSE=1` prints
 the solution picked for each shape and a `tuned_launches=... fallbacks=...` summary at exit; a solution rocBLAS refuses
 at run time (status 11 once while it sets up its workspace is normal) falls back to the default kernel for that call, and
-after three refusals for good. `hip_prefill_rocblas_gemm` (with `STRATA_ROCBLAS_TUNING` set; skips otherwise) is the
+after three refusals for good. `hip_prefill_rocblas_gemm` (with `SAGUARO_ROCBLAS_TUNING` set; skips otherwise) is the
 smoke test: it refuses a table for another architecture or build and checks Gemm's FP16 route against hipBLASEx on the
 table's first two shapes.
 
@@ -1102,7 +1102,7 @@ equivalence, other AMD cards, and mixed-vendor inference are not validated here.
 
 On a Strix Halo (gfx1151) the hyper-connection down / up projections are read as Q8_0 by default (quantized at load from the pack, or the GGUF's own Q8_0),
 which halves the 13.3 MB each read moves. Decode is about 9% faster (5 interleaved pairs per prompt on IQ3_S, MTP 4 drafts / min-p 0.5; json / code / tool
-call / chat / agent between +7.9% and +10.7%). `STRATA_HC_Q8=0` restores the bf16 read. Other cards are unchanged (gfx12 has had it on since 0.1.4x).
+call / chat / agent between +7.9% and +10.7%). `SAGUARO_HC_Q8=0` restores the bf16 read. Other cards are unchanged (gfx12 has had it on since 0.1.4x).
 Not bit-identical to the bf16 read: a greedy answer can pick another token at a near tie and then go its own way.
 
 How far it moves the model, measured with the quant-quality yardstick (teacher forced, 5 texts of 1,000 tokens, reference = bf16 read; RTX A4000, IQ3_XXS,

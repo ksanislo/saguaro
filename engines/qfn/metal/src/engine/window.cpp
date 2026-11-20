@@ -66,10 +66,10 @@ struct QsaArgs { uint32_t pos0, pos_base, max_cells, n_tok; float eps; };
 struct GlueArgs { uint32_t n, n_tok, n_embd, topk; };
 struct ArgArgs { uint32_t n_vocab, parts; };
 // the routed gate/up's i-quant grids from constant memory (QUANT_CTAB, function constant 23 of quant.metal): bitwise
-// the threadgroup copy's values, 3-7% faster on the M5 Max; STRATA_METAL_CTAB=0 turns it off
+// the threadgroup copy's values, 3-7% faster on the M5 Max; SAGUARO_METAL_CTAB=0 turns it off
 bool metal_ctab() {
     static const bool on = [] {
-        const char* e = std::getenv("STRATA_METAL_CTAB");
+        const char* e = std::getenv("SAGUARO_METAL_CTAB");
         return !(e && std::string(e) == "0");
     }();
     return on;
@@ -160,11 +160,11 @@ private:
     void push(std::vector<mtl::Dispatch>& ds, mtl::Dispatch d) {
         d.barrier = !nb_;
         nb_ = false;
-        // timing only (WRONG answers): STRATA_METAL_SKIP=a,b,... runs the dispatches whose pipeline name contains one
+        // timing only (WRONG answers): SAGUARO_METAL_SKIP=a,b,... runs the dispatches whose pipeline name contains one
         // of the words as empty grids (the marginal cost of a kernel class by leaving it out)
         static const std::vector<std::string> skip = [] {
             std::vector<std::string> v;
-            if (const char* e = std::getenv("STRATA_METAL_SKIP")) {
+            if (const char* e = std::getenv("SAGUARO_METAL_SKIP")) {
                 std::string s = e, w;
                 for (char c : s + ",") { if (c == ',') { if (!w.empty()) v.push_back(w); w.clear(); } else w += c; }
             }
@@ -237,28 +237,28 @@ private:
     int hp_ = 0;                     // which of the two history buffers holds the committed conv history (all layers)
     // commit(n) of a window of several tokens: the GDN fold of the kept prefix waits for the next window and runs at
     // the start of its command buffer (one submit and wait less a round).  Nothing else reads the GDN state between
-    // the two (the drafter reads the window's rows and its own caches).  STRATA_METAL_LAZY_FOLD=0: at commit.
+    // the two (the drafter reads the window's rows and its own caches).  SAGUARO_METAL_LAZY_FOLD=0: at commit.
     int pend_fold_ = 0;
     // gdn_step's partial commit (mac-kern 56526aed, commit = 0x100 | k): a verify window of T > 1 commits its first
     // row in place (it is always kept), so commit(1) needs no fold and commit(n) folds rows 1..n-1 only; a window
-    // without the head (the prompt) commits all its rows in the step.  Opt-in (STRATA_METAL_PARTIAL=1): at --spec 2
+    // without the head (the prompt) commits all its rows in the step.  Opt-in (SAGUARO_METAL_PARTIAL=1): at --spec 2
     // it measured 0.3-0.8% slower on the M5 Max (the in-place state write costs every window, the fold it saves
     // only the rounds with no accepted draft).  Off: the window commits nothing and commit(n) folds n rows.
-    bool partial_ = std::getenv("STRATA_METAL_PARTIAL") && std::string(std::getenv("STRATA_METAL_PARTIAL")) == "1";
+    bool partial_ = std::getenv("SAGUARO_METAL_PARTIAL") && std::string(std::getenv("SAGUARO_METAL_PARTIAL")) == "1";
     bool win_head_ = true;      // the window being encoded has the head
     bool last_head_ = true;     // the last window had it
     // token_chain's --fuse (mac-kern): the GDN step writes the prepared y planes itself (no xprep), and a window whose
     // context is within the selection budget skips the QSA score and top-k (the cell list is the identity: qids_
-    // holds it from init, restored after a window that selected).  STRATA_METAL_FUSE=0: off.
-    bool fuse_ = !(std::getenv("STRATA_METAL_FUSE") && std::string(std::getenv("STRATA_METAL_FUSE")) == "0");
+    // holds it from init, restored after a window that selected).  SAGUARO_METAL_FUSE=0: off.
+    bool fuse_ = !(std::getenv("SAGUARO_METAL_FUSE") && std::string(std::getenv("SAGUARO_METAL_FUSE")) == "0");
     bool qdirty_ = false;
     // mac-kern's router_route (3f9ca996): the BF16 router GEMV and moe_route in one dispatch, beside the shared
-    // expert's GEMVs (bitwise).  Opt-in (STRATA_METAL_ROUTE=1): in this window, where the router GEMV already runs
+    // expert's GEMVs (bitwise).  Opt-in (SAGUARO_METAL_ROUTE=1): in this window, where the router GEMV already runs
     // beside the shared GEMVs, it measured no faster (T2 GPU 13.035 vs 13.027 ms; the fused kernel alone 0.615 ms vs
     // 0.566 for the two) and 0.3-0.5% slower end to end on the M5 Max.
-    bool routef_ = std::getenv("STRATA_METAL_ROUTE") && std::string(std::getenv("STRATA_METAL_ROUTE")) == "1";
+    bool routef_ = std::getenv("SAGUARO_METAL_ROUTE") && std::string(std::getenv("SAGUARO_METAL_ROUTE")) == "1";
     mtl::Buffer rcounter_;
-    // STRATA_METAL_KPROF=T (test tooling): once, after the 20th cached window of T tokens with the head, the GPU time
+    // SAGUARO_METAL_KPROF=T (test tooling): once, after the 20th cached window of T tokens with the head, the GPU time
     // of each kernel class alone (the window's own dispatches of that pipeline + weight role, run by themselves)
     void kprof(const std::vector<mtl::Dispatch>& ds, int Tn);
     void fold(std::vector<mtl::Dispatch>& ds, int n_keep, int hp);
@@ -313,7 +313,7 @@ private:
     int last_n_disp_ = 0;
     int32_t last_tokens_[MAXT] = {};
     std::vector<float> last_norm_;   // the window's normalized PLE rows (T x hc_dim), for commit
-    // STRATA_METAL_LOGPOS=<path> (test tooling, one-token windows): per decode position the log-probability of the
+    // SAGUARO_METAL_LOGPOS=<path> (test tooling, one-token windows): per decode position the log-probability of the
     // token that came next (the next window's input: with --spec-follow, the forced text) and the top 64, in the
     // KL harness's row format (phaseA-tests cuda_p0/cuda_kl.py load_lp): pos, target, lp, argmax, 4 x 0, id:lp ...
     std::FILE* logpos_ = nullptr;
@@ -324,7 +324,7 @@ private:
     std::vector<float> lp_row_;
     std::vector<std::pair<float, int32_t>> lp_top_;
     void logpos(int Tn, const int32_t* tokens, int64_t pos0, bool head);
-    // STRATA_METAL_PROFILE=1: where a window's time goes, per window size (printed when the window goes away)
+    // SAGUARO_METAL_PROFILE=1: where a window's time goes, per window size (printed when the window goes away)
     struct Prof { int64_t n = 0; double pre = 0, rg = 0, gpu = 0, fin = 0, all = 0; };
     std::map<int, Prof> prof_;
     Prof cprof_, dprof_;   // commit (folds), the draft rounds
@@ -333,7 +333,7 @@ public:
     ~Window();
     void prof_add(bool draft, double ms) { Prof& x = draft ? dprof_ : cprof_; ++x.n; x.all += ms; }
 private:
-    // the Q8_0 copies of the hyper-connection matrices (the default; STRATA_HC_Q8=0: the BF16 originals)
+    // the Q8_0 copies of the hyper-connection matrices (the default; SAGUARO_HC_Q8=0: the BF16 originals)
     // Gyro (agentionai's Hadamard-folded trellis experts, native_experts.txt v5 + hadamard.txt): the gate/up input is
     // H (s * x) and the down input H h, per block of 128; XR_ holds the rotated rows, hsx_/hsh_ the +/-1 signs
     bool had_on_ = false;
@@ -363,7 +363,7 @@ private:
     gguf::Tensor mhead_t_;
     std::vector<int32_t> dvocab_;
     // the draft layer's BF16 matrices in Q8_0 (half the bytes a draft step reads; drafts only: the verify window
-    // decides every token).  STRATA_METAL_MTP_Q8=0 keeps BF16.
+    // decides every token).  SAGUARO_METAL_MTP_Q8=0 keeps BF16.
     mtl::Buffer mq8_;
     std::map<std::string, gguf::Tensor> mq8t_;
     const mtl::Buffer& MB(const std::string& name) const { return mq8t_.count(name) ? mq8_ : Wm_; }
@@ -403,7 +403,7 @@ private:
     bool m5_layout() { if (m5_layout_ < 0) m5_layout_ = coop_k4() ? 1 : 0; return m5_layout_ == 1; }
     bool pc_setup(int C);
     bool pc_chunk(const int64_t* tokens, int nT, int64_t pos0, std::string& err);
-    // the draft round in one command buffer (msl/mtp_chain.metal): STRATA_METAL_MTP_CHAIN=0 runs a command buffer
+    // the draft round in one command buffer (msl/mtp_chain.metal): SAGUARO_METAL_MTP_CHAIN=0 runs a command buffer
     // per step with the host's pick and embedding (as before)
     int lchain_ = -1;
     bool chain_ = false;
@@ -414,7 +414,7 @@ namespace {
 // A repack (metal_repack.py: <file>.repack.lock) or setup's model preparation (.preparing.lock) beside the GPU's file holds a lock
 // with its pid.  The repack and the pack move 100+ GB through the disk and one holds up to 20 GB of memory: an engine of 70-90 GB
 // beside them is what froze the 128 GB M5 Max twice (watchdog panics, 2026-10-13).  Returns the pid of a live one, else 0.
-// STRATA_METAL_IGNORE_REPACK=1 starts anyway (your choice).
+// SAGUARO_METAL_IGNORE_REPACK=1 starts anyway (your choice).
 long repack_pid_running(const std::string& model_file) {
     namespace fs = std::filesystem;
     std::error_code ec;
@@ -443,9 +443,9 @@ bool Window::init(const strata::core::ModelGeometry& g, strata::core::SessionSta
     }
     eps_ = 1e-6f;
     const double t0 = now_ms();
-    if (const long rp = repack_pid_running(shard1); rp > 0 && !(std::getenv("STRATA_METAL_IGNORE_REPACK") && std::string(std::getenv("STRATA_METAL_IGNORE_REPACK")) == "1")) {
+    if (const long rp = repack_pid_running(shard1); rp > 0 && !(std::getenv("SAGUARO_METAL_IGNORE_REPACK") && std::string(std::getenv("SAGUARO_METAL_IGNORE_REPACK")) == "1")) {
         err = "metal window: a model repack or setup's preparation is running here (pid " + std::to_string(rp) + "): the engine is not started "
-              "beside it (it froze a 128 GB Mac twice); wait for it to finish, or set STRATA_METAL_IGNORE_REPACK=1";
+              "beside it (it froze a 128 GB Mac twice); wait for it to finish, or set SAGUARO_METAL_IGNORE_REPACK=1";
         return false;
     }
     if (!f_.open(shard1, err)) return false;
@@ -494,7 +494,7 @@ bool Window::init(const strata::core::ModelGeometry& g, strata::core::SessionSta
     lgdn_ = cx_->compile({"gdn.metal"}, "#define NO_GGML_COMMON 1\n");
     lqsa_ = cx_->compile({"qsa.metal", "qsa2.metal"}, "#define NO_GGML_COMMON 1\n");
     lsmp_ = cx_->compile({"sample.metal"}, "#define NO_GGML_COMMON 1\n");
-    lple_ = cx_->compile({strata_metal::resource("STRATA_METAL_ENGINE_KERNELS", "engine-msl", STRATA_METAL_ENGINE_KERNELS_DEFAULT) + "/ple.metal"}, "#define NO_GGML_COMMON 1\n");
+    lple_ = cx_->compile({strata_metal::resource("SAGUARO_METAL_ENGINE_KERNELS", "engine-msl", STRATA_METAL_ENGINE_KERNELS_DEFAULT) + "/ple.metal"}, "#define NO_GGML_COMMON 1\n");
 
     const int MAXC = (int) std::max<int64_t>(4096, (max_cells + 64) / 4 * 4 + 64), MB = MAXC / 4 + 2;
     max_cells_ = MAXC;
@@ -565,10 +565,10 @@ bool Window::init(const strata::core::ModelGeometry& g, strata::core::SessionSta
             pooled_.push_back(A(4 * (size_t) MB * 128));
         }
     }
-    // ---- the HC read in Q8_0 (the owner's default on Metal, as STRATA_HC_Q8 on gfx12): the BF16 down / up / inject
+    // ---- the HC read in Q8_0 (the owner's default on Metal, as SAGUARO_HC_Q8 on gfx12): the BF16 down / up / inject
     // matrices quantized once at load (ggml's q8_0 rule, ref_quant), read by gr_down_q8 / gr_up_q8
     {
-        const char* e = std::getenv("STRATA_HC_Q8");
+        const char* e = std::getenv("SAGUARO_HC_Q8");
         hc_q8_ = !(e && std::string(e) == "0");
     }
     {
@@ -614,7 +614,7 @@ bool Window::init(const strata::core::ModelGeometry& g, strata::core::SessionSta
                 }
             });
         for (auto& x : th) x.join();
-        std::fprintf(stderr, "strata metal: HC read in Q8_0 (STRATA_HC_Q8=0: BF16): %zu matrices, %.0f MB, made in %.0f ms\n",
+        std::fprintf(stderr, "strata metal: HC read in Q8_0 (SAGUARO_HC_Q8=0: BF16): %zu matrices, %.0f MB, made in %.0f ms\n",
                      names.size(), tot / 1e6, now_ms() - tq);
     }
     if (stream_) {
@@ -622,7 +622,7 @@ bool Window::init(const strata::core::ModelGeometry& g, strata::core::SessionSta
         if (hc_q8_)
             for (const auto& kv : q8off_) skip.push_back(kv.first);
         if (!st_->load_dense(f_, *cx_, skip, W_, err)) return false;
-        const char* e = std::getenv("STRATA_METAL_PREFETCH");
+        const char* e = std::getenv("SAGUARO_METAL_PREFETCH");
         st_pred_ = !(e && std::atoi(e) <= 0);
         if (st_pred_) predL_ = A(4 * (size_t) 48 * MAXT * 512);
         if (st_pred_ && st_->ahead2() > 0) predL2_ = A(4 * (size_t) 48 * MAXT * 512);
@@ -653,7 +653,7 @@ void Window::gemv(std::vector<mtl::Dispatch>& ds, const gguf::Tensor& t, const A
     if (n_in >= 6144) { L = 32; Rr = 1; S = 8; K = 2; }
     else if (n_in == 640) { L = 8; Rr = 1; S = 4; K = 1; }
     else if (n_out <= 640 || ty == ref::Q2_0 || ty == ref::BF16) { L = 32; Rr = 1; S = 4; K = 1; }
-    static const bool gyro_tiles = !(std::getenv("STRATA_METAL_GYRO_TILES") && std::string(std::getenv("STRATA_METAL_GYRO_TILES")) == "0");   // off: the A/B arm
+    static const bool gyro_tiles = !(std::getenv("SAGUARO_METAL_GYRO_TILES") && std::string(std::getenv("SAGUARO_METAL_GYRO_TILES")) == "0");   // off: the A/B arm
     if (gyro_dense_ && gyro_tiles && ntok >= 2) {
         // Gyro's dense weights are Q5_K / Q6_K / Q8_0 (3.6 GB a token).  gemv_parity --one on the M4, 2 tokens: Q5_K 2560->10240
         // 261 us with 16,1,4,1 against 210 with 2,1,4,1 (-20%), 2560->6144 158 -> 129, 6144->2560 162 -> 139, 2560->12288
@@ -664,8 +664,8 @@ void Window::gemv(std::vector<mtl::Dispatch>& ds, const gguf::Tensor& t, const A
     }
     {
         // windows of several tokens: NR rows a lane share each x load (the window's cost is its x traffic).  The sums
-        // run in the same order for any NR, so the answers do not change.  STRATA_METAL_GEMV_NR (1, 2): the tile.
-        static const int nr_env = [] { const char* e = std::getenv("STRATA_METAL_GEMV_NR"); return e ? std::atoi(e) : 1; }();
+        // run in the same order for any NR, so the answers do not change.  SAGUARO_METAL_GEMV_NR (1, 2): the tile.
+        static const int nr_env = [] { const char* e = std::getenv("SAGUARO_METAL_GEMV_NR"); return e ? std::atoi(e) : 1; }();
         if (ntok > 1 && nr_env == 2 && n_out >= 2048) {
             if (S == 8 && K == 2) { S = 4; K = 2; }
             if (S == 8 && K == 1) S = 4;
@@ -1132,7 +1132,7 @@ bool Window::run(int Tn, const int32_t* tokens, int64_t pos0, bool head, int32_t
         const double r0 = now_ms();
         last_gpu_ms_ = 1000.0 * run_ds(c);
         {
-            static const int kt = std::getenv("STRATA_METAL_KPROF") ? std::atoi(std::getenv("STRATA_METAL_KPROF")) : 0;
+            static const int kt = std::getenv("SAGUARO_METAL_KPROF") ? std::atoi(std::getenv("SAGUARO_METAL_KPROF")) : 0;
             static int seen = 0;
             if (kt == Tn && head && ++seen == 20 && !stream_) kprof(c.ds, Tn);
         }
@@ -1248,15 +1248,15 @@ void stream_atexit() {
 }  // namespace
 
 // The arena, once the rest is allocated (the MTP layer loads after init): what the GPU working set and the RAM leave
-// with STRATA_METAL_KEEP_FREE_GB kept for macOS (default: 7 GB, or 15% of the RAM when that is more - the M5 Max
+// with SAGUARO_METAL_KEEP_FREE_GB kept for macOS (default: 7 GB, or 15% of the RAM when that is more - the M5 Max
 // froze with an 89 GB arena and 7 GB left beside a 50 GB n-gram table read through the file cache; arena_budget.h);
-// STRATA_METAL_ARENA_GB sets it.
+// SAGUARO_METAL_ARENA_GB sets it.
 bool Window::stream_arena(std::string& err) {
     uint64_t phys = 0;
     size_t len = sizeof phys;
     sysctlbyname("hw.memsize", &phys, &len, nullptr, 0);
     const double gb = 1e9;
-    if (!(std::getenv("STRATA_METAL_KEEP_HOST_WEIGHTS") && std::string(std::getenv("STRATA_METAL_KEEP_HOST_WEIGHTS")) == "1")) {
+    if (!(std::getenv("SAGUARO_METAL_KEEP_HOST_WEIGHTS") && std::string(std::getenv("SAGUARO_METAL_KEEP_HOST_WEIGHTS")) == "1")) {
         const uint64_t g = strata::gpu::purge_device_allocations(32u << 20);
         std::fprintf(stderr, "strata metal stream: %.2f GB of the host code's device weight copies given back (unused by the "
                              "Metal window)\n", g / 1e9);
@@ -1288,9 +1288,9 @@ bool Window::stream_arena(std::string& err) {
     am.available = avail_now();
     if (ss_ && ss_->ple.table && ss_->ple.table->mode() == strata::kernels::PleIo::Mmap)
         am.ple_mapped = (double) ss_->ple.table->rows() * 192.0;   // a row is at most 192 bytes (Q8_0 + its scale)
-    if (const char* e = std::getenv("STRATA_METAL_KEEP_FREE_GB")) am.keep_gb = std::atof(e);
-    if (const char* e = std::getenv("STRATA_METAL_ARENA_GB")) am.arena_gb = std::atof(e);
-    if (const char* e = std::getenv("STRATA_METAL_LEAVE_SHARE")) am.leave_share = std::atof(e);   // for measuring; the default is kLeaveShare
+    if (const char* e = std::getenv("SAGUARO_METAL_KEEP_FREE_GB")) am.keep_gb = std::atof(e);
+    if (const char* e = std::getenv("SAGUARO_METAL_ARENA_GB")) am.arena_gb = std::atof(e);
+    if (const char* e = std::getenv("SAGUARO_METAL_LEAVE_SHARE")) am.leave_share = std::atof(e);   // for measuring; the default is kLeaveShare
     const double keep = arena_keep(am);
     const double avail = am.available;
     double budget = arena_budget(am);
@@ -1301,7 +1301,7 @@ bool Window::stream_arena(std::string& err) {
         budget = std::max(budget, 1.0 * gb);
     }
     std::string prof;
-    if (const char* e = std::getenv("STRATA_METAL_EXPERT_PROFILE")) prof = e;
+    if (const char* e = std::getenv("SAGUARO_METAL_EXPERT_PROFILE")) prof = e;
     else prof = strata_metal::resource(nullptr, "data", STRATA_METAL_DATA_DEFAULT) + "/expert-profile.bin";
     std::fprintf(stderr, "strata metal stream: %.2f GB allocated before the arena (the process holds %.2f GB, %.2f GB resident); "
                          "RAM %.1f GB (%.1f GB available, %.1f GB kept for macOS), GPU working set %.1f GB\n", used / gb,
@@ -1314,11 +1314,11 @@ bool Window::stream_arena(std::string& err) {
                              "%.1f GB less %.1f GB left to macOS and its file cache%s\n",
                      fp.total / gb, fp.arena / gb, fp.base / gb, fp.ple / gb, fp.cap / gb, cx_->recommended_working_set() / gb,
                      phys / gb, (am.phys - fp.cap) / gb,
-                     am.arena_gb >= 0 && fp.over() ? " - STRATA_METAL_ARENA_GB is above the cap: kept as set (your choice), but "
+                     am.arena_gb >= 0 && fp.over() ? " - SAGUARO_METAL_ARENA_GB is above the cap: kept as set (your choice), but "
                                                      "a Mac that runs short of memory can freeze (watchdog panics seen at 90+ GB "
                                                      "resident of 128)" : "");
     }
-    const char* epg = std::getenv("STRATA_METAL_PROMPT_GEMM");
+    const char* epg = std::getenv("SAGUARO_METAL_PROMPT_GEMM");
     const bool pg_on = !(epg && std::string(epg) == "0");
     bool minimal = false;   // the arena's least layout (the min slots) is not shrunk further: it goes ahead, filled in steps
     for (int tries = 0;; ++tries) {
@@ -1348,7 +1348,7 @@ bool Window::stream_arena(std::string& err) {
 }
 
 void Window::logpos(int Tn, const int32_t* tokens, int64_t pos0, bool head) {
-    static const char* path = std::getenv("STRATA_METAL_LOGPOS");
+    static const char* path = std::getenv("SAGUARO_METAL_LOGPOS");
     if (path == nullptr || !head) return;
     if (logpos_ == nullptr) logpos_ = std::fopen(path, "ab");
     if (logpos_ == nullptr) return;
@@ -1428,7 +1428,7 @@ void Window::kprof(const std::vector<mtl::Dispatch>& ds, int Tn) {
 
 Window::~Window() {
     if (logpos_) std::fclose(logpos_);
-    if (std::getenv("STRATA_METAL_PROFILE") == nullptr) return;
+    if (std::getenv("SAGUARO_METAL_PROFILE") == nullptr) return;
     auto line = [](const char* what, const Prof& x) {
         if (x.n == 0) return;
         std::fprintf(stderr, "strata metal profile: %-10s %6lld x  %.3f ms: host before %.3f, run_graph %.3f (GPU %.3f, so "
@@ -1447,7 +1447,7 @@ bool Window::finish(int Tn, const int32_t* tokens, int64_t pos0, bool head, int3
     ++win_n_[Tn];
     win_ms_[Tn] += now_ms() - t0;
     win_gpu_[Tn] += last_gpu_ms_;
-    static const bool prof = std::getenv("STRATA_METAL_PROFILE") != nullptr;
+    static const bool prof = std::getenv("SAGUARO_METAL_PROFILE") != nullptr;
     if (prof) {
         Prof& x = prof_[Tn * 2 + (head ? 1 : 0)];
         const double t1 = now_ms();
@@ -1460,7 +1460,7 @@ bool Window::finish(int Tn, const int32_t* tokens, int64_t pos0, bool head, int3
     for (int t = 0; t < Tn; ++t) out[t] = head ? tokout_.as<int32_t>()[t] : -1;
     last_T_ = Tn;
     for (int t = 0; t < Tn; ++t) last_tokens_[t] = tokens[t];
-    static const bool trace = std::getenv("STRATA_METAL_TRACE") != nullptr;
+    static const bool trace = std::getenv("SAGUARO_METAL_TRACE") != nullptr;
     if (trace && head) {
         // the pick and its margin over the runner-up (a near tie says a backend difference may flip it)
         const float* lg = lm_.as<float>();
@@ -1573,7 +1573,7 @@ bool Window::commit(int n_keep, std::string& err) {
         // the GDN layers: the kept prefix folded into the state (gdn_step over n_keep tokens from the window's own
         // inputs, with commit; bitwise the window's trajectory).  K/V and indexer cells past the prefix are rewritten
         // when those positions run again, before anything reads them.
-        static const bool lazy = !(std::getenv("STRATA_METAL_LAZY_FOLD") && std::string(std::getenv("STRATA_METAL_LAZY_FOLD")) == "0");
+        static const bool lazy = !(std::getenv("SAGUARO_METAL_LAZY_FOLD") && std::string(std::getenv("SAGUARO_METAL_LAZY_FOLD")) == "0");
         int nf = n_keep;
         if (partial_) {
             if (!last_head_) {   // the prompt's window committed every row in its step
@@ -1630,9 +1630,9 @@ bool Window::mtp_load(const std::string& gguf_path, int max_t, std::string& err)
         float* dst = (float*) (mnorm_.as<uint8_t>() + kv.second);
         for (uint64_t i = 0; i < x.bytes / 4; ++i) dst[i] = src[i] + 1.0f;
     }
-    lmtp_ = cx_->compile({strata_metal::resource("STRATA_METAL_ENGINE_KERNELS", "engine-msl", STRATA_METAL_ENGINE_KERNELS_DEFAULT) + "/mtp.metal"}, "#define NO_GGML_COMMON 1\n");
+    lmtp_ = cx_->compile({strata_metal::resource("SAGUARO_METAL_ENGINE_KERNELS", "engine-msl", STRATA_METAL_ENGINE_KERNELS_DEFAULT) + "/mtp.metal"}, "#define NO_GGML_COMMON 1\n");
     {
-        const char* e = std::getenv("STRATA_METAL_MTP_Q8");
+        const char* e = std::getenv("SAGUARO_METAL_MTP_Q8");
         if (!(e && std::string(e) == "0")) {
             size_t tot = 0;
             std::vector<std::string> names;
@@ -1681,7 +1681,7 @@ bool Window::mtp_load(const std::string& gguf_path, int max_t, std::string& err)
         // the subset setup put beside the draft layer (--draft-vocab: <mtp>/rt/draft_vocab.bin, as CUDA reads it),
         // else the repository's default
         const std::string beside = gguf_path.substr(0, gguf_path.find_last_of('/') + 1) + "rt/draft_vocab.bin";
-        if (const char* e = std::getenv("STRATA_METAL_DRAFT_VOCAB")) vp = e;
+        if (const char* e = std::getenv("SAGUARO_METAL_DRAFT_VOCAB")) vp = e;
         else if (FILE* t = std::fopen(beside.c_str(), "rb")) { std::fclose(t); vp = beside; }
         else vp = strata_metal::resource(nullptr, "data", STRATA_METAL_DATA_DEFAULT) + "/draft_vocab.bin";
         FILE* f = vp == "full" ? nullptr : std::fopen(vp.c_str(), "rb");
@@ -1706,10 +1706,10 @@ bool Window::mtp_load(const std::string& gguf_path, int max_t, std::string& err)
     {
         const int ty = T("token_embd.weight").type;
         const int ok_types[] = {30, 8, 2, 6, 20, 23, 42, 21, 11, 12, 13, 14, 18};
-        const char* e = std::getenv("STRATA_METAL_MTP_CHAIN");
+        const char* e = std::getenv("SAGUARO_METAL_MTP_CHAIN");
         chain_ = !(e && std::string(e) == "0") && std::find(std::begin(ok_types), std::end(ok_types), ty) != std::end(ok_types);
         if (chain_) {
-            lchain_ = cx_->compile({"quant.metal", "units.metal", strata_metal::resource("STRATA_METAL_ENGINE_KERNELS", "engine-msl", STRATA_METAL_ENGINE_KERNELS_DEFAULT) + "/mtp_chain.metal"});
+            lchain_ = cx_->compile({"quant.metal", "units.metal", strata_metal::resource("SAGUARO_METAL_ENGINE_KERNELS", "engine-msl", STRATA_METAL_ENGINE_KERNELS_DEFAULT) + "/mtp_chain.metal"});
             dout_ = A(4 * MAXT); dprob_ = A(4 * MAXT); posv_ = A(4 * N);
             for (int i = 0; i < N; ++i) posv_.as<float>()[i] = (float) i;
             dmap_ = A(4 * std::max<size_t>(1, dvocab_.size()));
@@ -2028,7 +2028,7 @@ void Window::mtp_pick(std::vector<mtl::Dispatch>& ds, int j, bool embed) {
 
 // One round (mtp.hpp's draft()): the window's rows 0..a-1 caught up (K/V), then the full layer on row a (draft 0) and
 // on its own output for the next drafts.  By default the whole round is one command buffer (the pick, its
-// probability and the next step's embedding on the GPU); STRATA_METAL_MTP_CHAIN=0: a command buffer per step, the
+// probability and the next step's embedding on the GPU); SAGUARO_METAL_MTP_CHAIN=0: a command buffer per step, the
 // host picking and dequantizing.  The embedding rows: the catch-up's at memb_ rows 0..a-1, draft 0's at row a.
 bool Window::mtp_draft(int Tn, const int32_t* tokens, int64_t p, int a, int max_steps, int32_t* drafts, float* probs,
                        float min_p, int* n_drafts, std::string& err) {
@@ -2100,8 +2100,8 @@ bool Window::copy_logits(int t, float* host) const {
 // as grouped GEMMs (v2 on the M4, v3 on the M5).  The GDN state, the conv history, the K/V and indexer cells and the
 // PLE history are the decode window's own, so decoding goes on from them.  With SSD streaming the experts of a layer
 // are put in place at the layer's handshake (the arena's misses) and the next layer's are streamed in behind it.
-// STRATA_METAL_PROMPT_GEMM=0: prompts through the decode window (8 rows at a time).  Its numerics differ from the
-// window's (fp16 operands): STRATA_METAL_PROMPT_GEMM_MIN (default 64) keeps shorter prompts on the window path.
+// SAGUARO_METAL_PROMPT_GEMM=0: prompts through the decode window (8 rows at a time).  Its numerics differ from the
+// window's (fp16 operands): SAGUARO_METAL_PROMPT_GEMM_MIN (default 64) keeps shorter prompts on the window path.
 namespace {
 struct PgDq { uint32_t n_in, n_out, row_bytes, perm; };
 struct PgGemm { int M, N, K, pad; };
@@ -2134,11 +2134,11 @@ int Window::prompt_chunk_rows() const { return pg_ ? pg_->MT : 0; }
 
 bool Window::prompt_gemm_on(int64_t n) const {
     static const bool on = [] {
-        const char* e = std::getenv("STRATA_METAL_PROMPT_GEMM");
+        const char* e = std::getenv("SAGUARO_METAL_PROMPT_GEMM");
         return e ? std::string(e) != "0" : true;
     }();
     static const int64_t mn = [] {
-        const char* e = std::getenv("STRATA_METAL_PROMPT_GEMM_MIN");
+        const char* e = std::getenv("SAGUARO_METAL_PROMPT_GEMM_MIN");
         return e ? (int64_t) std::atoll(e) : (int64_t) 64;
     }();
     return on && n >= mn && pg_ != nullptr;
@@ -2147,7 +2147,7 @@ bool Window::prompt_gemm_on(int64_t n) const {
 bool Window::prompt_gemm_init(std::string& err) {
     if (pg_) return true;
     if (stream_ && !st_->ready()) return stream_arena(err);   // it makes the prompt buffers after the arena
-    const char* ec = std::getenv("STRATA_METAL_PROMPT_CHUNK");
+    const char* ec = std::getenv("SAGUARO_METAL_PROMPT_CHUNK");
     // Streaming: every chunk makes one pass over the layer's experts that are not in the arena, so a longer chunk
     // streams each expert fewer times. M5 Max, UD-Q5, warm: 1024 -> 700 tok/s at 4K, 2048 -> 920, 4096 -> 1,100 (32K the
     // same). The longer chunk's buffers (4.3 GB) come out of the arena only while a prompt runs, so it is the default on a
@@ -2166,10 +2166,10 @@ bool Window::prompt_gemm_init(std::string& err) {
     p.lgdn = cx_->compile({"gdn.metal", "gdn_prompt.metal"}, "#define NO_GGML_COMMON 1\n");
     p.lqsa = cx_->compile({"qsa.metal", "qsa_prompt.metal"}, "#define NO_GGML_COMMON 1\n");
     p.k4 = ::coop_k4(*cx_);
-    const char* eg = std::getenv("STRATA_METAL_PROMPT_EXPERTS");   // v2 | v3 (default: v3 with the M5's layout)
+    const char* eg = std::getenv("SAGUARO_METAL_PROMPT_EXPERTS");   // v2 | v3 (default: v3 with the M5's layout)
     p.gu_v3 = p.dn_v3 = eg ? std::string(eg) == "v3" : p.k4;
     if (T("blk.0.ffn_gate_exps.weight").type >= 144) p.gu_v3 = p.dn_v3 = false;   // the trellis experts have the v2 kernels only
-    const char* eq = std::getenv("STRATA_METAL_PROMPT_QSA");       // v1 | flash (default: flash with the M5's layout)
+    const char* eq = std::getenv("SAGUARO_METAL_PROMPT_QSA");       // v1 | flash (default: flash with the M5's layout)
     p.flash = eq ? std::string(eq) == "flash" : p.k4;
     const size_t MT = (size_t) C;
     p.maxrows = C * TOPK + NEXP * p.TM;
@@ -2555,7 +2555,7 @@ bool Window::prompt_chunk(const int32_t* tokens, int Tn, int64_t pos0, std::stri
     }
     pg_ms_ += now_ms() - t0;
     pg_tok_ += T;
-    static const bool trace = std::getenv("STRATA_METAL_TRACE") != nullptr;
+    static const bool trace = std::getenv("SAGUARO_METAL_TRACE") != nullptr;
     if (trace) std::fprintf(stderr, "strata metal: prompt chunk pos %lld, %d rows: %.0f ms\n", (long long) pos0, T, now_ms() - t0);
     // the window's state after the chunk: the conv history turned, the PLE history and token window advanced
     hp_ = 1 - hp_;
@@ -2623,9 +2623,9 @@ bool window_ensure(const strata::core::ModelGeometry& g, strata::core::SessionSt
     return window_init(window_create(), g, ss, MAXT, max_cells, &nv, err);
 }
 bool window_run(void* w, int T, const int32_t* tokens, int64_t pos0, bool head, int32_t* out, std::string& err) {
-    // STRATA_LOGPOS (the quant yardstick, the KL harness): every window's head logits are read, also the prompt's
+    // SAGUARO_LOGPOS (the quant yardstick, the KL harness): every window's head logits are read, also the prompt's
     // windows that sample nothing (head_sampling off)
-    static const bool logpos = std::getenv("STRATA_LOGPOS") != nullptr;
+    static const bool logpos = std::getenv("SAGUARO_LOGPOS") != nullptr;
     return ((Window*) w)->run(T, tokens, pos0, head || logpos, out, err);
 }
 void window_reset() {
@@ -2657,10 +2657,10 @@ std::string g_mtp_path;
 int g_mtp_max_t = 0;
 bool mtp_load(const std::string& rt_dir, int max_t, std::string& err) {
     (void) err;
-    // the MTP model in GGUF form (tools/mtp_pack.py) beside the rt directory: STRATA_METAL_MTP_GGUF, else
+    // the MTP model in GGUF form (tools/mtp_pack.py) beside the rt directory: SAGUARO_METAL_MTP_GGUF, else
     // <rt>/../mtp-q2_0.gguf
     std::string path;
-    if (const char* e = std::getenv("STRATA_METAL_MTP_GGUF")) path = e;
+    if (const char* e = std::getenv("SAGUARO_METAL_MTP_GGUF")) path = e;
     else {
         std::string d = rt_dir;
         while (!d.empty() && d.back() == '/') d.pop_back();
@@ -2689,12 +2689,12 @@ bool prompt_run(const int64_t* tokens, int64_t n, int64_t pos0, const float* con
 bool prompt_run_rows(const int64_t* tokens, int64_t n, int64_t pos0,
                      const std::function<bool(const float*, int64_t, int64_t, std::string&)>& on_chunk, std::string& err) {
     if (g_window == nullptr) { err = "metal prompt: the decode window is not up yet"; return false; }
-    static const bool windows = std::getenv("STRATA_METAL_PROMPT") && std::string(std::getenv("STRATA_METAL_PROMPT")) == "window";
-    static const int64_t min_rows = std::getenv("STRATA_METAL_PROMPT_MIN") ? std::atoll(std::getenv("STRATA_METAL_PROMPT_MIN")) : 32;
+    static const bool windows = std::getenv("SAGUARO_METAL_PROMPT") && std::string(std::getenv("SAGUARO_METAL_PROMPT")) == "window";
+    static const int64_t min_rows = std::getenv("SAGUARO_METAL_PROMPT_MIN") ? std::atoll(std::getenv("SAGUARO_METAL_PROMPT_MIN")) : 32;
     if (!windows && !g_window->streaming() && n >= min_rows) return g_window->prompt(tokens, n, pos0, on_chunk, err);
     if (!windows && g_window->streaming()) {
-        const char* e = std::getenv("STRATA_METAL_PROMPT_GEMM");
-        const char* em = std::getenv("STRATA_METAL_PROMPT_GEMM_MIN");
+        const char* e = std::getenv("SAGUARO_METAL_PROMPT_GEMM");
+        const char* em = std::getenv("SAGUARO_METAL_PROMPT_GEMM_MIN");
         const int64_t mn = em ? std::atoll(em) : 64;
         if (!(e && std::string(e) == "0") && n >= mn) {
             if (!g_window->prompt_gemm_init(err)) return false;

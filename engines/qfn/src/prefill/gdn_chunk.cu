@@ -539,10 +539,10 @@ void gdn_chunk_recurrence(float* state, const float* h, const float* gate, const
     const int64_t T64 = T - T % CH;
     if (T64 <= 0) return;
     cudaStream_t cs = (cudaStream_t) stream;
-    // the wmma path is the default; STRATA_GDN_CHUNK=2 selects the FP32-only FMA scan (the parity test's
+    // the wmma path is the default; SAGUARO_GDN_CHUNK=2 selects the FP32-only FMA scan (the parity test's
     // oracle - same math, no FP16 staging) and anything below sm_70 has no wmma to use.  Read per call (the
     // tests flip it between launches).
-    const char* forced_v = std::getenv("STRATA_GDN_CHUNK");
+    const char* forced_v = std::getenv("SAGUARO_GDN_CHUNK");
     const int forced = forced_v && *forced_v ? std::atoi(forced_v) : -1;
     int dev = 0;
     if (cudaGetDevice(&dev) != cudaSuccess) {
@@ -580,8 +580,8 @@ void gdn_chunk_recurrence(float* state, const float* h, const float* gate, const
     Ws& w = ws();
     const size_t chunks_total = (size_t) (T64 / CH);
     w.ensure(chunks_total < SEG ? (chunks_total ? chunks_total : 1) : SEG);
-    // STRATA_GDN_CHUNK_PROF=1: per-stage milliseconds over the whole call (a dev tool, not a hot path)
-    static const bool prof = std::getenv("STRATA_GDN_CHUNK_PROF") != nullptr;
+    // SAGUARO_GDN_CHUNK_PROF=1: per-stage milliseconds over the whole call (a dev tool, not a hot path)
+    static const bool prof = std::getenv("SAGUARO_GDN_CHUNK_PROF") != nullptr;
     cudaEvent_t pe0{}, pe1{};
     float ms[3] = {0, 0, 0};
     if (prof) cudaEventCreate(&pe0), cudaEventCreate(&pe1);

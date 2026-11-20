@@ -175,7 +175,7 @@ VmmChunk VmmRange::unmap(int64_t i) {
 
 #else  // not CUDA
 // HIP (ROCm 6+): the same elastic range through hipMemAddressReserve / hipMemCreate / hipMemMap / hipMemSetAccess.  Available
-// only where the device reports virtual memory management support (STRATA_HIP_VMM=0 turns it off): --kv-grow stays off
+// only where the device reports virtual memory management support (SAGUARO_HIP_VMM=0 turns it off): --kv-grow stays off
 // otherwise, as before.  Everything else (Metal, gfx906, ROCm older than 6): no virtual memory, the elastic K/V stays off.
 #if defined(STRATA_USE_HIP) && !defined(STRATA_HIP_GFX906)
 #include <hip/hip_runtime.h>
@@ -211,7 +211,7 @@ const Api& api() {
     static Api& a = *new Api;   // never destroyed: the K/V pools and the cache release their chunks from static destructors
     static std::once_flag once;
     std::call_once(once, [] {
-        const char* off = std::getenv("STRATA_HIP_VMM");
+        const char* off = std::getenv("SAGUARO_HIP_VMM");
         if (off != nullptr && off[0] == '0') return;
         if (hipGetDevice(&a.dev) != hipSuccess) { (void) hipGetLastError(); return; }
         int vmm = 0;

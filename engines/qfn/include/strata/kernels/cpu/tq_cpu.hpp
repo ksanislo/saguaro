@@ -20,7 +20,7 @@
 //
 // THE KERNELS: `tq_isa()` picks AVX-512 (F/BW/VL/VBMI/VNNI, cpu_avx512_ok) or AVX2 (cpu_avx2_ok) at run time; the
 // scalar kernel is the reference (on a CPU without AVX2 the engine keeps ggml-cpu's vec_dot, see tq_kernels_enabled).
-// STRATA_TQ_ISA=scalar|avx2|avx512 caps the choice (tests, A/B); STRATA_NO_TQ_KERNELS=1 makes native_expert.cpp use
+// SAGUARO_TQ_ISA=scalar|avx2|avx512 caps the choice (tests, A/B); SAGUARO_NO_TQ_KERNELS=1 makes native_expert.cpp use
 // ggml-cpu's vec_dot instead (the previous path).
 #pragma once
 
@@ -45,13 +45,13 @@ int tq_kbits(int ggml_type) noexcept;
 /// Values per block of the trellis types, and bytes per block (2 + 4 * bits: 34, 26, 30, 22, 18).
 constexpr int kTqBlock = 128;
 inline size_t tq_block_bytes(int ggml_type) noexcept { return (size_t) (2 + 4 * tq_kbits(ggml_type)); }
-/// The best ISA this CPU runs (capped by STRATA_TQ_ISA).
+/// The best ISA this CPU runs (capped by SAGUARO_TQ_ISA).
 TqIsa tq_isa();
 /// Whether this CPU can run `isa` at all (scalar: always).
 bool tq_isa_ok(TqIsa isa);
-/// Whether STRATA_NO_TQ_KERNELS=1 is absent.  The engine's native expert rows take these kernels for the trellis types
+/// Whether SAGUARO_NO_TQ_KERNELS=1 is absent.  The engine's native expert rows take these kernels for the trellis types
 /// on every CPU (AVX-512 or AVX2 where the CPU has them, else the scalar kernel: a ggml from upstream has no trellis
-/// type to fall back to, and the AVX code is only reached behind tq_isa_ok).  STRATA_NO_TQ_KERNELS=1 asks for
+/// type to fall back to, and the AVX code is only reached behind tq_isa_ok).  SAGUARO_NO_TQ_KERNELS=1 asks for
 /// ggml-cpu's vec_dot instead, honoured only by a ggml that has the types (the agentionai fork; tests, A/B).
 bool tq_kernels_enabled();
 const char* tq_isa_name(TqIsa isa);

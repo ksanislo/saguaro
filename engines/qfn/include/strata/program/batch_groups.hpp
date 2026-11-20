@@ -6,11 +6,11 @@
 // adaptive tier (`--adapt-async 1` between batch windows).  `--adapt-async 1` with the number of groups NOT given still
 // makes `auto` resolve to one group (and says why).  `--batch-mtp` does not any more (0.1.43.1): on 2x A4000 and 2x RTX
 // 3090 four concurrent streams lost 25-30% with the serial MTP windows against the pipelined default, so the default
-// pipelines and `--batch-mtp` is left off there (said at start); STRATA_BATCH_MTP_SERIAL=1 or `--batch-groups 1` keeps
+// pipelines and `--batch-mtp` is left off there (said at start); SAGUARO_BATCH_MTP_SERIAL=1 or `--batch-groups 1` keeps
 // the serial windows with the slots' drafts (the 0.1.42/0.1.43 behaviour).  A number or `auto` given on the command line
 // is honoured as before.
 //
-// STRATA_PIPED_MTP=1 (opt-in): the pipelined groups keep --batch-mtp's drafts (piped_mtp_* below); --batch-mtp then
+// SAGUARO_PIPED_MTP=1 (opt-in): the pipelined groups keep --batch-mtp's drafts (piped_mtp_* below); --batch-mtp then
 // stays on beside the pipeline instead of giving way to it.
 //
 // Pure (no GPU, no environment read): generate.cpp passes in what it knows.
@@ -31,9 +31,9 @@ struct Input {
     int later_stages = 0;      ///< the layer split's stages after CUDA0 (0: no layer split)
     bool batch_mtp = false;    ///< --batch-mtp is on (it passed the gates that do not concern the groups)
     bool adapt_async = false;  ///< --adapt-async 1 was asked for
-    bool mtp_serial = false;   ///< STRATA_BATCH_MTP_SERIAL=1: --batch-mtp with no --batch-groups runs one serial group (0.1.43)
-    bool nv_serial_faster = false;   ///< PROPOSED (0.2.1, owner decides): NVIDIA build, STRATA_BATCH_GROUPS_NV_SERIAL not 0 - two cards run faster in serial windows (z440 2x A4000, aggregate tok/s: +16% at 2 slots, +12% at 4, +15% at 8)
-    bool piped_mtp = false;    ///< STRATA_PIPED_MTP=1: the pipelined groups run --batch-mtp's drafts
+    bool mtp_serial = false;   ///< SAGUARO_BATCH_MTP_SERIAL=1: --batch-mtp with no --batch-groups runs one serial group (0.1.43)
+    bool nv_serial_faster = false;   ///< PROPOSED (0.2.1, owner decides): NVIDIA build, SAGUARO_BATCH_GROUPS_NV_SERIAL not 0 - two cards run faster in serial windows (z440 2x A4000, aggregate tok/s: +16% at 2 slots, +12% at 4, +15% at 8)
+    bool piped_mtp = false;    ///< SAGUARO_PIPED_MTP=1: the pipelined groups run --batch-mtp's drafts
 };
 
 struct Result {
@@ -74,10 +74,10 @@ inline Result resolve(const Input& in) {
 
 inline const char* serial_what(Serial s) {
     return s == Serial::BatchMtp ? "--batch-mtp" : s == Serial::AdaptAsync ? "--adapt-async 1"
-         : s == Serial::TwoCardsSerialFaster ? "serial windows (measured faster than pipelined groups on two NVIDIA cards; STRATA_BATCH_GROUPS_NV_SERIAL=0 keeps the pipeline)" : "";
+         : s == Serial::TwoCardsSerialFaster ? "serial windows (measured faster than pipelined groups on two NVIDIA cards; SAGUARO_BATCH_GROUPS_NV_SERIAL=0 keeps the pipeline)" : "";
 }
 
-// ---- STRATA_PIPED_MTP: a group's window carries each live slot's token and, while at most `max_active`
+// ---- SAGUARO_PIPED_MTP: a group's window carries each live slot's token and, while at most `max_active`
 // conversations decode, up to `max_drafts` of its MTP drafts right after it; the host decides each slot's accepted
 // prefix once the last stage has picked, and the group's next window waits for that commit and the slots' new drafts.
 
@@ -164,7 +164,7 @@ inline void remap_rows(Layout& L, const int* members) {
     for (int r = 0; r < L.S; ++r) L.rows[r] = members[L.rows[r]];
 }
 
-/// STRATA_REGROUP: a window holds its group's live slots only, so the slots a group holds are the host's choice.  The
+/// SAGUARO_REGROUP: a window holds its group's live slots only, so the slots a group holds are the host's choice.  The
 /// move that evens out the groups' decoding slots: member `from_t` of group `from` (a live slot) trades places with
 /// member `to_t` of group `to` (a free one: neither decoding nor being read), when `from` decodes at least two slots
 /// more than `to` (so a move never undoes another).  Members are group-major: member t of group g is [g * gs + t].

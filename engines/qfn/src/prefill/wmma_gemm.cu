@@ -56,7 +56,7 @@ static bool strata_wmma_gfx11_device() {
     return c == 1;
 }
 
-// The same answer for host code that decides whether to pad an activation's row stride (prefill.cpp, STRATA_PF_PAD).
+// The same answer for host code that decides whether to pad an activation's row stride (prefill.cpp, SAGUARO_PF_PAD).
 bool strata_pf_padded_gemm_available() { return strata_wmma_gfx11_device(); }
 
 template <typename ElemT>
@@ -305,7 +305,7 @@ bool strata_wmma_gemm_bf16(const uint16_t* X, const uint16_t* W, float* Y,
 }
 
 // ===========================================================================
-// S23 (opt-in STRATA_PF_GEMM=1): the prompt projections' FP16 GEMM on gfx11 (gfx1151: 30-33 TFLOPS on the 16K-row
+// S23 (opt-in SAGUARO_PF_GEMM=1): the prompt projections' FP16 GEMM on gfx11 (gfx1151: 30-33 TFLOPS on the 16K-row
 // projection shapes where the tuned hipBLASLt reaches 25-27; s23/gemm_probe4.hip).  Block 128 x BN (BN 256 or 128),
 // BK 32, 8 waves of 64 x BN/4, LDS double buffer with the next stage prefetched into named registers (arrays there
 // went to scratch), grouped tile order (8 row tiles sweep all column tiles: the weights stream from DRAM once per
@@ -480,7 +480,7 @@ __global__ void __launch_bounds__(256) kernel_bk64(const _Float16* __restrict__ 
         }
 #endif
 }
-// S23 (STRATA_PF_HCDOWN=1): the hyper-connection read's down (N nd = 320) and inject (N ni = 4) projections of xn16
+// S23 (SAGUARO_PF_HCDOWN=1): the hyper-connection read's down (N nd = 320) and inject (N ni = 4) projections of xn16
 // (BF16, T x 10240, token stride ldx: 10240 + 64 avoids the 4 KB-multiple stride) as ONE GEMM - weight rows
 // [w_down; w_inject] read from the two tensors, the epilogue splitting the columns into lo (T x nd) and inj (T x ni),
 // so xn16 is read once.  128 x 128 blocks, the BK 64 single-buffer scheme of kernel_bk64.  s23/hcdown_probe.hip,
@@ -576,7 +576,7 @@ __global__ void __launch_bounds__(256) kernel_hcdown(const uint16_t* __restrict_
 #endif
 }
 
-// S23/S (STRATA_HCD_EXACT=1): the HC down projection (N 320, K 10240, BF16 in, FP32 out) bitwise equal to hipBLASLt
+// S23/S (SAGUARO_HCD_EXACT=1): the HC down projection (N 320, K 10240, BF16 in, FP32 out) bitwise equal to hipBLASLt
 // solution 1176 / 1177 (MT32x96 / MT96x96, StaggerU 32, stride 256 B): every output is the k tiles of 32 accumulated in
 // order, 16 per WMMA, starting at k tile 4 * (token tile of 96 % 32) and wrapping (hcd_bit / hcd_perm probes: 0 of
 // 5.2 M outputs differ at T 16384).  96 x 160 blocks (two per token tile), 6 waves of 32 x 80.
@@ -692,8 +692,8 @@ bool strata_pf_gemm_f16_ld(const uint16_t* X, int64_t ldx, const uint16_t* W, in
     hipStream_t s = static_cast<hipStream_t>(stream);
     const int acc = beta == 1.0f ? 1 : 0;
     const int64_t mt = (T + pfg::BM - 1) / pfg::BM;
-    // STRATA_PF_BK64=0: the BK 32 kernel for the wide shapes too (the A/B; the same bits)
-    static const bool bk64 = [] { const char* v = std::getenv("STRATA_PF_BK64"); return !v || v[0] != '0'; }();
+    // SAGUARO_PF_BK64=0: the BK 32 kernel for the wide shapes too (the A/B; the same bits)
+    static const bool bk64 = [] { const char* v = std::getenv("SAGUARO_PF_BK64"); return !v || v[0] != '0'; }();
     if (N >= 1024 && bk64 && K % 64 == 0) {
         const unsigned grid = (unsigned) (mt * ((N + 255) / 256));
         pfg::kernel_bk64<<<grid, 256, 0, s>>>((const _Float16*) X, (const _Float16*) W, Y, (int) T, (int) N, (int) K,

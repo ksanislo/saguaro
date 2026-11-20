@@ -10,8 +10,8 @@ import { resolveHarness } from '../server/agent/harness-runtime.mjs';
 import { isViewStep, stepObjective } from '../server/agent/plan.mjs';
 import { UNATTENDED, createForkTimeskip, leverPrompt, parseLever, defaultLever, improvementPrompt, copyProject } from '../server/timeskip-fork.mjs';
 
-const HARNESS = process.env.STRATA_HARNESS_DIR;
-const skip = !HARNESS || !resolveHarness({ env: process.env }).ok ? 'STRATA_HARNESS_DIR is not set to a built Harness' : false;
+const HARNESS = process.env.SAGUARO_HARNESS_DIR;
+const skip = !HARNESS || !resolveHarness({ env: process.env }).ok ? 'SAGUARO_HARNESS_DIR is not set to a built Harness' : false;
 
 test('the lever answer is read strictly; a bad answer gets a fixed rule with its reason said plainly', () => {
   assert.deepEqual(parseLever('Sure! {"step": 3, "why": "The shape is set here."} done', 5), { step: 3, why: 'The shape is set here.' });

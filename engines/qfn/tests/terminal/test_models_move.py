@@ -307,9 +307,9 @@ class MoveTests(MoveCase):
             self.run_move()
         self.assertEqual(json.loads(self.config.read_text())["args"][1], str(self.old / "models/gone.gguf"))
 
-    @unittest.skipUnless(os.environ.get("STRATA_TEST_OTHER_VOLUME"), "set STRATA_TEST_OTHER_VOLUME to a folder on another volume (e.g. a subst or USB drive)")
+    @unittest.skipUnless(os.environ.get("SAGUARO_TEST_OTHER_VOLUME"), "set SAGUARO_TEST_OTHER_VOLUME to a folder on another volume (e.g. a subst or USB drive)")
     def test_a_real_second_volume(self):
-        other = Path(os.environ["STRATA_TEST_OTHER_VOLUME"]) / f"strata-move-{os.getpid()}"
+        other = Path(os.environ["SAGUARO_TEST_OTHER_VOLUME"]) / f"strata-move-{os.getpid()}"
         self.addCleanup(shutil.rmtree, other, True)
         self.new = other
         summary, _ = self.run_move()

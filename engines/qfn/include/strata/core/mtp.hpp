@@ -50,8 +50,8 @@ public:
               int64_t window = 32768, const MtpDrafter* shared = nullptr);
     /// The prompt's length: prefill() skips the cells the attention window can never reach again.
     void set_prompt_len(int64_t n) { prompt_len_ = n; }
-    /// STRATA_ROUTE_RESIDENT_MTP=1 (EXPERIMENTAL, opt-in, changes the output): the draft layer's router is biased like
-    /// the verifier's STRATA_ROUTE_RESIDENT, with `res_row` (a device residency row of 512 experts: slot or -1) as the
+    /// SAGUARO_ROUTE_RESIDENT_MTP=1 (EXPERIMENTAL, opt-in, changes the output): the draft layer's router is biased like
+    /// the verifier's SAGUARO_ROUTE_RESIDENT, with `res_row` (a device residency row of 512 experts: slot or -1) as the
     /// table.  nullptr switches it off.
     void set_route_resident(const int32_t* res_row, float margin, int lo, int hi) {
         rr_res_ = res_row; rr_margin_ = margin; rr_lo_ = lo; rr_hi_ = hi;
@@ -72,12 +72,12 @@ public:
     /// --mtp-draft-vocab FILE (opt-in; before bind): the draft head's token subset from FILE instead of
     /// rt/draft_vocab.bin (e.g. data/draft_vocab_en.bin, 40K tokens)
     void set_draft_vocab(const std::string& path) { dvocab_path_ = path; }
-    /// STRATA_MTP_TOP2=1 (diagnostic): draft j's runner-up token in the last draft() (-1 = unknown)
+    /// SAGUARO_MTP_TOP2=1 (diagnostic): draft j's runner-up token in the last draft() (-1 = unknown)
     static bool top2_env();
     int32_t top2(int j) const { return j >= 0 && j < (int) top2_.size() ? top2_[(size_t) j] : -1; }
     int max_t() const { return max_t_; }
     uint64_t vram_bytes() const { return vram_; }
-    /// The draft layer's K/V state (read-only: --serve's STRATA_STATE_HASH check hashes it)
+    /// The draft layer's K/V state (read-only: --serve's SAGUARO_STATE_HASH check hashes it)
     const QsaState& kv_state() const { return st_; }
     /// KV streaming: refill the ring of the drafter's window from its host copy for a sequence that continues at
     /// `upto` (a conversation-cache resume). No-op unless the drafter's K/V is a ring.
@@ -98,7 +98,7 @@ public:
     /// --pipeline-windows: capture the prefill graphs and size its input records for windows of up to max_t rows now,
     /// so a later prefill(sync = false) of a window neither captures nor allocates (both wait for the device).
     bool prepare_prefill(std::string& err);
-    /// A prompt read beside running batch windows (STRATA_PIPED_CONCURRENT): the prompt pass's graphs captured and its
+    /// A prompt read beside running batch windows (SAGUARO_PIPED_CONCURRENT): the prompt pass's graphs captured and its
     /// input records sized for chunks of up to n rows now, with nothing in flight.  On the read's thread a capture or
     /// a free waits for the device, whose windows wait for the main thread's doorbell service (#31).
     bool reserve_prefill(int64_t n, std::string& err);
@@ -110,7 +110,7 @@ public:
     bool draft(int T, const int32_t* tokens, int64_t p, int a, int32_t* drafts, std::string& err,
                float* probs = nullptr, float min_p = 0.0f, int* n_drafts = nullptr);
 
-    /// draft() split in two (STRATA_PIPED_MTP): the round is launched and draft_poll returns 1 once its drafts are in
+    /// draft() split in two (SAGUARO_PIPED_MTP): the round is launched and draft_poll returns 1 once its drafts are in
     /// `drafts` (0: still running, -1: an error).  Greedy drafts only (no min_p); no PLE prefetch.
     bool draft_launch(int T, const int32_t* tokens, int64_t p, int a, std::string& err);
     int draft_poll(int32_t* drafts, std::string& err, int* n_drafts = nullptr);
@@ -119,14 +119,14 @@ public:
     bool prepare_rounds(int max_T, std::string& err);
 
     /// The first round: one cell (`cell`) from `R_row` (device) and `token` -> T-1 drafts.
-    /// STRATA_SPEC_COST: called after each draft step with (index, probability) instead of the `min_p` test; false ends the chain.
+    /// SAGUARO_SPEC_COST: called after each draft step with (index, probability) instead of the `min_p` test; false ends the chain.
     /// Also called once for the last step of a chain that reached its length (so the rule sees every draft). Empty: min_p decides.
     void set_chain_rule(std::function<bool(int, float)> f) { chain_rule_ = std::move(f); }
 
     bool draft_first(int T, const float* R_row, int32_t token, int64_t cell, int32_t* drafts, std::string& err,
                      float* probs = nullptr, float min_p = 0.0f, int* n_drafts = nullptr);
 
-    /// COUPLED DRAFT SAMPLING (core/coupled_draft.hpp; STRATA_SPEC_COUPLED=1, set up by bind()): the request's
+    /// COUPLED DRAFT SAMPLING (core/coupled_draft.hpp; SAGUARO_SPEC_COUPLED=1, set up by bind()): the request's
     /// sampling.  A sampled request (temperature > 0, not greedy) then drafts by SAMPLING with the target's chain and
     /// the target's Philox draw for the verifying row, and `probs` is the draft's probability under that chain; a
     /// greedy one keeps the argmax drafts and their graphs.  A no-op when the switch is off.
@@ -137,7 +137,7 @@ public:
     void set_ple_session(SessionState* s) { ple_ss_ = s; }
     std::function<bool(int, float)> chain_rule_;
     bool coupled() const { return coupled_active_; }
-    /// PROBABILISTIC DRAFT ACCEPTANCE (core/spec_prob.hpp, STRATA_SPEC_PROB=1): this request's drafts are SAMPLED from
+    /// PROBABILISTIC DRAFT ACCEPTANCE (core/spec_prob.hpp, SAGUARO_SPEC_PROB=1): this request's drafts are SAMPLED from
     /// q and each draft j's distribution is in spec_q() + j * kSpecQStride (ids, -1 terminated; then float bits),
     /// valid on the host once draft() has returned.  False for greedy requests and where the mode is off.
     bool prob() const { return coupled_active_ && h_q_ != nullptr; }
@@ -147,7 +147,7 @@ public:
     // wait), its first `n_force` steps fed the given tokens instead of their own picks (teacher forcing: the drafts of
     // a window already in flight), each output read once the event after its step has completed.
     /// Before `load`: the round/step graphs get the forcing kernel (a no-op while its token is -1), and the drafter's
-    /// stream the highest priority (STRATA_MTP_PRIORITY=0: the default priority).
+    /// stream the highest priority (SAGUARO_MTP_PRIORITY=0: the default priority).
     void set_force_capture(bool on) { force_on_ = on; }
     /// The rows the next round reads (null: the bound `window_R`), copied into the bound buffer before the round.
     void set_source_R(const float* rows) { src_R_ = rows; }
@@ -215,7 +215,7 @@ private:
     int coupled_j_ = 0;
     strata::kernels::SamplerParams *h_cparams_ = nullptr, *m_cparams_ = nullptr, *cparams_ = nullptr;
     int32_t *h_chist_ = nullptr, *m_chist_ = nullptr, *cring_ = nullptr, *dinv_ = nullptr;
-    int32_t *h_q_ = nullptr, *m_q_ = nullptr;   ///< STRATA_SPEC_PROB: the drafts' q lists (mapped, max_t_ rows)
+    int32_t *h_q_ = nullptr, *m_q_ = nullptr;   ///< SAGUARO_SPEC_PROB: the drafts' q lists (mapped, max_t_ rows)
     void* cscratch_ = nullptr;
     const float* f32(const char* name) const;
     const uint16_t* bf16(const char* name) const;
@@ -223,7 +223,7 @@ private:
 
     const ModelGeometry* g_ = nullptr;
     SessionState* ss_ = nullptr;
-    /// STRATA_YARN_ELASTIC: the rotary position offset of the conversation drafted for (its session's level)
+    /// SAGUARO_YARN_ELASTIC: the rotary position offset of the conversation drafted for (its session's level)
     int32_t rope_off() const { return ss_ != nullptr && ss_->rope_level ? strata::kernels::kRopeYarnOff : 0; }
     SessionState* ple_ss_ = nullptr;
     const WeightTable* wt_ = nullptr;

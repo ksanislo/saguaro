@@ -1,7 +1,7 @@
 // metal/src/engine/stubs_144.cpp - the 0.1.44 PC entry points the Metal engine does not implement (merge of the Mac branch
 // with the PC release): new overloads / new functions that stubs.cpp (generated) does not know.  Each either stops the engine
 // with its name (like stubs.cpp) or, where the caller has a documented fallback, answers "not available".  None is reached
-// with the Metal defaults: STRATA_COMMIT_BATCH is off on Metal, the NVFP4 CPU rows need AVX2 / AVX-512, and the K-quant /
+// with the Metal defaults: SAGUARO_COMMIT_BATCH is off on Metal, the NVFP4 CPU rows need AVX2 / AVX-512, and the K-quant /
 // NVFP4 prompt paths are CUDA / HIP only.
 
 #include <cstddef>
@@ -54,7 +54,7 @@ void nvfp4_512_rows(const uint8_t*, size_t, int, const void* const*, int, float*
 }
 }  // namespace strata::kernels::cpu
 
-// STRATA_QSA_SLOTS (PR #2364): the one-launch-over-the-rows QSA launchers have no Metal kernel; false = "run the per-row calls",
+// SAGUARO_QSA_SLOTS (PR #2364): the one-launch-over-the-rows QSA launchers have no Metal kernel; false = "run the per-row calls",
 // which is what Verifier::record_window does on a decline.
 namespace strata::kernels {
 bool qsa_block_scores_slots(const float* const*, const float* const*, const float*, const int32_t*, int64_t, int64_t,

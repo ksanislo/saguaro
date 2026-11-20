@@ -1,4 +1,4 @@
-// src/kernels/fused_gr_bench.cpp - fused_gr_read_multi: the AMD fast kernels (STRATA_GR_FAST) against the old
+// src/kernels/fused_gr_bench.cpp - fused_gr_read_multi: the AMD fast kernels (SAGUARO_GR_FAST) against the old
 // ones, bit for bit on every output (lo, rs, inject, mixed, the in-place R), and each one's time.
 //
 //     build/fused_gr_bench [iters] [T min] [T max] [cold sets]
@@ -219,10 +219,10 @@ int main(int argc, char** argv) {
             cudaMalloc((void**) &cqu[c], qu.size()); cudaMemcpy(cqu[c], qu.data(), qu.size(), cudaMemcpyHostToDevice);
             cudaMalloc((void**) &cwn[c], wn.size() * 4); cudaMemcpy(cwn[c], wn.data(), wn.size() * 4, cudaMemcpyHostToDevice);
         }
-        uint8_t* dqm; unsigned* dcnt;   // the q8_1 image of mixed (STRATA_QFUSE_HC) as the engine asks for it
+        uint8_t* dqm; unsigned* dcnt;   // the q8_1 image of mixed (SAGUARO_QFUSE_HC) as the engine asks for it
         cudaMalloc((void**) &dqm, (size_t) TM * (N / 32) * 36); cudaMalloc((void**) &dcnt, (N / 32) * 4);
         cudaMemset(dcnt, 0, (N / 32) * 4);
-        const bool with_q = std::getenv("STRATA_BENCH_QMIXED") != nullptr;
+        const bool with_q = std::getenv("SAGUARO_BENCH_QMIXED") != nullptr;
         unsigned long long* dst;
         cudaMalloc((void**) &dst, (size_t) iters * 4 * 8);
         std::vector<unsigned long long> hst((size_t) iters * 4);

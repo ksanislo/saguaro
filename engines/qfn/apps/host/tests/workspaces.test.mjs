@@ -1,6 +1,6 @@
 /**
  * The first workspace is never the app's own folder, and any workspace can be renamed (a display name; the path stays).
- * A real host process with a scratch user profile; no STRATA_WORKSPACE, started inside the host folder like the installed app.
+ * A real host process with a scratch user profile; no SAGUARO_WORKSPACE, started inside the host folder like the installed app.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -16,8 +16,8 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 async function start(t, { user, home }) {
   const port = await freePort();
-  const env = { ...process.env, STRATA_HOME: home, STRATA_PORT: String(port), USERPROFILE: user, HOME: user, STRATA_REAL_ENGINE: '0', STRATA_COMPONENTS_DIR: join(home, 'components') };
-  delete env.STRATA_WORKSPACE;
+  const env = { ...process.env, SAGUARO_HOME: home, SAGUARO_PORT: String(port), USERPROFILE: user, HOME: user, SAGUARO_REAL_ENGINE: '0', SAGUARO_COMPONENTS_DIR: join(home, 'components') };
+  delete env.SAGUARO_WORKSPACE;
   const child = spawn(process.execPath, [join(HOST_DIR, 'server', 'index.mjs')], { cwd: HOST_DIR, env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
   let log = ''; child.stdout.on('data', d => { log += d; }); child.stderr.on('data', d => { log += d; });
   t.after(async () => {

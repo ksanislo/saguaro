@@ -292,8 +292,8 @@ int main() try {
 #if defined(STRATA_HIP_GFX906)
     // gfx906: the wave64 layout (one wavefront per row) is the same kernel for every column count, so multi_exact
     // has nothing to switch and the control cannot see a difference.  The control with power is the CUDA layout:
-    // ctest's mmvq_multi_parity_cuda_layout runs this with STRATA_MMVQ_WAVE=0.
-    if (off.powerless_cases != 0 && !(std::getenv("STRATA_MMVQ_WAVE") && std::string(std::getenv("STRATA_MMVQ_WAVE")) == "0")) {
+    // ctest's mmvq_multi_parity_cuda_layout runs this with SAGUARO_MMVQ_WAVE=0.
+    if (off.powerless_cases != 0 && !(std::getenv("SAGUARO_MMVQ_WAVE") && std::string(std::getenv("SAGUARO_MMVQ_WAVE")) == "0")) {
         std::printf("\nmmvq_multi_parity: ok (gfx906 wave64 layout: every column count runs the same exact kernel, "
                     "so the negative control has no other layout to find; mmvq_multi_parity_cuda_layout checks it).\n");
         return 0;

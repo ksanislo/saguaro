@@ -57,7 +57,7 @@ process is left, the next of these ends it, after the check above:
 
 Engines older Strata versions left behind wrote no record. At an engine start, an **orphan of exactly the executable about to
 be started** (`--serve` on its command line, no live parent: its server is gone) is ended the same way; another
-installation's engine, or any process whose parent is alive, is not. Set `STRATA_KEEP_LEFTOVERS=1` to turn both checks off.
+installation's engine, or any process whose parent is alive, is not. Set `SAGUARO_KEEP_LEFTOVERS=1` to turn both checks off.
 
 ## One app, one or several engines
 
@@ -73,6 +73,6 @@ the `f-split-life` stream for what it would need).
 `tests/terminal/lifecycle_matrix.py` runs every case above with a fake engine package, or a real engine
 (`--config RUN.json --components DIR --vram`), and asserts after each: no process of the tree is left, the port is free, the
 runtime lease can be taken, the GPU memory returned. `tests/terminal/test_lifecycle_matrix.py` is the pytest wrapper (the
-cases that need a console window run with `STRATA_MATRIX_CONSOLE=1`). `apps/desktop/scripts/app-close-matrix.py` drives the
+cases that need a console window run with `SAGUARO_MATRIX_CONSOLE=1`). `apps/desktop/scripts/app-close-matrix.py` drives the
 installed Windows app (normal close, window X, killed app, host crash, second launch, two engines).
 `tests/terminal/ssh_disconnect.py` drops a real ssh session on a Linux box.

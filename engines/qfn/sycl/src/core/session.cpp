@@ -1357,7 +1357,7 @@ bool session_run_token(const ModelGeometry &g, int64_t pos, int32_t pos_base,
     (void)DPCT_CHECK_ERROR(
         (cs->ext_oneapi_empty())); // one flush, so WDDM submits the graph now
     static const int flush_us = [] {
-        const char* e = std::getenv("STRATA_TG_FLUSH_US");
+        const char* e = std::getenv("SAGUARO_TG_FLUSH_US");
         return e ? std::atoi(e) : 2000;   // 24 Sep: 0 flushes run as fast as 5 us ones; this only notices faults
     }();
     volatile uint32_t* const seq = s.db->h_seq;

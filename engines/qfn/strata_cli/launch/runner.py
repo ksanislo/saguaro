@@ -4,7 +4,7 @@ Every step reports plain-word events through one callback (`emit`), so the TUI (
 tests see the same thing. Nothing here prints or reads the keyboard. The steps reuse what is already in the Terminal:
 
 * the engine comes from the signed feed (`strata update`, the one explicit step that downloads);
-* the model comes from setup.py in the app's own installer mode (STRATA_CONTROL_INSTALL), the same job the desktop app runs;
+* the model comes from setup.py in the app's own installer mode (SAGUARO_CONTROL_INSTALL), the same job the desktop app runs;
 * the run config the engine uses is a private copy of the installed one with this launch's choices applied; the profile
   `launch-<name>` (the shared profiles store) points at it, and carries host, port and parallel;
 * tuning is `strata tune auto`, its result lives in the shared presets store and is applied at every start;
@@ -38,9 +38,9 @@ WINDOWS = os.name == "nt"
 
 def install_isolation_words(catalog, data_dir: str | os.PathLike | None = None) -> list[str]:
     """Round 8, N5: a clean test (a scratch data folder) silently ran an OLDER install found elsewhere (its run config and engine 0.1.41).
-    When a data folder was chosen (--data-dir, or STRATA_DATA_DIR from the installer) and the install in use is outside it, say which one is used
+    When a data folder was chosen (--data-dir, or SAGUARO_DATA_DIR from the installer) and the install in use is outside it, say which one is used
     and why. Nothing is moved or switched."""
-    chosen = data_dir or os.environ.get("STRATA_DATA_DIR")
+    chosen = data_dir or os.environ.get("SAGUARO_DATA_DIR")
     places = getattr(catalog, "places", None) or []
     if not chosen or not places or places[0].source == "explicit":
         return []
@@ -514,9 +514,9 @@ class Runner:
 
     def _env(self) -> dict[str, str]:
         env = dict(os.environ, PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8")
-        env.pop("STRATA_NO_ACQUIRE", None)                  # launch is the explicit step that may download
+        env.pop("SAGUARO_NO_ACQUIRE", None)                  # launch is the explicit step that may download
         if self.components_dir:
-            env["STRATA_COMPONENTS_DIR"] = self.components_dir
+            env["SAGUARO_COMPONENTS_DIR"] = self.components_dir
         return env
 
     def _spawn(self, argv: list[str], *, env: dict | None = None, cwd: str | None = None) -> subprocess.Popen:
@@ -558,7 +558,7 @@ class Runner:
             if not stale:
                 self.emit("engine", f"Engine {eng['version']} ({eng['backend']}) is installed.", 100)
                 return
-        feed = self.feed or os.environ.get("STRATA_UPDATE_FEED")
+        feed = self.feed or os.environ.get("SAGUARO_UPDATE_FEED")
         if stale:
             self.emit("engine", stale + " Looking for a newer one…", 0, level="warn")
         else:
@@ -947,12 +947,12 @@ class Runner:
                   f"Getting {title} ready (a download may be large; it continues where it stopped if interrupted)…", 0)
         argv = [self.python, str(cat.src / "setup.py"), *self.setup_args()]
         env = self._env()
-        env.update(STRATA_CONTROL_INSTALL="1", STRATA_INSTALL_DIR=str(cat.root), PYTHONNOUSERSITE="1")
-        env.pop("STRATA_NEED_ENGINE", None)
+        env.update(SAGUARO_CONTROL_INSTALL="1", SAGUARO_INSTALL_DIR=str(cat.root), PYTHONNOUSERSITE="1")
+        env.pop("SAGUARO_NEED_ENGINE", None)
         if self.engine_problem:
-            env["STRATA_ALLOW_NO_ENGINE"] = "1"              # the person said go on: setup warns about the engine instead of stopping
+            env["SAGUARO_ALLOW_NO_ENGINE"] = "1"              # the person said go on: setup warns about the engine instead of stopping
         elif not self.multi_file():                          # (DeepSeek does not use the Strata engine: nothing to require)
-            env["STRATA_NEED_ENGINE"] = "1"
+            env["SAGUARO_NEED_ENGINE"] = "1"
         for k in ("PYTHONHOME", "PYTHONPATH", "VIRTUAL_ENV"):
             env.pop(k, None)
         env["PYTHONPATH"] = str(cat.src)
@@ -1895,10 +1895,10 @@ class Runner:
 
     def upgrade_dsv41_engine(self, found: Path) -> Path:
         """The installed DeepSeek engine package is older than the signed feed's: fetch, check and start the newer one next to it and switch to it
-        (strata_control.dsv41_engine.upgrade).  Not for a --dsv41-package or a STRATA_DSV41_EXE (the person chose the engine), not for an engine
+        (strata_control.dsv41_engine.upgrade).  Not for a --dsv41-package or a SAGUARO_DSV41_EXE (the person chose the engine), not for an engine
         outside an engine-dsv41 folder, and silent when the feed cannot be reached (a 10 s check; the launch never waits on the network)."""
         from strata_control import dsv41_engine
-        if (os.environ.get("STRATA_DSV41_EXE") or "").strip() or getattr(self.s, "dsv41_package", None):
+        if (os.environ.get("SAGUARO_DSV41_EXE") or "").strip() or getattr(self.s, "dsv41_package", None):
             return found
         root = Path(found).parent.parent
         if root.name != dsv41_engine.DIR:
@@ -1916,16 +1916,16 @@ class Runner:
 
     def dsv41_engine_found(self) -> tuple[Path | None, bool | None]:
         """(strata-dsv41 already installed, or None; whether the engine can be told at all).  Looks where setup puts DeepSeek's own engine package
-        (engine-dsv41/ beside the engine, in Strata's own folder, and in the data folder), and at STRATA_DSV41_EXE (a build of your own)."""
+        (engine-dsv41/ beside the engine, in Strata's own folder, and in the data folder), and at SAGUARO_DSV41_EXE (a build of your own)."""
         from strata_control import dsv41_engine
-        own = (os.environ.get("STRATA_DSV41_EXE") or "").strip()
+        own = (os.environ.get("SAGUARO_DSV41_EXE") or "").strip()
         if own:
             return (Path(own) if Path(own).is_file() else None), True
-        # The install this Terminal RUNS from (STRATA_INSTALL_DIR, else the folder its strata_cli comes from) and the install the model's settings live in
+        # The install this Terminal RUNS from (SAGUARO_INSTALL_DIR, else the folder its strata_cli comes from) and the install the model's settings live in
         # (catalog.root: the first remembered install, which after an update or on a computer with several installs can be an older one) can both hold a
         # DeepSeek engine package: the NEWEST version wins, the running Terminal's own on a tie, and the answer is logged.
         roots: list[Path] = []
-        for r in (os.environ.get("STRATA_INSTALL_DIR"), self.catalog.src, self.catalog.root):
+        for r in (os.environ.get("SAGUARO_INSTALL_DIR"), self.catalog.src, self.catalog.root):
             if r and not any(os.path.normcase(os.path.normpath(str(r))) == os.path.normcase(os.path.normpath(str(x))) for x in roots):
                 roots.append(Path(r))
         picks = []

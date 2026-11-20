@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { installBundledEngine, compareVersions, wrongMakeNotice } from '../server/bundled-engine.mjs';
 
 // the make of card is read from this computer unless a test names it; the existing tests are written for an NVIDIA PC
-process.env.STRATA_ENGINE_BACKEND = 'cuda';
+process.env.SAGUARO_ENGINE_BACKEND = 'cuda';
 const sha = buffer => createHash('sha256').update(buffer).digest('hex');
 function makePackage(root, version, { body = 'engine-' + version, backend = 'cuda', platform = 'windows-x86_64', variant = 'cuda13', minDriver = null } = {}) {
   const name = `${version}-${platform}-${backend}-${variant}`;
@@ -179,7 +179,7 @@ test('Windows: the display adapters decide the make, and a leftover nvidia-smi d
   assert.equal(gpuBackendHere({}, { vendors: new Set(['1002']) }), 'hip');
   assert.equal(gpuBackendHere({}, { vendors: new Set(['10de', '1002']) }), 'cuda');
   assert.equal(gpuBackendHere({}, { vendors: new Set(['8086']) }), 'sycl');
-  assert.equal(gpuBackendHere({ STRATA_ENGINE_BACKEND: 'cuda' }, { vendors: new Set(['1002']) }), 'cuda', 'an explicit choice wins');
+  assert.equal(gpuBackendHere({ SAGUARO_ENGINE_BACKEND: 'cuda' }, { vendors: new Set(['1002']) }), 'cuda', 'an explicit choice wins');
   const out = 'MatchingDeviceId    REG_SZ    PCI/VEN_1002&DEV_7551&SUBSYS_0' + String.fromCharCode(10) + 'MatchingDeviceId    REG_SZ    PCI/VEN_8086&DEV_46A6';
   assert.deepEqual([...windowsDisplayVendors({ platform: 'win32', run: () => out })].sort(), ['1002', '8086']);
   assert.equal(windowsDisplayVendors({ platform: 'linux', run: () => { throw new Error('must not run'); } }).size, 0);

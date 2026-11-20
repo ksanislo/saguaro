@@ -1,4 +1,4 @@
-// src/prefill/gdn_chunk_sm75.cuh - STRATA_GDN_CHUNKED_SM75=1: the chunked (WY form) prompt recurrence of
+// src/prefill/gdn_chunk_sm75.cuh - SAGUARO_GDN_CHUNKED_SM75=1: the chunked (WY form) prompt recurrence of
 // gdn_rec_chunked on Turing (sm_75: 64 KB of shared memory an SM, no cp.async, no TF32/BF16 tensor cores).
 // Included by src/prefill/kernels.cu and src/prefill/gdn_rec_parity.cu (the test runs this very code), after
 // their S, HK, HV, C, VPK, GCH, GDV, GTP, kChunkPrepSmem and gdn_chunk_prep_kernel's math.
@@ -485,7 +485,7 @@ float* gdn_chunk_t_scratch() {
     return bufs[dev];
 }
 
-// Whether the current device takes STRATA_GDN_CHUNKED_SM75's kernels (sm_75+): asked once a device, which logs the
+// Whether the current device takes SAGUARO_GDN_CHUNKED_SM75's kernels (sm_75+): asked once a device, which logs the
 // scan's occupancy.
 bool gdn_chunked_sm75_ok() {
     static int known[64] = {};   // per device: 0 not asked yet, 1 yes, 2 no
@@ -506,14 +506,14 @@ bool gdn_chunked_sm75_ok() {
         }
         if (!yes) cudaGetLastError();
         known[dev] = yes ? 1 : 2;
-        std::fprintf(stderr, "strata: CUDA%d GDN prompt recurrence chunked on tensor cores (STRATA_GDN_CHUNKED_SM75=1): %s "
+        std::fprintf(stderr, "strata: CUDA%d GDN prompt recurrence chunked on tensor cores (SAGUARO_GDN_CHUNKED_SM75=1): %s "
                              "(scan %d blocks/SM x %d SMs for %d blocks, %zu B shared)\n", dev, yes ? "on" : "off", per_sm,
                      sms, HK * (S / GDV / GT_NSL), kChunkScanTSmem);
     }
     return known[dev] == 1;
 }
 
-// STRATA_GDN_CHUNKED_SM75=1's recurrence of T tokens (any T > 0): super-blocks of GSB_T tokens, a prep and a scan
+// SAGUARO_GDN_CHUNKED_SM75=1's recurrence of T tokens (any T > 0): super-blocks of GSB_T tokens, a prep and a scan
 // launch each.  An error return means nothing was launched (the caller takes another kernel): before sm_75, or no
 // scratch.
 cudaError_t gdn_rec_chunked_sm75(float* state, const float* h, const float* gate, const float* beta, float* y, int64_t T,

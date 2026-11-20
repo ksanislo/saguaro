@@ -24,7 +24,7 @@ class DraftPolicy {
 public:
     static constexpr int kMaxT = 8;
     static constexpr int kBuckets = 4;
-    static constexpr int kCtxBuckets = 3;   // STRATA_SPEC_COST: row costs per context length (< 6K, < 24K, longer)
+    static constexpr int kCtxBuckets = 3;   // SAGUARO_SPEC_COST: row costs per context length (< 6K, < 24K, longer)
 
     explicit DraftPolicy(int max_t, double margin = 0.03);
 
@@ -48,18 +48,18 @@ public:
     double lookup_rate(int match) const;   // current q for a match length
     double cost_ms(int t) const;           // measured or scaled round time of a window of t tokens
     /// A per-card row-cost table (round ms of the windows of 1..n rows, the draft included) counted as `weight` earlier rounds each:
-    /// the start of a process that already knows the card (STRATA_SPEC_COST_TABLE; tuning time), replaced by what it then measures.
+    /// the start of a process that already knows the card (SAGUARO_SPEC_COST_TABLE; tuning time), replaced by what it then measures.
     void seed_costs(const double* ms, int n, double weight, int bucket = 0);
-    /// STRATA_SPEC_COST: the context position of the next round; selects the row-cost table of its length (a row of attention costs
+    /// SAGUARO_SPEC_COST: the context position of the next round; selects the row-cost table of its length (a row of attention costs
     /// more at 16K than at 1K).  A bucket with no measurement yet starts from the nearest one that has.  A no-op without set_robust(true).
     void set_context(long long pos);
     /// The measured round cost of every window size seen: "T1:39.8(n=120) T2:..." for the log / the next process's table.
     std::string cost_table_text() const;
-    /// STRATA_SPEC_COST: a round time far above what is known for that width (the first use of a width captures its graph; a stalled
+    /// SAGUARO_SPEC_COST: a round time far above what is known for that width (the first use of a width captures its graph; a stalled
     /// round) counts as a tenth of a sample, so one capture cannot price a width out of use.  Off: the cost EMA as it always was.
     void set_robust(bool on) { robust_ = on; }
 
-    /// COST-AWARE MTP WINDOW (STRATA_SPEC_COST=1): the MTP chain is drafted one step at a time; after draft j (probability p_j)
+    /// COST-AWARE MTP WINDOW (SAGUARO_SPEC_COST=1): the MTP chain is drafted one step at a time; after draft j (probability p_j)
     ///   E_j = 1 + q_0 + .. + q_j,  q_i = prod_{k<=i} a(p_k)   a() = the acceptance measured for MTP drafts of that probability
     /// is the expected tokens of the window of j + 2 rows, worth E_j / cost(j + 2) tokens per ms (cost() = the measured round time of
     /// that window size, which includes the draft).  The window is the best of the widths seen; the chain goes on only while one or two

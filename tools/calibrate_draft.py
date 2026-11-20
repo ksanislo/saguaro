@@ -19,7 +19,7 @@ way Saguaro is used, and only the sustained speed counts:
   - DFlash2 is kept only when it beats the other side by more than MIN_GAIN: a tie keeps the MTP block.
 
 The engine works on a copy of this PC's expert usage file (calibrate_glm.usage_copy), writes no learned expert profile
-or routing trace (calibrate_glm.without_writes) and keeps no conversations aside (STRATA_GLM_SLOTS=0): the
+or routing trace (calibrate_glm.without_writes) and keeps no conversations aside (SAGUARO_GLM_SLOTS=0): the
 calibration's answers neither lead the next start's warm-up nor take the place of this PC's kept conversations.
 
     python tools/calibrate_draft.py maya-<model>.json     # measure and print; ./saguaro.sh --speed-calibration applies it
@@ -160,10 +160,10 @@ def run(other: dict, dflash: dict, say=print, start_engine=None, other_label: st
         for i, (key, cfg, label) in enumerate((("other", other, other_label), ("dflash2", dflash, "DFlash2"))):
             if i == 1:
                 say(f"  (the first side took {(time.time() - t0) / 60.0:.0f} min: about as long again for DFlash2)")
-            # (no conversations kept aside: with STRATA_GLM_SLOT_KEEP the calibration's would push out this PC's own;
+            # (no conversations kept aside: with SAGUARO_GLM_SLOT_KEEP the calibration's would push out this PC's own;
             # and no learned expert profile or routing trace written: its answers are not this PC's use)
             c = {**cfg, "args": CAL.without_writes(list(cfg.get("args") or [])),
-                 "env": {**(cfg.get("env") or {}), **CAL.usage_copy(cfg, Path(tmp)), "STRATA_GLM_SLOTS": "0"}}
+                 "env": {**(cfg.get("env") or {}), **CAL.usage_copy(cfg, Path(tmp)), "SAGUARO_GLM_SLOTS": "0"}}
             res[key] = measure(c, label, warm, questions, n_doc, start_engine, say, f"[{i + 1}/2] ")
     for key in ("other", "dflash2"):
         if res[key]["tokens"] < MIN_TOKENS // 2:
@@ -178,8 +178,7 @@ def run(other: dict, dflash: dict, say=print, start_engine=None, other_label: st
 if __name__ == "__main__":
     if len(sys.argv) != 2:
         sys.exit("usage: calibrate_draft.py <maya-*.json>  (a config that drafts with DFlash2: --dflash in its args)")
-    import maya_names
-    cfg = maya_names.env_in(json.loads(Path(sys.argv[1]).read_text(encoding="utf-8-sig")))
+    cfg = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8-sig"))
     if "--dflash" not in (cfg.get("args") or [])[:-1]:
         sys.exit("this config does not draft with DFlash2 (no --dflash in its args)")
     print(json.dumps(run(without_dflash(cfg), cfg), indent=1))

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * The first run of the installed app, headless: the host as the Tauri shell starts it (STRATA_PACKAGED=1, STRATA_NO_ACQUIRE=1,
+ * The first run of the installed app, headless: the host as the Tauri shell starts it (SAGUARO_PACKAGED=1, SAGUARO_NO_ACQUIRE=1,
  * the staged Control, nothing installed, nothing in the per-user folders) and Chrome on its onboarding.
  *
  *   node apps/desktop/scripts/first-run-ui.mjs [--control <staged control>] [--node <node.exe>] [--work <scratch>] [--shots <dir>]
@@ -10,7 +10,7 @@
  *   (from Control's bundled installer on Control's Python); the page shows "Let's get started", and after it the model
  *   list with sizes (no "couldn't show this screen"); no page error; the install plan for the recommended model is a
  *   plan (nothing is downloaded or started: a plan changes nothing); the spy sees no pip/git/compiler/engine fetch.
- * Per-user folders (STRATA_HOME, APPDATA, LOCALAPPDATA, the components and install folders) are all under --work.
+ * Per-user folders (SAGUARO_HOME, APPDATA, LOCALAPPDATA, the components and install folders) are all under --work.
  * No model is downloaded and no engine runs.
  */
 import { spawn } from 'node:child_process';
@@ -47,13 +47,13 @@ for (const d of Object.values(dirs)) mkdirSync(d, { recursive: true });
 const port = await freePort();
 const env = {
   ...process.env,
-  STRATA_PORT: String(port), STRATA_DIST: join(repoHost, 'dist'), STRATA_PACKAGED: '1', STRATA_REAL_ENGINE: '1', STRATA_NO_ACQUIRE: '1',
-  STRATA_CONTROL_DIR: control, STRATA_HOME: dirs.home, STRATA_MODELS_DIR: join(work, 'models'), STRATA_COMPONENTS_DIR: dirs.components,
+  SAGUARO_PORT: String(port), SAGUARO_DIST: join(repoHost, 'dist'), SAGUARO_PACKAGED: '1', SAGUARO_REAL_ENGINE: '1', SAGUARO_NO_ACQUIRE: '1',
+  SAGUARO_CONTROL_DIR: control, SAGUARO_HOME: dirs.home, SAGUARO_MODELS_DIR: join(work, 'models'), SAGUARO_COMPONENTS_DIR: dirs.components,
   APPDATA: dirs.appdata, LOCALAPPDATA: dirs.local, XDG_CONFIG_HOME: join(work, 'xdg'), XDG_DATA_HOME: join(work, 'xdgdata'),
-  STRATA_PROFILE_DIR: join(work, 'profiles'), STRATA_RUNTIME_DIR: join(work, 'runtime'), ACQUIRE_SPY_LOG: spyLog,
+  SAGUARO_PROFILE_DIR: join(work, 'profiles'), SAGUARO_RUNTIME_DIR: join(work, 'runtime'), ACQUIRE_SPY_LOG: spyLog,
 };
-delete env.STRATA_INSTALL_DIR;
-mkdirSync(env.STRATA_MODELS_DIR, { recursive: true });
+delete env.SAGUARO_INSTALL_DIR;
+mkdirSync(env.SAGUARO_MODELS_DIR, { recursive: true });
 const host = spawn(nodeExe, [...(args['no-spy'] === undefined ? ['--import', spy] : []), join(repoHost, 'server', 'index.mjs')], { cwd: repoHost, env, stdio: ['ignore', 'pipe', 'pipe'] });
 let hostLog = '';
 host.stdout.on('data', c => { hostLog += c; }); host.stderr.on('data', c => { hostLog += c; });

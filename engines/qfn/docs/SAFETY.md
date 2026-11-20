@@ -63,7 +63,7 @@ That is the full list found in the code. Some details:
   run when you press a button or run a command. With no connection, the check says so and nothing else happens. The Terminal fetches an engine by itself only when none is
   installed, and `strata launch` asks first.
 - **Starting and serving never download.** `strata serve` and the app's load button fetch nothing. The app sets
-  `STRATA_PACKAGED=1` and `STRATA_NO_ACQUIRE=1` for its parts (`apps/desktop/src-tauri/src/main.rs`), and the downloaders
+  `SAGUARO_PACKAGED=1` and `SAGUARO_NO_ACQUIRE=1` for its parts (`apps/desktop/src-tauri/src/main.rs`), and the downloaders
   refuse to run under them (`strata_control/acquisition.py`, `apps/host/server/acquisition.mjs`). That is why the app
   never downloads `cloudflared` for you while it runs.
 - **The engine itself has no network code.** The part of Strata that runs the model (`src/`, `include/`, `sycl/`, `metal/`)
@@ -79,7 +79,7 @@ That is the full list found in the code. Some details:
   storage on your disk. Models are in the folder you chose.
 - **API keys** you save for outside services are kept in a file that only your user account can open. They are not
   encrypted. (`apps/host/server/model-providers.mjs`)
-- **The server listens on `127.0.0.1`**, this PC only. The app fixes that address (`STRATA_BIND=127.0.0.1`), and the engine
+- **The server listens on `127.0.0.1`**, this PC only. The app fixes that address (`SAGUARO_BIND=127.0.0.1`), and the engine
   server's default is the same (`serve/server.py`, the `--host` option).
 - **Sharing needs a key.** The app's "Share with other devices" and the Cloudflare tunnel will not start without an API
   key, and the shared port answers only `/v1/models`, `/v1/chat/completions` and `/v1/messages`
@@ -119,7 +119,7 @@ tensor). A file that does not match is deleted and the install stops. A file who
 size stops it before the download starts.
 
 - If the pinned version of a file is gone from Hugging Face, the install stops and says to update Strata. It does not take
-  the repository's current file instead. A tester can set `STRATA_ALLOW_UNPINNED=1` to take the current file anyway, without
+  the repository's current file instead. A tester can set `SAGUARO_ALLOW_UNPINNED=1` to take the current file anyway, without
   the check. It is off by default, and setup says so when it is set.
 - Starting a model does not check its files, and running setup again for a model you have does not download or hash them
   again. A file installed before these hashes existed is kept as it is.
@@ -132,7 +132,7 @@ size stops it before the download starts.
   (`setup.py`: `REPO_PINS`, `download`, `verify_sha256`; `tools/mtp_fetch.py`; `apps/host/server/image-models.mjs`.)
 
 **Engine in the source route.** `setup.py` checks the engine zip against the SHA-256 that GitHub's API publishes for that
-release file. If GitHub cannot say (offline, rate limit), setup warns and installs anyway. `STRATA_SKIP_SHA256=1` switches the
+release file. If GitHub cannot say (offline, rate limit), setup warns and installs anyway. `SAGUARO_SKIP_SHA256=1` switches the
 check off, and it is never on by default.
 
 **The one-line install** (`curl ... | sh`, `irm ... | iex`) checks the Terminal archive's SHA-256 and the signed feed with the

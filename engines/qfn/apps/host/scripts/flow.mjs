@@ -13,7 +13,7 @@ const executablePath = [
   join(homedir(), 'Library/Caches/ms-playwright/chromium_headless_shell-1234/chrome-headless-shell-mac-arm64/chrome-headless-shell'),
 ].find((p) => existsSync(p));
 
-const BASE = process.env.STRATA_URL ?? 'http://localhost:5199';
+const BASE = process.env.SAGUARO_URL ?? 'http://localhost:5199';
 const flow = process.argv[2] ?? 'chat';
 const shots = resolve('.shots');
 mkdirSync(shots, { recursive: true });

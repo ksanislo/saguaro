@@ -51,10 +51,10 @@ not resident, and so on the SSD.
 
 Not measured by the Saguaro team yet (no Mac): your `./saguaro.sh --bench` numbers are welcome in an issue. What to expect:
 with less unified memory than the model, part of the experts come from the SSD as a conversation needs them, and decode
-is bound by those reads rather than by the GPU - so MTP drafting is off then (`MAYA_GLM_MTP_DECODE=1` turns it on). A
+is bound by those reads rather than by the GPU - so MTP drafting is off then (`SAGUARO_GLM_MTP_DECODE=1` turns it on). A
 Mac that holds every expert (128 GB and more for the smaller quants) decodes from memory, where drafting pays.
 
-The pool takes no more than the Mac has free when Saguaro starts, less `MAYA_GLM_RAM_HEADROOM_GB` (6 GB): unified memory
+The pool takes no more than the Mac has free when Saguaro starts, less `SAGUARO_GLM_RAM_HEADROOM_GB` (6 GB): unified memory
 is shared with every other program, and a pool past it would be swapped (a slice that reads swapped experts stalls
 for seconds). Close other large programs before starting Saguaro for the most experts in memory.
 
@@ -67,17 +67,17 @@ draft the model would not have written are dropped, the recurrent state rolled b
 A window's rows are not the same bits as single tokens, though (within 4.9e-6 of them, below): ggml-metal picks its
 matrix kernel by the column count, so where two tokens nearly tie, a window of another length can pick the other one.
 The MTP draft length adapts to measured timing and is kept across requests, so the same greedy request can take
-another path the second time (a prefix-cache hit after a cold prompt, say). `MAYA_GLM_MTP_FIXED=N` fixes the length;
-`spec=1` (or `MAYA_GLM_MTP_DECODE=0`) decodes one token at a time.
+another path the second time (a prefix-cache hit after a cold prompt, say). `SAGUARO_GLM_MTP_FIXED=N` fixes the length;
+`spec=1` (or `SAGUARO_GLM_MTP_DECODE=0`) decodes one token at a time.
 
 - **MTP**: the model's own NextN block drafts with chained greedy steps; the draft length adapts to how many drafts are
-  accepted and what a round costs on this Mac (as on CUDA: `MAYA_GLM_MTP_DRAFT`, `MAYA_GLM_MTP_FIXED`,
-  `MAYA_GLM_MTP_ADAPT`). It is on when every expert fits in memory, where a token is GPU work and a window writes
+  accepted and what a round costs on this Mac (as on CUDA: `SAGUARO_GLM_MTP_DRAFT`, `SAGUARO_GLM_MTP_FIXED`,
+  `SAGUARO_GLM_MTP_ADAPT`). It is on when every expert fits in memory, where a token is GPU work and a window writes
   several for about the price of one. With experts streamed from the SSD a window needs more of them than one token
-  does, so it is off there (`MAYA_GLM_MTP_DECODE=1` turns it on, `0` off).
+  does, so it is off there (`SAGUARO_GLM_MTP_DECODE=1` turns it on, `0` off).
 - **DFlash2** (`--draft dflash2` at setup): a 0.7 GB block-diffusion drafter reads five of the model's layers and
   drafts up to 7 tokens in one pass, kept while the drafter is confident (`spec_min_p`, `spec_n_min`, `spec_cum`).
-- A request's `spec=1` turns drafting off; `MAYA_GLM_NO_MTP=1` for the engine.
+- A request's `spec=1` turns drafting off; `SAGUARO_GLM_NO_MTP=1` for the engine.
 
 ## Accuracy
 
@@ -100,7 +100,7 @@ Two choices keep it at f32 accuracy where Metal would otherwise round:
   same bits. Quantized weights use ggml-metal's matrix kernels as llama.cpp does.
 - The MLA latent cache is F32 by default (about 22 KB per token; `--kv-f16` halves it, as the CUDA engine stores it).
   On the GPU the DSA layers' matrix products round it to half anyway, so it is F16 there; `--kv-f32`
-  (`MAYA_METAL_KV_F32=1`) keeps it F32, and the fused sparse-attention kernel then reads F32 rows.
+  (`SAGUARO_METAL_KV_F32=1`) keeps it F32, and the fused sparse-attention kernel then reads F32 rows.
 
 ## Options
 

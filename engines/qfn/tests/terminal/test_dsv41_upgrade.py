@@ -142,7 +142,7 @@ class LaunchChoice(unittest.TestCase):
         found = Path("/x/engine-dsv41/0.1.49-a/strata-dsv41")
         with mock.patch.object(dsv41_engine, "upgrade", side_effect=AssertionError("must not run")):
             self.assertEqual(self.runner(package="/some/file.tar.gz").upgrade_dsv41_engine(found), found)
-            with mock.patch.dict(os.environ, {"STRATA_DSV41_EXE": "/my/build/strata-dsv41"}):
+            with mock.patch.dict(os.environ, {"SAGUARO_DSV41_EXE": "/my/build/strata-dsv41"}):
                 self.assertEqual(self.runner().upgrade_dsv41_engine(found), found)
             self.assertEqual(self.runner().upgrade_dsv41_engine(Path("/x/engine/strata-dsv41")), Path("/x/engine/strata-dsv41"))     # not a package folder
 

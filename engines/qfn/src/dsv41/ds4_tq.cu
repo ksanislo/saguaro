@@ -466,10 +466,10 @@ __global__ void __launch_bounds__(kThreads) mv_kernel(const MvJob j) {
         default: return false;                      \
     }
 
-// 32-bit stream loads (STRATA_DS4_TQ_WORDS=1) or the 16-bit ones (default)
+// 32-bit stream loads (SAGUARO_DS4_TQ_WORDS=1) or the 16-bit ones (default)
 bool use_words() {
     static const bool on = [] {
-        const char* e = std::getenv("STRATA_DS4_TQ_WORDS");
+        const char* e = std::getenv("SAGUARO_DS4_TQ_WORDS");
         return e != nullptr && std::atoi(e) != 0;   // (no gain measured on the R9700: 13.8 vs 14.2 ms a token)
     }();
     return on;

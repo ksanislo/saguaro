@@ -1,4 +1,4 @@
-// src/platform/numa_test.cpp - STRATA_NUMA_PLACE's pure helpers, and (Linux, 2+ nodes) a bound mapping read back.
+// src/platform/numa_test.cpp - SAGUARO_NUMA_PLACE's pure helpers, and (Linux, 2+ nodes) a bound mapping read back.
 #include "strata/platform/numa.hpp"
 
 #include <cstdio>

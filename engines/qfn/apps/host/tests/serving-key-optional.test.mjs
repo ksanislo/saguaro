@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const home = mkdtempSync(join(tmpdir(), 'strata-serving-key-'));
-process.env.STRATA_HOME = home;
+process.env.SAGUARO_HOME = home;
 const serving = await import('../server/serving.mjs');
 
 test('removing the API key while local sharing and the tunnel run is allowed', () => {

@@ -58,7 +58,7 @@ The sidebar shares the preview tab bar and respects reduced-motion preferences.
 | --- | --- |
 | Hardware detection | **Real.** `system_profiler` / `sysctl` / `vm_stat` on macOS, `nvidia-smi` / `/proc` on Linux, `os` module fallbacks everywhere. |
 | Native model catalog | **Read from the installed Strata source.** Families, real download sizes and hardware compatibility come from its official MCP catalog. |
-| Model files | **Native installer or real GGUF adapter.** Native preparation reuses/resumes shards and companion files. The older design adapter remains simulated unless `STRATA_REAL_ENGINE=1`. |
+| Model files | **Native installer or real GGUF adapter.** Native preparation reuses/resumes shards and companion files. The older design adapter remains simulated unless `SAGUARO_REAL_ENGINE=1`. |
 | Engine tuning | **Native config and measured operations.** Validated parameters/JSON, config backups, per-model GPU placement, measured benchmark and supported NVIDIA calibration. |
 | Serving API | **Native gateway.** Chat Completions, Anthropic and supported Responses protocols route by exact model ID. Existing key/network controls and request cancellation remain. |
 | Inference | **Native managed processes or a selected API/local adapter.** Native vision sends actual image content, and explicitly enabled MCP calls appear in chat. Design demonstrations remain labelled. |
@@ -93,13 +93,13 @@ strata/
 │   ├── monitor.mjs          live phase + throughput + thermals
 │   ├── serving.mjs          API keys, access policy, request log
 │   ├── inference.mjs        backend detection (llama.cpp/Ollama/LM Studio) + proxy
-│   └── store.mjs            JSON state under $STRATA_HOME (~/.strata)
+│   └── store.mjs            JSON state under $SAGUARO_HOME (~/.strata)
 └── scripts/                 dev runner, design-kit sync, screenshot harness
 ```
 
 State lives in `~/.strata` (`models/`, `data/state.json`). If the home directory
 is not writable — sandboxes, locked-down accounts — the host falls back to
-`./.strata`. Override with `STRATA_HOME`, `STRATA_WORKSPACE`, `STRATA_PORT`.
+`./.strata`. Override with `SAGUARO_HOME`, `SAGUARO_WORKSPACE`, `SAGUARO_PORT`.
 
 ## Design
 

@@ -315,7 +315,7 @@ def verify_and_parse(payload: bytes, signature_bytes: bytes, *, source: str, tru
     """Check the signature over `payload`, then parse; then the three guards: the channel is the one asked for, the feed has
     not expired, and its sequence is not lower than the last one accepted (a replayed older feed is a downgrade)."""
     if not trusted:
-        raise FeedError("this build trusts no update key (update_keys.json is empty and STRATA_UPDATE_TRUSTED_KEYS is not set), "
+        raise FeedError("this build trusts no update key (update_keys.json is empty and SAGUARO_UPDATE_TRUSTED_KEYS is not set), "
                         "so no update can be verified; nothing was downloaded")
     try:
         signature = json.loads(signature_bytes.decode("utf-8-sig"))
@@ -342,7 +342,7 @@ def verify_and_parse(payload: bytes, signature_bytes: bytes, *, source: str, tru
 def fetch(source: str, trusted: dict[str, bytes], **guards) -> Feed:
     """Read the feed and its signature from `source` (an https URL, a loopback http URL, a file URL or a folder/file path)."""
     if not trusted:
-        raise FeedError("this build trusts no update key (update_keys.json is empty and STRATA_UPDATE_TRUSTED_KEYS is not set), "
+        raise FeedError("this build trusts no update key (update_keys.json is empty and SAGUARO_UPDATE_TRUSTED_KEYS is not set), "
                         "so no update can be verified; nothing was downloaded")
     location = source
     if transfer.kind_of(source) == "path":
@@ -444,7 +444,7 @@ def _settle_hip_variants(fitting: list, hardware: dict, reasons: list[str]) -> l
         why = f"the installed {hardware['installed_variant']} build is kept, this PC's AMD card could not be identified"
     if not chosen:
         reasons.append("Strata cannot tell which AMD build this PC needs (" + ", ".join(sorted(_hip_variants(hip))) +
-                       "); the card was not recognised, so nothing was chosen. Name the build with STRATA_ENGINE_BACKEND=hip-<build>")
+                       "); the card was not recognised, so nothing was chosen. Name the build with SAGUARO_ENGINE_BACKEND=hip-<build>")
         return [p for p in fitting if p.backend != "hip"]
     reasons.append(f"several AMD builds fit; chose {chosen[0].variant}: {why}")
     return [p for p in fitting if p.backend != "hip" or p in chosen]

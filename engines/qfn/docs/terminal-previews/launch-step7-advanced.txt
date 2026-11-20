@@ -11,7 +11,7 @@
    --prefill               auto       auto         -         how many prompt tokens are read at once
    --spec                  4          4            -         draft tokens per step
    --native-rope           -          -            -         [experimental] experimental pinned rotary arithm
-   STRATA_PIN_BY_NEED      off        off          -         Pin memory only when needed
+   SAGUARO_PIN_BY_NEED      off        off          -         Pin memory only when needed
    + Add a setting by name…                                  for flags of newer engine versions
  Command that will run
    component:strata-engine --max-context 131072 --kv int8 --prefill auto --expert-cache auto --spec 4

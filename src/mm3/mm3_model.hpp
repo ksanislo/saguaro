@@ -94,7 +94,7 @@ struct Stats {
     long long kv_host_bytes = 0;  // KV streaming: the whole caches pinned in host memory now (INFO kv_ram_bytes)
     long profiled = 0;            // routings counted (save_profile writes them)
     long cpu_experts = 0;         // routed experts the CPU lane computed
-    long help_experts = 0;        // (MAYA_MM3_DECODE_HELP) routed experts the card beside computed for a token
+    long help_experts = 0;        // (SAGUARO_MM3_DECODE_HELP) routed experts the card beside computed for a token
     int cpu_threads = 0;          // the CPU lane's threads (0: no CPU lane)
     long promoted = 0;            // experts copied into a staging slot because they kept coming back
     double t_promo = 0;           // a forward's start waiting for those copies
@@ -126,7 +126,7 @@ public:
     Model& operator=(const Model&) = delete;
 
     bool load(const Options& o, std::string& err);
-    /// Saved conversations (MAYA_MM3_SLOT_DIR): the cache of positions 0 .. n - 1 written to / read from f (KV streaming,
+    /// Saved conversations (SAGUARO_MM3_SLOT_DIR): the cache of positions 0 .. n - 1 written to / read from f (KV streaming,
     /// one sequence only - state_ok()): every layer's K / V rows from the host copy and its index keys; a load also
     /// fills the VRAM ring with the last positions.  `id`: what makes a file this model's (the formats, the layers).
     bool state_ok() const;
@@ -162,13 +162,13 @@ public:
     /// GPU on; a group past the last GPU: its logits [R][vocab] for pipe_take (oldest first, with its tag).  Each row
     /// the same bits as forward_rows'.  A sequence is in one group at most; forward / forward_rows only with none in
     /// flight (pipe_busy() 0); pipe_drop() forgets them (after an error).
-    /// MAYA_MM3_ELASTIC: the positions sequence s's index keys hold in VRAM now (max_ctx() without it); ctx_fit maps
+    /// SAGUARO_MM3_ELASTIC: the positions sequence s's index keys hold in VRAM now (max_ctx() without it); ctx_fit maps
     /// them for n positions (VRAM short: the coldest resident experts give theirs) and gives back what is past n; an
     /// idle server calls ctx_give (true: more to do, for at most budget_s a call) to take the experts back.
     int ctx_room(int s) const;
     bool ctx_fit(int s, int n, std::string& err);
     bool ctx_give(double budget_s);
-    /// A prompt read done: the VRAM it borrowed (MAYA_MM3_KV_GATHER's slots) given back to the experts before the decode.
+    /// A prompt read done: the VRAM it borrowed (SAGUARO_MM3_KV_GATHER's slots) given back to the experts before the decode.
     void read_end();
     int pipe_stages() const;
     int pipe_busy() const;

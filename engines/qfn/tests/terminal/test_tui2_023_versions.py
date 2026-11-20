@@ -26,7 +26,7 @@ class VersionBump(unittest.TestCase):
         self.assertEqual(strata_cli.PRODUCT_VERSION, "0.2.4.2")
         self.assertEqual(strata_cli.version(), "0.1.49.2")                # the CMake project version: Control
         self.assertEqual(first("CMakeLists.txt", r"^project\(strata VERSION ([0-9.]+) "), "0.1.49.2")
-        self.assertIn('STRATA_VERSION="0.1.48-metal"', (ROOT / "metal" / "CMakeLists.txt").read_text(encoding="utf-8"))
+        self.assertIn('SAGUARO_VERSION="0.1.48-metal"', (ROOT / "metal" / "CMakeLists.txt").read_text(encoding="utf-8"))
 
     def test_every_place_the_app_version_lives_says_0_2_3(self):
         self.assertEqual(first("apps/desktop/src-tauri/Cargo.toml", r'^version = "([^"]+)"'), "0.2.3")
@@ -47,7 +47,7 @@ class VersionBump(unittest.TestCase):
 
     def test_version_prints_the_product_and_the_build(self):
         done = subprocess.run([sys.executable, str(ROOT / "strata.py"), "--version"], capture_output=True, text=True, cwd=str(ROOT),
-                              env={**os.environ, "STRATA_NO_HANDOVER": "1"})
+                              env={**os.environ, "SAGUARO_NO_HANDOVER": "1"})
         self.assertTrue(done.stdout.startswith("strata 0.2.4.2 (build 0.1.49.2;"), done.stdout)
 
 

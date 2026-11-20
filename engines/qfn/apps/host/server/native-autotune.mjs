@@ -94,7 +94,7 @@ export function createAutoTune({ launcher, workDir, spawnProcess = spawn, pollMs
         if (opts.leaveRam) args.push('--leave-ram', String(Math.max(0, Math.min(50, Math.round(opts.leaveRam)))));
         if (opts.allowSmallDifferences) args.push('--allow-small-differences');
         // For headless checks on a PC where another engine runs: do not wait for it (the tuner would sit in its quiet check).
-        if (process.env.STRATA_TUNE_NO_QUIET_CHECK === '1') args.push('--no-quiet-check');
+        if (process.env.SAGUARO_TUNE_NO_QUIET_CHECK === '1') args.push('--no-quiet-check');
         if (opts.name) args.push('--name', String(opts.name).slice(0, 80));
       }
       const child = spawnProcess(l.command, [...(l.prefix ?? []), ...args], { cwd: l.cwd, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], env: l.env });

@@ -48,7 +48,7 @@ int device_count();
 // the runtime cannot describe it.
 bool device_summary(int ordinal, std::string& name, std::string& detail);
 
-// STRATA_PRIMARY_DEVICE (generate.cpp): the ordinal the engine's own session runs on; 0 = the runtime's first
+// SAGUARO_PRIMARY_DEVICE (generate.cpp): the ordinal the engine's own session runs on; 0 = the runtime's first
 // visible device (upstream's behavior).  The Windows HIP runtime enumerates the cards in a fixed order no
 // HIP_VISIBLE_DEVICES list can change (it only filters), so a PC whose faster card comes second could not run
 // the model on it while the first card served as a helper.  The helper expert caches and the peer tier must

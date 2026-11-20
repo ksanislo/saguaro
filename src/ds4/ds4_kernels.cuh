@@ -418,7 +418,7 @@ struct RoutePair {
     const float *a_logits = nullptr, *a_bias = nullptr;   // route_ahead's
     int a_n = 0, m = 0, off = 0;
     int T = 1;   // (=2: a window's rows, 1 .. kWin)
-    float rs_w = 0.0f;   // (route_pair sets these from STRATA_DS4_RESIDENT_SKIP_W / _TOPK)
+    float rs_w = 0.0f;   // (route_pair sets these from SAGUARO_DS4_RESIDENT_SKIP_W / _TOPK)
     int rs_k = 0;
     int pf = 0;   // (DS4_PREFETCH) req->gpu written too
 };

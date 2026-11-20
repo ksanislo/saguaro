@@ -1,7 +1,7 @@
 /**
  * Helper agents (the Harness's subagents) in the chat: rows, concurrency, one approval card, Stop, and /goal.
  *
- * Pure tests always run; the rest need a built Harness (STRATA_HARNESS_DIR) and skip loudly without it.
+ * Pure tests always run; the rest need a built Harness (SAGUARO_HARNESS_DIR) and skip loudly without it.
  * The model is scripted; the Harness, its subagent runtime, its approval service, the gate and the bridge are real.
  */
 import test from 'node:test';
@@ -14,8 +14,8 @@ import { createAgentBridge, plainBlocker, goalEnding, plainGoalError } from '../
 import { resolveHarness } from '../server/agent/harness-runtime.mjs';
 import { ChildProjector, activityOf } from '../server/agent/children.mjs';
 
-const HARNESS = process.env.STRATA_HARNESS_DIR;
-const skip = !HARNESS || !resolveHarness({ env: process.env }).ok ? 'STRATA_HARNESS_DIR is not set to a built Harness' : false;
+const HARNESS = process.env.SAGUARO_HARNESS_DIR;
+const skip = !HARNESS || !resolveHarness({ env: process.env }).ok ? 'SAGUARO_HARNESS_DIR is not set to a built Harness' : false;
 const cleanup = dir => { try { rmSync(dir, { recursive: true, force: true, maxRetries: 3 }); } catch { /* best effort */ } };
 const fwd = p => p.replaceAll('\\', '/');
 

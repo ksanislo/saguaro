@@ -31,7 +31,7 @@ def choose_glyphs(requested: str, encoding: str | None, term: str | None) -> str
     if term == "dumb" or not encoding:
         return "ascii"
     if consoleinfo.legacy_console():
-        forced = os.environ.get("STRATA_GLYPHS", "").strip().lower()
+        forced = os.environ.get("SAGUARO_GLYPHS", "").strip().lower()
         if forced in ("ascii", "legacy"):
             return "ascii"
         if forced == "solid":

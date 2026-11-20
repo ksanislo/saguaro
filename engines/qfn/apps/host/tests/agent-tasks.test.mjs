@@ -1,6 +1,6 @@
 /**
  * Tasks as the agent: a scheduled task runs in a Harness session of its own, under the mode it was given, and its result and a
- * notification reach the person. Pure tests always run; the rest need a built Harness (STRATA_HARNESS_DIR).
+ * notification reach the person. Pure tests always run; the rest need a built Harness (SAGUARO_HARNESS_DIR).
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -14,8 +14,8 @@ import { resolveHarness } from '../server/agent/harness-runtime.mjs';
 import { createTaskService, validateTask, nextRun, TASK_MODES } from '../server/tasks.mjs';
 import { taskReport, cardLine } from '../server/task-report.mjs';
 
-const HARNESS = process.env.STRATA_HARNESS_DIR;
-const skip = !HARNESS || !resolveHarness({ env: process.env }).ok ? 'STRATA_HARNESS_DIR is not set to a built Harness' : false;
+const HARNESS = process.env.SAGUARO_HARNESS_DIR;
+const skip = !HARNESS || !resolveHarness({ env: process.env }).ok ? 'SAGUARO_HARNESS_DIR is not set to a built Harness' : false;
 const cleanup = dir => { try { rmSync(dir, { recursive: true, force: true, maxRetries: 3 }); } catch { /* best effort */ } };
 const fwd = p => p.replaceAll('\\', '/');
 const base = { title: 'Open downloads', prompt: 'open my downloads folder', frequency: 'daily', at: '09:00', timeZone: 'UTC' };

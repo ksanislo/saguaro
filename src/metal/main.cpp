@@ -32,7 +32,7 @@ void usage() {
                  "  --expert-profile-save F  this Mac's learned profile: read instead when it exists, rewritten after\n"
                  "                       each request\n"
                  "  --kv-f16             MLA latent cache in F16 (half the bytes; default F32, F16 on the GPU)\n"
-                 "  --kv-f32             keep the MLA latent cache F32 on the GPU too (MAYA_METAL_KV_F32=1)\n"
+                 "  --kv-f32             keep the MLA latent cache F32 on the GPU too (SAGUARO_METAL_KV_F32=1)\n"
                  "  --no-mtp             no MTP drafting (the NextN block is not loaded)\n"
                  "  --dflash F           draft with this DFlash2 drafter GGUF instead of the NextN block\n"
                  "  --cpu                run on ggml-cpu instead of the GPU (reference runs)\n");
@@ -58,10 +58,10 @@ int main(int argc, char** argv) {
     std::vector<int32_t> ids;
     int n_gen = 32;
     maya::metal::GlmOptions o;
-    o.mtp = !strata::platform::env_switch("MAYA_GLM_NO_MTP") && !strata::platform::env_switch("MAYA_GLM_NO_SPEC");
-    if (const char* v = std::getenv("MAYA_METAL_DSA_MM"); v && *v) o.dsa_mm = std::atoi(v) != 0;
-    if (const char* v = std::getenv("MAYA_METAL_DSA_KERNEL"); v && *v) o.dsa_kernel = std::atoi(v) != 0;
-    if (const char* v = std::getenv("MAYA_METAL_KV_F32"); v && *v) o.kv_f32 = std::atoi(v) != 0;
+    o.mtp = !strata::platform::env_switch("SAGUARO_GLM_NO_MTP") && !strata::platform::env_switch("SAGUARO_GLM_NO_SPEC");
+    if (const char* v = std::getenv("SAGUARO_METAL_DSA_MM"); v && *v) o.dsa_mm = std::atoi(v) != 0;
+    if (const char* v = std::getenv("SAGUARO_METAL_DSA_KERNEL"); v && *v) o.dsa_kernel = std::atoi(v) != 0;
+    if (const char* v = std::getenv("SAGUARO_METAL_KV_F32"); v && *v) o.kv_f32 = std::atoi(v) != 0;
     std::vector<std::string> rest;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];

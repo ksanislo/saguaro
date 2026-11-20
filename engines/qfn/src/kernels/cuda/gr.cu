@@ -465,7 +465,7 @@ void gr_read(const float* R, const float* w_norm, const uint16_t* w_down, const 
 
 static bool no_multi_gr() {
     static const bool off = [] {
-        const char* v = std::getenv("STRATA_NO_MULTI_GR");
+        const char* v = std::getenv("SAGUARO_NO_MULTI_GR");
         return v != nullptr && v[0] != '\0' && v[0] != '0';
     }();
     return off;

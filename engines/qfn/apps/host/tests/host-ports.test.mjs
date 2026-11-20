@@ -23,9 +23,9 @@ test('a taken preferred port gives the next free one, never the taken one', asyn
 
 test('the plain sentences name the cause and the one next step', () => {
   const use = listenProblem({ code: 'EADDRINUSE' }, 8791);
-  assert.match(use, /Port 8791 is already in use/); assert.match(use, /STRATA_PORT/);
+  assert.match(use, /Port 8791 is already in use/); assert.match(use, /SAGUARO_PORT/);
   const denied = listenProblem({ code: 'EACCES' }, 8792);
-  assert.match(denied, /Hyper-V, WSL and Docker/); assert.match(denied, /excludedportrange/); assert.match(denied, /STRATA_PORT/);
+  assert.match(denied, /Hyper-V, WSL and Docker/); assert.match(denied, /excludedportrange/); assert.match(denied, /SAGUARO_PORT/);
   assert.doesNotMatch(denied, /EACCES|permission denied/i);
 });
 
@@ -33,7 +33,7 @@ test('the host on a taken port prints the plain sentence and exits, with no stac
   const home = realpathSync(mkdtempSync(join(tmpdir(), 'strata-port-'))); t.after(() => rmSync(home, { recursive: true, force: true }));
   const blocker = await hold(0); t.after(() => blocker.close());
   const port = blocker.address().port;
-  const child = spawn(process.execPath, ['server/index.mjs'], { cwd, env: { ...process.env, STRATA_HOME: home, STRATA_PORT: String(port), STRATA_MODELS_DIR: join(home, 'm') } });
+  const child = spawn(process.execPath, ['server/index.mjs'], { cwd, env: { ...process.env, SAGUARO_HOME: home, SAGUARO_PORT: String(port), SAGUARO_MODELS_DIR: join(home, 'm') } });
   let err = ''; child.stderr.on('data', d => { err += d; });
   const code = await new Promise(resolve => { const timer = setTimeout(() => { child.kill(); resolve('timeout'); }, 30000); child.once('exit', c => { clearTimeout(timer); resolve(c); }); });
   assert.equal(code, 1, err);

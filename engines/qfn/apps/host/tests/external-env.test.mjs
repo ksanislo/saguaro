@@ -35,10 +35,10 @@ test('without a record, everything that points into the AppImage is removed and 
 test('with the launcher\'s record, the original environment is restored exactly', () => {
   const original = { PATH: '/usr/bin', LD_LIBRARY_PATH: '/mine', HOME: '/home/u', DISPLAY: ':1' };
   const record = Buffer.from(Object.entries(original).map(([k, v]) => `${k}=${v}`).join('\0') + '\0').toString('base64');
-  const env = externalEnvironment({ ...leaky, STRATA_ORIGINAL_ENV: record });
+  const env = externalEnvironment({ ...leaky, SAGUARO_ORIGINAL_ENV: record });
   assert.deepEqual(env, original);
-  assert.deepEqual(recordedOriginal({ STRATA_ORIGINAL_ENV: record }), original);
-  assert.equal(recordedOriginal({ STRATA_ORIGINAL_ENV: '!!!' }), null);
+  assert.deepEqual(recordedOriginal({ SAGUARO_ORIGINAL_ENV: record }), original);
+  assert.equal(recordedOriginal({ SAGUARO_ORIGINAL_ENV: '!!!' }), null);
 });
 
 test('outside an AppImage nothing changes', () => {

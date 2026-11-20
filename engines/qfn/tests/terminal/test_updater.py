@@ -4,7 +4,7 @@ engines behind real schema-2 packages, the real start path for the test start.
 Proves: an update downloads (with resume), verifies signature and every hash, installs side by side, test-starts the new
 engine from a staging folder through the owner runtime, and only then switches; a failing test start leaves the old engine
 working; the previous version is kept and can be returned to; saved presets are marked, not touched; models are never
-fetched; nothing runs while an engine serves; and a start/serve process (STRATA_NO_ACQUIRE) cannot reach any of it."""
+fetched; nothing runs while an engine serves; and a start/serve process (SAGUARO_NO_ACQUIRE) cannot reach any of it."""
 
 import hashlib
 import json
@@ -33,14 +33,14 @@ class UpdaterCase(unittest.TestCase):
         self.state_base = self.root / "state"
         self.release = self.root / "release"
         self.release.mkdir()
-        for name in ("STRATA_NO_ACQUIRE", "STRATA_API_KEY", "STRATA_REQUIRE_SIGNED_COMPONENTS", "STRATA_UPDATE_TRUSTED_KEYS"):
+        for name in ("SAGUARO_NO_ACQUIRE", "SAGUARO_API_KEY", "SAGUARO_REQUIRE_SIGNED_COMPONENTS", "SAGUARO_UPDATE_TRUSTED_KEYS"):
             patch = mock.patch.dict(os.environ)
             patch.start()
             self.addCleanup(patch.stop)
             os.environ.pop(name, None)
         env = mock.patch.dict(os.environ, {
-            "STRATA_PROFILE_DIR": str(self.root / "profiles"), "STRATA_RUNTIME_DIR": str(self.root / "runtime"),
-            "STRATA_COMPONENTS_DIR": str(self.components), "STRATA_ENGINE_BACKEND": "cuda",
+            "SAGUARO_PROFILE_DIR": str(self.root / "profiles"), "SAGUARO_RUNTIME_DIR": str(self.root / "runtime"),
+            "SAGUARO_COMPONENTS_DIR": str(self.components), "SAGUARO_ENGINE_BACKEND": "cuda",
             "FAKE_ENGINE_MARK": str(self.root / "ran.txt")})
         env.start()
         self.addCleanup(env.stop)
@@ -61,7 +61,7 @@ class UpdaterCase(unittest.TestCase):
         # tester build passes its key
         self.test_keys = self.root / "test-trust.json"
         self.test_keys.write_text(json.dumps({"keys": [signing.public_part(self.key)]}))
-        patch = mock.patch.dict(os.environ, {"STRATA_UPDATE_TRUSTED_KEYS": str(self.test_keys)})
+        patch = mock.patch.dict(os.environ, {"SAGUARO_UPDATE_TRUSTED_KEYS": str(self.test_keys)})
         patch.start()
         self.addCleanup(patch.stop)
         self.hardware = {"platform": PLATFORM, "backend": "cuda", "runtime": None, "nvidia_driver": "610.47",
@@ -404,7 +404,7 @@ class EngineUpdate(UpdaterCase):
     def test_a_process_that_forbids_acquiring_cannot_update(self):
         self.install_current()
         self.publish(("0.1.46", fx.GOOD_ENGINE))
-        with mock.patch.dict(os.environ, {"STRATA_NO_ACQUIRE": "1"}):
+        with mock.patch.dict(os.environ, {"SAGUARO_NO_ACQUIRE": "1"}):
             with self.assertRaises(acquisition.AcquisitionRefused):
                 updater.run_update(self.ctx(), control=False)
             with self.assertRaises(acquisition.AcquisitionRefused):
@@ -429,7 +429,7 @@ class StartPathSignature(UpdaterCase):
         super().setUp()
         self.pub = self.root / "feed-key.pub.json"
         self.pub.write_text(json.dumps({"keys": [signing.public_part(self.key)]}))
-        patch = mock.patch.dict(os.environ, {"STRATA_UPDATE_TRUSTED_KEYS": str(self.pub)})
+        patch = mock.patch.dict(os.environ, {"SAGUARO_UPDATE_TRUSTED_KEYS": str(self.pub)})
         patch.start()
         self.addCleanup(patch.stop)
         ec.register_signature_verifier(None)
@@ -450,7 +450,7 @@ class StartPathSignature(UpdaterCase):
 
     def test_without_trusted_keys_a_signed_package_is_unverified_and_required_signing_refuses_it(self):
         folder = fx.build_package(self.root / "signed", "0.1.46", key=self.key)
-        with mock.patch.dict(os.environ, {"STRATA_UPDATE_TRUSTED_KEYS": ""}):
+        with mock.patch.dict(os.environ, {"SAGUARO_UPDATE_TRUSTED_KEYS": ""}):
             ec.register_signature_verifier(None)
             self.assertEqual(ec.verify_signature(ec.read_manifest(folder)), "unverified")
             with self.assertRaises(ec.IntegrityProblem):
@@ -548,7 +548,7 @@ class OtherComponents(UpdaterCase):
 
     def test_the_app_installer_is_downloaded_and_its_signature_checked(self):
         public, installer = self.build_with_app()
-        ctx = self.ctx(app_version="0.1.0", environ={**os.environ, "STRATA_APP_UPDATE_PUBKEY": public})
+        ctx = self.ctx(app_version="0.1.0", environ={**os.environ, "SAGUARO_APP_UPDATE_PUBKEY": public})
         report = updater.check(ctx)
         self.assertEqual((report["app"]["status"], report["app"]["offered"]), ("available", "0.2.0"))
         out = updater.run_update(ctx, engine=False, control=False, app=True)
@@ -562,7 +562,7 @@ class OtherComponents(UpdaterCase):
 
     def test_an_installer_with_a_bad_signature_is_deleted(self):
         public, _ = self.build_with_app(tamper=True)
-        ctx = self.ctx(app_version="0.1.0", environ={**os.environ, "STRATA_APP_UPDATE_PUBKEY": public})
+        ctx = self.ctx(app_version="0.1.0", environ={**os.environ, "SAGUARO_APP_UPDATE_PUBKEY": public})
         out = updater.run_update(ctx, engine=False, control=False, app=True)
         self.assertEqual(out["exit_code"], 5)
         self.assertIn("signature", out["results"][0]["error"])
@@ -570,7 +570,7 @@ class OtherComponents(UpdaterCase):
 
     def test_no_app_key_no_app_download(self):
         self.build_with_app()
-        ctx = self.ctx(app_version="0.1.0", environ={k: v for k, v in os.environ.items() if k != "STRATA_APP_UPDATE_PUBKEY"})
+        ctx = self.ctx(app_version="0.1.0", environ={k: v for k, v in os.environ.items() if k != "SAGUARO_APP_UPDATE_PUBKEY"})
         with mock.patch.object(updater, "app_public_key", return_value=None):
             out = updater.run_update(ctx, engine=False, control=False, app=True)
         self.assertEqual(out["exit_code"], 5)
@@ -652,13 +652,13 @@ class OtherComponents(UpdaterCase):
 
 class Cli(UpdaterCase):
     """`strata update`, `strata components update|rollback` against a feed in a folder, with the test key file the way the
-    owner's local setup uses it (STRATA_UPDATE_TRUSTED_KEYS)."""
+    owner's local setup uses it (SAGUARO_UPDATE_TRUSTED_KEYS)."""
 
     def setUp(self):
         super().setUp()
         self.pub = self.root / "feed-key.pub.json"
         self.pub.write_text(json.dumps({"keys": [signing.public_part(self.key)]}))
-        patch = mock.patch.dict(os.environ, {"STRATA_UPDATE_TRUSTED_KEYS": str(self.pub)})
+        patch = mock.patch.dict(os.environ, {"SAGUARO_UPDATE_TRUSTED_KEYS": str(self.pub)})
         patch.start()
         self.addCleanup(patch.stop)
         patch = mock.patch.object(updater, "detect_hardware", return_value=dict(self.hardware))
@@ -753,20 +753,20 @@ class Cli(UpdaterCase):
     def test_an_untrusted_or_forbidden_update_is_exit_5_and_fetches_nothing(self):
         self.install_current()
         self.publish(("0.1.46", fx.GOOD_ENGINE))
-        with mock.patch.dict(os.environ, {"STRATA_UPDATE_TRUSTED_KEYS": ""}):
+        with mock.patch.dict(os.environ, {"SAGUARO_UPDATE_TRUSTED_KEYS": ""}):
             code, _, err = self.cli("update", *self.common())
             self.assertEqual(code, 5)
             self.assertIn("trusts no update key", err)
         wrong = self.root / "wrong.json"
         wrong.write_text(json.dumps({"keys": [signing.public_part(fx.make_key())]}))
-        with mock.patch.dict(os.environ, {"STRATA_UPDATE_TRUSTED_KEYS": str(wrong)}):
+        with mock.patch.dict(os.environ, {"SAGUARO_UPDATE_TRUSTED_KEYS": str(wrong)}):
             code, _, err = self.cli("update", *self.common())
             self.assertEqual(code, 5)
             self.assertIn("does not trust", err)
-        with mock.patch.dict(os.environ, {"STRATA_NO_ACQUIRE": "1"}):
+        with mock.patch.dict(os.environ, {"SAGUARO_NO_ACQUIRE": "1"}):
             code, _, err = self.cli("update", *self.common())
             self.assertEqual(code, 5)
-            self.assertIn("STRATA_NO_ACQUIRE", err)
+            self.assertIn("SAGUARO_NO_ACQUIRE", err)
         self.assertEqual(self.resolved(), "0.1.45")
         self.assertEqual(self.archive_requests(), [])
 

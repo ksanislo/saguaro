@@ -1,4 +1,4 @@
-"""STRATA_SLOT_ADMIT: a batch admission is read into its slot beside the decoding slots.
+"""SAGUARO_SLOT_ADMIT: a batch admission is read into its slot beside the decoding slots.
 
 The engine answers a BGEN at once with `BQ <slot> 1` (queued; the rest comes on the slot's own lines: BRP progress,
 BRA <slot> <1|0> when it decodes or does not, BRE when refused, then BT/BDONE) or `BQ <slot> 0` (the old way, on the
@@ -320,7 +320,7 @@ class SlotAdmit(unittest.TestCase):
 
 class PickSlotAdmit(unittest.TestCase):
     def test_no_hole_below_a_busy_slot(self):
-        """Pipelined groups of 2 (slots {0,1}, {2,3}): with STRATA_SLOT_ADMIT a slot below a busy one would make its
+        """Pipelined groups of 2 (slots {0,1}, {2,3}): with SAGUARO_SLOT_ADMIT a slot below a busy one would make its
         group wait for the whole read, so a slot above the busy ones comes first; without, the hole first, as before."""
         e = StrataEngine("missing-executable", [], lazy=True)
         e.batch, e.slot_gs, e.slot_groups = 4, 2, 2

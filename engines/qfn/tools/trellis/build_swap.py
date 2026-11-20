@@ -7,8 +7,8 @@ symlink to the shipped GGUF, so `--native <var>/<gguf name>` finds swap.bin besi
 Modes (all from the ORIGINAL Qwen weights, rotated into the file's basis with the file's own sign vectors):
   q8     Q8_0 (types 8/8): the near-lossless reference for the swapped layers
   plain  TQK6 gate/up + TQK7 down, plain-MSE trellis encode (tools/tqenc.py)
-  diag   the same with per-input-column importance weights h = E[x^2]^power from the calibration dump (STRATA_ACT_DUMP)
-  ldl    the same with block feedback from the full second-moment matrix of the dump (STRATA_ACT_DUMP_COV=1), blockldl.py
+  diag   the same with per-input-column importance weights h = E[x^2]^power from the calibration dump (SAGUARO_ACT_DUMP)
+  ldl    the same with block feedback from the full second-moment matrix of the dump (SAGUARO_ACT_DUMP_COV=1), blockldl.py
 
   python3 tools/trellis/build_swap.py --gguf SHIPPED --pack PACK --orig DIR --layers 4,16,28,40 --mode plain --var DIR [--gpu]
 """
@@ -70,7 +70,7 @@ def load_hessian(dump_dir, layer, kind):
     n, count = np.frombuffer(raw[:16], dtype=np.int64)
     n = int(n)
     if len(raw) < 16 + 8 * n + 8 * n * n:
-        raise SystemExit("%s has no covariance (run the calibration with STRATA_ACT_DUMP_COV=1)" % p)
+        raise SystemExit("%s has no covariance (run the calibration with SAGUARO_ACT_DUMP_COV=1)" % p)
     cov = np.frombuffer(raw[16 + 8 * n:16 + 8 * n + 8 * n * n], dtype=np.float64).reshape(n, n)
     return cov / max(int(count), 1)
 

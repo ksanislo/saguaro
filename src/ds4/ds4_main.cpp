@@ -11,12 +11,12 @@
 // continues the state (the conversation so far) reuses it; one that only shares the last prompt's start goes back to
 // that prompt's end; anything else starts over.  `GENI <max_new> [keys] <file> <ids>` carries the prompt's pictures
 // (the file: see read_pics); the state is shared only where the same picture sits at the same place.  With
-// MAYA_DS4_SLOT_KEEP=1 the conversations are kept when another one takes the model (a slot each: the state, the
-// compressed KV included), and across runs in MAYA_DS4_SLOT_DIR - so a request that does not continue the state but
+// SAGUARO_DS4_SLOT_KEEP=1 the conversations are kept when another one takes the model (a slot each: the state, the
+// compressed KV included), and across runs in SAGUARO_DS4_SLOT_DIR - so a request that does not continue the state but
 // does continue a kept conversation reads only its new tokens.  A kept conversation holds its pictures' marks too (a
 // span's start, its pixels' fingerprint, its length): it comes back only for a prompt whose pictures are the same at
 // the same places.  `marks=<pos>,...` and `shared=<pos>` on a GEN ask for restore points besides the end of the last
-// prompt (the server's MAYA_DS4_RESTORE_POINTS: the start of the last user message, a point near the prompt's tail,
+// prompt (the server's SAGUARO_DS4_RESTORE_POINTS: the start of the last user message, a point near the prompt's tail,
 // the end of the system prompt and tools): the read stops at each to keep the state there, and a later prompt that
 // leaves this one past one of them goes back to it (ds4_marks.hpp).  `logprobs=<k>` (0 .. 20) asks for an
 // `LP <id> <logprob> <id>:<logprob> ...` line after each T line: the token's log-probability and its row's k most likely
@@ -30,7 +30,6 @@
 #include "ds4_packinfo.hpp"
 #include "ds4_watchdog.hpp"
 #include "strata/core/vram_mark.hpp"
-#include "strata/platform/env_alias.hpp"
 #include "strata/platform/idle_gate.hpp"
 #include "strata/spec/draft_policy.hpp"
 #include "strata/spec/suffix_drafter.hpp"
@@ -271,12 +270,12 @@ std::string per_position(const strata::ds4::Stats& s0, const strata::ds4::Stats&
 
 // The drafts' cut on the product of their confidences (DeepInfer's cumulative rule, GLM's spec_cum): a draft is
 // verified while the chance that it and every draft before it are kept stays at least this - a long window whose later
-// drafts are likely lost is not verified whole.  MAYA_DS4_DSPARK_CUM=F (STRATA_DS4_DSPARK_CUM), a request's dspark_cum
+// drafts are likely lost is not verified whole.  SAGUARO_DS4_DSPARK_CUM=F (SAGUARO_DS4_DSPARK_CUM), a request's dspark_cum
 // key; 0: off, only the floor on each draft's own confidence (dspark_conf).  0.5 by default: a Radeon 8065S, Maya-S,
 // greedy over code / chat / a list, two runs: decode 12.04 -> 12.82 tok/s (+6.5%), the same tokens
 float dspark_cum_default() {
     static const float v = [] {
-        const char* e = std::getenv("STRATA_DS4_DSPARK_CUM");
+        const char* e = std::getenv("SAGUARO_DS4_DSPARK_CUM");
         return e != nullptr ? (float) std::atof(e) : 0.5f;
     }();
     return v;
@@ -342,14 +341,14 @@ RoundLog& round_log() {
     return r;
 }
 
-// a DS4_ setting as MAYA_DS4_* sets it (read as STRATA_DS4_*), else the DS4_* name itself (the model's ds4_env)
+// a DS4_ setting as SAGUARO_DS4_* sets it, else the DS4_* name itself (the model's ds4_env)
 const char* ds4_env(const char* name) {
-    const char* v = std::getenv((std::string("STRATA_") + name).c_str());
+    const char* v = std::getenv((std::string("SAGUARO_") + name).c_str());
     return v != nullptr ? v : std::getenv(name);
 }
 
-// DS4_DRAFT_COST=1 (MAYA_DS4_DRAFT_COST): DSpark's window by what a verified row costs on this PC, in place of the
-// fixed cut on the product of the confidences (MAYA_DS4_DSPARK_CUM) - the cost-aware window of
+// DS4_DRAFT_COST=1 (SAGUARO_DS4_DRAFT_COST): DSpark's window by what a verified row costs on this PC, in place of the
+// fixed cut on the product of the confidences (SAGUARO_DS4_DSPARK_CUM) - the cost-aware window of
 // strata/spec/draft_policy.hpp.  Under the floor on each draft's own confidence (dspark_conf), a request alone verifies
 // the drafts that commit the most tokens a millisecond at the measured round time of its window's rows; with
 // --parallel the windows of a step are planned together at the measured time of a step of that many requests by its
@@ -532,7 +531,7 @@ struct Req {
     // prompt that leaves this one past one of them goes back there (ds4_marks.hpp); none: as before
     std::vector<int64_t> marks;
     long long shared = -1;
-    // tail=<pos>: the point near the prompt's tail (MAYA_DS4_RESTORE_TAIL), kept as the marks are unless its read stop
+    // tail=<pos>: the point near the prompt's tail (SAGUARO_DS4_RESTORE_TAIL), kept as the marks are unless its read stop
     // costs more on this PC than reading its tokens again (TailCost, ds4_marks.hpp); -1: none
     long long tail = -1;
     // logprobs=<k> (0 .. 20; the server's OpenAI logprobs / top_logprobs): after each T line an LP line - the token's
@@ -701,7 +700,7 @@ void lp_out(long long rid, int tok, const strata::ds4::LogprobRow& row) {
 }
 
 // the serve watchdog (#539, #494): a request whose heartbeat - its prompt's progress, its tokens, the steps between -
-// stops for MAYA_DS4_WATCHDOG_S seconds (600; 0: off) ends the engine with a line saying where each device's thread
+// stops for SAGUARO_DS4_WATCHDOG_S seconds (600; 0: off) ends the engine with a line saying where each device's thread
 // was, and the server starts it again for the next request (a run that never ends otherwise holds every request behind
 // it until someone restarts the engine by hand).  A healthy request beats every few seconds - a prompt every chunk, a
 // slow PC's chunk of a long prompt a minute or two
@@ -709,8 +708,7 @@ std::atomic<uint64_t> g_beats{0};
 std::atomic<bool> g_busy{false};
 void beat() { g_beats.fetch_add(1, std::memory_order_relaxed); }
 void start_watchdog(const strata::ds4::Model& m) {
-    const char* v = std::getenv("STRATA_DS4_WATCHDOG_S");
-    if (v == nullptr) v = std::getenv("MAYA_DS4_WATCHDOG_S");
+    const char* v = std::getenv("SAGUARO_DS4_WATCHDOG_S");
     const int limit = v != nullptr ? std::atoi(v) : 600;
     if (limit <= 0) return;
     std::thread([&m, limit] {
@@ -724,7 +722,7 @@ void start_watchdog(const strata::ds4::Model& m) {
             std::fprintf(stderr, "maya ds4 serve: where it stopped: %s\n", m.where().c_str());
             // (the server reads the line with "issue #29" as the engine's own watchdog, not a lack of RAM)
             std::fprintf(stderr, "maya ds4 serve: no progress for %d s during a request - stopping the engine so the "
-                                 "server starts it again (issue #29, #539; MAYA_DS4_WATCHDOG_S)\n", limit);
+                                 "server starts it again (issue #29, #539; SAGUARO_DS4_WATCHDOG_S)\n", limit);
             std::fflush(stderr);
             std::_Exit(3);   // (not abort(): a core dump of the pinned expert tiers takes minutes)
         }
@@ -794,31 +792,31 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
     // (Model::slot_save: its window rings, the compressors' partial groups and every source's compressed KV and index
     // keys), then takes back the kept conversation this prompt does continue (slot_load) - chats, and an agent's side
     // requests, that interleave no longer re-read each other's prompts (70k and 185k tokens alternating: 75-200 s a
-    // switch at ~930 tok/s).  MAYA_DS4_SLOT_KEEP=1 turns them on and keeps them across runs, in MAYA_DS4_SLOT_DIR
+    // switch at ~930 tok/s).  SAGUARO_DS4_SLOT_KEEP=1 turns them on and keeps them across runs, in SAGUARO_DS4_SLOT_DIR
     // (default <pack>/slots): a slot is a .bin (the state) and a .meta (this model's identity, the conversation's
     // tokens and its size), both written under a temporary name first; a slot whose .meta is missing, foreign or does
-    // not match its file, or unused for MAYA_DS4_SLOT_DAYS (7) days, is removed at start.  MAYA_DS4_SLOT_CAP (4) is
+    // not match its file, or unused for SAGUARO_DS4_SLOT_DAYS (7) days, is removed at start.  SAGUARO_DS4_SLOT_CAP (4) is
     // the conversations kept in RAM; past it the least recently used is written to the folder and read back from there
     // (RAM first, the folder past the cap), and the engine's end writes the ones in RAM to the folder, so the next run
-    // reads on from them.  MAYA_DS4_SLOT_RAM_GB (0, off) additionally caps their bytes in RAM after each save: the
+    // reads on from them.  SAGUARO_DS4_SLOT_RAM_GB (0, off) additionally caps their bytes in RAM after each save: the
     // incoming state is serialized first (the peak can exceed the cap), then the least recently used spills to the
-    // folder, with one RAM conversation kept even when it alone is over the cap.  MAYA_DS4_SLOT_GB
+    // folder, with one RAM conversation kept even when it alone is over the cap.  SAGUARO_DS4_SLOT_GB
     // (16) caps the folder's .bin files: at start, and after every write, the folder's least recently used conversation
     // is removed while they are over it (never the one just written, so a conversation bigger than the cap stays).
-    // MAYA_DS4_SLOT_MIN (1024) is the shortest conversation set aside (a
+    // SAGUARO_DS4_SLOT_MIN (1024) is the shortest conversation set aside (a
     // shorter one is read again in about the time its slot would take).  Pictures travel as their marks: where a span
     // starts, the fingerprint of its pixels, its length - not the pixels, not the rows (the KV of the span is what the
     // rows did).  A conversation is taken back for a prompt whose pictures are the same at the same places; another
     // picture, or the same one elsewhere, shares no state past that place.
     const auto env_num = [](const char* k, double d) { const char* v = std::getenv(k); return v ? std::atof(v) : d; };
     const bool slot_keep =
-        std::getenv("STRATA_DS4_SLOT_KEEP") != nullptr && std::atoi(std::getenv("STRATA_DS4_SLOT_KEEP")) != 0;
-    int slot_max = slot_keep ? std::max(0, (int) env_num("STRATA_DS4_SLOT_CAP", 4)) : 0;
-    const size_t slot_min = (size_t) std::max(1.0, env_num("STRATA_DS4_SLOT_MIN", 1024));
-    const double slot_days = env_num("STRATA_DS4_SLOT_DAYS", 7);
-    const uint64_t slot_budget = (uint64_t) (env_num("STRATA_DS4_SLOT_GB", 16) * 1073741824.0);
+        std::getenv("SAGUARO_DS4_SLOT_KEEP") != nullptr && std::atoi(std::getenv("SAGUARO_DS4_SLOT_KEEP")) != 0;
+    int slot_max = slot_keep ? std::max(0, (int) env_num("SAGUARO_DS4_SLOT_CAP", 4)) : 0;
+    const size_t slot_min = (size_t) std::max(1.0, env_num("SAGUARO_DS4_SLOT_MIN", 1024));
+    const double slot_days = env_num("SAGUARO_DS4_SLOT_DAYS", 7);
+    const uint64_t slot_budget = (uint64_t) (env_num("SAGUARO_DS4_SLOT_GB", 16) * 1073741824.0);
     const uint64_t slot_ram_budget = [] {
-        const char* k = "STRATA_DS4_SLOT_RAM_GB", *v = std::getenv(k);
+        const char* k = "SAGUARO_DS4_SLOT_RAM_GB", *v = std::getenv(k);
         if (v == nullptr) return (uint64_t) 0;
         char* end = nullptr;
         const double gb = std::strtod(v, &end);
@@ -954,7 +952,7 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
         }
         return total;
     };
-    // the folder over MAYA_DS4_SLOT_GB: its least recently used conversation goes first, and never `keep` (the one just
+    // the folder over SAGUARO_DS4_SLOT_GB: its least recently used conversation goes first, and never `keep` (the one just
     // written), so a conversation bigger than the cap stays
     const auto slot_trim = [&](const std::string& keep) {
         const uint64_t before = slot_folder_bytes();
@@ -970,7 +968,7 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
         }
         if (dropped > 0) {
             char msg[256];
-            std::snprintf(msg, sizeof msg, "the folder held %s (over MAYA_DS4_SLOT_GB, %s): %zu least recently used "
+            std::snprintf(msg, sizeof msg, "the folder held %s (over SAGUARO_DS4_SLOT_GB, %s): %zu least recently used "
                           "conversation(s) removed, %s left", gb(before).c_str(), gb(slot_budget).c_str(), dropped,
                           gb(slot_folder_bytes()).c_str());
             note(msg);
@@ -1151,11 +1149,11 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
     };
     // SHARED STARTS (#607): the state at the end of a system prompt and its tools (the shared= restore point of a
     // prompt read from token 0) is also kept apart from its conversation, in RAM, so a NEW conversation behind the same
-    // start - after an unrelated one, in another --parallel conversation, with or without MAYA_DS4_SLOT_KEEP - takes it
+    // start - after an unrelated one, in another --parallel conversation, with or without SAGUARO_DS4_SLOT_KEEP - takes it
     // back and reads only the rest.  It is the state the read itself keeps at that point (a whole read up to it), so
-    // the rest is read as a cold read of the same prompt reads it: the same tokens.  MAYA_DS4_PREFIX_KEEP (2) starts at
-    // most, the least recently used giving way, MAYA_DS4_PREFIX_GB (2) their bytes at most, MAYA_DS4_PREFIX_MIN (1024)
-    // the shortest start kept; MAYA_DS4_PREFIX_KEEP=0: none.  Starts with pictures are not kept.
+    // the rest is read as a cold read of the same prompt reads it: the same tokens.  SAGUARO_DS4_PREFIX_KEEP (2) starts at
+    // most, the least recently used giving way, SAGUARO_DS4_PREFIX_GB (2) their bytes at most, SAGUARO_DS4_PREFIX_MIN (1024)
+    // the shortest start kept; SAGUARO_DS4_PREFIX_KEEP=0: none.  Starts with pictures are not kept.
     struct Prefix {
         std::vector<int32_t> tokens;
         std::vector<uint8_t> data;
@@ -1163,9 +1161,9 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
     };
     std::vector<Prefix> prefixes;
     uint64_t prefix_clock = 0;
-    const int prefix_max = m.marks_cap() > 0 ? std::max(0, (int) env_num("STRATA_DS4_PREFIX_KEEP", 2)) : 0;
-    const uint64_t prefix_budget = (uint64_t) (std::max(0.0, env_num("STRATA_DS4_PREFIX_GB", 2)) * 1073741824.0);
-    const size_t prefix_min = (size_t) std::max(1.0, env_num("STRATA_DS4_PREFIX_MIN", 1024));
+    const int prefix_max = m.marks_cap() > 0 ? std::max(0, (int) env_num("SAGUARO_DS4_PREFIX_KEEP", 2)) : 0;
+    const uint64_t prefix_budget = (uint64_t) (std::max(0.0, env_num("SAGUARO_DS4_PREFIX_GB", 2)) * 1073741824.0);
+    const size_t prefix_min = (size_t) std::max(1.0, env_num("SAGUARO_DS4_PREFIX_MIN", 1024));
     // the longest kept start the prompt begins with, past `floor` tokens and short of its last token (none: -1)
     const auto prefix_find = [&](const std::vector<int>& prompt, const std::vector<Pic>& want, size_t floor) -> int {
         int best = -1;
@@ -1234,7 +1232,7 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
         return true;
     };
     if (slot_max > 0) {
-        slot_dir = std::getenv("STRATA_DS4_SLOT_DIR") ? std::filesystem::path(std::getenv("STRATA_DS4_SLOT_DIR"))
+        slot_dir = std::getenv("SAGUARO_DS4_SLOT_DIR") ? std::filesystem::path(std::getenv("SAGUARO_DS4_SLOT_DIR"))
                                                       : std::filesystem::path(pack) / "slots";
         std::error_code ec;
         std::filesystem::create_directories(slot_dir, ec);
@@ -1292,7 +1290,7 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
                               " conversation(s) kept from earlier runs (" + gb(total) + ")";
             if (refused) msg += ", " + std::to_string(refused) + " not this model's or incomplete - removed";
             note(msg);
-            slot_trim("");   // (the folder over MAYA_DS4_SLOT_GB: the least recently used conversation goes first)
+            slot_trim("");   // (the folder over SAGUARO_DS4_SLOT_GB: the least recently used conversation goes first)
         }
     }
     if (slot_max > 0 && slot_ram_budget > 0) {
@@ -1401,7 +1399,7 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
                           (long long) d_acc, (long long) d_off);
             out += b;
         }
-        if (s.skipped > s_dec.skipped) {   // (STRATA_DS4_DISK_SKIP_W: experts left out a token)
+        if (s.skipped > s_dec.skipped) {   // (SAGUARO_DS4_DISK_SKIP_W: experts left out a token)
             std::snprintf(b, sizeof b, " skipped=%.3f", (double) (s.skipped - s_dec.skipped) / fed);
             out += b;
         }
@@ -1432,10 +1430,10 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
         int64_t tail_at = -1;
         double ms_main = 0.0, ms_tail = 0.0;
     };
-    // MAYA_DS4_RESTORE_TAIL_AUTO (1): the tail point is left out where its cost is measured higher than reading its
+    // SAGUARO_DS4_RESTORE_TAIL_AUTO (1): the tail point is left out where its cost is measured higher than reading its
     // tokens again; 0: kept on every read that reaches it, as before
     static const bool tail_auto = [] {
-        const char* v = std::getenv("MAYA_DS4_RESTORE_TAIL_AUTO");
+        const char* v = std::getenv("SAGUARO_DS4_RESTORE_TAIL_AUTO");
         return v == nullptr || std::atoi(v) != 0;
     }();
     strata::ds4::TailCost tail_cost;
@@ -1497,7 +1495,7 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
             const int64_t limit = (int64_t) std::min(c, r.ids.size() - 1);
             const int64_t rs = m.restorable(limit);
             bool whole = false;
-            // REWIND (MAYA_DS4_REWIND=1): the conversation in the model goes back to `limit` itself (its compressed
+            // REWIND (SAGUARO_DS4_REWIND=1): the conversation in the model goes back to `limit` itself (its compressed
             // KV kept, ~5.4K tokens read again for the rings) when that reads less than going back to a restore
             // point - an agent's compaction cut or an edit far past its last restore point.  Not across a picture.
             static const bool rw_on = [] { const char* v = ds4_env("DS4_REWIND"); return v != nullptr && std::atoi(v) > 0; }();
@@ -1611,7 +1609,7 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
         // the restore points the request asks for (marks= / shared=; ds4_marks.hpp picks the ones this read reaches):
         // the read stops at each and keeps the state there.  The stretch up to each is read as runs of its own (a
         // piece ends at a point, and tells the model only of the prompt up to the next one: Model::feed's `after`),
-        // so a long stretch's skip (MAYA_DS4_PROMPT_SKIP) runs every layer on its own last ~2,700 rows - the state kept at the point is the
+        // so a long stretch's skip (SAGUARO_DS4_PROMPT_SKIP) runs every layer on its own last ~2,700 rows - the state kept at the point is the
         // one a whole read leaves (the later layers' window rings included), at the cost of up to that many rows
         // through the layers the skip leaves out (V4.1: 20-39) that one run would have skipped - as many as lie
         // between the point and the prompt's end, when that is less
@@ -1630,7 +1628,7 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
                 std::fprintf(stderr, "maya ds4 serve: the tail restore point is left out on this PC: its read stop cost "
                                      "%.1fx a long read's time a token (more than reading its tokens again: the last "
                                      "tail run %zu tokens in %.0f ms, the long read %.2f ms a token); one in 32 still "
-                                     "keeps it, to measure again (MAYA_DS4_RESTORE_TAIL_AUTO=0 keeps it always)\n",
+                                     "keeps it, to measure again (SAGUARO_DS4_RESTORE_TAIL_AUTO=0 keeps it always)\n",
                              tail_cost.ratio, tail_cost.last_tail_tokens, tail_cost.last_tail_ms,
                              tail_cost.last_main_ms_token);
                 said_off = true;
@@ -1646,7 +1644,7 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
             static bool said = false;
             if (!said)
                 std::fprintf(stderr, "maya ds4 serve: restore points a request asks for: up to %d a conversation, "
-                                     "%.1f MB of RAM each (MAYA_DS4_RESTORE_POINTS)\n",
+                                     "%.1f MB of RAM each (SAGUARO_DS4_RESTORE_POINTS)\n",
                              m.marks_cap(), (double) m.check_bytes() / 1e6);
             said = true;
         }
@@ -1970,15 +1968,15 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
                                             : 0.0);
         if (d_off > 0) std::fprintf(stderr, "maya ds4 serve: drafts %lld of %lld kept; %s\n", d_acc, d_off,
                                     per_position(s_dec, s).c_str());
-        // (DS4_DRAFT_VRAM, read as STRATA_DS4_DRAFT_VRAM or DS4_DRAFT_VRAM: the cap's misses - this request's decode,
+        // (DS4_DRAFT_VRAM, read as SAGUARO_DS4_DRAFT_VRAM or DS4_DRAFT_VRAM: the cap's misses - this request's decode,
         //  the drafter's picks)
-        if (std::getenv("STRATA_DS4_DRAFT_VRAM") != nullptr || std::getenv("DS4_DRAFT_VRAM") != nullptr)
+        if (std::getenv("SAGUARO_DS4_DRAFT_VRAM") != nullptr || std::getenv("DS4_DRAFT_VRAM") != nullptr)
             std::fprintf(stderr, "maya ds4 serve: drafter experts: %lld picks, %lld of them on the CPU lane (this "
                                  "request's decode; DS4_DRAFT_VRAM)\n",
                          (long long) (s.draft_experts - s_dec.draft_experts),
                          (long long) (s.draft_cpu - s_dec.draft_cpu));
         if (s.hr_maps + s.hr_fails + s.hr_abandoned + s.hr_hits > 0 ||
-            std::getenv("STRATA_DS4_HELPER_RECENT") != nullptr || std::getenv("DS4_HELPER_RECENT") != nullptr)
+            std::getenv("SAGUARO_DS4_HELPER_RECENT") != nullptr || std::getenv("DS4_HELPER_RECENT") != nullptr)
             std::fprintf(stderr, "maya ds4 serve: helper recent slots: %lld picks served, %lld mapped, %lld let go, "
                                  "%lld fills not done, %lld left unmapped (this request)\n",
                          (long long) (s.hr_hits - s_dec.hr_hits), (long long) (s.hr_maps - s_dec.hr_maps),
@@ -1996,11 +1994,11 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
     // line a request causes carries it after its keyword (T <rid> <id>, PP <rid> ..., DONE <rid> ..., ERR <rid> ...);
     // STOP <rid> ends that request, a bare STOP every one.  Each request runs in one of the n conversations the model
     // holds (Model::seq_bind): the idle one whose state its prompt reuses the most, else an empty one, else the least
-    // recently used (whose conversation is set aside first with MAYA_DS4_SLOT_KEEP, as one conversation's is).  The
+    // recently used (whose conversation is set aside first with SAGUARO_DS4_SLOT_KEEP, as one conversation's is).  The
     // prompts being read take turns, a piece each (a chunk per pipeline stage: the split's stages all busy), and every
     // running request writes a token between two pieces - so a long prompt no longer holds every answer, and a short
     // question no longer waits for a long prompt read before it: a prompt whole in one piece goes ahead of the longer
-    // reads (MAYA_DS4_READ_ORDER=arrival: each prompt whole as it comes, the others waiting).  A prompt read alone goes
+    // reads (SAGUARO_DS4_READ_ORDER=arrival: each prompt whole as it comes, the others waiting).  A prompt read alone goes
     // in one run until a line comes (Model::set_yield: the run ends at a chunk every stage reaches), and a piece tells
     // the model how much of its prompt follows (the long prompt's skip counts from the prompt's end).  A prompt with pictures is
     // read whole (the tower borrows its room and gives it back before the prompt, with every other request between
@@ -2106,11 +2104,11 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
         std::deque<std::string> waiting;   // GEN lines no conversation is free for yet
         std::deque<Act*> read_line;        // the prompts being read, in turn: a piece each, then to the back
         const bool read_pieces = [] {
-            const char* v = std::getenv("MAYA_DS4_READ_ORDER");
+            const char* v = std::getenv("SAGUARO_DS4_READ_ORDER");
             return v == nullptr || std::string(v) != "arrival";
         }();
-        // MAYA_DS4_READ_PIECE=<chunks>: a piece is that many chunks a pipeline stage (1); MAYA_DS4_READ_ROUNDS=<n>: the
-        // running answers write n tokens each (n rounds) between two pieces (1); MAYA_DS4_READ_SHARE=<percent>: instead,
+        // SAGUARO_DS4_READ_PIECE=<chunks>: a piece is that many chunks a pipeline stage (1); SAGUARO_DS4_READ_ROUNDS=<n>: the
+        // running answers write n tokens each (n rounds) between two pieces (1); SAGUARO_DS4_READ_SHARE=<percent>: instead,
         // they write for that share of the time, their rounds' against the last piece's (a round at least; 0: off)
         constexpr int kReadPieceChunks = 1, kReadRounds = 1, kReadShareMax = 90;
         const auto env_count = [](const char* name, int dflt) {
@@ -2118,15 +2116,15 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
             const int x = v != nullptr ? std::atoi(v) : 0;
             return x > 0 ? x : dflt;
         };
-        // (MAYA_DS4_READ_PIECE_TOKENS=<n>: pieces of n tokens instead, below a chunk a stage too - the answers write
+        // (SAGUARO_DS4_READ_PIECE_TOKENS=<n>: pieces of n tokens instead, below a chunk a stage too - the answers write
         //  between them that much more often, each piece its own run through the stages; opt-in, to measure)
-        const size_t read_piece = env_count("MAYA_DS4_READ_PIECE_TOKENS", 0) > 0
-                                      ? (size_t) env_count("MAYA_DS4_READ_PIECE_TOKENS", 0)
+        const size_t read_piece = env_count("SAGUARO_DS4_READ_PIECE_TOKENS", 0) > 0
+                                      ? (size_t) env_count("SAGUARO_DS4_READ_PIECE_TOKENS", 0)
                                   : m.prompt_chunk() > 0 ? (size_t) m.prompt_chunk() * (size_t) m.pipeline_stages() *
-                                                             (size_t) env_count("MAYA_DS4_READ_PIECE", kReadPieceChunks)
+                                                             (size_t) env_count("SAGUARO_DS4_READ_PIECE", kReadPieceChunks)
                                                        : (size_t) m.feed_unit();
-        const int read_rounds = env_count("MAYA_DS4_READ_ROUNDS", kReadRounds);
-        const double read_share = std::min(env_count("MAYA_DS4_READ_SHARE", 0), kReadShareMax) / 100.0;
+        const int read_rounds = env_count("SAGUARO_DS4_READ_ROUNDS", kReadRounds);
+        const double read_share = std::min(env_count("SAGUARO_DS4_READ_SHARE", 0), kReadShareMax) / 100.0;
         // the reader's lines posted and taken: one waiting, a prompt read alone yields to it
         std::atomic<long long> lines_posted{0};
         long long lines_taken = 0;
@@ -4305,7 +4303,6 @@ int check_marks(strata::ds4::Model& m, const std::vector<int>& ids, int n) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    strata::platform::env_aliases();   // (MAYA_* settings under their older names too)
     // DS4_READ_HELP: every kernel loaded at CUDA's start - a lazy first launch on a card waits for the card while it
     // spins on a hand-off that waits for the launching thread (two threads in cuLaunchKernel, the read stopped; 11-09)
     if (const char* rh = std::getenv("DS4_READ_HELP"); rh != nullptr && rh[0] != '\0' && std::getenv("CUDA_MODULE_LOADING") == nullptr)
@@ -4341,9 +4338,9 @@ int main(int argc, char** argv) {
 #if defined(_WIN32)
     // Windows sleeps in 15.6 ms ticks unless a process asks for finer ones: the CPU lane's service thread naps
     // (sleep_for 20 us) between tokens, and the device's first wait of the next token then waits out the tick.
-    // MAYA_DS4_TIMER_MS=0: leave the system's resolution alone.
+    // SAGUARO_DS4_TIMER_MS=0: leave the system's resolution alone.
     {
-        const char* v = std::getenv("MAYA_DS4_TIMER_MS");
+        const char* v = std::getenv("SAGUARO_DS4_TIMER_MS");
         const int ms = v != nullptr ? std::atoi(v) : 1;
         if (ms > 0) timeBeginPeriod((UINT) ms);
     }
@@ -4521,7 +4518,7 @@ int main(int argc, char** argv) {
         suffix_draft = 0;
         // every layer routes every token, as a decode's do: the prompt skip (layers 21-39 of a long run's earlier
         // tokens left out) off unless set
-        const bool skip_set = std::getenv("DS4_YOCO") != nullptr || std::getenv("MAYA_DS4_PROMPT_SKIP") != nullptr;
+        const bool skip_set = std::getenv("DS4_YOCO") != nullptr || std::getenv("SAGUARO_DS4_PROMPT_SKIP") != nullptr;
         if (!skip_set) {
 #if defined(_WIN32)
             _putenv_s("DS4_YOCO", "0");
@@ -4822,7 +4819,7 @@ int main(int argc, char** argv) {
     const long long io1 = io_read_bytes();
     if (io0 >= 0 && io1 >= 0)
         std::fprintf(stderr, "decode reads from the disk: %.1f MB a token\n", (double) (io1 - io0) / 1e6 / nt);
-    if (s.skipped > s0.skipped)   // STRATA_DS4_DISK_SKIP_W
+    if (s.skipped > s0.skipped)   // SAGUARO_DS4_DISK_SKIP_W
         std::fprintf(stderr, "decode left out %.1f experts a token not in RAM (%.1f%% of the routed)\n",
                      (double) (s.skipped - s0.skipped) / nt,
                      100.0 * (double) (s.skipped - s0.skipped) / std::max<double>(1.0, (double) (s.experts - s0.experts)));

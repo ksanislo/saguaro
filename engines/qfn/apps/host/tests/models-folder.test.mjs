@@ -12,11 +12,11 @@ function fixture(t, { plan = {}, move = null, unfinished = null } = {}) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'strata-mfolder-')));
   const install = join(root, 'install'), data = join(root, 'host'), oldFolder = join(root, 'old'), newFolder = join(root, 'new');
   for (const d of [install, data, oldFolder, newFolder]) mkdirSync(d, { recursive: true });
-  const earlier = { install: process.env.STRATA_INSTALL_DIR, terminal: process.env.STRATA_TERMINAL_SETTINGS_FILE, settings: process.env.STRATA_SETTINGS_FILE, comp: process.env.STRATA_COMPONENTS_DIR };
-  process.env.STRATA_INSTALL_DIR = install;
-  process.env.STRATA_TERMINAL_SETTINGS_FILE = join(root, 'terminal-settings.json');
-  process.env.STRATA_COMPONENTS_DIR = join(root, 'components');
-  delete process.env.STRATA_SETTINGS_FILE;
+  const earlier = { install: process.env.SAGUARO_INSTALL_DIR, terminal: process.env.SAGUARO_TERMINAL_SETTINGS_FILE, settings: process.env.SAGUARO_SETTINGS_FILE, comp: process.env.SAGUARO_COMPONENTS_DIR };
+  process.env.SAGUARO_INSTALL_DIR = install;
+  process.env.SAGUARO_TERMINAL_SETTINGS_FILE = join(root, 'terminal-settings.json');
+  process.env.SAGUARO_COMPONENTS_DIR = join(root, 'components');
+  delete process.env.SAGUARO_SETTINGS_FILE;
   const calls = [];
   const control = {
     control: { dir: join(root, 'control'), python: join(root, 'control', 'python.exe'), cli: join(root, 'control', 'strata.py') }, version: '0.2.2',
@@ -46,13 +46,13 @@ function fixture(t, { plan = {}, move = null, unfinished = null } = {}) {
   const spawnProcess = () => { throw new Error('the host starts no process here'); };
   const native = createNativeControl({ control, directory: data, spawnProcess, fetcher: async () => Response.json({}), requests: () => [] });
   t.after(() => {
-    for (const [key, name] of [['install', 'STRATA_INSTALL_DIR'], ['terminal', 'STRATA_TERMINAL_SETTINGS_FILE'], ['settings', 'STRATA_SETTINGS_FILE'], ['comp', 'STRATA_COMPONENTS_DIR']]) {
+    for (const [key, name] of [['install', 'SAGUARO_INSTALL_DIR'], ['terminal', 'SAGUARO_TERMINAL_SETTINGS_FILE'], ['settings', 'SAGUARO_SETTINGS_FILE'], ['comp', 'SAGUARO_COMPONENTS_DIR']]) {
       if (earlier[key] === undefined) delete process.env[name]; else process.env[name] = earlier[key];
     }
     rmSync(root, { recursive: true, force: true });
   });
   native.setDownloadDirectory(oldFolder);
-  return { native, control, calls, root, install, oldFolder, newFolder, terminalFile: process.env.STRATA_TERMINAL_SETTINGS_FILE };
+  return { native, control, calls, root, install, oldFolder, newFolder, terminalFile: process.env.SAGUARO_TERMINAL_SETTINGS_FILE };
 }
 const finish = async (native, id) => { for (let i = 0; i < 400; i++) { const job = native.state().jobs.find(j => j.id === id); if (job.state !== 'running') return job; await new Promise(r => setTimeout(r, 10)); } throw new Error('job did not finish'); };
 

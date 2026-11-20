@@ -1,7 +1,7 @@
 // src/kernels/cuda/q8_sm60.cuh - a Q8_0 decode GEMV for Pascal GP100 (compute capability 6.0), opt-in with
-// STRATA_Q8_SM60=1.  Included by native_mmvq.cu, and by a standalone parity/speed check, so both run this code.
+// SAGUARO_Q8_SM60=1.  Included by native_mmvq.cu, and by a standalone parity/speed check, so both run this code.
 //
-// Reads the packed planes of STRATA_Q8_PACKED (the SAME int8 values row-major, n_in bytes per row, then one fp16 scale
+// Reads the packed planes of SAGUARO_Q8_PACKED (the SAME int8 values row-major, n_in bytes per row, then one fp16 scale
 // per 32 of them) for every Q8_0 dense matrix and the head, whatever their shape.  Why the packed kernel above is slow
 // on a GP100 die (measured on PH402, 1050 MHz: ~137 GB/s for the dense projections, ~160 for the head, against
 // 220-270 for this layout): one workgroup per row, eight bytes per thread per pass and a __syncthreads() per row - a
@@ -83,10 +83,10 @@ __global__ void kernel(const int8_t* __restrict__ qs, const half* __restrict__ d
 }
 
 // One workgroup per SM would leave too few rows in flight on a 48-SM die; four per SM is what the shapes of
-// Qwen3.8-Flash-Next measured best (STRATA_Q8_SM60_BPS overrides it).
+// Qwen3.8-Flash-Next measured best (SAGUARO_Q8_SM60_BPS overrides it).
 inline int blocks_per_sm() {
     static const int v = [] {
-        const char* e = std::getenv("STRATA_Q8_SM60_BPS");
+        const char* e = std::getenv("SAGUARO_Q8_SM60_BPS");
         const int n = e ? std::atoi(e) : 0;
         return n > 0 ? n : 4;
     }();

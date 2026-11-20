@@ -59,7 +59,7 @@ namespace {
 // Y's rows, written by an FP16-out GEMM as FP16 at the start of each FP32 row (ldc = 2 ldy halves), widened in place.
 // Float c overwrites halves 2c and 2c+1, so a row is walked from its end in blocks: a block's halves are read into
 // registers, the block syncs, then writes its floats - which only cover halves of blocks already read.
-// STRATA_DBG_NAN: the FP16 outputs that are not finite (an FP32-accumulated sum past 65504 becomes inf in FP16).
+// SAGUARO_DBG_NAN: the FP16 outputs that are not finite (an FP32-accumulated sum past 65504 becomes inf in FP16).
 __device__ unsigned long long g_f16_nonfinite = 0;
 __global__ void widen_rows_f16(float* __restrict__ Y, int64_t n, int64_t ldy, int count_nonfinite) {
     float* y = Y + (int64_t) blockIdx.x * ldy;
@@ -146,7 +146,7 @@ struct HipLtState {
     std::set<std::tuple<strata::prefill::hipblaslt::InputType, int, int, int, int>> fallback_shapes;
 
     ~HipLtState() {
-        if (std::getenv("STRATA_HIPBLASLT_VERBOSE")) {
+        if (std::getenv("SAGUARO_HIPBLASLT_VERBOSE")) {
             std::fprintf(stderr, "prefill gemm: hipBLASLt summary launches=%llu fallbacks=%llu unique_fallback_shapes=%zu\n",
                          (unsigned long long) lt_launches, (unsigned long long) fallbacks, fallback_shapes.size());
             for (const auto& shape : fallback_shapes) {
@@ -191,7 +191,7 @@ struct HipLtDescriptors {
 };
 
 std::unique_ptr<HipLtState> create_hipblaslt_state(void* workspace, size_t workspace_bytes) {
-    const char* path = std::getenv("STRATA_HIPBLASLT_TUNING");
+    const char* path = std::getenv("SAGUARO_HIPBLASLT_TUNING");
     if (!path || !*path) return nullptr;
 
     auto state = std::make_unique<HipLtState>();
@@ -237,7 +237,7 @@ HipLtCachedAlgo resolve_hipblaslt_algo(HipLtState& state, strata::prefill::hipbl
     if (cached != state.cache.end()) return cached->second;
 
     HipLtCachedAlgo resolved;
-    const bool verbose = std::getenv("STRATA_HIPBLASLT_VERBOSE") != nullptr;
+    const bool verbose = std::getenv("SAGUARO_HIPBLASLT_VERBOSE") != nullptr;
     const auto* row = state.table.closest(type, n, k, ldy, t);
     if (!row) {
         if (verbose) {
@@ -317,7 +317,7 @@ bool try_hipblaslt(void* opaque_state, strata::prefill::hipblaslt::InputType typ
     if (resolved.workspace_bytes > state->workspace_bytes) {
         ++state->fallbacks;
         state->fallback_shapes.emplace(type, (int) t, (int) n, (int) k, (int) ldy);
-        if (std::getenv("STRATA_HIPBLASLT_VERBOSE")) {
+        if (std::getenv("SAGUARO_HIPBLASLT_VERBOSE")) {
             std::fprintf(stderr, "prefill gemm: Lt fallback; solution needs %zu workspace bytes, have %zu\n",
                          resolved.workspace_bytes, state->workspace_bytes);
         }
@@ -361,17 +361,17 @@ bool prompt_f16() {
     int dev = 0;
     if (hipGetDevice(&dev) != hipSuccess || dev < 0 || dev >= kMaxDev) { (void) hipGetLastError(); return false; }
     if (const int8_t c = cached[dev].load(std::memory_order_relaxed)) return c == 2;
-    // Opt-in (#835): only STRATA_HIP_PROMPT_F16=1 turns it on.  It changes the prompt path's numbers (an FP16 rounding of
+    // Opt-in (#835): only SAGUARO_HIP_PROMPT_F16=1 turns it on.  It changes the prompt path's numbers (an FP16 rounding of
     // each 16-bit GEMM's output), so no card gets it unasked.  On gfx103x it is ~2x faster, so we say so once.
-    const char* e = std::getenv("STRATA_HIP_PROMPT_F16");
+    const char* e = std::getenv("SAGUARO_HIP_PROMPT_F16");
     const bool on = e != nullptr && e[0] == '1';
     hipDeviceProp_t p{};
     if (hipGetDeviceProperties(&p, dev) != hipSuccess) { (void) hipGetLastError(); p.gcnArchName[0] = 0; }
-    if (on) std::fprintf(stderr, "strata prefill: HIP device %d%s%s - STRATA_HIP_PROMPT_F16=1: the prompt's 16-bit GEMMs run FP16 in and out "
+    if (on) std::fprintf(stderr, "strata prefill: HIP device %d%s%s - SAGUARO_HIP_PROMPT_F16=1: the prompt's 16-bit GEMMs run FP16 in and out "
                                  "(rocBLAS is tuned only for that on gfx103x; not bit-identical to the default)%s",
                          dev, p.gcnArchName[0] ? " " : "", p.gcnArchName, "\n");
     else if (e == nullptr && std::strncmp(p.gcnArchName, "gfx103", 6) == 0)
-        std::fprintf(stderr, "strata prefill: HIP device %d %s - tip: STRATA_HIP_PROMPT_F16=1 reads long prompts about 2x faster here "
+        std::fprintf(stderr, "strata prefill: HIP device %d %s - tip: SAGUARO_HIP_PROMPT_F16=1 reads long prompts about 2x faster here "
                              "(FP16 prompt GEMMs, rocBLAS is tuned only for FP16 on gfx103x; the numbers differ slightly, see docs/AMD_HIP.md)%s",
                      dev, p.gcnArchName, "\n");
     cached[dev].store(on ? 2 : 1, std::memory_order_relaxed);
@@ -535,10 +535,10 @@ catch (sycl::exception const &exc) {
 // activations sit there.  With the FP16 path, the weight is converted once per call and the activations in row
 // slices, into the instance's own buffers, and the product runs as the FP16 GEMM (fp32 accumulate) on the tensor
 // cores.  Finite values beyond FP16's range are clamped to +-65504 (#540) instead of becoming Inf.  A beta = 1
-// product (STRATA_PREFILL_BF16X2's remainder, ~2^-9 of the original, deep in FP16's subnormal band) keeps cuBLAS.
-//   Default: on for compute capability 7.0 - 7.4 (Volta: only the experimental STRATA_EXPERIMENTAL_SM60 build runs
+// product (SAGUARO_PREFILL_BF16X2's remainder, ~2^-9 of the original, deep in FP16's subnormal band) keeps cuBLAS.
+//   Default: on for compute capability 7.0 - 7.4 (Volta: only the experimental SAGUARO_EXPERIMENTAL_SM60 build runs
 //   there), OFF for 7.5 (RTX 20 in the ready-made engine: the sums round differently, so it is opt-in until it has
-//   been gated).  STRATA_BF16_TC=1 / =0 turns it on / off on any 7.x card (=2, a test mode: on any card).
+//   been gated).  SAGUARO_BF16_TC=1 / =0 turns it on / off on any 7.x card (=2, a test mode: on any card).
 // Pascal (6.x) has no tensor cores and cuBLAS has no BF16 GEMM for it (#395, measured NOT_SUPPORTED on a P40): both
 // operands are widened to fp32 by an exact shift and the product is cublasSgemm with the same fp32 accumulator.
 namespace {
@@ -623,7 +623,7 @@ catch (sycl::exception const &exc) {
 // 0: cuBLAS's BF16 GEMM, 1: through FP16 (tensor cores), 2: through FP32 (Pascal)
 int bf16_path() {
     static const int forced = [] {
-        const char* v = std::getenv("STRATA_BF16_TC");
+        const char* v = std::getenv("SAGUARO_BF16_TC");
         return v != nullptr && v[0] != '\0' ? std::atoi(v) : -1;
     }();
     const int cc = current_cc();
@@ -664,7 +664,7 @@ bool Gemm::bf16_hcd_exact(const uint16_t* X, int64_t ldx, const uint16_t* W, flo
     static std::atomic<bool> told{false};
     if (!hipblaslt_state_ || N != 320 || K != 10240 || T < 1) {
         if (N == 320 && K == 10240 && !told.exchange(true))
-            std::fprintf(stderr, "strata: STRATA_HCD_EXACT: no hipBLASLt tuning table is loaded, so the exact kernel has nothing to match: "
+            std::fprintf(stderr, "strata: SAGUARO_HCD_EXACT: no hipBLASLt tuning table is loaded, so the exact kernel has nothing to match: "
                                  "the hyper-connection down projection stays on hipBLAS\n");
         return false;
     }
@@ -673,7 +673,7 @@ bool Gemm::bf16_hcd_exact(const uint16_t* X, int64_t ldx, const uint16_t* W, flo
     const int id = hipblaslt_solution_for(hipblaslt_state_, strata::prefill::hipblaslt::InputType::bf16, T, N, K, N, 0.0f);
     if (id != 1176 && id != 1177) {
         if (T >= 4096 && !told.exchange(true))   // (a short chunk may legitimately get another solution: not worth a line)
-            std::fprintf(stderr, "strata: STRATA_HCD_EXACT: the tuning table gives the hyper-connection down projection (N 320, K 10240) "
+            std::fprintf(stderr, "strata: SAGUARO_HCD_EXACT: the tuning table gives the hyper-connection down projection (N 320, K 10240) "
                                  "solution %d at T %lld, not 1176 / 1177: hipBLASLt runs it (a changed table or library; "
                                  "tools/hip/gfx1151-hipblaslt-100401.txt is the one measured)\n",
                          id, (long long) T);
@@ -709,11 +709,11 @@ uint8_t* gemm_stage(size_t need, sycl::queue& q) {
 inline bool staged_gemm(sycl::queue& q, void* handle, const uint16_t* W, int lda, const uint16_t* X, int ldb,
                         dpct::library_data_t dt, int64_t N, int64_t T, int64_t K, float alpha, float beta,
                         float* Y, int64_t ldy) {
-    // STRATA_SYCL_GEMM_NO_STAGE: the tests' negative control.  0.1.43: not on Battlemage either (the A770 oneMKL bug above did not
+    // SAGUARO_SYCL_GEMM_NO_STAGE: the tests' negative control.  0.1.43: not on Battlemage either (the A770 oneMKL bug above did not
     // show on a B70: 4K and 49K prompts, operands at 18 GiB into the cache arena, first-token logits byte-identical with and
-    // without staging; the 10 MB copy per expert was ~10% of a prompt).  STRATA_SYCL_GEMM_STAGE=1 stages there as before.
-    static const bool no_stage = std::getenv("STRATA_SYCL_GEMM_NO_STAGE") != nullptr ||
-        (strata::intel_gpu_gen(q.get_device()) == strata::IntelGpuGen::Battlemage && !(std::getenv("STRATA_SYCL_GEMM_STAGE") && std::getenv("STRATA_SYCL_GEMM_STAGE")[0] == '1'));
+    // without staging; the 10 MB copy per expert was ~10% of a prompt).  SAGUARO_SYCL_GEMM_STAGE=1 stages there as before.
+    static const bool no_stage = std::getenv("SAGUARO_SYCL_GEMM_NO_STAGE") != nullptr ||
+        (strata::intel_gpu_gen(q.get_device()) == strata::IntelGpuGen::Battlemage && !(std::getenv("SAGUARO_SYCL_GEMM_STAGE") && std::getenv("SAGUARO_SYCL_GEMM_STAGE")[0] == '1'));
     constexpr size_t k4G = 4ull << 30;
     const size_t es = 2;
     const size_t w_bytes = (size_t) lda * (size_t) N * es;   // W stored K x N, col-major (lda = K)
@@ -752,10 +752,10 @@ void Gemm::bf16(const uint16_t* X, const uint16_t* W, float* Y, int64_t T, int64
     if (ldy <= 0) ldy = N;
     if (ldx <= K) ldx = 0;
 #ifdef STRATA_USE_HIP
-    // #313 (opt-in STRATA_WMMA_GEMM=1; STRATA_WMMA_BF16=0 excludes bf16): RDNA3 / RDNA3.5 WMMA dense GEMM, before
+    // #313 (opt-in SAGUARO_WMMA_GEMM=1; SAGUARO_WMMA_BF16=0 excludes bf16): RDNA3 / RDNA3.5 WMMA dense GEMM, before
     // hipBLASLt; it returns false for shapes it does not take (and off gfx11) and this falls through
-    static const bool wmma_on = [] { const char* v = std::getenv("STRATA_WMMA_GEMM"); return v && v[0] != 0 && v[0] != '0'; }();
-    static const bool bf16_on = [] { const char* v = std::getenv("STRATA_WMMA_BF16"); return !v || (v[0] != 0 && v[0] != '0'); }();
+    static const bool wmma_on = [] { const char* v = std::getenv("SAGUARO_WMMA_GEMM"); return v && v[0] != 0 && v[0] != '0'; }();
+    static const bool bf16_on = [] { const char* v = std::getenv("SAGUARO_WMMA_BF16"); return !v || (v[0] != 0 && v[0] != '0'); }();
     if (wmma_on && bf16_on && ldx == 0 && T >= 16 && (beta == 0.0f || beta == 1.0f) &&
         strata_wmma_gemm_bf16(X, W, Y, T, N, K, ldy, beta, stream_)) {
         return;
@@ -838,10 +838,10 @@ void Gemm::f16(const uint16_t* X, const uint16_t* W, float* Y, int64_t T, int64_
     if (T <= 0 || N <= 0) return;
     if (ldy <= 0) ldy = N;
 #ifdef STRATA_USE_HIP
-    // #313 (opt-in STRATA_WMMA_GEMM=1): RDNA3 / RDNA3.5 WMMA dense GEMM, before hipBLASLt (falls through when false)
-    static const bool wmma_on = [] { const char* v = std::getenv("STRATA_WMMA_GEMM"); return v && v[0] != 0 && v[0] != '0'; }();
-    static const bool pf_on = [] { const char* v = std::getenv("STRATA_PF_GEMM"); return v && v[0] == '1'; }();
-    static const int64_t pf_min_t = [] { const char* v = std::getenv("STRATA_PF_SWITCH_MIN_T"); return v ? (int64_t) std::atoll(v) : (int64_t) 0; }();
+    // #313 (opt-in SAGUARO_WMMA_GEMM=1): RDNA3 / RDNA3.5 WMMA dense GEMM, before hipBLASLt (falls through when false)
+    static const bool wmma_on = [] { const char* v = std::getenv("SAGUARO_WMMA_GEMM"); return v && v[0] != 0 && v[0] != '0'; }();
+    static const bool pf_on = [] { const char* v = std::getenv("SAGUARO_PF_GEMM"); return v && v[0] == '1'; }();
+    static const int64_t pf_min_t = [] { const char* v = std::getenv("SAGUARO_PF_SWITCH_MIN_T"); return v ? (int64_t) std::atoll(v) : (int64_t) 0; }();
     if (pf_on && T >= pf_min_t && strata_pf_gemm_f16(X, W, Y, T, N, K, ldy, beta, stream_)) return;   // S23: opt-in
     if (wmma_on && T >= 16 && (beta == 0.0f || beta == 1.0f) &&
         strata_wmma_gemm_f16(X, W, Y, T, N, K, ldy, beta, stream_)) {
@@ -878,7 +878,7 @@ bool Gemm::native_mmq(const uint16_t* X, int type, const void* W, float* Y, int6
     namespace mmq = strata::prefill::mmq;
     constexpr int64_t kRows = 1024, kMaxK = 8192;
     static const bool enabled = [] {
-        const char* e = std::getenv("STRATA_DENSE_MMQ");
+        const char* e = std::getenv("SAGUARO_DENSE_MMQ");
         return e && e[0] == '1';
     }();
     if (!enabled || mmq_failed_ || !mmq::built() || !mmq::fits(type, N)) return false;
@@ -906,7 +906,7 @@ bool Gemm::native_mmq(const uint16_t* X, int type, const void* W, float* Y, int6
         }
         mmq_ctx_ = new mmq::Context();
         mmq::iota((int32_t*) ((uint8_t*) mmq_buf_ + ident_off), kRows, stream_);
-        std::fprintf(stderr, "prefill gemm: dense MMQ on (STRATA_DENSE_MMQ=1)\n");
+        std::fprintf(stderr, "prefill gemm: dense MMQ on (SAGUARO_DENSE_MMQ=1)\n");
     }
     void* xq = mmq_buf_;
     const int32_t* ident = (const int32_t*) ((uint8_t*) mmq_buf_ + ident_off);
@@ -945,13 +945,13 @@ void Gemm::f16_inplace(const uint16_t* X, const uint16_t* W, float* Y, int64_t T
                     (int) K, X, CUDA_R_16F, (int) K, &zero, Y, CUDA_R_16F, (int) (2 * ldy), CUBLAS_COMPUTE_32F,
                     CUBLAS_GEMM_DEFAULT),
        "cublasGemmEx f16 out");
-    static const bool dbg_nan = std::getenv("STRATA_DBG_NAN") != nullptr;
+    static const bool dbg_nan = std::getenv("SAGUARO_DBG_NAN") != nullptr;
     widen_rows_f16<<<(unsigned) T, 256, 0, (cudaStream_t) stream_>>>(Y, N, ldy, dbg_nan ? 1 : 0);
     if (dbg_nan) {   // debug only: a sync per GEMM
         unsigned long long bad = 0, zero_count = 0;
         (void) hipStreamSynchronize((hipStream_t) stream_);
         if (hipMemcpyFromSymbol(&bad, HIP_SYMBOL(g_f16_nonfinite), sizeof bad) == hipSuccess && bad != 0) {
-            std::fprintf(stderr, "strata prefill: STRATA_DBG_NAN: %llu non-finite FP16 GEMM outputs (T=%lld N=%lld K=%lld; FP16 ends at 65504)%s",
+            std::fprintf(stderr, "strata prefill: SAGUARO_DBG_NAN: %llu non-finite FP16 GEMM outputs (T=%lld N=%lld K=%lld; FP16 ends at 65504)%s",
                          bad, (long long) T, (long long) N, (long long) K, "\n");
             (void) hipMemcpyToSymbol(HIP_SYMBOL(g_f16_nonfinite), &zero_count, sizeof zero_count);
         }
@@ -964,12 +964,12 @@ void Gemm::f16_inplace(const uint16_t* X, const uint16_t* W, float* Y, int64_t T
 void Gemm::native(const uint16_t* X, int ggml_type, const void* W_blocks, float* Y, int64_t T, int64_t N, int64_t K,
                   int64_t ldy, float beta, int64_t ldx) {
 #ifdef STRATA_USE_HIP
-    // S23 (opt-in STRATA_PF_PAD=1, with STRATA_PF_GEMM=1 on chunks of STRATA_PF_SWITCH_MIN_T+ tokens): the weight
+    // S23 (opt-in SAGUARO_PF_PAD=1, with SAGUARO_PF_GEMM=1 on chunks of SAGUARO_PF_SWITCH_MIN_T+ tokens): the weight
     // dequantized into the scratch with row stride K + 64 halves, so no 4 KB-multiple stride camps on the memory
     // channels (gemm_probe8: K 6144 19 -> 29 TFLOPS from W alone, 35 with X padded too).  Bitwise the same products.
-    static const bool pad_on = [] { const char* v = std::getenv("STRATA_PF_PAD"); return v && v[0] == '1'; }();
-    static const bool pf_on = [] { const char* v = std::getenv("STRATA_PF_GEMM"); return v && v[0] == '1'; }();
-    static const int64_t pf_min_t = [] { const char* v = std::getenv("STRATA_PF_SWITCH_MIN_T"); return v ? (int64_t) std::atoll(v) : (int64_t) 0; }();
+    static const bool pad_on = [] { const char* v = std::getenv("SAGUARO_PF_PAD"); return v && v[0] == '1'; }();
+    static const bool pf_on = [] { const char* v = std::getenv("SAGUARO_PF_GEMM"); return v && v[0] == '1'; }();
+    static const int64_t pf_min_t = [] { const char* v = std::getenv("SAGUARO_PF_SWITCH_MIN_T"); return v ? (int64_t) std::atoll(v) : (int64_t) 0; }();
     if (pad_on && pf_on && T >= pf_min_t && T >= 64 && N >= 512 && K % 32 == 0 && N * (K + 64) <= scratch_elems_) {
         const int64_t ldw = K + 64;
         if (strata::kernels::dequant_f16_ld(ggml_type, W_blocks, 0, N, K, ldw, scratch_, stream_) &&
@@ -992,7 +992,7 @@ void Gemm::native(const uint16_t* X, int ggml_type, const void* W_blocks, float*
         }
         if (ok) return;
 #endif
-        std::fprintf(stderr, "prefill gemm: a padded X (ldx %lld, K %lld) needs STRATA_PF_PAD's path\n",
+        std::fprintf(stderr, "prefill gemm: a padded X (ldx %lld, K %lld) needs SAGUARO_PF_PAD's path\n",
                      (long long) ldx, (long long) K);
         std::exit(1);
     }

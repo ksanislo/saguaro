@@ -44,7 +44,7 @@ test('only the app shell can hand files over; the page fetches each file once', 
   const socket = createServer(); await new Promise(r => socket.listen(0, '127.0.0.1', r));
   const port = socket.address().port; await new Promise(r => socket.close(r));
   const secret = 'a'.repeat(40);
-  const child = spawn(process.execPath, ['server/index.mjs'], { cwd: root, env: { ...process.env, STRATA_HOME: home, STRATA_MODELS_DIR: join(home, 'models'), STRATA_PORT: String(port), STRATA_REAL_ENGINE: '0', STRATA_WORKSPACE: join(home, 'work'), STRATA_SHUTDOWN_TOKEN: secret }, stdio: 'ignore', windowsHide: true });
+  const child = spawn(process.execPath, ['server/index.mjs'], { cwd: root, env: { ...process.env, SAGUARO_HOME: home, SAGUARO_MODELS_DIR: join(home, 'models'), SAGUARO_PORT: String(port), SAGUARO_REAL_ENGINE: '0', SAGUARO_WORKSPACE: join(home, 'work'), SAGUARO_SHUTDOWN_TOKEN: secret }, stdio: 'ignore', windowsHide: true });
   const base = `http://127.0.0.1:${port}`;
   try {
     for (let i = 0; i < 100; i++) { try { if ((await fetch(base + '/api/skills')).ok) break; } catch { /* not up */ } await new Promise(r => setTimeout(r, 100)); }

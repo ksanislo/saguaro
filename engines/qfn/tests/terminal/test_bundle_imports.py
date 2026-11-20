@@ -80,7 +80,7 @@ class BundleImports(unittest.TestCase):
                 "    module = importlib.import_module(name)\n"
                 f"    assert os.path.samefile(os.path.dirname(module.__file__), {str(self.root / 'tools')!r}), (name, module.__file__)\n"
                 "print('imports ok')\n")
-        env = {**os.environ, "STRATA_CONTROL_INSTALL": "1", "PYTHONNOUSERSITE": "1"}
+        env = {**os.environ, "SAGUARO_CONTROL_INSTALL": "1", "PYTHONNOUSERSITE": "1"}
         for key in ("PYTHONPATH", "PYTHONHOME"):
             env.pop(key, None)
         done = subprocess.run([sys.executable, "-I", "-c", code], cwd=str(self.root.parent), env=env,

@@ -15,7 +15,7 @@ It finds out which computer this is, downloads the Terminal archive named in the
 home (`~/.local/share/strata/terminal`, `%LOCALAPPDATA%\Strata\terminal`; no administrator rights), checks the release's signed feed with the Terminal it just unpacked
 (`strata update --check`; if that fails it removes what it unpacked), puts `strata` on your PATH and prints `Installed. Run: strata launch`. The engine (the part that talks
 to your graphics card) comes with the first model: `strata launch` fetches the one for your card from the same release folder, signed, and test-starts it before using it.
-The release folder is the latest GitHub release of Niko1221/Strata (`https://github.com/Niko1221/Strata/releases/latest/download`). The script only fetches and checks; read it first if you like (it is the same file as `install.sh` / `install.ps1` in the repository's `packaging` folder and in the release). Set `STRATA_FEED` to another folder to try a local one; `packaging/make_local_feed.py` builds a test-signed one. How far to trust a piped installer is in [SECURITY.md](../SECURITY.md).
+The release folder is the latest GitHub release of Niko1221/Strata (`https://github.com/Niko1221/Strata/releases/latest/download`). The script only fetches and checks; read it first if you like (it is the same file as `install.sh` / `install.ps1` in the repository's `packaging` folder and in the release). Set `SAGUARO_FEED` to another folder to try a local one; `packaging/make_local_feed.py` builds a test-signed one. How far to trust a piped installer is in [SECURITY.md](../SECURITY.md).
 
 ## The screens (`strata launch`)
 
@@ -52,7 +52,7 @@ server's `/metrics`, the same data as the browser Monitor), the other five views
 version its maker tested the setup with: history) and **This server** (Not checked / Passed / Failed for your server, after `h`). `q` asks: keep serving in the background, or stop
 (stopping unloads the model and frees the graphics memory).
 
-In the classic Windows console (the Windows 10 default window) the monitor first switches that window's font to Cascadia Mono when it is installed (the console font API: no admin, nothing saved, gone with the window) and draws the full look; otherwise it draws a solid-block look: █ bars with a thin ▄ track, ▄ / █ sparklines, square boxes and the 16 palette colours (`•` instead of `●` when the font is not Consolas). It always shows one line: "For the full look, use Windows Terminal (built into Windows 11)". Windows Terminal, Linux and macOS are never touched. `STRATA_GLYPHS=unicode|ascii|solid` forces a look. With two or more graphics cards the Overview tiles show the busiest card (load), all cards (memory), the hottest card and the total power, a "Cards" strip lists each card (up to 4, then "press 5" for the Hardware view), and the CPU tile says "2 CPUs · 64 cores" from the server's new `sockets` figure.
+In the classic Windows console (the Windows 10 default window) the monitor first switches that window's font to Cascadia Mono when it is installed (the console font API: no admin, nothing saved, gone with the window) and draws the full look; otherwise it draws a solid-block look: █ bars with a thin ▄ track, ▄ / █ sparklines, square boxes and the 16 palette colours (`•` instead of `●` when the font is not Consolas). It always shows one line: "For the full look, use Windows Terminal (built into Windows 11)". Windows Terminal, Linux and macOS are never touched. `SAGUARO_GLYPHS=unicode|ascii|solid` forces a look. With two or more graphics cards the Overview tiles show the busiest card (load), all cards (memory), the hottest card and the total power, a "Cards" strip lists each card (up to 4, then "press 5" for the Hardware view), and the CPU tile says "2 CPUs · 64 cores" from the server's new `sockets` figure.
 
 ## Without the screens (flags)
 
@@ -61,7 +61,7 @@ strata launch --preset "IQ3_XXS 128K"                                 # a saved 
 strata launch --model iq3_xxs --context 128k --parallel 4 --vision off --tune quick \
               --access lan --port 8080 --save-preset "Office" --no-tui   # serve and print the address
 strata launch --model-path /data/models/IQ3_XXS --no-tui               # files you already have
-strata launch --preset Office --set prefill=65536 --set STRATA_PIN_BY_NEED=1 --no-tui
+strata launch --preset Office --set prefill=65536 --set SAGUARO_PIN_BY_NEED=1 --no-tui
 strata launch --model q2_0 --pool-cores 2-14:2 --no-tui               # experimental: pin the CPU workers to these logical processors (see DETAILS.md)
 strata launch --plan --model q2_0                                      # what would happen; nothing changes
 strata launch --model q2_0 --yes --no-tui                              # no questions (for one: download on a computer with no engine yet)
@@ -91,7 +91,7 @@ already on the disk, `strata launch` writes the run settings itself and says so;
 ## Models you already have
 
 `strata models list` looks in the same places the screens and `strata launch` look (one function, `strata_control/discovery.py`): the folder you name with `--install-dir` or
-STRATA_INSTALL_DIR (then only that one), the Terminal's own folder, the folders earlier installs remembered in settings.json, and the desktop app's install folder, which the Terminal
+SAGUARO_INSTALL_DIR (then only that one), the Terminal's own folder, the folders earlier installs remembered in settings.json, and the desktop app's install folder, which the Terminal
 shares (Windows `%LOCALAPPDATA%\Strata\install`; Linux and macOS `$XDG_DATA_HOME/strata/install`, by default `~/.local/share/strata/install`). The data folder is the one you set, else the
 app's (`app-settings.json` beside its install folder, else a `Documents/Strata` that holds models), else Strata's default. `strata models import PATH --plan` knows the Gyro-S and Gyro-M files
 (TQK6/TQK7 and TQ2_T experts) and every file set setup installs, also under another name when the header matches, and says which run config, prepared pack, draft layer and picture reader

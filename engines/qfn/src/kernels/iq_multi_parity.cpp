@@ -277,8 +277,8 @@ void check_grouped(int gu, int dt, int64_t H, int64_t FF, cudaStream_t s, std::m
     }
 }
 
-// STRATA_KQL (native_expert_set_mode 9): the staged-row kernels against the old ones, every STRATA_KQL_GU_P /
-// STRATA_KQL_D_P / STRATA_KQL_WARPS the environment picks; also with blobs 4 bytes off 16-byte alignment
+// SAGUARO_KQL (native_expert_set_mode 9): the staged-row kernels against the old ones, every SAGUARO_KQL_GU_P /
+// SAGUARO_KQL_D_P / SAGUARO_KQL_WARPS the environment picks; also with blobs 4 bytes off 16-byte alignment
 void check_kql(int gu, int dt, cudaStream_t s, std::mt19937& rng) {
     for (int skew : {0, 4}) {
         Grouped G(gu, dt, 2560, 640, {1, 3, 4, 5, 0, 8, 2, 11, 1}, 8, rng, skew);
@@ -293,7 +293,7 @@ void check_kql(int gu, int dt, cudaStream_t s, std::mt19937& rng) {
             if (i < (size_t) G.n_ent * 2560) finite = finite && std::isfinite(b[i]);
         }
         const bool ok = diff == 0 && finite;
-        std::printf("%-8s/%-7s  2560 x  640  STRATA_KQL staged rows%s, %d groups, %d entries: %s\n", name_of(gu), name_of(dt),
+        std::printf("%-8s/%-7s  2560 x  640  SAGUARO_KQL staged rows%s, %d groups, %d entries: %s\n", name_of(gu), name_of(dt),
                     skew ? " (unaligned blobs)" : "", G.n_groups, G.n_ent, ok ? "bitwise equal to the old kernels" : "FAIL");
         if (!ok) {
             std::printf("  %zu of %zu floats differ%s\n", diff, a.size(), finite ? "" : ", non-finite outputs");
@@ -449,7 +449,7 @@ int main(int argc, char** argv) {
         for (int dt : {20, 42}) check_grouped(gu, dt, 2560, 640, s, rng);   // the model's shape
         check_grouped(gu, 23, 1024, 512, s, rng);                           // IQ4_XS down needs n_ff % 256 == 0
     }
-    // UD-Q4_K_XL (run with STRATA_KQ_SPLIT=1 to compare the Split path with the old kernels; STRATA_EXPERT_V2K=0 / 1 picks
+    // UD-Q4_K_XL (run with SAGUARO_KQ_SPLIT=1 to compare the Split path with the old kernels; SAGUARO_EXPERT_V2K=0 / 1 picks
     // the generic multi kernel or the V2K one on gfx12: both are bitwise the old kernels)
     for (int gu : {12, 13})
         for (int dt : {7, 8}) check_grouped(gu, dt, 2560, 640, s, rng);

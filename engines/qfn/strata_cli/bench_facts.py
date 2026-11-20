@@ -497,7 +497,7 @@ def configuration(why: Why, *, options: dict | None, env: dict | None, props: di
         else:
             other[name] = value
     for name, value in sorted((env or {}).items()):
-        if name.startswith("STRATA_") and not SECRET_KEY.search(name):
+        if name.startswith("SAGUARO_") and not SECRET_KEY.search(name):
             grouped["experimental_options"][name] = base_if_path(str(value))
     n_ctx = ((props.get("default_generation_settings") or {}).get("n_ctx"))
     slots = props.get("total_slots")

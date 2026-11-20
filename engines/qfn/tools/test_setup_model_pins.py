@@ -1,6 +1,6 @@
 """Tests for the fixed SHA-256 and size of every model file setup downloads (REPO_PINS): every file a choice can
 download has one, a wrong file is deleted and setup stops, a pinned commit that answers 404 stops the download
-(STRATA_ALLOW_UNPINNED=1 is the tester's opt-out), and an installed model needs no network.  Mocked network - nothing
+(SAGUARO_ALLOW_UNPINNED=1 is the tester's opt-out), and an installed model needs no network.  Mocked network - nothing
 is downloaded.
 
     python -m unittest tools.test_setup_model_pins
@@ -130,8 +130,8 @@ class DownloadChecksThePin(unittest.TestCase):
     def run_download(self, name, served, pinned, length=None):
         seen, patch = self.serve(served, length if length is not None else len(served))
         with tempfile.TemporaryDirectory() as d, with_pin(name, pinned), patch, \
-                mock.patch.dict(setup.os.environ, {"STRATA_SOURCE": "huggingface"}):
-            setup.os.environ.pop("STRATA_ALLOW_UNPINNED", None)
+                mock.patch.dict(setup.os.environ, {"SAGUARO_SOURCE": "huggingface"}):
+            setup.os.environ.pop("SAGUARO_ALLOW_UNPINNED", None)
             dst = Path(d) / name
             try:
                 _, out = quiet(setup.download, pinned_url(name), dst)
@@ -178,8 +178,8 @@ class NotFoundOnThePinnedCommit(unittest.TestCase):
         seen = []
         out = io.StringIO()
         with tempfile.TemporaryDirectory() as d, mock.patch.object(setup.urllib.request, "urlopen", self.urlopen(seen)), \
-                mock.patch.dict(setup.os.environ, {"STRATA_SOURCE": "huggingface"}), contextlib.redirect_stdout(out):
-            setup.os.environ.pop("STRATA_ALLOW_UNPINNED", None)
+                mock.patch.dict(setup.os.environ, {"SAGUARO_SOURCE": "huggingface"}), contextlib.redirect_stdout(out):
+            setup.os.environ.pop("SAGUARO_ALLOW_UNPINNED", None)
             dst = Path(d) / "t.gguf"
             with self.assertRaises(SystemExit):
                 setup.download(pinned_url("Q2_0/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00001-of-00002.gguf"), dst, "the model")
@@ -191,19 +191,19 @@ class NotFoundOnThePinnedCommit(unittest.TestCase):
     def test_the_opt_out_takes_the_current_file_and_says_so(self):
         seen = []
         with tempfile.TemporaryDirectory() as d, mock.patch.object(setup.urllib.request, "urlopen", self.urlopen(seen)), \
-                mock.patch.dict(setup.os.environ, {"STRATA_SOURCE": "huggingface", "STRATA_ALLOW_UNPINNED": "1"}), \
+                mock.patch.dict(setup.os.environ, {"SAGUARO_SOURCE": "huggingface", "SAGUARO_ALLOW_UNPINNED": "1"}), \
                 mock.patch.object(setup, "_unpinned_said", []):
             dst = Path(d) / "Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00001-of-00002.gguf"
             _, out = quiet(setup.download, pinned_url("Q2_0/" + dst.name), dst)
             self.assertEqual(dst.read_bytes(), b"current file")     # not checked against the pin: it is not the pinned file
-        self.assertIn("STRATA_ALLOW_UNPINNED=1", out)
+        self.assertIn("SAGUARO_ALLOW_UNPINNED=1", out)
 
     def test_the_opt_out_is_off_by_default(self):
         with mock.patch.dict(setup.os.environ, {}, clear=False):
-            setup.os.environ.pop("STRATA_ALLOW_UNPINNED", None)
+            setup.os.environ.pop("SAGUARO_ALLOW_UNPINNED", None)
             self.assertFalse(setup.allow_unpinned())
             for value in ("", "0", "no"):
-                setup.os.environ["STRATA_ALLOW_UNPINNED"] = value
+                setup.os.environ["SAGUARO_ALLOW_UNPINNED"] = value
                 self.assertFalse(setup.allow_unpinned())
 
 
@@ -215,7 +215,7 @@ class InstalledModelsNeedNoNetwork(unittest.TestCase):
             raise AssertionError("network used for an installed file: " + req.full_url)
 
         with tempfile.TemporaryDirectory() as d, mock.patch.object(setup.urllib.request, "urlopen", urlopen), \
-                mock.patch.dict(setup.os.environ, {"HF_ENDPOINT": "http://127.0.0.1:9", "STRATA_SOURCE": "auto"}):
+                mock.patch.dict(setup.os.environ, {"HF_ENDPOINT": "http://127.0.0.1:9", "SAGUARO_SOURCE": "auto"}):
             dst = Path(d) / "Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00001-of-00002.gguf"
             dst.write_bytes(b"installed by an earlier setup")       # no hash in its mark (installed before the pins)
             setup.mark(dst)
@@ -229,17 +229,17 @@ class InstalledModelsNeedNoNetwork(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as d, mock.patch.object(setup.urllib.request, "urlopen", urlopen), \
                 mock.patch.object(setup.time, "sleep", lambda s: None), \
-                mock.patch.dict(setup.os.environ, {"STRATA_SOURCE": "huggingface"}):
+                mock.patch.dict(setup.os.environ, {"SAGUARO_SOURCE": "huggingface"}):
             with self.assertRaises(SystemExit):
                 quiet(setup.download, pinned_url("Q2_0/x.gguf"), Path(d) / "x.gguf")
 
     def test_the_runtime_has_no_model_host_in_it(self):
         """strata launch, serve, the monitor and the API reach no model host: the names are in setup.py and the install
-        tools only (and strata_control.acquisition refuses a download under STRATA_NO_ACQUIRE=1)."""
+        tools only (and strata_control.acquisition refuses a download under SAGUARO_NO_ACQUIRE=1)."""
         hosts = re.compile(r"huggingface\.co|hf-mirror|HF_ENDPOINT|modelscope|hf_hub_download", re.I)
         # The harmless mentions: the model-card link a benchmark result file names (nothing opens it), and the pinned
         # DFlash2 drafter address, which only `strata drafting fetch` downloads from, behind acquisition.require (refused
-        # under STRATA_NO_ACQUIRE, so a start or a server never reaches it). Dropping just those lines from the scan keeps
+        # under SAGUARO_NO_ACQUIRE, so a start or a server never reaches it). Dropping just those lines from the scan keeps
         # the rule exact for everything else.
         harmless = ('MODEL_CARD_URL = "https://huggingface.co/Qwen/Qwen3.8-Flash-Next"',
                     'BASE_URL = f"https://huggingface.co/{REPO}/resolve/{REVISION}/"')

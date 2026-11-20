@@ -1219,7 +1219,7 @@ class AdvancedScreen(Base):
         if self.mode:
             return
         self.mode = "add"
-        self.open_field("edit", "", "name=value, e.g. prefill=65536 or STRATA_PIN_BY_NEED=1")
+        self.open_field("edit", "", "name=value, e.g. prefill=65536 or SAGUARO_PIN_BY_NEED=1")
         self.say("Type the setting as name=value (the name of a newer engine's flag is fine).")
 
     def action_filter(self) -> None:

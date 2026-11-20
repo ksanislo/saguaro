@@ -6,7 +6,6 @@ from unittest.mock import patch
 from serve.response_config import limits_from_env
 from serve.response_store import ResponseStore, StoreBusy
 from serve.server import apply_server_env
-from tools import maya_names
 
 
 def item(index, content="x" * 2048):
@@ -83,26 +82,21 @@ class SharedHistory(unittest.TestCase):
         store.put("a", {"id": "r", "output": []}, [item(1)])
         with self.assertRaises(StoreBusy):
             store.get("a", "r")
-        with patch.dict(os.environ, {"STRATA_GLM_RESPONSES_OWNER_ENTRIES": "2"}):
+        with patch.dict(os.environ, {"SAGUARO_GLM_RESPONSES_OWNER_ENTRIES": "2"}):
             self.assertEqual(limits_from_env()["OWNER_ENTRIES"], 2)
         for value in ("0", "-1", "bad"):
-            with patch.dict(os.environ, {"STRATA_GLM_RESPONSES_CACHE_BYTES": value}), self.assertRaises(ValueError):
+            with patch.dict(os.environ, {"SAGUARO_GLM_RESPONSES_CACHE_BYTES": value}), self.assertRaises(ValueError):
                 limits_from_env()
 
-    def test_maya_environment_aliases_take_precedence_at_startup(self):
-        with patch.dict(os.environ, {"MAYA_GLM_RESPONSES_CACHE_ENTRIES": "7",
-                                     "STRATA_GLM_RESPONSES_CACHE_ENTRIES": "3"}, clear=True):
-            maya_names.alias_env(os.environ)
-            apply_server_env(maya_names.env_in({}))
-            self.assertEqual(limits_from_env()["CACHE_ENTRIES"], 7)
+    def test_a_config_setting_beats_the_environment_at_startup(self):
+        with patch.dict(os.environ, {"SAGUARO_GLM_RESPONSES_CACHE_ENTRIES": "7"}, clear=True):
+            apply_server_env({"env": {"SAGUARO_GLM_RESPONSES_CACHE_ENTRIES": "11"}})
+            self.assertEqual(limits_from_env()["CACHE_ENTRIES"], 11)
 
-    def test_maya_config_aliases_and_config_over_environment_precedence(self):
-        for env in ({"MAYA_GLM_RESPONSES_CACHE_ENTRIES": "11", "STRATA_GLM_RESPONSES_CACHE_ENTRIES": "5"},
-                    {"STRATA_GLM_RESPONSES_CACHE_ENTRIES": "11"}):
-            with self.subTest(env=env), patch.dict(os.environ, {"MAYA_GLM_RESPONSES_CACHE_ENTRIES": "7"}, clear=True):
-                maya_names.alias_env(os.environ)
-                apply_server_env(maya_names.env_in({"env": env}))
-                self.assertEqual(limits_from_env()["CACHE_ENTRIES"], 11)
+    def test_the_environment_when_no_config_names_the_setting(self):
+        with patch.dict(os.environ, {"SAGUARO_GLM_RESPONSES_CACHE_ENTRIES": "7"}, clear=True):
+            apply_server_env({})
+            self.assertEqual(limits_from_env()["CACHE_ENTRIES"], 7)
 
 
 if __name__ == "__main__":

@@ -75,7 +75,7 @@ bool write_expert_profile(const std::string& path, int64_t n_layers, int64_t n_e
 /// Free device memory for the expert cache.  On a unified memory system - one memory for the CPU and the GPU, such as
 /// the DGX Spark (GB10); CUDA reports it as cudaDevAttrIntegrated - cudaMemGetInfo counts only MemFree, not the page cache - which, with the experts read from the GGUF in place, is mostly those
 /// files' clean pages and gives way to a device allocation.  There the figure is MemAvailable less 6 GiB for the OS
-/// and the engine's host side (STRATA_UMA_HEADROOM_GIB).  Elsewhere it is cudaMemGetInfo's.
+/// and the engine's host side (SAGUARO_UMA_HEADROOM_GIB).  Elsewhere it is cudaMemGetInfo's.
 size_t device_free_bytes();
 
 /// One piece of an expert blob that lives contiguously in a source's own memory: `n` bytes at `p`, to land `at` bytes into the blob.
@@ -122,7 +122,7 @@ public:
     /// always.  CUDA only: a HIP build refuses it at open.  The slots past `slots()` after a shrink must hold no
     /// resident expert and no loan: the CALLER evicts them first (they become CPU misses).
     void set_segment_bytes(int64_t seg_bytes) { seg_req_ = seg_bytes > 0 ? seg_bytes : 0; }
-    /// STRATA_MMQ_DIRECT: `open_sized` leaves at least `g` bytes of room after each slot's blob (the prompt MMQ
+    /// SAGUARO_MMQ_DIRECT: `open_sized` leaves at least `g` bytes of room after each slot's blob (the prompt MMQ
     /// reads a little past a down matrix when it reads an expert in its slot).  Set before opening, like
     /// `set_segment_bytes`; `close` keeps it.  0 (the default): no guard.  The uniform `open` ignores it, and so does
     /// the SYCL engine's open_sized (its slots then have no guard, and `slot_tail` finds no room).
@@ -209,7 +209,7 @@ public:
     bool fill_slot_queued_parts(int32_t slot, const BlobPart* parts, int n, std::string& err);
     bool sync_queued(std::string& err);
     /// `fill_slot_queued` / `_parts` on `stream` (a cudaStream_t) instead of the legacy stream: the lazy refill
-    /// (STRATA_SHORT_READS), whose copies must not hold up the windows' synchronous copies.  CUDA / HIP only.
+    /// (SAGUARO_SHORT_READS), whose copies must not hold up the windows' synchronous copies.  CUDA / HIP only.
     bool fill_slot_on(int32_t slot, const uint8_t* host_blob, std::string& err, int64_t bytes, void* stream);
     bool fill_slot_on_parts(int32_t slot, const BlobPart* parts, int n, std::string& err, void* stream);
 
@@ -230,7 +230,7 @@ public:
     uint64_t slot_offset(int64_t s) const { return off_.empty() ? (uint64_t) s * (uint64_t) blob_ : off_[(size_t) s]; }
     /// The arena bytes of slot `s` (its blob, any slack and the guard).
     uint64_t slot_room(int32_t s) const { return slot_offset(s + 1) - slot_offset(s); }
-    /// STRATA_MMQ_DIRECT: the address `blob` bytes into slot `s` when the slot has room for `need` more bytes there
+    /// SAGUARO_MMQ_DIRECT: the address `blob` bytes into slot `s` when the slot has room for `need` more bytes there
     /// (null otherwise, or for a bad slot).  Uniform slots too: their stride is the largest blob.
     uint8_t* slot_tail(int32_t s, uint64_t blob, uint64_t need) const {
         if (s < 0 || s >= slots_ || base_ == nullptr) return nullptr;
@@ -249,7 +249,7 @@ private:
     uint8_t* base_ = nullptr;
     int64_t live_slots_ = 0;            ///< #533: slots() - all of them unless shrunk
     int64_t seg_req_ = 0;               ///< #533: the segment size asked for (0: one cudaMalloc)
-    int64_t guard_req_ = 0;             ///< STRATA_MMQ_DIRECT: bytes kept after each sized slot's blob (set_slot_guard)
+    int64_t guard_req_ = 0;             ///< SAGUARO_MMQ_DIRECT: bytes kept after each sized slot's blob (set_slot_guard)
     int64_t guard_ = 0;                 ///< ...the guard open_sized applied to the open slots (0: none)
     int64_t seg_ = 0;                   ///< #533: the segment size used (a multiple of the driver's granularity)
     uint64_t reserved_ = 0;             ///< #533: the reserved address range's size

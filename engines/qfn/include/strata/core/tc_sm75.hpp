@@ -10,8 +10,8 @@
 // with.  A machine that is not a 2080 Ti cannot be moved onto them by an environment variable.
 // The kernels themselves are gated a second time, at compile time, by `__CUDA_ARCH__ == 750`.
 //
-// 0.1.45: the Turing paths are opt-in (nobody here has an sm_75 card to confirm them): STRATA_SM75_PERF=1
-// (sm75_series.hpp) turns them on, STRATA_TC_SM75=0 / 1 forces this one off / on (still only on a 7.5 card).
+// 0.1.45: the Turing paths are opt-in (nobody here has an sm_75 card to confirm them): SAGUARO_SM75_PERF=1
+// (sm75_series.hpp) turns them on, SAGUARO_TC_SM75=0 / 1 forces this one off / on (still only on a 7.5 card).
 #pragma once
 
 #include "strata/core/sm75_series.hpp"
@@ -19,7 +19,7 @@
 namespace strata::core {
 
 inline bool tc_sm75_enabled(int cc_major, int cc_minor) {
-    return strata::sm75_switch("STRATA_TC_SM75", cc_major, cc_minor);   // 7.5 and only 7.5 - never another SM model
+    return strata::sm75_switch("SAGUARO_TC_SM75", cc_major, cc_minor);   // 7.5 and only 7.5 - never another SM model
 }
 
 }  // namespace strata::core

@@ -1,4 +1,4 @@
-"""serve/test_admit_order.py - STRATA_ADMIT_SHORT_FIRST: new requests take the control lines short prompts first
+"""serve/test_admit_order.py - SAGUARO_ADMIT_SHORT_FIRST: new requests take the control lines short prompts first
 (StrataEngine._take_control / _admit_next; no process, no GPU).
 
     python -m unittest serve.test_admit_order -v
@@ -89,7 +89,7 @@ class AdmitOrderTest(unittest.TestCase):
             self.assertTrue(self.e.ctl.acquire(timeout=1))
             self.take("agent", 120000, new=True)
             self.until(lambda: self.e.waiting == 1)
-            time.sleep(0.4)                         # past STRATA_ADMIT_MAX_WAIT_S
+            time.sleep(0.4)                         # past SAGUARO_ADMIT_MAX_WAIT_S
             self.take("chat", 500, new=True)
             self.until(lambda: self.e.waiting == 2)
             self.e.ctl.release()
@@ -97,7 +97,7 @@ class AdmitOrderTest(unittest.TestCase):
         self.assertEqual(self.order, ["agent", "chat"])
 
     def test_off_by_default(self):
-        self.assertEqual(server.ADMIT_SHORT_FIRST if "STRATA_ADMIT_SHORT_FIRST" not in __import__("os").environ
+        self.assertEqual(server.ADMIT_SHORT_FIRST if "SAGUARO_ADMIT_SHORT_FIRST" not in __import__("os").environ
                          else 0, 0)
         with mock.patch.object(server, "ADMIT_SHORT_FIRST", 0):
             order = self.queue(("agent1", 120000), ("chat", 500))

@@ -327,7 +327,7 @@ class FetchAndPack(unittest.TestCase):
         self.addCleanup(patcher.stop)
 
     def fetch(self, **kw):
-        with mock.patch.dict("os.environ", {"STRATA_UPDATE_ALLOW_HTTP": "1"}):
+        with mock.patch.dict("os.environ", {"SAGUARO_UPDATE_ALLOW_HTTP": "1"}):
             return drafting_fetch.ensure(self.data, progress=lambda *a: self.steps.append(a), base_url=self.base, files=self.files, **kw)
 
     def test_the_pinned_files_are_the_repositorys_own(self):
@@ -359,7 +359,7 @@ class FetchAndPack(unittest.TestCase):
 
     def test_a_file_that_does_not_match_its_hash_is_deleted_and_the_words_are_plain(self):
         bad = tuple((n, size, "0" * 64) for n, size, _h in self.files)
-        with mock.patch.dict("os.environ", {"STRATA_UPDATE_ALLOW_HTTP": "1"}):
+        with mock.patch.dict("os.environ", {"SAGUARO_UPDATE_ALLOW_HTTP": "1"}):
             with self.assertRaises(drafting_fetch.DraftingError) as ctx:
                 drafting_fetch.ensure(self.data, base_url=self.base, files=bad)
         self.assertIn("did not pass the safety check", str(ctx.exception))

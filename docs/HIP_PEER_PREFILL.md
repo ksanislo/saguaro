@@ -2,15 +2,15 @@
 
 For an eligible tensor-parallel pair, startup compares the ordinary host-mapped reduction, exact-F32 AR2, and direct peer-VRAM reduction. It selects the lowest median GPU time at the configured full prefill-chunk size. The peer path preserves member-0-plus-member-1 F32 addition order; it changes transport, not routing or weight precision. A faster collective is not a guarantee of the same percentage improvement in whole-model prefill.
 
-`MAYA_DS4_HIP_PEER_AR` is off by default (opt-in until it is measured on a two-GPU AMD PC). Set it in a serving config's `env`; native launches use `DS4_HIP_PEER_AR`. The choices are:
+`SAGUARO_DS4_HIP_PEER_AR` is off by default (opt-in until it is measured on a two-GPU AMD PC). Set it in a serving config's `env`; native launches use `DS4_HIP_PEER_AR`. The choices are:
 
 - `auto`: compare compatible transports once during model loading.
 - `0` or unset: retain the existing transport, with no peer allocation or timing probe.
 - `1`: force compatible peer transport without timing it against alternatives.
 
-Both ranks must support HIP peer access, fine-grained device allocations and a queryable steady wall clock. IDs come from the tensor-parallel group; no card models, bus addresses or GPU numbers are hard-coded. Unsupported pairs retain host transport. Explicit `MAYA_DS4_AR2=1/2` and flow groups retain their chosen transport without calibration; explicit AR2 `0` excludes AR2 from the comparison. When AR2 is unset, only its exact-F32 mode (`1`), not its FP16 mode (`2`), is a candidate.
+Both ranks must support HIP peer access, fine-grained device allocations and a queryable steady wall clock. IDs come from the tensor-parallel group; no card models, bus addresses or GPU numbers are hard-coded. Unsupported pairs retain host transport. Explicit `SAGUARO_DS4_AR2=1/2` and flow groups retain their chosen transport without calibration; explicit AR2 `0` excludes AR2 from the comparison. When AR2 is unset, only its exact-F32 mode (`1`), not its FP16 mode (`2`), is a candidate.
 
-Only two-member groups using the batch prompt loader are eligible. Single-GPU execution performs no peer queries, allocation or timing. Groups of three or more, decode/verification windows, logits gathering and pipeline handoffs keep their existing paths. `MAYA_DS4_AR2_DECODE` remains independent.
+Only two-member groups using the batch prompt loader are eligible. Single-GPU execution performs no peer queries, allocation or timing. Groups of three or more, decode/verification windows, logits gathering and pipeline handoffs keep their existing paths. `SAGUARO_DS4_AR2_DECODE` remains independent.
 
 Automatic mode logs `PEER_AR_AUTO` with GPU IDs, payload size, sample count, candidate median times, selected transport, calibration duration and completion status. An active peer pair also logs `exact peer prefill all-reduce enabled`; do not infer activation from the environment setting alone.
 
@@ -51,7 +51,7 @@ Those tests used an older experimental engine with additional scalar EXL3, host-
 
 The same transport builds on CUDA (`DS4_CUDA_PEER_AR`, a cmake option, on): `src/ds4/ds4_peer_cuda_compat.cuh` maps the
 HIP runtime names it uses (fine-grained allocations are plain `cudaMalloc`; `wall_clock64()` reads `%globaltimer`, a
-wall-clock rate of 1,000,000 kHz). `MAYA_DS4_HIP_PEER_AR` turns it on as on HIP; the log lines are the same
+wall-clock rate of 1,000,000 kHz). `SAGUARO_DS4_HIP_PEER_AR` turns it on as on HIP; the log lines are the same
 (`PEER_AR_AUTO`, `exact peer prefill all-reduce enabled on GPU0/GPU1`).
 
 - **CUDA's lazy module loading:** a kernel's first launch on a device loads it there, and with peer access on that can

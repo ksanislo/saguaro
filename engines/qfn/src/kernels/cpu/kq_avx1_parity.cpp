@@ -4,12 +4,12 @@
 // (subnormal and negative included), activations quantized the way the engine quantizes them.
 //
 //     kq_avx1_parity            every row of every token count 1..9, 16, 64 and a few row ranges: memcmp-equal
-//                               to ggml's vec_dot per token (what the engine runs with STRATA_CPU_KERNELS=old),
+//                               to ggml's vec_dot per token (what the engine runs with SAGUARO_CPU_KERNELS=old),
 //                               directly and through native_gu_rows / native_down_rows.
 //     kq_avx1_parity --bench [--pairs q4_K/q5_1,q8_0/q8_0] [--nt 1,2,4,8,64] [--threads 1,8,16]
 //                    [--cpus 10-19,30-39] [--mb 1024] [--reps 5] [--part all|gu|down]
 //                               whole experts (gate + up + down) per second, ggml's dot ("old") vs kq128 ("new") vs
-//                               kq128 fast ("fast", STRATA_CPU_KERNELS=fast; Q8_0 has no fast form, so new = fast there),
+//                               kq128 fast ("fast", SAGUARO_CPU_KERNELS=fast; Q8_0 has no fast form, so new = fast there),
 //                               arms interleaved and rotated per rep, thread k pinned to the k-th CPU of --cpus,
 //                               each thread walking its own experts out of --mb MB (more than L3: DRAM, as decode).
 #include "strata/kernels/cpu/kq_avx1.hpp"
@@ -362,7 +362,7 @@ int main(int argc, char** argv) {
     ggml_cpu_init();
     std::printf("kq_avx1_parity: %s (avx2 %d)\n", cpu::cpu_name().c_str(), (int) cpu::cpu_avx2_ok());
     if (!do_bench && (ggml_cpu_has_avx2() || !ggml_cpu_has_avx())) {   // the reference is ggml's __AVX__ dot only
-        std::printf("kq_avx1_parity: ggml-cpu is not the AVX-floor build here (STRATA_ISA_FLOOR=avx): nothing to compare\n");
+        std::printf("kq_avx1_parity: ggml-cpu is not the AVX-floor build here (SAGUARO_ISA_FLOOR=avx): nothing to compare\n");
         return 0;
     }
     for (auto& n : nts) n = std::min(std::max(n, 1), kMaxNT);

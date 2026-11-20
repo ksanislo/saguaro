@@ -42,7 +42,7 @@ __device__ float warp_sum(float x) {
         x += __shfl_xor_sync(0xffffffffu, x, offset);
     return x;
 }
-// TAB (#280, STRATA_ROPE_TABLE=1): the angles from the session's float64 table.  The host launches <false> whenever
+// TAB (#280, SAGUARO_ROPE_TABLE=1): the angles from the session's float64 table.  The host launches <false> whenever
 // no table applies - the default - so the default kernel is 0.1.31's code exactly (the table read is not in it;
 // with it merely skipped at run time, the compiled default path changed its results).
 // ROW (a batch window's slot rows): the block's (t, h, w) come staged per step in `thw`, not from the shared table
@@ -106,7 +106,7 @@ __device__ __forceinline__ void append_body(const float* __restrict__ raw, const
                         // through cos(0) - which is exactly what the queries are scaled by, so the top-k is unmoved.
                         float c, s;
                         const int32_t* ts = ROW ? thw + (std::size_t) step_idx * 3 : nullptr;
-                        // the spare's zero angle at its conversation's level (STRATA_YARN_ELASTIC: kRopeYarnOff)
+                        // the spare's zero angle at its conversation's level (SAGUARO_YARN_ELASTIC: kRopeYarnOff)
                         const int zp = (ROW ? __ldg(ts) : pos_base) >= kRopeYarnOff ? kRopeYarnOff : 0;
                         if (!(TAB && rope_tab_cs(rt, pos == 0 ? zp : idx_rope_pos<ROW>(mtab, ts, rope_pos, pair), pair, c, s))) {
                             const float theta_extrap = (pos == 0 ? zp : idx_rope_pos<ROW>(mtab, ts, rope_pos, pair)) * powf(theta_scale, float(pair));

@@ -1,7 +1,7 @@
 // src/prefill/gemm_f32_parity.cu - Pascal: Gemm::f16's opt-in FP32 route (cublasSgemm on FP32 copies of the FP16
-// operands, STRATA_DENSE_F32=1) against the cuBLAS FP16-operand call it replaces, bitwise, over the dense projections'
+// operands, SAGUARO_DENSE_F32=1) against the cuBLAS FP16-operand call it replaces, bitwise, over the dense projections'
 // shapes and a sweep of chunk sizes T (GPU, synthetic, no model).  Whether the two agree is a property of the cuBLAS
-// build (measured: 12.4.5.8 on a Tesla P40, 5,201 sizes): run this before setting STRATA_DENSE_F32=1.
+// build (measured: 12.4.5.8 on a Tesla P40, 5,201 sizes): run this before setting SAGUARO_DENSE_F32=1.
 //
 //     build/gemm_f32_parity [--quick | --full] [--bench]
 // default: every 7th T from the route's first to 8192, every T of 7000-7100 and around the powers of two, 8192;

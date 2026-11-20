@@ -5,7 +5,7 @@
 // steps of 64; each i-quant block is decoded ONCE into shared memory as F16 (code * the sub-block's scale: the product is exact up
 // to the F16 rounding of the scale and the product) and then shared by every row of the tile; x as F16 rows next to it, both
 // double-buffered, one barrier a step.  The F32 FMA tile of today (set_kernel) decodes the weights once per 64 rows and does
-// scalar FMAs.  Default ON for gfx12, STRATA_DS4_HIPK=0 switches it off (gfx12 only, the types below, experts of more than 16 rows).
+// scalar FMAs.  Default ON for gfx12, SAGUARO_DS4_HIPK=0 switches it off (gfx12 only, the types below, experts of more than 16 rows).
 #pragma once
 #if defined(STRATA_USE_HIP)
 
@@ -217,7 +217,7 @@ __global__ void __launch_bounds__(256) set_kernel(const SetArgs a, int dbg) {
 
 #include "ds4_iq_hip_r.inc"
 
-inline bool ok_device() {   // gfx12 unless STRATA_DS4_HIPK=0
+inline bool ok_device() {   // gfx12 unless SAGUARO_DS4_HIPK=0
     static std::atomic<int> state[16];
     int dev = 0;
     cudaGetDevice(&dev);
@@ -226,8 +226,8 @@ inline bool ok_device() {   // gfx12 unless STRATA_DS4_HIPK=0
     if (v == 0) {
         cudaDeviceProp prop{};
         const bool gfx12 = cudaGetDeviceProperties(&prop, dev) == cudaSuccess && std::strncmp(prop.gcnArchName, "gfx12", 5) == 0;
-        const char* e = std::getenv("STRATA_DS4_HIPK");
-        v = gfx12 && !(e != nullptr && e[0] == '0') ? 1 : 2;   // (on by default on gfx12; STRATA_DS4_HIPK=0 off)
+        const char* e = std::getenv("SAGUARO_DS4_HIPK");
+        v = gfx12 && !(e != nullptr && e[0] == '0') ? 1 : 2;   // (on by default on gfx12; SAGUARO_DS4_HIPK=0 off)
         state[dev].store(v, std::memory_order_relaxed);
     }
     return v == 1;
@@ -251,7 +251,7 @@ inline bool launch(const SetArgs& a, cudaStream_t s) {
         const int K = GU ? a.n_embd : a.n_ff, N = GU ? a.n_ff : a.n_embd;
         if (K % 256 != 0 || N % 64 != 0 || a.ldx % 8 != 0 || a.ldo % 2 != 0) return false;
         if (((uintptr_t) (GU ? (const void*) a.xf : (const void*) a.xh) & 15) != 0) return false;
-        static const int var = std::getenv("STRATA_DS4_HIPK") ? std::atoi(std::getenv("STRATA_DS4_HIPK")) : 0;
+        static const int var = std::getenv("SAGUARO_DS4_HIPK") ? std::atoi(std::getenv("SAGUARO_DS4_HIPK")) : 0;
         if (var != 2) {   // 2: the shared-memory weights kernel
             static const int cfg = std::getenv("HIPK_CFG") ? std::atoi(std::getenv("HIPK_CFG")) : 0;
             if (cfg == 1 && a.max_rows <= 32) return runr<T, GU, 32, 4, 1>(a, s);

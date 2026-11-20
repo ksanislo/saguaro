@@ -1,6 +1,6 @@
 /**
  * Helper agents on a model the person names (server/agent/model-routes.mjs and plugins/strata-models.mjs).
- * Pure tests always run; the real-Harness tests need STRATA_HARNESS_DIR and skip loudly without it.
+ * Pure tests always run; the real-Harness tests need SAGUARO_HARNESS_DIR and skip loudly without it.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -13,8 +13,8 @@ import { resolveHarness } from '../server/agent/harness-runtime.mjs';
 import { resolveModel, modelProblem, routeList } from '../server/agent/model-routes.mjs';
 import { AGENT_PROMPT } from '../server/agent/preset.mjs';
 
-const HARNESS = process.env.STRATA_HARNESS_DIR;
-const skip = !HARNESS || !resolveHarness({ env: process.env }).ok ? 'STRATA_HARNESS_DIR is not set to a built Harness' : false;
+const HARNESS = process.env.SAGUARO_HARNESS_DIR;
+const skip = !HARNESS || !resolveHarness({ env: process.env }).ok ? 'SAGUARO_HARNESS_DIR is not set to a built Harness' : false;
 
 const routes = [
   { provider: 'strata-local', model: 'gyro-gyro-s', name: 'qwen3.8-flash-next-gyro-gyro-s', connection: 'this computer', local: true },

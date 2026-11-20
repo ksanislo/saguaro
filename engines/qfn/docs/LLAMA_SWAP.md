@@ -18,7 +18,7 @@ models:
     cmd: >-
       sh -c 'cd /path/to/Strata && exec .venv/bin/python serve/server.py
       --engine strata --config strata-coder-iq1_m.json --port ${PORT}'
-    env: ["STRATA_ALLOWED_HOSTS=my-server"]     # the host name your clients use -- see below
+    env: ["SAGUARO_ALLOWED_HOSTS=my-server"]     # the host name your clients use -- see below
     checkEndpoint: /health
     ttl: 1800
 ```
@@ -47,7 +47,7 @@ llama-swap passes the client's Host header through, so a client that reaches the
 is refused. Requests by IP address and to `localhost` always pass, which is why it can work in a quick test and fail
 from another machine. Any one of these fixes it:
 
-- `STRATA_ALLOWED_HOSTS=my-server` in the entry's `env` (comma-separated names; ports are ignored), or
+- `SAGUARO_ALLOWED_HOSTS=my-server` in the entry's `env` (comma-separated names; ports are ignored), or
 - `"allowed_hosts": ["my-server"]` in `strata-<model>.json`, or
 - an `"api_key"`, which turns the check off -- then every client must send the key.
 

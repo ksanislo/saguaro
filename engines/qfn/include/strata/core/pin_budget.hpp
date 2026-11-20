@@ -14,10 +14,10 @@
 // A reserve that cannot be had is shrunk, then skipped: this never fails a start.
 //
 // Defaults: Windows CUDA 640 + 160 MiB (not the HIP build); Linux off (the NVIDIA driver there pins past RLIMIT_MEMLOCK and has no such
-// ceiling; checked with a 4 GiB cudaHostRegister under `ulimit -l 1 GiB`).  STRATA_PIN_RESERVE_MIB=N sets the soft
+// ceiling; checked with a 4 GiB cudaHostRegister under `ulimit -l 1 GiB`).  SAGUARO_PIN_RESERVE_MIB=N sets the soft
 // reserve (0 = off) on any OS; the hard one is a quarter of it, at least 64 MiB.
 //
-// STRATA_TEST_PIN_BUDGET_MIB=N is a TEST knob: it makes the engine's own pinned allocations and registrations that go
+// SAGUARO_TEST_PIN_BUDGET_MIB=N is a TEST knob: it makes the engine's own pinned allocations and registrations that go
 // through these wrappers (the arena's, the verify window's, the session's, the KV copy's) fail once N MiB are
 // outstanding, which is what the WDDM ceiling does on Windows.  It lets Linux reproduce the exhaustion.
 #pragma once
@@ -51,7 +51,7 @@ struct State {
     uint64_t arena_pinned = 0;    // what the arena registered (for the hint)
     int hard_retries = 0;
     State() {
-        if (const char* e = std::getenv("STRATA_TEST_PIN_BUDGET_MIB"); e != nullptr && *e != '\0')
+        if (const char* e = std::getenv("SAGUARO_TEST_PIN_BUDGET_MIB"); e != nullptr && *e != '\0')
             sim_budget = (uint64_t) std::strtoull(e, nullptr, 10) << 20;
     }
 };
@@ -78,7 +78,7 @@ inline void sim_uncharge(State& s, const void* p) {
 
 inline cudaError_t alloc_locked(State& s, void** p, size_t bytes, unsigned flags) {
     if (s.sim_budget != 0 && s.sim_used + bytes > s.sim_budget) return cudaErrorMemoryAllocation;
-    // STRATA_NUMA_PLACE: on the current card's node (cudaHostAlloc as before when placement is off)
+    // SAGUARO_NUMA_PLACE: on the current card's node (cudaHostAlloc as before when placement is off)
     const cudaError_t e = numa_host_alloc(p, bytes, flags, numa_place_current_node());
     if (e == cudaSuccess) sim_charge(s, *p, bytes);
     return e;
@@ -90,7 +90,7 @@ inline void free_locked(State& s, void* p) {
 }
 
 inline uint64_t soft_reserve_default_mib() {
-    if (const char* e = std::getenv("STRATA_PIN_RESERVE_MIB"); e != nullptr && *e != '\0')
+    if (const char* e = std::getenv("SAGUARO_PIN_RESERVE_MIB"); e != nullptr && *e != '\0')
         return (uint64_t) std::strtoull(e, nullptr, 10);
 #if defined(_WIN32) && !defined(STRATA_USE_HIP)   // CUDA on Windows (WDDM); the AMD build keeps its pinning as it was
     return 640;
@@ -143,7 +143,7 @@ inline void pin_reserve_take() {
     take(s.hard, s.hard_bytes, hard_mib);
     take(s.soft, s.soft_bytes, soft_mib);
     std::fprintf(stderr, "strata: pinned-memory headroom: holding %llu MiB for the buffers allocated after the expert arena "
-                         "(released after it: %llu MiB; kept until needed: %llu MiB; STRATA_PIN_RESERVE_MIB changes it)\n",
+                         "(released after it: %llu MiB; kept until needed: %llu MiB; SAGUARO_PIN_RESERVE_MIB changes it)\n",
                  (unsigned long long) ((s.soft_bytes + s.hard_bytes) >> 20), (unsigned long long) (s.soft_bytes >> 20),
                  (unsigned long long) (s.hard_bytes >> 20));
     if (s.soft_bytes + s.hard_bytes < ((soft_mib + hard_mib) << 20))
@@ -177,7 +177,7 @@ inline void pin_note_arena(uint64_t pinned_bytes) {
     s.arena_pinned = pinned_bytes;
     // TEST knob: the driver took everything but N KiB (what WDDM did on the 64 GB PC: the arena pinned to the ceiling)
     if (s.sim_budget != 0)
-        if (const char* e = std::getenv("STRATA_TEST_PIN_LEFT_KIB"); e != nullptr && *e != 0)
+        if (const char* e = std::getenv("SAGUARO_TEST_PIN_LEFT_KIB"); e != nullptr && *e != 0)
             s.sim_budget = s.sim_used + ((uint64_t) std::strtoull(e, nullptr, 10) << 10);
 }
 inline uint64_t pin_sim_peak() { return pin_detail::st().sim_peak; }
@@ -220,7 +220,7 @@ inline std::string pin_exhausted_hint() {
     auto& s = pin_detail::st();
     const uint64_t gib = s.arena_pinned >> 30;
     std::string t = "[pinned-memory-exhausted] the OS gave no more page-locked memory";
-    if (gib > 2) t += "; start again with STRATA_ARENA_PIN_GIB=" + std::to_string(gib - 2) + " (pin less of the expert arena) or with the low-RAM option";
+    if (gib > 2) t += "; start again with SAGUARO_ARENA_PIN_GIB=" + std::to_string(gib - 2) + " (pin less of the expert arena) or with the low-RAM option";
     return t;
 }
 

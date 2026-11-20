@@ -128,7 +128,7 @@ private:
 void* host_alloc(size_t bytes);           // page-aligned, zeroed; the GPU can wrap it without a copy
 void host_free(void* p, size_t bytes);
 // keep [p, p + bytes) in memory: unified memory the GPU reads must not be compressed or swapped out by another
-// program's demand (a graph would then wait seconds on page-ins).  MAYA_METAL_NO_PIN=1 skips it.  False: refused
+// program's demand (a graph would then wait seconds on page-ins).  SAGUARO_METAL_NO_PIN=1 skips it.  False: refused
 // (the wire limit, vm.user_wire_limit); the memory then stays pageable, said once.
 bool host_pin(void* p, size_t bytes);
 

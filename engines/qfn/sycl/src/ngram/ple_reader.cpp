@@ -1,5 +1,5 @@
 // sycl/src/ngram/ple_reader.cpp - SYCL port: upstream src/ngram/ple_reader.cpp plus a per-gather timing trace
-// (STRATA_PLE_TRACE=1: where a decode round's PLE wait goes). See include/strata/ngram/ple_reader.hpp.
+// (SAGUARO_PLE_TRACE=1: where a decode round's PLE wait goes). See include/strata/ngram/ple_reader.hpp.
 #include <cstdio>
 #include <cstdlib>
 #include "strata/ngram/ple_reader.hpp"
@@ -94,7 +94,7 @@ struct TicketState {
     double t_issue = 0, t_first = 0, t_last = 0;
 };
 bool ple_trace() {
-    static const bool v = std::getenv("STRATA_PLE_TRACE") != nullptr;
+    static const bool v = std::getenv("SAGUARO_PLE_TRACE") != nullptr;
     return v;
 }
 

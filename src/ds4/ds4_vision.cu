@@ -435,9 +435,9 @@ bool VisionTower::load(const VisionGeo& g, int device, const Reader& read, std::
         copied_[i] = a;
         used_[i] = b;
     }
-    {   // Turing and older: FP16 tensor cores instead of BF16 cuBLAS (MAYA_DS4_VISION_F16=0: BF16, the reference)
+    {   // Turing and older: FP16 tensor cores instead of BF16 cuBLAS (SAGUARO_DS4_VISION_F16=0: BF16, the reference)
         cudaDeviceProp pr{};
-        const char* fv = std::getenv("MAYA_DS4_VISION_F16");
+        const char* fv = std::getenv("SAGUARO_DS4_VISION_F16");
         const bool want = fv != nullptr ? std::atoi(fv) != 0
                                         : cudaGetDeviceProperties(&pr, device) == cudaSuccess && pr.major < 8;
         size_t fl = 0;
@@ -446,7 +446,7 @@ bool VisionTower::load(const VisionGeo& g, int device, const Reader& read, std::
             f16_ = true;
             std::fprintf(stderr, "vision: GEMMs on FP16 tensor cores (weights BF16 -> FP16 exact, %zu tiny values flushed)\n", fl);
         } else if (want) {
-            err = "vision: a weight beyond FP16's range - MAYA_DS4_VISION_F16=0 runs the BF16 GEMMs";
+            err = "vision: a weight beyond FP16's range - SAGUARO_DS4_VISION_F16=0 runs the BF16 GEMMs";
             return false;
         }
     }

@@ -23,11 +23,11 @@ The Overview puts serving state, prompt and answer speed, batch/queue pressure, 
 For a remote server, use HTTPS or a local SSH tunnel. A saved connection stores only the credential environment variable's **name**:
 
 ```sh
-strata connection create work --url https://example.invalid --credential-env STRATA_TELEMETRY_KEY
+strata connection create work --url https://example.invalid --credential-env SAGUARO_TELEMETRY_KEY
 strata monitor --connection work
 ```
 
-Set `STRATA_TELEMETRY_KEY` in the environment before connecting. Replace `example.invalid` with your own server root. The monitor client never needs a management credential.
+Set `SAGUARO_TELEMETRY_KEY` in the environment before connecting. Replace `example.invalid` with your own server root. The monitor client never needs a management credential.
 
 ## Prepare and rerun a local model
 

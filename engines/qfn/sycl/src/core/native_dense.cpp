@@ -29,9 +29,9 @@ bool in_range(const std::string& name) {
     const int l = std::atoi(name.c_str() + 4);
     return l >= g_layer_lb && l < g_layer_le;
 }
-// S23 experiment (STRATA_HC_Q8=1): the hyper-connection projections' Q8_0 bytes for the verify read
+// S23 experiment (SAGUARO_HC_Q8=1): the hyper-connection projections' Q8_0 bytes for the verify read
 bool hc_q8_env() {
-    static const bool on = [] { const char* v = std::getenv("STRATA_HC_Q8"); return v != nullptr && v[0] == '1'; }();
+    static const bool on = [] { const char* v = std::getenv("SAGUARO_HC_Q8"); return v != nullptr && v[0] == '1'; }();
     return on;
 }
 bool hc_q8_name(const std::string& name) {
@@ -103,7 +103,7 @@ struct Pending {
     int type;
     uint64_t bytes;
     DevicePtr data;
-    DevicePtr packed;   // STRATA_Q8_PACKED=1 copy, or null
+    DevicePtr packed;   // SAGUARO_Q8_PACKED=1 copy, or null
 };
 }
 
@@ -277,7 +277,7 @@ bool NativeDense::load(const std::vector<std::string> &shards,
                 }
                 max_in = (std::max)(max_in, (int) ref.ne0);
                 total += bytes;
-                // STRATA_Q8_PACKED=1: a second, packed copy of an eligible Q8_0 matrix for the decode MMVQ (the GGUF
+                // SAGUARO_Q8_PACKED=1: a second, packed copy of an eligible Q8_0 matrix for the decode MMVQ (the GGUF
                 // copy stays: the prompt path's GEMMs read it).
                 DevicePtr packed;
                 if (tensor.type == 8 && tensor.name != "blk.1.ple_key.weight" &&   // the PLE has its own kernel
@@ -321,15 +321,15 @@ bool NativeDense::load(const std::vector<std::string> &shards,
             if (hc_q8_requested())
                 for (const auto& tensor : gguf.tensors()) {
                     // S25: the F32 inject rows hold BF16-exact values: the read takes the pack's BF16 rows unless
-                    // STRATA_HC_Q8_INJECT=1 asks for a Q8_0 copy
-                    static const bool q8_inject = [] { const char* v = std::getenv("STRATA_HC_Q8_INJECT"); return v && v[0] == '1'; }();
+                    // SAGUARO_HC_Q8_INJECT=1 asks for a Q8_0 copy
+                    static const bool q8_inject = [] { const char* v = std::getenv("SAGUARO_HC_Q8_INJECT"); return v && v[0] == '1'; }();
                     const bool f32_inject = q8_inject && tensor.type == 0 && tensor.name.ends_with("_inject.weight");
                     if ((tensor.type != 8 && !f32_inject) || !hc_q8_name(tensor.name) || tensor.shape.size() != 2) continue;
                     auto found = table.table_.find(tensor.name);
                     if (found == table.table_.end() || found->second.hc_q8 != nullptr) continue;
                     auto& ref = found->second;
                     if (tensor.shape[0] != (uint64_t) ref.ne0 || tensor.shape[1] != (uint64_t) ref.ne1 || ref.ne0 % 32 != 0) {
-                        err = "native dense (STRATA_HC_Q8): incompatible matrix " + tensor.name; return false;
+                        err = "native dense (SAGUARO_HC_Q8): incompatible matrix " + tensor.name; return false;
                     }
                     const uint64_t bytes = (uint64_t) ref.ne0 / 32 * 34 * (uint64_t) ref.ne1;
                     void* p = nullptr;
@@ -350,7 +350,7 @@ bool NativeDense::load(const std::vector<std::string> &shards,
                             f32_inject ? (const void *)q8.data()
                                        : gguf.tensor_data(tensor),
                             bytes).wait()) != 0) {
-                        err = "native dense (STRATA_HC_Q8) upload " + tensor.name; return false;
+                        err = "native dense (SAGUARO_HC_Q8) upload " + tensor.name; return false;
                     }
                     ref.hc_q8 = p;
                     weights_.push_back(p);
@@ -400,12 +400,12 @@ bool NativeDense::load(const std::vector<std::string> &shards,
             weights_.push_back(item.data.release());
         }
         if (packed_count)
-            std::fprintf(stderr, "native dense: STRATA_Q8_PACKED=1 packed %zu Q8_0 matrices for decode (+%.1f MiB)\n",
+            std::fprintf(stderr, "native dense: SAGUARO_Q8_PACKED=1 packed %zu Q8_0 matrices for decode (+%.1f MiB)\n",
                          packed_count, packed_bytes / 1048576.0);
         scratch_ = scratch.release();
         bytes_ = total + hc_q8_bytes;
         if (hc_q8_requested())
-            std::fprintf(stderr, "strata: STRATA_HC_Q8=1: %.2f GiB of Q8_0 hyper-connection projections for the verify read\n",
+            std::fprintf(stderr, "strata: SAGUARO_HC_Q8=1: %.2f GiB of Q8_0 hyper-connection projections for the verify read\n",
                          (double) hc_q8_bytes / 1073741824.0);
         return true;
     } catch (const std::exception& error) {

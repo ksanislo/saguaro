@@ -1,4 +1,4 @@
-// include/strata/core/coupled_draft.hpp - COUPLED DRAFT SAMPLING (STRATA_SPEC_COUPLED=1, off by default).
+// include/strata/core/coupled_draft.hpp - COUPLED DRAFT SAMPLING (SAGUARO_SPEC_COUPLED=1, off by default).
 //
 // Under sampling the verify window samples row t of a window at position pos0 as Philox(seed, pos0 + t) over the
 // sampler chain (penalties -> top_k -> top_p -> min_p -> temperature -> inverse-CDF pick; verify.cpp run(),
@@ -54,13 +54,13 @@ inline constexpr int kCoupledHistCap = 4096;
 
 inline bool& coupled_draft_state() {
     static bool on = [] {
-        const char* e = std::getenv("STRATA_SPEC_COUPLED");
+        const char* e = std::getenv("SAGUARO_SPEC_COUPLED");
         return e != nullptr && *e != '\0' && std::strcmp(e, "0") != 0;
     }();
     return on;
 }
 
-/// Whether coupled draft sampling is enabled (via STRATA_SPEC_COUPLED=1 or --coupled-draft CLI flag).
+/// Whether coupled draft sampling is enabled (via SAGUARO_SPEC_COUPLED=1 or --coupled-draft CLI flag).
 inline bool coupled_draft_env() {
     return coupled_draft_state();
 }

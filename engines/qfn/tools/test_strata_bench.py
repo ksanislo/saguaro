@@ -195,13 +195,13 @@ class RedactionTests(unittest.TestCase):
     def test_config_view_drops_secrets_and_cuts_paths(self):
         cfg = {"exe": r"C:\Users\me\Strata\engine\strata.exe", "args": ["--native", "/home/me/models/m-IQ3_XXS.gguf", "--ctx", "65536"],
                "api_key": "hunter2", "model_name": "Fake Model", "log": "/tmp/x.log", "port": 8080,
-               "env": {"STRATA_FOO": "/home/me/z", "PATH": "/usr/bin", "STRATA_TOKEN": "t"}}
+               "env": {"SAGUARO_FOO": "/home/me/z", "PATH": "/usr/bin", "SAGUARO_TOKEN": "t"}}
         v = B.config_view(cfg)
         self.assertEqual(v["exe"], "strata.exe")
         self.assertEqual(v["args"], ["--native", "m-IQ3_XXS.gguf", "--ctx", "65536"])
         self.assertNotIn("api_key", v)
         self.assertNotIn("log", v)
-        self.assertEqual(v["env"], {"STRATA_FOO": "z"})
+        self.assertEqual(v["env"], {"SAGUARO_FOO": "z"})
         self.assertEqual(B.detect_quant(v), "IQ3_XXS")
         self.assertNotIn("hunter2", json.dumps(v))
 

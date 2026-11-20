@@ -205,7 +205,7 @@ def upgrade(dest: Path, source: str, *, installed: Path | None = None, hardware:
     check it as `install` does (signature, hashes, every file), put it NEXT TO the old one, start it once (`--version`), and only then remove the older
     folders (one generation).  Returns the new strata-dsv41, or None: nothing newer, the feed cannot be read (silent: a launch never waits on the
     network), or the newer one could not be installed (one plain line, the installed engine keeps running).  Versions compare numerically
-    (0.1.49 < 0.1.49.1).  The caller does not call this for a --dsv41-package or a STRATA_DSV41_EXE."""
+    (0.1.49 < 0.1.49.1).  The caller does not call this for a --dsv41-package or a SAGUARO_DSV41_EXE."""
     from strata_control import feed as feedmod, signing, transfer, updater
 
     dest = Path(dest)

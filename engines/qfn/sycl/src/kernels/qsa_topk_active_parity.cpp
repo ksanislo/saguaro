@@ -104,9 +104,9 @@ int main() try {
     }
     // the active-bound dispatch is Turing's in the engine; forced here so every CUDA card checks it
 #if defined(_WIN32)
-    _putenv_s("STRATA_TOPK_ACTIVE_ANY", "1");
+    _putenv_s("SAGUARO_TOPK_ACTIVE_ANY", "1");
 #else
-    setenv("STRATA_TOPK_ACTIVE_ANY", "1", 1);
+    setenv("SAGUARO_TOPK_ACTIVE_ANY", "1", 1);
 #endif
     const Case cases[] = {
         {1111, 256, 0}, {8192, 256, 0}, {32768, 256, 0}, {131072, 256, 0},

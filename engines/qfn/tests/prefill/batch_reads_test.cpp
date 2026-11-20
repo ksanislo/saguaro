@@ -1,4 +1,4 @@
-// STRATA_BATCH_READS: how the prompt path's queue worker picks the prompts of one shared chunk and how many tokens each
+// SAGUARO_BATCH_READS: how the prompt path's queue worker picks the prompts of one shared chunk and how many tokens each
 // gets (Prefill::plan_batch / batch_shares).  CPU only: no device is touched.
 #include "strata/prefill/prefill.hpp"
 
@@ -83,7 +83,7 @@ int main() {
         expect(p3.at == std::vector<size_t>({0, 2}), "a cancelled prompt is left to end the usual way");
         expect(Prefill::plan_batch(q, 1, 2048).at.empty(), "off below two");
     }
-    {   // STRATA_BATCH_READS_FAST: a short urgent read anywhere in the queue goes in the next chunk whole; the others a
+    {   // SAGUARO_BATCH_READS_FAST: a short urgent read anywhere in the queue goes in the next chunk whole; the others a
         // small share each, the chunk under the cap; a lone urgent read behind other pieces goes alone, first
         Prefill::BatchFast f;
         f.tokens = 512;
@@ -120,7 +120,7 @@ int main() {
         expect(p6.fast && p6.at == std::vector<size_t>({1}) && p6.got == v({40}), "fast alone, ahead of the queue");
         f.tokens = 0;
         expect(!Prefill::plan_batch(only, 8, 2048, f, 1023).fast, "FAST=0: off");
-        // STRATA_BATCH_READS_FAST_SHRINK: a short read on its way, nothing urgent queued yet: short chunks, a lone
+        // SAGUARO_BATCH_READS_FAST_SHRINK: a short read on its way, nothing urgent queued yet: short chunks, a lone
         // reader's piece sliced too (a batch of one)
         f.tokens = 512;
         std::deque<std::shared_ptr<PromptJob>> one;

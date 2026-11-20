@@ -14,8 +14,8 @@ import { buildProfile, OPENROUTER_EFFORTS } from '../server/agent/profile.mjs';
 import { createModelProviders } from '../server/model-providers.mjs';
 import { createVisionProbe, modelSupportsReasoning, readsPicturesByDefault } from '../server/vision-probe.mjs';
 
-const HARNESS = process.env.STRATA_HARNESS_DIR;
-const skip = !HARNESS || !resolveHarness({ env: process.env }).ok ? 'STRATA_HARNESS_DIR is not set to a built Harness' : false;
+const HARNESS = process.env.SAGUARO_HARNESS_DIR;
+const skip = !HARNESS || !resolveHarness({ env: process.env }).ok ? 'SAGUARO_HARNESS_DIR is not set to a built Harness' : false;
 
 const LIST = { data: [
   { id: 'deepseek/deepseek-v3.2', name: 'DeepSeek: DeepSeek V3.2', context_length: 163840, architecture: { input_modalities: ['text'] }, supported_parameters: ['tools', 'reasoning', 'include_reasoning', 'temperature'] },

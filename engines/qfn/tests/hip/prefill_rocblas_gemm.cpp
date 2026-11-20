@@ -1,9 +1,9 @@
 // Opt-in HIP smoke test for the rocBLAS solution table of the prompt path's FP16-out GEMMs (gfx103x); it needs
-// STRATA_ROCBLAS_TUNING (SKIP otherwise).  It checks that the table loads for this device and rocBLAS build, and that
+// SAGUARO_ROCBLAS_TUNING (SKIP otherwise).  It checks that the table loads for this device and rocBLAS build, and that
 // Gemm's FP16 path (set_f16_io, the route the table serves) matches an FP32-out hipBLASEx reference on the table's
 // first two shapes, at their token bucket and at a smaller odd T that resolves to the same row.  Like the hipBLASLt
 // test it does not check that rocBLAS ran the table's solution: an id the library refuses falls back to the default
-// kernel and the test still passes; STRATA_ROCBLAS_VERBOSE=1 prints the "tuned_launches=... fallbacks=..." summary.
+// kernel and the test still passes; SAGUARO_ROCBLAS_VERBOSE=1 prints the "tuned_launches=... fallbacks=..." summary.
 #include <cuda_runtime.h>
 #include <hip/hip_fp16.h>
 #include <hipblas/hipblas.h>
@@ -123,9 +123,9 @@ bool run_case(strata::prefill::Gemm& gemm, hipblasHandle_t blas, hipStream_t str
 }  // namespace
 
 int main() {
-    const char* tuning_path = std::getenv("STRATA_ROCBLAS_TUNING");
+    const char* tuning_path = std::getenv("SAGUARO_ROCBLAS_TUNING");
     if (!tuning_path || !*tuning_path) {
-        std::fprintf(stderr, "SKIP: set STRATA_ROCBLAS_TUNING to a tuning table (or the tools/hip directory) for this GPU and rocBLAS build\n");
+        std::fprintf(stderr, "SKIP: set SAGUARO_ROCBLAS_TUNING to a tuning table (or the tools/hip directory) for this GPU and rocBLAS build\n");
         return 77;
     }
     if (!strata::prefill::prompt_f16()) {
@@ -200,7 +200,7 @@ int main() {
     HIP_CHECK(hipStreamDestroy(stream));
     std::printf("smoke test: %d cases on the first %zu shapes of the table's %zu rows; %s\n", cases,
                 std::min<size_t>(2, table.rows().size()), table.rows().size(),
-                ok ? "outputs match hipBLASEx within FP16 rounding (solution ids are not verified; see STRATA_ROCBLAS_VERBOSE)"
+                ok ? "outputs match hipBLASEx within FP16 rounding (solution ids are not verified; see SAGUARO_ROCBLAS_VERBOSE)"
                    : "FAILED");
     return ok ? 0 : 1;
 }

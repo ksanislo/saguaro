@@ -62,7 +62,7 @@ namespace vnni {
 }  // namespace vnni
 #endif
 
-// ================================ the "bit-plane" row dot (opt-in: STRATA_Q2_BITPLANE=1) ================================
+// ================================ the "bit-plane" row dot (opt-in: SAGUARO_Q2_BITPLANE=1) ================================
 //
 // The kernel above spends, per 32-value chunk and token, a maddubs, a madd, a convert, a scalar d*scale product
 // broadcast into an FMA, and a scalar correction FMA; plus a 14-op interleave to unpack 64 codes.  Here:
@@ -82,7 +82,7 @@ namespace vnni {
 // The integer part is exact; only the float summation order differs from the kernel above (last bits).  Every
 // token's operations are the same whatever the group width, so a token's rows are bitwise the same alone or in a
 // verify window.  It changes the last bits of a Q2_0 expert on AVX2-only CPUs, so it is OFF by default
-// (STRATA_Q2_BITPLANE=1 turns it on; unset: the kernel above, exactly as before).
+// (SAGUARO_Q2_BITPLANE=1 turns it on; unset: the kernel above, exactly as before).
 template <int NT>
 inline void row_bp_acc(const uint8_t* row, const ActQ* const* a, int npairs, __m256* acc) {
     for (int t = 0; t < NT; ++t) acc[t] = _mm256_setzero_ps();
@@ -144,7 +144,7 @@ void rows_bp(const uint8_t* w, size_t row_bytes, int npairs, const ActQ* const* 
 }
 
 const bool kBitplane = [] {
-    const char* e = std::getenv("STRATA_Q2_BITPLANE");
+    const char* e = std::getenv("SAGUARO_Q2_BITPLANE");
     return e != nullptr && e[0] == '1';
 }();
 

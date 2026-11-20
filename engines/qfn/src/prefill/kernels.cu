@@ -39,7 +39,7 @@ __device__ __forceinline__ uint16_t bf(float f) {
     u += 0x7fffu + ((u >> 16) & 1u);
     return (uint16_t) (u >> 16);
 }
-// The BF16 GEMMs' second operand (STRATA_PREFILL_BF16X2): what the BF16 image `hi` left out of f, itself in BF16.
+// The BF16 GEMMs' second operand (SAGUARO_PREFILL_BF16X2): what the BF16 image `hi` left out of f, itself in BF16.
 // W.hi + W.lo carries ~16 mantissa bits of the activation - the decode path's FP32 x to within ~1e-5.
 __device__ __forceinline__ uint16_t bf_lo(float f, uint16_t hi) { return bf(f - __uint_as_float((uint32_t) hi << 16)); }
 __device__ __forceinline__ float sigm(float x) { return 1.0f / (1.0f + __expf(-x)); }
@@ -47,7 +47,7 @@ __device__ __forceinline__ uint16_t hf(float f) { return __half_as_ushort(__floa
 // A SwiGLU product for an FP16 GEMM: saturated, so a token with a massive activation cannot turn into inf and then
 // NaN in the down projection (decode's q8_1 has room to ~8e6; FP16 ends at 65504).  A NaN stays NaN (fminf/fmaxf
 // would make it -65504 and hide where it came from); finite values below 65504 round exactly as before.
-// STRATA_F16_RANGE=1 (set_f16_range): what reaches FP16's range on this device - the largest |value| the activation
+// SAGUARO_F16_RANGE=1 (set_f16_range): what reaches FP16's range on this device - the largest |value| the activation
 // images converted (hf_sat is their one funnel) and how many were beyond 65504 or NaN; W and Y are counted in gemm.cu.
 // Off, the cost is one flag read per value.  The max is kept as float bits (positive floats order as unsigned ints),
 // and a thread takes the atomic only when it beats the value it read, so the atomics stop once the max has settled.
@@ -204,7 +204,7 @@ __global__ void __launch_bounds__(256) gr_write_norm_rs_kernel(float* __restrict
         if (xn16_lo) xn16_lo[xo + d] = bf_lo(x, h);
     }
 }
-// S23 (opt-in STRATA_CVEC_FUSE=1): a steered layer's FFN write, its control vector and the next half's norm in one
+// S23 (opt-in SAGUARO_CVEC_FUSE=1): a steered layer's FFN write, its control vector and the next half's norm in one
 // pass over R (was gr_write + cvec_apply + gr_norm_rs: three).  The write is gr_write_kernel's, the vector
 // cvec_kernel's (the same per-thread dot order over d = tid + 256 k, the same two-level xor reduction), the norm
 // gr_norm_rs_kernel's (the same ss order and block_sum): the same bits.
@@ -358,7 +358,7 @@ __global__ void gdn_conv_tiled_kernel(const float* __restrict__ hist, const floa
         v0 = v1; v1 = v2; v2 = x;
     }
 }
-// Aurora (S23, opt-in STRATA_GDN_CONVL2=1): gdn_conv_tiled_kernel with gdn_l2_kernel folded in.  A block's 128 threads
+// Aurora (S23, opt-in SAGUARO_GDN_CONVL2=1): gdn_conv_tiled_kernel with gdn_l2_kernel folded in.  A block's 128 threads
 // are the 128 channels of one head, so for the q / k heads (block < 2 HK) the norm's sum of squares is the block's:
 // the same warp_sum, the same four partials added in the same order, the same v * rsqrtf(ss + eps) on the same
 // stored value - the same bits, without writing h and reading it back (16 tokens per round).
@@ -582,7 +582,7 @@ __global__ void __launch_bounds__(CB * RG) gdn_rec_cols_kernel(float* __restrict
 }
 // gdn_rec_cols_kernel with the next token's inputs (q/k rows, v, gate, beta) loaded into registers while this token
 // computes (software pipelining).  The same arithmetic in the same order: the same bits, and the same CB-column split.
-// STRATA_GDN_PIPELINE=0: gdn_rec_cols_kernel.
+// SAGUARO_GDN_PIPELINE=0: gdn_rec_cols_kernel.
 __global__ void __launch_bounds__(CB * RG) gdn_rec_cols_pipe_kernel(float* __restrict__ state, const float* __restrict__ h,
                                                                       const float* __restrict__ gate,
                                                                       const float* __restrict__ beta,
@@ -643,7 +643,7 @@ __global__ void __launch_bounds__(CB * RG) gdn_rec_cols_pipe_kernel(float* __res
 // accumulators each.  The chain is the recurrence's per-token floor (a 32-step dependent FFMA chain is ~128
 // cycles before the barriers); the split keeps the load pattern, the barriers and the (S, h_v, S) state
 // layout untouched.  FP32-level, NOT bit-exact - the four partial sums group the 32 products differently -
-// so it is opt-in by measured benefit (STRATA_GDN_REC_WARP=2; gdn_chunk_parity bounds the error).
+// so it is opt-in by measured benefit (SAGUARO_GDN_REC_WARP=2; gdn_chunk_parity bounds the error).
 #if defined(STRATA_EXPERIMENTAL_SM60)
 __global__ void __launch_bounds__(CB * RG) gdn_rec_cols_pipe_fast_kernel(float* __restrict__ state,
                                                                         const float* __restrict__ h,
@@ -715,9 +715,9 @@ __global__ void __launch_bounds__(CB * RG) gdn_rec_cols_pipe_fast_kernel(float* 
 // one of a token orders every read of rkv before the next token's writes, the next token's first one every read of ro
 // before the writes after it.  64 blocks instead of 192.  Per value head and column the same arithmetic in the same
 // order: the same bits (src/prefill/gdn_rec_parity.cu checks them and times the variants: 1.41x on a 4080 Super).
-// sm_80+ cards that hold its 64 blocks at once (gdn_keyhead_ok); STRATA_GDN_KEYHEAD=0: gdn_rec_cols_pipe_kernel.
+// sm_80+ cards that hold its 64 blocks at once (gdn_keyhead_ok); SAGUARO_GDN_KEYHEAD=0: gdn_rec_cols_pipe_kernel.
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
-#define STRATA_GDN_CP_ASYNC 0   // Turing builds: plain copies (launched there only with STRATA_GDN_KEYHEAD=1)
+#define STRATA_GDN_CP_ASYNC 0   // Turing builds: plain copies (launched there only with SAGUARO_GDN_KEYHEAD=1)
 #else
 #define STRATA_GDN_CP_ASYNC 1
 #endif
@@ -846,9 +846,9 @@ __global__ void __launch_bounds__(CB * RG) gdn_rec_kh_kernel(float* __restrict__
 // 64 SMs and more, 1.02-1.04x / 1.03-1.06x at 48 to 63 (two blocks against four: a draw, slower on neither),
 // 1.28-1.31x / 1.28-1.30x at 39 to 47, 1.53-1.57x / 1.54-1.55x at 32 to 38.  Per call, from the current device (a
 // layer split can mix cards).
-// STRATA_GDN_KEYHEAD=1 also takes it on sm_75 (plain copies instead of cp.async; same bits, A/B until measured).
+// SAGUARO_GDN_KEYHEAD=1 also takes it on sm_75 (plain copies instead of cp.async; same bits, A/B until measured).
 bool gdn_keyhead_ok() {
-    static const int env = [] { const char* v = std::getenv("STRATA_GDN_KEYHEAD"); return v != nullptr ? std::atoi(v) : -1; }();
+    static const int env = [] { const char* v = std::getenv("SAGUARO_GDN_KEYHEAD"); return v != nullptr ? std::atoi(v) : -1; }();
     if (env == 0) return false;
     const int min_major = env == 1 ? 7 : 8;
     static int known[64] = {};   // per device: 0 not asked yet, 1 yes, 2 no
@@ -864,12 +864,12 @@ bool gdn_keyhead_ok() {
         if (!yes) cudaGetLastError();
         known[dev] = yes ? 1 : 2;
         if (env == 1 && major < 8)   // the opt-in's verdict per card, for the A/B's log
-            std::fprintf(stderr, "strata: CUDA%d GDN prompt recurrence per key head (STRATA_GDN_KEYHEAD=1): %s "
+            std::fprintf(stderr, "strata: CUDA%d GDN prompt recurrence per key head (SAGUARO_GDN_KEYHEAD=1): %s "
                                  "(%d blocks/SM x %d SMs)\n", dev, yes ? "on" : "off", per_sm, sms);
     }
     return known[dev] == 1;
 }
-// STRATA_GDN_CHUNKED=1 (opt-in): the recurrence in chunks of GCH tokens (the WY form of the gated delta rule, as
+// SAGUARO_GDN_CHUNKED=1 (opt-in): the recurrence in chunks of GCH tokens (the WY form of the gated delta rule, as
 // flash-linear-attention computes it), all in FP32.  Per value head, with g_t = exp(gate_t), gamma_t the gate's sum
 // from the chunk's start to t (inclusive) and S0 the state before the chunk:
 //   A[t][i] = beta_t exp(gamma_t - gamma_i) k_t.k_i (i < t),   T = (I + A)^-1 (unit lower triangular),
@@ -881,7 +881,7 @@ bool gdn_keyhead_ok() {
 // super-block at once (a block per chunk and key head: its three value heads share k and q); gdn_chunk_scan_kernel then
 // walks the super-block's chunks per (value head, 16 columns): the state slice in registers, the products as small
 // register-tiled matmuls from shared memory.  Every exponent is <= 0 (gates are negative), so nothing overflows.
-// STRATA_GDN_CHUNKED=1 takes prompt chunks of this many tokens and more: on an RTX 5090 the two launches cost more
+// SAGUARO_GDN_CHUNKED=1 takes prompt chunks of this many tokens and more: on an RTX 5090 the two launches cost more
 // than they save below ~100 tokens (gdn_rec_parity --bench: 32 tokens 0.58x gdn_rec_kh_kernel, 96 1.03x, 128 1.20x,
 // 512 1.67x, 2048+ 1.81x)
 constexpr int64_t kGdnChunkedMin = 128;
@@ -1190,10 +1190,10 @@ cudaError_t gdn_rec_chunked(float* state, const float* h, const float* gate, con
             cudaGetLastError();
             return cudaErrorNotSupported;
         }
-        // STRATA_GDN_CHUNKED=2 skips the SM-count test (measurement on a card under 128 SMs: the scan then runs in
+        // SAGUARO_GDN_CHUNKED=2 skips the SM-count test (measurement on a card under 128 SMs: the scan then runs in
         // several waves and is expected to be slower than the default kernel; the architecture and shared-memory
         // tests stay)
-        static const bool any_sms = [] { const char* v = std::getenv("STRATA_GDN_CHUNKED"); return v != nullptr && std::atoi(v) >= 2; }();
+        static const bool any_sms = [] { const char* v = std::getenv("SAGUARO_GDN_CHUNKED"); return v != nullptr && std::atoi(v) >= 2; }();
         if (strata::cc_major_of(major) < 8 || (!any_sms && sms < HK * (S / GDV)) || (size_t) strata::smem_optin_of(smem) < kChunkScanSmem)
             return cudaErrorNotSupported;
     }
@@ -1219,7 +1219,7 @@ cudaError_t gdn_rec_chunked(float* state, const float* h, const float* gate, con
     }
     return cudaSuccess;   // launch errors surface at the caller's check; an error above means nothing ran
 }
-#include "gdn_chunk_sm75.cuh"   // STRATA_GDN_CHUNKED_SM75=1: the chunked recurrence on Turing tensor cores
+#include "gdn_chunk_sm75.cuh"   // SAGUARO_GDN_CHUNKED_SM75=1: the chunked recurrence on Turing tensor cores
 #endif
 #if defined(__HIPCC__)   // the Aurora (gfx11) recurrence kernels: AMD builds only
 // Aurora (S23): the recurrence with the column-split grid of gdn_rec_cols_pipe_kernel (four 32-column blocks per value
@@ -1230,7 +1230,7 @@ cudaError_t gdn_rec_chunked(float* state, const float* h, const float* gate, con
 // loaded into registers while this one computes, and a token's k and q rows are read into registers before its
 // products (one LDS latency per token, not one per load).  The old kernels took ~4 barriers per token and ~3.5 us
 // per token and layer on the Radeon 8060S; the output norm runs after it in gdn_out_norm_warp_kernel.
-// STRATA_GDN_HEAD=0: the old kernels.
+// SAGUARO_GDN_HEAD=0: the old kernels.
 constexpr int HT = 4;                           // tokens per staged chunk (LDS ~10 KB: all 192 blocks resident)
 constexpr int QCB = 32;                         // columns per block
 constexpr int QTH = QCB * 4;                    // threads per block: 4 lanes per column
@@ -1339,7 +1339,7 @@ __global__ void __launch_bounds__(QTH) gdn_rec_quad_kernel(float* __restrict__ s
         for (int r = 0; r < 32; ++r) base[(size_t) r * HV * S] = s[r];
     }
 }
-// Aurora (S23, opt-in STRATA_GDN_PP=1): gdn_rec_quad_kernel with the same arithmetic in the same order, two changes in
+// Aurora (S23, opt-in SAGUARO_GDN_PP=1): gdn_rec_quad_kernel with the same arithmetic in the same order, two changes in
 // how it is compiled.  (1) The VGPR count: the 32 state-row addresses of the first loads were kept live across the
 // whole walk to be reused by the final stores (64 VGPRs, 196 in all = 7 waves a SIMD for the 192 blocks of 4 waves
 // that need 9.6): the stores' lane offset goes through an asm so the addresses are made again, 133 VGPRs, all blocks
@@ -1465,7 +1465,7 @@ __global__ void __launch_bounds__(QTH) gdn_rec_quad_pp_kernel(float* __restrict_
     }
 }
 
-// Aurora (S23, opt-in STRATA_GDN_PP=2): gdn_rec_quad_kernel with two columns per lane (a wave: 4 row groups x 8 lanes x
+// Aurora (S23, opt-in SAGUARO_GDN_PP=2): gdn_rec_quad_kernel with two columns per lane (a wave: 4 row groups x 8 lanes x
 // 2 columns = 16 columns; a block of 4 waves 64 columns, 96 blocks).  A lane's two columns share the k / q rows it
 // reads from shared memory (half the LDS reads and shuffles per column, the kernel's limit) and give each wave two
 // independent dependency chains; the 384 waves fit in one round at 230 VGPRs.  Per column the same arithmetic in
@@ -1620,7 +1620,7 @@ __global__ void __launch_bounds__(S) gdn_out_norm_loop_kernel(const float* __res
             y[at] = v;
             y16[o16] = hf(v);
         } else {
-            // STRATA_GDN_NOY=1: nothing reads the FP32 result (403 MB per 16K chunk).  The FP16 value is what the
+            // SAGUARO_GDN_NOY=1: nothing reads the FP32 result (403 MB per 16K chunk).  The FP16 value is what the
             // compiler makes of hf(v) next to the store: v_fma_mixlo_f16, the product rounded to FP16 once
             unsigned r;
             asm("v_fma_mixlo_f16 %0, %1, %2, 0" : "=v"(r) : "v"(sg), "v"(bp));
@@ -1628,7 +1628,7 @@ __global__ void __launch_bounds__(S) gdn_out_norm_loop_kernel(const float* __res
         }
     }
 }
-// STRATA_GDN_CHUNKED=1 on the gfx11 matrix cores: the recurrence in chunks of 16 tokens (the WY form of the CUDA
+// SAGUARO_GDN_CHUNKED=1 on the gfx11 matrix cores: the recurrence in chunks of 16 tokens (the WY form of the CUDA
 // chunked path above), FP16 operands and FP32 accumulation, the output norm fused.  Per value head, gamma_t the
 // gate's sum from the chunk's start to t (inclusive; the code's sg) and S0 the state before the chunk:
 //   A[t][i] = beta_t exp(gamma_t - gamma_i) k_t.k_i (i < t),  T = (I + A)^-1,  P[t][i] = exp(gamma_t - gamma_i) q_t.k_i (i <= t),
@@ -1647,7 +1647,7 @@ constexpr int GW_NW = S / 16;      // the scan's waves per block: one per 16 val
 constexpr int GW_VPK = HV / HK;    // value heads per key head: the prep's waves per block
 constexpr int GW_KP = S + 8;       // the scan's padded FP16 k / q rows
 constexpr int GW_AHEAD = 3;        // the scan warms the cache this many chunks ahead
-constexpr int64_t kGdnWmmaMin = 64;   // STRATA_GDN_CHUNKED=1 takes prompt chunks of this many tokens and more
+constexpr int64_t kGdnWmmaMin = 64;   // SAGUARO_GDN_CHUNKED=1 takes prompt chunks of this many tokens and more
 typedef _Float16 gw_h16 __attribute__((ext_vector_type(16)));
 typedef _Float16 gw_h8 __attribute__((ext_vector_type(8)));
 typedef _Float16 gw_h2 __attribute__((ext_vector_type(2)));
@@ -1937,7 +1937,7 @@ __global__ void __launch_bounds__(GW_NW * 32) gdn_wmma_scan_kernel(float* __rest
 #pragma unroll
         for (int v = 0; v < 8; ++v) state[(size_t) (16 * j + 2 * v + hi) * rs + (size_t) vh * S + col] = s[j][v];
 }
-// The opt-in chunked recurrence on gfx11 (STRATA_GDN_CHUNKED=1): false (nothing launched) on another part.  y, the
+// The opt-in chunked recurrence on gfx11 (SAGUARO_GDN_CHUNKED=1): false (nothing launched) on another part.  y, the
 // FP32 scratch of the other kernels (T x 6144 floats), holds T and P (1 KB per chunk and value head: T x 3 KB).
 bool gdn_rec_wmma(float* state, const float* h, const float* gate, const float* beta, const float* z, const float* gamma,
                   float eps, float* y, uint16_t* y16, int64_t T, cudaStream_t s, int64_t ld16) {
@@ -2137,7 +2137,7 @@ __global__ void rms_rows_kernel(float* __restrict__ x, const float* __restrict__
     __syncthreads();
     for (int64_t c = threadIdx.x; c < cols; c += blockDim.x) r[c] = s * r[c] * w[c];
 }
-// TAB (#280, STRATA_ROPE_TABLE=1): the angles from the session's float64 table.  The host launches <false> whenever
+// TAB (#280, SAGUARO_ROPE_TABLE=1): the angles from the session's float64 table.  The host launches <false> whenever
 // no table applies - the default - so the default kernel is 0.1.31's code exactly (the table read is not in it;
 // with it merely skipped at run time, the compiled default path changed its results).
 template <bool TAB>
@@ -2241,7 +2241,7 @@ __global__ void to_bf16_kernel(const float* __restrict__ x, uint16_t* __restrict
     }
 }
 
-// S23 (opt-in STRATA_HC_UPMIX=1, gfx11): the hyper-connection read's up projection with gr_mix_r as its epilogue.  The
+// S23 (opt-in SAGUARO_HC_UPMIX=1, gfx11): the hyper-connection read's up projection with gr_mix_r as its epilogue.  The
 // up GEMM's FP32 output `gated` (T x 10240: 671 MB per 16K chunk) is never written or read back: a block computes a
 // tile of 64 tokens x 64 columns for all 4 streams on the matrix cores (BF16 in, FP32 accumulate over K = 320; the
 // lo16 and w_up tiles staged in LDS), and each lane already holds the 4 streams' values of its (token, column) - the
@@ -2313,7 +2313,7 @@ __global__ void __launch_bounds__(256) gr_upmix_kernel(const uint16_t* __restric
 }
 #endif
 #if !defined(__HIPCC__)
-// S23 on CUDA (sm_80+; opt-in STRATA_HC_UPMIX=1, see hc_upmix in prefill.cpp): the hyper-connection read's up
+// S23 on CUDA (sm_80+; opt-in SAGUARO_HC_UPMIX=1, see hc_upmix in prefill.cpp): the hyper-connection read's up
 // projection (lo16 x w_up^T, BF16 in, FP32 accumulate over K = 320) with gr_mix_r as its epilogue, so `gated`
 // (T x 10240 FP32, 336 MB for an 8,192-token chunk) is neither written by the GEMM nor read back by the mix - gr_mix_r
 // reads R and `gated` at ~96% of the bandwidth already, so only fewer bytes make the read faster.  A block: 128 tokens
@@ -2594,11 +2594,11 @@ void gdn_gates(const float* ab, const float* dt, const float* ssm_a, float* gate
     check("gdn_gates");
 }
 void gdn_conv(float* history, const float* qkv, const float* conv_w, float* h, int64_t T, float eps, void* stream) {
-    static const bool serial = std::getenv("STRATA_GDN_CONV_SERIAL") != nullptr;   // the old walk (A/B)
+    static const bool serial = std::getenv("SAGUARO_GDN_CONV_SERIAL") != nullptr;   // the old walk (A/B)
     if (serial || T <= CONV_TILE) {
         gdn_conv_kernel<<<C / 128, 128, 0, (cudaStream_t) stream>>>(history, qkv, conv_w, h, T);
     } else {
-        static const bool fused = [] { const char* v = std::getenv("STRATA_GDN_CONVL2"); return v && std::atoi(v) != 0; }();
+        static const bool fused = [] { const char* v = std::getenv("SAGUARO_GDN_CONVL2"); return v && std::atoi(v) != 0; }();
         if (fused) {
             gdn_conv_l2_kernel<<<dim3(C / 128, (unsigned) ((T + CONV_TILE - 1) / CONV_TILE)), 128, 0,
                                  (cudaStream_t) stream>>>(history, qkv, conv_w, h, T, eps);
@@ -2644,12 +2644,12 @@ void gdn_recurrence_variant(int variant, float* state, const float* h, const flo
                             const float* z, const float* gamma, float eps, float* y, uint16_t* y16, int64_t T,
                             void* stream, int64_t ld16) {
     if (ld16 <= 0) ld16 = (int64_t) HV * S;
-    static const bool serial = std::getenv("STRATA_GDN_REC_HEADS") != nullptr;   // the one-block-per-head kernel (A/B)
+    static const bool serial = std::getenv("SAGUARO_GDN_REC_HEADS") != nullptr;   // the one-block-per-head kernel (A/B)
 #if defined(__HIPCC__)
     if (variant == 0 || variant == 1) {
-        // STRATA_GDN_CHUNKED=1 (opt-in): the chunked recurrence on the gfx11 matrix cores, FP16 operands (other bits;
+        // SAGUARO_GDN_CHUNKED=1 (opt-in): the chunked recurrence on the gfx11 matrix cores, FP16 operands (other bits;
         // a shorter chunk or another part takes the kernels below)
-        static const bool chunked = [] { const char* v = std::getenv("STRATA_GDN_CHUNKED"); return v != nullptr && std::atoi(v) != 0; }();
+        static const bool chunked = [] { const char* v = std::getenv("SAGUARO_GDN_CHUNKED"); return v != nullptr && std::atoi(v) != 0; }();
         if (chunked && !serial && gdn_rec_wmma(state, h, gate, beta, z, gamma, eps, y, y16, T, (cudaStream_t) stream, ld16)) {
             check("gdn_recurrence (chunked, WMMA)");
             return;
@@ -2676,14 +2676,14 @@ void gdn_recurrence_variant(int variant, float* state, const float* h, const flo
     }
     if (variant == 1) {
         if (T > 0) {
-            static const int pp = [] { const char* v = std::getenv("STRATA_GDN_PP"); return v ? std::atoi(v) : 0; }();
+            static const int pp = [] { const char* v = std::getenv("SAGUARO_GDN_PP"); return v ? std::atoi(v) : 0; }();
             if (pp == 2)
                 gdn_rec_quad2c_kernel<<<HV * (S / C2CB), QTH, 0, (cudaStream_t) stream>>>(state, h, gate, beta, y, T);
             else if (pp)
                 gdn_rec_quad_pp_kernel<<<HV * (S / QCB), QTH, 0, (cudaStream_t) stream>>>(state, h, gate, beta, y, T);
             else
                 gdn_rec_quad_kernel<<<HV * (S / QCB), QTH, 0, (cudaStream_t) stream>>>(state, h, gate, beta, y, T);
-            static const bool noy = [] { const char* v = std::getenv("STRATA_GDN_NOY"); return v && std::atoi(v) != 0; }();
+            static const bool noy = [] { const char* v = std::getenv("SAGUARO_GDN_NOY"); return v && std::atoi(v) != 0; }();
             if (noy)
                 gdn_out_norm_loop_kernel<false><<<(unsigned) std::min<int64_t>(T * HV, 4096), S, 0, (cudaStream_t) stream>>>(
                     z, gamma, eps, y, y16, T * HV, ld16);
@@ -2699,21 +2699,21 @@ void gdn_recurrence_variant(int variant, float* state, const float* h, const flo
 #endif
 #if defined(STRATA_EXPERIMENTAL_SM60)
     // v100/gdn-chunk: the chunked recurrence (src/prefill/gdn_chunk.cu) on Volta, where the token chain is the
-    // cost.  STRATA_GDN_CHUNK=0 forces the recurrence, =1 forces the chunked path (the parity test's A/B switch);
+    // cost.  SAGUARO_GDN_CHUNK=0 forces the recurrence, =1 forces the chunked path (the parity test's A/B switch);
     // unset: cc == 7.0 only, every other architecture keeps the recurrence bit-for-bit as before.  Read per call
     // on purpose - cheap next to the work, and the tests flip it between two launches.
-    const char* chunk_v = std::getenv("STRATA_GDN_CHUNK");
+    const char* chunk_v = std::getenv("SAGUARO_GDN_CHUNK");
     const int chunk_env = chunk_v && *chunk_v ? std::atoi(chunk_v) : -1;
     static const bool volta = gdn_chunk_available();   // runtime cc == 7.0 (the kernels are compiled for sm_70 only)
     const bool chunked = !serial && T > 0 && (chunk_env >= 0 ? chunk_env != 0 : false);
     // v100/gdn-chunk: the sync-free warp-reduction recurrence (bit-exact vs gdn_rec_cols_pipe) is the
-    // measured-fast path on Volta; the chunked recurrence is opt-in (STRATA_GDN_CHUNK=1/2) - correct and
-    // measured, but slower than this on the V100 (bench/gdn_chunk_bench).  STRATA_GDN_REC_WARP=0 restores
+    // measured-fast path on Volta; the chunked recurrence is opt-in (SAGUARO_GDN_CHUNK=1/2) - correct and
+    // measured, but slower than this on the V100 (bench/gdn_chunk_bench).  SAGUARO_GDN_REC_WARP=0 restores
     // the old pipelined kernel bit-for-bit.
-    // STRATA_GDN_REC_WARP (Volta only, opt-in): unset or 0 -> the pipelined kernel (the default; the chain split changes the
+    // SAGUARO_GDN_REC_WARP (Volta only, opt-in): unset or 0 -> the pipelined kernel (the default; the chain split changes the
     // summation order, so it is not the default without a V100 check here), 2 -> the chain-split kernel (measured +6..9%, FP32-level), the
     // old pipelined kernel bit-for-bit is 0, 1 -> the sync-free bit-exact control.
-    const char* warp_v = std::getenv("STRATA_GDN_REC_WARP");
+    const char* warp_v = std::getenv("SAGUARO_GDN_REC_WARP");
     const int warp_env = warp_v && *warp_v ? std::atoi(warp_v) : 0;
     const bool warp_rec = !serial && !chunked && T > 0 && volta && warp_env != 0;
     if (chunked && T >= 64) {
@@ -2738,13 +2738,13 @@ void gdn_recurrence_variant(int variant, float* state, const float* h, const flo
     if (serial || T <= 0 || variant == 2) {
         gdn_rec_kernel<<<HV, dim3(S, RG), 0, (cudaStream_t) stream>>>(state, h, gate, beta, z, gamma, eps, y, y16, T, ld16);
     } else {
-        static const bool pipe = [] { const char* v = std::getenv("STRATA_GDN_PIPELINE"); return v == nullptr || std::atoi(v) != 0; }();
+        static const bool pipe = [] { const char* v = std::getenv("SAGUARO_GDN_PIPELINE"); return v == nullptr || std::atoi(v) != 0; }();
 #if !defined(__HIPCC__)
-        // STRATA_GDN_CHUNKED=1 (opt-in): the recurrence in chunks for prompt chunks of kGdnChunkedMin+ tokens (other
+        // SAGUARO_GDN_CHUNKED=1 (opt-in): the recurrence in chunks for prompt chunks of kGdnChunkedMin+ tokens (other
         // bits; a shorter chunk, a card it does not fit or a failed scratch allocation takes the kernels below)
-        static const bool chunked = [] { const char* v = std::getenv("STRATA_GDN_CHUNKED"); return v != nullptr && std::atoi(v) != 0; }();
-        // STRATA_GDN_CHUNKED_SM75=1 (opt-in): the same on FP16 tensor cores with hi/lo splits (sm_75+, other bits)
-        static const bool chunked75 = [] { const char* v = std::getenv("STRATA_GDN_CHUNKED_SM75"); return v != nullptr && std::atoi(v) != 0; }();
+        static const bool chunked = [] { const char* v = std::getenv("SAGUARO_GDN_CHUNKED"); return v != nullptr && std::atoi(v) != 0; }();
+        // SAGUARO_GDN_CHUNKED_SM75=1 (opt-in): the same on FP16 tensor cores with hi/lo splits (sm_75+, other bits)
+        static const bool chunked75 = [] { const char* v = std::getenv("SAGUARO_GDN_CHUNKED_SM75"); return v != nullptr && std::atoi(v) != 0; }();
         if (chunked && T >= kGdnChunkedMin && gdn_rec_chunked(state, h, gate, beta, y, T, (cudaStream_t) stream) == cudaSuccess) {
         } else if (chunked75 && T >= kGdnChunkedMin && gdn_rec_chunked_sm75_logged(state, h, gate, beta, y, T, stream)) {
         } else if (pipe && gdn_keyhead_ok())   // the value heads of a key head in one thread (same bits)
@@ -2761,20 +2761,20 @@ void gdn_recurrence_variant(int variant, float* state, const float* h, const flo
 }
 void gdn_recurrence_reserve() {
 #if !defined(__HIPCC__)
-    const char* v = std::getenv("STRATA_GDN_CHUNKED_SM75");
+    const char* v = std::getenv("SAGUARO_GDN_CHUNKED_SM75");
     if (v == nullptr || std::atoi(v) == 0) return;
     if (gdn_chunked_sm75_ok() && gdn_chunk_t_scratch() == nullptr)
-        std::fprintf(stderr, "strata: GDN chunked recurrence (STRATA_GDN_CHUNKED_SM75=1): no room for its 8.1 MB scratch; "
+        std::fprintf(stderr, "strata: GDN chunked recurrence (SAGUARO_GDN_CHUNKED_SM75=1): no room for its 8.1 MB scratch; "
                              "the default kernel runs\n");
 #endif
 }
 void gdn_recurrence(float* state, const float* h, const float* gate, const float* beta, const float* z,
                     const float* gamma, float eps, float* y, uint16_t* y16, int64_t T, void* stream, int64_t ld16) {
     // Aurora (S23): four lanes per column + the grid-stride norm, the same bits (tests/hip/gdn_rec_head.cpp);
-    // STRATA_GDN_HEAD=1 (on by default on gfx1151; off with STRATA_GDN_HEAD=0 or STRATA_GDN_REC_HEADS) takes them
-    // (AMD builds only; the arch defaults set STRATA_GDN_HEAD=1 on gfx1151 and leave other cards on the earlier kernels)
-    static const bool head = [] { const char* v = std::getenv("STRATA_GDN_HEAD"); return v != nullptr && std::atoi(v) != 0; }();
-    static const bool serial = std::getenv("STRATA_GDN_REC_HEADS") != nullptr;
+    // SAGUARO_GDN_HEAD=1 (on by default on gfx1151; off with SAGUARO_GDN_HEAD=0 or SAGUARO_GDN_REC_HEADS) takes them
+    // (AMD builds only; the arch defaults set SAGUARO_GDN_HEAD=1 on gfx1151 and leave other cards on the earlier kernels)
+    static const bool head = [] { const char* v = std::getenv("SAGUARO_GDN_HEAD"); return v != nullptr && std::atoi(v) != 0; }();
+    static const bool serial = std::getenv("SAGUARO_GDN_REC_HEADS") != nullptr;
     gdn_recurrence_variant(head && !serial ? 1 : 0, state, h, gate, beta, z, gamma, eps, y, y16, T, stream, ld16);
 }
 void route(const float* logits, int32_t* ids, float* weights, int64_t T, int64_t n_expert, void* stream) {

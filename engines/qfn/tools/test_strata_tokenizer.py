@@ -4,8 +4,8 @@ ids of a plain encode.
 
     python -m unittest tools.test_strata_tokenizer -v
 
-The real vocabulary comes from $STRATA_TOKENIZER (a pack's tokenizer/ directory) when set, else from llama.cpp's
-`models/ggml-vocab-qwen35.gguf` next to the gguf-py the tools use ($STRATA_GGUF_PY, third_party/llama.cpp); the
+The real vocabulary comes from $SAGUARO_TOKENIZER (a pack's tokenizer/ directory) when set, else from llama.cpp's
+`models/ggml-vocab-qwen35.gguf` next to the gguf-py the tools use ($SAGUARO_GGUF_PY, third_party/llama.cpp); the
 tests that need it are skipped without one.  The chat template's USER_DEFINED tokens (`<think>`, `<tool_call>`,
 ...) are added to the llama.cpp vocabulary, which does not have them, as the pack's has.
 """
@@ -28,7 +28,7 @@ ADDED = ["<think>", "</think>", "<tool_call>", "</tool_call>", "<tool_response>"
 
 
 def vocab_gguf() -> Path | None:
-    cands = [os.environ.get("STRATA_GGUF_PY"), ROOT / "third_party" / "llama.cpp" / "gguf-py", "/opt/llama.cpp/gguf-py"]
+    cands = [os.environ.get("SAGUARO_GGUF_PY"), ROOT / "third_party" / "llama.cpp" / "gguf-py", "/opt/llama.cpp/gguf-py"]
     for c in cands:
         if c and (Path(c).parent / "models" / "ggml-vocab-qwen35.gguf").is_file():
             return Path(c).parent / "models" / "ggml-vocab-qwen35.gguf"
@@ -36,7 +36,7 @@ def vocab_gguf() -> Path | None:
 
 
 def load_tokenizer():
-    pack = os.environ.get("STRATA_TOKENIZER")
+    pack = os.environ.get("SAGUARO_TOKENIZER")
     if pack and (Path(pack) / "vocab.json").is_file():
         t = Path(pack)
         vocab = json.loads((t / "vocab.json").read_text(encoding="utf-8"))
@@ -146,7 +146,7 @@ class Oracle(unittest.TestCase):
         path = vocab_gguf()
         if path is None or not path.with_suffix(".gguf.inp").is_file():
             self.skipTest("llama.cpp's ggml-vocab-qwen35.gguf test vectors are not here")
-        tk = gguf_tokenizer(path)                  # not $STRATA_TOKENIZER: the vectors belong to this vocabulary
+        tk = gguf_tokenizer(path)                  # not $SAGUARO_TOKENIZER: the vectors belong to this vocabulary
         inp = path.with_suffix(".gguf.inp").read_text(encoding="utf-8").split("\n__ggml_vocab_test__\n")
         out = path.with_suffix(".gguf.out").read_text(encoding="utf-8").split("\n")
         n = 0
@@ -163,7 +163,7 @@ class Marks(unittest.TestCase):
     def setUpClass(cls):
         cls.tk = load_tokenizer()
         if cls.tk is None:
-            raise unittest.SkipTest("no tokenizer (set STRATA_TOKENIZER or STRATA_GGUF_PY)")
+            raise unittest.SkipTest("no tokenizer (set SAGUARO_TOKENIZER or SAGUARO_GGUF_PY)")
 
     def test_marks(self):
         text = "a<|im_start|>user\nhi<|im_end|>\n<think>\n"
@@ -182,7 +182,7 @@ class Prompts(unittest.TestCase):
     def setUpClass(cls):
         cls.tk = load_tokenizer()
         if cls.tk is None:
-            raise unittest.SkipTest("no tokenizer (set STRATA_TOKENIZER or STRATA_GGUF_PY)")
+            raise unittest.SkipTest("no tokenizer (set SAGUARO_TOKENIZER or SAGUARO_GGUF_PY)")
         from serve.frontend import ChatTemplate
         cls.template = ChatTemplate(ROOT / "serve" / "chat_template.jinja")
 

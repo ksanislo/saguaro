@@ -452,7 +452,7 @@ class MonitorBundleTests(unittest.TestCase):
                 with redirect_stdout(source_output):
                     self.assertEqual(source_main(["monitor", "--once", "--json", "--url", url]), 0)
                 clean_env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "PYTHONHOME")}
-                clean_env["STRATA_CONNECTION_DIR"] = str(Path(directory) / "connections")
+                clean_env["SAGUARO_CONNECTION_DIR"] = str(Path(directory) / "connections")
                 portable = subprocess.run([sys.executable, "-S", str(bundle), "monitor", "--once", "--json",
                                            "--url", url], cwd=directory, env=clean_env, check=True,
                                           capture_output=True, text=True)

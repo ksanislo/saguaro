@@ -68,7 +68,7 @@ class GuiLayout(unittest.TestCase):
         patch = mock.patch.dict(os.environ, self.env)
         patch.start()
         self.addCleanup(patch.stop)
-        for key in ("STRATA_INSTALL_DIR", "STRATA_SETTINGS_FILE", "STRATA_COMPONENTS_DIR", "STRATA_DOCUMENTS_DIR"):
+        for key in ("SAGUARO_INSTALL_DIR", "SAGUARO_SETTINGS_FILE", "SAGUARO_COMPONENTS_DIR", "SAGUARO_DOCUMENTS_DIR"):
             patch = mock.patch.dict(os.environ)
             patch.start()
             self.addCleanup(patch.stop)
@@ -154,7 +154,7 @@ class GuiLayout(unittest.TestCase):
         old.mkdir()
         (old / "strata-x.json").write_text(json.dumps({"exe": "e", "tokenizer": "t", "args": []}))
         app_settings = self.install.parent / "app-settings.json"
-        with mock.patch.dict(os.environ, {"STRATA_SETTINGS_FILE": str(app_settings)}):
+        with mock.patch.dict(os.environ, {"SAGUARO_SETTINGS_FILE": str(app_settings)}):
             settings = Path(os.environ["APPDATA"]) / "Strata" / "settings.json"
             settings.parent.mkdir(parents=True)
             settings.write_text(json.dumps({"installs": [str(old)]}))

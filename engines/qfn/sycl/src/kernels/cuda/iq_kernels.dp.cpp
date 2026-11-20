@@ -952,7 +952,7 @@ mmvq_kernel(const uint8_t *__restrict__ w, size_t row_bytes,
 // scale as a float) and `apply` (the activation loads, the dp4a chain in the same order, the same integer scale
 // step and the same float expression).  `apply(load(...))` does the dot's integer and float operations in the same
 // order on the same values, so a column of the kernels below is BITWISE equal to the same column of mmvq_kernel /
-// native_gu_kernel / native_down_kernel (iq_multi_parity checks it; STRATA_OLD_IQ_MMVQ=1 keeps the old kernels).
+// native_gu_kernel / native_down_kernel (iq_multi_parity checks it; SAGUARO_OLD_IQ_MMVQ=1 keeps the old kernels).
 template<int TY> struct Split;
 // Formats with a Split below take the decode-once kernels; the others (Q4_K, Q5_K, Q5_1, Q8_0: UD-Q4_K_XL) the
 // per-entry ones, which call Fmt<TY>::dot per column exactly as before #242 (the launchers test kSplit at compile
@@ -1864,7 +1864,7 @@ template <> struct Multi<42> {   // q2_0 (down)
 // (the activation reads and the rest of the dot), the same statements in the same order as vec_dot_*_q8_1 above, so
 // apply(load(...)) is the dot's value bit for bit; a group's 2-4 entries then read and decode each weight word once
 // instead of once per entry.  Every entry keeps its own lane-strided k order and lanes_sum: the outputs are bitwise
-// those of row_dot_lanes (native_grouped_parity --kq checks it).  STRATA_KQ_SPLIT=0: the per-entry kernels.
+// those of row_dot_lanes (native_grouped_parity --kq checks it).  SAGUARO_KQ_SPLIT=0: the per-entry kernels.
 template <int TY> struct KqSplit { static constexpr bool has = false; };
 // APR trellis types: tq_load decodes the lane's 16 codebook values once, tq_apply is the activation side per entry (the same
 // operations as vec_dot_tq_q8_1, so the outputs are the per-entry kernels' bits)
@@ -3200,24 +3200,24 @@ bool env_on(const char* name) {
     const char* v = std::getenv(name);
     return v != nullptr && v[0] != '\0' && v[0] != '0';
 }
-// STRATA_OLD_IQ_MMVQ=1 keeps the per-column kernels (bitwise equal to the new ones; kept for A/B timing)
-bool g_old_kernels = env_on("STRATA_OLD_IQ_MMVQ");
+// SAGUARO_OLD_IQ_MMVQ=1 keeps the per-column kernels (bitwise equal to the new ones; kept for A/B timing)
+bool g_old_kernels = env_on("SAGUARO_OLD_IQ_MMVQ");
 // SYCL port (0.1.31 merge): upstream sends the split formats (the i-quants) to native_gu/down_multi_kernel, one warp
 // per row, 8 rows a group. On the B70 the port's grouped kernels (8 lanes a row, 32 rows a group, the multi-entry
 // dots with aligned loads and the IQ4 codebook in registers) are the measured ones, so they stay the default for
-// every format; STRATA_EXPERT_SPLIT=1 takes upstream's multi kernels, launched with their own grid (GU_ROWS rows).
-bool g_split_multi = env_on("STRATA_EXPERT_SPLIT");
-bool g_no_sub16_gu = env_on("STRATA_NO_SUB16_GU");
-// STRATA_IQ_STAGE_GRID=0 disables staging 64-bit i-quant codebook tables into shared memory
+// every format; SAGUARO_EXPERT_SPLIT=1 takes upstream's multi kernels, launched with their own grid (GU_ROWS rows).
+bool g_split_multi = env_on("SAGUARO_EXPERT_SPLIT");
+bool g_no_sub16_gu = env_on("SAGUARO_NO_SUB16_GU");
+// SAGUARO_IQ_STAGE_GRID=0 disables staging 64-bit i-quant codebook tables into shared memory
 bool g_stage_grid = [] {
-    const char* v = std::getenv("STRATA_IQ_STAGE_GRID");
+    const char* v = std::getenv("SAGUARO_IQ_STAGE_GRID");
     return v == nullptr || v[0] == '\0' || v[0] != '0';
 }();
 // The single-matrix mmvq (128-thread blocks, one per 4 rows) pays the 2-8 KB staging per block: on the RTX 5070 its
 // IQ2_XS / IQ2_S / IQ1_M calls were 10-20% slower staged at 3-8 columns (iq_multi_parity --bench), while the grouped
-// expert kernels gain.  So mmvq stages only with STRATA_IQ_STAGE_GRID_MMVQ=1 (bitwise the same either way).
+// expert kernels gain.  So mmvq stages only with SAGUARO_IQ_STAGE_GRID_MMVQ=1 (bitwise the same either way).
 bool g_stage_grid_mmvq = g_stage_grid && [] {
-    const char* v = std::getenv("STRATA_IQ_STAGE_GRID_MMVQ");
+    const char* v = std::getenv("SAGUARO_IQ_STAGE_GRID_MMVQ");
     return v != nullptr && v[0] == '1';
 }();
 
@@ -3482,11 +3482,11 @@ void launch_mmvq(const uint8_t *W, size_t rb, const block_q8_1 *X, float *y,
 }
 
 
-// SYCL port: upstream's opt-in AMD-tuned S26 (STRATA_EXPERT_V2) and S27 (STRATA_EXPERT_V2K) grouped-expert kernels are
+// SYCL port: upstream's opt-in AMD-tuned S26 (SAGUARO_EXPERT_V2) and S27 (SAGUARO_EXPERT_V2K) grouped-expert kernels are
 // not migrated: dpct cannot name their instantiations and they are tuned for gfx1151. The port's lane kernels below are
 // the measured ones for every format; the two switches only print a note.
 #if 0
-// ---------------------------------------------------------------- S26 STRATA_EXPERT_V2=1 (opt-in): IQ3_S gate/up + IQ4_NL down
+// ---------------------------------------------------------------- S26 SAGUARO_EXPERT_V2=1 (opt-in): IQ3_S gate/up + IQ4_NL down
 // Bitwise equal to native_gu_multi_kernel / native_down_multi_kernel (S26 harness, real UD-IQ4_XS expert blobs, T 1-3,
 // memcmp of every output): each row's lane sums and warp_sum are the same; a warp interleaves RPW rows (more loads in
 // flight) and reads the chunk's activation rows from LDS and, for IQ3_S, the grid table from LDS (the same values).
@@ -4051,8 +4051,8 @@ void s26_launch_l(const NativeExpertLayout &L, int64_t cap_groups,
     }
 }
 // ---------------------------------------------------------------- stream B: UD-Q4_K_XL grouped decode experts
-// STRATA_EXPERT_V2K=1: s26_gu_l_kernel / s26_down_l_kernel's structure (4 interleaved rows per warp, the chunk's q8_1
-// activation rows in LDS, SwiGLU + q8_1 fused, optionally STRATA_TSUM's transposed butterfly) for Q4_K / Q5_K gate/up
+// SAGUARO_EXPERT_V2K=1: s26_gu_l_kernel / s26_down_l_kernel's structure (4 interleaved rows per warp, the chunk's q8_1
+// activation rows in LDS, SwiGLU + q8_1 fused, optionally SAGUARO_TSUM's transposed butterfly) for Q4_K / Q5_K gate/up
 // and Q5_1 / Q8_0 down, which otherwise run native_gu_kernel / native_down_kernel (one entry at a time, the weight
 // words re-read per column).  Each Fmt<TY>::dot is split into S27<TY>::load (everything that depends on the weight) and
 // apply (the activation words and the same integer / float expression), the same impl functions, so a row's lane-strided
@@ -4483,7 +4483,7 @@ void s27_launch_ts(bool ts, const NativeExpertLayout &L, int64_t cap_groups,
 
 #endif
 
-// SYCL port: lanes per row of the port's grouped expert kernels at run time (STRATA_GU_LANES / STRATA_DOWN_LANES:
+// SYCL port: lanes per row of the port's grouped expert kernels at run time (SAGUARO_GU_LANES / SAGUARO_DOWN_LANES:
 // 4, 8, 16 or 32; default STRATA_EXPERT_LANES), 256 / lanes rows per work-group. Gate/up rows are 80 dot calls
 // (2560 wide), the IQ4_NL down rows 40 (640 wide), so the best split can differ by role.
 inline int lanes_env(const char* name) {
@@ -4491,12 +4491,12 @@ inline int lanes_env(const char* name) {
     const int n = v ? std::atoi(v) : kExpertLanes;
     return n == 4 || n == 8 || n == 16 || n == 32 ? n : kExpertLanes;
 }
-inline int gu_lanes() { static const int v = lanes_env("STRATA_GU_LANES"); return v; }
-inline int down_lanes() { static const int v = lanes_env("STRATA_DOWN_LANES"); return v; }
-// STRATA_KQ_GU_LANES (opt-in): the lane split of the K-quant / Q8_0 gate/up rows alone (Unsloth's files), default STRATA_GU_LANES.
+inline int gu_lanes() { static const int v = lanes_env("SAGUARO_GU_LANES"); return v; }
+inline int down_lanes() { static const int v = lanes_env("SAGUARO_DOWN_LANES"); return v; }
+// SAGUARO_KQ_GU_LANES (opt-in): the lane split of the K-quant / Q8_0 gate/up rows alone (Unsloth's files), default SAGUARO_GU_LANES.
 // B70, 4-token windows, split on: 16 lanes reads Q4_K/Q5_1 experts at 439 GB/s against 426 at 8; the reduction order differs
 // (other bits), so it stays opt-in.
-inline int kq_gu_lanes() { static const int v = std::getenv("STRATA_KQ_GU_LANES") ? lanes_env("STRATA_KQ_GU_LANES") : gu_lanes(); return v; }
+inline int kq_gu_lanes() { static const int v = std::getenv("SAGUARO_KQ_GU_LANES") ? lanes_env("SAGUARO_KQ_GU_LANES") : gu_lanes(); return v; }
 template <int TG, int LN, bool KM = true>
 void launch_gu_port(unsigned groups, dpct::queue_ptr s, const unsigned long long *grp_ptr, const int32_t *grp_start,
                     const int32_t *n_groups, const int32_t *ent_tok, const block_q8_1 *X,
@@ -4510,9 +4510,9 @@ void launch_gu_port(unsigned groups, dpct::queue_ptr s, const unsigned long long
             native_gu_kernel<TG, LN, KM>(grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up);
         });
 }
-// STRATA_KQ_SPLIT=0 (or native_expert_set_kq_split(false)): the K-quant / Q5_1 / Q8_0 lane kernels without the
+// SAGUARO_KQ_SPLIT=0 (or native_expert_set_kq_split(false)): the K-quant / Q5_1 / Q8_0 lane kernels without the
 // multi-entry split (one weight read per entry, as before); the outputs are the same bits either way
-bool g_kq_split = [] { const char* v = std::getenv("STRATA_KQ_SPLIT"); return !(v && v[0] == '0'); }();
+bool g_kq_split = [] { const char* v = std::getenv("SAGUARO_KQ_SPLIT"); return !(v && v[0] == '0'); }();
 template <int TG, int LN>
 void gu_port_km(unsigned groups, dpct::queue_ptr s, const unsigned long long *grp_ptr, const int32_t *grp_start,
                 const int32_t *n_groups, const int32_t *ent_tok, const block_q8_1 *X, const NativeExpertLayout &L,
@@ -4567,7 +4567,7 @@ void launch_down_lanes(dpct::dim3 grid, dpct::queue_ptr s, const unsigned long l
     }
 }
 
-// STRATA_EXPERT_SPLIT=1 (opt-in): upstream's multi-entry kernels, one warp per row, GU_ROWS rows a group, launched with
+// SAGUARO_EXPERT_SPLIT=1 (opt-in): upstream's multi-entry kernels, one warp per row, GU_ROWS rows a group, launched with
 // their own grid.  The sub-warp variants (SUB16 / SUB_DOWN) are not launched here: they are bitwise equal to the
 // generic path and need their own row counts; the port's lane kernels are the default for every format.
 template <int TG, bool STAGE_GRID>
@@ -4801,9 +4801,9 @@ __dpct_inline__ void iq3s_wide_kernel(const uint8_t* __restrict__ w, size_t rb, 
         if (lane == 0) y[(size_t) c * n_out + row] = v;
     }
 }
-// STRATA_IQ3S_WIDE=1: the wide kernel; unset or 0: the multi kernel (default).
+// SAGUARO_IQ3S_WIDE=1: the wide kernel; unset or 0: the multi kernel (default).
 bool iq3s_wide_on() {
-    static const bool v = [] { const char* e = std::getenv("STRATA_IQ3S_WIDE"); return e && std::atoi(e) != 0; }();
+    static const bool v = [] { const char* e = std::getenv("SAGUARO_IQ3S_WIDE"); return e && std::atoi(e) != 0; }();
     return v;
 }
 template <int NCOLS>
@@ -5047,7 +5047,7 @@ size_t native_expert_scratch_bytes(int64_t cap, int64_t n_ff) {
 
 
 #if defined(STRATA_HIP_GFX906)
-// ---- AMD layouts for the grouped native experts (STRATA_EXP_MODE; 0 = the CUDA one above).
+// ---- AMD layouts for the grouped native experts (SAGUARO_EXP_MODE; 0 = the CUDA one above).
 // 1 (W64): a row per 64-lane wavefront - 4x the wavefronts, ~1-2 calls per lane, a 64-lane butterfly.
 // 2 (R2):  a 32-lane logical warp computes TWO rows in one loop - two independent load chains in flight.
 // Either way a (row, entry) sum does not depend on the window size.
@@ -5582,9 +5582,9 @@ __global__ void __launch_bounds__(256) native_gu_fused_kernel(const unsigned lon
     }
 }
 
-int g_exp_mode = -1;   // native_expert_set_mode (the bench); -1 = STRATA_EXP_MODE, default 7
+int g_exp_mode = -1;   // native_expert_set_mode (the bench); -1 = SAGUARO_EXP_MODE, default 7
 int exp_mode() {
-    static const int m = [] { const char* v = std::getenv("STRATA_EXP_MODE"); return v ? std::atoi(v) : 7; }();
+    static const int m = [] { const char* v = std::getenv("SAGUARO_EXP_MODE"); return v ? std::atoi(v) : 7; }();
     return g_exp_mode >= 0 ? g_exp_mode : m;
 }
 #endif
@@ -5600,7 +5600,7 @@ void native_expert_set_mode(int mode, int phase) {
 }
 
 namespace {
-bool g_grouped_v1 = env_on("STRATA_GROUPED_V1");
+bool g_grouped_v1 = env_on("SAGUARO_GROUPED_V1");
 }  // namespace
 
 void native_grouped_set_v1(bool v1) { g_grouped_v1 = v1; }
@@ -5618,12 +5618,12 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
     float* h = (float*) ((uint8_t*) scratch + 2 * fa);
     block_q8_1* hq = (block_q8_1*) ((uint8_t*) scratch + 3 * fa);
     const auto* X = (const block_q8_1*) x_q8_1;
-    // SYCL port: STRATA_EXPERT_V2 / STRATA_EXPERT_V2K (upstream's AMD-tuned S26 / S27 kernels) are not built here
+    // SYCL port: SAGUARO_EXPERT_V2 / SAGUARO_EXPERT_V2K (upstream's AMD-tuned S26 / S27 kernels) are not built here
     static const bool v2_note = [] {
-        const char* a = std::getenv("STRATA_EXPERT_V2");
-        const char* b = std::getenv("STRATA_EXPERT_V2K");
+        const char* a = std::getenv("SAGUARO_EXPERT_V2");
+        const char* b = std::getenv("SAGUARO_EXPERT_V2K");
         if ((a && a[0] == '1') || (b && b[0] == '1'))
-            std::fprintf(stderr, "note: STRATA_EXPERT_V2 / STRATA_EXPERT_V2K are AMD-only experiments, ignored on SYCL\n");
+            std::fprintf(stderr, "note: SAGUARO_EXPERT_V2 / SAGUARO_EXPERT_V2K are AMD-only experiments, ignored on SYCL\n");
         return true;
     }();
     (void) v2_note;
@@ -5696,8 +5696,8 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
     const long long nh = (long long) cap_entries * L.n_ff;
 #if defined(STRATA_HIP_GFX906)
     // gfx906: the separate SwiGLU and q8_1 passes stay the default (the A/B baseline); the RDNA one-pass
-    // kernel (bitwise the same) with STRATA_HIP_SWIGLU_FUSED=1
-    static const bool sw_fused = env_on("STRATA_HIP_SWIGLU_FUSED");
+    // kernel (bitwise the same) with SAGUARO_HIP_SWIGLU_FUSED=1
+    static const bool sw_fused = env_on("SAGUARO_HIP_SWIGLU_FUSED");
     const bool sw_v1 = v1 || !sw_fused;
 #else
     const bool sw_v1 = v1;
@@ -5795,7 +5795,7 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
 }
 
 
-// A770 port (STRATA_PF_XMX=2): a group of experts' products in ONE launch, the weight tiles decoded straight from
+// A770 port (SAGUARO_PF_XMX=2): a group of experts' products in ONE launch, the weight tiles decoded straight from
 // the quantized blobs into local memory (no FP16 copy of the expert in global memory).  Sub-group 8, joint_matrix
 // 8x8x16 (DG2), 256 GRF.  Per expert i of the group: Y_i = X_i . W_i^T, rows back to back (cnt[i] each).
 // gate/up: up_i != nullptr, virtual row 2r = gate row r, 2r+1 = up row r (iq_dequant_gu_f16's interleave).

@@ -890,7 +890,7 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
     if (native && d.nact_multi.size() < (size_t) MAXT * kNativeActBytes) d.nact_multi.resize((size_t) MAXT * kNativeActBytes);
     if (d.job_of.size() != (size_t) d.n_expert) d.job_of.assign((size_t) d.n_expert, (int16_t) -1);
     if (d.jobs_multi.size() < (size_t) (n_tok * k)) d.jobs_multi.resize((size_t) (MAXT * k));
-    static const bool ptrace = std::getenv("STRATA_POOL_TRACE") != nullptr;
+    static const bool ptrace = std::getenv("SAGUARO_POOL_TRACE") != nullptr;
     auto pt = [&](const char* what, long long a = -1) {
         if (ptrace) { std::fprintf(stderr, "pool trace: layer %lld %s %lld\n", (long long) d.layers, what, a); std::fflush(stderr); }
     };
@@ -1412,13 +1412,13 @@ uint64_t total_memory_bytes() {
 
 #if defined(__linux__)
 // How many unbuffered reads at once the drive under the model file serves fastest - the stagers' count when
-// MAYA_EXPERT_STAGERS names none.  It belongs to the drive, not the CPU: an NVMe reads ~10% faster with 8 slices in
+// SAGUARO_EXPERT_STAGERS names none.  It belongs to the drive, not the CPU: an NVMe reads ~10% faster with 8 slices in
 // flight than with 3, a USB disk gains nothing past 2.  Measured once (~1 s: 2, 4, 8 and 16 threads reading
 // `piece`-sized slices at random places of the file, twice over, interleaved) and cached per drive in
-// <XDG_CONFIG_HOME or ~/.config>/project-maya/drive-reads.txt; MAYA_EXPERT_DRIVE_PROBE=0 skips it.  0: not measured
+// <XDG_CONFIG_HOME or ~/.config>/project-maya/drive-reads.txt; SAGUARO_EXPERT_DRIVE_PROBE=0 skips it.  0: not measured
 // (the caller keeps its own count).
 int drive_reads_at_once(int dfd, uint64_t file_bytes, uint64_t piece, std::string& said) {
-    const char* off = std::getenv("MAYA_EXPERT_DRIVE_PROBE");
+    const char* off = std::getenv("SAGUARO_EXPERT_DRIVE_PROBE");
     if ((off != nullptr && std::atoi(off) == 0) || dfd < 0) return 0;
     struct stat st{};
     if (::fstat(dfd, &st) != 0) return 0;
@@ -1508,7 +1508,7 @@ uint64_t expert_ram_room(uint64_t* avail_out, uint64_t* headroom_out, bool unbuf
     // the OS, the server and the engine's own buffers are what stays free
     uint64_t headroom = unbuffered ? std::max<uint64_t>(4ull << 30, total / 100 * 8)
                                    : std::max<uint64_t>(6ull << 30, total / 100 * 12);
-    if (const char* v = std::getenv("MAYA_EXPERT_HEADROOM_GB")) {   // (a measurement knob)
+    if (const char* v = std::getenv("SAGUARO_EXPERT_HEADROOM_GB")) {   // (a measurement knob)
         const double gb = std::atof(v);
         if (gb >= 0.0) headroom = (uint64_t) (gb * 1073741824.0);
     }
@@ -1664,8 +1664,8 @@ bool GgufExpertSource::open(const std::string& shard1, int64_t n_layers, int64_t
 #if defined(__linux__) && defined(O_DIRECT)
             // the misses are read unbuffered, a slice per read, many at once: through the mapping a miss is a run of
             // 4 KB page faults and the file cache (small beside a model this size) churns the RAM the experts need.
-            // MAYA_EXPERT_DIRECT=0 turns it off; a file system that refuses O_DIRECT keeps the mapping.
-            const char* dv = std::getenv("MAYA_EXPERT_DIRECT");
+            // SAGUARO_EXPERT_DIRECT=0 turns it off; a file system that refuses O_DIRECT keeps the mapping.
+            const char* dv = std::getenv("SAGUARO_EXPERT_DIRECT");
             if (dv == nullptr || std::atoi(dv) != 0) {
                 const int dfd = ::open(path.c_str(), O_RDONLY | O_DIRECT);
                 void* probe = nullptr;
@@ -1708,11 +1708,11 @@ bool GgufExpertSource::open(const std::string& shard1, int64_t n_layers, int64_t
     ring_of_.assign((size_t) (n_layers * n_expert), -1);
     res_off_.assign((size_t) (n_layers * n_expert), kNone);
     pf_stamp_.assign((size_t) (n_layers * n_expert), -1);
-    // the stagers: a quarter of the hardware threads, 2 to 8 (MAYA_EXPERT_STAGERS sets it; 0: blob() assembles alone) -
+    // the stagers: a quarter of the hardware threads, 2 to 8 (SAGUARO_EXPERT_STAGERS sets it; 0: blob() assembles alone) -
     // or, where the misses are read unbuffered (Linux), the reads at once the drive serves fastest (measured once a drive)
     int stagers = std::clamp((int) std::thread::hardware_concurrency() / 4, 2, 8);
     std::string drive_said;
-    if (const char* v = std::getenv("MAYA_EXPERT_STAGERS")) {
+    if (const char* v = std::getenv("SAGUARO_EXPERT_STAGERS")) {
         stagers = std::clamp(std::atoi(v), 0, 64);
     } else {
 #if defined(__linux__)
@@ -1849,11 +1849,11 @@ bool GgufExpertSource::make_resident(const std::vector<std::pair<int32_t, int32_
     if (arena_ != nullptr) { err = "GgufExpertSource: the resident arena is already made"; return false; }
     const auto& lay = strata::kernels::cpu::expert_layout();
     // ---- the budget: this PC's available RAM less a headroom for the OS and the page cache the other experts and
-    // the n-gram rows are read through (12% of the RAM, at least 6 GiB); MAYA_EXPERT_RAM_GB caps it
+    // the n-gram rows are read through (12% of the RAM, at least 6 GiB); SAGUARO_EXPERT_RAM_GB caps it
     uint64_t avail = 0, headroom = 0;
     uint64_t room = expert_ram_room(&avail, &headroom, direct_);
     if (budget > 0) room = std::min(room, budget);
-    if (const char* v = std::getenv("MAYA_EXPERT_RAM_GB")) {
+    if (const char* v = std::getenv("SAGUARO_EXPERT_RAM_GB")) {
         const double gb = std::atof(v);
         if (gb >= 0.0) room = std::min<uint64_t>(room, (uint64_t) (gb * 1073741824.0));
     }

@@ -15,8 +15,8 @@ class GgufPyLookup(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             gp = Path(d) / "third_party" / "llama.cpp" / "gguf-py"
             (gp / "gguf").mkdir(parents=True)
-            env = {k: v for k, v in os.environ.items() if k != "STRATA_GGUF_PY"}
-            env["STRATA_INSTALL_DIR"] = d
+            env = {k: v for k, v in os.environ.items() if k != "SAGUARO_GGUF_PY"}
+            env["SAGUARO_INSTALL_DIR"] = d
             with mock.patch.dict(os.environ, env, clear=True), \
                     mock.patch.object(_paths, "ENGINE", Path(d) / "nowhere" / "pkg"):
                 self.assertEqual(_paths.gguf_py(), str(gp))
@@ -24,15 +24,15 @@ class GgufPyLookup(unittest.TestCase):
     def test_env_wins_and_message_names_it(self):
         with tempfile.TemporaryDirectory() as d:
             (Path(d) / "gguf").mkdir()
-            with mock.patch.dict(os.environ, {"STRATA_GGUF_PY": d}):
+            with mock.patch.dict(os.environ, {"SAGUARO_GGUF_PY": d}):
                 self.assertEqual(_paths.gguf_py(), d)
-        env = {k: v for k, v in os.environ.items() if k not in ("STRATA_GGUF_PY", "STRATA_INSTALL_DIR")}
+        env = {k: v for k, v in os.environ.items() if k not in ("SAGUARO_GGUF_PY", "SAGUARO_INSTALL_DIR")}
         with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, env, clear=True), \
                 mock.patch.object(_paths, "ENGINE", Path(d) / "a" / "b"), \
                 mock.patch.object(_paths, "_install_dirs", return_value=[]):
             with self.assertRaises(SystemExit) as cm:
                 _paths.gguf_py()
-            self.assertIn("STRATA_GGUF_PY", str(cm.exception))
+            self.assertIn("SAGUARO_GGUF_PY", str(cm.exception))
 
 
 if __name__ == "__main__":

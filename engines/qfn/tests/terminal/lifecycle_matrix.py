@@ -141,17 +141,17 @@ class Rig:
         self.mark.mkdir()
         self.state = root / "state"
         self.state.mkdir()
-        self.env = {**os.environ, "STRATA_PROFILE_DIR": str(root / "profiles"), "STRATA_RUNTIME_DIR": str(root / "runtime"),
-                    "STRATA_COMPONENTS_DIR": str(self.components), "STRATA_ENGINE_BACKEND": BACKEND,
-                    "STRATA_NO_ACQUIRE": "1", "FAKE_ENGINE_MARK": str(self.mark), "LOCALAPPDATA": str(self.state),
+        self.env = {**os.environ, "SAGUARO_PROFILE_DIR": str(root / "profiles"), "SAGUARO_RUNTIME_DIR": str(root / "runtime"),
+                    "SAGUARO_COMPONENTS_DIR": str(self.components), "SAGUARO_ENGINE_BACKEND": BACKEND,
+                    "SAGUARO_NO_ACQUIRE": "1", "FAKE_ENGINE_MARK": str(self.mark), "LOCALAPPDATA": str(self.state),
                     "XDG_STATE_HOME": str(self.state), "PYTHONPATH": str(ROOT), "PYTHONUNBUFFERED": "1",
                     "FAKE_ENGINE_SLOW_STEPS": str(slow_steps)}
-        self.env.pop("STRATA_API_KEY", None)
-        for key in ("STRATA_PROFILE_DIR", "STRATA_RUNTIME_DIR", "LOCALAPPDATA", "XDG_STATE_HOME", "STRATA_COMPONENTS_DIR",
-                    "STRATA_NO_ACQUIRE", "STRATA_ENGINE_BACKEND", "FAKE_ENGINE_MARK", "FAKE_ENGINE_SLOW_STEPS"):
+        self.env.pop("SAGUARO_API_KEY", None)
+        for key in ("SAGUARO_PROFILE_DIR", "SAGUARO_RUNTIME_DIR", "LOCALAPPDATA", "XDG_STATE_HOME", "SAGUARO_COMPONENTS_DIR",
+                    "SAGUARO_NO_ACQUIRE", "SAGUARO_ENGINE_BACKEND", "FAKE_ENGINE_MARK", "FAKE_ENGINE_SLOW_STEPS"):
             os.environ[key] = self.env[key]               # this process reads the same folders (profiles, runtime)
         if real_components is not None:
-            self.env["STRATA_COMPONENTS_DIR"] = os.environ["STRATA_COMPONENTS_DIR"] = str(real_components)
+            self.env["SAGUARO_COMPONENTS_DIR"] = os.environ["SAGUARO_COMPONENTS_DIR"] = str(real_components)
         if real_config is not None:
             cfg = json.loads(real_config.read_text(encoding="utf-8"))
             cfg.update({"host": "127.0.0.1", "port": self.port})
@@ -381,7 +381,7 @@ def serve_case(rig: Rig, name: str, action, *, graceful: bool | None, vram: bool
                     psutil.Process(i.pid).kill()
                 except psutil.Error:
                     pass
-        keep = os.environ.get("STRATA_MATRIX_LOGS")                 # keep the server's and engine's logs as evidence
+        keep = os.environ.get("SAGUARO_MATRIX_LOGS")                 # keep the server's and engine's logs as evidence
         if keep:
             Path(keep).mkdir(parents=True, exist_ok=True)
             for log in ("serve.log", "engine.log"):
@@ -791,7 +791,7 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--scenarios", default="all")
     ap.add_argument("--config", help="a real engine's run config (then no fake engine is used)")
-    ap.add_argument("--components", help="the engine component folder for --config (STRATA_COMPONENTS_DIR)")
+    ap.add_argument("--components", help="the engine component folder for --config (SAGUARO_COMPONENTS_DIR)")
     ap.add_argument("--vram", action="store_true", help="check nvidia-smi memory returns")
     ap.add_argument("--report")
     a = ap.parse_args(argv)

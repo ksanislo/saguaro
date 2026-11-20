@@ -70,7 +70,7 @@ class SettingsRules(unittest.TestCase):
     def test_split_setting(self):
         self.assertEqual(S.split_setting("prefill=65536"), ("--prefill", "65536"))
         self.assertEqual(S.split_setting("--kv-grow"), ("--kv-grow", ""))
-        self.assertEqual(S.split_setting("STRATA_PIN_BY_NEED=1"), ("STRATA_PIN_BY_NEED", "1"))
+        self.assertEqual(S.split_setting("SAGUARO_PIN_BY_NEED=1"), ("SAGUARO_PIN_BY_NEED", "1"))
         self.assertEqual(S.split_setting("expert_cache=auto"), ("--expert-cache", "auto"))
         self.assertEqual(S.split_setting("IGC_EnableDPEmulation=1"), ("IGC_EnableDPEmulation", "1"))        # environment names keep their case
         self.assertEqual(S.split_setting("ONEAPI_DEVICE_SELECTOR=level_zero:gpu"), ("ONEAPI_DEVICE_SELECTOR", "level_zero:gpu"))
@@ -80,10 +80,10 @@ class SettingsRules(unittest.TestCase):
 
     def test_flags_text_round_trips_to_the_same_choices(self):
         s = S.LaunchSettings(family="qwen", model="IQ3_XXS", context=131072, parallel=2, tune="quick", access="lan", port=9000,
-                             extra={"--prefill": "65536", "STRATA_PIN_BY_NEED": "1"})
+                             extra={"--prefill": "65536", "SAGUARO_PIN_BY_NEED": "1"})
         text = S.flags_text(s)
         for part in ("--model iq3_xxs", "--context 128k", "--parallel 2", "--tune quick", "--access lan", "--port 9000",
-                     "--set prefill=65536", "--set STRATA_PIN_BY_NEED=1"):
+                     "--set prefill=65536", "--set SAGUARO_PIN_BY_NEED=1"):
             self.assertIn(part, text)
         self.assertIn('--preset "Fast"', S.flags_text(s, preset="Fast"))
 
@@ -271,9 +271,9 @@ class Advanced(unittest.TestCase):
         self.assertIsNone(params.check_name("--prefil", None))        # no list to check against: no warning
 
     def test_extra_becomes_argv_and_env(self):
-        a, e = S.as_argv_changes({"--prefill": "65536", "--kv-grow": "", "--spec": "off", "STRATA_PIN_BY_NEED": "1"}, frozenset({"--kv-grow"}))
+        a, e = S.as_argv_changes({"--prefill": "65536", "--kv-grow": "", "--spec": "off", "SAGUARO_PIN_BY_NEED": "1"}, frozenset({"--kv-grow"}))
         self.assertEqual(a, {"--prefill": "65536", "--kv-grow": True, "--spec": None})
-        self.assertEqual(e, {"STRATA_PIN_BY_NEED": "1"})
+        self.assertEqual(e, {"SAGUARO_PIN_BY_NEED": "1"})
 
 
 class RunConfig(unittest.TestCase):
@@ -281,13 +281,13 @@ class RunConfig(unittest.TestCase):
             "port": 8095, "model_name": "m", "env": {}}
 
     def test_derive_applies_access_key_and_advanced(self):
-        s = S.LaunchSettings(access="lan", port=9001, api_key="sk-k", extra={"--prefill": "65536", "--kv-grow": "", "STRATA_PIN_BY_NEED": "1"})
+        s = S.LaunchSettings(access="lan", port=9001, api_key="sk-k", extra={"--prefill": "65536", "--kv-grow": "", "SAGUARO_PIN_BY_NEED": "1"})
         cfg = derive_config(self.BASE, s, bool_flags=frozenset({"--kv-grow"}))
         self.assertEqual((cfg["host"], cfg["port"], cfg["api_key"]), ("0.0.0.0", 9001, "sk-k"))
         args = cfg["args"]
         self.assertEqual(args[args.index("--prefill") + 1], "65536")
         self.assertIn("--kv-grow", args)
-        self.assertEqual(cfg["env"], {"STRATA_PIN_BY_NEED": "1"})
+        self.assertEqual(cfg["env"], {"SAGUARO_PIN_BY_NEED": "1"})
         self.assertEqual(self.BASE["args"][-1], "auto")               # the installed config is never edited
 
     def test_mtp_off_leaves_the_draft_layer_out_of_this_launch_only(self):
@@ -812,10 +812,10 @@ class FlagsCommand(unittest.TestCase):
 
     def test_family_and_kv_and_gpu_and_data_dir_and_set(self):
         p = self.plan("--model", "iq3_xxs", "--family", "swift", "--kv", "q4_0", "--gpu", "0,1", "--data-dir", str(self.home.base / "data-x"),
-                      "--set", "prefill=65536", "--set", "STRATA_PIN_BY_NEED=1", "--tune-allow-small")
+                      "--set", "prefill=65536", "--set", "SAGUARO_PIN_BY_NEED=1", "--tune-allow-small")
         s = p["settings"]
         self.assertEqual((s["family"], s["kv"], s["gpus"], s["data_dir"], s["tune_allow_small"]), ("swift", "q4_0", [0, 1], str(self.home.base / "data-x"), True))
-        self.assertEqual(s["extra"], {"--prefill": "65536", "STRATA_PIN_BY_NEED": "1"})
+        self.assertEqual(s["extra"], {"--prefill": "65536", "SAGUARO_PIN_BY_NEED": "1"})
         self.assertIn("--set prefill=65536", p["flags"])
 
     def test_pool_cores_is_an_experimental_advanced_setting(self):
@@ -1138,7 +1138,7 @@ class ConnectCommand(unittest.TestCase):
         self.assertIn('wire_api = "responses"', text)
         self.assertIn("model_auto_compact_token_limit = 15000", text)
         self.assertIn('base_url = "http://127.0.0.1:18900/v1"', text)
-        self.assertEqual(out["env"], {"STRATA_API_KEY": "sk-real"})
+        self.assertEqual(out["env"], {"SAGUARO_API_KEY": "sk-real"})
 
     def test_claude_code_sets_window_and_output_cap_and_has_no_login(self):
         out = self.render("claude-code")

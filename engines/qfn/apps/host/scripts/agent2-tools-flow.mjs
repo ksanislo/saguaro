@@ -1,10 +1,10 @@
 /**
  * Settings -> Tools and what it gives the assistant, through the real app on a real model, with screenshots (playwright-core + Chrome).
  *
- *   STRATA_URL=http://127.0.0.1:8899 SHOTS=./shots MODEL='Qwen test' node scripts/agent2-tools-flow.mjs
+ *   SAGUARO_URL=http://127.0.0.1:8899 SHOTS=./shots MODEL='Qwen test' node scripts/agent2-tools-flow.mjs
  *
- * The host must run with STRATA_BROWSER_HEADLESS=1 (the browser step must not open a window on the person's desktop) and a scratch
- * STRATA_HOME / STRATA_TIMESKIP_DIR. Steps (each prints ok/FAIL):
+ * The host must run with SAGUARO_BROWSER_HEADLESS=1 (the browser step must not open a window on the person's desktop) and a scratch
+ * SAGUARO_HOME / SAGUARO_TIMESKIP_DIR. Steps (each prints ok/FAIL):
  *   1. Settings -> Tools shows the groups; two tools of my own are added through the dialog (instructions, command);
  *   2. web search with no key: "Searched the web" card, real DuckDuckGo results in the answer;
  *   3. the instruction tool is used without asking and shapes the answer; the command tool asks first in Manual, runs after Approve;
@@ -15,8 +15,8 @@ import { chromium } from 'playwright-core';
 import { existsSync, mkdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
-const BASE = process.env.STRATA_URL;
-if (!BASE) { console.error('STRATA_URL is required'); process.exit(2); }
+const BASE = process.env.SAGUARO_URL;
+if (!BASE) { console.error('SAGUARO_URL is required'); process.exit(2); }
 const SHOTS = resolve(process.env.SHOTS ?? 'agent2-tools-shots');
 mkdirSync(SHOTS, { recursive: true });
 const MODEL = process.env.MODEL ?? 'Qwen test';

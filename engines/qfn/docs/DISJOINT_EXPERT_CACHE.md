@@ -12,7 +12,7 @@ in both the server and command-line generation paths.
 
 ## Use
 
-Set `STRATA_DISJOINT_ADAPT=1` before starting the engine. It is off by default.
+Set `SAGUARO_DISJOINT_ADAPT=1` before starting the engine. It is off by default.
 It leaves the existing peer-tier check and expert arithmetic unchanged.
 The check is live: each promotion candidate is asked of the helper's own cache (`RemoteExperts::holds`), so an expert
 the helper's tier swaps in or out later is followed (a mask copied at load would go stale). Needs the helper-share

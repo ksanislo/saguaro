@@ -464,7 +464,7 @@ smoke_terminal() {   # extracted terminal folder
     else fail "smoke: terminal python" "does not start under the hardened runtime"; fi
     strata="$(dirname "$py")/../../bin/strata"
     if [ -x "$strata" ]; then
-      if out="$(env HOME="$home" STRATA_NO_ACQUIRE=1 "$strata" --version 2>&1)"; then rec OK "smoke: strata --version" "$(printf '%s' "$out" | head -n 1)"
+      if out="$(env HOME="$home" SAGUARO_NO_ACQUIRE=1 "$strata" --version 2>&1)"; then rec OK "smoke: strata --version" "$(printf '%s' "$out" | head -n 1)"
       else printf '%s\n' "$out" | tail -n 5 | sed 's/^/        /'; fail "smoke: strata --version" "the Terminal launcher does not start"; fi
     fi
   else

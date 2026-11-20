@@ -1,8 +1,8 @@
-// Opt-in HIP smoke test for the calibrated hipBLASLt prefill route; it needs STRATA_HIPBLASLT_TUNING (SKIP otherwise).
+// Opt-in HIP smoke test for the calibrated hipBLASLt prefill route; it needs SAGUARO_HIPBLASLT_TUNING (SKIP otherwise).
 // It checks that the table loads for this device and hipBLASLt version, that the two rows it uses exist (bf16
 // N=48 K=2560 ldy=96 and f16 N=512 K=2560 ldy=512, T bucket 4096), and that Gemm's output matches hipBLASEx on those
 // two rows. It does NOT check the other rows, and it does not check that hipBLASLt ran the table's solution: an id
-// the library rejects falls back to hipBLASEx and the test still passes. Set STRATA_HIPBLASLT_VERBOSE=1 to read the
+// the library rejects falls back to hipBLASEx and the test still passes. Set SAGUARO_HIPBLASLT_VERBOSE=1 to read the
 // "hipBLASLt summary launches=... fallbacks=..." line.
 #include <cuda_runtime.h>
 #include <hip/hip_bfloat16.h>
@@ -135,9 +135,9 @@ bool run_case(strata::prefill::Gemm& gemm, hipblasHandle_t blas, hipStream_t str
 }
 
 int main() {
-    const char* tuning_path = std::getenv("STRATA_HIPBLASLT_TUNING");
+    const char* tuning_path = std::getenv("SAGUARO_HIPBLASLT_TUNING");
     if (!tuning_path || !*tuning_path) {
-        std::fprintf(stderr, "SKIP: set STRATA_HIPBLASLT_TUNING to a tuning table for this GPU and hipBLASLt version\n");
+        std::fprintf(stderr, "SKIP: set SAGUARO_HIPBLASLT_TUNING to a tuning table for this GPU and hipBLASLt version\n");
         return 77;
     }
 
@@ -191,7 +191,7 @@ int main() {
     }
     HIP_CHECK(hipStreamDestroy(stream));
     std::printf("smoke test: 4 cases on 2 of the table's %zu rows; %s\n", table.rows().size(),
-                ok ? "outputs match hipBLASEx (solution ids are not verified; see STRATA_HIPBLASLT_VERBOSE)"
+                ok ? "outputs match hipBLASEx (solution ids are not verified; see SAGUARO_HIPBLASLT_VERBOSE)"
                    : "FAILED");
     return ok ? 0 : 1;
 }

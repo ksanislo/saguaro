@@ -1574,10 +1574,10 @@ void qsa_block_scores(const float* pooled, const float* dead, const float* q_idx
         std::exit(1);
     }
     // a block past a query's n_bid returns at once: the grid need only reach the batch's largest n_bid (C-1)
-    static const bool multi = [] { const char* v = std::getenv("STRATA_SCORES_MULTI"); return v == nullptr || std::atoi(v) != 0; }();
+    static const bool multi = [] { const char* v = std::getenv("SAGUARO_SCORES_MULTI"); return v == nullptr || std::atoi(v) != 0; }();
     if (multi && nq <= MQ && active_blocks <= 0) {   // no active count: decode (captured or not) and prefill's pooled16
-        // STRATA_QSA_EARLY_EXIT=0 keeps the old staging (every CTA loads the queries first); the scores are the same bits
-        static const bool early = [] { const char* v = std::getenv("STRATA_QSA_EARLY_EXIT"); return v == nullptr || std::atoi(v) != 0; }();
+        // SAGUARO_QSA_EARLY_EXIT=0 keeps the old staging (every CTA loads the queries first); the scores are the same bits
+        static const bool early = [] { const char* v = std::getenv("SAGUARO_QSA_EARLY_EXIT"); return v == nullptr || std::atoi(v) != 0; }();
         {
             auto exp_props = sycl::ext::oneapi::experimental::properties{
                 sycl::ext::oneapi::experimental::use_root_sync};
@@ -1653,10 +1653,10 @@ bool qsa_block_scores_tc(const float *pooled, const float *dead,
     if (nq <= 0) return true;
     if (s.idx_dim != IDX_DIM || s.idx_n_head != IDX_HEADS || s.idx_block != R || nq > 65535 * TC_QT) return false;
 #if defined(__HIPCC__)
-    // AMD: the gfx12 (RDNA4) WMMA scorer, opt-in (STRATA_SELECT_WMMA=1): it selects slightly differently from the warp
+    // AMD: the gfx12 (RDNA4) WMMA scorer, opt-in (SAGUARO_SELECT_WMMA=1): it selects slightly differently from the warp
     // kernel (254/256 queries the same), so the default keeps the warp kernel; every other target keeps it too (false)
     static const bool wmma_on = [] {
-        const char* v = std::getenv("STRATA_SELECT_WMMA");
+        const char* v = std::getenv("SAGUARO_SELECT_WMMA");
         return v != nullptr && v[0] != '\0' && v[0] != '0';
     }();
     if (!wmma_on || !sel_gfx12_device()) return false;
@@ -1692,8 +1692,8 @@ bool qsa_block_scores_tc(const float *pooled, const float *dead,
                 */
                 return false;
             }
-            // STRATA_QSA_WARP=1|select (an A/B arm): the pre-sm_80 kernels on any card, as RTX 20 runs them
-            const char* w = std::getenv("STRATA_QSA_WARP");
+            // SAGUARO_QSA_WARP=1|select (an A/B arm): the pre-sm_80 kernels on any card, as RTX 20 runs them
+            const char* w = std::getenv("SAGUARO_QSA_WARP");
             cc_major[dev] = w && (!std::strcmp(w, "1") || !std::strcmp(w, "select")) ? 7 : strata::cc_major_of(major);
         }
         (void) cc_major[dev];
@@ -1860,7 +1860,7 @@ bool qsa_block_topk_cluster(const float *scores, const int32_t *steps,
     if (s.idx_block != R || cap < qsa_selection_width(kTopkMaxCells, s) || nq > 65535 || max_blocks <= 0) return false;
     const size_t smem = (size_t) ((max_blocks + CL_N - 1) / CL_N) * sizeof(uint32_t);
     // Per device (a layer split runs on several): 1 the cluster kernel runs here, 2 it does not. It needs sm_90+ (the
-    // card's, or STRATA_EMULATE_CC's) AND code built for it: a build with only older code JIT-compiles their PTX, whose
+    // card's, or SAGUARO_EMULATE_CC's) AND code built for it: a build with only older code JIT-compiles their PTX, whose
     // copy of this kernel is a trap - the function's PTX version says which. `opt`: the dynamic shared memory opted in.
     static int ok[64] = {};
     static size_t opt[64] = {};
@@ -1956,14 +1956,14 @@ catch (sycl::exception const &exc) {
 void qsa_block_topk(const float* scores, const int32_t* steps, int64_t nq, int64_t max_blocks, int64_t cap,
                     const QsaShapes& s, int32_t* ids, void* stream, int64_t active_blocks) {
     // keys in registers when every query's blocks fit (contexts up to ~135K cells), else (CUDA) the same threads
-    // reading them from memory; the same ids. STRATA_TOPK_OLD=1: the original kernel
-    static const bool old = std::getenv("STRATA_TOPK_OLD") != nullptr;
+    // reading them from memory; the same ids. SAGUARO_TOPK_OLD=1: the original kernel
+    static const bool old = std::getenv("SAGUARO_TOPK_OLD") != nullptr;
     if (nq <= 0) return;
 #if !defined(__HIPCC__)
     // sm_90+: a cluster of CL_N CTAs per query for the calls of a few queries (decode windows); the same ids.
-    // STRATA_QSA_CLUSTER=0: the one-CTA kernels below
+    // SAGUARO_QSA_CLUSTER=0: the one-CTA kernels below
     static const bool cluster = [] {
-        const char* v = std::getenv("STRATA_QSA_CLUSTER");
+        const char* v = std::getenv("SAGUARO_QSA_CLUSTER");
         return !v || std::atoi(v) != 0;
     }();
     if (cluster && !old && nq <= CL_MAXQ && qsa_block_topk_cluster(scores, steps, nq, max_blocks, cap, s, ids, stream))
@@ -1978,10 +1978,10 @@ void qsa_block_topk(const float* scores, const int32_t* steps, int64_t nq, int64
     // TK_T * TK_PER registers. Use the prefill bound on sm_75, keeping max_blocks as the score-row stride.
     // Other CUDA devices keep 0.1.32's capacity rule: #337 was measured on RDNA4, and RTX 5070 64K prompts were
     // 1-3% slower. Decode/captured graphs omit the bound and never query the device here.
-    static const bool capacity_guard = std::getenv("STRATA_TOPK_CAPACITY_GUARD") != nullptr;
-    // STRATA_TOPK_ACTIVE_ANY=1 (tests): the Turing dispatch on any CUDA card, so qsa_topk_active_parity checks it
+    static const bool capacity_guard = std::getenv("SAGUARO_TOPK_CAPACITY_GUARD") != nullptr;
+    // SAGUARO_TOPK_ACTIVE_ANY=1 (tests): the Turing dispatch on any CUDA card, so qsa_topk_active_parity checks it
     // on whatever card runs the tests (the kernels are the same on every architecture)
-    static const bool any_card = [] { const char* v = std::getenv("STRATA_TOPK_ACTIVE_ANY"); return v && v[0] == '1'; }();
+    static const bool any_card = [] { const char* v = std::getenv("SAGUARO_TOPK_ACTIVE_ANY"); return v && v[0] == '1'; }();
     const bool counted = !capacity_guard && active_blocks > 0 && active_blocks <= max_blocks &&
                          (any_card || topk_active_turing_device());
 #endif
@@ -2006,9 +2006,9 @@ void qsa_block_topk(const float* scores, const int32_t* steps, int64_t nq, int64
 #if !defined(__HIPCC__)
     // Turing prefill (the `counted` bound) above ~90K cells (22,528 blocks): the wide kernel, which reads the keys
     // coalesced, instead of the register kernel's uncoalesced per-thread runs (PR #743: 131K, 1.03 -> 0.75 ms); the
-    // same ids.  STRATA_TOPK_STREAM=0 restores the register kernel there.
+    // same ids.  SAGUARO_TOPK_STREAM=0 restores the register kernel there.
     static const bool turing_wide = [] {
-        const char* v = std::getenv("STRATA_TOPK_STREAM");
+        const char* v = std::getenv("SAGUARO_TOPK_STREAM");
         return v == nullptr || v[0] != '0';
     }();
     if (reach > fit || (turing_wide && counted && reach > 22528))   // past the register kernel's reach, or Turing's band

@@ -62,7 +62,7 @@ test('a relative path in the command finds its file in the tool\'s folder', asyn
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'strata-cmd-')));
   try {
     mkdirSync(join(dir, 'tools'));
-    writeFileSync(join(dir, 'tools', 'foo.js'), 'console.log("from foo " + (process.env.STRATA_INPUT || ""));');
+    writeFileSync(join(dir, 'tools', 'foo.js'), 'console.log("from foo " + (process.env.SAGUARO_INPUT || ""));');
     const r = await runCommand({ command: `${node} tools/foo.js`, cwd: dir, input: 'hello' });
     assert.deepEqual([r.ok, r.text], [true, 'from foo hello']);
   } finally { rmSync(dir, { recursive: true, force: true }); }
@@ -79,7 +79,7 @@ test('a command over the limit is ended and says so; output over the cap says it
 });
 
 test('PowerShell commands run on Windows (Get-ChildItem, $env:)', { skip: !WIN && 'PowerShell is checked on Windows' }, async () => {
-  const r = await runCommand({ command: 'Write-Output ("a" + $env:STRATA_INPUT)', input: 'b' });
+  const r = await runCommand({ command: 'Write-Output ("a" + $env:SAGUARO_INPUT)', input: 'b' });
   assert.deepEqual([r.ok, r.text], [true, 'ab']);
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'strata-cmd-')));
   try {

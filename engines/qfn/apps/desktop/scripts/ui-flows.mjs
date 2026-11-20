@@ -130,8 +130,8 @@ async function scenario(name, { installed = false, env = {} } = {}, body) {
   const dir = join(work, name);
   const dirs = { home: join(dir, 'home'), appdata: join(dir, 'appdata'), local: join(dir, 'local'), components: join(dir, 'local', 'Strata', 'components'), install: join(dir, 'local', 'Strata', 'install'), state: join(dir, 'fake-state'), profiles: join(dir, 'profiles'), runtime: join(dir, 'runtime') };
   for (const d of [dirs.home, dirs.appdata, dirs.local, dirs.components, dirs.install, dirs.state, join(dir, 'models')]) mkdirSync(d, { recursive: true });
-  const baseEnv = { ...process.env, STRATA_COMPONENTS_DIR: dirs.components, STRATA_PROFILE_DIR: dirs.profiles, STRATA_RUNTIME_DIR: dirs.runtime, STRATA_HOME: dirs.home, STRATA_MODELS_DIR: join(dir, 'models'), APPDATA: dirs.appdata, LOCALAPPDATA: dirs.local, USERPROFILE: dirs.home, XDG_CONFIG_HOME: join(dir, 'xdg'), XDG_DATA_HOME: join(dir, 'xdgdata'), PYTHONDONTWRITEBYTECODE: '1', STRATA_ENGINE_BACKEND: 'cuda', FAKE_STATE: dirs.state, ...env };
-  delete baseEnv.STRATA_API_KEY; delete baseEnv.STRATA_INSTALL_DIR;
+  const baseEnv = { ...process.env, SAGUARO_COMPONENTS_DIR: dirs.components, SAGUARO_PROFILE_DIR: dirs.profiles, SAGUARO_RUNTIME_DIR: dirs.runtime, SAGUARO_HOME: dirs.home, SAGUARO_MODELS_DIR: join(dir, 'models'), APPDATA: dirs.appdata, LOCALAPPDATA: dirs.local, USERPROFILE: dirs.home, XDG_CONFIG_HOME: join(dir, 'xdg'), XDG_DATA_HOME: join(dir, 'xdgdata'), PYTHONDONTWRITEBYTECODE: '1', SAGUARO_ENGINE_BACKEND: 'cuda', FAKE_STATE: dirs.state, ...env };
+  delete baseEnv.SAGUARO_API_KEY; delete baseEnv.SAGUARO_INSTALL_DIR;
   if (installed) {
     const platform = isWin ? 'windows-x86_64' : 'linux-x86_64';
     const folder = join(dirs.components, 'engine', `0.1.45-${platform}-cuda`);
@@ -150,7 +150,7 @@ async function scenario(name, { installed = false, env = {} } = {}, body) {
   }
   const port = env.FIXED_PORT ? Number(env.FIXED_PORT) : await freePort(), base = `http://127.0.0.1:${port}`;
   const host = spawn(nodeExe, [join(repoHost, 'server', 'index.mjs')], { cwd: repoHost, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
-    env: { ...baseEnv, STRATA_PORT: String(port), STRATA_DIST: join(repoHost, 'dist'), STRATA_PACKAGED: '1', STRATA_REAL_ENGINE: '1', STRATA_NO_ACQUIRE: '1', STRATA_CONTROL_DIR: control, STRATA_SHARE_PORT: String(await freePort()), STRATA_TUNNEL_PORT: String(await freePort()) } });
+    env: { ...baseEnv, SAGUARO_PORT: String(port), SAGUARO_DIST: join(repoHost, 'dist'), SAGUARO_PACKAGED: '1', SAGUARO_REAL_ENGINE: '1', SAGUARO_NO_ACQUIRE: '1', SAGUARO_CONTROL_DIR: control, SAGUARO_SHARE_PORT: String(await freePort()), SAGUARO_TUNNEL_PORT: String(await freePort()) } });
   let log = ''; host.stdout.on('data', c => { log += c; }); host.stderr.on('data', c => { log += c; });
   const api = async (path, init) => { const r = await fetch(base + path, init); return { status: r.status, body: await r.json().catch(() => null) }; };
   const browser = await chromium.launch({ executablePath: CHROME, headless: true });
@@ -327,7 +327,7 @@ await scenario('profile', { installed: true }, async ({ base, api, browser, shot
 });
 
 // ------------------------------------------------------------------------------------------------ version list, This computer, Tune, a task
-for (const scheme of ['light', 'dark']) await scenario(scheme === 'light' ? 'ui2' : 'ui2d', { installed: true, env: { FAKE_TOKEN_DELAY: '0.02', FAKE_REPLY: 'I am thinking about it. </think> ' + 'Here is the answer, word by word. '.repeat(12), STRATA_TUNE_NO_QUIET_CHECK: '1' } }, async ({ base, api, browser, shot }) => {
+for (const scheme of ['light', 'dark']) await scenario(scheme === 'light' ? 'ui2' : 'ui2d', { installed: true, env: { FAKE_TOKEN_DELAY: '0.02', FAKE_REPLY: 'I am thinking about it. </think> ' + 'Here is the answer, word by word. '.repeat(12), SAGUARO_TUNE_NO_QUIET_CHECK: '1' } }, async ({ base, api, browser, shot }) => {
   const page = await newPage(browser, base, { colorScheme: scheme });
   await clickText(page, /Go straight to the app/i);
   await page.getByText(/Conversation context/i).first().waitFor({ timeout: 30000 });

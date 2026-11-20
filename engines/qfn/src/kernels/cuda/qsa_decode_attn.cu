@@ -170,7 +170,7 @@ __device__ __forceinline__ void attn_chunk_body(const float* __restrict__ q, Qsa
     }
     __syncthreads();
     if constexpr (LANE_CELL) {
-        // S25 (STRATA_ATTN_LANECELL=1): thread t scores cell t % 64 for heads 3 (t / 64) .. +2 by itself - the same
+        // S25 (SAGUARO_ATTN_LANECELL=1): thread t scores cell t % 64 for heads 3 (t / 64) .. +2 by itself - the same
         // 8-dimension partial per former lane (the identical expression), then the former warp_sum's butterfly as
         // lane 0 ran it (a[l] += a[l + o] for o = 16 .. 1), so every score is bit-identical without 12 shuffle
         // reductions per cell
@@ -337,7 +337,7 @@ __global__ void __launch_bounds__(THREADS) attn_chunk_rows_kernel(const float* _
 //     12 warp_sums (60 shuffles);
 //   - the probabilities are stored cell-major, so the value loop reads a cell's 12 as three 16-byte broadcasts.
 // RTX 2080 Ti, 2051 selected cells: 1 / 2 / 3 / 4 queries 51.6 / 78.5 / 110 / 146 -> 34.5 / 41.0 / 73.0 / 84.9 us
-// (with the merge); 600 cells 45.9 / 74.6 / 105 / 137 -> 28.6 / 32.8 / 33.5 / 33.3 us.  STRATA_ATTN_V3=0 keeps the
+// (with the merge); 600 cells 45.9 / 74.6 / 105 / 137 -> 28.6 / 32.8 / 33.5 / 33.3 us.  SAGUARO_ATTN_V3=0 keeps the
 // default kernel; =1 takes this one on any CUDA card.
 __global__ void __launch_bounds__(THREADS) attn_chunk_q8_v3_kernel(const float* __restrict__ q, QsaAttnPools p,
                                                                    const int32_t* __restrict__ ids,
@@ -437,7 +437,7 @@ __global__ void __launch_bounds__(THREADS) attn_chunk_q8_v3_kernel(const float* 
 }
 bool attn_v3_on() {
     static int on[16] = {};   // by device ordinal: 0 unknown, 1 yes, -1 no
-    static const int env = [] { const char* v = std::getenv("STRATA_ATTN_V3"); return v ? (v[0] == '0' ? 0 : 1) : -1; }();
+    static const int env = [] { const char* v = std::getenv("SAGUARO_ATTN_V3"); return v ? (v[0] == '0' ? 0 : 1) : -1; }();
     if (env >= 0) return env == 1;
     int dev = 0;
     if (cudaGetDevice(&dev) != cudaSuccess || dev < 0 || dev >= 16) return false;
@@ -446,7 +446,7 @@ bool attn_v3_on() {
         const bool ok = cudaDeviceGetAttribute(&maj, cudaDevAttrComputeCapabilityMajor, dev) == cudaSuccess &&
                         cudaDeviceGetAttribute(&mnr, cudaDevAttrComputeCapabilityMinor, dev) == cudaSuccess;
         if (!ok) cudaGetLastError();
-        on[dev] = ok && strata::sm75_default(maj, mnr) ? 1 : -1;   // Turing only, with STRATA_SM75_PERF=1
+        on[dev] = ok && strata::sm75_default(maj, mnr) ? 1 : -1;   // Turing only, with SAGUARO_SM75_PERF=1
     }
     return on[dev] > 0;
 }
@@ -459,7 +459,7 @@ bool attn_v3_on() {
 // run on gfx103x (RDNA2), with 8 cells per step and the butterfly's lane exchanges in registers (DPP / permlanex16)
 // instead of ds_bpermute: there the score loop is bound by the LDS pipe (the q reads and ds_bpermute share it), not by
 // occupancy - 8 cells per step at 7 waves/SIMD beat 1 cell at 9.  Every other card keeps exactly the kernel above.
-// Fork (lab/upsync): built on every CUDA build too, for STRATA_ATTN_DAILY=1 (see daily_attn below).  With NC 2 and
+// Fork (lab/upsync): built on every CUDA build too, for SAGUARO_ATTN_DAILY=1 (see daily_attn below).  With NC 2 and
 // no DPP it is the Daily's (be4cf1c) attn_chunk_kernel line for line - the same reduce12 scores, the same cell-major
 // probabilities and the same four-cell value fold - except that `spt` shares `sq`'s storage here (no arithmetic
 // change).  Without the variable nothing selects it on a card at or above sm_75.
@@ -829,18 +829,18 @@ bool query_swizzle_gfx906_device() {
 }
 #endif
 
-// Fork (lab/upsync): STRATA_ATTN_DAILY=1 runs the Daily's (be4cf1c) decode attention on every CUDA card: the chunk
+// Fork (lab/upsync): SAGUARO_ATTN_DAILY=1 runs the Daily's (be4cf1c) decode attention on every CUDA card: the chunk
 // pass on PR #540's kernel (attn_chunk_kernel_pre75<M, 2, false>, the Daily's attn_chunk_kernel), bit for bit the
 // default kernel's partials.  CUDA only; unset or anything but "1" keeps upstream 0.1.42's kernels.
-// STRATA_ATTN_PRE75=0 still turns the chunk kernel off (A/B).
+// SAGUARO_ATTN_PRE75=0 still turns the chunk kernel off (A/B).
 // 147-verify: unset, it is on for a compute capability 12.0 card (sm120_series.hpp; RTX PRO 5000, a 4-token verify round
-// -2.6%, bitwise); STRATA_ATTN_DAILY=0 (anything but "1") keeps upstream's kernels there too.
+// -2.6%, bitwise); SAGUARO_ATTN_DAILY=0 (anything but "1") keeps upstream's kernels there too.
 [[maybe_unused]] bool daily_attn() {
 #if defined(__HIPCC__)
     return false;
 #else
     static const int env = [] {
-        const char* v = std::getenv("STRATA_ATTN_DAILY");
+        const char* v = std::getenv("SAGUARO_ATTN_DAILY");
         if (v == nullptr) return -1;
         return v[0] == '1' && v[1] == '\0' ? 1 : 0;
     }();
@@ -860,17 +860,17 @@ bool query_swizzle_gfx906_device() {
 }
 
 #if defined(STRATA_ATTN_PRE75_BUILT)
-// CUDA: the current device is below sm_75 (experimental build) or STRATA_ATTN_DAILY=1 (any card); HIP: it is gfx103x
+// CUDA: the current device is below sm_75 (experimental build) or SAGUARO_ATTN_DAILY=1 (any card); HIP: it is gfx103x
 // (per device: a layer split can mix cards).
-// STRATA_ATTN_PRE75=0 turns PR #540's kernel off (A/B); on HIP =1 also runs it on another wave32 card.
+// SAGUARO_ATTN_PRE75=0 turns PR #540's kernel off (A/B); on HIP =1 also runs it on another wave32 card.
 bool pre75_attn() {
     static const int env = [] {
-        const char* e = std::getenv("STRATA_ATTN_PRE75");
+        const char* e = std::getenv("SAGUARO_ATTN_PRE75");
         return e == nullptr ? -1 : e[0] == '0' ? 0 : e[0] == '1' ? 1 : -1;
     }();
     if (env == 0) return false;
 #if !defined(__HIPCC__) && !defined(STRATA_EXPERIMENTAL_SM60)
-    return daily_attn();   // the ready-made engine: upstream's attn_chunk_kernel unless STRATA_ATTN_DAILY=1
+    return daily_attn();   // the ready-made engine: upstream's attn_chunk_kernel unless SAGUARO_ATTN_DAILY=1
 #else
 #if !defined(__HIPCC__)
     if (daily_attn()) return true;
@@ -911,9 +911,9 @@ bool pre75_attn() {
 #define STRATA_ATTN_CHUNK(M) attn_chunk_kernel<M>
 #endif
 
-// S25: STRATA_ATTN_LANECELL=1 - the score phase one cell per thread (bit-identical scores, no shuffle reductions)
+// S25: SAGUARO_ATTN_LANECELL=1 - the score phase one cell per thread (bit-identical scores, no shuffle reductions)
 bool lane_cell_attn() {
-    static const bool on = [] { const char* v = std::getenv("STRATA_ATTN_LANECELL"); return v && v[0] == '1'; }();
+    static const bool on = [] { const char* v = std::getenv("SAGUARO_ATTN_LANECELL"); return v && v[0] == '1'; }();
     return on;
 }
 
@@ -922,11 +922,11 @@ int attn_kv_mode(const QsaAttnPools& p) {
     return p.k_q4 != nullptr ? 2 : (p.k_q != nullptr && p.v_q4 != nullptr ? 3 : (p.k_q != nullptr ? 1 : 0));
 }
 
-// STRATA_ATTN_MERGE_V2: 1 merges with attn_merge_v2_kernel, 0 with attn_merge_kernel.  Unset it follows
-// STRATA_ATTN_DAILY (the Daily had it on by default on NVIDIA), so upstream's merger stays the default.
+// SAGUARO_ATTN_MERGE_V2: 1 merges with attn_merge_v2_kernel, 0 with attn_merge_kernel.  Unset it follows
+// SAGUARO_ATTN_DAILY (the Daily had it on by default on NVIDIA), so upstream's merger stays the default.
 int attn_merge_v2() {
     static const int env = [] {
-        const char* v = std::getenv("STRATA_ATTN_MERGE_V2");
+        const char* v = std::getenv("SAGUARO_ATTN_MERGE_V2");
         return v != nullptr && *v != '\0' ? (std::atoi(v) != 0 ? 1 : 0) : -1;
     }();
     return env >= 0 ? env : (daily_attn() ? 1 : 0);
@@ -943,7 +943,7 @@ void launch_merge(int v2, const float* part_acc, const float* part_m, const floa
 }
 
 // qsa_decode_attn_batch's chunk pass: `n_q` queries' partials into `scratch` (one stride each).  `kernel` < 0 is the
-// environment's choice (lane cell, gfx906 swizzle, STRATA_ATTN_DAILY / PR #540); 0 is attn_chunk_kernel and 1 PR #540's
+// environment's choice (lane cell, gfx906 swizzle, SAGUARO_ATTN_DAILY / PR #540); 0 is attn_chunk_kernel and 1 PR #540's
 // kernel where it is built (the parity harness: never the environment).
 void launch_chunks_batch(const float* q, const QsaAttnPools& pools, const int32_t* ids, const int32_t* steps,
                          int64_t cap, const QsaShapes& s, float* scratch, int64_t n_q, cudaStream_t st, int kernel) {
@@ -960,15 +960,15 @@ void launch_chunks_batch(const float* q, const QsaAttnPools& pools, const int32_
 #if defined(STRATA_ATTN_PRE75_BUILT)
     const bool pre = kernel < 0 ? pre75_attn() : kernel == 1;
 #endif
-    // S25: STRATA_ATTN_LANECELL=1 - the score phase one cell per thread (bit-identical scores, no shuffle reductions)
+    // S25: SAGUARO_ATTN_LANECELL=1 - the score phase one cell per thread (bit-identical scores, no shuffle reductions)
     const bool lane_cell = kernel < 0 && lane_cell_attn();
 #if defined(STRATA_HIP_GFX906)
     static const bool query_swizzle = [] {
-        const char* v = std::getenv("STRATA_GFX906_ATTN_QUERY_SWIZZLE"); return v && v[0] == '1';
+        const char* v = std::getenv("SAGUARO_GFX906_ATTN_QUERY_SWIZZLE"); return v && v[0] == '1';
     }();
     const bool use_query_swizzle = kernel < 0 && query_swizzle && !lane_cell && kv_mode == 1 &&
                                    query_swizzle_gfx906_device();
-    static const bool query_swizzle_trace = std::getenv("STRATA_GFX906_ATTN_QUERY_SWIZZLE_TRACE") != nullptr;
+    static const bool query_swizzle_trace = std::getenv("SAGUARO_GFX906_ATTN_QUERY_SWIZZLE_TRACE") != nullptr;
     static thread_local bool query_swizzle_said = false;
     if (query_swizzle_trace && !query_swizzle_said) {
         query_swizzle_said = true;
@@ -992,14 +992,14 @@ void launch_chunks_batch(const float* q, const QsaAttnPools& pools, const int32_
         // use_query_swizzle already requires INT8, warp scoring, and the calling
         // thread's current device to be exactly gfx906 with a 64-lane wavefront.
         static const bool reduce12 = [] {
-            const char* v = std::getenv("STRATA_GFX906_ATTN_REDUCE12");
+            const char* v = std::getenv("SAGUARO_GFX906_ATTN_REDUCE12");
             return v && v[0] == '1' && v[1] == '\0';
         }();
         if (reduce12) {
             attn_chunk_kernel<1, false, true, true><<<grid, THREADS, 0, st>>>(q, pools, ids, steps,
                 (int) s.n_head_kv, (int) s.page_size, scale, part_acc, part_m, part_l, n_chunks, (int) cap, stride);
             static const bool trace = [] {
-                const char* v = std::getenv("STRATA_GFX906_ATTN_REDUCE12_TRACE");
+                const char* v = std::getenv("SAGUARO_GFX906_ATTN_REDUCE12_TRACE");
                 return v && v[0] == '1' && v[1] == '\0';
             }();
             static thread_local bool said = false;
@@ -1092,7 +1092,7 @@ bool qsa_decode_attn_slots(const float* q, const QsaAttnSlotPools& pools, const 
 #endif
 #if defined(STRATA_HIP_GFX906)
     static const bool query_swizzle = [] {
-        const char* v = std::getenv("STRATA_GFX906_ATTN_QUERY_SWIZZLE"); return v && v[0] == '1';
+        const char* v = std::getenv("SAGUARO_GFX906_ATTN_QUERY_SWIZZLE"); return v && v[0] == '1';
     }();
     if (query_swizzle && !lane_cell && kv_mode == 1 && query_swizzle_gfx906_device()) return false;
 #endif
@@ -1148,7 +1148,7 @@ void qsa_decode_attn_batch_rows(const float* q, const QsaAttnPoolsRows& rows, co
     cudaStream_t st = (cudaStream_t) stream;
     // The plain kernel is what qsa_decode_attn_batch runs unless one of its variants is on (lane-cell scoring, the
     // pre-sm_75 / gfx103x kernel, the gfx906 swizzle): there each row goes through that call, one launch per row.
-    static const bool lane_cell_rows = [] { const char* v = std::getenv("STRATA_ATTN_LANECELL"); return v && v[0] == '1'; }();
+    static const bool lane_cell_rows = [] { const char* v = std::getenv("SAGUARO_ATTN_LANECELL"); return v && v[0] == '1'; }();
     bool per_row = lane_cell_rows;
 #if defined(STRATA_ATTN_PRE75_BUILT)
     per_row = per_row || pre75_attn();

@@ -26,7 +26,7 @@ Checks, in order, and each one names what failed:
 * the manifest parses strictly; file paths are relative, plain, and stay inside the component folder;
 * the platform and backend are combinations the project commits to (`components.BACKEND_MATRIX`);
 * the backend is the one this machine's GPU needs (detected, or asked for);
-* the signature (none yet; a verifier registered by S6 is called, and `STRATA_REQUIRE_SIGNED_COMPONENTS=1` refuses
+* the signature (none yet; a verifier registered by S6 is called, and `SAGUARO_REQUIRE_SIGNED_COMPONENTS=1` refuses
   an unsigned or unverifiable package);
 * every listed file exists with the listed size, and every file's SHA-256 matches (`verify(full=True)`, which is what
   a start does; the quick listing/status path hashes only the entrypoint);
@@ -56,9 +56,9 @@ SCHEMA_VERSION = 2
 READABLE_SCHEMAS = (1, 2)           # schema 1 (S3's first packages: no archs/min_driver/build_id/signature) still loads
 MANIFEST = "engine-component.json"
 COMPONENT_ID = "strata-engine"
-ENV_DIR = "STRATA_COMPONENTS_DIR"
-ENV_BACKEND = "STRATA_ENGINE_BACKEND"
-ENV_REQUIRE_SIGNED = "STRATA_REQUIRE_SIGNED_COMPONENTS"
+ENV_DIR = "SAGUARO_COMPONENTS_DIR"
+ENV_BACKEND = "SAGUARO_ENGINE_BACKEND"
+ENV_REQUIRE_SIGNED = "SAGUARO_REQUIRE_SIGNED_COMPONENTS"
 #: The updater's state (``strata update``, ``strata components rollback``) lives in the component folder; the only member the
 #: start path reads is ``engine.pinned``: the folder a manual rollback chose, which wins over a newer installed package.
 UPDATE_STATE = Path(".updates") / "state.json"
@@ -174,7 +174,7 @@ def package_lib_dirs(folder) -> list[str]:
 # ----------------------------------------------------------------------------------------------- where
 
 def components_dir(environ=None, *, windows: bool | None = None, home: Path | None = None) -> Path:
-    """The per-user component folder. ``STRATA_COMPONENTS_DIR`` wins (the app and the tests set it)."""
+    """The per-user component folder. ``SAGUARO_COMPONENTS_DIR`` wins (the app and the tests set it)."""
     environ = os.environ if environ is None else environ
     explicit = environ.get(ENV_DIR)
     if explicit:
@@ -328,7 +328,7 @@ def read_manifest(folder: Path) -> EngineComponent:
 
 #: A signature verifier is ``fn(payload: bytes, signature: dict, component) -> None``; it raises
 #: ``IntegrityProblem`` (or any exception) when the signature does not hold. S6 registers one that checks the project's
-#: key; until then there is none, unsigned packages load (unless ``STRATA_REQUIRE_SIGNED_COMPONENTS=1``), and a package
+#: key; until then there is none, unsigned packages load (unless ``SAGUARO_REQUIRE_SIGNED_COMPONENTS=1``), and a package
 #: that carries a signature nobody can check is reported as "signature not verified", never as verified.
 _verifier: Callable[[bytes, dict, "EngineComponent"], None] | None = None
 
@@ -347,7 +347,7 @@ def signing_payload(manifest: dict) -> bytes:
 
 def verify_signature(component: "EngineComponent", environ=None) -> str:
     """"verified", "unsigned" or "unverified" (signed, no verifier yet). Raises IntegrityProblem for a bad signature,
-    and for an unsigned or unverifiable package when ``STRATA_REQUIRE_SIGNED_COMPONENTS`` is set."""
+    and for an unsigned or unverifiable package when ``SAGUARO_REQUIRE_SIGNED_COMPONENTS`` is set."""
     environ = os.environ if environ is None else environ
     required = environ.get(ENV_REQUIRE_SIGNED, "").strip().lower() in ("1", "true", "yes", "on")
     if not component.signature:
@@ -438,7 +438,7 @@ def runtime_version() -> str | None:
 
 def detect_backend(environ=None) -> tuple[str | None, str]:
     """(backend, how) for this machine: the engine family its GPU needs. Bounded, read-only probes of tools that are
-    already installed; ``STRATA_ENGINE_BACKEND`` overrides (the tests and the support desk use it)."""
+    already installed; ``SAGUARO_ENGINE_BACKEND`` overrides (the tests and the support desk use it)."""
     environ = os.environ if environ is None else environ
     forced = environ.get(ENV_BACKEND, "").strip().lower()
     if forced:

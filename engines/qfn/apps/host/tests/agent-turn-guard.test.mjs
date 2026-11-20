@@ -1,5 +1,5 @@
 // The turn guard: a search-heavy /plan that keeps failing searches and rewriting its plan is stopped by the app and ends with a plain message;
-// a context at 100% never ends silently. The pure counting always runs; the end-to-end ones need a built Harness (STRATA_HARNESS_DIR) and
+// a context at 100% never ends silently. The pure counting always runs; the end-to-end ones need a built Harness (SAGUARO_HARNESS_DIR) and
 // run the real search code on a pretend web that refuses (no network).
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -11,8 +11,8 @@ import { startScriptedWorker } from './helpers/scripted-worker.mjs';
 import { createAgentBridge } from '../server/agent/agent-bridge.mjs';
 import { resolveHarness } from '../server/agent/harness-runtime.mjs';
 
-const HARNESS = process.env.STRATA_HARNESS_DIR;
-const skip = !HARNESS || !resolveHarness({ env: process.env }).ok ? 'STRATA_HARNESS_DIR is not set to a built Harness' : false;
+const HARNESS = process.env.SAGUARO_HARNESS_DIR;
+const skip = !HARNESS || !resolveHarness({ env: process.env }).ok ? 'SAGUARO_HARNESS_DIR is not set to a built Harness' : false;
 
 const search = (id, state, result = '') => ({ id, name: 'web_search', state, result });
 const LIMITED = 'Web search is limited right now. Try again in a minute, or add a search key (Exa, Perplexity or DeepSeek) in Settings → Tools → Web search. Do not retry this search';

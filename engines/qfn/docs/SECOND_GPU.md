@@ -35,7 +35,7 @@ compute capacity.
 The experiment requires the corresponding visible CUDA devices and a CUDA
 enabled build. Each card must keep at least 512 MiB free. Tiers must be enabled
 in order. Under WDDM (Windows, WSL2), CUDA registration of the host expert arena is capped at
-8 GiB to leave room for the contexts and MTP on CUDA0 (`STRATA_ARENA_PIN_GIB` overrides it; on Linux the whole
+8 GiB to leave room for the contexts and MTP on CUDA0 (`SAGUARO_ARENA_PIN_GIB` overrides it; on Linux the whole
 arena is registered). The rest remains
 available to the CPU pool; the PCIe expert path is available only for the
 registered layers. Without secondary GPUs, the original uncapped registration
@@ -146,7 +146,7 @@ alternative to the CUDA1-3 caches above, not a third tier beside them.
   bridge reported peer access, enabled it, and `cudaMemcpyPeerAsync` then copied nothing, so the peer computed on
   zeros and the first prompt came back NaN. A test copy each way now decides; if it arrives wrong the log says so
   and the prompt path uses the host route (the one without P2P: activations and rows through mapped host memory).
-  `STRATA_PEER_NO_P2P=1` asks for that route by hand.
+  `SAGUARO_PEER_NO_P2P=1` asks for that route by hand.
 - `--peer-slots N` (default 0): cap the tier at N experts; 0 = as many as fit.
 - `--peer-adapt-swaps N` (default -1): swaps per adaptive round on the peer;
   -1 uses the primary's `--adapt-swaps`.
@@ -207,13 +207,13 @@ cache in real VRAM; freeing another app's sticky allocation on the same card
 was worth about the same again.  Prefer explicit counts on a card that shares
 its VRAM with anything else.
 
-## Choosing the primary device on Windows (`STRATA_PRIMARY_DEVICE`)
+## Choosing the primary device on Windows (`SAGUARO_PRIMARY_DEVICE`)
 
 The engine runs the model on the device the runtime numbers 0.  Windows' HIP
 runtime enumerates the cards in a fixed order that `HIP_VISIBLE_DEVICES` only
 filters - it cannot reorder - so on a PC whose faster card comes second (an RX
 6800 after an RX 6600, say) a run with both visible could only put the model on
-the slow one.  `STRATA_PRIMARY_DEVICE=N` picks another visible ordinal as the
+the slow one.  `SAGUARO_PRIMARY_DEVICE=N` picks another visible ordinal as the
 primary; unset or 0 is upstream's behavior.
 
 - the helper caches (`--expert-cache-device1..3`) take the visible devices

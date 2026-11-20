@@ -238,7 +238,7 @@ class MaxTokens(unittest.TestCase):
     def test_debug_log_shows_the_resolved_budget(self):
         import contextlib
         import io
-        os.environ["STRATA_DEBUG"] = "1"
+        os.environ["SAGUARO_DEBUG"] = "1"
         try:
             for api in ("openai", "anthropic"):
                 with self.subTest(api=api):
@@ -247,7 +247,7 @@ class MaxTokens(unittest.TestCase):
                         _, _, pt, _ = self.call(api, max_tokens=-1)
                     self.assertIn(f"max_new={CTX - CTX_SLACK - pt} ", out.getvalue())
         finally:
-            del os.environ["STRATA_DEBUG"]
+            del os.environ["SAGUARO_DEBUG"]
 
 
 class FitMaxTokens(unittest.TestCase):
@@ -964,7 +964,7 @@ class ConfigApiKey(unittest.TestCase):
         err = io.StringIO()
         with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ), \
                 mock.patch.object(S, "serve", fake_serve), mock.patch.object(sys, "stderr", new=err):
-            os.environ.pop("STRATA_API_KEY", None)
+            os.environ.pop("SAGUARO_API_KEY", None)
             p = Path(d) / "cfg.json"
             p.write_text(json.dumps(cfg), encoding="utf-8")
             with mock.patch.object(sys, "argv", ["server.py", "--engine", "mock", "--port", "0", "--config", str(p)]):
@@ -1863,9 +1863,9 @@ class GpuChoice(unittest.TestCase):
         self.assertEqual(engine_nice({}, arch, "linux"), 5)                            # built-in Radeon on the PC
         self.assertEqual(engine_nice({}, {0: "gfx1201"}, "linux"), 0)                  # cards only: unchanged
         self.assertEqual(engine_nice({}, arch, "win32"), 0)
-        self.assertEqual(engine_nice({"STRATA_ENGINE_NICE": "0"}, arch, "linux"), 0)   # the off switch
-        self.assertEqual(engine_nice({"STRATA_ENGINE_NICE": "9"}, {0: "gfx1201"}, "linux"), 9)
-        self.assertEqual(engine_nice({"STRATA_ENGINE_NICE": "x"}, arch, "linux"), 0)
+        self.assertEqual(engine_nice({"SAGUARO_ENGINE_NICE": "0"}, arch, "linux"), 0)   # the off switch
+        self.assertEqual(engine_nice({"SAGUARO_ENGINE_NICE": "9"}, {0: "gfx1201"}, "linux"), 9)
+        self.assertEqual(engine_nice({"SAGUARO_ENGINE_NICE": "x"}, arch, "linux"), 0)
 
     def test_picture_reader_not_on_the_igpu(self):
         """The picture reader runs on the first visible card; with a split that starts on the iGPU it must use a card of its own."""
@@ -4159,7 +4159,7 @@ class SpillingThinkingEngine(ThinkingEngine):
 
 
 class BatchSpillingThinkingEngine(SpillingThinkingEngine):
-    """STRATA_BATCH_WRAP_SPILL: under --batch the run-ahead tokens come from take_spill(), `drained` stays empty."""
+    """SAGUARO_BATCH_WRAP_SPILL: under --batch the run-ahead tokens come from take_spill(), `drained` stays empty."""
 
     def generate(self, ids, max_new, sampling, cancel, embeddings=None):
         self._spill = None
@@ -4318,7 +4318,7 @@ class ThinkingBudget(unittest.TestCase):
         return b["choices"][0]["message"], first, second, self.tok.encode(REASONING_WRAP_UP, parse_special=True)
 
     def test_tokens_drained_after_the_stop_join_the_thinking(self):
-        """STRATA_REPLY_REUSE=1: the continuation extends what the engine holds - its run-ahead tokens too."""
+        """SAGUARO_REPLY_REUSE=1: the continuation extends what the engine holds - its run-ahead tokens too."""
         from serve.server import REASONING_WRAP_UP
         msg, first, second, extra = self.spilled()
         self.assertEqual(msg["reasoning_content"], ThinkingEngine.THOUGHT[:23] + REASONING_WRAP_UP.split("</think>")[0])
@@ -5370,7 +5370,7 @@ class SilentEngine(unittest.TestCase):
         self.assertNotIn("STOP", engine.proc.stdin.getvalue())    # nothing is listening: no STOP, no drain
 
     def test_death_note_finds_the_watchdog_line_under_a_long_trace(self):
-        # #1705: STRATA_VERIFY_TRACE dumps (~30 KB) after the watchdog's line must not hide it
+        # #1705: SAGUARO_VERIFY_TRACE dumps (~30 KB) after the watchdog's line must not hide it
         import tempfile
         engine = self.bare(0.3)
         with tempfile.TemporaryDirectory() as d:

@@ -61,24 +61,24 @@ class EnginePackageEnv(unittest.TestCase):
 class CalibrateWithoutAFullFolder(unittest.TestCase):
     def test_missing_setup_is_a_refusal_in_words_not_a_traceback(self):
         with mock.patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("STRATA_INSTALL_DIR", None)
+            os.environ.pop("SAGUARO_INSTALL_DIR", None)
             with mock.patch("importlib.import_module", side_effect=ImportError("no module")):
                 with self.assertRaises(ProfileError) as ctx:
                     calibration._full_folder("tools.calibrate")
         self.assertEqual(ctx.exception.code if hasattr(ctx.exception, "code") else 5, 5)
-        self.assertIn("STRATA_INSTALL_DIR", str(ctx.exception))
+        self.assertIn("SAGUARO_INSTALL_DIR", str(ctx.exception))
         self.assertIn("tune run --mode api", str(ctx.exception))
 
     def test_tool_availability_is_reported_for_the_plan(self):
         with mock.patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("STRATA_INSTALL_DIR", None)
+            os.environ.pop("SAGUARO_INSTALL_DIR", None)
             with mock.patch("importlib.util.find_spec", return_value=None):
                 self.assertFalse(calibration._tools_available())
             with tempfile.TemporaryDirectory() as d:
                 (Path(d) / "tools").mkdir()
                 (Path(d) / "setup.py").write_text("", encoding="utf-8")
                 (Path(d) / "tools" / "calibrate.py").write_text("", encoding="utf-8")
-                os.environ["STRATA_INSTALL_DIR"] = d
+                os.environ["SAGUARO_INSTALL_DIR"] = d
                 with mock.patch("importlib.util.find_spec", return_value=None):
                     self.assertTrue(calibration._tools_available())
 

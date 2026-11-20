@@ -588,7 +588,7 @@ inline uint32_t dbx_payload_sum(const float* x, int64_t n, const int32_t* ids, c
         for (int64_t j = 0; j < k; ++j) s += dbx_payload_mix(sycl::bit_cast<uint32_t>(w[j]), (uint32_t) (n + k + j));
     return s;
 }
-// STRATA_SYCL_A770_FAST=1 (opt-in): pair the activation stores without changing the checksum's word/position
+// SAGUARO_SYCL_A770_FAST=1 (opt-in): pair the activation stores without changing the checksum's word/position
 // order. Odd sizes or unaligned mapped pointers retain the scalar path.
 __dpct_inline__ uint32_t dbx_publish_x(const float* x, float* out, int n, int lane, int threads, bool pair, bool plain) {
     uint32_t part = 0;
@@ -667,7 +667,7 @@ __dpct_inline__ void doorbell_publish_res_kernel(
     const float *__restrict__ x, const int32_t *__restrict__ ids,
     const int32_t *__restrict__ d_res, int n_expert, int n, int k, float *x_out,
     int32_t *ids_out, uint32_t *seq, bool full, bool plain, bool pair) {
-    // full (STRATA_DOORBELL_CHECK=1): the payload is published whole and the checksum covers x and the ids (this
+    // full (SAGUARO_DOORBELL_CHECK=1): the payload is published whole and the checksum covers x and the ids (this
     // variant publishes no weights). Otherwise d_res/n_expert decide whether x is copied, as before the checksum:
     // when every routed expert is resident the host never reads x, and an uncached copy of it costs the A750 ~10%
     // of decode.
@@ -708,7 +708,7 @@ __dpct_inline__ void doorbell_publish_res_kernel(
     }
 }
 
-// #649 (HIP, STRATA_DOORBELL_STORE=1): the same publish, but the ring is STORED (the step's own number, known at
+// #649 (HIP, SAGUARO_DOORBELL_STORE=1): the same publish, but the ring is STORED (the step's own number, known at
 // capture) instead of read-modify-written over PCIe - one store, no read of host memory from the GPU.
 __dpct_inline__ void doorbell_publish_value_kernel(
     const float *__restrict__ x, const int32_t *__restrict__ ids,
@@ -790,7 +790,7 @@ void doorbell_publish(const float* x, const int32_t* ids, const float* weights, 
 void doorbell_publish_res(const float* x, const int32_t* ids, const int32_t* d_res, int n_expert, int64_t n, int64_t k,
                           float* x_out, int32_t* ids_out, uint32_t* d_seq, void* stream) {
     if (k > 1024) { std::fprintf(stderr, "doorbell_publish_res: k too large\n"); std::exit(1); }
-    static const bool full = [] { const char* v = std::getenv("STRATA_DOORBELL_CHECK"); return v != nullptr && v[0] == '1'; }();
+    static const bool full = [] { const char* v = std::getenv("SAGUARO_DOORBELL_CHECK"); return v != nullptr && v[0] == '1'; }();
     const bool fl = full;
     const bool plain = strata::doorbell_plain_payload() || g_plain_payload.load(std::memory_order_relaxed);
     const bool pair = strata::a770_fast();
@@ -828,10 +828,10 @@ bool doorbell_payload_ready(const uint32_t* h_seq, const float* h_x, int64_t n, 
 
 bool doorbell_wait_payload(const uint32_t* h_seq, const float* h_x, int64_t n, const int32_t* h_ids,
                            const float* h_weights, int64_t k, uint32_t want, int timeout_ms) {
-    // Opt-in (STRATA_DOORBELL_CHECK=1): on an Arc A750 (i915) the host-side checksum of the whole payload, read from
+    // Opt-in (SAGUARO_DOORBELL_CHECK=1): on an Arc A750 (i915) the host-side checksum of the whole payload, read from
     // uncached host memory twice per CPU-expert layer, cost 15-20% of decode (5 interleaved rounds), and the stale
     // payload it guards against was not seen there. The ring tag is still published by the GPU.
-    static const bool check = [] { const char* v = std::getenv("STRATA_DOORBELL_CHECK"); return v != nullptr && v[0] == '1'; }();
+    static const bool check = [] { const char* v = std::getenv("SAGUARO_DOORBELL_CHECK"); return v != nullptr && v[0] == '1'; }();
     if (!check) return true;
     if (doorbell_payload_ready(h_seq, h_x, n, h_ids, h_weights, k, want)) return true;
     const auto t0 = std::chrono::steady_clock::now();

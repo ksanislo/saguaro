@@ -72,13 +72,13 @@ from strata_control.discovery import in_trash
 from strata_control import user_args
 
 ROOT = Path(__file__).resolve().parent
-# The desktop app runs this installer under Strata Control (its bundled Python, STRATA_CONTROL_INSTALL=1). The source
+# The desktop app runs this installer under Strata Control (its bundled Python, SAGUARO_CONTROL_INSTALL=1). The source
 # (tools/, data/, serve/) stays in ROOT, inside the app; everything the install writes (run configs, logs, third_party,
-# the data folder beside it) goes to home(), a per-user folder (STRATA_INSTALL_DIR). In that mode it installs no Python
+# the data folder beside it) goes to home(), a per-user folder (SAGUARO_INSTALL_DIR). In that mode it installs no Python
 # package and no engine and compiles nothing: it downloads the model files, prepares them with the bundled tools and
 # writes a run config whose engine is "component:strata-engine". Outside that mode home() is ROOT and nothing changes.
-CONTROL = os.environ.get("STRATA_CONTROL_INSTALL") == "1"
-_CONTROL_HOME = Path(os.environ["STRATA_INSTALL_DIR"]).resolve() if CONTROL and os.environ.get("STRATA_INSTALL_DIR") else None
+CONTROL = os.environ.get("SAGUARO_CONTROL_INSTALL") == "1"
+_CONTROL_HOME = Path(os.environ["SAGUARO_INSTALL_DIR"]).resolve() if CONTROL and os.environ.get("SAGUARO_INSTALL_DIR") else None
 
 
 def home() -> Path:
@@ -90,7 +90,7 @@ WIN = os.name == "nt"
 # #214: every Hugging Face file comes from a fixed commit of its repository (the `sha` of
 # https://huggingface.co/api/models/<repo> when this was pinned), so a checkout installs the same files on any
 # day.  Every file has a fixed size and SHA-256 too (REPO_PINS); a revision the repository no longer has stops the
-# download (download()), unless a tester sets STRATA_ALLOW_UNPINNED=1.
+# download (download()), unless a tester sets SAGUARO_ALLOW_UNPINNED=1.
 HF_REVISIONS = {
     "ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF": "ed59f92082b1e93c0e96d60a8b11aab089b52f09",        # 2026-09-29
     "ukisai/Swift-1.5-Qwen3.8-Flash-Next-GSQ-RCO-GGUF": "99bb8f7f95c7aa7b24a36a7786a4f657b30f5d3d",   # 2026-10-07 (adds IQ3_S)
@@ -126,12 +126,12 @@ _unpinned_said = []
 
 
 def allow_unpinned() -> bool:
-    """STRATA_ALLOW_UNPINNED=1: a tester's opt-out.  A file whose pinned version is gone from Hugging Face is then taken
+    """SAGUARO_ALLOW_UNPINNED=1: a tester's opt-out.  A file whose pinned version is gone from Hugging Face is then taken
     from the repository's current files, without the SHA-256 check (nothing pins them).  Off by default, announced when set."""
-    on = (os.environ.get("STRATA_ALLOW_UNPINNED") or "").strip() == "1"
+    on = (os.environ.get("SAGUARO_ALLOW_UNPINNED") or "").strip() == "1"
     if on and not _unpinned_said:
         _unpinned_said.append(1)
-        warn("STRATA_ALLOW_UNPINNED=1: a model file whose pinned version is gone from Hugging Face is taken from its "
+        warn("SAGUARO_ALLOW_UNPINNED=1: a model file whose pinned version is gone from Hugging Face is taken from its "
              "current files instead, and is NOT checked against a SHA-256. Unset it to get the checked files only")
     return on
 
@@ -148,12 +148,12 @@ def file_pin(url: str):
 # sizes, and is reachable from mainland China where huggingface.co often is not.  It serves a repository's current
 # files (no pinned revision), so a file from it is checked against the SHA-256 ModelScope publishes for it, and the
 # MTP tensors against the pinned checkpoint's own hashes (tools/mtp_fetch.py).
-# --source / STRATA_SOURCE: huggingface (what auto means), or modelscope: only when asked for (a different host
+# --source / SAGUARO_SOURCE: huggingface (what auto means), or modelscope: only when asked for (a different host
 # serving current files, not our pinned revision: setup never switches to it by itself, it recommends it, #908).
 MS_DEFAULT = "https://www.modelscope.cn"
 SOURCES = ("auto", "modelscope", "huggingface")
 HF_FILE = re.compile(r"^https?://[^/]+/(?P<repo>[^/]+/[^/]+)/resolve/[^/]+/(?P<path>.+)$")
-_sources = {}                                      # model_source()'s answer per (STRATA_SOURCE, HF_ENDPOINT, host)
+_sources = {}                                      # model_source()'s answer per (SAGUARO_SOURCE, HF_ENDPOINT, host)
 _ms_files = {}
 
 
@@ -172,10 +172,10 @@ def reachable(url: str, timeout: float = 5.0) -> bool:
 
 
 def model_source() -> str:
-    """"modelscope" or "huggingface".  ModelScope only when --source modelscope / STRATA_SOURCE=modelscope asks for it;
+    """"modelscope" or "huggingface".  ModelScope only when --source modelscope / SAGUARO_SOURCE=modelscope asks for it;
     everything else (auto, a HF_ENDPOINT mirror chosen on purpose, #495) is Hugging Face.  Setup does not switch hosts
     by itself (#908): ModelScope serves a repository's current files, not our pinned revision."""
-    want = (os.environ.get("STRATA_SOURCE") or "auto").strip().lower()
+    want = (os.environ.get("SAGUARO_SOURCE") or "auto").strip().lower()
     key = (want, os.environ.get("HF_ENDPOINT") or "", ms_endpoint())
     if key not in _sources:
         _sources[key] = "modelscope" if want in ("ms", "modelscope") else "huggingface"
@@ -222,7 +222,7 @@ LLAMA_CPP_ZIP = f"https://github.com/ggml-org/llama.cpp/archive/{LLAMA_CPP_COMMI
 
 # The ready-made engine: <PREBUILT_URL><asset>, a zip with strata(.exe), strata-vision(.exe) and BUILD.json, built
 # by tools/make_release.py.  Set this to the GitHub release download folder when publishing, e.g.
-# "https://github.com/<you>/Strata/releases/latest/download/" (or pass --prebuilt / set STRATA_PREBUILT_URL).
+# "https://github.com/<you>/Strata/releases/latest/download/" (or pass --prebuilt / set SAGUARO_PREBUILT_URL).
 # With the default, the release of this checkout's own version (PREBUILT_TAG_URL, CMakeLists.txt's version) is
 # tried first and the latest release is the fallback (#214): an older checkout keeps the engine it shipped with.
 PREBUILT_URL = "https://github.com/Niko1221/Strata/releases/latest/download/"
@@ -246,7 +246,7 @@ CUDA12_WHEELS = ["nvidia-cublas-cu12==12.9.1.4", "nvidia-cuda-runtime-cu12==12.9
 # toolkit the CUDA 12 zip is built with (cuBLAS 12.9.1.4, runtime 12.9.79).  Not tested on such an old driver here.
 CUDA12_MIN_DRIVER = 528 if WIN else 525
 ENGINE12_DIR = "engine-cuda12"
-MIN_ENGINE = (0, 1, 46)                # versions compare all numbers; v0.1.46: the 0.2 release engine (UPDATE.bat and setup fetch it from the signed feed, #3469 #3437); v0.1.45: Qwen3.6 parallel requests and pictures, fixes #2346 #2372 #2396; v0.1.44.1: CPUs without AVX2 start again (#2324: an illegal instruction before main in the NVFP4 CPU rows), the CUDA 12.0/12.1 toolkits build (#2322), a crashed engine start is named instead of retried as a GPU runtime start, Mac M2 (#2323); v0.1.44: UD-Q4/Q5/Q6_K_XL and Q8_0 Unsloth files in setup (K-quant experts, MMQ prompt library strata_kq), NVFP4 packs, Qwen3.6-35B-A3B, Intel Arc A-series kernels, the pipelined-decode and latency work; v0.1.43.1: the adaptive overlap no longer collapses decode on pinned-host desktops (#1964 #1975), Windows PLE mmap stall (#1984), pinned prompt uploads (#1996), the I/O watchdog allowance; v0.1.43: adaptive-tier copies overlap on CUDA, P100 (sm_60) kernel tables, RDNA4 (gfx1200/gfx1201) defaults (route tail skip, measured PCIe share, 16K prompt chunks, fused IQ3 prompt experts); v0.1.42.1: the GGUF-in-place file tier on Windows unmaps every shard, dual-socket starts judge each NUMA node and STRATA_DROP_CACHE_ON_EXIT, tools/strata_bench.py; v0.1.42: STRATA_ROUTE_TAIL_SKIP=7 default on CUDA (+13-16% decode), the AMD 2-GPU checkpoint fix (H13), Phase 2 fixes and opt-ins; v0.1.41.1 (folded into 0.1.42): the #1576 card order, #1616 stage size, #1595 CPU share, #1630/#1607 Windows HIP chunk cap and commit-limit warning, #1603 parallel-request bookkeeping; v0.1.41: CPU prefill share on by default (NVIDIA, chunks < 1024), --batch-groups auto, the file tier read in batches on Windows, Pascal decode fix, per-arch tables; v0.1.40.3: the #1357 MTP router guard, the #1376 Windows HIP cache floor, #461 runtime DLLs, Intel A750 first-request fix; v0.1.40.2: F4 verify windows, the Linux file tier (#1194), the stager wait (#1057), #1264/#1201/#1139 fixes, opt-in CPU share (#1282), Intel Arc; v0.1.40: --resident-experts on a layer split with the split+resident variant (#848), --kv k8v4 with KV streaming (#711); v0.1.39: the #577 file-tier regression fixed, the OpenAI Responses API (#451, Codex), a reply stuck on one token ended (#606), the head before the arena (#620), effort_position (#458), --vram-reserve hot resize opt-in (#533), PR batch; v0.1.38: prompts faster (one gather per expert group #372, the first chunk's PLE rows beside layer 0 #374, DeltaNet three heads per thread #413), --kv q4_0 prompts on tensor cores (#452), Q5_0 experts on the GPU (#473), IQ4_XS on AVX-2 (#415), unbuffered expert loading on Windows (#357 #362), --peer-device (#531), a 6 GB card starts (#496), PR batch; v0.1.37: a silent engine is restarted (#481), Windows AMD counts the desktop's VRAM (#380 #377 #497), a steadier PCIe probe (#485), fixes #496 #495 #498 #505 #493; v0.1.36: a cancelled prompt logged as read so far (#471), the draft-head hint (#474), UPDATE.bat (#475), --expert-profile-save (#477); v0.1.35: Windows AMD uses its bundled HIP runtime (#468 #461), the low-RAM resident mode on Windows 32 GB (#467), fixes #460 #459 #446 #447 #457 #448 #444; v0.1.34: AMD on Windows (a ready-made HIP engine), an MCP server for AI assistants (tools/strata_mcp.py), a shorter README; v0.1.33: a portable image encoder again (#411 #412), setup recommends instead of forcing (#406 #403 #364 #384), fixes #352 #365 #369 #371 #375 #393 #408 #414; v0.1.32: split prompts faster (#340), AMD router +12%, Unsloth Q4 in setup, faster Q4 prompts, #326/#327/#342/#344 fixes, PR batch; v0.1.31: Unsloth UD-Q4_K_XL (experimental), GGUF-in-place low-RAM mode, Windows GGUF load 2x, server race + tokenizer fixes, AMD intrinsics; v0.1.30: short prompts faster (streaming from 1024 tokens), resident low-RAM variant, multi-GPU session carve, RDNA4; v0.1.29: sampled answers faster (split top-k), #154 correctness fixes; v0.1.28: the expert cache reserves the draft head, a cancelled request no longer fails the next; v0.1.27: RTX 20 (sm_75) in the ready-made engine, the HIP build without CUDA headers; v0.1.26: the draft layer's prompt pass in batches; v0.1.25: faster prompts (grouping off the copy engine, fused hyper-connection kernels), AMD HIP backend, --kv k8v4; v0.1.24: long prompts faster (QSA select on tensor cores); v0.1.23: image requests honor sampling, 8 GB cards start, batched verify window; v0.1.22: faster prompts (tensor-core attention), multi-GPU across images/steering/KV streaming; v0.1.21: multi-GPU layer split (--gpus); v0.1.20: system-prompt checkpoint, PCIe probe, hit rate; v0.1.19: penalties
+MIN_ENGINE = (0, 1, 46)                # versions compare all numbers; v0.1.46: the 0.2 release engine (UPDATE.bat and setup fetch it from the signed feed, #3469 #3437); v0.1.45: Qwen3.6 parallel requests and pictures, fixes #2346 #2372 #2396; v0.1.44.1: CPUs without AVX2 start again (#2324: an illegal instruction before main in the NVFP4 CPU rows), the CUDA 12.0/12.1 toolkits build (#2322), a crashed engine start is named instead of retried as a GPU runtime start, Mac M2 (#2323); v0.1.44: UD-Q4/Q5/Q6_K_XL and Q8_0 Unsloth files in setup (K-quant experts, MMQ prompt library strata_kq), NVFP4 packs, Qwen3.6-35B-A3B, Intel Arc A-series kernels, the pipelined-decode and latency work; v0.1.43.1: the adaptive overlap no longer collapses decode on pinned-host desktops (#1964 #1975), Windows PLE mmap stall (#1984), pinned prompt uploads (#1996), the I/O watchdog allowance; v0.1.43: adaptive-tier copies overlap on CUDA, P100 (sm_60) kernel tables, RDNA4 (gfx1200/gfx1201) defaults (route tail skip, measured PCIe share, 16K prompt chunks, fused IQ3 prompt experts); v0.1.42.1: the GGUF-in-place file tier on Windows unmaps every shard, dual-socket starts judge each NUMA node and SAGUARO_DROP_CACHE_ON_EXIT, tools/strata_bench.py; v0.1.42: SAGUARO_ROUTE_TAIL_SKIP=7 default on CUDA (+13-16% decode), the AMD 2-GPU checkpoint fix (H13), Phase 2 fixes and opt-ins; v0.1.41.1 (folded into 0.1.42): the #1576 card order, #1616 stage size, #1595 CPU share, #1630/#1607 Windows HIP chunk cap and commit-limit warning, #1603 parallel-request bookkeeping; v0.1.41: CPU prefill share on by default (NVIDIA, chunks < 1024), --batch-groups auto, the file tier read in batches on Windows, Pascal decode fix, per-arch tables; v0.1.40.3: the #1357 MTP router guard, the #1376 Windows HIP cache floor, #461 runtime DLLs, Intel A750 first-request fix; v0.1.40.2: F4 verify windows, the Linux file tier (#1194), the stager wait (#1057), #1264/#1201/#1139 fixes, opt-in CPU share (#1282), Intel Arc; v0.1.40: --resident-experts on a layer split with the split+resident variant (#848), --kv k8v4 with KV streaming (#711); v0.1.39: the #577 file-tier regression fixed, the OpenAI Responses API (#451, Codex), a reply stuck on one token ended (#606), the head before the arena (#620), effort_position (#458), --vram-reserve hot resize opt-in (#533), PR batch; v0.1.38: prompts faster (one gather per expert group #372, the first chunk's PLE rows beside layer 0 #374, DeltaNet three heads per thread #413), --kv q4_0 prompts on tensor cores (#452), Q5_0 experts on the GPU (#473), IQ4_XS on AVX-2 (#415), unbuffered expert loading on Windows (#357 #362), --peer-device (#531), a 6 GB card starts (#496), PR batch; v0.1.37: a silent engine is restarted (#481), Windows AMD counts the desktop's VRAM (#380 #377 #497), a steadier PCIe probe (#485), fixes #496 #495 #498 #505 #493; v0.1.36: a cancelled prompt logged as read so far (#471), the draft-head hint (#474), UPDATE.bat (#475), --expert-profile-save (#477); v0.1.35: Windows AMD uses its bundled HIP runtime (#468 #461), the low-RAM resident mode on Windows 32 GB (#467), fixes #460 #459 #446 #447 #457 #448 #444; v0.1.34: AMD on Windows (a ready-made HIP engine), an MCP server for AI assistants (tools/strata_mcp.py), a shorter README; v0.1.33: a portable image encoder again (#411 #412), setup recommends instead of forcing (#406 #403 #364 #384), fixes #352 #365 #369 #371 #375 #393 #408 #414; v0.1.32: split prompts faster (#340), AMD router +12%, Unsloth Q4 in setup, faster Q4 prompts, #326/#327/#342/#344 fixes, PR batch; v0.1.31: Unsloth UD-Q4_K_XL (experimental), GGUF-in-place low-RAM mode, Windows GGUF load 2x, server race + tokenizer fixes, AMD intrinsics; v0.1.30: short prompts faster (streaming from 1024 tokens), resident low-RAM variant, multi-GPU session carve, RDNA4; v0.1.29: sampled answers faster (split top-k), #154 correctness fixes; v0.1.28: the expert cache reserves the draft head, a cancelled request no longer fails the next; v0.1.27: RTX 20 (sm_75) in the ready-made engine, the HIP build without CUDA headers; v0.1.26: the draft layer's prompt pass in batches; v0.1.25: faster prompts (grouping off the copy engine, fused hyper-connection kernels), AMD HIP backend, --kv k8v4; v0.1.24: long prompts faster (QSA select on tensor cores); v0.1.23: image requests honor sampling, 8 GB cards start, batched verify window; v0.1.22: faster prompts (tensor-core attention), multi-GPU across images/steering/KV streaming; v0.1.21: multi-GPU layer split (--gpus); v0.1.20: system-prompt checkpoint, PCIe probe, hit rate; v0.1.19: penalties
 # KV bytes per context token and attention layer: 8-bit 1056, rotated 4-bit 576, hybrid K8V4 (8-bit K, 4-bit V) 816
 KV_CELL_BYTES = {"q4_0": 576, "k8v4": 816}
 PY_PACKAGES = ["numpy", "jinja2", "regex", "pyyaml", "tqdm", "requests", "pillow", "psutil"]
@@ -888,7 +888,7 @@ def run(cmd, cwd=None, env=None, check=True, quiet=False):
                                                  + " ".join(argv[:2]))
     say("  > " + " ".join(str(c) for c in cmd))
     env = dict(os.environ if env is None else env)
-    env.setdefault("STRATA_EXIT_WITH_PARENT", "1")     # tools/mtp_fetch.py ends when setup ends (#3257: a cancel left it writing)
+    env.setdefault("SAGUARO_EXIT_WITH_PARENT", "1")     # tools/mtp_fetch.py ends when setup ends (#3257: a cancel left it writing)
     r = subprocess.run([str(c) for c in cmd], cwd=cwd, env=env,
                        stdout=subprocess.PIPE if quiet else None, stderr=subprocess.STDOUT if quiet else None,
                        text=True)
@@ -903,7 +903,7 @@ def fetch_mtp(mtp: Path, env: dict, tries: int = 3):
     """The ~5 GB of MTP tensors (tools/mtp_fetch.py).  A timeout or a dropped connection stops one run, not the install (#3214 #3193):
     it is run again, and each run continues where the last one stopped.  The progress lines it prints are what the app shows."""
     cmd = [sys.executable, str(ROOT / "tools" / "mtp_fetch.py"), "fetch", "--out", str(mtp)]
-    env = {**env, "STRATA_SOURCE": model_source()}
+    env = {**env, "SAGUARO_SOURCE": model_source()}
     for n in range(1, tries + 1):
         r = run(cmd, env=env, check=False)
         rc = 0 if r is None else r.returncode              # (a test double answers None)
@@ -914,7 +914,7 @@ def fetch_mtp(mtp: Path, env: dict, tries: int = 3):
                  f"({n + 1} of {tries})")
             time.sleep(5)
     fail(f"the draft layer's download keeps stopping (exit {rc}): the connection to Hugging Face is slow or drops",
-         "run setup again - what is downloaded is kept. If it still stops, set STRATA_SOURCE=modelscope (setup --source modelscope) "
+         "run setup again - what is downloaded is kept. If it still stops, set SAGUARO_SOURCE=modelscope (setup --source modelscope) "
          "to read the same files from ModelScope")
 
 
@@ -1367,9 +1367,9 @@ def _cpuid_floor() -> str:
 
 def cpu_floor(avx2: bool) -> str:
     """The experimental older-CPU build this PC needs (#394 #595 #623): "" with AVX2 (the normal engine), "avx" (Sandy /
-    Ivy Bridge, AMD Bulldozer), "none" (SSE4.2 + POPCNT: Nehalem, Westmere), or "unsupported".  STRATA_ISA_FLOOR=avx|
+    Ivy Bridge, AMD Bulldozer), "none" (SSE4.2 + POPCNT: Nehalem, Westmere), or "unsupported".  SAGUARO_ISA_FLOOR=avx|
     none asks for that build on any PC (testing it on a newer one)."""
-    forced = os.environ.get("STRATA_ISA_FLOOR", "").strip().lower()
+    forced = os.environ.get("SAGUARO_ISA_FLOOR", "").strip().lower()
     if forced in ("avx", "none"):
         return forced
     if avx2:
@@ -1540,10 +1540,10 @@ OLD_GPUS = None       # why Pascal / Volta cards are admitted in this run (old_g
 
 
 def experimental_sm60() -> bool:
-    """#295: STRATA_EXPERIMENTAL_SM60=1 admits Pascal (6.x) and Volta (7.0) cards, run by the experimental CUDA 12
+    """#295: SAGUARO_EXPERIMENTAL_SM60=1 admits Pascal (6.x) and Volta (7.0) cards, run by the experimental CUDA 12
     engine (-DSTRATA_EXPERIMENTAL_SM60=ON).  So does naming such a card (--gpu N / --gpus), --cuda 12, or a PC that
     has no newer card (old_gpus_opt_in)."""
-    return os.environ.get("STRATA_EXPERIMENTAL_SM60", "").strip() == "1" or OLD_GPUS is not None
+    return os.environ.get("SAGUARO_EXPERIMENTAL_SM60", "").strip() == "1" or OLD_GPUS is not None
 
 
 def sm60_card(arch) -> bool:
@@ -1552,14 +1552,14 @@ def sm60_card(arch) -> bool:
 
 def old_gpus_opt_in(found, named=(), cuda=None, other=False):
     """Why this run may use Pascal / Volta cards (the experimental CUDA 12 engine), or None.  The cards are an opt-in:
-    the user named one (`named`: --gpu / --gpus), asked for --cuda 12, set STRATA_EXPERIMENTAL_SM60=1, or the PC has
+    the user named one (`named`: --gpu / --gpus), asked for --cuda 12, set SAGUARO_EXPERIMENTAL_SM60=1, or the PC has
     no card the ready-made engine runs on and no supported AMD card (`other`; it used to stop there).  A PC with a
     newer card keeps recommending it."""
     old = [g for g in found if sm60_card(g["arch"])]
     if not old:
         return None
-    if os.environ.get("STRATA_EXPERIMENTAL_SM60", "").strip() == "1":
-        return "STRATA_EXPERIMENTAL_SM60=1"
+    if os.environ.get("SAGUARO_EXPERIMENTAL_SM60", "").strip() == "1":
+        return "SAGUARO_EXPERIMENTAL_SM60=1"
     if str(cuda) == "12":
         return "--cuda 12"
     picked = [g for g in old if g["index"] in set(named)]
@@ -2034,17 +2034,17 @@ def gpu_info(pick=None):
 
 def find_nvcc(below=None):
     """The newest CUDA toolkit's nvcc and its (major, minor); with `below`, the newest older than that version.
-    #601: STRATA_NVCC=<path to nvcc> is the only one considered (a newer toolkit beside it that cannot build on this
+    #601: SAGUARO_NVCC=<path to nvcc> is the only one considered (a newer toolkit beside it that cannot build on this
     PC - CUDA 12.9 with glibc 2.43 - is not taken instead)."""
-    pick = os.environ.get("STRATA_NVCC")
+    pick = os.environ.get("SAGUARO_NVCC")
     if pick:
         if not Path(pick).exists():
-            warn(f"STRATA_NVCC={pick}: no such file; looking for a CUDA toolkit as usual")
+            warn(f"SAGUARO_NVCC={pick}: no such file; looking for a CUDA toolkit as usual")
         else:
             v = re.search(r"release (\d+)\.(\d+)", out([pick, "--version"]))
             ver = (int(v.group(1)), int(v.group(2))) if v else None
             if ver and below is not None and ver >= below:
-                warn(f"STRATA_NVCC={pick} is CUDA {ver[0]}.{ver[1]}; this build needs one older than "
+                warn(f"SAGUARO_NVCC={pick} is CUDA {ver[0]}.{ver[1]}; this build needs one older than "
                      f"{below[0]}.{below[1]}")
                 return (None, None)
             return (pick, ver) if ver else (None, None)
@@ -2076,9 +2076,9 @@ def find_vcvars(cuda_v=None):
     The version range is CUDA's requirement alone, so a caller with no CUDA (`cuda_v is None`) asks vswhere for no
     range at all: the CPU image encoder is built by MSVC, which is happy with any version (tools/hip/build_windows.bat
     already calls vswhere that way).  With the range applied to every caller, a machine whose only C++ tools are
-    Visual Studio 2026 gets None back and nothing can be built there (#881).  STRATA_VCVARS=<vcvars64.bat> picks one
+    Visual Studio 2026 gets None back and nothing can be built there (#881).  SAGUARO_VCVARS=<vcvars64.bat> picks one
     by hand, for an install vswhere cannot use."""
-    override = os.environ.get("STRATA_VCVARS")
+    override = os.environ.get("SAGUARO_VCVARS")
     if override:
         v = Path(override)
         return v if v.exists() else None
@@ -2132,7 +2132,7 @@ def drop_archive(z: Path) -> None:
 # each connection): download() takes the file in DL_CHUNK pieces over several connections, writes each piece at its own offset,
 # and keeps the finished pieces in <name>.part.chunks so a stopped download continues where it was.  Anything that is not a
 # ranged file of known length (no Range support, no length, a small file) is one stream, as before.
-DL_CONNECTIONS = 16             # STRATA_DL_CONNECTIONS=1 restores one stream (for testers)
+DL_CONNECTIONS = 16             # SAGUARO_DL_CONNECTIONS=1 restores one stream (for testers)
 DL_CHUNK = 32 << 20             # bytes per piece: what the piece list records and what a failed request loses at most
 DL_RUN = 4                      # pieces one request asks for (4 x 32 MiB): a new connection per piece spends its first seconds
                                 # in TCP slow start (measured: 8 connections 66 MB/s with a request per piece, 73 with 128 MiB)
@@ -2144,8 +2144,8 @@ DL_SAVE_EVERY = 5.0             # seconds between writes of the progress file
 
 
 def dl_connections() -> int:
-    """How many connections a big download uses: STRATA_DL_CONNECTIONS, else DL_CONNECTIONS (1 = one stream)."""
-    raw = (os.environ.get("STRATA_DL_CONNECTIONS") or "").strip()
+    """How many connections a big download uses: SAGUARO_DL_CONNECTIONS, else DL_CONNECTIONS (1 = one stream)."""
+    raw = (os.environ.get("SAGUARO_DL_CONNECTIONS") or "").strip()
     try:
         n = int(raw) if raw else DL_CONNECTIONS
     except ValueError:
@@ -2326,7 +2326,7 @@ def _prefix_bytes(done: set, total: int) -> int:
 
 def _load_pieces(part: Path, total: int) -> set:
     """The finished pieces of an earlier run.  <name>.part.chunks lists them; a .part without it comes from one stream
-    (an older setup, or STRATA_DL_CONNECTIONS=1): its bytes are a run from the start, so those pieces are finished."""
+    (an older setup, or SAGUARO_DL_CONNECTIONS=1): its bytes are a run from the start, so those pieces are finished."""
     side = part.with_name(part.name + ".chunks")
     n = -(-total // DL_CHUNK)
     try:
@@ -3380,34 +3380,34 @@ ROCM_INDEXES = {"gfx1100": "https://rocm.nightlies.amd.com/v2/gfx110X-dgpu/",   
                 "gfx1030": "https://rocm.nightlies.amd.com/v2/gfx103X-all/",
                 "gfx1031": "https://rocm.nightlies.amd.com/v2/gfx103X-all/",
                 "gfx1151": "https://rocm.nightlies.amd.com/v2/gfx1151/",       # Strix Halo (docs/STRIX_HALO.md)
-                "gfx1150": "https://rocm.nightlies.amd.com/v2/gfx1150/",       # Strix Point: only with STRATA_EXPERIMENTAL_GFX1150=1
-                "gfx1103": "https://rocm.nightlies.amd.com/v2/gfx110X-all/"}   # Radeon 780M: only with STRATA_EXPERIMENTAL_GFX1103=1
+                "gfx1150": "https://rocm.nightlies.amd.com/v2/gfx1150/",       # Strix Point: only with SAGUARO_EXPERIMENTAL_GFX1150=1
+                "gfx1103": "https://rocm.nightlies.amd.com/v2/gfx110X-all/"}   # Radeon 780M: only with SAGUARO_EXPERIMENTAL_GFX1103=1
 # The TheRock nightly indexes are pruned and move on, and each GPU family's index holds its own range (#1103: gfx103X-all
 # starts at 7.13.0a20260422 and has no 7.10; #1267: the 7.10 wheel segfaults on a Strix Halo with kernel 7.2.8), so one
 # version for every card cannot work.  The wheel is chosen per index (the family): a preferred version, tried first; when
 # the index no longer offers it, the newest one of the same 7.x line, else of the same major, with a warning (rocm_pick).
-# STRATA_ROCM_VERSION still forces one exact version (no lookup).
+# SAGUARO_ROCM_VERSION still forces one exact version (no lookup).
 ROCM_VERSION_DEFAULT = "7.10.0a20251120"                 # what Strata's HIP build was tested with (gfx120X, gfx110X)
 ROCM_FAMILY_PINS = {"gfx103X-all": "7.13.0a20260515",    # #1103: 7.13.0a20260515 runs; the 7.14 nightlies time out
                     "gfx110X-all": "7.10.0a20251121",    # the experimental gfx1103: this index has no ...20251120
                     "gfx1151": "7.14.0a20260608"}        # #1267: 7.14.0a20260529 to 20260608 run on kernel 7.2.8; the 7.10 wheel segfaults
-ROCM_VERSION_OVERRIDE = os.environ.get("STRATA_ROCM_VERSION") or None
+ROCM_VERSION_OVERRIDE = os.environ.get("SAGUARO_ROCM_VERSION") or None
 ROCM_VERSION = ROCM_VERSION_OVERRIDE or ROCM_VERSION_DEFAULT   # kept for callers that read one version
 ROCM_SYSTEM_MIN = (7, 0)       # an older system ROCm is passed over for the wheels (gfx1201 needs ROCm 6.4 or newer)
-# STRATA_EXPERIMENTAL_GFX1103=1 (opt-in, unsupported): the Radeon 780M / 760M / 740M iGPU (Ryzen 7040 / 8040, gfx1103) is taken
+# SAGUARO_EXPERIMENTAL_GFX1103=1 (opt-in, unsupported): the Radeon 780M / 760M / 740M iGPU (Ryzen 7040 / 8040, gfx1103) is taken
 # as a unified-memory AMD card like Strix Halo, with the native dot4 and gfx11 WMMA kernels, the gfx1103 exact speed switches
 # and a hipBLASLt table when one matches (measured on one machine: Ryzen 7 8745HS).  Unset: unchanged.
-GFX1103_OPT_IN = os.environ.get("STRATA_EXPERIMENTAL_GFX1103") == "1"
-# STRATA_EXPERIMENTAL_GFX1150=1 (opt-in, unvalidated): the Radeon 890M / 880M iGPU (Ryzen AI 300, Strix Point, gfx1150)
+GFX1103_OPT_IN = os.environ.get("SAGUARO_EXPERIMENTAL_GFX1103") == "1"
+# SAGUARO_EXPERIMENTAL_GFX1150=1 (opt-in, unvalidated): the Radeon 890M / 880M iGPU (Ryzen AI 300, Strix Point, gfx1150)
 # is taken as a unified-memory AMD card like Strix Halo.  The engine builds and runs for gfx1150 from 0.1.40.2 (#1217;
 # tools/hip/gfx1150-hipblaslt-100401.txt is calibrated on it), but no release ships a ready-made Windows engine for it:
 # build one with `STRATA_HIP_ARCHS=gfx1150 tools\hip\build_windows.bat` and start setup with `--prebuilt dist\`.
 # Unset: unchanged.
-GFX1150_OPT_IN = os.environ.get("STRATA_EXPERIMENTAL_GFX1150") == "1"
+GFX1150_OPT_IN = os.environ.get("SAGUARO_EXPERIMENTAL_GFX1150") == "1"
 AMD_ARCHS = ("gfx1100", "gfx1101", "gfx1102", "gfx1200", "gfx1201", "gfx1030", "gfx1031", "gfx1151") \
             + (("gfx1103",) if GFX1103_OPT_IN else ()) + (("gfx1150",) if GFX1150_OPT_IN else ())
 # The exact (bit-identical) speed switches the engine turns on by default on gfx1151 (src/core/arch_defaults.cpp), less
-# STRATA_HCD_EXACT: that one copies the gfx1151 hipBLASLt table's solutions 1176 / 1177, and the gfx1103 table
+# SAGUARO_HCD_EXACT: that one copies the gfx1151 hipBLASLt table's solutions 1176 / 1177, and the gfx1103 table
 # (tools/hip/gfx1103-hipblaslt-100401.txt) picks others, so it would only report that it cannot run.  A gfx1103 install
 # takes them from here (setup writes them into the config's "env"), the same way the table is written: one 780M measured
 # the same greedy answers with all 17 on and with all 17 off, +13% to +15% prompt and decode +3.2% (the decode half
@@ -3415,14 +3415,14 @@ AMD_ARCHS = ("gfx1100", "gfx1101", "gfx1102", "gfx1200", "gfx1201", "gfx1030", "
 # empty), so this keeps the default path byte-identical.
 GFX1103_SWITCHES = {
     # prompt
-    "STRATA_GDN_HEAD": "1", "STRATA_GDN_PP": "2", "STRATA_GDN_CONVL2": "1", "STRATA_GDN_NOY": "1",
-    "STRATA_CVEC_FUSE": "1", "STRATA_PF_PAD": "1",
+    "SAGUARO_GDN_HEAD": "1", "SAGUARO_GDN_PP": "2", "SAGUARO_GDN_CONVL2": "1", "SAGUARO_GDN_NOY": "1",
+    "SAGUARO_CVEC_FUSE": "1", "SAGUARO_PF_PAD": "1",
     # decode
-    "STRATA_Q8_PACKED": "1", "STRATA_Q6_PACKED": "1", "STRATA_MMVF_ROWS": "1", "STRATA_ATTN_LANECELL": "1",
-    "STRATA_EXPERT_V2": "1", "STRATA_TSUM": "1", "STRATA_LFUSE": "1", "STRATA_GDN_SPLIT": "1",
-    "STRATA_QFUSE": "1", "STRATA_PLE_BATCH": "1", "STRATA_SH_STREAM": "1",
+    "SAGUARO_Q8_PACKED": "1", "SAGUARO_Q6_PACKED": "1", "SAGUARO_MMVF_ROWS": "1", "SAGUARO_ATTN_LANECELL": "1",
+    "SAGUARO_EXPERT_V2": "1", "SAGUARO_TSUM": "1", "SAGUARO_LFUSE": "1", "SAGUARO_GDN_SPLIT": "1",
+    "SAGUARO_QFUSE": "1", "SAGUARO_PLE_BATCH": "1", "SAGUARO_SH_STREAM": "1",
 }
-# The same set for a gfx1150 install (Radeon 890M / 880M): less STRATA_HCD_EXACT as well, because a gfx1150 table picks other
+# The same set for a gfx1150 install (Radeon 890M / 880M): less SAGUARO_HCD_EXACT as well, because a gfx1150 table picks other
 # solutions than the gfx1151 one.  The Radeon 890M report (docs/AMD_HIP.md; bench/results/2026-10-07-community-gfx1150) measured the
 # same greedy answers with all 17 on and with all 17 off, decode +2% and prompts +3-6%.  The engine's arch defaults are not used
 # for gfx1150 (src/core/arch_defaults_test.cpp asserts gfx1150 stays empty), so this keeps the default path byte-identical.
@@ -3446,7 +3446,7 @@ AMD_CARDS = ("the RX 7900 XT / XTX (gfx1100), RX 7800 XT / 7700 XT (gfx1101), RX
 
 
 def rocm_index(arch):
-    return os.environ.get("STRATA_ROCM_INDEX") or ROCM_INDEXES[arch]
+    return os.environ.get("SAGUARO_ROCM_INDEX") or ROCM_INDEXES[arch]
 
 
 def rocm_family(index):
@@ -3478,9 +3478,9 @@ def rocm_pick(available, preferred):
         if hits:
             got = max(hits, key=rocm_vkey)
             return got, (f"ROCm {preferred} is not on this index any more: using {got}, the newest of the same {what} "
-                         f"(set STRATA_ROCM_VERSION to choose another)")
+                         f"(set SAGUARO_ROCM_VERSION to choose another)")
     return preferred, (f"ROCm {preferred} is not on this index and nothing of its major version is: "
-                       f"{available[0]} to {available[-1]} are (set STRATA_ROCM_VERSION to one of them)")
+                       f"{available[0]} to {available[-1]} are (set SAGUARO_ROCM_VERSION to one of them)")
 
 
 def rocm_wanted(index, listing=None):
@@ -3674,19 +3674,19 @@ def installed_size(family: str, names: list, have: list) -> str | None:
 
 def unsloth_default_env(family: str, model: str, hip: bool, in_budget: bool) -> dict:
     """0.1.44 (owner, review-quants.md section 5): the run-config "env" setup writes for Unsloth's files.
-    STRATA_MMQ_KQ=1 (the K-quant MMQ prompt kernels) for UD-Q5_K_XL and UD-Q6_K_XL, where its prompt-path KL is equal
-    or better than the FP16 path's; UD-Q4_K_XL keeps it opt-in.  STRATA_HC_Q8=1 on CUDA for the UD-* files (the
+    SAGUARO_MMQ_KQ=1 (the K-quant MMQ prompt kernels) for UD-Q5_K_XL and UD-Q6_K_XL, where its prompt-path KL is equal
+    or better than the FP16 path's; UD-Q4_K_XL keeps it opt-in.  SAGUARO_HC_Q8=1 on CUDA for the UD-* files (the
     GGUF's own Q8_0 hyper-connection projections, closer to the file and faster; the GSQ-RCO packs are untouched).
-    STRATA_ROUTE_TAIL_SKIP=0 where every expert is in RAM (the skip costs KL there); the RAM-budget mode keeps it."""
+    SAGUARO_ROUTE_TAIL_SKIP=0 where every expert is in RAM (the skip costs KL there); the RAM-budget mode keeps it."""
     env = {}
     if family != "unsloth":
         return env
     if model in ("UD-Q5_K_XL", "UD-Q6_K_XL"):
-        env["STRATA_MMQ_KQ"] = "1"
+        env["SAGUARO_MMQ_KQ"] = "1"
     if not hip and model.startswith("UD-"):
-        env["STRATA_HC_Q8"] = "1"
+        env["SAGUARO_HC_Q8"] = "1"
     if not in_budget:
-        env["STRATA_ROUTE_TAIL_SKIP"] = "0"
+        env["SAGUARO_ROUTE_TAIL_SKIP"] = "0"
     return env
 
 
@@ -3757,13 +3757,13 @@ def amd_device_access_problem(dev="/dev", access=os.access, listing=glob.glob) -
 
 def gfx1103_notes(gpu, ram) -> list[str]:
     """What setup tells the owner of a Radeon 780M / 760M / 740M (Phoenix / Hawk Point, gfx1103, unified memory): never
-    the Strix Halo text, which is about another chip (gfx1151).  Opt-in only (STRATA_EXPERIMENTAL_GFX1103=1)."""
+    the Strix Halo text, which is about another chip (gfx1151).  Opt-in only (SAGUARO_EXPERIMENTAL_GFX1103=1)."""
     notes = [f"  Radeon 780M / 760M class (gfx1103, Ryzen 7040 / 8040): the CPU and the GPU share one memory pool ({ram:.0f} GB "
              f"seen by the OS + a {gpu.get('dedicated_gb', 0.0):.1f} GB BIOS carve-out), so the model's experts live in "
              "that pool and the expert cache is sized from the memory the OS can give back."]
     notes.append("  " + ("The engine is compiled here for gfx1103" if not WIN else "This GPU has no ready-made Windows engine")
                  + " with the native dot4 and WMMA kernels and the 780M's exact speed switches"
-                 + " (experimental opt-in, STRATA_EXPERIMENTAL_GFX1103=1; measured on one machine, not validated on a real "
+                 + " (experimental opt-in, SAGUARO_EXPERIMENTAL_GFX1103=1; measured on one machine, not validated on a real "
                  "card): see docs/AMD_HIP.md and docs/RADEON_780M.md. This is not a Strix Halo.")
     if not WIN and gpu.get("shared_gb", 0) < 0.75 * ram - 1:
         notes.append(f"!the GPU can reach {gpu.get('shared_gb', 0):.0f} GB of shared memory (the GTT pool; the kernel's "
@@ -3774,14 +3774,14 @@ def gfx1103_notes(gpu, ram) -> list[str]:
 
 def gfx1150_notes(gpu, ram) -> list[str]:
     """What setup tells the owner of a Radeon 890M / 880M (Ryzen AI 300, Strix Point, gfx1150, unified memory): never
-    the Strix Halo text, which is about another chip (gfx1151).  Opt-in only (STRATA_EXPERIMENTAL_GFX1150=1)."""
+    the Strix Halo text, which is about another chip (gfx1151).  Opt-in only (SAGUARO_EXPERIMENTAL_GFX1150=1)."""
     notes = [f"  Radeon 890M / 880M class (gfx1150, Strix Point): the CPU and the GPU share one memory pool ({ram:.0f} GB "
              f"seen by the OS + a {gpu.get('dedicated_gb', 0.0):.1f} GB BIOS carve-out), so the model's experts live in "
              "that pool and the expert cache is sized from the memory the OS can give back."]
     notes.append("  " + ("The engine is compiled here for gfx1150" if not WIN else
                          "Windows has no ready-made engine for gfx1150: build one with STRATA_HIP_ARCHS=gfx1150 "
                          "tools\\hip\\build_windows.bat and start setup with --prebuilt dist\\")
-                 + " (experimental opt-in, STRATA_EXPERIMENTAL_GFX1150=1, unvalidated: docs/AMD_HIP.md).")
+                 + " (experimental opt-in, SAGUARO_EXPERIMENTAL_GFX1150=1, unvalidated: docs/AMD_HIP.md).")
     if not WIN and gpu.get("shared_gb", 0) < 0.75 * ram - 1:
         notes.append(f"!the GPU can reach {gpu.get('shared_gb', 0):.0f} GB of shared memory (the GTT pool; the kernel's "
                      "default is about half of the RAM). The kernel option ttm.pages_limit raises it; setup changes no "
@@ -4275,8 +4275,8 @@ def engine_from_feed(eng: Path, updating: bool = False) -> Path | None:
     from strata_control import engine_component as ec
     store = home() / "engine-feed"
     env = dict(os.environ)
-    env.pop("STRATA_NO_ACQUIRE", None)
-    env["STRATA_COMPONENTS_DIR"] = str(store)
+    env.pop("SAGUARO_NO_ACQUIRE", None)
+    env["SAGUARO_COMPONENTS_DIR"] = str(store)
     say("  Fetching the ready-made engine from the signed update feed ...")
     try:
         run = subprocess.run([sys.executable, str(ROOT / "strata.py"), "update", "--no-control", "--output", "json"],
@@ -4488,7 +4488,7 @@ def hipblaslt_table(arch, lib_dirs, ver=None, extra_dirs=()):
     ids are valid only for that pair (the engine refuses any other table and uses plain hipBLAS).  ver: the
     hipBLASLt version the ready-made engine ships (its BUILD.json), else read from the installed headers.  extra_dirs: the
     engine folder's own tuning/ first (a ready-made engine carries its tables), then tools/hip of this checkout.
-    STRATA_HIPBLASLT_TABLE=off: none (strata_control/hipblaslt_tuning.py)."""
+    SAGUARO_HIPBLASLT_TABLE=off: none (strata_control/hipblaslt_tuning.py)."""
     from strata_control import hipblaslt_tuning as HT
     if HT.switched_off():
         say(f"  hipBLASLt tuning table: off ({HT.SWITCH}=off); the prompt's dense matrix products use plain hipBLAS")
@@ -4952,8 +4952,8 @@ def verify_engine_archive(z: Path, asset: str, base: str) -> None:
     to download the same file.  A mark that saves 0.8 s is not worth a class of hole - anything that
     changes the file after it was verified, at any length - so there is no mark here.
     """
-    if os.environ.get("STRATA_SKIP_SHA256") == "1":
-        warn(f"STRATA_SKIP_SHA256=1: NOT checking {asset} against its SHA-256. If the file is corrupt or "
+    if os.environ.get("SAGUARO_SKIP_SHA256") == "1":
+        warn(f"SAGUARO_SKIP_SHA256=1: NOT checking {asset} against its SHA-256. If the file is corrupt or "
              f"tampered with, it will be installed anyway. Unset it to get the check back.")
         return
     want = engine_digest(asset, base)          # one API call: this is a rate-limited API
@@ -4992,7 +4992,7 @@ def engine_refused(asset: str, e: Exception, updating: bool) -> None:
     if not updating:
         fail(f"the downloaded Strata engine does not match GitHub's checksum: {e}",
              "the bad download has been deleted (corrupt or tampered), so the next run fetches the "
-             "published file again. Set STRATA_SKIP_SHA256=1 only if you insist on installing it anyway")
+             "published file again. Set SAGUARO_SKIP_SHA256=1 only if you insist on installing it anyway")
         return
     warn(f"keeping the engine that is installed: {e}")
     say("       Nothing was replaced. The bad download was deleted; run setup again to fetch it afresh.")
@@ -5000,7 +5000,7 @@ def engine_refused(asset: str, e: Exception, updating: bool) -> None:
 
 def prebuilt_bases(url_base) -> list[str]:
     """Where to look for the ready-made engine, in order (each ending in a slash).  The default: the release of this
-    checkout's version first, then the latest (#214); an explicit --prebuilt / STRATA_PREBUILT_URL: only that."""
+    checkout's version first, then the latest (#214); an explicit --prebuilt / SAGUARO_PREBUILT_URL: only that."""
     base = url_base if url_base.endswith(("/", "\\")) else url_base + "/"
     if base != PREBUILT_URL:
         return [base]
@@ -5345,23 +5345,23 @@ def nvcc_build(nvcc):
 
 def sm120_nvcc(nvcc, cuda_v, archs):
     """#892 / #968: CUDA 13.2.0 / 13.2.1's nvcc for an RTX 50 card (sm_120).  Returns (nvcc, cuda_v): an older 13.x toolkit
-    when one is installed and the user did not name a compiler (STRATA_NVCC), else the one found, with a warning that says
+    when one is installed and the user did not name a compiler (SAGUARO_NVCC), else the one found, with a warning that says
     what to do.  CUDA 13.2.2 (build 86 or newer) is fine.  Recommends, never forces: a user who picked 13.2 keeps it."""
     if not nvcc or cuda_v != CUDA_SM120_SUSPECT or max(archs) < 120:
         return nvcc, cuda_v
     build = nvcc_build(nvcc)
     if build is not None and build >= CUDA_SM120_FIXED_BUILD:
         return nvcc, cuda_v
-    if not os.environ.get("STRATA_NVCC"):
+    if not os.environ.get("SAGUARO_NVCC"):
         alt, alt_v = find_nvcc(below=CUDA_SM120_SUSPECT)
         if alt and alt_v and alt_v >= (13, 0):
             ok(f"CUDA {alt_v[0]}.{alt_v[1]} is used for the RTX 50 card (sm_120): CUDA 13.2.0 / 13.2.1's compiler made wrong "
-               "answers there (#892, #968); STRATA_NVCC=<nvcc> picks another")
+               "answers there (#892, #968); SAGUARO_NVCC=<nvcc> picks another")
             return alt, alt_v
     warn("CUDA 13.2.0 and 13.2.1's compiler (nvcc) made garbage prompts and answers for RTX 50 cards (sm_120) in two "
          "reports (#892, #968): the same source compiled with CUDA 13.0, 13.1 or 13.2.2 is right. If the engine answers "
          "with nonsense, update to CUDA 13.2.2 or install CUDA 13.0 next to it (https://developer.nvidia.com/cuda-toolkit-archive) "
-         "and set STRATA_NVCC to its nvcc; the ready-made engine is built with 13.0")
+         "and set SAGUARO_NVCC to its nvcc; the ready-made engine is built with 13.0")
     return nvcc, cuda_v
 
 
@@ -5390,7 +5390,7 @@ def install_build_tools(gpu, yes):
              f"Toolkit {need12[0]}.{need12[1]} or a newer 12.x (CUDA 13 cannot compile for these cards)" +
              (f"; found CUDA {cuda_v[0]}.{cuda_v[1]}" if nvcc else ""),
              "install CUDA 12.9 (it can sit next to a newer one) from https://developer.nvidia.com/cuda-toolkit-archive "
-             "and run it again (STRATA_NVCC=<its nvcc> picks one toolkit)")
+             "and run it again (SAGUARO_NVCC=<its nvcc> picks one toolkit)")
     # RTX 50 (sm_120): CUDA 13.0 - an engine built with 12.8 crashed in the prompt path on Linux (#220)
     need_cuda = need12 if old else (13, 0) if max(archs) >= 120 else (12, 0)
     vcvars = find_vcvars(cuda_v) if WIN else None
@@ -5517,7 +5517,7 @@ def source_hash(parts) -> str:
 
 
 def isa_floor_defs(floor: str, bdir: Path, meta: dict) -> list:
-    """The experimental older-CPU build's CMake definition (STRATA_ISA_FLOOR, CMakeLists.txt), none for the normal
+    """The experimental older-CPU build's CMake definition (SAGUARO_ISA_FLOOR, CMakeLists.txt), none for the normal
     build.  A build folder configured for another floor is configured afresh: ggml's CPU options are cached there."""
     if (meta.get("isa_floor") or "") != floor and (bdir / "CMakeCache.txt").exists():
         (bdir / "CMakeCache.txt").unlink()
@@ -5540,7 +5540,7 @@ def host_compiler_defs(cuda: bool) -> list:
 
 def toolkit_root_defs(nvcc) -> list:
     """CUDAToolkit_ROOT for the toolkit whose nvcc builds the engine.  Without it CMake can take cudart and cuBLAS from
-    another toolkit: with STRATA_NVCC=/opt/cuda-13.0/bin/nvcc on Ubuntu 24.04 that also has the distribution's CUDA
+    another toolkit: with SAGUARO_NVCC=/opt/cuda-13.0/bin/nvcc on Ubuntu 24.04 that also has the distribution's CUDA
     12.0 (nvidia-cuda-toolkit), the engine was compiled with the 13.0 headers but linked libcudart.so.12 from
     /usr/lib/x86_64-linux-gnu.  The distribution's own nvcc (/usr/bin) keeps CMake's search as before."""
     root = Path(nvcc).resolve().parent.parent
@@ -5897,9 +5897,9 @@ def ram_ctx(model, ram, low_ram=False) -> int:
 
 
 def app_settings_file() -> Path | None:
-    """The desktop app keeps its own settings file (STRATA_SETTINGS_FILE, in the app's data folder) and never reads or writes the
+    """The desktop app keeps its own settings file (SAGUARO_SETTINGS_FILE, in the app's data folder) and never reads or writes the
     one an older command-line Strata uses, so an old install is never adopted or moved."""
-    raw = os.environ.get("STRATA_SETTINGS_FILE")
+    raw = os.environ.get("SAGUARO_SETTINGS_FILE")
     return Path(raw) if raw else None
 
 
@@ -6165,12 +6165,12 @@ def write_config(path: Path, cfg: dict):
 # then applies the person's options over the generated ones
 SETUP_KEYS = frozenset({"exe", "args", "cwd", "tokenizer", "model_name", "log", "lib_dirs", "port", "backend", "env",
                         "gpu", "gpus_asked", "layer_split", "host", "api_key", "draft_vocab", "vision", "args_written"})
-SETUP_ENV = frozenset({"STRATA_HIPBLASLT_TUNING", "STRATA_ROCBLAS_TUNING", "STRATA_RESIDENT_PIN", "STRATA_NO_ARENA_THP", "STRATA_MMQ_KQ", "STRATA_HC_Q8",
-                       "STRATA_ROUTE_TAIL_SKIP"}) | frozenset(GFX1103_SWITCHES) | frozenset(GFX1150_SWITCHES)   # the "env" entries setup writes (the gfx1103 switches are setup's too: a re-run refreshes them, they do not linger)
+SETUP_ENV = frozenset({"SAGUARO_HIPBLASLT_TUNING", "SAGUARO_ROCBLAS_TUNING", "SAGUARO_RESIDENT_PIN", "SAGUARO_NO_ARENA_THP", "SAGUARO_MMQ_KQ", "SAGUARO_HC_Q8",
+                       "SAGUARO_ROUTE_TAIL_SKIP"}) | frozenset(GFX1103_SWITCHES) | frozenset(GFX1150_SWITCHES)   # the "env" entries setup writes (the gfx1103 switches are setup's too: a re-run refreshes them, they do not linger)
 # 0.1.44 added these three, written for Unsloth's files only (unsloth_default_env).  In any other model's config they are the
-# user's own (STRATA_ROUTE_TAIL_SKIP=0 to turn the tail skip off, STRATA_MMQ_KQ=1 ...): a setup run again keeps them there
+# user's own (SAGUARO_ROUTE_TAIL_SKIP=0 to turn the tail skip off, SAGUARO_MMQ_KQ=1 ...): a setup run again keeps them there
 # (0.1.44 dropped them with the rest of SETUP_ENV).
-SETUP_ENV_UNSLOTH = frozenset({"STRATA_MMQ_KQ", "STRATA_HC_Q8", "STRATA_ROUTE_TAIL_SKIP"})
+SETUP_ENV_UNSLOTH = frozenset({"SAGUARO_MMQ_KQ", "SAGUARO_HC_Q8", "SAGUARO_ROUTE_TAIL_SKIP"})
 SETUP_VISION = frozenset({"exe", "cpu_exe", "mmproj", "model", "gpu", "max_tokens", "threads"})
 
 
@@ -6621,7 +6621,7 @@ def calibrate_config(cfg_path: Path) -> bool:
             say(f"       the engine said: {why}")
         return False
     cfg["args"] = CAL.apply(cfg["args"], res["settings"])
-    if "env" in res:                                   # HIP: the engine variables it measured (STRATA_SH_STREAM)
+    if "env" in res:                                   # HIP: the engine variables it measured (SAGUARO_SH_STREAM)
         cfg["env"] = CAL.apply_env(cfg.get("env"), res["env"])
     write_config(cfg_path, cfg)
     st = load_settings()
@@ -6869,8 +6869,8 @@ def _start(cfg_path: Path, port: int | None, gpu: int | list | None = None, open
     for n, line in enumerate(textwrap.wrap(f"Settings ({cfg_path.name}): {settings_summary(cfg, port)}", 100,
                                            break_on_hyphens=False)):   # #564: what this start uses
         say(("  " if n == 0 else "    ") + line)
-    if not WIN and os.environ.get("STRATA_EXECV"):
-        # Replace this process instead of spawning a child. The Docker image sets STRATA_EXECV=1,
+    if not WIN and os.environ.get("SAGUARO_EXECV"):
+        # Replace this process instead of spawning a child. The Docker image sets SAGUARO_EXECV=1,
         # so there the server is PID 1 and docker stop's SIGTERM reaches the process that can
         # answer the engine with QUIT. Normal Linux starts keep spawning the server as a child.
         os.execve(cmd[0], cmd, {**os.environ, acquisition.ENV: "1"})
@@ -7077,7 +7077,7 @@ def parallel_note(asked: int | None, vram_gbs, arena_gb: float, ctx: int, kv: st
 
 PREFILL_BIG_RAM_GB = 96        # bench #433 #440 #834 #669: --prefill auto:32768 +21-35% at 96 GB, ~3x slower at 32 GB
 PREFILL_RISK_RAM_GB = 64       # below this an explicit auto:32768 is warned about
-HEADROOM_RAM_GB = 48           # bench #834: STRATA_RESIDENT_HEADROOM_GIB=6 on a PC with this much RAM or less
+HEADROOM_RAM_GB = 48           # bench #834: SAGUARO_RESIDENT_HEADROOM_GIB=6 on a PC with this much RAM or less
 AGENT_CACHE_FREE_GB = 24       # bench #882 #440: RAM left beside the model for the conversation cache
 AGENT_CACHE_MIB = 8192
 SMALL_VISION_VRAM_GB = 12.5    # bench #469: the GPU image encoder shrinks the prompt chunks on cards up to 12 GB
@@ -7105,8 +7105,8 @@ def bench_tips(args, env, ram: float, model_ram_gb: float, vram_gb: float, visio
         tips.append(f"tip: with {ram:.0f} GB of RAM, --prefill auto:32768 in the config's args read prompts 21-35% "
                     "faster in community benchmarks (#433 #440 #834); not set, nothing changes")
     resident = any(a in args for a in ("--resident-experts", "--resident-budget-gib"))
-    if resident and ram <= HEADROOM_RAM_GB and "STRATA_RESIDENT_HEADROOM_GIB" not in (env or {}):
-        tips.append(f"tip: on a PC with {ram:.0f} GB of RAM, \"env\": {{\"STRATA_RESIDENT_HEADROOM_GIB\": \"6\"}} in the "
+    if resident and ram <= HEADROOM_RAM_GB and "SAGUARO_RESIDENT_HEADROOM_GIB" not in (env or {}):
+        tips.append(f"tip: on a PC with {ram:.0f} GB of RAM, \"env\": {{\"SAGUARO_RESIDENT_HEADROOM_GIB\": \"6\"}} in the "
                     "config kept decode speed in a community benchmark and left the system 2 GiB more (#834); the "
                     "default is 4")
     if vision == "gpu" and 0 < vram_gb <= SMALL_VISION_VRAM_GB:
@@ -7245,7 +7245,7 @@ def use_cuda12(cards, cfg_path: Path, cfg: dict, yes: bool) -> dict:
          "CUDA 12 engine (docs/OLDER_GPUS.md; START-HERE.bat --setup --cuda 13 and newer cards only moves it back)")
     main = gpu_info(cards[0]["index"]) or cards[0]
     vision = "gpu" if cfg.get("vision") else "none"
-    eng = get_cuda12_engine(os.environ.get("STRATA_PREBUILT_URL", PREBUILT_URL),
+    eng = get_cuda12_engine(os.environ.get("SAGUARO_PREBUILT_URL", PREBUILT_URL),
                             {**main, "archs": sorted({int(g["arch"]) for g in cards})}, vision, yes)
     cfg["exe"] = str(eng / EXE)
     cfg["cuda"] = 12
@@ -7361,9 +7361,9 @@ def control_engine_step(gpu, vision):
                 say(line)
     except EC.EngineMissing as e:
         plain = getattr(e, "plain_notice", None) or getattr(e, "driver_notice", None)
-        if os.environ.get("STRATA_NEED_ENGINE") == "1" and os.environ.get("STRATA_ALLOW_NO_ENGINE") != "1":
+        if os.environ.get("SAGUARO_NEED_ENGINE") == "1" and os.environ.get("SAGUARO_ALLOW_NO_ENGINE") != "1":
             # strata launch needs an engine now: stop before step 5 instead of after the download, unless launch itself asked to go on
-            # (STRATA_ALLOW_NO_ENGINE: the person said yes to "download the model anyway").  The app does not stop (owner decision
+            # (SAGUARO_ALLOW_NO_ENGINE: the person said yes to "download the model anyway").  The app does not stop (owner decision
             # 2026-10-18): it says so in its download card and still downloads the model.
             fail(plain or "no engine is installed for this PC",
                  "get the engine that matches this graphics card (`strata update`, or the app's Settings), then run this again; "
@@ -7662,7 +7662,7 @@ def install_own_path(a, family, gpu, hip, amd, cuda_tk, multi, port, ram, adopte
     pack = data / "packs" / tag.lower()            # only the tokenizer: the engine reads the GGUF itself
     if not (pack / "tokenizer" / "vocab.json").exists():
         run([sys.executable, str(ROOT / "tools" / "strata_tokenizer.py"), "--gguf", str(gguf), "--out", str(pack)],
-            env=dict(os.environ, STRATA_GGUF_PY=str(llama / "gguf-py")))
+            env=dict(os.environ, SAGUARO_GGUF_PY=str(llama / "gguf-py")))
     ok(f"tokenizer: {pack / 'tokenizer'}")
 
     step(7, "writing the start script")
@@ -7734,7 +7734,7 @@ def install_own_path(a, family, gpu, hip, amd, cuda_tk, multi, port, ram, adopte
 
 # DeepSeek's engine is its own package (feed member "dsv41", strata_control/dsv41_engine.py), downloaded when DeepSeek is chosen and unpacked in
 # <data>/engine-dsv41/<version>-<platform>-<backend>/ beside the engine: the Qwen engine's files are never touched.  Fetched, verified and
-# resumed like an engine update (the signed feed; --feed / STRATA_UPDATE_FEED name another one, as for `strata update`).
+# resumed like an engine update (the signed feed; --feed / SAGUARO_UPDATE_FEED name another one, as for `strata update`).
 DSV41_ENGINE_DIR = "engine-dsv41"
 
 
@@ -7813,9 +7813,9 @@ def upgrade_dsv41_engine(eng: Path, exe: Path) -> Path:
 
 
 def dsv41_exe(eng: Path) -> Path | None:
-    """The DeepSeek-V4.1 engine (strata-dsv41): STRATA_DSV41_EXE (a build of your own), else its own package folder beside the engine (engine-dsv41/),
+    """The DeepSeek-V4.1 engine (strata-dsv41): SAGUARO_DSV41_EXE (a build of your own), else its own package folder beside the engine (engine-dsv41/),
     else beside the engine in `eng` (an older all-in-one package); None when there is none."""
-    own = (os.environ.get("STRATA_DSV41_EXE") or "").strip()
+    own = (os.environ.get("SAGUARO_DSV41_EXE") or "").strip()
     if own:
         return Path(own) if Path(own).is_file() else None
     name = "strata-dsv41.exe" if WIN else "strata-dsv41"
@@ -8046,13 +8046,13 @@ def install_dsv41(a, family, gpu, hip, amd, cuda_tk, multi, port, ram, adopted, 
         get_dsv41_engine(eng, hip, getattr(a, "dsv41_package", None))
         exe = dsv41_exe(eng)
     if (exe is not None and not getattr(a, "dsv41_package", None) and not getattr(a, "build", False)
-            and not (os.environ.get("STRATA_DSV41_EXE") or "").strip() and exe.parent.parent == dsv41_engine_dir(eng)):
+            and not (os.environ.get("SAGUARO_DSV41_EXE") or "").strip() and exe.parent.parent == dsv41_engine_dir(eng)):
         exe = upgrade_dsv41_engine(eng, exe)               # an installed package older than the signed feed's: updated next to it, switched after it starts
     if exe is not None and exe.parent != Path(eng):
         lib_dirs = [*lib_dirs, str(exe.parent)]            # its own package carries the libraries it needs
     if exe is None:
-        if os.environ.get("STRATA_VERBOSE") == "1" or "--verbose" in sys.argv:
-            say("  Details for developers: build it with cmake -DSTRATA_BUILD_DSV41=ON and point STRATA_DSV41_EXE at it.")
+        if os.environ.get("SAGUARO_VERBOSE") == "1" or "--verbose" in sys.argv:
+            say("  Details for developers: build it with cmake -DSTRATA_BUILD_DSV41=ON and point SAGUARO_DSV41_EXE at it.")
         fail("DeepSeek's engine is not available for this computer yet",
              "Supported graphics cards: NVIDIA RTX 30 and RTX 50 series, and the Radeon AI PRO R9700. " + dsv41_manual_steps(eng)
              + " Or update Strata later (a newer version may add your card), or pick another model. Nothing has been downloaded.")
@@ -8104,8 +8104,8 @@ def install_dsv41(a, family, gpu, hip, amd, cuda_tk, multi, port, ram, adopted, 
             fail(f"the model's pack is not complete ({tail or why[-300:]})",
                  f"delete {pack} and run setup again; if it is still incomplete, the files in {folder} may be damaged (setup checks them)")
         ok(f"pack: {pack} (checked: every file the engine needs is there)")
-        if os.environ.get("STRATA_DSV41_NO_SMOKE") == "1":
-            warn("the 16-word test run was skipped (STRATA_DSV41_NO_SMOKE=1)")
+        if os.environ.get("SAGUARO_DSV41_NO_SMOKE") == "1":
+            warn("the 16-word test run was skipped (SAGUARO_DSV41_NO_SMOKE=1)")
         else:
             say("  Testing the model with a short question (a few minutes: the engine reads the first experts from the disk) ...")
             good, why = dsv41_smoke(exe, pack, lib_dirs, [c["index"] for c in cards] if (a.gpu is not None or a.gpus) else None)
@@ -8234,7 +8234,7 @@ def mac_reader(eng: Path, vision: str):
 
 
 def mac_control_setup(a) -> int:
-    """The app (and the Terminal's `strata launch`) on a Mac, STRATA_CONTROL_INSTALL=1: the same job as on Windows and Linux. It
+    """The app (and the Terminal's `strata launch`) on a Mac, SAGUARO_CONTROL_INSTALL=1: the same job as on Windows and Linux. It
     downloads and prepares the model files and writes a run config whose engine is "component:strata-engine"; it builds nothing
     (the Metal engine is a component: a ready-made package from the feed, or the one inside the installer) and runs no
     metal/setup_mac.py. Which sizes a Mac can run, whether one stays in memory or streams its experts from the SSD, and the
@@ -8353,7 +8353,7 @@ def mac_control_setup(a) -> int:
 
     step(6, "preparing the model for Strata")
     pack = find_in(roots, f"packs/{tag.lower()}") or data / "packs" / tag.lower()
-    env = dict(os.environ, STRATA_GGUF_PY=str(llama / "gguf-py"))
+    env = dict(os.environ, SAGUARO_GGUF_PY=str(llama / "gguf-py"))
     if not (pack / "native_experts.txt").exists() or not (pack / "tokenizer" / "vocab.json").exists():
         run([sys.executable, str(ROOT / "tools" / "iq_pack.py"), "--gguf", str(files[0]), "--out", str(pack),
              *fam.get("pack_args", [])], env=env)       # Gyro: --compat-bf16
@@ -8384,7 +8384,7 @@ def mac_control_setup(a) -> int:
                           ROOT / "data" / "expert-profile.bin")      # Gyro: one file, the model and its n-gram table
     cfg = {"exe": engine_exe(Path("engine")), "args": args, "cwd": str(ROOT), "tokenizer": str(pack / "tokenizer"),
            "model_name": f"{fam['name']}-{model.lower()}", "log": str(home() / f"strata-{tag.lower()}.log"),
-           "lib_dirs": [], "port": port, "backend": "metal", "env": {"STRATA_METAL_STREAM": "1" if stream else "0"}}
+           "lib_dirs": [], "port": port, "backend": "metal", "env": {"SAGUARO_METAL_STREAM": "1" if stream else "0"}}
     if a.host:
         cfg["host"] = a.host
     if a.api_key:
@@ -8502,15 +8502,15 @@ def main() -> int:
     ap.add_argument("--source", choices=SOURCES, default=None,
                     help="where the model files come from: auto (default: Hugging Face), huggingface or modelscope "
                          "(mainland China: the same files, checked against ModelScope's published SHA-256; "
-                         "STRATA_SOURCE)")
+                         "SAGUARO_SOURCE)")
     ap.add_argument("--inspect", nargs="+", metavar=("SOURCE", "VARIANT"),
                     help="what a GGUF is and whether Strata runs it, from its headers only (no download): a file, a "
                          "folder, a URL, ms:owner/repo (ModelScope) or hf:owner/repo, and optionally a variant name")
-    ap.add_argument("--cuda", choices=["12", "13", "auto"], default=os.environ.get("STRATA_CUDA") or None,
+    ap.add_argument("--cuda", choices=["12", "13", "auto"], default=os.environ.get("SAGUARO_CUDA") or None,
                     help="NVIDIA: the CUDA toolkit of this model's engine. auto (default): CUDA 13, the ready-made "
                          "engine; CUDA 12 (experimental) when a chosen card is older than CUDA 13 supports (Pascal, "
                          "Volta). 12 also runs with an older driver (Windows 528+, Linux 525+). docs/OLDER_GPUS.md")
-    ap.add_argument("--prebuilt", default=os.environ.get("STRATA_PREBUILT_URL", PREBUILT_URL),
+    ap.add_argument("--prebuilt", default=os.environ.get("SAGUARO_PREBUILT_URL", PREBUILT_URL),
                     help="where the ready-made engine is (a URL folder or a local folder)")
     ap.add_argument("--check", action="store_true", help="only check this PC and exit")
     ap.add_argument("--calibrate", action="store_true",
@@ -8555,7 +8555,7 @@ def main() -> int:
         ap.error(f"--model {a.model} is a size of " + ", ".join(f"--family {f}" for f, d in {**PREVIEW_FAMILIES, **MULTI_FILE_FAMILIES}.items()
                                                               if a.model in d["models"]))
     if a.source:
-        os.environ["STRATA_SOURCE"] = a.source
+        os.environ["SAGUARO_SOURCE"] = a.source
     if a.inspect:                                      # headers only: nothing is installed
         sys.exit(subprocess.run([sys.executable, str(ROOT / "tools" / "strata_inspect.py"), *a.inspect[:2]]).returncode)
     if sys.platform == "darwin" and CONTROL:           # the app on a Mac: model files only; the Metal engine is a component
@@ -8850,7 +8850,7 @@ def main() -> int:
         # ggml-cpu's kernels for this CPU.  Experimental: measured only on newer CPUs with the older path forced, and by
         # users on a few Xeons.  A warning, not a stop.
         warn(f"this CPU has no AVX2: Strata support for it is EXPERIMENTAL and slow. Setup compiles the engine on this "
-             f"PC for {'AVX' if floor == 'avx' else 'SSE4.2'} (STRATA_ISA_FLOOR={floor}; 10-20 minutes, once), and the "
+             f"PC for {'AVX' if floor == 'avx' else 'SSE4.2'} (SAGUARO_ISA_FLOOR={floor}; 10-20 minutes, once), and the "
              "CPU's share of the experts runs on ggml-cpu's kernels, a few times slower than on an AVX2 CPU. "
              "See \"Older CPUs\" in docs/INSTALL.md")
         if hip and WIN:
@@ -9341,7 +9341,7 @@ def main() -> int:
     # ---- 6. the pack and the MTP draft layer
     step(6, "preparing the model for Strata")
     pack = find_in(roots, f"packs/{tag.lower()}") or data / "packs" / tag.lower()
-    env = dict(os.environ, STRATA_GGUF_PY=str(llama / "gguf-py"))
+    env = dict(os.environ, SAGUARO_GGUF_PY=str(llama / "gguf-py"))
     prepared = bool(ready and MODELS[model].get("prepare"))
     if prepared and not prepared_done(model, models_dir):
         say("  NVIDIA's checkpoint is turned into a Strata pack on this PC (once; 20-40 minutes, reads the 102 GB, writes about")
@@ -9611,10 +9611,10 @@ def main() -> int:
         else:
             table = hipblaslt_table(gpu["arch"], lib_dirs, meta.get("hipblaslt_version"), [eng / "tuning"])
             if table:
-                cfg["env"] = {"STRATA_HIPBLASLT_TUNING": str(table)}
+                cfg["env"] = {"SAGUARO_HIPBLASLT_TUNING": str(table)}
         if GFX1103_OPT_IN and gfx_arch_is(gpu["arch"], "gfx1103") and not WIN:
             # the 780M's KFD queues are evicted (a GPU reset) while transparent huge pages move the pinned expert arena
-            cfg.setdefault("env", {})["STRATA_NO_ARENA_THP"] = "1"
+            cfg.setdefault("env", {})["SAGUARO_NO_ARENA_THP"] = "1"
             # the exact gfx1151 speed switches measured on this chip (GFX1103_SWITCHES): the engine has no arch defaults
             # for gfx1103, so setup writes them into the config.  They are setup's own (SETUP_ENV), so a re-run refreshes
             # them and turning the opt-in off takes them out again.
@@ -9630,10 +9630,10 @@ def main() -> int:
         # <arch>-rocblas-<version>.txt for its own library, or runs the default kernels and says so in its log.
         rocblas_tables = sorted(p.name for p in (ROOT / "tools" / "hip").glob(f"{gpu['arch']}-rocblas-*.txt"))
         if rocblas_tables:
-            cfg.setdefault("env", {})["STRATA_ROCBLAS_TUNING"] = str(ROOT / "tools" / "hip")
+            cfg.setdefault("env", {})["SAGUARO_ROCBLAS_TUNING"] = str(ROOT / "tools" / "hip")
             ok(f"rocBLAS tuning tables for {gpu['arch']}: {', '.join(rocblas_tables)} (the engine takes the one of its rocBLAS build)")
         if resident:   # ROCm: large page-locked host allocations can fail or be slow for the CPU; keep the copy pageable
-            cfg.setdefault("env", {})["STRATA_RESIDENT_PIN"] = "0"
+            cfg.setdefault("env", {})["SAGUARO_RESIDENT_PIN"] = "0"
     if gpu["count"] > 1 or a.gpu is not None:
         cfg["gpu"] = gpu["index"]                      # the engine is told this card (issue #51)
         cfg["gpus_asked"] = True                       # chosen at setup: not asked again at start

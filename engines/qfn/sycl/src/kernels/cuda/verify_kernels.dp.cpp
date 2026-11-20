@@ -301,7 +301,7 @@ __dpct_inline__ void gdn_step_commit_kernel(
     for (int r = 0; r < RPG; ++r) base[r * row_stride] = s[r];
 }
 
-// S26 (STRATA_QFUSE=1): the q8_1 image of a 32-column block, written by the warp that holds those columns with
+// S26 (SAGUARO_QFUSE=1): the q8_1 image of a 32-column block, written by the warp that holds those columns with
 // native_quantize_q8_1_kernel's quantizer (the same XOR-tree max and sum, d = amax / 127, roundf(x / d), ds = (d, sum)).
 struct GdnQ81 { sycl::half2 ds; int8_t qs[32]; };
 __dpct_inline__ void gdn_q8_1_store(GdnQ81 *__restrict__ xq, size_t idx,
@@ -496,7 +496,7 @@ runtimes. You may need to adjust the code.
     }
 }
 
-// S25 (STRATA_GDN_SPLIT=1): the same recurrence with each head's 128 state columns over 4 blocks of 32 columns
+// S25 (SAGUARO_GDN_SPLIT=1): the same recurrence with each head's 128 state columns over 4 blocks of 32 columns
 // (128 threads: the same (column, row group) threads, each with the same 32 state rows), so 4x the blocks of
 // gdn_step_norm_multi_kernel - which ran one 512-thread block per head (32 blocks) and read the 2 MB state of a layer
 // at ~60 GB/s. Every column's arithmetic is the original's; the output norm, which needs all 128 columns of a head,
@@ -1575,7 +1575,7 @@ bool multi_block_head_ops() {
     return false;
 #else
     static const bool on = [] {
-        const char* v = std::getenv("STRATA_MULTI_BLOCK_ARGMAX");
+        const char* v = std::getenv("SAGUARO_MULTI_BLOCK_ARGMAX");
         return v == nullptr || std::atoi(v) != 0;
     }();
     return on;
@@ -1833,13 +1833,13 @@ void gdn_ab_multi(const float* x, const uint16_t* w_alpha, const uint16_t* w_bet
 void gdn_step_norm_multi(float* state, const float* h, int conv_channels, const float* gate, const float* beta,
                          const float* z, const float* gamma, float eps, float* y, int h_k, int h_v, int n_tok,
                          const int32_t* n_keep, void* stream, int t_out_begin, void* xq_out) {
-    GdnQ81* const xq = static_cast<GdnQ81*>(xq_out);   // S26: non-null = also the outputs' q8_1 (STRATA_QFUSE)
+    GdnQ81* const xq = static_cast<GdnQ81*>(xq_out);   // S26: non-null = also the outputs' q8_1 (SAGUARO_QFUSE)
     if (!state || !h || !gate || !beta || !z || !gamma || !y || h_k <= 0 || h_v % h_k || n_tok < 1 ||
         n_tok > kVerifyMaxT) {
         std::fprintf(stderr, "gdn_step_norm_multi: invalid arguments\n");
         std::exit(1);
     }
-    static const bool split = [] { const char* v = std::getenv("STRATA_GDN_SPLIT"); return v && v[0] == '1'; }();
+    static const bool split = [] { const char* v = std::getenv("SAGUARO_GDN_SPLIT"); return v && v[0] == '1'; }();
     // S26: the split runs where it is faster (gfx1151 harness, h_v 48: the commit 8-19% per call; a window of 2+ rows
     // 3-13%; one row: no gain, the old kernel stays) - bitwise equal in every case
     if (split && (t_out_begin >= n_tok || n_tok - t_out_begin >= 2)) {
@@ -1940,7 +1940,7 @@ void gdn_step_norm_multi(float* state, const float* h, int conv_channels, const 
         return;
     }
     static const bool commit_split = [] {
-        const char* e = std::getenv("STRATA_GDN_COMMIT_SPLIT");
+        const char* e = std::getenv("SAGUARO_GDN_COMMIT_SPLIT");
         return !e || e[0] != '0';
     }();
     if (commit_split && n_keep != nullptr && t_out_begin >= n_tok) {

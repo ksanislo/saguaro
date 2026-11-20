@@ -1,4 +1,4 @@
-// src/prefill/moe_mmq_tab.hpp - STRATA_MMQ_DIRECT: declarations of the pointer-table MMQ (moe_mmq_tab.cuh).
+// src/prefill/moe_mmq_tab.hpp - SAGUARO_MMQ_DIRECT: declarations of the pointer-table MMQ (moe_mmq_tab.cuh).
 // moe_mmq.cu includes only this header, so the tab kernels are instantiated once, in the per-type TUs that CMake
 // generates from mmq_tab_instance.cu.in (STRATA_MMQ_TAB on), never implicitly in moe_mmq.cu.
 #pragma once

@@ -157,8 +157,8 @@ bool cpu_check(const Input& in, int ld, const Output& got) {
     return ok;
 }
 // One path's time for one layer's recurrence + norm (GPU-event median of 7 runs after 2 warmups, the same start state each
-// run).  STRATA_GDN_CHUNKED is read once per process, so --bench (this path) and --bench-default (gfx1151's default: the
-// existing kernels with STRATA_GDN_PP=2 and STRATA_GDN_NOY=1) are separate runs of this binary.
+// run).  SAGUARO_GDN_CHUNKED is read once per process, so --bench (this path) and --bench-default (gfx1151's default: the
+// existing kernels with SAGUARO_GDN_PP=2 and SAGUARO_GDN_NOY=1) are separate runs of this binary.
 void bench(const char* path) {
     for (int64_t t : {64, 256, 2048, 16384, 32768}) {
         const Input in(t, 2, 1, false);
@@ -189,15 +189,15 @@ void bench(const char* path) {
 int main(int argc, char** argv) {
     const bool bench_default = argc > 1 && std::strcmp(argv[1], "--bench-default") == 0;
     const bool off = argc > 1 && (std::strcmp(argv[1], "--off") == 0 || std::strcmp(argv[1], "--default") == 0 || bench_default);
-    setting("STRATA_GDN_CHUNKED", off ? "0" : "1");
-    setting("STRATA_GDN_HEAD", "1"); setting("STRATA_GDN_PP", "2");
-    if (argc > 1 && std::strncmp(argv[1], "--bench", 7) == 0) setting("STRATA_GDN_NOY", "1");   // gfx1151's default
+    setting("SAGUARO_GDN_CHUNKED", off ? "0" : "1");
+    setting("SAGUARO_GDN_HEAD", "1"); setting("SAGUARO_GDN_PP", "2");
+    if (argc > 1 && std::strncmp(argv[1], "--bench", 7) == 0) setting("SAGUARO_GDN_NOY", "1");   // gfx1151's default
 #ifdef _WIN32
-    _putenv_s("STRATA_GDN_REC_HEADS", "");
-    if (argc > 1 && std::strcmp(argv[1], "--default") == 0) _putenv_s("STRATA_GDN_CHUNKED", "");
+    _putenv_s("SAGUARO_GDN_REC_HEADS", "");
+    if (argc > 1 && std::strcmp(argv[1], "--default") == 0) _putenv_s("SAGUARO_GDN_CHUNKED", "");
 #else
-    unsetenv("STRATA_GDN_REC_HEADS");
-    if (argc > 1 && std::strcmp(argv[1], "--default") == 0) unsetenv("STRATA_GDN_CHUNKED");
+    unsetenv("SAGUARO_GDN_REC_HEADS");
+    if (argc > 1 && std::strcmp(argv[1], "--default") == 0) unsetenv("SAGUARO_GDN_CHUNKED");
 #endif
     int device = 0;
     cudaDeviceProp props{};

@@ -14,7 +14,7 @@ namespace strata::core {
 //   * the room under every memory limit of this process's cgroup and of each ancestor visible under
 //     /sys/fs/cgroup (cgroup v2: memory.max and memory.high, each minus usage; cgroup v1:
 //     memory.limit_in_bytes minus memory.usage_in_bytes);
-//   * the operator's own cap, when one is set (--memory-limit-mib / STRATA_MEMORY_LIMIT_MIB): that many MiB minus
+//   * the operator's own cap, when one is set (--memory-limit-mib / SAGUARO_MEMORY_LIMIT_MIB): that many MiB minus
 //     what the container uses now - the top visible cgroup's memory.current, or MemTotal - MemAvailable when the
 //     cgroup files cannot be read.  For a container whose real limit sits on a parent cgroup it cannot see.
 //

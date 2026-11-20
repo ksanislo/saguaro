@@ -8,11 +8,11 @@
  * picker did nothing). Programs Strata ships itself (its Python, Node and engine) keep the environment they were built for; everything
  * else gets the environment the AppImage was started from.
  *
- * The AppImage's launcher records that original environment in STRATA_ORIGINAL_ENV (repack-appimage.sh adds the hook). An older
+ * The AppImage's launcher records that original environment in SAGUARO_ORIGINAL_ENV (repack-appimage.sh adds the hook). An older
  * AppImage without the record is cleaned instead: every variable that points into the AppImage's own folder is dropped, and its
  * folders are removed from the path lists.
  */
-const RECORD = 'STRATA_ORIGINAL_ENV';
+const RECORD = 'SAGUARO_ORIGINAL_ENV';
 
 /** Variables the AppImage tooling sets only for itself; never meant for another program. */
 const APPIMAGE_ONLY = [
@@ -20,7 +20,7 @@ const APPIMAGE_ONLY = [
   'GTK_DATA_PREFIX', 'GTK_EXE_PREFIX', 'GTK_PATH', 'GTK_IM_MODULE_FILE', 'GTK_THEME', 'GDK_PIXBUF_MODULE_FILE', 'GDK_PIXBUF_MODULEDIR',
   'GSETTINGS_SCHEMA_DIR', 'GI_TYPELIB_PATH', 'GIO_MODULE_DIR', 'GIO_EXTRA_MODULES',
   'GST_REGISTRY_REUSE_PLUGIN_SCANNER', 'GST_PLUGIN_SYSTEM_PATH_1_0', 'GST_PLUGIN_PATH_1_0', 'GST_PLUGIN_SCANNER_1_0', 'GST_PTP_HELPER_1_0',
-  'WEBKIT_EXEC_PATH', 'WEBKIT_INJECTED_BUNDLE_PATH', 'STRATA_ORIGINAL_ENV', 'STRATA_APPDIR',
+  'WEBKIT_EXEC_PATH', 'WEBKIT_INJECTED_BUNDLE_PATH', 'SAGUARO_ORIGINAL_ENV', 'SAGUARO_APPDIR',
 ];
 /** Lists of folders: the AppImage prepends its own; only its entries are removed. */
 const PATH_LISTS = ['PATH', 'XDG_DATA_DIRS', 'XDG_CONFIG_DIRS', 'LD_LIBRARY_PATH', 'LD_PRELOAD', 'LIBRARY_PATH', 'PYTHONPATH', 'PYTHONHOME', 'PERLLIB', 'PERL5LIB', 'QT_PLUGIN_PATH', 'QML2_IMPORT_PATH', 'GST_PLUGIN_PATH', 'GTK_PATH', 'GIO_MODULE_DIR'];

@@ -27,7 +27,7 @@ void validate(const QsaShapes& s, const char* what) {
 }
 
 // One block = one 64-value group of one KV head of K (blockIdx.z = 0) or V (1); 64 threads, one value each.
-// MULTI (S26 STRATA_LFUSE): blockIdx.z = 2 * token + (K / V); token j reads step + j * step_stride and its rows at
+// MULTI (S26 SAGUARO_LFUSE): blockIdx.z = 2 * token + (K / V); token j reads step + j * step_stride and its rows at
 // kcur / vcur + j * cur_stride - every token's code is the single launch's
 template <bool MULTI = false>
 __global__ void kv_append_q8_kernel(int8_t* __restrict__ k_q, int8_t* __restrict__ v_q,
@@ -152,12 +152,12 @@ __global__ void kv_gather_q8_wide_kernel(const int8_t* __restrict__ k_q, const i
     reinterpret_cast<uint4*>(v_scratch)[dst] = vo;
 }
 
-// The current device is below sm_75 (per device: a layer split can mix cards); STRATA_Q8_GATHER_WIDE=0 turns the
+// The current device is below sm_75 (per device: a layer split can mix cards); SAGUARO_Q8_GATHER_WIDE=0 turns the
 // 8-wide gather off (A/B).  The wide kernel is bitwise identical, so this only decides speed.  Mirrors
 // qsa_decode_attn.cu's pre75_attn.
 bool pre75_q8_gather() {
     static const bool off = [] {
-        const char* e = std::getenv("STRATA_Q8_GATHER_WIDE");
+        const char* e = std::getenv("SAGUARO_Q8_GATHER_WIDE");
         return e != nullptr && e[0] == '0';
     }();
     static int cc[64] = {};
@@ -175,7 +175,7 @@ bool pre75_q8_gather() {
     }
     return cc[dev] < 75;
 }
-#endif  // STRATA_EXPERIMENTAL_SM60
+#endif  // SAGUARO_EXPERIMENTAL_SM60
 
 }  // namespace
 

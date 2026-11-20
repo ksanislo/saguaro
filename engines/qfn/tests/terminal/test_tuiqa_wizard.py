@@ -184,7 +184,7 @@ class InstalledModelFolder(Base):
         pack.mkdir(parents=True)
         mm = docs / "Models" / "mmproj-Qwen3.8-Flash-Next-BF16.gguf"
         mm.write_bytes(b"x")
-        install = Path(os.environ["STRATA_INSTALL_DIR"])
+        install = Path(os.environ["SAGUARO_INSTALL_DIR"])
         install.mkdir(parents=True, exist_ok=True)
         cfg = {"exe": "component:strata-engine", "tokenizer": str(pack), "args": ["--pack", str(pack), "--native", str(gguf), "--mtp", str(docs / "mtp" / "rt"),
                                                                                  "--max-context", "32768", "--kv", "int8"],

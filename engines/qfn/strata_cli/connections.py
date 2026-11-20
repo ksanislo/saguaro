@@ -70,11 +70,11 @@ def credential_name(value: str) -> str:
 
 
 def connection_dir(*, create: bool = False) -> Path:
-    explicit = os.environ.get("STRATA_CONNECTION_DIR")
+    explicit = os.environ.get("SAGUARO_CONNECTION_DIR")
     if explicit:
         directory = Path(explicit).expanduser()
         if not directory.is_absolute():
-            raise ConnectionError("STRATA_CONNECTION_DIR must be absolute")
+            raise ConnectionError("SAGUARO_CONNECTION_DIR must be absolute")
     elif os.name == "nt":
         base = os.environ.get("APPDATA")
         directory = (Path(base) if base else Path.home() / "AppData" / "Roaming") / "Strata" / "connections"
@@ -219,7 +219,7 @@ def _lock(name: str):
 
 
 def create(name: str, url: str, *, prefix: str = "",
-           credential_env: str = "STRATA_TELEMETRY_KEY") -> tuple[dict, str]:
+           credential_env: str = "SAGUARO_TELEMETRY_KEY") -> tuple[dict, str]:
     name = _name(name)
     value = _validate({"schema_version": 1, "id": name, "url": server_url(url),
                        "prefix": prefix_path(prefix), "credential_env": credential_name(credential_env)},
@@ -274,7 +274,7 @@ def resolve(*, url: str | None = None, connection: str | None = None,
             credential_env: str | None = None, timeout: float | None = None,
             environment: dict | None = None) -> dict:
     env = os.environ if environment is None else environment
-    selected = connection or (None if url is not None else env.get("STRATA_CONNECTION"))
+    selected = connection or (None if url is not None else env.get("SAGUARO_CONNECTION"))
     if url is not None and connection is not None:
         raise ConnectionError("choose --url or --connection, not both")
     if selected:
@@ -284,10 +284,10 @@ def resolve(*, url: str | None = None, connection: str | None = None,
         origins = {"url": "connection", "prefix": "connection", "credential_env": "connection"}
     else:
         revision = None
-        root = url if url is not None else env.get("STRATA_URL", DEFAULT_URL)
+        root = url if url is not None else env.get("SAGUARO_URL", DEFAULT_URL)
         prefix = ""
-        key_ref = "STRATA_API_KEY"
-        origins = {"url": "flag" if url is not None else "environment" if "STRATA_URL" in env else "default",
+        key_ref = "SAGUARO_API_KEY"
+        origins = {"url": "flag" if url is not None else "environment" if "SAGUARO_URL" in env else "default",
                    "prefix": "default", "credential_env": "default"}
     if credential_env is not None:
         key_ref = credential_env

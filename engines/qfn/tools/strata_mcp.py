@@ -43,9 +43,9 @@ PROTOCOLS = ("2025-06-18", "2025-03-26", "2024-11-05")   # the revisions this se
 VERSION = "0.1.0"
 WIN = os.name == "nt"
 DEFAULT_ROOT = Path(__file__).resolve().parent.parent
-# The desktop app runs this under Strata Control's Python (STRATA_CONTROL_INSTALL=1): the install runs on that Python, makes no
+# The desktop app runs this under Strata Control's Python (SAGUARO_CONTROL_INSTALL=1): the install runs on that Python, makes no
 # .venv and installs no package (setup.py's own CONTROL mode).
-CONTROL = os.environ.get("STRATA_CONTROL_INSTALL") == "1"
+CONTROL = os.environ.get("SAGUARO_CONTROL_INSTALL") == "1"
 DEFAULT_PORT = 8080
 STATE_DIR = ".strata-mcp"                             # in the Strata folder (git-ignored)
 
@@ -584,8 +584,8 @@ class Strata:
 
     # ---- paths
     def settings_path(self) -> Path:
-        if os.environ.get("STRATA_SETTINGS_FILE"):
-            return Path(os.environ["STRATA_SETTINGS_FILE"])
+        if os.environ.get("SAGUARO_SETTINGS_FILE"):
+            return Path(os.environ["SAGUARO_SETTINGS_FILE"])
         if WIN:
             return Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming") / "Strata" / "settings.json"
         return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "strata" / "settings.json"
@@ -2661,13 +2661,13 @@ def install_job(spec_path: str) -> int:
         print("strata-mcp: running " + " ".join(cmd), flush=True)
         env = dict(os.environ, PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8")
         if spec.get("control"):                         # the app: the installer's own mode, writing to `root`
-            env.update(STRATA_CONTROL_INSTALL="1", STRATA_INSTALL_DIR=str(root), PYTHONNOUSERSITE="1")
+            env.update(SAGUARO_CONTROL_INSTALL="1", SAGUARO_INSTALL_DIR=str(root), PYTHONNOUSERSITE="1")
             for key in ("PYTHONHOME", "PYTHONPATH", "VIRTUAL_ENV"):
                 env.pop(key, None)
             # This job is the explicit install the user asked for (it downloads model files and the preparation sources). The
-            # server that started it, and every start or serve, keep STRATA_NO_ACQUIRE; setup.py's CONTROL mode still runs
+            # server that started it, and every start or serve, keep SAGUARO_NO_ACQUIRE; setup.py's CONTROL mode still runs
             # no pip, git, compiler or engine fetch.
-            env.pop("STRATA_NO_ACQUIRE", None)
+            env.pop("SAGUARO_NO_ACQUIRE", None)
         p = subprocess.Popen(cmd, cwd=str(src if spec.get("control") else root), stdin=subprocess.DEVNULL, env=env)
         record(child_pid=p.pid, child_ident=proc_identity(p.pid))
         rc = p.wait()

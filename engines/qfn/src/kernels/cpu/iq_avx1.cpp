@@ -1,4 +1,4 @@
-// src/kernels/cpu/iq_avx1.cpp - the i-quant expert rows for CPUs without AVX2 (STRATA_ISA_FLOOR=avx:
+// src/kernels/cpu/iq_avx1.cpp - the i-quant expert rows for CPUs without AVX2 (SAGUARO_ISA_FLOOR=avx:
 // Sandy/Ivy Bridge, Xeon E5 v1/v2, Bulldozer).  See iq_avx1.hpp.
 //
 // iq_avx2.cpp's multi-token scheme in 128-bit lanes: each 32-value chunk is decoded once per verify window
@@ -132,10 +132,10 @@ inline float hsum4(__m128 v) {
     return _mm_cvtss_f32(s);
 }
 
-// E-2 prefetching, the same knob as the AVX-2/512 kernels: STRATA_IQ_PREFETCH is the distance in bytes.
+// E-2 prefetching, the same knob as the AVX-2/512 kernels: SAGUARO_IQ_PREFETCH is the distance in bytes.
 int prefetch_distance() {
     static const int d = [] {
-        const char* v = std::getenv("STRATA_IQ_PREFETCH");
+        const char* v = std::getenv("SAGUARO_IQ_PREFETCH");
         return v ? std::atoi(v) : 2048;
     }();
     return d;

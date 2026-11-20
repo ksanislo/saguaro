@@ -801,11 +801,11 @@ int main(int argc, char** argv) {
         return 2;
     }
     // #152's width check tests the opt-in rule (the multi-token kernels from one token on)
-    if (std::getenv("STRATA_IQ_MT_MIN") == nullptr) {
+    if (std::getenv("SAGUARO_IQ_MT_MIN") == nullptr) {
 #ifdef _WIN32
-        _putenv_s("STRATA_IQ_MT_MIN", "1");
+        _putenv_s("SAGUARO_IQ_MT_MIN", "1");
 #else
-        setenv("STRATA_IQ_MT_MIN", "1", 1);
+        setenv("SAGUARO_IQ_MT_MIN", "1", 1);
 #endif
     }
     int failures = 0;

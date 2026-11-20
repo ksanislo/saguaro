@@ -1,4 +1,4 @@
-"""MAYA_DS4_RESTORE_POINTS: where the server asks the DeepSeek engine to keep restore points (its GEN line's marks= and
+"""SAGUARO_DS4_RESTORE_POINTS: where the server asks the DeepSeek engine to keep restore points (its GEN line's marks= and
 shared=), computed from the chat as the template renders it - no GPU, no engine (the mock engine).
 
     python -m unittest serve.test_ds4_restore_points -v
@@ -17,11 +17,10 @@ from serve import ds41_encoding as reference  # noqa: E402
 from serve.frontend import ChatTemplate, openai_to_messages  # noqa: E402
 from serve.server import (ByteTokenizer, MockEngine, Service, StrataEngine, deepseek_restore_points,  # noqa: E402
                           openai_chunks, openai_collect, restore_point_settings)
-import maya_names  # noqa: E402  (tools/, on the path server.py set)
 
 ROOT = Path(__file__).resolve().parents[1]
-ON = maya_names.read_as("MAYA_DS4_RESTORE_POINTS")
-TAIL = maya_names.read_as("MAYA_DS4_RESTORE_TAIL")
+ON = "SAGUARO_DS4_RESTORE_POINTS"
+TAIL = "SAGUARO_DS4_RESTORE_TAIL"
 # one id a byte (the stand-in tokenizer): a system prompt and its tools of ~2,900 tokens
 SYSTEM = "You are a careful assistant; answer from the documents you are given. " * 40
 TOOL = {"type": "function", "function": {"name": "lookup", "description": "Looks a thing up. " * 20, "parameters": {
@@ -143,7 +142,7 @@ class RestorePoints(unittest.TestCase):
         boundary = max(marks)
         self.assertEqual(ids[boundary], self.svc.ds_system_id)
         self.assertGreater(boundary, len(ids) - 60)
-        for p in marks[:-1]:   # (MAYA_DS4_RESTORE_TURNS: the earlier turn starts too)
+        for p in marks[:-1]:   # (SAGUARO_DS4_RESTORE_TURNS: the earlier turn starts too)
             self.assertIn(ids[p], (self.svc.ds_user_id, self.svc.ds_system_id))
 
     def test_earlier_turn_starts(self):
@@ -206,14 +205,14 @@ class RestorePoints(unittest.TestCase):
 
     def test_the_engine_line(self):
         ids, sampling = self.run_request(self.chat(), {ON: "4"})
-        pts = self.points(ids, turns=None)   # (the service reads MAYA_DS4_RESTORE_TURNS)
+        pts = self.points(ids, turns=None)   # (the service reads SAGUARO_DS4_RESTORE_TURNS)
         self.assertEqual(sampling["_restore"], pts)
         keys = StrataEngine.sampling_keys(sampling).split()
         self.assertIn("marks=" + ",".join(str(p) for p in pts["marks"]), keys)
         self.assertIn(f"shared={pts['shared']}", keys)
         self.assertIn("temperature=0.7", StrataEngine.sampling_keys({**sampling, "temperature": 0.7}).split())
         self.assertIn(f"shared={pts['shared']}", StrataEngine.sampling_keys({**sampling, "temperature": 0.7}).split())
-        # MAYA_DS4_RESTORE_TAIL moves the tail point
+        # SAGUARO_DS4_RESTORE_TAIL moves the tail point
         _, sampling = self.run_request([{"role": "user", "content": DOC}], {ON: "4", TAIL: "100"})
         self.assertEqual(sampling["_restore"]["tail"], len(self.engine.last_prompt) - 100)
         self.assertNotIn("marks", sampling["_restore"])

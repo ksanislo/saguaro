@@ -44,12 +44,12 @@ struct Ue4m3Table {   // ggml_ue4m3_to_fp32 (ggml-impl.h): halved for the double
 };
 constexpr Ue4m3Table kUe4m3;
 
-// software prefetch distance in bytes (STRATA_NVFP4_PREFETCH, 0 = off): the rows stream from DRAM through 4 KB
+// software prefetch distance in bytes (SAGUARO_NVFP4_PREFETCH, 0 = off): the rows stream from DRAM through 4 KB
 // pages, where the hardware prefetchers stop at every page boundary; the IQ kernel's E-2 knob, same default
 // (read on first use, behind the CPU check: a static initialiser here would run on every CPU, see above)
 inline int prefetch_distance() {
     static const int v = [] {
-        const char* e = std::getenv("STRATA_NVFP4_PREFETCH");
+        const char* e = std::getenv("SAGUARO_NVFP4_PREFETCH");
         return e ? std::atoi(e) : 2048;
     }();
     return v;

@@ -1,4 +1,4 @@
-// src/core/glm_multi.cu - several conversations at once (STRATA_GLM_SEQS=<n>); see glm_model.hpp (SeqCtx).
+// src/core/glm_multi.cu - several conversations at once (SAGUARO_GLM_SEQS=<n>); see glm_model.hpp (SeqCtx).
 //
 // Every per-sequence thing a part keeps lives in its state arena (the residual, the KDA states and conv histories, the
 // DSA latent / indexer caches) plus a handful of members (the position, the snapshot, the image rows).  A part holds n
@@ -428,7 +428,7 @@ static uint64_t el_layout_impl(const Glm5Geometry& g, bool lat_q8, int mtp_il, i
     return (uint64_t) floats * sizeof(float);
 }
 
-// STRATA_GLM_ELASTIC=1 (the fast path, CUDA): a reservation for ctx tokens with its fixed part backed and zeroed
+// SAGUARO_GLM_ELASTIC=1 (the fast path, CUDA): a reservation for ctx tokens with its fixed part backed and zeroed
 bool Glm5Model::el_create(int64_t ctx, SeqCtx& c, std::string& err, bool back_fixed) {
 #if defined(STRATA_USE_HIP)
     (void) ctx;
@@ -540,7 +540,7 @@ bool Glm5Model::seq_grow(int s, int64_t tokens, std::string& err) {
     if (tokens <= e.tokens) return true;
     if (!e.fixed_on && !seq_activate(s, err)) return false;
     static const int64_t step = [] {
-        const char* v = getenv("STRATA_GLM_ELASTIC_STEP");
+        const char* v = getenv("SAGUARO_GLM_ELASTIC_STEP");
         return std::max<int64_t>(256, v ? std::atoll(v) : 4096);
     }();
     std::lock_guard<std::mutex> lk(el_mu_);
@@ -764,22 +764,22 @@ uint64_t Glm5Model::seq_layout(int64_t ctx, SeqCtx& c) const {
     return c.bytes;
 }
 
-// STRATA_GLM_SEQS=<n> (1..8): n - 1 more state arenas on this part, zeroed - each for STRATA_GLM_SEQ_CTX tokens
+// SAGUARO_GLM_SEQS=<n> (1..8): n - 1 more state arenas on this part, zeroed - each for SAGUARO_GLM_SEQ_CTX tokens
 // (default: the engine's context; at least 8320, at most the context).  Called by load_pack right after the first
 // arena, so the expert pool is sized from what is left.
 bool Glm5Model::seq_alloc_arenas(std::string& err) {
-    const char* v = getenv("STRATA_GLM_SEQS");
+    const char* v = getenv("SAGUARO_GLM_SEQS");
     const int n = v ? std::max(1, std::min(8, std::atoi(v))) : 1;
     if (n <= 1) return true;
     int64_t ctx = max_ctx_;
-    if (const char* c = getenv("STRATA_GLM_SEQ_CTX")) ctx = std::max<int64_t>(8320, std::min<int64_t>(max_ctx_, std::atoll(c)));
+    if (const char* c = getenv("SAGUARO_GLM_SEQ_CTX")) ctx = std::max<int64_t>(8320, std::min<int64_t>(max_ctx_, std::atoll(c)));
     cudaSetDevice(dev_);
     seq_.assign((size_t) n, SeqCtx{});
     // the first sequence's layout recomputed must be the one load_pack made, or the others' would be wrong
     SeqCtx check;
     if (el_.empty() && (seq_layout(max_ctx_, check) != state_bytes_ || check.dsa_pool != dsa_pool_ ||
                         check.kda_conv != kda_conv_ || check.dsa_lat != dsa_lat_ || check.ik_ring != ik_ring_)) {
-        err = "glm multi: the state layout does not match load_pack's (this build cannot run MAYA_GLM_SEQS)";
+        err = "glm multi: the state layout does not match load_pack's (this build cannot run SAGUARO_GLM_SEQS)";
         return false;
     }
     seq_[0].state = state_;
@@ -803,7 +803,7 @@ bool Glm5Model::seq_alloc_arenas(std::string& err) {
             cudaGetLastError();
             err = "pack: sequence state " + std::to_string(s) + " of " + std::to_string(n) + " (" +
                   std::to_string(c.bytes >> 20) + " MB) does not fit on CUDA" + std::to_string(dev_) +
-                  " - fewer MAYA_GLM_SEQS or a smaller MAYA_GLM_SEQ_CTX";
+                  " - fewer SAGUARO_GLM_SEQS or a smaller SAGUARO_GLM_SEQ_CTX";
             return false;
         }
         cudaMemset(a, 0, c.bytes);
@@ -840,7 +840,7 @@ bool Glm5Model::seq_alloc_arenas(std::string& err) {
         std::fprintf(stderr, "glm multi: CUDA%d %d sequence states: the first for %lld tokens (%.2f GB), %d more for %lld "
                      "(%.2f GB in all, with every sequence's snapshot)\n", dev_, n, (long long) max_ctx_,
                      (double) state_bytes_ / 1e9, n - 1, (long long) ctx, (double) more / 1e9);
-    // several conversations drafting at once (STRATA_GLM_MULTI_MTP): their windows' buffers, before the pool too
+    // several conversations drafting at once (SAGUARO_GLM_MULTI_MTP): their windows' buffers, before the pool too
     if (multi_mtp_setting() > 0 && !mtpw_alloc(err)) return false;
     // one GPU decodes the sequences together; opt-in split rows need the same activations on every part, before its pool
     if (n_parts_ == 1 || split_rows_setting() > 0) return rows_alloc(err);
@@ -851,7 +851,7 @@ bool Glm5Model::seq_pipe_ready(std::string& err) {
     const Glm5Geometry& g = g_;
     for (Glm5Model* m = this; m != nullptr; m = m->split_next_.get()) {
         if (m->seq_.empty()) {
-            err = "glm multi: one sequence state only (MAYA_GLM_SEQS)";
+            err = "glm multi: one sequence state only (SAGUARO_GLM_SEQS)";
             return false;
         }
         cudaSetDevice(m->dev_);

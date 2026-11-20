@@ -1,7 +1,7 @@
 """Logging for a server that runs several conversations at once: when, which request, which conversation, which client.
 
 - Every line the server prints, and every line of the engine's log, starts with the date and time ("log_time" in the
-  config, default on; STRATA_LOG_TIME=0 turns it off).  A line printed for a request also names it, its conversation
+  config, default on; SAGUARO_LOG_TIME=0 turns it off).  A line printed for a request also names it, its conversation
   and its slot: `2026-10-22 15:41:07 [req 3f9a conv 7c21b0 slot 4] [strata] done: ...`.
 - The conversation key is a hash of the prompt up to the first assistant turn (the system prompt and the first user
   message), the same for every turn of one conversation.  No prompt text is logged.
@@ -21,7 +21,7 @@ import struct
 import threading
 import time
 
-ENABLED = os.environ.get("STRATA_LOG_TIME", "1") != "0"
+ENABLED = os.environ.get("SAGUARO_LOG_TIME", "1") != "0"
 _CTX = threading.local()
 _STAMP = re.compile(r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)? ")
 

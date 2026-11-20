@@ -105,17 +105,17 @@ bool rows_match_ggml(RowsFn fn, int type, std::initializer_list<int> nts = {2, 5
 
 RowsFn pick_rows(int type) {
     static const bool on = [] {
-        const char* v = std::getenv("STRATA_GLM_CPU_MT");
+        const char* v = std::getenv("SAGUARO_GLM_CPU_MT");
         return v == nullptr || std::atoi(v) != 0;
     }();
     if (!on) return nullptr;
     init_once();
     // AVX-512 where cpu_avx512_ok() (VNNI and VBMI: Ice Lake / Zen 4 and later, which run 512-bit integer code at
     // full clock); on a Skylake-SP Xeon 6152 the AVX-2 rows were 7-13% faster (glm_cpu_bench, Maya-L, 2-16 tokens)
-    const bool avx512 = cpu_avx512_ok() && std::getenv("STRATA_NO_IQ512") == nullptr;
-    const bool avx2 = cpu_avx2_ok() && std::getenv("STRATA_NO_IQ256") == nullptr;
-    // AVX without AVX2 (Sandy / Ivy Bridge): the 128-bit rows of iq_avx1.cpp; STRATA_NO_IQ128 keeps ggml's dots
-    const bool avx1 = !avx2 && cpu_avx1_only() && std::getenv("STRATA_NO_IQ128") == nullptr;
+    const bool avx512 = cpu_avx512_ok() && std::getenv("SAGUARO_NO_IQ512") == nullptr;
+    const bool avx2 = cpu_avx2_ok() && std::getenv("SAGUARO_NO_IQ256") == nullptr;
+    // AVX without AVX2 (Sandy / Ivy Bridge): the 128-bit rows of iq_avx1.cpp; SAGUARO_NO_IQ128 keeps ggml's dots
+    const bool avx1 = !avx2 && cpu_avx1_only() && std::getenv("SAGUARO_NO_IQ128") == nullptr;
     RowsFn fn = nullptr;
     void (*set_q5k)(bool) noexcept = nullptr;
     if (avx512 && iq512_supported(type)) {
@@ -155,15 +155,15 @@ RowsFn exact_rows(int type) {
 // CPU, like ggml-cpu's own dot (it has no AVX-512 form for these). IQ1_M and IQ2_XS use the same exact AVX2 row backend
 // in both modes, their grid / scale / delta decode kept off the shuffle port (ggml's is bound by it on Broadwell). IQ2_XXS (Maya-S's gate/up) first tries the
 // AVX-512 rows of iq_avx512_one.cpp (VBMI + BMI2: the grid as 2-bit codes in registers, the signs by pdep), checked
-// the same way.  STRATA_GLM_CPU_1T=0 keeps ggml's dot, STRATA_NO_IQ512 the AVX-2 rows.
+// the same way.  SAGUARO_GLM_CPU_1T=0 keeps ggml's dot, SAGUARO_NO_IQ512 the AVX-2 rows.
 RowsFn pick_rows1(int type) {
     static const bool on = [] {
-        const char* mt = std::getenv("STRATA_GLM_CPU_MT");
-        const char* v = std::getenv("STRATA_GLM_CPU_1T");
+        const char* mt = std::getenv("SAGUARO_GLM_CPU_MT");
+        const char* v = std::getenv("SAGUARO_GLM_CPU_1T");
         return (mt == nullptr || std::atoi(mt) != 0) && (v == nullptr || std::atoi(v) != 0);
     }();
     if (!on) return nullptr;
-    if (std::getenv("STRATA_NO_IQ512") == nullptr && iq512_one_supported(type)) {
+    if (std::getenv("SAGUARO_NO_IQ512") == nullptr && iq512_one_supported(type)) {
         init_once();
         if (rows_match_ggml(iq512_one_rows, type, {1}, 306)) return iq512_one_rows;
         std::fprintf(stderr, "native experts: the AVX-512 one-token %s rows differ from ggml-cpu's dot in this build - "
@@ -171,13 +171,13 @@ RowsFn pick_rows1(int type) {
     }
     // (AVX without AVX2: the AVX1 rows at one token too, where they give ggml's bits; Q2_K's are slower there)
     if (!cpu_avx2_ok() && cpu_avx1_only() && iq128_supported(type) && type != GGML_TYPE_Q2_K &&
-        std::getenv("STRATA_NO_IQ128") == nullptr) {
+        std::getenv("SAGUARO_NO_IQ128") == nullptr) {
         init_once();
         return rows_match_ggml(iq128_rows, type, {1}, 306) ? iq128_rows : nullptr;
     }
     if (!iq256_rows1_supported(type)) return nullptr;
     init_once();
-    if (!cpu_avx2_ok() || std::getenv("STRATA_NO_IQ256") != nullptr) return nullptr;
+    if (!cpu_avx2_ok() || std::getenv("SAGUARO_NO_IQ256") != nullptr) return nullptr;
     if (rows_match_ggml(iq256_rows1, type, {1}, 306)) return iq256_rows1;
     std::fprintf(stderr, "native experts: the one-token %s rows differ from ggml-cpu's dot in this build - "
                          "ggml's dot for them\n", ggml_type_name((ggml_type) type));
@@ -258,11 +258,11 @@ void native_gu_rows(const NativeFmt& f, const uint8_t* blob, const void* const* 
                     int r0, int r1) {
     // the multi-token kernels decode the weights once for all tokens: 2.0-2.4x ggml-cpu at three tokens, no faster
     // at one (all are bound by the codebook lookups, ~5 GB/s per core), measured by native_expert_parity.  AVX-512
-    // first, then the AVX-2 one (Zen 2/3, Intel 12th-14th gen).  STRATA_NO_IQ512 drops an AVX-512 CPU to the
-    // AVX-2 kernel, STRATA_NO_IQ256 drops the AVX-2 kernel; ggml-cpu's single-token vec_dot is reached only with
-    // both set (and on a CPU without AVX-512, STRATA_NO_IQ512 changes nothing).
-    static const bool avx512 = cpu_avx512_ok() && std::getenv("STRATA_NO_IQ512") == nullptr;
-    static const bool avx2 = cpu_avx2_ok() && std::getenv("STRATA_NO_IQ256") == nullptr;   // pre-AVX2: the AVX1 rows
+    // first, then the AVX-2 one (Zen 2/3, Intel 12th-14th gen).  SAGUARO_NO_IQ512 drops an AVX-512 CPU to the
+    // AVX-2 kernel, SAGUARO_NO_IQ256 drops the AVX-2 kernel; ggml-cpu's single-token vec_dot is reached only with
+    // both set (and on a CPU without AVX-512, SAGUARO_NO_IQ512 changes nothing).
+    static const bool avx512 = cpu_avx512_ok() && std::getenv("SAGUARO_NO_IQ512") == nullptr;
+    static const bool avx2 = cpu_avx2_ok() && std::getenv("SAGUARO_NO_IQ256") == nullptr;   // pre-AVX2: the AVX1 rows
     if (nt >= 2 && iq512_supported(f.gu_type)) {   // one token: ggml-cpu is as fast or faster
         if (avx512) {
             iq512_gu_rows(f.gu_type, blob, f.gu_row, f.up_off, (int) f.n_embd, act, nt, ff, r0, r1);
@@ -368,9 +368,9 @@ void native_down_rows_split(const NativeFmt& f, const uint8_t* down_base, const 
 void native_down_rows(const NativeFmt& f, const uint8_t* blob, const void* const* hq, int nt, float* const* out,
                       int r0, int r1) {
     // IQ4_NL down rows: the AVX-2 multi-token kernel decodes the nibbles and absolutises the weights once per
-    // block instead of once per token; ggml-cpu's dot is single-token.  STRATA_NO_IQ4NL falls back to it.
+    // block instead of once per token; ggml-cpu's dot is single-token.  SAGUARO_NO_IQ4NL falls back to it.
 #if defined(__x86_64__) || defined(_M_X64)
-    static const bool iq4nl_mt = std::getenv("STRATA_NO_IQ4NL") == nullptr;
+    static const bool iq4nl_mt = std::getenv("SAGUARO_NO_IQ4NL") == nullptr;
 #else
     static const bool iq4nl_mt = false;
 #endif

@@ -132,7 +132,7 @@ import { startScriptedWorker } from './helpers/scripted-worker.mjs';
 import { createAgentBridge } from '../server/agent/agent-bridge.mjs';
 import { resolveHarness } from '../server/agent/harness-runtime.mjs';
 
-const skip = !process.env.STRATA_HARNESS_DIR || !resolveHarness({ env: process.env }).ok ? 'STRATA_HARNESS_DIR is not set to a built Harness' : false;
+const skip = !process.env.SAGUARO_HARNESS_DIR || !resolveHarness({ env: process.env }).ok ? 'SAGUARO_HARNESS_DIR is not set to a built Harness' : false;
 
 test('real Harness: a turn that writes a file says what it is doing, in order, and ends with the status cleared before done', { skip }, async (t) => {
   const worker = await startScriptedWorker({});

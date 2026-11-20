@@ -159,11 +159,11 @@ template <int SG> __dpct_inline__ float sg_sum(float x) {   // SYCL port: warp_s
     return x;
 }
 // SYCL port: the decode mmvq kernels as Xe2-native SIMD16 sub-groups (twice the registers per lane, same 128
-// threads per group) or as the CUDA-shaped 32-lane warp (default). STRATA_MMVQ_SG: 16 = all SIMD16, 1 = IQ4_XS
+// threads per group) or as the CUDA-shaped 32-lane warp (default). SAGUARO_MMVQ_SG: 16 = all SIMD16, 1 = IQ4_XS
 // only, 2 = short outputs (n_out <= 1024) only, 3 = both. mmvq_sg_bench alone: SIMD16 wins on IQ4_XS (up to
 // 1.45x) and short outputs (up to 1.3x), loses 10-25% on the large K-quant projections.
 inline int mmvq_sg() {
-    static const int v = std::getenv("STRATA_MMVQ_SG") ? std::atoi(std::getenv("STRATA_MMVQ_SG")) : 32;
+    static const int v = std::getenv("SAGUARO_MMVQ_SG") ? std::atoi(std::getenv("SAGUARO_MMVQ_SG")) : 32;
     return v;
 }
 inline bool mmvq_sg16(bool iq4xs, int n_out) {
@@ -1353,13 +1353,13 @@ struct SmallTraits<IQ4NLBlock, 4> {
 // equal to ncols = 1 only to float rounding (the cross-warp reduction groups partial sums differently).
 bool g_multi_exact = true;   // until the upstream layout is timed on an idle GPU (plan rule: default only what is measured)
 
-// S26 STRATA_TSUM=1 (TS): warp 0's NCOLS x ROWS sums as one transposed butterfly (s26_tsum.cuh), bitwise the same
+// S26 SAGUARO_TSUM=1 (TS): warp 0's NCOLS x ROWS sums as one transposed butterfly (s26_tsum.cuh), bitwise the same
 static bool s26_tsum_on() {
-    static const bool on = [] { const char* v = std::getenv("STRATA_TSUM"); return v && v[0] == '1'; }();
+    static const bool on = [] { const char* v = std::getenv("SAGUARO_TSUM"); return v && v[0] == '1'; }();
     return on;
 }
 
-// S26 STRATA_LFUSE (PAIR): blocks n_out.. compute the same rows of w2 into y2 (two matrices of one shape on one
+// S26 SAGUARO_LFUSE (PAIR): blocks n_out.. compute the same rows of w2 into y2 (two matrices of one shape on one
 // input in one launch; each output's code is the single matrix's)
 template <typename F, int NCOLS, int NW, int ROWS, bool TS = false,
           bool PAIR = false, int SG = WARP>
@@ -1545,8 +1545,8 @@ __dpct_inline__ sycl::int4 load16_a2(const void* p) {
     for (int i = 0; i < 4; ++i) o[i] = half ? (w[i] >> 16) | (w[i + 1] << 16) : w[i];
     return sycl::int4((int) o[0], (int) o[1], (int) o[2], (int) o[3]);
 }
-inline bool q6k_a2() {   // STRATA_MMVQ_A2=0 turns the aligned-load path off
-    static const bool v = std::getenv("STRATA_MMVQ_A2") == nullptr || std::atoi(std::getenv("STRATA_MMVQ_A2")) != 0;
+inline bool q6k_a2() {   // SAGUARO_MMVQ_A2=0 turns the aligned-load path off
+    static const bool v = std::getenv("SAGUARO_MMVQ_A2") == nullptr || std::atoi(std::getenv("SAGUARO_MMVQ_A2")) != 0;
     return v;
 }
 
@@ -1707,22 +1707,22 @@ void native_mmvq_q6k_pf_kernel(const Q6KBlock* __restrict__ w, const Q81Block* _
         if (lane == 0) y[std::size_t(j) * n_out + row] = v;
     }
 }
-inline int q6k_pf() {   // STRATA_MMVQ_PF: weight-load steps issued ahead in the wide Q6_K kernel (0 = off)
-    static const int v = std::getenv("STRATA_MMVQ_PF") ? std::atoi(std::getenv("STRATA_MMVQ_PF")) : 0;
+inline int q6k_pf() {   // SAGUARO_MMVQ_PF: weight-load steps issued ahead in the wide Q6_K kernel (0 = off)
+    static const int v = std::getenv("SAGUARO_MMVQ_PF") ? std::atoi(std::getenv("SAGUARO_MMVQ_PF")) : 0;
     return v;
 }
 inline int q6k_wide_rpw() {
-    static const int v = std::getenv("STRATA_MMVQ_WIDE_RPW") ? std::atoi(std::getenv("STRATA_MMVQ_WIDE_RPW")) : 1;
+    static const int v = std::getenv("SAGUARO_MMVQ_WIDE_RPW") ? std::atoi(std::getenv("SAGUARO_MMVQ_WIDE_RPW")) : 1;
     return v;
 }
 // Large-GRF mode (256 registers per thread instead of 128) for the wide kernels (Q6_K a2 and the generic one) at 2-8
 // columns: on the A770 they spill at 128, and mmvq_bench Q6_K 4 columns goes 70-80 -> 150-237 GB/s with the same
 // checksum. Large GRF halves the threads an Xe core keeps resident, so it is the default on Arc A-series (Alchemist)
 // only, where it was measured; Battlemage and anything else, and 1 column everywhere, launch the same kernels as before.
-// STRATA_MMVQ_LARGE_GRF=1 forces it on, =0 off.
+// SAGUARO_MMVQ_LARGE_GRF=1 forces it on, =0 off.
 inline bool mmvq_large_grf(dpct::queue_ptr s) {
     static const bool v = [s] {
-        const char* e = std::getenv("STRATA_MMVQ_LARGE_GRF");
+        const char* e = std::getenv("SAGUARO_MMVQ_LARGE_GRF");
         if (e != nullptr) return std::atoi(e) != 0;
         return strata::intel_gpu_gen(s->get_device()) == strata::IntelGpuGen::Alchemist;
     }();
@@ -1778,7 +1778,7 @@ void launch_q6k_wide(const void* weights, const void* x_q8_1, float* y, int n_in
         return;
     }
     // RP rows per sub-group share each column's activation loads (the rows' own lanes, k order and butterfly: every
-    // output the same bits); with the aligned loads (A2) unless STRATA_MMVQ_A2=0
+    // output the same bits); with the aligned loads (A2) unless SAGUARO_MMVQ_A2=0
 #define STRATA_Q6W(RP) if (rpw == RP) { \
         const unsigned blocks = unsigned((std::size_t(n_out) + WARPS * RP - 1) / (WARPS * RP)); \
         if (q6k_a2()) { \
@@ -1913,7 +1913,7 @@ struct WideIQ4XS {
     }
     static float dot(const W& r, const A& v) { return r.d * v.ds * (float) dp4a4(r.hi, v.u1, dp4a4(r.lo, v.u0, 0)); }
 };
-// SYCL port: native_mmvq_wide_kernel with RPW rows per sub-group (STRATA_MMVQ_WIDE_K_RPW): each column's activations
+// SYCL port: native_mmvq_wide_kernel with RPW rows per sub-group (SAGUARO_MMVQ_WIDE_K_RPW): each column's activations
 // are loaded once (act) and used by the RPW rows (dot); a row's lanes, its k order and its butterfly are the
 // one-row kernel's, so every output is the same bits. At 2-4 columns the one-row kernel reads ~5x its weight bytes
 // in activations (each row re-reads the whole vector per column).
@@ -1952,8 +1952,8 @@ void native_mmvq_wide_rpw_kernel(const typename F::Block* __restrict__ w, const 
             if (lane == 0 && row0 + r < n_out) y[std::size_t(j) * n_out + row0 + r] = v;
         }
 }
-inline int wide_k_rpw() {   // STRATA_MMVQ_WIDE_K_RPW: rows per sub-group of the Q4_K / Q5_K / IQ4_XS wide kernel (1, 2, 4)
-    static const int v = std::getenv("STRATA_MMVQ_WIDE_K_RPW") ? std::atoi(std::getenv("STRATA_MMVQ_WIDE_K_RPW")) : 1;
+inline int wide_k_rpw() {   // SAGUARO_MMVQ_WIDE_K_RPW: rows per sub-group of the Q4_K / Q5_K / IQ4_XS wide kernel (1, 2, 4)
+    static const int v = std::getenv("SAGUARO_MMVQ_WIDE_K_RPW") ? std::atoi(std::getenv("SAGUARO_MMVQ_WIDE_K_RPW")) : 1;
     return v;
 }
 template <typename F, int NCOLS>
@@ -2007,8 +2007,8 @@ void launch_wide(const void* weights, const void* x_q8_1, float* y, int n_in, in
         sycl::nd_range<3>(sycl::range(1, 1, blocks) * sycl::range(1, WARPS, WARP), sycl::range(1, WARPS, WARP)),
         [=](sycl::nd_item<3>) [[sycl::reqd_sub_group_size(32)]] { native_mmvq_wide_kernel<F, NCOLS>(w, x, y, n_in, n_out); });
 }
-inline bool wide_k() {   // STRATA_MMVQ_WIDE_K=0: Q4_K/Q5_K/IQ4_XS through the multi kernel (the old path)
-    static const bool v = std::getenv("STRATA_MMVQ_WIDE_K") == nullptr || std::atoi(std::getenv("STRATA_MMVQ_WIDE_K")) != 0;
+inline bool wide_k() {   // SAGUARO_MMVQ_WIDE_K=0: Q4_K/Q5_K/IQ4_XS through the multi kernel (the old path)
+    static const bool v = std::getenv("SAGUARO_MMVQ_WIDE_K") == nullptr || std::atoi(std::getenv("SAGUARO_MMVQ_WIDE_K")) != 0;
     return v;
 }
 template <typename F>
@@ -2096,8 +2096,8 @@ void launch_wide32(const void* weights, const void* x_q8_1, float* y, int n_in, 
         sycl::nd_range<3>(sycl::range(1, 1, blocks) * sycl::range(1, WARPS, WARP), sycl::range(1, WARPS, WARP)),
         [=](sycl::nd_item<3>) [[sycl::reqd_sub_group_size(32)]] { native_mmvq_wide32_kernel<F, NCOLS>(w, x, y, n_in, n_out); });
 }
-inline bool wide_32() {   // STRATA_MMVQ_WIDE_32=0: Q8_0/IQ4_NL through the small/multi kernels (the old path)
-    static const bool v = std::getenv("STRATA_MMVQ_WIDE_32") == nullptr || std::atoi(std::getenv("STRATA_MMVQ_WIDE_32")) != 0;
+inline bool wide_32() {   // SAGUARO_MMVQ_WIDE_32=0: Q8_0/IQ4_NL through the small/multi kernels (the old path)
+    static const bool v = std::getenv("SAGUARO_MMVQ_WIDE_32") == nullptr || std::atoi(std::getenv("SAGUARO_MMVQ_WIDE_32")) != 0;
     return v;
 }
 template <typename F>
@@ -2126,7 +2126,7 @@ void launch_q6k_wide224(const void* weights, const void* x_q8_1, float* y, int n
         sycl::nd_range<3>(sycl::range(1, 1, blocks) * sycl::range(1, WARPS, WARP), sycl::range(1, WARPS, WARP)),
         [=](sycl::nd_item<3>) [[sycl::reqd_sub_group_size(32)]] { native_mmvq_q6k_wide_kernel<NCOLS, 1, WARP, 224>(w, x, y, n_in, n_out); });
 }
-bool g_q6k_wide = std::getenv("STRATA_MMVQ_WIDE") == nullptr || std::atoi(std::getenv("STRATA_MMVQ_WIDE")) != 0;
+bool g_q6k_wide = std::getenv("SAGUARO_MMVQ_WIDE") == nullptr || std::atoi(std::getenv("SAGUARO_MMVQ_WIDE")) != 0;
 
 template <typename F, int NCOLS, int RPW>
 void launch_rowwarp(const void* weights, const void* x_q8_1, float* y, int n_in, int n_out, dpct::queue_ptr s) {
@@ -2137,8 +2137,8 @@ void launch_rowwarp(const void* weights, const void* x_q8_1, float* y, int n_in,
         sycl::nd_range<3>(sycl::range(1, 1, blocks) * sycl::range(1, WARPS, WARP), sycl::range(1, WARPS, WARP)),
         [=](sycl::nd_item<3>) [[sycl::reqd_sub_group_size(32)]] { native_mmvq_rowwarp_kernel<F, NCOLS, RPW>(w, x, y, n_in, n_out); });
 }
-inline int rowwarp_rpw() {   // STRATA_MMVQ_RPW: 0 = the shared kernel, 1/2/4 = rows per warp (bench knob)
-    static const int v = std::getenv("STRATA_MMVQ_RPW") ? std::atoi(std::getenv("STRATA_MMVQ_RPW")) : 0;   // default: the shared kernel (measured equal at warm clocks)
+inline int rowwarp_rpw() {   // SAGUARO_MMVQ_RPW: 0 = the shared kernel, 1/2/4 = rows per warp (bench knob)
+    static const int v = std::getenv("SAGUARO_MMVQ_RPW") ? std::atoi(std::getenv("SAGUARO_MMVQ_RPW")) : 0;   // default: the shared kernel (measured equal at warm clocks)
     return v;
 }
 
@@ -2187,9 +2187,9 @@ void launch_multi_n(const void *weights, const void *x_q8_1, float *y, int n_in,
     }
     const dpct::dim3 threads(WARP, WARPS);
     // #783 PR-h (stuchapin909): two rows per block for every K, not only small K - each row keeps its own partial sums and
-    // reduction, so a row's result does not depend on its neighbour; STRATA_NO_MMVQ_ROWS2=1 keeps one row for large K
+    // reduction, so a row's result does not depend on its neighbour; SAGUARO_NO_MMVQ_ROWS2=1 keeps one row for large K
     static const bool rows1 = [] {
-        const char* v = std::getenv("STRATA_NO_MMVQ_ROWS2");
+        const char* v = std::getenv("SAGUARO_NO_MMVQ_ROWS2");
         return v != nullptr && v[0] != '\0' && v[0] != '0';
     }();
     if (rows1 && n_in / F::DIV >= F::BPI) {
@@ -2302,8 +2302,8 @@ void launch_check() {
 // 64 lanes exactly as the CUDA kernels stride them over a block (kbx = lane / T, stride 64 / T), and a 64-lane
 // butterfly instead of the LDS partials and __syncthreads of the one-block-per-row layout: on gfx906 a block per
 // 2 KB row spent most of its time being launched and joined.  The SAME kernel serves every column count 1..8, so a
-// column's sums do not depend on how many columns (verify tokens) ride along.  STRATA_MMVQ_WAVE=0: the CUDA layout.
-bool g_wave_off = std::getenv("STRATA_MMVQ_WAVE") && std::string(std::getenv("STRATA_MMVQ_WAVE")) == "0";
+// column's sums do not depend on how many columns (verify tokens) ride along.  SAGUARO_MMVQ_WAVE=0: the CUDA layout.
+bool g_wave_off = std::getenv("SAGUARO_MMVQ_WAVE") && std::string(std::getenv("SAGUARO_MMVQ_WAVE")) == "0";
 template<typename F, int NCOLS, int R>
 __launch_bounds__(256)
 __global__ void native_mmvq_wave_kernel(const typename F::Block* __restrict__ w, const Q81Block* __restrict__ x,
@@ -2459,7 +2459,7 @@ void small_f32(const void* weights, const float* x, void* scratch_q8_1,
     small_mmvq<Weight, Qi>(weights, scratch_q8_1, y, n_in, n_out, ncols, stream);
 }
 
-// ============================ STRATA_Q8_PACKED=1: the packed Q8_0 decode layout (opt-in) ============================
+// ============================ SAGUARO_Q8_PACKED=1: the packed Q8_0 decode layout (opt-in) ============================
 //
 // A lossless load-time repack of a Q8_0 matrix: the SAME int8 values in a qs plane (row-major, n_in bytes per row)
 // followed by the SAME fp16 scales in a d plane (row-major, n_in / 32 per row) - no requantization, same bytes.
@@ -2548,7 +2548,7 @@ native_q8_0_packed_kernel(const int8_t *__restrict__ qs,
         */
         item_ct1.barrier();
         if (TS && item_ct1.get_local_id(1) ==
-                      0) { // S26 STRATA_TSUM=1: one transposed butterfly,
+                      0) { // S26 SAGUARO_TSUM=1: one transposed butterfly,
                            // bitwise the same sums
             constexpr int P = s26ts::pow2_ceil(NCOLS);
             float v[P];
@@ -2660,7 +2660,7 @@ bool q8_packed_mmvq(const void* weights, const void* x_q8_1, float* y, int n_in,
 }
 
 
-// ============================ STRATA_Q6_PACKED=1: the packed Q6_K head layout (opt-in) ============================
+// ============================ SAGUARO_Q6_PACKED=1: the packed Q6_K head layout (opt-in) ============================
 //
 // The output heads (the main head, 248320 rows, and the MTP draft head's row subset) are Q6_K matrices of 2560-wide
 // rows: 10 blocks of 210 bytes each, so every int load is 2-byte aligned and a row is 2100 bytes. The packed copy
@@ -2668,11 +2668,11 @@ bool q8_packed_mmvq(const void* weights, const void* x_q8_1, float* y, int n_in,
 // two words are aligned dword loads (non-temporal). Thread ownership (block tid / 32 + 4 i, word tid % 32), the
 // q6_q8_dot_impl expression, the per-thread order and the reduction are those of native_q6_k_mmvq_kernel<false> /
 // native_mmvq_multi_kernel<Q6KTraits, NC, 4, 1>: every output is bitwise equal. Persistent workgroups.
-int g_q6p_grid_override = 0;   // the self-test's grid sweep (STRATA_Q6P_SELFTEST=2)
+int g_q6p_grid_override = 0;   // the self-test's grid sweep (SAGUARO_Q6P_SELFTEST=2)
 int q6p_grid() {
     if (g_q6p_grid_override > 0) return g_q6p_grid_override;
     static const int grid = [] {
-        const char* v = std::getenv("STRATA_Q6P_GRID");
+        const char* v = std::getenv("SAGUARO_Q6P_GRID");
         const int g = v ? std::atoi(v) : 0;
         return g > 0 ? g : 640;
     }();
@@ -2746,7 +2746,7 @@ __dpct_inline__ void native_q6_k_packed_kernel(
         */
         item_ct1.barrier();
         if (TS && item_ct1.get_local_id(1) ==
-                      0) { // S26 STRATA_TSUM=1: one transposed butterfly,
+                      0) { // S26 SAGUARO_TSUM=1: one transposed butterfly,
                            // bitwise the same sums
             constexpr int P = s26ts::pow2_ceil(NCOLS);
             float v[P];
@@ -2862,7 +2862,7 @@ bool q6_packed_mmvq(const void* weights, const void* x_q8_1, float* y, int n_in,
     return true;
 }
 
-// ============================ STRATA_Q6_PLANAR: the Q6_K heads as 16-byte-aligned planes (SYCL port) ============================
+// ============================ SAGUARO_Q6_PLANAR: the Q6_K heads as 16-byte-aligned planes (SYCL port) ============================
 //
 // native_mmvq_q6k_wide_kernel<..., A2 = true> reads each lane's ql / qh run as two aligned 16-byte loads and a funnel shift
 // because a 210-byte block is only 2-byte aligned. The planar layout holds the same bytes as four planes (ql 128 B, qh 64 B,
@@ -3016,7 +3016,7 @@ Q6Planar q6_planar_make(void* dev, std::size_t nb, int n_in, int n_out) {
 
 bool native_q8_0_packed_enabled() {
     static const bool enabled = [] {
-        const char* v = std::getenv("STRATA_Q8_PACKED");
+        const char* v = std::getenv("SAGUARO_Q8_PACKED");
         return v && v[0] == '1' && v[1] == '\0';
     }();
     return enabled;
@@ -3053,7 +3053,7 @@ void native_q8_0_packed_unregister(const void* gguf_weights) { q8_packed_registr
 
 bool native_q6_k_packed_enabled() {
     static const bool enabled = [] {
-        const char* v = std::getenv("STRATA_Q6_PACKED");
+        const char* v = std::getenv("SAGUARO_Q6_PACKED");
         return v && v[0] == '1' && v[1] == '\0';
     }();
     return enabled;
@@ -3061,7 +3061,7 @@ bool native_q6_k_packed_enabled() {
 
 bool native_q6_k_planar_enabled() {
     static const bool enabled = [] {
-        const char* v = std::getenv("STRATA_Q6_PLANAR");
+        const char* v = std::getenv("SAGUARO_Q6_PLANAR");
         return !(v && v[0] == '0' && v[1] == '\0');
     }();
     return enabled;
@@ -3081,7 +3081,7 @@ void* native_q6_k_planar_adopt(void* weights, int n_in, int n_out, const char* w
     void* dev = nullptr;
     try { dev = strata::malloc_device_guarded(l.total, q, what); } catch (...) { dev = nullptr; }
     if (dev == nullptr) {
-        std::fprintf(stderr, "strata: STRATA_Q6_PLANAR: no VRAM for the %s's planar copy (+%.1f MiB), keeping the GGUF layout\n", what,
+        std::fprintf(stderr, "strata: SAGUARO_Q6_PLANAR: no VRAM for the %s's planar copy (+%.1f MiB), keeping the GGUF layout\n", what,
                      l.total / 1048576.0);
         return weights;
     }
@@ -3106,11 +3106,11 @@ void* native_q6_k_planar_adopt(void* weights, int n_in, int n_out, const char* w
     q.wait();
     sycl::free(weights, q);
     q6_planar_registry()[dev] = q6_planar_make(dev, nb, n_in, n_out);
-    std::fprintf(stderr, "strata: STRATA_Q6_PLANAR: the %s (%d x %d) is stored as 16-byte-aligned planes (same bytes)\n", what, n_out, n_in);
+    std::fprintf(stderr, "strata: SAGUARO_Q6_PLANAR: the %s (%d x %d) is stored as 16-byte-aligned planes (same bytes)\n", what, n_out, n_in);
     return dev;
 }
 catch (sycl::exception const& exc) {
-    std::fprintf(stderr, "strata: STRATA_Q6_PLANAR conversion failed: %s\n", exc.what());
+    std::fprintf(stderr, "strata: SAGUARO_Q6_PLANAR conversion failed: %s\n", exc.what());
     return weights;
 }
 
@@ -3143,11 +3143,11 @@ void* native_q6_k_planar_gather(const void* planar, int n_in, const int32_t* row
     });
     q.wait();
     q6_planar_registry()[dev] = q6_planar_make(dev, nb, n_in, (int) n_sel);
-    std::fprintf(stderr, "strata: STRATA_Q6_PLANAR: the %s (%lld x %d) is gathered from the planar head\n", what, (long long) n_sel, n_in);
+    std::fprintf(stderr, "strata: SAGUARO_Q6_PLANAR: the %s (%lld x %d) is gathered from the planar head\n", what, (long long) n_sel, n_in);
     return dev;
 }
 catch (sycl::exception const& exc) {
-    std::fprintf(stderr, "strata: STRATA_Q6_PLANAR gather failed: %s\n", exc.what());
+    std::fprintf(stderr, "strata: SAGUARO_Q6_PLANAR gather failed: %s\n", exc.what());
     return nullptr;
 }
 
@@ -3211,10 +3211,10 @@ bool native_q6_k_pack(const void *weights, int n_in, int n_out,
                  reinterpret_cast<const sycl::half *>(base + o_d),
                  n_in,
                  n_out};
-    std::fprintf(stderr, "strata: STRATA_Q6_PACKED=1 packed the %s (%d x %d, +%.1f MiB)\n", what, n_out, n_in,
+    std::fprintf(stderr, "strata: SAGUARO_Q6_PACKED=1 packed the %s (%d x %d, +%.1f MiB)\n", what, n_out, n_in,
                  total / 1048576.0);
-    // STRATA_Q6P_SELFTEST=1: bitwise check against the GGUF-layout kernels (1..4 columns) and paired timings
-    if (const char* v = std::getenv("STRATA_Q6P_SELFTEST"); v && (v[0] == '1' || v[0] == '2')) {
+    // SAGUARO_Q6P_SELFTEST=1: bitwise check against the GGUF-layout kernels (1..4 columns) and paired timings
+    if (const char* v = std::getenv("SAGUARO_Q6P_SELFTEST"); v && (v[0] == '1' || v[0] == '2')) {
         dpct::queue_ptr s = &dpct::get_in_order_queue();
         /*
         DPCT1025: The SYCL queue is created ignoring the flag and priority
@@ -3809,14 +3809,14 @@ void native_q4_k_f32(const void* weights, const float* x, void* scratch_q8_1,
 
 void native_q6_k_mmvq(const void* weights, const void* x_q8_1, float* y,
                       int n_in, int n_out, int ncols, void* stream) {
-    if (q6_packed_mmvq(weights, x_q8_1, y, n_in, n_out, ncols, stream)) return;   // STRATA_Q6_PACKED=1 heads
-    if (q6_planar_mmvq(weights, x_q8_1, y, n_in, n_out, ncols, stream)) return;   // STRATA_Q6_PLANAR copies
+    if (q6_packed_mmvq(weights, x_q8_1, y, n_in, n_out, ncols, stream)) return;   // SAGUARO_Q6_PACKED=1 heads
+    if (q6_planar_mmvq(weights, x_q8_1, y, n_in, n_out, ncols, stream)) return;   // SAGUARO_Q6_PLANAR copies
     // SYCL port: 16-byte-load kernel for the decode shapes (ncols <= 4)
     // With the aligned loads (load16_a2) the wide kernel wins on every Q6_K shape and window width: 2.6-3.4x the
     // misaligned-load kernels in q6k_align_bench, decode 44.9 -> 54 tok/s on the Coder, output tokens identical.
-    // Without them (STRATA_MMVQ_A2=0) it won only on n_out >= 4096 at 1-4 columns, the old gate.
-    static const int wide_min = std::getenv("STRATA_MMVQ_WIDE_MIN") ? std::atoi(std::getenv("STRATA_MMVQ_WIDE_MIN")) : q6k_a2() ? 0 : 4096;
-    static const int wide_maxc = std::getenv("STRATA_MMVQ_WIDE_MAXC") ? std::atoi(std::getenv("STRATA_MMVQ_WIDE_MAXC")) : q6k_a2() ? 8 : 4;
+    // Without them (SAGUARO_MMVQ_A2=0) it won only on n_out >= 4096 at 1-4 columns, the old gate.
+    static const int wide_min = std::getenv("SAGUARO_MMVQ_WIDE_MIN") ? std::atoi(std::getenv("SAGUARO_MMVQ_WIDE_MIN")) : q6k_a2() ? 0 : 4096;
+    static const int wide_maxc = std::getenv("SAGUARO_MMVQ_WIDE_MAXC") ? std::atoi(std::getenv("SAGUARO_MMVQ_WIDE_MAXC")) : q6k_a2() ? 8 : 4;
     if (g_q6k_wide && ncols >= 1 && ncols <= wide_maxc && n_in % 256 == 0 && n_out >= wide_min) {
         const auto s = strata::q_of(stream);
         switch (ncols) {
@@ -4012,7 +4012,7 @@ bool native_mmvq_pair(int ggml_type, const void* w1, const void* w2, const void*
 
 void native_q8_0_mmvq(const void* weights, const void* x_q8_1, float* y,
                        int n_in, int n_out, int ncols, void* stream) {
-    if (q8_packed_mmvq(weights, x_q8_1, y, n_in, n_out, ncols, stream)) return;   // STRATA_Q8_PACKED=1 tensors
+    if (q8_packed_mmvq(weights, x_q8_1, y, n_in, n_out, ncols, stream)) return;   // SAGUARO_Q8_PACKED=1 tensors
     if (try_wide32<Wide32Q8>(weights, x_q8_1, y, n_in, n_out, ncols, stream)) { launch_check(); return; }
     small_mmvq<Q80Block, 8>(weights, x_q8_1, y, n_in, n_out, ncols, stream);
 }

@@ -18,7 +18,7 @@ measured on (a Ryzen 5 7600 + RTX 5070 on PCIe 5):
                   magnitude between rigs (about 700 tokens on four GP100 dies, 5000 on two RTX 3090 Ti) and costs
                   when it is wrong (a fixed 1024 read 22-36% slower on two RTX 4090) - so it is measured here, once,
                   as the prompt read speed of fresh prompts, rather than guessed or learned while the PC serves.
-  STRATA_SH_STREAM (AMD only)
+  SAGUARO_SH_STREAM (AMD only)
                   the shared expert on its own stream.  Off by default on HIP (#816: an RX 6800 on Windows and 4x R9700
                   decode 12-45% faster without it), but the same card family on another PC goes the other way (#1272:
                   2x RX 6900 XT on Linux, 6-11% faster with it), so it is measured here, per PC, and written into the
@@ -53,7 +53,7 @@ SWEEP_ROUNDS = 3                   # how many times the sweep visits each value 
 # the adaptive tier's candidates (every, swaps, decay) against the engine's own (None): swapping more and remembering
 # longer, the rest of the set as the engine has it
 # HIP: the shared-expert stream fork, off (the HIP default) against on; an engine environment variable, not an argument
-SH_STREAM = "STRATA_SH_STREAM"
+SH_STREAM = "SAGUARO_SH_STREAM"
 ADAPT_CANDIDATES = (None, ("1", "80", "0.97"), ("1", "160", "0.97"))
 ADAPT_FLAGS = ("--adapt-every", "--adapt-swaps", "--adapt-decay")
 MAX_NEW = 128

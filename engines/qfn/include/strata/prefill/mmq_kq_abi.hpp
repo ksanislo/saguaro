@@ -10,7 +10,7 @@
 #else
 #define STRATA_KQ_LIB_NAME "libstrata_kq.so"
 #endif
-// STRATA_MMQ_DIRECT=1: strata_kq_tab (src/prefill/mmq_kq_tab_lib.cu), the pointer-table MMQ for these types, opened
+// SAGUARO_MMQ_DIRECT=1: strata_kq_tab (src/prefill/mmq_kq_tab_lib.cu), the pointer-table MMQ for these types, opened
 // with strata_kq only when the switch is on (its kernels cost VRAM only then)
 #if defined(_WIN32)
 #define STRATA_KQ_TAB_LIB_NAME "strata_kq_tab.dll"
@@ -31,7 +31,7 @@ typedef int (*strata_kq_tab_run_fn)(int device, int ggml_type, const void* mmq_a
 
 // the engine's side (src/prefill/mmq_kq_loader.cpp)
 namespace strata::prefill::mmq::kq {
-/// STRATA_MMQ_KQ=1: the K-quant experts' prompt products through MMQ (opt-in: other rounding than the FP16 path).
+/// SAGUARO_MMQ_KQ=1: the K-quant experts' prompt products through MMQ (opt-in: other rounding than the FP16 path).
 bool wanted();
 /// wanted() and the library is open and started on every GPU (the first call opens it and says what happened).
 bool available();
@@ -39,7 +39,7 @@ bool available();
 int run(int ggml_type, const void* mmq_args, void* stream);
 /// sizeof(mmq_args) on the engine's side (moe_mmq.cu), checked against the library's.
 int abi_args_size();
-/// STRATA_MMQ_DIRECT=1: whether strata_kq_tab (opened with strata_kq, when available()) has a pointer-table
+/// SAGUARO_MMQ_DIRECT=1: whether strata_kq_tab (opened with strata_kq, when available()) has a pointer-table
 /// instance for the type.
 bool tab_has(int ggml_type);
 /// One pointer-table product (expert z at ptrs[z], 16 entries): the codes of strata_kq_tab_run_fn.

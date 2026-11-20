@@ -228,9 +228,9 @@ fn control_dir(res: &Path) -> Option<PathBuf> {
 
 /// What every host start gets, packaged or self-test: acquiring is forbidden, Control is where the bundle put it.
 fn apply_runtime_policy(cmd: &mut Command, res: &Path) {
-    cmd.env("STRATA_NO_ACQUIRE", "1");
+    cmd.env("SAGUARO_NO_ACQUIRE", "1");
     if let Some(dir) = control_dir(res) {
-        cmd.env("STRATA_CONTROL_DIR", dir);
+        cmd.env("SAGUARO_CONTROL_DIR", dir);
     }
 }
 
@@ -451,19 +451,19 @@ fn host_command(res: &Path, port: u16, shutdown_token: &str) -> Result<Command, 
     let mut cmd = Command::new(&node);
     cmd.arg(&entry)
         .current_dir(&host_dir)
-        .env("STRATA_PORT", port.to_string())
-        .env("STRATA_DIST", &dist)
+        .env("SAGUARO_PORT", port.to_string())
+        .env("SAGUARO_DIST", &dist)
         .env("NODE_ENV", "production")
         // U12: a packaged build must have no success path that uses demo responses or demo
-        // metrics. `STRATA_PACKAGED` makes the host refuse to simulate; `STRATA_REAL_ENGINE` is set
+        // metrics. `SAGUARO_PACKAGED` makes the host refuse to simulate; `SAGUARO_REAL_ENGINE` is set
         // for the same reason, so the monitor reports `none` instead of fabricated numbers.
-        .env("STRATA_PACKAGED", "1")
-        .env("STRATA_REAL_ENGINE", "1")
+        .env("SAGUARO_PACKAGED", "1")
+        .env("SAGUARO_REAL_ENGINE", "1")
         // the host leaves, after stopping what this app started, when this shell is gone (killed, crashed)
-        .env("STRATA_EXIT_WITH_PARENT", "1")
+        .env("SAGUARO_EXIT_WITH_PARENT", "1")
         // the host listens on the loopback address only, whatever the caller's environment says
-        .env("STRATA_BIND", "127.0.0.1")
-        .env("STRATA_SHUTDOWN_TOKEN", shutdown_token)
+        .env("SAGUARO_BIND", "127.0.0.1")
+        .env("SAGUARO_SHUTDOWN_TOKEN", shutdown_token)
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
@@ -471,8 +471,8 @@ fn host_command(res: &Path, port: u16, shutdown_token: &str) -> Result<Command, 
     hide_console(&mut cmd);
     // A user with the Strata API worker on a different port sets this; unset means the worker's
     // documented loopback default.
-    if let Ok(url) = std::env::var("STRATA_SERVER_URL") {
-        cmd.env("STRATA_SERVER_URL", url);
+    if let Ok(url) = std::env::var("SAGUARO_SERVER_URL") {
+        cmd.env("SAGUARO_SERVER_URL", url);
     }
     Ok(cmd)
 }
@@ -613,7 +613,7 @@ fn control_runs(dir: &Path) -> (bool, String) {
     let mut cmd = Command::new(&python);
     cmd.arg(dir.join("strata.py")).arg("--version").current_dir(dir)
         .env_remove("PYTHONHOME").env_remove("PYTHONPATH").env_remove("VIRTUAL_ENV")
-        .env("PYTHONNOUSERSITE", "1").env("PYTHONDONTWRITEBYTECODE", "1").env("STRATA_NO_ACQUIRE", "1");
+        .env("PYTHONNOUSERSITE", "1").env("PYTHONDONTWRITEBYTECODE", "1").env("SAGUARO_NO_ACQUIRE", "1");
     hide_console(&mut cmd);
     match cmd.output() {
         Ok(out) => {
@@ -635,7 +635,7 @@ fn control_engine_notice(dir: &Path) -> (bool, String) {
     cmd.arg(dir.join("strata.py")).args(["components", "engine", "--backend", "cuda", "--output", "json"])
         .arg("--components-dir").arg(&empty).current_dir(dir)
         .env_remove("PYTHONHOME").env_remove("PYTHONPATH")
-        .env("PYTHONNOUSERSITE", "1").env("PYTHONDONTWRITEBYTECODE", "1").env("STRATA_NO_ACQUIRE", "1");
+        .env("PYTHONNOUSERSITE", "1").env("PYTHONDONTWRITEBYTECODE", "1").env("SAGUARO_NO_ACQUIRE", "1");
     hide_console(&mut cmd);
     let result = match cmd.output() {
         Ok(out) => {
@@ -719,10 +719,10 @@ fn run_self_test(report_path: &str) -> i32 {
     let mut cmd = Command::new(&node);
     cmd.arg(&entry)
         .current_dir(&host_dir)
-        .env("STRATA_PORT", port.to_string())
-        .env("STRATA_DIST", &dist)
-        .env("STRATA_PACKAGED", "1")
-        .env("STRATA_REAL_ENGINE", "1")
+        .env("SAGUARO_PORT", port.to_string())
+        .env("SAGUARO_DIST", &dist)
+        .env("SAGUARO_PACKAGED", "1")
+        .env("SAGUARO_REAL_ENGINE", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -851,7 +851,7 @@ fn main() {
     // window process (`--window-child`) only shows the page. See supervisor.rs.
     #[cfg(target_os = "linux")]
     {
-        let options = supervisor::parse_args(&args, std::env::var("STRATA_UI").ok().as_deref());
+        let options = supervisor::parse_args(&args, std::env::var("SAGUARO_UI").ok().as_deref());
         if !options.window_child {
             std::process::exit(supervisor::run(&options));
         }
@@ -880,8 +880,8 @@ fn run_embedded() {
         .manage(ShutdownToken(Mutex::new(None)))
         .setup(|app| {
             // A way to prove the safety net on a computer where the app starts fine (tests only): a panic at the place a setup error ends in.
-            if std::env::var_os("STRATA_DESKTOP_TEST_PANIC").is_some() {
-                panic!("STRATA_DESKTOP_TEST_PANIC is set: the app panics on purpose");
+            if std::env::var_os("SAGUARO_DESKTOP_TEST_PANIC").is_some() {
+                panic!("SAGUARO_DESKTOP_TEST_PANIC is set: the app panics on purpose");
             }
             let handle = app.handle().clone();
             // A setup error would become a panic inside Tauri ("Failed to setup app"), and with panic = "abort" a crash with no message.
@@ -1106,11 +1106,11 @@ fn hand_over_drop(window: tauri::WebviewWindow, port: u16, token: String, paths:
 /// process dies; the shell moves to browser mode.
 #[cfg(target_os = "linux")]
 fn run_window_process() -> ! {
-    let port: u16 = std::env::var("STRATA_WINDOW_PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(PREFERRED_PORT);
-    let token = std::env::var("STRATA_SHUTDOWN_TOKEN").unwrap_or_default();
+    let port: u16 = std::env::var("SAGUARO_WINDOW_PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(PREFERRED_PORT);
+    let token = std::env::var("SAGUARO_SHUTDOWN_TOKEN").unwrap_or_default();
     // A way to prove the safety net on a computer where the window works (tests only): this process dies the way a WebKit crash does.
-    if std::env::var_os("STRATA_WINDOW_TEST_CRASH").is_some() {
-        eprintln!("[strata] STRATA_WINDOW_TEST_CRASH is set: the window process aborts on purpose.");
+    if std::env::var_os("SAGUARO_WINDOW_TEST_CRASH").is_some() {
+        eprintln!("[strata] SAGUARO_WINDOW_TEST_CRASH is set: the window process aborts on purpose.");
         std::process::abort();
     }
     // The shell is this process's parent: when it is gone (killed, crashed, logged off) the window goes too.
@@ -1318,19 +1318,19 @@ mod tests {
         std::fs::create_dir_all(res.join("node")).unwrap();
         std::fs::write(res.join("node").join(NODE_EXE), b"").unwrap();
         // a caller's environment must not widen the bind address: the command sets it itself
-        std::env::set_var("STRATA_BIND", "0.0.0.0");
+        std::env::set_var("SAGUARO_BIND", "0.0.0.0");
         let cmd = host_command(&res, 47831, "s3cret").expect("a host command");
-        std::env::remove_var("STRATA_BIND");
+        std::env::remove_var("SAGUARO_BIND");
         let env: std::collections::HashMap<String, String> = cmd
             .get_envs()
             .filter_map(|(k, v)| Some((k.to_string_lossy().into_owned(), v?.to_string_lossy().into_owned())))
             .collect();
-        assert_eq!(env.get("STRATA_BIND").map(String::as_str), Some("127.0.0.1"));
-        assert_eq!(env.get("STRATA_PORT").map(String::as_str), Some("47831"));
-        assert_eq!(env.get("STRATA_SHUTDOWN_TOKEN").map(String::as_str), Some("s3cret"));
-        assert_eq!(env.get("STRATA_PACKAGED").map(String::as_str), Some("1"));
-        assert_eq!(env.get("STRATA_NO_ACQUIRE").map(String::as_str), Some("1"));
-        assert!(env.get("STRATA_DIST").unwrap().ends_with("dist"));
+        assert_eq!(env.get("SAGUARO_BIND").map(String::as_str), Some("127.0.0.1"));
+        assert_eq!(env.get("SAGUARO_PORT").map(String::as_str), Some("47831"));
+        assert_eq!(env.get("SAGUARO_SHUTDOWN_TOKEN").map(String::as_str), Some("s3cret"));
+        assert_eq!(env.get("SAGUARO_PACKAGED").map(String::as_str), Some("1"));
+        assert_eq!(env.get("SAGUARO_NO_ACQUIRE").map(String::as_str), Some("1"));
+        assert!(env.get("SAGUARO_DIST").unwrap().ends_with("dist"));
         // a layout without the built UI or the host is refused in plain words
         assert!(host_command(&scratch("empty"), 1, "x").unwrap_err().contains("App Host entry is missing"));
         let _ = std::fs::remove_dir_all(&res);

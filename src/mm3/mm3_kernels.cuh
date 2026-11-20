@@ -99,7 +99,7 @@ void qk_norm_rope(float* q, const float* k, const float* v, const float* qn1, co
 /// (ring > 0: the caches are rings of that many rows, position p at row p % ring - the DSpark draft's window.  Hq 0:
 ///  K and V alone)
 
-/// The index cache, tiered (MAYA_MM3_IC_STREAM): positions below rv in VRAM (v), the rest in mapped host memory (h,
+/// The index cache, tiered (SAGUARO_MM3_IC_STREAM): positions below rv in VRAM (v), the rest in mapped host memory (h,
 /// indexed by position too); bmn / bmx [blocks][128] F32: each 128-key block's per-dimension min / max (an exact upper
 /// bound of its scores, so a token reads only the host blocks that can make its top-k).  rv INT_MAX: all in v.
 struct IcRef {
@@ -153,7 +153,7 @@ bool plan_dev(const int* top, const float* w, int T, int K, const unsigned long 
               unsigned long long* plan_ptr, float* plan_w, unsigned* counts, unsigned long long* grp_ptr, int* grp_start,
               int* grp_ent, int* n_groups, cudaStream_t s);
 /// Windows + AMD submit queued GPU work only when the host waits: the stream's queued work started now, without a wait
-/// (cudaStreamQuery).  Elsewhere nothing.  MAYA_MM3_WIN_SUBMIT=0: off.
+/// (cudaStreamQuery).  Elsewhere nothing.  SAGUARO_MM3_WIN_SUBMIT=0: off.
 void submit(cudaStream_t s);
 
 /// h = swigluoai(g, u) = min(g, L) * sigmoid(alpha min(g, L)) * (clamp(u, -L, L) + 1), elementwise over n values; F32

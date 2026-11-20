@@ -123,10 +123,10 @@ expert arena. Keep the file on a fast SSD.
 The trellis decode kernels read the codebook (2048 two-byte entries, 8 random lookups for every 16 weights) from the global
 table. On an RTX 3060 that made the gate/up and down kernels wait on the L1 cache, not on memory: 18 L1 sectors for every
 lookup request, the card's L1 at 64% busy while the DRAM was 27% busy. The kernels now keep the 4 KB codebook in shared memory
-(`STRATA_IQ_STAGE_GRID=0` reads it in place again) and take four rows per warp, 32 rows per thread block, so the copy is shared
+(`SAGUARO_IQ_STAGE_GRID=0` reads it in place again) and take four rows per warp, 32 rows per thread block, so the copy is shared
 and no lane idles in the 160-dot gate/up rows or the 40-dot down rows. The sums are added in the same order as before, so the
 answers are bit for bit the old ones: the identity gate (10 prompts, 4096 and 20000 token prompts) is identical on Gyro-S,
-Gyro-M, Q2_0 and IQ3_XXS, and the Q2_0 and IQ3_XXS kernels did not change. A Tesla P100 (compute capability 6.0) runs its own variant of the same idea, STRATA_TQ_STAGE (Gyro-S +30% there, 5 pairs).
+Gyro-M, Q2_0 and IQ3_XXS, and the Q2_0 and IQ3_XXS kernels did not change. A Tesla P100 (compute capability 6.0) runs its own variant of the same idea, SAGUARO_TQ_STAGE (Gyro-S +30% there, 5 pairs).
 
 RTX 3060 12 GB, Core Ultra 7, Ubuntu, CUDA 13.4, default flags (MTP draft 4, auto cache), 5 interleaved pairs of whole engine
 starts, medians of the story, code and facts prompts (200 tokens each), the pinned Gyro files, engine 0.2.1 against 0.2.2.
@@ -305,8 +305,8 @@ dominate.
 The Strata rows predate Strata's own CPU kernels for the trellis types (`src/kernels/cpu/tq_*.cpp`, AVX2 and
 AVX-512, picked at run time). Before them a cache miss ran ggml-cpu's `vec_dot`, one token at a time; the new kernels
 take about 45 % of its time per expert on AVX2 and decode a block once for all the tokens of a verify window
-(`build/tq_cpu_parity --bench` measures them on your CPU). `STRATA_NO_TQ_KERNELS=1` goes back to ggml-cpu;
-`STRATA_TQ_ISA=avx2` or `scalar` caps the instruction set (for comparisons).
+(`build/tq_cpu_parity --bench` measures them on your CPU). `SAGUARO_NO_TQ_KERNELS=1` goes back to ggml-cpu;
+`SAGUARO_TQ_ISA=avx2` or `scalar` caps the instruction set (for comparisons).
 
 ### Smaller caches (RTX 5090, 2026-10-02, before the int8 decode kernels)
 
@@ -325,7 +325,7 @@ checked. A real chat at 128k context worked through the web interface.
 ### Two GPUs (2026-10-04, 2× RTX 4090, no NVLink/P2P)
 
 - **Layer split** (Strata splits the layers across both cards automatically) works with Gyro, including the
-  idle-card prompt helper (`STRATA_PREFILL_HELP=1`). Repeated runs give identical output.
+  idle-card prompt helper (`SAGUARO_PREFILL_HELP=1`). Repeated runs give identical output.
 - **Decode with a second card** (`--peer-device 1` or `--expert-cache-device1 auto`) works and matches single-GPU output.
 - **Prompt processing on the peer card** needs GPU-to-GPU access (NVLink or data-centre GPUs); without it Strata keeps
   the prompt on the first GPU and logs `no P2P`.

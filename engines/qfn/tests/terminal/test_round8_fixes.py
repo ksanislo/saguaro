@@ -280,7 +280,7 @@ class InstallIsNotHijacked(unittest.TestCase):
             for folder in (Path(data) / "install", Path(other) / "install"):
                 folder.mkdir()
                 (folder / "strata-q.json").write_text("{}", encoding="utf-8")
-            env = {"STRATA_DATA_DIR": data}
+            env = {"SAGUARO_DATA_DIR": data}
             found = discovery.places(environ=env, here=Path(other) / "install", home=Path(other))
             self.assertEqual(Path(found[0].path).resolve(), (Path(data) / "install").resolve())
 

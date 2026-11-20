@@ -15,21 +15,21 @@
 # your card the first time you choose a model, from the same release folder, signed.
 #
 # <feed> is where the release folder is hosted: GitHub Releases of Niko1221/Strata (the "latest" release's files), built in as the default.
-# Set STRATA_FEED to another folder (a URL) to use that instead, for example a local test feed:  STRATA_FEED=http://127.0.0.1:8099 sh install.sh
+# Set SAGUARO_FEED to another folder (a URL) to use that instead, for example a local test feed:  SAGUARO_FEED=http://127.0.0.1:8099 sh install.sh
 #
-# Settings (all optional): STRATA_FEED, STRATA_DATA_DIR (default ~/.local/share/strata), STRATA_BIN_DIR (default ~/.local/bin),
-# STRATA_INSTALL_TEST_TRUST=1 (a test feed: also fetch <feed>/test-trust.json and trust only that key for the check in step 4).
+# Settings (all optional): SAGUARO_FEED, SAGUARO_DATA_DIR (default ~/.local/share/strata), SAGUARO_BIN_DIR (default ~/.local/bin),
+# SAGUARO_INSTALL_TEST_TRUST=1 (a test feed: also fetch <feed>/test-trust.json and trust only that key for the check in step 4).
 set -eu
 
-FEED="${STRATA_FEED:-https://github.com/Niko1221/Strata/releases/latest/download}"
+FEED="${SAGUARO_FEED:-https://github.com/Niko1221/Strata/releases/latest/download}"
 FEED="${FEED%/}"
-DATA_DIR="${STRATA_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/strata}"
-BIN_DIR="${STRATA_BIN_DIR:-$HOME/.local/bin}"
+DATA_DIR="${SAGUARO_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/strata}"
+BIN_DIR="${SAGUARO_BIN_DIR:-$HOME/.local/bin}"
 
 say() { printf '%s\n' "$*"; }
 die() { printf 'strata installer: %s\n' "$*" >&2; exit 1; }
 
-[ -n "$FEED" ] || die "this installer does not know where the Strata release folder is. Set STRATA_FEED to its address and run it again, for example: STRATA_FEED=https://example.org/strata sh install.sh"
+[ -n "$FEED" ] || die "this installer does not know where the Strata release folder is. Set SAGUARO_FEED to its address and run it again, for example: SAGUARO_FEED=https://example.org/strata sh install.sh"
 
 # Everything below is one function, called on the last line: a download that stops half-way is a syntax error (nothing runs), not a half installer.
 main() {
@@ -104,9 +104,9 @@ main() {
   chmod +x "$dest.incoming/bin/strata" 2>/dev/null || true
 
   # ---- 4. the signed feed, checked with the Terminal just unpacked
-  if [ "${STRATA_INSTALL_TEST_TRUST:-}" = 1 ]; then
+  if [ "${SAGUARO_INSTALL_TEST_TRUST:-}" = 1 ]; then
     fetch "$FEED/test-trust.json" "$work/test-trust.json" || { rm -rf "$dest.incoming"; die "the test feed has no test-trust.json"; }
-    STRATA_UPDATE_TRUSTED_KEYS="$work/test-trust.json"; export STRATA_UPDATE_TRUSTED_KEYS
+    SAGUARO_UPDATE_TRUSTED_KEYS="$work/test-trust.json"; export SAGUARO_UPDATE_TRUSTED_KEYS
   fi
   say "Checking the release's signature…"
   if ! "$dest.incoming/bin/strata" update --check --no-engine --feed "$FEED" >"$work/check.txt" 2>&1; then

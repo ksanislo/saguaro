@@ -457,7 +457,7 @@ bool moe_route_window(const WeightTable& tables, const ModelGeometry& g, int64_t
                       const float* x, float* logits, int32_t* ids, float* weights, int n, void* stream, std::string& err) {
     using namespace strata::kernels;
     const bool batched = native_bf16_projections && !(native_router_enabled() && g.n_expert == 512 && k == 10) &&
-                         !std::getenv("STRATA_ROUTE_PER_TOKEN");
+                         !std::getenv("SAGUARO_ROUTE_PER_TOKEN");
     if (!batched || n == 1) {
         for (int t = 0; t < n; ++t) {
             MoEBuffers mb = b;
@@ -469,7 +469,7 @@ bool moe_route_window(const WeightTable& tables, const ModelGeometry& g, int64_t
     const LayerView v(tables, layer);
     const WeightRef* w_router = v.get("ffn_gate_inp.weight");
     if (w_router == nullptr) { err = v.name("ffn_gate_inp.weight") + " is missing"; return false; }
-    if (std::getenv("STRATA_ROUTE_PROJ_PER_TOKEN"))
+    if (std::getenv("SAGUARO_ROUTE_PROJ_PER_TOKEN"))
         for (int t = 0; t < n; ++t)
             bf16_gemv_fp32_mmvf(x + t * g.n_embd, (const uint16_t*) w_router->data, logits + t * g.n_expert, g.n_embd,
                                 g.n_expert, stream);
@@ -725,9 +725,9 @@ KvPlan kv_plan(const QsaShapes& s, int64_t max_cells, int64_t ring_cells) {
     p.slots = p.pages;
     p.pooled_rows = max_cells / s.idx_block + 2;
     if (g_kv_resident <= 0 || ring_cells < 0) return p;   // ring_cells < 0: always fully resident
-    // A/B only: STRATA_KV_RING_OFF keeps the drafter fully resident, STRATA_KV_MAIN_OFF the main layers
-    static const bool ring_off = std::getenv("STRATA_KV_RING_OFF") != nullptr;
-    static const bool main_off = std::getenv("STRATA_KV_MAIN_OFF") != nullptr;
+    // A/B only: SAGUARO_KV_RING_OFF keeps the drafter fully resident, SAGUARO_KV_MAIN_OFF the main layers
+    static const bool ring_off = std::getenv("SAGUARO_KV_RING_OFF") != nullptr;
+    static const bool main_off = std::getenv("SAGUARO_KV_MAIN_OFF") != nullptr;
     if (ring_cells > 0 ? ring_off : main_off) return p;
     if (ring_cells > 0) {
         const int64_t r = (ring_cells + s.page_size - 1) / s.page_size;
@@ -958,7 +958,7 @@ uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, Q
             .memcpy(st.sin_tab, hs.data(), hs.size() * 4)
             .wait();
         st.owns_rope = true;
-        if (s.n_rot == 64)   // the native and prompt-path rope kernels read it (mrope.hpp, STRATA_ROPE_TABLE=1)
+        if (s.n_rot == 64)   // the native and prompt-path rope kernels read it (mrope.hpp, SAGUARO_ROPE_TABLE=1)
             strata::kernels::rope_table_set(st.cos_tab, st.sin_tab, (int) max_cells, strata::kernels::rope_scaling());
     }
     // the page table starts as the IDENTITY, which is the simplest legal mapping and what a caller that does
@@ -1253,7 +1253,7 @@ if (st.kv_hybrid) {
     strata::kernels::kv_append_q4_step(st.v_q4, st.v_q4, st.page_table, st.step, b.vcur, b.vcur, s, stream,
                                        mirror ? &hv : nullptr);
 } else {
-if (st.kv_rot) {   // rotated K and V (kv_q4.hpp): Q4_0, and INT8 with STRATA_KV_ROT=1
+if (st.kv_rot) {   // rotated K and V (kv_q4.hpp): Q4_0, and INT8 with SAGUARO_KV_ROT=1
     strata::kernels::fwht256_inplace_cuda(b.kcur, g.n_head_kv, stream);
     strata::kernels::fwht256_inplace_cuda(b.vcur, g.n_head_kv, stream);
 }

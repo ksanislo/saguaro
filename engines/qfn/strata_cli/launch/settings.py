@@ -220,12 +220,12 @@ def check_context(s: LaunchSettings, *, max_fit_tokens: int | None = None) -> li
 
 # ----------------------------------------------------------------------------------------------------- advanced settings
 
-_ENV_NAME = re.compile(r"^(?=[A-Za-z0-9_]*[A-Z])[A-Za-z_][A-Za-z0-9_]*$")     # any name with a capital letter: STRATA_X, IGC_EnableDPEmulation, ZES_ENABLE_SYSMAN
+_ENV_NAME = re.compile(r"^(?=[A-Za-z0-9_]*[A-Z])[A-Za-z_][A-Za-z0-9_]*$")     # any name with a capital letter: SAGUARO_X, IGC_EnableDPEmulation, ZES_ENABLE_SYSMAN
 _FLAG_NAME = re.compile(r"^[a-z][a-z0-9-]*$")
 
 
 def split_setting(text: str) -> tuple[str, str]:
-    """`prefill=65536`, `--prefill=65536`, `STRATA_PIN_BY_NEED=1` -> (key, value); the key is a `--flag` or an ENV name."""
+    """`prefill=65536`, `--prefill=65536`, `SAGUARO_PIN_BY_NEED=1` -> (key, value); the key is a `--flag` or an ENV name."""
     key, sep, value = text.partition("=")
     key = key.strip()
     if not key:
@@ -235,7 +235,7 @@ def split_setting(text: str) -> tuple[str, str]:
     flag = key[2:] if key.startswith("--") else key
     flag = flag.replace("_", "-")
     if not _FLAG_NAME.match(flag):
-        raise ValueError(f"'{text}' is not a setting name. Write it like prefill=65536 or STRATA_PIN_BY_NEED=1.")
+        raise ValueError(f"'{text}' is not a setting name. Write it like prefill=65536 or SAGUARO_PIN_BY_NEED=1.")
     return "--" + flag, value.strip()
 
 

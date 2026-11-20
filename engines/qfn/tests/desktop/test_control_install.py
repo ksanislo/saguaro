@@ -1,4 +1,4 @@
-"""The desktop app's installer: tools/strata_mcp.py and setup.py run on Control's Python in STRATA_CONTROL_INSTALL mode.
+"""The desktop app's installer: tools/strata_mcp.py and setup.py run on Control's Python in SAGUARO_CONTROL_INSTALL mode.
 
 What the owner asked for: a user installs the app, picks a model in it and downloads and prepares it, like any normal user.
 What must stay true: a start or a serve never acquires anything (tests/terminal/test_no_acquisition.py), and the install
@@ -23,7 +23,7 @@ sys.path.insert(0, str(ROOT))
 
 def load_setup(home: Path, name: str = "setup_control_mode"):
     """setup.py imported as the app's installer: the mode is read when the module loads."""
-    env = {"STRATA_CONTROL_INSTALL": "1", "STRATA_INSTALL_DIR": str(home)}
+    env = {"SAGUARO_CONTROL_INSTALL": "1", "SAGUARO_INSTALL_DIR": str(home)}
     with mock.patch.dict(os.environ, env):
         spec = importlib.util.spec_from_file_location(name, ROOT / "setup.py")
         module = importlib.util.module_from_spec(spec)
@@ -47,7 +47,7 @@ class ControlModeTests(unittest.TestCase):
         # without the mode nothing moves: HOME is the source folder, as it always was
         spec = importlib.util.spec_from_file_location("setup_plain_mode", ROOT / "setup.py")
         plain = importlib.util.module_from_spec(spec)
-        with mock.patch.dict(os.environ, {"STRATA_CONTROL_INSTALL": "0"}):
+        with mock.patch.dict(os.environ, {"SAGUARO_CONTROL_INSTALL": "0"}):
             spec.loader.exec_module(plain)
         self.assertFalse(plain.CONTROL)
         self.assertEqual(plain.home(), plain.ROOT)
@@ -91,7 +91,7 @@ class ControlModeTests(unittest.TestCase):
         empty = Path(self.tmp.name) / "components"
         empty.mkdir()
         gpu = {"index": 0, "vram_gb": 12.0}
-        with mock.patch.dict(os.environ, {"STRATA_COMPONENTS_DIR": str(empty)}), \
+        with mock.patch.dict(os.environ, {"SAGUARO_COMPONENTS_DIR": str(empty)}), \
                 mock.patch.object(S, "download", side_effect=AssertionError("fetched")), \
                 mock.patch.object(S, "build_engine", side_effect=AssertionError("built")), \
                 mock.patch.object(S, "get_prebuilt", side_effect=AssertionError("fetched an engine")):
@@ -177,7 +177,7 @@ class InstallerServerTests(unittest.TestCase):
         self.root.mkdir()
         spec = importlib.util.spec_from_file_location("strata_mcp_for_test", ROOT / "tools" / "strata_mcp.py")
         self.mcp = importlib.util.module_from_spec(spec)
-        with mock.patch.dict(os.environ, {"STRATA_CONTROL_INSTALL": "1", "STRATA_INSTALL_DIR": str(self.root)}):
+        with mock.patch.dict(os.environ, {"SAGUARO_CONTROL_INSTALL": "1", "SAGUARO_INSTALL_DIR": str(self.root)}):
             spec.loader.exec_module(self.mcp)
 
     def test_the_catalog_comes_from_setup_py_in_the_bundle(self):
@@ -208,16 +208,16 @@ class InstallerServerTests(unittest.TestCase):
             def wait(self):
                 return 0
 
-        with mock.patch.dict(os.environ, {"STRATA_NO_ACQUIRE": "1", "PYTHONPATH": "x", "PYTHONHOME": "y"}), \
+        with mock.patch.dict(os.environ, {"SAGUARO_NO_ACQUIRE": "1", "PYTHONPATH": "x", "PYTHONHOME": "y"}), \
                 mock.patch.object(self.mcp.subprocess, "Popen", FakePopen), \
                 mock.patch.object(self.mcp, "proc_identity", return_value=None):
             self.assertEqual(self.mcp.install_job(str(spec_path)), 0)
-            self.assertEqual(os.environ["STRATA_NO_ACQUIRE"], "1", "this process keeps the switch")
+            self.assertEqual(os.environ["SAGUARO_NO_ACQUIRE"], "1", "this process keeps the switch")
         self.assertEqual(seen["cmd"][:2], [sys.executable, str(ROOT / "setup.py")])
         env = seen["kw"]["env"]
-        self.assertEqual(env["STRATA_CONTROL_INSTALL"], "1")
-        self.assertEqual(env["STRATA_INSTALL_DIR"], str(self.root))
-        self.assertNotIn("STRATA_NO_ACQUIRE", env, "the explicit install job may fetch the chosen model's files")
+        self.assertEqual(env["SAGUARO_CONTROL_INSTALL"], "1")
+        self.assertEqual(env["SAGUARO_INSTALL_DIR"], str(self.root))
+        self.assertNotIn("SAGUARO_NO_ACQUIRE", env, "the explicit install job may fetch the chosen model's files")
         self.assertNotIn("PYTHONPATH", env)
         self.assertNotIn("PYTHONHOME", env)
         self.assertFalse((self.root / ".venv").exists(), "no virtual environment, no pip")
@@ -337,9 +337,9 @@ class InstallerServerTests(unittest.TestCase):
             else:
                 (shims / tool).write_text(f"#!/bin/sh\necho {tool} \"$@\" >> '{log}'\n", encoding="utf-8")
                 (shims / tool).chmod(0o755)
-        env = {k: v for k, v in os.environ.items() if k not in ("STRATA_NO_ACQUIRE", "PYTHONPATH", "VIRTUAL_ENV")}
-        env.update(STRATA_CONTROL_INSTALL="1", STRATA_INSTALL_DIR=str(home), APPDATA=str(Path(self.tmp.name) / "appdata"),
-                   XDG_CONFIG_HOME=str(Path(self.tmp.name) / "xdg"), STRATA_COMPONENTS_DIR=str(Path(self.tmp.name) / "components"),
+        env = {k: v for k, v in os.environ.items() if k not in ("SAGUARO_NO_ACQUIRE", "PYTHONPATH", "VIRTUAL_ENV")}
+        env.update(SAGUARO_CONTROL_INSTALL="1", SAGUARO_INSTALL_DIR=str(home), APPDATA=str(Path(self.tmp.name) / "appdata"),
+                   XDG_CONFIG_HOME=str(Path(self.tmp.name) / "xdg"), SAGUARO_COMPONENTS_DIR=str(Path(self.tmp.name) / "components"),
                    HF_ENDPOINT=(Path(self.tmp.name) / "no-such-hf").as_uri(), PATH=str(shims) + os.pathsep + env.get("PATH", ""),
                    PYTHONIOENCODING="utf-8")
         done = subprocess.run([sys.executable, str(ROOT / "setup.py"), "--yes", "--no-start", "--family", "qwen", "--model", "Q2_0",
@@ -386,7 +386,7 @@ class DeleteModelTests(unittest.TestCase):
         self.data = base / "Strata-data"
         spec = importlib.util.spec_from_file_location("strata_mcp_for_delete", ROOT / "tools" / "strata_mcp.py")
         self.mcp = importlib.util.module_from_spec(spec)
-        with mock.patch.dict(os.environ, {"STRATA_CONTROL_INSTALL": "1", "STRATA_INSTALL_DIR": str(self.root)}):
+        with mock.patch.dict(os.environ, {"SAGUARO_CONTROL_INSTALL": "1", "SAGUARO_INSTALL_DIR": str(self.root)}):
             spec.loader.exec_module(self.mcp)
         self.s = self.mcp.Strata(self.root, ROOT)
         self.tools = self.mcp.Tools(self.s)
@@ -461,7 +461,7 @@ class LocalGgufInstallTests(unittest.TestCase):
             local.mkdir()
             spec = importlib.util.spec_from_file_location("strata_mcp_for_local", ROOT / "tools" / "strata_mcp.py")
             mcp = importlib.util.module_from_spec(spec)
-            with mock.patch.dict(os.environ, {"STRATA_CONTROL_INSTALL": "1", "STRATA_INSTALL_DIR": str(root)}):
+            with mock.patch.dict(os.environ, {"SAGUARO_CONTROL_INSTALL": "1", "SAGUARO_INSTALL_DIR": str(root)}):
                 spec.loader.exec_module(mcp)
             tools = mcp.Tools(mcp.Strata(root, ROOT))
             plan, args = tools.install_plan("qwen", "IQ3_S", 32768, "no", None, None, None, None, None, None, None, str(local))

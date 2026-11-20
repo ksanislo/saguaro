@@ -181,7 +181,7 @@ attn_chunk_kernel(const float *__restrict__ q, QsaAttnPools p,
     */
     item_ct1.barrier();
     if constexpr (LANE_CELL) {
-        // S25 (STRATA_ATTN_LANECELL=1): thread t scores cell t % 64 for heads 3 (t / 64) .. +2 by itself - the same
+        // S25 (SAGUARO_ATTN_LANECELL=1): thread t scores cell t % 64 for heads 3 (t / 64) .. +2 by itself - the same
         // 8-dimension partial per former lane (the identical expression), then the former warp_sum's butterfly as
         // lane 0 ran it (a[l] += a[l + o] for o = 16 .. 1), so every score is bit-identical without 12 shuffle
         // reductions per cell
@@ -582,7 +582,7 @@ __global__ void __launch_bounds__(THREADS) attn_chunk_kernel_pre75(const float* 
 #pragma unroll
     for (int h = 0; h < G; ++h) part_acc[((size_t) slot * G + h) * HD + t] = acc[h];
 }
-#endif  // STRATA_EXPERIMENTAL_SM60
+#endif  // SAGUARO_EXPERIMENTAL_SM60
 
 __dpct_inline__ void attn_merge_kernel(const float *__restrict__ part_acc,
                                        const float *__restrict__ part_m,
@@ -616,11 +616,11 @@ __dpct_inline__ void attn_merge_kernel(const float *__restrict__ part_acc,
 }
 
 #if defined(STRATA_EXPERIMENTAL_SM60)
-// the current device is below sm_75 (per device: a layer split can mix cards); STRATA_ATTN_PRE75=0 turns PR #540's
+// the current device is below sm_75 (per device: a layer split can mix cards); SAGUARO_ATTN_PRE75=0 turns PR #540's
 // kernel off (A/B)
 bool pre75_attn() {
     static const bool off = [] {
-        const char* e = std::getenv("STRATA_ATTN_PRE75");
+        const char* e = std::getenv("SAGUARO_ATTN_PRE75");
         return e != nullptr && e[0] == '0';
     }();
     static int cc[64] = {};
@@ -665,8 +665,8 @@ void qsa_decode_attn_batch(const float* q, const QsaAttnPools& pools, const int3
     const dpct::dim3 grid((unsigned)n_chunks, (unsigned)s.n_head_kv,
                           (unsigned)n_q);
     dpct::queue_ptr st = strata::q_of(stream);
-    // S25: STRATA_ATTN_LANECELL=1 - the score phase one cell per thread (bit-identical scores, no shuffle reductions)
-    static const bool lane_cell = [] { const char* v = std::getenv("STRATA_ATTN_LANECELL"); return v && v[0] == '1'; }();
+    // S25: SAGUARO_ATTN_LANECELL=1 - the score phase one cell per thread (bit-identical scores, no shuffle reductions)
+    static const bool lane_cell = [] { const char* v = std::getenv("SAGUARO_ATTN_LANECELL"); return v && v[0] == '1'; }();
 #define STRATA_ATTN_LC(M)                                                      \
     {                                                                          \
         auto exp_props = sycl::ext::oneapi::experimental::properties{          \
@@ -742,10 +742,10 @@ void qsa_decode_attn_batch(const float* q, const QsaAttnPools& pools, const int3
         });                                                                    \
     }
 #undef STRATA_ATTN_RSK_DEFINED
-    // 151-b70: STRATA_ATTN_RS=2 (default): the probabilities in [cell][head] order and the value phase reading a cell's 12 as three vectors - the same
+    // 151-b70: SAGUARO_ATTN_RS=2 (default): the probabilities in [cell][head] order and the value phase reading a cell's 12 as three vectors - the same
     // bits (first-token logits md5 equal at 4K and 16K), +0.8..0.9% prompt tok/s on the B70; =1 adds a 16-shuffle reduce-scatter for the scores
     // (bit-exact too, but -1.5% here: the score phase is not shuffle bound); =0 the layout before
-    static const int rs_on = [] { const char* v = std::getenv("STRATA_ATTN_RS"); return v ? std::atoi(v) : 2; }();
+    static const int rs_on = [] { const char* v = std::getenv("SAGUARO_ATTN_RS"); return v ? std::atoi(v) : 2; }();
     if (lane_cell) {
         if (kv_mode == 3) { STRATA_ATTN_LC(3); }
         else if (kv_mode == 2) { STRATA_ATTN_LC(2); }

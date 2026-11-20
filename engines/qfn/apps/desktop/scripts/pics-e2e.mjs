@@ -28,14 +28,14 @@ const delay = ms => new Promise(r => setTimeout(r, ms));
 let failed = false;
 const record = (name, ok, detail = '') => { if (!ok) failed = true; console.log(`${ok ? 'ok  ' : 'FAIL'} ${name}${detail ? '  ' + String(detail).slice(0, 600) : ''}`); };
 const freePort = async () => { const s = createServer(); await new Promise(r => s.listen(0, '127.0.0.1', r)); const p = s.address().port; await new Promise(r => s.close(r)); return p; };
-const env = { ...process.env, STRATA_COMPONENTS_DIR: components, STRATA_PROFILE_DIR: dirs.profiles, STRATA_RUNTIME_DIR: dirs.runtime, STRATA_INSTALL_DIR: dirs.models,
-  STRATA_HOME: dirs.home, STRATA_MODELS_DIR: join(work, 'models-unused'), APPDATA: dirs.appdata, XDG_CONFIG_HOME: dirs.xdg, PYTHONDONTWRITEBYTECODE: '1' };
-delete env.STRATA_API_KEY;
+const env = { ...process.env, SAGUARO_COMPONENTS_DIR: components, SAGUARO_PROFILE_DIR: dirs.profiles, SAGUARO_RUNTIME_DIR: dirs.runtime, SAGUARO_INSTALL_DIR: dirs.models,
+  SAGUARO_HOME: dirs.home, SAGUARO_MODELS_DIR: join(work, 'models-unused'), APPDATA: dirs.appdata, XDG_CONFIG_HOME: dirs.xdg, PYTHONDONTWRITEBYTECODE: '1' };
+delete env.SAGUARO_API_KEY;
 const port = await freePort();
 const base = `http://127.0.0.1:${port}`;
 const host = spawn(node, [hostEntry], { cwd: join(install, 'host'), stdio: ['ignore', 'pipe', 'pipe'],
-  env: { ...env, STRATA_PORT: String(port), STRATA_DIST: join(install, 'host', 'dist'), NODE_ENV: 'production', STRATA_PACKAGED: '1', STRATA_REAL_ENGINE: '1', STRATA_NO_ACQUIRE: '1',
-    STRATA_SHARE_PORT: String(await freePort()), STRATA_TUNNEL_PORT: String(await freePort()) } });
+  env: { ...env, SAGUARO_PORT: String(port), SAGUARO_DIST: join(install, 'host', 'dist'), NODE_ENV: 'production', SAGUARO_PACKAGED: '1', SAGUARO_REAL_ENGINE: '1', SAGUARO_NO_ACQUIRE: '1',
+    SAGUARO_SHARE_PORT: String(await freePort()), SAGUARO_TUNNEL_PORT: String(await freePort()) } });
 let hostLog = '';
 host.stdout.on('data', c => { hostLog += c; }); host.stderr.on('data', c => { hostLog += c; });
 const call = async (path, method = 'GET', body) => {

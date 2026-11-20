@@ -223,7 +223,7 @@ class Integrity(unittest.TestCase):
 
 class Where(unittest.TestCase):
     def test_environment_wins_then_the_per_user_folder(self):
-        self.assertEqual(ec.components_dir({"STRATA_COMPONENTS_DIR": "/x/y"}), Path("/x/y"))
+        self.assertEqual(ec.components_dir({"SAGUARO_COMPONENTS_DIR": "/x/y"}), Path("/x/y"))
         win = ec.components_dir({"LOCALAPPDATA": "C:\\L"}, windows=True)
         self.assertEqual(win.name, "components")
         self.assertEqual(win.parent.name, "Strata")
@@ -231,9 +231,9 @@ class Where(unittest.TestCase):
         self.assertEqual(posix.as_posix(), "/d/strata/components")
 
     def test_backend_override_is_validated(self):
-        self.assertEqual(ec.detect_backend({"STRATA_ENGINE_BACKEND": "HIP"}), ("hip", "environment"))
+        self.assertEqual(ec.detect_backend({"SAGUARO_ENGINE_BACKEND": "HIP"}), ("hip", "environment"))
         with self.assertRaises(ec.ComponentProblem):
-            ec.detect_backend({"STRATA_ENGINE_BACKEND": "vulkan"})
+            ec.detect_backend({"SAGUARO_ENGINE_BACKEND": "vulkan"})
 
     def test_detection_runs_only_read_only_tools(self):
         calls = []
@@ -377,7 +377,7 @@ class NeverAcquires(unittest.TestCase):
 
     def test_status_and_cli_with_the_network_down(self):
         make_package(self.root)
-        with NoNetwork(), mock.patch.dict(os.environ, {"STRATA_NO_ACQUIRE": "1"}):
+        with NoNetwork(), mock.patch.dict(os.environ, {"SAGUARO_NO_ACQUIRE": "1"}):
             report = ec.status(self.root, backend="cuda")
             code, out, _ = self.run_cli("components", "engine", "--components-dir", str(self.root),
                                         "--backend", "cuda", "--output", "json")
@@ -435,7 +435,7 @@ class NeverAcquires(unittest.TestCase):
         store = components.ComponentStore(self.root / "store")
         artifact = components.Artifact(name="engine.tar.gz", url="https://example.invalid/e.tgz",
                                        sha256="0" * 64, bytes=10)
-        with NoNetwork(), mock.patch.dict(os.environ, {"STRATA_NO_ACQUIRE": "1"}):
+        with NoNetwork(), mock.patch.dict(os.environ, {"SAGUARO_NO_ACQUIRE": "1"}):
             with self.assertRaises(acquisition.AcquisitionRefused):
                 store._fetch(artifact)
 

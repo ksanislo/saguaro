@@ -240,8 +240,8 @@ bool GlmMetal::Impl::init_backends(std::string& err) {
         }
         // a GPU without Apple7-class simdgroup support (an Intel Mac's GPU, a virtual Mac's) runs no matrix product in
         // Metal: the graphs would fall back to the CPU and stop at the first one whose weights sit in GPU-only memory
-        // (a ggml assert) - say so up front instead.  MAYA_METAL_ALLOW_ANY_GPU=1 starts anyway (CI's virtual Macs).
-        const char* any = std::getenv("MAYA_METAL_ALLOW_ANY_GPU");
+        // (a ggml assert) - say so up front instead.  SAGUARO_METAL_ALLOW_ANY_GPU=1 starts anyway (CI's virtual Macs).
+        const char* any = std::getenv("SAGUARO_METAL_ALLOW_ANY_GPU");
         if (!(any && *any && *any != '0')) {
             ggml_init_params ip = {3 * ggml_tensor_overhead(), nullptr, true};
             ggml_context* c = ggml_init(ip);
@@ -449,10 +449,10 @@ bool GlmMetal::Impl::init_experts(std::string& err) {
         const size_t reserve = st.dense_bytes + st.state_bytes + ((size_t) 6 << 30);
         budget = working > reserve ? working - reserve : (size_t) 1 << 30;
         cap = budget;   // what the pool may grow to as memory frees up (GlmMetal::grow_pool)
-        // and no more than this Mac has free now, less a headroom (MAYA_GLM_RAM_HEADROOM_GB, default 6, as for the CUDA engine's RAM tier): unified memory
+        // and no more than this Mac has free now, less a headroom (SAGUARO_GLM_RAM_HEADROOM_GB, default 6, as for the CUDA engine's RAM tier): unified memory
         // is shared with every other program, and a pool past what is free gets compressed or swapped - a graph that
         // reads it then stalls for seconds (measured: 20-57 s) instead of 10 ms
-        const char* hv = std::getenv("MAYA_GLM_RAM_HEADROOM_GB");
+        const char* hv = std::getenv("SAGUARO_GLM_RAM_HEADROOM_GB");
         const double head_gb = hv && *hv ? std::atof(hv) : 6.0;
         const size_t avail = free_memory();
         const size_t head = (size_t) (head_gb * (double) (1ull << 30));

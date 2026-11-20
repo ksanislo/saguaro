@@ -364,12 +364,12 @@ class ToolCalls(unittest.TestCase):
 class Settings(unittest.TestCase):
     def test_on_by_default_and_the_ways_to_turn_it_off(self):
         self.assertTrue(loop_guard_setting({}, {}))
-        self.assertFalse(loop_guard_setting({}, {"MAYA_LOOP_GUARD": "0"}))
-        self.assertFalse(loop_guard_setting({}, {"STRATA_LOOP_GUARD": "off"}))
+        self.assertFalse(loop_guard_setting({}, {"SAGUARO_LOOP_GUARD": "0"}))
+        self.assertFalse(loop_guard_setting({}, {"SAGUARO_LOOP_GUARD": "off"}))
         self.assertFalse(loop_guard_setting({"loop_guard": False}, {}))
         self.assertFalse(loop_guard_setting({"loop_guard": "false"}, {}))
         self.assertTrue(loop_guard_setting({"loop_guard": True}, {}))
-        self.assertTrue(loop_guard_setting({"loop_guard": False}, {"MAYA_LOOP_GUARD": "1"}))   # the environment wins
+        self.assertTrue(loop_guard_setting({"loop_guard": False}, {"SAGUARO_LOOP_GUARD": "1"}))   # the environment wins
 
     def test_the_request_field(self):
         for value, want in ((True, True), (False, False), ("false", False), ("on", True), (0, False), (None, None)):
@@ -1011,13 +1011,13 @@ class Collapse(unittest.TestCase):
         msgs = self.turns(200)
         self.assertGreater(LG.conv_chars(msgs), LG.COLLAPSE_MAX_CHARS)
         self.assertIsNone(LG.collapse(msgs))
-        os.environ["MAYA_LOOP_GUARD_COLLAPSE_MAX"] = "1000000"          # (the behaviour before #702)
+        os.environ["SAGUARO_LOOP_GUARD_COLLAPSE_MAX"] = "1000000"          # (the behaviour before #702)
         try:
             self.assertIsNotNone(LG.collapse(msgs))
-            os.environ["MAYA_LOOP_GUARD_COLLAPSE_MAX"] = "lots"              # (not a number: the default, no error)
+            os.environ["SAGUARO_LOOP_GUARD_COLLAPSE_MAX"] = "lots"              # (not a number: the default, no error)
             self.assertIsNone(LG.collapse(msgs))
         finally:
-            os.environ.pop("MAYA_LOOP_GUARD_COLLAPSE_MAX", None)
+            os.environ.pop("SAGUARO_LOOP_GUARD_COLLAPSE_MAX", None)
 
     def test_a_conversation_without_a_loop_is_untouched(self):
         msgs = [{"role": "user", "content": "x"}]

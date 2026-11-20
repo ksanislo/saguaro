@@ -21,12 +21,12 @@ function controlDir(parent, name, version) {
   return dir;
 }
 
-test('only the update step may acquire: Control keeps STRATA_NO_ACQUIRE unless `acquire` is asked for', () => {
+test('only the update step may acquire: Control keeps SAGUARO_NO_ACQUIRE unless `acquire` is asked for', () => {
   const control = { dir: '/c', python: '/c/python/python3', cli: '/c/strata.py' };
-  assert.equal(controlEnvironment(control, { env: {}, components: '/k' }).STRATA_NO_ACQUIRE, '1');
-  const env = controlEnvironment(control, { env: { STRATA_NO_ACQUIRE: '1' }, components: '/k', acquire: true });
-  assert.equal('STRATA_NO_ACQUIRE' in env, false);
-  assert.equal(env.STRATA_COMPONENTS_DIR, '/k');
+  assert.equal(controlEnvironment(control, { env: {}, components: '/k' }).SAGUARO_NO_ACQUIRE, '1');
+  const env = controlEnvironment(control, { env: { SAGUARO_NO_ACQUIRE: '1' }, components: '/k', acquire: true });
+  assert.equal('SAGUARO_NO_ACQUIRE' in env, false);
+  assert.equal(env.SAGUARO_COMPONENTS_DIR, '/k');
   assert.equal(env.PYTHONNOUSERSITE, '1');
 });
 
@@ -72,20 +72,20 @@ test('runCli streams JSON lines as events and returns the last record; `acquire`
   const events = [];
   const control = { dir: '/c', python: '/c/python/python3', cli: '/c/strata.py' };
   const spawnProcess = fakeSpawn([{ event: 'phase', phase: 'feed', message: 'Reading' }, { event: 'progress', percent: 50, label: 'engine 0.1.46' }, { ok: true, results: [] }], 0, seen);
-  const result = await runCli(control, ['update', '--output', 'jsonl'], { spawnProcess, env: { STRATA_NO_ACQUIRE: '1' }, acquire: true, onLine: e => events.push(e) });
+  const result = await runCli(control, ['update', '--output', 'jsonl'], { spawnProcess, env: { SAGUARO_NO_ACQUIRE: '1' }, acquire: true, onLine: e => events.push(e) });
   assert.equal(events.length, 3);
   assert.equal(events[1].percent, 50);
   assert.deepEqual(result.json, { ok: true, results: [] });
-  assert.equal('STRATA_NO_ACQUIRE' in seen[0].options.env, false);
+  assert.equal('SAGUARO_NO_ACQUIRE' in seen[0].options.env, false);
   await runCli(control, ['models', 'list'], { spawnProcess: fakeSpawn([{ ok: true }], 0, seen), env: {} });
-  assert.equal(seen[1].options.env.STRATA_NO_ACQUIRE, '1', 'everything else keeps the switch on');
+  assert.equal(seen[1].options.env.SAGUARO_NO_ACQUIRE, '1', 'everything else keeps the switch on');
 });
 
 test('createControl: the update calls ask the explicit commands; a failed step carries its message and exit code', async () => {
   const seen = [];
   const reply = { ok: true, results: [{ component: 'engine', status: 'updated' }] };
   const control = createControl({
-    control: { dir: '/c', python: '/p', cli: '/c/strata.py' }, env: { STRATA_UPDATE_FEED: 'http://127.0.0.1:1/strata-feed.json', STRATA_APP_VERSION: '0.1.0' },
+    control: { dir: '/c', python: '/p', cli: '/c/strata.py' }, env: { SAGUARO_UPDATE_FEED: 'http://127.0.0.1:1/strata-feed.json', SAGUARO_APP_VERSION: '0.1.0' },
     run: async (args, options) => { seen.push([args.join(' '), !!options.acquire]); return { code: 0, json: args.includes('--check') ? { ok: true, engine: {} } : args[0] === 'components' ? { ok: true, to: '0.1.45' } : reply, text: '', stderr: '' }; },
   });
   await control.updateCheck();
@@ -143,7 +143,7 @@ test('the Settings update check maps the feed to the existing result shape', asy
 
 test('the shell bridge client exists only inside the desktop app, speaks to loopback with the token, and polls to the end', async () => {
   assert.equal(createAppUpdater({ env: {} }), null);
-  assert.equal(createAppUpdater({ env: { STRATA_SHELL_BRIDGE: 'http://example.com:80', STRATA_SHELL_TOKEN: 'x' } }), null, 'not a loopback address');
+  assert.equal(createAppUpdater({ env: { SAGUARO_SHELL_BRIDGE: 'http://example.com:80', SAGUARO_SHELL_TOKEN: 'x' } }), null, 'not a loopback address');
   const calls = [];
   const states = [{ state: 'downloading', downloaded: 10, total: 100 }, { state: 'downloading', downloaded: 100, total: 100 }, { state: 'done' }];
   const fetcher = async (url, init) => {
@@ -151,14 +151,14 @@ test('the shell bridge client exists only inside the desktop app, speaks to loop
     if (url.endsWith('/app-update/status')) return Response.json(states.shift());
     return Response.json(url.endsWith('/check') ? { available: true, version: '0.2.0' } : { state: 'downloading' });
   };
-  const updater = createAppUpdater({ env: { STRATA_SHELL_BRIDGE: 'http://127.0.0.1:4000', STRATA_SHELL_TOKEN: 'tok' }, fetcher, sleep: async () => {} });
+  const updater = createAppUpdater({ env: { SAGUARO_SHELL_BRIDGE: 'http://127.0.0.1:4000', SAGUARO_SHELL_TOKEN: 'tok' }, fetcher, sleep: async () => {} });
   assert.equal((await updater.check()).version, '0.2.0');
   const progress = [];
   await updater.install({ onProgress: p => progress.push(p.downloaded ?? null) });
   assert.deepEqual(progress, [10, 100, null]);
   assert.ok(calls.every(c => c[2] === 'Bearer tok'));
   assert.deepEqual(calls.map(c => c[0] + ' ' + c[1].split('/').pop()), ['GET check', 'POST install', 'GET status', 'GET status', 'GET status']);
-  const failing = createAppUpdater({ env: { STRATA_SHELL_BRIDGE: 'http://127.0.0.1:4000', STRATA_SHELL_TOKEN: 'tok' }, sleep: async () => {},
+  const failing = createAppUpdater({ env: { SAGUARO_SHELL_BRIDGE: 'http://127.0.0.1:4000', SAGUARO_SHELL_TOKEN: 'tok' }, sleep: async () => {},
     fetcher: async url => Response.json(url.endsWith('/status') ? { state: 'error', error: 'signature mismatch' } : {}) });
   await assert.rejects(failing.install(), /signature mismatch/);
 });
@@ -169,7 +169,7 @@ function fixture({ withApp = false, update } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'strata-update-ops-'));
   const install = join(root, 'install'), data = join(root, 'data');
   mkdirSync(install, { recursive: true });
-  process.env.STRATA_INSTALL_DIR = install;      // the app's own install folder: the host always names it to Control
+  process.env.SAGUARO_INSTALL_DIR = install;      // the app's own install folder: the host always names it to Control
   const config = join(install, 'strata-iq2_xs.json');
   writeFileSync(config, JSON.stringify({ exe: 'component:strata-engine', tokenizer: join(install, 'tok'), args: ['--max-context', '32768'], model_name: 'Qwen', port: 8080 }));
   const calls = [];
@@ -330,7 +330,7 @@ test('offline, the signed-feed check says there is no internet connection in pla
 
 test('the app updater and the host never reach the network by themselves: only check() does', async () => {
   const calls = [];
-  const updater = createAppUpdater({ env: { STRATA_SHELL_BRIDGE: 'http://127.0.0.1:4000', STRATA_SHELL_TOKEN: 'tok' }, fetcher: async url => { calls.push(url); return Response.json({ available: false }); } });
+  const updater = createAppUpdater({ env: { SAGUARO_SHELL_BRIDGE: 'http://127.0.0.1:4000', SAGUARO_SHELL_TOKEN: 'tok' }, fetcher: async url => { calls.push(url); return Response.json({ available: false }); } });
   assert.ok(updater);
   assert.equal(calls.length, 0, 'creating the updater makes no call');
   await updater.check();

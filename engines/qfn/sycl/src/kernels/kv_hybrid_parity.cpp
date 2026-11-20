@@ -86,8 +86,8 @@ void quantize_block_q4_0_host(const float* x, k::block_q4_0& blk) {
 int main() {
     // SYCL port: qsa_prompt_attn's tensor-core (mma.sync PTX) kernel is not ported; on SYCL the prompt attention this
     // test's last step checks exists as the XMX kernel (opt-in in the engine, where the FP32 fallback is faster).
-    // Test the kernel the port has, unless the caller chose (STRATA_PROMPT_ATTN_XMX=0 shows the refusal).
-    setenv("STRATA_PROMPT_ATTN_XMX", "1", 0);
+    // Test the kernel the port has, unless the caller chose (SAGUARO_PROMPT_ATTN_XMX=0 shows the refusal).
+    setenv("SAGUARO_PROMPT_ATTN_XMX", "1", 0);
     std::printf("=== Running kv_hybrid_parity test ===\n");
     k::QsaShapes s = k::qsa_real_shapes();
     s.page_size = 64;

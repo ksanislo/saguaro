@@ -1,6 +1,6 @@
 // src/program/draft_kv_plan_test.cpp - which path computes the draft layer's prompt K/V (header-only, CPU).
 //
-//   1. STRATA_SPLIT_MTP_BATCH: unset, empty, 0 and text that is not a number are off; any other whole number is on;
+//   1. SAGUARO_SPLIT_MTP_BATCH: unset, empty, 0 and text that is not a number are off; any other whole number is on;
 //   2. one GPU: the batched pass is tried whatever the variable says (the default before this change);
 //   3. a layer split: the default stays the drafter's own pass, silently; with the variable on the batched pass is
 //      tried, unless the pack has no GGUF-form token table, which is reported instead;

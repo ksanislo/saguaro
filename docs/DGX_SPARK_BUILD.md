@@ -174,7 +174,7 @@ lendable region and only printed a warning** - an out-of-bounds pointer.
 | `src/prefill/ggml_cuda_host.cu` | the scratch pool's `cudaMalloc` failure throws (with the bytes it wanted and the bytes free) instead of aborting |
 | `src/core/glm_prefill.cu` | `prefill_carve` returns false when the layout does not fit; `Glm5Model::prefill` reads the prompt again with a **smaller chunk** (down to 256 tokens) when it does not; `prefill_run` is guarded so the expert pool's tail is given back either way |
 | `src/program/generate.cpp` | `guarded()` catches a request's failure; `cuda_context_broken()` still ends the engine for a sticky CUDA error; the serve loops end the *request* (not the process) and lower the chunk for the requests that follow |
-| `src/prefill/prefill.cpp` | the same chunk-halving retry for the borrowed layout, with the `STRATA_PREALLOC_FAIL` test hook |
+| `src/prefill/prefill.cpp` | the same chunk-halving retry for the borrowed layout, with the `SAGUARO_PREALLOC_FAIL` test hook |
 | `serve/server.py`, `serve/test_server.py` | a memory failure is a **503** (the client can try again), a wrong request still a **400** |
 | `src/prefill/failure_test.cpp`, `tools/test_alloc_recovery.py` | **new tests**: the classification (no GPU), and both injected failures against the real engine - the request fails, the engine answers the next one |
 

@@ -173,7 +173,7 @@ apps/desktop/
     icons/              generated from the supplied brand masters by `tauri icon`
   package.json          build scripts only; no runtime dependencies
 apps/host/              App Host + the supplied UI, carrier-neutral and shared with Terminal
-  server/               the Node host (as supplied, plus STRATA_DIST)
+  server/               the Node host (as supplied, plus SAGUARO_DIST)
   dist/                 the built supplied UI
 ```
 
@@ -239,7 +239,7 @@ rather than one per client, which is what the architecture's artifact rules ask 
 ### 1.7 No demo path in a packaged build (U12)
 
 The supplied host fabricates monitor readings (randomised GPU utilisation, temperature, VRAM, and
-`promptTps = 1400 + rand*500`) whenever `STRATA_REAL_ENGINE !== '1'` — and that was the **default**.
+`promptTps = 1400 + rand*500`) whenever `SAGUARO_REAL_ENGINE !== '1'` — and that was the **default**.
 It also fell back to a token-streaming "demo engine" for chat.
 
 That is a production success path built from simulated data, which acceptance row U12 forbids. It
@@ -250,18 +250,18 @@ is now closed at three points:
    no longer adopted just because it holds a port.
 2. `requiresRealEngine()` returns true for a packaged build unconditionally. When no engine
    answers, the backend becomes `kind: "unavailable"` with a typed, actionable error; the demo
-   branch is unreachable. `STRATA_FORCE_DEMO=1` can only select demo mode in an **unpackaged**
+   branch is unreachable. `SAGUARO_FORCE_DEMO=1` can only select demo mode in an **unpackaged**
    run.
-3. The Tauri shell sets `STRATA_PACKAGED=1` and `STRATA_REAL_ENGINE=1` on the host process, so the
+3. The Tauri shell sets `SAGUARO_PACKAGED=1` and `SAGUARO_REAL_ENGINE=1` on the host process, so the
    monitor's derived fields report `none` rather than invented numbers.
 
 Verified behaviour:
 
 | Condition | Backend kind |
 | --- | --- |
-| `STRATA_PACKAGED=1`, no engine running | `unavailable` + typed error (no simulation) |
+| `SAGUARO_PACKAGED=1`, no engine running | `unavailable` + typed error (no simulation) |
 | development, no engine running | `demo` (labelled `simulated: true`) |
-| `STRATA_PACKAGED=1`, Strata worker live | `strata` (real, with model/context/dialects) |
+| `SAGUARO_PACKAGED=1`, Strata worker live | `strata` (real, with model/context/dialects) |
 
 ### 1.8 The agent bridge works end to end (A01/A03 groundwork)
 
@@ -368,8 +368,8 @@ strata timeskip run --workspace DIR --prompt "..." --attempts 1 \
     --revise-command "<python> <abs>/integrations/harness/revise_once.py --deadline 200"
 ```
 
-It runs with the **candidate directory** as its cwd, takes the prompt from `STRATA_TIMESKIP_PROMPT`
-and the attempt number from `STRATA_TIMESKIP_ATTEMPT`, and returns when the turn reaches a terminal
+It runs with the **candidate directory** as its cwd, takes the prompt from `SAGUARO_TIMESKIP_PROMPT`
+and the attempt number from `SAGUARO_TIMESKIP_ATTEMPT`, and returns when the turn reaches a terminal
 state. Its contract with Time-skip is narrow on purpose: **exit 0 means an attempt was made, not that
 it succeeded.** Whether it improved anything is decided by the checks, never by the runner.
 
@@ -719,7 +719,7 @@ $ strata tune rollback 20261015T052436Z-aa873d11c569
 restored strata-demo.json          # exact previous bytes
 ```
 
-`env.STRATA_TOKEN` and `aliases` survive the edit — an apply that dropped a user's token would be
+`env.SAGUARO_TOKEN` and `aliases` survive the edit — an apply that dropped a user's token would be
 worse than no apply at all. Every refusal leaves the configuration **byte-identical**, which the
 tests assert directly rather than inferring from a return value.
 
@@ -850,7 +850,7 @@ can start.
 the policy by naming the same variable:
 
 ```
-offline=True:  HF_HUB_OFFLINE=1  TRANSFORMERS_OFFLINE=1  PIP_NO_INDEX=1  NO_PROXY=*  STRATA_OFFLINE=1
+offline=True:  HF_HUB_OFFLINE=1  TRANSFORMERS_OFFLINE=1  PIP_NO_INDEX=1  NO_PROXY=*  SAGUARO_OFFLINE=1
                HTTP_PROXY/HTTPS_PROXY emptied so an accidental call fails fast rather than hanging
 profile asked HF_HUB_OFFLINE=0 -> '1'   (the policy wins)
 ```

@@ -2,7 +2,7 @@
  * The agent's tools in the app: the inventory, a tool from each family, and Manual mode's one approval card.
  *
  * Pure tests (the gate's rules, the preset list, the profile) always run. The rest need a built Harness
- * (STRATA_HARNESS_DIR) and skip loudly without it. The model is scripted (tests/helpers/scripted-worker.mjs): what is real is
+ * (SAGUARO_HARNESS_DIR) and skip loudly without it. The model is scripted (tests/helpers/scripted-worker.mjs): what is real is
  * the Harness, its tool executor, its sandbox, its approval service, the Strata gate plugin and the bridge.
  */
 import test from 'node:test';
@@ -18,8 +18,8 @@ import { STANDARD_PLUGIN_IDS, REMOVED_PLUGIN_IDS, standardPreset } from '../serv
 import { isReadOnlyShell, manualDecision, maskQuotes, READ_ONLY_TOOLS } from '../server/agent/plugins/strata-gate.mjs';
 import { plainToolError, withPlain } from '../server/agent/events.mjs';
 
-const HARNESS = process.env.STRATA_HARNESS_DIR;
-const skip = !HARNESS || !resolveHarness({ env: process.env }).ok ? 'STRATA_HARNESS_DIR is not set to a built Harness' : false;
+const HARNESS = process.env.SAGUARO_HARNESS_DIR;
+const skip = !HARNESS || !resolveHarness({ env: process.env }).ok ? 'SAGUARO_HARNESS_DIR is not set to a built Harness' : false;
 const cleanup = dir => { try { rmSync(dir, { recursive: true, force: true, maxRetries: 3 }); } catch { /* the Harness sandbox leaves access entries; best effort */ } };
 const fwd = p => p.replaceAll('\\', '/');
 
@@ -248,7 +248,7 @@ test('a tool server set up for the model is connected to the agent: its tools ar
   assert.match(cards(manual)[1].effect, /Use the connected tool demo \/ shout/);
   // the secret is in the environment of the agent only: never in the profile file
   const files = JSON.stringify(readdirDeep(join(dir, 'agent')).filter(f => f.endsWith('.yml')).map(f => readFileSync(f, 'utf8')));
-  assert.ok(files.includes('process.env.STRATA_MCP_0_E_DEMO_TOKEN') && !files.includes('tok-123456-secret'));
+  assert.ok(files.includes('process.env.SAGUARO_MCP_0_E_DEMO_TOKEN') && !files.includes('tok-123456-secret'));
 });
 
 function readdirDeep(dir) {

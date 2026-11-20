@@ -38,8 +38,8 @@ function byteChunks(text, n) {
 
 async function loadCompletion() {
   const home = await mkdtemp(join(tmpdir(), 'strata-framing-'));
-  process.env.STRATA_HOME = home;
-  process.env.STRATA_MODELS_DIR = join(home, 'models');
+  process.env.SAGUARO_HOME = home;
+  process.env.SAGUARO_MODELS_DIR = join(home, 'models');
   const { proxyCompletion } = await import('../server/inference.mjs');
   return { proxyCompletion, home };
 }

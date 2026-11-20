@@ -40,12 +40,12 @@ class PersistenceTest(unittest.TestCase):
                     "args": ["--native", str(t / "model.gguf"), "--expert-cache", "auto", "--spec", "4", "--max-context", "65536",
                              "--kv", "int8", "--kv-resident", "32768"]}
         self.cfg_path.write_text(json.dumps(self.cfg))
-        self.env = dict(os.environ, STRATA_PRESET_DIR=str(t / "presets"), PYTHONPATH=str(ROOT), STRATA_NO_PRESET="")
-        self.env.pop("STRATA_NO_PRESET")
+        self.env = dict(os.environ, SAGUARO_PRESET_DIR=str(t / "presets"), PYTHONPATH=str(ROOT), SAGUARO_NO_PRESET="")
+        self.env.pop("SAGUARO_NO_PRESET")
         # the tune's result, saved as a preset by the library, the way `strata tune auto` does
         sys.path.insert(0, str(ROOT))
-        os.environ["STRATA_PRESET_DIR"] = str(t / "presets")
-        self.addCleanup(lambda: os.environ.pop("STRATA_PRESET_DIR", None))
+        os.environ["SAGUARO_PRESET_DIR"] = str(t / "presets")
+        self.addCleanup(lambda: os.environ.pop("SAGUARO_PRESET_DIR", None))
         from strata_control import presets
         self.presets = presets
         ident = presets.current_identity(self.cfg, exe=self.cfg["exe"])
@@ -69,7 +69,7 @@ class PersistenceTest(unittest.TestCase):
         self.assertEqual(json.loads(self.cfg_path.read_text())["args"], self.cfg["args"])    # the saved run config itself never changes
 
     def test_a_tune_worker_measures_the_configuration_as_given(self):
-        env = dict(self.env, STRATA_NO_PRESET="1")
+        env = dict(self.env, SAGUARO_NO_PRESET="1")
         args = fresh_process(env, self.CODE % str(self.cfg_path))
         self.assertEqual(args[args.index("--kv-resident") + 1], "32768")
 

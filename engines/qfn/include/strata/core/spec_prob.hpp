@@ -1,4 +1,4 @@
-// include/strata/core/spec_prob.hpp - PROBABILISTIC DRAFT ACCEPTANCE (STRATA_SPEC_PROB=1, off by default).
+// include/strata/core/spec_prob.hpp - PROBABILISTIC DRAFT ACCEPTANCE (SAGUARO_SPEC_PROB=1, off by default).
 //
 // Speculative rejection sampling (Leviathan et al. / Chen et al.) for the MTP drafts of a SAMPLED request.  Under
 // sampling the verify window used to accept a draft only when it EQUALS the token the target sampled for that row
@@ -40,33 +40,33 @@
 namespace strata::core {
 
 /// --spec-min-p gates a further draft on the drawn token's probability under q (as the coupled drafter does).
-/// STRATA_SPEC_PROB_GATE=top gates on q's top probability instead: measured on the RTX 3060 it drafts longer windows
+/// SAGUARO_SPEC_PROB_GATE=top gates on q's top probability instead: measured on the RTX 3060 it drafts longer windows
 /// whose later guesses are kept less often, and decodes slower.
 inline bool spec_gate_pick() {
     static const bool on = [] {
-        const char* e = std::getenv("STRATA_SPEC_PROB_GATE");
+        const char* e = std::getenv("SAGUARO_SPEC_PROB_GATE");
         return e == nullptr || std::strcmp(e, "top") != 0;
     }();
     return on;
 }
 
-/// STRATA_SPEC_PROB_DT=x: the drafter's chain runs at x * the request's temperature (default 1).  Any q is valid for
+/// SAGUARO_SPEC_PROB_DT=x: the drafter's chain runs at x * the request's temperature (default 1).  Any q is valid for
 /// rejection sampling; the acceptance sum min(p, q) is what it changes.
 inline float spec_draft_temp_scale() {
     static const float s = [] {
-        const char* e = std::getenv("STRATA_SPEC_PROB_DT");
+        const char* e = std::getenv("SAGUARO_SPEC_PROB_DT");
         const float v = e != nullptr ? (float) std::atof(e) : 1.0f;
         return v > 0.0f ? v : 1.0f;
     }();
     return s;
 }
 
-/// STRATA_SPEC_MIN_TEMP=x: coupled / probabilistic drafting only for requests with temperature >= x (default 0: every
+/// SAGUARO_SPEC_MIN_TEMP=x: coupled / probabilistic drafting only for requests with temperature >= x (default 0: every
 /// sampled request).  Measured on the RTX 3060 and 5070: sampled drafting gains at temperature 1.0 and loses below
 /// about 0.7, where the draft head's argmax is the better guess; below x the drafter keeps its argmax drafts.
 inline float spec_min_temp() {
     static const float s = [] {
-        const char* e = std::getenv("STRATA_SPEC_MIN_TEMP");
+        const char* e = std::getenv("SAGUARO_SPEC_MIN_TEMP");
         return e != nullptr ? (float) std::atof(e) : 0.0f;
     }();
     return s;

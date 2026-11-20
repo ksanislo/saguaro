@@ -73,10 +73,10 @@ namespace {
 
 constexpr float EPS = 1e-6f;
 
-// #783 PR-i: STRATA_MTP_CATCHUP_ALL=1 catches the drafter's K/V up for the whole verified window, rejected rows included
+// #783 PR-i: SAGUARO_MTP_CATCHUP_ALL=1 catches the drafter's K/V up for the whole verified window, rejected rows included
 bool mtp_catchup_all() {
     static const bool on = [] {
-        const char* v = std::getenv("STRATA_MTP_CATCHUP_ALL");
+        const char* v = std::getenv("SAGUARO_MTP_CATCHUP_ALL");
         return v != nullptr && v[0] != '\0' && v[0] != '0';
     }();
     return on;
@@ -439,15 +439,15 @@ bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session
         cudaMemcpy(ident_, id.data(), id.size() * 4, cudaMemcpyHostToDevice);
     }
     // --pipeline-windows 2 (the forcing graphs): the chain shares its card with stage 1's windows and the next launch
-    // on stage 0 waits for it, so its stream gets the highest priority there (STRATA_MTP_PRIORITY=0: the default)
+    // on stage 0 waits for it, so its stream gets the highest priority there (SAGUARO_MTP_PRIORITY=0: the default)
     bool prio = false;
 #if !defined(STRATA_USE_HIP) && !defined(STRATA_HIP_GFX906) && !defined(STRATA_GPU_METAL)   // (HIP, Metal: the default priority)
-    static const bool hi_prio = [] { const char* v = std::getenv("STRATA_MTP_PRIORITY"); return v == nullptr || std::atoi(v) != 0; }();
+    static const bool hi_prio = [] { const char* v = std::getenv("SAGUARO_MTP_PRIORITY"); return v == nullptr || std::atoi(v) != 0; }();
     int prio_lo = 0, prio_hi = 0;
-    // (STRATA_SLOT_ADMIT: the slot drafters share their card with prompt reads too)
+    // (SAGUARO_SLOT_ADMIT: the slot drafters share their card with prompt reads too)
     static const bool beside_reads = [] {
-        const char* v = std::getenv("STRATA_SLOT_ADMIT");
-        const char* p = std::getenv("STRATA_PIPED_CONCURRENT_PRIO");
+        const char* v = std::getenv("SAGUARO_SLOT_ADMIT");
+        const char* p = std::getenv("SAGUARO_PIPED_CONCURRENT_PRIO");
         return v != nullptr && std::atoi(v) != 0 && (p == nullptr || std::atoi(p) != 0);
     }();
     if ((force_on_ || beside_reads) && hi_prio && cudaDeviceGetStreamPriorityRange(&prio_lo, &prio_hi) == cudaSuccess)
@@ -455,14 +455,14 @@ bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session
     cudaGetLastError();
 #endif
 #if defined(STRATA_USE_HIP) && !defined(STRATA_HIP_GFX906)
-    // engine-latency, STRATA_MTP_HIP_PRIO (default on gfx1200/gfx1201, =1 elsewhere opt-in, =0 off): the draft stream at the
+    // engine-latency, SAGUARO_MTP_HIP_PRIO (default on gfx1200/gfx1201, =1 elsewhere opt-in, =0 off): the draft stream at the
     // highest priority.  ROCm hands out hardware queues per priority (GPU_MAX_HW_QUEUES per level), so the drafter gets a
     // queue of its own: its round no longer waits behind the commit graph that the verifier's stream launched just before
     // it (the commit is only needed by the next window, and now runs beside the draft).  R9700, UD-Q4_K_XL: draft wall
     // 5.8 -> 3.5 ms a window (notes-latency.md).
     {
         static const bool hip_prio = [] {
-            if (const char* v = std::getenv("STRATA_MTP_HIP_PRIO"); v != nullptr && *v != 0) return std::atoi(v) != 0;
+            if (const char* v = std::getenv("SAGUARO_MTP_HIP_PRIO"); v != nullptr && *v != 0) return std::atoi(v) != 0;
             int dev = 0;
             cudaDeviceProp prop{};
             return cudaGetDevice(&dev) == cudaSuccess && cudaGetDeviceProperties(&prop, dev) == cudaSuccess &&
@@ -485,16 +485,16 @@ bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session
 #else
     // HIP keeps the shared expert on cs_, so nothing uses this branch stream, and #1240 stopped creating it and its two
     // events (an R9700 lost prompt speed with them after the first request).  On gfx103x the stream's existence alone
-    // makes prompts read faster: RX 6800, Windows, STRATA_HIP_PROMPT_F16=1, a 7.9K-token prompt at 798-808 tok/s
+    // makes prompts read faster: RX 6800, Windows, SAGUARO_HIP_PROMPT_F16=1, a 7.9K-token prompt at 798-808 tok/s
     // with it and 584-596 without, all of it in the prompt path's "wait copy" phase (3,081 -> 75 ms); the two events
-    // change nothing.  So gfx103x creates the stream and no other HIP card does.  STRATA_MTP_SIDE_STREAM=1 / =0 forces
+    // change nothing.  So gfx103x creates the stream and no other HIP card does.  SAGUARO_MTP_SIDE_STREAM=1 / =0 forces
     // either.
     {
         int dev = 0;
         cudaDeviceProp prop{};
         bool on = cudaGetDevice(&dev) == cudaSuccess && cudaGetDeviceProperties(&prop, dev) == cudaSuccess &&
                   std::strncmp(prop.gcnArchName, "gfx103", 6) == 0;
-        if (const char* v = std::getenv("STRATA_MTP_SIDE_STREAM"); v != nullptr && *v != 0) on = std::atoi(v) != 0;
+        if (const char* v = std::getenv("SAGUARO_MTP_SIDE_STREAM"); v != nullptr && *v != 0) on = std::atoi(v) != 0;
         if (on && cudaStreamCreateWithFlags(&side_, cudaStreamNonBlocking) != cudaSuccess) {
             err = "mtp: streams";
             return false;
@@ -516,20 +516,20 @@ bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session
 }
 
 namespace {
-// STRATA_MTP_FULL_HEAD=1 (a diagnostic): draft over the whole vocabulary (the main head itself) instead of
+// SAGUARO_MTP_FULL_HEAD=1 (a diagnostic): draft over the whole vocabulary (the main head itself) instead of
 // rt/draft_vocab.bin's subset - the reference head, to measure what the subset costs in acceptance
 bool full_head_env() {
-    static const bool on = [] { const char* v = std::getenv("STRATA_MTP_FULL_HEAD"); return v && v[0] == '1'; }();
+    static const bool on = [] { const char* v = std::getenv("SAGUARO_MTP_FULL_HEAD"); return v && v[0] == '1'; }();
     return on;
 }
 }  // namespace
 
 bool MtpDrafter::top2_env() {
-    static const bool on = [] { const char* v = std::getenv("STRATA_MTP_TOP2"); return v && v[0] == '1'; }();
+    static const bool on = [] { const char* v = std::getenv("SAGUARO_MTP_TOP2"); return v && v[0] == '1'; }();
     return on;
 }
 
-// STRATA_MTP_TOP2=1 (a diagnostic for tree drafts): draft j's runner-up under the draft layer, from the head logits
+// SAGUARO_MTP_TOP2=1 (a diagnostic for tree drafts): draft j's runner-up under the draft layer, from the head logits
 // the step just wrote (row 0), on the host.  Slow; only for measuring what a second branch would have caught.
 void MtpDrafter::record_top2(int j) {
     const int64_t nv = dhead_ != nullptr ? n_dvocab_ : n_vocab_;
@@ -559,7 +559,7 @@ uint64_t MtpDrafter::bind_bytes(uint64_t head_row_bytes, int64_t n_vocab) const 
             if (size >= 4 && size % 4 == 0) bytes += (uint64_t) (size / 4) * head_row_bytes + (uint64_t) size;
         }
     }
-    // coupled draft sampling (STRATA_SPEC_COUPLED=1 only): an upper bound - the id -> subset map, the penalty ring,
+    // coupled draft sampling (SAGUARO_SPEC_COUPLED=1 only): an upper bound - the id -> subset map, the penalty ring,
     // the split scratch (64 lists of 64 entries at most) and the parameters
     if (coupled_draft_env() && cparams_ == nullptr)
         bytes += (uint64_t) n_vocab * 4 + (uint64_t) (kCoupledHistCap + max_t_) * 4 + 64ull * 64ull * 8ull + 4096;
@@ -570,7 +570,7 @@ bool MtpDrafter::setup_coupled(std::string& err) {
     const int64_t nv = dhead_ != nullptr ? n_dvocab_ : n_vocab_;
     const size_t scratch = strata::kernels::coupled_draft_scratch_bytes((int) nv);
     if (scratch == 0) {
-        std::fprintf(stderr, "strata mtp: STRATA_SPEC_COUPLED: %lld draft logits are too wide for the coupled sampler; "
+        std::fprintf(stderr, "strata mtp: SAGUARO_SPEC_COUPLED: %lld draft logits are too wide for the coupled sampler; "
                              "argmax drafts\n", (long long) nv);
         return true;
     }
@@ -608,11 +608,11 @@ bool MtpDrafter::setup_coupled(std::string& err) {
     }
     coupled_ok_ = true;
     if (spec_prob_env())
-        std::fprintf(stderr, "strata mtp: probabilistic draft acceptance on (STRATA_SPEC_PROB): sampled requests draft by "
+        std::fprintf(stderr, "strata mtp: probabilistic draft acceptance on (SAGUARO_SPEC_PROB): sampled requests draft by "
                              "sampling the draft head's distribution over %lld tokens; the verifier accepts with "
                              "min(1, p/q) and resamples the residual\n", (long long) nv);
     else
-        std::fprintf(stderr, "strata mtp: coupled draft sampling on (STRATA_SPEC_COUPLED): sampled requests draft with the "
+        std::fprintf(stderr, "strata mtp: coupled draft sampling on (SAGUARO_SPEC_COUPLED): sampled requests draft with the "
                              "target's chain and Philox draw over %lld tokens\n", (long long) nv);
     return true;
 }
@@ -749,7 +749,7 @@ bool MtpDrafter::bind(const WeightTable& wt, const NativeHead* head, const float
                          (double) (n_dvocab_ * row_bytes) / 1048576.0);
             dhead_type_ = head->type();
             if (q4_head_ && !make_q4_head(err)) return false;
-            if (dhead_type_ == 14 && strata::kernels::native_q6_k_packed_enabled())   // STRATA_Q6_PACKED=1
+            if (dhead_type_ == 14 && strata::kernels::native_q6_k_packed_enabled())   // SAGUARO_Q6_PACKED=1
                 strata::kernels::native_q6_k_pack(dhead_, (int) (row_bytes / 210) * 256, (int) n_dvocab_,
                                                   "MTP draft head");
         }
@@ -758,9 +758,9 @@ bool MtpDrafter::bind(const WeightTable& wt, const NativeHead* head, const float
     return true;
 }
 
-// STRATA_MTP_PROFILE=1 (measurement only): GPU stamps between the draft layer's stages in the round graph and in every
+// SAGUARO_MTP_PROFILE=1 (measurement only): GPU stamps between the draft layer's stages in the round graph and in every
 // step graph (each stamp is one more node, so the totals run a little high); the per-stage averages are printed every
-// 300 rounds with STRATA_DRAFT_TIMING's line.  Off: no stamp is recorded and nothing changes.
+// 300 rounds with SAGUARO_DRAFT_TIMING's line.  Off: no stamp is recorded and nothing changes.
 namespace {
 constexpr int kMpSlots = 24;
 constexpr int kMpGraphs = 17;   // the round graph (0) and the steps 1..16
@@ -776,7 +776,7 @@ struct MtpProf {
     double sum[2][kMpSlots] = {};
     int64_t n[2] = {0, 0};
     MtpProf() {
-        const char* e = std::getenv("STRATA_MTP_PROFILE");
+        const char* e = std::getenv("SAGUARO_MTP_PROFILE");
         on = e != nullptr && e[0] == '1';
     }
     void init() {
@@ -825,9 +825,9 @@ struct MtpProf {
 };
 MtpProf g_mp;
 
-// STRATA_VERIFY_NODES=1 also lists the draft graphs' nodes (kernel names on HIP; counts on CUDA)
+// SAGUARO_VERIFY_NODES=1 also lists the draft graphs' nodes (kernel names on HIP; counts on CUDA)
 void mtp_list_nodes(cudaGraph_t graph, const char* what) {
-    if (std::getenv("STRATA_VERIFY_NODES") == nullptr || graph == nullptr) return;
+    if (std::getenv("SAGUARO_VERIFY_NODES") == nullptr || graph == nullptr) return;
 #if defined(STRATA_GPU_METAL)
     (void) what;    // Metal has no graph nodes to list
 #else
@@ -947,13 +947,13 @@ bool MtpDrafter::record_front(int T, int row0, cudaStream_t cs, std::string& err
         native_mmvq(wt_k_proj, wp_k_proj, xq_, kcur_, (int) N, (int) (NKV * HD), T, cs);
         native_mmvq(wt_v_proj, wp_v_proj, xq_, vcur_, (int) N, (int) (NKV * HD), T, cs);
         // #783 PR-d (stuchapin909): the T tokens' K norm, K/V rotation and K/V append each run once over all T rows
-        // (every row is independent; the rope keeps its per-token positions). STRATA_NO_BATCH_KV_STEP=1 appends per token.
+        // (every row is independent; the rope keeps its per-token positions). SAGUARO_NO_BATCH_KV_STEP=1 appends per token.
         static const bool no_batch_kv = [] {
-            const char* v = std::getenv("STRATA_NO_BATCH_KV_STEP");
+            const char* v = std::getenv("SAGUARO_NO_BATCH_KV_STEP");
             return v != nullptr && v[0] != '\0' && v[0] != '0';
         }();
         // #783 PR-f (stuchapin909): the per-head RMSNorm and the rope fused (bit-identical to the pair, rope_parity
-        // check 6; STRATA_NO_NORM_ROPE=1 keeps the two; off on HIP until its parity check passes). K rows of one token
+        // check 6; SAGUARO_NO_NORM_ROPE=1 keeps the two; off on HIP until its parity check passes). K rows of one token
         // are consecutive in `pos`, tokens are NH apart, so a one-token window is the fusable case.
         const bool fuse_nr = native_rope_enabled() && native_norm_rope_usable((int) HD, (int) s.n_rot);
         if (T == 1 && fuse_nr) {
@@ -967,7 +967,7 @@ bool MtpDrafter::record_front(int T, int row0, cudaStream_t cs, std::string& err
                 else rope_neox_apply(kc, kc, (int) NKV, (int) HD, (int) s.n_rot, st_.cos_tab, st_.sin_tab, pos + t * NH, cs);
             }
         }
-        if (st_.kv_rot) {   // rotated K and V (kv_q4.hpp): Q4_0, and INT8 with STRATA_KV_ROT=1
+        if (st_.kv_rot) {   // rotated K and V (kv_q4.hpp): Q4_0, and INT8 with SAGUARO_KV_ROT=1
             fwht256_inplace_cuda(kcur_, (int64_t) T * NKV, cs);
             fwht256_inplace_cuda(vcur_, (int64_t) T * NKV, cs);
         }
@@ -1039,8 +1039,8 @@ bool MtpDrafter::record_rest(int step_row, cudaStream_t cs, std::string& err) {
         g_mp.stamp(5, cs);
         const QsaAttnPools pools = qsa_attn_pools(st_);
         if (window_ > 0) window_ids(const_cast<int32_t*>(step), T, (int) window_, ident_, cap_, cs);
-        // STRATA_QSA_SPLIT_ATTN=1: the draft layer's attention over its window, split the same way
-        static const bool split_attn = [] { const char* v = std::getenv("STRATA_QSA_SPLIT_ATTN"); return v != nullptr && std::atoi(v) != 0; }();
+        // SAGUARO_QSA_SPLIT_ATTN=1: the draft layer's attention over its window, split the same way
+        static const bool split_attn = [] { const char* v = std::getenv("SAGUARO_QSA_SPLIT_ATTN"); return v != nullptr && std::atoi(v) != 0; }();
         if (!(split_attn && qsa_decode_attn_split(qcur_, pools, ident_, step, cap_, s, attn_scratch_, (uint64_t) attn_scratch_floats_, attn_, T, cs)))
         qsa_decode_attn_batch(qcur_, pools, ident_, step, cap_, s, attn_scratch_, attn_, T, cs);
         if (st_.kv_rot) fwht256_inplace_cuda(attn_, (int64_t) T * NH, cs);
@@ -1075,25 +1075,25 @@ bool MtpDrafter::record_rest(int step_row, cudaStream_t cs, std::string& err) {
         const SForm none{};
         const bool need_bf16_x = !shared_expert_native_bf16_enabled();
         static const bool fuse_head_gr = [] {
-            const char* v = std::getenv("STRATA_FUSE_HEAD_GR");
+            const char* v = std::getenv("SAGUARO_FUSE_HEAD_GR");
             return v != nullptr && std::atoi(v) != 0;
         }();
         static const bool head_mix_multi_on = [] {
 #if defined(STRATA_USE_HIP)
-            const char* v = std::getenv("STRATA_HEAD_MIX_MULTI");   // HIP: opt-in (=1)
+            const char* v = std::getenv("SAGUARO_HEAD_MIX_MULTI");   // HIP: opt-in (=1)
             return v != nullptr && std::atoi(v) != 0;
 #else
-            const char* v = std::getenv("STRATA_HEAD_MIX_MULTI");
+            const char* v = std::getenv("SAGUARO_HEAD_MIX_MULTI");
             return v == nullptr || std::atoi(v) != 0;
 #endif
         }();
         // the shared expert only reads mixed_ / xq_ and writes shared_: a branch beside the router and the routed
-        // experts, joined before the combine (CUDA; HIP keeps one stream: STRATA_MTP_SHARED_BRANCH=0 does too)
+        // experts, joined before the combine (CUDA; HIP keeps one stream: SAGUARO_MTP_SHARED_BRANCH=0 does too)
         static const bool branch_on = [] {
 #if defined(STRATA_USE_HIP)
             return false;
 #else
-            const char* v = std::getenv("STRATA_MTP_SHARED_BRANCH");
+            const char* v = std::getenv("SAGUARO_MTP_SHARED_BRANCH");
             return v == nullptr || std::atoi(v) != 0;
 #endif
         }();
@@ -1147,8 +1147,8 @@ bool MtpDrafter::record_rest(int step_row, cudaStream_t cs, std::string& err) {
             shared_rows();
         }
         g_mp.stamp(11, cs);
-        static const bool no_multi_gr = [] {   // #783 PR-g: STRATA_NO_MULTI_GR=1 keeps the per-token GR calls
-            const char* v = std::getenv("STRATA_NO_MULTI_GR");
+        static const bool no_multi_gr = [] {   // #783 PR-g: SAGUARO_NO_MULTI_GR=1 keeps the per-token GR calls
+            const char* v = std::getenv("SAGUARO_NO_MULTI_GR");
             return v != nullptr && v[0] != '\0' && v[0] != '0';
         }();
         for (int t = 0; t < T; ++t) {
@@ -1210,7 +1210,7 @@ bool MtpDrafter::record_rest(int step_row, cudaStream_t cs, std::string& err) {
         if (coupled_rec_) {
             // coupled draft sampling: the target's chain and Philox draw for the row that will verify this draft
             // (counter = this cell + 1, from its step record), penalties over the ring; T == 1 (full layer)
-            if (m_q_ != nullptr)   // STRATA_SPEC_PROB: a draw from q with its own stream, and q's list for the verifier
+            if (m_q_ != nullptr)   // SAGUARO_SPEC_PROB: a draw from q with its own stream, and q's list for the verifier
                 spec_draft_sample(head_logits_, (int) nv, sub ? dvocab_ : nullptr, sub ? dinv_ : nullptr, (int) n_vocab_,
                                   cparams_, cring_, kCoupledHistCap, coupled_j_, step, cscratch_, out_ids_, probs_, m_q_,
                                   spec_gate_pick(), spec_draft_temp_scale(), cs);
@@ -1394,14 +1394,14 @@ bool MtpDrafter::prepare_prefill(std::string& err) {
         pf_cap_ = max_t_ * per_row;
     }
     for (int T = 1; T <= max_t_; ++T)
-        if (!capture_prefill_dev(T, err)) return false;   // (STRATA_MTP_PREFILL_SYNC's loop syncs anyway)
+        if (!capture_prefill_dev(T, err)) return false;   // (SAGUARO_MTP_PREFILL_SYNC's loop syncs anyway)
     return true;
 }
 
-// STRATA_MTP_PREFILL_SYNC: the prompt pass's per-group loop (see MtpDrafter::prefill); HIP's default
+// SAGUARO_MTP_PREFILL_SYNC: the prompt pass's per-group loop (see MtpDrafter::prefill); HIP's default
 static bool prefill_per_group_sync() {
     static const bool v = [] {
-        if (const char* e = std::getenv("STRATA_MTP_PREFILL_SYNC")) return std::atoi(e) != 0;
+        if (const char* e = std::getenv("SAGUARO_MTP_PREFILL_SYNC")) return std::atoi(e) != 0;
 #if defined(STRATA_USE_HIP)
         return true;
 #else
@@ -1452,7 +1452,7 @@ bool MtpDrafter::prefill(const float* R_rows, const int32_t* next_tokens, int64_
     // E-4: every group's token / step / position records uploaded at once; each group is then device copies and a
     // graph on the one stream, with a single sync at the end (a group of <= max_t rows used to be staged in mapped
     // memory and synced before the next: ~5,500 host round trips on a 32K prompt).  The same work in the same
-    // order.  STRATA_MTP_PREFILL_SYNC=1 keeps the old loop, =0 forces E-4.
+    // order.  SAGUARO_MTP_PREFILL_SYNC=1 keeps the old loop, =0 forces E-4.
     // HIP defaults to the old loop.  This pass runs whenever E-9 (Prefill::draft_kv) declines, which it does for the
     // drafter's ring (KV streaming, --kv-resident), and on gfx1201 / ROCm 7.2.4 the E-4 queue (a graph launch and four
     // device copies per group, ~2,000 groups per 8192-token chunk, no sync) sometimes never completes: the prompt hangs
@@ -1543,7 +1543,7 @@ bool MtpDrafter::prefill(const float* R_rows, const int32_t* next_tokens, int64_
     return true;
 }
 
-// STRATA_DRAFT_TIMING=1: where a draft round's time goes, from cudaEvent pairs around each graph launch (GPU time of the round
+// SAGUARO_DRAFT_TIMING=1: where a draft round's time goes, from cudaEvent pairs around each graph launch (GPU time of the round
 // graph and of each step, and the idle gap the host's decision leaves between two steps) and the host's own wall time.
 namespace {
 struct DraftTiming {
@@ -1553,7 +1553,7 @@ struct DraftTiming {
     double pre_ms = 0, launch_ms = 0, ple_ms = 0, wait0_ms = 0, waitj_ms = 0;   // host: staging, graph launch calls, PLE prefetch, spins
     int64_t rounds = 0, steps = 0;
     DraftTiming() {
-        const char* e = std::getenv("STRATA_DRAFT_TIMING");
+        const char* e = std::getenv("SAGUARO_DRAFT_TIMING");
         on = e != nullptr && e[0] == '1';
     }
     void init() {

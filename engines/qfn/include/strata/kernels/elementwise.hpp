@@ -118,7 +118,7 @@ void copy_rows_from_mapped_after(const uint32_t* flag, uint32_t value, float* ds
 /// device-to-host memcpy nodes (copy-engine operations in the middle of the layer chain) and the ring kernel.
 void doorbell_publish(const float* x, const int32_t* ids, const float* weights, int64_t n, int64_t k, float* x_out,
                       int32_t* ids_out, float* weights_out, uint32_t* d_seq, void* stream);
-/// #649 (HIP, STRATA_DOORBELL_STORE=1): the ring stored as `value` instead of incremented over PCIe.
+/// #649 (HIP, SAGUARO_DOORBELL_STORE=1): the ring stored as `value` instead of incremented over PCIe.
 void doorbell_publish_value(const float* x, const int32_t* ids, const float* weights, int64_t n, int64_t k,
                             float* x_out, int32_t* ids_out, float* weights_out, uint32_t* d_seq, uint32_t value,
                             void* stream);

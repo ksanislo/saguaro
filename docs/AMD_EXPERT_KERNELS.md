@@ -11,7 +11,7 @@ architecture:
 
 gfx1201 is unchanged and untuned by this expert-kernel work. Other shapes,
 other quant types, other architectures and CUDA keep the original dispatch. Set
-`MAYA_HIP_EXPERTS_LEGACY=1` before starting a process to force original HIP
+`SAGUARO_HIP_EXPERTS_LEGACY=1` before starting a process to force original HIP
 expert kernels for an end-to-end comparison.
 
 The main change is packed sign expansion: a multiply spreads four sign bits
@@ -137,7 +137,7 @@ measured. gfx1201 continues to use the original kernels and remains untuned.
 Run the benchmark, `--shared`, and `--parity-only --sweep` on gfx1151 using the
 same ROCm build settings. Then compare the resident-pool Maya-S decode trace
 with the same prompt, token count and routing settings, once with
-`MAYA_HIP_EXPERTS_LEGACY=1` and once without it. Set that variable on the
+`SAGUARO_HIP_EXPERTS_LEGACY=1` and once without it. Set that variable on the
 separate profiling process; these changes do not require touching a running
 server.
 

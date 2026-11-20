@@ -123,7 +123,7 @@ bool tq_cpu_type(int type) { return kbits_of(type) > 0; }
 int tq_cpu_act() { return kActTq; }
 #else
 bool tq_cpu_fmt(int, int, int, int, IqCpu&, std::string& err) {
-    err = "this build has no CPU trellis kernels (STRATA_NATIVE_EXPERTS=OFF)";
+    err = "this build has no CPU trellis kernels (SAGUARO_NATIVE_EXPERTS=OFF)";
     return false;
 }
 void tq_cpu_quant(const float*, int, void*) {}

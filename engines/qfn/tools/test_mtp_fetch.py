@@ -142,9 +142,9 @@ class Ranges(FetchCase):
                 got = b"".join(M.ranged("u", 100, len(data) - 1, 1000, workers))
             self.assertEqual(got, data[100:])
             self.assertEqual(sorted(seen)[0], (100, 1099))
-        with mock.patch.dict(M.os.environ, {"STRATA_DL_CONNECTIONS": "1"}):
+        with mock.patch.dict(M.os.environ, {"SAGUARO_DL_CONNECTIONS": "1"}):
             self.assertEqual(M.connections(), 1)
-        with mock.patch.dict(M.os.environ, {"STRATA_DL_CONNECTIONS": ""}):
+        with mock.patch.dict(M.os.environ, {"SAGUARO_DL_CONNECTIONS": ""}):
             self.assertEqual(M.connections(), 16)
 
     def test_the_cdn_address_is_reused_and_forgotten_after_an_error(self):
@@ -250,7 +250,7 @@ class Ranges(FetchCase):
             self.assertEqual(M.verify(str(self.out)), [])
         with mock.patch.object(M, "REPO", "https://huggingface.co/Qwen/Qwen3.8-Flash-Next/resolve/main/"):
             (self.out / "tensors" / "mtp.a.bin").write_bytes(b"x")
-            self.assertEqual(M.verify(str(self.out)), [])          # STRATA_MTP_REVISION: other hashes
+            self.assertEqual(M.verify(str(self.out)), [])          # SAGUARO_MTP_REVISION: other hashes
         self.assertEqual(M.verify(str(self.out)), ["mtp.a"])
         self.assertEqual(M.verify(str(self.out / "nothing")), [])
 
@@ -352,7 +352,7 @@ class OneAtATime(unittest.TestCase):
         import time
         child_code = ("import sys,time; sys.path.insert(0, %r); import mtp_fetch as M; M.exit_with_parent(); "
                       "print('up', flush=True); time.sleep(60)" % str(ROOT / "tools"))
-        parent_code = ("import subprocess,sys,os; env=dict(os.environ, STRATA_EXIT_WITH_PARENT='1'); "
+        parent_code = ("import subprocess,sys,os; env=dict(os.environ, SAGUARO_EXIT_WITH_PARENT='1'); "
                        "p=subprocess.Popen([sys.executable,'-c',%r], env=env, stdout=subprocess.PIPE, text=True); "
                        "print(p.pid, flush=True); p.stdout.readline(); print('ready', flush=True); sys.stdout.flush(); os._exit(0)" % child_code)
         r = subprocess.Popen([sys.executable, "-c", parent_code], stdout=subprocess.PIPE, text=True)

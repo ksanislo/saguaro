@@ -243,32 +243,32 @@ class VsRange(unittest.TestCase):
 
 
     def test_vcvars_by_hand(self):
-        """#881: STRATA_VCVARS names a vcvars64.bat directly, for an install vswhere cannot use."""
+        """#881: SAGUARO_VCVARS names a vcvars64.bat directly, for an install vswhere cannot use."""
         import tempfile
         with tempfile.TemporaryDirectory() as d:
             bat = Path(d) / "vcvars64.bat"
             bat.write_text("rem")
-            with mock.patch.dict(os.environ, {"STRATA_VCVARS": str(bat)}):
+            with mock.patch.dict(os.environ, {"SAGUARO_VCVARS": str(bat)}):
                 self.assertEqual(setup.find_vcvars(), bat)
-            with mock.patch.dict(os.environ, {"STRATA_VCVARS": str(Path(d) / "missing.bat")}):
+            with mock.patch.dict(os.environ, {"SAGUARO_VCVARS": str(Path(d) / "missing.bat")}):
                 self.assertIsNone(setup.find_vcvars())
 
 class ExperimentalSm60(unittest.TestCase):
-    """#295: Pascal (6.x) and Volta (7.0) only with STRATA_EXPERIMENTAL_SM60=1, built with -DSTRATA_EXPERIMENTAL_SM60=ON
+    """#295: Pascal (6.x) and Volta (7.0) only with SAGUARO_EXPERIMENTAL_SM60=1, built with -DSTRATA_EXPERIMENTAL_SM60=ON
     and a CUDA 12.x toolkit; nothing changes without the variable."""
 
     def card(self, arch):
         return {"arch": arch, "vram_gb": 11.0, "index": 0, "name": "card"}
 
     def test_the_gate(self):
-        with mock.patch.dict(os.environ, {"STRATA_EXPERIMENTAL_SM60": ""}):
+        with mock.patch.dict(os.environ, {"SAGUARO_EXPERIMENTAL_SM60": ""}):
             for arch in ("60", "61", "70"):
                 p = setup.gpu_problem(self.card(arch))
                 self.assertIn("not supported", p)
                 self.assertIn("choose it with --gpu 0", p)              # the CUDA 12 engine (docs/OLDER_GPUS.md)
             self.assertNotIn("--gpu", setup.gpu_problem(self.card("52")))
             self.assertIsNone(setup.gpu_problem(self.card("75")))
-        with mock.patch.dict(os.environ, {"STRATA_EXPERIMENTAL_SM60": "1"}):
+        with mock.patch.dict(os.environ, {"SAGUARO_EXPERIMENTAL_SM60": "1"}):
             for arch in ("60", "61", "70", "75", "120"):
                 self.assertIsNone(setup.gpu_problem(self.card(arch)), arch)
             for arch in ("52", "72"):
@@ -292,14 +292,14 @@ class ExperimentalSm60(unittest.TestCase):
                     mock.patch.object(setup, "out", lambda cmd: versions.get(cmd[0], "")):  # #414
                 self.assertEqual(setup.find_nvcc(), (str(new), (13, 0)))
                 self.assertEqual(setup.find_nvcc(below=(13, 0)), (str(old), (12, 9)))
-                # #601: STRATA_NVCC is the only one considered; CUDA_HOME is a candidate like CUDA_PATH
-                with mock.patch.dict(os.environ, {"STRATA_NVCC": str(old)}):
+                # #601: SAGUARO_NVCC is the only one considered; CUDA_HOME is a candidate like CUDA_PATH
+                with mock.patch.dict(os.environ, {"SAGUARO_NVCC": str(old)}):
                     self.assertEqual(setup.find_nvcc(), (str(old), (12, 9)))
-                with mock.patch.dict(os.environ, {"STRATA_NVCC": str(new)}):
+                with mock.patch.dict(os.environ, {"SAGUARO_NVCC": str(new)}):
                     got, text = quiet(setup.find_nvcc, below=(13, 0))
                     self.assertEqual(got, (None, None))
                     self.assertIn("needs one older than 13.0", text)
-                with mock.patch.dict(os.environ, {"STRATA_NVCC": str(Path(d) / "missing")}):
+                with mock.patch.dict(os.environ, {"SAGUARO_NVCC": str(Path(d) / "missing")}):
                     got, text = quiet(setup.find_nvcc)
                     self.assertEqual(got, (str(new), (13, 0)))
                     self.assertIn("no such file", text)
@@ -338,7 +338,7 @@ class ExperimentalSm60(unittest.TestCase):
         got, seen = self.tools([120], nvcc)
         self.assertEqual(got[0], "nvcc130")
         self.assertEqual(seen, [None, (13, 2)])
-        with mock.patch.dict(os.environ, {"STRATA_NVCC": "x"}):          # the user's own pick is kept
+        with mock.patch.dict(os.environ, {"SAGUARO_NVCC": "x"}):          # the user's own pick is kept
             got, seen = self.tools([120], nvcc)
             self.assertEqual((got[0], seen), ("nvcc132", [None]))
         only132 = lambda below: (None, None) if below == (13, 2) else ("nvcc132", (13, 2))

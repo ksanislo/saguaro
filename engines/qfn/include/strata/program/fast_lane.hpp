@@ -1,6 +1,6 @@
-// include/strata/program/fast_lane.hpp - STRATA_FAST_LANE: a short prompt read through the pipelined decode windows.
+// include/strata/program/fast_lane.hpp - SAGUARO_FAST_LANE: a short prompt read through the pipelined decode windows.
 //
-// A slot whose prompt has at most STRATA_FAST_LANE_MAX tokens to read is not queued on the prompt path (where it waits
+// A slot whose prompt has at most SAGUARO_FAST_LANE_MAX tokens to read is not queued on the prompt path (where it waits
 // for the big chunk in progress on every stage): its prompt tokens go through its group's windows as rows that are all
 // kept, as drafts that are all accepted (the deferred commit keeps every row).  The window holding the prompt's last
 // token gives the first token (that row's pick).  Pure (no GPU, no environment): generate.cpp passes in what it knows.

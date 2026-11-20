@@ -18,7 +18,7 @@ Fixes for `strata launch` with DeepSeek and for the one-line installer. The Term
 
 ## Updating
 
-- **DeepSeek engine:** it updates itself on the next launch. When the signed feed has a newer DeepSeek engine package for your PC (0.1.49.2 over 0.1.49), `strata launch` downloads it, checks it, starts it once, switches to it and removes the old one. If that fails you see one line and the engine you have keeps running; with no internet the launch goes on without waiting. An engine you gave with `--dsv41-package` or `STRATA_DSV41_EXE` is never replaced.
+- **DeepSeek engine:** it updates itself on the next launch. When the signed feed has a newer DeepSeek engine package for your PC (0.1.49.2 over 0.1.49), `strata launch` downloads it, checks it, starts it once, switches to it and removes the old one. If that fails you see one line and the engine you have keeps running; with no internet the launch goes on without waiting. An engine you gave with `--dsv41-package` or `SAGUARO_DSV41_EXE` is never replaced.
 - **From 0.2.4 or 0.2.4.1:** run `strata update` in the Terminal. It fetches Control 0.1.49.2 and the next `strata` command runs it (`strata --version` says 0.2.4.2).
 - **New installs:** use the command in the README (download `install.sh`, then run it).
 - **Mac:** the Mac Terminal gets Control 0.1.49.2 too. DeepSeek is not on the Mac yet.

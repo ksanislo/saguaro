@@ -97,17 +97,17 @@ def main():
             '<|im_start|>assistant\n<think>\n\n</think>\n\n')
     args = common_args(cfg, a.spec) + ['--conversation-cache-mib', str(a.cache_mib), '--conversation-cache-slots', '4']
     env = child_env(cfg)
-    env['STRATA_STATE_HASH'] = '1'
-    env['STRATA_SNAPSHOT_VERIFY'] = '1'
-    env['STRATA_MTP_BATCH'] = '1'
+    env['SAGUARO_STATE_HASH'] = '1'
+    env['SAGUARO_SNAPSHOT_VERIFY'] = '1'
+    env['SAGUARO_MTP_BATCH'] = '1'
     a.output.mkdir(mode=0o700, parents=False, exist_ok=False)
     results = {'requests': [], 'arms': [], 'spec': a.spec, 'paragraphs': a.paragraphs, 'cache_mib': a.cache_mib}
     for name in ('full', 'incremental'):
         current_env = dict(env)
         if name == 'full':
-            current_env['STRATA_SNAPSHOT_FULL_CAPTURE'] = '1'
+            current_env['SAGUARO_SNAPSHOT_FULL_CAPTURE'] = '1'
         else:
-            current_env.pop('STRATA_SNAPSHOT_FULL_CAPTURE', None)
+            current_env.pop('SAGUARO_SNAPSHOT_FULL_CAPTURE', None)
         print('START', name, flush=True)
         log = a.output / (name + '.log')
         engine = StrataEngine(str(a.engine.resolve()), args, cwd=cfg.get('cwd'), log=str(log), env=current_env)

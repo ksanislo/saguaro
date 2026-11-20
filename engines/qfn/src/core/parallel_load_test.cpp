@@ -1,4 +1,4 @@
-// STRATA_PARALLEL_LOAD's GGUF reader against the reference one (CPU only, synthetic shards): every byte of the arena
+// SAGUARO_PARALLEL_LOAD's GGUF reader against the reference one (CPU only, synthetic shards): every byte of the arena
 // the same, with one unpinned group and with the layers split over two NUMA groups, a role in a second shard included.
 #include "strata/core/expert_source.hpp"
 #include "strata/core/pinned.hpp"
@@ -23,8 +23,8 @@ int main(int argc, char** argv) {
     const std::string a = dir + "/parallel_load_test-1.gguf", b = dir + "/parallel_load_test-2.gguf";
     strata::kernels::cpu::ExpertLayout lay;
     lay.native = true;
-    // STRATA_PARALLEL_LOAD_BENCH=1: 48 layers x 64 experts of ~2 MiB (6 GiB) instead, timed (fresh anonymous memory)
-    const bool bench = std::getenv("STRATA_PARALLEL_LOAD_BENCH") != nullptr;
+    // SAGUARO_PARALLEL_LOAD_BENCH=1: 48 layers x 64 experts of ~2 MiB (6 GiB) instead, timed (fresh anonymous memory)
+    const bool bench = std::getenv("SAGUARO_PARALLEL_LOAD_BENCH") != nullptr;
     lay.n_layers = bench ? 48 : 6;
     lay.n_expert = bench ? 64 : 8;
     std::mt19937_64 rng(7);
@@ -68,7 +68,7 @@ int main(int argc, char** argv) {
         strata::core::load_experts_gguf(a, m, lay, 6);
         const double fill6 = secs(t0);
         munmap(m, total);
-        const char* tv = std::getenv("STRATA_PARALLEL_LOAD_THREADS");
+        const char* tv = std::getenv("SAGUARO_PARALLEL_LOAD_THREADS");
         const int per = tv ? std::atoi(tv) : 8;
         for (const std::vector<int>& nodes : {std::vector<int>{}, std::vector<int>(48, 0)}) {
             std::vector<int> nn = nodes;

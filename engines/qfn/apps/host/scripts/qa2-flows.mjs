@@ -1,6 +1,6 @@
 /**
  * Browser checks for the split-qa2 fixes (QA report 2026-10-18): F03, F05, F08, picture drop, O02.
- *   node scripts/qa2-flows.mjs [shots-dir]     (needs a built dist: npm run build; Chrome via STRATA_CHROME or the default path)
+ *   node scripts/qa2-flows.mjs [shots-dir]     (needs a built dist: npm run build; Chrome via SAGUARO_CHROME or the default path)
  * Starts its own host on a temporary home with the demo engine, so nothing of the person's is touched.
  */
 import { spawn } from 'node:child_process';
@@ -12,12 +12,12 @@ import { chromium } from 'playwright-core';
 const HOST = resolve(import.meta.dirname, '..');
 const SHOTS = resolve(process.argv[2] ?? join(tmpdir(), 'strata-qa2-shots'));
 mkdirSync(SHOTS, { recursive: true });
-const CHROME = process.env.STRATA_CHROME ?? (process.platform === 'win32' ? 'C:/Program Files/Google/Chrome/Application/chrome.exe' : process.platform === 'darwin' ? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' : '/usr/bin/google-chrome');
+const CHROME = process.env.SAGUARO_CHROME ?? (process.platform === 'win32' ? 'C:/Program Files/Google/Chrome/Application/chrome.exe' : process.platform === 'darwin' ? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' : '/usr/bin/google-chrome');
 const checks = [];
 const check = (ok, what) => { checks.push(!!ok); console.log(ok ? 'PASS' : 'FAIL', what); };
 async function startHost(port) {
   const home = mkdtempSync(join(tmpdir(), 'st-qa2-'));
-  const child = spawn(process.execPath, [HOST + '/server/index.mjs', '--dist', HOST + '/dist'], { cwd: HOST, env: { ...process.env, STRATA_HOME: home, STRATA_PORT: String(port), STRATA_REAL_ENGINE: '0', STRATA_WORKSPACE: home }, stdio: 'ignore', windowsHide: true });
+  const child = spawn(process.execPath, [HOST + '/server/index.mjs', '--dist', HOST + '/dist'], { cwd: HOST, env: { ...process.env, SAGUARO_HOME: home, SAGUARO_PORT: String(port), SAGUARO_REAL_ENGINE: '0', SAGUARO_WORKSPACE: home }, stdio: 'ignore', windowsHide: true });
   for (let i = 0; i < 80; i++) { try { const r = await fetch('http://127.0.0.1:' + port + '/'); if (r.status < 500) break; } catch { /* wait */ } await new Promise(r => setTimeout(r, 250)); }
   await fetch('http://127.0.0.1:' + port + '/api/setup/step', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ step: 1, dismissed: true }) }).catch(() => {});
   return { url: 'http://127.0.0.1:' + port + '/', stop: () => { try { child.kill(); } catch { /* gone */ } } };

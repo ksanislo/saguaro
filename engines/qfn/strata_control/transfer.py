@@ -2,7 +2,7 @@
 
 This is the only network code of the update path. It is reached from `strata update` / `strata components update` and
 the app's explicit "Update" step, never from a start or a serve: ``require_acquisition`` is called by the caller before
-anything here runs, and it refuses under ``STRATA_NO_ACQUIRE``.
+anything here runs, and it refuses under ``SAGUARO_NO_ACQUIRE``.
 
 A *source* is where the feed lives: an ``https://`` URL (or ``http://`` to a loopback address, which is how a local test
 feed is served), a ``file://`` URL, or a plain folder / file path. Everything the feed points at is resolved against it
@@ -31,7 +31,7 @@ tls.install()      # #3722: the operating system's certificates, like the browse
 
 CHUNK = 1 << 20
 SMALL_LIMIT = 8 << 20
-ENV_ALLOW_HTTP = "STRATA_UPDATE_ALLOW_HTTP"
+ENV_ALLOW_HTTP = "SAGUARO_UPDATE_ALLOW_HTTP"
 
 
 class TransferError(RuntimeError):

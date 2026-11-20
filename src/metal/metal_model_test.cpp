@@ -16,8 +16,8 @@
 //       windows of 1-8 rows whose drafts are partly wrong must equal plain decoding token for token, every
 //       accepted row's logits within 1e-5 of the plain step's
 //
-// Settings (environment): MAYA_METAL_CPU=1 runs on ggml-cpu, MAYA_METAL_POOL_SLOTS=N shrinks the expert pool (the
-// eviction path), MAYA_METAL_UBATCH / MAYA_METAL_ATTN_CHUNK change the slicing, MAYA_METAL_KV_F16=1 / MAYA_METAL_KV_F32=1 the latent cache.
+// Settings (environment): SAGUARO_METAL_CPU=1 runs on ggml-cpu, SAGUARO_METAL_POOL_SLOTS=N shrinks the expert pool (the
+// eviction path), SAGUARO_METAL_UBATCH / SAGUARO_METAL_ATTN_CHUNK change the slicing, SAGUARO_METAL_KV_F16=1 / SAGUARO_METAL_KV_F32=1 the latent cache.
 #include "glm_metal.hpp"
 #include "spec.hpp"
 
@@ -50,14 +50,14 @@ void load(GlmMetal& m, const std::string& gguf, int64_t ctx, int max_window = 0,
     o.max_window = max_window;
     o.mtp = mtp;
     o.dflash = dflash;
-    o.use_gpu = env("MAYA_METAL_CPU") == 0;
-    o.pool_slots = env("MAYA_METAL_POOL_SLOTS");
-    if (env("MAYA_METAL_UBATCH") > 0) o.n_ubatch = env("MAYA_METAL_UBATCH");
-    if (env("MAYA_METAL_ATTN_CHUNK") > 0) o.attn_chunk = env("MAYA_METAL_ATTN_CHUNK");
-    o.kv_f16 = env("MAYA_METAL_KV_F16") != 0;
-    o.kv_f32 = env("MAYA_METAL_KV_F32") != 0;
-    if (const char* v = std::getenv("MAYA_METAL_DSA_MM"); v && *v) o.dsa_mm = std::atoi(v) != 0;
-    if (const char* v = std::getenv("MAYA_METAL_DSA_KERNEL"); v && *v) o.dsa_kernel = std::atoi(v) != 0;
+    o.use_gpu = env("SAGUARO_METAL_CPU") == 0;
+    o.pool_slots = env("SAGUARO_METAL_POOL_SLOTS");
+    if (env("SAGUARO_METAL_UBATCH") > 0) o.n_ubatch = env("SAGUARO_METAL_UBATCH");
+    if (env("SAGUARO_METAL_ATTN_CHUNK") > 0) o.attn_chunk = env("SAGUARO_METAL_ATTN_CHUNK");
+    o.kv_f16 = env("SAGUARO_METAL_KV_F16") != 0;
+    o.kv_f32 = env("SAGUARO_METAL_KV_F32") != 0;
+    if (const char* v = std::getenv("SAGUARO_METAL_DSA_MM"); v && *v) o.dsa_mm = std::atoi(v) != 0;
+    if (const char* v = std::getenv("SAGUARO_METAL_DSA_KERNEL"); v && *v) o.dsa_kernel = std::atoi(v) != 0;
     if (dsa_matvec) o.dsa_mm = false;
     m.set_options(o);
     std::string err;
@@ -207,7 +207,7 @@ int big(const std::string& gguf, const std::string& expect) {
     load(m, gguf, 1024);
     require(m.geometry().n_layers == 45, "the big fixture has 45 layers");
     // (MTP turns on mid-session once a streaming pool grows to hold every expert)
-    require(m.pool_holds_all() == (env("MAYA_METAL_POOL_SLOTS") == 0), "pool_holds_all() disagrees with the pool");
+    require(m.pool_holds_all() == (env("SAGUARO_METAL_POOL_SLOTS") == 0), "pool_holds_all() disagrees with the pool");
     const size_t V = (size_t) m.geometry().n_vocab;
     std::vector<int32_t> tokens;
     for (size_t i = 0; i < T; ++i) tokens.push_back((int32_t) ((i % 511) + 1));
@@ -283,7 +283,7 @@ int mtp(const std::string& gguf, int n_gen) {
         h.left = [&] { return (int64_t) (n_gen - (int) got.size()); };
         const int32_t y = (int32_t) argmax(lg.data(), V);
         if (!h.emit(y)) continue;
-        setenv("MAYA_GLM_MTP_FIXED", std::to_string(fixed).c_str(), 1);
+        setenv("SAGUARO_GLM_MTP_FIXED", std::to_string(fixed).c_str(), 1);
         maya::metal::DraftLength len(4);
         require(maya::metal::decode_mtp(m, y, len, h, err), "decode_mtp: " + err);
         for (size_t i = 0; i < got.size() && i < ref.size(); ++i)
@@ -294,7 +294,7 @@ int mtp(const std::string& gguf, int n_gen) {
             }
         require(got == ref, "MTP decoding differs from plain decoding");
     }
-    unsetenv("MAYA_GLM_MTP_FIXED");
+    unsetenv("SAGUARO_GLM_MTP_FIXED");
     std::printf("metal_model_test mtp: PASS (%d tokens, draft lengths 1, 2, 4)\n", n_gen);
     return 0;
 }

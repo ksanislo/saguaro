@@ -185,7 +185,7 @@ class Install(unittest.TestCase):
         for p in patches:
             p.start()
             self.addCleanup(p.stop)
-        mock.patch.dict("os.environ", {"STRATA_DSV41_EXE": ""}).start()
+        mock.patch.dict("os.environ", {"SAGUARO_DSV41_EXE": ""}).start()
         self.addCleanup(mock.patch.stopall)
 
     def install(self, ram=251.0, cards=None, engine=True, **kw):
@@ -231,7 +231,7 @@ class Install(unittest.TestCase):
         self.assertIn("DeepSeek's engine is not available for this computer yet", out)
         self.assertIn("RTX 30", out)
         self.assertNotIn("cmake", out)
-        self.assertNotIn("STRATA_DSV41_EXE", out)
+        self.assertNotIn("SAGUARO_DSV41_EXE", out)
         self.assertIn("Nothing has been downloaded", out)
         self.assertFalse([c for c in self.calls if c[0] == "get"])
 
@@ -453,7 +453,7 @@ class EnginePackage(unittest.TestCase):
         self.assertEqual(setup.dsv41_engine_dir(Path("/d/engine")), Path("/d") / "engine-dsv41")
 
     def test_the_own_package_is_found_before_the_old_place(self):
-        with tempfile.TemporaryDirectory() as d, mock.patch.dict("os.environ", {"STRATA_DSV41_EXE": ""}):
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict("os.environ", {"SAGUARO_DSV41_EXE": ""}):
             eng = Path(d) / "engine"
             eng.mkdir()
             name = "strata-dsv41.exe" if setup.WIN else "strata-dsv41"

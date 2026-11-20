@@ -176,11 +176,11 @@ class ModelInventoryTests(unittest.TestCase):
         thread.start()
         try:
             output = io.StringIO()
-            with mock.patch.dict(os.environ, {"STRATA_TELEMETRY_KEY": "read-only"}), \
+            with mock.patch.dict(os.environ, {"SAGUARO_TELEMETRY_KEY": "read-only"}), \
                     redirect_stdout(output):
                 code = main(["models", "list", "--served", "--url",
                              f"http://127.0.0.1:{server.server_port}",
-                             "--credential-env", "STRATA_TELEMETRY_KEY", "--output", "json"])
+                             "--credential-env", "SAGUARO_TELEMETRY_KEY", "--output", "json"])
             self.assertEqual(code, 0)
             self.assertEqual(json.loads(output.getvalue())["models"][0]["loaded"], False)
             self.assertEqual(seen, [("/v1/telemetry", "Bearer read-only")])

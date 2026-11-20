@@ -6,9 +6,9 @@ on the test box): edit them before reuse.
 
 Engine side (both off unless the variable is set):
 
-- `STRATA_TAP_FILE=<file>` (+ `STRATA_TAP_LAYERS`, default `5,15,25,35,45`): `Verifier::record_window` copies each verified row's completed layer output (the mean of
+- `SAGUARO_TAP_FILE=<file>` (+ `SAGUARO_TAP_LAYERS`, default `5,15,25,35,45`): `Verifier::record_window` copies each verified row's completed layer output (the mean of
   the 4 hyper-connection streams, the quantity the drafter was trained on) and `Verifier::run` appends `pos, token, taps` records.
-- `STRATA_SPEC_T_CYCLE=1,2,...,8` (CLI bench only): the verify window size cycles; the report line `window cost (ms/round)` gives the cost of each width.
+- `SAGUARO_SPEC_T_CYCLE=1,2,...,8` (CLI bench only): the verify window size cycles; the report line `window cost (ms/round)` gives the cost of each width.
 
 Scripts:
 

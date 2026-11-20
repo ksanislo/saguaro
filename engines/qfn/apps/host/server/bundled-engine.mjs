@@ -80,10 +80,10 @@ export function windowsDisplayVendors({ platform = process.platform, run = execF
 
 /**
  * The engine family this PC's graphics card needs ('cuda', 'hip', 'sycl'), or null when it cannot be told. The same order as Control
- * (NVIDIA first, then AMD, then Intel); STRATA_ENGINE_BACKEND wins. Reads only the driver and (Linux) the PCI vendor of the display adapters.
+ * (NVIDIA first, then AMD, then Intel); SAGUARO_ENGINE_BACKEND wins. Reads only the driver and (Linux) the PCI vendor of the display adapters.
  */
 export function gpuBackendHere(env = process.env, { vendors = windowsDisplayVendors() } = {}) {
-  const forced = String(env.STRATA_ENGINE_BACKEND ?? '').trim().toLowerCase();
+  const forced = String(env.SAGUARO_ENGINE_BACKEND ?? '').trim().toLowerCase();
   if (forced) return ['cuda', 'hip', 'sycl'].includes(forced) ? forced : null;
   // Windows: the display adapters are the machine's own statement of which cards it has; a leftover nvidia-smi from a card that was
   // taken out must not outvote them (#3688). Same order as Control: NVIDIA, then AMD, then Intel.

@@ -12,12 +12,12 @@
 // continues the state (the conversation so far) reuses it; one that only shares the last prompt's start goes back to
 // that prompt's end; anything else starts over.  `GENI <max_new> [keys] <file> <ids>` carries the prompt's pictures
 // (the file: see read_pics); the state is shared only where the same picture sits at the same place.  With
-// STRATA_DS4_SLOT_KEEP=1 the conversations are kept when another one takes the model (a slot each: the state, the
-// compressed KV included), and across runs in STRATA_DS4_SLOT_DIR - so a request that does not continue the state but
+// SAGUARO_DS4_SLOT_KEEP=1 the conversations are kept when another one takes the model (a slot each: the state, the
+// compressed KV included), and across runs in SAGUARO_DS4_SLOT_DIR - so a request that does not continue the state but
 // does continue a kept conversation reads only its new tokens.
 // `pin=N` on a GEN marks the first N prompt tokens as a start other requests share (a system prompt and its tools): the
 // read stops there for a checkpoint, so a request behind the same start - another agent - goes back to it instead of
-// reading it again (also without slots).  STRATA_DS4_REUSE=0 turns every reuse off (each request reads its whole prompt).
+// reading it again (also without slots).  SAGUARO_DS4_REUSE=0 turns every reuse off (each request reads its whole prompt).
 #include "ds4_model.hpp"
 #include "ds4_os.hpp"
 #include "ds4_packinfo.hpp"
@@ -151,11 +151,11 @@ static int g_round_nd = 0;
 
 // The drafts' cut on the product of their confidences (DeepInfer's cumulative rule): a draft is verified while the chance
 // that it and every draft before it are kept stays at least this - a long window whose later drafts are likely lost is
-// not verified whole.  STRATA_DS4_DSPARK_CUM=F, a request's dspark_cum key; 0: off, only the floor on each draft's own
+// not verified whole.  SAGUARO_DS4_DSPARK_CUM=F, a request's dspark_cum key; 0: off, only the floor on each draft's own
 // confidence (dspark_conf).  Off by default (not measured faster on code: H100 / owner PC); Project Maya runs 0.5 (a Radeon 8065S: decode +6.5%, the same tokens)
 float dspark_cum_default() {
     static const float v = [] {
-        const char* e = std::getenv("STRATA_DS4_DSPARK_CUM");
+        const char* e = std::getenv("SAGUARO_DS4_DSPARK_CUM");
         return e != nullptr ? (float) std::atof(e) : 0.0f;
     }();
     return v;
@@ -332,25 +332,25 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
     // (Model::slot_save: its window rings, the compressors' partial groups and every source's compressed KV and index
     // keys), then takes back the kept conversation this prompt does continue (slot_load) - chats, and an agent's side
     // requests, that interleave no longer re-read each other's prompts (70k and 185k tokens alternating: 75-200 s a
-    // switch at ~930 tok/s).  STRATA_DS4_SLOT_KEEP=1 turns them on and keeps them across runs, in STRATA_DS4_SLOT_DIR
+    // switch at ~930 tok/s).  SAGUARO_DS4_SLOT_KEEP=1 turns them on and keeps them across runs, in SAGUARO_DS4_SLOT_DIR
     // (default <pack>/slots): a slot is a .bin (the state) and a .meta (this model's identity, the conversation's
     // tokens and its size), both written under a temporary name first; a slot whose .meta is missing, foreign or does
-    // not match its file, or unused for STRATA_DS4_SLOT_DAYS (7) days, is removed at start.  STRATA_DS4_SLOT_CAP (4) is
+    // not match its file, or unused for SAGUARO_DS4_SLOT_DAYS (7) days, is removed at start.  SAGUARO_DS4_SLOT_CAP (4) is
     // the conversations kept in RAM; past it the least recently used is written to the folder and read back from there
     // (RAM first, the folder past the cap), and the engine's end writes the ones in RAM to the folder, so the next run
-    // reads on from them.  STRATA_DS4_SLOT_GB (16) caps the folder's .bin files: at start, and after every write, the
+    // reads on from them.  SAGUARO_DS4_SLOT_GB (16) caps the folder's .bin files: at start, and after every write, the
     // folder's least recently used conversation is removed while they are over it (never the one just written, so a
-    // conversation bigger than the cap stays).  STRATA_DS4_SLOT_MIN (1024) is the shortest conversation set aside (a
+    // conversation bigger than the cap stays).  SAGUARO_DS4_SLOT_MIN (1024) is the shortest conversation set aside (a
     // shorter one is read again in about the time its slot would take).  Text only: a conversation that holds pictures
     // is not set aside, and a prompt with pictures takes none back.
     const auto env_num = [](const char* k, double d) { const char* v = std::getenv(k); return v ? std::atof(v) : d; };
     const bool slot_keep =
-        std::getenv("STRATA_DS4_SLOT_KEEP") != nullptr && std::atoi(std::getenv("STRATA_DS4_SLOT_KEEP")) != 0;
-    const bool reuse = std::getenv("STRATA_DS4_REUSE") == nullptr || std::atoi(std::getenv("STRATA_DS4_REUSE")) != 0;
-    int slot_max = slot_keep ? std::max(0, (int) env_num("STRATA_DS4_SLOT_CAP", 4)) : 0;
-    const size_t slot_min = (size_t) std::max(1.0, env_num("STRATA_DS4_SLOT_MIN", 1024));
-    const double slot_days = env_num("STRATA_DS4_SLOT_DAYS", 7);
-    const uint64_t slot_budget = (uint64_t) (env_num("STRATA_DS4_SLOT_GB", 16) * 1073741824.0);
+        std::getenv("SAGUARO_DS4_SLOT_KEEP") != nullptr && std::atoi(std::getenv("SAGUARO_DS4_SLOT_KEEP")) != 0;
+    const bool reuse = std::getenv("SAGUARO_DS4_REUSE") == nullptr || std::atoi(std::getenv("SAGUARO_DS4_REUSE")) != 0;
+    int slot_max = slot_keep ? std::max(0, (int) env_num("SAGUARO_DS4_SLOT_CAP", 4)) : 0;
+    const size_t slot_min = (size_t) std::max(1.0, env_num("SAGUARO_DS4_SLOT_MIN", 1024));
+    const double slot_days = env_num("SAGUARO_DS4_SLOT_DAYS", 7);
+    const uint64_t slot_budget = (uint64_t) (env_num("SAGUARO_DS4_SLOT_GB", 16) * 1073741824.0);
     namespace fs = std::filesystem;
     std::filesystem::path slot_dir;
     struct Slot {
@@ -416,7 +416,7 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
         }
         return total;
     };
-    // the folder over STRATA_DS4_SLOT_GB: its least recently used conversation goes first, and never `keep` (the one just
+    // the folder over SAGUARO_DS4_SLOT_GB: its least recently used conversation goes first, and never `keep` (the one just
     // written), so a conversation bigger than the cap stays
     const auto slot_trim = [&](const std::string& keep) {
         const uint64_t before = slot_folder_bytes();
@@ -432,7 +432,7 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
         }
         if (dropped > 0) {
             char msg[256];
-            std::snprintf(msg, sizeof msg, "the folder held %s (over STRATA_DS4_SLOT_GB, %s): %zu least recently used "
+            std::snprintf(msg, sizeof msg, "the folder held %s (over SAGUARO_DS4_SLOT_GB, %s): %zu least recently used "
                           "conversation(s) removed, %s left", gb(before).c_str(), gb(slot_budget).c_str(), dropped,
                           gb(slot_folder_bytes()).c_str());
             note(msg);
@@ -575,7 +575,7 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
         return len;
     };
     if (slot_max > 0) {
-        slot_dir = std::getenv("STRATA_DS4_SLOT_DIR") ? std::filesystem::path(std::getenv("STRATA_DS4_SLOT_DIR"))
+        slot_dir = std::getenv("SAGUARO_DS4_SLOT_DIR") ? std::filesystem::path(std::getenv("SAGUARO_DS4_SLOT_DIR"))
                                                       : std::filesystem::path(pack) / "slots";
         std::error_code ec;
         std::filesystem::create_directories(slot_dir, ec);
@@ -630,7 +630,7 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
                               " conversation(s) kept from earlier runs (" + gb(total) + ")";
             if (refused) msg += ", " + std::to_string(refused) + " not this model's or incomplete - removed";
             note(msg);
-            slot_trim("");   // (the folder over STRATA_DS4_SLOT_GB: the least recently used conversation goes first)
+            slot_trim("");   // (the folder over SAGUARO_DS4_SLOT_GB: the least recently used conversation goes first)
         }
     }
     if (slot_max > 0) {
@@ -674,7 +674,7 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
                 continue;
             }
         }
-        if (!reuse) {   // (STRATA_DS4_REUSE=0, for A/Bs and tests: every request is a fresh read of its whole prompt)
+        if (!reuse) {   // (SAGUARO_DS4_REUSE=0, for A/Bs and tests: every request is a fresh read of its whole prompt)
             m.reset();
             held.clear();
         }
@@ -867,7 +867,7 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
                 std::snprintf(b, sizeof b, " drafts=%.3f", (double) d_acc / (double) d_off);
                 out += b;
             }
-            if (s.skipped > s_dec.skipped) {   // (STRATA_DS4_DISK_SKIP_W: experts left out a token)
+            if (s.skipped > s_dec.skipped) {   // (SAGUARO_DS4_DISK_SKIP_W: experts left out a token)
                 std::snprintf(b, sizeof b, " skipped=%.3f", (double) (s.skipped - s_dec.skipped) / fed);
                 out += b;
             }
@@ -962,7 +962,7 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
 // ---- Strata addition: teacher-forced scoring (the quality gate) -------------------------------------------------
 // --score IDS.json --score-out RUN.tsv: every segment of a tools/quant_quality.py ids file (name + ids) is read through
 // the model from a fresh state; per position the log-probability of the text's next token and the 64 most likely
-// tokens go out in the STRATA_LOGPOS row format that `quant_quality.py compare` reads (natural logs, full-vocabulary
+// tokens go out in the SAGUARO_LOGPOS row format that `quant_quality.py compare` reads (natural logs, full-vocabulary
 // log-softmax in double).  RUN.tsv.seg.json lists each segment's first line and size.
 struct ScoreSeg {
     std::string name;
@@ -1454,7 +1454,7 @@ int main(int argc, char** argv) {
     const long long io1 = io_read_bytes();
     if (io0 >= 0 && io1 >= 0)
         std::fprintf(stderr, "decode reads from the disk: %.1f MB a token\n", (double) (io1 - io0) / 1e6 / nt);
-    if (s.skipped > s0.skipped)   // STRATA_DS4_DISK_SKIP_W
+    if (s.skipped > s0.skipped)   // SAGUARO_DS4_DISK_SKIP_W
         std::fprintf(stderr, "decode left out %.1f experts a token not in RAM (%.1f%% of the routed)\n",
                      (double) (s.skipped - s0.skipped) / nt,
                      100.0 * (double) (s.skipped - s0.skipped) / std::max<double>(1.0, (double) (s.experts - s0.experts)));

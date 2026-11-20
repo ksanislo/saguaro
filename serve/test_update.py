@@ -58,7 +58,7 @@ class Pieces(unittest.TestCase):
             again.assert_not_called()
 
     def test_check_off(self):
-        with mock.patch.dict(os.environ, {"MAYA_UPDATE_CHECK": "0"}), \
+        with mock.patch.dict(os.environ, {"SAGUARO_UPDATE_CHECK": "0"}), \
                 mock.patch.object(U.urllib.request, "urlopen") as net:
             self.assertFalse(U.Updater("1.0.17").check(force=True)["enabled"])
             net.assert_not_called()

@@ -49,7 +49,7 @@
 //
 // Kernels are hand-written CUDA, FP32 throughout (the q/k staging through FP16 and the m8n8k4/wmma of the
 // reference's TileLang output are a later step; nothing here depends on TileLang).  Dispatch is a runtime
-// compute-capability check in `gdn_recurrence` - sm_80 and up keep the old recurrence unless STRATA_GDN_CHUNK
+// compute-capability check in `gdn_recurrence` - sm_80 and up keep the old recurrence unless SAGUARO_GDN_CHUNK
 // overrides it.
 #pragma once
 

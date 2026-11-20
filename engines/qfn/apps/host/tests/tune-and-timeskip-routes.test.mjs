@@ -44,12 +44,12 @@ async function startHost({ python } = {}) {
     cwd: join(REPO, 'apps/host'),
     env: {
       ...process.env,
-      STRATA_HOME: home,
+      SAGUARO_HOME: home,
       // the Time-skip runs of whoever uses this PC live in their own state folder; a test must not read (or write) them
       STRATA_TIMESKIP_DIR: join(home, 'time-skip'),
-      STRATA_PORT: String(port),
-      STRATA_REAL_ENGINE: '0',
-      ...(python ? { STRATA_PYTHON: python } : {}),
+      SAGUARO_PORT: String(port),
+      SAGUARO_REAL_ENGINE: '0',
+      ...(python ? { SAGUARO_PYTHON: python } : {}),
     },
     stdio: 'ignore',
   });

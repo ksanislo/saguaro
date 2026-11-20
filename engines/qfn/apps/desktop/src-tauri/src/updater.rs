@@ -2,7 +2,7 @@
 //!
 //! The UI is served by the App Host, so it cannot call Tauri's updater plugin; and the host is Node, which has no updater.
 //! The shell therefore opens one loopback listener, protected by a random token it hands only to the host it started
-//! (`STRATA_SHELL_BRIDGE`, `STRATA_SHELL_TOKEN`), and the host's `app-updater.mjs` talks to it:
+//! (`SAGUARO_SHELL_BRIDGE`, `SAGUARO_SHELL_TOKEN`), and the host's `app-updater.mjs` talks to it:
 //!
 //!   GET  /app-update/check    -> { available, version, current, notes }   (signature-verified metadata from the feed)
 //!   POST /app-update/install  -> starts download + install in the background
@@ -233,9 +233,9 @@ pub fn start(app: &AppHandle, token: String) -> Option<Bridge> {
 /// Environment for the App Host: where the bridge is, which app version this is.
 #[allow(dead_code)]
 pub fn apply_env(cmd: &mut std::process::Command, app: &AppHandle, bridge: Option<&Bridge>) {
-    cmd.env("STRATA_APP_VERSION", app.package_info().version.to_string());
+    cmd.env("SAGUARO_APP_VERSION", app.package_info().version.to_string());
     if let Some(bridge) = bridge {
-        cmd.env("STRATA_SHELL_BRIDGE", &bridge.url).env("STRATA_SHELL_TOKEN", &bridge.token);
+        cmd.env("SAGUARO_SHELL_BRIDGE", &bridge.url).env("SAGUARO_SHELL_TOKEN", &bridge.token);
     }
 }
 

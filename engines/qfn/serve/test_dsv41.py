@@ -3,7 +3,7 @@ token and the model-card defaults, over both APIs against a fake engine (no GPU,
 
     python -m unittest serve.test_dsv41 -v
 
-STRATA_DSV41_PACK=<dir> (the pack's tokenizer folder: vocab.json, merges.txt, token_type.json, tokenizer.json) adds
+SAGUARO_DSV41_PACK=<dir> (the pack's tokenizer folder: vocab.json, merges.txt, token_type.json, tokenizer.json) adds
 the check of the real tokenizer against the ids llama.cpp (PR 30817 b72050d0) made of the same rendered prompts.
 """
 from __future__ import annotations
@@ -123,9 +123,9 @@ class Tokenizer(unittest.TestCase):
         self.assertEqual(tok.token_bytes(256), b"<|im_end|>")
         self.assertEqual(tok.encode("a<|im_end|>", parse_special=True), [97, 256])
 
-    @unittest.skipUnless(os.environ.get("STRATA_DSV41_PACK"), "STRATA_DSV41_PACK (the pack's tokenizer folder) not set")
+    @unittest.skipUnless(os.environ.get("SAGUARO_DSV41_PACK"), "SAGUARO_DSV41_PACK (the pack's tokenizer folder) not set")
     def test_the_real_tokenizer_makes_the_ids_llama_cpp_made(self):
-        d = Path(os.environ["STRATA_DSV41_PACK"])
+        d = Path(os.environ["SAGUARO_DSV41_PACK"])
         vocab = json.loads((d / "vocab.json").read_text(encoding="utf-8"))
         tokens = [None] * len(vocab)
         for t, i in vocab.items():
@@ -548,13 +548,13 @@ class Api(ApiBase):
         self.assertEqual(self.engine.last_prompt[:n], ids[:n])
 
     def auto_pin(self, value):
-        old = os.environ.get("STRATA_DS4_AUTO_PIN")
+        old = os.environ.get("SAGUARO_DS4_AUTO_PIN")
         if value is None:
-            os.environ.pop("STRATA_DS4_AUTO_PIN", None)
+            os.environ.pop("SAGUARO_DS4_AUTO_PIN", None)
         else:
-            os.environ["STRATA_DS4_AUTO_PIN"] = value
-        self.addCleanup(lambda: os.environ.pop("STRATA_DS4_AUTO_PIN", None) if old is None
-                        else os.environ.__setitem__("STRATA_DS4_AUTO_PIN", old))
+            os.environ["SAGUARO_DS4_AUTO_PIN"] = value
+        self.addCleanup(lambda: os.environ.pop("SAGUARO_DS4_AUTO_PIN", None) if old is None
+                        else os.environ.__setitem__("SAGUARO_DS4_AUTO_PIN", old))
 
     def test_no_shared_start_without_a_system_prompt_or_when_switched_off(self):
         self.start("ok")
@@ -588,7 +588,7 @@ class Api(ApiBase):
 class SlotEnv(unittest.TestCase):
     """The engine's kept conversations: the folder and the switch reach the DeepSeek engine only."""
 
-    KEYS = ("STRATA_DS4_SLOT_KEEP", "STRATA_DS4_SLOT_DIR")
+    KEYS = ("SAGUARO_DS4_SLOT_KEEP", "SAGUARO_DS4_SLOT_DIR")
 
     def env(self, cfg):
         saved = {k: os.environ.pop(k, None) for k in self.KEYS}
@@ -601,19 +601,19 @@ class SlotEnv(unittest.TestCase):
 
     def test_deepseek_gets_a_folder_in_the_data_folder_and_the_default_switch(self):
         env = self.env({"arch": "deepseek41", "log": str(Path("data") / "strata-deepseek.log"), "args": []})
-        self.assertEqual(Path(env["STRATA_DS4_SLOT_DIR"]), Path("data") / "ds4-slots")
-        self.assertEqual(env["STRATA_DS4_SLOT_KEEP"], "1")
-        self.assertEqual(env["STRATA_DS4_SLOT_GB"], "2")
+        self.assertEqual(Path(env["SAGUARO_DS4_SLOT_DIR"]), Path("data") / "ds4-slots")
+        self.assertEqual(env["SAGUARO_DS4_SLOT_KEEP"], "1")
+        self.assertEqual(env["SAGUARO_DS4_SLOT_GB"], "2")
 
     def test_the_configs_own_settings_win(self):
         env = self.env({"arch": "deepseek41", "log": "x/y.log",
-                        "env": {"STRATA_DS4_SLOT_KEEP": "1", "STRATA_DS4_SLOT_DIR": "elsewhere"}})
-        self.assertEqual((env["STRATA_DS4_SLOT_KEEP"], env["STRATA_DS4_SLOT_DIR"]), ("1", "elsewhere"))
+                        "env": {"SAGUARO_DS4_SLOT_KEEP": "1", "SAGUARO_DS4_SLOT_DIR": "elsewhere"}})
+        self.assertEqual((env["SAGUARO_DS4_SLOT_KEEP"], env["SAGUARO_DS4_SLOT_DIR"]), ("1", "elsewhere"))
 
     def test_other_families_get_nothing(self):
         for arch in ("qwen4exp", None, "gyro"):
             env = self.env({"arch": arch, "log": "x/y.log"} if arch else {"log": "x/y.log"})
-            self.assertFalse([k for k in env if k.startswith("STRATA_DS4_")], arch)
+            self.assertFalse([k for k in env if k.startswith("SAGUARO_DS4_")], arch)
 
 class ThinkForever(DsEngine):
     """Thinks without end (random letters) until the thinking is closed in the prompt, then answers."""

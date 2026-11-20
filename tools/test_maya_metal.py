@@ -72,7 +72,7 @@ class MetalSetupTests(unittest.TestCase):
         self.assertFalse(maya.is_exl3(quant))
 
     def test_first_run_on_a_mac_picks_metal(self):
-        with patch.object(maya, "configs", return_value=[]), patch.dict(os.environ, MAYA_SH="1"), \
+        with patch.object(maya, "configs", return_value=[]), patch.dict(os.environ, SAGUARO_SH="1"), \
              patch.object(sys, "argv", ["saguaro.py", "--check"]), \
              patch.object(maya, "check_pc", return_value={"gpus": [{"index": 0}]}) as check, \
              patch.object(maya, "say"):
@@ -118,12 +118,12 @@ class MetalSetupTests(unittest.TestCase):
 
     def test_config_carries_the_shipped_expert_profile_and_env(self):
         maya.PROFILE.write_bytes(b"STRP")
-        self.a.env = ["MAYA_METAL_POOL_SLOTS=15"]
+        self.a.env = ["SAGUARO_METAL_POOL_SLOTS=15"]
         p, gguf = self.write()
         cfg = maya.read_json(p)
         self.assertEqual(cfg["args"][-2:], ["--expert-profile", str(maya.PROFILE)])
         self.assertEqual(cfg["args"][:4], ["--gguf", str(gguf), "--max-context", "16384"])
-        self.assertEqual(json.loads(p.read_text(encoding="utf-8"))["env"]["MAYA_METAL_POOL_SLOTS"], "15")
+        self.assertEqual(json.loads(p.read_text(encoding="utf-8"))["env"]["SAGUARO_METAL_POOL_SLOTS"], "15")
 
     def test_dflash_drafter_is_a_metal_argument_and_mtp_stays_the_default(self):
         drafter = self.root / "GLM-5.3-Flash-DFlash2" / "d.gguf"
@@ -255,9 +255,9 @@ class MetalSetupTests(unittest.TestCase):
 
     def test_server_environment_for_metal(self):
         from serve.server import child_env
-        cfg = {"backend": "metal", "gpu": [0], "env": {"MAYA_METAL_PP_CHUNK": "64"}}
+        cfg = {"backend": "metal", "gpu": [0], "env": {"SAGUARO_METAL_PP_CHUNK": "64"}}
         env = child_env(cfg)
-        self.assertEqual(env["MAYA_METAL_PP_CHUNK"], "64")        # (maya-metal reads its settings by their MAYA_* names)
+        self.assertEqual(env["SAGUARO_METAL_PP_CHUNK"], "64")        # (maya-metal reads its settings by their SAGUARO_* names)
         self.assertNotIn("CUDA_VISIBLE_DEVICES", env)
 
     def test_a_failed_tokenizer_export_stops_the_setup(self):

@@ -1,5 +1,5 @@
 """The keys shipped with a release build (strata_control/update_keys.json): the release feed key and the Tauri app key are there,
-the tester / local-test keys are not (they come with STRATA_UPDATE_TRUSTED_KEYS), and a feed is verified against them."""
+the tester / local-test keys are not (they come with SAGUARO_UPDATE_TRUSTED_KEYS), and a feed is verified against them."""
 from __future__ import annotations
 
 import json

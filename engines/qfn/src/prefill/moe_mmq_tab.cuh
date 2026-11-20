@@ -1,4 +1,4 @@
-// src/prefill/moe_mmq_tab.cuh - STRATA_MMQ_DIRECT: llama.cpp's MMQ outer scheduler (ggml-cuda mmq.cuh, MIT) with a
+// src/prefill/moe_mmq_tab.cuh - SAGUARO_MMQ_DIRECT: llama.cpp's MMQ outer scheduler (ggml-cuda mmq.cuh, MIT) with a
 // per-expert pointer table, so the prompt path's MMQ reads resident experts in their expert-cache slots instead of
 // a gathered copy.  Included only by the per-type instance TUs (CMake: mmq_tab_instance.cu.in); moe_mmq.cu sees
 // the declarations in moe_mmq_tab.hpp.
@@ -84,7 +84,7 @@ static_assert(std::is_same<decltype(&mul_mat_q_stream_k_fixup<GGML_TYPE_Q8_0, 8,
     (t).p[0], (t).p[1], (t).p[2], (t).p[3], (t).p[4], (t).p[5], (t).p[6], (t).p[7], (t).p[8], (t).p[9],        \
     (t).p[10], (t).p[11], (t).p[12], (t).p[13], (t).p[14], (t).p[15]
 
-// STRATA_MMQ_KTAIL=1 (deviation 3): mul_mat_q_process_tile's text with one change - an iteration's second 128-value
+// SAGUARO_MMQ_KTAIL=1 (deviation 3): mul_mat_q_process_tile's text with one change - an iteration's second 128-value
 // half is skipped when it starts at or past kb0_stop.  K = 640 (the down product, 20 blocks of 32) runs three
 // 256-wide iterations, the last half of the third (values 640..767) entirely past the row: its q8_1 activations are
 // the quantizer's zero padding (qs 0, d 0, s 0), so every term it adds is C*dA*dB with C == 0 (and dB == 0), an exact
@@ -112,7 +112,7 @@ static __device__ __forceinline__ void mul_mat_q_process_tile_ktail(
     int * tile_x = tile_y + GGML_PAD(J*MMQ_TILE_Y_K, nwarps*warp_size);
 
     constexpr int ne_block = QK8_1_MMQ;   // upstream: QK8_1_MMQ for every non-FP4 type on every arch (FP4 never takes ktail)
-    static_assert(qk <= ne_block && ne_block % qk == 0, "STRATA_MMQ_KTAIL: only types with blocks of <= 128 values");
+    static_assert(qk <= ne_block && ne_block % qk == 0, "SAGUARO_MMQ_KTAIL: only types with blocks of <= 128 values");
     constexpr int half_blocks = ne_block / qk;   // the blocks of one 128-value half
 
     constexpr int ITER_K          = ggml_cuda_mmq_get_K_vram(type, J, fallback);
@@ -185,10 +185,10 @@ static __device__ __forceinline__ void tab_process_tile(
                                                          kb0_start, kb0_stop);
     }
 }
-// STRATA_MMQ_KTAIL=1, read once per library; the launcher logs once when a product actually has the skipped half
+// SAGUARO_MMQ_KTAIL=1, read once per library; the launcher logs once when a product actually has the skipped half
 inline bool tab_ktail_requested() {
     static const bool on = [] {
-        const char* v = std::getenv("STRATA_MMQ_KTAIL");
+        const char* v = std::getenv("SAGUARO_MMQ_KTAIL");
         return v != nullptr && std::atoi(v) != 0;
     }();
     return on;
@@ -197,7 +197,7 @@ inline void tab_ktail_log(const char* type, int64_t k, int blocks, int padded) {
     static bool logged = false;   // once per library (the first product it applies to), not per type and J
     if (logged) return;
     logged = true;
-    std::fprintf(stderr, "strata: prompt MMQ (pointer table) skips the zero K tail (STRATA_MMQ_KTAIL=1): %s K = %lld "
+    std::fprintf(stderr, "strata: prompt MMQ (pointer table) skips the zero K tail (SAGUARO_MMQ_KTAIL=1): %s K = %lld "
                  "multiplies %d of %d blocks per row\n", type, (long long) k, blocks, padded);
 }
 
@@ -576,7 +576,7 @@ static void launch_mul_mat_q_tab_k(ggml_backend_cuda_context & ctx, const mmq_ar
          ntx_fd);
 }
 
-// STRATA_MMQ_KTAIL=1: the ktail instance for a product whose last iteration has a second half past the row
+// SAGUARO_MMQ_KTAIL=1: the ktail instance for a product whose last iteration has a second half past the row
 // (K = 640: the down product); every other product, and every product without the switch, runs the mirror above
 template <ggml_type type, int J>
 static void launch_mul_mat_q_tab(ggml_backend_cuda_context & ctx, const mmq_args & args, const mmq_x_tab & tab, cudaStream_t stream) {

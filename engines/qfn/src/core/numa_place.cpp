@@ -26,7 +26,7 @@ int device_numa_node(int dev) {
 
 bool numa_place_configure(const std::vector<int>& devices, std::string& why) {
     g_on = false;
-    if (strata::platform::numa_place_mode() == 0) { why = "off (STRATA_NUMA_PLACE unset)"; return false; }
+    if (strata::platform::numa_place_mode() == 0) { why = "off (SAGUARO_NUMA_PLACE unset)"; return false; }
     const int nn = strata::platform::numa_node_count();
     if (nn < 2) { why = "off: one NUMA node"; return false; }
     for (int& n : g_node) n = -1;

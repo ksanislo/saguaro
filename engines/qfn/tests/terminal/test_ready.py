@@ -35,8 +35,8 @@ class ReadyFileTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "ready.json"
             env = os.environ.copy()
-            env.pop("STRATA_API_KEY", None)
-            env.pop("STRATA_TELEMETRY_KEY", None)
+            env.pop("SAGUARO_API_KEY", None)
+            env.pop("SAGUARO_TELEMETRY_KEY", None)
             process = subprocess.Popen([sys.executable, "-m", "serve.server", "--engine", "mock", "--port", "0",
                                         "--ready-file", str(path)], cwd=root, env=env,
                                        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)

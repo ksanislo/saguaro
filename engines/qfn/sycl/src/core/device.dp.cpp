@@ -224,7 +224,7 @@ hipError_t mem_get_info(size_t* free_bytes, size_t* total_bytes) {
     if (free_bytes == nullptr || total_bytes == nullptr) return hipMemGetInfo(free_bytes, total_bytes);
     const hipError_t e = first_mem_get_info(free_bytes, total_bytes);
     static const bool off = [] {
-        const char* v = std::getenv("STRATA_WDDM_BUDGET");
+        const char* v = std::getenv("SAGUARO_WDDM_BUDGET");
         return v != nullptr && std::atoi(v) == 0;
     }();
     if (e != hipSuccess || off || free_bytes == nullptr || total_bytes == nullptr) return e;
@@ -242,7 +242,7 @@ hipError_t mem_get_info(size_t* free_bytes, size_t* total_bytes) {
     static std::atomic<bool> said{false};
     if (!said.exchange(true)) {
         std::fprintf(stderr, "strata: Windows budgets %llu of this card's %llu MiB for this process; free VRAM is "
-                             "counted within that (STRATA_WDDM_BUDGET=0: off)\n",
+                             "counted within that (SAGUARO_WDDM_BUDGET=0: off)\n",
                      (unsigned long long) (local.Budget >> 20), (unsigned long long) (*total_bytes >> 20));
     }
     *free_bytes = *free_bytes > withheld ? *free_bytes - withheld : 0;
@@ -371,7 +371,7 @@ DeviceInfo device_info(int ordinal) {
     // to a machine with an older card and would otherwise silently take whatever path the driver chose.  The HIP
     // backend checks the card against the architectures the binary was compiled for (and wave32).
 #if defined(STRATA_HIP_GFX906)
-    // AMD gfx906 (the STRATA_HIP_GFX906 compat build, not STRATA_USE_HIP): the build targets one gfx arch
+    // AMD gfx906 (the STRATA_HIP_GFX906 compat build, not SAGUARO_USE_HIP): the build targets one gfx arch
     // (CMAKE_HIP_ARCHITECTURES, wave64); a card of another arch fails at the first kernel launch with
     // hipErrorInvalidDeviceFunction.  gcnArchName says which it is.
     {

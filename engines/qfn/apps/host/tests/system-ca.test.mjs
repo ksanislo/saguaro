@@ -23,9 +23,9 @@ test('an empty or unreadable system store, or an older Node, changes nothing and
   assert.equal(useSystemCertificates({ getCACertificates() { throw new Error('store'); }, setDefaultCACertificates() {} }, {}), 'bundled');
 });
 
-test('STRATA_NO_SYSTEM_CA=1 leaves Node as it was', () => {
+test('SAGUARO_NO_SYSTEM_CA=1 leaves Node as it was', () => {
   const tls = fake(['S1']);
-  assert.equal(useSystemCertificates(tls, { STRATA_NO_SYSTEM_CA: '1' }), 'bundled');
+  assert.equal(useSystemCertificates(tls, { SAGUARO_NO_SYSTEM_CA: '1' }), 'bundled');
   assert.equal(tls.calls.length, 0);
 });
 

@@ -125,7 +125,7 @@ class FolderChangeMovesNothing(unittest.TestCase):
         weights.write_bytes(b"x" * 100)
         env = {"APPDATA": str(base / "appdata"), "XDG_CONFIG_HOME": str(base / "appdata")}
         with mock.patch.dict(os.environ, env), mock.patch.object(setup, "ROOT", root), mock.patch.object(setup, "_CONTROL_HOME", None):
-            os.environ.pop("STRATA_SETTINGS_FILE", None)
+            os.environ.pop("SAGUARO_SETTINGS_FILE", None)
             setup.settings_path().parent.mkdir(parents=True, exist_ok=True)
             setup.settings_path().write_text(json.dumps({"data_dir": str(old), "installs": []}), encoding="utf-8")
             with contextlib.redirect_stdout(io.StringIO()):

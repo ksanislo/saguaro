@@ -75,7 +75,7 @@ void bf16_rows_dot_multi_avx1(const uint16_t* w, int rows, int cols, const float
 }  // namespace strata::kernels::cpu
 
 // ---- The Unsloth / Q8_0 packs' expert rows (Q4_K, Q5_1, Q8_0) for several tokens at once, bit-exact against
-// ggml-cpu's own __AVX__ dots (ggml-cpu/arch/x86/quants.c, the STRATA_ISA_FLOOR=avx build): kq_avx2.cpp's scheme in
+// ggml-cpu's own __AVX__ dots (ggml-cpu/arch/x86/quants.c, the SAGUARO_ISA_FLOOR=avx build): kq_avx2.cpp's scheme in
 // 128-bit integer lanes.  Everything that depends only on the weights (nibbles, fifth bits, 6-bit scales, |q8|, the
 // fp16 scales) is done once per block; each token then runs ggml's integer chain and ggml's float operations in
 // ggml's order, so every token's result is ggml's to the bit whatever the group size (the `Fast` forms excepted).
@@ -106,7 +106,7 @@ inline float hsum_float_8(const __m256 x) {
 }
 inline __m256i set_m128i(__m128i hi, __m128i lo) { return _mm256_insertf128_si256(_mm256_castsi128_si256(lo), hi, 1); }
 
-// ---- Q4_K x Q8_K (ggml_vec_dot_q4_K_q8_K, __AVX__).  Fast (STRATA_CPU_KERNELS=fast): the two 16-value halves of a
+// ---- Q4_K x Q8_K (ggml_vec_dot_q4_K_q8_K, __AVX__).  Fast (SAGUARO_CPU_KERNELS=fast): the two 16-value halves of a
 // scale's 32 values summed in int16 (|sum| <= 7680) before one madd, half the madds; the same integer total spread
 // over the float lanes differently, so the result moves by float rounding only.
 template <int NT, bool Fast>

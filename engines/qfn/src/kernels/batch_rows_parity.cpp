@@ -1,5 +1,5 @@
-// src/kernels/batch_rows_parity.cpp - the batch window's one-launch-for-all-rows kernels (#2234, STRATA_BATCH_ATTN_ROWS /
-// STRATA_BATCH_GDN_GROUPS) against the per-row launches they replace, bitwise (GPU, synthetic, no model).
+// src/kernels/batch_rows_parity.cpp - the batch window's one-launch-for-all-rows kernels (#2234, SAGUARO_BATCH_ATTN_ROWS /
+// SAGUARO_BATCH_GDN_GROUPS) against the per-row launches they replace, bitwise (GPU, synthetic, no model).
 //
 //   1. qsa_block_scores_rows   == qsa_block_scores, one call per row, each row with its OWN indexer keys;
 //   2. qsa_decode_attn_batch_rows == qsa_decode_attn_batch, one call per row, each row over its OWN K/V pools

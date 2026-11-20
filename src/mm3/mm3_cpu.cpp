@@ -156,7 +156,7 @@ int CpuLane::auto_workers() {
     if (sched_getaffinity(0, sizeof set, &set) == 0) logical = CPU_COUNT(&set);
 #endif
     if (logical <= 0) logical = (int) std::thread::hardware_concurrency();
-    const char* v = ::mm3::env("MM3_LANE_FREE");   // (MAYA_MM3_LANE_FREE: the cores left free, 0: as before #552)
+    const char* v = ::mm3::env("MM3_LANE_FREE");   // (SAGUARO_MM3_LANE_FREE: the cores left free, 0: as before #552)
     return lane_default_workers(w, logical, v != nullptr ? std::max(0, std::atoi(v)) : 2);
 }
 

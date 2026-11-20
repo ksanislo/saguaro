@@ -60,11 +60,11 @@ void gdn_step_norm_multi(float* state, const float* h, int conv_channels, const 
 /// state `state + i * state_stride` over the first *n_keep rows of `h + i * h_stride` / `gate|beta + i * gb_stride`, as
 /// gdn_step_norm_multi's commit (n_keep set, no outputs).  Every layer's arithmetic is the per-layer call's, so the result
 /// is bitwise the loop of per-layer calls.  Returns false (nothing launched) when the per-layer commit would not take the
-/// state-only kernel (STRATA_GDN_SPLIT=1, STRATA_GDN_COMMIT_SPLIT=0, STRATA_DBG_GDN=1): the caller then keeps the loop.
+/// state-only kernel (SAGUARO_GDN_SPLIT=1, SAGUARO_GDN_COMMIT_SPLIT=0, SAGUARO_DBG_GDN=1): the caller then keeps the loop.
 bool gdn_commit_layers(float* state, int64_t state_stride, int64_t conv_off, const float* qkv, int64_t qkv_stride,
                        const float* h, int64_t h_stride, const float* gate, const float* beta, int64_t gb_stride,
                        int conv_channels, int h_k, int h_v, int n_max, int n_layers, const int32_t* n_keep, void* stream);
-/// (xq_out, S26 STRATA_QFUSE: also write the q8_1 image of output rows [t_out_begin, n_tok) there - the bytes
+/// (xq_out, S26 SAGUARO_QFUSE: also write the q8_1 image of output rows [t_out_begin, n_tok) there - the bytes
 /// native_quantize_q8_1(y + t_out_begin * value_dim, xq_out, value_dim, n_tok - t_out_begin) would write.)
 /// Spin until *flag >= value (a mapped host flag).  The value is fixed at capture, so several rings can be
 /// outstanding at once (the split verify window keeps two).
@@ -75,7 +75,7 @@ void wait_flag_ge(const uint32_t* flag, uint32_t value, void* stream);
 void wait_copy_i32_from_mapped(const uint32_t* flag, uint32_t value, int32_t* dst, const int32_t* src, int64_t n,
                                void* stream);
 
-/// Layer split, overlapped hand-off (STRATA_SPLIT_OVERLAP): dst (mapped) = [a (na) | b (nb) | c (nc)] with volatile
+/// Layer split, overlapped hand-off (SAGUARO_SPLIT_OVERLAP): dst (mapped) = [a (na) | b (nb) | c (nc)] with volatile
 /// stores, then the LAST block to finish raises *flag = 1 (mapped) after a system fence, so the next stage's GPU can
 /// start (wait_flag_ge(flag, 1)) without the host syncing this stage first.  `counter` is one device word, 0 between
 /// calls (the last block resets it).  Volatile because on RDNA a plain store to mapped memory can sit in the L2.
@@ -92,7 +92,7 @@ void wait_flag_ge_stamped(const uint32_t* flag, uint32_t value, unsigned long lo
 /// the GPU's %globaltimer (ns) into buf[i] (a one-thread kernel: the verify window's stage profiler).  Inside a PDL
 /// stretch (pdl.hpp) the stamp passes the early launch on, so a profiled window keeps the chain it measures.
 void gpu_stamp(unsigned long long* buf, int i, void* stream);
-/// an empty one-thread kernel (a graph node that does nothing: STRATA_DUMMY_NODES measures what a node costs in a window)
+/// an empty one-thread kernel (a graph node that does nothing: SAGUARO_DUMMY_NODES measures what a node costs in a window)
 void gpu_noop(void* stream);
 /// dst[r][0, w) = src[r][0, w) for `rows` rows of source stride `src_w` floats (the query half of each q/gate head
 /// pair): the strided device-to-device cudaMemcpy2DAsync as a kernel, so the window's chain stays kernel to kernel.
@@ -124,9 +124,9 @@ void embedding_gather_dev(const uint8_t* codes, const float* scales, const float
 /// R[t][c][:] = x[t][:] for the hc streams.
 void broadcast_streams(const float* x, float* R, int64_t n_embd, int hc, int n_tok, void* stream);
 /// out[:n_embd] = the mean of the hc streams of ONE row R[hc][n_embd] (the DFlash2 drafter's target features; only the
-/// STRATA_TAP_FILE hook calls it).
+/// SAGUARO_TAP_FILE hook calls it).
 void hc_mean_streams(const float* R, float* out, int64_t n_embd, int hc, void* stream);
-/// STRATA_ROUTE_STATS only: acc[r] += the number of ids of row r (k per row, n rows <= 8) that no earlier row of the window holds
+/// SAGUARO_ROUTE_STATS only: acc[r] += the number of ids of row r (k per row, n rows <= 8) that no earlier row of the window holds
 /// (duplicates inside a row count once).
 void route_marginal_stats(const int32_t* ids, int n, int k, unsigned long long* acc, void* stream);
 /// dst[:n] = src[(*index) * stride + :n]  (index read from device memory; a negative index copies nothing).
@@ -182,7 +182,7 @@ void row_top_prob_split(const float* logits, int n_rows, int n_vocab, const int3
 inline constexpr int kNonfiniteBlocks = 16;
 void logits_nonfinite_rows(const float* logits, int n_rows, int n, uint32_t* flags, void* stream);
 /// True where row_top_prob_split runs as its own kernel (CUDA; AMD keeps the one-block row_top_prob, so it calls
-/// that).  STRATA_MULTI_BLOCK_ARGMAX=0: off.
+/// that).  SAGUARO_MULTI_BLOCK_ARGMAX=0: off.
 bool multi_block_head_ops();
 /// True where the verify head's and the draft's greedy pick should be argmax_rows: sm_80 to sm_89 (the one-block
 /// kernel is slow there; sm_90+ has sample_tokens' cluster kernel, other cards keep sample_tokens).

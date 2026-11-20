@@ -1,4 +1,4 @@
-// STRATA_MMQ_DIRECT: the expert cache's slot guard (set_slot_guard), slot_room and slot_tail on the uniform cache
+// SAGUARO_MMQ_DIRECT: the expert cache's slot guard (set_slot_guard), slot_room and slot_tail on the uniform cache
 // (open: off_ empty, the stride is the largest blob) and on the sized one (open_sized: off_ holds each slot's start).
 // No guard asked (the default) must give today's sized layout byte for byte.  Needs a CUDA device (exits 77 without).
 #include "strata/core/expert_cache.hpp"

@@ -5,7 +5,7 @@
 //                 -> native_quant_h (signs, FWHT, Q8_0) -> native_down_rows
 // The reference:  the ops llama.cpp's build_lora_mm_id builds for a prism.hadamard weight - ggml_mul(x, signs),
 //                 llama_mul_mat_hadamard (reshape to [128, n/128], ggml_mul_mat(rot, .)), ggml_mul_mat(W', .) -
-//                 computed by ggml-cpu from the same checkout (STRATA_GGML_DIR = the agention llama.cpp fork).
+//                 computed by ggml-cpu from the same checkout (SAGUARO_GGML_DIR = the agention llama.cpp fork).
 // The rotation itself is computed two different ways (FWHT here, a dense 128x128 matmul there), so the two outputs
 // agree to float rounding plus the odd Q8_0 rounding flip, not bit for bit; the test bounds the relative error.
 //
@@ -303,7 +303,7 @@ int main(int argc, char** argv) {
         return rc;
     }
     // ggml type ids of the agention fork: 144 TQ2_T, 145 TQK6, 146 TQK7
-    if (GGML_TYPE_COUNT <= 146) { std::fprintf(stderr, "this ggml has no trellis types (build with STRATA_GGML_DIR = the agention fork): skipped\n"); return 77; }   // 77: ctest SKIP_RETURN_CODE (#3358)
+    if (GGML_TYPE_COUNT <= 146) { std::fprintf(stderr, "this ggml has no trellis types (build with SAGUARO_GGML_DIR = the agention fork): skipped\n"); return 77; }   // 77: ctest SKIP_RETURN_CODE (#3358)
     rc |= synthetic(8, 8);       // Q8_0: the fold's convention, against the unrotated float expert
     rc |= synthetic(145, 146);   // Gyro-S
     rc |= synthetic(144, 144);   // Gyro-M

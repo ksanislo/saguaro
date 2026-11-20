@@ -68,12 +68,12 @@ public:
     /// --mtp-draft-vocab FILE (opt-in; before bind): the draft head's token subset from FILE instead of
     /// rt/draft_vocab.bin (e.g. data/draft_vocab_en.bin, 40K tokens)
     void set_draft_vocab(const std::string& path) { dvocab_path_ = path; }
-    /// STRATA_MTP_TOP2=1 (diagnostic): draft j's runner-up token in the last draft() (-1 = unknown)
+    /// SAGUARO_MTP_TOP2=1 (diagnostic): draft j's runner-up token in the last draft() (-1 = unknown)
     static bool top2_env();
     int32_t top2(int j) const { return j >= 0 && j < (int) top2_.size() ? top2_[(size_t) j] : -1; }
     int max_t() const { return max_t_; }
     uint64_t vram_bytes() const { return vram_; }
-    /// The draft layer's K/V state (read-only: --serve's STRATA_STATE_HASH check hashes it)
+    /// The draft layer's K/V state (read-only: --serve's SAGUARO_STATE_HASH check hashes it)
     const QsaState& kv_state() const { return st_; }
     /// KV streaming: refill the ring of the drafter's window from its host copy for a sequence that continues at
     /// `upto` (a conversation-cache resume). No-op unless the drafter's K/V is a ring.
@@ -105,7 +105,7 @@ public:
     bool draft_first(int T, const float* R_row, int32_t token, int64_t cell, int32_t* drafts, std::string& err,
                      float* probs = nullptr, float min_p = 0.0f, int* n_drafts = nullptr);
 
-    /// COUPLED DRAFT SAMPLING (core/coupled_draft.hpp; STRATA_SPEC_COUPLED=1, set up by bind()): the request's
+    /// COUPLED DRAFT SAMPLING (core/coupled_draft.hpp; SAGUARO_SPEC_COUPLED=1, set up by bind()): the request's
     /// sampling.  A sampled request (temperature > 0, not greedy) then drafts by SAMPLING with the target's chain and
     /// the target's Philox draw for the verifying row, and `probs` is the draft's probability under that chain; a
     /// greedy one keeps the argmax drafts and their graphs.  A no-op when the switch is off.
@@ -120,7 +120,7 @@ public:
     // wait), its first `n_force` steps fed the given tokens instead of their own picks (teacher forcing: the drafts of
     // a window already in flight), each output read once the event after its step has completed.
     /// Before `load`: the round/step graphs get the forcing kernel (a no-op while its token is -1), and the drafter's
-    /// stream the highest priority (STRATA_MTP_PRIORITY=0: the default priority).
+    /// stream the highest priority (SAGUARO_MTP_PRIORITY=0: the default priority).
     void set_force_capture(bool on) { force_on_ = on; }
     /// The rows the next round reads (null: the bound `window_R`), copied into the bound buffer before the round.
     void set_source_R(const float* rows) { src_R_ = rows; }

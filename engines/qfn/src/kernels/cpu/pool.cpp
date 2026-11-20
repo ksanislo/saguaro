@@ -11,7 +11,7 @@
 #include <chrono>
 #include <immintrin.h>
 #if defined(_MSC_VER)
-#include <intrin.h>   // __cpuidex, __rdtsc (STRATA_POOL_UMWAIT)
+#include <intrin.h>   // __cpuidex, __rdtsc (SAGUARO_POOL_UMWAIT)
 #endif
 
 #include <cstdio>
@@ -35,23 +35,23 @@
 namespace strata::kernels::cpu {
 
 namespace {
-// STRATA_POOL_UMWAIT=<TSC cycles> (experimental, x86 WAITPKG only): a parked worker waits with UMONITOR/UMWAIT on the
+// SAGUARO_POOL_UMWAIT=<TSC cycles> (experimental, x86 WAITPKG only): a parked worker waits with UMONITOR/UMWAIT on the
 // epoch's cache line instead of spinning on _mm_pause.  It wakes when the host publishes (a write to that line) or
 // after the cycles, in the light C0.1 state; on a laptop the CPU then gives back the power the spin took, which the
-// GPU's share of the budget gets.  0 or unset (or no WAITPKG): the spin, unchanged.  STRATA_POOL_UMWAIT_C02=1: the
+// GPU's share of the budget gets.  0 or unset (or no WAITPKG): the spin, unchanged.  SAGUARO_POOL_UMWAIT_C02=1: the
 // deeper C0.2 state (slower wake).  MSVC x64 only for now (the intrinsics need no target flag there); other builds spin.
 uint64_t umwait_cycles() {
     static const uint64_t c = [] {
-        const char* e = std::getenv("STRATA_POOL_UMWAIT");
+        const char* e = std::getenv("SAGUARO_POOL_UMWAIT");
         if (e == nullptr || std::atoll(e) <= 0) return (uint64_t) 0;
 #if defined(_MSC_VER) && defined(_M_X64) && !defined(__clang__)   // MSVC proper: clang-cl (the Windows HIP build) has no WAITPKG intrinsics by default
         int r[4] = {0, 0, 0, 0};
         __cpuidex(r, 7, 0);
         if (((r[2] >> 5) & 1) == 0) {
-            std::fprintf(stderr, "strata: STRATA_POOL_UMWAIT: this CPU has no WAITPKG, the workers spin\n");
+            std::fprintf(stderr, "strata: SAGUARO_POOL_UMWAIT: this CPU has no WAITPKG, the workers spin\n");
             return (uint64_t) 0;
         }
-        std::fprintf(stderr, "strata: STRATA_POOL_UMWAIT: parked workers wait with UMWAIT (%lld cycles)\n", std::atoll(e));
+        std::fprintf(stderr, "strata: SAGUARO_POOL_UMWAIT: parked workers wait with UMWAIT (%lld cycles)\n", std::atoll(e));
         return (uint64_t) std::atoll(e);
 #else
         return (uint64_t) 0;
@@ -60,13 +60,13 @@ uint64_t umwait_cycles() {
     return c;
 }
 unsigned umwait_state() {
-    static const unsigned s = [] { const char* e = std::getenv("STRATA_POOL_UMWAIT_C02"); return e && *e == '1' ? 0u : 1u; }();
+    static const unsigned s = [] { const char* e = std::getenv("SAGUARO_POOL_UMWAIT_C02"); return e && *e == '1' ? 0u : 1u; }();
     return s;   // 1 = C0.1 (light), 0 = C0.2
 }
-// STRATA_POOL_UMWAIT_ESC=<TSC cycles> (experimental): an escalating wait - C0.1 for the first cycles of a park, C0.2 after
+// SAGUARO_POOL_UMWAIT_ESC=<TSC cycles> (experimental): an escalating wait - C0.1 for the first cycles of a park, C0.2 after
 // (a wait that has lasted that long is a GPU phase, a draft or a prompt read, where a slower wake costs little).
 uint64_t umwait_escalate() {
-    static const uint64_t c = [] { const char* e = std::getenv("STRATA_POOL_UMWAIT_ESC"); return e ? (uint64_t) (std::max)(0LL, std::atoll(e)) : (uint64_t) 0; }();
+    static const uint64_t c = [] { const char* e = std::getenv("SAGUARO_POOL_UMWAIT_ESC"); return e ? (uint64_t) (std::max)(0LL, std::atoll(e)) : (uint64_t) 0; }();
     return c;
 }
 
@@ -591,10 +591,10 @@ bool pin_this_thread(int core, [[maybe_unused]] int worker = -1) {
 }
 
 #if defined(__linux__)
-// Where the NUMA topology is read from: /sys. STRATA_TEST_SYSFS_ROOT=<dir> reads <dir>/devices/system/{node,cpu} instead,
+// Where the NUMA topology is read from: /sys. SAGUARO_TEST_SYSFS_ROOT=<dir> reads <dir>/devices/system/{node,cpu} instead,
 // so a test can give the pool a made-up two-node machine (pool_tasks_test); nobody sets it for real.
 std::string sysfs_root() {
-    const char* e = std::getenv("STRATA_TEST_SYSFS_ROOT");
+    const char* e = std::getenv("SAGUARO_TEST_SYSFS_ROOT");
     return e != nullptr && *e != '\0' ? std::string(e) : std::string("/sys");
 }
 
@@ -630,7 +630,7 @@ NumaSplitDecision decide_real_numa_split([[maybe_unused]] const std::vector<int>
                                          [[maybe_unused]] bool pinned) {
 #if defined(__linux__)
     // the expert source's own reading of it (expert_source.cpp): exactly "1"
-    const char* rotate = std::getenv("STRATA_EXCHANGE_ROTATE");
+    const char* rotate = std::getenv("SAGUARO_EXCHANGE_ROTATE");
     return decide_numa_split(thread_core, n_workers, pinned, rotate != nullptr && std::strcmp(rotate, "1") == 0, cpu_numa_node);
 #else
     NumaSplitDecision d;
@@ -686,7 +686,7 @@ void restore_thread_affinity(const ThreadAffinity& previous) {
 namespace {
 std::atomic<const ExpertPool*> g_diag_pool{nullptr};
 constexpr int kStagePools = 16;
-std::atomic<const ExpertPool*> g_stage_pools[kStagePools];   // STRATA_STAGE_SERVE: one per stage
+std::atomic<const ExpertPool*> g_stage_pools[kStagePools];   // SAGUARO_STAGE_SERVE: one per stage
 void diag_active_pool(std::FILE* f) {
     if (const ExpertPool* p = g_diag_pool.load()) p->diag(f);
     for (int i = 0; i < kStagePools; ++i)
@@ -752,17 +752,17 @@ ExpertPool::ExpertPool(int n_workers, bool pin, bool host_works, PoolAffinity af
     if (tasks < 0 || tasks > kMaxTasks) throw std::invalid_argument("expert pool tasks must be in 0..4096");
     pinned_ = pin;
     layout_ = logical_cpu_layout();   // now, before anything pins the caller (Linux reads the calling thread's allowed CPUs)
-    if (const char* e = std::getenv("STRATA_POOL_SPIN_US"))   // a test knob; see kSpinBeforeSleep
+    if (const char* e = std::getenv("SAGUARO_POOL_SPIN_US"))   // a test knob; see kSpinBeforeSleep
         spin_before_sleep_ = std::chrono::microseconds((std::max)(0, std::atoi(e)));
-    // STRATA_NUMA_SPLIT, read here for the worker count (the split itself is decided below, once the count is known).
-    // 0.2.2: with 2 or more NUMA nodes and neither variable set the split is tried by itself, and STRATA_NUMA_POOL=0 turns that
+    // SAGUARO_NUMA_SPLIT, read here for the worker count (the split itself is decided below, once the count is known).
+    // 0.2.2: with 2 or more NUMA nodes and neither variable set the split is tried by itself, and SAGUARO_NUMA_POOL=0 turns that
     // off (numa_pool.hpp).  One node: pick_numa_pool says Unchanged and nothing below differs from the pool before the split.
-    const char* env = std::getenv("STRATA_NUMA_SPLIT");
+    const char* env = std::getenv("SAGUARO_NUMA_SPLIT");
     const int numa_nodes = numa_node_count();
-    const NumaPoolPick pool_pick = pick_numa_pool(std::getenv("STRATA_NUMA_POOL"), env, numa_nodes);
+    const NumaPoolPick pool_pick = pick_numa_pool(std::getenv("SAGUARO_NUMA_POOL"), env, numa_nodes);
     if (!pool_pick.log.empty()) std::fprintf(stderr, "%s\n", pool_pick.log.c_str());
     if (pool_pick.choice == NumaPoolChoice::Off) env = nullptr;
-    bool auto_pool = pool_pick.choice == NumaPoolChoice::Auto;   // the split without STRATA_NUMA_SPLIT: only if it can run
+    bool auto_pool = pool_pick.choice == NumaPoolChoice::Auto;   // the split without SAGUARO_NUMA_SPLIT: only if it can run
     bool env_off = !auto_pool && (env == nullptr || *env == '\0' || std::strcmp(env, "0") == 0);
     bool env_known = auto_pool || (!env_off && (std::strcmp(env, "1") == 0 || std::strcmp(env, "test") == 0));
     const PoolPlanInput plan_in = pool_plan_input(topo_);
@@ -853,11 +853,11 @@ ExpertPool::ExpertPool(int n_workers, bool pin, bool host_works, PoolAffinity af
     plan_logical_ = plan_in.logical;
     if (n_ < 1) n_ = 1;
     prepare(false);
-    // STRATA_NUMA_SPLIT: decided here, before any worker starts (a worker counts into its slice's `parked` from its
+    // SAGUARO_NUMA_SPLIT: decided here, before any worker starts (a worker counts into its slice's `parked` from its
     // first instruction), and never revised.  Unset: the plan stays empty and nothing below runs.
     NumaSplitPlan plan;
     if (!env_off && !env_known) {
-        plan.why = std::string("unknown STRATA_NUMA_SPLIT value '") + env + "' (use 1 or test)";
+        plan.why = std::string("unknown SAGUARO_NUMA_SPLIT value '") + env + "' (use 1 or test)";
         std::fprintf(stderr, "strata cpu pool: NUMA split off: %s\n", plan.why.c_str());
     } else if (env_known) {
         plan.test = !auto_pool && std::strcmp(env, "test") == 0;
@@ -898,7 +898,7 @@ ExpertPool::ExpertPool(int n_workers, bool pin, bool host_works, PoolAffinity af
             for (int k : slice) ++slice_threads_[(size_t) k];
             if (auto_pool)
                 std::fprintf(stderr, "strata cpu pool: NUMA pool on: %d NUMA nodes found, one slice of the pool per node "
-                                     "(STRATA_NUMA_POOL=0 turns it off)\n", numa_nodes);
+                                     "(SAGUARO_NUMA_POOL=0 turns it off)\n", numa_nodes);
             if (plan.test)
                 std::fprintf(stderr, "strata cpu pool: NUMA split on (test, no real nodes): slice 0 = %d threads, "
                                      "slice 1 = %d threads\n", slice_threads_[0], slice_threads_[1]);
@@ -911,7 +911,7 @@ ExpertPool::ExpertPool(int n_workers, bool pin, bool host_works, PoolAffinity af
     }
     if (n_workers > 0) {
         // recommend, never force: a count above what this CPU uses well runs as configured, with a plain warning
-        // (STRATA_NUMA_SPLIT on: workers on the other socket are the point, that case is not warned about)
+        // (SAGUARO_NUMA_SPLIT on: workers on the other socket are the point, that case is not warned about)
         PoolPlanInput warn_in = plan_in;
         warn_in.span_packages = plan.on;
         static std::atomic<bool> warned{false};
@@ -926,7 +926,7 @@ ExpertPool::ExpertPool(int n_workers, bool pin, bool host_works, PoolAffinity af
 ExpertPool::ExpertPool(const std::vector<int>& cores, bool host_works, int tasks)
     : tasks_(tasks), host_works_(host_works) {
     if (tasks < 0 || tasks > kMaxTasks) throw std::invalid_argument("expert pool tasks must be in 0..4096");
-    if (const char* e = std::getenv("STRATA_POOL_SPIN_US"))
+    if (const char* e = std::getenv("SAGUARO_POOL_SPIN_US"))
         spin_before_sleep_ = std::chrono::microseconds((std::max)(0, std::atoi(e)));
     n_ = (std::max)(1, (int) cores.size());
     // no NUMA split and no g_numa_plan: a stage pool's cores sit on one node, the plan stays the engine pool's
@@ -1032,7 +1032,7 @@ void ExpertPool::worker(int id) {
         while (epoch_.load(std::memory_order_acquire) == seen) {
             if (stop_.load(std::memory_order_relaxed)) return;
 #if defined(_MSC_VER) && defined(_M_X64) && !defined(__clang__)   // MSVC proper: clang-cl (the Windows HIP build) has no WAITPKG intrinsics by default
-            if (um != 0) {   // STRATA_POOL_UMWAIT: wake on the publish's write to epoch_, or after `um` cycles
+            if (um != 0) {   // SAGUARO_POOL_UMWAIT: wake on the publish's write to epoch_, or after `um` cycles
                 _umonitor((void*) &epoch_);
                 if (epoch_.load(std::memory_order_acquire) != seen) break;
                 const uint64_t now = __rdtsc();
@@ -1209,7 +1209,7 @@ void ExpertPool::wait_done(int n) {
 void ExpertPool::drain(int id, ExpertScratch& scratch, uint32_t epoch) {
     const int s = numa_n_ == 0 ? 0 : id >= 0 ? wslice_[(size_t) id] : hslice_;
     for (;;) {
-        // STRATA_NUMA_SPLIT: a mode-5/6 batch lives on the slice heads, any other on `head_`; the epoch tag makes the
+        // SAGUARO_NUMA_SPLIT: a mode-5/6 batch lives on the slice heads, any other on `head_`; the epoch tag makes the
         // other family's claim fail, so `mode_` is never read before a claim has succeeded (pool.hpp)
         int ci = numa_n_ > 0 ? claim_slice(epoch, s) : -1;
         const bool sliced = ci >= 0;

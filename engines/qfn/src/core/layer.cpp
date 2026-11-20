@@ -454,7 +454,7 @@ bool moe_route_window(const WeightTable& tables, const ModelGeometry& g, int64_t
                       const float* x, float* logits, int32_t* ids, float* weights, int n, void* stream, std::string& err) {
     using namespace strata::kernels;
     const bool batched = native_bf16_projections && !(native_router_enabled() && g.n_expert == 512 && k == 10) &&
-                         !std::getenv("STRATA_ROUTE_PER_TOKEN");
+                         !std::getenv("SAGUARO_ROUTE_PER_TOKEN");
     if (!batched || n == 1) {
         for (int t = 0; t < n; ++t) {
             MoEBuffers mb = b;
@@ -466,7 +466,7 @@ bool moe_route_window(const WeightTable& tables, const ModelGeometry& g, int64_t
     const LayerView v(tables, layer);
     const WeightRef* w_router = v.get("ffn_gate_inp.weight");
     if (w_router == nullptr) { err = v.name("ffn_gate_inp.weight") + " is missing"; return false; }
-    if (std::getenv("STRATA_ROUTE_PROJ_PER_TOKEN"))
+    if (std::getenv("SAGUARO_ROUTE_PROJ_PER_TOKEN"))
         for (int t = 0; t < n; ++t)
             bf16_gemv_fp32_mmvf(x + t * g.n_embd, (const uint16_t*) w_router->data, logits + t * g.n_expert, g.n_embd,
                                 g.n_expert, stream);
@@ -591,7 +591,7 @@ std::atomic<uint64_t> g_kv_host_reserved{0};   // ... and the addresses the host
 // under_wddm() does (/dev/dxg, the device its GPU goes through to the Windows driver), the copy is anonymous memory
 // registered Portable|Mapped before any page is touched, which also leaves WSL's small cudaHostAlloc budget to the
 // staging buffers. Elsewhere cudaHostAlloc stays first. Either way the other method is the fallback when the first
-// is refused. STRATA_KV_HOST_REGISTER=1/0 forces registering first or cudaHostAlloc first. Like the cudaHostAlloc
+// is refused. SAGUARO_KV_HOST_REGISTER=1/0 forces registering first or cudaHostAlloc first. Like the cudaHostAlloc
 // copy it lives as long as the process.
 uint8_t* kv_host_alloc(uint64_t bytes) {
     auto host_alloc = [](uint64_t n) -> uint8_t* {
@@ -604,14 +604,14 @@ uint8_t* kv_host_alloc(uint64_t bytes) {
     return host_alloc(bytes);
 #else
     static const bool register_first = [] {
-        const char* e = std::getenv("STRATA_KV_HOST_REGISTER");
+        const char* e = std::getenv("SAGUARO_KV_HOST_REGISTER");
         if (e != nullptr && (e[0] == '0' || e[0] == '1')) return e[0] == '1';
         return std::filesystem::exists("/dev/dxg");
     }();
     auto register_anon = [](uint64_t n) -> uint8_t* {
         void* m = mmap(nullptr, (size_t) n, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         if (m == MAP_FAILED) return nullptr;
-        if (const int node = strata::core::numa_place_current_node(); node >= 0)   // STRATA_NUMA_PLACE: the stage's node
+        if (const int node = strata::core::numa_place_current_node(); node >= 0)   // SAGUARO_NUMA_PLACE: the stage's node
             (void) strata::platform::numa_bind(m, n, node, strata::platform::numa_place_mode() == 2);
         if (cudaHostRegister(m, (size_t) n, cudaHostRegisterPortable | cudaHostRegisterMapped) != cudaSuccess) {
             (void) cudaGetLastError();
@@ -634,9 +634,9 @@ uint8_t* kv_host_alloc(uint64_t bytes) {
 #endif
 }
 
-// ---- STRATA_KV_HOST_ELASTIC (default on with elastic slots; =0: off): an elastic slot state's host copy is one
+// ---- SAGUARO_KV_HOST_ELASTIC (default on with elastic slots; =0: off): an elastic slot state's host copy is one
 // address range for the whole context (MAP_NORESERVE: no RAM until pinned), each array pinned in steps of
-// STRATA_KV_HOST_STEP cells (8192) as the slot's cells grow (qsa_host_grow, from session_slot_fit) and unpinned past
+// SAGUARO_KV_HOST_STEP cells (8192) as the slot's cells grow (qsa_host_grow, from session_slot_fit) and unpinned past
 // what it keeps when it is trimmed.  The kernels keep the one pointer per array: a registered page's device address
 // is its host address on every card here (cudaDevAttrCanUseHostPointerForRegisteredMem, checked at the first state).
 #ifndef _WIN32
@@ -659,7 +659,7 @@ bool g_vram_main = false;   // qsa_set_vram_elastic_main: their VRAM pools and p
 std::atomic<bool> g_host_failed{false};   // qsa_host_pin_failed: the last qsa_host_grow ran out of RAM
 bool host_elastic_on() {
     static const bool on = [] {
-        const char* v = std::getenv("STRATA_KV_HOST_ELASTIC");
+        const char* v = std::getenv("SAGUARO_KV_HOST_ELASTIC");
         if (v != nullptr && v[0] == '0') return false;
         int n = 0;
         if (cudaGetDeviceCount(&n) != cudaSuccess || n < 1) { (void) cudaGetLastError(); return false; }
@@ -676,11 +676,11 @@ bool host_elastic_on() {
     }();
     return on;
 }
-// STRATA_KV_HOST_MIB=N: the K/V host copies pin at most N MiB in all (0: what the OS gives); past it a step fails as
+// SAGUARO_KV_HOST_MIB=N: the K/V host copies pin at most N MiB in all (0: what the OS gives); past it a step fails as
 // when the RAM is out
 uint64_t host_cap() {
     static const uint64_t cap = [] {
-        const char* v = std::getenv("STRATA_KV_HOST_MIB");
+        const char* v = std::getenv("SAGUARO_KV_HOST_MIB");
         const long long n = v != nullptr ? std::atoll(v) : 0;
         return n > 0 ? (uint64_t) n << 20 : (uint64_t) 0;
     }();
@@ -688,7 +688,7 @@ uint64_t host_cap() {
 }
 int64_t host_step_pages(int64_t page_size) {
     static const int64_t cells = [] {
-        const char* v = std::getenv("STRATA_KV_HOST_STEP");
+        const char* v = std::getenv("SAGUARO_KV_HOST_STEP");
         const long long n = v != nullptr ? std::atoll(v) : 0;
         return n > 0 ? (int64_t) n : (int64_t) 8192;
     }();
@@ -711,7 +711,7 @@ int32_t host_pool_make(const std::vector<uint64_t>& per, int64_t pages, int64_t 
                    MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
     if (m == MAP_FAILED) return -1;
     pool->base = (uint8_t*) (((uintptr_t) m + kHostPiece - 1) / kHostPiece * kHostPiece);
-    if (const int node = strata::core::numa_place_current_node(); node >= 0)   // STRATA_NUMA_PLACE: the stage's node
+    if (const int node = strata::core::numa_place_current_node(); node >= 0)   // SAGUARO_NUMA_PLACE: the stage's node
         (void) strata::platform::numa_bind(pool->base, (size_t) pool->total, node, strata::platform::numa_place_mode() == 2);
     (void) cudaGetDevice(&pool->dev);
     for (size_t i = 0; i < per.size(); ++i) arr[i] = pool->base + pool->off[i];
@@ -759,7 +759,7 @@ bool qsa_host_grow(const QsaState& st, int64_t cells) {
                 (void) cudaGetLastError();
                 g_host_failed = true;
                 std::fprintf(stderr, "strata: KV streaming: pinning more of a slot's host copy failed (%s; %.2f GiB pinned "
-                                     "for K/V in all)\n", capped ? "STRATA_KV_HOST_MIB reached" : cudaGetErrorString(e),
+                                     "for K/V in all)\n", capped ? "SAGUARO_KV_HOST_MIB reached" : cudaGetErrorString(e),
                              (double) g_kv_host_bytes.load() / 1073741824.0);
                 for (size_t j = 0; j < p.per.size(); ++j)
                     for (; p.pinned[j] > had[j]; --p.pinned[j]) {
@@ -938,9 +938,9 @@ KvPlan kv_plan(const QsaShapes& s, int64_t max_cells, int64_t ring_cells) {
     p.slots = p.pages;
     p.pooled_rows = max_cells / s.idx_block + 2;
     if (g_kv_resident <= 0 || ring_cells < 0) return p;   // ring_cells < 0: always fully resident
-    // A/B only: STRATA_KV_RING_OFF keeps the drafter fully resident, STRATA_KV_MAIN_OFF the main layers
-    static const bool ring_off = std::getenv("STRATA_KV_RING_OFF") != nullptr;
-    static const bool main_off = std::getenv("STRATA_KV_MAIN_OFF") != nullptr;
+    // A/B only: SAGUARO_KV_RING_OFF keeps the drafter fully resident, SAGUARO_KV_MAIN_OFF the main layers
+    static const bool ring_off = std::getenv("SAGUARO_KV_RING_OFF") != nullptr;
+    static const bool main_off = std::getenv("SAGUARO_KV_MAIN_OFF") != nullptr;
     if (ring_cells > 0 ? ring_off : main_off) return p;
     if (ring_cells > 0) {
         const int64_t r = (ring_cells + s.page_size - 1) / s.page_size;
@@ -972,7 +972,7 @@ std::vector<uint64_t> kv_per_slot(const QsaShapes& s, bool hybrid, bool q4, bool
     return {slot_rows * s.head_dim * 2, slot_rows * s.head_dim * 2};
 }
 
-// ---- the elastic --batch slot sessions (STRATA_ELASTIC_SLOTS, qsa_slot_*): a slot state's arrays larger than a chunk
+// ---- the elastic --batch slot sessions (SAGUARO_ELASTIC_SLOTS, qsa_slot_*): a slot state's arrays larger than a chunk
 // in a VMM range of its own on its device, backed from that device's slot budget as its conversation grows
 struct SlotPool {
     strata::core::VmmRange range;
@@ -1233,7 +1233,7 @@ void qsa_set_host_elastic_main(bool on) {
 }
 
 namespace {
-// ---- STRATA_ROPE_GROW (default on with the elastic solo pools, past a 262144 context; =0: off): a session's RoPE table
+// ---- SAGUARO_ROPE_GROW (default on with the elastic solo pools, past a 262144 context; =0: off): a session's RoPE table
 // in two VMM ranges of the whole context, the first 262144 positions backed at load and more from the card's slot budget
 // as conversations pass them (qsa_rope_grow at session_slot_fit / session_vram_fit).  Its address never moves, so the
 // captured graphs and the states sharing it keep their pointers.
@@ -1245,13 +1245,13 @@ struct RopeGrow {
 };
 std::vector<std::unique_ptr<RopeGrow>> g_rope_grow;
 std::mutex g_rope_mu;
-// every table a session owns (grown or whole), so a STRATA_YARN_ELASTIC level step rebuilds them in place
+// every table a session owns (grown or whole), so a SAGUARO_YARN_ELASTIC level step rebuilds them in place
 struct RopeOwner {
     float *cos = nullptr, *sin = nullptr;
     int n_rot = 0;
     int64_t max_cells = 0;
     int dev = 0;
-    RopeGrow* yarn = nullptr;   // STRATA_YARN_ELASTIC: the card's YaRN-level table (positions kRopeYarnOff + p)
+    RopeGrow* yarn = nullptr;   // SAGUARO_YARN_ELASTIC: the card's YaRN-level table (positions kRopeYarnOff + p)
 };
 std::vector<RopeOwner> g_rope_owners;
 bool g_rope_rows = false;             // qsa_set_rope_yarn: per-conversation levels
@@ -1264,7 +1264,7 @@ RopeGrow* yarn_of(const float* cos_tab) {
 
 constexpr int64_t kRopeBase = 262144, kRopeMargin = 4096;   // backed at load; past the cells asked for (drafts)
 bool rope_grow_on(int64_t max_cells) {
-    static const bool env = [] { const char* v = std::getenv("STRATA_ROPE_GROW"); return v == nullptr || v[0] != '0'; }();
+    static const bool env = [] { const char* v = std::getenv("SAGUARO_ROPE_GROW"); return v == nullptr || v[0] != '0'; }();
     return env && g_vram_main && max_cells > kRopeBase && strata::core::vmm_available();
 }
 RopeGrow* rope_grow_of(const float* cos_tab) {
@@ -1429,7 +1429,7 @@ bool qsa_rope_move(const QsaShapes& s, const std::vector<std::pair<const QsaStat
         (thw != nullptr && (cudaHostAlloc((void**) &pthw, (size_t) P * 3 * sizeof(int32_t),
                                           cudaHostAllocMapped | cudaHostAllocPortable) != cudaSuccess ||
                             cudaHostGetDevicePointer((void**) &pthw_dev, pthw, 0) != cudaSuccess))) {
-        std::fprintf(stderr, "strata: STRATA_YARN_ELASTIC: no pinned memory for the re-rotation table\n");
+        std::fprintf(stderr, "strata: SAGUARO_YARN_ELASTIC: no pinned memory for the re-rotation table\n");
         if (tab != nullptr) cudaFreeHost(tab);
         return false;
     }
@@ -1662,7 +1662,7 @@ uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, Q
         const uint64_t bytes = (uint64_t) max_cells * (s.n_rot / 2) * 4;
         if (!r->cos.reserve(bytes) || !r->sin.reserve(bytes) ||
             !rope_map(*r, kRopeBase - kRopeMargin, [] { return (strata::core::VmmChunk) 0; })) {
-            std::fprintf(stderr, "strata: STRATA_ROPE_GROW: the RoPE table's addresses or first positions failed\n");
+            std::fprintf(stderr, "strata: SAGUARO_ROPE_GROW: the RoPE table's addresses or first positions failed\n");
             return 0;
         }
         st.cos_tab = (float*) r->cos.base();
@@ -1689,7 +1689,7 @@ uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, Q
     st.host_step[strata::kernels::kStepCount] = 0;
     // KV streaming: the authoritative K/V of every cell, pinned and device-mapped, in the identity layout
     st.host = strata::kernels::KvHostPools{};
-    uint8_t* hel[4] = {};   // STRATA_KV_HOST_ELASTIC: an elastic slot's host arrays, addresses only until pinned
+    uint8_t* hel[4] = {};   // SAGUARO_KV_HOST_ELASTIC: an elastic slot's host arrays, addresses only until pinned
 #ifndef _WIN32
     if (((p.mode == 1 && (slot_G > 0 || g_host_main)) || (p.mode == 2 && host_elastic)) && host_elastic_on())
         st.host_elastic = host_pool_make(kv_per_slot(s, st.kv_hybrid, st.kv_q4, st.kv_int8), pages, s.page_size, hel);
@@ -1761,7 +1761,7 @@ uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, Q
                 r->sc = g_rope_yarn;
                 const uint64_t bytes = (uint64_t) max_cells * (s.n_rot / 2) * 4;
                 if (!r->cos.reserve(bytes) || !r->sin.reserve(bytes)) {
-                    std::fprintf(stderr, "strata: STRATA_YARN_ELASTIC: the YaRN table's addresses failed\n");
+                    std::fprintf(stderr, "strata: SAGUARO_YARN_ELASTIC: the YaRN table's addresses failed\n");
                     return 0;
                 }
                 y = r.get();
@@ -1775,7 +1775,7 @@ uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, Q
                                                 strata::kernels::kRopeYarnOff + (int) max_cells, strata::kernels::rope_scaling(),
                                                 strata::kernels::kRopeYarnOff);
         }
-        if (s.n_rot == 64 && !g_rope_rows)   // the native and prompt-path rope kernels read it (mrope.hpp, STRATA_ROPE_TABLE=1)
+        if (s.n_rot == 64 && !g_rope_rows)   // the native and prompt-path rope kernels read it (mrope.hpp, SAGUARO_ROPE_TABLE=1)
             strata::kernels::rope_table_set(st.cos_tab, st.sin_tab, (int) max_cells, strata::kernels::rope_scaling());
     }
     // the page table starts as the IDENTITY, which is the simplest legal mapping and what a caller that does
@@ -2064,7 +2064,7 @@ if (st.kv_hybrid) {
     strata::kernels::kv_append_q4_step(st.v_q4, st.v_q4, st.page_table, st.step, b.vcur, b.vcur, s, stream,
                                        mirror ? &hv : nullptr);
 } else {
-if (st.kv_rot) {   // rotated K and V (kv_q4.hpp): Q4_0, and INT8 with STRATA_KV_ROT=1
+if (st.kv_rot) {   // rotated K and V (kv_q4.hpp): Q4_0, and INT8 with SAGUARO_KV_ROT=1
     strata::kernels::fwht256_inplace_cuda(b.kcur, g.n_head_kv, stream);
     strata::kernels::fwht256_inplace_cuda(b.vcur, g.n_head_kv, stream);
 }
@@ -2387,7 +2387,7 @@ st_begin(layer, 0, stream);
         fa.eps = RMS_EPS; fa.lo = bb.gr.lo; fa.rs = bb.gr_rs; fa.inject_out = bb.inject; fa.mixed = bb.mixed;
         strata::kernels::fused_gr_read(fa, stream);
     } else {
-    if (w_down[0]->q8_scale || w_up[0]->q8_scale) { err = "STRATA_HC_REQ8 needs the fused hyper-connection read"; return false; }    gr_read(R, (const float*) w_norm[0]->data, NativeDense::hc_bf16_view(*w_down[0], stream, 0, 1),            NativeDense::hc_bf16_view(*w_up[0], stream, 1, 1), (const uint16_t*) w_inject[0]->data, RMS_EPS, gs, bb.gr, bb.mixed,            bb.inject, stream);
+    if (w_down[0]->q8_scale || w_up[0]->q8_scale) { err = "SAGUARO_HC_REQ8 needs the fused hyper-connection read"; return false; }    gr_read(R, (const float*) w_norm[0]->data, NativeDense::hc_bf16_view(*w_down[0], stream, 0, 1),            NativeDense::hc_bf16_view(*w_up[0], stream, 1, 1), (const uint16_t*) w_inject[0]->data, RMS_EPS, gs, bb.gr, bb.mixed,            bb.inject, stream);
     }
     st_end(layer, 0, stream);    dump_half(bb, g, layer, bb.inject, 2 * g.n_embd, g.hc, stream);        }
     if (run1) {
@@ -2410,7 +2410,7 @@ st_begin(layer, 3, stream);
         fa.eps = RMS_EPS; fa.lo = bb.gr.lo; fa.rs = bb.gr_rs; fa.inject_out = bb.inject2; fa.mixed = bb.mixed;
         strata::kernels::fused_gr_read(fa, stream);
     } else {
-    if (w_down[1]->q8_scale || w_up[1]->q8_scale) { err = "STRATA_HC_REQ8 needs the fused hyper-connection read"; return false; }    gr_read(R, (const float*) w_norm[1]->data, NativeDense::hc_bf16_view(*w_down[1], stream, 0, 1),            NativeDense::hc_bf16_view(*w_up[1], stream, 1, 1), (const uint16_t*) w_inject[1]->data, RMS_EPS, gs, bb.gr, bb.mixed,            bb.inject, stream);
+    if (w_down[1]->q8_scale || w_up[1]->q8_scale) { err = "SAGUARO_HC_REQ8 needs the fused hyper-connection read"; return false; }    gr_read(R, (const float*) w_norm[1]->data, NativeDense::hc_bf16_view(*w_down[1], stream, 0, 1),            NativeDense::hc_bf16_view(*w_up[1], stream, 1, 1), (const uint16_t*) w_inject[1]->data, RMS_EPS, gs, bb.gr, bb.mixed,            bb.inject, stream);
     }
     st_end(layer, 3, stream);        }
     if (run4) {

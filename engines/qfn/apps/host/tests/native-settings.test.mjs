@@ -12,10 +12,10 @@ test('MCP secrets round trip masked values and reject malformed transport settin
  for(const value of [{x:{command:'node',url:'https://example.test'}},{x:{url:'file:///tmp'}},{x:{command:'node',cwd:123}},{x:{url:'https://example.test',headers:{Authorization:'secret\r\nX: bad'}}},{x:{command:'node',env:{KEY:'••••••••'}}}])assert.throws(()=>validateMcpServers(value));
 });
 test('environment masks preserve credentials and unrelated existing configuration',()=>{
- const previous={PATH:'/native/bin',STRATA_API_KEY:'private',STRATA_PREFILL:'2'};
- assert.deepEqual(publicNativeEnv(previous),{STRATA_API_KEY:'••••••••',STRATA_PREFILL:'2'});
- assert.deepEqual(restoreNativeEnv({STRATA_API_KEY:'••••••••',STRATA_PREFILL:'3'},previous),{...previous,STRATA_PREFILL:'3'});
- assert.throws(()=>restoreNativeEnv({STRATA_TOKEN:'••••••••'}));
+ const previous={PATH:'/native/bin',SAGUARO_API_KEY:'private',SAGUARO_PREFILL:'2'};
+ assert.deepEqual(publicNativeEnv(previous),{SAGUARO_API_KEY:'••••••••',SAGUARO_PREFILL:'2'});
+ assert.deepEqual(restoreNativeEnv({SAGUARO_API_KEY:'••••••••',SAGUARO_PREFILL:'3'},previous),{...previous,SAGUARO_PREFILL:'3'});
+ assert.throws(()=>restoreNativeEnv({SAGUARO_TOKEN:'••••••••'}));
 });
 test('chat accepts bounded attached images and rejects remote or oversized image payloads',()=>{
  const photo={name:'photo.png',url:'data:image/png;base64,aGVsbG8='};assert.deepEqual(validateChatImages([photo]),[photo]);

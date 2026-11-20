@@ -157,7 +157,7 @@ class ModelOption(unittest.TestCase):
     def test_command_line(self):
         """The parser takes any name (no fixed choices) and refuses an unknown one with the list."""
         r = subprocess.run([sys.executable, str(Path(maya.__file__)), "--model", "glm-maya-zz", "--check"],
-                           capture_output=True, text=True, timeout=120, env=dict(maya.os.environ, MAYA_SH="1"))
+                           capture_output=True, text=True, timeout=120, env=dict(maya.os.environ, SAGUARO_SH="1"))
         self.assertEqual(r.returncode, 2, r.stderr)
         self.assertIn("not a model Saguaro knows", r.stderr)
 
@@ -167,7 +167,7 @@ def v1129_configs(root: Path) -> dict:
     cfgs = {
         "maya-maya-s24.json": {"exe": str(root / "build/maya"), "args": ["--glm-pack", "/m/Maya-S24/pack",
                                                                            "--max-context", "65536"],
-                               "model_name": "glm-5.3-flash", "env": {"MAYA_GLM_CPU_LANE": "8"},
+                               "model_name": "glm-5.3-flash", "env": {"SAGUARO_GLM_CPU_LANE": "8"},
                                "installer": {"models_dir": "/m", "quant": "Maya-S24", "draft": "mtp"}},
         "maya-ds4.json": {"exe": str(root / "build/maya-ds4"), "args": ["--pack", "/m/D/maya-ds4", "--max-context",
                                                                         "65536", "--tp", "2"],

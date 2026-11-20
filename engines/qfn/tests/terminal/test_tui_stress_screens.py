@@ -185,7 +185,7 @@ class SetupGuard(unittest.TestCase):
         env = mock.patch.dict(os.environ, {"APPDATA": str(self.base / "appdata"), "XDG_CONFIG_HOME": str(self.base / "appdata")})
         env.start()
         self.addCleanup(env.stop)
-        os.environ.pop("STRATA_SETTINGS_FILE", None)
+        os.environ.pop("SAGUARO_SETTINGS_FILE", None)
         for patcher in (mock.patch.object(setup, "ROOT", self.root), mock.patch.object(setup, "_CONTROL_HOME", None)):
             patcher.start()
             self.addCleanup(patcher.stop)

@@ -1,5 +1,5 @@
 // Recovered from the Claude Daily merge parity harness (lab/wip-0809), extended to the Daily's chunk kernel.
-// src/kernels/qsa_merge_daily_parity.cpp - the Daily's decode attention (STRATA_ATTN_DAILY=1: attn_chunk_kernel_pre75
+// src/kernels/qsa_merge_daily_parity.cpp - the Daily's decode attention (SAGUARO_ATTN_DAILY=1: attn_chunk_kernel_pre75
 // and attn_merge_v2_kernel) against upstream's (attn_chunk_kernel, attn_merge_kernel), bitwise (GPU, synthetic, no
 // model).
 //

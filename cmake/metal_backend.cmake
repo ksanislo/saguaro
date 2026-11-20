@@ -145,14 +145,14 @@ if(MAYA_METAL_TESTS)
   # the same gates on ggml-cpu (the oracle backend), and with the expert pool at its floor and small slices
   add_test(NAME metal_model_test_cpu COMMAND metal_model_test small)
   add_test(NAME metal_model_test_evict COMMAND metal_model_test small)
-  set_tests_properties(metal_model_test_cpu PROPERTIES ENVIRONMENT MAYA_METAL_CPU=1)
+  set_tests_properties(metal_model_test_cpu PROPERTIES ENVIRONMENT SAGUARO_METAL_CPU=1)
   set_tests_properties(metal_model_test_evict PROPERTIES
-                       ENVIRONMENT "MAYA_METAL_POOL_SLOTS=1;MAYA_METAL_UBATCH=3;MAYA_METAL_ATTN_CHUNK=2")
+                       ENVIRONMENT "SAGUARO_METAL_POOL_SLOTS=1;SAGUARO_METAL_UBATCH=3;SAGUARO_METAL_ATTN_CHUNK=2")
   # verify windows (speculative decoding): partly wrong drafts must decode exactly as plain decoding does
   add_test(NAME metal_model_window COMMAND metal_model_test window data/glm5-synth.gguf 40)
   # a 2048-token slice gathered 4 tokens a chunk: the graph outgrows any fixed budget (--ubatch 2048 aborted)
   add_test(NAME metal_model_big_slice COMMAND metal_model_test prefill data/glm5-synth.gguf 2048)
-  set_tests_properties(metal_model_big_slice PROPERTIES ENVIRONMENT "MAYA_METAL_UBATCH=2048;MAYA_METAL_ATTN_CHUNK=4")
+  set_tests_properties(metal_model_big_slice PROPERTIES ENVIRONMENT "SAGUARO_METAL_UBATCH=2048;SAGUARO_METAL_ATTN_CHUNK=4")
   set_tests_properties(metal_model_test metal_model_test_cpu metal_model_test_evict metal_model_window
                        metal_model_big_slice PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
   # the 45-layer fixture: its 1.2 GB GGUF is generated into the build tree (tools/glm_big_fixture.py needs numpy)
@@ -166,11 +166,11 @@ if(MAYA_METAL_TESTS)
     add_test(NAME metal_model_big_test_evict
              COMMAND metal_model_test big ${CMAKE_CURRENT_BINARY_DIR}/glm5-big-fixture.gguf)
     set_tests_properties(metal_model_big_test_evict PROPERTIES
-                         ENVIRONMENT "MAYA_METAL_POOL_SLOTS=1;MAYA_METAL_UBATCH=64")
+                         ENVIRONMENT "SAGUARO_METAL_POOL_SLOTS=1;SAGUARO_METAL_UBATCH=64")
     add_test(NAME metal_model_big_window COMMAND metal_model_test window ${CMAKE_CURRENT_BINARY_DIR}/glm5-big-fixture.gguf 48)
     add_test(NAME metal_model_big_window_evict
              COMMAND metal_model_test window ${CMAKE_CURRENT_BINARY_DIR}/glm5-big-fixture.gguf 48)
-    set_tests_properties(metal_model_big_window_evict PROPERTIES ENVIRONMENT "MAYA_METAL_POOL_SLOTS=1")
+    set_tests_properties(metal_model_big_window_evict PROPERTIES ENVIRONMENT "SAGUARO_METAL_POOL_SLOTS=1")
     # MTP drafting (the NextN block, tools/glm_mtp_fixture.py adds one to the fixtures) decodes as plain decoding does
     add_test(NAME metal_mtp_gen
              COMMAND ${MAYA_PYTHON3} ${CMAKE_CURRENT_SOURCE_DIR}/tools/glm_mtp_fixture.py
@@ -182,7 +182,7 @@ if(MAYA_METAL_TESTS)
     add_test(NAME metal_model_mtp COMMAND metal_model_test mtp ${CMAKE_CURRENT_BINARY_DIR}/glm5-mtp-small.gguf 40)
     add_test(NAME metal_model_big_mtp COMMAND metal_model_test mtp ${CMAKE_CURRENT_BINARY_DIR}/glm5-mtp-big.gguf 48)
     add_test(NAME metal_model_big_mtp_evict COMMAND metal_model_test mtp ${CMAKE_CURRENT_BINARY_DIR}/glm5-mtp-big.gguf 48)
-    set_tests_properties(metal_model_big_mtp_evict PROPERTIES ENVIRONMENT "MAYA_METAL_POOL_SLOTS=1")
+    set_tests_properties(metal_model_big_mtp_evict PROPERTIES ENVIRONMENT "SAGUARO_METAL_POOL_SLOTS=1")
     # DFlash2 drafting (tools/glm_dflash_fixture.py: a drafter for the 45-layer fixture, its KV ring wrapping)
     add_test(NAME metal_dflash_gen
              COMMAND ${MAYA_PYTHON3} ${CMAKE_CURRENT_SOURCE_DIR}/tools/glm_dflash_fixture.py
@@ -199,7 +199,7 @@ if(MAYA_METAL_TESTS)
     add_test(NAME metal_model_big_prefill COMMAND metal_model_test prefill ${CMAKE_CURRENT_BINARY_DIR}/glm5-big-q8.gguf 512)
     add_test(NAME metal_model_big_prefill_evict
              COMMAND metal_model_test prefill ${CMAKE_CURRENT_BINARY_DIR}/glm5-big-q8.gguf 512)
-    set_tests_properties(metal_model_big_prefill_evict PROPERTIES ENVIRONMENT "MAYA_METAL_POOL_SLOTS=1")
+    set_tests_properties(metal_model_big_prefill_evict PROPERTIES ENVIRONMENT "SAGUARO_METAL_POOL_SLOTS=1")
     # 16 heads: the DSA products take ggml-metal's mul_mm (dsa_mm), the gathers padded and not, tails of 1-4 tokens
     add_test(NAME metal_wide_gen
              COMMAND ${MAYA_PYTHON3} ${CMAKE_CURRENT_SOURCE_DIR}/tools/glm_mtp_fixture.py --wide --no-nextn
@@ -215,9 +215,9 @@ if(MAYA_METAL_TESTS)
     # the same with the latent kept F32 (--kv-f32): ggml_sparse_mla's F32 kernel
     add_test(NAME metal_model_wide512_prefill_f32
              COMMAND metal_model_test prefill ${CMAKE_CURRENT_BINARY_DIR}/glm5-wide512.gguf 300)
-    set_tests_properties(metal_model_wide512_prefill_f32 PROPERTIES ENVIRONMENT "MAYA_METAL_ATTN_CHUNK=5;MAYA_METAL_KV_F32=1"
+    set_tests_properties(metal_model_wide512_prefill_f32 PROPERTIES ENVIRONMENT "SAGUARO_METAL_ATTN_CHUNK=5;SAGUARO_METAL_KV_F32=1"
                          WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} FIXTURES_REQUIRED metal_mtp_gguf)
-    set_tests_properties(metal_model_wide_prefill metal_model_wide512_prefill PROPERTIES ENVIRONMENT "MAYA_METAL_ATTN_CHUNK=5"
+    set_tests_properties(metal_model_wide_prefill metal_model_wide512_prefill PROPERTIES ENVIRONMENT "SAGUARO_METAL_ATTN_CHUNK=5"
                          WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} FIXTURES_REQUIRED metal_mtp_gguf)
     set_tests_properties(metal_model_big_prefill metal_model_big_prefill_evict PROPERTIES
                          WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} FIXTURES_REQUIRED metal_mtp_gguf TIMEOUT 3600)

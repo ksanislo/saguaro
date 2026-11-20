@@ -3,14 +3,14 @@ and `strata launch` all ask.
 
 Three kinds of place hold a model's run config (`strata-<tag>.json`), looked at in this order, the first that has any is the main one:
 
-* explicit   STRATA_INSTALL_DIR or an --install-dir argument (it is the only place looked at);
+* explicit   SAGUARO_INSTALL_DIR or an --install-dir argument (it is the only place looked at);
 * here       the Terminal's own folder, when it has run configs (a source checkout that ran setup);
 * remembered the folders earlier Strata installs wrote into the user's settings file (``installs``);
 * app        the desktop app's install folder, which the Terminal shares: ``<components>/../install`` (Windows
              ``%LOCALAPPDATA%\\Strata\\install``, Linux and Mac ``$XDG_DATA_HOME/strata/install``, default ``~/.local/share/strata/install``).
              The app's own settings file (``app-settings.json`` beside it) names its data folder and installs.
 
-The desktop app itself (it sets STRATA_SETTINGS_FILE) never adopts an older command-line install, so for it only the explicit place, its
+The desktop app itself (it sets SAGUARO_SETTINGS_FILE) never adopts an older command-line install, so for it only the explicit place, its
 own install folder and its own settings file count. Everything here is read-only: nothing is created, copied or moved.
 
 The data folder (models, packs, mtp) is found the same way: the person's own setting first, then the app's data folder, then a
@@ -57,8 +57,8 @@ def app_settings_file(environ=None, *, windows: bool | None = None, home: Path |
 
 
 def in_app_mode(environ=None) -> bool:
-    """True inside the desktop app's own processes: they set STRATA_SETTINGS_FILE and never adopt an older install."""
-    return bool((os.environ if environ is None else environ).get("STRATA_SETTINGS_FILE"))
+    """True inside the desktop app's own processes: they set SAGUARO_SETTINGS_FILE and never adopt an older install."""
+    return bool((os.environ if environ is None else environ).get("SAGUARO_SETTINGS_FILE"))
 
 
 def documents_dirs(environ=None, *, windows: bool | None = None, home: Path | None = None) -> list[Path]:
@@ -66,7 +66,7 @@ def documents_dirs(environ=None, *, windows: bool | None = None, home: Path | No
     environ = os.environ if environ is None else environ
     home = _home(home)
     out: list[Path] = []
-    explicit = environ.get("STRATA_DOCUMENTS_DIR")
+    explicit = environ.get("SAGUARO_DOCUMENTS_DIR")
     if explicit:
         out.append(Path(explicit))
     if _windows(windows):
@@ -121,10 +121,10 @@ def _installs_in(settings: dict) -> list[Path]:
 
 
 def own_settings_file(environ=None, *, windows: bool | None = None, home: Path | None = None) -> Path:
-    """The settings file this process uses: the app's (STRATA_SETTINGS_FILE), else the command-line Strata's (%APPDATA% / ~/.config)."""
+    """The settings file this process uses: the app's (SAGUARO_SETTINGS_FILE), else the command-line Strata's (%APPDATA% / ~/.config)."""
     environ = os.environ if environ is None else environ
-    if environ.get("STRATA_SETTINGS_FILE"):
-        return Path(environ["STRATA_SETTINGS_FILE"])
+    if environ.get("SAGUARO_SETTINGS_FILE"):
+        return Path(environ["SAGUARO_SETTINGS_FILE"])
     home = _home(home)
     if _windows(windows):
         return Path(environ.get("APPDATA") or str(home / "AppData" / "Roaming")) / "Strata" / "settings.json"
@@ -161,12 +161,12 @@ def places(*, here: Path | None = None, explicit: str | os.PathLike | None = Non
            home: Path | None = None) -> list[Place]:
     """Every folder that holds run configs, in the order described above. An explicit folder is the only one."""
     environ = os.environ if environ is None else environ
-    raw = explicit if explicit is not None else environ.get("STRATA_INSTALL_DIR")
+    raw = explicit if explicit is not None else environ.get("SAGUARO_INSTALL_DIR")
     if raw is not None:
         p = Path(raw).expanduser()
         return [Place(p, "explicit", len(config_files(p)))]
     cands: list[tuple[Path, str]] = []
-    data_root = environ.get("STRATA_DATA_DIR")
+    data_root = environ.get("SAGUARO_DATA_DIR")
     if data_root:                                    # the installer's own folder (install.sh / install.ps1): an install kept inside it comes first
         cands.append((Path(data_root).expanduser() / "install", "datadir"))
     if here is not None:

@@ -40,7 +40,7 @@
 
 namespace strata::core {
 
-/// 0.1.43 (STRATA_ADAPT_OVERLAP): the adaptive tier's copies still landing while a decode window runs.  The window's
+/// 0.1.43 (SAGUARO_ADAPT_OVERLAP): the adaptive tier's copies still landing while a decode window runs.  The window's
 /// residency tables are the baseline's (the swapped-in experts are resident from the window's first layer), but their
 /// bytes arrive layer by layer: `run` holds a layer's plan (the first thing that lets the GPU read the layer's expert
 /// slots) back until `landed >= layer` for a layer with a swap (`has[layer]`).  Set `active` only around one window.
@@ -86,7 +86,7 @@ public:
 
     /// The watchdog's view of the window in flight (issue #31): the layer, the GPU's sequence, the flags.
     void diag(std::FILE* f) const;
-    /// #649 (STRATA_VERIFY_TRACE=1, opt-in): the last windows' host-side handshake events and the GPU's breadcrumbs
+    /// #649 (SAGUARO_VERIFY_TRACE=1, opt-in): the last windows' host-side handshake events and the GPU's breadcrumbs
     /// (in mapped memory, so they read while the GPU hangs).  Nothing when the trace is off.
     void trace_dump(std::FILE* f) const;
 
@@ -110,7 +110,7 @@ public:
     /// logits held a NaN or an infinity, else -1; nonfinite_pos() is that row's position.  Every window graph
     /// checks its T rows on the device beside the greedy pick (logits_nonfinite_rows into mapped flags, read after
     /// the sync the window already does: no extra sync).  On the stage with the head (a layer split asks the last
-    /// stage).  STRATA_NAN_GUARD=0: off (always -1).  STRATA_NAN_INJECT=<n>[,<n>...] (debug): the n-th window the
+    /// stage).  SAGUARO_NAN_GUARD=0: off (always -1).  SAGUARO_NAN_INJECT=<n>[,<n>...] (debug): the n-th window the
     /// guard checks in this process (counted from 1 over every stage-with-head verifier: prompt-tail windows, decode
     /// windows and batch windows alike) reports row 0 as non-finite, so the whole response can be tested.
     int nonfinite_row() const { return next_ != nullptr && !last_stage() ? next_->nonfinite_row() : nf_row_; }
@@ -145,7 +145,7 @@ public:
         hist_len_ = history_len;
         if (next_) next_->set_history(history, history_len);
     }
-    /// PROBABILISTIC DRAFT ACCEPTANCE (core/spec_prob.hpp, STRATA_SPEC_PROB=1): for the NEXT run() only, judge the
+    /// PROBABILISTIC DRAFT ACCEPTANCE (core/spec_prob.hpp, SAGUARO_SPEC_PROB=1): for the NEXT run() only, judge the
     /// window's first `n_q` drafts against the drafter's distributions `q` (host memory, n_q rows of kSpecQStride
     /// int32: ids, -1 terminated, then probabilities as float bits) with rejection sampling instead of exact match; the
     /// drafts past `n_q` (a lookup chain's tail) are point masses.  Has no effect on a greedy request, a window of one
@@ -177,9 +177,9 @@ public:
     /// layer split: the pipelined slot groups write their rows at hbase = group * rows-per-group, one row per slot.
     void set_handoff_rows(int rows) { handoff_rows_ = rows; }
     /// Is the zero-doorbell graph the one a batch window would run now (every expert of the stage in VRAM by the host
-    /// table)?  Looks at the table, as each window does.  (STRATA_ADMIT_MERGE_FIRST's gate.)
+    /// table)?  Looks at the table, as each window does.  (SAGUARO_ADMIT_MERGE_FIRST's gate.)
     bool ar_live() { refresh_ar(); return ar_on(); }
-    /// STRATA_SPLIT_OVERLAP=1 (opt-in; stages on DIFFERENT devices only): the hand-off carries a ready flag (one
+    /// SAGUARO_SPLIT_OVERLAP=1 (opt-in; stages on DIFFERENT devices only): the hand-off carries a ready flag (one
     /// mapped word per hand-off buffer: host and device addresses).  The writing stage raises it from the GPU when
     /// its hand-off is out (handoff_publish); the reading stage's window graph waits on it (wait_flag_ge) - so the
     /// next stage's graph is launched while this stage is still running, and the host no longer syncs between the
@@ -204,7 +204,7 @@ public:
     // Everything that is per row already (hyper-connections, dense projections, router, shared expert, the
     // routed experts on the GPU and the CPU, the head) runs once over the S rows, so the weights are read once
     // per window for all the sequences.  Row s's arithmetic is the single-token window's, so a slot's greedy
-    // tokens are its solo greedy tokens (modulo the multi-token CPU kernel choice: STRATA_IQ_MT_MIN=1).
+    // tokens are its solo greedy tokens (modulo the multi-token CPU kernel choice: SAGUARO_IQ_MT_MIN=1).
     //
     // Greedy only, no drafts (MTP) in a batch window.  `init_slots` once after `init` (S <= max_t); a layer
     // split's stages each get their own sessions, and run_slots/commit_slots continue into the next stage.
@@ -239,7 +239,7 @@ public:
     /// 1 = this stage's window and commit are done (the last stage's picks are in batch_out), 0 = still running,
     /// -1 = an error (err).  Serves every layer that has rung so far.
     int batch_poll(PoolMultiFn pool, void* user, std::string& err);
-    /// STRATA_PIPED_MTP: the same over explicit `rows` (a slot's rows contiguous: its token, then its draft) at hand-off
+    /// SAGUARO_PIPED_MTP: the same over explicit `rows` (a slot's rows contiguous: its token, then its draft) at hand-off
     /// rows [hbase, hbase + S).  `defer`: no commit is queued; commit_deferred(hbase, ...) queues it once the host knows
     /// each slot's accepted prefix.  Another window launched here first saves the pending window's commit inputs.
     bool batch_launch_rows(const int* rows, int S, int hbase, const int32_t* tokens, const int64_t* pos, bool defer,
@@ -255,12 +255,12 @@ public:
     bool batch_busy() const { return b_running_.load(std::memory_order_acquire); }
     /// Serves the layers of this stage's window that have rung (the CPU pool and the flags), with no CUDA call: 1 once
     /// every layer is served (or the window raises no host doorbells), 0 while one is still to ring.  batch_poll
-    /// calls it, unless set_external_serve(true) moved it to a thread of its own (STRATA_PIPED_CONCURRENT: a CUDA
+    /// calls it, unless set_external_serve(true) moved it to a thread of its own (SAGUARO_PIPED_CONCURRENT: a CUDA
     /// call can wait for the driver's lock while another thread holds it waiting for the GPU, whose window waits
     /// for its doorbell, #31); batch_poll then makes no CUDA call before every layer is served.
     int batch_serve(PoolMultiFn pool, void* user);
     void set_external_serve(bool on) { ext_serve_.store(on, std::memory_order_release); }
-    /// STRATA_STAGE_SERVE: another thread serves the doorbells of this verifier's run() and pipelined windows
+    /// SAGUARO_STAGE_SERVE: another thread serves the doorbells of this verifier's run() and pipelined windows
     /// (serve_external); `wake` is called at each such launch, `served` on the launching thread once every layer of a
     /// window is served (the server's dispatch is idle then).  The launching thread only waits and checks.  Unset:
     /// the windows serve themselves.  Not for windows with --remote-expert-opt, the PCIe balance or an adaptive gate.
@@ -286,7 +286,7 @@ public:
     /// commit() returns without waiting for its graph (a single-GPU session sets it): the next window follows it on
     /// the same stream and the drafter reads nothing it writes, so it overlaps the draft. Whoever reads or writes
     /// the session from another stream or the host afterwards (a new request, a checkpoint, a snapshot, the prompt
-    /// path, the end of a run) calls wait_commit() first.  STRATA_COMMIT_SYNC=1 keeps the wait.
+    /// path, the end of a run) calls wait_commit() first.  SAGUARO_COMMIT_SYNC=1 keeps the wait.
     static void set_commit_async(bool on);
     /// Waits for the last commit graph when commit() did not (an event recorded after it, not the whole device);
     /// false with `err` when it failed.  Free when nothing is pending.
@@ -343,7 +343,7 @@ public:
     /// The watchdog's line for a pipelined verifier: in flight, layers served, the GPU's ring and flags, its events.
     void diag_pipelined(std::FILE* f, const char* name) const;
 
-    /// Measurement hook (STRATA_LOGPOS): after run(), write one line per row t of the last window's head -
+    /// Measurement hook (SAGUARO_LOGPOS): after run(), write one line per row t of the last window's head -
     /// "pos target logprob top top_logprob hit extra_logprob target_logprob_without_extra" - where row t is the
     /// distribution at pos0 + t, targets[t] is the token at pos0 + t + 1, extra_logprob is the log-probability of
     /// `extra_id` in the same row, and the last column is the target's log-probability in that row renormalized
@@ -357,7 +357,7 @@ public:
     const float* final_R_all() const { return next_ ? next_->final_R_all() : R_; }
     /// DFlash2 (before init): keep the completed outputs of these layers (zero-based; the mean of the hc streams) for every row of
     /// each window in a device buffer, tap_dev() = [max_t][n_taps][n_embd] floats, valid until the next window.  Single-stage
-    /// verifiers only; STRATA_TAP_FILE (research dump) turns the same buffer on without this call.
+    /// verifiers only; SAGUARO_TAP_FILE (research dump) turns the same buffer on without this call.
     void set_taps(const std::vector<int>& layers) { tap_req_ = layers; }
     const float* tap_dev() const { return tap_dev_; }
     bool tapping() const { return tap_on_; }
@@ -392,12 +392,12 @@ public:
 
     double ms_wait = 0, ms_pool = 0, ms_host = 0, ms_commit = 0;
     int64_t windows = 0;
-    /// STRATA_VERIFY_PROFILE=1 - GPU stage times of the windows since the last call (ms per
+    /// SAGUARO_VERIFY_PROFILE=1 - GPU stage times of the windows since the last call (ms per
     /// window), as one line; empty when off.
     std::string profile_report();
-    /// STRATA_VERIFY_PROFILE: the same stage split, one line per window size T (bench: with STRATA_SPEC_T_CYCLE). Resets.
+    /// SAGUARO_VERIFY_PROFILE: the same stage split, one line per window size T (bench: with SAGUARO_SPEC_T_CYCLE). Resets.
     std::string profile_by_t_report();
-    /// STRATA_ROUTE_STATS=1: per window size, the routed experts per layer: distinct, and new per row (not in the rows before it). Resets.
+    /// SAGUARO_ROUTE_STATS=1: per window size, the routed experts per layer: distinct, and new per row (not in the rows before it). Resets.
     std::string route_stats_report();
 
 private:
@@ -484,14 +484,14 @@ private:
     /// Free the graph of the largest window size other than `keep_t` (and the prelaunched one); `evicted`: there was one.
     bool evict_window_graph(int keep_t, bool& evicted, std::string& err);
     bool no_window_eviction_ = false;   ///< capture_all wants every size at once: it must not free one to capture another
-    void collect_profile();   ///< STRATA_VERIFY_PROFILE: add the last window's stamps to prof_sum_
+    void collect_profile();   ///< SAGUARO_VERIFY_PROFILE: add the last window's stamps to prof_sum_
     void accumulate_profile(const unsigned long long* stamps);
     void accumulate_profile_inner(const unsigned long long* stamps);   ///< one window's stamps (host copy) into prof_sum_
     // pipelined windows (pl_launch ...)
     cudaStream_t ext_stream_ = nullptr;   ///< set_stream: the stage's shared stream (not destroyed here)
     bool always_publish_ = false;
     bool adapt_gate_wait(int32_t layer, std::string& err);
-    AdaptGate* adapt_gate_ = nullptr;     ///< 0.1.43: STRATA_ADAPT_OVERLAP's gate (null: off)
+    AdaptGate* adapt_gate_ = nullptr;     ///< 0.1.43: SAGUARO_ADAPT_OVERLAP's gate (null: off)
     void pl_stage(int T, const int32_t* tokens, int64_t pos0, const int32_t ple_prev[2]);
     cudaEvent_t ev_done_ = nullptr, ev_commit_ = nullptr;
     unsigned long long* prof_pin_ = nullptr;   ///< pinned host copy of the stamps (pipelined windows)
@@ -501,7 +501,7 @@ private:
     double fl_since_ms_ = 0, fl_flush_ms_ = 0, fl_launch_ms_ = 0;
     int32_t pl_prev_[2] = {-1, -1};
     std::vector<uint32_t> pl_ple_rows_;   ///< the window's PLE rows (T x PLE_N_HEADS), gathered when layer 0 is served
-    // STRATA_PIPED_MTP: windows launched with their commit deferred, by hbase; the arena rows of at most one of them
+    // SAGUARO_PIPED_MTP: windows launched with their commit deferred, by hbase; the arena rows of at most one of them
     // are live (arena_holds_), the others are copied to dsave_ before another window overwrites them
     struct DeferredWin {
         std::vector<int> key;
@@ -544,7 +544,7 @@ private:
     std::vector<float> logit_bias_host_;
     float* logit_bias_device_ = nullptr;
     int device_ = -1;                    ///< the device `init` ran on: run/commit switch to it (layer split)
-    unsigned long long* rr_stats_ = nullptr;   ///< STRATA_ROUTE_RESIDENT's counters on device_ (#1578); null: none
+    unsigned long long* rr_stats_ = nullptr;   ///< SAGUARO_ROUTE_RESIDENT's counters on device_ (#1578); null: none
     std::atomic<bool> released_{false};  ///< #267: release_gpu_waits ran (maybe on the watchdog thread): no more windows
     bool all_resident_ = false;           ///< 100% of experts in [lb_, le_) resident in VRAM: zero-doorbell graph
     /// #871: the zero-doorbell graph plans from the device residency table alone, so it is only right while every
@@ -556,9 +556,9 @@ private:
     void refresh_ar();
     uint32_t* h_plan_err_ = nullptr; uint32_t* m_plan_err_ = nullptr;   // set by resident_plan on a -1 (all-resident graph)
     const int32_t* h_res_ = nullptr;      ///< the host residency table (VerifyHits::h_res)
-    bool device_plan_ = false;            ///< E-6: resident-only layers planned on the device (STRATA_VERIFY_DEVICE_PLAN)
+    bool device_plan_ = false;            ///< E-6: resident-only layers planned on the device (SAGUARO_VERIFY_DEVICE_PLAN)
     uint32_t* skip_ = nullptr;            ///< E-6: per group, the ring whose plan the device built (0: the host's)
-    unsigned* qcnt_ = nullptr;             ///< S26 STRATA_QFUSE: the HC read's q8_1 group counters (n_embd / 32)
+    unsigned* qcnt_ = nullptr;             ///< S26 SAGUARO_QFUSE: the HC read's q8_1 group counters (n_embd / 32)
     unsigned long long* slot_off_d_ = nullptr;   ///< E-6: the slot offsets on the device
     int64_t lb_ = 0, le_ = -1;           ///< set_stage: the layers this verifier runs (-1: to the last)
     int handoff_rows_ = 0;               ///< set_handoff_rows (0: kVerifyMaxT)
@@ -571,7 +571,7 @@ private:
     uint32_t* hcount_d_ = nullptr;       ///< handoff_publish's block counter (device memory)
     uint32_t* herr_h_ = nullptr;         ///< the bounded hand-off wait gave up (mapped; the reading stage's)
     uint32_t* herr_d_ = nullptr;
-    uint32_t* hdrop_h_ = nullptr;        ///< STRATA_TEST_HANDOFF_DROP: the writing stage withholds its flag (mapped)
+    uint32_t* hdrop_h_ = nullptr;        ///< SAGUARO_TEST_HANDOFF_DROP: the writing stage withholds its flag (mapped)
     uint32_t* hdrop_d_ = nullptr;
     bool handoff_failed(std::string& err) const;   ///< the bounded hand-off wait timed out in the last window
     int prelaunched_ = 0;                ///< prelaunch ran for a window of this size: run skips staging + launch
@@ -587,7 +587,7 @@ private:
     bool copy_used_ = false;
     bool capture_commit(std::string& err);
     bool record_window(int T, cudaStream_t cs, std::string& err);
-    // #649: STRATA_VERIFY_TRACE=1 - a host event ring (trace_ev) and GPU breadcrumbs: the profiler's stamp points,
+    // #649: SAGUARO_VERIFY_TRACE=1 - a host event ring (trace_ev) and GPU breadcrumbs: the profiler's stamp points,
     // per layer and token group, written to mapped memory (null when the trace is off)
     void trace_ev(const char* what, int64_t step, int64_t layer, int64_t aux) const;
     unsigned long long* trace_h_ = nullptr;
@@ -602,7 +602,7 @@ private:
     int64_t prof_windows_ = 0;
     double prof_t_sum_[9][2][kProfPer] = {};   // the same per window size T (1..8), for profile_by_t_report
     int64_t prof_t_win_[9] = {};
-    bool rs_on_ = false;                      // STRATA_ROUTE_STATS
+    bool rs_on_ = false;                      // SAGUARO_ROUTE_STATS
     unsigned long long* rs_dev_ = nullptr;    // [9 T][n_layers][8 rows]: experts of row r that no earlier row of the window routed to
     int64_t rs_win_[9] = {};
 
@@ -613,7 +613,7 @@ private:
     const NativeHead* head_ = nullptr;
     int max_t_ = 0;
     int64_t cb_ = 0;                       ///< a slot's batch commit record (init_slots)
-    float* ple_key_ = nullptr;   ///< STRATA_PLE_BATCH: the window rows' PLE key / value projections
+    float* ple_key_ = nullptr;   ///< SAGUARO_PLE_BATCH: the window rows' PLE key / value projections
     float* ple_val_ = nullptr;
     int last_t_ = 0;
     int64_t last_pos0_ = 0;
@@ -622,22 +622,22 @@ private:
     cudaStream_t cs_ = nullptr;
     cudaStream_t sh_cs_ = nullptr;
     cudaEvent_t ev_fork_ = nullptr, ev_join_ = nullptr;
-    // STRATA_DF_BRANCH: a layer's mixer work that reads only the layer's input, captured as parallel graph branches
+    // SAGUARO_DF_BRANCH: a layer's mixer work that reads only the layer's input, captured as parallel graph branches
     // on these side streams (record_window); the same kernels on the same inputs, only their order is freer
     bool df_branch_ = false;
     cudaStream_t df_side_[2] = {};
     cudaEvent_t df_fork_ = nullptr;
     cudaEvent_t df_join_[2] = {};
-    // [level]: the graphs bake the session's RoPE level (the indexer's position base, STRATA_YARN_ELASTIC): a set per level
+    // [level]: the graphs bake the session's RoPE level (the indexer's position base, SAGUARO_YARN_ELASTIC): a set per level
     cudaGraphExec_t exec_[2][9] = {};
     cudaGraphExec_t exec_nr_[2][9] = {};   // #871: the doorbell variant of a stage that is all-resident otherwise
     bool launched_[2][9] = {}, launched_nr_[2][9] = {};   ///< this graph has been launched once (early_ple_flag: a cold first launch raises the PLE flag first)
     int lv() const;   ///< the level of the session the solo graphs run on (0 plain, 1 YaRN)
-    // fork 34a35db (STRATA_SIDE_MIXER=1): the GDN gates and the QSA indexer on a branch of the window's graph beside the
+    // fork 34a35db (SAGUARO_SIDE_MIXER=1): the GDN gates and the QSA indexer on a branch of the window's graph beside the
     // mixer's projections, joined before the recurrence / the attention
     cudaStream_t side_ = nullptr;
     cudaEvent_t mfork_ = nullptr, mjoin_ = nullptr;
-    // fork b063c13 (STRATA_SIDE_MIXER=2): a second branch for the GDN gate projection and the QSA queries' chain
+    // fork b063c13 (SAGUARO_SIDE_MIXER=2): a second branch for the GDN gate projection and the QSA queries' chain
     cudaStream_t side2_ = nullptr;
     cudaEvent_t pfork_ = nullptr, pjoin_ = nullptr;
     cudaGraphExec_t commit_exec_[2] = {};   // [level]
@@ -649,8 +649,8 @@ private:
     int32_t* h_commit_ = nullptr; int32_t* m_commit_ = nullptr; // [n_keep, n_keep-1, pos_0 .. pos_{T-1}]
     float* h_ple_ = nullptr;     float* m_ple_ = nullptr;       // T * n_embd
     int32_t* h_out_ = nullptr;   int32_t* m_out_ = nullptr;     // T argmax ids
-    // STRATA_TAP_FILE (off by default; nothing is allocated or captured without it): the DFlash2 experiment's hook.
-    // After each layer in STRATA_TAP_LAYERS (default 5,15,25,35,45) the window copies the layer's completed output
+    // SAGUARO_TAP_FILE (off by default; nothing is allocated or captured without it): the DFlash2 experiment's hook.
+    // After each layer in SAGUARO_TAP_LAYERS (default 5,15,25,35,45) the window copies the layer's completed output
     // (the residual with its pending FFN write applied, the mean of the hc streams) per row; run() appends
     // (pos, token, taps) records to the file.
     bool tap_on_ = false;
@@ -666,7 +666,7 @@ private:
     int nf_row_ = -1;                     ///< nonfinite_row()
     int64_t nf_pos_ = -1;                 ///< nonfinite_pos()
     uint32_t nf_mask_ = 0;                ///< nonfinite_in(): bit t = row t
-    void note_nonfinite(int T, const int64_t* pos_b);   ///< the window's flags (+ STRATA_NAN_INJECT) -> nf_row_
+    void note_nonfinite(int T, const int64_t* pos_b);   ///< the window's flags (+ SAGUARO_NAN_INJECT) -> nf_row_
     float* h_x_ = nullptr;       float* m_x_ = nullptr;         // doorbell payload: T * n_embd
     int32_t* h_ids_ = nullptr;   int32_t* m_ids_ = nullptr;     // T * k
     float* h_w_ = nullptr;       float* m_w_ = nullptr;         // T * k

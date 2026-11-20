@@ -1,5 +1,5 @@
 #include "strata/core/remote_experts.hpp"
-#include "strata/core/device.hpp"   // primary_device() (STRATA_PRIMARY_DEVICE)
+#include "strata/core/device.hpp"   // primary_device() (SAGUARO_PRIMARY_DEVICE)
 #include "strata/core/remote_expert_opt.hpp"
 
 #include "strata/kernels/cpu/expert_layout.hpp"
@@ -76,14 +76,14 @@ bool RemoteExperts::preflight(int device, double& free_gib, std::string& err) {
     }
     if (device == primary_device()) {   // the primary may be any visible ordinal; the helper cannot be it
         err = "CUDA" + std::to_string(device) + " experts: the helper cannot be the primary device "
-                                                 "(STRATA_PRIMARY_DEVICE)";
+                                                 "(SAGUARO_PRIMARY_DEVICE)";
         return false;
     }
     // The layer waits for this GPU on the CPU pool's critical path: spin instead of sleeping, whose wake-up
     // costs more than a small expert batch takes (measured: ~0.3 ms per round trip on Windows).  Only possible
-    // before the device's context exists, so first thing; STRATA_REMOTE_SPIN=0 keeps the driver's default.
+    // before the device's context exists, so first thing; SAGUARO_REMOTE_SPIN=0 keeps the driver's default.
 #if !defined(STRATA_USE_HIP) && !defined(STRATA_GPU_METAL)
-    const char* spin = std::getenv("STRATA_REMOTE_SPIN");
+    const char* spin = std::getenv("SAGUARO_REMOTE_SPIN");
     if (!(spin && spin[0] == '0')) cudaInitDevice(device, cudaDeviceScheduleSpin | cudaDeviceMapHost, 0);
     cudaGetLastError();
 #endif
@@ -230,8 +230,8 @@ bool RemoteExperts::open(int device, int slots, int64_t layers, int64_t experts,
         d_sh_ = strata::kernels::hadamard_device_signs(strata::kernels::cpu::hadamard_signs((int) FF), (int) FF);
     }
     // Zero-copy: the helper reads its input from, and writes its compact rows into, the pinned host buffers
-    // directly - two copies fewer per layer, each of which is a PCIe round trip.  STRATA_REMOTE_ZEROCOPY=0 copies.
-    const char* zc = std::getenv("STRATA_REMOTE_ZEROCOPY");
+    // directly - two copies fewer per layer, each of which is a PCIe round trip.  SAGUARO_REMOTE_ZEROCOPY=0 copies.
+    const char* zc = std::getenv("SAGUARO_REMOTE_ZEROCOPY");
     zero_copy_ = !(zc && zc[0] == '0') &&
                  cudaHostGetDevicePointer((void**) &z_x_, h_x_, 0) == cudaSuccess &&
                  cudaHostGetDevicePointer((void**) &z_out_, h_out_, 0) == cudaSuccess;
@@ -364,11 +364,11 @@ bool RemoteExperts::finish(float* out, std::string& err) {
     // Spin on the stream like PeerExperts::finish instead of the blocking sync: the layer waits for this helper
     // on the CPU pool's critical path, and a blocking sync's wake-up costs more than the helper's small batch
     // takes - on HIP especially, where the CUDA branch's cudaInitDevice(ScheduleSpin) does not exist and the
-    // device keeps its default policy.  STRATA_REMOTE_SPIN=0 keeps the blocking sync (the same switch the CUDA
+    // device keeps its default policy.  SAGUARO_REMOTE_SPIN=0 keeps the blocking sync (the same switch the CUDA
     // branch reads).
 #if defined(STRATA_USE_HIP)   // HIP only: the CUDA branch's cudaInitDevice(ScheduleSpin) already makes the sync spin
     static const bool spin = [] {
-        const char* v = std::getenv("STRATA_REMOTE_SPIN");
+        const char* v = std::getenv("SAGUARO_REMOTE_SPIN");
         return !(v != nullptr && v[0] == '0');
     }();
     if (spin) {

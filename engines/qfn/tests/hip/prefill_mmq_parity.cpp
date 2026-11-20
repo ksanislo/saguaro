@@ -218,7 +218,7 @@ std::vector<std::vector<uint8_t>> synthetic_q2(int experts, int64_t out_rows, in
 }
 
 // A synthetic matrix of any ggml type with a host quantizer (the K-quants: the dense GGUF tensors the
-// STRATA_DENSE_MMQ path multiplies on HIP).  K stays a 256-value multiple: the dense path only takes
+// SAGUARO_DENSE_MMQ path multiplies on HIP).  K stays a 256-value multiple: the dense path only takes
 // such K, and a partial 256-value chunk would read past the synthetic tensor's end.
 std::vector<std::vector<uint8_t>> synthetic_of_type(ggml_type type, int experts, int64_t out_rows, int64_t cols,
                                                      int trial) {

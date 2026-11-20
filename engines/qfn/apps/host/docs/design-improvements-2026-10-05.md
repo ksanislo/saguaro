@@ -550,7 +550,7 @@ Every relevant screen must account for loading, ready, genuine empty, filtered e
 **Audit date:** 5 October 2026, before implementation. Opened the existing design in the Codex in-app browser and used actual navigation, buttons, inputs, menus and keyboard shortcuts. This supplements the source audit; it is not a completed implementation verification pass.
 
 - Web preview: `http://127.0.0.1:5211`; isolated host: `http://127.0.0.1:8793`.
-- Host ran with `STRATA_REAL_ENGINE=0` and a separate temporary `STRATA_HOME`. Model installation/loading and inference in this walkthrough were simulated; hardware detection remained read-only.
+- Host ran with `SAGUARO_REAL_ENGINE=0` and a separate temporary `SAGUARO_HOME`. Model installation/loading and inference in this walkthrough were simulated; hardware detection remained read-only.
 - The preview's separate origin and temporary host state isolated test conversations and configuration from the usual Strata state.
 - Reviewed desktop at 1512×982, chat/sidebar at 1024×768, and chat/tuning at 390×844. Initial setup was also inspected in the browser's approximately 671px-wide natural viewport.
 - Inspected chat in Light and Dark, then restored Light. This visual inspection is not a contrast-compliance result.
@@ -693,7 +693,7 @@ Two existing requirements also gained concrete corrections in the final pass: Re
 
 ### Verification record
 
-All browser interactions used the in-app browser: actual clicks, inputs, key presses and read-only rendered-DOM inspection. Shell checks did not operate the browser. The preview used `STRATA_REAL_ENGINE=0` throughout; no real weights or inference service was used.
+All browser interactions used the in-app browser: actual clicks, inputs, key presses and read-only rendered-DOM inspection. Shell checks did not operate the browser. The preview used `SAGUARO_REAL_ENGINE=0` throughout; no real weights or inference service was used.
 
 | Evidence | Check actually performed | Result / limits |
 |---|---|---|
@@ -919,7 +919,7 @@ These decisions are deliberately explicit so the assets have one source of truth
 
 **5 October 2026, later implementation pass.** The user clarified: “We're mostly doing UI/experience and not full hookup yet. Current model is just for testing.” This pass therefore implements and verifies the React experience and the small design-host contracts its controls depend on. A Windows/Linux native Strata server is **not a completion gate for this UI pass**.
 
-The native repository was not changed. No native adapter, production configuration conversion, native hardware telemetry or real model installation was added. Browser testing used an isolated temporary `STRATA_HOME` and workspace on `127.0.0.1:8794`, with `STRATA_REAL_ENGINE=0`. Model loading/downloads and answers were visibly **Demo**. API fixtures used a local disposable server; they did not call a model provider.
+The native repository was not changed. No native adapter, production configuration conversion, native hardware telemetry or real model installation was added. Browser testing used an isolated temporary `SAGUARO_HOME` and workspace on `127.0.0.1:8794`, with `SAGUARO_REAL_ENGINE=0`. Model loading/downloads and answers were visibly **Demo**. API fixtures used a local disposable server; they did not call a model provider.
 
 The count remains **132 tracked requirements**, including 120 earlier findings and 12 brand additions. The concrete failures below are follow-ups to existing requirements, not a new count of unresolved defects. “Implemented” means the specified code exists in this test-host scope; it does not certify unperformed platform tests.
 

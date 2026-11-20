@@ -1,5 +1,5 @@
 // src/prefill/mmq_kq_tab_lib.cu - strata_kq_tab: the pointer-table MMQ (moe_mmq_tab.cuh) for the K-quant experts
-// (and any type CMake's STRATA_MMQ_TAB_KQ_TYPES adds), so STRATA_MMQ_DIRECT=1 reads resident UD-Q4/Q5/Q6_K_XL experts
+// (and any type CMake's STRATA_MMQ_TAB_KQ_TYPES adds), so SAGUARO_MMQ_DIRECT=1 reads resident UD-Q4/Q5/Q6_K_XL experts
 // in their cache slots.  A library of its own, like strata_kq: the engine loads every kernel of a module at start
 // (CUDA_MODULE_LOADING=EAGER), and these load only when the switch is on.  Built from the same mmq.cuh, flags and
 // architectures as strata_kq, whose mul_mat_q_case runs the gathered products: same tiles, same launch, same bits.

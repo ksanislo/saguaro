@@ -170,11 +170,11 @@ class Decision(TempDir):
 class Apply(TempDir):
     def test_apply_puts_the_table_in_a_copy_of_the_config_and_says_so_once(self):
         pkg = fake_package(self.root)
-        cfg = {"backend": "hip", "env": {"STRATA_RESIDENT_PIN": "0"}}
+        cfg = {"backend": "hip", "env": {"SAGUARO_RESIDENT_PIN": "0"}}
         lines = []
         out = ht.apply(cfg, pkg, ["gfx1201"], environ=ON, say=lines.append)
         self.assertEqual(out["env"][ht.ENGINE_VAR], str(pkg / "tuning" / "gfx1201-hipblaslt-100500.txt"))
-        self.assertEqual(out["env"]["STRATA_RESIDENT_PIN"], "0")
+        self.assertEqual(out["env"]["SAGUARO_RESIDENT_PIN"], "0")
         self.assertNotIn(ht.ENGINE_VAR, cfg["env"])        # the caller's config is untouched
         self.assertEqual(len(lines), 1)
         self.assertTrue(lines[0].startswith("[strata] hipBLASLt tuning table"))

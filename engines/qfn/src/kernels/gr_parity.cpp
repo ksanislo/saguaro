@@ -337,9 +337,9 @@ int fused_multi_lds_parity(const float* d_norm, const uint16_t* d_down, const ui
         check(cudaMemcpy(s.mixed.data(), d_mixed, s.mixed.size() * sizeof(float), cudaMemcpyDeviceToHost), "multi read mixed");
         return s;
     };
-    // the split read (STRATA_GR_V3=1) sums in another order than the single-token kernel: equal within float
+    // the split read (SAGUARO_GR_V3=1) sums in another order than the single-token kernel: equal within float
     // rounding, not to the bit, so it is compared with a relative tolerance; the default kernels bit for bit
-    static const bool v3 = [] { const char* v = std::getenv("STRATA_GR_V3"); return v != nullptr && std::atoi(v) != 0; }();
+    static const bool v3 = [] { const char* v = std::getenv("SAGUARO_GR_V3"); return v != nullptr && std::atoi(v) != 0; }();
     auto close = [](const std::vector<float>& x, const std::vector<float>& y) {
         double worst = 0.0, mag = 1e-30;
         for (size_t i = 0; i < x.size(); ++i) {
@@ -413,7 +413,7 @@ int fused_multi_lds_parity(const float* d_norm, const uint16_t* d_down, const ui
     }
 
 
-    // S26 STRATA_QFUSE: the read's own q8_1 image of `mixed` must be the bytes native_quantize_q8_1 writes from it -
+    // S26 SAGUARO_QFUSE: the read's own q8_1 image of `mixed` must be the bytes native_quantize_q8_1 writes from it -
     // for every T (1..8), directly and through a captured graph replayed twice (the group counters must reset)
     {
         uint8_t *d_q = nullptr, *d_ref = nullptr;
@@ -456,7 +456,7 @@ int fused_multi_lds_parity(const float* d_norm, const uint16_t* d_down, const ui
                 }
             }
         }
-        std::printf("  fused GR read + q8_1 (STRATA_QFUSE), T 1..8, direct and graph replays: %s\n", qbad ? "FAIL" : "pass");
+        std::printf("  fused GR read + q8_1 (SAGUARO_QFUSE), T 1..8, direct and graph replays: %s\n", qbad ? "FAIL" : "pass");
         bad += qbad;
         cudaFree(d_q); cudaFree(d_ref); cudaFree(d_cnt);
     }

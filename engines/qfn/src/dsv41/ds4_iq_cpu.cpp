@@ -8,7 +8,7 @@
 // branch below answers for them.  MXFP4, the source format, has its own CPU rows (ds4_gguf_cpu.cpp).
 #undef STRATA_NATIVE_EXPERTS
 #if defined(STRATA_NATIVE_EXPERTS)
-#include "strata/kernels/cpu/native_expert.hpp"  // (only with STRATA_NATIVE_EXPERTS)
+#include "strata/kernels/cpu/native_expert.hpp"  // (only with SAGUARO_NATIVE_EXPERTS)
 
 #define GGML_COMMON_DECL_CPP
 #define GGML_COMMON_IMPL_CPP
@@ -760,7 +760,7 @@ bool iq_cpu_own_rows(int type) { return own(type); }
 bool iq_cpu_fmt(int tg, int td, int n_embd, int n_ff, IqCpu& f, std::string& err) {
     if (tq_cpu_type(tg) && tq_cpu_type(td)) return tq_cpu_fmt(tg, td, n_embd, n_ff, f, err);
     if (gg_cpu_type(tg) && gg_cpu_type(td)) return gg_cpu_fmt(tg, td, n_embd, n_ff, f, err);
-    err = "this build has no ggml-cpu (STRATA_NATIVE_EXPERTS=OFF): the low-bit experts CPU lane is not in it";
+    err = "this build has no ggml-cpu (SAGUARO_NATIVE_EXPERTS=OFF): the low-bit experts CPU lane is not in it";
     return false;
 }
 void iq_cpu_quant(int act, const float* x, int k, void* dst) {

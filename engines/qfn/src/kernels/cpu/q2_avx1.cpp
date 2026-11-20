@@ -122,7 +122,7 @@ void rows(const uint8_t* w, size_t row_bytes, int nblocks, const ActQ* const* a,
     }
 }
 
-// ---- the bit-plane row kernel (STRATA_Q2_BITPLANE=1), 128-bit lanes: one 64-value block at a time instead of
+// ---- the bit-plane row kernel (SAGUARO_Q2_BITPLANE=1), 128-bit lanes: one 64-value block at a time instead of
 // a pair per 256-bit register.  The integer part is exact; the float summation order is this kernel's own (the
 // same statement as for the AVX-2 one), and every row reduces with the same tree alone or in a group (#152).
 template <int NT>
@@ -176,7 +176,7 @@ void rows_bp(const uint8_t* w, size_t row_bytes, int npairs, const ActQ* const* 
 }
 
 const bool kBitplane = [] {
-    const char* e = std::getenv("STRATA_Q2_BITPLANE");
+    const char* e = std::getenv("SAGUARO_Q2_BITPLANE");
     return e != nullptr && e[0] == '1';
 }();
 

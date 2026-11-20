@@ -1,6 +1,6 @@
 // 151-b70: the default choice of the prompt-expert chain (strata::prefill::i8::choose_mode), no GPU needed.
 //   unset            : auto on a Battlemage device whose kernels are available, else the FP16 chain
-//   STRATA_PREFILL_MMQ=0 / 1 / auto : off / forced / auto, whatever the device
+//   SAGUARO_PREFILL_MMQ=0 / 1 / auto : off / forced / auto, whatever the device
 #include <cstdio>
 #include "strata/prefill/esimd_moe.hpp"
 

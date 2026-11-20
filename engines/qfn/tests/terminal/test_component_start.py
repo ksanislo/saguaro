@@ -63,12 +63,12 @@ class ComponentStart(unittest.TestCase):
         self.components = self.root / "components"
         self.components.mkdir()
         env = mock.patch.dict(os.environ, {
-            "STRATA_PROFILE_DIR": str(self.root / "profiles"), "STRATA_RUNTIME_DIR": str(self.root / "runtime"),
-            "STRATA_COMPONENTS_DIR": str(self.components), "STRATA_ENGINE_BACKEND": "cuda",
-            "STRATA_NO_ACQUIRE": "1", "FAKE_ENGINE_MARK": str(self.root / "ran.txt")})
+            "SAGUARO_PROFILE_DIR": str(self.root / "profiles"), "SAGUARO_RUNTIME_DIR": str(self.root / "runtime"),
+            "SAGUARO_COMPONENTS_DIR": str(self.components), "SAGUARO_ENGINE_BACKEND": "cuda",
+            "SAGUARO_NO_ACQUIRE": "1", "FAKE_ENGINE_MARK": str(self.root / "ran.txt")})
         env.start()
         self.addCleanup(env.stop)
-        os.environ.pop("STRATA_API_KEY", None)
+        os.environ.pop("SAGUARO_API_KEY", None)
         from tools.strata_tokenizer import BYTE_TO_UNICODE
         tokenizer = self.root / "tokenizer"
         tokenizer.mkdir()

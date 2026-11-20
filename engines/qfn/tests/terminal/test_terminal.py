@@ -188,15 +188,15 @@ class ContractTests(unittest.TestCase):
                     self.assertTrue(all(display_width(line) <= width for line in view.splitlines()), name)
 
     def test_batch_telemetry_opt_in_and_explicit_disable_are_reversible(self):
-        env = {"STRATA_BATCH_TELEMETRY": "1"}
+        env = {"SAGUARO_BATCH_TELEMETRY": "1"}
         configure_batch_telemetry_env(env, {}, None)
-        self.assertEqual(env["STRATA_BATCH_TELEMETRY"], "1")
+        self.assertEqual(env["SAGUARO_BATCH_TELEMETRY"], "1")
         configure_batch_telemetry_env(env, {"batch_telemetry": False}, None)
-        self.assertNotIn("STRATA_BATCH_TELEMETRY", env)
+        self.assertNotIn("SAGUARO_BATCH_TELEMETRY", env)
         configure_batch_telemetry_env(env, {"batch_telemetry": False}, True)
-        self.assertEqual(env["STRATA_BATCH_TELEMETRY"], "1")
+        self.assertEqual(env["SAGUARO_BATCH_TELEMETRY"], "1")
         configure_batch_telemetry_env(env, {"batch_telemetry": True}, False)
-        self.assertNotIn("STRATA_BATCH_TELEMETRY", env)
+        self.assertNotIn("SAGUARO_BATCH_TELEMETRY", env)
 
     def test_batch_window_sample_distinguishes_processed_rows_from_active_slots(self):
         self.assertEqual(parse_batch_window_sample("BSTAT 3 18 9 1000\n"),

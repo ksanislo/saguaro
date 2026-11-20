@@ -3,7 +3,7 @@
 // q8_1 bytes, the whole buffer, for every q8_1 layout MMQ uses (D4: Q2_0 Q8_0 IQ2_XS, DS4: Q4_1, D2S6: Q2_K), on a
 // routing built the way Prefill builds it (10 of 512 experts a token, rows grouped by expert), with an all-zero
 // token and token counts that are not multiples of anything.  --bench: both at 2K, 8K and 32K tokens.
-// Also STRATA_MMQ_SWIGLU_Q8's fused kernel (mmq::swiglu_quantize) against swiglu / swiglu_scaled + quantize: the same
+// Also SAGUARO_MMQ_SWIGLU_Q8's fused kernel (mmq::swiglu_quantize) against swiglu / swiglu_scaled + quantize: the same
 // q8_1 bytes for the down product's activations (n_ff 640, split / interleaved / scaled gate-up rows), every layout.
 #include "strata/prefill/moe_mmq.hpp"
 

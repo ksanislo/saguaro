@@ -333,7 +333,7 @@ double time_parallel(const std::vector<BenchExpert>& ex, const ExpertFn& fn, int
 int bench(bool quick, const std::string& only) {
     const int ncold = quick ? 48 : 96;   // ~50-130 MB of weights: past the last-level cache
     std::printf("CPU: %s | AVX-512 kernels: %s, AVX2: %s | ggml-cpu built for this CPU (-march=native unless "
-                "STRATA_PORTABLE)\n", cpu_name().c_str(), cpu_avx512_ok() ? "yes" : "no", cpu_avx2_ok() ? "yes" : "no");
+                "SAGUARO_PORTABLE)\n", cpu_name().c_str(), cpu_avx512_ok() ? "yes" : "no", cpu_avx2_ok() ? "yes" : "no");
     std::printf("expert = gate+up %d x %d and down %d x %d of one type, %d distinct experts cycled (their weights come "
                 "from DRAM, as a cache miss's do)\n\n", FF, H, H, FF, ncold);
     struct Variant { std::string name; int type; ExpertFn fn; bool ok; };
@@ -534,7 +534,7 @@ int bench(bool quick, const std::string& only) {
 int main(int argc, char** argv) {
     ggml_cpu_init();
     if (GGML_TYPE_COUNT <= 146) {
-        std::fprintf(stderr, "this ggml has no trellis types (build with STRATA_GGML_DIR = the agention llama.cpp fork): skipped\n");
+        std::fprintf(stderr, "this ggml has no trellis types (build with SAGUARO_GGML_DIR = the agention llama.cpp fork): skipped\n");
         return 77;   // ctest SKIP_RETURN_CODE: a plain ggml is not a failure (#3358)
     }
     if (argc >= 2 && std::strcmp(argv[1], "--bench") == 0) {   // --bench [--quick] [--only <kernel name part>]

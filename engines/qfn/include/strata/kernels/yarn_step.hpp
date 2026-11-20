@@ -1,4 +1,4 @@
-// include/strata/kernels/yarn_step.hpp - STRATA_YARN_ELASTIC: stored keys moved from one RoPE level to another.
+// include/strata/kernels/yarn_step.hpp - SAGUARO_YARN_ELASTIC: stored keys moved from one RoPE level to another.
 //
 // A key in the cache is post-RoPE: k' = R(theta_old(p)) k, its cos/sin carrying the old level's mscale.  Moving it
 // to the new level is k'' = R(theta_new(p)) R(theta_old(p))^-1 k', per (position, pair), with no recompute.  `tab`

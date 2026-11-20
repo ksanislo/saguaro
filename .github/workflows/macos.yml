@@ -78,7 +78,7 @@ jobs:
         run: cmake --build build-metal --target maya-metal metal_model_test metal_sampler_test -j "$(sysctl -n hw.ncpu)"
       - name: The engine starts
         run: ./build-metal/maya-metal --help
-      # no GPU needed: the sampler against its reference, and the GLM gates on ggml-cpu (MAYA_METAL_CPU=1)
+      # no GPU needed: the sampler against its reference, and the GLM gates on ggml-cpu (SAGUARO_METAL_CPU=1)
       - name: CPU tests
         working-directory: build-metal
         run: ctest --output-on-failure --timeout 900 -R '^(metal_sampler_test|metal_model_test_cpu)$'
@@ -92,7 +92,7 @@ jobs:
           ctest --output-on-failure --timeout 1800
           -R '^(metal_model_test|metal_model_test_evict|metal_model_window|metal_model_big_slice|metal_serve_test)$'
       # a virtual Mac's GPU (no Apple7 simdgroup kernels): the engine must refuse it with a clear message, and with
-      # MAYA_METAL_ALLOW_ANY_GPU=1 the tests whose weights stay in shared memory still run (the 2048-token slice puts
+      # SAGUARO_METAL_ALLOW_ANY_GPU=1 the tests whose weights stay in shared memory still run (the 2048-token slice puts
       # experts in GPU-only memory and needs a real Apple-silicon GPU)
       - name: GPU without Apple7 is refused clearly
         if: steps.metal.outputs.gpu == 'yes' && steps.metal.outputs.apple7 != 'yes'
@@ -103,11 +103,11 @@ jobs:
           cat refuse.txt
           grep -q "needs Apple silicon" refuse.txt || { echo "::error::no clear message for an unsupported GPU"; exit 1; }
           if grep -q "GGML_ASSERT" refuse.txt; then echo "::error::an assert instead of the message"; exit 1; fi
-      - name: GPU tests (virtual GPU, MAYA_METAL_ALLOW_ANY_GPU=1)
+      - name: GPU tests (virtual GPU, SAGUARO_METAL_ALLOW_ANY_GPU=1)
         if: steps.metal.outputs.gpu == 'yes' && steps.metal.outputs.apple7 != 'yes'
         working-directory: build-metal
         env:
-          MAYA_METAL_ALLOW_ANY_GPU: "1"
+          SAGUARO_METAL_ALLOW_ANY_GPU: "1"
         run: >-
           ctest --output-on-failure --timeout 1800
           -R '^(metal_model_test|metal_model_test_evict|metal_model_window|metal_serve_test)$'

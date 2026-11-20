@@ -90,13 +90,13 @@ struct WeightRef {
     const void* native_data = nullptr;
     void* native_q8_1 = nullptr;
     int native_type = -1;
-    /// S23 experiment (STRATA_HC_Q8=1): a hyper-connection projection's Q8_0 bytes as the GGUF stores them, owned by
+    /// S23 experiment (SAGUARO_HC_Q8=1): a hyper-connection projection's Q8_0 bytes as the GGUF stores them, owned by
     /// NativeDense, for the verify window's read (every other path keeps the pack's BF16 `data`)
     const void* hc_q8 = nullptr;
     /// Plan v0.3 P1: false when the loader SKIPPED this tensor's canonical bytes because another form serves it
     /// (native GGUF projections, the native head).  The metadata above stays valid; `data` is null.
     bool resident = true;
-    /// STRATA_HC_Q8 (experiment): non-null when `data` holds int8 codes [ne1][ne0] of a BF16 hyper-connection
+    /// SAGUARO_HC_Q8 (experiment): non-null when `data` holds int8 codes [ne1][ne0] of a BF16 hyper-connection
     /// projection quantized Q8_0-style (one fp32 scale per 32 contiguous values, `q8_scale[ne1][ne0 / 32]`).
     const float* q8_scale = nullptr;
 };
@@ -135,11 +135,11 @@ public:
               const std::set<std::string>* skip = nullptr);
 
     /// A SKIPPED bf16 tensor's values read back from the pack file (the promoted-f32 and the raw 16-bit forms), for
-    /// the host-side Q8_0 quantizer of STRATA_HC_Q8 (the tensor then has no copy in the arena).
+    /// the host-side Q8_0 quantizer of SAGUARO_HC_Q8 (the tensor then has no copy in the arena).
     bool read_bf16_host(const std::string& name, std::vector<uint16_t>& out, std::string& err) const;
 
     const WeightRef* find(const std::string& name) const;
-    /// STRATA_HC_Q8: the hyper-connection projections (`blk.*.hc_{attn,ffn}_{down,up}.weight`) the loader SKIPPED
+    /// SAGUARO_HC_Q8: the hyper-connection projections (`blk.*.hc_{attn,ffn}_{down,up}.weight`) the loader SKIPPED
     /// are read from the pack, quantized to int8 + one fp32 scale per 32 values, and uploaded to their own device
     /// allocation (`q8_scale` set).  Returns the bytes uploaded in `bytes`.
     bool load_hc_q8(const std::string& pack_dir, uint64_t& bytes, std::string& err);

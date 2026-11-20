@@ -14,7 +14,7 @@ arithmetic, so bitwise output equivalence is not guaranteed.
 ## Selecting a helper and its budget
 
 The native executable accepts the `DS4_*` names below; Saguaro's public settings
-use the corresponding `MAYA_DS4_*` names. GPU IDs are visible IDs printed at
+use the corresponding `SAGUARO_DS4_*` names. GPU IDs are visible IDs printed at
 startup, after any visibility filtering. Budgets are explicit decimal GB;
 there is no default GPU or pool size.
 

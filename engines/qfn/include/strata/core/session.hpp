@@ -62,10 +62,10 @@ struct SessionState {
     int qsa_primary() const { return (int) qsa_ord0; }
     /// An elastic --batch slot session (session_init's `slot` 2): the cells its states are backed for; -1: not one.
     int64_t slot_cells = -1;
-    /// STRATA_YARN_ELASTIC per conversation: the RoPE level its K/V holds (0 plain, 1 YaRN: its rotary positions are
+    /// SAGUARO_YARN_ELASTIC per conversation: the RoPE level its K/V holds (0 plain, 1 YaRN: its rotary positions are
     /// passed offset by kRopeYarnOff).  Checkpoints carry it; a fresh conversation starts at 0.
     int rope_level = 0;
-    /// STRATA_KV_HOST_ELASTIC: a state outside the session whose host copy grows and shrinks with it (the slot's drafter)
+    /// SAGUARO_KV_HOST_ELASTIC: a state outside the session whose host copy grows and shrinks with it (the slot's drafter)
     const QsaState* host_follow = nullptr;
     /// The doorbell the host loop polls.  Null until a caller provides one - the engine runs without it, and
     /// neither `session_token` nor `session_replay` looks at it.
@@ -103,7 +103,7 @@ struct SessionState {
 /// the default full range is byte-identical to the old whole-model carve.  Pure arithmetic - safe to call for
 /// a candidate range before anything is allocated, which is how the layer-split search prices a placement.
 ///
-/// `slot` (STRATA_ELASTIC_SLOTS): 1 = a --batch slot's session, which batch windows read only for its sequence state
+/// `slot` (SAGUARO_ELASTIC_SLOTS): 1 = a --batch slot's session, which batch windows read only for its sequence state
 /// (GDN, QSA K/V and indexer, PLE history) - no scratch, and the RoPE table is the stage session's (`share_rope`,
 /// its primary state); 2 = that, with the QSA arrays larger than a VMM chunk elastic (session_slot_fit backs them).
 uint64_t session_bytes(const ModelGeometry& g, int64_t max_cells, int64_t k, int64_t layer_lo = 0,
@@ -120,7 +120,7 @@ int64_t session_slot_need(const SessionState& s, int64_t cells);
 /// Physical bytes its elastic arrays hold now, and their reserved addresses (0 for any other session).
 uint64_t session_slot_backed(const SessionState& s);
 uint64_t session_slot_reserved(const SessionState& s);
-/// STRATA_KV_HOST_ELASTIC: the RAM pinned for the session's host copies (0 for a host copy pinned whole).
+/// SAGUARO_KV_HOST_ELASTIC: the RAM pinned for the session's host copies (0 for a host copy pinned whole).
 uint64_t session_host_backed(const SessionState& s);
 /// ... grown (never trimmed) for `cells` cells: the solo session's, before anything writes them (a request's prompt and
 /// its max_new, a restored conversation).  False: no RAM to pin.

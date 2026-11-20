@@ -4,7 +4,7 @@
 //     build/verify_batch_parity
 //
 // 1. native_gr_post_multi against n native_gr_post calls (the hyper-connection write before the PLE block).
-// 2. native_ple_postops_batch_snap (STRATA_DF_PLE) against the per-token loop of the verify window: per token
+// 2. native_ple_postops_batch_snap (SAGUARO_DF_PLE) against the per-token loop of the verify window: per token
 //    native_ple_postops, ple_history_advance and a copy of the history (the commit's snapshot); the results, the final
 //    history and every snapshot, for windows of 2..8 tokens.
 // GPU, synthetic, no model.

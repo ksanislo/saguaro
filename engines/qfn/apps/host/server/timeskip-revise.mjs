@@ -3,7 +3,7 @@
  * One revision attempt for Time-skip, performed by the app's own assistant.
  *
  * Strata Control runs this as its `--revise-command`, with the candidate folder (an isolated copy of the user's work) as the working
- * directory, the request in STRATA_TIMESKIP_PROMPT and the attempt number in STRATA_TIMESKIP_ATTEMPT. It asks the host (which owns the
+ * directory, the request in SAGUARO_TIMESKIP_PROMPT and the attempt number in SAGUARO_TIMESKIP_ATTEMPT. It asks the host (which owns the
  * model and the Harness) for one agent turn inside that folder and returns when the turn ends. Exit 0 means "an attempt was made", not
  * "it helped": whether it helped is decided by the checks and, failing those, by the person.
  *
@@ -11,10 +11,10 @@
  * A turn on a slow computer can take many minutes with nothing to say; an answer that sends no byte for five minutes is abandoned by
  * Node's fetch, which is how a Time-skip used to end with "The assistant could not be reached".
  */
-const base = process.env.STRATA_HOST_URL;
-const secret = process.env.STRATA_INTERNAL_SECRET;
-const prompt = process.env.STRATA_TIMESKIP_PROMPT ?? '';
-const attempt = Number(process.env.STRATA_TIMESKIP_ATTEMPT ?? 1);
+const base = process.env.SAGUARO_HOST_URL;
+const secret = process.env.SAGUARO_INTERNAL_SECRET;
+const prompt = process.env.SAGUARO_TIMESKIP_PROMPT ?? '';
+const attempt = Number(process.env.SAGUARO_TIMESKIP_ATTEMPT ?? 1);
 
 if (!base || !secret || !prompt) {
   console.error('The revision step needs the Strata app to be running.');

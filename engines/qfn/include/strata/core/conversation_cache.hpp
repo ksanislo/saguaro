@@ -27,13 +27,13 @@ struct ConversationCheckpoint {
     std::vector<int32_t> ids;
     std::vector<ConversationImageKey> imgs;
     std::vector<uint8_t> gdn, ple, tails, dead, block_pos;
-    int rope_level = 0;   // the RoPE level of the K/V it continues (STRATA_YARN_ELASTIC), restored with it
+    int rope_level = 0;   // the RoPE level of the K/V it continues (SAGUARO_YARN_ELASTIC), restored with it
     uint64_t used = 0; // upstream root-pinned/LRU checkpoint retention
     // A shared-prefix pin (the request key pin=N): this checkpoint is the read-only prefix many suffix queries branch
     // from, so retention never evicts it (conv_cache.hpp) and a parked conversation holding it stays parked.  A run-time
     // mark only: it is not in the session file, a request that pins the same prefix again sets it.
     bool pinned = false;
-    // STRATA_CACHE_MESSAGE_BOUNDARY: a batch slot's message checkpoint; the main chain keeps it as its one tail
+    // SAGUARO_CACHE_MESSAGE_BOUNDARY: a batch slot's message checkpoint; the main chain keeps it as its one tail
     // checkpoint once handed back (run-time mark, like `pinned`)
     bool msg_tail = false;
     // --prefill-pipe on a layer split: the plan a prompt segment [from, to) is read in - its chunk (0: none), the loan
@@ -210,12 +210,12 @@ int64_t conversation_prefix(const ConversationCheckpoint& c, const std::vector<T
     return (int64_t) n;
 }
 
-/// STRATA_YARN_PLAIN_REUSE (tokens, default 32768; 0 = never): a prompt under the YaRN threshold resumes a YaRN checkpoint
+/// SAGUARO_YARN_PLAIN_REUSE (tokens, default 32768; 0 = never): a prompt under the YaRN threshold resumes a YaRN checkpoint
 /// inside a longer conversation when that saves at least this much reading - a compaction summary of the conversation's
 /// own history.  A shorter shared start (a system prompt) is read again at plain RoPE, as before.
 inline size_t yarn_plain_reuse_min() {
     static const size_t v = [] {
-        const char* t = std::getenv("STRATA_YARN_PLAIN_REUSE");
+        const char* t = std::getenv("SAGUARO_YARN_PLAIN_REUSE");
         return t != nullptr ? (size_t) std::strtoull(t, nullptr, 10) : (size_t) 32768;
     }();
     return v;
@@ -293,7 +293,7 @@ public:
                entries_.size() < slots_ && bytes() <= budget_ - held - incoming;
     }
 
-    // plain (STRATA_YARN_ELASTIC): a request that stays at plain RoPE takes a YaRN state only where it goes on with
+    // plain (SAGUARO_YARN_ELASTIC): a request that stays at plain RoPE takes a YaRN state only where it goes on with
     // that conversation (its live state or deepest checkpoint) or where the checkpoint saves a long read
     // (yarn_plain_keeps); it then runs at YaRN, the level of the K/V it continues
     template<class Token>
@@ -310,8 +310,8 @@ public:
             auto consider = [&](const ConversationCheckpoint& c, bool live) {
                 if (plain && !live && yarn_plain_skips(c.rope_level, c.ids.size(), deepest)) {
                     if (conversation_prefix(c, prompt, images) == (int64_t) c.ids.size())   // (it did match: say so)
-                        std::fprintf(stderr, "strata serve: STRATA_YARN_ELASTIC: a plain prompt passes over a parked YaRN "
-                                             "checkpoint of %zu tokens (STRATA_YARN_PLAIN_REUSE)\n", c.ids.size());
+                        std::fprintf(stderr, "strata serve: SAGUARO_YARN_ELASTIC: a plain prompt passes over a parked YaRN "
+                                             "checkpoint of %zu tokens (SAGUARO_YARN_PLAIN_REUSE)\n", c.ids.size());
                     return;
                 }
                 const int64_t n = conversation_prefix(c, prompt, images);

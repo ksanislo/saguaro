@@ -18,7 +18,7 @@ function fixture(config = {}, { gpuGb = 12 } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'strata-draft-test-'));
   const install = join(root, 'install'), data = join(root, 'data');
   mkdirSync(install, { recursive: true });
-  process.env.STRATA_INSTALL_DIR = install;
+  process.env.SAGUARO_INSTALL_DIR = install;
   const path = join(install, 'strata-q2_0.json');
   writeFileSync(path, JSON.stringify({ exe: 'component:strata-engine', tokenizer: join(install, 'tok'), args: ARGS, model_name: 'Qwen q2_0', port: 8080, ...config }));
   const saved = [];

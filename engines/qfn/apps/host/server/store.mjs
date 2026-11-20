@@ -1,5 +1,5 @@
 import { migrateSetup } from './setup.mjs';
-/** Tiny persisted state for the host: one JSON file under STRATA_HOME. */
+/** Tiny persisted state for the host: one JSON file under SAGUARO_HOME. */
 import { accessSync, constants, mkdirSync, readFileSync, writeFileSync, existsSync, realpathSync, readdirSync, statSync, statfsSync, symlinkSync } from 'node:fs';
 import { alignModels, isDriveRoot, libraryFolderFromPick, makeFolder } from './model-folder.mjs';
 import { dirname, isAbsolute, join, parse, relative, resolve } from 'node:path';
@@ -12,7 +12,7 @@ import { defaultModelDirectory } from './model-directory-default.mjs';
  * folder next to the checkout rather than failing to boot.
  */
 function resolveHome() {
-  const candidates = [process.env.STRATA_HOME, join(homedir(), '.strata'), join(process.cwd(), '.strata')].filter(
+  const candidates = [process.env.SAGUARO_HOME, join(homedir(), '.strata'), join(process.cwd(), '.strata')].filter(
     Boolean,
   );
   for (const dir of candidates) {
@@ -24,7 +24,7 @@ function resolveHome() {
       /* try the next candidate */
     }
   }
-  throw new Error('No writable data directory found — set STRATA_HOME to a writable path');
+  throw new Error('No writable data directory found — set SAGUARO_HOME to a writable path');
 }
 
 export const HOME = resolveHome();
@@ -60,9 +60,9 @@ function read() {
 let state = read();
 const DEFAULT_MODELS_DIRECTORY=defaultModelDirectory();
 /**
- * The model folder for a new install: the saved one, an existing library inside STRATA_HOME, else Documents/Strata/Models. A Documents folder
+ * The model folder for a new install: the saved one, an existing library inside SAGUARO_HOME, else Documents/Strata/Models. A Documents folder
  * that cannot be made (Controlled folder access, a disconnected share, an offline OneDrive known folder) must not stop the host from starting:
- * the models go to STRATA_HOME/models instead, and `notice` says so in plain words.
+ * the models go to SAGUARO_HOME/models instead, and `notice` says so in plain words.
  */
 export function pickModelsDirectory({ saved, home, preferred, fixedByEnv = false }) {
  if (saved) return { directory: saved, notice: '' };
@@ -80,7 +80,7 @@ export function pickModelsDirectory({ saved, home, preferred, fixedByEnv = false
   return { directory: legacy, notice: `Strata could not use ${preferred} for models (${error.code ?? error.message}), so models go to ${legacy}. You can pick another folder in Settings.` };
  }
 }
-const MODELS_PICK = pickModelsDirectory({ saved: state.modelsDir, home: HOME, preferred: DEFAULT_MODELS_DIRECTORY, fixedByEnv: !!process.env.STRATA_MODELS_DIR });
+const MODELS_PICK = pickModelsDirectory({ saved: state.modelsDir, home: HOME, preferred: DEFAULT_MODELS_DIRECTORY, fixedByEnv: !!process.env.SAGUARO_MODELS_DIR });
 /** Plain words for the person when the usual model folder could not be used (empty otherwise). */
 export const MODELS_DIR_NOTICE = MODELS_PICK.notice;
 if (MODELS_DIR_NOTICE) console.warn(`[strata] ${MODELS_DIR_NOTICE}`);
@@ -102,7 +102,7 @@ export function nativeDataDirectory(input) {
   if(realpathSync(nativeModels)!==root&&!(a.ino&&a.ino===b.ino&&a.dev===b.dev))throw new Error('The model folder conflicts with another library. Choose a different folder.');
   return data;
  }
- if(process.env.STRATA_MODELS_DIR||!existsSync(DEFAULT_MODELS_DIRECTORY)||root!==realpathSync(DEFAULT_MODELS_DIRECTORY))return input;
+ if(process.env.SAGUARO_MODELS_DIR||!existsSync(DEFAULT_MODELS_DIRECTORY)||root!==realpathSync(DEFAULT_MODELS_DIRECTORY))return input;
  const data=dirname(root);
  // `models` and `Models` are one folder on Windows and macOS; where they are not (Linux) a link makes them one, and where no link can be made (exFAT, a share) models go in `models`.
  alignModels(data,root);

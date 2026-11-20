@@ -45,7 +45,7 @@ def unicode_ok() -> bool:
         return False
     from strata_cli import consoleinfo
     if consoleinfo.legacy_console():          # the classic Windows console's font has no arrows, check marks or block glyphs ...
-        if os.environ.get("STRATA_GLYPHS", "").strip().lower() in ("ascii", "legacy"):
+        if os.environ.get("SAGUARO_GLYPHS", "").strip().lower() in ("ascii", "legacy"):
             return False
         if consoleinfo.classic_style()["mode"] != "full":         # ... unless the window's font could be switched to Cascadia Mono
             return False

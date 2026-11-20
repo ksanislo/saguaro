@@ -26,7 +26,7 @@ struct SamplerParams {
     uint64_t counter = 0;        // absolute draw index of row 0; advance across decode calls
     bool greedy = false;
     const float* logit_bias = nullptr; // optional device array [n_vocab], added BEFORE penalties/filters; -inf bans
-    bool gumbel = false;         // STRATA_SPEC_GUMBEL=1: Gumbel-max pick keyed by (seed, counter, token id) - see sampler.cu
+    bool gumbel = false;         // SAGUARO_SPEC_GUMBEL=1: Gumbel-max pick keyed by (seed, counter, token id) - see sampler.cu
 };
 
 // logits (n_tokens, n_vocab) -> one sampled token id per row in `out`.
@@ -45,11 +45,11 @@ void sample_tokens(const float* logits, int n_tokens, int n_vocab, const int* hi
                    const SamplerParams& p, int* out, void* stream);
 
 // The greedy pick (no penalties) on a thread-block cluster of 8 CTAs per row (sm_90+, CUDA; S19): the same token as
-// sample_tokens' one-block argmax, which takes it unless STRATA_ARGMAX_MULTI=0.  False (nothing launched) where it
+// sample_tokens' one-block argmax, which takes it unless SAGUARO_ARGMAX_MULTI=0.  False (nothing launched) where it
 // cannot run: HIP, a card or a build below sm_90.  Device pointers; capturable.
 bool sample_greedy_cluster(const float* logits, int n_tokens, int n_vocab, int* out, void* stream);
 
-// ---- COUPLED DRAFT SAMPLING (include/strata/core/coupled_draft.hpp, STRATA_SPEC_COUPLED=1).  Device pointers
+// ---- COUPLED DRAFT SAMPLING (include/strata/core/coupled_draft.hpp, SAGUARO_SPEC_COUPLED=1).  Device pointers
 // throughout; every per-request / per-round value comes from device memory, so the calls can be captured.
 //
 // The scratch `coupled_draft_sample` needs for `nv` logits (0: too wide for the split merge, coupled cannot run).
@@ -67,7 +67,7 @@ void coupled_draft_sample(float* logits, int nv, const int32_t* sub_to_id, const
                           const SamplerParams* params, int32_t* ring, int cap, int j, const int32_t* step_rec,
                           void* scratch, int32_t* out_id, float* out_prob, void* stream);
 
-// ---- PROBABILISTIC DRAFT ACCEPTANCE (include/strata/core/spec_prob.hpp, STRATA_SPEC_PROB=1).  Device pointers.
+// ---- PROBABILISTIC DRAFT ACCEPTANCE (include/strata/core/spec_prob.hpp, SAGUARO_SPEC_PROB=1).  Device pointers.
 // The drafter's last step in this mode: as coupled_draft_sample, but the draft is drawn from the chain's distribution
 // q with the drafter's own Philox stream, and q's (id, probability) list goes to qrows + j * kSpecQStride (the
 // drafter's mapped host memory; host-readable once the stream has synced).  *out_prob is q's top probability, or the

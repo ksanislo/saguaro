@@ -25,9 +25,9 @@ FILE = "token-savings.json"
 
 
 def ledger_path(config: Path, env=None) -> Path | None:
-    """Where the count is kept: beside the run config, or MAYA_SAVINGS_PATH (a file; its folder must be writable, the
+    """Where the count is kept: beside the run config, or SAGUARO_SAVINGS_PATH (a file; its folder must be writable, the
     temporary file is written next to it).  "off" (or "none", "0") keeps no file: the count lives only until the stop."""
-    v = ((os.environ if env is None else env).get("MAYA_SAVINGS_PATH") or "").strip()
+    v = ((os.environ if env is None else env).get("SAGUARO_SAVINGS_PATH") or "").strip()
     if v.lower() in ("off", "none", "0"):
         return None
     return Path(v).expanduser() if v else Path(config).parent / FILE
@@ -195,7 +195,7 @@ class Ledger:
         except OSError as e:
             if not self.save_failed:
                 print(f"[saguaro] could not save the token count ({self.path.name}): {e}; the count is kept in memory "
-                      "(MAYA_SAVINGS_PATH names another file, 'off' keeps none)", flush=True)
+                      "(SAGUARO_SAVINGS_PATH names another file, 'off' keeps none)", flush=True)
             self.save_failed = True
 
     def summary(self) -> dict:

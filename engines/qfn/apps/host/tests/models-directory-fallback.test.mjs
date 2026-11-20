@@ -15,10 +15,10 @@ function load(env) {
   return JSON.parse(run.stdout.trim().split('\n').pop());
 }
 
-test('a Documents folder that cannot be made does not stop the host: models go to STRATA_HOME/models with a notice', t => {
+test('a Documents folder that cannot be made does not stop the host: models go to SAGUARO_HOME/models with a notice', t => {
   const home = fixture(t);
   const blocker = join(home, 'not-a-folder'); writeFileSync(blocker, 'x');            // mkdir below a file fails like a blocked Documents folder
-  const { dir, notice } = load({ STRATA_HOME: join(home, 'h'), STRATA_MODELS_DIR: '', STRATA_DOCUMENTS_DIR: join(blocker, 'Documents') });
+  const { dir, notice } = load({ SAGUARO_HOME: join(home, 'h'), SAGUARO_MODELS_DIR: '', SAGUARO_DOCUMENTS_DIR: join(blocker, 'Documents') });
   assert.equal(dir, realpathSync(join(home, 'h', 'models')));
   assert.match(notice, /could not use .* for models/);
   assert.match(notice, /Settings/);
@@ -27,7 +27,7 @@ test('a Documents folder that cannot be made does not stop the host: models go t
 test('a usable Documents folder is used and says nothing', t => {
   const home = fixture(t);
   const docs = join(home, 'Documents'); mkdirSync(docs);
-  const { dir, notice } = load({ STRATA_HOME: join(home, 'h'), STRATA_MODELS_DIR: '', STRATA_DOCUMENTS_DIR: docs });
+  const { dir, notice } = load({ SAGUARO_HOME: join(home, 'h'), SAGUARO_MODELS_DIR: '', SAGUARO_DOCUMENTS_DIR: docs });
   assert.equal(dir, realpathSync(join(docs, 'Strata', 'Models')));
   assert.equal(notice, '');
 });

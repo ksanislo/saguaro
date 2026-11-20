@@ -1,9 +1,9 @@
-// src/kernels/cuda/route_prior.cu - STRATA_ROUTE_PRIOR=lambda: cache-conditioned routing (opt-in, changes the output).
+// src/kernels/cuda/route_prior.cu - SAGUARO_ROUTE_PRIOR=lambda: cache-conditioned routing (opt-in, changes the output).
 //
 // "Mixture of Cache-Conditional Experts" (arXiv 2412.00099), without training: when a token's 10 experts are picked,
 // an expert already in VRAM gets a `lambda` bonus on its logit.  The SELECTION uses the biased logits; the WEIGHTS stay
 // the router's (softmax over the 512 unbiased logits), renormalised over the 10 picked like the native router.  Fewer
-// missed experts to copy over PCIe or compute on the CPU.  Unlike STRATA_ROUTE_RESIDENT (a missed tail expert swapped
+// missed experts to copy over PCIe or compute on the CPU.  Unlike SAGUARO_ROUTE_RESIDENT (a missed tail expert swapped
 // for the best resident one within a logit margin), every rank can move, by an amount the logits decide.
 #include "strata/kernels/route_prior.hpp"
 

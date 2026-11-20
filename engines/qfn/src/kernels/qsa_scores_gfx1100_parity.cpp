@@ -127,8 +127,8 @@ void check(Case c) {
         for (int64_t j = steps[i*k::kStepCount+k::kStepWidth]; j < cap; ++j)
             require(iav[i*cap+j] == -1, "ID padding overwritten");
     for (auto* v: {&p, &d, &query, &step, &a, &b, &ia, &ib}) v->guard();
-    const bool branch = std::getenv("STRATA_SCORES_THREAD") &&
-        std::atoi(std::getenv("STRATA_SCORES_THREAD")) == 1 && bound >= 16385 && bound <= nb && nq >= 64;
+    const bool branch = std::getenv("SAGUARO_SCORES_THREAD") &&
+        std::atoi(std::getenv("SAGUARO_SCORES_THREAD")) == 1 && bound >= 16385 && bound <= nb && nq >= 64;
     std::printf("PASS ctx=%lld nq=%lld capacity=%lld mode=%d bound=%lld expected_thread=%d scores=%llu ids=%lld\n",
                 (long long)c.context, (long long)nq, (long long)c.capacity, c.mode, (long long)bound,
                 (int)branch, (unsigned long long)checked, (long long)(nq*cap));
@@ -162,8 +162,8 @@ int main(int argc, char** argv) {
     if (cudaGetDeviceCount(&devices) != cudaSuccess || devices == 0) { std::puts("SKIP no GPU"); return 77; }
     cudaDeviceProp properties{}; ck(cudaGetDeviceProperties(&properties, 0));
     if (!k::gfx_arch_is(properties.gcnArchName, "gfx1100") && !k::gfx_arch_is_gfx12(properties.gcnArchName)) { std::puts("SKIP requires gfx1100 or gfx12"); return 77; }
-    require(std::getenv("STRATA_SCORES_THREAD") && std::strcmp(std::getenv("STRATA_SCORES_THREAD"), "1") == 0,
-            "run with STRATA_SCORES_THREAD=1 so the candidate branch is tested");
+    require(std::getenv("SAGUARO_SCORES_THREAD") && std::strcmp(std::getenv("SAGUARO_SCORES_THREAD"), "1") == 0,
+            "run with SAGUARO_SCORES_THREAD=1 so the candidate branch is tested");
     const bool full = argc > 1 && std::strcmp(argv[1], "--full") == 0;
     for (int64_t n: {1,6,8,9,63,64,65,127,128,129,256})
         check({131075,n,262144,0,0,false});

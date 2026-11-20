@@ -106,7 +106,7 @@ All of these are optional; the details and every setting are in [SETTINGS.md](SE
   RAM, against the same questions one after another with the DSpark drafter
   ([how](SETTINGS.md#deepseek-v41-flash-several-requests-at-once)).
 - **Conversations kept:** the DeepSeek-V4.1-Flash-1017 engine holds one conversation: a prompt that continues it
-  reuses its state, anything else starts over. With `MAYA_DS4_SLOT_KEEP=1`, a conversation another request takes the
+  reuses its state, anything else starts over. With `SAGUARO_DS4_SLOT_KEEP=1`, a conversation another request takes the
   model from - a chat, or an agent's parent and workers - is set aside, and a request that continues it reads only its
   new tokens: in RAM, or across a restart from the folder. Off by default. How many are kept in RAM, the folder, its
   size cap and how long a slot lives are settings too
@@ -114,8 +114,8 @@ All of these are optional; the details and every setting are in [SETTINGS.md](SE
 - **Loading the experts:** the engine reads the pack's expert regions into VRAM and RAM at start. Once a region's
   bytes are copied, the load drops its pages from the file cache (`posix_fadvise`), so the same bytes are not held
   twice and a pack whose copies would not fit beside their cache loads at the disk's speed
-  (`MAYA_DS4_LOAD_DROP_CACHE`, on; `0` keeps them: a restart then starts warm, and a pack that fits loads a few
-  seconds faster without the calls). `MAYA_DS4_LOAD_THREADS` (12) and `MAYA_DS4_LOAD_INTERLEAVE` (off) set the load's
+  (`SAGUARO_DS4_LOAD_DROP_CACHE`, on; `0` keeps them: a restart then starts warm, and a pack that fits loads a few
+  seconds faster without the calls). `SAGUARO_DS4_LOAD_THREADS` (12) and `SAGUARO_DS4_LOAD_INTERLEAVE` (off) set the load's
   threads and file order; [loading the experts](SETTINGS.md#deepseek-loading-the-experts) has the numbers for a GGUF and an EXL3
   pack, and the huge-page note for a load that stalls part-way.
 - **Engram prompt read-ahead:** on one GPU, an optional read-ahead fills the ordinary row cache before each consuming
@@ -127,7 +127,7 @@ All of these are optional; the details and every setting are in [SETTINGS.md](SE
   off by default; they need enough physical RAM.
 - **Expert-copy startup on Linux (GGUF):** optional [direct reads](SETTINGS.md#deepseek-expert-copy-io) for the
   experts copied into RAM (off by default).
-- **Prompt experts on AMD:** `MAYA_DS4_EXPERT_MMQ=1` uses the existing int8 MMQ path for routed IQ experts. It is off
+- **Prompt experts on AMD:** `SAGUARO_DS4_EXPERT_MMQ=1` uses the existing int8 MMQ path for routed IQ experts. It is off
   by default and adds q8 activation rounding ([routed prompt experts on AMD](SETTINGS.md#deepseek-routed-prompt-experts-on-amd)).
 
 ## MiniMax-M3.1-Flash

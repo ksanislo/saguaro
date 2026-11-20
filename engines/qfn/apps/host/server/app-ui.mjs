@@ -3,7 +3,7 @@
  *
  * The Linux app starts the host itself (the "shell" process, which has no window) and shows the page in a separate window
  * process. WebKitGTK can crash that process on some computers; the shell then keeps the host running and opens the same page
- * in the default browser ("browser mode"). A person can also choose browser mode (`--browser`, STRATA_UI=browser).
+ * in the default browser ("browser mode"). A person can also choose browser mode (`--browser`, SAGUARO_UI=browser).
  *
  *   mode 'window'   the app window shows the page; the window process registers the app updater here (Tauri's signed updater).
  *   mode 'browser'  an ordinary browser tab shows the page. There is no window process, so the app cannot update itself, and
@@ -61,8 +61,8 @@ export function sendNotification(message, { run = execFile, env = externalEnviro
 }
 
 export function createAppUi({ env = process.env, shutdown = () => {}, open = openInBrowser, notify = sendNotification, createUpdater = createAppUpdater } = {}) {
-  let mode = MODES.has(env.STRATA_UI_MODE) ? env.STRATA_UI_MODE : null;
-  let reason = mode === 'browser' ? (env.STRATA_UI_REASON || 'chosen') : null;
+  let mode = MODES.has(env.SAGUARO_UI_MODE) ? env.SAGUARO_UI_MODE : null;
+  let reason = mode === 'browser' ? (env.SAGUARO_UI_REASON || 'chosen') : null;
   let bridge = null;
   const originalBridge = createUpdater({ env });   // the older way: the shell passed the bridge in the environment
 
@@ -86,7 +86,7 @@ export function createAppUi({ env = process.env, shutdown = () => {}, open = ope
     /** The window process hands over its updater bridge (a loopback address and a token). */
     setBridge({ url, token } = {}) {
       if (typeof url !== 'string' || !BRIDGE_URL.test(url) || typeof token !== 'string' || token.length < 16) throw new Error('That is not a bridge address.');
-      bridge = createUpdater({ env: { STRATA_SHELL_BRIDGE: url, STRATA_SHELL_TOKEN: token } });
+      bridge = createUpdater({ env: { SAGUARO_SHELL_BRIDGE: url, SAGUARO_SHELL_TOKEN: token } });
       return true;
     },
     /** Open the page in the default browser without changing the mode (a second start while Strata runs). */
