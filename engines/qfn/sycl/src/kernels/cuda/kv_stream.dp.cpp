@@ -479,6 +479,83 @@ catch (sycl::exception const &exc) {
   std::exit(1);
 }
 
+// blocks [b0, b1) of the host copy into the region (the read-prefix keep's partial stage)
+void kv_stage_blocks_from_host(const QsaAttnPools &stage, const KvHostPools &host,
+                               int fmt, int64_t b0, int64_t b1, const QsaShapes &s,
+                               void *stream) try {
+    if (b1 <= b0) return;
+    const Runs r = runs_of(stage, host, fmt, s);
+    for (int a = 0; a < r.n; ++a)
+        if (DPCT_CHECK_ERROR(strata::q_of(stream)->memcpy(
+                r.dst[a] + b0 * r.len[a], r.src[a] + b0 * r.len[a],
+                (size_t)((b1 - b0) * r.len[a]))) != 0)
+            check("stage");
+}
+catch (sycl::exception const &exc) {
+  std::cerr << exc.what() << "Exception caught at file:" << __FILE__
+            << ", line:" << __LINE__ << std::endl;
+  std::exit(1);
+}
+
+// the watermark fingerprint (see kv_stream.hpp): the CUDA arm folds the block on the device; here the block's
+// runs are copied to a host buffer and folded with the same FNV-1a, which the stream's in-order queue orders
+// after anything queued before it (a kept prefix hash read this way is the same number as CUDA's).
+namespace {
+void block_hash_side(const Runs &r, int64_t b, const uint8_t *const *side, uint64_t *out, void *stream) {
+    unsigned long long h = 1469598103934665603ull;
+    for (int a = 0; a < r.n; ++a) {
+        std::vector<uint8_t> buf((size_t) r.len[a]);
+        if (DPCT_CHECK_ERROR(strata::q_of(stream)
+                                 ->memcpy(buf.data(), side[a] + b * r.len[a], (size_t) r.len[a])
+                                 .wait()) != 0) {
+            *out = 0;
+            return;
+        }
+        for (int i = 0; i < r.len[a]; ++i)
+            h = (h ^ (unsigned long long) buf[(size_t) i]) * 1099511628211ull;
+    }
+    *out = h;
+}
+}  // namespace
+
+void kv_host_block_match(const QsaAttnPools &stage, const KvHostPools &host, int fmt,
+                         int64_t b, uint64_t expect, const QsaShapes &s, int32_t *ok, void *stream) try {
+    const Runs r = runs_of(stage, host, fmt, s);
+    const uint8_t *side[4];
+    for (int a = 0; a < r.n; ++a) side[a] = r.src[a];
+    unsigned long long h = 1469598103934665603ull;
+    for (int a = 0; a < r.n; ++a) {
+        std::vector<uint8_t> buf((size_t) r.len[a]);
+        if (DPCT_CHECK_ERROR(strata::q_of(stream)
+                                 ->memcpy(buf.data(), side[a] + b * r.len[a], (size_t) r.len[a])
+                                 .wait()) != 0) {
+            *ok = 0;
+            return;
+        }
+        for (int i = 0; i < r.len[a]; ++i)
+            h = (h ^ (unsigned long long) buf[(size_t) i]) * 1099511628211ull;
+    }
+    *ok = h == (unsigned long long) expect ? 1 : 0;
+}
+catch (sycl::exception const &exc) {
+  std::cerr << exc.what() << "Exception caught at file:" << __FILE__
+            << ", line:" << __LINE__ << std::endl;
+  std::exit(1);
+}
+
+void kv_pool_block_hash(const QsaAttnPools &stage, const KvHostPools &host, int fmt,
+                        int64_t b, const QsaShapes &s, uint64_t *out, void *stream) try {
+    const Runs r = runs_of(stage, host, fmt, s);
+    const uint8_t *side[4];
+    for (int a = 0; a < r.n; ++a) side[a] = r.dst[a];
+    block_hash_side(r, b, side, out, stream);
+}
+catch (sycl::exception const &exc) {
+  std::cerr << exc.what() << "Exception caught at file:" << __FILE__
+            << ", line:" << __LINE__ << std::endl;
+  std::exit(1);
+}
+
 KvStreamCounters kv_stream_counters(const KvStreamMap &m) try {
     int32_t c[kKvCtlInts] = {};
     KvStreamCounters r;

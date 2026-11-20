@@ -27,6 +27,7 @@ constexpr int RT = 1024;   // the resolve block
 struct Runs {
     const uint8_t* src[4];
     uint8_t* dst[4];
+    const uint8_t* side[4];   // the block hash kernel's read side (src or dst, set at call)
     int len[4];
     int n;
 };
@@ -254,12 +255,53 @@ void kv_ring_restore(const QsaAttnPools& slots, const KvHostPools& host, int fmt
 
 void kv_stage_from_host(const QsaAttnPools& stage, const KvHostPools& host, int fmt, int64_t n_blocks,
                         const QsaShapes& s, void* stream) {
-    if (n_blocks <= 0) return;
+    kv_stage_blocks_from_host(stage, host, fmt, 0, n_blocks, s, stream);
+}
+
+void kv_stage_blocks_from_host(const QsaAttnPools& stage, const KvHostPools& host, int fmt, int64_t b0,
+                               int64_t b1, const QsaShapes& s, void* stream) {
+    if (b1 <= b0) return;
     const Runs r = runs_of(stage, host, fmt, s);
     for (int a = 0; a < r.n; ++a)
-        if (memcpy_async_split(r.dst[a], r.src[a], (size_t) (n_blocks * r.len[a]), cudaMemcpyDefault,
-                            (cudaStream_t) stream) != cudaSuccess)
+        if (memcpy_async_split(r.dst[a] + b0 * r.len[a], r.src[a] + b0 * r.len[a], (size_t) ((b1 - b0) * r.len[a]),
+                            cudaMemcpyDefault, (cudaStream_t) stream) != cudaSuccess)
             check("stage");
+}
+
+namespace {
+// the watermark fingerprint: one thread folds the block's runs, FNV-1a 64, in `runs_of`'s array order (the
+// host copy's fold and the region's fold of the same bytes are the same number - same kernel, same order).
+__global__ void block_hash_kernel(Runs r, long long b, unsigned long long* out) {
+    unsigned long long h = 1469598103934665603ull;
+    for (int a = 0; a < r.n; ++a)
+        for (int i = 0; i < r.len[a]; ++i)
+            h = (h ^ (unsigned long long) r.side[a][b * r.len[a] + i]) * 1099511628211ull;
+    *out = h;
+}
+
+__global__ void block_match_kernel(Runs r, long long b, unsigned long long expect, int* ok) {
+    unsigned long long h = 1469598103934665603ull;
+    for (int a = 0; a < r.n; ++a)
+        for (int i = 0; i < r.len[a]; ++i)
+            h = (h ^ (unsigned long long) r.side[a][b * r.len[a] + i]) * 1099511628211ull;
+    *ok = h == expect ? 1 : 0;
+}
+}  // namespace
+
+void kv_pool_block_hash(const QsaAttnPools& stage, const KvHostPools& host, int fmt, int64_t b,
+                        const QsaShapes& s, uint64_t* out, void* stream) {
+    Runs r = runs_of(stage, host, fmt, s);
+    for (int a = 0; a < r.n; ++a) r.side[a] = r.dst[a];
+    block_hash_kernel<<<1, 1, 0, (cudaStream_t) stream>>>(r, (long long) b, (unsigned long long*) out);
+    check("pool block hash");
+}
+
+void kv_host_block_match(const QsaAttnPools& stage, const KvHostPools& host, int fmt, int64_t b, uint64_t expect,
+                         const QsaShapes& s, int32_t* ok, void* stream) {
+    Runs r = runs_of(stage, host, fmt, s);
+    for (int a = 0; a < r.n; ++a) r.side[a] = r.src[a];
+    block_match_kernel<<<1, 1, 0, (cudaStream_t) stream>>>(r, (long long) b, (unsigned long long) expect, (int*) ok);
+    check("host block match");
 }
 
 void kv_unstage_to_host(const QsaAttnPools& stage, const KvHostPools& host, int fmt, int64_t b0, int64_t b1,

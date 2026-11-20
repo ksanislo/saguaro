@@ -6,6 +6,7 @@
 #include "strata/kernels/dflash2.hpp"
 #endif
 #include "strata/prefill/warm_policy.hpp"
+#include "strata/prefill/kv_prefix_keep.hpp"
 #include <atomic>
 #if defined(__cpp_lib_atomic_wait)
 #define STRATA_ATOMIC_WAIT 1   // #1488: std::atomic::wait / notify_all are a GCC 11 library feature; GCC 10 spins instead
@@ -1028,6 +1029,20 @@ struct Prefill::Impl {
     PrefillStats* stats = nullptr;
     // KV streaming: one layer's whole K/V, staged from the host copy per layer and chunk (identity layout)
     strata::kernels::KvHostPools stage;
+    // the read-prefix keep (strata/prefill/kv_prefix_keep.hpp): one staging region per QSA layer of this stage
+    // (ordinal `keep_ord0 + i`), laid out instead of the one pool when the loan holds them all; records say what
+    // each region still equals the host copy for. They reset with the pools (carve), and the serve path
+    // invalidates them when the loan is refilled (Prefill::kv_keep_invalidate).
+    std::vector<strata::kernels::KvHostPools> keep_reg;
+    std::vector<strata::prefill::KvKeepRec> keep_recs;
+    int64_t keep_ord0 = 0;        // the first QSA ordinal keep_reg[0] covers
+    int64_t keep_pages = 0;       // blocks each region covers (identity layout), 0: keep off
+    bool keep_active = false;
+    int keep_wanted = -1;         // relayout's mode: -1 env, 0 one pool, 1 the regions (a loan priced for them)
+    uint64_t* keep_hash = nullptr;     ///< pinned, one slot per region: the committed watermark's hash (kernel-written)
+    uint64_t* keep_hash_dev = nullptr; ///< its device alias
+    int32_t* keep_ok = nullptr;        ///< pinned: the host-copy fingerprint check's verdict (kernel-written)
+    int32_t* keep_ok_dev = nullptr;
     int64_t stage_want = 0, stage_cells = 0;   // the staging's cells to lay out (0: every page) and laid out
     int32_t* ident_table = nullptr;
     cudaStream_t kv_copy = nullptr;
@@ -1035,10 +1050,17 @@ struct Prefill::Impl {
     // breakdown line (output only): the staging regions' stream time, an event pair per pass, summed after the chunk
     cudaEvent_t kv_ev0[kKvEvPairs] = {}, kv_ev1[kKvEvPairs] = {};
     int kv_pairs_run = 0;
+    // the read's staging measurement (one line per read, run_impl's end): bytes copied host->VRAM, stream ms,
+    // layer passes, and what the keep saved
+    int64_t kv_hits_run = 0, kv_chunks_run = 0;
+    uint64_t kv_skip_bytes_run = 0;
     double kv_ms_run = 0.0;                           // this chunk: staged host->device ...
     uint64_t kv_bytes_run = 0;                        // ... bytes ...
     int64_t kv_passes_run = 0;                        // ... per layer pass
     double kv_ms_total = 0.0;                         // this path over its lifetime
+    int64_t kv_passes_read = 0, kv_hits_read = 0;
+    uint64_t kv_bytes_read = 0, kv_skip_bytes_read = 0;
+    double kv_ms_read = 0.0;
     // layer split: the device, and the hand-off to the next stage (two pinned chunk buffers, used in turn)
     int device = -1;
     float* hand[2] = {};
@@ -1074,19 +1096,22 @@ bool stage_reach_off() {
     static const bool v = [] { const char* e = std::getenv("SAGUARO_KV_STAGE_REACH"); return e && e[0] == '0'; }();
     return v;
 }
+// SAGUARO_KV_PREFIX_KEEP=1 (default off): the read-prefix keep (strata/prefill/kv_prefix_keep.hpp) - the loan is
+// laid out as one staging region per QSA layer of the stage, a read keeps its prefix on the card across the
+// chunks (and across reads while the loan holds), and every layer pass copies only the new blocks. Off, every
+// layer of every chunk stages the whole prefix into the one shared pool, exactly as before.
+bool kv_keep_env() {
+    static const bool v = strata::prefill::kv_keep_wanted(std::getenv("SAGUARO_KV_PREFIX_KEEP"));
+    return v;
+}
 // `cells`: the pages it holds cover this many cells (0: every page of the layer)
 int64_t stage_pages(const core::QsaState& q0, const strata::kernels::QsaShapes& s, int64_t cells) {
     return cells <= 0 ? q0.n_pages : std::min<int64_t>(q0.n_pages, (cells + s.page_size - 1) / s.page_size);
 }
-void take_stage(Alloc& o_borrowed, const core::SessionState& ss, const strata::kernels::QsaShapes& s,
-                strata::kernels::KvHostPools& st, bool& ok, int64_t cells) {
-    const core::QsaState& q0 = ss.qsa_states[ss.qsa_primary()];
-    if (q0.kv_mode != 1) return;
-    if (stage_own() && o_borrowed.count_only) return;
-    Alloc own;
-    own.owned = o_borrowed.owned;
-    Alloc& o = stage_own() ? own : o_borrowed;
-    const size_t rows = (size_t) stage_pages(q0, s, cells) * s.n_head_kv * s.page_size;
+// one staging region (or the one shared pool): the pool arrays of `pages` pages, in the order take_stage uses
+void take_stage_pools(Alloc& o, const core::QsaState& q0, const strata::kernels::QsaShapes& s,
+                      strata::kernels::KvHostPools& st, bool& ok, size_t pages) {
+    const size_t rows = pages * s.n_head_kv * s.page_size;
     if (q0.kv_hybrid) {   // K8V4: the three runs of kKvHybrid; pools_of() then reads as the hybrid pools (mode 3)
         st.k_q = o.take<int8_t>(rows * s.head_dim, ok);
         st.k_scale = o.take<uint16_t>(rows * (s.head_dim / 64), ok);
@@ -1103,6 +1128,23 @@ void take_stage(Alloc& o_borrowed, const core::SessionState& ss, const strata::k
         st.k_pool = o.take<uint16_t>(rows * s.head_dim, ok);
         st.v_pool = o.take<uint16_t>(rows * s.head_dim, ok);
     }
+}
+void take_stage(Alloc& o_borrowed, const core::SessionState& ss, const strata::kernels::QsaShapes& s,
+                strata::kernels::KvHostPools& st, bool& ok, int64_t cells) {
+    const core::QsaState& q0 = ss.qsa_states[ss.qsa_primary()];
+    if (q0.kv_mode != 1) return;
+    if (stage_own() && o_borrowed.count_only) return;
+    Alloc own;
+    own.owned = o_borrowed.owned;
+    Alloc& o = stage_own() ? own : o_borrowed;
+    take_stage_pools(o, q0, s, st, ok, (size_t) stage_pages(q0, s, cells));
+}
+// the host copy's identity: an address a restore or a re-pin moves (the keep records key on it)
+const void* keep_host0(const core::QsaState& st) {
+    if (st.host.k_pool != nullptr) return st.host.k_pool;
+    if (st.host.k_q != nullptr) return st.host.k_q;
+    if (st.host.k_q4 != nullptr) return st.host.k_q4;
+    return nullptr;
 }
 strata::kernels::QsaAttnPools pools_of(const strata::kernels::KvHostPools& h, const int32_t* table) {
     strata::kernels::QsaAttnPools p;
@@ -1179,6 +1221,8 @@ void Prefill::release() {
         if (impl_->kv_ev1[i]) cudaEventDestroy(impl_->kv_ev1[i]);
     }
     if (impl_->grp_host) cudaFreeHost(impl_->grp_host);
+    if (impl_->keep_hash) cudaFreeHost(impl_->keep_hash);
+    if (impl_->keep_ok) cudaFreeHost(impl_->keep_ok);
     impl_->steps_up.release();
     impl_->tok_up.release();
     impl_->up_ring.release();
@@ -1781,18 +1825,85 @@ bool Prefill::carve(size_t T, void* alloc) {
     }
     m.ple_emb = o.take<float>(T * N, ok);
     m.ple_norm = o.take<float>((size_t) strata::kernels::NG_HC_DIM, ok);
-    take_stage(o, ss, s, m.stage, ok, m.stage_want);
+    // The read-prefix keep (strata/prefill/kv_prefix_keep.hpp): lay the staging out as one region per QSA layer
+    // of this stage instead of the one shared pool, when the room the region leaves after every other buffer
+    // holds all of them - then a read copies only the blocks that are new. Else carve the one shared pool, as
+    // before: the keep never inflates the loan and never fails the carve. The records reset either way (the
+    // pools moved, or the layout was decided afresh).
     {
         const core::QsaState& q0 = ss.qsa_states[ss.qsa_primary()];
         m.stage_cells = q0.kv_mode == 1 ? stage_pages(q0, s, m.stage_want) * s.page_size : 0;
+        m.keep_active = false;
+        m.keep_reg.clear();
+        m.keep_recs.clear();
+        m.keep_pages = 0;
+        m.keep_ord0 = 0;
+        m.stage = strata::kernels::KvHostPools{};
+        int64_t ord0 = 0;
+        for (int64_t l = 0; l < stage_lb_; ++l) ord0 += core::is_qsa_layer(g, l) ? 1 : 0;
+        const int64_t le = stage_le_ < 0 ? g.n_layers : stage_le_;
+        int64_t nq = 0;
+        for (int64_t l = stage_lb_; l < le; ++l) nq += core::is_qsa_layer(g, l) ? 1 : 0;
+        const bool want = q0.kv_mode == 1 && nq > 1 && m.stage_cells > 0 && !stage_own() &&
+                          (m.keep_wanted == 1 || (m.keep_wanted < 0 && kv_keep_env()));
+        // the keep's pinned write-back slots (one watermark hash + one fingerprint verdict per QSA layer of the
+        // model): a kernel writes them, the prefill reads them after its stream sync. Unmappable RAM: keep off.
+        auto keep_slots = [&]() -> bool {
+            if (m.keep_hash != nullptr) return true;
+            const size_t n = (size_t) std::max<int64_t>(g.n_qsa_layers(), 1);
+            void* h = nullptr;
+            void* o = nullptr;
+            if (force_pageable() || cudaHostAlloc(&h, n * 8, cudaHostAllocMapped) != cudaSuccess ||
+                cudaHostGetDevicePointer((void**) &m.keep_hash_dev, h, 0) != cudaSuccess ||
+                cudaHostAlloc(&o, n * 4, cudaHostAllocMapped) != cudaSuccess ||
+                cudaHostGetDevicePointer((void**) &m.keep_ok_dev, o, 0) != cudaSuccess) {
+                cudaGetLastError();
+                if (h != nullptr) cudaFreeHost(h);
+                if (o != nullptr) cudaFreeHost(o);
+                m.keep_hash = m.keep_hash_dev = nullptr;
+                m.keep_ok = m.keep_ok_dev = nullptr;
+                return false;
+            }
+            m.keep_hash = (uint64_t*) h;
+            m.keep_ok = (int32_t*) o;
+            std::memset(o, 0, n * 4);
+            return true;
+        };
+        if (want && keep_slots()) {
+            const bool ok0 = ok;
+            const uint64_t used0 = o.used;
+            const size_t owned0 = o.owned != nullptr ? o.owned->size() : 0;
+            bool kok = !o.spill;   // a hybrid borrowed/spilled layout cannot hand a spill slot back
+            const size_t pages = (size_t) stage_pages(q0, s, m.stage_want);
+            std::vector<strata::kernels::KvHostPools> regs((size_t) nq);
+            for (int64_t i = 0; kok && i < nq; ++i) take_stage_pools(o, q0, s, regs[(size_t) i], kok, pages);
+            if (kok) {
+                m.keep_active = true;
+                m.keep_reg = std::move(regs);
+                m.keep_pages = (int64_t) pages;
+                m.keep_ord0 = ord0;
+                m.keep_recs.assign((size_t) nq, strata::prefill::KvKeepRec{});
+            } else {
+                cudaGetLastError();   // the room holds the one pool, not one per layer: the one pool, keep off
+                ok = ok0;
+                o.used = used0;
+                if (o.owned != nullptr)
+                    while (o.owned->size() > owned0) { cudaFree(o.owned->back()); o.owned->pop_back(); }
+                take_stage(o, ss, s, m.stage, ok, m.stage_want);
+            }
+        } else {
+            take_stage(o, ss, s, m.stage, ok, m.stage_want);
+        }
     }
     m.T = (int64_t) T;
     return ok;
 }
 
-bool Prefill::relayout(int64_t chunk, void* borrow, uint64_t borrow_bytes, std::string& err, int64_t stage_cells) {
+bool Prefill::relayout(int64_t chunk, void* borrow, uint64_t borrow_bytes, std::string& err, int64_t stage_cells,
+                       int keep) {
     Impl& m = *impl_;
     m.stage_want = stage_cells;
+    m.keep_wanted = keep;
     if (m.borrow_spill) {
         err = "prefill: a hybrid borrowed/owned layout cannot be changed between requests";
         return false;
@@ -1829,6 +1940,10 @@ bool Prefill::relayout(int64_t chunk, void* borrow, uint64_t borrow_bytes, std::
 
 int64_t Prefill::chunk() const { return impl_->T; }
 int64_t Prefill::stage_cells() const { return impl_->stage_cells; }
+bool Prefill::kv_keep_wanted() { return kv_keep_env(); }
+void Prefill::kv_keep_invalidate() {
+    for (auto& r : impl_->keep_recs) strata::prefill::kv_keep_invalidate(r);
+}
 int64_t Prefill::stage_cells_for(const core::SessionState& ss, int64_t reach) {
     const int64_t full = ss.qsa_states[ss.qsa_primary()].max_cells;
     if (reach <= 0 || stage_reach_off()) return 0;
@@ -2469,8 +2584,8 @@ int64_t Prefill::chain_experts_cpu() const {
 }
 
 uint64_t Prefill::bytes_needed(const core::ModelGeometry& g, const core::SessionState& ss, int64_t chunk, bool src,
-                               int64_t stage_cells) {
-    return bytes_needed_impl(g, ss, chunk, false, src, stage_cells);
+                               int64_t stage_cells, int keep) {
+    return bytes_needed_impl(g, ss, chunk, false, src, stage_cells, keep);
 }
 
 // What `init` really allocates when the prompt path owns its buffers (no loan): every cudaMalloc rounds up to a 2 MiB
@@ -2481,7 +2596,7 @@ uint64_t Prefill::bytes_needed_owned(const core::ModelGeometry& g, const core::S
 }
 
 uint64_t Prefill::bytes_needed_impl(const core::ModelGeometry& g, const core::SessionState& ss, int64_t chunk,
-                                    bool owned_pages, bool src, int64_t stage_cells) {
+                                    bool owned_pages, bool src, int64_t stage_cells, int keep) {
     // the same allocation sequence as `init` (`carve`), counted - with the MoE layout `carve` picks for the same source
     const size_t T = (size_t) chunk;
     bool ok = true;
@@ -2531,7 +2646,23 @@ uint64_t Prefill::bytes_needed_impl(const core::ModelGeometry& g, const core::Se
     f(T * N);
     f((size_t) strata::kernels::NG_HC_DIM);
     strata::kernels::KvHostPools stage;
-    take_stage(o, ss, s, stage, ok, stage_cells);
+    // the read-prefix keep's regions (kv_prefix_keep.hpp): one region per QSA layer of the model instead of the
+    // one pool - counted for the model's full count where carve lays out a stage's share of it (over-count is
+    // the safe direction). A borrowed region only counts them for a request's own cells (stage_cells > 0): the
+    // auto chunk scan and the startup loan stay priced as before. Owned buffers count them whenever the keep is
+    // wanted (init lays out what it can and falls back to the one pool).
+    {
+        const core::QsaState& q0 = ss.qsa_states[ss.qsa_primary()];
+        const bool keep_on = (keep == 1 || (keep < 0 && kv_keep_env())) && keep != 0 &&
+                             q0.kv_mode == 1 && !stage_own() && g.n_qsa_layers() > 1 &&
+                             (owned_pages || stage_cells > 0);
+        if (keep_on) {
+            const size_t pages = (size_t) stage_pages(q0, s, stage_cells);
+            for (int64_t i = 0; i < g.n_qsa_layers(); ++i) take_stage_pools(o, q0, s, stage, ok, pages);
+        } else {
+            take_stage(o, ss, s, stage, ok, stage_cells);
+        }
+    }
     return o.used + (8u << 20);   // alignment slack
 }
 
@@ -2823,7 +2954,8 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
         return e ? std::atoi(e) != 0 : false;
     }();
     const bool kv_prefetch = kv_prefetch_on;
-    if (kv_prefetch) {
+    // the keep's watermark fingerprint runs on the side stream too, so keep-on needs it as much as prefetch does
+    if (kv_prefetch || m.keep_active) {
         if ((!m.kv_copy && cudaStreamCreateWithFlags(&m.kv_copy, cudaStreamNonBlocking) != cudaSuccess) ||
             (!m.kv_released && cudaEventCreateWithFlags(&m.kv_released, cudaEventDisableTiming) != cudaSuccess) ||
             (!m.kv_ready && cudaEventCreateWithFlags(&m.kv_ready, cudaEventDisableTiming) != cudaSuccess)) {
@@ -2835,8 +2967,11 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
     struct KvDrain {
         cudaStream_t stream;
         ~KvDrain() { if (stream) cudaStreamSynchronize(stream); }
-    } kv_drain{kv_prefetch ? m.kv_copy : nullptr};
+    } kv_drain{kv_prefetch || m.keep_active ? m.kv_copy : nullptr};
     int64_t kv_prefetches = 0;
+    m.kv_passes_read = m.kv_hits_read = 0;
+    m.kv_bytes_read = m.kv_skip_bytes_read = 0;
+    m.kv_ms_read = 0.0;
     const uint64_t gdn_floats = (uint64_t) g.ssm_state_size * g.ssm_v_heads * g.ssm_state_size +
                                 (uint64_t) g.ssm_conv_channels * (g.ssm_d_conv - 1);
     int32_t prev[2] = {ss.ple_prev[0], ss.ple_prev[1]};
@@ -2879,6 +3014,29 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
     PeTimer pe;
     if (m.pp) pe.dev = m.pp->dev; else pe.on = false;
     const cudaStream_t cs = (cudaStream_t) m.cs;
+    // the read-prefix keep's decision for one layer pass (kv_prefix_keep.hpp): the record says what the region
+    // still equals the host copy for; its watermark fingerprint is checked by one kernel reading the host copy
+    // on the side stream (a mismatch, a stale verdict, or a failed sync all mean "stage the whole prefix", so
+    // a torn read only costs the copy it avoids, never a wrong block). The decision must run with the region's
+    // last chunk landed (the chunk's end syncs the stream whenever a callback reports progress - otherwise the
+    // watermark's just-appended cells are still in flight and the verdict says "stage it all").
+    auto kv_keep_decide = [&](const core::QsaState& st, const core::SessionState* sess, int64_t li, int64_t p0,
+                              int64_t chunk) -> strata::prefill::KvKeepView {
+        strata::prefill::KvKeepRec& rec = m.keep_recs[(size_t) li];
+        const int fmt = core::qsa_kv_format(st);
+        const void* h0 = keep_host0(st);
+        const bool ident = rec.ss == (const void*) sess && rec.host0 == h0 && rec.fmt == fmt;
+        bool fp_ok = false;
+        if (ident && rec.staged_blocks > 0 && rec.fp_valid && m.keep_hash != nullptr && m.kv_copy != nullptr) {
+            const uint64_t stored = m.keep_hash[(size_t) li];
+            strata::kernels::kv_host_block_match(pools_of(m.keep_reg[(size_t) li], m.ident_table), st.host, fmt,
+                                                 rec.staged_blocks - 1, stored, s, &m.keep_ok[(size_t) li],
+                                                 m.kv_copy);
+            fp_ok = cudaStreamSynchronize(m.kv_copy) == cudaSuccess && m.keep_ok[(size_t) li] != 0;
+        }
+        return strata::prefill::kv_keep_view(ident, fp_ok, rec.staged_blocks, m.keep_pages, p0, chunk,
+                                             s.page_size);
+    };
     // the MMQ row table lives in the borrowed cache slots, which the refill after a prompt overwrites with experts:
     // write it again for every prompt (a layout is reused as long as the chunk and the slots are the same)
     if (m.ids_identity != nullptr) mmq::iota(m.ids_identity, m.T * K, m.cs);
@@ -3138,7 +3296,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
 
         int64_t qsa_index = 0, gdn_index = 0;
         for (int64_t l = 0; l < LB; ++l) (core::is_qsa_layer(g, l) ? qsa_index : gdn_index) += 1;
-        int64_t kv_pending = -1;
+        int64_t kv_pending = -1, kv_pending_from = 0;
         auto kv_prefetch_after = [&](int64_t layer, int64_t ordinal) -> bool {
             if (!kv_prefetch || p0 <= 0) return true;
             if (kv_pending >= 0) return true;   // one staging pool: the pending prefetch has not been consumed yet
@@ -3153,14 +3311,25 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                     err = "prefill: releasing KV staging pool";
                     return false;
                 }
-                strata::kernels::kv_stage_from_host(pools_of(m.stage, m.ident_table), state.host,
-                    core::qsa_kv_format(state), (p0 + s.page_size - 1) / s.page_size, s, m.kv_copy);
+                // the keep's region for this layer, staged only past its recorded watermark (the same decision
+                // the consuming layer will recompute: same record, same p0, so the same range)
+                strata::kernels::KvHostPools* stg = &m.stage;
+                int64_t from_block = 0;
+                if (m.keep_active && ordinal >= m.keep_ord0 &&
+                    ordinal < m.keep_ord0 + (int64_t) m.keep_reg.size()) {
+                    const int64_t li = ordinal - m.keep_ord0;
+                    stg = &m.keep_reg[(size_t) li];
+                    from_block = kv_keep_decide(state, &ss, li, p0, T).from_block;
+                }
+                strata::kernels::kv_stage_blocks_from_host(pools_of(*stg, m.ident_table), state.host,
+                    core::qsa_kv_format(state), from_block, (p0 + s.page_size - 1) / s.page_size, s, m.kv_copy);
                 if (cudaPeekAtLastError() != cudaSuccess ||
                     cudaEventRecord(m.kv_ready, m.kv_copy) != cudaSuccess) {
                     err = "prefill: enqueueing KV prefetch";
                     return false;
                 }
                 kv_pending = ordinal;
+                kv_pending_from = from_block;
                 ++kv_prefetches;
                 break;
             }
@@ -3584,6 +3753,16 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                         // KV streaming: this layer's cells [0, p0) come in from the host copy to the staging pool, and the
                         // chunk's cells go to the host copy, the staging pool, and the VRAM slots of resident blocks
                         const bool staged = st.kv_mode == 1;
+                        // this layer's staging pool: its keep region when this stage laid the regions out, else the one pool
+                        strata::kernels::KvHostPools* stg = &m.stage;
+                        int64_t keep_li = -1;
+                        if (staged && m.keep_active && qsa_index >= m.keep_ord0 &&
+                            qsa_index < m.keep_ord0 + (int64_t) m.keep_reg.size()) {
+                            keep_li = qsa_index - m.keep_ord0;
+                            stg = &m.keep_reg[(size_t) keep_li];
+                        }
+                        strata::prefill::KvKeepView kv_view;
+                        bool kv_pass_keep = false;   // this pass's copy goes through the keep's bookkeeping
                         if (staged) {
                             pt.mark(kPfKvStage, cs);
                             // the breakdown line: each staging region gets an event pair (created once); their
@@ -3597,21 +3776,42 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                             }
                             const int kv_ev = m.kv_pairs_run < kKvEvPairs ? m.kv_pairs_run : -1;
                             if (kv_ev >= 0) cudaEventRecord(m.kv_ev0[kv_ev], cs);
+                            const int64_t p_blocks = (p0 + s.page_size - 1) / s.page_size;
+                            int64_t from_block = 0;
                             if (kv_pending == qsa_index) {
                                 if (cudaStreamWaitEvent(cs, m.kv_ready, 0) != cudaSuccess) {
                                     err = "prefill: waiting for KV prefetch";
                                     return false;
                                 }
                                 kv_pending = -1;
-                            } else strata::kernels::kv_stage_from_host(pools_of(m.stage, m.ident_table), st.host,
-                                                                core::qsa_kv_format(st),
-                                                                (p0 + s.page_size - 1) / s.page_size, s, m.cs);
+                                from_block = kv_pending_from;
+                                if (keep_li >= 0) {   // the prefetch decided this range with the same record and p0:
+                                    const strata::prefill::KvKeepRec& rec0 = m.keep_recs[(size_t) keep_li];
+                                    kv_view = strata::prefill::kv_keep_view(   // the same view for the commit
+                                        rec0.ss == (const void*) sg.ss && rec0.host0 == keep_host0(st) &&
+                                            rec0.fmt == core::qsa_kv_format(st),
+                                        true, rec0.staged_blocks, m.keep_pages, p0, T, s.page_size);
+                                    kv_pass_keep = true;
+                                }
+                            } else {
+                                if (keep_li >= 0) {
+                                    kv_view = kv_keep_decide(st, sg.ss, keep_li, p0, T);
+                                    from_block = kv_view.from_block;
+                                    kv_pass_keep = true;
+                                }
+                                strata::kernels::kv_stage_blocks_from_host(pools_of(*stg, m.ident_table), st.host,
+                                                                    core::qsa_kv_format(st), from_block, p_blocks,
+                                                                    s, m.cs);
+                            }
                             if (kv_ev >= 0) cudaEventRecord(m.kv_ev1[kv_ev], cs);
                             if (kv_ev >= 0) ++m.kv_pairs_run;
                             ++m.kv_passes_run;
-                            m.kv_bytes_run +=
-                                (uint64_t) ((p0 + s.page_size - 1) / s.page_size) *
-                                strata::kernels::kv_block_bytes(s, core::qsa_kv_format(st));
+                            const uint64_t blk_bytes = strata::kernels::kv_block_bytes(s, core::qsa_kv_format(st));
+                            m.kv_bytes_run += (uint64_t) (p_blocks - from_block) * blk_bytes;
+                            if (kv_pass_keep && kv_view.skipped_blocks > 0) {   // the measured win, and the hit
+                                ++m.kv_hits_run;
+                                m.kv_skip_bytes_run += (uint64_t) kv_view.skipped_blocks * blk_bytes;
+                            }
                             pt.mark(kPfQsa, cs);
                             pf_step("reading the prompt (batched, step sync): the K/V staged from RAM at layer", l);
                         }
@@ -3632,8 +3832,8 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                             strata::kernels::fwht256_inplace_cuda(Vc, T * 2, m.cs);
                             const strata::kernels::KvHostPools hk = strata::kernels::kv_hybrid_k_half(st.host),
                                                                hv = strata::kernels::kv_hybrid_v_half(st.host),
-                                                               sk = strata::kernels::kv_hybrid_k_half(m.stage),
-                                                               sv = strata::kernels::kv_hybrid_v_half(m.stage);
+                                                               sk = strata::kernels::kv_hybrid_k_half(*stg),
+                                                               sv = strata::kernels::kv_hybrid_v_half(*stg);
                             const bool mirror = st.host.present();
                             kv_append(Kc, Kc, T, p0, st.page_table, s.page_size, nullptr, nullptr,
                                       st.k_q, st.k_q, st.k_scale, st.k_scale, m.cs, mirror ? &hk : nullptr,
@@ -3647,15 +3847,27 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                             }
                             if (st.kv_q4)
                                 strata::kernels::kv_append_q4(st.k_q4, st.v_q4, st.page_table, p0, T, Kc, Vc, s, m.cs,
-                                                              host_w, staged ? &m.stage : nullptr);
+                                                              host_w, staged ? stg : nullptr);
                             else
                                 kv_append(Kc, Vc, T, p0, st.page_table, s.page_size, st.kv_int8 ? nullptr : st.k_pool,
                                           st.kv_int8 ? nullptr : st.v_pool, st.k_q, st.v_q, st.k_scale, st.v_scale, m.cs,
-                                          host_w, staged ? &m.stage : nullptr);
+                                          host_w, staged ? stg : nullptr);
                             if (host_by_dma)
-                                strata::kernels::kv_unstage_to_host(pools_of(m.stage, m.ident_table), st.host,
+                                strata::kernels::kv_unstage_to_host(pools_of(*stg, m.ident_table), st.host,
                                                                     core::qsa_kv_format(st), p0 / s.page_size,
                                                                     (p0 + T + s.page_size - 1) / s.page_size, s, m.cs);
+                        }
+                        if (staged && keep_li >= 0) {
+                            // the region now equals the host copy for [0, floor((p0+chunk)/page)) blocks (the staged
+                            // prefix plus the cells this chunk appended into it): record it, and fingerprint the new
+                            // watermark from the region itself - stream-ordered after the append, so it holds exactly
+                            // the bytes the next read will compare the host copy against (kv_prefix_keep.hpp)
+                            strata::prefill::kv_keep_commit(m.keep_recs[(size_t) keep_li], sg.ss, keep_host0(st),
+                                                            core::qsa_kv_format(st), kv_view);
+                            const int64_t wm = kv_view.staged_after - 1;
+                            if (wm >= 0 && m.keep_hash != nullptr)
+                                strata::kernels::kv_pool_block_hash(pools_of(*stg, m.ident_table), st.host,
+                                    core::qsa_kv_format(st), wm, s, &m.keep_hash[(size_t) keep_li], m.cs);
                         }
                         if (staged) pf_step("reading the prompt (batched, step sync): the K/V append at layer", l);
                         split_q(Qf, q, T, m.cs);
@@ -3802,7 +4014,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                                 }
                             }
                         }
-                        const strata::kernels::QsaAttnPools pools = staged ? pools_of(m.stage, m.ident_table)
+                        const strata::kernels::QsaAttnPools pools = staged ? pools_of(*stg, m.ident_table)
                                                                            : core::qsa_attn_pools(st);
                         pt.mark(kPfQsaAttn, cs);
                         // perf-review D-1: the whole chunk on tensor cores, one block per (query, KV head), FP32-level
@@ -5393,6 +5605,11 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
         cudaGetLastError();
     }
     m.kv_ms_total += m.kv_ms_run;
+    m.kv_ms_read += m.kv_ms_run;
+    m.kv_bytes_read += m.kv_bytes_run;
+    m.kv_passes_read += m.kv_passes_run;
+    m.kv_hits_read += m.kv_hits_run;
+    m.kv_skip_bytes_read += m.kv_skip_bytes_run;
     if (job) {   // this chunk's staging went into the job(s) it read (a batched chunk splits it evenly per segment)
         const int64_t share = std::max<int64_t>(1, (int64_t) job->segs.size());
         job->kv_ms += m.kv_ms_run / (double) share;
@@ -5410,13 +5627,24 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
     m.kv_bytes_run = 0;
     m.kv_passes_run = 0;
     m.kv_pairs_run = 0;
+    m.kv_hits_run = 0;
+    m.kv_skip_bytes_run = 0;
     if (kv_prefetch) {
         if (const cudaError_t cst = cudaStreamSynchronize(m.kv_copy); cst != cudaSuccess) {
             err = std::string("prefill: KV prefetch stream: ") + cudaGetErrorString(cst);
             return false;
         }
-        std::fprintf(stderr, "strata KV prefetch: %lld layer prefixes, single existing staging pool\n",
-                     (long long) kv_prefetches);
+        std::fprintf(stderr, "strata KV prefetch: %lld layer prefixes, %s staging\n", (long long) kv_prefetches,
+                     m.keep_active ? "per-layer kept regions" : "single existing staging pool");
+    }
+    if (m.kv_passes_read > 0) {   // what this read copied, and what the keep saved (PLAN-prefix-redma's measure)
+        std::fprintf(stderr, "strata prefill: KV staged this read: %.0f ms on stream, %.2f GiB copied host->VRAM "
+                             "in %lld layer pass%s%s\n", m.kv_ms_read, (double) m.kv_bytes_read / 1073741824.0,
+                     (long long) m.kv_passes_read, m.kv_passes_read == 1 ? "" : "es",
+                     m.kv_hits_read > 0
+                         ? (" (keep: " + std::to_string((long long) m.kv_hits_read) + " of them read a prefix already "
+                            "on the card, " + std::to_string(m.kv_skip_bytes_read / 1048576) + " MiB not copied)").c_str()
+                         : (m.keep_active ? " (keep on, no prefix hit yet)" : ""));
     }
     stats_.ms_total += ms_since(t_start);
     {

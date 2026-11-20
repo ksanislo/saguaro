@@ -102,6 +102,21 @@ void kv_ring_restore(const QsaAttnPools& slots, const KvHostPools& host, int fmt
 void kv_stage_from_host(const QsaAttnPools& stage, const KvHostPools& host, int fmt, int64_t n_blocks,
                         const QsaShapes& s, void* stream);
 
+/// The same for blocks [b0, b1) only - the read-prefix keep's pass that copies what the region does not hold
+/// yet (strata/prefill/kv_prefix_keep.hpp). Not capturable (DMA).
+void kv_stage_blocks_from_host(const QsaAttnPools& stage, const KvHostPools& host, int fmt, int64_t b0,
+                               int64_t b1, const QsaShapes& s, void* stream);
+
+/// The keep's watermark fingerprint: hash block `b` of one side in `runs_of`'s array order with one thread, so
+/// the host copy's fold and the pool's fold of the same bytes are the same number.
+/// `kv_pool_block_hash` folds the pool's copy into `out` (device-writable host memory) when the region commits
+/// a watermark; `kv_host_block_match` folds the host copy and writes `*ok` (1/0) - whether it still matches the
+/// committed `expect`. Neither capturable (they end in a host write).
+void kv_pool_block_hash(const QsaAttnPools& stage, const KvHostPools& host, int fmt, int64_t b,
+                        const QsaShapes& s, uint64_t* out, void* stream);
+void kv_host_block_match(const QsaAttnPools& stage, const KvHostPools& host, int fmt, int64_t b, uint64_t expect,
+                         const QsaShapes& s, int32_t* ok, void* stream);
+
 /// #579 #613 (HIP A/B, SAGUARO_KV_HOST_DMA=1): the reverse of kv_stage_from_host for blocks [b0, b1) - the staging
 /// pool's blocks into the host copy, by DMA, so the prompt path's append need not write host memory from a kernel.
 /// Not capturable.
