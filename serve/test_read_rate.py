@@ -490,4 +490,4 @@ class OnReadTakesTheProvisionalFlag(unittest.TestCase):
         src = inspect.getsource(S)
         line = next(x for x in src.splitlines() if "tls.on_read = lambda" in x)
         self.assertIn("prov=False, st=stat", line)
-        self.assertIn("self._note_read(st, n, ts, ex, prov)", line)
+        self.assertIn("self._note_read_safe(st, n, ts, ex, prov)", line)

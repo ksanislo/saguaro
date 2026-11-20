@@ -3307,6 +3307,15 @@ class Service:
             self._note_peak_read(total, tokens, now)
             return total
 
+    def _note_read_safe(self, *a):
+        """_note_read for the drivers' read callbacks: a Monitor figure must never fail the request it watches."""
+        try:
+            self._note_read(*a)
+        except Exception as e:                          # (logged once a kind, the answer goes on)
+            if type(e).__name__ not in getattr(self, "_note_read_errs", set()):
+                self._note_read_errs = getattr(self, "_note_read_errs", set()) | {type(e).__name__}
+                print(f"[saguaro] read-rate bookkeeping failed ({type(e).__name__}: {e}); the request goes on", flush=True)
+
     def _note_read(self, stat, n_read, tok_s=None, exact=False, prov=False):
         """A read step of one request: the drivers' PP lines and the batch slots' read counters call this (through
         the hook run() installs on the engine's thread-local) with the prompt tokens IT has read now - the reused
@@ -4468,7 +4477,7 @@ class Service:
                     stat.at_engine = True
                     tls = getattr(self.engine, "_tls", None)   # this request's thread reads the engine's lines: its
                     if tls is not None:                        # PP steps count into the engine-total read rate
-                        tls.on_read = lambda n, ts=None, ex=False, prov=False, st=stat: self._note_read(st, n, ts, ex, prov)
+                        tls.on_read = lambda n, ts=None, ex=False, prov=False, st=stat: self._note_read_safe(st, n, ts, ex, prov)
                         tls.read_leg_base = 0                  # (this request's read counting starts from nothing)
                     self.running.add(stat)
                     self.active += 1
