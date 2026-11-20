@@ -3308,7 +3308,7 @@ class Service:
                 self.read_base = self.read_events.popleft()
             # the tokens really read in the window, over the time they took (from the last count before it)
             start = self.read_base or (self.read_events[0] if self.read_events else None)
-            if start is None:
+            if start is None or not self.read_events:   # (nothing counted inside the window: nothing read lately)
                 return 0.0
             n = self.read_events[-1][1] - start[1]
             span = now - start[0]
