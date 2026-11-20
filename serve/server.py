@@ -223,6 +223,13 @@ QUEUE_PING_S = 2.0
 QUEUE_TICK_S = 15.0
 QUEUE_WEDGED_S = 120.0
 QUEUE_WARN_S = 60.0
+# The Monitor's Conversations rows (Service.convs): a conversation is its opening - the first CONV_KEY_TOKENS prompt
+# tokens, which every turn of it re-sends whole.  The table keeps the recent CONV_MAX, and a turn that reuses a known
+# conversation's first CONV_REUSE_MIN+ tokens continues it even when its opening changed.
+CONV_MAX = 64
+CONV_IDLE_S = 2 * 3600.0
+CONV_KEY_TOKENS = 256
+CONV_REUSE_MIN = 32
 
 
 # ------------------------------------------------------------------------------------------------ engines
@@ -2231,6 +2238,47 @@ def request_spec_off(sampling) -> bool:
     return isinstance(tune, dict) and tune.get("spec") == 1 and not isinstance(tune.get("spec"), bool)
 
 
+def conv_head(ids: list[int], gen_tail: int) -> list[int]:
+    """A conversation's opening as tokens: its prompt without the reply's prompting tail (the generation prompt sits
+    at the end of one turn and in the middle of the next, so it cannot be part of the opening) - at most CONV_KEY_TOKENS."""
+    return list(ids[:max(0, len(ids) - gen_tail)])[:CONV_KEY_TOKENS]
+
+
+def conv_head_key(head: list[int]) -> bytes:
+    """The conversation's identity: a hash of that opening - an agent client re-sends the whole conversation every
+    turn, so its opening is the same every turn of it and new every new chat."""
+    return hashlib.blake2b(repr(head).encode("ascii", "ignore"), digest_size=8).digest()
+
+
+def conv_first_words(messages, n: int = 10) -> str:
+    """The Monitor's conversation row's label: the first user message's first words ("" when there is none)."""
+    for m in messages or []:
+        if not isinstance(m, dict) or m.get("role") != "user":
+            continue
+        c = m.get("content")
+        if isinstance(c, list):
+            c = " ".join(str(p.get("text", "")) for p in c if isinstance(p, dict))
+        w = " ".join(str(c or "").split()[:n])
+        if w:
+            return w[:96] + ("..." if len(w) > 96 else "")
+    return ""
+
+
+class Conversation:
+    """One row of the Monitor's Conversations card: one conversation's turns under one opening, what its last turn
+    did (speeds, tokens, context) and which turn the engine holds now (None: it waits idle).  `content` is its whole
+    opening while that is short (a young chat whose every turn is the opening: its rows are found by prefix)."""
+
+    def __init__(self, cid: int, key: bytes, head: list[int], api, words: str):
+        self.id, self.key, self.head, self.api, self.words = cid, key, head, api, words
+        self.content = list(head)                       # (None once the conversation outgrows CONV_KEY_TOKENS)
+        self.turns, self.tokens_read, self.tokens_written = 0, 0, 0
+        self.last_read_tok_s, self.last_decode_tok_s = None, None      # the last finished turn's rates
+        self.prompt_last, self.out_last, self.ctx = 0, 0, 0            # its sizes: the idle row shows these
+        self.stat = None                                                # the turn queued or with the engine now
+        self.last_active = time.time()                                  # when one of its turns started or ended
+
+
 class RequestStat:
     """One request's live figures: when its first answer token came (None while it reads the prompt) and its
     (time, generated) samples over RATE_WINDOW_S for the live decode rate."""
@@ -2252,6 +2300,7 @@ class RequestStat:
         self.at_engine = False                            # it holds an engine place now (a fair slice lets it go)
         # who this request is in the Monitor's "Right now": a stable id, the client it came from and when it queued
         self.id, self.api, self.queued_at = None, None, None
+        self.conv = None                                # the Conversation its opening names (its row in the card)
         # shared with other answers (several at once): the most decoding beside it, and the engine's total rate
         # (summed over them) sampled while it decoded - "this chat 7 tok/s · engine 14 tok/s across 2 chats"
         self.shared_max, self.eng_sum, self.eng_n = 1, 0.0, 0
@@ -2328,7 +2377,12 @@ class Service:
         self.running: set[RequestStat] = set()          # every request with the engine now, reading or writing
         self.waiting: set[RequestStat] = set()          # requests in the FIFO for their first turn (the "Right now" rows)
         self._req_ids = itertools.count(1)              # stable per-request ids for the Monitor (live.chats)
-        self.ended = collections.deque(maxlen=6)        # the last few that ended (the Monitor's Conversations)
+        self.ended = collections.deque(maxlen=6)        # the last few that ended (kept for older readers of /metrics)
+        # the Monitor's Conversations rows: recent conversations by opening (LRU, idle CONV_IDLE_S on gone; the
+        # per-instance conv_max / conv_idle_s are what the tests turn down)
+        self.convs: collections.OrderedDict = collections.OrderedDict()
+        self._conv_ids = itertools.count(1)
+        self.conv_max, self.conv_idle_s = CONV_MAX, CONV_IDLE_S
         self.history = collections.deque(maxlen=500)    # the last finished requests, newest last (GET /metrics)
         # since the server started (the Monitor's totals, issue #35)
         self.totals = {"since": time.time(), "requests": 0, "prompt_tokens": 0, "reused": 0, "output_tokens": 0,
@@ -3410,7 +3464,8 @@ class Service:
         stream = bool(kbt) and 0 < win < self.engine.max_context
         rows = []
         for st in sorted(self.waiting, key=lambda r: r.queued_at or 0.0):
-            rows.append({"id": st.id, "label": st.api, "state": "queued", "phase": None,
+            rows.append({"id": st.id, "label": st.api, "conv": st.conv.id if st.conv else None,
+                         "state": "queued", "phase": None,
                          "prompt_tokens": st.prompt_tokens or None, "prompt_read": None, "prompt_total": None,
                          "generated": 0, "max_tokens": st.max_tokens, "tok_s": None, "prefill_tok_s": None,
                          "prefill_shared": False, "context_used": st.prompt_tokens or 0,
@@ -3422,7 +3477,7 @@ class Service:
                 state = "thinking" if ph == "thinking" else \
                     "tool" if ph.startswith("writing a tool call") or ph == "tool call complete" else "writing"
             rate = st.read_avg if st.read_avg is not None else (st.read_last or 0.0)
-            entry = dict(v, id=st.id, label=st.api, state=state,
+            entry = dict(v, id=st.id, label=st.api, conv=st.conv.id if st.conv else None, state=state,
                          prefill_tok_s=round(max(0.0, rate), 1) if state == "reading" and rate else None)
             used = (st.prompt_tokens or 0) + (st.generated or 0)
             entry["context_used"] = used
@@ -3430,6 +3485,128 @@ class Service:
                 entry["cache_vram_bytes"] = int(min(used, win) * kbt) if stream else int(used * kbt)
                 entry["cache_ram_bytes"] = int(max(0, used - win) * kbt) if stream else 0
             rows.append(entry)
+        return rows
+
+    def _conv_prune(self, now):
+        """(status_lock held) drop conversations idle past conv_idle_s, and the least recently used ones while the
+        table is over conv_max - a turn in the engine always keeps its row."""
+        for k in [k for k, c in self.convs.items() if c.stat is None and now - c.last_active > self.conv_idle_s]:
+            del self.convs[k]
+        while len(self.convs) > self.conv_max:
+            gone = next((k for k, c in self.convs.items() if c.stat is None), None)
+            if gone is None:
+                break
+            del self.convs[gone]
+
+    def _conv_open(self, ids, api, words, stat, gen_tail=0) -> Conversation:
+        """(status_lock held) the row this request's opening names: found by it, or a new one (the table is an LRU,
+        idle rows expire).  Its turn count goes up the moment the request joins it, so the row says "turn 14" while
+        the fourteenth turn is still being written."""
+        now = time.time()
+        head = conv_head(ids, gen_tail)
+        short = len(ids) - gen_tail <= CONV_KEY_TOKENS
+        c = self.convs.get(conv_head_key(head))
+        if c is None:
+            c = Conversation(next(self._conv_ids), conv_head_key(head), head, api, words or "")
+            c.content = head if short else None
+            self.convs[c.key] = c
+        else:
+            c.head, c.content = head, head if short else None
+            self.convs.move_to_end(c.key)
+            if words and not c.words:
+                c.words = words
+        c.api, c.stat, c.last_active = api or c.api, stat, now
+        c.turns += 1
+        self._conv_prune(now)
+        return c
+
+    def _conv_idle(self, c: Conversation, stat=None, ids=None, gen_tail=0, prompt_n=0, out_n=0, reused=None,
+                   read_tok_s=None, decode_tok_s=None):
+        """(status_lock held) a conversation's turn ended: its row loses the request and waits idle with the turn's
+        figures.  A turn that opened a new row is re-homed onto the conversation it really continues: one whose
+        whole opening this prompt now extends (a chat still shorter than CONV_KEY_TOKENS grows its own opening every
+        turn), or - when the opening itself changed - one whose first `reused` tokens the engine still held: reuse
+        never reaches past where two prompts diverge, so it says which conversation's cache this turn read.  When a
+        later turn of the same opening is already under way (the row is not this request's any more), only the
+        counts are added."""
+        now = time.time()
+        mine = c.stat is stat
+        if mine and c.turns == 1 and ids:
+            n = max(0, len(ids) - gen_tail)
+            head = conv_head(ids, gen_tail)
+            for k, o in reversed(list(self.convs.items())):
+                if o is c or o.stat is not None:
+                    continue
+                if (o.content and n > len(o.content) and list(ids[:len(o.content)]) == o.content) or \
+                        (reused is not None and CONV_REUSE_MIN <= reused <= min(len(o.head), len(head))
+                         and o.head[:reused] == head[:reused]):
+                    o.turns += c.turns                  # (this turn joins the conversation it continues)
+                    o.words, o.api = o.words or c.words, c.api or o.api
+                    self.convs.pop(c.key, None)         # (the row this turn opened is dropped...)
+                    self.convs.pop(k, None)             # (...and o takes its opening, re-keyed below)
+                    c = o
+                    break
+        if reused is not None:
+            c.tokens_read += max(0, prompt_n - reused)
+            c.prompt_last, c.out_last, c.ctx = prompt_n, out_n, prompt_n + out_n
+        c.tokens_written += out_n
+        if read_tok_s is not None:
+            c.last_read_tok_s = read_tok_s
+        if decode_tok_s is not None:
+            c.last_decode_tok_s = decode_tok_s
+        if mine and ids:
+            n = max(0, len(ids) - gen_tail)
+            self.convs.pop(c.key, None)                 # (its old opening key, if the row is being re-keyed)
+            c.head = conv_head(ids, gen_tail)
+            c.content = list(ids[:n]) if n <= CONV_KEY_TOKENS else None
+            c.key = conv_head_key(c.head)
+            self.convs[c.key] = c                       # (re-keyed: the next turn lands right on it)
+            self.convs.move_to_end(c.key)
+        if mine:
+            c.stat, c.last_active = None, now
+        self._conv_prune(now)
+
+    def _convs_list(self, now) -> list:
+        """(status_lock held) /metrics' live.conversations: one entry per conversation - the ones with a turn queued
+        or in the engine first (their `turn` holds the per-request fields a row showed today), the idle ones after,
+        most recently used first.  The cache split is the "Right now" rows' (kv_bytes_token, VRAM window)."""
+        info = getattr(self.engine, "info", None) or {}
+        kbt = info.get("kv_bytes_token")
+        kbt = float(kbt) if isinstance(kbt, (int, float)) and not isinstance(kbt, bool) and kbt > 0 else None
+        win = info.get("kv_resident") if isinstance(info.get("kv_resident"), (int, float)) else 0
+        stream = bool(kbt) and 0 < win < self.engine.max_context
+        self._conv_prune(now)
+        live_rows, idle_rows = [], []
+        for c in reversed(list(self.convs.values())):         # (most recently used first)
+            e = {"id": c.id, "api": c.api, "words": c.words, "turns": c.turns,
+                 "read_tok_s": c.last_read_tok_s, "decode_tok_s": c.last_decode_tok_s,
+                 "tokens_read": c.tokens_read, "tokens_written": c.tokens_written}
+            st = c.stat
+            if st is not None:
+                v = st.view(now)
+                state, ph = v["state"], v["phase"] or ""
+                if state == "writing":
+                    state = "thinking" if ph == "thinking" else \
+                        "tool" if ph.startswith("writing a tool call") or ph == "tool call complete" else "writing"
+                rate = st.read_avg if st.read_avg is not None else (st.read_last or 0.0)
+                e["state"] = state
+                e["turn"] = dict(v, state=state, prefill_tok_s=(round(max(0.0, rate), 1)
+                                     if state == "reading" and rate else None))
+                used = (st.prompt_tokens or 0) + (st.generated or 0)
+                live_rows.append((-(v["elapsed_s"] or 0), e, used))
+            else:
+                e["state"], e["idle_s"] = "idle", round(max(0.0, now - c.last_active), 1)
+                e["prompt_last"], e["out_last"] = c.prompt_last, c.out_last
+                idle_rows.append((e, c.ctx))
+        live_rows.sort(key=lambda t: t[0])
+        out = [(e, used) for _, e, used in live_rows] + idle_rows
+        rows = []
+        for e, used in out:
+            e["context_used"] = used
+            if kbt:
+                e["cache_vram_bytes"] = int(min(used, win) * kbt) if stream else int(used * kbt)
+                e["cache_ram_bytes"] = int(max(0, used - win) * kbt) if stream else 0
+            rows.append(e)
         return rows
 
     def metrics(self, all_requests=False) -> dict:
@@ -3448,7 +3625,7 @@ class Service:
             writing = len(self.current_requests)        # (of the active ones, those past their prompt)
             spec_off = bool(self.current_requests) and all(r.spec_off for r in self.current_requests)
             now = time.time()
-            convs = sorted((r.view(now) for r in self.running), key=lambda v: -(v["elapsed_s"] or 0))
+            convs = self._convs_list(now)               # (one entry per conversation: the Monitor's Conversations)
             ended = list(self.ended)
             chats = self._chats_list(now)               # (every chat queued or with the engine, its own figures)
         progress = getattr(self.engine, "progress", None)
@@ -3481,10 +3658,11 @@ class Service:
                 live["prompt_read"], live["prompt_total"] = rd[-1]["prompt_read"], rd[-1]["prompt_total"]
             elif reading_n == 1 and progress:           # (its PP line has not reached the view yet: the engine's own)
                 live["prompt_read"], live["prompt_total"] = progress[0], progress[1]
-        # several at once: each request's own figures (Conversations), and the counts summed over them
+        # several conversations at once: each running one's own figures (Conversations), and the counts summed over them
         live["conversations"], live["ended"] = convs, ended
-        if len(convs) > 1:
-            live["generated"] = sum(v["generated"] for v in convs)
+        running_turns = [c["turn"] for c in convs if c.get("turn")]
+        if len(running_turns) > 1:
+            live["generated"] = sum(t["generated"] for t in running_turns)
         # the prompt the conversation cache already held (the Monitor's Context bar), from the engine's PP lines
         live["prompt_reused"] = progress[2] if s.get("busy") and progress and len(progress) > 2 else None
         engine = {"model": self.model, "model_label": self.model_label, "max_context": self.engine.max_context,
@@ -3703,6 +3881,7 @@ class Service:
             else:
                 prefill = CALL_START + (force if glm_calls else "\n" + (f"<function={force}>\n" if force else ""))
         given["_prefill"] = prefill
+        given["_conv_label"] = conv_first_words(asked)   # (the Monitor's conversation rows: its first words)
         given["_blocked"] = self._block_suffixes(blocked, tools, kwargs) if blocked and force is None else None
         if looping and tools and force is None and not loop_guard.answers_user(asked):   # (an answer to the user ends)
             keep = self._keep_suffix(tools, kwargs)
@@ -4434,7 +4613,10 @@ class Service:
         stat.spec_off = request_spec_off(sampling)
         stat.id, stat.api = next(self._req_ids), (sampling or {}).get("_api")
         stat.prompt_tokens, stat.max_tokens, stat.queued_at = len(ids), max_new, my_started
+        conv_tail = (sampling or {}).get("_gen_tail")   # the reply's opening tokens (prepare's gt=): not the opening
+        conv_tail = conv_tail if isinstance(conv_tail, int) and not isinstance(conv_tail, bool) and conv_tail > 0 else 0
         with self.status_lock:
+            stat.conv = self._conv_open(ids, stat.api, (sampling or {}).get("_conv_label"), stat, conv_tail)
             self.status["queued"] += 1
             self.waiting.add(stat)                      # (the Monitor's "Right now": queued until its turn comes)
             queued = True                               # counted as waiting until its turn comes (below, or in finally)
@@ -4856,6 +5038,11 @@ class Service:
                           f"({finish}, cancel={cancel.is_set()}){hit_msg}", flush=True)
                     if os.environ.get("SAGUARO_DEBUG") and raw_ids:
                         print(f"[saguaro] raw: {self.tok.decode(raw_ids)!r}", flush=True)
+                    if stat.conv is not None:
+                        self._conv_idle(stat.conv, stat, ids, conv_tail, len(ids), n, last.get("reused") or 0,
+                                        pf_s, row["decode_tok_s"])  # (its row waits idle with this turn's figures)
+                elif stat.conv is not None and stat.conv.stat is stat:
+                    stat.conv.stat, stat.conv.last_active = None, time.time()   # (it died: free the row, keep its turns)
                 if queued:                              # never started (a cancel, an error while waiting): not waiting now
                     self.status["queued"] -= 1
                 if hold[1]:
@@ -5739,6 +5926,9 @@ def make_handler(svc: Service):
             if kw.get("_prefill"):
                 oreq = {**oreq, "_prefill": kw["_prefill"]}
             oreq = {**oreq, "_blocked": kw.get("_blocked"), "_think_resume": kw.get("_think_resume")}
+            if kw.get("_gen_tail"):
+                oreq = {**oreq, "_gen_tail": kw["_gen_tail"]}
+            oreq = {**oreq, "_conv_label": kw.get("_conv_label")}   # (the Monitor's conversation row: its first words)
             cancel = threading.Event()
             watch_client(self, cancel)
             chunks = openai_chunks(svc, oreq, ids, thinking, tools, max_new, cancel)
@@ -6530,6 +6720,9 @@ def make_handler(svc: Service):
                     sampling["_prefill"] = kw["_prefill"]
                 sampling["_blocked"] = kw.get("_blocked")
                 sampling["_think_resume"] = kw.get("_think_resume")
+                if kw.get("_gen_tail"):
+                    sampling["_gen_tail"] = kw["_gen_tail"]
+                sampling["_conv_label"] = kw.get("_conv_label")   # (the Monitor's conversation row: its first words)
                 effective = {**svc.sampling_defaults, **svc.shared, **sampling}
                 config = {**req, **{k: effective[k] for k in ("temperature", "top_p") if k in effective}}
                 run = svc.run(ids, thinking, tools, max_new, sampling, cancel)
@@ -6567,6 +6760,7 @@ def make_handler(svc: Service):
             req = {**req, "_think_resume": kw.get("_think_resume")}
             if kw.get("_gen_tail"):                            # the reply's opening (gt=)
                 req = {**req, "_gen_tail": kw["_gen_tail"]}
+            req = {**req, "_conv_label": kw.get("_conv_label")}   # the Monitor's conversation row: its first words
             _debug_req("openai", req, messages, tools, max_new, thinking, len(ids))
             cancel = threading.Event()
             if not (req.get("stream") and req.get("strata_resume") is True):   # (the web app's runs on, by design)
@@ -6664,6 +6858,7 @@ def make_handler(svc: Service):
             req = {**req, "_think_resume": kw.get("_think_resume")}
             if kw.get("_gen_tail"):                            # the reply's opening (gt=)
                 req = {**req, "_gen_tail": kw["_gen_tail"]}
+            req = {**req, "_conv_label": kw.get("_conv_label")}   # the Monitor's conversation row: its first words
             _debug_req("anthropic", req, messages, tools, max_new, thinking, len(ids))
             cancel = threading.Event()
             watch_client(self, cancel)

@@ -99,6 +99,9 @@
 .now__chat .bar--sm { height: 4px; margin-bottom: 3px; }
 .now__chat__row { display: flex; gap: 8px; align-items: baseline; min-width: 0; flex-wrap: wrap; }
 .now__more { margin-top: 10px; }
+/* Conversations: one row each - who, its first words, the turn / context / cache line under it */
+.conv__who { display: block; max-width: 22ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.conv__meta { display: block; color: var(--st-ink-soft); font-size: 11px; }
 .ctx__chats { margin-top: 12px; display: grid; gap: 6px; }
 .ctx__chats__tot { margin: 0 0 2px; font-size: var(--st-fs-sm); color: var(--st-ink-soft); }
 .ctx__chat { display: grid; grid-template-columns: minmax(56px, auto) minmax(0, 1fr) auto; gap: 8px; align-items: center; font-size: var(--st-fs-sm); }

@@ -136,7 +136,8 @@ function RightNow({m}) {
   if (model) {
     const chatRow = (c) => {
       const [tone, text] = CHAT_STATES[c.state] || ["muted", c.state];
-      const who = API_NAMES[c.label] || c.label || `chat ${c.id != null ? c.id : ""}`.trim();
+      // the conversation id when the server gives one: a resumed turn keeps its chat's label across turns
+      const who = API_NAMES[c.label] || c.label || `chat ${c.conv != null ? c.conv : c.id != null ? c.id : ""}`.trim();
       let pct = null, ptone = "accent", detail;
       if (c.state === "reading") {
         ptone = "info";
@@ -233,7 +234,7 @@ function ContextCard({m}) {
     cacheTot = {n: actChats.length, all: GBb(v + rm), vram: GBb(v), ram: GBb(rm)};
   }
   const chatBar = (c) => {
-    const who = API_NAMES[c.label] || c.label || `chat ${c.id != null ? c.id : ""}`;
+    const who = API_NAMES[c.label] || c.label || `chat ${c.conv != null ? c.conv : c.id != null ? c.id : ""}`;
     const cv = c.cache_vram_bytes || 0, cr = c.cache_ram_bytes || 0, ctot = cv + cr;
     return html`<div class="ctx__chat" title=${`${who}: ${fmt(c.context_used)} of ${fmt(max)} positions`}>
       <span class="ctx__chat__who">${who}</span>
@@ -627,28 +628,42 @@ function Requests({m}) {
   </section>`;
 }
 
-// ------------------------------------------------------------------ the conversations: each answer with the engine now
-// (several at once: --parallel), its own phase, prompt read and count, then the last few that ended
+// ------------------------------------------------------------------ the conversations: one row per conversation
+// (as Strata's UI did: a resumed turn renews its row, it is no new row) - the conversations with a turn running
+// first, the idle ones after, badged "Idle 40 s".  A row: its state, who talks and what the chat opened with, the
+// turn number, the context and what its cache costs, and the running turn's progress or the last turn's speeds.
 function Conversations({m}) {
-  const live = m.live || {}, convs = live.conversations || [], ended = live.ended || [];
-  if (!convs.length && !ended.length) return null;
-  const row = (c, done) => {
-    const [tone, text] = done ? FINISH[c.finish] || ["muted", c.finish || "–"]
-      : c.state === "reading" ? ["info", "Reading"] : c.state === "writing" ? ["accent", c.phase ? c.phase[0].toUpperCase() + c.phase.slice(1) : "Writing"] : ["muted", "Waiting"];
-    const read = c.prompt_total ? `${fmt(c.prompt_read)} / ${fmt(c.prompt_total)}` : fmt(c.prompt_tokens);
-    const speed = c.state === "reading" && !done ? (c.prefill_tok_s != null ? `${fmt(c.prefill_tok_s)} prefill${c.prefill_shared ? " (shared clock)" : ""}` : "–") : c.tok_s != null ? fmt(c.tok_s, 1) : "–";
-    return html`<tr class=${done ? "muted" : ""}><td class="l nowrap"><span class=${`badge badge--${tone}`}>${text}</span></td>
-      <td>${read}</td><td>${fmt(c.generated)}${c.max_tokens && !done ? html`<span class="muted small"> / ${fmt(c.max_tokens)}</span>` : null}</td>
-      <td class="strong" title=${c.state === "reading" && c.prefill_shared && !done
-        ? "it read at the same time as other chats: the engine's clock for it then covers the shared reader, not this chat alone" : null}>${speed}</td>
-      <td>${c.elapsed_s == null ? "–" : `${fmt(c.elapsed_s, 1)} s`}</td></tr>`;
+  const live = m.live || {}, convs = live.conversations || [];
+  if (!convs.length) return null;
+  const nRun = convs.filter((c) => c.turn).length;
+  const row = (c) => {
+    const t = c.turn;
+    const [tone, text] = !t ? ["muted", `Idle ${ago(c.idle_s)}`]
+      : t.state === "waiting" ? ["muted", "Waiting"] : t.state === "reading" ? ["info", "Reading"]
+      : t.state === "thinking" ? ["accent", "Thinking"] : t.state === "tool" ? ["warn", "Tool call"]
+      : ["accent", t.phase ? t.phase[0].toUpperCase() + t.phase.slice(1) : "Writing"];
+    const who = `${API_NAMES[c.api] || c.api || `chat ${c.id}`}${c.words ? ` · "${c.words}"` : ""}`;
+    const cache = (c.cache_vram_bytes || 0) + (c.cache_ram_bytes || 0);
+    const under = [`turn ${fmt(c.turns)}`, `${fmt(c.context_used)} tok${cache ? ` · ${gb(cache, cache >= 10 * GIB ? 1 : 2)} GB cache` : ""}`];
+    const read = t ? (t.prompt_total ? `${fmt(t.prompt_read)} / ${fmt(t.prompt_total)}` : fmt(t.prompt_tokens)) : fmt(c.prompt_last);
+    const out = t ? `${fmt(t.generated)}${t.max_tokens ? html`<span class="muted small"> / ${fmt(t.max_tokens)}</span>` : ""}` : fmt(c.out_last);
+    const speed = !t ? (c.decode_tok_s != null ? `${fmt(c.decode_tok_s, 1)} tok/s` : "–")
+      : t.state === "reading" ? (t.prefill_tok_s != null ? `${fmt(t.prefill_tok_s)} prefill${t.prefill_shared ? " (shared clock)" : ""}` : "–")
+      : t.tok_s != null ? fmt(t.tok_s, 1) : "–";
+    return html`<tr class=${t ? "" : "muted"}><td class="l nowrap"><span class=${`badge badge--${tone}`}>${text}</span></td>
+      <td class="l"><span class="conv__who">${who}</span><span class="conv__meta muted small num">${under.join(" · ")}</span></td>
+      <td>${read}</td><td>${out}</td>
+      <td class="strong" title=${!t ? `Idle: its last turn read ${c.read_tok_s == null ? "–" : `${fmt(c.read_tok_s)} tok/s`} and wrote ${c.decode_tok_s == null ? "–" : `${fmt(c.decode_tok_s, 1)} tok/s`}; ${fmt(c.tokens_read)} read, ${fmt(c.tokens_written)} written all told`
+        : t.state === "reading" && t.prefill_shared ? "it read at the same time as other chats: the engine's clock for it then covers the shared reader, not this chat alone" : null}>${speed}</td>
+      <td>${!t || t.elapsed_s == null ? "–" : `${fmt(t.elapsed_s, 1)} s`}</td></tr>`;
   };
   return html`<section class="card" aria-label="Conversations">
     <div class="card__head"><span class="card__title">Conversations</span>
-      <span class="card__sub">${convs.length ? `${convs.length} with the engine now` : "none running"}</span></div>
+      <span class="card__sub">${nRun ? `${nRun} ${nRun === 1 ? "conversation" : "conversations"} with the engine now` : "none running"}</span></div>
     <div class="table-wrap"><table class="table num">
-      <thead><tr><th class="l">Now</th><th>Prompt</th><th>Output</th><th title="This conversation's own answer tokens per second (prompt tokens while it reads) - the engine's total is Decode above">Speed (this chat)</th><th>Time</th></tr></thead>
-      <tbody>${convs.map((c) => row(c, false))}${ended.slice(0, Math.max(0, 6 - convs.length)).map((c) => row(c, true))}</tbody>
+      <thead><tr><th class="l">Now</th><th class="l">Conversation</th><th>Prompt</th><th>Output</th>
+        <th title="This conversation's own answer tokens per second (prompt tokens while it reads) - the engine's total is Decode above; an idle row shows its last turn's">Speed (this chat)</th><th>Time</th></tr></thead>
+      <tbody>${convs.map(row)}</tbody>
     </table></div>
   </section>`;
 }
