@@ -103,6 +103,7 @@
 #include "strata/spec/suffix_drafter.hpp"
 #include "strata/spec/spec_start.hpp"
 #include "strata/program/batch_groups.hpp"
+#include "strata/program/vlen_pause.hpp"
 #include "strata/program/fast_lane.hpp"
 #include "strata/kernels/cvec.hpp"
 #include "strata/core/progress.hpp"
@@ -14432,6 +14433,35 @@ int main(int argc, char** argv) {
                     }
             if (piped_mtp && !pm_collect()) return false;
             regroup();
+            // PLAN-vision-fast-start (review 2): a pending VLEND / VRECLAIM steps on a held CUDA0 boundary.  The
+            // decision runs on every pump tick, not only when the stage-0 launch gate happens to find CUDA0 free -
+            // under SAGUARO_PIPED_MTP a CUDA0 window is in flight through that gate almost always (the pause never
+            // fired there).  arming is not gated on CUDA0 being quiet; the hold it returns is what drains CUDA0 so the
+            // step can run, and the pipeline opens again when the step comes due (2 s at the most).
+            bool vlen_hold = false;
+            {
+                strata::program::vlen_pause::In pin;
+                pin.pending = vlen_pending || vlen_reclaim_pending;
+                pin.armed = vlen_pause_armed;
+                pin.is_open = vlen_pause_t != Clock::time_point{};
+                pin.open_ms = pin.is_open
+                                  ? std::chrono::duration<double, std::milli>(Clock::now() - vlen_pause_t).count() : 0.0;
+                pin.stage_quiet = stage_group[(size_t) 0] < 0;
+                pin.may_step = !conc_serving;
+                pin.blocked = conc_serving || in_prompt_read || share_live;   // (a read owns CUDA0: its own settles answer)
+                const auto po = strata::program::vlen_pause::decide(pin);
+                if (po.arm_now) { vlen_pause_armed = false; vlen_pause_t = Clock::now(); }   // (the boundary is taken)
+                if (po.run_step) elastic_idle((size_t) 0, !in_prompt_read, -1);   // (the give / take-back runs there)
+                vlen_hold = po.hold && pin.pending;
+                if (vlen_hold && pin.stage_quiet)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));   // (CUDA0 drained, the step still coming: poll)
+                if (po.close) {
+                    std::fprintf(stderr, "strata serve: VLEND: CUDA0's pipeline paused %.0f ms at a window boundary%s\n",
+                                 pin.open_ms, po.due ? " (the step came due)"
+                                                      : " (the step is not done: a quiet settle keeps at it)");
+                    vlen_pause_t = {};
+                }
+            }
             // start waiting groups on free stages, the longest waiting first; a new step on stage 0 round-robin
             for (int k = n_pipe - 1; k >= 0; --k) {
                 if (stage_group[(size_t) k] >= 0) continue;
@@ -14444,28 +14474,7 @@ int main(int argc, char** argv) {
                     if (pick < 0) continue;
                 } else {
                     if (!may_start || share_live) continue;   // (a read holds the pools: SAGUARO_SHORT_READS)
-                    // PLAN-vision-fast-start: a lend's give / a reclaim's take-back is one step on a quiet CUDA0 -
-                    // pause the pipeline at this window boundary, step, and open it again (2 s at the most)
-                    if (vlen_pause_t == Clock::time_point{} && vlen_pause_armed &&
-                        (vlen_pending || vlen_reclaim_pending)) {
-                        vlen_pause_armed = false;
-                        vlen_pause_t = Clock::now();
-                    }
-                    if (vlen_pause_t != Clock::time_point{}) {
-                        const bool step_open = vlen_pending || vlen_reclaim_pending;
-                        if (step_open && Clock::now() - vlen_pause_t < std::chrono::milliseconds(2000)) {
-                            if (!conc_serving) elastic_idle((size_t) 0, !in_prompt_read, -1);   // (the step runs there)
-                            if (vlen_pending || vlen_reclaim_pending) {
-                                std::this_thread::sleep_for(std::chrono::milliseconds(1));   // (nothing to poll for)
-                                continue;
-                            }
-                        }
-                        std::fprintf(stderr, "strata serve: VLEND: CUDA0's pipeline paused %.0f ms at a window boundary%s\n",
-                                     std::chrono::duration<double, std::milli>(Clock::now() - vlen_pause_t).count(),
-                                     vlen_pending || vlen_reclaim_pending ? " (the step is not done: a quiet settle keeps "
-                                                                           "at it)" : " (the step came due)");
-                        vlen_pause_t = {};
-                    }
+                    if (vlen_hold) continue;   // (a VLEND / VRECLAIM step is held back for CUDA0 - no new window on it)
                     if (ram_short && pipe_inflight()) continue;   // (a slot waits for RAM: the groups drain first)
                     // (SAGUARO_FAST_LANE: a group with a lane read first)
                     auto lane_in = [&](int gi) {
