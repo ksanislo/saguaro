@@ -52,10 +52,10 @@ class ReadWindowSums(unittest.TestCase):
         self.addCleanup(self.clock.stop)
 
     def start_marker(self, *stats):
-        # what run() does when the engine takes a request: its read time (and the window's count) starts here
-        self.svc.read_events.append((self.t[0], self.svc.read_sum))
+        # what the engine's start hook does: the read's interval (and the window's count) starts where the engine
+        # took it - a wait before that is no read time
         for st in stats:
-            st.engine_t0 = self.t[0]
+            self.svc._read_start(st)
 
     def test_two_overlapping_reads_sum(self):
         # what the two chats really read adds up in the one window: 600 tokens by one and 400 by the other over
@@ -110,6 +110,7 @@ class ReadWindowSums(unittest.TestCase):
         self.t[0] += 1.0
         svc._note_read(a, 200)                    # below the last position: the engine reads the prompt again
         self.assertEqual(a.read_pos, 200)         # (a retry, a fair slice's next leg: counted from there)
+        self.assertEqual(svc._read_counted(a), 1000)  # (the old read closed with its 800, the retry adds its 200)
 
     def test_a_read_stalled_past_the_window_gives_no_rate(self):
         # a read that pauses (for another chat, slow media) and lands no token inside RATE_WINDOW_S: the window
@@ -148,8 +149,7 @@ class PeakPrefill(unittest.TestCase):
         with unittest.mock.patch("serve.server.time.time", lambda: t[0]):
             a = reader(RequestStat())
             svc.running.add(a)
-            svc.read_events.append((t[0], svc.read_sum))     # (run()'s start marker: the window counts from here)
-            a.engine_t0 = t[0]
+            svc._read_start(a)                        # (the read's interval starts where the engine took it)
             svc._note_read(a, 100)
             t[0] += 2.0
             svc._note_read(a, 200)                           # 200 tokens over the 2 s span: under the 512 minimum
@@ -161,7 +161,7 @@ class PeakPrefill(unittest.TestCase):
             peak = svc.totals["peak_prefill"]
             self.assertEqual((peak["tok_s"], peak["tokens"]), (250.0, 1000))
             t[0] += 2.0                                      # nothing read since: the window's mean falls
-            self.assertAlmostEqual(svc._prefill_tok_s(), 150.0)
+            self.assertAlmostEqual(svc._prefill_tok_s(), 900 / 5.0)   # the 900 counted since the window's start
             self.assertEqual(svc.totals["peak_prefill"]["tok_s"], 250.0)   # the peak keeps the higher
 
     def test_a_finished_read_records_it(self):
@@ -256,9 +256,8 @@ class StrataEngineReadHook(unittest.TestCase):
             stat = reader(RequestStat())
             svc.running.add(stat)
             svc.status.update(busy=True)
-            svc.read_events.append((t[0], svc.read_sum))     # (run()'s start marker: the window counts from here)
-            stat.engine_t0 = t[0]
-            eng._tls.on_read = lambda n, ts=None: svc._note_read(stat, n, ts)
+            eng._tls.on_read = lambda n, ts=None: svc._note_read(stat, n, ts)   # (no start hook: the first PP
+            # step opens the read's interval - the window spreads this exact read's count over the time it took)
             self.run_lines(eng, ["PP 4000 6000 2000.0 2000.0 2000", "PP 6000 6000 2500.0 2400.0 2000",
                                  "DONE 1 6000 100 10 stop 0 0 2000"])
             self.assertEqual(stat.read_pos, 4000)            # 6000 read, 2000 reused
@@ -334,8 +333,8 @@ class QfnAdmissionReads(unittest.TestCase):
 
     @staticmethod
     def start_marker(svc, stat, t):
-        svc.read_events.append((t[0], svc.read_sum))   # what run() does as the engine takes the request:
-        stat.engine_t0 = t[0]                         #   (its read time, and the window's count, start here)
+        svc._read_start(stat)                         # (the engine's own start hook: its read time, and the
+                                                      #  window's count for it, start there)
 
     def test_big_reuse_admission_counts_exactly_the_new_tokens(self):
         # the steps count positions since the read's first one (0, then 200) and the BRA line tops the count up
@@ -352,7 +351,7 @@ class QfnAdmissionReads(unittest.TestCase):
             res = self.drain(eng)
             self.assertTrue(res["start"])
             self.assertEqual(stat.read_pos, 438)              # prompt - reused, exactly
-            self.assertEqual(svc.read_sum, 438)               # the engine-total window saw the same
+            self.assertEqual(svc._read_counted(stat), 438)    # the engine-total window saw the same
             t[0] += 2.0
             self.assertEqual(svc._prefill_tok_s(), 438 / 2.0)  # the real count over the window's 2 s span
             self.assertIsNone(svc.totals["peak_prefill"])      # 438 < PEAK_MIN_READ_TOKENS: no peak from a short read
@@ -364,10 +363,10 @@ class QfnAdmissionReads(unittest.TestCase):
         stat = self.reading(svc, reader(RequestStat()))
         eng, got = self.engine(svc, stat)
         eng.slot_q[7].put("BRP 7 96000 196374 5000.0 8000.0")       # the read's start: counts nothing
-        self.assertEqual(svc.read_sum, 0)                           # nothing counted yet
+        self.assertEqual(svc._read_counted(stat), 0)                # nothing counted yet
         eng.slot_q[7].put("BRA 7 1 prompt=196374 reused=195936 read_ms=9897 wait_ms=75")
         self.drain(eng)
-        self.assertEqual((stat.read_pos, svc.read_sum), (438, 438))
+        self.assertEqual((stat.read_pos, svc._read_counted(stat)), (438, 438))
         self.assertIsNone(svc.totals["peak_prefill"])               # the 8000 tok/s on the line made no peak either
 
     def test_one_fast_chunk_2_to_431_tokens(self):
@@ -380,7 +379,7 @@ class QfnAdmissionReads(unittest.TestCase):
             eng, got = self.engine(svc, stat)
             eng.slot_q[7].put("BRA 7 1 prompt=1220 reused=789 read_ms=33 wait_ms=5")
             self.drain(eng)
-            self.assertEqual((stat.read_pos, svc.read_sum), (431, 431))
+            self.assertEqual((stat.read_pos, svc._read_counted(stat)), (431, 431))
             t[0] += 1.0
             self.assertEqual(svc._prefill_tok_s(), 431.0)           # the real count over the window's 1 s span
 
@@ -393,7 +392,7 @@ class QfnAdmissionReads(unittest.TestCase):
         self.drain(eng)
         eng.slot_q[7].put("BRA 7 1 prompt=5020 reused=5000 read_ms=40 wait_ms=0")
         self.drain(eng)
-        self.assertEqual((stat.read_pos, svc.read_sum), (5020, 5020))
+        self.assertEqual((stat.read_pos, svc._read_counted(stat)), (5020, 5020))
         self.assertEqual(svc.totals["peak_prefill"]["tok_s"], round(5000 / 0.1, 1))   # from the first leg (>= 512)
 
     def test_lines_and_return_value_pass_through(self):
@@ -422,7 +421,7 @@ class QfnAdmissionReads(unittest.TestCase):
         res = self.drain(eng)
         self.assertFalse(res["start"])
         self.assertEqual(got, [0])                                  # only the start: never a count
-        self.assertEqual((stat.read_pos, svc.read_sum), (0, 0))     # a refused admission counts nothing
+        self.assertEqual((stat.read_pos, svc._read_counted(stat)), (0, 0))   # a refused admission counts nothing
 
     def test_no_hook_passes_through(self):
         cls = _qfn_engine_class()
@@ -434,6 +433,39 @@ class QfnAdmissionReads(unittest.TestCase):
         res = self.drain(eng, slot=0)
         self.assertFalse(res["start"])
         self.assertIs(eng.slot_q[0], q0)
+
+
+class ReadsSpreadOverTheirTime(unittest.TestCase):
+    """Live 08:58:34 (11-20): three QFN admissions ended within 1 s - 10624 new tokens in 26.9 s, 10608 in 27.1 s,
+    524 in 21.5 s: about 810 tok/s of real reading together.  BRP progress was sparse, so most tokens arrived in
+    the BRA top-ups at the END, and the 5 s window read them all in one second: 11518 tokens -> peak 1536.7, twice
+    too high.  Each read is now an interval whose exact count the window spreads over its own span."""
+
+    def test_three_reads_ending_in_one_second_read_at_their_true_speed(self):
+        svc = make_svc()
+        t = [1000.0]
+        with unittest.mock.patch("serve.server.time.time", lambda: t[0]):
+            stats = []
+            for t0, t_end, n_read in ((0.0, 26.9, 10624), (0.2, 27.1, 10608), (5.6, 21.5, 524)):
+                st = reader(RequestStat())
+                svc.running.add(st)
+                t[0] = 1000.0 + t0
+                svc._read_start(st)                       # (the engine took it: the read's interval opens)
+                t[0] = 1000.0 + t0 + 1.0                  # (a sparse BRP step mid-read...)
+                svc._note_read(st, 400)
+                t[0] = 1000.0 + t_end                     # (...and the BRA top-up at the real end - all three of
+                svc._note_read(st, n_read, None, True)    #  those land within 0.2 s of each other)
+                stats.append(st)
+            svc.status.update(busy=True)
+            t[0] = 1027.4                                 # (the window ends 0.3 s after the last top-up)
+            rate = svc._prefill_tok_s()
+            self.assertGreater(rate, 500.0)               # (their true shared ~810...)
+            self.assertLess(rate, 1100.0)                 # (...never the 11518 -> 1536.7 of before)
+            peak = svc.totals["peak_prefill"]
+            self.assertIsNotNone(peak)
+            self.assertLess(peak["tok_s"], 1536.0)
+            self.assertGreater(peak["tok_s"], 500.0)
+            self.assertEqual(svc._read_counted(stats[0]), 10624)   # (the exact counts stand, per read)
 
 
 class PrometheusPeak(unittest.TestCase):
