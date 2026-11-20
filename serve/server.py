@@ -3310,8 +3310,8 @@ class Service:
             start = self.read_base or (self.read_events[0] if self.read_events else None)
             if start is None or not self.read_events:   # (nothing counted inside the window: nothing read lately)
                 return 0.0
-            n = self.read_events[-1][1] - start[1]
-            span = now - start[0]
+            n = self.read_events[-1][1] - start[1] if self.read_events else 0   # (a read paused past the window:
+            span = now - start[0]                                               #  it drained empty - nothing read)
             total = n / span if span >= RATE_MIN_SPAN_S else 0.0
             if span >= PEAK_MIN_SPAN_S:
                 self._note_peak_read(total, n, now)
