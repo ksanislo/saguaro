@@ -249,9 +249,12 @@ class BackgroundResponses(ResponseCase):
         with self.request(path=f"/v1/responses/{initial['id']}?stream=true&starting_after=0") as response:
             self.assertEqual(response.status, 410)
         self.assertLessEqual(self.svc.response_jobs.stats()["event_bytes"], 4096)
-        self.script(" ".join(f"word{i}" for i in range(800)))   # (5000+ bytes and no loop: the loop guard ends one)
+        self.script(" ".join(f"word{i}" for i in range(550)))   # (4289 bytes of answer and no loop: the guard leaves
+        # it alone, every delta is small, and the whole answer rides one output_text.done event - just over 4096, so
+        # the job fails on the byte limit.  The limit can only fire when the answer ends: the mock streams a few
+        # thousand tokens through the job pipeline in seconds, so the wait gets real headroom, not a stopwatch race.)
         _, initial = self.post(background=True, store=True)
-        out = self.wait(initial["id"])
+        out = self.wait(initial["id"], timeout=30)
         self.assertEqual(out["status"], "failed")
         self.assertIn("limit", out["error"]["message"])
 
