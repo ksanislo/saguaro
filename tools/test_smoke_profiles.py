@@ -56,10 +56,13 @@ def stub_opener(chat: bytes, context: bytes, seen: list | None = None):
 
 
 class Defaults(unittest.TestCase):
+    # ref-configs/ is the deploy's (git-ignored): without it the default list is simply empty
+    @unittest.skipUnless((ROOT / "ref-configs").is_dir(), "no ref-configs/ here (the deploy's, not the repository's)")
     def test_the_six_ref_config_ids(self):
         self.assertEqual(sorted(sp.default_model_ids()), sorted(SIX))
         self.assertEqual(len(sp.default_model_ids()), 6)
 
+    @unittest.skipUnless((ROOT / "ref-configs").is_dir(), "no ref-configs/ here (the deploy's, not the repository's)")
     def test_main_list_prints_them(self):
         out = io.StringIO()
         with redirect_stdout(out):
