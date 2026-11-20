@@ -91,6 +91,7 @@ import time
 import traceback
 import urllib.request
 import uuid
+from array import array
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Iterator, Protocol
@@ -224,13 +225,13 @@ QUEUE_PING_S = 2.0
 QUEUE_TICK_S = 15.0
 QUEUE_WEDGED_S = 120.0
 QUEUE_WARN_S = 60.0
-# The Monitor's Conversations rows (Service.convs): a conversation is its opening - the first CONV_KEY_TOKENS prompt
-# tokens, which every turn of it re-sends whole.  The table keeps the recent CONV_MAX, and a turn that reuses a known
-# conversation's first CONV_REUSE_MIN+ tokens continues it even when its opening changed.
+# The Monitor's Conversations rows (Service.convs): a request continues a conversation only when its prompt starts
+# with exactly that conversation's LAST PROMPT (minus the open reply's generation tail) - the part a later turn
+# re-sends byte-for-byte, just what the engine's own prefix reuse keys on (a finished assistant turn re-renders with
+# small differences, so it is not part of the key).  An opening, or a first message, is no identity: the longest
+# last-prompt a request starts with wins, none -> a new row.  The table keeps the recent CONV_MAX with an LRU.
 CONV_MAX = 64
 CONV_IDLE_S = 2 * 3600.0
-CONV_KEY_TOKENS = 256
-CONV_REUSE_MIN = 32
 
 
 # ------------------------------------------------------------------------------------------------ engines
@@ -2245,16 +2246,11 @@ def request_spec_off(sampling) -> bool:
     return isinstance(tune, dict) and tune.get("spec") == 1 and not isinstance(tune.get("spec"), bool)
 
 
-def conv_head(ids: list[int], gen_tail: int) -> list[int]:
-    """A conversation's opening as tokens: its prompt without the reply's prompting tail (the generation prompt sits
-    at the end of one turn and in the middle of the next, so it cannot be part of the opening) - at most CONV_KEY_TOKENS."""
-    return list(ids[:max(0, len(ids) - gen_tail)])[:CONV_KEY_TOKENS]
-
-
-def conv_head_key(head: list[int]) -> bytes:
-    """The conversation's identity: a hash of that opening - an agent client re-sends the whole conversation every
-    turn, so its opening is the same every turn of it and new every new chat."""
-    return hashlib.blake2b(repr(head).encode("ascii", "ignore"), digest_size=8).digest()
+def conv_hist_hash(ids: list[int]) -> bytes:
+    """A conversation's identity: a hash of the tokens a later turn must start with - its last prompt minus the open
+    reply's generation tail (blake2b of the int32 bytes).  A request continues a conversation only when its prompt
+    starts with exactly that - never with its opening alone."""
+    return hashlib.blake2b(array("i", ids).tobytes(), digest_size=8).digest()
 
 
 def conv_first_words(messages, n: int = 10) -> str:
@@ -2272,13 +2268,15 @@ def conv_first_words(messages, n: int = 10) -> str:
 
 
 class Conversation:
-    """One row of the Monitor's Conversations card: one conversation's turns under one opening, what its last turn
-    did (speeds, tokens, context) and which turn the engine holds now (None: it waits idle).  `content` is its whole
-    opening while that is short (a young chat whose every turn is the opening: its rows are found by prefix)."""
+    """One row of the Monitor's Conversations card: one conversation's turns - found by CONTINUATION, never by an
+    opening: cont_len + cont_hash are its last turn's prompt minus the generation tail, and a request continues it
+    only when its prompt starts with exactly that (the part a client re-sends byte-for-byte; the answer re-renders
+    with small differences, so it is no key).  What its last turn did (speeds, tokens, context) and which turn the
+    engine holds now (None: it waits idle)."""
 
-    def __init__(self, cid: int, key: bytes, head: list[int], api, words: str):
-        self.id, self.key, self.head, self.api, self.words = cid, key, head, api, words
-        self.content = list(head)                       # (None once the conversation outgrows CONV_KEY_TOKENS)
+    def __init__(self, cid: int, api, words: str):
+        self.id, self.key, self.api, self.words = cid, str(cid), api, words
+        self.cont_len, self.cont_hash = 0, None         # (0/None: no finished turn yet, nothing this could continue)
         self.turns, self.tokens_read, self.tokens_written = 0, 0, 0
         self.last_read_tok_s, self.last_decode_tok_s = None, None      # the last finished turn's rates
         self.prompt_last, self.out_last, self.ctx = 0, 0, 0            # its sizes: the idle row shows these
@@ -2304,6 +2302,7 @@ class RequestStat:
         self.read_pos, self.read_t0, self.read_t1, self.read_shared = 0, None, None, False
         self.read_avg = None                            # the engine's mean over its read, from its last progress line
         self.read_last, self.read_prev_t, self.read_prev_n = None, None, 0   # its last observed read interval
+        self.read_cur = None        # its read interval in Service.reads while one runs (closed when the answer starts)
         self.at_engine = False                            # it holds an engine place now (a fair slice lets it go)
         self.engine_t0 = None                             # when the engine took it (the real read time starts here)
         # who this request is in the Monitor's "Right now": a stable id, the client it came from and when it queued
@@ -2386,8 +2385,8 @@ class Service:
         self.waiting: set[RequestStat] = set()          # requests in the FIFO for their first turn (the "Right now" rows)
         self._req_ids = itertools.count(1)              # stable per-request ids for the Monitor (live.chats)
         self.ended = collections.deque(maxlen=6)        # the last few that ended (kept for older readers of /metrics)
-        # the Monitor's Conversations rows: recent conversations by opening (LRU, idle CONV_IDLE_S on gone; the
-        # per-instance conv_max / conv_idle_s are what the tests turn down)
+        # the Monitor's Conversations rows: recent conversations by their last turn (LRU, idle CONV_IDLE_S on gone;
+        # the per-instance conv_max / conv_idle_s are what the tests turn down)
         self.convs: collections.OrderedDict = collections.OrderedDict()
         self._conv_ids = itertools.count(1)
         self.conv_max, self.conv_idle_s = CONV_MAX, CONV_IDLE_S
@@ -2397,11 +2396,11 @@ class Service:
                        "prompt_ms": 0.0, "decode_ms": 0.0,
                        "peak_decode": None,   # the fastest answer's decode: {tok_s, tokens, time} (PEAK_MIN_TOKENS+)
                        "peak_prefill": None}  # the fastest prompt read: {tok_s, tokens, time} (PEAK_MIN_READ_TOKENS+)
-        # the prompt reads as they happen (the drivers' PP lines / the batch slots' read counters, all chats, both
-        # drivers): one event series like decode's, for the live engine-total Prefill rate and its peak
-        self.read_events = collections.deque(maxlen=4096)   # (time, read tokens summed over every request)
-        self.read_base = None                               # the last event at or before now - RATE_WINDOW_S
-        self.read_sum = 0
+        # every prompt read as its own INTERVAL [stat, t_start, t_end, tokens, steps] (the drivers' read hooks fill
+        # it): the window's count = in-progress reads' steps inside it + finished reads' tokens spread over their
+        # overlap with it - a top-up lands ACROSS the read it belongs to, not in the window it happens to end in,
+        # and the peaks come from this figure alone
+        self.reads: collections.deque = collections.deque()   # the intervals, oldest first (_read_prune drops closed)
         self.read_wall_s, self.read_wall_since = 0.0, None   # wall seconds with >=1 prompt reading / >=1 answer writing
         self.decode_wall_s, self.decode_wall_since = 0.0, None
         # the loop guard (serve/loop_guard.py; MAYA_LOOP_GUARD=0 / "loop_guard": false: off) and what it did since
@@ -3366,36 +3365,93 @@ class Service:
 
     def _prefill_tok_s(self):
         """Engine-total prompt READ rate now, summed over every chat reading its prompt (the drivers' read hooks
-        feed it, as the answer tokens feed _tok_s): a chat's engine-reported mean over its read where the driver
-        has one (a solo chat's is the figure the Monitor showed before), the rate of its last read interval
-        otherwise (QFN's slot admissions say progress, not a rate).  0.0 while nothing reads a prompt; a reading
-        above the peak becomes the peak, gated on the tokens read inside RATE_WINDOW_S like decode gates on
-        answer length."""
+        feed it, as the answer tokens feed _tok_s).  Every read is an interval: the window's count = the in-progress
+        reads' steps counted inside it + each FINISHED read's tokens spread over its overlap with the window - the
+        exact count over the time it really took, so three sparse-progress reads that end in the same second read as
+        one engine at their true ~810 tok/s, not 1536 (live 11-20: a top-up landing at a read's end doubled the peak).
+        0.0 while nothing reads a prompt; a reading above the peak becomes the peak, gated on the tokens counted
+        inside RATE_WINDOW_S like decode gates on answer length."""
         with self.status_lock:
             if not self.status.get("busy"):
                 return 0.0
+            now = time.time()
+            for st in self.running:                     # a read whose answer started is over: close its interval
+                if st.first_token is not None:          # (from now on its tokens spread across the read itself)
+                    self._read_close(st, st.first_token)
             readers = [r for r in self.running if r.at_engine and r.first_token is None]
             if not readers:
                 return 0.0
-            now = time.time()
-            while self.read_events and self.read_events[0][0] <= now - RATE_WINDOW_S:
-                self.read_base = self.read_events.popleft()
-            # the tokens really read in the window, over the time they took (from the last count before it)
-            start = self.read_base or (self.read_events[0] if self.read_events else None)
-            if start is None or not self.read_events:   # (nothing counted inside the window: nothing read lately)
-                return 0.0
-            n = self.read_events[-1][1] - start[1] if self.read_events else 0   # (a read paused past the window:
-            span = now - start[0]                                               #  it drained empty - nothing read)
+            w0 = now - RATE_WINDOW_S
+            n, t_lo = 0.0, None
+            for r in self.reads:                        # finished reads: their tokens over their overlap with it
+                t_start, t_end, tokens = r[1], r[2], r[3]
+                if t_end is None or not tokens:
+                    continue
+                lo = max(t_start, w0)
+                if t_end < lo:
+                    continue
+                n += tokens if t_end == t_start else tokens * (t_end - lo) / (t_end - t_start)
+                t_lo = lo if t_lo is None else min(t_lo, lo)
+            for st in readers:                          # reads still running: the steps counted inside the window
+                e = st.read_cur
+                if e is None or e[2] is not None or e[1] > now or not e[4] or e[4][-1][0] <= w0:
+                    continue
+                lo_n, lo_t = 0, e[1]
+                for te, ne in e[4]:
+                    if te > w0:
+                        break
+                    lo_n, lo_t = ne, te
+                c = e[4][-1][1] - lo_n
+                if c <= 0:
+                    continue
+                n += c
+                lo = max(lo_t, w0)
+                t_lo = lo if t_lo is None else min(t_lo, lo)
+            if not n or t_lo is None:                   # (a read paused past the window: it drained empty -
+                return 0.0                              #  nothing read lately)
+            span = now - t_lo
             total = n / span if span >= RATE_MIN_SPAN_S else 0.0
             if span >= PEAK_MIN_SPAN_S:
-                self._note_peak_read(total, n, now)
+                self._note_peak_read(total, int(round(n)), now)
             return total
 
+    def _read_open(self, stat, now):
+        """One read of one request begins: its interval joins the list the window spreads reads over."""
+        stat.read_cur = [stat, now, None, None, collections.deque(maxlen=4096), stat.read_pos]   # (stat, t_start,
+        self.reads.append(stat.read_cur)                        #  t_end, tokens, steps (time, counted tokens), and
+        self._read_prune(now)                                   #  the count the read started from (a leg's prefix)
+        return stat.read_cur
+
+    def _read_close(self, stat, at=None):
+        """(status_lock held) the read is over - its answer's first token, a retry, or the request ending: the whole
+        count stands with its span for the window to spread it over."""
+        r = getattr(stat, "read_cur", None)
+        if r is None or r[2] is not None:
+            return
+        r[3] = max(0, stat.read_pos - r[5])             # (what THIS read counted, not the absolute position: a
+        r[2] = max(r[1], (time.time() if at is None else at) - 0.0)   #  slice's next leg starts from the held prefix)
+        self._read_prune(time.time())
+
+    def _read_prune(self, now):
+        """(status_lock held) closed reads no window can reach anymore leave the list; an open one always stays."""
+        while self.reads and self.reads[0][2] is not None and self.reads[0][2] < now - 2 * RATE_WINDOW_S:
+            self.reads.popleft()
+
+    def _read_counted(self, stat) -> int:
+        """The prompt tokens this request's reads have counted (closed intervals plus an open one's steps) - what
+        the Monitor's figures and the tests read back."""
+        n = sum(r[3] or 0 for r in self.reads if r[0] is stat and r[2] is not None)
+        r = getattr(stat, "read_cur", None)
+        return n + (max(0, stat.read_pos - r[5]) if r is not None and r[2] is None else 0)
+
     def _read_start(self, stat):
-        """A batch request's BGEN went out after its wait for a slot: its read (and the window's count) start here."""
+        """(a driver's hook) the engine took this request - a QFN admission after its wait for a slot says so too:
+        its read's interval starts HERE (a queue wait inside the turn is no read time), the previous leg closes."""
+        now = time.time()
         with self.status_lock:
-            stat.engine_t0 = time.time()
-            self.read_events.append((stat.engine_t0, self.read_sum))
+            self._read_close(stat, now)
+            stat.engine_t0 = now
+            self._read_open(stat, now)
 
     def _note_read_safe(self, *a):
         """_note_read for the drivers' read callbacks: a Monitor figure must never fail the request it watches."""
@@ -3409,14 +3465,21 @@ class Service:
     def _note_read(self, stat, n_read, tok_s=None, exact=False, prov=False):
         """A read step of one request: the drivers' PP lines and the batch slots' read counters call this (through
         the hook run() installs on the engine's thread-local) with the prompt tokens IT has read now - the reused
-        prefix left out.  It counts into the engine-total read window and the request's own read span.
-        exact=True: the engine's own final figures for this read (its BRA line): they stand as THE count, replacing
-        what provisional steps suggested - the difference goes back out of the sum, negative included.
+        prefix left out.  It counts into THIS request's read interval (the engine's on_read_start, or its first
+        step, opens one) - which is how the engine-total window spreads it - and the request's own read span.
+        exact=True: the engine's own final figures for this read (its BRA line): they stand as THE count, topping the
+        steps' suggestion up or correcting it, negative included - and they END the read: its interval closes here,
+        so its tokens spread over the read itself instead of piling into the window it finished in.
         prov=True: a slot admission's BRP step: its progress may count from the prompt's start, so it only gives
         the live figure (the engine's own tok/s) and the read's wall span - it never counts tokens or a peak."""
         now = time.time()
         with self.status_lock:
+            r = stat.read_cur
+            if r is not None and r[2] is not None:      # (this read's interval closed with the answer: a new one)
+                r = None
             if prov:
+                if r is None:
+                    r = self._read_open(stat, now)
                 if stat.read_t0 is None:
                     stat.read_t0 = now
                 stat.read_t1 = now
@@ -3425,8 +3488,10 @@ class Service:
                     stat.read_prov = True
                 return
             if exact:
+                if r is None:
+                    r = self._read_open(stat, now)
                 stat.read_prov = False                  # (the engine's own count and clock from here)
-                if sum(1 for r in self.running if r.at_engine and r.first_token is None) > 1:
+                if sum(1 for x in self.running if x.at_engine and x.first_token is None) > 1:
                     stat.read_shared = True             # (two admissions read at once: label the request's own rate)
                 if tok_s is not None:
                     stat.read_avg = tok_s
@@ -3437,13 +3502,15 @@ class Service:
                 d = n_read - stat.read_pos
                 if d:
                     stat.read_pos = n_read
-                    self.read_sum += d
-                    self.read_events.append((now, self.read_sum))
-                    while self.read_events and self.read_events[0][0] <= now - RATE_WINDOW_S:
-                        self.read_base = self.read_events.popleft()
-                return
-            if n_read < stat.read_pos:                  # a new read of this request's prompt (a retry, a slice's leg)
+                    r[4].append((now, n_read))
+                self._read_close(stat, now)             # (the engine's BRA ENDS this read: from here its tokens
+                return                                  #  spread over the read itself, never at its end)
+            if r is None:                               # the first step of a read the driver announced no start for
+                r = self._read_open(stat, now)
+            elif n_read < stat.read_pos:                # a new read of this request's prompt (a retry, a slice's leg)
+                self._read_close(stat, now)
                 stat.read_pos, stat.read_avg, stat.read_last, stat.read_prev_t = 0, None, None, None
+                self._read_open(stat, now)              # (counts from nothing again; the engine's counter reset)
             d = n_read - stat.read_pos
             stat.read_pos = n_read
             if stat.read_t0 is None:
@@ -3457,12 +3524,9 @@ class Service:
                 self._note_peak_read(tok_s, n_read, now)
             if d <= 0:
                 return
-            if sum(1 for r in self.running if r.at_engine and r.first_token is None) > 1:
+            if sum(1 for x in self.running if x.at_engine and x.first_token is None) > 1:
                 stat.read_shared = True                 # two chats read at once: neither's engine clock is just its own
-            self.read_sum += d
-            self.read_events.append((now, self.read_sum))
-            while self.read_events and self.read_events[0][0] <= now - RATE_WINDOW_S:
-                self.read_base = self.read_events.popleft()
+            stat.read_cur[4].append((now, n_read))
 
     def _note_peak_read(self, tok_s, tokens, when):
         """The Monitor's peak Prefill (status_lock held): the highest read rate it has shown - a live window or a
@@ -3546,53 +3610,43 @@ class Service:
             del self.convs[gone]
 
     def _conv_open(self, ids, api, words, stat, gen_tail=0) -> Conversation:
-        """(status_lock held) the row this request's opening names: found by it, or a new one (the table is an LRU,
-        idle rows expire).  Its turn count goes up the moment the request joins it, so the row says "turn 14" while
-        the fourteenth turn is still being written."""
+        """(status_lock held) the row this request continues: the LONGEST conversation whose last prompt - without
+        the open reply's generation tail - this prompt starts with (the engine's prefix reuse works the same way:
+        it never reaches past where two prompts diverge); none -> a row of its own (the table is an LRU, idle rows
+        expire).  A fork: the branch that ran first advanced that row's last prompt, so the second no longer starts
+        with it and takes its own row.  The turn count goes up the moment the request joins a row, so the row says
+        "turn 14" while the fourteenth turn is still being written."""
         now = time.time()
-        head = conv_head(ids, gen_tail)
-        short = len(ids) - gen_tail <= CONV_KEY_TOKENS
-        c = self.convs.get(conv_head_key(head))
-        if c is None:
-            c = Conversation(next(self._conv_ids), conv_head_key(head), head, api, words or "")
-            c.content = head if short else None
-            self.convs[c.key] = c
-        else:
-            c.head, c.content = head, head if short else None
-            self.convs.move_to_end(c.key)
-            if words and not c.words:
-                c.words = words
-        c.api, c.stat, c.last_active = api or c.api, stat, now
-        c.turns += 1
+        n = max(0, len(ids) - gen_tail)
+        best = None
+        for c in self.convs.values():                   # (the LRU holds <= CONV_MAX candidates; longest match wins)
+            if 0 < c.cont_len <= n and c.cont_hash == conv_hist_hash(ids[:c.cont_len]):
+                if best is None or c.cont_len > best.cont_len:
+                    best = c
+        if best is not None:
+            self.convs.move_to_end(best.key)
+            if words and not best.words:
+                best.words = words
+            best.api, best.stat, best.last_active = api or best.api, stat, now
+            best.turns += 1
+            self._conv_prune(now)
+            return best
+        c = Conversation(next(self._conv_ids), api, words or "")
+        self.convs[c.key] = c
+        c.stat, c.last_active, c.turns = stat, now, 1
         self._conv_prune(now)
         return c
 
     def _conv_idle(self, c: Conversation, stat=None, ids=None, gen_tail=0, prompt_n=0, out_n=0, reused=None,
                    read_tok_s=None, decode_tok_s=None):
         """(status_lock held) a conversation's turn ended: its row loses the request and waits idle with the turn's
-        figures.  A turn that opened a new row is re-homed onto the conversation it really continues: one whose
-        whole opening this prompt now extends (a chat still shorter than CONV_KEY_TOKENS grows its own opening every
-        turn), or - when the opening itself changed - one whose first `reused` tokens the engine still held: reuse
-        never reaches past where two prompts diverge, so it says which conversation's cache this turn read.  When a
-        later turn of the same opening is already under way (the row is not this request's any more), only the
+        figures, its key - this turn's prompt minus the generation tail - recorded so the turn that resumes this
+        conversation matches it.  A turn that forks from it (an edited retry: its prompt no longer starts with that
+        one, and the branch that ran first advanced it) continues nothing and takes a row of its own.  When a later
+        turn of the same conversation is already under way (the row is not this request's any more), only the
         counts are added."""
         now = time.time()
         mine = c.stat is stat
-        if mine and c.turns == 1 and ids:
-            n = max(0, len(ids) - gen_tail)
-            head = conv_head(ids, gen_tail)
-            for k, o in reversed(list(self.convs.items())):
-                if o is c or o.stat is not None:
-                    continue
-                if (o.content and n > len(o.content) and list(ids[:len(o.content)]) == o.content) or \
-                        (reused is not None and CONV_REUSE_MIN <= reused <= min(len(o.head), len(head))
-                         and o.head[:reused] == head[:reused]):
-                    o.turns += c.turns                  # (this turn joins the conversation it continues)
-                    o.words, o.api = o.words or c.words, c.api or o.api
-                    self.convs.pop(c.key, None)         # (the row this turn opened is dropped...)
-                    self.convs.pop(k, None)             # (...and o takes its opening, re-keyed below)
-                    c = o
-                    break
         if reused is not None:
             c.tokens_read += max(0, prompt_n - reused)
             c.prompt_last, c.out_last, c.ctx = prompt_n, out_n, prompt_n + out_n
@@ -3603,12 +3657,8 @@ class Service:
             c.last_decode_tok_s = decode_tok_s
         if mine and ids:
             n = max(0, len(ids) - gen_tail)
-            self.convs.pop(c.key, None)                 # (its old opening key, if the row is being re-keyed)
-            c.head = conv_head(ids, gen_tail)
-            c.content = list(ids[:n]) if n <= CONV_KEY_TOKENS else None
-            c.key = conv_head_key(c.head)
-            self.convs[c.key] = c                       # (re-keyed: the next turn lands right on it)
-            self.convs.move_to_end(c.key)
+            c.cont_len, c.cont_hash = n, conv_hist_hash(list(ids[:n]))   # (the prompt the next turn must continue:
+            self.convs.move_to_end(c.key)                                #  longer every turn of this conversation)
         if mine:
             c.stat, c.last_active = None, now
         self._conv_prune(now)
@@ -4695,10 +4745,9 @@ class Service:
                     self.latest_request = stat
                     stat.phase, stat.prompt_tokens, stat.max_tokens = "reading the prompt", len(ids), max_new
                     stat.started = self.status["started"]
-                    stat.at_engine = True
-                    if stat.engine_t0 is None:
-                        stat.engine_t0 = time.time()    # (its read starts here: the real read time runs to its first token)
-                        self.read_events.append((stat.engine_t0, self.read_sum))   # (the window's count starts here too)
+                    stat.at_engine = True                 # (its read's interval opens where the ENGINE took it: the
+                    #  drivers' on_read_start marks it, or its first read step - a queue wait inside the turn is no
+                    #  read time and must not spread the read's tokens over itself)
                     tls = getattr(self.engine, "_tls", None)   # this request's thread reads the engine's lines: its
                     if tls is not None:                        # PP steps count into the engine-total read rate
                         tls.on_read = lambda n, ts=None, ex=False, prov=False, st=stat: self._note_read_safe(st, n, ts, ex, prov)
@@ -5030,6 +5079,7 @@ class Service:
                     self.running.discard(stat)
                     self.ended.appendleft({**stat.view(time.time()), "finish": finish, "time": time.time()})
                 self._wall_tick()                       # (its read/write ends here: a clock may close with it)
+                self._read_close(stat)                  # (its read's interval too: counted, spread over its span)
                 if counted:
                     # only this request's DONE counts: same object means no DONE arrived (death, error, disconnect)
                     last = dict(getattr(self.engine, "last", {}) or {}) \
@@ -5100,7 +5150,8 @@ class Service:
                         print(f"[saguaro] raw: {self.tok.decode(raw_ids)!r}", flush=True)
                     if stat.conv is not None:
                         self._conv_idle(stat.conv, stat, ids, conv_tail, len(ids), n, last.get("reused") or 0,
-                                        pf_s, row["decode_tok_s"])  # (its row waits idle with this turn's figures)
+                                        pf_s, row["decode_tok_s"])  # (its row waits idle with this turn's figures,
+                                        #  its prompt recorded as the key the next turn continues)
                 elif stat.conv is not None and stat.conv.stat is stat:
                     stat.conv.stat, stat.conv.last_active = None, time.time()   # (it died: free the row, keep its turns)
                 if queued:                              # never started (a cancel, an error while waiting): not waiting now
