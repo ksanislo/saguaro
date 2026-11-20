@@ -326,3 +326,18 @@ class LendProtocol(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class InfoAfterReady(unittest.TestCase):
+    """The live engine prints INFO vision_lend=1 after READY (its batch setup): it must reach engine.info, not a request."""
+
+    def test_info_line_after_ready_joins_the_info(self):
+        import queue as _q
+        from serve.server import _VlenLines
+        info = {"kv_bytes_token": 12672}
+        lines = _VlenLines(_q.Queue(), info)
+        lines.put("INFO vision_lend=1")
+        lines.put("T 0 42")
+        self.assertEqual(info.get("vision_lend"), 1)
+        self.assertEqual(lines.get_nowait(), "T 0 42")
+        self.assertTrue(lines.empty())

@@ -7119,13 +7119,19 @@ class _VlenLines(queue.Queue):
     while batch requests run, so VLENT / VRECLAIMED (and their ERR lines) go to the lend queue - never into a
     request's line stream."""
 
-    def __init__(self, vlen: queue.Queue):
+    def __init__(self, vlen: queue.Queue, info: dict | None = None):
         super().__init__()
-        self.vlen = vlen
+        self.vlen, self.info = vlen, info
 
     def put(self, item, block: bool = True, timeout: float | None = None):
         if isinstance(item, str) and item.startswith(("VLENT ", "VRECLAIMED ", "ERR VLEND:", "ERR VRECLAIM:")):
             self.vlen.put(item, block, timeout)
+            return
+        if isinstance(item, str) and item.startswith("INFO ") and self.info is not None:
+            # an INFO after READY (the batch setup's vision_lend=1): it joins the engine's facts, no request sees it
+            for kv in item.split()[1:]:
+                k, _, v = kv.partition("=")
+                self.info[k] = int(v) if v.lstrip("-").isdigit() else v
             return
         super().put(item, block, timeout)
 
@@ -7152,7 +7158,7 @@ def _qfn_engine_class():
             if getattr(self, "vlen_lines", None) is None:
                 self.vlen_lines = queue.Queue()
             if not isinstance(self.lines, _VlenLines):
-                wrapped = _VlenLines(self.vlen_lines)
+                wrapped = _VlenLines(self.vlen_lines, self.info)
                 while True:                              # (whatever the driver queued between start and here)
                     try:
                         wrapped.put_nowait(self.lines.get_nowait())
