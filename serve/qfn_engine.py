@@ -1555,6 +1555,11 @@ class StrataEngine:
         """A request decoding in a slot that is alone now (no other slot busy, nobody waiting) goes back to the solo
         path with its MTP drafts: the engine continues it from the slot's sessions (its slot cache; INFO
         slot_cache=1).  SAGUARO_PARALLEL_SOLO=0 keeps it in the slot."""
+        if os.environ.get("SAGUARO_SLOT_KEEP", "1") != "0":
+            # SAGUARO_SLOT_KEEP (read-stall): a conversation that has a batch slot keeps it - going solo means
+            # BSTOP, a copy of the whole conversation back into the main context and another one when a next
+            # request promotes it again: seconds of idle GPUs at 300K tokens.  SAGUARO_SLOT_KEEP=0 restores it.
+            return False
         if (embeddings or times >= self.SOLO_AGAIN_MAX or left < self.SOLO_AGAIN_MIN_LEFT or
                 not (self.info or {}).get("slot_cache") or os.environ.get("SAGUARO_PARALLEL_SOLO") == "0"):
             return False
@@ -1607,7 +1612,14 @@ class StrataEngine:
                     holding, born = True, self.gen                  # (the engine it now has the control lines of)
                 with self.slot_cv:
                     alone = not any(self.slot_busy) and self.waiting == 0
-                if alone and left > 1:
+                # SAGUARO_SLOT_KEEP (read-stall): alone but this conversation already has a batch slot (it holds its
+                # start): run this turn IN that slot (BGEN below) - the main-context solo path would move the whole
+                # conversation there (park + restore, seconds of RAM copying with the GPUs idle).
+                keep_slot = self._slot_holding(prompt) if alone and left > 1 else None
+                if keep_slot is not None:
+                    print(f"[saguaro] parallel: slot {keep_slot} holds this conversation: its solo turn reads beside "
+                          f"the slots (SAGUARO_SLOT_KEEP)", flush=True)
+                if alone and left > 1 and keep_slot is None:
                     head = f"GENI {left}{keys} {embeddings}" if embeddings else f"GEN {left}{keys}"
                     self._last_done = None                  # (#879: this request's DONE decides below)
                     deadline = getattr(cancel, "_strata_queue_deadline", None)
@@ -1683,10 +1695,14 @@ class StrataEngine:
                                 raise QueueWaitExpired("the inference queue wait deadline expired; retry later")
                             with self.slot_cv:
                                 slot = self.pick_slot(prompt)
+                                if (keep_slot is not None and not self.slot_busy[keep_slot] and
+                                        keep_slot not in {b for b, k in self.slot_kept.items() if k[1] > time.monotonic()}):
+                                    slot = keep_slot   # SAGUARO_SLOT_KEEP: the conversation's own slot, not a fresh one
                                 if slot is not None:
                                     self.slot_busy[slot] = True
                                     self.slot_claims.add(slot)
                                     self.slot_kept.pop(slot, None)
+                                    keep_slot = None
                                     logctx.set_slot(slot)
                                     if admit_wait:
                                         admit_wait = False
@@ -2045,7 +2061,42 @@ class StrataEngine:
 
     slot_groups = 1         # --batch-groups (set when the engine starts)
     SLOT_PREFIX_MIN = 512   # a held prefix shorter than this is not worth unbalancing the pipeline's groups
+    SLOT_KEEP_MIN_TOKENS = 16384   # SAGUARO_SLOT_KEEP: the conversation must reach this before its slot is kept for
+                                   # solo turns (below it a main-context move costs milliseconds, and solo is fastest)
     TURN_ID = 248045        # <|im_start|>: the engine's default --turn-token (its turn checkpoint sits at the last one)
+
+    def _held_prefix(self, b: int, prompt: list[int]) -> int:
+        # what of `prompt` the slot's cache serves: the slot's whole held stream (the prompt and what it decoded)
+        # when this prompt continues it, else its turn checkpoint - the engine takes one at the last <|im_start|> of
+        # a prompt (the next request of the chat renders the history again, but not the reply it decoded or the
+        # assistant header), so a prompt that agrees with the held tokens up to there is that chat's next turn
+        # too (#2518: it was only found by the engine's own source search, after pick_slot had sent it to another
+        # slot and the request in that slot had overwritten the chat whose cache the next one needed)
+        h = self.slot_held[b]
+        if not h:
+            return 0
+        if len(h) < len(prompt) and prompt[:len(h)] == h:
+            return len(h)
+        k = len(h) - 1 - h[::-1].index(self.TURN_ID) if self.TURN_ID in h else 0
+        return k if 0 < k < len(prompt) and prompt[:k] == h[:k] else 0
+
+    def _slot_holding(self, prompt: list[int]) -> int | None:
+        """SAGUARO_SLOT_KEEP (on): a free slot that holds the start of this prompt - the conversation already has a
+        batch slot, so a turn that is alone runs IN that slot (BGEN) instead of the main-context solo path: the solo
+        path moves the whole conversation there (park + copy, seconds at 300K tokens - the read-stall finding).
+        None: no slot holds it (a new conversation: the solo path is right for it), or SLOT_KEEP=0."""
+        if os.environ.get("SAGUARO_SLOT_KEEP", "1") == "0" or not prompt:
+            return None
+        with self.slot_cv:
+            best, best_n = None, 0
+            for b in self.slot_order:
+                if self.slot_busy[b]:
+                    continue
+                n = self._held_prefix(b, prompt)
+                if n > best_n:
+                    best, best_n = b, n
+            need = self.SLOT_PREFIX_MIN if self.slot_groups > 1 else 1
+            return best if best_n >= max(need, self.SLOT_KEEP_MIN_TOKENS) else None
 
     def pick_slot(self, prompt: list[int]) -> int | None:
         """A free slot for `prompt` (the caller holds slot_cv): the one whose held tokens are the longest start of the
@@ -2075,20 +2126,7 @@ class StrataEngine:
                 # a slot above the busy ones of its group first
                 return min(free, key=lambda b: (fills_hole(b), self.slot_order.index(b)))
             return min(free, key=lambda b: (not fills_hole(b), self.slot_order.index(b)))
-        def held_prefix(b):
-            # what of `prompt` the slot's cache serves: the slot's whole held stream (the prompt and what it decoded)
-            # when this prompt continues it, else its turn checkpoint - the engine takes one at the last <|im_start|> of
-            # a prompt (the next request of the chat renders the history again, but not the reply it decoded or the
-            # assistant header), so a prompt that agrees with the held tokens up to there is that chat's next turn
-            # too (#2518: it was only found by the engine's own source search, after pick_slot had sent it to another
-            # slot and the request in that slot had overwritten the chat whose cache the next one needed)
-            h = self.slot_held[b]
-            if not h:
-                return 0
-            if len(h) < len(prompt) and prompt[:len(h)] == h:
-                return len(h)
-            k = len(h) - 1 - h[::-1].index(self.TURN_ID) if self.TURN_ID in h else 0
-            return k if 0 < k < len(prompt) and prompt[:k] == h[:k] else 0
+        held_prefix = lambda b: self._held_prefix(b, prompt)   # noqa: E731 (the same rule as _slot_holding)
         best = max(free, key=held_prefix)
         # without --batch-groups a held prefix of any length is taken, as before
         if held_prefix(best) >= (self.SLOT_PREFIX_MIN if self.slot_groups > 1 else 1):

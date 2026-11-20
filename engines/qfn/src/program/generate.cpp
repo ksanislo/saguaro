@@ -5958,6 +5958,22 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "strata generate: SAGUARO_FAST_LANE: a read of at most %lld tokens beside the slots goes through "
                              "its group's windows, %d rows a window (SAGUARO_FAST_LANE_MAX)\n", (long long) fast_lane_max,
                      pm_group_rows);
+    // Context-aware fast-lane limit (read-stall fallback, 11-19): the prompt path pays a cost per read that grows with
+    // the conversation (its K/V staging brings the whole prefix back layer by layer) while the lane reads rows between
+    // the windows.  Where the prompt path's measured fixed cost at this context exceeds what the same read would take
+    // on the lane (rows x the lane's measured ms per row), the lane is the faster way even past SAGUARO_FAST_LANE_MAX:
+    // a per-decision rule, logged, the plain limit never edited.  SAGUARO_FAST_LANE_ADAPTIVE=0: off;
+    // SAGUARO_FAST_LANE_MAX_ROWS: the cap of the extension (default 2048 rows).
+    static const bool fl_adaptive = [] {
+        const char* v = std::getenv("SAGUARO_FAST_LANE_ADAPTIVE");
+        return v == nullptr || std::atoi(v) != 0;
+    }();
+    static const int64_t fl_adaptive_max = [] {
+        const char* v = std::getenv("SAGUARO_FAST_LANE_MAX_ROWS");
+        return v != nullptr ? (int64_t) std::max(0, std::atoi(v)) : (int64_t) 2048;
+    }();
+    double fl_lane_row_ms = 0.0;   // EWMA of a lane read's ms per row (lane ends; serve thread)
+    std::map<int64_t, std::pair<double, int64_t>> fl_fixed_ms;   // 64K context -> (EWMA prompt-path fixed ms, samples)
     // Secure MTP's CUDA0 allocations before the large host arena is registered with both CUDA contexts.
     // In particular WDDM can refuse the draft weights after mapping tens of GiB of host pages.
     strata::core::MtpDrafter mtp;
@@ -10491,11 +10507,12 @@ int main(int argc, char** argv) {
                     std::fflush(stdout);
                 }
                 if (!stored) spill();
-                std::fprintf(stderr, "strata serve: conversation cache: %s %zu tokens in %.1f ms; parked=%zu bytes=%zu evictions=%zu snapshot_bytes=%zu reused_kv_bytes=%zu%s\n",
+                const std::string split = strata::core::conversation_snapshot_take_split();   // (read-stall instrumentation)
+                std::fprintf(stderr, "strata serve: conversation cache: %s %zu tokens in %.1f ms; parked=%zu bytes=%zu evictions=%zu snapshot_bytes=%zu reused_kv_bytes=%zu%s; %s\n",
                              stored ? "parked" : "skipped", f.ids.size(),
                              std::chrono::duration<double, std::milli>(Clock::now() - t0).count(),
                              conversations.size(), conversations.bytes(), conversations.evictions(), snapshot_bytes, reused_bytes,
-                             who.c_str());
+                             who.c_str(), split.c_str());
             } catch (const std::bad_alloc&) {
                 // The active state has not been touched. Continue with normal
                 // prompt processing rather than killing a serving process.
@@ -13905,6 +13922,11 @@ int main(int argc, char** argv) {
             sl.lane_ids.clear();
             sl.lane_ids.shrink_to_fit();
             sl.adm_read_ms = ms;
+            {   // (context-aware fast-lane rule: what a lane row cost here, EWMA - output-side scheduling state only)
+                const double fl_rows = (double) (n - sl.lane_resume);
+                if (fl_rows > 0.0 && ms > 0.0)
+                    fl_lane_row_ms = fl_lane_row_ms > 0.0 ? 0.7 * fl_lane_row_ms + 0.3 * (ms / fl_rows) : ms / fl_rows;
+            }
             sl.adm_rows = pipe_rows - sl.lane_rows0;
             char nb[200];
             std::snprintf(nb, sizeof nb, "fast lane: %d windows, %lld rows, set up in %.0f ms",
@@ -14912,6 +14934,18 @@ int main(int argc, char** argv) {
             const char* v = std::getenv("SAGUARO_SLOT_ADMIT_GAIN");
             return v != nullptr ? (int64_t) std::atoll(v) : (int64_t) 16384;
         }();
+        // SAGUARO_SLOT_KEEP (on; =0 off): a conversation that already has a batch slot keeps it: its turn reads
+        // beside the slots (or resumes in place) even while nothing decodes.  The old way moved it into the main
+        // context - a park of the conversation that was there and a copy back afterwards, seconds at 300K tokens
+        // and idle GPUs (read-stall, 11-19).  SAGUARO_SLOT_KEEP_MIN: how much of the prompt the slot must hold.
+        static const bool adm_solo_keep = [] {
+            const char* v = std::getenv("SAGUARO_SLOT_KEEP");
+            return v == nullptr || std::atoi(v) != 0;
+        }();
+        static const int64_t adm_solo_min = [] {
+            const char* v = std::getenv("SAGUARO_SLOT_KEEP_MIN");
+            return v != nullptr ? (int64_t) std::atoll(v) : (int64_t) 256;
+        }();
         std::vector<char> adm_queued(bs.size(), 0), adm_cancel(bs.size(), 0), adm_paused(bs.size(), 0);
         std::vector<int64_t> adm_queued_len(bs.size(), 0);   // its prompt's length (the shorter-first test)
         std::vector<Clock::time_point> adm_queued_at(bs.size());
@@ -15061,8 +15095,14 @@ int main(int argc, char** argv) {
                         other = std::max(other, on_disk);
                     }
                 }
-                direct = strata::program::slot_admit_direct(batch_on() || pipe_inflight() || adm_active || cy_held_n > 0, false, own,
-                                                             other, adm_gain);
+                const bool busy = batch_on() || pipe_inflight() || adm_active || cy_held_n > 0;
+                // SAGUARO_SLOT_KEEP: nothing decoding is no reason to move the conversation out of its slot -
+                // beside the slots it resumes in place (its own held prefix covers the prompt); the old way
+                // parks whatever the main context holds and copies through it.  A slot holding only a sliver
+                // of the prompt is not "this conversation's slot" yet, and a deeper parked/disk copy (other)
+                // still wins as before (adm_gain).
+                const bool keeps_slot = adm_solo_keep && !busy && own >= adm_solo_min && own * 2 >= n;
+                direct = strata::program::slot_admit_direct(busy || keeps_slot, false, own, other, adm_gain);
                 if (trace)
                     std::fprintf(stderr, "strata trace: BGEN %d: %s (the slot holds %lld of %lld tokens, another cache "
                                          "%lld)\n", r.slot, direct ? "read beside the slots" : "the old way",
@@ -15212,6 +15252,11 @@ int main(int argc, char** argv) {
             double prep_ms = 0.0;
             std::string notes;
             std::atomic<int64_t> setup_us{-1};   // after t_take
+            // the breakdown line (output only): the pieces read (for the KV staging's share) and the time this read
+            // spent held at a piece boundary for SAGUARO_READ_YIELD
+            std::vector<std::shared_ptr<strata::prefill::PromptJob>> pieces;
+            double yield_ms = 0.0;
+            Clock::time_point t_held{};
         };
         std::vector<std::unique_ptr<AdmJob>> cy_held;   // SAGUARO_READ_YIELD: reads held at a piece boundary
         // SAGUARO_SLOT_GRID=N (buckets, 0 = off; 6 keeps at most 12, two per bucket): a batch slot's conversation keeps grid checkpoints
@@ -15279,6 +15324,8 @@ int main(int argc, char** argv) {
         int adm_main_dev = 0;
         bool adm_reserved = false;
         double adm_fence_ms = 0.0;
+        // the breakdown line (output only): what the read loop itself spent waiting (lines, the decode pump)
+        double adm_line_wait_ms = 0.0, adm_pump_wait_ms = 0.0;
         std::vector<char> adm_mtp_ready(bs.size(), 0);   // --batch-mtp: the slot drafter's prompt pass reserved
         std::atomic<int64_t> adm_at{0};                  // where the read in flight stands (its shorter-first test)
         std::string adm_short;                           // a shorter admission taken out of line to go first
@@ -15867,7 +15914,22 @@ int main(int argc, char** argv) {
                     if ((int64_t) c.ids.size() > resume) return false;   // (a turn checkpoint to restore: the queued way)
                 }
             }
-            if (!strata::program::fast_lane::eligible_len(n, resume, fast_lane_max)) return false;
+            if (!strata::program::fast_lane::eligible_len(n, resume, fast_lane_max)) {
+                // context-aware fast-lane limit (read-stall fallback): past SAGUARO_FAST_LANE_MAX, this read still
+                // goes by lane while its rows on the lane's measured row cost stay under the prompt path's measured
+                // fixed cost at this context; every such decision is logged.  SAGUARO_FAST_LANE_ADAPTIVE=0: off.
+                const int64_t fl_rows = n - 1 - resume;
+                const auto fit = fl_fixed_ms.find(n >> 16);
+                const double fl_fixed = fit != fl_fixed_ms.end() && fit->second.first > 0.0 && fit->second.second > 0
+                                            ? fit->second.first : 0.0;
+                const bool fl_extend = fl_adaptive && fl_rows > fast_lane_max && fl_rows <= fl_adaptive_max &&
+                                       fl_lane_row_ms > 0.0 && fl_fixed > 0.0 && fl_rows * fl_lane_row_ms < fl_fixed;
+                if (fl_adaptive && fl_rows > fast_lane_max && fl_adaptive_max > fast_lane_max)
+                    std::fprintf(stderr, "strata batch: slot %d: fast-lane decision: %lld rows x %.1f ms/row vs %.0f ms "
+                                         "prompt-path fixed cost measured at %lldK context: %s\n", b, (long long) fl_rows,
+                                 fl_lane_row_ms, fl_fixed, (long long) (n >> 16), fl_extend ? "the lane" : "the queued way");
+                if (!fl_extend) return false;
+            }
             if (eslots_on) {   // backed for the whole read now, or the queued way (which may make room)
                 const std::function<bool(size_t)> busy = [](size_t) { return false; };
                 if (slot_fit(b, n + 1 + strata::kernels::kVerifyMaxT, false, busy) != 0) return false;
@@ -15961,8 +16023,10 @@ int main(int argc, char** argv) {
             std::function<void()> br_tick_fn;   // (SAGUARO_BATCH_READS_DECODE_WINDOWS / _FAST_SHRINK: set below)
             auto pump_or_wait = [&] {
                 if (br_tick_fn) br_tick_fn();
+                const auto tp = Clock::now();   // (the breakdown line: the wait for the decode pump / the idle beat)
                 if (pump_ok && (batch_on() || pipe_inflight())) pump_ok = pump(true);
                 else std::this_thread::sleep_for(std::chrono::microseconds(500));
+                adm_pump_wait_ms += std::chrono::duration<double, std::milli>(Clock::now() - tp).count();
                 return pump_ok;
             };
             adm_quiet = [&]() -> bool {
@@ -16195,6 +16259,7 @@ int main(int argc, char** argv) {
                 auto pj = std::make_shared<strata::prefill::PromptJob>();
                 pj->tokens.assign(j.r.ids.begin() + a, j.r.ids.begin() + z);
                 pj->pos0 = a;
+                j.pieces.push_back(pj);   // (the breakdown line: its KV staging's share once the read ends)
                 if (!j.fed_any) j.t_fed0 = Clock::now();
                 j.fed_any = true;
                 // SAGUARO_BATCH_READS_FAST: a read short enough to go whole is read in the next chunk (a chat question
@@ -16337,6 +16402,18 @@ int main(int argc, char** argv) {
                 sl.reading = false;
                 j.read_ms = std::chrono::duration<double, std::milli>(Clock::now() - j.t_read).count();
                 j.rows = pipe_rows - j.rows0;
+                {   // context-aware fast-lane rule (read-stall): what the prompt path's read cost beyond its rows -
+                    // the per-read staging of the conversation's prefix - EWMA per 64K context bucket.  Clean
+                    // samples only: not held for a yield, and with the lane's row cost measured.
+                    const int64_t read_rows = j.n - j.resume;
+                    const double rows_ms = fl_lane_row_ms * (double) read_rows;
+                    if (fl_lane_row_ms > 0.0 && j.yield_ms == 0.0 && read_rows >= 16 && j.read_ms > rows_ms) {
+                        std::pair<double, int64_t>& f = fl_fixed_ms[j.n >> 16];
+                        const double est = j.read_ms - rows_ms;
+                        f.first = f.second == 0 ? est : 0.7 * f.first + 0.3 * est;
+                        ++f.second;
+                    }
+                }
                 auto end_slot = [&] {
                     sl.ids.clear();
                     if (ckpt_pool.on())
@@ -16413,11 +16490,27 @@ int main(int argc, char** argv) {
                 {   // where its time went, from its BGEN
                     auto at = [&](Clock::time_point t) { return std::chrono::duration<double, std::milli>(t - j.t_bgen).count(); };
                     const int64_t su = j.setup_us.load();
-                    char nb[400];
+                    // the KV staging's share: the host->device prefix copies its pieces ran (the prompt path's
+                    // fixed cost per read at long contexts) - output only, it changes nothing
+                    double kv_ms = 0.0;
+                    uint64_t kv_bytes = 0;
+                    int64_t kv_passes = 0;
+                    for (const auto& pj : j.pieces) {
+                        kv_ms += pj->kv_ms;
+                        kv_bytes += pj->kv_bytes;
+                        kv_passes += pj->kv_passes;
+                    }
+                    char kvb[160];
+                    std::snprintf(kvb, sizeof kvb, ", KV staged from RAM: %.0f ms in %lld layer passes (%.2f GB)",
+                                  kv_ms, (long long) kv_passes, (double) kv_bytes / 1073741824.0);
+                    char yb[80];
+                    std::snprintf(yb, sizeof yb, ", held for yield %.0f ms", j.yield_ms);
+                    char nb[768];
                     std::snprintf(nb, sizeof nb, "taken at %.0f ms, prepared in %.0f ms%s%s%s, set up at %.0f ms, first piece fed at "
-                                  "%.0f ms, read done at %.0f ms", at(j.t_take), j.prep_ms, j.notes.empty() ? "" : " (",
+                                  "%.0f ms, read done at %.0f ms%s%s", at(j.t_take), j.prep_ms, j.notes.empty() ? "" : " (",
                                   j.notes.c_str(), j.notes.empty() ? "" : ")", su >= 0 ? at(j.t_take) + su / 1000.0 : -1.0,
-                                  j.fed_any ? at(j.t_fed0) : -1.0, at(Clock::now()));
+                                  j.fed_any ? at(j.t_fed0) : -1.0, at(Clock::now()),
+                                  kv_passes > 0 ? kvb : "", j.yield_ms > 0.0 ? yb : "");
                     sl.adm_notes = nb;
                 }
                 ver.set_slot_sampling(b, j.r.sp);
@@ -16429,7 +16522,11 @@ int main(int argc, char** argv) {
             if (!first.empty() && !take(first)) return false;
             // SAGUARO_READ_YIELD: the reads held at a piece boundary go on from where they stopped (the loan still out)
             const size_t resumed = cy_held.size();
-            for (auto& j : cy_held) live.push_back(std::move(j));
+            const Clock::time_point t_cy = Clock::now();
+            for (auto& j : cy_held) {
+                j->yield_ms += std::chrono::duration<double, std::milli>(t_cy - j->t_held).count();
+                live.push_back(std::move(j));
+            }
             cy_held.clear();
             cy_held_n = 0;
             cy_yielded = false;
@@ -16518,7 +16615,8 @@ int main(int argc, char** argv) {
                 br_tick();
                 std::vector<std::string> fresh;
                 bool more = false, other = false;
-                {
+                {   // (the breakdown line: the cv wait for the next line is a wait point of this loop)
+                    const auto tw = Clock::now();
                     std::unique_lock<std::mutex> lk(in_mu);
                     if (!(batch_on() || pipe_inflight()))
                         in_cv.wait_for(lk, std::chrono::milliseconds(1), [&] { return in_lines.size() != seen; });
@@ -16529,6 +16627,7 @@ int main(int argc, char** argv) {
                     }
                     other = cy_on && cy_yield_line();
                     seen = in_lines.size();
+                    adm_line_wait_ms += std::chrono::duration<double, std::milli>(Clock::now() - tw).count();
                 }
                 for (const std::string& l : fresh)
                     if (!fl_take(l) && !take(l)) return false;
@@ -16602,6 +16701,7 @@ int main(int argc, char** argv) {
                             if (cy_done(*j)) {   // (its last piece landed meanwhile)
                                 if (!finish(*j)) return false;
                             } else {
+                                j->t_held = Clock::now();   // (the breakdown line: how long it waits here)
                                 cy_held.push_back(std::move(j));
                             }
                         }
@@ -16627,7 +16727,11 @@ int main(int argc, char** argv) {
                     if (!more) break;
                     continue;
                 }
-                if (batch_on() || pipe_inflight()) pump_ok = pump(true);
+                if (batch_on() || pipe_inflight()) {
+                    const auto tp = Clock::now();   // (the breakdown line: the wait behind a decode window/group)
+                    pump_ok = pump(true);
+                    adm_pump_wait_ms += std::chrono::duration<double, std::milli>(Clock::now() - tp).count();
+                }
             }
             return true;
         };
@@ -16650,6 +16754,8 @@ int main(int argc, char** argv) {
             adm_active = true;
             in_prompt_read = true;
             adm_fence_ms = 0.0;
+            adm_line_wait_ms = 0.0;
+            adm_pump_wait_ms = 0.0;
             static const bool released = [] {   // threads that inherited the host's core: off it (Linux; as the concurrent read)
                 if (!strata::aux_cpus::enabled())
                     if (const int moved = strata::aux_cpus::release_host_inheritors(); moved > 0)
@@ -16822,9 +16928,10 @@ int main(int argc, char** argv) {
             bells.stop = nullptr;
             if (adm_multi && cy_yielded) {   // the held reads keep the loan: refilled when the run that ends them ends
                 std::fprintf(stderr, "strata batch: %d admission%s read beside the slots in %.0f ms (queued, "
-                                     "SAGUARO_SLOT_ADMIT_MULTI); yielded with %zu held, the loan kept; decoded %lld rows "
-                                     "(%s)\n", n_adm, n_adm == 1 ? "" : "s",
+                                     "SAGUARO_SLOT_ADMIT_MULTI); yielded with %zu held, the loan kept; waited %.0f ms "
+                                     "for lines, %.0f ms in the pump; decoded %lld rows (%s)\n", n_adm, n_adm == 1 ? "" : "s",
                              std::chrono::duration<double, std::milli>(Clock::now() - t_run).count(), cy_held_n,
+                             adm_line_wait_ms, adm_pump_wait_ms,
                              (long long) (pipe_rows - rows_run0), window_note().c_str());
                 return true;
             }
@@ -16837,9 +16944,11 @@ int main(int argc, char** argv) {
             }
             adm_fence_ms += std::chrono::duration<double, std::milli>(Clock::now() - tf).count();
             std::fprintf(stderr, "strata batch: %d admission%s read beside the slots in %.0f ms%s; the groups stopped %.0f ms "
-                                 "for the loan (lend, refill) and decoded %lld rows (%s)\n", n_adm, n_adm == 1 ? "" : "s",
+                                 "for the loan (lend, refill), waited %.0f ms for lines, %.0f ms in the pump; decoded %lld "
+                                 "rows (%s)\n", n_adm, n_adm == 1 ? "" : "s",
                          std::chrono::duration<double, std::milli>(Clock::now() - t_run).count(),
                          adm_multi ? " (queued, SAGUARO_SLOT_ADMIT_MULTI)" : "", adm_fence_ms,
+                         adm_line_wait_ms, adm_pump_wait_ms,
                          (long long) (pipe_rows - rows_run0), window_note().c_str());
             return true;
         };
@@ -18381,10 +18490,11 @@ int main(int argc, char** argv) {
                             std::chrono::duration<double, std::milli>(Clock::now() - t0).count(),
                             ctx_from ? ctx_from : "ram");
                 std::fflush(stdout);
-                std::fprintf(stderr, "strata serve: conversation cache: restored %lld tokens (%s) in %.1f ms; parked=%zu bytes=%zu\n",
+                const std::string r_split = strata::core::conversation_snapshot_take_split();   // (read-stall instrumentation)
+                std::fprintf(stderr, "strata serve: conversation cache: restored %lld tokens (%s) in %.1f ms; parked=%zu bytes=%zu; %s\n",
                              (long long) resume, from_live ? "live" : "checkpoint",
                              std::chrono::duration<double, std::milli>(Clock::now() - t0).count(),
-                             conversations.size(), conversations.bytes());
+                             conversations.size(), conversations.bytes(), r_split.c_str());
             }
             if (want_cvec != cvec_cached) {
                 live_ok = false;

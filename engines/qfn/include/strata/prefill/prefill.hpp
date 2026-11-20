@@ -78,6 +78,12 @@ struct PromptJob {
     bool whole = false;  ///< read in one chunk (at most the buffers' tokens), as a batch reads its segments
     bool urgent = false; ///< SAGUARO_BATCH_READS_FAST: a short read's piece (the whole read fits FAST): the next chunk takes it
 
+    /// where the KV staging's host->device copies went (the read's breakdown line): time on the stream's staging
+    /// regions, bytes staged, layer passes.  Output only: the copies themselves are unchanged.
+    double kv_ms = 0.0;
+    uint64_t kv_bytes = 0;
+    int64_t kv_passes = 0;
+
     bool failed() const { return failed_.load(); }
     bool done() const { return done_.load(); }
     void finish(bool ok, const std::string& err) {
