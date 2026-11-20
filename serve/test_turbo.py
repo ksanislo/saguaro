@@ -48,7 +48,8 @@ class ResidentSkip(unittest.TestCase):
         # (the rule itself runs on the GPU; this pins the pieces the kernels' comments and the docs promise)
         ds = (self.ROOT / "src/ds4/ds4_kernels.cu").read_text(encoding="utf-8")
         self.assertIn("rank == 0 || ((rs_k <= 0 || rank < rs_k)", ds)            # (top-1 always kept)
-        self.assertIn("kept ? vram[pick[r]] : 0ull", ds)                          # (dropped: off the device ...)
+        # (a2d0adb8 read the entry once through a volatile pointer into `v`: the plan line still gets 0 for a drop)
+        self.assertIn("kept ? *(volatile const unsigned long long*) &vram[pick[r]] : 0ull", ds)   # (dropped: off the device ...)
         self.assertIn("kept ? pick[r] : -1", ds)                                  # ... and not on the CPU lane
         glm = (self.ROOT / "src/kernels/cuda/glm_fast.cu").read_text(encoding="utf-8")
         self.assertIn("const bool out = rank != 0 &&", glm)
