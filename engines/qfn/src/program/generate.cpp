@@ -737,7 +737,9 @@ struct Options {
 #endif
     /// --serve runs up to this many sequences at once, one token each per batch window (0 = off).  A request
     /// sent as `BGEN <slot> <max_new> ...` reads its prompt and its first token through the usual path, then
-    /// continues in slot <slot> of the batch windows (`BT <slot> <id>` lines, then `BDONE <slot> ...`).
+    /// continues in slot <slot> of the batch windows (`BT <slot> <id>` lines, then `BDONE <slot> <n> <finish> <ms>
+    /// <hits> <lookups> <drafts accepted> <drafts offered>` - the slot's own figures, the cache ones being the
+    /// engine-wide counters' delta over the request).
     int batch = 0;
     /// With an explicit --layer-split, every GPU loads only its own layers' dense weights instead of the whole
     /// model's: the VRAM they took goes back to the expert cache (opt-in)
@@ -12571,6 +12573,10 @@ int main(int argc, char** argv) {
             int64_t lane_rows0 = 0, lane_resume = 0;
             int lane_windows = 0;
             double lane_wait_ms = 0.0;
+            // what this slot's request saw, told on its BDONE (like the solo DONE's hits / lookups / drafts fields):
+            // the engine's expert-cache counters when the request started (its hits / lookups are the delta to BDONE;
+            // as in the multi loops, they are shared with the other slots decoding meanwhile) and its own MTP drafts
+            int64_t cache0 = 0, look0 = 0, draft_acc = 0, draft_off = 0;
         };
         std::vector<BSlot> bs((size_t) std::max(o.batch, 0));
         // an admission beside the slots, at its first token: one line with where its time went
@@ -12585,6 +12591,43 @@ int main(int argc, char** argv) {
                          std::chrono::duration<double, std::milli>(Clock::now() - sl.adm_t0).count(),
                          sl.adm_notes.empty() ? "" : "; ", sl.adm_notes.c_str());
             sl.adm_notes.clear();
+        };
+        // the tail every BDONE carries: " <hits> <lookups> <drafts accepted> <drafts offered>" - the slot's own
+        // figures (the engine-wide cache counters since its request started, as the solo DONE reports them)
+        auto bdone_stats = [&](int b) {
+            const BSlot& sl = bs[(size_t) b];
+            char t[128];
+            std::snprintf(t, sizeof t, " %lld %lld %lld %lld",
+                          (long long) (drive.d.cache_hits - sl.cache0),
+                          (long long) (drive.d.cache_hits + drive.d.cache_admitted + drive.d.cache_refused - sl.look0),
+                          (long long) sl.draft_acc, (long long) sl.draft_off);
+            return std::string(t);
+        };
+        // the Monitor's STAT line while the batch windows run (the same format the maya engines print and the server's
+        // tiers parser reads): at most once a second, over what was decoded since the last line - the engine-wide
+        // expert-cache hits / lookups and the MTP drafts the windows offered and kept
+        int64_t bstat_toks = 0, bstat_off = 0, bstat_acc = 0;
+        int64_t bstat_hits0 = drive.d.cache_hits, bstat_toks0 = 0, bstat_off0 = 0, bstat_acc0 = 0;
+        int64_t bstat_look0 = drive.d.cache_hits + drive.d.cache_admitted + drive.d.cache_refused;
+        Clock::time_point bstat_t1 = Clock::now();
+        const auto bstat_reset = [&] {
+            bstat_t1 = Clock::now();
+            bstat_hits0 = drive.d.cache_hits;
+            bstat_look0 = drive.d.cache_hits + drive.d.cache_admitted + drive.d.cache_refused;
+            bstat_toks0 = bstat_toks; bstat_off0 = bstat_off; bstat_acc0 = bstat_acc;
+        };
+        const auto batch_stat_line = [&](int active_slots) {
+            const Clock::time_point now = Clock::now();
+            const double el = std::chrono::duration<double>(now - bstat_t1).count();
+            if (el < 1.0) return;
+            const int64_t h = drive.d.cache_hits - bstat_hits0;
+            const int64_t look = drive.d.cache_hits + drive.d.cache_admitted + drive.d.cache_refused - bstat_look0;
+            const double n = (double) std::max<int64_t>(1, bstat_toks - bstat_toks0);
+            std::printf("STAT tok_s=%.2f ms_tok=%.2f vram_hit=%.4f draft_acc=%lld draft_off=%lld active=%d\n",
+                        n / std::max(1e-9, el), 1000.0 * el / n, (double) h / (double) std::max<int64_t>(1, look),
+                        (long long) (bstat_acc - bstat_acc0), (long long) (bstat_off - bstat_off0), active_slots);
+            std::fflush(stdout);
+            bstat_reset();
         };
         // timing of the batch windows since the slots were last all idle (one stderr line then)
         double bt_run = 0, bt_commit = 0, bt_emit = 0;
@@ -13295,7 +13338,8 @@ int main(int argc, char** argv) {
                          ram ? "no RAM is left to pin its context, and no idle conversation is left to give it (SAGUARO_KV_HOST_ELASTIC)"
                              : "the slot budget has no room to grow (SAGUARO_ELASTIC_SLOTS_MIB)");
             const double ms = std::chrono::duration<double, std::milli>(Clock::now() - sl.t0).count();
-            std::printf("BDONE %d %lld %s %.1f\n", b, (long long) sl.produced, ram ? "ram" : "length", ms);
+            std::printf("BDONE %d %lld %s %.1f%s\n", b, (long long) sl.produced, ram ? "ram" : "length", ms,
+                        bdone_stats(b).c_str());
             std::fflush(stdout);
             sl.active = false;
             sl.cached = o.prompt_cache > 0 && !sl.img && !sl.tainted;
@@ -13489,7 +13533,7 @@ int main(int argc, char** argv) {
             if (why == nullptr) return 0;
             std::fprintf(stderr, "strata batch: SAGUARO_YARN_ELASTIC: slot %d ends at %lld tokens: %s\n", b, (long long) sl.p, why);
             const double ms = std::chrono::duration<double, std::milli>(Clock::now() - sl.t0).count();
-            std::printf("BDONE %d %lld length %.1f\n", b, (long long) sl.produced, ms);
+            std::printf("BDONE %d %lld length %.1f%s\n", b, (long long) sl.produced, ms, bdone_stats(b).c_str());
             std::fflush(stdout);
             sl.active = false;
             sl.cached = o.prompt_cache > 0 && !sl.img && !sl.tainted;
@@ -13572,6 +13616,7 @@ int main(int argc, char** argv) {
             }
             if (bt_windows == 0) {
                 bt_start = Clock::now();
+                bstat_reset();
                 bt_wait0 = ver.ms_wait; bt_pool0 = ver.ms_pool;
                 bt_miss0 = drive.d.multi_misses; bt_hits0 = drive.d.cache_hits; bt_pcie0 = drive.d.pcie_experts;
                 bt_stage_wait0.assign(stages.size() + 1, 0.0);
@@ -13596,7 +13641,8 @@ int main(int argc, char** argv) {
                     std::fprintf(stderr, "strata batch: slot %d ends at position %lld: no VRAM for its window (%s); the "
                                          "request fails, the engine goes on\n", active[a], (long long) sl.p, err.c_str());
                     const double ms = std::chrono::duration<double, std::milli>(Clock::now() - sl.t0).count();
-                    std::printf("BDONE %d %lld vram %.1f\n", active[a], (long long) sl.produced, ms);
+                    std::printf("BDONE %d %lld vram %.1f%s\n", active[a], (long long) sl.produced, ms,
+                                bdone_stats(active[a]).c_str());
                     sl.active = false;
                     sl.cached = false;
                     sl.draft_ready = false;
@@ -13642,6 +13688,14 @@ int main(int argc, char** argv) {
             for (int a = 0; a < A; ++a) {
                 bt_rows += keep[active[a]];
                 bt_accepted += keep[active[a]] - 1;
+                // the slot's own MTP figures (its BDONE carries them) and the STAT line's engine-wide totals:
+                // one proposal a slot-window, accepted when the target picked it (keep 2)
+                BSlot& sl = bs[(size_t) active[a]];
+                sl.draft_acc += keep[active[a]] - 1;
+                sl.draft_off += batch_mtp ? 1 : 0;
+                bstat_acc += keep[active[a]] - 1;
+                bstat_off += batch_mtp ? 1 : 0;
+                bstat_toks += keep[active[a]];
             }
             for (int t = 0; t < A; ++t) {
                 const int b = active[t];
@@ -13653,7 +13707,8 @@ int main(int argc, char** argv) {
                                          "(BDONE nonfinite) and the next request reads its prompt from token 0\n", b,
                                  (long long) pos[first[t]]);
                     const double ms = std::chrono::duration<double, std::milli>(Clock::now() - sl.t0).count();
-                    std::printf("BDONE %d %lld nonfinite %.1f\n", b, (long long) sl.produced, ms);
+                    std::printf("BDONE %d %lld nonfinite %.1f%s\n", b, (long long) sl.produced, ms,
+                                bdone_stats(b).c_str());
                     sl.active = false;
                     sl.cached = false;
                     sl.checks.clear();
@@ -13671,7 +13726,8 @@ int main(int argc, char** argv) {
                                     : sl.p + 2 > o.max_context ? "length" : nullptr;
                     if (fin != nullptr) {
                         const double ms = std::chrono::duration<double, std::milli>(Clock::now() - sl.t0).count();
-                        std::printf("BDONE %d %lld %s %.1f\n", b, (long long) sl.produced, fin, ms);
+                        std::printf("BDONE %d %lld %s %.1f%s\n", b, (long long) sl.produced, fin, ms,
+                                    bdone_stats(b).c_str());
                         sl.active = false;
                         sl.cached = o.prompt_cache > 0 && !sl.img && !sl.tainted;
                         break;
@@ -13713,6 +13769,7 @@ int main(int argc, char** argv) {
             }
             strata::core::progress().busy.store(was_busy);
             report_batch_window(S, A, !batch_on(), w0);
+            batch_stat_line(A);
             if (!batch_on() && bt_windows > 0) {
                 const double w = (double) bt_windows, wall = msd(bt_start, Clock::now());
                 const double L = (double) g.n_layers;
@@ -14048,11 +14105,12 @@ int main(int argc, char** argv) {
             ++sl.produced;
             ++bt_rows;
             ++pipe_rows;
+            ++bstat_toks;
             const bool eos = std::find(o.eos_ids.begin(), o.eos_ids.end(), (int64_t) y) != o.eos_ids.end();
             const char* fin = eos ? "stop" : sl.produced >= sl.max_new ? "length" : sl.p + 2 > o.max_context ? "length" : nullptr;
             if (fin != nullptr) {
                 const double tms = std::chrono::duration<double, std::milli>(Clock::now() - sl.t0).count();
-                std::printf("BDONE %d %lld %s %.1f\n", b, (long long) sl.produced, fin, tms);
+                std::printf("BDONE %d %lld %s %.1f%s\n", b, (long long) sl.produced, fin, tms, bdone_stats(b).c_str());
                 sl.active = false;
                 sl.cached = o.prompt_cache > 0 && !sl.img && !sl.tainted;
             } else {
@@ -14088,6 +14146,11 @@ int main(int argc, char** argv) {
                                                                       sl.produced, sl.max_new, sl.p, o.max_context);
                 pm_prop += L.n[t] - 1;
                 pm_acc += keep[b] - 1;
+                // the slot's own MTP figures (its BDONE carries them) and the STAT line's engine-wide totals
+                bs[(size_t) b].draft_off += L.n[t] - 1;
+                bs[(size_t) b].draft_acc += keep[b] - 1;
+                bstat_off += L.n[t] - 1;
+                bstat_acc += keep[b] - 1;
             }
             if (fl_dump != nullptr)   // (SAGUARO_FAST_LANE_DUMP: before anything else is queued on this stage)
                 for (int t = 0; t < GS; ++t) {
@@ -14121,7 +14184,8 @@ int main(int argc, char** argv) {
                                          "ends (BDONE nonfinite) and the next request reads its prompt from token 0\n",
                                  b, (long long) sl.p);
                     const double ms = std::chrono::duration<double, std::milli>(Clock::now() - sl.t0).count();
-                    std::printf("BDONE %d %lld nonfinite %.1f\n", b, (long long) sl.produced, ms);
+                    std::printf("BDONE %d %lld nonfinite %.1f%s\n", b, (long long) sl.produced, ms,
+                                bdone_stats(b).c_str());
                     sl.active = false;
                     sl.cached = false;
                     sl.checks.clear();
@@ -14136,12 +14200,14 @@ int main(int argc, char** argv) {
                     ++sl.produced;
                     ++bt_rows;
                     ++pipe_rows;
+                    ++bstat_toks;
                     const bool eos = std::find(o.eos_ids.begin(), o.eos_ids.end(), (int64_t) y) != o.eos_ids.end();
                     const char* fin = eos ? "stop" : sl.stop ? "cancel" : sl.produced >= sl.max_new ? "length"
                                     : sl.p + 2 > o.max_context ? "length" : nullptr;
                     if (fin != nullptr) {
                         const double ms = std::chrono::duration<double, std::milli>(Clock::now() - sl.t0).count();
-                        std::printf("BDONE %d %lld %s %.1f\n", b, (long long) sl.produced, fin, ms);
+                        std::printf("BDONE %d %lld %s %.1f%s\n", b, (long long) sl.produced, fin, ms,
+                                    bdone_stats(b).c_str());
                         sl.active = false;
                         // (its deferred commit is queued on every stage ahead of anything that reads the slot)
                         sl.cached = o.prompt_cache > 0 && !sl.img && !sl.tainted;
@@ -14322,7 +14388,7 @@ int main(int argc, char** argv) {
                                      "(%s); the request fails, the engine goes on\n", b, (long long) sl.p, k + 1,
                              why.c_str());
                 const double ms = std::chrono::duration<double, std::milli>(Clock::now() - sl.t0).count();
-                std::printf("BDONE %d %lld vram %.1f\n", b, (long long) sl.produced, ms);
+                std::printf("BDONE %d %lld vram %.1f%s\n", b, (long long) sl.produced, ms, bdone_stats(b).c_str());
                 sl.active = false;
                 sl.cached = false;
                 sl.draft_ready = false;
@@ -14338,6 +14404,7 @@ int main(int argc, char** argv) {
             ++pipe_tick;
             if (bt_windows == 0 && !pipe_inflight()) {
                 bt_start = Clock::now();
+                bstat_reset();
                 bt_wait0 = ver.ms_wait; bt_pool0 = ver.ms_pool;
                 bt_miss0 = drive.d.multi_misses; bt_hits0 = drive.d.cache_hits; bt_pcie0 = drive.d.pcie_experts;
             }
@@ -14367,6 +14434,7 @@ int main(int argc, char** argv) {
                     ++wins_done;
                     G.inflight = false;
                     report_batch_window(G.S, G.active, !pipe_inflight() && !batch_on(), G.started);
+                    batch_stat_line(G.active);
                     continue;
                 }
                 const int32_t* outb = vk.batch_out();
@@ -14378,7 +14446,8 @@ int main(int argc, char** argv) {
                                              "ends (BDONE nonfinite) and the next request reads its prompt from token 0\n",
                                      gm(gi, t), (long long) sl.p);
                         const double ms = std::chrono::duration<double, std::milli>(Clock::now() - sl.t0).count();
-                        std::printf("BDONE %d %lld nonfinite %.1f\n", gm(gi, t), (long long) sl.produced, ms);
+                        std::printf("BDONE %d %lld nonfinite %.1f%s\n", gm(gi, t), (long long) sl.produced, ms,
+                                    bdone_stats(gm(gi, t)).c_str());
                         sl.active = false;
                         sl.cached = false;
                         sl.checks.clear();
@@ -14391,13 +14460,15 @@ int main(int argc, char** argv) {
                     adm_first(gm(gi, t));   // SAGUARO_SLOT_ADMIT: the admission's line, at its first token
                     ++bt_rows;
                     ++pipe_rows;
+                    ++bstat_toks;
                     const bool eos = std::find(o.eos_ids.begin(), o.eos_ids.end(), (int64_t) y) != o.eos_ids.end();
                     const char* fin = eos ? "stop" : sl.stop ? "cancel" : sl.produced >= sl.max_new ? "length"
                                     : sl.p + 2 > o.max_context ? "length" : nullptr;
                     sl.ids.push_back(sl.x);
                     if (fin != nullptr) {
                         const double ms = std::chrono::duration<double, std::milli>(Clock::now() - sl.t0).count();
-                        std::printf("BDONE %d %lld %s %.1f\n", gm(gi, t), (long long) sl.produced, fin, ms);
+                        std::printf("BDONE %d %lld %s %.1f%s\n", gm(gi, t), (long long) sl.produced, fin, ms,
+                                    bdone_stats(gm(gi, t)).c_str());
                         sl.active = false;
                         // a pipelined slot is a cache again (#857: a request left alone in its slot goes back to the solo path with its
                         // drafts): its state is final once its last window has left the last stage.  A later group window whose pad
@@ -14418,6 +14489,7 @@ int main(int argc, char** argv) {
                 ++wins_done;
                 G.inflight = false;
                 report_batch_window(G.S, G.active, !pipe_inflight() && !batch_on(), G.started);
+                batch_stat_line(G.active);
             }
             // SAGUARO_SHORT_READS: copies back landed while nothing is in flight (the table goes to every card)
             if (!lazy_fly.empty() && !conc_serving && !in_prompt_read && !pipe_inflight()) {
@@ -15915,6 +15987,8 @@ int main(int argc, char** argv) {
             sl = BSlot{};
             strata::kernels::slot_rope_set(b, nullptr);   // text: the identity
             sl.active = true;
+            sl.cache0 = drive.d.cache_hits;   // the request's own expert-cache figures (the tail of its BDONE)
+            sl.look0 = drive.d.cache_hits + drive.d.cache_admitted + drive.d.cache_refused;
             sl.x = (int32_t) ids[(size_t) n - 1];
             sl.p = n - 1;
             sl.max_new = j.r.max_new;
@@ -16085,6 +16159,8 @@ int main(int argc, char** argv) {
             sl = BSlot{};
             strata::kernels::slot_rope_set(b, nullptr);   // text: the identity
             sl.active = true;
+            sl.cache0 = drive.d.cache_hits;   // the request's own expert-cache figures (the tail of its BDONE)
+            sl.look0 = drive.d.cache_hits + drive.d.cache_admitted + drive.d.cache_refused;
             sl.lane = true;
             sl.lane_ids = std::move(ids);
             sl.p = resume;
@@ -16587,6 +16663,8 @@ int main(int argc, char** argv) {
                 sl = BSlot{};
                 strata::kernels::slot_rope_set(b, nullptr);   // text: the identity
                 sl.active = true;
+                sl.cache0 = drive.d.cache_hits;   // the request's own expert-cache figures (the tail of its BDONE)
+                sl.look0 = drive.d.cache_hits + drive.d.cache_admitted + drive.d.cache_refused;
                 sl.x = (int32_t) ids[(size_t) n - 1];
                 sl.p = n - 1;
                 sl.max_new = j.r.max_new;
@@ -21333,6 +21411,8 @@ int main(int argc, char** argv) {
                     }
                     const auto tc2 = Clock::now();   // (the slot's old checkpoints freed)
                     sl.active = true;
+                    sl.cache0 = drive.d.cache_hits;   // the request's own expert-cache figures (the tail of its BDONE)
+                    sl.look0 = drive.d.cache_hits + drive.d.cache_admitted + drive.d.cache_refused;
                     sl.x = x;
                     sl.p = p;
                     sl.produced = 1;
