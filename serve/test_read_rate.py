@@ -479,3 +479,15 @@ class ReadCountedQueueStaysAQueue(unittest.TestCase):
         from serve import server as S
         src = inspect.getsource(S)
         self.assertIn("def __getattr__(self, name):", src[src.index("class _ReadCounted"):][:600])
+
+
+class OnReadTakesTheProvisionalFlag(unittest.TestCase):
+    """Live 11-19: the QFN view calls on_read(n, rate, False, True); the 4th argument must be `prov`, not the stat."""
+
+    def test_on_read_lambda_signature(self):
+        import inspect
+        from serve import server as S
+        src = inspect.getsource(S)
+        line = next(x for x in src.splitlines() if "tls.on_read = lambda" in x)
+        self.assertIn("prov=False, st=stat", line)
+        self.assertIn("self._note_read(st, n, ts, ex, prov)", line)

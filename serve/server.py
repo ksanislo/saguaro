@@ -4468,7 +4468,7 @@ class Service:
                     stat.at_engine = True
                     tls = getattr(self.engine, "_tls", None)   # this request's thread reads the engine's lines: its
                     if tls is not None:                        # PP steps count into the engine-total read rate
-                        tls.on_read = lambda n, ts=None, ex=False, st=stat: self._note_read(st, n, ts, ex)
+                        tls.on_read = lambda n, ts=None, ex=False, prov=False, st=stat: self._note_read(st, n, ts, ex, prov)
                         tls.read_leg_base = 0                  # (this request's read counting starts from nothing)
                     self.running.add(stat)
                     self.active += 1
