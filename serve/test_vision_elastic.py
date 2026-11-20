@@ -1,6 +1,7 @@
 """serve/test_vision_elastic.py - the elastic QFN picture encoder in the shared server (no GPU, no engine): the first
-picture makes the expert cache keep elastic_mib free and only then starts the encoder; after elastic_idle_s without
-one it stops and the reserve goes back to 0.
+picture makes the expert engine lend elastic_mib of VRAM (VLEND on an engine that says vision_lend=1, its old
+vram_reserve otherwise) and only then starts the encoder; after elastic_idle_s without one it stops and the room is
+reclaimed (VRECLAIM), while conversations keep decoding when the engine lends.
 
     cd serve && python -m unittest -q test_vision_elastic
 """
@@ -9,6 +10,7 @@ from __future__ import annotations
 import contextlib
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -37,6 +39,28 @@ class ElasticVision(unittest.TestCase):
             if self.refuse:
                 raise ValueError("VRAM needs an engine started with --vram-elastic (one NVIDIA GPU, --serve)")
             return {"expert_cache_mib": 12288, "expert_cache_full_mib": 13312}
+
+    class LendEngine(MockEngine):
+        """A QFN engine that supports VLEND / VRECLAIM (its INFO says vision_lend=1): it lends CUDA0's VRAM while the
+        batch slots decode (refuse: one that answers ERR VLEND, its cache at its smallest size)."""
+
+        def __init__(self, tok, log, refuse=False):
+            super().__init__(tok, "ok", max_context=CTX)
+            self.log, self.refuse = log, refuse
+            self.info = {"logit_bias": 1, "vision_lend": 1}
+            self.lend_calls, self.reclaim_calls = [], []
+
+        def vision_lend(self, mib, timeout=45.0):
+            self.log.append(("lend", mib))
+            self.lend_calls.append(mib)
+            if self.refuse:
+                raise ValueError("VLEND: CUDA0's expert cache is at its smallest size of 128 slots: 900 of 1696 MiB free")
+            return {"free_mib": 1700, "cache_mib": 11008}
+
+        def vision_reclaim(self, timeout=45.0):
+            self.log.append(("reclaim",))
+            self.reclaim_calls.append(True)
+            return {"cache_mib": 12544}
 
     class Reader:
         """The elastic encoder: alive/restart/unload, the elastic numbers, an encode that records; no active()."""
@@ -83,12 +107,14 @@ class ElasticVision(unittest.TestCase):
         def active(self):
             return contextlib.nullcontext(self)
 
-    def make(self, refuse=False, elastic_idle_s=3600.0, resident=False):
+    def make(self, refuse=False, elastic_idle_s=3600.0, resident=False, lend=False):
         tok = ByteTokenizer()
         log, d = [], tempfile.TemporaryDirectory()
         self.addCleanup(d.cleanup)
         if resident:
             engine, vision = MockEngine(tok, "ok", max_context=CTX), self.Resident(d.name, log)
+        elif lend:
+            engine, vision = self.LendEngine(tok, log, refuse), self.Reader(d.name, log, elastic_idle_s)
         else:
             engine, vision = self.Engine(tok, log, refuse), self.Reader(d.name, log, elastic_idle_s)
         svc = Service(engine, tok, ChatTemplate(ROOT / "serve/chat_template.jinja"), vision=vision)
@@ -168,6 +194,74 @@ class ElasticVision(unittest.TestCase):
         self.assertEqual(svc._vision_idle_down(force=True), "nothing")
         self.picture(svc)
         self.assertEqual(log, [("encode",)])                    # active() around it, no engine commands, no clock
+        self.assertFalse(svc.vision_held)
+
+    # ---- the VLEND / VRECLAIM path (the engine says vision_lend=1): the encoder lives beside the decoding slots
+
+    def test_lend_first_picture_lends_room_then_starts_then_encodes(self):
+        svc, log = self.make(lend=True)
+        self.picture(svc)
+        self.assertEqual([e[0] for e in log], ["lend", "start", "encode"])   # the room first, the encoder after it
+        self.assertEqual(svc.engine.lend_calls, [1536])
+        self.assertTrue(svc.vision.running)
+        self.assertTrue(svc.vision_held)
+        self.assertEqual(svc.fifo._used, 0)                     # the turn was given back with the encode
+
+    def test_lend_encode_takes_only_its_own_fifo_place(self):
+        svc, log = self.make(lend=True)
+        svc.fifo.set_capacity(8)                                # the --batch 8 engine: seven conversations decode
+        for _ in range(7):
+            self.assertTrue(svc.fifo.acquire(units=1))
+        try:
+            th = threading.Thread(target=lambda: self.picture(svc), daemon=True)
+            th.start()
+            th.join(timeout=10.0)                               # (with units=None it would sit there: seven used)
+            self.assertEqual([e[0] for e in log], ["lend", "start", "encode"])
+        finally:
+            for _ in range(7):
+                svc.fifo.release(units=1)
+
+    def test_lend_idle_down_reclaims_while_a_slot_decodes(self):
+        svc, log = self.make(lend=True)
+        self.picture(svc)
+        self.assertTrue(svc.fifo.acquire())                     # a conversation decodes: VRECLAIM works anyway
+        try:
+            self.assertEqual(svc._vision_idle_down(force=True), "down")
+        finally:
+            svc.fifo.release()
+        self.assertEqual([e[0] for e in log], ["lend", "start", "encode", "unload", "reclaim"])
+        self.assertFalse(svc.vision.running)
+        self.assertFalse(svc.vision_held)
+
+    def test_lend_running_encode_keeps_the_encoder_up(self):
+        svc, log = self.make(lend=True, elastic_idle_s=0.0)     # idle long ago: the encode lock is what says busy
+        self.picture(svc)
+        self.assertTrue(svc._vision_enc.acquire(blocking=False))  # an encode is running on the encoder
+        try:
+            self.assertEqual(svc._vision_idle_down(), "busy")
+        finally:
+            svc._vision_enc.release()
+        self.assertTrue(svc.vision.running)
+        self.assertEqual(svc.engine.reclaim_calls, [])
+
+    def test_lend_refusal_still_starts_the_encoder(self):
+        svc, log = self.make(lend=True, refuse=True)            # ERR VLEND: the cache is at its smallest already
+        self.picture(svc)                                       # the refusal costs a log line, not the request
+        self.assertEqual([e[0] for e in log], ["lend", "start", "encode"])
+        self.assertFalse(svc.vision_held)                       # nothing held, so the idle stop reclaims nothing
+        self.assertEqual(svc._vision_idle_down(force=True), "down")
+        self.assertEqual([e[0] for e in log], ["lend", "start", "encode", "unload"])
+        self.assertEqual(svc.engine.reclaim_calls, [])
+
+    def test_the_idle_thread_stops_a_lent_encoder(self):
+        svc, log = self.make(lend=True, elastic_idle_s=0.5)     # the thread the server starts, on its own clock
+        svc.start_vision_idle()
+        self.picture(svc)
+        deadline = time.time() + 6.0
+        while not svc.engine.reclaim_calls and time.time() < deadline:
+            time.sleep(0.05)
+        self.assertEqual(svc.engine.reclaim_calls, [True])      # stopped and reclaimed by the thread, not by us
+        self.assertFalse(svc.vision.running)
         self.assertFalse(svc.vision_held)
 
 

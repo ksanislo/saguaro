@@ -2320,6 +2320,8 @@ class Service:
         self._engine_start = threading.Lock()            # ensure_engine: one start, also with --parallel's requests
         self.vision_held = False                         # the elastic QFN encoder holds VRAM the expert cache gave it
         self.last_image_at = 0.0                         # when an image turn last ended (that encoder's idle stop)
+        self._vision_enc = threading.Lock()              # the encode region of an elastic encoder that runs beside
+        #                                                  the batch slots (VLEND): one encode, and the idle stop sees it
         self.updater = Updater(MAYA_VERSION)             # About > Updates: a newer release, and updating to it
         # The ids that end an answer server-side.  A string that is not a special token in this vocabulary
         # (GLM-5.3 has no <|im_end|>) encodes to its TEXT pieces, whose ids occur inside ordinary answers -
@@ -2498,16 +2500,31 @@ class Service:
         """The engine runs, so its stdin takes a command (engines without an alive() are always ready here)."""
         return not hasattr(self.engine, "alive") or self.engine.alive()
 
+    def _vision_lends(self) -> bool:
+        """The QFN engine lends CUDA0's VRAM to the elastic encoder with VLEND / VRECLAIM (its INFO says so), so the
+        encoder can start and stop while batch slots decode; without it the engine only takes VRAM between requests."""
+        return (getattr(self.vision, "elastic", False) and hasattr(self.engine, "vision_lend")
+                and str(getattr(self.engine, "info", {}).get("vision_lend") or "") == "1")
+
     def _vision_up(self):
-        """The image turn's start for an elastic QFN encoder that is not running (the caller holds every FIFO place,
-        so no conversation decodes and the engine takes the VRAM command between requests): the expert cache first
-        keeps elastic_mib of VRAM free, then the encoder starts.  If the cache cannot shrink (an engine without
-        --vram-elastic), the encoder starts anyway, as a resident one would."""
+        """The image turn's start for an elastic QFN encoder that is not running.  With a lending engine (VLEND) the
+        caller holds its own FIFO place only: CUDA0's expert cache keeps elastic_mib free at its next quiet moment
+        while the batch slots decode, then the encoder starts.  Without one the caller holds every FIFO place (no
+        conversation decodes, the engine takes the VRAM command between requests).  If the cache cannot shrink (an
+        engine that neither lends nor has --vram-elastic), the encoder starts anyway, as a resident one would."""
         v = self.vision
         if not getattr(v, "elastic", False) or v.alive():
             return
         t0, room = time.time(), ""
-        if hasattr(self.engine, "vram_reserve") and self._engine_ready():
+        if self._vision_lends() and self._engine_ready():
+            try:
+                out = self.engine.vision_lend(v.elastic_mib)     # waits for the engine's VLENT line
+                self.vision_held = True
+                room = (f"the expert cache keeps {v.elastic_mib} MiB free for it "
+                        f"({out.get('cache_mib')} MiB left mapped); ")
+            except ValueError as e:
+                room = f"the expert cache did not make room for it ({e}); "
+        elif hasattr(self.engine, "vram_reserve") and self._engine_ready():
             try:
                 out = self.engine.vram_reserve(v.elastic_mib)
                 self.vision_held = True
@@ -2533,12 +2550,28 @@ class Service:
 
     def _vision_idle_down(self, force: bool = False) -> str:
         """An elastic encoder idle for elastic_idle_s (or force) stops and the expert cache takes its VRAM back:
-        "down", "busy" (a request holds the engine, or a picture came more recently) or "nothing"."""
+        "down", "busy" (an encode is running, or with a non-lending engine a request holds the engine, or a picture
+        came more recently) or "nothing"."""
         v = self.vision
         if not getattr(v, "elastic", False) or not (self.vision_held or v.alive()):
             return "nothing"
         if not force and time.time() - self.last_image_at < v.elastic_idle_s:
             return "busy"
+        if self._vision_lends():
+            # VRECLAIM works while the slots decode: only an encode on the encoder itself may not run under it
+            if not self._vision_enc.acquire(blocking=False):
+                return "busy"
+            try:
+                v.unload()
+                if self.vision_held and self._engine_ready():
+                    out = self.engine.vision_reclaim()
+                    print(f"[saguaro] images: the image encoder stopped after {v.elastic_idle_s:g} s without a "
+                          f"picture; the expert cache took its VRAM back ({out.get('cache_mib')} MiB mapped)",
+                          flush=True)
+                self.vision_held = False
+                return "down"
+            finally:
+                self._vision_enc.release()
         if not self.fifo.acquire(blocking=False):     # every place, nobody even queued: the engine takes no answer now
             return "busy"
         try:
@@ -3511,23 +3544,30 @@ class Service:
             # run on the GPU at the same time - an encode during a running request left that request stuck at
             # "reading the prompt" with CPU and GPU busy, for good (reproduced).  So encoding takes its turn in the
             # same FIFO as the requests.
-            with self._turn([False, False], cancel, units=None):
+            lend = self._vision_lends()
+            # a lending engine (VLEND) gives the room while the batch slots decode, so the encode takes its own place
+            # in the FIFO; the others need the engine to themselves (units=None: every place, as encoding always did)
+            with self._turn([False, False], cancel, units=1 if lend else None):
                 if cancel is not None and cancel.is_set():
                     raise ValueError("image preparation was cancelled")
                 self.ensure_engine()                     # (the encoder borrows the engine's memory: it must run)
-                self._vision_up()                        # (an elastic encoder: the cache frees room, then it starts)
-                with self._vision_active():
-                    enc = []
-                    try:
-                        for kind, src in media:
-                            if cancel is not None and cancel.is_set():
-                                raise ValueError("image preparation was cancelled")
-                            enc.append((kind, self.vision.encode(src) if kind == "image"
-                                        else self.vision.encode_video(src)))
-                    finally:
-                        self.last_image_at = time.time()  # (a turn that failed still restarts the idle clock)
-                if cancel is not None and cancel.is_set():
-                    raise ValueError("image preparation was cancelled")
+                # one encode on the encoder at a time (these requests now run beside each other), and the idle stop
+                # waits for an encode through the very same lock
+                enc_lock = self._vision_enc if lend else contextlib.nullcontext()
+                with enc_lock:
+                    self._vision_up()                    # (an elastic encoder: the cache frees room, then it starts)
+                    with self._vision_active():
+                        enc = []
+                        try:
+                            for kind, src in media:
+                                if cancel is not None and cancel.is_set():
+                                    raise ValueError("image preparation was cancelled")
+                                enc.append((kind, self.vision.encode(src) if kind == "image"
+                                            else self.vision.encode_video(src)))
+                        finally:
+                            self.last_image_at = time.time()  # (a turn that failed still restarts the idle clock)
+                    if cancel is not None and cancel.is_set():
+                        raise ValueError("image preparation was cancelled")
             literal = self.tok.encode(image_pad, parse_special=False)
             encoded = [e for kind, e in enc if kind == "image"]
             # one <|image_pad|> per image -> one per image token.  Only the markers the template writes for an image
@@ -6809,10 +6849,6 @@ def start_qfn(cfg: dict, tok):
     if vcfg:
         vlog = open(cfg["log"], "a", encoding="utf-8") if cfg.get("log") else None
         if vcfg.get("elastic") is True:
-            if cfg.get("vram_elastic") is not True:
-                print('[saguaro] images: a "vision" section with "elastic": true but no "vram_elastic": true in the '
-                      "config: the encoder starts with the first picture, but the expert cache cannot give it room",
-                      flush=True)
             # the elastic encoder (QFN's own reader class): it stays down until Service._vision_up starts it
             vision = QE.Vision(dict(vcfg), log=vlog, env=QE.vision_env(cfg, env))
         else:
@@ -6828,7 +6864,28 @@ def start_qfn(cfg: dict, tok):
     engine.silence_s = silence
     engine.load_s = round(time.time() - t0, 1)
     warn_tight_ram(engine.info.get("arena_mib"))
+    if vcfg and vcfg.get("elastic") is True and cfg.get("vram_elastic") is not True \
+            and str(engine.info.get("vision_lend") or "") != "1":
+        # the engine can neither lend (no VLEND: INFO has no vision_lend=1) nor take the old VRAM command
+        print('[saguaro] images: "elastic": true with no "vram_elastic" on an engine that cannot lend: the encoder '
+              "starts with the first picture, but the expert cache cannot give it room", flush=True)
     return engine, vision, sampling_defaults
+
+
+class _VlenLines(queue.Queue):
+    """serve/qfn_engine's line queue with the VLEND / VRECLAIM answers diverted: the engine answers those commands
+    while batch requests run, so VLENT / VRECLAIMED (and their ERR lines) go to the lend queue - never into a
+    request's line stream."""
+
+    def __init__(self, vlen: queue.Queue):
+        super().__init__()
+        self.vlen = vlen
+
+    def put(self, item, block: bool = True, timeout: float | None = None):
+        if isinstance(item, str) and item.startswith(("VLENT ", "VRECLAIMED ", "ERR VLEND:", "ERR VRECLAIM:")):
+            self.vlen.put(item, block, timeout)
+            return
+        super().put(item, block, timeout)
 
 
 def _qfn_engine_class():
@@ -6844,7 +6901,60 @@ def _qfn_engine_class():
             self._tls = threading.local()                # (this request's own prompt progress: Service._progress)
             self._reader = None                          # the thread reading its prompt now (QFN: one at a time)
             self.vram = []                               # the engine's start-up "VRAM dev=..." lines (gpu_map.parse)
+            self.vlen_lines: queue.Queue = queue.Queue()  # the VLEND / VRECLAIM answers (see _pump), kept from lines
             super().__init__(*a, **kw)
+
+        def _pump(self):
+            """The driver's reader with the lend answers diverted: wrap the line queue before the pump starts, so a
+            VLENT / VRECLAIMED line (or the ERR answering one) reaches vision_lend / vision_reclaim and no request."""
+            if getattr(self, "vlen_lines", None) is None:
+                self.vlen_lines = queue.Queue()
+            if not isinstance(self.lines, _VlenLines):
+                wrapped = _VlenLines(self.vlen_lines)
+                while True:                              # (whatever the driver queued between start and here)
+                    try:
+                        wrapped.put_nowait(self.lines.get_nowait())
+                    except queue.Empty:
+                        break
+                self.lines = wrapped
+            super()._pump()
+
+        def vision_lend(self, mib: int, timeout: float = 45.0) -> dict:
+            """`VLEND <mib>` (the engine's INFO says vision_lend=1): CUDA0 lends the picture encoder that much VRAM -
+            its expert cache gives it at the next quiet moment while the batch slots keep decoding.  -> the VLENT
+            line's figures (free_mib, cache_mib); raises ValueError with the engine's reason, EngineDied when it
+            ended.  The room stays held until vision_reclaim (the engine keeps CUDA0's floor raised meanwhile)."""
+            return self._vlen_command(f"VLEND {int(mib)}", "VLENT", timeout)
+
+        def vision_reclaim(self, timeout: float = 45.0) -> dict:
+            """`VRECLAIM`: the encoder is gone - drop the extra floor and let CUDA0's expert cache grow back over the
+            free VRAM (refilled from the profile as the batch loop does).  -> {cache_mib}; ValueError, EngineDied."""
+            return self._vlen_command("VRECLAIM", "VRECLAIMED", timeout)
+
+        def _vlen_command(self, cmd: str, want: str, timeout: float) -> dict:
+            if not self.alive():
+                raise QE.EngineDied("the engine is not running")
+            self._send(cmd)
+            end = time.monotonic() + timeout
+            while True:
+                try:
+                    line = self.vlen_lines.get(timeout=max(0.1, end - time.monotonic()))
+                except queue.Empty:
+                    if self.ended or not self.alive():
+                        raise QE.EngineDied("the engine ended") from None
+                    raise ValueError(f"the engine did not answer the {cmd} command") from None
+                if line is None:
+                    raise QE.EngineDied("the engine ended")
+                line = line.strip()
+                if line.startswith("ERR"):
+                    raise ValueError(line[4:].strip() or f"the engine refused the {cmd} command")
+                if line.startswith(want):
+                    out = {}
+                    for kv in line.split()[1:]:
+                        k, _, v = kv.partition("=")
+                        out[k] = int(v) if v.lstrip("-").isdigit() else v
+                    self.info["vlen"] = out
+                    return out
 
         def _ready_pump(self, proc, out, note=None):
             """The driver's start-up reader wrapped: the engine's VRAM lines become self.vram (the base class reads up

@@ -12574,8 +12574,12 @@ int main(int argc, char** argv) {
         };
         std::vector<Give> gv;
         const int64_t give_floor = 128;
+        std::string give_off_why;   // why the give path is off (what VLEND / VRECLAIM answer then)
         const bool give_on = [&] {
-            if (!elastic_give_env() || !eslots_on) return false;
+            if (!elastic_give_env() || !eslots_on) {
+                give_off_why = elastic_give_env() ? "no --batch slot budget to give to" : "STRATA_ELASTIC_SLOTS_GIVE is off";
+                return false;
+            }
             const char* why = srcp != &arena_src ? "the experts are not all in the RAM arena"
                             : ajob ? "--adapt-async is on"
                             : o.prefill_head_alias ? "--prefill-head-alias is on"
@@ -12586,6 +12590,7 @@ int main(int argc, char** argv) {
                 if (xc.vmm_range() == nullptr || xc.segmented()) why = "an expert cache is not in VMM";
             }
             if (why != nullptr) {
+                give_off_why = why;
                 std::fprintf(stderr, "strata batch: STRATA_ELASTIC_SLOTS_GIVE is off: %s\n", why);
                 return false;
             }
@@ -12612,6 +12617,10 @@ int main(int argc, char** argv) {
             }
             return true;
         }();
+        if (give_on) {   // VLEND / VRECLAIM are accepted in this configuration (the server starts its encoder on them)
+            std::printf("INFO vision_lend=1\n");
+            std::fflush(stdout);
+        }
         // STRATA_ELASTIC_IDLE without a cache that gives: the slots get their whole budget after all (what VRAM is left)
         if (eslots_on && !give_on && elastic_idle_env())
             for (size_t k = 0; k < bslot_ss.size(); ++k) {
@@ -12914,17 +12923,21 @@ int main(int argc, char** argv) {
         const int64_t vram_floor_mib = env_mib("STRATA_VRAM_FLOOR_MIB", o.batch > 0 ? 160 : 0);
         const int64_t floor_graph_mib = env_mib("STRATA_BATCH_GRAPH_MIB", 16);
         const int64_t floor_max_mib = env_mib("STRATA_VRAM_FLOOR_MAX_MIB", 1024);
+        // VLEND (PLAN-qfn-vision-lend): what CUDA0 keeps free for the picture encoder on top of its normal floor;
+        // VRECLAIM drops it again.  The once-a-second floor check gives it back / the cache takes it back.
+        std::atomic<int64_t> vlen_extra_b{0};
         auto floor_of = [&](size_t k) -> int64_t {   // bytes
             const strata::core::Verifier& vk = k == 0 ? ver : stages[k - 1]->ver;
             const size_t lim = vk.batch_graph_limit(), held = vk.batch_layouts();
             const int64_t pair = vk.batch_graph_bytes() > 0 ? (int64_t) vk.batch_graph_bytes() : floor_graph_mib << 20;
             const int64_t want = (vram_floor_mib << 20) + (lim > held ? (int64_t) (lim - held) * pair : 0);
-            return std::min(want, std::max(vram_floor_mib, floor_max_mib) << 20);
+            return std::min(want, std::max(vram_floor_mib, floor_max_mib) << 20) +
+                   (k == 0 ? vlen_extra_b.load(std::memory_order_relaxed) : 0);   // the encoder's share: over the cap
         };
         std::vector<Clock::time_point> floor_seen(bslot_ss.size());
         std::vector<uint8_t> floor_said(bslot_ss.size(), 0);
         auto vram_floor = [&](size_t k) {
-            if (vram_floor_mib <= 0 || !give_on) return;
+            if (!give_on || (vram_floor_mib <= 0 && vlen_extra_b.load(std::memory_order_relaxed) <= 0)) return;
             const auto now = Clock::now();
             if (now - floor_seen[k] < std::chrono::seconds(1)) return;
             floor_seen[k] = now;
@@ -16944,6 +16957,152 @@ int main(int argc, char** argv) {
             // request's prompt and first token as a GEN 1, then continues it in that slot
             if (line.rfind("BSTOP ", 0) == 0) {
                 adm_bstop(std::atoi(line.c_str() + 6));
+                continue;
+            }
+            // VLEND <mib> / VRECLAIM (PLAN-qfn-vision-lend): CUDA0 lends the picture encoder's process VRAM from its
+            // expert cache / slot budget and takes it back - while batch slots decode (a command read between windows;
+            // the piped groups landed above).  The room goes out through the floor path (free_to_driver / give) and
+            // back through the loop's own elastic_idle / take_back.  Answers: VLENT free_mib=<n> cache_mib=<n> /
+            // VRECLAIMED cache_mib=<n>, or ERR VLEND: / ERR VRECLAIM: with the reason.
+            if (line.rfind("VLEND", 0) == 0 || line.rfind("VRECLAIM", 0) == 0) {
+                const bool lend = line.rfind("VLEND", 0) == 0;
+                char* ve = nullptr;
+                long long vmib = 0;
+                if (lend) {
+                    vmib = std::strtoll(line.c_str() + 5, &ve, 10);
+                    if (ve == line.c_str() + 5 || vmib < 0) {
+                        std::printf("ERR VLEND: expected: VLEND <mib>\n");
+                        std::fflush(stdout);
+                        continue;
+                    }
+                }
+                if (!give_on || gv.empty()) {
+                    std::printf("ERR %s: no expert cache that gives (%s)\n", lend ? "VLEND" : "VRECLAIM",
+                                give_off_why.empty() ? "no --batch slots" : give_off_why.c_str());
+                    std::fflush(stdout);
+                    continue;
+                }
+                const int dev0 = eslot_dev(0);
+                const strata::core::OnDevice on0(dev0);
+                strata::core::ExpertCache& xc0 = *gv[0].cache;
+                const uint64_t G = strata::core::vmm_granularity(dev0);
+                vlen_extra_b.store(lend ? (int64_t) vmib << 20 : 0, std::memory_order_relaxed);
+                size_t fb = 0, tb = 0;
+                std::string vwhy;
+                bool done = false;
+                // the wait lets the slots run on: a queued BSTOP lands, any other command goes back for the loop to
+                // read; -1: the engine cannot go on
+                auto beat = [&]() -> int {
+                    std::string pl;
+                    while (try_next_line(pl)) {
+                        if (pl == "QUIT") {
+                            std::lock_guard<std::mutex> lk(in_mu);
+                            in_lines.push_front(pl);
+                            return 2;
+                        }
+                        if (pl.rfind("BSTOP ", 0) == 0) adm_bstop(std::atoi(pl.c_str() + 6));
+                        else if (pl != "BYIELD") {
+                            std::lock_guard<std::mutex> lk(in_mu);
+                            in_lines.push_front(pl);
+                            return 1;
+                        }
+                    }
+                    if (batch_on() || (piped && pipe_inflight())) return (piped ? pump(true) : batch_step()) ? 0 : -1;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(25));
+                    return 0;
+                };
+                // CUDA0 quiet: no window in flight there (what lets the give path touch its cache)
+                auto quiet0 = [&] {
+                    return !conc_serving && !in_prompt_read && (stage_group.empty() || stage_group[0] < 0);
+                };
+                const auto t_v = Clock::now();
+                if (lend) {
+                    const int64_t target = floor_of(0);   // its normal floor plus the encoder's share
+                    if (G == 0 || cudaMemGetInfo(&fb, &tb) != cudaSuccess) vwhy = "CUDA0's free VRAM cannot be read";
+                    while (vwhy.empty()) {
+                        if ((int64_t) fb >= target) { done = true; break; }
+                        if (quiet0()) {
+                            const int64_t short_b = target - (int64_t) fb;
+                            const int64_t got = free_to_driver((size_t) 0, (short_b + (int64_t) G - 1) / (int64_t) G,
+                                                               true);
+                            if (cudaMemGetInfo(&fb, &tb) != cudaSuccess) {
+                                vwhy = "CUDA0's free VRAM cannot be read";
+                                break;
+                            }
+                            int64_t fr = 0;
+                            strata::core::qsa_slot_budget_chunks(dev0, &fr, nullptr);
+                            if ((int64_t) fb < target && got == 0 && gv[0].lo <= give_floor &&
+                                fr <= slots_low_water(0)) {
+                                char w[200];
+                                std::snprintf(w, sizeof w, "CUDA0's expert cache is at its smallest size of %lld "
+                                                     "slots: %zu of %lld MiB free", (long long) give_floor, fb >> 20,
+                                              (long long) (target >> 20));
+                                vwhy = w;   // the floor stays: the once-a-second check gives more when the budget frees
+                                break;
+                            }
+                        }
+                        if (Clock::now() - t_v > std::chrono::seconds(30)) {
+                            char w[160];
+                            std::snprintf(w, sizeof w, "timed out with %zu of %lld MiB free after 30 s", fb >> 20,
+                                          (long long) (target >> 20));
+                            vwhy = w;
+                            vlen_extra_b.store(0, std::memory_order_relaxed);   // (it keeps no room it cannot give)
+                            break;
+                        }
+                        const int b = beat();
+                        if (b < 0) return 1;
+                        if (b > 0) {
+                            if (cudaMemGetInfo(&fb, &tb) == cudaSuccess && (int64_t) fb >= target) done = true;
+                            else vwhy = b == 2 ? "the engine is stopping"
+                                               : "a request came in before CUDA0 had given the room";
+                            break;
+                        }
+                    }
+                    if (done) {
+                        std::fprintf(stderr, "strata serve: VLEND %lld MiB: CUDA0 at %zu MiB free (its floor is %lld "
+                                             "MiB with the encoder's share); the expert cache maps %lld of %lld MiB, "
+                                             "%lld of %lld slots\n", vmib, fb >> 20, (long long) (target >> 20),
+                                     (long long) (xc0.mapped_bytes() >> 20), (long long) (xc0.full_bytes() >> 20),
+                                     (long long) xc0.slots(), (long long) xc0.full_slots());
+                        std::printf("VLENT free_mib=%lld cache_mib=%lld\n", (long long) (fb >> 20),
+                                    (long long) (xc0.mapped_bytes() >> 20));
+                    } else {
+                        std::fprintf(stderr, "strata serve: VLEND %lld MiB refused: %s\n", vmib, vwhy.c_str());
+                        std::printf("ERR VLEND: %s\n", vwhy.c_str());
+                    }
+                    std::fflush(stdout);
+                    continue;
+                }
+                // VRECLAIM: the encoder is gone.  What CUDA0 has free above its (now ordinary) floor goes into the slot
+                // budget and the expert cache takes it back, refilled from the profile - the loop's own elastic_idle
+                // branch; what a prompt loan still holds back comes back from the loop when the slots let go.
+                for (int tries = 0; G > 0 && tries < 12 && vwhy.empty(); ++tries) {
+                    if (cudaMemGetInfo(&fb, &tb) != cudaSuccess) { vwhy = "CUDA0's free VRAM cannot be read"; break; }
+                    if (!quiet0()) {
+                        const int b = beat();
+                        if (b < 0) return 1;
+                        if (b > 0) break;
+                        continue;
+                    }
+                    int64_t fr = 0, made = 0;
+                    strata::core::qsa_slot_budget_chunks(dev0, &fr, &made);
+                    const int64_t keep = budget_keep(0, made) + slots_low_water(0) + 32;   // chunks the slots keep
+                    const int64_t holes = (int64_t) ((xc0.bytes_of(gv[0].top) - xc0.bytes_of(gv[0].lo)) / G);
+                    const int64_t room = (int64_t) fb > floor_of(0) ? ((int64_t) fb - floor_of(0)) / (int64_t) G : 0;
+                    if (holes > 0 && room > 0 && fr <= keep)
+                        (void) strata::core::qsa_slot_budget_add(dev0, (uint64_t) std::min(room, holes) * G);
+                    const int64_t lo0 = gv[0].lo;
+                    elastic_idle((size_t) 0, true, -1);
+                    if (gv[0].lo >= gv[0].top) { done = true; break; }
+                    if (gv[0].lo == lo0 && room == 0) break;   // (a loan is out: the loop takes the budget's spare back)
+                }
+                std::fprintf(stderr, "strata serve: VRECLAIM: CUDA0 at %zu MiB free; the expert cache maps %lld of "
+                                     "%lld MiB, %lld of %lld slots%s\n", fb >> 20,
+                             (long long) (xc0.mapped_bytes() >> 20), (long long) (xc0.full_bytes() >> 20),
+                             (long long) xc0.slots(), (long long) xc0.full_slots(),
+                             done ? "" : " (the rest goes back as the slots let go)");
+                std::printf("VRECLAIMED cache_mib=%lld\n", (long long) (xc0.mapped_bytes() >> 20));
+                std::fflush(stdout);
                 continue;
             }
             // STRATA_PICTURE_SERIAL=1 (the old way: one position table for every slot, which a picture request rewrites):
