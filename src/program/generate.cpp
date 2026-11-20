@@ -1538,7 +1538,7 @@ static int glm_pack_generate(const Options& o) {
                     (unsigned long long) r.kv_ram, (unsigned long long) r.act, (unsigned long long) r.drafter,
                     (unsigned long long) r.window, (unsigned long long) r.pool, (unsigned long long) r.tail,
                     (unsigned long long) r.borrow, (unsigned long long) r.vision, (long long) r.slots,
-                    (long long) r.ctx, r.l0, r.l1);
+                    (long long) r.ctx, r.l0, r.l1 - 1);   // (layers first-last inclusive, as every engine reports them)
     };
     if (model.fast()) {
         // INFO facts for the server's Monitor tab (strata app): the expert tiers this engine runs with
