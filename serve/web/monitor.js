@@ -148,8 +148,7 @@ function RightNow({m}) {
         detail = `${fmt(c.generated || 0)}${c.max_tokens ? ` / ${fmt(c.max_tokens)}` : ""} tokens` +
                  `${c.tok_s ? ` · ${fmt(c.tok_s, 1)} tok/s` : ""}${took(c.elapsed_s)}`;
       }
-      return html`<div class="now__chat" title=${c.state === "reading" && c.prefill_shared
-        ? "it reads beside another chat: shared engine clock" : null}>
+      return html`<div class="now__chat" title=${null}>
         <${Badge} tone=${tone}>${text}<//>
         <div class="now__chat__body">
           ${pct != null ? html`<div class="bar bar--sm" role="progressbar" data-tone=${ptone} aria-valuenow=${Math.round(pct)}
@@ -617,8 +616,7 @@ function Requests({m}) {
             ${r.loop_guard && r.loop_guard.length   /* (what the loop guard did in this answer: on hover) */
               ? html` <span class="badge badge--warn" title=${r.loop_guard.join("\n")}>Loop guard</span>` : null}</td>
           <td>${fmt(r.prompt_tokens)}</td><td>${fmt(r.reused)}</td>
-          <td title=${r.prefill_shared ? "it read beside other chats: its rate is over the time its own read ran (the server's clock) - the engine's clock mixes the chats then"
-              : "Prompt tokens read per second (the reused ones not counted)"}>${fmt(pre)}${r.prefill_shared ? html` <span class="muted small">shared</span>` : null}</td>
+          <td title="New prompt tokens read per second: its own wall time from the engine taking it to its first token (other chats reading at the same time slow it, and that shows here)">${fmt(pre)}</td>
           <td>${fmt(r.output_tokens)}</td>
           <td class="strong">${fmt(r.decode_tok_s, 1)}</td><td>${r.hit_rate == null ? "–" : `${(r.hit_rate * 100).toFixed(1)}%`}</td>
           <td>${fmt(r.duration_s, 1)} s</td></tr>`;
@@ -648,13 +646,13 @@ function Conversations({m}) {
     const read = t ? (t.prompt_total ? `${fmt(t.prompt_read)} / ${fmt(t.prompt_total)}` : fmt(t.prompt_tokens)) : fmt(c.prompt_last);
     const out = t ? html`${fmt(t.generated)}${t.max_tokens ? html`<span class="muted small"> / ${fmt(t.max_tokens)}</span>` : ""}` : fmt(c.out_last);
     const speed = !t ? (c.decode_tok_s != null ? `${fmt(c.decode_tok_s, 1)} tok/s` : "–")
-      : t.state === "reading" ? (t.prefill_tok_s != null ? `${fmt(t.prefill_tok_s)} prefill${t.prefill_shared ? " (shared clock)" : ""}` : "–")
+      : t.state === "reading" ? (t.prefill_tok_s != null ? `${fmt(t.prefill_tok_s)} prefill` : "–")
       : t.tok_s != null ? `${fmt(t.tok_s, 1)} tok/s` : "–";
     return html`<tr class=${t ? "" : "muted"}><td class="l nowrap"><span class=${`badge badge--${tone}`}>${text}</span></td>
       <td class="l"><span class="conv__who">${who}</span><span class="conv__meta muted small num">${under.join(" · ")}</span></td>
       <td>${read}</td><td>${out}</td>
       <td class="strong" title=${!t ? `Idle: its last turn read ${c.read_tok_s == null ? "–" : `${fmt(c.read_tok_s)} tok/s`} and wrote ${c.decode_tok_s == null ? "–" : `${fmt(c.decode_tok_s, 1)} tok/s`}; ${fmt(c.tokens_read)} read, ${fmt(c.tokens_written)} written all told`
-        : t.state === "reading" && t.prefill_shared ? "it read at the same time as other chats: the engine's clock for it then covers the shared reader, not this chat alone" : null}>${speed}</td>
+        : null}>${speed}</td>
       <td>${!t || t.elapsed_s == null ? "–" : `${fmt(t.elapsed_s, 1)} s`}</td></tr>`;
   };
   return html`<section class="card" aria-label="Conversations">
