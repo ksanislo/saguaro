@@ -5958,6 +5958,22 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "strata generate: SAGUARO_FAST_LANE: a read of at most %lld tokens beside the slots goes through "
                              "its group's windows, %d rows a window (SAGUARO_FAST_LANE_MAX)\n", (long long) fast_lane_max,
                      pm_group_rows);
+    // Context-aware fast-lane limit (read-stall fallback, 11-19): the prompt path pays a cost per read that grows with
+    // the conversation (its K/V staging brings the whole prefix back layer by layer) while the lane reads rows between
+    // the windows.  Where the prompt path's measured fixed cost at this context exceeds what the same read would take
+    // on the lane (rows x the lane's measured ms per row), the lane is the faster way even past SAGUARO_FAST_LANE_MAX:
+    // a per-decision rule, logged, the plain limit never edited.  SAGUARO_FAST_LANE_ADAPTIVE=0: off;
+    // SAGUARO_FAST_LANE_MAX_ROWS: the cap of the extension (default 2048 rows).
+    static const bool fl_adaptive = [] {
+        const char* v = std::getenv("SAGUARO_FAST_LANE_ADAPTIVE");
+        return v == nullptr || std::atoi(v) != 0;
+    }();
+    static const int64_t fl_adaptive_max = [] {
+        const char* v = std::getenv("SAGUARO_FAST_LANE_MAX_ROWS");
+        return v != nullptr ? (int64_t) std::max(0, std::atoi(v)) : (int64_t) 2048;
+    }();
+    double fl_lane_row_ms = 0.0;   // EWMA of a lane read's ms per row (lane ends; serve thread)
+    std::map<int64_t, std::pair<double, int64_t>> fl_fixed_ms;   // 64K context -> (EWMA prompt-path fixed ms, samples)
     // Secure MTP's CUDA0 allocations before the large host arena is registered with both CUDA contexts.
     // In particular WDDM can refuse the draft weights after mapping tens of GiB of host pages.
     strata::core::MtpDrafter mtp;
@@ -13902,6 +13918,11 @@ int main(int argc, char** argv) {
             sl.lane_ids.clear();
             sl.lane_ids.shrink_to_fit();
             sl.adm_read_ms = ms;
+            {   // (context-aware fast-lane rule: what a lane row cost here, EWMA - output-side scheduling state only)
+                const double fl_rows = (double) (n - sl.lane_resume);
+                if (fl_rows > 0.0 && ms > 0.0)
+                    fl_lane_row_ms = fl_lane_row_ms > 0.0 ? 0.7 * fl_lane_row_ms + 0.3 * (ms / fl_rows) : ms / fl_rows;
+            }
             sl.adm_rows = pipe_rows - sl.lane_rows0;
             char nb[200];
             std::snprintf(nb, sizeof nb, "fast lane: %d windows, %lld rows, set up in %.0f ms",
@@ -15865,7 +15886,22 @@ int main(int argc, char** argv) {
                     if ((int64_t) c.ids.size() > resume) return false;   // (a turn checkpoint to restore: the queued way)
                 }
             }
-            if (!strata::program::fast_lane::eligible_len(n, resume, fast_lane_max)) return false;
+            if (!strata::program::fast_lane::eligible_len(n, resume, fast_lane_max)) {
+                // context-aware fast-lane limit (read-stall fallback): past SAGUARO_FAST_LANE_MAX, this read still
+                // goes by lane while its rows on the lane's measured row cost stay under the prompt path's measured
+                // fixed cost at this context; every such decision is logged.  SAGUARO_FAST_LANE_ADAPTIVE=0: off.
+                const int64_t fl_rows = n - 1 - resume;
+                const auto fit = fl_fixed_ms.find(n >> 16);
+                const double fl_fixed = fit != fl_fixed_ms.end() && fit->second.first > 0.0 && fit->second.second > 0
+                                            ? fit->second.first : 0.0;
+                const bool fl_extend = fl_adaptive && fl_rows > fast_lane_max && fl_rows <= fl_adaptive_max &&
+                                       fl_lane_row_ms > 0.0 && fl_fixed > 0.0 && fl_rows * fl_lane_row_ms < fl_fixed;
+                if (fl_adaptive && fl_rows > fast_lane_max && fl_adaptive_max > fast_lane_max)
+                    std::fprintf(stderr, "strata batch: slot %d: fast-lane decision: %lld rows x %.1f ms/row vs %.0f ms "
+                                         "prompt-path fixed cost measured at %lldK context: %s\n", b, (long long) fl_rows,
+                                 fl_lane_row_ms, fl_fixed, (long long) (n >> 16), fl_extend ? "the lane" : "the queued way");
+                if (!fl_extend) return false;
+            }
             if (eslots_on) {   // backed for the whole read now, or the queued way (which may make room)
                 const std::function<bool(size_t)> busy = [](size_t) { return false; };
                 if (slot_fit(b, n + 1 + strata::kernels::kVerifyMaxT, false, busy) != 0) return false;
@@ -16338,6 +16374,18 @@ int main(int argc, char** argv) {
                 sl.reading = false;
                 j.read_ms = std::chrono::duration<double, std::milli>(Clock::now() - j.t_read).count();
                 j.rows = pipe_rows - j.rows0;
+                {   // context-aware fast-lane rule (read-stall): what the prompt path's read cost beyond its rows -
+                    // the per-read staging of the conversation's prefix - EWMA per 64K context bucket.  Clean
+                    // samples only: not held for a yield, and with the lane's row cost measured.
+                    const int64_t read_rows = j.n - j.resume;
+                    const double rows_ms = fl_lane_row_ms * (double) read_rows;
+                    if (fl_lane_row_ms > 0.0 && j.yield_ms == 0.0 && read_rows >= 16 && j.read_ms > rows_ms) {
+                        std::pair<double, int64_t>& f = fl_fixed_ms[j.n >> 16];
+                        const double est = j.read_ms - rows_ms;
+                        f.first = f.second == 0 ? est : 0.7 * f.first + 0.3 * est;
+                        ++f.second;
+                    }
+                }
                 auto end_slot = [&] {
                     sl.ids.clear();
                     if (ckpt_pool.on())
