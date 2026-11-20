@@ -2153,8 +2153,8 @@ numbers. The engine does not guess: it reads the pairing from the system (Window
 `/sys/devices/system/cpu/cpu*/topology`). Where the system does not say (some containers), the line says so
 ("the OS did not say which logical processors share a core") and the default count is half of the logical processors. The
 line also says when two workers do share a core. `ps -L -o tid,psr,comm` on Linux, and Process Explorer or any tool that reads
-thread names on Windows, show the workers as `strata-pool-N` and the main thread as `strata-host`; the other helper threads
-carry names too (`strata-stage`, `strata-adapt`, `strata-io`, ...).
+thread names on Windows, show the workers as `saguaro-pool-N` and the main thread as `saguaro-host`; the other helper threads
+carry names too (`saguaro-stage`, `saguaro-adapt`, `saguaro-io`, ...).
 
 Only the workers and the main thread are pinned. Every other thread (the prompt copy threads, the adaptive tier's job thread,
 the graphics driver's threads) is placed by the operating system, and the picture encoder is a separate process whose threads

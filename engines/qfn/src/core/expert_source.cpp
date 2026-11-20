@@ -1201,7 +1201,7 @@ void FileExpertSource::io_enqueue(int64_t layer, int64_t expert, bool ahead) {
 // A read-ahead worker: takes a predicted (layer, expert), skips it when its pages are cached or it is already
 // staged, and otherwise reads the whole blob into a staging buffer (copy_from_files preads what is not cached).
 void FileExpertSource::io_worker() {
-    strata::platform::name_this_thread("strata-io");
+    strata::platform::name_this_thread("saguaro-io");
     for (;;) {
         int32_t layer, expert;
         bool ahead = true;   // a prediction (marked for the used / unused count), not a layer's own demand read
@@ -3035,7 +3035,7 @@ bool RouterLookahead::start(std::vector<std::vector<uint16_t>> routers, int64_t 
     src_ = src;
     x_.assign((size_t) (8 * n_embd), 0.f);
     thread_ = std::thread([this] {
-        strata::platform::name_this_thread("strata-lookahead");
+        strata::platform::name_this_thread("saguaro-ahead");
         strata::aux_cpus::pin_current_thread();
         run();
     });
@@ -4402,7 +4402,7 @@ bool FileExpertSource::ram_queued(int64_t layer, int64_t expert) const {
 }
 
 void FileExpertSource::ram_worker() {
-    strata::platform::name_this_thread("strata-ram");
+    strata::platform::name_this_thread("saguaro-ram");
     for (;;) {
         RamJob* job = nullptr;
         {
@@ -6423,7 +6423,7 @@ ForesightSwap::~ForesightSwap() {
 }
 
 void ForesightSwap::fill_loop() {
-    strata::platform::name_this_thread("strata-fill");
+    strata::platform::name_this_thread("saguaro-fill");
     int cur_dev = -1;
     for (;;) {
         int64_t idx;

@@ -16,7 +16,7 @@
 
 namespace strata::platform {
 
-/// Gives the calling thread a name: "strata-pool-3" for `name_this_thread("strata-pool", 3)`, "strata-host" for no index.
+/// Gives the calling thread a name: "saguaro-pool-3" for `name_this_thread("saguaro-pool", 3)`, "saguaro-host" for no index.
 /// Linux keeps 15 characters, the rest is cut.  Never fails loudly: a system that cannot name a thread leaves it unnamed.
 #if defined(_WIN32)
 void name_this_thread(const char* base, int index = -1);

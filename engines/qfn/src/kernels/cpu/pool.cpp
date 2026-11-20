@@ -954,7 +954,7 @@ void ExpertPool::start_workers(bool pin, const std::vector<int>& cores) {
     for (int i = 0; i < n_; ++i) {
         const int core = pin ? (i < (int) cores.size() ? cores[(size_t) i] : -1) : -1;
         threads_.emplace_back([this, i, core] {
-            strata::platform::name_this_thread("strata-pool", i);
+            strata::platform::name_this_thread("saguaro-pool", i);
             strata::aux_cpus::note_owned_thread();   // --aux-cpus never moves a worker
             // a failed pin only costs locality under the split: the worker keeps the slice it was given
             if (!pin_this_thread(core, i) && core >= 0 && numa_n_ > 0)

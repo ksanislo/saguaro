@@ -1987,7 +1987,7 @@ private:
         // the job's memcpys stay off the host's core and the pool's: by default the spare SMT sibling of the last
         // two-thread core (Windows); STRATA_ADAPT_JOB_CPU=<logical cpu>, or -1 for no pinning.  Without either, --aux-cpus
         // (off by default) puts the thread on the spare CPUs; an explicit STRATA_ADAPT_JOB_CPU is the user's word over it.
-        strata::platform::name_this_thread("strata-adapt-job");
+        strata::platform::name_this_thread("saguaro-adjob");
         const char* c = std::getenv("STRATA_ADAPT_JOB_CPU");
         const int cpu = c != nullptr ? std::atoi(c) : smt_spare_cpu();
         if (cpu >= 0) (void) strata::kernels::cpu::pin_current_thread(cpu);
@@ -2163,7 +2163,7 @@ private:
 #endif
     }
     void loop(size_t k) {
-        strata::platform::name_this_thread("strata-ckpt", (int) k);
+        strata::platform::name_this_thread("saguaro-ckpt", (int) k);
         spread_current_thread();
         uint64_t seen = 0;
         std::unique_lock<std::mutex> lk(mu_);
@@ -11895,7 +11895,7 @@ int main(int argc, char** argv) {
         std::deque<std::string>& in_lines = in_shared->lines;
         bool& in_eof = in_shared->eof;
         std::thread([st = in_shared] {
-            strata::platform::name_this_thread("strata-stdin");
+            strata::platform::name_this_thread("saguaro-stdin");
             strata::aux_cpus::pin_current_thread();
             // read(2) on the descriptor, not std::cin: glibc's exit() flushes every stdio stream and waits for
             // stdin's lock, which getline holds while it waits for input - an engine ending on an error (every
@@ -12205,7 +12205,7 @@ int main(int argc, char** argv) {
             const int io_limit = wio ? std::atoi(wio) : limit * 10;
             if (limit > 0)
                 std::thread([limit, io_limit] {
-                    strata::platform::name_this_thread("strata-watchdog");
+                    strata::platform::name_this_thread("saguaro-watch");
                     strata::aux_cpus::pin_current_thread();
                     strata::core::Progress& p = strata::core::progress();
                     uint64_t last = p.beats.load(), ticks_at = p.ticks.load();
@@ -19940,7 +19940,7 @@ int main(int argc, char** argv) {
                     if (!drive.d.usage.empty() && o.adapt_every > 0 && (rounds % o.adapt_iv(rounds)) == 0 && pending.empty() &&
                         !exch_wait) {
                         pl_adapt_done = false;
-                        pl_adapt_thr = std::thread([&] { strata::platform::name_this_thread("strata-adapt"); strata::aux_cpus::pin_current_thread(); pl_adapt_ok = adapt(); pl_adapt_done = true; });
+                        pl_adapt_thr = std::thread([&] { strata::platform::name_this_thread("saguaro-adapt"); strata::aux_cpus::pin_current_thread(); pl_adapt_ok = adapt(); pl_adapt_done = true; });
                     }
                     return true;
                 };
@@ -20632,7 +20632,7 @@ int main(int argc, char** argv) {
                 bool adapt_ok = true;
                 // (--adapt-async 1: the asynchronous tier above instead, ticked before the window)
                 if (!drive.d.usage.empty() && !ajob && ((rounds + 1) % o.adapt_iv(rounds)) == 0)
-                    adapt_thr = std::thread([&] { strata::platform::name_this_thread("strata-adapt"); strata::aux_cpus::pin_current_thread(); adapt_ok = adapt(); });
+                    adapt_thr = std::thread([&] { strata::platform::name_this_thread("saguaro-adapt"); strata::aux_cpus::pin_current_thread(); adapt_ok = adapt(); });
                 if (!ver.commit(a + 1, err)) {
                     if (adapt_thr.joinable()) adapt_thr.join();
                     std::printf("ERR %s\n", err.c_str());
@@ -22262,7 +22262,7 @@ int main(int argc, char** argv) {
             std::thread adapt_thr;
             bool adapt_ok = true;
             if (!drive.d.usage.empty() && ((rounds + 1) % o.adapt_iv(rounds)) == 0)
-                adapt_thr = std::thread([&] { strata::platform::name_this_thread("strata-adapt"); strata::aux_cpus::pin_current_thread(); adapt_ok = adapt(); });
+                adapt_thr = std::thread([&] { strata::platform::name_this_thread("saguaro-adapt"); strata::aux_cpus::pin_current_thread(); adapt_ok = adapt(); });
             strata::core::progress_at("spec loop: commit", (int64_t) T);
             if (!ver.commit(a + 1, err)) {
                 if (adapt_thr.joinable()) adapt_thr.join();
