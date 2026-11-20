@@ -207,6 +207,7 @@ class Engine(Protocol):
 
 
 PEAK_MIN_TOKENS = 32   # the Monitor's peak decode speed: answers this long or longer (a few tokens' speed says little)
+PEAK_MIN_READ_TOKENS = 512   # the Monitor's peak prefill speed: reads of at least this many (a small read's rate says little)
 
 
 class MockEngine:
@@ -1481,6 +1482,9 @@ class StrataEngine:
                         self.prefill_tok_s_mean = float(f[4]) if len(f) >= 5 else None
                         if getattr(self, "_tls", None) is not None:
                             self._tls.own_pp = (self.progress, self.prefill_tok_s_mean)
+                            cb = getattr(self._tls, "on_read", None)   # (engine-total read rate: Service._note_read)
+                            if cb:
+                                cb(self.progress[0] - self.progress[2], self.prefill_tok_s_mean)
                     if cancel.is_set():                   # lines reset the 10 s wait, so without this a long prompt
                         return                            # would send no keep-alives at all)
                     yield None
@@ -1692,6 +1696,9 @@ class StrataEngine:
                         self.prefill_tok_s_mean = float(f[5]) if len(f) >= 6 else None
                         if getattr(self, "_tls", None) is not None:
                             self._tls.own_pp = (self.progress, self.prefill_tok_s_mean)
+                            cb = getattr(self._tls, "on_read", None)   # (engine-total read rate: Service._note_read)
+                            if cb:
+                                cb(self.progress[0] - self.progress[2], self.prefill_tok_s_mean)
                     if cancel.is_set():
                         return
                     yield None
@@ -2211,6 +2218,13 @@ class RequestStat:
         # what the Monitor shows of this request (several answer at once: each its own, not the shared status's)
         self.phase, self.generated, self.prompt_tokens, self.max_tokens = "waiting", 0, 0, None
         self.started, self.progress, self.prefill_tok_s = None, None, None
+        # the prompt read (the drivers' PP lines / the batch slots' read counters): tokens read so far - what the
+        # conversation cache held stays out - the span the server saw them arrive over, and whether another chat
+        # read beside it (then its own engine clock mixes the two and the Monitor labels the rate as shared)
+        self.read_pos, self.read_t0, self.read_t1, self.read_shared = 0, None, None, False
+        self.read_avg = None                            # the engine's mean over its read, from its last progress line
+        self.read_last, self.read_prev_t, self.read_prev_n = None, None, 0   # its last observed read interval
+        self.at_engine = False                            # it holds an engine place now (a fair slice lets it go)
         # shared with other answers (several at once): the most decoding beside it, and the engine's total rate
         # (summed over them) sampled while it decoded - "this chat 7 tok/s · engine 14 tok/s across 2 chats"
         self.shared_max, self.eng_sum, self.eng_n = 1, 0.0, 0
@@ -2229,6 +2243,7 @@ class RequestStat:
                 "phase": self.phase, "prompt_tokens": self.prompt_tokens, "generated": self.generated,
                 "max_tokens": self.max_tokens, "prompt_read": pr[0] if pr else None, "prompt_total": pr[1] if pr else None,
                 "prefill_tok_s": self.prefill_tok_s if not self.first_token else None,
+                "prefill_shared": self.read_shared,     # (it read beside another chat: that rate is a shared clock's)
                 "tok_s": round(self.tok_s(now), 1) if self.first_token else None,
                 "elapsed_s": round(now - self.started, 1) if self.started else None}
 
@@ -2289,7 +2304,15 @@ class Service:
         # since the server started (the Monitor's totals, issue #35)
         self.totals = {"since": time.time(), "requests": 0, "prompt_tokens": 0, "reused": 0, "output_tokens": 0,
                        "prompt_ms": 0.0, "decode_ms": 0.0,
-                       "peak_decode": None}   # the fastest answer's decode: {tok_s, tokens, time} (PEAK_MIN_TOKENS+)
+                       "peak_decode": None,   # the fastest answer's decode: {tok_s, tokens, time} (PEAK_MIN_TOKENS+)
+                       "peak_prefill": None}  # the fastest prompt read: {tok_s, tokens, time} (PEAK_MIN_READ_TOKENS+)
+        # the prompt reads as they happen (the drivers' PP lines / the batch slots' read counters, all chats, both
+        # drivers): one event series like decode's, for the live engine-total Prefill rate and its peak
+        self.read_events = collections.deque(maxlen=4096)   # (time, read tokens summed over every request)
+        self.read_base = None                               # the last event at or before now - RATE_WINDOW_S
+        self.read_sum = 0
+        self.read_wall_s, self.read_wall_since = 0.0, None   # wall seconds with >=1 prompt reading / >=1 answer writing
+        self.decode_wall_s, self.decode_wall_since = 0.0, None
         # the loop guard (serve/loop_guard.py; MAYA_LOOP_GUARD=0 / "loop_guard": false: off) and what it did since
         # the server started: loops seen, and how each was broken (the Monitor's totals, /metrics, Prometheus)
         self.loop_guard = True
@@ -3028,7 +3051,8 @@ class Service:
         if getattr(self, "telemetry", None) is None:
             from serve.telemetry import Telemetry
             self.telemetry = Telemetry(extra=lambda: {"tok_s": self._tok_s(), "tok_s_mean": self._tok_s_mean(),
-                                                    "prefill_tok_s_mean": self._prefill_tok_s_mean()},
+                                                    "prefill_tok_s_mean": self._prefill_tok_s_mean(),
+                                                    "prefill_tok_s": self._prefill_tok_s()},   # (the sparkline's read rate)
                                        gpu_index=int(getattr(self, "gpu_index", 0) or 0),
                                        gpu_indices=getattr(self, "gpu_indices", None),
                                        amd=getattr(self, "backend", None) == "hip",
@@ -3117,15 +3141,130 @@ class Service:
             reading = self.status.get("busy") and self.latest_request not in self.current_requests
         return getattr(self.engine, "prefill_tok_s_mean", None) if reading else 0.0
 
+    def _prefill_tok_s(self):
+        """Engine-total prompt READ rate now, summed over every chat reading its prompt (the drivers' read hooks
+        feed it, as the answer tokens feed _tok_s): a chat's engine-reported mean over its read where the driver
+        has one (a solo chat's is the figure the Monitor showed before), the rate of its last read interval
+        otherwise (QFN's slot admissions say progress, not a rate).  0.0 while nothing reads a prompt; a reading
+        above the peak becomes the peak, gated on the tokens read inside RATE_WINDOW_S like decode gates on
+        answer length."""
+        with self.status_lock:
+            if not self.status.get("busy"):
+                return 0.0
+            readers = [r for r in self.running if r.at_engine and r.first_token is None]
+            if not readers:
+                return 0.0
+            now = time.time()
+            total = sum(max(0.0, r.read_avg if r.read_avg is not None else r.read_last or 0.0) for r in readers)
+            while self.read_events and self.read_events[0][0] <= now - RATE_WINDOW_S:
+                self.read_base = self.read_events.popleft()
+            tokens = self.read_events[-1][1] - (self.read_base[1] if self.read_base else 0) if self.read_events else 0
+            self._note_peak_read(total, tokens, now)
+            return total
+
+    def _note_read(self, stat, n_read, tok_s=None, exact=False, prov=False):
+        """A read step of one request: the drivers' PP lines and the batch slots' read counters call this (through
+        the hook run() installs on the engine's thread-local) with the prompt tokens IT has read now - the reused
+        prefix left out.  It counts into the engine-total read window and the request's own read span.
+        exact=True: the engine's own final figures for this read (its BRA line): they stand as THE count, replacing
+        what provisional steps suggested - the difference goes back out of the sum, negative included.
+        prov=True: a slot admission's BRP step: its progress may count from the prompt's start, so it only gives
+        the live figure (the engine's own tok/s) and the read's wall span - it never counts tokens or a peak."""
+        now = time.time()
+        with self.status_lock:
+            if prov:
+                if stat.read_t0 is None:
+                    stat.read_t0 = now
+                stat.read_t1 = now
+                if tok_s is not None:
+                    stat.read_avg = tok_s
+                return
+            if exact:
+                if sum(1 for r in self.running if r.at_engine and r.first_token is None) > 1:
+                    stat.read_shared = True             # (two admissions read at once: label the request's own rate)
+                if tok_s is not None:
+                    stat.read_avg = tok_s
+                    self._note_peak_read(tok_s, n_read, now)
+                if stat.read_t0 is None:
+                    stat.read_t0 = now
+                stat.read_t1 = now
+                d = n_read - stat.read_pos
+                if d:
+                    stat.read_pos = n_read
+                    self.read_sum += d
+                    self.read_events.append((now, self.read_sum))
+                    while self.read_events and self.read_events[0][0] <= now - RATE_WINDOW_S:
+                        self.read_base = self.read_events.popleft()
+                return
+            if n_read < stat.read_pos:                  # a new read of this request's prompt (a retry, a slice's leg)
+                stat.read_pos, stat.read_avg, stat.read_last, stat.read_prev_t = 0, None, None, None
+            d = n_read - stat.read_pos
+            stat.read_pos = n_read
+            if stat.read_t0 is None:
+                stat.read_t0 = now
+            stat.read_t1 = now
+            if stat.read_prev_t is not None and now > stat.read_prev_t and stat.read_prev_n <= n_read:
+                stat.read_last = (n_read - stat.read_prev_n) / (now - stat.read_prev_t)   # (its last interval's rate)
+            stat.read_prev_t, stat.read_prev_n = now, n_read
+            if tok_s is not None:                       # the engine's own mean over THIS request's read (its PP line)
+                stat.read_avg = tok_s
+                self._note_peak_read(tok_s, n_read, now)
+            if d <= 0:
+                return
+            if sum(1 for r in self.running if r.at_engine and r.first_token is None) > 1:
+                stat.read_shared = True                 # two chats read at once: neither's engine clock is just its own
+            self.read_sum += d
+            self.read_events.append((now, self.read_sum))
+            while self.read_events and self.read_events[0][0] <= now - RATE_WINDOW_S:
+                self.read_base = self.read_events.popleft()
+
+    def _note_peak_read(self, tok_s, tokens, when):
+        """The Monitor's peak Prefill (status_lock held): the highest read rate it has shown - a live window or a
+        finished read's - rounded as shown, once a read holds PEAK_MIN_READ_TOKENS tokens (a small read's rate says
+        little).  Kept like peak_decode."""
+        tok_s = round(tok_s or 0.0, 1)
+        peak = self.totals.get("peak_prefill")
+        if tok_s > 0 and tokens >= PEAK_MIN_READ_TOKENS and (peak is None or tok_s > peak["tok_s"]):
+            self.totals["peak_prefill"] = {"tok_s": tok_s, "tokens": tokens, "time": when}
+
+    def _wall_tick(self):
+        """The totals' wall clocks (status_lock held): the seconds during which at least one prompt was being read,
+        and those during which at least one answer was being written.  The requests' summed prompt_ms / decode_ms add
+        the same seconds once per chat; the totals' "N tokens at X tok/s" divides by these, so it stands under overlap.
+        Called wherever a request takes or gives back an engine place, answers its first token, or ends."""
+        now = time.time()
+        reading = any(r.at_engine and r.first_token is None for r in self.running)
+        writing = any(r.at_engine and r.first_token is not None for r in self.running)
+        if reading and self.read_wall_since is None:
+            self.read_wall_since = now
+        elif not reading and self.read_wall_since is not None:
+            self.read_wall_s += now - self.read_wall_since
+            self.read_wall_since = None
+        if writing and self.decode_wall_since is None:
+            self.decode_wall_since = now
+        elif not writing and self.decode_wall_since is not None:
+            self.decode_wall_s += now - self.decode_wall_since
+            self.decode_wall_since = None
+
+    def _wall_seconds(self):
+        """(status_lock held) (read_s, decode_s) to now - an open interval counts as it goes (nothing to close)."""
+        now = time.time()
+        read_s = self.read_wall_s + (now - self.read_wall_since if self.read_wall_since is not None else 0.0)
+        decode_s = self.decode_wall_s + (now - self.decode_wall_since if self.decode_wall_since is not None else 0.0)
+        return round(read_s, 3), round(decode_s, 3)
+
     def metrics(self, all_requests=False) -> dict:
         """GET /metrics: what the Monitor tab shows - the engine's facts, what it is doing, the last requests, and
         the hardware (with a minute of history per series)."""
         rate = self._tok_s()                            # (first: a live rate above the peak is the peak in `totals`)
+        pre_rate = self._prefill_tok_s()                # (the same for the read: 0.0 while nothing reads)
         with self.status_lock:
             s = dict(self.status)
+            reading_n = sum(1 for r in self.running if r.at_engine and r.first_token is None)
+            read_s, decode_s = self._wall_seconds()     # (the totals line divides by these, not by summed prompt_ms)
             answering = self.latest_request in self.current_requests
             hist = list(self.history)
-            totals = dict(self.totals)
+            totals = dict(self.totals, read_s=read_s, decode_s=decode_s)
             guard = dict(self.loop_guard_counts, on=bool(self.loop_guard))   # (what the loop guard did since start)
             active = self.active
             writing = len(self.current_requests)        # (of the active ones, those past their prompt)
@@ -3150,6 +3289,10 @@ class Service:
                 "tok_s": round(rate, 1) if state == "generating" else None,
                 "tok_s_mean": round(self._tok_s_mean(), 1) if state == "generating" else None,
                 "prefill_tok_s_mean": getattr(self.engine, "prefill_tok_s_mean", None) if s.get("busy") else None,
+                # the engine-total read rate (every chat reading, both drivers) and how many are: the Monitor's live
+                # Prefill figure and its label - the mean above stays what one chat's engine reported (as before)
+                "prefill_tok_s": round(pre_rate, 1) if s.get("busy") else None,
+                "reading_n": reading_n,
                 "tok_s_window_s": RATE_WINDOW_S if state == "generating" else None}
         if state == "reading" and progress:
             live["prompt_read"], live["prompt_total"] = progress[0], progress[1]
@@ -3256,6 +3399,9 @@ class Service:
             ("maya:decode_peak_tokens_seconds", "gauge",
              f"The fastest answer's generation throughput in tokens/s ({PEAK_MIN_TOKENS} tokens or more)",
              (t.get("peak_decode") or {}).get("tok_s") or 0),
+            ("maya:prefill_peak_tokens_seconds", "gauge",
+             f"The fastest prompt read throughput in tokens/s ({PEAK_MIN_READ_TOKENS} tokens read or more)",
+             (t.get("peak_prefill") or {}).get("tok_s") or 0),
             ("maya:engine_alive", "gauge", "1 while the engine process runs",
              int(self.engine.alive()) if hasattr(self.engine, "alive") else 1),
             ("maya:loop_guard_detected_total", "counter", "Loops the loop guard saw in answers", guard["detected"]),
@@ -3586,6 +3732,7 @@ class Service:
             if stat.first_token is None:
                 stat.first_token = now
                 self.current_requests.add(stat)
+                self._wall_tick()                       # (its read became a write: the wall clocks follow)
             stat.note(now, n)                           # this request's window over the last RATE_WINDOW_S
             stat.generated = n
             k = len(self.current_requests)
@@ -3959,8 +4106,10 @@ class Service:
                 stat.clear()                            # queued again: not decoding, so no part of the live rate
                 self.active -= 1
                 hold[1] = False
+                stat.at_engine = False                  # (it holds no engine place: neither read nor write counts now)
                 self.status["busy"] = self.active > 0
                 self.status["queued"] += 1
+                self._wall_tick()
             waiting = self.fifo.waiting()
             place = self.fifo.yield_place(units=1)      # in line, and the place free, in one step: behind whoever waits now
             hold[0] = False
@@ -3981,9 +4130,11 @@ class Service:
                 self.active += 1
                 self.touch_telemetry()
                 hold[1] = True
+                stat.at_engine = True
                 self.status.update({k: mine[k] for k in ("busy", "phase", "prompt_tokens", "started", "tool", "tail",
                                                          "max_tokens") if k in mine},
                                    generated=len(produced))
+                self._wall_tick()
             if paused_for:   # a paused read: back once the requests it paused for have started (else the engine
                 until = time.monotonic() + fair_read_yield_seconds()   # takes it up at once, ahead of them)
                 while time.monotonic() < until and not self.stopping and not cancel.is_set() \
@@ -4115,12 +4266,18 @@ class Service:
                     self.latest_request = stat
                     stat.phase, stat.prompt_tokens, stat.max_tokens = "reading the prompt", len(ids), max_new
                     stat.started = self.status["started"]
+                    stat.at_engine = True
+                    tls = getattr(self.engine, "_tls", None)   # this request's thread reads the engine's lines: its
+                    if tls is not None:                        # PP steps count into the engine-total read rate
+                        tls.on_read = lambda n, ts=None, ex=False, st=stat: self._note_read(st, n, ts, ex)
+                        tls.read_leg_base = 0                  # (this request's read counting starts from nothing)
                     self.running.add(stat)
                     self.active += 1
                     self.touch_telemetry()
                     counted = hold[1] = True
                     my_started = self.status["started"]
                     self.last_request_at = time.time()
+                    self._wall_tick()                     # (the totals' read/write wall clocks started or kept going)
                 before = getattr(self.engine, "last", None)
                 last_print = time.time()
                 # the thinking budget goes to the engine with the request: a reasoning block still open after that many
@@ -4433,10 +4590,12 @@ class Service:
                 Path(emb).unlink(missing_ok=True)
             book = None                                 # (the savings' count: after the lock, it writes a file)
             with self.status_lock:
+                stat.at_engine = False
                 self.current_requests.discard(stat)
                 if stat in self.running:
                     self.running.discard(stat)
                     self.ended.appendleft({**stat.view(time.time()), "finish": finish, "time": time.time()})
+                self._wall_tick()                       # (its read/write ends here: a clock may close with it)
                 if counted:
                     # only this request's DONE counts: same object means no DONE arrived (death, error, disconnect)
                     last = dict(getattr(self.engine, "last", {}) or {}) \
@@ -4444,13 +4603,19 @@ class Service:
                     started = my_started
                     loaded = str((getattr(self.engine, "info", {}) or {}).get("cvec", 0)) not in ("0", "", "None")
                     hit_rate = round(last["hits"] / last["lookups"], 3) if last.get("lookups") else None
+                    read_n = max(0, len(ids) - (last.get("reused") or 0))
+                    engine_pf = round(read_n / (last["prompt_ms"] / 1000), 1) if last.get("prompt_ms") and read_n else None
+                    own_pf = round(stat.read_pos / (stat.read_t1 - stat.read_t0), 1) \
+                        if stat.read_pos and stat.read_t1 and stat.read_t1 > stat.read_t0 else None
+                    # the request's own read rate: the engine's read clock - or, when its read ran beside another
+                    # chat's and that clock mixes the two, the time the server saw ITS read run (the row says shared)
+                    pf_s = own_pf if own_pf is not None and (engine_pf is None or stat.read_shared) else engine_pf
                     row = {
                         "projection": (sampling or {}).get("experimental_speed_projection") is not False
                         if loaded else None,
                         "time": started, "duration_s": round(time.time() - started, 1), "finish": finish,
                         "api": (sampling or {}).get("_api"),
-                        "prefill_tok_s": round((len(ids) - (last.get("reused") or 0)) / (last["prompt_ms"] / 1000), 1)
-                        if last.get("prompt_ms") and len(ids) > (last.get("reused") or 0) else None,
+                        "prefill_tok_s": pf_s, "prefill_shared": bool(stat.read_shared),
                         "prompt_tokens": len(ids), "reused": last.get("reused"), "output_tokens": n,
                         "engine_generated": last.get("generated"),
                         "prompt_ms": last.get("prompt_ms"), "decode_ms": last.get("decode_ms"),
@@ -4464,6 +4629,7 @@ class Service:
                     self.history.append(row)
                     t = self.totals
                     self._note_peak(row["decode_tok_s"], n, started)
+                    self._note_peak_read(pf_s, read_n, started)   # (the same for the read, from PEAK_MIN_READ_TOKENS on)
                     t["requests"] += 1
                     t["prompt_tokens"] += len(ids)
                     t["reused"] += last.get("reused") or 0
@@ -6779,10 +6945,58 @@ def _qfn_engine_class():
         def generate(self, ids, max_new, sampling, cancel, embeddings=None):
             me = threading.get_ident()
             self._tls.own_pp = None
+            cb = getattr(self._tls, "on_read", None)     # (engine-total read rate: Service._note_read)
+            seen = 0
+            solo = not int(getattr(self, "batch", 0) or 0)
             for t in super().generate(ids, max_new, sampling, cancel, embeddings):
-                if self._reader == me and self.progress:
+                if (self._reader == me or solo) and self.progress:
                     self._tls.own_pp = (self.progress, self.prefill_tok_s_mean)
+                    if cb and self.progress[0] > seen:  # the PP line's steps: RESUME's reused prefix stays out
+                        seen = self.progress[0]
+                        cb(max(0, seen - int(getattr(self, "reused", 0) or 0)), self.prefill_tok_s_mean)
                 yield t
+
+        def _admission_wait(self, slot, cancel, live):
+            """STRATA_SLOT_ADMIT: the admission reads beside the decoding slots, on its own lines: BRP <slot>
+            <done> <total> <ms> <tok/s> steps its progress, BRA <slot> 1 prompt=N reused=R read_ms=M the engine's
+            own figures.  The queue view below feeds both into the engine-total read rate - what gets counted is
+            what the engine counted (N - R new tokens over its own M ms; the BRP steps carry the engine's live
+            tok/s for the meantime) - and passes every line through untouched."""
+            cb = getattr(self._tls, "on_read", None)
+            if cb is None:
+                return (yield from super()._admission_wait(slot, cancel, live))
+            base = int(getattr(self._tls, "read_leg_base", 0) or 0)   # counted before this admission's leg (legs add up)
+            tls = self._tls
+
+            class _ReadCounted:
+                def __init__(self, q):
+                    self._q = q
+
+                def get(self, timeout=None):
+                    line = self._q.get(timeout=timeout)
+                    if line:
+                        f = line.split()
+                        try:
+                            if f[:2] == ["BRP", str(slot)] and len(f) >= 4 and f[2].isdigit() and f[3].isdigit():
+                                rate = float(f[5]) if len(f) >= 6 else None
+                                cb(base + int(f[2]), rate, False, True)     # (provisional: progress, not a count)
+                            elif f[:2] == ["BRA", str(slot)] and f[2:3] == ["1"]:
+                                kv = dict(x.partition("=")[::2] for x in f[3:] if "=" in x)
+                                new = max(0, int(kv["prompt"]) - int(kv.get("reused") or 0))
+                                ms = float(kv.get("read_ms") or 0)
+                                tls.read_leg_base = base + new   # (a later leg of the same request counts from here)
+                                cb(base + new, new / (ms / 1000) if ms > 0 and new else None, True)
+                        except (KeyError, ValueError, IndexError):
+                            pass                                       # (a line this view cannot read is none of its business)
+                    return line
+
+            q0 = self.slot_q[slot]
+            self.slot_q[slot] = _ReadCounted(q0)
+            try:
+                return (yield from super()._admission_wait(slot, cancel, live))
+            finally:
+                if isinstance(self.slot_q[slot], _ReadCounted):
+                    self.slot_q[slot] = q0
 
         @property
         def multi(self) -> int:

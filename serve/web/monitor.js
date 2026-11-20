@@ -52,33 +52,38 @@ function Throughput({m}) {
   const gen = live.state === "generating";
   const many = live.active > 1;                  // several answers at once (--parallel): their total, the graph's newest point
   const speed = many ? (h.tok_s || []).at(-1) : gen ? live.tok_s : last ? last.decode_tok_s : null;
-  // prefill: the engine's rate over the tokens it read (not the reused prefix), live while a request runs
-  const prefill = live.state !== "idle" ? live.prefill_tok_s_mean
+  // prefill: live is the engine's TOTAL over the prompt tokens read now (not the reused prefix), every chat reading;
+  // while only writing, this request's own figure as before, and when idle the last request's
+  const readingN = live.reading_n || 0;
+  const prefill = readingN ? (live.prefill_tok_s || 0)
+    : live.state !== "idle" ? live.prefill_tok_s_mean
     : last ? (last.prefill_tok_s != null ? last.prefill_tok_s
               : last.prompt_ms > 0 ? Math.max(0, last.prompt_tokens - (last.reused || 0)) / (last.prompt_ms / 1000) : null)
     : null;
   const fresh = tn && tn.time && Date.now() / 1000 - tn.time <= 30;
   const ms = gen && tn && tn.ms_tok ? tn.ms_tok : speed ? 1000 / speed : null;
   const hit = fresh && tn.vram_hit != null ? 100 * tn.vram_hit : last && last.hit_rate != null ? 100 * last.hit_rate : null;
-  const a = sparkPath(h.tok_s), b = sparkPath(h.prefill_tok_s_mean);
+  const a = sparkPath(h.tok_s), b = sparkPath(h.prefill_tok_s);
   // (the drafters on, and the share of their drafts the model kept: live from the engine's STAT lines, else the last answer's)
   const spec = speculationView(m);
   // the highest Decode figure since Saguaro started - live or a finished answer's (the server's, kept as each reading beats
   // it; from 32 tokens on: a few tokens' speed says little)
-  const peak = m.totals && m.totals.peak_decode;
-  const when = peak ? new Date(peak.time * 1000) : null;
-  const at = when ? when.toLocaleString([], new Date().toDateString() === when.toDateString()
-    ? {hour: "2-digit", minute: "2-digit"} : {weekday: "short", hour: "2-digit", minute: "2-digit"}) : "";
+  const peak = m.totals && m.totals.peak_decode, ppeak = m.totals && m.totals.peak_prefill;
+  const at = (p) => (p ? new Date(p.time * 1000).toLocaleString([], new Date(p.time * 1000).toDateString() === new Date().toDateString()
+    ? {hour: "2-digit", minute: "2-digit"} : {weekday: "short", hour: "2-digit", minute: "2-digit"}) : "");
   return html`<section class="card card--wide" aria-label="Throughput">
     <div class="speeds">
       <div class="speed"><span class="speed__label"><i class="key key--line"></i>Decode · ${many ? `engine total, ${live.writing} chats writing` : gen ? "writing now" : live.state === "reading" ? "reading the prompt" : last ? "last request" : "waiting for a request"}</span>
         <div class="speed__row"><span class="speed__big num">${speed == null ? "–" : fmt(speed, 1)}<small>tok/s</small></span>
           ${/* the peak beside the live Decode (below it on a phone), small: a reference, not a second headline */ ""}
-          <span class="speed__peak num" title=${peak ? `The highest decode speed since Saguaro started: ${fmt(peak.tok_s, 1)} tok/s at ${at}, ${fmt(peak.tokens)} tokens into the answer. Live speeds and finished answers count, from 32 tokens on.`
+          <span class="speed__peak num" title=${peak ? `The highest decode speed since Saguaro started: ${fmt(peak.tok_s, 1)} tok/s at ${at(peak)}, ${fmt(peak.tokens)} tokens into the answer. Live speeds and finished answers count, from 32 tokens on.`
               : "The highest decode speed since Saguaro started. Live speeds and finished answers count, from 32 tokens on."}>Peak ${peak ? `${fmt(peak.tok_s, 1)} tok/s` : "–"}</span></div></div>
       <div class="speed" title="Prompt tokens read per second (the prefill), counting only the tokens read - not the ones reused from the conversation cache">
-        <span class="speed__label"><i class="key key--dash"></i>Prefill · ${live.state === "reading" ? "reading now" : gen ? "this request" : last ? "last request" : "waiting"}</span>
-        <span class="speed__mid num">${prefill == null ? "–" : fmt(prefill)}<small>tok/s</small></span></div>
+        <span class="speed__label"><i class="key key--dash"></i>Prefill · ${readingN > 1 ? `engine total, ${readingN} chats reading` : readingN === 1 ? "reading now" : gen ? "this request" : last ? "last request" : "waiting"}</span>
+        <div class="speed__row"><span class="speed__mid num">${prefill == null ? "–" : fmt(prefill)}<small>tok/s</small></span>
+          ${/* the peak read beside it, like Decode's: the server keeps it, from 512 tokens read on */ ""}
+          <span class="speed__peak num" title=${ppeak ? `The highest prompt read speed since Saguaro started: ${fmt(ppeak.tok_s, 1)} tok/s at ${at(ppeak)}, a read of ${fmt(ppeak.tokens)} tokens. Live read rates and finished reads count, from 512 tokens read on.`
+              : "The highest prompt read speed since Saguaro started. Live read rates and finished reads count, from 512 tokens read on."}>Peak ${ppeak ? `${fmt(ppeak.tok_s, 1)} tok/s` : "–"}</span></div></div>
     </div>
     <div class=${`spark-wrap${a || b ? "" : " is-empty"}`}>
       <svg class="spark spark--hero" viewBox="0 0 100 32" preserveAspectRatio="none" aria-hidden="true">
@@ -496,9 +501,12 @@ function totalsLine(t, lg = {}) {
   const loops = lg.detected ? ` · loop guard: ${fmt(lg.detected)} loop${lg.detected === 1 ? "" : "s"} seen${did.length ? ` (${did.join(", ")})` : ""}${tools ? `, ${tools}` : ""}`
               : tools ? ` · loop guard: ${tools}` : lg.on === false ? " · loop guard off" : "";
   const since = new Date(t.since * 1000).toLocaleString([], {weekday: "short", hour: "2-digit", minute: "2-digit"});
+  // the wall seconds during which at least one prompt was read / one answer written (read_s, decode_s): under
+  // overlap the summed prompt_ms / decode_ms would add the same wall second once per chat (an older server: ms only)
   const read = t.prompt_tokens - t.reused;
-  const pSpeed = t.prompt_ms > 0 && read > 0 ? ` at ${fmt(read / (t.prompt_ms / 1000))} tok/s` : "";
-  const oSpeed = t.decode_ms > 0 && t.output_tokens > 0 ? ` at ${fmt(t.output_tokens / (t.decode_ms / 1000), 1)} tok/s` : "";
+  const readS = t.read_s != null ? t.read_s : t.prompt_ms / 1000, writeS = t.decode_s != null ? t.decode_s : t.decode_ms / 1000;
+  const pSpeed = readS > 0 && read > 0 ? ` at ${fmt(read / readS)} tok/s` : "";
+  const oSpeed = writeS > 0 && t.output_tokens > 0 ? ` at ${fmt(t.output_tokens / writeS, 1)} tok/s` : "";
   // (the requests' count is the hero's Requests served)
   return `Since ${since}: ${fmt(read)} prompt tokens read${pSpeed} (${fmt(t.reused)} reused) · ${fmt(t.output_tokens)} written${oSpeed}${loops}`;
 }
@@ -522,7 +530,10 @@ function Requests({m}) {
             ${r.api ? html` <span class="muted small">${API_NAMES[r.api] || r.api}</span>` : null}
             ${r.loop_guard && r.loop_guard.length   /* (what the loop guard did in this answer: on hover) */
               ? html` <span class="badge badge--warn" title=${r.loop_guard.join("\n")}>Loop guard</span>` : null}</td>
-          <td>${fmt(r.prompt_tokens)}</td><td>${fmt(r.reused)}</td><td>${fmt(pre)}</td><td>${fmt(r.output_tokens)}</td>
+          <td>${fmt(r.prompt_tokens)}</td><td>${fmt(r.reused)}</td>
+          <td title=${r.prefill_shared ? "it read beside other chats: its rate is over the time its own read ran (the server's clock) - the engine's clock mixes the chats then"
+              : "Prompt tokens read per second (the reused ones not counted)"}>${fmt(pre)}${r.prefill_shared ? html` <span class="muted small">shared</span>` : null}</td>
+          <td>${fmt(r.output_tokens)}</td>
           <td class="strong">${fmt(r.decode_tok_s, 1)}</td><td>${r.hit_rate == null ? "–" : `${(r.hit_rate * 100).toFixed(1)}%`}</td>
           <td>${fmt(r.duration_s, 1)} s</td></tr>`;
       }) : html`<tr><td colspan="9" class="l muted">No requests yet</td></tr>`}</tbody>
@@ -540,10 +551,12 @@ function Conversations({m}) {
     const [tone, text] = done ? FINISH[c.finish] || ["muted", c.finish || "–"]
       : c.state === "reading" ? ["info", "Reading"] : c.state === "writing" ? ["accent", c.phase ? c.phase[0].toUpperCase() + c.phase.slice(1) : "Writing"] : ["muted", "Waiting"];
     const read = c.prompt_total ? `${fmt(c.prompt_read)} / ${fmt(c.prompt_total)}` : fmt(c.prompt_tokens);
-    const speed = c.state === "reading" && !done ? (c.prefill_tok_s != null ? `${fmt(c.prefill_tok_s)} prefill` : "–") : c.tok_s != null ? fmt(c.tok_s, 1) : "–";
+    const speed = c.state === "reading" && !done ? (c.prefill_tok_s != null ? `${fmt(c.prefill_tok_s)} prefill${c.prefill_shared ? " (shared clock)" : ""}` : "–") : c.tok_s != null ? fmt(c.tok_s, 1) : "–";
     return html`<tr class=${done ? "muted" : ""}><td class="l nowrap"><span class=${`badge badge--${tone}`}>${text}</span></td>
       <td>${read}</td><td>${fmt(c.generated)}${c.max_tokens && !done ? html`<span class="muted small"> / ${fmt(c.max_tokens)}</span>` : null}</td>
-      <td class="strong">${speed}</td><td>${c.elapsed_s == null ? "–" : `${fmt(c.elapsed_s, 1)} s`}</td></tr>`;
+      <td class="strong" title=${c.state === "reading" && c.prefill_shared && !done
+        ? "it read at the same time as other chats: the engine's clock for it then covers the shared reader, not this chat alone" : null}>${speed}</td>
+      <td>${c.elapsed_s == null ? "–" : `${fmt(c.elapsed_s, 1)} s`}</td></tr>`;
   };
   return html`<section class="card" aria-label="Conversations">
     <div class="card__head"><span class="card__title">Conversations</span>
