@@ -44,7 +44,7 @@ __dpct_inline__ void poison_kernel(float *p, uint64_t n_floats) {
 
 #if defined(STRATA_USE_HIP)
 #if !defined(STRATA_HIP_ARCHS)
-#error "SAGUARO_HIP_ARCHS (the compiled HIP architectures) is set by cmake/hip_backend.cmake"
+#error "STRATA_HIP_ARCHS (the compiled HIP architectures) is set by cmake/hip_backend.cmake"
 #endif
 // "gfx1201:sramecc-:xnack-" -> "gfx1201"
 std::string base_arch(const char* gcn_arch_name) {
@@ -274,7 +274,7 @@ std::string gpu_arch_problem(int ordinal) {
 
 std::string device_code_error() try {
 #if defined(STRATA_USE_HIP) || defined(STRATA_HIP_GFX906)
-    return "";   // gpu_arch_problem() checks the HIP architectures against SAGUARO_HIP_ARCHS, before this point
+    return "";   // gpu_arch_problem() checks the HIP architectures against STRATA_HIP_ARCHS, before this point
 #else
     // every .cu of the engine is compiled for the same CMAKE_CUDA_ARCHITECTURES, so this kernel stands for all
     dpct::kernel_function_info a{};

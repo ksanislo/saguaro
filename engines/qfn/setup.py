@@ -3401,7 +3401,7 @@ GFX1103_OPT_IN = os.environ.get("SAGUARO_EXPERIMENTAL_GFX1103") == "1"
 # SAGUARO_EXPERIMENTAL_GFX1150=1 (opt-in, unvalidated): the Radeon 890M / 880M iGPU (Ryzen AI 300, Strix Point, gfx1150)
 # is taken as a unified-memory AMD card like Strix Halo.  The engine builds and runs for gfx1150 from 0.1.40.2 (#1217;
 # tools/hip/gfx1150-hipblaslt-100401.txt is calibrated on it), but no release ships a ready-made Windows engine for it:
-# build one with `SAGUARO_HIP_ARCHS=gfx1150 tools\hip\build_windows.bat` and start setup with `--prebuilt dist\`.
+# build one with `STRATA_HIP_ARCHS=gfx1150 tools\hip\build_windows.bat` and start setup with `--prebuilt dist\`.
 # Unset: unchanged.
 GFX1150_OPT_IN = os.environ.get("SAGUARO_EXPERIMENTAL_GFX1150") == "1"
 AMD_ARCHS = ("gfx1100", "gfx1101", "gfx1102", "gfx1200", "gfx1201", "gfx1030", "gfx1031", "gfx1151") \
@@ -3779,7 +3779,7 @@ def gfx1150_notes(gpu, ram) -> list[str]:
              f"seen by the OS + a {gpu.get('dedicated_gb', 0.0):.1f} GB BIOS carve-out), so the model's experts live in "
              "that pool and the expert cache is sized from the memory the OS can give back."]
     notes.append("  " + ("The engine is compiled here for gfx1150" if not WIN else
-                         "Windows has no ready-made engine for gfx1150: build one with SAGUARO_HIP_ARCHS=gfx1150 "
+                         "Windows has no ready-made engine for gfx1150: build one with STRATA_HIP_ARCHS=gfx1150 "
                          "tools\\hip\\build_windows.bat and start setup with --prebuilt dist\\")
                  + " (experimental opt-in, SAGUARO_EXPERIMENTAL_GFX1150=1, unvalidated: docs/AMD_HIP.md).")
     if not WIN and gpu.get("shared_gb", 0) < 0.75 * ram - 1:

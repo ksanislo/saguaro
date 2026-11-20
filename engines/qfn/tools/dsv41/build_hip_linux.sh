@@ -3,12 +3,12 @@
 # Built and ready, NOT run on a Linux Strix box (there is none); the Windows build of the same sources is the tested one.
 #
 #   ROCM_ROOT=/opt/rocm   (or the TheRock wheel root, e.g. .../_rocm_sdk_devel)  tools/dsv41/build_hip_linux.sh [targets...]
-#   env: SAGUARO_HIP_ARCHS (default gfx1151), BUILD_DIR (default build-dsv41-hip), JOBS (default nproc), SAGUARO_GGML_DIR (llama.cpp checkout)
+#   env: STRATA_HIP_ARCHS (default gfx1151), BUILD_DIR (default build-dsv41-hip), JOBS (default nproc), SAGUARO_GGML_DIR (llama.cpp checkout)
 # Needs: cmake, ninja, a ROCm with clang++ (ROCm >= 6.4 knows gfx1151; the wheel's device package is _rocm_sdk_libraries_gfx115X_all
 # or gfx1151), and glibc matching the box.  The engine has no RPATH: run with the ROCm lib dir on LD_LIBRARY_PATH.
 set -e
 SRC="$(cd "$(dirname "$0")/../.." && pwd)"
-ARCH="${SAGUARO_HIP_ARCHS:-gfx1151}"
+ARCH="${STRATA_HIP_ARCHS:-gfx1151}"
 R="${ROCM_ROOT:-/opt/rocm}"
 B="${BUILD_DIR:-$SRC/build-dsv41-hip}"
 J="${JOBS:-$(nproc)}"

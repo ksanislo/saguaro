@@ -95,7 +95,7 @@ opt-in build: the feed offers it to a PC whose card reports gfx1030 or gfx1031 a
 one keeps the package it always had), and the RX 7000 / 9000 / Strix Halo packages are unchanged. It runs the plain
 kernels: RDNA2 has no matrix cores, so none of the WMMA paths, the gfx12 prompt defaults or the 780M prompt set apply (they are chosen by the card's
 architecture, `src/core/arch_defaults.cpp`), and hipBLASLt ships no gfx1030 kernels, so there is no tuning table and the dense matrix products use plain
-hipBLAS. Linux build: `VARIANT=rx6000 packaging/build_hip_linux.sh`; Windows: `SAGUARO_HIP_ARCHS="gfx1030;gfx1031" tools\hip\build_windows.bat`, then
+hipBLAS. Linux build: `VARIANT=rx6000 packaging/build_hip_linux.sh`; Windows: `STRATA_HIP_ARCHS="gfx1030;gfx1031" tools\hip\build_windows.bat`, then
 `package_engine.py --variant rdna2`. The [RDNA2 section](#rdna2-gfx1030) has what community owners measured with engines built from source. Please
 report a run on an RX 6000 card with the end of `strata-<model>.log`.
 
@@ -196,7 +196,7 @@ speed lines the server window prints for a first answer.
 git; no admin, no AMD GPU) installs ROCm from AMD's TheRock wheels into `.rocm-win`, builds, and packages
 `dist\strata-windows-x64-hip.zip`; `START-HERE.bat --backend hip --prebuilt dist\` installs that one.
 `tools\hip\build_windows.bat tests` also builds the HIP tests (`ctest` in `build-hip-win`, with
-`.rocm-win\Lib\site-packages\_rocm_sdk_devel\bin` on the PATH). `SAGUARO_HIP_ARCHS` picks other architectures.
+`.rocm-win\Lib\site-packages\_rocm_sdk_devel\bin` on the PATH). `STRATA_HIP_ARCHS` picks other architectures.
 
 ## Build
 
@@ -792,11 +792,11 @@ run it; the report below is from a community machine: an RX 6900 XT 16 GB (gfx10
 - **File-tier cache rule on gfx906 (`SAGUARO_FILE_CACHE_OLD_RULE`):** on an MI50 ROCm queues are suspended while the kernel reclaims around the process's HMM-tracked arena (#1752, KevinX8: stalls, prompt 46 -> 360 tok/s once the file tier stops churning the page cache). The gfx906 backend therefore keeps the old rule (the file cache is used only when the room left is at least the bytes read from the files); other HIP cards keep the current rule. `SAGUARO_FILE_CACHE_OLD_RULE=1` forces the old rule on any Linux build, `=0` the current one.
 - **Windows** (the report above): setup's ready-made Windows engine 0.1.39 runs the RX 6800 beside a 780M iGPU
   (HIP numbers the RX 6800 1; setup points the engine at it), and `tools/hip/build_windows.bat` with
-  `SAGUARO_HIP_ARCHS=gfx1030` builds a working engine from the `gfx103X-all` 10.2.0a20260930 wheels.
+  `STRATA_HIP_ARCHS=gfx1030` builds a working engine from the `gfx103X-all` 10.2.0a20260930 wheels.
 - **gfx1031** (RX 6700 XT, #524): setup knows it (the `gfx103X-all` wheels, unvalidated); its reporter runs it daily
   on one card. More reports: an RX 6700 XT 12 GB run as gfx1030 on ROCm 7.2.4 (#1027: IQ2_XS, decode 30-32 tok/s, prompt about 300 tok/s, 6 of 6
   needles), and an RX 6800M 12 GB on Windows with a self-built engine (#915, #1078: Q2_0, decode 9-27 tok/s, prompt 50-114 tok/s; the
-  experts stream from disk with 31 GB of RAM). The ready-made Windows zip has no gfx1031 code unless it is built with it: `SAGUARO_HIP_ARCHS=gfx1031`
+  experts stream from disk with 31 GB of RAM). The ready-made Windows zip has no gfx1031 code unless it is built with it: `STRATA_HIP_ARCHS=gfx1031`
   in `tools\hip\build_windows.bat` (the default list has it from 0.1.40.2 on).
 - **gfx1150** (Radeon 890M, Ryzen AI 9 HX PRO 370, Strix Point, #1217): builds and runs from 0.1.40.2 as an unvalidated target (CMake warns; the
   device code already covers it: the WMMA guards and `gfx_arch_is_gfx11_wmma()` include it). One community machine: MINISFORUM N5 PRO, 96 GB DDR5-5600, GTT
@@ -811,7 +811,7 @@ run it; the report below is from a community machine: an RX 6900 XT 16 GB (gfx10
   `-DCMAKE_HIP_ARCHITECTURES=gfx1152` builds with a warning. It runs the portable kernels (the matrix-core guards name
   gfx1150 and gfx1151 only), no card has reported on it, and setup does not install for it (an integrated Radeon other
   than Strix Halo is named and not supported). A report from a real 860M is welcome.
-- **gfx1032** (RX 6600/6600 XT): unvalidated; built with `SAGUARO_HIP_ARCHS=gfx1030;gfx1032` and ran under Windows as
+- **gfx1032** (RX 6600/6600 XT): unvalidated; built with `STRATA_HIP_ARCHS=gfx1030;gfx1032` and ran under Windows as
   the *helper* expert GPU of an RX 6800 ([SECOND_GPU.md](SECOND_GPU.md)), 3.4-3.8k expert slots in its 8 GB and
   +8-18% decode over the 6800 alone. Its 14 WGP make a helper row about 2-3x the 6800's cost, so it pays as a
   cache tier for the CPU pool, not as a compute peer. No report of it as a primary card.

@@ -456,7 +456,7 @@ class WindowsZip(unittest.TestCase):
 
     def test_windows_build_script_lists_gfx1151(self):
         bat = (ROOT / "tools/hip/build_windows.bat").read_text(encoding="utf-8")
-        m = re.search(r'if not defined SAGUARO_HIP_ARCHS set "SAGUARO_HIP_ARCHS=([^"]+)"', bat)
+        m = re.search(r'if not defined STRATA_HIP_ARCHS set "STRATA_HIP_ARCHS=([^"]+)"', bat)
         self.assertIn("gfx1151", m.group(1).split(";"))
         self.assertTrue({"gfx1100", "gfx1101", "gfx1102", "gfx1200", "gfx1201", "gfx1030"} <= set(m.group(1).split(";")))
 

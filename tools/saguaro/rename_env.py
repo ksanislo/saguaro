@@ -52,9 +52,10 @@ SHELL_SUFFIXES = {".sh", ".bash", ".zsh", ".bat", ".cmd", ".ps1"}
 SPECIAL_DOC_NAMES = set()
 SHELL_NAMES = {"Dockerfile", "Containerfile"}
 
-# not settings, and not recognised as words automatically because a script or a config spells them (a usage example's
-# placeholder for the metal engine's binary); everything non-setting is caught automatically and printed as skipped.
-ALLOW = {"MAYA_METAL"}
+# not settings, and not recognised as words automatically because a script or a config spells them anyway: a usage
+# example's placeholder for the metal engine's binary, and the hip build scripts' name for the CMake variable and the
+# C++ macro of that name (cmake/hip_backend.cmake compiles it in - device.cu's #error names the MACRO, not a setting).
+ALLOW = {"MAYA_METAL", "STRATA_HIP_ARCHS", "MAYA_HIP_ARCHS", "STRATA_VISION_HIP_ARCHS", "MAYA_VISION_HIP_ARCHS"}
 
 KEYWORD = re.compile(r"[(,{][\s]*\Z")                                    # kwarg / object-key position
 ENV_ACCESS = re.compile(r"[\w$]*(?:env|environ)\??\.\Z", re.I)           # process.env.X, env?.X, baseEnv.X, environ.X

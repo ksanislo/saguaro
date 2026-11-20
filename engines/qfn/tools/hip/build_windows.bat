@@ -11,19 +11,19 @@ rem mix cl.exe with Clang for HIP, so ROCm's clang compiles the host code too (t
 rem headers and linker from vcvars); cmake/hip_backend.cmake force-includes the CUDA->HIP shim.
 rem
 rem Settings (environment variables, all optional):
-rem   SAGUARO_HIP_ARCHS     gfx1100;gfx1101;gfx1102;gfx1200;gfx1201;gfx1030;gfx1031;gfx1151 (the cards setup supports, + gfx1102; gfx1151 = Strix Halo;
+rem   STRATA_HIP_ARCHS     gfx1100;gfx1101;gfx1102;gfx1200;gfx1201;gfx1030;gfx1031;gfx1151 (the cards setup supports, + gfx1102; gfx1151 = Strix Halo;
 rem                        gfx1031 = RX 6700 XT / 6800M, #915 #1078; drop it from the list to build the zip without it)
 rem                        The release packages are built one per card family: rx9070 = gfx1200;gfx1201, rdna3 = gfx1100;gfx1101;gfx1102;gfx1151,
 rem                        rdna2 (0.2.2, RX 6000: built, not tested on a real card) = gfx1030;gfx1031; each then goes through package_engine.py --variant <name>
 rem   SAGUARO_ROCM_VERSION  10.2.0a20260930        SAGUARO_ROCM_INDEX  https://nightly.repo.amd.com/rocm/whl-next/
 rem   ROCM_VENV            <repo>\.rocm-win       BUILD_DIR          <repo>\build-hip-win     DIST_DIR  <repo>\dist
 rem   SAGUARO_GGML_DIR      a llama.cpp checkout at the pinned commit (default: CMake fetches it)
-rem   SAGUARO_ROCM_KEEP      1 = use the ROCM_VENV as it is (no pip install, even when its archs differ from SAGUARO_HIP_ARCHS)
-rem   SAGUARO_VISION_HIP_ARCHS  the GPU reader's archs (default: SAGUARO_HIP_ARCHS; about 70 MB of the zip per arch)
+rem   SAGUARO_ROCM_KEEP      1 = use the ROCM_VENV as it is (no pip install, even when its archs differ from STRATA_HIP_ARCHS)
+rem   STRATA_VISION_HIP_ARCHS  the GPU reader's archs (default: STRATA_HIP_ARCHS; about 70 MB of the zip per arch)
 rem   SAGUARO_NO_VISION     1 = skip the two picture readers (strata-vision.exe for the CPU, strata-vision-hip.exe for the GPU)
 setlocal EnableDelayedExpansion
 for %%I in ("%~dp0..\..") do set "SRC=%%~fI"
-if not defined SAGUARO_HIP_ARCHS set "SAGUARO_HIP_ARCHS=gfx1100;gfx1101;gfx1102;gfx1200;gfx1201;gfx1030;gfx1031;gfx1151"
+if not defined STRATA_HIP_ARCHS set "STRATA_HIP_ARCHS=gfx1100;gfx1101;gfx1102;gfx1200;gfx1201;gfx1030;gfx1031;gfx1151"
 if not defined SAGUARO_ROCM_VERSION set "SAGUARO_ROCM_VERSION=10.2.0a20260930"
 if not defined SAGUARO_ROCM_INDEX set "SAGUARO_ROCM_INDEX=https://nightly.repo.amd.com/rocm/whl-next/"
 if not defined ROCM_VENV set "ROCM_VENV=%SRC%\.rocm-win"
@@ -39,7 +39,7 @@ if not defined PY python -c "import sys" >nul 2>nul && set "PY=python"
 if not defined PY (echo Python 3.10+ is needed & exit /b 1)
 if not exist "%ROCM_VENV%\Scripts\python.exe" %PY% -m venv "%ROCM_VENV%" || exit /b 1
 set "EXTRAS=libraries,devel"
-for %%A in (%SAGUARO_HIP_ARCHS:;= %) do set "EXTRAS=!EXTRAS!,device-%%A"
+for %%A in (%STRATA_HIP_ARCHS:;= %) do set "EXTRAS=!EXTRAS!,device-%%A"
 set "STAMP=%ROCM_VENV%\strata-rocm.txt"
 set "WANT=%SAGUARO_ROCM_VERSION% %EXTRAS%"
 set "HAVE="
@@ -72,7 +72,7 @@ if defined SAGUARO_GGML_DIR set "GGML=-DSTRATA_GGML_DIR=%SAGUARO_GGML_DIR:\=/%"
 if not exist "%BUILD_DIR%\build.ninja" (
   cmake -G Ninja -S "%SRC%" -B "%BUILD_DIR%" -DCMAKE_BUILD_TYPE=Release ^
     -DSTRATA_ENABLE_HIP=ON -DSTRATA_ENABLE_CUDA=OFF -DSTRATA_BUILD_TESTS=%TESTS% -DSTRATA_PREFILL_MMQ=ON ^
-    -DSTRATA_NATIVE_EXPERTS=ON -DSTRATA_PORTABLE=ON "-DCMAKE_HIP_ARCHITECTURES=%SAGUARO_HIP_ARCHS%" ^
+    -DSTRATA_NATIVE_EXPERTS=ON -DSTRATA_PORTABLE=ON "-DCMAKE_HIP_ARCHITECTURES=%STRATA_HIP_ARCHS%" ^
     "-DCMAKE_C_COMPILER=%ROCM_F%/lib/llvm/bin/clang.exe" "-DCMAKE_CXX_COMPILER=%ROCM_F%/lib/llvm/bin/clang++.exe" ^
     "-DCMAKE_HIP_COMPILER=%ROCM_F%/lib/llvm/bin/clang++.exe" "-DCMAKE_HIP_COMPILER_ROCM_ROOT=%ROCM_F%" ^
     "-DCMAKE_PREFIX_PATH=%ROCM_F%" "-DCMAKE_HIP_FLAGS=--rocm-path=%ROCM_F% --rocm-device-lib-path=%BITCODE%" ^
@@ -87,7 +87,7 @@ if "%TESTS%"=="ON" (
 rem ---- 3b. the picture readers (tools/vision, the same llama.cpp as the engine): strata-vision.exe on the CPU (MSVC, portable: the
 rem      fallback that starts on any PC) and strata-vision-hip.exe on the GPU (ROCm's clang, ggml-hip, the archs above)
 set "VISION_ARGS="
-if not defined SAGUARO_VISION_HIP_ARCHS set "SAGUARO_VISION_HIP_ARCHS=%SAGUARO_HIP_ARCHS%"
+if not defined STRATA_VISION_HIP_ARCHS set "STRATA_VISION_HIP_ARCHS=%STRATA_HIP_ARCHS%"
 if not "%SAGUARO_NO_VISION%"=="1" (
   set "LLAMA=%SAGUARO_GGML_DIR%"
   if not defined LLAMA set "LLAMA=%BUILD_DIR%\_deps\strata_llamacpp-src"
@@ -100,7 +100,7 @@ if not "%SAGUARO_NO_VISION%"=="1" (
   cmake --build "%SRC%\build-vision-cpu-win" --target strata-vision || exit /b 1
   if not exist "%SRC%\build-vision-hip-win\build.ninja" (
     cmake -G Ninja -S "%SRC%\tools\vision" -B "%SRC%\build-vision-hip-win" -DCMAKE_BUILD_TYPE=Release -DLLAMA_DIR="!LLAMA!" ^
-      -DSTRATA_VISION_HIP=ON "-DSTRATA_VISION_HIP_ARCHS=%SAGUARO_VISION_HIP_ARCHS%" -DSTRATA_PORTABLE=ON ^
+      -DSTRATA_VISION_HIP=ON "-DSTRATA_VISION_HIP_ARCHS=%STRATA_VISION_HIP_ARCHS%" -DSTRATA_PORTABLE=ON ^
       "-DCMAKE_CXX_FLAGS=--rocm-path=%ROCM_F% --rocm-device-lib-path=%BITCODE%" ^
       "-DCMAKE_C_COMPILER=%ROCM_F%/lib/llvm/bin/clang.exe" "-DCMAKE_CXX_COMPILER=%ROCM_F%/lib/llvm/bin/clang++.exe" ^
       "-DCMAKE_HIP_COMPILER=%ROCM_F%/lib/llvm/bin/clang++.exe" "-DCMAKE_HIP_COMPILER_ROCM_ROOT=%ROCM_F%" ^
@@ -112,7 +112,7 @@ if not "%SAGUARO_NO_VISION%"=="1" (
 
 rem ---- 4. the zip: the programs, the ROCm DLLs they load (+ rocBLAS/hipBLASLt kernels for these archs), licenses
 "%ROCM_VENV%\Scripts\python.exe" "%SRC%\tools\hip\package_windows.py" --build "%BUILD_DIR%" --rocm "%ROCM%" ^
-  --archs "%SAGUARO_HIP_ARCHS%" --rocm-version "%SAGUARO_ROCM_VERSION%" --out "%DIST_DIR%" !VISION_ARGS! || exit /b 1
+  --archs "%STRATA_HIP_ARCHS%" --rocm-version "%SAGUARO_ROCM_VERSION%" --out "%DIST_DIR%" !VISION_ARGS! || exit /b 1
 echo.
 echo Done: %DIST_DIR%\strata-windows-x64-hip.zip
 endlocal
