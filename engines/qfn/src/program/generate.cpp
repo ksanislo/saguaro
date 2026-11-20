@@ -14887,6 +14887,18 @@ int main(int argc, char** argv) {
             const char* v = std::getenv("SAGUARO_SLOT_ADMIT_GAIN");
             return v != nullptr ? (int64_t) std::atoll(v) : (int64_t) 16384;
         }();
+        // SAGUARO_SLOT_KEEP (on; =0 off): a conversation that already has a batch slot keeps it: its turn reads
+        // beside the slots (or resumes in place) even while nothing decodes.  The old way moved it into the main
+        // context - a park of the conversation that was there and a copy back afterwards, seconds at 300K tokens
+        // and idle GPUs (read-stall, 11-19).  SAGUARO_SLOT_KEEP_MIN: how much of the prompt the slot must hold.
+        static const bool adm_solo_keep = [] {
+            const char* v = std::getenv("SAGUARO_SLOT_KEEP");
+            return v == nullptr || std::atoi(v) != 0;
+        }();
+        static const int64_t adm_solo_min = [] {
+            const char* v = std::getenv("SAGUARO_SLOT_KEEP_MIN");
+            return v != nullptr ? (int64_t) std::atoll(v) : (int64_t) 256;
+        }();
         std::vector<char> adm_queued(bs.size(), 0), adm_cancel(bs.size(), 0), adm_paused(bs.size(), 0);
         std::vector<int64_t> adm_queued_len(bs.size(), 0);   // its prompt's length (the shorter-first test)
         std::vector<Clock::time_point> adm_queued_at(bs.size());
@@ -15034,8 +15046,14 @@ int main(int argc, char** argv) {
                         other = std::max(other, on_disk);
                     }
                 }
-                direct = strata::program::slot_admit_direct(batch_on() || pipe_inflight() || adm_active || cy_held_n > 0, false, own,
-                                                             other, adm_gain);
+                const bool busy = batch_on() || pipe_inflight() || adm_active || cy_held_n > 0;
+                // SAGUARO_SLOT_KEEP: nothing decoding is no reason to move the conversation out of its slot -
+                // beside the slots it resumes in place (its own held prefix covers the prompt); the old way
+                // parks whatever the main context holds and copies through it.  A slot holding only a sliver
+                // of the prompt is not "this conversation's slot" yet, and a deeper parked/disk copy (other)
+                // still wins as before (adm_gain).
+                const bool keeps_slot = adm_solo_keep && !busy && own >= adm_solo_min && own * 2 >= n;
+                direct = strata::program::slot_admit_direct(busy || keeps_slot, false, own, other, adm_gain);
                 if (trace)
                     std::fprintf(stderr, "strata trace: BGEN %d: %s (the slot holds %lld of %lld tokens, another cache "
                                          "%lld)\n", r.slot, direct ? "read beside the slots" : "the old way",
