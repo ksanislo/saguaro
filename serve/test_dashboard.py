@@ -98,6 +98,17 @@ class Dashboard(unittest.TestCase):
         s, _, _ = self.req("POST", "/api/context", {"max_context": 2097152})   # (past what it was trained for)
         self.assertEqual(s, 400)
 
+    def test_context_reports_the_engines_own_kv_bytes(self):
+        """/api/context carries the engine's own K/V bytes (its INFO's kv_bytes_token / kv_ram_bytes) to the page: an
+        engine that reports none leaves them null, and the page then shows no size (never a guessed one)."""
+        self.engine.info = dict(self.engine.info, kv_bytes_token=1056, kv_ram_bytes=4096)
+        j = json.loads(self.req("GET", "/api/context")[2])
+        self.assertEqual((j["kv_bytes_token"], j["kv_ram_bytes"]), (1056, 4096))
+        self.engine.info = {k: v for k, v in self.engine.info.items() if not k.startswith("kv_")}
+        j = json.loads(self.req("GET", "/api/context")[2])
+        self.assertIsNone(j["kv_bytes_token"])
+        self.assertIsNone(j["kv_ram_bytes"])
+
     def test_reload_changes_the_context_and_saves_it(self):
         s, _, b = self.req("POST", "/api/context", {"max_context": 65536})
         self.assertEqual(s, 202)
@@ -668,6 +679,7 @@ PAGE_STUBS = """
 const noop = () => {};
 const el = new Proxy({}, {get: (t, k) => (k in t ? t[k] : k === "dataset" || k === "style" ? (t[k] = {})
   : k === "classList" ? (t[k] = {add: noop, remove: noop, toggle: noop}) : noop)});
+globalThis.navigator = {platform: "linux", userAgent: "node"};   // (lib.js' MOD: platform or user agent)
 globalThis.matchMedia = () => ({matches: false, addEventListener: noop, addListener: noop});
 globalThis.localStorage = {getItem: () => null, setItem: noop, removeItem: noop};
 globalThis.document = {documentElement: el, body: el, head: el, addEventListener: noop, querySelector: () => null,
@@ -776,10 +788,11 @@ console.log(JSON.stringify({glm: sv.tierShares(n, {experts: 2000}), none: sv.tie
         got = self.node("""
 const r1m = {min: 4096, max: 1048576}, r256 = {min: 4096, max: 262144};
 st.S.ctxInfo = {...r1m, context: 131072};
+const kvTok = 12288;   // (the bytes a position, as an engine's INFO would report them: kvBytesToken's source)
 console.log(JSON.stringify({m1: sv.ctxStopsIn(r1m, 131072), m256: sv.ctxStopsIn(r256, 131072, 100000),
                             settings: sv.ctxStops(), none: sv.ctxStopsIn(null, 1),
-                            win: sv.ctxHint(16384, {now: 131072, win: 32768, whole: true, ram: sv.GLM_KV_BYTES}),
-                            past: sv.ctxHint(131072, {now: 131072, win: 32768, whole: true, ram: sv.GLM_KV_BYTES})}));""")
+                            win: sv.ctxHint(16384, {now: 131072, win: 32768, whole: true, ram: kvTok}),
+                            past: sv.ctxHint(131072, {now: 131072, win: 32768, whole: true, ram: kvTok})}));""")
         self.assertEqual((got["m1"][0], got["m1"][-1]), (4096, 1048576))
         self.assertEqual(got["m1"], got["settings"])                     # (the same stops as Settings > Model's)
         self.assertEqual(got["m256"][-1], 262144)
@@ -787,6 +800,20 @@ console.log(JSON.stringify({m1: sv.ctxStopsIn(r1m, 131072), m256: sv.ctxStopsIn(
         self.assertEqual(got["none"], [])
         self.assertEqual(got["win"], "Up to 32K the whole cache stays in VRAM.")
         self.assertTrue(got["past"].startswith("≈ 1.5 GB of RAM for the context"), got["past"])
+
+    def test_the_size_line_takes_the_engines_own_bytes_per_position(self):
+        # the slider's line under it: the bytes of a position come from the engine's INFO (the metrics'
+        # engine.kv_bytes_token): one that reports them sizes the line, one that does not shows no size at all
+        got = self.node("""
+st.S.metrics = {engine: {kv_bytes_token: 1056}};
+const tok = sv.kvBytesToken();
+console.log(JSON.stringify({tok, none: (() => { st.S.metrics = {}; return sv.kvBytesToken(); })(),
+                            line: sv.ctxHint(131072, {now: 32768, win: 32768, ram: tok}),
+                            noguess: sv.ctxHint(131072, {now: 32768, win: 32768, ram: sv.kvBytesToken()})}));""")
+        self.assertEqual(got["tok"], 1056)
+        self.assertEqual(got["none"], 0)
+        self.assertTrue(got["line"].startswith("\u2248 0.1 GB of RAM for the context"), got["line"])
+        self.assertNotIn("GB", got["noguess"])
 
 
 if __name__ == "__main__":

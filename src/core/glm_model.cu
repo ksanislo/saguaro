@@ -1001,6 +1001,26 @@ Glm5Model::KvStreamStats Glm5Model::kv_stream_stats() const {
     return r;
 }
 
+// the K/V of one position, this engine's own numbers: every part's DSA layers x that part's latent row (the INFO line)
+uint64_t Glm5Model::kv_bytes_token() const {
+    uint64_t n = 0;
+    for (const Glm5Model* m = this; m != nullptr; m = m->split_next_.get())
+        n += (uint64_t) m->dsa_layers().size() *
+             (uint64_t) (m->lat_q8_ ? strata::kernels::glmf::lat8_rec_bytes(m->g_.kv_lora)
+                        : m->fast_mode_ ? m->g_.kv_lora * 2 : m->g_.kv_lora * 4);
+    return n;
+}
+
+uint64_t Glm5Model::kv_host_bytes() const {   // the same walk as kv_stream_stats, the bytes instead of the GB
+    uint64_t n = 0;
+    for (const Glm5Model* m = this; m != nullptr; m = m->split_next_.get()) {
+        std::vector<const KvStream*> ks = {m->kv_};
+        for (const SeqCtx& c : m->seq_) ks.push_back(c.kv);
+        for (const KvStream* K : ks) if (K != nullptr) n += K->host_bytes;
+    }
+    return n;
+}
+
 bool Glm5Model::forward(const std::vector<int32_t>& tokens, std::vector<float>& logits_out,
                         std::string& err) {
     if (!loaded_) {

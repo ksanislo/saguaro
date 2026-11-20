@@ -275,6 +275,9 @@ int64_t qsa_kv_resident();
 int64_t qsa_kv_resident_min();
 /// Pinned host bytes the streamed states hold (their host copies).
 uint64_t qsa_kv_host_bytes();
+/// The K/V bytes of ONE position in one QSA layer at the K/V dtype in use (the pool arrays: codes and scales;
+/// the indexer's pooled keys are not K/V and not in it).  The server's context card says what a position costs.
+uint64_t qsa_kv_bytes_per_cell(const ModelGeometry& g);
 /// Plan v0.3 P7: store K/V as INT8 with FP16 scales per 64 values (half the VRAM of FP16). Set before sizing and
 /// initializing the session; default off until gate G-C accepts it.
 void qsa_set_kv_int8(bool enabled);

@@ -732,6 +732,11 @@ public:
     /// or when the context fits in that many anyway
     int64_t kv_resident() const;
     static int64_t kv_resident_cells(int kpool, int64_t max_ctx);
+    /// The latent cache's bytes of ONE position over every DSA layer of this model and its split parts, at the
+    /// K/V dtype in use (FP16's kv_lora*2, INT8's record, or F32 on the reference path).  The server's context card.
+    uint64_t kv_bytes_token() const;
+    /// ... and the pinned host latent caches allocated now, summed over the parts and the bound sequences (0: not streaming).
+    uint64_t kv_host_bytes() const;
     /// ... and its block reads since the start, every part summed: those the selections named, those read from RAM
     struct KvStreamStats {
         uint64_t lookups = 0, misses = 0;

@@ -1533,10 +1533,14 @@ static int glm_pack_generate(const Options& o) {
         const auto st = model.fast_stats();
         // (+ the CPU lane setup's calibration reads: its threads and its PCIe share, as the engine started, and the most
         // threads a request's cpu_threads gets - its pool's size)
-        std::printf("INFO context=%lld kv=%s kv_resident=%lld expert_slots=%lld expert_cache_mib=%lld engine_kind=glm-fast "
+        // kv_bytes_token: the latent cache's bytes of one position over every DSA layer, this engine's own dtype;
+        // kv_ram_bytes (streaming only): the pinned host K/V it holds now - the Monitor's Context card, never a guess
+        std::printf("INFO context=%lld kv=%s kv_resident=%lld kv_bytes_token=%llu%s expert_slots=%lld expert_cache_mib=%lld engine_kind=glm-fast "
                     "experts=%d vram_slots=%lld vram_gb=%.1f ram_slots=%lld ram_gb=%.1f mtp=%d dflash=%d vision_lend=%zu "
                     "cpu_threads=%d cpu_threads_max=%d pcie_share=%.2f logit_bias=1 logprobs=%d\n",
                     (long long) o.max_context, model.kv_int8() ? "int8" : "fp16", (long long) model.kv_resident(),
+                    (unsigned long long) model.kv_bytes_token(),
+                    (model.kv_resident() > 0 ? " kv_ram_bytes=" + std::to_string(model.kv_host_bytes()) : std::string()).c_str(),
                     (long long) st.pool_slots,
                     (long long) (st.pool_gb * 1024.0), model.geometry().n_expert * (model.geometry().n_layers - model.geometry().dense_lead),
                     (long long) st.pool_slots, st.pool_gb, (long long) st.ram_slots, st.ram_gb, model.has_mtp() ? 1 : 0,
@@ -8619,12 +8623,18 @@ int main(int argc, char** argv) {
         {
             size_t free_b = 0, total_b = 0;
             cudaMemGetInfo(&free_b, &total_b);
-            std::printf("INFO context=%lld kv=%s kv_resident=%lld expert_slots=%lld expert_cache_mib=%lld spec=%d "
+            // kv_bytes_token / kv_ram_bytes as on the GLM fast path: the engine's own K/V per position, and the
+            // pinned host K/V when it streams (the Monitor's Context card never guesses a size)
+            const bool qwen_kv_stream = g.n_qsa_layers() > 0 && ss.qsa_states[0].kv_mode == 1;
+            std::printf("INFO context=%lld kv=%s kv_resident=%lld kv_bytes_token=%llu%s expert_slots=%lld expert_cache_mib=%lld spec=%d "
                         "mtp_max=%d lookup=%d vram_free_mib=%lld cvec=%s arena_mib=%lld pool_workers=%d pcie_frac=%.2f "
                         "spec_min_p=%.2f engine=" STRATA_VERSION "\n",
                         (long long) o.max_context, o.kv.c_str(),
-                        (long long) (g.n_qsa_layers() > 0 && ss.qsa_states[0].kv_mode == 1
-                                         ? ss.qsa_states[0].n_slots * 4 : 0),
+                        (long long) (qwen_kv_stream ? ss.qsa_states[0].n_slots * 4 : 0),
+                        (unsigned long long) (strata::core::qsa_kv_bytes_per_cell(g) *
+                                              (uint64_t) std::max<int64_t>(0, g.n_qsa_layers())),
+                        (qwen_kv_stream ? " kv_ram_bytes=" + std::to_string(strata::core::qsa_kv_host_bytes())
+                                        : std::string()).c_str(),
                         (long long) xcache.slots(), (long long) (xcache.bytes() >> 20), o.spec, o.mtp_max_t,
                         o.suffix_draft, (long long) (free_b >> 20), cvec_summary.c_str(),
                         // (the RAM the experts take: with them read from the GGUF, the RAM tier's - sized to fit)

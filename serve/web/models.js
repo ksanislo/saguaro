@@ -8,7 +8,7 @@ import {api, ctxfmt, esc, fmt, headers, isPhone, modelName, relTime} from "./lib
 import {S, confirmDialog, copyText, emit, toast} from "./state.js";
 import {newChat} from "./chats.js";
 import {setSide, showView} from "./sidebar.js";
-import {GLM_KV_BYTES, ctxHint, ctxStopsIn, loadCtxInfo} from "./server.js";
+import {ctxHint, ctxStopsIn, kvBytesToken, loadCtxInfo} from "./server.js";
 import {CtxSlider, Icon, ModelLogo, Seg, Switch, trapTab} from "./ui.js";
 
 // the page's own state (beside S: nothing else reads it but the model menu's count)
@@ -259,11 +259,18 @@ function contextRow(m, d, ch, cost, keys = [], extra = null) {
       hint=${ctxHint(n, {live: m.running && !ch(...keys), now, ...cost})} onChange=${(v) => setDraft({context: v})}/>`}/>`;
 }
 
+// the running engine's K/V bytes of one position (its INFO's kv_bytes_token); 0 when this is not the running model
+// or the draft changes a setting that sizes the cache (its KV format): the slider then shows no size, never a guessed one
+function engineKvBytes(m, ch, ...keys) {
+  return m.running && !ch(...keys) ? kvBytesToken() : 0;
+}
+
 function fieldsOf(m, d) {
   const s = m.settings, ch = (...ks) => ks.some((k) => !same(d[k], s[k])), glm = m.family === "glm";
   const per = Math.max(1, Number(d.parallel) || 1);   // (several answers at once: a cache each)
-  const context = contextRow(m, d, ch, !glm ? {} : d.kv_streaming
-    ? {win: Number(d.kv_resident) || 32768, whole: true, ram: GLM_KV_BYTES * per} : {vram: GLM_KV_BYTES * per},
+  const kvb = engineKvBytes(m, ch);                   // (GLM's format comes from the run config, not this draft)
+  const context = contextRow(m, d, ch, !glm || !kvb ? {} : d.kv_streaming
+    ? {win: Number(d.kv_resident) || 32768, whole: true, ram: kvb * per} : {vram: kvb * per},
     ["kv_streaming", "kv_resident", "parallel"]);
   const images = html`<${Row} label="Images" flag=${glm ? "vision" : "--vision"} changed=${ch("images")}
     hint=${m.choices.images ? "Reads images in chats. Off leaves its memory to the experts."
@@ -355,18 +362,17 @@ function fieldsOf(m, d) {
   ];
 }
 
-// MiniMax's (maya-mm3: it stops at a flag it does not know, so only its own are offered).  Its KV cache's pinned RAM a
-// context token, by format (saguaro.py's MM3_KV_BYTES)
-const MM3_KV = [{id: "bf16", label: "BF16", bytes: 122880}, {id: "int8", label: "INT8", bytes: 63360},
-                {id: "fp8", label: "FP8", bytes: 63360}, {id: "fp4", label: "FP4", bytes: 34560}];
+// MiniMax's (maya-mm3: it stops at a flag it does not know, so only its own are offered).  The KV cache formats to
+// pick from; their bytes of a position come from the engine's INFO (engineKvBytes), never from a table here
+const MM3_KV = [{id: "bf16", label: "BF16"}, {id: "int8", label: "INT8"}, {id: "fp8", label: "FP8"}, {id: "fp4", label: "FP4"}];
 function mm3Fields(m, d, s, ch, images, gpus) {
   const dspark = m.choices.draft.includes("dspark"), win = Number(d.kv_resident) || 32768;
   const kv = MM3_KV.find((f) => f.id === d.kv_cache);
-  const kvb = kv ? kv.bytes : 63360;                 // (a format of the config's own the page does not list: INT8's size)
+  const kvb = engineKvBytes(m, ch, "kv_cache");       // (0: the engine does not say, or the draft picks another format)
   const tps = [...new Set([0, 1, 2, 4].filter((t) => t <= Math.max(1, d.gpus.length)).concat([Number(s.tp), Number(d.tp)]))].sort((a, b) => a - b);
   return [
     {label: "Model", rows: [
-      contextRow(m, d, ch, d.parallel > 1 ? {vram: d.parallel * kvb} : d.kv_streaming ? {win, ram: kvb} : {vram: kvb},
+      contextRow(m, d, ch, !kvb ? {} : d.parallel > 1 ? {vram: d.parallel * kvb} : d.kv_streaming ? {win, ram: kvb} : {vram: kvb},
         ["kv_cache", "kv_streaming", "kv_resident", "parallel"],
         d.parallel > 1 ? `${d.parallel} answers at once: each keeps a whole cache of this size in VRAM. The engine shortens a context that does not fit.` : null),
       html`<${Row} label="Answers at once" flag="--parallel" changed=${ch("parallel")}
@@ -418,18 +424,20 @@ function mm3Fields(m, d, s, ch, images, gpus) {
   ];
 }
 
-// CYBER-FROST's (the `maya` engine's Qwen path; pictures through maya-vision and the base model's mmproj).  Its KV cache's VRAM a context token, by format: 12 attention
-// layers' K and V plus the sparse attention's pooled keys (saguaro.py's QWEN_KV_BYTES for FP16)
-const QWEN_KV = [{id: "fp16", label: "FP16", bytes: 26112}, {id: "int8", label: "INT8", bytes: 14208},
-                 {id: "k8v4", label: "K8 V4", bytes: 11328}, {id: "q4_0", label: "Q4_0", bytes: 8448}];
+// CYBER-FROST's (the `maya` engine's Qwen path; pictures through maya-vision and the base model's mmproj).  The KV cache
+// formats to pick from; their bytes of a position come from the engine's INFO (engineKvBytes), not from a table here
+const QWEN_KV = [{id: "fp16", label: "FP16"}, {id: "int8", label: "INT8"}, {id: "k8v4", label: "K8 V4"}, {id: "q4_0", label: "Q4_0"}];
 function qwenFields(m, d, s, ch, gpus) {
   const mtp = m.choices.draft.includes("mtp");
   const kv = QWEN_KV.find((f) => f.id === d.kv) || QWEN_KV[0];
+  const kvb = engineKvBytes(m, ch, "kv");
+  // the QSA path streams when the engine runs --kv-resident (its INFO's kv_resident): then the cache lives in RAM
+  const qwenWin = m.running && Number(S.ctxInfo && S.ctxInfo.kv_resident) > 0 ? Number(S.ctxInfo.kv_resident) : 0;
   const ec = AutoOr({label: "Expert cache", k: "expert_cache", d, dflt: 8000, unit: "experts", subLabel: "Experts in the GPU's pool"});
   const pf = AutoOr({label: "Prompt chunk", k: "prefill", d, dflt: 4096, unit: "tokens", subLabel: "Tokens a prompt is read in at a time"});
   return [
     {label: "Model", rows: [
-      contextRow(m, d, ch, {vram: kv.bytes}, ["kv"]),
+      contextRow(m, d, ch, !kvb ? {} : qwenWin ? {win: qwenWin, whole: true, ram: kvb} : {vram: kvb}, ["kv"]),
       html`<${Row} label="Images" flag="vision" changed=${ch("images")}
         hint=${m.choices.images ? "Reads images in chats: the image encoder starts when a picture arrives, no VRAM kept for it. Off reads text only."
           : "This model was set up without its image encoder: the setup adds it."}>

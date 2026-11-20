@@ -320,6 +320,9 @@ void serve_header(mm3::Model& m, bool spec_on, const std::string& kv_fmt) {
                 st0.experts, st0.resident, st0.pooled, m.draft_block() > 0 && spec_on ? 1 : 0, kv_fmt.c_str(),
                 st0.cpu_threads, st0.experts - st0.resident, m.max_ctx());
     if (st0.kv_ring > 0) std::printf(" kv_resident=%d", st0.kv_ring);   // (KV streaming: a layer's positions in VRAM)
+    // the engine's own K/V bytes of a position (every layer, the formats in use), and the pinned host K/V streaming holds
+    std::printf(" kv_bytes_token=%lld", st0.kv_pos_bytes);
+    if (st0.kv_ring > 0) std::printf(" kv_ram_bytes=%lld", st0.kv_host_bytes);
     std::printf("\n");
     // the same facts in the engine log (stderr) - the lines above reach the server only - for --report and a look at
     // where the model went, as the run without --serve prints them

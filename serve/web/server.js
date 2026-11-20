@@ -129,7 +129,12 @@ export async function loadMcp() {
 export const mcpOn = () => P.mcp !== false && S.mcp.tools > 0;
 
 // ------------------------------------------------------------------ the context size (a reload of the model)
-export const GLM_KV_BYTES = 12288;   // GLM's attention cache per token (KV streaming keeps all of it in RAM)
+// the running engine's own K/V bytes of one position (its INFO's kv_bytes_token, every layer at its dtype);
+// 0: this engine does not say - a size is then never shown, and never guessed from a constant
+export function kvBytesToken() {
+  const b = +(((S.metrics && S.metrics.engine) || {}).kv_bytes_token);
+  return Number.isFinite(b) && b > 0 ? b : 0;
+}
 export const CTX_STOPS = [4096, 8192, 16384, 32768, 49152, 65536, 98304, 131072, 196608, 262144, 393216, 524288, 786432, 1048576];
 export async function loadCtxInfo() {
   try {

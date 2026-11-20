@@ -90,6 +90,8 @@ struct Stats {
     double all_gb = 0;            // every routed expert's bytes (the Monitor: what neither VRAM nor the pool holds is on the SSD)
     int kv_ring = 0;              // KV streaming: the positions a layer's VRAM cache holds (0: all - off)
     double kv_host_gb = 0;        // ... and the host memory holding every position
+    long long kv_pos_bytes = 0;   // every layer's K / V of one position, the cache formats in use (INFO kv_bytes_token)
+    long long kv_host_bytes = 0;  // KV streaming: the whole caches pinned in host memory now (INFO kv_ram_bytes)
     long profiled = 0;            // routings counted (save_profile writes them)
     long cpu_experts = 0;         // routed experts the CPU lane computed
     long help_experts = 0;        // (MAYA_MM3_DECODE_HELP) routed experts the card beside computed for a token
