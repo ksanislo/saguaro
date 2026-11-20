@@ -87,6 +87,7 @@ int main(int argc, char** argv) {
 #endif
     std::string mmproj, model;
     bool gpu = false;
+    bool warmup_lazy = false;   // --warmup-lazy: the full warm-up runs after the first picture (the elastic encoder)
     int threads = 0, max_tokens = 0, min_tokens = 0;
     llama_flash_attn_type fa = LLAMA_FLASH_ATTN_TYPE_AUTO;
     bool fa_given = false;
@@ -114,6 +115,7 @@ int main(int argc, char** argv) {
         else if (a == "--threads") threads = std::atoi(next().c_str());
         else if (a == "--max-tokens") max_tokens = std::atoi(next().c_str());
         else if (a == "--min-tokens") min_tokens = std::atoi(next().c_str());   // mtmd image_min_tokens (#767)
+        else if (a == "--warmup-lazy") warmup_lazy = true;   // warm the full size after the first picture, not before READY
         else if (a == "--flash-attn") {   // FA keeps K and V in FP16; off = the attention in FP32
             const std::string v = next();
             fa = v == "on" ? LLAMA_FLASH_ATTN_TYPE_ENABLED : v == "off" ? LLAMA_FLASH_ATTN_TYPE_DISABLED
@@ -124,7 +126,7 @@ int main(int argc, char** argv) {
     }
     if (mmproj.empty() || model.empty()) {
         std::fprintf(stderr, "usage: strata-vision --mmproj <mmproj.gguf> --model <model.gguf> [--gpu] [--threads N] "
-                             "[--max-tokens N] [--min-tokens N] [--flash-attn on|off|auto]\n");
+                             "[--max-tokens N] [--min-tokens N] [--flash-attn on|off|auto] [--warmup-lazy]\n");
         return 2;
     }
     // On the CPU the GPU stays unseen: a CUDA build otherwise opens a context there (measured: 0.4-0.7 GB of VRAM,
@@ -246,14 +248,14 @@ int main(int argc, char** argv) {
         if (gg) gguf_free(gg);
     }
     if (n_embd <= 0) { std::printf("ERR the vision encoder has no projection_dim\n"); std::fflush(stdout); return 1; }
-    // Warm up at the LARGEST picture before READY: the encoder's GPU work buffers are allocated now, not at the first
-    // real picture.  The server starts this process before the engine, so the engine sizes its expert cache from
-    // what is really left; allocating ~1 GB later, on a GPU the engine has filled, made Windows page GPU memory and
-    // the engine crawl to a standstill.  (A square image well above any cap; mtmd scales it to the token limit.)
+    // Warm up at the LARGEST picture: the encoder's GPU work buffers are allocated now, not at the first real
+    // picture.  The server starts this process before the engine, so the engine sizes its expert cache from what is
+    // really left; allocating ~1 GB later, on a GPU the engine has filled, made Windows page GPU memory and the
+    // engine crawl to a standstill.  (A square image well above any cap; mtmd scales it to the token limit.)
     // On the CPU there is no VRAM to reserve, and the warm-up would only delay the engine's start by one encode
-    // (~6 s at 1,024 tokens).
-    if (!gpu) std::fprintf(stderr, "strata-vision: on the CPU, %d threads, no warm-up\n", threads);
-    else {
+    // (~6 s at 1,024 tokens).  --warmup-lazy (the elastic encoder, whose start a cold picture waits on): the
+    // first encode runs at its own size, and the full-size warm-up follows it before the next line is read.
+    auto warm_up = [&](bool after_first) {
         const auto warm_t0 = std::chrono::steady_clock::now();
         const uint32_t side = 2048;
         std::vector<unsigned char> rgb((size_t) side * side * 3, 128);
@@ -270,7 +272,8 @@ int main(int argc, char** argv) {
                     warm_tokens = (int) mtmd_input_chunk_get_n_tokens(ch);
             }
         }
-        std::fprintf(stderr, "strata-vision: warmed up at %d image tokens in %.1f s\n", warm_tokens,
+        std::fprintf(stderr, "strata-vision: warmed up%s at %d image tokens in %.1f s\n",
+                     after_first ? " after the first picture" : "", warm_tokens,
                      std::chrono::duration<double>(std::chrono::steady_clock::now() - warm_t0).count());
         // I7 (#3690): a picture that became 93,700 image tokens under --max-tokens 1024. The limit is not applied by this build of mtmd for
         // this model, and the log line above is the evidence to ask for.
@@ -279,7 +282,14 @@ int main(int argc, char** argv) {
                                  "the limit is not applied for this model; pictures over it are refused\n", warm_tokens, max_tokens);
         mtmd_input_chunks_free(chunks);
         if (bm) mtmd_bitmap_free(bm);
-    }
+    };
+    bool warmed = true;
+    if (!gpu) std::fprintf(stderr, "strata-vision: on the CPU, %d threads, no warm-up\n", threads);
+    else if (warmup_lazy) {
+        warmed = false;
+        std::fprintf(stderr, "strata-vision: --warmup-lazy: the first picture warms what it needs, the full warm-up "
+                             "follows it\n");
+    } else warm_up(false);
     std::printf("READY %d\n", n_embd);
     std::fflush(stdout);
 
@@ -335,6 +345,7 @@ int main(int argc, char** argv) {
         mtmd_input_chunks_free(chunks);
         mtmd_bitmap_free(bw.bitmap);
         if (bw.video_ctx) mtmd_helper_video_free(bw.video_ctx);
+        if (!warmed) { warmed = true; warm_up(true); }   // (--warmup-lazy: the full size now, before the next picture)
     }
     mtmd_free(ctx);
     llama_model_free(text);
