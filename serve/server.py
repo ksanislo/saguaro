@@ -2602,6 +2602,17 @@ class Service:
             with active():
                 yield self.vision
 
+    def _vision_keep_hot(self):
+        """The cheap-restart state after an idle stop: the elastic reader's weight files held in the OS file cache
+        for elastic_keep_s (the process itself cannot idle without GPU memory - see the Vision class).  It costs no
+        VRAM, so it outlives the stop; the VRAM (VRECLAIM) already went back at elastic_idle_s."""
+        keep_hot = getattr(self.vision, "keep_hot", None)
+        if keep_hot is not None:
+            try:
+                keep_hot()
+            except Exception as e:                    # a cold restart is the fallback, never a failed stop
+                print(f"[saguaro] images: keeping the encoder's weights hot: {e}", flush=True)
+
     def _vision_idle_down(self, force: bool = False) -> str:
         """An elastic encoder idle for elastic_idle_s (or force) stops and the expert cache takes its VRAM back:
         "down", "busy" (an encode is running, or with a non-lending engine a request holds the engine, or a picture
@@ -2623,6 +2634,7 @@ class Service:
                           f"picture; the expert cache took its VRAM back ({out.get('cache_mib')} MiB mapped)",
                           flush=True)
                 self.vision_held = False
+                self._vision_keep_hot()
                 return "down"
             finally:
                 self._vision_enc.release()
@@ -2636,6 +2648,7 @@ class Service:
                       f"the expert cache took its VRAM back ({out.get('expert_cache_mib')} of "
                       f"{out.get('expert_cache_full_mib')} MiB)", flush=True)
             self.vision_held = False
+            self._vision_keep_hot()
             return "down"
         finally:
             self.fifo.release()
@@ -2646,7 +2659,8 @@ class Service:
         if not getattr(v, "elastic", False):
             return
         print(f"[saguaro] images: the image encoder starts with the first picture and stops after {v.elastic_idle_s:g} s "
-              f"without one; while it runs the expert cache keeps {v.elastic_mib} MiB free for it", flush=True)
+              f"without one (its weights stay hot for {getattr(v, 'elastic_keep_s', 0):g} s for a cheap restart); while "
+              f"it runs the expert cache keeps {v.elastic_mib} MiB free for it", flush=True)
 
         def loop():
             while True:
