@@ -7106,11 +7106,6 @@ def start_qfn(cfg: dict, tok):
     engine.silence_s = silence
     engine.load_s = round(time.time() - t0, 1)
     warn_tight_ram(engine.info.get("arena_mib"))
-    if vcfg and vcfg.get("elastic") is True and cfg.get("vram_elastic") is not True \
-            and str(engine.info.get("vision_lend") or "") != "1":
-        # the engine can neither lend (no VLEND: INFO has no vision_lend=1) nor take the old VRAM command
-        print('[saguaro] images: "elastic": true with no "vram_elastic" on an engine that cannot lend: the encoder '
-              "starts with the first picture, but the expert cache cannot give it room", flush=True)
     return engine, vision, sampling_defaults
 
 
@@ -7261,6 +7256,9 @@ def _qfn_engine_class():
             class _ReadCounted:
                 def __init__(self, q):
                     self._q = q
+
+                def __getattr__(self, name):          # put/put_nowait/empty...: the driver's pump still feeds the queue
+                    return getattr(self._q, name)
 
                 def get(self, timeout=None):
                     line = self._q.get(timeout=timeout)

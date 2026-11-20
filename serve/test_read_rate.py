@@ -469,3 +469,13 @@ class ThroughRun(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReadCountedQueueStaysAQueue(unittest.TestCase):
+    """Live 11-19: the QFN pump puts into slot_q[slot] while a request waits through the counting view - it must take put."""
+
+    def test_the_wrapped_slot_queue_takes_puts(self):
+        import inspect
+        from serve import server as S
+        src = inspect.getsource(S)
+        self.assertIn("def __getattr__(self, name):", src[src.index("class _ReadCounted"):][:600])
