@@ -12938,6 +12938,10 @@ int main(int argc, char** argv) {
         bool vlen_reclaim_pending = false;       // a VRECLAIM answered; its take-back goes on in the loop
         Clock::time_point vlen_deadline{};       // VLEND's 30 s fuse, VRECLAIM's take-back fuse
         Clock::time_point vlen_rdeadline{};
+        // PLAN-vision-fast-start: a pending step no longer waits for a quiet CUDA0 to happen by itself: the command
+        // arms a pause, the next CUDA0 window boundary holds back new windows, steps toward the target and resumes
+        bool vlen_pause_armed = false;           // the next CUDA0 window boundary pauses for the pending step
+        Clock::time_point vlen_pause_t{};        // pause open since (its length is logged when it closes)
         auto floor_of = [&](size_t k) -> int64_t {   // bytes
             const strata::core::Verifier& vk = k == 0 ? ver : stages[k - 1]->ver;
             const size_t lim = vk.batch_graph_limit(), held = vk.batch_layouts();
@@ -14311,6 +14315,28 @@ int main(int argc, char** argv) {
                     if (pick < 0) continue;
                 } else {
                     if (!may_start || share_live) continue;   // (a read holds the pools: SAGUARO_SHORT_READS)
+                    // PLAN-vision-fast-start: a lend's give / a reclaim's take-back is one step on a quiet CUDA0 -
+                    // pause the pipeline at this window boundary, step, and open it again (2 s at the most)
+                    if (vlen_pause_t == Clock::time_point{} && vlen_pause_armed &&
+                        (vlen_pending || vlen_reclaim_pending)) {
+                        vlen_pause_armed = false;
+                        vlen_pause_t = Clock::now();
+                    }
+                    if (vlen_pause_t != Clock::time_point{}) {
+                        const bool step_open = vlen_pending || vlen_reclaim_pending;
+                        if (step_open && Clock::now() - vlen_pause_t < std::chrono::milliseconds(2000)) {
+                            if (!conc_serving) elastic_idle((size_t) 0, !in_prompt_read, -1);   // (the step runs there)
+                            if (vlen_pending || vlen_reclaim_pending) {
+                                std::this_thread::sleep_for(std::chrono::milliseconds(1));   // (nothing to poll for)
+                                continue;
+                            }
+                        }
+                        std::fprintf(stderr, "strata serve: VLEND: CUDA0's pipeline paused %.0f ms at a window boundary%s\n",
+                                     std::chrono::duration<double, std::milli>(Clock::now() - vlen_pause_t).count(),
+                                     vlen_pending || vlen_reclaim_pending ? " (the step is not done: a quiet settle keeps "
+                                                                           "at it)" : " (the step came due)");
+                        vlen_pause_t = {};
+                    }
                     if (ram_short && pipe_inflight()) continue;   // (a slot waits for RAM: the groups drain first)
                     // (SAGUARO_FAST_LANE: a group with a lane read first)
                     auto lane_in = [&](int gi) {
@@ -14921,11 +14947,13 @@ int main(int argc, char** argv) {
         size_t cy_held_n = 0;                // reads held at a piece boundary (cy_held, below)
         bool cy_yielded = false;             // the last run of reads ended by yielding
         int cy_served = 0;                   // old-way lines served since the held reads last went on
-        // (in_mu held) the line waiting first is a text request the old way (not a picture: the position table stays)
+        // (in_mu held) the line waiting first is a text request the old way (not a picture: the position table stays);
+        // VLEND / VRECLAIM outrank a piece of held read too (PLAN-vision-fast-start: they waited on it for ~17 s once)
         auto cy_yield_line = [&]() -> bool {
             if (in_lines.empty()) return false;
             const std::string& l = in_lines.front();
-            return l.rfind("\x02" "BGEN ", 0) == 0 || l.rfind("GEN ", 0) == 0;
+            return l.rfind("\x02" "BGEN ", 0) == 0 || l.rfind("GEN ", 0) == 0 ||
+                   l.rfind("VLEND", 0) == 0 || l.rfind("VRECLAIM", 0) == 0;
         };
         struct AdmReq {
             int slot = -1;
@@ -17056,8 +17084,10 @@ int main(int argc, char** argv) {
             // VLEND <mib> / VRECLAIM (PLAN-qfn-vision-lend, review 1): CUDA0 lends the picture encoder's process
             // VRAM from its expert cache / slot budget and takes it back - while batch slots decode.  ASYNCHRONOUS:
             // the command sets the pending state, works one quiet step here at once, and goes back to the command
-            // loop; every settle of card 0 (and the idle tick) runs vlen_tick until the answer is due:
-            // VLENT free_mib=<n> cache_mib=<n> / ERR VLEND: <why> / VRECLAIMED cache_mib=<n>.
+            // loop; every settle of card 0 (and the idle tick) runs vlen_tick until the answer is due, and the next
+            // CUDA0 window boundary holds back new windows for one step if the settles did not answer it (PLAN-
+            // vision-fast-start, its pause length on one line): VLENT free_mib=<n> cache_mib=<n> / ERR VLEND: <why> /
+            // VRECLAIMED cache_mib=<n>.
             if (line.rfind("VLEND", 0) == 0 || line.rfind("VRECLAIM", 0) == 0) {
                 const bool lend = line.rfind("VLEND", 0) == 0;
                 char* ve = nullptr;
@@ -17092,6 +17122,7 @@ int main(int argc, char** argv) {
                     vlen_reclaim_pending = true;
                     vlen_rdeadline = Clock::now() + std::chrono::seconds(120);
                 }
+                vlen_pause_armed = true;   // (if this tick cannot answer it, the next CUDA0 window boundary pauses for it)
                 vlen_tick();   // (between windows here too: usually the answer, or the first give, comes on this line)
                 if (!lend) {   // VRECLAIMED is answered at once; the take-back goes on in the loop (vlen_tick)
                     std::printf("VRECLAIMED cache_mib=%lld\n", (long long) (gv[0].cache->mapped_bytes() >> 20));
