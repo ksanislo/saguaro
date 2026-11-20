@@ -11,9 +11,9 @@ rem whose BUILD.json vision_archs do not cover its archs.
 rem
 rem Needs: Visual Studio 2022 Build Tools (run from a "x64 Native Tools" prompt, or let this call vcvars64), CMake + Ninja, the CUDA toolkit of
 rem the variant (CUDA_PATH_V12_9 / CUDA_PATH_V13_0, or CUDA_PATH already pointing at it), and the pinned llama.cpp (python -c "import setup;
-rem setup.get_llama_cpp()", or STRATA_GGML_DIR).
+rem setup.get_llama_cpp()", or SAGUARO_GGML_DIR).
 rem
-rem Settings (all optional): STRATA_GGML_DIR  the llama.cpp checkout (default third_party\llama.cpp)   VISION_BUILD_DIR  the build folder
+rem Settings (all optional): SAGUARO_GGML_DIR  the llama.cpp checkout (default third_party\llama.cpp)   VISION_BUILD_DIR  the build folder
 rem   VISION_ARCHS  override the architecture list (semicolons)      BUILD_JOBS  the number of compile jobs (default 4: the CUDA compiler uses RAM)
 rem
 rem It copies strata-vision.exe into <stage folder> and writes vision_archs into <stage folder>\BUILD.json. Nothing is uploaded.
@@ -34,9 +34,9 @@ if defined VISION_ARCHS set "ARCHS=%VISION_ARCHS%"
 if not defined CUDA_PATH (echo CUDA_PATH is not set: install the %VARIANT% toolkit & exit /b 1)
 if not exist "%CUDA_PATH%\bin\nvcc.exe" (echo no nvcc.exe in %CUDA_PATH%\bin & exit /b 1)
 if not defined BUILD_JOBS set "BUILD_JOBS=4"
-if not defined STRATA_GGML_DIR set "STRATA_GGML_DIR=%SRC%\third_party\llama.cpp"
-set "LLAMA=%STRATA_GGML_DIR:\=/%"
-if not exist "%LLAMA%/tools/mtmd" (echo llama.cpp with tools/mtmd not found in %LLAMA% - set STRATA_GGML_DIR & exit /b 1)
+if not defined SAGUARO_GGML_DIR set "SAGUARO_GGML_DIR=%SRC%\third_party\llama.cpp"
+set "LLAMA=%SAGUARO_GGML_DIR:\=/%"
+if not exist "%LLAMA%/tools/mtmd" (echo llama.cpp with tools/mtmd not found in %LLAMA% - set SAGUARO_GGML_DIR & exit /b 1)
 if not defined VISION_BUILD_DIR set "VISION_BUILD_DIR=%SRC%\build-vision-%VARIANT%-win"
 if not exist "%STAGE%" mkdir "%STAGE%"
 

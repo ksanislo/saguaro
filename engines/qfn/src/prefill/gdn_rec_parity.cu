@@ -2,13 +2,13 @@
 //
 // src/prefill/kernels.cu runs gdn_rec_kh_kernel (the three value heads that share a key head in one thread, the
 // inputs staged in blocks of 8 tokens) on CUDA sm_80+ cards that hold all 64 of its blocks at once, and
-// gdn_rec_cols_pipe_kernel elsewhere and with STRATA_GDN_KEYHEAD=0.  Both are copied below verbatim, with the output
+// gdn_rec_cols_pipe_kernel elsewhere and with SAGUARO_GDN_KEYHEAD=0.  Both are copied below verbatim, with the output
 // norm (gdn_out_norm_kernel) and the norm as it was before, which also stored the normalized value in FP32 although
 // nothing reads it.  The two recurrences do the same arithmetic in the same order per value head and column, so the
-// output, the state after it and the FP16 output must be the same bits.  STRATA_GDN_CHUNKED=1's recurrence in chunks
+// output, the state after it and the FP16 output must be the same bits.  SAGUARO_GDN_CHUNKED=1's recurrence in chunks
 // (copied below too) sums in another order: it must stay within 1e-4 of gdn_rec_kh_kernel (largest |difference| over
 // largest |value|, the output and the state), also at T = 8192 and 32768; up to 8192 both are also measured against
-// the recurrence in FP64.  STRATA_GDN_CHUNKED_SM75=1's tensor-core version (src/prefill/gdn_chunk_sm75.cuh, included,
+// the recurrence in FP64.  SAGUARO_GDN_CHUNKED_SM75=1's tensor-core version (src/prefill/gdn_chunk_sm75.cuh, included,
 // so this is the engine's code) is held to the same 1e-4, also at 2048, 8192 and 32768 tokens, and --bench times it.
 //
 // Synthetic inputs of the model's shape (q/k L2-normalized per key head as gdn_l2_kernel leaves them), no model.
@@ -54,7 +54,7 @@ __device__ __forceinline__ uint16_t hf(float f) { return __half_as_ushort(__floa
 // ------------------------------------------------------------------ the engine's kernels (src/prefill/kernels.cu)
 // gdn_rec_cols_kernel with the next token's inputs (q/k rows, v, gate, beta) loaded into registers while this token
 // computes (software pipelining).  The same arithmetic in the same order: the same bits, and the same CB-column split.
-// STRATA_GDN_PIPELINE=0: gdn_rec_cols_kernel.
+// SAGUARO_GDN_PIPELINE=0: gdn_rec_cols_kernel.
 __global__ void __launch_bounds__(CB * RG) gdn_rec_cols_pipe_kernel(float* __restrict__ state, const float* __restrict__ h,
                                                                       const float* __restrict__ gate,
                                                                       const float* __restrict__ beta,
@@ -121,9 +121,9 @@ __global__ void __launch_bounds__(CB * RG) gdn_rec_cols_pipe_kernel(float* __res
 // one of a token orders every read of rkv before the next token's writes, the next token's first one every read of ro
 // before the writes after it.  64 blocks instead of 192.  Per value head and column the same arithmetic in the same
 // order: the same bits (src/prefill/gdn_rec_parity.cu checks them and times the variants: 1.41x on a 4080 Super).
-// sm_80+ (gdn_keyhead_ok); STRATA_GDN_KEYHEAD=0: gdn_rec_cols_pipe_kernel.
+// sm_80+ (gdn_keyhead_ok); SAGUARO_GDN_KEYHEAD=0: gdn_rec_cols_pipe_kernel.
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
-#define STRATA_GDN_CP_ASYNC 0   // Turing builds: plain copies (launched there only with STRATA_GDN_KEYHEAD=1)
+#define STRATA_GDN_CP_ASYNC 0   // Turing builds: plain copies (launched there only with SAGUARO_GDN_KEYHEAD=1)
 #else
 #define STRATA_GDN_CP_ASYNC 1
 #endif
@@ -246,8 +246,8 @@ __global__ void __launch_bounds__(CB * RG) gdn_rec_kh_kernel(float* __restrict__
     }
 }
 
-// src/prefill/kernels.cu's chunked recurrence (STRATA_GDN_CHUNKED=1), copied as it is there
-// STRATA_GDN_CHUNKED=1 (opt-in): the recurrence in chunks of GCH tokens (the WY form of the gated delta rule, as
+// src/prefill/kernels.cu's chunked recurrence (SAGUARO_GDN_CHUNKED=1), copied as it is there
+// SAGUARO_GDN_CHUNKED=1 (opt-in): the recurrence in chunks of GCH tokens (the WY form of the gated delta rule, as
 // flash-linear-attention computes it), all in FP32.  Per value head, with g_t = exp(gate_t), gamma_t the gate's sum
 // from the chunk's start to t (inclusive) and S0 the state before the chunk:
 //   A[t][i] = beta_t exp(gamma_t - gamma_i) k_t.k_i (i < t),   T = (I + A)^-1 (unit lower triangular),
@@ -564,8 +564,8 @@ cudaError_t gdn_rec_chunked(float* state, const float* h, const float* gate, con
             cudaGetLastError();
             return cudaErrorNotSupported;
         }
-        // as in kernels.cu: STRATA_GDN_CHUNKED=2 skips the SM-count test (to measure a card under 128 SMs)
-        static const bool any_sms = [] { const char* v = std::getenv("STRATA_GDN_CHUNKED"); return v != nullptr && std::atoi(v) >= 2; }();
+        // as in kernels.cu: SAGUARO_GDN_CHUNKED=2 skips the SM-count test (to measure a card under 128 SMs)
+        static const bool any_sms = [] { const char* v = std::getenv("SAGUARO_GDN_CHUNKED"); return v != nullptr && std::atoi(v) >= 2; }();
         if (major < 8 || (!any_sms && sms < HK * (S / GDV)) || (size_t) smem < kChunkScanSmem)
             return cudaErrorNotSupported;
     }
@@ -591,7 +591,7 @@ cudaError_t gdn_rec_chunked(float* state, const float* h, const float* gate, con
     }
     return cudaSuccess;   // launch errors surface at the caller's check; an error above means nothing ran
 }
-#include "gdn_chunk_sm75.cuh"   // STRATA_GDN_CHUNKED_SM75=1: the chunked recurrence on Turing tensor cores
+#include "gdn_chunk_sm75.cuh"   // SAGUARO_GDN_CHUNKED_SM75=1: the chunked recurrence on Turing tensor cores
 // the output norm over a head's 128 columns, into the FP16 copy the out projection reads (the FP32 output before the
 // norm stays in its scratch buffer)
 __global__ void __launch_bounds__(S) gdn_out_norm_kernel(const float* __restrict__ z, const float* __restrict__ gamma,
@@ -880,7 +880,7 @@ int check_chunked(int64_t T, uint64_t seed) {
     ck(cudaDeviceSynchronize(), "chunked run");
     const double eo = max_rel(o0, o1, oc_n), es = max_rel(s0, s1, st);
     const bool bad = !(eo < 1e-4) || !(es < 1e-4);
-    std::printf("%s T=%-6lld chunked (STRATA_GDN_CHUNKED): output %.2e, state %.2e (max |diff| / max |value|)\n",
+    std::printf("%s T=%-6lld chunked (SAGUARO_GDN_CHUNKED): output %.2e, state %.2e (max |diff| / max |value|)\n",
                 bad ? "FAIL" : "    ", (long long) T, eo, es);
     if (T <= 8192) {   // both against FP64 (its output: 8 bytes a value, so not at 32K)
         double* sd = dalloc<double>(st);
@@ -896,7 +896,7 @@ int check_chunked(int64_t T, uint64_t seed) {
     return bad ? 1 : 0;
 }
 
-// STRATA_GDN_CHUNKED_SM75=1's recurrence (FP16 tensor cores, hi/lo splits; src/prefill/gdn_chunk_sm75.cuh) against
+// SAGUARO_GDN_CHUNKED_SM75=1's recurrence (FP16 tensor cores, hi/lo splits; src/prefill/gdn_chunk_sm75.cuh) against
 // gdn_rec_kh_kernel, held to the same 1e-4 as the FP32 chunked one, and against FP64 up to 8192 tokens
 int check_chunked_sm75(int64_t T, uint64_t seed) {
     Inputs in(T, seed);
@@ -928,7 +928,7 @@ int check_chunked_sm75(int64_t T, uint64_t seed) {
     }
     if (nonfinite) std::printf("FAIL T=%-6lld chunked sm75: %zu outputs / state values not finite\n", (long long) T, nonfinite);
     const bool bad = !(eo < 1e-4) || !(es < 1e-4) || nonfinite > 0;
-    std::printf("%s T=%-6lld chunked sm75 (STRATA_GDN_CHUNKED_SM75): output %.2e, state %.2e (max |diff| / max |value|)\n",
+    std::printf("%s T=%-6lld chunked sm75 (SAGUARO_GDN_CHUNKED_SM75): output %.2e, state %.2e (max |diff| / max |value|)\n",
                 bad ? "FAIL" : "    ", (long long) T, eo, es);
     if (T <= 8192) {
         double* sd = dalloc<double>(st);
@@ -1019,7 +1019,7 @@ void bench(int64_t T) {
                 1000.0f * r1 / (float) T, r0 / r1);
     if (can_chunk) {
         const float kh = median(t_kc[0]), kc = median(t_kc[1]);
-        std::printf("    recurrence, chunked (STRATA_GDN_CHUNKED=1)     %8.2f ms  (%.3f us per token)  %.2fx gdn_rec_kh_kernel\n",
+        std::printf("    recurrence, chunked (SAGUARO_GDN_CHUNKED=1)     %8.2f ms  (%.3f us per token)  %.2fx gdn_rec_kh_kernel\n",
                     kc, 1000.0f * kc / (float) T, kh / kc);
     }
     if (can_t) {
@@ -1434,7 +1434,7 @@ int main(int argc, char** argv) {
     const int64_t Ts[] = {1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 33, 257, 1000, 4099};
     uint64_t seed = 11;
     for (const int64_t T : Ts) fails += check_bits(T, seed++);
-    fails += check_bits(8192, seed++);   // a whole prompt chunk (Turing: the plain-copy staging, STRATA_GDN_KEYHEAD=1)
+    fails += check_bits(8192, seed++);   // a whole prompt chunk (Turing: the plain-copy staging, SAGUARO_GDN_KEYHEAD=1)
     {   // the engine's other condition (gdn_keyhead_ok): all 64 blocks in one wave on this card
         int per_sm = 0;
         ck(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&per_sm, gdn_rec_kh_kernel, CB * RG, 0), "occupancy");

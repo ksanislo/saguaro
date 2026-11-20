@@ -34,7 +34,7 @@
 #include <unistd.h>
 #endif
 
-#include "../core/ablate_capture.hpp"   // (MAYA_ABLATE_CAPTURE: the direction fitting's read-out)
+#include "../core/ablate_capture.hpp"   // (SAGUARO_ABLATE_CAPTURE: the direction fitting's read-out)
 #include "mm3_ablate.hpp"
 #include "mm3_cands.hpp"
 #include "mm3_cpu.hpp"
@@ -100,14 +100,14 @@ struct Layer {
     //  prompt path decodes them into Dev::wtmp for its F32 GEMM: the F32 values either way, a quarter of the bytes)
     const uint8_t *wiq8 = nullptr, *wik8 = nullptr;
     uint16_t *kc = nullptr, *vc = nullptr, *ic = nullptr;
-    k::IcRef icr;   // (the index cache as the kernels take it: ic, or tiered VRAM / host - MAYA_MM3_IC_STREAM)
+    k::IcRef icr;   // (the index cache as the kernels take it: ic, or tiered VRAM / host - SAGUARO_MM3_IC_STREAM)
     k::KvQ kvq;   // (--kv-cache: K's / V's quantized caches - a format other than BF16 instead of kc / vc)
     k::KvHost kvh;   // (--kv-streaming: the caches above a ring, every position in host memory too)
     // (--parallel) every sequence's caches - kc / vc / ic / kvq above are the bound one's (Model::bind)
     struct SeqKv {
         uint16_t *kc = nullptr, *vc = nullptr, *ic = nullptr;
         k::IcRef icr;
-        vmm::Range icv;   // (MAYA_MM3_ELASTIC: ic's range, mapped as the conversation grows)
+        vmm::Range icv;   // (SAGUARO_MM3_ELASTIC: ic's range, mapped as the conversation grows)
         k::KvQ kvq;
         k::KvHost kvh;   // (KV streaming: this conversation's ring tags and host rows)
     };
@@ -119,7 +119,7 @@ struct Layer {
     std::vector<int> res_slot;     // expert -> its slot in the resident region (-1: none)
     std::vector<int> res_ids;      // slot -> expert
     uint8_t* res_base = nullptr;   // the resident region: res_ids.size() blobs, blob bytes apart
-    vmm::Range resv;               // (MAYA_MM3_ELASTIC: the region's range - its tail given to the index keys)
+    vmm::Range resv;               // (SAGUARO_MM3_ELASTIC: the region's range - its tail given to the index keys)
     int res_cap = 0;               // (... its slots at the load)
     std::vector<const uint8_t*> host_blob;   // expert -> its assembled blob in the pinned pool (null: none)
     // host-free (every routed expert of the layer in VRAM): the decode's plan made on the device from exp_tab (expert ->
@@ -139,8 +139,8 @@ struct Dev {
     cudaEvent_t fev = nullptr, jev = nullptr;
     std::vector<int> layers;
     size_t free0 = 0;
-    size_t el_floor = 0;   // (MAYA_MM3_ELASTIC: the VRAM kept free - the load's free less a slack)
-    // (MAYA_MM3_KV_GATHER, elastic + KV streaming int8) a prompt chunk's host K / V blocks copied into VRAM once: the
+    size_t el_floor = 0;   // (SAGUARO_MM3_ELASTIC: the VRAM kept free - the load's free less a slack)
+    // (SAGUARO_MM3_KV_GATHER, elastic + KV streaming int8) a prompt chunk's host K / V blocks copied into VRAM once: the
     // four arrays' ranges (slots of [blk][Hkv] rows each, mapped as a read gets deeper), the block map, a counter
     vmm::Range kgr[4];
     int kg_slots = 0;
@@ -371,7 +371,7 @@ std::string tune_key_of(const std::vector<int>& gpus) {
 
 }  // namespace
 
-// MAYA_MM3_NUMA_POOL=1 (Linux, several NUMA nodes): the pinned pool split by the cards' NUMA nodes - the experts of a
+// SAGUARO_MM3_NUMA_POOL=1 (Linux, several NUMA nodes): the pinned pool split by the cards' NUMA nodes - the experts of a
 // card's layers in RAM on that card's node (mbind MPOL_PREFERRED, then registered), so its staging copies do not cross
 // the socket link (DS4_NUMA_STAGE's lesson on this 2 + 2 box).  Placement only: the same values, the same tokens.
 static int numa_nodes_online() {
@@ -446,7 +446,7 @@ struct Model::Impl {
     int head_dev = 0;
     // a token's and a verify window's attention: each query's kept blocks in this many runs on blocks of their own,
     // combined in run order (k::sparse_attn's splits - one block a KV group walking all of them left the GPU idle: a
-    // query's sums depend on the splits alone, so a window's rows keep the token path's bits).  MAYA_MM3_ATTN_SPLIT=1:
+    // query's sums depend on the splits alone, so a window's rows keep the token path's bits).  SAGUARO_MM3_ATTN_SPLIT=1:
     // one run (the decode as before)
     int attn_splits = 16;
     std::vector<float> inv_freq;
@@ -478,19 +478,19 @@ struct Model::Impl {
     std::map<int, std::array<size_t, kAN>> acct;
     std::map<int, size_t> acct_kvh;
     uint8_t* kv_host = nullptr;      // KV streaming: every layer's whole K / V cache (pinned, mapped)
-    uint8_t* ic_host = nullptr;      // (MAYA_MM3_IC_STREAM) the index cache's host tier
-    // the index cache's VRAM rows a layer: all (o.max_ctx) unless MAYA_MM3_IC_STREAM=<positions> tiers it
+    uint8_t* ic_host = nullptr;      // (SAGUARO_MM3_IC_STREAM) the index cache's host tier
+    // the index cache's VRAM rows a layer: all (o.max_ctx) unless SAGUARO_MM3_IC_STREAM=<positions> tiers it
     int ic_rows() const {
         const char* v = ::mm3::env("MM3_IC_STREAM");
         const int n = v ? std::atoi(v) : 0;
         return n >= 4096 && n < o.max_ctx ? n / 128 * 128 : o.max_ctx;
     }
-    // ---- elastic index keys (MAYA_MM3_ELASTIC=<positions>): each conversation's index cache an address range of
+    // ---- elastic index keys (SAGUARO_MM3_ELASTIC=<positions>): each conversation's index cache an address range of
     // o.max_ctx rows, el_pos of them mapped at the load and the rest as it grows - VRAM short, the coldest resident
     // experts of that GPU give their slots (ctx_take); an idle engine takes them back (ctx_give).  0: off
     int el_pos = 0;
     long el_taken = 0, el_given = 0;
-    size_t el_min = (size_t) 256 << 20;   // (VRAM always left free: MAYA_MM3_ELASTIC_MIN_FREE_MB)
+    size_t el_min = (size_t) 256 << 20;   // (VRAM always left free: SAGUARO_MM3_ELASTIC_MIN_FREE_MB)
     size_t ic_row_bytes() const { return (size_t) g.ix_dim * 2; }
     int ctx_room(int s) const {
         if (el_pos <= 0 || L.empty() || s < 0 || s >= (int) L[0].sk.size()) return o.max_ctx;
@@ -633,7 +633,7 @@ struct Model::Impl {
     }
     // (an idle engine) experts back into the regions while VRAM is free past the floor, the most routed first - for at
     // most budget_s seconds; true: more to give
-    // MAYA_MM3_KV_GATHER: 1 (default) on, 0 off, 2 every other prompt chunk (a speed check in one load)
+    // SAGUARO_MM3_KV_GATHER: 1 (default) on, 0 off, 2 every other prompt chunk (a speed check in one load)
     static int kv_gather_mode() {
         static const int m = [] {
             const char* v = ::mm3::env("MM3_KV_GATHER");
@@ -773,7 +773,7 @@ struct Model::Impl {
     static constexpr float kDecay = 0.95f, kPromote = 1.8f;
     static constexpr int kMaxPending = 4;
     uint8_t* pool = nullptr;         // the pinned pool
-    std::vector<std::pair<uint8_t*, size_t>> node_pools;   // (MAYA_MM3_NUMA_POOL: a pool a NUMA node, mapped + registered)
+    std::vector<std::pair<uint8_t*, size_t>> node_pools;   // (SAGUARO_MM3_NUMA_POOL: a pool a NUMA node, mapped + registered)
     std::unique_ptr<CpuLane> lane;
     std::unique_ptr<Draft> draftm;   // the DSpark draft (on the head's GPU)
     double draft_plan = 0.0;         // plan_memory's room for it (bytes: the draft, its taps, a margin)
@@ -820,13 +820,13 @@ struct Model::Impl {
         }
     }
 
-    // ---- MAYA_MM3_PROF=1 (one GPU): each forward's GPU time by part, from events on the stream - the time between two
+    // ---- SAGUARO_MM3_PROF=1 (one GPU): each forward's GPU time by part, from events on the stream - the time between two
     // marks goes to the second's part (a host wait before it included); printed at the end by kind of forward
     enum { kPAttnIn, kPIxProj, kPIndex, kPIxSel, kPAttn, kPOGemm, kPOut, kPDense, kPRouter, kPRoute, kPSync, kPExperts,
            kPHead, kPDraft, kPN };
     struct Prof {
         bool on = false;
-        bool sync = false;        // (MAYA_MM3_PROF=2: the host waits at each mark and times it - AMD's events may be
+        bool sync = false;        // (SAGUARO_MM3_PROF=2: the host waits at each mark and times it - AMD's events may be
                                   //  stamped as their packet is dispatched, ahead of the kernels before them)
         std::vector<double> ht;
         std::vector<cudaEvent_t> ev;
@@ -1336,7 +1336,7 @@ struct Model::Impl {
     // l, d, T given (the router's T rows of input in d.xn, its logits in d.logit): the error also says where the NaN
     // came from - the router's input and logits, the layer's gate and bias on the GPU against the model's files, and
     // the first NaN / Inf the files hold in the layers up to this one (a damaged download keeps its size; #672: the
-    // same layer on every GPU and split).  MAYA_MM3_DUMP_ROUTER=<file>: the input and logits rows written there too.
+    // same layer on every GPU and split).  SAGUARO_MM3_DUMP_ROUTER=<file>: the input and logits rows written there too.
     bool routes_ok(const int* top, int n, size_t li, std::string& err, const Layer* l = nullptr, Dev* d = nullptr,
                    int T = 0) const {
         for (int i = 0; i < n; ++i)
@@ -1571,7 +1571,7 @@ struct Model::Impl {
                 o.dspark = false;
                 info.push_back("NOTE: " + par + "no DSpark draft - the conversations decode together without it");
             }
-            static const bool ps = [] {   // (MAYA_MM3_PAR_STREAM=1: each conversation its own ring + host rows)
+            static const bool ps = [] {   // (SAGUARO_MM3_PAR_STREAM=1: each conversation its own ring + host rows)
                 const char* v = ::mm3::env("MM3_PAR_STREAM");
                 return v != nullptr && std::atoi(v) != 0;
             }();
@@ -1647,7 +1647,7 @@ struct Model::Impl {
             const size_t gr = vmm::granule(D[0].id), rb = (size_t) g.ix_dim * 2;
             const int step = gr > 0 && gr % rb == 0 ? (int) (gr / rb) : 0;
             if (step == 0 || ::mm3::env("MM3_IC_STREAM") || o.tp > 0) {
-                info.push_back("NOTE: MAYA_MM3_ELASTIC: off (no virtual memory API, MAYA_MM3_IC_STREAM or --tp)");
+                info.push_back("NOTE: SAGUARO_MM3_ELASTIC: off (no virtual memory API, SAGUARO_MM3_IC_STREAM or --tp)");
             } else {
                 el_pos = (std::atoi(ev) + step - 1) / step * step;
                 if (const char* mv = ::mm3::env("MM3_ELASTIC_MIN_FREE_MB")) el_min = (size_t) std::max(0, std::atoi(mv)) << 20;
@@ -1660,7 +1660,7 @@ struct Model::Impl {
         // the layers over the GPUs by what each needs against each GPU's free memory: a layer's dense weights, its routed
         // experts and its caches, the last GPU's room less the output head (and the DSpark draft) - so every GPU keeps
         // about the same share of its memory over (the dense layers hold no experts: by layer count the first GPU kept
-        // GBs free while the others' experts went to the CPU lane).  MAYA_MM3_SPLIT_OLD=1: by layer count and free memory
+        // GBs free while the others' experts went to the CPU lane).  SAGUARO_MM3_SPLIT_OLD=1: by layer count and free memory
         {
             const bool old = ::mm3::env("MM3_SPLIT_OLD") != nullptr;
             std::vector<double> w((size_t) g.n_layers, 1.0), cap(D.size());
@@ -2062,7 +2062,7 @@ struct Model::Impl {
             // only a prompt's and a picture's fallback (nothing is staged: every MoE layer host-free) - a few kept
             // (kMinSlots), the rest of their memory to the experts; and (the reserve not asked for) the GPU keeps
             // half a GB free instead of one - what the load has not taken by now is small (the BLAS's workspace, the
-            // graphs) - or a picture's room more on the vision tower's GPU.  MAYA_MM3_SLOTS_FIT=0: as before
+            // graphs) - or a picture's room more on the vision tower's GPU.  SAGUARO_MM3_SLOTS_FIT=0: as before
             if (d.n_slots > kMinSlots && o.resident_cap < 0) {
                 const char* sv = ::mm3::env("MM3_SLOTS_FIT");
                 size_t all = 0;
@@ -2238,7 +2238,7 @@ struct Model::Impl {
                 want += b;
             }
             CK(cudaSetDevice(D[0].id));
-            // (MAYA_MM3_NUMA_POOL=1: one pool a node - the first nw candidates by their layer's card's node)
+            // (SAGUARO_MM3_NUMA_POOL=1: one pool a node - the first nw candidates by their layer's card's node)
             std::map<int, size_t> by_node;
             const char* nv = ::mm3::env("MM3_NUMA_POOL");
             if (nv != nullptr && std::atoi(nv) != 0 && numa_nodes_online() > 1 && want > 0) {
@@ -2314,7 +2314,7 @@ struct Model::Impl {
                 for (auto& t : th) t.join();
                 st.pinned_gb = (double) want / (1u << 30);
                 if (!node_pools.empty()) {
-                    std::string w = "pinned pool by NUMA node (MAYA_MM3_NUMA_POOL):";
+                    std::string w = "pinned pool by NUMA node (SAGUARO_MM3_NUMA_POOL):";
                     for (auto& kv : by_node) w += " node " + std::to_string(kv.first) + " " + std::to_string(kv.second >> 30) + " GB";
                     info.push_back(w);
                 }
@@ -2327,7 +2327,7 @@ struct Model::Impl {
         }
         // host-free layers: a MoE layer with every routed expert in VRAM makes its decode plan on the device (the routing
         // read, the experts' addresses looked up and a window's experts grouped there) - a token or a verify window is
-        // enqueued whole, with no wait for the host between its layers.  MAYA_MM3_HOST_FREE=0: every layer through the
+        // enqueued whole, with no wait for the host between its layers.  SAGUARO_MM3_HOST_FREE=0: every layer through the
         // host as before (the same plan values, so the same tokens either way)
         {
             const char* hv = ::mm3::env("MM3_HOST_FREE");
@@ -3126,7 +3126,7 @@ struct Model::Impl {
         std::vector<CpuExpert> cpu;
         // (of the experts the CPU lane would take, lane_split's - ones in the pinned pool - to staging slots instead)
         int to_stage = 0, to_help = 0;
-        // MAYA_MM3_DECODE_HELP=1: the card beside d (its NUMA node) stages and computes some of them over its own link
+        // SAGUARO_MM3_DECODE_HELP=1: the card beside d (its NUMA node) stages and computes some of them over its own link
         Dev* hd = nullptr;
         if (lane && lane_copy > 0) {
             int cand = 0;
@@ -3245,7 +3245,7 @@ struct Model::Impl {
     // the routed experts of layer l for this chunk: top [T][K] on the host -> y rows (by the sorted rows' order) and
     // invrow; a pass over the resident experts (by resident slot), then one a batch of the staged experts (by staging
     // slot: an expert already in a slot keeps it, the others take the least recently used slots)
-    // MAYA_MM3_READ_HELP=1 (with STAGE_OVERLAP, a prompt's chunk): the card beside d on its NUMA node stages and computes
+    // SAGUARO_MM3_READ_HELP=1 (with STAGE_OVERLAP, a prompt's chunk): the card beside d on its NUMA node stages and computes
     // half of the layer's staged experts over its own PCIe link - the rows (xn, xn16) copied to it, its experts' output
     // rows copied back before the combine.  The same kernels on the same rows: the same bits.
     int helper_of(const Dev& d) {
@@ -3304,7 +3304,7 @@ struct Model::Impl {
             passes.back().dev = &d;
         }
         const long long lid = (long long) (&l - L.data());
-        // MAYA_MM3_STAGE_OVERLAP=1 (a prompt's chunk): the staging slots in two halves - a pass's copies (on the copy
+        // SAGUARO_MM3_STAGE_OVERLAP=1 (a prompt's chunk): the staging slots in two halves - a pass's copies (on the copy
         // stream) into one half while the pass before computes from the other - instead of copy, compute, wait
         static const bool ov_on = [] {
             const char* v = ::mm3::env("MM3_STAGE_OVERLAP");
@@ -3594,7 +3594,7 @@ struct Model::Impl {
     // Only where nothing in the forward needs the host: one GPU, every MoE layer host-free, the token kernels.  A
     // graph is keyed by its tokens, its head rows, the indexer's block count (the one argument that moves with the
     // position: every 128 tokens - a new capture then) and the residual stream's buffer (a prompt's MoE layers swap h
-    // and out: a graph captured before a prompt would read the other one after it).  MAYA_MM3_GRAPH=0: no graphs
+    // and out: a graph captured before a prompt would read the other one after it).  SAGUARO_MM3_GRAPH=0: no graphs
     // (--parallel: the key also holds the bound sequence - its caches are the graph's - and a forward_rows step's
     //  rows' sequences and block counts; graphs are dropped least recently used first, kGraphKeep kept)
     struct GraphEntry {
@@ -3674,7 +3674,7 @@ struct Model::Impl {
 
     // a forward's residual rows from GPU a's stream to b's (dst on b): b's stream waits on a's work there through an
     // event, the host goes on enqueueing (CUDA; HIP - whose queued work Windows submits only at a host wait - and
-    // MAYA_MM3_HOP_EVENTS=0: the host waits for a's stream first, as before)
+    // SAGUARO_MM3_HOP_EVENTS=0: the host waits for a's stream first, as before)
     bool hop_events = [] {
 #if defined(STRATA_USE_HIP)
         return false;
@@ -3931,7 +3931,7 @@ struct Model::Impl {
         int cur = L[0].dev;
         CK(cudaSetDevice(D[(size_t) cur].id));
         CK(cudaMemcpyAsync(D[(size_t) cur].h, h, (size_t) T * g.dim * 4, cudaMemcpyHostToDevice, D[(size_t) cur].s));
-        pmark(D[(size_t) cur], kPAttnIn);   // (MAYA_MM3_PROF: the forward's start)
+        pmark(D[(size_t) cur], kPAttnIn);   // (SAGUARO_MM3_PROF: the forward's start)
         // a token's or a verify window's rows through the head's GEMV (the same bits for each row), else the prompt's
         // head below
         const bool fast_head = want > 0 && want <= kWin && o.fast_decode;
@@ -4150,8 +4150,8 @@ bool Model::load(const Options& o_in, std::string& err) {
     }
 #if defined(_WIN32)
     // Windows: the tensor-parallel path's host waits on the GPUs' counters depend on its launches being submitted as
-    // they are enqueued, which the WDDM driver batches - the layer split there (MAYA_MM3_TP_WINDOWS=1: try it anyway)
-    if (o.tp > 0 && !(std::getenv("MAYA_MM3_TP_WINDOWS") && std::atoi(std::getenv("MAYA_MM3_TP_WINDOWS")) != 0)) {
+    // they are enqueued, which the WDDM driver batches - the layer split there (SAGUARO_MM3_TP_WINDOWS=1: try it anyway)
+    if (o.tp > 0 && !(std::getenv("SAGUARO_MM3_TP_WINDOWS") && std::atoi(std::getenv("SAGUARO_MM3_TP_WINDOWS")) != 0)) {
         Options o2 = o;
         o2.tp = 0;
         const bool ok = p->load(o2, err);

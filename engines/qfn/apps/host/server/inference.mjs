@@ -3,12 +3,12 @@
  *
  * Preference order:
  *   1. the Strata engine — the C++ engine behind Strata's own Python API worker. This is the
- *      product's inference path and is tried first. `STRATA_SERVER_URL` names it explicitly;
+ *      product's inference path and is tried first. `SAGUARO_SERVER_URL` names it explicitly;
  *      otherwise the Strata worker's default loopback address is probed.
  *   2. the engine Strata supervises itself (llama.cpp), when one is configured
  *   3. a *different* OpenAI-compatible server already running on localhost, but only when it
  *      identifies itself as one; a host that merely answers a port is not adopted silently
- *   4. a clearly-labelled demo engine — **development only**. A packaged or `STRATA_REAL_ENGINE=1`
+ *   4. a clearly-labelled demo engine — **development only**. A packaged or `SAGUARO_REAL_ENGINE=1`
  *      run never reaches this branch: it raises a typed error instead, so no simulated answer can
  *      enter a production success path.
  */
@@ -31,19 +31,19 @@ let checkedAt = 0;
 /**
  * True when this process must not simulate inference.
  *
- * Packaged builds are always real. `STRATA_REAL_ENGINE` can force it either way for development,
+ * Packaged builds are always real. `SAGUARO_REAL_ENGINE` can force it either way for development,
  * but it can never turn a packaged build back into demo mode — that is the guarantee acceptance
  * checklist row U12 asks for ("no success path using demo responses/metrics").
  */
 export function requiresRealEngine() {
-  if (process.env.STRATA_FORCE_DEMO === '1' && process.env.STRATA_PACKAGED !== '1') return false;
-  if (process.env.STRATA_REAL_ENGINE === '1') return true;
-  return process.env.STRATA_PACKAGED === '1';
+  if (process.env.SAGUARO_FORCE_DEMO === '1' && process.env.SAGUARO_PACKAGED !== '1') return false;
+  if (process.env.SAGUARO_REAL_ENGINE === '1') return true;
+  return process.env.SAGUARO_PACKAGED === '1';
 }
 
 /** Where the Strata API worker is, if it was named explicitly. */
 function strataUrl() {
-  const raw = process.env.STRATA_SERVER_URL?.trim();
+  const raw = process.env.SAGUARO_SERVER_URL?.trim();
   if (!raw) return STRATA_DEFAULT_URL;
   return raw.replace(/\/+$/, '').endsWith('/v1') ? raw.replace(/\/+$/, '') : `${raw.replace(/\/+$/, '')}/v1`;
 }

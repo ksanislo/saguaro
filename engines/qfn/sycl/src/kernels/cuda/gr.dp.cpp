@@ -687,7 +687,7 @@ catch (sycl::exception const &exc) {
 
 static bool no_multi_gr() {
     static const bool off = [] {
-        const char* v = std::getenv("STRATA_NO_MULTI_GR");
+        const char* v = std::getenv("SAGUARO_NO_MULTI_GR");
         return v != nullptr && v[0] != '\0' && v[0] != '0';
     }();
     return off;

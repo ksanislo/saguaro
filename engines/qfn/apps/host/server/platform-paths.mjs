@@ -25,11 +25,11 @@ export function stateRoot(env = process.env, platform = process.platform, home =
 const under = (root, platform, name) => (platform === 'win32' ? winPath(root, name) : posix.join(root, name));
 
 export function tuningDir(env = process.env, platform = process.platform, home = homedir()) {
-  return env.STRATA_TUNE_DIR || under(stateRoot(env, platform, home), platform, 'tuning');
+  return env.SAGUARO_TUNE_DIR || under(stateRoot(env, platform, home), platform, 'tuning');
 }
 
 export function timeSkipDir(env = process.env, platform = process.platform, home = homedir()) {
-  return env.STRATA_TIMESKIP_DIR || under(stateRoot(env, platform, home), platform, 'time-skip');
+  return env.SAGUARO_TIMESKIP_DIR || under(stateRoot(env, platform, home), platform, 'time-skip');
 }
 
 function systemRoot(env) {

@@ -125,8 +125,7 @@ def run(cfg: dict, say=print, start_engine=None) -> dict:
 if __name__ == "__main__":
     if len(sys.argv) != 2:
         sys.exit("usage: calibrate_ds4.py <maya-ds4.json>")
-    import maya_names
-    cfg = maya_names.env_in(json.loads(Path(sys.argv[1]).read_text(encoding="utf-8-sig")))
+    cfg = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8-sig"))
     if not has_drafter(cfg):
         sys.exit("this config's pack has no DSpark drafter")
     print(json.dumps(run(cfg), indent=1))

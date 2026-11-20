@@ -23,9 +23,9 @@ measured with Swift 1.5's IQ2_XS, which runs at the original's speed.
 4K 1,294 -> 1,570, 32K 2,170 -> 2,653, 128K 2,123 -> 2,468 tokens/s (+16-22%), as close to an FP16 reference as the
 previous kernels (closer at 32K: teacher-forced KL 0.009 vs 0.012). The decode path's block selection and greedy
 argmax run on thread-block clusters (RTX 50, sm_90+; other cards keep the previous kernels; the same tokens): Q2_0 output at 4K 89 -> 93.5, at 128K
-64.5 -> 76.4 tokens/s. `STRATA_PF_FUSED=0` keeps the previous prompt kernels (byte-identical answers to 0.1.35);
-`STRATA_PF_FUSED=1` also runs the native IQ packs' fused kernels (opt-in: IQ2_XS prompts +12% at 4K, +3% at 32K, the
-IQ3 packs about even; on HIP they run on gfx11 and on gfx1200 / gfx1201, see AMD_HIP.md); `STRATA_QSA_CLUSTER=0` / `STRATA_ARGMAX_MULTI=0` turn the decode kernels off. The tables
+64.5 -> 76.4 tokens/s. `SAGUARO_PF_FUSED=0` keeps the previous prompt kernels (byte-identical answers to 0.1.35);
+`SAGUARO_PF_FUSED=1` also runs the native IQ packs' fused kernels (opt-in: IQ2_XS prompts +12% at 4K, +3% at 32K, the
+IQ3 packs about even; on HIP they run on gfx11 and on gfx1200 / gfx1201, see AMD_HIP.md); `SAGUARO_QSA_CLUSTER=0` / `SAGUARO_ARGMAX_MULTI=0` turn the decode kernels off. The tables
 below are 0.1.26's.
 
 ### Prompt processing (tokens/s)
@@ -83,7 +83,7 @@ costs ~13.7 KB of RAM per context token (1.7 GB at 128K). Existing installs: run
 it on. Setup turns it on when the RAM has room for it; `--kv-streaming on|off` overrides that (on past the RAM test with a
 note; never under WSL, which cannot stream).
 
-Under WSL2 the driver caps what `cudaHostAlloc` may pin at about 1 GiB, so the KV host copy is pinned with `cudaHostRegister` of ordinary memory there (detected through `/dev/dxg`); `STRATA_KV_HOST_REGISTER=1` forces that order on any system and `=0` forces `cudaHostAlloc` first (the other method is the fallback in both cases). On Linux without WSL nothing changes by default; with the switch the engine prints `KV streaming: the host copy is pinned with cudaHostRegister` (#1498 by yjamil8; WSL not tested here, the forced path was run on a Tesla P100: `--kv int8 --kv-resident 32768`, answers and decode speed unchanged).
+Under WSL2 the driver caps what `cudaHostAlloc` may pin at about 1 GiB, so the KV host copy is pinned with `cudaHostRegister` of ordinary memory there (detected through `/dev/dxg`); `SAGUARO_KV_HOST_REGISTER=1` forces that order on any system and `=0` forces `cudaHostAlloc` first (the other method is the fallback in both cases). On Linux without WSL nothing changes by default; with the switch the engine prints `KV streaming: the host copy is pinned with cudaHostRegister` (#1498 by yjamil8; WSL not tested here, the forced path was run on a Tesla P100: `--kv int8 --kv-resident 32768`, answers and decode speed unchanged).
 
 **4-bit KV cache (engine 0.1.8, optional):** `START-HERE.bat --setup` asks above 8K context (or pass `--kv q4_0`). It
 halves the KV cache's memory with a Hadamard rotation before 4-bit rounding (PR #21), about 4% faster at 128K, but it
@@ -96,14 +96,14 @@ VRAM. RTX 3090, the Coder at 198K context: 99 instead of 85 tokens/s output, the
 slower. It streams its KV cache like the other formats (`--kv-resident N`): on an RTX 2060 SUPER 8 GB at 128K with
 20,480 resident cells, +780 expert slots over resident K8V4, and it scores better than 4-bit KV on long documents.
 
-**Reproducible greedy output (0.1.30, opt-in, `STRATA_IQ_MT_MIN=1`):** with the IQ models, the CPU computes an
+**Reproducible greedy output (0.1.30, opt-in, `SAGUARO_IQ_MT_MIN=1`):** with the IQ models, the CPU computes an
 expert for one token with ggml's dot product and for several tokens with Strata's multi-token kernels, which round
 slightly differently. How many tokens share an expert depends on the drafts in a verify window, so the same prompt
 at temperature 0 can end in a different (equally good) answer when the drafting, the cache state or a resumed
-conversation differ (issue #152). `STRATA_IQ_MT_MIN=1` (in the config's `env`) uses the multi-token kernels for
+conversation differ (issue #152). `SAGUARO_IQ_MT_MIN=1` (in the config's `env`) uses the multi-token kernels for
 every group: the answer then no longer depends on the drafting. Measured on a Ryzen 7600 (AVX-512): IQ3_S decode
 -1..-3%, the other models the same; the default stays the fastest rule. On an Intel CPU of Alder Lake or later
-without AVX-512, where the AVX-2 kernel gathers the IQ3_S grid, `STRATA_IQ3S_MT1=1` (opt-in) gives IQ3_S the multi-token
+without AVX-512, where the AVX-2 kernel gathers the IQ3_S grid, `SAGUARO_IQ3S_MT1=1` (opt-in) gives IQ3_S the multi-token
 kernel for one token, which is the faster one there; it changes a lone token's rounding, so it is off by default. Through the server, two more things carry
 over from one request to the next (#410): the adaptive tier moves experts between RAM and VRAM (the GPU and the CPU
 round an expert differently), and the prompt cache resumes a repeated prompt and reads only its tail through the
@@ -113,9 +113,9 @@ answer after a start differ from the next ones. Measured here (IQ3_XXS, a 3.6K-t
 three switches 1 answer of 4, without `--pcie-frac 0` 2 of 4 (the first one differs), with the defaults 2 of 4.
 `--pcie-frac 0` costs decode speed (the missed experts all run on the CPU), so keep it for A/B runs.
 
-**Coupled drafts with Gumbel-max picks (opt-in, `STRATA_SPEC_COUPLED=1` and `STRATA_SPEC_GUMBEL=1`):** for a request
-that samples (temperature above 0), `STRATA_SPEC_COUPLED=1` lets the draft layer sample its guesses with the target's own
-chain and random draw instead of taking its most likely token. `STRATA_SPEC_GUMBEL=1` changes how both of them pick from
+**Coupled drafts with Gumbel-max picks (opt-in, `SAGUARO_SPEC_COUPLED=1` and `SAGUARO_SPEC_GUMBEL=1`):** for a request
+that samples (temperature above 0), `SAGUARO_SPEC_COUPLED=1` lets the draft layer sample its guesses with the target's own
+chain and random draw instead of taking its most likely token. `SAGUARO_SPEC_GUMBEL=1` changes how both of them pick from
 that chain: the token with the largest p / E, where E is exponential noise keyed by the seed, the position and the token
 id (the Gumbel-max trick; it is still an exact sample of the same distribution). With the default pick, one random number
 walked over the candidates sorted by probability, a draft and a target whose candidate lists differ in one token tend to
@@ -125,7 +125,7 @@ Max+ 395 (Radeon 8060S, Linux, ROCm 7.14.1, the iGPU alone), UD-Q4_K_XL, `--spec
 layer), temperature 1.0 / top_p 0.95 / top_k 20, a 1.3K-token prompt and 512 output tokens, 12-13 requests per arm:
 drafts accepted 52.8% -> 59.9%, tokens per verify window 2.65 -> 2.88, output 41.1 -> 44.9 tokens/s (+9%); a window
 costs the same (draft 8.8 -> 9.1 ms of 64). `sampler_parity` checks the pick against a host reference on every sampled
-path, and that its frequencies match the softmax. On an RTX 3060 (IQ3_XXS, `--spec 4 --mtp`, temperature 1.0 / top_p 0.95 / top_k 20, 12 interleaved pairs of 200-token story and code requests) `STRATA_SPEC_COUPLED=1` raised the accepted drafts from 62.1% to 66.9% and adding `STRATA_SPEC_GUMBEL=1` to 68.0%, but decode speed did not move beyond the run-to-run spread (median 43.3 tok/s with coupled alone, 42.8 with Gumbel as well): try it on your own card before relying on it.
+path, and that its frequencies match the softmax. On an RTX 3060 (IQ3_XXS, `--spec 4 --mtp`, temperature 1.0 / top_p 0.95 / top_k 20, 12 interleaved pairs of 200-token story and code requests) `SAGUARO_SPEC_COUPLED=1` raised the accepted drafts from 62.1% to 66.9% and adding `SAGUARO_SPEC_GUMBEL=1` to 68.0%, but decode speed did not move beyond the run-to-run spread (median 43.3 tok/s with coupled alone, 42.8 with Gumbel as well): try it on your own card before relying on it.
 
 **The draft layer's tokens (0.1.27, `--draft-vocab`):** the MTP draft layer can only propose tokens from a subset
 of the vocabulary (`mtp/rt/draft_vocab.bin`). Since 0.1.27 the subset includes every Chinese, Japanese and Korean
@@ -169,14 +169,14 @@ other ~18 GB), a 32 GB PC with a 12-16 GB GPU the Coder; IQ3_XXS on a 32 GB PC s
   as far as the RAM allows, their experts are kept in RAM too (so a prompt reads nothing from the SSD either).
 - The cache still follows the conversation (`--adapt-every`): a swap copies the evicted expert back from VRAM into the
   RAM place of the one that replaces it, so the RAM copy keeps holding exactly what the GPU does not.
-- `STRATA_RAM_ADAPT=<n>` (opt-in, `--serve`, one GPU): the RAM copy follows the conversation too. Without it the
+- `SAGUARO_RAM_ADAPT=<n>` (opt-in, `--serve`, one GPU): the RAM copy follows the conversation too. Without it the
   copy is chosen once, at start, so when the RAM cannot hold every expert the GPU does not, an expert outside the copy
   is read from the SSD every time the conversation routes to it. With it, before a decode window and while no adaptive
   round is in flight, up to `n` experts the windows keep routing to (the adaptive tier's decayed count, 2 or more) take
   the RAM places of experts of their own layer that are not routed to (count below 0.5): one pair per layer, the
   largest difference first, one blob read each. The RAM stays the same size; the routing, the weights and the VRAM
   tier's rule are untouched, and an expert that left the copy is read from the file again when it is needed. It needs
-  the adaptive tier (`--adapt-every`), and does nothing with `STRATA_EXCHANGE_ROTATE=1`, a layer split, a peer or
+  the adaptive tier (`--adapt-every`), and does nothing with `SAGUARO_EXCHANGE_ROTATE=1`, a layer split, a peer or
   helper GPU, or `--batch`. Prompt routing is not used to choose replacements, and no selection runs during prefill.
   Later prompts can read from a RAM copy changed by earlier decode requests. The log reports how many experts moved.
   Measured on an RTX 3060 12 GB with 32 GB of RAM (Linux, IQ2_XS, 20.5 GiB of experts in RAM and about 6,000 experts on
@@ -194,43 +194,43 @@ other ~18 GB), a 32 GB PC with a 12-16 GB GPU the Coder; IQ3_XXS on a 32 GB PC s
   advances between their windows too (docs/BATCHING.md); not with `--batch-groups` or `--peer-device` (the blocking
   tier runs there). With `--pipeline-windows 2` (two windows in flight, see
   [MULTI_GPU.md](MULTI_GPU.md)) the copies into the evicted slots and the moves into RAM also wait until the windows
-  that were in flight when they were decided have completed (`STRATA_PIPELINE_ADAPT_ASYNC=0`: the blocking tier
+  that were in flight when they were decided have completed (`SAGUARO_PIPELINE_ADAPT_ASYNC=0`: the blocking tier
   there). It is not bit-exact from run to run: which window first computes a swapped-in expert on the GPU (which
   rounds differently from the CPU) depends on when its copy lands.
   It stays on the blocking tier (said in the log) when the exchange buffers are not page-locked; the stats line
   reports ms per round.
 - **The arena too** (one GPU, no layer split): with every expert in RAM `--adapt-async 1` runs the same tier copy-in only:
   nothing to copy back or move into RAM. The evicted slot is marked non-resident before the round's copies are posted, and an
-  expert becomes resident only once its copy has landed; `STRATA_ADAPT_ASYNC_WAIT=1` (the default there) waits for the round at
+  expert becomes resident only once its copy has landed; `SAGUARO_ADAPT_ASYNC_WAIT=1` (the default there) waits for the round at
   the next tick, so the window an expert turns GPU-resident does not depend on timing. The pick runs on the host thread
-  (`STRATA_ADAPT_PICK_INLINE=1`, one round per window); `STRATA_ADAPT_ASYNC_BATCH=N` posts at most N copies per tick (default 0
+  (`SAGUARO_ADAPT_PICK_INLINE=1`, one round per window); `SAGUARO_ADAPT_ASYNC_BATCH=N` posts at most N copies per tick (default 0
   = all; 16 measured slower). Every K/V grow and the `VRAM` command land the round in flight first. RTX 3090 + Ryzen 5 5600X,
   cold prompts: x1.07-1.11 decode, 12 of 12 prompts faster
   ([report](../bench/results/2026-10-11-community-rtx3090-5600x-arena-async/README.md)).
-- **Pin by need** (`STRATA_PIN_BY_NEED=1`, opt-in, the arena on one GPU): Windows page-locks about half the RAM at most (the
+- **Pin by need** (`SAGUARO_PIN_BY_NEED=1`, opt-in, the arena on one GPU): Windows page-locks about half the RAM at most (the
   WDDM shared budget), so the arena registers its first ~30 GiB and the layers past it get no PCIe share. With the variable
   every blob gets a page-aligned stride (+0.15 % RAM) and the expert profile's non-GPU-resident experts are registered by rank
-  instead, up to `STRATA_ARENA_PIN_GIB` (29 by default on Windows). `STRATA_PCIE_MIN1=1` sends one miss over PCIe as soon as a
+  instead, up to `SAGUARO_ARENA_PIN_GIB` (29 by default on Windows). `SAGUARO_PCIE_MIN1=1` sends one miss over PCIe as soon as a
   layer has two (the share otherwise rounds to 0 at 1-2 misses). RTX 3090 + Ryzen 5 5600X: prompt read +5-7 % at 56K-117K
   tokens; decode level alone, +2-3 % with `--adapt-async 1` and `--pcie-frac 0.6`
   ([report](../bench/results/2026-10-11-community-rtx3090-5600x-arena-pin-by-need/README.md)).
-- **Pinned-memory headroom** (Windows CUDA, on by default; `STRATA_PIN_RESERVE_MIB=N`, `0` = off, sets it on any OS): the arena registers
+- **Pinned-memory headroom** (Windows CUDA, on by default; `SAGUARO_PIN_RESERVE_MIB=N`, `0` = off, sets it on any OS): the arena registers
   slice by slice until the driver refuses one, and on a 64 GB PC that left no page-locked memory at all for the few small buffers the
   engine allocates after it (the verify window's staging: `verify: mapped staging allocation failed`, exit 1, on Swift 1.5 IQ2_XS). The
   engine now holds 640 MiB (given back as soon as the arena is placed) and 160 MiB (kept until a required buffer is refused, or READY) while
   the arena pins, so the arena stops about one layer earlier; a refused required buffer gives both back and tries once more. If that still
-  fails the error ends with `[pinned-memory-exhausted]` and names the `STRATA_ARENA_PIN_GIB` to start with. Linux has no such ceiling
-  (the NVIDIA driver pins past `ulimit -l`), so the reserve is off there. Test knobs: `STRATA_TEST_PIN_BUDGET_MIB=N` makes the engine's own
-  pinned allocations fail beyond N MiB, `STRATA_TEST_PIN_LEFT_KIB=N` lowers that ceiling after the arena to what is charged plus N KiB.
-- `STRATA_EXCHANGE_ROTATE=1` (opt-in): an adaptive swap hands buffer ownership over instead of copying the evicted
+  fails the error ends with `[pinned-memory-exhausted]` and names the `SAGUARO_ARENA_PIN_GIB` to start with. Linux has no such ceiling
+  (the NVIDIA driver pins past `ulimit -l`), so the reserve is off there. Test knobs: `SAGUARO_TEST_PIN_BUDGET_MIB=N` makes the engine's own
+  pinned allocations fail beyond N MiB, `SAGUARO_TEST_PIN_LEFT_KIB=N` lowers that ceiling after the arena to what is charged plus N KiB.
+- `SAGUARO_EXCHANGE_ROTATE=1` (opt-in): an adaptive swap hands buffer ownership over instead of copying the evicted
   blob into the RAM copy (fully page-locked copy; layers of different blob sizes keep spare buffers per size). Same
   tokens, fewer host copies; it works with `--adapt-async 1` too. Swift 1.5 IQ3_S on an RTX 5090 with 64 GB RAM
   (Windows, about 30 swaps per verify window): 164 -> 188 tok/s on one forced 1,500-token text, 155 -> 178 over 23
   coding-agent turns. Details and the measurements: [EXCHANGE_ROTATION.md](EXCHANGE_ROTATION.md). Measured by us on an RTX 3060 12 GB (IQ3_XXS, resident RAM, default flags, 5 interleaved pairs): decode 58.96 -> 62.03 tok/s (+5.2%, 5/5 pairs), prompt speed unchanged; tokens identical with real adaptive swaps (Tesla P100, resident, blocking adaptation). It adds about 1.4 GiB of page-locked RAM, so leave it off when the RAM is already tight.
 - The answers are the plain mapped mode's for the same expert placement: the bytes are the file's. With a page-locked
   copy the GPU also takes its usual share of the misses over PCIe (`--pcie-frac`), as with enough RAM; `--pcie-frac 0`
-  (or `STRATA_RESIDENT_PIN=0`) gives the mapped mode's exact tokens.
-- The engine leaves 4 GB of the RAM it finds free (`STRATA_RESIDENT_HEADROOM_GIB`); when even the experts the GPU does
+  (or `SAGUARO_RESIDENT_PIN=0`) gives the mapped mode's exact tokens.
+- The engine leaves 4 GB of the RAM it finds free (`SAGUARO_RESIDENT_HEADROOM_GIB`); when even the experts the GPU does
   not hold do not fit, it says so and runs the plain mapped mode. The server log shows, per request, how many expert
   reads went to the file (`resident RAM: ... blob reads from the file`: 0 in steady use).
 - `--low-ram resident|mmap` forces one variant (also on a PC with enough RAM, e.g. to try it).
@@ -243,14 +243,14 @@ other ~18 GB), a 32 GB PC with a 12-16 GB GPU the Coder; IQ3_XXS on a 32 GB PC s
   engine that runs the resident variant on a split, so it keeps both cards, resident, as for any config:
   [MULTI_GPU.md](MULTI_GPU.md#using-it).
 
-**A mapped arena for small RAM (Linux, opt-in, 0.1.39, PR #640):** `STRATA_ARENA_MMAP=1` maps a native pack's expert
+**A mapped arena for small RAM (Linux, opt-in, 0.1.39, PR #640):** `SAGUARO_ARENA_MMAP=1` maps a native pack's expert
 arena read-only from the pack's `experts.bin` instead of reading it into locked RAM, for a PC whose GPUs hold most
 experts but whose RAM is small (2x 16 GB GPUs with 32 GB of RAM: ~1 GB -> 25 GB available while serving). The first
 start writes `experts.bin` (when the drive has room for it), later starts map it; the pages of the experts a GPU holds
 are handed back to the OS. Run it with `--pcie-frac 0` (the GPUs get no mapped alias). Without the variable nothing
 changes.
 
-**Releasing mapped expert pages on Windows (opt-in):** `STRATA_FILE_RELEASE=1` lets `FileExpertSource` trim the
+**Releasing mapped expert pages on Windows (opt-in):** `SAGUARO_FILE_RELEASE=1` lets `FileExpertSource` trim the
 full file-backed pages of experts after their GPU uploads complete, including the slots lent to prefill and then
 refilled. It works with `experts.bin` and the direct GGUF views; shared boundary pages and private/pinned buffers
 are left alone. Unset or `0` keeps the previous behavior. On one 32 GB Windows 11 laptop with an RTX 4080 Laptop
@@ -266,21 +266,21 @@ maps the model's GGUF files themselves and reads each expert's gate, up and down
 says they are (the files are checked against it first: every tensor's name, type, shape, offset and bounds). That
 saves the 23-50 GB copy on the disk. The answers are the same: on the Coder, 64 greedy tokens from `experts.bin` and
 from the GGUF gave identical tokens and logits. An expert read from the GGUF is three reads instead of one, so the
-engine fetches a layer's missing experts on 8 threads (`STRATA_FETCH_THREADS`) with one batched page request
+engine fetches a layer's missing experts on 8 threads (`SAGUARO_FETCH_THREADS`) with one batched page request
 (Windows `PrefetchVirtualMemory`). With an `experts.bin` in the pack, nothing changes. Setup does not use this yet.
 
 **Linux file tier, 0.2.0 defaults (zero-copy page-cached experts, io prefetch, the decode gate):** when experts are read
 from a GGUF read in place (the native packs, also with `--mmap-experts`), Linux now runs three things by default
 (0.2.1: an `experts.bin` pack gets io prefetch and the decode gate when the page cache has room for at least 55% of the experts, see below; zero-copy
 does not apply to it, its blob is one range the kernels already read from the mapping).
-(1) **Zero-copy** (`STRATA_COLD_OVERLAP=4`): an expert of a GGUF read in place whose three tensors' pages are all in the page
+(1) **Zero-copy** (`SAGUARO_COLD_OVERLAP=4`): an expert of a GGUF read in place whose three tensors' pages are all in the page
 cache (mincore) is computed straight from the mapping; before, every such expert was first assembled into a staging buffer
 (a copy of ~1.5 MB per Q2_0 expert, on the decode's critical path). Same bytes, same rows, same output (identity gates
-IDENTICAL). (2) **io prefetch** (`STRATA_IO_PREFETCH=1`, the path described below): whole-blob `pread`s and the router-
-predicted experts of the next layers read ahead. (3) **the decode gate** (`STRATA_IO_PF_GATE=1`): every 16 decode windows the
+IDENTICAL). (2) **io prefetch** (`SAGUARO_IO_PREFETCH=1`, the path described below): whole-blob `pread`s and the router-
+predicted experts of the next layers read ahead. (3) **the decode gate** (`SAGUARO_IO_PF_GATE=1`): every 16 decode windows the
 decode's read-ahead is judged - it runs only while the page cache has room for the experts (the memory available, the
-tightest cgroup limit included, over the experts' bytes: off below 0.55, on above 0.65, `STRATA_IO_PF_GATE_LO` / `_HI`) and
-while it pays (at least 128 MB read ahead in 16 windows and 10% of it used, `STRATA_IO_PF_GATE_USEFUL`; a probe every 256
+tightest cgroup limit included, over the experts' bytes: off below 0.55, on above 0.65, `SAGUARO_IO_PF_GATE_LO` / `_HI`) and
+while it pays (at least 128 MB read ahead in 16 windows and 10% of it used, `SAGUARO_IO_PF_GATE_USEFUL`; a probe every 256
 windows when it closed for that). Closed, the decode reads as it did without io prefetch (the look-ahead predicts one layer
 and warms with an madvise hint); the prompt path keeps its preads either way. Measured on an RTX PRO 5000 emulating a 12 GB
 card (`--expert-cache 4448`, Q2_0 GGUF in place, page cache dropped before each engine, RAM limited by a cgroup), the 0.2.0
@@ -291,23 +291,23 @@ decode, 1.63 / 1.68x prompts (the gate stays closed there); `--resident-budget-g
 real RTX 3060 12 GB (32 GB cgroup, 3 pairs) zero-copy alone gave 1.14 / 1.44 / 1.47x decode, 1.06 / 1.02x prompts. With them,
 the container RAM check counts a cgroup's clean page cache (active and inactive) as available, as MemAvailable does on a bare
 host: before, the 18 GiB RAM tier in a 32 GiB cgroup re-checked "1.2 GiB available" once io prefetch's startup reads had left
-their cache in the group, and its file tier switched to unbuffered reads (which also left zero-copy off). Off switches: `STRATA_COLD_OVERLAP=0`, `STRATA_IO_PREFETCH=0`,
-`STRATA_IO_PF_GATE=0`; the startup log names what is on. Windows and macOS are unchanged.
+their cache in the group, and its file tier switched to unbuffered reads (which also left zero-copy off). Off switches: `SAGUARO_COLD_OVERLAP=0`, `SAGUARO_IO_PREFETCH=0`,
+`SAGUARO_IO_PF_GATE=0`; the startup log names what is on. Windows and macOS are unchanged.
 
 **Linux, `experts.bin` packs (0.2.1):** io prefetch and the decode gate are on by default when the page cache has room for at least 55% of the experts
-(the tightest cgroup limit or MemAvailable over the pack's expert bytes, asked once at start; `STRATA_IO_PF_GATE_LO`). Below that the pack reads as before and the log says so; `STRATA_IO_PREFETCH=1` forces it, `0` turns it off. Measured on an RTX 3060 12 GB, IQ3_XXS pack (43 GB `experts.bin`), `--mmap-experts`, cgroup RAM limit, page cache dropped before each engine, 5 interleaved pairs: 32 GB decode 1.38x / 1.21x / 1.33x (story / code / doc8k, 5/5 pairs faster each), prompts 4K 1.04x, 20K 1.06x. At 16 GB io prefetch gave decode +3..8% but the cold 4K prompt 4-6% slower, so it stays off there (room 38%). Identity gates (fixed flags, no RAM limit and a 32 GB cgroup): 10/10 texts, exact_pp 4K / 20K residual dumps IDENTICAL.
+(the tightest cgroup limit or MemAvailable over the pack's expert bytes, asked once at start; `SAGUARO_IO_PF_GATE_LO`). Below that the pack reads as before and the log says so; `SAGUARO_IO_PREFETCH=1` forces it, `0` turns it off. Measured on an RTX 3060 12 GB, IQ3_XXS pack (43 GB `experts.bin`), `--mmap-experts`, cgroup RAM limit, page cache dropped before each engine, 5 interleaved pairs: 32 GB decode 1.38x / 1.21x / 1.33x (story / code / doc8k, 5/5 pairs faster each), prompts 4K 1.04x, 20K 1.06x. At 16 GB io prefetch gave decode +3..8% but the cold 4K prompt 4-6% slower, so it stays off there (room 38%). Identity gates (fixed flags, no RAM limit and a 32 GB cgroup): 10/10 texts, exact_pp 4K / 20K residual dumps IDENTICAL.
 
-**Linux file-tier I/O path (`STRATA_IO_PREFETCH=1`; 0.1.40.2, on by default on Linux since 0.2.0 - see above):** the mapped file tier reads experts through
-page faults. With this on, the layer's uncached experts and the router-predicted ones of the next layer (`STRATA_LOOKAHEAD_K`,
-`STRATA_IO_PREFETCH_DEPTH`, default 2 when on) are read by I/O threads (`STRATA_IO_PF_THREADS`, default 8) with whole-blob
+**Linux file-tier I/O path (`SAGUARO_IO_PREFETCH=1`; 0.1.40.2, on by default on Linux since 0.2.0 - see above):** the mapped file tier reads experts through
+page faults. With this on, the layer's uncached experts and the router-predicted ones of the next layer (`SAGUARO_LOOKAHEAD_K`,
+`SAGUARO_IO_PREFETCH_DEPTH`, default 2 when on) are read by I/O threads (`SAGUARO_IO_PF_THREADS`, default 8) with whole-blob
 `pread`s into the page cache, and the CPU kernels read the mapping as before. The bytes are the same, so the output is the
-same (greedy IQ3_XXS and Q2_0 hashes identical, prefetch off vs on). `STRATA_IO_PF_STAGE=1` instead stages every uncached
-expert in a buffer and makes the layer wait for them; `STRATA_IO_PF_AHEAD=0` keeps only the demand reads. The per-request
+same (greedy IQ3_XXS and Q2_0 hashes identical, prefetch off vs on). `SAGUARO_IO_PF_STAGE=1` instead stages every uncached
+expert in a buffer and makes the layer wait for them; `SAGUARO_IO_PF_AHEAD=0` keeps only the demand reads. The per-request
 log line "file tier I/O" shows what the OS read from the drive (/proc/self/io, major faults) against the engine's expert
-reads; `STRATA_IO_STATS=1` (or prefetch on) adds the page-cache hit / miss split (mincore) and the read-ahead used / unused counts.
+reads; `SAGUARO_IO_STATS=1` (or prefetch on) adds the page-cache hit / miss split (mincore) and the read-ahead used / unused counts.
 Measured (interleaved A/B, 10 pairs, 200-token greedy medians, page cache dropped before each run, memory limit by cgroup):
 
-| box, lane | default (fill) | `STRATA_IO_PF_STAGE=1` |
+| box, lane | default (fill) | `SAGUARO_IO_PF_STAGE=1` |
 |---|---|---|
 | RTX 3060, 32 GB, IQ3_XXS | -3.4% | **+25.7%** |
 | RTX 3060, 16 GB, IQ3_XXS | -1.8% | -32.6% |
@@ -334,7 +334,7 @@ per fresh 8K-16K prompt went to zero; fresh prompts read 3-8% faster, the prompt
 0.8-2.1 s to 0.06-0.5 s per request). With
 the GGUF read in place it also warms the next layer's likely experts: while the CPU works on a layer, a thread applies
 the next layer's router to this layer's input and asks the OS for the pages of the predicted experts that neither the
-GPU nor the RAM budget holds (only pages - the experts computed are the same; `STRATA_LOOKAHEAD=0` turns it off). This
+GPU nor the RAM budget holds (only pages - the experts computed are the same; `SAGUARO_LOOKAHEAD=0` turns it off). This
 is what runs [Unsloth's UD-Q4_K_XL](UNSLOTH_Q4.md) (72 GiB of experts) on a 64 GB PC: 7-8.5 tokens/s at N = 40 on an
 RTX 5070, against ~3 tokens/s before these changes.
 
@@ -349,13 +349,13 @@ Windows 11, Swift 1.5 IQ3_XXS at 128K):**
   It does not look again during a session, so where the E-cores' speed changes while the engine runs,
   `--pool-affinity p-cores` is the steady choice. Not measured: other CPUs, Linux, AMD cards.
 
-**Exact one-token expert rows (0.1.45, opt-in, `STRATA_CPU_IQ_ALL_EXACT1=1`, #1415 #1544):** below the #152 rule
+**Exact one-token expert rows (0.1.45, opt-in, `SAGUARO_CPU_IQ_ALL_EXACT1=1`, #1415 #1544):** below the #152 rule
 (a lone token in an expert's group) an AVX-2 CPU without AVX-512 runs ggml-cpu's `vec_dot` for the i-quant gate/up rows.
 With the switch, IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS and IQ3_S take Strata's AVX-2 decode instead, with ggml's float order
 (the same per-lane integer sums, one fmadd per block, the format constant after `hsum_float_8`), so the output does not
 change, only the time (`iq_avx2_parity`: 0 of 5,120 outputs per format differ from ggml's; the identity gate with the
 switch on is 10/10 plus exact_pp 4K/20K identical on RTX 3060, 2x A4000 and R9700 boxes).  It is used only where
-ggml-cpu itself is the AVX2 build (not an ISA-floor build, not AVX-512) and not with `STRATA_IQ_MT_MIN=1`.  Per expert,
+ggml-cpu itself is the AVX2 build (not an ISA-floor build, not AVX-512) and not with `SAGUARO_IQ_MT_MIN=1`.  Per expert,
 gate/up, one thread: IQ3_S -32% on a Threadripper PRO 3975WX (Zen 2) and -11% on a Ryzen 5 5600X (Zen 3), IQ2_XXS -5..-6%,
 IQ3_XXS -5% (Zen 2) / +1% (Zen 3), IQ2_S 0% (Zen 2) / +7% (Zen 3, slower); on a Core Ultra 7 265 (VNNI, gather) IQ3_S -60%,
 IQ3_XXS -39%, IQ2_XXS -34%, IQ2_XS -24%, IQ2_S -3% on a P-core.  End to end, with the engine's decode timing: the CPU part of a
@@ -364,44 +364,44 @@ window falls 5% on a Xeon E5-2643 v3 + RTX A4000 (22.2 -> 21.1 ms of a 46.9 ms w
 move on a Threadripper PRO 3975WX + R9700 (14.5 ms, +0.4%, 5 pairs); no case reached +3% end to end, so the switch stays off.
 
 **Switches added in 0.1.40 (all off unless noted; none changes the default output):**
-- `--kv-grow` (or `STRATA_KV_GROW=1`; `--no-kv-grow` turns it off): the K/V takes VRAM only for the cells the requests
+- `--kv-grow` (or `SAGUARO_KV_GROW=1`; `--no-kv-grow` turns it off): the K/V takes VRAM only for the cells the requests
   reach, and the expert cache holds the rest, giving slots back as the context grows. It needs one GPU, an expert
   profile, the whole K/V in VRAM (no KV streaming) and every expert in RAM (not the resident low-RAM mode); otherwise,
   and with `--batch`, `--vram-elastic` or `--peer-device`, the engine says so and stays off.
   On HIP (ROCm 6+) it runs through hipMemAddressReserve / hipMemCreate / hipMemMap (2 MiB chunks; the card must report
-  virtual memory management, `STRATA_HIP_VMM=0` turns it off); until then every AMD card printed "--kv-grow is off".
+  virtual memory management, `SAGUARO_HIP_VMM=0` turns it off); until then every AMD card printed "--kv-grow is off".
   Radeon AI PRO R9700 with `--vram-reserve-mib 17084` (a 16 GB card), Q2_0 pack, `--max-context 196608`, 5 interleaved pairs:
   expert-cache slots 6,213 -> 7,968 and decode 96.3 -> 98.5 tok/s (x1.023, 5/5; the noise arm read x0.999); at
   `--max-context 262144` the default engine finds no VRAM left for the cache on that budget and does not start, `--kv-grow`
   starts with 7,877 slots (94.4 tok/s). Prompts of 20K and 60K tokens through the growing K/V read as fast as without it
   (x1.002, x1.001) and gave identical answers. At contexts up to 128K the K/V is small and nothing changes; it pays on cards of
   about 24 GB or less with contexts of 128K and more.
-- `--host-core last` (or `STRATA_HOST_CORE=last`, Windows): the host thread runs on the last physical core and the
+- `--host-core last` (or `SAGUARO_HOST_CORE=last`, Windows): the host thread runs on the last physical core and the
   workers take the first. Windows sends a GPU's interrupts to the first core, where a host spinning on the GPU's flags
   waits for them (`--host-core first` is the default; the startup log names the cores). It leaves a hybrid CPU as it
-  is. `--host-core sibling` (or `STRATA_HOST_CORE=sibling`) keeps the host on the first core but on its other
+  is. `--host-core sibling` (or `SAGUARO_HOST_CORE=sibling`) keeps the host on the first core but on its other
   hardware thread (SMT), so the interrupts keep the first logical processor and the workers keep every core; it works
   on hybrid CPUs too, and is `first` on a core without SMT. On a 4060 Ti + 5080 layer split with an i9-14900KF it
   turned a decode that swung by ±6% from run to run into a steady one, 8% faster on average.
-- `STRATA_ADAPT_LAG=2` (#764): a window takes the adaptive tier's swaps once they are two windows old (default 1,
-  as 0.1.39). `STRATA_PREFILL_EQUAL=1` (#693): a prompt segment is read in chunks of equal size, not full chunks and a
-  short last one (changes the rounding). `STRATA_OWNED_PRICE=exact` (#796): the cache sizing prices the prompt path's
+- `SAGUARO_ADAPT_LAG=2` (#764): a window takes the adaptive tier's swaps once they are two windows old (default 1,
+  as 0.1.39). `SAGUARO_PREFILL_EQUAL=1` (#693): a prompt segment is read in chunks of equal size, not full chunks and a
+  short last one (changes the rounding). `SAGUARO_OWNED_PRICE=exact` (#796): the cache sizing prices the prompt path's
   own buffers by their real allocation instead of 0.1.39's rule.
-- `STRATA_Q2_BITPLANE=1`: a bit-plane row kernel for Q2_0 on CPUs with AVX2 and no AVX-512 (changes the last bits).
-  `STRATA_NO_AVXVNNI=1` turns the AVX-VNNI forms of the i-quant, IQ4_NL and Q2_0 rows off on CPUs that have them
+- `SAGUARO_Q2_BITPLANE=1`: a bit-plane row kernel for Q2_0 on CPUs with AVX2 and no AVX-512 (changes the last bits).
+  `SAGUARO_NO_AVXVNNI=1` turns the AVX-VNNI forms of the i-quant, IQ4_NL and Q2_0 rows off on CPUs that have them
   (Alder Lake, Sapphire Rapids and later); they give the same bits as the AVX2 forms, 4-25% faster rows.
 - Draft layer: `--lookup-chain-min M` (the shortest context match `--lookup-chain` extends, default 3),
   `--mtp-hnorm stream` (one norm per stream, as llama.cpp's MTP graph) and `--mtp-draft-vocab FILE` (a token subset
   of your own instead of `<mtp>/draft_vocab.bin`).
-- Elsewhere: HIP `STRATA_DENSE_MMQ=1` and `STRATA_HIP_ADAPT_KERNEL_COPY=1` in [AMD_HIP.md](AMD_HIP.md#model-and-serving-configuration);
-  `STRATA_KEEP_EMPTY_TURNS=1` and `STRATA_TOPK_STREAM=0` in [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
+- Elsewhere: HIP `SAGUARO_DENSE_MMQ=1` and `SAGUARO_HIP_ADAPT_KERNEL_COPY=1` in [AMD_HIP.md](AMD_HIP.md#model-and-serving-configuration);
+  `SAGUARO_KEEP_EMPTY_TURNS=1` and `SAGUARO_TOPK_STREAM=0` in [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 
 
 **Read-ahead at start (Linux):** the weights, the native dense matrices, the GPU cache's fill from the profile, the
 resident RAM copy and the MTP draft files are asked for ahead of their reads (madvise / posix_fadvise WILLNEED in
 128 KiB steps), so the drive sees a deep queue instead of one page fault at a time. Measured on a Gen3 NVMe (RTX 5090,
 32 GB, Q2_0 resident at 262K): ready in 70 s instead of ~920 s; the fill went from 39 MB/s to 3.2 GB/s.
-`STRATA_READ_AHEAD=0` turns it off; `STRATA_FILL_AHEAD=N` sets how many fill pairs are asked for ahead (default 256).
+`SAGUARO_READ_AHEAD=0` turns it off; `SAGUARO_FILL_AHEAD=N` sets how many fill pairs are asked for ahead (default 256).
 
 **How much came from where:** with `--stats` the engine prints the tiers of the decode (`expert tiers`: blobs from the
 RAM copy, blobs and MB from the files, the time spent reading them; `routing prefetch`: how many of the file reads had
@@ -414,8 +414,8 @@ Its `hit_rate` is the VRAM share of the experts looked up while answering: exper
 (engine 0.1.39 or newer, #588) is their share of all routed experts, and the server log and the Monitor tab show it
 beside the hit rate.
 
-**Where a decode window's time goes (profiling, #610):** start the server with `STRATA_DECODE_TIMING=1` (and
-`STRATA_VERIFY_PROFILE=1` for the GPU's side) in the environment. After each request the engine log then has one
+**Where a decode window's time goes (profiling, #610):** start the server with `SAGUARO_DECODE_TIMING=1` (and
+`SAGUARO_VERIFY_PROFILE=1` for the GPU's side) in the environment. After each request the engine log then has one
 `strata decode timing:` line - windows, tokens per window, and per window the verify time split into the wait for the
 GPU, the CPU expert pool (plan, activation quantization, jobs) and the stage, plus commit and draft - and one
 `strata decode GPU stages (ms/window):` line with the GPU time of each stage (GDN and QSA layers, the VRAM expert
@@ -423,7 +423,7 @@ hits, the router, the head, ...). The GPU profile times every stage with events,
 use it to compare, not to measure speed. This works with every pack; `--gpu-stages` (a one-token replay of
 per-layer graphs) refuses a native (IQ) pack, which has no such graphs.
 
-**How good the next-layer expert prediction is (measurement only):** `STRATA_LOOKAHEAD_STATS=1` runs the router look-ahead on any expert tier and
+**How good the next-layer expert prediction is (measurement only):** `SAGUARO_LOOKAHEAD_STATS=1` runs the router look-ahead on any expert tier and
 scores it against the routing of the next layer: every 100 windows the engine log has a `strata lookahead stats:` line with the experts per layer
 outside the GPU cache, the recall and precision of the top-k / k+4 / k+10 guesses and of the vote-ranked top 4 / 8 / 12, how much of the PCIe share they
 would cover, and the predictor thread's time per window. It costs CPU (the predictor is a thread beside the expert pool), so use it to measure, not to
@@ -649,7 +649,7 @@ when the sockets wait for each other's counters. Prompt speed did not change in 
 with it translating every DMA (`cat /sys/kernel/iommu_groups/*/type | sort | uniq -c` shows `DMA-FQ`), pinned host-to-device copies ran at
 7.7 to 9.2 GB/s on PCIe 3.0 x16 and at 12.3 GB/s with `iommu=pt` on the kernel command line, which moved prompt speed by about 30% there.
 A NUMA-aware pool (one slice of workers per socket, each reading its own socket's copy of the CPU experts) gave +10 to +14% on
-the first box in a contributor's branch; 0.2.2 has it (on by itself with 2 or more NUMA nodes, `STRATA_NUMA_POOL=0` turns it off: see "NUMA-split CPU expert pool" below). Do not wrap the server in `numactl --cpunodebind` when you test
+the first box in a contributor's branch; 0.2.2 has it (on by itself with 2 or more NUMA nodes, `SAGUARO_NUMA_POOL=0` turns it off: see "NUMA-split CPU expert pool" below). Do not wrap the server in `numactl --cpunodebind` when you test
 workers across sockets: it pins them to one node.
 
 ### Running it at startup (Task Scheduler)
@@ -751,7 +751,7 @@ it instead of the config's `--expert-profile` when it is a profile of the same m
 before). A relative path is in the Strata folder; one file per model, and a profile per project works the same way
 (point the key at another file). The file is a fingerprint of what you used the model for: it stays on your PC.
 Without the key nothing is counted or written. Setup rewrites the config when run again: add the key again then.
-On an Intel Arc card with `STRATA_VERIFY_NO_HOST` (the SYCL default on Battlemage, no adaptive tier) the profile is ranked from the device's own routing counts and applies at the next start; a profile learned from one kind of text speeds that kind up (code, +13-19% decode on the Arc Pro B70, same tokens) and slows other kinds (prose, -18%), so keep one file per kind of work.
+On an Intel Arc card with `SAGUARO_VERIFY_NO_HOST` (the SYCL default on Battlemage, no adaptive tier) the profile is ranked from the device's own routing counts and applies at the next start; a profile learned from one kind of text speeds that kind up (code, +13-19% decode on the Arc Pro B70, same tokens) and slows other kinds (prose, -18%), so keep one file per kind of work.
 
 **The expert cache size is a budget, and on Windows an over-sized one pages instead of failing.** `--expert-cache N`
 (`"expert_cache": N`) is `N` times the largest expert blob, and the engine compares it only with the free VRAM it
@@ -915,7 +915,7 @@ print(r.choices[0].message.content)
   `strata-<model>.json` sets it for every request; a request's own value wins, and `0` means no budget. Off by default;
   Anthropic's `"thinking": {"budget_tokens": N}` chooses the level, as above, and since 0.1.45 is also the budget (a
   `reasoning_budget_tokens` in the same request wins).
-- **The reply's own token ids on the next turn (opt-in, `STRATA_REPLY_REUSE=1`).** After a request the engine holds
+- **The reply's own token ids on the next turn (opt-in, `SAGUARO_REPLY_REUSE=1`).** After a request the engine holds
   the prompt plus the ids it generated, and those are not always what the reply's text encodes to: a model writes a
   Turkish word, a number or code in pieces BPE would merge. The next turn's prompt renders that text again, and a fresh
   encode left the engine's ids at the first such piece, so the engine read the rest of the reply again from there.
@@ -957,14 +957,14 @@ print(r.choices[0].message.content)
   reads its whole prompt through the batched path instead (#3465: a reporter's prompts failed in that tail every time and
   passed with `--short-read 0`); the engine prints a line saying so. With replicas, the server forgets what that replica held.
   `repeat_stop_tokens` stays as the backstop. The kernel writes only its flags and the host only reads them, so an
-  answer without a NaN is the one the engine gives with `STRATA_NAN_GUARD=0`, which records no kernel: on an RTX
+  answer without a NaN is the one the engine gives with `SAGUARO_NAN_GUARD=0`, which records no kernel: on an RTX
   3080 with the RVN IQ3_S config at fixed expert sets (a chat replay of 8 turns on a 16K-token system prompt), the
-  guard on and off gave byte-identical answers in 3 pairs (one of them with `STRATA_ROUTE_TAIL_SKIP=0`, one with
-  `STRATA_SH_STREAM=0`); one more guard-off run differed from all the others from its first answer on, while a second
+  guard on and off gave byte-identical answers in 3 pairs (one of them with `SAGUARO_ROUTE_TAIL_SKIP=0`, one with
+  `SAGUARO_SH_STREAM=0`); one more guard-off run differed from all the others from its first answer on, while a second
   guard-off run matched the guard-on runs, so that was a difference between runs, not the guard. Its cost there: 4.8 us of GPU time a window on average (7.8 us at most), 0.009% of the decode
   time (Nsight Systems, 424 windows). The one-shot command line (`strata` without `--serve`) and the Intel (SYCL) port
   in `sycl/` do not check.
-  Debug switch: `STRATA_NAN_INJECT=<n>[,<n>...]` reports the n-th window the guard checks in the engine process
+  Debug switch: `SAGUARO_NAN_INJECT=<n>[,<n>...]` reports the n-th window the guard checks in the engine process
   (counted from 1 over prompt-tail, decode and batch windows) as non-finite, to exercise the whole path without a real
   fire. With `=1,60` on that 3080: a new chat's first window was flagged and the server sent the request again from
   token 0 (the client saw one normal answer); the 60th, mid-reply in the next turn, ended that reply as `"length"`
@@ -1105,7 +1105,7 @@ print(r.choices[0].message.content)
   in an admin PowerShell, and make sure the network is set to Private.
 - **From the internet.** Put a tunnel in front of it, for example [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/do-more-with-tunnels/trycloudflare/):
   `cloudflared tunnel --url http://127.0.0.1:8080`. **Set a key first**, or anyone with the link can use your PC:
-  add `"api_key": "some-long-secret"` to `strata-<model>.json` (or set the `STRATA_API_KEY` environment variable);
+  add `"api_key": "some-long-secret"` to `strata-<model>.json` (or set the `SAGUARO_API_KEY` environment variable);
   clients then send it as their API key. Several keys (one per client, so one can be withdrawn alone): separate them
   with commas, `--api-key key1,key2` or `"api_key": "key1,key2"` as llama.cpp does, or give a list,
   `"api_key": ["key1", "key2"]` (the way to use a key that contains a comma); a request passes with any one of them.
@@ -1128,7 +1128,7 @@ print(r.choices[0].message.content)
   and `host.docker.internal`; any port. Others get **403** naming the setting, and the server window prints one line
   for each. Reach it under another name (a reverse proxy that keeps the name, a tunnel, a DNS name on your network,
   another container's name for it)? Add the name: `"allowed_hosts": ["strata.example.com"]` in
-  `strata-<model>.json` or `STRATA_ALLOWED_HOSTS=strata.example.com` (comma-separated); `".example.com"` allows that
+  `strata-<model>.json` or `SAGUARO_ALLOWED_HOSTS=strata.example.com` (comma-separated); `".example.com"` allows that
   name and every name below it, and `["*"]` turns the check off (so does setting `api_key`). The hosts of
   `trusted_origins` count as allowed. Requests without a `Host` header (HTTP/1.0 clients) pass.
 - **Web pages without an API key.** Without `api_key`, a `POST` to `/v1/*` that carries an `Origin` header (a
@@ -1262,7 +1262,7 @@ room afterwards):
    absent (no memory controller at that level) is skipped; a file that is there but
    cannot be read or parsed makes the cgroup terms unusable: without `--memory-limit-mib` the guard then uses
    `MemAvailable` alone, as 0.1.41 did, and prints one warning per process; with the flag the sample is unknown, and unknown skips parking.
-3. `--memory-limit-mib N` (or `STRATA_MEMORY_LIMIT_MIB=N`; the flag wins, `0` = none):
+3. `--memory-limit-mib N` (or `SAGUARO_MEMORY_LIMIT_MIB=N`; the flag wins, `0` = none):
    N MiB is the total this engine's container or cgroup may use, minus what that
    container uses now. Use it when the container cannot see its own limit. The usage
    is `memory.current` of the top cgroup this mount shows (the container's own, in a
@@ -1299,7 +1299,7 @@ cache at that moment, not at the time of a park. Without a cgroup limit and with
 plain `MemAvailable`, as before.
 
 What it does not touch: the startup sizing of the expert arena, the file tier's resident budget, the Windows commit
-check and `STRATA_PIN_GUARD` (#1250: whether to page-lock the expert copy in steps follows `MemFree`, and each step
+check and `SAGUARO_PIN_GUARD` (#1250: whether to page-lock the expert copy in steps follows `MemFree`, and each step
 is checked against the cgroup-aware `host_available_memory`) keep their own probes (`--resident-budget-gib`, #633,
 #1250), and `--memory-limit-mib` does not reach them. This figure is for what runs after the start: parking a
 conversation and saving or restoring a session file, which read `MemAvailable` alone. `host_available_memory`
@@ -1332,7 +1332,7 @@ state. Invalid entries are discarded; transfer/synchronization failure is fatal
 rather than permission to continue with partial state. Indexer spare keys and the
 moving spare row are preserved, including checkpoint rewinds.
 The engine log reports parking, restoration, bytes, evictions, individual snapshot
-sizes and K/V bytes reused during capture. `STRATA_SNAPSHOT_FULL_CAPTURE=1` disables
+sizes and K/V bytes reused during capture. `SAGUARO_SNAPSHOT_FULL_CAPTURE=1` disables
 retention for diagnostic comparisons. Parked snapshots are not
 persisted across restarts unless `--session-dir` is set (session folder, below).
 
@@ -1423,7 +1423,7 @@ other files in those folders, and not the path, so a moved model folder still ma
 change in the middle of a file that keeps its size is not seen: do not change model files while their sessions are
 kept. The config fingerprint covers the engine version string (another version is refused; two builds of the same version
 are not told apart - there is no build hash), CUDA or HIP,
-`--kv`, `STRATA_KV_ROT`, `--kv-resident`, `--max-context`, `--mtp-window`, the resolved rope configuration (type,
+`--kv`, `SAGUARO_KV_ROT`, `--kv-resident`, `--max-context`, `--mtp-window`, the resolved rope configuration (type,
 base, factor, freq scale, original context, the YaRN knobs - the cached K is post-RoPE), the loaded control vector (a
 digest of the tables uploaded: every file's content times its exact scale, the mode, the layer range and the
 direction) and the arithmetic switches (`--native-*`, `--no-ple`, the A/B arms). Sampling, seeds, draft tuning and
@@ -1450,7 +1450,7 @@ stages, each stage against its own bounds, and every stage image is validated on
 single-GPU file is still v1, byte for byte. Not supported with `--peer-device`, `--batch` (the config's `"parallel"`, #465; the server answers `501`) or
 `--prompt-cache 0` (the RAM conversation cache need not be on). On Linux the file
 moves with `O_DIRECT` in 16 MiB blocks when the filesystem takes it (buffered I/O otherwise, or with
-`STRATA_SESSION_BUFFERED=1`); on Windows with buffered I/O. The engine has been run on Linux/CUDA only. An earlier
+`SAGUARO_SESSION_BUFFERED=1`); on Windows with buffered I/O. The engine has been run on Linux/CUDA only. An earlier
 revision's CPU file-I/O test passed as a 32-bit Windows executable under Wine; the current code has not been built
 for Windows, and the Windows engine, HIP and AMD cards have not been run.
 
@@ -1522,7 +1522,7 @@ without penalties, so more of its guesses are now rejected. Requests without pen
 
 **Token biases (opt-in).** The chat API supports request-scoped `logit_bias` objects and token/bias pair lists on supporting CUDA/HIP engines without continuous batching. A value of -100 (or `false` in a pair list) excludes a token. Unsupported engines return an error. See [LOGIT_BIAS.md](LOGIT_BIAS.md) for formats, limits and validation.
 
-**Sampled drafting (opt-in, 0.1.40.2).** With temperature above 0 the engine keeps a draft only when it equals the token the model sampled for that position, and the draft layer proposes its best guess. Two opt-in switches change how the draft layer drafts a sampled request; greedy requests (temperature 0) are never touched and stay byte-identical. `STRATA_SPEC_COUPLED=1` (or `--coupled-draft`) drafts by sampling with the request's own settings and the random number the checking row will use; the text for a seed does not change. `STRATA_SPEC_PROB=1` is speculative rejection sampling: the draft layer samples its guess from its own distribution q, the check accepts it with probability min(1, p/q) (p is the model's distribution after penalties, top_k, top_p, min_p and temperature) and otherwise samples the replacement from the leftover distribution, so every token is distributed exactly as without drafts (the text for a seed then depends on the drafts, so it is reproducible only for the same engine, flags and prompt). Guesses without a distribution (prompt lookup, suffix drafts) keep the exact-match rule, which is already exact. Neither is faster in a way that holds up: on an RTX 3060 (IQ3_XXS, 200-token story and code answers, 10 interleaved pairs) the default's median output speed was 42.4 / 43.2 / 43.3 tok/s at temperature 0.3 / 0.7 / 1.0, coupled drafting 40.6 / 42.4 / 43.3 and rejection sampling 41.0 / 42.6 / 42.6, with run-to-run differences of up to 5% between repeats; drafts kept per round fell at 0.3 and rose by about 5 points at 1.0, which the cost of the longer sampled windows ate. `STRATA_SPEC_DEPTH=1` prints the acceptance by draft depth for each request; `STRATA_SPEC_MIN_TEMP=0.9` limits sampled drafting to hotter requests. Proof that the rejection rule keeps the distribution: `spec_prob_test` (chi-square, 2 million trials per case) and `spec_verify_parity` (GPU against the host reference).
+**Sampled drafting (opt-in, 0.1.40.2).** With temperature above 0 the engine keeps a draft only when it equals the token the model sampled for that position, and the draft layer proposes its best guess. Two opt-in switches change how the draft layer drafts a sampled request; greedy requests (temperature 0) are never touched and stay byte-identical. `SAGUARO_SPEC_COUPLED=1` (or `--coupled-draft`) drafts by sampling with the request's own settings and the random number the checking row will use; the text for a seed does not change. `SAGUARO_SPEC_PROB=1` is speculative rejection sampling: the draft layer samples its guess from its own distribution q, the check accepts it with probability min(1, p/q) (p is the model's distribution after penalties, top_k, top_p, min_p and temperature) and otherwise samples the replacement from the leftover distribution, so every token is distributed exactly as without drafts (the text for a seed then depends on the drafts, so it is reproducible only for the same engine, flags and prompt). Guesses without a distribution (prompt lookup, suffix drafts) keep the exact-match rule, which is already exact. Neither is faster in a way that holds up: on an RTX 3060 (IQ3_XXS, 200-token story and code answers, 10 interleaved pairs) the default's median output speed was 42.4 / 43.2 / 43.3 tok/s at temperature 0.3 / 0.7 / 1.0, coupled drafting 40.6 / 42.4 / 43.3 and rejection sampling 41.0 / 42.6 / 42.6, with run-to-run differences of up to 5% between repeats; drafts kept per round fell at 0.3 and rose by about 5 points at 1.0, which the cost of the longer sampled windows ate. `SAGUARO_SPEC_DEPTH=1` prints the acceptance by draft depth for each request; `SAGUARO_SPEC_MIN_TEMP=0.9` limits sampled drafting to hotter requests. Proof that the rejection rule keeps the distribution: `spec_prob_test` (chi-square, 2 million trials per case) and `spec_verify_parity` (GPU against the host reference).
 
 ---
 
@@ -1577,7 +1577,7 @@ name = "Strata (local)"
 base_url = "http://127.0.0.1:8080/v1"
 wire_api = "responses"
 stream_idle_timeout_ms = 600000         # a first, long prompt can take minutes to read
-# env_key = "STRATA_API_KEY"            # only if the server has an api_key: the variable holding it
+# env_key = "SAGUARO_API_KEY"            # only if the server has an api_key: the variable holding it
 ```
 
 Then run `codex` (or `codex exec "..."`) as usual. Codex warns `Model metadata for ... not found` for a local model
@@ -1852,27 +1852,27 @@ test images.
 
 ---
 
-**Stager waits (0.1.40.2, `STRATA_STAGER_SLEEP`):** the prompt-staging threads sleep while they wait on Linux and spin on Windows, because spinning is a little faster there (a 5070 read an 8K Q2_0 prompt 1.2% faster). `STRATA_STAGER_SLEEP=1` makes Windows sleep too, which is the choice when sharing the machine matters more than speed: on a Ryzen 9 7940HS laptop with an RTX 4070 (IQ3_S, 64K context) sleeping waits read 5,914 and 22,305 token prompts 5-6% slower while the whole-machine CPU use fell from 77-90% to 21-25% (issue #1101, thanks to midhatn). `STRATA_STAGER_SLEEP=0` forces spinning on Linux. The output is the same either way.
+**Stager waits (0.1.40.2, `SAGUARO_STAGER_SLEEP`):** the prompt-staging threads sleep while they wait on Linux and spin on Windows, because spinning is a little faster there (a 5070 read an 8K Q2_0 prompt 1.2% faster). `SAGUARO_STAGER_SLEEP=1` makes Windows sleep too, which is the choice when sharing the machine matters more than speed: on a Ryzen 9 7940HS laptop with an RTX 4070 (IQ3_S, 64K context) sleeping waits read 5,914 and 22,305 token prompts 5-6% slower while the whole-machine CPU use fell from 77-90% to 21-25% (issue #1101, thanks to midhatn). `SAGUARO_STAGER_SLEEP=0` forces spinning on Linux. The output is the same either way.
 
-**Stager threads for a GGUF read in place (0.1.41, #1353):** a native pack read from its GGUF shards in place (UD-Q4_K_XL, a Q8_0 pack) copies each expert with 32 threads and a 128-deep ring when the bytes are page faults on an SSD. If the shards' pages are already in the page cache (a big-RAM box, a warm start) those copies are memory copies and the same profile ran 4-7x slower than the 4-thread default (a 124K-token Q8 prompt: 57 -> 350-410 tok/s with the default). The engine now checks a sample of the experts with `mincore` at the first prompt (Linux) and takes the RAM profile when 90% or more of their pages are resident, saying so in its log; a cold or partly cached GGUF keeps the SSD profile. `STRATA_STAGER_SSD=1` / `0` forces either profile; `STRATA_STAGER_THREADS` still wins. The bytes copied are the same.
+**Stager threads for a GGUF read in place (0.1.41, #1353):** a native pack read from its GGUF shards in place (UD-Q4_K_XL, a Q8_0 pack) copies each expert with 32 threads and a 128-deep ring when the bytes are page faults on an SSD. If the shards' pages are already in the page cache (a big-RAM box, a warm start) those copies are memory copies and the same profile ran 4-7x slower than the 4-thread default (a 124K-token Q8 prompt: 57 -> 350-410 tok/s with the default). The engine now checks a sample of the experts with `mincore` at the first prompt (Linux) and takes the RAM profile when 90% or more of their pages are resident, saying so in its log; a cold or partly cached GGUF keeps the SSD profile. `SAGUARO_STAGER_SSD=1` / `0` forces either profile; `SAGUARO_STAGER_THREADS` still wins. The bytes copied are the same.
 
-## Short prompts: the CPU shares the experts (on by default on one NVIDIA GPU, `STRATA_PREFILL_CPU_SHARE`)
+## Short prompts: the CPU shares the experts (on by default on one NVIDIA GPU, `SAGUARO_PREFILL_CPU_SHARE`)
 
 A prompt chunk of a few thousand tokens (an agent's tool result, a test's output, a short follow-up) streams every routed
 expert that is not in VRAM over PCIe, while the CPU pool that decodes sits idle and RAM already holds those experts.
-`STRATA_PREFILL_CPU_SHARE=auto` hands the pool the experts few of the chunk's tokens route to, measures per layer how
-long each side takes and gives the CPU the share at which both end together (`STRATA_PREFILL_CPU_SHARE=0.4` fixes a
+`SAGUARO_PREFILL_CPU_SHARE=auto` hands the pool the experts few of the chunk's tokens route to, measures per layer how
+long each side takes and gives the CPU the share at which both end together (`SAGUARO_PREFILL_CPU_SHARE=0.4` fixes a
 share). `auto` also checks that sharing pays: it times layers with the share and without it (the first ones alternate until three comparisons are in, then one in 29 runs the other way) and shares only while the layers that share are the faster ones. Where sharing is slower (every share was, on an RX 7900 GRE with a Ryzen 7 5700X3D under ROCm, #1282), the experts stay on the GPU apart from those measuring layers. It is off unless you set it, and then the output is byte-identical to the build without it.
 
-**0.1.41: on by default** on CUDA builds with one GPU and no `--batch` slots, for prompt chunks below 1,024 tokens: unset behaves as `auto` with `STRATA_PREFILL_CPU_SHARE_MAX=1024`, and the engine prints one line at start saying so. Measured (interleaved whole-engine runs, 8 rounds, medians): 512 tokens -28..-34% and 1,000 tokens -20..-26% prompt time on an RTX 3060, a Tesla P100 and an RTX 5070, 8/8 pairs each; mean KL against the share off 0.004 (max 0.025). The answers can differ slightly from 0.1.40.3. **`STRATA_PREFILL_CPU_SHARE=0` turns it off and gives 0.1.40.3's exact bytes.** The layer split, batch slots and AMD (HIP) builds keep it off unless you set the variable; `STRATA_PREFILL_CPU_SHARE_MAX=3072` (the extension to larger chunks) also stays opt-in: it lost 2% at 2,048 tokens on the 5070.
+**0.1.41: on by default** on CUDA builds with one GPU and no `--batch` slots, for prompt chunks below 1,024 tokens: unset behaves as `auto` with `SAGUARO_PREFILL_CPU_SHARE_MAX=1024`, and the engine prints one line at start saying so. Measured (interleaved whole-engine runs, 8 rounds, medians): 512 tokens -28..-34% and 1,000 tokens -20..-26% prompt time on an RTX 3060, a Tesla P100 and an RTX 5070, 8/8 pairs each; mean KL against the share off 0.004 (max 0.025). The answers can differ slightly from 0.1.40.3. **`SAGUARO_PREFILL_CPU_SHARE=0` turns it off and gives 0.1.40.3's exact bytes.** The layer split, batch slots and AMD (HIP) builds keep it off unless you set the variable; `SAGUARO_PREFILL_CPU_SHARE_MAX=3072` (the extension to larger chunks) also stays opt-in: it lost 2% at 2,048 tokens on the 5070.
 
 With it on, chunks below 3,072 tokens are staged after their routing (only those can hand the CPU a share) instead of
-streaming every expert from 1,024 tokens on; `STRATA_PREFILL_CPU_SHARE_MAX=1024` keeps the old limit. The CPU takes
+streaming every expert from 1,024 tokens on; `SAGUARO_PREFILL_CPU_SHARE_MAX=1024` keeps the old limit. The CPU takes
 experts it reads from RAM as they are: the arena, the page-locked copy of the resident RAM mode, or the mapped
 `experts.bin`'s pages in the file cache (`--mmap-experts`), not only page-locked ones. Serve without `--batch`; on a
 layer split every stage has the pool and one stage at a time takes it for a chunk.
 
-**0.1.42: not armed by default when memory is short.** A 0.1.41 report (RTX 5090, RAM already tight) had chats failing and the engine restarting until `STRATA_PREFILL_CPU_SHARE=0` was set. The default is now skipped, with one line in the log saying why, when the RAM this process can get (the cgroup limit counts on Linux) is below the share's own buffers plus 3 GiB, when on Windows the commit limit (RAM + page file) has less than 4 GiB left beyond them, or when the experts it would read are file pages (the mapped `experts.bin` outside the GPU cache and the RAM copy) that the free RAM plus 3 GiB cannot keep. An explicit `STRATA_PREFILL_CPU_SHARE=auto` (or a number) is kept and only warns. The share's two page-locked buffers (about 50 MB) are now taken once, at their largest, and a failed allocation ends the share for that run instead of failing the request.
+**0.1.42: not armed by default when memory is short.** A 0.1.41 report (RTX 5090, RAM already tight) had chats failing and the engine restarting until `SAGUARO_PREFILL_CPU_SHARE=0` was set. The default is now skipped, with one line in the log saying why, when the RAM this process can get (the cgroup limit counts on Linux) is below the share's own buffers plus 3 GiB, when on Windows the commit limit (RAM + page file) has less than 4 GiB left beyond them, or when the experts it would read are file pages (the mapped `experts.bin` outside the GPU cache and the RAM copy) that the free RAM plus 3 GiB cannot keep. An explicit `SAGUARO_PREFILL_CPU_SHARE=auto` (or a number) is kept and only warns. The share's two page-locked buffers (about 50 MB) are now taken once, at their largest, and a failed allocation ends the share for that run instead of failing the request.
 
 When on, the CPU's rows are computed in the CPU's own activation format, so the output changes in the last bits (first
 token KL against off: mean 0.006, max 0.026 nats over 22 prompts; about half of the 32-token greedy answers on 500 and
@@ -1901,7 +1901,7 @@ expert here: none was page-locked):
 A coding agent's recorded conversation on the two cards (a 100K-token start, then 8 turns of 1-5K tokens of code, 128
 tokens written a turn, the same tokens read by both): 137.4 s off, 130.6 s auto (reading 121.1 -> 114.3 s).
 
-## Missed experts in a verify window: the tail is skipped (on by default on CUDA, `STRATA_ROUTE_TAIL_SKIP`)
+## Missed experts in a verify window: the tail is skipped (on by default on CUDA, `SAGUARO_ROUTE_TAIL_SKIP`)
 
 When a card cannot hold every routed expert, most of a decode token's waiting time is spent on the experts that are not in VRAM:
 their copy over PCIe or their rows on the CPU pool. In a verify window of several tokens, an expert that **every** token of the window
@@ -1909,21 +1909,21 @@ routes at the bottom of its top 10 (rank 7 or lower, the smallest weights) adds 
 such a missed expert is neither copied nor computed, its contribution is zero, and the other experts keep the weight the router gave them
 (no renormalisation). An expert that any token ranks above 7, and every expert already in VRAM, is served as before.
 
-**`STRATA_ROUTE_TAIL_SKIP=0` turns it off** and restores the answers of a build without it byte for byte (checked: `mg_norepeat` 10 of 10 and `exact_pp` 4096 and 20000
+**`SAGUARO_ROUTE_TAIL_SKIP=0` turns it off** and restores the answers of a build without it byte for byte (checked: `mg_norepeat` 10 of 10 and `exact_pp` 4096 and 20000
 tokens identical to 0.1.42 without the change, on the RTX 3060, the RTX A4000 alone and as a 2-GPU split, and the Tesla P100). Another rank
-(`STRATA_ROUTE_TAIL_SKIP=8`, `=9`; 1-9 are accepted) is taken as given. The start-up line
-`STRATA_ROUTE_TAIL_SKIP=7 is ON (default)` names the opt-out.
-Since 0.1.43 the same default holds on HIP for gfx1200 / gfx1201 (RDNA4), under the same rules and with the same `STRATA_ROUTE_TAIL_SKIP=0` opt-out; other AMD parts are unchanged.
+(`SAGUARO_ROUTE_TAIL_SKIP=8`, `=9`; 1-9 are accepted) is taken as given. The start-up line
+`SAGUARO_ROUTE_TAIL_SKIP=7 is ON (default)` names the opt-out.
+Since 0.1.43 the same default holds on HIP for gfx1200 / gfx1201 (RDNA4), under the same rules and with the same `SAGUARO_ROUTE_TAIL_SKIP=0` opt-out; other AMD parts are unchanged.
 
 Where it applies: serve on a CUDA build with one GPU or a layer split (every stage skips by itself). Not applied, and no line printed: when every expert is
 in VRAM (nothing is missed), with `--batch` / `parallel` slots (a window then mixes requests, and one request's skip would depend on another's
 tokens: kept off until measured), with a peer-expert tier or a helper GPU, on HIP and SYCL builds, and (0.1.42.1, #1884) when 90% or more
 of all the experts are in the GPU cache: the few misses are cheap there and the skip costs more draft acceptance than it saves (a Tesla V100 32 GB
 with Coder IQ1_M, 94.8% of the experts cached, 99.9% decode hits: draft acceptance 70.1% to 68.2%, decode 1-2% slower than 0.1.41). A start-up line
-says so; `STRATA_ROUTE_TAIL_SKIP=7` turns it on anyway, and `STRATA_TAIL_SKIP_MAX_CACHED=<percent>` moves the line (101 = never). On an AMD layer split the line is 60% (2x R9700 at 16 GB-equivalent: Q2_0 with 73% cached lost 6.1% story decode with the skip, IQ3_S with 45% cached gained 7-10%). The request log gets
+says so; `SAGUARO_ROUTE_TAIL_SKIP=7` turns it on anyway, and `SAGUARO_TAIL_SKIP_MAX_CACHED=<percent>` moves the line (101 = never). On an AMD layer split the line is 60% (2x R9700 at 16 GB-equivalent: Q2_0 with 73% cached lost 6.1% story decode with the skip, IQ3_S with 45% cached gained 7-10%). The request log gets
 `route tail skip: N missed experts skipped` (cumulative) while it is active.
 
-**Answers differ slightly from 0.1.41** (`STRATA_ROUTE_TAIL_SKIP=0` brings them back). Teacher-forced KL of the decode path (the default's own greedy text and the default sampled at T=0.8, 28 chat prompts of code,
+**Answers differ slightly from 0.1.41** (`SAGUARO_ROUTE_TAIL_SKIP=0` brings them back). Teacher-forced KL of the decode path (the default's own greedy text and the default sampled at T=0.8, 28 chat prompts of code,
 reasoning, chat, six languages and long-document summaries, 220 tokens each, about 6,000 scored tokens per set, through the real verify windows with the MTP drafts):
 
 | | RTX 3060 12 GB, IQ3_XXS | RTX A4000 16 GB, Q2_0 |
@@ -1934,7 +1934,7 @@ reasoning, chat, six languages and long-document summaries, 220 tokens each, abo
 | perplexity of the forced text, skip / no skip | x1.011 / x1.007 | x1.005 / x1.003 |
 | KL of the first token after the prompt | 0.024 / 0.033 | 0.015 / 0.016 |
 | the same engine run twice (the floor; adaptive tier and CPU/GPU split depend on timing) | 0.0006-0.0007 | 0.0007 |
-| `STRATA_PREFILL_CPU_SHARE` on / off (already the default) | 0.0006-0.0007 (first token 0.002-0.0035) | 0.0005-0.0007 (first token 0.002-0.004) |
+| `SAGUARO_PREFILL_CPU_SHARE` on / off (already the default) | 0.0006-0.0007 (first token 0.002-0.0035) | 0.0005-0.0007 (first token 0.002-0.004) |
 | Q2_0 against IQ3_XXS, the same text | - | 0.1006 (p99 1.08, top-1 90.6%) |
 
 The effect is not even: code and reasoning prompts have a KL of 0.002-0.004, chat and non-English prompts 0.004-0.009.
@@ -1942,7 +1942,7 @@ Task check, greedy, thinking off (HumanEval every second problem, 82; 30 generat
 RTX 3060 76 and 78 of 82 / 78 of 82, reasoning 27 and 27 / 29; RTX A4000 76 and 76 / 76, reasoning 27 and 30 / 27. The runs do not separate the settings
 (one run each; a change of 3 reasoning tasks is noise).
 
-Decode speed, `STRATA_ROUTE_TAIL_SKIP` default against `=0`, 5 interleaved rounds on fresh engines, a story, a code answer and a 6K-token document, 200 tokens each,
+Decode speed, `SAGUARO_ROUTE_TAIL_SKIP` default against `=0`, 5 interleaved rounds on fresh engines, a story, a code answer and a 6K-token document, 200 tokens each,
 median over the rounds (ratio of tokens/s, default over `=0`; rounds in which the default was faster):
 
 | machine | story | code | 6K document | all three |
@@ -1954,7 +1954,7 @@ median over the rounds (ratio of tokens/s, default over `=0`; rounds in which th
 
 The gain follows how much of a token is spent waiting for missed experts (hit rate 75-90% on the single cards in the profile); a 2-GPU
 split that holds nearly every expert (hit rate 99.7%) gains nothing. It does not touch prompt reading. Switches that stay opt-in and are not part of this:
-`STRATA_ROUTE_PRIOR` (adds speed, doubles the KL), `STRATA_ROUTE_RESIDENT` and `STRATA_ROUTE_RESIDENT_MTP` (the latter is not faster than the former).
+`SAGUARO_ROUTE_PRIOR` (adds speed, doubles the KL), `SAGUARO_ROUTE_RESIDENT` and `SAGUARO_ROUTE_RESIDENT_MTP` (the latter is not faster than the former).
 
 ## The PCIe share of the missed experts is set from the CPU's speed (CUDA, single GPU, no `--pcie-frac`)
 
@@ -1966,10 +1966,10 @@ Since 0.1.42, on CUDA with one GPU and no `--pcie-frac`, the share starts at the
 already times: the wall time of the CPU pool per missed expert. With `R` = expert bytes / that time (GB/s) and `L` = the probe's link speed, the share is
 `L / (L + 1.85 R)`, rounded to 0.05 and kept between 0.10 and 0.60; it is changed at most three times (after 48, 96 and 96 more windows, about 10 s of
 decoding), and only by a full step. Each change prints one `PCIe share:` line. A request that sets its own `pcie_frac` is left alone.
-**`--pcie-frac N` always wins; `STRATA_PCIE_FRAC_DEFAULT=old` keeps the 0.1.41 rule.** Not used with a layer split, `--batch`, a peer GPU, when every
-expert is in VRAM, or on SYCL or on HIP other than gfx1200 / gfx1201 (RDNA4, where the measured share is the default since 0.1.43; `STRATA_PCIE_FRAC_DEFAULT=old` opts out; on the other HIP parts `STRATA_PCIE_FRAC_DEFAULT=auto` turns it on: an RX 7900 XTX showed no regression, no gain was claimed, #2224). The canonical Q2_0 pack uses it on CUDA since 0.1.43, on Linux by default and on Windows with `STRATA_PCIE_AUTO_CANON=1` (an RTX 5070 there: code +2.5%, a short answer -3.3%). The constant 1.85 is a fit to three machines, so it lands within a step of each machine's best, not on it. On HIP, `STRATA_PCIE_AUTO_SPLIT=1` (opt-in, 0.1.43) also refines a two-stage layer split: the pool speed is read once and each stage takes the share its own probed link gives (2x R9700 at 16 GB-eq, tail skip on: Q2_0 story +4.5%, code +9.9%, 4K +8.8%; IQ3_S story -2.1%, code +8.0%, 4K +23.3%; with three or more stages the pipelined loop does not run it).
+**`--pcie-frac N` always wins; `SAGUARO_PCIE_FRAC_DEFAULT=old` keeps the 0.1.41 rule.** Not used with a layer split, `--batch`, a peer GPU, when every
+expert is in VRAM, or on SYCL or on HIP other than gfx1200 / gfx1201 (RDNA4, where the measured share is the default since 0.1.43; `SAGUARO_PCIE_FRAC_DEFAULT=old` opts out; on the other HIP parts `SAGUARO_PCIE_FRAC_DEFAULT=auto` turns it on: an RX 7900 XTX showed no regression, no gain was claimed, #2224). The canonical Q2_0 pack uses it on CUDA since 0.1.43, on Linux by default and on Windows with `SAGUARO_PCIE_AUTO_CANON=1` (an RTX 5070 there: code +2.5%, a short answer -3.3%). The constant 1.85 is a fit to three machines, so it lands within a step of each machine's best, not on it. On HIP, `SAGUARO_PCIE_AUTO_SPLIT=1` (opt-in, 0.1.43) also refines a two-stage layer split: the pool speed is read once and each stage takes the share its own probed link gives (2x R9700 at 16 GB-eq, tail skip on: Q2_0 story +4.5%, code +9.9%, 4K +8.8%; IQ3_S story -2.1%, code +8.0%, 4K +23.3%; with three or more stages the pipelined loop does not run it).
 
-Measured (interleaved pairs of whole engine runs, new default against `STRATA_PCIE_FRAC_DEFAULT=old`, medians, route tail skip on):
+Measured (interleaved pairs of whole engine runs, new default against `SAGUARO_PCIE_FRAC_DEFAULT=old`, medians, route tail skip on):
 
 | card | the pool takes | share (old -> new) | decode, new / old | pairs faster |
 |---|---|---|---|---|
@@ -1981,12 +1981,12 @@ Explicit-share runs are byte-identical to 0.1.41 (`mg_norepeat` 10 of 10, `exact
 from the old default, as any change of the share does (CPU and GPU round differently): teacher-forced KL against the old default 0.0015 on the 3060
 (run-to-run floor 0.0013) and 0.0011 on the A4000 (floor 0.0012; at that time the share was 0.25).
 
-`STRATA_PCIE_BALANCE=1` (opt-in, CUDA, one GPU, no `--batch`, no `--pcie-frac`; #1548 by sergiywith / stuchapin909): instead of one share for every layer, each verify layer
+`SAGUARO_PCIE_BALANCE=1` (opt-in, CUDA, one GPU, no `--batch`, no `--pcie-frac`; #1548 by sergiywith / stuchapin909): instead of one share for every layer, each verify layer
 reads over PCIe the number of its missed experts that balances the two sides. The spin kernels stamp the GPU's clock (the plan's arrival, the PCIe part's start, the wait for the CPU rows),
 the host times its pool, and least squares with forgetting fit the pool's `a + c*n_cpu + d*n_pcie` and the GPU's `g0 + g*n_pcie`; the engine prints the fit (`pcie model`) at the end of `generate`.
 Every 64th layer with a miss moves one expert to the other side so both fits stay measured. Unset, nothing changes (the logits equal the build before). Measured by us (5 interleaved pairs, box default flags, IQ3_XXS): RTX A4000 arena decode 48.45 -> 51.15 tok/s (+5.6%, 5/5 pairs), RTX 3060 resident 59.12 -> 58.15 (-1.6%), Tesla P100 37.95 -> 37.48 (-1.3%): opt-in, worth trying on A4000-class cards.
 
-## The prompt chunk follows the host's memory (Linux, file tier; on by default, `STRATA_PREFILL_HOST_PLAN=0` turns it off)
+## The prompt chunk follows the host's memory (Linux, file tier; on by default, `SAGUARO_PREFILL_HOST_PLAN=0` turns it off)
 
 When the experts that do not fit in VRAM are read from the model files through the page cache, the size of the prompt chunk decides how many times a long
 prompt walks over those files, and how big the working set is each time (the chunk's activation buffers and the lent slots take RAM and VRAM from the
@@ -2000,8 +2000,8 @@ requests; a run at a fixed chunk is bit-identical to itself).
 Where it applies: a Linux file tier whose page cache is smaller than the file set at today's chunk. It does nothing, and says `kept`, when the GPU holds every
 expert, when the file set fits the cache (the owner-class RTX 5070 box: 14.8 GiB set against 41.2 GiB of cache, 2024 vs 2035 tok/s at 20K), when the set can
 never fit (a 16 GiB cgroup, 23.1 GiB set: 99.9 vs 98.9 tok/s at 20K, the fewest passes win), and on a fast NVMe where the bigger chunk wins even though it thrashes (P2003, 8192 kept).
-Windows reads the file tier unbuffered (no page cache), so it keeps today's pick. The plan is made for a prompt of `--max-context` tokens (at most 32768, at least 4096). `STRATA_SSD_GBPS` overrides the drive speed, `STRATA_PREFILL_PLAN_TOKS`
-the prompt speed (tokens/s) it assumes; `--prefill N` and `STRATA_PREFILL_RING` always win.
+Windows reads the file tier unbuffered (no page cache), so it keeps today's pick. The plan is made for a prompt of `--max-context` tokens (at most 32768, at least 4096). `SAGUARO_SSD_GBPS` overrides the drive speed, `SAGUARO_PREFILL_PLAN_TOKS`
+the prompt speed (tokens/s) it assumes; `--prefill N` and `SAGUARO_PREFILL_RING` always win.
 
 Measured (RTX 3060 12 GB, IQ2_XS, 20 GiB of experts in RAM, cgroup 34 GB, SATA speed emulated at 450 MB/s, page cache dropped and a fresh engine per run, 5 interleaved
 pairs, plan off against the planner's `8192 -> 3840`, medians):
@@ -2021,32 +2021,32 @@ None of these changes the default answers; each was measured against the default
 engine runs (a fresh engine per side, warmed, 200-token greedy answers on three fixed prompts, medians; "pairs faster" counts
 the pairs in which the switched arm won). They are here so you can try them on your own card.
 
-- **`STRATA_GDN_CHUNKED=1`: the DeltaNet recurrence of the prompt, opt-in**. On CUDA it runs in chunks of 32 tokens
+- **`SAGUARO_GDN_CHUNKED=1`: the DeltaNet recurrence of the prompt, opt-in**. On CUDA it runs in chunks of 32 tokens
   (sergiywith, #1372; WY form, FP32,
   other bits than the default: first-token KL against the default was 0.002-0.009 nats on average, the same top token in
   every prompt tried). The kernel needs 128 SMs in one wave, so by itself it runs only on a card with 128 or more
-  (RTX 5090: 1.8x on the recurrence). On smaller cards `STRATA_GDN_CHUNKED=2` forces it for a measurement, and it is
+  (RTX 5090: 1.8x on the recurrence). On smaller cards `SAGUARO_GDN_CHUNKED=2` forces it for a measurement, and it is
   slower there: 0.73x on an RTX 3060 (28 SMs) and 0.87x on an RTX 5070 (48 SMs) at 2K-32K tokens (`gdn_rec_parity --bench`),
   and the prompt time did not improve: RTX 5070 2K 1.01x, 8K 1.00x of the default's time; RTX 3060 2K, 8K, 16K 1.01x, no pair faster.
   On HIP, gfx1100-gfx1102, gfx1150 and gfx1151 use 16-token WMMA chunks with FP16 operands and a fused output norm; other cards and short
   chunks keep the existing path. It changes rounding too (first-token KL against the default 0.006-0.007 on average, the same top
   token in 12 of 12 prompts); on a Radeon 8060S (gfx1151) the layer's recurrence is 1.6x faster and a 4K-128K prompt after a warm-up prompt 1.4-2.1%; see
   [the HIP conditions and numerical checks](AMD_HIP.md#opt-in-chunked-prompt-gdn-on-gfx11).
-  `STRATA_GDN_CHUNKED_SM75=1` is the same recurrence for Turing (Tesla T4, sm_75) and newer cards: FP16 tensor-core
+  `SAGUARO_GDN_CHUNKED_SM75=1` is the same recurrence for Turing (Tesla T4, sm_75) and newer cards: FP16 tensor-core
   products with every operand split into fp16 hi + lo (FP32-level, other bits), a warp per value head and 16 columns,
   32 KB of shared memory a block (`src/prefill/gdn_chunk_sm75.cuh`; `gdn_rec_parity` checks it against the default
   kernel and FP64 and times it). Tesla T4, one layer's recurrence: 1.74x at 2K-8K tokens, 2.0x at 32K
   (`gdn_rec_parity`: within 1.1e-6 of the default kernel); not yet measured as prompt time or KL.
-- **`STRATA_FS_SLOTS=N`: the Foresight swap space** (q8atnight, #1348): N VRAM slots per layer, refilled on a copy stream
-  with the experts that just missed and with the ones the next layer's router predicts (`STRATA_FS_AHEAD=0` for the
+- **`SAGUARO_FS_SLOTS=N`: the Foresight swap space** (q8atnight, #1348): N VRAM slots per layer, refilled on a copy stream
+  with the experts that just missed and with the ones the next layer's router predicts (`SAGUARO_FS_AHEAD=0` for the
   misses only), so that an expert the cache lacks can be computed on the GPU instead of by the CPU. The model's own router
-  decides everything; the slots only hold copies of the same bytes (`STRATA_FS_VERIFY=1` reads every landed slot back and
+  decides everything; the slots only hold copies of the same bytes (`SAGUARO_FS_VERIFY=1` reads every landed slot back and
   compares it: 0 bad in 2,300+ reads on an RTX 5070). The slots are taken from the VRAM the expert cache would have
   (raise `--vram-reserve-mib` by about N x 80 MiB), and in every box measured the smaller cache cost more than the slots
   returned: decode 4 slots, median tok/s B/A (pairs faster): RTX 3060 0.95 (0/6) with misses only, 0.91 (0/6) with the
   look-ahead; Tesla P100 0.97 (2/6) and 1.00 (4/6); 16 slots on the P100 0.96 (0/6); RTX 5070 0.98 (1/6). The reporter
   measured the same on 2x RTX 3090 (the misses per layer are below one there, so the CPU round trip stays). Left off.
-- **`STRATA_STAGE_PIN`: pinned stage buffers** (Zhong Uncle, #1237; **opt-in, `STRATA_STAGE_PIN=1`**. It was on by default in
+- **`SAGUARO_STAGE_PIN`: pinned stage buffers** (Zhong Uncle, #1237; **opt-in, `SAGUARO_STAGE_PIN=1`**. It was on by default in
   development, but the 0.1.41 release gate found IQ3_S decode corrupted after a 4096-token prompt with it on, likely a stage
   buffer recycled before its asynchronous copy finished; it stays off until that is fixed). Where the experts are served from the GGUF in
   place (`--mmap-experts`, or too little RAM for the arena) the buffers the cache fill copies from are page-locked, so the
@@ -2054,15 +2054,15 @@ the pairs in which the switched arm won). They are here so you can try them on y
   pageable when the driver refuses). Decode, median tok/s on, off, 6 pairs of whole runs: Tesla P100 with the RAM capped at
   24 GB (cgroup) 13.9 -> 15.0 (+8%, 6/6 pairs faster); RTX 5070 `--mmap-experts` +1.2% (5/6); RTX 3060 `--mmap-experts`
   -0.1% (5/6). Boxes that hold all experts in RAM never use the stage buffers.
-- **`STRATA_ADAPT_LAG=2`: the adaptive tier's copies are waited for one window later** (#764). Decode, 6 pairs: Tesla P100
+- **`SAGUARO_ADAPT_LAG=2`: the adaptive tier's copies are waited for one window later** (#764). Decode, 6 pairs: Tesla P100
   (PCIe 3.0 x16) +3.5% (6/6 pairs faster), RTX 5070 +0.2% (4/6), RTX 3060 -1.3% (0/6), so it stays opt-in.
-  Where the tier does not wait for its copies (`STRATA_ADAPT_NOWAIT=1`, `STRATA_ADAPT_LAG` above 1) the device's residency table now follows each eviction before the next window (a small patch kernel before every verifier launch; #1517 by sergiywith): before, the pool could compute an evicted expert on the CPU from a stale activation (`STRATA_ADAPT_CHECKRES=1` counts such layers; `STRATA_ADAPT_EVICT_SYNC=0` turns the fix off). The default (the tier waits) is untouched.
-- **`STRATA_ADAPT_OVERLAP` (`=1` turns it on, on every backend; the startup log names the state and, when it cannot run, why): the adaptive tier's copies land while the next
+  Where the tier does not wait for its copies (`SAGUARO_ADAPT_NOWAIT=1`, `SAGUARO_ADAPT_LAG` above 1) the device's residency table now follows each eviction before the next window (a small patch kernel before every verifier launch; #1517 by sergiywith): before, the pool could compute an evicted expert on the CPU from a stale activation (`SAGUARO_ADAPT_CHECKRES=1` counts such layers; `SAGUARO_ADAPT_EVICT_SYNC=0` turns the fix off). The default (the tier waits) is untouched.
+- **`SAGUARO_ADAPT_OVERLAP` (`=1` turns it on, on every backend; the startup log names the state and, when it cannot run, why): the adaptive tier's copies land while the next
   window runs, with the same tokens.** The window takes the swaps at the same moment as with #463's wait (so the same experts run
   on the GPU and the CPU in every window), but the copies go in layer order and the verify window holds a layer's plan back
   until that layer's copies have landed, instead of the whole window waiting for the round (about 10 ms every fourth window on
-  an A4000, PCIe 3.0 x16). One GPU, the whole arena in RAM, no `--adapt-async`, `--pipeline-windows`, `STRATA_ADAPT_LAG`,
-  `STRATA_ADAPT_NOWAIT` or `STRATA_DMA_BATCH`. A layer split (two or more GPUs) never runs it, in any version: the startup log says
+  an A4000, PCIe 3.0 x16). One GPU, the whole arena in RAM, no `--adapt-async`, `--pipeline-windows`, `SAGUARO_ADAPT_LAG`,
+  `SAGUARO_ADAPT_NOWAIT` or `SAGUARO_DMA_BATCH`. A layer split (two or more GPUs) never runs it, in any version: the startup log says
   `off: not on a layer split` (0.1.43 printed that line only when the variable was set, and ran without the overlap on a split just the
   same, so 0.1.43.1's opt-in default changes nothing there; measured on 2x A4000, #2281). On by default on CUDA on Linux since 0.1.43, opt-in on Windows and HIP;
   opt-in on every backend since #2010, after an RTX 5090 Laptop lost 21% decode with it. What it is worth per box: an RTX A4000 (6
@@ -2071,18 +2071,18 @@ the pairs in which the switched arm won). They are here so you can try them on y
   (+4.4%) gain, but an RTX 5070 on Windows loses 2.6% on Q2_0 (IQ3_XXS no faster) and an RTX 5090 Laptop (WSL2, Core Ultra 9
   275HX, native IQ3_XXS pack, `--expert-cache-per-layer`) loses 21%: 84.6 vs 106.6 tok/s medians of 5 generations of 256
   tokens from one build, the slowest of the fast run above the fastest of the slow one (#2010).
-- **`STRATA_ADAPT_CALLBACK_WARMUP` (Linux, on by default since 0.1.43.1; =0 turns it off): start the GPU host-callback thread before the CPU
+- **`SAGUARO_ADAPT_CALLBACK_WARMUP` (Linux, on by default since 0.1.43.1; =0 turns it off): start the GPU host-callback thread before the CPU
   pool pins the host thread.** A callback thread created later can inherit the host's one-CPU affinity and compete
   with the verifier spinning for its signal (#1975). The warm-up runs and synchronizes one no-op host callback before
   constructing the pool; swap selection, per-layer callbacks and residency updates stay unchanged. On an RTX 5090 /
   Ryzen 9 9950X, a paired 4K three-prompt test averaged 142.82 -> 207.75 tok/s. Other GPUs and drivers remain untested;
   see the [reproducer, settings and limitations](../bench/results/2026-10-11-rtx-5090-callback-affinity/README.md).
-- **`STRATA_ADAPT_SIGNAL=host`: the overlap's per-layer "landed" signal as a host function** (the 0.1.43 way). From 0.1.43.1 the default is a
+- **`SAGUARO_ADAPT_SIGNAL=host`: the overlap's per-layer "landed" signal as a host function** (the 0.1.43 way). From 0.1.43.1 the default is a
   4-byte stream-ordered copy into pinned memory, which needs no driver callback thread: on a 20-core desktop (RTX 3060) the host
   functions still cost ~7 ms per window with the thread started early, because the pool's workers occupy every other CPU.
   **On Windows the host function stays the default** (0.1.44, #2188): under WDDM the copy and its signal waited in the
   driver's command buffer while the window spun on the pinned int, and the first request stopped with "the adaptive
-  tier's copies for layer 45 never landed" (RTX 4070 SUPER, driver 617.42). `STRATA_ADAPT_SIGNAL=copy` asks for the copy
+  tier's copies for layer 45 never landed" (RTX 4070 SUPER, driver 617.42). `SAGUARO_ADAPT_SIGNAL=copy` asks for the copy
   there; the engine now flushes the copy stream after queueing the swaps, which is meant to fix it but has not been run
   on Windows yet.
 - **`--prefill-head-alias` (`--serve`, one GPU): the output head's VRAM holds the prompt buffers while a prompt is read**,
@@ -2091,10 +2091,10 @@ the pairs in which the switched arm won). They are here so you can try them on y
   instead of 512: prefill 292.5 -> 667.1 tok/s on a 29,854-token prompt (medians of 12 and 6 fresh-engine trials).
   Reads of up to 512 fresh tokens cost about 0.6-0.75 s more per request, and the card had 0 MiB free while decoding.
   Details, limits and the measurement: [PREFILL_HEAD_ALIAS.md](PREFILL_HEAD_ALIAS.md).
-  `STRATA_ADAPT_NOWAIT` or `STRATA_DMA_BATCH`; otherwise the log says why it is off. RTX A4000, 6 interleaved pairs each,
+  `SAGUARO_ADAPT_NOWAIT` or `SAGUARO_DMA_BATCH`; otherwise the log says why it is off. RTX A4000, 6 interleaved pairs each,
   decode median tok/s: Q2_0 16 GB 62.5 -> 66.2 (+5.9%), Q2_0 as a 12 GB card 51.3 -> 54.2 (+5.7%), IQ3_XXS 16 GB 48.6 -> 52.6 (+8.3%),
   IQ3_XXS as 12 GB 39.3 -> 41.5 (+5.5%), 6/6 pairs faster every time.
-- **`STRATA_MMQ_DIRECT=1`: the prompt's MMQ reads resident experts in their cache slots** (CUDA, native packs; needs an
+- **`SAGUARO_MMQ_DIRECT=1`: the prompt's MMQ reads resident experts in their cache slots** (CUDA, native packs; needs an
   engine built with `-DSTRATA_MMQ_TAB=ON`, which is off by default). The prompt path multiplies its experts in groups of
   16 with llama.cpp's MMQ, which wants a group's weights in one buffer at a fixed stride, so every expert a chunk routes
   to is copied there first (2.3-3.1 MB each, per chunk and layer), resident ones too. With this on, a Strata-side copy of
@@ -2105,13 +2105,13 @@ the pairs in which the switched arm won). They are here so you can try them on y
   IQ2_S, IQ3_XXS, IQ3_S, IQ4_NL, IQ4_XS, Q8_0 - and every tile size; the optional Q5_0 experts get no pointer table
   and keep the copy). The K-quant experts (UD-Q4/Q5/Q6_K_XL: Q4_K, Q5_K, Q6_K, Q5_1, and their Q8_0 downs) get
   theirs from `strata_kq_tab`, a library next to `strata_kq` built the same way (same `mmq.cuh`, flags and
-  architectures as the gathered products' library) and opened with it only when `STRATA_MMQ_KQ=1` and
-  `STRATA_MMQ_DIRECT=1` are both set; its types are the CMake list `STRATA_MMQ_TAB_KQ_TYPES` (default `q4_k;q5_k;q5_1;q6_k`,
+  architectures as the gathered products' library) and opened with it only when `SAGUARO_MMQ_KQ=1` and
+  `SAGUARO_MMQ_DIRECT=1` are both set; its types are the CMake list `STRATA_MMQ_TAB_KQ_TYPES` (default `q4_k;q5_k;q5_1;q6_k`,
   add `q8_0` for UD-Q4_K_XL's Q8_0 downs), and `STRATA_MMQ_TAB_TYPES` picks the engine's own (default the nine; empty
   keeps the engine's kernels, and its VRAM, as without the option). Each sized cache slot keeps 256 bytes after its expert, because MMQ reads up to
   136 bytes past a 640-wide down matrix; they are zeroed before each group. That is about 2.3 MiB over 9,300 slots (one
-  slot fewer out of 6,998 on one RTX 3090). `STRATA_MMQ_DIRECT=2` keeps that layout, and opens `strata_kq_tab` as
-  =1 does, but copies as before (an A/B reference with the same cache size); 0 or unset is the default path, byte for byte. `STRATA_MMQ_DIRECT_LOG=1` adds each stage's count of experts
+  slot fewer out of 6,998 on one RTX 3090). `SAGUARO_MMQ_DIRECT=2` keeps that layout, and opens `strata_kq_tab` as
+  =1 does, but copies as before (an A/B reference with the same cache size); 0 or unset is the default path, byte for byte. `SAGUARO_MMQ_DIRECT_LOG=1` adds each stage's count of experts
   read in place to the log after every prompt. Under HIP, on a build without `STRATA_MMQ_TAB`, or when CMake turned
   that option off (it does so, with a message, when the llama.cpp tree's `mmq.cuh` differs from the one the copy
   mirrors), the variable is ignored.
@@ -2126,8 +2126,8 @@ the pairs in which the switched arm won). They are here so you can try them on y
   skipped the copies altogether ran 225 and 577 ms, but it is no bound for an exact implementation: it changes the
   routing (12,003 expert-layer entries fell to 777 on one prompt) and so does less work. On one RTX 3090 with most
   experts streamed from RAM the copies of streamed experts stay, and the prompt time did not move (within 1.5%).
-  Exactness, with `STRATA_PREFILL_CPU_SHARE=0` and no adaptive swaps: the first decode window's logits after the prompt
-  (`STRATA_DUMP_FIRST_LOGITS`, fp32) and 32 greedy tokens were byte-identical between 2 and 1 (and 0) for prompts of
+  Exactness, with `SAGUARO_PREFILL_CPU_SHARE=0` and no adaptive swaps: the first decode window's logits after the prompt
+  (`SAGUARO_DUMP_FIRST_LOGITS`, fp32) and 32 greedy tokens were byte-identical between 2 and 1 (and 0) for prompts of
   180-2,619 tokens - on the 4-GPU split with `--prefill 2048` (chunks of 1,024 tokens and more: the streamed walk),
   the same with 9 GB less expert cache per GPU (20-31% of the expert reads streamed, so groups mix in-place, copied and
   mid-group flushed experts), and on one GPU with `--expert-cache-per-layer`; the 150 greedy tokens of each of
@@ -2176,7 +2176,7 @@ processors": 8 workers on logical processors 1 to 8 (four cores, both threads) r
 2, 4, ..., 16 read 94 GB/s, and the default 15 workers on 2, 4, ..., 30 read 146 GB/s (medians of three interleaved 10-second
 runs; 31 workers on 1 to 31 read 123 GB/s).
 
-**`--pool-cores LIST`** (or `STRATA_POOL_CORES=LIST`, or `"pool_cores": "2,4,6,8"` in the run config, or
+**`--pool-cores LIST`** (or `SAGUARO_POOL_CORES=LIST`, or `"pool_cores": "2,4,6,8"` in the run config, or
 `strata launch --pool-cores 2,4,6,8`) pins the workers to exactly these logical processors, in this order. It is for people who
 want to choose the cores themselves (leave some for other programs, use one chiplet, test a layout); the default is what was
 measured. The list is numbers, ranges and `first-last:step`: `0,2,4,6`, `2-14:2`. The numbers are the ones Task Manager and
@@ -2204,7 +2204,7 @@ included; a lazily created host-callback thread can instead inherit the pinned h
 `--aux-cpus` puts every thread that is neither a pool worker nor the host thread on spare CPUs. It moves threads only and
 never changes a result.
 
-- **Which CPUs.** `--aux-cpus auto` (or `STRATA_AUX_CPUS=auto`): the SMT siblings of the host's core first, then the CPUs of
+- **Which CPUs.** `--aux-cpus auto` (or `SAGUARO_AUX_CPUS=auto`): the SMT siblings of the host's core first, then the CPUs of
   physical cores that have no pool worker. A CPU that shares a core with a worker is never taken; when no CPU is spare
   the feature does nothing and the start-up line says so. A list (`--aux-cpus 24,26` or `24-27`) is used as given, minus
   the host's CPU and the workers' CPUs, and only CPUs the process may run on. `--aux-cpus off` is the default.
@@ -2212,9 +2212,9 @@ never changes a result.
   threads, the prefill copy threads and helpers, the router look-ahead, the PLE reader, the file readers, the stdin reader
   and the watchdog. The threads someone else started (the CUDA driver's) are moved by a sweep over `/proc/self/task`
   once the pool exists and again at the start of every request. The pool's workers and the host thread are never moved,
-  and neither is a thread somebody pinned to one CPU. An explicit `STRATA_ADAPT_JOB_CPU` still wins for the adaptive tier's
-  job thread. `STRATA_AUX_STAGER=0` leaves the prefill copy threads where they were started: with a one-CPU spare set up
-  to 32 of them (`STRATA_STAGER_THREADS`) would share that CPU, which can slow the read of a long prompt.
+  and neither is a thread somebody pinned to one CPU. An explicit `SAGUARO_ADAPT_JOB_CPU` still wins for the adaptive tier's
+  job thread. `SAGUARO_AUX_STAGER=0` leaves the prefill copy threads where they were started: with a one-CPU spare set up
+  to 32 of them (`SAGUARO_STAGER_THREADS`) would share that CPU, which can slow the read of a long prompt.
 - **Per request.** `"strata_tune": {"aux_cpus": 1}` (`serve/server.py` forwards `1`, `0`, `true` and `false`) moves the
   threads to the set; `0` puts every moved thread back to the placement it had. A request without the key goes back to the
   start-up setting. With `--batch` the most recently admitted request's value holds, as for the other `strata_tune` keys.
@@ -2238,7 +2238,7 @@ never changes a result.
   stalls above 100 us, in 7 and 8 of 12 requests off against 0 or 1 with `auto`. That preemption of the host causes the
   loss is an inference; the counters do not prove it. The warm-up requests of each run were discarded.
 
-**NUMA-split CPU expert pool (0.2.2: on by itself when the machine has 2 or more NUMA nodes; off with `STRATA_NUMA_POOL=0`):** on a 2-socket Linux box it splits the CPU expert pool into
+**NUMA-split CPU expert pool (0.2.2: on by itself when the machine has 2 or more NUMA nodes; off with `SAGUARO_NUMA_POOL=0`):** on a 2-socket Linux box it splits the CPU expert pool into
 one slice per NUMA node, each with its own task counter and barrier, and at load it places each node's half of every
 CPU-side expert's rows in that node's memory (first touch by threads pinned to that node; the model file's page cache is
 released first), so a slice reads its own socket's memory. Under the split the default worker count is the physical cores
@@ -2251,12 +2251,12 @@ the split, 22 workers gave 43.25 tok/s, and the split at 12 workers gave 51.45; 
 NUMA nodes and enough free memory on each node for its half: otherwise the log warns `NUMA placement at risk`, and after
 the load it judges the placement from move_pages samples and prints FAILED when a node holds under 95% of its slice. Only
 native expert layers are split (`ArenaExpertSource` and the `cudaHostAlloc` path are not, and the engine says so at start-up
-for the arena path). The pool refuses the split with `STRATA_EXCHANGE_ROTATE=1` and when the two sockets' worker counts are
-lopsided, logs the reason (`NUMA split off: ...`) and runs as usual. `STRATA_NUMA_SPLIT=test` builds the same slices by
+for the arena path). The pool refuses the split with `SAGUARO_EXCHANGE_ROTATE=1` and when the two sockets' worker counts are
+lopsided, logs the reason (`NUMA split off: ...`) and runs as usual. `SAGUARO_NUMA_SPLIT=test` builds the same slices by
 alternating the threads between two slices on any machine, with no node lookup, no pinning requirement and no memory
 placement; it is for testing the per-slice scheduling, not for speed.
 
-*0.2.2: when it runs.* The split was a contributor's opt-in (`STRATA_NUMA_SPLIT=1`, issue #3201, measured on one dual Xeon Gold 6226 box). From 0.2.2 the pool counts the NUMA nodes that have CPUs (Linux: `/sys/devices/system/node/node*/cpulist`; Windows: `GetNumaHighestNodeNumber`) and, with 2 or more and neither `STRATA_NUMA_POOL` nor `STRATA_NUMA_SPLIT` set, tries the split by itself. **One node is exactly the pool as before: nothing is read, nothing is logged, no worker count changes.** On 2 or more nodes the split runs only when it can (Linux, exactly 2 nodes holding the pool's threads, balanced slices, pinned threads, no `STRATA_EXCHANGE_ROTATE=1`); otherwise the pool keeps its old worker count and cores and logs why: `strata cpu pool: NUMA pool off: <reason> (N NUMA nodes found), the pool runs as before` (a 4-node machine, a container that sees one node's CPUs, Windows). When it runs the log says `strata cpu pool: NUMA pool on: N NUMA nodes found, one slice of the pool per node (STRATA_NUMA_POOL=0 turns it off)`, then the `NUMA split on: slice 0 = node ...` line. **Off switch: `STRATA_NUMA_POOL=0`** (also `off`, `false`, `no`); it wins over `STRATA_NUMA_SPLIT=1`, and on a 2-node machine logs `NUMA pool off (STRATA_NUMA_POOL=0)`. `STRATA_NUMA_SPLIT=1` still asks for the split on any machine (and keeps the contributor's worker counts when it cannot run), `STRATA_NUMA_SPLIT=0` is off. On Windows the node count is read but the split itself is Linux-only for now: a Windows machine with 2 nodes logs the reason and runs as before. The 0.2.2 default was built from the report and tested on one-node machines only (identity gate and speed A/B unchanged there; the node logic runs in `numa_pool_test` on made-up topologies); it has not been run on a two-socket machine by us. Log: `strata cpu pool: NUMA split on: slice 0 = node 0 (N threads), slice 1 =
+*0.2.2: when it runs.* The split was a contributor's opt-in (`SAGUARO_NUMA_SPLIT=1`, issue #3201, measured on one dual Xeon Gold 6226 box). From 0.2.2 the pool counts the NUMA nodes that have CPUs (Linux: `/sys/devices/system/node/node*/cpulist`; Windows: `GetNumaHighestNodeNumber`) and, with 2 or more and neither `SAGUARO_NUMA_POOL` nor `SAGUARO_NUMA_SPLIT` set, tries the split by itself. **One node is exactly the pool as before: nothing is read, nothing is logged, no worker count changes.** On 2 or more nodes the split runs only when it can (Linux, exactly 2 nodes holding the pool's threads, balanced slices, pinned threads, no `SAGUARO_EXCHANGE_ROTATE=1`); otherwise the pool keeps its old worker count and cores and logs why: `strata cpu pool: NUMA pool off: <reason> (N NUMA nodes found), the pool runs as before` (a 4-node machine, a container that sees one node's CPUs, Windows). When it runs the log says `strata cpu pool: NUMA pool on: N NUMA nodes found, one slice of the pool per node (SAGUARO_NUMA_POOL=0 turns it off)`, then the `NUMA split on: slice 0 = node ...` line. **Off switch: `SAGUARO_NUMA_POOL=0`** (also `off`, `false`, `no`); it wins over `SAGUARO_NUMA_SPLIT=1`, and on a 2-node machine logs `NUMA pool off (SAGUARO_NUMA_POOL=0)`. `SAGUARO_NUMA_SPLIT=1` still asks for the split on any machine (and keeps the contributor's worker counts when it cannot run), `SAGUARO_NUMA_SPLIT=0` is off. On Windows the node count is read but the split itself is Linux-only for now: a Windows machine with 2 nodes logs the reason and runs as before. The 0.2.2 default was built from the report and tested on one-node machines only (identity gate and speed A/B unchanged there; the node logic runs in `numa_pool_test` on made-up topologies); it has not been run on a two-socket machine by us. Log: `strata cpu pool: NUMA split on: slice 0 = node 0 (N threads), slice 1 =
 node 1 (M threads)` at start, then `FileExpertSource: NUMA placement: node 0 <GiB> (xx.x % of its slices), node 1
 <GiB> (xx.x % of its slices); free before: ...; after the drop: ...; pages taken and page-locked in N s since the
 placement started`.
@@ -2324,10 +2324,10 @@ the document, +0.4% on the chat. Details: `bench/results/2026-09-27-esp/`.
 | Pictures are slow (3-30 s) | The encoder runs on the CPU, which is the default under 24 GB of graphics memory (the card's reader is the default from 24 GB). To use the card's reader: run setup again with `--vision gpu` (needs ~1.4 GB of VRAM; it takes room from the expert cache). |
 | A request never finishes: "reading the prompt", GPU "100%" at low power | The GPU ran out of VRAM (engines before 0.1.9 could end with ~30 MiB free at large contexts). Run `START-HERE.bat` once to get engine 0.1.9 or newer; the log then says `... MiB of VRAM free with everything loaded` (a few hundred) and names the `--vram-reserve-mib` to add if it is low. |
 | Output much slower than the tables above, only with a large `--context`, and the start says a small `... MiB of VRAM free with everything loaded` | The expert cache does not fit the card at that context. With `--expert-cache auto` the engine shrinks it to fit; with a fixed number it does not check again after the slots are written, and on Windows the extra is put in system memory instead of failing, so only the speed shows it. Use `auto`, a smaller number, or raise `--vram-reserve-mib` (it is deducted before the cache is sized). See "The expert cache size is a budget" under Sharing the GPU. |
-| Generation stops mid-answer, GPU "100%", one CPU core busy | Fixed in engine 0.1.12 (issue #29, a race in the CPU expert pool on big-VRAM cards). Since then a request that stops moving ends with an error instead of hanging (after 2 minutes; 1 minute from 0.1.13): the log says `no progress for ... s ... (issue #29)` with where it stopped, and the next request starts the engine again. If you see that line, please open an issue with it. Engine 0.1.13 adds a stall report under it (what every expert-pool thread and the GPU handshake were doing, memory and page faults) and, on Windows, a `strata-stall-<pid>.dmp` file with every thread's stack: attach both. (`STRATA_WATCHDOG_S` sets the time in seconds; 0 turns it off.) Engine 0.1.14 fixes the stall those reports found (issue #31: with the IQ packs the host could wait forever inside the NVIDIA driver while copying experts in a verify window; the experts are now copied by a GPU kernel, `--pcie-mode dma` restores the old way). |
+| Generation stops mid-answer, GPU "100%", one CPU core busy | Fixed in engine 0.1.12 (issue #29, a race in the CPU expert pool on big-VRAM cards). Since then a request that stops moving ends with an error instead of hanging (after 2 minutes; 1 minute from 0.1.13): the log says `no progress for ... s ... (issue #29)` with where it stopped, and the next request starts the engine again. If you see that line, please open an issue with it. Engine 0.1.13 adds a stall report under it (what every expert-pool thread and the GPU handshake were doing, memory and page faults) and, on Windows, a `strata-stall-<pid>.dmp` file with every thread's stack: attach both. (`SAGUARO_WATCHDOG_S` sets the time in seconds; 0 turns it off.) Engine 0.1.14 fixes the stall those reports found (issue #31: with the IQ packs the host could wait forever inside the NVIDIA driver while copying experts in a verify window; the experts are now copied by a GPU kernel, `--pcie-mode dma` restores the old way). |
 | `no progress for 60 s ... reading the prompt` on Linux, and the stall report says `threads waiting on the disk (state D): 16 ...` | The engine waits for the drive, not a deadlock: the n-gram table is read at random (`--ple-io direct`), which a rotational disk cannot keep up with (#605). The engine warns at start when the table is on one; `--ple-io ram` (Linux, needs RAM for the table) or the model on an SSD fixes it. Setup adds `--ple-io ram` itself on a rotational disk when the RAM holds the table (0.1.39). |
 | `the engine said nothing for ... s during the request` or `... did not finish the request after it was stopped (STOP)` | Issue #481: the engine and the server lost step (the engine waits for its next command, the server for the request's end; GPU at 0 %, nothing in the log). The server ends the engine after 300 s without a line from it during a request (while a prompt is read: each chunk may take three times the previous one's time, the first one up to its tokens at 50 tok/s more), the request ends with an error and the next request starts the engine again. `"engine_silence_s": 600` in `strata-<model>.json` sets the time (0 = wait forever, as before). If you see it, please add the end of the engine log to #481. |
-| `the engine said nothing for ... s and used no CPU or disk in that time (frozen ...)` | Issue #1317: a quicker version of the check above for an engine that is not slow but stopped (a deadlock inside a CUDA call, a driver stall): after 90 s without a line, if the engine process has also used no CPU time and moved no disk bytes in that time, the server ends it and the next request starts it again. An engine that is silent but still working is never ended by this check, the server prints one note (`... but is still working; it is not ended`) and leaves it to `engine_silence_s`. `STRATA_ENGINE_STALL_S=180` sets the time, `0` turns the check off (it needs `psutil`, which setup installs). |
+| `the engine said nothing for ... s and used no CPU or disk in that time (frozen ...)` | Issue #1317: a quicker version of the check above for an engine that is not slow but stopped (a deadlock inside a CUDA call, a driver stall): after 90 s without a line, if the engine process has also used no CPU time and moved no disk bytes in that time, the server ends it and the next request starts it again. An engine that is silent but still working is never ended by this check, the server prints one note (`... but is still working; it is not ended`) and leaves it to `engine_silence_s`. `SAGUARO_ENGINE_STALL_S=180` sets the time, `0` turns the check off (it needs `psutil`, which setup installs). |
 | `out of memory: cudaFuncSetAttribute` in the log (IQ3_XXS, long prompt) | Fixed in engine 0.1.15: CUDA loaded a kernel's code when it was first needed, and mid-prompt there was no VRAM left for it. Run `START-HERE.bat` (Windows) or `./setup.sh` (Linux) once to update. |
 | The desktop app or the Terminal says it could not find an engine, or that a model needs a newer engine; a Mac says an app is "damaged" | [TROUBLESHOOTING.md](TROUBLESHOOTING.md#the-desktop-app-and-the-terminal). |
 | Anything else | The engine log is `strata-<model>.log` in this folder. In the app: Settings, Engine, Diagnostics, View logs, Save logs. In the Terminal: `strata doctor`. |
@@ -2344,7 +2344,7 @@ the document, +0.4% on the chat. Details: `bench/results/2026-09-27-esp/`.
 - **RAM:** all 24,576 experts, pinned. The CPU computes the experts that are not on the GPU **in place**, at the same time
   as the GPU works on the cached ones (AVX-512 / AVX2 kernels, ggml's for the i-quants).
 - **SSD:** the 28.8 GB n-gram table, a few rows per token, read unbuffered past the OS cache (`--ple-io direct`, the
-  default, made for SSDs; on a rotational disk `--ple-io ram` keeps the table in RAM, #605). A start-up probe warns when direct reads measure slow (under 15K rows/s) but never switches by itself (since 0.1.43.1; `STRATA_PLE_AUTO_MMAP=1` brings back the 0.1.42 switch to `--ple-io mmap`): the bar is calibrated for NVMe, a SATA SSD tops out at 10-14K rows/s with direct's 16 reads in flight, and on one (Linux, 77.8K-token prompt) mmap read 2.1K rows/s against direct's 14.4K (#2040), while on a Windows box with a slow mapped file mmap stalled prompts (#1984). The engine reads the table
+  default, made for SSDs; on a rotational disk `--ple-io ram` keeps the table in RAM, #605). A start-up probe warns when direct reads measure slow (under 15K rows/s) but never switches by itself (since 0.1.43.1; `SAGUARO_PLE_AUTO_MMAP=1` brings back the 0.1.42 switch to `--ple-io mmap`): the bar is calibrated for NVMe, a SATA SSD tops out at 10-14K rows/s with direct's 16 reads in flight, and on one (Linux, 77.8K-token prompt) mmap read 2.1K rows/s against direct's 14.4K (#2040), while on a Windows box with a slow mapped file mmap stalled prompts (#1984). The engine reads the table
   in the format the GGUF has it: IQ4_NL (the default table), Q4_0, Q5_0, Q5_1, Q8_0, FP8 (E4M3 with a scale) or BF16.
   Measured on 4,000 random rows against the checkpoint's own BF16 table, the mean per-row error is Q8_0 0.53%, FP8 2.64%,
   Q5_1 3.78%, Q5_0 4.25%, IQ4_NL 7.60%, Q4_1 7.80%, Q4_0 8.55% (a Q8_0 table is 54 GB, an IQ4_NL one 28.8 GB). On the Q2_0 model, 700 teacher-forced tokens, the mean KL against the BF16 table is 0.0117 (Q5_0), 0.0121 (Q5_1), 0.0125
@@ -2361,13 +2361,13 @@ the document, +0.4% on the chat. Details: `bench/results/2026-09-27-esp/`.
   largest chunk that keeps that ring full. It only gives up ring slots where 0.1.39's rule held the chunk at 4,096
   tokens or less; from 6,144 on it keeps 0.1.39's ring and only looks for a bigger chunk beside it (shrinking the
   ring there measured slower: the Coder -12%), and a prompt that fits 0.1.39's chunk keeps 0.1.39's ring (one
-  chunk: a smaller ring only slowed it). RTX 5070, 32K prompts against `STRATA_RING_BYTES=0`, 2-3 interleaved
+  chunk: a smaller ring only slowed it). RTX 5070, 32K prompts against `SAGUARO_RING_BYTES=0`, 2-3 interleaved
   rounds: IQ3_XXS +18.5% at a 1,500-slot cache and +9% in another memory state, the Coder +3%, IQ3_S unchanged; 4K
   prompts unchanged (-0.7% to +1.1%, bit-identical). Q2_0 (a fixed `--prefill 2048`) is not affected. It changes
   the bits of a long prompt against 0.1.39 (the experts go through a different
   mix of cached and streamed groups). Measured quality, teacher-forced over the next 2,001 tokens of a long document
   against the FP16 prompt path (IQ3_XXS, `--prefill auto`): 8K prompt KL 0.042 (0.1.39: 0.054), top-1 agreement
-  93.5% (92.2%); 32K prompt KL 0.020 (0.019), top-1 95.3% (95.0%) - the same band as before. `STRATA_RING_BYTES=0`
+  93.5% (92.2%); 32K prompt KL 0.020 (0.019), top-1 95.3% (95.0%) - the same band as before. `SAGUARO_RING_BYTES=0`
   restores 0.1.39's ring, loan and chunk choice.
 
 The full story, with measurements, bottlenecks and what comes next: **[docs/paper/Strata-Paper.pdf](paper/Strata-Paper.pdf)**.
@@ -2455,15 +2455,15 @@ The page uses relative URLs and works through the existing host binding or a rev
 
 ### Prompt buffers: `bo` shares `emb` (#1454)
 
-The prompt path's half-output buffer `bo` reuses the embedding buffer `emb`, which is dead after the first hyper-connection broadcast: T x 2560 floats less VRAM per chunk (320 MiB at 32768 rows). The planner still counts those bytes by default, so the auto chunk and the cache slots the prompt path borrows are exactly those of 0.1.40.3 and the output bits are unchanged. `STRATA_EMB_REUSE_ACCOUNT=1` lets the planner use the saved bytes: where VRAM limits the chunk it grows (RTX 3060, IQ3_XXS: 6400 to 6656 tokens, 1652 to 1670 borrowed slots, prompt about +3.9%). A different chunk changes the prompt path's rounding, so prompt residuals are not byte-identical to the default; greedy output matched in our runs. Opt-in until it has a KL measurement.
+The prompt path's half-output buffer `bo` reuses the embedding buffer `emb`, which is dead after the first hyper-connection broadcast: T x 2560 floats less VRAM per chunk (320 MiB at 32768 rows). The planner still counts those bytes by default, so the auto chunk and the cache slots the prompt path borrows are exactly those of 0.1.40.3 and the output bits are unchanged. `SAGUARO_EMB_REUSE_ACCOUNT=1` lets the planner use the saved bytes: where VRAM limits the chunk it grows (RTX 3060, IQ3_XXS: 6400 to 6656 tokens, 1652 to 1670 borrowed slots, prompt about +3.9%). A different chunk changes the prompt path's rounding, so prompt residuals are not byte-identical to the default; greedy output matched in our runs. Opt-in until it has a KL measurement.
 
-**Fused int8 prompt experts on gfx12 (RDNA4, R9700): on by default for IQ3_S and IQ3_XXS packs.** `STRATA_PF_FUSED=0` turns them off (back to the MMQ prompt kernels, the previous bits). R9700, 1 card: prompt 4K +15.7%, 16K +13..+17%, 32K +19..+20%, a 96K prompt +16% (answers identical text); first-token KL against the FP16 prompt path over 96 prompts is equal to MMQ within noise (IQ3_XXS 0.00613 against 0.00683, IQ3_S 0.00416 against 0.00372). Other quants and other GPUs are unchanged; `STRATA_PF_FUSED=1` still opts in every covered format.
+**Fused int8 prompt experts on gfx12 (RDNA4, R9700): on by default for IQ3_S and IQ3_XXS packs.** `SAGUARO_PF_FUSED=0` turns them off (back to the MMQ prompt kernels, the previous bits). R9700, 1 card: prompt 4K +15.7%, 16K +13..+17%, 32K +19..+20%, a 96K prompt +16% (answers identical text); first-token KL against the FP16 prompt path over 96 prompts is equal to MMQ within noise (IQ3_XXS 0.00613 against 0.00683, IQ3_S 0.00416 against 0.00372). Other quants and other GPUs are unchanged; `SAGUARO_PF_FUSED=1` still opts in every covered format.
 
-**gfx12 (Linux): a bare `--prefill auto` may take 16384-token chunks.** Explicit `--prefill N`, `auto:N` and `STRATA_PREFILL_AUTO_MAX` are untouched; `STRATA_GFX12_CHUNK=0` or `STRATA_GFX12_DEFAULTS=0` keeps 8192.
+**gfx12 (Linux): a bare `--prefill auto` may take 16384-token chunks.** Explicit `--prefill N`, `auto:N` and `SAGUARO_PREFILL_AUTO_MAX` are untouched; `SAGUARO_GFX12_CHUNK=0` or `SAGUARO_GFX12_DEFAULTS=0` keeps 8192.
 
 ### CUDA diagnostics: a host thread for the verify-window launch
 
-`STRATA_VERIFY_ASYNC_LAUNCH=1` runs `Verifier::run`'s CUDA graph launch on a separate
+`SAGUARO_VERIFY_ASYNC_LAUNCH=1` runs `Verifier::run`'s CUDA graph launch on a separate
 host thread. This lets its caller serve the CPU expert doorbells while an
 instrumented `cudaGraphLaunch` blocks waiting for the graph. The caller joins the
 launch and checks its real error before returning a frontier; an early service
@@ -2487,22 +2487,22 @@ gate (10 prompts + exact_pp 4K/20K, fixed flags) is IDENTICAL with it on. Removi
 paid on their architecture. They are on by default now, per architecture (`include/strata/core/nv_defaults.hpp`, set before the
 engine reads its switches; a switch you set yourself, to anything, is kept):
 
-- sm_86 (RTX 3050-3090, RTX A2000-A6000): `STRATA_ADAPT_NOWAIT=1`, `STRATA_ADAPT_LAG=2`, `STRATA_CPU_IQ_ALL_EXACT1=1`,
-  `STRATA_SIDE_MIXER=2`, `STRATA_ATTN_DAILY=1`, `STRATA_GR_UP75=1`, `STRATA_GU_SWIGLU=1`, `STRATA_QSA_ROWS=1`, `STRATA_B6_MMVQ_ROWS=1`.
-  `STRATA_SM86_PERF=0` turns the set off.
-- sm_60 (Tesla P100): `STRATA_ADAPT_NOWAIT=1`, `STRATA_ADAPT_LAG=2`, `STRATA_SIDE_MIXER=2`, `STRATA_FUSE_WAIT=2`, `STRATA_B6_MMVQ_ROWS=1`,
-  `STRATA_FUSE_DECODE=1`, `STRATA_GR_UP75=1`. `STRATA_SM60_PERF=0` turns the set off.
+- sm_86 (RTX 3050-3090, RTX A2000-A6000): `SAGUARO_ADAPT_NOWAIT=1`, `SAGUARO_ADAPT_LAG=2`, `SAGUARO_CPU_IQ_ALL_EXACT1=1`,
+  `SAGUARO_SIDE_MIXER=2`, `SAGUARO_ATTN_DAILY=1`, `SAGUARO_GR_UP75=1`, `SAGUARO_GU_SWIGLU=1`, `SAGUARO_QSA_ROWS=1`, `SAGUARO_B6_MMVQ_ROWS=1`.
+  `SAGUARO_SM86_PERF=0` turns the set off.
+- sm_60 (Tesla P100): `SAGUARO_ADAPT_NOWAIT=1`, `SAGUARO_ADAPT_LAG=2`, `SAGUARO_SIDE_MIXER=2`, `SAGUARO_FUSE_WAIT=2`, `SAGUARO_B6_MMVQ_ROWS=1`,
+  `SAGUARO_FUSE_DECODE=1`, `SAGUARO_GR_UP75=1`. `STRATA_SM60_PERF=0` turns the set off.
 
-The table is used when every visible card has that one compute capability. `STRATA_ADAPT_OVERLAP=1` (opt-in) does not run beside
-`STRATA_ADAPT_LAG` / `STRATA_ADAPT_NOWAIT`: set `STRATA_ADAPT_LAG=1 STRATA_ADAPT_NOWAIT=0` with it. Left out because they did not pay or
-were mixed: `STRATA_EXPDEC`, `STRATA_GR_NORM_FAST`, `STRATA_RAM_ADAPT`, `STRATA_KV_HOST_REGISTER`, `STRATA_HOST_CORE`,
-`STRATA_GR_DOWN_TG`, `STRATA_DEQUANT_WIDE`; `STRATA_EXCHANGE_ROTATE` never reaches READY on the 3060 and `STRATA_PCIE_BALANCE` is slower on a
+The table is used when every visible card has that one compute capability. `SAGUARO_ADAPT_OVERLAP=1` (opt-in) does not run beside
+`SAGUARO_ADAPT_LAG` / `SAGUARO_ADAPT_NOWAIT`: set `SAGUARO_ADAPT_LAG=1 SAGUARO_ADAPT_NOWAIT=0` with it. Left out because they did not pay or
+were mixed: `SAGUARO_EXPDEC`, `SAGUARO_GR_NORM_FAST`, `SAGUARO_RAM_ADAPT`, `SAGUARO_KV_HOST_REGISTER`, `SAGUARO_HOST_CORE`,
+`SAGUARO_GR_DOWN_TG`, `SAGUARO_DEQUANT_WIDE`; `SAGUARO_EXCHANGE_ROTATE` never reaches READY on the 3060 and `SAGUARO_PCIE_BALANCE` is slower on a
 single card.
 
 The per-architecture sets themselves (no environment variables), against the engine without them, IQ3_XXS, default flags, 8
 interleaved pairs of fresh engines, the same number of expert-cache slots in every arm (engine 0.1.45.3 and its test builds):
 
-| Card | Decode before -> after | Gain | Pairs faster | Same engine against itself | With `STRATA_SM86_PERF=0` / `STRATA_SM60_PERF=0` |
+| Card | Decode before -> after | Gain | Pairs faster | Same engine against itself | With `SAGUARO_SM86_PERF=0` / `STRATA_SM60_PERF=0` |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | RTX 3060 12 GB (sm_86) | 60.36 -> 66.52 tok/s | +10.2% | 8/8 | 0.999 | 1.002 (equal to before) |
 | RTX A4000 16 GB (sm_86) | 51.16 -> 57.82 tok/s | +13.0% | 8/8 | 0.979 | 0.994 |
@@ -2511,7 +2511,7 @@ interleaved pairs of fresh engines, the same number of expert-cache slots in eve
 Two things looked at and **not changed**. A prompt chunk above 8192 (`--prefill auto:16384` or `auto:32768`) changes prompt speed by -3% to +8%
 on 12-16 GB cards at 20K tokens (at 16384 / 32768: RTX 3060 +4.5% / +4.5%, Tesla P100 +3.1% / +7.7%, RTX A4000 -3.4% / +6.0%), but it is not bit-exact on
 CUDA (the residual dump differs on the P100 and the A4000; 32768 also changed the output tokens on the P100), so the default
-stays 8192 on NVIDIA. It is exact on gfx12, where 16384 is the default. And `STRATA_ROUTE_PRIOR=0.5` stays opt-in: on an RTX 3060
+stays 8192 on NVIDIA. It is exact on gfx12, where 16384 is the default. And `SAGUARO_ROUTE_PRIOR=0.5` stays opt-in: on an RTX 3060
 (IQ3_XXS) its teacher-forced KL is 0.0126 against a run-to-run floor of 0.0012 (top-1 agreement 96.6% against 99.1%); on an RTX A4000
 HumanEval scored 154/164 against 157 and 159 for the default twice, and reasoning 25/30 against 24 and 26 (agent 6/6, needles 3/3, CJK
 8/8 and tool calls 5/5 for all), which is inside the run-to-run spread.
@@ -2526,25 +2526,25 @@ flags (`--spec 4 --spec-min-p 0.5`), 6 interleaved pairs of fresh engines, 300-t
 | before (tok/s) | 168.8 | 224.6 | 186.6 | 3829 / 4613 / 4767 |
 | now | 192.0 (+13.8%, 6/6 pairs) | 260.0 (+15.8%, 6/6) | 211.9 (+13.6%, 6/6) | 4212 / 4870 / 4929 (+9.9% / +5.4% / +3.4%, 6/6 each) |
 
-Decode is bitwise: with `STRATA_PF_FUSED=0` the answers are the same tokens as before and the identity gate passes (10 prompts
+Decode is bitwise: with `SAGUARO_PF_FUSED=0` the answers are the same tokens as before and the identity gate passes (10 prompts
 plus the 4K and 20K prompt dumps, with the fixed small cache and with every expert resident). The prompts change at rounding
 level because of the fused prompt experts (below). What changed:
 
-- On a 12.0 card these bitwise switches are on unless set: `STRATA_SIDE_MIXER=2` (the mixer's input-only work on graph
-  branches), `STRATA_ATTN_DAILY=1` (the Daily's decode attention), `STRATA_GR_UP75=1` and `STRATA_GR_DOWN_TG=1` (the
+- On a 12.0 card these bitwise switches are on unless set: `SAGUARO_SIDE_MIXER=2` (the mixer's input-only work on graph
+  branches), `SAGUARO_ATTN_DAILY=1` (the Daily's decode attention), `SAGUARO_GR_UP75=1` and `SAGUARO_GR_DOWN_TG=1` (the
   hyper-connection read's up projection with its loads hoisted, and its down projection with a block row per token; token
   pairs, `=2`, below 80 SMs),
-  `STRATA_GU_SWIGLU=1` (new: the routed experts' gate/up, SwiGLU and q8_1 in one launch). A fixed 4-token verify round went
-  13.70 -> 11.80 ms with them. `STRATA_SM120_PERF=0` turns the set off; each switch's own variable still wins in both directions.
+  `SAGUARO_GU_SWIGLU=1` (new: the routed experts' gate/up, SwiGLU and q8_1 in one launch). A fixed 4-token verify round went
+  13.70 -> 11.80 ms with them. `SAGUARO_SM120_PERF=0` turns the set off; each switch's own variable still wins in both directions.
 - The interleaved small-batch matvec (`native_mmvq_il`, docs/MMVQ_IL_TABLE.md) also runs 5 to 8 tokens (it stopped at 4, and a
   5-token window cost 2 ms more than a 4-token one), with a 12.0 table for 5-8 tokens and, on 12.0 cards with 80+ SMs, its own
-  2-4 token table. Bitwise (`mmvq_il_parity`, 1-8 tokens). `STRATA_MMVQ_IL_WIDE=0` / `STRATA_MMVQ_IL_120=0` turn them off.
-- On 12.0 cards with 80 or more SMs the native packs' prompt experts run on the fused int8 kernels (`STRATA_PF_FUSED`, the rule
+  2-4 token table. Bitwise (`mmvq_il_parity`, 1-8 tokens). `SAGUARO_MMVQ_IL_WIDE=0` / `SAGUARO_MMVQ_IL_120=0` turn them off.
+- On 12.0 cards with 80 or more SMs the native packs' prompt experts run on the fused int8 kernels (`SAGUARO_PF_FUSED`, the rule
   gfx12 has) for IQ2_S, IQ3_XXS, IQ3_S and IQ4_XS gate/up; IQ2_XXS / IQ2_XS keep MMQ until measured. An RTX 5070 (48 SMs, IQ2_XS
   pack, experts partly in RAM) was 4.7% slower on 20K prompts with them (0/6 pairs), so smaller 12.0 cards keep MMQ. Quality on IQ3_S: teacher-forced KL against MMQ 0.0002
   (5998 positions; MMQ against itself 0.0000) and 0.0010 after ~6K-token documents (1760 positions); first-token KL against
   the FP16 prompt path 0.01181 vs MMQ's 0.01236 (48 prompts of 1.5K-24K tokens); HumanEval 156/164, reasoning 26/30, agent
-  6/6, needles 6/6, CJK 8/8, tool calls 4/5, the same as MMQ. `STRATA_PF_FUSED=0` keeps MMQ.
+  6/6, needles 6/6, CJK 8/8, tool calls 4/5, the same as MMQ. `SAGUARO_PF_FUSED=0` keeps MMQ.
 - With the cheaper rows, deeper speculation was measured again (3 pairs): `--spec 3` 1.145 / 1.020 / 1.123 of before,
   `--spec 4` 1.122 / 1.141 / 1.132, `--spec 5` 1.079 / 1.101 / 1.074, `--spec 6` 1.060 / 1.177 / 1.097, `--spec 8` 1.027 /
   1.105 / 1.069 (story / code / document). `--spec 4 --spec-min-p 0.5` stays the default.
@@ -2563,21 +2563,21 @@ unless noted; the gain is small on these two cards and larger on the Turing card
 
 | Switch | What | Answers | RTX 3060 / A4000 |
 |---|---|---|---|
-| `STRATA_ATTN_DAILY=1` (#2075) | decode attention: two cells per step, a merge that skips empty chunks | bit-exact | +3.2% (5/5) / +0.7% |
-| `STRATA_QSA_ROWS=1` (#2059) | block scores of a verify window, queries in registers ([QSAROWS.md](QSAROWS.md)) | bit-exact | -0.3% / +0.3% |
-| `STRATA_EXPDEC=1` (#2058) | gate/up of the window's resident experts with the q8_1 rows in shared memory ([EXPERTDEC.md](EXPERTDEC.md)) | bit-exact | +0.5% / +1 to +5% (short context) |
-| `STRATA_SIDE_MIXER=1/2` (#1889) | the mixer's input-only work on graph branches | bit-exact | +0.5% / -0.6% (short context) |
-| `STRATA_B6_MMVQ_ROWS=1` (#1418) | exact multi-column MMVQ reusing the activation fragment across rows (K-quants, IQ4_XS) | bit-exact | +0.2..1% / +0.5..2% |
-| `STRATA_QSA_SPLIT_ATTN=1` (#1888) | decode attention split across blocks on the int8 mma path (sm_80+, int8 KV) | rounding-level (teacher-forced KL 0.0016 against a floor of 0.0012) | +2.8% / +3.5% |
-| `STRATA_HC_UPMIX=1` (#1370) | the hyper-connection up projection and `gr_mix_r` in one kernel (sm_80+) | bit-exact here (gate identical) | prompt +0.6% / +0.4% |
-| `STRATA_PROMPT_ATTN_IMMA=1` (#1367) | int8-KV prompt attention on INT8 tensor cores | rounding-level (KL at the floor) | prompt read +2.5% |
-| `STRATA_HC_REQ8=1` (#1262) | the hyper-connection projections as int8 + a scale per 32 (more expert-cache slots) | rounding-level (KL 0.0018) | decode -0.2% / +2.2% |
-| `STRATA_QUANT_GATHER=1` (#1368) | turns the once-per-token MoE input quantization back to the per-row gather | n/a | no difference measured |
-| `STRATA_PREFILL_GROUP_GATHER=0` (#1107) | turns the short-prompt grouped gather off | n/a | on is 0.6-1.3% faster |
+| `SAGUARO_ATTN_DAILY=1` (#2075) | decode attention: two cells per step, a merge that skips empty chunks | bit-exact | +3.2% (5/5) / +0.7% |
+| `SAGUARO_QSA_ROWS=1` (#2059) | block scores of a verify window, queries in registers ([QSAROWS.md](QSAROWS.md)) | bit-exact | -0.3% / +0.3% |
+| `SAGUARO_EXPDEC=1` (#2058) | gate/up of the window's resident experts with the q8_1 rows in shared memory ([EXPERTDEC.md](EXPERTDEC.md)) | bit-exact | +0.5% / +1 to +5% (short context) |
+| `SAGUARO_SIDE_MIXER=1/2` (#1889) | the mixer's input-only work on graph branches | bit-exact | +0.5% / -0.6% (short context) |
+| `SAGUARO_B6_MMVQ_ROWS=1` (#1418) | exact multi-column MMVQ reusing the activation fragment across rows (K-quants, IQ4_XS) | bit-exact | +0.2..1% / +0.5..2% |
+| `SAGUARO_QSA_SPLIT_ATTN=1` (#1888) | decode attention split across blocks on the int8 mma path (sm_80+, int8 KV) | rounding-level (teacher-forced KL 0.0016 against a floor of 0.0012) | +2.8% / +3.5% |
+| `SAGUARO_HC_UPMIX=1` (#1370) | the hyper-connection up projection and `gr_mix_r` in one kernel (sm_80+) | bit-exact here (gate identical) | prompt +0.6% / +0.4% |
+| `SAGUARO_PROMPT_ATTN_IMMA=1` (#1367) | int8-KV prompt attention on INT8 tensor cores | rounding-level (KL at the floor) | prompt read +2.5% |
+| `SAGUARO_HC_REQ8=1` (#1262) | the hyper-connection projections as int8 + a scale per 32 (more expert-cache slots) | rounding-level (KL 0.0018) | decode -0.2% / +2.2% |
+| `SAGUARO_QUANT_GATHER=1` (#1368) | turns the once-per-token MoE input quantization back to the per-row gather | n/a | no difference measured |
+| `SAGUARO_PREFILL_GROUP_GATHER=0` (#1107) | turns the short-prompt grouped gather off | n/a | on is 0.6-1.3% faster |
 
-`STRATA_DEQUANT_WIDE` (the wide dequantization of Q4_K / Q5_K / Q6_K / IQ4_XS for the prompt's dense weights) is now on by default on
+`SAGUARO_DEQUANT_WIDE` (the wide dequantization of Q4_K / Q5_K / Q6_K / IQ4_XS for the prompt's dense weights) is now on by default on
 sm_86 as well as sm_61: bit-exact, and the time to the first token of a 150 / 300 / 450-token prompt fell 11-15% on the RTX 3060 and 6-10% on the RTX A4000 (5 of 5 pairs each).
-`STRATA_DEQUANT_WIDE=0` turns it off.
+`SAGUARO_DEQUANT_WIDE=0` turns it off.
 
 ### RTX 20 (Turing, sm_75) kernel series (opt-in, 0.1.45)
 
@@ -2585,15 +2585,15 @@ Kernels by rafatxf (#2069-#2072, #2093, #2220-#2222), imanu86 (#2081) and xrip (
 on one RTX 2080 Ti (decode +5..6 % at 4K-32K, prompts at depth up to +30 %, per the PRs) and are bitwise equal to the kernels they
 replace, but nobody on the team has an sm_75 card to confirm them, so they are off until asked for:
 
-`STRATA_SM75_PERF=1` turns on every bitwise Turing kernel below on a 7.5 card (no other card is ever affected). Each has its own
-variable, which wins in both directions (`=0` off, `=1` on): `STRATA_SM75_IL` (interleaved small-batch matvec table),
-`STRATA_SM75_EXP` (expert layout mode 4), `STRATA_GR_UP75` / `STRATA_GR_DOWN_TG` (hyper-connection read), `STRATA_SCORES_HALVE`
-and `STRATA_TOPK_SPLIT` (decode QSA selection), `STRATA_TOPK_SAMPLE` (prompt top-k, one read of the scores), `STRATA_ATTN_V3`
-(decode attention), `STRATA_Q2_WARP` (Q2_0 matvec), `STRATA_FUSE_WAIT=2` and `STRATA_QIL` (fewer launches per decode layer),
-`STRATA_TC_SM75` (BF16 dequant, 16-byte stores), `STRATA_PA_V1_PREFETCH` (prompt attention v1 prefetch),
-`STRATA_SCORES_THREAD` (#1825: the prompt path's thread-per-head block scorer, bitwise the warp kernel's scores; `=1` takes it on any
+`SAGUARO_SM75_PERF=1` turns on every bitwise Turing kernel below on a 7.5 card (no other card is ever affected). Each has its own
+variable, which wins in both directions (`=0` off, `=1` on): `SAGUARO_SM75_IL` (interleaved small-batch matvec table),
+`SAGUARO_SM75_EXP` (expert layout mode 4), `SAGUARO_GR_UP75` / `SAGUARO_GR_DOWN_TG` (hyper-connection read), `SAGUARO_SCORES_HALVE`
+and `SAGUARO_TOPK_SPLIT` (decode QSA selection), `SAGUARO_TOPK_SAMPLE` (prompt top-k, one read of the scores), `SAGUARO_ATTN_V3`
+(decode attention), `SAGUARO_Q2_WARP` (Q2_0 matvec), `SAGUARO_FUSE_WAIT=2` and `SAGUARO_QIL` (fewer launches per decode layer),
+`SAGUARO_TC_SM75` (BF16 dequant, 16-byte stores), `SAGUARO_PA_V1_PREFETCH` (prompt attention v1 prefetch),
+`SAGUARO_SCORES_THREAD` (#1825: the prompt path's thread-per-head block scorer, bitwise the warp kernel's scores; `=1` takes it on any
 CUDA card, where it measured +1..3 % prompt speed on a Tesla P100 at 30-60K tokens, so it is not a default there).
 
-Options that change answers (other summation order) are separate and explicit: `STRATA_SELECT_SIMT=1|2` (FP32 tiled block scorer,
-KL 0.01 against the warp scorer per #2071), `STRATA_PA_V2T=1` (v2 prompt attention, #2092/#2146), `STRATA_PF_FUSED=1
-STRATA_PF_FUSED_SM75=1` (fused int8 prompt experts for the Q2_0 pack, #2145; only on a 7.5 card, sm_80+ is unchanged), `STRATA_BF16_TC=1` with `STRATA_XN_F16` (#2091).
+Options that change answers (other summation order) are separate and explicit: `SAGUARO_SELECT_SIMT=1|2` (FP32 tiled block scorer,
+KL 0.01 against the warp scorer per #2071), `SAGUARO_PA_V2T=1` (v2 prompt attention, #2092/#2146), `SAGUARO_PF_FUSED=1
+SAGUARO_PF_FUSED_SM75=1` (fused int8 prompt experts for the Q2_0 pack, #2145; only on a 7.5 card, sm_80+ is unchanged), `SAGUARO_BF16_TC=1` with `SAGUARO_XN_F16` (#2091).

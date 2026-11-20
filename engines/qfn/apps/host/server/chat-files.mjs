@@ -61,7 +61,7 @@ export function createChatFolders({ file }) {
  * The folder a chat's files live in, one rule for the agent's writes, Open, Show in folder, preview and attach:
  *   1. the folder the person chose for this chat; else
  *   2. the folder the agent actually worked in for it (its session's working folder, so it is the one it wrote to); else
- *   3. the default workspace (Documents/Strata/Workspace, or STRATA_WORKSPACE), where a chat with no folder is run.
+ *   3. the default workspace (Documents/Strata/Workspace, or SAGUARO_WORKSPACE), where a chat with no folder is run.
  * A folder that no longer exists is skipped. Never null while the default exists, so a chat with no chosen folder can still open its files.
  */
 export function chatRootOf({ chosen = null, used = null, fallback = null } = {}) {
@@ -84,10 +84,10 @@ export function resolveChatFile(root, rawPath) {
 
 /**
  * Start a program and return at once: detached, no shared output, never waited for.
- * `STRATA_OPENER=record` (tests) records the command instead of starting anything.
+ * `SAGUARO_OPENER=record` (tests) records the command instead of starting anything.
  */
 export function launch(command, args, { recorder = null } = {}) {
-  if (process.env.STRATA_OPENER === 'record' || recorder) { (recorder ?? launch.recorded).push([command, ...args]); return; }
+  if (process.env.SAGUARO_OPENER === 'record' || recorder) { (recorder ?? launch.recorded).push([command, ...args]); return; }
   // xdg-open and the browser it starts are the system's programs: they get the environment the AppImage was started from, not Strata's libraries.
   const child = spawn(command, args, { detached: true, stdio: 'ignore', windowsHide: false, env: externalEnvironment() });
   child.on('error', () => {});

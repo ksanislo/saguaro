@@ -1155,10 +1155,10 @@ template <int T, bool GU> bool setup_one(int& occ) { return setup_ww<T, GU, 4>(o
 // WGP (two CUs, which these kernels use as one in the default WGP mode) as one multiprocessor, and the occupancy query
 // answers 1 block for these kernels where 2 run side by side - so the grid was half the GPU's room.  gfx1151 (20
 // WGPs), 8192 tokens x top 10, IQ3_S / IQ4_NL, one layer: 1 block per WGP 60.7 ms, 2 44.7, 3 49.9, 4 45.2 (the same
-// work items and arithmetic: the results do not change).  STRATA_PF_OCC=N sets the blocks per WGP (an experiment knob).
+// work items and arithmetic: the results do not change).  SAGUARO_PF_OCC=N sets the blocks per WGP (an experiment knob).
 static int wgp_blocks(int occ) {
     static const int env = [] {
-        const char* v = std::getenv("STRATA_PF_OCC");
+        const char* v = std::getenv("SAGUARO_PF_OCC");
         return v != nullptr ? std::atoi(v) : 0;
     }();
     return env > 0 ? env : 2 * std::max(occ, 1);
@@ -1211,11 +1211,11 @@ const DevInfo& dev_info() {
     return d;
 }
 
-// opt-in on top of STRATA_PF_FUSED=1: STRATA_PF_FUSED_KQ=1 takes UD-Q4_K_XL's formats (the output differs from the FP16
+// opt-in on top of SAGUARO_PF_FUSED=1: SAGUARO_PF_FUSED_KQ=1 takes UD-Q4_K_XL's formats (the output differs from the FP16
 // expert path's at rounding level; KL-gated, see aurora_s23.md)
 bool kq_on() {
     static const bool on = [] {
-        const char* v = std::getenv("STRATA_PF_FUSED_KQ");
+        const char* v = std::getenv("SAGUARO_PF_FUSED_KQ");
         return v != nullptr && v[0] == '1';
     }();
     return on;
@@ -1344,10 +1344,10 @@ void launch(int ww, unsigned grid, const Batch &b, const NativeGeom &g,
 // about one such tile (56 to 112 rows on average), else 64.  Measured on the RTX 5070 (tests/cuda/prefill_fused_iq_test,
 // a layer of 2048 / 3584 / 8192 tokens, ms, 64 -> 128): IQ2_S 5.2 -> 6.7, 9.5 -> 9.3, 17.5 -> 19.5; IQ2_XXS 4.2 ->
 // 5.8, 7.4 -> 7.6, 13.6 -> 16.5; IQ3_S 5.6 -> 6.6, 10.2 -> 8.8, 18.4 -> 19.0; IQ3_XXS 5.1 -> 6.3, 9.1 -> 8.3, 16.5 ->
-// 17.5 (256 rows was slower still).  STRATA_PF_FUSED_TILE=64|128 forces one.
+// 17.5 (256 rows was slower still).  SAGUARO_PF_FUSED_TILE=64|128 forces one.
 int pick_ww(int64_t n, int n_expert) {
     static const int forced = [] {
-        const char* v = std::getenv("STRATA_PF_FUSED_TILE");
+        const char* v = std::getenv("SAGUARO_PF_FUSED_TILE");
         const int t = v ? std::atoi(v) : 0;
         return t == 64 ? 4 : t == 128 ? 2 : 0;
     }();
@@ -1359,8 +1359,8 @@ int pick_ww(int64_t n, int n_expert) {
 }  // namespace
 
 bool native_supported(int gu_type, int d_type) {
-    static const bool off = [] {   // STRATA_PF_FUSED_NATIVE=0: the native packs keep MMQ under STRATA_PF_FUSED=1 (A/B)
-        const char* v = std::getenv("STRATA_PF_FUSED_NATIVE");
+    static const bool off = [] {   // SAGUARO_PF_FUSED_NATIVE=0: the native packs keep MMQ under SAGUARO_PF_FUSED=1 (A/B)
+        const char* v = std::getenv("SAGUARO_PF_FUSED_NATIVE");
         return v != nullptr && v[0] == '0';
     }();
     return !off && requested() && gu_covered(gu_type) && d_covered(d_type) && dev_info().ok;   // opt-in (=1)

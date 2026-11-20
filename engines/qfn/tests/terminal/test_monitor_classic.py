@@ -49,7 +49,7 @@ class WhichLook(unittest.TestCase):
 
     def test_classic_style_switches_the_font_once_when_cascadia_is_installed(self):
         with mock.patch.object(consoleinfo, "legacy_console", return_value=True), mock.patch.object(consoleinfo.os, "name", "nt"), \
-                mock.patch.dict(os.environ, {"STRATA_GLYPHS": ""}), mock.patch.object(consoleinfo, "cascadia_installed", return_value=True), \
+                mock.patch.dict(os.environ, {"SAGUARO_GLYPHS": ""}), mock.patch.object(consoleinfo, "cascadia_installed", return_value=True), \
                 mock.patch.object(consoleinfo, "console_font", side_effect=["Consolas", "Cascadia Mono"]), \
                 mock.patch.object(consoleinfo, "switch_font", return_value=True) as sw:
             s = consoleinfo.classic_style()
@@ -62,7 +62,7 @@ class WhichLook(unittest.TestCase):
         for installed, switched in ((False, False), (True, False)):
             consoleinfo.forget_style()
             with mock.patch.object(consoleinfo, "legacy_console", return_value=True), mock.patch.object(consoleinfo.os, "name", "nt"), \
-                    mock.patch.dict(os.environ, {"STRATA_GLYPHS": ""}), mock.patch.object(consoleinfo, "cascadia_installed", return_value=installed), \
+                    mock.patch.dict(os.environ, {"SAGUARO_GLYPHS": ""}), mock.patch.object(consoleinfo, "cascadia_installed", return_value=installed), \
                     mock.patch.object(consoleinfo, "console_font", return_value="Lucida Console"), \
                     mock.patch.object(consoleinfo, "switch_font", return_value=switched):
                 s = consoleinfo.classic_style()
@@ -72,7 +72,7 @@ class WhichLook(unittest.TestCase):
         with mock.patch.object(consoleinfo, "legacy_console", return_value=False), mock.patch.object(consoleinfo, "switch_font") as sw:
             self.assertEqual(consoleinfo.classic_style()["mode"], "none")
             sw.assert_not_called()
-        env = {k: v for k, v in os.environ.items() if k not in ("WT_SESSION", "TERM_PROGRAM", "STRATA_GLYPHS")}
+        env = {k: v for k, v in os.environ.items() if k not in ("WT_SESSION", "TERM_PROGRAM", "SAGUARO_GLYPHS")}
         env["WT_SESSION"] = "x"
         with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(consoleinfo.os, "name", "nt"), mock.patch.object(consoleinfo.sys, "platform", "win32"):
             self.assertFalse(consoleinfo.legacy_console())                            # Windows Terminal
@@ -88,7 +88,7 @@ class WhichLook(unittest.TestCase):
             self.assertEqual(monitor.choose_glyphs("auto", "utf-8", "xterm"), "unicode")
         with mock.patch.object(consoleinfo, "legacy_console", return_value=True), mock.patch.object(consoleinfo, "classic_style", return_value={"mode": "solid"}):
             self.assertEqual(monitor.choose_glyphs("auto", "utf-8", None), "solid")
-            with mock.patch.dict(os.environ, {"STRATA_GLYPHS": "ascii"}):
+            with mock.patch.dict(os.environ, {"SAGUARO_GLYPHS": "ascii"}):
                 self.assertEqual(monitor.choose_glyphs("auto", "utf-8", None), "ascii")      # forced ASCII stays ASCII
             self.assertEqual(monitor.choose_glyphs("unicode", "utf-8", None), "unicode")      # an explicit --glyphs wins
         with mock.patch.object(consoleinfo, "legacy_console", return_value=False):

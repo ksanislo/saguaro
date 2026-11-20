@@ -9,9 +9,9 @@ import { appVersionFrom } from '../server/app-version.mjs';
 const here = fileURLToPath(new URL('../server', import.meta.url));
 
 test('the shell passes the version; a bad value is ignored', () => {
-  assert.equal(appVersionFrom({ env: { STRATA_APP_VERSION: '0.2.0-beta' }, here: '/nowhere/a/b' }), '0.2.0-beta');
-  assert.equal(appVersionFrom({ env: { STRATA_APP_VERSION: ' 1.2.3 ' }, here: '/nowhere/a/b' }), '1.2.3');
-  assert.equal(appVersionFrom({ env: { STRATA_APP_VERSION: 'latest' }, here: '/nowhere/a/b' }), 'dev');
+  assert.equal(appVersionFrom({ env: { SAGUARO_APP_VERSION: '0.2.0-beta' }, here: '/nowhere/a/b' }), '0.2.0-beta');
+  assert.equal(appVersionFrom({ env: { SAGUARO_APP_VERSION: ' 1.2.3 ' }, here: '/nowhere/a/b' }), '1.2.3');
+  assert.equal(appVersionFrom({ env: { SAGUARO_APP_VERSION: 'latest' }, here: '/nowhere/a/b' }), 'dev');
   assert.equal(appVersionFrom({ env: {}, here: '/nowhere/a/b' }), 'dev');
 });
 

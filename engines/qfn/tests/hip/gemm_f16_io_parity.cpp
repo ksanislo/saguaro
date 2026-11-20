@@ -1,4 +1,4 @@
-// #835: the FP16-in / FP16-out prompt GEMMs (Gemm::set_f16_io, STRATA_HIP_PROMPT_F16=1) against a CPU reference.
+// #835: the FP16-in / FP16-out prompt GEMMs (Gemm::set_f16_io, SAGUARO_HIP_PROMPT_F16=1) against a CPU reference.
 // f16() and bf16() (its weights BF16, its activations the FP16 image) write FP16 into Y's own rows and widen them in
 // place; the columns past N must stay untouched and a beta = 1 call must keep the ordinary FP32 path.  The tolerance
 // is FP16's: one rounding of each output.

@@ -63,7 +63,7 @@ class OptIn(unittest.TestCase):
     """Pascal / Volta cards are used only when chosen; a PC with a newer card keeps recommending the newer one."""
 
     def setUp(self):
-        self.env = mock.patch.dict(os.environ, {"STRATA_EXPERIMENTAL_SM60": ""})
+        self.env = mock.patch.dict(os.environ, {"SAGUARO_EXPERIMENTAL_SM60": ""})
         self.env.start()
 
     def tearDown(self):
@@ -80,8 +80,8 @@ class OptIn(unittest.TestCase):
         self.assertIn("only kind", setup.old_gpus_opt_in([V100]))
         self.assertIsNone(setup.old_gpus_opt_in([V100], other=True))            # an AMD card it can use instead
         self.assertIsNone(setup.old_gpus_opt_in([card(0, "GTX 980", 4.0, "52")]))
-        with mock.patch.dict(os.environ, {"STRATA_EXPERIMENTAL_SM60": "1"}):
-            self.assertEqual(setup.old_gpus_opt_in([rtx, v100]), "STRATA_EXPERIMENTAL_SM60=1")
+        with mock.patch.dict(os.environ, {"SAGUARO_EXPERIMENTAL_SM60": "1"}):
+            self.assertEqual(setup.old_gpus_opt_in([rtx, v100]), "SAGUARO_EXPERIMENTAL_SM60=1")
 
     def test_named(self):
         self.assertEqual(setup.named_gpus(None, "0,2"), [0, 2])
@@ -126,7 +126,7 @@ class Libraries(unittest.TestCase):
 
 
 class BuildTools(unittest.TestCase):
-    """The compile path: a CUDA 12 engine looks for a 12.x toolkit (STRATA_NVCC picks one), sm_120 needs 12.8+."""
+    """The compile path: a CUDA 12 engine looks for a 12.x toolkit (SAGUARO_NVCC picks one), sm_120 needs 12.8+."""
 
     def tools(self, gpu, nvcc):
         seen = []
@@ -176,7 +176,7 @@ class Install(unittest.TestCase):
         extra = [mock.patch.object(setup, "get_prebuilt", fake_prebuilt(calls)),
                  mock.patch.object(setup, "pip_cuda_libs", lambda tk=13: libs.append(tk)),
                  mock.patch.object(setup, "OLD_GPUS", None),
-                 mock.patch.dict(os.environ, {"STRATA_EXPERIMENTAL_SM60": "", "STRATA_CUDA": "", **(env or {})})]
+                 mock.patch.dict(os.environ, {"SAGUARO_EXPERIMENTAL_SM60": "", "SAGUARO_CUDA": "", **(env or {})})]
         code, out, cfg, asked = install(ram, found, argv, extra=extra)
         return code, out, cfg, calls, libs
 
@@ -218,7 +218,7 @@ class Install(unittest.TestCase):
 
     def test_cuda12_asked_for_on_a_newer_card(self):
         ram, found = PROFILES["128GB-1x24GB"]
-        for argv, env in ((["--cuda", "12"], None), ([], {"STRATA_CUDA": "12"})):
+        for argv, env in ((["--cuda", "12"], None), ([], {"SAGUARO_CUDA": "12"})):
             with self.subTest(argv=argv, env=env):
                 code, out, cfg, calls, _ = self.run_setup(ram, found, argv_for("qwen", "IQ3_XXS") + argv, env)
                 self.assertEqual(code, 0, out[-3000:])

@@ -111,10 +111,10 @@ inline bool copy_stream_ready(int dev) {
     return (size_t) dev < p.streams.size() && !p.streams[(size_t) dev].empty();
 }
 
-/// STRATA_TEST_COPY_FAIL_AT=N (tests only, #3350): the N-th snapshot / checkpoint copy of the process fails with
+/// SAGUARO_TEST_COPY_FAIL_AT=N (tests only, #3350): the N-th snapshot / checkpoint copy of the process fails with
 /// cudaErrorMemoryAllocation, as when a card has no memory left for the copy.  Unset: nothing.
 inline long test_copy_fail_at() {
-    static const long v = [] { const char* e = std::getenv("STRATA_TEST_COPY_FAIL_AT"); return e ? std::atol(e) : 0L; }();
+    static const long v = [] { const char* e = std::getenv("SAGUARO_TEST_COPY_FAIL_AT"); return e ? std::atol(e) : 0L; }();
     return v;
 }
 
@@ -128,7 +128,7 @@ inline cudaError_t copy_nonblocking(void* dst, const void* src, size_t bytes, bo
     cudaStream_t s = nullptr;
     cudaError_t e = private_stream(s);
     if (e != cudaSuccess) return e;
-    e = strata::kernels::memcpy_async_split(dst, src, bytes, cudaMemcpyDefault, s);   // (STRATA_KV_HOST_ELASTIC)
+    e = strata::kernels::memcpy_async_split(dst, src, bytes, cudaMemcpyDefault, s);   // (SAGUARO_KV_HOST_ELASTIC)
     if (e != cudaSuccess || queued) return e;
     e = cudaStreamSynchronize(s);
     core::progress_beat();   // #2049: a parked conversation is many of these; each one that lands is progress
@@ -140,23 +140,23 @@ inline cudaError_t copy_nonblocking(void* dst, const void* src, size_t bytes, bo
 /// it to the pagefile, copying it back runs at the drive's page-in speed (measured in the reports: ~190 hard faults
 /// a second, under 1 MB/s) and one memcpy of it stays silent past the 60 s limit, so the watchdog ended an engine
 /// that was only slow.  One beat per 1 MiB slice keeps a copy that moves alive and still lets a real stall show.
-/// STRATA_TEST_SLOW_COPY_US=N (tests only): every 1 MiB slice of a checkpoint copy takes N microseconds more, as when
+/// SAGUARO_TEST_SLOW_COPY_US=N (tests only): every 1 MiB slice of a checkpoint copy takes N microseconds more, as when
 /// the OS has paged the checkpoints out and each slice is read back from the drive.  Unset: no delay.
 inline long test_slow_copy_us() {
-    static const long v = [] { const char* e = std::getenv("STRATA_TEST_SLOW_COPY_US"); return e ? std::atol(e) : 0L; }();
+    static const long v = [] { const char* e = std::getenv("SAGUARO_TEST_SLOW_COPY_US"); return e ? std::atol(e) : 0L; }();
     return v;
 }
 
-/// STRATA_PARK_FAST=1 (default off): a parked K/V buffer grows without the zero fill (the copy writes every new byte
+/// SAGUARO_PARK_FAST=1 (default off): a parked K/V buffer grows without the zero fill (the copy writes every new byte
 /// and is the pages' first touch, on the copy threads), the threaded host copy starts at 4 MiB instead of 64 and its
 /// caller wakes when the last job lands instead of on the next 20 ms tick, and a park's prompt checkpoints are copied
 /// on several threads.  The same bytes either way.
 inline bool park_fast() {
     static const bool on = [] {
-        const char* e = std::getenv("STRATA_PARK_FAST");
+        const char* e = std::getenv("SAGUARO_PARK_FAST");
         const bool v = e != nullptr && e[0] == '1';
         if (v)
-            std::fprintf(stderr, "strata: conversation park: STRATA_PARK_FAST on (no zero fill, threaded copies from "
+            std::fprintf(stderr, "strata: conversation park: SAGUARO_PARK_FAST on (no zero fill, threaded copies from "
                                  "4 MiB woken on completion, checkpoints copied in parallel)\n");
         return v;
     }();

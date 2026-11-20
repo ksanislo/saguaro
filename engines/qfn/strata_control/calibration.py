@@ -40,7 +40,7 @@ ALLOWED_SETTINGS = {"--pcie-frac", "--spec-min-p", "--pool-workers",
 
 def _full_folder(name: str):
     """`setup` and `tools.calibrate` belong to a full Strata folder; the Terminal archive carries neither (it never
-    installs or builds). Use them when they are importable, or when STRATA_INSTALL_DIR names a folder that has both;
+    installs or builds). Use them when they are importable, or when SAGUARO_INSTALL_DIR names a folder that has both;
     otherwise refuse in words instead of a traceback."""
     import importlib
     import sys
@@ -48,7 +48,7 @@ def _full_folder(name: str):
         return importlib.import_module(name)
     except ImportError:
         pass
-    raw = os.environ.get("STRATA_INSTALL_DIR")
+    raw = os.environ.get("SAGUARO_INSTALL_DIR")
     if raw:
         folder = Path(raw).expanduser()
         if (folder / "setup.py").is_file() and (folder / "tools" / "calibrate.py").is_file():
@@ -60,19 +60,19 @@ def _full_folder(name: str):
                 pass
     raise ProfileError(
         "engine calibrate needs a full Strata folder (setup.py and tools/calibrate.py); this terminal archive has "
-        "neither. Set STRATA_INSTALL_DIR to such a folder, or use `strata tune run --mode api` to tune from the "
+        "neither. Set SAGUARO_INSTALL_DIR to such a folder, or use `strata tune run --mode api` to tune from the "
         "archive", 5) from None
 
 
 def _tools_available() -> bool:
-    """False in the Terminal archive without STRATA_INSTALL_DIR: `--measure` would be refused (see `_full_folder`)."""
+    """False in the Terminal archive without SAGUARO_INSTALL_DIR: `--measure` would be refused (see `_full_folder`)."""
     import importlib.util
     try:
         if importlib.util.find_spec("setup") and importlib.util.find_spec("tools.calibrate"):
             return True
     except (ImportError, ValueError):
         pass
-    raw = os.environ.get("STRATA_INSTALL_DIR")
+    raw = os.environ.get("SAGUARO_INSTALL_DIR")
     if raw:
         folder = Path(raw).expanduser()
         return (folder / "setup.py").is_file() and (folder / "tools" / "calibrate.py").is_file()

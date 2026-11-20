@@ -1,7 +1,7 @@
 /**
  * Settings -> Tools, behind the screen: what is saved, what reaches the agent, web search with no key, and the person's own tools.
  *
- * Pure tests always run. The two that start the real Harness need STRATA_HARNESS_DIR (the model is scripted; what is real is the Harness,
+ * Pure tests always run. The two that start the real Harness need SAGUARO_HARNESS_DIR (the model is scripted; what is real is the Harness,
  * its web seam and tool executor, the Strata gate plugin, the bridge and the app's own tool server).
  */
 import test from 'node:test';
@@ -23,8 +23,8 @@ import { manualDecision, planDecision } from '../server/agent/plugins/strata-gat
 import { createDuckDuckGoSearch, looksBlocked, parseHtmlResults, parseLiteResults, realUrl, BLOCKED_MESSAGE } from '../server/web-search-ddg.mjs';
 import { createExaSearch, createPerplexitySearch } from '../server/web-search-keyed.mjs';
 
-const HARNESS = process.env.STRATA_HARNESS_DIR;
-const skip = !HARNESS || !resolveHarness({ env: process.env }).ok ? 'STRATA_HARNESS_DIR is not set to a built Harness' : false;
+const HARNESS = process.env.SAGUARO_HARNESS_DIR;
+const skip = !HARNESS || !resolveHarness({ env: process.env }).ok ? 'SAGUARO_HARNESS_DIR is not set to a built Harness' : false;
 const tmp = () => mkdtempSync(join(tmpdir(), 'strata-tools-set-'));
 const cleanup = dir => { try { rmSync(dir, { recursive: true, force: true, maxRetries: 3 }); } catch { /* best effort */ } };
 const make = (dir, state = {}) => { let saved = state; return { tools: createAgentTools({ read: () => saved, write: v => { saved = v; }, dataDir: dir }), saved: () => saved }; };
@@ -112,9 +112,9 @@ test('profile: a keyed service is used only with its key saved; the key travels 
   assert.equal(entriesOf(noKey).find(x => x.id === 'web').config.searchProvider, 'strata-duckduckgo', 'no key: DuckDuckGo, not a broken search');
   const exa = buildProfile({ local: [], connections: [], tools: view('exa', 'exa-secret-key') });
   assert.equal(entriesOf(exa).find(x => x.id === 'web').config.searchProvider, 'exa');
-  assert.equal(exa.env.STRATA_SEARCH_KEY, 'exa-secret-key'); assert.ok(!exa.patch.includes('exa-secret-key'));
+  assert.equal(exa.env.SAGUARO_SEARCH_KEY, 'exa-secret-key'); assert.ok(!exa.patch.includes('exa-secret-key'));
   const ds = buildProfile({ local: [], connections: [], tools: view('deepseek', 'ds-secret') });
-  assert.deepEqual(entriesOf(ds).find(x => x.id === 'web-search-deepseek').config, { apiKeyEnv: 'STRATA_SEARCH_KEY' });
+  assert.deepEqual(entriesOf(ds).find(x => x.id === 'web-search-deepseek').config, { apiKeyEnv: 'SAGUARO_SEARCH_KEY' });
   assert.equal(entriesOf(ds).find(x => x.id === 'web').config.searchProvider, 'deepseek-official');
   assert.notEqual(noKey.signature, exa.signature, 'a changed choice restarts the agent');
 });
@@ -250,11 +250,11 @@ function mcpSession(dir, mode) {
   return { ask, close: () => child.kill() };
 }
 
-test('tool server: instruction tools return the person\'s text; command tools run their command with the assistant\'s text only in STRATA_INPUT', async () => {
+test('tool server: instruction tools return the person\'s text; command tools run their command with the assistant\'s text only in SAGUARO_INPUT', async () => {
   const dir = tmp();
   try {
     const script = join(dir, 'show.mjs');
-    writeFileSync(script, "console.log('got:' + process.env.STRATA_INPUT); if (process.env.STRATA_INPUT === 'fail') process.exit(3);");
+    writeFileSync(script, "console.log('got:' + process.env.SAGUARO_INPUT); if (process.env.SAGUARO_INPUT === 'fail') process.exit(3);");
     const { tools } = make(dir);
     tools.addCustom({ name: 'Notes', about: 'House style.', kind: 'instructions', instructions: 'Start with one line.' });
     tools.addCustom({ name: 'Show', about: 'Shows its input.', kind: 'command', command: `"${process.execPath}" "${script}"` });
@@ -305,7 +305,7 @@ async function rig(t, setup) {
 test('real Harness: the person\'s own tools are offered; an instruction tool never asks, a command asks in Manual and is refused in Plan', { skip }, async (t) => {
   const r = await rig(t, (tools, dir) => {
     const script = join(dir, 'touch.mjs');
-    writeFileSync(script, "import { writeFileSync } from 'node:fs'; writeFileSync(process.argv[2], 'ran'); console.log('ok:' + process.env.STRATA_INPUT);");
+    writeFileSync(script, "import { writeFileSync } from 'node:fs'; writeFileSync(process.argv[2], 'ran'); console.log('ok:' + process.env.SAGUARO_INPUT);");
     tools.addCustom({ name: 'House style', about: 'Write in our house style.', kind: 'instructions', instructions: 'Always start with one line.' });
     tools.addCustom({ name: 'Make marker', about: 'Writes a marker file.', kind: 'command', command: `"${process.execPath}" "${script}" "${join(dir, 'marker.txt')}"` });
   });
@@ -374,7 +374,7 @@ test('browser: the tool server is found in the agent component; the screen can s
 const browserNow = findBrowser();
 const playwrightCli = HARNESS ? findPlaywrightMcp(HARNESS) : null;
 // Opt-in: it starts a real (headless) Chrome, which a test run must not do on someone's PC unasked.
-const browserSkip = process.env.STRATA_TEST_BROWSER !== '1' ? 'starts a real browser: set STRATA_TEST_BROWSER=1' : skip || !browserNow.found || !playwrightCli ? 'needs STRATA_HARNESS_DIR with the browser tool server and Chrome or Edge on this computer' : false;
+const browserSkip = process.env.SAGUARO_TEST_BROWSER !== '1' ? 'starts a real browser: set SAGUARO_TEST_BROWSER=1' : skip || !browserNow.found || !playwrightCli ? 'needs SAGUARO_HARNESS_DIR with the browser tool server and Chrome or Edge on this computer' : false;
 
 test('real browser: the assistant opens a local page in the person\'s Chrome or Edge and reads it; Manual asks before opening it, Plan refuses', { skip: browserSkip, timeout: 240000 }, async (t) => {
   const http = await import('node:http');
@@ -382,9 +382,9 @@ test('real browser: the assistant opens a local page in the person\'s Chrome or 
   await new Promise(r => page.listen(0, '127.0.0.1', r));
   t.after(() => page.close());
   const url = `http://127.0.0.1:${page.address().port}/`;
-  const previous = process.env.STRATA_BROWSER_HEADLESS;
-  process.env.STRATA_BROWSER_HEADLESS = '1';
-  t.after(() => { if (previous === undefined) delete process.env.STRATA_BROWSER_HEADLESS; else process.env.STRATA_BROWSER_HEADLESS = previous; });
+  const previous = process.env.SAGUARO_BROWSER_HEADLESS;
+  process.env.SAGUARO_BROWSER_HEADLESS = '1';
+  t.after(() => { if (previous === undefined) delete process.env.SAGUARO_BROWSER_HEADLESS; else process.env.SAGUARO_BROWSER_HEADLESS = previous; });
   const worker = await startScriptedWorker({});
   const dir = tmp();
   const ws = join(dir, 'ws'); mkdirSync(ws, { recursive: true });

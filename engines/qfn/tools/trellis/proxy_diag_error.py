@@ -1,7 +1,7 @@
 """proxy_diag_error.py - the diagonal-Hessian output error of the swapped layers, no engine needed.
 
 For some experts of the chosen layers: W' = the ORIGINAL weights in the file's rotated basis; shipped = agentionai's decoded
-blocks; ours = plain-MSE encode, and activation-weighted encodes (h = E[x^2]^p from a STRATA_ACT_DUMP directory).
+blocks; ours = plain-MSE encode, and activation-weighted encodes (h = E[x^2]^p from a SAGUARO_ACT_DUMP directory).
 Reported: the unweighted relative error ||W' - Q||^2 / ||W'||^2 and the diagonal-Hessian error
 sum_i h_i ||W'_:,i - Q_:,i||^2 / sum_i h_i ||W'_:,i||^2 (the expected squared output error under independent channels),
 per layer and role, the mean over experts, in dB.

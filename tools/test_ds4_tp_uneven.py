@@ -1,4 +1,4 @@
-"""CPU-only checks of MAYA_DS4_TP_GGUF_UNEVEN's split (no model or GPU): the engine's own splitb / split128, compiled from
+"""CPU-only checks of SAGUARO_DS4_TP_GGUF_UNEVEN's split (no model or GPU): the engine's own splitb / split128, compiled from
 src/ds4/ds4_model.cu - every member whole blocks, the parts covering n_ff once in order, at most a block apart, the odd
 blocks going round the members with the rotation, split128 unchanged, and Maya's n_ff 2304 in 256s as 5 + 4."""
 from pathlib import Path
@@ -83,9 +83,9 @@ class TpUneven(unittest.TestCase):
     def test_the_settings_are_documented_and_read_both_ways(self):
         src = (ROOT / "src/ds4/ds4_model.cu").read_text()
         for name in ("TP_GGUF_UNEVEN", "TP_CHECK"):
-            self.assertIn(f'std::getenv("STRATA_DS4_{name}")', src)
+            self.assertIn(f'std::getenv("SAGUARO_DS4_{name}")', src)
             self.assertIn(f'std::getenv("DS4_{name}")', src)
-            self.assertIn(f"`MAYA_DS4_{name}`", (ROOT / "docs/SETTINGS.md").read_text())
+            self.assertIn(f"`SAGUARO_DS4_{name}`", (ROOT / "docs/SETTINGS.md").read_text())
 
 
 if __name__ == "__main__":

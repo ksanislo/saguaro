@@ -598,9 +598,9 @@ class AdvancedStep(Base):
 
         async def case(app, pilot, ctx):
             await press(pilot, *self.reach(), "a")
-            await typed(pilot, "STRATA_PIN_BY_NEED=1")
+            await typed(pilot, "SAGUARO_PIN_BY_NEED=1")
             await press(pilot, "enter")
-            self.assertEqual(ctx.settings.extra, {"STRATA_PIN_BY_NEED": "1"})
+            self.assertEqual(ctx.settings.extra, {"SAGUARO_PIN_BY_NEED": "1"})
         self.run_app(case, ctx=ctx)
 
     def test_experimental_filter_and_text_filter(self):

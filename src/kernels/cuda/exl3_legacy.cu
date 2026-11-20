@@ -1,7 +1,7 @@
 // src/kernels/cuda/exl3_legacy.cu - v1.1.8's EXL3 decode kernels, kept for NVIDIA GPUs before sm_80 (V100, T4,
 // RTX 20): #180's decode kernels run the tiles on the tensor cores from sm_80 on, and their CUDA-core fallback was
 // slower here than these (a V100 with EXL3-3.05bpw: decode 4.9 -> 4.4 tok/s).  exl3.cu's mv / moe_gate_up / moe_down
-// / win_experts / prepare / several_ok call these on such a GPU (STRATA_GLM_EXL3_DECODE=legacy|new picks one on any
+// / win_experts / prepare / several_ok call these on such a GPU (SAGUARO_GLM_EXL3_DECODE=legacy|new picks one on any
 // GPU); the prompt path is exl3.cu's on every GPU.  The code below is v1.1.8's, the prompt path's kernels left out
 // and decode8's trellis windows cut eight at a time (as exl3.cu's frag8) - the same values.
 //
@@ -576,7 +576,7 @@ __global__ void __launch_bounds__(kThreads) moe_gate_up_kernel(const KMoe a) {
 // VRAM experts gave the V100's 80 SMs 80 blocks, each through 2 x 4096 inputs in turn (179 us against moe_down's 68
 // for as many bytes).  Each block's product and block_out are moe_gate_up_kernel's; it leaves its 128 values in part
 // ([k][2][n_ff], the stream's scratch - live only within the kernel), and the second of an (expert, output block)'s
-// pair to finish takes both through the swiglu - the same bits (STRATA_EXL3_GU_SPLIT=0: moe_gate_up_kernel)
+// pair to finish takes both through the swiglu - the same bits (SAGUARO_EXL3_GU_SPLIT=0: moe_gate_up_kernel)
 template <int K2, int cb>
 __global__ void __launch_bounds__(kThreads) moe_gate_up2_kernel(const KMoe a) {
     __shared__ __half xs[kMaxKR];
@@ -1020,7 +1020,7 @@ void moe_gate_up(const MoeArgs& a, const float* x, float* h, cudaStream_t s) {
     m.x = x;
     if (h != nullptr) m.h = h;
     static const bool split = [] {
-        const char* e = std::getenv("STRATA_EXL3_GU_SPLIT");
+        const char* e = std::getenv("SAGUARO_EXL3_GU_SPLIT");
         return e == nullptr || std::atoi(e) != 0;
     }();
     // (the split's scratch: [k][2][n_ff] partials, k * n_ff / 128 counters)

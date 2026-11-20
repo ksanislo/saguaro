@@ -204,7 +204,7 @@ constexpr uint64_t kAdviseStep = 128ull << 10;
 
 bool read_ahead_enabled() {
     static const bool on = [] {
-        const char* v = std::getenv("STRATA_READ_AHEAD");
+        const char* v = std::getenv("SAGUARO_READ_AHEAD");
         return v == nullptr || std::atoi(v) != 0;
     }();
     return on;

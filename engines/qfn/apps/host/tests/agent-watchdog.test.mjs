@@ -7,8 +7,8 @@ import { join } from 'node:path';
 import { startScriptedWorker } from './helpers/scripted-worker.mjs';
 import { createAgentBridge } from '../server/agent/agent-bridge.mjs';
 import { resolveHarness } from '../server/agent/harness-runtime.mjs';
-const HARNESS = process.env.STRATA_HARNESS_DIR;
-const skip = !HARNESS || !resolveHarness({ env: process.env }).ok ? 'STRATA_HARNESS_DIR is not set to a built Harness' : false;
+const HARNESS = process.env.SAGUARO_HARNESS_DIR;
+const skip = !HARNESS || !resolveHarness({ env: process.env }).ok ? 'SAGUARO_HARNESS_DIR is not set to a built Harness' : false;
 
 test('a silent model ends the turn with a plain message, and the chat works again afterwards', { skip }, async (t) => {
   const worker = await startScriptedWorker({});

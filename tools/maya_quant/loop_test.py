@@ -85,7 +85,7 @@ def main():
             args += ["--greedy"] if greedy else ["--seed", str(1234 + run), "--temperature", "1.0", "--top-p", "0.95"]
             t0 = time.time()
             r = subprocess.run(args, capture_output=True, text=True, cwd=pathlib.Path(a.exe).parents[1],
-                               env=dict(os.environ, STRATA_GLM_USAGE="0"))
+                               env=dict(os.environ, SAGUARO_GLM_USAGE="0"))
             out = [int(l.split()[1]) for l in r.stdout.splitlines() if l.startswith("T ")]
             text = tok.decode(out, skip_special_tokens=False)
             finished = bool(out) and (out[-1] in EOS or len(out) < a.max_new)   # stopped at an end token

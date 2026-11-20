@@ -18,9 +18,9 @@
 #include "strata/sycl_queue.hpp"
 
 namespace strata {
-// STRATA_SYCL_A770_FAST=1 (opt-in, experimental, PR #1710): the A770 router and 64-bit paired payload transfers.
+// SAGUARO_SYCL_A770_FAST=1 (opt-in, experimental, PR #1710): the A770 router and 64-bit paired payload transfers.
 inline bool a770_fast() {
-    static const bool on = [] { const char* v = std::getenv("STRATA_SYCL_A770_FAST"); return v != nullptr && v[0] == '1'; }();
+    static const bool on = [] { const char* v = std::getenv("SAGUARO_SYCL_A770_FAST"); return v != nullptr && v[0] == '1'; }();
     return on;
 }
 using sys_atomic_u32 = sycl::atomic_ref<uint32_t, sycl::memory_order::relaxed, sycl::memory_scope::system>;
@@ -66,7 +66,7 @@ inline uint32_t sys_load(const volatile uint32_t* p) {
 // The store side of the handshake (device -> host) needs the same hint. A system-scope atomic store, even followed by
 // a release fence, is served from the GPU's cache on an Arc (xe) and reaches the host only when the kernel ends
 // (measured on an A770: 482 ms into a 482 ms kernel), so a host that polls the ring mid-window never sees it; that is
-// why the decode window had to wait for the whole graph (STRATA_VERIFY_NO_HOST) and every expert had to be
+// why the decode window had to wait for the whole graph (SAGUARO_VERIFY_NO_HOST) and every expert had to be
 // device-resident. The uncached L1+L3 write hint reaches memory at once (44 ms, the launch latency).
 // -DSTRATA_DOORBELL_ATOMIC_STORE restores the atomic store.
 #ifndef STRATA_DOORBELL_ATOMIC_STORE
@@ -99,13 +99,13 @@ template<class T> inline void sys_store_mapped(T* p, T v) {
 #endif
 // plain = true: an ordinary store. On the i915 driver (Arc A750) a plain store to host USM reaches the host in time
 // and the uncached hint only slows the publish (decode -11% on an A750, 4K prompt, 5 rounds); on xe it must be hinted.
-// STRATA_DOORBELL_PLAIN=0/1 overrides. The launchers read this on the host and pass it to the kernel.
+// SAGUARO_DOORBELL_PLAIN=0/1 overrides. The launchers read this on the host and pass it to the kernel.
 template<class T> inline void sys_store_mapped(bool plain, T* p, T v) {
     if (plain) *p = v; else sys_store_mapped(p, v);
 }
 inline bool doorbell_plain_payload() {
     static const bool v = [] {
-        if (const char* e = std::getenv("STRATA_DOORBELL_PLAIN")) return e[0] == '1';
+        if (const char* e = std::getenv("SAGUARO_DOORBELL_PLAIN")) return e[0] == '1';
         return intel_gpu_driver() == "i915";
     }();
     return v;
@@ -122,7 +122,7 @@ inline bool doorbell_plain_payload() {
 // every layer: 20,000 reads is a few tens of milliseconds, the first request after a start (cold pages, slow CPU
 // layers) is slower than that, the GPU gave up, went on with the experts' outputs missing, and the answer was token 0
 // ("!!!!!") or the engine crashed in the CPU pool on the garbage routing it read next.
-// STRATA_SPIN_MAX=<reads> overrides both; a build's -DSTRATA_SYCL_SPIN_MAX=<reads> (CMake) fixes one bound for every
+// SAGUARO_SPIN_MAX=<reads> overrides both; a build's -DSTRATA_SYCL_SPIN_MAX=<reads> (CMake) fixes one bound for every
 // device. The device functions take the bound as an argument: the launchers pass spin_max(queue).
 // Without a sysfs driver name (Windows, OpenCL) a B-series card is recognised from the device itself (intel_gpu_gen):
 // its window waits are the xe kind (expected to expire, so 20,000 reads), EXCEPT in a run that drafts without the MTP
@@ -139,7 +139,7 @@ inline uint32_t spin_max(const sycl::queue& q) {
     auto it = cache.find(d);
     if (it != cache.end()) return it->second;
     uint32_t v;
-    if (const char* e = std::getenv("STRATA_SPIN_MAX"); e && std::atol(e) > 0) v = (uint32_t) std::atol(e);
+    if (const char* e = std::getenv("SAGUARO_SPIN_MAX"); e && std::atol(e) > 0) v = (uint32_t) std::atol(e);
 #ifdef STRATA_SYCL_SPIN_MAX
     else v = STRATA_SYCL_SPIN_MAX;
 #else

@@ -1,4 +1,4 @@
-// include/strata/platform/numa.hpp - host memory on the NUMA node of the card that uses it (STRATA_NUMA_PLACE=1).
+// include/strata/platform/numa.hpp - host memory on the NUMA node of the card that uses it (SAGUARO_NUMA_PLACE=1).
 //
 // A layer split across sockets makes each socket a half-machine: its cards run their layers, and the expert RAM, the
 // stage hand-offs and the KV copies of those layers are best on that socket's node. Raw syscalls (mbind, move_pages):
@@ -32,7 +32,7 @@ struct NumaSpan {
 std::vector<NumaSpan> numa_spans(const std::vector<uint64_t>& layer_off, const std::vector<int>& layer_nodes,
                                  uint64_t total, uint64_t align);
 
-/// STRATA_NUMA_PLACE: 0 off, 1 preferred (falls back to the other node when this one is full), 2 "bind" (strict).
+/// SAGUARO_NUMA_PLACE: 0 off, 1 preferred (falls back to the other node when this one is full), 2 "bind" (strict).
 int numa_place_mode();
 
 /// mbind [p, p + bytes) to `node` before first touch (page-aligned start). False with `err` set on refusal.

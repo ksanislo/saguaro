@@ -1,7 +1,7 @@
 /**
  * Agent bridge, end to end against the real pinned Harness and a scripted worker.
  *
- * Needs the built Harness: set STRATA_HARNESS_DIR to a checkout built with `pnpm install` and
+ * Needs the built Harness: set SAGUARO_HARNESS_DIR to a checkout built with `pnpm install` and
  * `pnpm run build:artifacts`. Without it these tests skip, loudly, rather than pass.
  *
  * The model is scripted (tests/helpers/scripted-worker.mjs). What is real: the Harness process, its
@@ -18,8 +18,8 @@ import { startScriptedWorker } from './helpers/scripted-worker.mjs';
 import { createAgentBridge } from '../server/agent/agent-bridge.mjs';
 import { resolveHarness } from '../server/agent/harness-runtime.mjs';
 
-const HARNESS = process.env.STRATA_HARNESS_DIR;
-const skip = !HARNESS || !resolveHarness({ env: process.env }).ok ? 'STRATA_HARNESS_DIR is not set to a built Harness' : false;
+const HARNESS = process.env.SAGUARO_HARNESS_DIR;
+const skip = !HARNESS || !resolveHarness({ env: process.env }).ok ? 'SAGUARO_HARNESS_DIR is not set to a built Harness' : false;
 
 function cleanup(dir) {
   // The Harness's Windows sandbox adds access entries under the directories it works in, which can make a

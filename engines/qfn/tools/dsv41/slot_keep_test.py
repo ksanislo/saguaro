@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""tools/dsv41/slot_keep_test.py - the kept conversations of strata-dsv41 (STRATA_DS4_SLOT_KEEP=1): a prompt that does
+"""tools/dsv41/slot_keep_test.py - the kept conversations of strata-dsv41 (SAGUARO_DS4_SLOT_KEEP=1): a prompt that does
 not continue the conversation in the model takes the kept one it does continue back, so an agent and its sub-agents
 that take turns on one model read only their new tokens.
 
@@ -14,7 +14,7 @@ nothing can be compared; real text does not.
 Runs of the engine's `--serve` protocol, greedy, spec=0 (the state's position is then exactly the answer's).  Two agents,
 A (parent) and B (a sub-agent), each with its own conversation behind the SAME system prompt and tools, take turns
 A1 B1 A2 B2 ... (the server marks the shared start with pin=N on every request):
-  ref      STRATA_DS4_REUSE=0: every request is a fresh read of its whole prompt.  Its answers are the reference every
+  ref      SAGUARO_DS4_REUSE=0: every request is a fresh read of its whole prompt.  Its answers are the reference every
            other run must print, token for token.
   old      the engine as it was (no pin, no slots): each turn reads its whole prompt again, the other agent having
            taken the model.  Timings only.
@@ -248,11 +248,11 @@ def run(exe: str, pack: str, engine_args: list[str], slots: str, keep: bool, ste
         max_new: int, pin: int = 0, reuse: bool = True, slot_gb: float | None = None, load_timeout: float = 3600.0):
     """One engine process; each step is (name, a function of the answers so far that gives its prompt).  `pin`: the
     shared start's length sent with every request (what the server sends); `reuse` False: every request is a fresh
-    read of its whole prompt (STRATA_DS4_REUSE=0)."""
-    env = {"STRATA_DS4_SLOT_KEEP": "1" if keep else "0", "STRATA_DS4_SLOT_DIR": slots, "STRATA_DS4_SLOT_MIN": "256",
-           "STRATA_DS4_REUSE": "1" if reuse else "0"}
+    read of its whole prompt (SAGUARO_DS4_REUSE=0)."""
+    env = {"SAGUARO_DS4_SLOT_KEEP": "1" if keep else "0", "SAGUARO_DS4_SLOT_DIR": slots, "SAGUARO_DS4_SLOT_MIN": "256",
+           "SAGUARO_DS4_REUSE": "1" if reuse else "0"}
     if slot_gb is not None:
-        env["STRATA_DS4_SLOT_GB"] = str(slot_gb)
+        env["SAGUARO_DS4_SLOT_GB"] = str(slot_gb)
     args = ["--pack", pack, "--dspark", "off", "--threads", "on", "--vision", "off", "--expert-profile", "none",
             *engine_args, "--serve"]
     eng = Engine(exe, args, env)
@@ -361,7 +361,7 @@ def main() -> int:
               f"{N} turns per agent, {max_new} new tokens each, pin={PIN}", flush=True)
         need_ref = bool(steps & {"ref", "pin", "on", "restart", "cap"})
         if need_ref:
-            print("ref: A1 B1 A2 B2 ... every request a fresh read of its whole prompt (STRATA_DS4_REUSE=0), shared "
+            print("ref: A1 B1 A2 B2 ... every request a fresh read of its whole prompt (SAGUARO_DS4_REUSE=0), shared "
                   "start marked", flush=True)
             ref, _, load0 = run(a_.exe, a_.pack, engine_args, os.path.join(tmp, "ref"), False,
                                 build_steps(None, N + 1), max_new, pin=PIN, reuse=False)

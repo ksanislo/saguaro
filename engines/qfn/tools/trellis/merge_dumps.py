@@ -1,4 +1,4 @@
-"""merge_dumps.py - add STRATA_ACT_DUMP files (int64 n, int64 count, double sum x^2 [n]) of several runs into one directory, and
+"""merge_dumps.py - add SAGUARO_ACT_DUMP files (int64 n, int64 count, double sum x^2 [n]) of several runs into one directory, and
 print the per-layer summary.
 
   python3 tools/trellis/merge_dumps.py OUT_DIR IN_DIR [IN_DIR ...]

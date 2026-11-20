@@ -9,7 +9,7 @@ Open an issue with:
 - **`./saguaro.sh --bench`** (Saguaro stopped) **then `./saguaro.sh --report`**, and attach `maya-report.txt`. Windows:
   `START-SAGUARO.bat --bench` / `--report`. The report includes the bench results.
 - **A build from source without the installer** is fine too. Send the same things by hand:
-  - the exact engine command and environment (`STRATA_GLM_*` settings);
+  - the exact engine command and environment (`SAGUARO_GLM_*` settings);
   - GPUs (model, VRAM, PCIe generation and width as `nvidia-smi` shows them), CPU, RAM, disk;
   - model and context length;
   - the engine log's `glm fast:`, `glm split`, `glm stat:` and `glm spec:` lines.
@@ -29,9 +29,9 @@ of its log (the `.log` next to your `maya-*.json`).
 - **Base it on `main`** and keep it to one topic.
 - **Measure before and after** on your hardware, same harness, and put the numbers in the description. If the
   output changes (it can: which expert runs on the CPU or the GPU changes the last bits), say so.
-- **New settings** are `STRATA_GLM_*` environment variables, off or at today's behaviour by default unless measured
+- **New settings** are `SAGUARO_GLM_*` environment variables, off or at today's behaviour by default unless measured
   better, with a row in [docs/SETTINGS.md](docs/SETTINGS.md).
-- **AMD (HIP) and other backends:** keep NVIDIA's code path unchanged (`#if defined(STRATA_USE_HIP)`). We can't test
+- **AMD (HIP) and other backends:** keep NVIDIA's code path unchanged (`#if defined(SAGUARO_USE_HIP)`). We can't test
   AMD ourselves, so we merge AMD changes on your measurements once NVIDIA builds and behaves the same.
 - **A new CUDA call needs its AMD mapping.** The AMD build compiles the same sources with
   `include/strata/hip_compat/` forced in. A CUDA runtime or cuBLAS name without a `#define` there breaks every AMD build,

@@ -1177,7 +1177,7 @@ bool dense_requant(const uint8_t* q8, int n, int k, int type, std::vector<uint8_
 }
 #else
 bool iq_cpu_fmt(int, int, int, int, IqCpu&, std::string& err) {
-    err = "this build has no ggml-cpu (STRATA_NATIVE_EXPERTS=OFF): the low-bit experts' CPU lane is not in it";
+    err = "this build has no ggml-cpu (SAGUARO_NATIVE_EXPERTS=OFF): the low-bit experts' CPU lane is not in it";
     return false;
 }
 void iq_cpu_prepare_rows(int) {}
@@ -1190,7 +1190,7 @@ void iq_cpu_rows(int, const uint8_t*, size_t, int, const void* const*, int, floa
 bool iq_cpu_own_rows(int) { return false; }
 void iq_cpu_iq1s_rows(bool) {}
 bool dense_requant(const uint8_t*, int, int, int, std::vector<uint8_t>&, std::string& err) {
-    err = "this build has no ggml (STRATA_NATIVE_EXPERTS=OFF)";
+    err = "this build has no ggml (SAGUARO_NATIVE_EXPERTS=OFF)";
     return false;
 }
 #endif

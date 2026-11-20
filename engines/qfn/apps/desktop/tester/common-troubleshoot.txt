@@ -29,7 +29,7 @@ IF IT DOES NOT START
 BROWSER MODE (Strata in your web browser instead of the app window)
 ------------------------------------------------------------------
 Start it on purpose with:
-      ./@APPIMAGE@ --browser          (or:  STRATA_UI=browser ./@APPIMAGE@)
+      ./@APPIMAGE@ --browser          (or:  SAGUARO_UI=browser ./@APPIMAGE@)
 Strata starts its engine and opens http://127.0.0.1:47831/ in your default browser. The address works on your own computer only; nothing is
 reachable from the network.
 * Closing the browser tab does NOT stop Strata or its engine, because the tab is only a view. To stop everything, use the menu

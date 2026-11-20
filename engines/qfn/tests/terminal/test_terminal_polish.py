@@ -27,7 +27,7 @@ class MonitorFindsLaunch(unittest.TestCase):
         with mock.patch.dict(os.environ, env or {}, clear=False), \
                 mock.patch("strata_cli.launch.cmd.launch_info", return_value=info), \
                 mock.patch("strata_cli.monitor_commands.Endpoint") as endpoint:
-            os.environ.pop("STRATA_URL", None) if not env else None
+            os.environ.pop("SAGUARO_URL", None) if not env else None
             endpoint.return_value.snapshot.return_value = {"schema_version": 1}
             out = io.StringIO()
             with redirect_stdout(out):
@@ -37,7 +37,7 @@ class MonitorFindsLaunch(unittest.TestCase):
     def test_no_url_uses_the_running_launch_and_its_key(self):
         info = {"running": True, "url": "http://127.0.0.1:8080", "key": "launch-key"}
         with mock.patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("STRATA_API_KEY", None)
+            os.environ.pop("SAGUARO_API_KEY", None)
             endpoint = self._run(["monitor", "--once", "--quiet"], info)
         args = endpoint.call_args[0]
         self.assertEqual(args[0], "http://127.0.0.1:8080")

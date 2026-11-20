@@ -14,9 +14,9 @@
 # a model, from the same release folder, signed.
 #
 # <feed> is where the release folder is hosted: GitHub Releases of Niko1221/Strata (the "latest" release's files), built in as the default.
-# Set $env:STRATA_FEED to another folder (a URL) to use that instead, for example a local test feed:  $env:STRATA_FEED='http://127.0.0.1:8099'; irm http://127.0.0.1:8099/install.ps1 | iex
-# Optional: $env:STRATA_DATA_DIR (default %LOCALAPPDATA%\Strata), $env:STRATA_INSTALL_TEST_TRUST='1' (a test feed: trust only its
-# test-trust.json for step 4), $env:STRATA_NO_PATH='1' (do not change the user PATH).
+# Set $env:SAGUARO_FEED to another folder (a URL) to use that instead, for example a local test feed:  $env:SAGUARO_FEED='http://127.0.0.1:8099'; irm http://127.0.0.1:8099/install.ps1 | iex
+# Optional: $env:SAGUARO_DATA_DIR (default %LOCALAPPDATA%\Strata), $env:SAGUARO_INSTALL_TEST_TRUST='1' (a test feed: trust only its
+# test-trust.json for step 4), $env:SAGUARO_NO_PATH='1' (do not change the user PATH).
 & {   # a child scope: `irm | iex` runs in the caller's scope, and this script's variables must not overwrite the caller's
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -26,10 +26,10 @@ function Die([string]$msg) { [Console]::Error.WriteLine("strata installer: $msg"
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch { }
 try { if ([Net.WebRequest]::DefaultWebProxy) { [Net.WebRequest]::DefaultWebProxy.Credentials = [Net.CredentialCache]::DefaultNetworkCredentials } } catch { }
 
-$feed = if ($env:STRATA_FEED) { $env:STRATA_FEED } else { 'https://github.com/Niko1221/Strata/releases/latest/download' }
+$feed = if ($env:SAGUARO_FEED) { $env:SAGUARO_FEED } else { 'https://github.com/Niko1221/Strata/releases/latest/download' }
 $feed = $feed.TrimEnd('/')
 if (-not $feed) {
-    Die 'this installer does not know where the Strata release folder is. Set $env:STRATA_FEED to its address and run it again, for example: $env:STRATA_FEED=''https://example.org/strata'''
+    Die 'this installer does not know where the Strata release folder is. Set $env:SAGUARO_FEED to its address and run it again, for example: $env:SAGUARO_FEED=''https://example.org/strata'''
 }
 if ([Environment]::OSVersion.Platform -ne 'Win32NT') { Die 'this is the Windows installer; on Linux or macOS use install.sh.' }
 $arch = $env:PROCESSOR_ARCHITEW6432; if (-not $arch) { $arch = $env:PROCESSOR_ARCHITECTURE }
@@ -42,8 +42,8 @@ Write-Host 'Strata Terminal installer'
 Write-Host "  This computer: Windows $arch ($platform)$(if ($gpu) { ", graphics: $gpu" })"
 Write-Host "  Release folder: $feed"
 
-if (-not $env:STRATA_DATA_DIR -and -not $env:LOCALAPPDATA) { Die 'Windows did not say where your user folder is. Set $env:STRATA_DATA_DIR to a folder you own, for example $env:STRATA_DATA_DIR=''C:\Strata'', and run this again.' }
-$data = if ($env:STRATA_DATA_DIR) { $env:STRATA_DATA_DIR } else { Join-Path $env:LOCALAPPDATA 'Strata' }
+if (-not $env:SAGUARO_DATA_DIR -and -not $env:LOCALAPPDATA) { Die 'Windows did not say where your user folder is. Set $env:SAGUARO_DATA_DIR to a folder you own, for example $env:SAGUARO_DATA_DIR=''C:\Strata'', and run this again.' }
+$data = if ($env:SAGUARO_DATA_DIR) { $env:SAGUARO_DATA_DIR } else { Join-Path $env:LOCALAPPDATA 'Strata' }
 $work = Join-Path ([IO.Path]::GetTempPath()) ("strata-install-" + [Guid]::NewGuid().ToString('N').Substring(0, 8))
 New-Item -ItemType Directory -Path $work | Out-Null
 try {
@@ -66,7 +66,7 @@ try {
     $incoming = "$dest.incoming"
     New-Item -ItemType Directory -Force -Path (Join-Path $data 'terminal') | Out-Null
     if (Test-Path $incoming) { Remove-Item -Recurse -Force $incoming }
-    $tooLong = 'If it says a path is too long, set $env:STRATA_DATA_DIR to a short folder such as C:\Strata and run this again; otherwise check the free disk space.'
+    $tooLong = 'If it says a path is too long, set $env:SAGUARO_DATA_DIR to a short folder such as C:\Strata and run this again; otherwise check the free disk space.'
     try {
         # tar.exe (Windows 10 1803 and later) handles long paths; Expand-Archive in Windows PowerShell 5.1 does not.
         # tar.exe receives its arguments through the ANSI/OEM code page, so a folder with an accented letter in its name turns into one with a question mark and the
@@ -101,10 +101,10 @@ try {
         $moved = "$dest.moved"; Move-Item $inner.FullName $moved; Remove-Item -Recurse -Force $incoming; Move-Item $moved $incoming
     }
 
-    if ($env:STRATA_INSTALL_TEST_TRUST -eq '1') {
+    if ($env:SAGUARO_INSTALL_TEST_TRUST -eq '1') {
         $trust = Join-Path $work 'test-trust.json'
         try { Invoke-WebRequest -UseBasicParsing -Uri "$feed/test-trust.json" -OutFile $trust } catch { Remove-Item -Recurse -Force $incoming; Die 'the test feed has no test-trust.json' }
-        $env:STRATA_UPDATE_TRUSTED_KEYS = $trust
+        $env:SAGUARO_UPDATE_TRUSTED_KEYS = $trust
     }
     Write-Host "Checking the release's signature..."
     $strata = Join-Path $incoming 'bin\strata.cmd'
@@ -139,7 +139,7 @@ try {
         catch { Die "Strata was unpacked but its start command could not be set up ($($_.Exception.Message)). Run it directly: $dest\bin\strata.cmd" }
     }
     $bin = Join-Path $current 'bin'
-    if ($env:STRATA_NO_PATH -ne '1') {
+    if ($env:SAGUARO_NO_PATH -ne '1') {
         $user = [Environment]::GetEnvironmentVariable('Path', 'User')
         if (-not $user) { $user = '' }
         if (($user -split ';') -notcontains $bin) {
@@ -148,7 +148,7 @@ try {
         $env:Path = "$env:Path;$bin"
     }
     Write-Host 'Installed. Run: strata launch'
-    if ($env:STRATA_NO_PATH -eq '1') { Write-Host "  (the program is $bin\strata.cmd)" }
+    if ($env:SAGUARO_NO_PATH -eq '1') { Write-Host "  (the program is $bin\strata.cmd)" }
     else { Write-Host '  (open a new terminal window if the command is not found yet)' }
 }
 finally {

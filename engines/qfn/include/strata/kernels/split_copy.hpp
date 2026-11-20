@@ -1,5 +1,5 @@
 #pragma once
-// Bulk copies that may cross separately pinned host ranges.  STRATA_KV_HOST_ELASTIC pins a slot's KV-streaming host
+// Bulk copies that may cross separately pinned host ranges.  SAGUARO_KV_HOST_ELASTIC pins a slot's KV-streaming host
 // copy in pieces of kSplitCopyBytes at addresses aligned to it, and cudaMemcpyAsync refuses ("invalid argument") a
 // copy whose host side spans two registrations; split at the same boundaries of both sides, no piece does.
 
@@ -14,9 +14,9 @@ namespace strata::kernels {
 
 constexpr size_t kSplitCopyBytes = (size_t) 2 << 20;
 
-/// STRATA_SPLIT_COPY=0: one copy as before (A/B only: safe only with STRATA_KV_HOST_ELASTIC=0)
+/// SAGUARO_SPLIT_COPY=0: one copy as before (A/B only: safe only with SAGUARO_KV_HOST_ELASTIC=0)
 inline bool split_copy_on() {
-    static const bool on = [] { const char* v = std::getenv("STRATA_SPLIT_COPY"); return v == nullptr || v[0] != '0'; }();
+    static const bool on = [] { const char* v = std::getenv("SAGUARO_SPLIT_COPY"); return v == nullptr || v[0] != '0'; }();
     return on;
 }
 

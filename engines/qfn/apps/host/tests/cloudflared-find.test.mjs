@@ -61,10 +61,10 @@ test('Strata’s own copy wins over a system one; an old or broken copy is skipp
   assert.equal(skippedMessage(none.skipped), null);
 });
 
-test('STRATA_CLOUDFLARED picks exactly one file; STRATA_CLOUDFLARED_SEARCH=own keeps to Strata’s folders', async () => {
-  const one = connectorCandidates({ directory: '/h/cf', platform: 'linux', env: { PATH: '/usr/bin', STRATA_CLOUDFLARED: '/opt/mine/cloudflared' }, home: '/h' });
+test('SAGUARO_CLOUDFLARED picks exactly one file; SAGUARO_CLOUDFLARED_SEARCH=own keeps to Strata’s folders', async () => {
+  const one = connectorCandidates({ directory: '/h/cf', platform: 'linux', env: { PATH: '/usr/bin', SAGUARO_CLOUDFLARED: '/opt/mine/cloudflared' }, home: '/h' });
   assert.deepEqual(one, [{ path: '/opt/mine/cloudflared', source: 'setting' }]);
-  const own = connectorCandidates({ directory: '/h/cf', componentDirectory: '/h/c', platform: 'linux', env: { PATH: '/usr/bin', STRATA_CLOUDFLARED_SEARCH: 'own' }, home: '/h' });
+  const own = connectorCandidates({ directory: '/h/cf', componentDirectory: '/h/c', platform: 'linux', env: { PATH: '/usr/bin', SAGUARO_CLOUDFLARED_SEARCH: 'own' }, home: '/h' });
   assert.deepEqual(own.map(c => c.source), ['strata', 'component']);
 });
 

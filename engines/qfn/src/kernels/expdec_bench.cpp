@@ -1,12 +1,12 @@
 // src/kernels/expdec_bench.cpp - the VRAM experts of a decode verify window: the default grouped kernels against
-// EXPDEC (STRATA_EXPDEC=1, docs/EXPERTDEC.md), bit for bit and in microseconds, per card, per T, per format pair.
+// EXPDEC (SAGUARO_EXPDEC=1, docs/EXPERTDEC.md), bit for bit and in microseconds, per card, per T, per format pair.
 //
 //     build/expdec_bench [reps = 300] [device = -1 (all)] [groups = 20] [pairs = all] [choices = def,dec,dec:r2,dec:b4,dec:r2:b4] [shape = real]
 //
 // The model's routed expert formats at its geometry (n_embd 2560, n_ff 640): gate/up IQ2_XXS (16), IQ2_XS (17), IQ3_XXS
 // (18), IQ3_S (21), IQ2_S (22); down IQ4_NL (20), Q2_0 (42).  `pairs` is a comma list of gu/down type ids ("21/20,16/42")
 // or "all" (the 10 pairs).  `choices` is a comma list of kernel choices:
-//   def                     the default kernels (STRATA_EXPDEC off); the reference for the bitwise check
+//   def                     the default kernels (SAGUARO_EXPDEC off); the reference for the bitwise check
 //   dec[:r<n>][:d<n>][:b<n>][:w<n>][:x<n>][:g<n>][:h<n>][:m<n>]
 //                           EXPDEC with r = gate/up rows per lane (1, 2), d = down rows per lane (1, 2, 4), b = the
 //                           gate/up kernel's min blocks per SM (2 | 4), w = 1 EXPDEC for the down too (the engine's
@@ -422,7 +422,7 @@ int main(int argc, char** argv) {
         if (!gu || !down) std::printf("# warning: EXPDEC has no %s kernel for pair %d/%d: that phase runs the default\n",
                                       !gu ? "gate/up" : "down", p.gu, p.d);
     }
-    for (const char* name : {"STRATA_NO_SUB16_GU", "STRATA_EXPERT_V2", "STRATA_OLD_IQ_MMVQ", "STRATA_EXP_MODE"}) {
+    for (const char* name : {"SAGUARO_NO_SUB16_GU", "SAGUARO_EXPERT_V2", "SAGUARO_OLD_IQ_MMVQ", "SAGUARO_EXP_MODE"}) {
         const char* v = std::getenv(name);
         if (v != nullptr && v[0] != '\0' && v[0] != '0') std::printf("# warning: %s is set, the kernel choice is bypassed\n", name);
     }

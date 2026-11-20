@@ -123,7 +123,7 @@ struct Stats {
     int64_t eg_cached = 0, eg_cache_cap = 0;          // the row cache's rows held, its capacity
     int64_t eg_cache_row_bytes = 0;                   // each cached row's payload bytes
     int64_t swaps = 0;                // experts the cache moved into VRAM
-    int64_t skipped = 0;              // routed experts STRATA_DS4_DISK_SKIP_W left out (light, not in RAM)
+    int64_t skipped = 0;              // routed experts SAGUARO_DS4_DISK_SKIP_W left out (light, not in RAM)
     int skip_on = -1;                 // DISK_SKIP_AUTO: 1 skipping, 0 off (warm), -1 not in use
     int64_t skip_switches = 0;        // ... the times it switched
     double skip_cold = 0.0;           // ... the cold share over its window (while skipping)
@@ -362,7 +362,7 @@ public:
     /// Keep the state at the current position as a restore point a request asked for (GEN marks= / shared=: the start
     /// of the last user message, a point near the prompt's tail, the end of a shared start - shared: given up last),
     /// besides the three above: restore() and a slot go back to these too.  At most marks_cap() a conversation
-    /// (MAYA_DS4_RESTORE_POINTS, 4; 0: none kept), the least recently used giving way; each check_bytes() of host RAM.
+    /// (SAGUARO_DS4_RESTORE_POINTS, 4; 0: none kept), the least recently used giving way; each check_bytes() of host RAM.
     void mark(bool shared = false);
     int marks_cap() const;
     /// The held restore points at or before `from` that a request asked for again (marks= / shared=): their

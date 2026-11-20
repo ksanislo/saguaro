@@ -533,7 +533,7 @@ bool WeightTable::load_hc_q8(const std::string& pack_dir, uint64_t& bytes, std::
         // the pack holds BF16 either promoted to f32 (4 B/elem) or as it is in the GGUF (a native pack, 2 B/elem)
         if (w.kind != WeightKind::Bf16InF32 || w.ne0 % 32 != 0 ||
             (w.src_bytes != (uint64_t) w.elements * 4 && w.src_bytes != (uint64_t) w.elements * 2)) {
-            err = "STRATA_HC_REQ8: " + name + " is not a BF16 tensor of whole 32-value blocks";
+            err = "SAGUARO_HC_REQ8: " + name + " is not a BF16 tensor of whole 32-value blocks";
             return false;
         }
         todo.push_back(&w);
@@ -543,7 +543,7 @@ bool WeightTable::load_hc_q8(const std::string& pack_dir, uint64_t& bytes, std::
     uint64_t total = 0;
     for (const WeightRef* w : todo) total += al((uint64_t) w->elements) + al((uint64_t) w->elements / 32 * 4);
     uint8_t* dev = nullptr;
-    if (cudaMalloc((void**) &dev, total) != cudaSuccess) { err = "STRATA_HC_REQ8: cudaMalloc failed"; return false; }
+    if (cudaMalloc((void**) &dev, total) != cudaSuccess) { err = "SAGUARO_HC_REQ8: cudaMalloc failed"; return false; }
     std::vector<float> src;
     std::vector<int8_t> q;
     std::vector<float> sc;
@@ -552,7 +552,7 @@ bool WeightTable::load_hc_q8(const std::string& pack_dir, uint64_t& bytes, std::
         const char* fn = file_name(w->file_id);
         const std::string path = pack_dir + "/" + (fn ? fn : "?");
         std::FILE* f = std::fopen(path.c_str(), "rb");
-        if (!f) { err = "STRATA_HC_REQ8: cannot open " + path; return false; }
+        if (!f) { err = "SAGUARO_HC_REQ8: cannot open " + path; return false; }
         src.resize((size_t) w->elements);
         const bool raw16 = w->src_bytes == (uint64_t) w->elements * 2;
 #if defined(_WIN32)
@@ -571,7 +571,7 @@ bool WeightTable::load_hc_q8(const std::string& pack_dir, uint64_t& bytes, std::
             ok = std::fread(src.data(), 4, src.size(), f) == src.size();
         }
         std::fclose(f);
-        if (!ok) { err = "STRATA_HC_REQ8: cannot read the source bytes"; return false; }
+        if (!ok) { err = "SAGUARO_HC_REQ8: cannot read the source bytes"; return false; }
         const size_t nb = src.size() / 32;
         q.resize(src.size());
         sc.resize(nb);
@@ -588,7 +588,7 @@ bool WeightTable::load_hc_q8(const std::string& pack_dir, uint64_t& bytes, std::
         at += al(sc.size() * 4);
         if (cudaMemcpy(codes, q.data(), q.size(), cudaMemcpyHostToDevice) != cudaSuccess ||
             cudaMemcpy(scales, sc.data(), sc.size() * 4, cudaMemcpyHostToDevice) != cudaSuccess) {
-            err = "STRATA_HC_REQ8: upload failed";
+            err = "SAGUARO_HC_REQ8: upload failed";
             return false;
         }
         w->data = codes;

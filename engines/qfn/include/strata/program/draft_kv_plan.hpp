@@ -2,7 +2,7 @@
 //
 // One GPU: the prompt path's batched pass (E-9, `Prefill::draft_kv`) tries first and the drafter's own
 // per-8-row pass (`MtpDrafter::prefill`) takes what it declines.  A layer split: only the drafter's own pass
-// ran, until `STRATA_SPLIT_MTP_BATCH=1` (opt-in) lets the last stage's prompt path try E-9 as well.  The
+// ran, until `SAGUARO_SPLIT_MTP_BATCH=1` (opt-in) lets the last stage's prompt path try E-9 as well.  The
 // drafter's K/V then come from Q8_1 x Q8_0 MMQ instead of its own mmvq, so its drafts can differ a little; the
 // target's tokens are decided by the verify window and do not.
 //
@@ -13,7 +13,7 @@
 
 namespace strata::program::draft_kv {
 
-/// `STRATA_SPLIT_MTP_BATCH`'s value: any whole number other than 0 turns it on; unset, empty, `0` and text
+/// `SAGUARO_SPLIT_MTP_BATCH`'s value: any whole number other than 0 turns it on; unset, empty, `0` and text
 /// that is not a number leave it off.
 inline bool split_env_on(const char* value) { return value != nullptr && std::atoi(value) != 0; }
 

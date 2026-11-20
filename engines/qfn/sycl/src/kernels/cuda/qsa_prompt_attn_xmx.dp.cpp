@@ -366,8 +366,8 @@ bool dispatch(const float* q, const QsaAttnPools& pools, const int32_t* ids, con
 
 bool qsa_prompt_attn_xmx(const float* q, const QsaAttnPools& pools, const int32_t* ids, const int32_t* steps, int64_t cap,
                          const QsaShapes& s, float* attn, int64_t n_q, void* stream) {
-    // STRATA_PROMPT_ATTN_XMX=1 (64-cell chunks) or =32 (32-cell chunks); unset or 0: the caller's fallback
-    static const int mode = [] { const char* v = std::getenv("STRATA_PROMPT_ATTN_XMX"); return v ? std::atoi(v) : 0; }();
+    // SAGUARO_PROMPT_ATTN_XMX=1 (64-cell chunks) or =32 (32-cell chunks); unset or 0: the caller's fallback
+    static const int mode = [] { const char* v = std::getenv("SAGUARO_PROMPT_ATTN_XMX"); return v ? std::atoi(v) : 0; }();
     if (mode == 0 || n_q <= 0) return false;
     if (pools.k_q4 != nullptr || s.head_dim != HD || s.n_head != (int64_t) G * s.n_head_kv || cap <= 0 || !ids || !steps ||
         !pools.page_table)

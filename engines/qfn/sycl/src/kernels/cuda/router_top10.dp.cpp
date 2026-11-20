@@ -516,7 +516,7 @@ __global__ void __launch_bounds__(64) router_top10_wave_kernel(const float* __re
 //     lowest index on ties is unique, so the butterfly finds the same expert as the block reduction did;
 //   * the renormalisation sums the ten weights in rank order from registers and divides them in parallel.
 // Same expressions, same operands: the ids and weights are bitwise those of router_top10_kernel (hip_router_fast
-// checks it on 65,536 rows with ties, near-ties, NaN rows and the forced serial path). STRATA_HIP_ROUTER_OLD=1: the
+// checks it on 65,536 rows with ties, near-ties, NaN rows and the forced serial path). SAGUARO_HIP_ROUTER_OLD=1: the
 // kernel above.
 template <bool FORCE_SERIAL>
 __global__ void router_top10_fast_kernel(const float* __restrict__ logits, int n_tokens, int n_expert, int k,
@@ -688,10 +688,10 @@ void router_top10(const float *logits, int n_tokens, int n_expert, int k,
     {
 #if defined(STRATA_HIP_GFX906)
         // gfx906 (wave64): the one-wavefront kernel below stays the default; the S6 kernel is wave32-shaped and only
-        // runs here on request (STRATA_HIP_ROUTER_FAST=1) until it is measured on this card
-        static const bool old = std::getenv("STRATA_HIP_ROUTER_FAST") == nullptr;
+        // runs here on request (SAGUARO_HIP_ROUTER_FAST=1) until it is measured on this card
+        static const bool old = std::getenv("SAGUARO_HIP_ROUTER_FAST") == nullptr;
 #else
-        static const bool old = std::getenv("STRATA_HIP_ROUTER_OLD") != nullptr;
+        static const bool old = std::getenv("SAGUARO_HIP_ROUTER_OLD") != nullptr;
 #endif
         if (!old && n_tokens > 0 && n_expert > 64 && n_expert <= 512 && k > 0 && k <= 32) {
             launch_generic(logits, n_tokens, n_expert, k, ids, weights, stream, 1);
@@ -722,7 +722,7 @@ void router_top10(const float *logits, int n_tokens, int n_expert, int k,
         std::exit(1);
     }
 #if defined(STRATA_HIP_GFX906)
-    if (n_expert <= 64 * RW_PER && !std::getenv("STRATA_ROUTER_BLOCK")) {
+    if (n_expert <= 64 * RW_PER && !std::getenv("SAGUARO_ROUTER_BLOCK")) {
         router_top10_wave_kernel<<<(unsigned) n_tokens, 64, 0, (cudaStream_t) stream>>>(logits, n_tokens, n_expert, k,
                                                                                        ids, weights);
         const cudaError_t e = cudaGetLastError();

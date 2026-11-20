@@ -447,7 +447,7 @@ function qwenFields(m, d, s, ch, gpus) {
       html`<${Row} label="Expert cache" flag="--expert-cache" changed=${ch("expert_cache")}
         hint="Auto takes the VRAM left free, less the reserve. A number caps the GPU's pool at that many experts."
         below=${ec.below} warn=${whole(d.expert_cache) ? null : "A whole number, or Auto."}>${ec.ctl}<//>`,
-      html`<${Row} label="Experts in RAM" flag="MAYA_EXPERT_RAM_GB" changed=${ch("ram_gb")}
+      html`<${Row} label="Experts in RAM" flag="SAGUARO_EXPERT_RAM_GB" changed=${ch("ram_gb")}
         hint="The experts the GPU does not hold stay in RAM, the most-used first, as far as the free RAM goes; the rest are read from the SSD. A number caps that RAM."
         warn=${whole(d.ram_gb) ? null : "A whole number of GB, or empty for all the engine can take."}>
         <${Num} label="Experts in RAM" value=${d.ram_gb} ph="auto" unit="GB" on=${(v) => setDraft({ram_gb: v})}/><//>`]},

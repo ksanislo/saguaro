@@ -66,7 +66,7 @@ export function readDataFolder(file) {
 
 /** The settings file the Terminal (command-line Strata) keeps: the same place setup.py and strata_control/discovery.py use. */
 export function terminalSettingsFile(env = process.env, platform = process.platform) {
-  if (env.STRATA_TERMINAL_SETTINGS_FILE) return env.STRATA_TERMINAL_SETTINGS_FILE;
+  if (env.SAGUARO_TERMINAL_SETTINGS_FILE) return env.SAGUARO_TERMINAL_SETTINGS_FILE;
   if (platform === 'win32') return join(env.APPDATA || join(homedir(), 'AppData', 'Roaming'), 'Strata', 'settings.json');
   return join(env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'strata', 'settings.json');
 }

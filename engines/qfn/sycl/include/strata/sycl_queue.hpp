@@ -19,7 +19,7 @@ namespace strata {
 // queue.memset of many GiB runs on the blitter engine and times out ("Engine memory CAT error", GT reset); kernels do not.
 // Small fills (<= chunk) and non-multiple-of-8 tails fall back to memset.
 inline void big_fill_zero(sycl::queue& q, void* p, size_t bytes, size_t chunk = (size_t)256 << 20) {
-    static const bool plain = [] { const char* v = std::getenv("STRATA_CHUNKED_FILL"); return v && v[0] == '0'; }();
+    static const bool plain = [] { const char* v = std::getenv("SAGUARO_CHUNKED_FILL"); return v && v[0] == '0'; }();
     if (plain) { q.memset(p, 0, bytes); q.wait(); return; }
     uint8_t* b = (uint8_t*)p;
     size_t off = 0;
@@ -44,7 +44,7 @@ inline void big_fill_zero(sycl::queue& q, void* p, size_t bytes, size_t chunk = 
 // system-scope atomics: every ring wait runs to its bound and the window reads stale rows (NaN logits). Host memory
 // from zeMemAllocHost with ZE_HOST_MEM_ALLOC_FLAG_BIAS_UNCACHED does work there (sycl/probe/doorbell.cpp mode 2,
 // "HANDSHAKE OK"), so those buffers come from it when the Level Zero headers are present (libze-dev), else from
-// sycl::malloc_host. STRATA_HOST_UNCACHED=0 turns it off.
+// sycl::malloc_host. SAGUARO_HOST_UNCACHED=0 turns it off.
 #if defined(__has_include)
 #if __has_include(<level_zero/ze_api.h>) && __has_include(<sycl/ext/oneapi/backend/level_zero.hpp>)
 #include <level_zero/ze_api.h>
@@ -62,7 +62,7 @@ inline std::mutex& uncached_mu() { static std::mutex m; return m; }
 }  // namespace detail
 inline void* host_malloc_polled(size_t bytes, sycl::queue& q) {
 #ifdef STRATA_HAVE_ZE
-    static const bool on = [] { const char* v = std::getenv("STRATA_HOST_UNCACHED"); return !(v && v[0] == '0'); }();
+    static const bool on = [] { const char* v = std::getenv("SAGUARO_HOST_UNCACHED"); return !(v && v[0] == '0'); }();
     if (on && q.get_backend() == sycl::backend::ext_oneapi_level_zero) {
         auto ctx = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(q.get_context());
         ze_host_mem_alloc_desc_t d{ZE_STRUCTURE_TYPE_HOST_MEM_ALLOC_DESC, nullptr, ZE_HOST_MEM_ALLOC_FLAG_BIAS_UNCACHED};
@@ -206,7 +206,7 @@ inline uint64_t arena_alias_check(sycl::queue& q, void* base, size_t bytes, size
 
 namespace strata {
 inline bool arena_alias_guard_enabled() {
-    static const bool on = [] { const char* v = std::getenv("STRATA_ARENA_ALIAS_CHECK"); return v == nullptr || v[0] != '0'; }();
+    static const bool on = [] { const char* v = std::getenv("SAGUARO_ARENA_ALIAS_CHECK"); return v == nullptr || v[0] != '0'; }();
     return on;
 }
 }  // namespace strata
@@ -254,7 +254,7 @@ inline size_t device_offset_end(const void* p, size_t bytes) {
     return (size_t) (end - base);
 }
 // sycl::malloc_device for a big allocation, checked for aliased pages (arena_alias_check) and, when it has some, allocated
-// again behind a growing spacer that moves it.  Small allocations and STRATA_ARENA_ALIAS_CHECK=0 go straight to
+// again behind a growing spacer that moves it.  Small allocations and SAGUARO_ARENA_ALIAS_CHECK=0 go straight to
 // sycl::malloc_device.  The memory comes back uninitialised, as from sycl::malloc_device.
 inline void* malloc_device_guarded(size_t bytes, sycl::queue& q, const char* what = "device buffer") {
     void* p = sycl::malloc_device(bytes, q);
@@ -283,7 +283,7 @@ inline void* malloc_device_guarded(size_t bytes, sycl::queue& q, const char* wha
     }
     for (void* sp : spacers) if (sp != nullptr) sycl::free(sp, q);
     if (p != nullptr && !clean)
-        std::fprintf(stderr, "strata: WARNING: the %s still has aliased pages after 8 tries (STRATA_ARENA_ALIAS_CHECK=0 skips the check)\n", what);
+        std::fprintf(stderr, "strata: WARNING: the %s still has aliased pages after 8 tries (SAGUARO_ARENA_ALIAS_CHECK=0 skips the check)\n", what);
     device_alloc_register(p, bytes);
     return p;
 }

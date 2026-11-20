@@ -36,16 +36,16 @@ const SOURCE_LABEL = {
   component: 'the optional connector component',
   path: 'found on your PATH',
   system: 'a usual install location',
-  setting: 'chosen with the STRATA_CLOUDFLARED setting',
+  setting: 'chosen with the SAGUARO_CLOUDFLARED setting',
 };
 
 /** Candidate paths in search order, each as { path, source }. Pure: no disk access. */
 export function connectorCandidates({ directory, componentDirectory = null, platform = process.platform, env = process.env, home = homedir(), search = true } = {}) {
-  // STRATA_CLOUDFLARED=<file> uses exactly that connector; STRATA_CLOUDFLARED_SEARCH=own keeps the search to Strata's own folders.
+  // SAGUARO_CLOUDFLARED=<file> uses exactly that connector; SAGUARO_CLOUDFLARED_SEARCH=own keeps the search to Strata's own folders.
   const windows = platform === 'win32', p = windows ? win32 : posix;
   const name = windows ? 'cloudflared.exe' : 'cloudflared';
-  if (env.STRATA_CLOUDFLARED) return [{ path: env.STRATA_CLOUDFLARED, source: 'setting' }];
-  if (env.STRATA_CLOUDFLARED_SEARCH === 'own') search = false;
+  if (env.SAGUARO_CLOUDFLARED) return [{ path: env.SAGUARO_CLOUDFLARED, source: 'setting' }];
+  if (env.SAGUARO_CLOUDFLARED_SEARCH === 'own') search = false;
   const out = [], seen = new Set();
   const add = (dir, source) => {
     if (!dir) return;

@@ -837,10 +837,10 @@ DevInfo g_dev[32];
 // WGP (two CUs, which these kernels use as one in the default WGP mode) as one multiprocessor, and the occupancy query
 // answers 1 block for these kernels where 2 run side by side - so the grid was half the GPU's room.  gfx1151 (20
 // WGPs), 8192 tokens x top 10, IQ3_S / IQ4_NL, one layer: 1 block per WGP 60.7 ms, 2 44.7, 3 49.9, 4 45.2 (the same
-// work items and arithmetic: the results do not change).  STRATA_PF_OCC=N sets the blocks per WGP (an experiment knob).
+// work items and arithmetic: the results do not change).  SAGUARO_PF_OCC=N sets the blocks per WGP (an experiment knob).
 static int wgp_blocks(int occ) {
     static const int env = [] {
-        const char* v = std::getenv("STRATA_PF_OCC");
+        const char* v = std::getenv("SAGUARO_PF_OCC");
         return v != nullptr ? std::atoi(v) : 0;
     }();
     return env > 0 ? env : 2 * std::max(occ, 1);
@@ -940,13 +940,13 @@ catch (sycl::exception const &exc) {
 bool built() { return true; }
 bool available() { return dev_info().cc >= 80; }
 // 0.1.36: on by default for the Q2_0 pack (+13-23% prompts on an RTX 5070; teacher-forced against the FP16 path as
-// close as MMQ at 8K and closer at 32K: phaseA-tests s18-tf); STRATA_PF_FUSED=0 keeps MMQ.  The native packs' kernels
-// (moe_fused_iq) stay opt-in: STRATA_PF_FUSED=1 (requested()).
+// close as MMQ at 8K and closer at 32K: phaseA-tests s18-tf); SAGUARO_PF_FUSED=0 keeps MMQ.  The native packs' kernels
+// (moe_fused_iq) stay opt-in: SAGUARO_PF_FUSED=1 (requested()).
 bool enabled() {
     static const bool env = [] {
-        const char* v = std::getenv("STRATA_PF_FUSED");
+        const char* v = std::getenv("SAGUARO_PF_FUSED");
 #if defined(__HIPCC__)
-        return v != nullptr && v[0] == '1';   // Aurora: the gfx11 WMMA kernels are opt-in (STRATA_PF_FUSED=1)
+        return v != nullptr && v[0] == '1';   // Aurora: the gfx11 WMMA kernels are opt-in (SAGUARO_PF_FUSED=1)
 #else
         return v == nullptr || v[0] != '0';
 #endif
@@ -955,7 +955,7 @@ bool enabled() {
 }
 bool requested() {
     static const bool env = [] {
-        const char* v = std::getenv("STRATA_PF_FUSED");
+        const char* v = std::getenv("SAGUARO_PF_FUSED");
         return v != nullptr && v[0] == '1';
     }();
     return env && available();

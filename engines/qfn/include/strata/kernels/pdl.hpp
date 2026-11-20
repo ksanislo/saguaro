@@ -13,7 +13,7 @@
 // `pdl_supported()`), only for a kernel whose code was built for sm_90+ (PTX of an older architecture, JIT-compiled,
 // has no griddepcontrol.wait: such a kernel would race), and only when every node the capturing stream's next node
 // depends on is a kernel - never after a memcpy, a memset, a host node or an event node.  After a join of branches
-// (several kernels) each edge is programmatic and the wait covers them all; STRATA_DF_PDL=2 allows one predecessor
+// (several kernels) each edge is programmatic and the wait covers them all; SAGUARO_DF_PDL=2 allows one predecessor
 // only.  Everything else is an ordinary launch.  On HIP all of this is an ordinary launch, the device functions are
 // no-ops and the kernels keep their plain loops (kPdlPrefetch).
 #pragma once
@@ -27,8 +27,8 @@ namespace strata::kernels {
 /// Whether launches on this thread may carry the PDL attribute (set by the verify window's recorder).
 bool& pdl_scope();
 
-/// The current device runs PDL: a CUDA 12.3+ build, sm_90+ (STRATA_EMULATE_CC counts), code built for it, and
-/// STRATA_DF_PDL is set (1, or 2 for single-predecessor edges only).  Always false on HIP.
+/// The current device runs PDL: a CUDA 12.3+ build, sm_90+ (SAGUARO_EMULATE_CC counts), code built for it, and
+/// SAGUARO_DF_PDL is set (1, or 2 for single-predecessor edges only).  Always false on HIP.
 bool pdl_supported();
 
 #if (defined(__CUDACC__) || defined(__HIPCC__))

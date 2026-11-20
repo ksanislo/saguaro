@@ -15,7 +15,7 @@
 //     the FP32 kernel by summation order and the exp2 rounding, not by an FP16 cast.
 // Not bitwise equal to `qsa_decode_attn_batch`; `qsa_prompt_attn_parity` bounds the difference and the prompt
 // quality gate (needles, teacher-forced top-1) checks it end to end. Q4_0 KV (mode 4): each block's codes enter
-// exactly as int8 and its scale (one per 32 values) in FP32, as int8 KV's do (STRATA_PROMPT_ATTN_Q4=0: the old kernel).
+// exactly as int8 and its scale (one per 32 values) in FP32, as int8 KV's do (SAGUARO_PROMPT_ATTN_Q4=0: the old kernel).
 #pragma once
 
 #include "strata/kernels/qsa_decode_attn.hpp"
@@ -30,20 +30,20 @@ bool qsa_prompt_attn_batch(const float* q, const QsaAttnPools& pools, const int3
                            int64_t cap, const QsaShapes& s, float* attn, int64_t n_q, void* stream);
 
 /// HIP only (false in every other build): the prompt attention runs on the RDNA4 matrix cores on the current device -
-/// the default on gfx12 (STRATA_HIP_WMMA=0 turns it off), STRATA_HIP_WMMA=1 on gfx11 as well.  The prompt path sizes its
+/// the default on gfx12 (SAGUARO_HIP_WMMA=0 turns it off), SAGUARO_HIP_WMMA=1 on gfx11 as well.  The prompt path sizes its
 /// expert ring for it (prefill.cpp).
 bool qsa_hip_wmma_active();
 
-/// STRATA_QSA_SPLIT_ATTN=1 (the idea of fork Eddoursul fd23d91): `qsa_decode_attn_batch`'s decode
+/// SAGUARO_QSA_SPLIT_ATTN=1 (the idea of fork Eddoursul fd23d91): `qsa_decode_attn_batch`'s decode
 /// attention through the int8 tensor-core kernel above with each query's cells split among up to 20 blocks, merged with
 /// the log-sum-exp rescale, its partials in `scratch` (`scratch_floats` available).  False (nothing
 /// launched) unless int8 KV on sm_80+: the caller keeps qsa_decode_attn_batch.  Not bitwise the decode kernel: (b).
 bool qsa_decode_attn_split(const float* q, const QsaAttnPools& pools, const int32_t* ids, const int32_t* steps,
                            int64_t cap, const QsaShapes& s, float* scratch, uint64_t scratch_floats, float* attn, int64_t n_q,
                            void* stream);
-/// Tests: the int8-KV kernel on INT8 tensor cores (1), v2 (0), or as STRATA_PROMPT_ATTN_IMMA says (-1).
+/// Tests: the int8-KV kernel on INT8 tensor cores (1), v2 (0), or as SAGUARO_PROMPT_ATTN_IMMA says (-1).
 void qsa_prompt_attn_set_imma(int on);
-/// HIP: STRATA_HIP_WMMA asks for the matrix-core prompt attention (=1 or =auto) and this device is a gfx11 / gfx12 matrix-core part
+/// HIP: SAGUARO_HIP_WMMA asks for the matrix-core prompt attention (=1 or =auto) and this device is a gfx11 / gfx12 matrix-core part
 /// that has not switched it off after a failed launch.  The prompt path's 96-slot expert ring follows it.  False off HIP.
 bool qsa_prompt_attn_matrix_cores_requested();
 

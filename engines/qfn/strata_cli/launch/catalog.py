@@ -176,7 +176,7 @@ def installer_folder(explicit: str | os.PathLike | None = None) -> Path:
 
 def install_places(explicit: str | os.PathLike | None = None, src: str | os.PathLike | None = None) -> list:
     """Every folder with run configs, main one first: the SAME discovery `strata models list` and the own-files import use
-    (strata_control/discovery.py). An explicit folder (the argument, or STRATA_INSTALL_DIR) is the only one."""
+    (strata_control/discovery.py). An explicit folder (the argument, or SAGUARO_INSTALL_DIR) is the only one."""
     from strata_control import discovery
     return discovery.places(here=installer_folder(src), explicit=explicit)
 
@@ -187,7 +187,7 @@ def install_root(explicit: str | os.PathLike | None = None, src: str | os.PathLi
     from strata_control import discovery
     if explicit:
         return Path(explicit)
-    env = os.environ.get("STRATA_INSTALL_DIR")
+    env = os.environ.get("SAGUARO_INSTALL_DIR")
     if env:
         return Path(env)
     return discovery.find_install(here=installer_folder(src))[0]

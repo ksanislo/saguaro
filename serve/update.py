@@ -1,7 +1,7 @@
 """The dashboard's About > Updates: is a newer Saguaro release out, and updating this folder to it.
 
 The check asks GitHub for the latest release of the repository this folder was cloned from (git's origin; else
-mw00/project-maya) - only when the dashboard asks, at most every six hours (MAYA_UPDATE_CHECK=0 turns it off).
+mw00/project-maya) - only when the dashboard asks, at most every six hours (SAGUARO_UPDATE_CHECK=0 turns it off).
 Updating fast-forwards the git checkout to that release's tag, then the server ends with UPDATE_EXIT: saguaro.sh /
 START-SAGUARO.bat (saguaro.py) start Saguaro again, which compiles what changed in the engine and loads the model.  A folder
 that can't do that (no git, local changes, a server started some other way) gets the reason and the steps by hand."""
@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 REPO = "mw00/project-maya"
 UPDATE_EXIT = 75                    # the server's exit code that tells saguaro.py: updated, start again (EX_TEMPFAIL)
 RESTART_EXIT = 76                   # ... the dashboard saved a new port: start again with the saved config
-SUPERVISED = "MAYA_RESTART_ON_UPDATE"   # set by saguaro.py for the server it starts: it starts it again after an update
+SUPERVISED = "SAGUARO_RESTART_ON_UPDATE"   # set by saguaro.py for the server it starts: it starts it again after an update
 CHECK_EVERY = 6 * 3600
 RETRY_AFTER = 10 * 60               # GitHub not reached: ask again after this
 TAG = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
@@ -72,7 +72,7 @@ class Updater:
 
     # ---------------------------------------------------------------- is there a newer release
     def enabled(self) -> bool:
-        return os.environ.get("MAYA_UPDATE_CHECK", "1") != "0"
+        return os.environ.get("SAGUARO_UPDATE_CHECK", "1") != "0"
 
     def check(self, force: bool = False) -> dict:
         if self.enabled() and (force or time.time() >= self.next_check):

@@ -20,8 +20,8 @@ test('without LOCALAPPDATA, Windows falls back to the profile folder', () => {
 });
 
 test('explicit directories win on every platform', () => {
-  assert.equal(tuningDir({ STRATA_TUNE_DIR: 'D:\\tune' }, 'win32'), 'D:\\tune');
-  assert.equal(timeSkipDir({ STRATA_TIMESKIP_DIR: '/t/ts' }, 'linux'), '/t/ts');
+  assert.equal(tuningDir({ SAGUARO_TUNE_DIR: 'D:\\tune' }, 'win32'), 'D:\\tune');
+  assert.equal(timeSkipDir({ SAGUARO_TIMESKIP_DIR: '/t/ts' }, 'linux'), '/t/ts');
 });
 
 test('POSIX is unchanged: XDG_STATE_HOME, else ~/.local/state', () => {

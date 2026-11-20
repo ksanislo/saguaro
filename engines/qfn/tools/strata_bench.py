@@ -542,7 +542,7 @@ def config_view(cfg: dict) -> dict:
             out[k] = json.loads(json.dumps(v))
     env = cfg.get("env")
     if isinstance(env, dict):
-        out["env"] = {k: base_if_path(str(v)) for k, v in env.items() if k.startswith(("STRATA_", "HIP_", "CUDA_", "ROCR_", "ONEAPI_", "SYCL_")) and not SECRET_KEY.search(k)}
+        out["env"] = {k: base_if_path(str(v)) for k, v in env.items() if k.startswith(("SAGUARO_", "HIP_", "CUDA_", "ROCR_", "ONEAPI_", "SYCL_")) and not SECRET_KEY.search(k)}
     return out
 
 
@@ -935,7 +935,7 @@ def main(argv=None) -> int:
     ap.add_argument("--url", help="use the server already running at this address (http://127.0.0.1:8080) instead of starting one")
     ap.add_argument("--port", type=int, help="the port to start the server on (default: the config's)")
     ap.add_argument("--gpu", help="start the server on this GPU only (as the server's --gpu)")
-    ap.add_argument("--api-key", default=os.environ.get("STRATA_KEY", ""), help="the server's API key, if it has one (or STRATA_KEY)")
+    ap.add_argument("--api-key", default=os.environ.get("SAGUARO_KEY", ""), help="the server's API key, if it has one (or SAGUARO_KEY)")
     ap.add_argument("--runs", type=int, default=3, help="runs per test (default 3)")
     ap.add_argument("--clients", type=int, default=0, metavar="N", help="also send N requests at once")
     ap.add_argument("--long", action="store_true", help="also a prompt of about 32,768 tokens")

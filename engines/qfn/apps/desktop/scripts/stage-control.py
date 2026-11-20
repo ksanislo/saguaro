@@ -153,7 +153,7 @@ def check(folder: Path) -> int:
     if problems:
         print("\n".join(problems), file=sys.stderr)
         return 1
-    env = {"PYTHONNOUSERSITE": "1", "PYTHONDONTWRITEBYTECODE": "1", "STRATA_NO_ACQUIRE": "1", "SYSTEMROOT": __import__("os").environ.get("SYSTEMROOT", "")}
+    env = {"PYTHONNOUSERSITE": "1", "PYTHONDONTWRITEBYTECODE": "1", "SAGUARO_NO_ACQUIRE": "1", "SYSTEMROOT": __import__("os").environ.get("SYSTEMROOT", "")}
     done = subprocess.run([str(python), str(folder / "strata.py"), "--version"], capture_output=True, text=True, env=env,
                           cwd=str(folder), timeout=60)
     print(done.stdout.strip() or done.stderr.strip())
@@ -163,7 +163,7 @@ def check(folder: Path) -> int:
     probe = ("import sys; sys.path.insert(0, %r); import importlib.util as u; s = u.spec_from_file_location('s', %r); m = u.module_from_spec(s); "
              "s.loader.exec_module(m); import iq_pack, strata_pack, pack_index, mtp_fetch; "
              "print('installer ok: %%d models, %%d families' %% (len(m.MODELS), len(m.FAMILIES)))") % (str(folder / "tools"), str(folder / "setup.py"))
-    env["STRATA_CONTROL_INSTALL"] = "1"
+    env["SAGUARO_CONTROL_INSTALL"] = "1"
     again = subprocess.run([str(python), "-c", probe], capture_output=True, text=True, env=env, cwd=str(folder), timeout=120)
     print(again.stdout.strip() or again.stderr.strip()[-600:])
     return again.returncode

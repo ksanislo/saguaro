@@ -1,10 +1,10 @@
-# Grid checkpoints for batch slots (STRATA_SLOT_GRID)
+# Grid checkpoints for batch slots (SAGUARO_SLOT_GRID)
 
-Opt-in, off by default. `STRATA_SLOT_GRID=6` turns it on with 6 distance buckets.
+Opt-in, off by default. `SAGUARO_SLOT_GRID=6` turns it on with 6 distance buckets.
 
 ## Why
 
-A batch slot keeps its turn checkpoint (and, with `STRATA_CACHE_MESSAGE_BOUNDARY`, a message checkpoint), so the
+A batch slot keeps its turn checkpoint (and, with `SAGUARO_CACHE_MESSAGE_BOUNDARY`, a message checkpoint), so the
 next turn of its conversation continues where it left off. A request that keeps only a **prefix** of the
 conversation finds nothing near its cut. Examples are an agent's compaction summary over its oldest messages (the
 hermes-lcm chain summary), or a client that rewrites an older turn. That request then reads everything again after
@@ -25,7 +25,7 @@ prefix request reused 0 and read for 60 s, where the same request on a solo conv
 - **Saving.** An admission's read saves only the multiples that the thinning keeps at the prompt's end, beside what
   the slot already holds. A fresh 424K read saves 10, an incremental 23K turn 1-2.
   - Path A (whole read on its own thread) stops at each one, as it does for the message and turn checkpoints.
-  - Path B (queued pieces), `STRATA_BATCH_READS` and `STRATA_READ_YIELD` end a piece at each position, and each
+  - Path B (queued pieces), `SAGUARO_BATCH_READS` and `SAGUARO_READ_YIELD` end a piece at each position, and each
     stage saves its part through `on_stage_chunk` when it reaches it.
   - An incomplete set of parts makes no checkpoint. `rope_level` comes from `checkpoint_save`.
 - **Carry-forward.** An admission keeps the slot's earlier checkpoints that the new prompt still starts with, at or
@@ -34,7 +34,7 @@ prefix request reused 0 and read for 60 s, where the same request on a solo conv
 - **Hand-off.** When the solo path hands its conversation to a slot, the chain's checkpoints of that conversation
   that the thinning keeps are copied into the slot (copies: the solo session still holds it). The slot's
   "takes N tokens (copied in X ms)" line says how many, so the copy time is visible.
-- Parking, session files, hand-back and `STRATA_YARN_ELASTIC` moves take the slot's checkpoints as they took the
+- Parking, session files, hand-back and `SAGUARO_YARN_ELASTIC` moves take the slot's checkpoints as they took the
   turn checkpoint: `sl.checks` is the same list.
 
 ## Test

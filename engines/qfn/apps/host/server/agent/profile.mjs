@@ -299,16 +299,16 @@ export function buildProfile({ local = [], connections = [], gate = true, tools 
   const own = (kind, on) => on && tools.toolFile ? [{ id: `mcp-strata-${kind}`, name: '@deepseek-ai/dsh-mcp-client', config: { serverName: `strata-${kind}`, transport: 'stdio', command: process.execPath, args: [CUSTOM_TOOLS_SCRIPT, kind, tools.toolFile] } }] : [];
   // The browser: Playwright's tool server on the person's own Chrome or Edge, in a separate empty profile (what the Harness's own browser provider does). Every action asks in Manual.
   const browserRows = tools.browserEnabled && tools.browserPath && tools.browserCli
-    ? [{ id: 'mcp-browser', name: '@deepseek-ai/dsh-mcp-client', config: { serverName: 'browser', transport: 'stdio', command: process.execPath, args: [tools.browserCli, '--browser', 'chromium', '--isolated', ...(process.env.STRATA_BROWSER_HEADLESS === '1' ? ['--headless'] : []), '--executable-path', tools.browserPath] } }] : [];
+    ? [{ id: 'mcp-browser', name: '@deepseek-ai/dsh-mcp-client', config: { serverName: 'browser', transport: 'stdio', command: process.execPath, args: [tools.browserCli, '--browser', 'chromium', '--isolated', ...(process.env.SAGUARO_BROWSER_HEADLESS === '1' ? ['--headless'] : []), '--executable-path', tools.browserPath] } }] : [];
   const ownRows = [...own('instructions', tools.hasInstructionTools), ...own('commands', tools.hasCommandTools), ...browserRows];
   // Web search: DuckDuckGo with no key unless the person chose a keyed service AND saved its key (then that one; never a half-set-up one).
   const searchOn = !tools.off.has('search');
   const keyed = ['exa', 'perplexity', 'deepseek'].includes(tools.search.provider) && tools.search.key ? tools.search.provider : null;
-  if (searchOn && keyed) env.STRATA_SEARCH_KEY = tools.search.key;
+  if (searchOn && keyed) env.SAGUARO_SEARCH_KEY = tools.search.key;
   const webRows = !searchOn ? [] : keyed === 'deepseek'
-    ? [{ id: 'web', config: { searchProvider: 'deepseek-official', fetchProvider: 'http' } }, { id: 'web-search-deepseek', config: { apiKeyEnv: 'STRATA_SEARCH_KEY' } }]
+    ? [{ id: 'web', config: { searchProvider: 'deepseek-official', fetchProvider: 'http' } }, { id: 'web-search-deepseek', config: { apiKeyEnv: 'SAGUARO_SEARCH_KEY' } }]
     : [{ id: 'web', config: { searchProvider: keyed ?? DDG_PROVIDER_ID, fetchProvider: 'http' } }, { id: 'web-search-deepseek', disabled: true },
-      { insert: [{ id: 'strata-web-search', name: SEARCH_PLUGIN, config: { provider: keyed ?? 'duckduckgo', keyEnv: 'STRATA_SEARCH_KEY', ...(searchMock ? { mock: searchMock } : {}) } }] }];
+      { insert: [{ id: 'strata-web-search', name: SEARCH_PLUGIN, config: { provider: keyed ?? 'duckduckgo', keyEnv: 'SAGUARO_SEARCH_KEY', ...(searchMock ? { mock: searchMock } : {}) } }] }];
   /** The models a helper agent may be started on: the table the model-choice plugin and the Harness's allow-list are written from. */
   const subagentRoutes = routes.map(r => ({ provider: r.route, model: r.modelId, name: r.name, connection: r.connectionName, local: r.kind === 'local' }));
   const entries = [
@@ -344,7 +344,7 @@ export function buildProfile({ local = [], connections = [], gate = true, tools 
   const signature = createHash('sha256').update(patch).update(JSON.stringify(Object.entries(env).sort())).digest('hex').slice(0, 16);
   // What the agent is offered (tool groups, web search, tool servers, the person's own tools) decides whether a running agent must be
   // restarted for the next message; the routes are compared separately (a changed context size alone does not restart it).
-  const toolsSignature = createHash('sha256').update(JSON.stringify([mcp, ownRows, webRows, entries.find(e => e.id === 'preset-standard'), env.STRATA_SEARCH_KEY ?? '', mcpEnv])).digest('hex').slice(0, 16);
+  const toolsSignature = createHash('sha256').update(JSON.stringify([mcp, ownRows, webRows, entries.find(e => e.id === 'preset-standard'), env.SAGUARO_SEARCH_KEY ?? '', mcpEnv])).digest('hex').slice(0, 16);
   return { patch, env, routes, defaultRoute, signature, toolsSignature, shapeTargets, mcpSkipped };
 }
 

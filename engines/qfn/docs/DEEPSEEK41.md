@@ -64,7 +64,7 @@ strata launch --model ist-das-2.00bpw --plan             # where it would go on 
 strata launch --model-path DIR --model ist-das-2.00bpw   # start from files you already have
 ```
 
-Setup needs `strata-dsv41` next to the engine (or `STRATA_DSV41_EXE`) and says so before it downloads anything. Build it with
+Setup needs `strata-dsv41` next to the engine (or `SAGUARO_DSV41_EXE`) and says so before it downloads anything. Build it with
 `cmake -DSTRATA_BUILD_DSV41=ON`. The default context is 8192 tokens, the size it was checked at; `--context` asks for more.
 Loading takes a few minutes (the config sets `"engine_ready_s": 3600`).
 
@@ -83,8 +83,8 @@ The server speaks to the engine as it does for the other models, so `/v1/chat/co
 - Defaults when a request names none: temperature 1.0, top_p 1.0.
 - Agents and sub-agents that take turns do not read their prompts again. The engine sets a conversation aside when another request takes the model (about 17 MB per 6.5K tokens) and takes it
   back when the next prompt continues it, also after a restart. Slots live in `ds4-slots` next to the run log, are capped at 2 GB
-  (`STRATA_DS4_SLOT_GB`) and are removed after a week. The system prompt and tools shared by an agent
-  and its sub-agents are kept as a checkpoint too. `STRATA_DS4_SLOT_KEEP=0` and `STRATA_DS4_AUTO_PIN=0` turn this off.
+  (`SAGUARO_DS4_SLOT_GB`) and are removed after a week. The system prompt and tools shared by an agent
+  and its sub-agents are kept as a checkpoint too. `SAGUARO_DS4_SLOT_KEEP=0` and `SAGUARO_DS4_AUTO_PIN=0` turn this off.
 
 Not in this version: several requests at once (`--parallel` is ignored with a warning) and pictures (`--vision` is ignored with a warning).
 

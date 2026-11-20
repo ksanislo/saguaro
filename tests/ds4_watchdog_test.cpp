@@ -61,7 +61,7 @@ int main() {
         r.limit_s = 0;
         for (double t = 0; t < 100000; t += 100) assert(!r.stalled(true, 1, t));
     }
-    // a shorter limit (MAYA_DS4_WATCHDOG_S=60)
+    // a shorter limit (SAGUARO_DS4_WATCHDOG_S=60)
     {
         StallRule r;
         r.limit_s = 60;

@@ -59,7 +59,7 @@ inline IdleGate& idle_gate() {
 inline void idle_poke() { idle_gate().poke(); }
 
 // The deep idle's settings (seconds of quiet before it starts: 0 = never, the poll's milliseconds), from the
-// environment under either name: STRATA_<prefix>_SERVICE_DEEP_S / _DEEP_MS (prefix GLM, DS4).
+// environment as SAGUARO_<prefix>_SERVICE_DEEP_S / _DEEP_MS (prefix GLM, DS4).
 inline int idle_env(const char* name, int fallback) {
     const char* v = std::getenv(name);
     return v != nullptr && *v != '\0' ? std::max(0, std::atoi(v)) : fallback;

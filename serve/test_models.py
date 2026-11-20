@@ -33,7 +33,7 @@ def glm_cfg(d: Path, name="maya-maya-m.json", **extra) -> Path:
     cfg = {"exe": "/b/maya", "args": ["--glm-pack", str(pack), "--max-context", "131072", "--expert-cache", "auto",
                                       "--prefill", "auto", "--kv-streaming", "on"],
            "model_name": "glm-5.3-flash", "gpu": [0, 1], "port": 8080, "vision": {"mmproj": "/v/mmproj.gguf"},
-           "env": {"MAYA_GLM_RAM_HEADROOM_GB": "4"}, "sampling": {"temperature": 1.0},
+           "env": {"SAGUARO_GLM_RAM_HEADROOM_GB": "4"}, "sampling": {"temperature": 1.0},
            "installer": {"models_dir": str(d), "quant": "Maya-M", "draft": "mtp", "written": "2026-10-20 09:00"},
            **extra}
     p = d / name
@@ -85,7 +85,7 @@ class Settings(unittest.TestCase):
 
     def test_glm_read(self):
         s = M.settings_of(M.read(glm_cfg(self.d)))
-        self.assertEqual(s, {"context": 131072, "gpus": [0, 1], "env": {"MAYA_GLM_RAM_HEADROOM_GB": "4"},
+        self.assertEqual(s, {"context": 131072, "gpus": [0, 1], "env": {"SAGUARO_GLM_RAM_HEADROOM_GB": "4"},
                              "images": True, "reserve_mib": None, "parallel": 1, "draft": "mtp", "expert_cache": None,
                              "prefill": None, "kv_streaming": True, "kv_resident": None})
 
@@ -130,7 +130,7 @@ class Settings(unittest.TestCase):
         cfg = M.read(glm_cfg(self.d))
         cfg["args"] = ["--glm-pack", "/m/pack", "--max-context", "32768"]
         self.assertFalse(M.settings_of(cfg)["kv_streaming"])
-        self.assertTrue(M.settings_of(dict(cfg, env={"STRATA_GLM_KV_RESIDENT": "65536"}))["kv_streaming"])
+        self.assertTrue(M.settings_of(dict(cfg, env={"SAGUARO_GLM_KV_RESIDENT": "65536"}))["kv_streaming"])
         new = M.apply(cfg, {"context": 65536})
         self.assertEqual(new["args"], ["--glm-pack", "/m/pack", "--max-context", "65536"])
         on = M.apply(cfg, {"kv_streaming": True})
@@ -144,8 +144,8 @@ class Settings(unittest.TestCase):
             with self.assertRaises(ValueError, msg=k):
                 M.apply(cfg, {"env": {k: "/tmp/x"}})
         own = dict(cfg, env={"LD_LIBRARY_PATH": "/opt/rocm/lib"})
-        kept = M.apply(own, {"env": {"LD_LIBRARY_PATH": "/opt/rocm/lib", "MAYA_X": "1"}})
-        self.assertEqual(kept["env"], {"LD_LIBRARY_PATH": "/opt/rocm/lib", "MAYA_X": "1"})
+        kept = M.apply(own, {"env": {"LD_LIBRARY_PATH": "/opt/rocm/lib", "SAGUARO_X": "1"}})
+        self.assertEqual(kept["env"], {"LD_LIBRARY_PATH": "/opt/rocm/lib", "SAGUARO_X": "1"})
         with self.assertRaises(ValueError):
             M.apply(own, {"env": {"LD_LIBRARY_PATH": "/tmp/evil"}})
 
@@ -351,7 +351,7 @@ class Served(unittest.TestCase):
     """The server on the mock engine, its config beside another model's."""
 
     def setUp(self):
-        os.environ.pop("MAYA_RESTART_ON_UPDATE", None)
+        os.environ.pop("SAGUARO_RESTART_ON_UPDATE", None)
         tok = ByteTokenizer()
         self.svc = Service(MockEngine(tok, "</think>\n\nhello", max_context=32768), tok,
                            ChatTemplate(ROOT / "serve/chat_template.jinja"))
@@ -366,7 +366,7 @@ class Served(unittest.TestCase):
 
     def tearDown(self):
         self.gpus.stop()
-        os.environ.pop("MAYA_RESTART_ON_UPDATE", None)
+        os.environ.pop("SAGUARO_RESTART_ON_UPDATE", None)
         self.httpd.shutdown()
         self.httpd.server_close()
         self.tmp.cleanup()
@@ -396,7 +396,7 @@ class Page(Served):
         """A config's HF_TOKEN / *_API_KEY reach the page masked (as the report leaves them out); a save that sends the
         mask back keeps the value, a new value replaces it."""
         cfg = json.loads(self.cfg.read_text())
-        cfg["env"] = {"HF_TOKEN": "hf_secret", "MAYA_GLM_RAM_HEADROOM_GB": "4"}
+        cfg["env"] = {"HF_TOKEN": "hf_secret", "SAGUARO_GLM_RAM_HEADROOM_GB": "4"}
         self.cfg.write_text(json.dumps(cfg))
         s, b = self.req("GET", "/api/models")
         self.assertNotIn("hf_secret", json.dumps(b))
@@ -438,7 +438,7 @@ class Page(Served):
         self.assertEqual(s, 400)
 
     def test_running_one_starts_again_with_its_new_settings(self):
-        os.environ["MAYA_RESTART_ON_UPDATE"] = "1"
+        os.environ["SAGUARO_RESTART_ON_UPDATE"] = "1"
         with mock.patch.object(SV.os, "_exit") as ex, mock.patch.object(self.svc, "close_for_restart"):
             s, b = self.req("POST", "/api/models/settings", {"file": self.cfg.name, "settings": {"parallel": 2}})
             self.assertEqual((s, b["restarts"]), (202, True))
@@ -458,7 +458,7 @@ class Page(Served):
         self.assertEqual((s, b["to"], b["restarts"]), (202, self.other.name, False))
         self.assertGreater(self.other.stat().st_mtime, old + 900)            # (the next start picks it)
         self.assertFalse((self.d / M.SWITCH_FILE).exists())                   # (no restart: no note for saguaro.py)
-        os.environ["MAYA_RESTART_ON_UPDATE"] = "1"
+        os.environ["SAGUARO_RESTART_ON_UPDATE"] = "1"
         with mock.patch.object(SV.os, "_exit") as ex, mock.patch.object(self.svc, "close_for_restart"):
             s, b = self.req("POST", "/api/models/switch", {"file": self.other.name})
             for _ in range(50):
@@ -713,7 +713,7 @@ class DeletePage(Served):
         self.assertFalse((self.d / M.DELETE_FILE).exists())
 
     def test_the_running_one_after_a_switch(self):
-        os.environ["MAYA_RESTART_ON_UPDATE"] = "1"
+        os.environ["SAGUARO_RESTART_ON_UPDATE"] = "1"
         with mock.patch.object(Service, "_restart_into") as restart:
             s, b = self.req("POST", "/api/models/delete", {"file": self.cfg.name, "dry_run": True})
             self.assertEqual((s, b["running"]), (200, True))

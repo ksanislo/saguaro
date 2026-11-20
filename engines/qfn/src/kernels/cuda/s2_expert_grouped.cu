@@ -235,7 +235,7 @@ __global__ void down_kernel(const uint8_t* __restrict__ blob_base, const int32_t
     if (lane == 0) out[(size_t) dst_index[h] * H + r] = s;
 }
 
-// ---- THE SAME INTEGERS FROM FEWER INSTRUCTIONS.  `STRATA_OLD_GROUPED=1` keeps the kernels above.
+// ---- THE SAME INTEGERS FROM FEWER INSTRUCTIONS.  `SAGUARO_OLD_GROUPED=1` keeps the kernels above.
 //
 // **INSIDE A CHUNK, WHICH CODE MEETS WHICH ACTIVATION IN A `dp4a` WORD IS FREE.**  `s = sum_e code_e * x_e` and
 // `hx = sum_e x_e` are exact integer sums (|s| <= 32 * 3 * 128), so any grouping of the 32 products into words
@@ -519,7 +519,7 @@ void check(const char* who, void* stream) {
     (void) stream;
 }
 
-// The previous kernels stay selectable for A/B - `STRATA_OLD_GROUPED=1` in the environment, or
+// The previous kernels stay selectable for A/B - `SAGUARO_OLD_GROUPED=1` in the environment, or
 // `moe_grouped_select_old` (the parity test runs both in one process).  The environment is read once, on first use;
 // the choice is made at each launch, so a captured graph keeps the kernels it was captured with.
 std::atomic<int> g_select_old{-1};
@@ -530,20 +530,20 @@ bool old_kernels() {
     const int s = g_select_old.load(std::memory_order_relaxed);
     if (s >= 0) return s != 0;
     static const bool env = [] {
-        const char* e = std::getenv("STRATA_OLD_GROUPED");
+        const char* e = std::getenv("SAGUARO_OLD_GROUPED");
         return e != nullptr && e[0] == '1';
     }();
     return env;
 }
 
-// `STRATA_GROUPED_PAIR_MIN_HITS=N`: the per-hit path keeps the previous one-warp-per-row kernels below N hits of
+// `SAGUARO_GROUPED_PAIR_MIN_HITS=N`: the per-hit path keeps the previous one-warp-per-row kernels below N hits of
 // capacity.  The new per-hit kernels launch half the warps (two rows each), so one hit's gate/up is 80 blocks - fewer
 // than an RTX 5090's SMs - and whether that costs time at one to three hits is what `--bench` measures.  Bitwise
 // the same either way; default 0 (always the new kernels).  Ignored while `moe_grouped_select_old` forces a choice.
 long long pair_min_hits() {
     if (g_select_old.load(std::memory_order_relaxed) >= 0) return 0;
     static const long long n = [] {
-        const char* e = std::getenv("STRATA_GROUPED_PAIR_MIN_HITS");
+        const char* e = std::getenv("SAGUARO_GROUPED_PAIR_MIN_HITS");
         return e != nullptr ? std::atoll(e) : 0LL;
     }();
     return n;
@@ -1188,9 +1188,9 @@ void moe_grouped_s2(const unsigned long long* grp_ptr, const int32_t* grp_start,
         check("moe_grouped_s2/gu", stream);
     }
     // #783 PR-k (stuchapin909): SwiGLU and the scaled Q8_0 quantize of its result in one kernel (gate_up still gets the
-    // activation written back, so the parity checks read the same buffer); STRATA_S2_SWIGLU_Q8=0 keeps the two launches
+    // activation written back, so the parity checks read the same buffer); SAGUARO_S2_SWIGLU_Q8=0 keeps the two launches
     static const bool swiglu_q8 = [] {
-        const char* e = std::getenv("STRATA_S2_SWIGLU_Q8");
+        const char* e = std::getenv("SAGUARO_S2_SWIGLU_Q8");
         return e == nullptr || e[0] != '0';
     }();
     static_assert(FF % 32 == 0, "the fused SwiGLU + Q8_0 kernel works in whole 32-value blocks");

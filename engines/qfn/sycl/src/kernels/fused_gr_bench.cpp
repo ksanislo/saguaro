@@ -1,4 +1,4 @@
-// src/kernels/fused_gr_bench.cpp - fused_gr_read_multi: the AMD fast kernels (STRATA_GR_FAST) against the old
+// src/kernels/fused_gr_bench.cpp - fused_gr_read_multi: the AMD fast kernels (SAGUARO_GR_FAST) against the old
 // ones, bit for bit on every output (lo, rs, inject, mixed, the in-place R), and each one's time.
 //
 //     build/fused_gr_bench [iters] [T min] [T max]

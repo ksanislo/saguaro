@@ -140,13 +140,13 @@ class LogsTests(unittest.TestCase):
                 subprocess.run([sys.executable, str(ROOT / "packaging/monitor_bundle.py"), "build", str(bundle)],
                                check=True, capture_output=True, text=True)
                 clean_env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "PYTHONHOME")}
-                clean_env["STRATA_TELEMETRY_KEY"] = "read-key"
-                with mock.patch.dict(os.environ, {"STRATA_TELEMETRY_KEY": "read-key"}), \
+                clean_env["SAGUARO_TELEMETRY_KEY"] = "read-key"
+                with mock.patch.dict(os.environ, {"SAGUARO_TELEMETRY_KEY": "read-key"}), \
                      redirect_stdout(io.StringIO()) as source:
                     self.assertEqual(main(["logs", "--url", url, "--credential-env",
-                                           "STRATA_TELEMETRY_KEY", "--json"]), 0)
+                                           "SAGUARO_TELEMETRY_KEY", "--json"]), 0)
                 portable = subprocess.run([sys.executable, "-S", str(bundle), "logs", "--url", url,
-                                           "--credential-env", "STRATA_TELEMETRY_KEY", "--output", "json"],
+                                           "--credential-env", "SAGUARO_TELEMETRY_KEY", "--output", "json"],
                                           cwd=directory, env=clean_env, check=True, capture_output=True, text=True)
                 self.assertEqual(json.loads(source.getvalue()), json.loads(portable.stdout))
                 self.assertEqual(json.loads(portable.stdout)["events"][0]["event"], "finished")

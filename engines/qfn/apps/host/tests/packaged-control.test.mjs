@@ -23,10 +23,10 @@ function fakeControlDir() {
   return dir;
 }
 
-test('the Control component is found by STRATA_CONTROL_DIR or beside the host, and only if it is whole', () => {
+test('the Control component is found by SAGUARO_CONTROL_DIR or beside the host, and only if it is whole', () => {
   const dir = fakeControlDir();
   try {
-    const found = findControl({ env: { STRATA_CONTROL_DIR: dir }, hostDir: join(dir, 'nowhere') });
+    const found = findControl({ env: { SAGUARO_CONTROL_DIR: dir }, hostDir: join(dir, 'nowhere') });
     assert.equal(found.dir, dir);
     assert.equal(found.python, bundledPython(dir));
     assert.equal(found.bundle.python, '3.12.15');
@@ -42,27 +42,27 @@ test('the Control component is found by STRATA_CONTROL_DIR or beside the host, a
       assert.equal(findControl({ env: {}, hostDir: join(install, 'host') }).dir, join(install, 'control'));
     } finally { rmSync(install, { recursive: true, force: true }); }
     rmSync(join(dir, 'strata.py'));
-    assert.equal(findControl({ env: { STRATA_CONTROL_DIR: dir }, hostDir: join(dir, 'x') }), null, 'a half component is not used');
+    assert.equal(findControl({ env: { SAGUARO_CONTROL_DIR: dir }, hostDir: join(dir, 'x') }), null, 'a half component is not used');
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test("Control runs on its own interpreter with nothing from the user's Python and acquiring forbidden", () => {
   const control = { dir: '/c', python: '/c/python/python3', cli: '/c/strata.py' };
-  const env = controlEnvironment(control, { env: { PYTHONHOME: 'x', PYTHONPATH: 'y', VIRTUAL_ENV: 'z', STRATA_PYTHON: 'q', PATH: 'p', STRATA_API_KEY: 'secret' }, components: '/components' });
+  const env = controlEnvironment(control, { env: { PYTHONHOME: 'x', PYTHONPATH: 'y', VIRTUAL_ENV: 'z', SAGUARO_PYTHON: 'q', PATH: 'p', SAGUARO_API_KEY: 'secret' }, components: '/components' });
   assert.equal(env.PYTHONHOME, undefined);
   assert.equal(env.PYTHONPATH, undefined);
   assert.equal(env.VIRTUAL_ENV, undefined);
-  assert.equal(env.STRATA_PYTHON, undefined);
+  assert.equal(env.SAGUARO_PYTHON, undefined);
   assert.equal(env.PYTHONNOUSERSITE, '1');
-  assert.equal(env.STRATA_NO_ACQUIRE, '1');
-  assert.equal(env.STRATA_COMPONENTS_DIR, '/components');
-  assert.equal(env.STRATA_API_KEY, undefined, 'an inherited inference key never reaches the engine (the run config carries its own)');
+  assert.equal(env.SAGUARO_NO_ACQUIRE, '1');
+  assert.equal(env.SAGUARO_COMPONENTS_DIR, '/components');
+  assert.equal(env.SAGUARO_API_KEY, undefined, 'an inherited inference key never reaches the engine (the run config carries its own)');
   assert.equal(env.PATH, 'p');
   // the resolver prefers the bundled interpreter over py -3 / PATH / a venv
   const python = resolvePython({ repo: '/repo', control, env: {}, exists: () => true, starts: () => { throw new Error('must not probe'); }, useCache: false });
   assert.deepEqual([python.command, python.source], ['/c/python/python3', 'bundled']);
-  assert.equal(resolvePython({ control, env: { STRATA_PYTHON: '/mine' }, useCache: false }).command, '/mine', 'an explicit choice still wins');
-  assert.equal(componentsDirectory({ env: { STRATA_COMPONENTS_DIR: '/x' } }), '/x');
+  assert.equal(resolvePython({ control, env: { SAGUARO_PYTHON: '/mine' }, useCache: false }).command, '/mine', 'an explicit choice still wins');
+  assert.equal(componentsDirectory({ env: { SAGUARO_COMPONENTS_DIR: '/x' } }), '/x');
   assert.match(componentsDirectory({ env: { LOCALAPPDATA: 'C:\\L' }, platform: 'win32', home: 'C:\\H' }), /Strata[\\/]components$/);
 });
 
@@ -80,7 +80,7 @@ test('runCli passes the arguments untouched (no shell) and reads JSON', async ()
   assert.deepEqual(seen[0].args, ['/c/strata.py', 'models', 'list', '--installed', '--output', 'json']);
   assert.equal(seen[0].options.shell, undefined);
   assert.equal(seen[0].options.windowsHide, true);
-  assert.equal(seen[0].options.env.STRATA_NO_ACQUIRE, '1');
+  assert.equal(seen[0].options.env.SAGUARO_NO_ACQUIRE, '1');
 });
 
 // ---------------------------------------------------------------------------------- native-control in packaged mode
@@ -89,8 +89,8 @@ function packagedFixture({ engineUsable = true, updater = null, repair = false }
   const root = mkdtempSync(join(tmpdir(), 'strata-packaged-test-'));
   const install = join(root, 'install'), data = join(root, 'data');
   mkdirSync(install, { recursive: true });
-  const earlierInstallEnv = process.env.STRATA_INSTALL_DIR;
-  process.env.STRATA_INSTALL_DIR = install;      // the app's own install folder (the host always tells Control which one; it never falls back to an older CLI folder)
+  const earlierInstallEnv = process.env.SAGUARO_INSTALL_DIR;
+  process.env.SAGUARO_INSTALL_DIR = install;      // the app's own install folder (the host always tells Control which one; it never falls back to an older CLI folder)
   const configs = ['iq2_xs', 'iq3_s'].map(id => {
     const path = join(install, `strata-${id}.json`);
     writeFileSync(path, JSON.stringify({ exe: 'component:strata-engine', tokenizer: join(install, 'tok'), args: ['--max-context', '32768'], model_name: `Qwen ${id}`, port: 8080 }));
@@ -150,7 +150,7 @@ function packagedFixture({ engineUsable = true, updater = null, repair = false }
   };
   const native = createNativeControl({ control, directory: data, spawnProcess, fetcher, requests: () => requests });
   const others = () => spawned.filter(s => !String(s.args[0]).endsWith('strata_mcp.py'));
-  return { native, calls, saved, spawned, others, rpc, failStart: (v, times = Infinity) => { startFailure = v; startFailureLeft = times; }, catalog, hardware, install, root, cleanup: () => { if (earlierInstallEnv === undefined) delete process.env.STRATA_INSTALL_DIR; else process.env.STRATA_INSTALL_DIR = earlierInstallEnv; rmSync(root, { recursive: true, force: true }); } };
+  return { native, calls, saved, spawned, others, rpc, failStart: (v, times = Infinity) => { startFailure = v; startFailureLeft = times; }, catalog, hardware, install, root, cleanup: () => { if (earlierInstallEnv === undefined) delete process.env.SAGUARO_INSTALL_DIR; else process.env.SAGUARO_INSTALL_DIR = earlierInstallEnv; rmSync(root, { recursive: true, force: true }); } };
 }
 const finish = async (native, id) => { for (let i = 0; i < 400; i++) { const job = native.state().jobs.find(j => j.id === id); if (job.state !== 'running') return job; await new Promise(r => setTimeout(r, 10)); } throw new Error('job did not finish'); };
 
@@ -173,9 +173,9 @@ test('packaged: models come from Control, no python, git or engine process is st
     const installer = f.spawned[0];
     assert.equal(installer.command, join(f.root, 'control', 'python', 'python.exe'));
     assert.deepEqual(installer.args.slice(1), ['--root', f.install, '--src', join(f.root, 'control')]);
-    assert.equal(installer.options.env.STRATA_CONTROL_INSTALL, '1');
-    assert.equal(installer.options.env.STRATA_NO_ACQUIRE, '1', 'the installer process itself may not acquire; only its explicit install job does');
-    assert.equal(installer.options.env.STRATA_INSTALL_DIR, f.install);
+    assert.equal(installer.options.env.SAGUARO_CONTROL_INSTALL, '1');
+    assert.equal(installer.options.env.SAGUARO_NO_ACQUIRE, '1', 'the installer process itself may not acquire; only its explicit install job does');
+    assert.equal(installer.options.env.SAGUARO_INSTALL_DIR, f.install);
     assert.equal(installer.options.env.PYTHONNOUSERSITE, '1');
   } finally { await f.native.close(); f.cleanup(); }
 });
@@ -320,13 +320,13 @@ test('packaged: a start that died because Windows ran out of locked memory is tr
   const f = packagedFixture();
   try {
     await f.native.refresh(true);
-    f.failStart({ message: 'server_exited', output: { log_tail: 'verify: mapped staging allocation failed [pinned-memory-exhausted] the OS gave no more page-locked memory; start again with STRATA_ARENA_PIN_GIB=26 (pin less of the expert arena)' } }, 1);
+    f.failStart({ message: 'server_exited', output: { log_tail: 'verify: mapped staging allocation failed [pinned-memory-exhausted] the OS gave no more page-locked memory; start again with SAGUARO_ARENA_PIN_GIB=26 (pin less of the expert arena)' } }, 1);
     const job = await finish(f.native, f.native.operation('load', { model: 'iq2_xs' }).id);
     assert.equal(job.state, 'done', job.error);
     assert.equal(f.calls.filter(c => c[0] === 'start').length, 2, 'one try and exactly one more');
     assert.match(job.result.summary, /ready, after a second try: Windows would not lock as much memory/);
     assert.match(job.details[0], /pinned-memory-exhausted/);
-    assert.match(job.details[1], /STRATA_ARENA_PIN_GIB=26/);
+    assert.match(job.details[1], /SAGUARO_ARENA_PIN_GIB=26/);
     const instance = f.native.state().instances[0];
     assert.equal(instance.status, 'ready');
     const saved = JSON.parse(readFileSync(join(f.install, 'strata-iq2_xs.json'), 'utf8'));
@@ -532,7 +532,7 @@ test('the app never adopts an older command-line install: Control is always told
     assert.ok(asked.length > 0 && asked.every(dir => dir === f.install || (dir && dir.toLowerCase() === f.install.toLowerCase())), `Control was asked about ${JSON.stringify(asked)}`);
   } finally { f.cleanup(); }
   const env = controlEnvironment({ dir: '/c' }, { env: { APPDATA: '/old/appdata' }, components: join(tmpdir(), 'Strata', 'components') });
-  assert.equal(env.STRATA_SETTINGS_FILE, join(tmpdir(), 'Strata', 'app-settings.json'));
+  assert.equal(env.SAGUARO_SETTINGS_FILE, join(tmpdir(), 'Strata', 'app-settings.json'));
 });
 
 test("onboarding 'use your own GGUF' (#3507, #3424): the models folder the person picked holds the GGUF files, so preparing them never takes it for the data folder", async () => {

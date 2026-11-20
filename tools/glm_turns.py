@@ -3,7 +3,7 @@ turn three times (the engine keeps the prefix); prints each later turn's DONE fi
 
     python tools/glm_turns.py PACK_DIR [ENGINE (build/maya)]
 
-The engine's environment (STRATA_GLM_*) is passed through, e.g. STRATA_GLM_PREFILL_MIN=32 for the old token-path
+The engine's environment (SAGUARO_GLM_*) is passed through, e.g. SAGUARO_GLM_PREFILL_MIN=32 for the old token-path
 threshold."""
 import os, subprocess, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))

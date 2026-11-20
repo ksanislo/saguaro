@@ -1200,7 +1200,7 @@ struct TpEngine::Impl {
         // head, the DSpark draft and its taps) left as many bytes idle on the others (4x RTX 3090 at --tp 2: 3.2 GB on
         // GPU 1 beside the drafter on GPU 0).  That room, less the reserve every member keeps, now holds the member's
         // slices of the next most routed experts outside VRAM (place_extra).  Not with --resident-cap;
-        // MAYA_MM3_TP_EXTRA=0: as before
+        // SAGUARO_MM3_TP_EXTRA=0: as before
         if (pool != nullptr && o.resident_cap < 0) {
             const char* xv = ::mm3::env("MM3_TP_EXTRA");
             if (xv == nullptr || std::atoi(xv) != 0) place_extra();

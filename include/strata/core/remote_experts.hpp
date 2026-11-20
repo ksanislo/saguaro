@@ -33,7 +33,7 @@ public:
     bool owns(int key) const { return !owned_.empty() && owned_[(size_t) key] != 0; }
     bool integrated() const { return integrated_; }
     bool zero_copy() const { return zero_copy_; }   // the selected call path (an integrated helper's default)
-    bool profiling() const { return prof_; }         // STRATA_GLM_PROF read at open
+    bool profiling() const { return prof_; }         // SAGUARO_GLM_PROF read at open
     size_t available() const { return capacity_ - used_; }
     size_t used() const { return used_; }
     bool compute(int gu_type, int d_type, size_t down_off, float limit, int ne,
@@ -58,7 +58,7 @@ private:
     void *xq_ = nullptr, *hq_ = nullptr;
     strata::kernels::glmf::MoeDev plan_;
     // an integrated (UMA) helper: the input, the plan and the result in mapped pinned memory the kernels use in place
-    // - four copies fewer a call (STRATA_GLM_HELPER_ZEROCOPY=0: the copies)
+    // - four copies fewer a call (SAGUARO_GLM_HELPER_ZEROCOPY=0: the copies)
     bool zero_copy_ = false;
     uint8_t* zc_host_ = nullptr;      // [x | out | plan pointers | plan weights], host side
     float *x_h_ = nullptr, *out_h_ = nullptr;
@@ -66,7 +66,7 @@ private:
     float* plan_w_h_ = nullptr;
     float *x_z_ = nullptr, *out_z_ = nullptr;   // the same, as the helper's device sees them
     strata::kernels::glmf::MoeDev zplan_;
-    // STRATA_GLM_PROF: each call's host time and its stages' GPU time, summed; printed when the helper closes
+    // SAGUARO_GLM_PROF: each call's host time and its stages' GPU time, summed; printed when the helper closes
     bool prof_ = false;
     cudaEvent_t ev_[6] = {};
     unsigned long long calls_ = 0, experts_ = 0, bytes_ = 0;

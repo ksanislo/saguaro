@@ -47,7 +47,7 @@ class FetchMtp(unittest.TestCase):
     def test_the_source_reaches_the_fetch(self):
         with mock.patch.object(setup, "model_source", lambda: "modelscope"):
             _, calls = self.run_with([0])
-        self.assertEqual(calls[0][1]["STRATA_SOURCE"], "modelscope")
+        self.assertEqual(calls[0][1]["SAGUARO_SOURCE"], "modelscope")
 
 
 class RunEndsWithSetup(unittest.TestCase):
@@ -60,10 +60,10 @@ class RunEndsWithSetup(unittest.TestCase):
         with mock.patch.object(setup.subprocess, "run", fake_subprocess_run), mock.patch.object(setup, "say", lambda *a, **k: None), \
                 mock.patch.object(setup.acquisition, "require", lambda *a, **k: None):
             setup.run([sys.executable, "x.py"])
-            self.assertEqual(seen["env"]["STRATA_EXIT_WITH_PARENT"], "1")
+            self.assertEqual(seen["env"]["SAGUARO_EXIT_WITH_PARENT"], "1")
             self.assertIn("PATH", seen["env"] if os.name != "nt" else {k.upper(): v for k, v in seen["env"].items()})
-            setup.run([sys.executable, "x.py"], env={"B": "2", "STRATA_EXIT_WITH_PARENT": "0"})
-            self.assertEqual(seen["env"]["STRATA_EXIT_WITH_PARENT"], "0", "a value the caller set is kept")
+            setup.run([sys.executable, "x.py"], env={"B": "2", "SAGUARO_EXIT_WITH_PARENT": "0"})
+            self.assertEqual(seen["env"]["SAGUARO_EXIT_WITH_PARENT"], "0", "a value the caller set is kept")
             self.assertEqual(seen["env"]["B"], "2")
 
 

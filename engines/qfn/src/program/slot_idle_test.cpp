@@ -1,4 +1,4 @@
-// slot_idle.hpp: when a --batch slot's idle stretch (STRATA_ELASTIC_IDLE) starts over.
+// slot_idle.hpp: when a --batch slot's idle stretch (SAGUARO_ELASTIC_IDLE) starts over.
 #include "strata/program/slot_idle.hpp"
 
 #include <cstdio>

@@ -133,7 +133,7 @@ class OwnShards(unittest.TestCase):
         self.addCleanup(p.stop)
 
     def folder(self, shards=range(1, 10), nested=False):
-        base = Path(os.environ["STRATA_INSTALL_DIR"]) / "ds"
+        base = Path(os.environ["SAGUARO_INSTALL_DIR"]) / "ds"
         folder = base / "UD-Q8_K_XL" if nested else base
         folder.mkdir(parents=True, exist_ok=True)
         for i in shards:

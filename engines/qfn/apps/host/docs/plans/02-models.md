@@ -216,7 +216,7 @@ and SHA-256 values are pinned in `server/image-catalog.json`. Sizes above use
 GB in decimal units, matching the source file sizes.
 
 `server/image-models.mjs` owns a separate image library. It persists choice and
-installation metadata in `data/image-models.json` under STRATA_HOME and writes
+installation metadata in `data/image-models.json` under SAGUARO_HOME and writes
 real files beneath `models/image/<quant>/`. It leaves the chat library and
 chat engine process independent. Switching Off retains downloaded weights.
 The host checks free storage, exact byte count, GGUF magic and SHA-256 before
@@ -238,9 +238,9 @@ Named settings retain `imageModel`. Earlier settings omit this field and migrate
 to Off. Restoring settings restores both the engine configuration and image
 choice. A pending image selection is retained across refresh.
 
-**Runtime integration still required:** STRATA_REAL_ENGINE=0 uses the existing
+**Runtime integration still required:** SAGUARO_REAL_ENGINE=0 uses the existing
 prototype convention: installation and application are simulated and no weights
-are fetched. STRATA_REAL_ENGINE=1 downloads and verifies the requested diffusion
+are fetched. SAGUARO_REAL_ENGINE=1 downloads and verifies the requested diffusion
 GGUF, but reports image generation unavailable. Production generation must add a
 compatible image adapter, its text encoder and VAE, separate load/process health,
 image result routing and shared memory planning. Do not treat a downloaded GGUF

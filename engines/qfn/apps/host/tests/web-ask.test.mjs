@@ -3,7 +3,7 @@
  * readable refusal, Plan and Bypass are unchanged, and a switch in Settings -> Tools (off by default) skips the question.
  *
  * The gate is plain ESM, so most of this drives its plugin with a pretend Harness context. The bridge-level tests at the end use the real
- * Harness with a scripted model and skip without STRATA_HARNESS_DIR.
+ * Harness with a scripted model and skip without SAGUARO_HARNESS_DIR.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -19,8 +19,8 @@ import { createAgentBridge } from '../server/agent/agent-bridge.mjs';
 import { createAgentTaskRunner } from '../server/agent/task-run.mjs';
 import { resolveHarness } from '../server/agent/harness-runtime.mjs';
 
-const HARNESS = process.env.STRATA_HARNESS_DIR;
-const skip = !HARNESS || !resolveHarness({ env: process.env }).ok ? 'STRATA_HARNESS_DIR is not set to a built Harness' : false;
+const HARNESS = process.env.SAGUARO_HARNESS_DIR;
+const skip = !HARNESS || !resolveHarness({ env: process.env }).ok ? 'SAGUARO_HARNESS_DIR is not set to a built Harness' : false;
 
 const SEARCH = { name: 'web_search', arguments: { queries: ['heat pump prices'] } };
 const FETCH = { name: 'web_fetch', arguments: { url: 'https://example.com/a' } };

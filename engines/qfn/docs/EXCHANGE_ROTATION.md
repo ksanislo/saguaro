@@ -8,15 +8,15 @@ the next temporary buffer.
 
 ## Enable
 
-Rotation is **off by default**. Set `STRATA_EXCHANGE_ROTATE=1` before starting the
+Rotation is **off by default**. Set `SAGUARO_EXCHANGE_ROTATE=1` before starting the
 engine with your existing arguments:
 
 ```bash
-export STRATA_EXCHANGE_ROTATE=1
+export SAGUARO_EXCHANGE_ROTATE=1
 ```
 
 ```powershell
-$env:STRATA_EXCHANGE_ROTATE = '1'
+$env:SAGUARO_EXCHANGE_ROTATE = '1'
 ```
 
 Only the exact value `1` opts in. Set it to `0` or remove it to restore the copy
@@ -86,7 +86,7 @@ Core i7-13700K, RTX 5090 32 GB, 64 GB DDR5, Windows 11, driver 617.42, CUDA
 128K context, `--resident-experts` (31.4 GiB of experts page-locked in RAM,
 about 10,800 of 24,576 in VRAM), `--adapt-every 1 --adapt-swaps 80
 --adapt-decay 0.97`, `--spec 4`, `--pool-affinity p-cores`. In the first and third
-rows one binary ran both arms and only `STRATA_EXCHANGE_ROTATE` differs; in the
+rows one binary ran both arms and only `SAGUARO_EXCHANGE_ROTATE` differs; in the
 second the off arm is the build before this change (the third row's binary also
 carried extra timers).
 
@@ -161,7 +161,7 @@ generated exactly 1,024 tokens after the same 1,024-token counting prompt.
 The context allocation was 40,960, with 12,000 GPU expert slots, a 16.19 GiB
 pinned/mapped resident complement, FP16 KV, greedy target-only decoding and
 zero offered drafts, reused prompt tokens or file-tier blob reads during
-generation. Only `STRATA_EXCHANGE_ROTATE` changed. Transfer completion is
+generation. Only `SAGUARO_EXCHANGE_ROTATE` changed. Transfer completion is
 awaited before admission.
 
 The GPU cache was deliberately capped at 12,000 slots (15.45 GiB) to exercise

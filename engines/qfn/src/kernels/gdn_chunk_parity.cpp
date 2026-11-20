@@ -9,7 +9,7 @@
 //
 //   1. the recurrence vs the host reference: the FP32 floor of the old path,
 //   2. the chunked path vs the host reference: the number that matters for the model,
-//   3. chunked vs recurrence directly: the observable switch STRATA_GDN_CHUNK flips.
+//   3. chunked vs recurrence directly: the observable switch SAGUARO_GDN_CHUNK flips.
 //
 // Both GPU paths go through the REAL dispatch (`gdn_recurrence`), A/B'd with the env switch, so the tail
 // (< 64 tokens) and the output norm are part of what is compared - the recurrence kernels' raw FP32 output for
@@ -183,8 +183,8 @@ void run_case(int64_t T, uint64_t seed) {
         y_fast(y_ref.size()), st_fast(st0.size()), y_fma(y_ref.size()), st_fma(st0.size());
     auto run = [&](const char* chunk, const char* warp, std::vector<float>& y, std::vector<float>& st,
                    std::vector<float>* y16f = nullptr) {
-        setenv("STRATA_GDN_CHUNK", chunk, 1);
-        setenv("STRATA_GDN_REC_WARP", warp, 1);
+        setenv("SAGUARO_GDN_CHUNK", chunk, 1);
+        setenv("SAGUARO_GDN_REC_WARP", warp, 1);
         check(cudaMemcpy(d_st, d_st0, st0.size() * 4, cudaMemcpyDeviceToDevice), "D2D");
         strata::prefill::gdn_recurrence(d_st, d_h, d_g, d_b, d_z, d_ga, eps, d_y, d_y16, T, nullptr);
         check(cudaDeviceSynchronize(), "sync");

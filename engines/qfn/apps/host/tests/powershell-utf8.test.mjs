@@ -18,8 +18,8 @@ test('a Cyrillic temp folder name survives PowerShell through a pipe', { skip: p
   const dir = mkdtempSync(join(tmpdir(), word + '-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const read = script => execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script],
-    { encoding: 'utf8', windowsHide: true, env: { ...process.env, STRATA_UTF8_TEST: dir } }).trim();
-  const ask = '(Get-Item -LiteralPath $env:STRATA_UTF8_TEST).FullName';
+    { encoding: 'utf8', windowsHide: true, env: { ...process.env, SAGUARO_UTF8_TEST: dir } }).trim();
+  const ask = '(Get-Item -LiteralPath $env:SAGUARO_UTF8_TEST).FullName';
   const name = path => basename(path.replaceAll('\\', '/')).toLowerCase();   // the temp folder may come back as a short 8.3 path
   assert.equal(name(read(utf8Script(ask))), name(dir));
   assert.equal(name(read(utf8Script(`[Console]::Out.Write((${ask}))`))), name(dir));

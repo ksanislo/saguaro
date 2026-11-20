@@ -49,11 +49,11 @@ class Scripts(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
     def test_the_built_in_address_is_the_default_feed(self):
-        """install.sh / install.ps1 and `strata update` use the same GitHub Releases folder; STRATA_FEED stays an override."""
+        """install.sh / install.ps1 and `strata update` use the same GitHub Releases folder; SAGUARO_FEED stays an override."""
         from strata_cli import update_cmd
         self.assertEqual(update_cmd.DEFAULT_FEED, mlf.RELEASE_FEED + "/strata-feed.json")
         self.assertIn(":-" + mlf.RELEASE_FEED + "}", (ROOT / "packaging" / "install.sh").read_text(encoding="utf-8"))
-        self.assertIn("$env:STRATA_FEED", (ROOT / "packaging" / "install.ps1").read_text(encoding="utf-8"))
+        self.assertIn("$env:SAGUARO_FEED", (ROOT / "packaging" / "install.ps1").read_text(encoding="utf-8"))
 
 
 class Feed(unittest.TestCase):
@@ -106,9 +106,9 @@ class Feed(unittest.TestCase):
                 url = f"http://127.0.0.1:{server.server_address[1]}"
                 home = work / "home"
                 home.mkdir()
-                env = {**os.environ, "HOME": str(home), "STRATA_FEED": url, "STRATA_INSTALL_TEST_TRUST": "1", "STRATA_PYTHON": sys.executable,
-                       "PATH": os.environ["PATH"], "STRATA_NO_ACQUIRE": ""}
-                for k in ("XDG_DATA_HOME", "STRATA_UPDATE_TRUSTED_KEYS"):
+                env = {**os.environ, "HOME": str(home), "SAGUARO_FEED": url, "SAGUARO_INSTALL_TEST_TRUST": "1", "SAGUARO_PYTHON": sys.executable,
+                       "PATH": os.environ["PATH"], "SAGUARO_NO_ACQUIRE": ""}
+                for k in ("XDG_DATA_HOME", "SAGUARO_UPDATE_TRUSTED_KEYS"):
                     env.pop(k, None)
                 r = subprocess.run(["sh", str(feed / "install.sh")], capture_output=True, text=True, env=env, timeout=240)
                 self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
@@ -172,9 +172,9 @@ class Feed(unittest.TestCase):
             try:
                 home = work / "home"
                 home.mkdir()
-                env = {**os.environ, "HOME": str(home), "STRATA_FEED": f"http://127.0.0.1:{server.server_address[1]}",
-                       "STRATA_INSTALL_TEST_TRUST": "1", "STRATA_PYTHON": sys.executable, "STRATA_NO_ACQUIRE": ""}
-                for k in ("XDG_DATA_HOME", "STRATA_UPDATE_TRUSTED_KEYS"):
+                env = {**os.environ, "HOME": str(home), "SAGUARO_FEED": f"http://127.0.0.1:{server.server_address[1]}",
+                       "SAGUARO_INSTALL_TEST_TRUST": "1", "SAGUARO_PYTHON": sys.executable, "SAGUARO_NO_ACQUIRE": ""}
+                for k in ("XDG_DATA_HOME", "SAGUARO_UPDATE_TRUSTED_KEYS"):
                     env.pop(k, None)
                 r = subprocess.run(["sh", str(release / "install.sh")], capture_output=True, text=True, env=env, timeout=240)
                 self.assertEqual(r.returncode, 0, r.stdout + r.stderr)

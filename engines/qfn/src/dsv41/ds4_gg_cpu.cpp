@@ -207,7 +207,7 @@ static bool want_512(int type, int nt) {
     if (type == 29) return nt >= 2 || fam >= 0x1A;
     return false;
 }
-// CPUs with AVX but no AVX2 (Sandy/Ivy Bridge, a STRATA_ISA_FLOOR=avx build): iq128x_rows, the same multi-token scheme in 128-bit
+// CPUs with AVX but no AVX2 (Sandy/Ivy Bridge, a SAGUARO_ISA_FLOOR=avx build): iq128x_rows, the same multi-token scheme in 128-bit
 // integer lanes with ggml's AVX float order (bit-identical to its dot here too, checked by own_ok).  DS4_GG_IQ128=0 never, =1 always;
 // unset: from min_tokens_avx1 tokens.
 static int min_tokens_avx1() { return 1; }   // (measured: x1.05-1.18 at one token, x1.9-2.2 at four)
@@ -318,7 +318,7 @@ bool gg_row_to_bf16(int type, const uint8_t* row, int k, uint16_t* out) {
 namespace strata::ds4::gguf {
 bool gg_cpu_type(int) { return false; }
 bool gg_cpu_fmt(int, int, int, int, IqCpu&, std::string& err) {
-    err = "this build has no ggml-cpu lane (STRATA_NATIVE_EXPERTS=OFF)";
+    err = "this build has no ggml-cpu lane (SAGUARO_NATIVE_EXPERTS=OFF)";
     return false;
 }
 void gg_cpu_quant(int, const float*, int, void*) {}

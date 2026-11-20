@@ -213,19 +213,19 @@ class ParallelArgs(unittest.TestCase):
         import contextlib, io, os
         def said(args, env):
             buf = io.StringIO()
-            old = os.environ.get("STRATA_BATCH_MTP")
+            old = os.environ.get("SAGUARO_BATCH_MTP")
             if env is None:
-                os.environ.pop("STRATA_BATCH_MTP", None)
+                os.environ.pop("SAGUARO_BATCH_MTP", None)
             else:
-                os.environ["STRATA_BATCH_MTP"] = env
+                os.environ["SAGUARO_BATCH_MTP"] = env
             try:
                 with contextlib.redirect_stdout(buf):
                     r = parallel_args({"parallel": 12}, args)
             finally:
                 if old is None:
-                    os.environ.pop("STRATA_BATCH_MTP", None)
+                    os.environ.pop("SAGUARO_BATCH_MTP", None)
                 else:
-                    os.environ["STRATA_BATCH_MTP"] = old
+                    os.environ["SAGUARO_BATCH_MTP"] = old
             self.assertEqual(r, ["--batch", "12"])
             return "at most" in buf.getvalue()
         self.assertTrue(said([], None))                  # 0.1.39: the window holds 8 rows
@@ -238,7 +238,7 @@ class ParallelArgs(unittest.TestCase):
 
 
 class WrapSpill(unittest.TestCase):
-    """STRATA_BATCH_WRAP_SPILL: a slot (or solo leg) stopped for a wrap-up gives back the tokens it ran past the stop."""
+    """SAGUARO_BATCH_WRAP_SPILL: a slot (or solo leg) stopped for a wrap-up gives back the tokens it ran past the stop."""
 
     def engine(self):
         import queue as q
@@ -453,7 +453,7 @@ class FakeEngineCase(unittest.TestCase):
 
 
 class WrapSpillService(FakeEngineCase):
-    """STRATA_BATCH_WRAP_SPILL end to end: two requests in batch slots reach a thinking budget; after its BSTOP the fake
+    """SAGUARO_BATCH_WRAP_SPILL end to end: two requests in batch slots reach a thinking budget; after its BSTOP the fake
     slot emits one more token (as the engine runs ahead), which the wrap-up pass must carry."""
 
     def wrapped_prompts(self, on):
@@ -798,7 +798,7 @@ class ParallelService(FakeEngineCase):
 
     def test_a_burst_of_connections_is_not_reset(self):
         """30-40 clients at once got "connection reset by peer" with the listen backlog of 5 (4 x R9700 burst): the
-        server listens with a deep backlog (STRATA_HTTP_BACKLOG, 256), so 60 simultaneous requests all get answers."""
+        server listens with a deep backlog (SAGUARO_HTTP_BACKLOG, 256), so 60 simultaneous requests all get answers."""
         import serve.server as server
         self.assertGreaterEqual(server.Server.request_queue_size, 64)
         self.start(2)

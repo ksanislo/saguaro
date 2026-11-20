@@ -24,7 +24,7 @@ SavedConversation image(std::initializer_list<int32_t> ids, bool cvec = true) {
 }
 
 int main() {
-    {   // STRATA_YARN_ELASTIC: what a request that stays plain passes over (default: 32768 tokens saved is enough)
+    {   // SAGUARO_YARN_ELASTIC: what a request that stays plain passes over (default: 32768 tokens saved is enough)
         check(!yarn_plain_skips(0, 100, 1000), "a plain checkpoint is never passed over");
         check(yarn_plain_skips(1, 12000, 600000), "a short YaRN start inside a conversation is read again");
         check(!yarn_plain_skips(1, 137864, 617000), "a long YaRN prefix is resumed");
@@ -55,7 +55,7 @@ int main() {
         check(!bytes.read(tail.data(), bytes.size()-1, 2), "range check rejects a truncated payload");
         check(bytes.allocation_peak(SIZE_MAX) == SIZE_MAX, "allocation estimate rejects overflow");
     }
-    {   // STRATA_PARK_FAST: resize_for_overwrite grows like resize (same segments and reserve), only without the fill
+    {   // SAGUARO_PARK_FAST: resize_for_overwrite grows like resize (same segments and reserve), only without the fill
         ConversationBuffer a, b;
         const size_t n = 2 * ConversationBuffer::segment_bytes + 333;
         a.resize(1000, 5); b.resize(1000, 5);

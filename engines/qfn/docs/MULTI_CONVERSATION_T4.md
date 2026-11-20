@@ -16,40 +16,40 @@ Args added to the usual ones: `--conversation-cache-mib 16384 --conversation-cac
 
 ```json
 "env": {
-  "STRATA_STAGE_SERVE": "1",
-  "STRATA_NUMA_PLACE": "1",
-  "STRATA_PARALLEL_LOAD": "1",
-  "STRATA_ELASTIC_SLOTS": "1",
-  "STRATA_ELASTIC_SLOTS_GIVE": "1",
-  "STRATA_ELASTIC_IDLE": "1",
-  "STRATA_ELASTIC_IDLE_S": "300",
-  "STRATA_PIPED_MTP": "1",
-  "STRATA_PIPED_MTP_DRAFTS": "2",
-  "STRATA_SLOT_ADMIT": "1",
-  "STRATA_SLOT_ADMIT_MULTI": "1",
-  "STRATA_SLOT_ADMIT_CHUNK": "2048",
-  "STRATA_P2P_HANDOFF": "1",
-  "STRATA_SHORT_READS": "1",
-  "STRATA_REPLY_REUSE": "1",
-  "STRATA_READ_YIELD": "1",
-  "STRATA_BATCH_READS": "1",
-  "STRATA_BATCH_READS_MAX": "8",
-  "STRATA_BATCH_READS_FAST": "512",
-  "STRATA_BATCH_READS_FAST_SHRINK": "512",
-  "STRATA_BATCH_READS_DECODE_WINDOWS": "0",
-  "STRATA_FAST_LANE": "1",
-  "STRATA_FAST_LANE_MAX": "96",
-  "STRATA_NUMA_POOL": "0"
+  "SAGUARO_STAGE_SERVE": "1",
+  "SAGUARO_NUMA_PLACE": "1",
+  "SAGUARO_PARALLEL_LOAD": "1",
+  "SAGUARO_ELASTIC_SLOTS": "1",
+  "SAGUARO_ELASTIC_SLOTS_GIVE": "1",
+  "SAGUARO_ELASTIC_IDLE": "1",
+  "SAGUARO_ELASTIC_IDLE_S": "300",
+  "SAGUARO_PIPED_MTP": "1",
+  "SAGUARO_PIPED_MTP_DRAFTS": "2",
+  "SAGUARO_SLOT_ADMIT": "1",
+  "SAGUARO_SLOT_ADMIT_MULTI": "1",
+  "SAGUARO_SLOT_ADMIT_CHUNK": "2048",
+  "SAGUARO_P2P_HANDOFF": "1",
+  "SAGUARO_SHORT_READS": "1",
+  "SAGUARO_REPLY_REUSE": "1",
+  "SAGUARO_READ_YIELD": "1",
+  "SAGUARO_BATCH_READS": "1",
+  "SAGUARO_BATCH_READS_MAX": "8",
+  "SAGUARO_BATCH_READS_FAST": "512",
+  "SAGUARO_BATCH_READS_FAST_SHRINK": "512",
+  "SAGUARO_BATCH_READS_DECODE_WINDOWS": "0",
+  "SAGUARO_FAST_LANE": "1",
+  "SAGUARO_FAST_LANE_MAX": "96",
+  "SAGUARO_NUMA_POOL": "0"
 }
 ```
 
-This box also needs `STRATA_NO_LARGEPAGES=1` (no large pages configured). `STRATA_NUMA_POOL=0` keeps upstream
-0.2.2's automatic two-socket split off the engine's main pool: with STRATA_STAGE_SERVE every stage already has a pool on
+This box also needs `SAGUARO_NO_LARGEPAGES=1` (no large pages configured). `SAGUARO_NUMA_POOL=0` keeps upstream
+0.2.2's automatic two-socket split off the engine's main pool: with SAGUARO_STAGE_SERVE every stage already has a pool on
 its card's node, and the measurements below were taken that way.
 
-Turing (sm_75) only, exact or within rounding: `STRATA_SM75_PERF=1 STRATA_SM75_STACK=1 STRATA_KQL=3
-STRATA_SM75_Q8G=1 STRATA_GDN_KEYHEAD=1 STRATA_ARGMAX_ROWS_SM70=1 STRATA_BF16_TC=1
-STRATA_BF16_TC_SKIP=indexer,router,ssm` (Q4 also `STRATA_MMQ_KQ=1`).
+Turing (sm_75) only, exact or within rounding: `SAGUARO_SM75_PERF=1 SAGUARO_SM75_STACK=1 SAGUARO_KQL=3
+SAGUARO_SM75_Q8G=1 SAGUARO_GDN_KEYHEAD=1 SAGUARO_ARGMAX_ROWS_SM70=1 SAGUARO_BF16_TC=1
+SAGUARO_BF16_TC_SKIP=indexer,router,ssm` (Q4 also `SAGUARO_MMQ_KQ=1`).
 
 ## Logging (server config keys)
 
@@ -91,4 +91,4 @@ Soak: 6 coding agents + a chat every 45 s, 22 min: 0 failures, 0 stalls, 0 engin
   prompt kernels); answers were coherent in every check.
 - A browser over HTTP/1.1 opens at most 6 connections to one host: a reverse proxy in front should speak HTTP/2,
   or a 6th stream waits in the browser.
-- The Monitor page's context-memory gauge needs `STRATA_ELASTIC_SLOTS` (the engine's KMEM lines).
+- The Monitor page's context-memory gauge needs `SAGUARO_ELASTIC_SLOTS` (the engine's KMEM lines).

@@ -11,7 +11,7 @@ class HipArchitectureTests(unittest.TestCase):
     def probe(self, value):
         # Run the same validation/normalization code used before enable_language.
         source = (ROOT / "cmake/hip_backend.cmake").read_text().split("enable_language(HIP)")[0]
-        source += '\nmessage(STATUS "compiler=${CMAKE_HIP_ARCHITECTURES};runtime=${STRATA_HIP_ARCHS}")\n'
+        source += '\nmessage(STATUS "compiler=${CMAKE_HIP_ARCHITECTURES};runtime=${SAGUARO_HIP_ARCHS}")\n'
         with tempfile.TemporaryDirectory() as tmp:
             script = Path(tmp) / "probe.cmake"
             script.write_text("cmake_minimum_required(VERSION 3.24)\n" + source)

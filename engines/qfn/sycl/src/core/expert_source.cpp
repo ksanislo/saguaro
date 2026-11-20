@@ -380,15 +380,15 @@ void close_direct(void* h) {
 /// #286/#577: whether the file tier reads its `read_bytes` unbuffered, beside `arena_bytes` of RAM copy still to be
 /// taken.  Windows times probe reads too (experts_unbuffered); on Linux the same rule as its `cache_counts = false`
 /// arm decides: whether the file cache could keep those bytes at all, from MemAvailable and the tightest cgroup
-/// limit (host_available_memory).  STRATA_UNBUFFERED_LOAD=1 / 0 forces it either way, as on Windows.
+/// limit (host_available_memory).  SAGUARO_UNBUFFERED_LOAD=1 / 0 forces it either way, as on Windows.
 bool file_tier_unbuffered(const std::vector<std::string>& paths, uint64_t arena_bytes, uint64_t read_bytes,
                           std::string& why) {
 #if defined(_WIN32)
     return experts_unbuffered(paths, arena_bytes, why, /*cache_counts=*/false, read_bytes);
 #elif defined(__linux__)
     (void) paths;
-    if (const char* env = std::getenv("STRATA_UNBUFFERED_LOAD"); env != nullptr && env[0] != '\0') {
-        why = std::string("STRATA_UNBUFFERED_LOAD=") + env;
+    if (const char* env = std::getenv("SAGUARO_UNBUFFERED_LOAD"); env != nullptr && env[0] != '\0') {
+        why = std::string("SAGUARO_UNBUFFERED_LOAD=") + env;
         return env[0] != '0';
     }
     uint64_t avail = 0;
@@ -995,11 +995,11 @@ void FileExpertSource::fill_many(const std::vector<Fill>& todo) {
 #if defined(_WIN32)
     // One PrefetchVirtualMemory call for every slice about to be copied: the memory manager reads them in large
     // requests, all queued at once, where the copies' page faults would read a few clusters each.  The copies below
-    // then find the pages resident (or in flight).  STRATA_FETCH_PVM=0 is the A/B arm.
+    // then find the pages resident (or in flight).  SAGUARO_FETCH_PVM=0 is the A/B arm.
     {
         using Pvm = BOOL(WINAPI*)(HANDLE, ULONG_PTR, PWIN32_MEMORY_RANGE_ENTRY, ULONG);
         static const Pvm pvm = [] {
-            const char* v = std::getenv("STRATA_FETCH_PVM");
+            const char* v = std::getenv("SAGUARO_FETCH_PVM");
             if (v != nullptr && std::atoi(v) == 0) return (Pvm) nullptr;
             return (Pvm) (void*) GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "PrefetchVirtualMemory");
         }();
@@ -1101,8 +1101,8 @@ bool FileExpertSource::set_unbuffered(uint64_t ram_bytes, std::string& why) {
 
 bool FileExpertSource::recheck_unbuffered(std::string& why) {
 #if defined(_WIN32) || defined(__linux__)
-    if (const char* env = std::getenv("STRATA_UNBUFFERED_LOAD"); env != nullptr && env[0] != '\0') {
-        why = std::string("STRATA_UNBUFFERED_LOAD=") + env;
+    if (const char* env = std::getenv("SAGUARO_UNBUFFERED_LOAD"); env != nullptr && env[0] != '\0') {
+        why = std::string("SAGUARO_UNBUFFERED_LOAD=") + env;
         return !direct_.empty();
     }
     if (base_ == nullptr || paths_.empty()) {
@@ -1598,7 +1598,7 @@ const uint8_t* FileExpertSource::mapped_blob(int64_t layer, int64_t expert) cons
 uint64_t FileExpertSource::release(int64_t layer, int64_t expert) {
 #if defined(_WIN32)
     static const bool enabled = [] {
-        const char* v = std::getenv("STRATA_FILE_RELEASE");
+        const char* v = std::getenv("SAGUARO_FILE_RELEASE");
         return v != nullptr && std::strcmp(v, "1") == 0;
     }();
     if (!enabled || base_ == nullptr || layer < 0 || expert < 0 || layer >= n_layers_ || expert >= n_expert_)
@@ -1930,17 +1930,17 @@ bool FileExpertSource::pin_cache_complement(
                 // read by the GPU over PCIe (--pcie-frac) and copied by DMA; only the rest is locked in the working
                 // set (the registered prefix is page-locked by the driver already - locking it twice made the next
                 // device allocation fail).
-                // opt-in (STRATA_PARTIAL_PIN=1): on the RTX 5070 PC the GPU's PCIe share of the misses measured no
+                // opt-in (SAGUARO_PARTIAL_PIN=1): on the RTX 5070 PC the GPU's PCIe share of the misses measured no
                 // faster than the CPU computing them (7.30 / 7.44 tok/s with 24 / 16 GiB registered against 7.05-7.74
                 // unpinned at a 40 GiB budget), and registering adds startup time and driver memory pressure
                 static const bool partial_on = [] {
-                    const char* v = std::getenv("STRATA_PARTIAL_PIN");
+                    const char* v = std::getenv("SAGUARO_PARTIAL_PIN");
                     return v != nullptr && std::atoi(v) != 0;
                 }();
-                // at most STRATA_PARTIAL_PIN_GIB (default 24): registering 30 GiB of a 40 GiB arena left the driver
+                // at most SAGUARO_PARTIAL_PIN_GIB (default 24): registering 30 GiB of a 40 GiB arena left the driver
                 // unable to page-lock the prompt path's small buffers afterwards (RTX 5070, WDDM)
                 static const uint64_t pin_cap = [] {
-                    const char* v = std::getenv("STRATA_PARTIAL_PIN_GIB");
+                    const char* v = std::getenv("SAGUARO_PARTIAL_PIN_GIB");
                     return (uint64_t) ((v != nullptr && std::atof(v) > 0 ? std::atof(v) : 24.0) * 1073741824.0);
                 }();
                 if (budget_bytes > 0 && partial_on) {
@@ -2157,7 +2157,7 @@ bool FileExpertSource::pin_cache_complement(
         const long long missing = lendable - (long long) complement_lent_slots_;
         std::fprintf(stderr, "FileExpertSource: WARNING: %lld of %lld lendable slots (%.0f%%) will read their experts from the pack "
                              "during a long prompt; expect a slower prompt read on 50K+ token prompts (one measurement: 18%% uncovered "
-                             "cost 26%%). Free RAM or lower STRATA_RESIDENT_HEADROOM_GIB (now the RAM left free at start) and restart; "
+                             "cost 26%%). Free RAM or lower SAGUARO_RESIDENT_HEADROOM_GIB (now the RAM left free at start) and restart; "
                              "the line above should read N of N.\n", missing, lendable, 100.0 * (double) missing / (double) std::max<long long>(1, lendable));
     }
     if (!additional_gpu_pairs.empty()) {
@@ -2205,7 +2205,7 @@ bool FileExpertSource::reserve_exchanges(int64_t n, std::string& err) {
     if ((uint64_t)n > std::numeric_limits<size_t>::max() / blob) {
         err = "FileExpertSource: exchange allocation size overflow"; return false;
     }
-    const char* rotate_env = std::getenv("STRATA_EXCHANGE_ROTATE");
+    const char* rotate_env = std::getenv("SAGUARO_EXCHANGE_ROTATE");
     const bool requested = rotate_env && std::strcmp(rotate_env, "1") == 0;
     const bool uniform = std::all_of(layer_blob_bytes_.begin(), layer_blob_bytes_.end(),
                                     [blob](uint64_t b) { return b == blob; });
@@ -2316,7 +2316,7 @@ int64_t FileExpertSource::commit_exchanges() {
 }
 
 void FileExpertSource::commit_copies() {
-    if (exchange_storage_.active()) return;   // STRATA_EXCHANGE_ROTATE: ownership moves in commit_flip, nothing to copy
+    if (exchange_storage_.active()) return;   // SAGUARO_EXCHANGE_ROTATE: ownership moves in commit_flip, nothing to copy
     for (const Exchange& x : staged_) {
         const uint8_t* src = override_.empty() ? nullptr : override_[x.out];
         const uint64_t at = complement_offsets_[x.in];
@@ -2330,7 +2330,7 @@ int64_t FileExpertSource::commit_flip() {
     int64_t n = 0;
     for (const Exchange& x : staged_) {
         const uint8_t* src = override_[x.out];
-        if (exchange_storage_.active()) {   // STRATA_EXCHANGE_ROTATE: the same ownership transfer as commit_exchanges
+        if (exchange_storage_.active()) {   // SAGUARO_EXCHANGE_ROTATE: the same ownership transfer as commit_exchanges
             if (!exchange_storage_.commit(x.in, x.out, (size_t) x.q, src, (size_t) x.bytes)) {
                 std::fprintf(stderr, "FileExpertSource: invalid exchange rotation commit; refusing corrupt residency\n");
                 std::abort();
@@ -2356,7 +2356,7 @@ const uint8_t* FileExpertSource::resident_blob(int64_t layer, int64_t expert) co
         expert >= n_expert_) return nullptr;
     const size_t index = (size_t) layer * (size_t) n_expert_ + (size_t) expert;
     if (index >= complement_offsets_.size()) return nullptr;
-    return resident_blob(index);   // through the rotation's ownership table when STRATA_EXCHANGE_ROTATE is on
+    return resident_blob(index);   // through the rotation's ownership table when SAGUARO_EXCHANGE_ROTATE is on
 }
 
 const uint8_t* FileExpertSource::blob(int64_t layer, int64_t expert) {
@@ -2567,7 +2567,7 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
     if (native && d.nact_multi.size() < (size_t) MAXT * kNativeActBytes) d.nact_multi.resize((size_t) MAXT * kNativeActBytes);
     if (d.job_of.size() != (size_t) d.n_expert) d.job_of.assign((size_t) d.n_expert, (int16_t) -1);
     if (d.jobs_multi.size() < (size_t) (n_tok * k)) d.jobs_multi.resize((size_t) (MAXT * k));
-    static const bool ptrace = std::getenv("STRATA_POOL_TRACE") != nullptr;
+    static const bool ptrace = std::getenv("SAGUARO_POOL_TRACE") != nullptr;
     auto pt = [&](const char* what, long long a = -1) {
         if (ptrace) { std::fprintf(stderr, "pool trace: layer %lld %s %lld\n", (long long) d.layers, what, a); std::fflush(stderr); }
     };
@@ -2703,10 +2703,10 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
             for (int64_t i = 0; i < n; ++i) if (d.remote[r]->owns(i)) kind[i] = 2;
         }
     }
-    static const bool dec_batch = [] { const char* v = std::getenv("STRATA_DEC_BATCH"); return v == nullptr || std::atoi(v) != 0; }();
-    // the GPU's copy_rows_from_mapped zeroes the rows it computed itself (dec_batch); STRATA_VERIFY_DEVICE_PLAN's
+    static const bool dec_batch = [] { const char* v = std::getenv("SAGUARO_DEC_BATCH"); return v == nullptr || std::atoi(v) != 0; }();
+    // the GPU's copy_rows_from_mapped zeroes the rows it computed itself (dec_batch); SAGUARO_VERIFY_DEVICE_PLAN's
     // copy_or_zero_from_mapped copies every row, so there the host still zeroes them
-    static const bool device_plan = [] { const char* v = std::getenv("STRATA_VERIFY_DEVICE_PLAN"); return v != nullptr && std::atoi(v) != 0; }();
+    static const bool device_plan = [] { const char* v = std::getenv("SAGUARO_VERIFY_DEVICE_PLAN"); return v != nullptr && std::atoi(v) != 0; }();
     const bool gpu_zeroes_hits = (d.plan != nullptr && n <= kMaxWindowEntries && n <= d.plan->cap && dec_batch && !device_plan);
     bool any_cpu = false;
     for (int64_t i = 0; i < n; ++i)
@@ -3335,7 +3335,7 @@ bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int6
         std::ifstream f(path, std::ios::binary | std::ios::ate);
         if (!f) { err = "ArenaExpertSource: cannot open " + path; return false; }
         const uint64_t got = (uint64_t) f.tellg();
-        if (got != want && got != want + (uint64_t) blob) {   // + one blob: STRATA_ARENA_MMAP's padded file
+        if (got != want && got != want + (uint64_t) blob) {   // + one blob: SAGUARO_ARENA_MMAP's padded file
             char buf[400];
             std::snprintf(buf, sizeof buf,
                           "ArenaExpertSource: %s is %llu B but %lld layers x %lld experts (blobs up to %lld B) "
@@ -3347,7 +3347,7 @@ bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int6
         }
     }
 
-    // STRATA_ARENA_MMAP=1 (a small-RAM machine whose GPUs hold most experts): the arena is the pack's experts.bin
+    // SAGUARO_ARENA_MMAP=1 (a small-RAM machine whose GPUs hold most experts): the arena is the pack's experts.bin
     // mapped READ-ONLY - not locked, not pinned.  The page cache keeps what the CPU pool and the prompt path
     // actually read (the experts no VRAM cache holds) and gives back the rest under memory pressure; a page
     // dropped is re-read from the file, so a result never depends on what is resident.  The GPUs then get no
@@ -3356,7 +3356,7 @@ bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int6
 #if defined(_WIN32)
     static const bool arena_mmap = false;   // POSIX mmap/madvise: Linux only for now
 #else
-    static const bool arena_mmap = [] { const char* v = std::getenv("STRATA_ARENA_MMAP"); return v && v[0] == '1'; }();
+    static const bool arena_mmap = [] { const char* v = std::getenv("SAGUARO_ARENA_MMAP"); return v && v[0] == '1'; }();
     if (arena_mmap) {
         const uint64_t file_bytes = want + (uint64_t) blob;
         uint64_t have = 0;
@@ -3378,7 +3378,7 @@ bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int6
             blobs_ = n_layers * n_expert;
             n_expert_ = n_expert;
             reads_ = 0;
-            note_ = "mapped read-only from " + path + " (STRATA_ARENA_MMAP: not locked, not pinned)";
+            note_ = "mapped read-only from " + path + " (SAGUARO_ARENA_MMAP: not locked, not pinned)";
             gib_per_s_ = 0.0;
             load_seconds_ = load_read_s_ = load_copy_s_ = 0.0;
             record_inputs(path, gguf_, lay, from_gguf);   // session files: the mapped experts.bin is a model input
@@ -3433,12 +3433,12 @@ bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int6
     bounds.push_back(want);
     // #285: on Windows the per-layer registration runs on a thread ahead of the readers, which wait for their
     // layer's slice (the whole arena registered before the load cost ~2.5 s at 33 GiB of 4 KB pages, not hidden).
-    // Only where the whole arena would be registered: no cap (STRATA_ARENA_PIN_GIB, multi-GPU), no shared arena.
-    // Linux keeps the whole-arena pin (#253). OPT-IN (STRATA_DEFERRED_REGISTER=1): on the RTX 5070 / Windows the
+    // Only where the whole arena would be registered: no cap (SAGUARO_ARENA_PIN_GIB, multi-GPU), no shared arena.
+    // Linux keeps the whole-arena pin (#253). OPT-IN (SAGUARO_DEFERRED_REGISTER=1): on the RTX 5070 / Windows the
     // arena registered per layer before it is filled decoded ~10% slower than the old order (whole-arena try, sliced
     // fallback after the load) with identical output; the start-time gain does not pay for that.
 #ifdef _WIN32
-    const char* defer_env = std::getenv("STRATA_DEFERRED_REGISTER");
+    const char* defer_env = std::getenv("SAGUARO_DEFERRED_REGISTER");
     const bool deferred = max_pinned_bytes == 0 && arena_pin_cap_gib() == -1 && shared_arena_file.empty() &&
                           (defer_env != nullptr && defer_env[0] != 0 && defer_env[0] != '0');
 #else
@@ -3506,7 +3506,7 @@ bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int6
         err = "ArenaExpertSource: the load read " + std::to_string(st.bytes) + " B of " + std::to_string(want);
         return false;
     }
-    if (std::getenv("STRATA_VERIFY_ARENA") != nullptr) {   // tests: the loaded arena's checksum, any loader
+    if (std::getenv("SAGUARO_VERIFY_ARENA") != nullptr) {   // tests: the loaded arena's checksum, any loader
         std::fprintf(stderr, "strata generate: expert arena checksum %016llx (%.2f GiB)\n",
                      (unsigned long long) fnv1a64(a->data(), want), (double) want / (1ull << 30));
     }
@@ -3517,7 +3517,7 @@ bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int6
         std::filesystem::path(path).parent_path(), space_ec).available : 0;
     const bool room = !space_ec && free_disk >= want + (uint64_t) blob + (2ull << 30);
     if (arena_mmap && from_gguf && !room)
-        std::fprintf(stderr, "strata generate: STRATA_ARENA_MMAP: NOT writing %s - %.1f GiB free on that drive, it needs "
+        std::fprintf(stderr, "strata generate: SAGUARO_ARENA_MMAP: NOT writing %s - %.1f GiB free on that drive, it needs "
                              "%.1f GiB plus 2 GiB to spare; this start keeps the arena in RAM\n", path.c_str(),
                      (double) free_disk / 1073741824.0, (double) (want + (uint64_t) blob) / 1073741824.0);
     if (arena_mmap && from_gguf && room) {
@@ -3531,7 +3531,7 @@ bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int6
         if (f) ok = std::fclose(f) == 0 && ok;
         if (ok) ok = std::rename(tmp.c_str(), path.c_str()) == 0;
         if (!ok) std::remove(tmp.c_str());
-        std::fprintf(stderr, "strata generate: STRATA_ARENA_MMAP: %s %s (the next start maps it)\n",
+        std::fprintf(stderr, "strata generate: SAGUARO_ARENA_MMAP: %s %s (the next start maps it)\n",
                      ok ? "wrote" : "could NOT write", path.c_str());
     }
     arena_ = a;

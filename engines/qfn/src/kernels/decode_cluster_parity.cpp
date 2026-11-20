@@ -14,7 +14,7 @@
 //   decode_cluster_parity --selftest     parity (exit 0 = identical everywhere); skipped (exit 0) below sm_90
 //   decode_cluster_parity --bench        per-call times, old vs new, at 32K / 128K / 262K
 //
-// The old paths are reached through the public dispatchers with STRATA_QSA_CLUSTER=0 / STRATA_ARGMAX_MULTI=0, set
+// The old paths are reached through the public dispatchers with SAGUARO_QSA_CLUSTER=0 / SAGUARO_ARGMAX_MULTI=0, set
 // here before their first call (they read the variables once).
 #include "strata/kernels/qsa.hpp"
 #include "strata/kernels/qsa_select.hpp"
@@ -375,8 +375,8 @@ int bench() {
 }  // namespace
 
 int main(int argc, char** argv) {
-    set_env("STRATA_QSA_CLUSTER", "0");     // the dispatchers: the one-CTA kernels (the cluster ones called directly)
-    set_env("STRATA_ARGMAX_MULTI", "0");
+    set_env("SAGUARO_QSA_CLUSTER", "0");     // the dispatchers: the one-CTA kernels (the cluster ones called directly)
+    set_env("SAGUARO_ARGMAX_MULTI", "0");
     const bool do_bench = argc > 1 && std::strcmp(argv[1], "--bench") == 0;
     const bool verbose = argc > 2 && std::strcmp(argv[2], "-v") == 0;
     int dev = 0, major = 0;

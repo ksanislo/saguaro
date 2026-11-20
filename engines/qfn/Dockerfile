@@ -13,7 +13,7 @@
 # docker build has no GPU, so the CUDA architectures are given here instead of read from nvidia-smi. The engine is a fat binary with
 # a machine-code part per listed architecture (plus PTX for the newest, which later cards can JIT), and the runtime picks the one
 # matching your card. Narrow CUDA_ARCHITECTURES to your card for a faster build. Native code for the CPU that builds the image is NOT
-# used (STRATA_PORTABLE=ON), so the image runs on any x86-64 CPU with AVX2.
+# used (SAGUARO_PORTABLE=ON), so the image runs on any x86-64 CPU with AVX2.
 #
 # Plain legacy-builder features only (no heredocs, no --mount). AMD (HIP) and Intel (SYCL) source builds: docs/AMD_HIP.md, docs/INTEL.md.
 
@@ -78,7 +78,7 @@ RUN python3 /src/packaging/package_terminal.py --out /out --cache /cache \
  && /opt/strata/terminal/bin/strata --version
 # llama.cpp at the commit setup.py pins: fetched here, so the first start does not depend on GitHub. Only gguf-py (the model preparation
 # tools) and the file setup.py looks for (ggml/CMakeLists.txt) are kept: 170 MB become a few
-RUN cd /opt/strata/terminal && STRATA_CONTROL_INSTALL=1 STRATA_INSTALL_DIR=/opt/strata/seed PYTHONNOUSERSITE=1 \
+RUN cd /opt/strata/terminal && SAGUARO_CONTROL_INSTALL=1 SAGUARO_INSTALL_DIR=/opt/strata/seed PYTHONNOUSERSITE=1 \
       /opt/strata/terminal/python/bin/python3 -c "import setup; print(setup.get_llama_cpp())" \
  && rm -rf /opt/strata/seed/third_party/*.zip* \
  && cd /opt/strata/seed/third_party/llama.cpp \
@@ -88,7 +88,7 @@ RUN cd /opt/strata/terminal && STRATA_CONTROL_INSTALL=1 STRATA_INSTALL_DIR=/opt/
 
 # ---- 3. the runtime image (the same as docker/Dockerfile's, FLAVOR=cuda)
 FROM ${RUNTIME_BASE}
-ARG STRATA_VERSION=dev
+ARG SAGUARO_VERSION=dev
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends tini ca-certificates libgomp1 libatomic1 libnuma1 zlib1g \
     && rm -rf /var/lib/apt/lists/* /var/cache/apt/*
@@ -98,12 +98,12 @@ COPY --from=engine-build /engine/ /opt/strata/components/engine/
 COPY docker/entrypoint.sh docker/healthcheck.sh /opt/strata/
 COPY docker/strata-wrapper.sh /usr/local/bin/strata
 RUN chmod 0755 /opt/strata/entrypoint.sh /opt/strata/healthcheck.sh /usr/local/bin/strata
-ENV STRATA_COMPONENTS_DIR=/opt/strata/components STRATA_INSTALL_DIR=/data/install XDG_STATE_HOME=/data/state \
-    XDG_CONFIG_HOME=/data/config HOME=/data/home PORT=8080 LANG=C.UTF-8 PYTHONUNBUFFERED=1 PYTHONNOUSERSITE=1 STRATA_IN_DOCKER=1 \
+ENV SAGUARO_COMPONENTS_DIR=/opt/strata/components SAGUARO_INSTALL_DIR=/data/install XDG_STATE_HOME=/data/state \
+    XDG_CONFIG_HOME=/data/config HOME=/data/home PORT=8080 LANG=C.UTF-8 PYTHONUNBUFFERED=1 PYTHONNOUSERSITE=1 SAGUARO_IN_DOCKER=1 \
     NVIDIA_VISIBLE_DEVICES=all NVIDIA_DRIVER_CAPABILITIES=compute,utility
 VOLUME ["/data"]
 EXPOSE 8080
-LABEL org.opencontainers.image.title="Strata" com.strata.flavor="cuda" com.strata.build="from-source" org.opencontainers.image.version="${STRATA_VERSION}"
+LABEL org.opencontainers.image.title="Strata" com.strata.flavor="cuda" com.strata.build="from-source" org.opencontainers.image.version="${SAGUARO_VERSION}"
 HEALTHCHECK --interval=30s --timeout=8s --start-period=2h --retries=3 CMD ["/opt/strata/healthcheck.sh"]
 STOPSIGNAL SIGTERM
 ENTRYPOINT ["/usr/bin/tini", "--", "/opt/strata/entrypoint.sh"]

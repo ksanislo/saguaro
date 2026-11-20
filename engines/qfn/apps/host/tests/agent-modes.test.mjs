@@ -6,7 +6,7 @@
  * sandbox denies a change and offers an escalation, it retries the exact call once with `sandbox_permissions`.
  * Every test checks the file on disk, not only the frames, because the frames are what the Harness reports.
  *
- * Needs STRATA_HARNESS_DIR (a built Harness); without it these tests skip, loudly.
+ * Needs SAGUARO_HARNESS_DIR (a built Harness); without it these tests skip, loudly.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -19,8 +19,8 @@ import { resolveHarness } from '../server/agent/harness-runtime.mjs';
 import { MODE_PRESETS, modeOf, buildProfile } from '../server/agent/profile.mjs';
 import { NOT_IN_MODE, TurnProjector } from '../server/agent/events.mjs';
 
-const HARNESS = process.env.STRATA_HARNESS_DIR;
-const skip = !HARNESS || !resolveHarness({ env: process.env }).ok ? 'STRATA_HARNESS_DIR is not set to a built Harness' : false;
+const HARNESS = process.env.SAGUARO_HARNESS_DIR;
+const skip = !HARNESS || !resolveHarness({ env: process.env }).ok ? 'SAGUARO_HARNESS_DIR is not set to a built Harness' : false;
 const cleanup = dir => { try { rmSync(dir, { recursive: true, force: true, maxRetries: 3 }); } catch { /* the Harness sandbox leaves access entries; best effort */ } };
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const lines = file => readFileSync(file, 'utf8').split(/\r?\n/).filter(Boolean).length;

@@ -117,7 +117,7 @@ void check_mapped_release(strata::core::FileExpertSource& source, int64_t layer,
                 "QueryWorkingSetEx failed for the release fixture");
         return state.VirtualAttributes.Valid != 0;
     };
-    const char* setting = std::getenv("STRATA_FILE_RELEASE");
+    const char* setting = std::getenv("SAGUARO_FILE_RELEASE");
     const bool enabled = setting != nullptr && std::strcmp(setting, "1") == 0;
     for (int round = 0; round < 3; ++round) {
         require(std::memcmp(p, saved.data(), saved.size()) == 0, "release changed the mapped expert bytes");
@@ -394,7 +394,7 @@ void test_pin_pacing() {
     require(pin_depends_on_reclaim(numa_pin_free(90 * GiB, {88 * GiB, 2 * GiB}), 26 * GiB, 4 * GiB),
             "an unbalanced two-node host was not paced");
     require(page_cache_hint(info).find("drop_caches") != std::string::npos &&
-            page_cache_hint(info).find("STRATA_DROP_CACHE_ON_EXIT") != std::string::npos &&
+            page_cache_hint(info).find("SAGUARO_DROP_CACHE_ON_EXIT") != std::string::npos &&
             page_cache_hint(info).find("52.0 GiB") != std::string::npos, "the cache hint is incomplete");
     require(page_cache_hint("MemFree: 100 kB\nCached: 1000 kB\n").empty(), "a small cache was reported");
 }
@@ -567,10 +567,10 @@ void test_unbuffered_reads() {
     }
     FileExpertSource source;
     require(source.open(dir.path.string(), layers, experts, err), "could not map the synthetic pack: " + err);
-    set_env("STRATA_UNBUFFERED_LOAD", "1");
+    set_env("SAGUARO_UNBUFFERED_LOAD", "1");
     std::string why;
     const bool unbuffered = source.set_unbuffered(0, why);
-    set_env("STRATA_UNBUFFERED_LOAD", nullptr);
+    set_env("SAGUARO_UNBUFFERED_LOAD", nullptr);
 #if defined(_WIN32) || defined(__linux__)
     if (!unbuffered) {
         std::cout << "file_expert_source_test: unbuffered reads skipped (" << why << ")\n";
@@ -665,7 +665,7 @@ void test_host_memory() {
 #endif
 }
 
-// STRATA_IO_PREFETCH: the experts.bin file tier hands out the same bytes with the Linux I/O path on (whole-blob
+// SAGUARO_IO_PREFETCH: the experts.bin file tier hands out the same bytes with the Linux I/O path on (whole-blob
 // preads, the read-ahead workers, the mapping for cached blobs), however the reads and the predictions interleave.
 void test_io_prefetch() {
     using namespace strata::core;
@@ -730,9 +730,9 @@ void test_rotating_source(bool rotate, bool pin) {
     using namespace strata::core;
     using namespace strata::kernels::cpu;
 #if defined(_WIN32)
-    _putenv_s("STRATA_EXCHANGE_ROTATE", rotate ? "1" : "0");
+    _putenv_s("SAGUARO_EXCHANGE_ROTATE", rotate ? "1" : "0");
 #else
-    setenv("STRATA_EXCHANGE_ROTATE", rotate ? "1" : "0", 1);
+    setenv("SAGUARO_EXCHANGE_ROTATE", rotate ? "1" : "0", 1);
 #endif
     TempDirectory dir;
     std::string err;
@@ -820,9 +820,9 @@ void test_foresight_exchange(bool two_phase) {
     using namespace strata::core;
     using namespace strata::kernels::cpu;
 #if defined(_WIN32)
-    _putenv_s("STRATA_EXCHANGE_ROTATE", "0");
+    _putenv_s("SAGUARO_EXCHANGE_ROTATE", "0");
 #else
-    setenv("STRATA_EXCHANGE_ROTATE", "0", 1);
+    setenv("SAGUARO_EXCHANGE_ROTATE", "0", 1);
 #endif
     TempDirectory dir;
     std::string err;
@@ -904,14 +904,14 @@ void test_foresight_exchange(bool two_phase) {
     src.close();
 }
 
-// STRATA_RAM_ADAPT: an expert read from the file takes the RAM place of another of its layer.
+// SAGUARO_RAM_ADAPT: an expert read from the file takes the RAM place of another of its layer.
 void test_replace_resident(bool pin) {
     using namespace strata::core;
     using namespace strata::kernels::cpu;
 #if defined(_WIN32)
-    _putenv_s("STRATA_EXCHANGE_ROTATE", "0");
+    _putenv_s("SAGUARO_EXCHANGE_ROTATE", "0");
 #else
-    setenv("STRATA_EXCHANGE_ROTATE", "0", 1);
+    setenv("SAGUARO_EXCHANGE_ROTATE", "0", 1);
 #endif
     TempDirectory dir;
     std::string err;

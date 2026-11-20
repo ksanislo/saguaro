@@ -1418,14 +1418,14 @@ __global__ void __launch_bounds__(kThreads) values_kernel(const uint8_t* __restr
     }
 }
 
-// as ds4_gguf.cu's: sm_70 and later (AMD: RDNA 3 / 4), STRATA_DS4_NO_TC=1 keeps the F32 kernel - per device (the GPUs
+// as ds4_gguf.cu's: sm_70 and later (AMD: RDNA 3 / 4), SAGUARO_DS4_NO_TC=1 keeps the F32 kernel - per device (the GPUs
 // of a run need not be of one generation: one before sm_70 beside newer ones keeps its F32 kernel)
 bool tc_ok() {
 #if defined(STRATA_USE_HIP) && !STRATA_HAS_WMMA
     return false;
 #else
     static const bool off = [] {
-        const char* v = std::getenv("STRATA_DS4_NO_TC");
+        const char* v = std::getenv("SAGUARO_DS4_NO_TC");
         return v != nullptr && v[0] == '1';
     }();
     static std::atomic<int> known[64];   // 0: not asked yet, 1: no, 2: yes
@@ -1500,13 +1500,13 @@ const Iq1Var& iq1_var() {
     return v;
 }
 
-// the persistent grids (kPersist): DS4_IQ_PERSIST (MAYA_DS4_IQ_PERSIST, read as STRATA_DS4_IQ_PERSIST): 0 off, 1 on,
+// the persistent grids (kPersist): DS4_IQ_PERSIST (SAGUARO_DS4_IQ_PERSIST, read as SAGUARO_DS4_IQ_PERSIST): 0 off, 1 on,
 // unset: on for a device of compute capability 8.0 and up (measured about 2% slower on a V100); set_persist over it (tests)
 std::atomic<int> g_persist_set{-1};
 #if DS4_IQ_PERSIST_BUILD
 int persist_env() {   // -1: not set
     static const int v = [] {
-        const char* e = std::getenv("STRATA_DS4_IQ_PERSIST");
+        const char* e = std::getenv("SAGUARO_DS4_IQ_PERSIST");
         if (e == nullptr) e = std::getenv("DS4_IQ_PERSIST");
         return e == nullptr ? -1 : (std::atoi(e) != 0 ? 1 : 0);
     }();
@@ -1666,9 +1666,9 @@ LightBuf* light_buf(cudaStream_t s, int k) {
     }
     return &b;
 }
-bool light_on() {   // STRATA_DS4_NO_LIGHT=1: every set through the GEMM tiles
+bool light_on() {   // SAGUARO_DS4_NO_LIGHT=1: every set through the GEMM tiles
     static const bool on = [] {
-        const char* v = std::getenv("STRATA_DS4_NO_LIGHT");
+        const char* v = std::getenv("SAGUARO_DS4_NO_LIGHT");
         return !(v != nullptr && v[0] == '1');
     }();
     return on;
@@ -1878,7 +1878,7 @@ void set_persist(int on) { g_persist_set.store(on < 0 ? -1 : on != 0 ? 1 : 0, st
 #if defined(STRATA_USE_HIP) && !defined(MAYA_DS4_IQ_ONLY)
 // Prompt expert sets through the existing GLM MMQ path (HIP, opt-in).
 // The same q8_1/MMA path the GLM prompt uses (strata::prefill::mmq): the packed expert is read once, activations are
-// rounded to q8_1, and the products run on int8 tensor cores.  Opt-in (MAYA_DS4_EXPERT_MMQ=1), sets of at least 32 rows;
+// rounded to q8_1, and the products run on int8 tensor cores.  Opt-in (SAGUARO_DS4_EXPERT_MMQ=1), sets of at least 32 rows;
 // smaller sets, unsupported shapes/types and allocation failure keep the FP32 tiled kernel above.
 namespace {
 thread_local int mmq_rows = 0;
@@ -1898,7 +1898,7 @@ namespace {
 constexpr int kMmqCap = 32768;  // maximum compact rows in one prompt set
 bool mmq_on() {
     static const bool enabled = [] {
-        const char* e = std::getenv("STRATA_DS4_EXPERT_MMQ");
+        const char* e = std::getenv("SAGUARO_DS4_EXPERT_MMQ");
         return e != nullptr && std::strcmp(e, "1") == 0;
     }();
     return enabled;
@@ -2145,7 +2145,7 @@ bool mmq_down(const SetArgs& a, cudaStream_t s) {
 // Prompt expert sets through the fused int8 experts the GLM prompt uses (strata::prefill::rdna4, gfx1151 / gfx1100 /
 // RDNA4): the weights decoded to int8 in the WMMA tiles' shared memory, the activations and the SwiGLU's H rounded to
 // int8 per 32 values (as GLM's), the products on the int8 matrix cores.  On by default where it covers the set's formats
-// (STRATA_DS4_PREFILL_FUSED=0: the FP16 tiles above).  The set's rows are gathered into the scratch of the caller's
+// (SAGUARO_DS4_PREFILL_FUSED=0: the FP16 tiles above).  The set's rows are gathered into the scratch of the caller's
 // FusedScratchScope (its down output: unused until the down writes it), H goes into the caller's FP16 rows at their
 // stride (2 n_ff bytes: an int8 row is act_bytes(1, n_ff)), and the down reads it there - both passes decide alike.
 namespace {
@@ -2162,11 +2162,11 @@ FusedScratchScope::~FusedScratchScope() {
     fused_scratch_bytes = previous_bytes_;
 }
 namespace {
-// STRATA_DS4_PREFILL_FUSED: unset = on for gfx1151 (Strix / Gorgon Halo, where it is measured), 1 = on wherever the
+// SAGUARO_DS4_PREFILL_FUSED: unset = on for gfx1151 (Strix / Gorgon Halo, where it is measured), 1 = on wherever the
 // fused experts run (gfx1100, RDNA4: not measured), 0 = off
 bool fused_on() {
     static const int mode = [] {
-        const char* v = std::getenv("STRATA_DS4_PREFILL_FUSED");
+        const char* v = std::getenv("SAGUARO_DS4_PREFILL_FUSED");
         return v == nullptr ? -1 : std::atoi(v) != 0 ? 1 : 0;
     }();
     if (mode >= 0) return mode == 1;

@@ -2418,7 +2418,7 @@ __global__ void __launch_bounds__(kThreads) sparse_attn_mma_kernel(const float* 
     (void) q, (void) win, (void) ckv, (void) sel, (void) sel_stride, (void) ar, (void) sink, (void) heads, (void) scale, (void) out;
 #endif
 }
-#endif   // !STRATA_USE_HIP
+#endif   // !SAGUARO_USE_HIP
 
 // the ring's rows are kKvFp8: E4M3 codes, a UE8M0 scale per 32 (decoded: exactly the BF16 values they were made from)
 // a window buffer's row (dst) of position p: the ring's row decoded, zeros before position 0
@@ -2812,7 +2812,7 @@ __global__ void combine_kernel(const float* __restrict__ ed, const float* __rest
     out[(size_t) t * dim + e] = a;
 }
 
-// STRATA_DS4_RESIDENT_SKIP_W / _TOPK (CHANGES THE ANSWERS - Turbo; 0 = off): which of a token's k routed experts the
+// SAGUARO_DS4_RESIDENT_SKIP_W / _TOPK (CHANGES THE ANSWERS - Turbo; 0 = off): which of a token's k routed experts the
 // decode keeps, wherever they live (VRAM too).  Rank = the weight order (sc, ties by pick order).  Dropped: a pick whose
 // share of the route's weights is below rs_w, or whose rank is >= rs_k (rs_k > 0); the top-1 is always kept.  The kept
 // weights are renormalised (DeepSeek's route weights sum to route_scale).  keep: the bit of each kept pick.
@@ -3781,7 +3781,7 @@ bool pdl_on() {
 #endif
 }
 
-// STRATA_DS4_RESIDENT_SKIP_W / STRATA_DS4_RESIDENT_TOPK (MAYA_ names alias them), read once; 0 = off
+// SAGUARO_DS4_RESIDENT_SKIP_W / SAGUARO_DS4_RESIDENT_TOPK, read once; 0 = off
 namespace {
 struct ResidentSkip {
     float w;
@@ -3790,8 +3790,8 @@ struct ResidentSkip {
 ResidentSkip resident_skip() {
     static const ResidentSkip rs = [] {
         ResidentSkip r{0.0f, 0};
-        if (const char* v = std::getenv("STRATA_DS4_RESIDENT_SKIP_W")) r.w = std::max(0.0f, std::min(0.9f, (float) std::atof(v)));
-        if (const char* v = std::getenv("STRATA_DS4_RESIDENT_TOPK")) r.k = std::max(0, std::min(kPicks, std::atoi(v)));
+        if (const char* v = std::getenv("SAGUARO_DS4_RESIDENT_SKIP_W")) r.w = std::max(0.0f, std::min(0.9f, (float) std::atof(v)));
+        if (const char* v = std::getenv("SAGUARO_DS4_RESIDENT_TOPK")) r.k = std::max(0, std::min(kPicks, std::atoi(v)));
         return r;
     }();
     return rs;

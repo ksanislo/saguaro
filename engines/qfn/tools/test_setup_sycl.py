@@ -177,7 +177,7 @@ class ToSycl(unittest.TestCase):
         c = m.to_sycl(self.cfg(m), m.ROOT / "build-sycl-aot" / "strata", 64.0, {}, 32.0, "xe")
         self.assertIn("--stream-experts", c["args"])
         self.assertEqual(c["args"][c["args"].index("--vram-reserve-mib") + 1], "1024")
-        self.assertNotIn("STRATA_VERIFY_NO_HOST", c.get("env", {}))
+        self.assertNotIn("SAGUARO_VERIFY_NO_HOST", c.get("env", {}))
 
     def test_xe_ranks_the_experts_with_the_sycl_profile_and_i915_keeps_the_shipped_one(self):
         m = self.mod()
@@ -203,8 +203,8 @@ class ToSycl(unittest.TestCase):
         self.assertNotIn("--stream-experts", c["args"])
         self.assertEqual(c["args"][c["args"].index("--ple-io") + 1], "ram")
         self.assertEqual(c["args"][c["args"].index("--vram-reserve-mib") + 1], "300")
-        self.assertEqual(c["env"]["STRATA_VERIFY_NO_HOST"], "0")
-        self.assertEqual(c["env"]["STRATA_SYCL_BIN"], "build-sycl/strata")
+        self.assertEqual(c["env"]["SAGUARO_VERIFY_NO_HOST"], "0")
+        self.assertEqual(c["env"]["SAGUARO_SYCL_BIN"], "build-sycl/strata")
 
     def test_gyro_memory_warning_reads_the_real_ram(self):
         # setup's RAM rule is fed 1024 GB on the Intel path; Gyro counts VRAM + RAM, so it must see the real RAM
@@ -226,7 +226,7 @@ class ToSycl(unittest.TestCase):
         cfg["args"][cfg["args"].index("--native") + 1] = str(m.MOUNT / "d" / "Qwen3.8-Flash-Next-Gyro-S-TQ1_0.gguf")
         c = m.to_sycl(cfg, m.ROOT / "build-sycl" / "strata", 64.0, {}, 8.0, "i915")
         self.assertNotIn("--ple-io", c["args"])
-        self.assertEqual(c["env"]["STRATA_VERIFY_NO_HOST"], "0")
+        self.assertEqual(c["env"]["SAGUARO_VERIFY_NO_HOST"], "0")
 
     def test_split_short_rule(self):
         # #1980: 2x B60 24 GB - IQ3_XXS (42.9 GB) was refused under NO_HOST=1, IQ2_XS (35.5 GB) loads fully
@@ -294,7 +294,7 @@ class ToSycl(unittest.TestCase):
     def test_the_container_shares_dev_shm_with_the_server_for_the_embeddings(self):
         sh = (ROOT / "sycl" / "serve" / "strata-sycl.sh").read_text(encoding="utf-8")
         self.assertIn("-v /dev/shm:/dev/shm", sh)
-        self.assertIn("STRATA_SYCL_SHM", sh)
+        self.assertIn("SAGUARO_SYCL_SHM", sh)
 
     def test_a_picture_that_cannot_reach_the_container_is_said_once(self):
         import importlib.util

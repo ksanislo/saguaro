@@ -278,8 +278,8 @@ class Calibrate(unittest.TestCase):
         self.assertIn(f"{CAL.SH_STREAM}=1", res["report"]["failed_starts"])
 
     def test_apply_env(self):
-        old = {"STRATA_ROCBLAS_TUNING": "tools/hip", CAL.SH_STREAM: "1"}
-        self.assertEqual(CAL.apply_env(old, {}), {"STRATA_ROCBLAS_TUNING": "tools/hip"})   # an older choice goes
+        old = {"SAGUARO_ROCBLAS_TUNING": "tools/hip", CAL.SH_STREAM: "1"}
+        self.assertEqual(CAL.apply_env(old, {}), {"SAGUARO_ROCBLAS_TUNING": "tools/hip"})   # an older choice goes
         self.assertEqual(CAL.apply_env({"X": "1"}, {CAL.SH_STREAM: "1"}), {"X": "1", CAL.SH_STREAM: "1"})
         self.assertEqual(CAL.apply_env(None, None), {})
 
@@ -399,16 +399,16 @@ class SetupIntegration(unittest.TestCase):
         # HIP: the measured engine variable goes into the config's "env" and the settings file; a re-run that finds it
         # no longer faster removes it again, and leaves the config's other variables alone
         cfg_path = Path(self.tmp.name) / "strata-iq3_s.json"
-        cfg = {"exe": "x", "args": list(BASE), "model_name": "m", "backend": "hip", "env": {"STRATA_ROCBLAS_TUNING": "t"}}
+        cfg = {"exe": "x", "args": list(BASE), "model_name": "m", "backend": "hip", "env": {"SAGUARO_ROCBLAS_TUNING": "t"}}
         cfg_path.write_text(json.dumps(cfg))
         CAL.run = lambda c, say=print, start_engine=None: {"settings": {}, "env": {CAL.SH_STREAM: "1"}, "report": {"tok_s": 70.1}}
         self.assertTrue(self.S.calibrate_config(cfg_path))
         written = json.loads(cfg_path.read_text())
-        self.assertEqual(written["env"], {"STRATA_ROCBLAS_TUNING": "t", CAL.SH_STREAM: "1"})
+        self.assertEqual(written["env"], {"SAGUARO_ROCBLAS_TUNING": "t", CAL.SH_STREAM: "1"})
         self.assertEqual(self.S.saved_calibration(written)["env"], {CAL.SH_STREAM: "1"})
         CAL.run = lambda c, say=print, start_engine=None: {"settings": {}, "env": {}, "report": {"tok_s": 65.0}}
         self.assertTrue(self.S.calibrate_config(cfg_path))
-        self.assertEqual(json.loads(cfg_path.read_text())["env"], {"STRATA_ROCBLAS_TUNING": "t"})
+        self.assertEqual(json.loads(cfg_path.read_text())["env"], {"SAGUARO_ROCBLAS_TUNING": "t"})
 
     def test_failed_calibration_keeps_defaults(self):
         cfg_path = Path(self.tmp.name) / "strata-q2_0.json"

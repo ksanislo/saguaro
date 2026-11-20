@@ -15,8 +15,8 @@ test('native instances isolate devices, ports, IDs and private keys; default loa
  }finally{await f.cleanup();}
 });
 test('native save preserves unknown fields, credentials and a backup; null restores native defaults',async()=>{
- const f=nativeFixture();try{await f.control.refresh();const original=f.control.settings('iq2_xs');assert.equal(original.values.env.STRATA_TOKEN,'••••••••');f.control.save('iq2_xs',{values:{...original.values,parallel:2,reasoning_budget_tokens:null},mcp:{files:{command:'node',args:['file-server.mjs'],env:{TOKEN:'secret'}}}});
- const saved=JSON.parse(readFileSync(join(f.repo,'strata-iq2_xs.json')));assert.deepEqual(saved.unknown_native_key,{preserve:true});assert.equal(saved.env.PATH,'/native/bin');assert.equal(saved.env.STRATA_TOKEN,'private');assert.equal(saved.parallel,2);assert.equal('reasoning_budget_tokens' in saved,false);assert.ok(readFileSync(join(f.repo,'strata-iq2_xs.json.bak')));
+ const f=nativeFixture();try{await f.control.refresh();const original=f.control.settings('iq2_xs');assert.equal(original.values.env.SAGUARO_TOKEN,'••••••••');f.control.save('iq2_xs',{values:{...original.values,parallel:2,reasoning_budget_tokens:null},mcp:{files:{command:'node',args:['file-server.mjs'],env:{TOKEN:'secret'}}}});
+ const saved=JSON.parse(readFileSync(join(f.repo,'strata-iq2_xs.json')));assert.deepEqual(saved.unknown_native_key,{preserve:true});assert.equal(saved.env.PATH,'/native/bin');assert.equal(saved.env.SAGUARO_TOKEN,'private');assert.equal(saved.parallel,2);assert.equal('reasoning_budget_tokens' in saved,false);assert.ok(readFileSync(join(f.repo,'strata-iq2_xs.json.bak')));
  assert.equal(f.control.settings('iq2_xs').mcp.files.env.TOKEN,'••••••••');
  }finally{await f.cleanup();}
 });

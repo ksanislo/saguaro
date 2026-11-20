@@ -21,7 +21,7 @@ from pathlib import Path
 from tests.terminal import lifecycle_matrix as m
 root = Path("/data/split-life/sshrig"); import shutil; shutil.rmtree(root, ignore_errors=True); root.mkdir(parents=True)
 rig = m.Rig(root)
-print(json.dumps({"argv": rig.serve_argv(), "env": {k: v for k, v in rig.env.items() if k.startswith(("STRATA_", "FAKE_", "XDG_", "LOCALAPPDATA", "PYTHONPATH"))}, "port": rig.port}))
+print(json.dumps({"argv": rig.serve_argv(), "env": {k: v for k, v in rig.env.items() if k.startswith(("SAGUARO_", "FAKE_", "XDG_", "LOCALAPPDATA", "PYTHONPATH"))}, "port": rig.port}))
 '''
 
 REMOTE_STATE = r'''

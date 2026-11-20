@@ -162,7 +162,7 @@ int main(int argc, char** argv) {
             return 3;
         }
 #ifdef STRATA_VISION_HIP
-        const char* check = std::getenv("STRATA_VISION_ARCH_CHECK");
+        const char* check = std::getenv("SAGUARO_VISION_ARCH_CHECK");
         if (!g_gfx.empty() && (check == nullptr || std::atoi(check) != 0) &&
             !strata_arch_listed(STRATA_VISION_HIP_ARCHS, g_gfx.front())) {
             std::printf("ERR this GPU (%s) is not in the picture reader's build (%s)\n", g_gfx.front().c_str(),
@@ -194,8 +194,8 @@ int main(int argc, char** argv) {
     const auto load_t0 = std::chrono::steady_clock::now();
 #if !defined(_WIN32) && !defined(__APPLE__)   // macOS has no posix_fadvise
     // ask the OS for the projector file up front (128 KiB steps) so the loader's sequential reads find it cached;
-    // STRATA_READ_AHEAD=0 turns it off, as in the engine
-    if (const char* ra = std::getenv("STRATA_READ_AHEAD"); ra == nullptr || std::atoi(ra) != 0) {
+    // SAGUARO_READ_AHEAD=0 turns it off, as in the engine
+    if (const char* ra = std::getenv("SAGUARO_READ_AHEAD"); ra == nullptr || std::atoi(ra) != 0) {
         const int fd = open(mmproj.c_str(), O_RDONLY);
         if (fd >= 0) {
             const off_t n = lseek(fd, 0, SEEK_END);

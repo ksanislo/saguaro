@@ -23,25 +23,25 @@ class ConfigEnv(unittest.TestCase):
             return SK.config_env(str(path))
 
     def test_the_engines_settings_reach_it_under_its_names(self):
-        self.assertEqual(self.env_of({"DS4_POOL_GB": "88", "MAYA_DS4_STREAM": "0", "STRATA_DS4_SLOT_CAP": 8}),
-                         {"DS4_POOL_GB": "88", "STRATA_DS4_STREAM": "0", "STRATA_DS4_SLOT_CAP": "8"})
+        self.assertEqual(self.env_of({"DS4_POOL_GB": "88", "SAGUARO_DS4_STREAM": "0", "SAGUARO_DS4_SLOT_CAP": 8}),
+                         {"DS4_POOL_GB": "88", "SAGUARO_DS4_STREAM": "0", "SAGUARO_DS4_SLOT_CAP": "8"})
 
     def test_another_engines_settings_stay_out(self):
-        self.assertEqual(self.env_of({"STRATA_GLM_RAM_GB": "65", "MAYA_GLM_SLOTS": "0", "CUDA_VISIBLE_DEVICES": "1"}),
+        self.assertEqual(self.env_of({"SAGUARO_GLM_RAM_GB": "65", "SAGUARO_GLM_SLOTS": "0", "CUDA_VISIBLE_DEVICES": "1"}),
                          {})
 
 
 class EngineEnv(unittest.TestCase):
     def test_the_tests_slot_settings_win_over_a_config(self):
-        self.assertEqual(SK.engine_env({"MAYA_DS4_SLOT_KEEP": "0", "MAYA_DS4_SLOT_DIR": "/elsewhere"}, True,
+        self.assertEqual(SK.engine_env({"SAGUARO_DS4_SLOT_KEEP": "0", "SAGUARO_DS4_SLOT_DIR": "/elsewhere"}, True,
                                        "/tmp/slots", None),
-                         {"MAYA_DS4_SLOT_KEEP": "1", "MAYA_DS4_SLOT_DIR": "/tmp/slots"})
+                         {"SAGUARO_DS4_SLOT_KEEP": "1", "SAGUARO_DS4_SLOT_DIR": "/tmp/slots"})
 
     def test_the_cap_is_passed_only_when_the_run_sets_one(self):
         self.assertEqual(SK.engine_env({"DS4_POOL_GB": "88"}, False, "/tmp/slots", 0.05),
-                         {"DS4_POOL_GB": "88", "MAYA_DS4_SLOT_KEEP": "0", "MAYA_DS4_SLOT_DIR": "/tmp/slots",
-                          "MAYA_DS4_SLOT_GB": "0.05"})
-        self.assertNotIn("MAYA_DS4_SLOT_GB", SK.engine_env({}, False, "/tmp/slots", None))
+                         {"DS4_POOL_GB": "88", "SAGUARO_DS4_SLOT_KEEP": "0", "SAGUARO_DS4_SLOT_DIR": "/tmp/slots",
+                          "SAGUARO_DS4_SLOT_GB": "0.05"})
+        self.assertNotIn("SAGUARO_DS4_SLOT_GB", SK.engine_env({}, False, "/tmp/slots", None))
 
 
 if __name__ == "__main__":

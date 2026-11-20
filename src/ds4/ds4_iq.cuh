@@ -77,7 +77,7 @@ bool down(const Args& a, int groups, int ne_max, cudaStream_t s);
 /// [bounds[i], bounds[i + 1]) (local row = sorted row - row0); gate / up: h16[local] = F16 swiglu over x[idx[local]]
 /// (F32 rows, ldx); down: y[local] = down(h16[local]) (F16 rows in, ldx; F32 out, ldo).  A set's experts of at most 16
 /// rows take the token kernels' form (each weight read once, the rows' inputs rounded to int8 per 32 as the token path
-/// rounds them; STRATA_DS4_NO_LIGHT=1: never), the others GEMM tiles (tensor cores on CUDA, F16 operands).
+/// rounds them; SAGUARO_DS4_NO_LIGHT=1: never), the others GEMM tiles (tensor cores on CUDA, F16 operands).
 struct SetArgs {
     const uint8_t* wbase = nullptr;
     size_t stride = 0;
@@ -114,7 +114,7 @@ private:
     int previous_rows_;
     const int* previous_bounds_;
 };
-// The prompt set's scratch for its int8 activations (the fused experts, STRATA_DS4_PREFILL_FUSED): the caller's down
+// The prompt set's scratch for its int8 activations (the fused experts, SAGUARO_DS4_PREFILL_FUSED): the caller's down
 // output rows, which the set's gate / up leaves unused until its down writes them; nested scopes restore their caller's.
 class FusedScratchScope {
 public:
@@ -168,7 +168,7 @@ bool decode_values(int type, const uint8_t* w, int k, int n, float* sub, float* 
 /// IQ1_M, IQ2_S: 8 KiB and more), maya-ds4's on CUDA: a grid of the blocks the device holds at once, each block loading
 /// its codebook once and taking work items (a group, a tile of rows) round it - IQ1_M's codes then from a table of 4096
 /// entries (ds4_iq1_codes.hpp).  Each output the same lanes' sums in the same order as the full grid's: the same bits.
-/// DS4_IQ_PERSIST=0 (MAYA_DS4_IQ_PERSIST): the full grids, as before (HIP and maya-mm3: always); unset: on for a device of
+/// DS4_IQ_PERSIST=0 (SAGUARO_DS4_IQ_PERSIST): the full grids, as before (HIP and maya-mm3: always); unset: on for a device of
 /// compute capability 8.0 and up, off below (a V100 is about 2% slower with them); 1: on everywhere.  (tests)
 /// set_persist(1 / 0): on / off for the calls after it, -1: the environment's again.
 bool persist_on();

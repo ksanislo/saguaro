@@ -79,15 +79,15 @@ class Scratch:
             (self.models / f"strata-{name}.json").write_text(json.dumps({
                 "exe": "component:strata-engine", "backend": "cuda", "tokenizer": str(tok), "args": [], "cwd": str(root),
                 "model_name": name, "host": "127.0.0.1", "port": 0}))
-        self.env = {**os.environ, "STRATA_COMPONENTS_DIR": str(self.components), "STRATA_PROFILE_DIR": str(root / "profiles"),
-                    "STRATA_RUNTIME_DIR": str(root / "runtime"), "STRATA_INSTALL_DIR": str(self.models),
-                    "STRATA_MODELS_DIR": str(root / "models-unused"), "STRATA_ENGINE_BACKEND": "cuda",
-                    "STRATA_HOME": str(root / "home"), "APPDATA": str(root / "appdata"), "LOCALAPPDATA": str(root / "local"),
+        self.env = {**os.environ, "SAGUARO_COMPONENTS_DIR": str(self.components), "SAGUARO_PROFILE_DIR": str(root / "profiles"),
+                    "SAGUARO_RUNTIME_DIR": str(root / "runtime"), "SAGUARO_INSTALL_DIR": str(self.models),
+                    "SAGUARO_MODELS_DIR": str(root / "models-unused"), "SAGUARO_ENGINE_BACKEND": "cuda",
+                    "SAGUARO_HOME": str(root / "home"), "APPDATA": str(root / "appdata"), "LOCALAPPDATA": str(root / "local"),
                     "WEBVIEW2_USER_DATA_FOLDER": str(root / "webview"), "FAKE_ENGINE_MARK": str(self.mark),
                     "FAKE_ENGINE_SLOW_STEPS": "0", "PYTHONDONTWRITEBYTECODE": "1"}
-        self.env.pop("STRATA_API_KEY", None)
-        for key in ("STRATA_COMPONENTS_DIR", "STRATA_PROFILE_DIR", "STRATA_RUNTIME_DIR", "LOCALAPPDATA", "STRATA_ENGINE_BACKEND",
-                    "STRATA_NO_ACQUIRE", "FAKE_ENGINE_MARK"):
+        self.env.pop("SAGUARO_API_KEY", None)
+        for key in ("SAGUARO_COMPONENTS_DIR", "SAGUARO_PROFILE_DIR", "SAGUARO_RUNTIME_DIR", "LOCALAPPDATA", "SAGUARO_ENGINE_BACKEND",
+                    "SAGUARO_NO_ACQUIRE", "FAKE_ENGINE_MARK"):
             os.environ[key] = self.env.get(key, "1")          # this process reads the same runtime and records folders
 
 
@@ -194,7 +194,7 @@ def lease_free() -> bool:
 def control(scratch: Scratch, *argv: str, timeout: int = 300) -> dict:
     py = scratch.install / "control" / "python" / "python.exe"
     out = subprocess.run([str(py), str(scratch.install / "control" / "strata.py"), *argv, "--output", "json"],
-                         env={**scratch.env, "PYTHONNOUSERSITE": "1", "STRATA_NO_ACQUIRE": "1"},
+                         env={**scratch.env, "PYTHONNOUSERSITE": "1", "SAGUARO_NO_ACQUIRE": "1"},
                          capture_output=True, text=True, timeout=timeout)
     try:
         return json.loads(out.stdout)
@@ -205,7 +205,7 @@ def control(scratch: Scratch, *argv: str, timeout: int = 300) -> dict:
 def stop_cli(scratch: Scratch, slot: str) -> dict:
     py = scratch.install / "control" / "python" / "python.exe"
     out = subprocess.run([str(py), str(scratch.install / "control" / "strata.py"), "runtime", "stop", "--profile", slot, "--wait", "30",
-                          "--output", "json"], env={**scratch.env, "PYTHONNOUSERSITE": "1", "STRATA_NO_ACQUIRE": "1"},
+                          "--output", "json"], env={**scratch.env, "PYTHONNOUSERSITE": "1", "SAGUARO_NO_ACQUIRE": "1"},
                          capture_output=True, text=True, timeout=120)
     try:
         return json.loads(out.stdout)

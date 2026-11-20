@@ -499,7 +499,7 @@ public:
     // buffer and calls `stage_exchange`: `out` is then read from that buffer, and `in` still from here (the CPU
     // computes both until the swap lands).  Once the slot copy has landed, `commit_exchanges` moves `out` into
     // `in`'s place, so the copy keeps holding exactly the experts the GPU does not - with no read of the file.
-    // STRATA_EXCHANGE_ROTATE=1 can instead transfer buffer ownership (uniform, fully pinned/mapped slots).
+    // SAGUARO_EXCHANGE_ROTATE=1 can instead transfer buffer ownership (uniform, fully pinned/mapped slots).
     /// Whether the compact copy holds `(layer, expert)`.
     bool has_resident(int64_t layer, int64_t expert) const;
     /// Host room for `n` evicted blobs (page-locked when possible).  Idempotent for the same or a smaller `n`.
@@ -538,7 +538,7 @@ public:
     /// the time spent reading the files, summed over threads.
     uint64_t file_blob_bytes() const { return file_blob_bytes_.load(std::memory_order_relaxed); }
     double file_ms() const { return (double) file_us_.load(std::memory_order_relaxed) / 1000.0; }
-    /// Threads `prefetch` reads the GGUF with (STRATA_FETCH_THREADS, default 8).
+    /// Threads `prefetch` reads the GGUF with (SAGUARO_FETCH_THREADS, default 8).
     void set_fetch_threads(int n) { fetch_threads_ = n < 1 ? 1 : n; }
     /// #286: read the experts straight from the drive (Windows: FILE_FLAG_NO_BUFFERING, overlapped; Linux: O_DIRECT and
     /// the kernel's asynchronous reads) instead of
@@ -562,7 +562,7 @@ public:
     bool advise_pairs(const std::pair<int32_t, int32_t>* pairs, int64_t n) const override;
 
     const uint8_t* blob(int64_t layer, int64_t expert) override;
-    /// Windows, opt-in with STRATA_FILE_RELEASE=1: trim the file mapping's full pages after their expert reaches
+    /// Windows, opt-in with SAGUARO_FILE_RELEASE=1: trim the file mapping's full pages after their expert reaches
     /// VRAM. Never touches the resident complement or staging buffers. Disabled by default.
     uint64_t release(int64_t layer, int64_t expert) override;
     bool pinned(int64_t layer, int64_t expert) const override;
@@ -570,7 +570,7 @@ public:
     bool pcie_layer(int64_t layer) const override;
     bool transient(int64_t layer, int64_t expert) const override;
     bool copy_blob(int64_t layer, int64_t expert, uint8_t* dst) override;
-    /// The blob read from the model file(s) only, never from the RAM copy or an exchange buffer (STRATA_CHECK_SWAPS).
+    /// The blob read from the model file(s) only, never from the RAM copy or an exchange buffer (SAGUARO_CHECK_SWAPS).
     bool copy_blob_from_file(int64_t layer, int64_t expert, uint8_t* dst) const {
         return base_ != nullptr && dst != nullptr && layer >= 0 && expert >= 0 && layer < n_layers_ && expert < n_expert_ &&
                copy_from_files(layer, expert, dst);
@@ -748,7 +748,7 @@ public:
 
 private:
     void* arena_ = nullptr;          ///< the PinnedArena, owned
-    void* map_ = nullptr;            ///< STRATA_ARENA_MMAP: the arena file, mapped read-only (not the PinnedArena)
+    void* map_ = nullptr;            ///< SAGUARO_ARENA_MMAP: the arena file, mapped read-only (not the PinnedArena)
     uint64_t map_bytes_ = 0;
     std::vector<const uint8_t*> dev_slice_;   ///< device alias of each registered slice (or of the whole range)
     uint64_t slice_bytes_ = 0;

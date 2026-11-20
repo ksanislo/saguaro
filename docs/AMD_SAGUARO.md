@@ -17,7 +17,7 @@ packages.
 ```sh
 ./saguaro.sh --backend hip --gpu 0 --check
 ./saguaro.sh --backend hip --gpu 0 --context 8192 --no-vision --yes \
-  --download-model --no-start --port 8099 --env MAYA_GLM_RAM_GB=60
+  --download-model --no-start --port 8099 --env SAGUARO_GLM_RAM_GB=60
 ./saguaro.sh --backend hip --port 8099
 ```
 
@@ -119,9 +119,9 @@ Windows, large-image limits, and multiple-image workloads were not tested here.
 `--gpus 0,1` splits the layers across two supported cards, as on NVIDIA: each card caches the experts of its own
 half, and the second half also runs the model's MTP block, which drafts the next token so both cards stay busy. Setup
 puts the card with more VRAM first (it takes the bigger first half), leaves the split point to the engine, and writes
-one hipBLASLt table per architecture (`MAYA_HIPBLASLT_TUNING` takes a path list, `:`-separated on Linux and `;` on Windows; each card uses the table
+one hipBLASLt table per architecture (`SAGUARO_HIPBLASLT_TUNING` takes a path list, `:`-separated on Linux and `;` on Windows; each card uses the table
 for its own architecture). A discrete GPU paired with a unified-memory APU puts the discrete GPU first and loads the
-parts sequentially (`MAYA_GLM_PARALLEL_LOAD=0`), so the APU sizes its pool after the first part pins its RAM tier.
+parts sequentially (`SAGUARO_GLM_PARALLEL_LOAD=0`), so the APU sizes its pool after the first part pins its RAM tier.
 The two cards may be different architectures. The split passes one small host-memory hop
 per token, so no peer-to-peer access between the cards is needed.
 
@@ -138,7 +138,7 @@ best: moving two or four more layers to the first card did not speed up answers.
 
 ### Experimental expert helper
 
-`MAYA_GLM_EXPERT_HELPER=1` is an opt-in alternative to a layer split: visible GPU 0 keeps every trunk layer,
+`SAGUARO_GLM_EXPERT_HELPER=1` is an opt-in alternative to a layer split: visible GPU 0 keeps every trunk layer,
 attention, state and MTP; visible GPU 1 owns a complementary expert cache. A unified-memory helper reserves slots
 in the existing portable pinned RAM tier (no second weight copy); a discrete helper uses its own VRAM, automatically
 sized by aligned expert bytes with 512 MiB left free. Primary admissions, prefetch and background promotions exclude
@@ -151,18 +151,18 @@ All of this is part of the single helper switch; there is no separate optimizati
 Native GGUF experts only; EXL3 is not supported.
 
 For physical device 0 = 8060S and 1 = R9700, run the engine with `HIP_VISIBLE_DEVICES=1,0`,
-`MAYA_GLM_EXPERT_HELPER=1` and `MAYA_GLM_SPLIT=0`. The indices are process-local; the system order is unchanged.
-Keep the normal pack, context, headroom and MTP settings. Unset `MAYA_GLM_EXPERT_HELPER` to restore the existing
+`SAGUARO_GLM_EXPERT_HELPER=1` and `SAGUARO_GLM_SPLIT=0`. The indices are process-local; the system order is unchanged.
+Keep the normal pack, context, headroom and MTP settings. Unset `SAGUARO_GLM_EXPERT_HELPER` to restore the existing
 behavior. This experimental path does not claim general multi-GPU support or a speedup; measure it on the target
 hardware.
 
 #### The helper beside a layer split (two cards and the APU)
 
-With `MAYA_GLM_SPLIT=auto` (or pinned boundaries) the helper's device is left out of the split and every part of the
+With `SAGUARO_GLM_SPLIT=auto` (or pinned boundaries) the helper's device is left out of the split and every part of the
 split opens its own helper there over its own layers: a part's misses go to the APU, which computes them inside that
 part's pinned RAM tier at the APU's memory speed instead of the part's CPU lane. For physical device 0 = 8060S and
-1, 2 = two discrete cards, run the engine with `HIP_VISIBLE_DEVICES=1,2,0`, `MAYA_GLM_EXPERT_HELPER=2` and
-`MAYA_GLM_SPLIT=auto` (the split's devices are then 0 and 1; `MAYA_GLM_DEVS=0,1` says so explicitly). The helper's
+1, 2 = two discrete cards, run the engine with `HIP_VISIBLE_DEVICES=1,2,0`, `SAGUARO_GLM_EXPERT_HELPER=2` and
+`SAGUARO_GLM_SPLIT=auto` (the split's devices are then 0 and 1; `SAGUARO_GLM_DEVS=0,1` says so explicitly). The helper's
 device may not be one of the split's. The engine logs one `glm helper:` line per part. Measured on this layout: see the
 speed table; the CPU lane still takes the misses the helper does not own.
 
@@ -170,9 +170,9 @@ speed table; the CPU lane still takes the misses the helper does not own.
 
 Ryzen AI Max+ 395 / Radeon 8060S (`gfx1151`) uses unified memory. Use the same
 HIP setup command above, selecting its GPU number and omitting the
-`--env MAYA_GLM_RAM_GB=60` override. Setup detects the APU even if sysfs
+`--env SAGUARO_GLM_RAM_GB=60` override. Setup detects the APU even if sysfs
 reports only a small VRAM carve-out. It writes a 1 GiB reserve, 16 GiB of
-system headroom, `MAYA_GLM_PREFILL_SUB=1024`, and a 6144 MiB prompt budget
+system headroom, `SAGUARO_GLM_PREFILL_SUB=1024`, and a 6144 MiB prompt budget
 when system RAM is at least 96 GiB (4096 MiB otherwise), plus the existing
 `gfx1151` hipBLASLt table. Use `--gpu N` for the APU alone, or `--gpus D,N` to pair it with a supported discrete GPU
 (see [Two GPUs](#two-gpus)). It leaves `POOL_GB` and `RAM_GB` unset.
@@ -197,7 +197,7 @@ precede the automatic sizing change; verify its startup log and repeated
 prompt/answer rounds on the real box. See [tracking issue #6](https://github.com/mw00/project-maya/issues/6).
 
 **Answers and prompts (v1.1.10).** Where every expert sits in the GPU pool, the APUs answer faster with the same
-text (`MAYA_GLM_MTP_DECODE`, on by default on `gfx115x` only). On the Gorgon Halo of [Windows](#windows) (Radeon
+text (`SAGUARO_GLM_MTP_DECODE`, on by default on `gfx115x` only). On the Gorgon Halo of [Windows](#windows) (Radeon
 8065S, Maya-S, 32K context), 256-token answers run at 28.4-29.6 tokens/s to short prompts and at 23.2-23.5 after
 3K- and 8K-token prompts, against 18.4-19.7 without it; 3K- and 8K-token prompts read at 271 and 278 tokens/s
 (the fused prompt experts and the `wmma2` attention, both on by default on `gfx1151`).
@@ -208,7 +208,7 @@ AMD Instinct MI300X / MI325X (`gfx942`, CDNA3) is accepted as experimental, on o
 card and runs through the hip_compat half-wavefront layer.
 
 Install ROCm's development packages for the card first (ROCm 7.14: `amdrocm-core-dev7.14-gfx942` and
-`amdrocm-blas-dev7.14`), then run the setup above without the `MAYA_GLM_RAM_GB` override. On an MI325X (256 GB) every
+`amdrocm-blas-dev7.14`), then run the setup above without the `SAGUARO_GLM_RAM_GB` override. On an MI325X (256 GB) every
 expert of Maya-L fits in HBM next to a 1M-token context; with that much room, `"--kv-streaming", "off"` in the config's
 `"args"` keeps the whole latent cache on the card too.
 
@@ -255,7 +255,7 @@ quarters of Windows' shared half of its RAM). The engine therefore sizes it like
 the GPU memory HIP reports free, the RAM tier from the free RAM and commit, the rest read from the SSD - and not from
 `MemAvailable` as on Linux above. Windows' HIP runtime allocates at most 64 GiB plus the RAM Windows sees in one
 piece (95.7 GiB there), so a larger pool goes into several allocations, each holding whole layers. Setup writes a
-3 GiB reserve (the desktop runs on the same GPU), `MAYA_GLM_PREFILL_SUB=1024`, and a 6144 MiB prompt budget when RAM
+3 GiB reserve (the desktop runs on the same GPU), `SAGUARO_GLM_PREFILL_SUB=1024`, and a 6144 MiB prompt budget when RAM
 and GPU memory together are at least 96 GiB (4096 MiB otherwise).
 
 **The page file on a Windows APU.** Windows charges every allocation on the APU's GPU to its commit - RAM plus page
@@ -285,12 +285,12 @@ pass, and every expert sits in the GPU pool (134.3 GB, 288 slots a layer, warmed
 Prompts run in chunks, and inside a chunk the mixers and the dense FFN run in
 sub-batches. Two settings matter on AMD:
 
-- `MAYA_GLM_PREFILL_SUB` sets the sub-batch size. It was a fixed 256; it is
+- `SAGUARO_GLM_PREFILL_SUB` sets the sub-batch size. It was a fixed 256; it is
   now a runtime setting with 256 as the default. Larger sub-batches give the
   matrix cores bigger GEMMs. Setup writes `1024` together with
-  `MAYA_GLM_PREFILL_MB=4096` for cards with 20 GB or more; the extra prompt
+  `SAGUARO_GLM_PREFILL_MB=4096` for cards with 20 GB or more; the extra prompt
   memory is borrowed from the expert pool only while a prompt runs.
-- `MAYA_HIPBLASLT_TUNING` points at a table of hipBLASLt solutions for the
+- `SAGUARO_HIPBLASLT_TUNING` points at a table of hipBLASLt solutions for the
   prompt's FP16 projections, measured per architecture with
   `tools/hip/tune_hipblaslt` (`tools/hip/<arch>-glm-hipblaslt-<version>.txt`).
   Setup writes it when a table for the card exists. The engine accepts a table
@@ -312,7 +312,7 @@ Measured prompt speed, GLM-5.3-Flash Maya-S-v2 IQ2_XXS, ROCm 7.2:
 | prompt chunk forced to 256 (the earlier config) | ~50 tok/s | ~70 | - |
 | engine-sized chunk | ~198 | ~116 | - |
 | + tuned hipBLASLt | ~253-259 | ~195 | - |
-| + `MAYA_GLM_PREFILL_SUB=1024`, `MAYA_GLM_PREFILL_MB=4096` | ~413 | ~217 | ~490-560 |
+| + `SAGUARO_GLM_PREFILL_SUB=1024`, `SAGUARO_GLM_PREFILL_MB=4096` | ~413 | ~217 | ~490-560 |
 
 The 8060S runs used the same prompt-path changes on a local build. The R9700
 runs used a pinned RAM tier sized for every expert the VRAM pool does not hold. On
@@ -377,9 +377,9 @@ python3 tools/test_maya_hip.py
 LD_LIBRARY_PATH=/opt/rocm/lib HIP_VISIBLE_DEVICES=0 \
   ctest --test-dir build-hip --output-on-failure --timeout 60 \
   -R '^(glm_(hc|kda|ffn|dsa|layer)_parity|glm_model_test|hip_intrinsics|hip_(glm_handoff|glm_prefill_attention|handoff|device_selftest|prefill_mmq_parity|expert_cache_staging)|iq1_s_parity)$'
-MAYA_GLM_HC2=1 LD_LIBRARY_PATH=/opt/rocm/lib HIP_VISIBLE_DEVICES=0 \
+SAGUARO_GLM_HC2=1 LD_LIBRARY_PATH=/opt/rocm/lib HIP_VISIBLE_DEVICES=0 \
   build-hip/glm_hc_parity --selftest
-MAYA_GLM_HC1=1 LD_LIBRARY_PATH=/opt/rocm/lib HIP_VISIBLE_DEVICES=0 \
+SAGUARO_GLM_HC1=1 LD_LIBRARY_PATH=/opt/rocm/lib HIP_VISIBLE_DEVICES=0 \
   build-hip/glm_hc_parity --selftest
 ```
 

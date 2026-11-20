@@ -9,7 +9,7 @@ import tlsModule from 'node:tls';
 
 /** @returns {'system'|'bundled'} what the process trusts after the call */
 export function useSystemCertificates(tls = tlsModule, env = process.env) {
-  if (env.STRATA_NO_SYSTEM_CA === '1') return 'bundled';          // a way back for a PC where reading the store misbehaves; not a way to skip checks
+  if (env.SAGUARO_NO_SYSTEM_CA === '1') return 'bundled';          // a way back for a PC where reading the store misbehaves; not a way to skip checks
   try {
     if (typeof tls.getCACertificates !== 'function' || typeof tls.setDefaultCACertificates !== 'function') return 'bundled';
     const system = tls.getCACertificates('system');

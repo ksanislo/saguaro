@@ -6,7 +6,7 @@
  * test start) next to the model files. It reports through the job's own progress fields, so the UI shows one combined total.
  *
  * It never throws: a failed engine download leaves the model files alone and becomes `engine.state === 'failed'` with a retry
- * message. Loading, starting and serving never download (STRATA_NO_ACQUIRE stays on for them); this runs only inside the install
+ * message. Loading, starting and serving never download (SAGUARO_NO_ACQUIRE stays on for them); this runs only inside the install
  * job the user started. Contract: see phaseA-tests/notes-split-s6.md ("Job contract").
  */
 

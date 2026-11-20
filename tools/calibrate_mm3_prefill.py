@@ -179,6 +179,5 @@ def run_engine(cmd: list, env: dict, cwd, timeout: float, say=print) -> tuple[in
 if __name__ == "__main__":
     if len(sys.argv) != 2:
         sys.exit("usage: calibrate_mm3_prefill.py <maya-mm3.json>")
-    import maya_names
-    c = maya_names.env_in(json.loads(Path(sys.argv[1]).read_text(encoding="utf-8-sig")))
+    c = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8-sig"))
     print(json.dumps(run(c), indent=1))

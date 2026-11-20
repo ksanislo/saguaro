@@ -28,7 +28,7 @@ class ConnectionTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix="strata-connections-")
         self.addCleanup(self.temp.cleanup)
         self.directory = Path(self.temp.name) / "connections"
-        env = mock.patch.dict(os.environ, {"STRATA_CONNECTION_DIR": str(self.directory)}, clear=False)
+        env = mock.patch.dict(os.environ, {"SAGUARO_CONNECTION_DIR": str(self.directory)}, clear=False)
         env.start()
         self.addCleanup(env.stop)
 
@@ -40,7 +40,7 @@ class ConnectionTests(unittest.TestCase):
 
     def test_create_edit_precedence_and_private_storage(self):
         code, created = self._cli("connection", "create", "edge", "--url", "https://Example.COM:443",
-                                  "--prefix", "/proxy/strata", "--credential-env", "STRATA_READ_KEY",
+                                  "--prefix", "/proxy/strata", "--credential-env", "SAGUARO_READ_KEY",
                                   "--output", "json")
         self.assertEqual(code, 0)
         self.assertEqual(created["connection"]["url"], "https://example.com:443")
@@ -64,8 +64,8 @@ class ConnectionTests(unittest.TestCase):
                                  "--if-revision", revision, "--output", "json")
         self.assertEqual((code, stale["error"]["code"]), (6, 6))
         self.assertEqual(connections.load("edge")[0]["prefix"], "/new")
-        with mock.patch.dict(os.environ, {"STRATA_CONNECTION": "edge", "STRATA_URL": "https://ignored.example",
-                                       "STRATA_READ_KEY": "test-secret"}):
+        with mock.patch.dict(os.environ, {"SAGUARO_CONNECTION": "edge", "SAGUARO_URL": "https://ignored.example",
+                                       "SAGUARO_READ_KEY": "test-secret"}):
             code, effective = self._cli("config", "show", "--effective", "--output", "json")
             self.assertEqual(code, 0)
             self.assertEqual(effective["effective"]["url"], "https://example.com:443")
@@ -189,8 +189,8 @@ class ConnectionTests(unittest.TestCase):
         thread.start()
         try:
             root = f"http://127.0.0.1:{server.server_port}"
-            connections.create("proxied", root, prefix="/proxy", credential_env="STRATA_READ_KEY")
-            with mock.patch.dict(os.environ, {"STRATA_READ_KEY": "test-secret"}):
+            connections.create("proxied", root, prefix="/proxy", credential_env="SAGUARO_READ_KEY")
+            with mock.patch.dict(os.environ, {"SAGUARO_READ_KEY": "test-secret"}):
                 code, source = self._cli("status", "--connection", "proxied", "--json")
                 self.assertEqual(code, 0)
                 self.assertEqual(source["snapshot"]["work"]["active"], 3)

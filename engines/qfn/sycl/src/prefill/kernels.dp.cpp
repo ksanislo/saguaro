@@ -56,7 +56,7 @@ __dpct_inline__ uint16_t bf(float f) {
     u += 0x7fffu + ((u >> 16) & 1u);
     return (uint16_t) (u >> 16);
 }
-// The BF16 GEMMs' second operand (STRATA_PREFILL_BF16X2): what the BF16 image `hi` left out of f, itself in BF16.
+// The BF16 GEMMs' second operand (SAGUARO_PREFILL_BF16X2): what the BF16 image `hi` left out of f, itself in BF16.
 // W.hi + W.lo carries ~16 mantissa bits of the activation - the decode path's FP32 x to within ~1e-5.
 __dpct_inline__ uint16_t bf_lo(float f, uint16_t hi) {
     return bf(f - sycl::bit_cast<float>((uint32_t)hi << 16));
@@ -254,7 +254,7 @@ auto &sh = *sycl::ext::oneapi::group_local_memory_for_overwrite<float[32]>(
         if (xn16_lo) xn16_lo[xo + d] = bf_lo(x, h);
     }
 }
-// S23 (opt-in STRATA_CVEC_FUSE=1): a steered layer's FFN write, its control vector and the next half's norm in one
+// S23 (opt-in SAGUARO_CVEC_FUSE=1): a steered layer's FFN write, its control vector and the next half's norm in one
 // pass over R (was gr_write + cvec_apply + gr_norm_rs: three).  The write is gr_write_kernel's, the vector
 // cvec_kernel's (the same per-thread dot order over d = tid + 256 k, the same two-level xor reduction), the norm
 // gr_norm_rs_kernel's (the same ss order and block_sum): the same bits.
@@ -492,7 +492,7 @@ __dpct_inline__ void gdn_conv_tiled_kernel(const float *__restrict__ hist,
         v0 = v1; v1 = v2; v2 = x;
     }
 }
-// Aurora (S23, opt-in STRATA_GDN_CONVL2=1): gdn_conv_tiled_kernel with gdn_l2_kernel folded in.  A block's 128 threads
+// Aurora (S23, opt-in SAGUARO_GDN_CONVL2=1): gdn_conv_tiled_kernel with gdn_l2_kernel folded in.  A block's 128 threads
 // are the 128 channels of one head, so for the q / k heads (block < 2 HK) the norm's sum of squares is the block's:
 // the same warp_sum, the same four partials added in the same order, the same v * rsqrtf(ss + eps) on the same
 // stored value - the same bits, without writing h and reading it back (16 tokens per round).
@@ -868,7 +868,7 @@ auto &sk = *sycl::ext::oneapi::group_local_memory_for_overwrite<float[S]>(
 }
 // gdn_rec_cols_kernel with the next token's inputs (q/k rows, v, gate, beta) loaded into registers while this token
 // computes (software pipelining).  The same arithmetic in the same order: the same bits, and the same CB-column split.
-// STRATA_GDN_PIPELINE=0: gdn_rec_cols_kernel.
+// SAGUARO_GDN_PIPELINE=0: gdn_rec_cols_kernel.
 /*
 DPCT1110: The total declared local variable size in device function
 gdn_rec_cols_pipe_kernel exceeds 128 bytes and may cause high register pressure.
@@ -1002,7 +1002,7 @@ __dpct_inline__ void gdn_rec_cols_pipe_kernel(float *__restrict__ state,
 // one of a token orders every read of rkv before the next token's writes, the next token's first one every read of ro
 // before the writes after it.  64 blocks instead of 192.  Per value head and column the same arithmetic in the same
 // order: the same bits (src/prefill/gdn_rec_parity.cu checks them and times the variants: 1.41x on a 4080 Super).
-// sm_80+ cards that hold its 64 blocks at once (gdn_keyhead_ok); STRATA_GDN_KEYHEAD=0: gdn_rec_cols_pipe_kernel.
+// sm_80+ cards that hold its 64 blocks at once (gdn_keyhead_ok); SAGUARO_GDN_KEYHEAD=0: gdn_rec_cols_pipe_kernel.
 #if 1   // SYCL port: plain copies (no cp.async)
 #define STRATA_GDN_CP_ASYNC 0   // Turing builds: plain copies (never launched there, see gdn_keyhead_ok)
 #else
@@ -1229,8 +1229,8 @@ __dpct_inline__ void gdn_rec_kh_kernel(float *__restrict__ state,
 // cards).
 bool gdn_keyhead_ok() {
     // SYCL port: upstream picks it by SM count and occupancy (NVIDIA thresholds, measured on Ada/Ampere). On Xe the
-    // key-head kernel is an A/B until measured: STRATA_GDN_KEYHEAD=1 runs it, anything else keeps the kernel before.
-    static const bool on = [] { const char* v = std::getenv("STRATA_GDN_KEYHEAD"); return v != nullptr && std::atoi(v) == 1; }();
+    // key-head kernel is an A/B until measured: SAGUARO_GDN_KEYHEAD=1 runs it, anything else keeps the kernel before.
+    static const bool on = [] { const char* v = std::getenv("SAGUARO_GDN_KEYHEAD"); return v != nullptr && std::atoi(v) == 1; }();
     return on;
 }
 #endif
@@ -1243,7 +1243,7 @@ bool gdn_keyhead_ok() {
 // loaded into registers while this one computes, and a token's k and q rows are read into registers before its
 // products (one LDS latency per token, not one per load).  The old kernels took ~4 barriers per token and ~3.5 us
 // per token and layer on the Radeon 8060S; the output norm runs after it in gdn_out_norm_warp_kernel.
-// STRATA_GDN_HEAD=0: the old kernels.
+// SAGUARO_GDN_HEAD=0: the old kernels.
 constexpr int HT = 4;                           // tokens per staged chunk (LDS ~10 KB: all 192 blocks resident)
 constexpr int QCB = 32;                         // columns per block
 constexpr int QTH = QCB * 4;                    // threads per block: 4 lanes per column
@@ -1352,7 +1352,7 @@ __global__ void __launch_bounds__(QTH) gdn_rec_quad_kernel(float* __restrict__ s
         for (int r = 0; r < 32; ++r) base[(size_t) r * HV * S] = s[r];
     }
 }
-// Aurora (S23, opt-in STRATA_GDN_PP=1): gdn_rec_quad_kernel with the same arithmetic in the same order, two changes in
+// Aurora (S23, opt-in SAGUARO_GDN_PP=1): gdn_rec_quad_kernel with the same arithmetic in the same order, two changes in
 // how it is compiled.  (1) The VGPR count: the 32 state-row addresses of the first loads were kept live across the
 // whole walk to be reused by the final stores (64 VGPRs, 196 in all = 7 waves a SIMD for the 192 blocks of 4 waves
 // that need 9.6): the stores' lane offset goes through an asm so the addresses are made again, 133 VGPRs, all blocks
@@ -1478,7 +1478,7 @@ __global__ void __launch_bounds__(QTH) gdn_rec_quad_pp_kernel(float* __restrict_
     }
 }
 
-// Aurora (S23, opt-in STRATA_GDN_PP=2): gdn_rec_quad_kernel with two columns per lane (a wave: 4 row groups x 8 lanes x
+// Aurora (S23, opt-in SAGUARO_GDN_PP=2): gdn_rec_quad_kernel with two columns per lane (a wave: 4 row groups x 8 lanes x
 // 2 columns = 16 columns; a block of 4 waves 64 columns, 96 blocks).  A lane's two columns share the k / q rows it
 // reads from shared memory (half the LDS reads and shuffles per column, the kernel's limit) and give each wave two
 // independent dependency chains; the 384 waves fit in one round at 230 VGPRs.  Per column the same arithmetic in
@@ -1633,7 +1633,7 @@ __global__ void __launch_bounds__(S) gdn_out_norm_loop_kernel(const float* __res
             y[at] = v;
             y16[o16] = hf(v);
         } else {
-            // STRATA_GDN_NOY=1: nothing reads the FP32 result (403 MB per 16K chunk).  The FP16 value is what the
+            // SAGUARO_GDN_NOY=1: nothing reads the FP32 result (403 MB per 16K chunk).  The FP16 value is what the
             // compiler makes of hf(v) next to the store: v_fma_mixlo_f16, the product rounded to FP16 once
             unsigned r;
             asm("v_fma_mixlo_f16 %0, %1, %2, 0" : "=v"(r) : "v"(sg), "v"(bp));
@@ -1893,7 +1893,7 @@ auto &sh = *sycl::ext::oneapi::group_local_memory_for_overwrite<float[32]>(
     for (int64_t c = item_ct1.get_local_id(2); c < cols;
          c += item_ct1.get_local_range(2)) r[c] = s * r[c] * w[c];
 }
-// TAB (#280, STRATA_ROPE_TABLE=1): the angles from the session's float64 table.  The host launches <false> whenever
+// TAB (#280, SAGUARO_ROPE_TABLE=1): the angles from the session's float64 table.  The host launches <false> whenever
 // no table applies - the default - so the default kernel is 0.1.31's code exactly (the table read is not in it;
 // with it merely skipped at run time, the compiled default path changed its results).
 template <bool TAB>
@@ -2094,7 +2094,7 @@ __dpct_inline__ void to_bf16_kernel(const float *__restrict__ x,
     }
 }
 
-// S23 (opt-in STRATA_HC_UPMIX=1, gfx11): the hyper-connection read's up projection with gr_mix_r as its epilogue.  The
+// S23 (opt-in SAGUARO_HC_UPMIX=1, gfx11): the hyper-connection read's up projection with gr_mix_r as its epilogue.  The
 // up GEMM's FP32 output `gated` (T x 10240: 671 MB per 16K chunk) is never written or read back: a block computes a
 // tile of 64 tokens x 64 columns for all 4 streams on the matrix cores (BF16 in, FP32 accumulate over K = 320; the
 // lo16 and w_up tiles staged in LDS), and each lane already holds the 4 streams' values of its (token, column) - the
@@ -2171,7 +2171,7 @@ void kv_append(const float* K, const float* V, int64_t T, int64_t pos0, const in
                uint16_t* k_pool, uint16_t* v_pool, int8_t* k_q, int8_t* v_q, uint16_t* k_scale, uint16_t* v_scale,
                void* stream, const strata::kernels::KvHostPools* host, const strata::kernels::KvHostPools* stage) {
     if (T <= 0) return;
-    static const bool wide_env = [] { const char* v = std::getenv("STRATA_KV_WIDE_HOST"); return !(v && v[0] == '0'); }();
+    static const bool wide_env = [] { const char* v = std::getenv("SAGUARO_KV_WIDE_HOST"); return !(v && v[0] == '0'); }();
     const bool wide = wide_env;
     {
         auto exp_props = sycl::ext::oneapi::experimental::properties{
@@ -2501,7 +2501,7 @@ void gdn_gates(const float* ab, const float* dt, const float* ssm_a, float* gate
     check("gdn_gates");
 }
 void gdn_conv(float* history, const float* qkv, const float* conv_w, float* h, int64_t T, float eps, void* stream) {
-    static const bool serial = std::getenv("STRATA_GDN_CONV_SERIAL") != nullptr;   // the old walk (A/B)
+    static const bool serial = std::getenv("SAGUARO_GDN_CONV_SERIAL") != nullptr;   // the old walk (A/B)
     if (serial || T <= CONV_TILE) {
         auto exp_props = sycl::ext::oneapi::experimental::properties{
             sycl::ext::oneapi::experimental::use_root_sync};
@@ -2515,7 +2515,7 @@ void gdn_conv(float* history, const float* qkv, const float* conv_w, float* h, i
                     gdn_conv_kernel(history, qkv, conv_w, h, T);
                 });
     } else {
-        static const bool fused = [] { const char* v = std::getenv("STRATA_GDN_CONVL2"); return v && std::atoi(v) != 0; }();
+        static const bool fused = [] { const char* v = std::getenv("SAGUARO_GDN_CONVL2"); return v && std::atoi(v) != 0; }();
         if (fused) {
             {
                 auto exp_props = sycl::ext::oneapi::experimental::properties{
@@ -2606,7 +2606,7 @@ void gdn_conv(float* history, const float* qkv, const float* conv_w, float* h, i
 // Variant 6, the Xe sub-group recurrence (gdn_xe.hpp): one barrier per token instead of five, the same bits.  Arc A770
 // (Coder IQ1_M, 128K context, int8 KV): recurrence 1.83 -> 0.92 s on an 8K prompt (+5% prompt tok/s), 7.3 -> 3.65 s on
 // 32K (+8%), the same output tokens.  On by default on Alchemist only (not measured on other cards).
-// STRATA_GDN_XE=0: the column kernels everywhere; STRATA_GDN_XE=1: variant 6 on any Intel GPU with 16-lane sub-groups.
+// SAGUARO_GDN_XE=0: the column kernels everywhere; SAGUARO_GDN_XE=1: variant 6 on any Intel GPU with 16-lane sub-groups.
 static bool gdn_xe_device(void* stream) {
     const auto device = strata::q_of(stream)->get_device();
     const auto subgroups = device.get_info<sycl::info::device::sub_group_sizes>();
@@ -2615,7 +2615,7 @@ static bool gdn_xe_device(void* stream) {
 }
 static bool gdn_xe_on(void* stream) {
     static const bool on = [stream] {
-        const char* v = std::getenv("STRATA_GDN_XE");
+        const char* v = std::getenv("SAGUARO_GDN_XE");
         if (v && *v) return std::atoi(v) != 0 && gdn_xe_device(stream);
         return strata::intel_gpu_gen(strata::q_of(stream)->get_device()) == strata::IntelGpuGen::Alchemist &&
                gdn_xe_device(stream);
@@ -2648,14 +2648,14 @@ void gdn_recurrence_variant(int variant, float* state, const float* h, const flo
     }
     if (variant == 1) {
         if (T > 0) {
-            static const int pp = [] { const char* v = std::getenv("STRATA_GDN_PP"); return v ? std::atoi(v) : 0; }();
+            static const int pp = [] { const char* v = std::getenv("SAGUARO_GDN_PP"); return v ? std::atoi(v) : 0; }();
             if (pp == 2)
                 gdn_rec_quad2c_kernel<<<HV * (S / C2CB), QTH, 0, (cudaStream_t) stream>>>(state, h, gate, beta, y, T);
             else if (pp)
                 gdn_rec_quad_pp_kernel<<<HV * (S / QCB), QTH, 0, (cudaStream_t) stream>>>(state, h, gate, beta, y, T);
             else
                 gdn_rec_quad_kernel<<<HV * (S / QCB), QTH, 0, (cudaStream_t) stream>>>(state, h, gate, beta, y, T);
-            static const bool noy = [] { const char* v = std::getenv("STRATA_GDN_NOY"); return v && std::atoi(v) != 0; }();
+            static const bool noy = [] { const char* v = std::getenv("SAGUARO_GDN_NOY"); return v && std::atoi(v) != 0; }();
             if (noy)
                 gdn_out_norm_loop_kernel<false><<<(unsigned) std::min<int64_t>(T * HV, 4096), S, 0, (cudaStream_t) stream>>>(
                     z, gamma, eps, y, y16, T * HV, ld16);
@@ -2669,7 +2669,7 @@ void gdn_recurrence_variant(int variant, float* state, const float* h, const flo
 #else
     (void) variant;   // the quad recurrence kernels are AMD-only
 #endif
-    static const bool serial = std::getenv("STRATA_GDN_REC_HEADS") != nullptr;   // the one-block-per-head kernel (A/B)
+    static const bool serial = std::getenv("SAGUARO_GDN_REC_HEADS") != nullptr;   // the one-block-per-head kernel (A/B)
     // variant 6 = the Xe sub-group recurrence + the unchanged norm kernel (gdn_recurrence: gdn_xe_on)
     const bool xe = T > 0 && !serial && variant == 6;
     if (xe && !gdn_xe_device(stream)) throw std::runtime_error("GDN Xe variant requires an Intel GPU with 16-lane sub-groups");
@@ -2693,7 +2693,7 @@ void gdn_recurrence_variant(int variant, float* state, const float* h, const flo
                                        y16, T, ld16);
                     });
     } else {
-        static const bool pipe = [] { const char* v = std::getenv("STRATA_GDN_PIPELINE"); return v == nullptr || std::atoi(v) != 0; }();
+        static const bool pipe = [] { const char* v = std::getenv("SAGUARO_GDN_PIPELINE"); return v == nullptr || std::atoi(v) != 0; }();
         if (xe) {
             detail::gdn_xe_launch(*strata::q_of(stream), state, h, gate, beta, y, T);
         } else
@@ -2764,10 +2764,10 @@ void gdn_recurrence_variant(int variant, float* state, const float* h, const flo
 void gdn_recurrence(float* state, const float* h, const float* gate, const float* beta, const float* z,
                     const float* gamma, float eps, float* y, uint16_t* y16, int64_t T, void* stream, int64_t ld16) {
     // Aurora (S23): four lanes per column + the grid-stride norm, the same bits (tests/hip/gdn_rec_head.cpp);
-    // STRATA_GDN_HEAD=1 (on by default on gfx1151; off with STRATA_GDN_HEAD=0 or STRATA_GDN_REC_HEADS) takes them
-    // (AMD builds only; the arch defaults set STRATA_GDN_HEAD=1 on gfx1151 and leave other cards on the earlier kernels)
-    static const bool head = [] { const char* v = std::getenv("STRATA_GDN_HEAD"); return v != nullptr && std::atoi(v) != 0; }();
-    static const bool serial = std::getenv("STRATA_GDN_REC_HEADS") != nullptr;
+    // SAGUARO_GDN_HEAD=1 (on by default on gfx1151; off with SAGUARO_GDN_HEAD=0 or SAGUARO_GDN_REC_HEADS) takes them
+    // (AMD builds only; the arch defaults set SAGUARO_GDN_HEAD=1 on gfx1151 and leave other cards on the earlier kernels)
+    static const bool head = [] { const char* v = std::getenv("SAGUARO_GDN_HEAD"); return v != nullptr && std::atoi(v) != 0; }();
+    static const bool serial = std::getenv("SAGUARO_GDN_REC_HEADS") != nullptr;
     const int v = head && !serial ? 1 : (!serial && gdn_xe_on(stream)) ? 6 : 0;
     gdn_recurrence_variant(v, state, h, gate, beta, z, gamma, eps, y, y16, T, stream, ld16);
 }

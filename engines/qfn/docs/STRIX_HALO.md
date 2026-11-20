@@ -8,12 +8,12 @@ Ubuntu 26.04, kernel 7.0, ROCm 7.14.1). Setup (`setup.sh`, `START-HERE.bat`) rec
 named as what it is and not supported. On Linux setup compiles the engine for gfx1151 itself (the steps below are the same, by hand). The 0.2.0-beta release also has ready-made packages: `Strata-0.2.0-beta-linux-amd-strixhalo.AppImage` (engine `halo`, gfx1151, ROCm 7.14.1) and, on Windows, `Strata-0.2.0-beta-windows-hip-rdna3.exe` (engine `rdna3`: gfx1100, gfx1101, gfx1102 and gfx1151, ROCm 10.2.0a20260930); any app installer plus **Update engine** (or `strata update`) fetches the same package. What was run: both packages were built, linked and scanned, and the Linux package refuses to start on a card of another family (tried on an RX 9000 card); the maintainers have no Strix Halo and ran neither on one. The measurements on this page come from source builds on Linux (the maintainers' earlier box and community machines). Nobody has run a Strix Halo on Windows. The packaged engines do not carry the hipBLASLt table of section 3 yet (planned for 0.2.1), so their prompt reading is slower than the numbers below until then. A Windows zip of the 0.1.x START-HERE route without gfx1151 code is refused with a message, never used. Setup counts the GPU's memory as the BIOS carve-out plus the shared memory
 (the GTT pool; on Windows half the RAM) and recommends UD-IQ4_XS from about 80 GB of memory; it changes no BIOS or kernel setting.
 
-**Windows start-up (0.2.1.2).** On a Strix Halo under Windows the engine no longer registers the expert arena with the GPU driver: registering it took all free VRAM (91 GiB before, 0 after, on a 64 GB carve-out + 32 GB shared PC), the expert cache got no slots and the engine stopped with "the embedding buffer failed" (0.2.1 and earlier). The arena stays in RAM, held by the working-set lock, and the cache gets its normal slots. `STRATA_ARENA_PIN_GIB=N` (or `0`) registers it as before, `STRATA_UMA_REGISTER=1` too. Linux is unchanged.
+**Windows start-up (0.2.1.2).** On a Strix Halo under Windows the engine no longer registers the expert arena with the GPU driver: registering it took all free VRAM (91 GiB before, 0 after, on a 64 GB carve-out + 32 GB shared PC), the expert cache got no slots and the engine stopped with "the embedding buffer failed" (0.2.1 and earlier). The arena stays in RAM, held by the working-set lock, and the cache gets its normal slots. `SAGUARO_ARENA_PIN_GIB=N` (or `0`) registers it as before, `SAGUARO_UMA_REGISTER=1` too. Linux is unchanged.
 
 What the engine does differently on this chip:
 
 - **Unified memory.** The GPU's "VRAM" is the GTT pool of the same RAM. `device_free_bytes()` (the figure `--expert-cache auto` and
-  the memory plan use) counts what Linux can give back (`MemAvailable` less 6 GiB for the system, `STRATA_UMA_HEADROOM_GIB`
+  the memory plan use) counts what Linux can give back (`MemAvailable` less 6 GiB for the system, `SAGUARO_UMA_HEADROOM_GIB`
   changes the 6) instead of only `MemFree`, per device, for any integrated GPU on Linux (this applies to a DGX Spark too).
 - **gfx11 matrix cores.** The prompt attention, the block scorer, the prompt GEMMs and the prompt experts have WMMA kernels for
   gfx1100 / 1101 / 1102 / 1103 / 1150 / 1151. A gfx11 part outside that list (gfx1152) is not given them: it takes the portable path.
@@ -49,7 +49,7 @@ only to have the room.
 ## 2. The engine
 
 llama.cpp's `ggml` sources are pinned by this repository: CMake fetches the revision it needs. For an offline build, point
-`STRATA_GGML_DIR` at a checkout of exactly that revision.
+`SAGUARO_GGML_DIR` at a checkout of exactly that revision.
 
 ```sh
 git clone https://github.com/Niko1221/Strata.git && cd Strata
@@ -62,7 +62,7 @@ cmake -S . -B build-halo -G Ninja -DCMAKE_BUILD_TYPE=Release \
 cmake --build build-halo --target strata -j 8        # about 25 minutes the first time
 ```
 
-`gfx1151` is "unvalidated" in the build's own wording (it warns). `STRATA_PREFILL_MMQ=ON` builds ggml's MMQ kernels the prompt
+`gfx1151` is "unvalidated" in the build's own wording (it warns). `SAGUARO_PREFILL_MMQ=ON` builds ggml's MMQ kernels the prompt
 experts need. The tests: `cmake --build build-halo -j 8` builds them all, `ctest --test-dir build-halo` runs them;
 `hip_prefill_hcd_exact_parity` and `hip_prefill_hipblaslt_gemm` need the table (next section) and skip without it.
 
@@ -72,7 +72,7 @@ Hand the engine the table (`setup` does it for the supported cards; for gfx1151 
 products use plain hipBLAS and are slower.
 
 ```sh
-export STRATA_HIPBLASLT_TUNING=$PWD/tools/hip/gfx1151-hipblaslt-100401.txt
+export SAGUARO_HIPBLASLT_TUNING=$PWD/tools/hip/gfx1151-hipblaslt-100401.txt
 ```
 
 The engine accepts it only for the architecture and the hipBLASLt version named on the table's second line
@@ -83,63 +83,63 @@ settings of [DETAILS.md](DETAILS.md)); a pack of the Unsloth UD-IQ4_XS or UD-Q4_
 ## 4. What is on by default on gfx1151
 
 At start the engine looks at GPU 0; on a gfx1151 it sets the switches below unless you set them yourself
-(`STRATA_GFX1151_DEFAULTS=0` turns the whole table off, and the start-up line names what was set). **Every one of them gave
+(`SAGUARO_GFX1151_DEFAULTS=0` turns the whole table off, and the start-up line names what was set). **Every one of them gave
 byte-identical output on the maintainers' box** (the same token ids, 4K / 32K / 64K and four models, and a bitwise harness per kernel):
 they change speed, not answers. Nothing here applies to CUDA or to another AMD architecture.
 
 | Switch | What it does |
 |---|---|
-| `STRATA_GDN_HEAD`, `STRATA_GDN_PP=2`, `STRATA_GDN_CONVL2`, `STRATA_GDN_NOY` | the prompt's gated-delta-net recurrence: four lanes per column, two columns per lane, the convolution and the norms fused |
-| `STRATA_HCD_EXACT` | the hyper-connection down projection (N 320, K 10240) in a WMMA kernel that reproduces hipBLASLt solution 1176 / 1177's summation order (`hip_prefill_hcd_exact_parity` checks it bit for bit); it runs only where the table makes hipBLASLt pick one of those two, and says once if it cannot |
-| `STRATA_CVEC_FUSE`, `STRATA_PF_PAD` | a steered layer's write, control vector and next norm in one pass; padded GEMM row strides |
-| `STRATA_TOPK_REG_MIN_BLOCKS=4096` | the prompt's QSA top-k uses the register kernel from 16K cells of context instead of 28K (the original kernel is slower there; the selected cells are identical, `qsa_topk_parity` checks it) |
-| `STRATA_Q8_PACKED`, `STRATA_Q6_PACKED`, `STRATA_MMVF_ROWS`, `STRATA_ATTN_LANECELL` | decode layouts and kernels (packed Q8_0 / Q6_K weights, 4-row BF16 GEMV, one-cell-per-thread attention scores) |
-| `STRATA_EXPERT_V2`, `STRATA_TSUM`, `STRATA_LFUSE` | the grouped decode experts (IQ3_S / IQ4_NL), single-butterfly warp sums, fewer launches around the shared expert and the KV append |
-| `STRATA_GDN_SPLIT`, `STRATA_QFUSE`, `STRATA_PLE_BATCH` | the GDN step over four blocks per head, activation images written by their producers, the PLE key / value projections of a verify window at once |
-| `STRATA_SH_STREAM=1` | the shared expert on a second stream beside the routed experts. It is off by default on other AMD cards (#816), but it pays on gfx1151: decode +1.8% (UD-IQ4_XS) and +6.7% (UD-Q4_K_XL) at 8K |
+| `SAGUARO_GDN_HEAD`, `SAGUARO_GDN_PP=2`, `SAGUARO_GDN_CONVL2`, `SAGUARO_GDN_NOY` | the prompt's gated-delta-net recurrence: four lanes per column, two columns per lane, the convolution and the norms fused |
+| `SAGUARO_HCD_EXACT` | the hyper-connection down projection (N 320, K 10240) in a WMMA kernel that reproduces hipBLASLt solution 1176 / 1177's summation order (`hip_prefill_hcd_exact_parity` checks it bit for bit); it runs only where the table makes hipBLASLt pick one of those two, and says once if it cannot |
+| `SAGUARO_CVEC_FUSE`, `SAGUARO_PF_PAD` | a steered layer's write, control vector and next norm in one pass; padded GEMM row strides |
+| `SAGUARO_TOPK_REG_MIN_BLOCKS=4096` | the prompt's QSA top-k uses the register kernel from 16K cells of context instead of 28K (the original kernel is slower there; the selected cells are identical, `qsa_topk_parity` checks it) |
+| `SAGUARO_Q8_PACKED`, `SAGUARO_Q6_PACKED`, `SAGUARO_MMVF_ROWS`, `SAGUARO_ATTN_LANECELL` | decode layouts and kernels (packed Q8_0 / Q6_K weights, 4-row BF16 GEMV, one-cell-per-thread attention scores) |
+| `SAGUARO_EXPERT_V2`, `SAGUARO_TSUM`, `SAGUARO_LFUSE` | the grouped decode experts (IQ3_S / IQ4_NL), single-butterfly warp sums, fewer launches around the shared expert and the KV append |
+| `SAGUARO_GDN_SPLIT`, `SAGUARO_QFUSE`, `SAGUARO_PLE_BATCH` | the GDN step over four blocks per head, activation images written by their producers, the PLE key / value projections of a verify window at once |
+| `SAGUARO_SH_STREAM=1` | the shared expert on a second stream beside the routed experts. It is off by default on other AMD cards (#816), but it pays on gfx1151: decode +1.8% (UD-IQ4_XS) and +6.7% (UD-Q4_K_XL) at 8K |
 
 ## 5. What is not on by default (it changes bits)
 
-**Five of the switches below (`STRATA_PF_GEMM`, `STRATA_HC_UPMIX`, `STRATA_PA_FAST`, `STRATA_HIP_WMMA`, `STRATA_SELECT_WMMA`) are one opt-in on an integrated Radeon: `STRATA_IGPU_PROMPT_SET=1` ([AMD_HIP.md](AMD_HIP.md), "Integrated GPUs"). It was measured on a Radeon 780M only, where it is the default.** `STRATA_PF_FUSED`, `STRATA_PF_SWITCH_MIN_T` and `STRATA_PREFILL_STREAM_MIN` stay opt-in as well. `STRATA_HC_Q8` is on by default on gfx1151 (below); `STRATA_HC_Q8=0` turns it off.
+**Five of the switches below (`SAGUARO_PF_GEMM`, `SAGUARO_HC_UPMIX`, `SAGUARO_PA_FAST`, `SAGUARO_HIP_WMMA`, `SAGUARO_SELECT_WMMA`) are one opt-in on an integrated Radeon: `SAGUARO_IGPU_PROMPT_SET=1` ([AMD_HIP.md](AMD_HIP.md), "Integrated GPUs"). It was measured on a Radeon 780M only, where it is the default.** `SAGUARO_PF_FUSED`, `SAGUARO_PF_SWITCH_MIN_T` and `SAGUARO_PREFILL_STREAM_MIN` stay opt-in as well. `SAGUARO_HC_Q8` is on by default on gfx1151 (below); `SAGUARO_HC_Q8=0` turns it off.
 
 These are faster on gfx1151 and **round differently** from the default path (a different summation order or a half-precision
-intermediate), so they are opt-in and the maintainers gate them with KL against the default (`STRATA_PF_SWITCH_MIN_T=4096` keeps
+intermediate), so they are opt-in and the maintainers gate them with KL against the default (`SAGUARO_PF_SWITCH_MIN_T=4096` keeps
 the short prompts on the default numerics, since these pay on long ones). The maintainers' fast configuration sets all of
 them:
 
 ```sh
-export STRATA_PF_FUSED=1        # the prompt experts on the matrix cores (IQ2 / IQ3 / IQ4_XS gate/up, Q2_0 / IQ4_NL / Q8_0 down)
-export STRATA_PF_GEMM=1         # the prompt's FP16 projections on the 128 x 256 WMMA GEMM
-export STRATA_HC_UPMIX=1        # the hyper-connection up projection with its epilogue
-export STRATA_PA_FAST=1         # the prompt attention with single FP16 q and p
-export STRATA_HIP_WMMA=1        # the prompt attention on matrix cores
-export STRATA_SELECT_WMMA=1     # the block scorer on matrix cores
-export STRATA_PF_SWITCH_MIN_T=4096
-export STRATA_PREFILL_STREAM_MIN=128   # prompt reads of 128-1,023 tokens on the fused experts too (below)
+export SAGUARO_PF_FUSED=1        # the prompt experts on the matrix cores (IQ2 / IQ3 / IQ4_XS gate/up, Q2_0 / IQ4_NL / Q8_0 down)
+export SAGUARO_PF_GEMM=1         # the prompt's FP16 projections on the 128 x 256 WMMA GEMM
+export SAGUARO_HC_UPMIX=1        # the hyper-connection up projection with its epilogue
+export SAGUARO_PA_FAST=1         # the prompt attention with single FP16 q and p
+export SAGUARO_HIP_WMMA=1        # the prompt attention on matrix cores
+export SAGUARO_SELECT_WMMA=1     # the block scorer on matrix cores
+export SAGUARO_PF_SWITCH_MIN_T=4096
+export SAGUARO_PREFILL_STREAM_MIN=128   # prompt reads of 128-1,023 tokens on the fused experts too (below)
 ```
 
-`STRATA_HC_Q8` (on by default on gfx1151 since 0.2.2; `STRATA_HC_Q8=0` restores the bf16 read) measured on the Strix Halo (IQ3_S, gfx1151, 2026-10-21, MTP 4 drafts / min-p 0.5): **+8.4%**
+`SAGUARO_HC_Q8` (on by default on gfx1151 since 0.2.2; `SAGUARO_HC_Q8=0` restores the bf16 read) measured on the Strix Halo (IQ3_S, gfx1151, 2026-10-21, MTP 4 drafts / min-p 0.5): **+8.4%**
 on `json_extract` at fixed windows (53.55 -> 58.03 tok/s), at the cost of **94 of 250 output tokens differing** from
 the BF16 read (first at 60). It halves the hyper-connection weight bytes (13.29 -> 7.15 MB per read; cold read
 93.8 -> 20.3 us, 142 -> 352 GB/s). The answers are not bit-identical to the bf16 read; how far they move is in docs/AMD_HIP.md ("Strix Halo: 8-bit hyper-connection weights").
 
-`STRATA_PF_FUSED=1` reaches only chunks of `STRATA_PREFILL_STREAM_MIN` tokens or more (1,024 by default, the floor measured on
+`SAGUARO_PF_FUSED=1` reaches only chunks of `SAGUARO_PREFILL_STREAM_MIN` tokens or more (1,024 by default, the floor measured on
 a discrete card, where a smaller chunk does not pay for streaming every expert); a smaller read runs its experts through MMQ.
 With every expert in the unified memory nothing streams, and MMQ is the slow part: an agent's turn - a tool result of ~1,000
 tokens on a cached conversation - read in 3.1-6.0 s at 1,024 and 0.9-2.5 s at 128 (C2T8, `--no-prefill-borrow`; 12-turn
 replay 3.4 -> 2.1 s per turn). Its output is the fused path's, which reads of 1,024 tokens or more already take; it is not
-under `STRATA_PF_SWITCH_MIN_T`, which gates only the hyper-connection and padding switches. A UD-Q4_K_XL or other K-quant
-pack takes the fused experts only with `STRATA_PF_FUSED_KQ=1` as well.
+under `SAGUARO_PF_SWITCH_MIN_T`, which gates only the hyper-connection and padding switches. A UD-Q4_K_XL or other K-quant
+pack takes the fused experts only with `SAGUARO_PF_FUSED_KQ=1` as well.
 
-`STRATA_PF_F16=1` (gfx11 only; add it to the list above) runs the covered prompt experts on the F16 matrix cores instead of
-the int8 ones: K-quant gate/up and Q5_1 down (with `STRATA_PF_FUSED_KQ=1`), IQ2 / IQ3 / IQ4_XS gate/up, Q2_0 / IQ4_NL / Q8_0
+`SAGUARO_PF_F16=1` (gfx11 only; add it to the list above) runs the covered prompt experts on the F16 matrix cores instead of
+the int8 ones: K-quant gate/up and Q5_1 down (with `SAGUARO_PF_FUSED_KQ=1`), IQ2 / IQ3 / IQ4_XS gate/up, Q2_0 / IQ4_NL / Q8_0
 down. One layer, 16,384 tokens: Q4_K / Q5_1 85.3 -> 53.5 ms, IQ3_S / IQ4_NL gate/up 11.65 -> 9.87 and down 6.11 -> 4.71 ms.
 It rounds differently from the int8 kernels. First-token KL against a run with no switches, 12 natural-text prompts of
 1.5K-24K tokens (Strata's own docs and sources), top-1 the same in 12 of 12: UD-Q4_K_XL mean 0.0068 (median 0.0021) against
-0.0031 (0.0024) for `STRATA_PF_FUSED=1 STRATA_PF_FUSED_KQ=1` without it; UD-IQ4_XS 0.0085 (0.0036) against 0.0068 (0.0032). One
+0.0031 (0.0024) for `SAGUARO_PF_FUSED=1 SAGUARO_PF_FUSED_KQ=1` without it; UD-IQ4_XS 0.0085 (0.0036) against 0.0068 (0.0032). One
 1.5K prompt carries most of the Q4_K_XL mean (0.049).
 
-`STRATA_REFILL_PARTS=1` (opt-in, exact; HIP and CUDA, a GGUF read in place) refills the expert-cache slots a prompt borrowed straight from the GGUF mapping (an expert's gate, up and down tensors) instead of through an assembled 4 MB copy per expert: the same bytes in the slot (checked against the assembled blob on 162 slots), 0.1 to 0.3 s less at the end of a prompt; gfx1151, UD-Q4_K_XL and UD-IQ4_XS: a 4K-8K prompt +2.3% to +3.5%, 32K +1.1%. It is not in the table above because only gfx1151 has measured it.
+`SAGUARO_REFILL_PARTS=1` (opt-in, exact; HIP and CUDA, a GGUF read in place) refills the expert-cache slots a prompt borrowed straight from the GGUF mapping (an expert's gate, up and down tensors) instead of through an assembled 4 MB copy per expert: the same bytes in the slot (checked against the assembled blob on 162 slots), 0.1 to 0.3 s less at the end of a prompt; gfx1151, UD-Q4_K_XL and UD-IQ4_XS: a 4K-8K prompt +2.3% to +3.5%, 32K +1.1%. It is not in the table above because only gfx1151 has measured it.
 
 Two engine flags help on long contexts and are not Strix-specific: `--mtp-window 8192` (the draft layer attends to the last 8,192
 cells: 64K output +3.5%, 32K -0.4%) and `--spec`, `--lookup-chain`, `--mtp-q4` (see [DETAILS.md](DETAILS.md)).
@@ -150,17 +150,17 @@ The Strix Halo chip usually draws your desktop, and its graphics memory is your 
 
 - **One memory, counted once.** The expert cache of an integrated GPU lives in the same RAM as the expert arena. The automatic cache size is the smaller of
   what the GPU reports free and what the OS reports available, less a reserve for the desktop (the larger of 8 GiB and 8% of the RAM; the start-up line says so
-  when it changes the size). `STRATA_UMA_RESERVE_GIB=N` sets the reserve (`0` = the old sizing, nothing kept back); `--expert-cache N` is never changed.
+  when it changes the size). `SAGUARO_UMA_RESERVE_GIB=N` sets the reserve (`0` = the old sizing, nothing kept back); `--expert-cache N` is never changed.
 - **A card of its own beside the chip** (for example a Radeon AI PRO R9700). A card of its own is the recommended Main card and the chip stays Off in the card roles.
   If you name the chip in a layer split anyway (`--gpus 0,1`, or the config's `"gpu": [0, 1]`), the split runs as asked, the chip is placed on the first layers and
   never on the last stage (the output head, the draft layer and the check of its guesses), the picture reader is started on the card of its own, and the
   start prints one plain line about it. `"gpu_order": "as_given"` and a manual `layer_split` keep your order. `setup --gpus all` leaves the chip out
   when two cards of their own are present; name it by number to use it.
 - **The CPU.** On Linux with built-in Radeon graphics the engine starts at nice +5, so the desktop keeps its share of the CPU while the engine's workers spin.
-  `STRATA_ENGINE_NICE=0` turns it off, `STRATA_ENGINE_NICE=N` sets another value.
+  `SAGUARO_ENGINE_NICE=0` turns it off, `SAGUARO_ENGINE_NICE=N` sets another value.
 
 What is not known yet: how much of the screen freeze a long compute job on the same chip causes, and whether registering the whole expert arena with the driver
-(the Linux default on gfx1151; Windows uses the unregistered arena since 0.2.1.2) hurts when the GTT is small. `STRATA_ARENA_PIN_GIB=none` runs the unregistered
+(the Linux default on gfx1151; Windows uses the unregistered arena since 0.2.1.2) hurts when the GTT is small. `SAGUARO_ARENA_PIN_GIB=none` runs the unregistered
 arena on any OS; reports with `amdgpu_top` and `dmesg` are welcome.
 
 ## 6. Measured

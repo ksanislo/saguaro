@@ -163,7 +163,7 @@ class Dashboard(unittest.TestCase):
             self.assertIn("--mtp", off["args"])
             self.assertEqual(off["args"][off["args"].index("--mtp-max-t") + 1], "1")
             self.assertEqual(M.settings_of(off)["draft"], "none")
-            self.assertEqual(out["env"], {"MAYA_EXPERT_RAM_GB": "40"})
+            self.assertEqual(out["env"], {"SAGUARO_EXPERT_RAM_GB": "40"})
             with self.assertRaises(ValueError):             # (a config set up without the encoder)
                 M.apply(cfg, {"images": True})
             with self.assertRaises(ValueError):

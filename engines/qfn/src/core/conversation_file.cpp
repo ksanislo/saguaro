@@ -80,7 +80,7 @@ uint64_t load64(const uint8_t* p) { uint64_t v; std::memcpy(&v, p, 8); return v;
 
 // ---- file I/O in aligned 16 MiB blocks.  Linux: O_DIRECT when the filesystem takes it (no page cache, so a
 // 1.2 GB session neither evicts other files nor is charged to the engine's memory cgroup), buffered I/O otherwise
-// (tmpfs, a filesystem that refuses an aligned direct transfer, or STRATA_SESSION_BUFFERED=1).  Windows and other
+// (tmpfs, a filesystem that refuses an aligned direct transfer, or SAGUARO_SESSION_BUFFERED=1).  Windows and other
 // systems: ordinary buffered I/O, same blocks.
 constexpr size_t kAlign = 4096, kBlock = 16u << 20;
 #ifdef _WIN32
@@ -339,7 +339,7 @@ bool free_space(const std::string& path, uint64_t& out) {
 #endif
 
 bool buffered_forced() {
-    const char* e = std::getenv("STRATA_SESSION_BUFFERED");
+    const char* e = std::getenv("SAGUARO_SESSION_BUFFERED");
     return e != nullptr && e[0] == '1';
 }
 

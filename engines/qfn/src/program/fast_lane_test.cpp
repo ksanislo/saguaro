@@ -1,4 +1,4 @@
-// src/program/fast_lane_test.cpp - STRATA_FAST_LANE's row bookkeeping (header-only, CPU): the lane slot's rows in a
+// src/program/fast_lane_test.cpp - SAGUARO_FAST_LANE's row bookkeeping (header-only, CPU): the lane slot's rows in a
 // group window, the cursor, every row kept, the first token from the prompt's last row, the drafter's catch-up tokens.
 #include "strata/program/fast_lane.hpp"
 #include "strata/core/batch_rows.hpp"
@@ -74,7 +74,7 @@ Sim simulate(int64_t n, int64_t resume, bool partner, bool drafts_on, int max_ro
 }  // namespace
 
 int main() {
-    std::printf("fast_lane_test: STRATA_FAST_LANE's rows\n");
+    std::printf("fast_lane_test: SAGUARO_FAST_LANE's rows\n");
     check(fl::eligible_len(40, 0, 96), "eligible: 39 tokens before the last <= 96");
     check(fl::eligible_len(97, 0, 96) && !fl::eligible_len(98, 0, 96), "eligible: exactly at the cap (96 read, then the last)");
     check(fl::eligible_len(5000, 4950, 96), "eligible: a long prompt the slot holds all but 49 of");

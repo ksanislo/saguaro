@@ -1,12 +1,12 @@
 # Batched DMA submission (experimental)
 
-With `--pcie-mode dma`, `STRATA_DMA_BATCH=1` submits a verifier group's independent
+With `--pcie-mode dma`, `SAGUARO_DMA_BATCH=1` submits a verifier group's independent
 expert uploads through `cudaMemcpyBatchAsync` on CUDA 13.0 or later. The default
 is `0`, retaining the existing per-expert copies. The normal kernel-copy mode
 is unchanged. This is an experiment to reduce host submission overhead, not a
 demonstrated increase in model tokens per second.
 
-`STRATA_DMA_BATCH=2` also sets CUDA 13.4's
+`SAGUARO_DMA_BATCH=2` also sets CUDA 13.4's
 `cudaMemcpyFlagPreferOverlapWithCompute`. It is a scheduling hint, not a
 guarantee of overlap. On CUDA 13.0–13.3 this mode behaves like `1`. Older CUDA
 builds and HIP retain individual copies. A single upload or a group larger than

@@ -110,10 +110,10 @@ public:
     /// this instance to layers [l0, l1) (l1 == 0 means "to the end") - the layer split's halves.
     bool load_pack(const std::string& pack_dir, int64_t max_ctx, std::string& err, int dev = 0, int l0 = 0,
                    int l1 = 0);
-    /// The split entry the driver/test use: STRATA_GLM_SPLIT (else `layer_split`, the driver's --layer-split) =
-    /// "0" one device; "<layer>" two parts - layers [0,layer) on device 0, the rest on STRATA_GLM_DEV1 (default
+    /// The split entry the driver/test use: SAGUARO_GLM_SPLIT (else `layer_split`, the driver's --layer-split) =
+    /// "0" one device; "<layer>" two parts - layers [0,layer) on device 0, the rest on SAGUARO_GLM_DEV1 (default
     /// 1); "K1,K2,.." one part per visible device, each later one starting at its K; "auto"/absent: every visible
-    /// device (STRATA_GLM_DEVS="0,2,.." picks and orders them).  The parts are joined by a per-token 64 KB host
+    /// device (SAGUARO_GLM_DEVS="0,2,.." picks and orders them).  The parts are joined by a per-token 64 KB host
     /// hop of the residual at each boundary (no peer access needed).
     bool load_pack_env(const std::string& pack_dir, int64_t max_ctx, std::string& err,
                        const std::string& layer_split = "");
@@ -123,7 +123,7 @@ public:
     bool load_pack_split(const std::string& pack_dir, int64_t max_ctx, const std::vector<int>& bounds,
                          const std::vector<int>& devs, std::string& err);
     static constexpr int kMaxParts = 16;
-    /// The fast decode path (src/core/glm_fast_path.cu) is the default for packs; STRATA_GLM_SLOW=1
+    /// The fast decode path (src/core/glm_fast_path.cu) is the default for packs; SAGUARO_GLM_SLOW=1
     /// keeps the correctness-first per-op path (the reference the fast path is checked against).
     bool fast() const { return fast_ != nullptr; }
     /// Skip the per-token logits download (the driver samples on the device).
@@ -169,25 +169,25 @@ public:
     /// The CPU LANE (a decode's RAM-tier experts): the share of them copied over PCIe to the GPU instead of computed
     /// on the CPU - 0: the CPU takes every one, 1: none (of f such experts in a route, f - round(share f) go to the
     /// CPU).  pcie_share(): the split in use, as a share; set_pcie_share(s): this split from the next token on, s < 0
-    /// the one the engine started with (STRATA_GLM_PCIE_SHARE, else measured at start).  cpu_lane_threads(): the
-    /// threads taking its jobs; cpu_lane_threads_max(): the pool's size (STRATA_GLM_CPU_LANE_MAX can make it more than
+    /// the one the engine started with (SAGUARO_GLM_PCIE_SHARE, else measured at start).  cpu_lane_threads(): the
+    /// threads taking its jobs; cpu_lane_threads_max(): the pool's size (SAGUARO_GLM_CPU_LANE_MAX can make it more than
     /// the lane's own count); set_cpu_lane_threads(n): at most n of the pool's, n <= 0 the lane's own.  These are for
     /// setup's calibration (per request, no restart); false when this engine has no CPU lane.
     double pcie_share() const;
-    /// STRATA_GLM_CPU_CAL: once a request (2000+ lane experts a window), drop a calibration decode stays >15% from
+    /// SAGUARO_GLM_CPU_CAL: once a request (2000+ lane experts a window), drop a calibration decode stays >15% from
     void lane_drift_check();
     /// Between requests: over decode's first windows of lane work, a split the start-up timing chose is planned again
-    /// from the lane's own cost in decode when that is >15% off (at most three times; STRATA_GLM_CPU_RETIME=0: never)
+    /// from the lane's own cost in decode when that is >15% off (at most three times; SAGUARO_GLM_CPU_RETIME=0: never)
     void lane_retime();
     bool set_pcie_share(double share);
     int cpu_lane_threads() const;
     int cpu_lane_threads_max() const;
     bool set_cpu_lane_threads(int n);
-    /// The decode's disk reads: each expert read from the SSD in 3 x n pieces at once (STRATA_GLM_READ_CHUNKS, 8).
+    /// The decode's disk reads: each expert read from the SSD in 3 x n pieces at once (SAGUARO_GLM_READ_CHUNKS, 8).
     /// set_read_chunks(n): n (1-16) from the next read on, n <= 0 the engine's own - for setup's calibration (per
     /// request, no restart): the best size depends on the drive, its driver and the CPU
     void set_read_chunks(int n);
-    /// The decode's light misses (STRATA_GLM_MISS_SKIP_W / _FROM, changes the answers): a routed expert that is not in
+    /// The decode's light misses (SAGUARO_GLM_MISS_SKIP_W / _FROM, changes the answers): a routed expert that is not in
     /// VRAM and carries less than w of the route's weights is left out on layers from `from` on.  set_miss_skip(w, from):
     /// this request's bar and first layer (w < 0 / from < 0: the engine's own) - for sweeps without a restart.
     void set_miss_skip(double w, int from);
@@ -195,7 +195,7 @@ public:
     /// states and conv histories (the DSA caches are append-only, so the position alone restores them) - and
     /// restore it later to continue a prompt that extends the saved one.  false when unsupported.
     bool snapshot_save();
-    // the expert usage file (opt-in, STRATA_GLM_USAGE=<file>: the warm-up follows it ahead of the expert profile):
+    // the expert usage file (opt-in, SAGUARO_GLM_USAGE=<file>: the warm-up follows it ahead of the expert profile):
     // written after each request.  Without it nothing is kept between sessions but --expert-profile-save's profile.
     bool save_usage();
     std::string usage_path() const;
@@ -212,14 +212,14 @@ public:
     /// --dump-routing: every route (the decode's and the prompt's) appended to `path` as Strata's trace records -
     /// int32 layer, int32 k, then k int32 expert ids and k float weights - tools/make_profile.py's input.
     static bool set_routing_dump(const std::string& path, std::string& err);
-    /// STRATA_GLM_ROUTE_DUMP=<dir> (the serve loop writes the files): the host's cumulative route counts, prompt then
+    /// SAGUARO_GLM_ROUTE_DUMP=<dir> (the serve loop writes the files): the host's cumulative route counts, prompt then
     /// decode, each [kRcLayers=128][kRcExperts=512]; layer_slots: each layer's VRAM expert slots (main) on its card
     static bool route_counting();
     static void route_counts(std::vector<uint32_t>& out);
     /// ... the decode's route counts of one sequence (each route tagged with its row's sequence: no blending when several
     /// decode together), [kRcLayers][kRcExperts]; the prompt's chunks go to <dir>/prompt-chunks.txt as they are read
     static void route_counts_seq(int seq, std::vector<uint32_t>& out);
-    static bool route_seq_counting();   // ... counted (ROUTE_DUMP or STRATA_GLM_CONV_UNION)
+    static bool route_seq_counting();   // ... counted (ROUTE_DUMP or SAGUARO_GLM_CONV_UNION)
     static void route_totals(uint64_t& tagged, uint64_t& global);   // decode routes: summed over the sequences / in all
     std::vector<int> layer_slots() const;
     std::vector<int> layer_usable_slots() const;   // ... at most the elastic pool's mapped slots (it gives some to contexts)
@@ -268,11 +268,11 @@ public:
     /// state and the snapshot; false + err on a mismatch or a truncated buffer.
     uint64_t slot_save(std::vector<uint8_t>& data, std::string& err);
     bool slot_load(const std::vector<uint8_t>& data, int64_t n_pos, std::string& err);
-    /// STRATA_GLM_SLOT_FAST=1: slot_save's bytes copied out of every part at once into a host image, then written to
+    /// SAGUARO_GLM_SLOT_FAST=1: slot_save's bytes copied out of every part at once into a host image, then written to
     /// `tmp` by a background thread, renamed to `path` when whole and after(bytes) run there (false: path removed).
     /// The bytes, or 0 + err (nothing queued).  slot_load(path) waits for that write; slot_cancel drops it (a write
     /// under way: its file removed when it ends); slot_flush waits for every write queued (logged when it waited).
-    /// Queued images are capped at STRATA_GLM_SLOT_FAST_QUEUE_MB (8192): a save past it waits for the writer.
+    /// Queued images are capped at SAGUARO_GLM_SLOT_FAST_QUEUE_MB (8192): a save past it waits for the writer.
     static bool slot_fast();
     uint64_t slot_save_bg(const std::string& tmp, const std::string& path, const std::function<bool(uint64_t)>& after,
                           std::string& err);
@@ -315,7 +315,7 @@ public:
     /// closes the reasoning block this way inside the running decode - the speculative loop takes it as the truth
     /// for its position, like a rejected draft, so nothing is read again.
     void force_next(int32_t tok) { force_tok_ = tok; }
-    /// The on-demand vision encoder (serve VLEND / VRECLAIM; STRATA_GLM_VISION_LEND_MB at load): the first GPU's
+    /// The on-demand vision encoder (serve VLEND / VRECLAIM; SAGUARO_GLM_VISION_LEND_MB at load): the first GPU's
     /// lendable pool tail is emptied and freed so the encoder's process can use that VRAM, and allocated again
     /// once it has ended (false while the memory is still taken).  vision_lend_bytes(): 0 when unavailable.
     bool vision_lend(size_t& bytes, std::string& err);
@@ -331,7 +331,7 @@ public:
         }
         return t;
     }
-    /// --spec-follow (STRATA_GLM_SPEC_FOLLOW): the next decoded tokens are `ids`, one a position, instead of the picked
+    /// --spec-follow (SAGUARO_GLM_SPEC_FOLLOW): the next decoded tokens are `ids`, one a position, instead of the picked
     /// ones - every decode path takes them through forced(), so the speculative ones keep exactly the drafts that match
     /// them.  Two builds or settings then decode the same text (the same windows, drafts and routes), which a speed
     /// A/B needs: a near-tie flip otherwise changes the text and with it the draft acceptance.  Empty: off.
@@ -389,7 +389,7 @@ public:
     uint64_t warm_mv0_ = 0, warm_rp0_ = 0;   // (the moves and re-evictions at the event)
     int n_parts_ = 1;                                      // the devices the layers are split across (the CPU lane's share)
     int part_ = 0;                                         // ... and which of them this one is (0 = the first layers)
-    // THE HEAD SPLIT (an EXL3 pack on 3+ parts; STRATA_GLM_HEAD_SPLIT=0: off): a pipelined window's pick on the last
+    // THE HEAD SPLIT (an EXL3 pack on 3+ parts; SAGUARO_GLM_HEAD_SPLIT=0: off): a pipelined window's pick on the last
     // part reads the head's columns [0, head_c0_) there and [head_c0_, n_vocab) on a helper part at once (its own
     // copy), the two argmaxes (or the helper's logits, sampling) joined on the last part - the same pick as the whole
     // row's.  The helper: the part of the fewest layers between the first and the last (their head GEMV ~1.2 ms of
@@ -539,7 +539,7 @@ public:
     std::vector<uint32_t> pool_count_;                     // per-slot use count (LFU with aging, see pool_evict)
     uint64_t pool_evictions_ = 0;
     uint64_t pool_clock_ = 0, pool_hits_ = 0, pool_misses_ = 0;
-    // ---- STRATA_GLM_TIMING=1: cudaEvent phase accumulators (dense mixer / expert tail / rest),
+    // ---- SAGUARO_GLM_TIMING=1: cudaEvent phase accumulators (dense mixer / expert tail / rest),
     // printed once at destruction; pool_host accumulates the host-side miss staging (memcpy from
     // the mmap + issue), which shows up as stream idle inside the expert tail.
     bool timing_ = false;
@@ -565,7 +565,7 @@ public:
     // ---- the miss staging pool (speed pass): one worker per in-flight miss reads the expert's three
     // ranges IN PARALLEL (the NVMe at multi-queue rate instead of one faulting memcpy on the main
     // thread), then the main thread DMAs each staged blob to its slot with a single pinned copy.
-    // STRATA_GLM_NO_STAGE=1 keeps the serial pageable path (A/B).
+    // SAGUARO_GLM_NO_STAGE=1 keeps the serial pageable path (A/B).
     bool stage_on_ = false;
     struct StageJob {
         const uint8_t* src[3] = {nullptr, nullptr, nullptr};
@@ -591,10 +591,10 @@ public:
     // ---- the fast path (src/core/glm_fast_path.cu)
     struct FastState;
     FastState* fast_ = nullptr;
-    bool fast_mode_ = false;                               // decided at load (STRATA_GLM_SLOW=1 turns it off)
+    bool fast_mode_ = false;                               // decided at load (SAGUARO_GLM_SLOW=1 turns it off)
     bool host_logits_ = true;
     int last_tok_ = -1;                                    // the greedy argmax of the last fast forward
-    const strata::kernels::SamplerParams* mtp_sample_ = nullptr;   // decode_spec, STRATA_GLM_SPEC_SAMPLE: fast_mtp DRAWS
+    const strata::kernels::SamplerParams* mtp_sample_ = nullptr;   // decode_spec, SAGUARO_GLM_SPEC_SAMPLE: fast_mtp DRAWS
     int32_t force_tok_ = -1;                               // force_next()
     // pick_tokens' penalty rows (this part's, allocated with the first request that has penalties): a ring of
     // kPenRows rows of pen_w_ tokens, pinned + device, each row's event recorded behind the pick that read it (the
@@ -611,9 +611,9 @@ public:
     std::map<std::string, const uint16_t*> w16_;           // the pack's big BF16 rows, kept BF16 (fast mode)
     bool fast_setup(std::string& err);
     bool fast_setup_finish(std::string& err);
-    bool dual_prefill_ready();   // STRATA_GLM_DUAL_PREFILL (glm_prefill.cu)
+    bool dual_prefill_ready();   // SAGUARO_GLM_DUAL_PREFILL (glm_prefill.cu)
     int dual_pf_state_ = 0;      // 0 not tried, 1 on, -1 off
-    bool calc_prefill_ready();   // STRATA_GLM_PREFILL_CALC (glm_prefill.cu)
+    bool calc_prefill_ready();   // SAGUARO_GLM_PREFILL_CALC (glm_prefill.cu)
     int calc_pf_state_ = 0;      // 0 not tried, 1 on, -1 off
     void ram_left_check() const;
     void fast_destroy();
@@ -634,12 +634,12 @@ public:
         float* ffn;
     };
     bool fast_moe_experts(int il, const MoeIo& io, bool pred, int n_ah, const float* const* ah_bias, bool& pf_pending,
-                          std::string& err, bool rows = false);   // rows: a batched step's row (STRATA_GLM_SKIP_EMPTY)
+                          std::string& err, bool rows = false);   // rows: a batched step's row (SAGUARO_GLM_SKIP_EMPTY)
     // ... its route (moe_route with the token path's settings) into md's plan, the shared expert's h to sh_hq; win /
     // win_n / win_rows: a grouped batched step's row and rows (glm_rows.cu)
     void fast_moe_route(int il, const MoeIo& io, const strata::kernels::glmf::MoeDev& md, void* sh_hq, bool pred,
                         int n_ah, const float* const* ah_bias, bool lane, int win = 0, int win_n = 0, int win_rows = 0);
-    // STRATA_GLM_GROUP_EXPERTS: the routed experts of a batched step's n rows, each distinct one once for its rows
+    // SAGUARO_GLM_GROUP_EXPERTS: the routed experts of a batched step's n rows, each distinct one once for its rows
     // (glm_rows.cu); false with err empty: not here (the rows go one by one)
     bool rows_moe_grouped(int il, int n, std::string& err);
     void fast_service();
@@ -658,10 +658,10 @@ public:
     // in pieces of the ring) - 8 KB/position/layer, 1 GB per card saved at 128K; a snapshot keeps the open pool's rows
     // (snap_pool_: per DSA layer kpool-1 ik rows, then kpool-1 ig rows), since later positions overwrite their slots
     int ik_ring_ = 0;
-    // the fast path's latent cache in INT8 records (--kv int8 / STRATA_GLM_KV_INT8=1; glm_fast.hpp lat8_rec_bytes):
+    // the fast path's latent cache in INT8 records (--kv int8 / SAGUARO_GLM_KV_INT8=1; glm_fast.hpp lat8_rec_bytes):
     // 544 bytes a position and layer against FP16's 1024
     bool lat_q8_ = false;
-    // KV streaming (--kv-resident N / STRATA_GLM_KV_RESIDENT; strata/kernels/glm_kv_stream.hpp): the fast path's DSA
+    // KV streaming (--kv-resident N / SAGUARO_GLM_KV_RESIDENT; strata/kernels/glm_kv_stream.hpp): the fast path's DSA
     // layers keep their latent cache in pinned RAM and N positions of it in VRAM - state_ + dsa_lat_[il] is then the
     // layer's VRAM slots.  Null: every position in VRAM.  (glm_fast_state.hpp)
     struct KvStream;
@@ -686,10 +686,10 @@ public:
     std::string profile_path_;                             // --expert-profile (empty: the pack's own files)
     std::vector<std::pair<int32_t, int32_t>> profile_;     // its ranked (layer, expert) pairs, read by fast_setup
     bool fast_warm(std::string& err);                      // load-time: stream every expert into the tiers
-    bool fast_cpu_lane_setup(std::string& err);            // STRATA_GLM_CPU_LANE: the pool, its calibration, the split
-    bool fast_helper_setup(std::string& err);              // STRATA_GLM_EXPERT_HELPER: complementary GPU cache
+    bool fast_cpu_lane_setup(std::string& err);            // SAGUARO_GLM_CPU_LANE: the pool, its calibration, the split
+    bool fast_helper_setup(std::string& err);              // SAGUARO_GLM_EXPERT_HELPER: complementary GPU cache
     bool fast_helper_adapt(std::string& err);              // helper-only, at an idle boundary
-    bool fast_helper_check(std::string& err);              // STRATA_GLM_HELPER_CHECK: the helper vs this GPU
+    bool fast_helper_check(std::string& err);              // SAGUARO_GLM_HELPER_CHECK: the helper vs this GPU
     void fast_cpu_experts(int il, int ne, const uint8_t* const* blob, const float* w, const float* x, float* out);
     // the same on `pool` with the rows act / hq / ff / dn, or x3 for an EXL3 pack (a verify window's CPU lanes:
     // FastState::win_lane, each with its own rows)
@@ -703,7 +703,7 @@ public:
                         strata::kernels::glmf::CpuAnswer* const* ans, const unsigned int* seq);
     // ---- the NextN (MTP) draft block (the last half carries it; layer index n_layers)
     int mtp_il_ = -1;                                      // its layer index here, -1: not on this half
-    int mtp_src_ = -1;                                     // the shard of STRATA_GLM_MTP_GGUF's block, -1: the model's
+    int mtp_src_ = -1;                                     // the shard of SAGUARO_GLM_MTP_GGUF's block, -1: the model's
     int lt_ = 0;                                           // the tier layers: [l0_, lt_) = the trunk's + the draft's
     void* mtp_arena_ = nullptr;
     uint64_t mtp_arena_bytes_ = 0;                         // (the VRAM report)
@@ -726,9 +726,9 @@ public:
     /// returns the block's greedy proposal for p + 2 (-1: no draft block).  Fills the block's caches at p.
     int mtp_draft(int32_t next_tok, std::string& err);
     bool has_mtp() const;
-    bool kv_int8() const { return lat_q8_; }   // the latent cache in INT8 (STRATA_GLM_KV_INT8=1)
+    bool kv_int8() const { return lat_q8_; }   // the latent cache in INT8 (SAGUARO_GLM_KV_INT8=1)
     /// KV streaming: the positions of each DSA layer kept in VRAM (0: all of them - not streamed); and what
-    /// STRATA_GLM_KV_RESIDENT gives for a context: rounded up to whole pools and to glmf::kKvResidentMin, 0 when unset
+    /// SAGUARO_GLM_KV_RESIDENT gives for a context: rounded up to whole pools and to glmf::kKvResidentMin, 0 when unset
     /// or when the context fits in that many anyway
     int64_t kv_resident() const;
     static int64_t kv_resident_cells(int kpool, int64_t max_ctx);
@@ -764,7 +764,7 @@ public:
     bool decode_spec(strata::kernels::SamplerParams& sp, int64_t max_new, const std::function<bool(int)>& emit,
                      int64_t& produced, std::string& err);
     uint64_t spec_steps_ = 0, spec_hits_ = 0;              // speculative positions, accepted
-    double spec_t_[4] = {0, 0, 0, 0};                      // STRATA_GLM_SPEC_PROF host phases of spec_head/tail
+    double spec_t_[4] = {0, 0, 0, 0};                      // SAGUARO_GLM_SPEC_PROF host phases of spec_head/tail
     int64_t spec_n_ = 0;
     cudaEvent_t spec_ev_[3] = {nullptr, nullptr, nullptr}; // ... and the device span of each token
     bool spec_ev_live_ = false;
@@ -779,7 +779,7 @@ public:
     size_t spec_kda_bytes() const;                         // the head's saved recurrent states on this part
     bool spec_kda_reserve(std::string& err);               // ... taken at setup, before the expert pool
     // the speculative decode on a split of more than two parts: the HEAD GROUP is this part and the ones after it
-    // up to spec_head_last() (STRATA_GLM_SPEC_HEAD=<parts>, default half), the TAIL GROUP the rest; each group runs
+    // up to spec_head_last() (SAGUARO_GLM_SPEC_HEAD=<parts>, default half), the TAIL GROUP the rest; each group runs
     // its parts one after another and the two groups overlap as the two halves of a two-part split do
     Glm5Model* spec_head_last();
     Glm5Model* spec_tail_last();
@@ -791,7 +791,7 @@ public:
     /// own hidden state feeding the next step), one verify window (window()) checks [last token, drafts...], the
     /// target's samples accept the drafts while they match (window_commit keeps them), and the NextN block's cache takes
     /// the kept rows with the trunk's hidden states.  The same tokens the token-at-a-time loop gives for the same
-    /// samples.  On by default on the Strix / Gorgon Halo APUs (gfx115x, mtp_decode_default); STRATA_GLM_MTP_DECODE=1
+    /// samples.  On by default on the Strix / Gorgon Halo APUs (gfx115x, mtp_decode_default); SAGUARO_GLM_MTP_DECODE=1
     /// elsewhere, =0 off.  mtp_ready(): this model was set up for it.
     static bool mtp_decode_wanted(int dev, int n_parts);
     bool mtp_ready() const;
@@ -799,7 +799,7 @@ public:
                     int64_t& produced, std::string& err);
     bool decode_spec_pipe(strata::kernels::SamplerParams& sp, int64_t max_new, const std::function<bool(int)>& emit,
                           int64_t& produced, std::string& err);   // the MTP drafts through a pipelined verify window
-                                                                   // over a split (STRATA_GLM_SPEC_WIN, glm_mtp.cu)
+                                                                   // over a split (SAGUARO_GLM_SPEC_WIN, glm_mtp.cu)
     uint64_t mtp_rounds_ = 0;                              // verify passes (spec_steps_ / spec_hits_: drafts, accepted)
     uint64_t mtp_round_n_[9] = {};                         // ... by the draft length the round used
     bool mtp_fill_prev(int32_t token, int64_t p, std::string& err);   // the token path: entry p - 1 from head_x and token
@@ -808,7 +808,7 @@ private:
     int64_t mtp_hx_pos_ = -1;                              // the position whose trunk hidden state head_x holds
     // the adaptive draft length: per length n, the rounds' wall time (EMA, ms) and how many; per draft position, how
     // often it was reached (its earlier drafts all accepted) and accepted - decayed counts, the recent text's
-    // (STRATA_GLM_MTP_ACC_WINDOW)
+    // (SAGUARO_GLM_MTP_ACC_WINDOW)
     double mtp_ms_[9] = {};
     uint64_t mtp_seen_[9] = {};
     double mtp_reach_[9] = {}, mtp_hit_[9] = {};
@@ -830,7 +830,7 @@ private:
     bool mtp_cache_rows(int64_t p0, int n, const float* h, const int32_t* next, std::string& err, bool sync = true,
                         float* emb_rows_h = nullptr);
 public:
-    // ---- several conversations at once (src/core/glm_multi.cu, STRATA_GLM_SEQS=<n>): each part keeps n sequence
+    // ---- several conversations at once (src/core/glm_multi.cu, SAGUARO_GLM_SEQS=<n>): each part keeps n sequence
     // states (the state arena: residual, KDA states, DSA caches; the position, the snapshot) and binds one at a time -
     // every path that reads `state_` (the token path, the prompt path, snapshots, slots) then works on the bound one.
     // The pipelined decode issues a token of one sequence through every part without waiting, so with n sequences in
@@ -838,7 +838,7 @@ public:
     struct SeqCtx {
         float* state = nullptr;
         int64_t pos = 0, snap_pos = -1;
-        // its own context (STRATA_GLM_SEQ_CTX: the extra sequences can be smaller than the first) and so its own
+        // its own context (SAGUARO_GLM_SEQ_CTX: the extra sequences can be smaller than the first) and so its own
         // arena layout
         int64_t max_ctx = 0;
         uint64_t bytes = 0;
@@ -858,10 +858,10 @@ public:
         KvStream* kv = nullptr;   // KV streaming: its latent caches' host copy and maps (null: not streamed, or bound)
     };
     std::vector<SeqCtx> seq_;                              // empty: one sequence (the classic engine)
-    // ---- ELASTIC CONTEXTS (src/core/glm_multi.cu, STRATA_GLM_ELASTIC=1; CUDA virtual memory): every sequence's state
+    // ---- ELASTIC CONTEXTS (src/core/glm_multi.cu, SAGUARO_GLM_ELASTIC=1; CUDA virtual memory): every sequence's state
     // reserves address space for the whole context, its fixed part (KDA states, index rings) backed at once and its
-    // context-sized DSA caches as positions are written, STRATA_GLM_ELASTIC_STEP tokens at a time, out of a budget per
-    // card that every sequence shares (STRATA_GLM_ELASTIC_KV_GB; default: one whole context's).  Every sequence can
+    // context-sized DSA caches as positions are written, SAGUARO_GLM_ELASTIC_STEP tokens at a time, out of a budget per
+    // card that every sequence shares (SAGUARO_GLM_ELASTIC_KV_GB; default: one whole context's).  Every sequence can
     // reach the whole context; the cards hold what the conversations hold, not what they might.
     struct Elastic;
     std::vector<Elastic*> el_;                             // per sequence; empty: static arenas
@@ -881,7 +881,7 @@ public:
                                                                   // (all: its fixed part too - the slot is free)
     int64_t seq_backed(int s) const;                              // positions s has backed (this part)
     void el_destroy();
-    // ... and the expert pool they take from (STRATA_GLM_ELASTIC_POOL, on with STRATA_GLM_ELASTIC): its main slots
+    // ... and the expert pool they take from (SAGUARO_GLM_ELASTIC_POOL, on with SAGUARO_GLM_ELASTIC): its main slots
     // are backed granule by granule, so a layer's top slots can be given up (lent, then unbacked) for a context's
     // caches - the coldest layer top first - and taken back when the contexts let go
     struct ElPool;
@@ -896,14 +896,14 @@ public:
     void pool_take_back_all();
 
     int cur_seq_ = 0;
-    int route_tag_ = 0;              // STRATA_GLM_ROUTE_DUMP: 1 + the sequence of the routes being issued (0: cur_seq_)
+    int route_tag_ = 0;              // SAGUARO_GLM_ROUTE_DUMP: 1 + the sequence of the routes being issued (0: cur_seq_)
     std::vector<int> row_seq_;       // ... a batched rows step's sequences, by row (rows_bind)
     int seq_count() const { return seq_.empty() ? 1 : (int) seq_.size(); }
-    static void live_seqs_set(int n);                     // the scheduler: requests running now (MAYA_GLM_VRAM_EVICT=live)
+    static void live_seqs_set(int n);                     // the scheduler: requests running now (SAGUARO_GLM_VRAM_EVICT=live)
     int seq_bound() const { return cur_seq_; }
     void seq_bind(int s);                                  // this part
     void seq_bind_all(int s);                              // every part of the split
-    bool seq_alloc_arenas(std::string& err);               // load: the extra arenas (STRATA_GLM_SEQS), before the pool
+    bool seq_alloc_arenas(std::string& err);               // load: the extra arenas (SAGUARO_GLM_SEQS), before the pool
     uint64_t seq_layout(int64_t ctx, SeqCtx& c) const;     // load_pack's arena layout for a context of ctx tokens
     int64_t seq_max_ctx(int s) const {                     // a sequence's context (the bound one's is max_ctx_)
         return seq_.empty() || s == cur_seq_ ? max_ctx_ : seq_[(size_t) s].max_ctx;
@@ -926,7 +926,7 @@ public:
     /// sequence's position advances by one.  n <= rows_max().
     bool rows_ok() const { return rows_ != nullptr && n_parts_ == 1 && split_next_ == nullptr && fast_ != nullptr; }
     static int rows_max();
-    /// STRATA_GLM_SPLIT_ROWS as the scheduler and the parts' setup both take it: 0 (off) .. rows_max()
+    /// SAGUARO_GLM_SPLIT_ROWS as the scheduler and the parts' setup both take it: 0 (off) .. rows_max()
     static int split_rows_setting();
     bool multi_rows(const int* seqs, const int32_t* tokens, const strata::kernels::SamplerParams* sps, int n,
                     int* tokens_out, std::string& err);
@@ -936,7 +936,7 @@ public:
     bool multi_issue_rows(const int* seqs, const int32_t* tokens, const strata::kernels::SamplerParams* sps, int n,
                           std::string& err);
     // ---- several conversations drafting with the NextN block at once (src/core/glm_mtp_rows.cu,
-    // STRATA_GLM_MULTI_MTP=<drafts>, off by default).  A conversation's WINDOW - its last written token and its drafts
+    // SAGUARO_GLM_MULTI_MTP=<drafts>, off by default).  A conversation's WINDOW - its last written token and its drafts
     // - goes through the split's batched rows as consecutive rows of one group; the last part's head picks every
     // row; the host keeps the rows up to the first wrong draft (strata/core/mtp_rows.hpp) and commits them (the
     // recurrent states restored and the kept rows replayed where a draft missed, the positions set); the NextN block
@@ -944,7 +944,7 @@ public:
     // Calls for one group, in this order: mtpw_front, mtpw_back, mtpw_picks, mtpw_commit, mtpw_draft_queue,
     // mtpw_draft_take; several groups may be between their front and their commit at once (each conversation in one).
     static int multi_mtp_setting();                       // the drafts a window carries at most (0: off)
-    static int multi_mtp_cap();                           // a group's rows at most (STRATA_GLM_MULTI_MTP_ROWS)
+    static int multi_mtp_cap();                           // a group's rows at most (SAGUARO_GLM_MULTI_MTP_ROWS)
     struct MtpRows;
     MtpRows* mtpw_ = nullptr;
     bool mtpw_alloc(std::string& err);                    // load, every part: before the pool
@@ -969,7 +969,7 @@ public:
                           const int* drafts, std::string& err);
     bool mtpw_draft_take(int32_t* out, std::string& err);   // the drafts, conversation after conversation
     uint64_t mtpw_steps_ = 0, mtpw_rows_ = 0;              // (statistics: verify steps and rows, every group)
-    // STRATA_GLM_MTPW_CREWS=1: the group's rows enqueued by the parts' own workers (the host's serial launch chain,
+    // SAGUARO_GLM_MTPW_CREWS=1: the group's rows enqueued by the parts' own workers (the host's serial launch chain,
     // which a row-4 group's round otherwise spends ~80-100 ms on, runs on all the parts at once).  The workers keep
     // the same per-part body (mtpw_part), gated per row by the previous part's row-hop events; the host only hands the
     // group to them (mtpw_front/mtpw_back turn into kicks) and waits for the enqueues at the picks.
@@ -1055,10 +1055,10 @@ public:
     bool window_commit(int n_keep, std::string& err, bool wait = true);
     void win_commit_wait();
     bool win_reserve(std::string& err);                    // the window's buffers and state backup, before the pool
-    void win_prof_report();                                // STRATA_GLM_WIN_PROF: each part's window time, then reset
+    void win_prof_report();                                // SAGUARO_GLM_WIN_PROF: each part's window time, then reset
     // ---- the DFlash drafter (src/core/glm_dflash.cu): the part with the head holds it, on its device
     std::unique_ptr<GlmDflash> dflash_;
-    std::string dflash_path_;                              // STRATA_GLM_DFLASH: its GGUF (every part knows it)
+    std::string dflash_path_;                              // SAGUARO_GLM_DFLASH: its GGUF (every part knows it)
     bool dflash_on_ = false;                               // a drafter will be bound: the window's buffers at setup
     GlmDflash* cap_d_ = nullptr;                           // every part: the drafter its captures go to ...
     std::vector<int> cap_k_;                               // ... absolute layer -> its feature index (-1: not read)
@@ -1073,14 +1073,14 @@ public:
     /// drafter's block, p_min < 0: 0.5 on a split, 0.9 on one GPU) is checked by one verify window - pipelined on a split (window_pipe's steps, stopped at
     /// the first wrong draft), batched on one GPU - the same tokens as token-at-a-time decode for the same samples.
     /// After the prompt's last forward().
-    /// n_min / p_cum: GlmDflash::draft_finish's (< 0: STRATA_GLM_DFLASH_MIN / _CUM, else 0)
+    /// n_min / p_cum: GlmDflash::draft_finish's (< 0: SAGUARO_GLM_DFLASH_MIN / _CUM, else 0)
     bool decode_dflash(strata::kernels::SamplerParams& sp, int64_t max_new, int n_max, float p_min,
                        const std::function<bool(int)>& emit, int64_t& produced, std::string& err, int n_min = -1,
                        float p_cum = -1.0f);
     // ---- the batched prompt path (src/core/glm_prefill.cu)
     struct PrefillState;
     PrefillState* pf_ = nullptr;
-    // STRATA_GLM_PREFILL_CALC: this (waiting) part's share of another part's MoE layer, enqueued on this GPU
+    // SAGUARO_GLM_PREFILL_CALC: this (waiting) part's share of another part's MoE layer, enqueued on this GPU
     struct CalcJob;
     bool prefill_calc(const CalcJob& job, std::string& err);
     bool prefill_setup(std::string& err);                  // in fast_setup: sizes, host buffers (no device memory)
@@ -1107,7 +1107,7 @@ public:
     };
     PinnedPrompt prefill_pinned() const;
     // the expert pool's bytes on part `part` from its free VRAM (glm_fast_path.cu): --expert-cache auto | N and the VRAM
-    // reserve (STRATA_GLM_EXPERT_CACHE, STRATA_GLM_RESERVE_MB / _RESERVE_LATER_MB; the driver sets them from the
+    // reserve (SAGUARO_GLM_EXPERT_CACHE, SAGUARO_GLM_RESERVE_MB / _RESERVE_LATER_MB; the driver sets them from the
     // config's args).  floor_b: the pool's floor (a route's experts and the spares, every layer), which a small card's
     // default reserve gives way to; slot_b: the part's largest expert slot (--expert-cache N is N of them)
     struct PoolBudget {
@@ -1125,7 +1125,7 @@ public:
     PoolBudget pool_b_;                                    // the budget the pool was carved from
     static size_t mmq_scratch_reserve();      // ... of which the prompt path's MMQ scratch pool needs this much
     // the slots a layer must keep while the pool lends the prompt path: one route's experts, the device's spares, +2
-    // (Strata's floor); STRATA_GLM_PREFILL_KEEP lowers it, never below route + spares
+    // (Strata's floor); SAGUARO_GLM_PREFILL_KEEP lowers it, never below route + spares
     static int pool_keep(int n_exp_used);
     bool lend_tail(size_t limit, uint64_t& moved, uint64_t& dropped, std::string& err);
     bool lend_slots(const std::function<bool(int, int)>& sel, uint64_t& moved, uint64_t& dropped, std::string& err);
@@ -1141,7 +1141,7 @@ public:
     /// left; no logits.  false with `err` empty when the fast path has no prompt path (feed them to forward()).
     bool prefill(const std::vector<int32_t>& tokens, std::string& err, int32_t next_token = -1);
     bool prefill_run(const std::vector<int32_t>& tokens, std::string& err);   // prefill() between lend and return
-    /// prefill() in three steps, for a prompt read on another thread beside the decode (STRATA_GLM_SEQS): begin takes
+    /// prefill() in three steps, for a prompt read on another thread beside the decode (SAGUARO_GLM_SEQS): begin takes
     /// the bound sequence's layout and lends (false with `err` empty: no prompt path for these n tokens - the token
     /// path), prefill_run reads, finish returns and moves that sequence's position.  begin and finish on the
     /// decode's thread with nothing in flight.
@@ -1159,15 +1159,15 @@ public:
     /// the prompt (prefill then returns false with err "cancelled" and the sequence must be reset).
     std::function<bool(int64_t, int64_t)> prefill_progress;
     /// The fewest chunks a split cuts a prompt-path call into (1: as many as the largest chunk needs).  The scheduler's
-    /// interleaved pieces (STRATA_GLM_PREFILL_INTERLEAVE) set 2: a piece no longer than one chunk would run on one GPU
-    /// after the other, two pipeline across the split.  STRATA_GLM_PREFILL_MIN_CHUNKS sets a floor for every call
+    /// interleaved pieces (SAGUARO_GLM_PREFILL_INTERLEAVE) set 2: a piece no longer than one chunk would run on one GPU
+    /// after the other, two pipeline across the split.  SAGUARO_GLM_PREFILL_MIN_CHUNKS sets a floor for every call
     /// (prefill_floor: the larger of the two).
     int prefill_min_chunks = 1;
     /// A chunk length to cut a prompt-path call in instead (0: the call's own choice) - with prefill_chunk_for, the
     /// interleaved pieces keep the chunk boundaries an uncut read takes (the experts' residency per chunk can still
     /// differ: strata/core/prefill_pieces.hpp)
     int prefill_force_chunk = 0;
-    /// STRATA_GLM_PREFILL_GAPS (strata/core/prefill_gaps.hpp; set by the several-conversation scheduler while it reads
+    /// SAGUARO_GLM_PREFILL_GAPS (strata/core/prefill_gaps.hpp; set by the several-conversation scheduler while it reads
     /// a prompt with other requests decoding): a split's read calls prefill_gap at a chunk boundary, from the thread
     /// that called prefill(), with every part idle (each part's stream synchronized, no part started on its next
     /// chunk) and the pool's tail still lent - when prefill_gap_wanted() says there is something to decode.  The
@@ -1177,7 +1177,7 @@ public:
     std::function<int()> prefill_gap;
     /// The chunk length a prompt-path call of n tokens takes (0: no prompt path)
     int prefill_chunk_for(int64_t n) const;
-    /// The fewest chunks a call of n tokens is cut into (STRATA_GLM_PREFILL_MIN_CHUNKS or call_min; 1 on one GPU)
+    /// The fewest chunks a call of n tokens is cut into (SAGUARO_GLM_PREFILL_MIN_CHUNKS or call_min; 1 on one GPU)
     int64_t prefill_floor(int64_t n, int call_min) const;
     /// Debug: every half's sequence state (KDA states + conv histories, DSA caches) to <path>.<half>.bin, with the
     /// per-layer offsets in <path>.<half>.txt - two runs that should agree are compared per layer and component.

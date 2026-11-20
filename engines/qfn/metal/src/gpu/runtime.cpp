@@ -187,7 +187,7 @@ Error wait_value(MTL::SharedEvent* ev, uint64_t v) {
 void check_purged(const Alloc* a, const char* what) {
     if (a && a->purged) {
         std::fprintf(stderr, "strata metal runtime: a %s touches a device allocation of %.1f MB that was given back "
-                             "(STRATA_METAL_KEEP_HOST_WEIGHTS=1 keeps it)\n", what, a->bytes / 1e6);
+                             "(SAGUARO_METAL_KEEP_HOST_WEIGHTS=1 keeps it)\n", what, a->bytes / 1e6);
         void* fr[48];
         backtrace_symbols_fd(fr, backtrace(fr, 48), 2);   // which host code still reads it
         std::abort();
@@ -267,9 +267,9 @@ Error run_op(StreamImpl* s, const Op& o) {
     return kSuccess;
 }
 
-// STRATA_METAL_ALLOC_LOG=1: every allocation of 16 MB or more, with the running total (memory budgets on small Macs)
+// SAGUARO_METAL_ALLOC_LOG=1: every allocation of 16 MB or more, with the running total (memory budgets on small Macs)
 void alloc_log(const char* what, size_t n) {
-    static const bool on = std::getenv("STRATA_METAL_ALLOC_LOG") != nullptr;
+    static const bool on = std::getenv("SAGUARO_METAL_ALLOC_LOG") != nullptr;
     static std::atomic<uint64_t> tot{0};
     const uint64_t t = tot += n;
     if (on && n >= (16u << 20)) std::fprintf(stderr, "strata metal runtime: %s %.1f MB (total %.2f GB)\n", what, n / 1e6, t / 1e9);

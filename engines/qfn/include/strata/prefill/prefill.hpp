@@ -38,10 +38,10 @@ struct PrefillStats {
     int64_t experts_streamed = 0;   ///< expert blobs copied host -> device
     int64_t experts_dma = 0;        ///< ...of which straight from the pinned arena (no CPU copy)
     int64_t experts_resident = 0;   ///< expert-layer groups served from the VRAM tier
-    int64_t experts_direct = 0;     ///< ...of which MMQ read in their cache slots, not gathered (STRATA_MMQ_DIRECT=1)
-    int64_t swiglu_fused = 0;       ///< STRATA_MMQ_SWIGLU_Q8=1: expert groups whose down input was quantized in the fused pass
+    int64_t experts_direct = 0;     ///< ...of which MMQ read in their cache slots, not gathered (SAGUARO_MMQ_DIRECT=1)
+    int64_t swiglu_fused = 0;       ///< SAGUARO_MMQ_SWIGLU_Q8=1: expert groups whose down input was quantized in the fused pass
     int64_t swiglu_h = 0;           ///< ...and groups that fell back to writing H (switch on, fused pass not applicable)
-    int64_t experts_cpu = 0;        ///< ...computed on the CPU pool instead of streamed (STRATA_PREFILL_CPU_SHARE)
+    int64_t experts_cpu = 0;        ///< ...computed on the CPU pool instead of streamed (SAGUARO_PREFILL_CPU_SHARE)
     double cpu_share = 0;           ///< ...the share of the streamed ones it took last (measured by default)
     double ms_ple = 0;
 };
@@ -50,7 +50,7 @@ struct PrefillStats {
 namespace strata::core { class MtpDrafter; }
 namespace strata::prefill {
 
-/// STRATA_PREFILL_MULTI: one prompt read into its own sessions, queued on a layer split's first stage (Prefill::enqueue).
+/// SAGUARO_PREFILL_MULTI: one prompt read into its own sessions, queued on a layer split's first stage (Prefill::enqueue).
 /// Its chunks follow the ones queued before it through every stage, so stage 0 reads this prompt while the later
 /// stages finish the one before. The callbacks are this prompt's (the Prefill's own members are not called).
 struct PromptJob {
@@ -66,7 +66,7 @@ struct PromptJob {
     /// Once: from the last stage's thread when it has read the last chunk, or from the stage that failed.
     std::function<void(bool ok, const std::string& err)> on_done;
 
-    /// STRATA_BATCH_READS: a batched chunk carries pieces of several queued prompts (each of its own sessions); this
+    /// SAGUARO_BATCH_READS: a batched chunk carries pieces of several queued prompts (each of its own sessions); this
     /// job's tokens are theirs in order, and `segs` says whose.  Only the queue's worker builds one.
     struct Seg {
         std::shared_ptr<PromptJob> job;
@@ -76,7 +76,7 @@ struct PromptJob {
     std::vector<Seg> segs;
     int64_t taken = 0;   ///< tokens the worker gave stage 0 so far (a prompt a batch sliced stays queued for the rest)
     bool whole = false;  ///< read in one chunk (at most the buffers' tokens), as a batch reads its segments
-    bool urgent = false; ///< STRATA_BATCH_READS_FAST: a short read's piece (the whole read fits FAST): the next chunk takes it
+    bool urgent = false; ///< SAGUARO_BATCH_READS_FAST: a short read's piece (the whole read fits FAST): the next chunk takes it
 
     bool failed() const { return failed_.load(); }
     bool done() const { return done_.load(); }
@@ -91,7 +91,7 @@ private:
 
 /// HIP: one tiny BF16 and one tiny FP16 product on a private handle, so the first prompt does not pay hipBLAS's one-time
 /// library loads (about 2.5 s on an R9700); once per device, later calls wait for the first and return.  Safe to call from a
-/// thread before the expert arena loads.  STRATA_PREFILL_WARM=0 makes it a no-op.  Nothing on CUDA / SYCL.
+/// thread before the expert arena loads.  SAGUARO_PREFILL_WARM=0 makes it a no-op.  Nothing on CUDA / SYCL.
 void warm_gemm_libraries(int device);
 
 
@@ -100,7 +100,7 @@ public:
     /// E-9: the draft layer's K/V for prompt cells [cell0, cell0 + n) from their final residual rows `R_rows`
     /// (device) and `next_tokens` (host: the token at cell+1), in batches through this path's GEMMs and its idle
     /// scratch - call it from on_chunk.  false with `err` empty: not applicable here (a ring or hybrid K/V, another
-    /// device, too little scratch; STRATA_MTP_BATCH=0), the caller runs the drafter's own pass.  Not bit-identical to
+    /// device, too little scratch; SAGUARO_MTP_BATCH=0), the caller runs the drafter's own pass.  Not bit-identical to
     /// that pass (FP16 GEMMs instead of Q8_1 activations): the drafts may differ, never the target's tokens' logits.
     /// `why` (optional): on a decline (false, `err` empty) the reason, a static string.
     bool draft_kv(core::MtpDrafter& mtp, const float* R_rows, const int32_t* next_tokens, int64_t n, int64_t cell0,
@@ -131,7 +131,7 @@ public:
     /// The cells the K/V staging holds as laid out now (0: no staging - the K/V is resident).
     int64_t stage_cells() const;
     /// The staging cells a loan for reads reaching `reach` cells lays out: 262144 (or the whole context, if less) up
-    /// to there, past it the reach rounded up to 131072; 0 (the whole context) for reach <= 0 or STRATA_KV_STAGE_REACH=0.
+    /// to there, past it the reach rounded up to 131072; 0 (the whole context) for reach <= 0 or SAGUARO_KV_STAGE_REACH=0.
     static int64_t stage_cells_for(const core::SessionState& ss, int64_t reach);
 
     /// The share of the streamed experts' bytes DMA-able straight from pinned RAM (1 = all).  Sizes the streamed
@@ -139,17 +139,17 @@ public:
     static void set_pinned_share(double share);
     static double pinned_share();
     /// The chunk size from which a chunk streams every expert the GPU does not hold, routed or not; a smaller one
-    /// stages only the experts it routes to.  1024, or STRATA_PREFILL_STREAM_MIN, or the CPU share's limit once that
-    /// is armed (3072 when STRATA_PREFILL_CPU_SHARE is set).
+    /// stages only the experts it routes to.  1024, or SAGUARO_PREFILL_STREAM_MIN, or the CPU share's limit once that
+    /// is armed (3072 when SAGUARO_PREFILL_CPU_SHARE is set).
     static int64_t stream_all_min_tokens();
     /// --prefill-pipe (opt-in): the chunk a layer split's first stage reads an `n`-token prompt in, for `stages`
     /// stages, chunks of at most `cap` (the buffers' size) and a stage-chunk cost of b + a C with b/a = `ratio` tokens
-    /// (0: unknown - STRATA_PREFILL_EQUAL's rule: the same chunk count as `cap` gives, evened out when its last chunk
+    /// (0: unknown - SAGUARO_PREFILL_EQUAL's rule: the same chunk count as `cap` gives, evened out when its last chunk
     /// has stream_all_min tokens or more): the chunk count with the pipeline's least time, see the definition. `cap`
     /// when that is today's split or not 3% better than it. A function of its arguments only.
     static int64_t pipeline_chunk(int64_t n, int64_t cap, int stages, double ratio);
-    /// --prefill-pipe for this run: 0 off (the buffers' chunks), 1 today's chunk count evened out (STRATA_PREFILL_EQUAL's
-    /// rule), a number > 1 the rig's b/a in tokens (setup's --calibrate measures it). Default: STRATA_PREFILL_PIPE, else 0.
+    /// --prefill-pipe for this run: 0 off (the buffers' chunks), 1 today's chunk count evened out (SAGUARO_PREFILL_EQUAL's
+    /// rule), a number > 1 the rig's b/a in tokens (setup's --calibrate measures it). Default: SAGUARO_PREFILL_PIPE, else 0.
     static void set_pipe(double value);
     /// The same for the next prompts only (the `pipe=` request key, setup's calibration); < 0 = the run's own value.
     static void set_pipe_request(double value);
@@ -175,10 +175,10 @@ public:
     int64_t chain_experts_streamed() const;
     int64_t chain_experts_cpu() const;   ///< the same chain's experts the CPU share took
     /// #340: the streamed ring's slot count for chunks that stream every expert, instead of the pinned-share rule
-    /// (0 = that rule). Set before any `bytes_needed`/`init` (both count the ring); STRATA_PREFILL_RING still wins.
+    /// (0 = that rule). Set before any `bytes_needed`/`init` (both count the ring); SAGUARO_PREFILL_RING still wins.
     static void set_ring_override(int slots);
     /// #583: the auto chunk scan's byte-budget ring, for chunks above `small_max` (0.1.39's auto chunk: a prompt that
-    /// fits it keeps 0.1.39's ring).  0 slots = none.  A layer split's set_ring_override and STRATA_PREFILL_RING win.
+    /// fits it keeps 0.1.39's ring).  0 slots = none.  A layer split's set_ring_override and SAGUARO_PREFILL_RING win.
     static void set_ring_budget(int slots, int64_t small_max);
 
     /// Device bytes `init` needs for a chunk of `chunk` tokens (what a borrowed region must hold).  `src`: init gets an
@@ -206,17 +206,17 @@ public:
     /// chunk was small (< 6144), else 0.1.39's ring (measured: shrinking it for a bigger chunk lost there).
     static int64_t ring_cap_for(int64_t old_chunk);
 
-    /// What the ring actually resolves to for a chunk of `chunk` tokens, after the override, STRATA_PREFILL_RING
+    /// What the ring actually resolves to for a chunk of `chunk` tokens, after the override, SAGUARO_PREFILL_RING
     /// and the pinned-share rule - the slot count `init` lays out.  The engine reports it on its INFO line so the
     /// Monitor tab shows the pair the run really got, not what it asked for.
     static int64_t ring_slots_for(int64_t chunk);
 
     /// 0.1.39b (#583, the default): the ring as a byte budget, the loan's corrected count and the auto chunk scan that
-    /// keeps the ring full.  STRATA_RING_BYTES=0: 0.1.39's ring, loan and chunk list.
+    /// keeps the ring full.  SAGUARO_RING_BYTES=0: 0.1.39's ring, loan and chunk list.
     static bool ring_bytes_enabled();
 
-    /// STRATA_MMQ_DIRECT: the guard each sized expert-cache slot keeps after its blob (ExpertCache::set_slot_guard),
-    /// so the prompt MMQ can read a resident expert in its slot.  0 unless STRATA_MMQ_DIRECT is 1 or 2 on a CUDA
+    /// SAGUARO_MMQ_DIRECT: the guard each sized expert-cache slot keeps after its blob (ExpertCache::set_slot_guard),
+    /// so the prompt MMQ can read a resident expert in its slot.  0 unless SAGUARO_MMQ_DIRECT is 1 or 2 on a CUDA
     /// build with the pointer-table MMQ (STRATA_MMQ_TAB).
     static size_t slot_guard_bytes();
 
@@ -226,16 +226,16 @@ public:
 
     const PrefillStats& stats() const { return stats_; }
 
-    /// STRATA_PREFILL_MULTI, first stage only: queue a prompt (see PromptJob). Returns at once; a worker thread reads
+    /// SAGUARO_PREFILL_MULTI, first stage only: queue a prompt (see PromptJob). Returns at once; a worker thread reads
     /// the queued prompts in order, each without waiting for the later stages to finish the one before. Every stage's
     /// buffers (and a loan they are carved from) serve all queued prompts: keep the loan until drain_jobs.
     /// Not beside `run` (drain_jobs first).
     /// `front`: before the prompts not started yet (a shorter one first; the one being read goes on).
     void enqueue(std::shared_ptr<PromptJob> job, bool front = false);
-    /// Several at once, in order (the worker sees them together: STRATA_BATCH_READS can read them in one chunk).
+    /// Several at once, in order (the worker sees them together: SAGUARO_BATCH_READS can read them in one chunk).
     void enqueue(std::vector<std::shared_ptr<PromptJob>> jobs, bool front = false);
     /// The queued prompts stage 0 has not started that `pred` picks, taken out of the queue (their on_done never runs).
-    /// One a batched chunk read part of (STRATA_BATCH_READS) has started: it stays.
+    /// One a batched chunk read part of (SAGUARO_BATCH_READS) has started: it stays.
     std::vector<std::shared_ptr<PromptJob>> withdraw(const std::function<bool(const PromptJob&)>& pred);
     /// Waits until every queued prompt has gone through every stage (each one's on_done has run).
     void drain_jobs();
@@ -243,7 +243,7 @@ public:
     size_t jobs_pending() const;
     /// Prompts queued (not being read) whose first stage's session is `s0`.
     size_t jobs_queued_for(const core::SessionState* s0) const;
-    /// STRATA_BATCH_READS=1: the worker reads up to STRATA_BATCH_READS_MAX (4) queued prompts of different sessions
+    /// SAGUARO_BATCH_READS=1: the worker reads up to SAGUARO_BATCH_READS_MAX (4) queued prompts of different sessions
     /// in one chunk; 0 when off.  Each gets an even share of the chunk (what one leaves goes to the others).
     static int batch_reads_max();
     /// The batch of a chunk: tokens per prompt for budget `budget` and what each has left (water-filling, in order).
@@ -257,10 +257,10 @@ public:
         std::vector<int64_t> got;
         bool fast = false;   ///< a latency chunk: urgent reads whole, the others at most `share` each (may be one prompt)
     };
-    /// STRATA_BATCH_READS_FAST=<tokens> (512; 0 off): an urgent piece of at most that many tokens goes in the next chunk
-    /// whole, ahead of everything not started; each other reader gets STRATA_BATCH_READS_FAST_SHARE (128) at most, the
-    /// chunk at most STRATA_BATCH_READS_FAST_CHUNK tokens (default: just below the stream-all size, 1023).
-    /// STRATA_BATCH_READS_FAST_SHRINK (512; 0 off): while a short read is admitted but not queued yet
+    /// SAGUARO_BATCH_READS_FAST=<tokens> (512; 0 off): an urgent piece of at most that many tokens goes in the next chunk
+    /// whole, ahead of everything not started; each other reader gets SAGUARO_BATCH_READS_FAST_SHARE (128) at most, the
+    /// chunk at most SAGUARO_BATCH_READS_FAST_CHUNK tokens (default: just below the stream-all size, 1023).
+    /// SAGUARO_BATCH_READS_FAST_SHRINK (512; 0 off): while a short read is admitted but not queued yet
     /// (set_urgent_wait), the chunks are at most that many tokens, a lone reader's piece sliced too.
     struct BatchFast {
         int64_t tokens = 0, share = 128, chunk = 0, shrink = 0;
@@ -268,7 +268,7 @@ public:
     void set_urgent_wait(bool on) { urgent_wait_.store(on, std::memory_order_release); }
     /// Each stage before each queued chunk but one with an urgent read (stage 0: the queue's worker; a later stage: its
     /// hand-off thread), with nothing of the prompt path held: may wait (the decode share,
-    /// STRATA_BATCH_READS_DECODE_WINDOWS), never compute. `chunk_ms`: that stage's last chunk time. Set while idle.
+    /// SAGUARO_BATCH_READS_DECODE_WINDOWS), never compute. `chunk_ms`: that stage's last chunk time. Set while idle.
     std::function<void(double chunk_ms)> between_chunks;
     double last_chunk_ms_ = -1.0;   ///< (a later stage: its last queued chunk's time, set on its hand-off thread)
     /// A queued prompt's chunk is on this stage's card now (any thread may read).
@@ -309,9 +309,9 @@ public:
     /// The first stage only, checked before every chunk but the first: true ends the run there as if the prompt
     /// ended there.  `run` returns true once every stage has read the tokens before that chunk, and `stopped_at()`
     /// says how many of the run's tokens that is (-1 when the run read them all).  A read beside the batch slots
-    /// (STRATA_PIPED_CONCURRENT) gives way to a waiting shorter request there.
+    /// (SAGUARO_PIPED_CONCURRENT) gives way to a waiting shorter request there.
     std::function<bool()> stop_at_chunk;
-    /// 149-prefetch (STRATA_RAM_ADAPT2): a layer's routed expert ids (T x k, -1 = none) after the prompt path downloaded them
+    /// 149-prefetch (SAGUARO_RAM_ADAPT2): a layer's routed expert ids (T x k, -1 = none) after the prompt path downloaded them
     /// for its grouping on the host; a policy may count them. Not called on the paths that keep the ids on the GPU.
     std::function<void(int64_t layer, const int32_t* ids, int64_t n)> on_routes;
     int64_t stopped_at() const { return stopped_at_; }
@@ -320,7 +320,7 @@ public:
     void set_session(core::SessionState& ss);
     core::SessionState& session() const;
     /// Grows this stage's (and the later stages') pinned upload slots to what a text chunk of `T` tokens uploads, so
-    /// a run of such chunks allocates no pinned memory (STRATA_PIPED_CONCURRENT: an allocation or free on the read's
+    /// a run of such chunks allocates no pinned memory (SAGUARO_PIPED_CONCURRENT: an allocation or free on the read's
     /// thread takes the driver's lock).  Before the run, with nothing of this path in flight.  False: a slot could
     /// not be had (it then grows at first use, as before).
     bool reserve_uploads(int64_t T);
@@ -337,7 +337,7 @@ public:
     void set_stage(int64_t layer_begin, int64_t layer_end, Prefill* next) {
         stage_lb_ = layer_begin; stage_le_ = layer_end; next_ = next;
     }
-    /// STRATA_NUMA_PLACE: the NUMA node of the hand-off buffers (the next stage's card, which reads them); set before `init`.
+    /// SAGUARO_NUMA_PLACE: the NUMA node of the hand-off buffers (the next stage's card, which reads them); set before `init`.
     void set_hand_node(int node) { hand_node_ = node; }
 
     /// LAYER SPLIT: `helper` is another stage's prompt path (another GPU).  A prompt of one chunk runs the stages one
@@ -345,11 +345,11 @@ public:
     /// non-resident experts over its own PCIe link into its own (lent) prompt buffers, computes their rows, and sends
     /// them back - the --peer-device peer's streaming, without P2P (activations and rows through mapped host memory,
     /// read by copy kernels).  Only on the MMQ prompt path, only for chunks of stream_all_min() tokens and more, up to
-    /// the size where the measured share stops paying.  Opt-in: STRATA_PREFILL_HELP=1 (not bit-identical to the default).  Both stages must have
+    /// the size where the measured share stops paying.  Opt-in: SAGUARO_PREFILL_HELP=1 (not bit-identical to the default).  Both stages must have
     /// run `init`.
     bool set_stage_helper(Prefill* helper, std::string& err);
 
-    /// The CPU expert pool (decode's, idle while a prompt is read). With STRATA_PREFILL_CPU_SHARE set, a chunk below
+    /// The CPU expert pool (decode's, idle while a prompt is read). With SAGUARO_PREFILL_CPU_SHARE set, a chunk below
     /// stream_all_min() tokens - an agent's tool output - hands it the non-resident experts routed by at most MAXT of
     /// its tokens, fewest first, up to a share of the experts it would stream (`auto`: measured, where both sides end
     /// together). The CPU reads them from RAM (the arena, the page-locked copy, or the mapped experts.bin's pages)
@@ -358,17 +358,17 @@ public:
     /// thread runs meanwhile (no batch slots); on a layer split every stage may have it - one stage at a time takes it
     /// for a chunk. Set before `init`.
     void set_cpu_pool(kernels::cpu::ExpertPool* pool);
-    /// STRATA_P2P_HANDOFF=2: hand each chunk to the next stage in that stage's VRAM (two buffers of the host hand-off's
+    /// SAGUARO_P2P_HANDOFF=2: hand each chunk to the next stage in that stage's VRAM (two buffers of the host hand-off's
     /// size there, written peer to peer) where this GPU can reach it; otherwise the pinned host buffers stay.  After
     /// every stage's `init`; once.  Returns the line for the log ("" when there is no next stage on another GPU).
     std::string enable_peer_handoff();
-    /// With STRATA_PREFILL_CPU_SHARE set and `applies` (a pool will be set): the chunks staged after their routing - the
-    /// only ones the share applies to - go up to STRATA_PREFILL_CPU_SHARE_MAX tokens (default 3072) instead of 1024.
+    /// With SAGUARO_PREFILL_CPU_SHARE set and `applies` (a pool will be set): the chunks staged after their routing - the
+    /// only ones the share applies to - go up to SAGUARO_PREFILL_CPU_SHARE_MAX tokens (default 3072) instead of 1024.
     /// Before any `bytes_needed` (the ring and the small-chunk buffers follow the limit); `init` also sets it.
     /// `by_default`: this path is one the share was measured on (CUDA, one GPU, no batch slots), so with the variable unset
-    /// the share is on for chunks below 1024 tokens (STRATA_PREFILL_CPU_SHARE=0 turns it off).
+    /// the share is on for chunks below 1024 tokens (SAGUARO_PREFILL_CPU_SHARE=0 turns it off).
     static void arm_cpu_share(bool applies, bool by_default = false);
-    /// The staged-chunk limit of a default-armed share (1024; STRATA_SHORT_READS raises it).  Call before arm_cpu_share.
+    /// The staged-chunk limit of a default-armed share (1024; SAGUARO_SHORT_READS raises it).  Call before arm_cpu_share.
     static void set_share_default_max(int64_t tokens);
 
 private:
@@ -400,7 +400,7 @@ private:
     bool bind_stage_helper(int64_t T);  // binds the helper's buffers for a one-chunk prompt of T tokens
     const float* hand_in_ = nullptr;    ///< the previous stage's rows of the chunk being read (host, pinned)
     bool hand_in_peer_ = false;         ///< ... in this stage's VRAM instead (enable_peer_handoff)
-    /// STRATA_HANDOFF_PIPE: the previous stage's per-piece "landed in hand_in_" events (cudaEvent_t[hand_pieces_],
+    /// SAGUARO_HANDOFF_PIPE: the previous stage's per-piece "landed in hand_in_" events (cudaEvent_t[hand_pieces_],
     /// on its device) when it copies the chunk in pieces without a host wait; null with the one-copy hand-off
     const void* hand_ev_ = nullptr;
     int hand_pieces_ = 0;

@@ -33,7 +33,7 @@ export function cachedHardware() {
 }
 
 function testHardware() {
-  const raw = process.env.STRATA_TEST_HARDWARE;
+  const raw = process.env.SAGUARO_TEST_HARDWARE;
   if (!raw) return null;
   try { const value = JSON.parse(raw); return value && typeof value === 'object' ? value : null; } catch { return null; }
 }
@@ -43,7 +43,7 @@ export async function detect({ force = false } = {}) {
 
   const platform = process.platform;
   const arch = process.arch;
-  // Tests only: STRATA_TEST_HARDWARE='{"totalGb":128,"freeGb":100,"gpus":[...]}' stands in for the probes, so a
+  // Tests only: SAGUARO_TEST_HARDWARE='{"totalGb":128,"freeGb":100,"gpus":[...]}' stands in for the probes, so a
   // test about routing or lifecycle does not depend on how much memory the machine running it has.
   const forced = testHardware();
   const totalGb = forced?.totalGb ?? os.totalmem() / 1024 ** 3;

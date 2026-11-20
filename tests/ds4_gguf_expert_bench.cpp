@@ -5,7 +5,7 @@
 //
 // Reads the layer's first 64 experts from the shard (gate / up / down _exps, any types the lane takes) - far past the
 // L3, so each comes from DRAM like a RAM-tier pick - and times gate/up then down in 64-row jobs on a pool (the caller
-// helping), as the lane runs them.  DS4_IQ_OWN=0 STRATA_NO_IQ128=1: ggml-cpu's dots, to compare.  MXFP4 experts (all
+// helping), as the lane runs them.  DS4_IQ_OWN=0 SAGUARO_NO_IQ128=1: ggml-cpu's dots, to compare.  MXFP4 experts (all
 // three roles): gg::mx_rows on mx_quant's activations; DS4_MX_TIER=<name> picks the tier.  DS4_BENCH_EXPERTS=<n>: fewer
 // experts (default 64).
 #include "../src/ds4/ds4_gguf_cpu.hpp"

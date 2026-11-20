@@ -41,7 +41,7 @@ SUPPORTED_SELECTIONS = frozenset({"qwen/Q2_0", "qwen/IQ2_XS", "qwen/IQ3_XXS", "q
 
 def settings_path() -> Path:
     """The user's Strata settings file: the same place setup.py writes it (%APPDATA%/Strata/settings.json, or
-    $XDG_CONFIG_HOME/strata/settings.json). The desktop app sets STRATA_SETTINGS_FILE to a file of its own (in its data folder), so it
+    $XDG_CONFIG_HOME/strata/settings.json). The desktop app sets SAGUARO_SETTINGS_FILE to a file of its own (in its data folder), so it
     never reads an older command-line install's list of Strata folders."""
     return discovery.own_settings_file()
 
@@ -60,10 +60,10 @@ def _has_configs(directory: Path) -> bool:
 
 
 def resolve_install(override: str | None = None) -> tuple[Path, str]:
-    """(the main install folder, how it was found): explicit (an argument or STRATA_INSTALL_DIR), here (this folder has run
+    """(the main install folder, how it was found): explicit (an argument or SAGUARO_INSTALL_DIR), here (this folder has run
     configs), remembered (an earlier install from the settings file), app (the desktop app's install folder, shared with the
     Terminal) or default (the app's folder, with no model in it yet)."""
-    raw = override or os.environ.get("STRATA_INSTALL_DIR")
+    raw = override or os.environ.get("SAGUARO_INSTALL_DIR")
     if raw is not None:
         path = Path(raw).expanduser()
         if not path.is_absolute() or not path.is_dir():

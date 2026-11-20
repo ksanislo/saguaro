@@ -32,8 +32,8 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 COPY terminal-src/ /src/
 # the sources have no .git here (and the image has no git): build.sh passes the commit they are from, package_terminal.py writes it to COMMIT
-ARG STRATA_COMMIT=
-ENV STRATA_BUILD_COMMIT=${STRATA_COMMIT}
+ARG SAGUARO_COMMIT=
+ENV SAGUARO_BUILD_COMMIT=${SAGUARO_COMMIT}
 RUN python3 /src/packaging/package_terminal.py --out /out --cache /cache \
  && mkdir -p /opt/strata \
  && tar -xzf /out/strata-terminal-*-linux-x86_64.tar.gz -C /opt/strata \
@@ -41,7 +41,7 @@ RUN python3 /src/packaging/package_terminal.py --out /out --cache /cache \
  && /opt/strata/terminal/bin/strata --version
 # llama.cpp at the commit setup.py pins: fetched here, so the first start does not depend on GitHub. Only gguf-py (the model preparation
 # tools) and the file setup.py looks for (ggml/CMakeLists.txt) are kept: 170 MB become a few
-RUN cd /opt/strata/terminal && STRATA_CONTROL_INSTALL=1 STRATA_INSTALL_DIR=/opt/strata/seed PYTHONNOUSERSITE=1 \
+RUN cd /opt/strata/terminal && SAGUARO_CONTROL_INSTALL=1 SAGUARO_INSTALL_DIR=/opt/strata/seed PYTHONNOUSERSITE=1 \
       /opt/strata/terminal/python/bin/python3 -c "import setup; print(setup.get_llama_cpp())" \
  && rm -rf /opt/strata/seed/third_party/*.zip* \
  && cd /opt/strata/seed/third_party/llama.cpp \
@@ -65,7 +65,7 @@ RUN set -e; n=0; for d in /engine/*/; do \
 # ---- 3. the runtime image
 FROM ${BASE_IMAGE}
 ARG FLAVOR=cuda
-ARG STRATA_VERSION=dev
+ARG SAGUARO_VERSION=dev
 ARG ENGINE_LABEL=
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -101,14 +101,14 @@ RUN set -e; \
 
 # Everything that is yours lives in /data: model files, the prepared pack, presets, tuning results, the API key, logs.
 # The engine and the Terminal are in the image; updating the image never touches /data.
-ENV STRATA_COMPONENTS_DIR=/opt/strata/components \
-    STRATA_INSTALL_DIR=/data/install \
+ENV SAGUARO_COMPONENTS_DIR=/opt/strata/components \
+    SAGUARO_INSTALL_DIR=/data/install \
     XDG_STATE_HOME=/data/state \
     XDG_CONFIG_HOME=/data/config \
     HOME=/data/home \
     PORT=8080 \
     LANG=C.UTF-8 PYTHONUNBUFFERED=1 PYTHONNOUSERSITE=1 \
-    STRATA_IN_DOCKER=1 \
+    SAGUARO_IN_DOCKER=1 \
     NVIDIA_VISIBLE_DEVICES=all NVIDIA_DRIVER_CAPABILITIES=compute,utility
 VOLUME ["/data"]
 EXPOSE 8080
@@ -118,7 +118,7 @@ LABEL org.opencontainers.image.title="Strata" \
       org.opencontainers.image.url="https://github.com/Niko1221/Strata" \
       org.opencontainers.image.documentation="https://github.com/Niko1221/Strata/blob/main/docs/DOCKER.md" \
       org.opencontainers.image.description="Strata local LLM server (Terminal + engine package), flavor ${FLAVOR}" \
-      org.opencontainers.image.version="${STRATA_VERSION}" \
+      org.opencontainers.image.version="${SAGUARO_VERSION}" \
       org.opencontainers.image.licenses="see LICENSE" \
       com.strata.flavor="${FLAVOR}" \
       com.strata.engine="${ENGINE_LABEL}"

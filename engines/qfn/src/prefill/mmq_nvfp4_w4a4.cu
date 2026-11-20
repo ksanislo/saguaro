@@ -1,4 +1,4 @@
-// src/prefill/mmq_nvfp4_w4a4.cu - NVFP4 MMQ with FP4 activations on Blackwell (W4A4, opt-in: STRATA_PREFILL_NVFP4=w4a4).
+// src/prefill/mmq_nvfp4_w4a4.cu - NVFP4 MMQ with FP4 activations on Blackwell (W4A4, opt-in: SAGUARO_PREFILL_NVFP4=w4a4).
 //
 // RTX 50's FP4 MMA exists only in the arch-specific target (sm_120a), so this is the one translation unit CMake
 // builds with 12x -> 12xa (strata_mmq_w4a4); everything else, the default NVFP4 path included, keeps the plain

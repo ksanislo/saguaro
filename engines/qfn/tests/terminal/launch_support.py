@@ -25,12 +25,12 @@ class Home:
         base = Path(self.tmp.name)
         self.base = base
         self.env = {
-            "STRATA_PROFILE_DIR": str(base / "config" / "profiles"),
-            "STRATA_PRESET_DIR": str(base / "config" / "presets"),
-            "STRATA_LAUNCH_PRESET_DIR": str(base / "config" / "launch-presets"),
-            "STRATA_COMPONENTS_DIR": str(base / "components"),
-            "STRATA_INSTALL_DIR": str(base / "install"),
-            "STRATA_RUNTIME_DIR": str(base / "runtime"),
+            "SAGUARO_PROFILE_DIR": str(base / "config" / "profiles"),
+            "SAGUARO_PRESET_DIR": str(base / "config" / "presets"),
+            "SAGUARO_LAUNCH_PRESET_DIR": str(base / "config" / "launch-presets"),
+            "SAGUARO_COMPONENTS_DIR": str(base / "components"),
+            "SAGUARO_INSTALL_DIR": str(base / "install"),
+            "SAGUARO_RUNTIME_DIR": str(base / "runtime"),
             "XDG_STATE_HOME": str(base / "state"),
             "LOCALAPPDATA": str(base / "local"),
             "HOME": str(base / "home"),
@@ -50,7 +50,7 @@ class Home:
 
 def catalog(hw: dict | None = None, root: Path | None = None):
     from strata_cli.launch.catalog import Catalog
-    return Catalog(root=root or Path(os.environ["STRATA_INSTALL_DIR"]), hardware=hw or HW_12)
+    return Catalog(root=root or Path(os.environ["SAGUARO_INSTALL_DIR"]), hardware=hw or HW_12)
 
 
 def text_of(app) -> str:

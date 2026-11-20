@@ -37,7 +37,7 @@ tokens (the stream only holds back up to HOLD_MAX tokens of a tail that repeats 
 literal, a function name over and over, code lines alike - is not an exact block repeated back to back three times
 or more, which is what a loop is.
 
-Off: MAYA_LOOP_GUARD=0, "loop_guard": false in the run config, or "loop_guard": false in a request (true there turns
+Off: SAGUARO_LOOP_GUARD=0, "loop_guard": false in the run config, or "loop_guard": false in a request (true there turns
 it on for that request when the server has it off).
 """
 from __future__ import annotations
@@ -552,7 +552,7 @@ def echoes(messages: list[dict]) -> bool:
 # rewrites the prompt's prefix, and the engine's conversation cache (snapshot/checkpoints) then no longer matches, so
 # the whole conversation is read again (a 126K-token prompt: 16 chunks, ~2 minutes, #702).  The generation-side
 # protections (stops_short, keep_going, the repetition penalty) still apply to long conversations.
-# MAYA_LOOP_GUARD_COLLAPSE_MAX overrides it; 0 = no limit (the behaviour before #702).
+# SAGUARO_LOOP_GUARD_COLLAPSE_MAX overrides it; 0 = no limit (the behaviour before #702).
 COLLAPSE_MAX_CHARS = 32000
 
 
@@ -583,7 +583,7 @@ def collapse(messages: list[dict]) -> Collapse | None:
     if not echoes(messages):
         return None
     try:
-        limit = int(os.environ.get("MAYA_LOOP_GUARD_COLLAPSE_MAX") or COLLAPSE_MAX_CHARS)
+        limit = int(os.environ.get("SAGUARO_LOOP_GUARD_COLLAPSE_MAX") or COLLAPSE_MAX_CHARS)
     except ValueError:          # (a setting that is not a number: the default, not a failed request)
         limit = COLLAPSE_MAX_CHARS
     if limit and conv_chars(messages) > limit:

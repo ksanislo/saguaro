@@ -61,7 +61,7 @@ Pictures work on the A750 (on by default, read on the CPU). The Alchemist A-seri
   Level Zero; on Ubuntu, `intel-opencl-icd libze1 libze-intel-gpu1`, or Intel's
   [client GPU guide](https://dgpu-docs.intel.com/driver/client/overview.html)).
 - **Intel oneAPI**: the DPC++ compiler (`icpx`, 2025.3 or newer; 2026.1 is what was built here) and **oneMKL**. About 5 GB.
-- `cmake` 3.24+, `ninja`, `git` (the build fetches ggml unless you point `STRATA_GGML_DIR` at a llama.cpp checkout),
+- `cmake` 3.24+, `ninja`, `git` (the build fetches ggml unless you point `SAGUARO_GGML_DIR` at a llama.cpp checkout),
   Python 3.
 - For `./setup.sh --backend sycl` today: **Docker**, and nothing else from the list above except the GPU driver.
   `sycl/setup_intel.py` runs the engine in the `strata-sycl-dev` image built from `sycl/tools/Dockerfile`, and the
@@ -121,7 +121,7 @@ Options:
   `ctest --test-dir build-sycl` on the card.
 
 `setup_intel.py` looks for `build-sycl-aot/strata` or `build-sycl/strata` in the checkout. With the
-top-level option the engine is at `build-sycl/sycl/strata`, so either use `-S sycl` or set `STRATA_SYCL_BIN`.
+top-level option the engine is at `build-sycl/sycl/strata`, so either use `-S sycl` or set `SAGUARO_SYCL_BIN`.
 
 ## Setup and running
 
@@ -144,25 +144,25 @@ Things that matter on an Arc (details in INTEL.md):
   variable through) and `--layer-split`.
 - **`--layer-split auto` on two equal cards (0.1.44, #1440):** when several splits hold all the experts and predict the
   same speed, the search now takes the one that leaves its fullest card the most VRAM to spare (within 0.2% of the best
-  predicted time, `STRATA_SPLIT_HEADROOM_TOL`). It used to take the first one tried, which filled the second card to its
+  predicted time, `SAGUARO_SPLIT_HEADROOM_TOL`). It used to take the first one tried, which filled the second card to its
   last MiB. A full card under `xe` moves buffers to system memory instead of failing: 2x B70 with IQ3_S, auto picked
   K=24 (~11 tok/s) where `--layer-split 30` ran ~54. The startup line names both splits when the choice moves.
-  `STRATA_SPLIT_HEADROOM=0` keeps the old pick.
+  `SAGUARO_SPLIT_HEADROOM=0` keeps the old pick.
 - **Arc Pro B60:** the PCI id is `8086:e211` (`lspci -nn`, the kernel's `xe` id list files it with the BMG-G21 cards), `sycl-ls` prints
   `Intel(R) Arc(TM) Pro B60 Graphics 20.1.0`, and `ocloc ids bmg-g21` prints 20.1.0, so `-DSTRATA_SYCL_AOT=bmg-g21` is the right target.
   `setup_intel.py` knows both B60 ids, `e211` and `e221` (both seen on B60 cards). On a `--layer-split` the startup line "N experts are neither in VRAM nor mirrored"
-  counts the other card's layers; the lines `100% of the experts resident` that follow are the ones to read. Set `STRATA_MIRROR_MIB=0` there,
+  counts the other card's layers; the lines `100% of the experts resident` that follow are the ones to read. Set `SAGUARO_MIRROR_MIB=0` there,
   or the pinned mirror is allocated and not used.
 - **`setvars.sh` and `set -u`:** `source /opt/intel/oneapi/setvars.sh` in a shell with `set -u` stops at `OCL_ICD_FILENAMES: unbound variable`
   (oneAPI 2026.1.1). Source it before `set -u`, or run `set +u` around it.
 - **Without Docker:** `sycl/serve/strata-sycl.sh` needs Docker. Natively, `source setvars.sh`, export `SYCL_CACHE_PERSISTENT=0`,
-  `ZES_ENABLE_SYSMAN=1` and `STRATA_VERIFY_DEVICE_PLAN=1`, then run `build-sycl-aot/strata` or `sycl/serve/server_intel.py` with an `exe` that does this.
+  `ZES_ENABLE_SYSMAN=1` and `SAGUARO_VERIFY_DEVICE_PLAN=1`, then run `build-sycl-aot/strata` or `sycl/serve/server_intel.py` with an `exe` that does this.
   A normal user is not in the `render` group on Ubuntu, and then `sycl-ls` shows only the CPU device.
-- `STRATA_VERIFY_NO_HOST=1` (set by `strata-sycl.sh` unless the config's `"env"` says otherwise) is needed on `xe`
+- `SAGUARO_VERIFY_NO_HOST=1` (set by `strata-sycl.sh` unless the config's `"env"` says otherwise) is needed on `xe`
   cards when part of the experts is not in VRAM (the host-to-GPU flag stores are not visible there, NaN logits
   otherwise) and is left off on the `i915` Arc A-series: see [INTEL.md](INTEL.md). The config's `"env"` block and any
   `STRATA_*`, `ONEAPI_*`, `UR_*`, `IGC_*`, `SYCL_*` or `ZES_*` variable of the server's environment reach the engine
-  through `strata-sycl.sh` (for example `STRATA_MIRROR_MIB`, `IGC_EnableDPEmulation`).
+  through `strata-sycl.sh` (for example `SAGUARO_MIRROR_MIB`, `IGC_EnableDPEmulation`).
 
 ## Windows
 

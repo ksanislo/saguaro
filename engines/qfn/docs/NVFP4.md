@@ -80,7 +80,7 @@ languages and an agent transcript, against Unsloth's Q8_0; RTX 3060 box):
 | --- | ---: | ---: | ---: |
 | NVFP4 GPTQ, experts on the CPU | 92.09% | 0.070 | 1.12 |
 | NVFP4 GPTQ, 1,500 experts on the GPU | 91.79% | 0.069 | 1.07 |
-| the same with `STRATA_ROUTE_TAIL_SKIP=7` | 88.59% | 0.118 | 1.76 |
+| the same with `SAGUARO_ROUTE_TAIL_SKIP=7` | 88.59% | 0.118 | 1.76 |
 | NVFP4 GPTQ with the GSQ-RCO IQ4_NL n-gram table instead of the FP8 one | 92.15% | 0.069 | 1.07 |
 | for comparison, the same tool: Unsloth UD-Q5_K_XL | 94.55% | 0.038 | 0.64 |
 | Unsloth UD-Q4_K_XL | 93.09% | 0.056 | - |
@@ -88,7 +88,7 @@ languages and an agent transcript, against Unsloth's Q8_0; RTX 3060 box):
 | GSQ-RCO IQ3_S | 87.69% | 0.144 | 1.98 |
 
 The route tail skip moves the answers by more than the quantization itself, so it is off by default for NVFP4
-experts. `STRATA_ROUTE_TAIL_SKIP=7` turns it on: +7-25% decode on the RTX 3060, +47-55% on the RTX 5070 (64 GB).
+experts. `SAGUARO_ROUTE_TAIL_SKIP=7` turns it on: +7-25% decode on the RTX 3060, +47-55% on the RTX 5070 (64 GB).
 
 Decode experts (`nvfp4_decode_bench`, 64 distinct experts per call, the share of the card's DRAM bandwidth):
 
@@ -102,7 +102,7 @@ Each weight is decoded once for all the tokens of a verify window (before the po
 at 4 tokens), bit for bit the same results.
 
 Prompt experts on the RTX 5070 (`mmq_expert_bench`, one launch of 16 experts with 625 rows each, gate/up + down): w4a8
-1.52 ms, w4a4x2 (`STRATA_PREFILL_NVFP4=w4a4x2`) 1.13 ms, w4a4x2 with down too (`STRATA_PREFILL_X2_MIN_K=640`)
+1.52 ms, w4a4x2 (`SAGUARO_PREFILL_NVFP4=w4a4x2`) 1.13 ms, w4a4x2 with down too (`STRATA_PREFILL_X2_MIN_K=640`)
 0.995 ms, UD-IQ4_XS's experts 1.20 ms. First-token KL against the exact FP16 path (24 prompts, 1.5-8K tokens): w4a8
 0.0068, w4a4x2 0.0056, w4a4x2 with down 0.0044. On a 64 GB PC the prompt waits for the experts read from the SSD,
 so the modes give the same prompt speed there; w4a8 stays the default until a 96 GB+ RTX 50 PC measures the others.
@@ -132,7 +132,7 @@ FP16's range.
 
 ## Prompt path precision
 
-`STRATA_PREFILL_NVFP4` picks how the batched prompt path multiplies the experts:
+`SAGUARO_PREFILL_NVFP4` picks how the batched prompt path multiplies the experts:
 
 | mode | kernel | activations | one product vs FP64 (`mmq_nvfp4_parity`) |
 |---|---|---|---|
@@ -160,7 +160,7 @@ First-token KL divergence against `fp16`, 8 prompts (code and prose, 1K-8K token
 `w4a8` is the default. It is 4.5x closer to the reference than `w4a4`, at 86% of its speed, and it is the precision
 every generated token already runs at. `fp16` is the choice when the prompt must be read exactly.
 
-`STRATA_DUMP_MOE_INPUT` + `mmq_nvfp4_parity --real` test one product on a real prompt's rows: layer 20, its 12
+`SAGUARO_DUMP_MOE_INPUT` + `mmq_nvfp4_parity --real` test one product on a real prompt's rows: layer 20, its 12
 busiest experts, max|x|/rms 4 median and 9 at most. The errors:
 
 | mode | gate/up | down (heavier SwiGLU tails) |
@@ -174,12 +174,12 @@ busiest experts, max|x|/rms 4 median and 9 at most. The errors:
 `src/kernels/cpu/nvfp4_avx512.cpp` computes the CPU pool's NVFP4 rows in 512-bit lanes. Each 64-value block is
 decoded once for every token of a verify window: `vpdpbusd` on |E2M1| codes, with the sign moved onto the
 activation. The arithmetic is ggml-cpu's `ggml_vec_dot_nvfp4_q8_0`, with the float additions ordered differently
-(worst 4.5e-7 relative, `nvfp4_avx512_parity`). `STRATA_NO_NVFP4_512=1` falls back to ggml-cpu.
+(worst 4.5e-7 relative, `nvfp4_avx512_parity`). `SAGUARO_NO_NVFP4_512=1` falls back to ggml-cpu.
 
 A CPU without AVX-512 (Zen 1-3, Intel Core 4th-10th and 12th-14th gen, Core Ultra, Xeon E5 v3/v4) runs the same rows in 256-bit lanes
 (`src/kernels/cpu/nvfp4_avx2.cpp`): ggml's AVX2 arithmetic step for step, so every row is bit-equal to ggml-cpu's
 (`nvfp4_cpu_parity`, 0 of 1280x9 / 2560x9 rows differ on a Ryzen 5 5600X, a Ryzen 7 255 and a Core Ultra 7 265).
-`STRATA_NO_NVFP4_256=1` falls back to ggml-cpu. An NVFP4 pack is a native pack (its folder holds `native_experts.txt`),
+`SAGUARO_NO_NVFP4_256=1` falls back to ggml-cpu. An NVFP4 pack is a native pack (its folder holds `native_experts.txt`),
 so the engine starts on such a CPU; the AVX-512 requirement belongs to the canonical Q2_0 pack only (#2347: a `--pack`
 folder without `native_experts.txt` is read as that pack, and the engine now says so before it refuses).
 
@@ -221,7 +221,7 @@ guarded (`GGML_USE_HIP`). Neither was built for HIP here.
 
 - `nvfp4_expert_gpu_parity`: the decode kernels against ggml's reference.
 - `nvfp4_avx512_parity`: the CPU rows against ggml-cpu (with `--expert`: one whole expert).
-- `mmq_nvfp4_parity`: the prompt path's products against FP64 (with `--real`: rows dumped by `STRATA_DUMP_MOE_INPUT`).
+- `mmq_nvfp4_parity`: the prompt path's products against FP64 (with `--real`: rows dumped by `SAGUARO_DUMP_MOE_INPUT`).
 - `tools/nvfp4_verify.py` and `tools/nvfp4_verify_gguf.py`: the conversion, bit for bit.
 
 ## NVIDIA's FP4-Local checkpoint

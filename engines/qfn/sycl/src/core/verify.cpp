@@ -68,13 +68,13 @@ namespace {
 constexpr float EPS = 1e-6f;
 using Clock = std::chrono::steady_clock;
 double ms_since(Clock::time_point t) { return std::chrono::duration<double, std::milli>(Clock::now() - t).count(); }
-const bool g_dbg = std::getenv("STRATA_VERIFY_DEBUG") != nullptr;
-inline bool g_lfuse() { static const bool on = [] { const char* v = std::getenv("STRATA_LFUSE"); return v != nullptr && v[0] == '1'; }(); return on; }
-inline bool g_lfuse_gate() { static const bool on = [] { const char* v = std::getenv("STRATA_LFUSE_GATE"); return v == nullptr || v[0] != '0'; }(); return on; }
-inline bool g_lfuse_pair() { static const bool on = [] { const char* v = std::getenv("STRATA_LFUSE_PAIR"); return v == nullptr || v[0] != '0'; }(); return on; }
-inline bool g_qdedup() { static const bool on = [] { const char* v = std::getenv("STRATA_VERIFY_QDEDUP"); return v != nullptr && std::atoi(v) != 0; }(); return on; }
-// S26 STRATA_QFUSE=1: activation q8_1 images written by their producers (the GDN output norm) - the same bytes
-inline bool g_qfuse() { static const bool on = [] { const char* v = std::getenv("STRATA_QFUSE"); return v != nullptr && std::atoi(v) != 0; }(); return on; }
+const bool g_dbg = std::getenv("SAGUARO_VERIFY_DEBUG") != nullptr;
+inline bool g_lfuse() { static const bool on = [] { const char* v = std::getenv("SAGUARO_LFUSE"); return v != nullptr && v[0] == '1'; }(); return on; }
+inline bool g_lfuse_gate() { static const bool on = [] { const char* v = std::getenv("SAGUARO_LFUSE_GATE"); return v == nullptr || v[0] != '0'; }(); return on; }
+inline bool g_lfuse_pair() { static const bool on = [] { const char* v = std::getenv("SAGUARO_LFUSE_PAIR"); return v == nullptr || v[0] != '0'; }(); return on; }
+inline bool g_qdedup() { static const bool on = [] { const char* v = std::getenv("SAGUARO_VERIFY_QDEDUP"); return v != nullptr && std::atoi(v) != 0; }(); return on; }
+// S26 SAGUARO_QFUSE=1: activation q8_1 images written by their producers (the GDN output norm) - the same bytes
+inline bool g_qfuse() { static const bool on = [] { const char* v = std::getenv("SAGUARO_QFUSE"); return v != nullptr && std::atoi(v) != 0; }(); return on; }
 #define VDBG(...) do { if (g_dbg) { std::fprintf(stderr, "verify dbg: " __VA_ARGS__); std::fflush(stderr); } } while (0)
 
 struct Bump {
@@ -88,33 +88,33 @@ struct Bump {
 };
 
 // #649 (HIP, opt-in A/Bs for the gfx1030 verify timeouts; CUDA never reads them)
-//   STRATA_VERIFY_COHERENT=1  the handshake words and rows in explicitly coherent (fine-grained) host memory
-//   STRATA_DOORBELL_STORE=1   the GPU stores each step's ring instead of read-modify-writing it over PCIe
+//   SAGUARO_VERIFY_COHERENT=1  the handshake words and rows in explicitly coherent (fine-grained) host memory
+//   SAGUARO_DOORBELL_STORE=1   the GPU stores each step's ring instead of read-modify-writing it over PCIe
 bool env_on(const char* name) {
     const char* e = std::getenv(name);
     return e != nullptr && e[0] != 0 && e[0] != '0';
 }
 #if defined(STRATA_USE_HIP)
-const bool g_coherent = env_on("STRATA_VERIFY_COHERENT");
-const bool g_doorbell_store = env_on("STRATA_DOORBELL_STORE");
+const bool g_coherent = env_on("SAGUARO_VERIFY_COHERENT");
+const bool g_doorbell_store = env_on("SAGUARO_DOORBELL_STORE");
 #endif
-const bool g_trace = env_on("STRATA_VERIFY_TRACE");
-// STRATA_VERIFY_STEPPED=1 (opt-in, Arc A-series): see Verifier::step_hook_.  STRATA_VERIFY_PIPE=0 serves without the
+const bool g_trace = env_on("SAGUARO_VERIFY_TRACE");
+// SAGUARO_VERIFY_STEPPED=1 (opt-in, Arc A-series): see Verifier::step_hook_.  SAGUARO_VERIFY_PIPE=0 serves without the
 // helper thread (serial segments) for A/B runs.
-const bool g_stepped = env_on("STRATA_VERIFY_STEPPED");
+const bool g_stepped = env_on("SAGUARO_VERIFY_STEPPED");
 
-// STRATA_PIPE_HELPER_SIBLING=1 (opt-in, stepped mode): the host thread is pinned to one logical CPU and a std::thread
+// SAGUARO_PIPE_HELPER_SIBLING=1 (opt-in, stepped mode): the host thread is pinned to one logical CPU and a std::thread
 // inherits that mask, so the pipelined serve's pool helper and the main thread's flag-A wait share one CPU and the
 // early segment is mostly submitted only after the pool finished.  With this set the helper runs on the host CPU's SMT
 // sibling instead.  -1: keep the inherited mask (unset, not pinned to one CPU, or no sibling).
 int pipe_helper_cpu() {
 #if defined(__linux__)
     static const int cpu = [] {
-        if (!env_on("STRATA_PIPE_HELPER_SIBLING")) return -1;
+        if (!env_on("SAGUARO_PIPE_HELPER_SIBLING")) return -1;
         cpu_set_t s;
         CPU_ZERO(&s);
         if (pthread_getaffinity_np(pthread_self(), sizeof s, &s) != 0 || CPU_COUNT(&s) != 1) {
-            std::fprintf(stderr, "strata verify: STRATA_PIPE_HELPER_SIBLING: host thread is not pinned to one CPU; unchanged\n");
+            std::fprintf(stderr, "strata verify: SAGUARO_PIPE_HELPER_SIBLING: host thread is not pinned to one CPU; unchanged\n");
             return -1;
         }
         int host = -1;
@@ -149,20 +149,20 @@ int pipe_helper_cpu() {
     return -1;
 #endif
 }
-const bool g_no_multi_gr = env_on("STRATA_NO_MULTI_GR");   // #783 PR-g: per-token GR reads/writes and generic-T kernels again
-const bool g_no_batch_kv = env_on("STRATA_NO_BATCH_KV_STEP");   // #783 PR-d: per-token K/V and indexer appends again
+const bool g_no_multi_gr = env_on("SAGUARO_NO_MULTI_GR");   // #783 PR-g: per-token GR reads/writes and generic-T kernels again
+const bool g_no_batch_kv = env_on("SAGUARO_NO_BATCH_KV_STEP");   // #783 PR-d: per-token K/V and indexer appends again
 
 // The shared expert runs on its own stream, forked off and joined back per layer (`sh_fork` in record_window).  The
 // overlap pays off on CUDA, where it was added (cfd3b72).  On HIP a cross-stream event dependency costs more than the
 // shared expert takes to run, so there the fork starts off: same binary, same 48,067-token prompt, three runs each on a
 // Radeon AI PRO R9700 (gfx1201, ROCm 6.4.3), the fork off decodes at 62.9 t/s against 43.4 t/s with it on.  The
 // profiler turns the fork off to time the stages, so a profiled run never showed that.  #816 reports the same fall on a
-// gfx1030 (RX 6800, Windows, 42.5 -> 56.4 t/s).  STRATA_SH_STREAM overrides either default: `=1` forks, `=0` does not.
+// gfx1030 (RX 6800, Windows, 42.5 -> 56.4 t/s).  SAGUARO_SH_STREAM overrides either default: `=1` forks, `=0` does not.
 // Strix Halo (gfx1151, unified memory) is the exception: the fork pays there (+1.8% UD-IQ4_XS, +6.7% UD-Q4_K_XL decode
-// at 8K, ids identical), so the gfx1151 arch table sets STRATA_SH_STREAM=1.  Read on first use, after that table ran.
+// at 8K, ids identical), so the gfx1151 arch table sets SAGUARO_SH_STREAM=1.  Read on first use, after that table ran.
 bool sh_stream_on() {
     static const bool on = [] {
-        if (const char* v = std::getenv("STRATA_SH_STREAM")) return v[0] != '0';
+        if (const char* v = std::getenv("SAGUARO_SH_STREAM")) return v[0] != '0';
 #if defined(STRATA_USE_HIP)
         return false;
 #else
@@ -174,15 +174,15 @@ bool sh_stream_on() {
 
 // A one-token window always keeps its token, so its graph advances the sequence state itself (the GDN conv history
 // and recurrence state) and Verifier::commit launches no commit graph after it (eddoursul's fork, F7).  CUDA only:
-// HIP keeps the commit graph after every window (STRATA_ONE_TOKEN_COMMIT=0 does too).
+// HIP keeps the commit graph after every window (SAGUARO_ONE_TOKEN_COMMIT=0 does too).
 // The head's hyper-connection read for the window's tokens in one launch set (CUDA; HIP keeps gr_read per token;
-// STRATA_HEAD_MIX_MULTI=0 does too): bitwise the same sums.
+// SAGUARO_HEAD_MIX_MULTI=0 does too): bitwise the same sums.
 bool head_mix_multi_enabled() {
 #if defined(STRATA_USE_HIP)
     return false;
 #else
     static const bool on = [] {
-        const char* v = std::getenv("STRATA_HEAD_MIX_MULTI");
+        const char* v = std::getenv("SAGUARO_HEAD_MIX_MULTI");
         return v == nullptr || std::atoi(v) != 0;
     }();
     return on;
@@ -194,7 +194,7 @@ bool one_token_self_commit() {
     return false;
 #else
     static const bool on = [] {
-        const char* v = std::getenv("STRATA_ONE_TOKEN_COMMIT");
+        const char* v = std::getenv("SAGUARO_ONE_TOKEN_COMMIT");
         return v == nullptr || std::atoi(v) != 0;
     }();
     return on;
@@ -206,24 +206,24 @@ bool intel_i915_gpu() { return strata::intel_gpu_driver() == "i915"; }
 
 // How long the host waits for a layer's doorbell before it gives the window up (#267).  20 s by default; the first
 // window of a run on a card that JIT-compiles its kernels (no AOT: an Arc A750 needs FP64 emulation) can take longer
-// to start, so STRATA_RING_TIMEOUT_S raises it.
+// to start, so SAGUARO_RING_TIMEOUT_S raises it.
 std::chrono::seconds strata_ring_timeout() {
     static const long s = [] {
-        const char* v = std::getenv("STRATA_RING_TIMEOUT_S");
+        const char* v = std::getenv("SAGUARO_RING_TIMEOUT_S");
         const long n = v ? std::atol(v) : 20;
         return n >= 1 ? n : 20L;
     }();
     return std::chrono::seconds(s);
 }
 
-// STRATA_VERIFY_STEPPED: no kernel of the window reads a host store while it runs, and no host reads a kernel's store
+// SAGUARO_VERIFY_STEPPED: no kernel of the window reads a host store while it runs, and no host reads a kernel's store
 // while it runs - every flag is raised before the segment that waits on it is submitted, and the host reads a
 // segment's rings and payload after the segment drained. So the window's mapped buffers need no uncached host memory
 // (sycl_queue.hpp) and its doorbell publishes need no uncached payload stores (sycl_doorbell.hpp). Both cost the
 // window time on an A770 (xe, Coder IQ1_M, 8K prompt): the GPU waited ~70 ms a window for the CPU with them, ~42
-// without; decode 22.8-25.0 -> 26.9-28.9 tok/s. STRATA_VERIFY_HOST_UNCACHED=1 keeps both.
+// without; decode 22.8-25.0 -> 26.9-28.9 tok/s. SAGUARO_VERIFY_HOST_UNCACHED=1 keeps both.
 bool window_host_uncached() {
-    static const bool v = !g_stepped || env_on("STRATA_VERIFY_HOST_UNCACHED");
+    static const bool v = !g_stepped || env_on("SAGUARO_VERIFY_HOST_UNCACHED");
     return v;
 }
 
@@ -286,7 +286,7 @@ void release_live_verifiers(std::FILE* f) {
         }
     if (f != nullptr) std::fflush(f);
 }
-// #649: the host side of STRATA_VERIFY_TRACE - a ring of the last kTraceN handshake events of every verifier
+// #649: the host side of SAGUARO_VERIFY_TRACE - a ring of the last kTraceN handshake events of every verifier
 struct TraceEv {
     int64_t t_ns;
     const void* who;
@@ -304,10 +304,10 @@ std::string released_note(bool drained) {
     return drained ? "; its GPU waits were released and the GPU finished (#267)"
                    : "; its GPU waits were released but the GPU did not finish within 5 s (#267)";
 }
-// #267 test hook: STRATA_TEST_VERIFY_STALL=N withholds the last layer's flag in the N-th window (1-based), so the
+// #267 test hook: SAGUARO_TEST_VERIFY_STALL=N withholds the last layer's flag in the N-th window (1-based), so the
 // GPU spins on a flag nobody raises - the bounded window wait and the release are then what ends it.  Unset: never.
 const int64_t g_test_stall = [] {
-    const char* e = std::getenv("STRATA_TEST_VERIFY_STALL");
+    const char* e = std::getenv("SAGUARO_TEST_VERIFY_STALL");
     return e != nullptr ? (int64_t) std::atoll(e) : (int64_t) 0;
 }();
 }  // namespace
@@ -408,7 +408,7 @@ void Verifier::diag(std::FILE* f) const {
     std::fprintf(f, "  verify window%s: %d tokens at position %lld, host at layer step %u; the GPU rang %u; flags: "
                     "served %u, plan (A) %u, copies (B) %u\n", current ? "" : " (last window, not the current stage)",
                  last_t_, (long long) last_pos0_, cur_layer_ + 1, rd(h_seq_), rd(h_flag_), rd(h_flagA_), rd(h_flagB_));
-    trace_dump(f);   // #649: STRATA_VERIFY_TRACE=1 only
+    trace_dump(f);   // #649: SAGUARO_VERIFY_TRACE=1 only
 }
 
 Verifier::~Verifier() try {
@@ -634,7 +634,7 @@ bool Verifier::init(const WeightTable &wt, const ModelGeometry &g,
         std::fprintf(stderr, "strata verify trace (#649): on\n");
 #endif
     }
-    prof_on_ = std::getenv("STRATA_VERIFY_PROFILE") != nullptr;
+    prof_on_ = std::getenv("SAGUARO_VERIFY_PROFILE") != nullptr;
     if (prof_on_) {
         const size_t np = (size_t) g.n_layers * kProfPer + 4;
         /*
@@ -711,7 +711,7 @@ bool Verifier::init(const WeightTable &wt, const ModelGeometry &g,
     h_res_ = hits.h_res;
     if (h_plan_err_ != nullptr) *(volatile uint32_t*) h_plan_err_ = 0;
     if (hits.h_res != nullptr && hits.d_res != nullptr && hits.cache_base != nullptr) {
-        const char* v_ar = std::getenv("STRATA_VERIFY_ALL_RESIDENT");
+        const char* v_ar = std::getenv("SAGUARO_VERIFY_ALL_RESIDENT");
         if (v_ar == nullptr || std::atoi(v_ar) != 0) {
             bool all_ok = true;
             for (int64_t l = lb_; l < le_ && all_ok; ++l) {
@@ -725,10 +725,10 @@ bool Verifier::init(const WeightTable &wt, const ModelGeometry &g,
             all_resident_ = all_ok;
         }
     }
-    // E-6: a layer whose routed experts are all resident is planned on the device (STRATA_VERIFY_DEVICE_PLAN=1: on;
+    // E-6: a layer whose routed experts are all resident is planned on the device (SAGUARO_VERIFY_DEVICE_PLAN=1: on;
     // exact, but neutral on RIBPC 1-2 GPUs: off by default)
     {
-        const char* v = std::getenv("STRATA_VERIFY_DEVICE_PLAN");
+        const char* v = std::getenv("SAGUARO_VERIFY_DEVICE_PLAN");
         // (not with set_always_publish: the device table may lag the host's while windows are in flight)
         device_plan_ = !all_resident_ && !always_publish_ && (v != nullptr && std::atoi(v) != 0);
     }
@@ -775,7 +775,7 @@ bool Verifier::init(const WeightTable &wt, const ModelGeometry &g,
         */
         if (!ok2) {; all_resident_ = false; device_plan_ = false; }
     }
-    if (std::getenv("STRATA_VERIFY_DEBUG") != nullptr) {   // SYCL port: the per-layer residual ladder (token 0)
+    if (std::getenv("SAGUARO_VERIFY_DEBUG") != nullptr) {   // SYCL port: the per-layer residual ladder (token 0)
         dbgR_ = (float*) sycl::malloc_device((size_t) g.n_layers * g.n_embd * 4, dpct::get_in_order_queue());
         dbgM_ = (float*) sycl::malloc_device((size_t) g.n_layers * g.n_embd * 4, dpct::get_in_order_queue());
     }
@@ -805,12 +805,12 @@ const float* Verifier::final_R(int t) const { return R_ + (size_t) t * (size_t) 
 bool Verifier::record_window(int T, dpct::queue_ptr cs, std::string &err) {
     using namespace strata::kernels;
     const ModelGeometry& g = *g_;
-    // 0.1.43 (STRATA_VERIFY_LEAN=0 turns it off): with the device plan under STRATA_VERIFY_NO_HOST no host ever answers a doorbell, so
+    // 0.1.43 (SAGUARO_VERIFY_LEAN=0 turns it off): with the device plan under SAGUARO_VERIFY_NO_HOST no host ever answers a doorbell, so
     // a layer's doorbell publish, the three flag waits, the plan copy, the PCIe-share group and its staging kernels are nodes of
     // the graph that only wait for each other or do nothing: ~9 nodes (~1.4 ms) per layer-window less.  The VRAM / mirror groups, the
     // combine and the answers are the same kernels on the same data.
-    static const bool lean_env = [] { const char* v = std::getenv("STRATA_VERIFY_LEAN"); return !(v && v[0] == '0'); }();
-    static const bool no_host_env = [] { const char* v = std::getenv("STRATA_VERIFY_NO_HOST"); return v && *v && std::strcmp(v, "0") != 0; }();
+    static const bool lean_env = [] { const char* v = std::getenv("SAGUARO_VERIFY_LEAN"); return !(v && v[0] == '0'); }();
+    static const bool no_host_env = [] { const char* v = std::getenv("SAGUARO_VERIFY_NO_HOST"); return v && *v && std::strcmp(v, "0") != 0; }();
     // Not for a batch window (batch_rec_): unless the stage is all-resident, run_slot_rows / batch_poll wait for each
     // layer's doorbell, so a lean batch graph finishes with the ring silent ("verify batch: layer 0 never rang (graph
     // finished)", then the engine dies). Batch windows keep the doorbell nodes; the solo window stays lean.
@@ -830,10 +830,10 @@ bool Verifier::record_window(int T, dpct::queue_ptr cs, std::string &err) {
     auto Rt = [&](int t) { return R_ + (size_t) t * HC * N; };
     const int G = (split_ && T >= 2 && !batch_rec_) ? 2 : 1;   // a batch window is one group
     const bool self_commit = T == 1 && !batch_rec_ && !g_qfuse() && one_token_self_commit();   // see Verifier::commit
-    static const bool dec_batch = [] { const char* v = std::getenv("STRATA_DEC_BATCH"); return v == nullptr || std::atoi(v) != 0; }();
-    // SYCL port, STRATA_VERIFY_EAGER=1: the window runs on the queue instead of as a graph, and each stage stamp is
+    static const bool dec_batch = [] { const char* v = std::getenv("SAGUARO_DEC_BATCH"); return v == nullptr || std::atoi(v) != 0; }();
+    // SYCL port, SAGUARO_VERIFY_EAGER=1: the window runs on the queue instead of as a graph, and each stage stamp is
     // a host-side wait + clock (there is no %globaltimer here), so the existing stage profiler reports ms per stage.
-    static const bool eager = std::getenv("STRATA_VERIFY_EAGER") != nullptr;
+    static const bool eager = std::getenv("SAGUARO_VERIFY_EAGER") != nullptr;
     auto stamp = [&](int64_t l, int i, int grp) {
         if (trace_m_ != nullptr) gpu_stamp(trace_m_, (int) ((l * kProfPer + i) * 2 + grp), cs);   // #649
         if (!prof_on_ || grp != 0) return;
@@ -841,7 +841,7 @@ bool Verifier::record_window(int T, dpct::queue_ptr cs, std::string &err) {
         else gpu_stamp(prof_, (int) (l * kProfPer + i), cs);
     };
     const int tb_[2] = {0, (T + 1) / 2}, te_[2] = {G == 2 ? (T + 1) / 2 : T, T};
-    // S26 STRATA_LFUSE=1: where the shared expert's gate / scale fusions apply (the paths they replace are the ones taken)
+    // S26 SAGUARO_LFUSE=1: where the shared expert's gate / scale fusions apply (the paths they replace are the ones taken)
     auto lfuse_on = [&](int n) {
         return g_lfuse() && ar_on() && native_moe_combine_enabled() && dec_batch && n > 1 && n <= 8 &&
                shared_expert_native_bf16_enabled();
@@ -922,16 +922,16 @@ bool Verifier::record_window(int T, dpct::queue_ptr cs, std::string &err) {
             }
             float* normalized = (float*) ((uint8_t*) ss.ple.scratch + ple_block_scratch_bytes());
             static const bool ple_batch_env = [] {
-                const char* e = std::getenv("STRATA_PLE_BATCH");
+                const char* e = std::getenv("SAGUARO_PLE_BATCH");
                 return !e || e[0] != '0';
             }();
             const bool ple_batch_kv = ple_batch_env && dec_batch && n > 1 && ss.ple.w.key_bf16 != nullptr &&
                                       ss.ple.w.value_bf16 != nullptr && ple_native_bf16_enabled() &&
                                       ple_native_postops_enabled();
-            // S25 (STRATA_PLE_BATCH=1): the key and value projections depend only on each row's n-gram embedding, so
+            // S25 (SAGUARO_PLE_BATCH=1): the key and value projections depend only on each row's n-gram embedding, so
             // the group's rows run through the multi-row forms of the same kernels (the weights read once); every
             // row's arithmetic is the single-row call's. The history-dependent rest stays row by row.
-            static const bool ple_batch = [] { const char* e = std::getenv("STRATA_PLE_BATCH"); return e && e[0] == '1'; }();
+            static const bool ple_batch = [] { const char* e = std::getenv("SAGUARO_PLE_BATCH"); return e && e[0] == '1'; }();
             PleWeights pw = ss.ple.w;
             const bool nkey = pw.key_native_data != nullptr && pw.key_bf16 == nullptr;
             const bool batched = !ple_batch_kv && ple_batch && n > 1 && (pw.key_bf16 != nullptr || nkey) && ple_native_bf16_enabled();
@@ -961,7 +961,7 @@ bool Verifier::record_window(int T, dpct::queue_ptr cs, std::string &err) {
                     return false;
                 }
             }
-            // #783 PR-g (stuchapin909): the window's residual writes in one launch (STRATA_NO_MULTI_GR=1: per token)
+            // #783 PR-g (stuchapin909): the window's residual writes in one launch (SAGUARO_NO_MULTI_GR=1: per token)
             const bool multi_write = dec_batch && !g_no_multi_gr && n > 1;
             if (multi_write) gr_write_multi(Rt(tb), bo_ + tb * N, inj2_ + tb * HC, gs, Rt(tb), n, cs);
             for (int t = tb; t < te; ++t) {
@@ -999,7 +999,7 @@ bool Verifier::record_window(int T, dpct::queue_ptr cs, std::string &err) {
                 a.q8_inject = (const uint8_t*) wi[half]->hc_q8;
                 a.eps = EPS; a.lo = lo_ + t * g.hc_lr; a.rs = rs_ + t * HC;
                 a.inject_out = inj_out + t * HC; a.mixed = mixed_ + t * N;
-                if (qcnt_ != nullptr) {   // S26 STRATA_QFUSE: the consumer's q8_1 image written by the read itself
+                if (qcnt_ != nullptr) {   // S26 SAGUARO_QFUSE: the consumer's q8_1 image written by the read itself
                     a.q8_cnt = qcnt_;
                     if (half == 0) a.q8_mixed = xq_ + (size_t) (t - tb) * (N / 32) * 36;
                     else if (strata::kernels::cpu::expert_layout().native) a.q8_mixed = nat_xq_ + (size_t) t * (N / 32) * 36;
@@ -1008,7 +1008,7 @@ bool Verifier::record_window(int T, dpct::queue_ptr cs, std::string &err) {
             return fused_gr_read_multi(fa, n, xn_ + (size_t) tb * HC * N, cs, (prof_on_ && grp == 0) ? prof_ : nullptr,
                                 (int) (l * kProfPer + (half == 0 ? 27 : 30)));
         };
-        const bool q8_attn = gr_read_group(0, pending, inj2_, inj_);   // true: xq_ holds mixed's q8_1 (STRATA_QFUSE)
+        const bool q8_attn = gr_read_group(0, pending, inj2_, inj_);   // true: xq_ holds mixed's q8_1 (SAGUARO_QFUSE)
         stamp(l, 1, grp);
         float* xm = mixed_ + tb * N;
         try {
@@ -1070,7 +1070,7 @@ bool Verifier::record_window(int T, dpct::queue_ptr cs, std::string &err) {
                 gdn_step_norm_multi(state, hb, (int) C, gate, beta, z_, (const float*) wnm->data, EPS, y_, (int) HK,
                                     (int) HV, te, self_commit ? one_ : nullptr, cs, tb, g_qfuse() ? (void*) xq_ : nullptr);
                 stamp(l, 6, grp);
-                if (!g_qfuse()) native_quantize_q8_1(y_ + (size_t) tb * ZV, xq_, (int) ZV, n, cs);   // STRATA_QFUSE: done above
+                if (!g_qfuse()) native_quantize_q8_1(y_ + (size_t) tb * ZV, xq_, (int) ZV, n, cs);   // SAGUARO_QFUSE: done above
                 native_mmvq(wout->native_type, wout->native_data, xq_, bo_ + tb * N, (int) ZV, (int) N, n, cs);
             } else {
                 // ======================= QSA =======================
@@ -1086,7 +1086,7 @@ bool Verifier::record_window(int T, dpct::queue_ptr cs, std::string &err) {
                     !native_of(wv, v.name("attn_v.weight"), err) || !native_of(wo, v.name("attn_output.weight"), err))
                     return false;
                 // #783 PR-f (stuchapin909): the per-head RMSNorm and the rope in one launch, bit-identical to the pair
-                // (rope_parity check 6); STRATA_NO_NORM_ROPE=1 keeps the two; off on HIP until its parity check passes
+                // (rope_parity check 6); SAGUARO_NO_NORM_ROPE=1 keeps the two; off on HIP until its parity check passes
                 const bool fuse_nr = native_qsa_enabled() && native_rope_enabled() && native_norm_rope_usable((int) HD, (int) s.n_rot);
                 auto norm_rope = [&](float* data, const WeightRef* norm, int rows, int cols, const int32_t* pos) {
                     if (fuse_nr && native_norm_rope_usable(cols, (int) s.n_rot)) {
@@ -1101,7 +1101,7 @@ bool Verifier::record_window(int T, dpct::queue_ptr cs, std::string &err) {
                 };
                 float* idx_raw = idx_raw_L_ + (size_t) qi * MT * ID;
                 // the per-token GEMVs / norms / RoPEs / copies of this layer as one launch over the
-                // window's rows each - row-wise identical arithmetic (STRATA_DEC_BATCH=0: token by token)
+                // window's rows each - row-wise identical arithmetic (SAGUARO_DEC_BATCH=0: token by token)
                 const bool qb = dec_batch && n > 1 && native_qsa_enabled() && native_rope_enabled() && !st.kv_q4;
                 if (!q8_attn) native_quantize_q8_1(xm, xq_, (int) N, n, cs);
                 if (qb) bf16_gemv_fp32_mmvf_multi(mixed_ + tb * N, N, (const uint16_t*) wik->data, idx_raw + tb * ID, ID, N, ID, n, cs);
@@ -1291,11 +1291,11 @@ bool Verifier::record_window(int T, dpct::queue_ptr cs, std::string &err) {
             return false;
         }
         stamp(l, 16, grp);
-        const bool q8_ffn = gr_read_group(1, true, inj_, inj2_);   // true: nat_xq_ holds the MoE input's q8_1 (STRATA_QFUSE)
+        const bool q8_ffn = gr_read_group(1, true, inj_, inj2_);   // true: nat_xq_ holds the MoE input's q8_1 (SAGUARO_QFUSE)
         // with CPU experts in the window the shared expert forks off once the doorbell is published (it no longer
-        // competes with it for the GPU's first microseconds); STRATA_SH_FORK_LATE=0 forks at the top as before
+        // competes with it for the GPU's first microseconds); SAGUARO_SH_FORK_LATE=0 forks at the top as before
         static const bool sh_fork_late_env = [] {
-            const char* e = std::getenv("STRATA_SH_FORK_LATE");
+            const char* e = std::getenv("SAGUARO_SH_FORK_LATE");
             return !e || e[0] != '0';
         }();
         const bool sh_fork = sh_stream_on() && !prof_on_ && !g_stepped &&
@@ -1308,9 +1308,9 @@ bool Verifier::record_window(int T, dpct::queue_ptr cs, std::string &err) {
             (sh_cs_)->ext_oneapi_submit_barrier({*ev_fork_});
         }
         // the window's rows routed in 2 launches (one router GEMV reading the weight once, one
-        // top-10) instead of 2 per token; every row's arithmetic is the single-token call's (STRATA_DEC_BATCH=0: old)
+        // top-10) instead of 2 per token; every row's arithmetic is the single-token call's (SAGUARO_DEC_BATCH=0: old)
         const WeightRef* w_router = v.get("ffn_gate_inp.weight");
-        // S26 STRATA_LFUSE=1: the shared expert's gate row rides in the router GEMV launch, its sigmoid + row scale
+        // S26 SAGUARO_LFUSE=1: the shared expert's gate row rides in the router GEMV launch, its sigmoid + row scale
         // move into the combine, gate + up share one launch (all bitwise; resident combine path, 2-8 rows only)
         const WeightRef* w_sgi = lfuse_on(n) && g_lfuse_gate() ? v.get("ffn_gate_inp_shexp.weight") : nullptr;
         bool sg_ready = false;
@@ -1329,7 +1329,7 @@ bool Verifier::record_window(int T, dpct::queue_ptr cs, std::string &err) {
         } else if (dec_batch) {
             // gfx906: the Coder's 256-expert router (the native router is 512 x 10 only) for the whole window in one
             // multi-column BF16 projection and one top-k, bitwise the per-token calls (route_window_parity); ~3 ms
-            // of a ~55 ms verify window on 2x MI50.  STRATA_ROUTE_PER_TOKEN=1: the per-token calls.
+            // of a ~55 ms verify window on 2x MI50.  SAGUARO_ROUTE_PER_TOKEN=1: the per-token calls.
             if (!moe_route_window(wt, g, l, K, ss.moe, mixed_ + tb * N, logits_ + tb * NE, ids_ + tb * K, w_ + tb * K, n,
                                   cs, err))
                 return false;
@@ -1373,7 +1373,7 @@ bool Verifier::record_window(int T, dpct::queue_ptr cs, std::string &err) {
             if (step_hook_ && !step_hook_(l, grp)) { if (err.empty()) err = "verify: stepped serve failed"; return false; }
         }
         stamp(l, 17, grp);
-        bool qdedup = false;   // STRATA_VERIFY_QDEDUP took effect: the experts' q8_1 image of xm is already made
+        bool qdedup = false;   // SAGUARO_VERIFY_QDEDUP took effect: the experts' q8_1 image of xm is already made
         {
             const WeightRef *wgi = need(v, "ffn_gate_inp_shexp.weight", err), *wsg = need(v, "ffn_gate_shexp.weight", err),
                             *wsu = need(v, "ffn_up_shexp.weight", err), *wsd = need(v, "ffn_down_shexp.weight", err);
@@ -1386,7 +1386,7 @@ bool Verifier::record_window(int T, dpct::queue_ptr cs, std::string &err) {
             nsw.up_type = wsu->native_type; nsw.up_data = wsu->native_data;
             nsw.down_type = wsd->native_type; nsw.down_data = wsd->native_data;
             nsw.q8_1 = sh_fork ? sh_xq_ : xq_;
-            // STRATA_VERIFY_QDEDUP=1 (not with the forked shared-expert stream, which quantizes into its own buffer): the
+            // SAGUARO_VERIFY_QDEDUP=1 (not with the forked shared-expert stream, which quantizes into its own buffer): the
             // experts' q8_1 image of xm is made first and the shared expert's gate/up read it (quantize_q8_1_rows and
             // native_quantize_q8_1 write the same bytes)
             qdedup = g_qdedup() && !sh_fork && strata::kernels::cpu::expert_layout().native;
@@ -1410,7 +1410,7 @@ bool Verifier::record_window(int T, dpct::queue_ptr cs, std::string &err) {
         if (strata::kernels::cpu::expert_layout().native) {
             // APR: Hadamard-folded gate/up take H (s * x); xm itself stays as it is (the shared expert above and the
             // doorbell copy for the CPU pool, which rotates its own in native_quant_act). The q8_1 image of xm that
-            // STRATA_QFUSE / STRATA_VERIFY_QDEDUP may already have written is of the unrotated input, so a folded layer
+            // SAGUARO_QFUSE / SAGUARO_VERIFY_QDEDUP may already have written is of the unrotated input, so a folded layer
             // always rewrites it from the rotated rows (same stream, after the shared expert has read it).
             const auto& f = strata::kernels::cpu::expert_layout().fmt[(size_t) l];
             if (f.had_gu) {   // nat_xr_ exists: init carved it because this layer is folded (had_gu_any)
@@ -1427,7 +1427,7 @@ bool Verifier::record_window(int T, dpct::queue_ptr cs, std::string &err) {
 
     // ---------------------------------------------------------------- post(l, group): experts, combine
     static const bool fuse_head_gr_env = [] {
-        const char* e = std::getenv("STRATA_FUSE_HEAD_GR");
+        const char* e = std::getenv("SAGUARO_FUSE_HEAD_GR");
         return e && e[0] == '1';
     }();
     const bool fuse_head_gr = fuse_head_gr_env && (le_ == g.n_layers) && (head_ != nullptr && head_->loaded()) &&
@@ -1517,7 +1517,7 @@ bool Verifier::record_window(int T, dpct::queue_ptr cs, std::string &err) {
             ev_join_ != nullptr) {
             cs->ext_oneapi_submit_barrier({*ev_join_});
         }
-        if (sg_gated_[grp]) {   // STRATA_LFUSE: the shared expert's gate was not applied: the combine applies it (all rows are hits)
+        if (sg_gated_[grp]) {   // SAGUARO_LFUSE: the shared expert's gate was not applied: the combine applies it (all rows are hits)
             try {
                 native_moe_combine_multi_hits_gated(parts_out, w_ + tb * K, shared_ + tb * N, sh_g_ + tb, bo_ + tb * N, N, K, n, cs);
             } catch (const std::exception& e) { err = "verify combine: " + std::string(e.what()); return false; }
@@ -1572,7 +1572,7 @@ bool Verifier::record_window(int T, dpct::queue_ptr cs, std::string &err) {
         const WeightRef *hn = wt.find("output_hc_norm.weight"), *hd = wt.find("output_hc_down.weight"),
                         *hu = wt.find("output_hc_up.weight");
         if (!hn || !hd || !hu) { err = "verify: an output_hc_* weight is missing"; return false; }
-        // S25 (STRATA_HC_Q8=1): the final mixer from the GGUF's Q8_0 projections too, through the same multi read
+        // S25 (SAGUARO_HC_Q8=1): the final mixer from the GGUF's Q8_0 projections too, through the same multi read
         // (no pending write, no inject)
         const bool mix_q8 = hd->hc_q8 != nullptr && hu->hc_q8 != nullptr && head_ != nullptr && head_->loaded();
         if (mix_q8) {
@@ -1727,7 +1727,7 @@ bool Verifier::capture_segments(int T, std::string& err) try {
     };
     dpct::experimental::begin_recording(cs_);
     step_hook_ = [&](int64_t l, int grp) { return boundary(l, grp, 1); };
-    static const bool split_on = [] { const char* e = std::getenv("STRATA_VERIFY_SPLIT"); return !(e && e[0] == '0'); }();
+    static const bool split_on = [] { const char* e = std::getenv("SAGUARO_VERIFY_SPLIT"); return !(e && e[0] == '0'); }();
     if (split_on) step_hook2_ = [&](int64_t l, int grp) { return boundary(l, grp, 0); };
     std::string rerr;
     const bool ok = record_window(T, cs_, rerr);
@@ -1740,7 +1740,7 @@ bool Verifier::capture_segments(int T, std::string& err) try {
         if (err.empty()) err = "verify: segment capture: " + rerr;
         return false;
     }
-    if (std::getenv("STRATA_VERIFY_NODES") != nullptr)
+    if (std::getenv("SAGUARO_VERIFY_NODES") != nullptr)
         std::fprintf(stderr, "strata verify: the %d-token window as %zu graph segments\n", T, seg_[T].size());
     return true;
 }
@@ -1752,11 +1752,11 @@ catch (sycl::exception const& exc) {
 bool Verifier::capture(int T, std::string &err) try {
     // stepped mode: the doorbell window as segments; the all-resident (zero-doorbell) graph has no serves and is
     // captured whole below, its one host flag raised before launch (run)
-    if (g_stepped && !ar_on() && std::getenv("STRATA_VERIFY_EAGER") == nullptr) return capture_segments(T, err);
+    if (g_stepped && !ar_on() && std::getenv("SAGUARO_VERIFY_EAGER") == nullptr) return capture_segments(T, err);
     dpct::experimental::command_graph_exec_ptr &exec_t =
         ar_off_ ? exec_nr_[T] : exec_[T];
     if (exec_t != nullptr) return true;
-    if (std::getenv("STRATA_VERIFY_EAGER") != nullptr) return true;   // SYCL port: no graph, run() replays the body
+    if (std::getenv("SAGUARO_VERIFY_EAGER") != nullptr) return true;   // SYCL port: no graph, run() replays the body
     if (DPCT_CHECK_ERROR(dpct::experimental::begin_recording(cs_)) != 0) {
         err = "verify: begin capture failed";
         return false;
@@ -1787,7 +1787,7 @@ bool Verifier::capture(int T, std::string &err) try {
               dpct::get_error_string_dummy(ce);
         return false;
     }
-    if (std::getenv("STRATA_VERIFY_NODES") != nullptr) {   // what the window graph holds
+    if (std::getenv("SAGUARO_VERIFY_NODES") != nullptr) {   // what the window graph holds
         size_t nn = 0;
         dpct::experimental::get_nodes(graph, nullptr, &nn);
         std::vector<dpct::experimental::node_ptr> nodes(nn);
@@ -1970,7 +1970,7 @@ void Verifier::stage_inputs(int T, const int32_t* tokens, int64_t pos0) {
 }
 
 void Verifier::collect_profile() {
-    if (std::getenv("STRATA_VERIFY_EAGER") == nullptr)   // eager (SYCL port): prof_h_ already holds the host clocks
+    if (std::getenv("SAGUARO_VERIFY_EAGER") == nullptr)   // eager (SYCL port): prof_h_ already holds the host clocks
         dpct::get_in_order_queue()
             .memcpy(prof_h_.data(), prof_, prof_h_.size() * 8)
             .wait();
@@ -2050,22 +2050,22 @@ bool Verifier::run(int T, const int32_t *tokens, int64_t pos0, PoolMultiFn pool,
         // started when it was launched behind that work still in flight on another queue (no GPU breadcrumb, 20 s
         // timeout, the engine dies). Letting the other queues drain before every window removes it (9 of 9 three-request runs pass; before, almost all
         // failed; the gap rule alone (=2) did not help, so it is the windows after each other, not only the first). The cost is
-        // the overlap of a window with the previous commit's tail.  STRATA_WINDOW_SYNC=1 always drains, =0 never, =2 the gap rule; the default is 1 on an i915 card, 0 elsewhere.
+        // the overlap of a window with the previous commit's tail.  SAGUARO_WINDOW_SYNC=1 always drains, =0 never, =2 the gap rule; the default is 1 on an i915 card, 0 elsewhere.
         // #2194: the same never-starting first window on an Arc A770 under xe (main thread in this function's stepped
         // serve, queue::wait, no xe reset) - an Alchemist card, whatever its driver. Reproduced on the A750 with
-        // STRATA_WINDOW_SYNC=0 (stepped, --resident-experts, IQ3_XXS): 1 of 6 runs hung there (same stack), against 0 of 11
+        // SAGUARO_WINDOW_SYNC=0 (stepped, --resident-experts, IQ3_XXS): 1 of 6 runs hung there (same stack), against 0 of 11
         // with the drain. So the default drain is per GPU generation now: every Alchemist card (i915 or xe), as before
         // every i915 card; Battlemage and the others are unchanged (0).
-        static const char* wv = std::getenv("STRATA_WINDOW_SYNC");
+        static const char* wv = std::getenv("SAGUARO_WINDOW_SYNC");
         static const int wmode = wv ? std::atoi(wv)
                                     : ((intel_i915_gpu() || strata::intel_gpu_gen(cs_->get_device()) == strata::IntelGpuGen::Alchemist) ? 1 : 0);
         const bool first_or_gap = t_prev_end.time_since_epoch().count() == 0 || (t_launch - t_prev_end) > std::chrono::milliseconds(20);
         if (wmode == 1 || (wmode == 2 && first_or_gap)) dpct::get_current_device().queues_wait_and_throw();
     }
-    // STRATA_VERIFY_STEPPED (Arc A-series): the doorbell window runs as segments with the CPU experts served at the
+    // SAGUARO_VERIFY_STEPPED (Arc A-series): the doorbell window runs as segments with the CPU experts served at the
     // queue boundaries between them (no mid-kernel host signalling); the all-resident graph gets its one flag (the PLE
     // rows are in place) before launch.
-    const bool stepped_run = g_stepped && !ar_on() && std::getenv("STRATA_VERIFY_EAGER") == nullptr && !seg_[T].empty();
+    const bool stepped_run = g_stepped && !ar_on() && std::getenv("SAGUARO_VERIFY_EAGER") == nullptr && !seg_[T].empty();
     const bool stepped_ar = g_stepped && ar_on() && !(g_test_stall > 0 && windows + 1 == g_test_stall);
     if (stepped_ar) {
         if (do_ple) {
@@ -2080,7 +2080,7 @@ bool Verifier::run(int T, const int32_t *tokens, int64_t pos0, PoolMultiFn pool,
     }
     dpct::err0 le = 0;
     if (stepped_run) {
-        if (remote_opt_) { err = "verify: STRATA_VERIFY_STEPPED does not serve --remote-expert-opt"; return false; }
+        if (remote_opt_) { err = "verify: SAGUARO_VERIFY_STEPPED does not serve --remote-expert-opt"; return false; }
         const int Gs = groups_[T] > 0 ? groups_[T] : 1;
         double st_wait = 0, st_pool = 0;
         std::vector<char> submitted(seg_[T].size(), 0);
@@ -2113,7 +2113,7 @@ bool Verifier::run(int T, const int32_t *tokens, int64_t pos0, PoolMultiFn pool,
             };
             // segment nxt ends at a split point: it is the plan copy + VRAM groups, whose only host wait is flag A
             const bool split = nxt < seg_kind_[T].size() && seg_kind_[T][nxt] == 0;
-            static const bool pipe = [] { const char* e = std::getenv("STRATA_VERIFY_PIPE"); return !(e && e[0] == '0'); }();
+            static const bool pipe = [] { const char* e = std::getenv("SAGUARO_VERIFY_PIPE"); return !(e && e[0] == '0'); }();
             if (pipe && split) {
                 std::atomic<bool> done{false};
                 std::string herr;
@@ -2174,7 +2174,7 @@ bool Verifier::run(int T, const int32_t *tokens, int64_t pos0, PoolMultiFn pool,
         ms_pool += st_pool;
         if (le != 0) return false;
     } else {
-        le = (std::getenv("STRATA_VERIFY_EAGER") != nullptr)
+        le = (std::getenv("SAGUARO_VERIFY_EAGER") != nullptr)
                  ? (record_window(T, cs_, err) ? 0 : 1)   // SYCL port: eager replay of the window body
                  : DPCT_CHECK_ERROR((cs_)->ext_oneapi_graph(*(ar_off_ ? exec_nr_[T] : exec_[T])));
     }
@@ -2204,9 +2204,9 @@ bool Verifier::run(int T, const int32_t *tokens, int64_t pos0, PoolMultiFn pool,
     // SYCL port: with every routed expert resident the GPU takes its own plan (`device_plan_`) and skips every
     // host flag, so the host has nothing to do per layer - and on this platform a kernel's writes to host-mapped
     // memory are not reliably visible while the graph runs (measured: the ring is seen late or not at all),
-    // so waiting on them per layer fails. STRATA_VERIFY_NO_HOST=1 waits for the whole window instead. Only for
+    // so waiting on them per layer fails. SAGUARO_VERIFY_NO_HOST=1 waits for the whole window instead. Only for
     // an all-resident cache: a missed expert would leave the GPU waiting for a plan that never comes.
-    static const bool no_host = [] { const char* v = std::getenv("STRATA_VERIFY_NO_HOST"); return v && *v && std::strcmp(v, "0") != 0; }();
+    static const bool no_host = [] { const char* v = std::getenv("SAGUARO_VERIFY_NO_HOST"); return v && *v && std::strcmp(v, "0") != 0; }();
     const int64_t steps = (le_ - lb_) * G;
     const bool test_stall = g_test_stall > 0 && windows + 1 == g_test_stall;   // #267 test hook (off: false)
     if (stepped_run || stepped_ar) {
@@ -2332,7 +2332,7 @@ bool Verifier::run(int T, const int32_t *tokens, int64_t pos0, PoolMultiFn pool,
     const dpct::err0 se = DPCT_CHECK_ERROR(cs_->wait());
     trace_ev("SYNCED", -1, -1, (int64_t) se);
     const Clock::time_point t_done = Clock::now();
-    if (std::getenv("STRATA_VERIFY_DEBUG") != nullptr) {
+    if (std::getenv("SAGUARO_VERIFY_DEBUG") != nullptr) {
         std::fprintf(stderr, "verify dbg: T=%d window: since previous window %.1f ms, staging %.1f ms, gpu %.1f ms\n", T,
                      t_prev_end.time_since_epoch().count() ? std::chrono::duration<double, std::milli>(t0 - t_prev_end).count() : 0.0,
                      std::chrono::duration<double, std::milli>(t_launch - t0).count(),
@@ -2354,7 +2354,7 @@ bool Verifier::run(int T, const int32_t *tokens, int64_t pos0, PoolMultiFn pool,
         err = std::string("verify: ") + dpct::get_error_string_dummy(se);
         return false;
     }
-    if (no_host && std::getenv("STRATA_VERIFY_DEBUG") != nullptr) {   // SYCL port: what the window left behind
+    if (no_host && std::getenv("SAGUARO_VERIFY_DEBUG") != nullptr) {   // SYCL port: what the window left behind
         const int Gd = groups_[T] > 0 ? groups_[T] : 1;
         std::vector<uint32_t> sk((size_t) Gd, 0);
         std::vector<int32_t> id0((size_t) ss.k, 0);
@@ -2426,7 +2426,7 @@ bool Verifier::run(int T, const int32_t *tokens, int64_t pos0, PoolMultiFn pool,
     }
     if (prof_on_ && G == 1) {   // the window's GPU stage stamps
         collect_profile();
-        if (std::getenv("STRATA_VERIFY_EAGER") != nullptr)   // SYCL port: the stage table per window, host-clocked
+        if (std::getenv("SAGUARO_VERIFY_EAGER") != nullptr)   // SYCL port: the stage table per window, host-clocked
             std::fprintf(stderr, "verify stages T=%d (ms/window):%s\n", T, profile_report().c_str());
     }
     // ---- a sampled or penalized request: the head's sampling again, host-side so its parameters are this call's
@@ -2449,7 +2449,7 @@ bool Verifier::run(int T, const int32_t *tokens, int64_t pos0, PoolMultiFn pool,
         }
     }
     for (int t = 0; t < T; ++t) out[t] = ((volatile int32_t*) h_out_)[t];
-    if (static const bool dbg = std::getenv("STRATA_DBG_NAN") != nullptr; dbg) {   // debug: the first non-finite head
+    if (static const bool dbg = std::getenv("SAGUARO_DBG_NAN") != nullptr; dbg) {   // debug: the first non-finite head
         static bool reported = false;
         if (!reported) {
             std::vector<float> h((size_t) T * (size_t) n_vocab_);
@@ -2523,7 +2523,7 @@ void Verifier::fetch_dma(void *ctx, const uint8_t *const *src, int n,
     if (n <= 0) { raise_flag(v->h_flagB_, want); return; }
     v->copy_used_ = true;
     uint8_t* stage = (uint8_t*) v->sink_.staging;                  // this group's half in a split window
-    // STRATA_DMA_BATCH (midhatn's #807, F12): the group's independent uploads as one cudaMemcpyBatchAsync.  Mode 0 is
+    // SAGUARO_DMA_BATCH (midhatn's #807, F12): the group's independent uploads as one cudaMemcpyBatchAsync.  Mode 0 is
     // the loop the engine always ran, errors unchecked (it never stops the engine).  A batch mode whose uploads
     // cannot be submitted stops the engine: flag B must not release the consumers to expert weights that were never
     // copied.
@@ -2612,10 +2612,10 @@ bool Verifier::window_logprobs(const int32_t* targets, int T, int64_t pos0, int3
         std::fprintf(out, "%lld\t%d\t%.9f\t%lld\t%.9f\t%d\t%.9f\t%.9f", (long long) (pos0 + t), (int) tgt,
                      (double) row[tgt] - lse, (long long) top, maxv - lse, (int) (top == (int64_t) tgt), extra,
                      without);
-        // STRATA_LOGPOS_TOPK=K: the K most likely tokens and their log-probabilities too (`id:logprob`), for a
+        // SAGUARO_LOGPOS_TOPK=K: the K most likely tokens and their log-probabilities too (`id:logprob`), for a
         // top-k comparison with another engine on the same tokens (docs/UNSLOTH_Q4.md)
         static const int topk = [] {
-            const char* v = std::getenv("STRATA_LOGPOS_TOPK");
+            const char* v = std::getenv("SAGUARO_LOGPOS_TOPK");
             return v != nullptr ? std::max(0, std::min(256, std::atoi(v))) : 0;
         }();
         if (topk > 0) {
@@ -2636,7 +2636,7 @@ bool Verifier::window_logprobs(const int32_t* targets, int T, int64_t pos0, int3
 }
 
 namespace { bool g_commit_async = false; }
-void Verifier::set_commit_async(bool on) { g_commit_async = on && std::getenv("STRATA_COMMIT_SYNC") == nullptr; }
+void Verifier::set_commit_async(bool on) { g_commit_async = on && std::getenv("SAGUARO_COMMIT_SYNC") == nullptr; }
 
 bool Verifier::commit(int n_keep, std::string &err) try {
     const OnDevice on_device(device_);

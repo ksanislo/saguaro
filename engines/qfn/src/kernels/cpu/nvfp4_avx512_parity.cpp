@@ -8,7 +8,7 @@
 // expert (layer 0, expert 0 of a pack's experts.bin) covers the checkpoint's own distribution.
 // Also the down rows (n 640) and gate/up through silu with the blob tail's scales, 1..9 tokens (past one slice).
 // The AVX2 rows follow ggml's AVX2 path step for step, so for them every row must also be bit-equal (ggml-cpu built
-// with AVX2: STRATA_PORTABLE, or a native build). Each kernel is checked when this CPU runs it.
+// with AVX2: SAGUARO_PORTABLE, or a native build). Each kernel is checked when this CPU runs it.
 // Speed: gate+up rows of one expert for 1..8 tokens, each way, as the CPU pool runs them.
 //
 //     nvfp4_avx512_parity --bw THREADS TOKENS [ggml|avx2]
@@ -19,7 +19,7 @@
 // ~1e-5 and its Q8_0 scale an FP16 subnormal) and with s_down applied to the output instead.
 //
 // DRAM rate: THREADS threads each run whole experts (gate/up through silu, then down) out of 4.2 GB of blobs -
-// 40x the L3 - for TOKENS tokens; GB/s of weights read. STRATA_NVFP4_PREFETCH sets the kernel's prefetch distance.
+// 40x the L3 - for TOKENS tokens; GB/s of weights read. SAGUARO_NVFP4_PREFETCH sets the kernel's prefetch distance.
 #include "strata/kernels/cpu/expert_layout.hpp"
 #include "strata/kernels/cpu/nvfp4_avx2.hpp"
 #include "strata/kernels/cpu/nvfp4_avx512.hpp"
@@ -241,7 +241,7 @@ int bandwidth(int threads, int nt, bool use_ggml, const Kern& k) {
         for (auto& p : pool) p.join();
         best = std::fmin(best, now_ms() - t0);
     }
-    const char* pf = std::getenv("STRATA_NVFP4_PREFETCH");
+    const char* pf = std::getenv("SAGUARO_NVFP4_PREFETCH");
     std::printf("%s  threads %d  tokens %d  prefetch %s: %.1f ms for %d experts -> %.1f GB/s, %.1f us/expert/thread\n",
                 use_ggml ? "ggml  " : k.name, threads, nt, use_ggml ? "-" : (pf ? pf : "2048"), best, E,
                 (double) E * BLOB / best / 1e6, best * 1000.0 * threads / E);

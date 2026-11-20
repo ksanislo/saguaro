@@ -35,8 +35,8 @@ def add_status(sp: argparse._SubParsersAction) -> None:
 
 def running_launch() -> dict | None:
     """The server a `strata launch` has running (address and its key), when no address was given: so `strata monitor` needs no --url.
-    Nothing is read when a connection, STRATA_URL or STRATA_CONNECTION names the server, and a thin monitor bundle has no launch code."""
-    if os.environ.get("STRATA_URL") or os.environ.get("STRATA_CONNECTION"):
+    Nothing is read when a connection, SAGUARO_URL or SAGUARO_CONNECTION names the server, and a thin monitor bundle has no launch code."""
+    if os.environ.get("SAGUARO_URL") or os.environ.get("SAGUARO_CONNECTION"):
         return None
     try:
         from strata_cli.launch.cmd import launch_info
@@ -79,7 +79,7 @@ def add_connections(sp: argparse._SubParsersAction) -> None:
     create.add_argument("name")
     create.add_argument("--url", required=True)
     create.add_argument("--prefix", default="", help="reverse-proxy path prefix, e.g. /strata")
-    create.add_argument("--credential-env", default="STRATA_TELEMETRY_KEY")
+    create.add_argument("--credential-env", default="SAGUARO_TELEMETRY_KEY")
     show = actions.add_parser("show", help="show a saved connection without its credential")
     show.add_argument("name")
     actions.add_parser("list", help="list saved connections")

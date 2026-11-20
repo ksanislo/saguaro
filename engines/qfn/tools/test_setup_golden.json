@@ -239,8 +239,8 @@
    ],
    "cwd": "<T>",
    "env": {
-    "STRATA_HC_Q8": "1",
-    "STRATA_ROUTE_TAIL_SKIP": "0"
+    "SAGUARO_HC_Q8": "1",
+    "SAGUARO_ROUTE_TAIL_SKIP": "0"
    },
    "exe": "<T>/engine/<EXE>",
    "gpu": 0,
@@ -533,7 +533,7 @@
    ],
    "cwd": "<T>",
    "env": {
-    "STRATA_HC_Q8": "1"
+    "SAGUARO_HC_Q8": "1"
    },
    "exe": "<T>/engine/<EXE>",
    "gpu": 0,
@@ -823,7 +823,7 @@
    ],
    "cwd": "<T>",
    "env": {
-    "STRATA_HC_Q8": "1"
+    "SAGUARO_HC_Q8": "1"
    },
    "exe": "<T>/engine/<EXE>",
    "gpu": 0,
@@ -1085,7 +1085,7 @@
    ],
    "cwd": "<T>",
    "env": {
-    "STRATA_HC_Q8": "1"
+    "SAGUARO_HC_Q8": "1"
    },
    "exe": "<T>/engine/<EXE>",
    "gpu": 0,
@@ -1340,8 +1340,8 @@
    ],
    "cwd": "<T>",
    "env": {
-    "STRATA_HC_Q8": "1",
-    "STRATA_ROUTE_TAIL_SKIP": "0"
+    "SAGUARO_HC_Q8": "1",
+    "SAGUARO_ROUTE_TAIL_SKIP": "0"
    },
    "exe": "<T>/engine/<EXE>",
    "gpu": 0,

@@ -157,7 +157,7 @@ std::string page_cache_hint(const std::string& meminfo_text) {
                   "; %.1f GiB of the RAM is file cache (earlier runs' model files, which Linux gives back on demand - "
                   "'free' showing little is normal). If the start still fails, free it with: "
                   "sync; echo 1 | sudo tee /proc/sys/vm/drop_caches   (or start strata serve with "
-                  "STRATA_DROP_CACHE_ON_EXIT=1 so it releases its model files when it stops)",
+                  "SAGUARO_DROP_CACHE_ON_EXIT=1 so it releases its model files when it stops)",
                   (double) cache / 1073741824.0);
     return msg;
 }
@@ -526,7 +526,7 @@ void log_complement_memory(const char* stage, uint64_t requested) {
 }
 
 #if defined(__linux__)
-/// STRATA_NUMA_SPLIT step B: each NUMA slice of every complement slot (numa_slice_ranges) is first-touched by a helper
+/// SAGUARO_NUMA_SPLIT step B: each NUMA slice of every complement slot (numa_slice_ranges) is first-touched by a helper
 /// thread pinned to one core of that slice's node, so the default local policy puts its pages there (no mbind: ~113k
 /// ranges would split the arena into more VMAs than vm.max_map_count allows).  Inactive (`place` false) unless the
 /// live pool split on real nodes; then the paced fault loop hands it each step to touch.
@@ -863,15 +863,15 @@ bool file_tier_probe(const std::vector<std::string>& paths, double& direct_bps, 
 /// #286/#577: whether the file tier reads its `read_bytes` unbuffered, beside `arena_bytes` of RAM copy still to be
 /// taken.  Windows times probe reads too (experts_unbuffered); on Linux the same rule as its `cache_counts = false`
 /// arm decides: whether the file cache could keep those bytes at all, from MemAvailable and the tightest cgroup
-/// limit (host_available_memory).  STRATA_UNBUFFERED_LOAD=1 / 0 forces it either way, as on Windows.
+/// limit (host_available_memory).  SAGUARO_UNBUFFERED_LOAD=1 / 0 forces it either way, as on Windows.
 bool file_tier_unbuffered(const std::vector<std::string>& paths, uint64_t arena_bytes, uint64_t read_bytes,
                           std::string& why) {
 #if defined(_WIN32)
     return experts_unbuffered(paths, arena_bytes, why, /*cache_counts=*/false, read_bytes);
 #elif defined(__linux__)
     (void) paths;
-    if (const char* env = std::getenv("STRATA_UNBUFFERED_LOAD"); env != nullptr && env[0] != '\0') {
-        why = std::string("STRATA_UNBUFFERED_LOAD=") + env;
+    if (const char* env = std::getenv("SAGUARO_UNBUFFERED_LOAD"); env != nullptr && env[0] != '\0') {
+        why = std::string("SAGUARO_UNBUFFERED_LOAD=") + env;
         return env[0] != '0';
     }
     uint64_t avail = 0;
@@ -885,12 +885,12 @@ bool file_tier_unbuffered(const std::vector<std::string>& paths, uint64_t arena_
     // #1752 (KevinX8): ROCm queues are suspended while the kernel reclaims around the process's HMM-tracked arena
     // (#1691) on an MI50 (gfx906): the cached reads churn the page cache and reclaim unmaps the arena, so the gfx906
     // backend keeps the old room >= read_bytes rule.  Other HIP cards (gfx1201 measured: not affected) keep the new
-    // rule; STRATA_FILE_CACHE_OLD_RULE=1 / 0 forces the old rule on / off on any Linux build.
+    // rule; SAGUARO_FILE_CACHE_OLD_RULE=1 / 0 forces the old rule on / off on any Linux build.
     bool old_rule = false;
 #if defined(STRATA_HIP_GFX906)
     old_rule = true;
 #endif
-    if (const char* r = std::getenv("STRATA_FILE_CACHE_OLD_RULE"); r != nullptr && r[0] != '\0') old_rule = r[0] != '0';
+    if (const char* r = std::getenv("SAGUARO_FILE_CACHE_OLD_RULE"); r != nullptr && r[0] != '\0') old_rule = r[0] != '0';
     const bool keepable = old_rule
         ? strata::platform::file_cache_keeps(avail, arena_bytes, read_bytes)
         : strata::platform::file_cache_keeps(avail, arena_bytes, read_bytes, 1ull << 30, 0.05, 3ull << 29);
@@ -904,9 +904,9 @@ bool file_tier_unbuffered(const std::vector<std::string>& paths, uint64_t arena_
     // set, whether it pays depends on the drive: on a PCIe 5 NVMe (8 GB/s direct) the cached path read prompts at half
     // the speed and decoded 3-4x slower than unbuffered reads, on a 1.7-2.5 GB/s NVMe the cache decodes faster.  So time
     // both paths once at start and read unbuffered only when the drive is fast and serves direct reads clearly faster
-    // (platform::file_tier_prefers_direct).  STRATA_FILE_TIER_PROBE=0 keeps the room rule alone.
+    // (platform::file_tier_prefers_direct).  SAGUARO_FILE_TIER_PROBE=0 keeps the room rule alone.
     if (keepable && !old_rule && read_bytes > 0) {
-        const char* pe = std::getenv("STRATA_FILE_TIER_PROBE");
+        const char* pe = std::getenv("SAGUARO_FILE_TIER_PROBE");
         const uint64_t margin = 1ull << 30;
         const double room = avail > arena_bytes + margin ? (double) (avail - arena_bytes - margin) : 0.0;
         const double held = room / (double) read_bytes;
@@ -1044,8 +1044,8 @@ FileExpertSource::IoCounters FileExpertSource::io_counters() const {
     return c;
 }
 
-// 149-prefetch: the speculative bytes a decode window may read ahead.  Fixed (STRATA_IO_PF_BUDGET_MB), or what the workers
-// measured they can read in one window (one worker's rate x the workers x the window's time) times STRATA_IO_PF_BUDGET_FRAC;
+// 149-prefetch: the speculative bytes a decode window may read ahead.  Fixed (SAGUARO_IO_PF_BUDGET_MB), or what the workers
+// measured they can read in one window (one worker's rate x the workers x the window's time) times SAGUARO_IO_PF_BUDGET_FRAC;
 // 256 MB until both rates are known.
 uint64_t FileExpertSource::io_budget_now() const {
     if (io_budget_fixed_ > 0) return io_budget_fixed_;
@@ -1064,7 +1064,7 @@ void FileExpertSource::io_window_tick() {
     io_win_t0_ = now;
     io_win_bytes_ = 0;
     // feedback: the share of the read-ahead bytes that a layer then used (the used count lags the reads by a window or
-    // so; an EWMA over windows evens that out).  Below STRATA_IO_PF_TARGET the budget shrinks (x0.7 a window, to 1/20),
+    // so; an EWMA over windows evens that out).  Below SAGUARO_IO_PF_TARGET the budget shrinks (x0.7 a window, to 1/20),
     // above it it grows back (x1.1, to 1): a box whose page cache cannot hold what is read ahead stops paying for it.
     const uint64_t pf = io_pf_bytes_.load(std::memory_order_relaxed), used = io_pf_used_bytes_.load(std::memory_order_relaxed);
     const uint64_t dpf = pf - io_prev_pf_, du = used - io_prev_used_;
@@ -1135,26 +1135,26 @@ void FileExpertSource::set_io_prefetch(bool on, int threads) {
     }
     if (!warm_stamp_) warm_stamp_.reset(new std::atomic<uint32_t>[(size_t) (n_layers_ * n_expert_)]());
     io_threads_ = threads > 0 ? threads : 8;
-    if (const char* v = std::getenv("STRATA_IO_PF_AHEAD")) io_ahead_ = std::atoi(v) != 0;
-    {   // experts.bin: fill the page cache from the workers and let the kernels read the mapping (STRATA_IO_PF_STAGE=1: stage)
-        const char* v = std::getenv("STRATA_IO_PF_STAGE");
+    if (const char* v = std::getenv("SAGUARO_IO_PF_AHEAD")) io_ahead_ = std::atoi(v) != 0;
+    {   // experts.bin: fill the page cache from the workers and let the kernels read the mapping (SAGUARO_IO_PF_STAGE=1: stage)
+        const char* v = std::getenv("SAGUARO_IO_PF_STAGE");
         io_fill_ = role_ptr_.empty() && !(v != nullptr && std::atoi(v) != 0);
     }
     io_pf_ = true;
     io_stats_ = true;
     io_quit_ = false;
-    {   // 149-prefetch: STRATA_IO_PF_SCHED=1 - deadlines, confidence admission and a per-window byte budget (off: as before)
-        const char* v = std::getenv("STRATA_IO_PF_SCHED");
+    {   // 149-prefetch: SAGUARO_IO_PF_SCHED=1 - deadlines, confidence admission and a per-window byte budget (off: as before)
+        const char* v = std::getenv("SAGUARO_IO_PF_SCHED");
         io_sched_ = v != nullptr && std::atoi(v) != 0;
-        if (const char* m = std::getenv("STRATA_IO_PF_MINCONF")) io_minconf_ = (float) std::clamp(std::atof(m), 0.0, 1.0);
-        if (const char* m = std::getenv("STRATA_IO_PF_BUDGET_MB")) io_budget_fixed_ = (uint64_t) std::max(0.0, std::atof(m) * 1048576.0);
-        if (const char* m = std::getenv("STRATA_IO_PF_BUDGET_FRAC")) io_budget_frac_ = std::clamp(std::atof(m), 0.01, 4.0);
-        if (const char* m = std::getenv("STRATA_IO_PF_TARGET")) io_target_ = std::clamp(std::atof(m), 0.0, 1.0);
-        gate_on_ = true;   // 0.2.0: the decode gate comes with io prefetch; STRATA_IO_PF_GATE=0 turns it off
-        if (const char* m = std::getenv("STRATA_IO_PF_GATE"); m != nullptr && m[0] != '\0') gate_on_ = std::atoi(m) != 0;
-        if (const char* m = std::getenv("STRATA_IO_PF_GATE_LO")) gate_lo_ = std::clamp(std::atof(m), 0.0, 1.0);
-        if (const char* m = std::getenv("STRATA_IO_PF_GATE_HI")) gate_hi_ = std::clamp(std::atof(m), gate_lo_, 1.0);
-        if (const char* m = std::getenv("STRATA_IO_PF_GATE_USEFUL")) gate_min_useful_ = std::clamp(std::atof(m), 0.0, 1.0);
+        if (const char* m = std::getenv("SAGUARO_IO_PF_MINCONF")) io_minconf_ = (float) std::clamp(std::atof(m), 0.0, 1.0);
+        if (const char* m = std::getenv("SAGUARO_IO_PF_BUDGET_MB")) io_budget_fixed_ = (uint64_t) std::max(0.0, std::atof(m) * 1048576.0);
+        if (const char* m = std::getenv("SAGUARO_IO_PF_BUDGET_FRAC")) io_budget_frac_ = std::clamp(std::atof(m), 0.01, 4.0);
+        if (const char* m = std::getenv("SAGUARO_IO_PF_TARGET")) io_target_ = std::clamp(std::atof(m), 0.0, 1.0);
+        gate_on_ = true;   // 0.2.0: the decode gate comes with io prefetch; SAGUARO_IO_PF_GATE=0 turns it off
+        if (const char* m = std::getenv("SAGUARO_IO_PF_GATE"); m != nullptr && m[0] != '\0') gate_on_ = std::atoi(m) != 0;
+        if (const char* m = std::getenv("SAGUARO_IO_PF_GATE_LO")) gate_lo_ = std::clamp(std::atof(m), 0.0, 1.0);
+        if (const char* m = std::getenv("SAGUARO_IO_PF_GATE_HI")) gate_hi_ = std::clamp(std::atof(m), gate_lo_, 1.0);
+        if (const char* m = std::getenv("SAGUARO_IO_PF_GATE_USEFUL")) gate_min_useful_ = std::clamp(std::atof(m), 0.0, 1.0);
     }
     if (!pf_mark_) {
         pf_mark_.reset(new std::atomic<uint8_t>[(size_t) (n_layers_ * n_expert_)]);
@@ -1787,7 +1787,7 @@ bool FileExpertSource::copy_from_files(int64_t layer, int64_t expert, uint8_t* d
     return true;
 }
 
-// Pinned stage buffers (PR 1237): opt-in (STRATA_STAGE_PIN=1).  On by default they corrupted IQ3_S decode after a 4096-token
+// Pinned stage buffers (PR 1237): opt-in (SAGUARO_STAGE_PIN=1).  On by default they corrupted IQ3_S decode after a 4096-token
 // prompt in the 0.1.41 release gate (48 tokens of id 0; off = identical to 0.1.40.4): with page-locked buffers the cache-fill
 // copy is truly asynchronous, so a recycled stage buffer can be overwritten before its copy finishes.  Off until that is fixed.
 #define STAGE_PIN_DEFAULT 0
@@ -1832,10 +1832,10 @@ bool FileExpertSource::claim_stage(int64_t key, size_t& v, bool& fill, bool ahea
         // Pinned, where the driver allows: a stage buffer is the source of the cache fill's cudaMemcpyAsync,
         // and a pageable source is staged through the driver's bounce buffer - an extra copy at a fraction of
         // the transfer rate, on the calling thread.  A failure falls back to pageable for this buffer.
-        // STRATA_STAGE_PIN: 0 keeps them pageable (as before 0.1.41), 1 always tries to pin, unset (the default) pins while
+        // SAGUARO_STAGE_PIN: 0 keeps them pageable (as before 0.1.41), 1 always tries to pin, unset (the default) pins while
         // the host has kStagePinFloor of RAM to spare beside this buffer (the pool grows to ~257 buffers, 0.4-0.6 GiB):
         // a low-RAM box keeps pageable ones instead of paying for the pinning (recommend, never force).
-        static const int pin_mode = [] { const char* v = std::getenv("STRATA_STAGE_PIN"); return v == nullptr ? -1 : (std::atoi(v) != 0 ? 1 : 0); }();
+        static const int pin_mode = [] { const char* v = std::getenv("SAGUARO_STAGE_PIN"); return v == nullptr ? -1 : (std::atoi(v) != 0 ? 1 : 0); }();
         bool want_pin = pin_mode != 0;
         if (pin_mode < 0) {
             uint64_t avail = 0;
@@ -1896,7 +1896,7 @@ bool FileExpertSource::claim_stage(int64_t key, size_t& v, bool& fill, bool ahea
     return false;
 }
 
-// 149 STRATA_IO_PF_GATE: whether this thread reads for the decode (the dispatch's thread, and the fetch threads it starts)
+// 149 SAGUARO_IO_PF_GATE: whether this thread reads for the decode (the dispatch's thread, and the fetch threads it starts)
 namespace { thread_local bool tl_decode = false; }
 FileExpertSource::DecodeScope::DecodeScope() : prev(tl_decode) { tl_decode = true; }
 FileExpertSource::DecodeScope::~DecodeScope() { tl_decode = prev; }
@@ -1981,7 +1981,7 @@ void FileExpertSource::gate_capacity() {
     if (total == 0 || room == 0) return;   // unknown: the state stays
     gate_ratio_ = (double) room / (double) total;
     // and the read-ahead must pay: the share of its bytes a layer then used, over these 16 windows (64 MB at least read
-    // ahead to judge).  Below STRATA_IO_PF_GATE_USEFUL (0.10) it closes (a RAM tier holds what it would read: an 18 GiB
+    // ahead to judge).  Below SAGUARO_IO_PF_GATE_USEFUL (0.10) it closes (a RAM tier holds what it would read: an 18 GiB
     // RAM tier, 0% used, -9..-15% decode); closed for that reason, it opens again for a probe every 256 windows.
     const uint64_t pf = io_pf_bytes_.load(std::memory_order_relaxed), used = io_pf_used_bytes_.load(std::memory_order_relaxed);
     const uint64_t dpf = pf - gate_prev_pf_, dused = used - gate_prev_used_;
@@ -2189,7 +2189,7 @@ void FileExpertSource::claim_todo(int64_t layer, const int64_t* experts, int64_t
     }
 }
 
-// 149-cold STRATA_COLD_OVERLAP=1: the claimed blobs are read on background threads (the decode thread computes the
+// 149-cold SAGUARO_COLD_OVERLAP=1: the claimed blobs are read on background threads (the decode thread computes the
 // ready experts meanwhile); the same reads as fill_many, on as many threads, each blob published as it lands.
 int64_t FileExpertSource::prefetch_begin(int64_t layer, const int64_t* experts, int64_t n, uint8_t* pending) {
     for (int64_t i = 0; i < n; ++i) pending[i] = 0;
@@ -2202,7 +2202,7 @@ int64_t FileExpertSource::prefetch_begin(int64_t layer, const int64_t* experts, 
     async_todo_.clear();
     async_fill_us_ = 0;
     static const int mode_env = [] {   // as the dispatch reads it (0.2.0: unset = 4 for the GGUF read in place on Linux)
-        const char* v = std::getenv("STRATA_COLD_OVERLAP");
+        const char* v = std::getenv("SAGUARO_COLD_OVERLAP");
         return v == nullptr || v[0] == '\0' ? -1 : std::atoi(v);
     }();
     const int mode = mode_env >= 0 ? mode_env : (linux_file_defaults() ? 4 : 0);
@@ -2364,11 +2364,11 @@ void FileExpertSource::fill_many(const std::vector<Fill>& todo) {
 #if defined(_WIN32)
     // One PrefetchVirtualMemory call for every slice about to be copied: the memory manager reads them in large
     // requests, all queued at once, where the copies' page faults would read a few clusters each.  The copies below
-    // then find the pages resident (or in flight).  STRATA_FETCH_PVM=0 is the A/B arm.
+    // then find the pages resident (or in flight).  SAGUARO_FETCH_PVM=0 is the A/B arm.
     {
         using Pvm = BOOL(WINAPI*)(HANDLE, ULONG_PTR, PWIN32_MEMORY_RANGE_ENTRY, ULONG);
         static const Pvm pvm = [] {
-            const char* v = std::getenv("STRATA_FETCH_PVM");
+            const char* v = std::getenv("SAGUARO_FETCH_PVM");
             if (v != nullptr && std::atoi(v) == 0) return (Pvm) nullptr;
             return (Pvm) (void*) GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "PrefetchVirtualMemory");
         }();
@@ -2494,8 +2494,8 @@ bool FileExpertSource::set_unbuffered(uint64_t ram_bytes, std::string& why) {
 
 bool FileExpertSource::recheck_unbuffered(std::string& why) {
 #if defined(_WIN32) || defined(__linux__)
-    if (const char* env = std::getenv("STRATA_UNBUFFERED_LOAD"); env != nullptr && env[0] != '\0') {
-        why = std::string("STRATA_UNBUFFERED_LOAD=") + env;
+    if (const char* env = std::getenv("SAGUARO_UNBUFFERED_LOAD"); env != nullptr && env[0] != '\0') {
+        why = std::string("SAGUARO_UNBUFFERED_LOAD=") + env;
         return !direct_.empty();
     }
     if (base_ == nullptr || paths_.empty()) {
@@ -2560,9 +2560,9 @@ bool FileExpertSource::drop_mapping(std::string& why) {
     why = "every expert outside RAM and VRAM is read unbuffered";
     return true;
 #else
-    // Linux's page cache has no such lock: only the tests close the GGUF views (STRATA_TEST_UNMAP_GGUF=1), to run the
+    // Linux's page cache has no such lock: only the tests close the GGUF views (SAGUARO_TEST_UNMAP_GGUF=1), to run the
     // unmapped path the Windows file tier takes
-    const char* t = std::getenv("STRATA_TEST_UNMAP_GGUF");
+    const char* t = std::getenv("SAGUARO_TEST_UNMAP_GGUF");
     if (t == nullptr || t[0] == '\0' || std::atoi(t) == 0 || role_ptr_.empty()) { why = "not Windows"; return false; }
     if (direct_.empty()) { why = "the reads are not unbuffered"; return false; }
     if (unmapped_) { why = "already closed"; return true; }
@@ -2574,15 +2574,15 @@ bool FileExpertSource::drop_mapping(std::string& why) {
         m.fd = -1;
     }
     unmapped_ = true;
-    why = std::to_string(maps_.size()) + " GGUF shard(s) unmapped (STRATA_TEST_UNMAP_GGUF); every expert outside RAM and VRAM is read unbuffered";
+    why = std::to_string(maps_.size()) + " GGUF shard(s) unmapped (SAGUARO_TEST_UNMAP_GGUF); every expert outside RAM and VRAM is read unbuffered";
     return true;
 #endif
 }
 
 bool FileExpertSource::begin_startup_unbuffered(std::string& why) {
 #if defined(_WIN32)
-    if (const char* v = std::getenv("STRATA_STARTUP_UNBUFFERED"); v != nullptr && v[0] != '\0' && std::atoi(v) == 0) {
-        why = "STRATA_STARTUP_UNBUFFERED=0";
+    if (const char* v = std::getenv("SAGUARO_STARTUP_UNBUFFERED"); v != nullptr && v[0] != '\0' && std::atoi(v) == 0) {
+        why = "SAGUARO_STARTUP_UNBUFFERED=0";
         return false;
     }
     if (base_ == nullptr || unmapped_ || startup_ub_ || !role_ptr_.empty() || !maps_.empty() || paths_.size() != 1 ||
@@ -3407,7 +3407,7 @@ const uint8_t* FileExpertSource::mapped_blob(int64_t layer, int64_t expert) cons
 uint64_t FileExpertSource::release(int64_t layer, int64_t expert) {
 #if defined(_WIN32)
     static const bool enabled = [] {
-        const char* v = std::getenv("STRATA_FILE_RELEASE");
+        const char* v = std::getenv("SAGUARO_FILE_RELEASE");
         return v != nullptr && std::strcmp(v, "1") == 0;
     }();
     if (!enabled || base_ == nullptr || unmapped_ || layer < 0 || expert < 0 || layer >= n_layers_ || expert >= n_expert_)
@@ -3687,7 +3687,7 @@ bool FileExpertSource::pin_cache_complement(
     uint64_t lock_off = 0;      ///< where the working-set lock starts (after the registered prefix)
     std::string note;
 #if defined(__linux__)
-    NumaComplementPlacement numa;   ///< STRATA_NUMA_SPLIT step B; inert unless the live pool split on real nodes
+    NumaComplementPlacement numa;   ///< SAGUARO_NUMA_SPLIT step B; inert unless the live pool split on real nodes
 #endif
     auto release = [&]() {
         if (arena == nullptr) return;
@@ -3730,22 +3730,22 @@ bool FileExpertSource::pin_cache_complement(
         // the cache of the model files the engine read itself in the way (MemFree low, MemAvailable high) a host was
         // OOM-killed here.  First give those pages back (the engine's own mappings); when what is really free still
         // does not cover the complement, register it in steps, each only while the RAM left stays above the reserve.
-        // STRATA_PIN_GUARD=0 pages-locks in one go as before, =2 always registers in steps (a test); STRATA_PIN_RESERVE_GIB
+        // SAGUARO_PIN_GUARD=0 pages-locks in one go as before, =2 always registers in steps (a test); SAGUARO_PIN_RESERVE_GIB
         // is the RAM that must stay above every step (default: the resident headroom, at least 2 GiB)
-        // STRATA_NUMA_SPLIT placement forces the drop and the paced path whatever the guard (STRATA_PIN_GUARD=0 included)
+        // SAGUARO_NUMA_SPLIT placement forces the drop and the paced path whatever the guard (SAGUARO_PIN_GUARD=0 included)
         const uint64_t pace_reserve = [&] {
-            const char* v = std::getenv("STRATA_PIN_RESERVE_GIB");
+            const char* v = std::getenv("SAGUARO_PIN_RESERVE_GIB");
             return v != nullptr && std::atof(v) > 0 ? (uint64_t) (std::atof(v) * 1073741824.0)
                                                      : std::max<uint64_t>(headroom_bytes, 2ull << 30);
         }();
 #if defined(__linux__)
         if (pin) {
             static const int guard = [] {
-                const char* v = std::getenv("STRATA_PIN_GUARD");
+                const char* v = std::getenv("SAGUARO_PIN_GUARD");
                 return v == nullptr ? 1 : std::atoi(v);
             }();
             uint64_t free_now = 0;
-            numa.init(offsets, n_expert_, layer_blob_bytes_, role_bytes_);   // STRATA_NUMA_SPLIT: placed by the paced loop
+            numa.init(offsets, n_expert_, layer_blob_bytes_, role_bytes_);   // SAGUARO_NUMA_SPLIT: placed by the paced loop
             if (numa.place) {
                 // the engine's own mapped model pages sit on whichever node read them, and a toucher on a full node
                 // gets its pages from the other one (no local reclaim): give them back first, as the guard=1 path does
@@ -3758,13 +3758,13 @@ bool FileExpertSource::pin_cache_complement(
                 // carries the host's other allocations
                 numa.check_room(pace_reserve / 2);
                 if (guard == 0)
-                    std::fprintf(stderr, "FileExpertSource: STRATA_PIN_GUARD=0 overridden: NUMA placement needs the "
+                    std::fprintf(stderr, "FileExpertSource: SAGUARO_PIN_GUARD=0 overridden: NUMA placement needs the "
                                          "paced path\n");
             }
             if (guard == 2 || numa.place) {
                 paced = true;
                 std::fprintf(stderr, "FileExpertSource: %s: page-locking the complement in steps\n",
-                             guard == 2 ? "STRATA_PIN_GUARD=2" : "STRATA_NUMA_SPLIT");
+                             guard == 2 ? "SAGUARO_PIN_GUARD=2" : "SAGUARO_NUMA_SPLIT");
             } else if (guard != 0 && free_memory_bytes(free_now) &&
                        detail::pin_depends_on_reclaim(free_now, bytes, pace_reserve)) {
                 drop_file_cache();
@@ -3822,7 +3822,7 @@ bool FileExpertSource::pin_cache_complement(
                 if (posix_memalign(&aligned, (size_t) page, (size_t) ((bytes + page - 1) / page * page)) == 0) arena = aligned;
 #endif
 #if defined(__linux__)
-                // STRATA_NUMA_SPLIT: a 2 MiB huge page would put several slices on its toucher's node, so the arena
+                // SAGUARO_NUMA_SPLIT: a 2 MiB huge page would put several slices on its toucher's node, so the arena
                 // takes 4 KiB pages (one call, no VMA split)
                 if (arena != nullptr && numa.place) {
                     if (madvise(arena, (size_t) ((bytes + page - 1) / page * page), MADV_NOHUGEPAGE) != 0)
@@ -3847,17 +3847,17 @@ bool FileExpertSource::pin_cache_complement(
                 // read by the GPU over PCIe (--pcie-frac) and copied by DMA; only the rest is locked in the working
                 // set (the registered prefix is page-locked by the driver already - locking it twice made the next
                 // device allocation fail).
-                // opt-in (STRATA_PARTIAL_PIN=1): on the RTX 5070 PC the GPU's PCIe share of the misses measured no
+                // opt-in (SAGUARO_PARTIAL_PIN=1): on the RTX 5070 PC the GPU's PCIe share of the misses measured no
                 // faster than the CPU computing them (7.30 / 7.44 tok/s with 24 / 16 GiB registered against 7.05-7.74
                 // unpinned at a 40 GiB budget), and registering adds startup time and driver memory pressure
                 static const bool partial_on = [] {
-                    const char* v = std::getenv("STRATA_PARTIAL_PIN");
+                    const char* v = std::getenv("SAGUARO_PARTIAL_PIN");
                     return v != nullptr && std::atoi(v) != 0;
                 }();
-                // at most STRATA_PARTIAL_PIN_GIB (default 24): registering 30 GiB of a 40 GiB arena left the driver
+                // at most SAGUARO_PARTIAL_PIN_GIB (default 24): registering 30 GiB of a 40 GiB arena left the driver
                 // unable to page-lock the prompt path's small buffers afterwards (RTX 5070, WDDM)
                 static const uint64_t pin_cap = [] {
-                    const char* v = std::getenv("STRATA_PARTIAL_PIN_GIB");
+                    const char* v = std::getenv("SAGUARO_PARTIAL_PIN_GIB");
                     return (uint64_t) ((v != nullptr && std::atof(v) > 0 ? std::atof(v) : 24.0) * 1073741824.0);
                 }();
                 if (paced) {
@@ -4087,7 +4087,7 @@ bool FileExpertSource::pin_cache_complement(
     if (maps_.empty() && !unmapped_) (void) VirtualUnlock((LPVOID) base_, (SIZE_T) mapped_bytes_);
     for (const Map& m : maps_) if (!m.closed) (void) VirtualUnlock((LPVOID) m.base, (SIZE_T) m.bytes);
 #endif
-    if (std::getenv("STRATA_VERIFY_COMPLEMENT") != nullptr && host != nullptr && bytes > 0) {
+    if (std::getenv("SAGUARO_VERIFY_COMPLEMENT") != nullptr && host != nullptr && bytes > 0) {
         // tests: the copy's checksum (FNV-1a of each 1 GiB piece on its own thread, then of those), any reader
         constexpr uint64_t kPiece = 1ull << 30;
         const size_t pieces = (size_t) ((bytes + kPiece - 1) / kPiece);
@@ -4143,7 +4143,7 @@ bool FileExpertSource::pin_cache_complement(
                              "during a long prompt; expect a slower prompt read on 50K+ token prompts (one measurement: 18%% uncovered "
                              "cost 26%%). %s and restart; the line above should read N of N.\n", missing, lendable,
                      100.0 * (double) missing / (double) std::max<long long>(1, lendable),
-                     lend ? "Free RAM or lower STRATA_RESIDENT_HEADROOM_GIB (now the RAM left free at start)"
+                     lend ? "Free RAM or lower SAGUARO_RESIDENT_HEADROOM_GIB (now the RAM left free at start)"
                           : "Raise --resident-budget-gib (the lend region comes after the ranked experts)");
     }
     if (!stage_lend_regions_.empty()) {
@@ -4193,7 +4193,7 @@ bool FileExpertSource::reserve_exchanges(int64_t n, std::string& err, int64_t bo
     if ((uint64_t)n > std::numeric_limits<size_t>::max() / blob) {
         err = "FileExpertSource: exchange allocation size overflow"; return false;
     }
-    const char* rotate_env = std::getenv("STRATA_EXCHANGE_ROTATE");
+    const char* rotate_env = std::getenv("SAGUARO_EXCHANGE_ROTATE");
     const bool requested = rotate_env && std::strcmp(rotate_env, "1") == 0;
     // layers of several block sizes (a GGUF's mixed i-quants): spares of every size, see ExchangeStorage
     bounce = std::max<int64_t>(0, std::min(bounce, n));
@@ -4376,7 +4376,7 @@ bool FileExpertSource::ram_stage(int64_t layer, int64_t in, int64_t out) {
     {
         std::lock_guard<std::mutex> lk(ram_mu_);
         static const size_t cap = [] {
-            const char* v = std::getenv("STRATA_RAM_ADAPT_QUEUE");
+            const char* v = std::getenv("SAGUARO_RAM_ADAPT_QUEUE");
             return v != nullptr ? (size_t) std::max(1, std::atoi(v)) : (size_t) 64;
         }();
         if (ram_jobs_.size() >= cap) return false;
@@ -4483,7 +4483,7 @@ int FileExpertSource::tier_of(int64_t layer, int64_t expert) const {
 
 void FileExpertSource::commit_copies() {
     fs_hold_staged(true);   // #2134: held until commit_flip has pointed `out` at its new place
-    if (exchange_storage_.active()) return;   // STRATA_EXCHANGE_ROTATE: ownership moves in commit_flip, nothing to copy
+    if (exchange_storage_.active()) return;   // SAGUARO_EXCHANGE_ROTATE: ownership moves in commit_flip, nothing to copy
     for (const Exchange& x : staged_) {
         const uint8_t* src = override_.empty() ? nullptr : override_[x.out];
         const uint64_t at = complement_offsets_[x.in];
@@ -4498,7 +4498,7 @@ int64_t FileExpertSource::commit_flip() {
     fs_hold_staged(true);   // (already held by commit_copies; idempotent)
     for (const Exchange& x : staged_) {
         const uint8_t* src = override_[x.out];
-        if (exchange_storage_.active()) {   // STRATA_EXCHANGE_ROTATE: the same ownership transfer as commit_exchanges
+        if (exchange_storage_.active()) {   // SAGUARO_EXCHANGE_ROTATE: the same ownership transfer as commit_exchanges
             if (!exchange_storage_.commit(x.in, x.out, (size_t) x.q, src, (size_t) x.bytes)) {
                 std::fprintf(stderr, "FileExpertSource: invalid exchange rotation commit; refusing corrupt residency\n");
                 std::abort();
@@ -4525,7 +4525,7 @@ const uint8_t* FileExpertSource::resident_blob(int64_t layer, int64_t expert) co
         expert >= n_expert_) return nullptr;
     const size_t index = (size_t) layer * (size_t) n_expert_ + (size_t) expert;
     if (index >= complement_offsets_.size()) return nullptr;
-    return resident_blob(index);   // through the rotation's ownership table when STRATA_EXCHANGE_ROTATE is on
+    return resident_blob(index);   // through the rotation's ownership table when SAGUARO_EXCHANGE_ROTATE is on
 }
 
 const uint8_t* FileExpertSource::blob_stable(int64_t layer, int64_t expert) {
@@ -4543,7 +4543,7 @@ const uint8_t* FileExpertSource::blob_stable(int64_t layer, int64_t expert) {
 
 int FileExpertSource::blob_parts(int64_t layer, int64_t expert, BlobPart* out) {
     // the GGUF mapped in place only (three tensors per expert); the RAM copy, an exchange override, the unbuffered
-    // reads, a closed mapping and the I/O prefetch (STRATA_IO_PREFETCH: it preads the ranges the page cache lacks, which a copy out
+    // reads, a closed mapping and the I/O prefetch (SAGUARO_IO_PREFETCH: it preads the ranges the page cache lacks, which a copy out
     // of the mapping would fault in one page at a time) keep going through blob(), which knows them
     if (role_ptr_.empty() || !direct_.empty() || io_pf_ || unmapped_ || base_ == nullptr || layer < 0 || expert < 0 ||
         layer >= n_layers_ || expert >= n_expert_)
@@ -4585,7 +4585,7 @@ const uint8_t* FileExpertSource::blob(int64_t layer, int64_t expert) {
             if (result != nullptr) {
                 file_read_bytes_.fetch_add(layer_blob_bytes_[(size_t) layer], std::memory_order_relaxed);
 #if defined(__linux__)
-                if (io_stats_) {   // STRATA_IO_STATS=1: what the page cache held when the kernels were handed the blob
+                if (io_stats_) {   // SAGUARO_IO_STATS=1: what the page cache held when the kernels were handed the blob
                     uint64_t total = 0;
                     const uint64_t c = cached_bytes(layer, expert, total);
                     io_cached_.fetch_add(c, std::memory_order_relaxed);
@@ -4762,14 +4762,14 @@ static_assert(strata::kernels::cpu::MAXT * 10 <= kMaxWindowEntries, "a verify wi
 }  // namespace
 
 namespace {
-// STRATA_ROUTE_TAIL_SKIP: the rank from which a missed expert that every token of the window routes that low is skipped.  An
+// SAGUARO_ROUTE_TAIL_SKIP: the rank from which a missed expert that every token of the window routes that low is skipped.  An
 // explicit environment value is read once; the serve start-up (generate.cpp) sets the CUDA default where it applies.
 std::atomic<int> g_tail_skip_rank{-1};   // -1: not resolved yet
 }  // namespace
 int tail_skip_rank() {
     int r = g_tail_skip_rank.load(std::memory_order_relaxed);
     if (r < 0) {
-        const char* v = std::getenv("STRATA_ROUTE_TAIL_SKIP");
+        const char* v = std::getenv("SAGUARO_ROUTE_TAIL_SKIP");
         r = v != nullptr ? std::atoi(v) : 0;
         r = r > 0 && r < 10 ? r : 0;
         g_tail_skip_rank.store(r, std::memory_order_relaxed);
@@ -4807,16 +4807,16 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
     if (native && d.nact_multi.size() < (size_t) MAXT * kNativeActBytes) d.nact_multi.resize((size_t) MAXT * kNativeActBytes);
     if (d.job_of.size() != (size_t) d.n_expert) d.job_of.assign((size_t) d.n_expert, (int16_t) -1);
     if (d.jobs_multi.size() < (size_t) (n_tok * k)) d.jobs_multi.resize((size_t) (MAXT * k));
-    static const bool ptrace = std::getenv("STRATA_POOL_TRACE") != nullptr;
+    static const bool ptrace = std::getenv("SAGUARO_POOL_TRACE") != nullptr;
     auto pt = [&](const char* what, long long a = -1) {
         if (ptrace) { std::fprintf(stderr, "pool trace: layer %lld %s %lld\n", (long long) d.layers, what, a); std::fflush(stderr); }
     };
     const auto c0 = std::chrono::steady_clock::now();
-    const FileExpertSource::DecodeScope decode_scope;   // 149 STRATA_IO_PF_GATE: this thread reads for the decode
-    // 149-cold STRATA_COLD_OVERLAP: 0 off, 1 overlap, 2 measure only, 3 overlap + zero-copy, 4 zero-copy only.
+    const FileExpertSource::DecodeScope decode_scope;   // 149 SAGUARO_IO_PF_GATE: this thread reads for the decode
+    // 149-cold SAGUARO_COLD_OVERLAP: 0 off, 1 overlap, 2 measure only, 3 overlap + zero-copy, 4 zero-copy only.
     // 0.2.0: unset, 4 for the GGUF read in place on Linux (zero-copy needs the page cache's residency query), else 0
     static const int cold_env = [] {
-        const char* v = std::getenv("STRATA_COLD_OVERLAP");
+        const char* v = std::getenv("SAGUARO_COLD_OVERLAP");
         return v == nullptr || v[0] == '\0' ? -1 : std::clamp(std::atoi(v), 0, 4);
     }();
     d.cold_mode = cold_env >= 0 ? cold_env : (d.src != nullptr && d.src->linux_file_defaults() ? 4 : 0);
@@ -4854,7 +4854,7 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
                     !(d.peer != nullptr && d.peer->has(d.layers, e)) && !helper_holds(e)) ++nmiss;
             }
         }
-        // STRATA_ROUTE_TAIL_SKIP=R (default 7 on CUDA serve, =0 off; changes the output): a missed expert that EVERY token of the window routes
+        // SAGUARO_ROUTE_TAIL_SKIP=R (default 7 on CUDA serve, =0 off; changes the output): a missed expert that EVERY token of the window routes
         // only at rank >= R (the smallest weights of the top-10) is neither copied nor computed; its contribution is
         // zero, without renormalisation (the others keep the weight the router gave them).  Less PCIe and CPU work.
         const int tail_rank = tail_skip_rank();
@@ -4877,13 +4877,13 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
                 ++d.tail_experts;
             }
         }
-        // STRATA_PCIE_BALANCE (opt-in, #1548): the count comes from the measured CPU and GPU costs instead of the share
+        // SAGUARO_PCIE_BALANCE (opt-in, #1548): the count comes from the measured CPU and GPU costs instead of the share
         const bool pcie_ok = (d.pcie_num > 0 || d.pcie_model.on) && d.src->pcie_layer(d.layers);
         int m = pcie_ok ? d.pcie_model.pick(nmiss, (nmiss * d.pcie_num) >> 8) : 0;
-        // STRATA_PCIE_MIN1 (opt-in): the share rounds to 0 for 1-2 misses per layer, so the PCIe lane idles on the typical
+        // SAGUARO_PCIE_MIN1 (opt-in): the share rounds to 0 for 1-2 misses per layer, so the PCIe lane idles on the typical
         // decode step; with >= 2 misses give it at least one (the last in routing order).  It only flies if its blob is
         // pinned (the fetch below checks), else it stays a CPU miss exactly as before.  Read once.
-        static const bool pcie_min1 = [] { const char* v = std::getenv("STRATA_PCIE_MIN1"); return v && std::atoi(v) != 0; }();
+        static const bool pcie_min1 = [] { const char* v = std::getenv("SAGUARO_PCIE_MIN1"); return v && std::atoi(v) != 0; }();
         if (pcie_min1 && pcie_ok && m < 1 && nmiss >= 2) m = 1;
         int miss_rank = 0, groups = 0, entries = 0, fetches = 0;
         GpuPlanSink& P = *d.plan;
@@ -4894,7 +4894,7 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
             const int32_t e = ids[i0];
             int kd = -1;
             unsigned long long ptr = 0;
-            if (skip_d[q]) {                       // STRATA_ROUTE_TAIL_SKIP: neither copied nor computed
+            if (skip_d[q]) {                       // SAGUARO_ROUTE_TAIL_SKIP: neither copied nor computed
                 for (int64_t i = i0; i < n; ++i)
                     if (first_of[i] == i0) kind[i] = -2;
                 continue;
@@ -4989,15 +4989,15 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
             for (int64_t i = 0; i < n; ++i) if (d.remote[r]->owns(i)) kind[i] = 2;
         }
     }
-    static const bool dec_batch = [] { const char* v = std::getenv("STRATA_DEC_BATCH"); return v == nullptr || std::atoi(v) != 0; }();
-    // the GPU's copy_rows_from_mapped zeroes the rows it computed itself (dec_batch); STRATA_VERIFY_DEVICE_PLAN's
+    static const bool dec_batch = [] { const char* v = std::getenv("SAGUARO_DEC_BATCH"); return v == nullptr || std::atoi(v) != 0; }();
+    // the GPU's copy_rows_from_mapped zeroes the rows it computed itself (dec_batch); SAGUARO_VERIFY_DEVICE_PLAN's
     // copy_or_zero_from_mapped copies every row, so there the host still zeroes them
-    static const bool device_plan = [] { const char* v = std::getenv("STRATA_VERIFY_DEVICE_PLAN"); return v != nullptr && std::atoi(v) != 0; }();
+    static const bool device_plan = [] { const char* v = std::getenv("SAGUARO_VERIFY_DEVICE_PLAN"); return v != nullptr && std::atoi(v) != 0; }();
     const bool gpu_zeroes_hits = (d.plan != nullptr && n <= kMaxWindowEntries && n <= d.plan->cap && dec_batch && !device_plan);
     bool any_cpu = false;
     for (int64_t i = 0; i < n; ++i)
-        if (kind[i] == -1) { any_cpu = true; break; }   // -2: skipped (STRATA_ROUTE_TAIL_SKIP), no work
-    if (d.dres_check != nullptr && any_cpu) {   // STRATA_ADAPT_CHECKRES
+        if (kind[i] == -1) { any_cpu = true; break; }   // -2: skipped (SAGUARO_ROUTE_TAIL_SKIP), no work
+    if (d.dres_check != nullptr && any_cpu) {   // SAGUARO_ADAPT_CHECKRES
         bool published = false;
         for (int64_t i = 0; i < n && !published; ++i)
             published = ids[i] < 0 || ids[i] >= d.n_expert ||
@@ -5019,7 +5019,7 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
         }
     }
     const auto c2 = std::chrono::steady_clock::now();
-    // 149-cold STRATA_COLD_OVERLAP (d.cold_mode): which of the CPU's experts still have a blob to read.  Mode 1 reads
+    // 149-cold SAGUARO_COLD_OVERLAP (d.cold_mode): which of the CPU's experts still have a blob to read.  Mode 1 reads
     // them in the background and computes the ready ones first, then each read one as it lands; every expert keeps
     // its own token rows (the pool splits rows, never a row's sum), and the weighted sum over a token's experts is
     // the GPU's, after the dispatch - so the result is the same bits in any batch order.  The stage buffers stay
@@ -5076,7 +5076,7 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
                 d.fail_expert = e;
                 return;
             }
-            if (kind[i] == -2) {            // STRATA_ROUTE_TAIL_SKIP: a skipped tail expert contributes zero
+            if (kind[i] == -2) {            // SAGUARO_ROUTE_TAIL_SKIP: a skipped tail expert contributes zero
                 std::memset(row, 0, (size_t) H * sizeof(float));
                 ++d.tail_skipped;
                 continue;
@@ -5680,7 +5680,7 @@ LoadStats load_experts_gguf(const std::string& gguf, uint8_t* dst, const strata:
 
 int parallel_load_mode() {
 #if defined(__linux__)
-    static const int m = [] { const char* v = std::getenv("STRATA_PARALLEL_LOAD"); return v != nullptr && v[0] == '1' ? 1 : 0; }();
+    static const int m = [] { const char* v = std::getenv("SAGUARO_PARALLEL_LOAD"); return v != nullptr && v[0] == '1' ? 1 : 0; }();
     return m;
 #else
     return 0;   // pread and per-node threads: Linux only
@@ -5688,12 +5688,12 @@ int parallel_load_mode() {
 }
 
 bool parallel_load_register_first() {
-    const char* v = std::getenv("STRATA_PARALLEL_LOAD_REGISTER");
+    const char* v = std::getenv("SAGUARO_PARALLEL_LOAD_REGISTER");
     return v != nullptr && std::string(v) == "first";
 }
 
 bool parallel_load_register_overlap() {
-    const char* v = std::getenv("STRATA_PARALLEL_LOAD_REGISTER");
+    const char* v = std::getenv("SAGUARO_PARALLEL_LOAD_REGISTER");
     return v != nullptr && std::string(v) == "overlap";
 }
 
@@ -5817,7 +5817,7 @@ bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int6
         std::ifstream f(path, std::ios::binary | std::ios::ate);
         if (!f) { err = "ArenaExpertSource: cannot open " + path; return false; }
         const uint64_t got = (uint64_t) f.tellg();
-        if (got != want && got != want + (uint64_t) blob) {   // + one blob: STRATA_ARENA_MMAP's padded file
+        if (got != want && got != want + (uint64_t) blob) {   // + one blob: SAGUARO_ARENA_MMAP's padded file
             char buf[400];
             std::snprintf(buf, sizeof buf,
                           "ArenaExpertSource: %s is %llu B but %lld layers x %lld experts (blobs up to %lld B) "
@@ -5829,7 +5829,7 @@ bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int6
         }
     }
 
-    // STRATA_ARENA_MMAP=1 (a small-RAM machine whose GPUs hold most experts): the arena is the pack's experts.bin
+    // SAGUARO_ARENA_MMAP=1 (a small-RAM machine whose GPUs hold most experts): the arena is the pack's experts.bin
     // mapped READ-ONLY - not locked, not pinned.  The page cache keeps what the CPU pool and the prompt path
     // actually read (the experts no VRAM cache holds) and gives back the rest under memory pressure; a page
     // dropped is re-read from the file, so a result never depends on what is resident.  The GPUs then get no
@@ -5838,7 +5838,7 @@ bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int6
 #if defined(_WIN32)
     static const bool arena_mmap = false;   // POSIX mmap/madvise: Linux only for now
 #else
-    static const bool arena_mmap = [] { const char* v = std::getenv("STRATA_ARENA_MMAP"); return v && v[0] == '1'; }();
+    static const bool arena_mmap = [] { const char* v = std::getenv("SAGUARO_ARENA_MMAP"); return v && v[0] == '1'; }();
     if (arena_mmap) {
         const uint64_t file_bytes = want + (uint64_t) blob;
         uint64_t have = 0;
@@ -5861,7 +5861,7 @@ bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int6
             blobs_ = n_layers * n_expert;
             n_expert_ = n_expert;
             reads_ = 0;
-            note_ = "mapped read-only from " + path + " (STRATA_ARENA_MMAP: not locked, not pinned)";
+            note_ = "mapped read-only from " + path + " (SAGUARO_ARENA_MMAP: not locked, not pinned)";
             gib_per_s_ = 0.0;
             load_seconds_ = load_read_s_ = load_copy_s_ = 0.0;
             record_inputs(path, gguf_, lay, from_gguf);   // session files: the mapped experts.bin is a model input
@@ -5916,7 +5916,7 @@ bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int6
     bounds.push_back(want);
     // Pin by need: the arena gets a page-aligned blob STRIDE (blob rounded up to 4 KiB, ~+0.15 %), so every blob starts
     // on a page and any set of blobs can be registered exactly (a canonical blob is 337.5 pages: packed, an isolated
-    // blob could never be registered without its neighbours' bytes).  Not with the mapped arena file (STRATA_ARENA_MMAP
+    // blob could never be registered without its neighbours' bytes).  Not with the mapped arena file (SAGUARO_ARENA_MMAP
     // writes experts.bin from the arena).  The file offsets (loff) stay packed; only the destination moves.
     padded_ = false;
     pad_ = PadMap{};
@@ -5966,25 +5966,25 @@ bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int6
     }
     // #285: on Windows the per-layer registration runs on a thread ahead of the readers, which wait for their
     // layer's slice (the whole arena registered before the load cost ~2.5 s at 33 GiB of 4 KB pages, not hidden).
-    // Only where the whole arena would be registered: no cap (STRATA_ARENA_PIN_GIB, multi-GPU), no shared arena.
-    // Linux keeps the whole-arena pin (#253). OPT-IN (STRATA_DEFERRED_REGISTER=1): on the RTX 5070 / Windows the
+    // Only where the whole arena would be registered: no cap (SAGUARO_ARENA_PIN_GIB, multi-GPU), no shared arena.
+    // Linux keeps the whole-arena pin (#253). OPT-IN (SAGUARO_DEFERRED_REGISTER=1): on the RTX 5070 / Windows the
     // arena registered per layer before it is filled decoded ~10% slower than the old order (whole-arena try, sliced
     // fallback after the load) with identical output; the start-time gain does not pay for that.
 #ifdef _WIN32
-    const char* defer_env = std::getenv("STRATA_DEFERRED_REGISTER");
+    const char* defer_env = std::getenv("SAGUARO_DEFERRED_REGISTER");
     const bool deferred = !by_need && max_pinned_bytes == 0 && arena_pin_cap_gib() == -1 && shared_arena_file.empty() &&
                           (defer_env != nullptr && defer_env[0] != 0 && defer_env[0] != '0');
 #else
     const bool deferred = false;
 #endif
-    // STRATA_NUMA_PLACE: each layer's bytes on the node of the card that runs it, bound before the registration
+    // SAGUARO_NUMA_PLACE: each layer's bytes on the node of the card that runs it, bound before the registration
     // faults them in (an anonymous arena only: a shared arena file has one placement for every process)
     numa_note_.clear();
     const bool numa = !numa_nodes_.empty() && shared_arena_file.empty() && (int64_t) numa_nodes_.size() == n_layers;
     if (numa)
         pinned_arena_numa_plan(strata::platform::numa_spans(padded_ ? pad_.dst_off : loff, numa_nodes_,
                                                             (padded_ ? arena_bytes : want) + (uint64_t) blob, 2ull << 20));
-    // STRATA_PARALLEL_LOAD: the GGUF's experts read by threads on each layer's node; by default into the unregistered
+    // SAGUARO_PARALLEL_LOAD: the GGUF's experts read by threads on each layer's node; by default into the unregistered
     // arena (the readers fault the pages in, in parallel), registered after (cudaHostRegister faults on one thread)
     const bool par = parallel_load_mode() == 1 && from_gguf && !by_need && !deferred && shared_arena_file.empty() &&
                      !arena_mmap;
@@ -6032,19 +6032,19 @@ bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int6
     const std::atomic<int>* rp = deferred ? &ready : nullptr;
     double register_s = -1.0;
     if (par) {
-        const char* tv = std::getenv("STRATA_PARALLEL_LOAD_THREADS");   // per node (or in all, unpinned)
+        const char* tv = std::getenv("SAGUARO_PARALLEL_LOAD_THREADS");   // per node (or in all, unpinned)
         const int per_node = tv != nullptr && std::atoi(tv) > 0 ? std::atoi(tv) : 8;
-        // STRATA_PARALLEL_LOAD_REGISTER=overlap: the one whole-arena registration (register_filled, unchanged) runs on
+        // SAGUARO_PARALLEL_LOAD_REGISTER=overlap: the one whole-arena registration (register_filled, unchanged) runs on
         // a thread beside the fill.  It walks the arena in address order and faults in (on its one thread) any page
         // no reader has touched yet, so it starts only once the filled prefix P is long enough to stay behind the
-        // readers: P / R >= unfilled / fill rate, R = STRATA_PARALLEL_LOAD_REGISTER_GBS (default 10 GB/s, the
+        // readers: P / R >= unfilled / fill rate, R = SAGUARO_PARALLEL_LOAD_REGISTER_GBS (default 10 GB/s, the
         // registration's measured pace over resident pages).  Exact: the registration pins pages, it writes none;
         // a page either thread faults first lands on the node the NUMA policy names (required over the whole arena).
         std::string ov_note;
         bool overlap = fill_first && parallel_load_register_overlap();
         if (overlap && !a->numa_whole) {
             overlap = false;
-            ov_note = " (overlap off: STRATA_NUMA_PLACE does not cover the whole arena, first touch decides the node)";
+            ov_note = " (overlap off: SAGUARO_NUMA_PLACE does not cover the whole arena, first touch decides the node)";
         } else if (overlap && (max_pinned_bytes != 0 || arena_pin_cap_gib() > 0 || arena_no_register())) {
             overlap = false;
             ov_note = " (overlap off: a capped or no registration)";
@@ -6057,7 +6057,7 @@ bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int6
         if (overlap) {
             done.reset(new std::atomic<uint8_t>[(size_t) n_layers]);
             for (int64_t l = 0; l < n_layers; ++l) done[(size_t) l].store(0);
-            const char* rv = std::getenv("STRATA_PARALLEL_LOAD_REGISTER_GBS");
+            const char* rv = std::getenv("SAGUARO_PARALLEL_LOAD_REGISTER_GBS");
             const double rate = (rv != nullptr && std::atof(rv) > 0 ? std::atof(rv) : 10.0) * 1e9;
             int dev = 0;
             cudaGetDevice(&dev);
@@ -6098,12 +6098,12 @@ bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int6
             register_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - tr).count();
         }
         char pn[200];
-        std::snprintf(pn, sizeof pn, "parallel load (STRATA_PARALLEL_LOAD): %d threads per node, filled in %.1f s%s",
+        std::snprintf(pn, sizeof pn, "parallel load (SAGUARO_PARALLEL_LOAD): %d threads per node, filled in %.1f s%s",
                       per_node, st.seconds,
                       overlap ? "" : fill_first ? ", registered after it in " : ", registered before it");
         char rs[300] = "";
         if (overlap && reg_end_s >= 0.0)
-            std::snprintf(rs, sizeof rs, ", registered beside it (STRATA_PARALLEL_LOAD_REGISTER=overlap): started %.1f s "
+            std::snprintf(rs, sizeof rs, ", registered beside it (SAGUARO_PARALLEL_LOAD_REGISTER=overlap): started %.1f s "
                           "into the fill, done %.1f s after it began (%.1f s after the fill ended, %.1f s registering)",
                           reg_start_s, reg_end_s, std::max(0.0, reg_end_s - fill_s), reg_end_s - reg_start_s);
         else if (register_s >= 0.0)
@@ -6149,7 +6149,7 @@ bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int6
             }
         }
     }
-    if (std::getenv("STRATA_VERIFY_ARENA") != nullptr) {   // tests: the loaded arena's checksum, any loader
+    if (std::getenv("SAGUARO_VERIFY_ARENA") != nullptr) {   // tests: the loaded arena's checksum, any loader
         std::fprintf(stderr, "strata generate: expert arena checksum %016llx (%.2f GiB)\n",
                      (unsigned long long) fnv1a64(a->data(), want), (double) want / (1ull << 30));
     }
@@ -6160,7 +6160,7 @@ bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int6
         std::filesystem::path(path).parent_path(), space_ec).available : 0;
     const bool room = !space_ec && free_disk >= want + (uint64_t) blob + (2ull << 30);
     if (arena_mmap && from_gguf && !room)
-        std::fprintf(stderr, "strata generate: STRATA_ARENA_MMAP: NOT writing %s - %.1f GiB free on that drive, it needs "
+        std::fprintf(stderr, "strata generate: SAGUARO_ARENA_MMAP: NOT writing %s - %.1f GiB free on that drive, it needs "
                              "%.1f GiB plus 2 GiB to spare; this start keeps the arena in RAM\n", path.c_str(),
                      (double) free_disk / 1073741824.0, (double) (want + (uint64_t) blob) / 1073741824.0);
     if (arena_mmap && from_gguf && room) {
@@ -6174,7 +6174,7 @@ bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int6
         if (f) ok = std::fclose(f) == 0 && ok;
         if (ok) ok = std::rename(tmp.c_str(), path.c_str()) == 0;
         if (!ok) std::remove(tmp.c_str());
-        std::fprintf(stderr, "strata generate: STRATA_ARENA_MMAP: %s %s (the next start maps it)\n",
+        std::fprintf(stderr, "strata generate: SAGUARO_ARENA_MMAP: %s %s (the next start maps it)\n",
                      ok ? "wrote" : "could NOT write", path.c_str());
     }
     arena_ = a;
@@ -6584,20 +6584,20 @@ std::string ForesightSwap::report() const {
 
 ForesightSwap* foresight_swap_from_env(int64_t layers, int64_t experts, const std::vector<int>& card_of_layer,
                                        const std::vector<int>& devices) {
-    const char* v = std::getenv("STRATA_FS_SLOTS");
+    const char* v = std::getenv("SAGUARO_FS_SLOTS");
     const int slots = v ? std::atoi(v) : 0;
     if (slots <= 0) return nullptr;
-    if (const char* dp = std::getenv("STRATA_VERIFY_DEVICE_PLAN"); dp && std::atoi(dp) != 0) {
-        std::fprintf(stderr, "strata serve: foresight swap: off beside STRATA_VERIFY_DEVICE_PLAN (the device would plan "
+    if (const char* dp = std::getenv("SAGUARO_VERIFY_DEVICE_PLAN"); dp && std::atoi(dp) != 0) {
+        std::fprintf(stderr, "strata serve: foresight swap: off beside SAGUARO_VERIFY_DEVICE_PLAN (the device would plan "
                              "resident layers without the host)\n");
         return nullptr;
     }
     auto* f = new ForesightSwap();
     auto env_int = [](const char* name, int def, int lo) { const char* e = std::getenv(name); const int x = e ? std::atoi(e) : def; return x < lo ? lo : x; };
-    f->budget = env_int("STRATA_FS_BUDGET", 32, 1);
-    f->admit = env_int("STRATA_FS_ADMIT", 1, 1);
-    f->depth = env_int("STRATA_FS_DEPTH", 4, 2);
-    f->verify = env_int("STRATA_FS_VERIFY", 0, 0) != 0;
+    f->budget = env_int("SAGUARO_FS_BUDGET", 32, 1);
+    f->admit = env_int("SAGUARO_FS_ADMIT", 1, 1);
+    f->depth = env_int("SAGUARO_FS_DEPTH", 4, 2);
+    f->verify = env_int("SAGUARO_FS_VERIFY", 0, 0) != 0;
     std::string err;
     if (!f->init(std::min(slots, 64), layers, experts, card_of_layer, devices, err)) {
         std::fprintf(stderr, "strata serve: foresight swap: %s - swap space off\n", err.c_str());

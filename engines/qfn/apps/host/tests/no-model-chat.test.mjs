@@ -48,7 +48,7 @@ test('sendMessage checks for a model before it adds the message, picks a chat or
 test('over HTTP, a chat with no model loaded gets one plain error and no reply', async t => {
   const home = await mkdtemp(join(tmpdir(), 'strata-nomodel-'));
   const port = await freePort();
-  const host = spawn(process.execPath, ['server/index.mjs'], { cwd: root, stdio: 'ignore', env: { ...process.env, STRATA_HOME: home, STRATA_MODELS_DIR: join(home, 'models'), STRATA_PORT: String(port), STRATA_SHARE_PORT: String(await freePort()), STRATA_TUNNEL_PORT: String(await freePort()), STRATA_REAL_ENGINE: '0', STRATA_TEST_HARDWARE: ROOMY_HOST } });
+  const host = spawn(process.execPath, ['server/index.mjs'], { cwd: root, stdio: 'ignore', env: { ...process.env, SAGUARO_HOME: home, SAGUARO_MODELS_DIR: join(home, 'models'), SAGUARO_PORT: String(port), SAGUARO_SHARE_PORT: String(await freePort()), SAGUARO_TUNNEL_PORT: String(await freePort()), SAGUARO_REAL_ENGINE: '0', SAGUARO_TEST_HARDWARE: ROOMY_HOST } });
   t.after(async () => { host.kill(); await new Promise(r => host.once('exit', r)); await rm(home, { recursive: true, force: true }).catch(() => {}); });
   let up = false;
   for (let i = 0; i < 150 && !up; i++) { try { up = (await fetch(`http://127.0.0.1:${port}/api/health`)).ok; } catch { await delay(100); } }

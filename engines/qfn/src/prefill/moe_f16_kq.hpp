@@ -1,5 +1,5 @@
 // src/prefill/moe_f16_kq.hpp - gfx11: the K-quant prompt experts on the F16 matrix cores (moe_f16_kq.cu; the switch,
-// STRATA_PF_F16=1 with STRATA_PF_FUSED_KQ=1, is moe_f16_common.cuh's).
+// SAGUARO_PF_F16=1 with SAGUARO_PF_FUSED_KQ=1, is moe_f16_common.cuh's).
 // Internal to moe_fused_iq.cu, which owns the native experts' tables and launches.
 #pragma once
 

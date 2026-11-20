@@ -58,7 +58,7 @@ class ApplyCase(unittest.TestCase):
         self.config.write_text(json.dumps({
             "model": "fixture", "gpu": 0,
             "args": ["--max-context", "32768", "--kv", "fp16"],
-            "env": {"PATH": "/native/bin", "STRATA_TOKEN": "private"},
+            "env": {"PATH": "/native/bin", "SAGUARO_TOKEN": "private"},
             "aliases": ["chat"],
         }, indent=1) + "\n", encoding="utf-8")
         self.before = self.config.read_bytes()
@@ -105,9 +105,9 @@ class TestConfigEdit(ApplyCase):
     def test_unknown_fields_and_secrets_survive(self):
         """An apply that dropped a user's token or a vendor's unknown key would be worse than none."""
         out = ta.apply_args_to_config(
-            {"args": [], "env": {"STRATA_TOKEN": "private"}, "vendor_unknown": {"keep": True},
+            {"args": [], "env": {"SAGUARO_TOKEN": "private"}, "vendor_unknown": {"keep": True},
              "aliases": ["chat"]}, ["--kv", "int8"])
-        self.assertEqual(out["env"], {"STRATA_TOKEN": "private"})
+        self.assertEqual(out["env"], {"SAGUARO_TOKEN": "private"})
         self.assertEqual(out["vendor_unknown"], {"keep": True})
         self.assertEqual(out["aliases"], ["chat"])
 
@@ -193,7 +193,7 @@ class TestApply(ApplyCase):
                                         current_identity=self.identity(), state_dir=self.state)
         after = json.loads(self.config.read_text(encoding="utf-8"))
         self.assertEqual(after["args"], ["--max-context", "32768", "--kv", "int8"])
-        self.assertEqual(after["env"]["STRATA_TOKEN"], "private")
+        self.assertEqual(after["env"]["SAGUARO_TOKEN"], "private")
         self.assertEqual(after["aliases"], ["chat"])
         self.assertEqual(result["plan"]["added"], ["--kv int8"])
         self.assertEqual(result["plan"]["removed"], ["--kv fp16"])

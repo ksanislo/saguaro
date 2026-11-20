@@ -208,7 +208,7 @@ int sweep(bool exact, cudaStream_t s, Totals& t) {
     return bad;
 }
 
-// STRATA_SM75_Q8G: the Turing Q8_0 row kernel against the default multi-column kernel, the same T-column call on the
+// SAGUARO_SM75_Q8G: the Turing Q8_0 row kernel against the default multi-column kernel, the same T-column call on the
 // same bytes, at the engine's shapes (plus a partial row group and a row shorter than one pass), every rows-a-warp choice
 struct Q8gShape { int n_in, n_out; };
 const Q8gShape Q8G_SHAPES[] = {
@@ -218,7 +218,7 @@ const Q8gShape Q8G_SHAPES[] = {
 
 int q8g_sweep(cudaStream_t s) {
     namespace K = strata::kernels;
-    std::printf("\n=== STRATA_SM75_Q8G kernel vs the default Q8_0 kernel ===\n");
+    std::printf("\n=== SAGUARO_SM75_Q8G kernel vs the default Q8_0 kernel ===\n");
     std::printf("%-14s %3s %4s %10s %10s %10s\n", "n_in x n_out", "T", "rows", "outputs", "bits diff", "nonfinite");
     int bad = 0, ran = 0;
     for (const Q8gShape& sh : Q8G_SHAPES) {
@@ -278,8 +278,8 @@ int q8g_sweep(cudaStream_t s) {
             }
         cudaFree(dw); cudaFree(xq); cudaFree(dx); cudaFree(ya); cudaFree(yb);
     }
-    if (ran == 0) { std::printf("STRATA_SM75_Q8G: the kernel never ran\n"); ++bad; }
-    std::printf("STRATA_SM75_Q8G: %d calls compared, %d differ or are non-finite\n", ran, bad);
+    if (ran == 0) { std::printf("SAGUARO_SM75_Q8G: the kernel never ran\n"); ++bad; }
+    std::printf("SAGUARO_SM75_Q8G: %d calls compared, %d differ or are non-finite\n", ran, bad);
     return bad;
 }
 
@@ -306,7 +306,7 @@ int main() {
         return 1;
     }
     if (bad_q8g != 0) {
-        std::printf("\nmmvq_multi_parity: FAILED. The STRATA_SM75_Q8G kernel differs from the default Q8_0 kernel in %d "
+        std::printf("\nmmvq_multi_parity: FAILED. The SAGUARO_SM75_Q8G kernel differs from the default Q8_0 kernel in %d "
                     "call(s), or never ran.\n", bad_q8g);
         return 1;
     }
@@ -322,8 +322,8 @@ int main() {
 #if defined(STRATA_HIP_GFX906)
     // gfx906: the wave64 layout (one wavefront per row) is the same kernel for every column count, so multi_exact
     // has nothing to switch and the control cannot see a difference.  The control with power is the CUDA layout:
-    // ctest's mmvq_multi_parity_cuda_layout runs this with STRATA_MMVQ_WAVE=0.
-    if (off.powerless_cases != 0 && !(std::getenv("STRATA_MMVQ_WAVE") && std::string(std::getenv("STRATA_MMVQ_WAVE")) == "0")) {
+    // ctest's mmvq_multi_parity_cuda_layout runs this with SAGUARO_MMVQ_WAVE=0.
+    if (off.powerless_cases != 0 && !(std::getenv("SAGUARO_MMVQ_WAVE") && std::string(std::getenv("SAGUARO_MMVQ_WAVE")) == "0")) {
         std::printf("\nmmvq_multi_parity: ok (gfx906 wave64 layout: every column count runs the same exact kernel, "
                     "so the negative control has no other layout to find; mmvq_multi_parity_cuda_layout checks it).\n");
         return 0;

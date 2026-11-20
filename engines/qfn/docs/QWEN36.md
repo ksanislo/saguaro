@@ -59,7 +59,7 @@ as for Flash-Next ([BATCHING.md](BATCHING.md)). A request that arrives while ano
 new request is read **between** the decode windows of the others, and a conversation continues in the slot that holds its start (or the
 engine copies the longer held start from another slot). A 3,008-token prompt read in 0.95 s (3,200 tok/s, 6 chunks) beside three decoding
 slots: each of them paused at most 160 ms (one chunk) instead of the whole read, and produced 20 tokens meanwhile (one window per chunk,
-the default); `STRATA_Q36_READ_WINDOWS=4` gives them 65 tokens during a 1.14 s read (more of the time, a slower read).
+the default); `SAGUARO_Q36_READ_WINDOWS=4` gives them 65 tokens during a 1.14 s read (more of the time, a slower read).
 A request that runs alone (the solo path, with its MTP drafts) and is moved into a batch slot when another arrives, and back when it is
 alone again, gives the text it gives running alone (the server's hand-over reuses the held state).
 
@@ -123,14 +123,14 @@ speed gain is small. On a card that holds every expert (R9700 32 GB, 8K prompts)
 `--batch-mtp`). The engine says what the sessions take before it allocates them and refuses (with the numbers) a count that cannot fit.
 
 In the hybrid mode the text of a request can differ a little between running alone and running beside others: the experts that sit on the
-GPU or on the CPU change with the routing of all the requests, and the two compute with different rounding. With the slot tables fixed (`STRATA_Q36_FIXED_SLOTS=1`, a test setting) every slot equals its
+GPU or on the CPU change with the routing of all the requests, and the two compute with different rounding. With the slot tables fixed (`SAGUARO_Q36_FIXED_SLOTS=1`, a test setting) every slot equals its
 solo run there too, with and without `--batch-mtp`.
 
 ## Speed (0.1.45)
 
 Decode and prompt kernels of this engine path were rewritten for speed; **every change on the decode path gives the old kernels' bits**
-(`STRATA_Q36_VERIFY=1 strata ... --no-graph` runs the old kernel beside each new one on the real activations and compares them bit for bit:
-0 mismatches in 18,360 / 8,187 / 6,399 comparisons on the R9700 and the RTX 3060; `STRATA_Q36_OLD_KERNELS=1` switches them all off). The
+(`SAGUARO_Q36_VERIFY=1 strata ... --no-graph` runs the old kernel beside each new one on the real activations and compares them bit for bit:
+0 mismatches in 18,360 / 8,187 / 6,399 comparisons on the R9700 and the RTX 3060; `SAGUARO_Q36_OLD_KERNELS=1` switches them all off). The
 10 parity prompts (greedy 128) give the base engine's tokens, plain and with `--mtp 2`. Where the prompt's chunk size changes, the numbers
 change a little: see "Prompt chunk".
 
@@ -139,7 +139,7 @@ projections, head: 1.9 GB per token) run at 530 GB/s, the memory bound. The rest
 (140 per token) at 18 us, the Q4_K gate/up kernel at 250 GB/s, `k_moe_out` (one block) 17 us, `k_group` (one thread walking 256 experts) 9 us.
 Now: those products one warp per row (a launch of 2048 warps took 21 us on gfx1201 where 1024 warps took 5 us, so the grid is capped), shared
 gate+up+SwiGLU+q8_1 in one launch, the MoE end with 1024 threads and the next layer's q8_1 image, add+norm+q8_1 in one launch, router top-k and
-grouping in one launch, the router and the shared gate in one product, Q4_K gate/up on the V2K kernels (`STRATA_EXPERT_V2K`, gfx12 default).
+grouping in one launch, the router and the shared gate in one product, Q4_K gate/up on the V2K kernels (`SAGUARO_EXPERT_V2K`, gfx12 default).
 The prompt's GDN conv runs in tiles of 16 tokens side by side and the delta rule loads one token ahead with two barriers per token (both exact).
 
 R9700 32 GB (p620, HIP gfx1201), UD-Q4_K_XL, base = the engine before this work, 5 interleaved pairs, 3 repetitions each, medians; llama.cpp
@@ -166,7 +166,7 @@ expert: R9700 pp4096 at chunk 512 / 1024 / 2048 / 4096 = 3,453 / 4,786 / 5,766 /
 largest of 4096 / 2048 / 1024 that fits beside the experts, the 0.77 GiB reserve and the sessions' caches without giving the packed decode
 copies back (8K-64K context: 4096, 100K: 2048, 131K: 512; `--batch 2..4`: 1024 at most so the other slots are not held for a whole chunk,
 `--batch 8`: 512). The hybrid mode keeps 2048 (a bigger chunk takes expert slots: RTX 3060 chunk 4096 reads prompts 5% faster and decodes 13%
-slower) and goes down to 1024 / 512 on a card with 7.5 / 5.5 GiB free. **`--prefill 512` (or `STRATA_Q36_CHUNK=512`) gives the old size, and
+slower) and goes down to 1024 / 512 on a card with 7.5 / 5.5 GiB free. **`--prefill 512` (or `SAGUARO_Q36_CHUNK=512`) gives the old size, and
 then the text is the base engine's, bit for bit.** The chunk size changes the GEMM tiles the BLAS picks and with them the last bits of the
 prompt state: KL against the 512 chunk on six real 1.5-3.2K-token documents (48 teacher-forced rows each): chunk 1024 4.0e-3, 2048 4.2e-3,
 4096 3.6e-3 (per prompt 2.3e-3 .. 5.9e-3), top-1 agreement 44-48 of 48 rows - the size of the llama.cpp CPU-vs-HIP difference on the same

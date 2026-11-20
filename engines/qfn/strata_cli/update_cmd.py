@@ -6,7 +6,7 @@
     strata components update      the same as `strata update` (engine + Control)
     strata components rollback    return to the previous engine version the last update kept
 
-Starting and serving never come here. A process that has forbidden acquiring (STRATA_NO_ACQUIRE) is refused with exit 5.
+Starting and serving never come here. A process that has forbidden acquiring (SAGUARO_NO_ACQUIRE) is refused with exit 5.
 Exit codes: 0 done or nothing to do, 2 usage, 5 refused (signature, hash, downgrade, no key, acquiring forbidden),
 6 failed and the old version is still in use (network, test start), 7 an engine is serving, 130 stopped.
 """
@@ -21,15 +21,15 @@ import threading
 from pathlib import Path
 
 #: Where the feed is read when nothing else is set: the files of the latest GitHub release of Niko1221/Strata (the same folder the
-#: one-line installers use). Only a feed signed with a key in update_keys.json (or STRATA_UPDATE_TRUSTED_KEYS) is accepted.
+#: one-line installers use). Only a feed signed with a key in update_keys.json (or SAGUARO_UPDATE_TRUSTED_KEYS) is accepted.
 DEFAULT_FEED = "https://github.com/Niko1221/Strata/releases/latest/download/strata-feed.json"
-ENV_FEED = "STRATA_UPDATE_FEED"
-ENV_APP_VERSION = "STRATA_APP_VERSION"
+ENV_FEED = "SAGUARO_UPDATE_FEED"
+ENV_APP_VERSION = "SAGUARO_APP_VERSION"
 
 
 def _common(p: argparse.ArgumentParser) -> None:
     p.add_argument("--feed", default=None, help=f"where the signed update feed is (URL or folder). Default: ${ENV_FEED}, the feed used last, or the project's")
-    p.add_argument("--components-dir", default=None, help="the component folder (default: the per-user one, or STRATA_COMPONENTS_DIR)")
+    p.add_argument("--components-dir", default=None, help="the component folder (default: the per-user one, or SAGUARO_COMPONENTS_DIR)")
     p.add_argument("--backend", default=None, help="choose an engine family instead of detecting this PC's GPU")
     p.add_argument("--wait", type=float, default=None, metavar="SECONDS",
                    help="if an engine is serving, wait up to this long for it to stop instead of refusing")
@@ -229,7 +229,7 @@ def run(a) -> int:
     except signing.SignatureError as exc:
         return fail(str(exc), 5)
     except acquisition.AcquisitionRefused as exc:
-        return fail(f"{exc} (the update is the one explicit step that downloads; run it from a shell where STRATA_NO_ACQUIRE is not set)", 5)
+        return fail(f"{exc} (the update is the one explicit step that downloads; run it from a shell where SAGUARO_NO_ACQUIRE is not set)", 5)
     except KeyboardInterrupt:
         return fail("stopped; a partial download is kept and the next update resumes it", 130)
 

@@ -3,7 +3,7 @@
 The classic Windows console window (conhost: the default window of Windows PowerShell and cmd on Windows 10) uses Consolas or Lucida Console,
 which have no glyphs for the eighth-block sparkline characters or the check mark: they show as empty boxes (Consolas has the full, half and
 shade blocks, the box-drawing set and the rounded corners; Lucida Console has no rounded corners and no filled circle).
-Windows Terminal, VS Code's terminal, ConEmu and every Linux/macOS terminal with a modern font have them. `STRATA_GLYPHS=ascii|unicode`
+Windows Terminal, VS Code's terminal, ConEmu and every Linux/macOS terminal with a modern font have them. `SAGUARO_GLYPHS=ascii|unicode`
 overrides the guess (`solid` draws the classic console's solid look without touching the window's font).
 
 In the classic console only, `classic_style()` does the best it can with no admin rights and no registry change:
@@ -23,7 +23,7 @@ TIP = "For the full look, use Windows Terminal (built into Windows 11)"
 
 def legacy_console() -> bool:
     """True for the classic Windows console (no Windows Terminal, no VS Code, no ConEmu, no ssh session into it)."""
-    forced = os.environ.get("STRATA_GLYPHS", "").strip().lower()
+    forced = os.environ.get("SAGUARO_GLYPHS", "").strip().lower()
     if forced in ("ascii", "legacy", "solid"):
         return True
     if forced == "unicode":
@@ -164,7 +164,7 @@ def classic_style() -> dict:
     if _cached is not None:
         return _cached
     legacy = legacy_console()
-    forced = os.environ.get("STRATA_GLYPHS", "").strip().lower() in ("ascii", "legacy", "solid")
+    forced = os.environ.get("SAGUARO_GLYPHS", "").strip().lower() in ("ascii", "legacy", "solid")
     switched = False
     font = console_font() if (legacy and forced) else None
     if legacy and not forced and os.name == "nt":

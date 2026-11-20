@@ -1,5 +1,5 @@
 // Exact multi-row BF16/F32 GEMV checks against independent single-row calls.
-// Run with STRATA_MMVF_ROWS=1; synthetic data, no model or private prompts.
+// Run with SAGUARO_MMVF_ROWS=1; synthetic data, no model or private prompts.
 #include "strata/kernels/bf16_gemv.hpp"
 #include <cuda_runtime.h>
 #include <cstdint>
@@ -17,8 +17,8 @@ template<class T> static T* alloc(size_t n) {
     T* p = nullptr; ck(cudaMalloc(&p, n * sizeof(T))); return p;
 }
 int main() {
-    const char* flag = std::getenv("STRATA_MMVF_ROWS");
-    if (!flag || flag[0] != '1') { std::fprintf(stderr, "set STRATA_MMVF_ROWS=1\n"); return 2; }
+    const char* flag = std::getenv("SAGUARO_MMVF_ROWS");
+    if (!flag || flag[0] != '1') { std::fprintf(stderr, "set SAGUARO_MMVF_ROWS=1\n"); return 2; }
     cudaStream_t s; ck(cudaStreamCreate(&s));
     const int shapes[][2] = {{64,64},{192,67},{512,65},{640,128},{2560,48},
                              {2560,128},{2560,512},{2560,2560},{10240,320}};

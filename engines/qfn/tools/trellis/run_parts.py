@@ -4,7 +4,7 @@ The long runs of this experiment met two kinds of "verify: timed out" (the engin
 was shared; one failed segment must not cost the whole run.  The ids file is cut into --parts parts, each part is one engine
 run (retried up to --retries times, a failed try is discarded), and the part files are joined at the end into OUT.tsv +
 OUT.tsv.seg.json, which `quant_quality.py compare` and swap_compare.py read as usual.  With --dump-dir every part writes its
-STRATA_ACT_DUMP files to <dump-dir>/p<i>/ (only the dumps of finished parts are kept).
+SAGUARO_ACT_DUMP files to <dump-dir>/p<i>/ (only the dumps of finished parts are kept).
 
   python3 tools/trellis/run_parts.py --runner /data/dsv41-enc/run_qq.sh --cfg CFG --ids IDS --out OUT.tsv --parts 6 \
       [--env K=V ...] [--dump-dir DIR]
@@ -60,7 +60,7 @@ def main() -> int:
                 dd = pathlib.Path(a.dump_dir) / ("p%d" % i)
                 shutil.rmtree(dd, ignore_errors=True)
                 dd.mkdir(parents=True)
-                env += ["STRATA_ACT_DUMP=%s/act" % dd]
+                env += ["SAGUARO_ACT_DUMP=%s/act" % dd]
             t0 = time.time()
             r = subprocess.run([a.runner, a.cfg, str(ids), str(tsv)] + env, capture_output=True, text=True)
             ok = pathlib.Path(str(tsv) + ".seg.json").exists()

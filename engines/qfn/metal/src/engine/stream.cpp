@@ -31,7 +31,7 @@ int env_int(const char* n, int d) {
 }  // namespace
 
 bool ExpertStream::wanted(const gguf::File& f, const mtl::Context& cx) {
-    const char* e = std::getenv("STRATA_METAL_STREAM");
+    const char* e = std::getenv("SAGUARO_METAL_STREAM");
     if (e && std::string(e) == "1") return true;
     if (e && std::string(e) == "0") return false;
     // auto: stream when the mapped weights (experts and dense) and ~12 GiB beside them (the prompt buffers, KV, the
@@ -73,7 +73,7 @@ bool ExpertStream::open(const gguf::File& f, std::string& err) {
     }
     // the expert-contiguous copy beside the GGUF, when it is this GGUF's (sizes in its header) and its first and
     // last experts match the GGUF's bytes
-    if (env_int("STRATA_METAL_CONTIG", 1) != 0) {
+    if (env_int("SAGUARO_METAL_CONTIG", 1) != 0) {
         const std::string cp = f.path + ".experts";
         const int cfd = ::open(cp.c_str(), O_RDONLY);
         bool ok = cfd >= 0;
@@ -120,11 +120,11 @@ bool ExpertStream::open(const gguf::File& f, std::string& err) {
         }
     }
     // size classes: one LRU pool per class.  The layers' slot sizes (9 in the IQ3_XXS mix) are merged into a few
-    // classes, each as big as its largest member, so that no member wastes more than STRATA_METAL_CLASS_WASTE (default
+    // classes, each as big as its largest member, so that no member wastes more than SAGUARO_METAL_CLASS_WASTE (default
     // 0.15) of its slot: every class must hold a whole layer's experts for a prompt chunk, so fewer classes = less
     // memory tied up in those minimums.
     {
-        const char* ew = std::getenv("STRATA_METAL_CLASS_WASTE");
+        const char* ew = std::getenv("SAGUARO_METAL_CLASS_WASTE");
         const double waste = ew ? std::atof(ew) : 0.15;
         std::vector<uint64_t> pages_of(NL);
         std::vector<uint64_t> sizes;
@@ -146,20 +146,20 @@ bool ExpertStream::open(const gguf::File& f, std::string& err) {
             lay_[(size_t) l].cls = best;
         }
     }
-    nio_ = std::max(1, env_int("STRATA_METAL_IO_THREADS", 6));
-    split_ = std::max(1, std::min(8, env_int("STRATA_METAL_READ_SPLIT", 1)));
+    nio_ = std::max(1, env_int("SAGUARO_METAL_IO_THREADS", 6));
+    split_ = std::max(1, std::min(8, env_int("SAGUARO_METAL_READ_SPLIT", 1)));
     // The read-ahead's depth and where its experts wait in the LRU, measured on the M4 (notes-mac-ssd.md, 3 interleaved
     // pairs each): Q2_0 (1.38 MB experts) top 10 at the LRU front 12.2 tok/s vs top 6 at the tail 11.3; the IQ3_XXS
     // mix (1.75 MB, the SSD is the limit) top 6 at the tail 8.06 vs top 10 at the front 7.43.
     uint64_t eb = 0;
     for (const auto& x : lay_) eb += x.gs + x.us + x.ds;
     const bool big = (double) eb / NL > 1.5e6;
-    pre_k_ = env_int("STRATA_METAL_PREFETCH", big ? 6 : 10);
-    pre_k2_ = env_int("STRATA_METAL_PREFETCH2", 0);
+    pre_k_ = env_int("SAGUARO_METAL_PREFETCH", big ? 6 : 10);
+    pre_k2_ = env_int("SAGUARO_METAL_PREFETCH2", 0);
     prefetch_ = pre_k_ > 0;
-    pre_mru_ = env_int("STRATA_METAL_PREFETCH_MRU", big ? 0 : 1) != 0;
+    pre_mru_ = env_int("SAGUARO_METAL_PREFETCH_MRU", big ? 0 : 1) != 0;
     // timing only (WRONG answers): every missing expert is pointed at slot 0, nothing is read
-    fake_ = env_int("STRATA_METAL_STREAM_FAKE", 0) != 0;
+    fake_ = env_int("SAGUARO_METAL_STREAM_FAKE", 0) != 0;
     return true;
 }
 
@@ -419,14 +419,14 @@ bool ExpertStream::make_arena(mtl::Context& cx, uint64_t budget, const std::stri
     }
     // the slots placed in chunks of at most maxBufferLength (and 8 GB), up to 4 (the kernels' buffers 0, 7, 8, 9)
     // (8 GB each unless the arena needs bigger ones to fit 4: the M4 refused one 20.6 GB buffer, the M5 Max takes an
-    // 89 GB arena for UD-Q5_K_XL in 4 of ~23 GB; STRATA_METAL_ARENA_CHUNK_GB sets it)
+    // 89 GB arena for UD-Q5_K_XL in 4 of ~23 GB; SAGUARO_METAL_ARENA_CHUNK_GB sets it)
     uint64_t total = 0, biggest = 0;
     for (const auto& k : cls_) {
         total += (uint64_t) k.n * k.pages * PAGE;
         biggest = std::max<uint64_t>(biggest, k.pages * PAGE);
     }
     uint64_t want = std::max<uint64_t>(8ull << 30, total / 4 + 4 * biggest);
-    if (const char* e = std::getenv("STRATA_METAL_ARENA_CHUNK_GB")) want = (uint64_t) (std::atof(e) * (1ull << 30));
+    if (const char* e = std::getenv("SAGUARO_METAL_ARENA_CHUNK_GB")) want = (uint64_t) (std::atof(e) * (1ull << 30));
     const uint64_t cmax = std::min<uint64_t>(cx.max_buffer_length(), want) / PAGE * PAGE;
     code_.assign((size_t) base, 0);
     host_.assign((size_t) base, nullptr);
@@ -444,7 +444,7 @@ bool ExpertStream::make_arena(mtl::Context& cx, uint64_t budget, const std::stri
             cur += k.pages * PAGE;
         }
     if (!csize.empty()) csize.back() = cur;
-    if (csize.size() > 4) { err = "metal stream: the arena needs more than 4 buffers (lower STRATA_METAL_ARENA_GB)"; return false; }
+    if (csize.size() > 4) { err = "metal stream: the arena needs more than 4 buffers (lower SAGUARO_METAL_ARENA_GB)"; return false; }
     if (recheck) {   // the memory macOS can give, asked again just before the arena is committed
         uint64_t total = 0;
         for (uint64_t b : csize) total += b;
@@ -482,7 +482,7 @@ bool ExpertStream::make_arena(mtl::Context& cx, uint64_t budget, const std::stri
     // the fill: the ranked pairs in steps (best first; each step in file order) on the I/O threads; before each step
     // grow() asks whether macOS still has the memory for it (arena_grow); the best-ranked ends at the LRU front
     uint64_t step = 1536ull << 20;
-    if (const char* e = std::getenv("STRATA_METAL_ARENA_STEP_GB")) step = std::max<uint64_t>(64ull << 20, (uint64_t) (std::atof(e) * 1e9));
+    if (const char* e = std::getenv("SAGUARO_METAL_ARENA_STEP_GB")) step = std::max<uint64_t>(64ull << 20, (uint64_t) (std::atof(e) * 1e9));
     std::vector<int> next_free(cls_.size());
     for (size_t c = 0; c < cls_.size(); ++c) next_free[c] = cls_[c].base;
     size_t done = 0;
@@ -546,13 +546,13 @@ bool ExpertStream::make_arena(mtl::Context& cx, uint64_t budget, const std::stri
     // (the GPU's own wiring ends a few seconds after the last one; a Metal residency set did not hold it either, measured), and
     // macOS compresses it when anything else wants memory: a 20 GB file written beside the idle engine took tens of GB of the arena
     // into the compressor in seconds and froze the 128 GB M5 Max (watchdog panic, 2026-10-13).  Wired, a file write can only
-    // shrink the file cache.  STRATA_METAL_WIRE_ARENA=0/1; the default is on for a Mac of 64 GB or more (the M4 32 GB was measured
+    // shrink the file cache.  SAGUARO_METAL_WIRE_ARENA=0/1; the default is on for a Mac of 64 GB or more (the M4 32 GB was measured
     // unwired).  Not when the fill stopped early for lack of memory (the unused slots would be wired too).
     {
         uint64_t phys = 0;
         size_t plen = sizeof phys;
         sysctlbyname("hw.memsize", &phys, &plen, nullptr, 0);
-        const char* we = std::getenv("STRATA_METAL_WIRE_ARENA");
+        const char* we = std::getenv("SAGUARO_METAL_WIRE_ARENA");
         const bool want = we && *we ? std::atoi(we) != 0 : (double) phys >= kBigMac;
         if (want && !stopped) {
             const double tp = now_ms();
@@ -563,7 +563,7 @@ bool ExpertStream::make_arena(mtl::Context& cx, uint64_t budget, const std::stri
                 else ++failed;
             }
             std::fprintf(stderr, "strata metal stream: %.1f GB of the arena wired (mlock) in %.0f ms%s; macOS cannot compress it while "
-                                 "the engine idles (STRATA_METAL_WIRE_ARENA=0 turns it off)\n", pinned / 1e9, now_ms() - tp,
+                                 "the engine idles (SAGUARO_METAL_WIRE_ARENA=0 turns it off)\n", pinned / 1e9, now_ms() - tp,
                          failed ? "; SOME CHUNKS COULD NOT BE WIRED" : "");
         }
     }

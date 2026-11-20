@@ -9,7 +9,7 @@ SETUP, UPDATE or `strata install`. This module is that line, in one place:
   network probe, a compile) and raises `AcquisitionRefused` inside such a stretch;
 * `AcquisitionRefused` is the typed error: it says what is missing and names the explicit command.
 
-The environment variable `STRATA_NO_ACQUIRE=1` forbids acquiring for a whole process. A process
+The environment variable `SAGUARO_NO_ACQUIRE=1` forbids acquiring for a whole process. A process
 that serves (`strata serve`, `strata runtime start`, the API server) never imports the installer, so
 for it this is a second line of defence, not the first.
 
@@ -23,7 +23,7 @@ import os
 import sys
 import threading
 
-ENV = "STRATA_NO_ACQUIRE"
+ENV = "SAGUARO_NO_ACQUIRE"
 
 _lock = threading.Lock()
 _depth = 0

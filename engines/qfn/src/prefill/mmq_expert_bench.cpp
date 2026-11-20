@@ -1,6 +1,6 @@
 // src/prefill/mmq_expert_bench.cpp - the prompt path's routed-expert products (MMQ) timed at the engine's shapes.
 //
-//     [STRATA_PREFILL_NVFP4=w4a8|w4a4] mmq_expert_bench [rows per expert ...]
+//     [SAGUARO_PREFILL_NVFP4=w4a8|w4a4] mmq_expert_bench [rows per expert ...]
 //
 // One MMQ group as the prompt path launches it: 16 experts, R rows each, in one activation array in expert order.
 // gate/up [1280 x 2560] and down [2560 x 640] in NVFP4, down in Q8_0 (the GPTQ + Q8_0-down pack's 27 layers), and
@@ -109,7 +109,7 @@ int main(int argc, char** argv) {
     std::vector<int> Rs;
     for (int i = 1; i < argc; ++i) Rs.push_back(std::atoi(argv[i]));
     if (Rs.empty()) Rs = {12, 160, 626};
-    const char* mode = std::getenv("STRATA_PREFILL_NVFP4");
+    const char* mode = std::getenv("SAGUARO_PREFILL_NVFP4");
     std::printf("mmq_expert_bench: mode %s (FP4 activations: %s), 16 experts a launch, medians of 25\n",
                 mode ? mode : "w4a8", mmq::fp4_activations(GGML_TYPE_NVFP4) ? "yes" : "no");
     const Case cases[] = {{"nvfp4 gate/up", GGML_TYPE_NVFP4, 1280, 2560},

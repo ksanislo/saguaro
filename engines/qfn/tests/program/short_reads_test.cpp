@@ -1,4 +1,4 @@
-// short_reads.hpp: STRATA_SHORT_READS's rules (synthetic: no model, no GPU).
+// short_reads.hpp: SAGUARO_SHORT_READS's rules (synthetic: no model, no GPU).
 #include "strata/program/short_reads.hpp"
 
 #include <cstdio>
@@ -29,7 +29,7 @@ int main() {
     CHECK(!sr::split_share_default(false, true, true, false, true, true));   // switch off: unchanged
     CHECK(!sr::split_share_default(true, false, true, false, true, true));   // one GPU has its own rule
     CHECK(!sr::split_share_default(true, true, false, false, true, true));   // --batch / --no-pool: no idle pool
-    CHECK(!sr::split_share_default(true, true, true, true, true, true));     // STRATA_PREFILL_CPU_SHARE decides
+    CHECK(!sr::split_share_default(true, true, true, true, true, true));     // SAGUARO_PREFILL_CPU_SHARE decides
     CHECK(!sr::split_share_default(true, true, true, false, false, true));   // every expert resident
     CHECK(!sr::split_share_default(true, true, true, false, true, false));   // RAM is short
 

@@ -375,16 +375,16 @@ edit("include/dpct/detail/memory_detail.hpp", lazy_device_memory)
 def version_flag(s):
     if '"--version"' in s:
         return s
-    return s.replace("    std::setvbuf(stdout, nullptr, _IONBF, 0);\n#if (defined(STRATA_USE_HIP)",
+    return s.replace("    std::setvbuf(stdout, nullptr, _IONBF, 0);\n#if (defined(SAGUARO_USE_HIP)",
                      "    std::setvbuf(stdout, nullptr, _IONBF, 0);\n"
                      "    // `strata --version` / `-V` (also `strata generate --version`): the version and nothing else, before any GPU is touched, as the CUDA\n"
                      "    // and HIP engines have answered it. `strata update` runs it as the engine's smoke test, and the Intel package build runs it with\n"
                      "    // an empty environment.\n"
                      "    for (int i = 1; i < argc && i < 3; ++i) {\n"
                      "        if (std::strcmp(argv[i], \"--version\") == 0 || std::strcmp(argv[i], \"-V\") == 0) {\n"
-                     "            std::printf(\"strata %s\\n\", STRATA_VERSION);\n"
+                     "            std::printf(\"strata %s\\n\", SAGUARO_VERSION);\n"
                      "            return 0;\n"
                      "        }\n"
                      "    }\n"
-                     "#if (defined(STRATA_USE_HIP)", 1)
+                     "#if (defined(SAGUARO_USE_HIP)", 1)
 edit("src/program/generate.cpp", version_flag)

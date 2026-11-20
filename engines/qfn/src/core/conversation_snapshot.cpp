@@ -55,7 +55,7 @@ bool layout(const QsaState& st, const ModelGeometry& g, int64_t upto, bool index
     // restore reconstructs that row when rewinding to an earlier prefix.
     const int64_t pooled = index && upto > 0 ? upto / s.idx_block + 1 : 0;
     // Format 3 identifies snapshot K8V4 only; never pass it to the block movers.  Rotated INT8 K/V (#293,
-    // STRATA_KV_ROT=1) is another format too (+16): its bytes mean nothing to a state that does not rotate, so a
+    // SAGUARO_KV_ROT=1) is another format too (+16): its bytes mean nothing to a state that does not rotate, so a
     // snapshot or prompt checkpoint taken with the rotation never restores into one without it, nor the reverse.
     // (Q4_0 is always rotated: nothing to tell apart; without the rotation the format is the one it always was.)
     const int rotated = st.kv_rot && !st.kv_q4 && !st.kv_hybrid ? 16 : 0;
@@ -120,7 +120,7 @@ bool valid(const QsaState& st, const Layout& l, int64_t upto, std::string& error
 }
 
 // a host-to-host copy (parked image <-> the pinned host K/V copy under KV streaming) of 64 MiB or more on several
-// threads: one memcpy runs at one core's DDR3 speed (~2 GB/s).  STRATA_SNAPSHOT_COPY_THREADS=N (default 8, 0/1 off)
+// threads: one memcpy runs at one core's DDR3 speed (~2 GB/s).  SAGUARO_SNAPSHOT_COPY_THREADS=N (default 8, 0/1 off)
 bool host_both(const void* dst, const void* src) {
     cudaPointerAttributes a{}, b{};
     if (cudaPointerGetAttributes(&a, dst) != cudaSuccess || cudaPointerGetAttributes(&b, src) != cudaSuccess) {
@@ -138,7 +138,7 @@ using conversation_detail::park_fast;
 // image's buffers are 16 MiB segments, so a K/V part arrives as many jobs (one memcpy runs at one core's DDR3 speed).
 bool host_copy_threaded(const std::vector<CopyJob>& jobs) {
     static const int nt = [] {
-        const char* e = std::getenv("STRATA_SNAPSHOT_COPY_THREADS");
+        const char* e = std::getenv("SAGUARO_SNAPSHOT_COPY_THREADS");
         return e != nullptr ? std::atoi(e) : 8;
     }();
     size_t total = 0;
@@ -259,7 +259,7 @@ bool conversation_kv_save(ConversationKv& image, const QsaState& st, const Model
         const size_t keep = i == 4 ? (index ? size_t(unchanged_tokens / strata::kernels::qsa_real_shapes().idx_block) * g.idx_key_dim * 4 : 0)
                                   : l.cells ? (sizes[i] / size_t(l.cells)) * size_t(whole_cells) : 0;
         if (keep > dst[i]->size()) { error = "conversation snapshot: missing reusable prefix"; return false; }
-        // (STRATA_PARK_FAST: no fill - every byte past the old size lies in [keep, sizes[i]), which the jobs below
+        // (SAGUARO_PARK_FAST: no fill - every byte past the old size lies in [keep, sizes[i]), which the jobs below
         // overwrite; a failed copy fails the capture and the image is dropped)
         if (park_fast()) dst[i]->resize_for_overwrite(sizes[i]);
         else dst[i]->resize(sizes[i]);

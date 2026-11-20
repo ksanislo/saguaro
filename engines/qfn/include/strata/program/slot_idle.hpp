@@ -1,5 +1,5 @@
 #pragma once
-// STRATA_ELASTIC_IDLE: how long a --batch slot has kept the same conversation idle.  Pure (slot_idle_test).
+// SAGUARO_ELASTIC_IDLE: how long a --batch slot has kept the same conversation idle.  Pure (slot_idle_test).
 
 #include <cstddef>
 

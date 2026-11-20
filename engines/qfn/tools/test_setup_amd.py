@@ -660,7 +660,7 @@ class DeviceAccess(unittest.TestCase):
         guard = src[src.rindex("#if", 0, i):i]
         self.assertIn("cudaGetDeviceCount", guard)
         self.assertIn('access("/dev/kfd", R_OK | W_OK)', guard)
-        self.assertIn("STRATA_USE_HIP", guard)               # CUDA builds keep the "another program" text
+        self.assertIn("SAGUARO_USE_HIP", guard)               # CUDA builds keep the "another program" text
         self.assertIn("another program (or an engine that is still exiting)", src)
 
 
@@ -724,7 +724,7 @@ class TdrPointer(unittest.TestCase):
         self.assertIn('WIN and str(gpu.get("arch") or "").startswith("gfx12")', src)
         doc = (Path(setup.__file__).resolve().parent / "docs/TROUBLESHOOTING.md").read_text(encoding="utf-8")
         self.assertIn("Windows AMD: the driver resets", doc)
-        for env in ("STRATA_PF_STEP_SYNC", "STRATA_KV_HOST_DMA"):
+        for env in ("SAGUARO_PF_STEP_SYNC", "SAGUARO_KV_HOST_DMA"):
             self.assertIn(env, doc)
             self.assertIn(env, (Path(setup.__file__).resolve().parent / "src/prefill/prefill.cpp").read_text(encoding="utf-8"))
 

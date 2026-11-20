@@ -63,7 +63,7 @@ PROFILE_PATCH = HERE / "profile" / "cordis.patch.yml"
 #: an extra request shifts every later reply and the run looks like a model that chose not to
 #: call a tool. The product profile must keep answering title requests, so the row lives here.
 SCRIPTED_OVERLAY = HERE / "profile" / "scripted-worker.cordis.patch.yml"
-PYTHON = os.environ.get("STRATA_PYTHON", sys.executable)
+PYTHON = os.environ.get("SAGUARO_PYTHON", sys.executable)
 
 #: The bash call the scripted worker emits. It appends exactly one line, so counting the lines counts
 #: the executions -- a replayed tool would leave two.

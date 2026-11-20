@@ -86,7 +86,7 @@ def main() -> int:
     ap.add_argument("--archs", required=True, help="the archs the engine was compiled for, ';'-separated")
     ap.add_argument("--rocm-version", required=True)
     ap.add_argument("--out", required=True, type=Path)
-    ap.add_argument("--vision-cpu", type=Path, help="strata-vision.exe built for the CPU (tools/vision, STRATA_PORTABLE=ON)")
+    ap.add_argument("--vision-cpu", type=Path, help="strata-vision.exe built for the CPU (tools/vision, SAGUARO_PORTABLE=ON)")
     ap.add_argument("--vision-hip", type=Path, help="strata-vision-hip.exe built for the same archs (STRATA_VISION_HIP=ON)")
     a = ap.parse_args()
     archs = [x for x in re.split(r"[;, ]+", a.archs) if x]
@@ -181,7 +181,7 @@ def main() -> int:
         meta.update({"vision": "gpu", "vision_gpu": a.vision_hip.name, "vision_archs": archs})
     (stage / "BUILD.json").write_text(json.dumps(meta, indent=1), encoding="utf-8")
     # the hipBLASLt tuning tables of tools/hip for these archs and exactly this hipBLASLt version, in tuning/ (strata_control/hipblaslt_tuning.py):
-    # the engine start points STRATA_HIPBLASLT_TUNING at the one for the card; an arch without a table keeps plain hipBLAS
+    # the engine start points SAGUARO_HIPBLASLT_TUNING at the one for the card; an arch without a table keeps plain hipBLAS
     tables = ht.stage_tables(stage, archs, meta["hipblaslt_version"], ROOT / "tools" / "hip")
     for arch, have in ht.missing_report(archs, meta["hipblaslt_version"], ROOT / "tools" / "hip").items():
         print(f"no hipBLASLt table for {arch} with hipBLASLt {meta['hipblaslt_version']} (the repo has: {', '.join(map(str, have)) or 'none'}): plain hipBLAS there")

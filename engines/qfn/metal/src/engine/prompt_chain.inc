@@ -5,8 +5,8 @@
 // the PLE block after layer 0 (GEMMs + msl/ple.metal), every row's final residual (the drafter's prompt rows), the
 // window's history parity, RoPE table and pending fold.  No head: the last prompt token runs as a decode window.
 //
-// The 8-row-window prompt path stays as the fallback: STRATA_METAL_PROMPT=window, and prompts shorter than
-// STRATA_METAL_PROMPT_MIN rows (default 32).  STRATA_METAL_PROMPT_CHUNK = C (default 2048).  The kernel variants
+// The 8-row-window prompt path stays as the fallback: SAGUARO_METAL_PROMPT=window, and prompts shorter than
+// SAGUARO_METAL_PROMPT_MIN rows (default 32).  SAGUARO_METAL_PROMPT_CHUNK = C (default 2048).  The kernel variants
 // follow prompt_chain's defaults: matrix-unit register operands where the GPU has the M5's right-input layout
 // (COOP_K4, function constant 7), else the older expert and attention kernels (the M4).
 
@@ -400,7 +400,7 @@ bool Window::pc_chunk(const int64_t* tokens, int nT, int64_t pos0, std::string& 
 bool Window::prompt(const int64_t* tokens, int64_t n, int64_t pos0,
                     const std::function<bool(const float*, int64_t, int64_t, std::string&)>& on_chunk, std::string& err) {
     static const int C = [] {
-        const char* e = std::getenv("STRATA_METAL_PROMPT_CHUNK");
+        const char* e = std::getenv("SAGUARO_METAL_PROMPT_CHUNK");
         return std::max(64, std::min(8192, e ? std::atoi(e) : 2048));
     }();
     if (!pc_setup((int) std::min<int64_t>(C, std::max<int64_t>(n, 64)))) { err = "metal prompt: setup failed"; return false; }
@@ -419,7 +419,7 @@ bool Window::prompt(const int64_t* tokens, int64_t n, int64_t pos0,
             if (!ok) return false;
         }
     }
-    if (std::getenv("STRATA_METAL_TRACE") || std::getenv("STRATA_METAL_PROFILE"))
+    if (std::getenv("SAGUARO_METAL_TRACE") || std::getenv("SAGUARO_METAL_PROFILE"))
         std::fprintf(stderr, "strata metal: prompt %lld tokens in %.1f ms (GPU %.1f ms, host rows %.1f ms, drafter rows %.1f ms) "
                              "-> %.1f tok/s\n", (long long) n, now_ms() - t0, pb_.gpu_ms, pb_.host_ms, pb_.mtp_ms,
                      1000.0 * (double) n / (now_ms() - t0));

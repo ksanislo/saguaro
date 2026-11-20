@@ -80,7 +80,7 @@ class HandoverPreRelease(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.comp = Path(self.temp.name) / "components"
         self.comp.mkdir()
-        self.env = {"STRATA_COMPONENTS_DIR": str(self.comp)}
+        self.env = {"SAGUARO_COMPONENTS_DIR": str(self.comp)}
 
     def target(self, running):
         return handover.find_target(running, self.env)

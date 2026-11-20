@@ -92,7 +92,7 @@ test('Windows: the model library on a whole drive goes to X:\\Strata\\Models', {
   const cwd = fileURLToPath(new URL('..', import.meta.url));
   const drive = `${letter}:\\`;
   const run = spawnSync(process.execPath, ['--input-type=module', '-e', `const store=await import('./server/store.mjs');console.log(store.validateModelsDirectory(${JSON.stringify(drive)}));`],
-    { cwd, env: { ...process.env, STRATA_HOME: home, STRATA_MODELS_DIR: join(home, 'models') }, encoding: 'utf8' });
+    { cwd, env: { ...process.env, SAGUARO_HOME: home, SAGUARO_MODELS_DIR: join(home, 'models') }, encoding: 'utf8' });
   assert.equal(run.status, 0, run.stderr);
   assert.equal(run.stdout.trim().toLowerCase(), `${drive}Strata\\Models`.toLowerCase());
   assert.equal(existsSync(join(dir, 'Strata', 'Models')), true);
@@ -131,5 +131,5 @@ const readdirSyncSafe = folder => execFileSync(process.execPath, ['-e', `console
 test('the Terminal settings file is where setup.py and Control keep it', () => {
   assert.equal(terminalSettingsFile({ APPDATA: 'C:\R' }, 'win32'), join('C:\R', 'Strata', 'settings.json'));
   assert.equal(terminalSettingsFile({ XDG_CONFIG_HOME: '/x' }, 'linux'), join('/x', 'strata', 'settings.json'));
-  assert.equal(terminalSettingsFile({ STRATA_TERMINAL_SETTINGS_FILE: '/t.json' }, 'linux'), '/t.json');
+  assert.equal(terminalSettingsFile({ SAGUARO_TERMINAL_SETTINGS_FILE: '/t.json' }, 'linux'), '/t.json');
 });

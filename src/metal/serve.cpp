@@ -110,11 +110,11 @@ struct Server {
     Input in;
     std::vector<int32_t> cached;      // the previous prompt less its last token: what the snapshot holds
     uint64_t cached_img = 0;          // the images inside it (positions and rows, hashed)
-    const int loop_w_think = env_int("MAYA_GLM_LOOP_THINK", 256);
-    const int loop_w_answer = env_int("MAYA_GLM_LOOP_ANSWER", 1024);
+    const int loop_w_think = env_int("SAGUARO_GLM_LOOP_THINK", 256);
+    const int loop_w_answer = env_int("SAGUARO_GLM_LOOP_ANSWER", 1024);
     int chunk = 512;                            // prompt tokens a forward() takes: the engine's slice (serve())
-    bool mtp = false;                           // the NextN block drafts (has_mtp(), not MAYA_GLM_NO_MTP)
-    bool mtp_auto = false;                      // mtp follows the pool (no MAYA_GLM_MTP_DECODE, MTP allowed)
+    bool mtp = false;                           // the NextN block drafts (has_mtp(), not SAGUARO_GLM_NO_MTP)
+    bool mtp_auto = false;                      // mtp follows the pool (no SAGUARO_GLM_MTP_DECODE, MTP allowed)
     std::unique_ptr<DraftLength> mtp_len;       // kept across requests: what drafts were worth on this machine
 
     // the request's images, for the prefix check (generate.cpp's img_hash): FNV-1a over the rows and positions
@@ -525,8 +525,8 @@ struct Server {
 
 }  // namespace
 
-int mtp_draft_cap() {   // MAYA_GLM_MTP_DRAFT (default 3), at most 8 drafts a round
-    const char* v = std::getenv("MAYA_GLM_MTP_DRAFT");
+int mtp_draft_cap() {   // SAGUARO_GLM_MTP_DRAFT (default 3), at most 8 drafts a round
+    const char* v = std::getenv("SAGUARO_GLM_MTP_DRAFT");
     return std::min(8, std::max(0, v && *v ? std::atoi(v) : 3));
 }
 
@@ -537,19 +537,19 @@ int serve(GlmMetal& model, const std::vector<std::string>& args) {
     // a prompt goes to forward() a slice at a time (STOP and the PP lines land between them): one --ubatch slice, or
     // 512-token pieces cut every --ubatch 2048 slice to 512 and its experts' tiles ran a quarter full
     s.chunk = model.ubatch();
-    if (const char* c = std::getenv("MAYA_METAL_PP_CHUNK")) s.chunk = std::max(1, std::atoi(c));
+    if (const char* c = std::getenv("SAGUARO_METAL_PP_CHUNK")) s.chunk = std::max(1, std::atoi(c));
     // MTP drafts by default only when every expert is resident: then a token is GPU work and a verify window writes
     // several for about the price of one.  With experts streamed from the SSD a window needs more of them than one
     // token (measured on Maya-S, 64 GB M4 Max: plain 7.3 tok/s, MTP 6.9 - the same tokens) - as the CUDA engine, whose
-    // MTP decode is on by default only where memory is unified and large.  MAYA_GLM_MTP_DECODE=0/1 decides instead.
-    const char* md = std::getenv("MAYA_GLM_MTP_DECODE");
+    // MTP decode is on by default only where memory is unified and large.  SAGUARO_GLM_MTP_DECODE=0/1 decides instead.
+    const char* md = std::getenv("SAGUARO_GLM_MTP_DECODE");
     const bool mtp_wanted = md && *md ? std::atoi(md) != 0 : model.stats().experts_all_resident;
     const bool no_mtp =
-        strata::platform::env_switch("MAYA_GLM_NO_MTP") || strata::platform::env_switch("MAYA_GLM_NO_SPEC");
+        strata::platform::env_switch("SAGUARO_GLM_NO_MTP") || strata::platform::env_switch("SAGUARO_GLM_NO_SPEC");
     s.mtp = mtp_wanted && model.has_mtp() && !no_mtp;
     s.mtp_auto = !(md && *md) && model.has_mtp() && !no_mtp;
     if (model.has_mtp() && !s.mtp)
-        std::printf("NOTE MTP drafting is off (the experts stream from the SSD); MAYA_GLM_NO_MTP=1 frees the NextN "
+        std::printf("NOTE MTP drafting is off (the experts stream from the SSD); SAGUARO_GLM_NO_MTP=1 frees the NextN "
                     "block's memory for the expert pool\n");
     if (s.mtp) s.mtp_len = std::make_unique<DraftLength>(mtp_draft_cap());
     const auto& st = model.stats();

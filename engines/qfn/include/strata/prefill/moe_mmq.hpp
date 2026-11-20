@@ -14,13 +14,13 @@ namespace strata::prefill::mmq {
 bool built();
 /// MMQ covers this ggml type (the i-quants and Q2_0 the packs use, Q8_0, NVFP4 unless fp16, and with
 /// STRATA_MMQ_KQUANTS the K-quants Q4_K / Q5_K / Q5_1 / Q6_K: Unsloth's UD-Q4_K_XL experts (CUDA), and the dense GGUF
-/// projections of the mixed-quant packs through Gemm::native's STRATA_DENSE_MMQ path (HIP); IQ1_M is not covered).
+/// projections of the mixed-quant packs through Gemm::native's SAGUARO_DENSE_MMQ path (HIP); IQ1_M is not covered).
 bool supported(int ggml_type);
 /// #420: `supported`, and on every visible GPU llama.cpp's MMQ has a tile for this type and a weight matrix of
 /// `w_rows` rows that fits the card's shared memory - the same test its tile choice makes, which aborts the process
 /// ("J_best=0") when nothing fits.  false (said once per type) keeps that product on the non-MMQ path.
 bool fits(int ggml_type, int64_t w_rows);
-/// NVFP4 prompt precision, STRATA_PREFILL_NVFP4: w4a8 (default) - int8 tensor cores, Q8_1 activations, what decode
+/// NVFP4 prompt precision, SAGUARO_PREFILL_NVFP4: w4a8 (default) - int8 tensor cores, Q8_1 activations, what decode
 /// runs at; w4a4 - Blackwell's FP4 x FP4 MMA, activations rounded to NVFP4 (faster, first-token KL up to 0.03 vs
 /// fp16); fp16 - the dequantize + FP16 GEMM path (the reference).
 enum class Nvfp4Mode { W4A8, W4A4, FP16 };
@@ -48,13 +48,13 @@ void scale_gu_rows(float* gu, int64_t ld, int64_t n_ff, const int32_t* bounds, i
 void scale_down_rows(float* d, int64_t ld, const int32_t* bounds, int n, const float* tails, int64_t nrows, void* stream);
 /// The rows quantize(x, src, ...) writes for tokens x k_used rows in expert order, written token by token: token t's
 /// row of x is quantized once and stored at rows slot[t * k_used + k] (`slot` the inverse of `src`) - the same bytes,
-/// a k_used-th of the quantizations (llama.cpp's quantize_scatter_mmq_q8_1_cuda).  STRATA_QUANT_GATHER=1: quantize()
+/// a k_used-th of the quantizations (llama.cpp's quantize_scatter_mmq_q8_1_cuda).  SAGUARO_QUANT_GATHER=1: quantize()
 /// over `src`, as before.
 void quantize_scatter(const float* x, const int32_t* slot, const int32_t* src, void* xq, int ggml_type, int64_t cols,
                       int64_t ld, int64_t tokens, int k_used, void* stream);
 
 constexpr int kGatherGroupMax = 16;
-/// STRATA_MMQ_DIRECT: each expert's own weight address (gate|up or down), in place of `w + z * expert_bytes` -
+/// SAGUARO_MMQ_DIRECT: each expert's own weight address (gate|up or down), in place of `w + z * expert_bytes` -
 /// expert z < n <= kGatherGroupMax starts at p[z].  The launch (tiles, stream-k split, fixup) is the same as
 /// with `w`: only the base address of each expert's matrix changes.
 struct WeightTab {
@@ -125,7 +125,7 @@ void swiglu(const float* gu, float* h, int64_t rows, int64_t n_ff, bool interlea
 /// swiglu of an NVFP4 group's gate/up rows (split halves) with scale_gu_rows' scales applied as they are read.
 void swiglu_scaled(const float* gu, float* h, int64_t rows, int64_t n_ff, const int32_t* bounds, int n,
                    const float* tails, int64_t row0, void* stream);
-/// STRATA_MMQ_SWIGLU_Q8=1 (read once; logs when on): the down product's activations straight from GU.
+/// SAGUARO_MMQ_SWIGLU_Q8=1 (read once; logs when on): the down product's activations straight from GU.
 bool swiglu_q8_requested();
 /// swiglu (tails null) or swiglu_scaled (tails, bounds, n, row0 as there) of `rows` GU rows, written as quantize(h, nullptr,
 /// xq, t, n_ff, n_ff, rows) writes it - the same bytes, without h.  false (nothing written) where it does not apply:
@@ -143,13 +143,13 @@ void f16_to_f32(const uint16_t* x, float* y, int64_t n, void* stream);
 /// dst = {0, rows} (the bounds of one matrix; dst on the device).
 void set_bounds(int32_t* dst, int32_t rows, void* stream);
 
-// ---- STRATA_MMQ_DIRECT: the prompt MMQ reads resident experts in place (docs/DETAILS.md, "STRATA_MMQ_DIRECT") ----
+// ---- SAGUARO_MMQ_DIRECT: the prompt MMQ reads resident experts in place (docs/DETAILS.md, "SAGUARO_MMQ_DIRECT") ----
 /// This build has the pointer-table MMQ (CUDA, the build option STRATA_MMQ_TAB on - off by default - and the
 /// llama.cpp tree matched the mirrored scheduler's fingerprint).  false under HIP, gfx906, SYCL and builds without MMQ.
 bool tab_built();
 /// `tab_built`, `fits`, rows a multiple of 128 (no fallback tiles) and a pointer-table instance for the type (the
 /// engine's: CMake's STRATA_MMQ_TAB_TYPES, by default the native packs' nine Q2_0 IQ2_XXS IQ2_XS IQ2_S IQ3_XXS IQ3_S
-/// IQ4_NL IQ4_XS Q8_0; then strata_kq_tab's, open with STRATA_MMQ_KQ=1 STRATA_MMQ_DIRECT=1: Q4_K Q5_K Q5_1 Q6_K and
+/// IQ4_NL IQ4_XS Q8_0; then strata_kq_tab's, open with SAGUARO_MMQ_KQ=1 SAGUARO_MMQ_DIRECT=1: Q4_K Q5_K Q5_1 Q6_K and
 /// optionally Q8_0, STRATA_MMQ_TAB_KQ_TYPES; never Q5_0).
 bool tab_fits(int ggml_type, int64_t w_rows);
 /// The bytes past a [rows, cols] matrix that its last row's final K tile reads (the largest over-read of any
@@ -159,10 +159,10 @@ size_t overread_bytes(int ggml_type, int64_t cols);
 constexpr size_t kSlotGuard = 256;
 /// Every launch of `n_experts` experts of [w_rows, *] `ggml_type` weights computes each output tile in one block
 /// with no stream-k K split, and every tile width has the same I/K tiles and SRAM layout, on every visible GPU - so an
-/// expert's rows get the same bits in any such launch, whatever its group-mates and max_rows (STRATA_MMQ_GROUP_SORT).
+/// expert's rows get the same bits in any such launch, whatever its group-mates and max_rows (SAGUARO_MMQ_GROUP_SORT).
 /// 160 or 320 tiles per column tile on 82 SMs: yes; 108 or 128 SMs: no (stream-k splits the few-tile launches).
 bool whole_tiles(int ggml_type, int64_t w_rows, int n_experts);
-/// STRATA_MMQ_DIRECT, read once: 0 (default) today's gather; 1 the guard layout and resident experts read in
+/// SAGUARO_MMQ_DIRECT, read once: 0 (default) today's gather; 1 the guard layout and resident experts read in
 /// place; 2 the guard layout with today's gather (the bitwise A/B reference).  0 whenever !tab_built().
 int direct_mode();
 /// kSlotGuard when direct_mode() != 0, else 0 (no CUDA call).

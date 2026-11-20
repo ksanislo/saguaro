@@ -94,7 +94,7 @@ const ggml_cuda_device_info & ggml_cuda_info() {
                 return v;
             };
             d.cc = 100 * strata::cc_major_of(attr(cudaDevAttrComputeCapabilityMajor)) +
-                   10 * strata::cc_minor_of(attr(cudaDevAttrComputeCapabilityMinor));   // STRATA_EMULATE_CC
+                   10 * strata::cc_minor_of(attr(cudaDevAttrComputeCapabilityMinor));   // SAGUARO_EMULATE_CC
             d.smpbo = strata::smem_optin_of(attr(cudaDevAttrMaxSharedMemoryPerBlockOptin));
             d.integrated = attr(cudaDevAttrIntegrated) != 0;
             d.supports_cooperative_launch = attr(cudaDevAttrCooperativeLaunch) != 0;

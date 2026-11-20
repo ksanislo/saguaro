@@ -67,7 +67,7 @@ public:
 
     /// The watchdog's view of the window in flight (issue #31): the layer, the GPU's sequence, the flags.
     void diag(std::FILE* f) const;
-    /// #649 (STRATA_VERIFY_TRACE=1, opt-in): the last windows' host-side handshake events and the GPU's breadcrumbs
+    /// #649 (SAGUARO_VERIFY_TRACE=1, opt-in): the last windows' host-side handshake events and the GPU's breadcrumbs
     /// (in mapped memory, so they read while the GPU hangs).  Nothing when the trace is off.
     void trace_dump(std::FILE* f) const;
 
@@ -141,7 +141,7 @@ public:
     // Everything that is per row already (hyper-connections, dense projections, router, shared expert, the
     // routed experts on the GPU and the CPU, the head) runs once over the S rows, so the weights are read once
     // per window for all the sequences.  Row s's arithmetic is the single-token window's, so a slot's greedy
-    // tokens are its solo greedy tokens (modulo the multi-token CPU kernel choice: STRATA_IQ_MT_MIN=1).
+    // tokens are its solo greedy tokens (modulo the multi-token CPU kernel choice: SAGUARO_IQ_MT_MIN=1).
     //
     // Greedy only, no drafts (MTP) in a batch window.  `init_slots` once after `init` (S <= max_t); a layer
     // split's stages each get their own sessions, and run_slots/commit_slots continue into the next stage.
@@ -184,7 +184,7 @@ public:
     /// commit() returns without waiting for its graph (a single-GPU session sets it): the next window follows it on
     /// the same stream and the drafter reads nothing it writes, so it overlaps the draft. Whoever reads or writes
     /// the session from another stream or the host afterwards (a new request, a checkpoint, a snapshot, the prompt
-    /// path, the end of a run) calls wait_commit() first.  STRATA_COMMIT_SYNC=1 keeps the wait.
+    /// path, the end of a run) calls wait_commit() first.  SAGUARO_COMMIT_SYNC=1 keeps the wait.
     static void set_commit_async(bool on);
     /// Waits for the last commit graph when commit() did not (an event recorded after it, not the whole device);
     /// false with `err` when it failed.  Free when nothing is pending.
@@ -229,7 +229,7 @@ public:
     /// The watchdog's line for a pipelined verifier: in flight, layers served, the GPU's ring and flags, its events.
     void diag_pipelined(std::FILE* f, const char* name) const;
 
-    /// Measurement hook (STRATA_LOGPOS): after run(), write one line per row t of the last window's head -
+    /// Measurement hook (SAGUARO_LOGPOS): after run(), write one line per row t of the last window's head -
     /// "pos target logprob top top_logprob hit extra_logprob target_logprob_without_extra" - where row t is the
     /// distribution at pos0 + t, targets[t] is the token at pos0 + t + 1, extra_logprob is the log-probability of
     /// `extra_id` in the same row, and the last column is the target's log-probability in that row renormalized
@@ -257,7 +257,7 @@ public:
 
     double ms_wait = 0, ms_pool = 0, ms_host = 0, ms_commit = 0;
     int64_t windows = 0;
-    /// STRATA_VERIFY_PROFILE=1 - GPU stage times of the windows since the last call (ms per
+    /// SAGUARO_VERIFY_PROFILE=1 - GPU stage times of the windows since the last call (ms per
     /// window), as one line; empty when off.
     std::string profile_report();
 
@@ -301,7 +301,7 @@ private:
     void* arena_b_ = nullptr;
     int64_t last_pos_b_[8] = {};
     bool capture_batch(const int* rows, int S, int hbase, std::string& err);
-    void collect_profile();   ///< STRATA_VERIFY_PROFILE: add the last window's stamps to prof_sum_
+    void collect_profile();   ///< SAGUARO_VERIFY_PROFILE: add the last window's stamps to prof_sum_
     void accumulate_profile(const unsigned long long* stamps);   ///< one window's stamps (host copy) into prof_sum_
     // pipelined windows (pl_launch ...)
     dpct::queue_ptr ext_stream_ = nullptr;  ///< set_stream: the stage's shared stream (not destroyed here);
@@ -340,9 +340,9 @@ private:
     void refresh_ar();
     uint32_t* h_plan_err_ = nullptr; uint32_t* m_plan_err_ = nullptr;   // set by resident_plan on a -1 (all-resident graph)
     const int32_t* h_res_ = nullptr;      ///< the host residency table (VerifyHits::h_res)
-    bool device_plan_ = false;            ///< E-6: resident-only layers planned on the device (STRATA_VERIFY_DEVICE_PLAN)
+    bool device_plan_ = false;            ///< E-6: resident-only layers planned on the device (SAGUARO_VERIFY_DEVICE_PLAN)
     uint32_t* skip_ = nullptr;            ///< E-6: per group, the ring whose plan the device built (0: the host's)
-    unsigned* qcnt_ = nullptr;             ///< S26 STRATA_QFUSE: the HC read's q8_1 group counters (n_embd / 32)
+    unsigned* qcnt_ = nullptr;             ///< S26 SAGUARO_QFUSE: the HC read's q8_1 group counters (n_embd / 32)
     unsigned long long* slot_off_d_ = nullptr;   ///< E-6: the slot offsets on the device
     int64_t lb_ = 0, le_ = -1;           ///< set_stage: the layers this verifier runs (-1: to the last)
     const float* hand_in_ = nullptr;
@@ -355,7 +355,7 @@ private:
     bool copy_used_ = false;
     bool capture_commit(std::string& err);
     bool record_window(int T, dpct::queue_ptr cs, std::string &err);
-    // STRATA_VERIFY_STEPPED=1 (opt-in; Arc A-series / DG2): DG2 has no usm_atomic_host_allocations, so a running
+    // SAGUARO_VERIFY_STEPPED=1 (opt-in; Arc A-series / DG2): DG2 has no usm_atomic_host_allocations, so a running
     // kernel does not see the host's flag stores and the host sees the GPU's ring late (the doorbell wait is most of
     // a window there).  Stepped mode records the window as one graph per segment between host serves and serves each
     // layer group's CPU experts at a queue boundary: every flag a segment waits on is raised before it is submitted.
@@ -367,7 +367,7 @@ private:
     std::vector<std::pair<int64_t, int>> seg_at_[9];   ///< the (layer, group) after segment i; the last has none
     std::vector<char> seg_kind_[9];                    ///< 1: a serve point, 0: a split point
     bool capture_segments(int T, std::string& err);
-    // #649: STRATA_VERIFY_TRACE=1 - a host event ring (trace_ev) and GPU breadcrumbs: the profiler's stamp points,
+    // #649: SAGUARO_VERIFY_TRACE=1 - a host event ring (trace_ev) and GPU breadcrumbs: the profiler's stamp points,
     // per layer and token group, written to mapped memory (null when the trace is off)
     void trace_ev(const char* what, int64_t step, int64_t layer, int64_t aux) const;
     unsigned long long* trace_h_ = nullptr;
@@ -387,7 +387,7 @@ private:
     VerifyHits hits_;
     const NativeHead* head_ = nullptr;
     int max_t_ = 0;
-    float* ple_key_ = nullptr;   ///< STRATA_PLE_BATCH: the window rows' PLE key / value projections
+    float* ple_key_ = nullptr;   ///< SAGUARO_PLE_BATCH: the window rows' PLE key / value projections
     float* ple_val_ = nullptr;
     int last_t_ = 0;
     int64_t last_pos0_ = 0;

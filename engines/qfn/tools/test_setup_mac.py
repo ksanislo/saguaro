@@ -255,7 +255,7 @@ M4 = {"machdep.cpu.brand_string": "Apple M4", "hw.memsize": str(32 * 2 ** 30), "
 
 
 class ControlMode(unittest.TestCase):
-    """The app on a Mac (STRATA_CONTROL_INSTALL=1): model files and a run config naming the engine component. No source build, no
+    """The app on a Mac (SAGUARO_CONTROL_INSTALL=1): model files and a run config naming the engine component. No source build, no
     metal/setup_mac.py, no Command Line Tools; the Mac rules are strata_control/mac_fit.py's, the module setup_mac.py uses too."""
 
     def setUp(self):
@@ -326,7 +326,7 @@ class ControlMode(unittest.TestCase):
         self.assertNotIn("--mtp", args)
         self.assertEqual(args[args.index("--suffix-draft") + 1], "0")
         self.assertEqual(args[args.index("--max-context") + 1], "8192")
-        self.assertEqual(cfg["env"], {"STRATA_METAL_STREAM": "1"})
+        self.assertEqual(cfg["env"], {"SAGUARO_METAL_STREAM": "1"})
         self.assertEqual(cfg["tokenizer"], str(self.data / "packs" / "q2_0" / "tokenizer"))
         self.assertEqual(len(ran), 1, "only the pack is made (tools/iq_pack.py): no draft layer, no build")
         self.assertTrue(ran[0][1].endswith("iq_pack.py"))
@@ -337,7 +337,7 @@ class ControlMode(unittest.TestCase):
         self.assertEqual(rc, 0)
         cfg = self.config("iq3_xxs")
         self.assertIn("--mtp", cfg["args"])
-        self.assertEqual(cfg["env"], {"STRATA_METAL_STREAM": "0"})
+        self.assertEqual(cfg["env"], {"SAGUARO_METAL_STREAM": "0"})
         self.assertEqual(cfg["args"][cfg["args"].index("--max-context") + 1], "65536")      # the default context by memory
 
     def test_no_command_line_tools_needed_and_the_unsloth_files_are_not_offered(self):
@@ -358,7 +358,7 @@ class ControlMode(unittest.TestCase):
         self.assertEqual(args[args.index("--native") + 1], str(g), "the one file is the model")
         self.assertEqual(args[args.index("--ple-gguf") + 1], str(g), "... and holds its n-gram table")
         self.assertEqual(cfg["backend"], "metal")
-        self.assertEqual(cfg["env"], {"STRATA_METAL_STREAM": "1"}, "29.7 GB of weights stream on a 32 GB Mac")
+        self.assertEqual(cfg["env"], {"SAGUARO_METAL_STREAM": "1"}, "29.7 GB of weights stream on a 32 GB Mac")
         self.assertNotIn("--mtp", args)
         self.assertTrue(ran[0][1].endswith("iq_pack.py"))
         self.assertIn("--compat-bf16", ran[0], "Gyro's pack converts the small Q6_K / Q5_K tensors (docs/GYRO.md)")
@@ -390,7 +390,7 @@ class Source(unittest.TestCase):
         env = mock.patch.dict(os.environ, {}, clear=False)
         env.start()
         self.addCleanup(env.stop)
-        os.environ.pop("STRATA_SOURCE", None)
+        os.environ.pop("SAGUARO_SOURCE", None)
         warnings = []
         # setup.data_folder() is mocked: the real one moves the model files of this checkout and of the data folder in
         # the user's settings.json into --data-dir, and saves that dir as the new data folder; with a temp dir that
@@ -403,7 +403,7 @@ class Source(unittest.TestCase):
                 mock.patch.object(setup, "ok", lambda *a, **k: None), \
                 mock.patch.object(setup, "step", lambda *a, **k: None):
             M.main(["--source", "modelscope", "--yes", "--check", "--data-dir", tmp])
-        self.assertEqual(os.environ.get("STRATA_SOURCE"), "modelscope")
+        self.assertEqual(os.environ.get("SAGUARO_SOURCE"), "modelscope")
         self.assertFalse([w for w in warnings if "--source" in w],
                          f"--source was not used: {warnings}")
 

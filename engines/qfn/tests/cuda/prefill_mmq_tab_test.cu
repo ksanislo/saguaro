@@ -1,4 +1,4 @@
-// prefill_mmq_tab_test - STRATA_MMQ_DIRECT: the pointer-table MMQ (src/prefill/moe_mmq_tab.cuh, Product::tab) bit for
+// prefill_mmq_tab_test - SAGUARO_MMQ_DIRECT: the pointer-table MMQ (src/prefill/moe_mmq_tab.cuh, Product::tab) bit for
 // bit against the gathered MMQ the prompt path runs today (experts copied `expert_bytes` apart, a zeroed 4096-byte
 // tail after the last one).
 //
@@ -15,14 +15,14 @@
 // IQ3_S + Q8_0, some read in place (direct), the others gathered at compact positions c != q - one at a time
 // (gather_native) or by gather_native_group with a mid-group flush (first > 0) - including groups whose last entry is
 // direct and groups with no gathered entry; both products bitwise equal to all-gathered.
-// Part 4, STRATA_MMQ_GROUP_SORT: a layer's experts in groups of 16 as prefill.cpp runs them (activations quantized
+// Part 4, SAGUARO_MMQ_GROUP_SORT: a layer's experts in groups of 16 as prefill.cpp runs them (activations quantized
 // in group order through the src map, absolute bounds, max_rows = the group's largest count), once in ID order and
 // once with the full groups in row-count order (mmq_resident_sort_rows, the partial group kept): every token's
 // product row bitwise equal, when mmq::whole_tiles says so for this card (else only reported). Sorting the partial
-// group too (STRATA_MMQ_RESIDENT_SORT_NE) is reported, not required.
+// group too (SAGUARO_MMQ_RESIDENT_SORT_NE) is reported, not required.
 // The K-quant experts' types (Q4_K / Q5_K / Q6_K gate/up, Q5_1 down, and the Q4_K + Q5_1 / Q4_K + Q8_0 / Q5_K + Q8_0
 // pairs of UD-Q4_K_XL) get the same parts when the build has their pointer table (strata_kq_tab, run with
-// STRATA_MMQ_KQ=1 STRATA_MMQ_DIRECT=1); every type is checked only if CMake's STRATA_TAB_TEST_TYPES lists it, and a
+// SAGUARO_MMQ_KQ=1 SAGUARO_MMQ_DIRECT=1); every type is checked only if CMake's STRATA_TAB_TEST_TYPES lists it, and a
 // listed type without a table, or an unlisted one with a table, fails.
 // Exit 77 without a CUDA device of sm_75 or newer or without the pointer-table build.
 #include "strata/prefill/moe_mmq.hpp"
@@ -195,10 +195,10 @@ bool any_nonfinite(const Dev& d, size_t floats) {
     return false;
 }
 
-// STRATA_MMQ_KTAIL=1 (moe_mmq_tab.cuh): a K whose last 256-wide iteration ends in a 128-value half past the row
+// SAGUARO_MMQ_KTAIL=1 (moe_mmq_tab.cuh): a K whose last 256-wide iteration ends in a 128-value half past the row
 // (K = 640 for blocks of <= 128 values) skips that half, which is where the over-read lands
 bool ktail_skips(const Shape& sh) {
-    const char* v = std::getenv("STRATA_MMQ_KTAIL");
+    const char* v = std::getenv("SAGUARO_MMQ_KTAIL");
     if (v == nullptr || std::atoi(v) == 0) return false;
     const int64_t qk = ggml_blck_size(sh.t);
     if (qk > 128 || 128 % qk != 0) return false;
@@ -264,7 +264,7 @@ void product_case(mmq::Context& ctx, const Shape& sh, const std::vector<int>& cn
         same_bits(ref, got, out, what);
         return;
     }
-    if (ktail_skips(sh)) {   // STRATA_MMQ_KTAIL=1: the half holding the over-read is never multiplied
+    if (ktail_skips(sh)) {   // SAGUARO_MMQ_KTAIL=1: the half holding the over-read is never multiplied
         same_bits(ref, got, out, what);
         return;
     }
@@ -332,7 +332,7 @@ void sweep(mmq::Context& ctx, const Shape& sh, bool full, std::mt19937& rng, cud
         product_case(ctx, sh, {3, 64, 0, 17}, 64, rng, s, true, "negative");
         product_case(ctx, sh, {200}, 200, rng, s, true, "negative");
         std::printf("%-8s %-7s negative control (guards not zeroed): %s\n", ggml_type_name(sh.t), sh.role,
-                    g_fail != f1 ? "FAILED" : ktail_skips(sh) ? "bitwise identical: STRATA_MMQ_KTAIL never multiplies them"
+                    g_fail != f1 ? "FAILED" : ktail_skips(sh) ? "bitwise identical: SAGUARO_MMQ_KTAIL never multiplies them"
                                                               : "non-finite output, as required");
     }
 }

@@ -6,7 +6,7 @@
 #include <map>
 #include <vector>
 
-// STRATA_SLOT_GRID: periodic checkpoints for a batch slot's conversation.  A slot keeps its turn (and message)
+// SAGUARO_SLOT_GRID: periodic checkpoints for a batch slot's conversation.  A slot keeps its turn (and message)
 // checkpoint for a continuation; a request that keeps only a PREFIX of the conversation - an agent's compaction
 // summary over its oldest messages, a client that rewrote an older turn - needs a checkpoint well before the end.
 // The solo path keeps one every --prompt-cache-every tokens; a slot keeps a few, by distance from the end: bucket -1

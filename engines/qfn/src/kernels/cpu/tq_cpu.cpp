@@ -46,7 +46,7 @@ void fill_table_computed() {
 }
 
 int env_isa_cap() {
-    const char* e = std::getenv("STRATA_TQ_ISA");
+    const char* e = std::getenv("SAGUARO_TQ_ISA");
     if (e == nullptr || *e == 0) return 2;
     const std::string v(e);
     if (v == "scalar") return 0;
@@ -134,7 +134,7 @@ TqIsa tq_isa() {
 
 bool tq_kernels_enabled() {
     static const bool on = [] {
-        if (const char* e = std::getenv("STRATA_NO_TQ_KERNELS"); e != nullptr && std::atoi(e) != 0) return false;
+        if (const char* e = std::getenv("SAGUARO_NO_TQ_KERNELS"); e != nullptr && std::atoi(e) != 0) return false;
         // Every CPU runs them: the scalar kernel (baseline x86-64) where there is no AVX2.  A ggml built from upstream
         // has no vec_dot for the trellis types to fall back to, so a CPU without AVX2 must not be sent there.
         return true;

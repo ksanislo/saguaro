@@ -23,8 +23,8 @@ import { join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 
 const run = promisify(execFile);
-const BASE = process.env.STRATA_URL ?? 'http://localhost:5199';
-const ROOT = resolve(process.env.STRATA_SHOTS ?? '.shots');
+const BASE = process.env.SAGUARO_URL ?? 'http://localhost:5199';
+const ROOT = resolve(process.env.SAGUARO_SHOTS ?? '.shots');
 const TMP = join(ROOT, 'motion-frames');
 mkdirSync(TMP, { recursive: true });
 

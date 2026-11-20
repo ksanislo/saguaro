@@ -4,8 +4,8 @@
  *
  *   node apps/desktop/scripts/installed-flow.mjs --install <folder the installer wrote> [--work <scratch>] [--spy <acquire-spy.mjs>]
  *
- * It starts the installed host with the installed node.exe exactly as the Tauri shell does (STRATA_PACKAGED=1,
- * STRATA_NO_ACQUIRE=1; Control found beside the host), against a scratch component folder holding a fake engine
+ * It starts the installed host with the installed node.exe exactly as the Tauri shell does (SAGUARO_PACKAGED=1,
+ * SAGUARO_NO_ACQUIRE=1; Control found beside the host), against a scratch component folder holding a fake engine
  * package and a scratch install folder holding one run config. Everything per-user (profiles, runtime state, host data,
  * components) lives under --work, so the real profile of whoever runs this is never read or written.
  *
@@ -55,11 +55,11 @@ const sha = buf => createHash('sha256').update(buf).digest('hex');
 // ------------------------------------------------------------------------------ fixtures
 const baseEnv = {
   ...process.env,
-  STRATA_COMPONENTS_DIR: dirs.components, STRATA_PROFILE_DIR: dirs.profiles, STRATA_RUNTIME_DIR: dirs.runtime,
-  STRATA_INSTALL_DIR: dirs.models, STRATA_ENGINE_BACKEND: String(args.backend ?? 'cuda'), STRATA_HOME: dirs.home, STRATA_MODELS_DIR: real ? join(work, 'models-unused') : dirs.models,
+  SAGUARO_COMPONENTS_DIR: dirs.components, SAGUARO_PROFILE_DIR: dirs.profiles, SAGUARO_RUNTIME_DIR: dirs.runtime,
+  SAGUARO_INSTALL_DIR: dirs.models, SAGUARO_ENGINE_BACKEND: String(args.backend ?? 'cuda'), SAGUARO_HOME: dirs.home, SAGUARO_MODELS_DIR: real ? join(work, 'models-unused') : dirs.models,
   APPDATA: join(work, 'appdata'), XDG_CONFIG_HOME: join(work, 'xdg'), PYTHONDONTWRITEBYTECODE: '1',
 };
-delete baseEnv.STRATA_API_KEY;
+delete baseEnv.SAGUARO_API_KEY;
 mkdirSync(baseEnv.APPDATA, { recursive: true });
 const mark = join(work, 'engine-ran.json');
 
@@ -100,7 +100,7 @@ function makeTokenizerAndConfig() {
   writeFileSync(join(dirs.models, 'strata-stub.json'), JSON.stringify({ exe: 'component:strata-engine', backend: 'cuda', tokenizer: tok, args: [], cwd: work, model_name: 'stub', host: '127.0.0.1', port: 0 }));
 }
 
-const control = (...argv) => spawnSync(python, [join(controlDir, 'strata.py'), ...argv, '--output', 'json'], { cwd: controlDir, env: { ...baseEnv, PYTHONNOUSERSITE: '1', STRATA_NO_ACQUIRE: '1', FAKE_ENGINE_MARK: mark }, encoding: 'utf8', timeout: 120000 });
+const control = (...argv) => spawnSync(python, [join(controlDir, 'strata.py'), ...argv, '--output', 'json'], { cwd: controlDir, env: { ...baseEnv, PYTHONNOUSERSITE: '1', SAGUARO_NO_ACQUIRE: '1', FAKE_ENGINE_MARK: mark }, encoding: 'utf8', timeout: 120000 });
 const controlJson = (...argv) => { const r = control(...argv); let json = null; try { json = JSON.parse(r.stdout.slice(r.stdout.indexOf('{'))); } catch { /* not json */ } return { code: r.status, json, text: r.stdout + r.stderr }; };
 const alive = pid => { try { process.kill(pid, 0); return true; } catch { return false; } };
 
@@ -112,8 +112,8 @@ async function startHost() {
   if (args.spy) { spyLog = join(work, 'acquire-spy.log'); writeFileSync(spyLog, ''); }
   host = spawn(node, hostArgs, {
     cwd: join(install, 'host'), stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
-    env: { ...baseEnv, STRATA_PORT: String(port), STRATA_DIST: join(install, 'host', 'dist'), NODE_ENV: 'production', STRATA_PACKAGED: '1', STRATA_REAL_ENGINE: '1',
-      STRATA_NO_ACQUIRE: '1', STRATA_SHUTDOWN_TOKEN: shutdownToken, FAKE_ENGINE_MARK: mark, STRATA_SHARE_PORT: String(await freePort()), STRATA_TUNNEL_PORT: String(await freePort()),
+    env: { ...baseEnv, SAGUARO_PORT: String(port), SAGUARO_DIST: join(install, 'host', 'dist'), NODE_ENV: 'production', SAGUARO_PACKAGED: '1', SAGUARO_REAL_ENGINE: '1',
+      SAGUARO_NO_ACQUIRE: '1', SAGUARO_SHUTDOWN_TOKEN: shutdownToken, FAKE_ENGINE_MARK: mark, SAGUARO_SHARE_PORT: String(await freePort()), SAGUARO_TUNNEL_PORT: String(await freePort()),
       ...(spyLog ? { ACQUIRE_SPY_LOG: spyLog } : {}) },
   });
   let log = '';
@@ -127,9 +127,9 @@ async function startHostViaShell() {
   port = await freePort(); base = `http://127.0.0.1:${port}`;
   const spec = { command: node, args: [hostEntry], options: {
     cwd: join(install, 'host'), stdio: 'ignore', windowsHide: true,
-    env: { ...baseEnv, STRATA_PORT: String(port), STRATA_DIST: join(install, 'host', 'dist'), NODE_ENV: 'production', STRATA_PACKAGED: '1', STRATA_REAL_ENGINE: '1',
-      STRATA_NO_ACQUIRE: '1', STRATA_SHUTDOWN_TOKEN: shutdownToken, STRATA_EXIT_WITH_PARENT: '1', FAKE_ENGINE_MARK: mark,
-      STRATA_SHARE_PORT: String(await freePort()), STRATA_TUNNEL_PORT: String(await freePort()) } } };
+    env: { ...baseEnv, SAGUARO_PORT: String(port), SAGUARO_DIST: join(install, 'host', 'dist'), NODE_ENV: 'production', SAGUARO_PACKAGED: '1', SAGUARO_REAL_ENGINE: '1',
+      SAGUARO_NO_ACQUIRE: '1', SAGUARO_SHUTDOWN_TOKEN: shutdownToken, SAGUARO_EXIT_WITH_PARENT: '1', FAKE_ENGINE_MARK: mark,
+      SAGUARO_SHARE_PORT: String(await freePort()), SAGUARO_TUNNEL_PORT: String(await freePort()) } } };
   const shell = spawn(node, ['-e', "const s=JSON.parse(process.env.HOST_SPEC);const c=require('node:child_process').spawn(s.command,s.args,s.options);console.log(c.pid);setInterval(()=>{},1000);"],
     { env: { ...process.env, HOST_SPEC: JSON.stringify(spec) }, stdio: ['ignore', 'pipe', 'inherit'], windowsHide: true });
   const hostPid = await new Promise(r => shell.stdout.once('data', c => r(Number(String(c).trim()))));

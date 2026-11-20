@@ -132,7 +132,7 @@ table above is the comparison that holds the binary fixed.
 ## Port check on 0.1.43.1
 
 This change was moved to upstream main (0.1.43.1) and checked on the same PC. Both runs used the same build, a fresh
-engine each, and `STRATA_ARENA_PIN_GIB=auto`: without it, the full sliced arena pin on this 64 GB PC left WDDM with
+engine each, and `SAGUARO_ARENA_PIN_GIB=auto`: without it, the full sliced arena pin on this 64 GB PC left WDDM with
 0 GiB free for the cache (#243). The requests were the 29,842-token prompt cold, then a 31-token follow-up on its
 prefix, two 45-token prompts, and the long prompt again. Output was capped at 768 tokens with low reasoning, and
 generation was free (not forced).

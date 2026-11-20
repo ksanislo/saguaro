@@ -22,7 +22,7 @@ examples:
                                                    set everything on the command line, serve, print the address
   strata launch --model-path /data/models/IQ3_XXS --no-tui
                                                    use model files you already have (a folder or one .gguf)
-  strata launch --preset Office --set prefill=65536 --set STRATA_PIN_BY_NEED=1 --no-tui
+  strata launch --preset Office --set prefill=65536 --set SAGUARO_PIN_BY_NEED=1 --no-tui
                                                    change one advanced setting for this start
   strata launch --plan --model q2_0                show what would happen, change nothing
   strata launch --list-presets | --delete-preset NAME | --status | --stop [--preset NAME]
@@ -136,7 +136,7 @@ def add_parsers(sp: argparse._SubParsersAction) -> list[argparse.ArgumentParser]
     o.add_argument("--open", action="store_true", help="open the server's web page in your browser once it is serving (nothing opens a browser without this)")
     o.add_argument("--yes", action="store_true", help="do not ask questions (for one: whether to download the model on a computer with no engine yet)")
     o.add_argument("--plan", action="store_true", help="show what would happen and exit; nothing is changed")
-    o.add_argument("--feed", metavar="URL|DIR", help="where the signed update feed (engine downloads) is; default: STRATA_UPDATE_FEED or the project's")
+    o.add_argument("--feed", metavar="URL|DIR", help="where the signed update feed (engine downloads) is; default: SAGUARO_UPDATE_FEED or the project's")
     o.add_argument("--output", choices=("human", "json"), default="human")
     m = p.add_argument_group("manage")
     m.add_argument("--list-presets", action="store_true", help="list saved presets")
@@ -482,7 +482,7 @@ def _can_ask() -> bool:
     through the environment. A pipe from a script or CI does not."""
     if sys.stdin is None or sys.stdin.closed:
         return False
-    if os.environ.get("CI") or os.environ.get("STRATA_NO_PROMPT"):
+    if os.environ.get("CI") or os.environ.get("SAGUARO_NO_PROMPT"):
         return False
     return bool(os.environ.get("MSYSTEM") or os.environ.get("TERM_PROGRAM") or os.environ.get("TERM") or os.environ.get("WT_SESSION"))
 
@@ -821,9 +821,9 @@ def run_launch(a: argparse.Namespace) -> int:
         if a.open and local:
             open_page(local)
         if result.key and os.name == "nt":
-            _say(f"  Watch it:    $env:STRATA_API_KEY = strata launch --show-key; strata monitor --url {local} --credential-env STRATA_API_KEY")
+            _say(f"  Watch it:    $env:SAGUARO_API_KEY = strata launch --show-key; strata monitor --url {local} --credential-env SAGUARO_API_KEY")
         elif result.key:
-            _say(f"  Watch it:    STRATA_API_KEY=$(strata launch --show-key) strata monitor --url {local} --credential-env STRATA_API_KEY")
+            _say(f"  Watch it:    SAGUARO_API_KEY=$(strata launch --show-key) strata monitor --url {local} --credential-env SAGUARO_API_KEY")
         else:
             _say(f"  Watch it:    strata monitor --url {local}")
         for line in final_hint_lines(s, bool(a.preset or a.save_preset)):

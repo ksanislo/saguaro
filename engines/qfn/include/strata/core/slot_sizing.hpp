@@ -1,5 +1,5 @@
 #pragma once
-// The elastic --batch slot sessions (STRATA_ELASTIC_SLOTS): where a slot state's growing arrays sit in its VMM range
+// The elastic --batch slot sessions (SAGUARO_ELASTIC_SLOTS): where a slot state's growing arrays sit in its VMM range
 // and how many of their chunks a context of `cells` cells needs.  Pure arithmetic (slot_sizing_test).
 
 #include <algorithm>

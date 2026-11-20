@@ -34,8 +34,8 @@ RESULT = {"outcome": "improved", "seconds": 1100, "settings": {"args": {"--host-
 class StoreTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        os.environ["STRATA_PRESET_DIR"] = str(Path(self.tmp.name) / "presets")
-        self.addCleanup(lambda: os.environ.pop("STRATA_PRESET_DIR", None))
+        os.environ["SAGUARO_PRESET_DIR"] = str(Path(self.tmp.name) / "presets")
+        self.addCleanup(lambda: os.environ.pop("SAGUARO_PRESET_DIR", None))
         self.addCleanup(self.tmp.cleanup)
         self.choices = presets.choices_from_config(CFG)
 
@@ -138,7 +138,7 @@ class StoreTest(unittest.TestCase):
 
     def test_a_broken_store_never_breaks_a_start(self):
         self.make()
-        for f in Path(os.environ["STRATA_PRESET_DIR"]).glob("*.json"):
+        for f in Path(os.environ["SAGUARO_PRESET_DIR"]).glob("*.json"):
             f.write_text("{not json")
         out, info = presets.overlay(CFG, now=identity())
         self.assertEqual(out, CFG)

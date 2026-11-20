@@ -9,7 +9,7 @@ A config's settings, as the page shows them (None: the engine's own default, or 
              kv_resident, cpu_threads (maya-mm3 stops at a flag it does not know: only its own are written)
   CYBER-FROST (the `maya` engine's Qwen path; its server always loads the MTP drafter - "none" is --mtp-max-t 1):
              draft ("mtp" | "none"), expert_cache, prefill, kv ("fp16" | "int8" |
-             "k8v4" | "q4_0"), ram_gb (the experts' RAM tier, MAYA_EXPERT_RAM_GB); no images (text only)
+             "k8v4" | "q4_0"), ram_gb (the experts' RAM tier, SAGUARO_EXPERT_RAM_GB); no images (text only)
 apply() writes them back into the config's "args", "env", "gpu" and "vision" - its other keys as they are."""
 from __future__ import annotations
 
@@ -25,7 +25,6 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
-import maya_names  # noqa: E402  (tools/) a setting under either of its names
 import maya_quants  # noqa: E402  (tools/) the quants' names users see, and each config's family
 
 SWITCH_FILE = ".maya-switch.json"           # the server's note to saguaro.py: start this config next (a switch)
@@ -278,7 +277,7 @@ def settings_of(cfg: dict) -> dict:
         return out
     if family(cfg) == "qwen":
         ec, pf = flag(args, "--expert-cache", "auto"), flag(args, "--prefill", "auto")
-        ram = maya_names.lookup(env, "MAYA_EXPERT_RAM_GB")
+        ram = env.get("SAGUARO_EXPERT_RAM_GB")
         out.update(images=bool(cfg.get("vision")), reserve_mib=_int(flag(args, "--vram-reserve-mib")),
                    draft="mtp" if flag(args, "--mtp") and flag(args, "--mtp-max-t") != "1" else "none",
                    expert_cache=None if ec == "auto" else _int(ec), prefill=None if pf == "auto" else _int(pf),
@@ -313,7 +312,7 @@ def glm_streams(cfg: dict) -> bool:
     if kvs is not None:
         return kvs != "off"
     return (_int(flag(args, "--kv-resident"), 0) or 0) > 0 or \
-        (_int(maya_names.lookup(env, "MAYA_GLM_KV_RESIDENT"), 0) or 0) > 0
+        (_int(env.get("SAGUARO_GLM_KV_RESIDENT"), 0) or 0) > 0
 
 
 def _num(s: dict, key: str, lo: int, hi: int, what: str, none_ok: bool = True):
@@ -418,12 +417,9 @@ def apply(cfg: dict, settings: dict) -> dict:
         ram = _num(s, "ram_gb", 0, 4096, "Experts in RAM (GB)")
         env2 = dict(out.get("env") or {})
         if ram is None:
-            for name in maya_names.both_names("MAYA_EXPERT_RAM_GB"):   # (set under either name)
-                env2.pop(name, None)
+            env2.pop("SAGUARO_EXPERT_RAM_GB", None)
         else:
-            for name in maya_names.both_names("MAYA_EXPERT_RAM_GB"):
-                env2.pop(name, None)
-            env2["MAYA_EXPERT_RAM_GB"] = str(ram)
+            env2["SAGUARO_EXPERT_RAM_GB"] = str(ram)
         if env2:
             out["env"] = env2
         else:
@@ -734,18 +730,18 @@ TURBO_CONTEXT_FAMILIES = ("glm", "minimax")         # ... DeepSeek's context is 
 # _FROM stays 23 - the docs warn the early layers notice it far more); DeepSeek's RAM_SKIP the same rule for every
 # expert VRAM does not hold, at the highest value documented (Maya-XS, DSpark: 27.8 -> 39.7 tok/s at 0.14).  MiniMax and
 # Qwen have no skipping.  DeepSeek's DSPARK_CUM is lowered with the draft floor below (longer verified windows).
-# Not used: MAYA_GLM_TRUNK_KEEP(_MAP) (its layer map is per model, a uniform value hurts the early layers),
-# MAYA_*_DISK_SKIP_* (only for experts that fit neither VRAM nor RAM), MAYA_GLM_DFLASH_MIN/_CUM (meant for per-request
-# tuning, no measured fast value).  The loop guard (MAYA_LOOP_GUARD) is deliberately NOT touched: it costs no speed and
+# Not used: SAGUARO_GLM_TRUNK_KEEP(_MAP) (its layer map is per model, a uniform value hurts the early layers),
+# SAGUARO_*_DISK_SKIP_* (only for experts that fit neither VRAM nor RAM), SAGUARO_GLM_DFLASH_MIN/_CUM (meant for per-request
+# tuning, no measured fast value).  The loop guard (SAGUARO_LOOP_GUARD) is deliberately NOT touched: it costs no speed and
 # stops greedy runaway loops, which would ruin a benchmark.
 # Where the whole model is in VRAM those skips have nothing to leave out, so Turbo also caps the routed experts a token
-# computes, wherever they live (MAYA_*_RESIDENT_TOPK, docs/SETTINGS.md; the weight rule MAYA_*_RESIDENT_SKIP_W is not
+# computes, wherever they live (SAGUARO_*_RESIDENT_TOPK, docs/SETTINGS.md; the weight rule SAGUARO_*_RESIDENT_SKIP_W is not
 # used: on the AMD Strix Halo test PC 0.20 already gave garbage, the rank cap degrades more gently).  The values are the
 # fastest whose output was still sound there (a three.js page that parses with `node --check`, short factual answers):
 # DeepSeek IQ1_M keeps 3 of its 6 experts a token (40.8 -> 49.5 tok/s with Turbo's other settings), GLM Maya-M-Derisked 4
 # of its 8 (33.2 -> 38.8; 3 gave a page with a duplicate import and slower drafts).
-TURBO_ENV = {"glm": {"MAYA_GLM_MISS_SKIP_W": "0.16", "MAYA_GLM_MISS_SKIP_FROM": "23", "MAYA_GLM_RESIDENT_TOPK": "4"},
-             "deepseek": {"MAYA_DS4_RAM_SKIP_W": "0.14", "MAYA_DS4_DSPARK_CUM": "0.3", "MAYA_DS4_RESIDENT_TOPK": "3"}}
+TURBO_ENV = {"glm": {"SAGUARO_GLM_MISS_SKIP_W": "0.16", "SAGUARO_GLM_MISS_SKIP_FROM": "23", "SAGUARO_GLM_RESIDENT_TOPK": "4"},
+             "deepseek": {"SAGUARO_DS4_RAM_SKIP_W": "0.14", "SAGUARO_DS4_DSPARK_CUM": "0.3", "SAGUARO_DS4_RESIDENT_TOPK": "3"}}
 # the drafter that goes fastest where the pack has it: DSpark (DeepSeek, MiniMax), MTP (Qwen).  GLM keeps the drafter the
 # setup measured for this PC (MTP or DFlash2: which is faster depends on the GPUs).
 TURBO_DRAFT = {"deepseek": "dspark", "minimax": "dspark", "qwen": "mtp"}

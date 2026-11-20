@@ -1,4 +1,4 @@
-// tools/q8_sm60_check.cu - parity and speed of the STRATA_Q8_SM60=1 kernel (src/kernels/cuda/q8_sm60.cuh) on the
+// tools/q8_sm60_check.cu - parity and speed of the SAGUARO_Q8_SM60=1 kernel (src/kernels/cuda/q8_sm60.cuh) on the
 // Q8_0 shapes of Qwen3.8-Flash-Next (hidden 2560): the dense projections, the shared expert and the head.
 //
 // It includes the committed header, so the check covers the code the engine compiles, not a copy.  Parity: random

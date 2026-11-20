@@ -1,7 +1,7 @@
 """The component updater: the one explicit step that downloads and installs engines (and Control, and the app installer).
 
 Everything that fetches software lives behind this module. Starting or serving never imports it (`acquisition.require`
-refuses here when ``STRATA_NO_ACQUIRE`` is set), so a PC that only runs models never reaches the network.
+refuses here when ``SAGUARO_NO_ACQUIRE`` is set), so a PC that only runs models never reaches the network.
 
 What an engine update does, in order, and what keeps the old engine safe at each point:
 
@@ -248,7 +248,7 @@ def _amd_card_names() -> list[str]:
 
 def detect_hardware(environ=None) -> dict:
     """What the package choice depends on. Read-only probes of tools that are already installed (nvidia-smi, rocminfo, sysfs);
-    ``STRATA_ENGINE_BACKEND`` overrides the backend like it does for a start. Anything unreadable is left empty, which the
+    ``SAGUARO_ENGINE_BACKEND`` overrides the backend like it does for a start. Anything unreadable is left empty, which the
     selection treats as "cannot tell", never as a refusal."""
     environ = os.environ if environ is None else environ
     prefer = ""
@@ -543,7 +543,7 @@ def make_guard(ctx: Context) -> str | None:
       - if this PC really has a card of the installed make too (the display adapters / PCI vendors say so), the update stays
         on the installed make (a PC with an NVIDIA card and an AMD card keeps the engine it was set up with);
       - otherwise nothing is chosen and the returned sentence says why.
-    An explicit ask (``--backend``, ``STRATA_ENGINE_BACKEND``) is the person's decision and passes. Returns None when the update
+    An explicit ask (``--backend``, ``SAGUARO_ENGINE_BACKEND``) is the person's decision and passes. Returns None when the update
     may go on."""
     hw = ctx.hardware
     want = hw.get("backend")
@@ -860,12 +860,12 @@ def default_test_start(stage_root: Path, component: ec.EngineComponent, ctx: Con
         cfg["log"] = str(sandbox / "engine.log")
         config_path = sandbox / "run.json"
         config_path.write_text(json.dumps(cfg, indent=1), encoding="utf-8")
-        env = {"STRATA_COMPONENTS_DIR": str(stage_root), "STRATA_PROFILE_DIR": str(sandbox / "profiles"),
-               "STRATA_RUNTIME_DIR": str(sandbox / "runtime"), "STRATA_NO_ACQUIRE": "1",
-               "STRATA_ENGINE_BACKEND": component.backend}
+        env = {"SAGUARO_COMPONENTS_DIR": str(stage_root), "SAGUARO_PROFILE_DIR": str(sandbox / "profiles"),
+               "SAGUARO_RUNTIME_DIR": str(sandbox / "runtime"), "SAGUARO_NO_ACQUIRE": "1",
+               "SAGUARO_ENGINE_BACKEND": component.backend}
         name = "updtest"
         with _patched_environ(env):
-            os.environ.pop("STRATA_API_KEY", None)
+            os.environ.pop("SAGUARO_API_KEY", None)
             profiles.create(name, str(config_path))
             started = None
             try:
@@ -1118,7 +1118,7 @@ def _control_version(interpreter: str, entry: Path, stage: Path, ctx: Context, v
     for attempt, timeout in enumerate(CONTROL_VERSION_TIMEOUTS):
         try:
             done = subprocess.run([interpreter, str(entry), "--version"], capture_output=True, text=True, timeout=timeout, cwd=str(stage),
-                                  env={**ctx.environ, "PYTHONNOUSERSITE": "1", "STRATA_NO_ACQUIRE": "1", "STRATA_HANDOVER": "1"},
+                                  env={**ctx.environ, "PYTHONNOUSERSITE": "1", "SAGUARO_NO_ACQUIRE": "1", "SAGUARO_HANDOVER": "1"},
                                   creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             last_error = None
             if done.returncode == 0 and version in done.stdout:
@@ -1196,7 +1196,7 @@ def update_control(ctx: Context, feed: feedmod.Feed, state: State) -> dict:
 
 def app_public_key(environ=None) -> str | None:
     environ = os.environ if environ is None else environ
-    explicit = environ.get("STRATA_APP_UPDATE_PUBKEY")
+    explicit = environ.get("SAGUARO_APP_UPDATE_PUBKEY")
     if explicit:
         return explicit
     try:

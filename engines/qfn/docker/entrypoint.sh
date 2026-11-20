@@ -21,14 +21,14 @@
 #   API_KEY / API_KEY_FILE   the key clients must send. The server listens on every address inside the container, and Strata does
 #                 not serve beyond loopback without a key, so one is always on: yours, or one made on the first start and kept in /data.
 #   PRESET        preset name in /data (default "docker"). Settings above are saved into it; with no settings given a saved preset is reused.
-#   STRATA_SET    advanced engine settings, space separated KEY=VALUE (like `strata launch --set`)
+#   SAGUARO_SET    advanced engine settings, space separated KEY=VALUE (like `strata launch --set`)
 set -u
 
 APP=/opt/strata
 STRATA="$APP/terminal/bin/strata"
 PYBIN="$APP/terminal/python/bin/python3"; [ -x "$PYBIN" ] || PYBIN=$(command -v python3 || echo python3)
 STATE_DIR="${XDG_STATE_HOME:-/data/state}/strata"
-KEY_FILE="${STRATA_KEY_FILE:-/data/state/api-key}"
+KEY_FILE="${SAGUARO_KEY_FILE:-/data/state/api-key}"
 PHASE_FILE=/run/strata-phase
 PRESET="${PRESET:-docker}"
 PORT="${PORT:-8080}"
@@ -53,7 +53,7 @@ if ! grep -q " /data " /proc/self/mountinfo 2>/dev/null; then
 fi
 
 # ---- plain warnings (never refusals)
-cpuinfo="${STRATA_CPUINFO:-/proc/cpuinfo}"
+cpuinfo="${SAGUARO_CPUINFO:-/proc/cpuinfo}"
 if [ -r "$cpuinfo" ] && grep -q '^flags' "$cpuinfo" && ! grep -m1 '^flags' "$cpuinfo" | grep -qw avx2; then
   warn "This computer's CPU has no AVX2. The engine is built for CPUs with AVX2 and may stop with 'illegal instruction'."
 fi
@@ -140,7 +140,7 @@ fi
 # the card is found through sysfs even when no device file was passed in: say so now instead of failing when the engine starts
 # (before the model is prepared; /dev/dxg is the GPU of Docker Desktop on WSL2)
 backend=$(printf '%s' "$engine_json" | sed -n 's/.*"backend": *"\([a-z0-9]*\)".*/\1/p' | head -1)
-dev="${STRATA_DEV_DIR:-/dev}"
+dev="${SAGUARO_DEV_DIR:-/dev}"
 case "$backend" in
   cuda) ls "$dev"/nvidia[0-9]* >/dev/null 2>&1 || [ -e "$dev/dxg" ] || { echo "[X] This computer has an NVIDIA card, but the container cannot use it, so nothing would run (and the model would be prepared for nothing). Start the container with: --gpus all (needs the NVIDIA Container Toolkit on the host; docs/DOCKER.md, Troubleshooting)." >&2; exit 3; } ;;
   hip)  [ -e "$dev/kfd" ] || { echo "[X] This is an AMD card, but /dev/kfd is not in the container. Add: --device /dev/kfd --device /dev/dri --group-add video --group-add <render group number> (docs/DOCKER.md)" >&2; exit 3; } ;;
@@ -209,8 +209,8 @@ if [ -n "$roles" ]; then
   case "$gpus" in ""|all|ALL) ;; *) die "Set GPU_ROLES or GPU / GPUS, not both." 2 ;; esac
   set -- "$@" --gpu-roles "$roles"; have=1
 fi
-[ -n "${STRATA_SET:-}" ] && { for kv in $STRATA_SET; do set -- "$@" --set "$kv"; done; have=1; }
-[ -n "$key" ] && { set -- "$@" --api-key-env STRATA_LAUNCH_KEY; }
+[ -n "${SAGUARO_SET:-}" ] && { for kv in $SAGUARO_SET; do set -- "$@" --set "$kv"; done; have=1; }
+[ -n "$key" ] && { set -- "$@" --api-key-env SAGUARO_LAUNCH_KEY; }
 
 # tune once: ask only when this preset has not been tuned yet (a restart must not tune again for 20 minutes)
 tune_mode=$(printf '%s' "${TUNE:-}" | tr 'A-Z' 'a-z')
@@ -263,7 +263,7 @@ elif [ -n "$model_path" ]; then what="the model files in $model_path"
 else what="the recommended model"; fi
 say "Starting Strata: $what (preset '$PRESET')."
 if [ -n "$key" ]; then
-  STRATA_LAUNCH_KEY="$key" "$PYBIN" -c "$RESET_INT" "$STRATA" "$@" &
+  SAGUARO_LAUNCH_KEY="$key" "$PYBIN" -c "$RESET_INT" "$STRATA" "$@" &
 else
   "$PYBIN" -c "$RESET_INT" "$STRATA" "$@" &
 fi

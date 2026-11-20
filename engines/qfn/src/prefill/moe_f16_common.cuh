@@ -1,4 +1,4 @@
-// src/prefill/moe_f16_common.cuh - the parts the gfx11 F16 prompt-expert kernels share (STRATA_PF_F16=1): the
+// src/prefill/moe_f16_common.cuh - the parts the gfx11 F16 prompt-expert kernels share (SAGUARO_PF_F16=1): the
 // switch, the work item's width, the int8 activations staged as F16, the WMMA over the token tiles and the two
 // epilogues.  moe_f16_kq.cu (the K-quant kernels) and moe_fused_iq.cu (the other native formats) include it.
 //
@@ -50,10 +50,10 @@ constexpr int ROWS = 128;        // weight rows per work item
 constexpr int GU_NFB = 640 / 64, D_NFB = 2560 / ROWS;   // work items per tile: 64 features, 128 output rows
 constexpr int GU_ACT_LD = 2560 / 64 * AB, H_LD = 640 / 64 * AB;   // bytes per activation / H row
 
-/// STRATA_PF_F16=1 (on top of STRATA_PF_FUSED=1): the covered formats take the F16 kernels on gfx11.
+/// SAGUARO_PF_F16=1 (on top of SAGUARO_PF_FUSED=1): the covered formats take the F16 kernels on gfx11.
 inline bool requested() {
     static const bool on = [] {
-        const char* v = std::getenv("STRATA_PF_F16");
+        const char* v = std::getenv("SAGUARO_PF_F16");
         return v != nullptr && v[0] == '1';
     }();
     return on;
@@ -62,10 +62,10 @@ inline bool requested() {
 /// Two tiles a work item when an expert has a tile's rows or more on average.  gfx1151, Q4_K, top 10 over 512
 /// experts, one 128-expert launch, ms (64 / 128): 1024 tokens 1.22 / 1.28, 2048 1.51 / 1.64, 4096 2.73 / 2.48, 8192
 /// 4.76 / 4.59, 16384 9.19 / 8.46; Q5_1 down 2048 1.02 / 1.04, 4096 1.61 / 1.48, 16384 5.29 / 4.83.
-/// STRATA_PF_F16_BN=64|128 forces one.
+/// SAGUARO_PF_F16_BN=64|128 forces one.
 inline int pick_bn(int64_t n, int n_expert) {
     static const int forced = [] {
-        const char* v = std::getenv("STRATA_PF_F16_BN");
+        const char* v = std::getenv("SAGUARO_PF_F16_BN");
         const int t = v ? std::atoi(v) : 0;
         return t == kTileRows || t == 2 * kTileRows ? t : 0;
     }();

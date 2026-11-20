@@ -44,7 +44,7 @@ async function startHost(extraEnv = {}, spawnOptions = {}) {
   const port = await freePort();
   const host = spawn(process.execPath, ['server/index.mjs'], {
     cwd: root, stdio: 'ignore', ...spawnOptions,
-    env: { ...process.env, STRATA_HOME: home, STRATA_MODELS_DIR: join(home, 'models'), STRATA_PORT: String(port), STRATA_SHARE_PORT: String(await freePort()), STRATA_TUNNEL_PORT: String(await freePort()), STRATA_REAL_ENGINE: '1', ...extraEnv },
+    env: { ...process.env, SAGUARO_HOME: home, SAGUARO_MODELS_DIR: join(home, 'models'), SAGUARO_PORT: String(port), SAGUARO_SHARE_PORT: String(await freePort()), SAGUARO_TUNNEL_PORT: String(await freePort()), SAGUARO_REAL_ENGINE: '1', ...extraEnv },
   });
   let up = false;
   for (let i = 0; i < 120 && !up; i++) { try { up = (await fetch(`http://127.0.0.1:${port}/api/health`)).ok; } catch { await delay(100); } }
@@ -64,14 +64,14 @@ test('SIGTERM and SIGHUP end the host through the clean shutdown (exit 0)', { sk
   }
 });
 
-test('Started by the shell (STRATA_EXIT_WITH_PARENT=1), the host leaves when its parent is killed', async t => {
+test('Started by the shell (SAGUARO_EXIT_WITH_PARENT=1), the host leaves when its parent is killed', async t => {
   // a stand-in shell: it starts the host and then waits to be killed hard
   const home = await mkdtemp(join(tmpdir(), 'strata-host-parent-'));
   t.after(() => rm(home, { recursive: true, force: true }));
   const port = await freePort();
   const shell = spawn(process.execPath, ['-e', `
     const {spawn}=require('node:child_process');
-    const h=spawn(process.execPath,['server/index.mjs'],{cwd:${JSON.stringify(root)},stdio:'ignore',env:{...process.env,STRATA_EXIT_WITH_PARENT:'1',STRATA_HOME:${JSON.stringify(home)},STRATA_MODELS_DIR:${JSON.stringify(join(home, 'models'))},STRATA_PORT:'${port}',STRATA_SHARE_PORT:'${await freePort()}',STRATA_TUNNEL_PORT:'${await freePort()}',STRATA_REAL_ENGINE:'1'}});
+    const h=spawn(process.execPath,['server/index.mjs'],{cwd:${JSON.stringify(root)},stdio:'ignore',env:{...process.env,SAGUARO_EXIT_WITH_PARENT:'1',SAGUARO_HOME:${JSON.stringify(home)},SAGUARO_MODELS_DIR:${JSON.stringify(join(home, 'models'))},SAGUARO_PORT:'${port}',SAGUARO_SHARE_PORT:'${await freePort()}',SAGUARO_TUNNEL_PORT:'${await freePort()}',SAGUARO_REAL_ENGINE:'1'}});
     console.log(h.pid);
     setInterval(()=>{},1000);
   `], { cwd: root, stdio: ['ignore', 'pipe', 'inherit'] });
@@ -88,7 +88,7 @@ test('Started by the shell (STRATA_EXIT_WITH_PARENT=1), the host leaves when its
   assert.equal(reachable, false, 'the port is free again');
 });
 
-test('Without STRATA_EXIT_WITH_PARENT a host started from a source checkout does not follow its parent', async t => {
+test('Without SAGUARO_EXIT_WITH_PARENT a host started from a source checkout does not follow its parent', async t => {
   const h = await startHost();
   t.after(h.done);
   t.after(() => h.host.kill('SIGKILL'));

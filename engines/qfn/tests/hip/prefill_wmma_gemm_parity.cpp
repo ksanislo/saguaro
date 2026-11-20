@@ -232,9 +232,9 @@ CaseStatus run_gemm_case(DeviceBuffer& dx, DeviceBuffer& dw, DeviceBuffer& dy,
             // this reference sums in double and rounds to nearest, so a correct result may differ by one ULP
             // (measured: every mismatch on this hardware is <= 1 ULP and toward zero).  Compare against a
             // tolerance of 4 ULP - tight enough to stay diagnostic, since a wrong row, column, stride or tile
-            // boundary differs by O(value) rather than by 1e-7.  STRATA_WMMA_PARITY_EXACT=1 demands bit
+            // boundary differs by O(value) rather than by 1e-7.  SAGUARO_WMMA_PARITY_EXACT=1 demands bit
             // equality for anyone who wants to see the raw deltas.
-            static const bool exact = std::getenv("STRATA_WMMA_PARITY_EXACT") != nullptr;
+            static const bool exact = std::getenv("SAGUARO_WMMA_PARITY_EXACT") != nullptr;
             const double tol = exact ? 0.0
                                      : 4.0 * (double)std::numeric_limits<float>::epsilon() *
                                            std::max(1.0, std::abs(static_cast<double>(ref_y[idx])));
@@ -335,7 +335,7 @@ int main() {
     MismatchRecord first_mismatch{};
     uint32_t case_seed = 0x574d4d41u;
 
-    const bool verbose = (std::getenv("STRATA_TEST_VERBOSE") != nullptr);
+    const bool verbose = (std::getenv("SAGUARO_TEST_VERBOSE") != nullptr);
 
     for (bool is_bf16 : {false, true}) {
         const char* dtype_str = is_bf16 ? "bf16" : "f16";

@@ -1,6 +1,6 @@
-// include/strata/platform/env_switch.hpp - an on/off switch from the environment (the NO_* ones: MAYA_GLM_NO_SPEC,
-// MAYA_GLM_NO_MTP, MAYA_GLM_NO_PREFILL): unset, empty, "0", "false", "off" or "no" (any case) is OFF; anything else -
-// "1" as the docs give it - is ON.  A plain getenv() != nullptr took MAYA_GLM_NO_SPEC=0 for "no drafting" (#860).
+// include/strata/platform/env_switch.hpp - an on/off switch from the environment (the NO_* ones: SAGUARO_GLM_NO_SPEC,
+// SAGUARO_GLM_NO_MTP, SAGUARO_GLM_NO_PREFILL): unset, empty, "0", "false", "off" or "no" (any case) is OFF; anything else -
+// "1" as the docs give it - is ON.  A plain getenv() != nullptr took SAGUARO_GLM_NO_SPEC=0 for "no drafting" (#860).
 // Header only, no dependencies: the CUDA engine and maya-metal both include it.
 #pragma once
 

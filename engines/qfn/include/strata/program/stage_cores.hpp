@@ -1,4 +1,4 @@
-// include/strata/program/stage_cores.hpp - STRATA_STAGE_SERVE: which CPU cores serve which stage of a layer split.
+// include/strata/program/stage_cores.hpp - SAGUARO_STAGE_SERVE: which CPU cores serve which stage of a layer split.
 //
 // Every stage gets a share of the physical cores of the NUMA node its GPU hangs off: the first core of the share runs
 // the stage's service thread (its doorbells, and it drains with the pool), the rest are its expert pool's workers.

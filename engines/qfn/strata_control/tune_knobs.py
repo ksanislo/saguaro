@@ -110,7 +110,7 @@ ARMS: tuple[Arm, ...] = (
     Arm("q36_hybrid_rows_256", "Larger hybrid row blocks", "placement", {"--hybrid-rows": 256}, families=("qwen36",),
         backends=("cuda", "hip"), classes=("D",), needs=("hybrid_experts",), deep_only=True),
     # --- thorough only: measured as no effect (spec 4.2-4.4), tried last ------------------------------------------------------
-    Arm("pin_by_need", "Pin memory only when needed", "exact", {}, {"STRATA_PIN_BY_NEED": "1"},
+    Arm("pin_by_need", "Pin memory only when needed", "exact", {}, {"SAGUARO_PIN_BY_NEED": "1"},
         backends=("cuda",), classes=("C",), needs=("one_gpu",), deep_only=True),
     Arm("host_core_last", "Run the control thread on the last CPU core", "exact", {"--host-core": "last"},
         classes=("B", "C"), deep_only=True),
@@ -151,10 +151,10 @@ BOUNDS: dict[str, dict[str, Any]] = {
 #: The never-pick list (4.5), as rows: ``flag`` (or ``env``), a condition on the machine, the value test and the reason
 #: in plain words. ``when`` names facts from `condition_holds`; empty = always.
 NEVER: tuple[dict[str, Any], ...] = (
-    {"env": "STRATA_SH_STREAM", "when": ("gfx12",), "reason": "it halves decode speed on this graphics card"},
-    {"env": "STRATA_RDNA2_SGEMM", "value": "all", "when": ("gfx12",), "reason": "it makes long prompts five times slower"},
-    {"env": "STRATA_SELECT_SIMT", "reason": "its gain is below the 3% margin"},
-    {"env": "STRATA_HIP_WMMA", "reason": "it changes the numbers (a quality setting)"},
+    {"env": "SAGUARO_SH_STREAM", "when": ("gfx12",), "reason": "it halves decode speed on this graphics card"},
+    {"env": "SAGUARO_RDNA2_SGEMM", "value": "all", "when": ("gfx12",), "reason": "it makes long prompts five times slower"},
+    {"env": "SAGUARO_SELECT_SIMT", "reason": "its gain is below the 3% margin"},
+    {"env": "SAGUARO_HIP_WMMA", "reason": "it changes the numbers (a quality setting)"},
     {"flag": "--pool-affinity", "when": ("hybrid_cpu",), "values": ("auto", "p-cores"),
      "reason": "it made answers 47% slower on a CPU with performance and efficiency cores"},
     {"flag": "--pool-workers", "test": "above_engine_default", "reason": "more helper threads than the engine chose made it 36% slower"},

@@ -10,7 +10,7 @@
 //     <exe dir>/metal/ggml-common.h
 //     <exe dir>/metal/data/expert-profile.bin  draft_vocab.bin
 //
-// Order: the environment variable (STRATA_METAL_KERNELS, ...), then that folder when it exists, then the compiled-in
+// Order: the environment variable (SAGUARO_METAL_KERNELS, ...), then that folder when it exists, then the compiled-in
 // path. Nothing here touches a build run from its source tree: the folder does not exist there.
 #pragma once
 

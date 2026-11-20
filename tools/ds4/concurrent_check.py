@@ -141,8 +141,8 @@ def main(argv=None) -> int:
                                         "3 (--strict): an answer missed its own code")
     ap.add_argument("--url", default="http://127.0.0.1:8080/v1", help="the server's OpenAI API (default %(default)s)")
     ap.add_argument("--model", help="the model's name (default: the first /v1/models gives)")
-    ap.add_argument("--api-key", default=os.environ.get("MAYA_API_KEY") or os.environ.get("OPENAI_API_KEY"),
-                    help="the server's key, if it asks for one (default: $MAYA_API_KEY or $OPENAI_API_KEY)")
+    ap.add_argument("--api-key", default=os.environ.get("SAGUARO_API_KEY") or os.environ.get("OPENAI_API_KEY"),
+                    help="the server's key, if it asks for one (default: $SAGUARO_API_KEY or $OPENAI_API_KEY)")
     ap.add_argument("--clients", type=int, default=4, help="conversations at once (default %(default)s)")
     ap.add_argument("--rounds", type=int, default=1, help="runs, each with new codes (default %(default)s)")
     ap.add_argument("--turns", type=int, choices=(1, 2), default=1,

@@ -18,9 +18,9 @@ int env_int(const char* k, int def) {
 
 DraftLength::DraftLength(int n_cap)
     : cap_(std::max(0, n_cap)),
-      start_(std::min(std::max(0, env_int("MAYA_GLM_MTP_START", 2)), std::max(0, n_cap))),
-      fixed_(env_int("MAYA_GLM_MTP_FIXED", -1)),
-      adapt_(env_int("MAYA_GLM_MTP_ADAPT", 1) != 0),
+      start_(std::min(std::max(0, env_int("SAGUARO_GLM_MTP_START", 2)), std::max(0, n_cap))),
+      fixed_(env_int("SAGUARO_GLM_MTP_FIXED", -1)),
+      adapt_(env_int("SAGUARO_GLM_MTP_ADAPT", 1) != 0),
       hit_((size_t) cap_ + 1, 0.0),
       reach_((size_t) cap_ + 1, 0.0),
       ms_((size_t) cap_ + 1, 0.0),

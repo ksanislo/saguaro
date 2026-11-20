@@ -99,7 +99,7 @@ std::vector<NumaSpan> numa_spans(const std::vector<uint64_t>& layer_off, const s
 
 int numa_place_mode() {
     static const int m = [] {
-        const char* v = std::getenv("STRATA_NUMA_PLACE");
+        const char* v = std::getenv("SAGUARO_NUMA_PLACE");
         if (v == nullptr || v[0] == '\0' || v[0] == '0') return 0;
         return std::strcmp(v, "bind") == 0 ? 2 : 1;
     }();

@@ -157,7 +157,7 @@ float host_philox_uniform(uint64_t seed, uint64_t counter) {
     return (float) (c0 >> 8) * (1.0f / 16777216.0f);
 }
 
-// The Gumbel-max noise, host side - a transcription of the kernel's `gumbel_exp` (STRATA_SPEC_GUMBEL): Exp(1) from
+// The Gumbel-max noise, host side - a transcription of the kernel's `gumbel_exp` (SAGUARO_SPEC_GUMBEL): Exp(1) from
 // a splitmix64 hash of (seed, counter, token id).  The pick is argmax_i p_i / E_i, an exact sample of p.
 double host_gumbel_exp(uint64_t seed, uint64_t counter, uint32_t token) {
     uint64_t z = seed ^ (counter * 0x9E3779B97F4A7C15ull) ^ ((uint64_t) token * 0xD1B54A32D192ED03ull);
@@ -473,8 +473,8 @@ int main(int argc, char** argv) {
     {
         // the sampled path under test; ctest runs this binary once per path
         auto on = [](const char* n) { const char* e = std::getenv(n); return e && *e && std::strcmp(e, "0") != 0; };
-        std::printf("  sampled path: %s\n", on("STRATA_OLD_SAMPLER")         ? "sampler_kernel (STRATA_OLD_SAMPLER)"
-                                            : on("STRATA_SAMPLER_ONE_BLOCK") ? "one block (STRATA_SAMPLER_ONE_BLOCK)"
+        std::printf("  sampled path: %s\n", on("SAGUARO_OLD_SAMPLER")         ? "sampler_kernel (SAGUARO_OLD_SAMPLER)"
+                                            : on("SAGUARO_SAMPLER_ONE_BLOCK") ? "one block (SAGUARO_SAMPLER_ONE_BLOCK)"
                                                                              : "split top_k (default)");
     }
     if (bench) {
@@ -1355,7 +1355,7 @@ int main(int argc, char** argv) {
         bad += wrong;
     }
 
-    // ---- GUMBEL-MAX (STRATA_SPEC_GUMBEL, p.gumbel).  (a) The kernel's pick equals the host reference's, draw for draw,
+    // ---- GUMBEL-MAX (SAGUARO_SPEC_GUMBEL, p.gumbel).  (a) The kernel's pick equals the host reference's, draw for draw,
     // under the chains the server uses (top_k / top_p / min_p / temperature).  (b) It is an exact sample: over many
     // counters the picks' frequencies match the softmax of the surviving logits.  (c) It is a different stream from
     // the inverse-CDF draw (the flag is really read), and greedy rows ignore it.

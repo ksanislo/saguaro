@@ -84,7 +84,7 @@ class CarryOver(unittest.TestCase):
             mm = Path(d) / "mmproj-Q8_0.gguf"
             mm.write_bytes(b"")
             old = {"exe": "e", "args": ["--kv", "int8", "--threads", "8"], "sampling": {"temperature": 0.7},
-                   "env": {"STRATA_RESIDENT_PIN": "0", "MY_VAR": "1"},
+                   "env": {"SAGUARO_RESIDENT_PIN": "0", "MY_VAR": "1"},
                    "vision": {"exe": "v", "mmproj": str(mm), "gpu": False, "max_tokens": 300, "min_tokens": 64}}
             p.write_text(json.dumps(old), encoding="utf-8")
             new = {"exe": "e2", "args": ["--kv", "int8"],

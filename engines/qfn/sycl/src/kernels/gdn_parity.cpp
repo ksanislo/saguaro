@@ -181,7 +181,7 @@ int prefill_case(int T, int seed, int repeats) {
     for (size_t i = 0; i < ref16.size(); ++i) half_bad += ref16[i] != got16[i];
     std::printf("prefill T=%d seed=%d heads=%d: state=%zu y=%zu fp16=%zu mismatches; max_abs=%.9g max_rel=%.9g; baseline=%.3f ms xe=%.3f ms\n",
                 T, seed, HV, state_bad, y_bad, half_bad, max_abs, max_rel, base_ms, xe_ms);
-    // T=7 additionally checks the production entry point (variant 6 on Alchemist or under STRATA_GDN_XE=1,
+    // T=7 additionally checks the production entry point (variant 6 on Alchemist or under SAGUARO_GDN_XE=1,
     // else variant 0) and T=0's no-op contract.
     int extra_bad = 0;
     if (T == 7) {

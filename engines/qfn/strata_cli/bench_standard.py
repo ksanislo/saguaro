@@ -786,7 +786,7 @@ def run(target: Target, out: Path | None, *, out_root: Path | None = None, optio
     props = target.get("/props", timeout=15)
     status = target.get("/v1/status", timeout=15) or {}
     if props is None:
-        raise ProfileError("the server did not answer /props (an API key may be needed: STRATA_API_KEY)", 5)
+        raise ProfileError("the server did not answer /props (an API key may be needed: SAGUARO_API_KEY)", 5)
     redact = facts.redactor(target.key or "")
     why = facts.Why()
     reasons_nonconforming: list[str] = []

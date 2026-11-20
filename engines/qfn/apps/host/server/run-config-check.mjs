@@ -91,7 +91,7 @@ export function checkRunConfig(text, { known = KNOWN_KEYS } = {}) {
       if (!Array.isArray(value) || value.some(v => typeof v !== 'string')) add('error', 'args-type', key, {}, '"args" must be a list of quoted text entries, for example ["--ple-io", "mmap"]. Numbers need quotes too.');
       else if (value.some(v => ['--host', '--port', '--api-key'].includes(v))) add('warning', 'args-managed', key, {}, 'Strata manages the network address, port and API key itself, so --host, --port and --api-key in "args" are not honoured.');
     } else if (key === 'env') {
-      if (!value || typeof value !== 'object' || Array.isArray(value)) add('error', 'env-type', key, {}, '"env" must be an object of names with quoted text values, for example { "STRATA_X": "1" }.');
+      if (!value || typeof value !== 'object' || Array.isArray(value)) add('error', 'env-type', key, {}, '"env" must be an object of names with quoted text values, for example { "SAGUARO_X": "1" }.');
       else for (const [name, v] of Object.entries(value)) {
         if (typeof v !== 'string') add('error', 'env-value', key, { name }, `"env" entry ${name} must be quoted text, for example "1", not ${show(v)}.`);
       }

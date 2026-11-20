@@ -80,7 +80,7 @@ export function resourceSettings(config,hardware,profile,model={},values={}){
  // (--resident-budget-gib, which implies --mmap-experts). Full performance takes the budget out again.
  if(baseline.ramBudget)remove('--resident-budget-gib');
  let env=null;   // the engine's own "leave RAM free" setting travels in the run config's env
- if(baseline.ramHeadroom&&config.env){env={...config.env};delete env.STRATA_RESIDENT_HEADROOM_GIB;}
+ if(baseline.ramHeadroom&&config.env){env={...config.env};delete env.SAGUARO_RESIDENT_HEADROOM_GIB;}
  const ram=Number(hardware?.ram_gb)||0,arena=Number(model?.arenaGb)||0;let ramBudget=false;
  if(profile==='work'&&ram>0&&arena>0&&!['--resident-experts','--mmap-experts','--resident-budget-gib'].some(f=>args.includes(f))&&ram*.8<arena+10){
   args.push('--resident-budget-gib',String(Math.max(8,Math.min(Math.floor(ram*.8)-10,Math.floor(arena/1.073741824)))));ramBudget=true;
@@ -88,7 +88,7 @@ export function resourceSettings(config,hardware,profile,model={},values={}){
  // The budget caps what the engine keeps in RAM. "Leave 20%" is also asked of the engine itself: at its start it leaves 20% of the RAM
  // available for other programs (it keeps fewer experts if the PC is busy), and it said nothing about this before.
  let ramHeadroom=false;
- if(ramBudget&&!(config.env?.STRATA_RESIDENT_HEADROOM_GIB)){env={...(env??config.env??{}),STRATA_RESIDENT_HEADROOM_GIB:String(Math.ceil(ram*.2))};ramHeadroom=true;}
+ if(ramBudget&&!(config.env?.SAGUARO_RESIDENT_HEADROOM_GIB)){env={...(env??config.env??{}),SAGUARO_RESIDENT_HEADROOM_GIB:String(Math.ceil(ram*.2))};ramHeadroom=true;}
  return {args,vram_reserve_mib:reserve,...(asked!==null?{}:{ui_reserve_applied:reserve}),...(env?{env}:{}),ui_resource_baseline:{...baseline,ramBudget,ramHeadroom}};
 }
 
@@ -122,11 +122,11 @@ export function saferStart(config,hardware,model,failure){
  const ram=Number(hardware?.ram_gb)||0,arena=Number(model?.arenaGb)||0;
  // Windows lets a program lock only about half the RAM for the graphics card; the engine pins the model's experts up to that.
  // When it ran out of locked memory, pin less of them: they stay in RAM, a little slower to reach.
- if(/pinned-memory-exhausted|mapped staging/i.test(text)&&!env.STRATA_ARENA_PIN_GIB){
-  const hint=Number((text.match(/STRATA_ARENA_PIN_GIB=(\d+)/)??[])[1]);
+ if(/pinned-memory-exhausted|mapped staging/i.test(text)&&!env.SAGUARO_ARENA_PIN_GIB){
+  const hint=Number((text.match(/SAGUARO_ARENA_PIN_GIB=(\d+)/)??[])[1]);
   const gib=hint>0?hint:ram>0?Math.max(4,Math.floor(ram/2)-8):16;
-  env.STRATA_ARENA_PIN_GIB=String(gib);
-  return {config:{...config,env},words:`Windows would not lock as much memory as the model asked for, so Strata started again and locks ${gib} GB of the model instead of all of it. Replies may start a little slower.`,detail:`STRATA_ARENA_PIN_GIB=${gib}`};
+  env.SAGUARO_ARENA_PIN_GIB=String(gib);
+  return {config:{...config,env},words:`Windows would not lock as much memory as the model asked for, so Strata started again and locks ${gib} GB of the model instead of all of it. Replies may start a little slower.`,detail:`SAGUARO_ARENA_PIN_GIB=${gib}`};
  }
  if(['--resident-experts','--mmap-experts'].some(f=>args.includes(f)))return null;
  const at=args.indexOf('--resident-budget-gib');

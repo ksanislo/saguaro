@@ -18,7 +18,7 @@
 # The Node version must satisfy the App Host's own `engines.node` (>= 24.12.0).
 set -euo pipefail
 
-NODE_VERSION="${STRATA_NODE_VERSION:-24.12.0}"
+NODE_VERSION="${SAGUARO_NODE_VERSION:-24.12.0}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEST="$HERE/../src-tauri/resources/node"
 

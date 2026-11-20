@@ -1156,18 +1156,18 @@ struct SmallTraits<IQ4NLBlock, 4> {
 // llama.cpp's generic multi-column table (ncols 2-4: 4 warps; 5-8: 2 warps; always 2 rows per block): faster,
 // equal to ncols = 1 only to float rounding (the cross-warp reduction groups partial sums differently).
 bool g_multi_exact = true;   // until the upstream layout is timed on an idle GPU (plan rule: default only what is measured)
-// B6 STRATA_B6_MMVQ_ROWS (lab, default 0 = off): see native_mmvq_set_b6_rows
+// B6 SAGUARO_B6_MMVQ_ROWS (lab, default 0 = off): see native_mmvq_set_b6_rows
 // read at first use (not at load): a per-architecture default set at start (nv_defaults.hpp) must be seen
 int g_b6_rows = -1;
-int b6_rows_mode() { if (g_b6_rows < 0) { const char* v = std::getenv("STRATA_B6_MMVQ_ROWS"); g_b6_rows = v ? std::atoi(v) : 0; } return g_b6_rows; }
+int b6_rows_mode() { if (g_b6_rows < 0) { const char* v = std::getenv("SAGUARO_B6_MMVQ_ROWS"); g_b6_rows = v ? std::atoi(v) : 0; } return g_b6_rows; }
 
-// S26 STRATA_TSUM=1 (TS): warp 0's NCOLS x ROWS sums as one transposed butterfly (s26_tsum.cuh), bitwise the same
+// S26 SAGUARO_TSUM=1 (TS): warp 0's NCOLS x ROWS sums as one transposed butterfly (s26_tsum.cuh), bitwise the same
 static bool s26_tsum_on() {
-    static const bool on = [] { const char* v = std::getenv("STRATA_TSUM"); return v && v[0] == '1'; }();
+    static const bool on = [] { const char* v = std::getenv("SAGUARO_TSUM"); return v && v[0] == '1'; }();
     return on;
 }
 
-// S26 STRATA_LFUSE (PAIR): blocks n_out.. compute the same rows of w2 into y2 (two matrices of one shape on one
+// S26 SAGUARO_LFUSE (PAIR): blocks n_out.. compute the same rows of w2 into y2 (two matrices of one shape on one
 // input in one launch; each output's code is the single matrix's)
 template<typename F, int NCOLS, int NW, int ROWS, bool TS = false, bool PAIR = false>
 __launch_bounds__(NW * WARP, (ROWS <= 2 ? 4 : 1))
@@ -1272,10 +1272,10 @@ __global__ void native_mmvq_multi_kernel(const typename F::Block* __restrict__ w
 //   gfx1201 (R9700): n_in <= 4096 with n_out >= 4096 (qkv 2560->10240 73-79% -> 83-84% of the 644 GB/s, gate 2560->6144
 //     51-68% -> 76-78%, q 2560->12288 74-80% -> 85-86%); 6144->2560 is slower there (79% -> 55-59%) and keeps two rows.
 //   sm_86 (RTX A4000): every n_out >= 2048 (+1-4% at 2-4 columns, 6144->2560 at 6 columns 70% -> 76%).
-// Other cards keep two rows until measured (STRATA_NO_MMVQ_ROWS2=1 forces one row everywhere; =0 keeps two everywhere).
-// Turing: sm_86's rule with STRATA_SM75_Q8ROWS1=1 (opt-in until q8_gemv_bench / an A/B on a T4 says so).
-bool sm75_q8rows1_env() { const char* v = std::getenv("STRATA_SM75_Q8ROWS1"); return v != nullptr && v[0] == '1'; }
-int dev_class() {   // 1 = gfx12, 2 = sm_86 (or sm_75 with STRATA_SM75_Q8ROWS1=1), 0 = the rest; per device
+// Other cards keep two rows until measured (SAGUARO_NO_MMVQ_ROWS2=1 forces one row everywhere; =0 keeps two everywhere).
+// Turing: sm_86's rule with SAGUARO_SM75_Q8ROWS1=1 (opt-in until q8_gemv_bench / an A/B on a T4 says so).
+bool sm75_q8rows1_env() { const char* v = std::getenv("SAGUARO_SM75_Q8ROWS1"); return v != nullptr && v[0] == '1'; }
+int dev_class() {   // 1 = gfx12, 2 = sm_86 (or sm_75 with SAGUARO_SM75_Q8ROWS1=1), 0 = the rest; per device
     static int cls[16];   // 0 unknown, else class + 1
     int dev = 0;
     if (cudaGetDevice(&dev) != cudaSuccess || dev < 0 || dev >= 16) return 0;
@@ -1303,7 +1303,7 @@ bool q8_0_rows1(int n_in, int n_out) {
         return false;
     } else {
         static const int env = [] {
-            const char* v = std::getenv("STRATA_NO_MMVQ_ROWS2");
+            const char* v = std::getenv("SAGUARO_NO_MMVQ_ROWS2");
             return v == nullptr || v[0] == '\0' ? -1 : v[0] != '0';
         }();
         if (env == 0) return false;
@@ -1312,7 +1312,7 @@ bool q8_0_rows1(int n_in, int n_out) {
     }
 }
 
-// ---- B6 STRATA_B6_MMVQ_ROWS (lab, opt-in): the exact multi-column layout with each column's activation fragment
+// ---- B6 SAGUARO_B6_MMVQ_ROWS (lab, opt-in): the exact multi-column layout with each column's activation fragment
 // loaded ONCE per weight block and reused across ROWS rows of the block (the default kernel reloads it for every row
 // it applies it to, and the K-quant scales once per column).  A thread keeps the same blocks (kbx = tid / T, stride
 // BPI with WARPS warps), each (row, column) sum adds the same per-block values in the same order, and the cross-warp
@@ -1479,7 +1479,7 @@ template<typename F, int NCOLS>
 void launch_multi_n(const void* weights, const void* x_q8_1, float* y, int n_in, int n_out, cudaStream_t s) {
     const auto* w = static_cast<const typename F::Block*>(weights);
     const auto* x = static_cast<const Q81Block*>(x_q8_1);
-    if (b6_launch<F, NCOLS>(w, x, y, n_in, n_out, s)) return;   // STRATA_B6_MMVQ_ROWS
+    if (b6_launch<F, NCOLS>(w, x, y, n_in, n_out, s)) return;   // SAGUARO_B6_MMVQ_ROWS
     if (!g_multi_exact) {
         constexpr int NW = NCOLS <= 4 ? 4 : 2;
         const unsigned blocks = unsigned((std::size_t(n_out) + 1) / 2);
@@ -1492,9 +1492,9 @@ void launch_multi_n(const void* weights, const void* x_q8_1, float* y, int n_in,
     const typename F::Block* const no_w2 = nullptr;
     float* const no_y2 = nullptr;
     // #783 PR-h (stuchapin909): two rows per block for every K, not only small K - each row keeps its own partial sums and
-    // reduction, so a row's result does not depend on its neighbour; STRATA_NO_MMVQ_ROWS2=1 keeps one row for large K
+    // reduction, so a row's result does not depend on its neighbour; SAGUARO_NO_MMVQ_ROWS2=1 keeps one row for large K
     static const bool rows1 = [] {
-        const char* v = std::getenv("STRATA_NO_MMVQ_ROWS2");
+        const char* v = std::getenv("SAGUARO_NO_MMVQ_ROWS2");
         return v != nullptr && v[0] != '\0' && v[0] != '0';
     }();
     if ((rows1 || q8_0_rows1<F>(n_in, n_out)) && n_in / F::DIV >= F::BPI) {
@@ -1824,8 +1824,8 @@ void launch_check() {
 // 64 lanes exactly as the CUDA kernels stride them over a block (kbx = lane / T, stride 64 / T), and a 64-lane
 // butterfly instead of the LDS partials and __syncthreads of the one-block-per-row layout: on gfx906 a block per
 // 2 KB row spent most of its time being launched and joined.  The SAME kernel serves every column count 1..8, so a
-// column's sums do not depend on how many columns (verify tokens) ride along.  STRATA_MMVQ_WAVE=0: the CUDA layout.
-bool g_wave_off = std::getenv("STRATA_MMVQ_WAVE") && std::string(std::getenv("STRATA_MMVQ_WAVE")) == "0";
+// column's sums do not depend on how many columns (verify tokens) ride along.  SAGUARO_MMVQ_WAVE=0: the CUDA layout.
+bool g_wave_off = std::getenv("SAGUARO_MMVQ_WAVE") && std::string(std::getenv("SAGUARO_MMVQ_WAVE")) == "0";
 template<typename F, int NCOLS, int R>
 __launch_bounds__(256)
 __global__ void native_mmvq_wave_kernel(const typename F::Block* __restrict__ w, const Q81Block* __restrict__ x,
@@ -1931,16 +1931,16 @@ void small_f32(const void* weights, const float* x, void* scratch_q8_1,
     small_mmvq<Weight, Qi>(weights, scratch_q8_1, y, n_in, n_out, ncols, stream);
 }
 
-// STRATA_Q8_SM60=1 (opt-in, written for Pascal GP100): every Q8_0 dense matrix and the head get the packed planes
+// SAGUARO_Q8_SM60=1 (opt-in, written for Pascal GP100): every Q8_0 dense matrix and the head get the packed planes
 // below and run q8sm60::kernel on them (q8_sm60.cuh) instead of the exact kernels.
 bool q8_sm60_on() {
 #if defined(__HIPCC__)
     return false;   // a CUDA kernel for one NVIDIA chip: HIP builds never compile it
 #else
     static const bool on = [] {
-        const char* v = std::getenv("STRATA_Q8_SM60");
+        const char* v = std::getenv("SAGUARO_Q8_SM60");
         const bool yes = v && v[0] == '1' && v[1] == '\0';
-        if (yes) std::fprintf(stderr, "strata q8 sm60: Q8_0 decode GEMVs on the Pascal kernel (STRATA_Q8_SM60=1)\n");
+        if (yes) std::fprintf(stderr, "strata q8 sm60: Q8_0 decode GEMVs on the Pascal kernel (SAGUARO_Q8_SM60=1)\n");
         return yes;
     }();
     return on;
@@ -1950,7 +1950,7 @@ bool q8_sm60_on() {
 #include "q8_sm60.cuh"
 #endif
 
-// ============================ STRATA_Q8_PACKED=1: the packed Q8_0 decode layout (opt-in) ============================
+// ============================ SAGUARO_Q8_PACKED=1: the packed Q8_0 decode layout (opt-in) ============================
 //
 // A lossless load-time repack of a Q8_0 matrix: the SAME int8 values in a qs plane (row-major, n_in bytes per row)
 // followed by the SAME fp16 scales in a d plane (row-major, n_in / 32 per row) - no requantization, same bytes.
@@ -2005,7 +2005,7 @@ __global__ void native_q8_0_packed_kernel(const int8_t* __restrict__ qs, const h
             for (int j = 0; j < NCOLS; ++j) partial[buf][threadIdx.y - 1][j][threadIdx.x] = tmp[j];
         }
         __syncthreads();
-        if (TS && threadIdx.y == 0) {   // S26 STRATA_TSUM=1: one transposed butterfly, bitwise the same sums
+        if (TS && threadIdx.y == 0) {   // S26 SAGUARO_TSUM=1: one transposed butterfly, bitwise the same sums
             constexpr int P = s26ts::pow2_ceil(NCOLS);
             float v[P];
 #pragma unroll
@@ -2098,7 +2098,7 @@ bool q8_packed_mmvq(const void* weights, const void* x_q8_1, float* y, int n_in,
 }
 
 
-// ============================ STRATA_Q6_PACKED=1: the packed Q6_K head layout (opt-in) ============================
+// ============================ SAGUARO_Q6_PACKED=1: the packed Q6_K head layout (opt-in) ============================
 //
 // The output heads (the main head, 248320 rows, and the MTP draft head's row subset) are Q6_K matrices of 2560-wide
 // rows: 10 blocks of 210 bytes each, so every int load is 2-byte aligned and a row is 2100 bytes. The packed copy
@@ -2106,11 +2106,11 @@ bool q8_packed_mmvq(const void* weights, const void* x_q8_1, float* y, int n_in,
 // two words are aligned dword loads (non-temporal). Thread ownership (block tid / 32 + 4 i, word tid % 32), the
 // q6_q8_dot_impl expression, the per-thread order and the reduction are those of native_q6_k_mmvq_kernel<false> /
 // native_mmvq_multi_kernel<Q6KTraits, NC, 4, 1>: every output is bitwise equal. Persistent workgroups.
-int g_q6p_grid_override = 0;   // the self-test's grid sweep (STRATA_Q6P_SELFTEST=2)
+int g_q6p_grid_override = 0;   // the self-test's grid sweep (SAGUARO_Q6P_SELFTEST=2)
 int q6p_grid() {
     if (g_q6p_grid_override > 0) return g_q6p_grid_override;
     static const int grid = [] {
-        const char* v = std::getenv("STRATA_Q6P_GRID");
+        const char* v = std::getenv("SAGUARO_Q6P_GRID");
         const int g = v ? std::atoi(v) : 0;
         return g > 0 ? g : 640;
     }();
@@ -2160,7 +2160,7 @@ __global__ void native_q6_k_packed_kernel(const int* __restrict__ ql, const int*
             for (int j = 0; j < NCOLS; ++j) partial[buf][threadIdx.y - 1][j][threadIdx.x] = tmp[j];
         }
         __syncthreads();
-        if (TS && threadIdx.y == 0) {   // S26 STRATA_TSUM=1: one transposed butterfly, bitwise the same sums
+        if (TS && threadIdx.y == 0) {   // S26 SAGUARO_TSUM=1: one transposed butterfly, bitwise the same sums
             constexpr int P = s26ts::pow2_ceil(NCOLS);
             float v[P];
 #pragma unroll
@@ -2235,7 +2235,7 @@ bool q6_packed_mmvq(const void* weights, const void* x_q8_1, float* y, int n_in,
 
 bool native_q8_0_packed_enabled() {
     static const bool enabled = [] {
-        const char* v = std::getenv("STRATA_Q8_PACKED");
+        const char* v = std::getenv("SAGUARO_Q8_PACKED");
         return v && v[0] == '1' && v[1] == '\0';
     }();
     return enabled || q8_sm60_on();
@@ -2319,7 +2319,7 @@ void native_q8_0_packed_unregister(const void* gguf_weights) { q8_packed_registr
 
 bool native_q6_k_packed_enabled() {
     static const bool enabled = [] {
-        const char* v = std::getenv("STRATA_Q6_PACKED");
+        const char* v = std::getenv("SAGUARO_Q6_PACKED");
         return v && v[0] == '1' && v[1] == '\0';
     }();
     return enabled;
@@ -2354,10 +2354,10 @@ bool native_q6_k_pack(const void* weights, int n_in, int n_out, const char* what
                                              reinterpret_cast<const int*>(base + o_qh),
                                              reinterpret_cast<const int8_t*>(base + o_sc),
                                              reinterpret_cast<const half*>(base + o_d), n_in, n_out};
-    std::fprintf(stderr, "strata: STRATA_Q6_PACKED=1 packed the %s (%d x %d, +%.1f MiB)\n", what, n_out, n_in,
+    std::fprintf(stderr, "strata: SAGUARO_Q6_PACKED=1 packed the %s (%d x %d, +%.1f MiB)\n", what, n_out, n_in,
                  total / 1048576.0);
-    // STRATA_Q6P_SELFTEST=1: bitwise check against the GGUF-layout kernels (1..4 columns) and paired timings
-    if (const char* v = std::getenv("STRATA_Q6P_SELFTEST"); v && (v[0] == '1' || v[0] == '2')) {
+    // SAGUARO_Q6P_SELFTEST=1: bitwise check against the GGUF-layout kernels (1..4 columns) and paired timings
+    if (const char* v = std::getenv("SAGUARO_Q6P_SELFTEST"); v && (v[0] == '1' || v[0] == '2')) {
         cudaStream_t s = nullptr;
         cudaStreamCreateWithFlags(&s, cudaStreamNonBlocking);
         const int nq = n_in / Q8K;
@@ -2531,7 +2531,7 @@ namespace {
 // an RTX 2080 Ti).  Here lane l runs the chunks of the exact kernel's threads l, 32+l, 64+l and 96+l in their loop
 // order, adds the four sums as warp 0 adds the other warps' partials, then the same warp_sum: every output is bit for
 // bit native_q2_0_mmvq_kernel's (one column) and launch_multi's exact layout (two to four).  80 -> 31 us at three
-// columns, 37 -> 25 us at one.  STRATA_Q2_WARP=0 keeps the old kernels; =1 takes this one on any CUDA card.
+// columns, 37 -> 25 us at one.  SAGUARO_Q2_WARP=0 keeps the old kernels; =1 takes this one on any CUDA card.
 constexpr int kQ20WarpRows = 4;
 template <int NCOLS>
 __global__ void __launch_bounds__(WARPS * WARP) q2_0_warp_rows_kernel(const Q20Block* __restrict__ w,
@@ -2576,7 +2576,7 @@ __global__ void __launch_bounds__(WARPS * WARP) q2_0_warp_rows_kernel(const Q20B
 }
 bool q2_0_warp_rows_on() {
     static int on[16] = {};   // by device ordinal: 0 unknown, 1 yes, -1 no
-    static const int env = [] { const char* v = std::getenv("STRATA_Q2_WARP"); return v ? (v[0] == '0' ? 0 : 1) : -1; }();
+    static const int env = [] { const char* v = std::getenv("SAGUARO_Q2_WARP"); return v ? (v[0] == '0' ? 0 : 1) : -1; }();
     if (env >= 0) return env == 1;
     int dev = 0;
     if (cudaGetDevice(&dev) != cudaSuccess || dev < 0 || dev >= 16) return false;
@@ -2585,7 +2585,7 @@ bool q2_0_warp_rows_on() {
         const bool ok = cudaDeviceGetAttribute(&maj, cudaDevAttrComputeCapabilityMajor, dev) == cudaSuccess &&
                         cudaDeviceGetAttribute(&mnr, cudaDevAttrComputeCapabilityMinor, dev) == cudaSuccess;
         if (!ok) cudaGetLastError();
-        on[dev] = ok && strata::sm75_default(maj, mnr) ? 1 : -1;   // Turing only, with STRATA_SM75_PERF=1
+        on[dev] = ok && strata::sm75_default(maj, mnr) ? 1 : -1;   // Turing only, with SAGUARO_SM75_PERF=1
     }
     return on[dev] > 0;
 }
@@ -2771,7 +2771,7 @@ void native_q4_k_f32(const void* weights, const float* x, void* scratch_q8_1,
 
 void native_q6_k_mmvq(const void* weights, const void* x_q8_1, float* y,
                       int n_in, int n_out, int ncols, void* stream) {
-    if (q6_packed_mmvq(weights, x_q8_1, y, n_in, n_out, ncols, stream)) return;   // STRATA_Q6_PACKED=1 heads
+    if (q6_packed_mmvq(weights, x_q8_1, y, n_in, n_out, ncols, stream)) return;   // SAGUARO_Q6_PACKED=1 heads
     validate_shape(n_in, ncols, 256);
     if (n_out <= 0) throw std::invalid_argument("native MMVQ requires n_out > 0");
     validate_pointer(weights);
@@ -2832,13 +2832,13 @@ void native_q5_0_f32(const void* weights, const float* x, void* scratch_q8_1,
 
 namespace {
 #if !defined(__HIPCC__)
-// STRATA_SM75_Q8G=1 (Turing, opt-in): Q8_0 at 2-8 columns on the GGUF layout, activations staged in shared memory once
+// SAGUARO_SM75_Q8G=1 (Turing, opt-in): Q8_0 at 2-8 columns on the GGUF layout, activations staged in shared memory once
 // per workgroup, a warp per R rows; lane l's chunk m is thread 32 (m % 4) + l's pass m / 4 of the exact kernel: bitwise.
 constexpr int Q8G_WARPS = 8;
 constexpr std::size_t Q8G_MAX_SMEM = 48 * 1024;
 int g_q8g_force = -1;      // native_q8_0_turing_tune: -1 the env switch, 0 off, 1 on (any CUDA card)
-int g_q8g_rows = 0;        // rows a warp (0: STRATA_SM75_Q8G_ROWS, default 2)
-int g_q8g_min_out = -1;    // smallest n_out taken (-1: STRATA_SM75_Q8G_MIN_OUT, default 2048)
+int g_q8g_rows = 0;        // rows a warp (0: SAGUARO_SM75_Q8G_ROWS, default 2)
+int g_q8g_min_out = -1;    // smallest n_out taken (-1: SAGUARO_SM75_Q8G_MIN_OUT, default 2048)
 
 std::size_t q8g_smem(int ncols, int n_in) { return std::size_t(ncols) * (std::size_t(n_in) + std::size_t(n_in / 32) * sizeof(float)); }
 
@@ -2850,12 +2850,12 @@ int q8g_env_int(const char* name, int dflt) {
 bool q8g_on() {
     if (g_q8g_force >= 0) return g_q8g_force > 0;
     static const bool env = [] {
-        const bool yes = q8g_env_int("STRATA_SM75_Q8G", 0) != 0;
-        if (yes) std::fprintf(stderr, "strata: STRATA_SM75_Q8G=1: Q8_0 GEMVs at 2-8 columns on the Turing row kernel\n");
+        const bool yes = q8g_env_int("SAGUARO_SM75_Q8G", 0) != 0;
+        if (yes) std::fprintf(stderr, "strata: SAGUARO_SM75_Q8G=1: Q8_0 GEMVs at 2-8 columns on the Turing row kernel\n");
         return yes;
     }();
     if (!env) return false;
-    static int ok[16] = {};   // per device: 1 a Turing card (or STRATA_EMULATE_CC=75), -1 not
+    static int ok[16] = {};   // per device: 1 a Turing card (or SAGUARO_EMULATE_CC=75), -1 not
     int dev = 0;
     if (cudaGetDevice(&dev) != cudaSuccess || dev < 0 || dev >= 16) { cudaGetLastError(); return false; }
     if (ok[dev] == 0) {
@@ -2869,16 +2869,16 @@ bool q8g_on() {
 }
 
 int q8g_rows(int ncols) {
-    static const int env = q8g_env_int("STRATA_SM75_Q8G_ROWS", 2);
+    static const int env = q8g_env_int("SAGUARO_SM75_Q8G_ROWS", 2);
     int r = g_q8g_rows > 0 ? g_q8g_rows : env;
     r = r >= 4 ? 4 : r >= 2 ? 2 : 1;
     return ncols > 4 && r > 2 ? 2 : r;   // 5-8 columns: the accumulators of 4 rows would spill
 }
 
-// STRATA_SM75_Q8G_CHECK (debug): 1 = also run the default kernel first and count outputs that differ, keeping the new ones;
+// SAGUARO_SM75_Q8G_CHECK (debug): 1 = also run the default kernel first and count outputs that differ, keeping the new ones;
 // 2 = the same, keeping the default's.  native_q8_0_turing_report prints the counts.
 int q8g_check_mode() {
-    static const int v = q8g_env_int("STRATA_SM75_Q8G_CHECK", 0);
+    static const int v = q8g_env_int("SAGUARO_SM75_Q8G_CHECK", 0);
     return v == 1 || v == 2 ? v : 0;
 }
 __device__ unsigned long long g_q8g_chk[3];   // calls, outputs, outputs that differ
@@ -2896,7 +2896,7 @@ __device__ __forceinline__ void q8g_check_store(float* out, float v, int check, 
 bool q8g_takes(int n_in, int n_out, int ncols) {
     if (ncols < 2 || ncols > MAX_NCOLS || !g_multi_exact || n_in <= 0 || n_in % 32 != 0 || n_out <= 0 || !q8g_on())
         return false;
-    static const int env_min = q8g_env_int("STRATA_SM75_Q8G_MIN_OUT", 2048);
+    static const int env_min = q8g_env_int("SAGUARO_SM75_Q8G_MIN_OUT", 2048);
     return n_out >= (g_q8g_min_out >= 0 ? g_q8g_min_out : env_min) && q8g_smem(ncols, n_in) <= Q8G_MAX_SMEM;
 }
 
@@ -3048,7 +3048,7 @@ void q8g_report() {
         unsigned int fst[7] = {};
         if (cudaSetDevice(d) != cudaSuccess || cudaMemcpyFromSymbol(c, g_q8g_chk, sizeof c) != cudaSuccess ||
             cudaMemcpyFromSymbol(fst, g_q8g_first, sizeof fst) != cudaSuccess) { cudaGetLastError(); continue; }
-        std::fprintf(stderr, "strata: STRATA_SM75_Q8G_CHECK=%d: device %d: %llu calls, %llu outputs, %llu differ from the "
+        std::fprintf(stderr, "strata: SAGUARO_SM75_Q8G_CHECK=%d: device %d: %llu calls, %llu outputs, %llu differ from the "
                      "default kernel", q8g_check_mode(), d, c[0], c[1], c[2]);
         if (c[2] != 0)
             std::fprintf(stderr, " (first: %u x %u, %u columns, row %u column %u: default 0x%08x new 0x%08x)", fst[0], fst[1],
@@ -3084,7 +3084,7 @@ bool native_mmvq_pair(int ggml_type, const void* w1, const void* w2, const void*
         return false;
     const auto& reg = q8_packed_registry();
     if (reg.count(w1) || reg.count(w2)) return false;
-    if (q8g_takes(n_in, n_out, ncols)) return false;   // STRATA_SM75_Q8G: the two calls take the Turing kernel
+    if (q8g_takes(n_in, n_out, ncols)) return false;   // SAGUARO_SM75_Q8G: the two calls take the Turing kernel
     const auto* a = static_cast<const Q80Block*>(w1);
     const auto* b = static_cast<const Q80Block*>(w2);
     const auto* x = static_cast<const Q81Block*>(x_q8_1);
@@ -3104,8 +3104,8 @@ bool native_mmvq_pair(int ggml_type, const void* w1, const void* w2, const void*
 
 void native_q8_0_mmvq(const void* weights, const void* x_q8_1, float* y,
                        int n_in, int n_out, int ncols, void* stream) {
-    if (q8_packed_mmvq(weights, x_q8_1, y, n_in, n_out, ncols, stream)) return;   // STRATA_Q8_PACKED=1 tensors
-    if (q8g_mmvq(weights, x_q8_1, y, n_in, n_out, ncols, stream)) return;         // STRATA_SM75_Q8G=1
+    if (q8_packed_mmvq(weights, x_q8_1, y, n_in, n_out, ncols, stream)) return;   // SAGUARO_Q8_PACKED=1 tensors
+    if (q8g_mmvq(weights, x_q8_1, y, n_in, n_out, ncols, stream)) return;         // SAGUARO_SM75_Q8G=1
     small_mmvq<Q80Block, 8>(weights, x_q8_1, y, n_in, n_out, ncols, stream);
 }
 
@@ -3247,7 +3247,7 @@ constexpr IlRows kIlRowsShared[] = {   // sm_86 + sm_120, and the fallback for e
 // it takes the shared table, which sits between the measured sm_86 and sm_120.  To add one, run
 // `mmvq_il_parity --bench --emit-table` on the card (docs/MMVQ_IL_TABLE.md), paste the printed block as a
 // `constexpr IlRows kIlRows_89[]` and add {89, kIlRows_89, sizeof(kIlRows_89) / sizeof(IlRows)} below.  Each choice
-// is bitwise the same output, so a table is only speed.  Without a rebuild: STRATA_MMVQ_IL_ROWS (see il_env_rows).
+// is bitwise the same output, so a table is only speed.  Without a rebuild: SAGUARO_MMVQ_IL_ROWS (see il_env_rows).
 // Volta (sm_70): read off mmvq_il_parity --bench on a V100-SXM2-32GB (two runs, mean), the same rule - per cell the
 // rows count whose every measured shape takes at least 3% off native_mmvq's time (e.g. the Q5_K head at 3 columns
 // 1094 -> 821 us, Q6_K 12288 rows 68.9 -> 47.9 us), else 0; unmeasured classes take a neighbour's value (PR 1401)
@@ -3311,7 +3311,7 @@ constexpr IlRows kIlRows_75[] = {
 // 147-verify: 5-8 columns (a verify window of 5+ rows) by n_out class, per architecture; 0 = native_mmvq's kernels.  Every
 // choice is bitwise native_mmvq's output (mmvq_il_parity, T 1-8), so a table is only speed.  Measured on an RTX PRO 5000
 // Blackwell (sm_120) with mmvq_il_parity --bench --emit-table; other cards have no table yet and keep native_mmvq's
-// kernels at 5+ columns.  STRATA_MMVQ_IL_WIDE=0 turns the 5-8 column path off.
+// kernels at 5+ columns.  SAGUARO_MMVQ_IL_WIDE=0 turns the 5-8 column path off.
 struct IlRows58 { int type; uint8_t r[4][5]; };
 constexpr IlRows58 kIlRows58_120[] = {   // 4 = 2 rows a warp here (launch_il_rows)
     {23, {{0, 4, 4, 4, 4}, {0, 4, 2, 4, 2}, {0, 4, 2, 4, 2}, {0, 4, 2, 2, 2}}},   // IQ4_XS
@@ -3325,7 +3325,7 @@ constexpr Il58Arch kIl58Arch[] = {
     {120, kIlRows58_120, sizeof(kIlRows58_120) / sizeof(IlRows58)},
     {1201, kIlRows58_120, sizeof(kIlRows58_120) / sizeof(IlRows58)},   // a 12.0 card with 80+ SMs (il_cc)
 };
-// One column: rows a warp by n_out class, 0 = native_mmvq's single-column kernels (STRATA_MMVQ_IL_T1=0 turns this off).
+// One column: rows a warp by n_out class, 0 = native_mmvq's single-column kernels (SAGUARO_MMVQ_IL_T1=0 turns this off).
 struct Il1Rows { int type; uint8_t r[5]; };
 constexpr Il1Rows kIl1Rows_86[] = {
     {11, {0, 1, 1, 1, 1}},   // Q3_K: 2560x10240 60 -> 43 us, 6144x2560 30 -> 26 us on the A4000
@@ -3345,8 +3345,8 @@ bool il_env_on(const char* name) {
     const char* v = std::getenv(name);
     return v == nullptr || v[0] != '0';
 }
-bool il_t1_on() { static const bool on = il_env_on("STRATA_MMVQ_IL_T1"); return on; }
-bool il_q3k_on() { static const bool on = il_env_on("STRATA_MMVQ_IL_Q3K"); return on; }
+bool il_t1_on() { static const bool on = il_env_on("SAGUARO_MMVQ_IL_T1"); return on; }
+bool il_q3k_on() { static const bool on = il_env_on("SAGUARO_MMVQ_IL_Q3K"); return on; }
 struct IlArch { int cc; const IlRows* t; size_t n; };
 constexpr IlArch kIlArch[] = {
     {60, kIlRows_60, sizeof(kIlRows_60) / sizeof(IlRows)},   // Pascal GP100: measured on a Tesla P100
@@ -3358,13 +3358,13 @@ constexpr IlArch kIlArch[] = {
     // was measured on an RTX 5070 (48 SMs) and stays that card's
     {1201, kIlRows_120, sizeof(kIlRows_120) / sizeof(IlRows)},
 };
-// STRATA_MMVQ_IL_ROWS="type:ncols:r0,r1,r2,r3,r4;..." overrides single rows of the table for every card (type = ggml
+// SAGUARO_MMVQ_IL_ROWS="type:ncols:r0,r1,r2,r3,r4;..." overrides single rows of the table for every card (type = ggml
 // type 23/12/13/14, ncols 2-4, r* = rows a warp 0/1/2/4 for the five n_out classes).  Parsed once.
 struct IlEnvRow { int type, ncols; uint8_t r[5]; };
 const std::vector<IlEnvRow>& il_env_rows() {
     static const std::vector<IlEnvRow> v = [] {
         std::vector<IlEnvRow> out;
-        const char* e = std::getenv("STRATA_MMVQ_IL_ROWS");
+        const char* e = std::getenv("SAGUARO_MMVQ_IL_ROWS");
         if (!e) return out;
         std::string str(e);
         size_t pos = 0;
@@ -3378,9 +3378,9 @@ const std::vector<IlEnvRow>& il_env_rows() {
                 bool ok = true;
                 for (int i = 0; i < 5; ++i) { ok = ok && (r[i] == 0 || r[i] == 1 || r[i] == 2 || r[i] == 4); x.r[i] = (uint8_t) r[i]; }
                 if (ok) out.push_back(x);
-                else std::fprintf(stderr, "strata: STRATA_MMVQ_IL_ROWS: rows must be 0/1/2/4 - entry ignored\n");
+                else std::fprintf(stderr, "strata: SAGUARO_MMVQ_IL_ROWS: rows must be 0/1/2/4 - entry ignored\n");
             } else {
-                std::fprintf(stderr, "strata: STRATA_MMVQ_IL_ROWS: cannot read '%s' (type:ncols:r0,r1,r2,r3,r4) - ignored\n",
+                std::fprintf(stderr, "strata: SAGUARO_MMVQ_IL_ROWS: cannot read '%s' (type:ncols:r0,r1,r2,r3,r4) - ignored\n",
                              str.substr(pos, end - pos).c_str());
             }
             pos = end + 1;
@@ -3396,7 +3396,7 @@ int native_mmvq_il_rows_for(int cc, int type, int ncols, int n_out) {
     if (ncols < 1 || ncols > 8) return 0;
     const int cls = n_out < 2048 ? 0 : n_out < 4096 ? 1 : n_out < 8192 ? 2 : n_out < 12288 ? 3 : 4;
     if (ncols > 4) {   // 147-verify: 5..8 columns, only where a card measured its table
-        static const bool wide = il_env_on("STRATA_MMVQ_IL_WIDE");
+        static const bool wide = il_env_on("SAGUARO_MMVQ_IL_WIDE");
         if (!wide) return 0;
         if (type == 11 && !il_q3k_on()) return 0;
         for (const Il58Arch& a : kIl58Arch)
@@ -3407,7 +3407,7 @@ int native_mmvq_il_rows_for(int cc, int type, int ncols, int n_out) {
     }
     for (const IlEnvRow& e : il_env_rows())
         if (e.type == type && e.ncols == ncols) return e.r[cls];
-    if (ncols == 1) {   // 143-dense: one column (the plain q8_1 blocks, no interleaved copy); STRATA_MMVQ_IL_T1=0 turns it off
+    if (ncols == 1) {   // 143-dense: one column (the plain q8_1 blocks, no interleaved copy); SAGUARO_MMVQ_IL_T1=0 turns it off
         if (!il_t1_on()) return 0;
         for (const Il1Arch& a : kIl1Arch)
             if (a.cc == cc)
@@ -3415,10 +3415,10 @@ int native_mmvq_il_rows_for(int cc, int type, int ncols, int n_out) {
                     if (a.t[i].type == type) return a.t[i].r[cls];
         return 0;
     }
-    if (type == 11 && !il_q3k_on()) return 0;   // STRATA_MMVQ_IL_Q3K=0: Q3_K keeps native_mmvq's kernels
+    if (type == 11 && !il_q3k_on()) return 0;   // SAGUARO_MMVQ_IL_Q3K=0: Q3_K keeps native_mmvq's kernels
     const IlRows* t = kIlRowsShared;
     size_t n = sizeof(kIlRowsShared) / sizeof(IlRows);
-    static const bool own120 = il_env_on("STRATA_MMVQ_IL_120");   // 147-verify: =0 gives a big 12.0 card the shared table again
+    static const bool own120 = il_env_on("SAGUARO_MMVQ_IL_120");   // 147-verify: =0 gives a big 12.0 card the shared table again
     for (const IlArch& a : kIlArch)
         if (a.cc == cc && a.t != nullptr && (cc != 1201 || own120)) { t = a.t; n = a.n; }
     for (size_t i = 0; i < n; ++i)
@@ -3451,17 +3451,17 @@ void native_mmvq_il_tune(int rows) { g_tune_rows = rows; }
 
 namespace {
 // sm_80 and newer (measured on sm_86 and sm_120), Volta (sm_70) and Pascal (sm_60, sm_61), each with its own table
-// above; Turing keeps native_mmvq's kernels unless STRATA_SM75_PERF=1 (kIlRows_75)
-// Volta (PR 1401): opt-in with STRATA_SM70_TABLE=1 until the author confirms on a V100 with the final code
-bool sm70_opt_in() { const char* v = std::getenv("STRATA_SM70_TABLE"); return v != nullptr && std::atoi(v) != 0; }
+// above; Turing keeps native_mmvq's kernels unless SAGUARO_SM75_PERF=1 (kIlRows_75)
+// Volta (PR 1401): opt-in with SAGUARO_SM70_TABLE=1 until the author confirms on a V100 with the final code
+bool sm70_opt_in() { const char* v = std::getenv("SAGUARO_SM70_TABLE"); return v != nullptr && std::atoi(v) != 0; }
 // Pascal (sm_60, GP100): the same interleaved kernels (bitwise equal to native_mmvq's, mmvq_il_parity), its own table
-// kIlRows_60.  STRATA_SM60_TABLE=0 keeps native_mmvq's kernels on a P100; any other value (or unset) uses the table.
-// STRATA_SM75_IL=0 / 1 forces the table off / on; unset it follows STRATA_SM75_PERF=1 (Turing only)
-bool sm75_il_on(int major, int minor) { return strata::sm75_switch("STRATA_SM75_IL", major, minor); }
-bool sm60_table_on() { const char* v = std::getenv("STRATA_SM60_TABLE"); return v == nullptr || std::atoi(v) != 0; }
+// kIlRows_60.  SAGUARO_SM60_TABLE=0 keeps native_mmvq's kernels on a P100; any other value (or unset) uses the table.
+// SAGUARO_SM75_IL=0 / 1 forces the table off / on; unset it follows SAGUARO_SM75_PERF=1 (Turing only)
+bool sm75_il_on(int major, int minor) { return strata::sm75_switch("SAGUARO_SM75_IL", major, minor); }
+bool sm60_table_on() { const char* v = std::getenv("SAGUARO_SM60_TABLE"); return v == nullptr || std::atoi(v) != 0; }
 // Pascal (sm_61: Tesla P40 / P4, GTX 10 series; native dp4a): the same interleaved kernels (bitwise equal to
-// native_mmvq's, mmvq_il_parity), its own table kIlRows_61.  STRATA_SM61_TABLE=0 keeps native_mmvq's kernels.
-bool sm61_table_on() { const char* v = std::getenv("STRATA_SM61_TABLE"); return v == nullptr || std::atoi(v) != 0; }
+// native_mmvq's, mmvq_il_parity), its own table kIlRows_61.  SAGUARO_SM61_TABLE=0 keeps native_mmvq's kernels.
+bool sm61_table_on() { const char* v = std::getenv("SAGUARO_SM61_TABLE"); return v == nullptr || std::atoi(v) != 0; }
 bool il_arch_ok() {
     static int ok[16] = {};   // 0 unknown, 1 yes, -1 no, by device ordinal
     int dev = 0;

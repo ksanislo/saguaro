@@ -138,7 +138,7 @@ glm fast: CUDA0 layers [0,45) expert pool 80.17 GB, 288-288 slots/layer (12096 t
 glm fast: CUDA0 all experts fit in the GPU pool; RAM tier is staging only
 ```
 
-- `headroom 16.00 GB` is `MAYA_GLM_RAM_HEADROOM_GB` - the RAM left free for the system (the desktop, the file
+- `headroom 16.00 GB` is `SAGUARO_GLM_RAM_HEADROOM_GB` - the RAM left free for the system (the desktop, the file
   cache, everything else that is not Saguaro). Raise it on a busy machine; lower it when the pool is short.
 - `1024 MB reserve` is the VRAM kept free beside the pool for the driver, the sampler and what is allocated later (a
   unified device uses 1024 MiB, a discrete card 700).
@@ -194,7 +194,7 @@ prompt, reported by @ericoh88 on v1.1.15); the row above it is this build, at 21
 The pack this setup uses (Maya-S-v2-IQ2_XXS) has no MTP draft block, so a plain install decodes token by token. Two
 ways to get more out of the machine were measured here. **They are mutually exclusive**: with `--parallel` above 1 the
 several-conversation scheduler decodes without the drafter (`src/program/generate.cpp`: `glm dflash: not used with
-MAYA_GLM_SEQS=%d`), so each lives in its own config and only one runs at a time.
+SAGUARO_GLM_SEQS=%d`), so each lives in its own config and only one runs at a time.
 
 ### DFlash2 - the default config
 
@@ -235,7 +235,7 @@ arguments, `--parallel 4`, no `--dflash` - the drafter is not used with it - and
 MAYA_CONFIG=$PWD/maya-maya-s-v2-iq2_xxs-parallel4.json ./serve-maya.sh
 ```
 
-Measured with the engine's own multi bench (`STRATA_GLM_MULTI_BENCH=4,512,256`: four synthetic 512-token prompts,
+Measured with the engine's own multi bench (`SAGUARO_GLM_MULTI_BENCH=4,512,256`: four synthetic 512-token prompts,
 256 greedy tokens each, sequence 0 alone first as the reference):
 
 | | tokens/s | |
@@ -291,7 +291,7 @@ the size): with four running, the VRAM hit was 99.8% and a token saw 0.67 disk r
 ## Troubleshooting
 
 **"has no room for the expert pool"** - the pool came out too small for one route's experts in every layer. On a
-unified device that means the RAM was not free: close what holds it, or lower `MAYA_GLM_RAM_HEADROOM_GB` (16 GB by
+unified device that means the RAM was not free: close what holds it, or lower `SAGUARO_GLM_RAM_HEADROOM_GB` (16 GB by
 default here) or `--max-context`.
 
 **The pool is smaller than expected** - it is sized from the free RAM at the start, so anything else on the machine

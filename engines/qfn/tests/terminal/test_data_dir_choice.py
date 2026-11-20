@@ -40,10 +40,10 @@ class DataFolderChoice(unittest.TestCase):
         self.old = self.base / "old-data"
         self.new = self.base / "new-data"
         env = mock.patch.dict(os.environ, {"APPDATA": str(self.base / "appdata"), "XDG_CONFIG_HOME": str(self.base / "appdata"),
-                                           "STRATA_SETTINGS_FILE": ""})
+                                           "SAGUARO_SETTINGS_FILE": ""})
         env.start()
         self.addCleanup(env.stop)
-        os.environ.pop("STRATA_SETTINGS_FILE", None)
+        os.environ.pop("SAGUARO_SETTINGS_FILE", None)
         for patcher in (mock.patch.object(setup, "ROOT", self.root), mock.patch.object(setup, "_CONTROL_HOME", None)):
             patcher.start()
             self.addCleanup(patcher.stop)

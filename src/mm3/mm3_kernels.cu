@@ -501,7 +501,7 @@ __global__ void __launch_bounds__(256) block_scores_tok_kernel(const float* iq, 
 #endif
 }
 __device__ __forceinline__ bool ic_better(float a, int ia, float b, int ib) { return a > b || (a == b && ia < ib); }
-// MAYA_MM3_IC_STREAM: block b's per-dimension min / max over its rows written so far (one block of 128 threads a
+// SAGUARO_MM3_IC_STREAM: block b's per-dimension min / max over its rows written so far (one block of 128 threads a
 // touched row's block: the dims; a block touched by several rows of the call is done by each of them - the same values)
 // block b's bounds from its rows [b * 128, end): per-dimension min / max, and the centroid + radius (max distance)
 __device__ void ic_block_bounds(IcRef& ic, int b, int end) {
@@ -2369,7 +2369,7 @@ void block_scores(const float* iq, IcRef ic, const int* pos, int T, int Hi, int 
         ic_thresh_kernel<<<1, 32 * Hi, 0, s>>>(pos, Hi, nblk, nv, topk, bs);
         ic_prune_kernel<<<(unsigned) (nblk - nv), 128, 0, s>>>(iq, ic, pos, Hi, nblk, nv, topk, bs);
         check("block_scores (tiered)");
-        static int checks = std::getenv("MAYA_MM3_IC_CHECK") ? std::atoi(std::getenv("MAYA_MM3_IC_CHECK")) : 0;
+        static int checks = std::getenv("SAGUARO_MM3_IC_CHECK") ? std::atoi(std::getenv("SAGUARO_MM3_IC_CHECK")) : 0;
         if (checks > 0) {   // (debugging: every block scored as before, both selections compared)
             --checks;
             float* full = nullptr;
@@ -2422,9 +2422,9 @@ void block_scores(const float* iq, IcRef ic, const int* pos, int T, int Hi, int 
         }
         return;
     }
-    // a prompt's (MAYA_MM3_MSA_WIDE=0: the token kernel for them too - the same bits either way)
+    // a prompt's (SAGUARO_MM3_MSA_WIDE=0: the token kernel for them too - the same bits either way)
     static const bool wide_on = [] {
-        const char* v = std::getenv("MAYA_MM3_MSA_WIDE");
+        const char* v = std::getenv("SAGUARO_MM3_MSA_WIDE");
         return v == nullptr || std::atoi(v) != 0;
     }();
     if (wide_on && !msa_old && T >= 2 * (kBwV / Hi) && blk % kBwK == 0) {
@@ -2436,9 +2436,9 @@ void block_scores(const float* iq, IcRef ic, const int* pos, int T, int Hi, int 
         check("block_scores (wide)");
         return;
     }
-    // (a token: a block a key block - MAYA_MM3_MSA_TOK=0: the tiles below for it too, the same bits)
+    // (a token: a block a key block - SAGUARO_MM3_MSA_TOK=0: the tiles below for it too, the same bits)
     static const bool tok_on = [] {
-        const char* v = std::getenv("MAYA_MM3_MSA_TOK");
+        const char* v = std::getenv("SAGUARO_MM3_MSA_TOK");
         return v == nullptr || std::atoi(v) != 0;
     }();
     if (tok_on && !msa_old && T == 1 && Hi <= 4 && blk <= 128) {
@@ -2489,7 +2489,7 @@ void select_blocks(const float* bs, const int* pos, int T, int Hi, int nblk, int
 // (query, KV group) - its 16 query heads are the MMA's 16 rows - over 32-key tiles of the kept blocks, online softmax
 // in F32 as sparse_attn_kernel's.  The int8 codes are exact in FP16; a key's scale multiplies its scores after the
 // product, a value's multiplies its row (FP16, the PV product's operand) - not the same bits as the
-// CUDA-core kernel (the queries and probabilities rounded to FP16).  MAYA_MM3_ATTN_TC=0: that kernel.
+// CUDA-core kernel (the queries and probabilities rounded to FP16).  SAGUARO_MM3_ATTN_TC=0: that kernel.
 constexpr int kTcKeys = 32, kTcWarps = 4;
 __device__ __forceinline__ uint32_t h2pack(float a, float b) {
     const __half2 h = __floats2half2_rn(a, b);
@@ -2733,22 +2733,22 @@ void sparse_attn(const float* q, const uint16_t* kc, const uint16_t* vc, const i
     if (T <= 0) return;
     const int S = part != nullptr && splits > 1 ? std::min({splits, topk, kCombMaxS}) : 1;
     const dim3 grid((unsigned) T, (unsigned) Hkv, (unsigned) S);
-    // (a decode token's or window's few queries: the wide kernel - the same bits; MAYA_MM3_ATTN_WIDE=0: the other)
+    // (a decode token's or window's few queries: the wide kernel - the same bits; SAGUARO_MM3_ATTN_WIDE=0: the other)
     static const bool wide_on = [] {
-        const char* v = std::getenv("MAYA_MM3_ATTN_WIDE");
+        const char* v = std::getenv("SAGUARO_MM3_ATTN_WIDE");
         return v == nullptr || std::atoi(v) != 0;
     }();
     const bool wide = wide_on && T <= kWideT;
-    // (a prompt's queries over int8 K and V, unsplit: the tensor-core kernel - MAYA_MM3_ATTN_TC=0: the CUDA cores')
+    // (a prompt's queries over int8 K and V, unsplit: the tensor-core kernel - SAGUARO_MM3_ATTN_TC=0: the CUDA cores')
     static const bool tc_on = [] {
-        const char* v = std::getenv("MAYA_MM3_ATTN_TC");
+        const char* v = std::getenv("SAGUARO_MM3_ATTN_TC");
         return v == nullptr || std::atoi(v) != 0;
     }();
     if (tc_on && !wide && S == 1 && kq.kf == kKvI8 && kq.vf == kKvI8 && Hq == Hkv * kG && blk % kTcKeys == 0) {
         sparse_attn_tc_kernel<<<dim3((unsigned) ((T + kTcWarps - 1) / kTcWarps), (unsigned) Hkv), kTcWarps * 32, 0, s>>>(
             q, kept, pos, T, Hq, Hkv, topk, blk, scale, out, kq, hs);
         check("sparse_attn_tc");
-        static int checks = std::getenv("MAYA_MM3_ATTN_TC_CHECK") ? std::atoi(std::getenv("MAYA_MM3_ATTN_TC_CHECK")) : 0;
+        static int checks = std::getenv("SAGUARO_MM3_ATTN_TC_CHECK") ? std::atoi(std::getenv("SAGUARO_MM3_ATTN_TC_CHECK")) : 0;
         if (checks > 0) {   // (debugging: the CUDA cores' kernel on the same inputs, the largest difference said)
             --checks;
             const size_t n = (size_t) T * Hq * 128;
@@ -2817,7 +2817,7 @@ bool plan_dev(const int* top, const float* w, int T, int K, const unsigned long 
 void submit(cudaStream_t s) {
 #if defined(_WIN32)
     static const bool on = [] {
-        const char* v = std::getenv("MAYA_MM3_WIN_SUBMIT");
+        const char* v = std::getenv("SAGUARO_MM3_WIN_SUBMIT");
         if (v == nullptr) v = std::getenv("MM3_WIN_SUBMIT");
         return v == nullptr || std::atoi(v) != 0;
     }();
@@ -3034,12 +3034,12 @@ void mx_rows(const uint8_t* w, const uint8_t* scale, int N, int K, const float* 
         return;
     }
     // (up to 8 rows - a proposal's block, a verify window's context: mxc_kernel, CUDA - measured on the V100s; HIP and
-    //  MAYA_MM3_MXC=0: the kernel below)
+    //  SAGUARO_MM3_MXC=0: the kernel below)
 #if defined(STRATA_USE_HIP)
     constexpr bool mxc_on = false;
 #else
     static const bool mxc_on = [] {
-        const char* v = std::getenv("MAYA_MM3_MXC");
+        const char* v = std::getenv("SAGUARO_MM3_MXC");
         return v == nullptr || std::atoi(v) != 0;
     }();
 #endif

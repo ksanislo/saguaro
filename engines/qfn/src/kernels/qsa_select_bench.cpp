@@ -7,9 +7,9 @@
 //        qsa_select_bench --parity   accuracy at 32K / 64K / 128K / 256K (1024 queries): max error against FP64, selections
 //                                    differing from the warp kernel's per 1000 queries, and FP64's verdict on each flip
 // QSA_BENCH_VALUES=wide: every key and query row scaled by 2^U(-12, 12), one value in 16 exactly 0 (the fast scorers'
-// per-row scaling under stress).  The warp scorer is the thread kernel when it is on (STRATA_SCORES_THREAD=1 or
-// STRATA_SM75_PERF=1 on Turing), the same bits.  The fast scorer: sm_80+ 3xTF32, sm_75 STRATA_SELECT_SM75=1, else
-// STRATA_SELECT_SIMT=1.
+// per-row scaling under stress).  The warp scorer is the thread kernel when it is on (SAGUARO_SCORES_THREAD=1 or
+// SAGUARO_SM75_PERF=1 on Turing), the same bits.  The fast scorer: sm_80+ 3xTF32, sm_75 SAGUARO_SELECT_SM75=1, else
+// SAGUARO_SELECT_SIMT=1.
 // capacity_cells (the engine's --max-context): the score buffers and the top-k dispatch follow the CAPACITY
 // (max_blocks = capacity / 4 + 2), the work follows the context. Default: capacity = context (max_blocks = ctx / 4 + 1).
 #include "strata/kernels/qsa.hpp"
@@ -133,7 +133,7 @@ int run_case(int64_t ctx, int64_t nq, int reps, int64_t capacity) {
     std::vector<int32_t> ia((size_t) (nq * cap)), ib(ia.size());
     ck(cudaMemcpy(a.data(), sc_old, a.size() * 4, cudaMemcpyDeviceToHost), "down");
     ck(cudaMemcpy(b.data(), sc_new, b.size() * 4, cudaMemcpyDeviceToHost), "down");
-    if (std::getenv("QSA_BENCH_HASH")) {   // the fast scorer's bytes (compare STRATA_SELECT_SIMT=1 and =2)
+    if (std::getenv("QSA_BENCH_HASH")) {   // the fast scorer's bytes (compare SAGUARO_SELECT_SIMT=1 and =2)
         unsigned long long h = 1469598103934665603ull;
         for (int64_t i = 0; i < nq; ++i) {
             const int64_t nbid = steps[(size_t) (i * k::kStepCount + k::kStepNBid)];

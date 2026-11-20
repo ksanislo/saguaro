@@ -27,23 +27,12 @@ class ResidentSkip(unittest.TestCase):
     ROOT = Path(__file__).resolve().parents[1]
 
     def test_turbo_values_are_sane(self):
-        for fam, name, k_exp in (("glm", "MAYA_GLM_RESIDENT_TOPK", 8), ("deepseek", "MAYA_DS4_RESIDENT_TOPK", 6)):
+        for fam, name, k_exp in (("glm", "SAGUARO_GLM_RESIDENT_TOPK", 8), ("deepseek", "SAGUARO_DS4_RESIDENT_TOPK", 6)):
             k = int(M.TURBO_ENV[fam][name])
             self.assertTrue(1 <= k < k_exp, (fam, k))          # (a cap below the model's own k, never zero: top-1 stays)
         # the weight rule is not part of Turbo (the sweep on the test PC: 0.20 gave garbage)
         for env in M.TURBO_ENV.values():
             self.assertFalse([k for k in env if k.endswith("RESIDENT_SKIP_W")])
-
-    def test_turbo_env_aliases_to_the_names_the_engines_read(self):
-        from tools import maya_names as N
-        env = dict(M.TURBO_ENV["glm"], **M.TURBO_ENV["deepseek"])
-        N.alias_env(env)
-        self.assertEqual(env["STRATA_GLM_RESIDENT_TOPK"], env["MAYA_GLM_RESIDENT_TOPK"])
-        self.assertEqual(env["STRATA_DS4_RESIDENT_TOPK"], env["MAYA_DS4_RESIDENT_TOPK"])
-        self.assertEqual(N.read_as("MAYA_DS4_RESIDENT_SKIP_W"), "STRATA_DS4_RESIDENT_SKIP_W")
-        exported = {}
-        N.export_env(exported, {"MAYA_GLM_RESIDENT_TOPK": "4"})
-        self.assertEqual((exported["MAYA_GLM_RESIDENT_TOPK"], exported["STRATA_GLM_RESIDENT_TOPK"]), ("4", "4"))
 
     def test_the_engines_read_the_options_and_the_docs_name_them(self):
         src = {"DS4": (self.ROOT / "src/ds4/ds4_kernels.cu").read_text(encoding="utf-8"),
@@ -51,8 +40,8 @@ class ResidentSkip(unittest.TestCase):
         docs = (self.ROOT / "docs/SETTINGS.md").read_text(encoding="utf-8")
         for prefix, text in src.items():
             for opt in ("RESIDENT_TOPK", "RESIDENT_SKIP_W"):
-                self.assertIn(f'getenv("STRATA_{prefix}_{opt}")', text, (prefix, opt))
-                self.assertIn(f"MAYA_{prefix}_{opt}", docs)
+                self.assertIn(f'getenv("SAGUARO_{prefix}_{opt}")', text, (prefix, opt))
+                self.assertIn(f"SAGUARO_{prefix}_{opt}", docs)
         self.assertEqual(docs.count("changes the answers - Turbo"), 2)
 
     def test_a_dropped_expert_is_a_null_plan_entry_and_the_top_one_stays(self):
@@ -69,7 +58,7 @@ class ResidentSkip(unittest.TestCase):
     def test_off_in_a_config_without_turbo(self):
         d = Path(tempfile.mkdtemp())
         try:
-            for make, key in ((glm_cfg, "MAYA_GLM_RESIDENT_TOPK"), (ds4_cfg, "MAYA_DS4_RESIDENT_TOPK")):
+            for make, key in ((glm_cfg, "SAGUARO_GLM_RESIDENT_TOPK"), (ds4_cfg, "SAGUARO_DS4_RESIDENT_TOPK")):
                 self.assertNotIn(key, M.read(make(d)).get("env") or {})   # (opt-in: nothing sets it but Turbo)
         finally:
             shutil.rmtree(d, ignore_errors=True)
@@ -87,16 +76,16 @@ class TurboMap(unittest.TestCase):
         p = glm_cfg(self.d)                                    # (131072 context, MTP, no parallel)
         patch = M.turbo_patch(M.read(p))
         self.assertEqual(patch["context"], 32768)
-        self.assertEqual(patch["env"]["MAYA_GLM_MISS_SKIP_W"], "0.16")
-        self.assertEqual(patch["env"]["MAYA_GLM_MISS_SKIP_FROM"], "23")
-        self.assertEqual(patch["env"]["MAYA_GLM_RESIDENT_TOPK"], "4")       # (the all-in-VRAM lever, below)
-        self.assertEqual(patch["env"]["MAYA_GLM_RAM_HEADROOM_GB"], "4")     # (the config's own variable stays)
+        self.assertEqual(patch["env"]["SAGUARO_GLM_MISS_SKIP_W"], "0.16")
+        self.assertEqual(patch["env"]["SAGUARO_GLM_MISS_SKIP_FROM"], "23")
+        self.assertEqual(patch["env"]["SAGUARO_GLM_RESIDENT_TOPK"], "4")       # (the all-in-VRAM lever, below)
+        self.assertEqual(patch["env"]["SAGUARO_GLM_RAM_HEADROOM_GB"], "4")     # (the config's own variable stays)
         self.assertNotIn("draft", patch)                       # (GLM keeps the drafter the setup measured)
 
     def test_smallest_quants_keep_every_expert(self):
         """GLM and DeepSeek Maya-XS: Turbo's other settings, but no expert cap (TURBO_NO_TOPK)."""
-        for make, key, other in ((glm_cfg, "MAYA_GLM_RESIDENT_TOPK", "MAYA_GLM_MISS_SKIP_W"),
-                                 (ds4_cfg, "MAYA_DS4_RESIDENT_TOPK", "MAYA_DS4_RAM_SKIP_W")):
+        for make, key, other in ((glm_cfg, "SAGUARO_GLM_RESIDENT_TOPK", "SAGUARO_GLM_MISS_SKIP_W"),
+                                 (ds4_cfg, "SAGUARO_DS4_RESIDENT_TOPK", "SAGUARO_DS4_RAM_SKIP_W")):
             cfg = M.read(make(self.d))
             cfg.setdefault("installer", {})["ds4_quant" if key.startswith("MAYA_DS4") else "quant"] = \
                 "maya-xs" if key.startswith("MAYA_DS4") else "Maya-XS-IQ1_S"
@@ -108,10 +97,10 @@ class TurboMap(unittest.TestCase):
         p = ds4_cfg(self.d)
         patch = M.turbo_patch(M.read(p))
         self.assertNotIn("context", patch)
-        self.assertEqual(patch["env"], {"MAYA_DS4_RAM_SKIP_W": "0.14", "MAYA_DS4_DSPARK_CUM": "0.3",
-                                        "MAYA_DS4_RESIDENT_TOPK": "3"})
+        self.assertEqual(patch["env"], {"SAGUARO_DS4_RAM_SKIP_W": "0.14", "SAGUARO_DS4_DSPARK_CUM": "0.3",
+                                        "SAGUARO_DS4_RESIDENT_TOPK": "3"})
         self.assertEqual(patch["dspark_conf"], 0.3)                    # (the draft floor lowered from 0.7)
-        self.assertNotIn("MAYA_LOOP_GUARD", patch["env"])              # (the loop guard is left on)
+        self.assertNotIn("SAGUARO_LOOP_GUARD", patch["env"])              # (the loop guard is left on)
 
     def test_deepseek_lookup_and_drafter(self):
         p = ds4_cfg(self.d)
@@ -151,7 +140,7 @@ class TurboSnapshot(unittest.TestCase):
         on = M.read(self.p)
         self.assertTrue(M.turbo_on(on))
         self.assertEqual(M.settings_of(on)["context"], 32768)
-        self.assertEqual(on["env"]["MAYA_GLM_MISS_SKIP_W"], "0.16")
+        self.assertEqual(on["env"]["SAGUARO_GLM_MISS_SKIP_W"], "0.16")
         self.assertTrue(M.turbo_info(on)["on"])
         out = M.turbo_disable(self.p)
         self.assertTrue(out["changed"])
@@ -201,7 +190,7 @@ class TurboSnapshot(unittest.TestCase):
         cfg.pop("env")
         self.p.write_text(json.dumps(cfg))
         M.turbo_enable(self.p)
-        self.assertIn("MAYA_GLM_MISS_SKIP_W", M.read(self.p)["env"])
+        self.assertIn("SAGUARO_GLM_MISS_SKIP_W", M.read(self.p)["env"])
         M.turbo_disable(self.p)
         self.assertNotIn("env", M.read(self.p))
 
@@ -238,7 +227,7 @@ class TurboServer(unittest.TestCase):
         self.assertFalse(info["on"])
         self.assertTrue(info["engine"])
         self.assertEqual(info["plan"]["context"]["to"], 32768)
-        out = self.call("/api/turbo", {"on": True})           # (no MAYA_RESTART_ON_UPDATE here: saved, no restart)
+        out = self.call("/api/turbo", {"on": True})           # (no SAGUARO_RESTART_ON_UPDATE here: saved, no restart)
         self.assertTrue(out["on"])
         self.assertFalse(out.get("restarting_now"))
         self.assertTrue(self.call("/api/turbo")["on"])

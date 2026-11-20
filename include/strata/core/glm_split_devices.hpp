@@ -6,7 +6,7 @@
 
 namespace strata::core {
 
-// The devices of a GLM layer split, in part order: `named` (STRATA_GLM_DEVS, when given) or every visible device
+// The devices of a GLM layer split, in part order: `named` (SAGUARO_GLM_DEVS, when given) or every visible device
 // in order, without the expert helper's (`helper`, -1: none).  `n_parts` > 0 (pinned boundaries) takes that many;
 // 0 (`auto`) takes up to `max_parts`.  False with `err` when the named list repeats a device, names the helper,
 // or has fewer devices than the parts need; a split of one device is the caller's single-device case.
@@ -17,11 +17,11 @@ inline bool glm_split_devices(const std::vector<int>* named, int n_dev, int help
         for (size_t i = 0; i < named->size(); ++i) {
             const int d = (*named)[i];
             if (d == helper) {
-                err = "GLM expert helper: CUDA" + std::to_string(d) + " is the helper, not a part of the split (MAYA_GLM_DEVS)";
+                err = "GLM expert helper: CUDA" + std::to_string(d) + " is the helper, not a part of the split (SAGUARO_GLM_DEVS)";
                 return false;
             }
             if (std::find(named->begin(), named->begin() + (long) i, d) != named->begin() + (long) i) {
-                err = "glm split: MAYA_GLM_DEVS names CUDA" + std::to_string(d) + " twice";
+                err = "glm split: SAGUARO_GLM_DEVS names CUDA" + std::to_string(d) + " twice";
                 return false;
             }
         }

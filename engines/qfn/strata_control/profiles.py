@@ -36,7 +36,7 @@ class ProfileError(ValueError):
 
 
 def profile_dir() -> Path:
-    explicit = os.environ.get("STRATA_PROFILE_DIR")
+    explicit = os.environ.get("SAGUARO_PROFILE_DIR")
     if explicit:
         return Path(explicit).expanduser()
     if os.name == "nt":

@@ -71,7 +71,7 @@ bool is_copy_engine_queue(const sycl::queue* q) {
 
 
 sycl::queue* make_copy_engine_queue(const char* what) {
-    static const bool off = [] { const char* v = std::getenv("STRATA_COPY_ENGINE"); return v && v[0] == '0'; }();
+    static const bool off = [] { const char* v = std::getenv("SAGUARO_COPY_ENGINE"); return v && v[0] == '0'; }();
     if (off) return nullptr;
 #ifndef STRATA_HAVE_ZE_API
     (void) what;
@@ -85,11 +85,11 @@ sycl::queue* make_copy_engine_queue(const char* what) {
     try {
 
         if (dev.get_backend() != sycl::backend::ext_oneapi_level_zero) return nullptr;
-        // Battlemage only unless STRATA_COPY_ENGINE=1: on an Arc A750 (i915, JIT) the prompt path hung with it once the stager's
+        // Battlemage only unless SAGUARO_COPY_ENGINE=1: on an Arc A750 (i915, JIT) the prompt path hung with it once the stager's
         // completion flag became a copy-engine memcpy (4K and 600-token prompts, 10+ minutes, GPU not hung), and the measured gain
         // there was 1.4% (a prompt there is compute bound).
         {
-            const char* force = std::getenv("STRATA_COPY_ENGINE");
+            const char* force = std::getenv("SAGUARO_COPY_ENGINE");
             if (!(force && force[0] == '1') && strata::intel_gpu_gen(dev) != strata::IntelGpuGen::Battlemage) return nullptr;
         }
         // The legacy Level Zero adapter already puts memcpy on the copy engine (and its kernel launches are slower); only
@@ -130,7 +130,7 @@ sycl::queue* make_copy_engine_queue(const char* what) {
         static std::atomic<bool> said{false};
         if (!said.exchange(true))
             std::fprintf(stderr, "strata: copy engine: %s copies run on the GPU's copy engine (queue group %d), not the "
-                                 "compute engine (STRATA_COPY_ENGINE=0 turns it off)\n", what, ord);
+                                 "compute engine (SAGUARO_COPY_ENGINE=0 turns it off)\n", what, ord);
         return q;
     } catch (const std::exception& e) {
         std::fprintf(stderr, "strata: copy engine queue not available (%s): ordinary queue\n", e.what());

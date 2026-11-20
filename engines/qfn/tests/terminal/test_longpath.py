@@ -78,7 +78,7 @@ class Messages(unittest.TestCase):
         name = "C:\\" + "\\".join(["d" * 60] * 5) + "\\file.dat"
         words = longpath.file_words(FileNotFoundError(2, "No such file or directory", name))
         self.assertIn("longer than Windows allows", words)
-        self.assertIn("STRATA_COMPONENTS_DIR", words)
+        self.assertIn("SAGUARO_COMPONENTS_DIR", words)
         self.assertIn(name, words)
 
     @unittest.skipUnless(WINDOWS, "the limit is a Windows one")

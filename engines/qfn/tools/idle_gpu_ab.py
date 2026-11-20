@@ -142,7 +142,7 @@ if "--summary" in sys.argv:
     sys.exit(0)
 
 MODE = sys.argv[1]
-REPO = Path(os.environ["STRATA_REPO"])
+REPO = Path(os.environ["SAGUARO_REPO"])
 sys.path.insert(0, str(REPO / "tools"))
 sys.path.insert(0, str(REPO))
 import strata_tokenizer as ST  # noqa: E402
@@ -209,9 +209,9 @@ def ids_for(name, n=0):
 def clean_env(env_extra):
     env = child_env(cfg)
     for k in list(env):
-        if k.startswith("STRATA_"):
+        if k.startswith("SAGUARO_"):
             env.pop(k, None)
-    env["STRATA_DECODE_TIMING"] = "1"
+    env["SAGUARO_DECODE_TIMING"] = "1"
     env.update(env_extra)
     return env
 

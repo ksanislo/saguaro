@@ -31,7 +31,7 @@ case "$*" in
   *"launch --status"*) echo '{"running": [{"name": "docker", "state": "ready"}]}'; exit 0 ;;
   *"--show-key"*) echo "KEY-FROM-PRESET-0123456789"; exit 0 ;;
   *"launch --stop"*) echo "stopped" >> "$STUB_LOG"; exit 0 ;;
-  *"launch --no-tui"*) echo "key-env=${STRATA_LAUNCH_KEY:-}" >> "$STUB_LOG"; [ -n "${STUB_FAIL:-}" ] && exit 6; exit 0 ;;
+  *"launch --no-tui"*) echo "key-env=${SAGUARO_LAUNCH_KEY:-}" >> "$STUB_LOG"; [ -n "${STUB_FAIL:-}" ] && exit 6; exit 0 ;;
 esac
 exit 0
 """
@@ -55,7 +55,7 @@ class Entrypoint(unittest.TestCase):
 
     def env(self, **extra):
         env = {k: v for k, v in os.environ.items() if k not in ("MODEL", "API_KEY", "CONTEXT", "VISION", "TUNE", "PORT", "GPU", "GPUS")}
-        env.update(STUB_LOG=str(self.log), STRATA_CPUINFO=str(self.tmp / "cpuinfo"), **extra)
+        env.update(STUB_LOG=str(self.log), SAGUARO_CPUINFO=str(self.tmp / "cpuinfo"), **extra)
         (self.tmp / "cpuinfo").write_text("flags : fpu avx2 sse4_2\n")
         return env
 
@@ -82,12 +82,12 @@ class Entrypoint(unittest.TestCase):
         (self.tmp / "models").mkdir()
         (self.tmp / "models" / "m-00001-of-00002.gguf").write_text("x")
         p = self.start(MODEL="IQ3_XXS", CONTEXT="64k", PARALLEL="2", VISION="yes", TUNE="quick", GPUS="0,1", PORT="8123", PRESET="office",
-                       API_KEY="a-long-enough-key-123456", MODEL_PATH=str(self.tmp / "models"), STRATA_SET="prefill=65536 STRATA_PIN_BY_NEED=1")
+                       API_KEY="a-long-enough-key-123456", MODEL_PATH=str(self.tmp / "models"), SAGUARO_SET="prefill=65536 SAGUARO_PIN_BY_NEED=1")
         log = self.wait_for("--show-key")
         line = self.launch_line(log)
         for want in ("--access lan", "--port 8123", "--model IQ3_XXS", "--model-path " + str(self.tmp / "models"), "--context 64k", "--parallel 2",
-                     "--vision on", "--gpu 0,1", "--tune quick", "--set prefill=65536", "--set STRATA_PIN_BY_NEED=1",
-                     "--save-preset office", "--api-key-env STRATA_LAUNCH_KEY"):
+                     "--vision on", "--gpu 0,1", "--tune quick", "--set prefill=65536", "--set SAGUARO_PIN_BY_NEED=1",
+                     "--save-preset office", "--api-key-env SAGUARO_LAUNCH_KEY"):
             self.assertIn(want, line)
         self.assertNotIn("a-long-enough-key", line)                      # the key is passed by environment, never on a command line
         self.assertIn("key-env=a-long-enough-key-123456", log)
@@ -228,13 +228,13 @@ class Entrypoint(unittest.TestCase):
     def test_nvidia_card_without_gpu_access_ends_before_any_work(self):
         dev = self.tmp / "dev"
         dev.mkdir()
-        r = subprocess.run([SH, str(self.script)], env=self.env(STUB_BACKEND="cuda", STRATA_DEV_DIR=str(dev), MODEL="Q2_0"),
+        r = subprocess.run([SH, str(self.script)], env=self.env(STUB_BACKEND="cuda", SAGUARO_DEV_DIR=str(dev), MODEL="Q2_0"),
                            capture_output=True, text=True, timeout=30)
         self.assertEqual(r.returncode, 3)
         self.assertIn("--gpus all", r.stderr)
         self.assertNotIn("launch --no-tui", self.log.read_text())
         (dev / "nvidia0").write_text("")                                  # with the device files the start goes on
-        p = self.start(STUB_BACKEND="cuda", STRATA_DEV_DIR=str(dev), MODEL="Q2_0")
+        p = self.start(STUB_BACKEND="cuda", SAGUARO_DEV_DIR=str(dev), MODEL="Q2_0")
         self.wait_for("launch --no-tui")
         self.stop(p)
 

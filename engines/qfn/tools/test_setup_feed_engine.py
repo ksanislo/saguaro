@@ -52,7 +52,7 @@ class FeedEngine(unittest.TestCase):
         cmd = run.call_args.args[0]
         self.assertIn("update", cmd)
         self.assertIn("--no-control", cmd)
-        self.assertNotIn("STRATA_NO_ACQUIRE", run.call_args.kwargs["env"])        # this one step may fetch
+        self.assertNotIn("SAGUARO_NO_ACQUIRE", run.call_args.kwargs["env"])        # this one step may fetch
         self.assertEqual((self.eng / setup.EXE).read_bytes(), b"new")
         meta = json.loads((self.eng / "BUILD.json").read_text(encoding="utf-8"))
         self.assertEqual((meta["version"], meta["source"]), ("0.1.46", "prebuilt"))

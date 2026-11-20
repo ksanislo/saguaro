@@ -12,7 +12,7 @@ import { resolveHarness } from '../server/agent/harness-runtime.mjs';
 import { materializeSkills } from '../server/skill-files.mjs';
 import { SkillsUsed, skillInfoFrom, skillLabel } from '../server/agent/skills-used.mjs';
 
-const skip = !process.env.STRATA_HARNESS_DIR || !resolveHarness({ env: process.env }).ok ? 'STRATA_HARNESS_DIR is not set to a built Harness' : false;
+const skip = !process.env.SAGUARO_HARNESS_DIR || !resolveHarness({ env: process.env }).ok ? 'SAGUARO_HARNESS_DIR is not set to a built Harness' : false;
 const cleanup = dir => { try { rmSync(dir, { recursive: true, force: true, maxRetries: 3 }); } catch { /* best effort */ } };
 
 test('a skill is reported once, when it has worked, with the whole list so far', () => {

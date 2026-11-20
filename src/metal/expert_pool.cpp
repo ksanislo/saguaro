@@ -33,7 +33,7 @@ void host_free(void* p, size_t bytes) {
 }
 
 bool host_pin(void* p, size_t bytes) {
-    static const bool off = std::getenv("MAYA_METAL_NO_PIN") != nullptr;
+    static const bool off = std::getenv("SAGUARO_METAL_NO_PIN") != nullptr;
     if (off || p == nullptr || bytes == 0) return true;
     if (mlock(p, bytes) == 0) return true;
     static std::atomic<bool> said{false};
@@ -274,7 +274,7 @@ bool ExpertPool::init(const std::vector<std::vector<ExpertMatrix>>& layers, int 
             G.n_slots = n;
             G.active = forced_slots > 0 ? n : std::min(n, std::max((int) (use * n_expert * nl), min_slots));
             all_resident_ = all_resident_ && G.active == all;
-            if (std::getenv("MAYA_METAL_POOL_DEBUG"))
+            if (std::getenv("SAGUARO_METAL_POOL_DEBUG"))
                 std::fprintf(stderr, "pool group: format %zu, %d layers, %d of %d slots, %.2f MB a slot\n", f, nl,
                              G.active, n, (G.ebytes[0] + G.ebytes[1] + G.ebytes[2]) / 1e6);
             for (int i = 0; i < nl; ++i) layers_[(size_t) ls[(size_t) (at + i)]].group = (int) groups_.size();

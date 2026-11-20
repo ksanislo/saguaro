@@ -1,7 +1,7 @@
 /**
  * Locates and runs the pinned DeepSeek Harness (`dsh`) for the web profile.
  *
- * The Harness is a separate component, not part of the host: it is found through `STRATA_HARNESS_DIR`
+ * The Harness is a separate component, not part of the host: it is found through `SAGUARO_HARNESS_DIR`
  * (or `<components>/harness`), checked for the files a run needs, and started with the Strata profile
  * on a loopback port the OS picks. Nothing here downloads or installs anything.
  *
@@ -42,7 +42,7 @@ export function agentEnvironment(base = process.env, extra = {}) {
  */
 export function resolveHarness({ env = process.env, componentsDir = null, bundledDir = null } = {}) {
   // Order: an explicit folder, the folder the installer ships next to the host, then the user's component folder.
-  const candidates = [env.STRATA_HARNESS_DIR, bundledDir, componentsDir ? join(componentsDir, 'harness') : null].filter(Boolean);
+  const candidates = [env.SAGUARO_HARNESS_DIR, bundledDir, componentsDir ? join(componentsDir, 'harness') : null].filter(Boolean);
   if (!candidates.length) return { ok: false, reason: 'The agent component (DeepSeek Harness) is not installed.' };
   for (const dir of candidates.map(c => resolve(c))) {
     // A source checkout keeps the CLI in apps/cli; the installer's pruned production copy IS the CLI package.

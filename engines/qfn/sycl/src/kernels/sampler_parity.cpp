@@ -535,8 +535,8 @@ int main(int argc, char** argv) {
     {
         // the sampled path under test; ctest runs this binary once per path
         auto on = [](const char* n) { const char* e = std::getenv(n); return e && *e && std::strcmp(e, "0") != 0; };
-        std::printf("  sampled path: %s\n", on("STRATA_OLD_SAMPLER")         ? "sampler_kernel (STRATA_OLD_SAMPLER)"
-                                            : on("STRATA_SAMPLER_ONE_BLOCK") ? "one block (STRATA_SAMPLER_ONE_BLOCK)"
+        std::printf("  sampled path: %s\n", on("SAGUARO_OLD_SAMPLER")         ? "sampler_kernel (SAGUARO_OLD_SAMPLER)"
+                                            : on("SAGUARO_SAMPLER_ONE_BLOCK") ? "one block (SAGUARO_SAMPLER_ONE_BLOCK)"
                                                                              : "split top_k (default)");
     }
     if (bench) {

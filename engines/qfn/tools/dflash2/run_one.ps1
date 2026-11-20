@@ -9,7 +9,7 @@ $env:LOCALAPPDATA = "C:\strata-test\la"
 $env:APPDATA = "C:\strata-test\la"
 New-Item -ItemType Directory -Force -Path $env:LOCALAPPDATA | Out-Null
 New-Item -ItemType Directory -Force -Path "$W\out" | Out-Null
-$env:STRATA_ARENA_PIN_GIB = "none"
+$env:SAGUARO_ARENA_PIN_GIB = "none"
 $env:PATH = "$W\eng\rocm\bin;" + $env:PATH
 $mtp = $D + "\mtp\rt"
 $base = @("--pack", "$D\packs\iq3_s",
@@ -31,13 +31,13 @@ if ($Mode -eq "gen") {
   $a = $base + @("--spec", "4", "--spec-min-p", "0.5", "--mtp", $mtp, "--spec-follow", "$W\p\$Name.out.ids", "--max-new", "$n", "--tokens", $ids)
   if ($Mode -eq "genfm") { $a += @("--suffix-draft", "0") }
 } elseif ($Mode -eq "tap") {
-  $env:STRATA_TAP_FILE = "$W\out\tap_$Name.bin"
-  Remove-Item $env:STRATA_TAP_FILE -ErrorAction SilentlyContinue
+  $env:SAGUARO_TAP_FILE = "$W\out\tap_$Name.bin"
+  Remove-Item $env:SAGUARO_TAP_FILE -ErrorAction SilentlyContinue
   $first = (Get-Content "$W\p\$Name.first.ids" -Raw).Trim()
   $n = (Get-Content "$W\p\$Name.rest.ids" -Raw).Split(",").Count
   $a = $base + @("--spec", "8", "--spec-oracle", "$W\p\$Name.rest.ids", "--spec-follow", "$W\p\$Name.rest.ids", "--max-new", "$n", "--tokens", $first)
 } elseif ($Mode -eq "tcycle") {
-  $env:STRATA_SPEC_T_CYCLE = $Cycle
+  $env:SAGUARO_SPEC_T_CYCLE = $Cycle
   $first = (Get-Content "$W\p\$Name.first.ids" -Raw).Trim()
   $a = $base + @("--spec", "8", "--spec-oracle", "$W\p\$Name.rest.ids", "--spec-follow", "$W\p\$Name.rest.ids", "--max-new", "$MaxNew", "--tokens", $first)
 } else { "bad mode"; exit 2 }

@@ -9,7 +9,7 @@ import { openTextFile, textEditorCommand } from '../server/open-text-file.mjs';
 const good = `{
   "exe": "/opt/strata/strata",
   "args": ["--native", "/m/a.gguf", "--max-context", "65536"],
-  "env": {"STRATA_PCIE_FRAC_DEFAULT": "old"},
+  "env": {"SAGUARO_PCIE_FRAC_DEFAULT": "old"},
   "sampling": {"temperature": 0.7, "repeat_penalty": 1.1},
   "parallel": 2,
   "aliases": "chat, coding",
@@ -52,7 +52,7 @@ test('an unknown key is a warning with the nearest real name, and does not hold 
 });
 
 test('a bad value is an error that names the key, the line, what is allowed and what was found', () => {
-  const text = '{\n  "parallel": 12,\n  "lazy_load": "yes",\n  "anthropic_thinking": "sometimes",\n  "idle_unload_s": 1.5,\n  "port": 70000,\n  "args": ["--ple-io", 4],\n  "env": {"PATH": "/x", "STRATA_Y": 2},\n  "sampling": {"temperature": -1, "top_k": 0.5, "banana": 3},\n  "gpu": "first",\n  "layer_split": "32,16",\n  "reasoning_effort": "max"\n}';
+  const text = '{\n  "parallel": 12,\n  "lazy_load": "yes",\n  "anthropic_thinking": "sometimes",\n  "idle_unload_s": 1.5,\n  "port": 70000,\n  "args": ["--ple-io", 4],\n  "env": {"PATH": "/x", "SAGUARO_Y": 2},\n  "sampling": {"temperature": -1, "top_k": 0.5, "banana": 3},\n  "gpu": "first",\n  "layer_split": "32,16",\n  "reasoning_effort": "max"\n}';
   const result = checkRunConfig(text);
   assert.equal(result.ok, false);
   const by = key => result.issues.filter(i => i.key === key);
@@ -99,7 +99,7 @@ test('every issue sentence exists in all eight languages and keeps its slots', a
     { code: 'json', line: 3, params: { line: 3 } }, { code: 'json', line: null, params: { line: 0 } }, { code: 'not-object', params: {} },
     { code: 'unknown-key-near', params: { key: 'paralel', near: 'parallel' } }, { code: 'unknown-key', params: { key: 'zzz' } },
     { code: 'args-type', params: {} }, { code: 'args-managed', params: {} }, { code: 'env-type', params: {} },
-    { code: 'env-value', params: { name: 'STRATA_X' } }, { code: 'sampling-type', params: {} }, { code: 'bool', params: { key: 'lazy_load', value: '"yes"' } },
+    { code: 'env-value', params: { name: 'SAGUARO_X' } }, { code: 'sampling-type', params: {} }, { code: 'bool', params: { key: 'lazy_load', value: '"yes"' } },
     { code: 'number-range', params: { key: 'port', min: 1, max: 65535, value: '0' } }, { code: 'whole-range', params: { key: 'parallel', min: 1, max: 8, value: '12' } },
     { code: 'choice', params: { key: 'gpu_order', choices: 'auto, as_given', value: '"x"' } }, { code: 'text', params: { key: 'aliases' } },
     { code: 'layer-split', params: {} }, { code: 'gpu', params: {} },

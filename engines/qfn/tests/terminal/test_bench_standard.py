@@ -1159,12 +1159,12 @@ class ArchiveCommitTests(unittest.TestCase):
     def test_an_explicit_commit_or_the_variable_wins_over_git(self):
         sha = "ab" * 20
         self.assertEqual(self.pt.build_commit(sha.upper()), sha)
-        with mock.patch.dict(os.environ, {"STRATA_COMMIT": "cd" * 20}):
+        with mock.patch.dict(os.environ, {"SAGUARO_COMMIT": "cd" * 20}):
             self.assertEqual(self.pt.build_commit(None), "cd" * 20)
 
     def test_a_tree_copy_without_git_has_no_commit(self):
         with mock.patch.dict(os.environ, {}, clear=False), mock.patch.object(self.pt.subprocess, "run") as run:
-            os.environ.pop("STRATA_COMMIT", None)
+            os.environ.pop("SAGUARO_COMMIT", None)
             run.return_value = mock.Mock(stdout="fatal: not a git repository\n")
             self.assertIsNone(self.pt.build_commit("not a sha"))
 

@@ -9,9 +9,9 @@ import { join } from 'node:path';
  * may download from it. REAL is read when the module loads, and node --test runs each file in its own process, so this file sets it first.
  */
 const home = mkdtempSync(join(tmpdir(), 'strata-list-'));
-process.env.STRATA_HOME = home;
-process.env.STRATA_MODELS_DIR = join(home, 'models');
-process.env.STRATA_REAL_ENGINE = '1';
+process.env.SAGUARO_HOME = home;
+process.env.SAGUARO_MODELS_DIR = join(home, 'models');
+process.env.SAGUARO_REAL_ENGINE = '1';
 const calls = [];
 const realFetch = globalThis.fetch;
 globalThis.fetch = (...args) => { calls.push(String(args[0])); return Promise.reject(new Error('no network in this test')); };

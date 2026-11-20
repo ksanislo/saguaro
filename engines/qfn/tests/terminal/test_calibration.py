@@ -32,11 +32,11 @@ class CalibrationFlowTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        patcher = mock.patch.dict(os.environ, {"STRATA_PROFILE_DIR": str(self.root / "profiles"),
-                                           "STRATA_RUNTIME_DIR": str(self.root / "runtime"),
+        patcher = mock.patch.dict(os.environ, {"SAGUARO_PROFILE_DIR": str(self.root / "profiles"),
+                                           "SAGUARO_RUNTIME_DIR": str(self.root / "runtime"),
                                            "XDG_CONFIG_HOME": str(self.root / "settings"),
                                            "APPDATA": str(self.root / "settings"),
-                                           "STRATA_API_KEY": ""})
+                                           "SAGUARO_API_KEY": ""})
         patcher.start()
         self.addCleanup(patcher.stop)
         # setup's own answer: <XDG_CONFIG_HOME>/strata/settings.json, or %APPDATA%/Strata/settings.json on Windows

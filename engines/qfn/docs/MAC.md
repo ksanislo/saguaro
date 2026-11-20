@@ -75,7 +75,7 @@ check the Mac), `--build` (build the engine again).
 
 ### The desktop app and `strata launch` on a Mac
 
-The Strata app (and the Terminal's `strata launch`) do not build anything on your Mac. The Metal engine comes ready-made, as an engine component: from the update feed, or inside the app's installer. The model install is `setup.py` in its Control mode (`STRATA_CONTROL_INSTALL=1`): it downloads (or uses with `--gguf-dir`) and prepares the model files and writes a run config whose engine is `component:strata-engine`. It does not run `metal/setup_mac.py`, needs no Command Line Tools, and writes the same Metal flags (`--mmap-experts`, `--spec 2`, no draft layer when the experts stream from the SSD).
+The Strata app (and the Terminal's `strata launch`) do not build anything on your Mac. The Metal engine comes ready-made, as an engine component: from the update feed, or inside the app's installer. The model install is `setup.py` in its Control mode (`SAGUARO_CONTROL_INSTALL=1`): it downloads (or uses with `--gguf-dir`) and prepares the model files and writes a run config whose engine is `component:strata-engine`. It does not run `metal/setup_mac.py`, needs no Command Line Tools, and writes the same Metal flags (`--mmap-experts`, `--spec 2`, no draft layer when the experts stream from the SSD).
 
 The model list and the recommendation judge a Mac by its unified memory with the rules of `strata_control/mac_fit.py`, the module `setup_mac.py` uses too: Q2_0, IQ3_XXS and IQ3_S are offered (the Unsloth many-shard files need the repack of `./setup.sh` for now); a pack that does not stay in memory is listed as "read from the SSD", and a Mac under 16 GB of unified memory is told the model does not fit.
 
@@ -123,9 +123,9 @@ of the second request on (the first request after the start pays a few seconds o
 
 - **UD-Q5 and UD-Q6 cannot stay resident:** their repacked file (103.9 and 114.8 GB) is bigger than the largest buffer Metal gives (86.6 GB), so the experts stream from the SSD into an arena of about 65-67 GB on the 128 GB M5 Max (about 68% of Q5's experts, 62% of Q6's; it was 80-86 GB before the footprint cap below, and the decode and prompt speeds did not change: Q6 story 51 tok/s, 15K prompt 1,020 tok/s at both sizes).
 - **The cost is a fixed hand-shake per layer** (the engine reads the router's choice and makes sure the experts are in the arena), not the SSD. A window of 2 tokens costs 38 ms against ~17 resident, so a longer window pays: Q5 story 28 tok/s without MTP, 41.8 with `--spec 2`, 50.6 with `--spec 3`, 46 with `--spec 4`. Setup writes `--spec 3` and keeps the MTP draft layer for a streaming Mac with 96 GB or more.
-- **The engine's whole anonymous footprint is limited to 60% of the RAM on a Mac with 64 GB or more (82.4 GB of the M5 Max's 137.4 GB): the arena, every Metal buffer and the host memory the process holds, not only the Metal buffers.** macOS keeps a floor of file cache (`vm.vm_page_filecache_min`: 37.2 GB here) and compresses anonymous memory instead of dropping cache below it. The arena is anonymous, and the GPU wires it only while a command buffer runs, so while it is filled it is ordinary pageable memory. Two kernel panics on the M5 Max (the watchdog daemon starved for 92 s) had the engine at 95 and 90 GiB resident and the compressor at 2-4 million pages. Measured again with a memory watchdog every second: an old-build arena of 100 GB compressed 19 GB of itself in 7 seconds and swapped 24,000 pages; the old automatic arena (69 GB) with a 40 GB file write and a 16 GB program beside it took the compressor from 21,000 to 4.07 million pages in 10 seconds (pressure "warn"). With 30% left (footprint 94.5 GB) and the file write alone, 12,000 pages were swapped out; with 35% left, 316; with 40% left and the write and the 16 GB program, none and the compressor at 0.3 million pages. The old rule (arena + Metal buffers under 67%) counted 7.5 GB of buffers where the process held 11-15 GB, so its real total was about 100 GB. A resident pack is different (clean file pages that macOS drops, never compresses): UD-Q4_K_XL resident (wired 91.7 GB) took the same 40 GB write and 16 GB program with no swap-out and nothing compressed, so resident packs are limited to 70% of the RAM as before. The arena is also wired (`mlock`) once it is filled: unwired it is ordinary pageable memory whenever the GPU is idle (the GPU's own wiring ends a few seconds after its last command buffer; a Metal residency set did not hold it), and a 20 GB file written beside the idle engine took the arena into the compressor and froze the Mac (a third watchdog panic, in a control run of this work). Wired, the same write at full speed raised the compressor by 0.7 million pages (the engine's non-arena memory), swapped out 408 pages and changed nothing else. `STRATA_METAL_WIRE_ARENA=0` turns it off; it is on for Macs with 64 GB or more. The engine prints the planned total (`planned resident footprint ... cap ...`) and the footprint after the fill. `STRATA_METAL_ARENA_GB` still sets the arena as you say, with a warning when it is over the cap.
+- **The engine's whole anonymous footprint is limited to 60% of the RAM on a Mac with 64 GB or more (82.4 GB of the M5 Max's 137.4 GB): the arena, every Metal buffer and the host memory the process holds, not only the Metal buffers.** macOS keeps a floor of file cache (`vm.vm_page_filecache_min`: 37.2 GB here) and compresses anonymous memory instead of dropping cache below it. The arena is anonymous, and the GPU wires it only while a command buffer runs, so while it is filled it is ordinary pageable memory. Two kernel panics on the M5 Max (the watchdog daemon starved for 92 s) had the engine at 95 and 90 GiB resident and the compressor at 2-4 million pages. Measured again with a memory watchdog every second: an old-build arena of 100 GB compressed 19 GB of itself in 7 seconds and swapped 24,000 pages; the old automatic arena (69 GB) with a 40 GB file write and a 16 GB program beside it took the compressor from 21,000 to 4.07 million pages in 10 seconds (pressure "warn"). With 30% left (footprint 94.5 GB) and the file write alone, 12,000 pages were swapped out; with 35% left, 316; with 40% left and the write and the 16 GB program, none and the compressor at 0.3 million pages. The old rule (arena + Metal buffers under 67%) counted 7.5 GB of buffers where the process held 11-15 GB, so its real total was about 100 GB. A resident pack is different (clean file pages that macOS drops, never compresses): UD-Q4_K_XL resident (wired 91.7 GB) took the same 40 GB write and 16 GB program with no swap-out and nothing compressed, so resident packs are limited to 70% of the RAM as before. The arena is also wired (`mlock`) once it is filled: unwired it is ordinary pageable memory whenever the GPU is idle (the GPU's own wiring ends a few seconds after its last command buffer; a Metal residency set did not hold it), and a 20 GB file written beside the idle engine took the arena into the compressor and froze the Mac (a third watchdog panic, in a control run of this work). Wired, the same write at full speed raised the compressor by 0.7 million pages (the engine's non-arena memory), swapped out 408 pages and changed nothing else. `SAGUARO_METAL_WIRE_ARENA=0` turns it off; it is on for Macs with 64 GB or more. The engine prints the planned total (`planned resident footprint ... cap ...`) and the footprint after the fill. `SAGUARO_METAL_ARENA_GB` still sets the arena as you say, with a warning when it is over the cap.
 - **The experts' copy** (`<model>.experts`, 98 GB for Q5) did not pay on the M5 Max: decode 50.3 against 50.2 tok/s without it, 4K prompt 741 against 685 (noisy). Setup does not write it on a Mac with 96 GB or more.
-- **Prompts stream in chunks of 4096** on a streaming Mac with 96 GB or more (the engine's own default there; 1024 on a smaller one): every chunk makes one pass over the experts that are not in the arena, so a longer chunk reads them fewer times. UD-Q5, warm, 2 interleaved rounds: chunks of 1024 gave 700 tok/s on the 4K prompt, 2048 gave 920 and 4096 gave 1,100 (32K: 710, 970, 1,100); the decode did not change. `STRATA_METAL_PROMPT_CHUNK=N` sets it. On a resident model 4096 instead of 2048 gained only 2-4% (Q2_0), so that default stays.
+- **Prompts stream in chunks of 4096** on a streaming Mac with 96 GB or more (the engine's own default there; 1024 on a smaller one): every chunk makes one pass over the experts that are not in the arena, so a longer chunk reads them fewer times. UD-Q5, warm, 2 interleaved rounds: chunks of 1024 gave 700 tok/s on the 4K prompt, 2048 gave 920 and 4096 gave 1,100 (32K: 710, 970, 1,100); the decode did not change. `SAGUARO_METAL_PROMPT_CHUNK=N` sets it. On a resident model 4096 instead of 2048 gained only 2-4% (Q2_0), so that default stays.
 
 ### M4 Mac mini, 32 GB, experts streamed from the SSD
 
@@ -186,7 +186,7 @@ disk than this Mac had; one token per step, no draft layer; the arena was 11-12 
 | | Gyro-S |
 |---|---|
 | Decode, story, 120 tokens (5 interleaved pairs, medians) | **9.14 tok/s** (9.07-9.15) |
-| Decode, with the dense-weight tiles turned off (`STRATA_METAL_GYRO_TILES=0`) | 8.70 tok/s (8.69-8.73); same tokens in all 10 runs |
+| Decode, with the dense-weight tiles turned off (`SAGUARO_METAL_GYRO_TILES=0`) | 8.70 tok/s (8.69-8.73); same tokens in all 10 runs |
 | Prompt, 4,065 tokens (3 runs) | **109 tok/s** (108-110) |
 | Memory the engine held | 18.6 GB of the 32 GB |
 
@@ -219,7 +219,7 @@ reads an int8 copy of the codebook, the CPU path an int16 one; the Mac multiplie
 
 ### Quality
 
-- **The Q8_0 hyper-connection read is the default on Mac.** It keeps a Q8_0 copy of the hyper-connection matrices instead of BF16. `STRATA_HC_Q8=0` in the config's `env` gives the exact BF16 read.
+- **The Q8_0 hyper-connection read is the default on Mac.** It keeps a Q8_0 copy of the hyper-connection matrices instead of BF16. `SAGUARO_HC_Q8=0` in the config's `env` gives the exact BF16 read.
 - **How the KL was measured:** teacher-forced over 28 prompts (code, reasoning, chat, six languages, documents), about 6,000 positions per set. The reference is BF16.
   - On the model's own text: mean KL 0.0007, top-1 agreement 98.9%.
   - On another model's text: mean KL 0.0007, top-1 agreement 99.1%.
@@ -264,26 +264,26 @@ reads an int8 copy of the codebook, the CPU path an int16 one; the Mac multiplie
 
 | Variable | Effect |
 |---|---|
-| `STRATA_HC_Q8=0` | The BF16 hyper-connection read (exact) instead of Q8_0 |
-| `STRATA_METAL_PROMPT=window` | Read the prompt through decode windows (the slow, exact fallback; ~190 tok/s) |
-| `STRATA_METAL_PROMPT_CHUNK=N` | Prompt chunk size (default 2048) |
-| `STRATA_METAL_MTP_Q8=0` | The draft layer's matrices in BF16 instead of Q8_0 |
-| `STRATA_METAL_MTP_CHAIN=0` | One GPU submission per draft step instead of one per round |
-| `STRATA_METAL_FUSE=0`, `STRATA_METAL_LAZY_FOLD=0` | Turn off two decode fusions (same tokens, slower) |
-| `STRATA_METAL_PARTIAL=1`, `STRATA_METAL_ROUTE=1` | Two decode variants that measured no faster here (same tokens) |
-| `STRATA_METAL_STREAM=1` / `=0` | Stream the experts from the SSD even when the pack fits / never (the default decides by size) |
-| `STRATA_METAL_CONTIG=0` | Streaming: read the model file even when the experts' copy is there |
-| `STRATA_METAL_ARENA_GB=N`, `STRATA_METAL_KEEP_FREE_GB=N` | Streaming: the arena's size, or the memory left to macOS when the arena is sized |
-| `STRATA_METAL_LEAVE_SHARE=0.4` | Streaming, Macs with 64 GB or more: the share of the RAM left to macOS and its file cache when the footprint cap is set (for measuring) |
-| `STRATA_METAL_WIRE_ARENA=0` | Streaming, Macs with 64 GB or more: leave the filled arena pageable (default: wired with mlock) |
-| `STRATA_METAL_IGNORE_REPACK=1` | Start the engine although a model repack or setup's preparation is running beside it (the engine refuses by default: it froze this Mac) |
-| `STRATA_METAL_KEEP_HOST_WEIGHTS=1` | Streaming: keep the host code's own copies of the weights (2-3 GB) instead of giving them back to macOS |
-| `STRATA_METAL_TRACE=1`, `STRATA_METAL_PROFILE=1`, `STRATA_METAL_KPROF=T` | Per-window traces, a time breakdown, per-kernel GPU times |
+| `SAGUARO_HC_Q8=0` | The BF16 hyper-connection read (exact) instead of Q8_0 |
+| `SAGUARO_METAL_PROMPT=window` | Read the prompt through decode windows (the slow, exact fallback; ~190 tok/s) |
+| `SAGUARO_METAL_PROMPT_CHUNK=N` | Prompt chunk size (default 2048) |
+| `SAGUARO_METAL_MTP_Q8=0` | The draft layer's matrices in BF16 instead of Q8_0 |
+| `SAGUARO_METAL_MTP_CHAIN=0` | One GPU submission per draft step instead of one per round |
+| `SAGUARO_METAL_FUSE=0`, `SAGUARO_METAL_LAZY_FOLD=0` | Turn off two decode fusions (same tokens, slower) |
+| `SAGUARO_METAL_PARTIAL=1`, `SAGUARO_METAL_ROUTE=1` | Two decode variants that measured no faster here (same tokens) |
+| `SAGUARO_METAL_STREAM=1` / `=0` | Stream the experts from the SSD even when the pack fits / never (the default decides by size) |
+| `SAGUARO_METAL_CONTIG=0` | Streaming: read the model file even when the experts' copy is there |
+| `SAGUARO_METAL_ARENA_GB=N`, `SAGUARO_METAL_KEEP_FREE_GB=N` | Streaming: the arena's size, or the memory left to macOS when the arena is sized |
+| `SAGUARO_METAL_LEAVE_SHARE=0.4` | Streaming, Macs with 64 GB or more: the share of the RAM left to macOS and its file cache when the footprint cap is set (for measuring) |
+| `SAGUARO_METAL_WIRE_ARENA=0` | Streaming, Macs with 64 GB or more: leave the filled arena pageable (default: wired with mlock) |
+| `SAGUARO_METAL_IGNORE_REPACK=1` | Start the engine although a model repack or setup's preparation is running beside it (the engine refuses by default: it froze this Mac) |
+| `SAGUARO_METAL_KEEP_HOST_WEIGHTS=1` | Streaming: keep the host code's own copies of the weights (2-3 GB) instead of giving them back to macOS |
+| `SAGUARO_METAL_TRACE=1`, `SAGUARO_METAL_PROFILE=1`, `SAGUARO_METAL_KPROF=T` | Per-window traces, a time breakdown, per-kernel GPU times |
 
-**Two opt-ins an M1 Max cannot run (measured on an M1 Max, macOS 26.6.2, Q2_0):** `STRATA_METAL_PROMPT_EXPERTS=v3` - the
+**Two opt-ins an M1 Max cannot run (measured on an M1 Max, macOS 26.6.2, Q2_0):** `SAGUARO_METAL_PROMPT_EXPERTS=v3` - the
 prompt's expert GEMMs with the M5's layout, `mm_gu3` - loses the threadgroup once a prompt spreads over more than 40
 threadgroups of it (35 pass, 40 fail; 190 tiles and the engine's tile both fail, one tile passes), so it is off there (the
-default is v2). `STRATA_METAL_ROUTE=1` - the router GEMV and `moe_route` fused into one dispatch - routes with stale
+default is v2). `SAGUARO_METAL_ROUTE=1` - the router GEMV and `moe_route` fused into one dispatch - routes with stale
 logits and gives a different top-10 per run (two identical runs differ in ids, weights and plan; the logits themselves
 stay bitwise): the fusion hands the routing to the last threadgroup of the GEMV through a device counter, and this
 Metal's device atomics are relaxed-only, with no acquire to pair with the writers' fence. Both are off by default. The

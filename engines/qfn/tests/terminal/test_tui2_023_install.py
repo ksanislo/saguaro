@@ -56,7 +56,7 @@ class WindowsInstaller(unittest.TestCase):
     def run_installer(self, feed: str, data: Path):
         runner = self.root / "run.ps1"
         runner.write_text("$ErrorActionPreference = 'Continue'\n"
-                          f"$env:STRATA_FEED = '{feed}'; $env:STRATA_DATA_DIR = '{data}'; $env:STRATA_NO_PATH = '1'\n"
+                          f"$env:SAGUARO_FEED = '{feed}'; $env:SAGUARO_DATA_DIR = '{data}'; $env:SAGUARO_NO_PATH = '1'\n"
                           f"try {{ Invoke-Expression (Get-Content -Raw -LiteralPath '{INSTALL_PS1}') }} catch {{ Write-Host \"STOPPED\" }}\n",
                           encoding="utf-8-sig")
         done = subprocess.run([POWERSHELL, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(runner)], capture_output=True, text=True,

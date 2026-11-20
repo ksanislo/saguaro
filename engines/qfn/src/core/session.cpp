@@ -167,7 +167,7 @@ bool session_slot_fit(SessionState& s, int64_t cells, bool trim) {
     if (trim) {
         for (const QsaState* st : sts) {
             qsa_slot_trim(*st, cells);
-            qsa_host_trim(*st, cells);   // STRATA_KV_HOST_ELASTIC: the host copy too
+            qsa_host_trim(*st, cells);   // SAGUARO_KV_HOST_ELASTIC: the host copy too
         }
         if (s.host_follow != nullptr) qsa_host_trim(*s.host_follow, cells);
         s.slot_cells = std::min(s.slot_cells, cells);
@@ -263,7 +263,7 @@ namespace strata::core {
 #endif
 
 void session_zero(SessionState& s, const ModelGeometry& g, const float* R_init, void* stream) {
-    s.rope_level = 0;   // a fresh conversation starts plain (STRATA_YARN_ELASTIC)
+    s.rope_level = 0;   // a fresh conversation starts plain (SAGUARO_YARN_ELASTIC)
 #if defined(STRATA_GPU_METAL)
     // the running state lives in the Metal decode window; the session's own device buffers are not read there
     (void) g; (void) R_init; (void) stream;
@@ -1053,7 +1053,7 @@ bool session_run_token(const ModelGeometry& g, int64_t pos, int32_t pos_base, Se
     if (le != cudaSuccess) { err = std::string("session_run_token: launch: ") + cudaGetErrorString(le); return false; }
     (void) cudaStreamQuery(cs);                     // one flush, so WDDM submits the graph now
     static const int flush_us = [] {
-        const char* e = std::getenv("STRATA_TG_FLUSH_US");
+        const char* e = std::getenv("SAGUARO_TG_FLUSH_US");
         return e ? std::atoi(e) : 2000;   // 24 Sep: 0 flushes run as fast as 5 us ones; this only notices faults
     }();
     volatile uint32_t* const seq = s.db->h_seq;

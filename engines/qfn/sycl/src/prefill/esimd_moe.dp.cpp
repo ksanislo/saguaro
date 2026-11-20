@@ -168,7 +168,7 @@ struct GArgs {
     int rowb;                         // bytes per weight row
     int ldy;
     uint32_t lim;                     // byte offset of the last dword of the matrix the clamped reads (ld32c) stay inside
-    int dbg;                          // bring-up switches (STRATA_I8_DBG): 1 skip the decode, 2 skip the activation loads, 4 skip the stores, 8 skip the K loop
+    int dbg;                          // bring-up switches (SAGUARO_I8_DBG): 1 skip the decode, 2 skip the activation loads, 4 skip the stores, 8 skip the K loop
 };
 
 // The expert a work item belongs to, with constant-index reads of the kernel argument arrays.
@@ -752,21 +752,21 @@ int pick_mt(const Layout& lo) {
     return 8;
 }
 int dbg_flags() {
-    static const int v = [] { const char* s = std::getenv("STRATA_I8_DBG"); return s ? std::atoi(s) : 0; }();
+    static const int v = [] { const char* s = std::getenv("SAGUARO_I8_DBG"); return s ? std::atoi(s) : 0; }();
     return v;
 }
 int mt_for(const Layout& lo) {
-    static const int mo = [] { const char* s = std::getenv("STRATA_I8_MT"); return s ? std::atoi(s) : 0; }();
+    static const int mo = [] { const char* s = std::getenv("SAGUARO_I8_MT"); return s ? std::atoi(s) : 0; }();
     return mo ? mo : pick_mt(lo);
 }
 
-// register mode per tile height: STRATA_I8_GRF=128 (more threads per EU, spills at MT 8) or 256; default 256
+// register mode per tile height: SAGUARO_I8_GRF=128 (more threads per EU, spills at MT 8) or 256; default 256
 int wg_for() {
-    static const int v = [] { const char* s = std::getenv("STRATA_I8_WG"); return s ? std::atoi(s) : 1; }();
+    static const int v = [] { const char* s = std::getenv("SAGUARO_I8_WG"); return s ? std::atoi(s) : 1; }();
     return v;
 }
 int grf_for(int mt) {
-    static const int g = [] { const char* s = std::getenv("STRATA_I8_GRF"); return s ? std::atoi(s) : 256; }();
+    static const int g = [] { const char* s = std::getenv("SAGUARO_I8_GRF"); return s ? std::atoi(s) : 256; }();
     (void) mt;
     return g == 128 ? 128 : 256;
 }
@@ -840,7 +840,7 @@ bool available(void* stream) {
     const sycl::device d = q.get_device();
     if (auto it = per_dev.find(d); it != per_dev.end()) return it->second;
     const bool ok = [&] {
-        const char* v = std::getenv("STRATA_I8_FORCE");
+        const char* v = std::getenv("SAGUARO_I8_FORCE");
         if (v && v[0] == '0') return false;
         if (!d.has(sycl::aspect::ext_intel_esimd)) return false;
         namespace mx = sycl::ext::oneapi::experimental::matrix;

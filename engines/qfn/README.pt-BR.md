@@ -294,12 +294,12 @@ Elas ajudam quando você usa uma placa de vídeo e a sua RAM comporta todos os e
 - `"--adapt-async", "1"` à lista `"args"`. O cache de experts passa a ser atualizado numa thread auxiliar, em vez de pausar a
   resposta. Medido numa RTX 5070 (Windows, Q2_0): +4 a 5% na geração, +7 a 10% em código e documentos longos. As respostas podem diferir
   um pouco do padrão e continuam iguais de uma execução para outra.
-- `"STRATA_PIN_BY_NEED": "1"` no bloco `"env"` (Windows). O Windows só consegue travar cerca de metade da RAM para a placa
+- `"SAGUARO_PIN_BY_NEED": "1"` no bloco `"env"` (Windows). O Windows só consegue travar cerca de metade da RAM para a placa
   de vídeo, e isso trava primeiro os experts de que a placa precisa. Medido na RTX 5070: +4,4% na leitura do prompt.
 
 ```json
 "args": [ ..., "--adapt-async", "1" ],
-"env": { "STRATA_PIN_BY_NEED": "1" }
+"env": { "SAGUARO_PIN_BY_NEED": "1" }
 ```
 
 Reinicie o Strata depois da alteração. Para desfazer, remova as duas entradas.

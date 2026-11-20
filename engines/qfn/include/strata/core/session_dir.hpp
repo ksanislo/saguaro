@@ -28,7 +28,7 @@ public:
     struct Options {
         std::string dir;
         SessionFileIdentity id;
-        // STRATA_YARN_ELASTIC: the identity of a conversation at the YaRN level (config 0: none); its files read as such
+        // SAGUARO_YARN_ELASTIC: the identity of a conversation at the YaRN level (config 0: none); its files read as such
         SessionFileIdentity id_yarn;
         SessionReadLimits limits;              // this runtime's bounds (its stages included); admit = RAM preflight
         // the least recently used files go first when the folder is over max_bytes (or, a safety net, max_files);

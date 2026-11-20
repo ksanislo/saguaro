@@ -472,7 +472,7 @@ class WorkerSession:
                 if v is None:
                     spawn_env.pop(k, None)
             spawn_env["PYTHONUNBUFFERED"] = "1"
-            spawn_env["STRATA_NO_PRESET"] = "1"          # measure the configuration as given, not a saved tuning on top
+            spawn_env["SAGUARO_NO_PRESET"] = "1"          # measure the configuration as given, not a saved tuning on top
             before = tune_machine.gpu_used_mib()
             wl = open(worker_log, "w")
             argv = [self.python, "-m", "serve.server", "--engine", "strata", "--config", str(cfg_path),

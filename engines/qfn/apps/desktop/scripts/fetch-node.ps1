@@ -17,7 +17,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 
-$NodeVersion = if ($env:STRATA_NODE_VERSION) { $env:STRATA_NODE_VERSION } else { '24.12.0' }
+$NodeVersion = if ($env:SAGUARO_NODE_VERSION) { $env:SAGUARO_NODE_VERSION } else { '24.12.0' }
 $Target = 'win-x64'
 # SHA-256 of node-v24.12.0-win-x64.zip from nodejs.org's SHASUMS256.txt; keep equal to fetch-node.sh.
 $Expected = '9c125f61ae947b52e779095830f9cac267846a043ef7192183c84016aaad2812'

@@ -53,7 +53,7 @@ The app is the easiest way. It has the engine inside, so there is nothing to bui
      **Run anyway**. The installer asks for the folder (by default `%LOCALAPPDATA%\Programs\Strata`): on a PC
      with little space on C:, pick a folder on another drive that you can write to (not Program Files, which needs
      an administrator). Updates from inside the app go into the same folder. The engine inside the app
-     (`%LOCALAPPDATA%\Strata\components`) stays on C:; `STRATA_COMPONENTS_DIR` moves it, and the models go to the
+     (`%LOCALAPPDATA%\Strata\components`) stays on C:; `SAGUARO_COMPONENTS_DIR` moves it, and the models go to the
      folder you choose in the app.
    - **Linux:** the `.AppImage`. Make it runnable (right-click, Properties, Permissions, "Allow executing file as
      program", or `chmod +x`), then double-click it. It needs FUSE 2: `sudo apt install libfuse2` on Ubuntu 22.04,
@@ -173,14 +173,14 @@ git clone https://github.com/Niko1221/Strata.git && cd Strata
   [AMD_HIP.md](AMD_HIP.md)).
 - **To try a pull request:** `git fetch origin pull/<number>/head:pr-<number> && git checkout pr-<number>`, then
   `./setup.sh`. `git checkout main` goes back; the next `./setup.sh` rebuilds.
-- **Settings for the engine** (for example `STRATA_HIPBLASLT_TUNING=/path/to/table.txt`) go into the `"env"` object of
+- **Settings for the engine** (for example `SAGUARO_HIPBLASLT_TUNING=/path/to/table.txt`) go into the `"env"` object of
   `strata-<model>.json`, which `./setup.sh` writes next to the checkout. `./run-<model>.sh` starts the model with it.
 - **The Terminal monitor from a checkout:** the monitor needs one extra package, which the source install does not
   put into `.venv`:
 
   ```bash
   .venv/bin/pip install -r requirements-monitor.txt
-  STRATA_PYTHON="$PWD/.venv/bin/python3" bin/strata monitor --url http://127.0.0.1:8080
+  SAGUARO_PYTHON="$PWD/.venv/bin/python3" bin/strata monitor --url http://127.0.0.1:8080
   ```
 
   (`bin/strata` is the same `strata` command as the Terminal's: `bin/strata --help` lists the rest.)
@@ -240,7 +240,7 @@ that this is experimental and slow, and compiles the engine (10-20 minutes, once
 Tools and the CUDA Toolkit, which setup offers to install). It does not stop. The ready-made engine still refuses such
 a CPU, and says so.
 
-What differs in that build (`STRATA_ISA_FLOOR=avx` or `none`, chosen from the CPU):
+What differs in that build (`SAGUARO_ISA_FLOOR=avx` or `none`, chosen from the CPU):
 
 - ggml-cpu is compiled for AVX or SSE4.2 instead of AVX2, and the CPU's share of the experts runs on its kernels.
   Strata's own AVX2 / AVX-512 kernels stay in the program but are used only on a CPU that has them.
@@ -250,14 +250,14 @@ What differs in that build (`STRATA_ISA_FLOOR=avx` or `none`, chosen from the CP
   decode went from 26 to 11-17 tok/s with the AVX build and to 3.5-3.8 tok/s with the SSE4.2 build (Coder and IQ3_XXS,
   10 prompts each, one run). An old Xeon with DDR3 will be slower than these.
 - Untested on a real old CPU by us. It was checked here by forcing the older paths on a Ryzen 5 7600
-  (`STRATA_FORCE_ISA=avx` or `sse`): the answers were sane and passed the engine's checks, but not the same token for
+  (`SAGUARO_FORCE_ISA=avx` or `sse`): the answers were sane and passed the engine's checks, but not the same token for
   token as the normal build (ggml-cpu rounds the CPU experts differently, as the AVX2 kernel does from the AVX-512
   one). Contributors ran earlier versions of the same approach on a Xeon E5-2680 (2.87 tok/s with a GTX 1080 Ti)
   and on Xeon E5-2687W / X5690 machines.
 - AMD cards: Linux only (setup compiles the AMD engine there anyway); NVIDIA on Windows and Linux.
 - Two-socket Xeons: memory on the other socket is slow; keep the RAM on one CPU if you can.
 
-By hand: `cmake ... -DSTRATA_ISA_FLOOR=avx` (or `none`) builds it; `STRATA_ISA_FLOOR=avx` set for setup builds it on
+By hand: `cmake ... -DSTRATA_ISA_FLOOR=avx` (or `none`) builds it; `SAGUARO_ISA_FLOOR=avx` set for setup builds it on
 any PC (to try it). Problems and results on real hardware are welcome as GitHub issues.
 
 ## Updating
@@ -321,7 +321,7 @@ The model files are the only big part (70 to 190 GB). Put them where there is ro
   folder of shards, a folder above it, or one `.gguf` file); a folder that holds several sizes needs the one `.gguf` file.
 - **Drives that are not NTFS** (exFAT, FAT32, a network share) work: Strata writes straight into `<folder>\models` and makes no
   link there.
-- **What stays on C:** the engine (`%LOCALAPPDATA%\Strata\components`, 1 to 2 GB per version; `STRATA_COMPONENTS_DIR` moves it),
+- **What stays on C:** the engine (`%LOCALAPPDATA%\Strata\components`, 1 to 2 GB per version; `SAGUARO_COMPONENTS_DIR` moves it),
   the app itself (the installer asks), your settings, chat history, tuning results and logs (`%LOCALAPPDATA%\Strata`,
   `%APPDATA%\Strata`; a few MB). Nothing else large: downloads, the prepared model data (`packs`) and the draft layer (`mtp`) are
   written in the model folder, and so are the half-finished files of an interrupted download.
@@ -415,7 +415,7 @@ pinned revisions and checks apply, and the MTP draft layer comes from there too.
 **From ModelScope (mainland China):** every repository setup downloads from (the GSQ-RCO models, Swift 1.5, the
 Coder, Unsloth's files, and the original checkpoint the MTP draft layer is taken from) is on
 [ModelScope](https://www.modelscope.cn) under the same name, with the same files. Setup never switches to it by
-itself (a download that fails says how): use `--source modelscope` (`STRATA_SOURCE=modelscope`). ModelScope serves a
+itself (a download that fails says how): use `--source modelscope` (`SAGUARO_SOURCE=modelscope`). ModelScope serves a
 repository's current files (no pinned revision), so each file is checked against the SHA-256 ModelScope publishes for
 it (self-attested: a changed upstream repository would carry its own hash), and the MTP tensors against the
 pinned checkpoint's own hashes, as from Hugging Face; setup says so when you choose it. Measured on a PC in mainland

@@ -120,7 +120,7 @@ private:
     std::vector<TuningRow> rows_;
 };
 
-// The tuning-table list (STRATA_HIPBLASLT_TUNING): paths joined by the OS's path-list separator, ':' on Linux and
+// The tuning-table list (SAGUARO_HIPBLASLT_TUNING): paths joined by the OS's path-list separator, ':' on Linux and
 // ';' on Windows (saguaro.py joins them with os.pathsep). On Windows a ':' still separates too, for configs written
 // before the switch, except the one of a drive prefix ("C:\..." or "C:/..."), which belongs to the path.
 // Empty entries are skipped.

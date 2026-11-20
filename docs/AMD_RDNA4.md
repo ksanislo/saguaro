@@ -61,9 +61,9 @@ env -u ROCR_VISIBLE_DEVICES LD_LIBRARY_PATH=/opt/rocm/lib HIP_VISIBLE_DEVICES=1 
   ctest --test-dir build-multi --output-on-failure --timeout 60 \
   -R '^(glm_(hc|kda|ffn|dsa|layer)_parity|glm_model_test|hip_intrinsics|hip_(glm_handoff|glm_prefill_attention|handoff|device_selftest|prefill_mmq_parity|expert_cache_staging)|iq1_s_parity)$'
 env -u ROCR_VISIBLE_DEVICES LD_LIBRARY_PATH=/opt/rocm/lib HIP_VISIBLE_DEVICES=1 \
-  MAYA_GLM_HC1=1 build-multi/glm_hc_parity --selftest
+  SAGUARO_GLM_HC1=1 build-multi/glm_hc_parity --selftest
 env -u ROCR_VISIBLE_DEVICES LD_LIBRARY_PATH=/opt/rocm/lib HIP_VISIBLE_DEVICES=1 \
-  MAYA_GLM_HC2=1 build-multi/glm_hc_parity --selftest
+  SAGUARO_GLM_HC2=1 build-multi/glm_hc_parity --selftest
 ```
 
 Both cards pass 14/14 GPU checks; HC1/HC2 also pass on the R9700. The intrinsics

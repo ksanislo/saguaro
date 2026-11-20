@@ -1,11 +1,11 @@
-// src/prefill/moe_f16_kq.cu - see moe_f16_kq.hpp.  gfx11 only (opt-in STRATA_PF_F16=1 with STRATA_PF_FUSED_KQ=1).
+// src/prefill/moe_f16_kq.cu - see moe_f16_kq.hpp.  gfx11 only (opt-in SAGUARO_PF_F16=1 with SAGUARO_PF_FUSED_KQ=1).
 //
 // gufo's routed-expert kernels for the K-quants, on Strata's tables, int8 activations and H (the work item, the
 // activation staging and the epilogues are moe_f16_common.cuh's):
 //   - gate/up (Q4_K, Q5_K): the weight codes stay packed in LDS (one 32-byte nibble group per row and stage) and
 //     each wave turns its own 16 rows into F16 right after the LDS read: w = q * (d sc) - dmin m as one packed FMA;
 //   - down (Q5_1): a K block's 16 code bytes and its high-bit word in LDS, w = q d + m per wave.
-// The output differs from native_w11_kernel's (F16 weights instead of int8 sub-blocks), like STRATA_PF_FUSED_KQ's
+// The output differs from native_w11_kernel's (F16 weights instead of int8 sub-blocks), like SAGUARO_PF_FUSED_KQ's
 // does from the MMQ path.
 //
 // Adapted from gufo 97b8645f: src/models/qwen38_flash_next/kernels/rocm/kernels.hip.cpp

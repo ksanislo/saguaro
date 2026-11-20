@@ -1633,17 +1633,17 @@ bool launch70(const float* q, const QsaAttnPools& pools, const int32_t* ids, con
     }
     return true;
 }
-#else   // AMD, or a build without STRATA_EXPERIMENTAL_SM60: no m8n8k4 kernel (the caller keeps the old one)
+#else   // AMD, or a build without SAGUARO_EXPERIMENTAL_SM60: no m8n8k4 kernel (the caller keeps the old one)
 template <int KV_MODE>
 bool launch70(const float *, const QsaAttnPools &, const int32_t *,
               const int32_t *, int64_t, const QsaShapes &, float *, int64_t,
               dpct::queue_ptr) {
     return false;
 }
-#endif  // !__HIPCC__ && STRATA_EXPERIMENTAL_SM60
+#endif  // !__HIPCC__ && SAGUARO_EXPERIMENTAL_SM60
 
 #if defined(__HIPCC__)
-// ---- S6: the int8-KV prompt attention on RDNA4 matrix cores (opt-in: STRATA_HIP_WMMA=1, gfx12 only). The design of
+// ---- S6: the int8-KV prompt attention on RDNA4 matrix cores (opt-in: SAGUARO_HIP_WMMA=1, gfx12 only). The design of
 // the v2 kernel above with gfx12's v_wmma_f32_16x16x16_f16 (wave32) in place of m16n8k16: wave w owns dims
 // [64w, 64w+64) (int8 scale group w) for q.k and p.v; q and p are split into FP16 hi + lo parts, the int8 codes enter
 // exactly as FP16, the scales are applied in FP32 and the four groups' q.k partials are added in a fixed order.
@@ -1708,7 +1708,7 @@ __device__ __forceinline__ wh8 i8_to_h(const uint32_t* x) {   // PA_KL codes, ex
 }
 
 // SPLIT = true (default): q and p carried as FP16 hi + lo pairs (two WMMAs each: FP32-level). S23 (opt-in
-// STRATA_PA_FAST=1): SPLIT = false, one FP16 image each - half the matrix work, rounding-level (FP16 attention as the
+// SAGUARO_PA_FAST=1): SPLIT = false, one FP16 image each - half the matrix work, rounding-level (FP16 attention as the
 // usual flash-attention kernels), quality-gated
 template <bool SPLIT>
 __global__ void __launch_bounds__(THREADS) prompt_attn_wmma_kernel(const float* __restrict__ q, QsaAttnPools p,
@@ -1918,7 +1918,7 @@ __global__ void __launch_bounds__(THREADS) prompt_attn_wmma_kernel(const float* 
 // last bits
 bool hip_wmma_usable() {
     static const bool want = [] {
-        const char* e = std::getenv("STRATA_HIP_WMMA");
+        const char* e = std::getenv("SAGUARO_HIP_WMMA");
         return e != nullptr && e[0] == '1';
     }();
     if (!want) return false;
@@ -1933,7 +1933,7 @@ bool hip_wmma_usable() {
         static bool told = false;
         if (!told) {
             told = true;
-            std::fprintf(stderr, "strata: STRATA_HIP_WMMA: the prompt attention on matrix cores %s (%s)\n",
+            std::fprintf(stderr, "strata: SAGUARO_HIP_WMMA: the prompt attention on matrix cores %s (%s)\n",
                          arch[dev] == 1 ? "on" : "unavailable", prop.gcnArchName);
         }
     }
@@ -1945,8 +1945,8 @@ bool launch_wmma(const float* q, const QsaAttnPools& pools, const int32_t* ids, 
     const float scale_log2 = 1.4426950408889634f / sqrtf((float) HD);
     for (int64_t q0 = 0; q0 < n_q; q0 += 65535) {
         const int64_t nb = n_q - q0 < 65535 ? n_q - q0 : 65535;
-        static const bool fast = [] { const char* e = std::getenv("STRATA_PA_FAST"); return e != nullptr && e[0] == '1'; }();
-        static const int64_t min_t = [] { const char* e = std::getenv("STRATA_PF_SWITCH_MIN_T"); return e ? (int64_t) std::atoll(e) : (int64_t) 0; }();
+        static const bool fast = [] { const char* e = std::getenv("SAGUARO_PA_FAST"); return e != nullptr && e[0] == '1'; }();
+        static const int64_t min_t = [] { const char* e = std::getenv("SAGUARO_PF_SWITCH_MIN_T"); return e ? (int64_t) std::atoll(e) : (int64_t) 0; }();
         if (fast && n_q >= min_t)
             prompt_attn_wmma_kernel<false><<<dim3((unsigned) nb, (unsigned) s.n_head_kv), THREADS, 0, st>>>(
                 q + q0 * s.n_head * HD, pools, ids + q0 * cap, steps + q0 * kStepCount, (int) s.n_head_kv,
@@ -2000,8 +2000,8 @@ bool qsa_prompt_attn_batch(const float* q, const QsaAttnPools& pools, const int3
                 */
                 return false;
             }
-            // STRATA_QSA_WARP=1|attn (an A/B arm): the pre-sm_80 kernels on any card, as RTX 20 runs them
-            const char* w = std::getenv("STRATA_QSA_WARP");
+            // SAGUARO_QSA_WARP=1|attn (an A/B arm): the pre-sm_80 kernels on any card, as RTX 20 runs them
+            const char* w = std::getenv("SAGUARO_QSA_WARP");
             cc[dev] = w && (!std::strcmp(w, "1") || !std::strcmp(w, "attn")) ? 75
                       : 10 * strata::cc_major_of(major) + strata::cc_minor_of(minor);
         }
@@ -2013,7 +2013,7 @@ bool qsa_prompt_attn_batch(const float* q, const QsaAttnPools& pools, const int3
     }
 #if defined(__HIPCC__)
     // the tensor-core kernels are compiled out on AMD (its major version is not a CUDA sm); RDNA4 has its own int8-KV
-    // matrix-core kernel, opt-in (STRATA_HIP_WMMA=1); everything else keeps the old kernel
+    // matrix-core kernel, opt-in (SAGUARO_HIP_WMMA=1); everything else keeps the old kernel
     (void) turing; (void) volta;
     if (pools.k_q != nullptr && pools.v_q != nullptr && pools.k_scale != nullptr && pools.v_scale != nullptr &&
         pools.k_q4 == nullptr && pools.v_q4 == nullptr && s.head_dim == HD && s.n_head == (int64_t) G * s.n_head_kv &&
@@ -2024,9 +2024,9 @@ bool qsa_prompt_attn_batch(const float* q, const QsaAttnPools& pools, const int3
     if (s.head_dim != HD || s.n_head != (int64_t) G * s.n_head_kv || cap <= 0 || !ids || !steps || !pools.page_table)
         return false;
     dpct::queue_ptr st = strata::q_of(stream);
-    if (pools.k_q4 != nullptr) {   // Q4_0 K and V (--kv q4_0): mode 4.  STRATA_PROMPT_ATTN_Q4=0: the old kernel (A/B)
+    if (pools.k_q4 != nullptr) {   // Q4_0 K and V (--kv q4_0): mode 4.  SAGUARO_PROMPT_ATTN_Q4=0: the old kernel (A/B)
         static const bool q4_off = [] {
-            const char* v = std::getenv("STRATA_PROMPT_ATTN_Q4");
+            const char* v = std::getenv("SAGUARO_PROMPT_ATTN_Q4");
             return v != nullptr && v[0] == '0';
         }();
         // sm_80+ only: on Turing mode 4 would run as pairs of m16n8k8 MMAs, which no parity run has checked yet
@@ -2040,10 +2040,10 @@ bool qsa_prompt_attn_batch(const float* q, const QsaAttnPools& pools, const int3
     }
     if (pools.k_q != nullptr) {
         if (!pools.v_q || !pools.k_scale || !pools.v_scale) return false;
-        // STRATA_PROMPT_ATTN_V1=1 (debug): the first version, same accuracy, another summation order - the control
+        // SAGUARO_PROMPT_ATTN_V1=1 (debug): the first version, same accuracy, another summation order - the control
         // for how far the model amplifies an FP32-level change.  Turing always takes it: v2's cp.async does not
         // exist before sm_80.
-        static const bool v1 = std::getenv("STRATA_PROMPT_ATTN_V1") != nullptr;
+        static const bool v1 = std::getenv("SAGUARO_PROMPT_ATTN_V1") != nullptr;
         if (volta) return launch70<1>(q, pools, ids, steps, cap, s, attn, n_q, st);
         if (v1 || turing) return launch<1>(q, pools, ids, steps, cap, s, attn, n_q, st);
         return launch_i8(q, pools, ids, steps, cap, s, attn, n_q, st);

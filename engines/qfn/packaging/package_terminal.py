@@ -113,7 +113,7 @@ TOOLS_SUBSET = (
 #: What `strata launch` and the desktop app's installer need on top of the read-only terminal: the model catalog and GPU probe
 #: (tools/strata_mcp.py reads setup.py's tables) and the install job, which downloads the model the user chose, prepares it with
 #: the bundled tools and writes a run config naming "component:strata-engine". setup.py runs in its CONTROL mode there
-#: (STRATA_CONTROL_INSTALL=1: no pip, no engine fetch, no compiler). Entry points; their local imports under tools/ come with them.
+#: (SAGUARO_CONTROL_INSTALL=1: no pip, no engine fetch, no compiler). Entry points; their local imports under tools/ come with them.
 #: The same list the app's Control component stages (apps/desktop/scripts/stage-control.py uses these names).
 INSTALLER_FILES = ("setup.py", "ref/load.py")   # ref/load.py: strata_pack.py (the Q2_0 AVX-512 repack) imports it
 #: calibrate: setup.py imports it after a tune (calibrate_config, and the earlier tuning that a rerun applies); it was missing from this
@@ -292,7 +292,7 @@ def add_installer(folder: Path, source: Path = ROOT) -> dict:
         shutil.rmtree(folder / INSTALLER_DATA)
     shutil.copytree(source / INSTALLER_DATA, folder / INSTALLER_DATA, ignore=shutil.ignore_patterns("__pycache__"))
     return {"files": copied, "data": INSTALLER_DATA, "setup_sha256": sha256(folder / "setup.py"),
-            "mode": "STRATA_CONTROL_INSTALL=1: downloads the chosen model, prepares it, installs no package and no engine"}
+            "mode": "SAGUARO_CONTROL_INSTALL=1: downloads the chosen model, prepares it, installs no package and no engine"}
 
 
 def write_archive(root: Path, name: str, out_dir: Path, kind: str) -> Path:
@@ -311,10 +311,10 @@ def write_archive(root: Path, name: str, out_dir: Path, kind: str) -> Path:
 
 
 def build_commit(explicit: str | None = None) -> str | None:
-    """The full commit this archive is built from: --commit, the STRATA_COMMIT variable, STRATA_BUILD_COMMIT (a Docker build
+    """The full commit this archive is built from: --commit, the SAGUARO_COMMIT variable, SAGUARO_BUILD_COMMIT (a Docker build
     copies the files without .git and without git), or `git rev-parse HEAD` of the source tree. None when none of them gives
     40 hex digits (a tree copy without .git)."""
-    for candidate in (explicit, os.environ.get("STRATA_COMMIT"), os.environ.get("STRATA_BUILD_COMMIT")):
+    for candidate in (explicit, os.environ.get("SAGUARO_COMMIT"), os.environ.get("SAGUARO_BUILD_COMMIT")):
         if candidate and re.fullmatch(r"[0-9a-fA-F]{40}", candidate.strip()):
             return candidate.strip().lower()
     try:
@@ -338,7 +338,7 @@ def main() -> int:
     ap.add_argument("--skip-deps", action="store_true",
                     help="skip the locked install (layout checks only; the result is NOT distributable)")
     ap.add_argument("--commit", default=None, metavar="SHA",
-                    help="the full commit the sources come from, for a tree copy that has no .git (or set STRATA_COMMIT); "
+                    help="the full commit the sources come from, for a tree copy that has no .git (or set SAGUARO_COMMIT); "
                          "`strata bench run` records it, and a standard benchmark without it is nonconforming")
     ap.add_argument("--keep-staging", action="store_true")
     ap.add_argument("--no-installer", action="store_true",
@@ -355,7 +355,7 @@ def main() -> int:
                          "bundled interpreter. Use --skip-deps for a layout check.")
     commit = build_commit(args.commit)
     if commit is None:
-        message = ("the commit of these sources is unknown (no .git here, no --commit, no STRATA_COMMIT): the archive would carry "
+        message = ("the commit of these sources is unknown (no .git here, no --commit, no SAGUARO_COMMIT): the archive would carry "
                    "no COMMIT file, and every `strata bench run` on it would be nonconforming")
         if not args.skip_deps:
             raise SystemExit(message)

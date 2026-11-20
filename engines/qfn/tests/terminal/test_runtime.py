@@ -33,13 +33,13 @@ class RuntimeTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix="strata-runtime-test-")
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        env = mock.patch.dict(os.environ, {"STRATA_PROFILE_DIR": str(self.root / "profiles"),
-                                       "STRATA_RUNTIME_DIR": str(self.root / "runtime")})
+        env = mock.patch.dict(os.environ, {"SAGUARO_PROFILE_DIR": str(self.root / "profiles"),
+                                       "SAGUARO_RUNTIME_DIR": str(self.root / "runtime")})
         env.start()
         self.addCleanup(env.stop)
-        previous_key = os.environ.pop("STRATA_API_KEY", None)
-        self.addCleanup(lambda: os.environ.__setitem__("STRATA_API_KEY", previous_key)
-                        if previous_key is not None else os.environ.pop("STRATA_API_KEY", None))
+        previous_key = os.environ.pop("SAGUARO_API_KEY", None)
+        self.addCleanup(lambda: os.environ.__setitem__("SAGUARO_API_KEY", previous_key)
+                        if previous_key is not None else os.environ.pop("SAGUARO_API_KEY", None))
         engine = self.root / "engine.py"
         engine.write_text("#!" + sys.executable + "\nimport sys\nfrom pathlib import Path\n"
                           "if '--batch' in sys.argv: print('INFO batch_slots=2', flush=True)\n"
@@ -136,7 +136,7 @@ class RuntimeTests(unittest.TestCase):
 
         other = self.root / "strata-other.json"
         other.write_text(self.config.read_text().replace('"fake"', '"other"'), encoding="utf-8")
-        with mock.patch.dict(os.environ, {"STRATA_INSTALL_DIR": str(self.root)}):
+        with mock.patch.dict(os.environ, {"SAGUARO_INSTALL_DIR": str(self.root)}):
             code, listed = send("models.installed", {})
             inspect_code, inspected = send("models.inspect", {"model_id": "other"})
         self.assertEqual(code, 0)
@@ -855,7 +855,7 @@ class RuntimeTests(unittest.TestCase):
             if key:
                 cfg["api_key"] = key
             self.config.write_text(json.dumps(cfg))
-            with mock.patch.dict(os.environ, {"STRATA_API_KEY": ""}):
+            with mock.patch.dict(os.environ, {"SAGUARO_API_KEY": ""}):
                 plan, args = _launch_plan("local")
             self.assertEqual(plan["effective"]["host"], "0.0.0.0")
 
@@ -1228,14 +1228,14 @@ class RuntimeTests(unittest.TestCase):
         done = subprocess.run(["icacls", str(shared), "/grant", "*S-1-1-0:(OI)(CI)R"], capture_output=True)
         if done.returncode != 0:
             self.skipTest("icacls could not widen the test directory")
-        with mock.patch.dict(os.environ, {"STRATA_RUNTIME_DIR": str(shared)}):
+        with mock.patch.dict(os.environ, {"SAGUARO_RUNTIME_DIR": str(shared)}):
             # a folder that names Everyone is the user's own state folder: it is locked down once and used (never a stop)
             self.assertEqual(runtime.runtime_dir(), shared)
             self.assertTrue(private_files.is_unshared(shared))
         again = Path(self.temp.name) / "shared-runtime-2"
         again.mkdir()
         subprocess.run(["icacls", str(again), "/grant", "*S-1-1-0:(OI)(CI)R"], capture_output=True)
-        with mock.patch.dict(os.environ, {"STRATA_RUNTIME_DIR": str(again)}), \
+        with mock.patch.dict(os.environ, {"SAGUARO_RUNTIME_DIR": str(again)}), \
                 mock.patch.object(private_files, "restrict_to_current_user"), \
                 mock.patch.object(private_files, "repair_access", return_value=False):
             # when the lock-down does not happen it still refuses, in plain words and naming who can open it

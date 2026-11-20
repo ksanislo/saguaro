@@ -53,7 +53,7 @@ public:
     double ms_begin() const { return ms_begin_; }
     double ms_wait() const { return ms_wait_; }
 
-    /// STRATA_PREFILL_HELPER_SOURCE (opt-in): copy up to `n` cached blobs into the host buffers `dst[i]`
+    /// SAGUARO_PREFILL_HELPER_SOURCE (opt-in): copy up to `n` cached blobs into the host buffers `dst[i]`
     /// on this helper's own stream and wait.  `hit[i]` is set where this helper held (layer, expert); the
     /// bytes are the ones open() filled from the same source, so the prompt path gets identical bytes.
     /// Misses are left to the caller.  False with `err` on a CUDA failure; the hits copied so far are
@@ -75,7 +75,7 @@ private:
     double ms_begin_ = 0, ms_wait_ = 0;
     ExpertCache cache_;
     cudaStream_t stream_ = nullptr;
-    cudaStream_t read_stream_ = nullptr;   ///< STRATA_PREFILL_HELPER_SOURCE: cache -> host copies
+    cudaStream_t read_stream_ = nullptr;   ///< SAGUARO_PREFILL_HELPER_SOURCE: cache -> host copies
     std::mutex read_mu_;                   ///< one cache reader at a time (the stager is threaded)
     float* h_x_ = nullptr;
     float* h_out_ = nullptr;
@@ -104,7 +104,7 @@ private:
     std::vector<unsigned long long> ptr_;
 };
 
-/// STRATA_PREFILL_HELPER_SOURCE (opt-in): the prompt path's view of the expert tiers, where a blob a helper
+/// SAGUARO_PREFILL_HELPER_SOURCE (opt-in): the prompt path's view of the expert tiers, where a blob a helper
 /// GPU already holds in its VRAM cache is copied from that cache instead of being read from the files again.
 /// Everything else is forwarded to `fallback` unchanged, so its batched unbuffered reads, its pinned RAM copy
 /// and the prompt path's own decisions keep their meaning.  Nothing is cached here: every call asks the

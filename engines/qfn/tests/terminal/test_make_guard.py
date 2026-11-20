@@ -63,7 +63,7 @@ class Detection(unittest.TestCase):
 
     def test_the_environment_override_still_wins(self):
         with mock.patch.object(ec, "windows_display_adapters", return_value=R9700_ONLY):
-            self.assertEqual(ec.detect_backend({"STRATA_ENGINE_BACKEND": "cuda"}), ("cuda", "environment"))
+            self.assertEqual(ec.detect_backend({"SAGUARO_ENGINE_BACKEND": "cuda"}), ("cuda", "environment"))
 
 
 class Decision(unittest.TestCase):

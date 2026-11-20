@@ -6,7 +6,7 @@
 // A layer split's prompt-path ring and the lend slots sized from it, kept apart from the engine so they can be tested
 // on the CPU (header-only, like pipeline_gate.hpp).
 //
-//  1. split_ring_slots: the streamed-ring override a split chooses (STRATA_SPLIT_RING, else 96 when most experts are
+//  1. split_ring_slots: the streamed-ring override a split chooses (SAGUARO_SPLIT_RING, else 96 when most experts are
 //     resident).  The choice must be made BEFORE anything sizes the prompt path with Prefill::bytes_needed (which counts
 //     ring_slots * max_blob): the split's lend regions (the RAM copies of the experts the prompt path borrows) used to
 //     be sized first, with the default ring, so a larger ring borrowed more slots than the copy kept.
@@ -15,7 +15,7 @@
 namespace strata::program {
 
 /// The ring override (slots) for a layer split, 0 = none (the pinned-share rule stays).
-///   env        STRATA_SPLIT_RING as read from the environment (nullptr = unset); 0 / non-numeric = the pinned-share rule
+///   env        SAGUARO_SPLIT_RING as read from the environment (nullptr = unset); 0 / non-numeric = the pinned-share rule
 ///   res_share  the share of (layer, expert) pairs resident in some stage cache, 0..1
 inline int split_ring_slots(const char* env, double res_share) {
     const int ring = env != nullptr ? std::atoi(env) : (res_share >= 0.75 ? 96 : 0);

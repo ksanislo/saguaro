@@ -465,7 +465,7 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
     enable_testing()
     add_test(NAME qsa_scores_gfx1100_parity COMMAND qsa_scores_gfx1100_parity --full)
     set_tests_properties(qsa_scores_gfx1100_parity PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 180
-      ENVIRONMENT "STRATA_SCORES_THREAD=1;STRATA_SCORES_THREAD_TRACE=1")
+      ENVIRONMENT "SAGUARO_SCORES_THREAD=1;SAGUARO_SCORES_THREAD_TRACE=1")
   endif()
   # perf-review D-1: the tensor-core prompt attention vs the FP32 kernel and FP64 (GPU, synthetic, no model); with
   # the tests, or alone with -DSTRATA_PARITY_PROMPT_ATTN=ON.  CUDA only: HIP compiles the tensor-core kernel out.
@@ -497,7 +497,7 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
     add_test(NAME qsa_slots_parity COMMAND qsa_slots_parity)
     add_test(NAME qsa_slots_parity_lanecell COMMAND qsa_slots_parity)
     set_tests_properties(qsa_slots_parity qsa_slots_parity_lanecell PROPERTIES SKIP_RETURN_CODE 77)
-    set_tests_properties(qsa_slots_parity_lanecell PROPERTIES ENVIRONMENT "STRATA_ATTN_LANECELL=1")
+    set_tests_properties(qsa_slots_parity_lanecell PROPERTIES ENVIRONMENT "SAGUARO_ATTN_LANECELL=1")
     # fork: the Daily's decode attention (STRATA_ATTN_DAILY=1: PR #540's chunk kernel on every card and the bounded
     # merge) against upstream's kernels, bitwise; the production entries checked with the variable off and on
     add_executable(qsa_merge_daily_parity src/kernels/qsa_merge_daily_parity.cpp)
@@ -505,16 +505,16 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
     target_link_libraries(qsa_merge_daily_parity PRIVATE strata_kernels CUDA::cudart)
     add_test(NAME qsa_merge_daily_parity_default COMMAND qsa_merge_daily_parity)
     add_test(NAME qsa_merge_daily_parity_daily COMMAND qsa_merge_daily_parity)
-    set_tests_properties(qsa_merge_daily_parity_default PROPERTIES ENVIRONMENT "STRATA_ATTN_DAILY=0"
+    set_tests_properties(qsa_merge_daily_parity_default PROPERTIES ENVIRONMENT "SAGUARO_ATTN_DAILY=0"
                          SKIP_RETURN_CODE 77)
-    set_tests_properties(qsa_merge_daily_parity_daily PROPERTIES ENVIRONMENT "STRATA_ATTN_DAILY=1"
+    set_tests_properties(qsa_merge_daily_parity_daily PROPERTIES ENVIRONMENT "SAGUARO_ATTN_DAILY=1"
                          SKIP_RETURN_CODE 77)
     # the prompt path's block scores on the thread-per-head kernel (Turing) against the warp kernel, bitwise
     add_executable(qsa_scores_parity src/kernels/qsa_scores_parity.cpp)
     target_include_directories(qsa_scores_parity PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
     target_link_libraries(qsa_scores_parity PRIVATE strata_kernels CUDA::cudart)
     add_test(NAME qsa_scores_parity COMMAND qsa_scores_parity)
-    set_tests_properties(qsa_scores_parity PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT "STRATA_SCORES_THREAD=1")
+    set_tests_properties(qsa_scores_parity PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT "SAGUARO_SCORES_THREAD=1")
   endif()
   # QSAROWS (docs/QSAROWS.md): what the T rows of a verification window cost in a QSA layer's decode kernels at a long
   # context (block scores, top-k, attention over each row's selection, indexer append), row by row; GPU, synthetic, no
@@ -534,7 +534,7 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
     add_test(NAME qsa_select_bench COMMAND qsa_select_bench 32768 256 3 262144)
     # the FP32 tiled scorer (STRATA_SELECT_SIMT=1) on HIP: FP64 gate and selections against the warp kernel at 131K
     add_test(NAME qsa_select_bench_fp32_tiled COMMAND qsa_select_bench 131072 256 3 262144)
-    set_tests_properties(qsa_select_bench_fp32_tiled PROPERTIES ENVIRONMENT "STRATA_SELECT_SIMT=1")
+    set_tests_properties(qsa_select_bench_fp32_tiled PROPERTIES ENVIRONMENT "SAGUARO_SELECT_SIMT=1")
   endif()
   # the same on CUDA: the tensor-core scorer (sm_80+) or the FP32 tiled one (below sm_80, and forced on any card by
   # STRATA_QSA_WARP=1 in the second test) against the warp kernel and FP64, at 32K and 131K
@@ -544,11 +544,11 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
     target_link_libraries(qsa_select_bench PRIVATE strata_kernels CUDA::cudart)
     add_test(NAME qsa_select_bench COMMAND qsa_select_bench 32768 256 3 262144)
     add_test(NAME qsa_select_bench_fp32_tiled COMMAND qsa_select_bench 131072 256 3 262144)
-    set_tests_properties(qsa_select_bench_fp32_tiled PROPERTIES ENVIRONMENT "STRATA_QSA_WARP=1;STRATA_SELECT_SIMT=1")
+    set_tests_properties(qsa_select_bench_fp32_tiled PROPERTIES ENVIRONMENT "SAGUARO_QSA_WARP=1;SAGUARO_SELECT_SIMT=1")
     # Turing's FP16 hi/lo tensor-core scorer (STRATA_SELECT_SM75=1; sm_80+ cards run their 3xTF32 one): FP64 gate,
     # flips per 1000 queries at 32K-256K
     add_test(NAME qsa_select_bench_sm75 COMMAND qsa_select_bench --parity)
-    set_tests_properties(qsa_select_bench_sm75 PROPERTIES ENVIRONMENT "STRATA_SELECT_SM75=1;STRATA_SCORES_THREAD=1"
+    set_tests_properties(qsa_select_bench_sm75 PROPERTIES ENVIRONMENT "SAGUARO_SELECT_SM75=1;SAGUARO_SCORES_THREAD=1"
                          TIMEOUT 600)
   endif()
   if(STRATA_BUILD_TESTS AND STRATA_ENABLE_CUDA)   # the prompt attention on a recorded selection (STRATA_QSA_DUMP)
@@ -1128,7 +1128,7 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
     add_test(NAME mmvq_multi_parity COMMAND mmvq_multi_parity)
     if(STRATA_HIP_GFX906)   # the CUDA layout, where the negative control has power (the wave64 one is exact at every T)
       add_test(NAME mmvq_multi_parity_cuda_layout COMMAND mmvq_multi_parity)
-      set_tests_properties(mmvq_multi_parity_cuda_layout PROPERTIES ENVIRONMENT "STRATA_MMVQ_WAVE=0")
+      set_tests_properties(mmvq_multi_parity_cuda_layout PROPERTIES ENVIRONMENT "SAGUARO_MMVQ_WAVE=0")
     endif()
   endif()
   if(STRATA_ENABLE_CUDA)
@@ -1153,7 +1153,7 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
     target_link_libraries(pdl_parity PRIVATE strata_kernels ${_strata_gpu_runtime_target})
     add_test(NAME pdl_parity COMMAND pdl_parity)
     # PDL is opt-in (STRATA_DF_PDL); the test checks the opted-in path, whose PDL capture forces programmatic launches
-    set_tests_properties(pdl_parity PROPERTIES ENVIRONMENT "STRATA_DF_PDL=1")
+    set_tests_properties(pdl_parity PROPERTIES ENVIRONMENT "SAGUARO_DF_PDL=1")
   endif()
   # the IQ kernels that decode a weight part once for every column/entry, bitwise vs the per-column ones
   # (GPU, synthetic, no model; --bench adds old/new timings)
@@ -1167,15 +1167,15 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
   target_include_directories(tq_pascal_bench PRIVATE ${_strata_gpu_include_directories})
   target_link_libraries(tq_pascal_bench PRIVATE strata_kernels ${_strata_gpu_runtime_target})
   add_test(NAME tq_pascal_bench COMMAND tq_pascal_bench)
-  set_tests_properties(iq_multi_parity PROPERTIES ENVIRONMENT "STRATA_KQ_SPLIT=1")   # the Q4_K / Q5_K / Q8_0 Split path against the old kernels
+  set_tests_properties(iq_multi_parity PROPERTIES ENVIRONMENT "SAGUARO_KQ_SPLIT=1")   # the Q4_K / Q5_K / Q8_0 Split path against the old kernels
   # the same Split path on the other routes it can meet: the generic multi kernels (no V2K) and the fused gate/up + SwiGLU kernel, and the sub-16-row
   # gate/up route switched off (a K-quant row has 160 dots, not the 80 the sub-16 rows assume: STRATA_KQ_SPLIT=1 must stay bitwise on all of them)
   add_test(NAME iq_multi_parity_kq_nov2k COMMAND iq_multi_parity)
-  set_tests_properties(iq_multi_parity_kq_nov2k PROPERTIES ENVIRONMENT "STRATA_KQ_SPLIT=1;STRATA_EXPERT_V2K=0")
+  set_tests_properties(iq_multi_parity_kq_nov2k PROPERTIES ENVIRONMENT "SAGUARO_KQ_SPLIT=1;SAGUARO_EXPERT_V2K=0")
   add_test(NAME iq_multi_parity_kq_swiglu COMMAND iq_multi_parity)
-  set_tests_properties(iq_multi_parity_kq_swiglu PROPERTIES ENVIRONMENT "STRATA_KQ_SPLIT=1;STRATA_GU_SWIGLU=1")
+  set_tests_properties(iq_multi_parity_kq_swiglu PROPERTIES ENVIRONMENT "SAGUARO_KQ_SPLIT=1;SAGUARO_GU_SWIGLU=1")
   add_test(NAME iq_multi_parity_kq_nosub16 COMMAND iq_multi_parity)
-  set_tests_properties(iq_multi_parity_kq_nosub16 PROPERTIES ENVIRONMENT "STRATA_KQ_SPLIT=1;STRATA_NO_SUB16_GU=1")
+  set_tests_properties(iq_multi_parity_kq_nosub16 PROPERTIES ENVIRONMENT "SAGUARO_KQ_SPLIT=1;SAGUARO_NO_SUB16_GU=1")
   # the prompt path's DeltaNet recurrence: gdn_rec_kh_kernel against gdn_rec_cols_pipe_kernel, bitwise (GPU,
   # synthetic, no model; --bench adds timings).  NVIDIA only: cp.async and the CUDA occupancy API (not on gfx906)
   if(STRATA_ENABLE_CUDA AND NOT STRATA_HIP_GFX906)
@@ -1220,11 +1220,11 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
   target_include_directories(mmvf_rows_parity PRIVATE ${_strata_gpu_include_directories})
   target_link_libraries(mmvf_rows_parity PRIVATE strata_kernels ${_strata_gpu_runtime_target})
   add_test(NAME mmvf_rows_parity COMMAND mmvf_rows_parity)
-  set_tests_properties(mmvf_rows_parity PROPERTIES ENVIRONMENT "STRATA_MMVF_ROWS=1" TIMEOUT 120)
+  set_tests_properties(mmvf_rows_parity PROPERTIES ENVIRONMENT "SAGUARO_MMVF_ROWS=1" TIMEOUT 120)
   if(STRATA_HIP_GFX906)
     add_test(NAME native_grouped_fused_parity COMMAND native_grouped_parity)
     set_tests_properties(native_grouped_fused_parity PROPERTIES
-      ENVIRONMENT "STRATA_HIP_SWIGLU_FUSED=1;STRATA_EXP_MODE=7" TIMEOUT 120)
+      ENVIRONMENT "SAGUARO_HIP_SWIGLU_FUSED=1;SAGUARO_EXP_MODE=7" TIMEOUT 120)
     add_executable(gfx906_gdn_rec_head tests/hip/gdn_rec_head.cpp)
     target_include_directories(gfx906_gdn_rec_head PRIVATE ${_strata_gpu_include_directories})
     target_link_libraries(gfx906_gdn_rec_head PRIVATE strata_prefill ${_strata_gpu_runtime_target})
@@ -1297,18 +1297,18 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
   target_include_directories(sampler_parity PRIVATE ${_strata_gpu_include_directories})
   target_link_libraries(sampler_parity PRIVATE strata_kernels ${_strata_gpu_runtime_target})
   add_test(NAME sampler_parity COMMAND sampler_parity --selftest)
-  set_tests_properties(sampler_parity PROPERTIES ENVIRONMENT "STRATA_OLD_SAMPLER=0;STRATA_SAMPLER_ONE_BLOCK=0")
+  set_tests_properties(sampler_parity PROPERTIES ENVIRONMENT "SAGUARO_OLD_SAMPLER=0;SAGUARO_SAMPLER_ONE_BLOCK=0")
   # the GPU verifier of probabilistic draft acceptance against the host reference (STRATA_SPEC_PROB)
   add_executable(spec_verify_parity src/kernels/spec_verify_parity.cpp)
   target_include_directories(spec_verify_parity PRIVATE ${_strata_gpu_include_directories})
   target_link_libraries(spec_verify_parity PRIVATE strata_kernels ${_strata_gpu_runtime_target})
   add_test(NAME spec_verify_parity COMMAND spec_verify_parity)
-  set_tests_properties(spec_verify_parity PROPERTIES ENVIRONMENT "STRATA_OLD_SAMPLER=0;STRATA_SAMPLER_ONE_BLOCK=0")
+  set_tests_properties(spec_verify_parity PROPERTIES ENVIRONMENT "SAGUARO_OLD_SAMPLER=0;SAGUARO_SAMPLER_ONE_BLOCK=0")
   # the same fixtures on the other two sampled paths: the one-block kernel and the 0.1.20 kernel
   add_test(NAME sampler_parity_one_block COMMAND sampler_parity --selftest)
-  set_tests_properties(sampler_parity_one_block PROPERTIES ENVIRONMENT "STRATA_OLD_SAMPLER=0;STRATA_SAMPLER_ONE_BLOCK=1")
+  set_tests_properties(sampler_parity_one_block PROPERTIES ENVIRONMENT "SAGUARO_OLD_SAMPLER=0;SAGUARO_SAMPLER_ONE_BLOCK=1")
   add_test(NAME sampler_parity_old COMMAND sampler_parity --selftest)
-  set_tests_properties(sampler_parity_old PROPERTIES ENVIRONMENT "STRATA_OLD_SAMPLER=1;STRATA_SAMPLER_ONE_BLOCK=0")
+  set_tests_properties(sampler_parity_old PROPERTIES ENVIRONMENT "SAGUARO_OLD_SAMPLER=1;SAGUARO_SAMPLER_ONE_BLOCK=0")
   # S19: the decode QSA top-k and the greedy argmax on thread-block clusters (sm_90+) vs the one-CTA kernels, bitwise,
   # captured in a graph too (GPU, synthetic, no model; skips below sm_90); --bench: per-call times
   if(STRATA_ENABLE_CUDA)
@@ -1423,7 +1423,7 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
   add_test(NAME qsa_topk_parity COMMAND qsa_topk_parity --selftest)
   # the register kernel from the smallest prompt batch (the line gfx1151 moves to 4096 blocks): same ids at every case
   add_test(NAME qsa_topk_parity_reg_always COMMAND qsa_topk_parity --selftest)
-  set_tests_properties(qsa_topk_parity_reg_always PROPERTIES ENVIRONMENT "STRATA_TOPK_REG_MIN_BLOCKS=0")
+  set_tests_properties(qsa_topk_parity_reg_always PROPERTIES ENVIRONMENT "SAGUARO_TOPK_REG_MIN_BLOCKS=0")
 
   # ---- P2.S4: the PLE n-gram hash, the IQ4_NL table read, and the PLE block ----
   # `ngram.cpp` is host-only but lives in `strata_kernels` because `ple.cu` shares its geometry constants, and
@@ -1868,7 +1868,7 @@ if(STRATA_NATIVE_EXPERTS)
     add_test(NAME pool_tasks_test COMMAND pool_tasks_test)
     set_tests_properties(pool_tasks_test PROPERTIES TIMEOUT 180)
     add_test(NAME router_dot_parity COMMAND router_dot_parity)
-    add_test(NAME router_dot_parity_avx COMMAND ${CMAKE_COMMAND} -E env STRATA_FORCE_ISA=avx $<TARGET_FILE:router_dot_parity>)
+    add_test(NAME router_dot_parity_avx COMMAND ${CMAKE_COMMAND} -E env SAGUARO_FORCE_ISA=avx $<TARGET_FILE:router_dot_parity>)
   endif()
   # the AVX-2 expert kernels' variants (iq_avx2.cpp, q2_avx2.cpp) bit for bit against each other at 1..8 tokens and
   # against ggml-cpu's dot, on random blocks; --bench: ms per expert on one thread, the weights streamed from DRAM
@@ -1879,7 +1879,7 @@ if(STRATA_NATIVE_EXPERTS)
   target_link_libraries(kq_cpu_bench PRIVATE strata_kernels_cpu)
   if(STRATA_BUILD_TESTS)
     add_test(NAME iq_avx2_parity COMMAND iq_avx2_parity)
-    add_test(NAME iq_avx2_parity_iq3s_mt1 COMMAND ${CMAKE_COMMAND} -E env STRATA_IQ3S_MT1=1 $<TARGET_FILE:iq_avx2_parity>)
+    add_test(NAME iq_avx2_parity_iq3s_mt1 COMMAND ${CMAKE_COMMAND} -E env SAGUARO_IQ3S_MT1=1 $<TARGET_FILE:iq_avx2_parity>)
   endif()
   # the older CPUs' AVX1 expert rows (iq_avx1.cpp) against ggml-cpu's dots and against their own one-token
   # rows at every width; --bench: ms per expert, the weights streamed from DRAM.  Runs on any AVX CPU:
@@ -1901,7 +1901,7 @@ if(STRATA_NATIVE_EXPERTS)
   target_link_libraries(q8k_quant_parity PRIVATE strata_kernels_cpu)
   if(STRATA_BUILD_TESTS)
     add_test(NAME q8k_quant_parity COMMAND q8k_quant_parity)
-    add_test(NAME q8k_quant_parity_avx COMMAND ${CMAKE_COMMAND} -E env STRATA_FORCE_ISA=avx $<TARGET_FILE:q8k_quant_parity>)
+    add_test(NAME q8k_quant_parity_avx COMMAND ${CMAKE_COMMAND} -E env SAGUARO_FORCE_ISA=avx $<TARGET_FILE:q8k_quant_parity>)
   endif()
   set(_strata_mmq_types q2_0 iq2_xxs iq2_xs iq2_s iq3_xxs iq3_s iq4_nl iq4_xs q8_0)
   # APR: the agention llama.cpp fork has MMQ instances for its trellis expert types (f62fdead0); any other ggml
@@ -2156,7 +2156,7 @@ if(STRATA_NATIVE_EXPERTS)
       add_test(NAME prefill_mmq_tab_test COMMAND prefill_mmq_tab_test)
       # strata_kq_tab opens only with both switches (and strata_kq next to the test)
       set_tests_properties(prefill_mmq_tab_test PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900
-                           ENVIRONMENT "STRATA_MMQ_KQ=1;STRATA_MMQ_DIRECT=1")
+                           ENVIRONMENT "SAGUARO_MMQ_KQ=1;SAGUARO_MMQ_DIRECT=1")
     endif()
     if(STRATA_BUILD_TESTS AND STRATA_MMQ_KQUANTS)
       # the UD-Q4_K_XL expert formats through MMQ against ggml's dequantized weights (synthetic, a few seconds)
@@ -2164,7 +2164,7 @@ if(STRATA_NATIVE_EXPERTS)
       target_link_libraries(prefill_mmq_kquant_test PRIVATE strata_mmq ggml-base ${_strata_gpu_runtime_target})
       add_test(NAME prefill_mmq_kquant_test COMMAND prefill_mmq_kquant_test)
       # the K-quant MMQ is opt-in at run time (STRATA_MMQ_KQ=1), and on CUDA it is strata_kq next to the test
-      set_tests_properties(prefill_mmq_kquant_test PROPERTIES TIMEOUT 120 ENVIRONMENT STRATA_MMQ_KQ=1)
+      set_tests_properties(prefill_mmq_kquant_test PROPERTIES TIMEOUT 120 ENVIRONMENT SAGUARO_MMQ_KQ=1)
     endif()
     # the NVFP4 expert products (w4a8 / w4a4, STRATA_PREFILL_NVFP4) against a double-precision reference
     add_executable(mmq_nvfp4_parity src/prefill/mmq_nvfp4_parity.cpp)
@@ -2250,7 +2250,7 @@ if(STRATA_NATIVE_EXPERTS)
     set_tests_properties(hip_prefill_fused_iq PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 600)
     # the same binary on F16 weights (gfx11: the covered formats take moe_f16_kq.cu / native_f16_kernel; elsewhere it is the default run again)
     add_test(NAME hip_prefill_fused_iq_f16 COMMAND hip_prefill_fused_iq)
-    set_tests_properties(hip_prefill_fused_iq_f16 PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 600 ENVIRONMENT "STRATA_PF_F16=1;STRATA_PF_F16_KQ=1")
+    set_tests_properties(hip_prefill_fused_iq_f16 PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 600 ENVIRONMENT "SAGUARO_PF_F16=1;SAGUARO_PF_F16_KQ=1")
     list(APPEND _strata_hip_tests hip_prefill_fused_iq)
 
     # Numerical diagnostic: synthetic layouts by default, optional first-expert IQ3_XXS/IQ4_NL check with a pack.
@@ -2381,7 +2381,7 @@ if(STRATA_BUILD_TESTS)
     add_executable(q2_bitplane_parity src/kernels/cpu/q2_bitplane_parity.cpp)
     target_link_libraries(q2_bitplane_parity PRIVATE strata_kernels_cpu)
     add_test(NAME q2_bitplane_parity COMMAND q2_bitplane_parity)
-    set_tests_properties(q2_bitplane_parity PROPERTIES ENVIRONMENT "STRATA_Q2_BITPLANE=1")
+    set_tests_properties(q2_bitplane_parity PROPERTIES ENVIRONMENT "SAGUARO_Q2_BITPLANE=1")
   endif()
 
   if(STRATA_NATIVE_EXPERTS)
@@ -2396,7 +2396,7 @@ if(STRATA_BUILD_TESTS)
     add_executable(tq_cpu_parity src/kernels/cpu/tq_cpu_parity.cpp)
     target_link_libraries(tq_cpu_parity PRIVATE strata_kernels_cpu)
     add_test(NAME tq_cpu_parity COMMAND tq_cpu_parity)
-    add_test(NAME tq_cpu_parity_avx2 COMMAND ${CMAKE_COMMAND} -E env STRATA_FORCE_AVX2=1 $<TARGET_FILE:tq_cpu_parity>)
+    add_test(NAME tq_cpu_parity_avx2 COMMAND ${CMAKE_COMMAND} -E env SAGUARO_FORCE_AVX2=1 $<TARGET_FILE:tq_cpu_parity>)
     set_tests_properties(tq_cpu_parity tq_cpu_parity_avx2 PROPERTIES TIMEOUT 300 SKIP_RETURN_CODE 77)
   endif()
 
@@ -2462,7 +2462,7 @@ if(STRATA_BUILD_TESTS)
         endif()
       endforeach()
       if(TARGET q2_bitplane_parity)
-        set_tests_properties(sde_${_chip}_q2_bitplane_parity PROPERTIES ENVIRONMENT "STRATA_Q2_BITPLANE=1")
+        set_tests_properties(sde_${_chip}_q2_bitplane_parity PROPERTIES ENVIRONMENT "SAGUARO_Q2_BITPLANE=1")
       endif()
     endforeach()
   endif()

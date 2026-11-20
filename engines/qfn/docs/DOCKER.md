@@ -104,7 +104,7 @@ docker compose -f docker-compose.nvidia.yml logs -f
 They set what the commands above set: the GPU (`deploy.resources.reservations.devices` for NVIDIA, `/dev/kfd` and
 `/dev/dri` plus the `video` and `render` groups for AMD, `/dev/dri` for Intel), `ulimits.memlock`, `shm_size`, a two-minute
 `stop_grace_period`, the `strata-data` volume, and the port bound to `127.0.0.1`. To let other computers reach it, set
-`STRATA_BIND=0.0.0.0` in `.env` and keep a real `API_KEY`.
+`SAGUARO_BIND=0.0.0.0` in `.env` and keep a real `API_KEY`.
 
 ## Settings
 
@@ -126,7 +126,7 @@ screens; leave out what you do not care about.
 | `API_KEY` / `API_KEY_FILE` | the key clients must send ([below](#the-api-key)); the file form is for Docker secrets | made for you |
 | `PORT` | the port inside the container | `8080` |
 | `PRESET` | the preset name in `/data` | `docker` |
-| `STRATA_SET` | advanced engine settings, space separated, like `strata launch --set` (`"prefill=65536 STRATA_PIN_BY_NEED=1"`) | none |
+| `SAGUARO_SET` | advanced engine settings, space separated, like `strata launch --set` (`"prefill=65536 SAGUARO_PIN_BY_NEED=1"`) | none |
 
 Your choices are saved as a preset in the volume. Start again with no settings and the saved preset is used; start with
 settings and they replace the saved ones (tuning results are kept). To change one thing, recreate the container with the new
@@ -271,7 +271,7 @@ package and start through `strata launch`. Mapping:
 | `MODEL`, `FAMILY`, `CONTEXT`, `API_KEY`, `PORT`, `KV`, `GPU`, `GPUS`, `VISION` | the same (`VISION` takes `off\|on\|gpu\|cpu`; `no` / `yes` still work) |
 | `GGUF_DIR` | `MODEL_PATH` (the old name still works) |
 | `HOST` | not needed: the server listens on every address inside the container; choose where it is reachable with `-p` |
-| `LOW_RAM`, `RESIDENT_BUDGET_GIB`, `KV_STREAMING`, `LAYER_SPLIT`, `CONFIG`, `REINSTALL` | ignored with a warning; use `STRATA_SET` for engine settings and `strata launch --help` for the rest |
+| `LOW_RAM`, `RESIDENT_BUDGET_GIB`, `KV_STREAMING`, `LAYER_SPLIT`, `CONFIG`, `REINSTALL` | ignored with a warning; use `SAGUARO_SET` for engine settings and `strata launch --help` for the rest |
 
 A volume from the older image is picked up: the first start moves `/data/models`, `/data/packs` and `/data/mtp` into
 `/data/Strata-data` (a rename inside the volume: nothing is copied or downloaded again, and the prepared pack is kept). The old

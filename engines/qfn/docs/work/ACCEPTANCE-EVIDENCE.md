@@ -104,7 +104,7 @@ Every row of `strata-acceptance-checklist.md` appears exactly once, with an expl
 | U09 | **not-implemented** | Connector operations exist in the reviewed host (Cloudflare tunnel, LAN share) but the explicit-only and never-widen-on-failure assertions are not tested. | `apps/host/server/cloudflare.mjs, local-share.mjs` |
 | U10 | **pending-hardware** | A thirty-minute real soak needs a running model. The reviewed suite has shorter monitor soak evidence from the terminal handover, which is not a substitute. | `docs/work/QUALIFICATION-KIT.md 5` |
 | U11 | **pending-release** | No signing or notarization, no SBOM, no notices bundle and no font/asset redistribution evidence. Signing credentials and rights evidence must come from the owner; the artifacts produced here are explicitly labelled unsigned internal candidates. | `packaging/README.md, docs/work/evidence/tauri-artifact.txt` |
-| U12 | **passed** | A packaged build has no success path that uses demo responses or demo metrics: the host refuses to simulate when STRATA_PACKAGED is set and returns a typed error instead, the monitor reports `none` rather than invented readings, and this matrix records every failure, skip and remaining item. | `docs/work/IMPLEMENTATION_STATUS.md 1.7, this file` |
+| U12 | **passed** | A packaged build has no success path that uses demo responses or demo metrics: the host refuses to simulate when SAGUARO_PACKAGED is set and returns a typed error instead, the monitor reports `none` rather than invented readings, and this matrix records every failure, skip and remaining item. | `docs/work/IMPLEMENTATION_STATUS.md 1.7, this file` |
 
 ## Reading this table
 

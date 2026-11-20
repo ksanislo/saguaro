@@ -10,7 +10,7 @@ below). UD-Q4_K_XL's manual workflow asks nothing of setup, and neither does thi
 
 > **Status (MODEL-UPDATE Phase 1).** The Q6_K gate/up kernels are part of every build now (they were the opt-in
 > `-DSTRATA_Q6K_EXPERTS=ON`): measured to leave other models' expert-cache slots unchanged ([QUANTS.md](QUANTS.md)). The
-> MMQ prompt kernels for Q6_K come with the K-quant library and `STRATA_MMQ_KQ=1`; without it the prompt takes the FP16
+> MMQ prompt kernels for Q6_K come with the K-quant library and `SAGUARO_MMQ_KQ=1`; without it the prompt takes the FP16
 > path. The file runs on the standard engine (AMD R9700: the quality yardstick in [QUANTS.md](QUANTS.md)).
 
 ## What is in the file
@@ -110,7 +110,7 @@ it (the PLE Q8_0 reader is the other half):
 - **Decode windows:** the grouped expert kernels (`native_expert_grouped`) take gate/up Q6_K — a pinned copy of
   llama.cpp's `vec_dot_q6_K_q8_1` behind `Fmt<14>`, and the dequantizer (`dequantize_q6_K` folded onto the kernel's
   32 threads). Per-token MMVQ (`native_mmvq`) already had Q6_K.
-- **The prompt path:** llama.cpp's MMQ prompt kernels instantiate Q6_K (the K-quant library, `STRATA_MMQ_KQ=1`; it builds
+- **The prompt path:** llama.cpp's MMQ prompt kernels instantiate Q6_K (the K-quant library, `SAGUARO_MMQ_KQ=1`; it builds
   `template-instances/mmq-instance-q6_k.cu` alongside q4_k/q5_k/q5_1; `moe_mmq` accepts and dispatches it).
 - **The gates:** `native_expert_supported` took Q6_K/Q8_0 pairs (gate/up Q8_0 as in layer 2 was already in the
   lists) — the engine previously refused the whole pack with "no GPU kernels for".

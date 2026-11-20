@@ -1,4 +1,4 @@
-// include/strata/core/coupled_draft.hpp - COUPLED DRAFT SAMPLING (STRATA_SPEC_COUPLED=1, off by default).
+// include/strata/core/coupled_draft.hpp - COUPLED DRAFT SAMPLING (SAGUARO_SPEC_COUPLED=1, off by default).
 //
 // Under sampling the verify window samples row t of a window at position pos0 as Philox(seed, pos0 + t) over the
 // sampler chain (penalties -> top_k -> top_p -> min_p -> temperature -> inverse-CDF pick; verify.cpp run(),
@@ -11,7 +11,7 @@
 // the two inverse-CDF picks from one uniform agree far more often than an argmax agrees with a sample; the target's
 // pick - and so the text - does not change, because verification is still exact-match against the target's sample.
 //
-// STRATA_SPEC_GUMBEL=1 (opt-in) replaces the inverse-CDF pick on BOTH sides with a Gumbel-max pick: argmax p_i / E_i,
+// SAGUARO_SPEC_GUMBEL=1 (opt-in) replaces the inverse-CDF pick on BOTH sides with a Gumbel-max pick: argmax p_i / E_i,
 // E_i ~ Exp(1) keyed by (seed, counter, token id) (sampler.cu `gumbel_exp`).  A token then gets the same noise in the
 // draft's and the target's draw whichever other tokens survived either cut, so they agree on the tokens they share;
 // with one uniform over two probability-sorted lists, a one-token difference in the lists shifts every later pick.
@@ -56,23 +56,23 @@ inline constexpr int kCoupledHistCap = 4096;
 
 inline bool& coupled_draft_state() {
     static bool on = [] {
-        const char* e = std::getenv("STRATA_SPEC_COUPLED");
+        const char* e = std::getenv("SAGUARO_SPEC_COUPLED");
         return e != nullptr && *e != '\0' && std::strcmp(e, "0") != 0;
     }();
     return on;
 }
 
-/// STRATA_SPEC_PROB=1: probabilistic draft acceptance (core/spec_prob.hpp).  It runs on the coupled drafter's
+/// SAGUARO_SPEC_PROB=1: probabilistic draft acceptance (core/spec_prob.hpp).  It runs on the coupled drafter's
 /// machinery (the chain's sampling over the draft head, the penalty ring), so it switches that setup on too.
 inline bool spec_prob_env() {
     static const bool on = [] {
-        const char* e = std::getenv("STRATA_SPEC_PROB");
+        const char* e = std::getenv("SAGUARO_SPEC_PROB");
         return e != nullptr && *e != '\0' && std::strcmp(e, "0") != 0;
     }();
     return on;
 }
 
-/// Whether coupled draft sampling is enabled (via STRATA_SPEC_COUPLED=1 or --coupled-draft CLI flag), or the
+/// Whether coupled draft sampling is enabled (via SAGUARO_SPEC_COUPLED=1 or --coupled-draft CLI flag), or the
 /// probabilistic mode that needs the same buffers and graphs.
 inline bool coupled_draft_env() {
     return coupled_draft_state() || spec_prob_env();

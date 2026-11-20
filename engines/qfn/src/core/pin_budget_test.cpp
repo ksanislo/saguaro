@@ -20,8 +20,8 @@ static int g_fail = 0;
 
 int main() {
     // the singleton reads its environment on first use: set everything first
-    SETENV("STRATA_TEST_PIN_BUDGET_MIB", "100");
-    SETENV("STRATA_PIN_RESERVE_MIB", "32");   // soft 32 MiB, hard 64 MiB (a quarter of 32 is below the 64 MiB floor)
+    SETENV("SAGUARO_TEST_PIN_BUDGET_MIB", "100");
+    SETENV("SAGUARO_PIN_RESERVE_MIB", "32");   // soft 32 MiB, hard 64 MiB (a quarter of 32 is below the 64 MiB floor)
     using namespace strata::core;
     if (cudaFree(0) != cudaSuccess) {
         std::printf("pin_budget_test: SKIP (no GPU)\n");

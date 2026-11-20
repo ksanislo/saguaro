@@ -191,7 +191,7 @@ class ArchiveVerification(unittest.TestCase):
         patch = mock.patch.dict(os.environ, {}, clear=False)
         env = patch.start()
         self.addCleanup(patch.stop)
-        env.pop("STRATA_SKIP_SHA256", None)
+        env.pop("SAGUARO_SKIP_SHA256", None)
 
     def digest(self, value):
         return mock.patch.object(setup, "engine_digest", return_value=value)
@@ -236,17 +236,17 @@ class ArchiveVerification(unittest.TestCase):
             self.assertTrue(self.z.exists())
 
     def test_skip_env_skips_the_check_loudly(self):
-        os.environ["STRATA_SKIP_SHA256"] = "1"
+        os.environ["SAGUARO_SKIP_SHA256"] = "1"
         said = io.StringIO()
         with mock.patch.object(setup, "engine_digest", return_value=(1, "0" * 64)) as m,                 mock.patch.object(setup, "warn", said.write):
             setup.verify_engine_archive(self.z, ASSET, TAG_BASE)     # a wrong digest, but skipped
         self.assertEqual(m.call_count, 0)
-        self.assertIn("STRATA_SKIP_SHA256", said.getvalue())
+        self.assertIn("SAGUARO_SKIP_SHA256", said.getvalue())
         self.assertIn("NOT checking", said.getvalue())
         self.assertTrue(self.z.exists())
 
     def test_skip_env_needs_exactly_1(self):
-        os.environ["STRATA_SKIP_SHA256"] = "0"
+        os.environ["SAGUARO_SKIP_SHA256"] = "0"
         with self.digest((1, "0" * 64)):
             with self.assertRaises(setup.UnverifiedEngine):
                 setup.verify_engine_archive(self.z, ASSET, TAG_BASE)

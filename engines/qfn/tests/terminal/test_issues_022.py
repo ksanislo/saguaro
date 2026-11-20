@@ -155,7 +155,7 @@ class WindowsRuntimeFolderRefused(unittest.TestCase):
             def restrict(path, directory=None):
                 state["fixed"] = True
 
-            env = {"STRATA_RUNTIME_DIR": str(base)}
+            env = {"SAGUARO_RUNTIME_DIR": str(base)}
             with self.mock.patch.dict(os.environ, env), self.mock.patch.object(pf, "dacl_sddl", side_effect=sddl), \
                     self.mock.patch.object(pf, "restrict_to_current_user", side_effect=restrict) as r, \
                     self.mock.patch.object(pf, "private_mkdir"), self.mock.patch.object(runtime, "_private_mkdir"):
@@ -168,7 +168,7 @@ class WindowsRuntimeFolderRefused(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp) / "runtime"
             base.mkdir()
-            with self.mock.patch.dict(os.environ, {"STRATA_RUNTIME_DIR": str(base)}), \
+            with self.mock.patch.dict(os.environ, {"SAGUARO_RUNTIME_DIR": str(base)}), \
                     self.mock.patch.object(pf, "dacl_sddl", return_value="D:PAI(A;OICI;FA;;;S-1-5-21-1-2-3-1001)(A;OICI;FR;;;BU)"), \
                     self.mock.patch.object(pf, "restrict_to_current_user", side_effect=OSError("denied")), \
                     self.mock.patch.object(runtime, "_private_mkdir"):
@@ -201,7 +201,7 @@ class WindowsRuntimeFolderMoreCases(unittest.TestCase):
             def rp(path, tree=True):
                 calls["repair"] += 1
                 return repair(calls) if repair else False
-            with mock.patch.dict(os.environ, {"STRATA_RUNTIME_DIR": str(base)}), \
+            with mock.patch.dict(os.environ, {"SAGUARO_RUNTIME_DIR": str(base)}), \
                     mock.patch.object(pf, "current_user_sid", return_value=self.ME), \
                     mock.patch.object(pf, "dacl_sddl", side_effect=sddl), \
                     mock.patch.object(pf, "restrict_to_current_user", side_effect=r), \

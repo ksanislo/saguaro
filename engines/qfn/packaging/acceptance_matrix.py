@@ -412,7 +412,7 @@ ROWS: dict[str, tuple[str, str, str]] = {
             "packaging/README.md, docs/work/evidence/tauri-artifact.txt"),
     "U12": ("passed",
             "A packaged build has no success path that uses demo responses or demo metrics: the "
-            "host refuses to simulate when STRATA_PACKAGED is set and returns a typed error "
+            "host refuses to simulate when SAGUARO_PACKAGED is set and returns a typed error "
             "instead, the monitor reports `none` rather than invented readings, and this matrix "
             "records every failure, skip and remaining item.",
             "docs/work/IMPLEMENTATION_STATUS.md 1.7, this file"),

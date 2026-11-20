@@ -135,9 +135,9 @@ class ThinkingBudget(unittest.TestCase):
 
     def test_reserve_override_cannot_consume_small_limit(self):
         from unittest.mock import patch
-        with patch.dict(os.environ, {"STRATA_GLM_THINK_RESERVE": "4096"}):
+        with patch.dict(os.environ, {"SAGUARO_GLM_THINK_RESERVE": "4096"}):
             self.assertGreaterEqual(self.call("openai", 512)["_think_budget"], 255)
-        with patch.dict(os.environ, {"STRATA_GLM_THINK_RESERVE": "16"}):
+        with patch.dict(os.environ, {"SAGUARO_GLM_THINK_RESERVE": "16"}):
             self.assertEqual(self.call("openai", 512)["_think_budget"], 383)
 
     def test_tiny_limits_still_honour_total_output(self):
@@ -151,7 +151,7 @@ class ThinkingBudget(unittest.TestCase):
         from unittest.mock import patch
         from serve.server import apply_server_env
         with patch.dict(os.environ):
-            apply_server_env({"env": {"STRATA_GLM_THINK_RESERVE": "16"}})
+            apply_server_env({"env": {"SAGUARO_GLM_THINK_RESERVE": "16"}})
             self.assertEqual(self.call("openai", 512)["_think_budget"], 383)
 
 
@@ -249,7 +249,7 @@ class MaxTokens(unittest.TestCase):
     def test_debug_log_shows_the_resolved_budget(self):
         import contextlib
         import io
-        os.environ["STRATA_DEBUG"] = "1"
+        os.environ["SAGUARO_DEBUG"] = "1"
         try:
             for api in ("openai", "anthropic"):
                 with self.subTest(api=api):
@@ -258,7 +258,7 @@ class MaxTokens(unittest.TestCase):
                         _, _, pt, _ = self.call(api, max_tokens=-1)
                     self.assertIn(f"max_new={CTX - CTX_SLACK - pt} ", out.getvalue())
         finally:
-            del os.environ["STRATA_DEBUG"]
+            del os.environ["SAGUARO_DEBUG"]
 
 
 class FitMaxTokens(unittest.TestCase):
@@ -674,7 +674,7 @@ class SamplingKeys(unittest.TestCase):
                               if k.startswith("read_chunks=")], bad)
 
     def test_miss_skip_tune_keys(self):
-        # the GLM engine's light-miss bar and first layer for one request (STRATA_GLM_MISS_SKIP_W / _FROM)
+        # the GLM engine's light-miss bar and first layer for one request (SAGUARO_GLM_MISS_SKIP_W / _FROM)
         k = self.keys(temperature=0, strata_tune={"miss_skip_w": 0.14, "miss_skip_from": 23})
         self.assertIn("miss_skip_w=0.14", k)
         self.assertIn("miss_skip_from=23", k)
@@ -2065,7 +2065,7 @@ class StallWatchdog(unittest.TestCase):
         import serve.server as S
         saved = {k: os.environ.get(k) for k in S.SERVER_ENV}
         try:
-            S.apply_server_env({"env": {"STRATA_ENGINE_STALL_S": "0", "STRATA_HTTP_BACKLOG": "64"}})
+            S.apply_server_env({"env": {"SAGUARO_ENGINE_STALL_S": "0", "SAGUARO_HTTP_BACKLOG": "64"}})
             self.assertEqual((S.ENGINE_STALL_S, S.Server.request_queue_size), (0.0, 64))
         finally:
             for k, v in saved.items():
@@ -2337,8 +2337,8 @@ class ModelManagement(unittest.TestCase):
         self.assertTrue(model_management_setting({}, env={}))
         self.assertTrue(model_management_setting({"model_management": True}, env={}))
         self.assertFalse(model_management_setting({"model_management": False}, env={}))
-        self.assertFalse(model_management_setting({"model_management": True}, env={"MAYA_MODEL_MANAGEMENT": "0"}))
-        self.assertTrue(model_management_setting({}, env={"MAYA_MODEL_MANAGEMENT": "on"}))
+        self.assertFalse(model_management_setting({"model_management": True}, env={"SAGUARO_MODEL_MANAGEMENT": "0"}))
+        self.assertTrue(model_management_setting({}, env={"SAGUARO_MODEL_MANAGEMENT": "on"}))
 
     def test_unload_load_and_the_state_stream(self):
         self.svc.model_management = True
@@ -2455,11 +2455,11 @@ class GoneClients(unittest.TestCase):
 
 class QueuedKeepAlives(GoneClients):
     """#483: a streamed request waiting in the queue for its first turn sends SSE keep-alive comments (every
-    MAYA_QUEUE_PING_S) - before, nothing at all, and a client with a stream-idle timeout gave up on a turn that was
+    SAGUARO_QUEUE_PING_S) - before, nothing at all, and a client with a stream-idle timeout gave up on a turn that was
     only waiting.  The answer after the wait is the same; the OpenAI and Anthropic streams alike."""
 
     def setUp(self):
-        self.env = unittest.mock.patch.dict(os.environ, {"MAYA_QUEUE_PING_S": "0.1"})
+        self.env = unittest.mock.patch.dict(os.environ, {"SAGUARO_QUEUE_PING_S": "0.1"})
         self.env.start()
         super().setUp()
 

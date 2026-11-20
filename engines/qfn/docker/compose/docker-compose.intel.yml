@@ -4,14 +4,14 @@
 #   cp .env.example .env
 #   docker compose -f docker-compose.intel.yml up -d
 #
-# Images: ghcr.io/niko1221/strata (published from 0.2.1 on). To use one you built yourself: STRATA_IMAGE=strata:0.2.3-<flavor> docker compose up -d
+# Images: ghcr.io/niko1221/strata (published from 0.2.1 on). To use one you built yourself: SAGUARO_IMAGE=strata:0.2.3-<flavor> docker compose up -d
 services:
   strata:
-    image: ${STRATA_IMAGE:-ghcr.io/niko1221/strata:0.2.3-sycl}
+    image: ${SAGUARO_IMAGE:-ghcr.io/niko1221/strata:0.2.3-sycl}
     container_name: strata
     restart: unless-stopped
     ports:
-      - "${STRATA_BIND:-127.0.0.1}:${STRATA_PORT:-8080}:8080"
+      - "${SAGUARO_BIND:-127.0.0.1}:${SAGUARO_PORT:-8080}:8080"
     environment:
       MODEL: ${MODEL:-}
       MODEL_PATH: ${MODEL_PATH:-}            # GGUF files you already have, as seen inside the container (mount them below)

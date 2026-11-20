@@ -1,7 +1,7 @@
 """Saved launch presets: the whole answer set of the setup screens under a name.
 
 One small JSON file per preset in `launch-presets/` beside the profiles folder (so it is found wherever the profiles are, and
-`STRATA_LAUNCH_PRESET_DIR` moves it for tests). The files are private to the user (they can hold the API key). The tuned
+`SAGUARO_LAUNCH_PRESET_DIR` moves it for tests). The files are private to the user (they can hold the API key). The tuned
 settings themselves are NOT copied here: a preset points at the tuning preset the tuner saved (`strata presets`, the store the
 desktop app also uses), so a re-tune in either place is seen in both. The profile the run uses (`strata profile`) is the shared
 one too (named `launch-<slug>`).
@@ -25,7 +25,7 @@ class PresetError(ValueError):
 
 
 def preset_dir() -> Path:
-    explicit = os.environ.get("STRATA_LAUNCH_PRESET_DIR")
+    explicit = os.environ.get("SAGUARO_LAUNCH_PRESET_DIR")
     if explicit:
         return Path(explicit).expanduser()
     from strata_control import profiles

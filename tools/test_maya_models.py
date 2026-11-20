@@ -148,7 +148,7 @@ class RestartAfterUpdate(unittest.TestCase):
 
     def test_update_exit_starts_the_new_version(self):
         _, call, execv, refresh = self.start(maya.UPDATE_EXIT)
-        self.assertEqual(call.call_args.kwargs["env"]["MAYA_RESTART_ON_UPDATE"], "1")
+        self.assertEqual(call.call_args.kwargs["env"]["SAGUARO_RESTART_ON_UPDATE"], "1")
         refresh.assert_called_once()                    # (the new saguaro.py compiles what changed when it starts)
         argv = execv.call_args.args[1]
         self.assertEqual(argv[1:3], [str(maya.HERE / "saguaro.py"), "--yes"])
@@ -346,7 +346,7 @@ class DraftChoice(unittest.TestCase):
             self.assertEqual(self.choose({}, pc=pc, yes=False), "dflash2")
 
     def test_the_mtp_text_says_how_this_pc_drafts(self):
-        """One NVIDIA GPU decodes without the MTP block; one Ryzen AI Max APU drafts with it (MAYA_GLM_MTP_DECODE)."""
+        """One NVIDIA GPU decodes without the MTP block; one Ryzen AI Max APU drafts with it (SAGUARO_GLM_MTP_DECODE)."""
         def mtp_text(pc):
             shown = []
             with patch.object(maya, "choose", side_effect=lambda q, intro, rows, d, y: shown.extend(rows) or 0):

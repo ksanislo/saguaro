@@ -348,7 +348,7 @@ void serve_header(mm3::Model& m, bool spec_on, const std::string& kv_fmt) {
 // The drafts are verified as DSpark's are (greedy: the target's argmax; sampling: kept with the target's probability
 // of the draft, else drawn without it), so every token is still the target's own.  Not beside MM3_SAMPLED_DRAFTS (its
 // drafts' distributions).  N: the shortest match proposed from (3); 0: off.  A request's suffix_draft=0|1 key turns
-// it off / on for that request (on: with N 3 when the engine started with it off).  MAYA_MM3_LOOKUP_TRUST=0 (a
+// it off / on for that request (on: with N 3 when the engine started with it off).  SAGUARO_MM3_LOOKUP_TRUST=0 (a
 // request's lookup_trust=0|1 over it): no trusted rounds, every round with DSpark drafts first.
 struct Lookup {
     static constexpr int kMaxT = 16;   // (the decode window's tokens at most: kWin in mm3_model.cu / mm3_tp.cu)
@@ -361,14 +361,14 @@ struct Lookup {
     Lookup(int min_match, size_t cap) : sfx(min_match, 64, cap), policy(kMaxT), buf((size_t) kMaxT) {}
 };
 
-// ---- saved conversations (MAYA_MM3_SLOT_DIR, one conversation at a time with KV streaming: Model::state_ok): the
+// ---- saved conversations (SAGUARO_MM3_SLOT_DIR, one conversation at a time with KV streaming: Model::state_ok): the
 // conversation in the cache is written to the folder when a request that does not continue it would drop it (it is at
-// least MAYA_MM3_SLOT_MIN tokens, 1024) and when the engine ends (QUIT: the server's unload), and a request whose
+// least SAGUARO_MM3_SLOT_MIN tokens, 1024) and when the engine ends (QUIT: the server's unload), and a request whose
 // prompt continues a saved one (all of its tokens, more than the cache shares with the request) reads it back instead
 // of reading those tokens again - across model swaps and restarts.  A conversation: conv-<hash>.bin (Model::state_save)
 // and .meta (this model's identity, the tokens), written under temporary names first; a newer save of a conversation
-// removes its older, shorter ones.  The folder's .bin files are kept under MAYA_MM3_SLOT_GB (64), least recently used
-// first out; older than MAYA_MM3_SLOT_DAYS (7) days: removed at start.  Conversations with pictures are not saved.
+// removes its older, shorter ones.  The folder's .bin files are kept under SAGUARO_MM3_SLOT_GB (64), least recently used
+// first out; older than SAGUARO_MM3_SLOT_DAYS (7) days: removed at start.  Conversations with pictures are not saved.
 struct SlotStore {
     struct Slot {
         std::string bin;
@@ -558,7 +558,7 @@ int serve(mm3::Model& m, const std::vector<int>& eos, int chunk, bool spec_on, f
     SlotStore slots;
     if (const char* sd = ::mm3::env("MM3_SLOT_DIR")) {
         if (m.state_ok()) slots.open(sd, m.state_id() + " pack=" + pack);
-        else SlotStore::note("conversations are saved with KV streaming and one conversation at a time only (MAYA_MM3_SLOT_DIR ignored)");
+        else SlotStore::note("conversations are saved with KV streaming and one conversation at a time only (SAGUARO_MM3_SLOT_DIR ignored)");
     }
     // (the prompt lookup: one policy over every request of this run)
     std::unique_ptr<Lookup> lk;
@@ -1002,7 +1002,7 @@ int serve_multi(mm3::Model& m, const std::vector<int>& eos, int chunk, const std
     SlotStore slots;   // (each conversation's cache: saved / read back as serve()'s one, the sequence bound first)
     if (const char* sd = ::mm3::env("MM3_SLOT_DIR")) {
         if (m.state_ok()) slots.open(sd, m.state_id() + " pack=" + pack);
-        else SlotStore::note("conversations are saved with KV streaming only (MAYA_MM3_SLOT_DIR ignored)");
+        else SlotStore::note("conversations are saved with KV streaming only (SAGUARO_MM3_SLOT_DIR ignored)");
     }
     const bool abl_default = m.ablating();   // (a GEN without ablate=: as the engine started)
     std::printf("READY %d stop multi=%d\n", m.max_ctx(), N);
@@ -1173,7 +1173,7 @@ int serve_multi(mm3::Model& m, const std::vector<int>& eos, int chunk, const std
     };
     // a decode step: the written tokens of every request going on read together (Model::forward_rows)
     std::vector<int> ids_, sq_, ps_;
-    // (MAYA_MM3_ELASTIC) a row whose conversation needs index keys the GPUs cannot give: that request alone fails
+    // (SAGUARO_MM3_ELASTIC) a row whose conversation needs index keys the GPUs cannot give: that request alone fails
     auto room = [&](std::vector<Gen*>& rows) {
         std::string err;
         rows.erase(std::remove_if(rows.begin(), rows.end(), [&](Gen* gp) {
@@ -1203,7 +1203,7 @@ int serve_multi(mm3::Model& m, const std::vector<int>& eos, int chunk, const std
         feed(ready());
         sweep();
     };
-    // a layer split's pipeline (Model::pipe_tick; MAYA_MM3_PIPE=0: off - the requests read together instead): each
+    // a layer split's pipeline (Model::pipe_tick; SAGUARO_MM3_PIPE=0: off - the requests read together instead): each
     // tick a group of the ready requests enters the first GPU - about 1 / stages of all the requests, so the GPUs each
     // hold one - and the groups past the last GPU draw their next tokens
     const int stages = mm3::env("MM3_PIPE") && std::atoi(mm3::env("MM3_PIPE")) == 0 ? 1 : m.pipe_stages();
@@ -1244,7 +1244,7 @@ int serve_multi(mm3::Model& m, const std::vector<int>& eos, int chunk, const std
     auto pipe_step = [&]() {
         show();
         std::vector<Gen*> rows = ready();
-        for (Gen* gp : rows) {   // (MAYA_MM3_ELASTIC: index keys past the free VRAM - the pipeline empty first)
+        for (Gen* gp : rows) {   // (SAGUARO_MM3_ELASTIC: index keys past the free VRAM - the pipeline empty first)
             const int pos = (int) seqs[(size_t) gp->seq].state.size();
             std::string err;
             if (m.pipe_busy() > 0 && m.ctx_room(gp->seq) <= pos && !m.ctx_fit(gp->seq, pos + 1, err)) {
@@ -1362,7 +1362,7 @@ int serve_multi(mm3::Model& m, const std::vector<int>& eos, int chunk, const std
         S.state.resize(bfrom2);
         S.held.clear();
         S.abl = abl;
-        if (!m.ctx_fit(best, (int) ids.size(), err)) {   // (MAYA_MM3_ELASTIC: its index keys' VRAM, the rest given back)
+        if (!m.ctx_fit(best, (int) ids.size(), err)) {   // (SAGUARO_MM3_ELASTIC: its index keys' VRAM, the rest given back)
             std::printf("ERR %d %s\n", g.rid, err.c_str());
             std::printf("DONE %d 0 %zu 0.0 0.0 cancel 0 0 0 0 0\n", g.rid, ids.size());
             std::fflush(stdout);
@@ -1947,9 +1947,9 @@ int main(int argc, char** argv) {
     }
 #if defined(_WIN32)
     // Windows sleeps in 15.6 ms ticks unless a process asks for finer ones (the CPU lane's idle workers, the waits'
-    // naps).  MAYA_MM3_TIMER_MS=0: leave the system's resolution alone
+    // naps).  SAGUARO_MM3_TIMER_MS=0: leave the system's resolution alone
     {
-        const char* v = std::getenv("MAYA_MM3_TIMER_MS");
+        const char* v = std::getenv("SAGUARO_MM3_TIMER_MS");
         const int ms = v != nullptr ? std::atoi(v) : 1;
         if (ms > 0) timeBeginPeriod((UINT) ms);
     }
@@ -2113,7 +2113,7 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "maya-mm3: %s\n", err.empty() ? "the pack has no vision tower" : err.c_str());
             return 1;
         }
-        void* lent = nullptr;   // (MAYA_MM3_VISION_LEND=1: the lender's path tested - a room lent, given back)
+        void* lent = nullptr;   // (SAGUARO_MM3_VISION_LEND=1: the lender's path tested - a room lent, given back)
         if (const char* fl = mm3::env("MM3_VISION_LEND"); fl && std::atoi(fl) == 1)
             v.set_lender([&lent](size_t b) { return cudaMalloc(&lent, b) == cudaSuccess ? lent : nullptr; },
                          [&lent]() {

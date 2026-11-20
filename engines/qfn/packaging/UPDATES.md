@@ -2,7 +2,7 @@
 
 Everything that downloads software on a user's PC lives behind one explicit step: `strata update` in the Terminal, or
 "Update engine" / "Update Strata" in the app's Settings. Starting a model and serving never download anything
-(`STRATA_NO_ACQUIRE` stays on for them; the update step is a separate Control process that is allowed to). Engines are
+(`SAGUARO_NO_ACQUIRE` stays on for them; the update step is a separate Control process that is allowed to). Engines are
 separate from the app and ship more often: an app-only update downloads 0 engine bytes (the update installers are built without the engine), an engine update downloads only the
 package for that PC's GPU. **Models and saved tuning presets are never downloaded, replaced or deleted by any update.**
 
@@ -52,7 +52,7 @@ For a GitHub release the assets are flat: pack with `--url-prefix ""` and upload
 
 ### What a PC checks, in order
 
-1. the signature of the feed (key ids it trusts: `strata_control/update_keys.json`, plus `STRATA_UPDATE_TRUSTED_KEYS` for a test setup, which
+1. the signature of the feed (key ids it trusts: `strata_control/update_keys.json`, plus `SAGUARO_UPDATE_TRUSTED_KEYS` for a test setup, which
    the CLI announces);
 2. `channel`, `expires_at`, and `sequence` not lower than the last accepted feed (the downgrade guard for a replayed old feed);
 3. the engine package that fits **this** PC (`feed.select_engine`): platform, backend (CUDA / HIP / SYCL / Metal as detected),
@@ -104,7 +104,7 @@ Then, in git, once, in the commit that ships the first signed release (done for 
 * the Tauri public key into `apps/desktop/src-tauri/tauri.conf.json` (`plugins.updater.pubkey`) and into `update_keys.json` as `app_minisign_public`
   (the Terminal verifies the app installer with it).
 
-Only release keys live in `update_keys.json`. A tester or local-test key is never added there: it is passed with `STRATA_UPDATE_TRUSTED_KEYS`
+Only release keys live in `update_keys.json`. A tester or local-test key is never added there: it is passed with `SAGUARO_UPDATE_TRUSTED_KEYS`
 (a file of extra public keys; `packaging/make_local_feed.py` writes one as `test-trust.json`), so private tester builds keep working
 without their key being part of a release build. A build whose `update_keys.json` is empty (a source checkout from before the keys) refuses every
 feed with "this build trusts no update key".
@@ -176,7 +176,7 @@ The feed is hosted as the files of a GitHub release of `Niko1221/Strata`. The bu
 `https://github.com/Niko1221/Strata/releases/latest/download` (`strata_cli/update_cmd.py` `DEFAULT_FEED` adds `/strata-feed.json`; `install.sh`
 and `install.ps1` use the folder). GitHub assets are flat, so build the packages with `--url-prefix ""` and upload every file of the release folder
 as an asset: `strata-feed.json`, `strata-feed.json.sig`, `install-manifest.txt`, `install.sh`, `install.ps1`, the engine and Control archives and the
-app installer with `latest.json` (the Tauri updater endpoint). `STRATA_FEED` (installers) and `--feed` / `STRATA_UPDATE_FEED` (`strata update`) override the
+app installer with `latest.json` (the Tauri updater endpoint). `SAGUARO_FEED` (installers) and `--feed` / `SAGUARO_UPDATE_FEED` (`strata update`) override the
 address. Nothing in this tree uploads anything.
 
 Publish as a normal release (latest): a pre-release is not found by `latest/download`, so the installers, `strata update` and the app updater would get a 404. The `latest` release must carry every file listed above, so a later hotfix release repeats them all. The app updater reads

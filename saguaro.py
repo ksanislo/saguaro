@@ -49,8 +49,8 @@ no tuning step - it balances its own split):
 The tuning (tools/calibrate_glm.py): decode speed measured with a few splits of the RAM-tier
 experts between the CPU and the PCIe link, with fewer and more CPU threads, and - when part of the model is read from
 the SSD - with smaller disk reads, in one engine run (~10-15 minutes, the model loads first); a setting is kept when
-it is more than 3% faster than the engine's own choice.  The result goes into the config's "env" (STRATA_GLM_PCIE_SHARE,
-STRATA_GLM_CPU_LANE, STRATA_GLM_READ_CHUNKS) and into ~/.config/project-maya/calibration.json for this PC, model and
+it is more than 3% faster than the engine's own choice.  The result goes into the config's "env" (SAGUARO_GLM_PCIE_SHARE,
+SAGUARO_GLM_CPU_LANE, SAGUARO_GLM_READ_CHUNKS) and into ~/.config/project-maya/calibration.json for this PC, model and
 context, so a setup again keeps it.  DeepSeek-V4.1-Flash-1017's (tools/calibrate_ds4_tp.py, ./saguaro.sh --calibrate only):
 decode speed with each --tp that groups the GPUs differently and with fewer CPU threads, an engine start each (~25-40
 minutes on 9 GPUs); a setting is kept when it is more than 5% faster and still reads a long prompt at 60% of the
@@ -80,7 +80,6 @@ sys.path.insert(0, str(HERE / "tools"))
 import setup as S  # noqa: E402  Strata's installer: PC checks, pip, llama.cpp, downloads (nothing runs on import)
 from setup import ask, fail, ok, run, say, step, warn  # noqa: E402
 import maya_import as MI  # noqa: E402  --import-model: model files downloaded some other way, found by size + sha256
-import maya_names as N  # noqa: E402  the settings' names users see (MAYA_*) and the older ones the code reads
 import maya_quants as Q  # noqa: E402  the quants' names users see (MiniMax M3.1 · Maya-XS) and the older ones as aliases
 import calibrate_glm as CAL  # noqa: E402  the CPU lane's tuning for this PC (./saguaro.sh --calibrate)
 import calibrate_ds4_tp as CAL4  # noqa: E402  DeepSeek's: --tp and the CPU threads (./saguaro.sh --calibrate)
@@ -735,7 +734,7 @@ def hf_url(repo: str, revision: str, folder: str, file: str) -> str:
 
 def read_json(path: Path) -> dict:
     try:
-        return N.env_in(json.loads(path.read_text(encoding="utf-8-sig")))   # (a config's settings: see maya_names)
+        return json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
         return {}
 
@@ -1553,7 +1552,7 @@ def check_pc(a, family: str = "glm", gguf: bool = False, ds4_quant: str = "exl3"
         ok(f"CPU: {cpu} (ARM64, {os.cpu_count()} threads; the expert kernels use ggml-cpu's NEON paths)")
     elif not avx2:
         warn(f"the CPU ({cpu}) has no AVX2: the engine runs, its CPU expert lane on ggml's own kernels (slower; "
-             "on 2x Xeon E5-2660 v2 it still added ~15% to 4-GPU decode). MAYA_GLM_CPU_LANE=0 turns it off")
+             "on 2x Xeon E5-2660 v2 it still added ~15% to 4-GPU decode). SAGUARO_GLM_CPU_LANE=0 turns it off")
     else:
         ok(f"CPU: {cpu} ({'AVX-512' if avx512 else 'AVX2'}, {os.cpu_count()} threads)")
 
@@ -2901,7 +2900,7 @@ def pack_step(a, d: Path, shards: list, llama: Path, quant: str | None = None) -
              "--gguf-dir DIR")
     say("  Writing the index of every tensor, the small float weights (about 1 GB) and the tokenizer; the experts")
     say("  stay in the GGUF files (a few minutes) ...")
-    env = dict(os.environ, STRATA_GGUF_PY=str(llama / "gguf-py"))
+    env = dict(os.environ, SAGUARO_GGUF_PY=str(llama / "gguf-py"))
     # --compat-bf16: the GLM pack stores the projections its kernels read as BF16 (router, indexer, absorbed MLA,
     # KDA gates) in BF16 even where the GGUF quantized them or keeps them F32 (tools/iq_pack.py GLM5NEXT_BF16)
     run([sys.executable, str(ROOT / "tools" / "iq_pack.py"), "--gguf", str(shards[0]), "--out", str(pack),
@@ -3148,8 +3147,8 @@ def parse_env(items) -> dict:
     for it in items:
         k, sep, v = it.partition("=")
         if not sep or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", k):
-            fail(f"--env takes KEY=VALUE, e.g. --env MAYA_GLM_RAM_HEADROOM_GB=4, not {it!r}")
-        env[N.read_as(k)] = v                          # (in memory under the name the code reads; MAYA_ on disk)
+            fail(f"--env takes KEY=VALUE, e.g. --env SAGUARO_GLM_RAM_HEADROOM_GB=4, not {it!r}")
+        env[k] = v                                     # (one setting, one name)
     return env
 
 
@@ -3264,23 +3263,23 @@ def write_config(a, pc, meta, pack: Path, quant: str, ctx: int, models: Path, vi
         cfg["backend"] = "hip"
         # Leave space for the Linux desktop. The engine sizes its prompt chunk from
         # the available prompt-memory budget; forcing 256 here severely slows HIP.
-        hip_env = {"STRATA_GLM_RESERVE_MB": str(hip_reserve_mib(pc["gpus"])), "STRATA_GLM_RAM_HEADROOM_GB": "16"}
+        hip_env = {"SAGUARO_GLM_RESERVE_MB": str(hip_reserve_mib(pc["gpus"])), "SAGUARO_GLM_RAM_HEADROOM_GB": "16"}
         gpus = pc["gpus"]
         if len(gpus) == 1:
-            hip_env["STRATA_GLM_SPLIT"] = "0"   # two or more cards: the engine picks the split (and drafts with MTP)
+            hip_env["SAGUARO_GLM_SPLIT"] = "0"   # two or more cards: the engine picks the split (and drafts with MTP)
         # Larger prompt sub-batches feed the matrix cores much better (7900 XT: ~250 -> ~410 tok/s); they need
         # a bigger prompt budget, borrowed from the expert pool only while a prompt runs.
         if any(hip_unified_memory(g) for g in gpus):
             if len(gpus) > 1:
                 # Pin the first part's RAM tier before the APU measures the shared memory left.
-                hip_env["STRATA_GLM_PARALLEL_LOAD"] = "0"
+                hip_env["SAGUARO_GLM_PARALLEL_LOAD"] = "0"
             total_ram, _ = mem_gb()
             if WIN:     # Windows counts the GPU's carve-out apart from its RAM, and its desktop runs on that GPU
                 total_ram += sum(g.get("vram_gb", 0) for g in gpus)
-            hip_env.update({"STRATA_GLM_PREFILL_SUB": "1024",
-                            "STRATA_GLM_PREFILL_MB": "6144" if total_ram >= 96 else "4096"})
+            hip_env.update({"SAGUARO_GLM_PREFILL_SUB": "1024",
+                            "SAGUARO_GLM_PREFILL_MB": "6144" if total_ram >= 96 else "4096"})
         elif min(g.get("vram_gb", 0) for g in gpus) >= 20:
-            hip_env.update({"STRATA_GLM_PREFILL_SUB": "1024", "STRATA_GLM_PREFILL_MB": "4096"})
+            hip_env.update({"SAGUARO_GLM_PREFILL_SUB": "1024", "SAGUARO_GLM_PREFILL_MB": "4096"})
         # Pass every available version per architecture: the engine's existing header guard selects the
         # table matching each card and its installed hipBLASLt, or keeps plain hipBLAS when none matches.
         # A version can have more than one table (<version>.txt, then <version>-b.txt, ...: builds of one hipBLASLt
@@ -3293,7 +3292,7 @@ def write_config(a, pc, meta, pack: Path, quant: str, ctx: int, models: Path, vi
             tables.extend(str(path) for path in found)
         if tables:
             # the OS's path-list separator: a ':' would also split a Windows drive letter (C:\...)
-            hip_env["STRATA_HIPBLASLT_TUNING"] = os.pathsep.join(tables)
+            hip_env["SAGUARO_HIPBLASLT_TUNING"] = os.pathsep.join(tables)
         env = {**hip_env, **env}
     if env:
         cfg["env"] = env
@@ -3350,7 +3349,7 @@ def write_config(a, pc, meta, pack: Path, quant: str, ctx: int, models: Path, vi
            (": " + ", ".join(f"{k}={v}" for k, v in cal["settings"].items()) if cal.get("settings") else ""))
         if cal.get("context"):
             ok(f"(tuned at context {cal['context']}: {ME} --calibrate tunes this context too)")
-    cfg_path.write_text(json.dumps(N.env_out(cfg), indent=1), encoding="utf-8")
+    cfg_path.write_text(json.dumps(cfg, indent=1), encoding="utf-8")
     ok(f"config: {cfg_path}")
     ok(f"start script: {write_run_script(cfg_path, port)}")
     return cfg_path
@@ -3619,7 +3618,7 @@ def gpu_env_changes(was: dict, now: dict) -> list:
 def stale_tuning(cfg: dict) -> str | None:
     """The CPU lane's tuned settings in the config's env (CAL.KEYS: setup's calibration, or one kept by hand) left out
     when the driver, the GPUs' slots or their P2P layout changed since they were measured (#419: a P2P driver installed
-    later made a split's STRATA_GLM_PCIE_SHARE=0.25 pin the wrong experts - 25 tok/s instead of 40), so the engine
+    later made a split's SAGUARO_GLM_PCIE_SHARE=0.25 pin the wrong experts - 25 tok/s instead of 40), so the engine
     measures again at its start.  `cfg` is changed in place; the message, or None (nothing changed).  Settings without
     a record of where they were measured (an older config) get this PC's now, so the next change is seen."""
     env = cfg.get("env") or {}
@@ -3637,7 +3636,7 @@ def stale_tuning(cfg: dict) -> str | None:
     diff = gpu_env_changes(was, now)
     if not diff:
         return None
-    dropped = ", ".join(f"{N.shown(k)}={env[k]}" for k in keys)
+    dropped = ", ".join(f"{k}={env[k]}" for k in keys)
     rest = {k: v for k, v in env.items() if k not in keys}
     if rest:
         cfg["env"] = rest
@@ -3710,7 +3709,7 @@ def calibrate_config(cfg_path: Path) -> bool:
     ge = gpu_env(cfg)                                  # (where it was measured: a driver or P2P change re-measures, #419)
     if ge:
         cfg.setdefault("installer", {})["tuned_on"] = ge
-    cfg_path.write_text(json.dumps(N.env_out(cfg), indent=1), encoding="utf-8")
+    cfg_path.write_text(json.dumps(cfg, indent=1), encoding="utf-8")
     store = load_calibrations()
     store[hardware_key(cfg)] = {"settings": res["settings"], "tok_s": res["report"].get("tok_s"),
                                 "date": time.strftime("%Y-%m-%d"), **({"gpu_env": ge} if ge else {})}
@@ -3901,7 +3900,7 @@ def speed_calibration(cfg_path: Path, why: str = "") -> bool:
             say(f"       the engine said: {why_not}")
         cfg.setdefault("installer", {})["speed_calibration"] = {"date": time.strftime("%Y-%m-%d %H:%M"),
                                                                 "failed": str(e)[:300]}
-        cfg_path.write_text(json.dumps(N.env_out(cfg), indent=1), encoding="utf-8")
+        cfg_path.write_text(json.dumps(cfg, indent=1), encoding="utf-8")
         return False
     o, d = res["other"]["tok_s"], res["dflash2"]["tok_s"]
     keep = res["keep"] == "dflash2"
@@ -3911,7 +3910,7 @@ def speed_calibration(cfg_path: Path, why: str = "") -> bool:
     inst["speed_calibration"] = {"date": time.strftime("%Y-%m-%d %H:%M"), "version": maya_version(),
                                  "dflash2_tok_s": d, ("no_drafting" if one else "mtp") + "_tok_s": o,
                                  "tokens": [res["other"]["tokens"], res["dflash2"]["tokens"]], "kept": inst["draft"]}
-    cfg_path.write_text(json.dumps(N.env_out(out), indent=1), encoding="utf-8")
+    cfg_path.write_text(json.dumps(out, indent=1), encoding="utf-8")
     say()
     if keep:
         ok(f"speed calibration: DFlash2 is faster on this PC - {d:.1f} against {o:.1f} tokens/s with {other} "
@@ -3959,13 +3958,13 @@ def prefill_calibration(cfg_path: Path, why: str = "") -> bool:
             say(f"       the engine said: {why_not}")
         cfg.setdefault("installer", {})["prefill_calibration"] = {"date": time.strftime("%Y-%m-%d %H:%M"),
                                                                   "failed": str(e)[:300]}
-        cfg_path.write_text(json.dumps(N.env_out(cfg), indent=1), encoding="utf-8")
+        cfg_path.write_text(json.dumps(cfg, indent=1), encoding="utf-8")
         return False
     cfg.setdefault("installer", {})["prefill_calibration"] = {
         "date": time.strftime("%Y-%m-%d %H:%M"), "version": maya_version(), "chunk": res.get("chunk"),
         "gemm": res.get("gemm"), "tok_s": res.get("tok_s"), "default_tok_s": res.get("default_tok_s"),
         "tokens": res.get("tokens"), "file": res.get("file")}
-    cfg_path.write_text(json.dumps(N.env_out(cfg), indent=1), encoding="utf-8")
+    cfg_path.write_text(json.dumps(cfg, indent=1), encoding="utf-8")
     t, d = res.get("tok_s") or 0, res.get("default_tok_s") or 0
     gemm = {"hipblaslt": "hipBLASLt", "blas": "the BLAS's"}.get(res.get("gemm"), res.get("gemm"))
     gain = f" (+{(t / d - 1) * 100:.0f}% over the defaults' {d:.0f})" if d > 0 and t > d * 1.005 else \
@@ -4010,7 +4009,7 @@ def speed_calibration_ds4(cfg_path: Path, cfg: dict, why: str = "") -> bool:
             say(f"       the engine said: {why_not}")
         cfg.setdefault("installer", {})["speed_calibration"] = {"date": time.strftime("%Y-%m-%d %H:%M"),
                                                                 "failed": str(e)[:300]}
-        cfg_path.write_text(json.dumps(N.env_out(cfg), indent=1), encoding="utf-8")
+        cfg_path.write_text(json.dumps(cfg, indent=1), encoding="utf-8")
         return False
     o, d = res["none"]["tok_s"], res["dspark"]["tok_s"]
     keep = res["keep"] == "dspark"
@@ -4019,7 +4018,7 @@ def speed_calibration_ds4(cfg_path: Path, cfg: dict, why: str = "") -> bool:
         "date": time.strftime("%Y-%m-%d %H:%M"), "version": maya_version(), "dspark_tok_s": d, "no_drafting_tok_s": o,
         "drafts_accepted": [res["dspark"]["drafts_accepted"], res["dspark"]["drafts_offered"]],
         "tokens": [res["none"]["tokens"], res["dspark"]["tokens"]], "kept": "dspark" if keep else "none"}
-    cfg_path.write_text(json.dumps(N.env_out(out), indent=1), encoding="utf-8")
+    cfg_path.write_text(json.dumps(out, indent=1), encoding="utf-8")
     say()
     if keep:
         ok(f"speed calibration: the DSpark drafter is faster on this PC - {d:.1f} against {o:.1f} tokens/s "
@@ -4062,7 +4061,7 @@ def keep_drafting(cfg_path: Path, on: bool) -> None:
             args += ["--mtp-max-t", "1"]
         cfg.setdefault("installer", {})["mtp_calibration"] = {"date": time.strftime("%Y-%m-%d %H:%M"),
                                                                "skipped": "chosen", "kept": "mtp" if on else "none"}
-        cfg_path.write_text(json.dumps(N.env_out(cfg), indent=1), encoding="utf-8")
+        cfg_path.write_text(json.dumps(cfg, indent=1), encoding="utf-8")
         ok(f"speed calibration skipped: Saguaro {'drafts with the MTP drafter' if on else 'decodes without drafting'}, "
            "as chosen")
         return
@@ -4074,7 +4073,7 @@ def keep_drafting(cfg_path: Path, on: bool) -> None:
     out.setdefault("installer", {})["speed_calibration"] = {"date": time.strftime("%Y-%m-%d %H:%M"),
                                                             "version": maya_version(), "skipped": "chosen",
                                                             "kept": kept}
-    cfg_path.write_text(json.dumps(N.env_out(out), indent=1), encoding="utf-8")
+    cfg_path.write_text(json.dumps(out, indent=1), encoding="utf-8")
     name = "the DSpark drafter" if ds4 else "DFlash2"
     if on:
         ok(f"speed calibration skipped: Saguaro drafts with {name}, as chosen")
@@ -4093,19 +4092,17 @@ def server_command(cfg_path: Path, a) -> tuple:
     cfg = read_json(cfg_path)
     check_parallel(a, config_family(cfg))
     rename_programs()
-    renamed = fix_config_names(cfg)                    # (v1.1.16's names: the programs, and the settings as MAYA_*)
-    try:
-        old_env = any(str(k).startswith(N.OLD) for k in
-                      json.loads(cfg_path.read_text(encoding="utf-8-sig")).get("env") or {})
-    except (OSError, ValueError, AttributeError):
-        old_env = False
+    renamed = fix_config_names(cfg)                    # (v1.1.16's names: the programs)
+    old_env = migrate_env_names(cfg)                   # (a config of the old setting names: rewritten to SAGUARO_*)
     if renamed or old_env:
-        cfg_path.write_text(json.dumps(N.env_out(cfg), indent=1), encoding="utf-8")
+        cfg_path.write_text(json.dumps(cfg, indent=1), encoding="utf-8")
+    if old_env:
+        ok(f"{cfg_path.name}: its settings use the SAGUARO_* names now")
     if renamed:
         ok(f"{cfg_path.name}: the programs use their current names now ({Path(cfg['exe']).name})")
     if getattr(a, "parallel", None):                   # --parallel given at a start: kept in the config
         set_arg(cfg.setdefault("args", []), "--parallel", a.parallel)
-        cfg_path.write_text(json.dumps(N.env_out(cfg), indent=1), encoding="utf-8")
+        cfg_path.write_text(json.dumps(cfg, indent=1), encoding="utf-8")
     select_build_backend(cfg.get("backend", "cuda"))
     args = cfg.get("args") or []
     ds4 = config_family(cfg) == "deepseek"
@@ -4139,10 +4136,10 @@ def server_command(cfg_path: Path, a) -> tuple:
         if not (pack / PACK_SOURCES).exists():
             stamp_pack(pack, shard_set(pack.parent / src))
     if add_profile(cfg):                               # a config written before the expert profile (an update)
-        cfg_path.write_text(json.dumps(N.env_out(cfg), indent=1), encoding="utf-8")
+        cfg_path.write_text(json.dumps(cfg, indent=1), encoding="utf-8")
     stale = stale_tuning(cfg)                          # tuned before a driver / P2P change: measured again (#419)
     if stale is not None:
-        cfg_path.write_text(json.dumps(N.env_out(cfg), indent=1), encoding="utf-8")
+        cfg_path.write_text(json.dumps(cfg, indent=1), encoding="utf-8")
         if stale:
             warn(f"{cfg_path.name}: {stale}")
         ok(f"{cfg_path.name}: starts from the shipped expert profile now (--expert-profile {PROFILE})")
@@ -4166,7 +4163,7 @@ def server_command(cfg_path: Path, a) -> tuple:
     port = a.port or cfg.get("port") or 8080
     host = a.host or cfg.get("host") or "127.0.0.1"
     key = a.api_key or cfg.get("api_key")
-    cmd = [sys.executable, str(ROOT / "serve" / "server.py"), "--engine", "maya", "--config", str(cfg_path),
+    cmd = [sys.executable, str(ROOT / "serve" / "server.py"), "--config", str(cfg_path),
            "--port", str(port)]
     if a.host:
         cmd += ["--host", a.host]
@@ -4184,7 +4181,7 @@ def server_command(cfg_path: Path, a) -> tuple:
             "context": ctx, "dashboard": f"http://{here}:{port}/", "api": f"http://{here}:{port}/v1",
             "log": cfg.get("log"), "key": (key or "").split(",")[0],      # (its dashboard reads /metrics with it)
             "gpus": [int(g) for g in gpus if g.strip().isdigit()]}         # (its load: one part each, in this order)
-    env = dict(os.environ, MAYA_RESTART_ON_UPDATE="1")  # (the dashboard may update Saguaro)
+    env = dict(os.environ, SAGUARO_RESTART_ON_UPDATE="1")  # (the dashboard may update Saguaro)
     if S.UI is not None:                               # (the setup's screen shows the same in its card, and reads
         env["PYTHONUNBUFFERED"] = "1"                  # the server's output from a pipe)
         found = S.amd_gpus() if cfg.get("backend") == "hip" else metal_gpus() if metal else S.gpus()
@@ -4205,7 +4202,7 @@ def server_command(cfg_path: Path, a) -> tuple:
         say("  the rest in pinned RAM for its CPU lane - the first answers are the slowest.")
     elif config_family(cfg) == "qwen":
         say("  Loading takes a few minutes: the engine places the most-used experts in VRAM, the next ones in RAM as far")
-        say("  as the free RAM goes (MAYA_EXPERT_RAM_GB caps it) and reads the rest from the SSD when they are routed.")
+        say("  as the free RAM goes (SAGUARO_EXPERT_RAM_GB caps it) and reads the rest from the SSD when they are routed.")
     elif ds4:
         say("  Loading takes a few minutes: the engine places the experts in VRAM by how often they are used, copies the")
         say("  rest into RAM for its CPU lane and pins them - the first answers are the slowest.")
@@ -4214,7 +4211,7 @@ def server_command(cfg_path: Path, a) -> tuple:
         say("  experts stream from the SSD while it answers (decode speed is SSD-bound) - the first answers are the slowest.")
     else:
         say("  Loading takes a few minutes: the engine pins up to all but about 6 GB of the free RAM for its expert tier")
-        say("  (MAYA_GLM_RAM_HEADROOM_GB changes the 6) and warms its caches - the first answers are the slowest.")
+        say("  (SAGUARO_GLM_RAM_HEADROOM_GB changes the 6) and warms its caches - the first answers are the slowest.")
     say("  Ctrl+C (or closing this terminal) stops it. Engine log: " + str(cfg.get("log", "")))
     say("  " + "-" * 100)
     return cmd, env, info
@@ -5751,7 +5748,7 @@ def write_config_ds4(a, pc: dict, meta: dict, pack: Path, ctx: int, models: Path
                f": {ds4_tuned(new)}")
             if cal.get("context"):
                 ok(f"(tuned at context {cal['context']}: {ME} --calibrate tunes this context too)")
-    cfg_path.write_text(json.dumps(N.env_out(cfg), indent=1), encoding="utf-8")
+    cfg_path.write_text(json.dumps(cfg, indent=1), encoding="utf-8")
     ok(f"config: {cfg_path}")
     ok(f"start script: {write_run_script(cfg_path, port)}")
     if ds4_seed_profile(cfg):
@@ -6333,7 +6330,7 @@ def write_config_mm3(a, pc: dict, meta: dict, pack: Path, ctx: int, models: Path
                         "quant": MM3 if quant == "exl3" else MM3_QUANTS[quant], "mm3_quant": quant,
                         "model_dir": str(d), **({"own": True} if own else {}),
                         "written": time.strftime("%Y-%m-%d %H:%M")}
-    cfg_path.write_text(json.dumps(N.env_out(cfg), indent=1), encoding="utf-8")
+    cfg_path.write_text(json.dumps(cfg, indent=1), encoding="utf-8")
     ok(f"config: {cfg_path}")
     ok(f"start script: {write_run_script(cfg_path, port)}")
     if moved:   # (this quant's config under the name before: its dashboard settings come along, the old files go)
@@ -6503,7 +6500,7 @@ def qwen_pack_step(a, d: Path, files: list, llama: Path) -> Path:
         return pack
     if not os.access(d, os.W_OK):
         fail(f"{d} is not writable: the pack is written next to the GGUF file")
-    env = dict(os.environ, STRATA_GGUF_PY=str(llama / "gguf-py"))
+    env = dict(os.environ, SAGUARO_GGUF_PY=str(llama / "gguf-py"))
     say("  Writing the index of every tensor, the small float weights (about 1.5 GB) and the tokenizer; the experts and")
     say("  the n-gram table stay in the GGUF file (a few minutes) ...")
     # (--compat-bf16: the projections the engine reads as BF16 - the hyper-connections' mixes, the router - are
@@ -6574,7 +6571,7 @@ def write_config_qwen(a, pc: dict, meta: dict, pack: Path, gguf: Path, ctx: int,
     cfg["log"] = str(cfg_path.with_suffix(".log"))
     cfg["installer"] = {"family": "qwen", "models_dir": str(models), "quant": QWEN, "qwen_quant": "q5_k_m",
                         "model_dir": str(d), "written": time.strftime("%Y-%m-%d %H:%M")}
-    cfg_path.write_text(json.dumps(N.env_out(cfg), indent=1), encoding="utf-8")
+    cfg_path.write_text(json.dumps(cfg, indent=1), encoding="utf-8")
     ok(f"config: {cfg_path}")
     ok(f"start script: {write_run_script(cfg_path, port)}")
     return cfg_path
@@ -6654,7 +6651,7 @@ def qwen_draft_calibration(cfg_path: Path) -> bool | None:
         args += ["--mtp-max-t", "1"]
     cfg["args"] = args
     cfg.setdefault("installer", {})["mtp_calibration"] = {"off": off, "on": on, "date": time.strftime("%Y-%m-%d")}
-    cfg_path.write_text(json.dumps(N.env_out(cfg), indent=1), encoding="utf-8")
+    cfg_path.write_text(json.dumps(cfg, indent=1), encoding="utf-8")
     ok(f"MTP drafting {'ON' if use else 'off'}: {on / off:.2f}x the decode without it on this PC")
     return use
 
@@ -6804,8 +6801,32 @@ def model_option(a) -> str | None:
     return None
 
 
+def migrate_env_names(cfg: dict) -> bool:
+    """A config's "env" still under the old prefixes: every OLD_X becomes SAGUARO_X (MAYA_ wins a clash of two);
+    True when it changed.  One setting, one name - the old names stop working with this rename."""
+    e = cfg.get("env")
+    if not isinstance(e, dict):
+        return False
+    old = re.compile(r"(MAYA|STRATA)_([A-Z0-9_]+)")
+    win = {}
+    for k in e:
+        m = old.fullmatch(str(k))
+        if m and (m.group(2) not in win or (win[m.group(2)] == "STRATA" and m.group(1) == "MAYA")):
+            win[m.group(2)] = m.group(1)
+    out, done = {}, False
+    for k, v in e.items():
+        m = old.fullmatch(str(k))
+        if m:
+            done = True
+            if win[m.group(2)] != m.group(1):
+                continue                                # (the twin loses: the winning value stands)
+            k = "SAGUARO_" + m.group(2)
+        out.setdefault(k, v)
+    cfg["env"] = out
+    return done
+
+
 def main() -> int:
-    N.alias_env(os.environ)   # (MAYA_* settings under the names the code and the engines read, for all it starts)
     stop_signals()            # (SIGTERM / SIGHUP stop it as Ctrl+C does: the server it runs with it)
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--backend", choices=["cuda", "hip", "metal"],
@@ -6891,7 +6912,7 @@ def main() -> int:
                                    "other devices on your network (set --api-key too)")
     ap.add_argument("--api-key", help="require this key from API clients and the dashboard")
     ap.add_argument("--env", action="append", default=[], metavar="KEY=VALUE",
-                    help="an engine setting kept in the config, e.g. MAYA_GLM_RAM_HEADROOM_GB=4 (docs/SETTINGS.md)")
+                    help="an engine setting kept in the config, e.g. SAGUARO_GLM_RAM_HEADROOM_GB=4 (docs/SETTINGS.md)")
     ap.add_argument("--nvcc", help="the CUDA toolkit's nvcc to build with (default: the newest that fits your GPUs)")
     ap.add_argument("--host-compiler", help="the C++ compiler nvcc uses, e.g. g++-12 (when the default g++ is newer "
                                             "than your CUDA accepts)")
@@ -6932,12 +6953,12 @@ def main() -> int:
             ap.error(f"config not found: {a.config}")
         if a.backend and read_json(a.config).get("backend", "cuda") != a.backend:
             ap.error(f"{a.config}: config backend does not match --backend {a.backend}")
-    if not WIN and sys.prefix == sys.base_prefix and not os.environ.get("MAYA_SH"):
+    if not WIN and sys.prefix == sys.base_prefix and not os.environ.get("SAGUARO_SH"):
         # started as `python3 saguaro.py`: a system Python takes no pip installs (PEP 668, "externally-managed-
         # environment") - saguaro.sh makes the private .venv and runs this file with its Python
         say("Starting through ./saguaro.sh, which runs Saguaro with its own Python environment (.venv) ...")
         sys.stdout.flush()
-        os.execve("/bin/sh", ["/bin/sh", str(HERE / "saguaro.sh"), *sys.argv[1:]], dict(os.environ, MAYA_SH="1"))
+        os.execve("/bin/sh", ["/bin/sh", str(HERE / "saguaro.sh"), *sys.argv[1:]], dict(os.environ, SAGUARO_SH="1"))
     version = maya_version()
     say(f"Saguaro v{version} - GLM-5.3-Flash, {DS4} or {MM3} on your own GPU(s).")
     if a.report:

@@ -1,5 +1,5 @@
 // sycl/src/kernels/mmvq_sg_bench.cpp - SYCL port: the decode mmvq kernels on the Coder's dense shapes and types.
-//   mmvq_sg_bench   (run with STRATA_MMVQ_SG=16 and =32; prints us per call and a checksum of the outputs)
+//   mmvq_sg_bench   (run with SAGUARO_MMVQ_SG=16 and =32; prints us per call and a checksum of the outputs)
 #include "strata/kernels/native_mmvq.hpp"
 #include <sycl/sycl.hpp>
 #include <dpct/dpct.hpp>

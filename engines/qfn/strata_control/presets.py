@@ -43,7 +43,7 @@ class PresetError(ValueError):
 # --------------------------------------------------------------------------- the folder
 
 def preset_dir() -> Path:
-    explicit = os.environ.get("STRATA_PRESET_DIR")
+    explicit = os.environ.get("SAGUARO_PRESET_DIR")
     if explicit:
         return Path(explicit).expanduser()
     from strata_control import profiles

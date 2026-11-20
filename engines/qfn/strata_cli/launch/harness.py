@@ -92,7 +92,7 @@ def codex_file(t: Target) -> str:
     return (f'model = "{t.model}"\nmodel_provider = "strata"\nmodel_context_window = {t.context}\n'
             f"model_auto_compact_token_limit = {COMPACT_AT}\nmodel_reasoning_summary = \"auto\"\napproval_policy = \"never\"\n"
             'sandbox_mode = "workspace-write"\ncheck_for_update_on_startup = false\n\n[model_providers.strata]\n'
-            f'name = "Strata (local)"\nbase_url = "{t.base}"\nwire_api = "responses"\nenv_key = "STRATA_API_KEY"\n'
+            f'name = "Strata (local)"\nbase_url = "{t.base}"\nwire_api = "responses"\nenv_key = "SAGUARO_API_KEY"\n'
             "stream_idle_timeout_ms = 600000\n")
 
 
@@ -158,7 +158,7 @@ def _limits_opencode(t: Target) -> list[str]:
 
 def _limits_codex(t: Target) -> list[str]:
     return ["Codex prints \"Model metadata ... not found\" on every start: harmless, it does not know the model.",
-            "It will not send without STRATA_API_KEY set; any text works when the server has no key.",
+            "It will not send without SAGUARO_API_KEY set; any text works when the server has no key.",
             "Where the sandbox cannot start (no bubblewrap), use --dangerously-bypass-approvals-and-sandbox only in a throwaway folder.",
             "Its system prompt and tools take about 8.6K tokens of the window."]
 
@@ -211,7 +211,7 @@ HARNESSES: list[Harness] = [
             files=[FileSpec("~/.config/opencode/opencode.json", "json", opencode_file, merge=True)], limits=_limits_opencode,
             run='opencode run "your task"', install="npm i -g opencode-ai"),
     Harness("codex", "Codex CLI", "responses + tools", tested="codex-cli 0.163.0",
-            files=[FileSpec("~/.codex/config.toml", "toml", codex_file)], env=lambda t: {"STRATA_API_KEY": t.key}, limits=_limits_codex,
+            files=[FileSpec("~/.codex/config.toml", "toml", codex_file)], env=lambda t: {"SAGUARO_API_KEY": t.key}, limits=_limits_codex,
             run='codex exec --skip-git-repo-check "your task"', install="npm i -g @openai/codex"),
     Harness("claude-code", "Claude Code", "messages + tools", tested="Claude Code 2.1.302",
             files=[FileSpec("~/.claude/settings.json", "json", claude_file, merge=True)], env=claude_env, limits=_limits_claude,

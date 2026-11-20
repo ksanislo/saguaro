@@ -15,9 +15,9 @@
 // three implementations that pick the same token, bit for bit:
 //   - the SPLIT top_k (default): `sampler_split_part_kernel` cuts each row into 4,096-logit blocks over the whole
 //     GPU, each keeps its own top_k, and `sampler_split_merge_kernel` merges those lists and runs the tail;
-//   - `sampler_one_block_kernel` (`STRATA_SAMPLER_ONE_BLOCK=1`, and the fallback when the split cannot run): one
+//   - `sampler_one_block_kernel` (`SAGUARO_SAMPLER_ONE_BLOCK=1`, and the fallback when the split cannot run): one
 //     block per token, `top_k` block-argmax rounds, each over the logits after the previous pick;
-//   - `sampler_kernel` (`STRATA_OLD_SAMPLER=1`), the kernel of engine 0.1.20, kept as the reference.
+//   - `sampler_kernel` (`SAGUARO_OLD_SAMPLER=1`), the kernel of engine 0.1.20, kept as the reference.
 // The two new ones share `sampled_tail_warp` (top_p / min_p / temperature / draw on one warp).
 #define DPCT_PROFILING_ENABLED
 #include <sycl/sycl.hpp>
@@ -418,7 +418,7 @@ auto &sv = *sycl::ext::oneapi::group_local_memory_for_overwrite<float[32]>(
 /// order - is unchanged; `top_p`'s cut reads that order in double arithmetic as before; temperature and the
 /// Philox draw apply after the cut.  `sampler_parity` pins all of it against the host reference.
 ///
-/// **KEPT AS THE REFERENCE, BEHIND `STRATA_OLD_SAMPLER=1`.**  Two costs remain in it: the `taken`
+/// **KEPT AS THE REFERENCE, BEHIND `SAGUARO_OLD_SAMPLER=1`.**  Two costs remain in it: the `taken`
 /// sweep is O(k) per logit per round, O(k^2 x n_vocab) per row (47 M shared-memory compares at k = 20, 500 M at
 /// 64), and the double-precision tail runs on all 1,024 threads where one warp suffices - GeForce issues FP64 at
 /// 1/64 of FP32.  The kernels after this one remove both and select the same list in the same order.
@@ -808,7 +808,7 @@ inline void sampled_tail_warp(const int *sel_ids, const float *sel_logit, int k,
 /// what has not been picked.  The round is then the same block argmax with the same tie rule, so the list is the
 /// same list in the same order.  An empty round leaves (-inf, id 0) as before, and every round after it is empty
 /// in both versions (nothing after -inf beats -inf).  O(k x n_vocab) per row instead of O(k^2 x n_vocab), then warp
-/// 0 runs the tail.  `STRATA_SAMPLER_ONE_BLOCK=1`, and the fallback when the split path cannot run.
+/// 0 runs the tail.  `SAGUARO_SAMPLER_ONE_BLOCK=1`, and the fallback when the split path cannot run.
 /*
 DPCT1110: The total declared local variable size in device function
 sampler_one_block_kernel exceeds 128 bytes and may cause high register pressure.
@@ -1286,8 +1286,8 @@ __dpct_inline__ void coupled_merge_kernel(
     }
 }
 
-// Which sampled path runs, read once: `STRATA_OLD_SAMPLER=1` is `sampler_kernel` (engine 0.1.20),
-// `STRATA_SAMPLER_ONE_BLOCK=1` the one-block kernel; by default the split top_k wherever it applies.
+// Which sampled path runs, read once: `SAGUARO_OLD_SAMPLER=1` is `sampler_kernel` (engine 0.1.20),
+// `SAGUARO_SAMPLER_ONE_BLOCK=1` the one-block kernel; by default the split top_k wherever it applies.
 enum class SampledPath { Split, OneBlock, Old };
 
 bool env_flag(const char* name) {
@@ -1296,8 +1296,8 @@ bool env_flag(const char* name) {
 }
 
 SampledPath sampled_path() {
-    static const SampledPath path = env_flag("STRATA_OLD_SAMPLER")         ? SampledPath::Old
-                                    : env_flag("STRATA_SAMPLER_ONE_BLOCK") ? SampledPath::OneBlock
+    static const SampledPath path = env_flag("SAGUARO_OLD_SAMPLER")         ? SampledPath::Old
+                                    : env_flag("SAGUARO_SAMPLER_ONE_BLOCK") ? SampledPath::OneBlock
                                                                            : SampledPath::Split;
     return path;
 }
@@ -1407,7 +1407,7 @@ bool sample_greedy_cluster(const float *logits, int n_tokens, int n_vocab,
     if (n_tokens <= 0 || n_vocab <= 0) return true;
     if (n_tokens > 65535) return false;
     // Per device (a layer split runs on several): 1 the cluster kernel runs here, 2 it does not - sm_90+ (the card's,
-    // or STRATA_EMULATE_CC's), code built for it (an older build's PTX holds a trap: the PTX version says which), and
+    // or SAGUARO_EMULATE_CC's), code built for it (an older build's PTX holds a trap: the PTX version says which), and
     // room for one cluster of kAmCtas CTAs.
     static int ok[64] = {};
     int dev = 0;
@@ -1488,9 +1488,9 @@ void sample_tokens(const float* logits, int n_tokens, int n_vocab, const int* hi
             : 0;
     if (p.greedy || p.temperature <= 0.0f) {
         // Without penalties (shmem == 0: no window) on sm_90+, a cluster of CTAs per token - the same token; see
-        // `sampler_greedy_cluster_kernel`.  STRATA_ARGMAX_MULTI=0: always the one-block kernel.
+        // `sampler_greedy_cluster_kernel`.  SAGUARO_ARGMAX_MULTI=0: always the one-block kernel.
         static const bool multi = [] {
-            const char* v = std::getenv("STRATA_ARGMAX_MULTI");
+            const char* v = std::getenv("SAGUARO_ARGMAX_MULTI");
             return !v || std::atoi(v) != 0;
         }();
         // One block per token, 1,024 threads over the vocabulary.  See `sampler_greedy_kernel`.

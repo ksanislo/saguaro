@@ -102,7 +102,7 @@ async function startHost() {
   const { port } = probe.address();
   await new Promise(r => probe.close(r));
   const child = spawn(process.execPath, [join(HOST_ROOT, 'server', 'index.mjs'), '--dist', join(HOST_ROOT, 'dist')], {
-    cwd: HOST_ROOT, env: { ...process.env, STRATA_HOME: home, STRATA_WORKSPACE: home, STRATA_PORT: String(port), STRATA_REAL_ENGINE: '0' }, stdio: 'ignore',
+    cwd: HOST_ROOT, env: { ...process.env, SAGUARO_HOME: home, SAGUARO_WORKSPACE: home, SAGUARO_PORT: String(port), SAGUARO_REAL_ENGINE: '0' }, stdio: 'ignore',
   });
   const base = `http://127.0.0.1:${port}`;
   for (let i = 0; i < 150; i++) {

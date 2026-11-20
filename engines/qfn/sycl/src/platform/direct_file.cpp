@@ -58,10 +58,10 @@ struct Pending {
     uint64_t tag;
 };
 
-/// The number of issuing threads: STRATA_IO_THREADS, else 4 (Windows: overlapped submits) / 16 (Linux: each
+/// The number of issuing threads: SAGUARO_IO_THREADS, else 4 (Windows: overlapped submits) / 16 (Linux: each
 /// thread does one blocking pread, so the thread count is the queue depth).
 int io_threads(int dflt) {
-    const char* v = std::getenv("STRATA_IO_THREADS");
+    const char* v = std::getenv("SAGUARO_IO_THREADS");
     const int n = v ? std::atoi(v) : dflt;
     return std::clamp(n, 1, 64);
 }
@@ -313,7 +313,7 @@ bool DirectFile::open(const std::string& path, std::string& err) {
     impl_->size = (uint64_t) st.st_size;
     // SYCL port (the B70 box, 2026-09-30): the PLE rows of a 2,184-token prompt are ~27k random 4 KB O_DIRECT reads; with
     // 16 threads they took 466 ms (p50 1.0 ms per read), with 64 332 ms (0.7 ms) - the drive wants a deeper queue than
-    // 16 blocking threads give it. STRATA_IO_THREADS still overrides.
+    // 16 blocking threads give it. SAGUARO_IO_THREADS still overrides.
     const int n = io_threads(64);
     for (int i = 0; i < n; ++i) impl_->pool.emplace_back([this] { impl_->worker(); });
     return true;

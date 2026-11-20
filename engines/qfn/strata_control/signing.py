@@ -9,7 +9,7 @@ Two kinds of key exist and must not be mixed up:
 
 * the **feed/component key** (this module): an Ed25519 key the owner keeps offline. It signs the update feed index and every
   engine package manifest. Installed copies of Control carry the public half in ``update_keys.json`` and nothing else
-  can add to it except the explicit, documented override ``STRATA_UPDATE_TRUSTED_KEYS`` (a file of extra public keys;
+  can add to it except the explicit, documented override ``SAGUARO_UPDATE_TRUSTED_KEYS`` (a file of extra public keys;
   the test suite and a local feed use it, and the CLI says so when it is in effect).
 * the **app updater key** (Tauri's minisign key): signs the desktop installer. ``minisign_verify`` below checks such a
   signature so the Terminal can verify an app installer it downloads, the same way the Tauri updater does.
@@ -28,7 +28,7 @@ import secrets
 from pathlib import Path
 
 ALG = "ed25519"
-ENV_EXTRA_KEYS = "STRATA_UPDATE_TRUSTED_KEYS"
+ENV_EXTRA_KEYS = "SAGUARO_UPDATE_TRUSTED_KEYS"
 BUILTIN_KEYS = Path(__file__).with_name("update_keys.json")
 
 
@@ -193,7 +193,7 @@ def parse_public(entry: dict) -> tuple[str, bytes]:
 
 def load_trusted_keys(extra: str | os.PathLike | None = None, *, environ=None) -> dict[str, bytes]:
     """{key_id: public key bytes}: the keys shipped in ``update_keys.json`` plus a file of extra keys when
-    ``STRATA_UPDATE_TRUSTED_KEYS`` (or `extra`) names one. A malformed entry is an error, never skipped, so a typo cannot
+    ``SAGUARO_UPDATE_TRUSTED_KEYS`` (or `extra`) names one. A malformed entry is an error, never skipped, so a typo cannot
     quietly turn into "trust nothing" or "trust something else"."""
     environ = os.environ if environ is None else environ
     keys: dict[str, bytes] = {}

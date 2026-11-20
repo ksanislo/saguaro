@@ -21,9 +21,9 @@ int main() {
     expect(!warm_gemm_wanted({"gfx1151", "gfx1201"}, nullptr), "8060S + R9700 (#3204): off");
     expect(!warm_gemm_wanted({"gfx1201", "gfx1151"}, nullptr), "the order does not matter");
     expect(!warm_gemm_wanted({"gfx1100", "gfx1100", "gfx1030"}, nullptr), "any second architecture turns it off");
-    expect(!warm_gemm_wanted({"gfx1201"}, "0"), "STRATA_PREFILL_WARM=0: off");
-    expect(!warm_gemm_wanted({"gfx1201", "gfx1201"}, "0"), "STRATA_PREFILL_WARM=0 on two cards: off");
-    expect(warm_gemm_wanted({"gfx1151", "gfx1201"}, "1"), "STRATA_PREFILL_WARM=1 forces it on a mixed pair");
+    expect(!warm_gemm_wanted({"gfx1201"}, "0"), "SAGUARO_PREFILL_WARM=0: off");
+    expect(!warm_gemm_wanted({"gfx1201", "gfx1201"}, "0"), "SAGUARO_PREFILL_WARM=0 on two cards: off");
+    expect(warm_gemm_wanted({"gfx1151", "gfx1201"}, "1"), "SAGUARO_PREFILL_WARM=1 forces it on a mixed pair");
     expect(!warm_gemm_wanted({"gfx1151", "gfx1201"}, ""), "an empty value is unset: a mixed pair stays off");
     if (g_fail) { std::fprintf(stderr, "warm_policy_test: %d failure(s)\n", g_fail); return 1; }
     std::printf("warm_policy_test: OK\n");

@@ -44,7 +44,7 @@ class Dsv41Engine(unittest.TestCase):
         self.key = fx.make_key()
         trust = self.root / "trust.json"
         trust.write_text(json.dumps({"keys": [signing.public_part(self.key)]}))
-        for p in (mock.patch.dict(os.environ, {"STRATA_UPDATE_TRUSTED_KEYS": str(trust), "STRATA_COMPONENTS_DIR": str(self.root / "c")}),
+        for p in (mock.patch.dict(os.environ, {"SAGUARO_UPDATE_TRUSTED_KEYS": str(trust), "SAGUARO_COMPONENTS_DIR": str(self.root / "c")}),
                   mock.patch.object(signing, "BUILTIN_KEYS", self.root / "none.json"),
                   mock.patch.object(ec, "cuda_archs_present", return_value=["sm_86"]),
                   mock.patch.object(ec, "nvidia_driver_version", return_value="610.47")):

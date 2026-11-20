@@ -296,12 +296,12 @@ Q2_0 o IQ3_XXS en un PC de 64 GB. Abre `strata-<model>.json` en la carpeta de da
 - `"--adapt-async", "1"` a la lista `"args"`. Así la caché de expertos se actualiza en un hilo auxiliar en vez de detener la
   respuesta. Medido en una RTX 5070 (Windows, Q2_0): +4-5 % en decodificación, +7-10 % en código y documentos largos. Las
   respuestas pueden diferir un poco de las del ajuste por defecto y son iguales de una ejecución a otra.
-- `"STRATA_PIN_BY_NEED": "1"` en el bloque `"env"` (Windows). Windows solo puede bloquear aproximadamente la mitad de la RAM
+- `"SAGUARO_PIN_BY_NEED": "1"` en el bloque `"env"` (Windows). Windows solo puede bloquear aproximadamente la mitad de la RAM
   para la tarjeta gráfica, y este ajuste bloquea primero los expertos que la tarjeta necesita antes. Medido en la RTX 5070: +4,4 % en lectura del prompt.
 
 ```json
 "args": [ ..., "--adapt-async", "1" ],
-"env": { "STRATA_PIN_BY_NEED": "1" }
+"env": { "SAGUARO_PIN_BY_NEED": "1" }
 ```
 
 Reinicia Strata después del cambio. Para deshacerlo, quita las dos entradas.

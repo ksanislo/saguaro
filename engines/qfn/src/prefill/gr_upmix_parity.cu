@@ -1,4 +1,4 @@
-// src/prefill/gr_upmix_parity.cu - the hyper-connection read's fused up projection + mix (gr_upmix, STRATA_HC_UPMIX=1)
+// src/prefill/gr_upmix_parity.cu - the hyper-connection read's fused up projection + mix (gr_upmix, SAGUARO_HC_UPMIX=1)
 // against the default pair (Gemm::bf16 - cuBLAS - writing `gated`, then gr_mix_r), on synthetic inputs of the model's
 // shapes (N = 2560, 4 streams, K = 320).  Where cuBLAS's kernel sums K in the fused kernel's order the outputs are the
 // same bits (CUDA 13.3 on an RTX 5090 from 33 tokens - the prompt path's default there); elsewhere FP32 rounding: the

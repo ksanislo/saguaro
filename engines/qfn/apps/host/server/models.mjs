@@ -14,10 +14,10 @@ import { CONTEXT_TOKENS, VARIANTS, downloadUrl, footprint, localModels, refreshL
  *
  * Strata is being iterated on as a product surface, so by default the model
  * library is simulated: downloads animate, loads stage, nothing is fetched and
- * no process is spawned. Set STRATA_REAL_ENGINE=1 to use the real path
+ * no process is spawned. Set SAGUARO_REAL_ENGINE=1 to use the real path
  * (Hugging Face download + supervised llama.cpp engine).
  */
-export const REAL = process.env.STRATA_REAL_ENGINE === '1';
+export const REAL = process.env.SAGUARO_REAL_ENGINE === '1';
 import { MODELS_DIR, diskFreeGb, get as getStore, update } from './store.mjs';
 import * as supervisor from './supervisor.mjs';
 import { EventHub, nowIso, round, uid } from './util.mjs';

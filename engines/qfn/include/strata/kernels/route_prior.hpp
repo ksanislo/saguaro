@@ -1,4 +1,4 @@
-// include/strata/kernels/route_prior.hpp - STRATA_ROUTE_PRIOR=lambda (opt-in, changes the output): cache-conditioned
+// include/strata/kernels/route_prior.hpp - SAGUARO_ROUTE_PRIOR=lambda (opt-in, changes the output): cache-conditioned
 // routing in verify windows.  See src/kernels/cuda/route_prior.cu.
 #pragma once
 

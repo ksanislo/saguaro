@@ -52,11 +52,11 @@ void build_rope_table(int n_rot, double theta, int max_pos, float* cos_tab, floa
 /// transcribed; see the header of `rope_scaling.hpp` for what arrives from where.
 void build_rope_table(int n_rot, const RopeScaling& scaling, int max_pos, float* cos_tab, float* sin_tab);
 /// Positions [p0, p1) of the same table into cos_tab/sin_tab[0 ..): each row exactly what the whole table holds there.
-/// STRATA_YARN_ELASTIC: what the RoPE tables hold (the level in force); the kernels keep reading rope_scaling() for
+/// SAGUARO_YARN_ELASTIC: what the RoPE tables hold (the level in force); the kernels keep reading rope_scaling() for
 /// their fallback, and with the tables forced on (rope_table_force) never take it.  Unset: rope_scaling().
 void rope_content_set(const RopeScaling& scaling);
 const RopeScaling& rope_content();
-/// STRATA_ROPE_TABLE=1 for every kernel that can read the table, set before any table is built.
+/// SAGUARO_ROPE_TABLE=1 for every kernel that can read the table, set before any table is built.
 void rope_table_force(bool on);
 void build_rope_table_range(int n_rot, const RopeScaling& scaling, int p0, int p1, float* cos_tab, float* sin_tab);
 

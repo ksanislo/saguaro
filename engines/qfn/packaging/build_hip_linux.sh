@@ -59,7 +59,7 @@ if [ -z "${VISION_ONLY:-}" ]; then
   nice -n 10 cmake --build "$OUT/b" --target strata -j "$JOBS" > "$OUT/build.log" 2>&1
   st "engine built rc=$?"
   [ -x "$OUT/b/strata" ] || { st "ABORT no strata"; exit 1; }
-  if [ "$DSV41" = 1 ]; then      # own build tree: the engine's flags stay as they were; STRATA_NATIVE_EXPERTS=ON is what the DeepSeek path was built with
+  if [ "$DSV41" = 1 ]; then      # own build tree: the engine's flags stay as they were; SAGUARO_NATIVE_EXPERTS=ON is what the DeepSeek path was built with
     cmake -G Ninja -S . -B "$OUT/bd" -DCMAKE_BUILD_TYPE=Release -DSTRATA_ENABLE_HIP=ON -DSTRATA_ENABLE_CUDA=OFF -DSTRATA_BUILD_TESTS=OFF       -DSTRATA_BUILD_DSV41=ON -DSTRATA_NATIVE_EXPERTS=ON "-DCMAKE_HIP_ARCHITECTURES=$ARCHS" "${HIPDEFS[@]}" -DSTRATA_GGML_DIR="$LLAMA" -DSTRATA_PORTABLE=ON       "-DCMAKE_EXE_LINKER_FLAGS=-Wl,-rpath,'\$ORIGIN' -Wl,--enable-new-dtags" > "$OUT/cfg-dsv41.log" 2>&1
     st "dsv41 configured rc=$?"
     nice -n 10 cmake --build "$OUT/bd" --target strata-dsv41 -j "$JOBS" > "$OUT/build-dsv41.log" 2>&1

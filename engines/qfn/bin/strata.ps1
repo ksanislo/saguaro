@@ -1,6 +1,6 @@
 # Strata Terminal launcher for PowerShell. It finds a Python in a fixed order and hands over to strata.py.
 # It installs nothing and downloads nothing.
-#   1. $env:STRATA_PYTHON                  an explicit override, always wins
+#   1. $env:SAGUARO_PYTHON                  an explicit override, always wins
 #   2. <root>\python\python.exe            the private runtime shipped in the terminal archive
 #   3. <root>\.venv\Scripts\python.exe     a source checkout set up by SETUP.bat
 #   4. py -3 / python on PATH, 3.10+       a developer convenience, never a requirement
@@ -25,12 +25,12 @@ function Test-Python([string[]]$cmd) {
 $py = $null
 $bundled = Join-Path $root 'python\python.exe'
 $venv = Join-Path $root '.venv\Scripts\python.exe'
-if ($env:STRATA_PYTHON) {
-    if (-not (Test-Path -LiteralPath $env:STRATA_PYTHON)) {
-        [Console]::Error.WriteLine("strata: STRATA_PYTHON=$($env:STRATA_PYTHON) does not exist")
+if ($env:SAGUARO_PYTHON) {
+    if (-not (Test-Path -LiteralPath $env:SAGUARO_PYTHON)) {
+        [Console]::Error.WriteLine("strata: SAGUARO_PYTHON=$($env:SAGUARO_PYTHON) does not exist")
         exit 5
     }
-    $py = @($env:STRATA_PYTHON)
+    $py = @($env:SAGUARO_PYTHON)
 } elseif (Test-Path -LiteralPath $bundled) {
     # the private runtime: nothing from the user's site-packages or PYTHONHOME/PYTHONPATH may leak in
     $env:PYTHONNOUSERSITE = '1'
@@ -47,7 +47,7 @@ if ($env:STRATA_PYTHON) {
 if (-not $py) {
     [Console]::Error.WriteLine("strata: no usable Python found.")
     [Console]::Error.WriteLine("        This archive carries its own runtime in python\: it is missing from this install.")
-    [Console]::Error.WriteLine("        Reinstall the archive, or set STRATA_PYTHON to a Python 3.10 or newer.")
+    [Console]::Error.WriteLine("        Reinstall the archive, or set SAGUARO_PYTHON to a Python 3.10 or newer.")
     exit 5
 }
 # UTF-8 text in Python, not the Windows code page: folders with Cyrillic or other letters stay intact (#3202)

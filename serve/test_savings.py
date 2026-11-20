@@ -121,9 +121,9 @@ class LedgerPath(unittest.TestCase):
         self.assertEqual(SV.ledger_path(Path("/a/b/run.json"), {}), Path("/a/b") / SV.FILE)
 
     def test_env_names_the_file_and_off_keeps_none(self):
-        self.assertEqual(SV.ledger_path(Path("/a/b/run.json"), {"MAYA_SAVINGS_PATH": "/w/s.json"}), Path("/w/s.json"))
+        self.assertEqual(SV.ledger_path(Path("/a/b/run.json"), {"SAGUARO_SAVINGS_PATH": "/w/s.json"}), Path("/w/s.json"))
         for v in ("off", "OFF", "none"):
-            self.assertIsNone(SV.ledger_path(Path("/a/b/run.json"), {"MAYA_SAVINGS_PATH": v}))
+            self.assertIsNone(SV.ledger_path(Path("/a/b/run.json"), {"SAGUARO_SAVINGS_PATH": v}))
 
     def test_a_failed_save_is_logged_once(self):
         import io

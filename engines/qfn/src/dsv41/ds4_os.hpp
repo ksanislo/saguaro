@@ -409,11 +409,11 @@ inline void* anon_alloc(size_t bytes, int node, int nodes) {
 #else
     void* m = ::mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (m == MAP_FAILED) return nullptr;
-    // STRATA_NO_LARGEPAGES=1 / DS4_NO_HUGEPAGES=1: no MADV_HUGEPAGE - with THP's defrag on madvise and the RAM full of page
+    // SAGUARO_NO_LARGEPAGES=1 / DS4_NO_HUGEPAGES=1: no MADV_HUGEPAGE - with THP's defrag on madvise and the RAM full of page
     // cache, every fault of a huge-page range compacts memory first (2 x Xeon E5-2660 v2, 251 GB: a 102 GB copy fell to
     // 54 MB/s, kcompactd at 100%)
     static const bool no_huge = [] {
-        for (const char* k : {"STRATA_NO_LARGEPAGES", "DS4_NO_HUGEPAGES"})
+        for (const char* k : {"SAGUARO_NO_LARGEPAGES", "DS4_NO_HUGEPAGES"})
             if (const char* v = std::getenv(k); v != nullptr && v[0] != '\0' && v[0] != '0') return true;
         return false;
     }();

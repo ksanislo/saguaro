@@ -1,4 +1,4 @@
-// ablate_capture.hpp - the read-out tools/ablate_fit.py fits a refusal direction from (MAYA_ABLATE_CAPTURE=<file>).
+// ablate_capture.hpp - the read-out tools/ablate_fit.py fits a refusal direction from (SAGUARO_ABLATE_CAPTURE=<file>).
 //
 // With the variable set, the engines' refusal-ablation hook (every residual write of the main layers: the attention's
 // and the FFN's output, right before it joins the residual) does not project: it appends the write's LAST row - the
@@ -20,7 +20,7 @@ namespace strata::ablcap {
 
 inline std::FILE* file() {
     static std::FILE* f = [] {
-        const char* p = std::getenv("MAYA_ABLATE_CAPTURE");
+        const char* p = std::getenv("SAGUARO_ABLATE_CAPTURE");
         return p != nullptr && *p ? std::fopen(p, "ab") : nullptr;
     }();
     return f;
@@ -38,7 +38,7 @@ inline void put(const float* y, int T, int dim, cudaStream_t s) {
     if (cudaStreamSynchronize(s) != cudaSuccess ||
         cudaMemcpy(row.data(), y + (size_t) (T - 1) * (size_t) dim, (size_t) dim * sizeof(float),
                    cudaMemcpyDefault) != cudaSuccess) {
-        std::fprintf(stderr, "MAYA_ABLATE_CAPTURE: a row could not be read back\n");
+        std::fprintf(stderr, "SAGUARO_ABLATE_CAPTURE: a row could not be read back\n");
         return;
     }
     const int32_t h[2] = {(int32_t) T, (int32_t) dim};

@@ -193,7 +193,7 @@ void to16(const void* x, size_t n, cudaStream_t s) {
 struct Vision::Impl {
     VisionGeo g;
     int dev = -1;
-    bool f16 = false;   // (Turing: the BF16 GEMMs on FP16 tensor cores; MAYA_MM3_VISION_F16=0 keeps BF16, the reference)
+    bool f16 = false;   // (Turing: the BF16 GEMMs on FP16 tensor cores; SAGUARO_MM3_VISION_F16=0 keeps BF16, the reference)
     cudaStream_t s = nullptr, cs = nullptr;   // the encode's stream, the weights' copy stream
     cublasHandle_t blas = nullptr;
     cudaEvent_t ev_up[2] = {nullptr, nullptr};     // a slot's stage copied in (its bounce buffer free again)
@@ -325,7 +325,7 @@ struct Vision::Impl {
 #if !defined(STRATA_USE_HIP)
         {
             cudaDeviceProp pr{};
-            const char* fv = std::getenv("MAYA_MM3_VISION_F16");
+            const char* fv = std::getenv("SAGUARO_MM3_VISION_F16");
             f16 = fv != nullptr ? std::atoi(fv) != 0 : cudaGetDeviceProperties(&pr, dev) == cudaSuccess && pr.major < 8;
             if (f16) std::fprintf(stderr, "maya-mm3: vision: GEMMs on FP16 tensor cores (BF16 -> FP16, exact in range)\n");
         }

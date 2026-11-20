@@ -415,8 +415,8 @@ def _enable_privilege(name: str) -> bool:
 def user_roots() -> list[Path]:
     """The folders that are the user's own per-user data: a file inside one may be repaired by that user."""
     roots: list[Path] = []
-    for key in ("APPDATA", "LOCALAPPDATA", "STRATA_HOME", "STRATA_PROFILE_DIR", "STRATA_INSTALL_DIR", "STRATA_RUNTIME_DIR",
-                "STRATA_STATE_DIR"):
+    for key in ("APPDATA", "LOCALAPPDATA", "SAGUARO_HOME", "SAGUARO_PROFILE_DIR", "SAGUARO_INSTALL_DIR", "SAGUARO_RUNTIME_DIR",
+                "SAGUARO_STATE_DIR"):
         value = os.environ.get(key)
         if value:
             roots.append(Path(value))
@@ -511,7 +511,7 @@ def known_roots() -> list[Path]:
         if value:
             roots.append(Path(value) / sub)
     roots.append(Path.home() / ".strata")
-    for key in ("STRATA_HOME", "STRATA_PROFILE_DIR", "STRATA_RUNTIME_DIR", "STRATA_STATE_DIR", "STRATA_INSTALL_DIR"):
+    for key in ("SAGUARO_HOME", "SAGUARO_PROFILE_DIR", "SAGUARO_RUNTIME_DIR", "SAGUARO_STATE_DIR", "SAGUARO_INSTALL_DIR"):
         value = os.environ.get(key)
         if value:
             roots.append(Path(value))

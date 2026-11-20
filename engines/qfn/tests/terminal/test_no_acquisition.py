@@ -309,7 +309,7 @@ class CliServeIsOfflineTests(unittest.TestCase):
             out = io.StringIO()
             with mock.patch.object(urllib.request, "urlopen", rec.urlopen), \
                     mock.patch.object(subprocess, "run", rec.program), mock.patch.object(subprocess, "Popen", rec.program), \
-                    mock.patch.dict(os.environ, {"STRATA_PROFILE_DIR": str(Path(d) / "profiles")}), \
+                    mock.patch.dict(os.environ, {"SAGUARO_PROFILE_DIR": str(Path(d) / "profiles")}), \
                     contextlib.redirect_stdout(out):
                 code = cli.main(["serve", "--profile", str(cfg), "--plan", "--output", "json"])
         self.assertEqual(code, 0, out.getvalue())
@@ -319,7 +319,7 @@ class CliServeIsOfflineTests(unittest.TestCase):
     def test_strata_install_without_the_installer_is_a_typed_error(self):
         err = io.StringIO()
         with tempfile.TemporaryDirectory() as d, \
-                mock.patch.dict(os.environ, {"STRATA_INSTALL_DIR": d}), \
+                mock.patch.dict(os.environ, {"SAGUARO_INSTALL_DIR": d}), \
                 mock.patch.object(cli, "ROOT", Path(d)), contextlib.redirect_stderr(err):
             code = cli.main(["install"])
         self.assertEqual(code, 5)

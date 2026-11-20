@@ -546,25 +546,25 @@ struct ScalarRowsSetting {
     bool present;
     std::string saved;
     ScalarRowsSetting() {
-        const char* v = std::getenv("STRATA_EXL3_HIP_SCALAR_ROWS");
+        const char* v = std::getenv("SAGUARO_EXL3_HIP_SCALAR_ROWS");
         present = v != nullptr;
         if (v) saved = v;
         set("0");
     }
     static void set(const char* v) {
 #if defined(_WIN32)
-        _putenv_s("STRATA_EXL3_HIP_SCALAR_ROWS", v);
+        _putenv_s("SAGUARO_EXL3_HIP_SCALAR_ROWS", v);
 #else
-        setenv("STRATA_EXL3_HIP_SCALAR_ROWS", v, 1);
+        setenv("SAGUARO_EXL3_HIP_SCALAR_ROWS", v, 1);
 #endif
     }
     ~ScalarRowsSetting() {
         if (present) set(saved.c_str());
         else {
 #if defined(_WIN32)
-            _putenv_s("STRATA_EXL3_HIP_SCALAR_ROWS", "");
+            _putenv_s("SAGUARO_EXL3_HIP_SCALAR_ROWS", "");
 #else
-            unsetenv("STRATA_EXL3_HIP_SCALAR_ROWS");
+            unsetenv("SAGUARO_EXL3_HIP_SCALAR_ROWS");
 #endif
         }
     }

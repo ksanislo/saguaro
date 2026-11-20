@@ -13,7 +13,7 @@
 //
 // IQ3_XXS, IQ3_S and IQ2_S also have a gathered decode (Fmt32<118>, <121>, <122>): the grid indices built in a
 // register and read with one vpgather, the same words into the same lanes, so the same bits.  Where it is faster
-// depends on the core, so STRATA_IQ256_GATHER picks it per thread (expert_layout.hpp, cpu_gather_fast_here).
+// depends on the core, so SAGUARO_IQ256_GATHER picks it per thread (expert_layout.hpp, cpu_gather_fast_here).
 //
 // Where the CPU has AVX-VNNI (cpu_avxvnni_ok: Alder Lake, Sapphire Rapids and later) the row kernels take a second
 // copy with vpdpwssd / vpdpbusd (iq_avx2_rows.inl), the same integer sums.
@@ -177,13 +177,13 @@ inline float hsum8(__m256 v) {
 
 // E-2 (iq_avx512.cpp) on the AVX-2 path: the pool streams the expert rows from DRAM at ~25 GB/s (4 KB pages
 // when large pages are refused), so ask for the bytes a few blocks before the decode needs them - 2048 B is
-// two gate/up rows ahead, a row is ~1 KB.  Same switch as the AVX-512 kernels: STRATA_IQ_PREFETCH is the
+// two gate/up rows ahead, a row is ~1 KB.  Same switch as the AVX-512 kernels: SAGUARO_IQ_PREFETCH is the
 // distance in bytes, 0 = off, default 2048.  Measured on a Zen 3 5700X3D (no AVX-512) on IQ3_S decode: -4% on
 // the gate/up phase, +1.0 GB/s over the rows, -1.3% ms/round end to end.  The non-temporal hint measured
 // worse than T0 at the same distance, so this keeps T0.
 int prefetch_distance() {
     static const int d = [] {
-        const char* v = std::getenv("STRATA_IQ_PREFETCH");
+        const char* v = std::getenv("SAGUARO_IQ_PREFETCH");
         return v ? std::atoi(v) : 2048;
     }();
     return d;
@@ -274,7 +274,7 @@ template <> struct Fmt32<21> {   // IQ3_S: d, qs[64], qh[8], signs[32], scales[4
     }
 };
 
-// ---- the gathered decodes (STRATA_IQ256_GATHER, see the top of the file): each its format's Fmt32 bit for bit
+// ---- the gathered decodes (SAGUARO_IQ256_GATHER, see the top of the file): each its format's Fmt32 bit for bit
 // The 32 sign bits of a half from the j's 8 sign bytes: one broadcast and one shuffle (sgn_vec: two and an insert).
 inline __m256i sgn_half(const uint8_t* m8, int half) {
     const __m256i sb = _mm256_shuffle_epi8(
@@ -489,7 +489,7 @@ void iq256_gu_rows_exact_one(int type, const uint8_t* blob, size_t gu_row, size_
 }
 
 int iq256_variant() noexcept {
-    // STRATA_IQ256_GATHER=0/1 for every core; unset, where the calling thread's core gathers faster (per thread: a
+    // SAGUARO_IQ256_GATHER=0/1 for every core; unset, where the calling thread's core gathers faster (per thread: a
     // hybrid CPU's pool runs on P- and E-cores).  AVX-VNNI where cpu_avxvnni_ok().  The same bits either way.
     const int s = iq256_gather_setting();
     return ((s >= 0 ? s == 1 : cpu_gather_fast_here()) ? kIq256Gather : 0) | (vnni_on() ? kIq256Vnni : 0);

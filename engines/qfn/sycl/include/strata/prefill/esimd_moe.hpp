@@ -36,7 +36,7 @@ bool battlemage(void* stream);
 /// True when any GPU on this machine is a Battlemage one (sizes the staging ring before a queue exists).
 bool any_battlemage();
 
-/// Which chain the prompt experts take.  `env` is STRATA_PREFILL_MMQ (else STRATA_PF_I8), null or empty when unset.  Returns 0 = the
+/// Which chain the prompt experts take.  `env` is SAGUARO_PREFILL_MMQ (else SAGUARO_PF_I8), null or empty when unset.  Returns 0 = the
 /// FP16 chain (dequantize + oneMKL), 1 = the int8 chain everywhere, 2 = auto (int8 per group while the group's rows per expert are under
 /// the crossover measured on this GPU).  Set: "0" -> 0, "auto" -> 2, any other number -> 1.  Unset: auto on a Battlemage device whose
 /// kernels are in the binary and run, else 0 (Alchemist and every other GPU keep the FP16 chain).

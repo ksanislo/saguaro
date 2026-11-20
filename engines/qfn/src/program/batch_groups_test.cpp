@@ -58,7 +58,7 @@ int main() {
         i.mtp_serial = true;
         r = bg::resolve(i);
         check(r.groups == 1 && r.from_auto && r.serial == bg::Serial::BatchMtp && r.would_be == 2 && !r.mtp_dropped,
-              "STRATA_BATCH_MTP_SERIAL: one group, because of --batch-mtp");
+              "SAGUARO_BATCH_MTP_SERIAL: one group, because of --batch-mtp");
         check(bg::serial_what(r.serial)[0] == '-', "the reason names the feature");
     }
     {
@@ -73,7 +73,7 @@ int main() {
         i.adapt_async = true;
         check(bg::resolve(i).serial == bg::Serial::AdaptAsync, "both: --adapt-async 1 still gives one group");
         i.mtp_serial = true;
-        check(bg::resolve(i).serial == bg::Serial::BatchMtp, "both with STRATA_BATCH_MTP_SERIAL: --batch-mtp is named");
+        check(bg::resolve(i).serial == bg::Serial::BatchMtp, "both with SAGUARO_BATCH_MTP_SERIAL: --batch-mtp is named");
     }
     {   // nothing to give way: the slots do not divide, so auto is one group anyway and there is nothing to say
         bg::Input i = in(3, 1);
@@ -129,13 +129,13 @@ int main() {
         check(bg::resolve(i).groups == 2, "an explicit number without a split is returned (the engine warns)");
     }
 
-    // ---- STRATA_PIPED_MTP
+    // ---- SAGUARO_PIPED_MTP
     {   // the default pipeline keeps --batch-mtp instead of dropping it
         bg::Input i = in(4, 3);
         i.batch_mtp = true;
         i.piped_mtp = true;
         const auto r = bg::resolve(i);
-        check(r.groups == 4 && !r.mtp_dropped && r.serial == bg::Serial::None, "STRATA_PIPED_MTP: 4 groups, MTP kept");
+        check(r.groups == 4 && !r.mtp_dropped && r.serial == bg::Serial::None, "SAGUARO_PIPED_MTP: 4 groups, MTP kept");
         i.piped_mtp = false;
         check(bg::resolve(i).mtp_dropped, "without it the pipeline drops --batch-mtp");
     }
@@ -205,7 +205,7 @@ int main() {
         const int32_t t1[2] = {1, 6};
         check(bg::piped_mtp_keep(2, pick, t1, no, false, 10, 100, 50, 1000) == 1, "keep: draft rejected");
     }
-    {   // STRATA_REGROUP: 4 groups of 2; slots 0,1 decode in group 0, 2 in group 1, 7 reads (not free) in group 3
+    {   // SAGUARO_REGROUP: 4 groups of 2; slots 0,1 decode in group 0, 2 in group 1, 7 reads (not free) in group 3
         bool live[8] = {true, true, true, false, false, false, false, false};
         bool fr[8] = {false, false, false, true, true, true, true, false};
         bg::Regroup m = bg::regroup_pick(4, 2, live, fr);

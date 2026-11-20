@@ -132,7 +132,7 @@ def end_leftover_engines(exe: str) -> None:
     """Before an engine starts: end the ones a lost server left running (strata_control/procs.py). Only a process
     this install recorded whose starter is gone, or an orphan of exactly this executable running --serve, and only
     after its PID, start time and command line are checked again at the moment of the signal. Never raises."""
-    if os.environ.get("STRATA_KEEP_LEFTOVERS") == "1":
+    if os.environ.get("SAGUARO_KEEP_LEFTOVERS") == "1":
         return
     try:
         from strata_control import procs
@@ -202,13 +202,13 @@ VISION_START = "<|vision_start|>"
 # broken state that answers one token forever (an issue saw 36,689 tokens of "!"). The config's "repeat_stop_tokens"
 # sets it; 0 turns it off.
 REPEAT_STOP_TOKENS = 256
-# Opt-in STRATA_REPLY_REUSE=1: the next turn's prompt keeps the reply's own token ids (what the engine holds) up to where
+# Opt-in SAGUARO_REPLY_REUSE=1: the next turn's prompt keeps the reply's own token ids (what the engine holds) up to where
 # its text differs, and a thinking budget's stop keeps the tokens the engine generated past it, so neither re-reads the
 # reply.  Off: every prompt is a fresh encode, as before.
-REPLY_REUSE = os.environ.get("STRATA_REPLY_REUSE", "") == "1"
-# Opt-in STRATA_BATCH_WRAP_SPILL=1 (server env or the config's "env"): the tokens the engine generated past a budget's stop
+REPLY_REUSE = os.environ.get("SAGUARO_REPLY_REUSE", "") == "1"
+# Opt-in SAGUARO_BATCH_WRAP_SPILL=1 (server env or the config's "env"): the tokens the engine generated past a budget's stop
 # join the wrap-up under --batch too, so the continuation extends what the slot holds instead of reading it all again
-BATCH_WRAP_SPILL = os.environ.get("STRATA_BATCH_WRAP_SPILL", "") == "1"
+BATCH_WRAP_SPILL = os.environ.get("SAGUARO_BATCH_WRAP_SPILL", "") == "1"
 ANSWER_ROOM_MIN_CAP = 1024    # 0.1.45: from this max_tokens on, thinking without a budget is closed early enough to leave room to answer
 DS41_DEFAULT_BUDGET = 32768   # DeepSeek-V4.1 only: the thinking budget when neither the request nor the config names one
 DS41_SMALL_CAP_MIN = 48       # DeepSeek-V4.1 only: from this max_tokens up to ANSWER_ROOM_MIN_CAP, thinking is capped at half of it
@@ -304,7 +304,7 @@ PP_SLACK = 3.0
 # fire and every later request queued behind it (the "lost step" class of #481).  Generous on purpose: a cold model
 # load, a slow disk or a slow CPU encode is not a hang.  Only a process that says nothing at all for this long is
 # ended; the next request starts it again.
-# STRATA_ENGINE_READY_S / STRATA_VISION_READY_S / STRATA_VISION_ENCODE_S override them (0 = wait for ever, as before).
+# SAGUARO_ENGINE_READY_S / SAGUARO_VISION_READY_S / SAGUARO_VISION_ENCODE_S override them (0 = wait for ever, as before).
 
 
 def _timeout_env(name: str, default: float) -> float | None:
@@ -320,17 +320,17 @@ def _timeout_env(name: str, default: float) -> float | None:
 # moves no bytes of I/O in that time is not slow, it is idle or frozen (a deadlock in a CUDA call, a driver stall, a lost
 # step), and waiting longer cannot help: it is ended, and the next request starts it again.  An engine that is silent but
 # still working is never ended by this, only reported once (the recommendation: engine_silence_s, or this variable).
-# STRATA_ENGINE_STALL_S overrides it (0 = off).  Needs psutil (setup installs it); without it nothing is ended.
-ENGINE_STALL_S = _timeout_env("STRATA_ENGINE_STALL_S", 90.0)
+# SAGUARO_ENGINE_STALL_S overrides it (0 = off).  Needs psutil (setup installs it); without it nothing is ended.
+ENGINE_STALL_S = _timeout_env("SAGUARO_ENGINE_STALL_S", 90.0)
 # --batch: new requests take the control lines (one prompt read at a time) short prompts first: a prompt of at most
-# STRATA_ADMIT_SHORT_FIRST tokens goes before longer ones (opt-in; unset or 0: whoever gets the lock first), and a
-# longer one that waited STRATA_ADMIT_MAX_WAIT_S (default 30) counts as short.  A chat question then waits for the one
+# SAGUARO_ADMIT_SHORT_FIRST tokens goes before longer ones (opt-in; unset or 0: whoever gets the lock first), and a
+# longer one that waited SAGUARO_ADMIT_MAX_WAIT_S (default 30) counts as short.  A chat question then waits for the one
 # read in progress, not for every agent read that came before it.
 try:
-    ADMIT_SHORT_FIRST = max(0, int(os.environ.get("STRATA_ADMIT_SHORT_FIRST") or 0))
+    ADMIT_SHORT_FIRST = max(0, int(os.environ.get("SAGUARO_ADMIT_SHORT_FIRST") or 0))
 except ValueError:
     ADMIT_SHORT_FIRST = 0
-ADMIT_MAX_WAIT_S = _timeout_env("STRATA_ADMIT_MAX_WAIT_S", 30.0) or 0.0
+ADMIT_MAX_WAIT_S = _timeout_env("SAGUARO_ADMIT_MAX_WAIT_S", 30.0) or 0.0
 STALL_CPU_EPS_S = 0.5       # CPU seconds the engine may use in the whole stall window and still count as frozen
 STALL_IO_EPS_B = 1 << 20    # bytes read or written in that window
 
@@ -340,9 +340,9 @@ def engine_frozen(base: tuple[float, int], now: tuple[float, int]) -> bool:
     return (now[0] - base[0]) <= STALL_CPU_EPS_S and (now[1] - base[1]) <= STALL_IO_EPS_B
 
 
-VISION_READY_S = _timeout_env("STRATA_VISION_READY_S", 300.0)
-VISION_ENCODE_S = _timeout_env("STRATA_VISION_ENCODE_S", 300.0)
-ENGINE_READY_S = _timeout_env("STRATA_ENGINE_READY_S", 900.0)
+VISION_READY_S = _timeout_env("SAGUARO_VISION_READY_S", 300.0)
+VISION_ENCODE_S = _timeout_env("SAGUARO_VISION_ENCODE_S", 300.0)
+ENGINE_READY_S = _timeout_env("SAGUARO_ENGINE_READY_S", 900.0)
 
 
 # ------------------------------------------------------------------------------------------------ engines
@@ -666,9 +666,9 @@ def start_log_marks(log: str | None, offset: int) -> list:
 # A start that ends at once with the GPU runtime's own failure and none of the engine's lines: on ROCm, a start right
 # after the previous engine exited can fail inside the runtime's device/queue set-up while the old process's queues are
 # still being torn down ("terminate called after throwing an instance of 'rocr::AMD::hsa_exception'", or an exit with
-# nothing in the log).  Such a start is tried again after a short wait (STRATA_START_RETRIES, default 3; 0: never).
+# nothing in the log).  Such a start is tried again after a short wait (SAGUARO_START_RETRIES, default 3; 0: never).
 TRANSIENT_START_MARKS = ("hsa_exception", "HSA_STATUS_ERROR", "hsaKmt")
-START_RETRIES = max(0, int(os.environ.get("STRATA_START_RETRIES", "3") or 0))
+START_RETRIES = max(0, int(os.environ.get("SAGUARO_START_RETRIES", "3") or 0))
 
 
 def transient_start_failure(log: str | None, offset: int, elapsed_s: float, rc: int | None = None) -> bool:
@@ -696,7 +696,7 @@ def transient_start_failure(log: str | None, offset: int, elapsed_s: float, rc: 
 
 
 def echo_requests(log_path: str, offset: int) -> None:
-    """STRATA_REQUEST_LINES=1: one stdout line per finished request, from the engine's own summary in its log.
+    """SAGUARO_REQUEST_LINES=1: one stdout line per finished request, from the engine's own summary in its log.
 
     The engine's stderr goes to the log file (the start narrator reads it), so a supervisor that only sees this
     process's output - a tray, llama-swap - has no per-request numbers. This re-states the engine's line with the
@@ -878,7 +878,7 @@ def conversation_cache_view(info: dict, hist: list, totals: dict, parked: dict) 
             "last_prompt": last.get("prompt_tokens") if last else None}
 
 
-_BTRACE = bool(os.environ.get("STRATA_BATCH_TRACE"))
+_BTRACE = bool(os.environ.get("SAGUARO_BATCH_TRACE"))
 
 
 def btrace(*a):
@@ -888,7 +888,7 @@ def btrace(*a):
 
 EOS_IDS = {248044, 248046}   # <|endoftext|>, <|im_end|>: the engine's default --eos-ids
 
-# a batch slot's own lines, routed to its queue: its tokens and end, and (STRATA_SLOT_ADMIT) its admission's read
+# a batch slot's own lines, routed to its queue: its tokens and end, and (SAGUARO_SLOT_ADMIT) its admission's read
 # progress (BRP), its start or not (BRA <slot> <1|0>) and a refusal (BRE)
 SLOT_LINES = ("BT ", "BDONE ", "BRP ", "BRA ", "BRE ")
 
@@ -961,9 +961,9 @@ def configure_batch_telemetry_env(env: dict, cfg: dict, override: bool | None) -
     """Only an explicit setting changes the inherited opt-in engine environment."""
     choice = override if override is not None else cfg.get("batch_telemetry")
     if choice is True:
-        env["STRATA_BATCH_TELEMETRY"] = "1"
+        env["SAGUARO_BATCH_TELEMETRY"] = "1"
     elif choice is False:
-        env.pop("STRATA_BATCH_TELEMETRY", None)
+        env.pop("SAGUARO_BATCH_TELEMETRY", None)
 
 
 def parse_batch_window_sample(line: str) -> dict | None:
@@ -1127,7 +1127,7 @@ class StrataEngine:
             threading.Thread(target=narrate_start, args=(log, os.path.getsize(log), args, loading),
                              daemon=True).start()
             # once per log: the follower keeps reading the same (appended) log across restarts and reloads
-            if os.environ.get("STRATA_REQUEST_LINES") and os.path.abspath(log) not in _echoing:
+            if os.environ.get("SAGUARO_REQUEST_LINES") and os.path.abspath(log) not in _echoing:
                 _echoing.add(os.path.abspath(log))
                 threading.Thread(target=echo_requests, args=(log, os.path.getsize(log)), daemon=True).start()
         if log:                                          # #779: when an engine started (a crash report has the time)
@@ -1146,7 +1146,7 @@ class StrataEngine:
             say_nice = pin.get("preexec_fn")
             pin["preexec_fn"] = lambda: (say_nice() if say_nice else None, os.nice(nice))[0]
             print(f"[strata] engine priority: nice +{nice} (this PC has built-in Radeon graphics that usually draw the desktop; "
-                  "STRATA_ENGINE_NICE=0 turns it off)", flush=True)
+                  "SAGUARO_ENGINE_NICE=0 turns it off)", flush=True)
         end_leftover_engines(exe)                        # one an earlier run lost still holds the GPU and the memory
         spawned_at = time.monotonic()
         try:
@@ -1265,10 +1265,10 @@ class StrataEngine:
         groups_run = int(self.info.get("batch_groups") or groups)
         self.slot_gs = gs if groups > 1 and groups_run > 1 else 0
         self.slot_q = [queue.Queue() for _ in range(self.batch)]
-        # STRATA_SLOT_ADMIT (INFO slot_admit=1): an admission's prompt is read into its slot beside the decoding slots;
+        # SAGUARO_SLOT_ADMIT (INFO slot_admit=1): an admission's prompt is read into its slot beside the decoding slots;
         # the engine answers BGEN with `BQ <slot> 1` and the rest comes on the slot's own lines (see generate_batched)
         self.slot_admit = bool(self.batch) and str(self.info.get("slot_admit") or "") == "1"
-        # INFO slot_keep=1 (STRATA_PIPED_MTP: a window holds live slots only): an idle slot keeps its conversation, so
+        # INFO slot_keep=1 (SAGUARO_PIPED_MTP: a window holds live slots only): an idle slot keeps its conversation, so
         # pick_slot chooses by what the slots hold, as without pipelined groups
         self.slot_keep = bool(self.batch) and str(self.info.get("slot_keep") or "") == "1"
         self.slot_busy = [False] * self.batch
@@ -1348,7 +1348,7 @@ class StrataEngine:
                 if sample is not None and self.proc is proc:
                     self.terminal_stage_sample = {**sample, "observed_monotonic": time.monotonic()}
                 continue
-            if line.startswith("BIDLE "):              # STRATA_ELASTIC_IDLE parked the slot's conversation: it holds nothing
+            if line.startswith("BIDLE "):              # SAGUARO_ELASTIC_IDLE parked the slot's conversation: it holds nothing
                 try:
                     b = int(line.split()[1])
                     with self.slot_cv:
@@ -1436,7 +1436,7 @@ class StrataEngine:
             tail = wide[-4096:]
         except (OSError, TypeError):
             pass
-        # #1705: STRATA_VERIFY_TRACE dumps are ~30 KB and push the watchdog's line out of a 4 KB tail
+        # #1705: SAGUARO_VERIFY_TRACE dumps are ~30 KB and push the watchdog's line out of a 4 KB tail
         for line in reversed(wide.splitlines()):
             if "issue #29" in line:
                 return ("The engine stopped itself because it had stopped making progress - a hang it caught. Its log "
@@ -1726,7 +1726,7 @@ class StrataEngine:
                 f = line.split()
                 self._ctl_result = ("badm", len(f) >= 3 and f[2] == "1", f[3] if len(f) >= 4 else None)
                 return
-            elif line.startswith("BQ "):                 # STRATA_SLOT_ADMIT: 1 = read beside the slots, on its own lines
+            elif line.startswith("BQ "):                 # SAGUARO_SLOT_ADMIT: 1 = read beside the slots, on its own lines
                 if line.split()[2:3] == ["1"]:
                     self._ctl_result = ("queued", True)
                     return
@@ -1834,7 +1834,7 @@ class StrataEngine:
                         tail = []
                     break
                 if line.startswith("BRE ") or (line.startswith("BRA ") and line.split()[2:3] == ["0"]):
-                    tail = []                       # STRATA_SLOT_ADMIT: an admission that never started
+                    tail = []                       # SAGUARO_SLOT_ADMIT: an admission that never started
                     break
             else:
                 if until is not None:
@@ -1853,7 +1853,7 @@ class StrataEngine:
     SLOT_KEEP_S = 5.0        # how long a slot waits for its request's next pass (it comes within milliseconds)
 
     def take_spill(self) -> list[int] | None:
-        """STRATA_BATCH_WRAP_SPILL: the tokens the engine generated past this thread's last stop (None: not collected)."""
+        """SAGUARO_BATCH_WRAP_SPILL: the tokens the engine generated past this thread's last stop (None: not collected)."""
         tl = getattr(self, "_next_pass", None)
         spill = getattr(tl, "spill", None) if tl is not None else None
         if tl is not None:
@@ -1923,8 +1923,8 @@ class StrataEngine:
     def _take_control(self, cancel, plen: int, after_epoch: int | None = None, new: bool = False):
         """Waits for the control lines (one prompt read at a time), yielding None heartbeats; False when cancelled.
         `after_epoch`: a request whose read gave way lets the requests waiting then go first.
-        `new`: the request's first admission (STRATA_ADMIT_SHORT_FIRST orders only these)."""
-        entry = [plen, time.monotonic(), new]           # (length, arrival, ordered: STRATA_ADMIT_SHORT_FIRST)
+        `new`: the request's first admission (SAGUARO_ADMIT_SHORT_FIRST orders only these)."""
+        entry = [plen, time.monotonic(), new]           # (length, arrival, ordered: SAGUARO_ADMIT_SHORT_FIRST)
         with self.slot_cv:
             self.waiting += 1
             self.wait_lens.append(entry)
@@ -1979,9 +1979,9 @@ class StrataEngine:
         return True
 
     def _admit_next(self):
-        """STRATA_ADMIT_SHORT_FIRST=<tokens> (the caller holds slot_cv): the new request that takes the control lines
+        """SAGUARO_ADMIT_SHORT_FIRST=<tokens> (the caller holds slot_cv): the new request that takes the control lines
         next - one whose prompt is at most that long (it reads little) before a longer one, in arrival order within
-        each; a longer one that has waited STRATA_ADMIT_MAX_WAIT_S counts as short (it is never held back for good).
+        each; a longer one that has waited SAGUARO_ADMIT_MAX_WAIT_S counts as short (it is never held back for good).
         Off (unset or 0): whoever gets the lock first, as before.  Only the order changes, never what is read."""
         now = time.monotonic()
         ordered = [e for e in self.wait_lens if len(e) > 2 and e[2]]
@@ -1996,9 +1996,9 @@ class StrataEngine:
     def _may_go_solo(self, left: int, times: int, embeddings) -> bool:
         """A request decoding in a slot that is alone now (no other slot busy, nobody waiting) goes back to the solo
         path with its MTP drafts: the engine continues it from the slot's sessions (its slot cache; INFO
-        slot_cache=1).  STRATA_PARALLEL_SOLO=0 keeps it in the slot."""
+        slot_cache=1).  SAGUARO_PARALLEL_SOLO=0 keeps it in the slot."""
         if (embeddings or times >= self.SOLO_AGAIN_MAX or left < self.SOLO_AGAIN_MIN_LEFT or
-                not (self.info or {}).get("slot_cache") or os.environ.get("STRATA_PARALLEL_SOLO") == "0"):
+                not (self.info or {}).get("slot_cache") or os.environ.get("SAGUARO_PARALLEL_SOLO") == "0"):
             return False
         with self.slot_cv:
             return sum(1 for b in self.slot_busy if b) == 1 and self.waiting == 0
@@ -2111,7 +2111,7 @@ class StrataEngine:
                         carry_leg(carry, self.last)         # #1869: the solo leg's figures; the slot's admission (a copy of
                                                             # the held prefix: prompt_read 1) and BDONE replace them
                         prompt = list(ids) + out            # promoted: it continues in a batch slot from here
-                direct = False      # STRATA_SLOT_ADMIT: this admission was read beside the slots
+                direct = False      # SAGUARO_SLOT_ADMIT: this admission was read beside the slots
                 while True:
                     if slot is None:
                         # a free slot (they free themselves at BDONE, which needs no control lines): the one that holds
@@ -2238,7 +2238,7 @@ class StrataEngine:
                         slot = None
                         continue
                     if self._ctl_result and self._ctl_result[0] == "queued":
-                        # STRATA_SLOT_ADMIT: the engine reads this prompt into the slot beside the decoding slots and
+                        # SAGUARO_SLOT_ADMIT: the engine reads this prompt into the slot beside the decoding slots and
                         # answers on the slot's lines; the control lines are the next request's meanwhile
                         phase = "queued"
                         self.ctl.release()
@@ -2363,7 +2363,7 @@ class StrataEngine:
         finally:
             # a consumer that left early (or an error): keep the engine and this server in step
             btrace("finally phase", phase, "slot", slot, "holding", holding)
-            # STRATA_BATCH_WRAP_SPILL: a next pass follows (a budget's wrap-up): collect what the engine ran past the stop
+            # SAGUARO_BATCH_WRAP_SPILL: a next pass follows (a budget's wrap-up): collect what the engine ran past the stop
             spill = [] if BATCH_WRAP_SPILL and getattr(self._next_pass, "on", False) else None
             try:
                 if phase in ("solo", "admit") and (self.gen != born or not self.alive()):
@@ -2440,7 +2440,7 @@ class StrataEngine:
                         self.slot_cv.notify_all()
 
     def _admission_wait(self, slot: int, cancel, live: dict):
-        """STRATA_SLOT_ADMIT: an admission the engine queued (`BQ <slot> 1`), up to its start, yielding None heartbeats.
+        """SAGUARO_SLOT_ADMIT: an admission the engine queued (`BQ <slot> 1`), up to its start, yielding None heartbeats.
         Returns {"start": True, "figures": ...} at `BRA <slot> 1`, {"start": False, "why": ...} at `BRA <slot> 0 <why>`;
         `BRE <slot> <why>` (refused) raises ValueError.  A cancel sends BSTOP once (the engine drops a queued admission
         or stops its read at the next chunk, and answers BRA 0)."""
@@ -2513,7 +2513,7 @@ class StrataEngine:
                 g0 = b - b % gs
                 return any(self.slot_busy[x] for x in range(b + 1, g0 + gs))
             if getattr(self, "slot_admit", False):
-                # STRATA_SLOT_ADMIT: a hole's group would wait for the slot's whole read (its window writes the slot):
+                # SAGUARO_SLOT_ADMIT: a hole's group would wait for the slot's whole read (its window writes the slot):
                 # a slot above the busy ones of its group first
                 return min(free, key=lambda b: (fills_hole(b), self.slot_order.index(b)))
             return min(free, key=lambda b: (not fills_hole(b), self.slot_order.index(b)))
@@ -2727,7 +2727,7 @@ class StrataEngine:
             gpu_working = False
         if now is not None and not gpu_working and engine_frozen(state["base"], now):
             raise self._silent(f"the engine said nothing for {age:.0f} s and used no CPU or disk in that time (frozen; "
-                               "STRATA_ENGINE_STALL_S sets this, 0 = off)")
+                               "SAGUARO_ENGINE_STALL_S sets this, 0 = off)")
         if now is not None:   # working: look again after another window from here, and say so once
             state["base"], state["next"] = now, age + stall_s
             if not state.get("warned"):
@@ -3354,11 +3354,11 @@ def card_roles_lines(cfg: dict) -> list[str]:
 
 def engine_binary(exe: str, cfg: dict | None = None) -> str:
     """The file that holds the engine's own option strings, for a feature check that reads it.  The Intel launcher
-    (sycl/serve/strata-sycl.sh) is a shell script that runs its repo's STRATA_SYCL_BIN (default build-sycl-aot/strata)
+    (sycl/serve/strata-sycl.sh) is a shell script that runs its repo's SAGUARO_SYCL_BIN (default build-sycl-aot/strata)
     in a container, so the check reads that binary, not the script.  Any other `exe` is the engine itself."""
     p = Path(exe)
     if p.name == "strata-sycl.sh":
-        rel = ((cfg or {}).get("env") or {}).get("STRATA_SYCL_BIN") or os.environ.get("STRATA_SYCL_BIN") \
+        rel = ((cfg or {}).get("env") or {}).get("SAGUARO_SYCL_BIN") or os.environ.get("SAGUARO_SYCL_BIN") \
             or "build-sycl-aot/strata"
         b = p.resolve().parents[2] / rel
         if b.is_file():
@@ -3542,7 +3542,7 @@ def parallel_args(cfg: dict, args: list[str]) -> list[str]:
         return []
     if n <= 1:
         return []
-    if n > PARALLEL_MAX and "--batch-mtp" not in args and os.environ.get("STRATA_BATCH_MTP", "0") in ("", "0"):
+    if n > PARALLEL_MAX and "--batch-mtp" not in args and os.environ.get("SAGUARO_BATCH_MTP", "0") in ("", "0"):
         print(f'[strata] "parallel": {n} - the engine runs at most {PARALLEL_MAX} requests together; it will use '
               f"{PARALLEL_MAX}", flush=True)
     return ["--batch", str(n)]
@@ -3683,10 +3683,10 @@ def engine_nice(env: dict | None = None, archs: dict[int, str] | None = None, pl
     """Linux only: the nice value the engine starts with.  The engine's CPU pool spins at 100% on every physical core but one and its host
     thread on another; with the desktop drawn by a built-in Radeon (HIP_IGPU_ARCHS: Strix Halo and the other APUs) the compositor then
     competes with them for the CPU, which reads as a frozen screen.  +5 gives the desktop its share and costs nothing when nothing else
-    runs.  STRATA_ENGINE_NICE=N sets it (0 = off, also for any PC without such a chip).  Not on Windows / macOS."""
+    runs.  SAGUARO_ENGINE_NICE=N sets it (0 = off, also for any PC without such a chip).  Not on Windows / macOS."""
     if not (platform or sys.platform).startswith("linux"):
         return 0
-    asked = (env or os.environ).get("STRATA_ENGINE_NICE")
+    asked = (env or os.environ).get("SAGUARO_ENGINE_NICE")
     if asked is not None and str(asked).strip() != "":
         try:
             return max(0, min(19, int(str(asked).strip())))
@@ -3880,15 +3880,15 @@ DS41_SLOT_GB_DEFAULT = "2"        # the folder's cap in GB (a 6.5K-token convers
 
 def deepseek_slot_env(env: dict, cfg: dict) -> None:
     """DeepSeek-V4.1 only.  The engine sets a conversation aside when another request takes the model and takes it back
-    at its checkpoints (agents and sub-agents that take turns do not read their prompts again).  STRATA_DS4_SLOT_KEEP
+    at its checkpoints (agents and sub-agents that take turns do not read their prompts again).  SAGUARO_DS4_SLOT_KEEP
     switches it (the default above; a config's env or the shell wins); the folder is `ds4-slots` next to the run log, in
-    Strata's data folder (STRATA_DS4_SLOT_DIR names another), and the engine caps it (STRATA_DS4_SLOT_GB, 2 here, 16 in the engine) and
-    removes what is older than a week or not this model's.  On by default; STRATA_DS4_SLOT_KEEP=0 turns it off."""
-    env.setdefault("STRATA_DS4_SLOT_KEEP", DS41_SLOT_KEEP_DEFAULT)
-    env.setdefault("STRATA_DS4_SLOT_GB", DS41_SLOT_GB_DEFAULT)
+    Strata's data folder (SAGUARO_DS4_SLOT_DIR names another), and the engine caps it (SAGUARO_DS4_SLOT_GB, 2 here, 16 in the engine) and
+    removes what is older than a week or not this model's.  On by default; SAGUARO_DS4_SLOT_KEEP=0 turns it off."""
+    env.setdefault("SAGUARO_DS4_SLOT_KEEP", DS41_SLOT_KEEP_DEFAULT)
+    env.setdefault("SAGUARO_DS4_SLOT_GB", DS41_SLOT_GB_DEFAULT)
     log = cfg.get("log")
-    if "STRATA_DS4_SLOT_DIR" not in env and log:
-        env["STRATA_DS4_SLOT_DIR"] = str(Path(log).parent / "ds4-slots")
+    if "SAGUARO_DS4_SLOT_DIR" not in env and log:
+        env["SAGUARO_DS4_SLOT_DIR"] = str(Path(log).parent / "ds4-slots")
 
 
 def child_env(cfg: dict, *, offline: bool = False) -> dict:
@@ -3917,7 +3917,7 @@ def child_env(cfg: dict, *, offline: bool = False) -> dict:
         except ImportError:
             # The policy module is part of the application; without it, refuse rather than silently
             # running a child with network access under a flag that promised otherwise.
-            env["STRATA_OFFLINE"] = "1"
+            env["SAGUARO_OFFLINE"] = "1"
             env["HF_HUB_OFFLINE"] = "1"
             env["TRANSFORMERS_OFFLINE"] = "1"
     dirs = [d for d in cfg.get("lib_dirs") or [] if Path(d).is_dir()]
@@ -4249,7 +4249,7 @@ class Service:
         # #321: origins that count as Strata's own page for /settings and MCP tools, e.g. the web app reached through a
         # reverse proxy or tunnel whose Host differs ("https://strata.example.com"); never a wildcard
         self.trusted_origins: list[str] = []
-        # DNS rebinding: extra Host names this server answers to (the config's allowed_hosts, $STRATA_ALLOWED_HOSTS;
+        # DNS rebinding: extra Host names this server answers to (the config's allowed_hosts, $SAGUARO_ALLOWED_HOSTS;
         # "*" = any), and every name it answers to, which serve() works out from the address it listens on
         self.allowed_hosts: list[str] = []
         self.host_names: set[str] = set(LOOPBACK_NAMES)
@@ -5448,8 +5448,8 @@ class Service:
         """DeepSeek-V4.1 only: how many leading messages are the system prompt (its tools are rendered with them).  An
         agent and its sub-agents that work behind the same system prompt and tools share exactly this start, so the
         engine keeps a checkpoint of its state there (pin=N): the next agent behind the same start goes back to it
-        instead of reading it again.  0: none (STRATA_DS4_AUTO_PIN=0, no system message, or nothing after it)."""
-        if os.environ.get("STRATA_DS4_AUTO_PIN", "1") == "0":
+        instead of reading it again.  0: none (SAGUARO_DS4_AUTO_PIN=0, no system message, or nothing after it)."""
+        if os.environ.get("SAGUARO_DS4_AUTO_PIN", "1") == "0":
             return 0
         n = 0
         for m in messages:
@@ -5677,7 +5677,7 @@ class Service:
         timings, before = None, None                    # this request's timings; the engine's `last` before it
         recovery_count, reasoning_text, repeat_coverage = 0, "", 0.0
         looped, next_loop_check = False, LOOP_CHECK_EVERY       # #728: reasoning that repeats whole passages
-        raw_ids = []                                    # every generated id (STRATA_DEBUG: dump raw model text)
+        raw_ids = []                                    # every generated id (SAGUARO_DEBUG: dump raw model text)
         emb, self.embeddings.path = getattr(self.embeddings, "path", None), None   # this run's to delete now
         img_keys, self.embeddings.keys = getattr(self.embeddings, "keys", None), None
         if emb and img_keys:
@@ -6153,7 +6153,7 @@ class Service:
                                 print("[strata] the reply reached max tokens while still thinking, so it has no "
                                       "answer: a thinking budget (reasoning_budget_tokens, in the request or in "
                                       "strata-<model>.json for every request) leaves room to answer", flush=True)
-                            if os.environ.get("STRATA_DEBUG") and raw_ids:
+                            if os.environ.get("SAGUARO_DEBUG") and raw_ids:
                                 print(f"[strata] raw: {self.tok.decode(raw_ids)!r}", flush=True)
                                 print(f"[strata] raw ids: {list(raw_ids)}", flush=True)
                         st["busy"] = False
@@ -6315,8 +6315,8 @@ def request_stats(segments: list[dict]) -> dict:
 
 
 def _debug_req(api, req, messages, tools, max_new, thinking, prompt_tokens):
-    """One compact line per request while diagnosing blank/empty turns. Set STRATA_DEBUG=1 to enable."""
-    if not os.environ.get("STRATA_DEBUG"):
+    """One compact line per request while diagnosing blank/empty turns. Set SAGUARO_DEBUG=1 to enable."""
+    if not os.environ.get("SAGUARO_DEBUG"):
         return
     last = messages[-1] if messages else {}
     body = last.get("content")
@@ -6713,10 +6713,10 @@ CHUNKED_BODY_MAX = 256 << 20                # #893: the most a Transfer-Encoding
 
 def body_limit() -> int:
     """The most a request body may hold, in bytes (read into memory): 256 MiB, which is a million-token conversation
-    with room to spare; STRATA_MAX_BODY_MIB changes it (0 or an unreadable value: the default).  A larger one is
+    with room to spare; SAGUARO_MAX_BODY_MIB changes it (0 or an unreadable value: the default).  A larger one is
     answered 413 before it is read (a Content-Length of 10 TB used to be read until the client gave up)."""
     try:
-        mib = int(os.environ.get("STRATA_MAX_BODY_MIB", "0"))
+        mib = int(os.environ.get("SAGUARO_MAX_BODY_MIB", "0"))
     except ValueError:
         mib = 0
     return mib << 20 if mib > 0 else CHUNKED_BODY_MAX
@@ -6815,7 +6815,7 @@ def make_handler(svc: Service):
             if length > limit:
                 self.close_connection = True               # the body is not read: the connection ends with the answer
                 raise BadBody(413, f"the request body is larger than {limit >> 20} MiB "
-                                   "(STRATA_MAX_BODY_MIB raises the limit)")
+                                   "(SAGUARO_MAX_BODY_MIB raises the limit)")
             return self.rfile.read(length)
 
         def _drain_body(self):
@@ -6861,12 +6861,12 @@ def make_handler(svc: Service):
             if svc.api_key or host_allowed(host, svc.host_names, "*" in svc.allowed_hosts):
                 return True
             print(f"[strata] refused a request for Host {host!r} from {self.client_address[0]}: not a name this server "
-                  f"answers to (add it to \"allowed_hosts\" in the config or STRATA_ALLOWED_HOSTS, or set an API key)",
+                  f"answers to (add it to \"allowed_hosts\" in the config or SAGUARO_ALLOWED_HOSTS, or set an API key)",
                   flush=True)
             self._json(403, {"error": {"type": "forbidden", "message":
                              f"Host {host!r} is not allowed (DNS rebinding protection). Reaching Strata under this "
                              f"name on purpose? Add it to \"allowed_hosts\" in the config (strata-<model>.json) or to "
-                             f"the STRATA_ALLOWED_HOSTS environment variable, or set an API key (\"api_key\"), which "
+                             f"the SAGUARO_ALLOWED_HOSTS environment variable, or set an API key (\"api_key\"), which "
                              f"turns this check off"}})
             return False
 
@@ -8080,8 +8080,8 @@ class Server(ThreadingHTTPServer):
     allow_reuse_address = os.name != "nt"
     # socketserver listens with a backlog of 5: a burst of 30-40 clients at once got "connection reset by peer" on the
     # first ones (measured on 4 x R9700, also with one request at a time); the requests wait in the server, not the kernel
-    # (STRATA_HTTP_BACKLOG overrides it)
-    request_queue_size = max(5, int(os.environ.get("STRATA_HTTP_BACKLOG") or 256))
+    # (SAGUARO_HTTP_BACKLOG overrides it)
+    request_queue_size = max(5, int(os.environ.get("SAGUARO_HTTP_BACKLOG") or 256))
 
     def handle_error(self, request, client_address):
         if not isinstance(sys.exc_info()[1], ConnectionError):   # a client that hangs up needs no stack trace
@@ -8220,7 +8220,7 @@ def _name_in(name: str, names) -> bool:
 
 
 def allowed_hosts_of(value, env: str = "") -> list[str]:
-    """The config's allowed_hosts (a name or a list) plus $STRATA_ALLOWED_HOSTS (comma-separated): host names, "*" or
+    """The config's allowed_hosts (a name or a list) plus $SAGUARO_ALLOWED_HOSTS (comma-separated): host names, "*" or
     ".example.com" (it and every name below it).  A scheme, port or path is dropped ("https://a.example.com:8443/"
     -> "a.example.com"); a wrong entry stops the start (ValueError)."""
     items = [] if value in (None, "") else [value] if isinstance(value, str) else value
@@ -8275,7 +8275,7 @@ def host_allowed(host, names, any_host=False) -> bool:
 
 
 def key_list(value) -> list[str]:
-    """#1344: the keys a server accepts.  --api-key / STRATA_API_KEY / "api_key" take llama.cpp's form, several keys
+    """#1344: the keys a server accepts.  --api-key / SAGUARO_API_KEY / "api_key" take llama.cpp's form, several keys
     separated by commas ("k1,k2"; spaces around each are dropped), or a list in the config ("api_key": ["k1", "k2"],
     the way to give a key that contains a comma).  A list is taken as it is."""
     if value is None or value == "":
@@ -8286,7 +8286,7 @@ def key_list(value) -> list[str]:
 
 
 def explicit_no_key(value) -> bool:
-    """The owner chose to serve without a key: "api_key": "none" in the config, STRATA_API_KEY=none or --api-key none
+    """The owner chose to serve without a key: "api_key": "none" in the config, SAGUARO_API_KEY=none or --api-key none
     (or --no-api-key, handled by the caller).  Never a key called "none"."""
     return isinstance(value, str) and value.strip().lower() == "none"
 
@@ -8507,9 +8507,9 @@ SAMPLING_ALIASES = {"repeat_penalty": "repetition_penalty", "repeat_last_n": "pe
 def apply_saved_tuning(cfg: dict, *, say=None) -> dict:
     """The run config with the active saved tuning for its choices put on top (strata_control/presets.py), with no measurement.
     Every start path runs this (the Terminal, `runtime start`, the app's load, a restart of the app, an unload and a load), so the
-    tuning is applied every time and never re-measured. A tune's own worker sets STRATA_NO_PRESET so that it measures the
+    tuning is applied every time and never re-measured. A tune's own worker sets SAGUARO_NO_PRESET so that it measures the
     configuration it was given. Never fails a start: a store that cannot be read means the configuration as it is."""
-    if os.environ.get("STRATA_NO_PRESET"):
+    if os.environ.get("SAGUARO_NO_PRESET"):
         return cfg
     say = say or (lambda line: print(line, flush=True))
     try:
@@ -8624,7 +8624,7 @@ def start_replicas(cfg: dict, groups: list[list[int]], exe: str, effort_end: lis
             errors.append((i, e))
     rc0 = rp.replica_cfg(cfg, 0, groups[0])
     warn_budget_over_ram(engine_args(rc0) if "args" in rc0 else [])
-    if os.environ.get("STRATA_REPLICA_START", "") == "serial":
+    if os.environ.get("SAGUARO_REPLICA_START", "") == "serial":
         for i in range(n):
             one(i)
     else:
@@ -8844,8 +8844,8 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
     ap.add_argument("--no-fit-max-tokens", action="store_true",
                     help="answer 400 when prompt + max_tokens does not fit the context, like llama.cpp "
                          "(also \"fit_max_tokens\": false in the config). A prompt that alone does not fit is always 400")
-    ap.add_argument("--api-key", default=os.environ.get("STRATA_API_KEY", ""),
-                    help="require this key on /v1/* (Authorization: Bearer ... or x-api-key); also $STRATA_API_KEY. "
+    ap.add_argument("--api-key", default=os.environ.get("SAGUARO_API_KEY", ""),
+                    help="require this key on /v1/* (Authorization: Bearer ... or x-api-key); also $SAGUARO_API_KEY. "
                          "Several keys: separate them with commas (key1,key2), as llama.cpp does")
     ap.add_argument("--no-api-key", action="store_true",
                     help="serve on the network without an API key (anyone who can reach the port can use the model; "
@@ -8917,7 +8917,7 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
         sys.stdout, sys.stderr = logctx.StampedStream(sys.stdout), logctx.StampedStream(sys.stderr)
     if a.config and a.engine == "strata":
         cfg = apply_saved_tuning(cfg)
-    attestation_key = os.environ.pop("STRATA_OWNER_ATTEST_KEY", None)
+    attestation_key = os.environ.pop("SAGUARO_OWNER_ATTEST_KEY", None)
     launch_attestation = None
     if a.owner_fd is not None:
         if attestation_key is None or not re.fullmatch(r"[0-9a-f]{64}", attestation_key):
@@ -8961,7 +8961,7 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
         cfg["gpu"] = int(a.gpu) if a.gpu.strip().isdigit() else a.gpu
     a.host = a.host or cfg.get("host") or "127.0.0.1"   # issue #26: the run scripts pass no --host, the config can
     supplied_args = argv if argv is not None else sys.argv[1:]
-    if ("STRATA_API_KEY" in os.environ and not os.environ["STRATA_API_KEY"].strip()) or \
+    if ("SAGUARO_API_KEY" in os.environ and not os.environ["SAGUARO_API_KEY"].strip()) or \
             any((x == "--api-key" and i + 1 < len(supplied_args) and not supplied_args[i + 1].strip()) or
                 x.strip() == "--api-key=" for i, x in enumerate(supplied_args)):
         print("[strata] an API key was given but it is empty: set a key, or leave it out", file=sys.stderr)
@@ -9171,7 +9171,7 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
         print(f"[strata] model aliases: {', '.join(svc.aliases)}", flush=True)
     svc.api_key = preflight_api_key
     try:
-        svc.telemetry_key = api_key_of(os.environ.get("STRATA_TELEMETRY_KEY") or cfg.get("telemetry_read_key", ""))
+        svc.telemetry_key = api_key_of(os.environ.get("SAGUARO_TELEMETRY_KEY") or cfg.get("telemetry_read_key", ""))
     except ValueError as e:
         print(f"[strata] invalid telemetry_read_key: {e}", file=sys.stderr)
         return 2
@@ -9192,7 +9192,7 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
     svc.cors_origins = origins_of(cfg.get("cors_origins"), "cors_origins", wildcard=True)
     svc.trusted_origins = origins_of(cfg.get("trusted_origins"), "trusted_origins", wildcard=False)
     try:
-        svc.allowed_hosts = allowed_hosts_of(cfg.get("allowed_hosts"), os.environ.get("STRATA_ALLOWED_HOSTS", ""))
+        svc.allowed_hosts = allowed_hosts_of(cfg.get("allowed_hosts"), os.environ.get("SAGUARO_ALLOWED_HOSTS", ""))
     except ValueError as e:
         raise SystemExit(f"[strata] config {e}")
     if svc.allowed_hosts:
@@ -9246,10 +9246,10 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
         raise SystemExit(f"[strata] config \"repeat_stop_tokens\" must be a whole number >= 0 (0 = off), not {rs!r}")
     svc.repeat_stop_tokens = rs
     global BATCH_WRAP_SPILL                             # (the config's "env" otherwise reaches only the engine)
-    if str((cfg.get("env") or {}).get("STRATA_BATCH_WRAP_SPILL", "")) == "1":
+    if str((cfg.get("env") or {}).get("SAGUARO_BATCH_WRAP_SPILL", "")) == "1":
         BATCH_WRAP_SPILL = True
     if BATCH_WRAP_SPILL:
-        print("[strata] STRATA_BATCH_WRAP_SPILL: a budget wrap-up keeps the tokens run past its stop", flush=True)
+        print("[strata] SAGUARO_BATCH_WRAP_SPILL: a budget wrap-up keeps the tokens run past its stop", flush=True)
     svc.effort_end = bool(effort_end)                   # #458: "effort_position": "end" with an engine that has it
     if cfg.get("reasoning_budget_tokens") is not None:  # #123: a default thinking budget for every request
         svc.reasoning_budget_configured = True
@@ -9383,7 +9383,7 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
                         engine.proc.kill()
                         try:
                             from serve import cache_drop
-                            cache_drop.drop_after_exit(engine)       # opt-in (STRATA_DROP_CACHE_ON_EXIT=1), default unchanged
+                            cache_drop.drop_after_exit(engine)       # opt-in (SAGUARO_DROP_CACHE_ON_EXIT=1), default unchanged
                         except Exception as e:  # noqa: BLE001 - never block the exit
                             print(f"[strata] could not release the model files' cache: {e}", flush=True)
         finally:

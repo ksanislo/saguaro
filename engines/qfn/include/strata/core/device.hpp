@@ -30,7 +30,7 @@ struct DeviceInfo {
 };
 
 // HIP builds: whether GPU `ordinal` can run this binary - its architecture must be one the binary was COMPILED
-// for (STRATA_HIP_ARCHS, set by cmake/hip_backend.cmake) and it must run wave32.  "" when it can (or when there
+// for (SAGUARO_HIP_ARCHS, set by cmake/hip_backend.cmake) and it must run wave32.  "" when it can (or when there
 // is no such device: the caller's own device errors apply), else the reason in a sentence.  A binary carried to
 // another card would otherwise fail later with "invalid device function".  CUDA builds: always "".
 std::string gpu_arch_problem(int ordinal);
@@ -48,7 +48,7 @@ int device_count();
 // the runtime cannot describe it.
 bool device_summary(int ordinal, std::string& name, std::string& detail);
 
-// STRATA_PRIMARY_DEVICE (generate.cpp): the ordinal the engine's own session runs on; 0 = the runtime's first
+// SAGUARO_PRIMARY_DEVICE (generate.cpp): the ordinal the engine's own session runs on; 0 = the runtime's first
 // visible device (upstream's behavior).  The Windows HIP runtime enumerates the cards in a fixed order no
 // HIP_VISIBLE_DEVICES list can change (it only filters), so a PC whose faster card comes second could not run
 // the model on it while the first card served as a helper.  The helper expert caches and the peer tier must

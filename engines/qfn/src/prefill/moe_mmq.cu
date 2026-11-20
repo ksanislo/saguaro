@@ -35,14 +35,14 @@ int abi_args_size() { return (int) sizeof(mmq_args); }
 #endif
 namespace {
 #if defined(STRATA_MMQ_KQUANTS)
-// MODEL-UPDATE Phase 1: the K-quant products through MMQ are opt-in at run time (STRATA_MMQ_KQ=1); on CUDA their
+// MODEL-UPDATE Phase 1: the K-quant products through MMQ are opt-in at run time (SAGUARO_MMQ_KQ=1); on CUDA their
 // kernels are the strata_kq library (mmq_kq_loader.cpp), opened only then
 bool kq_ok() {
 #if defined(STRATA_KQ_DSO)
     return kq::available();
 #else
     static const bool on = [] {
-        const char* v = std::getenv("STRATA_MMQ_KQ");
+        const char* v = std::getenv("SAGUARO_MMQ_KQ");
         return v != nullptr && v[0] == '1';
     }();
     return on;
@@ -159,7 +159,7 @@ __global__ void swiglu_scaled_kernel(const float* __restrict__ gu, float* __rest
     h[i] = g / (1.0f + __expf(-g)) * u;
 }
 #if !defined(GGML_USE_HIP)
-// STRATA_MMQ_SWIGLU_Q8=1: swiglu_kernel / swiglu_scaled_kernel and ggml's quantize_mmq_q8_1 (quantize.cu, the
+// SAGUARO_MMQ_SWIGLU_Q8=1: swiglu_kernel / swiglu_scaled_kernel and ggml's quantize_mmq_q8_1 (quantize.cu, the
 // non-scatter, ids-less instance quantize() launches) in one pass, without the FP32 H.  Each value is computed by the
 // swiglu kernels' expression and the rest is quantize_mmq_q8_1 line for line (same grid, block layout, scale and
 // rounding, the same shuffle order for amax and the sum), so the q8_1 bytes are identical.  The empty asm keeps each
@@ -296,7 +296,7 @@ __global__ void set_bounds_kernel(int32_t* d, int32_t rows) {
 unsigned blocks(int64_t n) { return (unsigned) ((n + 255) / 256); }
 
 #if defined(STRATA_MMQ_TAB) && !defined(__HIPCC__)
-// STRATA_MMQ_DIRECT: a group's guards (y < g.n, byte stores) and its two zero tails (y == g.n: gate/up, y == g.n + 1:
+// SAGUARO_MMQ_DIRECT: a group's guards (y < g.n, byte stores) and its two zero tails (y == g.n: gate/up, y == g.n + 1:
 // down; uint4 stores when `tail16`, which the host checked: both pointers and the size 16-byte aligned).  Only in a
 // STRATA_MMQ_TAB build: the engine loads every kernel at start (EAGER), so a build without it keeps today's image.
 __global__ void prep_group_kernel(GuardTab g, int64_t guard, uint8_t* tail_gu, uint8_t* tail_d, int64_t tail, bool tail16) {
@@ -392,11 +392,11 @@ bool built() { return true; }
 
 Nvfp4Mode nvfp4_mode() {
     static const Nvfp4Mode m = [] {
-        const char* e = std::getenv("STRATA_PREFILL_NVFP4");
+        const char* e = std::getenv("SAGUARO_PREFILL_NVFP4");
         if (e == nullptr || std::strcmp(e, "w4a8") == 0) return Nvfp4Mode::W4A8;
         if (std::strcmp(e, "w4a4") == 0) return Nvfp4Mode::W4A4;
         if (std::strcmp(e, "fp16") == 0) return Nvfp4Mode::FP16;
-        std::fprintf(stderr, "STRATA_PREFILL_NVFP4=%s: expected w4a8, w4a4 or fp16\n", e);
+        std::fprintf(stderr, "SAGUARO_PREFILL_NVFP4=%s: expected w4a8, w4a4 or fp16\n", e);
         std::exit(1);
     }();
     return m;
@@ -416,7 +416,7 @@ bool supported(int t) {
 #endif
             return true;
 #ifdef STRATA_MMQ_KQUANTS
-        // Unsloth's UD-Q4/Q5/Q6_K_XL experts; on HIP also the dense GGUF projections (STRATA_DENSE_MMQ)
+        // Unsloth's UD-Q4/Q5/Q6_K_XL experts; on HIP also the dense GGUF projections (SAGUARO_DENSE_MMQ)
         case GGML_TYPE_Q4_K: case GGML_TYPE_Q5_K: case GGML_TYPE_Q5_1: case GGML_TYPE_Q6_K:
             return kq_ok();
 #endif
@@ -494,7 +494,7 @@ bool fp4_activations(int t) {
     if (t != GGML_TYPE_NVFP4 || nvfp4_mode() != Nvfp4Mode::W4A4) return false;
     static const bool on = [] {
         const bool ok = w4a4_available();
-        if (!ok) std::fprintf(stderr, "prefill mmq: STRATA_PREFILL_NVFP4=w4a4 needs an sm_12x card in a 12x build; W4A8\n");
+        if (!ok) std::fprintf(stderr, "prefill mmq: SAGUARO_PREFILL_NVFP4=w4a4 needs an sm_12x card in a 12x build; W4A8\n");
         return ok;
     }();
     return on;
@@ -535,7 +535,7 @@ void quantize(const float* x, const int32_t* ids, void* xq, int t, int64_t cols,
 void quantize_scatter(const float* x, const int32_t* slot, const int32_t* src, void* xq, int t, int64_t cols, int64_t ld,
                       int64_t tokens, int k_used, void* stream) {
     if (tokens <= 0 || k_used <= 0) return;
-    static const bool gather = [] { const char* e = std::getenv("STRATA_QUANT_GATHER"); return e != nullptr && std::atoi(e) != 0; }();
+    static const bool gather = [] { const char* e = std::getenv("SAGUARO_QUANT_GATHER"); return e != nullptr && std::atoi(e) != 0; }();
     if (gather) {
         quantize(x, src, xq, t, cols, ld, tokens * k_used, stream);
         return;
@@ -628,7 +628,7 @@ void Context::run(const Product& p, void* stream) {
     ck(cudaGetLastError(), "mul_mat_q");
 }
 
-// ---- STRATA_MMQ_DIRECT ----
+// ---- SAGUARO_MMQ_DIRECT ----
 bool tab_built() {
 #if defined(STRATA_MMQ_TAB) && !defined(__HIPCC__)
     return true;
@@ -696,11 +696,11 @@ bool whole_tiles(int t, int64_t w_rows, int n_experts) {
 
 int direct_mode() {
     static const int mode = [] {
-        const char* v = std::getenv("STRATA_MMQ_DIRECT");
+        const char* v = std::getenv("SAGUARO_MMQ_DIRECT");
         const int m = v ? std::atoi(v) : 0;
         if (m != 1 && m != 2) return 0;
         if (!tab_built()) {
-            std::fprintf(stderr, "strata: STRATA_MMQ_DIRECT=%d is ignored: this build has no pointer-table MMQ "
+            std::fprintf(stderr, "strata: SAGUARO_MMQ_DIRECT=%d is ignored: this build has no pointer-table MMQ "
                                  "(CUDA with STRATA_MMQ_TAB only)\n", m);
             return 0;
         }
@@ -799,9 +799,9 @@ void down_row_scales(float* sd, const int32_t* bounds, int n, const float* tails
 
 bool swiglu_q8_requested() {
     static const bool on = [] {
-        const char* v = std::getenv("STRATA_MMQ_SWIGLU_Q8");
+        const char* v = std::getenv("SAGUARO_MMQ_SWIGLU_Q8");
         const bool r = v != nullptr && std::atoi(v) != 0;
-        if (r) std::fprintf(stderr, "strata: prompt MMQ fuses SwiGLU into the down product's q8_1 quantize (STRATA_MMQ_SWIGLU_Q8=1)\n");
+        if (r) std::fprintf(stderr, "strata: prompt MMQ fuses SwiGLU into the down product's q8_1 quantize (SAGUARO_MMQ_SWIGLU_Q8=1)\n");
         return r;
     }();
     return on;

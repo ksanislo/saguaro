@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """tools/ds4/parallel_test.py - several conversations at once on maya-ds4 (`--parallel N`): the answers are the ones
-each conversation gets alone, a STOP ends one alone, the kept conversations (MAYA_DS4_SLOT_KEEP) work per lane, a new
+each conversation gets alone, a STOP ends one alone, the kept conversations (SAGUARO_DS4_SLOT_KEEP) work per lane, a new
 prompt is read while the others answer - and what it costs and what it gains, measured.
 
     python tools/ds4/parallel_test.py --pack /mnt/data/models/.../maya-ds4 [--exe build/maya-ds4] [--gpus 0,2,1]
                                       [--config maya-ds4.json] [--lanes 3] [--skip-long] [--measure] [--spec 0]
 
 The engine gets the environment this test inherits plus, with `--config <maya-ds4.json>`, that config's DeepSeek
-settings (`DS4_*` and `MAYA_DS4_*` names, under the names the engine reads).  Every run uses a scratch
-MAYA_DS4_SLOT_DIR (the pack's own slots/ is never touched: the engine prunes what is not its own at start), and the
+settings (`DS4_*` and `SAGUARO_DS4_*` names, under the names the engine reads).  Every run uses a scratch
+SAGUARO_DS4_SLOT_DIR (the pack's own slots/ is never touched: the engine prunes what is not its own at start), and the
 engine's stdin/stdout protocol - no ports, no server.
 
 Checks (greedy, spec=0 so a conversation's state ends exactly at its last printed token, as slot_keep_test.py's):
@@ -17,7 +17,7 @@ Checks (greedy, spec=0 so a conversation's state ends exactly at its last printe
             against both)
   together  one process, `--parallel <lanes>`: the same prompts sent at once, all lanes busy - every answer must be
             the one it got alone, token for token (the check the GLM engine's docs give for --parallel)
-  slots     `--parallel 2` with MAYA_DS4_SLOT_KEEP=1: A and B at once, then A's next turn - it reuses A's whole
+  slots     `--parallel 2` with SAGUARO_DS4_SLOT_KEEP=1: A and B at once, then A's next turn - it reuses A's whole
             prefix from the lane (DONE's `reused`), so a conversation that stays in its lane is not read again
   stop      two requests at once: STOP <rid> one of them; its DONE says `cancel` with fewer tokens, the other's
             answer is whole (a STOP is a request's own)
@@ -209,7 +209,7 @@ def engine_args(a, parallel: int, ctx: int) -> list[str]:
 
 def one_run(a, settings: dict, parallel: int, ctx: int, slots: str, keep: bool = False) -> Multi:
     env = dict(settings)
-    env.update({"MAYA_DS4_SLOT_DIR": slots, "MAYA_DS4_SLOT_KEEP": "1" if keep else "0"})
+    env.update({"SAGUARO_DS4_SLOT_DIR": slots, "SAGUARO_DS4_SLOT_KEEP": "1" if keep else "0"})
     eng = Multi(a.exe, engine_args(a, parallel, ctx), env)
     t0 = time.monotonic()
     eng.start(timeout=3600.0)
@@ -223,7 +223,7 @@ def main() -> int:
     ap.add_argument("--exe", default=str(Path(__file__).resolve().parents[2] / "build/maya-ds4"),
                     help="the engine (default: <repo>/build/maya-ds4)")
     ap.add_argument("--gpus", default="", help="the GPUs (default: every visible one, the engine's own split)")
-    ap.add_argument("--config", default="", help="a model config (maya-ds4.json): its DS4_/MAYA_DS4_ settings")
+    ap.add_argument("--config", default="", help="a model config (maya-ds4.json): its DS4_/SAGUARO_DS4_ settings")
     ap.add_argument("--lanes", type=int, default=3, help="the conversations at once to test and measure (1-8)")
     ap.add_argument("--ctx", type=int, default=131072, help="--max-context")
     ap.add_argument("--len", type=int, default=2000, help="the checks' prompts (tokens)")
@@ -317,7 +317,7 @@ def main() -> int:
         print(f"the together run failed: {e}", flush=True)
         ok = False
 
-    # ---- slots: with the conversations kept (MAYA_DS4_SLOT_KEEP=1), A's conversation leaves its lane when another
+    # ---- slots: with the conversations kept (SAGUARO_DS4_SLOT_KEEP=1), A's conversation leaves its lane when another
     # request takes it, and A's next turn takes it back whole (its prefix reused, not read again)
     try:
         eng = one_run(a, settings, min(2, lanes), a.ctx, os.path.join(tmp, "slots"), keep=True)

@@ -36,9 +36,9 @@ class FetchEngines(unittest.TestCase):
 
     def run_script(self, *args, trust=True):
         env = dict(os.environ)
-        env.pop("STRATA_UPDATE_TRUSTED_KEYS", None)
+        env.pop("SAGUARO_UPDATE_TRUSTED_KEYS", None)
         if trust:
-            env["STRATA_UPDATE_TRUSTED_KEYS"] = str(self.trust)
+            env["SAGUARO_UPDATE_TRUSTED_KEYS"] = str(self.trust)
         return subprocess.run([sys.executable, str(SCRIPT), "--source", str(self.release), "--out", str(self.out), *args],
                               capture_output=True, text=True, env=env, cwd=str(ROOT))
 

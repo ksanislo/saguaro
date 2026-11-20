@@ -17,7 +17,7 @@
 #   --ctx DIR                keep the build context here (default: a temporary folder, removed after the build)
 #   --no-cache               docker build --no-cache
 #   --ctx-only               assemble the context and stop
-# Environment: STRATA_DOCKER_BUILD_OPTS adds options to `docker build` (for example --network host).
+# Environment: SAGUARO_DOCKER_BUILD_OPTS adds options to `docker build` (for example --network host).
 # Nothing is pushed anywhere; the image stays in the local Docker.
 set -eu
 
@@ -57,7 +57,7 @@ cleanup() { if [ -n "$own_ctx" ] && [ -z "$ctxonly" ]; then rm -rf "$ctx"; fi; }
 trap cleanup EXIT
 
 # the commit the sources are from (the build context has no .git; package_terminal.py writes it into the archive's COMMIT)
-commit=${STRATA_BUILD_COMMIT:-$(git -C "$repo" rev-parse HEAD 2>/dev/null || true)}
+commit=${SAGUARO_BUILD_COMMIT:-$(git -C "$repo" rev-parse HEAD 2>/dev/null || true)}
 case "$commit" in *[!0-9a-f]*|"") commit="" ;; esac
 
 # 1. the Terminal's sources: exactly what packaging/package_terminal.py copies (the working tree, so local edits are in the image)
@@ -100,9 +100,9 @@ echo "flavor $flavor, base $base, engine(s): $engine_label, tag $tag"
 [ -n "$ctxonly" ] && { echo "context kept (--ctx-only)"; exit 0; }
 
 # shellcheck disable=SC2086
-docker build $nocache ${STRATA_DOCKER_BUILD_OPTS:-} \
+docker build $nocache ${SAGUARO_DOCKER_BUILD_OPTS:-} \
   --build-arg "BASE_IMAGE=$base" --build-arg "FLAVOR=$flavor" \
-  --build-arg "STRATA_COMMIT=$commit" --build-arg "STRATA_VERSION=$version" --build-arg "ENGINE_LABEL=$engine_label" \
+  --build-arg "SAGUARO_COMMIT=$commit" --build-arg "SAGUARO_VERSION=$version" --build-arg "ENGINE_LABEL=$engine_label" \
   -t "$tag" "$ctx"
 docker image inspect "$tag" --format 'built {{.RepoTags}} {{.Size}} bytes'
 echo "Not pushed anywhere. Size on disk: $(docker image inspect "$tag" --format '{{.Size}}') bytes."

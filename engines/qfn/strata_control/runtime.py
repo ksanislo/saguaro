@@ -100,13 +100,13 @@ def _name(value: str) -> str:
 
 def runtime_dir() -> Path:
     _supported()
-    override = os.environ.get("STRATA_RUNTIME_DIR")
+    override = os.environ.get("SAGUARO_RUNTIME_DIR")
     if override:
         base = Path(override).expanduser()
     else:
         base = paths.state_base() / "runtime"
     if not base.is_absolute():
-        raise ProfileError("STRATA_RUNTIME_DIR must be absolute")
+        raise ProfileError("SAGUARO_RUNTIME_DIR must be absolute")
     existed = base.exists()
     _private_mkdir(base, parents=True, exist_ok=True)
     details = base.lstat()
@@ -854,9 +854,9 @@ class Host:
         attestation_key = secrets.token_bytes(32)
         expected_attestation = launch_identity.attestation(attestation_key, source_bytes, server_args)
         child_env = os.environ.copy()
-        child_env["STRATA_OWNER_ATTEST_KEY"] = attestation_key.hex()
-        child_env["STRATA_NO_ACQUIRE"] = "1"      # a managed server never installs or downloads (acquisition.py)
-        child_env["STRATA_RUNTIME_PROFILE"] = self.name   # the records of its engine say which profile they belong to
+        child_env["SAGUARO_OWNER_ATTEST_KEY"] = attestation_key.hex()
+        child_env["SAGUARO_NO_ACQUIRE"] = "1"      # a managed server never installs or downloads (acquisition.py)
+        child_env["SAGUARO_RUNTIME_PROFILE"] = self.name   # the records of its engine say which profile they belong to
         try:
             with os.fdopen(descriptor, "ab") as stream:
                 if WINDOWS:

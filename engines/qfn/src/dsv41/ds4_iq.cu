@@ -1084,7 +1084,7 @@ __global__ void __launch_bounds__(kThreads) light_kernel_rows(const SetArgs a, c
         }
 }
 
-bool tc_ok() {   // as ds4_gguf.cu's: sm_70 and later, STRATA_DS4_NO_TC=1 keeps the F32 kernel
+bool tc_ok() {   // as ds4_gguf.cu's: sm_70 and later, SAGUARO_DS4_NO_TC=1 keeps the F32 kernel
 #if defined(STRATA_USE_HIP)
     return false;
 #else
@@ -1097,7 +1097,7 @@ bool tc_ok() {   // as ds4_gguf.cu's: sm_70 and later, STRATA_DS4_NO_TC=1 keeps 
     if (v == 0) {
         int major = 0;
         cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev);
-        const char* e = std::getenv("STRATA_DS4_NO_TC");
+        const char* e = std::getenv("SAGUARO_DS4_NO_TC");
         v = major >= 7 && !(e != nullptr && e[0] == '1') ? 1 : 2;
         state[dev].store(v, std::memory_order_relaxed);
     }
@@ -1187,7 +1187,7 @@ void dn_ne(const Args& a, int groups, int ne, cudaStream_t s) {
 template <int T, bool GU>
 void launch_set(const SetArgs& a, dim3 grid, cudaStream_t s) {
 #if defined(STRATA_USE_HIP)
-    if (hipk::launch<T, GU>(a, s)) return;   // (gfx12, STRATA_DS4_HIPK=1: the matrix-core tiles)
+    if (hipk::launch<T, GU>(a, s)) return;   // (gfx12, SAGUARO_DS4_HIPK=1: the matrix-core tiles)
 #endif
 #if !defined(STRATA_USE_HIP)
     if (tc_ok()) {
@@ -1228,9 +1228,9 @@ LightBuf* light_buf(cudaStream_t s, int k) {
     }
     return &b;
 }
-bool light_on() {   // STRATA_DS4_NO_LIGHT=1: every set through the GEMM tiles
+bool light_on() {   // SAGUARO_DS4_NO_LIGHT=1: every set through the GEMM tiles
     static const bool on = [] {
-        const char* v = std::getenv("STRATA_DS4_NO_LIGHT");
+        const char* v = std::getenv("SAGUARO_DS4_NO_LIGHT");
         return !(v != nullptr && v[0] == '1');
     }();
     return on;

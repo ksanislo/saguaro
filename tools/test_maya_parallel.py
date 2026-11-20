@@ -131,7 +131,7 @@ class ParallelOptionTests(unittest.TestCase):
         for action, mocked in (("--calibrate", "calibrate_config"), ("--speed-calibration", "speed_calibration")):
             with self.subTest(action=action):
                 self.config("minimax")
-                with patch.dict(os.environ, MAYA_SH="1"), \
+                with patch.dict(os.environ, SAGUARO_SH="1"), \
                         patch.object(sys, "argv", ["saguaro.py", "--config", str(self.path),
                                                    "--parallel", "4", action, "--no-start"]), \
                         patch.object(maya, "stop_signals"), \

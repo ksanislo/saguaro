@@ -85,7 +85,7 @@ export function runCommand({ command, input = '', cwd, callCwd, shell = 'auto', 
     const limit = clampTimeoutSec(timeoutSec);
     let child;
     try {
-      child = spawn(plan.file, plan.args, { shell: plan.shell, windowsHide: true, cwd: where.cwd, env: { ...process.env, STRATA_INPUT: String(input ?? '') }, stdio: ['ignore', 'pipe', 'pipe'] });
+      child = spawn(plan.file, plan.args, { shell: plan.shell, windowsHide: true, cwd: where.cwd, env: { ...process.env, SAGUARO_INPUT: String(input ?? '') }, stdio: ['ignore', 'pipe', 'pipe'] });
     } catch (e) { return resolve({ ok: false, text: `The command could not start in ${plan.name}: ${e.message}` }); }
     let text = '', cut = false, timedOut = false;
     const take = chunk => { if (text.length < OUT_MAX + 1) text += chunk.toString(); else cut = true; };

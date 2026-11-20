@@ -26,7 +26,7 @@ namespace strata::core {
 
 enum class PageBacking { LargePages, NormalPages, PinnedByCuda };
 
-/// #243: STRATA_ARENA_PIN_GIB, the cap on the expert arena's CUDA registration in GiB.  -1 when unset (the engine
+/// #243: SAGUARO_ARENA_PIN_GIB, the cap on the expert arena's CUDA registration in GiB.  -1 when unset (the engine
 /// decides, as in 0.1.30), 0 = no cap (the whole arena, or as many slices as the driver takes), N > 0 = at most N GiB,
 /// -2 for "auto" (Windows: the sliced pin stays below the GPU's shared-memory budget).
 int arena_pin_cap_gib();
@@ -40,11 +40,11 @@ inline std::atomic<bool>& arena_uma_no_register_flag() {
     static std::atomic<bool> f{false};
     return f;
 }
-/// True when the arena is to stay unregistered: STRATA_ARENA_PIN_GIB=none always, otherwise the flag above unless the user set
-/// STRATA_ARENA_PIN_GIB to a number (STRATA_ARENA_PIN_GIB=0 registers the whole arena as before).
+/// True when the arena is to stay unregistered: SAGUARO_ARENA_PIN_GIB=none always, otherwise the flag above unless the user set
+/// SAGUARO_ARENA_PIN_GIB to a number (SAGUARO_ARENA_PIN_GIB=0 registers the whole arena as before).
 bool arena_no_register();
 
-/// STRATA_NUMA_PLACE: spans (arena offsets) the next anonymous arena binds to their nodes before it registers (used once).
+/// SAGUARO_NUMA_PLACE: spans (arena offsets) the next anonymous arena binds to their nodes before it registers (used once).
 void pinned_arena_numa_plan(std::vector<strata::platform::NumaSpan> spans);
 struct PinnedArena {
     void* base = nullptr;
@@ -70,10 +70,10 @@ struct PinnedArena {
     /// existing allocation path.  Population/coordination and backing-file lifetime remain the caller's job.
     PinnedArena(uint64_t bytes, const std::vector<uint64_t>& bounds, uint64_t max_pinned_bytes = 0,
                 const std::string& shared_file = {}, uint64_t shared_pack_hash = 0);
-    /// Pin by need (STRATA_PIN_BY_NEED=1): register only the given byte ranges (offset, length), in the given order
+    /// Pin by need (SAGUARO_PIN_BY_NEED=1): register only the given byte ranges (offset, length), in the given order
     /// (the caller's priority: the hottest experts the GPU does not hold first), each rounded out to 4 KiB pages and
     /// trimmed against the ranges already registered; stops at the first refusal of the driver (the WDDM budget is
-    /// not raisable: we choose WHAT to pin), or when `max_pinned_bytes` (or STRATA_ARENA_PIN_GIB) would be passed.
+    /// not raisable: we choose WHAT to pin), or when `max_pinned_bytes` (or SAGUARO_ARENA_PIN_GIB) would be passed.
     /// Everything not registered - the holes - is locked resident instead.  Registered before any page is touched,
     /// as the other constructors do.  `registered_bytes` is then the TOTAL registered, not a prefix: use
     /// `pin_ranges`.
@@ -90,13 +90,13 @@ struct PinnedArena {
     /// Registers the deferred slices in order, publishing how many are done in `ready`, and INT_MAX once it
     /// returns (a slice CUDA refuses ends the registration, and the rest is kept resident by the working-set lock).
     void register_slices(std::atomic<int>& ready);
-    /// STRATA_PARALLEL_LOAD (Linux): reserve only; the caller fills the arena (its threads fault the pages in, on
+    /// SAGUARO_PARALLEL_LOAD (Linux): reserve only; the caller fills the arena (its threads fault the pages in, on
     /// their own nodes), then register_filled() registers it as the first constructor would (the same cap, the same
     /// sliced and locked fallbacks).  cudaHostRegister holds the driver while it faults pages in on one thread.
     struct FillFirst {};
     PinnedArena(uint64_t bytes, const std::vector<uint64_t>& bounds, FillFirst, uint64_t max_pinned_bytes = 0);
     void register_filled();
-    /// FillFirst: STRATA_NUMA_PLACE's policy covers every byte of the arena, so a page lands on its planned node
+    /// FillFirst: SAGUARO_NUMA_PLACE's policy covers every byte of the arena, so a page lands on its planned node
     /// whichever thread faults it in (the fill's readers or the registration)
     bool numa_whole = false;
     std::vector<uint64_t> bounds_;
@@ -187,7 +187,7 @@ LoadStats load_experts_direct(const std::string& path, uint8_t* dst, const std::
 /// reads says they are not in the OS file cache (a cached read takes ~10 us, the drive ~80), and the RAM left
 /// beside the arena (`arena_bytes`) could not keep them cached for the next start either - so a warm restart after
 /// an idle unload never gets slower, and only a start that reads the drive anyway skips the cache's copy.
-/// STRATA_UNBUFFERED_LOAD=1 / 0 forces it. `why` says what decided.
+/// SAGUARO_UNBUFFERED_LOAD=1 / 0 forces it. `why` says what decided.
 /// `cache_counts` false (the file tier with a RAM budget): only whether the files could be kept decides - their mapped
 /// pages land in the process's working set, so a partly cached file would still take the RAM the budget was sized for.
 /// `read_bytes` (#577): the bytes the files are read for, when that is less than the files (the file tier reads only

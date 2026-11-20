@@ -1,4 +1,4 @@
-// route_resident_parity - the warp-parallel STRATA_ROUTE_RESIDENT swap against a scalar reference of the same
+// route_resident_parity - the warp-parallel SAGUARO_ROUTE_RESIDENT swap against a scalar reference of the same
 // semantics, bit for bit.
 //
 // route_resident_k is one warp per token: lane j scans experts j, j + 32, ... and the warp reduces the best
@@ -215,7 +215,7 @@ int main() {
             std::printf("  case %3d  n_tok %d  margin %.2f  ranks [%d,%d]  ties %d  ids %s  weights %s (%d ulp)  stats %s\n",
                         c, n_tok, margin, lo, hi, (int) tie_heavy, ids_same ? "same" : "*** DIFFER ***",
                         w_same ? "same" : "*** DIFFER ***", w_ulp, st_same ? "same" : "*** DIFFER ***");
-            if (std::getenv("STRATA_PARITY_DUMP") && dumped < 2) {
+            if (std::getenv("SAGUARO_PARITY_DUMP") && dumped < 2) {
                 ++dumped;
                 for (int t = 0; t < n_tok; ++t) {
                     std::printf("    token %d  ids in ", t);

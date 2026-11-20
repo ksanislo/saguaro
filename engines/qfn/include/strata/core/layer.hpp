@@ -243,10 +243,10 @@ struct QsaState {
     /// The elastic K/V (qsa_set_kv_elastic): this state's pools are in a VMM range mapped only as far as the
     /// context needs - its index in layer.cpp's registry; -1: carved from the arena as before.
     int32_t kv_elastic = -1;
-    /// An elastic --batch slot state (STRATA_ELASTIC_SLOTS): its arrays larger than a chunk are in a VMM range of its
+    /// An elastic --batch slot state (SAGUARO_ELASTIC_SLOTS): its arrays larger than a chunk are in a VMM range of its
     /// own, backed by qsa_slots_grow - its index in layer.cpp's registry; -1: carved as before.
     int32_t slot_elastic = -1;
-    /// STRATA_KV_HOST_ELASTIC: an elastic slot state's KV-streaming host copy has addresses for the whole context and
+    /// SAGUARO_KV_HOST_ELASTIC: an elastic slot state's KV-streaming host copy has addresses for the whole context and
     /// RAM pinned only as far as qsa_host_grow has reached - its index in layer.cpp's registry; -1: pinned whole.
     int32_t host_elastic = -1;
     strata::kernels::KvHostPools host;
@@ -321,7 +321,7 @@ int64_t qsa_kv_resident_min();
 uint64_t qsa_kv_host_bytes();
 /// The host copies' addresses (pinned or not): what a host copy pinned whole would take.
 uint64_t qsa_kv_host_reserved_bytes();
-/// STRATA_KV_HOST_ELASTIC: the states qsa_state_init makes from now on with a streamed host copy (not only the elastic
+/// SAGUARO_KV_HOST_ELASTIC: the states qsa_state_init makes from now on with a streamed host copy (not only the elastic
 /// slots') get one that grows (session_host_fit); --serve sets it around the solo session and the stages' sessions.
 void qsa_set_host_elastic_main(bool on);
 /// ... and their VRAM K/V pools and pooled indexer keys in a slot pool of their own (backed as the context grows:
@@ -331,16 +331,16 @@ void qsa_set_vram_elastic_main(bool on);
 bool qsa_slots_grow_fresh(const QsaState& st, int64_t cells);
 /// The last qsa_host_grow found no RAM to pin (what a "no room" after a failed slot growth means: RAM, not VRAM).
 bool qsa_host_pin_failed();
-/// STRATA_KV_HOST_ELASTIC: an elastic state's host copy pinned for its first `cells` cells (whole steps of
-/// STRATA_KV_HOST_STEP cells); false: RAM or the driver refused (nothing of the failed step stays pinned).
+/// SAGUARO_KV_HOST_ELASTIC: an elastic state's host copy pinned for its first `cells` cells (whole steps of
+/// SAGUARO_KV_HOST_STEP cells); false: RAM or the driver refused (nothing of the failed step stays pinned).
 bool qsa_host_grow(const QsaState& st, int64_t cells);
-/// STRATA_ROPE_GROW: the RoPE table `st` reads (its own or the one it shares) backed for `cells` positions, from its
+/// SAGUARO_ROPE_GROW: the RoPE table `st` reads (its own or the one it shares) backed for `cells` positions, from its
 /// card's slot budget; true when it already is or is not grown.  `need`: the budget chunks that takes.
 bool qsa_rope_grow(const QsaState& st, int64_t cells);
 int64_t qsa_rope_need(const QsaState& st, int64_t cells);
 /// Frees a grown RoPE table (session_release, with the table's owner).
 void qsa_rope_release(const float* cos_tab);
-/// STRATA_YARN_ELASTIC per conversation (set before any session): every session owner gets a YaRN-level table (the
+/// SAGUARO_YARN_ELASTIC per conversation (set before any session): every session owner gets a YaRN-level table (the
 /// kernels read it for rotary positions >= kRopeYarnOff), backed by qsa_rope_yarn_fit as YaRN conversations need it.
 void qsa_set_rope_yarn(const strata::kernels::RopeScaling* yarn);
 bool qsa_rope_yarn_fit(const QsaState& st, int64_t cells);
@@ -362,7 +362,7 @@ uint64_t qsa_host_backed_bytes(const QsaState& st);
 /// Plan v0.3 P7: store K/V as INT8 with FP16 scales per 64 values (half the VRAM of FP16). Set before sizing and
 /// initializing the session; default off until gate G-C accepts it.
 void qsa_set_kv_int8(bool enabled);
-/// INT8 K/V through the Hadamard rotation (off by default: STRATA_KV_ROT=1)
+/// INT8 K/V through the Hadamard rotation (off by default: SAGUARO_KV_ROT=1)
 void qsa_set_kv_int8_rotate(bool enabled);
 bool qsa_kv_int8();
 /// PR #21: store K/V as Q4_0 after a Hadamard rotation (`--kv q4_0`): 576 B per cell, vs 1,056 in INT8.
@@ -383,7 +383,7 @@ uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, Q
 /// slot states map as their conversations grow and give back when trimmed.
 uint64_t qsa_slot_budget_add(int dev, uint64_t bytes);   ///< returns the bytes made
 void qsa_slot_budget(int dev, uint64_t& total, uint64_t& free);
-/// STRATA_ELASTIC_SLOTS_GIVE: the expert cache hands a chunk of its own to the budget, and takes up to `n` free ones back
+/// SAGUARO_ELASTIC_SLOTS_GIVE: the expert cache hands a chunk of its own to the budget, and takes up to `n` free ones back
 /// (appended to `out`; returns how many).
 void qsa_slot_budget_give(int dev, VmmChunk h);
 int64_t qsa_slot_budget_take(int dev, int64_t n, std::vector<VmmChunk>& out);

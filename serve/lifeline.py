@@ -30,7 +30,7 @@ from strata_control import procs
 
 _REAL_POPEN = subprocess.Popen                  # tests replace subprocess.Popen; isinstance needs the class
 LINUX = sys.platform.startswith("linux")
-MODE = (os.environ.get("STRATA_LIFELINE") or "").strip().lower()        # "watcher" forces the portable path (tests)
+MODE = (os.environ.get("SAGUARO_LIFELINE") or "").strip().lower()        # "watcher" forces the portable path (tests)
 
 _libc = None
 if LINUX:
@@ -262,7 +262,7 @@ def popen(args, role: str = "engine", **kw) -> subprocess.Popen:
         with _children_lock:
             _children.add(child)
     try:
-        token = procs.write_record(child.pid, role, profile=os.environ.get("STRATA_RUNTIME_PROFILE") or None)
+        token = procs.write_record(child.pid, role, profile=os.environ.get("SAGUARO_RUNTIME_PROFILE") or None)
         threading.Thread(target=_after_exit, args=(child, token), name="strata-lifeline-reaper", daemon=True).start()
     except Exception:  # noqa: BLE001 - a record is a safety net, never a reason to fail a start
         pass

@@ -40,7 +40,7 @@ public:
     /// the native kernel also reads, e.g. OrcaRouter's IQ3_XXS) serves the PLE from that row, so it is taken out
     /// of `skip` and `load` does not upload the GGUF key over it.  A quantized row leaves `skip` unchanged.
     static bool keep_unquantized_ple_key(const std::string& pack_dir, std::set<std::string>& skip, std::string& err);
-    /// STRATA_HC_Q8=1: the hyper-connection down / up projections of the layers live only as Q8_0 (the bf16 copy is not
+    /// SAGUARO_HC_Q8=1: the hyper-connection down / up projections of the layers live only as Q8_0 (the bf16 copy is not
     /// loaded: `add_hc_skip` puts their rows in the arena's skip set, `load` quantizes them from the pack file).
     static bool hc_q8_requested();
     static bool add_hc_skip(const std::string& pack_dir, std::set<std::string>& skip);
@@ -59,7 +59,7 @@ public:
 
 private:
     std::vector<void*> weights_;
-    std::vector<const void*> packed_keys_;   // GGUF-layout pointers registered with STRATA_Q8_PACKED=1
+    std::vector<const void*> packed_keys_;   // GGUF-layout pointers registered with SAGUARO_Q8_PACKED=1
     void* scratch_ = nullptr;
     uint64_t bytes_ = 0;
     uint64_t allocated_ = 0;

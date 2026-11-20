@@ -1,5 +1,5 @@
 // include/strata/kernels/cpu/iq_avx1.hpp - AVX1 (SSE4.2 + AVX, no AVX2/FMA) multi-token expert rows
-// for the older-CPU builds (STRATA_ISA_FLOOR=avx: Sandy/Ivy Bridge, Xeon E5 v1/v2, Bulldozer).
+// for the older-CPU builds (SAGUARO_ISA_FLOOR=avx: Sandy/Ivy Bridge, Xeon E5 v1/v2, Bulldozer).
 //
 // The sibling of kq_avx1.cpp for the expert kernels: without these, every CPU expert on such a CPU runs on
 // ggml-cpu's scalar `_generic` dots (every x86 i-quant dot is #if defined(__AVX2__)).  Everything these

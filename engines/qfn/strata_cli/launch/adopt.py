@@ -115,7 +115,7 @@ def plan(*, family: str, model: str, model_dir: Path, data_dir: Path, src: Path,
     cfg = {"exe": "component:strata-engine", "args": args, "cwd": str(src), "tokenizer": str(tokenizer), "model_name": model_name,
            "log": str(log), "lib_dirs": [], "port": 8080}
     if backend == "metal":
-        cfg["env"] = {"STRATA_METAL_STREAM": "1"}
+        cfg["env"] = {"SAGUARO_METAL_STREAM": "1"}
     if backend:
         cfg["backend"] = backend
     return cfg, []

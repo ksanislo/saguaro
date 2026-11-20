@@ -61,26 +61,26 @@ int main() {
             }
         }
         const auto zero = pick("0", nullptr, nodes);
-        expect(zero.choice == C::Unchanged && zero.log.empty(), "one node, STRATA_NUMA_POOL=0: Unchanged and silent");
-        expect(pick(nullptr, "1", nodes).choice == C::Unchanged, "one node, STRATA_NUMA_SPLIT=1: the old variable decides");
-        expect(pick(nullptr, "test", nodes).choice == C::Unchanged, "one node, STRATA_NUMA_SPLIT=test: the old variable decides");
+        expect(zero.choice == C::Unchanged && zero.log.empty(), "one node, SAGUARO_NUMA_POOL=0: Unchanged and silent");
+        expect(pick(nullptr, "1", nodes).choice == C::Unchanged, "one node, SAGUARO_NUMA_SPLIT=1: the old variable decides");
+        expect(pick(nullptr, "test", nodes).choice == C::Unchanged, "one node, SAGUARO_NUMA_SPLIT=test: the old variable decides");
     }
     {
         const auto p = pick(nullptr, nullptr, 2);
         expect(p.choice == C::Auto && p.log.empty(), "two nodes, nothing set: Auto");
-        expect(pick("1", nullptr, 2).choice == C::Auto, "two nodes, STRATA_NUMA_POOL=1: Auto");
+        expect(pick("1", nullptr, 2).choice == C::Auto, "two nodes, SAGUARO_NUMA_POOL=1: Auto");
         expect(pick("", "", 2).choice == C::Auto, "two nodes, empty variables: Auto");
         expect(pick(nullptr, nullptr, 4).choice == C::Auto, "four nodes: Auto (the decision refuses it, with a line)");
         for (const char* off : {"0", "off", "OFF", "false", "No"}) {
             const auto o = pick(off, nullptr, 2);
-            expect(o.choice == C::Off, std::string("two nodes, STRATA_NUMA_POOL=") + off + ": Off");
-            expect(o.log.find("STRATA_NUMA_POOL=0") != std::string::npos && o.log.find("2 NUMA nodes") != std::string::npos,
+            expect(o.choice == C::Off, std::string("two nodes, SAGUARO_NUMA_POOL=") + off + ": Off");
+            expect(o.log.find("SAGUARO_NUMA_POOL=0") != std::string::npos && o.log.find("2 NUMA nodes") != std::string::npos,
                    "the off line names the switch and the node count");
         }
-        expect(pick("0", "1", 2).choice == C::Off, "STRATA_NUMA_POOL=0 beats STRATA_NUMA_SPLIT=1");
-        expect(pick("0", "test", 1).choice == C::Off, "STRATA_NUMA_POOL=0 beats STRATA_NUMA_SPLIT=test, even on one node");
-        expect(pick(nullptr, "1", 2).choice == C::Unchanged, "two nodes, STRATA_NUMA_SPLIT=1: the old variable decides");
-        expect(pick(nullptr, "0", 2).choice == C::Unchanged, "two nodes, STRATA_NUMA_SPLIT=0: the old variable decides (off)");
+        expect(pick("0", "1", 2).choice == C::Off, "SAGUARO_NUMA_POOL=0 beats SAGUARO_NUMA_SPLIT=1");
+        expect(pick("0", "test", 1).choice == C::Off, "SAGUARO_NUMA_POOL=0 beats SAGUARO_NUMA_SPLIT=test, even on one node");
+        expect(pick(nullptr, "1", 2).choice == C::Unchanged, "two nodes, SAGUARO_NUMA_SPLIT=1: the old variable decides");
+        expect(pick(nullptr, "0", 2).choice == C::Unchanged, "two nodes, SAGUARO_NUMA_SPLIT=0: the old variable decides (off)");
     }
 
     // ---- decide_numa_split on a made-up 2 x 12-core box (host core 0; cores 0-11 node 0, 12-23 node 1)
@@ -117,7 +117,7 @@ int main() {
         const auto base = cores({1, 12, 2, 13, 0});
         expect(cpu::decide_numa_split(base, 4, true, false, node_of).on, "4 workers + host, balanced: on");
         const auto rot = cpu::decide_numa_split(base, 4, true, true, node_of);
-        expect(!rot.on && rot.why.find("STRATA_EXCHANGE_ROTATE=1") != std::string::npos, "rotating slots: refused");
+        expect(!rot.on && rot.why.find("SAGUARO_EXCHANGE_ROTATE=1") != std::string::npos, "rotating slots: refused");
         const auto nopin = cpu::decide_numa_split(base, 4, false, false, node_of);
         expect(!nopin.on && nopin.why.find("not pinned") != std::string::npos, "unpinned threads: refused");
         const auto nocore = cpu::decide_numa_split(cores({1, -1, 2, 13}), 4, true, false, node_of);
@@ -130,7 +130,7 @@ int main() {
         const auto one = cpu::decide_numa_split(cores({1}), 1, true, false, node_of);
         expect(!one.on && one.why.find("needs 2 or more") != std::string::npos, "one thread: refused");
     }
-    {   // a single-node machine fed to the decision (STRATA_NUMA_SPLIT=1 on one node): refused, never half-on
+    {   // a single-node machine fed to the decision (SAGUARO_NUMA_SPLIT=1 on one node): refused, never half-on
         auto flat = [](int core) { return core < 0 ? -1 : 0; };
         const auto d = cpu::decide_numa_split(cores({1, 2, 3, 4, 0}), 4, true, false, flat);
         expect(!d.on, "every core on node 0: off");

@@ -8,10 +8,10 @@ import { resolvePython, shellPrefix, venvPython } from '../server/python-resolve
 const none = () => false;
 const pick = (options) => resolvePython({ useCache: false, env: {}, exists: none, starts: none, ...options });
 
-test('an explicit STRATA_PYTHON wins over everything', () => {
-  assert.deepEqual(pick({ platform: 'win32', repo: 'C:\\r', env: { STRATA_PYTHON: 'D:\\py\\python.exe' }, exists: () => true }),
+test('an explicit SAGUARO_PYTHON wins over everything', () => {
+  assert.deepEqual(pick({ platform: 'win32', repo: 'C:\\r', env: { SAGUARO_PYTHON: 'D:\\py\\python.exe' }, exists: () => true }),
     { command: 'D:\\py\\python.exe', args: [], source: 'environment' });
-  assert.equal(pick({ platform: 'linux', env: { STRATA_NATIVE_PYTHON: '/opt/py' } }).command, '/opt/py');
+  assert.equal(pick({ platform: 'linux', env: { SAGUARO_NATIVE_PYTHON: '/opt/py' } }).command, '/opt/py');
 });
 
 test('the repository venv is used with the platform layout', () => {
