@@ -25,6 +25,12 @@ bool fail(std::string& error, const char* message) {
 }
 
 bool sync(std::string& error) {
+    // (the park/restore split: what the thread blocks on - output only)
+    struct SyncRec {
+        std::chrono::steady_clock::time_point t0;
+        ~SyncRec() { conversation_detail::snapshot_split().sync_ms +=
+                          conversation_detail::split_ms(t0, std::chrono::steady_clock::now()); }
+    } sync_rec{std::chrono::steady_clock::now()};
     if (strata::core::device_sync_override()) {   // (the narrowed sync: this thread's queued copies are not in it)
         cudaStream_t s = nullptr;
         if (conversation_detail::private_stream(s) == cudaSuccess && cudaStreamSynchronize(s) != cudaSuccess)
@@ -318,7 +324,13 @@ bool conversation_snapshot_save(SavedConversation& image, const ConversationView
     captured.geometry = geometry_key(g);
     captured.layer_lo = ss.layer_lo; captured.layer_hi = ss.layer_hi;
     captured.live.ids = view.ids; captured.live.imgs = view.images;
-    captured.cvec = view.cvec; captured.checkpoints = conversation_detail::copy_checkpoints_beating(view.checkpoints);
+    captured.cvec = view.cvec;
+    {   // (the park/restore split: the checkpoint tree's host copies, output only)
+        const auto t_ck = std::chrono::steady_clock::now();
+        captured.checkpoints = conversation_detail::copy_checkpoints_beating(view.checkpoints);
+        conversation_detail::snapshot_split().ckpt_ms +=
+            conversation_detail::split_ms(t_ck, std::chrono::steady_clock::now());
+    }
     const int64_t unchanged = reuse.kv.empty() ? 0 : reuse.unchanged_tokens;
     captured.kv = std::move(reuse.kv);
     const size_t layers = owned_qsa(ss);

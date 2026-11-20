@@ -908,6 +908,9 @@ struct PinnedUpload {
     }
 };
 
+// breakdown line (output only): event pairs a chunk records around its KV staging regions
+constexpr int kKvEvPairs = 128;
+
 struct Prefill::Impl {
     const core::WeightTable* wt = nullptr;
     const core::ModelGeometry* g = nullptr;
@@ -1029,6 +1032,13 @@ struct Prefill::Impl {
     int32_t* ident_table = nullptr;
     cudaStream_t kv_copy = nullptr;
     cudaEvent_t kv_released = nullptr, kv_ready = nullptr;
+    // breakdown line (output only): the staging regions' stream time, an event pair per pass, summed after the chunk
+    cudaEvent_t kv_ev0[kKvEvPairs] = {}, kv_ev1[kKvEvPairs] = {};
+    int kv_pairs_run = 0;
+    double kv_ms_run = 0.0;                           // this chunk: staged host->device ...
+    uint64_t kv_bytes_run = 0;                        // ... bytes ...
+    int64_t kv_passes_run = 0;                        // ... per layer pass
+    double kv_ms_total = 0.0;                         // this path over its lifetime
     // layer split: the device, and the hand-off to the next stage (two pinned chunk buffers, used in turn)
     int device = -1;
     float* hand[2] = {};
@@ -1164,6 +1174,10 @@ void Prefill::release() {
     if (impl_->kv_copy) cudaStreamDestroy(impl_->kv_copy);
     if (impl_->kv_released) cudaEventDestroy(impl_->kv_released);
     if (impl_->kv_ready) cudaEventDestroy(impl_->kv_ready);
+    for (int i = 0; i < kKvEvPairs; ++i) {
+        if (impl_->kv_ev0[i]) cudaEventDestroy(impl_->kv_ev0[i]);
+        if (impl_->kv_ev1[i]) cudaEventDestroy(impl_->kv_ev1[i]);
+    }
     if (impl_->grp_host) cudaFreeHost(impl_->grp_host);
     impl_->steps_up.release();
     impl_->tok_up.release();
@@ -2749,6 +2763,10 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
     const int64_t forced = hand_in_ == nullptr && !job ? std::exchange(force_chunk_, 0) : 0;
     const bool forced_single = force_single_, forced_planned = force_planned_;
     Impl& m = *impl_;
+    m.kv_ms_run = 0.0;   // (the breakdown line counts are per chunk: reset here, read at the end)
+    m.kv_bytes_run = 0;
+    m.kv_passes_run = 0;
+    m.kv_pairs_run = 0;
     const core::OnDevice on_device(m.device);
     const core::ModelGeometry& g = *m.g;
     // SAGUARO_PREFILL_MULTI: a queued prompt's own session and callbacks on this stage
@@ -3559,6 +3577,17 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                         const bool staged = st.kv_mode == 1;
                         if (staged) {
                             pt.mark(kPfKvStage, cs);
+                            // the breakdown line: each staging region gets an event pair (created once); their
+                            // stream times are summed after the chunk's final sync.  Output only.
+                            if (m.kv_ev0[0] == nullptr) {
+                                bool ev_ok = true;
+                                for (int i = 0; i < kKvEvPairs && ev_ok; ++i)
+                                    ev_ok = cudaEventCreateWithFlags(&m.kv_ev0[i], cudaEventDisableTiming) == cudaSuccess &&
+                                            cudaEventCreateWithFlags(&m.kv_ev1[i], cudaEventDisableTiming) == cudaSuccess;
+                                if (!ev_ok) { cudaGetLastError(); for (int i = 0; i < kKvEvPairs; ++i) m.kv_ev0[i] = m.kv_ev1[i] = nullptr; }
+                            }
+                            const int kv_ev = m.kv_pairs_run < kKvEvPairs ? m.kv_pairs_run : -1;
+                            if (kv_ev >= 0) cudaEventRecord(m.kv_ev0[kv_ev], cs);
                             if (kv_pending == qsa_index) {
                                 if (cudaStreamWaitEvent(cs, m.kv_ready, 0) != cudaSuccess) {
                                     err = "prefill: waiting for KV prefetch";
@@ -3568,6 +3597,12 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                             } else strata::kernels::kv_stage_from_host(pools_of(m.stage, m.ident_table), st.host,
                                                                 core::qsa_kv_format(st),
                                                                 (p0 + s.page_size - 1) / s.page_size, s, m.cs);
+                            if (kv_ev >= 0) cudaEventRecord(m.kv_ev1[kv_ev], cs);
+                            if (kv_ev >= 0) ++m.kv_pairs_run;
+                            ++m.kv_passes_run;
+                            m.kv_bytes_run +=
+                                (uint64_t) ((p0 + s.page_size - 1) / s.page_size) *
+                                strata::kernels::kv_block_bytes(s, core::qsa_kv_format(st));
                             pt.mark(kPfQsa, cs);
                             pf_step("reading the prompt (batched, step sync): the K/V staged from RAM at layer", l);
                         }
@@ -5341,6 +5376,31 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
         err = std::string("prefill: expert copy stream: ") + cudaGetErrorString(cst);
         return false;
     }
+    if (m.kv_pairs_run > 0) {   // the breakdown line: sum this chunk's staging regions (events, output only)
+        for (int i = 0; i < m.kv_pairs_run; ++i) {
+            float ms = 0.0f;
+            if (cudaEventElapsedTime(&ms, m.kv_ev0[i], m.kv_ev1[i]) == cudaSuccess) m.kv_ms_run += ms;
+        }
+        cudaGetLastError();
+    }
+    m.kv_ms_total += m.kv_ms_run;
+    if (job) {   // this chunk's staging went into the job(s) it read (a batched chunk splits it evenly per segment)
+        const int64_t share = std::max<int64_t>(1, (int64_t) job->segs.size());
+        job->kv_ms += m.kv_ms_run / (double) share;
+        job->kv_bytes += m.kv_bytes_run / (uint64_t) share;
+        job->kv_passes += m.kv_passes_run / share;
+        if (bat)
+            for (const PromptJob::Seg& sg : job->segs)
+                if (sg.job.get() != job.get()) {
+                    sg.job->kv_ms += m.kv_ms_run / (double) share;
+                    sg.job->kv_bytes += m.kv_bytes_run / (uint64_t) share;
+                    sg.job->kv_passes += m.kv_passes_run / share;
+                }
+    }
+    m.kv_ms_run = 0.0;
+    m.kv_bytes_run = 0;
+    m.kv_passes_run = 0;
+    m.kv_pairs_run = 0;
     if (kv_prefetch) {
         if (const cudaError_t cst = cudaStreamSynchronize(m.kv_copy); cst != cudaSuccess) {
             err = std::string("prefill: KV prefetch stream: ") + cudaGetErrorString(cst);

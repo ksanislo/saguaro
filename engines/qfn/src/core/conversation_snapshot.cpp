@@ -202,9 +202,20 @@ bool transfer(void* dst, const void* src, size_t n, std::string& error) {
 }
 // the jobs together on threads when they can be (host_copy_threaded), else one by one as transfer()
 bool transfer_jobs(const std::vector<CopyJob>& jobs, std::string& error) {
-    if (host_copy_threaded(jobs)) return true;
+    const auto t0 = std::chrono::steady_clock::now();   // (the park/restore split: output only)
+    size_t total = 0;
+    for (const CopyJob& j : jobs) total += j.n;
+    if (host_copy_threaded(jobs)) {
+        conversation_detail::snapshot_split().copy_ms += conversation_detail::split_ms(t0, std::chrono::steady_clock::now());
+        conversation_detail::snapshot_split().copy_bytes += total;
+        ++conversation_detail::snapshot_split().threaded;
+        return true;
+    }
     for (const CopyJob& j : jobs)
         if (!transfer(j.dst, j.src, j.n, error)) return false;
+    conversation_detail::snapshot_split().copy_ms += conversation_detail::split_ms(t0, std::chrono::steady_clock::now());
+    conversation_detail::snapshot_split().copy_bytes += total;
+    ++conversation_detail::snapshot_split().plain;
     return true;
 }
 } // namespace
@@ -230,6 +241,10 @@ size_t conversation_kv_bytes(const QsaState& st, const ModelGeometry& g, int64_t
     size_t bytes = 0;
     std::string error;
     return conversation_kv_capture_bytes({}, st, g, upto, index, bytes, error) ? bytes : 0;
+}
+
+std::string conversation_snapshot_take_split() {
+    return conversation_detail::snapshot_split_note(conversation_detail::take_snapshot_split());
 }
 
 bool conversation_kv_save(ConversationKv& image, const QsaState& st, const ModelGeometry& g,
@@ -261,8 +276,11 @@ bool conversation_kv_save(ConversationKv& image, const QsaState& st, const Model
         if (keep > dst[i]->size()) { error = "conversation snapshot: missing reusable prefix"; return false; }
         // (SAGUARO_PARK_FAST: no fill - every byte past the old size lies in [keep, sizes[i]), which the jobs below
         // overwrite; a failed copy fails the capture and the image is dropped)
+        const auto t_alloc = std::chrono::steady_clock::now();   // (the park split: buffer growth = fresh pages + fill)
         if (park_fast()) dst[i]->resize_for_overwrite(sizes[i]);
         else dst[i]->resize(sizes[i]);
+        conversation_detail::snapshot_split().alloc_ms +=
+            conversation_detail::split_ms(t_alloc, std::chrono::steady_clock::now());
         std::vector<CopyJob> jobs;
         if (!dst[i]->visit(keep, sizes[i] - keep, [&](uint8_t* p, size_t n, size_t at) {
                 if (!src[i]) { error = "conversation snapshot: missing state buffer"; return false; }

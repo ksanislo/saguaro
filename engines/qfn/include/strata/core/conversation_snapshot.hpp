@@ -23,6 +23,10 @@ bool conversation_kv_capture_bytes(const ConversationKv& image, const QsaState& 
 // No CUDA calls or destination writes. Used for whole-session prevalidation.
 bool conversation_kv_validate(const ConversationKv& image, const QsaState& state, const ModelGeometry& g,
                               int64_t upto, bool include_index, std::string& error);
+// The read-stall split (output only): what the snapshot save/restore calls on this thread spent their time in -
+// buffer growth (alloc), the copies, the device syncs they wait behind, and the checkpoint tree.  Takes and resets
+// the thread's record: call it once after a whole park or restore, and log what it returns.
+std::string conversation_snapshot_take_split();
 bool conversation_kv_restore(const ConversationKv& image, const QsaState& state, const ModelGeometry& g,
                              int64_t upto, bool include_index, std::string& error);
 // conversation_kv_save(from) + conversation_kv_restore(to) without a host image, for two states of the same layout.

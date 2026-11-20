@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <exception>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <vector>
 
