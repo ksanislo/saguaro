@@ -648,7 +648,7 @@ function Conversations({m}) {
     const cache = (c.cache_vram_bytes || 0) + (c.cache_ram_bytes || 0);
     const under = [`turn ${fmt(c.turns)}`, `${fmt(c.context_used)} tok${cache ? ` · ${gb(cache, cache >= 10 * GIB ? 1 : 2)} GB cache` : ""}`];
     const read = t ? (t.prompt_total ? `${fmt(t.prompt_read)} / ${fmt(t.prompt_total)}` : fmt(t.prompt_tokens)) : fmt(c.prompt_last);
-    const out = t ? `${fmt(t.generated)}${t.max_tokens ? html`<span class="muted small"> / ${fmt(t.max_tokens)}</span>` : ""}` : fmt(c.out_last);
+    const out = t ? html`${fmt(t.generated)}${t.max_tokens ? html`<span class="muted small"> / ${fmt(t.max_tokens)}</span>` : ""}` : fmt(c.out_last);
     const speed = !t ? (c.decode_tok_s != null ? `${fmt(c.decode_tok_s, 1)} tok/s` : "–")
       : t.state === "reading" ? (t.prefill_tok_s != null ? `${fmt(t.prefill_tok_s)} prefill${t.prefill_shared ? " (shared clock)" : ""}` : "–")
       : t.tok_s != null ? fmt(t.tok_s, 1) : "–";
