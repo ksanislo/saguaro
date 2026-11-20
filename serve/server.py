@@ -2517,9 +2517,11 @@ class Service:
             return
         t0, room = time.time(), ""
         if self._vision_lends() and self._engine_ready():
+            # the engine may hold its raised floor after ANY VLEND (a refusal can leave the give half-done), so the
+            # idle stop must send VRECLAIM even when the lend itself was refused
+            self.vision_held = True
             try:
                 out = self.engine.vision_lend(v.elastic_mib)     # waits for the engine's VLENT line
-                self.vision_held = True
                 room = (f"the expert cache keeps {v.elastic_mib} MiB free for it "
                         f"({out.get('cache_mib')} MiB left mapped); ")
             except ValueError as e:
@@ -6934,6 +6936,11 @@ def _qfn_engine_class():
         def _vlen_command(self, cmd: str, want: str, timeout: float) -> dict:
             if not self.alive():
                 raise QE.EngineDied("the engine is not running")
+            while True:                                    # (an answer to an earlier, timed-out command: stale now)
+                try:
+                    self.vlen_lines.get_nowait()
+                except queue.Empty:
+                    break
             self._send(cmd)
             end = time.monotonic() + timeout
             while True:

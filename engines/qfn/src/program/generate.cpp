@@ -12926,6 +12926,11 @@ int main(int argc, char** argv) {
         // VLEND (PLAN-qfn-vision-lend): what CUDA0 keeps free for the picture encoder on top of its normal floor;
         // VRECLAIM drops it again.  The once-a-second floor check gives it back / the cache takes it back.
         std::atomic<int64_t> vlen_extra_b{0};
+        // the commands answer asynchronously (review 1): they set this and the loop's settles work toward it
+        bool vlen_pending = false;               // a VLEND still awaits its VLENT / ERR VLEND
+        bool vlen_reclaim_pending = false;       // a VRECLAIM answered; its take-back goes on in the loop
+        Clock::time_point vlen_deadline{};       // VLEND's 30 s fuse, VRECLAIM's take-back fuse
+        Clock::time_point vlen_rdeadline{};
         auto floor_of = [&](size_t k) -> int64_t {   // bytes
             const strata::core::Verifier& vk = k == 0 ? ver : stages[k - 1]->ver;
             const size_t lim = vk.batch_graph_limit(), held = vk.batch_layouts();
@@ -12960,6 +12965,84 @@ int main(int argc, char** argv) {
             }
             floor_said[k] = 1;
         };
+        // VLEND / VRECLAIM pending work (PLAN-qfn-vision-lend review 1): the commands only set this state and go back
+        // to the command loop; every settle of card 0 (and the idle tick) runs one step toward it on a quiet CUDA0,
+        // giving toward VLEND's target or growing the cache back after a VRECLAIM.  The answer line prints once,
+        // here; the serve thread alone touches this state and writes these lines.
+        const std::thread::id vlen_thread = std::this_thread::get_id();
+        auto vlen_tick = [&]() {
+            if (!vlen_pending && !vlen_reclaim_pending) return;
+            if (std::this_thread::get_id() != vlen_thread) return;   // (an allocation hook may settle a card too)
+            const int vdev = eslot_dev(0);
+            const strata::core::OnDevice on0(vdev);
+            strata::core::ExpertCache& xc = *gv[0].cache;
+            const uint64_t G = strata::core::vmm_granularity(vdev);
+            size_t fb = 0, tb = 0;
+            auto bad_vram = [&] {
+                (void) cudaGetLastError();
+                if (vlen_pending) {
+                    vlen_pending = false;
+                    std::printf("ERR VLEND: CUDA0's free VRAM cannot be read\n");
+                    std::fflush(stdout);
+                }
+                vlen_reclaim_pending = false;
+            };
+            if (G == 0 || cudaMemGetInfo(&fb, &tb) != cudaSuccess) { bad_vram(); return; }
+            const int64_t floor_b = floor_of(0);   // VLEND's target: CUDA0's floor with the encoder's share
+            if (vlen_pending) {
+                int64_t got = -1;
+                if ((int64_t) fb < floor_b) {
+                    const int64_t short_b = floor_b - (int64_t) fb;
+                    got = free_to_driver((size_t) 0, (short_b + (int64_t) G - 1) / (int64_t) G, true);
+                    if (cudaMemGetInfo(&fb, &tb) != cudaSuccess) { bad_vram(); return; }
+                }
+                if ((int64_t) fb >= floor_b) {   // (the floor stays raised until VRECLAIM)
+                    vlen_pending = false;
+                    std::fprintf(stderr, "strata serve: VLEND: CUDA0 at %zu MiB free (its floor is %lld MiB with the "
+                                         "encoder's share); the expert cache maps %lld of %lld MiB, %lld of %lld slots\n",
+                                 fb >> 20, (long long) (floor_b >> 20), (long long) (xc.mapped_bytes() >> 20),
+                                 (long long) (xc.full_bytes() >> 20), (long long) xc.slots(),
+                                 (long long) xc.full_slots());
+                    std::printf("VLENT free_mib=%lld cache_mib=%lld\n", (long long) (fb >> 20),
+                                (long long) (xc.mapped_bytes() >> 20));
+                    std::fflush(stdout);
+                    return;
+                }
+                int64_t fr = 0;
+                strata::core::qsa_slot_budget_chunks(vdev, &fr, nullptr);
+                if (got == 0 && gv[0].lo <= give_floor && fr <= slots_low_water(0)) {
+                    vlen_pending = false;   // (the floor stays: the server sends VRECLAIM after any VLEND)
+                    std::printf("ERR VLEND: CUDA0's expert cache is at its smallest size of %lld slots: %zu of "
+                                "%lld MiB free\n", (long long) give_floor, fb >> 20, (long long) (floor_b >> 20));
+                    std::fflush(stdout);
+                    return;
+                }
+                if (Clock::now() > vlen_deadline) {
+                    vlen_pending = false;   // (the floor stays for the same reason: a later settle may free more)
+                    std::printf("ERR VLEND: timed out with %zu of %lld MiB free after 30 s\n", fb >> 20,
+                                (long long) (floor_b >> 20));
+                    std::fflush(stdout);
+                }
+                return;
+            }
+            // VRECLAIM: CUDA0's cache grows back over the VRAM the encoder gave up (the free VRAM goes into the slot
+            // budget here; the settle above / the loop's elastic_idle takes it back into the cache, refilled).
+            int64_t fr = 0, made = 0;
+            strata::core::qsa_slot_budget_chunks(vdev, &fr, &made);
+            const int64_t keep = budget_keep(0, made) + slots_low_water(0) + 32;   // chunks the slots keep
+            const int64_t holes = (int64_t) ((xc.bytes_of(gv[0].top) - xc.bytes_of(gv[0].lo)) / G);
+            const int64_t room = (int64_t) fb > floor_b ? ((int64_t) fb - floor_b) / (int64_t) G : 0;
+            if (holes <= 0 || Clock::now() > vlen_rdeadline || (room <= 0 && fr <= keep)) {
+                vlen_reclaim_pending = false;   // (whole again, nothing left to take, or it is not coming)
+                std::fprintf(stderr, "strata serve: VRECLAIM: the expert cache maps %lld of %lld MiB, %lld of %lld "
+                                     "slots%s\n", (long long) (xc.mapped_bytes() >> 20),
+                             (long long) (xc.full_bytes() >> 20), (long long) xc.slots(),
+                             (long long) xc.full_slots(), holes > 0 ? " (the rest goes back as the slots let go)" : "");
+                return;
+            }
+            if (room > 0 && fr <= budget_keep(0, made) + slots_low_water(0))
+                (void) strata::core::qsa_slot_budget_add(vdev, (uint64_t) std::min(room, holes) * G);
+        };
         auto elastic_idle = [&](size_t k, bool may_give, int skip) {
             if (!eslots_on) return;
             const strata::core::OnDevice on_k(eslot_dev(k));
@@ -12980,6 +13063,7 @@ int main(int argc, char** argv) {
             const int64_t low = slots_low_water(k);
             if (!may_give) return;
             vram_floor(k);   // (first: the budget it leaves is what is settled below)
+            if (k == 0) vlen_tick();   // (VLEND / VRECLAIM step toward their target on this quiet settle)
             strata::core::qsa_slot_budget_chunks(eslot_dev(k), &fr, &made);
             if (fr < low && gv[k].lo > give_floor) {
                 give(k, low - fr + 16);
@@ -16752,6 +16836,9 @@ int main(int argc, char** argv) {
                 if (big) due.push_back((int) b);
             }
             if (conc_serving || in_prompt_read || share_live || cy_held_n > 0 || adm_active) return true;
+            if ((vlen_pending || vlen_reclaim_pending) && !pipe_inflight() && !batch_on())
+                for (size_t k = 0; k < bslot_ss.size(); ++k)   // (idle: without this the floor path would never run)
+                    elastic_idle(k, true, -1);
             if (due.empty()) {   // nothing running: budget chunks a slot let go of go back to the expert caches
                 if (pipe_inflight() || batch_on()) return true;
                 for (size_t k = 0; k < bslot_ss.size(); ++k) {
@@ -16959,11 +17046,11 @@ int main(int argc, char** argv) {
                 adm_bstop(std::atoi(line.c_str() + 6));
                 continue;
             }
-            // VLEND <mib> / VRECLAIM (PLAN-qfn-vision-lend): CUDA0 lends the picture encoder's process VRAM from its
-            // expert cache / slot budget and takes it back - while batch slots decode (a command read between windows;
-            // the piped groups landed above).  The room goes out through the floor path (free_to_driver / give) and
-            // back through the loop's own elastic_idle / take_back.  Answers: VLENT free_mib=<n> cache_mib=<n> /
-            // VRECLAIMED cache_mib=<n>, or ERR VLEND: / ERR VRECLAIM: with the reason.
+            // VLEND <mib> / VRECLAIM (PLAN-qfn-vision-lend, review 1): CUDA0 lends the picture encoder's process
+            // VRAM from its expert cache / slot budget and takes it back - while batch slots decode.  ASYNCHRONOUS:
+            // the command sets the pending state, works one quiet step here at once, and goes back to the command
+            // loop; every settle of card 0 (and the idle tick) runs vlen_tick until the answer is due:
+            // VLENT free_mib=<n> cache_mib=<n> / ERR VLEND: <why> / VRECLAIMED cache_mib=<n>.
             if (line.rfind("VLEND", 0) == 0 || line.rfind("VRECLAIM", 0) == 0) {
                 const bool lend = line.rfind("VLEND", 0) == 0;
                 char* ve = nullptr;
@@ -16982,129 +17069,30 @@ int main(int argc, char** argv) {
                     std::fflush(stdout);
                     continue;
                 }
-                const int dev0 = eslot_dev(0);
-                const strata::core::OnDevice on0(dev0);
-                strata::core::ExpertCache& xc0 = *gv[0].cache;
-                const uint64_t G = strata::core::vmm_granularity(dev0);
-                vlen_extra_b.store(lend ? (int64_t) vmib << 20 : 0, std::memory_order_relaxed);
-                size_t fb = 0, tb = 0;
-                std::string vwhy;
-                bool done = false;
-                // the wait lets the slots run on: a queued BSTOP lands, any other command goes back for the loop to
-                // read; -1: the engine cannot go on
-                auto beat = [&]() -> int {
-                    std::string pl;
-                    while (try_next_line(pl)) {
-                        if (pl == "QUIT") {
-                            std::lock_guard<std::mutex> lk(in_mu);
-                            in_lines.push_front(pl);
-                            return 2;
-                        }
-                        if (pl.rfind("BSTOP ", 0) == 0) adm_bstop(std::atoi(pl.c_str() + 6));
-                        else if (pl != "BYIELD") {
-                            std::lock_guard<std::mutex> lk(in_mu);
-                            in_lines.push_front(pl);
-                            return 1;
-                        }
-                    }
-                    if (batch_on() || (piped && pipe_inflight())) return (piped ? pump(true) : batch_step()) ? 0 : -1;
-                    std::this_thread::sleep_for(std::chrono::milliseconds(25));
-                    return 0;
-                };
-                // CUDA0 quiet: no window in flight there (what lets the give path touch its cache)
-                auto quiet0 = [&] {
-                    return !conc_serving && !in_prompt_read && (stage_group.empty() || stage_group[0] < 0);
-                };
-                const auto t_v = Clock::now();
-                if (lend) {
-                    const int64_t target = floor_of(0);   // its normal floor plus the encoder's share
-                    if (G == 0 || cudaMemGetInfo(&fb, &tb) != cudaSuccess) vwhy = "CUDA0's free VRAM cannot be read";
-                    while (vwhy.empty()) {
-                        if ((int64_t) fb >= target) { done = true; break; }
-                        if (quiet0()) {
-                            const int64_t short_b = target - (int64_t) fb;
-                            const int64_t got = free_to_driver((size_t) 0, (short_b + (int64_t) G - 1) / (int64_t) G,
-                                                               true);
-                            if (cudaMemGetInfo(&fb, &tb) != cudaSuccess) {
-                                vwhy = "CUDA0's free VRAM cannot be read";
-                                break;
-                            }
-                            int64_t fr = 0;
-                            strata::core::qsa_slot_budget_chunks(dev0, &fr, nullptr);
-                            if ((int64_t) fb < target && got == 0 && gv[0].lo <= give_floor &&
-                                fr <= slots_low_water(0)) {
-                                char w[200];
-                                std::snprintf(w, sizeof w, "CUDA0's expert cache is at its smallest size of %lld "
-                                                     "slots: %zu of %lld MiB free", (long long) give_floor, fb >> 20,
-                                              (long long) (target >> 20));
-                                vwhy = w;   // the floor stays: the once-a-second check gives more when the budget frees
-                                break;
-                            }
-                        }
-                        if (Clock::now() - t_v > std::chrono::seconds(30)) {
-                            char w[160];
-                            std::snprintf(w, sizeof w, "timed out with %zu of %lld MiB free after 30 s", fb >> 20,
-                                          (long long) (target >> 20));
-                            vwhy = w;
-                            vlen_extra_b.store(0, std::memory_order_relaxed);   // (it keeps no room it cannot give)
-                            break;
-                        }
-                        const int b = beat();
-                        if (b < 0) return 1;
-                        if (b > 0) {
-                            if (cudaMemGetInfo(&fb, &tb) == cudaSuccess && (int64_t) fb >= target) done = true;
-                            else vwhy = b == 2 ? "the engine is stopping"
-                                               : "a request came in before CUDA0 had given the room";
-                            break;
-                        }
-                    }
-                    if (done) {
-                        std::fprintf(stderr, "strata serve: VLEND %lld MiB: CUDA0 at %zu MiB free (its floor is %lld "
-                                             "MiB with the encoder's share); the expert cache maps %lld of %lld MiB, "
-                                             "%lld of %lld slots\n", vmib, fb >> 20, (long long) (target >> 20),
-                                     (long long) (xc0.mapped_bytes() >> 20), (long long) (xc0.full_bytes() >> 20),
-                                     (long long) xc0.slots(), (long long) xc0.full_slots());
-                        std::printf("VLENT free_mib=%lld cache_mib=%lld\n", (long long) (fb >> 20),
-                                    (long long) (xc0.mapped_bytes() >> 20));
-                    } else {
-                        std::fprintf(stderr, "strata serve: VLEND %lld MiB refused: %s\n", vmib, vwhy.c_str());
-                        std::printf("ERR VLEND: %s\n", vwhy.c_str());
-                    }
+                if (vlen_pending && !lend) {   // (the server gave up on the lend: close the pair, then reclaim)
+                    vlen_pending = false;
+                    std::printf("ERR VLEND: superseded by VRECLAIM\n");
                     std::fflush(stdout);
-                    continue;
                 }
-                // VRECLAIM: the encoder is gone.  What CUDA0 has free above its (now ordinary) floor goes into the slot
-                // budget and the expert cache takes it back, refilled from the profile - the loop's own elastic_idle
-                // branch; what a prompt loan still holds back comes back from the loop when the slots let go.
-                for (int tries = 0; G > 0 && tries < 12 && vwhy.empty(); ++tries) {
-                    if (cudaMemGetInfo(&fb, &tb) != cudaSuccess) { vwhy = "CUDA0's free VRAM cannot be read"; break; }
-                    if (!quiet0()) {
-                        const int b = beat();
-                        if (b < 0) return 1;
-                        if (b > 0) break;
-                        continue;
-                    }
-                    int64_t fr = 0, made = 0;
-                    strata::core::qsa_slot_budget_chunks(dev0, &fr, &made);
-                    const int64_t keep = budget_keep(0, made) + slots_low_water(0) + 32;   // chunks the slots keep
-                    const int64_t holes = (int64_t) ((xc0.bytes_of(gv[0].top) - xc0.bytes_of(gv[0].lo)) / G);
-                    const int64_t room = (int64_t) fb > floor_of(0) ? ((int64_t) fb - floor_of(0)) / (int64_t) G : 0;
-                    if (holes > 0 && room > 0 && fr <= keep)
-                        (void) strata::core::qsa_slot_budget_add(dev0, (uint64_t) std::min(room, holes) * G);
-                    const int64_t lo0 = gv[0].lo;
-                    elastic_idle((size_t) 0, true, -1);
-                    if (gv[0].lo >= gv[0].top) { done = true; break; }
-                    if (gv[0].lo == lo0 && room == 0) break;   // (a loan is out: the loop takes the budget's spare back)
+                if (lend) {
+                    vlen_extra_b.store((int64_t) vmib << 20, std::memory_order_relaxed);
+                    vlen_pending = true;
+                    vlen_reclaim_pending = false;
+                    vlen_deadline = Clock::now() + std::chrono::seconds(30);
+                } else {
+                    vlen_extra_b.store(0, std::memory_order_relaxed);
+                    vlen_pending = false;
+                    vlen_reclaim_pending = true;
+                    vlen_rdeadline = Clock::now() + std::chrono::seconds(120);
                 }
-                std::fprintf(stderr, "strata serve: VRECLAIM: CUDA0 at %zu MiB free; the expert cache maps %lld of "
-                                     "%lld MiB, %lld of %lld slots%s\n", fb >> 20,
-                             (long long) (xc0.mapped_bytes() >> 20), (long long) (xc0.full_bytes() >> 20),
-                             (long long) xc0.slots(), (long long) xc0.full_slots(),
-                             done ? "" : " (the rest goes back as the slots let go)");
-                std::printf("VRECLAIMED cache_mib=%lld\n", (long long) (xc0.mapped_bytes() >> 20));
-                std::fflush(stdout);
+                vlen_tick();   // (between windows here too: usually the answer, or the first give, comes on this line)
+                if (!lend) {   // VRECLAIMED is answered at once; the take-back goes on in the loop (vlen_tick)
+                    std::printf("VRECLAIMED cache_mib=%lld\n", (long long) (gv[0].cache->mapped_bytes() >> 20));
+                    std::fflush(stdout);
+                }
                 continue;
             }
+
             // STRATA_PICTURE_SERIAL=1 (the old way: one position table for every slot, which a picture request rewrites):
             // a picture request starts when no slot decodes, a text one when no picture conversation does
             if (picture_serial && slot_admit && o.vision && !adm_direct) {
