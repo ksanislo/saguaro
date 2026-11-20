@@ -10,7 +10,7 @@
 
 namespace strata::core::glmfast {
 
-// The all-resident launch skip (STRATA_GLM_RESIDENT_SKIP; the complete pool was here too until v1.1.35): on by
+// The all-resident launch skip (SAGUARO_GLM_RESIDENT_SKIP; the complete pool was here too until v1.1.35): on by
 // default on AMD, where the Strix / Gorgon Halo APUs hold every expert (measured there); an NVIDIA build launches
 // every route's kernels unless the setting is 1.  The setting, when given, wins either way.
 inline bool on_by_default_on_amd(const char* env) {
