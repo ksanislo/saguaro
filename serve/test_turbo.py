@@ -22,7 +22,7 @@ WEB = Path(__file__).resolve().parent / "web"
 
 
 class ResidentSkip(unittest.TestCase):
-    """MAYA_DS4_RESIDENT_* / MAYA_GLM_RESIDENT_*: the experts a token goes without wherever they live (Turbo's lever for
+    """SAGUARO_DS4_RESIDENT_* / SAGUARO_GLM_RESIDENT_*: the experts a token goes without wherever they live (Turbo's lever for
     a model that fits in VRAM): the option names, their env aliasing, Turbo's values, the engines reading them."""
     ROOT = Path(__file__).resolve().parents[1]
 
@@ -87,8 +87,8 @@ class TurboMap(unittest.TestCase):
         for make, key, other in ((glm_cfg, "SAGUARO_GLM_RESIDENT_TOPK", "SAGUARO_GLM_MISS_SKIP_W"),
                                  (ds4_cfg, "SAGUARO_DS4_RESIDENT_TOPK", "SAGUARO_DS4_RAM_SKIP_W")):
             cfg = M.read(make(self.d))
-            cfg.setdefault("installer", {})["ds4_quant" if key.startswith("MAYA_DS4") else "quant"] = \
-                "maya-xs" if key.startswith("MAYA_DS4") else "Maya-XS-IQ1_S"
+            cfg.setdefault("installer", {})["ds4_quant" if key.startswith("SAGUARO_DS4") else "quant"] = \
+                "maya-xs" if key.startswith("SAGUARO_DS4") else "Maya-XS-IQ1_S"
             patch = M.turbo_patch(cfg)
             self.assertNotIn(key, patch["env"])
             self.assertIn(other, patch["env"])

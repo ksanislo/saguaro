@@ -6740,7 +6740,7 @@ def start_qfn(cfg: dict, tok):
     server's engine interface, and its picture encoder (vision-qfn: the same ENC protocol as maya-vision) resident."""
     from serve import qfn_engine as QE
     if not cfg:
-        raise SystemExit("--engine qfn needs --config")
+        raise SystemExit("the batch driver needs a config (its exe names the *qfn engine)")
     env = QE.child_env(cfg)
     QE.configure_batch_telemetry_env(env, cfg, None)
     sampling_defaults = sampling_defaults_from_config(cfg)
