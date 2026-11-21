@@ -194,9 +194,13 @@ function RightNow({m}) {
   </section>`;
 }
 
-// ------------------------------------------------------------------ the context: what the conversation holds, of its size
-// the prompt the conversation cache already held (reused), the prompt read new and what was written - of the request being
-// answered, else of the last one; GLM's KV streaming keeps the first kv_resident positions of each layer in VRAM
+// ------------------------------------------------------------------ the context: the ENGINE's context, aggregate in use over what it can hold
+// every chat in a slot (active or idle-in-slot) of its positions, split into VRAM (inside each chat's VRAM window),
+// RAM (positions streamed to pinned RAM), PARKED (conversations the engine parked in RAM outside a slot) and FREE to
+// the capacity - the BINDING limit, labelled with which one it is: "limit: 8 x 1M positions" or "limit: memory (RAM)"
+// (PLAN-context-panel; the server's m.context, from the conversations' rows and the engine's re-reported VRAM lines).
+// A conversation saved on disk is not counted. Without m.context (an engine printing no VRAM lines) the card keeps
+// following the newest request the way it did before; the per-chat rows below stay as they are either way.
 function ContextCard({m}) {
   const live = m.live || {}, last = (m.requests || [])[0], eng = m.engine || {};
   const max = eng.max_context || 0;
@@ -239,6 +243,42 @@ function ContextCard({m}) {
         ${ctot && cr ? html`<i class="ctx__chat__ram" style=${`flex-grow:${cr}`}></i>` : null}</span>
       <span class="ctx__chat__nums num">${fmt(c.context_used)}${kbt && ctot ? ` · ${GBb(ctot)}` : ""}</span></div>`;
   };
+  const C = m.context;
+  if (C && C.capacity) {   // ---------------- the engine's own bar: what every chat in a slot holds, of what it can hold
+    const cap = C.capacity, cu = C.used || {}, pk = C.parked || {}, free = C.free || 0;
+    const segs = [{k: "vram", label: "In VRAM", n: cu.vram_tokens || 0, b: cu.vram_bytes}];
+    if ((cu.ram_tokens || 0) > 0) segs.push({k: "ram", label: "Streamed in RAM", n: cu.ram_tokens, b: cu.ram_bytes});
+    if ((pk.bytes || 0) > 0) segs.push({k: "parked", label: "Parked in RAM", n: pk.tokens, b: pk.bytes});
+    // flex sizes the bar: positions where they are known, else a stand-in so the segment shows at all
+    const grow = (s) => (s.n != null && s.n > 0 ? s.n : (pk.bytes && s.n == null ? Math.max(1, Math.round((cu.tokens || 0) / 40)) : 0));
+    const nAt = (s) => s.n != null ? `${fmt(s.n)} tokens` : "";
+    const capTok = cap.tokens || 1, pctv = (100 * (cu.tokens || 0)) / capTok;
+    const limit = cap.kind === "memory" ? `limit: memory (${cap.which})`
+                : `limit: ${fmt(cap.slots)} x ${ctxfmt(cap.max_context)} positions`;
+    const aria = `${fmt(cu.tokens || 0)} of ${fmt(cap.tokens)} tokens in use on the engine`
+      + segs.map((s) => `, ${s.label.toLowerCase()} ${nAt(s)}${s.b ? `${s.n != null ? " " : ""}(${GBb(s.b)})` : ""}`).join("")
+      + (free ? `, free ${fmt(free)}` : "");
+    const enote = (cu.tokens || 0) === 0 && !(pk.bytes > 0)
+      ? "No conversation in a slot yet: the context fills as chats go on - every chat in a slot counts here, one that "
+        + "the engine parked in RAM apart from them, and one saved on disk not at all."
+      : `Every chat in a slot at once: ${segs.map((s) => `${s.label.toLowerCase()} ${nAt(s)}${s.b ? ` (${GBb(s.b)})` : ""}`).join(", ")}.`
+        + (pk.bytes > 0 ? " Conversations the engine parked in RAM sit outside its slots; a conversation saved on disk is not counted." : "");
+    return html`<section class="card" aria-label="Context">
+      <div class="card__head"><span class="card__title">Context</span><span class="card__sub">${limit}</span></div>
+      <div class="ctx__nums"><span class="ctx__big num">${fmt(cu.tokens || 0)}<small>/ ${fmt(cap.tokens)} tokens</small></span>
+        <span class="ctx__pct num"><b>${pctv > 0 && pctv < 0.1 ? "< 0.1" : fmt(pctv, pctv > 0 && pctv < 10 ? 1 : 0)}%</b> used · ${fmt(free)} left</span></div>
+      <div class="ctx__track"><div class="ctxbar" role="img" aria-label=${aria}>
+        ${segs.map((s) => html`<span class=${`ctxbar__${s.k}`} style=${`flex-grow:${grow(s)}`}></span>`)}
+        ${free > 0 ? html`<span style=${`flex-grow:${free}`}></span>` : null}</div></div>
+      <div class="legend">${segs.map((s) => html`<span><i class=${`sw sw--${s.k}`}></i>${s.label} <b class="num">${[nAt(s), s.b ? GBb(s.b) : ""].filter(Boolean).join(" · ")}</b></span>`)}
+        <span><i class="sw sw--free"></i>Free <b class="num">${fmt(free)}</b></span></div>
+      ${cacheTot || manyChats ? html`<div class="ctx__chats">
+        ${cacheTot ? html`<p class="ctx__chats__tot num">${fmt(cacheTot.n)} chats: ${cacheTot.all} of K/V, ${cacheTot.vram} in VRAM, ${cacheTot.ram} in RAM</p>` : null}
+        ${actChats.map(chatBar)}
+        <p class="ctx__chats__lgd"><span><i class="ctx__chat__vram"></i>VRAM window</span><span><i class="ctx__chat__ram"></i>in RAM</span></p></div>` : null}
+      <p class="card__note card__note--tip">${enote}</p>
+    </section>`;
+  }
   const W = ctxfmt(win), where = showWin
     ? (sup ? `The window is a setting in this model's config file: ${sup} starts the engine with it.`
            : "The window is a setting: Models › Engine settings › Prompts and cache › Positions each layer keeps in VRAM.")

@@ -9,7 +9,11 @@ from __future__ import annotations
 # tower runs in the engine's own process: vision_own, and which also tells its prompt chunks' buffers apart (prompt)
 # and what its tensor parallel copies (tp, of a group of tp_n GPUs - out of its weights and kv))
 BYTES = ("total", "free", "weights", "kv", "kv_ram", "act", "drafter", "window", "pool", "tail", "borrow", "vision",
-         "vision_own", "prompt", "tp", "helper")
+         "vision_own", "prompt", "tp", "helper", "kv_room")
+# engine-wide fields the VRAM lines carry on every card (PLAN-context-panel): the pinned-RAM K/V budget and the
+# bytes of parked conversations are the engine's, not a card's - merge() keeps them as they stand, never adds them
+# (the server's Context panel takes the largest figure a card reports)
+ENGINE_WIDE = ("kv_ram_room", "parked")
 
 
 def parse(line: str) -> dict | None:
@@ -54,6 +58,9 @@ def merge(lines: list[dict]) -> list[dict]:
         for k in BYTES:
             if k not in ("total", "free"):
                 d[k] = d.get(k, 0) + r.get(k, 0)
+        for k in ENGINE_WIDE:                              # (the engine's own figure: the biggest part's, never a sum)
+            if r.get(k):
+                d[k] = max(d.get(k, 0), r[k])
         d["slots"] = d.get("slots", 0) + r.get("slots", 0)
         d["free"] = min(d.get("free", 0), r.get("free", 0))
         at = [x for x in (d.get("at"), r.get("at")) if x is not None]   # (the card's split is as old as its oldest part)
