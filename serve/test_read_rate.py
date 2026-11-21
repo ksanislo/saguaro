@@ -309,9 +309,9 @@ class QfnAdmissionReads(unittest.TestCase):
         eng.slot_q = {slot: queue.Queue()}
         got = []
         if svc is not None:
-            eng._tls.on_read = lambda n, ts=None, ex=False, pv=False: svc._note_read(stat, n, ts, ex, pv)
+            eng._tls.on_read = lambda n, ts=None, ex=False, pv=False, rms=None: svc._note_read(stat, n, ts, ex, pv, rms)
         else:
-            eng._tls.on_read = lambda n, ts=None, ex=False, pv=False: got.append((n, ts, ex, pv))
+            eng._tls.on_read = lambda n, ts=None, ex=False, pv=False, rms=None: got.append((n, ts, ex, pv, rms))
         return eng, got
 
     @staticmethod
@@ -402,8 +402,9 @@ class QfnAdmissionReads(unittest.TestCase):
             eng.slot_q[7].put(ln)
         live = {"state": "reading", "prompt_read": 0, "prompt_tokens": 5000}
         res = self.drain(eng, live)
-        self.assertEqual(got, [(0, None, False, False), (800, None, False, False),     # position deltas since the
-                               (3000, 3000 / 1.4, True, False)])                       # first BRP; the BRA total
+        self.assertEqual(got, [(0, None, False, False, None), (800, None, False, False, None),   # position deltas
+                               (3000, 3000 / 1.4, True, False, 1400.0)])                         # since the first
+        #  BRP; the BRA total, its own read_ms riding along (old-format lines: the fallback paths)
         self.assertTrue(res["start"])
         self.assertEqual(res["figures"]["prompt_read"], 3000)       # the driver's own figures, untouched
         self.assertEqual(live["prompt_read"], 1200)                 # written through by the driver itself
@@ -566,15 +567,17 @@ class ReadCountedQueueStaysAQueue(unittest.TestCase):
 
 
 class OnReadTakesTheProvisionalFlag(unittest.TestCase):
-    """Live 11-19: the QFN view calls on_read(n, rate, False, True); the 4th argument must be `prov`, not the stat."""
+    """Live 11-19: the QFN view calls on_read(n, rate, False, True); the 4th argument must be `prov`, not the stat.
+    PLAN-qfn-per-request-read-stats: the 5th is read_ms - the engine's own clock for this request's read."""
 
     def test_on_read_lambda_signature(self):
         import inspect
         from serve import server as S
         src = inspect.getsource(S)
-        line = next(x for x in src.splitlines() if "tls.on_read = lambda" in x)
-        self.assertIn("prov=False, st=stat", line)
-        self.assertIn("self._note_read_safe(st, n, ts, ex, prov)", line)
+        i = src.index("tls.on_read = lambda")
+        two = " ".join(src[i:i + 220].splitlines()[:2])
+        self.assertIn("prov=False, rms=None, st=stat", two)
+        self.assertIn("self._note_read_safe(st, n, ts, ex, prov, rms)", two)
 
 
 class StraddlingStepIsSpread(unittest.TestCase):
@@ -606,3 +609,163 @@ class RestoredConversationIsNotARead(unittest.TestCase):
         i = src.index("only from RESUME's reused prefix")
         self.assertIn("if base is not None:", src[i:i + 900])
         self.assertIn("def _read_exact(self, stat, tokens):", src)
+
+
+def qfn_harness(lines):
+    """The real QfnEngine (its driver behind a fake engine) over canned stdout lines: -> (engine, got).
+    `got` collects every on_read call the adapter makes, the way the Service's hook would see it."""
+    import io
+    from types import SimpleNamespace
+    cls = _qfn_engine_class()
+    eng = cls.__new__(cls)
+    eng.proc = SimpleNamespace(stdin=io.StringIO(), poll=lambda: None)
+    eng.lines = queue.Queue()
+    for ln in lines:
+        eng.lines.put(ln)
+    eng.can_stop = False
+    eng.max_context = 262144
+    eng.silence_s = 0.0
+    eng.last = {}
+    eng.batch = 0
+    eng._tls = threading.local()
+    eng._reader = threading.get_ident()          # (this thread reads its prompt: what _take_control marks)
+    got = []
+    eng._tls.on_read = lambda n, ts=None, ex=False, prov=False, rms=None: got.append((n, ts, ex, prov, rms))
+    return eng, got
+
+
+class PerRequestEngineStats(unittest.TestCase):
+    """PLAN-qfn-per-request-read-stats: the engine reports every read for ITS request - `PP ... new_read= read_ms=`
+    and the closing `RDONE rid= new= ms=` (the slot lines' BRP say the same) - and the adapter feeds those
+    straight in: no RESUME base, no first-position deltas, no shared reader's rate.  A restored conversation's
+    positions (which looked like reads: the 596/596 rows, the 6622 and 2680 tok/s peaks) count nothing; only
+    new_read over read_ms does - per chat, summed for the live total, and the peak comes from those."""
+
+    def test_solo_restored_conversation_counts_only_new_read(self):
+        # a 200,520-token conversation restored from disk, 3,155 tokens read: the PP positions say 200620...203674
+        # (the old RESUME path could not use any of it - no RESUME on a restore), the new fields say 100...3154
+        eng, got = qfn_harness([
+            "PP 200620 203675 3000 450.0 new_read=100 read_ms=2900.0 rid=1",
+            "PP 203674 203675 8000 480.0 new_read=3154 read_ms=7900.0 rid=1",
+            "RDONE rid=1 new=3155 ms=7950.0",
+            "T 7",
+            "DONE 1 203675 8100.0 5.0 stop 0 0 200520 12 20 0 0 0.0 3155 0 chunk=0 experts_streamed=0"])
+        [t for t in eng.generate(list(range(203675)), 1, {}, threading.Event()) if t is not None]
+        self.assertEqual([g[0] for g in got], [100, 3154, 3155])         # the engine's own counts, step by step
+        self.assertEqual(got[0][4], 2900.0)                              # ... each with its own running time
+        self.assertTrue(got[2][2])                                       # RDONE is the exact close
+        self.assertAlmostEqual(got[2][1], 3155 / 7.95)                   # its rate: new_read over read_ms
+
+    def test_solo_service_records_the_engine_pair(self):
+        svc = make_svc()
+        eng, _ = qfn_harness([
+            "PP 200620 203675 3000 450.0 new_read=100 read_ms=2900.0 rid=1",
+            "RDONE rid=1 new=3155 ms=7950.0",
+            "T 7",
+            "DONE 1 203675 8100.0 5.0 stop 0 0 200520 12 20 0 0 0.0 3155 0 chunk=0 experts_streamed=0"])
+        t = [1000.0]
+        with unittest.mock.patch("serve.server.time.time", lambda: t[0]):
+            stat = reader(RequestStat())
+            svc.running.add(stat)
+            svc.status.update(busy=True)
+            svc._read_start(stat)
+            eng._tls.on_read = lambda n, ts=None, ex=False, prov=False, rms=None: svc._note_read(
+                stat, n, ts, ex, prov, rms)
+            [x for x in eng.generate(list(range(203675)), 1, {}, threading.Event()) if x is not None]
+            self.assertEqual(stat.read_pos, 3155)                        # only the read's own tokens
+            self.assertEqual(svc._read_counted(stat), 3155)
+            self.assertEqual(stat.read_engine, (3155, 7950.0))           # the exact pair: its row and its peak
+            # the chat's live rate is the engine's: new_read / read_ms - not the wall clock of the turn
+            self.assertAlmostEqual(svc._own_read_rate(stat, t[0], 0), 3155 / 7.95)
+
+    def test_solo_old_engine_fallback_untouched(self):
+        # an engine before the fields: no new_read anywhere, so the RESUME base keeps working exactly as before
+        eng, got = qfn_harness([
+            "RESUME 2000",
+            "PP 3000 6000 1000 1000.0",
+            "PP 6000 6000 2500 2400.0",
+            "T 7",
+            "DONE 1 6000 2600.0 5.0 stop 0 0 2000 12 20 0 0 0.0 4000 0 chunk=0 experts_streamed=0"])
+        [t for t in eng.generate(list(range(6000)), 1, {}, threading.Event()) if t is not None]
+        self.assertEqual([g[0] for g in got], [1000, 4000])              # counted from RESUME's base, as before
+        self.assertIsNone(got[0][4])                                     # (no engine clock on this path)
+
+    def test_two_concurrent_admissions_keep_their_own_rates(self):
+        # the 596/596 bug: two chats reading at once must not share one reader's rate.  Chat a reads 438 tokens
+        # of its restored conversation in 0.9 s of real reading; chat b reads 10,000 fresh tokens in 2 s:
+        # their rows say ~487 and 5000, and the engine-total window sums both counts.
+        svc = make_svc()
+        t = [1000.0]
+        cls = _qfn_engine_class()
+        eng = cls.__new__(cls)
+        eng.slot_q = {1: queue.Queue(), 2: queue.Queue()}
+        eng._tls = threading.local()
+        a, b = reader(RequestStat()), reader(RequestStat())
+        eng.slot_q[1].put("BRP 1 196374 196374 900 486.7 new_read=438 read_ms=900.0")
+        eng.slot_q[1].put("BRA 1 1 prompt=196374 reused=195936 read_ms=900 wait_ms=10")
+        eng.slot_q[2].put("BRP 2 5000 10000 1000 5000.0 new_read=5000 read_ms=1000.0")
+        eng.slot_q[2].put("BRA 2 1 prompt=10000 reused=0 read_ms=2000 wait_ms=5")
+
+        def one(st):
+            slot = 1 if st is a else 2
+            eng._tls.on_read = lambda n, ts=None, ex=False, prov=False, rms=None: svc._note_read(
+                st, n, ts, ex, prov, rms)
+            eng._tls.on_read_start = lambda st=st: svc._read_start(st)
+            it = eng._admission_wait(slot, threading.Event(), {"state": "reading", "prompt_read": 0})
+            try:
+                while True:
+                    next(it)
+            except StopIteration:
+                pass
+
+        with unittest.mock.patch("serve.server.time.time", lambda: t[0]):
+            svc.status.update(busy=True)
+            svc.running.update({a, b})
+            ths = [threading.Thread(target=one, args=(st,), daemon=True) for st in (a, b)]
+            for th in ths:
+                th.start()
+            for th in ths:
+                th.join(10)
+            self.assertEqual((svc._read_counted(a), svc._read_counted(b)), (438, 10000))
+            self.assertAlmostEqual(svc._own_read_rate(a, t[0], 0), 438 / 0.9)     # ITS read: ~487 tok/s
+            self.assertAlmostEqual(svc._own_read_rate(b, t[0], 0), 10000 / 2.0)   # ITS read: 5000 tok/s
+            self.assertNotEqual(a.read_eng_ms, b.read_eng_ms)                     # (never one shared number)
+            t[0] += 1.0
+            total = svc._prefill_tok_s()                                          # the live total: sum of the chats
+            self.assertAlmostEqual(total, (438 + 10000) / 1.0)
+
+    def test_a_held_read_counts_only_its_running_time(self):
+        # a read paused between its legs (BYIELD / a shorter admission first): read_ms is the time the read
+        # actually ran; the time it spent held stays out.  The legs add up in the count and in the clock.
+        svc = make_svc()
+        t = [1000.0]
+        with unittest.mock.patch("serve.server.time.time", lambda: t[0]):
+            stat = reader(RequestStat())
+            svc.status.update(busy=True)
+            svc.running.add(stat)
+            cls = _qfn_engine_class()
+            eng = cls.__new__(cls)
+            eng.slot_q = {7: queue.Queue()}
+            eng._tls = threading.local()
+            eng._tls.on_read = lambda n, ts=None, ex=False, prov=False, rms=None: svc._note_read(
+                stat, n, ts, ex, prov, rms)
+            eng._tls.on_read_start = lambda: svc._read_start(stat)
+
+            def drain():
+                it = eng._admission_wait(7, threading.Event(), {"state": "reading", "prompt_read": 0})
+                try:
+                    while True:
+                        next(it)
+                except StopIteration:
+                    pass
+
+            eng.slot_q[7].put("BRP 7 2000 8000 500 4000.0 new_read=2000 read_ms=500.0")
+            eng.slot_q[7].put("BRA 7 1 prompt=5000 reused=0 read_ms=1000 wait_ms=20")   # (leg 1, then a BYIELD)
+            drain()
+            t[0] += 4.0                                        # the read sits held for a while (queue + hold):
+            eng.slot_q[7].put("BRP 7 6000 8000 200 5000.0 new_read=1000 read_ms=200.0")
+            eng.slot_q[7].put("BRA 7 1 prompt=8000 reused=5000 read_ms=400 wait_ms=10")  # (leg 2: the rest)
+            drain()
+            self.assertEqual(svc._read_counted(stat), 8000)     # its tokens: 5000 + 3000
+            self.assertEqual(stat.read_engine, (8000, 1400.0))  # its own time: 1000 + 400 ms, not the held minute
+            self.assertAlmostEqual(svc._own_read_rate(stat, t[0], 0), 8000 / 1.4)
