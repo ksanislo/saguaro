@@ -4974,6 +4974,10 @@ std::vector<Glm5Model::VramReport> Glm5Model::vram_report() const {
     std::vector<VramReport> out;
     int cur = 0;
     cudaGetDevice(&cur);
+    // PLAN-context-panel, output only: the pinned host K/V this engine allocated for KV streaming (0 when it does
+    // not stream) - the engine's figure, carried on every part's line; this engine keeps no conversations parked
+    // in RAM outside its slots, so every line's `parked` is 0
+    const uint64_t host_room = kv_host_bytes();
     for (const Glm5Model* m = this; m != nullptr; m = m->split_next_.get()) {
         const FastState* F = m->fast_;
         VramReport r;
@@ -5002,6 +5006,10 @@ std::vector<Glm5Model::VramReport> Glm5Model::vram_report() const {
             r.kv = m->el_held();   //  expert pool gives way - the line says what the card holds of them NOW, so the
             if (m->elp_ != nullptr) r.pool = m->el_pool_mapped();   //  re-printed one follows the giving and taking)
         }
+        // (PLAN-context-panel) the part's K/V budget fields, as Glm5Model::VramReport describes them
+        r.kv_room = r.kv + (m->elastic() ? r.pool : 0);
+        r.kv_ram_room = host_room;
+        r.parked = 0;
         r.borrow = m->prefill_borrow_bytes();
         r.vision = m->vision_lend_bytes();
         r.ctx = m->max_ctx_;

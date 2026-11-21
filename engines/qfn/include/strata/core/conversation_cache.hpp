@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -245,7 +246,12 @@ public:
     /// with one long conversation spends the cache on the side requests and evicts the long one (oldest first) -
     /// exactly the reuse it wanted.  0 parks every conversation, whatever its size.
     bool wants(int64_t tokens) const { return min_tokens_ <= 0 || tokens >= min_tokens_; }
-    size_t bytes() const { return bytes_ + reuse_.bytes(); }
+    size_t bytes() const { return bytes_.load() + reuse_.bytes(); }
+    /// (PLAN-context-panel) the parked conversations' RAM bytes as they stand right now, from another thread: the
+    /// engine's beat thread re-prints its VRAM lines with this figure (the `parked=` field), so the Monitor's
+    /// Context panel can show the conversations parked in RAM outside the slots.  The retained K/V waiting for the
+    /// next park is not in it - what sits parked now is.
+    size_t parked_bytes_live() const { return bytes_.load(); }
     size_t size() const { return entries_.size(); }
     size_t evictions() const { return evictions_; }
     // the longest parked conversation, in tokens (--kv-grow keeps the K/V that long while it could be restored)
@@ -495,7 +501,10 @@ private:
         entries_.erase(entries_.begin() + (std::ptrdiff_t) index);
         serials_.erase(serials_.begin() + (std::ptrdiff_t) index);
     }
-    size_t budget_ = 0, slots_ = 0, bytes_ = 0, evictions_ = 0, superseded_ = 0, borrowed_ = 0;
+    size_t budget_ = 0, slots_ = 0, evictions_ = 0, superseded_ = 0, borrowed_ = 0;
+    // (PLAN-context-panel) an atomic: the parked bytes leave this cache's thread only to be read by the beat
+    // thread printing the engine's VRAM lines (parked_bytes_live); everything that changes it runs on its own thread
+    std::atomic<size_t> bytes_{0};
     int64_t min_tokens_ = 0;   // --conversation-cache-min-tokens: 0 parks every conversation, whatever its size
     std::deque<std::shared_ptr<SavedConversation>> entries_; // least recently active first
     std::deque<uint64_t> serials_;          // entries_[i]'s identity, never reused

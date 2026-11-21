@@ -12153,7 +12153,7 @@ int main(int argc, char** argv) {
             // the same fields the GLM / MiniMax / DeepSeek engines print.  `act` is what the card holds at this point
             // besides the parts named here (its scratch, graph pools and CUDA context: QFN totals those nowhere).
             auto vram_line = [&](int dev, uint64_t weights, uint64_t kv, uint64_t kv_ram, uint64_t drafter,
-                                 uint64_t pool, int64_t slots, int64_t l0, int64_t l1) {
+                                 uint64_t pool, int64_t slots, int64_t l0, int64_t l1, uint64_t ram_room) {
                 char bus[32] = "-";
                 if (cudaDeviceGetPCIBusId(bus, (int) sizeof bus, dev) != cudaSuccess) std::snprintf(bus, sizeof bus, "-");
                 size_t vf = 0, vt = 0;
@@ -12162,13 +12162,20 @@ int main(int argc, char** argv) {
                     if (cudaMemGetInfo(&vf, &vt) != cudaSuccess) (void) cudaGetLastError();
                 }
                 const uint64_t used = vt > vf ? (uint64_t) (vt - vf) : 0, known = weights + kv + pool + drafter;
+                // PLAN-context-panel, output only: the K/V budget fields the Monitor's Context panel aggregates -
+                // kv_room: what this card holds for chat state (the sessions' carve), kv_ram_room: the pinned host
+                // RAM streamed K/V can take (the whole copies reserved, 0 without streaming; the engine's figure,
+                // so every line carries it and the server takes the largest), parked: the bytes of conversations
+                // the engine parked in RAM outside its slots.  The re-printed lines below carry the same fields.
                 std::printf("VRAM dev=%d pci=%s total=%llu free=%llu weights=%llu kv=%llu kv_ram=%llu act=%llu drafter=%llu "
-                            "window=0 pool=%llu tail=0 borrow=0 vision=0 slots=%lld ctx=%lld layers=%lld-%lld\n",
+                            "window=0 pool=%llu tail=0 borrow=0 vision=0 slots=%lld ctx=%lld layers=%lld-%lld "
+                            "kv_room=%llu kv_ram_room=%llu parked=%llu\n",
                             dev, bus, (unsigned long long) vt, (unsigned long long) vf, (unsigned long long) weights,
                             (unsigned long long) kv, (unsigned long long) kv_ram,
                             (unsigned long long) (used > known ? used - known : 0), (unsigned long long) drafter,
                             (unsigned long long) pool, (long long) slots, (long long) o.max_context,
-                            (long long) l0, (long long) l1);
+                            (long long) l0, (long long) l1, (unsigned long long) kv, (unsigned long long) ram_room,
+                            (unsigned long long) conversations.parked_bytes_live());
             };
             // the MTP draft layer's bytes (and a --batch slot's drafters) on the card the drafter lives on
             auto mtp_on = [&](int dev) {
@@ -12186,12 +12193,13 @@ int main(int argc, char** argv) {
                     return n ? (uint64_t) n * strata::core::session_bytes(g, o.max_context, K, lo, hi, kind) : (uint64_t) 0;
                 };
                 const bool kv_host = g.n_qsa_layers() > 0 && ss.qsa_states[ss.qsa_primary()].kv_mode == 1;
+                const uint64_t host_room = kv_host ? strata::core::qsa_kv_host_reserved_bytes() : 0;
                 vram_line(primary_device, wt.report().arena_bytes + native_dense.allocated_bytes() +
                           (native_head.loaded() ? native_head.weight_bytes() : 0),
                           strata::core::session_bytes(g, o.max_context, K, 0, hi0) +
                           (bslot_ss.empty() ? (uint64_t) 0 : slot_state(primary_device, 0, hi0, bslot_ss[0].size())),
                           kv_host ? kv_host_solo : 0, mtp_on(primary_device), (uint64_t) xcache.bytes(),
-                          (int64_t) xcache.slots(), 0, (int64_t) (hi0 < 0 ? g.n_layers : hi0) - 1);
+                          (int64_t) xcache.slots(), 0, (int64_t) (hi0 < 0 ? g.n_layers : hi0) - 1, host_room);
                 for (size_t i = 0; i < stages.size(); ++i) {
                     const GpuStage& st = *stages[i];
                     vram_line(st.dev, st.wt.report().arena_bytes + st.dense.allocated_bytes() +
@@ -12200,17 +12208,17 @@ int main(int argc, char** argv) {
                               (bslot_ss.size() > i + 1 ? slot_state(st.dev, st.lb, st.le, bslot_ss[i + 1].size())
                                                        : (uint64_t) 0),
                               0, mtp_on(st.dev), (uint64_t) st.cache.bytes(), (int64_t) st.cache.slots(),
-                              st.lb, st.le - 1);
+                              st.lb, st.le - 1, host_room);
                 }
                 // helper cards (a remote / peer expert tier): experts only, they run no layers and hold no state
                 for (int r = 0; r < 3; ++r)
                     if (o.expert_cache_remote[(size_t) r] > 0)
                         vram_line(remote_dev[r], 0, 0, 0, 0,
                                   (uint64_t) (remote_experts[(size_t) r].gib() * 1073741824.0),
-                                  remote_experts[(size_t) r].resident(), -1, -1);
+                                  remote_experts[(size_t) r].resident(), -1, -1, host_room);
                 if (peer.valid())
                     vram_line(peer.device(), 0, 0, 0, 0, (uint64_t) (peer.gib() * 1073741824.0), peer.resident(),
-                              -1, -1);
+                              -1, -1, host_room);
             }
             std::fflush(stdout);
         }
@@ -12354,15 +12362,18 @@ int main(int argc, char** argv) {
                 kvram = c.slot == 0 && vl_kv_host ? strata::core::qsa_kv_host_bytes() : 0;
             };
             static strata::program::VramLive vram_live;   // (the beat thread below owns it for the process)
-            strata::program::VramLive::beat([vl, vl_split, vl_ctx] {
+            strata::program::VramLive::beat([vl, vl_split, vl_ctx, vl_kv_host, &conversations] {
+                const uint64_t vl_parked = conversations.parked_bytes_live();   // (the engine's own figure: every line's)
+                const uint64_t vl_ram_room = vl_kv_host ? strata::core::qsa_kv_host_reserved_bytes() : 0;
                 std::vector<std::string> fp;
                 fp.reserve(vl.size());
                 for (const VLCard& c : vl) {
                     uint64_t kv = 0, pool = 0, kvram = 0;
                     vl_split(c, kv, pool, kvram);
-                    char b[96];
-                    std::snprintf(b, sizeof b, "%d:%llu:%llu:%llu", c.dev, (unsigned long long) kv,
-                                  (unsigned long long) pool, (unsigned long long) kvram);
+                    char b[128];
+                    std::snprintf(b, sizeof b, "%d:%llu:%llu:%llu:%llu:%llu", c.dev, (unsigned long long) kv,
+                                  (unsigned long long) pool, (unsigned long long) kvram,
+                                  (unsigned long long) (c.solo + c.slotf), (unsigned long long) vl_parked);
                     fp.emplace_back(b);
                 }
                 vram_live.tick(fp, [&](size_t i) {   // (a card's line: one printf and fflush; the device is asked only here)
@@ -12373,13 +12384,20 @@ int main(int argc, char** argv) {
                     size_t vf = 0, vt = 0;
                     if (cudaMemGetInfo(&vf, &vt) != cudaSuccess) { (void) cudaGetLastError(); return; }
                     const uint64_t used = vt > vf ? (uint64_t) (vt - vf) : 0, known = c.w + kv + pool + c.dft;
+                    // PLAN-context-panel: kv_room is what the card's sessions can hold for chat state (the whole
+                    // carve, backed or still to be), kv_ram_room the pinned host RAM streamed K/V can take, and
+                    // parked the conversations parked in RAM outside the slots - all output only, the same fields
+                    // as the start-up lines.
                     std::printf("VRAM dev=%d pci=%s total=%llu free=%llu weights=%llu kv=%llu kv_ram=%llu act=%llu drafter=%llu "
-                                "window=0 pool=%llu tail=0 borrow=0 vision=0 slots=%lld ctx=%lld layers=%lld-%lld\n",
+                                "window=0 pool=%llu tail=0 borrow=0 vision=0 slots=%lld ctx=%lld layers=%lld-%lld "
+                                "kv_room=%llu kv_ram_room=%llu parked=%llu\n",
                                 c.dev, c.pci, (unsigned long long) vt, (unsigned long long) vf,
                                 (unsigned long long) c.w, (unsigned long long) kv, (unsigned long long) kvram,
                                 (unsigned long long) (used > known ? used - known : 0), (unsigned long long) c.dft,
                                 (unsigned long long) pool, (long long) (c.xc != nullptr ? c.xc->slots() : c.sl),
-                                (long long) vl_ctx, (long long) c.l0, (long long) c.l1);
+                                (long long) vl_ctx, (long long) c.l0, (long long) c.l1,
+                                (unsigned long long) (c.solo + c.slotf), (unsigned long long) vl_ram_room,
+                                (unsigned long long) vl_parked);
                     std::fflush(stdout);
                 });
             });

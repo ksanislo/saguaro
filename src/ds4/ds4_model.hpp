@@ -415,6 +415,10 @@ public:
     /// (PLAN-vram-live) one fingerprint a card of what its VRAM line follows (pure bookkeeping, no device call):
     /// the serve loop re-prints info_lines' VRAM lines when one moves (strata/program/vram_live.hpp).
     std::vector<std::string> vram_live_fp() const;
+    /// (PLAN-context-panel, output only) the bytes of conversations parked in RAM outside the slots: the serve loop
+    /// publishes them whenever it parks, takes back, spills to disk or drops one, and the VRAM lines carry the
+    /// figure (`parked=`) for the Monitor's Context panel (which counts what is parked apart from what is in a slot).
+    void set_parked_bytes(uint64_t bytes);
     /// Where the main thread and each device's thread of a run of chunks are (any thread may ask; the serve watchdog's
     /// report of a request that stopped moving).
     std::string where() const;

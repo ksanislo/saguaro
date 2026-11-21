@@ -3739,6 +3739,56 @@ class Service:
             rows.append(e)
         return rows
 
+    def _engine_context(self, convs: list) -> dict | None:
+        """The Monitor's Context panel as the ENGINE's context (PLAN-context-panel): every chat in a slot - active or
+        idle-in-slot, the "Right now" and idle conversation rows - summed over the positions the engine can hold at
+        once.  Used splits into VRAM (each chat's positions inside its KV window), RAM (its positions streamed to
+        pinned RAM) and PARKED (conversations the engine parked in RAM outside its slots - its VRAM lines' `parked=`,
+        their positions only as its own bytes per position says); a conversation saved on disk is in neither.
+        Capacity is the BINDING limit: the engine's positions (max_context x its chat slots: QFN's --batch 8, MiniMax's
+        --parallel 2, ...) or its live K/V budgets - (kv_room + kv_ram_room) / kv_bytes_token, its re-reported VRAM
+        lines' fields; an engine without RAM streaming has no kv_ram_room and is VRAM only - whichever is smaller.
+        None when the engine prints no VRAM lines: the page keeps its old per-request headline then."""
+        eng = self.engine
+        rows = list(getattr(eng, "vram", None) or [])
+        if not rows:
+            return None
+        info = getattr(eng, "info", None) or {}
+        kbt = info.get("kv_bytes_token")
+        kbt = float(kbt) if isinstance(kbt, (int, float)) and not isinstance(kbt, bool) and kbt > 0 else None
+        merged = gpu_map.merge(rows)                       # (two split parts on one card add up)
+        kv_room = sum(int(r.get("kv_room") or 0) for r in merged)
+        kv_ram_room = max((int(r.get("kv_ram_room") or 0) for r in rows), default=0)
+        parked = max((int(r.get("parked") or 0) for r in rows), default=0)
+        max_ctx = int(eng.max_context or 0)
+        slots = max(int(getattr(eng, "multi", 0) or 0), int(getattr(eng, "batch", 0) or 0), 1)
+        pos_cap = max_ctx * slots
+        mem_cap = int((kv_room + kv_ram_room) / kbt) if kbt and (kv_room or kv_ram_room) else None
+        if mem_cap is not None and mem_cap < pos_cap:      # what the engine's live budgets hold binds
+            kind, cap = "memory", mem_cap
+            which = "VRAM+RAM" if kv_room and kv_ram_room else ("RAM" if kv_ram_room else "VRAM")
+        else:                                              # 8 x 1M positions bind (or no budget figures to compare)
+            kind, which, cap = "positional", "", pos_cap
+        win = info.get("kv_resident") if isinstance(info.get("kv_resident"), (int, float)) else 0
+        stream = 0 < win < max_ctx                         # (the "Right now" rows' split, the same rule)
+        used = vram_pos = ram_pos = 0
+        for e in convs:
+            n = int(e.get("context_used") or 0)
+            used += n
+            if stream:
+                vram_pos += min(n, int(win))
+                ram_pos += max(0, n - int(win))
+            else:
+                vram_pos += n
+        parked_tok = int(parked / kbt) if kbt and parked else 0   # (its positions, as its own bytes say: the bar's PARKED)
+        return {"capacity": {"tokens": cap, "kind": kind, "which": which, "slots": slots,
+                             "max_context": max_ctx, "positional": pos_cap, "memory": mem_cap,
+                             "kv_room": kv_room, "kv_ram_room": kv_ram_room},
+                "used": {"tokens": used, "vram_tokens": vram_pos, "ram_tokens": ram_pos,
+                         **({"vram_bytes": int(vram_pos * kbt), "ram_bytes": int(ram_pos * kbt)} if kbt else {})},
+                "parked": {"bytes": parked, **({"tokens": parked_tok} if kbt and parked else {})},
+                "free": max(0, cap - used - parked_tok)}
+
     def metrics(self, all_requests=False) -> dict:
         """GET /metrics: what the Monitor tab shows - the engine's facts, what it is doing, the last requests, and
         the hardware (with a minute of history per series)."""
@@ -3816,6 +3866,7 @@ class Service:
         hw = dict(tel["now"])
         cards = hw.pop("vram", None)                      # (each card's processes: for the GPU map only)
         return {"engine": engine, "live": live, "tiers": tiers, "gpu_map": self._gpu_map(cards),
+                "context": self._engine_context(convs),   # (the engine's Context panel: PLAN-context-panel)
                 "requests": hist[::-1][:None if all_requests else 12],
                 "requests_kept": len(hist), "totals": totals, "loop_guard": guard, "hardware": hw,
                 "hardware_static":

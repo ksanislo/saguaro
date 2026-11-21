@@ -152,6 +152,13 @@ public:
         uint64_t pool = 0, tail = 0, borrow = 0, vision = 0;
         int64_t slots = 0, ctx = 0;
         int l0 = 0, l1 = 0;
+        // (PLAN-context-panel, output only) the K/V budget fields the Monitor's Context panel aggregates: kv_room
+        // is what this part can hold for chat state - the sequence state it holds now plus, with the elastic
+        // context on, the expert pool's room the contexts can still back themselves out of (the fixed carve alone
+        // without it); kv_ram_room is the pinned host K/V the engine allocated for KV streaming - its own figure,
+        // the same on every part's line, 0 when it does not stream; parked: this engine parks nothing in RAM
+        // outside its slots, so 0.
+        uint64_t kv_room = 0, kv_ram_room = 0, parked = 0;
     };
     std::vector<VramReport> vram_report() const;
     /// (PLAN-vram-live) the bytes behind each part's VRAM line, read from the bookkeeping alone - no device calls,

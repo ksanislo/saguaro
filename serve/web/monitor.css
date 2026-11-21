@@ -91,6 +91,9 @@
 .ctxbar__reused, .sw.sw--reused { background: var(--st-accent); }
 .ctxbar__fresh, .sw.sw--fresh { background: var(--st-info); }
 .ctxbar__written, .sw.sw--written { background: var(--st-ok); }
+.ctxbar__vram, .sw.sw--vram { background: var(--st-accent); }
+.ctxbar__ram, .sw.sw--ram { background: var(--st-info); }
+.ctxbar__parked, .sw.sw--parked { background: var(--st-warn); }
 
 /* Right now: one compact row per chat (a busy batch), and the per-chat cache bars on the Context card */
 .now__summary { display: block; margin: 2px 0 4px; font-size: var(--st-fs-sm); color: var(--st-ink-muted); }
