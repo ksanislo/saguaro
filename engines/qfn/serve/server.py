@@ -11,7 +11,7 @@ text engine uses (serve/images.py).
 Tools from MCP servers (serve/mcp.py, `"mcp_servers"` in the config or --mcp-config) are offered only to requests that
 ask for them with `"strata_mcp": true` - the web app does; other clients see exactly the API they always saw.
 Images (optional, when the config has a "vision" entry): OpenAI image_url parts and Anthropic image blocks (base64
-data, http(s) URLs or local file paths) go through `strata-vision` (the model's mmproj file) and reach the engine as
+data, http(s) URLs or local file paths) go through `vision-qfn` (the model's mmproj file) and reach the engine as
 embeddings (`GENI`).  JPEG/PNG/BMP/GIF go straight in; WebP, TIFF, AVIF, ... (agents like omp send WebP) are
 converted to PNG first with Pillow.
 A request whose prompt alone does not fit the engine's context is REJECTED with 400, never truncated.  When the prompt
@@ -174,7 +174,7 @@ def combined_embeddings_path(vision_dir: Path, nbytes: int) -> Path:
     if os.name != "nt" and shm.is_dir() and os.access(shm, os.W_OK):
         try:
             if shutil.disk_usage(shm).free > 2 * nbytes + (16 << 20):
-                return shm / f"strata-vision-{os.getpid()}-{name}"
+                return shm / f"saguaro-vision-{os.getpid()}-{name}"
         except OSError:
             pass
     return Path(vision_dir) / name
@@ -524,7 +524,7 @@ DRAFT_HEAD_HINT = ("a smaller draft vocabulary needs less VRAM: --draft-vocab cy
 
 def start_failure_hint(log: str | None, offset: int) -> str:
     """#474: what to change when the engine stopped at the start because the MTP draft head did not fit the VRAM
-    left: the engine's own `strata mtp:` lines after that failure (0.1.36+: what it needs, what is free, the smaller
+    left: the engine's own `saguaro mtp:` lines after that failure (0.1.36+: what it needs, what is free, the smaller
     subsets), else the same advice in words for an older engine.  "" for any other failure: the log says why."""
     if not log:
         return ""
@@ -536,8 +536,8 @@ def start_failure_hint(log: str | None, offset: int) -> str:
         return ""
     if DRAFT_HEAD_FAIL not in text:
         return ""
-    said = [x.strip()[len("strata mtp: "):] for x in text.splitlines()
-            if logctx.unstamp(x).strip().startswith("strata mtp: ") and ("draft head over" in x or "hint:" in x)]
+    said = [x.strip()[len("saguaro mtp: "):] for x in text.splitlines()
+            if logctx.unstamp(x).strip().startswith("saguaro mtp: ") and ("draft head over" in x or "hint:" in x)]
     return ". mtp: " + DRAFT_HEAD_FAIL + ". " + (" ".join(said) if said else "Hint: " + DRAFT_HEAD_HINT)
 
 
@@ -797,7 +797,7 @@ def narrate_start(log_path: str, offset: int, args: list, done: threading.Event,
 
 
 class ConvCacheLog:
-    """#596: the engine's conversation cache as its log tells it (the engine writes "strata serve: conversation
+    """#596: the engine's conversation cache as its log tells it (the engine writes "saguaro serve: conversation
     cache: parked N tokens ...; parked=P bytes=B evictions=E" and "restored N tokens ...; parked=P bytes=B" to stderr,
     which is the log): read on from where it was last read, from the start of the engine's current run."""
     EVENT = re.compile(r"conversation cache: (parked|skipped|restored) (\d+) tokens.*?parked=(\d+) bytes=(\d+)"
@@ -903,7 +903,7 @@ FATAL_PREFIXES = ("ERR verify: timed out at layer ", "ERR verify batch: timed ou
 def parse_engine_stage_line(line: str) -> list[dict] | None:
     """Accept only the engine's final, contiguous stage plan (inclusive layer ends)."""
     line = logctx.unstamp(line)
-    prefix = "strata serve: layer split: layers "
+    prefix = "saguaro serve: layer split: layers "
     suffix = ", one hand-off per window"
     if not line.startswith(prefix) or not line.rstrip("\r\n").endswith(suffix):
         return None
@@ -3075,7 +3075,7 @@ def vision_start_error(line: str, log=None, code: int | None = None, waited: flo
 
 
 class Vision:
-    """The resident image encoder: `strata-vision` (llama.cpp mtmd + the mmproj file) reads `ENC <image> <out>`
+    """The resident image encoder: `vision-qfn` (llama.cpp mtmd + the mmproj file) reads `ENC <image> <out>`
     lines and writes each image's embeddings; results are cached by the image's hash, so a conversation that
     sends the same picture again (every turn, with most clients) encodes it once."""
 
@@ -3088,7 +3088,7 @@ class Vision:
         resort (the encoder's own files are then named relative to it, see `_start`)."""
         for parent in (None, Path.cwd(), Path(os.environ.get("SystemDrive", "C:") + os.sep)):
             try:
-                d = Path(tempfile.mkdtemp(prefix="strata-vision-", dir=parent))
+                d = Path(tempfile.mkdtemp(prefix="saguaro-vision-", dir=parent))
             except OSError:
                 continue                                       # not writable, or no such drive
             if " " not in str(d):
@@ -3097,13 +3097,13 @@ class Vision:
                 d.rmdir()                                      # just created, so still empty
             except OSError:
                 pass
-        return Path(tempfile.mkdtemp(prefix="strata-vision-"))
+        return Path(tempfile.mkdtemp(prefix="saguaro-vision-"))
 
     def __init__(self, cfg: dict, log=None, env: dict | None = None, lazy: bool = False):
         args = self.reader_args(cfg)
         self.dir = self.work_dir()
         self.spawn = (args, log, env)                   # to start it again after an unload
-        # AMD: the GPU reader (strata-vision-hip) has the CPU reader (strata-vision, same program, no GPU runtime) to
+        # AMD: the GPU reader (vision-qfn-hip) has the CPU reader (vision-qfn, same program, no GPU runtime) to
         # fall back on when it does not start; _start switches to it by itself
         cpu = vision_reader.cpu_fallback(cfg)
         self.fallback = (self.reader_args(cpu), log, env) if cpu else None
@@ -3345,7 +3345,7 @@ class Vision:
 
     @staticmethod
     def normalize(data: bytes) -> bytes:
-        """The formats strata-vision's decoder (stb_image) reads pass through; anything else is converted to PNG.
+        """The formats vision-qfn's decoder (stb_image) reads pass through; anything else is converted to PNG.
         A JPEG with an EXIF Orientation other than 1 is turned upright first (needs Pillow)."""
         jpeg = data[:3] == b"\xff\xd8\xff"
         if (jpeg and not Vision._exif_rotated(data)) or data[:8] == b"\x89PNG\r\n\x1a\n" or data[:2] == b"BM" or \
@@ -3426,11 +3426,11 @@ class Vision:
 
     def warn_if_over_limit(self, tokens: int) -> None:
         """I7: one picture that became more than 4 times the limit is logged with the numbers, so the next report has them (the reader's own
-        stderr has the warm-up line).  A reader built before the limit was enforced inside it (strata-vision refuses these now) still lets them by."""
+        stderr has the warm-up line).  A reader built before the limit was enforced inside it (vision-qfn refuses these now) still lets them by."""
         limit = getattr(self, "max_tokens", 0)
         if limit and tokens > 4 * limit:
             print(f"[strata] images: one picture became {tokens} image tokens, more than 4 times the limit of {limit} (vision.max_tokens); "
-                  "the picture reader is not applying its limit. Update the engine, and send the line 'strata-vision: warmed up at N image "
+                  "the picture reader is not applying its limit. Update the engine, and send the line 'saguaro vision: warmed up at N image "
                   "tokens' from the reader's log with the report", flush=True)
 
     def close(self):
@@ -4124,7 +4124,7 @@ def hip_env_guard(env: dict, cfg: dict) -> list[str]:
         else:
             said.append(f"{', '.join(bad)} not writable (AMD's runtime needs a writable temporary folder)")
     for line in said:
-        print(f"strata serve: AMD: {line}", file=sys.stderr, flush=True)
+        print(f"saguaro serve: AMD: {line}", file=sys.stderr, flush=True)
     return said
 
 
@@ -8956,7 +8956,7 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
 
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--engine", choices=["mock", "strata"], default="mock")
-    ap.add_argument("--config", help="strata engine config (JSON: exe, args, cwd, tokenizer, model_name), "
+    ap.add_argument("--config", help="saguaro engine config (JSON: exe, args, cwd, tokenizer, model_name), "
                                      "written by setup.py")
     ap.add_argument("--host", default=None,
                     help="the address to listen on: 127.0.0.1 = this PC only (the default), 0.0.0.0 = also other devices "

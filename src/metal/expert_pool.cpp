@@ -38,7 +38,7 @@ bool host_pin(void* p, size_t bytes) {
     if (mlock(p, bytes) == 0) return true;
     static std::atomic<bool> said{false};
     if (!said.exchange(true))
-        std::fprintf(stderr, "maya-metal: cannot pin %.1f GB in memory (%s): it stays pageable, so other programs' "
+        std::fprintf(stderr, "saguaro metal: cannot pin %.1f GB in memory (%s): it stays pageable, so other programs' "
                      "demand can swap it out\n", bytes / 1e9, std::strerror(errno));
     return false;
 }

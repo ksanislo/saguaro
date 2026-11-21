@@ -146,7 +146,7 @@ static bool own_ok(int type, int impl) {
             for (int t = 0; t < nt; ++t)
                 if (std::memcmp(o0[(size_t) t].data(), o1[(size_t) t].data(), rows * sizeof(float)) != 0) {
                     if (dbg() || std::getenv("DS4_GG_VERBOSE"))
-                        std::fprintf(stderr, "ds4: CPU lane type %d: %s rows differ from ggml-cpu's dot at %d tokens, not used\n", type,
+                        std::fprintf(stderr, "saguaro ds4: CPU lane type %d: %s rows differ from ggml-cpu's dot at %d tokens, not used\n", type,
                                      impl == 2 ? "AVX1" : impl == 1 ? "AVX-512" : "AVX2", nt);
                     return;
                 }
@@ -222,7 +222,7 @@ static bool use_iq128(int type, int nt) {
     const bool ok = own_ok(type, 2);
     static std::once_flag said[32];
     std::call_once(said[type & 31], [&] {
-        std::fprintf(stderr, "ds4: CPU lane type %d: %s\n", type, ok ? "Strata's AVX1 rows (bit-identical to ggml-cpu's dot)"
+        std::fprintf(stderr, "saguaro ds4: CPU lane type %d: %s\n", type, ok ? "Strata's AVX1 rows (bit-identical to ggml-cpu's dot)"
                                                                      : "ggml-cpu's dot (the AVX1 rows differ on this CPU)");
     });
     return ok;

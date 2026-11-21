@@ -345,10 +345,10 @@ void serve_header(mm3::Model& m, bool spec_on, const std::string& kv_fmt) {
     std::printf("\n");
     // the same facts in the engine log (stderr) - the lines above reach the server only - for --report and a look at
     // where the model went, as the run without --serve prints them
-    std::fprintf(stderr, "maya-mm3: loaded in %.1f s, %ld of %ld experts in VRAM, %.1f GB pinned pool\n", st0.load_s,
+    std::fprintf(stderr, "saguaro mm3: loaded in %.1f s, %ld of %ld experts in VRAM, %.1f GB pinned pool\n", st0.load_s,
                  st0.resident, st0.experts, st0.pinned_gb);
-    for (const std::string& l : m.info_lines()) std::fprintf(stderr, "maya-mm3: %s\n", l.c_str());
-    for (const std::string& l : m.vram_lines()) std::fprintf(stderr, "maya-mm3: %s\n", l.c_str());
+    for (const std::string& l : m.info_lines()) std::fprintf(stderr, "saguaro mm3: %s\n", l.c_str());
+    for (const std::string& l : m.vram_lines()) std::fprintf(stderr, "saguaro mm3: %s\n", l.c_str());
     if (m.ablate_loaded())   // (--ablate: GEN ablate=0|1 turns its projection off / on for the request)
         std::printf("INFO ablate=1 ablate_default=%d\n", m.ablating() ? 1 : 0);
     if (!m.vision()) std::printf("INFO vision=off\n");   // (no tower: the server answers text only)
@@ -597,7 +597,7 @@ int serve(mm3::Model& m, const std::vector<int>& eos, int chunk, bool spec_on, f
     const bool abl_default = m.ablating();   // (a GEN without ablate=: as the engine started)
     std::printf("READY %d stop\n", m.max_ctx());
     std::fflush(stdout);
-    std::fprintf(stderr, "maya mm3 serve: GEN <max_new> [keys] <ids>; GENI <max_new> [keys] <file> <ids>; STOP, QUIT\n");
+    std::fprintf(stderr, "saguaro mm3 serve: GEN <max_new> [keys] <ids>; GENI <max_new> [keys] <file> <ids>; STOP, QUIT\n");
 #if defined(SIGPIPE)
     std::signal(SIGPIPE, SIG_IGN);
 #endif
@@ -975,9 +975,9 @@ int serve(mm3::Model& m, const std::vector<int>& eos, int chunk, bool spec_on, f
             tok = next;
         }
         if (spec && d_off > 0)
-            std::fprintf(stderr, "maya mm3 serve: DSpark kept %lld of %lld drafts\n", d_acc, d_off);
+            std::fprintf(stderr, "saguaro mm3 serve: DSpark kept %lld of %lld drafts\n", d_acc, d_off);
         if (L != nullptr && L->windows > lk_w0)
-            std::fprintf(stderr, "maya mm3 serve: prompt lookup: %lld rounds (%lld without a draft), %lld of its %lld "
+            std::fprintf(stderr, "saguaro mm3 serve: prompt lookup: %lld rounds (%lld without a draft), %lld of its %lld "
                          "drafts kept (in the above)\n", L->windows - lk_w0, L->trusted - lk_t0, L->accepted - lk_a0,
                          L->offered - lk_o0);
         if (!fail.empty()) {
@@ -1001,7 +1001,7 @@ int serve(mm3::Model& m, const std::vector<int>& eos, int chunk, bool spec_on, f
                 std::fprintf(stderr, "mm3: the expert profile %s not saved %s\n", profile_out.c_str(), perr.c_str());
         }
         std::fprintf(stderr,
-                     "maya mm3 serve: prompt %zu tokens = %zu reused + %zu read in %.0f ms (%.1f tok/s), %lld generated "
+                     "saguaro mm3 serve: prompt %zu tokens = %zu reused + %zu read in %.0f ms (%.1f tok/s), %lld generated "
                      "in %.0f ms (%.2f tok/s); CPU lane %.1f%% of the experts\n",
                      r.ids.size(), from, r.ids.size() - from, t1 - t0,
                      t1 > t0 ? 1000.0 * (double) (r.ids.size() - from) / (t1 - t0) : 0.0, produced, t2 - t1,
@@ -1032,7 +1032,7 @@ int serve_multi(mm3::Model& m, const std::vector<int>& eos, int chunk, const std
     const bool abl_default = m.ablating();   // (a GEN without ablate=: as the engine started)
     std::printf("READY %d stop multi=%d\n", m.max_ctx(), N);
     std::fflush(stdout);
-    std::fprintf(stderr, "maya mm3 serve: %d conversations at once (--parallel); GEN <max_new> [keys] rid=<id> <ids>; "
+    std::fprintf(stderr, "saguaro mm3 serve: %d conversations at once (--parallel); GEN <max_new> [keys] rid=<id> <ids>; "
                          "STOP <rid>, STOP, QUIT\n", N);
 #if defined(SIGPIPE)
     std::signal(SIGPIPE, SIG_IGN);
@@ -1102,7 +1102,7 @@ int serve_multi(mm3::Model& m, const std::vector<int>& eos, int chunk, const std
         std::printf("DONE %d %lld %zu %.1f %.1f %s 0 0 %zu %lld %lld\n", g.rid, g.produced, g.r.ids.size(), g.t1 - g.t0,
                     t2 - g.t1, g.finish, g.from, look - cpu, look);
         std::fprintf(stderr,
-                     "maya mm3 serve: request %d (sequence %d): prompt %zu tokens = %zu reused + %zu read in %.0f ms, "
+                     "saguaro mm3 serve: request %d (sequence %d): prompt %zu tokens = %zu reused + %zu read in %.0f ms, "
                      "%lld generated in %.0f ms (%.2f tok/s, %zu running) - %s\n",
                      g.rid, g.seq, g.r.ids.size(), g.from, g.r.ids.size() - g.from, g.t1 - g.t0, g.produced, t2 - g.t1,
                      t2 > g.t1 ? 1000.0 * (double) g.produced / (t2 - g.t1) : 0.0, run.size(), g.finish);
@@ -1534,7 +1534,7 @@ int rows_check(mm3::Model& m, const std::vector<int>& ids, int steps) {
     for (int s = 0; s < N; ++s) {
         m.bind(s);
         if (!m.forward(ids.data() + (size_t) s * part, (int) part, 0, 1, one.data(), err)) {
-            std::fprintf(stderr, "maya-mm3: %s\n", err.c_str());
+            std::fprintf(stderr, "saguaro mm3: %s\n", err.c_str());
             return 1;
         }
         tok[(size_t) s] = argmax(one.data());
@@ -1549,7 +1549,7 @@ int rows_check(mm3::Model& m, const std::vector<int>& ids, int steps) {
             m.bind(sq[(size_t) r]);
             if (!m.forward(&tok[(size_t) sq[(size_t) r]], 1, pos[(size_t) sq[(size_t) r]], 1,
                            one.data() + (size_t) r * V, err)) {
-                std::fprintf(stderr, "maya-mm3: %s\n", err.c_str());
+                std::fprintf(stderr, "saguaro mm3: %s\n", err.c_str());
                 return 1;
             }
         }
@@ -1559,7 +1559,7 @@ int rows_check(mm3::Model& m, const std::vector<int>& ids, int steps) {
             p[(size_t) r] = pos[(size_t) sq[(size_t) r]];
         }
         if (!m.forward_rows(t.data(), sq.data(), p.data(), R, rows.data(), err)) {
-            std::fprintf(stderr, "maya-mm3: %s\n", err.c_str());
+            std::fprintf(stderr, "saguaro mm3: %s\n", err.c_str());
             return 1;
         }
         int same = 0;
@@ -1582,7 +1582,7 @@ int rows_check(mm3::Model& m, const std::vector<int>& ids, int steps) {
         for (int s = 0; s < N; ++s) {
             m.bind(s);
             if (!m.forward(&tok[(size_t) s], 1, pos[(size_t) s], 1, one.data() + (size_t) s * V, err)) {
-                std::fprintf(stderr, "maya-mm3: %s\n", err.c_str());
+                std::fprintf(stderr, "saguaro mm3: %s\n", err.c_str());
                 return 1;
             }
         }
@@ -1596,7 +1596,7 @@ int rows_check(mm3::Model& m, const std::vector<int>& ids, int steps) {
                 p[(size_t) i] = pos[(size_t) (s0 + i)];
             }
             if (!m.pipe_tick(t.data(), sq.data(), p.data(), n, n ? s0 : -1, err)) {
-                std::fprintf(stderr, "maya-mm3: %s\n", err.c_str());
+                std::fprintf(stderr, "saguaro mm3: %s\n", err.c_str());
                 return 1;
             }
             int first;
@@ -1678,7 +1678,7 @@ int score_main(mm3::Model& m, const std::string& path, const std::string& out_pa
         for (int a = 0; a < T; a += C) {
             const int n = std::min(C, T - a);
             if (!m.forward(ids.data() + a, n, a, n, lg.data(), err)) {
-                std::fprintf(stderr, "maya-mm3: %s\n", err.c_str());
+                std::fprintf(stderr, "saguaro mm3: %s\n", err.c_str());
                 return 1;
             }
             for (int i = 0; i < n; ++i) {
@@ -1785,7 +1785,7 @@ double decode_rate(mm3::Model& m, int N, std::vector<float>& lg) {
         const double t0 = now();
         for (int i = 0; i < kDecodeTokens; ++i) {
             if (!m.forward(&tok, 1, N + i, 1, lg.data(), err)) {
-                std::fprintf(stderr, "maya-mm3: calibration: %s\n", err.c_str());
+                std::fprintf(stderr, "saguaro mm3: calibration: %s\n", err.c_str());
                 return -1.0;
             }
             tok = argmax();
@@ -1821,7 +1821,7 @@ int calibrate_decode(mm3::Model& m, std::vector<int> ids, const std::string& out
     std::vector<float> lg((size_t) m.vocab());
     std::string err;
     if (!m.forward(ids.data(), N, 0, 1, lg.data(), err)) {
-        std::fprintf(stderr, "maya-mm3: calibration: %s\n", err.c_str());
+        std::fprintf(stderr, "saguaro mm3: calibration: %s\n", err.c_str());
         return 1;
     }
     const double dec = decode_rate(m, N, lg);
@@ -1862,7 +1862,7 @@ int calibrate_prefill(mm3::Model& m, std::vector<int> ids, const std::string& ou
         for (int r = 0; r < 2; ++r) {   // (the first also measures hipBLASLt's kernels for its shapes)
             const double t0 = now();
             if (!m.forward(ids.data(), N, 0, 1, lg.data(), err)) {
-                std::fprintf(stderr, "maya-mm3: calibration: %s\n", err.c_str());
+                std::fprintf(stderr, "saguaro mm3: calibration: %s\n", err.c_str());
                 return -1;
             }
             best = std::max(best, (double) N / (now() - t0));
@@ -1909,7 +1909,7 @@ int calibrate_prefill(mm3::Model& m, std::vector<int> ids, const std::string& ou
     char set[256];
     std::snprintf(set, sizeof set, "chunk=%d gemm=%d tok_s=%.1f default_tok_s=%.1f tokens=%d", bc, bg, bt, def, N);
     if (!m.write_tune(set, err)) {
-        std::fprintf(stderr, "maya-mm3: calibration: %s\n", err.c_str());
+        std::fprintf(stderr, "saguaro mm3: calibration: %s\n", err.c_str());
         return 1;
     }
     std::string js = "{\"key\": \"" + m.tune_key() + "\", \"file\": \"";
@@ -2139,7 +2139,7 @@ int main(int argc, char** argv) {
             return 1;
         }
         if (!pk.load(o.pack, err) || !mm3::Vision::in_pack(pk) || !v.load(pk, o.gpus.empty() ? 0 : o.gpus[0], err)) {
-            std::fprintf(stderr, "maya-mm3: %s\n", err.empty() ? "the pack has no vision tower" : err.c_str());
+            std::fprintf(stderr, "saguaro mm3: %s\n", err.empty() ? "the pack has no vision tower" : err.c_str());
             return 1;
         }
         void* lent = nullptr;   // (SAGUARO_MM3_VISION_LEND=1: the lender's path tested - a room lent, given back)
@@ -2158,7 +2158,7 @@ int main(int argc, char** argv) {
         for (int rep = 0; rep < 2; ++rep) {   // (the second one timed)
             const double t0 = now();
             if (!v.encode(px.data(), w, h, rows, err)) {
-                std::fprintf(stderr, "maya-mm3: %s\n", err.c_str());
+                std::fprintf(stderr, "saguaro mm3: %s\n", err.c_str());
                 return 1;
             }
             if (rep == 1)
@@ -2214,7 +2214,7 @@ int main(int argc, char** argv) {
     mm3::Model m;
     std::string err;
     if (!m.load(o, err)) {
-        std::fprintf(stderr, "maya-mm3: %s\n", err.c_str());
+        std::fprintf(stderr, "saguaro mm3: %s\n", err.c_str());
         return 1;
     }
     if (!calib_out.empty()) {
@@ -2238,7 +2238,7 @@ int main(int argc, char** argv) {
         return serve(m, eos, o.chunk, o.dspark, dspark_conf, dspark_cost, kvf, profile_out, suffix_draft, o.pack);
     }
     const auto& st = m.stats();
-    std::fprintf(stderr, "maya-mm3: loaded in %.1f s, %ld of %ld experts in VRAM, %.1f GB pinned pool\n", st.load_s,
+    std::fprintf(stderr, "saguaro mm3: loaded in %.1f s, %ld of %ld experts in VRAM, %.1f GB pinned pool\n", st.load_s,
                  st.resident, st.experts, st.pinned_gb);
     for (const auto& l : m.info_lines()) std::fprintf(stderr, "  %s\n", l.c_str());
     if (!batch.empty()) {   // one prompt a line (ids), each from position 0: the expert profile's corpus
@@ -2251,7 +2251,7 @@ int main(int argc, char** argv) {
             if (b.empty()) continue;
             if ((int) b.size() > m.max_ctx()) b.resize((size_t) m.max_ctx());
             if (!m.forward(b.data(), (int) b.size(), 0, 0, nullptr, err)) {
-                std::fprintf(stderr, "maya-mm3: %s\n", err.c_str());
+                std::fprintf(stderr, "saguaro mm3: %s\n", err.c_str());
                 return 1;
             }
             tok += (long) b.size();
@@ -2260,7 +2260,7 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "batch: %d prompts, %ld tokens in %.1f s\n", k, tok, now() - b0);
         if (!profile_out.empty()) {
             if (!m.save_profile(profile_out, err)) {
-                std::fprintf(stderr, "maya-mm3: %s\n", err.c_str());
+                std::fprintf(stderr, "saguaro mm3: %s\n", err.c_str());
                 return 1;
             }
             std::fprintf(stderr, "wrote the expert profile %s (%ld routings)\n", profile_out.c_str(),
@@ -2271,7 +2271,7 @@ int main(int argc, char** argv) {
     const int n = (int) ids.size();
     if (ppl > 0 && o.tp > 0) {   // (the tensor-parallel path: one prompt, the NLL taken chunk by chunk)
         if (!m.forward_ppl(ids.data(), n, err)) {
-            std::fprintf(stderr, "maya-mm3: %s\n", err.c_str());
+            std::fprintf(stderr, "saguaro mm3: %s\n", err.c_str());
             return 1;
         }
         const std::vector<double>& nl = m.ppl_nll();
@@ -2299,7 +2299,7 @@ int main(int argc, char** argv) {
         for (int a0 = 0; a0 < n - 1; a0 += C) {
             const int T = std::min(C, n - a0);
             if (!m.forward(ids.data() + a0, T, a0, T, lg.data(), err)) {
-                std::fprintf(stderr, "maya-mm3: %s\n", err.c_str());
+                std::fprintf(stderr, "saguaro mm3: %s\n", err.c_str());
                 return 1;
             }
             for (int t = 0; t < T && a0 + t + 1 < n; ++t) {
@@ -2330,7 +2330,7 @@ int main(int argc, char** argv) {
         for (const std::string& l : m.vram_lines()) std::fprintf(stderr, "before the pictures: %s\n", l.c_str());
         const double t0 = now();
         if (!read_pics(images, pics, err) || !picture_rows(m, pics, ids, 0, rows, err)) {
-            std::fprintf(stderr, "maya-mm3: %s\n", err.c_str());
+            std::fprintf(stderr, "saguaro mm3: %s\n", err.c_str());
             return 1;
         }
         std::fprintf(stderr, "pictures: %zu encoded in %.0f ms\n", pics.size(), 1e3 * (now() - t0));
@@ -2341,7 +2341,7 @@ int main(int argc, char** argv) {
     std::vector<float> logits((size_t) last * m.vocab());
     double t0 = now();
     if (!m.forward(ids.data(), n, 0, last, logits.data(), err)) {
-        std::fprintf(stderr, "maya-mm3: %s\n", err.c_str());
+        std::fprintf(stderr, "saguaro mm3: %s\n", err.c_str());
         return 1;
     }
     double t1 = now();
@@ -2388,7 +2388,7 @@ int main(int argc, char** argv) {
         int bad = 0;
         for (int it = 0; it <= iters; ++it) {
             if (!m.forward(win.data(), (int) win.size(), n, (int) win.size(), it == 0 ? ref.data() : cur.data(), err)) {
-                std::fprintf(stderr, "maya-mm3: %s\n", err.c_str());
+                std::fprintf(stderr, "saguaro mm3: %s\n", err.c_str());
                 return 1;
             }
             if (it == 0) continue;
@@ -2430,7 +2430,7 @@ int main(int argc, char** argv) {
             const double td = now();
             int k = 0;
             if (!m.draft(next, pos, B, drafts, conf, err)) {
-                std::fprintf(stderr, "maya-mm3: %s\n", err.c_str());
+                std::fprintf(stderr, "saguaro mm3: %s\n", err.c_str());
                 return 1;
             }
             while (k < (int) drafts.size() && conf[(size_t) k] >= dspark_conf) ++k;
@@ -2445,7 +2445,7 @@ int main(int argc, char** argv) {
             win.insert(win.end(), drafts.begin(), drafts.begin() + k);
             const double tv = now();
             if (!m.forward(win.data(), (int) win.size(), pos, (int) win.size(), lg.data(), err)) {
-                std::fprintf(stderr, "maya-mm3: %s\n", err.c_str());
+                std::fprintf(stderr, "saguaro mm3: %s\n", err.c_str());
                 return 1;
             }
             t_verify += now() - tv;
@@ -2497,7 +2497,7 @@ int main(int argc, char** argv) {
                 if (g == 8 + std::atoi(ns)) cudaProfilerStop();
             }
             if (!m.forward(&next, 1, pos++, 1, lg.data(), err)) {
-                std::fprintf(stderr, "maya-mm3: %s\n", err.c_str());
+                std::fprintf(stderr, "saguaro mm3: %s\n", err.c_str());
                 return 1;
             }
             ++done;
@@ -2515,7 +2515,7 @@ int main(int argc, char** argv) {
     }
     if (!profile_out.empty()) {
         if (!m.save_profile(profile_out, err)) {
-            std::fprintf(stderr, "maya-mm3: %s\n", err.c_str());
+            std::fprintf(stderr, "saguaro mm3: %s\n", err.c_str());
             return 1;
         }
         std::fprintf(stderr, "wrote the expert profile %s (%ld routings)\n", profile_out.c_str(), m.stats().profiled);

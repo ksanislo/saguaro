@@ -476,7 +476,7 @@ bool use_words() {
 }
 
 bool bad(const char* what) {
-    std::fprintf(stderr, "ds4 tq: %s\n", what);
+    std::fprintf(stderr, "saguaro ds4 tq: %s\n", what);
     return false;
 }
 }  // namespace

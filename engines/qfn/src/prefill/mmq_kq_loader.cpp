@@ -74,7 +74,7 @@ void open_tab(Lib& L, int n_dev) {
     const std::string path = own_folder() + STRATA_KQ_TAB_LIB_NAME;
     void* h = open_path(path);
     if (h == nullptr) {
-        std::fprintf(stderr, "strata: SAGUARO_MMQ_DIRECT=1: %s not found next to the engine - the K-quant experts are "
+        std::fprintf(stderr, "saguaro: SAGUARO_MMQ_DIRECT=1: %s not found next to the engine - the K-quant experts are "
                              "gathered as before\n", STRATA_KQ_TAB_LIB_NAME);
         return;
     }
@@ -84,7 +84,7 @@ void open_tab(Lib& L, int n_dev) {
     const auto run = (strata_kq_tab_run_fn) sym(h, "strata_kq_tab_run");
     if (abi == nullptr || init == nullptr || has == nullptr || run == nullptr || abi() / 100000 != STRATA_KQ_ABI_VERSION ||
         abi() % 100000 != abi_args_size()) {
-        std::fprintf(stderr, "strata: SAGUARO_MMQ_DIRECT=1: %s is from another engine version - the K-quant experts are "
+        std::fprintf(stderr, "saguaro: SAGUARO_MMQ_DIRECT=1: %s is from another engine version - the K-quant experts are "
                              "gathered as before\n", path.c_str());
         return;
     }
@@ -93,7 +93,7 @@ void open_tab(Lib& L, int n_dev) {
     for (int d = 0; d < n_dev; ++d) {
         const int e = init(d);
         if (e != 0) {
-            std::fprintf(stderr, "strata: SAGUARO_MMQ_DIRECT=1: %s did not start on GPU %d (CUDA error %d) - the K-quant "
+            std::fprintf(stderr, "saguaro: SAGUARO_MMQ_DIRECT=1: %s did not start on GPU %d (CUDA error %d) - the K-quant "
                                  "experts are gathered as before\n", path.c_str(), d, e);
             cudaSetDevice(cur);
             return;
@@ -102,7 +102,7 @@ void open_tab(Lib& L, int n_dev) {
     cudaSetDevice(cur);
     L.tab_has = has;
     L.tab_run = run;
-    std::fprintf(stderr, "strata: pointer-table K-quant prompt kernels from %s (SAGUARO_MMQ_DIRECT=%d)\n", path.c_str(),
+    std::fprintf(stderr, "saguaro: pointer-table K-quant prompt kernels from %s (SAGUARO_MMQ_DIRECT=%d)\n", path.c_str(),
                  direct_mode());
 }
 
@@ -111,7 +111,7 @@ Lib open_lib() {
     const std::string path = own_folder() + STRATA_KQ_LIB_NAME;
     void* h = open_path(path);
     if (h == nullptr) {
-        std::fprintf(stderr, "strata: K-quant prompt kernels (SAGUARO_MMQ_KQ=1): %s not found next to the engine - "
+        std::fprintf(stderr, "saguaro: K-quant prompt kernels (SAGUARO_MMQ_KQ=1): %s not found next to the engine - "
                              "these experts take the FP16 prompt path\n", STRATA_KQ_LIB_NAME);
         return L;
     }
@@ -120,7 +120,7 @@ Lib open_lib() {
     L.run = (strata_kq_run_fn) sym(h, "strata_kq_run");
     if (abi == nullptr || init == nullptr || L.run == nullptr || abi() / 100000 != STRATA_KQ_ABI_VERSION ||
         abi() % 100000 != abi_args_size()) {
-        std::fprintf(stderr, "strata: K-quant prompt kernels: %s is from another engine version - these experts take "
+        std::fprintf(stderr, "saguaro: K-quant prompt kernels: %s is from another engine version - these experts take "
                              "the FP16 prompt path\n", path.c_str());
         L.run = nullptr;
         return L;
@@ -132,7 +132,7 @@ Lib open_lib() {
     for (int d = 0; d < n; ++d) {
         const int e = init(d);
         if (e != 0) {
-            std::fprintf(stderr, "strata: K-quant prompt kernels: %s did not start on GPU %d (CUDA error %d) - these "
+            std::fprintf(stderr, "saguaro: K-quant prompt kernels: %s did not start on GPU %d (CUDA error %d) - these "
                                  "experts take the FP16 prompt path\n", path.c_str(), d, e);
             L.run = nullptr;
             cudaSetDevice(cur);
@@ -140,7 +140,7 @@ Lib open_lib() {
         }
     }
     cudaSetDevice(cur);
-    std::fprintf(stderr, "strata: K-quant prompt kernels from %s (SAGUARO_MMQ_KQ=1)\n", path.c_str());
+    std::fprintf(stderr, "saguaro: K-quant prompt kernels from %s (SAGUARO_MMQ_KQ=1)\n", path.c_str());
     L.ok = true;
     if (direct_mode() != 0) open_tab(L, n);
     return L;

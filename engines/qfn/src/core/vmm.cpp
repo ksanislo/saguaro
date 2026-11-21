@@ -196,7 +196,7 @@ struct Api {
 };
 void fail(const char* what, hipError_t e) {
     static int n = 0;
-    if (n++ < 8) std::fprintf(stderr, "strata: HIP virtual memory: %s failed: %s\n", what, hipGetErrorString(e));
+    if (n++ < 8) std::fprintf(stderr, "saguaro: HIP virtual memory: %s failed: %s\n", what, hipGetErrorString(e));
     (void) hipGetLastError();
 }
 hipMemAllocationProp alloc_prop(int dev) {

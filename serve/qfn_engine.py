@@ -225,7 +225,7 @@ DRAFT_HEAD_HINT = ("a smaller draft vocabulary needs less VRAM: --draft-vocab cy
                    "keeps it; or a smaller --context in setup.")
 def start_failure_hint(log: str | None, offset: int) -> str:
     """#474: what to change when the engine stopped at the start because the MTP draft head did not fit the VRAM
-    left: the engine's own `strata mtp:` lines after that failure (0.1.36+: what it needs, what is free, the smaller
+    left: the engine's own `saguaro mtp:` lines after that failure (0.1.36+: what it needs, what is free, the smaller
     subsets), else the same advice in words for an older engine.  "" for any other failure: the log says why."""
     if not log:
         return ""
@@ -237,8 +237,8 @@ def start_failure_hint(log: str | None, offset: int) -> str:
         return ""
     if DRAFT_HEAD_FAIL not in text:
         return ""
-    said = [x.strip()[len("strata mtp: "):] for x in text.splitlines()
-            if logctx.unstamp(x).strip().startswith("strata mtp: ") and ("draft head over" in x or "hint:" in x)]
+    said = [x.strip()[len("saguaro mtp: "):] for x in text.splitlines()
+            if logctx.unstamp(x).strip().startswith("saguaro mtp: ") and ("draft head over" in x or "hint:" in x)]
     return ". mtp: " + DRAFT_HEAD_FAIL + ". " + (" ".join(said) if said else "Hint: " + DRAFT_HEAD_HINT)
 
 def start_log_text(log: str | None, offset: int, limit: int = 1 << 20) -> str:
@@ -495,7 +495,7 @@ FATAL_PREFIXES = ("ERR verify: timed out at layer ", "ERR verify batch: timed ou
 def parse_engine_stage_line(line: str) -> list[dict] | None:
     """Accept only the engine's final, contiguous stage plan (inclusive layer ends)."""
     line = logctx.unstamp(line)
-    prefix = "strata serve: layer split: layers "
+    prefix = "saguaro serve: layer split: layers "
     suffix = ", one hand-off per window"
     if not line.startswith(prefix) or not line.rstrip("\r\n").endswith(suffix):
         return None
@@ -2981,7 +2981,7 @@ class Vision:
         limit = getattr(self, "max_tokens", 0)
         if limit and tokens > 4 * limit:
             print(f"[saguaro] images: one picture became {tokens} image tokens, more than 4 times the limit of {limit} (vision.max_tokens); "
-                  "the picture reader is not applying its limit. Update the engine, and send the line 'strata-vision: warmed up at N image "
+                  "the picture reader is not applying its limit. Update the engine, and send the line 'saguaro vision: warmed up at N image "
                   "tokens' from the reader's log with the report", flush=True)
 
     def close(self):
@@ -3614,7 +3614,7 @@ def hip_env_guard(env: dict, cfg: dict) -> list[str]:
         else:
             said.append(f"{', '.join(bad)} not writable (AMD's runtime needs a writable temporary folder)")
     for line in said:
-        print(f"strata serve: AMD: {line}", file=sys.stderr, flush=True)
+        print(f"saguaro serve: AMD: {line}", file=sys.stderr, flush=True)
     return said
 
 def vision_card_off_igpu(env: dict, archs: dict[int, str] | None = None) -> int | None:

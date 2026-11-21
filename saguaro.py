@@ -4278,7 +4278,7 @@ def stop_signals() -> None:
 
 def serve_on_screen(cfg_path: Path, a) -> int:
     """Saguaro's server on the setup's screen (setup.UI): its exit code; one it did not choose stops there, with the
-    last line its engine logged in this start (mostly the reason: "strata generate: pack: out of memory")."""
+    last line its engine logged in this start (mostly the reason: "saguaro generate: pack: out of memory")."""
     cmd, env, info = server_command(cfg_path, a)
     log = Path(info["log"]) if info.get("log") else None
     seen = log.stat().st_size if log is not None and log.is_file() else 0
@@ -4345,11 +4345,11 @@ def after_server(rc: int, a) -> int:
 # prompt path's chunks, and the per-token breakdown ("glm stat": VRAM hits, RAM fetches, disk reads, CPU lane)
 REPORT_LINES = re.compile(r"glm fast:|glm prefill: (?:CUDA|HIP)|glm split|glm stat|glm slots|glm vram|ds4 serve: prompt read|glm prefill: \d|ERR|error|failed|"
                           r"out of memory|"
-                          # maya-ds4's placement and speed lines (issue #416), not its loading progress
-                          r"^ds4: (?!copying experts |experts \d+ / |loading \d)|^ds4 (?:slots|cache):|^maya-ds4:|"
+                          # the DeepSeek engine's placement and speed lines (issue #416), not its loading progress
+                          r"^saguaro ds4: (?!copying experts |experts \d+ / |loading \d)|^saguaro ds4 (?:slots|cache):|"
                           r"^(?:prompt|decode): \d+ tokens in |^decode per token:|^decode (?:reads|left out)|^dspark|"
-                          # maya-mm3's: where the model went (its --serve start) and each answer's prompt / decode speed
-                          r"^maya-mm3:|^maya mm3 serve: (?:prompt|DSpark) ",
+                          # MiniMax's: where the model went (its --serve start) and each answer's prompt / decode speed
+                          r"^saguaro mm3:|^saguaro mm3 serve: (?:prompt|DSpark) ",
                           re.I)
 STAT_DECODE = re.compile(r"glm stat: decode ([\d.]+) ms/tok")
 

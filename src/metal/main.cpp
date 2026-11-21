@@ -67,7 +67,7 @@ int main(int argc, char** argv) {
         const std::string a = argv[i];
         auto next = [&]() -> const char* {
             if (i + 1 >= argc) {
-                std::fprintf(stderr, "maya-metal: %s needs a value\n", a.c_str());
+                std::fprintf(stderr, "saguaro metal: %s needs a value\n", a.c_str());
                 std::exit(2);
             }
             return argv[++i];
@@ -110,18 +110,18 @@ int main(int argc, char** argv) {
     std::string err;
     const auto t0 = std::chrono::steady_clock::now();
     if (!model.load(gguf, max_ctx, err)) {
-        std::fprintf(stderr, "maya-metal: %s\n", err.c_str());
+        std::fprintf(stderr, "saguaro metal: %s\n", err.c_str());
         return 1;
     }
     const double load_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-    std::fprintf(stderr, "maya-metal: loaded in %.1f s: %s\n", load_s, model.describe().c_str());
+    std::fprintf(stderr, "saguaro metal: loaded in %.1f s: %s\n", load_s, model.describe().c_str());
     if (serve) return maya::metal::serve(model, rest);
 
     if (ids.empty()) ids = {1};
     std::vector<float> logits;
     auto t1 = std::chrono::steady_clock::now();
     if (!model.forward(ids, logits, err)) {
-        std::fprintf(stderr, "maya-metal: %s\n", err.c_str());
+        std::fprintf(stderr, "saguaro metal: %s\n", err.c_str());
         return 1;
     }
     const double pp = std::chrono::duration<double>(std::chrono::steady_clock::now() - t1).count();
@@ -182,7 +182,7 @@ int main(int argc, char** argv) {
         }
     }
     if (!ok) {
-        std::fprintf(stderr, "maya-metal: %s\n", err.c_str());
+        std::fprintf(stderr, "saguaro metal: %s\n", err.c_str());
         return 1;
     }
     const double tg = std::chrono::duration<double>(std::chrono::steady_clock::now() - t1).count();

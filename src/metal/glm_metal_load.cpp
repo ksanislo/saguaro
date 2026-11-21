@@ -458,7 +458,7 @@ bool GlmMetal::Impl::init_experts(std::string& err) {
         const size_t head = (size_t) (head_gb * (double) (1ull << 30));
         const size_t fits = avail > head ? avail - head : 0;
         if (fits < budget) {
-            std::fprintf(stderr, "maya-metal: %.1f GB free now (headroom %.0f GB): the expert pool takes %.1f GB, not %.1f\n",
+            std::fprintf(stderr, "saguaro metal: %.1f GB free now (headroom %.0f GB): the expert pool takes %.1f GB, not %.1f\n",
                          avail / 1e9, head_gb, fits / 1e9, budget / 1e9);
             budget = std::max(fits, (size_t) 1 << 30);
         }
@@ -483,7 +483,7 @@ bool GlmMetal::Impl::init_experts(std::string& err) {
             }
             std::fclose(f);
             if (ranked.empty())
-                std::fprintf(stderr, "maya-metal: %s is not a GLM expert profile, skipped\n", path.c_str());
+                std::fprintf(stderr, "saguaro metal: %s is not a GLM expert profile, skipped\n", path.c_str());
         }
     }
     if (!ranked.empty() && !pool.all_resident() && !pool.warm(ranked, err)) return false;

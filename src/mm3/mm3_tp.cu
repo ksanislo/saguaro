@@ -681,7 +681,7 @@ struct TpEngine::Impl {
                     if (o.vision_must) return false;
                     info.push_back("NOTE: vision off: the tower did not load on CUDA" + std::to_string(vd) + " (" + err +
                                    ") - text only");
-                    std::fprintf(stderr, "maya-mm3: %s\n", info.back().c_str());
+                    std::fprintf(stderr, "saguaro mm3: %s\n", info.back().c_str());
                     err.clear();
                     cudaGetLastError();
                     vis.reset();

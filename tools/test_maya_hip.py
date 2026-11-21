@@ -445,15 +445,15 @@ class HipSetupTests(unittest.TestCase):
                                "--showdriverversion", "--json"])
 
     def test_report_carries_minimax_engine_lines(self):
-        # a MiniMax report had none of its engine's lines ("last 80 of 0"): maya-mm3 --serve wrote where the model went
-        # to the server only, and REPORT_LINES knew no maya-mm3 line
-        kept = ["maya-mm3: loaded in 171.2 s, 9216 of 9216 experts in VRAM, 0.0 GB pinned pool",
-                "maya-mm3: weights: GGUF MiniMax-M3.1-Flash-Maya-S (dense Q6_K)",
-                "maya-mm3: VRAM 0 dense 7.9 GB, experts 118.1 GB",
-                "maya mm3 serve: DSpark kept 189 of 245 drafts",
-                "maya mm3 serve: prompt 201 tokens = 172 reused + 29 read in 806 ms (36.0 tok/s), 256 generated in "
+        # a MiniMax report had none of its engine's lines ("last 80 of 0"): its --serve wrote where the model went
+        # to the server only, and REPORT_LINES knew no saguaro mm3 line
+        kept = ["saguaro mm3: loaded in 171.2 s, 9216 of 9216 experts in VRAM, 0.0 GB pinned pool",
+                "saguaro mm3: weights: GGUF MiniMax-M3.1-Flash-Maya-S (dense Q6_K)",
+                "saguaro mm3: VRAM 0 dense 7.9 GB, experts 118.1 GB",
+                "saguaro mm3 serve: DSpark kept 189 of 245 drafts",
+                "saguaro mm3 serve: prompt 201 tokens = 172 reused + 29 read in 806 ms (36.0 tok/s), 256 generated in "
                 "13334 ms (19.20 tok/s); CPU lane 0.0% of the experts"]
-        other = ["maya mm3 serve: GEN <max_new> [keys] <ids>; GENI <max_new> [keys] <file> <ids>; STOP, QUIT"]
+        other = ["saguaro mm3 serve: GEN <max_new> [keys] <ids>; GENI <max_new> [keys] <file> <ids>; STOP, QUIT"]
         self.assertEqual(maya.speed_lines(kept + other), kept)
 
     def test_report_minimax_images_from_its_vision_arg(self):

@@ -154,7 +154,7 @@ bool PeerExperts::open(int device, const std::vector<std::pair<int32_t, int32_t>
             p2p_ = e0 == cudaSuccess && e1 == cudaSuccess;
             // recommend, never force: the direct path is used only if a test copy each way arrives exact (#2666)
             if (p2p_ && !p2p_copies_data(device)) {
-                std::fprintf(stderr, "strata: peer GPU %d: peer access is enabled but a test copy between the two GPUs arrived wrong "
+                std::fprintf(stderr, "saguaro: peer GPU %d: peer access is enabled but a test copy between the two GPUs arrived wrong "
                                      "(a host bridge between them, no real P2P): the prompt path takes the host route instead "
                                      "(SAGUARO_PEER_NO_P2P=1 does that by hand)\n", device);
                 { On q0(0); cudaDeviceDisablePeerAccess(device); cudaGetLastError(); }

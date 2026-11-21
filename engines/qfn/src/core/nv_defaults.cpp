@@ -80,7 +80,7 @@ std::vector<std::string> apply_nv_defaults(int major, int minor) {
         const int mj = strata::cc_major_of(major);
         const char* arch = mj == 8 ? "sm_86 (Ampere)" : mj == 7 ? "sm_75 (Turing, SAGUARO_SM75_STACK=1)" : "sm_60 (Pascal)";
         const char* off_name = mj == 8 ? "SAGUARO_SM86_PERF" : mj == 7 ? "SAGUARO_SM75_STACK" : "STRATA_SM60_PERF";
-        std::fprintf(stderr, "strata: %s: %zu exact speed switches on by default (%s=0 turns them off; a switch you set is kept): ",
+        std::fprintf(stderr, "saguaro: %s: %zu exact speed switches on by default (%s=0 turns them off; a switch you set is kept): ",
                      arch, set.size(), off_name);
         for (size_t i = 0; i < set.size(); ++i) std::fprintf(stderr, "%s%s", i ? " " : "", set[i].c_str() + 7);
         std::fprintf(stderr, "\n");

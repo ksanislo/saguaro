@@ -1221,7 +1221,7 @@ LightBuf* light_buf(cudaStream_t s, int k) {
         if (b.d != nullptr) cudaFree(b.d);
         b = LightBuf{};
         if (cudaMalloc(&b.q, need) != cudaSuccess || cudaMalloc(&b.d, need / 32 * sizeof(float)) != cudaSuccess) {
-            std::fprintf(stderr, "ds4 iq: the light sets' scratch (%zu MB) failed\n", need >> 20);
+            std::fprintf(stderr, "saguaro ds4 iq: the light sets' scratch (%zu MB) failed\n", need >> 20);
             return nullptr;
         }
         b.cap = need;

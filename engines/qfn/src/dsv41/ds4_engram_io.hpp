@@ -145,7 +145,7 @@ public:
         for (auto& t : th_) t.join();
         th_.clear();
         if (check_n_.load() > 0)
-            std::fprintf(stderr, "ds4 Engram check (DS4_EG_CHECK): %lld rows read unbuffered, %lld differed from a buffered read\n",
+            std::fprintf(stderr, "saguaro ds4 Engram check (DS4_EG_CHECK): %lld rows read unbuffered, %lld differed from a buffered read\n",
                          (long long) check_n_.load(), (long long) check_bad_.load());
     }
     int threads() const { return (int) th_.size(); }

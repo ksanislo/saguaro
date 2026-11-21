@@ -410,7 +410,7 @@ static uint8_t* numa_map(size_t bytes, int node) {
     unsigned long mask[4] = {0, 0, 0, 0};
     mask[node / 64] = 1ul << (node % 64);
     if (syscall(SYS_mbind, m, bytes, 1 /* MPOL_PREFERRED */, mask, 256, 0) != 0)
-        std::fprintf(stderr, "maya-mm3: NOTE: mbind to NUMA node %d failed: the pool's pages go where they are touched\n", node);
+        std::fprintf(stderr, "saguaro mm3: NOTE: mbind to NUMA node %d failed: the pool's pages go where they are touched\n", node);
     if (cudaHostRegister(m, bytes, cudaHostRegisterPortable) != cudaSuccess) {
         cudaGetLastError();
         ::munmap(m, bytes);
@@ -630,7 +630,7 @@ struct Model::Impl {
         }
         graphs_clear();
         el_taken += n;
-        std::fprintf(stderr, "maya-mm3: elastic context: CUDA%d gave %ld experts' VRAM (%zu MB) to the index keys\n",
+        std::fprintf(stderr, "saguaro mm3: elastic context: CUDA%d gave %ld experts' VRAM (%zu MB) to the index keys\n",
                      d.id, n, freed >> 20);
         return true;
     }
@@ -761,7 +761,7 @@ struct Model::Impl {
             if (n > 0) {
                 graphs_clear();
                 el_given += n;
-                std::fprintf(stderr, "maya-mm3: elastic context: CUDA%d took %ld experts back into VRAM\n", d.id, n);
+                std::fprintf(stderr, "saguaro mm3: elastic context: CUDA%d took %ld experts back into VRAM\n", d.id, n);
             }
             if (more) break;
         }
@@ -979,7 +979,7 @@ struct Model::Impl {
     ~Impl() {
         preport();
         if (st.help_experts > 0)
-            std::fprintf(stderr, "maya-mm3: decode help: %ld experts computed by the card beside (CPU lane %ld)\n",
+            std::fprintf(stderr, "saguaro mm3: decode help: %ld experts computed by the card beside (CPU lane %ld)\n",
                          st.help_experts, st.cpu_experts);
         graphs_clear();
         for (cudaEvent_t e : pf.ev) cudaEventDestroy(e);
@@ -1108,7 +1108,7 @@ struct Model::Impl {
         if (o.cpu_threads >= 0 && !gg_fmt(l.lay.gg_type[0], l.lay.gg_type[1], l.lay.gg_type[2], g.dim, g.ff, l.gf, err)) {
             // (a build without ggml-cpu, or a type it has no dot for: the experts outside VRAM are staged instead)
             info.push_back("NOTE: no CPU lane - layer " + std::to_string(li) + "'s experts: " + err);
-            std::fprintf(stderr, "maya-mm3: %s\n", info.back().c_str());
+            std::fprintf(stderr, "saguaro mm3: %s\n", info.back().c_str());
             err.clear();
             o.cpu_threads = -1;
         }
@@ -1201,7 +1201,7 @@ struct Model::Impl {
     void lane_retime(int n, double ms) {
         const double c1 = lane_cpu1, add = lane_cpu_add;
         if (!lane_rt.note(n, ms, lane_cpu1, lane_cpu_add)) return;
-        std::fprintf(stderr, "maya-mm3: the CPU lane timed again in decode: an expert %.2f ms (+%.2f ms each more), "
+        std::fprintf(stderr, "saguaro mm3: the CPU lane timed again in decode: an expert %.2f ms (+%.2f ms each more), "
                              "planned with %.2f (+%.2f); %.2f ms to copy - 4 such experts: %d staged\n",
                      lane_cpu1, lane_cpu_add, c1, add, lane_copy, lane_split(4));
     }
@@ -1477,7 +1477,7 @@ struct Model::Impl {
         // time is the error's, a few seconds for the experts)
         static std::atomic<bool> scanned{false};
         if (!scanned.exchange(true)) {
-            std::fprintf(stderr, "maya-mm3: layer %zu's router: reading the model's files for NaN/Inf (layers 0-%zu) ...\n",
+            std::fprintf(stderr, "saguaro mm3: layer %zu's router: reading the model's files for NaN/Inf (layers 0-%zu) ...\n",
                          li, li);
             std::string hit;
             int unread = 0;
@@ -2097,7 +2097,7 @@ struct Model::Impl {
                 if (o.vision_must) return false;
                 info.push_back("NOTE: vision off: the tower did not load on CUDA" +
                                std::to_string(D[(size_t) o.vision_gpu].id) + " (" + err + ") - text only");
-                std::fprintf(stderr, "maya-mm3: %s\n", info.back().c_str());
+                std::fprintf(stderr, "saguaro mm3: %s\n", info.back().c_str());
                 err.clear();
                 cudaGetLastError();
                 vis.reset();
@@ -3657,7 +3657,7 @@ struct Model::Impl {
                 CK(cudaMemcpyAsync(&used, d.kg_cnt, 4, cudaMemcpyDeviceToHost, d.s));
                 CK(cudaStreamSynchronize(d.s));
                 cudaFree(ref);
-                std::fprintf(stderr, "maya-mm3: kv gather check layer %d pos %d: %d host blocks copied (%d slots), %s\n",
+                std::fprintf(stderr, "saguaro mm3: kv gather check layer %d pos %d: %d host blocks copied (%d slots), %s\n",
                              li, pmax, used, d.kg_slots,
                              std::memcmp(a.data(), b.data(), n * 4) == 0 ? "BIT-IDENTICAL" : "DIFFERENT");
             }
@@ -3781,7 +3781,7 @@ struct Model::Impl {
                 graph_on = false;
                 info.push_back("NOTE: graphs off: a forward did not capture (" + (err.empty() ? std::string("CUDA") : err) +
                                ") - the kernels launched one by one");
-                std::fprintf(stderr, "maya-mm3: %s\n", info.back().c_str());
+                std::fprintf(stderr, "saguaro mm3: %s\n", info.back().c_str());
                 err.clear();
                 return body(false);
             }
@@ -4195,7 +4195,7 @@ bool Model::load(const Options& o_in, std::string& err) {
             return false;
         }
         for (const auto& s : skipped)
-            std::fprintf(stderr, "maya-mm3: NOTE: %s left out - compute capability below 7.0 (--gpus to choose)\n",
+            std::fprintf(stderr, "saguaro mm3: NOTE: %s left out - compute capability below 7.0 (--gpus to choose)\n",
                          s.c_str());
     }
     // the prefill calibration of this PC (maya-mm3 --calibrate-prefill, the setup's calibration step): its chunk and
@@ -4291,7 +4291,7 @@ bool Model::load(const Options& o_in, std::string& err) {
         Options o2 = o;
         o2.tp = 0;
         err.clear();
-        std::fprintf(stderr, "maya-mm3: --tp %d did not load (%s): the layer split instead\n", o.tp, why.c_str());
+        std::fprintf(stderr, "saguaro mm3: --tp %d did not load (%s): the layer split instead\n", o.tp, why.c_str());
         if (!p->load(o2, err)) {
             err = "--tp " + std::to_string(o.tp) + ": " + why + "; the layer split: " + err;
             return false;
@@ -4614,7 +4614,7 @@ void Model::set_turbo(int seq, int drop, int skip) {
                  // options yet - a request that asks for them runs exact (said once, like QFN's batch slots)
         static std::atomic<bool> told{false};
         if ((d || s) && !told.exchange(true))
-            std::fprintf(stderr, "maya-mm3: --tp: turbo drop=%d skip=%s asked for - this build does not apply it on "
+            std::fprintf(stderr, "saguaro mm3: --tp: turbo drop=%d skip=%s asked for - this build does not apply it on "
                                  "the tensor-parallel path; the request runs exact (said once)\n",
                          d, s == 2 ? "ram" : s == 1 ? "ssd" : "off");
         return;

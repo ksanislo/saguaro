@@ -520,7 +520,7 @@ inline void* anon_alloc(size_t bytes, int node, int nodes, int thp = 1) {
             //  Docker's default seccomp profile refuses mbind to a container without CAP_SYS_NICE)
             static std::atomic<bool> said{false};
             if (!said.exchange(true))
-                std::fprintf(stderr, "ds4: mbind to NUMA node %d failed (%s): the RAM copies do not prefer their node "
+                std::fprintf(stderr, "saguaro ds4: mbind to NUMA node %d failed (%s): the RAM copies do not prefer their node "
                                      "(a container needs SYS_NICE)\n", node, std::strerror(errno));
         }
     }

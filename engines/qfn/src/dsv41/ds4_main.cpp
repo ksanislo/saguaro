@@ -320,7 +320,7 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
     for (const std::string& l : m.info_lines()) std::printf("%s\n", l.c_str());
     std::printf("READY %lld stop\n", (long long) m.max_context());
     std::fflush(stdout);
-    std::fprintf(stderr, "maya ds4 serve: GEN <max_new> [keys] <ids>; GENI <max_new> [keys] <pictures> <ids>; STOP, QUIT\n");
+    std::fprintf(stderr, "saguaro ds4 serve: GEN <max_new> [keys] <ids>; GENI <max_new> [keys] <pictures> <ids>; STOP, QUIT\n");
     Lines in;
     in.start();
     std::string line;
@@ -364,7 +364,7 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
     uint64_t slot_clock = 0, slot_seq = 0;
     const std::string slot_identity = m.slot_identity();
     const auto note = [&](const std::string& msg) {
-        std::fprintf(stderr, "ds4 slots: %s\n", msg.c_str());
+        std::fprintf(stderr, "saguaro ds4 slots: %s\n", msg.c_str());
         std::printf("NOTE sessions: %s\n", msg.c_str());
         std::fflush(stdout);
     };
@@ -443,7 +443,7 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
         std::error_code ec;
         const auto space = std::filesystem::space(slot_dir, ec);
         if (!ec && space.available < ((uint64_t) 8 << 30)) {   // (8 GB free, the GLM engine's guard)
-            std::fprintf(stderr, "ds4 slots: under 8 GB free in %s - the conversation is not written\n",
+            std::fprintf(stderr, "saguaro ds4 slots: under 8 GB free in %s - the conversation is not written\n",
                          slot_dir.string().c_str());
             return false;
         }
@@ -457,7 +457,7 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
             f.flush();
             if (!f) {
                 std::filesystem::remove(path + ".tmp", ec);
-                std::fprintf(stderr, "ds4 slots: writing %s.tmp failed (disk full?)\n", path.c_str());
+                std::fprintf(stderr, "saguaro ds4 slots: writing %s.tmp failed (disk full?)\n", path.c_str());
                 return false;
             }
         }
@@ -465,7 +465,7 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
         if (ec || !meta_write(meta_of(path), s.tokens, s.data->size(), s.cks)) {
             std::filesystem::remove(path + ".tmp", ec);
             std::filesystem::remove(path, ec);
-            std::fprintf(stderr, "ds4 slots: writing %s failed\n", path.c_str());
+            std::fprintf(stderr, "saguaro ds4 slots: writing %s failed\n", path.c_str());
             return false;
         }
         s.path = path;
@@ -485,7 +485,7 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
         const uint64_t bytes = m.slot_save(*buf, e);   // (a state unchanged since it was taken refuses here: nothing
         if (bytes == 0) {                             // changes, its slot stays)
             if (e != "it is already set aside")
-                std::fprintf(stderr, "ds4 slots: setting the conversation aside failed (%s) - it is read from token 0 "
+                std::fprintf(stderr, "saguaro ds4 slots: setting the conversation aside failed (%s) - it is read from token 0 "
                                      "when it comes back\n", e.c_str());
             return;
         }
@@ -580,7 +580,7 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
         std::error_code ec;
         std::filesystem::create_directories(slot_dir, ec);
         if (!std::filesystem::is_directory(slot_dir, ec)) {
-            std::fprintf(stderr, "ds4 slots: %s is not writable - conversations are not set aside\n",
+            std::fprintf(stderr, "saguaro ds4 slots: %s is not writable - conversations are not set aside\n",
                          slot_dir.string().c_str());
             slot_max = 0;
         } else {
@@ -755,7 +755,7 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
             }
             if (ok) {
                 m.set_images(std::move(imgs));
-                std::fprintf(stderr, "maya ds4 serve: %zu pictures, %d read (%.0f ms)\n", pics.size(), encoded,
+                std::fprintf(stderr, "saguaro ds4 serve: %zu pictures, %d read (%.0f ms)\n", pics.size(), encoded,
                              now_ms() - te);
             }
             for (Pic& q : pics) q.rgb = {};   // (only the start, hash and span stay)
@@ -815,14 +815,14 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
                 m.reset();
                 held.clear();
             }
-            std::fprintf(stderr, "ds4 serve: stopped while reading the prompt of %zu tokens, after %.0f ms%s\n",
+            std::fprintf(stderr, "saguaro ds4 serve: stopped while reading the prompt of %zu tokens, after %.0f ms%s\n",
                          total, now_ms() - t0, back ? "; the conversation before it is kept" : "");
             std::printf("DONE 0 %zu %.1f 0.0 cancel 0 0 %zu 0 0\n", r.ids.size(), now_ms() - t0, back ? from : (size_t) 0);
             std::fflush(stdout);
             continue;
         }
         if (!ok) {
-            std::fprintf(stderr, "ds4: %s\n", err.c_str());
+            std::fprintf(stderr, "saguaro ds4: %s\n", err.c_str());
             std::printf("ERR %s\n", err.c_str());
             std::printf("DONE 0 %zu 0.0 0.0 cancel 0 0 0 0 0\n", r.ids.size());
             std::fflush(stdout);
@@ -898,7 +898,7 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
                 if (!round(m, tok, room, try_spec, r.conf >= 0 ? r.conf : conf_min, r.temperature, r.top_p, r.top_k,
                            r.min_p, r.seed, counter, got,
                            off, acc, err, r.cum)) {
-                    std::fprintf(stderr, "ds4: %s\n", err.c_str());
+                    std::fprintf(stderr, "saguaro ds4: %s\n", err.c_str());
                     finish = "cancel";
                     break;
                 }
@@ -919,13 +919,13 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
         std::fflush(stdout);
         const auto& s = m.stats();
         std::fprintf(stderr,
-                     "maya ds4 serve: prompt %zu tokens = %zu reused + %zu read in %.0f ms (%.1f tok/s), %lld generated "
+                     "saguaro ds4 serve: prompt %zu tokens = %zu reused + %zu read in %.0f ms (%.1f tok/s), %lld generated "
                      "in %.0f ms (%.2f tok/s); CPU lane %.1f%% of the experts\n",
                      r.ids.size(), from, r.ids.size() - from, t1 - t0,
                      t1 > t0 ? 1000.0 * (double) (r.ids.size() - from) / (t1 - t0) : 0.0, produced, t2 - t1,
                      t2 > t1 ? 1000.0 * (double) produced / (t2 - t1) : 0.0,
                      s.experts ? 100.0 * (double) s.cpu_experts / (double) s.experts : 0.0);
-        if (d_off > 0) std::fprintf(stderr, "maya ds4 serve: drafts %lld of %lld kept; %s\n", d_acc, d_off,
+        if (d_off > 0) std::fprintf(stderr, "saguaro ds4 serve: drafts %lld of %lld kept; %s\n", d_acc, d_off,
                                     per_position(s_dec, s).c_str());
         m.save_profile();
     }
@@ -1007,7 +1007,7 @@ int score(strata::ds4::Model& m, const std::string& ids_path, const std::string&
     std::vector<ScoreSeg> segs;
     std::string err;
     if (!read_score_ids(ids_path, segs, err)) {
-        std::fprintf(stderr, "strata-dsv41: %s\n", err.c_str());
+        std::fprintf(stderr, "saguaro dsv41: %s\n", err.c_str());
         return 1;
     }
     // DS4_SCORE_PREFIX=N (a test of the long-prompt layer skip): the segments are joined into one stream, its first N
@@ -1023,7 +1023,7 @@ int score(strata::ds4::Model& m, const std::string& ids_path, const std::string&
     std::FILE* out = std::fopen(out_path.c_str(), "wb");
     std::FILE* sj = std::fopen((out_path + ".seg.json").c_str(), "wb");
     if (out == nullptr || sj == nullptr) {
-        std::fprintf(stderr, "strata-dsv41: cannot write %s\n", out_path.c_str());
+        std::fprintf(stderr, "saguaro dsv41: cannot write %s\n", out_path.c_str());
         return 1;
     }
     std::fprintf(sj, "{\"segments\": [");
@@ -1042,14 +1042,14 @@ int score(strata::ds4::Model& m, const std::string& ids_path, const std::string&
         if (prefix_n > 0 && (size_t) prefix_n + 1 < ids.size()) {
             a0 = (size_t) prefix_n;
             if (!m.feed(ids.data(), (int) a0, 1, err)) {
-                std::fprintf(stderr, "strata-dsv41: %s\n", err.c_str());
+                std::fprintf(stderr, "saguaro dsv41: %s\n", err.c_str());
                 return 1;
             }
         }
         for (size_t a = a0; a + 1 < ids.size();) {
             const int T = (int) std::min<size_t>((size_t) window, ids.size() - 1 - a);   // (positions a .. a+T-1 are scored)
             if (!m.feed(ids.data() + a, T, T, err) || !m.logits(lg) || lg.size() < (size_t) T * (size_t) V) {
-                std::fprintf(stderr, "strata-dsv41: %s\n", err.empty() ? "no logits" : err.c_str());
+                std::fprintf(stderr, "saguaro dsv41: %s\n", err.empty() ? "no logits" : err.c_str());
                 return 1;
             }
             for (int t = 0; t < T; ++t) {
@@ -1102,7 +1102,7 @@ int profile_run(strata::ds4::Model& m, const std::string& ids_path, int window) 
     std::vector<ScoreSeg> segs;
     std::string err;
     if (!read_score_ids(ids_path, segs, err)) {
-        std::fprintf(stderr, "strata-dsv41: %s\n", err.c_str());
+        std::fprintf(stderr, "saguaro dsv41: %s\n", err.c_str());
         return 1;
     }
     const double t0 = now_ms();
@@ -1113,7 +1113,7 @@ int profile_run(strata::ds4::Model& m, const std::string& ids_path, int window) 
         for (size_t a = 0; a < ids.size();) {
             const int T = (int) std::min<size_t>((size_t) window, ids.size() - a);
             if (!m.feed(ids.data() + a, T, 0, err)) {
-                std::fprintf(stderr, "strata-dsv41: %s\n", err.c_str());
+                std::fprintf(stderr, "saguaro dsv41: %s\n", err.c_str());
                 return 1;
             }
             a += (size_t) T;
@@ -1133,7 +1133,7 @@ int spec_eval(strata::ds4::Model& m, const std::string& ids_path, int n, int win
     std::vector<ScoreSeg> segs;
     std::string err;
     if (!read_score_ids(ids_path, segs, err)) {
-        std::fprintf(stderr, "strata-dsv41: %s\n", err.c_str());
+        std::fprintf(stderr, "saguaro dsv41: %s\n", err.c_str());
         return 1;
     }
     if (const char* f = std::getenv("DS4_ROUND_LOG")) g_round_log = std::fopen(f, "wb");
@@ -1146,7 +1146,7 @@ int spec_eval(strata::ds4::Model& m, const std::string& ids_path, int n, int win
             const int T = (int) std::min<size_t>((size_t) window, ids.size() - a);
             const bool last = a + (size_t) T == ids.size();
             if (!m.feed(ids.data() + a, T, last ? 1 : 0, err)) {
-                std::fprintf(stderr, "strata-dsv41: %s\n", err.c_str());
+                std::fprintf(stderr, "saguaro dsv41: %s\n", err.c_str());
                 return 1;
             }
             a += (size_t) T;
@@ -1160,7 +1160,7 @@ int spec_eval(strata::ds4::Model& m, const std::string& ids_path, int n, int win
         while (emitted < n && !stop) {
             int off = 0, acc = 0;
             if (!round(m, tok, n - emitted, spec, conf_min, 0.0f, 1.0f, 1, 0.0f, 1, counter, got, off, acc, err)) {
-                std::fprintf(stderr, "strata-dsv41: %s\n", err.c_str());
+                std::fprintf(stderr, "saguaro dsv41: %s\n", err.c_str());
                 return 1;
             }
             ++rounds;
@@ -1247,9 +1247,9 @@ int main(int argc, char** argv) {
         else if (a == "--seed") cli_seed = std::strtoull(val("--seed").c_str(), nullptr, 10);
         else if (a == "--verbose" || a == "-v") {
             o.verbose = true;
-            std::fprintf(stderr, "ds4: build %s (%s)\n", DS4_BUILD_ID, STRATA_VERSION);
+            std::fprintf(stderr, "saguaro ds4: build %s (%s)\n", DS4_BUILD_ID, STRATA_VERSION);
         } else if (a == "--version") {
-            std::printf("strata-dsv41 %s build %s\n", STRATA_VERSION, DS4_BUILD_ID);
+            std::printf("saguaro dsv41 %s build %s\n", STRATA_VERSION, DS4_BUILD_ID);
             return 0;
         }
         else if (a == "--ids") ids_s = val("--ids");
@@ -1289,7 +1289,7 @@ int main(int argc, char** argv) {
     strata::ds4::Model m;
     std::string err;
     if (!m.load(o, err)) {
-        std::fprintf(stderr, "maya-ds4: %s\n", err.c_str());
+        std::fprintf(stderr, "saguaro ds4: %s\n", err.c_str());
         return 1;
     }
     if (!o.vision_only) std::fprintf(stderr, "%s", m.describe().c_str());
@@ -1306,14 +1306,14 @@ int main(int argc, char** argv) {
         const bool got = f != nullptr && !px.empty() && std::fread(px.data(), 1, px.size(), f) == px.size();
         if (f != nullptr) std::fclose(f);
         if (!got) {
-            std::fprintf(stderr, "maya-ds4: %s: expected %d x %d RGB bytes (--size WxH)\n", enc_rgb.c_str(), enc_w, enc_h);
+            std::fprintf(stderr, "saguaro ds4: %s: expected %d x %d RGB bytes (--size WxH)\n", enc_rgb.c_str(), enc_w, enc_h);
             return 1;
         }
         std::vector<uint16_t> span;
         for (int k = 0; k < 2; ++k) {   // (the second: warm)
             const double te = now_ms();
             if (!m.encode_image(px.data(), enc_w, enc_h, span, err)) {
-                std::fprintf(stderr, "maya-ds4: %s\n", err.c_str());
+                std::fprintf(stderr, "saguaro ds4: %s\n", err.c_str());
                 return 1;
             }
             std::fprintf(stderr, "vision: %d x %d pixels -> a span of %zu rows in %.0f ms\n", enc_w, enc_h,
@@ -1336,7 +1336,7 @@ int main(int argc, char** argv) {
     if (!images.empty()) {   // --images: a GENI file's pictures, for the prompt's spans
         std::vector<Pic> pics;
         if (!read_pics(images, pics, err)) {
-            std::fprintf(stderr, "maya-ds4: %s\n", err.c_str());
+            std::fprintf(stderr, "saguaro ds4: %s\n", err.c_str());
             return 1;
         }
         std::vector<strata::ds4::Image> imgs;
@@ -1344,7 +1344,7 @@ int main(int argc, char** argv) {
             auto rows = std::make_shared<std::vector<uint16_t>>();
             const double te = now_ms();
             if (!m.encode_image(q.rgb.data(), q.width, q.height, *rows, err)) {
-                std::fprintf(stderr, "maya-ds4: %s\n", err.c_str());
+                std::fprintf(stderr, "saguaro ds4: %s\n", err.c_str());
                 return 1;
             }
             std::fprintf(stderr, "picture at %lld: %d x %d pixels, %zu tokens, %.0f ms\n", (long long) q.start, q.width,
@@ -1361,7 +1361,7 @@ int main(int argc, char** argv) {
         const int T = (int) std::min<size_t>((size_t) window, ids.size() - a);
         const bool last = a + (size_t) T == ids.size();
         if (!m.feed(ids.data() + a, T, df != nullptr ? T : (last ? 1 : 0), err)) {
-            std::fprintf(stderr, "maya-ds4: %s\n", err.c_str());
+            std::fprintf(stderr, "saguaro ds4: %s\n", err.c_str());
             return 1;
         }
         if (df != nullptr && m.logits(lg)) std::fwrite(lg.data(), 4, lg.size(), df);
@@ -1400,7 +1400,7 @@ int main(int argc, char** argv) {
                 const bool try_spec = spec && !cool;
                 if (!round(m, tok, n - (int) out.size(), try_spec, o.dspark_conf, temp, 1.0f, temp > 0 ? 64 : 1, 0.0f,
                            cli_seed, counter, got, off, acc, err)) {
-                    std::fprintf(stderr, "maya-ds4: %s\n", err.c_str());
+                    std::fprintf(stderr, "saguaro ds4: %s\n", err.c_str());
                     return 1;
                 }
                 d_off += off;

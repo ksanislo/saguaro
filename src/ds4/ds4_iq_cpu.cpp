@@ -951,7 +951,7 @@ bool own(int type) {
         static bool ok1[8];
         std::call_once(once1[k], [&] {
             ok1[k] = own_check(type);
-            std::fprintf(stderr, "ds4: CPU lane %s rows: %s\n", ggml_type_name((ggml_type) type),
+            std::fprintf(stderr, "saguaro ds4: CPU lane %s rows: %s\n", ggml_type_name((ggml_type) type),
                          ok1[k] ? "AVX1 (bit-identical to ggml-cpu's dot)" : "ggml-cpu's (the AVX1 rows differ from its dot here)");
         });
         return ok1[k];
@@ -974,10 +974,10 @@ bool own(int type) {
             }
             const int from = x512_from(type);
             if (good)
-                std::fprintf(stderr, "ds4: CPU lane %s rows: AVX-512%s%s\n", ggml_type_name((ggml_type) type),
+                std::fprintf(stderr, "saguaro ds4: CPU lane %s rows: AVX-512%s%s\n", ggml_type_name((ggml_type) type),
                              k != 6 && isa().pop512 ? " (VPOPCNTDQ)" : "", from > 1 ? ", from 2 tokens a call" : "");
             else
-                std::fprintf(stderr, "ds4: CPU lane %s rows: not the AVX-512 ones (they differ from ggml-cpu's dot in this "
+                std::fprintf(stderr, "saguaro ds4: CPU lane %s rows: not the AVX-512 ones (they differ from ggml-cpu's dot in this "
                                      "build)\n", ggml_type_name((ggml_type) type));
             if (good || k != 0) {
                 ok[k] = good;
@@ -1010,7 +1010,7 @@ bool own(int type) {
         }
         if (no_pdep) {   // (IQ1_S without pdep: ours whenever they give ggml-cpu's bits - nothing to time against a
             ok[k] = good;   // dot that runs pdep in microcode here, or that the test asked to leave out)
-            std::fprintf(stderr, "ds4: CPU lane IQ1_S rows: %s\n",
+            std::fprintf(stderr, "saguaro ds4: CPU lane IQ1_S rows: %s\n",
                          !good ? "ggml-cpu's (ours differ from its dot in this build)"
                          : pdep_slow_cpu() ? "ours without pdep (this CPU runs pdep in microcode)"
                                            : "ours without pdep (DS4_IQ1_PDEP=0)");
@@ -1030,7 +1030,7 @@ bool own(int type) {
         if (gflag != nullptr) *gflag = tg < tb;
         ok[k] = std::min(tb, tg) < 0.9 * tn;
         if (std::getenv("DS4_IQ_VERBOSE") != nullptr)
-            std::fprintf(stderr, "ds4: CPU lane %s rows (%d token%s): native %.0f us, ours %.0f us%s -> %s\n",
+            std::fprintf(stderr, "saguaro ds4: CPU lane %s rows (%d token%s): native %.0f us, ours %.0f us%s -> %s\n",
                          ggml_type_name((ggml_type) type), nt, nt > 1 ? "s" : "", tn, tb, gflag != nullptr ? (std::string(" (second form: gather / one table / pdep ") + std::to_string((int) tg) + " us)").c_str() : "",
                          ok[k] ? (gflag != nullptr && *gflag ? "ours (second form)" : "ours") : "native");
     });

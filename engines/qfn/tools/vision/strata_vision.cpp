@@ -102,11 +102,11 @@ int main(int argc, char** argv) {
         else if (a == "--gpu") gpu = true;
         else if (a == "--version") {
 #ifdef STRATA_VISION_HIP
-            std::printf("strata-vision hip (GPU architectures: %s)\n", STRATA_VISION_HIP_ARCHS);
+            std::printf("saguaro vision hip (GPU architectures: %s)\n", STRATA_VISION_HIP_ARCHS);
 #elif defined(STRATA_VISION_METAL)
-            std::printf("strata-vision metal\n");
+            std::printf("saguaro vision metal\n");
 #elif defined(STRATA_VISION_SYCL)
-            std::printf("strata-vision sycl (Intel GPU)\n");
+            std::printf("saguaro vision sycl (Intel GPU)\n");
 #else
             std::printf("strata-vision\n");
 #endif
@@ -236,7 +236,7 @@ int main(int argc, char** argv) {
         std::fflush(stdout);
         return 1;
     }
-    std::fprintf(stderr, "strata-vision: model files loaded in %.1f s\n",
+    std::fprintf(stderr, "saguaro vision: model files loaded in %.1f s\n",
                  std::chrono::duration<double>(std::chrono::steady_clock::now() - load_t0).count());
     // a vocab-only model reports no hparams, so the width comes from the projector: its output is the model's input
     int n_embd = 0;
@@ -272,22 +272,22 @@ int main(int argc, char** argv) {
                     warm_tokens = (int) mtmd_input_chunk_get_n_tokens(ch);
             }
         }
-        std::fprintf(stderr, "strata-vision: warmed up%s at %d image tokens in %.1f s\n",
+        std::fprintf(stderr, "saguaro vision: warmed up%s at %d image tokens in %.1f s\n",
                      after_first ? " after the first picture" : "", warm_tokens,
                      std::chrono::duration<double>(std::chrono::steady_clock::now() - warm_t0).count());
         // I7 (#3690): a picture that became 93,700 image tokens under --max-tokens 1024. The limit is not applied by this build of mtmd for
         // this model, and the log line above is the evidence to ask for.
         if (max_tokens > 0 && warm_tokens > max_tokens + max_tokens / 8)
-            std::fprintf(stderr, "strata-vision: WARNING the warm-up picture became %d image tokens, over the limit of %d (--max-tokens): "
+            std::fprintf(stderr, "saguaro vision: WARNING the warm-up picture became %d image tokens, over the limit of %d (--max-tokens): "
                                  "the limit is not applied for this model; pictures over it are refused\n", warm_tokens, max_tokens);
         mtmd_input_chunks_free(chunks);
         if (bm) mtmd_bitmap_free(bm);
     };
     bool warmed = true;
-    if (!gpu) std::fprintf(stderr, "strata-vision: on the CPU, %d threads, no warm-up\n", threads);
+    if (!gpu) std::fprintf(stderr, "saguaro vision: on the CPU, %d threads, no warm-up\n", threads);
     else if (warmup_lazy) {
         warmed = false;
-        std::fprintf(stderr, "strata-vision: --warmup-lazy: the first picture warms what it needs, the full warm-up "
+        std::fprintf(stderr, "saguaro vision: --warmup-lazy: the first picture warms what it needs, the full warm-up "
                              "follows it\n");
     } else warm_up(false);
     std::printf("READY %d\n", n_embd);

@@ -187,7 +187,7 @@ __global__ void __launch_bounds__(32 * RG) gdn_step_commit_kernel(float* __restr
     if (n <= 0) return;
     if (DBG && n > n_max) {
         if (blockIdx.x == 0 && blockIdx.y == 0 && threadIdx.x == 0 && threadIdx.y == 0)
-            printf("strata DBG: gdn_step_commit: n_keep %d is past the window's %d rows: commit skipped (#937)\n", n, n_max);
+            printf("saguaro DBG: gdn_step_commit: n_keep %d is past the window's %d rows: commit skipped (#937)\n", n, n_max);
         return;
     }
     gdn_step_commit_body(state, hbuf, C, gate, beta, h_k, h_v, n);

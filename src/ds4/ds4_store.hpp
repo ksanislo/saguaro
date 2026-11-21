@@ -751,7 +751,7 @@ private:
                         os::pread_par(files_.buf[f], j.dst + j.off % kAlign, j.len, j.off);
         if (ok && direct_failed && !no_direct_[f].exchange(true)) {
             counts_.direct_off.fetch_add(1, std::memory_order_relaxed);
-            std::fprintf(stderr, "ds4: RAM store: unbuffered reads of file %zu fail - it is read through the page cache\n", f);
+            std::fprintf(stderr, "saguaro ds4: RAM store: unbuffered reads of file %zu fail - it is read through the page cache\n", f);
         }
         return ok;
     }

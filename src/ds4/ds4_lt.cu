@@ -123,7 +123,7 @@ bool gemm(void* stream, const uint16_t* W, int n, int k, const uint16_t* x, int 
     if (!d.tried) {
         d.tried = true;
         d.live = hipblasLtCreate(&d.h) == HIPBLAS_STATUS_SUCCESS && hipMalloc(&d.ws, kWorkspace) == hipSuccess;
-        if (!d.live) std::fprintf(stderr, "ds4 gemm: hipBLASLt unavailable on device %d - hipBLAS instead\n", dev);
+        if (!d.live) std::fprintf(stderr, "saguaro ds4 gemm: hipBLASLt unavailable on device %d - hipBLAS instead\n", dev);
         hipDeviceProp_t p{};
         int ver = 0;
         if (d.live && hipGetDeviceProperties(&p, dev) == hipSuccess &&
@@ -159,7 +159,7 @@ bool gemm(void* stream, const uint16_t* W, int n, int k, const uint16_t* x, int 
                 pick.algo = res.front().algo;
             }
             if (verbose)
-                std::fprintf(stderr, "ds4 gemm: hipBLASLt n %d k %d ldx %d ldy %d rows <= %d: stored solution %d %s\n",
+                std::fprintf(stderr, "saguaro ds4 gemm: hipBLASLt n %d k %d ldx %d ldy %d rows <= %d: stored solution %d %s\n",
                              n, k, ldx, ldy, key.tb, sv->second, pick.ok ? "taken" : "refused - measuring again");
         }
         if (!pick.ok) {   // the shape's first product here: every candidate timed on this GPU, the fastest kept
@@ -203,7 +203,7 @@ bool gemm(void* stream, const uint16_t* W, int n, int k, const uint16_t* x, int 
             if (e1) (void) hipEventDestroy(e1);
             (void) hipGetLastError();
             if (verbose)
-                std::fprintf(stderr, "ds4 gemm: hipBLASLt n %d k %d ldx %d ldy %d rows <= %d: %d candidates, %s %.3f ms\n",
+                std::fprintf(stderr, "saguaro ds4 gemm: hipBLASLt n %d k %d ldx %d ldy %d rows <= %d: %d candidates, %s %.3f ms\n",
                              n, k, ldx, ldy, key.tb, got, pick.ok ? "the fastest" : "none ran", pick.ok ? best / 2 : 0.0f);
             if (pick.ok && !store.empty() && !d.tag.empty()) {   // (kept for the next start on this GPU kind)
                 std::lock_guard<std::mutex> store_lk(g_mu);

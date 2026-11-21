@@ -149,9 +149,9 @@ class EngineLog:
 
     HIT = re.compile(r"decode expert cache hit rate: ([\d.]+)% \((\d+) hits / (\d+) lookups\)"
                      r"(?:; (\d+) more read by the GPU over PCIe.*?\(([\d.]+)% of all)?")
-    PIPE = re.compile(r"strata batch \(pipelined, (\d+) groups of (\d+)\): (\d+) group-steps, (\d+) rows in ([\d.]+) ms"
+    PIPE = re.compile(r"saguaro batch \(pipelined, (\d+) groups of (\d+)\): (\d+) group-steps, (\d+) rows in ([\d.]+) ms"
                       r" = ([\d.]+) rows/s")
-    PIPE_MTP = re.compile(r"strata batch \(pipelined\): MTP proposals accepted (\d+) of (\d+) \(([\d.]+)%\); (\d+) windows"
+    PIPE_MTP = re.compile(r"saguaro batch \(pipelined\): MTP proposals accepted (\d+) of (\d+) \(([\d.]+)%\); (\d+) windows"
                           r" of ([\d.]+) rows avg, ([\d.]+) ms launch to picks")
     THREAD = re.compile(r"read (\d+) tokens on a thread of its own in ([\d.]+) ms \(.*?to (\d+) of (\d+)\); the slots "
                         r"decoded (\d+) rows meanwhile \(([\d.]+) rows/s")
@@ -207,7 +207,7 @@ class EngineLog:
                 "latest": {**self.latest, "vram_free_mib": dict(self.latest["vram_free_mib"])}}
 
     def feed(self, line: str) -> None:
-        if "strata" not in line and "STRATA" not in line:
+        if "saguaro" not in line and "SAGUARO" not in line:
             return
         now = self.wall()
         c, lt = self.counts, self.latest
@@ -219,7 +219,7 @@ class EngineLog:
                 lt["hit_rate"] = {"pct": float(m.group(1)), "hits": int(m.group(2)), "lookups": int(m.group(3)),
                                   "pcie_pct": _num(m.group(5)), "at": now}
             return
-        if "strata batch (pipelined" in line:
+        if "saguaro batch (pipelined" in line:
             m = self.PIPE.search(line)
             if m:
                 c["pipelined_reports"] += 1
@@ -278,7 +278,7 @@ class EngineLog:
             c["graphs_freed"] += int(m.group(1)) if m else 0
             lt["no_vram_for_graph_at"] = now
             return
-        if "strata verify: captured the" in line:
+        if "saguaro verify: captured the" in line:
             c["graph_captures"] += 1
             return
         if "MiB of VRAM free" in line:

@@ -123,7 +123,7 @@ std::vector<std::string> apply_arch_defaults(const char* gcn_arch, bool integrat
     }
     if (!set.empty()) {
         const bool g12 = strata::kernels::gfx_arch_is_gfx12(gcn_arch);
-        std::fprintf(stderr, "strata: %s: %zu exact speed switches on by default (%s=0 turns "
+        std::fprintf(stderr, "saguaro: %s: %zu exact speed switches on by default (%s=0 turns "
                              "them off; a switch you set is kept): ",
                      g12 ? "gfx12 (RDNA4)" : "gfx1151 (Strix Halo)", set.size(),
                      g12 ? "SAGUARO_GFX12_DEFAULTS" : "SAGUARO_GFX1151_DEFAULTS");
@@ -137,7 +137,7 @@ std::vector<std::string> apply_arch_defaults(const char* gcn_arch, bool integrat
         igpu.push_back(kv.first);
     }
     if (!igpu.empty()) {
-        std::fprintf(stderr, "strata: integrated GPU (%s): the matrix-core prompt set is on (1.6x to 2x faster prompts on a "
+        std::fprintf(stderr, "saguaro: integrated GPU (%s): the matrix-core prompt set is on (1.6x to 2x faster prompts on a "
                              "Radeon 780M, the answers differ in the last bits): ", gcn_arch);
         for (size_t i = 0; i < igpu.size(); ++i) std::fprintf(stderr, "%s%s", i ? " " : "", igpu[i].c_str() + 7);
         std::fprintf(stderr, ".  Turn one off with NAME=0 (for example SAGUARO_HC_UPMIX=0), all of them with SAGUARO_IGPU_PROMPT_SET=0");

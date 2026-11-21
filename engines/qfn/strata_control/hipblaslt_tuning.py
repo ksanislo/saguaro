@@ -231,7 +231,7 @@ def apply(cfg: dict, folder, archs_present=None, *, environ=None, say=print) -> 
         archs_present = present_archs(cfg)
     decision = resolve(folder, archs_present, environ=environ, cfg=cfg)
     if decision.message:
-        say(("[strata] " if decision.level == "info" else "[strata] note: ") + decision.message)
+        say(("[saguaro] " if decision.level == "info" else "[saguaro] note: ") + decision.message)
     if decision.path is None:
         return cfg
     out = dict(cfg)

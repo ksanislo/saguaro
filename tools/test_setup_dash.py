@@ -355,19 +355,19 @@ class Start(unittest.IsolatedAsyncioTestCase):
     def test_a_failed_start_says_its_engine_s_last_line_and_not_setup_stopped(self):
         with tempfile.TemporaryDirectory() as d:
             log = Path(d) / "maya.log"
-            log.write_text("strata generate: an earlier start's error\n")
+            log.write_text("saguaro generate: an earlier start's error\n")
 
             def serve(cmd, env, info):
                 with open(log, "a") as f:
                     f.write("glm fast: CUDA8 tiers warm: 1440 experts (19.3 GB)\n"
-                            "strata generate: pack: out of memory\n")
+                            "saguaro generate: pack: out of memory\n")
                 return 1
             failed = []
             ui = SimpleNamespace(serve=serve, fail=lambda m, h: failed.append((m, h)), say=lambda m: True)
             with patch.object(maya, "server_command", return_value=([], {}, {"log": str(log)})), \
                     patch.object(S, "UI", ui), self.assertRaises(SystemExit):
                 maya.serve_on_screen(Path("maya-test.json"), SimpleNamespace())
-        self.assertIn("its engine's last line: strata generate: pack: out of memory", failed[0][1])
+        self.assertIn("its engine's last line: saguaro generate: pack: out of memory", failed[0][1])
         self.assertNotIn("earlier", failed[0][1])
         app = SimpleNamespace(run=lambda: ("fail", failed[0]), serving={"state": "starting"}, served=[])
         out = io.StringIO()

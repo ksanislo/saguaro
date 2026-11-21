@@ -2209,11 +2209,11 @@ int hip_wmma_arch(int dev) {
             told = true;
             const bool on = (arch[dev] == 2 && (mode >= 1 || strata::core::kGfx12PromptDefaultsOn)) || (arch[dev] == 1 && mode >= 1);
             if (mode >= 1 || on)
-                std::fprintf(stderr, "strata: %sthe prompt attention on matrix cores %s (%s)%s\n", mode >= 1 ? "SAGUARO_HIP_WMMA: " : "",
+                std::fprintf(stderr, "saguaro: %sthe prompt attention on matrix cores %s (%s)%s\n", mode >= 1 ? "SAGUARO_HIP_WMMA: " : "",
                              !on ? "unavailable" : (mode == 2 ? "chosen per call" : "on"), prop.gcnArchName,
                              mode >= 1 ? "" : " by default; SAGUARO_HIP_WMMA=0 turns it off");
             else
-                std::fprintf(stderr, "strata: the prompt attention on matrix cores is off by default on Windows (opt-in until tested on Windows); "
+                std::fprintf(stderr, "saguaro: the prompt attention on matrix cores is off by default on Windows (opt-in until tested on Windows); "
                                      "SAGUARO_HIP_WMMA=1 turns it on (%s)\n", prop.gcnArchName);
         }
     }
