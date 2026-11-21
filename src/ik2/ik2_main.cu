@@ -3558,33 +3558,31 @@ void embed_row(Model& M, int t, float* raw, float* out) {
 
 }  // namespace
 
-// The Inkling 2 preview: Linux, one NVIDIA GPU of 24 GB, Ampere (sm_80) or newer.  Outside it the engine stops with one
-// line saying why; IK2_UNSUPPORTED=1 runs it anyway where it can run at all (two GPUs, smaller cards with the experts
-// streamed from RAM, Windows: untested).
-void check_preview(int n_gpu, bool serve) {
-    auto refuse = [&](const std::string& m) {   // (--serve: the server prints a NOTE line)
-        if (serve) std::printf("NOTE maya-ik2: %s\n", m.c_str()), std::fflush(stdout);
+// What this engine cannot run on stops here with one line saying why (--serve: also as a NOTE the server prints): no
+// NVIDIA GPU, one older than Turing (sm_75), a build with no kernels for the GPU's arch, more than two GPUs.  Upstream's
+// preview limits (one 24 GB Ampere card) are not ours: a smaller card streams the experts it cannot hold from host
+// memory, two cards run expert parallel.
+void check_devices(int n_gpu, bool serve) {
+    auto refuse = [&](const std::string& m) {
+        if (serve) std::printf("NOTE saguaro ik2: %s\n", m.c_str()), std::fflush(stdout);
         die(m);
     };
-    const bool force = getenv("IK2_UNSUPPORTED") && std::atoi(getenv("IK2_UNSUPPORTED"));
-    const std::string run_anyway = " (IK2_UNSUPPORTED=1 runs it anyway, untested)";
 #ifdef _WIN32
-    if (!force) refuse("the Inkling 2 preview runs on Linux, Windows is outside it" + run_anyway);
+    if (!(getenv("IK2_UNSUPPORTED") && std::atoi(getenv("IK2_UNSUPPORTED"))))
+        refuse("Windows is untested (IK2_UNSUPPORTED=1 runs it anyway)");
 #endif
     int nd = 0;
     const cudaError_t e = cudaGetDeviceCount(&nd);
     if (e != cudaSuccess || nd < 1)
-        refuse(std::string("no NVIDIA GPU visible (") + (e != cudaSuccess ? cudaGetErrorString(e) : "0 devices") +
-            "): the Inkling 2 preview runs on one NVIDIA GPU");
-    if (n_gpu < 1 || n_gpu > 2) refuse("--gpus " + std::to_string(n_gpu) + ": the Inkling 2 preview runs on one GPU");
-    if (n_gpu == 2 && !force)
-        refuse("--gpus 2: the Inkling 2 preview runs on one GPU, two (IK2_EP=1 or IK2_TP=1) are outside it" + run_anyway);
+        refuse(std::string("no NVIDIA GPU visible (") + (e != cudaSuccess ? cudaGetErrorString(e) : "0 devices") + ")");
+    if (n_gpu < 1 || n_gpu > 2) refuse("--gpus " + std::to_string(n_gpu) + ": one GPU or two");
     for (int d = 0; d < std::min(n_gpu, nd); ++d) {
         cudaDeviceProp p{};
         CU(cudaGetDeviceProperties(&p, d));
         const std::string gpu = "GPU " + std::to_string(d) + " (" + p.name + ", sm_" + std::to_string(p.major) +
                                 std::to_string(p.minor) + ")";
-        if (p.major < 8) refuse(gpu + " is too old: maya-ik2 needs an NVIDIA GPU of sm_80 (Ampere) or newer");
+        if (p.major < 7 || (p.major == 7 && p.minor < 5))
+            refuse(gpu + " is too old: Inkling 2 needs an NVIDIA GPU of sm_75 (Turing) or newer");
         CU(cudaSetDevice(d));
 #ifndef STRATA_USE_HIP   // (a kernel of this build for the GPU: none when its arch is not in the list)
         cudaFuncAttributes fa{};
@@ -3594,11 +3592,6 @@ void check_preview(int n_gpu, bool serve) {
                 " to CMAKE_CUDA_ARCHITECTURES and rebuild");
         }
 #endif
-        if (p.totalGlobalMem < (22ull << 30) && !force) {
-            char m[64];
-            std::snprintf(m, sizeof m, "%.1f GB", (double) p.totalGlobalMem / 1e9);
-            refuse(gpu + " has " + m + ", the Inkling 2 preview needs a 24 GB card" + run_anyway);
-        }
     }
     CU(cudaSetDevice(0));
 }
@@ -3673,7 +3666,7 @@ int main(int argc, char** argv) {
         while (*p && *p != ',') ++p;
         if (*p == ',') ++p;
     }
-    check_preview(n_gpu, serve);
+    check_devices(n_gpu, serve);
     const double t_start = now();
     Shards S(model);
     Model M;
@@ -3733,13 +3726,53 @@ int main(int argc, char** argv) {
     if (c.n_pass > 1) {
         std::printf("looped: layers %d .. %d run %d times - %d layer visits a token; message gates of rank %d\n", c.core0,
                     c.core1 - 1, c.n_pass, c.n_visit, c.rank);
-        // if (n_gpu != 1) die("a looped model: one GPU so far (--gpus 1)");
         if (!draft_path.empty() && (c.C != 2304 || c.n_visit != 48)) die("--draft: a looped model other than Inkling-2-Mini");
     }
     if (getenv("IK2_POP_OUT")) g_pop.assign((size_t) c.n_layer * c.E, 0), g_pop_E = c.E;
     g_tp_F = c.F, g_tp_C = c.C;
-    if (n_gpu == 2 && getenv("IK2_EP") && std::atoi(getenv("IK2_EP"))) {
-        const double share = getenv("IK2_EP_SPLIT") ? std::atof(getenv("IK2_EP_SPLIT")) : 0.5;
+    // what the weights and the K / V cache take (the dense weights as the GGUF's blocks, and as FP16 copies)
+    size_t exp_b = 0, dense_b = 0, dense_f16_b = 0, kv_b = 0;
+    for (const auto& kv : S.by_name) {
+        const auto& t = *kv.second.second;
+        if (!k::block_values((int) t.type)) continue;
+        if (t.name.find("_exps.weight") != std::string::npos) exp_b += tensor_bytes(t);
+        else if (t.name != "token_embd.weight") dense_b += tensor_bytes(t), dense_f16_b += (size_t) t.elements() * 2;
+    }
+    for (int l = 0; l < c.n_layer; ++l) {
+        const size_t cap = c.sliding[l] ? (size_t) std::min(ctx, c.window + std::max(chunk, ik2::draft::kBlock)) : (size_t) ctx;
+        kv_b += (l >= c.core0 && l < c.core1 ? c.n_pass : 1) * cap * c.KV * c.D * (g_kv_fp8 ? 1 : 2) * 2;
+    }
+    // Two GPUs: expert parallel (IK2_EP=1) or tensor parallel (IK2_TP=1), else the layers split between them - which a
+    // looped model cannot be (a pass's bank and messages are one GPU's work buffers), so it is expert parallel.
+    const bool want_tp = n_gpu == 2 && getenv("IK2_TP") && std::atoi(getenv("IK2_TP")) &&
+                         !(getenv("IK2_EP") && std::atoi(getenv("IK2_EP")));
+    const bool want_ep = n_gpu == 2 && !want_tp && ((getenv("IK2_EP") && std::atoi(getenv("IK2_EP"))) || c.n_pass > 1);
+    if (want_ep && !(getenv("IK2_EP") && std::atoi(getenv("IK2_EP"))))
+        std::printf("a looped model on two GPUs: expert parallel (the layers cannot be split between them)\n");
+    if (want_ep) {
+        // GPU 1's share of each layer's experts (IK2_EP_SPLIT).  Unset: a half - or, when the two GPUs can hold every
+        // expert between them, by the room each has (GPU 0 also carries the dense weights and the K / V cache)
+        double share = getenv("IK2_EP_SPLIT") ? std::atof(getenv("IK2_EP_SPLIT")) : 0.5;
+        if (!getenv("IK2_EP_SPLIT")) {
+            size_t fr_d[2] = {0, 0}, tot_d = 0;
+            for (int d = 0; d < 2; ++d) {
+                CU(cudaSetDevice(d));
+                CU(cudaMemGetInfo(&fr_d[d], &tot_d));
+            }
+            CU(cudaSetDevice(0));
+            const double work = 3.0 * 1073741824.0;   // (a GPU's work buffers and the room left beside its cache)
+            const double r0 = (double) fr_d[0] - (double) dense_f16_b - (double) kv_b - work, r1 = (double) fr_d[1] - work;
+            if (r0 > 0 && r1 > 0 && r0 + r1 >= (double) exp_b) {
+                share = std::clamp(r1 / (r0 + r1), 0.1, 0.9);
+                std::printf("expert parallel: GPU 1 takes %.0f%% of the experts (room for %.1f GiB on GPU 0, %.1f on GPU 1; "
+                            "the experts are %.1f GiB)\n", share * 100.0, r0 / 1073741824.0, r1 / 1073741824.0,
+                            exp_b / 1073741824.0);
+            } else if (r0 + r1 < (double) exp_b) {
+                std::printf("expert parallel: the two GPUs have room for %.1f GiB of the experts' %.1f GiB - the rest "
+                            "streams from host memory\n", std::max(0.0, r0) / 1073741824.0 + std::max(0.0, r1) / 1073741824.0,
+                            exp_b / 1073741824.0);
+            }
+        }
         g_pop_E_ep = c.E;
         g_ep_own.assign((size_t) c.n_layer * c.E, 0);
         std::vector<uint64_t> cnt;
@@ -3787,8 +3820,8 @@ int main(int argc, char** argv) {
         CB(cublasSetStream(g_dev[d].blas, g_dev[d].s));
         CB(cublasSetMathMode(g_dev[d].blas, CUBLAS_DEFAULT_MATH));
     }
-    g_ep = n_gpu == 2 && getenv("IK2_EP") && std::atoi(getenv("IK2_EP"));
-    g_tp = n_gpu == 2 && !g_ep && getenv("IK2_TP") && std::atoi(getenv("IK2_TP"));
+    g_ep = want_ep;
+    g_tp = want_tp;
     if (dual()) {
         int p01 = 0, p10 = 0;
         CU(cudaDeviceCanAccessPeer(&p01, 0, 1));
@@ -3831,18 +3864,12 @@ int main(int argc, char** argv) {
     g_block = !(getenv("IK2_BLOCK") && !std::atoi(getenv("IK2_BLOCK")));
     g_attn_mma = c.D == 128 && c.H / c.KV <= 8 ? (getenv("IK2_ATTN_MMA") ? std::atoi(getenv("IK2_ATTN_MMA")) : 1) : 0;
     g_mma_split = k::attn_decode_mma_blocks(c.KV);
+    if (n_gpu == 1 && g_pool && !getenv("IK2_DENSE")) {   // (the CPU lane: the cache path, see below for the blocks)
+        size_t fr0 = 0, tot0 = 0;
+        CU(cudaMemGetInfo(&fr0, &tot0));
+        if (tot0 < (22ull << 30) && exp_b + dense_f16_b + kv_b + ((size_t) 3 << 30) > fr0) g_dense_q8 = true;
+    }
     if (n_gpu == 1 && !g_pool) {
-        size_t exp_b = 0, dense_b = 0, kv_b = 0;
-        for (const auto& kv : S.by_name) {
-            const auto& t = *kv.second.second;
-            if (!k::block_values((int) t.type)) continue;
-            if (t.name.find("_exps.weight") != std::string::npos) exp_b += tensor_bytes(t);
-            else if (t.name != "token_embd.weight") dense_b += tensor_bytes(t);
-        }
-        for (int l = 0; l < c.n_layer; ++l) {
-            const size_t cap = c.sliding[l] ? (size_t) std::min(ctx, c.window + std::max(chunk, ik2::draft::kBlock)) : (size_t) ctx;
-            kv_b += (l >= c.core0 && l < c.core1 ? c.n_pass : 1) * cap * c.KV * c.D * (g_kv_fp8 ? 1 : 2) * 2;
-        }
         size_t fr0 = 0, tot0 = 0;
         CU(cudaMemGetInfo(&fr0, &tot0));
         const size_t reserve = (size_t) 3 << 29;   // (the work buffers and a quarter of a GiB of room: 1.5 GiB)
@@ -3852,6 +3879,14 @@ int main(int argc, char** argv) {
         std::printf("experts %.1f GiB, dense weights %.1f GiB as blocks, K / V cache %.1f GiB, %.1f GiB free: %s\n",
                     exp_b / 1073741824.0, dense_b / 1073741824.0, kv_b / 1073741824.0, fr0 / 1073741824.0,
                     fits ? "every expert stays in VRAM" : "the experts in host memory, a cache of them in VRAM");
+        // A card under 22 GiB that cannot hold every expert (a 16 GB one with Inkling-2-Mini): the dense weights stay
+        // as the GGUF's blocks there too - half an FP16 copy's bytes, that much more of the experts in the cache
+        // (IK2_DENSE=f16: no)
+        if (!fits && !getenv("IK2_DENSE") && tot0 < (22ull << 30)) {
+            g_dense_q8 = true;
+            std::printf("dense weights kept as blocks (%.1f GiB, not %.1f GiB of FP16): more room for the expert cache\n",
+                        dense_b / 1073741824.0, dense_f16_b / 1073741824.0);
+        }
     }
 
     // the dense weights
@@ -4452,7 +4487,9 @@ int main(int argc, char** argv) {
     CU(cudaMemGetInfo(&fr, &tot));
     // (what is left free: 2 GiB beside a cache that streams experts in and out; a quarter of one when every expert
     //  stays in VRAM - nothing more is allocated but a token's graph)
-    const size_t room = g_fast_want ? (size_t) 256 << 20 : (size_t) 2 << 30;
+    // (IK2_ROOM_MB: another amount)
+    const size_t room = getenv("IK2_ROOM_MB") ? (size_t) std::max(64, std::atoi(getenv("IK2_ROOM_MB"))) << 20
+                        : g_fast_want ? (size_t) 256 << 20 : (size_t) 2 << 30;
     const size_t budget = std::min((size_t) (cache_gb * 1073741824.0), fr > room ? fr - room : (size_t) 0);
     EC.tp = g_tp ? d : -1;
     EC.init(M.L, dual() ? -1 : d, c.n_layer, c.E, budget);

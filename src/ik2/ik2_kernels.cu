@@ -3666,6 +3666,12 @@ __global__ void to_bf16_kernel(const float* x, size_t n, uint16_t* y) {
     const size_t i = (size_t) blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) y[i] = f2bf_rn(x[i]);
 }
+__global__ void bf16_to_f16_kernel(const uint16_t* x, size_t n, uint16_t* y) {
+    const size_t i = (size_t) blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const float v = __uint_as_float((uint32_t) x[i] << 16);
+    y[i] = f2h(fminf(fmaxf(v, -65504.0f), 65504.0f));
+}
 
 __global__ void mix_rms_kernel(const float* x, int n_tap, size_t tap_stride, int C, const float* alpha, const float* w,
                                float eps, float* out) {
@@ -5266,6 +5272,11 @@ void to_bf16(const float* x, size_t n, uint16_t* y, cudaStream_t s) {
     if (!n) return;
     to_bf16_kernel<<<grid(n), kBlk, 0, s>>>(x, n, y);
     check("to_bf16");
+}
+void bf16_to_f16(const uint16_t* x, size_t n, uint16_t* y, cudaStream_t s) {
+    if (n == 0) return;
+    bf16_to_f16_kernel<<<grid(n), kBlk, 0, s>>>(x, n, y);
+    check("bf16_to_f16");
 }
 void mix_rms(const float* x, int n_tap, size_t tap_stride, int rows, int C, const float* alpha, const float* w,
              float eps, float* out, cudaStream_t s) {

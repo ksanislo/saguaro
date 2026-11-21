@@ -361,6 +361,9 @@ void attn_decode_mma_fp8(const uint16_t* q16, const float* r, const float* sink,
 void conv_hist_after(const float* old, const float* x, int T, int C, float* hist, cudaStream_t s);
 /// BF16 copies of n values (nearest even).
 void to_bf16(const float* x, size_t n, uint16_t* y, cudaStream_t s);
+/// FP16 of n BF16 values (exact but past FP16's range, where a value saturates or rounds): the drafter's inputs on a
+/// GPU whose tensor cores have no BF16 (before sm_80).
+void bf16_to_f16(const uint16_t* x, size_t n, uint16_t* y, cudaStream_t s);
 /// out [rows][C] = rms(sum_k alpha[k] x[k][row]) * w: x's taps n_tap apart (tap_stride floats), alpha (device) [n_tap].
 void mix_rms(const float* x, int n_tap, size_t tap_stride, int rows, int C, const float* alpha, const float* w,
              float eps, float* out, cudaStream_t s);
