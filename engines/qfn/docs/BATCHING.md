@@ -611,12 +611,37 @@ On top of `GEN` / `GENI`:
 | `BGEN <slot> <max_new> [keys] <ids>` | in | read the prompt (as `GEN 1`), then continue in `<slot>` |
 | `BGENI <slot> <max_new> [keys] <file> <ids>` | in | the same with images |
 | `BADM <slot> <1/0>` | out | after the admission's `DONE`: 1 = it continues in the slot, 0 = it ended |
+| `BRP <slot> <done> <total> <ms> <tok/s> [new_read=<n> read_ms=<ms>]` | out | the admission's read progress (see below) |
+| `BRA <slot> <1/0> [prompt=<n> reused=<r> read_ms=<ms> wait_ms=<ms>]` | out | the read ended: admitted (with its exact figures) or not |
 | `BT <slot> <id>` | out | a token of that slot |
 | `BDONE <slot> <generated> <stop/length/cancel> <ms>` | out | the slot is free again (it keeps its conversation) |
 | `BSTOP <slot>` | in | end that slot at its next window |
 | `BYIELD <slot>` | in | the prompt being read gives way at its next chunk boundary; its part read waits in `<slot>` (the admission's own, or a free slot for a solo request) |
 | `YIELDED <slot> <tokens>` | out | before the `DONE cancel` of a read that gave way: the request is sent again later and goes on from there |
+| `RDONE rid=<id> new=<n> ms=<ms>` | out | a solo read (the control lines) has ended: this request's exact new tokens over the time its read actually ran |
 | `INFO ... batch_slots=N` | out | the slots the engine runs (only with `--batch`) |
+
+### Per-request read progress (PLAN-qfn-per-request-read-stats)
+
+Every read line says what IT request read - its own counted tokens and its own running time - so a server
+never has to guess either from positions or from a shared reader's rate.  All of them are appended
+`key=value` fields: a server that does not know them reads the old positional fields unchanged.
+
+* `PP <position> <prompt_tokens> <ms> <tok/s> new_read=<n> read_ms=<ms> rid=<id>` (solo, after every chunk or
+  window part) and `BRP <slot> <done> <total> <ms> <tok/s> new_read=<n> read_ms=<ms>` (a read beside the
+  slots): `new_read` counts from where THIS read started - the reused, restored or parked prefix never
+  counts - and `read_ms` is the time this request's read has actually been running: not the queue wait
+  before it (the `BRA` line's `wait_ms`), not the time it was held at a piece boundary (the slots' decode
+  share, a `BYIELD` or `SAGUARO_READ_YIELD` hold).  The slot's own `<slot>` is its id on the batch lines.
+* `RDONE rid=<id> new=<n> ms=<ms>` ends a solo read (a restored conversation whose whole prompt was there
+  gets one too, with `new=` the tokens the read covered and `ms=0.0`); `BRA <slot> 1 prompt= reused=
+  read_ms=` already ends the batch reads the same way.  `new` is the DONE line's prompt tokens minus the
+  reused ones - fewer when a cancel stopped the read part-way (`DONE`'s own prompt-tokens-read field).
+* The Monitor's "Where the experts live" page (parity with the maya engines): `INFO ... engine_kind=qwen
+  experts=<all> vram_slots=<cache slots> vram_gb=<cache bytes> ram_slots=<all> ram_gb=<RAM copies>` picks
+  the qwen layout, and the periodic `STAT` line carries `ram_fetch=` (experts the CPU computes from RAM a
+  token), `disk=0` and `disk_gb=0` (this engine has no SSD tier) and the residency `vram_used=` /
+  `ram_used=` (routed experts in the VRAM caches vs held in RAM) with `vram_gb=` / `ram_gb=`.
 
 `tools/batch_test.py` drives the engine directly: the same prompts alone, then together, compared token by token,
 and the aggregate rate.

@@ -8170,6 +8170,18 @@ int main(int argc, char** argv) {
     // from the live session or the longest conversation checkpoint its prompt starts with (see ConvCheckpoint),
     // otherwise from an empty sequence (`session_zero`); the rest of the prompt goes through the batched prompt path
     // and its last token through the first verify window - the path all three model files share.  Decoding is greedy.
+    //
+    // PLAN-qfn-per-request-read-stats (per-request read progress, output only - appended key=value fields, so a
+    // server that does not know them reads the old positional fields exactly as before):
+    //   `PP <position> <prompt_tokens> <ms> <tok/s> new_read=<n> read_ms=<ms> rid=<id>` - new_read is THIS request's
+    //   tokens read so far, counted from where this read started (the reused / restored / parked prefix never
+    //   counts), and read_ms the time this request's read has actually been running: not the waits between prompt
+    //   pieces (the slots' decode share, a yield hold), not the restore, not any queue time.  <ms> keeps its old
+    //   meaning (wall time since the request began) for servers that use it.
+    //   `RDONE rid=<id> new=<n> ms=<ms>` once per read, at its end - after the last part read, or before the DONE of
+    //   a read that ends early (cancel, BYIELD, no VRAM): the exact new tokens for this request's read (the DONE's
+    //   prompt - reused, or the clamped count when a cancel stopped it part-way) over its own read time.  The batch
+    //   path's equivalent is its `BRA <slot> 1 prompt= reused= read_ms=` line, unchanged.
     // The expert-cache slots (from the end of the cache) that hold the prompt path's buffers for a chunk, and the
     // bytes from the first of them to the end.
     // the share of expert bytes the arena could pin (sizes the prompt path's streamed ring and its lend cap)
@@ -10568,6 +10580,35 @@ int main(int argc, char** argv) {
         };
         int64_t pp_total = 0, pp_from = 0, pp_next_check = 0;
         bool pp_tail_saved = false;
+        // PLAN-qfn-per-request-read-stats: this request's own read clock and id, for the PP / RDONE lines.
+        // pp_run_us counts only the time a read of THIS request actually ran: not the time between pieces
+        // (SAGUARO_BATCH_DECODE_SHARE, SAGUARO_READ_YIELD holds), not restores, not lending - the PP lines' old
+        // <ms> field stays the wall time since the request began, so current servers keep working.  The stage
+        // threads read them beside the host thread: atomics.
+        std::atomic<long long> pp_run_us{0};
+        std::atomic<bool> pp_running{false};
+        Clock::time_point pp_run_t0{};
+        auto pp_running_ms = [&]() -> double {
+            double ms = (double) pp_run_us.load(std::memory_order_relaxed) / 1000.0;
+            if (pp_running.load(std::memory_order_relaxed))
+                ms += std::chrono::duration<double, std::milli>(Clock::now() - pp_run_t0).count();
+            return ms;
+        };
+        auto pp_run_begin = [&]() {
+            pp_run_t0 = Clock::now();
+            pp_running.store(true, std::memory_order_relaxed);
+        };
+        auto pp_run_end = [&]() {
+            if (!pp_running.exchange(false, std::memory_order_relaxed)) return;
+            pp_run_us.fetch_add((long long) (std::chrono::duration<double, std::micro>(Clock::now() -
+                                                                                        pp_run_t0).count() + 0.5),
+                                std::memory_order_relaxed);
+        };
+        // the request's id on the wire (PLAN-qfn-per-request-read-stats): the PP and RDONE lines' rid=; the server
+        // reads one solo request at a time, so this only tells a late line from the next request's
+        static long long serve_rid = 0;
+        long long pp_rid = 0;
+        bool rdone_done = false;   // this request's RDONE (once, at its read's end or before its DONE)
         // #471: the position the prompt pass has read up to (a chunk's or a window's end): what a request cancelled
         // mid-read reports as read, instead of the whole prompt
         int64_t pp_reached = 0;
@@ -10834,11 +10875,16 @@ int main(int argc, char** argv) {
                 std::fprintf(stderr, "strata serve: DRAFT_PREFILL path=%s mode=%d cells=%lld\n",
                              batched ? "batched" : "token", mtp.kv_state().kv_mode, (long long) T);
             // progress for the server window: PP <position reached> <prompt tokens> <ms> <fresh tokens/s>
+            //   new_read= read_ms= rid= (PLAN-qfn-per-request-read-stats): this request's own figures - tokens read
+            //   from where THIS read started (never reused / restored / parked positions) over the time its read
+            //   actually ran; appended key=value, so a server that does not know them reads the old four fields
             const int64_t done = p0 + T;
             pp_reached = done;
             const double ms = std::chrono::duration<double, std::milli>(Clock::now() - pp_t0).count();
-            std::printf("PP %lld %lld %.0f %.1f\n", (long long) done, (long long) pp_total, ms,
-                        ms > 0.0 ? 1000.0 * (double) (done - pp_from) / ms : 0.0);
+            std::printf("PP %lld %lld %.0f %.1f new_read=%lld read_ms=%.1f rid=%lld\n", (long long) done,
+                        (long long) pp_total, ms,
+                        ms > 0.0 ? 1000.0 * (double) (done - pp_from) / ms : 0.0,
+                        (long long) std::max<int64_t>(0, done - pp_from), pp_running_ms(), (long long) pp_rid);
             strata::core::progress_at("reading the prompt (batched), done up to token", done);
             strata::core::progress_beat();
             std::fflush(stdout);
@@ -12149,6 +12195,21 @@ int main(int argc, char** argv) {
                                        // SAGUARO_PIPED_MTP: a window holds live slots only, so an idle slot keeps its
                                        // conversation for its next turn (the server picks slots by what they hold)
                                        (piped_mtp ? " slot_keep=1" : "")).c_str() : "");
+            // the Monitor's "Where the experts live" layout (parity with the maya engines' Qwen path, which names
+            // itself the same way): engine_kind=qwen picks TIER_SETS.qwen (serve/web/monitor.js), and tierShares()
+            // (serve/web/server.js) reads experts / vram_slots / vram_gb / ram_slots / ram_gb from here and
+            // vram_used / ram_used / vram_gb / ram_gb / disk_gb from the STAT lines.  QFN has no SSD tier: every
+            // expert lives in RAM (resident or mapped) and the ones VRAM's caches do not hold are computed by the
+            // CPU from there, so the STAT lines report disk=0 / disk_gb=0.
+            {
+                const int64_t all_experts = (int64_t) g.n_layers * (int64_t) g.n_expert;
+                std::printf("INFO engine_kind=qwen experts=%lld vram_slots=%lld vram_gb=%.1f ram_slots=%lld ram_gb=%.1f\n",
+                            (long long) all_experts, (long long) slots_all, (double) mib_all / 1024.0,
+                            (long long) all_experts,
+                            (double) (o.mmap_experts ? src.resident_bytes()
+                                                     : strata::kernels::cpu::expert_layout().total) / 1073741824.0);
+                std::fflush(stdout);
+            }
             // The Monitor's map of each GPU (serve/gpu_map.py parses it): one line per CUDA device this engine uses,
             // the same fields the GLM / MiniMax / DeepSeek engines print.  `act` is what the card holds at this point
             // besides the parts named here (its scratch, graph pools and CUDA context: QFN totals those nowhere).
@@ -12642,8 +12703,35 @@ int main(int argc, char** argv) {
             const int64_t h = drive.d.cache_hits - bstat_hits0;
             const int64_t look = drive.d.cache_hits + drive.d.cache_admitted + drive.d.cache_refused - bstat_look0;
             const double n = (double) std::max<int64_t>(1, bstat_toks - bstat_toks0);
-            std::printf("STAT tok_s=%.2f ms_tok=%.2f vram_hit=%.4f draft_acc=%lld draft_off=%lld active=%d\n",
+            // PLAN-qfn-per-request-read-stats (parity 14): what the page's qwen tier layout reads beside the hit
+            // share - ram_fetch: the routed selections a token found outside the VRAM caches, the CPU lane then
+            // computes from RAM (QFN has no SSD tier to read from: disk / disk_gb are 0 by design), and the
+            // residency the bar draws (tierShares() in serve/web/server.js): experts in the VRAM caches vs the
+            // rest held in RAM, the caches' slots and bytes as they stand NOW (the adaptive tier moves them).
+            int64_t v_used = xcache.resident(), v_slots = (int64_t) xcache.slots();
+            double v_bytes = (double) xcache.bytes();
+            for (const auto& st : stages) {
+                v_used += st->cache.resident();
+                v_slots += (int64_t) st->cache.slots();
+                v_bytes += (double) st->cache.bytes();
+            }
+            for (int r = 0; r < 3; ++r)
+                if (o.expert_cache_remote[(size_t) r] > 0) {
+                    v_used += remote_experts[(size_t) r].resident();
+                    v_slots += remote_experts[(size_t) r].resident();   // (as the INFO line counts their slots)
+                    v_bytes += remote_experts[(size_t) r].gib() * 1073741824.0;
+                }
+            const int64_t all_experts = (int64_t) g.n_layers * (int64_t) g.n_expert;
+            const double ram_bytes = (double) (o.mmap_experts ? src.resident_bytes()
+                                                              : strata::kernels::cpu::expert_layout().total);
+            std::printf("STAT tok_s=%.2f ms_tok=%.2f vram_hit=%.4f ram_fetch=%.3f disk=0.000 "
+                        "vram_used=%lld vram_slots=%lld ram_used=%lld ram_gb=%.1f vram_gb=%.1f disk_gb=0.0 "
+                        "draft_acc=%lld draft_off=%lld active=%d\n",
                         n / std::max(1e-9, el), 1000.0 * el / n, (double) h / (double) std::max<int64_t>(1, look),
+                        (double) std::max<int64_t>(0, look - h) / n,
+                        (long long) v_used, (long long) v_slots,
+                        (long long) std::max<int64_t>(0, all_experts - v_used),
+                        ram_bytes / 1073741824.0, v_bytes / 1073741824.0,
                         (long long) (bstat_acc - bstat_acc0), (long long) (bstat_off - bstat_off0), active_slots);
             std::fflush(stdout);
             bstat_reset();
@@ -14100,8 +14188,10 @@ int main(int argc, char** argv) {
             const double ms = std::chrono::duration<double, std::milli>(Clock::now() - sl.lane_t0).count();
             if (!st.done) {
                 sl.x = sl.lane_ids[(size_t) sl.p];
-                std::printf("BRP %d %lld %lld %.0f %.1f\n", b, (long long) sl.p, (long long) n, ms,
-                            ms > 0.0 ? 1000.0 * (double) (sl.p - sl.lane_resume) / ms : 0.0);
+                std::printf("BRP %d %lld %lld %.0f %.1f new_read=%lld read_ms=%.1f\n", b, (long long) sl.p,
+                            (long long) n, ms,
+                            ms > 0.0 ? 1000.0 * (double) (sl.p - sl.lane_resume) / ms : 0.0,
+                            (long long) std::max<int64_t>(0, sl.p - sl.lane_resume), ms);
                 std::fflush(stdout);
                 return true;
             }
@@ -15176,6 +15266,10 @@ int main(int argc, char** argv) {
         // with `BQ <slot> 1` (queued: then BRP <slot> <done> <total> <ms> <tok/s> while it reads, BRA <slot> <1|0> ...
         // when it decodes or does not, BRE <slot> <why> when it failed, then BT/BDONE) or `BQ <slot> 0` (read the old
         // way, answered on the control lines).  One read at a time; further BGENs queue behind it.
+        // BRP lines carry this request's own figures too (PLAN-qfn-per-request-read-stats, appended key=value):
+        // `new_read=<n>` - its tokens read so far from where the read started (never its reused / parked prefix) -
+        // and `read_ms=<ms>` - the time its read has run (a read held for a yield prints no lines while held; the
+        // wait before the read starts stays in BRA's wait_ms).  The slot is the first field: that is its rid.
         static const int64_t adm_gain = [] {   // another cache this much longer than the slot's own: the old way
             const char* v = std::getenv("SAGUARO_SLOT_ADMIT_GAIN");
             return v != nullptr ? (int64_t) std::atoll(v) : (int64_t) 16384;
@@ -15814,8 +15908,10 @@ int main(int argc, char** argv) {
                 const int64_t done = p0 + T;
                 adm_at.store(done);
                 const double ms = std::chrono::duration<double, std::milli>(Clock::now() - t_read).count();
-                std::printf("BRP %d %lld %lld %.0f %.1f\n", b, (long long) done, (long long) n, ms,
-                            ms > 0.0 ? 1000.0 * (double) (done - at0) / ms : 0.0);
+                std::printf("BRP %d %lld %lld %.0f %.1f new_read=%lld read_ms=%.1f\n", b, (long long) done,
+                            (long long) n, ms,
+                            ms > 0.0 ? 1000.0 * (double) (done - at0) / ms : 0.0,
+                            (long long) std::max<int64_t>(0, done - j.resume), j.read_ms + ms);
                 std::fflush(stdout);
                 strata::core::progress_at("reading a prompt into a batch slot, done up to token", done);
                 strata::core::progress_beat();
@@ -16528,8 +16624,13 @@ int main(int argc, char** argv) {
                     const int64_t done = p0 + T;
                     jp->done_at.store(done);
                     const double ms = std::chrono::duration<double, std::milli>(Clock::now() - jp->t_read).count();
-                    std::printf("BRP %d %lld %lld %.0f %.1f\n", b, (long long) done, (long long) n, ms,
-                                ms > 0.0 ? 1000.0 * (double) (done - jp->resume) / ms : 0.0);
+                    // PLAN-qfn-per-request-read-stats: new_read counts this request's tokens read from where its read
+                    // started (its reused prefix left out, never a parked position); read_ms is the time this read has
+                    // run since it was fed (a read held for a yield prints no lines while it is held)
+                    std::printf("BRP %d %lld %lld %.0f %.1f new_read=%lld read_ms=%.1f\n", b, (long long) done,
+                                (long long) n, ms,
+                                ms > 0.0 ? 1000.0 * (double) (done - jp->resume) / ms : 0.0,
+                                (long long) std::max<int64_t>(0, done - jp->resume), ms);
                     std::fflush(stdout);
                     strata::core::progress_at("reading a prompt into a batch slot, done up to token", done);
                     strata::core::progress_beat();
@@ -18885,6 +18986,10 @@ int main(int argc, char** argv) {
             pp_reached = read_from;
             pp_exact = true;   // a restore, a checkpoint mount or a zeroed session: the state is exactly at read_from
             pp_t0 = r0;
+            pp_run_us.store(0, std::memory_order_relaxed);   // (PLAN-qfn-per-request-read-stats: this request's own
+            pp_running.store(false, std::memory_order_relaxed);   //  read clock, its rid, one RDONE per read)
+            pp_rid = ++serve_rid;
+            rdone_done = false;
             pp_next_check = reread_to > 0 || !req_ckpt ? INT64_MAX : resume + o.prompt_cache_every;   // ckpt=0: none
             pp_tail_saved = reread_to > 0 || !req_ckpt;   // ckpt=0 (#861): no tail checkpoint either
             {
@@ -18949,6 +19054,11 @@ int main(int argc, char** argv) {
             // stage runs the same windows in the same order as read_windows below, so the session ends the same.
             auto read_windows_pl = [&](int64_t a, int64_t b, std::string& e) -> bool {
                 strata::core::progress_at("reading the prompt (pipelined verify windows), from token", a);
+                pp_run_begin();   // (this part's windows are read time; the guard ends the clock on every exit)
+                struct RunEnd {
+                    std::function<void()> f;
+                    ~RunEnd() { if (f) f(); }
+                } run_end{{[&] { pp_run_end(); }}};
                 if (!pl_prepare(e)) return false;
                 for (int par = 0; par < 2; ++par) PV[0][par]->set_head_sampling(false);   // reaches stage 1 (set_next)
                 struct Restore {
@@ -19025,9 +19135,12 @@ int main(int argc, char** argv) {
                 }
                 pl_drain();   // nothing in flight: both stages' commits and the drafter's rows have landed
                 pl_mtp_live[0] = pl_mtp_live[1] = false;
+                pp_run_end();   // (the read is over: its time stops here, before the line that reports it)
                 const double ms = std::chrono::duration<double, std::milli>(Clock::now() - pp_t0).count();
-                std::printf("PP %lld %lld %.0f %.1f\n", (long long) b, (long long) pp_total, ms,
-                            ms > 0.0 ? 1000.0 * (double) (b - pp_from) / ms : 0.0);
+                std::printf("PP %lld %lld %.0f %.1f new_read=%lld read_ms=%.1f rid=%lld\n", (long long) b,
+                            (long long) pp_total, ms,
+                            ms > 0.0 ? 1000.0 * (double) (b - pp_from) / ms : 0.0,
+                            (long long) std::max<int64_t>(0, b - pp_from), pp_running_ms(), (long long) pp_rid);
                 strata::core::progress_beat();
                 std::fflush(stdout);
                 return true;
@@ -19038,6 +19151,11 @@ int main(int argc, char** argv) {
                 // the pipelined prompt read stays two-stage (three or more stages read serially; only the decode overlaps)
                 if (pipe && n_stages == 2 && pl_pw >= 1 && std::getenv("SAGUARO_LOGPOS") == nullptr) return read_windows_pl(a, b, e);
                 strata::core::progress_at("reading the prompt (verify windows), from token", a);   // #217: not "batched"
+                pp_run_begin();   // (this part's windows are read time; the guard ends the clock on every exit)
+                struct RunEnd {
+                    std::function<void()> f;
+                    ~RunEnd() { if (f) f(); }
+                } run_end{{[&] { pp_run_end(); }}};
                 // every token is committed and the picks are discarded: no head sampling (see set_head_sampling)
                 struct NoHeadSampling {
                     strata::core::Verifier& v;
@@ -19086,9 +19204,12 @@ int main(int argc, char** argv) {
                 }
                 // the batched prompt path (other streams), checkpoints and snapshots may follow: the last commit first
                 if (!ver.wait_commit(e)) return false;
+                pp_run_end();   // (the read is over: its time stops here, before the line that reports it)
                 const double ms = std::chrono::duration<double, std::milli>(Clock::now() - pp_t0).count();
-                std::printf("PP %lld %lld %.0f %.1f\n", (long long) b, (long long) pp_total, ms,
-                            ms > 0.0 ? 1000.0 * (double) (b - pp_from) / ms : 0.0);
+                std::printf("PP %lld %lld %.0f %.1f new_read=%lld read_ms=%.1f rid=%lld\n", (long long) b,
+                            (long long) pp_total, ms,
+                            ms > 0.0 ? 1000.0 * (double) (b - pp_from) / ms : 0.0,
+                            (long long) std::max<int64_t>(0, b - pp_from), pp_running_ms(), (long long) pp_rid);
                 strata::core::progress_beat();
                 std::fflush(stdout);
                 return true;
@@ -19160,7 +19281,10 @@ int main(int argc, char** argv) {
                 auto run = [&](int64_t q, int64_t r) -> bool {
                     if (planned) sp.force_chunk(plan.chunk, plan_single, plan.chunked);
                     const ShareScope share_scope(read_share_set, read_share_now());
-                    return sp.run(ids.data() + q, r - q, q, e);
+                    pp_run_begin();   // (this request's own read clock: the pieces between two runs - the slots'
+                    const bool ok = sp.run(ids.data() + q, r - q, q, e);
+                    pp_run_end();     //  decode share, a yield hold - are not read time: PLAN-qfn-per-request-read-stats)
+                    return ok;
                 };
                 // (a layer split reads its stages as a pipeline over one run's chunks: beside slots a chunk at a time, with
                 // none decoding in pieces of SAGUARO_BATCH_YIELD_CHUNKS chunks (default 8; 0 = one run) so a BYIELD is taken)
@@ -19397,6 +19521,7 @@ int main(int argc, char** argv) {
                             conc_thread_cpus();
                             try {   // (an exception leaving a std::thread ends the process: a failed read instead)
                                 if (planned) sp.force_chunk(plan.chunk, plan_single, plan.chunked);
+                                pp_run_begin();   // (the read's own thread runs it: its time is this request's
                                 read_ok = sp.run(ids.data() + q0, b0 - q0, q0, read_err);
                             } catch (const std::exception& x) {
                                 read_ok = false;
@@ -19405,6 +19530,7 @@ int main(int argc, char** argv) {
                                 read_ok = false;
                                 read_err = "the prompt read failed";
                             }
+                            pp_run_end();   //  read time; pumping the slots between the rounds is not)
                             done.store(true, std::memory_order_release);
                             { std::lock_guard<std::mutex> lk(in_mu); }   // (the loop below may be waiting on in_cv)
                             in_cv.notify_all();
@@ -20121,8 +20247,10 @@ int main(int argc, char** argv) {
                 }
                 if (sp_ok && merge_at >= 0) {   // the server's progress reaches the prompt's end, as after its last window
                     const double ms = std::chrono::duration<double, std::milli>(Clock::now() - pp_t0).count();
-                    std::printf("PP %lld %lld %.0f %.1f\n", (long long) to, (long long) pp_total, ms,
-                                ms > 0.0 ? 1000.0 * (double) (to - pp_from) / ms : 0.0);
+                    std::printf("PP %lld %lld %.0f %.1f new_read=%lld read_ms=%.1f rid=%lld\n", (long long) to,
+                                (long long) pp_total, ms,
+                                ms > 0.0 ? 1000.0 * (double) (to - pp_from) / ms : 0.0,
+                                (long long) std::max<int64_t>(0, to - pp_from), pp_running_ms(), (long long) pp_rid);
                     std::fflush(stdout);
                 }
                 if (!sp_ok) {
@@ -20163,6 +20291,17 @@ int main(int argc, char** argv) {
                 if (trace && to == message_at)
                     std::fprintf(stderr, "strata serve: message boundary checkpoint: %lld tokens, %lld tail\n",
                                  (long long) message_at, (long long) (turn_at - message_at));
+            }
+            // PLAN-qfn-per-request-read-stats: the read is over - this request's exact new tokens (prompt minus what
+            // it reused: never a restored / parked position counted as a read) over the time its read actually ran,
+            // the figures the batch path tells on its BRA line.  A read that ends early (cancel, yield, no VRAM)
+            // gets the same line before its DONE (below); a request that ends with ERR gives none.
+            if (!cancelled && !rdone_done) {
+                rdone_done = true;
+                std::printf("RDONE rid=%lld new=%lld ms=%.1f\n", (long long) pp_rid,
+                            (long long) std::max<int64_t>(0, n - resume),
+                            (double) pp_run_us.load(std::memory_order_relaxed) / 1000.0);
+                std::fflush(stdout);
             }
             if (!cy_held.empty()) {
                 if (trace) std::fprintf(stderr, "strata trace: SAGUARO_READ_YIELD: the loan stays out for %zu held reads\n", cy_held.size());
@@ -21419,6 +21558,12 @@ int main(int argc, char** argv) {
             // cancel stopped it part-way (a cancelled request used to be logged and counted as having read them all)
             const int64_t fresh = n - resume;
             const int64_t read_n = cancelled ? std::clamp<int64_t>(pp_reached - resume, 0, fresh) : fresh;
+            if (!rdone_done) {   // (PLAN-qfn-per-request-read-stats: this read ends here too - cancelled, yielded
+                rdone_done = true;   //  or a prompt that was whole from the start: its own count, its own read time)
+                std::printf("RDONE rid=%lld new=%lld ms=%.1f\n", (long long) pp_rid, (long long) read_n,
+                            (double) pp_run_us.load(std::memory_order_relaxed) / 1000.0);
+                std::fflush(stdout);
+            }
             // DONE <generated> <prompt> <prompt ms> <decode ms> <finish> <drafts accepted> <drafts offered> <reused> [hits] [lookups]
             //      [RAM blobs] [file blobs] [file MB]   (CS-T tiers; appended, so an older server reads the rest)
             //      [prompt tokens read]   (#471: fewer than <prompt> - <reused> when a cancel stopped the read)
