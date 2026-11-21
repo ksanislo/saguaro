@@ -1119,6 +1119,9 @@ struct Model::Impl {
     bool prompt_par = false;          // the prompt path's chunks (a thread a GPU), as --tp / --threads asked
     unsigned win_seq = 0;             // the windows the threads ran (the hand-offs' seq)
     std::atomic<unsigned> win_now{0};   // (the last decode window's win_seq, for the copy threads)
+    // (PLAN-context-panel) the parked conversations' RAM bytes outside the slots, published by the serve loop
+    // (Model::set_parked_bytes) and carried on the VRAM lines - the beat thread reads it while printing them
+    std::atomic<uint64_t> parked_bytes{0};
     // the chunked prompt path (threads mode): chunk tokens a pass, runs shorter than chunk_min in windows
     int chunk = 0, chunk_min = 512;
     static constexpr int kFlowChunkMin = 2;   // chunk_min with every device's layers on the flow (see load)
@@ -10253,9 +10256,10 @@ struct Model::Impl {
         for (size_t di = 0; di < devs.size(); ++di) {
             const size_t held = el != nullptr ? el->held_dev((int) di) : 0;
             const size_t taken = el != nullptr && di < el->taken_in.size() ? el->taken_in[di] : 0;
-            char b[96];
-            std::snprintf(b, sizeof b, "%d:%zu:%zu:%d", devs[di].id, held, taken,
-                          (vis_room != nullptr || vis_res != nullptr) && vt.device() == devs[di].id ? 1 : 0);
+            char b[128];
+            std::snprintf(b, sizeof b, "%d:%zu:%zu:%d:%llu", devs[di].id, held, taken,
+                          (vis_room != nullptr || vis_res != nullptr) && vt.device() == devs[di].id ? 1 : 0,
+                          (unsigned long long) parked_bytes.load());   // (PLAN-context-panel: a park re-prints the line)
             out.push_back(b);
         }
         return out;
@@ -23969,14 +23973,20 @@ struct Model::Impl {
             const size_t pool_now = pool_base > taken_g ? pool_base - taken_g : 0;
             char pci[32] = "-";
             if (cudaDeviceGetPCIBusId(pci, sizeof pci, d.id) != cudaSuccess) std::snprintf(pci, sizeof pci, "-");
+            // PLAN-context-panel, output only: the K/V budget fields.  kv_room: what this card can hold for chat
+            // state - the conversations' KV now plus, with the elastic conversations on, the pool room they can
+            // still back themselves out of; kv_ram_room: this engine streams no K/V to host RAM, so 0 (its RAM
+            // holds parked conversations, said apart by `parked=`); parked: the bytes of conversations parked in
+            // RAM outside the slots, the serve loop's figure (Model::set_parked_bytes), the same on every line.
             std::snprintf(b, sizeof b,
                           "VRAM dev=%d pci=%s total=%zu free=%zu weights=%zu kv=%zu kv_ram=0 act=%zu drafter=%zu window=0 "
                           "pool=%zu helper=%zu tail=0 borrow=0 vision=0 vision_own=%zu prompt=%zu tp=%zu tp_n=%zu slots=%lld ctx=%lld "
-                          "layers=%d-%d",
+                          "layers=%d-%d kv_room=%zu kv_ram_room=%zu parked=%llu",
                            d.id, pci, tot, fr, d.weights - mtp_dense - tp_w, kv_now, d.scratch, mtp_dense + mtp_exp,
                            pool_now, d.id == helper_id ? helper_bytes : 0, vis, d.prompt - v_prompt,
                            tp_w + tp_kv, tn, slots,
-                          (long long) o.max_context, a, z);
+                          (long long) o.max_context, a, z, kv_now + (el != nullptr ? pool_now : 0), (size_t) 0,
+                          (unsigned long long) parked_bytes.load());
             v.push_back(b);
             helper_reported = helper_reported || d.id == helper_id;
         }
@@ -23991,8 +24001,9 @@ struct Model::Impl {
                     std::snprintf(pci, sizeof pci, "-");
                 std::snprintf(b, sizeof b, "VRAM dev=%d pci=%s total=%zu free=%zu weights=0 kv=0 kv_ram=0 act=0 drafter=0 "
                                           "window=0 pool=0 helper=%zu tail=0 borrow=0 vision=0 vision_own=0 prompt=0 "
-                                          "tp=0 tp_n=1 slots=0 ctx=%lld layers=-1--1",
-                              helper_id, pci, tot, fr, helper_bytes, (long long) o.max_context);
+                                          "tp=0 tp_n=1 slots=0 ctx=%lld layers=-1--1 kv_room=0 kv_ram_room=0 parked=%llu",
+                              helper_id, pci, tot, fr, helper_bytes, (long long) o.max_context,
+                              (unsigned long long) parked_bytes.load());
                 v.push_back(b);
             }
             cudaSetDevice(previous);
@@ -24325,6 +24336,8 @@ std::string Model::describe() const { return p_->describe(); }
 std::vector<std::string> Model::info_lines() const { return p_->info_lines(); }
 // (PLAN-vram-live) the per-card bookkeeping the VRAM lines follow - see Impl::vram_live_fp
 std::vector<std::string> Model::vram_live_fp() const { return p_->vram_live_fp(); }
+// (PLAN-context-panel) the serve loop's parked-conversation bytes, for the VRAM lines' `parked=` field
+void Model::set_parked_bytes(uint64_t bytes) { p_->parked_bytes.store(bytes); }
 Model::Tiers Model::tiers() const {
     const Impl& m = *p_;
     Tiers t;

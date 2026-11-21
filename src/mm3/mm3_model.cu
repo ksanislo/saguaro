@@ -771,6 +771,13 @@ struct Model::Impl {
     // asked (cudaMemGetInfo, the PCI id) only here, at print time.
     std::vector<std::string> vram_lines_live() const {
         std::vector<std::string> out;
+        // PLAN-context-panel, output only: the K/V budget fields.  kv_room is what this card can hold for chat
+        // state - the index keys' K/V mapped now plus, with the elastic context on, the pool's room they can
+        // still map back; kv_ram_room is the pinned host cache KV streaming was given (its bytes are the budget,
+        // allocated at the load; 0 without streaming), the same engine-wide figure on every line; parked: this
+        // engine parks nothing in RAM outside its slots, so 0.  The load's lines and the TP variant carry them too.
+        size_t host_total = 0;
+        for (const auto& e : acct_kvh) host_total += e.second;
         for (const Dev& d : D) {
             cudaSetDevice(d.id);
             size_t fr = 0, tot = 0;
@@ -789,15 +796,16 @@ struct Model::Impl {
             }
             const size_t pool = a[kAPool] > given ? a[kAPool] - given : 0;
             const size_t kvh = acct_kvh.count(d.id) ? acct_kvh.at(d.id) : 0;
+            const size_t kv_room = a[kAKV] + (el_pos > 0 ? pool : 0);
             char pci[32] = "-";
             if (cudaDeviceGetPCIBusId(pci, sizeof pci, d.id) != cudaSuccess) std::snprintf(pci, sizeof pci, "-");
             char b[512];
             std::snprintf(b, sizeof b,
                           "VRAM dev=%d pci=%s total=%zu free=%zu weights=%zu kv=%zu kv_ram=%zu act=%zu drafter=%zu "
                           "window=0 pool=%zu tail=0 borrow=0 vision=0 vision_own=%zu prompt=0 tp=0 tp_n=1 slots=%lld "
-                          "ctx=%d layers=%d-%d",
+                          "ctx=%d layers=%d-%d kv_room=%zu kv_ram_room=%zu parked=%zu",
                           d.id, pci, tot, fr, a[kAW], a[kAKV], kvh, a[kAAct], drafter, pool, vision, slots, o.max_ctx,
-                          d.layers.front(), d.layers.back());
+                          d.layers.front(), d.layers.back(), kv_room, host_total, (size_t) 0);
             out.push_back(b);
         }
         return out;
@@ -2492,12 +2500,17 @@ struct Model::Impl {
             char pci[32] = "-";
             if (cudaDeviceGetPCIBusId(pci, sizeof pci, d.id) != cudaSuccess) std::snprintf(pci, sizeof pci, "-");
             char b[512];
+            // PLAN-context-panel: the K/V budget fields (see vram_lines_live) - what the card can hold for chat
+            // state (the elastic pool's room included), the pinned host cache streaming was given, and 0 parked
+            size_t host_total = 0;
+            for (const auto& e : acct_kvh) host_total += e.second;
             std::snprintf(b, sizeof b,
                           "VRAM dev=%d pci=%s total=%zu free=%zu weights=%zu kv=%zu kv_ram=%zu act=%zu drafter=%zu "
                           "window=0 pool=%zu tail=0 borrow=0 vision=0 vision_own=%zu prompt=0 tp=0 tp_n=1 slots=%lld "
-                          "ctx=%d layers=%d-%d",
+                          "ctx=%d layers=%d-%d kv_room=%zu kv_ram_room=%zu parked=%zu",
                           d.id, pci, tot, fr, a[kAW], a[kAKV], acct_kvh.count(d.id) ? acct_kvh.at(d.id) : 0, a[kAAct],
-                          drafter, a[kAPool], vision, slots, o.max_ctx, d.layers.front(), d.layers.back());
+                          drafter, a[kAPool], vision, slots, o.max_ctx, d.layers.front(), d.layers.back(),
+                          a[kAKV] + (el_pos > 0 ? a[kAPool] : 0), host_total, (size_t) 0);
             vram.push_back(b);
         }
         // (PLAN-vram-live) remember the resident regions as the load mapped them: what ctx_take gives the index keys

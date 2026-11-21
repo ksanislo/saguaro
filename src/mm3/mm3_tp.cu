@@ -1277,13 +1277,19 @@ struct TpEngine::Impl {
                 char pci[32] = "-";
                 if (cudaDeviceGetPCIBusId(pci, sizeof pci, m.id) != cudaSuccess) std::snprintf(pci, sizeof pci, "-");
                 char b[512];
+                // PLAN-context-panel: the K/V budget fields.  No elastic context on the tensor-parallel path, so
+                // the card's chat-state budget is the KV it holds; the host cache streamed K/V was given is the
+                // engine-wide sum over its members (the server takes the largest line's figure); it parks nothing.
+                size_t host_total = 0;
+                for (const auto& e : acct_kvh) host_total += e.second;
                 std::snprintf(b, sizeof b,
                               "VRAM dev=%d pci=%s total=%zu free=%zu weights=%zu kv=%zu kv_ram=%zu act=%zu drafter=%zu "
-                              "window=0 pool=%zu tail=0 borrow=0 vision=0 vision_own=%zu prompt=%zu tp=%zu tp_n=%zu "
-                              "slots=%lld ctx=%d layers=%d-%d",
+                              "window=0 pool=%zu tail=0 borrow=0 vision=0 vision_own=%zu prompt=0 tp=%zu tp_n=%zu "
+                              "slots=%lld ctx=%d layers=%d-%d kv_room=%zu kv_ram_room=%zu parked=%zu",
                               m.id, pci, tot, fr, a[kAW], a[kAKV] - std::min(a[kAKV], tpb),
                               acct_kvh.count(m.id) ? acct_kvh.at(m.id) : 0, a[kAAct], drafter, a[kAPool], vision,
-                              a[kAPrompt], tpb, tn, slots, o.max_ctx, gr.l0, gr.l1 - 1);
+                              a[kAPrompt], tpb, tn, slots, o.max_ctx, gr.l0, gr.l1 - 1,
+                              a[kAKV] - std::min(a[kAKV], tpb), host_total, (size_t) 0);
                 vram.push_back(b);
             }
         st.load_s = now() - t0;

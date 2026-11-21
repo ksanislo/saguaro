@@ -1531,14 +1531,19 @@ static int glm_pack_generate(const Options& o) {
     // the Monitor's `VRAM dev=...` line, from Glm5Model::vram_report: the start prints it and the split moving
     // later gets it re-printed (PLAN-vram-live, below READY), so it is a lambda.
     const auto print_vram = [](const strata::core::Glm5Model::VramReport& r) {
+        // PLAN-context-panel, output only: the K/V budget fields the Monitor's Context panel aggregates - what the
+        // part can hold for chat state, the engine's pinned host K/V for streamed K/V, and its parked conversations
+        // (this engine keeps none); the re-printed lines below carry them the same way.
         std::printf("VRAM dev=%d pci=%s total=%llu free=%llu weights=%llu kv=%llu kv_ram=%llu act=%llu drafter=%llu "
-                    "window=%llu pool=%llu tail=%llu borrow=%llu vision=%llu slots=%lld ctx=%lld layers=%d-%d\n",
+                    "window=%llu pool=%llu tail=%llu borrow=%llu vision=%llu slots=%lld ctx=%lld layers=%d-%d "
+                    "kv_room=%llu kv_ram_room=%llu parked=%llu\n",
                     r.dev, r.pci.empty() ? "-" : r.pci.c_str(), (unsigned long long) r.total,
                     (unsigned long long) r.free, (unsigned long long) r.weights, (unsigned long long) r.kv,
                     (unsigned long long) r.kv_ram, (unsigned long long) r.act, (unsigned long long) r.drafter,
                     (unsigned long long) r.window, (unsigned long long) r.pool, (unsigned long long) r.tail,
                     (unsigned long long) r.borrow, (unsigned long long) r.vision, (long long) r.slots,
-                    (long long) r.ctx, r.l0, r.l1 - 1);   // (layers first-last inclusive, as every engine reports them)
+                    (long long) r.ctx, r.l0, r.l1 - 1,   // (layers first-last inclusive, as every engine reports them)
+                    (unsigned long long) r.kv_room, (unsigned long long) r.kv_ram_room, (unsigned long long) r.parked);
     };
     if (model.fast()) {
         // INFO facts for the server's Monitor tab (strata app): the expert tiers this engine runs with

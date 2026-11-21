@@ -933,6 +933,16 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
         if (ec) return 1e9;
         return std::chrono::duration<double>(fs::file_time_type::clock::now() - t).count() / 86400.0;
     };
+    const auto slot_ram_bytes = [&]() {
+        uint64_t total = 0;
+        for (const Slot& s : slots)
+            if (s.data) total += s.data->size();
+        return total;
+    };
+    // (PLAN-context-panel, output only) hand the parked bytes to the engine: its re-printed VRAM lines carry them
+    // (`parked=`), and the Monitor's Context panel counts what sits parked in RAM outside the slots apart from
+    // what is in them.  Every change to the RAM slots publishes here, so the beat re-prints on a park or a drop.
+    const auto slot_publish = [&]() { m.set_parked_bytes(slot_ram_bytes()); };
     const auto slot_drop = [&](size_t i) {
         if (slots[i].data)   // a RAM slot: its buffer simply dies
             slots[i].data.reset();
@@ -942,16 +952,11 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
             std::filesystem::remove(meta_of(slots[i].path), ec);
         }
         slots.erase(slots.begin() + (long) i);
+        slot_publish();
     };
     const auto slot_count = [&](int& ram, int& disk) {
         ram = disk = 0;
         for (const Slot& s : slots) (s.data ? ram : disk) += 1;
-    };
-    const auto slot_ram_bytes = [&]() {
-        uint64_t total = 0;
-        for (const Slot& s : slots)
-            if (s.data) total += s.data->size();
-        return total;
     };
     // the folder's conversations (their .bin; a .meta beside each is a few KB: identity and tokens)
     const auto slot_folder_bytes = [&]() {
@@ -1022,6 +1027,7 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
         s.bytes = s.data->size();
         s.data.reset();
         slot_trim(path);   // (the folder over its cap: the least recently used conversation goes, not this one)
+        slot_publish();    // (PLAN-context-panel: its bytes left the RAM for the folder)
         return true;
     };
     // the conversation in the model into a slot (the state is lost otherwise: another one takes the model)
@@ -1077,6 +1083,7 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
                           gb(slot_ram_bytes()).c_str(), gb(slot_ram_budget).c_str(), ram, disk);
             note(msg);
         }
+        slot_publish();   // (PLAN-context-panel: the parked bytes moved - the VRAM lines follow)
     };
     // the kept conversation this prompt shares the most of - past `floor` tokens, what the model itself can go back
     // to - back in the model: the tokens it covers (0: none).  A conversation the prompt continues whole comes back
