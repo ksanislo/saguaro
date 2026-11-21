@@ -119,10 +119,10 @@ in memory are read from the SSD. A ~150 GB pack in the shape of Maya's DeepSeek 
 dense weights GPTQ'd at 5-6 bits) is the target for a 160 GB pool; unsloth's KLD (0.092 against their BF16 file,
 which keeps the experts' original bits) is the bar.
 
-## 6. Phase 2: the engine, `maya-ik2`
+## 6. Phase 2: the engine, `saguaro-ik2`
 
 `src/ik2/` runs unsloth's GGUFs in place (UD-Q4_K_XL: NVFP4 experts in layers 0-39; UD-Q3_K_XL: IQ3_XXS / IQ4_XS),
-CUDA on Linux, Ampere on. Built by CMake beside the other engines (`maya-ik2`, and `ik2_kernels_test` with
+CUDA on Linux, Ampere on. Built by CMake beside the other engines (`saguaro-ik2`, and `ik2_kernels_test` with
 `STRATA_BUILD_TESTS`); a 90 in `CMAKE_CUDA_ARCHITECTURES` builds sm_90a for the Hopper attention.
 
 **Where the weights sit.** The dense weights (attention, router, head: ~4.7 B) are decoded once to FP16 in VRAM. The
@@ -132,15 +132,15 @@ in place, a layer at a time: 48 s from NVMe for UD-Q4_K_XL), and the GPU keeps a
 
 **Prompts** go through layer by layer in passes of up to 16,384 tokens, so a pass copies each expert it misses
 once; the next layer's likely experts are copied while this one runs, and a pass evicts its own experts first
-(scan resistance) instead of flushing the cache. `IK2_WARM` fills the cache at load with the experts tokens pick
-most (a profile written with `IK2_POP_OUT`). The attention is one fused kernel (relative bias, sinks, sliding window
+(scan resistance) instead of flushing the cache. `SAGUARO_IK2_WARM` fills the cache at load with the experts tokens pick
+most (a profile written with `SAGUARO_IK2_POP_OUT`). The attention is one fused kernel (relative bias, sinks, sliding window
 and clips; FP16 MMA, and wgmma on Hopper).
 
-**Decode** is bound by the PCIe link (~47 expert misses a token on the H200). `IK2_CPU=1` computes a missing
+**Decode** is bound by the PCIe link (~47 expert misses a token on the H200). `SAGUARO_IK2_CPU=1` computes a missing
 expert on the CPU when that is sooner than its copy (NVFP4 experts, AVX-512).
 
-**Two GPUs** (`--gpus 2`, outside the preview of section 8: with `IK2_UNSUPPORTED=1`): `IK2_EP=1` deals each layer's experts to both by how often they are picked
-(`IK2_EP_SPLIT`, GPU 1's share), each GPU with its own cache and link; attention and the KV cache stay on GPU 0.
+**Two GPUs** (`--gpus 2`, outside the preview of section 8: with `SAGUARO_IK2_UNSUPPORTED=1`): `SAGUARO_IK2_EP=1` deals each layer's experts to both by how often they are picked
+(`SAGUARO_IK2_EP_SPLIT`, GPU 1's share), each GPU with its own cache and link; attention and the KV cache stay on GPU 0.
 Without it the layers are split between the GPUs.
 
 **Serving.** `--serve` speaks Maya's engine protocol (`serve/server.py`'s `StrataEngine`: `INFO`, `READY <ctx> stop`,
@@ -164,7 +164,7 @@ To run it (no setup in `maya.py` yet):
     python tools/strata_tokenizer.py --gguf Inkling-2-Small-UD-Q4_K_XL-00001-of-00009.gguf --out ik2 \
         --chat-template tools/ik2/chat_template.jinja --check
     cat > ik2.json <<EOF
-    {"exe": "build/maya-ik2", "args": ["--model", "Inkling-2-Small-UD-Q4_K_XL-00001-of-00009.gguf",
+    {"exe": "build/saguaro-ik2", "args": ["--model", "Inkling-2-Small-UD-Q4_K_XL-00001-of-00009.gguf",
      "--max-context", "65536", "--cache-gb", "200"], "tokenizer": "ik2/tokenizer", "model_name": "inkling-2-small"}
     EOF
     python serve/server.py --engine maya --config ik2.json
@@ -173,10 +173,10 @@ To run it (no setup in `maya.py` yet):
 
 UD-Q4_K_XL, KV in FP16, the experts in pinned host memory, PCIe 5:
 
-| | H200 (141 GB) | RTX PRO 6000 (96 GB) | 2x RTX PRO 6000, `IK2_EP=1` |
+| | H200 (141 GB) | RTX PRO 6000 (96 GB) | 2x RTX PRO 6000, `SAGUARO_IK2_EP=1` |
 | --- | --- | --- | --- |
 | Expert cache | ~114 GiB | ~67 GiB | one on each GPU |
-| Decode | 35-36 tok/s (`IK2_CPU=1`: 36.2) | 22 tok/s | 42 tok/s |
+| Decode | 35-36 tok/s (`SAGUARO_IK2_CPU=1`: 36.2) | 22 tok/s | 42 tok/s |
 | A 21.8k-token prompt, fresh | 5.9 s | 7.7-8.0 s | 7.25-7.8 s |
 | A 105k-token prompt | 19.3 s | | |
 
@@ -186,7 +186,7 @@ link is busy only 61% - with the host's per-layer work between them. Decode near
 UD-Q3_K_XL on the H200: decode 44.6 tok/s (its experts are smaller: fewer misses, more of them cached).
 
 Against `ref/inkling2.py` (float64) over the same GGUF, 48 tokens: layers 0-5 within 3e-4 relative, every top-1
-token the same, KL mean 8.5e-4 (max 7.2e-3). With `IK2_KV=fp8` 5 of the 48 top-1 tokens differ (KL mean 8.3e-3):
+token the same, KL mean 8.5e-4 (max 7.2e-3). With `SAGUARO_IK2_KV=fp8` 5 of the 48 top-1 tokens differ (KL mean 8.3e-3):
 Inkling's router is full of near-ties, and FP8's 1.5% in layer 0's attention output already changes 7 tokens'
 experts there - so FP16 is the default.
 
@@ -195,7 +195,7 @@ expert decodes and their softcapped SwiGLU) to a double-precision reference on t
 
 What did not help (kept out): prefetching two or three layers ahead, or before the routing round trip (both crowd
 the cache: a 21.8k prompt on an RTX PRO 6000 went 8.05 -> 9.7 s); predicting the next layer's experts from this
-layer's input (46% precise); tensor parallel experts (`IK2_TP=1`: 42.8 vs EP's 41.3 tok/s but slower prompts; kept
+layer's input (46% precise); tensor parallel experts (`SAGUARO_IK2_TP=1`: 42.8 vs EP's 41.3 tok/s but slower prompts; kept
 as an option); the drafter (`--draft`: 2.4-2.7 tokens a step, but verifying 8 costs ~260 ms).
 
 ## 7. Next
@@ -217,7 +217,7 @@ the block states the core was first given. A pass after the first reads the pass
 layer - for q, k, v and the MoE - each an attention residual over the earlier pass's block states and its final
 stream (`loop_res_query`, `loop_kv_res_query`), let into the layer's input by a gate of rank 64:
 `(1 - tanh(F g)) x + tanh(G g) m`, `g = D [rms(x); rms(m)]`. The weights are a layer's; the KV cache and the conv
-histories are a visit's. `ref/inkling2.py` and `maya-ik2` keep a list of visits; with `num_loops` 1 it is the layers.
+histories are a visit's. `ref/inkling2.py` and `saguaro-ik2` keep a list of visits; with `num_loops` 1 it is the layers.
 
 **The file.** unsloth's Mini GGUFs are in the layout llama.cpp master reads (other tensor and key names, the convs
 not folded, gate and up merged into `ffn_gate_up_exps`); the reference and the engine read both layouts.
@@ -231,7 +231,7 @@ the messages left out the KL is 0.56.
 Q8_0 blocks (taken apart: the values and the scales each on their own, `mv_q8p`), so on a 24 GB card every expert
 stays in VRAM and a token needs nothing from the host between its embedding and its logits: an expert's blocks are
 found on the device (a table of pointers, `route_token`), the position is read on the device, no cuBLAS, no
-synchronisation - and a token's launches replay as one CUDA graph (`IK2_FAST`, `IK2_GRAPH`). The experts are copied
+synchronisation - and a token's launches replay as one CUDA graph (`SAGUARO_IK2_FAST`, `SAGUARO_IK2_GRAPH`). The experts are copied
 to VRAM straight from the mapped files (a reload takes 3 s). What a token costs then is its weights' bytes (3.7 GB:
 half the experts', half the dense) and its launches - each 2 us and more whatever it does - so:
 
@@ -245,7 +245,7 @@ half the experts', half the dense) and its launches - each 2 us and more whateve
 - sampling takes its candidates from the device (`cand_topk`): a thousand logits and a few more instead of the
   vocabulary's 200,058 every token.
 - the NVFP4 experts of a token run on the tensor cores straight from their blocks (`experts_gate_up_swiglu_mma`,
-  `experts_down_mma`, `IK2_EXPERT_MMA`): a code times its sub-block's scale is exact in FP16, the sums are FP32, and
+  `experts_down_mma`, `SAGUARO_IK2_EXPERT_MMA`): a code times its sub-block's scale is exact in FP16, the sums are FP32, and
   the gate / up input goes in as two FP16 limbs in two of the eight columns, which is the FP32 input's product. A
   warp alone on 16 rows was slower than the scalar kernel (100 against 118 tok/s): it waits for a block's bytes
   before it asks for the next ones. Eight warps on the same 16 rows, each a stride of the row, read 745 GB/s;
@@ -254,19 +254,19 @@ half the experts', half the dense) and its launches - each 2 us and more whateve
 
 With these three, same card and file, FP8 cache: 124.8 tok/s 47 tokens deep (was 111.9), 120.7 at 4,096 (108.6),
 103.2 after a 63,981-token document (94.1), 89.1 after 127,910 (81.4). The scalar expert path
-(`IK2_EXPERT_MMA=0`) gives the logits of before bit for bit; over 399 forced tokens the tensor-core experts are a
+(`SAGUARO_IK2_EXPERT_MMA=0`) gives the logits of before bit for bit; over 399 forced tokens the tensor-core experts are a
 median KL of 5.7e-5 from it with 394 of the top tokens the same (the tensor-core attention against its scalar
 kernel on that text: 1.7e-4 and 393), and on 96 GSM8K questions they solve 74 where the scalar ones solve 73.
 
 A prompt goes the cache path's way with every expert a hit; the attention's flash kernel reads an FP8 cache too
 (the tile's bytes by `cp.async`, FP16 of them in shared memory), and a looped layer's gates are cuBLAS products
-over a chunk. A short prompt - a chat turn, up to 96 tokens (`IK2_RG_SLOTS`) - has its experts read by groups, an
+over a chunk. A short prompt - a chat turn, up to 96 tokens (`SAGUARO_IK2_RG_SLOTS`) - has its experts read by groups, an
 expert's blocks once for up to 8 of its tokens, instead of decoded to FP16 for a GEMM: 12 new tokens take 56 ms
 (were 118).
 
 **Measured**, one RTX 3090 (24 GB, 300 W), UD-Q4_K_XL, tok/s:
 
-| | llama.cpp b12590 | `maya-ik2`, FP16 cache | FP8 cache |
+| | llama.cpp b12590 | `saguaro-ik2`, FP16 cache | FP8 cache |
 | --- | --- | --- | --- |
 | A token, 47 tokens deep | 57 | 112 | 110 |
 | 4,096 deep | | 106 | 107 |
@@ -306,7 +306,7 @@ document's edit. A controller decides each step (`SpecCtl`): a window of B's exp
 with a the recent acceptance, over its measured time, against a plain token's; after 8 plain tokens it drafts once
 to look again. One RTX 3090, greedy, against plain decode: prose 131 / 127 tok/s, new code 162 / 126, an edit 213 /
 124; through the server new code 207 tok/s, at temperature 0.7 209. The drafter's context: its windowed layers a
-ring of 2048 rows, the layer without a window the whole context in FP16 (`IK2_DRAFT_CTX` caps it: a 64K document
+ring of 2048 rows, the layer without a window the whole context in FP16 (`SAGUARO_IK2_DRAFT_CTX` caps it: a 64K document
 continues at 3.07 tokens a step with the whole context, 2.24 with the last 16K).
 
 To run it (one GPU):
@@ -314,8 +314,8 @@ To run it (one GPU):
     python tools/strata_tokenizer.py --gguf Inkling-2-Mini-UD-Q4_K_XL.gguf --out ik2 \
         --chat-template tools/ik2/chat_template.jinja --check
     cat > ik2-mini.json <<EOF
-    {"exe": "build/maya-ik2", "args": ["--model", "Inkling-2-Mini-UD-Q4_K_XL.gguf", "--max-context", "262144"],
-     "env": {"IK2_KV": "fp8"}, "tokenizer": "ik2/tokenizer", "model_name": "inkling-2-mini",
+    {"exe": "build/saguaro-ik2", "args": ["--model", "Inkling-2-Mini-UD-Q4_K_XL.gguf", "--max-context", "262144"],
+     "env": {"SAGUARO_IK2_KV": "fp8"}, "tokenizer": "ik2/tokenizer", "model_name": "inkling-2-mini",
      "vision": {"exe": "build-vision/bin/maya-vision", "mmproj": "mmproj-BF16.gguf", "gpu": true}}
     EOF
     python serve/server.py --engine maya --config ik2-mini.json
@@ -324,12 +324,12 @@ Thinking off (`reasoning_effort` `none`, `enable_thinking` false) has the prompt
 the model has no switch for its thinking, only the effort level, and at the lowest it still thinks a little.
 
 **The preview.** Inkling-2-Mini comes in as an experimental preview: Linux, one NVIDIA GPU of 24 GB, sm_80
-(Ampere) or newer; tested on RTX 3090s (sm_86). Elsewhere `maya-ik2` stops at the start with one line saying why
+(Ampere) or newer; tested on RTX 3090s (sm_86). Elsewhere `saguaro-ik2` stops at the start with one line saying why
 (under `--serve` also as a `NOTE` the server prints): no NVIDIA GPU, a GPU older than sm_80 (a V100 cannot run it:
 the kernels use Ampere's `mma.sync` m16n8k16 and `cp.async`), a build with no kernels for the GPU's arch, less than
-22 GiB of VRAM, `--gpus 2` or more, Windows. `IK2_UNSUPPORTED=1` runs it anyway where it can run at all: two GPUs
-(`IK2_EP=1` or `IK2_TP=1`, section 6), smaller cards with the experts streamed from RAM, @cobra91's Windows / CUDA 13
-port - untested here. CMake skips `maya-ik2` without a CUDA arch of 80 or more in the list, in a HIP build, and on
+22 GiB of VRAM, `--gpus 2` or more, Windows. `SAGUARO_IK2_UNSUPPORTED=1` runs it anyway where it can run at all: two GPUs
+(`SAGUARO_IK2_EP=1` or `SAGUARO_IK2_TP=1`, section 6), smaller cards with the experts streamed from RAM, @cobra91's Windows / CUDA 13
+port - untested here. CMake skips `saguaro-ik2` without a CUDA arch of 80 or more in the list, in a HIP build, and on
 Windows unless `-DSTRATA_IK2_WINDOWS=ON`.
 
 **Defaults.** Thinking Machines' `generation_config.json`: temperature 1.0 (no top_p, no top_k: 1.0 and off).
@@ -344,7 +344,7 @@ Thinking is the template's `reasoning_effort`, a name or a number in [0.0, 0.99]
 | `mmproj-BF16.gguf` (0.6 GB, pictures) | same | `2c165c78790e78a3f45a2d1e9e931083e52ee69d45ff2a0dc9c281fdf1a666e7` |
 | `mtp.safetensors` (0.6 GB, the drafter: optional) | [thinkingmachines/Inkling-2-Mini](https://huggingface.co/thinkingmachines/Inkling-2-Mini) | `7c3b651317f01f73bcf4e1dceba66ef8b7e1a1eac6bc171e882e690a4b10a1d2` |
 
-Outside the preview, two GPUs with a loop run as expert parallel (`IK2_EP=1`, its caches filled at the start:
-checked on Windows, an RTX 5080 with an RTX 4060 Ti); the drafter is one GPU's.  Not done: the loop in the layer-major prompt passes (`IK2_SUP`: off
+Outside the preview, two GPUs with a loop run as expert parallel (`SAGUARO_IK2_EP=1`, its caches filled at the start:
+checked on Windows, an RTX 5080 with an RTX 4060 Ti); the drafter is one GPU's.  Not done: the loop in the layer-major prompt passes (`SAGUARO_IK2_SUP`: off
 for a looped model), a second card for the KV cache (a million tokens is 16 GiB of it), the drafter's own launches
 as a graph (2-3 ms a step now).

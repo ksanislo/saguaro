@@ -1,4 +1,4 @@
-// src/ik2/ik2_kernels.cu - maya-ik2's kernels (the interface and the conventions: ik2_kernels.cuh).
+// src/ik2/ik2_kernels.cu - saguaro-ik2's kernels (the interface and the conventions: ik2_kernels.cuh).
 #include "ik2_kernels.cuh"
 #include "ik2_iq_tables.h"
 
@@ -5030,10 +5030,10 @@ void attn_probs_bias_f16(const float* lg, uint16_t* out16, int H, int Tq, int nk
                                                                                    qk_scale, bias, extent, window, sink);
     check("attn_probs_bias_f16");
 }
-// the Hopper kernel (wgmma) on a 9.x GPU of a build with sm_90a; IK2_WGMMA=0: the mma.sync one everywhere
+// the Hopper kernel (wgmma) on a 9.x GPU of a build with sm_90a; SAGUARO_IK2_WGMMA=0: the mma.sync one everywhere
 bool fa_wgmma() {
     static const int on = [] {
-        if (getenv("IK2_WGMMA") && !std::atoi(getenv("IK2_WGMMA"))) return 0;
+        if (getenv("SAGUARO_IK2_WGMMA") && !std::atoi(getenv("SAGUARO_IK2_WGMMA"))) return 0;
         int dev = 0, major = 0;
         cudaGetDevice(&dev);
         cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev);
@@ -5404,8 +5404,8 @@ bool experts_mma_fits(int ty_gate, int ty_up, int ty_down, int C, int F) {
     return ty_gate == kNVFP4 && ty_up == kNVFP4 && ty_down == kNVFP4 && C % 64 == 0 && F % 64 == 0;
 }
 static int experts_mma_split(bool gate) {
-    static const int wg = getenv("IK2_EXPERT_MMA_SPLIT") ? atoi(getenv("IK2_EXPERT_MMA_SPLIT")) : 8;
-    static const int wd = getenv("IK2_EXPERT_MMA_SPLIT_DOWN") ? atoi(getenv("IK2_EXPERT_MMA_SPLIT_DOWN")) : 4;
+    static const int wg = getenv("SAGUARO_IK2_EXPERT_MMA_SPLIT") ? atoi(getenv("SAGUARO_IK2_EXPERT_MMA_SPLIT")) : 8;
+    static const int wd = getenv("SAGUARO_IK2_EXPERT_MMA_SPLIT_DOWN") ? atoi(getenv("SAGUARO_IK2_EXPERT_MMA_SPLIT_DOWN")) : 4;
     return gate ? wg : wd;
 }
 template <bool Gate>

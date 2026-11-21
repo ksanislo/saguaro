@@ -1,4 +1,4 @@
-// tests/ik2_kernels_test.cu - maya-ik2's kernels (src/ik2/ik2_kernels.cu) on random data, no model, each against a
+// tests/ik2_kernels_test.cu - saguaro-ik2's kernels (src/ik2/ik2_kernels.cu) on random data, no model, each against a
 // double reference written from ref/inkling2.py's ops:
 //   * rms, the scaled L2 clip (with and without the full layers' log scaling), the short conv (static and dynamic taps,
 //     the history carried over calls of 1, 2, 3 and many tokens = one call over all of them), the attention residual
@@ -2549,6 +2549,8 @@ int main() {
     cudaDeviceProp p{};
     CU(cudaGetDeviceProperties(&p, 0));
     std::printf("ik2_kernels_test on %s (sm_%d%d)\n", p.name, p.major, p.minor);
+    if (p.major < 8)   // (what the attention and expert kernels' tensor-core tests below then check)
+        std::printf("before sm_80: mma m16n8k16 as two m16n8k8 steps, no cp.async (tiles loaded in place)\n");
     test_rms();
     test_l2clip();
     test_conv();
