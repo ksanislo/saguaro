@@ -1383,8 +1383,8 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
         // the SSD) and, a token, the CPU lane's experts from the SSD (the storage's reads over an expert's bytes, at
         // most the CPU lane's) and from RAM (the rest of them)
         const strata::ds4::Model::Tiers tr = m.tiers();
-        std::snprintf(b, sizeof b, " vram_used=%d ram_used=%d cpu_n=%d vram_gb=%.2f ram_gb=%.2f disk_gb=%.2f",
-                      tr.vram, tr.ram, tr.cpu, tr.vram_gb, tr.ram_gb, tr.disk_gb);
+        std::snprintf(b, sizeof b, " vram_used=%d vram_slots=%d ram_used=%d ram_slots=%d cpu_n=%d vram_gb=%.2f ram_gb=%.2f disk_gb=%.2f",
+                      tr.vram, tr.vram_slots, tr.ram, tr.ram_slots, tr.cpu, tr.vram_gb, tr.ram_gb, tr.disk_gb);
         out += b;
         std::snprintf(b, sizeof b, " eg_cache_rows=%lld eg_cache_cap=%lld eg_cache_row_bytes=%lld eg_lookup_rows=%lld",
                       (long long) s.eg_cached, (long long) s.eg_cache_cap, (long long) s.eg_cache_row_bytes,
@@ -1445,6 +1445,9 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
     // written)
     struct Prompt {
         double t0 = 0;
+        double read_ms = 0;      // (the read's own running time: the prompt runs only - no restore, no picture encode,
+                                 //  no --parallel waits: the ms of its PP / DONE lines, parity 2)
+        double feed_t0 = 0;      // (the prompt run in flight: when it began)
         strata::core::VramMark v0;   // (the free VRAM when the read began: the prompt-read line at its end)
         strata::ds4::Stats s0;   // (the request's own CPU lane share)
         size_t from = 0;         // the tokens the state already held
@@ -1687,7 +1690,6 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
                                   size_t piece) -> bool {
         const size_t total = r.ids.size();
         const size_t from = P.from;
-        const double t0 = P.t0;
         const size_t start = P.done;
         int64_t beat_at = -1;   // (the run's progress at the last beat)
         // (a run of chunks: each one through every layer)
@@ -1698,7 +1700,8 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
                 beat_at = d + (int64_t) P.done;
                 beat();
             }
-            const double ms = now_ms() - t0;
+            const double ms = P.read_ms + (P.feed_t0 > 0 ? now_ms() - P.feed_t0 : 0.0);   // (the read's own time:
+            //  what its runs have spent, this one so far - the waits between pieces and before the read are out)
             std::printf("PP%s %zu %zu %.1f %.1f %zu\n", tag.c_str(), P.done + (size_t) d, total, ms,
                         ms > 0 ? 1000.0 * (double) (P.done + (size_t) d - from) / ms : 0.0, from);
             std::fflush(stdout);
@@ -1739,7 +1742,8 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
             // (the prompt's end: the last token in the same run, the checkpoint before it kept on the way)
             const bool fin = P.done + n == total;
             size_t took = n;   // (fewer: a yield - the model ended the run early, the rest a later piece's)
-            const double f0 = P.tail_at >= 0 ? now_ms() : 0.0;   // (TailCost: the run's wall time)
+            P.feed_t0 = now_ms();                          // (the run begins: its time is the read's own)
+            const double f0 = P.tail_at >= 0 ? P.feed_t0 : 0.0;   // (TailCost: the run's wall time)
             if (!inner.empty()) {
                 ok = m.feed_marks(r.ids.data() + P.done, (int) n, 1, 1, inner, err);
                 if (ok) took = (size_t) m.fed();
@@ -1757,6 +1761,8 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
                          : m.feed(r.ids.data() + P.done, (int) n, 0, err, (int) (upto - P.done - n));
                 if (ok) took = (size_t) m.fed();
             }
+            P.read_ms += now_ms() - P.feed_t0;   // (parity 2: the read ran this long; its waits and the other
+            P.feed_t0 = 0.0;                     //  conversations' pieces between do not count)
             if (ok && P.tail_at >= 0) {
                 const bool after = P.done >= (size_t) P.tail_at;
                 (after ? P.ms_tail : P.ms_main) += now_ms() - f0;
@@ -1784,7 +1790,7 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
                 ++P.next_cut;
             }
             if (ok && (P.done >= P.next_pp || P.done == total)) {
-                const double ms = now_ms() - t0;
+                const double ms = P.read_ms;   // (the read's own running time, parity 2)
                 std::printf("PP%s %zu %zu %.1f %.1f %zu\n", tag.c_str(), P.done, total, ms,
                             ms > 0 ? 1000.0 * (double) (P.done - from) / ms : 0.0, from);
                 std::fflush(stdout);
@@ -1802,9 +1808,10 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
                 held.clear();
             }
             std::fprintf(stderr, "saguaro ds4 serve: stopped while reading the prompt of %zu tokens, after %.0f ms%s\n",
-                         total, now_ms() - t0, back ? "; the conversation before it is kept" : "");
+                         total, now_ms() - P.t0, back ? "; the conversation before it is kept" : "");
             end_note();
-            std::printf("DONE%s 0 %zu %.1f 0.0 cancel 0 0 %zu 0 0\n", tag.c_str(), total, now_ms() - t0, back ? from : (size_t) 0);
+            // (the read that partly happened: its own read ms and the reused base it read from, not 0)
+            std::printf("DONE%s 0 %zu %.1f 0.0 cancel 0 0 %zu 0 0\n", tag.c_str(), total, P.read_ms, back ? from : (size_t) 0);
             std::fflush(stdout);
             return false;
         }
@@ -1813,7 +1820,8 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
             std::fprintf(stderr, "saguaro ds4: %s\n", err.c_str());
             std::printf("ERR%s %s\n", tag.c_str(), err.c_str());
             end_note();
-            std::printf("DONE%s 0 %zu 0.0 0.0 cancel 0 0 0 0 0\n", tag.c_str(), total);
+            // (a read that failed part-way: the ms and base it really had, as the STOP's DONE)
+            std::printf("DONE%s 0 %zu %.1f 0.0 cancel 0 0 %zu 0 0\n", tag.c_str(), total, P.read_ms, from);
             std::fflush(stdout);
             m.reset();
             held.clear();
@@ -1982,7 +1990,7 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
         const double t2 = now_ms();
         const strata::ds4::Stats& se = m.stats();   // (hits / lookups: the decode's routed experts in VRAM / all)
         end_note();
-        std::printf("DONE %lld %zu %.1f %.1f %s %lld %lld %zu %lld %lld\n", produced, r.ids.size(), t1 - t0, t2 - t1,
+        std::printf("DONE %lld %zu %.1f %.1f %s %lld %lld %zu %lld %lld\n", produced, r.ids.size(), P.read_ms, t2 - t1,
                     finish, d_acc, d_off, from, (long long) ((se.experts - sd.experts) - (se.cpu_experts - sd.cpu_experts)),
                     (long long) (se.experts - sd.experts));
         std::fflush(stdout);
@@ -2311,7 +2319,7 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
             const strata::ds4::Stats& se = m.stats();   // (the engine's over the request's decode, the others' too)
             end_note();
             std::printf("DONE %lld %lld %zu %.1f %.1f %s %lld %lld %zu %lld %lld\n", a.r.rid, a.produced, a.r.ids.size(),
-                        a.t1 - a.P.t0, t2 - a.t1, a.finish, a.d_acc, a.d_off, a.P.from,
+                        a.P.read_ms, t2 - a.t1, a.finish, a.d_acc, a.d_off, a.P.from,
                         (long long) ((se.experts - a.sd.experts) - (se.cpu_experts - a.sd.cpu_experts)),
                         (long long) (se.experts - a.sd.experts));
             std::fflush(stdout);

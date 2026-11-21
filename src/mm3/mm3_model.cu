@@ -4474,8 +4474,9 @@ const Stats& Model::stats() const { return tpe ? tpe->stats() : p->st; }
 std::vector<std::string> Model::info_lines() const { return tpe ? tpe->info_lines() : p->info; }
 std::vector<std::string> Model::vram_lines() const { return tpe ? tpe->vram_lines() : p->vram; }
 std::vector<std::string> Model::vram_lines_live() const { return tpe ? vram_lines() : p->vram_lines_live(); }
-// (--tp has no elastic context: its split never moves, so its fingerprint never changes and only the heartbeat prints)
-std::vector<std::string> Model::vram_live_fp() const { return tpe ? std::vector<std::string>{} : p->vram_live_fp(); }
+// (--tp: no elastic context, so the split never moves and a member's fingerprint never changes - but the beat still
+// has one fingerprint per member, so the 60 s heartbeat re-reports the TP cards (parity 7, PLAN-vram-live))
+std::vector<std::string> Model::vram_live_fp() const { return tpe ? tpe->vram_live_fp() : p->vram_live_fp(); }
 
 int Model::draft_block() const {
     if (tpe) return tpe->draft_block();

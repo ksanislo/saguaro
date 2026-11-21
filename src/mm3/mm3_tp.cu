@@ -310,6 +310,24 @@ struct TpEngine::Impl {
     int acat = kAAct;
     std::map<int, std::array<size_t, kAN>> acct;
     std::map<int, size_t> acct_ic, acct_kvh;   // (the index-key caches, every member's whole; the host KV bytes)
+    // (PLAN-vram-live, parity 7) one cheap fingerprint per TP member device, in vram_lines order, so VramLive::tick
+    // has cards to re-print: this engine's own accounting for that device - no device call.  The split does not move
+    // (--tp has no elastic context); it is the 60 s heartbeat that re-reports the members' lines.
+    std::vector<std::string> vram_live_fp() const {
+        std::vector<std::string> out;
+        for (const Group& gr : G)
+            for (int mi : gr.mem) {
+                const Member& m = M[(size_t) mi];
+                std::array<size_t, kAN> a{};
+                if (auto it = acct.find(m.id); it != acct.end()) a = it->second;
+                char b[96];
+                std::snprintf(b, sizeof b, "%d:%zu:%zu:%zu", m.id, a[kAKV],
+                              acct_ic.count(m.id) ? acct_ic.at(m.id) : (size_t) 0,
+                              acct_kvh.count(m.id) ? acct_kvh.at(m.id) : (size_t) 0);
+                out.push_back(b);
+            }
+        return out;
+    }
     uint8_t* pool = nullptr;
     size_t plan_bytes = 0;
     std::vector<float> inv_freq;
@@ -2833,6 +2851,7 @@ int TpEngine::eos() const { return p->g.eos; }
 const Stats& TpEngine::stats() const { return p->st; }
 std::vector<std::string> TpEngine::info_lines() const { return p->info; }
 std::vector<std::string> TpEngine::vram_lines() const { return p->vram; }
+std::vector<std::string> TpEngine::vram_live_fp() const { return p->vram_live_fp(); }
 bool TpEngine::save_profile(const std::string& path, std::string& err) const {
     std::FILE* f = std::fopen(path.c_str(), "wb");
     if (!f || std::fwrite(p->prof.data(), 4, p->prof.size(), f) != p->prof.size()) {
