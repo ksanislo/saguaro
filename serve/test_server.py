@@ -47,13 +47,13 @@ class StampedLog(unittest.TestCase):
         print("[saguaro] request 1 done", file=out)
         print("[saguaro] in", "pieces", end="", file=out)
         print(" - one line", file=out)
-        print("maya ds4 serve: request 926: prompt 100 tokens", file=out)
+        print("saguaro ds4 serve: request 926: prompt 100 tokens", file=out)
         print("  [saguaro] indented is not stamped", file=out)
         lines = buf.getvalue().splitlines()
         stamp = r"\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d{3} "
         self.assertRegex(lines[0], "^" + stamp + r"\[saguaro\] request 1 done$")
         self.assertRegex(lines[1], "^" + stamp + r"\[saguaro\] in pieces - one line$")
-        self.assertEqual(lines[2:], ["maya ds4 serve: request 926: prompt 100 tokens", "  [saguaro] indented is not stamped"])
+        self.assertEqual(lines[2:], ["saguaro ds4 serve: request 926: prompt 100 tokens", "  [saguaro] indented is not stamped"])
         self.assertEqual(len(re.findall(stamp, buf.getvalue())), 2)
 
 
@@ -2547,7 +2547,7 @@ class FailedRestartKeepsContext(unittest.TestCase):
 
 @unittest.skipUnless(os.name == "posix", "the fake engine is a script with a #! line")
 class StaleDoneAfterErr(unittest.TestCase):
-    """maya-ds4 and maya-mm3 end a failed request with ERR and then DONE (a picture that cannot be read, a forward that
+    """saguaro-ds4 and saguaro-mm3 end a failed request with ERR and then DONE (a picture that cannot be read, a forward that
     failed).  The single-stream reader raised at the ERR and left the DONE queued: the next request read it as its own
     end and answered nothing.  Now the DONE after an ERR is taken."""
 
@@ -2881,8 +2881,8 @@ class EngineEndTests(unittest.TestCase):
             return e.death_note()
 
     def test_a_gpu_fault_the_engine_caught_is_not_read_as_ram(self):
-        n = self.note("ds4: CUDA0: an illegal memory access was encountered - the device's state is unknown\n"
-                      "maya ds4 serve: a GPU's state is unknown after this request - the engine ends (exit 3) so the "
+        n = self.note("saguaro ds4: CUDA0: an illegal memory access was encountered - the device's state is unknown\n"
+                      "saguaro ds4 serve: a GPU's state is unknown after this request - the engine ends (exit 3) so the "
                       "server starts it again for the next request\n")
         self.assertIn("a GPU took a fault inside a kernel", n)
         self.assertIn("the engine ends (exit 3)", n)
@@ -2909,9 +2909,9 @@ class EngineEndTests(unittest.TestCase):
         self.assertFalse(e.alive())                      # (the process may still be exiting: the next request restarts)
 
     def test_the_watchdog_and_ram_notes_are_unchanged(self):
-        self.assertIn("a hang it caught", self.note("maya ds4 serve: no progress for 600 s during a request - stopping "
+        self.assertIn("a hang it caught", self.note("saguaro ds4 serve: no progress for 600 s during a request - stopping "
                                                     "the engine so the server starts it again (issue #29, #539)\n"))
-        self.assertIn("running out of RAM", self.note("ds4: something else\n", returncode=-9))
+        self.assertIn("running out of RAM", self.note("saguaro ds4: something else\n", returncode=-9))
 
 
 if __name__ == "__main__":

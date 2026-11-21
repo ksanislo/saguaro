@@ -10,7 +10,7 @@ non-stream), POST /tokenize and /detokenize, GET /v1/models, GET /models, GET /p
 Tools from MCP servers (serve/mcp.py, `"mcp_servers"` in the config or --mcp-config) are offered only to requests that
 ask for them with `"strata_mcp": true` - the web app does; other clients see exactly the API they always saw.
 Images (optional, when the config has a "vision" entry): OpenAI image_url parts and Anthropic image blocks (base64
-data, http(s) URLs or local file paths) go through `maya-vision` (the model's mmproj file) and reach the engine as
+data, http(s) URLs or local file paths) go through `vision-glm` (the model's mmproj file) and reach the engine as
 embeddings (`GENI`).  JPEG/PNG/BMP/GIF go straight in; WebP, TIFF, AVIF, ... (agents like omp send WebP) are
 converted to PNG first with Pillow.  DeepSeek-V4.1 (maya-ds4, `INFO vision=ds4`) runs its vision tower in the engine:
 the server only resizes the pictures (serve/ds4_vision.py) and sends their pixels with `GENI`; so does
@@ -19,14 +19,14 @@ Requests whose prompt plus max tokens exceed the engine's context are REJECTED w
 An unset (or 0, or -1) max tokens means "unlimited": whatever the prompt leaves of the context.
 
 The engine boundary is `Engine.generate(prompt_ids, max_new, sampling, cancel) -> iterator of token ids`.
-`StrataEngine` keeps one `strata --serve` process resident (weights, expert arena and VRAM tier load once) and
+`StrataEngine` keeps one `saguaro-glm --serve` process resident (weights, expert arena and VRAM tier load once) and
 talks to it over stdin/stdout; `MockEngine` is a scripted stand-in that makes every API path testable without a GPU.
 """
 from __future__ import annotations
 
 def engine_kind(cfg: dict) -> str | None:
     """The driver a config needs: "batch" for a Qwen3.8-Flash-Next config - its engine is the QFN batch binary
-    (engines/qfn: saguaro-qfn / maya-qfn, driven by serve/qfn_engine.py's batch protocol) - and "line" for every
+    (engines/qfn: saguaro-qfn, driven by serve/qfn_engine.py's batch protocol) - and "line" for every
     other engine config (today's maya engine, the one-token-at-a-time line protocol); None with no config.  The
     signal is the engine binary: only the batch driver's name ends in qfn; the configs' exe is what runs the model."""
     exe = str(cfg.get("exe") or "").replace("\\", "/").rsplit("/", 1)[-1].lower()
@@ -35,38 +35,10 @@ def engine_kind(cfg: dict) -> str | None:
     return "batch" if exe.endswith("qfn") else ("line" if exe else None)
 
 
-# ---- a Qwen3.8-Flash-Next config (engine_kind: batch) runs its driver in THIS server (serve/qfn_engine.py: its batch-protocol
-# driver).  SAGUARO_QFN_SHIM=1 keeps the old way - the process becomes engines/qfn/serve/server.py (its server and
-# web UI) with the same arguments (os.execv: the PID llama-swap watches stays).
-def _qfn_dispatch():
-    import os as _os, sys as _sys
-    if _os.environ.get("SAGUARO_QFN_SHIM") != "1":
-        return
-    a = _sys.argv[1:]
-    cfg_path = None
-    for i, x in enumerate(a):
-        if x == "--config" and i + 1 < len(a):
-            cfg_path = a[i + 1]
-        elif x.startswith("--config="):
-            cfg_path = x.split("=", 1)[1]
-    if not cfg_path:
-        return
-    try:
-        import json as _json
-        kind = engine_kind(_json.loads(open(cfg_path, encoding="utf-8-sig").read()))
-    except (OSError, ValueError):
-        return
-    if kind != "batch":
-        return
-    rest = ["--engine", "strata"] + a          # (engines/qfn/serve/server.py's own --engine; the old name of its batch)
-    root = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), "engines", "qfn")
-    _os.chdir(root)
-    _os.execv(_sys.executable, [_sys.executable, "-m", "serve.server", *rest])
-
-
-_qfn_dispatch()
-
-
+# ---- a Qwen3.8-Flash-Next config (engine_kind: batch) runs its driver in THIS server (serve/qfn_engine.py: QFN's own
+# batch-protocol driver, extracted from engines/qfn by tools/saguaro/extract_qfn_engine.py).  (The old SAGUARO_QFN_SHIM
+# path, an os.execv into engines/qfn/serve/server.py, is gone: that server no longer imports here, and every start of
+# a batch config has run the extracted driver since it was written.)
 import argparse
 import collections
 import contextlib
@@ -199,7 +171,7 @@ REPORT_LINES = re.compile(r"glm fast:|glm prefill: (?:CUDA|HIP)|glm split|glm st
 IM_END = "<|im_end|>"
 IMAGE_PAD = "<|image_pad|>"
 VISION_START = "<|vision_start|>"
-CTX_SLACK = 8               # `strata --serve` rejects prompt + max_new + 8 > context: keep the same margin here
+CTX_SLACK = 8               # `saguaro-glm --serve` rejects prompt + max_new + 8 > context: keep the same margin here
 TEXT_FILE_MIN, TEXT_FILE_MAX = 512 * 1024, 16 * 1024 * 1024
 
 
@@ -988,7 +960,7 @@ def narrate_start(log_path: str, offset: int, args: list, done: threading.Event,
 
 
 class StrataEngine:
-    """The resident engine: `strata --serve` reads `GEN <max_new> <ids>` lines and streams `T <id>` lines, then
+    """The resident engine: `saguaro-glm --serve` reads `GEN <max_new> <ids>` lines and streams `T <id>` lines, then
     `DONE ...`.  Requests are serialized by the service's FIFO, so one pipe is enough.
 
     Per-request sampling rides the same line as engine-side keys between max_new and the ids
@@ -1856,7 +1828,7 @@ class StrataEngine:
 
 
 class Vision:
-    """The resident image encoder: `maya-vision` (llama.cpp mtmd + the mmproj file) reads `ENC <image> <out>`
+    """The resident image encoder: `vision-glm` (llama.cpp mtmd + the mmproj file) reads `ENC <image> <out>`
     and `VID <video> <out>` lines and writes each picture's embeddings (a video: one record per frame); results
     are cached by the source's hash, so a conversation that sends the same picture again (every turn, with most
     clients) encodes it once.
@@ -1878,7 +1850,7 @@ class Vision:
         if cfg.get("no_flash_attn"):   # GLM-5.3's encoder on a GPU: full-precision attention (cosine 0.9997 vs 0.999)
             args.append("--no-flash-attn")
         self.args, self.log, self.env = args, log, env
-        self.dir = Path(tempfile.mkdtemp(prefix="maya-vision-"))
+        self.dir = Path(tempfile.mkdtemp(prefix="saguaro-vision-"))
         self.proc = None
         self.lend = self.reclaim = None   # on demand: callables (the engine's VLEND / VRECLAIM), wired by main()
         self.owed = False                 # the engine's memory is not back yet (a reclaim that kept failing)
@@ -1959,7 +1931,7 @@ class Vision:
 
     @staticmethod
     def normalize(data: bytes) -> bytes:
-        """The formats maya-vision's decoder (stb_image) reads pass through; anything else is converted to PNG."""
+        """The formats vision-glm's decoder (stb_image) reads pass through; anything else is converted to PNG."""
         if data[:3] == b"\xff\xd8\xff" or data[:8] == b"\x89PNG\r\n\x1a\n" or data[:2] == b"BM" or \
                 data[:6] in (b"GIF87a", b"GIF89a"):
             return data
@@ -2094,7 +2066,7 @@ class Vision:
 
 def vision_footprint(vcfg: dict, env: dict, cache_file: Path, gpu: int) -> tuple[int, int] | None:
     """(image token cap, bytes) for the on-demand vision encoder on THIS machine's first GPU: measured once by
-    `maya-vision --measure` (before the model loads, so the GPU is otherwise idle) and cached per encoder file, cap
+    `vision-glm --measure` (before the model loads, so the GPU is otherwise idle) and cached per encoder file, cap
     and GPU.  A cap the config does not set is the largest of 4096 / 2048 / 1024 image tokens whose footprint stays
     within 15% of the card (a 32 GB card keeps 4096, an 8-12 GB card gets 1024).  None: no GPU to measure on, or
     no measurement (the encoder failed or printed no well-formed MEM line)."""
@@ -2423,7 +2395,7 @@ class Service:
         self.reads: collections.deque = collections.deque()   # the intervals, oldest first (_read_prune drops closed)
         self.read_wall_s, self.read_wall_since = 0.0, None   # wall seconds with >=1 prompt reading / >=1 answer writing
         self.decode_wall_s, self.decode_wall_since = 0.0, None
-        # the loop guard (serve/loop_guard.py; MAYA_LOOP_GUARD=0 / "loop_guard": false: off) and what it did since
+        # the loop guard (serve/loop_guard.py; SAGUARO_LOOP_GUARD=0 / "loop_guard": false: off) and what it did since
         # the server started: loops seen, and how each was broken (the Monitor's totals, /metrics, Prometheus)
         self.loop_guard = True
         self.loop_guard_counts = {"detected": 0, "penalised": 0, "thinking_closed": 0, "stopped": 0, "tool_repeats": 0,
@@ -3934,7 +3906,7 @@ class Service:
         live["prompt_reused"] = progress[2] if s.get("busy") and progress and len(progress) > 2 else None
         engine = {"model": self.model, "model_label": self.model_label, "max_context": self.engine.max_context,
                   "images": self.vision is not None,
-                  **dict(getattr(self.engine, "info", {}) or {}), "maya_version": SAGUARO_VERSION,
+                  **dict(getattr(self.engine, "info", {}) or {}), "saguaro_version": SAGUARO_VERSION,
                   "trained_context": self.trained_context,
                   **({"dspark": self.dspark} if self.dspark is not None else {})}
         # the drafters on (empty: drafting is off): the Monitor's Speculation says "off", or the draft acceptance
@@ -7598,7 +7570,7 @@ def supervisor_name() -> str | None:
 def start_qfn(cfg: dict, tok):
     """Qwen3.8-Flash-Next's engine (engines/qfn) under this server: QFN's own driver (serve/qfn_engine.py - its arguments,
     environment and batch protocol: the server-side slot admission, BGEN / BDONE, wrap spill, session files) behind this
-    server's engine interface, and its picture encoder (vision-qfn: the same ENC protocol as maya-vision) resident, or
+    server's engine interface, and its picture encoder (vision-qfn: the same ENC protocol as vision-glm) resident, or
     elastic - not started until a picture arrives (the vision section's "elastic": true)."""
     from serve import qfn_engine as QE
     if not cfg:

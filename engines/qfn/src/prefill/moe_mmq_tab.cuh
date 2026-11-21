@@ -197,7 +197,7 @@ inline void tab_ktail_log(const char* type, int64_t k, int blocks, int padded) {
     static bool logged = false;   // once per library (the first product it applies to), not per type and J
     if (logged) return;
     logged = true;
-    std::fprintf(stderr, "strata: prompt MMQ (pointer table) skips the zero K tail (SAGUARO_MMQ_KTAIL=1): %s K = %lld "
+    std::fprintf(stderr, "saguaro: prompt MMQ (pointer table) skips the zero K tail (SAGUARO_MMQ_KTAIL=1): %s K = %lld "
                  "multiplies %d of %d blocks per row\n", type, (long long) k, blocks, padded);
 }
 

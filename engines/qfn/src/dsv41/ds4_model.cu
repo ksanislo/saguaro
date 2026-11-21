@@ -1680,7 +1680,7 @@ struct Model::Impl {
             if (!gg::type_on_device(l.lay.K[r])) {
                 l.cpu_only = true;
                 std::fprintf(stderr,
-                             "ds4: layer %d %s is %s: no GPU kernel for it, its experts stay on the CPU lane "
+                             "saguaro ds4: layer %d %s is %s: no GPU kernel for it, its experts stay on the CPU lane "
                              "(ggml-cpu's rows; VRAM tier: none)\n", l.il, r == 2 ? "down" : "gate/up",
                              gg::type_name(l.lay.K[r]));
                 break;
@@ -1907,7 +1907,7 @@ struct Model::Impl {
                               g.o_groups % tp != 0))
                 --tp;
             if (tp != o.tp)
-                std::fprintf(stderr, "ds4: tensor parallel %d -> %d: the experts' %d-value blocks split n_ff %d no other way "
+                std::fprintf(stderr, "saguaro ds4: tensor parallel %d -> %d: the experts' %d-value blocks split n_ff %d no other way "
                                      "(each GPU its own layers)\n", o.tp, tp, blk, g.ff);
         }
         // the groups: runs of tp devices of one kind (their memory), a device unlike the next alone
@@ -1977,7 +1977,7 @@ struct Model::Impl {
             tap_cap = std::max(kWin, 128);
         } else   // (only as asked for: --prefill-chunk 0, or --tp 1 with --threads off)
             std::fprintf(stderr,
-                         "ds4: prompts run in windows of %d tokens (%s): long prompts prefill far slower than in\n"
+                         "saguaro ds4: prompts run in windows of %d tokens (%s): long prompts prefill far slower than in\n"
                          "     chunks (a 7-GPU RTX 3090 rig, Maya-S read in place: 8K / 32K tokens 115 / 99 tokens/s,\n"
                          "     461 / 1010 in chunks of %d) - %s\n",
                          kWin, o.prefill_chunk == 0 ? "--prefill-chunk 0" : "--tp 1 with --threads off", kVlRows,
@@ -1986,7 +1986,7 @@ struct Model::Impl {
         // the vision tower on the first GPU, before the split: the layers get what it leaves
         if (o.vision && !load_vision(err)) {   // (a tower that cannot load leaves the model reading text: said loudly,
             if (o.vision_only) return false;   // and the server is told pictures are off - info_lines)
-            std::fprintf(stderr, "ds4: WARNING: the vision tower did not load (%s): pictures are OFF, the model reads "
+            std::fprintf(stderr, "saguaro ds4: WARNING: the vision tower did not load (%s): pictures are OFF, the model reads "
                                  "text only\n", err.c_str());
             vision_err = err.empty() ? "unknown reason" : err;
             err.clear();
@@ -2003,7 +2003,7 @@ struct Model::Impl {
             for (const Dev& d : devs) room_b += std::max(0.0, (double) d.free0 - (double) ((size_t) o.reserve_mib << 20));
             if (exp_b > 1.5 * room_b) {
                 o.dspark = false;
-                std::fprintf(stderr, "ds4: DSpark not loaded: the routed experts (%.0f GB) are far more than the GPU holds (%.0f GB), where its verify "
+                std::fprintf(stderr, "saguaro ds4: DSpark not loaded: the routed experts (%.0f GB) are far more than the GPU holds (%.0f GB), where its verify "
                                      "rounds read 3.3x a token's bytes and gain nothing (--dspark on loads it anyway)\n", exp_b / 1e9, room_b / 1e9);
             }
         }
@@ -2375,7 +2375,7 @@ struct Model::Impl {
                 }
         }
         if (o.verbose)
-            std::fprintf(stderr, "ds4: dense weights loaded in %.1f s\n", (now_ms() - t0) / 1000.0);
+            std::fprintf(stderr, "saguaro ds4: dense weights loaded in %.1f s\n", (now_ms() - t0) / 1000.0);
         // the markov steps over a head group of two or more (DS4_MK_SPLIT=0: the lead's whole rows, as before): E
         // host-mapped, the steps' slots
         // (only where every member holds its rows of the markov head: a type load_dense does not take keeps the lead's)
@@ -2486,7 +2486,7 @@ struct Model::Impl {
                             pk.maps[i] = {nullptr, 0};
                         }
                         eg_direct[i] = 1;
-                        if (o.verbose) std::fprintf(stderr, "ds4: %s unmapped, its Engram rows read unbuffered\n",
+                        if (o.verbose) std::fprintf(stderr, "saguaro ds4: %s unmapped, its Engram rows read unbuffered\n",
                                                     pk.files[i].c_str());
                     }
             }
@@ -2501,7 +2501,7 @@ struct Model::Impl {
                 // crashed in eg_issue - so refuse the pack once, with the type's name, before any token is read.
                 int fmt;
                 if (tw == nullptr) {
-                    std::fprintf(stderr, "ds4: Engram layer %s: engram.embed.weight is missing from the pack\n", id.c_str());
+                    std::fprintf(stderr, "saguaro ds4: Engram layer %s: engram.embed.weight is missing from the pack\n", id.c_str());
                     std::exit(2);
                 } else if (tw->dtype == "MXFP8") {
                     fmt = 0;
@@ -2513,7 +2513,7 @@ struct Model::Impl {
                     fmt = 3;   // (an old pack: FP8 codes in one tensor, their E8M0 scales in another)
                 } else {
                     std::fprintf(stderr,
-                                 "ds4: Engram layer %s: engram.embed.weight type %s is not one the Engram reader handles "
+                                 "saguaro ds4: Engram layer %s: engram.embed.weight type %s is not one the Engram reader handles "
                                  "(MXFP8, Q6_K, IQ4_NL)\n",
                                  id.c_str(), tw->dtype.c_str());
                     std::exit(2);
@@ -2531,7 +2531,7 @@ struct Model::Impl {
                 eg_fmt.push_back((uint8_t) fmt);
             }
             if (o.verbose)
-                std::fprintf(stderr, "ds4: Engram rows read on %d threads, issued with the tokens, collected before "
+                std::fprintf(stderr, "saguaro ds4: Engram rows read on %d threads, issued with the tokens, collected before "
                                      "their layer; row cache %llu MB (%zu rows)\n",
                              nth, (unsigned long long) mb, eg_cache.capacity());
         }
@@ -2581,13 +2581,13 @@ struct Model::Impl {
                 chunk = chunk > 512 ? chunk / 2 / 16 * 16 : 0;
                 if (chunk > 0) {
                     eg_cap = (size_t) chunk;
-                    std::fprintf(stderr, "ds4: the prompt path's buffers for chunks of %d rows did not fit (%s): trying %d\n",
+                    std::fprintf(stderr, "saguaro ds4: the prompt path's buffers for chunks of %d rows did not fit (%s): trying %d\n",
                                  was, aerr.c_str(), chunk);
                 } else {
                     prompt_par = false;
                     eg_cap = (size_t) kWin;
                     tap_cap = kWin;
-                    std::fprintf(stderr, "ds4: the prompt path's buffers did not fit (%s): prompts run in windows of %d "
+                    std::fprintf(stderr, "saguaro ds4: the prompt path's buffers did not fit (%s): prompts run in windows of %d "
                                          "tokens (slower on long prompts; more free GPU memory or a lower --reserve-mib "
                                          "brings the chunks back)\n", aerr.c_str(), kWin);
                 }
@@ -2612,7 +2612,7 @@ struct Model::Impl {
             if (avail == ~uint64_t{0}) warm_bytes = (uint64_t) need;
             if (store_gb() > 0) warm_bytes = 0;   // (the store is the RAM tier: nothing to warm in the OS cache)
             std::fprintf(stderr,
-                         "ds4: the experts VRAM leaves over (~%.1f GB) are read in place from the model's files%s "
+                         "saguaro ds4: the experts VRAM leaves over (~%.1f GB) are read in place from the model's files%s "
                          "(%.1f GB of RAM free to keep them: the most-routed %.1f GB read ahead; prompts in chunks of %d)\n",
                          need / 1e9, o.mmap_experts > 0 ? " (--mmap-experts on)"
                                      : pk.gguf ? " (--mmap-experts off copies them into RAM)" : ", not copied into RAM",
@@ -2646,7 +2646,7 @@ struct Model::Impl {
                     err = "pinning the CPU lane's experts (" + std::to_string(m.second >> 20) + " MiB) failed";
                     return false;
                 }
-            if (o.verbose) std::fprintf(stderr, "ds4: CPU lane's experts pinned in %.1f s\n", (now_ms() - tr) / 1000.0);
+            if (o.verbose) std::fprintf(stderr, "saguaro ds4: CPU lane's experts pinned in %.1f s\n", (now_ms() - tr) / 1000.0);
             if (file_experts) {   // in place: each device's staging for its ring, and its readers (DS4_READERS, 8)
                 size_t mr = 0;
                 for (const Layer& l : L)
@@ -2776,7 +2776,7 @@ struct Model::Impl {
         calibrate_paths();
         init_store();      // (last: the store's arena is registered with the driver - page-locked memory the other pinned allocations must come before)
         preload_store();
-        if (o.verbose) std::fprintf(stderr, "ds4: loaded in %.1f s\n%s", (now_ms() - t0) / 1000.0, describe().c_str());
+        if (o.verbose) std::fprintf(stderr, "saguaro ds4: loaded in %.1f s\n%s", (now_ms() - t0) / 1000.0, describe().c_str());
         reset();
         return true;
     }
@@ -2810,7 +2810,7 @@ struct Model::Impl {
             room += std::max(0.0, (double) d.free0 - (double) ((size_t) o.reserve_mib << 20) - 1.5 * (1 << 30)) * o.vram_experts;
         const bool fit = exp_b > 0 && exp_b <= 1.3 * std::max(1.0, room - other_b);   // (R9700 x4: 1.16 -> ring 16: decode -1.8% after a prompt, 64: -4.4%, 400: -4.6%)
         if (o.verbose)
-            std::fprintf(stderr, "ds4: staging ring: experts %.1f GB, VRAM room %.1f GB, dense %.1f GB -> %d MB\n", exp_b / 1e9,
+            std::fprintf(stderr, "saguaro ds4: staging ring: experts %.1f GB, VRAM room %.1f GB, dense %.1f GB -> %d MB\n", exp_b / 1e9,
                          room / 1e9, other_b / 1e9, fit ? 16 : 400);
         return fit ? 16 : 400;
     }
@@ -3874,13 +3874,13 @@ struct Model::Impl {
             commit_kept = kept;
             pagefile_hint = std::ceil((pf + kept) / gib);
             std::fprintf(stderr,
-                         "ds4: WARNING: %.1f GB of experts stay off the GPU - Windows charges the GPU's memory to its "
+                         "saguaro ds4: WARNING: %.1f GB of experts stay off the GPU - Windows charges the GPU's memory to its "
                          "commit (RAM + page file) and can commit only %.1f GB more for them (%.0f GB kept for the "
                          "other programs). A page file of %.0f GB (%.0f MB; now %.0f GB) keeps them on the GPU: System "
                          "> About > Advanced system settings > Performance > Advanced > Virtual memory, then restart\n",
                          kept / 1e9, room0 / 1e9, commit_margin() / 1e9, pagefile_hint, pagefile_hint * 1024.0, pf / gib);
         } else if (room0 < 1e300 && o.verbose) {
-            std::fprintf(stderr, "ds4: Windows' commit has room for the GPU's experts (%.1f GB beside %.0f GB for the other "
+            std::fprintf(stderr, "saguaro ds4: Windows' commit has room for the GPU's experts (%.1f GB beside %.0f GB for the other "
                                  "programs)\n", room0 / 1e9, commit_margin() / 1e9);
         }
         for (Layer& l : L) {
@@ -4041,7 +4041,7 @@ struct Model::Impl {
                     }
                     const int64_t db = done_bytes.fetch_add((int64_t) l.blob) + (int64_t) l.blob;
                     if (o.verbose && (i % 1024) == 0)
-                        std::fprintf(stderr, "ds4: experts %zu / %zu (%.1f GB, %.2f GB/s)\n", i, jobs.size(), db / 1e9,
+                        std::fprintf(stderr, "saguaro ds4: experts %zu / %zu (%.1f GB, %.2f GB/s)\n", i, jobs.size(), db / 1e9,
                                      db / 1e6 / std::max(1.0, now_ms() - t0));
                 }
                 if (stage) cudaFreeHost(stage);
@@ -4124,7 +4124,7 @@ struct Model::Impl {
             if (ram_held > 0) ram_free.push_back(ram_held);
             if (o.expert_cache && ram_held > 0) ram_th = std::thread([this] { ram_loop(); });
             if (o.verbose)
-                std::fprintf(stderr, "ds4: RAM tier: %d experts (%.1f GB of RAM), the hottest after VRAM's; the other %zu "
+                std::fprintf(stderr, "saguaro ds4: RAM tier: %d experts (%.1f GB of RAM), the hottest after VRAM's; the other %zu "
                                      "read from the model's files (%.1f s)\n",
                              ram_held, ram_slots.size() * (double) maxb / 1e9, warm.size() - (size_t) ram_held,
                              (now_ms() - t0) / 1000.0);
@@ -4142,7 +4142,7 @@ struct Model::Impl {
             });
         for (auto& t : wt) t.join();
         if (o.verbose && nw > 0)
-            std::fprintf(stderr, "ds4: %zu CPU-lane experts read ahead (%.1f GB) in %.1f s\n", nw,
+            std::fprintf(stderr, "saguaro ds4: %zu CPU-lane experts read ahead (%.1f GB) in %.1f s\n", nw,
                          nw * (double) L[0].blob / 1e9, (now_ms() - t0) / 1000.0);
         return true;
     }
@@ -4177,12 +4177,12 @@ struct Model::Impl {
         double budget = o.mmap_experts == 0 ? std::min(all, can) : 0.0;
         if (const char* v = std::getenv("DS4_COPY_GB")) budget = std::atof(v) * 1e9;
         if (o.mmap_experts == 0 && all > can)
-            std::fprintf(stderr, "ds4: --mmap-experts off: the CPU lane's experts (%.1f GB) do not all fit the RAM this "
+            std::fprintf(stderr, "saguaro ds4: --mmap-experts off: the CPU lane's experts (%.1f GB) do not all fit the RAM this "
                                  "process can get (%.1f GB beside %.0f GB for the rest) - the most-routed copied, the "
                                  "others read in place\n", all / 1e9, can / 1e9, kRamMargin / 1e9);
         if (budget <= 0) {
             if (o.verbose)
-                std::fprintf(stderr, "ds4: the CPU lane's experts (%.1f GB) stay in place: the RAM this process can get "
+                std::fprintf(stderr, "saguaro ds4: the CPU lane's experts (%.1f GB) stay in place: the RAM this process can get "
                                      "(%.1f GB beside %.0f GB for the rest) does not hold them all\n",
                              all / 1e9, can / 1e9, kRamMargin / 1e9);
             return true;
@@ -4232,7 +4232,7 @@ struct Model::Impl {
                 }
             }
             if (!ok) {
-                std::fprintf(stderr, "ds4: no RAM for layer %d's %d copied experts (%.1f GB): they stay in place\n", l.il,
+                std::fprintf(stderr, "saguaro ds4: no RAM for layer %d's %d copied experts (%.1f GB): they stay in place\n", l.il,
                              ns, (double) bytes * NH / 1e9);
                 n_copy[(size_t) l.il] = 0;
                 continue;
@@ -4277,7 +4277,7 @@ struct Model::Impl {
                     }
                     const int64_t db = done_b.fetch_add((int64_t) l.blob) + (int64_t) l.blob;
                     if (o.verbose && i % 2048 == 0)
-                        std::fprintf(stderr, "ds4: copying experts %zu / %zu (%.1f GB, %.2f GB/s)\n", i, jobs.size(), db / 1e9,
+                        std::fprintf(stderr, "saguaro ds4: copying experts %zu / %zu (%.1f GB, %.2f GB/s)\n", i, jobs.size(), db / 1e9,
                                      db / 1e6 / std::max(1.0, now_ms() - t0));
                 }
             });
@@ -4291,7 +4291,7 @@ struct Model::Impl {
         ram_held = (int) jobs.size();
         double cb = 0;
         for (const Job& j : jobs) cb += (double) L[(size_t) j.layer].blob;
-        std::fprintf(stderr, "ds4: %zu of the CPU lane's %zu experts copied into RAM (%.1f GB, %d NUMA part%s) in %.1f s%s\n",
+        std::fprintf(stderr, "saguaro ds4: %zu of the CPU lane's %zu experts copied into RAM (%.1f GB, %d NUMA part%s) in %.1f s%s\n",
                      jobs.size(), hot.size(), cb / 1e9, NH, NH > 1 ? "s" : "", (now_ms() - t0) / 1000.0,
                      jobs.size() < hot.size() ? "; the others read in place" : "");
         return true;
@@ -4394,7 +4394,7 @@ struct Model::Impl {
                     const int64_t db = done_bytes.fetch_add((int64_t) l.region_bytes[(size_t) e]) +
                                        (int64_t) l.region_bytes[(size_t) e];
                     if (o.verbose && (i % 1024) == 0)
-                        std::fprintf(stderr, "ds4: experts %zu / %zu (%.1f GB, %.2f GB/s)\n", i, jobs.size(),
+                        std::fprintf(stderr, "saguaro ds4: experts %zu / %zu (%.1f GB, %.2f GB/s)\n", i, jobs.size(),
                                      db / 1e9, db / 1e6 / std::max(1.0, now_ms() - t0));
                 }
                 if (stage) cudaFreeHost(stage);
@@ -4406,7 +4406,7 @@ struct Model::Impl {
             return false;
         }
         if (file_experts)
-            std::fprintf(stderr, "ds4: experts loaded in %.1f s (%.1f GB of the CPU lane's read ahead)\n",
+            std::fprintf(stderr, "saguaro ds4: experts loaded in %.1f s (%.1f GB of the CPU lane's read ahead)\n",
                          (now_ms() - t0) / 1000.0, warm / 1e9);
         return true;
     }
@@ -4432,7 +4432,7 @@ struct Model::Impl {
             if (gsz > 1) std::snprintf(tp, sizeof tp, " (tensor parallel %zu, part %d)", gsz, d.mi);
             char line[384];
             std::snprintf(line, sizeof line,
-                          "ds4: CUDA%d layers [%d, %d]%s%s: weights %.2f GB, experts %.2f GB (%d of %d in VRAM), caches "
+                          "saguaro ds4: CUDA%d layers [%d, %d]%s%s: weights %.2f GB, experts %.2f GB (%d of %d in VRAM), caches "
                           "%.2f GB, %.0f MiB free\n",
                           d.id, a, b, tp, (int) di == head_dev ? " + head" : "", d.weights / 1e9, d.experts / 1e9, ev, et,
                           d.caches / 1e9, fr / 1048576.0);
@@ -4446,15 +4446,15 @@ struct Model::Impl {
         }
         char line[200];
         if (copy_mode)
-            std::snprintf(line, sizeof line, "ds4: %d routed experts on the CPU lane (%.1f GB): %d copied into RAM (%d NUMA "
+            std::snprintf(line, sizeof line, "saguaro ds4: %d routed experts on the CPU lane (%.1f GB): %d copied into RAM (%d NUMA "
                                              "parts), the rest in place in the model's files; %d threads\n",
                           nh, hb_ / 1e9, ram_held, NH, cpu_threads());
         else if (file_experts)
             std::snprintf(line, sizeof line,
-                          "ds4: %d routed experts on the CPU lane (%.1f GB, in place in the model's files), %d threads\n",
+                          "saguaro ds4: %d routed experts on the CPU lane (%.1f GB, in place in the model's files), %d threads\n",
                           nh, hb_ / 1e9, cpu_threads());
         else
-            std::snprintf(line, sizeof line, "ds4: %d routed experts on the CPU lane (%.1f GB of RAM, %d NUMA parts), %d threads\n", nh,
+            std::snprintf(line, sizeof line, "saguaro ds4: %d routed experts on the CPU lane (%.1f GB of RAM, %d NUMA parts), %d threads\n", nh,
                           hb_ / 1e9, NH, cpu_threads());
         s << line;
         return s.str();
@@ -4517,7 +4517,7 @@ struct Model::Impl {
                     cudaHostUnregister(h);
                     return nullptr;
                 }
-                if (d != h) std::fprintf(stderr, "ds4: RAM store: chunk host %p -> device %p (not the identity)\n", h, d);
+                if (d != h) std::fprintf(stderr, "saguaro ds4: RAM store: chunk host %p -> device %p (not the identity)\n", h, d);
                 return d;
             };
             cfg.unmap_chunk = [dev0](void* h) {
@@ -4549,24 +4549,24 @@ struct Model::Impl {
         for (os::fd_t f : pk.dfds) direct = direct && f != os::kBadFd;
         auto st = std::make_unique<ExpertStore>();
         if (!st->init(cfg, geo, pk.dfds, pk.pfds)) {
-            std::fprintf(stderr, "ds4: --ssd-cache: the store could not start\n");
+            std::fprintf(stderr, "saguaro ds4: --ssd-cache: the store could not start\n");
             return;
         }
         store = std::move(st);
         store_dma = store->dma_pinned();
-        if (store_dma) std::fprintf(stderr, "ds4: RAM store: page-locked whole (it holds every routed expert): the prompt streams its slots by DMA\n");
+        if (store_dma) std::fprintf(stderr, "saguaro ds4: RAM store: page-locked whole (it holds every routed expert): the prompt streams its slots by DMA\n");
         // (the router lookahead's guesses are not read ahead with the store: measured 4.5 against 4.7 tok/s, 62% of the guesses are right and
         // the SSD is the narrow part; DS4_AHEAD=1 turns them on)
         if (std::getenv("DS4_AHEAD") == nullptr) ahead_mode = 0;
         for (Layer& l : L)
             if (l.il < g.nl && want_zc) l.zc.assign((size_t) l.n_exp, 0);
-        std::fprintf(stderr, "ds4: RAM store: up to %zu slots of %.1f MB (%.1f GB), policy %d, %d reader threads, %s reads%s\n",
+        std::fprintf(stderr, "saguaro ds4: RAM store: up to %zu slots of %.1f MB (%.1f GB), policy %d, %d reader threads, %s reads%s\n",
                      store->slots_max(), store->slot_bytes() / 1e6, store->slots_max() * (double) store->slot_bytes() / 1e9,
                      (int) cfg.policy, cfg.threads, direct ? "unbuffered" : "BUFFERED (no direct handle)",
                      store->nodes() > 1 ? (", interleaved over " + std::to_string(store->nodes()) + " NUMA nodes").c_str() : "");
         if (want_zc) {
             if (!store->gpu_mapped()) {
-                std::fprintf(stderr, "ds4: RAM store: the arena could not be mapped for the GPU: zero-copy off\n");
+                std::fprintf(stderr, "saguaro ds4: RAM store: the arena could not be mapped for the GPU: zero-copy off\n");
                 for (Layer& l : L) l.zc.clear();
             } else {
                 zc_stride = (store->max_blob() + 4095) & ~(size_t) 4095;
@@ -4584,7 +4584,7 @@ struct Model::Impl {
                         }
                 }
             }
-            std::fprintf(stderr, "ds4: RAM store: the GPU takes its slots over PCIe (%s), %zu slots kept evictable\n",
+            std::fprintf(stderr, "saguaro ds4: RAM store: the GPU takes its slots over PCIe (%s), %zu slots kept evictable\n",
                          zc_stage_buf != nullptr ? "copied into a staging area at the PCIe rate first" : "off", cfg.reserve);
         }
     }
@@ -4613,7 +4613,7 @@ struct Model::Impl {
         const double t0 = now_ms();
         const size_t leave = (size_t) (std::getenv("DS4_STORE_RESERVE") ? std::atoi(std::getenv("DS4_STORE_RESERVE")) : 192) + 64;
         const size_t n = store->preload(list, leave);
-        std::fprintf(stderr, "ds4: RAM store: %zu of the profile's hottest experts read in (%.1f GB) in %.1f s\n", n,
+        std::fprintf(stderr, "saguaro ds4: RAM store: %zu of the profile's hottest experts read in (%.1f GB) in %.1f s\n", n,
                      (double) n * (double) L[0].blob / 1e9, (now_ms() - t0) / 1000.0);
         // the room left: the VRAM experts too, coldest first - the cache's moves hand them to the CPU lane, which then read them
         // from the disk in its critical path (4x T4: 1.5 misses and 8 ms a token at 180 GB of store) - and the unprofiled ones,
@@ -4637,7 +4637,7 @@ struct Model::Impl {
                         ++q;
                     }
             if (q > 0)
-                std::fprintf(stderr, "ds4: RAM store: %zu more (the VRAM experts, coldest first, then the unprofiled) read behind "
+                std::fprintf(stderr, "saguaro ds4: RAM store: %zu more (the VRAM experts, coldest first, then the unprofiled) read behind "
                                      "the first tokens (%.1f GB)\n", q, (double) q * (double) L[0].blob / 1e9);
         }
     }
@@ -4711,7 +4711,7 @@ struct Model::Impl {
         if (o.verbose) {
             int nthr = 0;
             for (auto& p : pools) nthr += p->size();
-            std::fprintf(stderr, "ds4: CPU lane: %d threads, MXFP4 rows %s (%s)\n", nthr, gg::mx_tier_name(gg::mx_tier()),
+            std::fprintf(stderr, "saguaro ds4: CPU lane: %d threads, MXFP4 rows %s (%s)\n", nthr, gg::mx_tier_name(gg::mx_tier()),
                          gg::mx_tier_report());
         }
     }
@@ -5255,7 +5255,7 @@ struct Model::Impl {
         CK(cudaSetDevice(d.id));
         CK(cudaMemGetInfo(&d.free0, &d.total));   // (the split sees what the tower left)
         if (o.verbose)
-            std::fprintf(stderr, "ds4: vision tower (%d blocks) on CUDA%d: %.0f MiB, up to %d patches, %.1f s\n",
+            std::fprintf(stderr, "saguaro ds4: vision tower (%d blocks) on CUDA%d: %.0f MiB, up to %d patches, %.1f s\n",
                          vg.layers, d.id, (double) vt.device_bytes() / (1 << 20), vt.max_patches(),
                          (now_ms() - t0) / 1000.0);
         return true;
@@ -5580,7 +5580,7 @@ struct Model::Impl {
         if (!gg::iq_cpu_fmt(gg::expert_type(l.lay, 0), gg::expert_type(l.lay, 2), E, FF, fm, ferr) ||
             fm.act_bytes > (size_t) E * 4 || fm.h_bytes > (size_t) E * 4) {
             static std::atomic<bool> said{false};
-            if (!said.exchange(true)) std::fprintf(stderr, "ds4: layer %d's CPU-lane experts: %s\n", l.il, ferr.c_str());
+            if (!said.exchange(true)) std::fprintf(stderr, "saguaro ds4: layer %d's CPU-lane experts: %s\n", l.il, ferr.c_str());
             for (const Ent& en : ents) std::memset(c_yd.data() + (size_t) en.slot0 * E, 0, (size_t) en.n * E * 4);
             return;
         }
@@ -5893,7 +5893,7 @@ struct Model::Impl {
                         }
                     }
                 }
-                std::fprintf(stderr, "ds4 cache: layer %d expert %d in, %d out: %s\n", l.il, sw.in, sw.out,
+                std::fprintf(stderr, "saguaro ds4 cache: layer %d expert %d in, %d out: %s\n", l.il, sw.in, sw.out,
                              ok ? "both match the model file" : "MISMATCH");
             }
             std::lock_guard<std::mutex> lk(sw_mu);
@@ -5951,10 +5951,10 @@ struct Model::Impl {
                 for (int r = 0; r < 3 && ok_out; ++r)
                     ok_out = std::memcmp(dev.data() + l.lay.trellis[r], file.data() + l.lay.trellis[r], mx_part_bytes(l, r)) == 0;
             }
-            std::fprintf(stderr, "ds4 cache: layer %d expert %d in, %d out%s: %s\n", l.il, sw.in, sw.out,
+            std::fprintf(stderr, "saguaro ds4 cache: layer %d expert %d in, %d out%s: %s\n", l.il, sw.in, sw.out,
                          sw.ram >= 0 ? " (into RAM)" : "", ok && ok_out ? "matches the model file" : "MISMATCH");
         } else if (!ok) {
-            std::fprintf(stderr, "ds4 cache: layer %d expert %d: the move into VRAM failed\n", l.il, sw.in);
+            std::fprintf(stderr, "saguaro ds4 cache: layer %d expert %d: the move into VRAM failed\n", l.il, sw.in);
         }
     }
 
@@ -5995,10 +5995,10 @@ struct Model::Impl {
             }
             const double ts = now_ms();
             const size_t n = store->preload(list, 0);
-            if (o.verbose) std::fprintf(stderr, "ds4: RAM store: %zu hot experts read after the prompt (%.0f ms)\n", n, now_ms() - ts);
+            if (o.verbose) std::fprintf(stderr, "saguaro ds4: RAM store: %zu hot experts read after the prompt (%.0f ms)\n", n, now_ms() - ts);
         }
         if (o.verbose && st.swaps > s0)
-            std::fprintf(stderr, "ds4: expert cache: %lld swaps after the prompt (%.0f ms)\n", (long long) (st.swaps - s0),
+            std::fprintf(stderr, "saguaro ds4: expert cache: %lld swaps after the prompt (%.0f ms)\n", (long long) (st.swaps - s0),
                          now_ms() - t0);
     }
     void cache_tick(int T) {
@@ -6016,7 +6016,7 @@ struct Model::Impl {
         if (avail == ~uint64_t{0} || avail >= (4ull << 30)) return;
         const size_t chunks = 1 + (size_t) (((5ull << 30) - avail) / (700ull << 20));
         const size_t n = store->shrink_chunks(chunks);
-        if (n > 0) std::fprintf(stderr, "ds4: RAM store: %.1f GB free: gave back %zu chunks (%zu slots left)\n", avail / 1e9, n, store->slots_allocated());
+        if (n > 0) std::fprintf(stderr, "saguaro ds4: RAM store: %.1f GB free: gave back %zu chunks (%zu slots left)\n", avail / 1e9, n, store->slots_allocated());
     }
     void cache_tick_swaps(int T) {
         if (!o.expert_cache || cache_ths.empty()) return;
@@ -7698,7 +7698,7 @@ struct Model::Impl {
             if (pm.disk > 0) std::snprintf(dk, sizeof dk, "%.2f GB/s", pm.disk / 1e9);
             if (pm.cpu_cold > 0) std::snprintf(cc, sizeof cc, "%.2f GB/s", pm.cpu_cold / 1e9);
             std::fprintf(stderr,
-                         "ds4: prompts through the flow or windows by this PC's speeds: DMA %.1f GB/s, RAM to staging "
+                         "saguaro ds4: prompts through the flow or windows by this PC's speeds: DMA %.1f GB/s, RAM to staging "
                          "%.1f GB/s, the disk %s; the CPU lane %.1f GB/s in RAM, %s from the disk (%.0f ms)\n",
                          pm.dma / 1e9, pm.copy / 1e9, dk, pm.cpu / 1e9, cc, now_ms() - t0);
         }
@@ -7795,7 +7795,7 @@ struct Model::Impl {
         pm.last_pred = flow ? t_flow : t_win;
         if (o.verbose)
             std::fprintf(stderr,
-                         "ds4: a prompt of %d tokens through %s: predicted %.2f s, %s %.2f s (%.0f%% of its CPU-lane "
+                         "saguaro ds4: a prompt of %d tokens through %s: predicted %.2f s, %s %.2f s (%.0f%% of its CPU-lane "
                          "experts' %.1f GB in RAM)\n",
                          n, flow ? "the flow" : "windows", flow ? pf : pw, flow ? "windows" : "the flow", flow ? pw : pf,
                          100.0 * res_share, (f_res + f_cold) / 1e9);
@@ -8084,7 +8084,7 @@ struct Model::Impl {
             cudaSetDevice(d.id);
             prof_collect();
             std::fprintf(stderr,
-                         "ds4 prompt GPU time, %d tokens: attention %.0f ms, routing + shared expert %.0f ms, experts %.0f ms "
+                         "saguaro ds4 prompt GPU time, %d tokens: attention %.0f ms, routing + shared expert %.0f ms, experts %.0f ms "
                          "(with the waits for streamed ones), between layers %.0f ms\n",
                          n, cprof_ms[1], cprof_ms[2], cprof_ms[3], cprof_ms[0]);
             {   // the finer table (ms, % of the sum)
@@ -8094,7 +8094,7 @@ struct Model::Impl {
                 double sum = 0;
                 for (double v : cprof_ms) sum += v;
                 for (int i = 0; i < 11; ++i)
-                    std::fprintf(stderr, "ds4 prof  %-34s %9.1f ms %5.1f%%\n", nm_[i], cprof_ms[i], sum > 0 ? 100.0 * cprof_ms[i] / sum : 0.0);
+                    std::fprintf(stderr, "saguaro ds4 prof  %-34s %9.1f ms %5.1f%%\n", nm_[i], cprof_ms[i], sum > 0 ? 100.0 * cprof_ms[i] / sum : 0.0);
                 struct Agg {
                     double ms = 0, flops = 0;
                     long calls = 0, rows = 0, experts = 0;
@@ -8125,13 +8125,13 @@ struct Model::Impl {
                 for (auto& kv : agg) tot += kv.second.ms;
                 for (auto& kv : agg)
                     std::fprintf(stderr,
-                                 "ds4 prof  expert kernels type %-8s %-7s %9.1f ms  calls %5ld  experts %6ld (%.1f us each, %.1f a call)  rows/expert %6.1f  ~%5.1f TFLOPS\n",
+                                 "saguaro ds4 prof  expert kernels type %-8s %-7s %9.1f ms  calls %5ld  experts %6ld (%.1f us each, %.1f a call)  rows/expert %6.1f  ~%5.1f TFLOPS\n",
                                  gg::iq::name(kv.first.first), kv.first.second ? "down" : "gate+up", kv.second.ms, kv.second.calls,
                                  kv.second.experts, kv.second.experts > 0 ? 1e3 * kv.second.ms / (double) kv.second.experts : 0.0,
                                  kv.second.calls > 0 ? (double) kv.second.experts / (double) kv.second.calls : 0.0,
                                  kv.second.experts > 0 ? (double) kv.second.rows / (double) kv.second.experts : 0.0,
                                  kv.second.ms > 0 ? kv.second.flops / kv.second.ms / 1e9 : 0.0);
-                std::fprintf(stderr, "ds4 prof  expert kernels total %.1f ms\n", tot);
+                std::fprintf(stderr, "saguaro ds4 prof  expert kernels total %.1f ms\n", tot);
             }
             for (double& v : cprof_ms) v = 0;
             prof_chunk = false;
@@ -8149,7 +8149,7 @@ struct Model::Impl {
                     std::snprintf(lcs, sizeof lcs, ", %llu again from the layer cache (layer-major, %d chunks, %.1f GB "
                                   "of RAM)", (unsigned long long) c.it_lc, (int) run.T.size(), (double) c.lc_bytes / 1e9);
                 std::fprintf(stderr,
-                             "ds4 prompt stream, CUDA%d: %d tokens in %.0f ms; %llu experts streamed: %llu from the files "
+                             "saguaro ds4 prompt stream, CUDA%d: %d tokens in %.0f ms; %llu experts streamed: %llu from the files "
                              "(%.1f GB, %.2f GB/s: %.1f GB from the disk unbuffered, %.1f GB through the page cache), %llu "
                              "from RAM (%.1f GB)%s; %llu likely ones queued early, %llu of them unpicked; the compute waited "
                              "%.0f ms for reads\n",

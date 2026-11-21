@@ -4,7 +4,7 @@ Back to the [README](../README.md).
 
 Experimental: GLM-5.3-Flash on a Mac with Apple Silicon, on its GPU through Metal, with the same dashboard and the same
 OpenAI- and Anthropic-compatible API as on Linux and Windows (streamed answers, tool calls, thinking levels). It reads
-pictures (`maya-vision`, the image encoder, runs on the GPU too), and it drafts
+pictures (`vision-glm`, the image encoder, runs on the GPU too), and it drafts
 with the model's MTP block or the DFlash2 drafter (`--draft dflash2`) when that is faster on the Mac. One conversation at a time;
 DeepSeek-V4.1-Flash, MiniMax-M3.1-Flash and Qwen-3.8-Flash-Next are NVIDIA / AMD only for now.
 

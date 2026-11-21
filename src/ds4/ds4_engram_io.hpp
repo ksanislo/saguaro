@@ -177,7 +177,7 @@ public:
                 ::munlock(base, length); ::munmap(base, length); return false;
             }
             if ((pos / chunk) % 32 == 0 || pos + chunk >= length)
-                std::fprintf(stderr, "ds4: Engram RAM file %d locked %.2f / %.2f GB\n", file,
+                std::fprintf(stderr, "saguaro ds4: Engram RAM file %d locked %.2f / %.2f GB\n", file,
                              (double) std::min(pos + chunk, length) / 1e9, (double) length / 1e9);
         }
         ram_.push_back({file, off, n, base, length, (size_t) (off - begin)});
@@ -200,7 +200,7 @@ public:
         for (auto& t : th_) t.join();
         th_.clear();
         if (check_n_.load() > 0)
-            std::fprintf(stderr, "ds4 Engram check (DS4_EG_CHECK): %lld rows read unbuffered, %lld differed from a buffered read\n",
+            std::fprintf(stderr, "saguaro ds4 Engram check (DS4_EG_CHECK): %lld rows read unbuffered, %lld differed from a buffered read\n",
                          (long long) check_n_.load(), (long long) check_bad_.load());
     }
     int threads() const { return (int) th_.size(); }
@@ -391,7 +391,7 @@ public:
         }
         if (profile)
             std::fprintf(stderr,
-                         "ds4: Engram plan: %zu lookups, %zu rows, %s %.1f ms, dedup %.1f ms, zones %.1f ms: "
+                         "saguaro ds4: Engram plan: %zu lookups, %zu rows, %s %.1f ms, dedup %.1f ms, zones %.1f ms: "
                          "%d reads, %.3f GB\n",
                          n, ids.size(), sorted_by, (plan1 - plan0) / 1e6, (plan2 - plan1) / 1e6,
                          (now_ns() - plan2) / 1e6, jobs, planned_bytes / 1e9);

@@ -37,7 +37,7 @@ GGUFs already exist: [unsloth/GLM-5.3-Flash-GGUF](https://huggingface.co/unsloth
 (dynamic quants; ~120 GB at their 3-bit, ~180 GB at 4-bit). llama.cpp has the building blocks this
 architecture needs (KDA chunked + recurrent kernels, NoPE-MLA, DSA lightning indexer from the DeepSeek
 V3.2 work, nextn/MTP), which matters twice: it proves the kernels are portable, and `third_party/ggml`
-is the pinned dependency Saguaro builds its native path and `maya-vision` against.
+is the pinned dependency Saguaro builds its native path and `vision-glm` against.
 
 ## 2. What the engine already is
 
@@ -183,7 +183,7 @@ Either way this is the *cheapest* architecture delta; the risk is only parity di
   (`generate.cpp:1374`, 248320) and must come from the pack. GLM's MTP tensors must be in the GGUF
   (llama.cpp's glm5 conversion carries nextn tensors) and `tools/mtp_pack.py` taught the tensor names.
   Draft acceptance is an empirical question per model.
-* **Vision.** `maya-vision` is built from the pinned llama.cpp `mtmd` (`tools/vision/`). GLM's 24-block
+* **Vision.** `vision-glm` is built from the pinned llama.cpp `mtmd` (`tools/vision/`). GLM's 24-block
   ViT at 448 px is a standard layout; support reduces to what the pinned llama.cpp supports for
   `glm5-next` vision + a converted `mmproj` GGUF, plus the family wiring in `setup.py`. If the pinned
   llama.cpp predates glm5 vision support, this is a submodule pin bump with a re-run of the parity tests.

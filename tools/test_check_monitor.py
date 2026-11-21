@@ -73,7 +73,7 @@ class ParseEngineLog(unittest.TestCase):
         self.assertEqual(decodes[1].tokens, 100)
 
     def test_unstamped_event_is_reported(self):
-        log = LOG + "strata batch: slot 2 admitted beside the decoding slots: 256 prompt tokens (0 reused) read in 100 ms\n"
+        log = LOG + "saguaro batch: slot 2 admitted beside the decoding slots: 256 prompt tokens (0 reused) read in 100 ms\n"
         reads, _, errors = cm.parse_engine_log(log)
         self.assertEqual(len(reads), 5)
         self.assertIsNone(reads[4].when)

@@ -158,7 +158,7 @@ inline bool park_fast() {
     static const bool on = [] {
         const char* e = std::getenv("SAGUARO_PARK_FAST");
         const bool v = e == nullptr || std::atoi(e) != 0;
-        std::fprintf(stderr, "strata: conversation park: SAGUARO_PARK_FAST %s (%s)\n", v ? "on" : "off",
+        std::fprintf(stderr, "saguaro: conversation park: SAGUARO_PARK_FAST %s (%s)\n", v ? "on" : "off",
                      v ? "no zero fill, threaded copies from 4 MiB woken on completion, checkpoints copied in parallel"
                        : "the pre-11-19 path: zero-filled growth, 64 MiB threaded threshold");
         return v;

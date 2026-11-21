@@ -3,7 +3,7 @@
 with a picture in its history is set aside and taken back - for a prompt whose picture sits at the same place with the
 same pixels, and for no other.
 
-    python tools/ds4/slot_image_test.py --pack /mnt/data/models/.../maya-ds4 [--exe build/maya-ds4] [--gpus 0,1]
+    python tools/ds4/slot_image_test.py --pack /mnt/data/models/.../maya-ds4 [--exe build/saguaro-ds4] [--gpus 0,1]
                                         [--config maya-ds4.json]
 
 Two runs of the engine's `--serve` protocol (greedy, spec=0: the state's position is the answer's, exactly):
@@ -144,7 +144,7 @@ def run(exe: str, gpus: list[int], pack: str, ctx: int, slots: str, keep: bool,
             eng.quit()
         err = eng.stderr_lines()
     for line in err:
-        if line.startswith("ds4 slots:") and "failed" in line:
+        if line.startswith("saguaro ds4 slots:") and "failed" in line:
             raise RuntimeError("the engine: " + line)
     return answers, eng.notes
 
@@ -152,7 +152,7 @@ def run(exe: str, gpus: list[int], pack: str, ctx: int, slots: str, keep: bool,
 def main() -> int:
     ap = argparse.ArgumentParser(description="pictures in the kept conversations")
     ap.add_argument("--pack", required=True)
-    ap.add_argument("--exe", default=str(Path(__file__).resolve().parents[2] / "build" / "maya-ds4"))
+    ap.add_argument("--exe", default=str(Path(__file__).resolve().parents[2] / "build" / "saguaro-ds4"))
     ap.add_argument("--gpus", default="")
     ap.add_argument("--config", default="")
     ap.add_argument("--ctx", type=int, default=32768)

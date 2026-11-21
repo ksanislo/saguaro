@@ -1659,7 +1659,7 @@ LightBuf* light_buf(cudaStream_t s, int k) {
         if (b.d != nullptr) cudaFree(b.d);
         b = LightBuf{};
         if (cudaMalloc(&b.q, need) != cudaSuccess || cudaMalloc(&b.d, need / 32 * sizeof(float)) != cudaSuccess) {
-            std::fprintf(stderr, "ds4 iq: the light sets' scratch (%zu MB) failed\n", need >> 20);
+            std::fprintf(stderr, "saguaro ds4 iq: the light sets' scratch (%zu MB) failed\n", need >> 20);
             return nullptr;
         }
         b.cap = need;
@@ -2254,7 +2254,7 @@ bool set_gate_up(const SetArgs& a, cudaStream_t s) {
 #if defined(STRATA_USE_HIP) && !defined(MAYA_DS4_IQ_ONLY)
     if (fused_wanted(a)) {
         if (fused_gate_up(a, s)) return true;
-        std::fprintf(stderr, "ds4: the fused prompt experts could not run a set\n");
+        std::fprintf(stderr, "saguaro ds4: the fused prompt experts could not run a set\n");
         std::abort();   // (its down would read H the FP16 tiles never wrote)
     }
     if (mmq_wanted(a, true) && mmq_gate_up(a, s)) return true;
@@ -2292,7 +2292,7 @@ bool set_down(const SetArgs& a, cudaStream_t s) {
 #if defined(STRATA_USE_HIP) && !defined(MAYA_DS4_IQ_ONLY)
     if (fused_wanted(a)) {
         if (fused_down(a, s)) return true;
-        std::fprintf(stderr, "ds4: the fused prompt experts could not run a set's down\n");
+        std::fprintf(stderr, "saguaro ds4: the fused prompt experts could not run a set's down\n");
         std::abort();   // (H is int8 here: the FP16 tiles cannot read it)
     }
     if (mmq_wanted(a, false) && mmq_down(a, s)) return true;

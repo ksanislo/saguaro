@@ -3,7 +3,7 @@
 each conversation gets alone, a STOP ends one alone, the kept conversations (SAGUARO_DS4_SLOT_KEEP) work per lane, a new
 prompt is read while the others answer - and what it costs and what it gains, measured.
 
-    python tools/ds4/parallel_test.py --pack /mnt/data/models/.../maya-ds4 [--exe build/maya-ds4] [--gpus 0,2,1]
+    python tools/ds4/parallel_test.py --pack /mnt/data/models/.../maya-ds4 [--exe build/saguaro-ds4] [--gpus 0,2,1]
                                       [--config maya-ds4.json] [--lanes 3] [--skip-long] [--measure] [--spec 0]
 
 The engine gets the environment this test inherits plus, with `--config <maya-ds4.json>`, that config's DeepSeek
@@ -220,8 +220,8 @@ def one_run(a, settings: dict, parallel: int, ctx: int, slots: str, keep: bool =
 def main() -> int:
     ap = argparse.ArgumentParser(description="several conversations at once on maya-ds4 (--parallel N)")
     ap.add_argument("--pack", required=True, help="the model's pack dir (maya-ds4)")
-    ap.add_argument("--exe", default=str(Path(__file__).resolve().parents[2] / "build/maya-ds4"),
-                    help="the engine (default: <repo>/build/maya-ds4)")
+    ap.add_argument("--exe", default=str(Path(__file__).resolve().parents[2] / "build/saguaro-ds4"),
+                    help="the engine (default: <repo>/build/saguaro-ds4)")
     ap.add_argument("--gpus", default="", help="the GPUs (default: every visible one, the engine's own split)")
     ap.add_argument("--config", default="", help="a model config (maya-ds4.json): its DS4_/SAGUARO_DS4_ settings")
     ap.add_argument("--lanes", type=int, default=3, help="the conversations at once to test and measure (1-8)")

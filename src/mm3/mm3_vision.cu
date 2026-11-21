@@ -327,7 +327,7 @@ struct Vision::Impl {
             cudaDeviceProp pr{};
             const char* fv = std::getenv("SAGUARO_MM3_VISION_F16");
             f16 = fv != nullptr ? std::atoi(fv) != 0 : cudaGetDeviceProperties(&pr, dev) == cudaSuccess && pr.major < 8;
-            if (f16) std::fprintf(stderr, "maya-mm3: vision: GEMMs on FP16 tensor cores (BF16 -> FP16, exact in range)\n");
+            if (f16) std::fprintf(stderr, "saguaro mm3: vision: GEMMs on FP16 tensor cores (BF16 -> FP16, exact in range)\n");
         }
 #endif
         g.dim = (int) pk.num("vision.hidden_size", 1280);
@@ -553,7 +553,7 @@ struct Vision::Impl {
                 return false;
             }
             if (!lent_once)
-                std::fprintf(stderr, "maya-mm3: NOTE: vision: CUDA%d had not %zu MB free for the picture - the "
+                std::fprintf(stderr, "saguaro mm3: NOTE: vision: CUDA%d had not %zu MB free for the picture - the "
                              "experts' staging slots are lent to it meanwhile (their experts copied in again after)\n",
                              dev, y.total >> 20);
             lent_once = true;
@@ -698,7 +698,7 @@ struct Vision::Impl {
         if (f16) {
             unsigned sat = 0;
             VK(cudaMemcpyFromSymbol(&sat, g_vis_sat, sizeof sat));
-            if (sat) std::fprintf(stderr, "maya-mm3: NOTE: vision: %u activations beyond FP16's range saturated\n", sat);
+            if (sat) std::fprintf(stderr, "saguaro mm3: NOTE: vision: %u activations beyond FP16's range saturated\n", sat);
         }
 #endif
         return true;

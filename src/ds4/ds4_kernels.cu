@@ -3894,18 +3894,18 @@ void embed(const uint16_t* rows, int T, float* h, int dim, int hc, cudaStream_t 
 
 void finish(float* x, int n_vec, int len, long long stride, const Finish& f, cudaStream_t s) {
     if (len > kFinMax * kThreads) {
-        std::fprintf(stderr, "ds4 finish: a vector of %d values is more than %d\n", len, kFinMax * kThreads);
+        std::fprintf(stderr, "saguaro ds4 finish: a vector of %d values is more than %d\n", len, kFinMax * kThreads);
         return;
     }
     if (n_vec <= 0) return;
     if (f.q8 != nullptr &&
         (f.q8d == nullptr || len % 32 != 0 || stride != len || f.dst != nullptr || f.pdst != nullptr)) {
-        std::fprintf(stderr, "ds4 finish: int8 rows of %d values (stride %lld) not covered\n", len, stride);
+        std::fprintf(stderr, "saguaro ds4 finish: int8 rows of %d values (stride %lld) not covered\n", len, stride);
         return;
     }
     if (f.pdst != nullptr) {
         if (f.quant < kKvFp8 || f.quant > kKvFp4p || len % 32 != 0) {
-            std::fprintf(stderr, "ds4 finish: packed rows of quant %d, %d values not covered\n", f.quant, len);
+            std::fprintf(stderr, "saguaro ds4 finish: packed rows of quant %d, %d values not covered\n", f.quant, len);
             return;
         }
         pdl_launch(finish_kernel<true>, n_vec, kThreads, 0, s, x, len, stride, f);
@@ -3914,7 +3914,7 @@ void finish(float* x, int n_vec, int len, long long stride, const Finish& f, cud
 }
 bool finish_rows(float* x, int n_vec, int len, long long stride, const Finish& f, const FinishRows& r, cudaStream_t s) {
     if (len > kFinMax * kThreads || f.pdst != nullptr || f.q8 != nullptr || f.vpp < 1 || n_vec > kWin * f.vpp) {
-        std::fprintf(stderr, "ds4 finish_rows: %d vectors of %d values (%d a row) not covered\n", n_vec, len, f.vpp);
+        std::fprintf(stderr, "saguaro ds4 finish_rows: %d vectors of %d values (%d a row) not covered\n", n_vec, len, f.vpp);
         return false;
     }
     if (n_vec > 0) pdl_launch(finish_rows_kernel, n_vec, kThreads, 0, s, x, len, stride, f, r);
@@ -4053,7 +4053,7 @@ static void router_rows_env(int& tt, int& rw) {
     if ((tt != kGemvT || rw != 1) && !said.exchange(true)) {
         const bool ok = (tt == 8 || tt == 16 || tt == 32 || tt == 64) && (rw == 1 || rw == 2) && !(tt == 8 && rw == 2) &&
                         !(tt == 64 && rw == 2);
-        std::fprintf(stderr, "ds4: prompt router rows: %d tokens a block, %d rows a warp (DS4_ROUTER_T/RW)%s\n", tt, rw,
+        std::fprintf(stderr, "saguaro ds4: prompt router rows: %d tokens a block, %d rows a warp (DS4_ROUTER_T/RW)%s\n", tt, rw,
                      ok ? "" : " - not covered: 8 and 1");
     }
 }
@@ -4133,7 +4133,7 @@ void index_score(const float* q, const float* w, const void* k, int heads, int h
                  int cand_stride, int blk, const Rows& lim, float* out, long long out_stride, cudaStream_t s,
                  int kfmt, bool tc) {
     if (hd != 128 || heads > 32 || (kfmt != kKvFp4p && kfmt != kKvBf16)) {
-        std::fprintf(stderr, "ds4 index_score: %d heads of %d (keys %d) not covered\n", heads, hd, kfmt);
+        std::fprintf(stderr, "saguaro ds4 index_score: %d heads of %d (keys %d) not covered\n", heads, hd, kfmt);
         return;
     }
     if (n <= 0) return;
@@ -4169,12 +4169,12 @@ void index_score(const float* q, const float* w, const void* k, int heads, int h
                 set(index_score_tc_kernel<6>, index_tc_smem<6>(), 6);
                 if (e != cudaSuccess) {
                     (void) cudaGetLastError();
-                    std::fprintf(stderr, "ds4: indexer tensor cores off on CUDA%d (%s): the CUDA cores' scores\n", dev,
+                    std::fprintf(stderr, "saguaro ds4: indexer tensor cores off on CUDA%d (%s): the CUDA cores' scores\n", dev,
                                  cudaGetErrorString(e));
                 } else {
                     if (is75) sm75.fetch_or(1ull << dev);
                     capable.fetch_or(1ull << dev);
-                    std::fprintf(stderr, "ds4: indexer scores on the int8 tensor cores on CUDA%d (sm_%d%d, %s; %s)\n", dev,
+                    std::fprintf(stderr, "saguaro ds4: indexer scores on the int8 tensor cores on CUDA%d (sm_%d%d, %s; %s)\n", dev,
                                  major, minor, major >= 8 ? "m16n8k32" : "m8n8k16 x4",
                                  !is75 ? "every call" : tc75 >= 2 ? "DS4_INDEX_TC_SM75=2: prompt slabs and decode windows"
                                                                   : "DS4_INDEX_TC_SM75=1: prompt slabs only");
@@ -4790,7 +4790,7 @@ static bool attn_v7_now() {
                                          (int) kV7Smem) == cudaSuccess
                 ? 2 : 1;
         cudaGetLastError();
-        if (v == 2) std::fprintf(stderr, "ds4: CUDA%d prompt attention on the tensor cores (sm_%d%d, FP16)\n", dev, p.major, p.minor);
+        if (v == 2) std::fprintf(stderr, "saguaro ds4: CUDA%d prompt attention on the tensor cores (sm_%d%d, FP16)\n", dev, p.major, p.minor);
         known[dev].store(v, std::memory_order_relaxed);
     }
     return v == 2;
@@ -4814,7 +4814,7 @@ static bool attn_v7t4_now() {
                                          (int) kV7T4Smem) == cudaSuccess
                 ? 2 : 1;
         cudaGetLastError();
-        if (v == 2) std::fprintf(stderr, "ds4: CUDA%d prompt attention on the tensor cores (sm_%d%d, FP16, v7 in %zu KB: DS4_ATTN_V7_T4)\n", dev, p.major, p.minor, kV7T4Smem >> 10);
+        if (v == 2) std::fprintf(stderr, "saguaro ds4: CUDA%d prompt attention on the tensor cores (sm_%d%d, FP16, v7 in %zu KB: DS4_ATTN_V7_T4)\n", dev, p.major, p.minor, kV7T4Smem >> 10);
         known[dev].store(v, std::memory_order_relaxed);
     }
     return v == 2;
@@ -4856,7 +4856,7 @@ static bool attn_mma_now() {
     if (v == 0) {
         cudaDeviceProp p{};
         v = cudaGetDeviceProperties(&p, dev) == cudaSuccess && p.major >= 8 ? 2 : 1;
-        if (v == 2) std::fprintf(stderr, "ds4: CUDA%d prompt attention on the tensor cores (sm_%d%d)\n", dev, p.major, p.minor);
+        if (v == 2) std::fprintf(stderr, "saguaro ds4: CUDA%d prompt attention on the tensor cores (sm_%d%d)\n", dev, p.major, p.minor);
         known[dev].store(v, std::memory_order_relaxed);
     }
     return v == 2;
@@ -4910,7 +4910,7 @@ void sparse_attn(const float* q, const uint16_t* win, const void* ckv, const int
                  const AttnRows& a, const float* sink, int heads, int d, int T, float scale, float* out, cudaStream_t s,
                  int ckv_fmt, int heads_per_block, const AttnScratch* scr) {
     if (d != 512 || (ckv_fmt != kKvFp4 && ckv_fmt != kKvBf16)) {
-        std::fprintf(stderr, "ds4 sparse_attn: head dim %d (rows %d) not covered\n", d, ckv_fmt);
+        std::fprintf(stderr, "saguaro ds4 sparse_attn: head dim %d (rows %d) not covered\n", d, ckv_fmt);
         return;
     }
     if (ckv_fmt == kKvBf16) {
@@ -5016,7 +5016,7 @@ void ring_to_ext_runs(const RingRuns& r, uint16_t* ext, int n, int d, cudaStream
 }
 void ext_to_ring_runs(const RingRuns& r, const uint16_t* ext, int n, int d, cudaStream_t s) {
     if (d % 32 != 0) {
-        std::fprintf(stderr, "ds4 ext_to_ring_runs: row of %d not covered\n", d);
+        std::fprintf(stderr, "saguaro ds4 ext_to_ring_runs: row of %d not covered\n", d);
         return;
     }
     int tmax = 0;
@@ -5025,7 +5025,7 @@ void ext_to_ring_runs(const RingRuns& r, const uint16_t* ext, int n, int d, cuda
 }
 void ext_to_ring(const uint16_t* ext, uint8_t* ring, int64_t p0, int n, int T, int d, cudaStream_t s, uint8_t* backup) {
     if (d % 32 != 0) {
-        std::fprintf(stderr, "ds4 ext_to_ring: row of %d not covered\n", d);
+        std::fprintf(stderr, "saguaro ds4 ext_to_ring: row of %d not covered\n", d);
         return;
     }
     pdl_launch(ext_to_ring_kernel, T, kThreads, 0, s, ext, ring, (long long) p0, n, T, d, backup);

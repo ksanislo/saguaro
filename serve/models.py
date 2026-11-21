@@ -251,7 +251,7 @@ def choices(cfg: dict) -> dict:
     if family(cfg) == "deepseek":
         return {"draft": ["dspark", "none"] if ds4_has_drafter(cfg) else ["none"],
                 "images": ds4_has_vision(cfg) or "--vision" not in (cfg.get("args") or [])}
-    if family(cfg) == "qwen":                          # (images: the setup's maya-vision entry, on or kept off)
+    if family(cfg) == "qwen":                          # (images: the setup's vision-glm entry, on or kept off)
         return {"draft": ["mtp", "none"] if qwen_mtp(cfg) is not None else ["none"],
                 "images": bool(cfg.get("vision") or cfg.get("vision_off"))}
     f = dflash_file(cfg)
@@ -395,7 +395,7 @@ def apply(cfg: dict, settings: dict) -> dict:
         if qwen_mtp(cfg) is not None:   # (loaded either way - the server needs it; "none" keeps its drafts off)
             args = set_flag(args, "--mtp", qwen_mtp(cfg))
         args = drop_flag(args, "--mtp-max-t") if s["draft"] == "mtp" else set_flag(args, "--mtp-max-t", 1)
-        # Images: the config's "vision" (maya-vision with the model's mmproj) and the engine's bare --vision flag (GENI
+        # Images: the config's "vision" (vision-glm with the model's mmproj) and the engine's bare --vision flag (GENI
         # requests); off keeps the entry as "vision_off", so Images can be switched on again
         if s.get("images") and not out.get("vision"):
             if not out.get("vision_off"):

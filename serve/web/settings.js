@@ -383,7 +383,7 @@ function gpuNames(name, count) {
 }
 function facts() {
   const m = S.metrics || {}, eng = m.engine || {}, hw = m.hardware || {}, st = m.hardware_static || {}, storage = m.storage;
-  const ver = eng.maya_version || S.health.version;
+  const ver = eng.saguaro_version || eng.maya_version || S.health.version;
   const kvPerTok = eng.kv_gb && eng.kv_ctx ? (eng.kv_gb * 1073741824) / eng.kv_ctx : null;
   let kv;
   if (eng.engine_kind === "glm-fast") {

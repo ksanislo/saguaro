@@ -11,7 +11,7 @@ The EXL3 3.5bpw model has integer per-matrix K (3/4 for routed experts, 6 for mo
 ```sh
 python tools/ds4/pack.py --model /path/to/DeepSeek-V4.1-Flash-1017-EXL3-3.5bpw
 # After building the HIP engine; this starts its raw token-ID serving protocol.
-DS4_SPLIT=36,4 build-hip/maya-ds4 \
+DS4_SPLIT=36,4 build-hip/saguaro-ds4 \
   --pack /path/to/DeepSeek-V4.1-Flash-1017-EXL3-3.5bpw/maya-ds4 \
   --gpus 0,1,2 --tp 2 --max-context 262144 --reserve-mib 2048 \
   --mmap-experts off --prefill-chunk 2048 --vision off --dspark none --serve

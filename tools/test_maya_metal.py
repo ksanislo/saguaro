@@ -42,7 +42,7 @@ class MetalSetupTests(unittest.TestCase):
         self.assertEqual((maya.BUILD, maya.EXE), (self.root / "build-metal", self.root / "build-metal/maya-metal"))
         self.assertEqual(maya.STAMP, self.root / "build-metal/MAYA-BUILD.json")
         maya.select_build_backend("cuda")                       # (the other backends keep theirs)
-        self.assertEqual(maya.EXE, self.root / "build/maya")
+        self.assertEqual(maya.EXE, self.root / "build/saguaro-glm")
 
     def test_check_describes_the_apple_gpu(self):
         pc = maya.check_pc(self.a)

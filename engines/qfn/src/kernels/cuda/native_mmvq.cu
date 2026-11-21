@@ -1940,7 +1940,7 @@ bool q8_sm60_on() {
     static const bool on = [] {
         const char* v = std::getenv("SAGUARO_Q8_SM60");
         const bool yes = v && v[0] == '1' && v[1] == '\0';
-        if (yes) std::fprintf(stderr, "strata q8 sm60: Q8_0 decode GEMVs on the Pascal kernel (SAGUARO_Q8_SM60=1)\n");
+        if (yes) std::fprintf(stderr, "saguaro q8 sm60: Q8_0 decode GEMVs on the Pascal kernel (SAGUARO_Q8_SM60=1)\n");
         return yes;
     }();
     return on;
@@ -2265,7 +2265,7 @@ bool native_q8_0_sm60_pack(const void* weights, int n_in, int n_out, const char*
     void* packed = nullptr;
     if (cudaMalloc(&packed, bytes) != cudaSuccess) {
         cudaGetLastError();
-        std::fprintf(stderr, "strata q8 sm60: no VRAM for the packed %s (%.0f MiB); it keeps the GGUF layout\n", what,
+        std::fprintf(stderr, "saguaro q8 sm60: no VRAM for the packed %s (%.0f MiB); it keeps the GGUF layout\n", what,
                      double(bytes) / 1048576.0);
         return false;
     }
@@ -2275,12 +2275,12 @@ bool native_q8_0_sm60_pack(const void* weights, int n_in, int n_out, const char*
     if (cudaDeviceSynchronize() != cudaSuccess) {
         cudaGetLastError();
         cudaFree(packed);
-        std::fprintf(stderr, "strata q8 sm60: packing the %s failed; it keeps the GGUF layout\n", what);
+        std::fprintf(stderr, "saguaro q8 sm60: packing the %s failed; it keeps the GGUF layout\n", what);
         return false;
     }
     q8_packed_registry()[weights] = Q8Packed{qs, d, n_in, n_out};
     q8_sm60_owned()[weights] = packed;
-    std::fprintf(stderr, "strata q8 sm60: packed %s (%d x %d, %.0f MiB more VRAM)\n", what, n_out, n_in,
+    std::fprintf(stderr, "saguaro q8 sm60: packed %s (%d x %d, %.0f MiB more VRAM)\n", what, n_out, n_in,
                  double(bytes) / 1048576.0);
     return true;
 #endif
@@ -2354,7 +2354,7 @@ bool native_q6_k_pack(const void* weights, int n_in, int n_out, const char* what
                                              reinterpret_cast<const int*>(base + o_qh),
                                              reinterpret_cast<const int8_t*>(base + o_sc),
                                              reinterpret_cast<const half*>(base + o_d), n_in, n_out};
-    std::fprintf(stderr, "strata: SAGUARO_Q6_PACKED=1 packed the %s (%d x %d, +%.1f MiB)\n", what, n_out, n_in,
+    std::fprintf(stderr, "saguaro: SAGUARO_Q6_PACKED=1 packed the %s (%d x %d, +%.1f MiB)\n", what, n_out, n_in,
                  total / 1048576.0);
     // SAGUARO_Q6P_SELFTEST=1: bitwise check against the GGUF-layout kernels (1..4 columns) and paired timings
     if (const char* v = std::getenv("SAGUARO_Q6P_SELFTEST"); v && (v[0] == '1' || v[0] == '2')) {
@@ -2403,10 +2403,10 @@ bool native_q6_k_pack(const void* weights, int n_in, int n_out, const char* what
             }
             g_q6_bypass = false;
             std::sort(tb.begin(), tb.end()); std::sort(tc.begin(), tc.end());
-            std::fprintf(stderr, "strata: Q6_K packed self-test %s ncols %d: GGUF %.1f us (%.1f-%.1f), packed %.1f us "
+            std::fprintf(stderr, "saguaro: Q6_K packed self-test %s ncols %d: GGUF %.1f us (%.1f-%.1f), packed %.1f us "
                          "(%.1f-%.1f), 11 paired samples\n", what, nc, tb[5], tb[0], tb[10], tc[5], tc[0], tc[10]);
         }
-        std::fprintf(stderr, "strata: Q6_K packed self-test %s: outputs %s (1-4 columns)\n", what,
+        std::fprintf(stderr, "saguaro: Q6_K packed self-test %s: outputs %s (1-4 columns)\n", what,
                      same ? "BITWISE EQUAL" : "DIFFER");
         if (v[0] == '2') {   // grid sweep of the packed kernel
             for (int grid : {160, 320, 640, 1280, 2560, 5120, 20480}) {
@@ -2422,7 +2422,7 @@ bool native_q6_k_pack(const void* weights, int n_in, int n_out, const char* what
                         tc.push_back(ms * 1000.0f / 5);
                     }
                     std::sort(tc.begin(), tc.end());
-                    std::fprintf(stderr, "strata: Q6_K packed grid sweep %s grid %d ncols %d: %.1f us (%.1f-%.1f)\n",
+                    std::fprintf(stderr, "saguaro: Q6_K packed grid sweep %s grid %d ncols %d: %.1f us (%.1f-%.1f)\n",
                                  what, grid, nc, tc[3], tc[0], tc[6]);
                 }
             }
@@ -2851,7 +2851,7 @@ bool q8g_on() {
     if (g_q8g_force >= 0) return g_q8g_force > 0;
     static const bool env = [] {
         const bool yes = q8g_env_int("SAGUARO_SM75_Q8G", 0) != 0;
-        if (yes) std::fprintf(stderr, "strata: SAGUARO_SM75_Q8G=1: Q8_0 GEMVs at 2-8 columns on the Turing row kernel\n");
+        if (yes) std::fprintf(stderr, "saguaro: SAGUARO_SM75_Q8G=1: Q8_0 GEMVs at 2-8 columns on the Turing row kernel\n");
         return yes;
     }();
     if (!env) return false;
@@ -3048,7 +3048,7 @@ void q8g_report() {
         unsigned int fst[7] = {};
         if (cudaSetDevice(d) != cudaSuccess || cudaMemcpyFromSymbol(c, g_q8g_chk, sizeof c) != cudaSuccess ||
             cudaMemcpyFromSymbol(fst, g_q8g_first, sizeof fst) != cudaSuccess) { cudaGetLastError(); continue; }
-        std::fprintf(stderr, "strata: SAGUARO_SM75_Q8G_CHECK=%d: device %d: %llu calls, %llu outputs, %llu differ from the "
+        std::fprintf(stderr, "saguaro: SAGUARO_SM75_Q8G_CHECK=%d: device %d: %llu calls, %llu outputs, %llu differ from the "
                      "default kernel", q8g_check_mode(), d, c[0], c[1], c[2]);
         if (c[2] != 0)
             std::fprintf(stderr, " (first: %u x %u, %u columns, row %u column %u: default 0x%08x new 0x%08x)", fst[0], fst[1],
@@ -3378,9 +3378,9 @@ const std::vector<IlEnvRow>& il_env_rows() {
                 bool ok = true;
                 for (int i = 0; i < 5; ++i) { ok = ok && (r[i] == 0 || r[i] == 1 || r[i] == 2 || r[i] == 4); x.r[i] = (uint8_t) r[i]; }
                 if (ok) out.push_back(x);
-                else std::fprintf(stderr, "strata: SAGUARO_MMVQ_IL_ROWS: rows must be 0/1/2/4 - entry ignored\n");
+                else std::fprintf(stderr, "saguaro: SAGUARO_MMVQ_IL_ROWS: rows must be 0/1/2/4 - entry ignored\n");
             } else {
-                std::fprintf(stderr, "strata: SAGUARO_MMVQ_IL_ROWS: cannot read '%s' (type:ncols:r0,r1,r2,r3,r4) - ignored\n",
+                std::fprintf(stderr, "saguaro: SAGUARO_MMVQ_IL_ROWS: cannot read '%s' (type:ncols:r0,r1,r2,r3,r4) - ignored\n",
                              str.substr(pos, end - pos).c_str());
             }
             pos = end + 1;

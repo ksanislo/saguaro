@@ -51,7 +51,7 @@ class HipSetupTests(unittest.TestCase):
         self.a.gpu = None
         pc = maya.check_pc(self.a)
         self.assertEqual(pc["gpus"], [self.gpus[1]])
-        self.assertEqual(maya.EXE, self.root / "build-hip/maya")
+        self.assertEqual(maya.EXE, self.root / "build-hip/saguaro-glm")
 
     def test_versioned_llvm_slot_is_found(self) -> None:
         """Gentoo's versioned LLVM slots count as ROCm's compiler."""
@@ -111,7 +111,7 @@ class HipSetupTests(unittest.TestCase):
         self.assertEqual(cfg["gpu"], [0])
         self.assertEqual(cfg["env"]["SAGUARO_GLM_SPLIT"], "0")
         self.assertEqual(cfg["env"]["SAGUARO_GLM_RESERVE_MB"], "4096")
-        self.assertEqual(cfg["exe"], str(self.root / "build-hip/maya"))
+        self.assertEqual(cfg["exe"], str(self.root / "build-hip/saguaro-glm"))
         self.assertNotIn("vision", cfg)
 
     def test_config_prompt_defaults_and_tuning_table(self):
@@ -263,7 +263,7 @@ class HipSetupTests(unittest.TestCase):
         self.assertEqual(meta["backend"], "hip")
 
     def test_refresh_compiles_a_target_the_new_source_has_not_built(self):
-        # #664: after a git pull, starting GLM compiled build-hip/maya and stamped the new source with targets
+        # #664: after a git pull, starting GLM compiled build-hip/saguaro-glm and stamped the new source with targets
         # ["maya"]; the DeepSeek setup's next start found that source in the stamp and ran the old maya-ds4.
         build = self.root / "build-hip"
         build.mkdir()
@@ -317,7 +317,7 @@ class HipSetupTests(unittest.TestCase):
         (tp / "merges.txt").write_text("")
         (tp / "token_type.json").write_text("[1]")
         # A stale CUDA executable in a HIP config must not select the CUDA build.
-        cfg = {"exe": str(self.root / "build/maya"), "args": ["--max-context", "16384"],
+        cfg = {"exe": str(self.root / "build/saguaro-glm"), "args": ["--max-context", "16384"],
                "tokenizer": str(tp), "gpu": [0] if gpu is None else gpu,
                "env": {"SAGUARO_GLM_PREFILL_SUB": "512", "SAGUARO_GLM_RAM_GB": "60"},
                "lib_dirs": [str(self.rocm / "lib")]}
@@ -343,7 +343,7 @@ class HipSetupTests(unittest.TestCase):
             self.assertEqual(maya.bench(path, "test"), 0)
         proc.wait.assert_called_once_with(timeout=120)
         self.assertIn("QUIT\n", [call.args[0] for call in proc.stdin.write.call_args_list])
-        text = (self.root / "maya-bench.txt").read_text()
+        text = (self.root / "saguaro-bench.txt").read_text()
         self.assertIn("128.0 tokens/s over 3 answers", text)
         self.assertIn("2048 tokens/s, 2048 tokens", text)
         self.assertIn("8192 tokens/s, 8192 tokens", text)
@@ -353,7 +353,7 @@ class HipSetupTests(unittest.TestCase):
         call, text = self.run_bench(self.installed_config(gpu=[1, 0]))
         self.assertEqual(maya.BUILD, self.root / "build-hip")
         self.assertEqual(maya.STAMP, self.root / "build-hip/MAYA-BUILD.json")
-        self.assertEqual(call.args[0][:2], [str(self.root / "build-hip/maya"), "--serve"])
+        self.assertEqual(call.args[0][:2], [str(self.root / "build-hip/saguaro-glm"), "--serve"])
         self.assertEqual(call.args[0][-2:], ["--layer-split", "auto"])
         env = call.kwargs["env"]
         self.assertEqual(env["HIP_VISIBLE_DEVICES"], "1,0")
@@ -388,14 +388,14 @@ class HipSetupTests(unittest.TestCase):
 
     def test_bench_uses_ds4_build_on_hip(self):
         # #350: bench() hardcoded the GLM binary for every HIP config, so a DeepSeek setup's --bench crashed with
-        # FileNotFoundError (build-hip/maya was never built there - build-hip/maya-ds4 was).
+        # FileNotFoundError (build-hip/saguaro-glm was never built there - build-hip/saguaro-ds4 was).
         path = self.installed_config(gpu=[1, 0])
         cfg = maya.read_json(path)
-        cfg["exe"] = str(self.root / "build-hip/maya-ds4")            # what write_config_ds4 actually writes
+        cfg["exe"] = str(self.root / "build-hip/saguaro-ds4")          # what write_config_ds4 actually writes
         cfg["args"] = ["--pack", str(self.root / "model/maya-ds4")] + cfg["args"]
         path.write_text(json.dumps(cfg))
         call, _ = self.run_bench(path)
-        self.assertEqual(call.args[0][:2], [str(self.root / "build-hip/maya-ds4"), "--serve"])
+        self.assertEqual(call.args[0][:2], [str(self.root / "build-hip/saguaro-ds4"), "--serve"])
 
     def run_report(self, outputs=None, tools=(), backend=None, cfg_path=None):
         outputs = outputs or {}
@@ -408,7 +408,7 @@ class HipSetupTests(unittest.TestCase):
                 patch.object(maya.S, "page_file_gb", return_value=None), \
                 patch.object(maya.shutil, "which", side_effect=lambda name: f"/usr/bin/{name}" if name in tools else None):
             self.assertEqual(maya.report("test", backend, cfg_path), 0)
-        return (self.root / "maya-report.txt").read_text(), query
+        return (self.root / "saguaro-report.txt").read_text(), query
 
     def test_report_rocm_smi_json_and_engine_speed_lines(self):
         cfg_path = self.installed_config()
@@ -445,22 +445,22 @@ class HipSetupTests(unittest.TestCase):
                                "--showdriverversion", "--json"])
 
     def test_report_carries_minimax_engine_lines(self):
-        # a MiniMax report had none of its engine's lines ("last 80 of 0"): maya-mm3 --serve wrote where the model went
-        # to the server only, and REPORT_LINES knew no maya-mm3 line
-        kept = ["maya-mm3: loaded in 171.2 s, 9216 of 9216 experts in VRAM, 0.0 GB pinned pool",
-                "maya-mm3: weights: GGUF MiniMax-M3.1-Flash-Maya-S (dense Q6_K)",
-                "maya-mm3: VRAM 0 dense 7.9 GB, experts 118.1 GB",
-                "maya mm3 serve: DSpark kept 189 of 245 drafts",
-                "maya mm3 serve: prompt 201 tokens = 172 reused + 29 read in 806 ms (36.0 tok/s), 256 generated in "
+        # a MiniMax report had none of its engine's lines ("last 80 of 0"): its --serve wrote where the model went
+        # to the server only, and REPORT_LINES knew no saguaro mm3 line
+        kept = ["saguaro mm3: loaded in 171.2 s, 9216 of 9216 experts in VRAM, 0.0 GB pinned pool",
+                "saguaro mm3: weights: GGUF MiniMax-M3.1-Flash-Maya-S (dense Q6_K)",
+                "saguaro mm3: VRAM 0 dense 7.9 GB, experts 118.1 GB",
+                "saguaro mm3 serve: DSpark kept 189 of 245 drafts",
+                "saguaro mm3 serve: prompt 201 tokens = 172 reused + 29 read in 806 ms (36.0 tok/s), 256 generated in "
                 "13334 ms (19.20 tok/s); CPU lane 0.0% of the experts"]
-        other = ["maya mm3 serve: GEN <max_new> [keys] <ids>; GENI <max_new> [keys] <file> <ids>; STOP, QUIT"]
+        other = ["saguaro mm3 serve: GEN <max_new> [keys] <ids>; GENI <max_new> [keys] <file> <ids>; STOP, QUIT"]
         self.assertEqual(maya.speed_lines(kept + other), kept)
 
     def test_report_minimax_images_from_its_vision_arg(self):
         # a MiniMax report said "images off" with --vision on: it read cfg["vision"], which only GLM's configs set
         path = self.installed_config()
         cfg = maya.read_json(path)
-        cfg["exe"] = str(self.root / "build-hip/maya-mm3")
+        cfg["exe"] = str(self.root / "build-hip/saguaro-mm3")
         for args, shown in ((["--vision", "on"], "images on"), (["--vision", "off"], "images off"), ([], "images off")):
             with self.subTest(args=args):
                 cfg["args"] = ["--pack", str(self.root / "model/maya-mm3"), "--max-context", "65536"] + args
@@ -559,7 +559,7 @@ class HipSetupTests(unittest.TestCase):
         query.assert_any_call(["nvidia-smi", "--query-gpu=index,name,memory.total,memory.used,driver_version,"
                                              "pcie.link.gen.max,pcie.link.width.current,pcie.link.width.max,power.limit,"
                                              "temperature.gpu", "--format=csv"])
-        text = (self.root / "maya-report.txt").read_text()
+        text = (self.root / "saguaro-report.txt").read_text()
         self.assertIn(json.dumps(stamp), text)
         self.assertNotIn("## ROCm", text)
 
@@ -802,7 +802,7 @@ class WindowsHipSetupTests(unittest.TestCase):
         self.assertEqual(pc["gpus"], [self.apu])
         self.assertEqual(pc["rocm"], str(self.rocm.resolve()))
         self.assertEqual(pc["rocm_bin"], str(self.rocm.resolve() / "bin"))
-        self.assertEqual(maya.EXE, self.root / "build-hip/maya.exe")
+        self.assertEqual(maya.EXE, self.root / "build-hip/saguaro-glm.exe")
 
     def test_check_without_rocm_says_the_pip_command(self):
         with patch.object(maya, "windows_rocm", return_value=(None, None)), \
@@ -843,7 +843,7 @@ class WindowsHipSetupTests(unittest.TestCase):
             meta = maya.compile_engine_hip(pc, self.root / "llama", "source-sha")
         conf, _, env, bat = build.call_args.args
         self.assertEqual(build.call_args.kwargs["vcvars"], Path("C:/VS/vcvars64.bat"))
-        # the HIP runtime it was built with sits next to maya.exe (else System32's, the driver's, loads first);
+        # the HIP runtime it was built with sits next to the engine's own exe (else System32's, the driver's, loads first);
         # the libraries stay in lib_dirs
         self.assertEqual(sorted(p.name for p in maya.EXE.parent.glob("*.dll")),
                          ["amd_comgr0702.dll", "amdhip64_7.dll", "rocm_kpack.dll"])
@@ -914,7 +914,7 @@ class WindowsHipSetupTests(unittest.TestCase):
                               self.root / "data", None)
         cfg = maya.read_json(p)
         self.assertEqual(p.name, "maya-maya-l-hip.json")
-        self.assertEqual((cfg["backend"], cfg["gpu"], cfg["exe"]), ("hip", [0], str(self.root / "build-hip/maya.exe")))
+        self.assertEqual((cfg["backend"], cfg["gpu"], cfg["exe"]), ("hip", [0], str(self.root / "build-hip/saguaro-glm.exe")))
         self.assertEqual(cfg["lib_dirs"], [str(self.rocm / "bin")])
         env = cfg["env"]
         self.assertEqual(env["SAGUARO_GLM_RESERVE_MB"], "3072")    # the desktop runs on the APU's GPU too

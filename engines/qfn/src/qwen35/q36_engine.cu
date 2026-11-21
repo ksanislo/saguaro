@@ -69,7 +69,7 @@ namespace MMQ = strata::prefill::mmq;
     do {                                                                                                               \
         cudaError_t e_ = (x);                                                                                          \
         if (e_ != cudaSuccess) {                                                                                       \
-            std::fprintf(stderr, "strata-q36: %s failed: %s (%s:%d)\n", #x, cudaGetErrorString(e_), __FILE__, __LINE__); \
+            std::fprintf(stderr, "saguaro q36: %s failed: %s (%s:%d)\n", #x, cudaGetErrorString(e_), __FILE__, __LINE__); \
             std::exit(1);                                                                                              \
         }                                                                                                              \
     } while (0)
@@ -948,7 +948,7 @@ float* upload_f32(const strata::TensorInfo& t, const uint8_t* src) {
             for (int j = 0; j < 32; ++j) h[b * 32 + j] = d * (float) (int8_t) q[2 + j];
         }
     } else {
-        std::fprintf(stderr, "strata-q36: %s is %s, expected F32, BF16, F16 or Q8_0\n", t.name.c_str(), t.type_name());
+        std::fprintf(stderr, "saguaro q36: %s is %s, expected F32, BF16, F16 or Q8_0\n", t.name.c_str(), t.type_name());
         std::exit(1);
     }
     float* d = nullptr;
@@ -963,7 +963,7 @@ bool load(const std::string& path, Model& m, std::string& err, bool want_mtp) {
     const strata::GgufModel& gm = *m.file;
     if (!strata::core::geometry_from_gguf(gm.meta(), m.g, m.top_k, err)) return false;
     if (m.g.family != strata::ModelFamily::Qwen35Moe) {
-        err = "strata-q36 runs Qwen3.6-35B-A3B (qwen35moe) files only";
+        err = "saguaro q36 runs Qwen3.6-35B-A3B (qwen35moe) files only";
         return false;
     }
     size_t checked = 0;
@@ -981,7 +981,7 @@ bool load(const std::string& path, Model& m, std::string& err, bool want_mtp) {
     auto find = [&](const std::string& name, size_t& s) -> const strata::TensorInfo* {
         const strata::TensorInfo* t = gm.find(name, &s);
         if (!t) {
-            std::fprintf(stderr, "strata-q36: missing %s\n", name.c_str());
+            std::fprintf(stderr, "saguaro q36: missing %s\n", name.c_str());
             std::exit(1);
         }
         return t;
@@ -1000,7 +1000,7 @@ bool load(const std::string& path, Model& m, std::string& err, bool want_mtp) {
         w.n_in = (int) t->shape[0];
         w.n_out = (int) t->shape[1];
         if (!K::native_mmvq_supported(w.type)) {
-            std::fprintf(stderr, "strata-q36: %s is %s, which the native MMVQ does not take\n", name.c_str(), t->type_name());
+            std::fprintf(stderr, "saguaro q36: %s is %s, which the native MMVQ does not take\n", name.c_str(), t->type_name());
             std::exit(1);
         }
         const uint64_t nb = strata::tensor_payload_bytes(*t);
@@ -1109,7 +1109,7 @@ bool load(const std::string& path, Model& m, std::string& err, bool want_mtp) {
         m.embd = d;
         bytes += nb;
     }
-    std::fprintf(stderr, "strata-q36: %s: %zu tensors (layout checked), %.2f GiB on the GPU in %.1f s (the routed "
+    std::fprintf(stderr, "saguaro q36: %s: %zu tensors (layout checked), %.2f GiB on the GPU in %.1f s (the routed "
                  "experts are placed after the engine's buffers)\n", path.c_str(), checked, (double) bytes / (1 << 30),
                  ms_since(t0) / 1000.0);
     return true;
@@ -1362,7 +1362,7 @@ struct Engine {
         CK(cudaMalloc(&xq, K::native_q8_1_bytes((int) N, 1) * T));
         x16 = dalloc_t<__half>(T * (size_t) max_in);
         if (cublasCreate(&blas) != CUBLAS_STATUS_SUCCESS || cublasSetStream(blas, st) != CUBLAS_STATUS_SUCCESS) {
-            std::fprintf(stderr, "strata-q36: cuBLAS handle failed\n");
+            std::fprintf(stderr, "saguaro q36: cuBLAS handle failed\n");
             std::exit(1);
         }
         att_s = dalloc(kAttScoreFloats);
@@ -1394,7 +1394,7 @@ struct Engine {
             mq_gu = dalloc((size_t) ne * 2 * FF);
             mq_h = dalloc((size_t) ne * FF);
         }
-        std::fprintf(stderr, "strata-q36: prompt experts on %s\n", use_mmq ? "MMQ (int8)" : "the native grouped kernels");
+        std::fprintf(stderr, "saguaro q36: prompt experts on %s\n", use_mmq ? "MMQ (int8)" : "the native grouped kernels");
         {
             std::string gerr;
             int64_t big = 0;
@@ -1408,7 +1408,7 @@ struct Engine {
                 big = std::max<int64_t>(big, (int64_t) m->eh_proj.n_in * m->eh_proj.n_out);
             }
             if (!gemm.init(st, big, gerr)) {
-                std::fprintf(stderr, "strata-q36: prompt GEMM: %s\n", gerr.c_str());
+                std::fprintf(stderr, "saguaro q36: prompt GEMM: %s\n", gerr.c_str());
                 std::exit(1);
             }
         }
@@ -1459,11 +1459,11 @@ struct Engine {
             size_t fr0 = 0, tot0 = 0;
             CK(cudaMemGetInfo(&fr0, &tot0));
             if (n_sess > 1)
-                std::fprintf(stderr, "strata-q36: %d sessions (--batch): %.2f GiB of VRAM each at a context of %d (%.2f GiB in "
+                std::fprintf(stderr, "saguaro q36: %d sessions (--batch): %.2f GiB of VRAM each at a context of %d (%.2f GiB in "
                              "all), %.2f GiB free before them\n", n_sess, (double) per / (1 << 30), ctx,
                              (double) per * n_sess / (1 << 30), (double) fr0 / (1 << 30));
             if (n_sess > 1 && per * (size_t) n_sess + ((size_t) 1 << 30) > fr0) {
-                std::fprintf(stderr, "strata-q36: not enough VRAM for %d slots at a context of %d (%.2f GiB each, %.2f GiB "
+                std::fprintf(stderr, "saguaro q36: not enough VRAM for %d slots at a context of %d (%.2f GiB each, %.2f GiB "
                              "free): use fewer slots (\"parallel\" / --batch) or a shorter --max-context\n", n_sess, ctx,
                              (double) per / (1 << 30), (double) fr0 / (1 << 30));
                 std::exit(1);
@@ -1506,7 +1506,7 @@ struct Engine {
         CK(cudaDeviceSynchronize());   // every legacy-stream cudaMemset of the buffers above is done
         size_t fr = 0, tot = 0;
         CK(cudaMemGetInfo(&fr, &tot));
-        std::fprintf(stderr, "strata-q36: context %d cells, prompt chunk %d%s, %.2f GiB of VRAM free\n", ctx, tmax,
+        std::fprintf(stderr, "saguaro q36: context %d cells, prompt chunk %d%s, %.2f GiB of VRAM free\n", ctx, tmax,
                      m->has_mtp ? ", MTP block loaded" : "", (double) fr / (1 << 30));
     }
 
@@ -1555,7 +1555,7 @@ struct Engine {
         const float one = 1.0f, zero = 0.0f;
         if (cublasSgemm(blas, CUBLAS_OP_T, CUBLAS_OP_N, n_out, T, n_in, &one, W, n_in, xin, n_in, &zero, out, n_out) !=
             CUBLAS_STATUS_SUCCESS) {
-            std::fprintf(stderr, "strata-q36: cublasSgemm failed\n");
+            std::fprintf(stderr, "saguaro q36: cublasSgemm failed\n");
             std::exit(1);
         }
     }
@@ -1590,7 +1590,7 @@ struct Engine {
             size_t i = 0;
             while (i < n && std::memcmp(&ha[i], &hb[i], 4) == 0) ++i;
             if (++v_by[what] <= 3)
-                std::fprintf(stderr, "strata-q36 VERIFY MISMATCH %s%s: first at %zu of %zu: new %g old %g (bits %08x %08x)\n", what,
+                std::fprintf(stderr, "saguaro q36 VERIFY MISMATCH %s%s: first at %zu of %zu: new %g old %g (bits %08x %08x)\n", what,
                              tag.c_str(), i, n, (double) ha[i], (double) hb[i], *(unsigned*) &ha[i], *(unsigned*) &hb[i]);
         }
     }
@@ -1787,7 +1787,7 @@ struct Engine {
         }
         if (bad) {
             ++v_bad;
-            if (v_bad <= 20) std::fprintf(stderr, "strata-q36 VERIFY MISMATCH group (T %d, groups %d vs %d)\n", T, nn, no);
+            if (v_bad <= 20) std::fprintf(stderr, "saguaro q36 VERIFY MISMATCH group (T %d, groups %d vs %d)\n", T, nn, no);
         }
     }
     bool grouped_by_route = false;   // route_group already filled the group arrays of this layer
@@ -1963,7 +1963,7 @@ struct Engine {
                                                        0, Qh, CUDA_R_16F, H * HD, HD, &zero, Sh, CUDA_R_32F, ldp,
                                                        (long long) nt * ldp, G, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT) !=
                             CUBLAS_STATUS_SUCCESS) {
-                            std::fprintf(stderr, "strata-q36: attention scores GEMM failed\n");
+                            std::fprintf(stderr, "saguaro q36: attention scores GEMM failed\n");
                             std::exit(1);
                         }
                     }
@@ -1977,7 +1977,7 @@ struct Engine {
                                                        0, Sh, CUDA_R_16F, ldp, (long long) nt * ldp, &zero, Oh, CUDA_R_32F,
                                                        H * HD, HD, G, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT) !=
                             CUBLAS_STATUS_SUCCESS) {
-                            std::fprintf(stderr, "strata-q36: attention values GEMM failed\n");
+                            std::fprintf(stderr, "saguaro q36: attention values GEMM failed\n");
                             std::exit(1);
                         }
                     }
@@ -2207,7 +2207,7 @@ struct Engine {
     }
     const uint8_t* stream_take(int li) {
         if (stream_pos >= (int) stream_seq.size() || stream_seq[(size_t) stream_pos] != li) {
-            std::fprintf(stderr, "strata-q36: the expert stream is out of step (layer %d)\n", li);
+            std::fprintf(stderr, "saguaro q36: the expert stream is out of step (layer %d)\n", li);
             std::exit(1);
         }
         const int b = stream_pos % 2;
@@ -2774,7 +2774,7 @@ struct Engine {
         hy_cpu = hy_gpu = hy_swaps = 0;
         hy_cpu_ms = 0;
         reset();
-        std::fprintf(stderr, "strata-q36: warmed up in %.1f s (one prompt chunk, a decode step%s)\n",
+        std::fprintf(stderr, "saguaro q36: warmed up in %.1f s (one prompt chunk, a decode step%s)\n",
                      ms_since(t0) / 1000.0, mtp_d > 0 ? ", a speculative step" : "");
     }
 
@@ -2833,7 +2833,7 @@ bool place_experts(Model& m, Engine& E, double vram_gib, int threads, int hybrid
         m.packed.clear();
         E.reset_graphs();
         CK(cudaMemGetInfo(&fr, &tot));
-        std::fprintf(stderr, "strata-q36: the packed Q8_0 decode copies (%.2f GiB) given back so that every routed "
+        std::fprintf(stderr, "saguaro q36: the packed Q8_0 decode copies (%.2f GiB) given back so that every routed "
                      "expert fits in VRAM (SAGUARO_Q36_KEEP_PACKED=1 keeps them and runs the hybrid mode)\n",
                      (double) packed_bytes / (1 << 30));
     }
@@ -2857,7 +2857,7 @@ bool place_experts(Model& m, Engine& E, double vram_gib, int threads, int hybrid
             CK(cudaMemGetInfo(&fr, &tot));
             budget2 = fr > small_reserve ? fr - small_reserve : 0;
             mtp_only = total_main + ((size_t) 64 << 20) <= budget2;
-            std::fprintf(stderr, "strata-q36: the experts nearly fit: the attention scores buffer at 64 MB and the VRAM "
+            std::fprintf(stderr, "saguaro q36: the experts nearly fit: the attention scores buffer at 64 MB and the VRAM "
                          "reserve at 256 MiB (instead of 768) so that every main layer's experts fit; a driver or "
                          "another program needing more VRAM later can make it fail - --expert-vram GiB sets the experts' "
                          "budget instead\n");
@@ -2875,7 +2875,7 @@ bool place_experts(Model& m, Engine& E, double vram_gib, int threads, int hybrid
             }
             L->n_slots = (int) ne;
         }
-        std::fprintf(stderr, "strata-q36: every routed expert in VRAM (%.2f GiB) in %.1f s\n", (double) total / (1 << 30),
+        std::fprintf(stderr, "saguaro q36: every routed expert in VRAM (%.2f GiB) in %.1f s\n", (double) total / (1 << 30),
                      ms_since(t0) / 1000.0);
         return true;
     }
@@ -2996,11 +2996,11 @@ bool place_experts(Model& m, Engine& E, double vram_gib, int threads, int hybrid
     E.pool = std::make_unique<C::ExpertPool>(threads);
     CK(cudaDeviceSynchronize());
     if (mtp_only)
-        std::fprintf(stderr, "strata-q36: every main layer's routed experts in VRAM (%.2f GiB); the MTP block's: %d of "
+        std::fprintf(stderr, "saguaro q36: every main layer's routed experts in VRAM (%.2f GiB); the MTP block's: %d of "
                      "%lld in VRAM, the rest on the CPU pool (its drafts only)\n", (double) total_main / (1 << 30), S,
                      (long long) ne);
     else
-    std::fprintf(stderr, "strata-q36: hybrid experts: %d of %lld per layer in VRAM (%.2f GiB), all %.2f GiB in %s host "
+    std::fprintf(stderr, "saguaro q36: hybrid experts: %d of %lld per layer in VRAM (%.2f GiB), all %.2f GiB in %s host "
                  "memory, the rest of a batch of <= %d rows on %d CPU threads, bigger prompt chunks streamed (%.2f GiB "
                  "staging); %.1f s\n", S, (long long) ne, (double) S * per_slot / (1 << 30), (double) host / (1 << 30),
                  pinned ? "pinned" : "pageable", E.hybrid_t, E.pool->workers() + (E.pool->host_works() ? 1 : 0),
@@ -3281,7 +3281,7 @@ struct Serve {
                 if (fin) {
                     std::printf("BDONE %d %lld %s %.1f\n", b, (long long) sl.produced, fin, ms_since(sl.t0));
                     if (sl.offered > 0)
-                        std::fprintf(stderr, "strata batch: slot %d: %lld of %lld MTP proposals accepted\n", b, sl.accepted,
+                        std::fprintf(stderr, "saguaro batch: slot %d: %lld of %lld MTP proposals accepted\n", b, sl.accepted,
                                      sl.offered);
                     sl.active = false;
                     ss.active = false;
@@ -3604,7 +3604,7 @@ struct Serve {
             }
             std::printf("BADM %d %d\n", slot, cont ? 1 : 0);
             std::fflush(stdout);
-            std::fprintf(stderr, "strata batch: slot %d takes a prompt of %zu tokens = %zu reused + %lld read in %.0f ms (%.1f "
+            std::fprintf(stderr, "saguaro batch: slot %d takes a prompt of %zu tokens = %zu reused + %lld read in %.0f ms (%.1f "
                          "tok/s)%s\n", slot, ids.size(), reuse, (long long) fresh, prompt_ms,
                          prompt_ms > 0 ? 1000.0 * (double) fresh / prompt_ms : 0.0, cont ? "" : ", done at once");
             return;
@@ -3656,7 +3656,7 @@ struct Serve {
         std::printf("DONE %lld %zu %.1f %.1f %s %lld %lld %zu 0 0 0 0 0.0 %lld 0\n", produced, ids.size(), prompt_ms,
                     decode_ms, finish, accepted, offered, reuse, (long long) fresh);
         std::fflush(stdout);
-        std::fprintf(stderr, "strata serve: session %d: prompt %zu tokens = %zu reused + %lld read in %.0f ms (%.1f tok/s), "
+        std::fprintf(stderr, "saguaro serve: session %d: prompt %zu tokens = %zu reused + %lld read in %.0f ms (%.1f tok/s), "
                      "%lld generated in %.0f ms (%.1f tok/s), drafts accepted %lld of %lld (%s)\n", s, ids.size(), reuse,
                      (long long) fresh, prompt_ms, prompt_ms > 0 ? 1000.0 * (double) fresh / prompt_ms : 0.0, produced,
                      decode_ms, decode_ms > 0 ? 1000.0 * (double) produced / decode_ms : 0.0, accepted, offered, finish);
@@ -3729,7 +3729,7 @@ int strata::qwen35::run(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         auto next = [&]() -> std::string {
-            if (i + 1 >= argc) { std::fprintf(stderr, "strata-q36: %s needs a value\n", a.c_str()); std::exit(2); }
+            if (i + 1 >= argc) { std::fprintf(stderr, "saguaro q36: %s needs a value\n", a.c_str()); std::exit(2); }
             return argv[++i];
         };
         // strata's names where they mean the same thing (the family switch passes strata's command line on)
@@ -3755,7 +3755,7 @@ int strata::qwen35::run(int argc, char** argv) {
             // a number of drafts; Flash-Next's "--mtp <draft layer dir>" means nothing for this family
             const std::string v = next();
             if (!v.empty() && std::isdigit((unsigned char) v[0])) mtp_d = std::atoi(v.c_str());
-            else std::fprintf(stderr, "strata-q36: ignoring --mtp %s (this family's MTP is the GGUF's own block: --mtp N "
+            else std::fprintf(stderr, "saguaro q36: ignoring --mtp %s (this family's MTP is the GGUF's own block: --mtp N "
                                       "drafts)\n", v.c_str());
         }
         else if (a == "--draft-vocab") draft_vocab = std::atoi(next().c_str());   // the MTP drafts pick among the first N token ids
@@ -3770,7 +3770,7 @@ int strata::qwen35::run(int argc, char** argv) {
             // serve passes the config's args plus a few of its own: one this engine does not have is said and skipped
             // (with its value), not fatal
             const bool val = i + 1 < argc && std::string(argv[i + 1]).rfind("--", 0) != 0;
-            std::fprintf(stderr, "strata-q36: ignoring %s%s%s (not an option of this engine)\n", a.c_str(),
+            std::fprintf(stderr, "saguaro q36: ignoring %s%s%s (not an option of this engine)\n", a.c_str(),
                          val ? " " : "", val ? argv[i + 1] : "");
             if (val) ++i;
         } else {
@@ -3781,7 +3781,7 @@ int strata::qwen35::run(int argc, char** argv) {
             return 2;
         }
     }
-    if (model.empty()) { std::fprintf(stderr, "strata-q36: --model is required\n"); return 2; }
+    if (model.empty()) { std::fprintf(stderr, "saguaro q36: --model is required\n"); return 2; }
 #if !defined(_WIN32)
     setenv("CUDA_MODULE_LOADING", "EAGER", 0);   // every kernel loaded with the context, not in the first prompt
     setenv("SAGUARO_Q8_PACKED", "1", 0);   // the packed Q8_0 decode copy unless SAGUARO_Q8_PACKED is set otherwise
@@ -3791,14 +3791,14 @@ int strata::qwen35::run(int argc, char** argv) {
     if (std::getenv("SAGUARO_Q8_PACKED") == nullptr) _putenv_s("SAGUARO_Q8_PACKED", "1");   // as on Linux (it was missing here)
     if (std::getenv("CUDA_MODULE_LOADING") == nullptr) _putenv_s("CUDA_MODULE_LOADING", "EAGER");
 #endif
-    if (mtp_d < 0 || mtp_d > 7) { std::fprintf(stderr, "strata-q36: --mtp takes 0 .. 7 drafts\n"); return 2; }
-    if (chunk < 0 || chunk > 4096 || ctx < 256) { std::fprintf(stderr, "strata-q36: bad --chunk / --max-context\n"); return 2; }
+    if (mtp_d < 0 || mtp_d > 7) { std::fprintf(stderr, "saguaro q36: --mtp takes 0 .. 7 drafts\n"); return 2; }
+    if (chunk < 0 || chunk > 4096 || ctx < 256) { std::fprintf(stderr, "saguaro q36: bad --chunk / --max-context\n"); return 2; }
     Model m;
     std::string err;
     try {
-        if (!load(model, m, err, mtp_d > 0)) { std::fprintf(stderr, "strata-q36: %s\n", err.c_str()); return 1; }
+        if (!load(model, m, err, mtp_d > 0)) { std::fprintf(stderr, "saguaro q36: %s\n", err.c_str()); return 1; }
     } catch (const std::exception& e) {
-        std::fprintf(stderr, "strata-q36: %s\n", e.what());
+        std::fprintf(stderr, "saguaro q36: %s\n", e.what());
         return 1;
     }
     Engine E;
@@ -3844,24 +3844,24 @@ int strata::qwen35::run(int argc, char** argv) {
         }
         if (const char* cv = std::getenv("SAGUARO_Q36_CHUNK")) chunk = std::max(256, std::min(4096, std::atoi(cv)));   // force a chunk (512: the old default)
         if (std::getenv("SAGUARO_Q36_PLACE_DEBUG"))
-            std::fprintf(stderr, "strata-q36: chunk rule: free %.2f GiB (raw %.2f, with %.2f packed), main experts %.2f GiB, chunk %d\n",
+            std::fprintf(stderr, "saguaro q36: chunk rule: free %.2f GiB (raw %.2f, with %.2f packed), main experts %.2f GiB, chunk %d\n",
                          fr / 1073741824.0, fr_raw / 1073741824.0, packed / 1073741824.0, experts / 1073741824.0, chunk);
     }
     E.init(m, ctx, chunk, batch, vision);
     if (!place_experts(m, E, expert_vram, cpu_threads, hybrid_rows, expert_slots, err)) {
-        std::fprintf(stderr, "strata-q36: %s\n", err.c_str());
+        std::fprintf(stderr, "saguaro q36: %s\n", err.c_str());
         return 1;
     }
     struct Report {
         Engine& E;
         ~Report() {
-            if (E.verify_k) std::fprintf(stderr, "strata-q36 VERIFY: %lld comparisons, %lld mismatches\n", E.v_calls, E.v_bad);
+            if (E.verify_k) std::fprintf(stderr, "saguaro q36 VERIFY: %lld comparisons, %lld mismatches\n", E.v_calls, E.v_bad);
             if (E.verify_k)
                 for (const auto& kv : E.v_by)
-                    std::fprintf(stderr, "strata-q36 VERIFY   %s: %lld mismatches\n", kv.first.c_str(), kv.second);
+                    std::fprintf(stderr, "saguaro q36 VERIFY   %s: %lld mismatches\n", kv.first.c_str(), kv.second);
             if (!E.m->hybrid) return;
             const long long n = E.hy_cpu + E.hy_gpu;
-            std::fprintf(stderr, "strata-q36: hybrid experts: %lld of %lld batch entries on the GPU (%.1f%%), %lld on the "
+            std::fprintf(stderr, "saguaro q36: hybrid experts: %lld of %lld batch entries on the GPU (%.1f%%), %lld on the "
                          "CPU pool in %.0f ms, %lld slot replacements\n", E.hy_gpu, n, n ? 100.0 * E.hy_gpu / n : 0.0,
                          E.hy_cpu, E.hy_cpu_ms, E.hy_swaps);
         }
@@ -3871,7 +3871,7 @@ int strata::qwen35::run(int argc, char** argv) {
     if (draft_vocab < 0 && std::getenv("SAGUARO_Q36_DRAFT_VOCAB") != nullptr) draft_vocab = std::atoi(std::getenv("SAGUARO_Q36_DRAFT_VOCAB"));
     E.draft_n = std::max(0, draft_vocab);
     E.bmtp = (batch_mtp || (std::getenv("SAGUARO_BATCH_MTP") != nullptr && std::string(std::getenv("SAGUARO_BATCH_MTP")) != "0")) && E.n_sess > 1 && E.mtp_d > 0;
-    if (batch_mtp && !E.bmtp) std::fprintf(stderr, "strata-q36: --batch-mtp needs --batch N (2 or more) and --mtp N: ignored\n");
+    if (batch_mtp && !E.bmtp) std::fprintf(stderr, "saguaro q36: --batch-mtp needs --batch N (2 or more) and --mtp N: ignored\n");
     if (warm) E.warmup();
     if (serve_mode) return serve(E);
     if (bench_pp > 0 || bench_tg > 0) {
@@ -3901,18 +3901,18 @@ int strata::qwen35::run(int argc, char** argv) {
         return 0;
     }
     const std::vector<int32_t> prompt = parse_ids(tokens.c_str()), forced = parse_ids(force.c_str());
-    if (prompt.empty()) { std::fprintf(stderr, "strata-q36: --tokens, --serve or --bench-pp is required\n"); return 2; }
+    if (prompt.empty()) { std::fprintf(stderr, "saguaro q36: --tokens, --serve or --bench-pp is required\n"); return 2; }
     if (!forced.empty()) n_gen = (int) forced.size() + 1;
     FILE* ff = dump_full.empty() ? nullptr : std::fopen(dump_full.c_str(), "wb");
     std::vector<float> lg;
     std::vector<int32_t> gen;
     if (!emb_file.empty()) {
-        if (!vision) { std::fprintf(stderr, "strata-q36: --emb needs --vision\n"); return 2; }
+        if (!vision) { std::fprintf(stderr, "saguaro q36: --emb needs --vision\n"); return 2; }
         ImgReq ir;
         const std::string ve = build_images(emb_file, prompt, m.g.n_embd, {}, ir);
-        if (!ve.empty()) { std::fprintf(stderr, "strata-q36: %s\n", ve.c_str()); return 2; }
+        if (!ve.empty()) { std::fprintf(stderr, "saguaro q36: %s\n", ve.c_str()); return 2; }
         E.set_images(ir.rows, ir.cell_row, ir.mrope, (int64_t) prompt.size(), ir.delta);
-        std::fprintf(stderr, "strata-q36: %zu picture(s), %zu rows, text after them at cell + %d\n", ir.imgs.size(),
+        std::fprintf(stderr, "saguaro q36: %zu picture(s), %zu rows, text after them at cell + %d\n", ir.imgs.size(),
                      ir.rows.size() / (size_t) m.g.n_embd, (int) ir.delta);
     }
     const auto t0 = Clock::now();
@@ -3938,7 +3938,7 @@ int strata::qwen35::run(int argc, char** argv) {
         std::printf("gen:");
         for (int t : gen) std::printf(" %d", t);
         std::printf("\n");
-        std::fprintf(stderr, "strata-q36: prompt %zu tokens in %.1f ms, %zu generated in %.1f ms (%.1f tok/s), MTP %d drafts: "
+        std::fprintf(stderr, "saguaro q36: prompt %zu tokens in %.1f ms, %zu generated in %.1f ms (%.1f tok/s), MTP %d drafts: "
                      "%lld of %lld accepted (%.0f%%)\n", prompt.size(), pp_ms, gen.size(), ms_since(t1),
                      gen.size() / (ms_since(t1) / 1000.0), E.mtp_d, accepted, offered,
                      offered ? 100.0 * accepted / offered : 0.0);
@@ -3959,7 +3959,7 @@ int strata::qwen35::run(int argc, char** argv) {
     std::printf("gen:");
     for (int t : gen) std::printf(" %d", t);
     std::printf("\n");
-    std::fprintf(stderr, "strata-q36: prompt %zu tokens in %.1f ms (%.1f tok/s), %zu generated in %.1f ms (%.1f tok/s)\n",
+    std::fprintf(stderr, "saguaro q36: prompt %zu tokens in %.1f ms (%.1f tok/s), %zu generated in %.1f ms (%.1f tok/s)\n",
                  prompt.size(), pp_ms, prompt.size() / (pp_ms / 1000.0), gen.size(), ms_since(t1),
                  gen.size() / (ms_since(t1) / 1000.0));
     return 0;

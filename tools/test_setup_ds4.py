@@ -1434,7 +1434,8 @@ class MayaQuants(unittest.TestCase):
 
 
 class Rename(unittest.TestCase):
-    """v1.1.16's program names: an earlier version's programs renamed in place, the stamps and configs follow."""
+    """The programs' names: an earlier version's programs renamed in place, the stamps and configs follow (v1.1.16's
+    target names stay what the stamps name; the program files move to the Saguaro names in one step from either age)."""
 
     def test_programs_and_stamp(self):
         root = Path(tempfile.mkdtemp())
@@ -1443,32 +1444,45 @@ class Rename(unittest.TestCase):
         (root / "build-vision" / "bin").mkdir(parents=True)
         (root / "build" / ("strata" + ext)).write_text("glm")
         (root / "build" / ("strata-ds4" + ext)).write_text("ds4")
+        (root / "build" / ("maya-mm3" + ext)).write_text("mm3")
         (root / "build-vision" / "bin" / ("strata-vision" + ext)).write_text("vision")
         (root / "build" / "MAYA-BUILD.json").write_text(json.dumps({"src": "s", "targets": ["strata", "strata-ds4"]}))
         with patch.object(maya, "ROOT", root), patch.object(maya, "VBUILD", root / "build-vision"):
             maya.rename_programs()
             maya.rename_programs()   # (again: nothing left to do)
-        self.assertEqual((root / "build" / ("maya" + ext)).read_text(), "glm")
-        self.assertEqual((root / "build" / ("maya-ds4" + ext)).read_text(), "ds4")
-        self.assertEqual((root / "build-vision" / "bin" / ("maya-vision" + ext)).read_text(), "vision")
+        self.assertEqual((root / "build" / ("saguaro-glm" + ext)).read_text(), "glm")
+        self.assertEqual((root / "build" / ("saguaro-ds4" + ext)).read_text(), "ds4")
+        self.assertEqual((root / "build" / ("saguaro-mm3" + ext)).read_text(), "mm3")
+        self.assertEqual((root / "build-vision" / "bin" / ("vision-glm" + ext)).read_text(), "vision")
         self.assertFalse((root / "build" / ("strata" + ext)).exists())
         self.assertEqual(json.loads((root / "build" / "MAYA-BUILD.json").read_text())["targets"], ["maya", "maya-ds4"])
+
+    def test_programs_from_the_maya_age(self):
+        root = Path(tempfile.mkdtemp())
+        ext = ".exe" if maya.WIN else ""
+        (root / "build").mkdir()
+        (root / "build" / ("maya" + ext)).write_text("glm")
+        (root / "build" / ("strata" + ext)).write_text("older")   # (both ages: `maya` takes the name, `strata` stays)
+        with patch.object(maya, "ROOT", root), patch.object(maya, "VBUILD", root / "build-vision"):
+            maya.rename_programs()
+        self.assertEqual((root / "build" / ("saguaro-glm" + ext)).read_text(), "glm")
+        self.assertTrue((root / "build" / ("strata" + ext)).exists())
 
     def test_config(self):
         m = Path(tempfile.mkdtemp())
         (m / "build").mkdir()
         (m / "build-vision" / "bin").mkdir(parents=True)
-        for p in ("build/maya.exe", "build/maya-ds4", "build-vision/bin/maya-vision"):
+        for p in ("build/saguaro-glm.exe", "build/saguaro-ds4", "build-vision/bin/vision-glm"):
             (m / p).write_text("")
         cfg = {"exe": str(m / "build" / "strata.exe"), "vision": {"exe": str(m / "build-vision/bin/strata-vision")}}
         self.assertTrue(maya.fix_config_names(cfg))
-        self.assertEqual(Path(cfg["exe"]).name, "maya.exe")
-        self.assertEqual(Path(cfg["vision"]["exe"]).name, "maya-vision")
+        self.assertEqual(Path(cfg["exe"]).name, "saguaro-glm.exe")
+        self.assertEqual(Path(cfg["vision"]["exe"]).name, "vision-glm")
         self.assertFalse(maya.fix_config_names(cfg))
-        ds4 = {"exe": str(m / "build" / "strata-ds4")}
+        ds4 = {"exe": str(m / "build" / "maya-ds4")}
         self.assertEqual(maya.config_family(ds4), "deepseek")   # (read before it is fixed too)
         self.assertTrue(maya.fix_config_names(ds4))
-        self.assertEqual(Path(ds4["exe"]).name, "maya-ds4")
+        self.assertEqual(Path(ds4["exe"]).name, "saguaro-ds4")
         other = {"exe": str(m / "elsewhere" / "strata")}   # (no program under the new name there: kept)
         self.assertFalse(maya.fix_config_names(other))
         self.assertEqual(Path(other["exe"]).name, "strata")

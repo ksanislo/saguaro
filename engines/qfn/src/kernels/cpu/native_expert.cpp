@@ -313,7 +313,7 @@ void native_gu_rows(const NativeFmt& f, const uint8_t* blob, const void* const* 
     if (exact_one && nt == 1 && nt < native_gu_mt_min(f.gu_type) && avx2 && !cpu_avx512_ok() &&
         (f.gu_type == 16 || f.gu_type == 17 || f.gu_type == 18 || f.gu_type == 21 || f.gu_type == 22)) {
         static std::once_flag announced;
-        std::call_once(announced, [] { std::fprintf(stderr, "strata ab: GATE=SAGUARO_CPU_IQ_ALL_EXACT1 active=1\n"); });
+        std::call_once(announced, [] { std::fprintf(stderr, "saguaro ab: GATE=SAGUARO_CPU_IQ_ALL_EXACT1 active=1\n"); });
         iq256_gu_rows_exact_one(f.gu_type, blob, f.gu_row, f.up_off, (int) f.n_embd, act[0], ff[0], r0, r1);
         return;
     }

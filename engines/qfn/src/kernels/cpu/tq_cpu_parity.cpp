@@ -383,7 +383,7 @@ int bench(bool quick, const std::string& only) {
                         true});
     };
     auto add_q2 = [&](bool avx512) {
-        vars.push_back({avx512 ? "strata Q2_0 avx512" : "strata Q2_0 avx2", 42,
+        vars.push_back({avx512 ? "saguaro Q2_0 avx512" : "saguaro Q2_0 avx2", 42,
                         [avx512](const BenchExpert& e, int nt) {
                             thread_local ActQ a1[MAXT], a2[MAXT];
                             thread_local bool init = false;
@@ -412,7 +412,7 @@ int bench(bool quick, const std::string& only) {
     add_q2(false);
     add_q2(true);
     // the Q2_0 pack's own AVX-512 kernel (the repacked 1,382,400-byte blob that setup makes on AVX-512 CPUs)
-    vars.push_back({"strata Q2_0 avx512 pack", 42,
+    vars.push_back({"saguaro Q2_0 avx512 pack", 42,
                     [](const BenchExpert& e, int nt) {
                         thread_local ActQ a1, a2;
                         thread_local bool init = false;

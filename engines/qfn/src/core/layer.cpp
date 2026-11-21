@@ -620,7 +620,7 @@ uint8_t* kv_host_alloc(uint64_t bytes) {
         }
         static bool said = false;
         if (!said) {
-            std::fprintf(stderr, "strata: KV streaming: the host copy is pinned with cudaHostRegister\n");
+            std::fprintf(stderr, "saguaro: KV streaming: the host copy is pinned with cudaHostRegister\n");
             said = true;
         }
         return (uint8_t*) m;
@@ -667,7 +667,7 @@ bool host_elastic_on() {
             int same = 0;
             if (cudaDeviceGetAttribute(&same, cudaDevAttrCanUseHostPointerForRegisteredMem, d) != cudaSuccess || !same) {
                 (void) cudaGetLastError();
-                std::fprintf(stderr, "strata: KV streaming: CUDA%d cannot use a registered page's host address: the slots' "
+                std::fprintf(stderr, "saguaro: KV streaming: CUDA%d cannot use a registered page's host address: the slots' "
                                      "host copies are pinned whole\n", d);
                 return false;
             }
@@ -758,7 +758,7 @@ bool qsa_host_grow(const QsaState& st, int64_t cells) {
                 if (e == cudaSuccess) (void) cudaHostUnregister(a);   // (the device address is not the host's)
                 (void) cudaGetLastError();
                 g_host_failed = true;
-                std::fprintf(stderr, "strata: KV streaming: pinning more of a slot's host copy failed (%s; %.2f GiB pinned "
+                std::fprintf(stderr, "saguaro: KV streaming: pinning more of a slot's host copy failed (%s; %.2f GiB pinned "
                                      "for K/V in all)\n", capped ? "SAGUARO_KV_HOST_MIB reached" : cudaGetErrorString(e),
                              (double) g_kv_host_bytes.load() / 1073741824.0);
                 for (size_t j = 0; j < p.per.size(); ++j)
@@ -858,14 +858,14 @@ bool pool_grow(ElasticPool& p, int64_t cells, const std::function<strata::core::
             if (!p.range.mapped(c)) fresh.push_back(c);
         if (fresh.empty()) continue;
         if (!p.range.map_range(c0, c1, take)) {
-            std::fprintf(stderr, "strata: the elastic K/V could not map %zu chunks (the driver has no VRAM left)\n",
+            std::fprintf(stderr, "saguaro: the elastic K/V could not map %zu chunks (the driver has no VRAM left)\n",
                          fresh.size());
             return false;
         }
         // what the chunk held before (another pool's cells, an expert) is not K/V: zeroed, as a new session is
         for (const int64_t c : fresh)
             if (cudaMemset(p.range.base() + (uint64_t) c * G, 0, (size_t) G) != cudaSuccess) {
-                std::fprintf(stderr, "strata: the elastic K/V could not clear a chunk: %s\n",
+                std::fprintf(stderr, "saguaro: the elastic K/V could not clear a chunk: %s\n",
                              cudaGetErrorString(cudaGetLastError()));
                 return false;
             }
@@ -1155,7 +1155,7 @@ bool qsa_slots_grow(const std::vector<const QsaState*>& states, int64_t cells) {
                     b.free.pop_back();
                     return h;
                 })) {
-                std::fprintf(stderr, "strata: elastic slots: mapping %zu chunks on CUDA%d failed\n", fresh.size(), dev);
+                std::fprintf(stderr, "saguaro: elastic slots: mapping %zu chunks on CUDA%d failed\n", fresh.size(), dev);
                 for (const int64_t c : fresh)   // never mapped and not cleared
                     if (const strata::core::VmmChunk h = p.range.unmap(c)) b.free.push_back(h);
                 return false;
@@ -1163,7 +1163,7 @@ bool qsa_slots_grow(const std::vector<const QsaState*>& states, int64_t cells) {
             // a chunk taken back from another slot still holds that slot's cells: zeroed, as a new session is
             for (const int64_t c : fresh)
                 if (cudaMemsetAsync(p.range.base() + (uint64_t) c * G, 0, (size_t) G, b.zero) != cudaSuccess) {
-                    std::fprintf(stderr, "strata: elastic slots: clearing a chunk failed: %s\n",
+                    std::fprintf(stderr, "saguaro: elastic slots: clearing a chunk failed: %s\n",
                                  cudaGetErrorString(cudaGetLastError()));
                     return false;
                 }
@@ -1298,7 +1298,7 @@ bool rope_map(RopeGrow& r, int64_t cells, const std::function<strata::core::VmmC
     const uint64_t at = (uint64_t) r.cells * rope_row_bytes(r);
     if (cudaMemcpy(r.cos.base() + at, hc.data(), hc.size() * 4, cudaMemcpyHostToDevice) != cudaSuccess ||
         cudaMemcpy(r.sin.base() + at, hs.data(), hs.size() * 4, cudaMemcpyHostToDevice) != cudaSuccess) {
-        std::fprintf(stderr, "strata: the RoPE table could not be filled: %s\n", cudaGetErrorString(cudaGetLastError()));
+        std::fprintf(stderr, "saguaro: the RoPE table could not be filled: %s\n", cudaGetErrorString(cudaGetLastError()));
         return false;
     }
     r.cells = to;
@@ -1321,7 +1321,7 @@ bool qsa_rope_grow(const QsaState& st, int64_t cells) {
     size_t i = 0;
     const int64_t had = r->cells;
     if (!rope_map(*r, cells, [&] { return i < got.size() ? got[i++] : (strata::core::VmmChunk) 0; })) return false;
-    std::fprintf(stderr, "strata: CUDA%d's RoPE table covers %lld positions now (was %lld)\n", dev, (long long) r->cells,
+    std::fprintf(stderr, "saguaro: CUDA%d's RoPE table covers %lld positions now (was %lld)\n", dev, (long long) r->cells,
                  (long long) had);
     return true;
 }
@@ -1369,7 +1369,7 @@ bool qsa_rope_yarn_fit(const QsaState& st, int64_t cells) {
     size_t i = 0;
     const int64_t had = r->cells;
     if (!rope_map(*r, cells, [&] { return i < got.size() ? got[i++] : (strata::core::VmmChunk) 0; })) return false;
-    std::fprintf(stderr, "strata: CUDA%d's YaRN RoPE table covers %lld positions now (was %lld)\n", dev,
+    std::fprintf(stderr, "saguaro: CUDA%d's YaRN RoPE table covers %lld positions now (was %lld)\n", dev,
                  (long long) r->cells, (long long) had);
     return true;
 }
@@ -1396,7 +1396,7 @@ int64_t qsa_rope_yarn_trim() {
                     else strata::core::vmm_chunk_free(h);
                     ++n;
                 }
-        std::fprintf(stderr, "strata: CUDA%d's YaRN RoPE table given back (%lld positions; no YaRN conversation is live)\n",
+        std::fprintf(stderr, "saguaro: CUDA%d's YaRN RoPE table given back (%lld positions; no YaRN conversation is live)\n",
                      dev, (long long) r->cells);
         r->cells = 0;
     }
@@ -1429,7 +1429,7 @@ bool qsa_rope_move(const QsaShapes& s, const std::vector<std::pair<const QsaStat
         (thw != nullptr && (cudaHostAlloc((void**) &pthw, (size_t) P * 3 * sizeof(int32_t),
                                           cudaHostAllocMapped | cudaHostAllocPortable) != cudaSuccess ||
                             cudaHostGetDevicePointer((void**) &pthw_dev, pthw, 0) != cudaSuccess))) {
-        std::fprintf(stderr, "strata: SAGUARO_YARN_ELASTIC: no pinned memory for the re-rotation table\n");
+        std::fprintf(stderr, "saguaro: SAGUARO_YARN_ELASTIC: no pinned memory for the re-rotation table\n");
         if (tab != nullptr) cudaFreeHost(tab);
         return false;
     }
@@ -1581,7 +1581,7 @@ uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, Q
         for (const uint64_t b : kv_per_slot(s, st.kv_hybrid, st.kv_q4, st.kv_int8)) add(b, p.slots, true);
         add((uint64_t) s.idx_dim * 4, p.pooled_rows, false);
         if (!spool->arr.empty() && !spool->range.reserve(strata::core::slot_layout(spool->arr, slot_G))) {
-            std::fprintf(stderr, "strata: elastic slots: reserving a slot state's addresses failed\n");
+            std::fprintf(stderr, "saguaro: elastic slots: reserving a slot state's addresses failed\n");
             return 0;
         }
         const std::vector<uint64_t> per = kv_per_slot(s, st.kv_hybrid, st.kv_q4, st.kv_int8);
@@ -1605,7 +1605,7 @@ uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, Q
         pool->n_slots = p.slots;
         pool->page_size = s.page_size;
         if (!pool->range.reserve(at) || !pool_grow(*pool, g_kv_elastic_init, [] { return (strata::core::VmmChunk) 0; })) {
-            std::fprintf(stderr, "strata: the elastic K/V could not reserve or map its pools\n");
+            std::fprintf(stderr, "saguaro: the elastic K/V could not reserve or map its pools\n");
             return 0;
         }
         uint8_t* a[4] = {};
@@ -1662,7 +1662,7 @@ uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, Q
         const uint64_t bytes = (uint64_t) max_cells * (s.n_rot / 2) * 4;
         if (!r->cos.reserve(bytes) || !r->sin.reserve(bytes) ||
             !rope_map(*r, kRopeBase - kRopeMargin, [] { return (strata::core::VmmChunk) 0; })) {
-            std::fprintf(stderr, "strata: SAGUARO_ROPE_GROW: the RoPE table's addresses or first positions failed\n");
+            std::fprintf(stderr, "saguaro: SAGUARO_ROPE_GROW: the RoPE table's addresses or first positions failed\n");
             return 0;
         }
         st.cos_tab = (float*) r->cos.base();
@@ -1711,7 +1711,7 @@ uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, Q
         if ((h = kv_host_alloc(bytes)) == nullptr ||
             cudaHostGetDevicePointer((void**) &d, h, 0) != cudaSuccess) {
             // both cudaHostRegister and cudaHostAlloc were refused (kv_host_alloc): usually not enough free RAM
-            if (p.mode == 1) std::fprintf(stderr, "strata: KV streaming: cannot pin %.2f GiB of RAM for a layer's KV copy "
+            if (p.mode == 1) std::fprintf(stderr, "saguaro: KV streaming: cannot pin %.2f GiB of RAM for a layer's KV copy "
                                  "(%.2f GiB pinned so far): RAM or the driver refused to pin it - lower the context, "
                                  "or run without --kv-resident\n", (double) bytes / 1073741824.0,
                                  (double) g_kv_host_bytes.load() / 1073741824.0);
@@ -1761,7 +1761,7 @@ uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, Q
                 r->sc = g_rope_yarn;
                 const uint64_t bytes = (uint64_t) max_cells * (s.n_rot / 2) * 4;
                 if (!r->cos.reserve(bytes) || !r->sin.reserve(bytes)) {
-                    std::fprintf(stderr, "strata: SAGUARO_YARN_ELASTIC: the YaRN table's addresses failed\n");
+                    std::fprintf(stderr, "saguaro: SAGUARO_YARN_ELASTIC: the YaRN table's addresses failed\n");
                     return 0;
                 }
                 y = r.get();
@@ -1797,7 +1797,7 @@ uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, Q
     }
     // a solo session's state (qsa_set_vram_elastic_main): its first cells now, before anything at load uses it
     if (!elastic_slot && st.slot_elastic >= 0 && !qsa_slots_grow_fresh(st, 1)) {
-        std::fprintf(stderr, "strata: KV streaming: backing a solo session state's first cells failed\n");
+        std::fprintf(stderr, "saguaro: KV streaming: backing a solo session state's first cells failed\n");
         return 0;
     }
     return c.used;

@@ -72,11 +72,11 @@ int main(int argc, char** argv) {
             } catch (const strata::core::CudaError&) {
                 std::printf("selftest: over-allocation refused as required\n");
             }
-            std::printf("strata-device selftest OK\n");
+            std::printf("saguaro device selftest OK\n");
         }
         return 0;
     } catch (const std::exception& e) {
-        std::fprintf(stderr, "strata-device: %s\n", e.what());
+        std::fprintf(stderr, "saguaro device: %s\n", e.what());
         return 1;
     }
 }

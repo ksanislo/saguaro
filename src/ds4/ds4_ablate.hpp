@@ -176,7 +176,7 @@ inline bool load_direction(const std::string& path, int layer, int n_layer, floa
             std::snprintf(buf, sizeof buf, "adapter (direction layer %d), scale %.3g", layer, scale);
         else
             std::snprintf(buf, sizeof buf, "direction.%d, scale %.3g", layer, scale);
-        what = "ds4: abliteration: " + path + " " + buf + ", projected out of every layer's attention and MoE writes";
+        what = "saguaro ds4: abliteration: " + path + " " + buf + ", projected out of every layer's attention and MoE writes";
         return true;
     } catch (const std::exception& e) {   // GgufFile refuses a malformed header by throwing
         err = path + ": " + e.what();

@@ -214,7 +214,7 @@ These settings change what the engine chooses (put them in the config with `--en
 | `SAGUARO_GLM_THINK_RESERVE` | 1024 | the server: the token reserve for the final answer when a request's output limit is tiny. The config's `"thinking_budget"` (32768) is lowered by a request's `max_tokens` (or the context left) only when that limit is 1024 tokens or fewer (a side request such as a title): then a quarter is kept for the answer, with this preferred floor, capped at half the limit so reasoning still has room; the forced `</think>` token also counts toward the limit. A larger `max_tokens` is the cap on the whole output and leaves the thinking budget as it is (a chat client's 4096 no longer closes the thinking at ~3K tokens; a thinking that reaches the limit ends with `finish_reason` "length"); the reserve can also be supplied as `SAGUARO_GLM_THINK_RESERVE` in the run config's `env` |
 | `SAGUARO_ENGINE_STALL_S` | 90 | the server: an engine silent this long that also used no CPU, disk or GPU in that time is stuck - it is ended, the request gets an error and the next request starts it again (a silent engine that is working is never ended); `0` = off |
 | `SAGUARO_WATCHDOG_S` | 180 | the engine: a request that finishes no prompt layer and no token for this long has hung, even with a thread spinning (#40). The engine writes where it stopped to its log (on Windows also `maya-stall-<pid>.dmp`, every thread's stack: attach both to an issue) and ends; the request gets an error and the next request starts it again. `0` = off |
-| `SAGUARO_DS4_WATCHDOG_S` | 600 | DeepSeek's engine (`maya-ds4 --serve`): a request whose prompt, tokens and steps between stop moving for this long has hung (#539, #494: a tensor-parallel group with one GPU spinning and the other idle). The engine writes where the main thread and each GPU's thread of a prompt were (`maya ds4 serve: where it stopped: ...`) and ends; the request gets an error and the next one starts it again. `0` = off. Not this setting's, and always on: a request that leaves a GPU holding layers in a fault (an illegal address, a failed launch - every later call on that GPU fails) or the prompt path's room not handed back ends the engine the same way once that request's error is out (`maya ds4 serve: a GPU's state is unknown after this request`, exit 3), and the next request - even one already waiting - starts a fresh one; before, it stayed up and refused every later request until a restart by hand |
+| `SAGUARO_DS4_WATCHDOG_S` | 600 | DeepSeek's engine (`saguaro-ds4 --serve`): a request whose prompt, tokens and steps between stop moving for this long has hung (#539, #494: a tensor-parallel group with one GPU spinning and the other idle). The engine writes where the main thread and each GPU's thread of a prompt were (`saguaro ds4 serve: where it stopped: ...`) and ends; the request gets an error and the next one starts it again. `0` = off. Not this setting's, and always on: a request that leaves a GPU holding layers in a fault (an illegal address, a failed launch - every later call on that GPU fails) or the prompt path's room not handed back ends the engine the same way once that request's error is out (`saguaro ds4 serve: a GPU's state is unknown after this request`, exit 3), and the next request - even one already waiting - starts a fresh one; before, it stayed up and refused every later request until a restart by hand |
 | `SAGUARO_HTTP_BACKLOG`, `SAGUARO_MAX_BODY_MIB` | 256, 256 | the server: connections that may wait to be accepted, and the largest request body in MiB (a larger one gets a 413 before it is read) |
 | `SAGUARO_ENGINE_QUIT_S` | 50 | the server: how long the engine gets to end (and keep its conversation, with `SAGUARO_GLM_SLOT_KEEP`) after a stop - SIGTERM and SIGHUP are handled like Ctrl+C, a second one is ignored (a second Ctrl+C ends the server at once); a supervisor's own grace (llama-swap's `unloadTimeout`) should exceed it |
 | `SAGUARO_ENGINE_WRAP_S` | 40 | the server: on a stop, a request in progress is wrapped up instead of dropped - its thinking is closed at once and it answers for up to this long (then it is cut), so the client gets an answer and the turn ends; requests still queued are refused. Keep it plus the engine's end inside the supervisor's grace (llama-swap's `unloadTimeout`); `0` = cut at once |
@@ -278,7 +278,7 @@ there, and the reserves below, go there too, and a setup again keeps them (`SAGU
 | `--vram-reserve-mib N` | the VRAM left free beside the pool: 700 MiB by default (1024 on a Ryzen AI Max APU under Linux). On a small card where that would leave the pool less than a route's experts and the spares in every layer, `auto` lowers it as far as 300 MiB and says so; a number set here is kept. The setup takes it too (`--vram-reserve-mib N`) |
 | `--vram-reserve-later-mib N` | the same on a split's later GPUs (default: `--vram-reserve-mib`'s) - a card that drives no display needs less |
 
-At start the engine log says how much VRAM each GPU has free with everything loaded (`maya serve: CUDA0: ... MiB of
+At start the engine log says how much VRAM each GPU has free with everything loaded (`saguaro serve: CUDA0: ... MiB of
 VRAM free with everything loaded`). Under 256 MiB (512 on a split's later GPUs) it adds `LOW` and the reserve that would
 leave room. The engine only says so: raise `--vram-reserve-mib` (`--vram-reserve-later-mib`), lower `--max-context`, or
 close other programs that use the GPU. A drafter's verify windows allocate on first use, after the start: an RTX 3090
@@ -367,7 +367,7 @@ row is used: with DSpark drafts, an accepted draft's and the token after them ea
 verify window, so the numbers are those of a step without drafts, up to the rounding of a window's arithmetic. Tool
 calls, the end-of-thinking token and the end of turn have no entries.
 
-Only the DeepSeek engine (maya-ds4) reports them (`GEN ... logprobs=<n>`: an `LP [<rid>] <id> <logprob> <id>:<logprob>
+Only the DeepSeek engine (saguaro-ds4) reports them (`GEN ... logprobs=<n>`: an `LP [<rid>] <id> <logprob> <id>:<logprob>
 ...` line after each token's `T` line; its start says `INFO logprobs=20`). A request without them decodes exactly as
 before - no device work, no extra wait; one that asks costs a kernel over the token's logit row (the window's rows with
 drafts) and a small copy a step. Another engine (GLM, MiniMax) answers a request that asks with a 400.
@@ -454,7 +454,7 @@ with `"loop_guard": false` (or `true`) beside its sampling fields (Chat Completi
 This is a setting of **GLM-5.3-Flash**, **DeepSeek-V4.1-Flash** ([DeepSeek's below](#deepseek-v41-flash-several-requests-at-once))
 and **MiniMax-M3.1-Flash**. A saved conversation slot reuses earlier state; it does not decode requests at the same time.
 
-**MiniMax-M3.1-Flash:** `maya-mm3 --parallel N` (the setup and `START-SAGUARO.bat --parallel 4` write it into the config)
+**MiniMax-M3.1-Flash:** `saguaro-mm3 --parallel N` (the setup and `START-SAGUARO.bat --parallel 4` write it into the config)
 gives every conversation its own KV cache, always in VRAM: KV streaming and the DSpark drafter are off while N is above
 1 (the engine says so with a NOTE; the config keeps both settings for the day N is 1 again), and `--tp` runs the layer
 split. The cache takes about 61 KB a position with INT8, so N conversations of a context need N x 61 KB x context of
@@ -484,7 +484,7 @@ the size. With N above 1 the engine decodes without a [DFlash2 drafter](#draftin
 
 ### DeepSeek-V4.1-Flash: several requests at once
 
-`maya-ds4 --parallel N` holds N conversations, each with its own state: its window rings, its compressed KV and index
+`saguaro-ds4 --parallel N` holds N conversations, each with its own state: its window rings, its compressed KV and index
 keys, its checkpoints. That is about 1.1 KB a position on each GPU for each of them, a whole context's worth each,
 taken from the experts' VRAM at the start (the log's `ds4: --parallel` line gives the size). The setup's recommended
 context shares the memory beside the model among the N conversations.
@@ -498,7 +498,7 @@ context shares the memory beside the model among the N conversations.
   experts the requests share are read once for all of them, and each request's attention reads its own
   conversation's caches.
   Each request gets exactly the tokens it would get alone with plain steps: greedy, with the experts where the load put
-  them and the PCIe lane off, its logits are bit for bit its own (checked with 2 and 4 at once: `maya-ds4 --parallel 4
+  them and the PCIe lane off, its logits are bit for bit its own (checked with 2 and 4 at once: `saguaro-ds4 --parallel 4
   --multi-check --ids ...`). The CPU lane's and the PCIe lane's rounding can change the last bits, as it already can
   between two runs of one request.
 - **A new request** takes the idle conversation its prompt continues. If none fits, it takes an empty one, else the
@@ -584,7 +584,7 @@ A prompt read in pieces stops at each [restore point](#deepseek-restore-points-i
 does: a piece ends there, and tells the engine only of the prompt up to that point, so the state kept there is the one
 a read up to it leaves. Between two points a long prompt's skip still counts from the next point, not from each piece.
 
-`maya-ds4 --parts-check --ids ...` (tests; with `--parallel 2` another conversation read and stepped between the parts)
+`saguaro-ds4 --parts-check --ids ...` (tests; with `--parallel 2` another conversation read and stepped between the parts)
 reads a prompt in one run and again in parts of one chunk of that run's own plan, and compares the two bit for bit,
 with both reads' waits for Engram rows; the other conversation's tokens against its own alone are informational. In
 that check, where the GPUs lend the prompt's buffers their expert slots (a GGUF's experts read in place), the room stays
@@ -794,7 +794,7 @@ that. It applies to prompts of ~3,700 new tokens or more, on one GPU (several GP
 | `SAGUARO_DS4_DSPARK_CUM` | 0.5 | DSpark drafting: a draft is verified only while the chance that it and every draft before it are kept (the product of their confidences) stays at least this, so a window whose later drafts would likely be lost is not verified whole. The same tokens; a Radeon 8065S with Maya-S decoded 12.04 -> 12.82 tok/s (+6.5%). `0` = off (only each draft's own floor, `--dspark-conf`); a request's `strata_tune` `spec_cum` sets it for that request |
 | `SAGUARO_DS4_DRAFT_COST` | off (0) | opt-in until measured on GPUs. `1`: DSpark's window by what a verified row costs on this PC, in place of the cut above. Of the drafts above their own floor (`--dspark-conf`), a round verifies as many as commit the most tokens a millisecond: the chance each draft holds (its confidence, moved towards what drafts of that confidence at that position did) against the measured round time of a window of that many rows, kept apart for contexts under 8K, under 64K and longer. A round far slower than its size is known to take (a stall, a cold read) counts as twice that at most; a size measured in a slow stretch, or not yet, is tried again when its drafts are likely to hold. With `--parallel` the windows of a step are planned together at the measured time of a step of that many requests by its rows in all: one request's extra rows are charged for the time they add to the others, and a request whose drafts are likelier to hold may take more than its even share of the 16 rows. The same tokens: every draft is still verified, only how many are verified changes. A request's own `spec_cum` keeps the fixed cut for it. The engine log gives the measured costs after each request (`draft cost (DS4_DRAFT_COST)`); `DS4_DRAFT_COST=1` works too |
 | `DS4_DSPARK_LAZY` | on (1) | DSpark drafting: the drafter's head, markov steps and confidences run only for the rows the round's cut (`--dspark-conf`, `SAGUARO_DS4_DSPARK_CUM`, `DS4_DSPARK_MAX`) can still keep, in up to three steps, the cut checked on the host after each; a head on one device only (a tensor-parallel head group and `DS4_DSPARK_DUMP` run every row). The same drafts and tokens. `0`: every row, as before |
-| `--suffix-draft` (maya-ds4) | 3 (on, NVIDIA and AMD) | (the dashboard's Models page: Prompt lookup) prompt lookup beside DSpark: where the answer repeats earlier context (code edits, quoted text), a round verifies the tokens that followed that earlier occurrence (up to 15, past DSpark's block) instead of DSpark's drafts, when its first token agrees with DSpark's and the measured round times and acceptance say it commits more tokens a millisecond. The same tokens (greedy: identical; sampled: every token still the model's own draw). 9 GPUs (RTX 3090 + 8x RTX 5060 Ti), Mix-256G, `--tp 8`: whole-file edits 84 -> 111 and 96 -> 144 tok/s, ordinary answers unchanged. Without DSpark (`--dspark none` or `off`, or a round after DSpark's drafts all fell below their confidence) the lookup's drafts are weighed against a plain step the same way: EXL3 3.5 bpw, `--tp 8`, no DSpark, a whole-file edit 48 -> 166 tok/s, a JSON list 57 -> 154, prose unchanged. The value is the shortest match it proposes from; `--suffix-draft 0` turns it off; a request's `strata_tune` `suffix_draft` (0/1) sets it for that request. On AMD its long verify windows (up to 16 tokens) do not always give the same bits as the short ones, so a greedy answer can take another word at a near-tie (the same quality); a Strix Halo with DSpark: a whole-file edit 46 -> 58 tok/s, ordinary answers unchanged |
+| `--suffix-draft` (saguaro-ds4) | 3 (on, NVIDIA and AMD) | (the dashboard's Models page: Prompt lookup) prompt lookup beside DSpark: where the answer repeats earlier context (code edits, quoted text), a round verifies the tokens that followed that earlier occurrence (up to 15, past DSpark's block) instead of DSpark's drafts, when its first token agrees with DSpark's and the measured round times and acceptance say it commits more tokens a millisecond. The same tokens (greedy: identical; sampled: every token still the model's own draw). 9 GPUs (RTX 3090 + 8x RTX 5060 Ti), Mix-256G, `--tp 8`: whole-file edits 84 -> 111 and 96 -> 144 tok/s, ordinary answers unchanged. Without DSpark (`--dspark none` or `off`, or a round after DSpark's drafts all fell below their confidence) the lookup's drafts are weighed against a plain step the same way: EXL3 3.5 bpw, `--tp 8`, no DSpark, a whole-file edit 48 -> 166 tok/s, a JSON list 57 -> 154, prose unchanged. The value is the shortest match it proposes from; `--suffix-draft 0` turns it off; a request's `strata_tune` `suffix_draft` (0/1) sets it for that request. On AMD its long verify windows (up to 16 tokens) do not always give the same bits as the short ones, so a greedy answer can take another word at a near-tie (the same quality); a Strix Halo with DSpark: a whole-file edit 46 -> 58 tok/s, ordinary answers unchanged |
 
 ## DeepSeek: which way a prompt goes, and its buffers
 
@@ -1437,12 +1437,12 @@ an `--expert-profile` in the config's `args` (a file, or `none`) is used instead
 
 ## DeepSeek: tools for a pack, a build and the drafter
 
-`maya-ds4` runs these only when asked; serving is the same without them.
+`saguaro-ds4` runs these only when asked; serving is the same without them.
 
 | Argument | What it does |
 | --- | --- |
 | `--pack-info` (with `--pack <dir>`) | describes the pack without a GPU and without reading its weights: the routed experts' types layer by layer (gate and up / down) with an expert's and a token's bytes, where each part goes (the GPUs, pinned RAM, the files), how much of the expert profile's routing the most-routed experts take (50 / 80 / 90 / 95 / 99%: how many, how many GB - what VRAM and RAM must hold), the drafter's and the Engram's metadata, tensors of a type no kernel takes, and every file `model_dir` points at (there, and as long as its tensors need). A pack whose weights were moved or cleaned up still reads perfectly and only fails at the load: it is called a `DEAD PACK` here. Suspicious metadata is warned about, e.g. `dspark_block_size` 0 beside the drafter's tensors (the drafter is then not loaded), or an expert profile of another size (ignored at the load). Exit code 0: it can load; 1: not a pack; 2: it cannot load. `--expert-profile FILE` reads that profile instead of the pack's |
-| `--version` | the release (the `VERSION` file's) and the commit the binary was built from, e.g. `maya-ds4 1.1.35 (build 193b851c0d2e)`; `--verbose` puts the same as a `ds4: build ...` line at the top of the engine log. The commit is git's at each build (`-dirty`: built with changes not committed); a source folder without git takes a `BUILD_ID` file's first line, and `cmake -DMAYA_BUILD_ID=...` sets it outright |
+| `--version` | the release (the `VERSION` file's) and the commit the binary was built from, e.g. `saguaro-ds4 1.1.35 (build 193b851c0d2e)`; `--verbose` puts the same as a `saguaro saguaro ds4: build ...` line at the top of the engine log. The commit is git's at each build (`-dirty`: built with changes not committed); a source folder without git takes a `BUILD_ID` file's first line, and `cmake -DMAYA_BUILD_ID=...` sets it outright |
 | `--profile-run FILE` | an expert profile from a corpus: each line of `FILE` a run of token ids (`0,128803,...`, BOS and text, as `--ppl` takes them: `tools/ds4/tok.py --text` gives a text's ids, the BOS id `0` goes first) read from a fresh state; the routing is counted and saved as it goes (every 10 lines or minute, and at the end) to `--profile-out` (default `FILE.profile.bin`): that run's counts alone. The pack's profile places the experts and is not written; the drafter is not loaded unless `--dspark` says so; every layer routes every token, the prompt skip off (`SAGUARO_DS4_PROMPT_SKIP` set keeps yours). `python tools/ds4/profile.py make --pack <pack> --out my-profile.bin RUN.profile.bin ...` turns such files into a starting profile (each run weighing the same), `profile.py compare` says how much two agree |
 | `--profile-readonly` | the expert profile (the pack's, or `--expert-profile`'s) places the experts but is never written back: a test run with another layout, other settings or odd prompts leaves the pack's counts as they were |
 | `--profile-out FILE` | any run: what this run routed alone (the counts read at the start taken off) also goes to `FILE`, whenever the profile is saved (after each answer, at the end) - e.g. `--serve --profile-readonly --profile-out mine.bin` collects a session's routing without touching the pack's |
@@ -1695,7 +1695,7 @@ A read from token 0 also stops at the end of the system prompt and its tools, wh
 conversations (below). A tail point taken on the way costs no stop, so the tail point's measured cost (above) counts
 only the reads that stop at it. Each piece read alone, layers 20-39 also run on up to ~2,700 tokens before its point, which a read without the point
 would have skipped, and the pieces' chunks end at the point, so that first read's answer can differ from a read without
-points the way another `--prefill-chunk` can. `maya-ds4 --marks-check --ids ...` compares the two reads: with the skip
+points the way another `--prefill-chunk` can. `saguaro-ds4 --marks-check --ids ...` compares the two reads: with the skip
 off the same logits bit for bit, and from each point the same state. Each conversation `--parallel` holds has its own points, and a kept conversation keeps them and
 is taken back at them too. An RTX 3090 + eight RTX 5060 Ti, EXL3 3.5 bpw, an 18K-token chat: its last message edited, the
 first token after 15.0 s without the points (every token read again), 0.2 s with them (18,041 tokens kept, 14 read);
@@ -1829,7 +1829,7 @@ AMD alike. The options above apply, but for `--tp` (the GGUFs run the layer spli
 
 **The prefill calibration.** How a PC reads prompts fastest depends on its GPU, so it is measured there: the setup
 (step 9), `./saguaro.sh --calibrate` and the first start of a MiniMax config set up before it run the engine once over a
-~4K-token text (`maya-mm3 --calibrate-prefill`, tools/calibrate_mm3_prefill.py) with a few settings - the chunk of
+~4K-token text (`saguaro-mm3 --calibrate-prefill`, tools/calibrate_mm3_prefill.py) with a few settings - the chunk of
 tokens a step takes and, with Saguaro's GGUF quants on AMD, the matrix products' library - and keep the fastest. A larger
 chunk's buffers take VRAM from the experts: where every expert still fits it is simply taken when faster; where most
 experts stay in RAM (each chunk then copies them over PCIe, so a larger one reads prompts much faster) a second start
@@ -1876,13 +1876,13 @@ host thread, device and stream, and keeps the existing path during graph capture
 CYBER-FROST-3.8 (a fine-tune of
 Qwen3.8-Flash-Next: 512 experts, 10 a token, GatedDeltaNet and sparse-attention layers, an n-gram table, an MTP block;
 the Qwen Community License 1.0, `LICENSE.qwen-community-1.0`). One 112.5 GB file, downloaded from the commit
-`tools/qwen/download.json` pins and checked against its sha256. It runs on the `maya` engine's own Qwen path, from the
+`tools/qwen/download.json` pins and checked against its sha256. It runs on the `saguaro-glm` engine's own Qwen path, from the
 file in place: the setup writes `maya-cyber-frost.json` (`maya-cyber-frost-hip.json` on AMD), the pack (the index of
 the file's tensors, its small float weights and the tokenizer with the model's chat template) and the MTP drafter, built
 from the file's NextN block (`tools/mtp_from_gguf.py`, in `<model folder>/pack/mtp`). Pictures: the fine-tune kept the base model's vision
 tower byte for byte, so the setup downloads the base model's mmproj (0.9 GB, pinned and sha256-checked, into
 `<model folder>/vision`) and writes the config's `"vision"` entry and the engine's `--vision`; the image encoder
-(`build-vision/bin/maya-vision`) starts only when a picture arrives, on the first GPU: in VRAM that is free, and where
+(`build-vision/bin/vision-glm`) starts only when a picture arrives, on the first GPU: in VRAM that is free, and where
 that is short the engine gives back as much of its expert cache as the encoder needs (all of it on a small card, and
 then the draft layer's experts too) while the picture is read, then maps it again and refills the same experts (a
 second or so per request with new pictures; text answers and the decode speed stay as they were; NVIDIA, the HIP build

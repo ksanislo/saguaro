@@ -447,7 +447,7 @@ bool fits(int t, int64_t w_rows) {
             static bool said[GGML_TYPE_COUNT] = {};
             if (t >= 0 && t < GGML_TYPE_COUNT && !said[t]) {
                 said[t] = true;
-                std::fprintf(stderr, "strata: prompt kernels: llama.cpp's MMQ has no tile for %s (%lld rows) on GPU %d "
+                std::fprintf(stderr, "saguaro: prompt kernels: llama.cpp's MMQ has no tile for %s (%lld rows) on GPU %d "
                                      "(cc %d, %zu bytes of shared memory per block): that product takes the non-MMQ path "
                                      "(#420)\n", type_label((int) t), (long long) w_rows, id, cc, smpbo);
             }
@@ -700,7 +700,7 @@ int direct_mode() {
         const int m = v ? std::atoi(v) : 0;
         if (m != 1 && m != 2) return 0;
         if (!tab_built()) {
-            std::fprintf(stderr, "strata: SAGUARO_MMQ_DIRECT=%d is ignored: this build has no pointer-table MMQ "
+            std::fprintf(stderr, "saguaro: SAGUARO_MMQ_DIRECT=%d is ignored: this build has no pointer-table MMQ "
                                  "(CUDA with STRATA_MMQ_TAB only)\n", m);
             return 0;
         }
@@ -801,7 +801,7 @@ bool swiglu_q8_requested() {
     static const bool on = [] {
         const char* v = std::getenv("SAGUARO_MMQ_SWIGLU_Q8");
         const bool r = v != nullptr && std::atoi(v) != 0;
-        if (r) std::fprintf(stderr, "strata: prompt MMQ fuses SwiGLU into the down product's q8_1 quantize (SAGUARO_MMQ_SWIGLU_Q8=1)\n");
+        if (r) std::fprintf(stderr, "saguaro: prompt MMQ fuses SwiGLU into the down product's q8_1 quantize (SAGUARO_MMQ_SWIGLU_Q8=1)\n");
         return r;
     }();
     return on;

@@ -77,7 +77,7 @@ def log_mark() -> int:
 
 
 def show(name: str, lines: list[str]) -> list[str]:
-    keep = [l for l in lines if "ds4 slots:" in l or "maya ds4 serve: prompt" in l or l.startswith("PP ")]
+    keep = [l for l in lines if "saguaro ds4 slots:" in l or "saguaro ds4 serve: prompt" in l or l.startswith("PP ")]
     print(f"\n[{name}] engine lines:")
     for l in keep[-8:]:
         print("   " + l)

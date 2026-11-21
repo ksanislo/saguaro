@@ -54,7 +54,8 @@ def without(args: list, name: str) -> list:
 
 def is_mm3(cfg: dict) -> bool:
     """A MiniMax-M3.1-Flash config (maya-mm3): its DSpark drafter is measured the same way."""
-    return (cfg.get("installer") or {}).get("family") == "minimax" or Path(cfg.get("exe", "")).name.startswith("maya-mm3")
+    return (cfg.get("installer") or {}).get("family") == "minimax" or \
+        Path(cfg.get("exe", "")).name.startswith(("maya-mm3", "saguaro-mm3"))
 
 
 def with_dspark(cfg: dict, mode: str) -> dict:

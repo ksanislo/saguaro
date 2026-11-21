@@ -369,7 +369,7 @@ unsigned bf16_tc_skip() {
             if (v.find(word) != std::string::npos) r |= bit;
         if (const char* i = std::getenv("SAGUARO_BF16_TC_SKIP_INDEXER"); i && std::atoi(i) != 0) r |= kTcIndexer;
         if (r != 0)
-            std::fprintf(stderr, "strata: SAGUARO_BF16_TC_SKIP: %s%s%s%s%skeep cuBLAS's BF16 GEMM\n", r & kTcIndexer ? "indexer " : "",
+            std::fprintf(stderr, "saguaro: SAGUARO_BF16_TC_SKIP: %s%s%s%s%skeep cuBLAS's BF16 GEMM\n", r & kTcIndexer ? "indexer " : "",
                          r & kTcRouter ? "router " : "", r & kTcSsm ? "ssm " : "", r & kTcHc ? "hc " : "", r & kTcPle ? "ple " : "");
         return r;
     }();
@@ -1327,7 +1327,7 @@ bool mmq_kq_layer(int64_t l, int gt, int dt) {
             for (int k = std::max(a, 0); k <= b && k < 256; ++k) r[(size_t) k] = 1;
             i = j + 1;
         }
-        std::fprintf(stderr, "strata: SAGUARO_MMQ_KQ_LAYERS=%s: the K-quant experts of the other layers keep the FP16 path\n", e);
+        std::fprintf(stderr, "saguaro: SAGUARO_MMQ_KQ_LAYERS=%s: the K-quant experts of the other layers keep the FP16 path\n", e);
         return r;
     }();
     const auto kq = [](int t) { return t == 12 || t == 13 || t == 14 || t == 7; };   // GGML_TYPE_Q4_K, Q5_K, Q6_K, Q5_1
@@ -1388,7 +1388,7 @@ const MmqPlan& mmq_plan() {
                 p.d_over[(size_t) l] = (uint32_t) mmq::overread_bytes(dt, 640);
                 ++nd;
             }
-            std::fprintf(stderr, "strata: prompt MMQ reads resident experts in place (SAGUARO_MMQ_DIRECT=1): %lld of %lld "
+            std::fprintf(stderr, "saguaro: prompt MMQ reads resident experts in place (SAGUARO_MMQ_DIRECT=1): %lld of %lld "
                                  "layers\n", (long long) nd, (long long) layers);
         }
         // the verdict depends only on the layer's formats and the visible GPUs: taken once here, not per chunk
@@ -1401,7 +1401,7 @@ const MmqPlan& mmq_plan() {
                 p.group_sort[(size_t) l] = mmq::whole_tiles(gt, 1280, MMQ_GROUP) && mmq::whole_tiles(dt, N, MMQ_GROUP);
                 ns += p.group_sort[(size_t) l];
             }
-            std::fprintf(stderr, "strata: prompt MMQ sorts the full expert groups (SAGUARO_MMQ_GROUP_SORT=1): %lld of %lld "
+            std::fprintf(stderr, "saguaro: prompt MMQ sorts the full expert groups (SAGUARO_MMQ_GROUP_SORT=1): %lld of %lld "
                                  "layers\n", (long long) ns, (long long) layers);
         }
         return p;
@@ -1478,7 +1478,7 @@ void warm_gemm_libraries(int device) {
         }
         const bool wanted = warm_gemm_wanted(archs, std::getenv("SAGUARO_PREFILL_WARM"));
         if (!wanted)
-            std::fprintf(stderr, "strata prefill: no hipBLAS warm-up: the cards are of more than one architecture "
+            std::fprintf(stderr, "saguaro prefill: no hipBLAS warm-up: the cards are of more than one architecture "
                                  "(it slows prompts there, #3204); the first prompt loads the libraries (SAGUARO_PREFILL_WARM=1 asks for it)\n");
         return wanted;
     }();
@@ -1518,7 +1518,7 @@ void warm_gemm_libraries(int device) {
     if (st) cudaStreamDestroy(st);
     if (prev != device) cudaSetDevice(prev);
     if (ok)
-        std::fprintf(stderr, "strata prefill: warmed the BF16 and FP16 GEMM libraries on GPU %d in %.0f ms (SAGUARO_PREFILL_WARM=0 skips)\n",
+        std::fprintf(stderr, "saguaro prefill: warmed the BF16 and FP16 GEMM libraries on GPU %d in %.0f ms (SAGUARO_PREFILL_WARM=0 skips)\n",
                      device, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
 #else
     (void) device;
@@ -2136,7 +2136,7 @@ bool Prefill::draft_kv(core::MtpDrafter& mtp, const float* R_rows, const int32_t
     }
     mtp.ms_prefill += ms_since(t0);
     if (timing)
-        std::fprintf(stderr, "strata draft kv: %lld cells from %lld (first needed %lld), batch %lld: drafter idle %.1f ms, "
+        std::fprintf(stderr, "saguaro draft kv: %lld cells from %lld (first needed %lld), batch %lld: drafter idle %.1f ms, "
                      "the batches %.1f ms, all %.1f ms\n", (long long) n, (long long) cell0, (long long) (cell0 + r0),
                      (long long) B, ms_idle, ms_since(tl0), ms_since(t0));
     return true;
@@ -2301,7 +2301,7 @@ bool Prefill::set_peer(core::PeerExperts* peer, int64_t cap_rows, std::string& e
             if (lay.native && f.tail_off) { err = "prefill peer: not for NVFP4 experts yet"; return false; }
     }
     if (strata::kernels::cpu::hadamard_spec().any()) {   // APR: the peer's MMQ share does not rotate; declined
-        std::fprintf(stderr, "strata: prefill peer: not used for a Hadamard-folded (APR) pack\n");
+        std::fprintf(stderr, "saguaro: prefill peer: not used for a Hadamard-folded (APR) pack\n");
         m.pp.reset();
         return true;
     }
@@ -2453,7 +2453,7 @@ bool Prefill::set_peer(core::PeerExperts* peer, int64_t cap_rows, std::string& e
     cudaMemGetInfo(&fb, &tb);
     cudaSetDevice(prev);
     if (!ok) { err = "prefill peer: the peer's buffers do not fit (raise --peer-reserve-mib or lower --peer-prefill-rows)"; return false; }
-    std::fprintf(stderr, "strata prefill: peer GPU %d computes its experts' rows of each prompt chunk (up to %lld rows per "
+    std::fprintf(stderr, "saguaro prefill: peer GPU %d computes its experts' rows of each prompt chunk (up to %lld rows per "
                          "layer%s%s); %zu MiB left free on it\n", pp->dev, (long long) pp->cap_rows,
                  pp->p2p ? "" : (pp->sums ? (pp->f16 ? ", no P2P: through mapped host memory in FP16, one weighted sum per token back"
                                                      : ", no P2P: through mapped host memory, one weighted sum per token back")
@@ -2464,7 +2464,7 @@ bool Prefill::set_peer(core::PeerExperts* peer, int64_t cap_rows, std::string& e
     // APR: this path rotates on the peer too (peer_had_signs), but no P2P pair has run it end to end with a
     // Hadamard-folded pack yet (the validated two-GPU runs had no P2P, so their prompts stayed on the first GPU)
     if (strata::kernels::cpu::hadamard_spec().any())
-        std::fprintf(stderr, "strata prefill: warning: prompt processing on a P2P peer GPU is not validated end to end "
+        std::fprintf(stderr, "saguaro prefill: warning: prompt processing on a P2P peer GPU is not validated end to end "
                              "with Hadamard-folded experts yet\n");
     m.pp = std::move(pp);
     return true;
@@ -2567,7 +2567,7 @@ void Prefill::force_chunk(int64_t chunk, bool single, bool planned) {
 }
 void Prefill::log_plan(int64_t n, int64_t chunk, int stages) {
     const double pipe = pipe_value();
-    std::fprintf(stderr, "strata prefill: %lld tokens in %lld-token chunks over %d stages (--prefill-pipe %s)\n",
+    std::fprintf(stderr, "saguaro prefill: %lld tokens in %lld-token chunks over %d stages (--prefill-pipe %s)\n",
                  (long long) n, (long long) chunk, stages,
                  pipe > 1.0 ? (std::to_string((long long) ratio_tokens(pipe)) + ": b/a").c_str()
                             : "1: today's chunk count, evened out");
@@ -2764,7 +2764,7 @@ struct ColdTrace {
         strata::core::device_sync();
         const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
         ++n;
-        std::fprintf(stderr, "strata cold-trace: #%d %s %s T=%lld N=%lld K=%lld %.2f ms\n", n, what, name.c_str(), (long long) T,
+        std::fprintf(stderr, "saguaro cold-trace: #%d %s %s T=%lld N=%lld K=%lld %.2f ms\n", n, what, name.c_str(), (long long) T,
                      (long long) N, (long long) K, ms);
     }
 };
@@ -3127,7 +3127,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
             stopped_at_ = c0;
             break;
         }
-        if (std::getenv("SAGUARO_TRACE")) { std::fprintf(stderr, "strata trace: prompt chunk %lld of %lld\n", (long long) c0, (long long) n); std::fflush(stderr); }
+        if (std::getenv("SAGUARO_TRACE")) { std::fprintf(stderr, "saguaro trace: prompt chunk %lld of %lld\n", (long long) c0, (long long) n); std::fflush(stderr); }
         const int64_t T = std::min(C, n - c0), p0 = pos0 + c0;
         core::progress_at("reading the prompt (batched): preparing the chunk from token", p0);   // #251
 #if defined(STRATA_HAVE_DFLASH2)
@@ -3535,7 +3535,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
             const cudaError_t a = cudaStreamSynchronize(m.cs), b = cudaStreamSynchronize(m.copy);
             const double ms = ms_since(ts);
             if (ms > 250.0 || a != cudaSuccess || b != cudaSuccess)
-                std::fprintf(stderr, "strata pf-step: chunk from token %lld, layer %lld: %s took %.0f ms (%s / %s)\n",
+                std::fprintf(stderr, "saguaro pf-step: chunk from token %lld, layer %lld: %s took %.0f ms (%s / %s)\n",
                              (long long) p0, (long long) layer, what, ms, cudaGetErrorString(a), cudaGetErrorString(b));
         };
         for (int64_t l = LB; l < LE; ++l) {
@@ -3666,7 +3666,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                             const double dd = (double) got[i] - ref[i];
                             e2 += dd * dd; r2 += (double) ref[i] * ref[i]; emax = std::max(emax, std::fabs(dd));
                         }
-                        std::fprintf(stderr, "strata: SAGUARO_HC_UPMIX_CHECK layer %lld half %d T %lld: mixed rel RMS %.3e, "
+                        std::fprintf(stderr, "saguaro: SAGUARO_HC_UPMIX_CHECK layer %lld half %d T %lld: mixed rel RMS %.3e, "
                                      "max |diff| %.3e (%s)\n", (long long) l, half, (long long) T,
                                      std::sqrt(e2 / std::max(r2, 1e-30)), emax, upmixed ? "upmix" : "upmix refused");
                     } else {
@@ -3932,7 +3932,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                                 std::sort(u.begin(), u.end());
                                 sum_u += (double) (std::unique(u.begin(), u.end()) - u.begin());
                             }
-                            std::fprintf(stderr, "strata prefill: selection overlap at %lld: 16-query tiles read %.1f%% of the "
+                            std::fprintf(stderr, "saguaro prefill: selection overlap at %lld: 16-query tiles read %.1f%% of the "
                                                  "cells one query at a time does\n", (long long) p0, sum_w > 0 ? 100.0 * sum_u / sum_w : 0.0);
                         }
                         // SAGUARO_IDX_FP16_CHECK: would FP16 pooled indexer keys select the same cells? (the KV-streaming
@@ -3978,7 +3978,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                                 if (p0 + t + 1 > m.cap) { ++sel_queries; shared += (double) c; cells += (double) w; }
                             }
                             if (qsa_index + 1 == g.n_qsa_layers())
-                                std::fprintf(stderr, "strata prefill: FP16 indexer keys: %lld of %lld selections identical; "
+                                std::fprintf(stderr, "saguaro prefill: FP16 indexer keys: %lld of %lld selections identical; "
                                                      "where the selection is sparse, %.4f%% of cells shared (%lld queries)\n",
                                              same, queries, cells > 0 ? 100.0 * shared / cells : 100.0, sel_queries);
                         }
@@ -4181,7 +4181,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                     if (fused_l) {
                         if (static bool said = false; !said) {
                             said = true;
-                            std::fprintf(stderr, "strata: prompt experts on the fused int8 kernels (SAGUARO_PF_FUSED=1, "
+                            std::fprintf(stderr, "saguaro: prompt experts on the fused int8 kernels (SAGUARO_PF_FUSED=1, "
                                                  "#136)\n");
                         }
                         pt.mark(kPfGather, cs);
@@ -5337,7 +5337,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                         static int64_t reported = -1;
                         if ((bgu || bdm || bbo || bh > 0) && reported != stats_.chunks) {
                             reported = stats_.chunks;
-                            std::fprintf(stderr, "strata dbg: layer %lld (mmq %d, types %d/%d, %zu experts): non-finite GU %lld "
+                            std::fprintf(stderr, "saguaro dbg: layer %lld (mmq %d, types %d/%d, %zu experts): non-finite GU %lld "
                                          "H %lld Dm %lld bo %lld of T %lld\n", (long long) l, (int) use_mmq, mmq_gt, mmq_dt,
                                          n_order, (long long) bgu, (long long) bh, (long long) bdm, (long long) bbo,
                                          (long long) T);
@@ -5389,7 +5389,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                         cudaMemcpyAsync(xb.data(), xc, xb.size() * 2, cudaMemcpyDeviceToHost, m.cs);
                         cudaStreamSynchronize(m.cs);
                         cudaFree(Rc); cudaFree(rc); cudaFree(xc);
-                        std::fprintf(stderr, "strata: SAGUARO_CVEC_FUSE_CHECK layer %lld T %lld: R %s, rs %s, xn16 %s\n",
+                        std::fprintf(stderr, "saguaro: SAGUARO_CVEC_FUSE_CHECK layer %lld T %lld: R %s, rs %s, xn16 %s\n",
                                      (long long) l, (long long) T,
                                      std::memcmp(a.data(), b.data(), a.size() * 4) ? "DIFFERS" : "identical",
                                      std::memcmp(ra.data(), rb.data(), ra.size() * 4) ? "DIFFERS" : "identical",
@@ -5581,7 +5581,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
             std::fprintf(stderr, " %lld non-finite (max |x| %.3g)", (long long) c, mx);
         };
         const int64_t last = (n - 1) % C;
-        std::fprintf(stderr, "strata dbg: prompt end: last residual row");
+        std::fprintf(stderr, "saguaro dbg: prompt end: last residual row");
         bad(m.R + last * D, D);
         if (ss.ple.ready()) { std::fprintf(stderr, "; PLE history"); bad(ss.ple.hist, (int64_t) strata::kernels::NG_HIST * strata::kernels::NG_HC_DIM); }
         std::fprintf(stderr, "; GDN state 0");
@@ -5634,11 +5634,11 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
             err = std::string("prefill: KV prefetch stream: ") + cudaGetErrorString(cst);
             return false;
         }
-        std::fprintf(stderr, "strata KV prefetch: %lld layer prefixes, %s staging\n", (long long) kv_prefetches,
+        std::fprintf(stderr, "saguaro KV prefetch: %lld layer prefixes, %s staging\n", (long long) kv_prefetches,
                      m.keep_active ? "per-layer kept regions" : "single existing staging pool");
     }
     if (m.kv_passes_read > 0) {   // what this read copied, and what the keep saved (PLAN-prefix-redma's measure)
-        std::fprintf(stderr, "strata prefill: KV staged this read: %.0f ms on stream, %.2f GiB copied host->VRAM "
+        std::fprintf(stderr, "saguaro prefill: KV staged this read: %.0f ms on stream, %.2f GiB copied host->VRAM "
                              "in %lld layer pass%s%s\n", m.kv_ms_read, (double) m.kv_bytes_read / 1073741824.0,
                      (long long) m.kv_passes_read, m.kv_passes_read == 1 ? "" : "es",
                      m.kv_hits_read > 0
@@ -5651,7 +5651,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
         static const bool f16_range = std::getenv("SAGUARO_F16_RANGE") != nullptr;
         float xm = 0.0f, wy[2] = {0.0f, 0.0f}; unsigned long long xo = 0, wyo[2] = {0, 0};
         if (f16_range && f16_range_read(xm, xo, true) && gemm_f16_range_read(wy, wyo, true))
-            std::fprintf(stderr, "strata f16 range: %lld tokens: activation images max |x| %.1f (%llu beyond 65504 or NaN), "
+            std::fprintf(stderr, "saguaro f16 range: %lld tokens: activation images max |x| %.1f (%llu beyond 65504 or NaN), "
                                  "BF16 weights max |w| %.3f (%llu), FP16 GEMM outputs max |y| %.1f (%llu not finite)\n",
                          (long long) n, xm, xo, wy[0], wyo[0], wy[1], wyo[1]);
 #if !defined(__HIPCC__)
@@ -5667,7 +5667,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
             }
             cudaSetDevice(cur);
             if (tot[0] + tot[1] > 0)
-                std::fprintf(stderr, "strata f16 range (BF16_TC): %lld tokens: weights max |w| %.3f, %llu clamped, %llu of %llu "
+                std::fprintf(stderr, "saguaro f16 range (BF16_TC): %lld tokens: weights max |w| %.3f, %llu clamped, %llu of %llu "
                                      "subnormal in FP16; activations max |x| %.1f, %llu clamped, %llu of %llu subnormal in FP16\n",
                              (long long) n, mx[0], cl[0], sub[0], tot[0], mx[1], cl[1], sub[1], tot[1]);
         }
@@ -5684,9 +5684,9 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
             std::snprintf(b, sizeof b, " %s %.0f (%.1f%%)", kPfNames[i], pt.ms[i], total > 0 ? 100.0 * pt.ms[i] / total : 0.0);
             line += b;
         }
-        std::fprintf(stderr, "strata prefill timing: %lld tokens, GPU timeline %.0f ms, wall %.0f ms, host staging %.0f ms:%s\n",
+        std::fprintf(stderr, "saguaro prefill timing: %lld tokens, GPU timeline %.0f ms, wall %.0f ms, host staging %.0f ms:%s\n",
                      (long long) n, total, ms_since(t_start), stats_.ms_experts_host, line.c_str());
-        std::fprintf(stderr, "strata prefill timing: host: chunk setup (PLE rows, the expert stream plan) %.0f ms, "
+        std::fprintf(stderr, "saguaro prefill timing: host: chunk setup (PLE rows, the expert stream plan) %.0f ms, "
                              "waiting for each chunk %.0f ms, after each chunk (the draft layer, progress) %.0f ms, "
                              "PLE %.0f ms\n", host_setup_ms, host_sync_ms, host_chunk_ms, stats_.ms_ple);
         if (pe.on) {
@@ -5696,12 +5696,12 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                 std::snprintf(b, sizeof b, " %s %.0f", kPeNames[i], pe.ms[i]);
                 pl += b;
             }
-            std::fprintf(stderr, "strata prefill timing (peer GPU, ms):%s; MoE layers %lld, rows/layer %.0f of %lld cap, experts/layer %.0f, "
+            std::fprintf(stderr, "saguaro prefill timing (peer GPU, ms):%s; MoE layers %lld, rows/layer %.0f of %lld cap, experts/layer %.0f, "
                                  "over the cap %lld\n", pl.c_str(), (long long) m.pp->layers,
                          m.pp->layers ? (double) m.pp->rows / m.pp->layers : 0.0, (long long) m.pp->cap_rows,
                          m.pp->layers ? (double) m.pp->experts / m.pp->layers : 0.0, (long long) m.pp->over_cap);
             if (m.pp->ps_frac > 0.0)
-                std::fprintf(stderr, "strata prefill timing: peer-streamed experts %lld (%.0f per MoE layer)\n",
+                std::fprintf(stderr, "saguaro prefill timing: peer-streamed experts %lld (%.0f per MoE layer)\n",
                              (long long) m.pp->ps_experts, m.pp->layers ? (double) m.pp->ps_experts / m.pp->layers : 0.0);
         }
     }
@@ -5717,7 +5717,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
             std::snprintf(h, sizeof(h), "%04llx ", (unsigned long long) (x & 0xffff));
             line += h;
         }
-        std::fprintf(stderr, "strata prefill: GDN_HASH %s\n", line.c_str());
+        std::fprintf(stderr, "saguaro prefill: GDN_HASH %s\n", line.c_str());
     }
     // the last stage has read a queued prompt's last chunk; every earlier stage synchronized before handing it on
     if (job && next_ == nullptr && job_last) {
@@ -5986,7 +5986,7 @@ std::shared_ptr<PromptJob> Prefill::take_batch(std::deque<std::shared_ptr<Prompt
         parts += (parts.empty() ? "" : "+") + std::to_string((long long) sg.n);
         urgent_in = urgent_in || sg.job->urgent;
     }
-    std::fprintf(stderr, "strata prefill: SAGUARO_BATCH_READS: one %schunk of %zu prompts (%s tokens)\n",
+    std::fprintf(stderr, "saguaro prefill: SAGUARO_BATCH_READS: one %schunk of %zu prompts (%s tokens)\n",
                  urgent_in ? "fast " : shrink ? "short " : "", b->segs.size(), parts.c_str());
     // a stage that fails the chunk fails every prompt in it; each prompt's own end is reported by the last stage
     b->on_done = [segs = b->segs](bool ok, const std::string& e) {
@@ -6067,7 +6067,7 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
     if (mmq::direct_mode() == 1) {
         static const bool log = [] { const char* v = std::getenv("SAGUARO_MMQ_DIRECT_LOG"); return v && std::atoi(v) != 0; }();
         for (const Prefill* p = this; log && p != nullptr; p = p->next_)
-            std::fprintf(stderr, "strata prefill: layers %lld..%lld: %lld of %lld resident experts read in place, %lld "
+            std::fprintf(stderr, "saguaro prefill: layers %lld..%lld: %lld of %lld resident experts read in place, %lld "
                                  "streamed (SAGUARO_MMQ_DIRECT, totals)\n", (long long) p->stage_lb_,
                          (long long) p->stage_le_, (long long) p->stats_.experts_direct,
                          (long long) p->stats_.experts_resident, (long long) p->stats_.experts_streamed);
@@ -6076,7 +6076,7 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
     if (mmq::swiglu_q8_requested()) {
         static const bool log = [] { const char* v = std::getenv("SAGUARO_MMQ_SWIGLU_Q8_LOG"); return v && std::atoi(v) != 0; }();
         for (const Prefill* p = this; log && p != nullptr; p = p->next_)
-            std::fprintf(stderr, "strata prefill: layers %lld..%lld: %lld expert groups fused SwiGLU into q8_1, %lld wrote H "
+            std::fprintf(stderr, "saguaro prefill: layers %lld..%lld: %lld expert groups fused SwiGLU into q8_1, %lld wrote H "
                                  "(SAGUARO_MMQ_SWIGLU_Q8, totals)\n", (long long) p->stage_lb_, (long long) p->stage_le_,
                          (long long) p->stats_.swiglu_fused, (long long) p->stats_.swiglu_h);
     }

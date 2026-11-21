@@ -333,11 +333,11 @@ class Helpers(unittest.TestCase):
 
 class EngineError(unittest.TestCase):
     def test_the_engine_own_last_line(self):
-        # the engine's own lines say "maya ..." (or "glm ...", "ERR ..."); without one, the log's last line
+        # the engine's own lines say "saguaro ..." (or "glm ...", "ERR ..."); without one, the log's last line
         with tempfile.TemporaryDirectory() as d:
             log = Path(d) / "engine.log"
-            log.write_text("loading\nmaya generate: pack: out of memory\nsome library noise\n")
-            self.assertEqual(CAL.engine_error(str(log)), "maya generate: pack: out of memory")
+            log.write_text("loading\nsaguaro generate: pack: out of memory\nsome library noise\n")
+            self.assertEqual(CAL.engine_error(str(log)), "saguaro generate: pack: out of memory")
             log.write_text("only noise\n")
             self.assertEqual(CAL.engine_error(str(log)), "only noise")
 

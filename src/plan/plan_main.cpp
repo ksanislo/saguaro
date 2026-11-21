@@ -67,7 +67,7 @@ int main(int argc, char** argv) {
         std::printf("%s", strata::plan::to_string(p).c_str());
         return 0;
     } catch (const strata::plan::DoesNotClose& e) {
-        std::fprintf(stderr, "strata-plan: %s\n", e.what());
+        std::fprintf(stderr, "saguaro plan: %s\n", e.what());
         return 1;
     }
 }

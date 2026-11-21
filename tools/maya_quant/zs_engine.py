@@ -1,5 +1,5 @@
 """tools/maya_quant/zs_engine.py - the zero-shot requests (zs_tasks.py) scored by the engine: one LOGP line each to
-`strata --serve` (the choices of a question share their context: the engine restores it instead of reading it again),
+`saguaro-glm --serve` (the choices of a question share their context: the engine restores it instead of reading it again),
 one JSON line out per request with its summed log-probability.  Resumable: requests already in --out are skipped.
 
     python zs_engine.py --reqs zs.jsonl --out zs_maya.jsonl -- <strata args: --glm-pack PACK --max-context 4096 ...>
@@ -19,7 +19,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--reqs", required=True)
     ap.add_argument("--out", required=True)
-    ap.add_argument("--exe", default=str(pathlib.Path(__file__).resolve().parents[2] / "build" / "maya"))
+    ap.add_argument("--exe", default=str(pathlib.Path(__file__).resolve().parents[2] / "build" / "saguaro-glm"))
     ap.add_argument("engine", nargs=argparse.REMAINDER)
     a = ap.parse_args()
     args = [x for x in a.engine if x != "--"]

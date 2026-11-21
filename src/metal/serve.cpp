@@ -501,22 +501,22 @@ struct Server {
                     std::chrono::duration<double, std::milli>(t2 - t1).count(), finish, reuse);
         std::fflush(stdout);
         if (const size_t grown = model.grow_pool()) {   // memory freed since the start: more experts stay resident
-            std::fprintf(stderr, "maya-metal: the expert pool grew by %.1f GB to %.1f GB\n", grown / 1e9,
+            std::fprintf(stderr, "saguaro metal: the expert pool grew by %.1f GB to %.1f GB\n", grown / 1e9,
                          model.stats().pool_bytes / 1e9);
             // started short (a restart before the old engine's memory came back): MTP's default turns on once the
             // pool holds every expert, as it would have at a start with that memory
             if (mtp_auto && !mtp && model.pool_holds_all()) {
                 mtp = true;
                 mtp_len = std::make_unique<DraftLength>(mtp_draft_cap());
-                std::fprintf(stderr, "maya-metal: every expert has a slot now: MTP drafting is on\n");
+                std::fprintf(stderr, "saguaro metal: every expert has a slot now: MTP drafting is on\n");
             }
         }
         std::string pe;   // this machine's expert usage, for the next start (after DONE: nobody waits on it)
-        if (!model.save_profile(pe)) std::fprintf(stderr, "maya-metal: %s\n", pe.c_str());
+        if (!model.save_profile(pe)) std::fprintf(stderr, "saguaro metal: %s\n", pe.c_str());
         if (produced > 0) {
             const auto& st = model.stats();
             const double s = std::chrono::duration<double>(t2 - t1).count();
-            std::fprintf(stderr, "maya-metal: %lld tokens, %.2f tok/s; experts %llu hits / %llu misses so far\n",
+            std::fprintf(stderr, "saguaro metal: %lld tokens, %.2f tok/s; experts %llu hits / %llu misses so far\n",
                          (long long) produced, produced / std::max(1e-9, s), (unsigned long long) st.expert_hits,
                          (unsigned long long) st.expert_misses);
         }

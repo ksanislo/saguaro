@@ -85,7 +85,7 @@ class Command(unittest.TestCase):
             cmds.append(cmd)
             if "--calibrate-decode" in cmd:
                 if rc_b:
-                    return rc_b, ["maya-mm3: out of memory\n"]
+                    return rc_b, ["saguaro mm3: out of memory\n"]
                 Path(cmd[cmd.index("--calibrate-decode") + 1]).write_text(json.dumps({"decode_tok_s": kept_decode}))
                 return 0, []
             Path(cmd[cmd.index("--calibrate-prefill") + 1]).write_text(json.dumps(
@@ -128,7 +128,7 @@ class Command(unittest.TestCase):
         with patch.object(CPF, "prompt_ids", return_value=[]):
             with self.assertRaisesRegex(RuntimeError, "exit 1.*out of memory"):
                 CPF.run(mm3_cfg(), say=lambda *a: None,
-                        runner=lambda *a: (1, ["maya-mm3: out of memory\n", "\n"]))
+                        runner=lambda *a: (1, ["saguaro mm3: out of memory\n", "\n"]))
 
 
 class Setup(unittest.TestCase):

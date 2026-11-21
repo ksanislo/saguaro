@@ -1900,13 +1900,13 @@ void embed(const uint16_t* rows, int T, float* h, int dim, int hc, cudaStream_t 
 
 void finish(float* x, int n_vec, int len, long long stride, const Finish& f, cudaStream_t s) {
     if (len > kFinMax * kThreads) {
-        std::fprintf(stderr, "ds4 finish: a vector of %d values is more than %d\n", len, kFinMax * kThreads);
+        std::fprintf(stderr, "saguaro ds4 finish: a vector of %d values is more than %d\n", len, kFinMax * kThreads);
         return;
     }
     if (n_vec <= 0) return;
     if (f.pdst != nullptr) {
         if (f.quant < kKvFp8 || f.quant > kKvFp4p || len % 32 != 0) {
-            std::fprintf(stderr, "ds4 finish: packed rows of quant %d, %d values not covered\n", f.quant, len);
+            std::fprintf(stderr, "saguaro ds4 finish: packed rows of quant %d, %d values not covered\n", f.quant, len);
             return;
         }
         finish_kernel<true><<<n_vec, kThreads, 0, s>>>(x, len, stride, f);
@@ -1986,7 +1986,7 @@ void index_score(const float* q, const float* w, const void* k, int heads, int h
                  int cand_stride, int blk, const Rows& lim, float* out, long long out_stride, cudaStream_t s,
                  int kfmt) {
     if (hd != 128 || heads > 32 || (kfmt != kKvFp4p && kfmt != kKvBf16)) {
-        std::fprintf(stderr, "ds4 index_score: %d heads of %d (keys %d) not covered\n", heads, hd, kfmt);
+        std::fprintf(stderr, "saguaro ds4 index_score: %d heads of %d (keys %d) not covered\n", heads, hd, kfmt);
         return;
     }
     if (n <= 0) return;
@@ -2040,7 +2040,7 @@ void sparse_attn(const float* q, const uint16_t* win, const void* ckv, const int
                  const AttnRows& a, const float* sink, int heads, int d, int T, float scale, float* out, cudaStream_t s,
                  int ckv_fmt, int heads_per_block, const AttnScratch* scr) {
     if (d != 512 || (ckv_fmt != kKvFp4 && ckv_fmt != kKvBf16)) {
-        std::fprintf(stderr, "ds4 sparse_attn: head dim %d (rows %d) not covered\n", d, ckv_fmt);
+        std::fprintf(stderr, "saguaro ds4 sparse_attn: head dim %d (rows %d) not covered\n", d, ckv_fmt);
         return;
     }
     if (ckv_fmt == kKvBf16) {
@@ -2099,7 +2099,7 @@ void ring_to_ext(const uint8_t* ring, uint16_t* ext, int64_t p0, int n, int d, c
 }
 void ext_to_ring(const uint16_t* ext, uint8_t* ring, int64_t p0, int n, int T, int d, cudaStream_t s, uint8_t* backup) {
     if (d % 32 != 0) {
-        std::fprintf(stderr, "ds4 ext_to_ring: row of %d not covered\n", d);
+        std::fprintf(stderr, "saguaro ds4 ext_to_ring: row of %d not covered\n", d);
         return;
     }
     ext_to_ring_kernel<<<T, kThreads, 0, s>>>(ext, ring, (long long) p0, n, T, d, backup);

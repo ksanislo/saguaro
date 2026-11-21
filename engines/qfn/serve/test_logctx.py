@@ -47,13 +47,13 @@ class Lines(unittest.TestCase):
         log = logctx.StampedLog(f)
         r, w = os.pipe()
         with os.fdopen(w, "w") as wf:
-            wf.write("strata serve: one\n\nstrata batch: two\n")
+            wf.write("saguaro serve: one\n\nsaguaro batch: two\n")
         with os.fdopen(r, "r") as rf:
             logctx.copy_lines(rf, log)
         a, blank, b = f.getvalue().split("\n")[:3]
-        self.assertRegex(a, r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d{3} strata serve: one$")
+        self.assertRegex(a, r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d{3} saguaro serve: one$")
         self.assertEqual(blank, "")
-        self.assertEqual(logctx.unstamp(b), "strata batch: two")
+        self.assertEqual(logctx.unstamp(b), "saguaro batch: two")
 
 
 class Client(unittest.TestCase):

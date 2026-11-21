@@ -80,5 +80,5 @@ def main_guard(fn, *, fail=None):
     except AcquisitionRefused as exc:
         if fail is not None:
             return fail(str(exc), None)
-        print(f"strata: {exc}", file=sys.stderr)
+        print(f"saguaro: {exc}", file=sys.stderr)
         return exc.exit_code

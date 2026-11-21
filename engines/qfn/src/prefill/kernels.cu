@@ -864,7 +864,7 @@ bool gdn_keyhead_ok() {
         if (!yes) cudaGetLastError();
         known[dev] = yes ? 1 : 2;
         if (env == 1 && major < 8)   // the opt-in's verdict per card, for the A/B's log
-            std::fprintf(stderr, "strata: CUDA%d GDN prompt recurrence per key head (SAGUARO_GDN_KEYHEAD=1): %s "
+            std::fprintf(stderr, "saguaro: CUDA%d GDN prompt recurrence per key head (SAGUARO_GDN_KEYHEAD=1): %s "
                                  "(%d blocks/SM x %d SMs)\n", dev, yes ? "on" : "off", per_sm, sms);
     }
     return known[dev] == 1;
@@ -2626,7 +2626,7 @@ bool gdn_rec_chunked_sm75_logged(float* state, const float* h, const float* gate
     const cudaError_t e = gdn_rec_chunked_sm75(state, h, gate, beta, y, T, (cudaStream_t) stream);
     if (e != cudaSuccess) {
         if (!refused[dev].exchange(true))
-            std::fprintf(stderr, "strata: CUDA%d GDN sm75 recurrence refused a %lld-token call (%s): the default kernel "
+            std::fprintf(stderr, "saguaro: CUDA%d GDN sm75 recurrence refused a %lld-token call (%s): the default kernel "
                                  "runs\n", dev, (long long) T, cudaGetErrorString(e));
         return false;
     }
@@ -2634,7 +2634,7 @@ bool gdn_rec_chunked_sm75_logged(float* state, const float* h, const float* gate
     int64_t nl = next_log[dev].load();
     if (c == 1 || n >= std::max<int64_t>(nl, 65536)) {
         next_log[dev].store(std::max<int64_t>(n, 32768) * 2);
-        std::fprintf(stderr, "strata: CUDA%d GDN sm75 recurrence ran: %lld tokens in %lld calls (this call %lld)\n", dev,
+        std::fprintf(stderr, "saguaro: CUDA%d GDN sm75 recurrence ran: %lld tokens in %lld calls (this call %lld)\n", dev,
                      (long long) n, (long long) c, (long long) T);
     }
     return true;
@@ -2764,7 +2764,7 @@ void gdn_recurrence_reserve() {
     const char* v = std::getenv("SAGUARO_GDN_CHUNKED_SM75");
     if (v == nullptr || std::atoi(v) == 0) return;
     if (gdn_chunked_sm75_ok() && gdn_chunk_t_scratch() == nullptr)
-        std::fprintf(stderr, "strata: GDN chunked recurrence (SAGUARO_GDN_CHUNKED_SM75=1): no room for its 8.1 MB scratch; "
+        std::fprintf(stderr, "saguaro: GDN chunked recurrence (SAGUARO_GDN_CHUNKED_SM75=1): no room for its 8.1 MB scratch; "
                              "the default kernel runs\n");
 #endif
 }

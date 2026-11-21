@@ -506,7 +506,7 @@ bool gdn_chunked_sm75_ok() {
         }
         if (!yes) cudaGetLastError();
         known[dev] = yes ? 1 : 2;
-        std::fprintf(stderr, "strata: CUDA%d GDN prompt recurrence chunked on tensor cores (SAGUARO_GDN_CHUNKED_SM75=1): %s "
+        std::fprintf(stderr, "saguaro: CUDA%d GDN prompt recurrence chunked on tensor cores (SAGUARO_GDN_CHUNKED_SM75=1): %s "
                              "(scan %d blocks/SM x %d SMs for %d blocks, %zu B shared)\n", dev, yes ? "on" : "off", per_sm,
                      sms, HK * (S / GDV / GT_NSL), kChunkScanTSmem);
     }

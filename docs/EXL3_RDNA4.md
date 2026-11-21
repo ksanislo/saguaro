@@ -48,7 +48,7 @@ installation, merging these entries into its configuration's `env` is enough:
 
 Preserve the other `env` entries. Use these exact `EXL3_*` names: the kernel
 library reads them directly. The same names can be exported for a native
-`maya-ds4` launch. They must be set before starting the engine.
+`saguaro-ds4` launch. They must be set before starting the engine.
 
 ### Verify and compare
 
@@ -107,7 +107,7 @@ and cache behavior differed. Measure both stages when choosing settings.
 
 ## Tests
 
-Build `maya-ds4` and `exl3_test` with HIP enabled and gfx1201 in
+Build `saguaro-ds4` and `exl3_test` with HIP enabled and gfx1201 in
 `CMAKE_HIP_ARCHITECTURES`. Select a device with `HIP_VISIBLE_DEVICES`.
 If normal setup built the engine with tests disabled, enable the test targets
 in that existing HIP build directory first:

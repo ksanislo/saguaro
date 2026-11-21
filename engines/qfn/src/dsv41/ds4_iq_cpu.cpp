@@ -678,7 +678,7 @@ bool own(int type) {
         if (gflag != nullptr) *gflag = tg < tb;
         ok[k] = std::min(tb, tg) < 0.9 * tn;
         if (std::getenv("DS4_IQ_VERBOSE") != nullptr)
-            std::fprintf(stderr, "ds4: CPU lane %s rows: native %.0f us, ours %.0f us%s -> %s\n", ggml_type_name((ggml_type) type),
+            std::fprintf(stderr, "saguaro ds4: CPU lane %s rows: native %.0f us, ours %.0f us%s -> %s\n", ggml_type_name((ggml_type) type),
                          tn, tb, gflag != nullptr ? (std::string(" (second form: gather / one table ") + std::to_string((int) tg) + " us)").c_str() : "",
                          ok[k] ? (gflag != nullptr && *gflag ? "ours (second form)" : "ours") : "native");
     });

@@ -2033,7 +2033,7 @@ bool Glm5Model::fast_setup(std::string& err) {
                                                  "tier %.0f GB below the free RAM (%.1f GB free, %.1f GB of commit left): "
                                                  "those experts are read from the SSD. Enlarge the page file by at "
                                                  "least %.0f GB (System > Advanced system settings > Performance > "
-                                                 "Virtual memory) and restart Maya\n", short_gb,
+                                                 "Virtual memory) and restart Saguaro\n", short_gb,
                                          (double) ms.ullAvailPhys / G, (double) ms.ullAvailPageFile / G, short_gb + 4.0);
                     }
 #else

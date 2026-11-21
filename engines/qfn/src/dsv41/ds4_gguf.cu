@@ -27,12 +27,12 @@ std::atomic<int> g_errors{0};
 void check(const char* what) {
     const cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) {
-        std::fprintf(stderr, "ds4 gguf %s: %s\n", what, cudaGetErrorString(e));
+        std::fprintf(stderr, "saguaro ds4 gguf %s: %s\n", what, cudaGetErrorString(e));
         g_errors.fetch_add(1, std::memory_order_relaxed);
     }
 }
 void fail(const char* what) {
-    std::fprintf(stderr, "ds4 gguf %s\n", what);
+    std::fprintf(stderr, "saguaro ds4 gguf %s\n", what);
     g_errors.fetch_add(1, std::memory_order_relaxed);
 }
 
@@ -986,7 +986,7 @@ Scratch* scratch(cudaStream_t s) {
 
 bool mx_geometry(const char* who, int k, int n_embd, int n_ff) {
     if (k < 1 || k > 8 || n_embd % BN != 0 || n_ff % BN != 0 || n_embd > kMaxEmbd || n_ff % kMxBlock != 0) {
-        std::fprintf(stderr, "ds4 gguf %s: geometry not covered (k %d n_embd %d n_ff %d)\n", who, k, n_embd, n_ff);
+        std::fprintf(stderr, "saguaro ds4 gguf %s: geometry not covered (k %d n_embd %d n_ff %d)\n", who, k, n_embd, n_ff);
         g_errors.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
@@ -1028,7 +1028,7 @@ bool iq_args(const x3::ExpertLayout& lay, int n_embd, int n_ff, float limit, iq:
     ia.td = expert_type(lay, 2);
     if (ia.tg != expert_type(lay, 1) || !iq::supported(ia.tg) || !iq::supported(ia.td) || n_embd % iq::block_values(ia.tg) != 0 ||
         n_ff % iq::block_values(ia.td) != 0) {
-        std::fprintf(stderr, "ds4 gguf %s: expert types %s / %s / %s (n_embd %d, n_ff %d) not covered\n", who,
+        std::fprintf(stderr, "saguaro ds4 gguf %s: expert types %s / %s / %s (n_embd %d, n_ff %d) not covered\n", who,
                      type_name(expert_type(lay, 0)), type_name(expert_type(lay, 1)), type_name(expert_type(lay, 2)),
                      n_embd, n_ff);
         g_errors.fetch_add(1, std::memory_order_relaxed);
@@ -1084,7 +1084,7 @@ bool mv(const x3::MvJob* jobs, int n, cudaStream_t s) {
             Scratch* sc = scratch(s);
             if (sc == nullptr || m.raw == nullptr || q.xf == nullptr || q.y == nullptr || q.ncol < 1 ||
                 q.ncol > x3::kMaxMvCols || m.k > kMaxQK || type_row_bytes(m.K, m.k) == 0) {
-                std::fprintf(stderr, "ds4 gguf mv: job %d unsupported (type %s k %d n %d)\n", i, type_name(m.K), m.k, m.n);
+                std::fprintf(stderr, "saguaro ds4 gguf mv: job %d unsupported (type %s k %d n %d)\n", i, type_name(m.K), m.k, m.n);
                 g_errors.fetch_add(1, std::memory_order_relaxed);
                 return false;
             }
@@ -1109,7 +1109,7 @@ bool mv(const x3::MvJob* jobs, int n, cudaStream_t s) {
         if ((m.fmt != kFmtBF16 && m.fmt != kFmtMXFP4 && m.fmt != kFmtQ8_0) || m.raw == nullptr || q.xf == nullptr ||
             q.y == nullptr || q.ncol < 1 || q.ncol > x3::kMaxMvCols || m.k <= 0 || m.n <= 0 ||
             (f != 0 && m.k % kMxBlock != 0)) {
-            std::fprintf(stderr, "ds4 gguf mv: job %d unsupported (fmt %d k %d n %d, %d activations)\n", i, m.fmt, m.k,
+            std::fprintf(stderr, "saguaro ds4 gguf mv: job %d unsupported (fmt %d k %d n %d, %d activations)\n", i, m.fmt, m.k,
                          m.n, q.ncol);
             g_errors.fetch_add(1, std::memory_order_relaxed);
             return false;
@@ -1272,7 +1272,7 @@ void moe_down(const x3::MoeArgs& a, const float* h, const float* sh_out, float* 
 bool win_experts(const x3::WinArgs& a, cudaStream_t s) {
     if (a.T < 1 || a.T > kMaxEnt || !mx_geometry("win_experts", a.k, a.n_embd, a.n_ff) || a.h == nullptr ||
         a.part == nullptr || a.out == nullptr) {
-        std::fprintf(stderr, "ds4 gguf win_experts: not covered (T %d)\n", a.T);
+        std::fprintf(stderr, "saguaro ds4 gguf win_experts: not covered (T %d)\n", a.T);
         return false;
     }
     MxArgs m = mx_args(a.lay, a.n_embd, a.n_ff, a.limit);

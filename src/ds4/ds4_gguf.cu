@@ -31,12 +31,12 @@ std::atomic<int> g_errors{0};
 void check(const char* what) {
     const cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) {
-        std::fprintf(stderr, "ds4 gguf %s: %s\n", what, cudaGetErrorString(e));
+        std::fprintf(stderr, "saguaro ds4 gguf %s: %s\n", what, cudaGetErrorString(e));
         g_errors.fetch_add(1, std::memory_order_relaxed);
     }
 }
 void fail(const char* what) {
-    std::fprintf(stderr, "ds4 gguf %s\n", what);
+    std::fprintf(stderr, "saguaro ds4 gguf %s\n", what);
     g_errors.fetch_add(1, std::memory_order_relaxed);
 }
 
@@ -1207,7 +1207,7 @@ Scratch* scratch(cudaStream_t s) {
 
 bool mx_geometry(const char* who, int k, int n_embd, int n_ff) {
     if (k < 1 || k > 8 || n_embd % BN != 0 || n_ff % BN != 0 || n_embd > kMaxEmbd || n_ff % kMxBlock != 0) {
-        std::fprintf(stderr, "ds4 gguf %s: geometry not covered (k %d n_embd %d n_ff %d)\n", who, k, n_embd, n_ff);
+        std::fprintf(stderr, "saguaro ds4 gguf %s: geometry not covered (k %d n_embd %d n_ff %d)\n", who, k, n_embd, n_ff);
         g_errors.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
@@ -1232,7 +1232,7 @@ bool q8_batch() {   // a mv call's int8 inputs in one launch (DS4_Q8_BATCH=0: a 
     if (m >= 0) return (m & 1) != 0;
     static const bool on = [] {
         const bool b = q8_env("DS4_Q8_BATCH");
-        if (!b) std::fprintf(stderr, "ds4: a GEMV call's int8 inputs rounded a launch a job (DS4_Q8_BATCH=0)\n");
+        if (!b) std::fprintf(stderr, "saguaro ds4: a GEMV call's int8 inputs rounded a launch a job (DS4_Q8_BATCH=0)\n");
         return b;
     }();
     return on;
@@ -1242,7 +1242,7 @@ bool q8_share() {   // jobs on one input share its rounding (DS4_Q8_SHARE=0: eac
     if (m >= 0) return (m & 2) != 0;
     static const bool on = [] {
         const bool b = q8_env("DS4_Q8_SHARE");
-        if (!b) std::fprintf(stderr, "ds4: each GEMV job rounds its own int8 input (DS4_Q8_SHARE=0)\n");
+        if (!b) std::fprintf(stderr, "saguaro ds4: each GEMV job rounds its own int8 input (DS4_Q8_SHARE=0)\n");
         return b;
     }();
     return on;
@@ -1273,7 +1273,7 @@ bool q8_batch_check(int dev, std::string& err) {
     const char* where = "";
     auto fail_at = [&](const std::string& why) {
         err = "Q8 batch check on CUDA" + std::to_string(dev) + ": " + why;
-        std::fprintf(stderr, "ds4: CUDA%d Q8 batch check FAILED: %s\n", dev, why.c_str());
+        std::fprintf(stderr, "saguaro ds4: CUDA%d Q8 batch check FAILED: %s\n", dev, why.c_str());
         return false;
     };
     // the inputs (host): a fixed generator; block kinds by the block's index
@@ -1443,7 +1443,7 @@ bool q8_batch_check(int dev, std::string& err) {
             }
     }
     std::fprintf(stderr,
-                 "ds4: CUDA%d Q8 batch check: 8 jobs (k 32 .. 5120, rows 1 .. 16, strided, one input read with two k, "
+                 "saguaro ds4: CUDA%d Q8 batch check: 8 jobs (k 32 .. 5120, rows 1 .. 16, strided, one input read with two k, "
                  "two jobs sharing a rounding): %zu int8 and %zu scales the per-job launches' bit for bit, every guard "
                  "intact (DS4_Q8_CHECK)\n",
                  dev, payload_q, payload_d);
@@ -1494,7 +1494,7 @@ bool iq_args(const x3::ExpertLayout& lay, int n_embd, int n_ff, float limit, iq:
     // (a row of the role's inputs in whole blocks: 256 values, IQ4_NL's 32)
     if (gu ? ia.tg != expert_type(lay, 1) || !iq::supported(ia.tg) || n_embd % iq::block_values(ia.tg) != 0
            : !iq::supported(ia.td) || n_ff % iq::block_values(ia.td) != 0) {
-        std::fprintf(stderr, "ds4 gguf %s: expert types %s / %s / %s (n_embd %d, n_ff %d) not covered\n", who,
+        std::fprintf(stderr, "saguaro ds4 gguf %s: expert types %s / %s / %s (n_embd %d, n_ff %d) not covered\n", who,
                      type_name(expert_type(lay, 0)), type_name(expert_type(lay, 1)), type_name(expert_type(lay, 2)),
                      n_embd, n_ff);
         g_errors.fetch_add(1, std::memory_order_relaxed);
@@ -1583,7 +1583,7 @@ bool mv(const x3::MvJob* jobs, int n, cudaStream_t s, const PreQ8* pre) {
             Scratch* sc = scratch(s);
             if (sc == nullptr || m.raw == nullptr || q.xf == nullptr || q.y == nullptr || q.ncol < 1 ||
                 q.ncol > x3::kMaxMvCols || m.k > kMaxQK || type_row_bytes(m.gg_type, m.k) == 0) {
-                std::fprintf(stderr, "ds4 gguf mv: job %d unsupported (type %s k %d n %d)\n", i, type_name(m.gg_type), m.k,
+                std::fprintf(stderr, "saguaro ds4 gguf mv: job %d unsupported (type %s k %d n %d)\n", i, type_name(m.gg_type), m.k,
                              m.n);
                 g_errors.fetch_add(1, std::memory_order_relaxed);
                 return false;
@@ -1610,7 +1610,7 @@ bool mv(const x3::MvJob* jobs, int n, cudaStream_t s, const PreQ8* pre) {
         if ((m.fmt != kFmtBF16 && m.fmt != kFmtMXFP4 && m.fmt != kFmtQ8_0) || m.raw == nullptr || q.xf == nullptr ||
             q.y == nullptr || q.ncol < 1 || q.ncol > x3::kMaxMvCols || m.k <= 0 || m.n <= 0 ||
             (f != 0 && m.k % kMxBlock != 0)) {
-            std::fprintf(stderr, "ds4 gguf mv: job %d unsupported (fmt %d k %d n %d, %d activations)\n", i, m.fmt, m.k,
+            std::fprintf(stderr, "saguaro ds4 gguf mv: job %d unsupported (fmt %d k %d n %d, %d activations)\n", i, m.fmt, m.k,
                          m.n, q.ncol);
             g_errors.fetch_add(1, std::memory_order_relaxed);
             return false;
@@ -1785,7 +1785,7 @@ void moe_down(const x3::MoeArgs& a, const float* h, const float* sh_out, float* 
 bool win_experts(const x3::WinArgs& a, cudaStream_t s) {
     if (a.T < 1 || a.T > kMaxEnt || !mx_geometry("win_experts", a.k, a.n_embd, a.n_ff) || a.h == nullptr ||
         a.part == nullptr || a.out == nullptr) {
-        std::fprintf(stderr, "ds4 gguf win_experts: not covered (T %d)\n", a.T);
+        std::fprintf(stderr, "saguaro ds4 gguf win_experts: not covered (T %d)\n", a.T);
         return false;
     }
     MxArgs m = mx_args(a.lay, a.n_embd, a.n_ff, a.limit);

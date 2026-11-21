@@ -338,7 +338,7 @@ def end_leftovers(profile: str | None = None, *, grace: float = 8.0, say=None) -
         outcome = end_one(record, grace=grace)
         result[outcome].append({"pid": record["pid"], "role": record.get("role"), "profile": record.get("profile")})
         if say is not None and outcome != "gone":
-            say(f"[strata] leftover {record.get('role', 'process')} {record['pid']} {outcome}")
+            say(f"[saguaro] leftover {record.get('role', 'process')} {record['pid']} {outcome}")
     return result
 
 
@@ -392,5 +392,5 @@ def end_orphans(engine_exe: str, *, grace: float = 8.0, say=None) -> list[dict]:
         outcome = end_one(record, grace=grace)
         ended.append({"pid": ident.pid, "outcome": outcome})
         if say is not None and outcome != "gone":
-            say(f"[strata] an engine left behind by an earlier run (pid {ident.pid}) {outcome}")
+            say(f"[saguaro] an engine left behind by an earlier run (pid {ident.pid}) {outcome}")
     return ended

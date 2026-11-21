@@ -12,7 +12,7 @@ the rest of the vocabulary as one bucket, the same top token, the target's NLL -
      alone, at the depths where attention reads the most rows.
 
     python tools/mm3/kv_gate.py make --ref ~/mm31/ref/ref_topk.npz --rows ~/mm31/calib/eval_mm31.npy --out DIR
-    python tools/mm3/kv_gate.py run --exe build/maya-mm3 --pack <model>/maya-mm3 --dir DIR \\
+    python tools/mm3/kv_gate.py run --exe build/saguaro-mm3 --pack <model>/maya-mm3 --dir DIR \\
         [--formats bf16,int8,fp8,fp4,int8,fp4 ...] [--lengths 4096,16384,65536] [--rows 8] [-- engine args]
 
 `run` prints a table and the recommendation: the smallest format (bytes a position) whose long-prompt KL against BF16

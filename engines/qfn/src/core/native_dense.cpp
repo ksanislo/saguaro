@@ -62,7 +62,7 @@ bool hc_q8_env() {
                                strata::kernels::gfx_arch_is_gfx1151(p1151.gcnArchName);
             (void) cudaGetLastError();
             if (g1151) {
-                std::fprintf(stderr, "strata: Strix Halo (gfx1151): 8-bit hyper-connection weights are on (decode about 9%% faster, "
+                std::fprintf(stderr, "saguaro: Strix Halo (gfx1151): 8-bit hyper-connection weights are on (decode about 9%% faster, "
                                      "answers can differ in near-tie tokens); SAGUARO_HC_Q8=0 keeps the bf16 read\n");
                 return true;
             }
@@ -74,7 +74,7 @@ bool hc_q8_env() {
         const bool g12 = cudaGetDevice(&dev) == cudaSuccess && cudaGetDeviceProperties(&p, dev) == cudaSuccess &&
                          strata::kernels::gfx_arch_is_gfx12(p.gcnArchName);
         (void) cudaGetLastError();
-        if (g12) std::fprintf(stderr, "strata: gfx12 (RDNA4): the hyper-connection projections are read as Q8_0 (quantized at load, "
+        if (g12) std::fprintf(stderr, "saguaro: gfx12 (RDNA4): the hyper-connection projections are read as Q8_0 (quantized at load, "
                                       "decode faster, answers differ slightly); SAGUARO_HC_Q8=0 keeps the bf16 read\n");
         return g12;
 #else
@@ -509,7 +509,7 @@ bool NativeDense::load(const std::vector<std::string>& shards, WeightTable& tabl
         bytes_ = total + hc_q8_bytes;
         allocated_ = allocated;
         if (hc_q8_env())
-            std::fprintf(stderr, "strata: SAGUARO_HC_Q8=1: %.2f GiB of Q8_0 hyper-connection projections for the verify read\n",
+            std::fprintf(stderr, "saguaro: SAGUARO_HC_Q8=1: %.2f GiB of Q8_0 hyper-connection projections for the verify read\n",
                          (double) hc_q8_bytes / 1073741824.0);
         return true;
     } catch (const std::exception& error) {

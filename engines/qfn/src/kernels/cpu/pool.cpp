@@ -48,10 +48,10 @@ uint64_t umwait_cycles() {
         int r[4] = {0, 0, 0, 0};
         __cpuidex(r, 7, 0);
         if (((r[2] >> 5) & 1) == 0) {
-            std::fprintf(stderr, "strata: SAGUARO_POOL_UMWAIT: this CPU has no WAITPKG, the workers spin\n");
+            std::fprintf(stderr, "saguaro: SAGUARO_POOL_UMWAIT: this CPU has no WAITPKG, the workers spin\n");
             return (uint64_t) 0;
         }
-        std::fprintf(stderr, "strata: SAGUARO_POOL_UMWAIT: parked workers wait with UMWAIT (%lld cycles)\n", std::atoll(e));
+        std::fprintf(stderr, "saguaro: SAGUARO_POOL_UMWAIT: parked workers wait with UMWAIT (%lld cycles)\n", std::atoll(e));
         return (uint64_t) std::atoll(e);
 #else
         return (uint64_t) 0;
@@ -584,7 +584,7 @@ bool pin_this_thread(int core, [[maybe_unused]] int worker = -1) {
 #else
     const int error = detail::pin_thread_to_cpu(core);
     if (error != 0)
-        std::fprintf(stderr, "strata cpu pool: affinity for worker %d (CPU %d) failed: %d; previous affinity kept\n",
+        std::fprintf(stderr, "saguaro cpu pool: affinity for worker %d (CPU %d) failed: %d; previous affinity kept\n",
                      worker, core, error);
     return error == 0;
 #endif
@@ -648,7 +648,7 @@ ThreadAffinity pin_current_thread(int core) {
     ULONG target = 0;
     if (!detail::get_thread_cpu_sets(previous.cpu_sets) || !detail::cpu_set_for_core(core, target) ||
         !SetThreadSelectedCpuSets(GetCurrentThread(), &target, 1)) {
-        std::fprintf(stderr, "strata cpu pool: host CPU Set selection for processor %d failed: %lu; previous placement kept\n",
+        std::fprintf(stderr, "saguaro cpu pool: host CPU Set selection for processor %d failed: %lu; previous placement kept\n",
                      core, (unsigned long) GetLastError());
         return {};
     }
@@ -659,7 +659,7 @@ ThreadAffinity pin_current_thread(int core) {
     int error = detail::get_thread_affinity(previous.mask);
     if (error == 0) error = detail::pin_thread_to_cpu(core);
     if (error != 0) {
-        std::fprintf(stderr, "strata cpu pool: host affinity for CPU %d failed: %d; previous affinity kept\n", core, error);
+        std::fprintf(stderr, "saguaro cpu pool: host affinity for CPU %d failed: %d; previous affinity kept\n", core, error);
         return {};
     }
     previous.valid = true;
@@ -674,12 +674,12 @@ void restore_thread_affinity(const ThreadAffinity& previous) {
     // turning the caller's implicit Windows 11 affinity into an explicit single-group hard mask.
     if (!SetThreadSelectedCpuSets(GetCurrentThread(), previous.cpu_sets.empty() ? nullptr : previous.cpu_sets.data(),
                                  (ULONG) previous.cpu_sets.size()))
-        std::fprintf(stderr, "strata cpu pool: host CPU Set restoration failed: %lu\n",
+        std::fprintf(stderr, "saguaro cpu pool: host CPU Set restoration failed: %lu\n",
                      (unsigned long) GetLastError());
 #else
     const int error = detail::set_thread_affinity(previous.mask);
     if (error != 0)
-        std::fprintf(stderr, "strata cpu pool: host affinity restoration failed: %d\n", error);
+        std::fprintf(stderr, "saguaro cpu pool: host affinity restoration failed: %d\n", error);
 #endif
 }
 
@@ -774,10 +774,10 @@ ExpertPool::ExpertPool(int n_workers, bool pin, bool host_works, PoolAffinity af
         static std::atomic<bool> told{false};   // (a throw-away pool of --pool-affinity measure builds the same list again)
         const bool say = !told.exchange(true);
         if (say)
-            for (const std::string& w : chk.warnings) std::fprintf(stderr, "strata cpu pool: --pool-cores: %s\n", w.c_str());
+            for (const std::string& w : chk.warnings) std::fprintf(stderr, "saguaro cpu pool: --pool-cores: %s\n", w.c_str());
         if (chk.cpus.empty()) {
             if (say)
-                std::fprintf(stderr, "strata cpu pool: --pool-cores: no usable logical processor in the list; the pool uses its "
+                std::fprintf(stderr, "saguaro cpu pool: --pool-cores: no usable logical processor in the list; the pool uses its "
                                      "default placement\n");
         } else {
             topo_.worker_cores = chk.cpus;
@@ -838,7 +838,7 @@ ExpertPool::ExpertPool(int n_workers, bool pin, bool host_works, PoolAffinity af
             topo_ = plain_topo;
             auto_pool = env_known = false;
             env_off = true;
-            std::fprintf(stderr, "strata cpu pool: NUMA pool off: %s (%d NUMA nodes found), the pool runs as before\n",
+            std::fprintf(stderr, "saguaro cpu pool: NUMA pool off: %s (%d NUMA nodes found), the pool runs as before\n",
                          tried.why.c_str(), numa_nodes);
         }
     } else if (env_known) {
@@ -858,7 +858,7 @@ ExpertPool::ExpertPool(int n_workers, bool pin, bool host_works, PoolAffinity af
     NumaSplitPlan plan;
     if (!env_off && !env_known) {
         plan.why = std::string("unknown SAGUARO_NUMA_SPLIT value '") + env + "' (use 1 or test)";
-        std::fprintf(stderr, "strata cpu pool: NUMA split off: %s\n", plan.why.c_str());
+        std::fprintf(stderr, "saguaro cpu pool: NUMA split off: %s\n", plan.why.c_str());
     } else if (env_known) {
         plan.test = !auto_pool && std::strcmp(env, "test") == 0;
         const int threads = n_ + (host_works_ ? 1 : 0);   // thread j < n_: worker j; j == n_: the host
@@ -897,16 +897,16 @@ ExpertPool::ExpertPool(int n_workers, bool pin, bool host_works, PoolAffinity af
             slice_threads_.assign(2, 0);
             for (int k : slice) ++slice_threads_[(size_t) k];
             if (auto_pool)
-                std::fprintf(stderr, "strata cpu pool: NUMA pool on: %d NUMA nodes found, one slice of the pool per node "
+                std::fprintf(stderr, "saguaro cpu pool: NUMA pool on: %d NUMA nodes found, one slice of the pool per node "
                                      "(SAGUARO_NUMA_POOL=0 turns it off)\n", numa_nodes);
             if (plan.test)
-                std::fprintf(stderr, "strata cpu pool: NUMA split on (test, no real nodes): slice 0 = %d threads, "
+                std::fprintf(stderr, "saguaro cpu pool: NUMA split on (test, no real nodes): slice 0 = %d threads, "
                                      "slice 1 = %d threads\n", slice_threads_[0], slice_threads_[1]);
             else
-                std::fprintf(stderr, "strata cpu pool: NUMA split on: slice 0 = node %d (%d threads), slice 1 = node %d "
+                std::fprintf(stderr, "saguaro cpu pool: NUMA split on: slice 0 = node %d (%d threads), slice 1 = node %d "
                                      "(%d threads)\n", plan.nodes[0], slice_threads_[0], plan.nodes[1], slice_threads_[1]);
         } else {
-            std::fprintf(stderr, "strata cpu pool: NUMA split off: %s\n", plan.why.c_str());
+            std::fprintf(stderr, "saguaro cpu pool: NUMA split off: %s\n", plan.why.c_str());
         }
     }
     if (n_workers > 0) {
@@ -916,7 +916,7 @@ ExpertPool::ExpertPool(int n_workers, bool pin, bool host_works, PoolAffinity af
         warn_in.span_packages = plan.on;
         static std::atomic<bool> warned{false};
         const std::string why = pool_workers_warning(n_workers, warn_in, plan_pool_workers(warn_in));
-        if (!why.empty() && !warned.exchange(true)) std::fprintf(stderr, "strata cpu pool: warning: %s\n", why.c_str());
+        if (!why.empty() && !warned.exchange(true)) std::fprintf(stderr, "saguaro cpu pool: warning: %s\n", why.c_str());
     }
     g_numa_plan = std::move(plan);
     g_numa_owner = this;
@@ -958,7 +958,7 @@ void ExpertPool::start_workers(bool pin, const std::vector<int>& cores) {
             strata::aux_cpus::note_owned_thread();   // --aux-cpus never moves a worker
             // a failed pin only costs locality under the split: the worker keeps the slice it was given
             if (!pin_this_thread(core, i) && core >= 0 && numa_n_ > 0)
-                std::fprintf(stderr, "strata cpu pool: NUMA split: worker %d not pinned to CPU %d, its slice's rows may "
+                std::fprintf(stderr, "saguaro cpu pool: NUMA split: worker %d not pinned to CPU %d, its slice's rows may "
                                      "be read remotely\n", i, core);
             worker(i);
         });
@@ -1134,7 +1134,7 @@ int ExpertPool::numa_plan_phase(int per, int nb) {
 
 uint32_t ExpertPool::begin_batch(int n) {
     if (n < 0 || n > 0xffff) {
-        std::fprintf(stderr, "strata: expert pool batch of %d jobs is out of range\n", n);
+        std::fprintf(stderr, "saguaro: expert pool batch of %d jobs is out of range\n", n);
         std::abort();
     }
     // Every job of the previous batch has completed (`wait_done`), and a claim of it can no longer succeed, so
@@ -1169,7 +1169,7 @@ void ExpertPool::wait_parked(const char* what) {
         const auto now = std::chrono::steady_clock::now();
         if (spins == 1024u) t0 = now;
         else if (now - t0 > kStall) {
-            std::fprintf(stderr, "strata: the CPU expert pool stalled %s (%u of %d workers parked)%s - stopping the engine "
+            std::fprintf(stderr, "saguaro: the CPU expert pool stalled %s (%u of %d workers parked)%s - stopping the engine "
                                  "so the server can start it again (issue #29)\n",
                          what, parked_count(), n_, numa_counters().c_str());
             strata::core::release_gpu_waits(stderr);   // #267: the GPU may be spinning on this layer's flag
@@ -1196,7 +1196,7 @@ void ExpertPool::wait_done(int n) {
         const auto now = std::chrono::steady_clock::now();
         if (spins == 1024u || d != seen) { t0 = now; seen = d; }     // progress restarts the clock
         else if (now - t0 > kStall) {
-            std::fprintf(stderr, "strata: the CPU expert pool stalled: %u of %d jobs done, %u of %d workers parked%s - "
+            std::fprintf(stderr, "saguaro: the CPU expert pool stalled: %u of %d jobs done, %u of %d workers parked%s - "
                                  "stopping the engine so the server can start it again (issue #29)\n",
                          d, n, parked_count(), n_, numa_counters().c_str());
             strata::core::release_gpu_waits(stderr);   // #267
