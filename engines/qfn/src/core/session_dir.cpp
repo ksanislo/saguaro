@@ -45,12 +45,12 @@ SessionPeek peek_of(const SavedConversation& image, uint64_t bytes) {
     return p;
 }
 
-std::string random_name() {
+std::string random_name(const char* ext = ".session") {
     std::random_device rd;
     const uint64_t v = (uint64_t) rd() << 32 ^ rd();
     char b[40];
-    std::snprintf(b, sizeof b, "%016" PRIx64 ".session", v);
-    return b;
+    std::snprintf(b, sizeof b, "%016" PRIx64, v);
+    return std::string(b) + ext;
 }
 
 } // namespace
@@ -89,12 +89,17 @@ void SessionDir::open() {
     fs::create_directories(o_.dir, ec);
     std::vector<std::pair<fs::file_time_type, Entry>> found;
     for (const auto& de : fs::directory_iterator(o_.dir, ec)) {
-        if (!de.is_regular_file() || de.path().extension() != ".session") continue;
+        const bool log = de.path().extension() == kSessionLogExt;
+        if (!de.is_regular_file() || (de.path().extension() != ".session" && !log)) continue;
+        if (log && !session_log_supported()) continue;   // (not this build's to judge)
         Entry e;
         e.path = de.path().string();
+        e.log = log;
         std::string err;
-        if (!session_file_peek(e.path, o_.id, e.peek, err) &&
-            (o_.id_yarn.config == 0 || !session_file_peek(e.path, o_.id_yarn, e.peek, err))) {
+        auto peek = [&](const SessionFileIdentity& id) {
+            return log ? session_log_peek(e.path, id, e.peek, err) : session_file_peek(e.path, id, e.peek, err);
+        };
+        if (!peek(o_.id) && (o_.id_yarn.config == 0 || !peek(o_.id_yarn))) {
             say("drop " + e.path + " (" + err + ")");
             const uint64_t sz = (uint64_t) fs::file_size(de.path(), ec);
             fs::remove(de.path(), ec);
@@ -171,6 +176,51 @@ void SessionDir::wait_write_locked(std::unique_lock<std::mutex>& lk, const Saved
     progress_at("request");
 }
 
+SessionDir::Saved SessionDir::saved(const std::shared_ptr<const SavedConversation>& image) const {
+    if (!image) return Saved::no;
+    std::lock_guard<std::mutex> lk(mu_);
+    if (writing_ == image.get()) return Saved::writing;
+    for (const Job& j : jobs_)
+        if (j.image == image) return Saved::queued;
+    const ConversationCheckpoint* deepest = session_deepest_checkpoint(image->checkpoints);
+    for (const Entry& e : entries_) {
+        if (e.state == State::writing || e.peek.cvec != image->cvec) continue;
+        // its own file, or a file of this conversation further on (supersedes()'s rules, the file being the newer)
+        if (e.image.lock() == image || head_prefix(image->live, e.peek.live) ||
+            (deepest != nullptr && !deepest->ids.empty() &&
+             (same_head(*deepest, e.peek.live) || same_head(*deepest, e.peek.deepest))))
+            return Saved::yes;
+    }
+    return Saved::no;
+}
+
+size_t SessionDir::expedite(const SavedConversation* image) {
+    size_t n = 0;
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        const auto now = std::chrono::steady_clock::now();
+        for (Job& j : jobs_)
+            if ((image != nullptr ? j.image.get() == image : j.image.use_count() == 1) && j.due > now) {
+                j.due = now;
+                ++n;
+            }
+        // the writer takes the front job when it is due: the ones moved up go first, in their order
+        std::stable_sort(jobs_.begin(), jobs_.end(), [](const Job& a, const Job& b) { return a.due < b.due; });
+    }
+    if (n) cv_.notify_all();
+    return n;
+}
+
+uint64_t SessionDir::orphan_bytes() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    uint64_t n = 0;
+    for (const Job& j : jobs_)
+        if (j.image.use_count() == 1) n += j.image->bytes();
+    // (the running write: the writer's job and writing_img_)
+    if (writing_img_ && writing_img_.use_count() == 2) n += writing_img_->bytes();
+    return n;
+}
+
 void SessionDir::flush() {
     std::unique_lock<std::mutex> lk(mu_);
     flushing_ = true;
@@ -208,9 +258,27 @@ void SessionDir::writer_loop() {
         jobs_.pop_front();
         writing_ = job.image.get();
         writing_img_ = job.image;
+
+        // an appending file of this conversation is extended (the newest one, when a rewritten tail left several)
+        const bool use_log = o_.append && session_log_supported();
+        std::string path;
+        bool extend = false;
+        if (use_log) {
+            size_t best = entries_.size();
+            for (size_t i = 0; i < entries_.size(); ++i)
+                if (entries_[i].log && entries_[i].state == State::idle && entries_[i].peek.cvec == job.image->cvec &&
+                    supersedes(job.image->live, job.image->checkpoints, entries_[i].peek) &&
+                    (best == entries_.size() || entries_[i].seq > entries_[best].seq))
+                    best = i;
+            if (best != entries_.size()) {
+                entries_[best].state = State::writing;
+                path = entries_[best].path;
+                extend = true;
+            }
+        }
+        if (path.empty()) path = (fs::path(o_.dir) / random_name(use_log ? kSessionLogExt : ".session")).string();
         lk.unlock();
 
-        const std::string path = (fs::path(o_.dir) / random_name()).string();
         SessionWriteOptions wo;
         wo.deepest_checkpoint_only = true;
         wo.min_free_bytes = o_.min_free_bytes;
@@ -229,14 +297,20 @@ void SessionDir::writer_loop() {
         std::string err;
         SessionStatus st;
         const auto t0 = std::chrono::steady_clock::now();
-        const bool ok = session_file_write(path, *job.image, id_of(*job.image), written, err, wo, &st);
+        SessionLogStats ls;
+        const bool ok = use_log ? session_log_save(path, *job.image, id_of(*job.image), ls, err, wo, &st, o_.log_format)
+                                : session_file_write(path, *job.image, id_of(*job.image), written, err, wo, &st);
         const double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
 
         lk.lock();
         writing_ = nullptr;
         writing_img_.reset();
+        if (extend && !ok)   // (its file is as its last commit left it)
+            for (Entry& e : entries_)
+                if (e.path == path && e.state == State::writing) e.state = State::idle;
         if (ok) {
-            add_written_locked(path, *job.image, written, s, "wrote");
+            add_written_locked(path, *job.image, use_log ? (size_t) ls.file_bytes : written, s, "wrote", nullptr,
+                               job.image, use_log ? &ls : nullptr);
         } else if (write_cancel_.load(std::memory_order_relaxed) == job.image.get()) {
             say("write of " + std::to_string(job.image->live.ids.size()) + " tokens stopped after " +
                 std::to_string((long long) (s * 1000.0)) + " ms: the conversation was taken back");
@@ -251,12 +325,19 @@ void SessionDir::writer_loop() {
 }
 
 void SessionDir::add_written_locked(const std::string& path, const SavedConversation& image, size_t written, double s,
-                                    const char* what, const std::vector<ConversationCheckpoint>* chain) {
+                                    const char* what, const std::vector<ConversationCheckpoint>* chain,
+                                    const std::shared_ptr<const SavedConversation>& from, const SessionLogStats* log) {
     Entry e;
     e.path = path;
     e.peek = peek_of(image, written);
     e.seq = ++seq_;
     e.used = std::chrono::system_clock::now();
+    e.log = log != nullptr;
+    e.image = from;
+    if (log != nullptr) e.peek.version = 3;
+    // (a file that was extended in place: its old index entry goes, the file stays)
+    entries_.erase(std::remove_if(entries_.begin(), entries_.end(), [&](const Entry& x) { return x.path == path; }),
+                   entries_.end());
     size_t dropped = 0;
     for (size_t i = 0; i < entries_.size();) {
         if (entries_[i].state != State::loading &&
@@ -267,12 +348,21 @@ void SessionDir::add_written_locked(const std::string& path, const SavedConversa
             ++i;
         }
     }
-    char b[200];
-    std::snprintf(b, sizeof b, "%s %zu tokens, %zu MiB in %.1f s (%zu older file(s) of it dropped)", what,
-                  image.live.ids.size(), written >> 20, s, dropped);
+    char b[280];
+    if (log != nullptr && log->appended)
+        std::snprintf(b, sizeof b, "appended %zu tokens: %llu MiB written, %llu MiB already in its file (%zu MiB) in "
+                      "%.1f s (%zu older file(s) of it dropped)", image.live.ids.size(),
+                      (unsigned long long) (log->written_bytes >> 20), (unsigned long long) (log->reused_bytes >> 20),
+                      written >> 20, s, dropped);
+    else
+        std::snprintf(b, sizeof b, "%s %zu tokens, %zu MiB in %.1f s (%zu older file(s) of it dropped)%s", what,
+                      image.live.ids.size(), written >> 20, s, dropped,
+                      log != nullptr && log->compacted ? "; its file was rewritten whole to drop replaced chunks" : "");
     say(b);
-    note_locked("wrote", image.live.ids.size(), written, s * 1000.0,
-                exiting_ ? "exit" : std::strcmp(what, "wrote") == 0 ? "background" : "direct");
+    // (sess_bytes: what this save put on the disk - an append's is its new chunks only)
+    note_locked("wrote", image.live.ids.size(), log != nullptr ? (uint64_t) log->written_bytes : written, s * 1000.0,
+                exiting_ ? "exit" : log != nullptr && log->appended ? "appended"
+                         : std::strcmp(what, "wrote") == 0 ? "background" : "direct");
     entries_.push_back(std::move(e));
     enforce_caps_locked();
     state_locked();
@@ -433,9 +523,10 @@ std::optional<SavedConversation> SessionDir::fetch(const std::vector<int32_t>& i
         if (best == entries_.size()) return std::nullopt;
         Entry& e = entries_[best];
         const std::string path = e.path;
-        if (e.state == State::loading) {   // the preload is reading it: wait for that read
+        if (e.state == State::loading || e.state == State::writing) {   // being read by the preload, or extended
             cv_.wait(lk, [&] {
-                for (const auto& x : entries_) if (x.path == path) return x.state != State::loading;
+                for (const auto& x : entries_)
+                    if (x.path == path) return x.state != State::loading && x.state != State::writing;
                 return true;
             });
             continue;
@@ -494,8 +585,14 @@ std::optional<SavedConversation> SessionDir::fetch(const std::vector<int32_t>& i
 bool SessionDir::read_file(const std::string& path, SavedConversation& image, std::string& error) const {
     size_t bytes = 0;
     SessionStatus st;
-    if (session_file_map(path, o_.id, image, bytes, error, o_.limits, &st)) return true;   // K/V as views: no RAM copy
-    if (o_.id_yarn.config == 0 || !session_file_map(path, o_.id_yarn, image, bytes, error, o_.limits, &st)) return false;
+    const bool log = fs::path(path).extension() == kSessionLogExt;
+    auto read = [&](const SessionFileIdentity& id) {
+        // (v1/v2: K/V as views into the mapping, no RAM copy; an appending file's chunks are read into owned buffers)
+        return log ? session_log_read(path, id, image, bytes, error, o_.limits, &st, o_.log_format)
+                   : session_file_map(path, id, image, bytes, error, o_.limits, &st);
+    };
+    if (read(o_.id)) return true;
+    if (o_.id_yarn.config == 0 || !read(o_.id_yarn)) return false;
     // a YaRN conversation's file: the level rides on every state it restores
     image.live.rope_level = 1;
     for (auto& p : image.live.stage_parts) p.rope_level = 1;
