@@ -220,8 +220,8 @@ def one_run(a, settings: dict, parallel: int, ctx: int, slots: str, keep: bool =
 def main() -> int:
     ap = argparse.ArgumentParser(description="several conversations at once on maya-ds4 (--parallel N)")
     ap.add_argument("--pack", required=True, help="the model's pack dir (maya-ds4)")
-    ap.add_argument("--exe", default=str(Path(__file__).resolve().parents[2] / "build/maya-ds4"),
-                    help="the engine (default: <repo>/build/maya-ds4)")
+    ap.add_argument("--exe", default=str(Path(__file__).resolve().parents[2] / "build/saguaro-ds4"),
+                    help="the engine (default: <repo>/build/saguaro-ds4)")
     ap.add_argument("--gpus", default="", help="the GPUs (default: every visible one, the engine's own split)")
     ap.add_argument("--config", default="", help="a model config (maya-ds4.json): its DS4_/SAGUARO_DS4_ settings")
     ap.add_argument("--lanes", type=int, default=3, help="the conversations at once to test and measure (1-8)")

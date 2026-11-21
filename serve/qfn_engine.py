@@ -2626,7 +2626,7 @@ def vision_start_error(line: str, log=None, code: int | None = None, waited: flo
     return msg
 
 class Vision:
-    """The resident image encoder: `strata-vision` (llama.cpp mtmd + the mmproj file) reads `ENC <image> <out>`
+    """The resident image encoder: `vision-qfn` (llama.cpp mtmd + the mmproj file) reads `ENC <image> <out>`
     lines and writes each image's embeddings; results are cached by the image's hash, so a conversation that
     sends the same picture again (every turn, with most clients) encodes it once."""
 
@@ -2639,7 +2639,7 @@ class Vision:
         resort (the encoder's own files are then named relative to it, see `_start`)."""
         for parent in (None, Path.cwd(), Path(os.environ.get("SystemDrive", "C:") + os.sep)):
             try:
-                d = Path(tempfile.mkdtemp(prefix="strata-vision-", dir=parent))
+                d = Path(tempfile.mkdtemp(prefix="saguaro-vision-", dir=parent))
             except OSError:
                 continue                                       # not writable, or no such drive
             if " " not in str(d):
@@ -2648,13 +2648,13 @@ class Vision:
                 d.rmdir()                                      # just created, so still empty
             except OSError:
                 pass
-        return Path(tempfile.mkdtemp(prefix="strata-vision-"))
+        return Path(tempfile.mkdtemp(prefix="saguaro-vision-"))
 
     def __init__(self, cfg: dict, log=None, env: dict | None = None, lazy: bool = False):
         args = self.reader_args(cfg)
         self.dir = self.work_dir()
         self.spawn = (args, log, env)                   # to start it again after an unload
-        # AMD: the GPU reader (strata-vision-hip) has the CPU reader (strata-vision, same program, no GPU runtime) to
+        # AMD: the GPU reader (vision-qfn-hip) has the CPU reader (vision-qfn, same program, no GPU runtime) to
         # fall back on when it does not start; _start switches to it by itself
         cpu = vision_reader.cpu_fallback(cfg)
         self.fallback = (self.reader_args(cpu), log, env) if cpu else None
@@ -2896,7 +2896,7 @@ class Vision:
 
     @staticmethod
     def normalize(data: bytes) -> bytes:
-        """The formats strata-vision's decoder (stb_image) reads pass through; anything else is converted to PNG.
+        """The formats vision-qfn's decoder (stb_image) reads pass through; anything else is converted to PNG.
         A JPEG with an EXIF Orientation other than 1 is turned upright first (needs Pillow)."""
         jpeg = data[:3] == b"\xff\xd8\xff"
         if (jpeg and not Vision._exif_rotated(data)) or data[:8] == b"\x89PNG\r\n\x1a\n" or data[:2] == b"BM" or \
@@ -2977,7 +2977,7 @@ class Vision:
 
     def warn_if_over_limit(self, tokens: int) -> None:
         """I7: one picture that became more than 4 times the limit is logged with the numbers, so the next report has them (the reader's own
-        stderr has the warm-up line).  A reader built before the limit was enforced inside it (strata-vision refuses these now) still lets them by."""
+        stderr has the warm-up line).  A reader built before the limit was enforced inside it (vision-qfn refuses these now) still lets them by."""
         limit = getattr(self, "max_tokens", 0)
         if limit and tokens > 4 * limit:
             print(f"[saguaro] images: one picture became {tokens} image tokens, more than 4 times the limit of {limit} (vision.max_tokens); "

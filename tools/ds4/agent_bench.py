@@ -3,7 +3,7 @@ system prompt and task first, then the conversation so far with the model's last
 time between an answer and the next turn, every agent at once.  The same seeded workload on each engine given, and
 per turn when its first token and its last came from its send.
 
-    python tools/ds4/agent_bench.py --pack <pack> --exe build/maya-ds4 [--exe <another build>] [--gpus 0,2,1]
+    python tools/ds4/agent_bench.py --pack <pack> --exe build/saguaro-ds4 [--exe <another build>] [--gpus 0,2,1]
                                     [--config maya-ds4.json] [--agents 4] [--turns 8] [--seed 1]
 
   turn 1      the system prompt and task: 4,000-12,000 tokens

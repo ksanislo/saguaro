@@ -4,7 +4,7 @@
 // mtmd library and the model's mmproj file (vision encoder + projector).  The engine does the rest: it places the
 // rows at the image's pad tokens and gives them their 2-D M-RoPE positions (see --serve GENI in generate.cpp).
 //
-//   strata-vision --mmproj <mmproj.gguf> --model <text model .gguf, first split> [--gpu] [--threads N]
+//   vision-qfn --mmproj <mmproj.gguf> --model <text model .gguf, first split> [--gpu] [--threads N]
 //                 [--max-tokens N] [--min-tokens N] [--flash-attn on|off|auto]
 // Flash attention defaults to auto, and to off on the CPU when ggml is built with AVX-512 (see main).
 //
@@ -108,7 +108,7 @@ int main(int argc, char** argv) {
 #elif defined(STRATA_VISION_SYCL)
             std::printf("saguaro vision sycl (Intel GPU)\n");
 #else
-            std::printf("strata-vision\n");
+            std::printf("vision-qfn\n");
 #endif
             return 0;
         }
@@ -125,7 +125,7 @@ int main(int argc, char** argv) {
         else { std::fprintf(stderr, "unknown argument %s\n", a.c_str()); return 2; }
     }
     if (mmproj.empty() || model.empty()) {
-        std::fprintf(stderr, "usage: strata-vision --mmproj <mmproj.gguf> --model <model.gguf> [--gpu] [--threads N] "
+        std::fprintf(stderr, "usage: vision-qfn --mmproj <mmproj.gguf> --model <model.gguf> [--gpu] [--threads N] "
                              "[--max-tokens N] [--min-tokens N] [--flash-attn on|off|auto] [--warmup-lazy]\n");
         return 2;
     }

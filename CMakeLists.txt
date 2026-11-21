@@ -646,6 +646,7 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
   endif()
 
   add_executable(maya src/program/generate.cpp)
+  set_target_properties(maya PROPERTIES OUTPUT_NAME saguaro-glm)   # the program's name (the target keeps its old one)
   target_include_directories(maya PRIVATE ${_strata_gpu_include_directories})
   target_link_libraries(maya PRIVATE strata_engine strata_prefill strata_spec ${_strata_gpu_runtime_target})
 
@@ -656,6 +657,7 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
     add_executable(maya-ds4 src/ds4/ds4_main.cpp src/ds4/ds4_model.cu src/ds4/ds4_kernels.cu src/ds4/ds4_vision.cu
                               src/ds4/ds4_gguf.cu src/ds4/ds4_gguf_cpu.cpp src/ds4/ds4_iq.cu src/ds4/ds4_iq_cpu.cpp
                               src/ds4/ds4_lt.cu src/ds4/ds4_host_ar.cpp src/ds4/ds4_packinfo.cpp)
+    set_target_properties(maya-ds4 PROPERTIES OUTPUT_NAME saguaro-ds4)   # the program's name (the target keeps its old one)
     target_include_directories(maya-ds4 PRIVATE ${_strata_gpu_include_directories} third_party/ggml)
     # the commit and the release `maya-ds4 --version` and --verbose name, written at every build (cmake/build_id.cmake:
     # git's commit, a source archive's BUILD_ID file, or -DMAYA_BUILD_ID=...; the release from VERSION)
@@ -790,6 +792,7 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
     set(_mm3_nv_sources src/mm3/mm3_exl3.cu src/mm3/mm3_dspark.cu src/mm3/mm3_vision.cu src/mm3/mm3_tp.cu)
     add_executable(maya-mm3 src/mm3/mm3_main.cpp src/mm3/mm3_model.cu src/mm3/mm3_kernels.cu src/mm3/mm3_cpu.cpp
                             src/mm3/mm3_host.cpp ${_mm3_nv_sources} ${_mm3_gguf_sources} ${_mm3_gguf_cpu_sources})
+    set_target_properties(maya-mm3 PROPERTIES OUTPUT_NAME saguaro-mm3)   # the program's name (the target keeps its old one)
     target_include_directories(maya-mm3 PRIVATE ${_strata_gpu_include_directories} include src/mm3 third_party/ggml)
     # (the CPU lane: the shared CPU EXL3 kernels, used as they are; ggml-cpu's dots for a GGUF's experts)
     target_link_libraries(maya-mm3 PRIVATE strata_kernels_cpu strata_spec ${_strata_gpu_runtime_target}
@@ -1675,7 +1678,8 @@ endif()
 # ---- saguaro-qfn: Qwen3.8-Flash-Next's engine (engines/qfn, Strata's tree with its own CMake project - its targets share
 # names with this project's, so it builds as an external project) with the live QFN build's options (tools/qfn/build.sh;
 # the same compiler, flags, ggml checkout and kq-library types, so the same compiled code). Output in <build>/qfn:
-# saguaro-qfn (= its strata target), libstrata_kq.so + libstrata_kq_tab.so (one set, loaded from the binary's folder).
+# saguaro-qfn (the strata target's OUTPUT_NAME - no renaming), libstrata_kq.so + libstrata_kq_tab.so (one set, loaded
+# from the binary's folder).
 option(SAGUARO_QFN "Build the QFN engine (engines/qfn) as saguaro-qfn" OFF)
 set(SAGUARO_QFN_GGML_DIR "/data/llm/strata-main/third_party/llama.cpp" CACHE PATH "the llama.cpp checkout engines/qfn takes ggml from")
 if(SAGUARO_QFN AND STRATA_ENABLE_CUDA)
@@ -1689,7 +1693,7 @@ if(SAGUARO_QFN AND STRATA_ENABLE_CUDA)
                -DSTRATA_BUILD_CONVERSATION_TESTS=ON -DSTRATA_GGML_DIR=${SAGUARO_QFN_GGML_DIR} -DSTRATA_MMQ_TAB=ON
                -DSTRATA_MMQ_TAB_TYPES= "-DSTRATA_MMQ_TAB_KQ_TYPES=q4_k$<SEMICOLON>q5_k$<SEMICOLON>q5_1$<SEMICOLON>q8_0"
     BUILD_COMMAND ${CMAKE_COMMAND} --build <BINARY_DIR> --target strata strata_kq strata_kq_tab
-    INSTALL_COMMAND ${CMAKE_COMMAND} -E copy_if_different <BINARY_DIR>/strata <BINARY_DIR>/saguaro-qfn
+    INSTALL_COMMAND ""          # (its strata target's OUTPUT_NAME is saguaro-qfn: nothing to copy or rename)
     BUILD_ALWAYS ON
     EXCLUDE_FROM_ALL ON)
   add_custom_target(saguaro-qfn DEPENDS qfn_engine)

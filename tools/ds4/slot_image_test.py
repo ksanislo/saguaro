@@ -3,7 +3,7 @@
 with a picture in its history is set aside and taken back - for a prompt whose picture sits at the same place with the
 same pixels, and for no other.
 
-    python tools/ds4/slot_image_test.py --pack /mnt/data/models/.../maya-ds4 [--exe build/maya-ds4] [--gpus 0,1]
+    python tools/ds4/slot_image_test.py --pack /mnt/data/models/.../maya-ds4 [--exe build/saguaro-ds4] [--gpus 0,1]
                                         [--config maya-ds4.json]
 
 Two runs of the engine's `--serve` protocol (greedy, spec=0: the state's position is the answer's, exactly):

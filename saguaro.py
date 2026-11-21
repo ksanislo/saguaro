@@ -23,7 +23,7 @@ with Saguaro (third_party/wheels) and goes into .venv from there - nothing is do
 and Saguaro in the terminal as before; --yes: the setup in plain text.
 
 What the first run does (each step is skipped when it is already done) - first it asks which model: GLM-5.3-Flash
-(the steps below) or DeepSeek-V4.1-Flash-1017 (the same steps for its own engine, build/maya-ds4: LibertAIDAI's EXL3
+(the steps below) or DeepSeek-V4.1-Flash-1017 (the same steps for its own engine, build/saguaro-ds4: LibertAIDAI's EXL3
 quant at 2.9 bits, 211 GB, and its two Engram tables from DeepSeek's base repo, 203 GB; its pack is tools/ds4/pack.py's;
 its vision tower runs in the engine - a GGUF's comes from DeepSeek's own checkpoint, 0.97 GB, shown and asked first;
 no tuning step - it balances its own split):
@@ -36,11 +36,11 @@ no tuning step - it balances its own split):
      Maya-S, Maya-S24, Maya-M, Maya-M-Derisked or Maya-L; or turboderp's EXL3 quant at 3.05 or 4.05 bits or the
      self-calibrated one at 4.10, experimental: NVIDIA, and AMD)
   3. Python packages into .venv, llama.cpp's source at the pinned commit (it lists them and asks first)
-  4. compiles the engine (`build/maya`, or `build-hip/maya`) for your GPU(s): 10-30 minutes, once
+  4. compiles the engine (`build/saguaro-glm`, or `build-hip/saguaro-glm`) for your GPU(s): 10-30 minutes, once
   5. the model: GGUF files you already have (--gguf-dir), or a download it shows you first - the exact commands
      and the size - and starts only after you answer y (or pass --download-model)
   6. builds the pack (the engine's index of the model files) inside the model folder
-  7. images: compiles the vision encoder (`build-vision/bin/maya-vision`) and fetches the model's vision files
+  7. images: compiles the vision encoder (`build-vision/bin/vision-glm`) and fetches the model's vision files
      (1.1 GB, shown and asked first like the model; --no-vision skips it)
   8. writes maya-<model>.json and run-maya-<model>.sh (.bat on Windows) - with the settings tuned for this PC
      earlier, or it offers the tuning (./saguaro.sh --calibrate does it any time) - and starts the dashboard on
@@ -94,10 +94,10 @@ RESTART_EXIT = 76                                  # ... after it saved a new po
 SWITCH_FILE = ".maya-switch.json"                  # ... or the Models page's note: the config to start (serve/models.py)
 ROOT = S.ROOT
 BUILD = ROOT / "build"
-EXE = BUILD / ("maya.exe" if WIN else "maya")
+EXE = BUILD / ("saguaro-glm.exe" if WIN else "saguaro-glm")
 STAMP = BUILD / "MAYA-BUILD.json"                  # what the engine in build/ was compiled from and for
 VBUILD = ROOT / "build-vision"
-VEXE = VBUILD / "bin" / ("maya-vision.exe" if WIN else "maya-vision")  # the image encoder (llama.cpp's mtmd)
+VEXE = VBUILD / "bin" / ("vision-glm.exe" if WIN else "vision-glm")   # the image encoder (llama.cpp's mtmd)
 VSTAMP = VBUILD / "MAYA-BUILD.json"
 MIN_CC = 60                                        # Pascal and newer (the GLM path; see arch_setting) ...
 VALIDATED_CC = 70                                  # ... Volta (V100) and newer validated, Pascal experimental (#212)
@@ -544,13 +544,13 @@ DFLASH = {"repo": "Anbeeld/GLM-5.3-Flash-DFlash2-GGUF", "revision": "f3569acb7f9
           "sha256": "f4158ffb805b26c4fe439669c2009908a80ea89e1576ecea4d03eaded18f017c",
           "license": "CC BY-NC-ND 4.0"}   # (the repo's: non-commercial use only, shown wherever it is offered)
 DRAFTS = ("mtp", "dflash2")                        # the setup's drafting choices; MTP the default
-# DeepSeek-V4.1-Flash-1017: its own engine (src/ds4, build/maya-ds4) reads LibertAIDAI's EXL3 quant at 2.9 bits in
+# DeepSeek-V4.1-Flash-1017: its own engine (src/ds4, build/saguaro-ds4) reads LibertAIDAI's EXL3 quant at 2.9 bits in
 # place from its safetensors; its two Engram tables come from DeepSeek's base repo.  Every file is pinned and checked
 # (tools/ds4/download.json).  Linux and NVIDIA RTX 30 / A100 or newer only: its vision tower's BF16 GEMMs, the CPU
 # lane's NUMA memory.  Tensor parallel across pairs of equal GPUs (--tp 2; ./saguaro.sh --calibrate measures the others),
 # the rest of the experts in RAM.
 DS4 = "DeepSeek-V4.1-Flash-1017"
-DS4_EXE = BUILD / ("maya-ds4.exe" if WIN else "maya-ds4")
+DS4_EXE = BUILD / ("saguaro-ds4.exe" if WIN else "saguaro-ds4")
 DS4_MANIFEST = ROOT / "tools" / "ds4" / "download.json"
 DS4_PACK_TOOLS = ("tools/ds4/pack.py", "tools/ds4/engram_hash.py", "tools/ds4/st.py", "tools/ds4/chat_template.jinja")
 DS4_MIN_CC = 70                                    # (V100 on: the experts' kernels before sm_80 since v1.1.20)
@@ -611,12 +611,12 @@ DS4_35 = DS4 + "-3.5bpw"                            # the same model in LibertAI
 DS4_EXL3 = {"exl3": {"bits": "2.9", "manifest": DS4_MANIFEST, "weights_gb": 211, "memory_gb": DS4_MEMORY_GB, "dir": DS4},
             "exl3-3.5": {"bits": "3.5", "manifest": ROOT / "tools" / "ds4" / "download-3.5bpw.json", "weights_gb": 258,
                          "memory_gb": 280, "dir": DS4_35}}
-# MiniMax-M3.1-Flash: its own engine (src/mm3, build/maya-mm3) reads Mia-AiLab's EXL3 quant at 3.5 bits (EAQ v1) in place
+# MiniMax-M3.1-Flash: its own engine (src/mm3, build/saguaro-mm3) reads Mia-AiLab's EXL3 quant at 3.5 bits (EAQ v1) in place
 # from its safetensors; every file is pinned and checked (tools/mm3/download.json, its DSpark draft a download of its
 # own).  NVIDIA: the layers split across the GPUs, the most-routed experts in VRAM (data/expert-profile-mm3.bin), the
 # others computed on the CPU from RAM.  Its chat template is Saguaro's own (tools/mm3/chat_template.jinja: MiniMax's plus Off).
 MM3 = "MiniMax-M3.1-Flash"
-MM3_EXE = BUILD / ("maya-mm3.exe" if WIN else "maya-mm3")
+MM3_EXE = BUILD / ("saguaro-mm3.exe" if WIN else "saguaro-mm3")
 MM3_MANIFEST = ROOT / "tools" / "mm3" / "download.json"
 MM3_PACK_TOOLS = ("tools/mm3/pack.py", "tools/mm3/st.py", "tools/strata_tokenizer.py", "tools/mm3/chat_template.jinja")
 MM3_DIR = "MiniMax-M3.1-Flash-EXL3-3.5bpw"
@@ -686,7 +686,7 @@ MM3_GGUF_MIN_CC = 70                               # (maya-ds4's GGUF kernels' r
 # GGUF (tools/qwen/download.json: pinned, sha256-checked).  It runs on the `maya` engine's own Qwen path from the file
 # in place: the experts in VRAM, the next-most-used in RAM as far as this PC's RAM goes, the rest read from the SSD; the
 # 52 GB n-gram table read from the SSD row by row (never in RAM).  Pictures: the base model's vision tower (the fine-tune
-# kept it byte for byte) as llama.cpp's mmproj, read by maya-vision when a picture arrives (download.json's "vision").  Its chat
+# kept it byte for byte) as llama.cpp's mmproj, read by vision-glm when a picture arrives (download.json's "vision").  Its chat
 # template is the GGUF's (thinking always on, reasoning effort low / medium / xhigh; Qwen's XML tool calls); sampling
 # its card's (general.sampling: temperature 1.0, top-p 0.95, top-k 20).  The MTP drafter is built from the GGUF's
 # NextN block (tools/mtp_from_gguf.py) and kept where it measures faster on this PC.
@@ -861,17 +861,23 @@ def gpu_label(g) -> str:
     return f"GPU {g['index']} ({g['name']}, {g['vram_gb']:.0f} GB)"
 
 
-# v1.1.16 named the programs after Saguaro: the ones an earlier version compiled are renamed in place (nothing compiled
-# again), their build stamps and the configs' paths follow (rename_programs, fix_config_names)
+# v1.1.16 named the programs after the old engine and the visible-names release names them Saguaro's own: the ones an
+# earlier version compiled are renamed in place (nothing compiled again), their build stamps and the configs' paths
+# follow (rename_programs, fix_config_names). OLD_NAMES is the build targets' v1.1.16 rename (the targets kept those
+# names); PROG_NAMES maps every program name a build folder or config can still carry to today's file name.
 OLD_NAMES = {"strata": "maya", "strata-ds4": "maya-ds4", "strata-vision": "maya-vision"}
+PROG_NAMES = {"strata": "saguaro-glm", "strata-ds4": "saguaro-ds4", "strata-vision": "vision-glm",
+              "maya": "saguaro-glm", "maya-ds4": "saguaro-ds4", "maya-mm3": "saguaro-mm3",
+              "maya-vision": "vision-glm"}
 
 
 def rename_programs() -> None:
     ext = ".exe" if WIN else ""
-    pairs = [(ROOT / d / (old + ext), ROOT / d / (new + ext)) for d in ("build", "build-hip")
-             for old, new in (("strata", "maya"), ("strata-ds4", "maya-ds4"))]
-    pairs.append((VBUILD / "bin" / ("strata-vision" + ext), VBUILD / "bin" / ("maya-vision" + ext)))
-    for old, new in pairs:
+    pairs = [(ROOT / d / (old + ext), ROOT / d / (PROG_NAMES[old] + ext))
+             for d in ("build", "build-hip") for old in ("maya", "strata", "maya-ds4", "strata-ds4", "maya-mm3")]
+    pairs += [(VBUILD / "bin" / (old + ext), VBUILD / "bin" / (PROG_NAMES[old] + ext))
+              for old in ("maya-vision", "strata-vision")]
+    for old, new in pairs:      # (newest first: when both old programs are there, `maya` takes the name and `strata` stays)
         if old.exists() and not new.exists():
             try:
                 os.replace(old, new)
@@ -887,15 +893,15 @@ def rename_programs() -> None:
 
 
 def fix_config_names(cfg: dict) -> bool:
-    """A config written before v1.1.16 names the programs by their old names: True when it was changed.  A path moves to
-    the new name only when the program is there under it (rename_programs renames Saguaro's own builds; a program
-    elsewhere keeps its path)."""
+    """A config written before the programs got their Saguaro names still names them by an old one: True when it was
+    changed.  A path moves to the new name only when the program is there under it (rename_programs renames Saguaro's
+    own builds; a program elsewhere keeps its path)."""
     def renamed(p: str) -> str:
         q = Path(p)
         stem, ext = (q.name[:-4], ".exe") if q.name.endswith(".exe") else (q.name, "")
-        if stem not in OLD_NAMES:
+        if stem not in PROG_NAMES:
             return p
-        new = q.with_name(OLD_NAMES[stem] + ext)
+        new = q.with_name(PROG_NAMES[stem] + ext)
         return str(new) if (new if new.is_absolute() else ROOT / new).exists() else p
     done = False
     if cfg.get("exe") and renamed(cfg["exe"]) != cfg["exe"]:
@@ -910,9 +916,9 @@ def select_build_backend(backend: str) -> None:
     """Separate build folders and stamps prevent reusing a binary from the other backend."""
     global BUILD, EXE, STAMP, DS4_EXE, MM3_EXE
     BUILD = ROOT / {"hip": "build-hip", "metal": "build-metal"}.get(backend, "build")
-    EXE = BUILD / ("maya-metal" if backend == "metal" else "maya.exe" if WIN else "maya")
-    DS4_EXE = BUILD / ("maya-ds4.exe" if WIN else "maya-ds4")
-    MM3_EXE = BUILD / ("maya-mm3.exe" if WIN else "maya-mm3")
+    EXE = BUILD / ("maya-metal" if backend == "metal" else "saguaro-glm.exe" if WIN else "saguaro-glm")
+    DS4_EXE = BUILD / ("saguaro-ds4.exe" if WIN else "saguaro-ds4")
+    MM3_EXE = BUILD / ("saguaro-mm3.exe" if WIN else "saguaro-mm3")
     STAMP = BUILD / "MAYA-BUILD.json"
 
 
@@ -1884,7 +1890,7 @@ def compile_engine(archs, gpu_ids, nvcc, host_compiler, llama: Path, src: str, s
     build = [cmake, "--build", str(BUILD), "--target", target, "-j", str(jobs)]
     say("  Compiling the engine for " + ", ".join(f"sm_{x}" for x in archs) +
         " (10-30 minutes the first time, a few minutes after an update) ...")
-    stopped = cmake_steps(conf, build, env, "build-maya.bat", nvcc=nvcc)
+    stopped = cmake_steps(conf, build, env, "build-saguaro.bat", nvcc=nvcc)
     if stopped:
         return stop(stopped)
     # the targets compiled from this source for these GPUs (a GLM-5.3-Flash and a DeepSeek setup share build/)
@@ -2079,7 +2085,7 @@ def compile_engine_hip(pc: dict, llama: Path, src: str, soft=False, target: str 
     say("  Compiling Saguaro for AMD " + ", ".join(pc["archs"]) + " ...")
     vcvars = S.find_vcvars(cuda=False) if WIN else None
     if cmake_steps(conf, [cmake, "--build", str(BUILD), "--target", target, "-j", str(jobs)], env,
-                   "build-maya-hip.bat", vcvars=vcvars):
+                   "build-saguaro-hip.bat", vcvars=vcvars):
         if soft:
             warn("HIP rebuild failed; starting the previous engine")
             return None
@@ -3038,7 +3044,7 @@ def fetch(url: str, dst: Path, want: str | None) -> None:
 
 
 def compile_vision(pc, meta, llama: Path, src: str) -> bool:
-    """maya-vision: llama.cpp's mtmd at the pinned commit with GLM-5.3-Flash's vision tower added
+    """vision-glm: llama.cpp's mtmd at the pinned commit with GLM-5.3-Flash's vision tower added
     (tools/vision/glm5next_patch.py, idempotent), for the same GPUs and toolkit as the engine."""
     cmake = pick_cmake()
     if cmake is None:
@@ -3086,7 +3092,7 @@ def compile_vision(pc, meta, llama: Path, src: str) -> bool:
         ("Metal backend: a minute or two" if metal else ("HIP" if hip else "CUDA") + " kernels: 10-20 minutes") +
         ", once) ...")
     if cmake_steps(conf, [cmake, "--build", str(VBUILD), "--target", "maya-vision", "-j", str(jobs)],
-                   dict(os.environ) if metal else env, "" if metal else "build-maya-vision.bat", vcvars=vcvars,
+                   dict(os.environ) if metal else env, "" if metal else "build-vision-glm.bat", vcvars=vcvars,
                    nvcc=None if metal or hip else meta.get("nvcc") or pc["nvcc"]):
         return False
     if bindir is not None and VEXE.exists():
@@ -5759,7 +5765,7 @@ def write_config_ds4(a, pc: dict, meta: dict, pack: Path, ctx: int, models: Path
 
 def set_up_ds4(a, prev: dict) -> Path | None:
     """DeepSeek-V4.1-Flash-1017's steps 1-8: the PC (Linux, RTX 30 / A100 or newer, the memory), the context, its
-    engine (build/maya-ds4), the files, the pack, the config.  No tuning: the engine balances its own split."""
+    engine (build/saguaro-ds4), the files, the pack, the config.  No tuning: the engine balances its own split."""
     inst = prev.get("installer") or {}
     prev_args = prev.get("args") or []
     prev_ctx = int(prev_args[prev_args.index("--max-context") + 1]) if "--max-context" in prev_args[:-1] else None
@@ -6355,7 +6361,7 @@ def mm3_pack_has_vision(pack: Path) -> bool:
 
 def set_up_mm3(a, prev: dict) -> Path | None:
     """MiniMax-M3.1-Flash's steps 1-8: the files (EXL3, or Saguaro's GGUF quants), the PC (NVIDIA - mm3_gpus(); a GGUF also
-    AMD; the memory), the context (recommended by this PC's memory), its engine (build/maya-mm3), the files, the pack,
+    AMD; the memory), the context (recommended by this PC's memory), its engine (build/saguaro-mm3), the files, the pack,
     pictures, the config."""
     inst = prev.get("installer") or {}
     prev_args = prev.get("args") or []
@@ -6670,7 +6676,7 @@ def qwen_vision_model() -> dict | None:
 
 
 def vision_encoder_ready(a, pc: dict, meta: dict, llama: Path) -> bool:
-    """build-vision's maya-vision for this PC's GPUs, compiled when it is not there or its source changed."""
+    """build-vision's vision-glm for this PC's GPUs, compiled when it is not there or its source changed."""
     src = S.source_hash(("tools/vision",))
     vmeta = read_json(VSTAMP)
     if VEXE.exists() and not a.rebuild and vmeta.get("src") == src \
@@ -6684,7 +6690,7 @@ def vision_encoder_ready(a, pc: dict, meta: dict, llama: Path) -> bool:
 
 
 def qwen_vision_step(a, pc: dict, meta: dict, llama: Path, d: Path, gguf: Path) -> dict | None:
-    """Step 7: the config's "vision" entry - maya-vision with the model's mmproj (in <model folder>/vision) and the
+    """Step 7: the config's "vision" entry - vision-glm with the model's mmproj (in <model folder>/vision) and the
     GGUF's vocabulary - or None (text only, said why).  The server starts the encoder when a request carries a picture;
     the engine places its rows at the <|image_pad|> tokens with their M-RoPE positions (--vision: GENI requests)."""
     step(7, "images (the vision encoder)")
@@ -6713,7 +6719,7 @@ def qwen_vision_step(a, pc: dict, meta: dict, llama: Path, d: Path, gguf: Path) 
 
 def set_up_qwen(a, prev: dict) -> Path | None:
     """CYBER-FROST-3.8-PS's steps 1-8: the PC (NVIDIA from V100, or AMD), the context (recommended by this PC's VRAM),
-    the engine (build/maya), the file (pinned, sha256-checked), the pack and the MTP drafter, the config; then the
+    the engine (build/saguaro-glm), the file (pinned, sha256-checked), the pack and the MTP drafter, the config; then the
     drafter measured."""
     inst = prev.get("installer") or {}
     prev_args = prev.get("args") or []

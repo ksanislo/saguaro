@@ -424,7 +424,7 @@ function mm3Fields(m, d, s, ch, images, gpus) {
   ];
 }
 
-// CYBER-FROST's (the `maya` engine's Qwen path; pictures through maya-vision and the base model's mmproj).  The KV cache
+// CYBER-FROST's (the GLM engine's Qwen path; pictures through vision-glm and the base model's mmproj).  The KV cache
 // formats to pick from; their bytes of a position come from the engine's INFO (engineKvBytes), not from a table here
 const QWEN_KV = [{id: "fp16", label: "FP16"}, {id: "int8", label: "INT8"}, {id: "k8v4", label: "K8 V4"}, {id: "q4_0", label: "Q4_0"}];
 function qwenFields(m, d, s, ch, gpus) {

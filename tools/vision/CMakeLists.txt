@@ -1,4 +1,4 @@
-# tools/vision - maya-vision, the image encoder for Strata's multimodal path (optional; setup.py builds it when
+# tools/vision - the maya-vision target: vision-glm, the image encoder for the multimodal path (optional; setup.py builds it when
 # the vision encoder is chosen).  Uses llama.cpp's mtmd library at the same pinned commit as the engine's ggml.
 #
 #   cmake -S tools/vision -B build-vision -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLAMA_DIR=third_party/llama.cpp
@@ -61,7 +61,7 @@ if(STRATA_VISION_HIP)
 endif()
 
 add_subdirectory(${LLAMA_DIR} llama EXCLUDE_FROM_ALL)
-# float32 sums for the encoder's matmuls and attention on the GPU (ggml_vision_precision.py): on maya-vision's own
+# float32 sums for the encoder's matmuls and attention on the GPU (ggml_vision_precision.py): on vision-glm's own
 # ggml only - the engines compile the same ggml files without it
 foreach(_t ggml-cuda ggml-hip)
   if(TARGET ${_t})
@@ -73,3 +73,4 @@ add_executable(maya-vision strata_vision.cpp)
 target_link_libraries(maya-vision PRIVATE mtmd llama)
 target_compile_features(maya-vision PRIVATE cxx_std_17)
 set_target_properties(maya-vision PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+set_target_properties(maya-vision PROPERTIES OUTPUT_NAME vision-glm)   # the program's name (the target keeps its old one)

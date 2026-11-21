@@ -10,7 +10,7 @@ non-stream), POST /tokenize and /detokenize, GET /v1/models, GET /models, GET /p
 Tools from MCP servers (serve/mcp.py, `"mcp_servers"` in the config or --mcp-config) are offered only to requests that
 ask for them with `"strata_mcp": true` - the web app does; other clients see exactly the API they always saw.
 Images (optional, when the config has a "vision" entry): OpenAI image_url parts and Anthropic image blocks (base64
-data, http(s) URLs or local file paths) go through `maya-vision` (the model's mmproj file) and reach the engine as
+data, http(s) URLs or local file paths) go through `vision-glm` (the model's mmproj file) and reach the engine as
 embeddings (`GENI`).  JPEG/PNG/BMP/GIF go straight in; WebP, TIFF, AVIF, ... (agents like omp send WebP) are
 converted to PNG first with Pillow.  DeepSeek-V4.1 (maya-ds4, `INFO vision=ds4`) runs its vision tower in the engine:
 the server only resizes the pictures (serve/ds4_vision.py) and sends their pixels with `GENI`; so does
@@ -26,7 +26,7 @@ from __future__ import annotations
 
 def engine_kind(cfg: dict) -> str | None:
     """The driver a config needs: "batch" for a Qwen3.8-Flash-Next config - its engine is the QFN batch binary
-    (engines/qfn: saguaro-qfn / maya-qfn, driven by serve/qfn_engine.py's batch protocol) - and "line" for every
+    (engines/qfn: saguaro-qfn, driven by serve/qfn_engine.py's batch protocol) - and "line" for every
     other engine config (today's maya engine, the one-token-at-a-time line protocol); None with no config.  The
     signal is the engine binary: only the batch driver's name ends in qfn; the configs' exe is what runs the model."""
     exe = str(cfg.get("exe") or "").replace("\\", "/").rsplit("/", 1)[-1].lower()
@@ -1828,7 +1828,7 @@ class StrataEngine:
 
 
 class Vision:
-    """The resident image encoder: `maya-vision` (llama.cpp mtmd + the mmproj file) reads `ENC <image> <out>`
+    """The resident image encoder: `vision-glm` (llama.cpp mtmd + the mmproj file) reads `ENC <image> <out>`
     and `VID <video> <out>` lines and writes each picture's embeddings (a video: one record per frame); results
     are cached by the source's hash, so a conversation that sends the same picture again (every turn, with most
     clients) encodes it once.
@@ -1850,7 +1850,7 @@ class Vision:
         if cfg.get("no_flash_attn"):   # GLM-5.3's encoder on a GPU: full-precision attention (cosine 0.9997 vs 0.999)
             args.append("--no-flash-attn")
         self.args, self.log, self.env = args, log, env
-        self.dir = Path(tempfile.mkdtemp(prefix="maya-vision-"))
+        self.dir = Path(tempfile.mkdtemp(prefix="saguaro-vision-"))
         self.proc = None
         self.lend = self.reclaim = None   # on demand: callables (the engine's VLEND / VRECLAIM), wired by main()
         self.owed = False                 # the engine's memory is not back yet (a reclaim that kept failing)
@@ -1931,7 +1931,7 @@ class Vision:
 
     @staticmethod
     def normalize(data: bytes) -> bytes:
-        """The formats maya-vision's decoder (stb_image) reads pass through; anything else is converted to PNG."""
+        """The formats vision-glm's decoder (stb_image) reads pass through; anything else is converted to PNG."""
         if data[:3] == b"\xff\xd8\xff" or data[:8] == b"\x89PNG\r\n\x1a\n" or data[:2] == b"BM" or \
                 data[:6] in (b"GIF87a", b"GIF89a"):
             return data
@@ -2066,7 +2066,7 @@ class Vision:
 
 def vision_footprint(vcfg: dict, env: dict, cache_file: Path, gpu: int) -> tuple[int, int] | None:
     """(image token cap, bytes) for the on-demand vision encoder on THIS machine's first GPU: measured once by
-    `maya-vision --measure` (before the model loads, so the GPU is otherwise idle) and cached per encoder file, cap
+    `vision-glm --measure` (before the model loads, so the GPU is otherwise idle) and cached per encoder file, cap
     and GPU.  A cap the config does not set is the largest of 4096 / 2048 / 1024 image tokens whose footprint stays
     within 15% of the card (a 32 GB card keeps 4096, an 8-12 GB card gets 1024).  None: no GPU to measure on, or
     no measurement (the encoder failed or printed no well-formed MEM line)."""
@@ -7570,7 +7570,7 @@ def supervisor_name() -> str | None:
 def start_qfn(cfg: dict, tok):
     """Qwen3.8-Flash-Next's engine (engines/qfn) under this server: QFN's own driver (serve/qfn_engine.py - its arguments,
     environment and batch protocol: the server-side slot admission, BGEN / BDONE, wrap spill, session files) behind this
-    server's engine interface, and its picture encoder (vision-qfn: the same ENC protocol as maya-vision) resident, or
+    server's engine interface, and its picture encoder (vision-qfn: the same ENC protocol as vision-glm) resident, or
     elastic - not started until a picture arrives (the vision section's "elastic": true)."""
     from serve import qfn_engine as QE
     if not cfg:

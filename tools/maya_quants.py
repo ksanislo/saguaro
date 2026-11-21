@@ -189,18 +189,18 @@ def resolve(name: str, glm_downloads=()) -> tuple | None:
 
 
 def family_of(cfg: dict) -> str:
-    """"minimax" for a MiniMax-M3.1-Flash config (maya-mm3), "qwen" for CYBER-FROST-3.8-PS (the `maya` engine with its
-    n-gram table, --ple-gguf), "deepseek" for a DeepSeek-V4.1-Flash config (maya-ds4's --pack: also the configs from
-    before the programs' names of v1.1.16), else "glm"."""
+    """"minimax" for a MiniMax-M3.1-Flash config (saguaro-mm3), "qwen" for CYBER-FROST-3.8-PS (the GLM engine with its
+    n-gram table, --ple-gguf), "deepseek" for a DeepSeek-V4.1-Flash config (the engine's --pack: configs written before
+    the programs got their Saguaro names count too), else "glm"."""
     inst = cfg.get("installer") or {}
     exe = Path(str(cfg.get("exe", ""))).name
-    if inst.get("family") == "minimax" or exe.startswith("maya-mm3"):
+    if inst.get("family") == "minimax" or exe.startswith(("maya-mm3", "saguaro-mm3")):
         return "minimax"
     args = cfg.get("args") or []
     if inst.get("family") == "qwen" or "--ple-gguf" in args[:-1]:
         return "qwen"
     return "deepseek" if inst.get("family") == "deepseek" or "--pack" in args[:-1] or \
-        exe.startswith(("maya-ds4", "strata-ds4")) else "glm"   # (the engine's name before v1.1.16)
+        exe.startswith(("maya-ds4", "strata-ds4", "saguaro-ds4")) else "glm"   # (the engine's old names)
 
 
 def config_key(cfg: dict) -> str | None:

@@ -301,7 +301,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="the kept conversations (SAGUARO_DS4_SLOT_KEEP): A, B, then A's next turn")
     ap.add_argument("--pack", required=True, help="the model's pack dir (maya-ds4)")
     ap.add_argument("--exe", default=os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
-        os.path.abspath(__file__)))), "build", "maya-ds4"), help="the engine (default: <repo>/build/maya-ds4)")
+        os.path.abspath(__file__)))), "build", "saguaro-ds4"), help="the engine (default: <repo>/build/saguaro-ds4)")
     ap.add_argument("--gpus", default="", help="the GPUs (default: every visible one, the engine's own split)")
     ap.add_argument("--config", default="", help="a model config (maya-ds4.json): its DS4_/SAGUARO_DS4_ settings go to the "
                                                 "engine - an APU's DS4_POOL_GB, else its pool is sized from hipMemGetInfo "
