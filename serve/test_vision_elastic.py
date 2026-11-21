@@ -17,7 +17,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from serve.frontend import ChatTemplate  # noqa: E402
-from serve.server import ByteTokenizer, MockEngine, Service  # noqa: E402
+from serve.server import ByteTokenizer, LendTimeout, MockEngine, Service  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 CTX = 4096
@@ -83,6 +83,46 @@ class ElasticVision(unittest.TestCase):
             t = self.ticks                          # (the engine pauses CUDA0 at the next boundary and answers there)
             while not self.stop.is_set() and self.ticks == t:
                 self.stop.wait(0.02)
+            return {"free_mib": 1700, "cache_mib": 11008}
+
+    class ReadingLendEngine(LendEngine):
+        """A QFN engine whose serve loop is busy for 30 s with a long prompt read, yet answers VLEND within about a
+        second (PLAN-vision-fast-start review 4): its reader thread reads the command off stdin itself, so the lend is
+        not left unread in the input queue behind the read - the answer comes at the next settle, not when the read ends."""
+
+        def __init__(self, tok, log, busy_s=30.0):
+            super().__init__(tok, log)
+            self.busy_until = time.monotonic() + busy_s
+            self.stop = threading.Event()
+            self.busy = threading.Event()
+            self.busy.set()                         # (the long prompt read: the serve loop is out of the command loop)
+            threading.Thread(target=self._read, daemon=True).start()
+
+        def _read(self):
+            while time.monotonic() < self.busy_until and not self.stop.is_set():
+                time.sleep(0.02)                    # (the serve loop keeps reading the prompt; 30 s of it)
+
+        def vision_lend(self, mib, timeout=45.0):
+            self.log.append(("lend", mib))
+            self.lend_calls.append(mib)
+            # the reader thread took the command the instant it arrived and answers on the next settle - it does not
+            # wait for the busy serve loop to come back to the command loop (that wait was the 46 s of live 11-20)
+            return {"free_mib": 1700, "cache_mib": 11008}
+
+    class TimeoutingLendEngine(LendEngine):
+        """A QFN engine that answers VLEND after `timeouts` no-answers (review 4): the first `timeouts` calls raise
+        LendTimeout (the 45 s wait expired), then it answers.  timeouts very large: it never answers (the second wait
+        too - the encoder must not start on a card with no room)."""
+
+        def __init__(self, tok, log, timeouts=1):
+            super().__init__(tok, log)
+            self.timeouts = timeouts
+
+        def vision_lend(self, mib, timeout=45.0):
+            self.log.append(("lend", mib))
+            self.lend_calls.append(mib)
+            if len(self.lend_calls) <= self.timeouts:
+                raise LendTimeout(f"the engine did not answer the VLEND command ({len(self.lend_calls)})")
             return {"free_mib": 1700, "cache_mib": 11008}
 
     class Reader:
@@ -319,6 +359,59 @@ class ElasticVision(unittest.TestCase):
         self.assertLess(took, 1.0)                              # the pause budget: a window boundary, not the decode
         self.assertGreater(eng.ticks, ticks0)                   # ... the fake slots kept decoding through it
         self.assertEqual([e[0] for e in log], ["lend", "start", "encode"])
+
+    def _with_engine(self, eng, log):
+        tok = ByteTokenizer()
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        self.addCleanup(lambda: getattr(eng, "stop", None) and eng.stop.set())
+        vision = self.Reader(d.name, log)
+        svc = Service(eng, tok, ChatTemplate(ROOT / "serve/chat_template.jinja"), vision=vision)
+        self.addCleanup(lambda: getattr(svc.embeddings, "path", None)
+                        and svc.embeddings.path.unlink(missing_ok=True))
+        return svc
+
+    def test_lend_answered_while_the_serve_loop_is_busy(self):
+        # PLAN-vision-fast-start review 4: a long prompt read keeps the engine's serve loop out of the command loop for
+        # 30 s, but its reader thread reads VLEND off stdin itself and answers at the next settle - so the picture turn
+        # (lend -> start -> encode) finishes in well under a second, not after the read (which cost 46 s live 11-20)
+        tok = ByteTokenizer()
+        log = []
+        eng = self.ReadingLendEngine(tok, log, busy_s=30.0)
+        svc = self._with_engine(eng, log)
+        t0 = time.monotonic()
+        self.picture(svc)
+        took = time.monotonic() - t0
+        self.assertLess(took, 1.0)                              # answered while the serve loop is still busy
+        self.assertTrue(eng.busy.is_set())                      # ... and that read was still running
+        self.assertEqual([e[0] for e in log], ["lend", "start", "encode"])
+
+    def test_lend_timeout_waits_once_then_starts(self):
+        # review 4: a 45 s no-answer is retried once (logged), not given up on - the engine that answers on the second
+        # wait gets its room and its encoder, the turn never starting without room on a lending engine
+        tok = ByteTokenizer()
+        log = []
+        eng = self.TimeoutingLendEngine(tok, log, timeouts=1)
+        svc = self._with_engine(eng, log)
+        self.picture(svc)
+        self.assertEqual([e[0] for e in log], ["lend", "lend", "start", "encode"])   # the retry, then the room
+        self.assertEqual(eng.lend_calls, [1536, 1536])
+        self.assertTrue(svc.vision.running)
+        self.assertTrue(svc.vision_held)
+
+    def test_lend_still_timeout_does_not_start_without_room(self):
+        # review 4: a lending engine (vision_lend=1) that does not answer even the second wait: the encoder is NOT
+        # started without room (the vision_lend=0 "start anyway" is the other, non-lending path); the turn errors, and
+        # the held floor is reclaimed by the idle stop (vision_held stays set so VRECLAIM still goes out)
+        tok = ByteTokenizer()
+        log = []
+        eng = self.TimeoutingLendEngine(tok, log, timeouts=10)
+        svc = self._with_engine(eng, log)
+        with self.assertRaises(ValueError):
+            self.picture(svc)
+        self.assertEqual([e[0] for e in log], ["lend", "lend"])   # the two waits, never the encoder
+        self.assertFalse(svc.vision.running)
+        self.assertTrue(svc.vision_held)                           # the floor may be raised: a reclaim is owed after it
 
     def test_the_idle_stop_keeps_the_weights_hot_for_a_cheap_restart(self):
         svc, log = self.make(lend=True)                         # VRAM back at elastic_idle_s, the hot file cache kept
