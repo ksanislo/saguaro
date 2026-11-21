@@ -272,6 +272,14 @@ public:
     int fed() const;   // the tokens the last feed() / feed_mark() took (all of them unless a yield)
     /// A request starts (before its prompt): DISK_SKIP_AUTO may switch back on here, never mid-answer.
     void begin_request();
+    /// PLAN-turbo-live (serve/turbo_live.py): conversation `seq`'s request runs live Turbo: drop N runs its
+    /// windows' routes as top-k minus N experts (the router drops its N weakest picks and renormalises the kept
+    /// ones, ruling over SAGUARO_DS4_RESIDENT_TOPK for its tokens); skip 1 = "ssd" (picks a disk read would serve
+    /// are left out, VRAM and RAM still serve), 2 = "ram" (picks VRAM does not hold are left out) - the engine's
+    /// DISK_SKIP / RAM_SKIP rules at the bar 1.0, for that conversation's tokens only, drafts' layers aside.
+    /// 0 / 0: exact - today's routes, byte for byte.  The serve loop sets it at a request's admission (its
+    /// conversation) and clears it at its end; prompts and the host-routed path run as they were.
+    void set_turbo(int seq, int drop, int skip);
     int64_t pos() const;
     int64_t max_context() const;
     int vocab() const;

@@ -4923,12 +4923,29 @@ bool Glm5Model::set_cpu_lane_threads(int n) {
     return any;
 }
 
-void Glm5Model::set_miss_skip(double w, int from) {
-    for (Glm5Model* m = this; m != nullptr; m = m->split_next_.get())
-        if (m->fast_ != nullptr) {
-            m->fast_->miss_w_req = w >= 0.0 ? (float) std::min(1.0, w) : -1.0f;
-            m->fast_->miss_from_req = from >= 0 ? from : -1;
-        }
+// PLAN-turbo-live: the per-sequence request options (live Turbo + the miss_skip keys) live in every part of the
+// split, a slot per sequence: the route reads the one belonging to its own sequence, so a Turbo request changes
+// only its chat's tokens and the others decoding beside it stay exact.
+void Glm5Model::set_miss_skip(int seq, double w, int from) {
+    if (seq < 0) return;
+    for (Glm5Model* m = this; m != nullptr; m = m->split_next_.get()) {
+        if ((size_t) seq >= (size_t) m->seq_count()) continue;
+        if (m->seq_turbo_.size() < (size_t) m->seq_count()) m->seq_turbo_.resize((size_t) m->seq_count());
+        SeqTurbo& t = m->seq_turbo_[(size_t) seq];
+        t.miss_w = w >= 0.0 ? (float) std::min(1.0, w) : -1.0f;
+        t.miss_from = from >= 0 ? from : -1;
+    }
+}
+
+void Glm5Model::set_turbo(int seq, int drop, int skip) {
+    if (seq < 0) return;
+    for (Glm5Model* m = this; m != nullptr; m = m->split_next_.get()) {
+        if ((size_t) seq >= (size_t) m->seq_count()) continue;
+        if (m->seq_turbo_.size() < (size_t) m->seq_count()) m->seq_turbo_.resize((size_t) m->seq_count());
+        SeqTurbo& t = m->seq_turbo_[(size_t) seq];
+        t.drop = drop > 0 ? drop : 0;
+        t.skip = skip > 0 ? (skip > 2 ? 2 : skip) : 0;
+    }
 }
 
 void Glm5Model::set_read_chunks(int n) {
@@ -7099,22 +7116,32 @@ void Glm5Model::fast_moe_route(int il, const MoeIo& io, const gf::MoeDev& md, vo
         return v != nullptr ? std::max(1, std::atoi(v)) : 0;
     }();
     static const int near_n = getenv("SAGUARO_GLM_ROUTE_LOG") != nullptr ? 16 : 0;   // the route log's near misses
+    // PLAN-turbo-live: this route's sequence's live Turbo (Glm5Model::SeqTurbo, set on the request's own line).
+    // A skip is the tier's bar at 1.0: "ram" leaves out every expert not in VRAM (the miss bar, any layer), "ssd"
+    // every disk-only expert (VRAM and RAM still serve); drop N runs the route's k-N heaviest (its top-1 stays,
+    // the kept weights renormalise where the model's do).  The sequence's strata_tune miss_skip_w wins over the
+    // Turbo ram bar.  All off: the engine's own values below - today's route, byte for byte.
+    const SeqTurbo& t = seq_turbo(route_seq(win, win_rows));
+    const float eff_disk_w = il == mtp_il_ ? 0.0f : (t.skip == 1 ? 1.0f : F->disk_skip_w);
+    const int eff_disk_from = il == mtp_il_ ? 8 : F->disk_skip_from;
+    const int eff_res_k = t.drop > 0 ? std::max(1, g.n_exp_used - t.drop) : 0;   // 0: the engine's SAGUARO_GLM_RESIDENT_TOPK
     gf::moe_route(io.rlog, Ly.router_bias, g.n_expert, g.n_exp_used, g.w_scale, g.norm_w != 0, il, io.x,
                   g.n_embd, md, io.sh_g, io.sh_u, g.swiglu_shexp, FFs, sh_hq, F->cs,
                   pred ? F->plog : nullptr, pred ? F->L[(size_t) il + 1].router_bias : nullptr,
                   pred ? F->max_pf : 0, n_ah > 0 ? F->alog : nullptr, ah_bias, n_ah,
                   il == mtp_il_ ? mtp_skip_from() : glmfast::trunk_skip_from(il), lane ? F->cpu_plan : 0ull, promote_min,
-                  pf_rank, near_n, win, nullptr, win_n, il == mtp_il_ ? 8 : F->disk_skip_from,
-                  il == mtp_il_ ? 0.0f : F->disk_skip_w, il == mtp_il_ ? 0.0f : [&] {
-                      const float w = F->miss_w_req >= 0.0f ? F->miss_w_req : F->miss_w;
-                      const int from = F->miss_from_req >= 0 ? F->miss_from_req : F->miss_from;
+                  pf_rank, near_n, win, nullptr, win_n, eff_disk_from,
+                  eff_disk_w, il == mtp_il_ ? 0.0f : [&] {
+                      const float w = t.miss_w >= 0.0f ? t.miss_w : t.skip == 2 ? 1.0f : F->miss_w;
+                      const int from = t.miss_from >= 0 ? t.miss_from : t.skip == 2 ? 0 : F->miss_from;
                       return il >= from ? w : 0.0f;
                   }(), win_rows, il != mtp_il_,
                   // SAGUARO_GLM_ROUTE_DUMP: 1 + the route's sequence (a rows step's row, else the bound one)
                   !glmfast::route_seq_counting() ? 0
                   : route_tag_ > 0             ? route_tag_
                   : win_rows > 0 && win >= 0 && win < (int) row_seq_.size() ? 1 + row_seq_[(size_t) win]
-                                                                             : 1 + (seq_.empty() ? 0 : cur_seq_));
+                                                                             : 1 + (seq_.empty() ? 0 : cur_seq_),
+                  eff_res_k);
 }
 
 bool Glm5Model::fast_moe_experts(int il, const MoeIo& io, bool pred, int n_ah, const float* const* ah_bias,

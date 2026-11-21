@@ -6590,7 +6590,7 @@ void moe_route(const float* logits, const float* bias, int n_expert, int k, floa
                int max_prefetch, const float* ahead_logits, const float* const* ahead_bias, int n_ahead,
                int skip_from, unsigned long long cpu_plan, int promote_min, int pf_rank, int near_n, int win,
                unsigned int* scr_used, int win_n, int disk_skip_from, float disk_skip_w, float miss_skip_w,
-               int win_rows, bool resident_ok, int tag) {
+               int win_rows, bool resident_ok, int tag, int res_k_req) {
     RouteArgs a{logits, bias, n_expert, k, w_scale, norm_w ? 1 : 0, layer, x, n_embd, d,
                 sh_gate, sh_up, sh_limit, n_ff_sh, (block_q8_1*) sh_hq, pred_logits, pred_bias, max_prefetch,
                 ahead_logits, {}, 0, skip_from, d.cpu_seq != nullptr ? cpu_plan : 0ull, promote_min,
@@ -6612,7 +6612,9 @@ void moe_route(const float* logits, const float* bias, int n_expert, int k, floa
         return v ? std::max(0, std::atoi(v)) : 0;
     }();
     a.res_w = resident_ok ? res_w : 0.0f;
-    a.res_k = resident_ok ? res_k : 0;
+    // PLAN-turbo-live: a request's drop N arrives as its own res_k (fast_moe_route: k - N); it rules over the
+    // engine's RESIDENT_TOPK for that chat's tokens.  0: no request drop - the env's, today's route.
+    a.res_k = resident_ok ? (res_k_req > 0 ? res_k_req : res_k) : 0;
     // SAGUARO_GLM_ROUTE_RANK=0: the selections by topk_warp's serial rounds again (A/B); topk_rank needs whole warps of
     // experts that one block's threads cover and at most 8 picks
     static const bool rank_on = [] {

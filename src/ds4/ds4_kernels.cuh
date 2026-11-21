@@ -373,7 +373,17 @@ struct Req {
     float w[kWin][kPicks];
     int ahead[kWin][kAhead];
     unsigned char gpu[kWin][kPicks];   // (DS4_PREFETCH) 1: the device planned pick i on itself, its table entry read once
+    // PLAN-turbo-live: row t's request's live Turbo byte (turbo_drop | turbo_skip << 4; 0: exact).  The router
+    // applies the drop (its own route_keep, renormalised) and stamps the byte; serve_lane applies the skip bar.
+    unsigned char turbo[kWin];
     float x[kWin][kMaxDim];
+};
+/// A window's rows' live Turbo bytes (PLAN-turbo-live, the request line's turbo_drop / turbo_skip through
+/// Model::set_turbo, per conversation): the router takes it as a kernel argument (passed by value, so the fused
+/// path's captured launches are unaffected) - the low nibble drops the row's N weakest picks (its top-1 stays,
+/// the kept weights renormalise as the router does), the next two name the skip the host's serve_lane applies.
+struct RouteTurbo {
+    unsigned char b[kWin];
 };
 struct Resp {
     unsigned seq;
@@ -390,7 +400,7 @@ void route_publish(const float* logits, const float* bias, int n, int k, int T, 
                    const unsigned long long* vram, const float* x, int dim, int* idx, float* w,
                    unsigned long long* plan_ptr, Req* req, unsigned seq, cudaStream_t s, const float* bias_vl = nullptr,
                    unsigned vl = 0, int na0 = 0, int na1 = 0, Resp* resp = nullptr, int* cpu_any = nullptr,
-                   const unsigned* host_done = nullptr, int pf = 0);
+                   const unsigned* host_done = nullptr, int pf = 0, const RouteTurbo* tr = nullptr);
 /// Lookahead: the m picks a later layer will likely make (its gate's logits on this layer's FFN input, the routing's
 /// score + bias, the m best of n) into req->ahead[t][off ..) for the T tokens - before route_publish, which publishes them.
 void route_ahead(const float* logits, const float* bias, int n, int m, int T, Req* req, int off, cudaStream_t s);
@@ -418,8 +428,9 @@ struct RoutePair {
     const float *a_logits = nullptr, *a_bias = nullptr;   // route_ahead's
     int a_n = 0, m = 0, off = 0;
     int T = 1;   // (=2: a window's rows, 1 .. kWin)
-    float rs_w = 0.0f;   // (route_pair sets these from SAGUARO_DS4_RESIDENT_SKIP_W / _TOPK)
+    float rs_w = 0.0f;   // (route_pair sets these from SAGUARO_DS4_RESIDENT_SKIP_W / _TOPK ...)
     int rs_k = 0;
+    RouteTurbo tr{};     // ... and a row's own drop wins over the env's for its tokens (PLAN-turbo-live)
     int pf = 0;   // (DS4_PREFETCH) req->gpu written too
 };
 bool route_pair(const RoutePair& a, cudaStream_t s);

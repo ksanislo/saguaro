@@ -2843,7 +2843,8 @@ __global__ void __launch_bounds__(512) route_publish_kernel(const float* __restr
                                                             const float* __restrict__ x, int dim, int* idx, float* w,
                                                             unsigned long long* plan_ptr, Req* req,
                                                             const float* __restrict__ bias_vl, unsigned vl,
-                                                            int* cpu_any, float rs_w, int rs_k, int pf) {
+                                                            int* cpu_any, float rs_w, int rs_k, int pf,
+                                                            RouteTurbo tr) {
     pdl_wait();
     pdl_trigger();
     __shared__ float sc[1024], bs[1024];
@@ -2889,7 +2890,13 @@ __global__ void __launch_bounds__(512) route_publish_kernel(const float* __restr
         for (int r = 0; r < k; ++r) s += sc[pick[r]];
         int cpu = 0;
         float sk;
-        const unsigned keep = route_keep(sc, pick, k, s, rs_w, rs_k, sk);
+        // PLAN-turbo-live: the row's request's own drop N (turbo_drop): the route's k-N heaviest picks,
+        // renormalised (route_keep's rule, the request ruling over the env's RESIDENT_TOPK for its tokens).
+        // Byte 0 (and the MTP drafts, which the model leaves out): rs_k as the env's, today's route exactly.
+        const int trb = t < kWin ? tr.b[t] : 0;
+        const int eff_k = (trb & 15) > 0 ? (k - (trb & 15) > 1 ? k - (trb & 15) : 1) : rs_k;
+        const unsigned keep = route_keep(sc, pick, k, s, rs_w, eff_k, sk);
+        if (req != nullptr) req->turbo[t] = (unsigned char) trb;   // (serve_lane's skip rule reads the byte)
         for (int r = 0; r < k; ++r) {
             const bool kept = (keep >> r) & 1u;   // (a dropped pick: no weight, off the device, not on the CPU lane)
             const float wv = kept ? sc[pick[r]] / (sk + 1e-20f) * route_scale : 0.0f;
@@ -3007,7 +3014,12 @@ __global__ void __launch_bounds__(512) route_pair_kernel(const RoutePair a) {
             for (int r = 0; r < k; ++r) s += sc[pick[r]];
             int cpu = 0;
             float sk;
-            const unsigned keep = route_keep(sc, pick, k, s, a.rs_w, a.rs_k, sk);
+            // PLAN-turbo-live: the row's request's own drop over the env's, as route_publish_kernel (the fused
+            // path must agree with it bit for bit - route_fuse_check compares the two)
+            const int trb = t < kWin ? a.tr.b[t] : 0;
+            const int eff_k = (trb & 15) > 0 ? (k - (trb & 15) > 1 ? k - (trb & 15) : 1) : a.rs_k;
+            const unsigned keep = route_keep(sc, pick, k, s, a.rs_w, eff_k, sk);
+            if (a.req != nullptr) a.req->turbo[t] = (unsigned char) trb;
             for (int r = 0; r < k; ++r) {
                 const bool kept = (keep >> r) & 1u;
                 const float wv = kept ? sc[pick[r]] / (sk + 1e-20f) * a.route_scale : 0.0f;
@@ -3801,12 +3813,16 @@ ResidentSkip resident_skip() {
 void route_publish(const float* logits, const float* bias, int n, int k, int T, float route_scale,
                    const unsigned long long* vram, const float* x, int dim, int* idx, float* w,
                    unsigned long long* plan_ptr, Req* req, unsigned seq, cudaStream_t s, const float* bias_vl,
-                   unsigned vl, int na0, int na1, Resp* resp, int* cpu_any, const unsigned* host_done, int pf) {
+                   unsigned vl, int na0, int na1, Resp* resp, int* cpu_any, const unsigned* host_done, int pf,
+                   const RouteTurbo* tr) {
     if (req == nullptr || host_done == nullptr) resp = nullptr;
     if (resp == nullptr) cpu_any = nullptr;
     const ResidentSkip rs = resident_skip();
+    RouteTurbo trv{};   // (by value: a row's own drop, PLAN-turbo-live; null: the env's, today's route)
+    if (tr != nullptr)
+        for (int t = 0; t < kWin; ++t) trv.b[t] = tr->b[t];
     pdl_launch(route_publish_kernel, T, 512, 0, s, logits, bias, n, k, route_scale, vram, x, dim, idx, w, plan_ptr, req,
-               vl != 0 ? bias_vl : nullptr, vl, cpu_any, rs.w, rs.k, pf);
+               vl != 0 ? bias_vl : nullptr, vl, cpu_any, rs.w, rs.k, pf, trv);
     if (req != nullptr) pdl_launch(publish_kernel, 1, 1, 0, s, req, T, seq, na0, na1, resp, cpu_any, host_done);
 }
 void route_ahead(const float* logits, const float* bias, int n, int m, int T, Req* req, int off, cudaStream_t s) {
@@ -3819,7 +3835,7 @@ bool route_pair(const RoutePair& a, cudaStream_t s) {
         return false;
     RoutePair b = a;
     const ResidentSkip rs = resident_skip();
-    b.rs_w = rs.w, b.rs_k = rs.k;
+    b.rs_w = rs.w, b.rs_k = rs.k;   // (the env's base; a row's own drop, b.tr, rules over it for its tokens)
     route_pair_kernel<<<dim3(2, (unsigned) b.T), 512, 0, s>>>(b);
     if (cudaGetLastError() != cudaSuccess) return false;   // (a routing that did not go in is never published)
     publish_kernel<<<1, 1, 0, s>>>(a.req, a.T, a.seq, a.na0, a.na1, nullptr, nullptr, nullptr);

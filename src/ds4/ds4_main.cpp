@@ -541,6 +541,11 @@ struct Req {
     // logit_bias=<id>:<bias>,... (OpenAI's logit_bias; the server's ignore_eos bans the end tokens with -100): added to
     // the logits of every pick of the answer (Model::set_logit_bias); none: the picks exactly as without
     std::vector<std::pair<int, float>> bias;
+    // PLAN-turbo-live (turbo_drop=N turbo_skip=ssd|ram, serve/turbo_live.py): this request's lossy speed options,
+    // applied to its conversation's answer tokens only: top-k minus N experts (renormalised) and / or leaving out
+    // what the SSD ("ssd") / non-VRAM ("ram") tiers would serve - the engine's DISK_SKIP / RAM_SKIP rule at the
+    // bar 1.0 (Model::set_turbo; the windows' routes, the drafts' layers aside).  Absent: off, an exact request.
+    int turbo_drop = 0, turbo_skip = 0;
 };
 
 // A prompt's picture: where its span starts, its pixels (the server's resize: RGB rows, both sides multiples of the
@@ -665,6 +670,8 @@ bool parse_gen(const std::string& line, Req& r, bool geni) {
         else if (k == "think_weak") { for (int x : parse_ids(v)) r.soft_weak.insert(x); }
         else if (k == "think_dig") { for (int x : parse_ids(v)) r.soft_dig.insert(x); }
         else if (k == "rid") r.rid = std::atoll(v.c_str());
+        else if (k == "turbo_drop") r.turbo_drop = std::atoi(v.c_str());   // PLAN-turbo-live (serve/turbo_live.py)
+        else if (k == "turbo_skip") r.turbo_skip = v == "ram" ? 2 : v == "ssd" ? 1 : 0;
         else if (k == "marks") {
             for (int x : parse_ids(v))
                 if (x > 0) r.marks.push_back(x);
@@ -1861,6 +1868,7 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
             continue;
         }
         m.begin_request();   // (DISK_SKIP_AUTO: between requests only)
+        m.set_turbo(0, r.turbo_drop, r.turbo_skip);   // (PLAN-turbo-live: this request's own; absent: off, exact)
         if (round_log().f != nullptr) round_log().tag = "r" + std::to_string(++log_req);   // (DS4_ROUND_LOG)
         // a request's own seed: its draws from the start of its stream, so the same seed gives the same answer (the
         // counter ran on across requests: a seed was not reproducible); without one the stream runs on as before
@@ -2294,6 +2302,7 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
             seq_rid[(size_t) a.seq] = -1;
             seq_used[(size_t) a.seq] = ++use_clock;
             seq_idle_t[(size_t) a.seq] = now_ms();
+            m.set_turbo(a.seq, 0, 0);   // (PLAN-turbo-live: its request's bars end with it - the next one sets its own)
             in.forget(a.r.rid);
             if (lk_owner == a.r.rid) lk_owner = -1;
         };
@@ -2441,9 +2450,13 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
                                                [best](const std::pair<int, uint64_t>& x) { return x.first == best; }),
                                 bs.idle_h.end());
             seq_used[(size_t) best] = ++use_clock;
+            // PLAN-turbo-live: the request's bars belong to the conversation it got (its answer's windows route and
+            // skip with them; release() clears them again); an absent request sets 0 - today's exact route
+            m.set_turbo(best, r.turbo_drop, r.turbo_skip);
             if (acts.empty()) m.begin_request();   // (DISK_SKIP_AUTO: between requests only - none runs now)
             const long long rid = r.rid;
             if (!prompt_begin(r, geni, " " + std::to_string(rid), a->P)) {
+                m.set_turbo(best, 0, 0);
                 in.forget(rid);
                 end_if_broken();
                 return true;
@@ -2456,6 +2469,7 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
             if ((!read_pieces && !answering_now) || !a->P.pics.empty()) {
                 read_turn(*a, r.ids.size(), false);
                 if (a->ended) {
+                    m.set_turbo(best, 0, 0);   // (PLAN-turbo-live: the read ended the request: the bars go with it)
                     in.forget(rid);
                     end_if_broken();
                     return true;

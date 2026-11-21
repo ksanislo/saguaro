@@ -100,7 +100,7 @@ from urllib.parse import parse_qs, urlsplit
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT))   # run as a script (run-<model>.bat) as well as a module
-from serve import ds4_vision, gpu_map, logctx, loop_guard, mm3_vision, model_api, model_pull, models, savings  # noqa: E402
+from serve import ds4_vision, gpu_map, logctx, loop_guard, mm3_vision, model_api, model_pull, models, savings, turbo_live  # noqa: E402
 
 ENGINE_VISION = (ds4_vision.Vision, mm3_vision.Vision)   # the engines that run their vision tower themselves
 from serve.frontend import (CALL_END, CALL_START, MINIMAX_NS, ChatTemplate, Event, OutputParser,  # noqa: E402
@@ -756,6 +756,11 @@ def check_request_sampling(req: dict) -> None:
             req["loop_guard"] = bool(guard)
         else:
             raise ValueError("loop_guard: true or false")
+    # PLAN-turbo-live: this request's lossy options (serve/turbo_live.py): {"drop": N, "skip": "off"|"ssd"|"ram"}
+    # (OpenAI's extra-body form: a top-level field), checked and kept in its canonical form; absent = the model's
+    # live Turbo setting (Service.check_request), off = today's exact request
+    if "turbo" in req:
+        req["turbo"] = turbo_live.normalize_turbo(req.get("turbo"))
 
 
 def logit_bias_of(value, vocab_size: int | None = None) -> dict[int, float]:
@@ -1361,9 +1366,9 @@ class StrataEngine:
             # temperature 0 is greedy: the engine reads temperature=0 as that whatever else the line says, and no other
             # sampler key goes (with only a config's top_p the engine took its sampled path: not deterministic) - but
             # the penalties do: they change the logits greedy picks from (#273: a greedy answer's loops)
-            return (" temperature=0" + penalty_keys + think + tune_keys + StrataEngine.projection_key(sampling) +
-                    bias_key + StrataEngine.restore_keys(sampling) + StrataEngine.logprob_key(sampling) +
-                    StrataEngine.reply_key(sampling))
+            return (" temperature=0" + penalty_keys + think + tune_keys + turbo_live.turbo_keys(sampling) +
+                    StrataEngine.projection_key(sampling) + bias_key + StrataEngine.restore_keys(sampling) +
+                    StrataEngine.logprob_key(sampling) + StrataEngine.reply_key(sampling))
         if isinstance(t, (int, float)) and float(t) > 0.0:
             keys += f" temperature={float(t)!r}"
         tp = sampling.get("top_p")
@@ -1380,7 +1385,7 @@ class StrataEngine:
         seed = sampling.get("seed")
         if isinstance(seed, int) and seed > 0:
             keys += f" seed={seed}"
-        keys += think + tune_keys
+        keys += think + tune_keys + turbo_live.turbo_keys(sampling)
         return (keys + StrataEngine.projection_key(sampling) + bias_key + StrataEngine.restore_keys(sampling) +
                 StrataEngine.logprob_key(sampling) +
                 StrataEngine.reply_key(sampling))
@@ -2297,6 +2302,7 @@ class RequestStat:
     def __init__(self):
         self.first_token = None
         self.spec_off = False                           # it asked for no drafting (spec=1)
+        self.turbo = None                               # the request's lossy Turbo options (serve/turbo_live.py)
         self.base = None                                # (time, generated) at the window's start: the rate counts from it
         self.samples = collections.deque(maxlen=4096)   # the samples inside the window, oldest first
         # what the Monitor shows of this request (several answer at once: each its own, not the shared status's)
@@ -2338,6 +2344,7 @@ class RequestStat:
                 "max_tokens": self.max_tokens, "prompt_read": pr[0] if pr else None, "prompt_total": pr[1] if pr else None,
                 "prefill_tok_s": self.prefill_tok_s if not self.first_token else None,
                 "prefill_shared": self.read_shared,     # (it read beside another chat: that rate is a shared clock's)
+                "turbo": dict(self.turbo) if self.turbo else None,   # (the Monitor's Turbo badge: its options, none = exact)
                 "tok_s": round(self.tok_s(now), 1) if self.first_token else None,
                 "elapsed_s": round(now - self.started, 1) if self.started else None}
 
@@ -2378,6 +2385,8 @@ class Service:
         self.default_effort = None                    # the run config's `reasoning_effort`: a request without one
         self.shared = {}                              # the web app's Chat settings for every client (POST /settings)
         self.shared_path = None                       # where they are kept between starts (next to the config)
+        self.turbo_default = None                     # the model's live Turbo (PLAN-turbo-live): {"drop","skip"} or None
+        self.turbo_path = None                        # its sidecar file (the engine config is never touched)
         self.fifo = FairLock()
         self.stopping = False            # the server is ending: a request still queued is refused, not started
         self.embeddings = threading.local()           # the current request's image embeddings file (GENI)
@@ -2490,6 +2499,11 @@ class Service:
         line takes, before anything is sent.  A logit_bias needs an engine that applies it (INFO logit_bias=1): an
         older one would answer as if it had none."""
         check_request_sampling(req)
+        # PLAN-turbo-live: a request without its own Turbo takes the model's live one (the control panel's, no
+        # config rewrite); one that says off keeps off - it overrides the global setting for itself
+        if not isinstance(req.get("turbo"), dict):
+            default = self.turbo_default   # (read once: a concurrent POST /api/turbo/options stores None between two reads and dict(None) is a 500)
+            req["turbo"] = dict(default) if default else None
         bias = logit_bias_of(req.get("logit_bias"), len(getattr(self.tok, "tokens", None) or ()) or None)
         if bias and (getattr(self.engine, "info", None) or {}).get("logit_bias") != 1:
             raise ValueError("logit_bias: this engine does not apply token biases - update Saguaro (./saguaro.sh --setup)")
@@ -2564,6 +2578,22 @@ class Service:
             except OSError as e:
                 print(f"[saguaro] could not save the shared settings: {e}", flush=True)
         return self.shared
+
+    def set_turbo_default(self, value) -> dict:
+        """The model's live Turbo (PLAN-turbo-live, the control panel's per-model setting): lossy options every
+        request that carries none of its own runs with (agents included).  It applies at once - no config rewrite,
+        no reload - and is kept in a sidecar file for the next start; the engine's run config is not touched."""
+        t = turbo_live.normalize_turbo(value)
+        self.turbo_default = turbo_live.turbo_on(t)     # (off, None: the model answers exact unless a request says otherwise)
+        if self.turbo_path:
+            try:
+                if self.turbo_default:
+                    Path(self.turbo_path).write_text(json.dumps(self.turbo_default, indent=1), encoding="utf-8")
+                else:
+                    Path(self.turbo_path).unlink(missing_ok=True)
+            except OSError as e:
+                print(f"[saguaro] could not save the live Turbo setting: {e}", flush=True)
+        return dict(self.turbo_default) if self.turbo_default else None
 
     def with_shared(self, req: dict, api: str) -> dict:
         """The request with the shared thinking level and max tokens filled in where it has none of its own."""
@@ -3662,6 +3692,7 @@ class Service:
                          "state": "queued", "phase": None,
                          "prompt_tokens": st.prompt_tokens or None, "prompt_read": None, "prompt_total": None,
                          "generated": 0, "max_tokens": st.max_tokens, "tok_s": None, "prefill_tok_s": None,
+                         "turbo": dict(st.turbo) if st.turbo else None,
                          "prefill_shared": False, "context_used": st.prompt_tokens or 0,
                          "elapsed_s": round(now - st.queued_at, 1) if st.queued_at else None})
         for st in sorted(self.running, key=lambda r: r.started or 0.0):
@@ -4848,6 +4879,7 @@ class Service:
         counted, my_started, my_first, queued = False, time.time(), None, False
         stat = RequestStat()                            # this request's live figures
         stat.spec_off = request_spec_off(sampling)
+        stat.turbo = turbo_live.turbo_of(sampling)      # (the Monitor's Turbo badge shows its options)
         stat.id, stat.api = next(self._req_ids), (sampling or {}).get("_api")
         stat.cid = (sampling or {}).get("_cid")
         stat.prompt_tokens, stat.max_tokens, stat.queued_at = len(ids), max_new, my_started
@@ -5264,6 +5296,7 @@ class Service:
                         # the drafts offered and kept (the engine's DONE line; None: it reported none)
                         "drafts_offered": last.get("drafts_offered"), "drafts_accepted": last.get("drafts_accepted"),
                         "spec_off": stat.spec_off,
+                        "turbo": dict(stat.turbo) if stat.turbo else None,
                         "loop_guard": guards[0].summary() if guards and guards[0].events else None}
                     self.history.append(row)
                     t = self.totals
@@ -6536,6 +6569,11 @@ def make_handler(svc: Service):
                 # the Turbo button (Settings > Chat defaults): on or off, and what it would change in the engine
                 if self._authorized():
                     self._json(200, svc.turbo_info())
+            elif path == "/api/turbo/options":
+                # the live per-request Turbo (PLAN-turbo-live): the model's global setting (the control panel's),
+                # what requests without their own `turbo` run with - changes apply at once, no config rewrite
+                if self._authorized():
+                    self._json(200, {"turbo": dict(svc.turbo_default) if svc.turbo_default else None})
             elif path == "/api/models":
                 # the Models page: the configs the setup wrote, the running one, each one's engine settings
                 if self._authorized():
@@ -6684,6 +6722,9 @@ def make_handler(svc: Service):
                     return
                 if path == "/api/turbo":
                     self._turbo()
+                    return
+                if path == "/api/turbo/options":
+                    self._turbo_options()
                     return
                 if path in ("/api/models/settings", "/api/models/switch", "/api/models/delete", "/api/models/leftovers"):
                     self._models(path.rsplit("/", 1)[1])
@@ -6869,6 +6910,26 @@ def make_handler(svc: Service):
                 self._json(400, {"error": {"type": "invalid_request_error", "message": str(e)}})
                 return
             self._json(202 if out.get("restarting_now") else 200, out)
+
+        def _turbo_options(self):
+            # The live per-request Turbo (PLAN-turbo-live): the model's global options in the control panel.  It
+            # changes what every request without its own `turbo` runs with - so the app's own page only - but it is
+            # engine state only: applied at once, no config rewrite, no reload, and it works under llama-swap
+            body = self._body()
+            if not self._own_page("Turbo's options can be changed"):
+                return
+            try:
+                req = json.loads(body or b"{}")
+                if not isinstance(req, dict) or "turbo" not in req:
+                    raise ValueError('send {"turbo": {"drop": N, "skip": "off"|"ssd"|"ram"}} or {"turbo": null}')
+                out = svc.set_turbo_default(req.get("turbo"))
+            except (TypeError, ValueError, OSError) as e:
+                self._json(400, {"error": {"type": "invalid_request_error", "message": str(e)}})
+                return
+            print("[saguaro] live Turbo for this model: "
+                  + (f"drop {out['drop']}, skip {out['skip']}" if out else "off")
+                  + " (every request without its own, from the next one)", flush=True)
+            self._json(200, {"turbo": out})
 
         def _update(self):
             # It replaces the server's files and restarts it for every client: only the app's own page
@@ -8079,6 +8140,16 @@ def main() -> int:
                       ", ".join(f"{k}={v}" for k, v in svc.shared.items()), flush=True)
         except (OSError, ValueError):
             svc.shared = {}
+        # the model's live Turbo (PLAN-turbo-live): its sidecar file, beside the config but never in it
+        svc.turbo_path = str(Path(a.config).with_suffix("")) + ".turbo.json"
+        try:
+            svc.turbo_default = turbo_live.turbo_on(turbo_live.normalize_turbo(
+                json.loads(Path(svc.turbo_path).read_text(encoding="utf-8"))))
+            if svc.turbo_default:
+                print(f"[saguaro] live Turbo for this model: drop {svc.turbo_default['drop']}, "
+                      f"skip {svc.turbo_default['skip']} (requests without their own)", flush=True)
+        except (OSError, ValueError):
+            svc.turbo_default = None
     if hub is not None:
         import atexit
         svc.mcp = hub

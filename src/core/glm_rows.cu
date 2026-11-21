@@ -652,10 +652,10 @@ bool Glm5Model::rows_moe(int il, RowSeq* rw, int n, std::string& err) {
         return false;
     };
     const auto& Ly = F->L[(size_t) il];
-    if (glmfast::route_seq_counting()) {   // SAGUARO_GLM_ROUTE_DUMP's / CONV_UNION's tags: the rows as issued (an MTP window's are several a seq)
-        row_seq_.resize((size_t) n);
-        for (int i = 0; i < n; ++i) row_seq_[(size_t) i] = rw[i].seq;
-    }
+    // the rows as issued (an MTP window's are several a seq): SAGUARO_GLM_ROUTE_DUMP's / CONV_UNION's tags, and
+    // PLAN-turbo-live's per-row Turbo (the grouped rows' route finds its sequence through row_seq_)
+    row_seq_.resize((size_t) n);
+    for (int i = 0; i < n; ++i) row_seq_[(size_t) i] = rw[i].seq;
     const float* no_bias[gf::kAhead] = {nullptr, nullptr, nullptr, nullptr};
     bool pf_pending = false;   // (no prefetch in a batched step)
     // the router and the shared expert's gate / up for every row, then each row's routed experts (and the

@@ -1193,6 +1193,25 @@ void extra_sources_append(const int32_t* t, size_t n) {
     for (auto& src : strata::spec::extra_draft_sources()) src->append(t, n);
 }
 
+// PLAN-turbo-live: the per-request lossy options on the request line: `turbo_drop=N` (run top-k minus N experts:
+// drop the N lowest router weights and renormalise the kept ones) and `turbo_skip=off|ssd|ram` (ssd: drop an
+// expert that would be read from SSD, VRAM and RAM still serve; ram: drop an expert not in VRAM).  Absent = off:
+// the request is exact, the line and its behavior are today's.  Parsed here and stored per slot/sequence; the
+// engine that does not apply one yet says so once, per request, and runs that request exact.
+struct Turbo {
+    int drop = 0;     // 0 = off, else 1..9 (the router's k is 10)
+    int skip = 0;     // 0 off, 1 ssd, 2 ram
+    bool off() const { return drop == 0 && skip == 0; }
+    const char* skip_name() const { return skip == 2 ? "ram" : skip == 1 ? "ssd" : "off"; }
+};
+void turbo_key(Turbo& t, const std::string& key, const char* val) {
+    if (key == "turbo_drop") t.drop = std::clamp(std::atoi(val), 0, 9);
+    else if (key == "turbo_skip") t.skip = std::string(val) == "ram" ? 2 : std::string(val) == "ssd" ? 1 : 0;
+}
+std::string turbo_said(const Turbo& t) {
+    return "turbo drop=" + std::to_string(t.drop) + " skip=" + t.skip_name();
+}
+
 bool parse_i64_list(const char* s, std::vector<int64_t>& out, std::string& err) {
     out.clear();
     std::string text(s);
@@ -12684,6 +12703,8 @@ int main(int argc, char** argv) {
             // the engine's expert-cache counters when the request started (its hits / lookups are the delta to BDONE;
             // as in the multi loops, they are shared with the other slots decoding meanwhile) and its own MTP drafts
             int64_t cache0 = 0, look0 = 0, draft_acc = 0, draft_off = 0;
+            // PLAN-turbo-live: the request line's lossy options for this slot's request (off = exact)
+            Turbo turbo;
         };
         std::vector<BSlot> bs((size_t) std::max(o.batch, 0));
         // an admission beside the slots, at its first token: one line with where its time went
@@ -15415,6 +15436,7 @@ int main(int argc, char** argv) {
             bool img = false, bias = false, ckpt = true;
             strata::kernels::SamplerParams sp;
             std::vector<int64_t> ids;
+            Turbo turbo;
         };
         auto adm_parse = [&](const std::string& l, AdmReq& r) -> bool {
             r.img = l.rfind("BGENI ", 0) == 0;
@@ -15440,6 +15462,7 @@ int main(int argc, char** argv) {
                 const float fv = std::strtof(val, nullptr);
                 if (key == "logit_bias") r.bias = true;
                 else if (key == "ckpt") r.ckpt = std::atoi(val) != 0;
+                else if (key == "turbo_drop" || key == "turbo_skip") turbo_key(r.turbo, key, val);
                 else if (key == "temperature") temperature = fv;
                 else if (key == "top_p") top_p = fv;
                 else if (key == "top_k") top_k = std::atoi(val);
@@ -16226,6 +16249,10 @@ int main(int argc, char** argv) {
             sl.x = (int32_t) ids[(size_t) n - 1];
             sl.p = n - 1;
             sl.max_new = j.r.max_new;
+            sl.turbo = j.r.turbo;
+            if (!sl.turbo.off())
+                std::fprintf(stderr, "strata batch: slot %d: %s asked for - this engine build does not apply it yet; "
+                                     "the request runs exact\n", b, turbo_said(sl.turbo).c_str());
             sl.t0 = Clock::now();
             sl.ids.assign(ids.begin(), ids.end() - 1);
             sl.cvec = cvec_cached;
@@ -16401,6 +16428,10 @@ int main(int argc, char** argv) {
             sl.x = sl.lane_ids[(size_t) resume];
             sl.ids.assign(sl.lane_ids.begin(), sl.lane_ids.begin() + resume);
             sl.max_new = r.max_new;
+            sl.turbo = r.turbo;
+            if (!sl.turbo.off())
+                std::fprintf(stderr, "strata batch: slot %d: %s asked for - this engine build does not apply it yet; "
+                                     "the request runs exact\n", b, turbo_said(sl.turbo).c_str());
             sl.t0 = Clock::now();
             sl.cvec = cvec_cached;
             sl.adm_log = true;
@@ -16907,6 +16938,10 @@ int main(int argc, char** argv) {
                 sl.x = (int32_t) ids[(size_t) n - 1];
                 sl.p = n - 1;
                 sl.max_new = j.r.max_new;
+                sl.turbo = j.r.turbo;
+                if (!sl.turbo.off())
+                    std::fprintf(stderr, "strata batch: slot %d: %s asked for - this engine build does not apply it yet; "
+                                         "the request runs exact\n", b, turbo_said(sl.turbo).c_str());
                 sl.t0 = Clock::now();
                 sl.ids.assign(ids.begin(), ids.end() - 1);
                 sl.cvec = cvec_cached;
@@ -18167,6 +18202,7 @@ int main(int argc, char** argv) {
             // in prompt order.  With them the conversation cache matches a picture by its key and grid, not by its
             // embedding floats, so a picture encoded again with other bits still matches.  Absent: the embeddings' hash.
             std::vector<uint64_t> req_img_keys;
+            Turbo req_turbo;   // PLAN-turbo-live: this request's lossy options (off: the request is exact)
             bool req_pcie_set = false;   // the request names its own share (the measured one holds meanwhile)
             if (endp != nullptr) {   // GENI takes the same keys (#75: image requests were always greedy); its
                                      // embedding file path is the first token without an =
@@ -18197,6 +18233,7 @@ int main(int argc, char** argv) {
                     else if (key == "spec_min_p") req_spec_min_p = std::clamp((double) fv, 0.0, 1.0);
                     else if (key == "pipe") req_pipe = std::max(0.0, (double) fv);
                     else if (key == "aux_cpus") req_aux_cpus = std::atoi(tok.c_str() + eq + 1) != 0 ? 1 : 0;
+                    else if (key == "turbo_drop" || key == "turbo_skip") turbo_key(req_turbo, key, tok.c_str() + eq + 1);
                     else if (key == "img_keys") {
                         req_img_keys.clear();
                         const char* q = tok.c_str() + eq + 1;
@@ -18232,6 +18269,9 @@ int main(int argc, char** argv) {
                 std::printf("ERR bad request: %s\n", pe.empty() ? "max_new" : pe.c_str());
                 continue;
             }
+            if (admit_slot < 0 && !req_turbo.off())   // a solo request's own line (a batch slot says it at its admission)
+                std::fprintf(stderr, "strata serve: %s asked for - this engine build does not apply it yet; the request "
+                                     "runs exact\n", turbo_said(req_turbo).c_str());
             const int64_t n = (int64_t) ids.size();
             req_imgs.clear();
             if (geni && !o.vision) { std::printf("ERR this engine was started without --vision\n"); continue; }
@@ -21749,6 +21789,10 @@ int main(int argc, char** argv) {
                     sl.p = p;
                     sl.produced = 1;
                     sl.max_new = admit_max_new;
+                    sl.turbo = req_turbo;
+                    if (!sl.turbo.off())
+                        std::fprintf(stderr, "strata batch: slot %d: %s asked for - this engine build does not apply it "
+                                             "yet; the request runs exact\n", admit_slot, turbo_said(sl.turbo).c_str());
                     sl.t0 = Clock::now();
                     sl.ids = live;
                     if (batch_mtp) {

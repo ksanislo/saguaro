@@ -6,12 +6,12 @@ import {SPRITE, coarse, ctxfmt, esc, fmt, isPhone, modelName, timeStr, tokfmt} f
 import {LEVELS, P, PRESET_NAMES, S, copyText, emit, presetOf, savePrefs, thinkPill, thinkTitles} from "./state.js";
 import {mcpOn} from "./server.js";
 import {addFiles, cancelEdit, chatView, ctxMeter, editMessage, focusInput, newChat, painters, regenerate,
-        removeAttachment, scrollDown, send, setThinking, stopAnswer, thinkingOf, updateCtxMeter} from "./chats.js";
+        removeAttachment, scrollDown, send, setChatTurbo, setThinking, stopAnswer, thinkingOf, turboOf, updateCtxMeter} from "./chats.js";
 import {markdown, onCodeClick, patchHtml, streamingMarkdown} from "./md.js";
 import {ChatMenuItems, openSettings, setSide, showView, status, usd} from "./sidebar.js";
 import {MS, loadModels} from "./models.js";
-import {CODING_IDEAS} from "./turbo-core.js";
-import {Gauge, Icon, Menu, MenuItem, MenuSep, ModelLogo, useDismiss} from "./ui.js";
+import {CODING_IDEAS, TURBO_DROPS, TURBO_SKIPS, turboBadge, turboChoose, turboToggle} from "./turbo-core.js";
+import {Gauge, Icon, Menu, MenuLabel, MenuItem, MenuSep, ModelLogo, useDismiss} from "./ui.js";
 
 // ------------------------------------------------------------------ the header
 function MeterRing({c}) {
@@ -338,9 +338,42 @@ function PlusMenu({open, close, anchor, pickFiles}) {
   <//>`;
 }
 
+// this chat's live Turbo (PLAN-turbo-live): a flame beside the thinking speedometer - the toggle and the options
+// (drop 1/2/3 experts, skip off/SSD/RAM), changeable mid-conversation; the request carries it every turn, so a
+// choice applies from the next turn.  No chat setting = the model's live Turbo (the control panel's) or exact.
+function TurboMenu({open, close, anchor}) {
+  const c = S.current, tb = turboOf(c);
+  const pick = (key, value) => { setChatTurbo(turboChoose(c, key, value)); close(); };
+  return html`<${Menu} open=${open} onClose=${close} anchor=${anchor} label="Turbo, for this chat" align="left" width=${290} cls="turbo-menu">
+    <button type="button" role="menuitemcheckbox" aria-checked=${String(!!tb)} class="menu__item"
+      onClick=${() => { setChatTurbo(turboToggle(c)); close(); }}>
+      <${Icon} name="bolt" sm/><span class="menu__label">Turbo<span class="menu__hint">lossy speed, this chat only; every other chat stays exact</span></span>
+      <span class="switch switch--sm" aria-hidden="true" data-on=${String(!!tb)}><span class="switch__knob"></span></span></button>
+    ${tb ? html`<${MenuSep}/>
+      <${MenuLabel}>Drop experts<//>
+      ${TURBO_DROPS.map((d) => html`<${MenuItem} label=${`drop ${d} of the 10`} checked=${tb.drop === d}
+        onClick=${() => pick("drop", d)}/>`)}
+      <${MenuLabel}>Skip<//>
+      ${TURBO_SKIPS.map((s) => html`<${MenuItem} label=${`skip: ${s.name}`} sub=${s.hint} checked=${(tb.skip || "off") === s.id}
+        onClick=${() => pick("skip", s.id)}/>`)}` : null}
+  <//>`;
+}
+function TurboChip({menu, setMenu, btn}) {
+  const tb = turboOf(S.current), badge = turboBadge(tb);
+  return html`<span class="anchor">
+    <button type="button" ref=${btn} class=${`think-chip turbo-chip${tb ? " is-on" : ""}${menu ? " is-open" : ""}`}
+      aria-haspopup="menu" aria-expanded=${String(menu)} aria-pressed=${tb ? "true" : "false"}
+      aria-label=${tb ? `Turbo on for this chat: ${badge}. Change it` : "Turbo, for this chat"}
+      title=${tb ? `Turbo (this chat): ${badge} - trades quality for speed, from the next turn`
+                 : "Turbo, for this chat: lossy speed options (drop experts, skip slow ones); off keeps every answer exact"}
+      onClick=${() => setMenu(!menu)}><${Icon} name="bolt" sm/><span>${tb ? badge : "Turbo"}</span></button>
+    <${TurboMenu} open=${menu} close=${() => setMenu(false)} anchor=${btn}/>
+  </span>`;
+}
+
 function Composer({center}) {
-  const ta = useRef(null), box = useRef(null), file = useRef(null), plusBtn = useRef(null), thinkBtn = useRef(null);
-  const [tall, setTall] = useState(false), [plus, setPlus] = useState(false), [think, setThink] = useState(false);
+  const ta = useRef(null), box = useRef(null), file = useRef(null), plusBtn = useRef(null), thinkBtn = useRef(null), turboBtn = useRef(null);
+  const [tall, setTall] = useState(false), [plus, setPlus] = useState(false), [think, setThink] = useState(false), [turbo, setTurbo] = useState(false);
   const compactW = useRef(0);
   const text = S.draft;
   const mine = S.busy && S.busy.chat === S.current;
@@ -385,6 +418,7 @@ function Composer({center}) {
             aria-label=${`Thinking: ${lv.name}. Change it`} title="How long the model thinks" onClick=${() => setThink(!think)}>
             <${Gauge} level=${level}/><span>${lv.name}</span></button>
         </span>
+        <${TurboChip} menu=${turbo} setMenu=${setTurbo} btn=${turboBtn}/>
         ${mine ? html`<button type="button" class="send send--stop" aria-label="Stop the answer (Esc)" title="Stop (Esc)" onClick=${stopAnswer}>
                    <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="2" fill="currentColor"/></svg></button>`
                : html`<button type="submit" class="send" aria-label="Send" title="Send (Enter)" disabled=${!canSend}><${Icon} name="arrow-up"/></button>`}

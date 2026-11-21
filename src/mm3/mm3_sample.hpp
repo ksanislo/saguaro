@@ -32,6 +32,10 @@ struct Req {
     std::vector<int> ids;
     int rid = -1;           // rid=N: the request's id (--parallel: every line it causes carries it)
     int ablate = -1;        // ablate=0|1: this request projects the --ablate direction out or not (-1: as started)
+    // PLAN-turbo-live (turbo_drop=N turbo_skip=ssd|ram, serve/turbo_live.py): this request's lossy speed options on
+    // its answer tokens - top-k minus N experts (renormalised) and / or leaving out what the SSD ("ssd") or a
+    // non-VRAM read ("ram") would serve.  Absent: 0/0, an exact request.  Model::set_turbo applies per conversation.
+    int turbo_drop = 0, turbo_skip = 0;
 };
 
 inline bool penalised(const Req& r) {

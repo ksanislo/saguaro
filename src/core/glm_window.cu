@@ -564,6 +564,12 @@ bool Glm5Model::fast_moe_window(int il, int t0, int T, int part, int gid, std::s
         return v ? std::max(0, std::atoi(v)) : 0;
     }();
     const float* ah_bias[gf::kAhead] = {nullptr, nullptr, nullptr, nullptr};
+    // PLAN-turbo-live: a window belongs to one sequence (multi MTP's rows route through rows_moe) - its request's
+    // live Turbo applies as in fast_moe_route, so the window routes like the token path it serves.  Only the
+    // request's own bars: a window never took the engine's miss/disk-skip env values, and still does not.
+    const SeqTurbo& t = seq_turbo(route_seq(0, 0));
+    const int wres = t.drop > 0 ? std::max(1, g.n_exp_used - t.drop) : 0;   // 0: the engine's SAGUARO_GLM_RESIDENT_TOPK
+    const float wdisk = t.skip == 1 ? 1.0f : 0.0f, wmiss = t.skip == 2 ? 1.0f : 0.0f;
     // the batched window's routes on two window lanes (both sockets' pools answer it, win_lane): every RAM-tier expert
     // to the CPU - the calibrated plan priced one pool against PCIe, and a merged layer has two (a 3090's 2.1 ms PCIe
     // fetch is several experts' CPU time there).  SAGUARO_GLM_WIN_ALLCPU=0: the calibrated plan
@@ -621,7 +627,7 @@ bool Glm5Model::fast_moe_window(int il, int t0, int T, int part, int gid, std::s
                           g.norm_w != 0, il, W.x + (size_t) t * E, E, mt, W.sh_g + (size_t) t * FFs,
                           W.sh_u + (size_t) t * FFs, g.swiglu_shexp, FFs, (uint8_t*) W.sh_hq + (size_t) t * W.sh_hq_s, s,
                           nullptr, nullptr, 0, nullptr, ah_bias, 0, keep, lane ? win_plan : 0ull, promote_min, 0, 0, t,
-                          scr, t0 + T);
+                          scr, t0 + T, 8, wdisk, wmiss, 0, true, 0, wres);
             ++F->expected;
             // (every expert in VRAM: the wait and the fetch are no-ops - fast_moe's all_resident, 2 launches a token)
             if (!F->all_resident) {
@@ -776,7 +782,7 @@ bool Glm5Model::fast_moe_window(int il, int t0, int T, int part, int gid, std::s
         gf::moe_route(W.rlog + (size_t) t * g.n_expert, Ly.router_bias, g.n_expert, g.n_exp_used, g.w_scale,
                       g.norm_w != 0, il, x, E, md, W.sh_g + (size_t) t * FFs, W.sh_u + (size_t) t * FFs,
                       g.swiglu_shexp, FFs, F->sh_hq, s, nullptr, nullptr, 0, nullptr, ah_bias, 0, keep,
-                      lane ? F->cpu_plan : 0ull, promote_min);
+                      lane ? F->cpu_plan : 0ull, promote_min, 0, 0, 0, nullptr, 0, 8, wdisk, wmiss, 0, true, 0, wres);
         ++F->expected;
         if (!F->all_resident) {
             gf::moe_wait(md, E, s);

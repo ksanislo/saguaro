@@ -1274,7 +1274,8 @@ __global__ void __launch_bounds__(128) attn_combine_kernel(const float* part, in
 }
 
 // ------------------------------------------------------------------ the router (one warp a token, E <= 256)
-__global__ void route_kernel(const float* logits, const float* bias, int T, int E, int K, int* top, float* w) {
+__global__ void route_kernel(const float* logits, const float* bias, int T, int E, int K, int* top, float* w,
+                             const unsigned char* turb_seq, unsigned long long rows) {
     const int t = (blockIdx.x * blockDim.x + threadIdx.x) >> 5, lane = threadIdx.x & 31;
     if (t >= T) return;
     float sg[8], ch[8];
@@ -1318,7 +1319,29 @@ __global__ void route_kernel(const float* logits, const float* bias, int T, int 
         pi = bi;
     }
     __syncwarp();
-    if (lane < K) w[(size_t) t * K + lane] /= sum;
+    // PLAN-turbo-live: this row's conversation's turbo_drop (the byte turb_seq[rows>>4t]'s low nibble): the route
+    // runs top-k minus N - the N lightest picks' weights go to the drop MARKER -1.0f (their expert is not planned,
+    // not staged, not on the CPU lane, not counted) and the kept ones renormalise by the kept sum, the top-1
+    // always running.  A marker, not 0: a real pick's sigmoid can underflow to exactly 0 on extreme logits and
+    // must then keep today's behavior (planned, counted, adds nothing) with no Turbo asked for - every consumer
+    // below tests < 0.  0: the line below, today's bits.
+    int drop = turb_seq != nullptr && t < 16 ? (int) (turb_seq[(rows >> (4 * t)) & 15u] & 15u) : 0;
+    if (drop > K - 1) drop = K - 1;   // (the top-1 always runs)
+    if (drop <= 0) {
+        if (lane < K) w[(size_t) t * K + lane] /= sum;
+        return;
+    }
+    const float v = lane < K ? w[(size_t) t * K + lane] : 0.0f;   // (the raw sigmoid: not yet normalised)
+    int rank = 0;
+    for (int r = 0; r < K; ++r) {
+        const float vr = __shfl_sync(0xffffffffu, v, r);
+        rank += r != lane && (vr > v || (vr == v && r < lane));
+    }
+    const bool kept = rank < K - drop;
+    float ks = kept && lane < K ? v : 0.0f;
+#pragma unroll
+    for (int o = 16; o > 0; o >>= 1) ks += __shfl_xor_sync(0xffffffffu, ks, o);
+    if (lane < K) w[(size_t) t * K + lane] = kept ? v / ks : -1.0f;   // (-1: the marker, never a real weight)
 }
 
 // ------------------------------------------------------------------ the routed experts' plan on the device
@@ -1342,7 +1365,11 @@ __global__ void __launch_bounds__(kPlanEnt) plan_dev_kernel(const int* __restric
             const int x = top[t * K + i];
             p = tab[x];
             wt = __fmul_rn(w[t * K + i], scale);
-            if (counts != nullptr) atomicAdd(counts + x, 1u);
+            // PLAN-turbo-live: the drop MARKER (turbo_drop: the router wrote -1.0f) is not planned and not
+            // counted - and its weight is stored clean (0) so no sum ever sees it.  A real pick whose sigmoid
+            // underflowed to 0 (wt 0, no Turbo asked for) keeps today's path: planned, counted, adds nothing.
+            if (wt < 0.0f) { p = 0ull; wt = 0.0f; }
+            if (counts != nullptr && p != 0ull) atomicAdd(counts + x, 1u);
         }
         plan_ptr[e] = p;
         plan_w[e] = wt;
@@ -2798,9 +2825,10 @@ void sparse_attn(const float* q, const uint16_t* kc, const uint16_t* vc, const i
     check("sparse_attn");
 }
 
-void route(const float* logits, const float* bias, int T, int E, int K, int* top, float* w, cudaStream_t s) {
+void route(const float* logits, const float* bias, int T, int E, int K, int* top, float* w, cudaStream_t s,
+           const unsigned char* turb_seq, unsigned long long rows) {
     if (T <= 0) return;
-    route_kernel<<<(T + 7) / 8, 256, 0, s>>>(logits, bias, T, E, K, top, w);
+    route_kernel<<<(T + 7) / 8, 256, 0, s>>>(logits, bias, T, E, K, top, w, turb_seq, rows);
     check("route");
 }
 

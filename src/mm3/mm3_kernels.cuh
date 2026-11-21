@@ -140,8 +140,15 @@ void sparse_attn(const float* q, const uint16_t* kc, const uint16_t* vc, const i
 inline size_t attn_part_floats(int T, int Hkv, int splits) { return (size_t) T * Hkv * splits * 16 * 130; }
 
 /// The router over logits [T][E] (F32): s = sigmoid, chosen by s + bias (the K largest, ties to the lower expert),
-/// weights s / sum over the chosen -> top [T][K], w [T][K].
-void route(const float* logits, const float* bias, int T, int E, int K, int* top, float* w, cudaStream_t s);
+/// weights s / sum over the chosen -> top [T][K], w [T][K].  PLAN-turbo-live: turb_seq (given: a device byte per
+/// conversation, its low nibble that request's turbo_drop) and rows (four bits a row: its conversation's index)
+/// run row t's route as top-k minus N: the N lightest picks (the router's own weights, ties to the earlier pick)
+/// get the weight MARKER -1.0f - no plan, no CPU lane, not counted (plan_dev zeroes such an entry too) - and the
+/// kept ones renormalise by the kept sum; the top-1 always runs.  A marker rather than 0: a real pick's sigmoid
+/// can underflow to exactly 0 and must keep today's behavior when no Turbo was asked for.  Null / all zero: the
+/// plain rule, the same bits.
+void route(const float* logits, const float* bias, int T, int E, int K, int* top, float* w, cudaStream_t s,
+           const unsigned char* turb_seq = nullptr, unsigned long long rows = 0);
 
 /// The routed experts' plan on the device, for a layer whose experts are all in VRAM (no round trip through the host):
 /// token t's pick i < K -> plan_ptr[t * 8 + i] = tab[top[t * K + i]] (tab: expert -> its blob's device address) and

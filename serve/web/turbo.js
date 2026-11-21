@@ -2,12 +2,15 @@
 // the fastest thinking level in this browser's settings, and - in the engine's run config, the same "settings saved, Saguaro
 // starts again" flow as the Models page - a 32K context (GLM, MiniMax), expert skipping and the fastest drafting where the
 // engine has them.  Off: every one of those back as it was.  The snapshot of the page's settings is kept here (localStorage);
-// the engine's is in the run config (serve/models.py).
+// the engine's is in the run config (serve/models.py).  Below it lives the LIVE per-request Turbo (PLAN-turbo-live): the
+// model's global options for requests that carry none of their own - engine state only, applied at once, no config rewrite,
+// no reload, and it stays visible under llama-swap (it never touches configs there).
 import {html} from "./preact.js";
 import {api, esc, store} from "./lib.js";
 import {S, THINKING, P, confirmDialog, emit, loadPrefs, prefsKey, toast} from "./state.js";
 import {loadTime} from "./server.js";
-import {turboEnter, turboLeave} from "./turbo-core.js";
+import {TURBO_DROPS, TURBO_SKIPS, turboEnter, turboLeave} from "./turbo-core.js";
+import {Seg, Switch} from "./ui.js";
 
 S.turbo = {on: false, engine: false, plan: {}, env: {}, restarts: false, busy: false};
 
@@ -118,4 +121,54 @@ export function TurboButton() {
     </svg>
     <span>${t.on ? "Turbo ON" : "Turbo"}</span>
   </button>`;
+}
+
+// ---- live per-request Turbo (PLAN-turbo-live): the model's global setting for the control panel.  Every request
+// that does not carry its own `turbo` - the page's per-chat chip overrides it, API clients and agents included -
+// runs with these lossy options.  Changes apply at once (from the next request), persist across restarts, and
+// touch no config: unlike Maya's Turbo above there is no restart, and this stays visible under llama-swap.
+
+S.turboLive = undefined;   // until loaded: null = exact (off); {"drop": N, "skip": "off"|"ssd"|"ram"}; still undefined = an older server has none
+
+export async function loadTurboLive() {
+  try {
+    const t = await api("api/turbo/options");
+    S.turboLive = t.turbo || null;
+  } catch (e) { S.turboLive = undefined; }   // (an older server: no live Turbo)
+  emit();
+}
+
+export async function setTurboLive(next) {   // {"drop","skip"} (parts that stay are the current ones) or null
+  const prev = S.turboLive;
+  S.turboLive = next;
+  emit();
+  try {
+    const t = await api("api/turbo/options", {method: "POST", body: {turbo: next}});
+    S.turboLive = t.turbo || null;
+    toast("success", S.turboLive ? "Live Turbo is on" : "Live Turbo is off",
+          S.turboLive ? "Every request without its own Turbo runs with these options, from the next one."
+                      : "Requests run exact again, from the next one.", 4000);
+  } catch (e) {
+    S.turboLive = prev;
+    toast("error", "The live Turbo setting was not saved", e.message, 6000);
+  }
+  emit();
+}
+
+export function TurboLive() {
+  if (S.turboLive === undefined) return null;   // older server: no live Turbo
+  const t = S.turboLive;
+  const on = (v) => setTurboLive({drop: t ? t.drop : 1, skip: t ? t.skip : "off", ...(v || {})});
+  return html`<div class="set-head"><h3>Turbo, live</h3></div>
+    <p class="set-intro">Lossy speed for every request this model answers that does not set its own - the apps, the
+      agents and new chats. A chat's own Turbo (the bolt in its message box) wins over this. It applies to the next
+      request as it is asked - nothing restarts - and a request without it stays exact when this is off.</p>
+    <div class="set-row"><span><span>On</span><span class="set-row__sub">drop the weakest experts, keep an answer the model still stands behind</span></span>
+      <${Switch} label="Live Turbo for this model" on=${!!t} onChange=${(v) => setTurboLive(v ? {drop: 1, skip: "off"} : null)}/></div>
+    ${t ? html`<div class="set-row"><span><span>Drop experts</span><span class="set-row__sub">per token, the lowest router weights of the 10; the rest carry their share</span></span>
+      <${Seg} label="Experts dropped" value=${String(t.drop)} onChange=${(v) => on({drop: +v})}
+        options=${TURBO_DROPS.map((d) => ({id: String(d), label: `${d}`, title: `run top-10 minus ${d}: the ${d} weakest experts of every token dropped, the kept ones renormalised`}))}/></div>
+      <div class="set-row"><span><span>Skip</span><span class="set-row__sub">an expert the engine would fetch the slow way is dropped instead</span></span>
+      <${Seg} label="Skip tier" value=${t.skip || "off"} onChange=${(v) => on({skip: v})}
+        options=${TURBO_SKIPS.map((s) => ({id: s.id, label: s.name, title: s.hint}))}/></div>` : null}`;
 }
