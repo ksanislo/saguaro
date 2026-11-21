@@ -144,7 +144,7 @@ def run(exe: str, gpus: list[int], pack: str, ctx: int, slots: str, keep: bool,
             eng.quit()
         err = eng.stderr_lines()
     for line in err:
-        if line.startswith("ds4 slots:") and "failed" in line:
+        if line.startswith("saguaro ds4 slots:") and "failed" in line:
             raise RuntimeError("the engine: " + line)
     return answers, eng.notes
 

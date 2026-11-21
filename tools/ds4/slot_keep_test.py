@@ -292,7 +292,7 @@ def run(exe: str, gpus: list[int], pack: str, ctx: int, slots: str, keep: bool,
             eng.quit()
         err = eng.stderr_lines()
     for line in err:   # (a slot that failed to be set aside, taken back or written: this test's failure, not a log line)
-        if line.startswith("ds4 slots:") and "failed" in line:
+        if line.startswith("saguaro ds4 slots:") and "failed" in line:
             raise RuntimeError("the engine: " + line)
     return answers, eng.notes, load_s
 

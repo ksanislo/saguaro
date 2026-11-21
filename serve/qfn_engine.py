@@ -1013,7 +1013,7 @@ class StrataEngine:
             return (f"The engine exited (code {rc}) after it reported: {self.last_err} - please report it at "
                     "github.com/Niko1221/Strata/issues with the log.")
         last = next((logctx.unstamp(x).strip() for x in reversed(tail.splitlines())
-                     if logctx.unstamp(x).strip().startswith(("strata", "ERR"))), "")
+                     if logctx.unstamp(x).strip().startswith(("saguaro", "ERR"))), "")
         if rc is not None and rc >= 0 and last:          # it ended by itself: its own last words say why (#215)
             return (f"The engine exited (code {rc}). Its last log line: {last} - if that does not explain it, please "
                     "report it at github.com/Niko1221/Strata/issues with the log.")
