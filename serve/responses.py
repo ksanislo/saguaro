@@ -105,7 +105,7 @@ def normalize_request(req):
     allowed = {"model", "input", "instructions", "tools", "tool_choice", "parallel_tool_calls", "reasoning",
                "max_output_tokens", "temperature", "top_p", "stream", "store", "metadata", "previous_response_id",
                "background", "text", "truncation", "include", "service_tier", "prompt_cache_key", "client_metadata",
-               "top_logprobs"}
+               "top_logprobs", "turbo"}
     for key in req:
         if key not in allowed:
             raise ValueError(f"unsupported Responses parameter: {key}")
@@ -265,7 +265,9 @@ def normalize_request(req):
     instruction = validation.prompt()
     if instruction:
         messages = with_system_note(messages, instruction)
-    normalized = {k: req[k] for k in ("temperature", "top_p", "reasoning", "stream", "parallel_tool_calls") if k in req}
+    normalized = {k: req[k] for k in ("temperature", "top_p", "reasoning", "stream", "parallel_tool_calls",
+                                      "turbo")   # live Turbo (PLAN-turbo-live): checked with the rest (check_request)
+                  if k in req}
     normalized.update(messages=messages, tools=tools, tool_choice=choice, _response_validation=validation)
     if "max_output_tokens" in req:
         normalized["max_completion_tokens"] = req["max_output_tokens"]

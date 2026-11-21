@@ -36,3 +36,45 @@ export const CODING_IDEAS = [
   {icon: "code", label: "Fix a bug",
    q: "This function should return the median of a list but is wrong for even lengths. Find the bug and fix it:\n\n```python\n\n```"},
 ];
+
+// ---- live per-request Turbo (PLAN-turbo-live): the chat's own lossy options, sent with every turn of it and
+// changeable mid-conversation (they apply from the next turn).  `chat.turbo` holds {"drop": 0-3, "skip":
+// "off"|"ssd"|"ram"}, or nothing while the chat is exact.  serve/turbo_live.py reads the same shape on the wire.
+
+export const TURBO_DROPS = [1, 2, 3];
+export const TURBO_SKIPS = [
+  {id: "off", name: "off", hint: "every expert the router picks is used"},
+  {id: "ssd", name: "SSD", hint: "an expert that would come off the SSD is dropped (VRAM and RAM still serve)"},
+  {id: "ram", name: "RAM", hint: "an expert not in VRAM is dropped (VRAM only)"},
+];
+
+// the chat's Turbo as the request sends it (null = exact: the field is not sent at all)
+export function turboOfChat(chat) {
+  const t = chat && typeof chat === "object" ? chat.turbo : null;
+  if (!t || (typeof t !== "object")) return null;
+  const drop = Number.isInteger(t.drop) && t.drop > 0 && t.drop <= 3 ? t.drop : 0;
+  const skip = ["ssd", "ram"].includes(t.skip) ? t.skip : "off";
+  return drop || skip !== "off" ? {drop, skip} : null;
+}
+
+// flipping the toggle: on starts at drop 1 / skip off; off clears the chat's options
+export function turboToggle(chat) {
+  return turboOfChat(chat) ? null : {drop: 1, skip: "off"};
+}
+
+// one choice inside the menu (drop 1/2/3, skip off/SSD/RAM) applied to what the chat has now; an exact chat that
+// picks a skip level joins Turbo with drop 0
+export function turboChoose(chat, key, value) {
+  const cur = turboOfChat(chat) || {drop: 0, skip: "off"};
+  const next = {...cur, [key]: value};
+  return turboOfChat({turbo: next}) ? next : null;
+}
+
+// the Monitor's badge text for a request's options ("" when exact) - serve/turbo_live.py turbo_badge's twin
+export const turboBadge = (t) => {
+  if (!t || typeof t !== "object") return "";
+  const parts = [];
+  if (t.drop) parts.push(`-${t.drop} experts`);
+  if (t.skip && t.skip !== "off") parts.push(({ssd: "no SSD", ram: "VRAM only"})[t.skip] || t.skip);
+  return parts.join(" · ");
+};

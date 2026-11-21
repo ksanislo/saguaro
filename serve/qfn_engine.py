@@ -40,6 +40,7 @@ from serve import logit_bias as bias_api  # noqa: E402
 from serve.engine_stats import EngineLog, EngineStats  # noqa: E402
 from serve import logctx  # noqa: E402
 from serve import lifeline  # noqa: E402
+from serve import turbo_live  # noqa: E402
 def popen(what: str, args: list, role: str = "engine", **kw):
     """#735: subprocess.Popen, but Windows' refusal to start a program (WinError 4551, or 1260 when a policy blocks it:
     Smart App Control on a clean Windows 11 blocks an exe that is not signed) is said in words instead of a bare
@@ -1237,7 +1238,8 @@ class StrataEngine:
             pn = prefix.get("tokens")
             if isinstance(pn, int) and not isinstance(pn, bool) and pn > 0:
                 keys += f" pin={pn}"
-        return keys + StrataEngine.projection_key(sampling) + bias_api.engine_key(sampling.get("logit_bias"))
+        return (keys + turbo_live.turbo_keys(sampling) + StrataEngine.projection_key(sampling) +
+                bias_api.engine_key(sampling.get("logit_bias")))
 
     @staticmethod
     def projection_key(sampling: dict) -> str:

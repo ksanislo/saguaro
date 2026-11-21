@@ -3,6 +3,7 @@
 import {html, useRef, useState} from "./preact.js";
 import {GIB, ago, ctxfmt, fmt, gb, isPhone, kfmt, rate, store} from "./lib.js";
 import {S, copyText, emit, toast} from "./state.js";
+import {turboBadge} from "./turbo-core.js";
 import {fetchReport, reqAll, speculationView, tierShares} from "./server.js";
 import {newChat} from "./chats.js";
 import {setSide, status} from "./sidebar.js";
@@ -23,6 +24,9 @@ const Spark = ({values, max, tone = "", cls = ""}) => {
 };
 const Num = ({v, unit}) => html`<span class="stat__value">${v == null ? "–" : v}${v != null && unit ? html`<small>${unit}</small>` : null}</span>`;
 const Badge = ({tone, children}) => html`<span class=${`badge badge--${tone}`}><i class="badge__dot"></i>${children}</span>`;
+// the Turbo a request ran with (PLAN-turbo-live): its options on the chat's row, nothing when it was exact
+const TurboBadge = ({turbo}) => { const b = turboBadge(turbo); return b ? html`<span class="badge badge--warn"
+  title=${"Turbo (this request): " + b}>Turbo ${b}</span>` : null; };
 
 // ------------------------------------------------------------------ problems worth a line at the top
 function Banners({m}) {
@@ -150,6 +154,7 @@ function RightNow({m}) {
       }
       return html`<div class="now__chat" title=${null}>
         <${Badge} tone=${tone}>${text}<//>
+        <${TurboBadge} turbo=${c.turbo}/>
         <div class="now__chat__body">
           ${pct != null ? html`<div class="bar bar--sm" role="progressbar" data-tone=${ptone} aria-valuenow=${Math.round(pct)}
             aria-valuemin="0" aria-valuemax="100" aria-label=${who}><span style=${`width:${pct}%`}></span></div>` : null}
@@ -180,9 +185,10 @@ function RightNow({m}) {
     detail = `last answer: ${fmt(last.output_tokens)} tokens${took(last.duration_s)}`;
   }
   const running = live.state !== "idle";
+  const one = (live.chats || [])[0];   // one chat: its own Turbo, when it asked for any
   return html`<section class="card card--side" aria-label="Right now">
     <span class="card__title">Right now</span>
-    <div class="now"><${Badge} tone=${tone}>${label}<//><span class="now__detail num">${detail}</span></div>
+    <div class="now"><${Badge} tone=${tone}>${label}<//>${one && one.turbo ? html` <${TurboBadge} turbo=${one.turbo}/>` : null}<span class="now__detail num">${detail}</span></div>
     ${pct != null ? html`<div class="bar" data-tone=${ptone} role="progressbar" aria-valuenow=${Math.round(pct)} aria-valuemin="0" aria-valuemax="100"
       aria-label=${label}><span style=${`width:${pct}%`}></span></div>` : null}
     <dl class="kv">
@@ -614,7 +620,8 @@ function Requests({m}) {
         return html`<tr><td class="l">${t}</td><td class="l nowrap"><span class=${`badge badge--${tone}`}>${text}</span>
             ${r.api ? html` <span class="muted small">${API_NAMES[r.api] || r.api}</span>` : null}
             ${r.loop_guard && r.loop_guard.length   /* (what the loop guard did in this answer: on hover) */
-              ? html` <span class="badge badge--warn" title=${r.loop_guard.join("\n")}>Loop guard</span>` : null}</td>
+              ? html` <span class="badge badge--warn" title=${r.loop_guard.join("\n")}>Loop guard</span>` : null}
+            <${TurboBadge} turbo=${r.turbo}/></td>
           <td>${fmt(r.prompt_tokens)}</td><td>${fmt(r.reused)}</td>
           <td title="New prompt tokens read per second: its own wall time from the engine taking it to its first token (other chats reading at the same time slow it, and that shows here)">${fmt(pre)}</td>
           <td>${fmt(r.output_tokens)}</td>
@@ -648,7 +655,8 @@ function Conversations({m}) {
     const speed = !t ? (c.decode_tok_s != null ? `${fmt(c.decode_tok_s, 1)} tok/s` : "–")
       : t.state === "reading" ? (t.prefill_tok_s != null ? `${fmt(t.prefill_tok_s)} prefill` : "–")
       : t.tok_s != null ? `${fmt(t.tok_s, 1)} tok/s` : "–";
-    return html`<tr class=${t ? "" : "muted"}><td class="l nowrap"><span class=${`badge badge--${tone}`}>${text}</span></td>
+    return html`<tr class=${t ? "" : "muted"}><td class="l nowrap"><span class=${`badge badge--${tone}`}>${text}</span>
+      ${t ? html`<${TurboBadge} turbo=${t.turbo}/>` : null}</td>
       <td class="l"><span class="conv__who">${who}</span><span class="conv__meta muted small num">${under.join(" · ")}</span></td>
       <td>${read}</td><td>${out}</td>
       <td class="strong" title=${!t ? `Idle: its last turn read ${c.read_tok_s == null ? "–" : `${fmt(c.read_tok_s)} tok/s`} and wrote ${c.decode_tok_s == null ? "–" : `${fmt(c.decode_tok_s, 1)} tok/s`}; ${fmt(c.tokens_read)} read, ${fmt(c.tokens_written)} written all told`

@@ -4,6 +4,7 @@
 import {SPRITE, api, coarse, ctxfmt, db, download, fmt, headers, store, uid} from "./lib.js";
 import {P, PENALTIES, S, confirmDialog, defaultSystem, emit, levelFor, modelId, promptDialog, toast} from "./state.js";
 import {mcpOn} from "./server.js";
+import {turboOfChat} from "./turbo-core.js";
 
 // ------------------------------------------------------------------ the chats' list
 let dbBroken = false;                 // IndexedDB unavailable (some private windows): localStorage, without pictures
@@ -35,6 +36,16 @@ export function setThinking(level) {
   if (c.messages.length) persist(c);
   emit();
   updateCtxMeter();
+}
+// the chat's live Turbo (PLAN-turbo-live): changeable mid-conversation, applies from the next turn (the body is
+// built per answer).  `next` is {"drop","skip"} or null (exact); stored on the chat, so it survives a reload
+export {turboOfChat as turboOf};
+export function setChatTurbo(next) {
+  const c = S.current;
+  if (!c) return;
+  if (next) c.turbo = {...next}; else delete c.turbo;
+  if (c.messages.length) persist(c);
+  emit();
 }
 
 const slim = (c) => ({...c, messages: c.messages.map((m) => ({...m, images: (m.images || []).map((i) => ({name: i.name}))}))});
@@ -396,6 +407,8 @@ export async function answer(resumeJob = null) {
     if (P.seed) body.seed = +P.seed;
     if (P.max) body.max_tokens = +P.max;
     if (mcpOn()) body.strata_mcp = true;           // this server may run MCP tools for it
+    const tb = turboOfChat(chat);                  // this chat's live Turbo (PLAN-turbo-live): {"drop","skip"} or nothing - sent every turn, so changing it applies from the next one
+    if (tb) body.turbo = tb;
     // the server keeps the answer running if this connection drops (a phone's screen sleeping mid-answer, or a reload):
     // the page reconnects to it by id and carries on from the last chunk it read (strata_resume)
     body.strata_resume = true;
