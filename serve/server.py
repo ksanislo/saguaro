@@ -1117,8 +1117,8 @@ class StrataEngine:
     _TAGGED = ("T ", "LP ", "PP ", "DONE ", "ERR ")
 
     def _route(self, line: str) -> bool:
-        """Several conversations at once: a request's own lines (T / LP / PP / DONE / ERR <rid> ...) go to its queue, the
-        engine's (STAT, NOTE) are handled here; True when the line was taken."""
+        """Several conversations at once: a request's own lines (T / LP / PP / RESUME / DONE / ERR <rid> ...) go to its
+        queue, the engine's (STAT, NOTE) are handled here; True when the line was taken."""
         if line.startswith(self._TAGGED):
             f = line.split(None, 2)
             if len(f) >= 2 and f[1].isdigit():
@@ -1133,7 +1133,19 @@ class StrataEngine:
             self._parse_stat(line)
             return True
         if line.startswith("NOTE "):
-            print("[saguaro] " + line[5:].strip(), flush=True)
+            print("[saguaro] " + line[5:].strip(), flush=True)   # (glm tags its loop guard's NOTE with r<rid>: the
+            return True                                          #  printed message says which answer it closed)
+        if line.startswith("RESUME "):
+            # (glm, before a restored read: this many of the prompt's tokens are not read again. The reuse base rides
+            # the PP lines for these engines ("no RESUME base needed", the solo reader), so the line is only taken -
+            # routed to its own request when one is live: it says that read began - and never left for the shared
+            # queue, which in multi mode nothing reads)
+            f = line.split()
+            if len(f) >= 3 and f[1].isdigit():
+                with self._routes_lock:
+                    q = self._routes.get(int(f[1]))
+                if q is not None:
+                    q.put(line)
             return True
         return False
 
