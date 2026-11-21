@@ -2492,7 +2492,8 @@ class Service:
         # PLAN-turbo-live: a request without its own Turbo takes the model's live one (the control panel's, no
         # config rewrite); one that says off keeps off - it overrides the global setting for itself
         if not isinstance(req.get("turbo"), dict):
-            req["turbo"] = dict(self.turbo_default) if self.turbo_default else None
+            default = self.turbo_default   # (read once: a concurrent POST /api/turbo/options stores None between two reads and dict(None) is a 500)
+            req["turbo"] = dict(default) if default else None
         bias = logit_bias_of(req.get("logit_bias"), len(getattr(self.tok, "tokens", None) or ()) or None)
         if bias and (getattr(self.engine, "info", None) or {}).get("logit_bias") != 1:
             raise ValueError("logit_bias: this engine does not apply token biases - update Saguaro (./saguaro.sh --setup)")
