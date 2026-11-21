@@ -2395,7 +2395,7 @@ class Service:
         self.reads: collections.deque = collections.deque()   # the intervals, oldest first (_read_prune drops closed)
         self.read_wall_s, self.read_wall_since = 0.0, None   # wall seconds with >=1 prompt reading / >=1 answer writing
         self.decode_wall_s, self.decode_wall_since = 0.0, None
-        # the loop guard (serve/loop_guard.py; MAYA_LOOP_GUARD=0 / "loop_guard": false: off) and what it did since
+        # the loop guard (serve/loop_guard.py; SAGUARO_LOOP_GUARD=0 / "loop_guard": false: off) and what it did since
         # the server started: loops seen, and how each was broken (the Monitor's totals, /metrics, Prometheus)
         self.loop_guard = True
         self.loop_guard_counts = {"detected": 0, "penalised": 0, "thinking_closed": 0, "stopped": 0, "tool_repeats": 0,
@@ -3906,7 +3906,7 @@ class Service:
         live["prompt_reused"] = progress[2] if s.get("busy") and progress and len(progress) > 2 else None
         engine = {"model": self.model, "model_label": self.model_label, "max_context": self.engine.max_context,
                   "images": self.vision is not None,
-                  **dict(getattr(self.engine, "info", {}) or {}), "maya_version": SAGUARO_VERSION,
+                  **dict(getattr(self.engine, "info", {}) or {}), "saguaro_version": SAGUARO_VERSION,
                   "trained_context": self.trained_context,
                   **({"dspark": self.dspark} if self.dspark is not None else {})}
         # the drafters on (empty: drafting is off): the Monitor's Speculation says "off", or the draft acceptance
