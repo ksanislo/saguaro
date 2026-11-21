@@ -2308,6 +2308,11 @@ class RequestStat:
         self.read_pos, self.read_t0, self.read_t1, self.read_shared = 0, None, None, False
         self.read_avg = None                            # the engine's mean over its read, from its last progress line
         self.read_last, self.read_prev_t, self.read_prev_n = None, None, 0   # its last observed read interval
+        # the engine's OWN per-request read figures (PLAN-qfn-per-request-read-stats: PP/BRP new_read=/read_ms=,
+        # RDONE / BRA at the read's end): counted tokens over the time its read actually ran - never a shared
+        # reader's rate, never wall time since the engine took it
+        self.read_eng_n, self.read_eng_ms = 0, None     # live pair (the last progress step's)
+        self.read_engine = None                         # the finished read's exact (new tokens, read_ms)
         self.read_cur = None        # its read interval in Service.reads while one runs (closed when the answer starts)
         self.at_engine = False                            # it holds an engine place now (a fair slice lets it go)
         self.engine_t0 = None                             # when the engine took it (the real read time starts here)
@@ -3491,6 +3496,15 @@ class Service:
         while self.reads and self.reads[0][2] is not None and self.reads[0][2] < now - 2 * RATE_WINDOW_S:
             self.reads.popleft()
 
+    def _own_read_rate(self, st, now, n_own) -> float:
+        """One chat's live read rate (PLAN-qfn-per-request-read-stats): once the engine's progress lines carry
+        its own figures, its new_read over its own read_ms - the reader's wall time no longer mixes in what the
+        chat spent queued or held at a piece boundary.  Without those fields (an older engine): its counted
+        tokens over the time since the engine took it, as before."""
+        if st.read_eng_ms and st.read_eng_ms > 0 and st.read_eng_n:
+            return st.read_eng_n / (st.read_eng_ms / 1000.0)
+        return n_own / (now - st.engine_t0) if n_own and st.engine_t0 and now > st.engine_t0 else 0.0
+
     def _read_counted(self, stat) -> int:
         """The prompt tokens this request's reads have counted (closed intervals plus an open one's steps) - what
         the Monitor's figures and the tests read back."""
@@ -3516,7 +3530,7 @@ class Service:
                 self._note_read_errs = getattr(self, "_note_read_errs", set()) | {type(e).__name__}
                 print(f"[saguaro] read-rate bookkeeping failed ({type(e).__name__}: {e}); the request goes on", flush=True)
 
-    def _note_read(self, stat, n_read, tok_s=None, exact=False, prov=False):
+    def _note_read(self, stat, n_read, tok_s=None, exact=False, prov=False, read_ms=None):
         """A read step of one request: the drivers' PP lines and the batch slots' read counters call this (through
         the hook run() installs on the engine's thread-local) with the prompt tokens IT has read now - the reused
         prefix left out.  It counts into THIS request's read interval (the engine's on_read_start, or its first
@@ -3525,8 +3539,22 @@ class Service:
         steps' suggestion up or correcting it, negative included - and they END the read: its interval closes here,
         so its tokens spread over the read itself instead of piling into the window it finished in.
         prov=True: a slot admission's BRP step: its progress may count from the prompt's start, so it only gives
-        the live figure (the engine's own tok/s) and the read's wall span - it never counts tokens or a peak."""
+        the live figure (the engine's own tok/s) and the read's wall span - it never counts tokens or a peak.
+        read_ms (PLAN-qfn-per-request-read-stats): the engine's OWN milliseconds this request's read has run
+        (PP/BRP read_ms=, RDONE / BRA ms=) beside its own counted tokens - when it comes, the request's rate IS
+        new_read / read_ms: no shared reader's clock, no wall time since the engine took it."""
         now = time.time()
+        if read_ms is not None and not prov:            # (a prov step is a position, not a counted read: no pair)
+            if exact:
+                prev = stat.read_engine
+                # a leg of one request adds to it (BRA's read_ms is its own leg); a restarted read replaces it
+                stat.read_engine = (n_read, prev[1] + read_ms) if prev and n_read >= prev[0] else (n_read, read_ms)
+                stat.read_eng_n, stat.read_eng_ms = n_read, stat.read_engine[1]
+            else:
+                # the request's own pair: its tokens so far over the time its read has run - the finished legs'
+                # clock included, the held time never (read_ms is only what ran)
+                base_ms = stat.read_engine[1] if stat.read_engine and n_read >= stat.read_engine[0] else 0.0
+                stat.read_eng_n, stat.read_eng_ms = n_read, base_ms + read_ms
         with self.status_lock:
             r = stat.read_cur
             if r is not None and r[2] is not None:      # (this read's interval closed with the answer: a new one)
@@ -3564,6 +3592,7 @@ class Service:
             elif n_read < stat.read_pos:                # a new read of this request's prompt (a retry, a slice's leg)
                 self._read_close(stat, now)
                 stat.read_pos, stat.read_avg, stat.read_last, stat.read_prev_t = 0, None, None, None
+                stat.read_eng_n, stat.read_eng_ms = 0, None   # (the engine's live pair restarts with the read)
                 self._read_open(stat, now)              # (counts from nothing again; the engine's counter reset)
             d = n_read - stat.read_pos
             stat.read_pos = n_read
@@ -3641,10 +3670,10 @@ class Service:
             if state == "writing":                # (the same phase detection the single live.phase uses, per request)
                 state = "thinking" if ph == "thinking" else \
                     "tool" if ph.startswith("writing a tool call") or ph == "tool call complete" else "writing"
-            # its own read: the tokens counted for THIS chat over the time since the engine took it (the engine's
-            # progress rates are the reader's, shared by every chat reading at once)
+            # its own read: the engine's new_read / read_ms when its lines carry them (per-request read stats),
+            # else the tokens counted for THIS chat over the time since the engine took it
             n_own = self._read_counted(st) if state == "reading" else 0
-            rate = n_own / (now - st.engine_t0) if n_own and st.engine_t0 and now > st.engine_t0 else 0.0
+            rate = self._own_read_rate(st, now, n_own)
             entry = dict(v, id=st.id, label=st.api, conv=st.conv.id if st.conv else None, state=state,
                          prefill_tok_s=round(max(0.0, rate), 1) if state == "reading" and rate else None)
             used = (st.prompt_tokens or 0) + (st.generated or 0)
@@ -3742,10 +3771,10 @@ class Service:
                 if state == "writing":
                     state = "thinking" if ph == "thinking" else \
                         "tool" if ph.startswith("writing a tool call") or ph == "tool call complete" else "writing"
-                    # its own read: the tokens counted for THIS chat over the time since the engine took it (the engine's
-                # progress rates are the reader's, shared by every chat reading at once)
+                # its own read: the engine's new_read / read_ms when its lines carry them (per-request read
+                # stats), else its counted tokens over the time since the engine took it
                 n_own = self._read_counted(st) if state == "reading" else 0
-                rate = n_own / (now - st.engine_t0) if n_own and st.engine_t0 and now > st.engine_t0 else 0.0
+                rate = self._own_read_rate(st, now, n_own)
                 e["state"] = state
                 e["turn"] = dict(v, state=state, prefill_tok_s=(round(max(0.0, rate), 1)
                                      if state == "reading" and rate else None))
@@ -4861,7 +4890,8 @@ class Service:
                     #  read time and must not spread the read's tokens over itself)
                     tls = getattr(self.engine, "_tls", None)   # this request's thread reads the engine's lines: its
                     if tls is not None:                        # PP steps count into the engine-total read rate
-                        tls.on_read = lambda n, ts=None, ex=False, prov=False, st=stat: self._note_read_safe(st, n, ts, ex, prov)
+                        tls.on_read = lambda n, ts=None, ex=False, prov=False, rms=None, st=stat: \
+                            self._note_read_safe(st, n, ts, ex, prov, rms)
                         tls.on_read_start = lambda st=stat: self._read_start(st)
                         tls.read_leg_base = 0                  # (this request's read counting starts from nothing)
                     self.running.add(stat)
@@ -5198,18 +5228,27 @@ class Service:
                     started = my_started
                     loaded = str((getattr(self.engine, "info", {}) or {}).get("cvec", 0)) not in ("0", "", "None")
                     hit_rate = round(last["hits"] / last["lookups"], 3) if last.get("lookups") else None
-                    read_n = max(0, len(ids) - (last.get("reused") or 0))
-                    # the REAL read rate: the new tokens over the wall time from the engine taking the request to its
-                    # first token (restores, queueing in the engine and pauses for other chats included) - one count
-                    pf_s = round(read_n / (stat.first_token - stat.engine_t0), 1) \
-                        if read_n and stat.engine_t0 and stat.first_token and stat.first_token > stat.engine_t0 else None
-                    self._read_exact(stat, read_n)      # (status_lock held: the live window's record, the exact count)
-                    # the wall clock of its read (first read step to first token): the engine's prompt_ms leaves out
-                    # the time its read paused for other chats, so its rate can be 2-3x the real one - never shown above it
-                    wall_pf = round(read_n / (stat.first_token - stat.read_t0), 1) \
-                        if read_n and stat.read_t0 and stat.first_token and stat.first_token > stat.read_t0 else None
-                    if wall_pf is not None and (pf_s is None or wall_pf < pf_s):
-                        pf_s = wall_pf
+                    eng_read = getattr(stat, "read_engine", None)
+                    if eng_read and eng_read[1] > 0:
+                        # the engine's OWN figures for this read (PLAN-qfn-per-request-read-stats: RDONE / BRA -
+                        # new_read over read_ms, the time its read actually ran): no guessing from prompt minus
+                        # reused, no wall span that mixes queueing and holds into the read.  The live window
+                        # already closed on these counts when the read ended; nothing to top up here.
+                        read_n = eng_read[0]
+                        pf_s = round(read_n / (eng_read[1] / 1000.0), 1) if read_n else None
+                    else:
+                        read_n = max(0, len(ids) - (last.get("reused") or 0))
+                        # the REAL read rate: the new tokens over the wall time from the engine taking the request to its
+                        # first token (restores, queueing in the engine and pauses for other chats included) - one count
+                        pf_s = round(read_n / (stat.first_token - stat.engine_t0), 1) \
+                            if read_n and stat.engine_t0 and stat.first_token and stat.first_token > stat.engine_t0 else None
+                        self._read_exact(stat, read_n)      # (status_lock held: the live window's record, the exact count)
+                        # the wall clock of its read (first read step to first token): the engine's prompt_ms leaves out
+                        # the time its read paused for other chats, so its rate can be 2-3x the real one - never shown above it
+                        wall_pf = round(read_n / (stat.first_token - stat.read_t0), 1) \
+                            if read_n and stat.read_t0 and stat.first_token and stat.first_token > stat.read_t0 else None
+                        if wall_pf is not None and (pf_s is None or wall_pf < pf_s):
+                            pf_s = wall_pf
                     row = {
                         "projection": (sampling or {}).get("experimental_speed_projection") is not False
                         if loaded else None,
@@ -7676,25 +7715,47 @@ def _qfn_engine_class():
             solo = not int(getattr(self, "batch", 0) or 0)
             for t in super().generate(ids, max_new, sampling, cancel, embeddings):
                 if (self._reader == me or solo) and self.progress:
-                    self._tls.own_pp = (self.progress, self.prefill_tok_s_mean)
-                    if cb and self.progress[0] > seen:  # the PP line's steps, counted from where this read starts:
-                        if base is None:                # only from RESUME's reused prefix: without it (a restored
-                            r = int(getattr(self, "reused", 0) or 0)   # conversation) where the read starts is
-                            if not 0 < r <= self.progress[0]:          # unknown - count nothing until the exact
-                                continue_count = False                 # figures at its end (Service._read_exact)
-                            else:
-                                base, continue_count = r, True
-                        if base is not None:
-                            seen = self.progress[0]
-                            cb(max(0, seen - base))
+                    new = getattr(self, "progress_new", None)
+                    rms = getattr(self, "progress_read_ms", None)
+                    if new is not None:
+                        # PLAN-qfn-per-request-read-stats: the engine counts THIS request's read itself - PP's
+                        # new_read= from where the read started (a restored conversation's positions never look
+                        # like reads) and read_ms= the time that read has actually run.  No RESUME base needed:
+                        # this chat's row and the engine-total window both take the engine's own figures.
+                        rate = new / (rms / 1000.0) if new and rms and rms > 0 else self.prefill_tok_s_mean
+                        self._tls.own_pp = (self.progress, rate)
+                        if new > seen:
+                            seen = new
+                            if cb:
+                                cb(new, rate, False, False, rms if rms and rms > 0 else None)
+                    else:                                # (an engine before the fields: the old RESUME base)
+                        self._tls.own_pp = (self.progress, self.prefill_tok_s_mean)
+                        if cb and self.progress[0] > seen:   # the PP line's steps, counted from where this read starts:
+                            if base is None:                # only from RESUME's reused prefix: without it (a restored
+                                r = int(getattr(self, "reused", 0) or 0)   # conversation) where the read starts is
+                                if not 0 < r <= self.progress[0]:          # unknown - count nothing until the exact
+                                    continue_count = False                 # figures at its end (Service._read_exact)
+                                else:
+                                    base, continue_count = r, True
+                            if base is not None:
+                                seen = self.progress[0]
+                                cb(max(0, seen - base))
+                rd = getattr(self, "read_done", None)    # RDONE: this solo read ended with its exact figures
+                if rd is not None and (self._reader == me or solo):
+                    self.read_done = None                # (consume: never the next request's)
+                    if cb:
+                        n_done, ms_done = rd
+                        cb(n_done, n_done / (ms_done / 1000.0) if n_done and ms_done else None,
+                           True, False, ms_done if ms_done and ms_done > 0 else None)
                 yield t
 
         def _admission_wait(self, slot, cancel, live):
             """STRATA_SLOT_ADMIT: the admission reads beside the decoding slots, on its own lines: BRP <slot>
-            <done> <total> <ms> <tok/s> steps its progress, BRA <slot> 1 prompt=N reused=R read_ms=M the engine's
-            own figures.  The queue view below feeds both into the engine-total read rate - what gets counted is
-            what the engine counted (N - R new tokens over its own M ms; the BRP steps carry the engine's live
-            tok/s for the meantime) - and passes every line through untouched."""
+            <done> <total> <ms> <tok/s> [new_read=<n> read_ms=<ms>] steps its progress, BRA <slot> 1 prompt=N
+            reused=R read_ms=M the engine's own figures.  The queue view below feeds both into the engine-total
+            read rate - with the per-request fields (PLAN-qfn-per-request-read-stats) it takes them straight:
+            this chat's new_read over its own read_ms; an engine before the fields falls back to the position
+            deltas since the read's first BRP and the BRA's totals - and passes every line through untouched."""
             start = getattr(self._tls, "on_read_start", None)
             if start is not None:
                 start()                                  # (its BGEN is out: the engine's read starts now, not the slot wait)
@@ -7718,18 +7779,31 @@ def _qfn_engine_class():
                         f = line.split()
                         try:
                             if f[:2] == ["BRP", str(slot)] and len(f) >= 4 and f[2].isdigit() and f[3].isdigit():
+                                kv = dict(x.partition("=")[::2] for x in f[5:] if "=" in x)
                                 rate = float(f[5]) if len(f) >= 6 else None
                                 pos = int(f[2])
-                                if self.first is None or pos < self.first:
-                                    self.first = pos                   # (where this read starts: the reused prefix)
-                                cb(base + pos - self.first)            # (positions read since: a real count)
-                                tls.own_pp = ((pos, int(f[3])), rate)  # (this chat's row shows its own read)
+                                if kv.get("new_read") is not None:
+                                    # PLAN-qfn-per-request-read-stats: the engine counts THIS request's read on the
+                                    # slot's own line - new_read= its tokens from where the read started (never its
+                                    # reused / parked prefix), read_ms= the time that read has actually run.  No
+                                    # first-position delta, no shared reader's rate: the legs add up in base.
+                                    new = int(float(kv["new_read"]))
+                                    rms = float(kv.get("read_ms") or 0) or None
+                                    own = new / (rms / 1000.0) if new and rms and rms > 0 else rate
+                                    tls.own_pp = ((pos, int(f[3])), own)
+                                    cb(base + new, own, False, False, rms)
+                                else:                    # (an engine before the fields: the position-delta guess)
+                                    if self.first is None or pos < self.first:
+                                        self.first = pos                 # (where this read starts: the reused prefix)
+                                    cb(base + pos - self.first)          # (positions read since: a real count)
+                                    tls.own_pp = ((pos, int(f[3])), rate)  # (this chat's row shows its own read)
                             elif f[:2] == ["BRA", str(slot)] and f[2:3] == ["1"]:
                                 kv = dict(x.partition("=")[::2] for x in f[3:] if "=" in x)
                                 new = max(0, int(kv["prompt"]) - int(kv.get("reused") or 0))
                                 ms = float(kv.get("read_ms") or 0)
                                 tls.read_leg_base = base + new   # (a later leg of the same request counts from here)
-                                cb(base + new, new / (ms / 1000) if ms > 0 and new else None, True)
+                                cb(base + new, new / (ms / 1000) if ms > 0 and new else None, True, False,
+                                   ms if ms > 0 else None)     # (the engine's own read_ms rides along: its clock)
                         except (KeyError, ValueError, IndexError):
                             pass                                       # (a line this view cannot read is none of its business)
                     return line

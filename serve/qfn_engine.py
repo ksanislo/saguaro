@@ -665,6 +665,9 @@ class StrataEngine:
         self.prefill_tok_s_mean = None
         self.progress = None             # (read, total) prompt tokens while a prompt is read, from PP lines
         self.progress_ms = 0             # PP's own milliseconds since the prompt started (its third field)
+        self.progress_new = None         # PP's new_read=: the request's own tokens read (PLAN-qfn-per-request-read-stats)
+        self.progress_read_ms = None     # PP's read_ms=: the time its read has actually run (None: an older engine)
+        self.read_done = None            # RDONE's (new, read_ms): the exact figures at the end of a solo read
         self.reused = 0                  # RESUME: prompt tokens not read again (a client takes them out of the work)
         self.silent_note = None
         self.last_err = None
@@ -1135,6 +1138,32 @@ class StrataEngine:
             hist = self.stat_history = collections.deque(maxlen=120)
         hist.append(st)
 
+    def _pp_new(self, f):
+        """PLAN-qfn-per-request-read-stats: `PP <pos> <total> <ms> <tok/s> new_read=<n> read_ms=<ms> rid=<id>` -
+        this request's own counted tokens (from where its read started, never a reused / restored / parked
+        position) over the time its read has actually been running.  Both None for an engine before the fields,
+        so the shared server keeps its old RESUME-based counting."""
+        self.progress_new = self.progress_read_ms = None
+        for kv in f[5:]:
+            k, _, v = kv.partition("=")
+            try:
+                if k == "new_read":
+                    self.progress_new = int(float(v))
+                elif k == "read_ms":
+                    self.progress_read_ms = float(v)
+            except ValueError:
+                pass
+
+    def _rdone(self, line):
+        """`RDONE rid=<id> new=<n> ms=<ms>` (PLAN-qfn-per-request-read-stats): one solo read has ended - the exact
+        new tokens for this request's read and its own running time (the batch path says the same on its BRA line).
+        The request's consumer takes it from here; a line nobody consumed must not reach the next request."""
+        kv = dict(x.partition("=")[::2] for x in line.split()[1:] if "=" in x)
+        try:
+            self.read_done = (int(float(kv["new"])), float(kv["ms"]))
+        except (KeyError, ValueError):
+            pass
+
     def vram(self, reserve_mib: int | None, timeout: float = 120.0) -> dict:
         """#533: `VRAM <reserve_mib>` between requests (the caller holds the service's FIFO): the engine shrinks its
         expert cache until that much VRAM is free, or grows it back when more is free; None: back to the reserve it
@@ -1294,12 +1323,15 @@ class StrataEngine:
                     self.progress = (int(f[1]), int(f[2]))
                     self.progress_ms = float(f[3]) if len(f) >= 4 else 0.0
                     self.prefill_tok_s_mean = float(f[4]) if len(f) >= 5 else None
+                    self._pp_new(f)
                 if not stopped and cancel.is_set():
                     # #879: a Stop during the prompt read went out only after the first token (or after 10 s of
                     # silence, which a stream of PP lines never allows): the engine read the whole prompt first
                     self._send("STOP")
                     stopped = True
                 yield None
+            elif line.startswith("RDONE "):               # the read on the control lines ended (per-request stats)
+                self._rdone(line)
             elif line.startswith("DONE"):
                 self._parse_done(line)
                 self._last_done = line
@@ -1615,6 +1647,7 @@ class StrataEngine:
         if BATCH_WRAP_SPILL:
             self._next_pass.spill = None                # (a pass's spill is read right after it, never by a later one)
         self.progress, self.progress_ms, self.reused = None, 0, 0
+        self.progress_new = self.progress_read_ms = self.read_done = None   # (per-request read stats, per request)
         born = self.gen                                 # the engine process this request is sent to
         keys = self.sampling_keys(sampling or {})
         out: list[int] = []
@@ -2213,6 +2246,7 @@ class StrataEngine:
             yield from self.generate_batched(ids, max_new, sampling, cancel, embeddings)
             return
         self.progress, self.progress_ms, self.reused = None, 0, 0
+        self.progress_new = self.progress_read_ms = self.read_done = None   # (per-request read stats, per request)
         self.prefill_tok_s_mean = None
         # an image request takes the same sampling keys as text (#75: it used to decode greedily whatever was asked)
         head = f"GENI {int(max_new)}{self.sampling_keys(sampling or {})} {embeddings}" if embeddings else \
@@ -2275,6 +2309,7 @@ class StrataEngine:
                         self.progress = (int(f[1]), int(f[2]))             # prompt progress, one per chunk: also a heartbeat (the
                         self.progress_ms = float(f[3]) if len(f) >= 4 else 0.0
                         self.prefill_tok_s_mean = float(f[4]) if len(f) >= 5 else None
+                        self._pp_new(f)
                         rate, chunk = self.prefill_tok_s_mean or 0.0, int(f[1]) - read_to
                         read_to = int(f[1])
                         if silence > 0 and rate > 0 and chunk > 0:   # #481: the next chunk, as long as this one
@@ -2287,6 +2322,8 @@ class StrataEngine:
                         read_to = self.reused = int(line.split()[1])
                     except (IndexError, ValueError):
                         pass
+                elif line.startswith("RDONE "):           # the read ended: this request's exact new tokens, its own
+                    self._rdone(line)                     #  read time (PLAN-qfn-per-request-read-stats)
                 elif line.startswith("DONE"):
                     self._parse_done(line)
                     done = True
