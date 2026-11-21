@@ -1820,7 +1820,8 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
             std::fprintf(stderr, "saguaro ds4: %s\n", err.c_str());
             std::printf("ERR%s %s\n", tag.c_str(), err.c_str());
             end_note();
-            std::printf("DONE%s 0 %zu 0.0 0.0 cancel 0 0 0 0 0\n", tag.c_str(), total);
+            // (a read that failed part-way: the ms and base it really had, as the STOP's DONE)
+            std::printf("DONE%s 0 %zu %.1f 0.0 cancel 0 0 %zu 0 0\n", tag.c_str(), total, P.read_ms, from);
             std::fflush(stdout);
             m.reset();
             held.clear();

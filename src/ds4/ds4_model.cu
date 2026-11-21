@@ -23939,14 +23939,15 @@ struct Model::Impl {
         //  same tier settings tiers() reports as STAT vram_slots/ram_slots: the copy pool, the store, the read-ahead
         //  window, or (in place, the page cache holding the lane) every CPU-lane expert)
         double rb = 0;
+        int nr = 0;   // (routed layers only, as tiers(): the mtp layers are not this tier's)
         for (const Layer& l : L)
-            if (!l.mtp) rb += (double) (l.n_exp - l.n_vram) * (double) l.blob;
-        const double blob = nh > 0 ? rb / nh : 0.0;
+            if (!l.mtp) { rb += (double) (l.n_exp - l.n_vram) * (double) l.blob; nr += l.n_exp - l.n_vram; }
+        const double blob = nr > 0 ? rb / nr : 0.0;
         const int ram_cap = ram_held > 0    ? ram_held
                             : store         ? (int) store->slots_max()
                             : file_experts && blob > 0.0
-                                ? (int) std::min<double>(nh, (double) warm_bytes / blob)
-                                            : nh;
+                                ? (int) std::min<double>(nr, (double) warm_bytes / blob)
+                                            : nr;
         std::snprintf(b, sizeof b, "INFO context=%lld kv=fp4 kv_resident=%lld kv_bytes_token=%zu expert_slots=%d engine_kind=ds4 "
                                    "cpu_experts=%d ram_experts=%d cpu_threads=%d engine=ds4-0.1 experts=%d ram_slots=%d",
                       (long long) o.max_context, (long long) o.max_context, kv_tok, g.nl * g.n_exp - nh, nh, ram_held,

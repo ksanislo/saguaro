@@ -2503,6 +2503,8 @@ static int glm_pack_generate(const Options& o) {
         const strata::core::VramMark vram0 = strata::core::vram_mark(vram_devs());   // (the line at the read's end)
         t0 = std::chrono::steady_clock::now();
         gap_mark = t0;   // (SAGUARO_GLM_PREFILL_GAPS: the first gap's stage starts with the read, not the restore)
+        gap_count = gap_tok = 0;   // (every read starts its own gap figures: one without gaps must not inherit them)
+        gap_ms = 0.0;
         // the prompt one CHUNK at a time (PP reports per chunk: the server shows it and counts it as a heartbeat);
         // the state is saved before the generation prompt (snap_at), so an identical or extending prompt can reuse it
         // THE SNAPSHOT'S POSITION: before the prompt's generation prompt (its trailing <|assistant|>, then <think> or
@@ -4276,6 +4278,8 @@ static int glm_pack_generate(const Options& o) {
             g->reuse = prep_restore(g->prompt);
             if (o.serve) std::printf("RESUME %s%zu\n", tag.c_str(), g->reuse);   // (its own restored base, as prep_prompt's)
             g->t0 = std::chrono::steady_clock::now();
+            gap_count = gap_tok = 0;   // (the Reader's read takes no gaps)
+            gap_ms = 0.0;
             g->sa = snap_pos(g->prompt, req_gt);
             g->div = restore_div;
             g->sys_end = strata::core::system_prompt_end(g->prompt.data(), g->prompt.size(), 154827);   // <|user|>

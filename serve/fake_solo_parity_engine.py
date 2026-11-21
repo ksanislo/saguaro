@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """serve/fake_solo_parity_engine.py - a stand-in for one-conversation `saguaro-glm --serve` that answers with the lines
 the parity contract (REPORT-parity-output.md) has the GLM engine print: a `RESUME <reused>` line before the read, PP
-lines whose ms is the read's own time, and the full 10-field DONE.  For serve/test_parity_lines.py: the StrataEngine
+lines whose ms is the read's own time, and the full 10-field DONE.  For serve/test_parity_output.py: the StrataEngine
 reader must take them as before (the reuse base rides the PP line; RESUME is not its base).
 
     serve/fake_solo_parity_engine.py --serve
