@@ -2827,12 +2827,19 @@ struct Model::Impl {
         std::vector<char> stage_it((size_t) g.n_exp, 0);   // (lane_split's: distinct experts staged instead)
         if (lane && lane_copy > 0) {
             std::vector<int> cand;
-            for (int t = 0; t < T; ++t)
+            for (int t = 0; t < T; ++t) {
+                // PLAN-turbo-live (review finding 4): the same filter the token path uses - a pick its request's
+                // turbo_drop left out (weight 0) or its turbo_skip=ram leaves un-served is no staging candidate:
+                // it would copy a blob over PCIe for a token that goes without the expert (the window path's
+                // decision loop below leaves those out).
+                const bool tskip2 = (turbo_row(turbo_seq(t, T)) >> 4) == 2;
                 for (int i = 0; i < g.k_exp; ++i) {
                     const int x = rtop[t * g.k_exp + i];
-                    if (on_cpu(l, d, x) && pooled(l, x) && std::find(cand.begin(), cand.end(), x) == cand.end())
+                    if (rw[t * g.k_exp + i] > 0.0f && !tskip2 && on_cpu(l, d, x) && pooled(l, x) &&
+                        std::find(cand.begin(), cand.end(), x) == cand.end())
                         cand.push_back(x);
                 }
+            }
             const int s = std::min((int) cand.size(), std::min(lane_split((int) cand.size()), d.n_slots / 2));
             for (int i = 0; i < s; ++i) stage_it[(size_t) cand[(size_t) i]] = 1;
         }
