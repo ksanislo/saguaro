@@ -8,7 +8,9 @@
 // <stop|length|cancel> 0 0 <reused> <hits> <lookups>` (the decode's routed experts in VRAM / all); `STOP` ends a
 // request early, `QUIT` the engine.  A prompt that shares a start with the state (the last conversation) reads only
 // the rest.  Keys: temperature, top_p, top_k, min_p, seed, penalty_last_n / _repeat / _freq / _present,
-// think_budget + think_end (a reasoning block still open after that many tokens is closed with think_end).
+// think_budget + think_end (a reasoning block still open after that many tokens is closed with think_end), and the
+// per-request live Turbo (PLAN-turbo-live): turbo_drop=N (route top-k minus N, renormalised), turbo_skip=ssd|ram
+// (leave out what the SSD / a non-VRAM read would serve) - this request's answer tokens only, absent is exact.
 // With --vision on, `GENI <max_new> [keys] <file> <ids>` carries the prompt's pictures (the file: see read_pics; each
 // picture's image tokens take its rows); the state is shared only where the same picture sits at the same place.
 //
@@ -306,6 +308,8 @@ bool parse_gen(const std::string& line, Req& r) {
         else if (k == "lookup_trust") r.trust = std::atoi(v.c_str()) != 0;
         else if (k == "rid") r.rid = std::atoi(v.c_str());
         else if (k == "ablate") r.ablate = std::atoi(v.c_str()) != 0;
+        else if (k == "turbo_drop") r.turbo_drop = std::atoi(v.c_str());   // PLAN-turbo-live (serve/turbo_live.py)
+        else if (k == "turbo_skip") r.turbo_skip = v == "ram" ? 2 : v == "ssd" ? 1 : 0;
         // (keys this engine does not use are taken and ignored)
     }
     return !r.ids.empty();
@@ -658,6 +662,9 @@ int serve(mm3::Model& m, const std::vector<int>& eos, int chunk, bool spec_on, f
         const bool abl = m.ablate_loaded() && (r.ablate >= 0 ? r.ablate != 0 : abl_default);
         if (m.ablate_loaded() && abl != m.ablating()) from = 0;
         m.set_ablate(abl);
+        // PLAN-turbo-live: this request's live Turbo on the one conversation (0/off: exact, today's answer).  The
+        // next request sets its own; nothing routes between requests.
+        m.set_turbo(0, r.turbo_drop, r.turbo_skip);
         if (slots.on && !abl && pics.empty()) {
             // the conversation in the cache, about to be dropped past `from`: saved first; then a saved one the request
             // continues further than the cache does, read back
@@ -1085,6 +1092,7 @@ int serve_multi(mm3::Model& m, const std::vector<int>& eos, int chunk, const std
     auto release = [&](int s) {
         seqs[(size_t) s].busy = false;
         seqs[(size_t) s].used = ++clock;
+        m.set_turbo(s, 0, 0);   // PLAN-turbo-live: its request's bars end with it; the next one sets its own
     };
     // a request's end: its DONE line (the engine's counters over its decode are shared with the others meanwhile)
     auto finish = [&](Gen& g) {
@@ -1391,6 +1399,9 @@ int serve_multi(mm3::Model& m, const std::vector<int>& eos, int chunk, const std
         }
         m.bind(best);
         m.set_ablate(abl);
+        // PLAN-turbo-live: this request's lossy options go on its conversation for its whole answer (release()
+        // clears them again when it ends - the others decoding beside it keep theirs).  Absent: 0/off, exact.
+        m.set_turbo(best, g.r.turbo_drop, g.r.turbo_skip);
         std::vector<mm3::Model::Image> rows;
         if (!(pics.empty() && std::find(ids.begin(), ids.end(), m.vision() ? m.vision()->image_token : -1) ==
                                   ids.end()) &&

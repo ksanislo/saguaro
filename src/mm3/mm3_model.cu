@@ -167,6 +167,8 @@ struct Dev {
     uint8_t* pin = nullptr;              // a pinned blob for the copies
     unsigned long long* plan_h = nullptr;   // pinned: the token's plan (8 pointers, then 8 weights)
     unsigned long long* plan_d = nullptr;
+    unsigned char* turbo_h = nullptr;   // PLAN-turbo-live: pinned, then on the device: a byte per conversation
+    unsigned char* turbo_d = nullptr;   //   (turbo_drop | turbo_skip << 4, 0: exact) - the router reads the device one
     float* xh_h = nullptr;               // pinned: the token's normed input (the CPU lane's x), then its part + flag
     // pinned staging of a forward's inputs and the head's logits: the copies are the stream's own DMA commands, in its
     // order (a copy from or to pageable memory is not: on Windows + AMD, whose queued work starts only at a host wait,
@@ -846,6 +848,19 @@ struct Model::Impl {
     // ... per sequence whether its forwards project it out (set_ablate; empty: no direction)
     std::vector<uint8_t> abl_on;
     bool abl_row(int s) const { return s >= 0 && s < (int) abl_on.size() && abl_on[(size_t) s] != 0; }
+    // PLAN-turbo-live: a byte per conversation, its request's live Turbo (turbo_drop | turbo_skip << 4, 0: exact):
+    // the router drops the row's picks off the device byte (set_turbo copies it down, stream-ordered), and the
+    // host tier decisions read it here (skip: leave out what the SSD / a non-VRAM read would serve).
+    std::vector<unsigned char> turbo_on;
+    unsigned char turbo_row(int s) const { return s >= 0 && s < (int) turbo_on.size() ? turbo_on[(size_t) s] : 0; }
+    int turbo_seq(int t, int T) const {   // a window row's conversation (forward_rows' rseq, else the bound one)
+        return !rseq.empty() && (int) rseq.size() == T ? rseq[(size_t) t] : bound;
+    }
+    unsigned long long turbo_rows(int T) const {   // four bits a row: its conversation's index (the router's map)
+        unsigned long long r = 0;
+        for (int t = 0; t < T && t < 16; ++t) r |= (unsigned long long) (turbo_seq(t, T) & 15) << (4 * t);
+        return r;
+    }
     // whether any row of this forward (T rows: forward_rows' rseq, else the bound sequence's) projects it out - the
     // prompt path's split products (gemm_acc, the MoE's write into out) only then, else its fused adds as without
     bool abl_any(const Dev& d, int T) const {
@@ -1620,6 +1635,7 @@ struct Model::Impl {
         const double t0 = now();
         o = opt;
         o.seqs = std::max(1, std::min(o.seqs, 8));
+        turbo_on.assign((size_t) o.seqs, 0);   // PLAN-turbo-live: every conversation starts exact (set_turbo moves it)
         if (o.seqs > 1) {   // (--parallel: one conversation's machinery left out, each with a NOTE)
             const std::string par = "--parallel " + std::to_string(o.seqs) + ": ";
             if (o.dspark) {
@@ -1942,6 +1958,10 @@ struct Model::Impl {
             CK(cudaMallocHost(&d.top_h, (size_t) T * g.k_exp * sizeof(int)));
             if (L[(size_t) 0].dev == (int) di) CK(cudaMallocHost(&d.emb_h, (size_t) T * g.dim * sizeof(float)));
             if (!A(d.plan_d, 16)) return false;
+            CK(cudaMallocHost(&d.turbo_h, 16));   // (PLAN-turbo-live: all zero at load: every conversation exact)
+            std::memset(d.turbo_h, 0, 16);
+            if (!A(d.turbo_d, 16)) return false;
+            CK(cudaMemcpyAsync(d.turbo_d, d.turbo_h, 16, cudaMemcpyHostToDevice, d.s));
             CK(cudaMallocHost(&d.xh_h, (size_t) (2 * g.dim + 4) * sizeof(float)));
             if (!A(d.cpu_d, (size_t) g.dim + 4)) return false;
             CK(cudaMallocHost(&d.win_rb, win_rb_bytes()));
@@ -2706,7 +2726,7 @@ struct Model::Impl {
         {   // the router's branch (the side stream) beside the shared expert
             const cudaStream_t xs = fork(d);
             k::rows_dot(l.gate, g.n_exp, g.dim, d.xn, T, d.logit, xs);
-            k::route(d.logit, l.bias, T, g.n_exp, g.k_exp, d.top, d.w, xs);
+            k::route(d.logit, l.bias, T, g.n_exp, g.k_exp, d.top, d.w, xs, d.turbo_d, turbo_rows(T));
         }
         const x3::MvJob sgu[2] = {job(l.sg, d.xn, g.dim, d.g, g.ff_shared), job(l.su, d.xn, g.dim, d.u, g.ff_shared)};
         if (!x3::mv(sgu, 2, d.s)) {
@@ -2824,8 +2844,12 @@ struct Model::Impl {
                 if (i >= g.k_exp) continue;
                 const int x = rtop[t * g.k_exp + i];
                 const float wt = rw[t * g.k_exp + i] * g.scale;
-                pw[e] = wt;
+                if (wt == 0.0f) continue;   // (PLAN-turbo-live: turbo_drop left it out - no weight, no plan, no count)
                 ++prof[li * g.n_exp + x];
+                const int tsk = turbo_row(turbo_seq(t, T)) >> 4;
+                if ((tsk == 2 || (tsk == 1 && !pooled(l, x))) && on_cpu(l, d, x))
+                    continue;   // (PLAN-turbo-live: turbo_skip - routed and counted, but its tier leaves it un-served)
+                pw[e] = wt;
                 if (lane && on_cpu(l, d, x) && !stage_it[(size_t) x]) {
                     if (cpu_seen.empty()) cpu_seen.assign((size_t) g.n_layers * g.n_exp, 0);
                     if (cpu_of[(size_t) x] < 0) ++cpu_seen[li * g.n_exp + x];
@@ -3125,7 +3149,8 @@ struct Model::Impl {
         {   // the router's branch (the side stream) beside the shared expert
             const cudaStream_t xs = fork(d, !l.hf);
             k::rows_dot(l.gate, g.n_exp, g.dim, d.xn, 1, d.logit, xs);
-            k::route(d.logit, l.bias, 1, g.n_exp, g.k_exp, d.top, d.w, xs);
+            k::route(d.logit, l.bias, 1, g.n_exp, g.k_exp, d.top, d.w, xs, d.turbo_d,
+                     (unsigned long long) (unsigned) (bound & 15));   // PLAN-turbo-live: row 0 is the bound one's
         }
         // the shared expert into sh (while the router's answer comes back)
         const x3::MvJob sgu[2] = {job(l.sg, d.xn, d.g), job(l.su, d.xn, d.u)};
@@ -3178,7 +3203,13 @@ struct Model::Impl {
         std::memcpy(w, d.plan_h + 4, (size_t) g.k_exp * 4);
         const size_t li = (size_t) (&l - L.data());
         if (!routes_ok(top, g.k_exp, li, err, &l, &d, 1)) return false;
-        for (int i = 0; i < g.k_exp; ++i) ++prof[li * g.n_exp + top[i]];
+        // PLAN-turbo-live: this conversation's request's skip level (its byte's top nibble; turbo_skip): "ram" (2)
+        // goes without every pick not in VRAM, "ssd" (1) without every pick the files (not the RAM pool) would
+        // serve; the router already zeroed the picks its turbo_drop left out (w 0: no weight, no plan, no count).
+        // 0: none of these branches opens - the plan and its counts are today's, bit for bit.
+        const int tskip = turbo_row(bound) >> 4;
+        for (int i = 0; i < g.k_exp; ++i)
+            if (w[i] > 0.0f) ++prof[li * g.n_exp + top[i]];   // (a dropped pick is not a routing: not counted)
         st.profiled += g.k_exp;
         std::vector<char> busy((size_t) d.n_slots, 0);
         unsigned long long* ph = d.plan_h;
@@ -3191,7 +3222,7 @@ struct Model::Impl {
         if (lane && lane_copy > 0) {
             int cand = 0;
             for (int i = 0; i < g.k_exp; ++i)
-                cand += on_cpu(l, d, top[i]) && pooled(l, top[i]);
+                cand += w[i] > 0.0f && tskip != 2 && on_cpu(l, d, top[i]) && pooled(l, top[i]);
             static const bool dh_on = [] {
                 const char* v = ::mm3::env("MM3_DECODE_HELP");
                 return v != nullptr && std::atoi(v) != 0;
@@ -3208,7 +3239,17 @@ struct Model::Impl {
         }
         int help_e[8], help_n = 0;
         for (int i = 0; i < g.k_exp; ++i) {
+            if (w[i] == 0.0f) {   // (PLAN-turbo-live: its pick dropped by the router: no plan entry, no weight)
+                ph[i] = 0;
+                pw[i] = 0.0f;
+                continue;
+            }
             pw[i] = w[i] * g.scale;
+            if ((tskip == 2 || (tskip == 1 && !pooled(l, top[i]))) && on_cpu(l, d, top[i])) {
+                ph[i] = 0;   // (PLAN-turbo-live: turbo_skip - no read, no copy, no CPU lane, no promotion)
+                pw[i] = 0.0f;
+                continue;
+            }
             if (hd && on_cpu(l, d, top[i]) && to_help > 0 && pooled(l, top[i])) {
                 --to_help;   // (the helper's: off d's plan)
                 help_e[help_n++] = i;
@@ -4545,6 +4586,33 @@ void Model::set_ablate(bool on) {
     if (ablate_loaded() && p->bound >= 0 && p->bound < (int) p->abl_on.size()) p->abl_on[(size_t) p->bound] = on ? 1 : 0;
 }
 bool Model::ablating() const { return ablate_loaded() && p->abl_row(p->bound); }
+
+void Model::set_turbo(int seq, int drop, int skip) {
+    const int d = drop > 0 ? std::min(drop, 9) : 0;
+    const int s = skip > 0 ? std::min(skip, 2) : 0;
+    if (tpe) {   // PLAN-turbo-live: the tensor-parallel path routes on its own host loop and does not apply the lossy
+                 // options yet - a request that asks for them runs exact (said once, like QFN's batch slots)
+        static std::atomic<bool> told{false};
+        if ((d || s) && !told.exchange(true))
+            std::fprintf(stderr, "maya-mm3: --tp: turbo drop=%d skip=%s asked for - this build does not apply it on "
+                                 "the tensor-parallel path; the request runs exact (said once)\n",
+                         d, s == 2 ? "ram" : s == 1 ? "ssd" : "off");
+        return;
+    }
+    if (seq < 0 || seq >= (int) p->turbo_on.size()) return;
+    const unsigned char byte = (unsigned char) (d | (s << 4));
+    if (p->turbo_on[(size_t) seq] == byte) return;   // (no change, no device writes: absent/off stays today's)
+    p->turbo_on[(size_t) seq] = byte;   // (the host's tier decisions read this now; the router reads the copy below)
+    int dev0 = 0;
+    cudaGetDevice(&dev0);   // (leave the caller's current device as it was: the serve loop is device-sensitive)
+    for (Dev& dv : p->D) {  // (whichever card routes this conversation's tokens reads the same byte)
+        if (dv.turbo_d == nullptr) continue;
+        dv.turbo_h[seq] = byte;
+        cudaSetDevice(dv.id);
+        cudaMemcpyAsync(dv.turbo_d + seq, dv.turbo_h + seq, 1, cudaMemcpyHostToDevice, dv.s);
+    }
+    cudaSetDevice(dev0);
+}
 
 bool Model::forward_rows(const int* ids, const int* seq, const int* pos, int R, float* logits_out, std::string& err) {
     if (R <= 0) return true;

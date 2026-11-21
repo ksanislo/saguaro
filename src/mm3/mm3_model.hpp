@@ -150,6 +150,13 @@ public:
     bool ablate_loaded() const;
     void set_ablate(bool on);
     bool ablating() const;
+    /// PLAN-turbo-live (serve/turbo_live.py): conversation `seq`'s request runs live Turbo on its answer tokens.
+    /// drop: the router runs top-k minus N (drops the N lightest picks, renormalises the kept ones, the top-1
+    /// always runs).  skip: 1 "ssd" (a pick neither in VRAM nor in a staging slot and not in the RAM pool is left
+    /// out - its files read is skipped), 2 "ram" (a pick not in VRAM / a staging slot is left out).  0/0: exact -
+    /// byte-identical routes, like the request never carried it.  Set at a request's admission, cleared at its end;
+    /// the prompt path and the tensor-parallel path (--tp) run exact (a --tp Turbo ask is refused on stderr, once).
+    void set_turbo(int seq, int drop, int skip);
     /// One token of each of R conversations together (R <= 16, distinct sequences): ids[r] at position pos[r] of
     /// sequence seq[r], whose cache holds its positions before it; logits_out [R][vocab].  Each row is the same bits as
     /// that token's forward alone: the dense matrices on the token kernels' several columns, the routed experts on the
