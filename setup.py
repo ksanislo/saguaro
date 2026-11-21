@@ -503,7 +503,7 @@ def download(url, dst: Path, what=None, headers=None):
     total = 0
     for attempt in range(5):
         try:
-            req = urllib.request.Request(url, method="HEAD", headers={"User-Agent": "maya-setup"})
+            req = urllib.request.Request(url, method="HEAD", headers={"User-Agent": "saguaro-setup"})
             for k, v in (headers or {}).items():
                 req.add_unredirected_header(k, v)
             total = int(urllib.request.urlopen(req, timeout=60).headers.get("Content-Length", 0))
@@ -521,7 +521,7 @@ def download(url, dst: Path, what=None, headers=None):
         if total and have >= total:                    # killed between the last byte and the rename: no 416 loop
             break
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "maya-setup", "Range": f"bytes={have}-"})
+            req = urllib.request.Request(url, headers={"User-Agent": "saguaro-setup", "Range": f"bytes={have}-"})
             for k, v in (headers or {}).items():
                 req.add_unredirected_header(k, v)
             with urllib.request.urlopen(req, timeout=60) as r, open(part, "ab" if have else "wb") as f:

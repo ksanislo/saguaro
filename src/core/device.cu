@@ -52,7 +52,7 @@ std::string arch_problem(const cudaDeviceProp& p, int ordinal) {
     const std::string arch = base_arch(p.gcnArchName);
     const std::string card = "GPU " + std::to_string(ordinal) + " (" + p.name + ", " + arch + ")";
     if (!compiled_for(arch)) {
-        return card + " is not an architecture this Maya engine was compiled for (" + STRATA_HIP_ARCHS +
+        return card + " is not an architecture this Saguaro engine was compiled for (" + STRATA_HIP_ARCHS +
                "); compile it for this card (./saguaro.sh --backend hip, or -DCMAKE_HIP_ARCHITECTURES=" + arch +
                ", docs/AMD_SAGUARO.md) or choose another GPU with HIP_VISIBLE_DEVICES";
     }

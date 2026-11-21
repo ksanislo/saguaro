@@ -46,8 +46,13 @@ td.log
 /run-maya-*.bat
 /maya-report.txt
 /maya-bench.txt
+/saguaro-report.txt
+/saguaro-bench.txt
+/saguaro-bench.log
 /build-strata.bat
 /build-maya*.bat
+/build-saguaro*.bat
+/build-vision-glm.bat
 
 # image encoder (setup.py --vision): build output and the generated build script
 build-vision*/

@@ -128,12 +128,12 @@ if(STRATA_ENABLE_CUDA)
     endforeach()
     if(NOT _kept)
       message(FATAL_ERROR
-        "CMAKE_CUDA_ARCHITECTURES=native, but none of this PC's GPUs (${CMAKE_CUDA_ARCHITECTURES_NATIVE}) is one Maya "
+        "CMAKE_CUDA_ARCHITECTURES=native, but none of this PC's GPUs (${CMAKE_CUDA_ARCHITECTURES_NATIVE}) is one Saguaro "
         "builds for (compute capability 6.0 or newer): name the architecture, e.g. -DCMAKE_CUDA_ARCHITECTURES=70.")
     endif()
     if(_left)
       list(JOIN _left ", " _left_s)
-      message(STATUS "Maya: CMAKE_CUDA_ARCHITECTURES=native left out ${_left_s} (a display card beside the GPUs)")
+      message(STATUS "Saguaro: CMAKE_CUDA_ARCHITECTURES=native left out ${_left_s} (a display card beside the GPUs)")
     endif()
     set(CMAKE_CUDA_ARCHITECTURES "${_kept}")
   endif()
@@ -147,11 +147,11 @@ if(STRATA_ENABLE_CUDA)
     endif()
     if(_base LESS 60)
       message(FATAL_ERROR
-        "Maya needs an NVIDIA GPU of compute capability 6.0 or newer (Pascal experimental, Volta / V100 and the "
+        "Saguaro needs an NVIDIA GPU of compute capability 6.0 or newer (Pascal experimental, Volta / V100 and the "
         "RTX 20 / 30 / 40 / 50 series), but CMAKE_CUDA_ARCHITECTURES is '${CMAKE_CUDA_ARCHITECTURES}'.")
     endif()
   endforeach()
-  message(STATUS "Maya: CUDA enabled, arch ${CMAKE_CUDA_ARCHITECTURES}")
+  message(STATUS "Saguaro: CUDA enabled, arch ${CMAKE_CUDA_ARCHITECTURES}")
   # Pascal (sm_6x - a "native" build on a Tesla P40, as saguaro.py's arch_setting() asks for below sm_75): GP102 / GP104
   # cache global loads in L2 only unless the code is compiled to cache them in L1 as well, and the decode's GEMVs - many
   # small loads of weights, scales and the q8_1 activations every warp of a block reads - starve there (Maya-L's Q6_K
@@ -166,7 +166,7 @@ if(STRATA_ENABLE_CUDA)
     string(REGEX REPLACE "-.*$" "" _base "${_a}")
     if(_base MATCHES "^6[0-9]$")
       string(APPEND CMAKE_CUDA_FLAGS " -Xptxas -dlcm=ca")
-      message(STATUS "Maya: Pascal (sm_${_base}): global loads cached in L1 (-Xptxas -dlcm=ca)")
+      message(STATUS "Saguaro: Pascal (sm_${_base}): global loads cached in L1 (-Xptxas -dlcm=ca)")
       break()
     endif()
   endforeach()
@@ -779,7 +779,7 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
       endif()
     endforeach()
     if(_mm3_filter AND NOT _mm3_archs)
-      message(STATUS "Maya: maya-mm3 not built - it needs sm_70 or newer, arch ${_strata_archs}")
+      message(STATUS "Saguaro: maya-mm3 not built - it needs sm_70 or newer, arch ${_strata_archs}")
     endif()
   endif()
   if((STRATA_ENABLE_CUDA AND (_mm3_archs OR NOT _mm3_filter)) OR STRATA_ENABLE_HIP)
@@ -885,7 +885,7 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
           set_target_properties(${_t} PROPERTIES CUDA_ARCHITECTURES "${_mm3_archs}")
         endif()
       endforeach()
-      message(STATUS "Maya: maya-mm3 for ${_mm3_archs}")
+      message(STATUS "Saguaro: maya-mm3 for ${_mm3_archs}")
     endif()
   endif()
 
@@ -1326,7 +1326,7 @@ int main() { return 0; }
                                 PROPERTIES COMPILE_OPTIONS "-mavx512f;-mavx512bw;-mavx512vl;-mavx512dq;-mavx512vnni;-mavx512vbmi;-mf16c;-mfma")
   else()
     if(NOT MAYA_CPU_VNNI_EMULATE)
-      message(STATUS "Maya: the compiler or its assembler has no AVX512-VNNI - the CPU expert kernel uses AVX512-BW's "
+      message(STATUS "Saguaro: the compiler or its assembler has no AVX512-VNNI - the CPU expert kernel uses AVX512-BW's "
                      "dot products (the same sums)")
     endif()
     set_source_files_properties(src/kernels/cpu/expert.cpp

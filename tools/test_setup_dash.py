@@ -140,7 +140,7 @@ class Boxes(unittest.TestCase):
 @unittest.skipIf(T is None, "Textual is not installed (./saguaro.sh --setup installs it)")
 class Screen(unittest.IsolatedAsyncioTestCase):
     async def test_maya_running_shows_the_dashboard_and_tab_its_log(self):
-        server = "import time\nprint('ready: http://127.0.0.1:9/v1')\nprint('[strata] a log line')\ntime.sleep(30)"
+        server = "import time\nprint('ready: http://127.0.0.1:9/v1')\nprint('[saguaro] a log line')\ntime.sleep(30)"
         info = {"model": "glm-5.3-flash", "quant": "Maya-L", "context": "32768", "dashboard": "http://127.0.0.1:9/",
                 "api": "http://127.0.0.1:9/v1", "log": None, "key": ""}
         with tempfile.TemporaryDirectory() as d:
@@ -165,7 +165,7 @@ class Screen(unittest.IsolatedAsyncioTestCase):
                     await pilot.pause(0.2)
                     self.assertEqual(app.view, T.LOG)
                     self.assertTrue(app.query_one("#page").display)
-                    self.assertIn("[strata] a log line", "\n".join(x.text for x in app.query_one("#output").lines))
+                    self.assertIn("[saguaro] a log line", "\n".join(x.text for x in app.query_one("#output").lines))
                     await pilot.press("escape")             # back to the dashboard
                     await pilot.pause(0.1)
                     self.assertIsNone(app.view)

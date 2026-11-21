@@ -251,7 +251,7 @@ bool GlmMetal::Impl::init_backends(std::string& err) {
             ggml_free(c);
             if (!mm) {
                 err = std::string("this Mac's GPU (") + ggml_backend_dev_description(gpu_dev) +
-                      ") cannot run maya-metal's matrix products: Maya on a Mac needs Apple silicon (M1 or newer)";
+                      ") cannot run maya-metal's matrix products: Saguaro on a Mac needs Apple silicon (M1 or newer)";
                 return false;
             }
         }

@@ -3811,7 +3811,7 @@ int main(int argc, char** argv) {
     if (!strata::kernels::cpu::cpu_avx2_ok() && isa_floor[0] == '\0') {
 #endif
         std::fprintf(stderr, "saguaro generate: this CPU (%s) does not support AVX2 with FMA and F16C, which this engine's "
-                             "CPU expert kernels need; Strata runs on Intel Haswell (2013), AMD Zen (2017) or newer. "
+                             "CPU expert kernels need; Saguaro runs on Intel Haswell (2013), AMD Zen (2017) or newer. "
                              "Older CPUs are EXPERIMENTAL and slow: setup compiles an engine for them on this PC "
                              "(SAGUARO_ISA_FLOOR, see \"Older CPUs\" in docs/INSTALL.md)\n",
                      strata::kernels::cpu::cpu_name().c_str());
@@ -6585,7 +6585,7 @@ int main(int argc, char** argv) {
         if (arena_src.load_gib_per_second() > 0.0 && arena_src.load_gib_per_second() < 0.2) {
             std::fprintf(stderr,
                          "saguaro generate: hint: ~24x below what this hardware streams from a normal "
-                         "launch. If Strata is started by Task Scheduler or a service, register the task "
+                         "launch. If Saguaro is started by Task Scheduler or a service, register the task "
                          "with Priority 4 (Normal) and 'Run with highest privileges' - the scheduler's "
                          "defaults (Below normal + a least-privilege token) throttle the load. See "
                          "docs/DETAILS.md ('Running it at startup').\n");

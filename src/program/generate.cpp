@@ -1571,7 +1571,7 @@ static int glm_pack_generate(const Options& o) {
         if (const auto cc = model.commit_capped(); cc.first > 0) {
             std::printf("NOTE experts: %.0f GB stay off the GPU - Windows' page file is too small to hold them there; "
                         "a page file of %zu GB keeps them on the GPU (System > About > Advanced system settings > "
-                        "Performance > Advanced > Virtual memory), then restart Maya\n", (double) cc.first / 1e9, cc.second);
+                        "Performance > Advanced > Virtual memory), then restart Saguaro\n", (double) cc.first / 1e9, cc.second);
             std::printf("INFO gpu_commit_capped_gb=%.0f pagefile_hint_gb=%zu\n", std::ceil((double) cc.first / 1e9),
                         cc.second);
         }
@@ -6861,7 +6861,7 @@ int main(int argc, char** argv) {
         if (arena_src.load_gib_per_second() > 0.0 && arena_src.load_gib_per_second() < 0.2) {
             std::fprintf(stderr,
                          "saguaro generate: hint: ~24x below what this hardware streams from a normal "
-                         "launch. If Maya is started by Task Scheduler or a service, register the task "
+                         "launch. If Saguaro is started by Task Scheduler or a service, register the task "
                          "with Priority 4 (Normal) and 'Run with highest privileges' - the scheduler's "
                          "defaults (Below normal + a least-privilege token) throttle the load.\n");
         }

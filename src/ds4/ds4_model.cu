@@ -24035,7 +24035,7 @@ struct Model::Impl {
             std::snprintf(b, sizeof b,
                           "NOTE experts: %.0f GB stay off the GPU - Windows' page file is too small to hold them there; "
                           "a page file of %.0f GB keeps them on the GPU (System > About > Advanced system settings > "
-                          "Performance > Advanced > Virtual memory), then restart Maya", commit_kept / 1e9, pagefile_hint);
+                          "Performance > Advanced > Virtual memory), then restart Saguaro", commit_kept / 1e9, pagefile_hint);
             v.push_back(b);
             std::snprintf(b, sizeof b, "INFO gpu_commit_capped_gb=%.0f pagefile_hint_gb=%.0f", std::ceil(commit_kept / 1e9),
                           pagefile_hint);

@@ -2,7 +2,7 @@
 
 - Every line the server prints, and every line of the engine's log, starts with the date and time ("log_time" in the
   config, default on; SAGUARO_LOG_TIME=0 turns it off).  A line printed for a request also names it, its conversation
-  and its slot: `2026-10-22 15:41:07 [req 3f9a conv 7c21b0 slot 4] [strata] done: ...`.
+  and its slot: `2026-10-22 15:41:07 [req 3f9a conv 7c21b0 slot 4] [saguaro] done: ...`.
 - The conversation key is a hash of the prompt up to the first assistant turn (the system prompt and the first user
   message), the same for every turn of one conversation.  No prompt text is logged.
 - The client: its address from X-Forwarded-For when the connection comes from a proxy listed in "trusted_proxies"

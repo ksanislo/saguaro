@@ -4514,7 +4514,7 @@ int main(int argc, char** argv) {
             return 2;
         }
     }
-    if (o.verbose) std::fprintf(stderr, "saguaro ds4: build %s (Maya %s)\n", MAYA_BUILD_ID, MAYA_RELEASE);
+    if (o.verbose) std::fprintf(stderr, "saguaro ds4: build %s (Saguaro %s)\n", MAYA_BUILD_ID, MAYA_RELEASE);
     if (describe) {   // the pack's description alone, before anything that would touch a GPU
         if (o.pack.empty()) {
             usage();

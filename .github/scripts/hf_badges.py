@@ -16,7 +16,7 @@ BADGES = [
 
 def downloads(repo: str) -> int:
     url = f"https://huggingface.co/api/models/{repo}?expand=downloadsAllTime"
-    with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "maya-badges"}), timeout=60) as r:
+    with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "saguaro-badges"}), timeout=60) as r:
         return int(json.load(r)["downloadsAllTime"])
 
 
