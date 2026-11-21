@@ -18,8 +18,8 @@ from pathlib import Path
 FAMILIES = ("glm", "deepseek", "minimax", "qwen")
 # ("qwen": CYBER-FROST-3.8-PS, the Qwen3.8-Flash-Next fine-tune - qwen4exp, on the `maya` engine's own Qwen path)
 MODEL = {"glm": "GLM-5.3-Flash", "deepseek": "DeepSeek-V4.1-Flash-1017", "minimax": "MiniMax-M3.1-Flash",
-         "qwen": "CYBER-FROST-3.8-PS"}
-SHOWN = {"glm": "GLM-5.3", "deepseek": "DeepSeek V4.1", "minimax": "MiniMax M3.1",
+         "qwen": "CYBER-FROST-3.8-PS", "hy4": "Hy4-Flash"}
+SHOWN = {"glm": "GLM-5.3", "deepseek": "DeepSeek V4.1", "minimax": "MiniMax M3.1", "hy4": "Hy4-Flash",
          "qwen": "Qwen-3.8-Flash-Next (CYBER-FROST)"}   # the model's name on screen (the chat header: serve/web/lib.js's
                                                          # modelName(id, true), "Qwen-3.8-Flash-Next"); its ids stay
 SEP = " · "
@@ -37,6 +37,8 @@ MODEL_DEFAULTS = {
     "glm": ({"temperature": 1.0, "top_p": 0.95}, "max"),
     "deepseek": ({"temperature": 1.0, "top_p": 1.0}, "high"),
     "minimax": ({"temperature": 1.0, "top_p": 0.95}, "auto"),
+    # Hy4-Flash: Tencent's card / generation_config - temperature 0.9, top_p 1.0; its template's High
+    "hy4": ({"temperature": 0.9, "top_p": 1.0}, "high"),
     # CYBER-FROST-3.8-PS: Blackfrost-AI/CYBER-FROST-3.8-BF16 generation_config.json and card - temperature 1.0, top_p
     # 0.95, top_k 20; thinking on, its template's default effort xhigh
     "qwen": ({"temperature": 1.0, "top_p": 0.95, "top_k": 20}, "xhigh"),
@@ -194,6 +196,8 @@ def family_of(cfg: dict) -> str:
     the programs got their Saguaro names count too), else "glm"."""
     inst = cfg.get("installer") or {}
     exe = Path(str(cfg.get("exe", ""))).name
+    if inst.get("family") == "hy4" or exe.startswith(("maya-hy4", "saguaro-hy4")):   # (Hy4-flash: its own --pack)
+        return "hy4"
     if inst.get("family") == "minimax" or exe.startswith(("maya-mm3", "saguaro-mm3")):
         return "minimax"
     args = cfg.get("args") or []
