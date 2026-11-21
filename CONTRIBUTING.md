@@ -6,7 +6,7 @@ Reports and pull requests are welcome. These are what helps most.
 
 Open an issue with:
 
-- **`./saguaro.sh --bench`** (Saguaro stopped) **then `./saguaro.sh --report`**, and attach `maya-report.txt`. Windows:
+- **`./saguaro.sh --bench`** (Saguaro stopped) **then `./saguaro.sh --report`**, and attach `saguaro-report.txt`. Windows:
   `START-SAGUARO.bat --bench` / `--report`. The report includes the bench results.
 - **A build from source without the installer** is fine too. Send the same things by hand:
   - the exact engine command and environment (`SAGUARO_GLM_*` settings);
@@ -21,7 +21,7 @@ Name your Saguaro version (`VERSION`, or the commit). Say what you measured and 
 
 ## A bug
 
-Run `./saguaro.sh --report` right after the failure and attach `maya-report.txt`. If the engine stopped, add the end
+Run `./saguaro.sh --report` right after the failure and attach `saguaro-report.txt`. If the engine stopped, add the end
 of its log (the `.log` next to your `maya-*.json`).
 
 ## A pull request

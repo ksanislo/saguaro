@@ -71,7 +71,7 @@ All of them run on NVIDIA from the V100 / RTX 20 on, and on AMD and Windows (exp
 [What you need](#what-you-need)). DeepSeek's sizes include its Engram tables. The setup also offers unsloth's GGUF and
 LibertAIDAI's EXL3 quants of DeepSeek, orcarouter's abliterated DeepSeek, Mia-AiLab's EXL3 quant of MiniMax,
 turboderp's EXL3 quants of GLM, and Saguaro's fourth family, **Qwen-3.8-Flash-Next** (CYBER-FROST), as its Q5_K_M GGUF
-on the `maya-qfn` engine (from Strata), with pictures
+on the `saguaro-qfn` engine (from Strata), with pictures
 ([its settings](docs/SETTINGS.md#qwen-38-flash-next-cyber-frost)). **Each model's files, drafters, pictures and options:
 [docs/MODELS.md](docs/MODELS.md).**
 
@@ -259,7 +259,7 @@ The setup shows every download before it starts it, builds everything once (20-4
 ## Something went wrong?
 
 Run **`./saguaro.sh --report`** (Windows: `START-SAGUARO.bat --report`) right after a slow answer or an error, and attach the
-`maya-report.txt` it writes to a [GitHub issue](https://github.com/mw00/project-maya/issues). It holds your hardware,
+`saguaro-report.txt` it writes to a [GitHub issue](https://github.com/mw00/project-maya/issues). It holds your hardware,
 your setup and the engine's speed lines; nothing is sent anywhere by itself. The engine's own log is
 `maya-<model>.log` in the Saguaro folder.
 
@@ -292,7 +292,7 @@ Speed reports, bug reports and pull requests are welcome: [CONTRIBUTING.md](CONT
   created and led by Peasant Smith ([@mw00](https://github.com/mw00), [X](https://x.com/PeasantSmith)), with
   [@needmorevram](https://github.com/needmorevram) ([X](https://x.com/needmorevram)) as co-maintainer (DFlash2
   drafting, EXL3 support, KV streaming, conversation checkpoints, the layer-split search, the expert profile and the
-  CPU expert kernels, and for `maya-ds4` the 3.5-bit EXL3 option, tensor parallel over 4 / 8 GPUs and the threaded
+  CPU expert kernels, and for `saguaro-ds4` the 3.5-bit EXL3 option, tensor parallel over 4 / 8 GPUs and the threaded
   expert-cache swaps #276) - thanks also to upstream's contributors
   ([mw00/project-maya](https://github.com/mw00/project-maya/graphs/contributors)).
 - **Engine lineage: [Strata](https://github.com/Niko1221/Strata)** (MIT License, Copyright (c) 2026 Niko1221 and the

@@ -4436,7 +4436,7 @@ def rocm_report(rocm: Path) -> str:
 
 
 def report(version: str, backend: str | None = None, cfg_path: Path | None = None) -> int:
-    """--report: maya-report.txt in the Saguaro folder - this PC, the installed setup and the engine log's speed lines,
+    """--report: saguaro-report.txt in the Saguaro folder - this PC, the installed setup and the engine log's speed lines,
     for a bug or speed report.  Nothing is sent anywhere; the home folder is written as ~ and API keys are left out."""
     home = str(Path.home())
     lines = []
@@ -4517,10 +4517,10 @@ def report(version: str, backend: str | None = None, cfg_path: Path | None = Non
             add(f"Engine log {log.name}: the last 25 lines", "\n".join(text[-25:]))
         else:
             add(f"Engine log {log.name}", "not written yet (start Saguaro once and ask it something)")
-    bench_txt = ROOT / "maya-bench.txt"
+    bench_txt = ROOT / "saguaro-bench.txt"
     if bench_txt.exists():
-        add("Benchmark (maya-bench.txt, from --bench)", bench_txt.read_text(encoding="utf-8", errors="replace"))
-    out = ROOT / "maya-report.txt"
+        add("Benchmark (saguaro-bench.txt, from --bench)", bench_txt.read_text(encoding="utf-8", errors="replace"))
+    out = ROOT / "saguaro-report.txt"
     out.write_text("\n".join(lines) + "\n", encoding="utf-8")
     say()
     ok(f"written: {out}")
@@ -4593,7 +4593,7 @@ def bench_decode_mean(results) -> tuple[float, int]:
 def bench(cfg_path: Path, version: str) -> int:
     """--bench: a standard speed test of the installed model on this PC - decode (writing an answer) on three
     questions and prefill (reading a prompt) at 2k and 8k tokens of this folder's docs - through the engine alone, the
-    way the dashboard starts it.  Writes maya-bench.txt (--report includes it).  A few minutes."""
+    way the dashboard starts it.  Writes saguaro-bench.txt (--report includes it).  A few minutes."""
     import urllib.request
     cfg = read_json(cfg_path)
     select_build_backend(cfg.get("backend", "cuda"))
@@ -4621,7 +4621,7 @@ def bench(cfg_path: Path, version: str) -> int:
                        sorted((ROOT / "bench" / "results").glob("*.md")) if p.exists())
     doc = tok.encode(text)
     lens = [n for n in (2048, 8192) if n + 64 <= ctx and n <= len(doc)]
-    log_path = ROOT / "maya-bench.log"
+    log_path = ROOT / "saguaro-bench.log"
     step(1, f"benchmark: {cfg_path.name} (loading the model first - a minute or a few)")
     t0 = time.time()
     with open(log_path, "w", encoding="utf-8") as log:
@@ -4693,7 +4693,7 @@ def bench(cfg_path: Path, version: str) -> int:
               for r in results if r[0] == "decode"]
     lines += [f"prefill (reading the prompt): {r[2]:.0f} tokens/s, {r[1]}" for r in results if r[0] == "prefill"]
     lines += ["", "engine lines:"] + [x.replace(str(Path.home()), "~") for x in stats[-40:]]
-    out = ROOT / "maya-bench.txt"
+    out = ROOT / "saguaro-bench.txt"
     out.write_text("\n".join(lines) + "\n", encoding="utf-8")
     say()
     for x in lines[:4 + len(results)]:
@@ -6925,12 +6925,12 @@ def main() -> int:
     ap.add_argument("--llama-dir", help="a llama.cpp checkout at the pinned commit, instead of downloading its source")
     ap.add_argument("--rebuild", action="store_true", help="compile the engine again")
     ap.add_argument("--repack", action="store_true", help="build the pack again")
-    ap.add_argument("--report", action="store_true", help="write maya-report.txt - this PC, the setup and the engine's "
+    ap.add_argument("--report", action="store_true", help="write saguaro-report.txt - this PC, the setup and the engine's "
                                                           "speed lines - to attach when you report a problem or a "
                                                           "speed (nothing is sent anywhere)")
     ap.add_argument("--bench", action="store_true", help="a standard speed test of the installed model (a few "
                                                          "minutes, with Saguaro stopped): decode on three questions and "
-                                                         "prefill at 2k / 8k tokens; writes maya-bench.txt")
+                                                         "prefill at 2k / 8k tokens; writes saguaro-bench.txt")
     ap.add_argument("--calibrate", action="store_true",
                     help="tune the engine's CPU lane for this PC (the PCIe share and the CPU threads, ~10-15 minutes; "
                          f"{DS4}: the tensor parallel groups and the CPU threads, an engine start each, ~25-40 "

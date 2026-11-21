@@ -113,7 +113,7 @@ class Gate(unittest.TestCase):
     def test_exe_by_platform(self):
         self.assertEqual(maya.exe_for_target("maya-mm3"), maya.MM3_EXE)
         maya.select_build_backend("cuda")
-        self.assertEqual(maya.MM3_EXE.name, "maya-mm3.exe" if maya.WIN else "maya-mm3")
+        self.assertEqual(maya.MM3_EXE.name, "saguaro-mm3.exe" if maya.WIN else "saguaro-mm3")
 
 
 class Contexts(unittest.TestCase):

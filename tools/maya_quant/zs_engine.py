@@ -1,5 +1,5 @@
 """tools/maya_quant/zs_engine.py - the zero-shot requests (zs_tasks.py) scored by the engine: one LOGP line each to
-`strata --serve` (the choices of a question share their context: the engine restores it instead of reading it again),
+`saguaro-glm --serve` (the choices of a question share their context: the engine restores it instead of reading it again),
 one JSON line out per request with its summed log-probability.  Resumable: requests already in --out are skipped.
 
     python zs_engine.py --reqs zs.jsonl --out zs_maya.jsonl -- <strata args: --glm-pack PACK --max-context 4096 ...>

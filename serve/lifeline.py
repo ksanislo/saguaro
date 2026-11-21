@@ -293,7 +293,7 @@ def install_stop_handlers(request_stop, finished: threading.Event | None = None)
         if sig is None:
             continue
         try:
-            # `nohup strata serve ... &` asks to outlive its terminal: a hangup that is ignored at start stays ignored
+            # `nohup saguaro-glm --serve ... &` asks to outlive its terminal: a hangup that is ignored at start stays ignored
             if name == "SIGHUP" and signal.getsignal(sig) == signal.SIG_IGN:
                 continue
             signal.signal(sig, in_main(reason))

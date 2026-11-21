@@ -13,7 +13,7 @@ It first asks which model to set up:
   (211 GB) or [at 3.5 bits](https://huggingface.co/LibertAIDAI/DeepSeek-V4.1-Flash-1017-EXL3-3.5bpw) (258 GB, about
   280 GB of VRAM and RAM; `--ds4-quant exl3-3.5`, its own folder; a second quant hard-links the Engram tables from the
   first instead of downloading them) and its two Engram tables from [DeepSeek's repo](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017)
-  (203 GB), on its own engine (`build/maya-ds4`): Linux, NVIDIA V100 or newer (pictures: RTX 30 / A100 or newer); AMD experimental. It is fast with about 230 GB
+  (203 GB), on its own engine (`build/saguaro-ds4`): Linux, NVIDIA V100 or newer (pictures: RTX 30 / A100 or newer); AMD experimental. It is fast with about 230 GB
   of VRAM and RAM together; with less, the setup warns and the engine reads the experts that do not fit from the
   model's files on the SSD (`--mmap-experts auto`), much slower - one RTX 3090 with 64 GB of RAM: prompts about 50
   tokens/s, answers 4-5 tokens/s (faster with `--dspark none`). The same steps with these differences: the
@@ -43,7 +43,7 @@ It first asks which model to set up:
   99 tokens/s in windows, 1010 in chunks). The GGUFs have no DSpark drafter and no vision tower.
 - **MiniMax-M3.1-Flash** (experimental; `--model MiniMax-M3.1-Flash`) - [Mia-AiLab's EXL3 quant at 3.5 bits](https://huggingface.co/Mia-AiLab/MiniMax-M3.1-Flash-EXL3-EAQ-v1-3.5-bpw)
   (197 GB with MiniMax's DSpark drafter; every file pinned and checked, `tools/mm3/download.json`) on its own engine
-  (`build/maya-mm3`): NVIDIA from V100 on, Linux and Windows; AMD experimental (as GLM's EXL3 quants there: the
+  (`build/saguaro-mm3`): NVIDIA from V100 on, Linux and Windows; AMD experimental (as GLM's EXL3 quants there: the
   kernels pass their tests on AMD, the whole model has not run on one yet) - on AMD, Saguaro's GGUF quants
   (`--model minimax-maya-xs` / `minimax-maya-s`: [SETTINGS.md](SETTINGS.md#minimax-m31-flash)) are the tested way.
   About 250 GB of VRAM
@@ -104,7 +104,7 @@ at the next boot), or exempt your user sessions for good with a drop-in, then lo
 
 ```bash
 sudo mkdir -p /etc/systemd/system/user@.service.d
-printf '[Service]\nManagedOOMMemoryPressure=auto\n' | sudo tee /etc/systemd/system/user@.service.d/90-maya-oomd.conf
+printf '[Service]\nManagedOOMMemoryPressure=auto\n' | sudo tee /etc/systemd/system/user@.service.d/90-saguaro-oomd.conf
 sudo systemctl daemon-reload
 ```
 
@@ -142,8 +142,8 @@ Wants=network-online.target
 
 [Service]
 User=you
-WorkingDirectory=/path/to/maya
-ExecStart=/path/to/maya/saguaro.sh --config /path/to/maya/maya-<model>.json
+WorkingDirectory=/path/to/saguaro
+ExecStart=/path/to/saguaro/saguaro.sh --config /path/to/saguaro/maya-<model>.json
 Restart=on-failure
 RestartSec=30
 TimeoutStartSec=3600
@@ -164,7 +164,7 @@ WantedBy=multi-user.target
   --speed-calibration --no-start`, and for MiniMax `--calibrate --no-start` too). They load the model a few times and
   keep the answer in the config, so the service starts straight from it afterwards. A terminal start of the same config
   still measures what is missing, as before.
-- **Logs.** The server's output (the same lines a terminal shows) goes to the journal: `journalctl -u maya -f`. The
+- **Logs.** The server's output (the same lines a terminal shows) goes to the journal: `journalctl -u saguaro -f`. The
   engine writes its own log to the file named by `"log"` in the config, `maya-<model>.log` beside it by default.
 - The model needs the whole machine: stop the service before a calibration, a setup or `--check`, and do not start two
   units on the same GPUs.

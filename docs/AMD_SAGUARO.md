@@ -38,7 +38,7 @@ Configs are named `maya-<quant>-hip.json` and
 select the AMD device through `HIP_VISIBLE_DEVICES`.
 
 `--bench` and `--report` work on HIP: `./saguaro.sh --backend hip --bench` uses
-`build-hip/maya` and the config's GPU order and environment; run it with Saguaro
+`build-hip/saguaro-glm` and the config's GPU order and environment; run it with Saguaro
 stopped. `./saguaro.sh --backend hip --report` includes AMD GPU details from
 `rocm-smi` or `amd-smi` when available (KFD topology otherwise), the ROCm path
 and version, and the engine's speed lines. Add `--config /path/to/maya-hip.json`
@@ -55,7 +55,7 @@ amount.
 ## CPU image encoder on Linux
 
 HIP setup builds a GPU image encoder (above); instead, the server can use a CPU-only
-`maya-vision` helper alongside the HIP text engine. This is an explicit manual
+`vision-glm` helper alongside the HIP text engine. This is an explicit manual
 setup. Stop Saguaro before building or changing the config.
 
 After HIP setup has fetched its pinned `third_party/llama.cpp` checkout, run
@@ -89,14 +89,14 @@ printf '%s\n' \
   | sha256sum -c -
 ```
 
-Add this `vision` member to the HIP config, replacing `/absolute/path/to/maya`
+Add this `vision` member to the HIP config, replacing `/absolute/path/to/saguaro`
 with your project path. If your model-data directory differs, use its paths:
 
 ```json
 "vision": {
-  "exe": "/absolute/path/to/maya/build-vision-cpu/bin/maya-vision",
-  "mmproj": "/absolute/path/to/maya/data/vision/mmproj-GLM-5.3-Flash-F16.gguf",
-  "model": "/absolute/path/to/maya/data/vision/GLM-5.3-Flash-vocab.gguf",
+  "exe": "/absolute/path/to/saguaro/build-vision-cpu/bin/vision-glm",
+  "mmproj": "/absolute/path/to/saguaro/data/vision/mmproj-GLM-5.3-Flash-F16.gguf",
+  "model": "/absolute/path/to/saguaro/data/vision/GLM-5.3-Flash-vocab.gguf",
   "gpu": false
 }
 ```
@@ -247,7 +247,7 @@ with Gorgon Halo); `--check` prints that command instead. GPU numbers are hipInf
 hipInfo, Windows' AMD display adapters in the registry's order.
 
 The build copies the ROCm SDK's HIP runtime (`amdhip64_7.dll`, `amd_comgr*.dll`, `rocm_kpack.dll`) next to
-`build-hip\maya.exe`: Windows would otherwise load the driver's own from System32 before the SDK's.
+`build-hip\saguaro-glm.exe`: Windows would otherwise load the driver's own from System32 before the SDK's.
 
 **Memory on a Windows APU.** Windows gives the APU's GPU a fixed carve-out and does not count it as RAM: the 192 GB PC
 below, with 160 GB of Variable Graphics Memory, shows 32 GB of RAM, and HIP reports 171.9 GB (the carve-out and three

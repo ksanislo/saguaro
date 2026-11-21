@@ -129,7 +129,7 @@ paths instead.
 | `CMakeLists.txt` | `STRATA_CPU_X86`; the x86-only sources, flags, tests and benchmarks gated on it; `GGML_NATIVE` off on ARM with `GGML_CPU_ARM_ARCH` | the x86 kernels are compiled with `-mavx512f...`; on aarch64 ggml-cpu needs its own arch string |
 | `setup.py` | `ARM`, `arm_cpu_arch()` (from `/proc/cpuinfo`'s features), `cpu_info()`, and `unified_memory_pci_ids()` (a GPU with no memory BAR of its own) | the installer must recognise the machine, pick ggml's `-march` (`armv8.6-a+dotprod+i8mm+fp16` on the GB10) and report "120 GB shared with the system" instead of "120 GB of VRAM" |
 | `saguaro.py` | the ARM branch in `check_pc`, the GPU label, and `-DGGML_CPU_ARM_ARCH` passed to the engine and vision builds | the setup's checks and messages |
-| `tools/vision/CMakeLists.txt` | the same ggml arch handling | the image encoder builds for aarch64 too (verified: `build-vision/bin/maya-vision`) |
+| `tools/vision/CMakeLists.txt` | the same ggml arch handling | the image encoder builds for aarch64 too (verified: `build-vision/bin/vision-glm`) |
 | `src/kernels/cpu/expert_multi_test.cpp`, `src/platform/memory_test.cpp`, `tests/exl3_test.cu` | skip where the kernel or the lock limit is missing | a test that cannot run must say so instead of failing |
 | `serve/server.py` | `STRATA_HTTP_MAX_CONNECTIONS` (64) and `STRATA_HTTP_READ_TIMEOUT_S` (30 s) | a stuck client held a handler for ever; a stalled body is now a 408 and an over-limit request a 503 with `Retry-After: 1` |
 | `serve/test_server.py` | tests for both limits | |

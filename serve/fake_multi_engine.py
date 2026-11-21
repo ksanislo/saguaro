@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""serve/fake_multi_engine.py - a stand-in for `strata --serve` with several conversations (READY ... multi=<n>), for
+"""serve/fake_multi_engine.py - a stand-in for `saguaro-glm --serve` with several conversations (READY ... multi=<n>), for
 serve/test_multi.py: GEN ... rid=<id> <ids> answers with the prompt's ids (each + 1000) one at a time, the requests
 interleaved token by token as the pipelined decode interleaves them; STOP <id> ends one; QUIT ends.
 FAKE_MULTI_INTERLEAVE=<n> (SAGUARO_GLM_PREFILL_INTERLEAVE's line pattern): a prompt is read n ids a piece, one PP line

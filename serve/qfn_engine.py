@@ -71,8 +71,8 @@ def rttime_limit_note() -> str:
         return ""
     return (f"This session has a real-time CPU limit (RLIMIT_RTTIME hard limit {hard}; the desktop's audio system sets "
             "it to 0 when rtkit is not installed). Linux can then end a program with signal 9 for no visible reason. "
-            "Install rtkit, or start Strata outside the desktop session's limits, for example: "
-            "systemd-run --user --collect -p LimitRTTIME=infinity -- strata serve ...")
+            "Install rtkit, or start the engine outside the desktop session's limits, for example: "
+            "systemd-run --user --collect -p LimitRTTIME=infinity -- saguaro-qfn --serve ...")
 
 def end_leftover_engines(exe: str) -> None:
     """Before an engine starts: end the ones a lost server left running (strata_control/procs.py). Only a process
@@ -616,7 +616,7 @@ def session_event_text(f: dict, state: dict | None) -> str | None:
     return None
 
 class StrataEngine:
-    """The resident engine: `strata --serve` reads `GEN <max_new> <ids>` lines and streams `T <id>` lines, then
+    """The resident engine: `saguaro-qfn --serve` reads `GEN <max_new> <ids>` lines and streams `T <id>` lines, then
     `DONE ...`.  Requests are serialized by the service's FIFO, so one pipe is enough.
 
     Per-request sampling rides the same line as engine-side keys between max_new and the ids

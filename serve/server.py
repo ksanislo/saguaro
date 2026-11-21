@@ -19,7 +19,7 @@ Requests whose prompt plus max tokens exceed the engine's context are REJECTED w
 An unset (or 0, or -1) max tokens means "unlimited": whatever the prompt leaves of the context.
 
 The engine boundary is `Engine.generate(prompt_ids, max_new, sampling, cancel) -> iterator of token ids`.
-`StrataEngine` keeps one `strata --serve` process resident (weights, expert arena and VRAM tier load once) and
+`StrataEngine` keeps one `saguaro-glm --serve` process resident (weights, expert arena and VRAM tier load once) and
 talks to it over stdin/stdout; `MockEngine` is a scripted stand-in that makes every API path testable without a GPU.
 """
 from __future__ import annotations
@@ -171,7 +171,7 @@ REPORT_LINES = re.compile(r"glm fast:|glm prefill: (?:CUDA|HIP)|glm split|glm st
 IM_END = "<|im_end|>"
 IMAGE_PAD = "<|image_pad|>"
 VISION_START = "<|vision_start|>"
-CTX_SLACK = 8               # `strata --serve` rejects prompt + max_new + 8 > context: keep the same margin here
+CTX_SLACK = 8               # `saguaro-glm --serve` rejects prompt + max_new + 8 > context: keep the same margin here
 TEXT_FILE_MIN, TEXT_FILE_MAX = 512 * 1024, 16 * 1024 * 1024
 
 
@@ -960,7 +960,7 @@ def narrate_start(log_path: str, offset: int, args: list, done: threading.Event,
 
 
 class StrataEngine:
-    """The resident engine: `strata --serve` reads `GEN <max_new> <ids>` lines and streams `T <id>` lines, then
+    """The resident engine: `saguaro-glm --serve` reads `GEN <max_new> <ids>` lines and streams `T <id>` lines, then
     `DONE ...`.  Requests are serialized by the service's FIFO, so one pipe is enough.
 
     Per-request sampling rides the same line as engine-side keys between max_new and the ids

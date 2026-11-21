@@ -1,7 +1,7 @@
 # The models
 
 Saguaro runs three quant families, each on an engine built for it; its fourth model family is Qwen-3.8-Flash-Next
-(CYBER-FROST) on the `maya-qfn` engine (`engines/qfn`, from Strata) - [its settings](SETTINGS.md#qwen-38-flash-next-cyber-frost).
+(CYBER-FROST) on the `saguaro-qfn` engine (`engines/qfn`, from Strata) - [its settings](SETTINGS.md#qwen-38-flash-next-cyber-frost).
 This page has each one's files, what they need and what is special about it. Back to the [README](../README.md).
 
 - [How the quants are named](#how-the-quants-are-named)
@@ -20,7 +20,7 @@ yourself, give its setup id: `./setup.sh --model glm-maya-s24`. The names used b
 ## GLM-5.3-Flash
 
 **[GLM-5.3-Flash](https://huggingface.co/zai-org/GLM-5.3-Flash)** (zai-org, MIT license; 321 B parameters, about 18 B
-active per token, a context of up to 1 M tokens), on Saguaro's first engine (`maya`).
+active per token, a context of up to 1 M tokens), on Saguaro's first engine (`saguaro-glm`).
 
 Saguaro's own quants of GLM-5.3-Flash, made from Z.ai's FP8 release with statistics from the FP8 model. Each keeps
 the model's MTP block, which drafts tokens ahead.
@@ -64,7 +64,7 @@ On AMD, GLM-5.3-Flash reads pictures too (experimental): setup builds its image 
 ## DeepSeek-V4.1-Flash-1017
 
 The setup also offers **[DeepSeek-V4.1-Flash-1017](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017)**
-(DeepSeek, MIT license; 748 B parameters) on an engine of its own (`maya-ds4`): `./setup.sh --setup` and pick it, or
+(DeepSeek, MIT license; 748 B parameters) on an engine of its own (`saguaro-ds4`): `./setup.sh --setup` and pick it, or
 `./setup.sh --model DeepSeek-V4.1-Flash-1017`.
 
 The server uses the pinned official prompt encoder, with numeric reasoning budgets and ID-matched parallel tool
@@ -134,7 +134,7 @@ All of these are optional; the details and every setting are in [SETTINGS.md](SE
 
 The setup also offers **[MiniMax-M3.1-Flash](https://huggingface.co/MiniMaxAI/MiniMax-M3.1-Flash)** (MiniMax; 428 B
 parameters, 23 B active per token, up to 1 M tokens; the [MiniMax Community License](../LICENSE.minimax-m31): free for
-non-commercial use, commercial use has conditions) on an engine of its own (`maya-mm3`, contributed by
+non-commercial use, commercial use has conditions) on an engine of its own (`saguaro-mm3`, contributed by
 [@needmorevram](https://github.com/needmorevram), #477): `./setup.sh --model MiniMax-M3.1-Flash`.
 
 | Files | Size | Runs on |

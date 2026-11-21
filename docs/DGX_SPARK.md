@@ -124,7 +124,7 @@ figure counts the model's file-backed page cache as used (on the test machine it
 pack cached), so the pool would come out far too small - the start fails with
 
 ```
-maya generate: glm fast: CUDA0 has no room for the expert pool: 5 slots a layer, at least 8 needed (about 604 MiB
+saguaro generate: glm fast: CUDA0 has no room for the expert pool: 5 slots a layer, at least 8 needed (about 604 MiB
 more). To make room: a smaller --max-context, --kv int8, or close other programs that use the GPU
 ```
 

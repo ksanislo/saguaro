@@ -2,8 +2,8 @@
 
 Saguaro accepts `POST /v1/responses`, with JSON or SSE output, using the same model,
 authentication, CORS policy, context limit, and generation engine as Chat Completions.
-This includes GLM models served by `maya` and DeepSeek-V4.1 models served by
-`maya-ds4`, with their configured chat templates, tool syntax and vision paths.
+This includes GLM models served by `saguaro-glm` and DeepSeek-V4.1 models served by
+`saguaro-ds4`, with their configured chat templates, tool syntax and vision paths.
 
 ```sh
 curl http://127.0.0.1:8080/v1/responses \

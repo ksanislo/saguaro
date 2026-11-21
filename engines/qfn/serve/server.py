@@ -21,7 +21,7 @@ brings back the strict 400 of llama.cpp.
 An unset (or 0, or -1) max tokens means "unlimited": whatever the prompt leaves of the context.
 
 The engine boundary is `Engine.generate(prompt_ids, max_new, sampling, cancel) -> iterator of token ids`.
-`StrataEngine` keeps one `strata --serve` process resident (weights, expert arena and VRAM tier load once) and
+`StrataEngine` keeps one `saguaro-qfn --serve` process resident (weights, expert arena and VRAM tier load once) and
 talks to it over stdin/stdout; `MockEngine` is a scripted stand-in that makes every API path testable without a GPU.
 """
 from __future__ import annotations
@@ -125,8 +125,8 @@ def rttime_limit_note() -> str:
         return ""
     return (f"This session has a real-time CPU limit (RLIMIT_RTTIME hard limit {hard}; the desktop's audio system sets "
             "it to 0 when rtkit is not installed). Linux can then end a program with signal 9 for no visible reason. "
-            "Install rtkit, or start Strata outside the desktop session's limits, for example: "
-            "systemd-run --user --collect -p LimitRTTIME=infinity -- strata serve ...")
+            "Install rtkit, or start the engine outside the desktop session's limits, for example: "
+            "systemd-run --user --collect -p LimitRTTIME=infinity -- saguaro-qfn --serve ...")
 
 
 def end_leftover_engines(exe: str) -> None:
@@ -282,7 +282,7 @@ KEEPALIVE_S = 10.0          # a held-back tool argument leaves the stream quiet:
 # Anthropic clients add /v1/messages to their base URL themselves. A base URL that already ends in /v1 (copied from an OpenAI-style
 # setup) makes them post /v1/v1/messages; these two paths mean the same as the real ones. Nothing else is aliased.
 V1_V1_ALIASES = {"/v1/v1/messages": "/v1/messages", "/v1/v1/messages/count_tokens": "/v1/messages/count_tokens"}
-CTX_SLACK = 8               # `strata --serve` rejects prompt + max_new + 8 > context: keep the same margin here
+CTX_SLACK = 8               # `saguaro-qfn --serve` rejects prompt + max_new + 8 > context: keep the same margin here
 # The live tok/s is a rate over a window, not a mean since the first token: a mean reads ~1/elapsed at the first
 # token (the Monitor showed five-digit numbers) and then undershoots for the first second of every answer.
 RATE_WINDOW_S = 2.0
@@ -1057,7 +1057,7 @@ def context_text(ctx: dict | None) -> str:
 
 
 class StrataEngine:
-    """The resident engine: `strata --serve` reads `GEN <max_new> <ids>` lines and streams `T <id>` lines, then
+    """The resident engine: `saguaro-qfn --serve` reads `GEN <max_new> <ids>` lines and streams `T <id>` lines, then
     `DONE ...`.  Requests are serialized by the service's FIFO, so one pipe is enough.
 
     Per-request sampling rides the same line as engine-side keys between max_new and the ids
