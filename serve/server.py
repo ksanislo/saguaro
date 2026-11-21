@@ -3744,9 +3744,9 @@ class Service:
                 if state == "writing":
                     state = "thinking" if ph == "thinking" else \
                         "tool" if ph.startswith("writing a tool call") or ph == "tool call complete" else "writing"
-                    # its own read: the engine's new_read / read_ms when its lines carry them
-                    # (per-request read stats), else its counted tokens over the time since the engine took it
-                    n_own = self._read_counted(st) if state == "reading" else 0
+                # its own read: the engine's new_read / read_ms when its lines carry them (per-request read
+                # stats), else its counted tokens over the time since the engine took it
+                n_own = self._read_counted(st) if state == "reading" else 0
                 rate = self._own_read_rate(st, now, n_own)
                 e["state"] = state
                 e["turn"] = dict(v, state=state, prefill_tok_s=(round(max(0.0, rate), 1)

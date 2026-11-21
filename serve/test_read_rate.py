@@ -734,6 +734,32 @@ class PerRequestEngineStats(unittest.TestCase):
             total = svc._prefill_tok_s()                                          # the live total: sum of the chats
             self.assertAlmostEqual(total, (438 + 10000) / 1.0)
 
+    def test_convs_list_computes_the_reading_rows_own_rate(self):
+        # the review finding (11-21): _convs_list must compute every live row's own read rate - with the
+        # n_own assignment stuck inside the "writing" branch, a reading row raised UnboundLocalError (GET
+        # /metrics died while a chat read - exactly when the figure matters) or took the previous row's
+        # stale count; every row now reads its own, like _chats_list does
+        svc = make_svc()
+        t = [1000.0]
+        with unittest.mock.patch("serve.server.time.time", lambda: t[0]):
+            r = reader(RequestStat())              # reading, engine fields: 1000 tokens in 2000 ms = 500
+            r.started, r.prompt_tokens = t[0] - 2.0, 5000
+            w = reader(RequestStat())              # writing: its row is reached first in the loop
+            w.started, w.first_token, w.prompt_tokens = t[0] - 9.0, t[0] - 4.0, 700
+            svc.running.update({r, w})
+            svc.status.update(busy=True)
+            with svc.status_lock:
+                r.conv = svc._conv_open(list(range(5000)), "openai", "read me", r)
+                w.conv = svc._conv_open(list(range(700)), "openai", "write me", w)   # (LRU: w's row first)
+            svc._read_start(r)                             # (each takes the status_lock itself)
+            svc._note_read(r, 1000, 500.0, False, False, 2000.0)
+            rows = {e["id"]: e for e in svc.metrics()["live"]["conversations"]}
+            er, ew = rows[r.conv.id], rows[w.conv.id]
+            self.assertEqual(er["state"], "reading")
+            self.assertEqual(er["turn"]["prefill_tok_s"], 500.0)   # ITS new_read / read_ms, not a stale row
+            self.assertEqual(ew["state"], "writing")
+            self.assertIsNone(ew["turn"]["prefill_tok_s"])         # (its answer is written: no read rate)
+
     def test_a_held_read_counts_only_its_running_time(self):
         # a read paused between its legs (BYIELD / a shorter admission first): read_ms is the time the read
         # actually ran; the time it spent held stays out.  The legs add up in the count and in the clock.
