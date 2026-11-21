@@ -1740,6 +1740,10 @@ struct Model::Impl {
         return el.get();
     }
     int sq_bound = 0;
+    // PLAN-turbo-live: each conversation's live Turbo byte (turbo_drop | turbo_skip << 4, 0: exact): Model::set_turbo
+    // sets it on the request's admission and clears it at its end.  The window's rows carry theirs to the router
+    // (drop, renormalised there) and the mailbox stamps it for serve_lane (skip: the tier's rule at the bar 1.0).
+    std::atomic<unsigned char> sq_turbo[kWin] = {};
     std::vector<int> sq_base;
     std::vector<int> mrows;      // the last multi step's rows' conversations (sample_multi)
     std::vector<uint32_t> prof;       // [nl][n_exp] routed-expert hits
@@ -16615,14 +16619,23 @@ struct Model::Impl {
                 const bool aon = dsk_rule && disk_skip_auto && sk_auto.on.load(std::memory_order_relaxed);
                 const bool dsk = dsk_rule && (!disk_skip_auto || aon);
                 const bool rsk = ram_skip_w > 0.0f && !l.mtp && li >= disk_skip_from && li < g.nl;
+                // PLAN-turbo-live: the request's own skip rides these rules at the bar 1.0 for its tokens (the
+                // mailbox's byte, turbo_skip): "ssd" = every pick the CPU lane would read from the SSD (RAM still
+                // serves), "ram" = every pick VRAM does not hold.  The drafts' layer stays as it was; a token whose
+                // byte is 0 runs exactly today's rule, and the auto-switch's counts do not see the request's skips.
+                const bool t_ok = !l.mtp && li < g.nl;
                 int heavy = 0, cold = 0, heavy_cpu = 0;
                 const bool xpl = xp_dist > 0 && xp_layer_ok(l);
                 const uint8_t* xfl = xpl && !ahead_for.empty() && ahead_for[(size_t) li] == next
                                          ? ahead_fl.data() + (size_t) li * 1024 : nullptr;
                 if (xpl && li == xp_first) xp_rows += T;
                 for (int t = 0; t < T; ++t) {
+                    // PLAN-turbo-live: this token's request's skip (the router stamped the byte): the tier's rule
+                    // at the bar 1.0 (every pick it carries is under it); 0 / the drafts: today's rules, byte for byte.
+                    const int tsk = t < kWin ? (r.turbo[t] >> 4) : 0;
+                    const bool t_ssd = t_ok && tsk == 1, t_ram = t_ok && tsk == 2;
                     float wsum = 0.0f;   // (DISK_SKIP_W: the token's route weights)
-                    if (dsk || rsk)
+                    if (dsk || rsk || t_ssd || t_ram)
                         for (int i = 0; i < l.k_exp; ++i)
                             if (r.ids[t][i] >= 0 && r.ids[t][i] < l.n_exp) wsum += r.w[t][i];
                     for (int i = 0; i < l.k_exp; ++i) {
@@ -16658,7 +16671,8 @@ struct Model::Impl {
                                     continue;
                                 }
                             }
-                            if ((light && !in_ram(l, e)) || (rsk && r.w[t][i] < ram_skip_w * wsum)) {
+                            if ((light && !in_ram(l, e)) || (rsk && r.w[t][i] < ram_skip_w * wsum) ||
+                                ((t_ram || (t_ssd && !in_ram(l, e))) && r.w[t][i] < wsum)) {
                                 ++st.skipped;
                                 continue;
                             }
@@ -23192,6 +23206,14 @@ struct Model::Impl {
             const bool rf_t = T == 1 || (route_fuse_win && T <= kWin);
             const Layer* nx1 = route_fuse && rf_t && !l.mtp && lead && ahead_mode == 1 ? ahead_layer(L0, 1) : nullptr;
             const int m1 = nx1 != nullptr ? std::max(1, std::min(kAhead1, nx1->k_exp + ahead_extra)) : 0;
+            // PLAN-turbo-live: the window's rows carry their conversations' Turbo bytes (set at each request's
+            // admission): the router drops that row's picks; the MTP draft layer routes as it was (its block only
+            // has to be a good guess).  All zero: the env's rules, today's launches and plans exactly.
+            RouteTurbo tr;
+            for (int t = 0; t < kWin; ++t) tr.b[t] = 0;
+            if (!l.mtp)
+                for (int t = 0; t < T && t < kWin; ++t)
+                    tr.b[t] = sq_turbo[(size_t) (wp.nrow ? wp.rseq[t] : sq_bound)].load(std::memory_order_relaxed);
             RoutePair rp;
             if (nx1 != nullptr) {
                 rp.logits = d.glog;
@@ -23216,6 +23238,7 @@ struct Model::Impl {
                 rp.m = m1;
                 rp.T = T;
                 rp.pf = xp_dist > 0 ? 1 : 0;
+                rp.tr = tr;
                 // (DS4_PREFETCH=2: the layer after's guesses too, written before route_pair publishes them)
                 const Layer* nx2 = xp_dist >= 2 ? ahead_layer(L0, 2) : nullptr;
                 if (nx2 != nullptr && route_fusable(l, nx1, m1, D)) {
@@ -23250,7 +23273,7 @@ struct Model::Impl {
                 route_publish(d.glog, l.gate_bias, l.n_exp, l.k_exp, T, g.route_scale, l.vram_tab, d.x, D, d.ridx, d.rw,
                               d.plan_ptr, lead ? reqs + slot : nullptr, sq, s, l.gate_bias_vl, l.mtp ? 0u : wp.vl,
                               na[0], na[1], lead && self_answer ? resps + slot : nullptr, d.cpu_any,
-                              lane_done, xp_dist > 0 ? 1 : 0);
+                              lane_done, xp_dist > 0 ? 1 : 0, &tr);
             }
             {
                 x3::MvJob js[2] = {job(l.s1, d.x, d.sg, T, D, FF), job(l.s3, d.x, d.su, T, D, FF)};
@@ -24176,6 +24199,12 @@ int Model::fed() const { return p_->fed_n; }
 bool Model::cancelled() const { return p_->halted; }
 bool Model::broken() { return p_->broken(); }
 void Model::begin_request() { p_->begin_request(); }
+void Model::set_turbo(int seq, int drop, int skip) {
+    if (seq < 0 || seq >= (int) (sizeof p_->sq_turbo / sizeof p_->sq_turbo[0])) return;
+    p_->sq_turbo[(size_t) seq].store(
+        (unsigned char) ((drop > 0 ? std::min(drop, 9) : 0) | ((skip > 0 ? std::min(skip, 2) : 0) << 4)),
+        std::memory_order_relaxed);
+}
 int Model::sample(float t, float tp, int tk, float mp, uint64_t seed, uint64_t counter) {
     return p_->sample(t, tp, tk, mp, seed, counter);
 }
