@@ -1840,7 +1840,8 @@ class Vision:
     resident), for a second or two of start-up per request with new pictures."""
 
     def __init__(self, cfg: dict, log=None, env: dict | None = None, start: bool = True):
-        args = [cfg["exe"], "--mmproj", cfg["mmproj"], "--model", cfg["model"]]
+        # (no "model": no text model - Inkling 2's encoder reads its pictures from the mmproj alone)
+        args = [cfg["exe"], "--mmproj", cfg["mmproj"]] + (["--model", cfg["model"]] if cfg.get("model") else [])
         if cfg.get("gpu"):
             args.append("--gpu")
         if cfg.get("threads"):
@@ -1853,6 +1854,11 @@ class Vision:
         self.dir = Path(tempfile.mkdtemp(prefix="saguaro-vision-"))
         self.proc = None
         self.lend = self.reclaim = None   # on demand: callables (the engine's VLEND / VRECLAIM), wired by main()
+        # on demand without lending (Inkling 2): a callable, True when the GPU's free memory holds the encoder now -
+        # it then starts there, else on the CPU (no GPU visible, `cpu_threads`); it ends after the request's pictures
+        self.room = None
+        self.cpu_threads = 0
+        self.on_gpu = None                # (where the last on-demand start ran: True GPU, False CPU)
         self.owed = False                 # the engine's memory is not back yet (a reclaim that kept failing)
         self.lock = threading.RLock()
         self.cache: dict[str, tuple[Path, int]] = {}
@@ -1863,11 +1869,20 @@ class Vision:
         if self.lend is not None:
             self.settle()
             self.lend()
+        args, env = self.args, self.env
+        if self.room is not None:
+            self.on_gpu = bool(self.room())
+            print(f"[saguaro] images: reading the pictures on the {'GPU' if self.on_gpu else 'CPU'}", flush=True)
+            if not self.on_gpu:
+                args = [x for x in args if x != "--gpu"] + \
+                    (["--threads", str(self.cpu_threads)] if self.cpu_threads and "--threads" not in args else [])
+                env = dict(env if env is not None else os.environ, CUDA_VISIBLE_DEVICES="")
         try:
-            self.proc = subprocess.Popen(self.args + (["--no-warmup"] if self.lend is not None else []),
+            self.proc = subprocess.Popen(args + (["--no-warmup"] if self.lend is not None or self.room is not None
+                                                 else []),
                                          stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                          stderr=self.log or subprocess.DEVNULL, text=True, encoding="utf-8",
-                                         bufsize=1, env=self.env)
+                                         bufsize=1, env=env)
             line = self.proc.stdout.readline()
             if not line.startswith("READY"):
                 raise RuntimeError("the vision encoder did not start: " + line.strip())
@@ -1913,7 +1928,7 @@ class Vision:
             try:
                 yield self
             finally:
-                if self.lend is not None and self.proc is not None:
+                if (self.lend is not None or self.room is not None) and self.proc is not None:
                     self._stop()
 
     @staticmethod
@@ -2064,6 +2079,16 @@ class Vision:
             self.proc.kill()
 
 
+def gpu_free_bytes(gpu: int) -> int | None:
+    """The free memory of NVIDIA GPU `gpu` (nvidia-smi's numbering) now, or None when nvidia-smi cannot say."""
+    try:
+        r = subprocess.run(["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits", "-i", str(gpu)],
+                           capture_output=True, text=True, timeout=20)
+        return int(r.stdout.strip().splitlines()[0]) << 20 if r.returncode == 0 else None
+    except (OSError, subprocess.TimeoutExpired, ValueError, IndexError):
+        return None
+
+
 def vision_footprint(vcfg: dict, env: dict, cache_file: Path, gpu: int) -> tuple[int, int] | None:
     """(image token cap, bytes) for the on-demand vision encoder on THIS machine's first GPU: measured once by
     `vision-glm --measure` (before the model loads, so the GPU is otherwise idle) and cached per encoder file, cap
@@ -2085,8 +2110,9 @@ def vision_footprint(vcfg: dict, env: dict, cache_file: Path, gpu: int) -> tuple
         if not isinstance(m, dict) or not all(isinstance(m.get(k), int) and m[k] > 0 for k in ("bytes", "total")):
             m = None
         if m is None:
-            args = [vcfg["exe"], "--mmproj", vcfg["mmproj"], "--model", vcfg["model"], "--gpu", "--max-tokens", str(cap),
-                    "--measure"] + (["--no-flash-attn"] if vcfg.get("no_flash_attn") else [])
+            args = [vcfg["exe"], "--mmproj", vcfg["mmproj"]] + \
+                (["--model", vcfg["model"]] if vcfg.get("model") else []) + \
+                ["--gpu", "--max-tokens", str(cap), "--measure"] + (["--no-flash-attn"] if vcfg.get("no_flash_attn") else [])
             print(f"[saguaro] images: measuring the vision encoder on this GPU ({cap} image tokens) ...", flush=True)
             try:
                 r = subprocess.run(args, capture_output=True, text=True, timeout=600, env=env)
@@ -2127,7 +2153,8 @@ def engine_args(cfg: dict) -> list[str]:
     """The engine's arguments: the config's, and with several GPUs the layer split across them ("layer_split" in the
     config: "auto" by default, or the first layer of each later GPU's share, e.g. "18" or "16,32")."""
     args = list(cfg["args"])
-    if len(gpu_list(cfg)) > 1 and "--layer-split" not in args:
+    # (saguaro-ik2 deals its layers itself, --gpus: it stops at a flag it does not know)
+    if len(gpu_list(cfg)) > 1 and "--layer-split" not in args and maya_quants.family_of(cfg) != "ik2":
         args += ["--layer-split", str(cfg.get("layer_split") or "auto")]
     return args
 
@@ -2441,7 +2468,9 @@ class Service:
                             # DeepSeek-V4.1 ends a turn with its EOS (and would start the next with <｜User｜>)
                             _special_ids("<｜end▁of▁sentence｜>") + _special_ids("<｜User｜>") +
                             # MiniMax-M3.1 with [e~[ (and would start the next turn with ]~b])
-                            _special_ids("[e~[") + _special_ids("]~b]"))
+                            _special_ids("[e~[") + _special_ids("]~b]") +
+                            # Inkling 2 with <|content_model_end_sampling|>
+                            _special_ids("<|content_model_end_sampling|>"))
         # DeepSeek's turn openers: where its last user turn starts and its system prompt ends (SAGUARO_DS4_RESTORE_POINTS)
         self.ds_user_id = (_special_ids("<｜User｜>") or [None])[0]
         self.ds_system_id = (_special_ids("<｜System｜>") or [None])[0]
@@ -4118,8 +4147,17 @@ class Service:
                 prefill = "\n\n<｜DSML｜ calls>\n" + (f'<｜DSML｜ invoke name="{force}">\n' if force else "")
             elif getattr(self.template, "minimax", False):
                 prefill = MINIMAX_NS + "<tool_call>\n" + (MINIMAX_NS + f'<invoke name="{force}">' if force else "")
+            elif getattr(self.template, "inkling", False):
+                # Inkling 2: a call is a model message of its own, <|message_model|>NAME<|content_invoke_tool_json|>{..}
+                prefill = "<|message_model|>" + (force + "<|content_invoke_tool_json|>" if force else "")
             else:
                 prefill = CALL_START + (force if glm_calls else "\n" + (f"<function={force}>\n" if force else ""))
+        if not prefill and not tools and getattr(self.template, "inkling", False) and \
+                (kwargs.get("enable_thinking") is False or kwargs.get("reasoning_effort") == "none"):
+            # Inkling 2 has no switch for its thinking, only its effort, and at "none" it still thinks a little: with
+            # thinking off the prompt opens the answer's text segment (with tools the first segment may be a call)
+            kwargs = {**kwargs, "enable_thinking": False}
+            prefill = "<|message_model|><|content_text|>"
         given["_prefill"] = prefill
         given["_conv_label"] = conv_first_words(asked)   # (the Monitor's conversation rows: its first words)
         given["_blocked"] = self._block_suffixes(blocked, tools, kwargs) if blocked and force is None else None
@@ -4158,6 +4196,15 @@ class Service:
             self.embeddings.path = self.vision.write(self.vision.dir / f"req-{uuid.uuid4().hex[:12]}.dsi", pics,
                                                      starts)
         elif media:
+            inkling = getattr(self.template, "inkling", False)
+            if self.vision is None and inkling:
+                # Inkling 2's GGUF has no vision tower: the image encoder (the config's "vision" entry) reads pictures
+                raise ValueError(f"{self.model} on saguaro-ik2 reads text only without the image encoder (a \"vision\" "
+                                 "entry in its config: the encoder and the model's mmproj file), so it cannot read "
+                                 "images or videos: send the request without them (describe the picture in text "
+                                 "instead)")
+            if inkling and any(kind == "video" for kind, _ in media):
+                raise ValueError(f"{self.model} reads pictures, not videos")
             if self.vision is None:
                 raise ValueError("this server was started without the vision encoder (run setup again and choose "
                                  "'vision'), so it cannot read images or videos")
@@ -4169,12 +4216,18 @@ class Service:
             glm = "<|begin_of_image|>" in self.template.source
             image_pad, image_start = ("<|image|>", "<|begin_of_image|>") if glm else (IMAGE_PAD, VISION_START)
             video_pad, video_start = ("<|video|>", "<|begin_of_video|>") if glm else ("<|video_pad|>", VISION_START)
+            if inkling:
+                # Inkling 2 writes <|content_image|><|unused_200054|><|end_message|>: the one placeholder becomes the
+                # picture's image tokens (each takes one of the encoder's rows); pictures only
+                image_pad, image_start = "<|unused_200054|>", "<|content_image|>"
             pad = self.tok.encode(image_pad, parse_special=True)[0]
             start = self.tok.encode(image_start, parse_special=True)[0]
-            vp = self.tok.encode(video_pad, parse_special=True)[0]
-            vstart = self.tok.encode(video_start, parse_special=True)[0]
-            # every frame is an independent image: the image's own begin / end markers around its pads
-            iend = self.tok.encode("<|end_of_image|>" if glm else "<|vision_end|>", parse_special=True)[0]
+            vp = vstart = iend = None
+            if not inkling:
+                vp = self.tok.encode(video_pad, parse_special=True)[0]
+                vstart = self.tok.encode(video_start, parse_special=True)[0]
+                # every frame is an independent image: the image's own begin / end markers around its pads
+                iend = self.tok.encode("<|end_of_image|>" if glm else "<|vision_end|>", parse_special=True)[0]
             frame = (start, pad, iend)
             # Encode only while the engine is idle: the engine and the image encoder (a separate process) must not
             # run on the GPU at the same time - an encode during a running request left that request stuck at
@@ -4794,6 +4847,7 @@ class Service:
                                 stream_tools=True, dsml=getattr(self.template, "deepseek", False),
                                 token_only_end=getattr(self.template, "deepseek", False) and self.think_end_id is not None,
                                 minimax=getattr(self.template, "minimax", False),
+                                inkling=getattr(self.template, "inkling", False),
                                 strict_tools=responses, single_tool=single_tool)
         parser = new_parser()
         # calls the loop guard blocks in this answer (prepare, _block_suffixes): {(name, args): (ToolRepeat, ids)}.
@@ -6513,8 +6567,9 @@ def make_handler(svc: Service):
             elif path == "/health":
                 # the run config's recommended settings: the web app's Chat defaults until its user picks their own
                 rec = {k: v for k, v in svc.sampling_defaults.items() if k in ("temperature", "top_p", "top_k", "min_p")}
-                if svc.default_effort:   # (MiniMax's by its own five names, CYBER-FROST's by Qwen's three)
-                    rec["reasoning_effort"] = (effort_name if getattr(svc.template, "minimax", False) else effort_level)(
+                if svc.default_effort:   # (MiniMax's and Inkling's by their own names, CYBER-FROST's by Qwen's three)
+                    named = getattr(svc.template, "minimax", False) or getattr(svc.template, "inkling", False)
+                    rec["reasoning_effort"] = (effort_name if named else effort_level)(
                         svc.default_effort) or svc.default_effort
                     if getattr(svc.template, "forced_thinking", False):
                         rec["reasoning_effort"] = QWEN_EFFORT.get(rec["reasoning_effort"], rec["reasoning_effort"])
@@ -7970,7 +8025,8 @@ def main() -> int:
                 vcfg, on_demand = dict(vcfg, gpu=False), False
             else:
                 vcfg = dict(vcfg, max_tokens=fp[0])
-                engine_env = dict(env, SAGUARO_GLM_VISION_LEND_MB=str((fp[1] >> 20) + 1))
+                if models.family(cfg) != "ik2":   # (saguaro-ik2 lends no memory: the encoder takes what is free)
+                    engine_env = dict(env, SAGUARO_GLM_VISION_LEND_MB=str((fp[1] >> 20) + 1))
                 print(f"[saguaro] images: the vision encoder needs {fp[1] / 2**30:.2f} GB on this GPU at up to {fp[0]} "
                       "image tokens", flush=True)
         if vcfg and not on_demand:
@@ -8011,6 +8067,18 @@ def main() -> int:
                 vision.reclaim = lambda: engine.command("VRECLAIM", "VRECLAIMED")
                 print(f"[saguaro] images: the vision encoder starts when a picture arrives, in {lent / 2**30:.2f} GB "
                       "the model lends it", flush=True)
+            elif models.family(cfg) == "ik2":
+                # Inkling 2 (its engine lends no memory and keeps none for pictures): the encoder starts when a picture
+                # arrives - on the GPU when its free memory then holds what the encoder measured, else on the CPU -
+                # and ends once the request's pictures are read
+                need, gi = fp[1], (gpu_list(cfg) or [0])[0]
+                vision = Vision(vcfg, log=vlog, env=venv, start=False)
+                vision.room = lambda: (gpu_free_bytes(gi) or 0) >= need
+                vision.cpu_threads = max(1, (os.cpu_count() or 2) // 2)
+                free = gpu_free_bytes(gi)
+                print(f"[saguaro] images: the vision encoder starts when a picture arrives - on GPU {gi} while "
+                      f"{need / 2**30:.2f} GB of it is free ({(free or 0) / 2**30:.2f} GB now), else on the CPU; "
+                      "no VRAM kept for it", flush=True)
             else:   # the model's GPU memory is too small to lend that much (or an engine without lending)
                 print("[saguaro] images: the model cannot lend the vision encoder its GPU memory here - the encoder "
                       "runs on the CPU", flush=True)
@@ -8044,7 +8112,8 @@ def main() -> int:
             raise SystemExit(f"[saguaro] config reasoning_effort: {e}")
         svc.default_effort = cfg["reasoning_effort"]
         # (#363: DeepSeek's 1..100 budget is a level of its own - it was shown as "none")
-        level = (effort_name if svc.template.minimax else effort_level)(svc.default_effort) or \
+        level = (effort_name if svc.template.minimax or getattr(svc.template, "inkling", False) else effort_level)(
+            svc.default_effort) or \
             (f"{svc.default_effort} of 100" if type(svc.default_effort) is int
                                                      else "none")
         if getattr(svc.template, "forced_thinking", False):   # (CYBER-FROST: Qwen's words, low / medium / xhigh)

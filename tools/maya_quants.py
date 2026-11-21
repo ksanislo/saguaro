@@ -40,6 +40,8 @@ MODEL_DEFAULTS = {
     # CYBER-FROST-3.8-PS: Blackfrost-AI/CYBER-FROST-3.8-BF16 generation_config.json and card - temperature 1.0, top_p
     # 0.95, top_k 20; thinking on, its template's default effort xhigh
     "qwen": ({"temperature": 1.0, "top_p": 0.95, "top_k": 20}, "xhigh"),
+    # Inkling 2 (saguaro-ik2): its card and files name no sampling, so plain sampling; "auto" its template's own effort
+    "ik2": ({"temperature": 1.0, "top_p": 1.0}, "auto"),
 }
 
 
@@ -189,11 +191,13 @@ def resolve(name: str, glm_downloads=()) -> tuple | None:
 
 
 def family_of(cfg: dict) -> str:
-    """"minimax" for a MiniMax-M3.1-Flash config (saguaro-mm3), "qwen" for CYBER-FROST-3.8-PS (the GLM engine with its
-    n-gram table, --ple-gguf), "deepseek" for a DeepSeek-V4.1-Flash config (the engine's --pack: configs written before
-    the programs got their Saguaro names count too), else "glm"."""
+    """"ik2" for an Inkling 2 config (saguaro-ik2), "minimax" for a MiniMax-M3.1-Flash config (saguaro-mm3), "qwen"
+    for CYBER-FROST-3.8-PS (the GLM engine with its n-gram table, --ple-gguf), "deepseek" for a DeepSeek-V4.1-Flash
+    config (the engine's --pack: configs written before the programs got their Saguaro names count too), else "glm"."""
     inst = cfg.get("installer") or {}
     exe = Path(str(cfg.get("exe", ""))).name
+    if inst.get("family") == "ik2" or exe.startswith(("maya-ik2", "saguaro-ik2")):   # (Inkling 2)
+        return "ik2"
     if inst.get("family") == "minimax" or exe.startswith(("maya-mm3", "saguaro-mm3")):
         return "minimax"
     args = cfg.get("args") or []
