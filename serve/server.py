@@ -3819,6 +3819,11 @@ class Service:
         kv_room = sum(int(r.get("kv_room") or 0) for r in merged)
         kv_ram_room = max((int(r.get("kv_ram_room") or 0) for r in rows), default=0)
         parked = max((int(r.get("parked") or 0) for r in rows), default=0)
+        # PLAN-qfn-park-budget (QFN): how many conversations are parked and what they may hold now; absent elsewhere
+        parked_n = max((int(r.get("parked_n") or 0) for r in rows), default=0) \
+            if any("parked_n" in r for r in rows) else None
+        park_budget = max((int(r.get("park_budget") or 0) for r in rows), default=0) \
+            if any("park_budget" in r for r in rows) else None
         max_ctx = int(eng.max_context or 0)
         slots = max(int(getattr(eng, "multi", 0) or 0), int(getattr(eng, "batch", 0) or 0), 1)
         pos_cap = max_ctx * slots
@@ -3845,7 +3850,9 @@ class Service:
                              "kv_room": kv_room, "kv_ram_room": kv_ram_room},
                 "used": {"tokens": used, "vram_tokens": vram_pos, "ram_tokens": ram_pos,
                          **({"vram_bytes": int(vram_pos * kbt), "ram_bytes": int(ram_pos * kbt)} if kbt else {})},
-                "parked": {"bytes": parked, **({"tokens": parked_tok} if kbt and parked else {})},
+                "parked": {"bytes": parked, **({"tokens": parked_tok} if kbt and parked else {}),
+                           **({"conversations": parked_n} if parked_n is not None else {}),
+                           **({"budget_bytes": park_budget} if park_budget is not None else {})},
                 "free": max(0, cap - used - parked_tok)}
 
     def metrics(self, all_requests=False) -> dict:

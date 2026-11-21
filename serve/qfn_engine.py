@@ -591,9 +591,16 @@ def session_event_text(f: dict, state: dict | None) -> str | None:
         n = (state or {}).get("files")
         return f"{n if n is not None else 'the'} saved conversation{'' if n == 1 else 's'}, {human_bytes(size)} on disk"
     if what == "wrote":
+        if why == "appended":                           # an appending session file: only what changed was written
+            return f"saved {conv} to disk: {human_bytes(size)} appended to its file ({ms / 1000:.1f} s)"
         where = {"exit": "on shutdown", "direct": "straight from the GPU (no RAM to park it)",
                  "background": "in the background"}.get(why, "")
         return f"saved {conv} to disk {where} ({took})".replace("  ", " ")
+    if what == "dropped":                               # the parked cache gave RAM back (park_policy.hpp)
+        reasons = {"pressure": "the host is short of RAM", "budget": "the live conversations need its room",
+                   "idle": "it was idle past the limit",
+                   "unsaved": "the host is out of RAM - it was NOT on disk yet, its next turn reads the prompt again"}
+        return f"released {conv} parked in RAM ({human_bytes(size)}): {reasons.get(why, why)}"
     if what == "read":
         return f"reading {conv} back from disk ({took})"
     if what == "parked":
