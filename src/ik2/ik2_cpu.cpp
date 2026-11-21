@@ -8,13 +8,21 @@
 
 namespace ik2::cpu {
 
-bool available() {
+namespace {
+// 2: AVX-512 F / BW, 1: AVX (Sandy / Ivy Bridge: no AVX2, no FMA), 0: neither - the scalar rows
+int isa_level() {
 #if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
-    return __builtin_cpu_supports("avx512f") && __builtin_cpu_supports("avx512bw");
+    static const int v = (__builtin_cpu_supports("avx512f") && __builtin_cpu_supports("avx512bw")) ? 2
+                         : (__builtin_cpu_supports("avx") && __builtin_cpu_supports("ssse3")) ? 1 : 0;
+    return v;
 #else
-    return false;
+    return 0;
 #endif
 }
+}  // namespace
+
+bool available() { return isa_level() > 0; }
+const char* isa() { return isa_level() == 2 ? "avx512" : isa_level() == 1 ? "avx" : "scalar"; }
 
 Pool::Pool(int n) {
     for (int i = 0; i < n; ++i)
@@ -124,6 +132,39 @@ void nvfp4_rows_avx512(const uint8_t* W, int K, int r0, int r1, const float* x, 
         out[r - r0] = _mm512_reduce_add_ps(_mm512_add_ps(acc0, acc1));
     }
 }
+// AVX alone (the host's Xeon E5 v2): the codes through pshufb, 128-bit integers, 256-bit F32 products, no FMA
+__attribute__((target("avx")))
+void nvfp4_rows_avx(const uint8_t* W, int K, int r0, int r1, const float* x, float* out) {
+    const __m128i tab = _mm_setr_epi8(0, 1, 2, 3, 4, 6, 8, 12, 0, -1, -2, -3, -4, -6, -8, -12);
+    const __m128i m4 = _mm_set1_epi8(0x0F);
+    const int nb = K / 64;
+    const size_t rb = (size_t) nb * 36;
+    for (int r = r0; r < r1; ++r) {
+        const uint8_t* b = W + (size_t) r * rb;
+        __m256 acc0 = _mm256_setzero_ps(), acc1 = _mm256_setzero_ps();
+        const float* xp = x;
+        for (int i = 0; i < nb; ++i, b += 36, xp += 64)
+            for (int sb = 0; sb < 4; ++sb) {
+                const __m128i raw = _mm_loadl_epi64((const __m128i*) (b + 4 + sb * 8));
+                const __m128i lo = _mm_and_si128(raw, m4);
+                const __m128i hi = _mm_and_si128(_mm_srli_epi16(raw, 4), m4);
+                const __m128i val = _mm_shuffle_epi8(tab, _mm_unpacklo_epi64(lo, hi));   // values 0 .. 15
+                const __m128i i0 = _mm_cvtepi8_epi32(val), i1 = _mm_cvtepi8_epi32(_mm_srli_si128(val, 4));
+                const __m128i i2 = _mm_cvtepi8_epi32(_mm_srli_si128(val, 8));
+                const __m128i i3 = _mm_cvtepi8_epi32(_mm_srli_si128(val, 12));
+                const __m256 v0 = _mm256_cvtepi32_ps(_mm256_insertf128_si256(_mm256_castsi128_si256(i0), i1, 1));
+                const __m256 v1 = _mm256_cvtepi32_ps(_mm256_insertf128_si256(_mm256_castsi128_si256(i2), i3, 1));
+                const __m256 sc = _mm256_set1_ps(g_scale.v[b[sb]]);
+                acc0 = _mm256_add_ps(acc0, _mm256_mul_ps(v0, _mm256_mul_ps(_mm256_loadu_ps(xp + sb * 16), sc)));
+                acc1 = _mm256_add_ps(acc1, _mm256_mul_ps(v1, _mm256_mul_ps(_mm256_loadu_ps(xp + sb * 16 + 8), sc)));
+            }
+        const __m256 a = _mm256_add_ps(acc0, acc1);
+        __m128 h = _mm_add_ps(_mm256_castps256_ps128(a), _mm256_extractf128_ps(a, 1));
+        h = _mm_add_ps(h, _mm_movehl_ps(h, h));
+        h = _mm_add_ss(h, _mm_shuffle_ps(h, h, 1));
+        out[r - r0] = _mm_cvtss_f32(h);
+    }
+}
 #endif
 
 void nvfp4_rows_scalar(const uint8_t* W, int K, int r0, int r1, const float* x, float* out) {
@@ -150,12 +191,19 @@ void nvfp4_rows_scalar(const uint8_t* W, int K, int r0, int r1, const float* x, 
 
 void nvfp4_rows(const uint8_t* W, int K, int r0, int r1, const float* x, float* out) {
 #if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
-    static const bool fast = available();
-    if (fast) {
+    static const int lvl = isa_level();
+    if (lvl == 2) {
         nvfp4_rows_avx512(W, K, r0, r1, x, out);
         return;
     }
+    if (lvl == 1) {
+        nvfp4_rows_avx(W, K, r0, r1, x, out);
+        return;
+    }
 #endif
+    nvfp4_rows_scalar(W, K, r0, r1, x, out);
+}
+void nvfp4_rows_plain(const uint8_t* W, int K, int r0, int r1, const float* x, float* out) {
     nvfp4_rows_scalar(W, K, r0, r1, x, out);
 }
 
