@@ -104,6 +104,7 @@
 #include "strata/spec/spec_start.hpp"
 #include "strata/program/batch_groups.hpp"
 #include "strata/program/vlen_pause.hpp"
+#include "strata/program/vlen_preempt.hpp"
 #include "strata/program/fast_lane.hpp"
 #include "strata/kernels/cvec.hpp"
 #include "strata/core/progress.hpp"
@@ -13141,6 +13142,7 @@ int main(int argc, char** argv) {
         // refused attempt is said once per reason, the first three per pending step (the pump ticks a thousand a second)
         int vlen_refused_logged = 0;             // refused pause attempts said for this pending step
         std::string vlen_refuse_said;            // the last refused reason said (a new reason gets a new line)
+        bool vlen_pre_said = false;              // review 4b: the held-read pre-empt step said once per pending step
         // PLAN-vision-fast-start review 4: the serve thread turns the command the stdin reader took off stdin into this
         // pending state.  The reader only sets vlen_cmd / vlen_extra_b atomically (so a long prompt read no longer
         // leaves the lend unread); the validation the old command handler did now runs here, and the answers (VLENT /
@@ -13178,7 +13180,7 @@ int main(int argc, char** argv) {
                 vlen_rdeadline = Clock::now() + std::chrono::seconds(120);
             }
             vlen_pause_armed = true;   // (if this tick cannot answer it, the next CUDA0 window boundary pauses for it)
-            vlen_refused_logged = 0; vlen_refuse_said.clear();
+            vlen_refused_logged = 0; vlen_refuse_said.clear(); vlen_pre_said = false;
             if (!lend) {   // VRECLAIMED is answered at once; the take-back goes on in the loop (vlen_tick)
                 std::printf("VRECLAIMED cache_mib=%lld\n", (long long) (gv[0].cache->mapped_bytes() >> 20));
                 std::fflush(stdout);
@@ -15283,12 +15285,16 @@ int main(int argc, char** argv) {
         bool cy_yielded = false;             // the last run of reads ended by yielding
         int cy_served = 0;                   // old-way lines served since the held reads last went on
         // (in_mu held) the line waiting first is a text request the old way (not a picture: the position table stays);
-        // VLEND / VRECLAIM outrank a piece of held read too (PLAN-vision-fast-start: they waited on it for ~17 s once)
+        // review 4b: a pending lend / reclaim pre-empts a piece of held read too - the reads stop at their next piece
+        // boundary and the step runs there, exactly like a text request the old way waiting first (VLEND / VRECLAIM are
+        // no longer in in_lines: the stdin reader took them; their pending state is what interrupts here)
         auto cy_yield_line = [&]() -> bool {
+            if (strata::program::vlen_preempt::interrupts(vlen_pending || vlen_reclaim_pending ||
+                                                          in_shared->vlen_cmd.load(std::memory_order_acquire) != 0))
+                return true;
             if (in_lines.empty()) return false;
             const std::string& l = in_lines.front();
-            return l.rfind("\x02" "BGEN ", 0) == 0 || l.rfind("GEN ", 0) == 0 ||
-                   l.rfind("VLEND", 0) == 0 || l.rfind("VRECLAIM", 0) == 0;
+            return l.rfind("\x02" "BGEN ", 0) == 0 || l.rfind("GEN ", 0) == 0;
         };
         struct AdmReq {
             int slot = -1;
@@ -17456,6 +17462,31 @@ int main(int argc, char** argv) {
                 }
                 cy_drop_stopped();
                 if (!cy_held.empty()) {
+                    // review 4b: a pending lend / reclaim pre-empts the held reads at the piece boundary they stopped
+                    // at.  With nothing else decoding CUDA0 is quiet now (the reads are held, no window on it), so run
+                    // the give / take-back step here and say the hold length; the reads stay held until the step is
+                    // answered, then go on.  While slots decode the pause runs the step on the pump tick below instead.
+                    if ((vlen_pending || vlen_reclaim_pending) && !batch_on() && !(piped && pipe_inflight()) &&
+                        !in_prompt_read && !conc_serving && !share_live) {
+                        double held_ms = 0.0;
+                        for (const auto& j : cy_held)
+                            held_ms = std::max(held_ms, std::chrono::duration<double, std::milli>(Clock::now() - j->t_held).count());
+                        const size_t n_held = cy_held.size();
+                        const auto tt = Clock::now();
+                        elastic_idle((size_t) 0, true, -1);   // (vlen_tick: one step toward the target on the quiet card)
+                        if (!vlen_pre_said) {
+                            vlen_pre_said = true;
+                            std::fprintf(stderr, "strata serve: VLEND: the held reads gave their next piece boundary to the "
+                                                 "step (%zu read%s held %.0f ms, CUDA0 quiet %.0f ms)\n", n_held,
+                                         n_held == 1 ? "" : "s", held_ms,
+                                         std::chrono::duration<double, std::milli>(Clock::now() - tt).count());
+                            std::fflush(stderr);
+                        }
+                        // (still due - a reclaim's multi-settle take-back, or a give the driver has not finished - poll
+                        // like the pump does rather than spin; the reads stay held and go on once the step is answered)
+                        if (vlen_pending || vlen_reclaim_pending) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                        continue;
+                    }
                     if (!yield_line || cy_served >= cy_max_lines) {
                         cy_served = 0;
                         if (!adm_run(std::string())) return 1;
@@ -19422,10 +19453,14 @@ int main(int argc, char** argv) {
                             st0[(size_t) k] = {stage_verifier(k).windows, stage_verifier(k).ms_host};
                         std::atomic<bool> done{false};
                         std::atomic<int> want_yield{-1};
+                        std::atomic<bool> lend_yield{false};   // review 4b: a pending lend asks this read to stop at its next chunk
                         bool read_ok = true;
                         std::string read_err;
                         in_prompt_read = true;
-                        sp.stop_at_chunk = [&] { return want_yield.load(std::memory_order_acquire) >= 0; };
+                        sp.stop_at_chunk = [&] {
+                            return want_yield.load(std::memory_order_acquire) >= 0 ||
+                                   strata::program::vlen_preempt::interrupts(lend_yield.load(std::memory_order_acquire));
+                        };
                         const ShareScope share_scope(read_share_set, read_share_now());   // (after the reader's join)
                         std::thread reader([&] {
                             conc_thread_cpus();
@@ -19472,6 +19507,9 @@ int main(int argc, char** argv) {
                                                          "settle in 500 ms (the step waits at its next chunk)\n");
                                     std::fflush(stderr);
                                 }
+                                // review 4b: a pending lend pre-empts this read - stop it at its next chunk so the step
+                                // can run on the CUDA0 it releases, then it resumes from there (the give_way path below)
+                                lend_yield.store(true, std::memory_order_release);
                             } else
                                 pend_since = Clock::time_point{};
                             std::unique_lock<std::mutex> lk(in_mu);
@@ -19524,6 +19562,23 @@ int main(int argc, char** argv) {
                         if (!read_ok) {
                             e = read_err;
                             return false;
+                        }
+                        // review 4b: the read stopped at this chunk for a pending lend (not a BYIELD).  pipe_drain
+                        // above left nothing in flight, so CUDA0 is quiet: run the give / take-back step on it (the
+                        // card the read just released), say the hold length, and resume from the next chunk.
+                        if (q < b0 && !pipe_inflight() && lend_yield.load(std::memory_order_acquire) &&
+                            want_yield.load() < 0 && (vlen_pending || vlen_reclaim_pending)) {
+                            const double hold_ms = pend_since == Clock::time_point{}
+                                                       ? 0.0
+                                                       : std::chrono::duration<double, std::milli>(Clock::now() - pend_since).count();
+                            const auto tt = Clock::now();
+                            elastic_idle((size_t) 0, true, -1);   // (vlen_tick: one step toward the target, now quiet)
+                            std::fprintf(stderr, "strata serve: VLEND: the prompt read on its own thread gave its next "
+                                                 "chunk to the step (held %.0f ms, CUDA0 quiet %.0f ms)\n", hold_ms,
+                                         std::chrono::duration<double, std::milli>(Clock::now() - tt).count());
+                            std::fflush(stderr);
+                            q0 = q;   // (the read resumes from here)
+                            continue;
                         }
                         if (q < b0 && give_way(want_yield.load(), q, e)) return false;
                         q0 = q;   // done, or the give-way was not taken there: the rest goes on the same way
