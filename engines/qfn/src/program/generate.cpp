@@ -11909,6 +11909,13 @@ int main(int argc, char** argv) {
             std::condition_variable cv;
             std::deque<std::string> lines;
             bool eof = false;
+            // PLAN-vision-fast-start review 4: the reader thread takes VLEND / VRECLAIM off stdin itself and sets this
+            // atomically instead of queueing it - a long prompt read kept the serve loop out of the command loop, so a
+            // lend sat unread in `lines` for 46 s (live 11-20).  vlen_cmd: 0 none, 1 VLEND, 2 VRECLAIM, 3 a malformed
+            // VLEND; vlen_extra_b: the encoder's share the command asks CUDA0 to keep free.  The serve thread consumes
+            // both (vlen_consume) and the step answers from wherever it runs.
+            std::atomic<int> vlen_cmd{0};
+            std::atomic<int64_t> vlen_extra_b{0};
         };
         const auto in_shared = std::make_shared<StdinShared>();
         std::atomic<bool>& stop_req = in_shared->stop_req;
@@ -11950,6 +11957,24 @@ int main(int argc, char** argv) {
             while (getline_fd(l)) {
                 if (!l.empty() && l.back() == '\r') l.pop_back();
                 if (l == "STOP") { st->stop_req.store(true); continue; }
+                // PLAN-vision-fast-start review 4: a lend / reclaim is recognised here, on the reader thread, and sets
+                // the pending state atomically - it never waits in `lines` behind the serve loop's own work (a long
+                // prompt read kept it unread for 46 s once).  The serve thread's settles take it from here.
+                if (l.rfind("VLEND", 0) == 0 || l.rfind("VRECLAIM", 0) == 0) {
+                    const bool lend = l.rfind("VLEND", 0) == 0;
+                    long long vmib = -1;
+                    if (lend) {
+                        char* ve = nullptr;
+                        vmib = std::strtoll(l.c_str() + 5, &ve, 10);
+                        if (ve == l.c_str() + 5 || vmib < 0) vmib = -1;   // (a bad number: cmd 3, answered ERR by the step)
+                    }
+                    st->vlen_extra_b.store(vmib >= 0 ? ((int64_t) vmib << 20) : 0, std::memory_order_relaxed);
+                    st->vlen_cmd.store(!lend ? 2 : (vmib >= 0 ? 1 : 3), std::memory_order_release);
+                    std::fprintf(stderr, "strata serve: %s read by the stdin reader\n", l.c_str());
+                    std::fflush(stderr);
+                    { std::lock_guard<std::mutex> lk(st->mu); st->cv.notify_all(); }   // (wake an idle serve loop)
+                    continue;
+                }
                 std::lock_guard<std::mutex> lk(st->mu);
                 st->lines.push_back(l);
                 st->cv.notify_one();
@@ -13101,7 +13126,8 @@ int main(int argc, char** argv) {
         const int64_t floor_max_mib = env_mib("SAGUARO_VRAM_FLOOR_MAX_MIB", 1024);
         // VLEND (PLAN-qfn-vision-lend): what CUDA0 keeps free for the picture encoder on top of its normal floor;
         // VRECLAIM drops it again.  The once-a-second floor check gives it back / the cache takes it back.
-        std::atomic<int64_t> vlen_extra_b{0};
+        // Review 4: the target is the shared atomic the stdin reader thread writes the instant it reads the command.
+        std::atomic<int64_t>& vlen_extra_b = in_shared->vlen_extra_b;
         // the commands answer asynchronously (review 1): they set this and the loop's settles work toward it
         bool vlen_pending = false;               // a VLEND still awaits its VLENT / ERR VLEND
         bool vlen_reclaim_pending = false;       // a VRECLAIM answered; its take-back goes on in the loop
@@ -13115,6 +13141,49 @@ int main(int argc, char** argv) {
         // refused attempt is said once per reason, the first three per pending step (the pump ticks a thousand a second)
         int vlen_refused_logged = 0;             // refused pause attempts said for this pending step
         std::string vlen_refuse_said;            // the last refused reason said (a new reason gets a new line)
+        // PLAN-vision-fast-start review 4: the serve thread turns the command the stdin reader took off stdin into this
+        // pending state.  The reader only sets vlen_cmd / vlen_extra_b atomically (so a long prompt read no longer
+        // leaves the lend unread); the validation the old command handler did now runs here, and the answers (VLENT /
+        // ERR / VRECLAIMED) print from wherever the step completes - one printf+fflush per line on the serve thread, the
+        // same single-writer discipline the other protocol lines use.  Idempotent: called from the pump tick, vlen_tick
+        // and the idle loop; a second call in the same instant takes nothing (the exchange).
+        auto vlen_consume = [&]() {
+            const int cmd = in_shared->vlen_cmd.exchange(0, std::memory_order_acq_rel);
+            if (cmd == 0) return;
+            if (cmd == 3) {   // (a malformed "VLEND" the reader recognised but could not parse)
+                std::printf("ERR VLEND: expected: VLEND <mib>\n");
+                std::fflush(stdout);
+                return;
+            }
+            const bool lend = cmd == 1;
+            if (!give_on || gv.empty()) {
+                std::printf("ERR %s: no expert cache that gives (%s)\n", lend ? "VLEND" : "VRECLAIM",
+                            give_off_why.empty() ? "no --batch slots" : give_off_why.c_str());
+                std::fflush(stdout);
+                return;
+            }
+            if (vlen_pending && !lend) {   // (the server gave up on the lend: close the pair, then reclaim)
+                vlen_pending = false;
+                std::printf("ERR VLEND: superseded by VRECLAIM\n");
+                std::fflush(stdout);
+            }
+            if (lend) {
+                vlen_pending = true;
+                vlen_reclaim_pending = false;
+                vlen_deadline = Clock::now() + std::chrono::seconds(30);
+            } else {
+                vlen_extra_b.store(0, std::memory_order_relaxed);
+                vlen_pending = false;
+                vlen_reclaim_pending = true;
+                vlen_rdeadline = Clock::now() + std::chrono::seconds(120);
+            }
+            vlen_pause_armed = true;   // (if this tick cannot answer it, the next CUDA0 window boundary pauses for it)
+            vlen_refused_logged = 0; vlen_refuse_said.clear();
+            if (!lend) {   // VRECLAIMED is answered at once; the take-back goes on in the loop (vlen_tick)
+                std::printf("VRECLAIMED cache_mib=%lld\n", (long long) (gv[0].cache->mapped_bytes() >> 20));
+                std::fflush(stdout);
+            }
+        };
         auto floor_of = [&](size_t k) -> int64_t {   // bytes
             const strata::core::Verifier& vk = k == 0 ? ver : stages[k - 1]->ver;
             const size_t lim = vk.batch_graph_limit(), held = vk.batch_layouts();
@@ -13155,8 +13224,11 @@ int main(int argc, char** argv) {
         // here; the serve thread alone touches this state and writes these lines.
         const std::thread::id vlen_thread = std::this_thread::get_id();
         auto vlen_tick = [&]() {
-            if (!vlen_pending && !vlen_reclaim_pending) return;
+            const bool fresh = in_shared->vlen_cmd.load(std::memory_order_acquire) != 0;
+            if (!fresh && !vlen_pending && !vlen_reclaim_pending) return;   // (the fast path, as before)
             if (std::this_thread::get_id() != vlen_thread) return;   // (an allocation hook may settle a card too)
+            vlen_consume();   // (review 4: a lend the stdin reader took off stdin becomes pending state right here)
+            if (!vlen_pending && !vlen_reclaim_pending) return;
             const int vdev = eslot_dev(0);
             const strata::core::OnDevice on0(vdev);
             strata::core::ExpertCache& xc = *gv[0].cache;
@@ -14517,6 +14589,7 @@ int main(int argc, char** argv) {
             // step can run, and the pipeline opens again when the step comes due (2 s at the most).
             bool vlen_hold = false;
             {
+                vlen_consume();   // (review 4: a lend the stdin reader took is pending state before this tick decides)
                 strata::program::vlen_pause::In pin;
                 pin.pending = vlen_pending || vlen_reclaim_pending;
                 pin.armed = vlen_pause_armed;
@@ -16844,9 +16917,25 @@ int main(int argc, char** argv) {
                 }
             };
             size_t seen = 0;
+            Clock::time_point cy_pend_since{};   // review 4: when a step first waited behind these held reads
+            bool cy_pend_said = false;           // (the "a read cannot settle in 0.5 s" line is said once per step)
             for (;;) {
                 if (!pump_ok) return false;
                 br_tick();
+                vlen_consume();   // review 4: a lend the reader took while these reads ran is pending state here
+                // review 4 point 2: reads beside the slots reach a settle at their next piece boundary; if a pending
+                // step has waited here past 0.5 s (the run is not yielding to it), say so once
+                if (vlen_pending || vlen_reclaim_pending) {
+                    if (cy_pend_since == Clock::time_point{}) cy_pend_since = Clock::now();
+                    else if (!cy_pend_said &&
+                             std::chrono::duration<double, std::milli>(Clock::now() - cy_pend_since).count() > 500.0) {
+                        cy_pend_said = true;
+                        std::fprintf(stderr, "strata serve: VLEND: a prompt read beside the slots has not reached a "
+                                             "settle in 500 ms (it answers the step at its next piece boundary)\n");
+                        std::fflush(stderr);
+                    }
+                } else
+                    cy_pend_since = Clock::time_point{};
                 std::vector<std::string> fresh;
                 bool more = false, other = false;
                 {   // (the breakdown line: the cv wait for the next line is a wait point of this loop)
@@ -17198,6 +17287,10 @@ int main(int argc, char** argv) {
                          sdir ? "RAM, --session-dir" : conversations.enabled() ? "RAM only" : "nowhere: it is dropped");
         auto eidle_tick = [&]() -> bool {
             if (!eidle_on) return true;
+            vlen_consume();   // review 4: a lend the stdin reader took is pending here too (the idle path runs the step)
+            if ((vlen_pending || vlen_reclaim_pending) && !conc_serving && !in_prompt_read && !share_live &&
+                cy_held_n == 0 && !adm_active && !pipe_inflight() && !batch_on())
+                for (size_t k = 0; k < bslot_ss.size(); ++k) elastic_idle(k, true, -1);   // (CUDA0 quiet: step now)
             const auto now = Clock::now();
             if (now - eidle_last < std::chrono::milliseconds(500)) return true;
             eidle_last = now;
@@ -17350,6 +17443,7 @@ int main(int argc, char** argv) {
         for (size_t k = 0; eslots_on && k < bslot_ss.size(); ++k) vram_floor(k);   // the floor before the first window
         for (;;) {
             line_drain_ms = 0.0;
+            vlen_consume();   // review 4: a lend / reclaim the stdin reader took off stdin is pending state from here
             bool adm_direct = false;   // SAGUARO_SLOT_ADMIT: this BGEN is read beside the slots (adm_run)
             // SAGUARO_READ_YIELD: held reads go on unless a text request the old way waits first (at most
             // SAGUARO_READ_YIELD_LINES in a row); a held read a BSTOP reached ends first
@@ -17402,7 +17496,9 @@ int main(int argc, char** argv) {
                     if (!eidle_tick()) return 1;
                     {
                         std::unique_lock<std::mutex> lk(in_mu);
-                        in_cv.wait_for(lk, std::chrono::seconds(1), [&] { return !in_lines.empty() || in_eof; });
+                        in_cv.wait_for(lk, std::chrono::seconds(1), [&] {
+                            return !in_lines.empty() || in_eof || in_shared->vlen_cmd.load(std::memory_order_acquire) != 0;
+                        });
                         if (!in_lines.empty()) {
                             line = std::move(in_lines.front());
                             in_lines.pop_front();
@@ -17424,58 +17520,14 @@ int main(int argc, char** argv) {
                 adm_bstop(std::atoi(line.c_str() + 6));
                 continue;
             }
-            // VLEND <mib> / VRECLAIM (PLAN-qfn-vision-lend, review 1): CUDA0 lends the picture encoder's process
-            // VRAM from its expert cache / slot budget and takes it back - while batch slots decode.  ASYNCHRONOUS:
-            // the command sets the pending state, works one quiet step here at once, and goes back to the command
-            // loop; every settle of card 0 (and the idle tick) runs vlen_tick until the answer is due, and the next
-            // CUDA0 window boundary holds back new windows for one step if the settles did not answer it (PLAN-
-            // vision-fast-start, its pause length on one line): VLENT free_mib=<n> cache_mib=<n> / ERR VLEND: <why> /
-            // VRECLAIMED cache_mib=<n>.
+            // VLEND <mib> / VRECLAIM (PLAN-qfn-vision-lend, reviews 1-4): CUDA0 lends the picture encoder's process
+            // VRAM from its expert cache / slot budget and takes it back - while batch slots decode.  Review 4: the
+            // stdin reader thread now recognises these commands and sets the pending state atomically (so a long prompt
+            // read no longer leaves one unread in the queue); this loop only reaches the case a stray VLEND line that
+            // somehow got past the reader would be - there it is taken as a fresh command and stepped once.
             if (line.rfind("VLEND", 0) == 0 || line.rfind("VRECLAIM", 0) == 0) {
-                const bool lend = line.rfind("VLEND", 0) == 0;
-                // review 3: the serve loop took the command off stdin now - with the server's "VLEND sent" / "VLENT
-                // after" lines this places any wait: before the read (a command queued behind the engine's work) or
-                // after it (the step waiting for a quiet CUDA0)
-                std::fprintf(stderr, "strata serve: %s read by the serve loop\n", line.c_str());
-                char* ve = nullptr;
-                long long vmib = 0;
-                if (lend) {
-                    vmib = std::strtoll(line.c_str() + 5, &ve, 10);
-                    if (ve == line.c_str() + 5 || vmib < 0) {
-                        std::printf("ERR VLEND: expected: VLEND <mib>\n");
-                        std::fflush(stdout);
-                        continue;
-                    }
-                }
-                if (!give_on || gv.empty()) {
-                    std::printf("ERR %s: no expert cache that gives (%s)\n", lend ? "VLEND" : "VRECLAIM",
-                                give_off_why.empty() ? "no --batch slots" : give_off_why.c_str());
-                    std::fflush(stdout);
-                    continue;
-                }
-                if (vlen_pending && !lend) {   // (the server gave up on the lend: close the pair, then reclaim)
-                    vlen_pending = false;
-                    std::printf("ERR VLEND: superseded by VRECLAIM\n");
-                    std::fflush(stdout);
-                }
-                if (lend) {
-                    vlen_extra_b.store((int64_t) vmib << 20, std::memory_order_relaxed);
-                    vlen_pending = true;
-                    vlen_reclaim_pending = false;
-                    vlen_deadline = Clock::now() + std::chrono::seconds(30);
-                } else {
-                    vlen_extra_b.store(0, std::memory_order_relaxed);
-                    vlen_pending = false;
-                    vlen_reclaim_pending = true;
-                    vlen_rdeadline = Clock::now() + std::chrono::seconds(120);
-                }
-                vlen_pause_armed = true;   // (if this tick cannot answer it, the next CUDA0 window boundary pauses for it)
-                vlen_refused_logged = 0; vlen_refuse_said.clear();   // (this step gets its own refused lines)
-                vlen_tick();   // (between windows here too: usually the answer, or the first give, comes on this line)
-                if (!lend) {   // VRECLAIMED is answered at once; the take-back goes on in the loop (vlen_tick)
-                    std::printf("VRECLAIMED cache_mib=%lld\n", (long long) (gv[0].cache->mapped_bytes() >> 20));
-                    std::fflush(stdout);
-                }
+                vlen_consume();
+                vlen_tick();   // (a stray line: step it once here too; the settles finish a pending step)
                 continue;
             }
 
@@ -19403,9 +19455,25 @@ int main(int argc, char** argv) {
                         } read_end{reader, sp.stop_at_chunk, in_prompt_read};
                         bool pump_ok = true;
                         size_t seen = 0;   // in_lines' length after the last look: a line that comes wakes the wait
+                        Clock::time_point pend_since{};   // review 4: when a step first waited on this read (0 = none)
+                        bool pend_said = false;           // (the "a read cannot settle in 0.5 s" line is said once)
                         while (!done.load(std::memory_order_acquire)) {
+                            vlen_consume();   // review 4: take a lend the reader read now (this loop owns stdin meanwhile)
                             const bool decoding = pump_ok && (batch_on() || pipe_inflight());
                             if (decoding) pump_ok = pump(true);
+                            // review 4 point 2: a step the read on CUDA0 keeps from its settle is said once after 0.5 s
+                            // (the read answers it at its next chunk; review 4b lets a lone read stop there for it)
+                            if (vlen_pending || vlen_reclaim_pending) {
+                                if (pend_since == Clock::time_point{}) pend_since = Clock::now();
+                                else if (!pend_said &&
+                                         std::chrono::duration<double, std::milli>(Clock::now() - pend_since).count() > 500.0) {
+                                    pend_said = true;
+                                    std::fprintf(stderr, "strata serve: VLEND: a prompt read on CUDA0 has not reached a "
+                                                         "settle in 500 ms (the step waits at its next chunk)\n");
+                                    std::fflush(stderr);
+                                }
+                            } else
+                                pend_since = Clock::time_point{};
                             std::unique_lock<std::mutex> lk(in_mu);
                             if (!decoding)   // nothing to pump: until the read ends or a line comes (both notify)
                                 in_cv.wait_for(lk, std::chrono::milliseconds(2), [&] {

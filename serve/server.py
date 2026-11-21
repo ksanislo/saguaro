@@ -479,6 +479,12 @@ class EngineDied(RuntimeError):
     """The engine process ended in the middle of a request (issue #27: on Linux, the out-of-memory killer)."""
 
 
+class LendTimeout(ValueError):
+    """A VLEND / VRECLAIM got no answer within its wait (PLAN-vision-fast-start review 4): the engine was busy reading
+    its prompt and did not reach a settle.  Distinct from an ERR refusal (the engine alive and saying "no room"): on a
+    timeout _vision_up waits once more, and a lending engine is not started without room.  (A refusal stays a ValueError.)"""
+
+
 class ContextOverflow(ValueError):
     """A request too long for the context (rejected, never truncated): a 400 with OpenAI's error code and wording -
     "maximum context length is N tokens" - which OpenAI-compatible clients (opencode, pi-ai, OpenClaw) recognise as a
@@ -2634,20 +2640,41 @@ class Service:
             # idle stop must send VRECLAIM even when the lend itself was refused
             self.vision_held = True
             # PLAN-vision-fast-start review 3: WHEN the command goes out and when its answer comes back - the line
-            # pairs with the engine's "read by the serve loop" line, so a wait between the two can be placed
+            # pairs with the engine's "read by the stdin reader" line, so a wait between the two can be placed
             t_lend = time.monotonic()
             print(f"[saguaro] images: VLEND {v.elastic_mib} MiB sent to the engine (its VLENT line answers)",
                   flush=True)
-            try:
-                out = self.engine.vision_lend(v.elastic_mib)     # waits for the engine's VLENT line
-                print(f"[saguaro] images: VLENT after {(time.monotonic() - t_lend) * 1000:.0f} ms "
-                      f"({out.get('cache_mib')} MiB mapped)", flush=True)
-                room = (f"the expert cache keeps {v.elastic_mib} MiB free for it "
-                        f"({out.get('cache_mib')} MiB left mapped); ")
-            except ValueError as e:
-                print(f"[saguaro] images: the lend was refused after {(time.monotonic() - t_lend) * 1000:.0f} ms "
-                      f"({e})", flush=True)
-                room = f"the expert cache did not make room for it ({e}); "
+            tries = 0
+            while True:
+                tries += 1
+                try:
+                    out = self.engine.vision_lend(v.elastic_mib)   # waits for the engine's VLENT line
+                    print(f"[saguaro] images: VLENT after {(time.monotonic() - t_lend) * 1000:.0f} ms "
+                          f"({out.get('cache_mib')} MiB mapped)", flush=True)
+                    room = (f"the expert cache keeps {v.elastic_mib} MiB free for it "
+                            f"({out.get('cache_mib')} MiB left mapped); ")
+                    break
+                except LendTimeout as e:
+                    waited = (time.monotonic() - t_lend) * 1000
+                    if tries == 1:
+                        # review 4: keep the 45 s timeout, but on a timeout wait once more - the engine reads VLEND on
+                        # its own thread now and answers at the next settle, so the first 45 s only covers a read that
+                        # genuinely cannot pause yet; a second no-answer is the engine, not a queue (which is fixed)
+                        print(f"[saguaro] images: no VLENT after {waited:.0f} ms ({e}); waiting for the engine once more",
+                              flush=True)
+                        t_lend = time.monotonic()
+                        continue
+                    # a lending engine that will not answer: the encoder is never started on a card with no room (the
+                    # engine did not say vision_lend=0, so this is not the resident start-anyway path)
+                    print(f"[saguaro] images: still no VLENT after another {waited:.0f} ms; the image encoder is not "
+                          f"started without room", flush=True)
+                    raise ValueError(f"the engine made no room for the image encoder ({e})") from None
+                except ValueError as e:
+                    # an ERR refusal (the engine is alive and says "no room"): start it anyway, as a resident one would
+                    print(f"[saguaro] images: the lend was refused after {(time.monotonic() - t_lend) * 1000:.0f} ms "
+                          f"({e})", flush=True)
+                    room = f"the expert cache did not make room for it ({e}); "
+                    break
         elif hasattr(self.engine, "vram_reserve") and self._engine_ready():
             try:
                 out = self.engine.vram_reserve(v.elastic_mib)
@@ -7546,7 +7573,7 @@ def _qfn_engine_class():
                 except queue.Empty:
                     if self.ended or not self.alive():
                         raise QE.EngineDied("the engine ended") from None
-                    raise ValueError(f"the engine did not answer the {cmd} command") from None
+                    raise LendTimeout(f"the engine did not answer the {cmd} command") from None
                 if line is None:
                     raise QE.EngineDied("the engine ended")
                 line = line.strip()
