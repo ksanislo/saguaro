@@ -35,38 +35,10 @@ def engine_kind(cfg: dict) -> str | None:
     return "batch" if exe.endswith("qfn") else ("line" if exe else None)
 
 
-# ---- a Qwen3.8-Flash-Next config (engine_kind: batch) runs its driver in THIS server (serve/qfn_engine.py: its batch-protocol
-# driver).  SAGUARO_QFN_SHIM=1 keeps the old way - the process becomes engines/qfn/serve/server.py (its server and
-# web UI) with the same arguments (os.execv: the PID llama-swap watches stays).
-def _qfn_dispatch():
-    import os as _os, sys as _sys
-    if _os.environ.get("SAGUARO_QFN_SHIM") != "1":
-        return
-    a = _sys.argv[1:]
-    cfg_path = None
-    for i, x in enumerate(a):
-        if x == "--config" and i + 1 < len(a):
-            cfg_path = a[i + 1]
-        elif x.startswith("--config="):
-            cfg_path = x.split("=", 1)[1]
-    if not cfg_path:
-        return
-    try:
-        import json as _json
-        kind = engine_kind(_json.loads(open(cfg_path, encoding="utf-8-sig").read()))
-    except (OSError, ValueError):
-        return
-    if kind != "batch":
-        return
-    rest = ["--engine", "strata"] + a          # (engines/qfn/serve/server.py's own --engine; the old name of its batch)
-    root = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), "engines", "qfn")
-    _os.chdir(root)
-    _os.execv(_sys.executable, [_sys.executable, "-m", "serve.server", *rest])
-
-
-_qfn_dispatch()
-
-
+# ---- a Qwen3.8-Flash-Next config (engine_kind: batch) runs its driver in THIS server (serve/qfn_engine.py: QFN's own
+# batch-protocol driver, extracted from engines/qfn by tools/saguaro/extract_qfn_engine.py).  (The old SAGUARO_QFN_SHIM
+# path, an os.execv into engines/qfn/serve/server.py, is gone: that server no longer imports here, and every start of
+# a batch config has run the extracted driver since it was written.)
 import argparse
 import collections
 import contextlib
