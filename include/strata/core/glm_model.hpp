@@ -192,9 +192,22 @@ public:
     /// request, no restart): the best size depends on the drive, its driver and the CPU
     void set_read_chunks(int n);
     /// The decode's light misses (SAGUARO_GLM_MISS_SKIP_W / _FROM, changes the answers): a routed expert that is not in
-    /// VRAM and carries less than w of the route's weights is left out on layers from `from` on.  set_miss_skip(w, from):
-    /// this request's bar and first layer (w < 0 / from < 0: the engine's own) - for sweeps without a restart.
-    void set_miss_skip(double w, int from);
+    /// VRAM and carries less than w of the route's weights is left out on layers from `from` on.  set_miss_skip(seq,
+    /// w, from): this sequence's bar and first layer (w < 0 / from < 0: the engine's own) - for sweeps without a
+    /// restart, and per conversation: the requests beside it in the batch keep the engine's (or their own).
+    void set_miss_skip(int seq, double w, int from);
+    /// PLAN-turbo-live: a request's live Turbo on the sequence it runs in (set at its admission, cleared at its end;
+    /// 0/off everywhere: the engine's own values, byte-identical routes).  drop: run top-k minus N experts (drop the
+    /// N lowest router weights, renormalise the kept ones); skip: 1 "ssd" (an expert a disk read would serve is
+    /// left out; VRAM and RAM still serve), 2 "ram" (an expert not in VRAM is left out - VRAM only).  SeqTurbo also
+    /// carries that sequence's miss_skip_w / miss_skip_from keys, which win over the Turbo ram bar.
+    struct SeqTurbo {
+        int drop = 0;          // turbo_drop=N: the route runs max(1, k-N) of its experts (0: off)
+        int skip = 0;          // turbo_skip: 1 = "ssd", 2 = "ram" (0: off)
+        float miss_w = -1.0f;  // the miss_skip_w / miss_skip_from keys (< 0: the engine's)
+        int miss_from = -1;
+    };
+    void set_turbo(int seq, int drop, int skip);   // every part of the split
     /// Conversation reuse (the fast path): save the sequence state at the current position - the recurrent KDA
     /// states and conv histories (the DSA caches are append-only, so the position alone restores them) - and
     /// restore it later to continue a prompt that extends the saved one.  false when unsupported.
@@ -908,7 +921,17 @@ public:
 
     int cur_seq_ = 0;
     int route_tag_ = 0;              // SAGUARO_GLM_ROUTE_DUMP: 1 + the sequence of the routes being issued (0: cur_seq_)
-    std::vector<int> row_seq_;       // ... a batched rows step's sequences, by row (rows_bind)
+    std::vector<int> row_seq_;       // ... a batched rows step's sequences, by row (rows_bind; kept even when nothing counts)
+    std::vector<SeqTurbo> seq_turbo_;   // PLAN-turbo-live: per sequence, its request's live Turbo (set_turbo sizes it)
+    const SeqTurbo& seq_turbo(int s) const {
+        static const SeqTurbo off;
+        return s >= 0 && s < (int) seq_turbo_.size() ? seq_turbo_[(size_t) s] : off;
+    }
+    int route_seq(int win, int win_rows) const {   // the route's sequence, the route tag's own rule (the rows' row, else the bound)
+        return route_tag_ > 0 ? route_tag_ - 1
+               : win_rows > 0 && win >= 0 && win < (int) row_seq_.size() ? row_seq_[(size_t) win]
+                                                                         : seq_index();
+    }
     int seq_count() const { return seq_.empty() ? 1 : (int) seq_.size(); }
     static void live_seqs_set(int n);                     // the scheduler: requests running now (SAGUARO_GLM_VRAM_EVICT=live)
     int seq_bound() const { return cur_seq_; }

@@ -1741,6 +1741,13 @@ static int glm_pack_generate(const Options& o) {
     // in the same decode
     int64_t req_think_budget = 0;
     int64_t req_gt = 0;   // GEN gt=<n>: the prompt's last n tokens open the reply (the template's generation prompt)
+    // PLAN-turbo-live: this request's live Turbo (GEN keys, serve/turbo_live.py): turbo_drop=N runs the route's k-N
+    // heaviest experts (renormalised), turbo_skip=ssd|ram leaves out what the SSD / the RAM tier would serve; and
+    // its strata_tune miss bar (miss_skip_w / miss_skip_from).  Absent: off - the request is exact, its routes are
+    // today's byte for byte.  Applied to the sequence the request runs in (set_turbo / set_miss_skip), so a Turbo
+    // chat changes only its own tokens and the others in the batch stay exact.
+    double req_msw = -1.0;
+    int req_msf = -1, req_tdrop = 0, req_tskip = 0;   // turbo_skip: 1 = ssd, 2 = ram
     // where a prompt's state is kept for the next request: before the reply's opening (gt), so the request after an
     // answer that was cancelled or dropped from the history - the next user message stands there - still continues it
     const auto snap_pos = [](const std::vector<int32_t>& prompt, int64_t gt) -> size_t {
@@ -3227,6 +3234,8 @@ static int glm_pack_generate(const Options& o) {
         std::vector<float> img_rows;
         std::vector<std::pair<int32_t, float>> bias;
         int64_t gt = 0;
+        double msw = -1.0;   // its miss bar and live Turbo, for the context it gets (PLAN-turbo-live)
+        int msf = -1, tdrop = 0, tskip = 0;
     };
     std::deque<Pending> pending;
     // the room a context must leave for the answer (at most what the request asked for): a long prompt goes to a
@@ -3561,6 +3570,8 @@ static int glm_pack_generate(const Options& o) {
         ctxs[(size_t) g.ctx].busy = deferred;   // (a deferred snapshot: busy until flush_pauses)
         ctxs[(size_t) g.ctx].used = ++ctx_clock;
         ctxs[(size_t) g.ctx].idle_since = std::chrono::steady_clock::now();
+        model.set_miss_skip(g.ctx, -1.0, -1);   // (PLAN-turbo-live: its bars end with it - the next request sets its own)
+        model.set_turbo(g.ctx, 0, 0);
         g.done = true;
     };
     const auto gen_sweep = [&] {
@@ -3768,6 +3779,8 @@ static int glm_pack_generate(const Options& o) {
             bind_ctx(c);
             snap_tokens.clear();
             ckpts.clear();   // (the caches they stood on are reset too)
+            model.set_miss_skip(c, -1.0, -1);   // (PLAN-turbo-live: with the sequences, their request bars go too)
+            model.set_turbo(c, 0, 0);
             model.reset();
         }
         gen_sweep();
@@ -3782,6 +3795,8 @@ static int glm_pack_generate(const Options& o) {
             bind_ctx(c);
             snap_tokens.clear();
             ckpts.clear();   // (the caches they stood on are reset too)
+            model.set_miss_skip(c, -1.0, -1);   // (PLAN-turbo-live: with the sequences, their request bars go too)
+            model.set_turbo(c, 0, 0);
             model.reset();
         }
     };
@@ -4040,7 +4055,7 @@ static int glm_pack_generate(const Options& o) {
                                const strata::kernels::SamplerParams& rq) {
         if (reader) {   // one prompt read at a time: this one waits for it
             pending.push_back({rid, ids, max_new, rq, req_think_budget, req_think_end, cur_img_pos, cur_img_rows,
-                               req_bias});
+                               req_bias, 0, req_msw, req_msf, req_tdrop, req_tskip});
             return;
         }
         if (!multi_drain() || !resolve_ready()) {
@@ -4119,7 +4134,7 @@ static int glm_pack_generate(const Options& o) {
                 return;
             }
             pending.push_back({rid, ids, max_new, rq, req_think_budget, req_think_end, cur_img_pos, cur_img_rows,
-                               req_bias, req_gt});
+                               req_bias, req_gt, req_msw, req_msf, req_tdrop, req_tskip});
             std::fprintf(stderr, "glm multi: request %d waits for a context that holds %lld tokens\n", rid,
                          (long long) want);
             return;
@@ -4131,7 +4146,7 @@ static int glm_pack_generate(const Options& o) {
                 return;
             }
             pending.push_back({rid, ids, max_new, rq, req_think_budget, req_think_end, cur_img_pos, cur_img_rows,
-                               req_bias});
+                               req_bias, 0, req_msw, req_msf, req_tdrop, req_tskip});
             std::fprintf(stderr, "glm multi: request %d waits for context memory (%lld tokens)\n", rid, (long long) want);
             return;
         }
@@ -4151,6 +4166,10 @@ static int glm_pack_generate(const Options& o) {
         }
         gap_failed = false;
         bind_ctx(best);
+        // PLAN-turbo-live: the request's bars belong to the context it got - its prompt read's and its decode
+        // tokens' routes take them, and the chats decoding beside it keep their own (off: the engine's)
+        model.set_miss_skip(best, req_msw, req_msf);
+        model.set_turbo(best, req_tdrop, req_tskip);
         model.set_image_rows(cur_img_pos, cur_img_rows);
         g->images = !cur_img_pos.empty();
         model.force_next(-1);
@@ -4275,6 +4294,8 @@ static int glm_pack_generate(const Options& o) {
                          (unsigned long long) gap_tok, 1000.0 * (double) gap_tok / std::max(1.0, gap_ms));
         tag.clear();
         if (rc != 0) {
+            model.set_miss_skip(best, -1.0, -1);   // (PLAN-turbo-live: its read failed - the context's bars go back to the engine's)
+            model.set_turbo(best, 0, 0);
             ctxs[(size_t) best].busy = false;
             if (conv.shadow || conv.uni) conv_running(-1, rid);   // (its read is over)
             admit_stop.store(false);
@@ -4320,6 +4341,10 @@ static int glm_pack_generate(const Options& o) {
             req_think_end = w2.think_end;
             req_bias = std::move(w2.bias);
             req_gt = w2.gt;
+            req_msw = w2.msw;   // (its miss bar and live Turbo go with it, PLAN-turbo-live)
+            req_msf = w2.msf;
+            req_tdrop = w2.tdrop;
+            req_tskip = w2.tskip;
             cur_img_pos = std::move(w2.img_pos);
             cur_img_rows = std::move(w2.img_rows);
             gen_admit(w2.rid, w2.ids, w2.max_new, w2.rq);
@@ -5510,8 +5535,10 @@ static int glm_pack_generate(const Options& o) {
             double req_pcie = -1.0;   // setup's calibration: this request's CPU lane (as the engine started: -1 / 0)
             int req_threads = 0;
             int req_chunks = 0;   // ... and its disk reads' pieces (0: as the engine started)
-            double req_msw = -1.0;   // ... and its light-miss bar / first layer (SAGUARO_GLM_MISS_SKIP_W / _FROM; < 0: the engine's)
-            int req_msf = -1;
+            req_msw = -1.0;   // ... its light-miss bar / first layer (SAGUARO_GLM_MISS_SKIP_W / _FROM; < 0: the engine's)
+            req_msf = -1;     // ... and its live Turbo (PLAN-turbo-live; 0/off: the request is exact)
+            req_tdrop = 0;
+            req_tskip = 0;
             int req_rid = -1;
             req_spec = 0;
             req_spec_min_p = -1.0;
@@ -5547,6 +5574,8 @@ static int glm_pack_generate(const Options& o) {
                 else if (k == "read_chunks") { req_chunks = std::atoi(v.c_str()); }
                 else if (k == "miss_skip_w") { req_msw = std::atof(v.c_str()); }
                 else if (k == "miss_skip_from") { req_msf = std::atoi(v.c_str()); }
+                else if (k == "turbo_drop") { req_tdrop = std::atoi(v.c_str()); }   // PLAN-turbo-live (serve/turbo_live.py)
+                else if (k == "turbo_skip") { req_tskip = v == "ram" ? 2 : v == "ssd" ? 1 : 0; }
                 else if (k == "rid") { req_rid = std::atoi(v.c_str()); }
                 else if (k == "spec") { req_spec = std::atoi(v.c_str()); }
                 else if (k == "spec_min_p") { req_spec_min_p = std::atof(v.c_str()); }
@@ -5631,13 +5660,18 @@ static int glm_pack_generate(const Options& o) {
             model.set_pcie_share(req_pcie >= 0.0 && req_pcie <= 1.0 ? req_pcie : -1.0);
             model.set_cpu_lane_threads(req_threads > 0 ? req_threads : 0);
             model.set_read_chunks(req_chunks > 0 ? req_chunks : 0);
-            model.set_miss_skip(req_msw, req_msf);
             std::vector<int64_t> toks;
             std::string e;
             if (max_new <= 0 || ids.empty() || !parse_i64_list(ids.c_str(), toks, e)) {
                 if (multi && req_rid >= 0) std::printf("ERR %d malformed GEN line\n", req_rid);
                 else std::printf("ERR malformed GEN line\n");
                 continue;
+            }
+            // PLAN-turbo-live: one conversation: the sequence is the engine's own; several: the request's bars go to
+            // the context gen_admit picks for it (and travel with it through `pending`)
+            if (!multi) {
+                model.set_miss_skip(model.seq_index(), req_msw, req_msf);
+                model.set_turbo(model.seq_index(), req_tdrop, req_tskip);
             }
             lp_ctx.clear();   // a generation saves its own state over LOGP's
             cur_img_pos.clear();
@@ -5695,6 +5729,8 @@ static int glm_pack_generate(const Options& o) {
             model.set_image_rows(cur_img_pos, cur_img_rows);
             run_request(toks, max_new, rq);
             model.set_image_rows({}, {});
+            model.set_miss_skip(model.seq_index(), -1.0, -1);   // (PLAN-turbo-live: the next request sets its own; LOGP runs exact)
+            model.set_turbo(model.seq_index(), 0, 0);
             continue;
         }
         if (cmd.empty()) continue;
