@@ -1389,7 +1389,8 @@ if(STRATA_NATIVE_EXPERTS)
   if(STRATA_CPU_X86)
     target_sources(strata_kernels_cpu PRIVATE src/kernels/cpu/native_expert.cpp src/kernels/cpu/iq_avx512.cpp
                                              src/kernels/cpu/iq_avx2.cpp src/kernels/cpu/kq_avx512.cpp src/kernels/cpu/iq_avx1.cpp
-                                             src/kernels/cpu/iq_avx512_one.cpp)
+                                             src/kernels/cpu/iq_avx512_one.cpp src/kernels/cpu/iq2v_rows.cpp
+                                             src/kernels/cpu/iq3v_rows.cpp)
   else()
     target_sources(strata_kernels_cpu PRIVATE src/kernels/cpu/native_expert.cpp)
   endif()
@@ -1400,7 +1401,13 @@ if(STRATA_NATIVE_EXPERTS)
     # Match the non-MSVC no-contraction mode: IQ1_M's subnormal-scale parity checks need it too.
     set_source_files_properties(src/kernels/cpu/iq_avx2.cpp PROPERTIES COMPILE_OPTIONS "/arch:AVX2;/fp:strict")
     set_source_files_properties(src/kernels/cpu/iq_avx512_one.cpp PROPERTIES COMPILE_OPTIONS "/arch:AVX512")
+    set_source_files_properties(src/kernels/cpu/iq2v_rows.cpp PROPERTIES COMPILE_OPTIONS "/arch:AVX2;/fp:strict")
+    set_source_files_properties(src/kernels/cpu/iq3v_rows.cpp PROPERTIES COMPILE_OPTIONS "/arch:AVX2;/fp:strict")
   elseif(STRATA_CPU_X86)
+    # (the second-generation IQ2 / IQ3 rows: each function's instruction set its own, no contraction; run only
+    #  where the caller's CPU check says so - saguaro-hy4's src/hy4/ds4/ds4_iq_cpu.cpp)
+    set_source_files_properties(src/kernels/cpu/iq2v_rows.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+    set_source_files_properties(src/kernels/cpu/iq3v_rows.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
     # (no VNNI / VBMI needed - cpu_avx512bw_ok() is enough to run them; no FP contraction: their sums must take
     # ggml-cpu's float steps exactly, see iq_avx512.cpp)
     set_source_files_properties(src/kernels/cpu/iq_avx512.cpp PROPERTIES COMPILE_OPTIONS
