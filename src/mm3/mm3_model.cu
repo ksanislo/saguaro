@@ -2829,13 +2829,13 @@ struct Model::Impl {
             std::vector<int> cand;
             for (int t = 0; t < T; ++t) {
                 // PLAN-turbo-live (review finding 4): the same filter the token path uses - a pick its request's
-                // turbo_drop left out (weight 0) or its turbo_skip=ram leaves un-served is no staging candidate:
+                // turbo_drop left out (the -1 marker) or its turbo_skip=ram leaves un-served is no candidate:
                 // it would copy a blob over PCIe for a token that goes without the expert (the window path's
                 // decision loop below leaves those out).
                 const bool tskip2 = (turbo_row(turbo_seq(t, T)) >> 4) == 2;
                 for (int i = 0; i < g.k_exp; ++i) {
                     const int x = rtop[t * g.k_exp + i];
-                    if (rw[t * g.k_exp + i] > 0.0f && !tskip2 && on_cpu(l, d, x) && pooled(l, x) &&
+                    if (rw[t * g.k_exp + i] >= 0.0f && !tskip2 && on_cpu(l, d, x) && pooled(l, x) &&
                         std::find(cand.begin(), cand.end(), x) == cand.end())
                         cand.push_back(x);
                 }
@@ -2851,7 +2851,7 @@ struct Model::Impl {
                 if (i >= g.k_exp) continue;
                 const int x = rtop[t * g.k_exp + i];
                 const float wt = rw[t * g.k_exp + i] * g.scale;
-                if (wt == 0.0f) continue;   // (PLAN-turbo-live: turbo_drop left it out - no weight, no plan, no count)
+                if (wt < 0.0f) continue;   // (PLAN-turbo-live: the turbo_drop marker - no weight, no plan, no count)
                 ++prof[li * g.n_exp + x];
                 const int tsk = turbo_row(turbo_seq(t, T)) >> 4;
                 if ((tsk == 2 || (tsk == 1 && !pooled(l, x))) && on_cpu(l, d, x))
@@ -3212,11 +3212,11 @@ struct Model::Impl {
         if (!routes_ok(top, g.k_exp, li, err, &l, &d, 1)) return false;
         // PLAN-turbo-live: this conversation's request's skip level (its byte's top nibble; turbo_skip): "ram" (2)
         // goes without every pick not in VRAM, "ssd" (1) without every pick the files (not the RAM pool) would
-        // serve; the router already zeroed the picks its turbo_drop left out (w 0: no weight, no plan, no count).
-        // 0: none of these branches opens - the plan and its counts are today's, bit for bit.
+        // serve; the router already marked the picks its turbo_drop left out (weight -1: no plan, no count - a
+        // real zero-weight pick, no Turbo asked for, keeps today's path).  0: no branch opens, today's bits.
         const int tskip = turbo_row(bound) >> 4;
         for (int i = 0; i < g.k_exp; ++i)
-            if (w[i] > 0.0f) ++prof[li * g.n_exp + top[i]];   // (a dropped pick is not a routing: not counted)
+            if (w[i] >= 0.0f) ++prof[li * g.n_exp + top[i]];   // (a dropped pick is not a routing: not counted)
         st.profiled += g.k_exp;
         std::vector<char> busy((size_t) d.n_slots, 0);
         unsigned long long* ph = d.plan_h;
@@ -3229,7 +3229,7 @@ struct Model::Impl {
         if (lane && lane_copy > 0) {
             int cand = 0;
             for (int i = 0; i < g.k_exp; ++i)
-                cand += w[i] > 0.0f && tskip != 2 && on_cpu(l, d, top[i]) && pooled(l, top[i]);
+                cand += w[i] >= 0.0f && tskip != 2 && on_cpu(l, d, top[i]) && pooled(l, top[i]);
             static const bool dh_on = [] {
                 const char* v = ::mm3::env("MM3_DECODE_HELP");
                 return v != nullptr && std::atoi(v) != 0;
@@ -3246,7 +3246,7 @@ struct Model::Impl {
         }
         int help_e[8], help_n = 0;
         for (int i = 0; i < g.k_exp; ++i) {
-            if (w[i] == 0.0f) {   // (PLAN-turbo-live: its pick dropped by the router: no plan entry, no weight)
+            if (w[i] < 0.0f) {   // (PLAN-turbo-live: the router's drop marker: no plan entry, no weight)
                 ph[i] = 0;
                 pw[i] = 0.0f;
                 continue;

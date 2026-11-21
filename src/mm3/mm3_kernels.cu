@@ -1320,9 +1320,11 @@ __global__ void route_kernel(const float* logits, const float* bias, int T, int 
     }
     __syncwarp();
     // PLAN-turbo-live: this row's conversation's turbo_drop (the byte turb_seq[rows>>4t]'s low nibble): the route
-    // runs top-k minus N - the N lightest picks go to weight 0 (their expert is not planned, not staged, not on
-    // the CPU lane, not counted) and the kept ones renormalise by the kept sum, the top-1 always running.  0:
-    // the line below, today's bits.
+    // runs top-k minus N - the N lightest picks' weights go to the drop MARKER -1.0f (their expert is not planned,
+    // not staged, not on the CPU lane, not counted) and the kept ones renormalise by the kept sum, the top-1
+    // always running.  A marker, not 0: a real pick's sigmoid can underflow to exactly 0 on extreme logits and
+    // must then keep today's behavior (planned, counted, adds nothing) with no Turbo asked for - every consumer
+    // below tests < 0.  0: the line below, today's bits.
     int drop = turb_seq != nullptr && t < 16 ? (int) (turb_seq[(rows >> (4 * t)) & 15u] & 15u) : 0;
     if (drop > K - 1) drop = K - 1;   // (the top-1 always runs)
     if (drop <= 0) {
@@ -1339,7 +1341,7 @@ __global__ void route_kernel(const float* logits, const float* bias, int T, int 
     float ks = kept && lane < K ? v : 0.0f;
 #pragma unroll
     for (int o = 16; o > 0; o >>= 1) ks += __shfl_xor_sync(0xffffffffu, ks, o);
-    if (lane < K) w[(size_t) t * K + lane] = kept ? v / ks : 0.0f;
+    if (lane < K) w[(size_t) t * K + lane] = kept ? v / ks : -1.0f;   // (-1: the marker, never a real weight)
 }
 
 // ------------------------------------------------------------------ the routed experts' plan on the device
@@ -1363,9 +1365,10 @@ __global__ void __launch_bounds__(kPlanEnt) plan_dev_kernel(const int* __restric
             const int x = top[t * K + i];
             p = tab[x];
             wt = __fmul_rn(w[t * K + i], scale);
-            // PLAN-turbo-live: a weight-0 pick (turbo_drop left it out) is not planned and not counted - the
-            // router's own rule; every real pick weighs more than 0, so this branch never opens without Turbo.
-            if (wt == 0.0f) p = 0ull;
+            // PLAN-turbo-live: the drop MARKER (turbo_drop: the router wrote -1.0f) is not planned and not
+            // counted - and its weight is stored clean (0) so no sum ever sees it.  A real pick whose sigmoid
+            // underflowed to 0 (wt 0, no Turbo asked for) keeps today's path: planned, counted, adds nothing.
+            if (wt < 0.0f) { p = 0ull; wt = 0.0f; }
             if (counts != nullptr && p != 0ull) atomicAdd(counts + x, 1u);
         }
         plan_ptr[e] = p;
