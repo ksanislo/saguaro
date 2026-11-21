@@ -23935,10 +23935,22 @@ struct Model::Impl {
             for (const uint8_t* p : s.ckv) if (p != nullptr) ++reps;
             kv_tok += (reps > 0 ? reps : 1) * ckv_rb() / (size_t) (s.ratio > 1 ? s.ratio : 1);
         }
+        // (parity 14: the page's Settings "Experts" row - the routed total and the RAM tier's slot capacity, the
+        //  same tier settings tiers() reports as STAT vram_slots/ram_slots: the copy pool, the store, the read-ahead
+        //  window, or (in place, the page cache holding the lane) every CPU-lane expert)
+        double rb = 0;
+        for (const Layer& l : L)
+            if (!l.mtp) rb += (double) (l.n_exp - l.n_vram) * (double) l.blob;
+        const double blob = nh > 0 ? rb / nh : 0.0;
+        const int ram_cap = ram_held > 0    ? ram_held
+                            : store         ? (int) store->slots_max()
+                            : file_experts && blob > 0.0
+                                ? (int) std::min<double>(nh, (double) warm_bytes / blob)
+                                            : nh;
         std::snprintf(b, sizeof b, "INFO context=%lld kv=fp4 kv_resident=%lld kv_bytes_token=%zu expert_slots=%d engine_kind=ds4 "
-                                   "cpu_experts=%d ram_experts=%d cpu_threads=%d engine=ds4-0.1",
+                                   "cpu_experts=%d ram_experts=%d cpu_threads=%d engine=ds4-0.1 experts=%d ram_slots=%d",
                       (long long) o.max_context, (long long) o.max_context, kv_tok, g.nl * g.n_exp - nh, nh, ram_held,
-                      cpu_threads());
+                      cpu_threads(), g.nl * g.n_exp, ram_cap);
         v.push_back(b);
         // The helper is allocated separately from Dev::experts, including its recent-expert slots.
         const size_t helper_bytes = helper_pool != nullptr ? helper_used : 0;
@@ -24374,6 +24386,7 @@ Model::Tiers Model::tiers() const {
     for (const Layer& l : m.L) {
         if (l.mtp) continue;
         t.vram += l.n_vram;
+        t.vram_slots += l.n_slots > 0 ? l.n_slots : l.n_vram;   // (the layer's VRAM expert slots: the tier's capacity)
         t.vram_gb += (double) l.n_vram * (double) l.blob / 1e9;
         t.cpu += l.n_exp - l.n_vram;
         cb += (double) (l.n_exp - l.n_vram) * (double) l.blob;
@@ -24388,6 +24401,13 @@ Model::Tiers Model::tiers() const {
     if (m.store) t.ram = (int) std::min<size_t>((size_t) t.cpu, (size_t) t.ram + m.store->held());
     t.ram_gb = t.ram * t.cpu_blob / 1e9;
     t.disk_gb = std::max(0, t.cpu - t.ram) * t.cpu_blob / 1e9;
+    // the RAM tier's slot capacity (parity 14): the pool's slots, the store's slots, the read-ahead's window, or
+    // (in place, where the page cache holds the whole lane) every CPU-lane expert - the same settings tiers() reads
+    t.ram_slots = m.ram_held > 0      ? m.ram_held
+                  : m.store           ? (int) m.store->slots_max()
+                  : m.file_experts && t.cpu_blob > 0
+                      ? (int) std::min<double>(t.cpu, (double) m.warm_bytes / t.cpu_blob)
+                                      : t.cpu;
     return t;
 }
 

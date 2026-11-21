@@ -435,6 +435,8 @@ public:
     /// bytes on average (the SSD's reads a token -> experts a token)
     struct Tiers {
         int vram = 0, ram = 0, cpu = 0;
+        int vram_slots = 0;   // (parity 14: the tier's capacity - the layers' VRAM expert slots)
+        int ram_slots = 0;    // ... the RAM tier's: the copy pool, the store, the read-ahead window, or (in place) the lane
         double vram_gb = 0, ram_gb = 0, cpu_blob = 0;
         double disk_gb = 0;   // the CPU lane's experts neither copied nor read ahead into RAM: on the SSD only
     };
