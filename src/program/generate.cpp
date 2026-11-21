@@ -2971,9 +2971,8 @@ static int glm_pack_generate(const Options& o) {
             // running the NextN block's draft (same tokens as the loop below)
             // SAGUARO_GLM_SPEC_WIN=1: the MTP drafts + the pipelined verify window through a split (decode_spec_pipe)
             int64_t n_spec = 0;
-            int spec_win = 0;
-            if (const char* e = getenv("SAGUARO_GLM_SPEC_WIN")) spec_win = std::atoi(e) != 0;
-            const bool piped = spec_win != 0;
+            // (unset: on for a split of three or more Volta GPUs - Glm5Model::spec_win_mode)
+            const bool piped = model.spec_win_mode() != 0;
             const bool done_ok = piped ? model.decode_spec_pipe(sp, max_new, on_token, n_spec, err)
                                        : model.decode_spec(sp, max_new, on_token, n_spec, err);
             if (!done_ok) {
@@ -4407,10 +4406,7 @@ static int glm_pack_generate(const Options& o) {
         }
         conv_tick();
         Gen* only = gens.size() == 1 ? gens[0].get() : nullptr;
-        static const bool spec_win_env = [] {
-            const char* e = getenv("SAGUARO_GLM_SPEC_WIN");
-            return e != nullptr && std::atoi(e) != 0;
-        }();
+        static const bool spec_win_env = model.spec_win_mode() != 0;
         if (only != nullptr && !only->inflight && !only->reading && multi_spec && !step_no_spec && model.spec_ready() && spec_win_env) {
             Gen& g = *only;
             bind_ctx(g.ctx);

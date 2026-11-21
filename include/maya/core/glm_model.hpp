@@ -796,6 +796,11 @@ public:
     /// same tokens the token-at-a-time loop would produce for the same samples.  The sequence state is left for the
     /// next request to restore (snapshot) or reset.
     bool spec_ready() const;
+    /// SAGUARO_GLM_SPEC_WIN as this split takes it: 1 = the MTP drafts through the pipelined verify window
+    /// (decode_spec_pipe: every GPU of the split on a different token), 0 = the two-group speculative decode
+    /// (decode_spec).  Unset: 1 on a GLM-5.3-Flash split of three GPUs or more that are all Volta (compute capability
+    /// 7.0: Tesla V100, Titan V, Quadro GV100 - #235), 0 elsewhere.  Any part answers for the whole split.
+    int spec_win_mode() const;
     bool decode_spec(maya::kernels::SamplerParams& sp, int64_t max_new, const std::function<bool(int)>& emit,
                      int64_t& produced, std::string& err);
     uint64_t spec_steps_ = 0, spec_hits_ = 0;              // speculative positions, accepted
