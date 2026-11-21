@@ -348,3 +348,45 @@ Outside the preview, two GPUs with a loop run as expert parallel (`SAGUARO_IK2_E
 checked on Windows, an RTX 5080 with an RTX 4060 Ti); the drafter is one GPU's.  Not done: the loop in the layer-major prompt passes (`SAGUARO_IK2_SUP`: off
 for a looped model), a second card for the KV cache (a million tokens is 16 GiB of it), the drafter's own launches
 as a graph (2-3 ms a step now).
+
+## 9. Saguaro: Turing (sm_75), one and two Tesla T4s
+
+`saguaro-ik2` is upstream's `maya-ik2` (v1.1.72) built for sm_75 and newer; the sm_80+ code is upstream's, unchanged
+behind `__CUDA_ARCH__`. Sections 1-8 are upstream's text with our names (`saguaro-ik2`, `SAGUARO_IK2_*`).
+
+**What needed Ampere, and what Turing does instead** (`src/ik2/ik2_kernels.cu`):
+
+| Upstream | On sm_75 | Result |
+| --- | --- | --- |
+| `mma.sync` m16n8k16 (FP16 in, FP32 sums): the prefill attention, a token's attention, the NVFP4 experts on the tensor cores | two m16n8k8 steps over the same fragments (`mma16816`) | the same products and FP32 sums, a k of 8 at a time; FP16 tensor cores |
+| `cp.async` (a K / V tile and its bias copied a tile ahead) | the copy made in place, the tile loaded when it is used | the same values |
+| the prefill attention's 88 KB of shared memory (two tiles, FP8's raw bytes) | one tile, an FP8 tile made FP16 as it loads: 52 KB (Turing has 64 KB) | the same values |
+| the drafter's BF16 GEMMs (`--draft`) | a matrix exact in FP16 kept FP16, its BF16 input made FP16 (saturating) | exact but past FP16's range |
+| the preview's gate (one 24 GB card, sm_80) | gone: a small card streams experts, two run expert parallel | |
+
+Nothing else is Ampere's: the NVFP4 blocks are decoded in the kernels on every GPU (no FP4 hardware path), the E4M3
+cache conversions have their bit forms below sm_89, `ldmatrix` and the FP16 `f16x2` arithmetic are Turing's. The CPU
+lane (`SAGUARO_IK2_CPU=1`) has AVX rows for a CPU without AVX2 / FMA (`ik2_cpu.cpp`), chosen at run time.
+
+**Inkling-2-Mini UD-Q4_K_XL's tensors**: experts of layers 0-19 NVFP4 (10.68 GiB), of layers 20-23 Q8_0 (4.03 GiB);
+dense matrices Q8_0 (1.55 GiB, 0.47 of it the embedding, which stays on the host); norms, convs, routers and loop
+gates F32 (0.14 GiB). 16.4 GiB in all - more than one T4's 15.6, so:
+
+- **One T4**: the experts in pinned host memory (14.7 GiB of RAM), the dense weights kept as the GGUF's blocks
+  (automatic under 22 GiB), and what VRAM is left a cache of the experts - about 70-75% of them at a context of
+  32,768; a missing expert is copied in when a token picks it. `SAGUARO_IK2_ROOM_MB` sets the VRAM left free beside
+  the cache (2048 by default).
+- **Two T4s**: expert parallel (automatic for a looped model on `--gpus 2`): every expert in VRAM, GPU 0 with the
+  dense weights (FP16) and the K / V cache, GPU 1's share of the experts by the room each card has
+  (`SAGUARO_IK2_EP_SPLIT` sets it). A context of 131,072 in FP16 (4.5 GiB of cache) leaves room for every expert.
+
+`saguaro-ik2 --model FILE --plan 15.4 --gpus N --max-context N` prints this plan from the file alone, no GPU.
+
+**Check on the cards**: `tools/ik2/t4_check.sh --gpus 2,3` runs `ik2_kernels_test` (each kernel against a double
+reference - on a T4 that is the m16n8k8 and in-place forms), then loads the model on one card and on two, asks a
+greedy question, reads a long prompt, and prints the speeds and each card's VRAM. `ik2_cpu_test` (no GPU) holds the
+CPU lane's rows to the format's definition.
+
+**Configs**: `configs/Inkling-2-Mini-UD-Q4_K_XL.json` (two cards) and `configs/Inkling-2-Mini-UD-Q4_K_XL.1card.json`.
+The tokenizer folder they name: `python tools/strata_tokenizer.py --gguf FILE --out <model folder> --chat-template
+tools/ik2/chat_template.jinja --check`.
