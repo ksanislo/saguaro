@@ -340,7 +340,8 @@ void SessionDir::add_written_locked(const std::string& path, const SavedConversa
                    entries_.end());
     size_t dropped = 0;
     for (size_t i = 0; i < entries_.size();) {
-        if (entries_[i].state != State::loading &&
+        // (a file the writer is extending stays: its own write decides what it holds next)
+        if (entries_[i].state != State::loading && entries_[i].state != State::writing &&
             supersedes(image.live, chain ? *chain : image.checkpoints, entries_[i].peek)) {
             drop_entry_locked(i, "superseded");
             ++dropped;
