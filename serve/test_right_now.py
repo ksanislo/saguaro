@@ -82,7 +82,7 @@ class LiveChats(unittest.TestCase):
         self.assertEqual(sorted(chats), [11, 12, 13])
         self.assertEqual(chats[11]["state"], "reading")
         self.assertEqual((chats[11]["prompt_read"], chats[11]["prompt_total"], chats[11]["prefill_tok_s"]),
-                         (400, 1000, 900.0))
+                         (400, 1000, None))
         self.assertEqual(chats[12]["state"], "writing")
         self.assertGreater(chats[12]["tok_s"], 0)
         self.assertEqual(chats[12]["generated"], 15)

@@ -3614,7 +3614,10 @@ class Service:
             if state == "writing":                # (the same phase detection the single live.phase uses, per request)
                 state = "thinking" if ph == "thinking" else \
                     "tool" if ph.startswith("writing a tool call") or ph == "tool call complete" else "writing"
-            rate = st.read_avg if st.read_avg is not None else (st.read_last or 0.0)
+            # its own read: the tokens counted for THIS chat over the time since the engine took it (the engine's
+            # progress rates are the reader's, shared by every chat reading at once)
+            n_own = self._read_counted(st) if state == "reading" else 0
+            rate = n_own / (now - st.engine_t0) if n_own and st.engine_t0 and now > st.engine_t0 else 0.0
             entry = dict(v, id=st.id, label=st.api, conv=st.conv.id if st.conv else None, state=state,
                          prefill_tok_s=round(max(0.0, rate), 1) if state == "reading" and rate else None)
             used = (st.prompt_tokens or 0) + (st.generated or 0)
@@ -3712,7 +3715,10 @@ class Service:
                 if state == "writing":
                     state = "thinking" if ph == "thinking" else \
                         "tool" if ph.startswith("writing a tool call") or ph == "tool call complete" else "writing"
-                rate = st.read_avg if st.read_avg is not None else (st.read_last or 0.0)
+                    # its own read: the tokens counted for THIS chat over the time since the engine took it (the engine's
+                # progress rates are the reader's, shared by every chat reading at once)
+                n_own = self._read_counted(st) if state == "reading" else 0
+                rate = n_own / (now - st.engine_t0) if n_own and st.engine_t0 and now > st.engine_t0 else 0.0
                 e["state"] = state
                 e["turn"] = dict(v, state=state, prefill_tok_s=(round(max(0.0, rate), 1)
                                      if state == "reading" and rate else None))
