@@ -152,7 +152,7 @@ def run(exe: str, gpus: list[int], pack: str, ctx: int, slots: str, keep: bool,
 def main() -> int:
     ap = argparse.ArgumentParser(description="pictures in the kept conversations")
     ap.add_argument("--pack", required=True)
-    ap.add_argument("--exe", default=str(Path(__file__).resolve().parents[2] / "build" / "maya-ds4"))
+    ap.add_argument("--exe", default=str(Path(__file__).resolve().parents[2] / "build" / "saguaro-ds4"))
     ap.add_argument("--gpus", default="")
     ap.add_argument("--config", default="")
     ap.add_argument("--ctx", type=int, default=32768)

@@ -3,7 +3,7 @@
 each conversation gets alone, a STOP ends one alone, the kept conversations (SAGUARO_DS4_SLOT_KEEP) work per lane, a new
 prompt is read while the others answer - and what it costs and what it gains, measured.
 
-    python tools/ds4/parallel_test.py --pack /mnt/data/models/.../maya-ds4 [--exe build/maya-ds4] [--gpus 0,2,1]
+    python tools/ds4/parallel_test.py --pack /mnt/data/models/.../maya-ds4 [--exe build/saguaro-ds4] [--gpus 0,2,1]
                                       [--config maya-ds4.json] [--lanes 3] [--skip-long] [--measure] [--spec 0]
 
 The engine gets the environment this test inherits plus, with `--config <maya-ds4.json>`, that config's DeepSeek

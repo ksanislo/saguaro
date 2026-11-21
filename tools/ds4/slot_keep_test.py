@@ -2,7 +2,7 @@
 """tools/ds4/slot_keep_test.py - the kept conversations (SAGUARO_DS4_SLOT_KEEP): a prompt that does not continue the
 conversation in the model takes the kept one it does continue back, so A, B, A's next turn reads only the new tokens.
 
-    python tools/ds4/slot_keep_test.py --pack /mnt/data/models/.../maya-ds4 [--exe build/maya-ds4] [--gpus 0,2,1]
+    python tools/ds4/slot_keep_test.py --pack /mnt/data/models/.../maya-ds4 [--exe build/saguaro-ds4] [--gpus 0,2,1]
                                        [--config maya-ds4.json]
 
 The engine gets the environment this test inherits plus, with `--config <maya-ds4.json>`, that config's DeepSeek
