@@ -645,7 +645,6 @@ int serve(mm3::Model& m, const std::vector<int>& eos, int chunk, bool spec_on, f
             std::fflush(stdout);
             continue;
         }
-        const double t0 = now() * 1e3;
         // the state's shared start (the last token is always read again: its logits are this request's first)
         size_t from = 0;
         while (from < state.size() && from + 1 < r.ids.size() && state[from] == r.ids[from]) ++from;
@@ -683,6 +682,9 @@ int serve(mm3::Model& m, const std::vector<int>& eos, int chunk, bool spec_on, f
         }
         state.resize(from);
         held.clear();
+        // (parity 2: the read's own clock - it starts after the restore block above, so the conversation save and
+        //  read-back that ran there are not charged to this read; PP and both DONEs below report this clock)
+        const double t0 = now() * 1e3;
         std::vector<mm3::Model::Image> rows;
         if (!(pics.empty() && std::find(r.ids.begin(), r.ids.end(), m.vision() ? m.vision()->image_token : -1) ==
                                   r.ids.end()) &&
@@ -741,7 +743,9 @@ int serve(mm3::Model& m, const std::vector<int>& eos, int chunk, bool spec_on, f
         m.read_end();
         if (!ok) {
             std::printf("ERR %s\n", err.c_str());
-            std::printf("DONE 0 %zu 0.0 0.0 cancel 0 0 0 0 0\n", r.ids.size());
+            // (parity 3: a read that partly happened reports its real end: the time it ran and the base it read
+            //  from - not the zeros of a read that never began)
+            std::printf("DONE 0 %zu %.1f 0.0 cancel 0 0 %zu 0 0\n", r.ids.size(), t1 - t0, from);
             std::fflush(stdout);
             state.clear();
             held.clear();
@@ -781,7 +785,8 @@ int serve(mm3::Model& m, const std::vector<int>& eos, int chunk, bool spec_on, f
                         "ram_gb=%.2f %s=%.3f %s=0 promo=%.3f disk_gb=%.2f%s\n",
                         ms > 0 ? 1000.0 * (double) produced / ms : 0.0, produced > 0 ? ms / (double) produced : 0.0,
                         ex > 0 ? 1.0 - cx / ex : 1.0, cx * per, s.resident, s.pooled, s.vram_gb, s.pinned_gb,
-                        s.pooled ? "ram_fetch" : "disk", cx * per, s.pooled ? "disk" : "ram_fetch",
+                        s.pooled ? "ram_fetch" : "disk", (double) (s.staged - s_dec.staged) * per,
+                        s.pooled ? "disk" : "ram_fetch",
                         (double) (s.promoted - s_dec.promoted) * per, std::max(0.0, s.all_gb - s.vram_gb - s.pinned_gb),
                         extra);
         };
@@ -1064,6 +1069,8 @@ int serve_multi(mm3::Model& m, const std::vector<int>& eos, int chunk, const std
         int tok = -1;              // the next token: written at the next step, then read
         size_t from = 0;
         double t0 = 0, t1 = 0;
+        double gap_ms = 0;       // (decode steps of the others taken inside its read: out of its PP / DONE ms)
+        long long d_acc = 0, d_off = 0;   // (its own drafts kept / offered: none - serve_multi has no drafter)
         long prof0 = 0, cpu0 = 0;  // (the engine's routings / CPU lane experts when its decode began)
         mm3::Cands cd;
     };
@@ -1085,8 +1092,10 @@ int serve_multi(mm3::Model& m, const std::vector<int>& eos, int chunk, const std
         std::printf("STAT tok_s=%.2f ms_tok=%.2f vram_hit=%.4f cpu=%.3f vram_used=%ld ram_used=%ld vram_gb=%.2f "
                     "ram_gb=%.2f %s=%.3f %s=0 promo=%.3f disk_gb=%.2f active=%zu\n",
                     ms > 0 ? 1000.0 * (double) multi_n / ms : 0.0, ms / n, xp > 0 ? 1.0 - cx / xp : 1.0, cx / n,
-                    s.resident, s.pooled, s.vram_gb, s.pinned_gb, s.pooled ? "ram_fetch" : "disk", cx / n,
-                    s.pooled ? "disk" : "ram_fetch", (double) (s.promoted - busy_s0.promoted) / n,
+                    s.resident, s.pooled, s.vram_gb, s.pinned_gb, s.pooled ? "ram_fetch" : "disk",
+                    (double) (s.staged - busy_s0.staged) / n,   // (parity 14: the named tier's real host-fetch lane:
+                    s.pooled ? "disk" : "ram_fetch",            //  staged copies - the other tier carries none)
+                    (double) (s.promoted - busy_s0.promoted) / n,
                     std::max(0.0, s.all_gb - s.vram_gb - s.pinned_gb), run.size());
     };
     auto release = [&](int s) {
@@ -1099,8 +1108,10 @@ int serve_multi(mm3::Model& m, const std::vector<int>& eos, int chunk, const std
         const double t2 = now() * 1e3;
         const auto& se = m.stats();
         const long long look = se.profiled - g.prof0, cpu = se.cpu_experts - g.cpu0;
-        std::printf("DONE %d %lld %zu %.1f %.1f %s 0 0 %zu %lld %lld\n", g.rid, g.produced, g.r.ids.size(), g.t1 - g.t0,
-                    t2 - g.t1, g.finish, g.from, look - cpu, look);
+        // (its read's own ms: the decode steps of the others between its chunks are not read time; the drafts fields
+        //  are its own counters - real, and zero: this path has no drafter, unlike serve()'s DSpark / lookup)
+        std::printf("DONE %d %lld %zu %.1f %.1f %s %lld %lld %zu %lld %lld\n", g.rid, g.produced, g.r.ids.size(),
+                    g.t1 - g.t0 - g.gap_ms, t2 - g.t1, g.finish, g.d_acc, g.d_off, g.from, look - cpu, look);
         std::fprintf(stderr,
                      "saguaro mm3 serve: request %d (sequence %d): prompt %zu tokens = %zu reused + %zu read in %.0f ms, "
                      "%lld generated in %.0f ms (%.2f tok/s, %zu running) - %s\n",
@@ -1426,7 +1437,7 @@ int serve_multi(mm3::Model& m, const std::vector<int>& eos, int chunk, const std
             }
             S.state.insert(S.state.end(), ids.begin() + (long) a, ids.begin() + (long) a + T);
             a += (size_t) T;
-            const double ms = now() * 1e3 - g.t0;
+            const double ms = now() * 1e3 - g.t0 - g.gap_ms;   // (the read's own time: the steps between are out)
             std::printf("PP %d %zu %zu %.1f %.1f %zu\n", g.rid, a, ids.size(), ms,
                         ms > 0 ? 1000.0 * (double) (a - bfrom2) / ms : 0.0, bfrom2);
             std::fflush(stdout);
@@ -1435,14 +1446,19 @@ int serve_multi(mm3::Model& m, const std::vector<int>& eos, int chunk, const std
                 cancel = true;
                 break;
             }
-            if (between && !run.empty()) step();   // (the running requests' next token)
+            if (between && !run.empty()) {   // (the running requests' next token: the read waits, its clock does not)
+                const double tg = now() * 1e3;
+                step();
+                g.gap_ms += now() * 1e3 - tg;
+            }
         }
         m.set_images({});
         m.read_end();
         g.t1 = now() * 1e3;
         if (!ok) {
             std::printf("ERR %d %s\n", g.rid, err.c_str());
-            std::printf("DONE %d 0 %zu 0.0 0.0 cancel 0 0 0 0 0\n", g.rid, ids.size());
+            // (parity 3: the read that partly happened: its real end - the time it ran and the base it read from)
+            std::printf("DONE %d 0 %zu %.1f 0.0 cancel 0 0 %zu 0 0\n", g.rid, ids.size(), g.t1 - g.t0 - g.gap_ms, bfrom2);
             std::fflush(stdout);
             S.state.clear();
             S.held.clear();
@@ -1451,7 +1467,7 @@ int serve_multi(mm3::Model& m, const std::vector<int>& eos, int chunk, const std
             return;
         }
         if (cancel) {
-            std::printf("DONE %d 0 %zu %.1f 0.0 cancel 0 0 %zu 0 0\n", g.rid, ids.size(), g.t1 - g.t0, bfrom2);
+            std::printf("DONE %d 0 %zu %.1f 0.0 cancel 0 0 %zu 0 0\n", g.rid, ids.size(), g.t1 - g.t0 - g.gap_ms, bfrom2);
             std::fflush(stdout);
             release(best);
             in.forget(g.rid);
