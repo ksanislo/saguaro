@@ -7285,6 +7285,25 @@ bool Glm5Model::fast_moe_experts(int il, const MoeIo& io, bool pred, int n_ah, c
     return true;
 }
 
+// SAGUARO_GLM_KDA_GRAPH: GLM-5.3-Flash's decode layers replayed as CUDA graphs - the recurrent (KDA) layers whole, the
+// DSA layers' FFN side (SAGUARO_GLM_DSA_FFN_GRAPH); the same kernels with the same arguments, so the same tokens, with
+// fewer launches.  1 = on, 0 = off.  Unset: on in CUDA builds, unless SAGUARO_GLM_DEFER_CPU asks for its deferral (which
+// needs direct launches); AMD (HIP) builds keep direct launches unless it is 1.
+// (read at every call, as before: tests/glm_pack_graph_test.cpp switches it within one process)
+static bool kda_graph_wanted() {
+    const char* e = getenv("SAGUARO_GLM_KDA_GRAPH");
+    if (e != nullptr && e[0] != '\0') return std::atoi(e) != 0;
+#if defined(MAYA_USE_HIP)
+    return false;
+#else
+    static const bool defer = [] {
+        const char* d = getenv("SAGUARO_GLM_DEFER_CPU");
+        return d != nullptr && std::atoi(d) != 0;
+    }();
+    return !defer;
+#endif
+}
+
 bool Glm5Model::fast_layers(int64_t p, bool hop_in, std::string& err) {
     (void) hop_in;
     if (!el_.empty() && !seq_grow(seq_index(), p + 1, err)) return false;   // elastic: position p backed
@@ -7295,10 +7314,27 @@ bool Glm5Model::fast_layers(int64_t p, bool hop_in, std::string& err) {
     bool pf_pending = false;
     float* Rc = state_;
     float* Ro = state_ + (int64_t) g.hc * g.n_embd;
-    const char* graph_opt = getenv("SAGUARO_GLM_KDA_GRAPH");
-    const bool graphs = graph_opt && std::atoi(graph_opt) != 0 && (F->win.pipe_t < 8) && !F->spec_gate &&
-                        !F->prof_on && !dumps && F->max_pf == 0 && F->n_ahead == 0 &&
-                        getenv("GLM_DUMP_H") == nullptr && cap_d_ == nullptr;
+    // the decode layers as CUDA graphs (kda_graph_wanted): the spec gate, profiling, dumps, prefetch, lookahead and the
+    // DFlash capture launch directly; so does an engine whose capture once failed
+    bool graphs = kda_graph_wanted() && !F->kda_graph_broken && (F->win.pipe_t < 8) && !F->spec_gate &&
+                  !F->prof_on && !dumps && F->max_pf == 0 && F->n_ahead == 0 &&
+                  getenv("GLM_DUMP_H") == nullptr && cap_d_ == nullptr;
+    // the route kernel's per-request arguments, in the graphs' key (fast_moe_route reads the same values): the
+    // sequence's live Turbo (drop / skip) and its miss_skip keys
+    const SeqTurbo& key_t = seq_turbo(route_seq(-1, 0));
+    const int key_turbo = key_t.drop * 4 + key_t.skip;
+    const float key_mw = key_t.miss_w;
+    const int key_mf = key_t.miss_from;
+    // a capture that failed (LayerGraphs::enqueue): this engine decodes with direct launches from now on
+    const auto graph_fallback = [&](std::string& e) -> bool {
+        if (!F->kda_graphs.capture_failed) return false;
+        F->kda_graphs.capture_failed = false;
+        F->kda_graph_broken = true;
+        graphs = false;
+        std::fprintf(stderr, "glm KDA graphs: capture failed (%s) - decoding with direct launches\n", e.c_str());
+        e.clear();
+        return true;
+    };
     static const bool dsa_ffn_graphs = [] {
         const char* v = getenv("SAGUARO_GLM_DSA_FFN_GRAPH");
         return v == nullptr || std::atoi(v) != 0;
@@ -7455,9 +7491,14 @@ bool Glm5Model::fast_layers(int64_t p, bool hop_in, std::string& err) {
         };
         if (graphs && !Ly.recr && dsa_ffn_graphs) {
             bool replayed = false;
-            const glmfast::LayerGraphs::Key key{F->cpu_plan, Rc, Ro, F->all_resident, F->win.pipe_t};
-            if (!F->kda_graphs.enqueue(il + 100, key, s, F->expected, Ly.moe ? 1 : 0, ffn_body, replayed, err))
-                return false;
+            float *const rc0 = Rc, *const ro0 = Ro;
+            const glmfast::LayerGraphs::Key key{F->cpu_plan, Rc, Ro, F->all_resident, F->win.pipe_t, key_turbo, key_mw, key_mf};
+            if (!F->kda_graphs.enqueue(il + 100, key, s, F->expected, Ly.moe ? 1 : 0, ffn_body, replayed, err)) {
+                if (!graph_fallback(err)) return false;
+                Rc = rc0;   // (the capture ran the host's swaps; nothing ran on the device)
+                Ro = ro0;
+                return ffn_body();
+            }
             if (replayed) std::swap(Rc, Ro);
             return true;
         }
@@ -7465,9 +7506,14 @@ bool Glm5Model::fast_layers(int64_t p, bool hop_in, std::string& err) {
         };
         if (graphs && Ly.recr) {
             bool replayed = false;
-            const glmfast::LayerGraphs::Key key{F->cpu_plan, Rc, Ro, F->all_resident, F->win.pipe_t};
-            if (!F->kda_graphs.enqueue(il, key, s, F->expected, Ly.moe ? 1 : 0, body, replayed, err))
-                return false;
+            float *const rc0 = Rc, *const ro0 = Ro;
+            const glmfast::LayerGraphs::Key key{F->cpu_plan, Rc, Ro, F->all_resident, F->win.pipe_t, key_turbo, key_mw, key_mf};
+            if (!F->kda_graphs.enqueue(il, key, s, F->expected, Ly.moe ? 1 : 0, body, replayed, err)) {
+                if (!graph_fallback(err)) return false;
+                Rc = rc0;
+                Ro = ro0;
+                if (!body()) return false;
+            }
             // Capture executes the host pointer swaps; replay only executes device
             // work. Maintain the identical residual convention in both cases.
             if (replayed) {
