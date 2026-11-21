@@ -166,6 +166,16 @@ if(STRATA_BUILD_CONVERSATION_TESTS)
   target_include_directories(session_log_test PRIVATE include)
   target_link_libraries(session_log_test PRIVATE Threads::Threads)
   add_test(NAME session_log_test COMMAND session_log_test)
+  # the parked conversations' release policy (header-only, CPU)
+  add_executable(park_policy_test src/core/park_policy_test.cpp)
+  target_include_directories(park_policy_test PRIVATE include)
+  add_test(NAME park_policy_test COMMAND park_policy_test)
+  # ... carried out on a real conversation cache and session folder
+  add_executable(park_release_test src/core/park_release_test.cpp src/core/session_dir.cpp src/core/session_log.cpp
+                 src/core/conversation_file.cpp)
+  target_include_directories(park_release_test PRIVATE include)
+  target_link_libraries(park_release_test PRIVATE Threads::Threads)
+  add_test(NAME park_release_test COMMAND park_release_test)
 endif()
 
 if(STRATA_HIP_GFX906)
