@@ -10590,13 +10590,14 @@ int main(int argc, char** argv) {
         Clock::time_point pp_run_t0{};
         auto pp_running_ms = [&]() -> double {
             double ms = (double) pp_run_us.load(std::memory_order_relaxed) / 1000.0;
-            if (pp_running.load(std::memory_order_relaxed))
+            // acquire: the release store in pp_run_begin orders the pp_run_t0 write before this flag
+            if (pp_running.load(std::memory_order_acquire))
                 ms += std::chrono::duration<double, std::milli>(Clock::now() - pp_run_t0).count();
             return ms;
         };
         auto pp_run_begin = [&]() {
             pp_run_t0 = Clock::now();
-            pp_running.store(true, std::memory_order_relaxed);
+            pp_running.store(true, std::memory_order_release);
         };
         auto pp_run_end = [&]() {
             if (!pp_running.exchange(false, std::memory_order_relaxed)) return;
