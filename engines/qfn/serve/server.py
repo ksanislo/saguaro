@@ -1290,6 +1290,9 @@ class StrataEngine:
         # what each slot's sessions hold (prompt + every token a window fed), so a conversation's next turn goes to
         # the slot that has its start (the engine checks it again); when the slot was last used
         self.slot_held: list[list[int]] = [[] for _ in range(self.batch)]
+        # SAGUARO_SLOT_SOLO: what the engine's main context holds after the last solo request or old-way admission (a
+        # guess that only steers routing; written and read by the request that has the control lines)
+        self.main_held: list[int] = []
         self.slot_used = [0.0] * self.batch
         self.slot_live: list[dict | None] = [None] * self.batch   # /metrics: the request in each slot
         # #1012: the admission state belongs to the server, not to one engine process.  restart() runs this again
@@ -2125,9 +2128,16 @@ class StrataEngine:
                 if keep_slot is not None:
                     print(f"[strata] parallel: slot {keep_slot} holds this conversation: its solo turn reads beside "
                           f"the slots (SAGUARO_SLOT_KEEP)", flush=True)
+                if alone and left > 1 and keep_slot is None and not embeddings:
+                    keep_slot = self._solo_to_slot(prompt)
+                    if keep_slot is not None:
+                        print(f"[strata] parallel: the main context holds another conversation "
+                              f"({len(self.main_held)} tokens): this one's solo turn goes to slot {keep_slot} "
+                              f"(SAGUARO_SLOT_SOLO)", flush=True)
                 if alone and left > 1 and keep_slot is None:
                     head = f"GENI {left}{keys} {embeddings}" if embeddings else f"GEN {left}{keys}"
                     self._last_done = None                  # (#879: this request's DONE decides below)
+                    self.main_held = []                     # (until its DONE: the main context is being rewritten)
                     deadline = getattr(cancel, "_strata_queue_deadline", None)
                     if deadline is not None and time.monotonic() >= deadline:
                         raise QueueWaitExpired("the inference queue wait deadline expired; retry later")
@@ -2169,6 +2179,8 @@ class StrataEngine:
                         out.append(t)
                         yield t
                     raise_bad_finish(self._done_finish())    # #879 / no VRAM (never promoted to a slot)
+                    if self._yielded is None and not cancel.is_set():
+                        self.main_held = (list(ids) + out)[:-1] if out else list(prompt)
                     if self._yielded is not None and reserved is not None and self._yielded[0] == reserved:
                         slot, reserved = reserved, None     # gave way: the read goes on in that slot (below)
                     elif reserved is not None:              # it did not give way: the slot is free again
@@ -2338,6 +2350,7 @@ class StrataEngine:
                         break
                     cont = bool(self._ctl_result and self._ctl_result[1])
                     phase = "slot" if cont else "none"
+                    self.main_held = list(prompt) if cont else []   # the old way: read in the main context first
                     while pending:
                         t = pending.pop(0)
                         out.append(t)
@@ -2458,6 +2471,7 @@ class StrataEngine:
                     if spill is not None:
                         self._next_pass.spill = spill
                 elif phase == "admit":
+                    self.main_held = []                 # (an old-way admission left half-way)
                     line = self._drain_control("BADM", born=born)
                     if line and line.startswith("BADM ") and line.split()[2:3] == ["1"]:
                         phase = "slot"
@@ -2578,13 +2592,44 @@ class StrataEngine:
         # assistant header), so a prompt that agrees with the held tokens up to there is that chat's next turn
         # too (#2518: it was only found by the engine's own source search, after pick_slot had sent it to another
         # slot and the request in that slot had overwritten the chat whose cache the next one needed)
-        h = self.slot_held[b]
+        return self._held_of(self.slot_held[b], prompt)
+
+    def _held_of(self, h: list[int], prompt: list[int]) -> int:
+        """The rule of _held_prefix for any held token list (a slot's, or the main context's)."""
         if not h:
             return 0
         if len(h) < len(prompt) and prompt[:len(h)] == h:
             return len(h)
         k = len(h) - 1 - h[::-1].index(self.TURN_ID) if self.TURN_ID in h else 0
         return k if 0 < k < len(prompt) and prompt[:k] == h[:k] else 0
+
+    def _solo_to_slot(self, prompt: list[int]) -> int | None:
+        """SAGUARO_SLOT_SOLO (on; needs SAGUARO_SLOT_KEEP and slot admission): a request that is alone, while the
+        main context holds ANOTHER long conversation that no slot has.  A solo turn there parks that conversation
+        (the whole of it copied out, and back in at its next turn), every time the two alternate.  It gets an empty
+        slot instead and keeps it (SAGUARO_SLOT_KEEP), so the other one stays in the main context.
+        None: the solo path (a short or new prompt, the main context's own conversation, no empty slot)."""
+        if (os.environ.get("SAGUARO_SLOT_SOLO", "1") == "0" or os.environ.get("SAGUARO_SLOT_KEEP", "1") == "0"
+                or not getattr(self, "slot_admit", False)
+                or (getattr(self, "slot_gs", 0) > 1 and not getattr(self, "slot_keep", False))):
+            return None
+        held = getattr(self, "main_held", None) or []
+        need = self.SLOT_KEEP_MIN_TOKENS
+        if len(prompt) < need or len(held) < need:
+            return None
+        if self._held_of(held, prompt) * 2 >= max(len(held), len(prompt)):
+            return None                                  # the main context's own conversation goes on there
+        now = time.monotonic()
+        with self.slot_cv:
+            for b in range(self.batch):
+                h = self.slot_held[b]
+                if len(h) >= len(held) and h[:len(held)] == held:
+                    return None                          # a slot has it too: the main context's copy is nobody's
+            kept = {b for b, k in self.slot_kept.items() if k[1] > now}
+            for b in self.slot_order:
+                if not self.slot_busy[b] and not self.slot_held[b] and b not in kept:
+                    return b
+        return None
 
     def _slot_holding(self, prompt: list[int]) -> int | None:
         """SAGUARO_SLOT_KEEP (on): a free slot that holds the start of this prompt - the conversation already has a
