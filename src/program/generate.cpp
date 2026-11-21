@@ -5667,12 +5667,6 @@ static int glm_pack_generate(const Options& o) {
                 else std::printf("ERR malformed GEN line\n");
                 continue;
             }
-            // PLAN-turbo-live: one conversation: the sequence is the engine's own; several: the request's bars go to
-            // the context gen_admit picks for it (and travel with it through `pending`)
-            if (!multi) {
-                model.set_miss_skip(model.seq_index(), req_msw, req_msf);
-                model.set_turbo(model.seq_index(), req_tdrop, req_tskip);
-            }
             lp_ctx.clear();   // a generation saves its own state over LOGP's
             cur_img_pos.clear();
             cur_img_rows.clear();
@@ -5726,6 +5720,13 @@ static int glm_pack_generate(const Options& o) {
                     continue;
                 }
             }
+            // PLAN-turbo-live: one conversation (multi branched off above): the request's bars go on the engine's
+            // own sequence HERE, past every error path of the line (a bad embeddings file, a bad logit_bias) - a
+            // request that dies on one of those never leaves its drop/skip behind for the next command to route
+            // with (the clear below runs whenever a run began).  Several conversations: the bars travel to the
+            // context gen_admit picks (and through `pending`), set and cleared there.
+            model.set_miss_skip(model.seq_index(), req_msw, req_msf);
+            model.set_turbo(model.seq_index(), req_tdrop, req_tskip);
             model.set_image_rows(cur_img_pos, cur_img_rows);
             run_request(toks, max_new, rq);
             model.set_image_rows({}, {});
