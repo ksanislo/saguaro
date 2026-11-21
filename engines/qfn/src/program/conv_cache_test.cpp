@@ -392,6 +392,25 @@ int main() {
                   restore_fits(full, none, 2, 0),
               "no sample, no cards, no need: do not refuse");
     }
+    {   // SAGUARO_REWIND_PARK / SAGUARO_SLOT_SOLO: when the main session's outgoing conversation is not parked
+        using strata::program::conv_cache::held_by_slot;
+        using strata::program::conv_cache::own_rewind;
+        // the live log's case: prompt 144219, 4914 generated, the next prompt resumes at the turn checkpoint 144214
+        check(own_rewind(144214, 149134, 144219, 1024), "the next turn of the same chat (reply re-rendered): not parked");
+        check(own_rewind(144219, 149134, 144219, 1024), "a resume exactly at the last prompt's end: not parked");
+        check(!own_rewind(12000, 149134, 144219, 1024), "another chat sharing only the system prompt: parked");
+        check(!own_rewind(143000, 149134, 144219, 1024), "an edit further back than the slack: parked");
+        check(own_rewind(143195, 149134, 144219, 1024) && !own_rewind(143194, 149134, 144219, 1024), "the slack's edge");
+        check(!own_rewind(144214, 149134, -1, 1024), "the last prompt's length unknown (restored, cancelled): parked");
+        check(!own_rewind(0, 149134, 144219, 1024), "nothing reused: parked");
+        check(!own_rewind(150000, 149134, 144219, 1024), "a resume past the live state is not this session's: parked");
+        const std::vector<int32_t> live{1, 2, 3, 4};
+        check(held_by_slot(live, std::vector<int32_t>{1, 2, 3, 4}), "a slot holding the same tokens owns the conversation");
+        check(held_by_slot(live, std::vector<int64_t>{1, 2, 3, 4, 5, 6}), "a slot further on in it owns it too");
+        check(!held_by_slot(live, std::vector<int32_t>{1, 2, 3}), "a slot holding only its start does not");
+        check(!held_by_slot(live, std::vector<int32_t>{1, 2, 9, 4, 5}), "another branch does not");
+        check(!held_by_slot(std::vector<int32_t>{}, std::vector<int32_t>{1}), "an empty session has nothing to own");
+    }
     std::printf(g_fail ? "FAIL\n" : "PASS\n");
     return g_fail ? 1 : 0;
 }

@@ -10155,6 +10155,8 @@ int main(int argc, char** argv) {
         std::vector<int32_t> live;
         std::vector<ImgKey> live_imgs, req_imgs;
         bool live_ok = false;
+        // the prompt length of the request that left `live` (-1: unknown), for conv_cache::own_rewind
+        int64_t live_prompt_n = -1;
         // #879: a window met non-finite logits: the next request drops every cached state first and reads from token 0
         bool nan_flush = false;
         // #3465: the non-finite logits came in a window that reads the PROMPT's tail (the last few tokens, read through
@@ -18758,6 +18760,27 @@ int main(int argc, char** argv) {
             spill_skip_rewind = !incoming && !borrow && slot_source < 0 && resume > 0 &&
                                 (int64_t) live.size() - resume <= 4096;
             bool park_ok = true;
+            // SAGUARO_REWIND_PARK=1 / SAGUARO_SLOT_SOLO=0 restore the parks below: the outgoing main conversation is
+            // not copied out when this request only rewrites its own reply, or when a batch slot holds all of it
+            static const bool rewind_park = [] { const char* v = std::getenv("SAGUARO_REWIND_PARK"); return v != nullptr && std::atoi(v) != 0; }();
+            static const bool slot_solo = [] { const char* v = std::getenv("SAGUARO_SLOT_SOLO"); return v == nullptr || std::atoi(v) != 0; }();
+            const int64_t prev_prompt_n = std::exchange(live_prompt_n, -1);
+            const char* park_skip = nullptr;
+            if (live_ok && !live.empty() && !borrow && !pin_sibling && park_worth) {
+                if (!rewind_park && !from_live && !incoming && slot_source < 0 &&
+                    strata::program::conv_cache::own_rewind(resume, (int64_t) live.size(), prev_prompt_n, 1024))
+                    park_skip = "this request rewinds its own reply (SAGUARO_REWIND_PARK)";
+                if (park_skip == nullptr && slot_solo && live_imgs.empty() && (!from_live || incoming || slot_source >= 0))
+                    for (const BSlot& sl : bs)
+                        if ((sl.active || sl.cached) && !sl.partial && !sl.reading && !sl.tainted && !sl.img &&
+                            sl.cvec == cvec_cached && strata::program::conv_cache::held_by_slot(live, sl.ids)) {
+                            park_skip = "a batch slot holds this conversation (SAGUARO_SLOT_SOLO)";
+                            break;
+                        }
+                if (park_skip != nullptr)
+                    std::fprintf(stderr, "saguaro serve: conversation cache: the outgoing %zu tokens are not parked: %s\n",
+                                 live.size(), park_skip);
+            }
             if (borrow && !pin_sibling && park_worth) {
                 conversations.guard(parked.serial);   // parking the outgoing conversation must not evict the donor
                 const bool parked_ok = park_current(0);
@@ -18785,7 +18808,7 @@ int main(int argc, char** argv) {
                         return 1;
                     }
                 }
-            } else if ((!from_live || incoming || slot_source >= 0) && !pin_sibling && park_worth) {
+            } else if ((!from_live || incoming || slot_source >= 0) && !pin_sibling && park_worth && park_skip == nullptr) {
                 park_ok = park_current(incoming ? incoming->bytes() : 0);
             }
             spill_skip_rewind = false;
@@ -21596,6 +21619,7 @@ int main(int argc, char** argv) {
                 live_imgs = imgs_below(req_imgs, (int64_t) live.size());
                 live_ok = o.prompt_cache > 0 && req_ckpt;   // ckpt=0: nothing to continue or park (#830)
                 if (nf_hit) live_ok = false;   // #879 (the next request's start drops the rest)
+                live_prompt_n = live_ok ? n : -1;
             } else if (!nf_hit && !read_vram && pp_exact && pp_reached > 0 && o.prompt_cache > 0 && req_ckpt &&
                        pp_reached <= (int64_t) cur.size()) {
                 // #1620: stopped between two windows (or before the first token was read): the session is exactly at
