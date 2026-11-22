@@ -2473,7 +2473,8 @@ bool Glm5Model::fast_setup_finish(std::string& err) {
     F->lane_pending = false;
     cudaSetDevice(dev_);
     if (!fast_cpu_lane_setup(err)) return false;   // keep the existing CPU pool/calibration for batched prefill
-    if (const char* h = getenv("SAGUARO_GLM_EXPERT_HELPER"); h != nullptr && h[0] != '\0')
+    if (n_parts_ == 1 && split_next_ == nullptr) (void) slot_bounce();   // AMD: at start-up (a split's: at its first switch)
+    if (const char* h = getenv("MAYA_GLM_EXPERT_HELPER"); h != nullptr && h[0] != '\0')
         if (!fast_helper_setup(err)) return false;
     F->svc = std::thread([this] { fast_service(); });
     const std::vector<int> svc_cpus = cpu_list_env("SAGUARO_GLM_SVC_CPUS" + std::to_string(dev_));
@@ -9055,6 +9056,7 @@ bool Glm5Model::ckpt_restore(int slot, std::string& err) {
 // per half the KDA snapshot and the DSA runs in that order.
 namespace {
 constexpr uint64_t kSlotMagic = 0x3254534C4159414Dull;   // "MAYALST2" (v2: the ik / ig ring's open pool only)
+constexpr int64_t kSlotChunk = (int64_t) 16 << 20;   // floats: slot_save / slot_load copy a run this much at a time
 
 // (start, floats) of each DSA cache run a slot of n positions holds on one half, in file order: in the state arena, or a
 // KV-streamed layer's latents in its host copy (kv_host[il])
@@ -9553,6 +9555,32 @@ void Glm5Model::slot_flush() {
                      std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(), w.first, w.second / 1e9);
 }
 std::vector<std::string> Glm5Model::slot_failed_writes() { return slot_writer().failures(); }
+// AMD: slot_save's and slot_load's bounce (kSlotChunk floats), pinned once and kept.  They copied through a 64 MiB
+// vector made for each call instead; on ROCm (7.2.3, gfx1201) the copy leaves part of that pageable memory registered
+// with the driver (an SVM range), so freeing the vector unmaps a range amdgpu still tracks and it stops every GPU queue
+// of the process (kgd2kfd_quiesce_mm) - at every conversation switch, whatever the THP settings.  On gfx1201 such a
+// stop sometimes hangs the MES and the host (ROCm/TheRock #9299, #9861).  nullptr (CUDA builds, or the allocation
+// failed): the vector, as before.
+float* Glm5Model::slot_bounce() {
+#if defined(STRATA_USE_HIP)
+    if (slot_bounce_ == nullptr && !slot_bounce_tried_) {
+        slot_bounce_tried_ = true;
+        if (cudaHostAlloc((void**) &slot_bounce_, (size_t) kSlotChunk * sizeof(float), cudaHostAllocPortable) !=
+            cudaSuccess) {
+            (void) cudaGetLastError();
+            slot_bounce_ = nullptr;
+            std::fprintf(stderr, "glm slots: the pinned bounce (%lld MB) did not allocate - slots copy through pageable "
+                                 "memory, as before\n", (long long) (kSlotChunk * (int64_t) sizeof(float) >> 20));
+        } else {
+            std::fprintf(stderr, "glm slots: pinned bounce %lld MB (AMD: conversation switches free no registered "
+                                 "memory)\n", (long long) (kSlotChunk * (int64_t) sizeof(float) >> 20));
+        }
+    }
+    return slot_bounce_;
+#else
+    return nullptr;
+#endif
+}
 
 uint64_t Glm5Model::slot_save(const std::string& path, std::string& err) {
     std::vector<Glm5Model*> halves;
@@ -9575,6 +9603,7 @@ uint64_t Glm5Model::slot_save(const std::string& path, std::string& err) {
     put(&nh, 4);
     put(&n, 8);
     std::vector<float> buf;
+    float* const bounce = slot_bounce();   // AMD: pinned once (nullptr: buf, as before)
     double t_sync = 0, t_copy = 0, t_write = 0;
     for (Glm5Model* m : halves) {
         const Glm5Geometry& g = m->g_;
@@ -9598,13 +9627,14 @@ uint64_t Glm5Model::slot_save(const std::string& path, std::string& err) {
         if (pool_rows > 0) src.push_back({m->snap_pool_, pool_rows});
         for (const auto& r : runs) src.push_back({r.first, r.second});
         for (const auto& s : src) {
-            constexpr int64_t kChunk = (int64_t) 16 << 20;   // floats
+            constexpr int64_t kChunk = kSlotChunk;   // floats
             for (int64_t at = 0; at < s.second; at += kChunk) {
                 const int64_t c = std::min(kChunk, s.second - at);
-                buf.resize((size_t) c);
+                if (bounce == nullptr) buf.resize((size_t) c);
+                float* const bp = bounce != nullptr ? bounce : buf.data();
                 tq = std::chrono::steady_clock::now();
                 // (Default: a streamed layer's latents are pinned host memory)
-                if (cudaMemcpy(buf.data(), s.first + at, (size_t) c * sizeof(float), cudaMemcpyDefault) !=
+                if (cudaMemcpy(bp, s.first + at, (size_t) c * sizeof(float), cudaMemcpyDefault) !=
                     cudaSuccess) {
                     cudaGetLastError();
                     cudaSetDevice(dev_);
@@ -9613,7 +9643,7 @@ uint64_t Glm5Model::slot_save(const std::string& path, std::string& err) {
                 }
                 const auto tw = std::chrono::steady_clock::now();
                 t_copy += std::chrono::duration<double, std::milli>(tw - tq).count();
-                put(buf.data(), (size_t) c * sizeof(float));
+                put(bp, (size_t) c * sizeof(float));
                 t_write += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tw).count();
             }
         }
@@ -9714,6 +9744,7 @@ bool Glm5Model::slot_load(const std::string& path, int64_t n_pos, std::string& e
         return (int) (std::find(ls.begin(), ls.end(), il) - ls.begin());
     };
     std::vector<float> buf;
+    float* const bounce = slot_bounce();   // AMD: pinned once (nullptr: buf, as before)
     const auto copy_in = [&](Glm5Model* m, float* dst, int64_t floats) -> bool {
         if (fast) {
             const std::streamoff at = f.tellg();
@@ -9722,13 +9753,14 @@ bool Glm5Model::slot_load(const std::string& path, int64_t n_pos, std::string& e
             return (bool) f.seekg((std::streamoff) floats * (std::streamoff) sizeof(float), std::ios::cur);
         }
         cudaSetDevice(m->dev_);
-        constexpr int64_t kChunk = (int64_t) 16 << 20;
+        constexpr int64_t kChunk = kSlotChunk;
         for (int64_t at = 0; at < floats; at += kChunk) {
             const int64_t c = std::min(kChunk, floats - at);
-            buf.resize((size_t) c);
+            if (bounce == nullptr) buf.resize((size_t) c);
+            float* const bp = bounce != nullptr ? bounce : buf.data();
             // (Default: a KV-streamed layer's latents are its pinned host copy)
-            if (!get(buf.data(), (size_t) c * sizeof(float)) ||
-                cudaMemcpy(dst + at, buf.data(), (size_t) c * sizeof(float), cudaMemcpyDefault) != cudaSuccess) {
+            if (!get(bp, (size_t) c * sizeof(float)) ||
+                cudaMemcpy(dst + at, bp, (size_t) c * sizeof(float), cudaMemcpyDefault) != cudaSuccess) {
                 cudaGetLastError();
                 return false;
             }
