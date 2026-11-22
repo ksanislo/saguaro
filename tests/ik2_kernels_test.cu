@@ -1,4 +1,4 @@
-// tests/ik2_kernels_test.cu - maya-ik2's kernels (src/ik2/ik2_kernels.cu) on random data, no model, each against a
+// tests/ik2_kernels_test.cu - saguaro-ik2's kernels (src/ik2/ik2_kernels.cu) on random data, no model, each against a
 // double reference written from ref/inkling2.py's ops:
 //   * rms, the scaled L2 clip (with and without the full layers' log scaling), the short conv (static and dynamic taps,
 //     the history carried over calls of 1, 2, 3 and many tokens = one call over all of them), the attention residual
@@ -2670,7 +2670,7 @@ void test_experts_mma() {
 // experts_block_gu / _down vs experts_gate_up_swiglu_mma / experts_down_mma (sm_80 on) - Inkling-2-Mini's sizes.
 void test_window_exact(bool mma) {
 #ifdef STRATA_USE_HIP
-    mma = false;   // (AMD: the token path's experts are the row dots - IK2_EXPERT_MMA's default 0 there)
+    mma = false;   // (AMD: the token path's experts are the row dots - SAGUARO_IK2_EXPERT_MMA's default 0 there)
 #endif
     constexpr int C = 2304, F = 1152, K = 8, E = 24;   // (E 24: a window of 5 picks about 2.6x one token's experts)
     {   // the dense products: rows of a planar Q8_0 matrix (N not a multiple of the rows a block)
@@ -2693,7 +2693,7 @@ void test_window_exact(bool mma) {
             }
         }
         expect_true("mv_q8p_cols = mv_q8p for each token, to the bit (T 1 .. 8)", same);
-        if (getenv("IK2_TEST_WINDOW_TIME")) {   // (the window's dense product against T one-token ones: a 2304 x 2304 matrix)
+        if (getenv("SAGUARO_IK2_TEST_WINDOW_TIME")) {   // (the window's dense product against T one-token ones: a 2304 x 2304 matrix)
             const int NB = 2304 * 4;   // (4 such matrices' rows: about a visit's dense bytes)
             std::vector<int8_t> qb((size_t) NB * C, 3);
             std::vector<uint16_t> db((size_t) NB * (C / 32), f2h_host(0.01f));
@@ -2799,7 +2799,7 @@ void test_window_exact(bool mma) {
                 h_same &= !std::memcmp(host(h1, (size_t) K * F).data(), hw.data() + (size_t) t * K * F, (size_t) K * F * 2);
                 y_same &= !std::memcmp(host(y1, (size_t) K * C).data(), yw.data() + (size_t) t * K * C, (size_t) K * C * 4);
             }
-            if (getenv("IK2_TEST_WINDOW_TIME")) {   // (T tokens' experts one token at a time against the window's)
+            if (getenv("SAGUARO_IK2_TEST_WINDOW_TIME")) {   // (T tokens' experts one token at a time against the window's)
                 cudaEvent_t e0, e1;
                 CU(cudaEventCreate(&e0));
                 CU(cudaEventCreate(&e1));
@@ -2855,7 +2855,7 @@ int main() {
     cudaDeviceProp p{};
     CU(cudaGetDeviceProperties(&p, 0));
     std::printf("ik2_kernels_test on %s (sm_%d%d)\n", p.name, p.major, p.minor);
-    if (getenv("IK2_TEST_WINDOW_ONLY")) {   // (the exact window's checks alone: a GPU without the tensor-core kernels)
+    if (getenv("SAGUARO_IK2_TEST_WINDOW_ONLY")) {   // (the exact window's checks alone: a GPU without the tensor-core kernels)
         test_window_exact(p.major >= 8);
         std::printf(g_fail ? "FAILED: %d check(s)\n" : "all passed\n", g_fail);
         return g_fail ? 1 : 0;

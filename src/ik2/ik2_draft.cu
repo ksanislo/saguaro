@@ -1,4 +1,4 @@
-// src/ik2/ik2_draft.cu - maya-ik2's drafter (the design: ik2_draft.hpp).
+// src/ik2/ik2_draft.cu - saguaro-ik2's drafter (the design: ik2_draft.hpp).
 #include "ik2_draft.hpp"
 #include "ik2_kernels.cuh"
 
@@ -143,7 +143,7 @@ struct DLayer {
 
 struct Drafter {
     int taps = 8, C = 4608, H = 48, KV = 8, F = 18432, R = 256, V = 0, ctx = 0;
-    int cap = 0;   // the rows of the layer without a window's context cache (IK2_DRAFT_CTX, default the context)
+    int cap = 0;   // the rows of the layer without a window's context cache (SAGUARO_IK2_DRAFT_CTX, default the context)
     float* ctx_tmp = nullptr;   // write_context's K and V rows before an FP16 cache, [2][kMixRows][KV * 128]
     float eps = 1e-6f, theta = 1e6f;
     std::vector<DLayer> L;
@@ -311,8 +311,8 @@ Drafter* load(const std::string& path, int C, int ctx, cublasHandle_t blas, cuda
     auto* d = new Drafter;
     d->C = C, d->ctx = ctx, d->blas = blas, d->s = s;
     {
-        // (IK2_DRAFT_CTX: the positions the layer without a window sees, the last ones; default the whole context)
-        const int want = getenv("IK2_DRAFT_CTX") ? std::atoi(getenv("IK2_DRAFT_CTX")) : ctx;
+        // (SAGUARO_IK2_DRAFT_CTX: the positions the layer without a window sees, the last ones; default the whole context)
+        const int want = getenv("SAGUARO_IK2_DRAFT_CTX") ? std::atoi(getenv("SAGUARO_IK2_DRAFT_CTX")) : ctx;
         d->cap = std::min(ctx, std::max(want, 2048));
     }
     const bool mini = C == 2304;
@@ -373,7 +373,7 @@ Drafter* load(const std::string& path, int C, int ctx, cublasHandle_t blas, cuda
             l.kc = dalloc<float>((size_t) l.cap * KV * 128);
             l.vc = dalloc<float>((size_t) l.cap * KV * 128);
             d->vram += (size_t) l.cap * KV * 128 * 8;
-        } else {         // (the whole context, or IK2_DRAFT_CTX's last positions: FP16)
+        } else {         // (the whole context, or SAGUARO_IK2_DRAFT_CTX's last positions: FP16)
             l.cap = d->cap;
             l.kc16 = dalloc<uint16_t>((size_t) l.cap * KV * 128);
             l.vc16 = dalloc<uint16_t>((size_t) l.cap * KV * 128);
@@ -412,7 +412,7 @@ Drafter* load(const std::string& path, int C, int ctx, cublasHandle_t blas, cuda
 void fold(Drafter* d, const uint16_t* lm_f16, int n_rows) {
     const int C = d->C, R = d->R;
     d->n_rows = n_rows;
-    if (getenv("IK2_DRAFT_SHORTLIST") && atoi(getenv("IK2_DRAFT_SHORTLIST"))) {
+    if (getenv("SAGUARO_IK2_DRAFT_SHORTLIST") && atoi(getenv("SAGUARO_IK2_DRAFT_SHORTLIST"))) {
         const int stride = (n_rows + 31) / 32;
         d->shortlist = dalloc<int>((kBlock - 1) * stride);
         d->shortlist_scores = dalloc<float>(stride);

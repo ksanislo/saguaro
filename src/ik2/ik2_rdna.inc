@@ -1,4 +1,4 @@
-// src/ik2/ik2_rdna.inc - maya-ik2's kernels for AMD's matrix cores (RDNA 3 / 3.5 gfx11, RDNA 4 gfx12, wave32), the
+// src/ik2/ik2_rdna.inc - saguaro-ik2's kernels for AMD's matrix cores (RDNA 3 / 3.5 gfx11, RDNA 4 gfx12, wave32), the
 // paths where the CUDA kernels' mma.sync has no AMD instruction to map to (ik2_kernels.cu includes this inside
 // ik2::k; the interface is in ik2_kernels.cuh).  The products: maya::kernels::wmma_f16 (16 x 16 x 16, F16 in, F32
 // sums; include/strata/kernels/rdna_wmma.hpp).  Every sum runs in a fixed order, so a GPU's answers repeat; they are
@@ -427,8 +427,8 @@ bool gemm_bf16_cols(const uint16_t* W, int N, int K, const uint16_t* x, int T, f
 
 
 bool experts_rdna_available(int ty_gate, int ty_up, int ty_down, int C, int F) {
-    static const int on = [] {   // (the current GPU: an RDNA 3 / 3.5 / 4 one of this build; IK2_RDNA_MOE=0: off)
-        if (std::getenv("IK2_RDNA_MOE") && !std::atoi(std::getenv("IK2_RDNA_MOE"))) return 0;
+    static const int on = [] {   // (the current GPU: an RDNA 3 / 3.5 / 4 one of this build; SAGUARO_IK2_RDNA_MOE=0: off)
+        if (std::getenv("SAGUARO_IK2_RDNA_MOE") && !std::atoi(std::getenv("SAGUARO_IK2_RDNA_MOE"))) return 0;
         return rdna_wmma_gpu() ? 1 : 0;
     }();
     const bool fmt = (ty_gate == kNVFP4 || ty_gate == kQ8_0) && ty_up == ty_gate && ty_down == ty_gate;

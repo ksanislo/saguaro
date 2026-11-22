@@ -1,24 +1,24 @@
-// src/ik2/ik2_main.cu - maya-ik2: Inkling 2 (thinkingmachines/Inkling-2-Small, 594B / ~17B active) on one or two
+// src/ik2/ik2_main.cu - saguaro-ik2: Inkling 2 (thinkingmachines/Inkling-2-Small, 594B / ~17B active) on one or two
 // GPUs, from an `inkling2` GGUF in llama.cpp PR #32187's layout (docs/INKLING2.md; unsloth/Inkling-2-Small-GGUF's
 // files: NVFP4, IQ3_XXS / IQ4_XS and Q*_K experts).
 //
 //   * The dense weights (attention, router, head) decoded once to FP16 in VRAM (the router in F32); cuBLAS' FP16 GEMMs
 //     with F32 sums.  The attention (relative bias, sinks, sliding window, L2 clips) fused: an mma.sync kernel, and a
-//     wgmma one on Hopper (sm_90a); the KV cache in FP16 (IK2_KV=fp8: E4M3).
+//     wgmma one on Hopper (sm_90a); the KV cache in FP16 (SAGUARO_IK2_KV=fp8: E4M3).
 //   * The routed experts as the GGUF holds them, all in pinned host memory (~323 GiB for UD-Q4_K_XL), and a cache of
 //     them in VRAM (--cache-gb, at most what the GPU has room for).  A prompt goes through layer by layer in passes of
 //     up to 16384 tokens, so each pass streams every expert it misses once, the next layer's prefetched while this one
-//     runs; a scan-resistant eviction keeps a pass from flushing the cache.  IK2_WARM fills the cache at load with the
-//     experts tokens pick most (a profile written with IK2_POP_OUT).
-//   * Decode a token at a time; with IK2_CPU=1 a missing expert is computed on the CPU (AVX-512) when that is sooner
-//     than its copy.  Two GPUs (--gpus 2): IK2_EP=1 deals each layer's experts to both (expert parallel - each with its
+//     runs; a scan-resistant eviction keeps a pass from flushing the cache.  SAGUARO_IK2_WARM fills the cache at load with the
+//     experts tokens pick most (a profile written with SAGUARO_IK2_POP_OUT).
+//   * Decode a token at a time; with SAGUARO_IK2_CPU=1 a missing expert is computed on the CPU (AVX-512) when that is sooner
+//     than its copy.  Two GPUs (--gpus 2): SAGUARO_IK2_EP=1 deals each layer's experts to both (expert parallel - each with its
 //     own cache and PCIe link), else the layers are split between them.
 //
-//   maya-ik2 --model FIRST-SHARD.gguf --serve [--max-context 262144] [--cache-gb 60] [--gpus 1] [--threads 8]
+//   saguaro-ik2 --model FIRST-SHARD.gguf --serve [--max-context 262144] [--cache-gb 60] [--gpus 1] [--threads 8]
 //            [--kv-streaming auto|on|off] [--kv-resident N]
 //            [--eos a,b]
-//   maya-ik2 --model FIRST-SHARD.gguf --tokens 1,2,3|@FILE [--gen N] [--chunk 2048] [--dump DIR]
-// --serve: Maya's engine protocol on stdin / stdout (serve/server.py's StrataEngine: INFO / READY, GEN, PP, T, DONE,
+//   saguaro-ik2 --model FIRST-SHARD.gguf --tokens 1,2,3|@FILE [--gen N] [--chunk 2048] [--dump DIR]
+// --serve: Saguaro's engine protocol on stdin / stdout (serve/server.py's StrataEngine: INFO / READY, GEN, PP, T, DONE,
 // STOP); --serve-ik2 the older @-line one.  --dump: each layer's output (blk.L.out) and the log-probabilities of every
 // prompt position, F32 raw files ([T][C], [T][n_vocab]) - what tools/ik2_compare.py holds against ref/inkling2.py's
 // seams.  Settings (IK2_*): docs/SETTINGS.md.
@@ -105,7 +105,7 @@ namespace k = ik2::k;
     do {                                                                                                   \
         cudaError_t e_ = (x);                                                                              \
         if (e_ != cudaSuccess) {                                                                           \
-            std::fprintf(stderr, "maya-ik2: %s: %s (%s:%d)\n", #x, cudaGetErrorString(e_), __FILE__, __LINE__); \
+            std::fprintf(stderr, "saguaro ik2: %s: %s (%s:%d)\n", #x, cudaGetErrorString(e_), __FILE__, __LINE__); \
             std::exit(1);                                                                                  \
         }                                                                                                  \
     } while (0)
@@ -113,13 +113,13 @@ namespace k = ik2::k;
     do {                                                                                                   \
         cublasStatus_t e_ = (x);                                                                           \
         if (e_ != CUBLAS_STATUS_SUCCESS) {                                                                 \
-            std::fprintf(stderr, "maya-ik2: %s: cuBLAS status %d (line %d)\n", #x, (int) e_, __LINE__);    \
+            std::fprintf(stderr, "saguaro ik2: %s: cuBLAS status %d (line %d)\n", #x, (int) e_, __LINE__);    \
             std::exit(1);                                                                                  \
         }                                                                                                  \
     } while (0)
 
 [[noreturn]] void die(const std::string& m) {
-    std::fprintf(stderr, "maya-ik2: %s\n", m.c_str());
+    std::fprintf(stderr, "saguaro ik2: %s\n", m.c_str());
     std::exit(1);
 }
 
@@ -201,11 +201,11 @@ struct Config {
 
 // a dense matrix as the GGUF holds it, in VRAM: its blocks [N][K]
 struct Mat {
-    // (IK2_DENSE=q8 with Q8_0 blocks and K a multiple of 128: the blocks taken apart - the int8 values [N][K] and the
+    // (SAGUARO_IK2_DENSE=q8 with Q8_0 blocks and K a multiple of 128: the blocks taken apart - the int8 values [N][K] and the
     //  blocks' FP16 scales [N][K / 32] - which a warp reads 128 values an instruction; raw is then null)
     int8_t* q8 = nullptr;
     uint16_t* q8d = nullptr;
-    uint8_t* raw = nullptr;     // IK2_DENSE=q8: the blocks, one token's products straight over them
+    uint8_t* raw = nullptr;     // SAGUARO_IK2_DENSE=q8: the blocks, one token's products straight over them
     uint16_t* f16 = nullptr;    // else (the default): an FP16 copy, every product a cuBLAS GEMM - measured faster on an
     int type = 0, N = 0, K = 0; // RTX PRO 6000 (16 against 21 ms a token), for 4 GiB more VRAM
 };
@@ -247,8 +247,8 @@ struct Layer {
     float* tab_sc[3] = {};
     std::vector<const uint8_t*> tab_h;             // (tab_blob on the host: a short prompt's groups)
     // the state: of the visit being run (bind_visit)
-    uint16_t *kc = nullptr, *vc = nullptr;         // FP16 [kv_cap][KV * D] (IK2_KV=f16)
-    uint8_t *kc8 = nullptr, *vc8 = nullptr;        // FP8 E4M3 [kv_cap][KV * D] (IK2_KV=fp8)
+    uint16_t *kc = nullptr, *vc = nullptr;         // FP16 [kv_cap][KV * D] (SAGUARO_IK2_KV=f16)
+    uint8_t *kc8 = nullptr, *vc8 = nullptr;        // FP8 E4M3 [kv_cap][KV * D] (SAGUARO_IK2_KV=fp8)
     int kv_cap = 0;
     bool kv_host = false;                          // (KV streaming) kc8 / vc8 (kc / vc) are pinned host RAM
     float *h_k, *h_v, *h_attn, *h_mlp;             // conv histories [3][C']
@@ -295,13 +295,13 @@ cublasHandle_t g_blas;
 cudaStream_t g_s;
 cudaStream_t g_cs;          // the experts' copies of the token path, beside the compute stream
 cudaEvent_t g_ev;
-bool g_overlap = true;      // IK2_OVERLAP=0: the copies on the compute stream, before the experts
-// The CPU lane (IK2_CPU=1: on): a missing NVFP4 expert computed in host memory by the pool while the others' blocks
+bool g_overlap = true;      // SAGUARO_IK2_OVERLAP=0: the copies on the compute stream, before the experts
+// The CPU lane (SAGUARO_IK2_CPU=1: on): a missing NVFP4 expert computed in host memory by the pool while the others' blocks
 // are copied; its own blocks follow on the copy stream without being waited for ("lazy"), so it is in VRAM next time.
 ik2::cpu::Pool* g_pool = nullptr;
 double g_t_cpu = 0.5e-3, g_t_up = 0.36e-3;   // seconds an expert: the pool's (measured as it runs), the link's
 uint64_t g_n_cpu = 0, g_n_wait = 0;
-bool g_cpu_lazy = true;   // IK2_CPU_LAZY=0: a CPU-computed expert is not copied in afterwards (the link carries less)
+bool g_cpu_lazy = true;   // SAGUARO_IK2_CPU_LAZY=0: a CPU-computed expert is not copied in afterwards (the link carries less)
 constexpr int kRing = 256;
 cudaEvent_t g_ring[kRing];                   // a lazy batch's end on the copy stream, by sequence number
 uint64_t g_seq_next = 1, g_seq_done = 0;
@@ -309,11 +309,11 @@ void lazy_poll() {
     while (g_seq_done + 1 < g_seq_next && cudaEventQuery(g_ring[(g_seq_done + 1) % kRing]) == cudaSuccess) ++g_seq_done;
 }
 
-// IK2_PROF=1: the stream waited for at each phase's end, its time added to the phase (slower, but where it goes)
+// SAGUARO_IK2_PROF=1: the stream waited for at each phase's end, its time added to the phase (slower, but where it goes)
 bool g_prof = false;
-bool g_mv = true;   // IK2_MV=0: a few tokens' experts through the FP16 GEMMs too
-// How often each expert is picked by a token (prefill and decode), [n_layer * E]: IK2_POP_OUT=FILE writes it at
-// the end (int32 n_layer, int32 E, then uint64 counts); IK2_WARM=FILE fills the expert cache with the most picked
+bool g_mv = true;   // SAGUARO_IK2_MV=0: a few tokens' experts through the FP16 GEMMs too
+// How often each expert is picked by a token (prefill and decode), [n_layer * E]: SAGUARO_IK2_POP_OUT=FILE writes it at
+// the end (int32 n_layer, int32 E, then uint64 counts); SAGUARO_IK2_WARM=FILE fills the expert cache with the most picked
 // experts at load, so the first requests do not start from an empty cache.
 std::vector<uint64_t> g_pop;
 int g_pop_E = 0;
@@ -322,7 +322,7 @@ void pop_count(int l, const int* top, int S) {
     for (int i = 0; i < S; ++i) ++g_pop[(size_t) l * g_pop_E + top[i]];
 }
 void pop_dump() {
-    const char* f = getenv("IK2_POP_OUT");
+    const char* f = getenv("SAGUARO_IK2_POP_OUT");
     if (!f || g_pop.empty()) return;
     FILE* o = std::fopen(f, "wb");
     if (!o) return;
@@ -332,33 +332,33 @@ void pop_dump() {
     std::fclose(o);
 }
 int g_pop_E_ep = 0;
-// IK2_EP=1 with --gpus 2: expert parallel. Every layer's attention and dense weights (and the KV cache) on GPU 0;
+// SAGUARO_IK2_EP=1 with --gpus 2: expert parallel. Every layer's attention and dense weights (and the KV cache) on GPU 0;
 // expert e of every layer belongs to GPU e & 1, each GPU with its own cache over all layers and its own PCIe link.
 // In decode a layer's picks go to their GPUs at once, both links copying the misses side by side.
 bool g_ep = false;
 cudaEvent_t g_ep_x, g_ep_cp[2], g_ep_done;
-// IK2_TP=1 with --gpus 2: the experts tensor-parallel instead. GPU d holds half of every expert: rows [d F/2, ..) of
+// SAGUARO_IK2_TP=1 with --gpus 2: the experts tensor-parallel instead. GPU d holds half of every expert: rows [d F/2, ..) of
 // gate and up and rows [d C/2, ..) of down, so every miss is half on each link. A layer: each GPU its half of h
 // (gate/up/SwiGLU), the halves swapped (P2P), each GPU its half of the output rows (down), concatenated on GPU 0.
-// Attention, dense weights and the KV cache on GPU 0 as with IK2_EP.
+// Attention, dense weights and the KV cache on GPU 0 as with SAGUARO_IK2_EP.
 bool g_tp = false;
 cudaEvent_t g_tp_h[2];
 int g_tp_F = 0, g_tp_C = 0;
 inline bool dual() { return g_ep || g_tp; }
-// which GPU an expert belongs to, [n_layer * E]: IK2_EP_SPLIT = GPU 1's share of the picks (0.5; GPU 0 also holds the
-// attention, the dense weights and the KV cache). With IK2_WARM's profile each layer's experts are dealt by how often
+// which GPU an expert belongs to, [n_layer * E]: SAGUARO_IK2_EP_SPLIT = GPU 1's share of the picks (0.5; GPU 0 also holds the
+// attention, the dense weights and the KV cache). With SAGUARO_IK2_WARM's profile each layer's experts are dealt by how often
 // they are picked, so the two GPUs' shares come out as asked; without it by a hash of the expert.
 std::vector<uint8_t> g_ep_own;
 inline int ep_owner(int l, int e) { return g_ep_own[(size_t) l * g_pop_E_ep + e]; }
-bool g_flash = true;   // IK2_FLASH=0: the prefill's attention (FP16 KV) through the logits in memory and cuBLAS, not fused
+bool g_flash = true;   // SAGUARO_IK2_FLASH=0: the prefill's attention (FP16 KV) through the logits in memory and cuBLAS, not fused
 int g_n_sm = 0;
-bool g_pa70 = false;   // Volta: a prompt chunk's attention on a full layer on mma.m8n8k4 (IK2_PA70=0: cuBLAS)
+bool g_pa70 = false;   // Volta: a prompt chunk's attention on a full layer on mma.m8n8k4 (SAGUARO_IK2_PA70=0: cuBLAS)
 // (from this many keys on - a chunk ending there or deeper; below it cuBLAS as before, the answers of v1.1.73;
-//  IK2_PA70_MIN: tests and the owner's choice)
+//  SAGUARO_IK2_PA70_MIN: tests and the owner's choice)
 int g_pa70_min = 65536;
-bool g_group = true;   // IK2_GROUP=0: 2 .. 8 tokens' experts a slot at a time, their attention a head at a time
-bool g_group_exp = true, g_group_attn = true;   // (IK2_GROUP=1: the experts grouped only, 2: the attention only)
-FILE* g_trace = nullptr;   // IK2_TRACE=FILE: each layer's picks, records of int32 (layer, T, K, T x K experts)
+bool g_group = true;   // SAGUARO_IK2_GROUP=0: 2 .. 8 tokens' experts a slot at a time, their attention a head at a time
+bool g_group_exp = true, g_group_attn = true;   // (SAGUARO_IK2_GROUP=1: the experts grouped only, 2: the attention only)
+FILE* g_trace = nullptr;   // SAGUARO_IK2_TRACE=FILE: each layer's picks, records of int32 (layer, T, K, T x K experts)
 struct Prof {
     double attn = 0, route = 0, upload = 0, experts = 0, rest = 0;
     double t = 0;
@@ -397,7 +397,7 @@ uint8_t* g_stage = nullptr;   // a raw tensor on its way to its FP16 decode
 size_t g_stage_bytes = 0;
 
 bool g_dense_q8 = false;
-// The KV cache in FP16 (IK2_KV=fp8: E4M3, half the bytes).  Against ref/inkling2.py over 48 tokens FP16 kept every
+// The KV cache in FP16 (SAGUARO_IK2_KV=fp8: E4M3, half the bytes).  Against ref/inkling2.py over 48 tokens FP16 kept every
 // top-1 token (KL mean 8.5e-4) and FP8 changed 5 (KL 8.3e-3): Inkling's router is full of near-ties, so FP8's 1.5% in
 // layer 0's attention output already moves 7 of 48 tokens' experts.  The full layers' cache is 32 KB a token in FP16.
 bool g_kv_fp8 = false;
@@ -426,7 +426,7 @@ int g_ring_tgt = 16384;                    // rows a slot aims at (a few blocks 
 cudaStream_t g_kv_cs = nullptr;
 cudaEvent_t g_ring_ready[kKvRing] = {}, g_ring_done[kKvRing] = {};
 bool g_kv_streaming = false;               // any visit streamed (the token and block paths without their graphs)
-int g_depth = 0;            // IK2_DEPTH=N (CLI tests): the prompt placed at position N, the cache before it zeros
+int g_depth = 0;            // SAGUARO_IK2_DEPTH=N (CLI tests): the prompt placed at position N, the cache before it zeros
 // the RAM the system has free now (bytes; 0 unknown)
 size_t host_ram_avail() {
 #ifdef _WIN32
@@ -760,7 +760,7 @@ bool host_register_works() {
 
 // ---- the expert cache in VRAM: per-size-class pools, O(1) S3-FIFO with ghost history
 
-// GPU d's half of role r (0 gate, 1 up, 2 down) of an expert: offset in the role's part, bytes (IK2_TP)
+// GPU d's half of role r (0 gate, 1 up, 2 down) of an expert: offset in the role's part, bytes (SAGUARO_IK2_TP)
 inline void tp_part(const Layer& Ly, int d, int r, size_t& off, size_t& bytes) {
     const size_t rows = r < 2 ? (size_t) g_tp_F : (size_t) g_tp_C, rb = Ly.eb[r] / rows, half = rows / 2;
     off = (size_t) d * half * rb, bytes = half * rb;
@@ -795,11 +795,11 @@ struct ExpertCache {
     std::vector<int> loc;              // l * E + e -> slot in pools[layer_pool[l]], or -1
     std::vector<uint64_t> ghost_at;    // l * E + e -> ghost_seq when evicted in decode (0: none)
     int last_handle = -1;
-    bool scan = false;   // a long prefill's pass (evict_scan; IK2_SCAN=0: off)
+    bool scan = false;   // a long prefill's pass (evict_scan; SAGUARO_IK2_SCAN=0: off)
     // the offload path's tier (set before init): the pools are only what the profile is worth a byte - no minimum
     // of a layer's experts (prompts take their misses through the staging ring, run_prefill_moe), none merged
     bool tier_only = false;
-    int tp = -1;         // IK2_TP: this GPU's half of every expert (its index), not whole experts
+    int tp = -1;         // SAGUARO_IK2_TP: this GPU's half of every expert (its index), not whole experts
     uint64_t tick = 0, hits = 0, misses = 0, bytes_up = 0;
     double t_up = 0;
 
@@ -1203,7 +1203,7 @@ struct Work {
     const uint8_t** blob;
     int* tok;
     uint8_t *pack_h[kPackRing] = {}, *pack_d[kPackRing] = {};   // ring-buffered token path tables
-    uint16_t* tp_h = nullptr;   // IK2_TP: the whole h, [S][F] FP16 (each GPU fills its half, then the other's)
+    uint16_t* tp_h = nullptr;   // SAGUARO_IK2_TP: the whole h, [S][F] FP16 (each GPU fills its half, then the other's)
     uint8_t* tp_pk = nullptr;   // (the decode's tables of this layer on the device: canonical blobs at +1536)
     float *y_h[kPackRing] = {};                                 // ring-buffered CPU lane outputs [64][C]
     int pack_slot = 0;
@@ -1226,7 +1226,7 @@ struct Work {
     std::vector<uint64_t> use_tot;   // [layer] their sum
     float* wtr = nullptr;        // [S] the routing weight of each expert-sorted row
     float* wtr_h[2] = {nullptr, nullptr};
-    // prefill attention: the relative bias of up to kRelbRows queries x heads, [rows * H][extent] (IK2_RELB=0: off)
+    // prefill attention: the relative bias of up to kRelbRows queries x heads, [rows * H][extent] (SAGUARO_IK2_RELB=0: off)
     static constexpr int kRelbRows = 512;
     float* relb = nullptr;
     int relb_ext = 0;
@@ -1258,9 +1258,9 @@ struct Work {
 
 // --serve: SIGUSR1 asks the request running to stop (its client went away) at its next token or prompt chunk
 volatile std::sig_atomic_t g_cancel = 0;
-// IK2_STATS=1: per request, how many tokens the prefill's experts each ran ([0] 1, [1] 2, [2] 3-7, [3] 8+)
+// SAGUARO_IK2_STATS=1: per request, how many tokens the prefill's experts each ran ([0] 1, [1] 2, [2] 3-7, [3] 8+)
 uint64_t g_cnt_hist[4] = {0, 0, 0, 0};
-// IK2_STATS: a request's experts by where they came from: used and already cached / used and prefetched for this
+// SAGUARO_IK2_STATS: a request's experts by where they came from: used and already cached / used and prefetched for this
 // pass / used and copied after the routing / prefetched and not used
 uint64_t g_src_hist[4] = {0, 0, 0, 0};
 extern "C" void on_usr1(int) { g_cancel = 1; }
@@ -1822,7 +1822,7 @@ void run_layer_attn(const Model& M, Layer& Ly, int l, int T, int pos0, const flo
 // of them in VRAM (the expert cache's slots: Ly.tab_blob, null where an expert is not there) and the rest copied by
 // the GPU from pinned host memory into staging slots after the router, the same expert kernels on the same bytes
 bool g_off = false;        // set at load
-bool g_off_want = false;   // the layout chosen (the fit, IK2_OFF)
+bool g_off_want = false;   // the layout chosen (the fit, SAGUARO_IK2_OFF)
 struct OffState {
     std::vector<const uint8_t*> host;   // [n_layer] the layer's pinned experts as the device sees them
     // (Windows, only the experts the tier does not hold pinned: host[l] is the layer's row of htab_d - each expert's
@@ -1840,7 +1840,7 @@ struct OffState {
     uint32_t* heat = nullptr;           // [n_layer * E] (device): picks since load
     int blocks = 0;                     // off_fetch_copy's grid
     uint64_t tick = ~0ull;              // the cache's tick the tables were made at (a prompt moves experts)
-    // the lane-parity mode (IK2_LANE): the CPU lane's mailboxes (mapped host memory) and the split's figures
+    // the lane-parity mode (SAGUARO_IK2_LANE): the CPU lane's mailboxes (mapped host memory) and the split's figures
     std::vector<int> fmt;               // [n_layer] 0 NVFP4, 1 Q8_0
     k::LaneCost* cost = nullptr;        // (device)
     k::LaneCost cost_h{};               // (pinned host: what was last sent)
@@ -1853,7 +1853,7 @@ struct OffState {
     std::unique_ptr<ik2::lane::Server> lane;
 };
 OffState g_offs;
-bool g_lane = false;   // IK2_LANE: the offload path's lane-parity mode (set at load)
+bool g_lane = false;   // SAGUARO_IK2_LANE: the offload path's lane-parity mode (set at load)
 
 // A layer-major prefill pass of many tokens uses nearly every expert of a layer, so the ones not in VRAM can be
 // copied in before the layer's routing is known: while the previous layer's experts and this layer's attention run.
@@ -1862,7 +1862,7 @@ bool g_lane = false;   // IK2_LANE: the offload path's lane-parity mode (set at 
 void prefetch_layer(Model& M, int l, Work& W, ExpertCache& EC, int T, const Work* Wpop = nullptr, int own = -1, int ahead = 1) {
     const int pr = ((l % Work::kPfRing) + Work::kPfRing) % Work::kPfRing;
     W.pf_layers[pr] = -1;
-    if (g_off || (getenv("IK2_PREFETCH") && !std::atoi(getenv("IK2_PREFETCH")))) return;   // (offload: the ring)
+    if (g_off || (getenv("SAGUARO_IK2_PREFETCH") && !std::atoi(getenv("SAGUARO_IK2_PREFETCH")))) return;   // (offload: the ring)
     if (!g_overlap || g_prof || l >= M.c.n_layer || (!dual() && M.L[l].dev != g_cur)) return;
     const Work& U = Wpop ? *Wpop : W;   // (whose picks so far: under EP, GPU 0's)
     const int E = M.c.E, pi = EC.layer_pool[l];
@@ -1871,11 +1871,11 @@ void prefetch_layer(Model& M, int l, Work& W, ExpertCache& EC, int T, const Work
     const uint64_t t = EC.tick + (uint64_t) ahead;   // (the tick its layer will run in: kept till then)
     W.pf_bs[pr].assign(E, -1);
     // Only the experts this pass will likely use: P(used) = 1 - (1 - p_e)^(T K) from the prefills so far (p_e the
-    // expert's share of the layer's tokens); with little history yet, all of them (IK2_PF_P: the threshold)
+    // expert's share of the layer's tokens); with little history yet, all of them (SAGUARO_IK2_PF_P: the threshold)
     const bool known = !U.use_tot.empty() && U.use_tot[l] >= (uint64_t) 16 * E;
     // (0.999, not 0.5: a request's tokens are alike, so the independent-picks estimate is far too high - at 0.5 a
     // fifth of the prefetched experts went unused; 500 / 800 new tokens 4.2 / 4.3 -> 3.5 / 3.6 s, 21.8k unchanged)
-    const double thr = getenv("IK2_PF_P") ? std::atof(getenv("IK2_PF_P")) : 0.999;
+    const double thr = getenv("SAGUARO_IK2_PF_P") ? std::atof(getenv("SAGUARO_IK2_PF_P")) : 0.999;
     const double picks = (double) T * M.c.K;
     int n = 0;
     for (int e = 0; e < E; ++e) {
@@ -1980,7 +1980,7 @@ void run_prefill_moe(const Model& M, Layer& Ly, int l, int T, const uint16_t* xq
         wtr[row] = wt[i];
     }
 
-    // the experts on a GPU: d -1 all of them (one GPU), else the ones it owns (IK2_EP), into X.tmp
+    // the experts on a GPU: d -1 all of them (one GPU), else the ones it owns (SAGUARO_IK2_EP), into X.tmp
     auto exec = [&](int d, Work& X, ExpertCache& XC, const uint16_t* xin) {
         const uint64_t tick = g_off ? XC.tick : ++XC.tick;   // (the offload path: the tier is not touched)
         const cudaStream_t cst = g_overlap && !g_prof ? g_cs : g_s;
@@ -2315,12 +2315,12 @@ void run_head(const Model& M, int T, bool all_logits, OutMode out_mode, int nb, 
 // an expert's blocks are found on the device (Layer::tab_blob) and a token needs nothing from the host between its
 // embedding and its logits: no routing round trip a layer, no table upload.  The position is read on the device too
 // (W.pos), so a token's launches do not change from one token to the next and are replayed as one CUDA graph.  The
-// dense weights are the GGUF's blocks (IK2_DENSE=q8, the default when the experts fit), one product a launch.
-bool g_fast = false;        // set at load: every expert resident, one GPU, the dense weights as blocks (IK2_FAST=0: no)
+// dense weights are the GGUF's blocks (SAGUARO_IK2_DENSE=q8, the default when the experts fit), one product a launch.
+bool g_fast = false;        // set at load: every expert resident, one GPU, the dense weights as blocks (SAGUARO_IK2_FAST=0: no)
 bool g_fast_want = false;
-bool g_graph = true;        // IK2_GRAPH=0: the resident path's launches one by one
-bool g_block = true;        // IK2_BLOCK=0: a verify window through forward() instead of the block path
-int g_attn_mma = 1;         // a token's attention on the tensor cores (IK2_ATTN_MMA=0: the scalar kernels; 2: the
+bool g_graph = true;        // SAGUARO_IK2_GRAPH=0: the resident path's launches one by one
+bool g_block = true;        // SAGUARO_IK2_BLOCK=0: a verify window through forward() instead of the block path
+int g_attn_mma = 1;         // a token's attention on the tensor cores (SAGUARO_IK2_ATTN_MMA=0: the scalar kernels; 2: the
                             // layers without a window only)
 int g_mma_split = 1;        // its blocks a K / V head (k::attn_decode_mma_blocks: the device filled once)
 struct FastGraph {
@@ -2556,7 +2556,7 @@ void fast_token_launches(Model& M, Work& W, OutMode out_mode) {
         const int extent = Ly.sliding ? c.extent_swa : c.extent;
         const int window = Ly.sliding ? c.window : (1 << 30);
         const int P = Ly.sliding ? P_sl : P_full;
-        // the attention on the tensor cores, from an FP16 copy of q (IK2_ATTN_MMA=0: the scalar kernels - a layer
+        // the attention on the tensor cores, from an FP16 copy of q (SAGUARO_IK2_ATTN_MMA=0: the scalar kernels - a layer
         // without a window, its keys the whole context, is bound by their arithmetic)
         const bool mma = g_attn_mma == 1 || (g_attn_mma == 2 && !Ly.sliding);
         const int ring = Ly.sliding ? Ly.kv_cap : 0;
@@ -2647,9 +2647,9 @@ void fast_token_launches(Model& M, Work& W, OutMode out_mode) {
         float* rw = (float*) (W.route_d + c.K);
         // (NVFP4 experts go through the tensor cores, their input as two FP16 limbs the router's launch writes)
 #ifdef STRATA_USE_HIP   // (AMD: the scalar kernels read the blocks faster than the mma's layouts on the shuffles)
-        static const int exp_mma = getenv("IK2_EXPERT_MMA") ? atoi(getenv("IK2_EXPERT_MMA")) : 0;
+        static const int exp_mma = getenv("SAGUARO_IK2_EXPERT_MMA") ? atoi(getenv("SAGUARO_IK2_EXPERT_MMA")) : 0;
 #else
-        static const int exp_mma = getenv("IK2_EXPERT_MMA") ? atoi(getenv("IK2_EXPERT_MMA")) : 1;
+        static const int exp_mma = getenv("SAGUARO_IK2_EXPERT_MMA") ? atoi(getenv("SAGUARO_IK2_EXPERT_MMA")) : 1;
 #endif
         const bool exp_tc = exp_mma && !g_lane && k::experts_mma_fits(Ly.ty[0], Ly.ty[1], Ly.ty[2], C, c.F);
         if (g_two.on) two_send(M, l, W, exp_tc);   // (two GPUs: GPU 1's picks there, beside GPU 0's)
@@ -2715,7 +2715,7 @@ void fast_token_launches(Model& M, Work& W, OutMode out_mode) {
 // has reached yet holds extra experts - the most picked a byte first, at the top of the cache - and gives them back
 // as the context grows (at a request's start, a prompt chunk's or a token's, never inside one: the token path's
 // tables then say null and the expert is fetched again).  An expert is the same bytes wherever it sits and the
-// kernels are the same, so the answers are those of the layout without lending.  IK2_LEND=0: off.
+// kernels are the same, so the answers are those of the layout without lending.  SAGUARO_IK2_LEND=0: off.
 struct LendSlot {
     int key = 0, buf = 0;   // l * E + e; the buffer it sits in
     size_t lo = 0;          // its first byte in the buffer
@@ -2740,7 +2740,7 @@ struct LendState {
     double t_lend = 0;
 };
 LendState g_lend;
-int kLendRoom = 8192;   // positions kept free above a request's prompt and the latest token (IK2_LEND_ROOM: tests)
+int kLendRoom = 8192;   // positions kept free above a request's prompt and the latest token (SAGUARO_IK2_LEND_ROOM: tests)
 constexpr int kLendGuard = 1024;  // a token or chunk this near a lent expert gives it back first
 constexpr int kLendBatch = 64;    // experts a batch (~0.3 GB; one in flight, the next started at a token's start)
 
@@ -2783,11 +2783,11 @@ bool two_setup(Model& M, ExpertCache& EC, const std::vector<double>& value) {
     cls1 = k::arch_class();
     cudaDeviceProp p1{};
     CU(cudaGetDeviceProperties(&p1, T.dev));
-    // its room: what is free less a quarter of a GiB (IK2_ROOM1_MB) and its token buffers; GPUs of two kinds compute
+    // its room: what is free less a quarter of a GiB (SAGUARO_IK2_ROOM1_MB) and its token buffers; GPUs of two kinds compute
     // a row each their own way, so the split must not move between starts there: whole GiB
     size_t fr = 0, tot = 0;
     CU(cudaMemGetInfo(&fr, &tot));
-    const size_t keep = (size_t) (getenv("IK2_ROOM1_MB") ? std::atof(getenv("IK2_ROOM1_MB")) : 256.0) * 1048576.0 +
+    const size_t keep = (size_t) (getenv("SAGUARO_IK2_ROOM1_MB") ? std::atof(getenv("SAGUARO_IK2_ROOM1_MB")) : 256.0) * 1048576.0 +
                         ((size_t) 8 << 20);
     size_t room = fr > keep ? fr - keep : 0;
     if (cls0 != cls1) room &= ~(((size_t) 1 << 30) - 1);
@@ -2859,12 +2859,12 @@ bool two_setup(Model& M, ExpertCache& EC, const std::vector<double>& value) {
     CU(cudaSetDevice(0));
     T.y_in = dalloc<float>((size_t) S * C);
     CU(cudaEventCreateWithFlags(&T.ev_x, cudaEventDisableTiming));
-    const char* hs = getenv("IK2_HOST_STAGE");
-    const char* hp = getenv("IK2_PEER");
+    const char* hs = getenv("SAGUARO_IK2_HOST_STAGE");
+    const char* hp = getenv("SAGUARO_IK2_PEER");
     std::string err;
     const size_t yb = (size_t) K * C * 4;
     if (!T.link.setup({0, T.dev}, {0, 1, 1, 0}, {(void*) T.y_in, (void*) T.y32}, (size_t) S * C * 4, {g_dev[0].s, T.s},
-                      hs && std::atoi(hs), hp && std::atoi(hp), yb, yb, "IK2_HOST_STAGE", err))
+                      hs && std::atoi(hs), hp && std::atoi(hp), yb, yb, "SAGUARO_IK2_HOST_STAGE", err))
         die(err);
     CU(cudaSetDevice(0));
     T.on = true;
@@ -2884,8 +2884,8 @@ bool two_setup(Model& M, ExpertCache& EC, const std::vector<double>& value) {
 // (at load, after the tier: the buffers that can lend - every full visit's K and V in VRAM, no KV streaming)
 void lend_init(Model& M) {
     const Config& c = M.c;
-    if (getenv("IK2_LEND") && !std::atoi(getenv("IK2_LEND"))) return;
-    if (getenv("IK2_LEND_ROOM")) kLendRoom = std::max(kLendGuard + 8, std::atoi(getenv("IK2_LEND_ROOM")));
+    if (getenv("SAGUARO_IK2_LEND") && !std::atoi(getenv("SAGUARO_IK2_LEND"))) return;
+    if (getenv("SAGUARO_IK2_LEND_ROOM")) kLendRoom = std::max(kLendGuard + 8, std::atoi(getenv("SAGUARO_IK2_LEND_ROOM")));
     if (!g_off || g_kv_swing >= 0) return;
     // (one GPU only: off on two GPUs - GPU 1's experts are outside GPU 0's tier too; --parallel never meets it, its
     //  slots need every expert resident, no offload)
@@ -2970,7 +2970,7 @@ void lend_back(Model& M, int p) {
     }
     g_lend.slots.swap(keep);
     for (const auto& sl : drop) g_lend.n_back += sl.state == 2;
-    if (getenv("IK2_LEND_LOG"))
+    if (getenv("SAGUARO_IK2_LEND_LOG"))
         std::printf("kv lending: %zu experts given back below position %d (%zu left, from %d up)\n", drop.size(), p,
                     g_lend.slots.size(), g_lend.floor);
 }
@@ -3029,7 +3029,7 @@ void lend_grow(Model& M, int end) {
     CU(cudaStreamWaitEvent(g_lend.st, g_lend.from, 0));
     lend_issue(M);
     g_lend.t_lend += now() - t0;
-    if (getenv("IK2_LEND_LOG"))
+    if (getenv("SAGUARO_IK2_LEND_LOG"))
         std::printf("kv lending: %d experts placed (%zu in all, from position %d up)\n", n, g_lend.slots.size(),
                     g_lend.floor);
 }
@@ -3048,7 +3048,7 @@ inline void lend_check(Model& M, int end, bool token = false) {
     if (!g_lend.pending) lend_issue(M);
 }
 
-// The lane-parity mode (IK2_LANE=1, =fetch / =cpu: every miss to one side - tests): the CPU lane started and the
+// The lane-parity mode (SAGUARO_IK2_LANE=1, =fetch / =cpu: every miss to one side - tests): the CPU lane started and the
 // split's figures measured here (an expert on the lane, over the bus, on the GPU).  False: the layers' experts are
 // not in formats the exact lane has (NVFP4 / Q8_0, gate and up of one type) - the offload path goes on without it.
 bool lane_init(Model& M, const std::string& want, int threads) {
@@ -3093,14 +3093,14 @@ bool lane_init(Model& M, const std::string& want, int threads) {
             if (!np[e] && k-- == 0) return e;
         return 0;
     };
-    // The per-PC calibration (IK2_CALIB: its file, default ~/.maya/ik2-offload-calib.txt; 0: measured every start,
+    // The per-PC calibration (SAGUARO_IK2_CALIB: its file, default ~/.saguaro/ik2-offload-calib.txt; 0: measured every start,
     // not kept): the lane's size and the split's figures measured once for this GPU, CPU and layer formats, kept
     // under that key and read back on the next start (the decode re-times the lane as it goes either way).
-    const char* ce = getenv("IK2_CALIB");
+    const char* ce = getenv("SAGUARO_IK2_CALIB");
     std::string cal_path = ce && *ce ? ce : "";
     if (cal_path.empty()) {
         const char* home = getenv("HOME") ? getenv("HOME") : getenv("USERPROFILE");
-        if (home) cal_path = std::string(home) + "/.maya/ik2-offload-calib.txt";
+        if (home) cal_path = std::string(home) + "/.saguaro/ik2-offload-calib.txt";
     }
     std::string key;
     {
@@ -3237,8 +3237,8 @@ bool lane_init(Model& M, const std::string& want, int threads) {
     std::printf("lane parity: the CPU lane on %d threads (%s rows); an expert %.0f / %.0f us on the CPU, %.0f / %.0f us "
                 "over the bus, %.0f / %.0f us on the GPU (NVFP4 / Q8_0)%s\n",
                 g_offs.lane->threads(), ik2::lane::rows_form(), cs.cpu[0], cs.cpu[1], cs.fetch[0], cs.fetch[1],
-                cs.gpu[0], cs.gpu[1], cs.force == 1 ? "; every miss fetched (IK2_LANE=fetch)"
-                                      : cs.force == 2 ? "; every miss on the CPU (IK2_LANE=cpu)" : "");
+                cs.gpu[0], cs.gpu[1], cs.force == 1 ? "; every miss fetched (SAGUARO_IK2_LANE=fetch)"
+                                      : cs.force == 2 ? "; every miss on the CPU (SAGUARO_IK2_LANE=cpu)" : "");
     return true;
 }
 
@@ -3352,7 +3352,7 @@ void tile_rows(const Mat& m, int r0, int n, const uint16_t* x16, int T, float* y
     if (!m.q8) die("the block path: a dense matrix that is not planar Q8_0");
     k::q8_tile(m.q8 + (size_t) r0 * m.K, m.q8d + (size_t) r0 * (m.K >> 5), n, m.K, x16, T, y, ldy, g_s);
 }
-// The exact window (g_block_exact, the default; IK2_BLOCK_EXACT=0: the tensor cores' tiles and the window's own
+// The exact window (g_block_exact, the default; SAGUARO_IK2_BLOCK_EXACT=0: the tensor cores' tiles and the window's own
 // attention - a few 1e-5 off the one-token path, so that drafting changes greedy answers): every token's values the
 // one-token path's to the bit - its products with mv1's sums (the weights read once), its attention through the
 // token's own kernels, its experts' rows with the token kernels' sums (an expert read once for its tokens).
@@ -3570,11 +3570,11 @@ void fast_block_launches(Model& M, Work& W, int T, OutMode out_mode) {
         k::route_rows(W.rlog, Ly.probs_b, T, c.E, c.K, c.route_scale, rtop, rw, g_s);
         k::group_route(rtop, rw, S, c.K, Ly.tab_blob, Ly.tab_sc[0], Ly.tab_sc[1], Ly.tab_sc[2], g_blk.blob, g_blk.n,
                        g_blk.tok, g_blk.row, g_blk.sg, g_blk.su, g_blk.wt, g_blk.inv, g_s);
-        // (exact: the token path's choice - NVFP4 on the tensor cores unless IK2_EXPERT_MMA=0, else the row dots)
+        // (exact: the token path's choice - NVFP4 on the tensor cores unless SAGUARO_IK2_EXPERT_MMA=0, else the row dots)
 #ifdef STRATA_USE_HIP   // (AMD: the token path's default is the row dots - so is the window's)
-        static const int exp_mma = getenv("IK2_EXPERT_MMA") ? atoi(getenv("IK2_EXPERT_MMA")) : 0;
+        static const int exp_mma = getenv("SAGUARO_IK2_EXPERT_MMA") ? atoi(getenv("SAGUARO_IK2_EXPERT_MMA")) : 0;
 #else
-        static const int exp_mma = getenv("IK2_EXPERT_MMA") ? atoi(getenv("IK2_EXPERT_MMA")) : 1;
+        static const int exp_mma = getenv("SAGUARO_IK2_EXPERT_MMA") ? atoi(getenv("SAGUARO_IK2_EXPERT_MMA")) : 1;
 #endif
         if (ex && !(exp_mma && k::experts_mma_fits(Ly.ty[0], Ly.ty[1], Ly.ty[2], C, c.F))) {
             k::experts_gate_up_swiglu_mem(g_blk.blob, g_blk.n, g_blk.tok, g_blk.row, S, Ly.ty[0], Ly.ty[1], Ly.eb[0],
@@ -3700,7 +3700,7 @@ int g_par = 1;                                 // --parallel
 size_t g_dense_bytes = 0, g_exp_bytes = 0;     // (the VRAM line's weights and STAT's experts, as the plan counted them)
 
 // --serve's watchdog (#29, #539 as maya-ds4's): a request has hung when its heartbeat - a prompt pass, a token, a step -
-// has not moved for IK2_WATCHDOG_S seconds (600; 0: off) while it runs; the engine then ends (exit 3) with a line
+// has not moved for SAGUARO_IK2_WATCHDOG_S seconds (600; 0: off) while it runs; the engine then ends (exit 3) with a line
 // naming the stage it was in, and the server starts a fresh one for the next request.  Never the request's length.
 std::atomic<uint64_t> g_beat{0};
 std::atomic<const char*> g_wd_stage{"waiting"};
@@ -3710,7 +3710,7 @@ inline void beat(const char* stage) {
     g_beat.fetch_add(1, std::memory_order_relaxed);
 }
 void watchdog_start() {
-    const char* v = getenv("IK2_WATCHDOG_S");
+    const char* v = getenv("SAGUARO_IK2_WATCHDOG_S");
     const int limit = v && *v ? std::atoi(v) : 600;
     if (limit <= 0) return;
     std::thread([limit] {
@@ -3721,11 +3721,11 @@ void watchdog_start() {
             std::this_thread::sleep_for(std::chrono::seconds(1));
             const double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
             if (!rule.stalled(g_wd_busy.load(), g_beat.load(), t)) continue;
-            std::printf("END maya-ik2: no progress for %d s in %s - stopping the engine so the server starts it again "
-                        "(issue #29; IK2_WATCHDOG_S)\n", limit, g_wd_stage.load());
+            std::printf("END saguaro ik2: no progress for %d s in %s - stopping the engine so the server starts it again "
+                        "(issue #29; SAGUARO_IK2_WATCHDOG_S)\n", limit, g_wd_stage.load());
             std::fflush(stdout);
-            std::fprintf(stderr, "maya-ik2 serve: no progress for %d s during a request, stuck in %s - stopping the "
-                                 "engine so the server starts it again (issue #29, #539; IK2_WATCHDOG_S)\n",
+            std::fprintf(stderr, "saguaro ik2 serve: no progress for %d s during a request, stuck in %s - stopping the "
+                                 "engine so the server starts it again (issue #29, #539; SAGUARO_IK2_WATCHDOG_S)\n",
                          limit, g_wd_stage.load());
             std::fflush(stderr);
             std::_Exit(3);
@@ -3812,9 +3812,9 @@ void par_launches(Model& M, Work& W, int T, const int* sl, bool cand) {
     CU(cudaMemcpyAsync(W.pos, g_parb.pos_h, (size_t) T * 4, cudaMemcpyHostToDevice, g_s));
     auto blk = [&](int i) { return W.blocks + (size_t) i * W.blk_ld * C; };
 #ifdef STRATA_USE_HIP
-    static const int exp_mma = getenv("IK2_EXPERT_MMA") ? atoi(getenv("IK2_EXPERT_MMA")) : 0;
+    static const int exp_mma = getenv("SAGUARO_IK2_EXPERT_MMA") ? atoi(getenv("SAGUARO_IK2_EXPERT_MMA")) : 0;
 #else
-    static const int exp_mma = getenv("IK2_EXPERT_MMA") ? atoi(getenv("IK2_EXPERT_MMA")) : 1;
+    static const int exp_mma = getenv("SAGUARO_IK2_EXPERT_MMA") ? atoi(getenv("SAGUARO_IK2_EXPERT_MMA")) : 1;
 #endif
     int nb = 0, nb_pre = 0, n_bank = 0;
     for (int vis = 0; vis < c.n_visit; ++vis) {
@@ -4114,7 +4114,7 @@ int sample_from(const std::vector<std::pair<int, double>>& d, std::mt19937_64& r
     return d[0].first;
 }
 
-// When to draft and how wide (IK2_DRAFT_WIDTH the widest; IK2_DRAFT_ADAPT=0: always that wide): a step's expected
+// When to draft and how wide (SAGUARO_IK2_DRAFT_WIDTH the widest; SAGUARO_IK2_DRAFT_ADAPT=0: always that wide): a step's expected
 // tokens (1 - a^B) / (1 - a) - a the drafts' acceptance, each accepted given the one before it, from the recent
 // steps - over its measured time, against a plain token's; a plain run drafts once in a while to look again.
 struct SpecCtl {
@@ -4123,9 +4123,9 @@ struct SpecCtl {
     double c_plain = 7.8e-3, c[kBlockMax + 1] = {};
     double S = 1, F = 1;   // (the drafts accepted, the ones rejected: decayed counts)
     int plain_run = 0;
-    int probe = getenv("IK2_DRAFT_PROBE") ? atoi(getenv("IK2_DRAFT_PROBE")) : 8;   // plain tokens before a look
+    int probe = getenv("SAGUARO_IK2_DRAFT_PROBE") ? atoi(getenv("SAGUARO_IK2_DRAFT_PROBE")) : 8;   // plain tokens before a look
     int probe_w = 4;
-    double decay = getenv("IK2_DRAFT_DECAY") ? atof(getenv("IK2_DRAFT_DECAY")) : 0.85;
+    double decay = getenv("SAGUARO_IK2_DRAFT_DECAY") ? atof(getenv("SAGUARO_IK2_DRAFT_DECAY")) : 0.85;
     uint64_t steps = 0, plain = 0, drafted = 0, accepted = 0;
     uint64_t hist[kBlockMax] = {};
     SpecCtl() {
@@ -4226,7 +4226,7 @@ int spec_pick(const std::vector<std::pair<int, double>>& dist, int draft, std::m
     return accepted ? draft : sample_from(dist, rng, draft);
 }
 
-int g_window_check = 0;                       // IK2_WINDOW_CHECK: windows still to check against fast_token
+int g_window_check = 0;                       // SAGUARO_IK2_WINDOW_CHECK: windows still to check against fast_token
 uint64_t g_window_rows = 0, g_window_same = 0;   // (rows checked, rows the same to the bit)
 
 // One speculative step: the anchor (the last chosen token, not run yet) at position P, B - 1 drafts after it, the B
@@ -4254,7 +4254,7 @@ void spec_step(Model& M, ik2::draft::Drafter* drafter, int anchor, int P, int B,
     for (int j = 1; j < B; ++j) tk[j] = dr[j - 1];
     next.clear();
     std::vector<float> lo;
-    if (g_window_check > 0) {   // (IK2_WINDOW_CHECK=n: the first n windows against the one-token path, logit for logit)
+    if (g_window_check > 0) {   // (SAGUARO_IK2_WINDOW_CHECK=n: the first n windows against the one-token path, logit for logit)
         --g_window_check;
         std::vector<float> lb, lt;
         fast_block(M, tk, B, P, OutMode::kLogits, lb, nullptr);
@@ -4333,8 +4333,8 @@ void forward(Model& M, const int* tok, int T, int pos0, bool all_logits, OutMode
 #define W (*Wp)
 #define EC (*ECp)
     // (the offload path: a prompt streams its experts through the cache without pushing the tier out - the slot
-    //  it takes is the one it took last, evict_scan; IK2_SCAN=0: the usual order)
-    if (g_off) EC.scan = T > 1 && !(getenv("IK2_SCAN") && !std::atoi(getenv("IK2_SCAN")));
+    //  it takes is the one it took last, evict_scan; SAGUARO_IK2_SCAN=0: the usual order)
+    if (g_off) EC.scan = T > 1 && !(getenv("SAGUARO_IK2_SCAN") && !std::atoi(getenv("SAGUARO_IK2_SCAN")));
     // the embedding rows, normed (pinned host staging, no stream sync needed)
     {
         const size_t rb = (size_t) C / k::block_values(M.embd_type) * k::block_bytes(M.embd_type);
@@ -4915,7 +4915,7 @@ void forward(Model& M, const int* tok, int T, int pos0, bool all_logits, OutMode
 // Layer-major super-chunk prefill (single GPU, no dump, no drafter):
 // A long prompt in fewer passes: the prefill scratch for a pass of T tokens (~256 KB a token) is lent by the expert
 // cache (ExpertCache::lend), which a long prefill streams through anyway, and given back afterwards - so the passes
-// can be as long as the cache allows without the decode's cache being smaller (IK2_BORROW=0: off).
+// can be as long as the cache allows without the decode's cache being smaller (SAGUARO_IK2_BORROW=0: off).
 struct BigScratch {
     int pool = -1, T_sup = 0;
     size_t blk_ld = 0;
@@ -4975,7 +4975,7 @@ size_t big_carve(const Config& c, int T, size_t gu32_have, size_t lg_want, size_
 int big_begin(const Model& M, Work& W, ExpertCache& EC, int n, int ctx_end, BigScratch& bs) {
     bs.pool = -1;
     // (the offload path lends none of the tier: what a prompt took would be gone from it for the decode)
-    if (W.T_sup <= 0 || dual() || (g_off && EC.tier_only) || (getenv("IK2_BORROW") && !std::atoi(getenv("IK2_BORROW"))))
+    if (W.T_sup <= 0 || dual() || (g_off && EC.tier_only) || (getenv("SAGUARO_IK2_BORROW") && !std::atoi(getenv("SAGUARO_IK2_BORROW"))))
         return W.T_sup;
     const Config& c = M.c;
     // the attention's scratch for 256 queries against the whole context: few, large GEMMs (the default ~400 MB left
@@ -5072,7 +5072,7 @@ void forward_prefill_sup(Model& M, const int* tok, int T, int pos0, int sub_chun
     // (enough tokens that a layer uses most of its experts; below, the misses copied after the routing cost less than
     // prefetching experts that turn out unused - a 119-token turn took 3.4 s with 2E, 1.9 s without)
     const bool pf = (size_t) T * c.K >= (size_t) 8 * c.E;
-    EC.scan = pf && !(getenv("IK2_SCAN") && !std::atoi(getenv("IK2_SCAN")));
+    EC.scan = pf && !(getenv("SAGUARO_IK2_SCAN") && !std::atoi(getenv("SAGUARO_IK2_SCAN")));
     if (dual()) dev_cache(1).scan = EC.scan;
     // (under EP each GPU prefetches the experts it owns, by GPU 0's picks so far)
     // One layer ahead: two or three layers in flight cost more than they hide - their slots squeeze the cache (2x RTX
@@ -5190,7 +5190,7 @@ void embed_row(Model& M, int t, float* raw, float* out) {
 }  // namespace
 
 // The Inkling 2 preview: Linux, one NVIDIA GPU of 24 GB, Ampere (sm_80) or newer.  Outside it the engine stops with one
-// line saying why; IK2_UNSUPPORTED=1 runs it anyway where it can run at all (two GPUs, smaller cards with the experts
+// line saying why; SAGUARO_IK2_UNSUPPORTED=1 runs it anyway where it can run at all (two GPUs, smaller cards with the experts
 // streamed from RAM, Windows: untested).
 // Greedy decode on the resident path from `anchor` (chosen, not run yet) at position P until out holds gen tokens
 // (the anchor first): each step a plain token or a window of the drafter's or the prompt lookup's drafts (ctl.pick);
@@ -5238,9 +5238,9 @@ void decode_greedy(Model& M, ik2::draft::Drafter* drafter, int anchor, int P, in
 }
 
 // --drafting auto: which of no drafting, the prompt lookup, the drafter, and both decodes fastest on this PC -
-// measured once at the first start (before READY, on IK2_DRAFT_IDS's requests: the server's chat, code and tool call
-// in the model's own template) and remembered in IK2_DRAFT_FILE (the server's data folder) a line a key: the GPU, its
-// driver, the model and the drafter files, the context and the cache; IK2_DRAFT_MEASURE=1 measures again.  A line:
+// measured once at the first start (before READY, on SAGUARO_IK2_DRAFT_IDS's requests: the server's chat, code and tool call
+// in the model's own template) and remembered in SAGUARO_IK2_DRAFT_FILE (the server's data folder) a line a key: the GPU, its
+// driver, the model and the drafter files, the context and the cache; SAGUARO_IK2_DRAFT_MEASURE=1 measures again.  A line:
 // "<key>\t<none> <lookup> <drafter> <both> tok/s <date>" (-1: not measured here).
 const char* kDraftNames[4] = {"no drafting", "the prompt lookup", "the drafter", "the drafter and the prompt lookup"};
 std::string draft_key(const std::string& model, const std::string& draft_path, int ctx) {
@@ -5262,8 +5262,8 @@ std::string draft_key(const std::string& model, const std::string& draft_path, i
 }
 // the remembered choice (0 .. 3, kDraftNames), or -1; tps: its four figures
 int draft_remembered(const std::string& key, double* tps, std::string& date) {
-    const char* f = getenv("IK2_DRAFT_FILE");
-    const char* again = getenv("IK2_DRAFT_MEASURE");
+    const char* f = getenv("SAGUARO_IK2_DRAFT_FILE");
+    const char* again = getenv("SAGUARO_IK2_DRAFT_MEASURE");
     if (!f || !*f || (again && std::atoi(again))) return -1;
     std::ifstream in(f);
     std::string line;
@@ -5280,7 +5280,7 @@ int draft_remembered(const std::string& key, double* tps, std::string& date) {
     return c;
 }
 void draft_remember(const std::string& key, const double* tps, int c) {
-    const char* f = getenv("IK2_DRAFT_FILE");
+    const char* f = getenv("SAGUARO_IK2_DRAFT_FILE");
     if (!f || !*f) return;
     std::vector<std::string> keep;
     {
@@ -5364,11 +5364,11 @@ int check_sampling() {
 
 void check_preview(int n_gpu, bool serve) {
     auto refuse = [&](const std::string& m) {   // (--serve: the server prints a NOTE line)
-        if (serve) std::printf("NOTE maya-ik2: %s\n", m.c_str()), std::fflush(stdout);
+        if (serve) std::printf("NOTE saguaro ik2: %s\n", m.c_str()), std::fflush(stdout);
         die(m);
     };
-    const bool force = getenv("IK2_UNSUPPORTED") && std::atoi(getenv("IK2_UNSUPPORTED"));
-    const std::string run_anyway = " (IK2_UNSUPPORTED=1 runs it anyway, untested)";
+    const bool force = getenv("SAGUARO_IK2_UNSUPPORTED") && std::atoi(getenv("SAGUARO_IK2_UNSUPPORTED"));
+    const std::string run_anyway = " (SAGUARO_IK2_UNSUPPORTED=1 runs it anyway, untested)";
 #if defined(_WIN32) && defined(STRATA_USE_HIP)
     if (!force) refuse("Inkling 2 on AMD runs on Linux only, Windows is outside it" + run_anyway);
 #endif
@@ -5384,9 +5384,9 @@ void check_preview(int n_gpu, bool serve) {
             "): the Inkling 2 preview runs on one " + vendor + " GPU");
     if (n_gpu < 1 || n_gpu > 2)
         refuse("--gpus " + std::to_string(n_gpu) + ": Inkling 2 runs on one or two GPUs (three or more are not in it yet)");
-    const bool old_two = (getenv("IK2_EP") && std::atoi(getenv("IK2_EP"))) || (getenv("IK2_TP") && std::atoi(getenv("IK2_TP")));
+    const bool old_two = (getenv("SAGUARO_IK2_EP") && std::atoi(getenv("SAGUARO_IK2_EP"))) || (getenv("SAGUARO_IK2_TP") && std::atoi(getenv("SAGUARO_IK2_TP")));
     if (n_gpu == 2 && old_two && !force)
-        refuse("--gpus 2 with IK2_EP=1 / IK2_TP=1: the older two-GPU modes are outside the preview (without them: "
+        refuse("--gpus 2 with SAGUARO_IK2_EP=1 / SAGUARO_IK2_TP=1: the older two-GPU modes are outside the preview (without them: "
                "the two-GPU split)" + run_anyway);
 #ifdef STRATA_USE_HIP   // (the split runs GPU 0 on the offload path, not checked on AMD yet)
     if (n_gpu == 2 && !force) refuse("--gpus 2: two AMD GPUs are not in the Inkling 2 preview yet" + run_anyway);
@@ -5406,11 +5406,11 @@ void check_preview(int n_gpu, bool serve) {
             refuse("this build has no kernels for " + gpu + ": it is built for " + STRATA_HIP_ARCHS +
                    " (add " + arch + " to CMAKE_HIP_ARCHITECTURES and rebuild)");
         if (arch.rfind("gfx11", 0) != 0 && arch.rfind("gfx12", 0) != 0 && !force)   // (the matrix-core prompt paths)
-            refuse(gpu + ": maya-ik2 on AMD needs an RDNA 3 / 3.5 / 4 GPU (gfx11 / gfx12)" + run_anyway);
+            refuse(gpu + ": saguaro-ik2 on AMD needs an RDNA 3 / 3.5 / 4 GPU (gfx11 / gfx12)" + run_anyway);
 #else
         const std::string gpu = "GPU " + std::to_string(d) + " (" + p.name + ", sm_" + std::to_string(p.major) +
                                 std::to_string(p.minor) + ")";
-        if (p.major < 7) refuse(gpu + " is too old: maya-ik2 needs an NVIDIA GPU of sm_70 (Volta) or newer");
+        if (p.major < 7) refuse(gpu + " is too old: saguaro-ik2 needs an NVIDIA GPU of sm_70 (Volta) or newer");
 #endif
         CU(cudaSetDevice(d));
 #ifndef STRATA_USE_HIP   // (a kernel of this build for the GPU: none when its arch is not in the list)
@@ -5443,7 +5443,7 @@ void check_preview(int n_gpu, bool serve) {
 int main(int argc, char** argv) {
     std::string model, toks, dump, draft_path, drafting;
     int gen = 16, chunk = 2048, ctx = 262144, threads = 8, n_gpu = 1;
-    bool serve = false, serve_maya = true;   // (--serve: Maya's engine protocol; --serve-ik2: the @-line one)
+    bool serve = false, serve_maya = true;   // (--serve: Saguaro's engine protocol; --serve-ik2: the @-line one)
     std::vector<int> eos_ids;                 // --eos a,b: the tokens a request ends at (Maya's protocol)
     double cache_gb = 60;
     int image_token = 200054;   // --image-token: Inkling 2's <|unused_200054|>, the template's placeholder of a picture
@@ -5497,38 +5497,38 @@ int main(int argc, char** argv) {
         }
         else die("unknown argument " + a);
     }
-    g_depth = getenv("IK2_DEPTH") ? std::max(0, std::atoi(getenv("IK2_DEPTH"))) : 0;   // (tests: a long context's speed without its prompt)
+    g_depth = getenv("SAGUARO_IK2_DEPTH") ? std::max(0, std::atoi(getenv("SAGUARO_IK2_DEPTH"))) : 0;   // (tests: a long context's speed without its prompt)
     if (drafting.empty()) drafting = draft_path.empty() ? "off" : "on";   // (--draft alone: as before, drafting on)
     if (drafting == "off") draft_path.clear();
-    g_lookup = drafting != "off" && !(getenv("IK2_LOOKUP") && !std::atoi(getenv("IK2_LOOKUP")));
+    g_lookup = drafting != "off" && !(getenv("SAGUARO_IK2_LOOKUP") && !std::atoi(getenv("SAGUARO_IK2_LOOKUP")));
     if (g_par > 1 && serve && (!draft_path.empty() || g_lookup)) {   // (a drafter's state is one conversation's)
-        std::printf("NOTE maya-ik2: drafting off with --parallel %d (several conversations decode together)\n", g_par);
+        std::printf("NOTE saguaro ik2: drafting off with --parallel %d (several conversations decode together)\n", g_par);
         draft_path.clear(), g_lookup = false, drafting = "off";
     }
-    g_prof = getenv("IK2_PROF") && std::atoi(getenv("IK2_PROF"));
-    g_flash = !(getenv("IK2_FLASH") && !std::atoi(getenv("IK2_FLASH")));
+    g_prof = getenv("SAGUARO_IK2_PROF") && std::atoi(getenv("SAGUARO_IK2_PROF"));
+    g_flash = !(getenv("SAGUARO_IK2_FLASH") && !std::atoi(getenv("SAGUARO_IK2_FLASH")));
 #ifdef STRATA_USE_HIP
     if (!k::attn_flash_available()) g_flash = false;   // (AMD: the fused prompt attention where its kernel is built)
 #endif
-    g_mv = !getenv("IK2_MV") || std::atoi(getenv("IK2_MV"));
-    g_group = !getenv("IK2_GROUP") || std::atoi(getenv("IK2_GROUP"));
-    if (getenv("IK2_GROUP")) {
-        const int v = std::atoi(getenv("IK2_GROUP"));
+    g_mv = !getenv("SAGUARO_IK2_MV") || std::atoi(getenv("SAGUARO_IK2_MV"));
+    g_group = !getenv("SAGUARO_IK2_GROUP") || std::atoi(getenv("SAGUARO_IK2_GROUP"));
+    if (getenv("SAGUARO_IK2_GROUP")) {
+        const int v = std::atoi(getenv("SAGUARO_IK2_GROUP"));
         g_group_exp = v == 1 || v >= 3, g_group_attn = v >= 2;
     }
-    g_dense_q8 = getenv("IK2_DENSE") && std::string(getenv("IK2_DENSE")) == "q8";
-    if (getenv("IK2_KV")) {
-        const std::string kv = getenv("IK2_KV");
+    g_dense_q8 = getenv("SAGUARO_IK2_DENSE") && std::string(getenv("SAGUARO_IK2_DENSE")) == "q8";
+    if (getenv("SAGUARO_IK2_KV")) {
+        const std::string kv = getenv("SAGUARO_IK2_KV");
         if (kv == "f16" || kv == "fp16") g_kv_fp8 = false;
         else if (kv == "fp8" || kv == "e4m3") g_kv_fp8 = true;
-        else die("unknown IK2_KV=" + kv + " (expected fp8 or f16)");
+        else die("unknown SAGUARO_IK2_KV=" + kv + " (expected fp8 or f16)");
     }
-    if (getenv("IK2_TRACE") && *getenv("IK2_TRACE")) {
-        g_trace = std::fopen(getenv("IK2_TRACE"), "wb");
-        if (!g_trace) die(std::string("cannot write ") + getenv("IK2_TRACE"));
+    if (getenv("SAGUARO_IK2_TRACE") && *getenv("SAGUARO_IK2_TRACE")) {
+        g_trace = std::fopen(getenv("SAGUARO_IK2_TRACE"), "wb");
+        if (!g_trace) die(std::string("cannot write ") + getenv("SAGUARO_IK2_TRACE"));
     }
     if (model.empty() || (toks.empty() && !serve))
-        die("usage: maya-ik2 --model FIRST.gguf (--tokens 1,2,3 [--gen N] | --serve) [--chunk 2048] [--ctx N] ...");
+        die("usage: saguaro-ik2 --model FIRST.gguf (--tokens 1,2,3 [--gen N] | --serve) [--chunk 2048] [--ctx N] ...");
     std::vector<int> prompt;
     for (const char* p = toks.c_str(); *p;) {
         prompt.push_back(std::atoi(p));
@@ -5537,25 +5537,25 @@ int main(int argc, char** argv) {
     }
     check_preview(n_gpu, serve);
     // --gpus 2: the split (TwoGpu) - the engine runs as on one GPU (GPU 0), GPU 1 added to the token path at load;
-    // IK2_EP=1 / IK2_TP=1: the older two-GPU modes on the cache path instead (IK2_UNSUPPORTED)
-    if (n_gpu == 2 && !(getenv("IK2_EP") && std::atoi(getenv("IK2_EP"))) &&
-        !(getenv("IK2_TP") && std::atoi(getenv("IK2_TP")))) {
+    // SAGUARO_IK2_EP=1 / SAGUARO_IK2_TP=1: the older two-GPU modes on the cache path instead (SAGUARO_IK2_UNSUPPORTED)
+    if (n_gpu == 2 && !(getenv("SAGUARO_IK2_EP") && std::atoi(getenv("SAGUARO_IK2_EP"))) &&
+        !(getenv("SAGUARO_IK2_TP") && std::atoi(getenv("SAGUARO_IK2_TP")))) {
         g_two.want = true;
         n_gpu = 1;
     }
 #ifdef STRATA_USE_HIP
-    {   // (AMD: the GEMMs' measured kernels - lt-picks.txt beside the GGUF, or IK2_LT_STORE's file; empty: none kept)
-        const char* ls = std::getenv("IK2_LT_STORE");
+    {   // (AMD: the GEMMs' measured kernels - lt-picks.txt beside the GGUF, or SAGUARO_IK2_LT_STORE's file; empty: none kept)
+        const char* ls = std::getenv("SAGUARO_IK2_LT_STORE");
         const size_t sl = model.find_last_of('/');
         const std::string dir = sl == std::string::npos ? std::string(".") : model.substr(0, sl);
-        strata::ds4::lt::set_store(ls != nullptr ? ls : (dir + "/lt-picks.txt").c_str(), "IK2_LT_STORE");
+        strata::ds4::lt::set_store(ls != nullptr ? ls : (dir + "/lt-picks.txt").c_str(), "SAGUARO_IK2_LT_STORE");
     }
 #endif
-    // IK2_VRAM_GB=N (tests): the first GPU as a card of N GiB - the rest of its memory taken now and kept, so every
+    // SAGUARO_IK2_VRAM_GB=N (tests): the first GPU as a card of N GiB - the rest of its memory taken now and kept, so every
     // figure the engine reads (cudaMemGetInfo) is a smaller card's
-    // (two GPUs: each of them; IK2_VRAM_GB1: GPU 1's own)
+    // (two GPUs: each of them; SAGUARO_IK2_VRAM_GB1: GPU 1's own)
     for (int d = 0; d < (g_two.want ? 2 : 1); ++d) {
-        const char* vg = getenv(d == 1 && getenv("IK2_VRAM_GB1") ? "IK2_VRAM_GB1" : "IK2_VRAM_GB");
+        const char* vg = getenv(d == 1 && getenv("SAGUARO_IK2_VRAM_GB1") ? "SAGUARO_IK2_VRAM_GB1" : "SAGUARO_IK2_VRAM_GB");
         if (!vg || !*vg) continue;
         CU(cudaSetDevice(d));
         size_t fr = 0, tot = 0;
@@ -5564,7 +5564,7 @@ int main(int argc, char** argv) {
         if (want < tot) {
             void* ballast = nullptr;
             CU(cudaMalloc(&ballast, tot - want));
-            std::printf("IK2_VRAM_GB=%s: GPU %d as a card of %.1f GiB (%.1f GiB held back)\n", vg, d,
+            std::printf("SAGUARO_IK2_VRAM_GB=%s: GPU %d as a card of %.1f GiB (%.1f GiB held back)\n", vg, d,
                         want / 1073741824.0, (tot - want) / 1073741824.0);
         }
     }
@@ -5623,7 +5623,7 @@ int main(int argc, char** argv) {
     // (a row of an expert is whole blocks of its type: checked per tensor below; 64 covers NVFP4 and Q8_0)
     if (c.D != 128 || c.H % c.KV || c.C % 64 || c.F % 64) die("unexpected shapes");
     const int n_sliding = (int) std::count(c.sliding.begin(), c.sliding.end(), true);
-    std::printf("maya-ik2: %d layers (%d sliding), %d experts (%d a token), width %d, vocab %d; %zu shards\n",
+    std::printf("saguaro ik2: %d layers (%d sliding), %d experts (%d a token), width %d, vocab %d; %zu shards\n",
                 c.n_layer, n_sliding, c.E, c.K, c.C, c.n_vocab, S.files.size());
     if (c.n_pass > 1) {
         std::printf("looped: layers %d .. %d run %d times - %d layer visits a token; message gates of rank %d\n", c.core0,
@@ -5631,14 +5631,14 @@ int main(int argc, char** argv) {
         // if (n_gpu != 1) die("a looped model: one GPU so far (--gpus 1)");
         if (!draft_path.empty() && (c.C != 2304 || c.n_visit != 48)) die("--draft: a looped model other than Inkling-2-Mini");
     }
-    if (getenv("IK2_POP_OUT")) g_pop.assign((size_t) c.n_layer * c.E, 0), g_pop_E = c.E;
+    if (getenv("SAGUARO_IK2_POP_OUT")) g_pop.assign((size_t) c.n_layer * c.E, 0), g_pop_E = c.E;
     g_tp_F = c.F, g_tp_C = c.C;
-    if (n_gpu == 2 && getenv("IK2_EP") && std::atoi(getenv("IK2_EP"))) {
-        const double share = getenv("IK2_EP_SPLIT") ? std::atof(getenv("IK2_EP_SPLIT")) : 0.5;
+    if (n_gpu == 2 && getenv("SAGUARO_IK2_EP") && std::atoi(getenv("SAGUARO_IK2_EP"))) {
+        const double share = getenv("SAGUARO_IK2_EP_SPLIT") ? std::atof(getenv("SAGUARO_IK2_EP_SPLIT")) : 0.5;
         g_pop_E_ep = c.E;
         g_ep_own.assign((size_t) c.n_layer * c.E, 0);
         std::vector<uint64_t> cnt;
-        if (const char* wf = getenv("IK2_WARM"); wf && *wf) {
+        if (const char* wf = getenv("SAGUARO_IK2_WARM"); wf && *wf) {
             FILE* in = std::fopen(wf, "rb");
             int32_t hdr[2] = {0, 0};
             if (in && std::fread(hdr, 4, 2, in) == 2 && hdr[0] == c.n_layer && hdr[1] == c.E) {
@@ -5682,8 +5682,8 @@ int main(int argc, char** argv) {
         CB(cublasSetStream(g_dev[d].blas, g_dev[d].s));
         CB(cublasSetMathMode(g_dev[d].blas, CUBLAS_DEFAULT_MATH));
     }
-    g_ep = n_gpu == 2 && getenv("IK2_EP") && std::atoi(getenv("IK2_EP"));
-    g_tp = n_gpu == 2 && !g_ep && getenv("IK2_TP") && std::atoi(getenv("IK2_TP"));
+    g_ep = n_gpu == 2 && getenv("SAGUARO_IK2_EP") && std::atoi(getenv("SAGUARO_IK2_EP"));
+    g_tp = n_gpu == 2 && !g_ep && getenv("SAGUARO_IK2_TP") && std::atoi(getenv("SAGUARO_IK2_TP"));
     if (dual()) {
         // (their copies are the runtime's peer copies: peer access only where mm3_link.cuh's test copy passes, and
         //  not at all where the IOMMU translates - those modes have no host-memory hand-off: refused there)
@@ -5695,14 +5695,14 @@ int main(int argc, char** argv) {
             CU(cudaMalloc(&tb[d], (size_t) 4 << 20));
         }
         if (!lk.setup({0, 1}, {0, 1, 1, 0}, tb, (size_t) 4 << 20, {g_dev[0].s, g_dev[1].s}, false,
-                      getenv("IK2_PEER") && std::atoi(getenv("IK2_PEER")), 1, 1, "IK2_HOST_STAGE", err))
+                      getenv("SAGUARO_IK2_PEER") && std::atoi(getenv("SAGUARO_IK2_PEER")), 1, 1, "SAGUARO_IK2_HOST_STAGE", err))
             die(err);
         for (int d = 0; d < 2; ++d) {
             CU(cudaSetDevice(d));
             CU(cudaFree(tb[d]));
         }
         if (lk.of(0, 1) == gpulink::kHost || lk.of(1, 0) == gpulink::kHost)
-            die("IK2_EP / IK2_TP: " + lk.say + " - these modes copy only peer to peer or by the driver (the two-GPU "
+            die("SAGUARO_IK2_EP / SAGUARO_IK2_TP: " + lk.say + " - these modes copy only peer to peer or by the driver (the two-GPU "
                 "split without them hands over through host memory)");
         const int p01 = lk.all_peer, p10 = lk.all_peer;
         CU(cudaSetDevice(0));
@@ -5719,15 +5719,15 @@ int main(int argc, char** argv) {
                     p01 && p10 ? "on" : "off: copies through the host");
     }
     use_dev(0);
-    g_overlap = !getenv("IK2_OVERLAP") || std::atoi(getenv("IK2_OVERLAP"));
+    g_overlap = !getenv("SAGUARO_IK2_OVERLAP") || std::atoi(getenv("SAGUARO_IK2_OVERLAP"));
     for (auto& e : g_ring) CU(cudaEventCreateWithFlags(&e, cudaEventDisableTiming));
     // (off by default: on an RTX PRO 6000 node's Xeon 6737P an NVFP4 expert takes 0.73 ms on 7 threads against 0.33 ms
-    //  over PCIe, and the lane measured 16.4 against 16.8 tok/s - IK2_CPU=1 to try it)
-    if (getenv("IK2_CPU") && std::atoi(getenv("IK2_CPU")) && ik2::cpu::available() && threads > 1 && n_gpu == 1)
+    //  over PCIe, and the lane measured 16.4 against 16.8 tok/s - SAGUARO_IK2_CPU=1 to try it)
+    if (getenv("SAGUARO_IK2_CPU") && std::atoi(getenv("SAGUARO_IK2_CPU")) && ik2::cpu::available() && threads > 1 && n_gpu == 1)
         g_pool = new ik2::cpu::Pool(threads - 1);
-    if (getenv("IK2_UP_MS")) g_t_up = std::atof(getenv("IK2_UP_MS")) * 1e-3;
-    g_cpu_lazy = !getenv("IK2_CPU_LAZY") || std::atoi(getenv("IK2_CPU_LAZY"));
-    if (n_gpu > 1 && getenv("IK2_DENSE")) die("IK2_DENSE with --gpus > 1");
+    if (getenv("SAGUARO_IK2_UP_MS")) g_t_up = std::atof(getenv("SAGUARO_IK2_UP_MS")) * 1e-3;
+    g_cpu_lazy = !getenv("SAGUARO_IK2_CPU_LAZY") || std::atoi(getenv("SAGUARO_IK2_CPU_LAZY"));
+    if (n_gpu > 1 && getenv("SAGUARO_IK2_DENSE")) die("SAGUARO_IK2_DENSE with --gpus > 1");
 
     // --drafting auto: this PC's choice when it was measured before (then only that drafter takes room), else every
     // source that fits, measured before READY (serve)
@@ -5748,20 +5748,20 @@ int main(int argc, char** argv) {
     }
 
     // Do the experts all fit in VRAM beside the dense weights and the K / V cache (Inkling-2-Mini's 14.7 GiB on a 24 GB
-    // card)?  Then they all stay there: the dense weights are kept as the GGUF's blocks unless IK2_DENSE says otherwise
+    // card)?  Then they all stay there: the dense weights are kept as the GGUF's blocks unless SAGUARO_IK2_DENSE says otherwise
     // (half an FP16 copy's bytes, a token's products straight over them) and tokens take the resident path
-    // (IK2_FAST=0: off; IK2_GRAPH=0: its launches one by one instead of a CUDA graph a token).
-    g_graph = !(getenv("IK2_GRAPH") && !std::atoi(getenv("IK2_GRAPH")));
-    g_block = !(getenv("IK2_BLOCK") && !std::atoi(getenv("IK2_BLOCK")));
-    g_block_exact = !(getenv("IK2_BLOCK_EXACT") && !std::atoi(getenv("IK2_BLOCK_EXACT")));
-    g_window_check = getenv("IK2_WINDOW_CHECK") ? std::atoi(getenv("IK2_WINDOW_CHECK")) : 0;
-    if (g_block_exact && !k::experts_block_exact()) {   // (IK2_EXPERT_MMA_SPLIT* not the defaults: no exact window)
+    // (SAGUARO_IK2_FAST=0: off; SAGUARO_IK2_GRAPH=0: its launches one by one instead of a CUDA graph a token).
+    g_graph = !(getenv("SAGUARO_IK2_GRAPH") && !std::atoi(getenv("SAGUARO_IK2_GRAPH")));
+    g_block = !(getenv("SAGUARO_IK2_BLOCK") && !std::atoi(getenv("SAGUARO_IK2_BLOCK")));
+    g_block_exact = !(getenv("SAGUARO_IK2_BLOCK_EXACT") && !std::atoi(getenv("SAGUARO_IK2_BLOCK_EXACT")));
+    g_window_check = getenv("SAGUARO_IK2_WINDOW_CHECK") ? std::atoi(getenv("SAGUARO_IK2_WINDOW_CHECK")) : 0;
+    if (g_block_exact && !k::experts_block_exact()) {   // (SAGUARO_IK2_EXPERT_MMA_SPLIT* not the defaults: no exact window)
         if (!draft_path.empty())
-            std::printf("INFO maya-ik2: drafting off - IK2_EXPERT_MMA_SPLIT / _DOWN are not 8 / 4, and the verify "
+            std::printf("INFO saguaro ik2: drafting off - SAGUARO_IK2_EXPERT_MMA_SPLIT / _DOWN are not 8 / 4, and the verify "
                         "window would then change the answers\n");
         g_block = false;
     }
-    g_attn_mma = c.D == 128 && c.H / c.KV <= 8 ? (getenv("IK2_ATTN_MMA") ? std::atoi(getenv("IK2_ATTN_MMA")) : 1) : 0;
+    g_attn_mma = c.D == 128 && c.H / c.KV <= 8 ? (getenv("SAGUARO_IK2_ATTN_MMA") ? std::atoi(getenv("SAGUARO_IK2_ATTN_MMA")) : 1) : 0;
     g_mma_split = k::attn_decode_mma_blocks(c.KV);
     // Older NVIDIA (docs/INKLING2.md 8): Volta (sm_70) and Turing (sm_75) take their own attention and expert kernels
     // (k::arch_class); a prompt's attention goes through cuBLAS there (the fused kernel is Ampere's: cp.async, and more
@@ -5773,11 +5773,11 @@ int main(int argc, char** argv) {
         for (int d = 0; d < n_gpu; ++d) use_dev(d), cls = std::min(cls, k::arch_class());
         use_dev(0);
         if (cls < 80) g_flash = false;
-        g_pa70 = cls == 70 && !(getenv("IK2_PA70") && !std::atoi(getenv("IK2_PA70")));
-        if (getenv("IK2_PA70_MIN")) g_pa70_min = std::max(0, std::atoi(getenv("IK2_PA70_MIN")));
+        g_pa70 = cls == 70 && !(getenv("SAGUARO_IK2_PA70") && !std::atoi(getenv("SAGUARO_IK2_PA70")));
+        if (getenv("SAGUARO_IK2_PA70_MIN")) g_pa70_min = std::max(0, std::atoi(getenv("SAGUARO_IK2_PA70_MIN")));
         if (cls < 75) g_block = false;
         if (cls < 80 && (!draft_path.empty() || g_lookup)) {
-            std::printf("NOTE maya-ik2: drafting off - on this GPU (sm_%d class) the verify window does not have the "
+            std::printf("NOTE saguaro ik2: drafting off - on this GPU (sm_%d class) the verify window does not have the "
                         "one-token path's kernels yet, so it would change the answers; plain decoding\n", cls);
             std::fflush(stdout);
             draft_path.clear(), g_lookup = false;
@@ -5854,8 +5854,8 @@ int main(int argc, char** argv) {
             // not fit together, the experts leave VRAM first (the offload path: a tier of the most-used ones stays,
             // the others in RAM fetched by the GPU / the CPU lane) and the cache stays in VRAM; rows go to RAM only
             // where the cache alone does not fit beside the dense weights and a half-GiB tier.  (Not where the
-            // offload path does not run: AMD, IK2_OFF=0, IK2_DENSE - there every expert stays and the cache streams.)
-            bool off_ok = !getenv("IK2_DENSE") && !(getenv("IK2_OFF") && *getenv("IK2_OFF") && !std::atoi(getenv("IK2_OFF")));
+            // offload path does not run: AMD, SAGUARO_IK2_OFF=0, SAGUARO_IK2_DENSE - there every expert stays and the cache streams.)
+            bool off_ok = !getenv("SAGUARO_IK2_DENSE") && !(getenv("SAGUARO_IK2_OFF") && *getenv("SAGUARO_IK2_OFF") && !std::atoi(getenv("SAGUARO_IK2_OFF")));
 #ifdef STRATA_USE_HIP
             off_ok = false;
 #endif
@@ -5915,26 +5915,26 @@ int main(int argc, char** argv) {
         }
         // Where they do not all fit (a card under 24 GB, or a context past what one holds), the offload token path:
         // the resident path's launches with a tier of the experts in VRAM and the others fetched by the GPU from
-        // host memory (ik2_off.cuh).  IK2_OFF=0: the cache path instead (forward() a visit at a time); IK2_OFF=1:
+        // host memory (ik2_off.cuh).  SAGUARO_IK2_OFF=0: the cache path instead (forward() a visit at a time); SAGUARO_IK2_OFF=1:
         // the offload path even where every expert fits (tests).  Not with two GPUs or the CPU lane (n_gpu == 1,
         // !g_pool here).
-        const char* off_env = getenv("IK2_OFF");
+        const char* off_env = getenv("SAGUARO_IK2_OFF");
         int off_set = off_env && *off_env ? std::atoi(off_env) : -1;
         // Two GPUs: where GPU 0 holds every expert, the resident path there alone (one GPU's speed, v1.1.73's path;
-        // IK2_TWO=1: the split anyway), else the split - GPU 0 on the offload path, GPU 1 with the next experts
+        // SAGUARO_IK2_TWO=1: the split anyway), else the split - GPU 0 on the offload path, GPU 1 with the next experts
         if (g_two.want) {
-            const char* tw = getenv("IK2_TWO");
+            const char* tw = getenv("SAGUARO_IK2_TWO");
             if (fits && !(tw && std::atoi(tw)) && off_set != 1) {
                 std::printf("two GPUs: GPU 0 holds every expert - they all stay there and GPU 1 is not used (the "
-                            "resident path; IK2_TWO=1: the two-GPU split anyway)\n");
+                            "resident path; SAGUARO_IK2_TWO=1: the two-GPU split anyway)\n");
                 g_two.want = false;
             } else {
                 off_set = 1;
             }
         }
-        if (fits && !getenv("IK2_DENSE")) g_dense_q8 = true;
-        g_fast_want = fits && off_set != 1 && g_dense_q8 && !(getenv("IK2_FAST") && !std::atoi(getenv("IK2_FAST")));
-        g_off_want = (off_set == 1 || (off_set != 0 && !fits)) && !getenv("IK2_DENSE");
+        if (fits && !getenv("SAGUARO_IK2_DENSE")) g_dense_q8 = true;
+        g_fast_want = fits && off_set != 1 && g_dense_q8 && !(getenv("SAGUARO_IK2_FAST") && !std::atoi(getenv("SAGUARO_IK2_FAST")));
+        g_off_want = (off_set == 1 || (off_set != 0 && !fits)) && !getenv("SAGUARO_IK2_DENSE");
 #ifdef STRATA_USE_HIP   // (AMD: the offload path is not checked there yet - the cache path where they do not fit)
         if (off_set != 1) g_off_want = false;
 #endif
@@ -5946,10 +5946,10 @@ int main(int argc, char** argv) {
                                  : "the experts in host memory, a cache of them in VRAM");
         // Drafting never changes this plan (a loaded drafter takes room only where everything above stays as it is):
         // it runs on the resident path, its room - the drafter's, or the prompt lookup's window records alone - beside
-        // the model at this context, and not the room the pictures' encoder would have had on the GPU (IK2_VISION_GIB,
+        // the model at this context, and not the room the pictures' encoder would have had on the GPU (SAGUARO_IK2_VISION_GIB,
         // the server's: the encoder starts on the GPU when the free VRAM holds it).  Else it is left out, said why.
         const size_t used = exp_b + dense_b + kv_b + reserve;
-        const double vis = getenv("IK2_VISION_GIB") ? std::atof(getenv("IK2_VISION_GIB")) * 1073741824.0 : 0.0;
+        const double vis = getenv("SAGUARO_IK2_VISION_GIB") ? std::atof(getenv("SAGUARO_IK2_VISION_GIB")) * 1073741824.0 : 0.0;
         const double left = fr0 > used ? (double) (fr0 - used) : 0.0;
         auto room_ok = [&](size_t need, std::string& why) {
             if (g_two.want) why = "on two GPUs it is not checked against plain decoding yet (plain decoding)";
@@ -5972,14 +5972,14 @@ int main(int argc, char** argv) {
                                           : "the prompt lookup", need / 1073741824.0);
                 break;
             }
-            std::printf("NOTE maya-ik2: %s left out (%.2f GiB): %s\n", model_drafter ? "the drafter" : "the prompt lookup",
+            std::printf("NOTE saguaro ik2: %s left out (%.2f GiB): %s\n", model_drafter ? "the drafter" : "the prompt lookup",
                         need / 1073741824.0, why.c_str());
             if (model_drafter) draft_path.clear();
             else g_lookup = false;
         }
         std::fflush(stdout);
     } else if (!draft_path.empty() || g_lookup) {
-        std::printf("NOTE maya-ik2: drafting off - it runs on one GPU with every expert in VRAM, not here\n");
+        std::printf("NOTE saguaro ik2: drafting off - it runs on one GPU with every expert in VRAM, not here\n");
         draft_path.clear(), g_lookup = false;
     }
 
@@ -6230,7 +6230,7 @@ int main(int argc, char** argv) {
             Vi.kc = dalloc<uint16_t>((size_t) Vi.kv_cap * KD);
             Vi.vc = dalloc<uint16_t>((size_t) Vi.kv_cap * KD);
         }
-        if (g_depth > 0 && !Vi.kv_host) {   // (IK2_DEPTH tests: the positions before the prompt read as zeros)
+        if (g_depth > 0 && !Vi.kv_host) {   // (SAGUARO_IK2_DEPTH tests: the positions before the prompt read as zeros)
             const size_t b = (size_t) Vi.kv_cap * KD * (g_kv_fp8 ? 1 : 2);
             CU(cudaMemset(g_kv_fp8 ? (void*) Vi.kc8 : (void*) Vi.kc, 0, b));
             CU(cudaMemset(g_kv_fp8 ? (void*) Vi.vc8 : (void*) Vi.vc, 0, b));
@@ -6268,25 +6268,25 @@ int main(int argc, char** argv) {
         std::fflush(stdout);
     }
 
-    // the experts into pinned host memory: the allocations, then the reads, several files at once.  IK2_HOST=mmap:
+    // the experts into pinned host memory: the allocations, then the reads, several files at once.  SAGUARO_IK2_HOST=mmap:
     // read where the files are mapped instead (pageable: slower copies, no 323 GiB of host memory - for several
     // GPUs whose caches hold most of the experts)
     const double t_host = now();
     Pinned pin;
     double t_alloc = 0;
     // (the resident path keeps every expert in VRAM, so no pinned host copy is needed: the experts go from where the
-    //  files are mapped straight to their slots, and stay in the page cache for the next load - IK2_HOST=pinned: as
+    //  files are mapped straight to their slots, and stay in the page cache for the next load - SAGUARO_IK2_HOST=pinned: as
     //  for the other models)
-    const bool host_mmap = getenv("IK2_HOST") ? std::string(getenv("IK2_HOST")) == "mmap" : g_fast_want;
+    const bool host_mmap = getenv("SAGUARO_IK2_HOST") ? std::string(getenv("SAGUARO_IK2_HOST")) == "mmap" : g_fast_want;
     // The offload path pins only the experts the VRAM tier does not hold (owner, v1.1.73): the layers' blocks only
     // reserved here (no RAM), the tier planned on the real free VRAM (EC.init), copied in from where the files are
     // mapped, then the rest read and pinned (below the warm) - an 8 GB card's tier is RAM a 16 GB PC does not need.
-    // Linux, where the GPU reads a registered range at its own address; IK2_PIN_ALL=1: every expert pinned here.
+    // Linux, where the GPU reads a registered range at its own address; SAGUARO_IK2_PIN_ALL=1: every expert pinned here.
     bool pin_later = false;
 #ifndef _WIN32
-    if (!host_mmap && g_off_want && !(getenv("IK2_PIN_ALL") && std::atoi(getenv("IK2_PIN_ALL"))) &&
-        !(getenv("IK2_TIER_MIN") && std::atoi(getenv("IK2_TIER_MIN"))) &&
-        !(getenv("IK2_ALLOC") && std::string(getenv("IK2_ALLOC")) == "hostalloc")) {
+    if (!host_mmap && g_off_want && !(getenv("SAGUARO_IK2_PIN_ALL") && std::atoi(getenv("SAGUARO_IK2_PIN_ALL"))) &&
+        !(getenv("SAGUARO_IK2_TIER_MIN") && std::atoi(getenv("SAGUARO_IK2_TIER_MIN"))) &&
+        !(getenv("SAGUARO_IK2_ALLOC") && std::string(getenv("SAGUARO_IK2_ALLOC")) == "hostalloc")) {
         int dv = 0, same = 0;
         CU(cudaGetDevice(&dv));
         CU(cudaDeviceGetAttribute(&same, cudaDevAttrCanUseHostPointerForRegisteredMem, dv));
@@ -6295,14 +6295,14 @@ int main(int argc, char** argv) {
 #else
     // (Windows: the GPU does not read a registered range at its own address - each run of experts registered has a
     //  device address of its own, so the fetch finds an expert through a table of them, g_offs.tab)
-    if (!host_mmap && g_off_want && !(getenv("IK2_PIN_ALL") && std::atoi(getenv("IK2_PIN_ALL"))) &&
-        !(getenv("IK2_TIER_MIN") && std::atoi(getenv("IK2_TIER_MIN"))) &&
-        !(getenv("IK2_ALLOC") && std::string(getenv("IK2_ALLOC")) == "hostalloc"))
+    if (!host_mmap && g_off_want && !(getenv("SAGUARO_IK2_PIN_ALL") && std::atoi(getenv("SAGUARO_IK2_PIN_ALL"))) &&
+        !(getenv("SAGUARO_IK2_TIER_MIN") && std::atoi(getenv("SAGUARO_IK2_TIER_MIN"))) &&
+        !(getenv("SAGUARO_IK2_ALLOC") && std::string(getenv("SAGUARO_IK2_ALLOC")) == "hostalloc"))
         pin_later = g_offs.tab = true;
 #endif
     if (host_mmap) {
-        if (g_pool) die("IK2_HOST=mmap with the CPU lane");
-        if (g_off_want) die("IK2_HOST=mmap with the offload path (it reads pinned host memory: IK2_OFF=0)");
+        if (g_pool) die("SAGUARO_IK2_HOST=mmap with the CPU lane");
+        if (g_off_want) die("SAGUARO_IK2_HOST=mmap with the offload path (it reads pinned host memory: SAGUARO_IK2_OFF=0)");
         for (const auto& J : exp_jobs) {
             Layer& Ly = M.L[J.l];
             const uint8_t* p = S.data(J.name);
@@ -6312,7 +6312,7 @@ int main(int argc, char** argv) {
                 ::madvise((void*) a0, (size_t) p - a0 + tensor_bytes(*S.info(J.name)), MADV_WILLNEED);
             }
         }
-        std::printf("experts: read where the files are mapped (IK2_HOST=mmap)\n");
+        std::printf("experts: read where the files are mapped (SAGUARO_IK2_HOST=mmap)\n");
         std::fflush(stdout);
     } else if (pin_later) {
         pin.blocks.resize(c.n_layer);
@@ -6347,10 +6347,10 @@ int main(int argc, char** argv) {
         std::fflush(stdout);
     } else {
         // Pinned host memory: anonymous mappings read into and then registered with CUDA, a layer as soon as its
-        // reads are done (323 GiB in ~60 s from VAST); IK2_ALLOC=hostalloc: cudaHostAlloc instead, which pins at
+        // reads are done (323 GiB in ~60 s from VAST); SAGUARO_IK2_ALLOC=hostalloc: cudaHostAlloc instead, which pins at
         // ~3 GiB/s (the driver serializes it; 110-190 s)
 #ifndef _WIN32
-        bool use_mmap_reg = !(getenv("IK2_ALLOC") && std::string(getenv("IK2_ALLOC")) == "hostalloc") &&
+        bool use_mmap_reg = !(getenv("SAGUARO_IK2_ALLOC") && std::string(getenv("SAGUARO_IK2_ALLOC")) == "hostalloc") &&
                             host_register_works();
         pin.blocks.resize(c.n_layer);
         if (use_mmap_reg) {
@@ -6373,7 +6373,7 @@ int main(int argc, char** argv) {
         pin.blocks.resize(c.n_layer);
 #endif
         // (pinned: the allocations and the reads overlap - a layer's reads start as soon as its buffer exists;
-        // IK2_ALLOC_THREADS threads allocate, default 1)
+        // SAGUARO_IK2_ALLOC_THREADS threads allocate, default 1)
         std::vector<std::atomic<int>> ready(c.n_layer);
         for (auto& r : ready) r.store(use_mmap_reg ? 1 : 0);
         for (int l = 0; l < c.n_layer; ++l) {
@@ -6388,15 +6388,15 @@ int main(int argc, char** argv) {
         double t_alloc_end = 0;
         std::atomic<int> alloc_left{use_mmap_reg ? 0 : c.n_layer};
         if (!use_mmap_reg) {
-            const int na = std::max(1, getenv("IK2_ALLOC_THREADS") ? std::atoi(getenv("IK2_ALLOC_THREADS")) : 1);
+            const int na = std::max(1, getenv("SAGUARO_IK2_ALLOC_THREADS") ? std::atoi(getenv("SAGUARO_IK2_ALLOC_THREADS")) : 1);
             for (int t = 0; t < na; ++t)
                 alloc_th.emplace_back([&]() {
 #if defined(__linux__)
                     // (the offload path on a PC of several NUMA nodes: the pinned experts spread over all of them,
                     //  page by page, so the CPU lane's threads on every node stream them at the sum of the nodes'
-                    //  bandwidth - Jupiter's two Xeons: 85 GB/s against 50 from one node; IK2_NUMA=0: where the
+                    //  bandwidth - Jupiter's two Xeons: 85 GB/s against 50 from one node; SAGUARO_IK2_NUMA=0: where the
                     //  allocation lands)
-                    if (g_off_want && !(getenv("IK2_NUMA") && !std::atoi(getenv("IK2_NUMA")))) {
+                    if (g_off_want && !(getenv("SAGUARO_IK2_NUMA") && !std::atoi(getenv("SAGUARO_IK2_NUMA")))) {
                         int nn = 0;
                         while (nn < 64 && std::filesystem::exists("/sys/devices/system/node/node" + std::to_string(nn))) ++nn;
                         if (nn > 1) {
@@ -6490,7 +6490,7 @@ int main(int argc, char** argv) {
             reg_th.join();   // (the layers read last are still registering)
             t_pin = now() - tp0;
             if (reg_fail > 0)
-                std::fprintf(stderr, "maya-ik2: warning: cudaHostRegister failed on %d layers (running pageable)\n",
+                std::fprintf(stderr, "saguaro ik2: warning: cudaHostRegister failed on %d layers (running pageable)\n",
                              reg_fail);
         }
         if (use_mmap_reg) {
@@ -6557,8 +6557,8 @@ int main(int argc, char** argv) {
     // (a looped model's prompts go through forward(): forward_prefill_sup has no loop yet)
     // ... nor the resident path's models: a pass borrows cache slots, which would evict experts
     W.T_sup = ((n_gpu == 1 || dual()) && draft_path.empty() && c.n_pass == 1 && !g_fast_want && fr >= (20ULL << 30)) ? (fr >= (60ULL << 30) ? 16384 : 4096) : 0;
-    // IK2_SUP=N: tokens a layer-major prefill pass (each pass streams every expert not in the cache once)
-    if (W.T_sup > 0 && getenv("IK2_SUP")) W.T_sup = std::max(W.Tm, std::atoi(getenv("IK2_SUP")));
+    // SAGUARO_IK2_SUP=N: tokens a layer-major prefill pass (each pass streams every expert not in the cache once)
+    if (W.T_sup > 0 && getenv("SAGUARO_IK2_SUP")) W.T_sup = std::max(W.Tm, std::atoi(getenv("SAGUARO_IK2_SUP")));
     const size_t Tm = W.Tm, S8 = Tm * c.K;
     const size_t T_buf = std::max(Tm, (size_t) W.T_sup), S_buf = T_buf * c.K;
     W.blk_ld = T_buf;
@@ -6574,7 +6574,7 @@ int main(int argc, char** argv) {
     W.blocks = dalloc<float>((size_t) (c.n_layer / c.block + 1) * T_buf * C);
     W.x16 = dalloc<uint16_t>(Tm * std::max(C, HD)), W.xk16 = dalloc<uint16_t>(Tm * C), W.xv16 = dalloc<uint16_t>(Tm * C);
     if (W.T_sup > 0 || dual()) W.xq16_sup = dalloc<uint16_t>(T_buf * C);
-    if (!getenv("IK2_RELB") || std::atoi(getenv("IK2_RELB"))) {
+    if (!getenv("SAGUARO_IK2_RELB") || std::atoi(getenv("SAGUARO_IK2_RELB"))) {
         W.relb_ext = std::max(c.extent, c.extent_swa);
         W.relb = dalloc<float>((size_t) Work::kRelbRows * c.H * W.relb_ext);
     }
@@ -6623,9 +6623,9 @@ int main(int argc, char** argv) {
     CU(cudaHostAlloc(&W.argmax_h, Tm * 4, cudaHostAllocPortable));
     CU(cudaHostAlloc(&W.logits_h, (size_t) c.n_rows * 4, cudaHostAllocPortable));
     CU(cudaHostAlloc(&W.cand_h, (size_t) (2 + 2 * kCandCap) * 4, cudaHostAllocPortable));
-    {   // (IK2_RG_SLOTS: the slots - tokens x picks - up to which a prompt's experts go by groups; 0: never)
+    {   // (SAGUARO_IK2_RG_SLOTS: the slots - tokens x picks - up to which a prompt's experts go by groups; 0: never)
         // (96 tokens by default: past ~128 the FP16 GEMMs are the faster way)
-        const int want = getenv("IK2_RG_SLOTS") ? std::atoi(getenv("IK2_RG_SLOTS")) : 96 * c.K;
+        const int want = getenv("SAGUARO_IK2_RG_SLOTS") ? std::atoi(getenv("SAGUARO_IK2_RG_SLOTS")) : 96 * c.K;
         W.rg_slots = std::max(0, std::min(want, (int) std::max<size_t>(64, T_buf)));
         W.rg_groups = c.E + W.rg_slots / k::kGroupMax;
         W.rg_bytes = (size_t) W.rg_groups * (8 + 4 + 8 * k::kGroupMax) + (size_t) W.rg_slots * 16;
@@ -6680,7 +6680,7 @@ int main(int argc, char** argv) {
             g_offs.pool[l] = (int) (it - sizes.begin());
             if (it == sizes.end()) sizes.push_back(sb);
         }
-        const int n_st = std::max(c.K, getenv("IK2_STAGE") ? std::atoi(getenv("IK2_STAGE")) : 2 * c.K);
+        const int n_st = std::max(c.K, getenv("SAGUARO_IK2_STAGE") ? std::atoi(getenv("SAGUARO_IK2_STAGE")) : 2 * c.K);
         for (size_t sb : sizes) {
             k::OffStage st;
             st.sb = sb, st.n = n_st;
@@ -6711,16 +6711,16 @@ int main(int argc, char** argv) {
     }
     CU(cudaMemGetInfo(&fr, &tot));
     // (what is left free: 2 GiB beside a cache that streams experts in and out; a quarter of one when every expert
-    //  stays in VRAM - nothing more is allocated but a token's graph; the offload path: IK2_ROOM_MB, 1 GiB)
+    //  stays in VRAM - nothing more is allocated but a token's graph; the offload path: SAGUARO_IK2_ROOM_MB, 1 GiB)
     const size_t room = g_fast_want ? (size_t) 256 << 20
-                      : g_off_want ? (size_t) (getenv("IK2_ROOM_MB") ? std::atof(getenv("IK2_ROOM_MB")) : 1024.0) << 20
+                      : g_off_want ? (size_t) (getenv("SAGUARO_IK2_ROOM_MB") ? std::atof(getenv("SAGUARO_IK2_ROOM_MB")) : 1024.0) << 20
                                    : (size_t) 2 << 30;
     const size_t budget = std::min((size_t) (cache_gb * 1073741824.0), fr > room ? fr - room : (size_t) 0);
     EC.tp = g_tp ? d : -1;
-    EC.tier_only = g_off_want && d == 0 && !(getenv("IK2_TIER_MIN") && std::atoi(getenv("IK2_TIER_MIN")));
+    EC.tier_only = g_off_want && d == 0 && !(getenv("SAGUARO_IK2_TIER_MIN") && std::atoi(getenv("SAGUARO_IK2_TIER_MIN")));
     std::vector<double> off_value;   // (the offload path: the profile's picks an expert, the tier's pools sized by them)
     if (g_off_want && d == 0)
-        if (const char* wf = getenv("IK2_WARM"); wf && *wf)
+        if (const char* wf = getenv("SAGUARO_IK2_WARM"); wf && *wf)
             if (FILE* in = std::fopen(wf, "rb")) {
                 int32_t hdr[2] = {0, 0};
                 std::vector<uint64_t> cnt((size_t) c.n_layer * c.E);
@@ -6737,8 +6737,8 @@ int main(int argc, char** argv) {
         std::printf("  pool %zu: %d slots of %.1f MiB (%.1f GiB, %d layers)\n", p, EC.pools[p].n_slots,
                     EC.pools[p].slot_bytes / 1048576.0,
                     (double) EC.pools[p].n_slots * EC.pools[p].slot_bytes / 1073741824.0, EC.pools[p].n_layers);
-    const char* wf = getenv("IK2_WARM");
-    if ((wf && *wf) || g_ep) {   // the cache filled with the most picked experts (IK2_POP_OUT's file or all owned for EP)
+    const char* wf = getenv("SAGUARO_IK2_WARM");
+    if ((wf && *wf) || g_ep) {   // the cache filled with the most picked experts (SAGUARO_IK2_POP_OUT's file or all owned for EP)
         FILE* in = (wf && *wf) ? std::fopen(wf, "rb") : nullptr;
         int32_t hdr[2] = {0, 0};
         std::vector<uint64_t> cnt;
@@ -6830,7 +6830,7 @@ int main(int argc, char** argv) {
                     const auto ab = run_span(l, e0, n);
                     if (!VirtualAlloc((void*) ab.first, ab.second - ab.first, MEM_COMMIT, PAGE_READWRITE))
                         die("the offload path: no RAM for the experts the VRAM tier does not hold (Windows' commit "
-                            "limit: a larger page file, or IK2_PIN_ALL=1)");
+                            "limit: a larger page file, or SAGUARO_IK2_PIN_ALL=1)");
                 });
 #endif
             std::vector<std::thread> th;
@@ -6878,7 +6878,7 @@ int main(int argc, char** argv) {
                     }
                 });
             for (auto& t : th) t.join();
-            if (fails) die("the offload path: the experts the tier does not hold could not be pinned (IK2_PIN_ALL=1: "
+            if (fails) die("the offload path: the experts the tier does not hold could not be pinned (SAGUARO_IK2_PIN_ALL=1: "
                            "every expert pinned at the load)");
             double anon = 0;
 #ifdef _WIN32
@@ -6910,7 +6910,7 @@ int main(int argc, char** argv) {
             void* dp = g_offs.tab ? (void*) (g_offs.htab_d + (size_t) l * c.E) : (void*) M.L[l].host[0];
             if (M.L[l].nopin.empty() && (cudaHostGetDevicePointer(&dp, (void*) M.L[l].host[0], 0) != cudaSuccess || !dp))
                 die("the offload path: layer " + std::to_string(l) + "'s experts are not mapped for the GPU (pinning "
-                    "failed - IK2_OFF=0 runs the cache path)");
+                    "failed - SAGUARO_IK2_OFF=0 runs the cache path)");
             g_offs.host[l] = (const uint8_t*) dp;
         }
         auto blocks = [](const Mat& m) { return m.raw || m.q8; };
@@ -6927,17 +6927,17 @@ int main(int argc, char** argv) {
         g_off = true;
         off_tables(M);
         lend_init(M);
-        // The decode mode (owner, v1.1.73): lane parity wherever it is the faster one on this PC (IK2_LANE unset or
+        // The decode mode (owner, v1.1.73): lane parity wherever it is the faster one on this PC (SAGUARO_IK2_LANE unset or
         // auto: decided from the calibration's figures), else mode A (the resident kernels, the bus only);
-        // IK2_LANE=0: mode A, =1 / fetch / cpu: lane parity (tests).
-        const char* le = getenv("IK2_LANE");
+        // SAGUARO_IK2_LANE=0: mode A, =1 / fetch / cpu: lane parity (tests).
+        const char* le = getenv("SAGUARO_IK2_LANE");
         // (two GPUs: mode A - GPU 1's rows are the resident kernels', so GPU 0's must be too)
         // (KV streaming: mode A too - the lane is not combined with the streamed visits' copies)
         if (g_kv_streaming && le && *le && std::string(le) != "0")
-            std::printf("NOTE IK2_LANE=%s not taken: the CPU lane is off while the KV cache streams (mode A)\n", le);
+            std::printf("NOTE SAGUARO_IK2_LANE=%s not taken: the CPU lane is off while the KV cache streams (mode A)\n", le);
         const std::string lw = g_two.want || g_kv_streaming ? "0" : le && *le ? le : "auto";
         if (lw != "0") {
-            g_lane = lane_init(M, lw, getenv("IK2_LANE_THREADS") ? std::atoi(getenv("IK2_LANE_THREADS")) : -1);
+            g_lane = lane_init(M, lw, getenv("SAGUARO_IK2_LANE_THREADS") ? std::atoi(getenv("SAGUARO_IK2_LANE_THREADS")) : -1);
             if (!g_lane) std::printf("lane parity: off - an expert format the exact lane does not have\n");
         }
         if (g_lane && lw == "auto") {
@@ -6965,9 +6965,9 @@ int main(int argc, char** argv) {
             if (!faster) g_lane = false, g_offs.lane.reset();
         }
         // two GPUs: GPU 1's experts - a token's launches on both devices one by one (2x V100, 2x 12 GB: 78.7 tok/s,
-        // against 73.1 as one CUDA graph across them; IK2_TWO_GRAPH=1: the graph, where every copy is a peer one)
+        // against 73.1 as one CUDA graph across them; SAGUARO_IK2_TWO_GRAPH=1: the graph, where every copy is a peer one)
         if (g_two.want && two_setup(M, EC, off_value))
-            g_graph = g_graph && g_two.link.all_peer && getenv("IK2_TWO_GRAPH") && std::atoi(getenv("IK2_TWO_GRAPH"));
+            g_graph = g_graph && g_two.link.all_peer && getenv("SAGUARO_IK2_TWO_GRAPH") && std::atoi(getenv("SAGUARO_IK2_TWO_GRAPH"));
         int n_tier = 0;
         for (int i = 0; i < c.n_layer * c.E; ++i) n_tier += EC.loc[i] >= 0;
         size_t st_b = 0;
@@ -7133,12 +7133,12 @@ int main(int argc, char** argv) {
             eos_ids.push_back(199999);   // (Inkling 2's <|endoftext|>)
         }
         // --drafting auto, not measured on this PC yet: each source that loaded - none, the prompt lookup, the
-        // drafter, both - times greedy answers to IK2_DRAFT_IDS's requests (IK2_DRAFT_TOKENS each, 128), the
-        // fastest kept (within IK2_DRAFT_TIE, 3%, of none: none) and remembered; the answers are the same whichever
+        // drafter, both - times greedy answers to SAGUARO_IK2_DRAFT_IDS's requests (SAGUARO_IK2_DRAFT_TOKENS each, 128), the
+        // fastest kept (within SAGUARO_IK2_DRAFT_TIE, 3%, of none: none) and remembered; the answers are the same whichever
         // (drafting on = off), so one load measures them all
         if (drafting == "auto" && draft_choice < 0 && (drafter || g_lookup) && g_fast && g_block) {
             std::vector<std::vector<int>> reqs;
-            if (const char* f = getenv("IK2_DRAFT_IDS")) {
+            if (const char* f = getenv("SAGUARO_IK2_DRAFT_IDS")) {
                 std::ifstream in(f);
                 std::string l;
                 while (std::getline(in, l))
@@ -7148,12 +7148,12 @@ int main(int argc, char** argv) {
                     }
             }
             if (reqs.empty()) {
-                std::printf("NOTE maya-ik2: drafting on, not measured (no requests to time it on: IK2_DRAFT_IDS)\n");
+                std::printf("NOTE saguaro ik2: drafting on, not measured (no requests to time it on: SAGUARO_IK2_DRAFT_IDS)\n");
             } else {
-                const int gen_n = getenv("IK2_DRAFT_TOKENS") ? std::max(16, std::atoi(getenv("IK2_DRAFT_TOKENS"))) : 128;
-                const double tie = getenv("IK2_DRAFT_TIE") ? std::atof(getenv("IK2_DRAFT_TIE")) : 0.03;
+                const int gen_n = getenv("SAGUARO_IK2_DRAFT_TOKENS") ? std::max(16, std::atoi(getenv("SAGUARO_IK2_DRAFT_TOKENS"))) : 128;
+                const double tie = getenv("SAGUARO_IK2_DRAFT_TIE") ? std::atof(getenv("SAGUARO_IK2_DRAFT_TIE")) : 0.03;
                 const bool have[4] = {true, g_lookup, drafter != nullptr, drafter && g_lookup};
-                std::printf("NOTE maya-ik2: measuring this PC once, before the first answer: drafting (%zu requests, %d "
+                std::printf("NOTE saguaro ik2: measuring this PC once, before the first answer: drafting (%zu requests, %d "
                             "tokens each, a source at a time); remembered, the next starts skip it\n", reqs.size(), gen_n);
                 std::fflush(stdout);
                 const double tm0 = now();
@@ -7178,7 +7178,7 @@ int main(int argc, char** argv) {
                         }
                         CU(cudaStreamSynchronize(g_s));
                         SpecCtl ctl;
-                        ctl.wmax = getenv("IK2_DRAFT_WIDTH") ? std::clamp(atoi(getenv("IK2_DRAFT_WIDTH")), 2, kBlockMax) : 5;
+                        ctl.wmax = getenv("SAGUARO_IK2_DRAFT_WIDTH") ? std::clamp(atoi(getenv("SAGUARO_IK2_DRAFT_WIDTH")), 2, kBlockMax) : 5;
                         ctl.use_lookup = mode == 1 || mode == 3, ctl.use_model = mode >= 2;
                         if (mode == 0) ctl.wmax = 1;   // (plain tokens only)
                         strata::spec::SuffixDrafter lk1;
@@ -7203,7 +7203,7 @@ int main(int argc, char** argv) {
                 draft_choice = best;
                 draft_remember(draft_key_s, tps, best);
                 reset();
-                std::printf("NOTE maya-ik2: measured this PC once in %.0f s: drafting - %s (no drafting %.1f, the prompt "
+                std::printf("NOTE saguaro ik2: measured this PC once in %.0f s: drafting - %s (no drafting %.1f, the prompt "
                             "lookup %.1f, the drafter %.1f, both %.1f tokens/s)\n", now() - tm0, kDraftNames[best],
                             tps[0], tps[1], tps[2], tps[3]);
             }
@@ -7217,7 +7217,7 @@ int main(int argc, char** argv) {
         size_t slot_extra = 0;
         if (g_par > 1 && !(serve_maya && g_fast && !g_off && n_gpu == 1 && !g_two.on && !g_kv_streaming && !g_tp &&
                             ctx / g_par >= 4096)) {
-            std::printf("NOTE maya-ik2: --parallel %d not taken - several conversations at once run where every expert "
+            std::printf("NOTE saguaro ik2: --parallel %d not taken - several conversations at once run where every expert "
                         "stays in VRAM on one GPU (the resident path), with at least 4096 positions each; one at a time\n",
                         g_par);
             g_par = 1;
@@ -7233,7 +7233,7 @@ int main(int argc, char** argv) {
         if (serve_maya) {
             // (dspark= / lookup=: the drafters this start runs - the Monitor's Speculation; drafting= the choice)
             const bool sp = (drafter || g_lookup) && g_fast && g_block;
-            const char* wd = getenv("IK2_WATCHDOG_S");
+            const char* wd = getenv("SAGUARO_IK2_WATCHDOG_S");
             std::printf("INFO engine=ik2 engine_kind=ik2 model=Inkling-2 kv=%s ctx=%d gpus=%d dspark=%d lookup=%d "
                         "drafting=%s experts=%d parallel=%d watchdog_s=%d path=%s\n", g_kv_fp8 ? "fp8" : "f16", ctx,
                         g_two.on ? 2 : n_gpu, sp && drafter ? 1 : 0, sp && g_lookup ? 1 : 0, drafting.c_str(),
@@ -7682,12 +7682,12 @@ int main(int argc, char** argv) {
         }
         std::string line;
         std::mt19937_64 rng(1234);
-        // speculative decoding (--draft, the resident path): the controller decides each step; IK2_DRAFT_WIDTH the
-        // widest window, IK2_DRAFT_ADAPT=0 always that wide
+        // speculative decoding (--draft, the resident path): the controller decides each step; SAGUARO_IK2_DRAFT_WIDTH the
+        // widest window, SAGUARO_IK2_DRAFT_ADAPT=0 always that wide
         SpecCtl sctl;
         const bool spec_on = (drafter || g_lookup) && g_fast && g_block;
-        sctl.wmax = getenv("IK2_DRAFT_WIDTH") ? std::clamp(atoi(getenv("IK2_DRAFT_WIDTH")), 2, kBlockMax) : 5;
-        sctl.adapt = !(getenv("IK2_DRAFT_ADAPT") && !atoi(getenv("IK2_DRAFT_ADAPT")));
+        sctl.wmax = getenv("SAGUARO_IK2_DRAFT_WIDTH") ? std::clamp(atoi(getenv("SAGUARO_IK2_DRAFT_WIDTH")), 2, kBlockMax) : 5;
+        sctl.adapt = !(getenv("SAGUARO_IK2_DRAFT_ADAPT") && !atoi(getenv("SAGUARO_IK2_DRAFT_ADAPT")));
         sctl.use_model = drafter != nullptr, sctl.use_lookup = g_lookup;
         static strata::spec::SuffixDrafter lk;   // (the prompt lookup: a request's tokens so far)
         while (next_line(line)) {
@@ -7890,14 +7890,14 @@ int main(int argc, char** argv) {
                 snap_copy(sn, true);
             }
             const double t1 = now();
-            if (getenv("IK2_STATS"))
+            if (getenv("SAGUARO_IK2_STATS"))
                 std::printf("prefill stats: %zu tokens run, %llu expert copies (%.1f GiB) in %.2f s; experts that ran 1 / 2 / 3-7 / 8+ "
                             "tokens: %llu / %llu / %llu / %llu\n",
                             ids.size() - (size_t) cached, (unsigned long long) (dev_cache(0).misses - miss0),
                             (dev_cache(0).bytes_up - bytes0) / 1073741824.0, t1 - t0,
                             (unsigned long long) g_cnt_hist[0], (unsigned long long) g_cnt_hist[1],
                             (unsigned long long) g_cnt_hist[2], (unsigned long long) g_cnt_hist[3]);
-            if (getenv("IK2_STATS"))
+            if (getenv("SAGUARO_IK2_STATS"))
                 std::printf("prefill sources: used and cached %llu, used and prefetched %llu, used and copied after the "
                             "routing %llu, prefetched and unused %llu\n",
                             (unsigned long long) g_src_hist[0], (unsigned long long) g_src_hist[1],
@@ -7943,8 +7943,8 @@ int main(int argc, char** argv) {
                 for (int i = 0; i < g_cand.n; ++i) cd[i] = {g_cand.val[i], g_cand.idx[i]};
                 return pick_top(cd);
             };
-            // IK2_CAND=0: sampling takes the whole vocabulary's logits from the device every token
-            const bool use_cand = !(getenv("IK2_CAND") && !std::atoi(getenv("IK2_CAND")));
+            // SAGUARO_IK2_CAND=0: sampling takes the whole vocabulary's logits from the device every token
+            const bool use_cand = !(getenv("SAGUARO_IK2_CAND") && !std::atoi(getenv("SAGUARO_IK2_CAND")));
             bool cand = false;   // the last token's logits came as candidates (g_cand), not in `last`
             int pending_sample = -1;   // (a speculative window's last token, sampled already)
             const char* reason = "length";
@@ -8041,7 +8041,7 @@ int main(int argc, char** argv) {
                 }
                 hist.push_back(tok);
             }
-            if (spec_on && getenv("IK2_STATS"))
+            if (spec_on && getenv("SAGUARO_IK2_STATS"))
                 std::fprintf(stderr, "speculative: %llu windows, %llu of %llu drafts accepted (the lookup's %llu of "
                              "%llu), %llu plain tokens\n", (unsigned long long) (sctl.steps + sctl.l_steps),
                              (unsigned long long) sctl.kept(), (unsigned long long) sctl.offered(),
@@ -8067,7 +8067,7 @@ int main(int argc, char** argv) {
         std::_Exit(0);   // (QUIT / end of input: out at once, as maya-hy4 - the OS frees the pinned runs and the driver's state)
     }
     if (g_depth + (int) prompt.size() + gen > ctx) die("prompt + gen past --ctx");
-    if (g_depth > 0 && (serve || drafter || g_lookup || g_dev[0].W.T_sup > 0)) die("IK2_DEPTH: the CLI's plain path only (no drafting)");
+    if (g_depth > 0 && (serve || drafter || g_lookup || g_dev[0].W.T_sup > 0)) die("SAGUARO_IK2_DEPTH: the CLI's plain path only (no drafting)");
     // the prompt
     std::vector<float> logits;
     double t_exp = 0;
@@ -8114,7 +8114,7 @@ int main(int argc, char** argv) {
                 (unsigned long long) ec_sum([](ExpertCache& e) { return e.hits; }),
                 (unsigned long long) ec_sum([](ExpertCache& e) { return e.misses; }),
                 ec_sum([](ExpertCache& e) { return e.bytes_up; }) / 1073741824.0);
-    if (g_lend.want >= 0 && getenv("IK2_LEND_WAIT") && std::atoi(getenv("IK2_LEND_WAIT"))) {   // (tests: the steady speed)
+    if (g_lend.want >= 0 && getenv("SAGUARO_IK2_LEND_WAIT") && std::atoi(getenv("SAGUARO_IK2_LEND_WAIT"))) {   // (tests: the steady speed)
         const double tw = now();
         lend_grow(M, g_lend.want);
         g_lend.want = -1;
@@ -8148,25 +8148,25 @@ int main(int argc, char** argv) {
     const uint64_t h0 = (uint64_t) ec_sum([](ExpertCache& e) { return e.hits; }),
                    m0 = (uint64_t) ec_sum([](ExpertCache& e) { return e.misses; });
     int n_steps = 0;
-    const int verify_check = getenv("IK2_VERIFY_CHECK") ? std::atoi(getenv("IK2_VERIFY_CHECK")) : 0;
-    const int block_check = getenv("IK2_BLOCK_CHECK") ? std::atoi(getenv("IK2_BLOCK_CHECK")) : 0;
+    const int verify_check = getenv("SAGUARO_IK2_VERIFY_CHECK") ? std::atoi(getenv("SAGUARO_IK2_VERIFY_CHECK")) : 0;
+    const int block_check = getenv("SAGUARO_IK2_BLOCK_CHECK") ? std::atoi(getenv("SAGUARO_IK2_BLOCK_CHECK")) : 0;
     double t_draft = 0, t_verify = 0;
     std::vector<int> acc_hist(ik2::draft::kBlock, 0);
-    // IK2_FORCE=FILE (comma-separated ids): the tokens fed are these instead of the model's own picks, and how often
+    // SAGUARO_IK2_FORCE=FILE (comma-separated ids): the tokens fed are these instead of the model's own picks, and how often
     // its pick agrees with the next one is counted - two builds then run the same tokens (a fair speed comparison)
     // and the agreement measures their numerics on real text
     std::vector<int> force;
     int agree = 0;
-    if (getenv("IK2_FORCE")) {
-        FILE* ff = std::fopen(getenv("IK2_FORCE"), "r");
-        if (!ff) die("IK2_FORCE: cannot read the file");
+    if (getenv("SAGUARO_IK2_FORCE")) {
+        FILE* ff = std::fopen(getenv("SAGUARO_IK2_FORCE"), "r");
+        if (!ff) die("SAGUARO_IK2_FORCE: cannot read the file");
         int v;
         while (std::fscanf(ff, "%d,", &v) == 1) force.push_back(v);
         std::fclose(ff);
     }
-    // IK2_LOGITS_OUT=FILE: every generated token's logits [n_vocab] F32 appended there (with IK2_FORCE: two builds'
+    // SAGUARO_IK2_LOGITS_OUT=FILE: every generated token's logits [n_vocab] F32 appended there (with SAGUARO_IK2_FORCE: two builds'
     // logits over the same tokens, to compare)
-    FILE* lo = getenv("IK2_LOGITS_OUT") ? std::fopen(getenv("IK2_LOGITS_OUT"), "wb") : nullptr;
+    FILE* lo = getenv("SAGUARO_IK2_LOGITS_OUT") ? std::fopen(getenv("SAGUARO_IK2_LOGITS_OUT"), "wb") : nullptr;
     const bool lookup_only = !drafter && g_lookup && g_fast && g_block;   // (then the drafting loop below)
     for (int i = 0, best = first_best; i < gen && !drafter && !lookup_only; ++i) {
         const int tok = i < (int) force.size() ? force[i] : best;
@@ -8196,8 +8196,8 @@ int main(int argc, char** argv) {
     if ((drafter || g_lookup) && g_fast && g_block) {
         // (the resident path: the controller picks plain tokens or a window of the drafter's or the prompt lookup's
         //  drafts; greedy, as the CLI's generation is)
-        ctl.wmax = getenv("IK2_DRAFT_WIDTH") ? std::clamp(atoi(getenv("IK2_DRAFT_WIDTH")), 2, kBlockMax) : 5;
-        ctl.adapt = !(getenv("IK2_DRAFT_ADAPT") && !atoi(getenv("IK2_DRAFT_ADAPT")));
+        ctl.wmax = getenv("SAGUARO_IK2_DRAFT_WIDTH") ? std::clamp(atoi(getenv("SAGUARO_IK2_DRAFT_WIDTH")), 2, kBlockMax) : 5;
+        ctl.adapt = !(getenv("SAGUARO_IK2_DRAFT_ADAPT") && !atoi(getenv("SAGUARO_IK2_DRAFT_ADAPT")));
         ctl.use_model = drafter != nullptr, ctl.use_lookup = g_lookup;
         strata::spec::SuffixDrafter lk;
         lk.append(prompt.data(), prompt.size());
@@ -8246,10 +8246,10 @@ int main(int argc, char** argv) {
         auto argmax_row = [&](const float* r) { return (int) (std::max_element(r, r + c.n_vocab) - r); };
         int anchor = first_best, P = (int) prompt.size();
         out.push_back(anchor);
-        // IK2_DRAFT_WIDTH: the tokens a step verifies, the anchor and width - 1 drafts (2 .. 8)
-        const int width = getenv("IK2_DRAFT_WIDTH") ? std::clamp(atoi(getenv("IK2_DRAFT_WIDTH")), 2, ik2::draft::kBlock)
+        // SAGUARO_IK2_DRAFT_WIDTH: the tokens a step verifies, the anchor and width - 1 drafts (2 .. 8)
+        const int width = getenv("SAGUARO_IK2_DRAFT_WIDTH") ? std::clamp(atoi(getenv("SAGUARO_IK2_DRAFT_WIDTH")), 2, ik2::draft::kBlock)
                                                     : ik2::draft::kBlock;
-        const bool margin_check = getenv("IK2_MARGIN") != nullptr;
+        const bool margin_check = getenv("SAGUARO_IK2_MARGIN") != nullptr;
         while ((int) out.size() < gen && P < ctx) {
             const int B = std::min(width, ctx - P);
             const double t0 = now();
@@ -8266,7 +8266,7 @@ int main(int argc, char** argv) {
             const bool need_logits = n_steps < verify_check || margin_check;
             const bool use_block = g_fast && g_block && !need_logits;
             if (use_block && n_steps < block_check) {
-                // (IK2_BLOCK_CHECK=n: the first n windows through both paths, their logits compared; forward()'s
+                // (SAGUARO_IK2_BLOCK_CHECK=n: the first n windows through both paths, their logits compared; forward()'s
                 //  then taken)
                 std::vector<float> lb;
                 fast_block(M, tk, B, P, OutMode::kLogits, lb, nullptr);

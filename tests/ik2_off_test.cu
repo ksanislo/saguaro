@@ -1,4 +1,4 @@
-// tests/ik2_off_test.cu - maya-ik2's offload path (src/ik2/ik2_off.cuh, ik2_exact.h, ik2_lane.hpp):
+// tests/ik2_off_test.cu - saguaro-ik2's offload path (src/ik2/ik2_off.cuh, ik2_exact.h, ik2_lane.hpp):
 //   * the exact lane: the GPU's off_gate_up_x / off_down_x against ik2_exact.h's reference and every CPU form this
 //     machine runs (AVX-512, AVX2, scalar) - bit for bit, on random NVFP4 and Q8_0 experts at Mini's sizes;
 //   * ik2_exact.h's exp / tanh / swiglu / FP16 rounding: the GPU's bits against the host's over a sweep;

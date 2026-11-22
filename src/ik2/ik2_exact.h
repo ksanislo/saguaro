@@ -1,5 +1,5 @@
-// src/ik2/ik2_exact.h - maya-ik2's "exact lane" arithmetic for a routed expert: the same bits on the CPU and on the
-// GPU, so an answer does not depend on where an expert ran (the offload path's lane-parity mode, IK2_LANE).
+// src/ik2/ik2_exact.h - saguaro-ik2's "exact lane" arithmetic for a routed expert: the same bits on the CPU and on the
+// GPU, so an answer does not depend on where an expert ran (the offload path's lane-parity mode, SAGUARO_IK2_LANE).
 //
 //   * a weight decoded to an exact F32 (NVFP4: a code times its sub-block's E4M3 scale; Q8_0: q times the block's
 //     FP16 d - both products exact in F32);

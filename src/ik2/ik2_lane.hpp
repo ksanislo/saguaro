@@ -1,4 +1,4 @@
-// src/ik2/ik2_lane.hpp - maya-ik2's CPU lane for the offload path's lane-parity mode (IK2_LANE): the routed experts a
+// src/ik2/ik2_lane.hpp - saguaro-ik2's CPU lane for the offload path's lane-parity mode (SAGUARO_IK2_LANE): the routed experts a
 // visit gives it (ik2_off.cuh's LaneJob, in host memory the GPU writes), computed in ik2_exact.h's arithmetic - the
 // same bits as the GPU's off_gate_up_x / off_down_x - on Hy4's lane threads (hy4::Lane: a physical core each, NUMA
 // nodes, the busy-PC reserve), the rows answered in LaneDone for the GPU to pull.

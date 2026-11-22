@@ -1,4 +1,4 @@
-// src/ik2/ik2_kernels.cu - maya-ik2's kernels (the interface and the conventions: ik2_kernels.cuh).
+// src/ik2/ik2_kernels.cu - saguaro-ik2's kernels (the interface and the conventions: ik2_kernels.cuh).
 #include "ik2_kernels.cuh"
 #include "ik2_iq_tables.h"
 
@@ -5885,7 +5885,7 @@ int arch_class() {
         cudaDeviceGetAttribute(&mi, cudaDevAttrComputeCapabilityMinor, d);
         const int cc = ma * 10 + mi;
         int c = cc >= 80 ? 80 : cc >= 75 ? 75 : 70;
-        if (const char* e = std::getenv("IK2_ARCH")) {   // (tests: an older class's kernels on a newer GPU)
+        if (const char* e = std::getenv("SAGUARO_IK2_ARCH")) {   // (tests: an older class's kernels on a newer GPU)
             const int f = std::atoi(e);
             if (f == 70 || f == 75) c = std::min(c, f);
         }
@@ -6016,10 +6016,10 @@ void attn_probs_bias_f16(const float* lg, uint16_t* out16, int H, int Tq, int nk
                                                                                    qk_scale, bias, extent, window, sink);
     check("attn_probs_bias_f16");
 }
-// the Hopper kernel (wgmma) on a 9.x GPU of a build with sm_90a; IK2_WGMMA=0: the mma.sync one everywhere
+// the Hopper kernel (wgmma) on a 9.x GPU of a build with sm_90a; SAGUARO_IK2_WGMMA=0: the mma.sync one everywhere
 bool fa_wgmma() {
     static const int on = [] {
-        if (getenv("IK2_WGMMA") && !std::atoi(getenv("IK2_WGMMA"))) return 0;
+        if (getenv("SAGUARO_IK2_WGMMA") && !std::atoi(getenv("SAGUARO_IK2_WGMMA"))) return 0;
         int dev = 0, major = 0;
         cudaGetDevice(&dev);
         cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev);
@@ -6029,9 +6029,9 @@ bool fa_wgmma() {
 }
 #ifdef STRATA_USE_HIP
 // (AMD: the matrix-core kernel of ik2_rdna.inc on RDNA 3 / 3.5 / 4 - the CUDA kernel's 86 KB of shared memory is past
-//  RDNA's 64 KB; IK2_RDNA_FLASH=0: off)
+//  RDNA's 64 KB; SAGUARO_IK2_RDNA_FLASH=0: off)
 bool attn_flash_available() {
-    static const bool on = !(std::getenv("IK2_RDNA_FLASH") && !std::atoi(std::getenv("IK2_RDNA_FLASH"))) && rdna_wmma_gpu();
+    static const bool on = !(std::getenv("SAGUARO_IK2_RDNA_FLASH") && !std::atoi(std::getenv("SAGUARO_IK2_RDNA_FLASH"))) && rdna_wmma_gpu();
     return on;
 }
 #else
@@ -6451,8 +6451,8 @@ bool experts_mma_fits(int ty_gate, int ty_up, int ty_down, int C, int F) {
     return ty_gate == kNVFP4 && ty_up == kNVFP4 && ty_down == kNVFP4 && C % 64 == 0 && F % 64 == 0;
 }
 static int experts_mma_split(bool gate) {
-    static const int wg = getenv("IK2_EXPERT_MMA_SPLIT") ? atoi(getenv("IK2_EXPERT_MMA_SPLIT")) : 8;
-    static const int wd = getenv("IK2_EXPERT_MMA_SPLIT_DOWN") ? atoi(getenv("IK2_EXPERT_MMA_SPLIT_DOWN")) : 4;
+    static const int wg = getenv("SAGUARO_IK2_EXPERT_MMA_SPLIT") ? atoi(getenv("SAGUARO_IK2_EXPERT_MMA_SPLIT")) : 8;
+    static const int wd = getenv("SAGUARO_IK2_EXPERT_MMA_SPLIT_DOWN") ? atoi(getenv("SAGUARO_IK2_EXPERT_MMA_SPLIT_DOWN")) : 4;
     return gate ? wg : wd;
 }
 template <bool Gate>
@@ -6462,24 +6462,24 @@ static void launch_experts_mma(const uint8_t* const* blob, int S, size_t off, co
     const int w = experts_mma_split(Gate);
     const dim3 g((unsigned) (Gate ? F / 8 : C / 16), (unsigned) S);
     if (arch_class() == 70) {   // (Volta: mma.m8n8k4, the same rows and splits)
-#define IK2_V70_LAUNCH(W) experts_v70_kernel<Gate, W><<<g, W * 32, 0, s>>>(blob, off, C, F, x16, x_ld, h, y, sg, su, gcap, ucap)
-        if (w == 1) IK2_V70_LAUNCH(1);
-        else if (w == 2) IK2_V70_LAUNCH(2);
-        else if (w == 3) IK2_V70_LAUNCH(3);
-        else if (w == 6) IK2_V70_LAUNCH(6);
-        else if (w == 8) IK2_V70_LAUNCH(8);
-        else IK2_V70_LAUNCH(4);
-#undef IK2_V70_LAUNCH
+#define SAGUARO_IK2_V70_LAUNCH(W) experts_v70_kernel<Gate, W><<<g, W * 32, 0, s>>>(blob, off, C, F, x16, x_ld, h, y, sg, su, gcap, ucap)
+        if (w == 1) SAGUARO_IK2_V70_LAUNCH(1);
+        else if (w == 2) SAGUARO_IK2_V70_LAUNCH(2);
+        else if (w == 3) SAGUARO_IK2_V70_LAUNCH(3);
+        else if (w == 6) SAGUARO_IK2_V70_LAUNCH(6);
+        else if (w == 8) SAGUARO_IK2_V70_LAUNCH(8);
+        else SAGUARO_IK2_V70_LAUNCH(4);
+#undef SAGUARO_IK2_V70_LAUNCH
         return;
     }
-#define IK2_MMA_LAUNCH(W) experts_mma_kernel<Gate, W><<<g, W * 32, 0, s>>>(blob, off, C, F, x16, x_ld, h, y, sg, su, gcap, ucap)
-    if (w == 1) IK2_MMA_LAUNCH(1);
-    else if (w == 2) IK2_MMA_LAUNCH(2);
-    else if (w == 3) IK2_MMA_LAUNCH(3);
-    else if (w == 6) IK2_MMA_LAUNCH(6);
-    else if (w == 8) IK2_MMA_LAUNCH(8);
-    else IK2_MMA_LAUNCH(4);
-#undef IK2_MMA_LAUNCH
+#define SAGUARO_IK2_MMA_LAUNCH(W) experts_mma_kernel<Gate, W><<<g, W * 32, 0, s>>>(blob, off, C, F, x16, x_ld, h, y, sg, su, gcap, ucap)
+    if (w == 1) SAGUARO_IK2_MMA_LAUNCH(1);
+    else if (w == 2) SAGUARO_IK2_MMA_LAUNCH(2);
+    else if (w == 3) SAGUARO_IK2_MMA_LAUNCH(3);
+    else if (w == 6) SAGUARO_IK2_MMA_LAUNCH(6);
+    else if (w == 8) SAGUARO_IK2_MMA_LAUNCH(8);
+    else SAGUARO_IK2_MMA_LAUNCH(4);
+#undef SAGUARO_IK2_MMA_LAUNCH
 }
 void experts_gate_up_swiglu_mma(const uint8_t* const* blob, int S, size_t eb0, const uint16_t* x16, int C, int F,
                                 const float* sg, const float* su, float gcap, float ucap, uint16_t* h,
@@ -7098,21 +7098,21 @@ void mv_q8p_cols(const int8_t* q, const uint16_t* d, int N, int K, const float* 
         std::abort();
     }
     // (a warp's rows: more share each x load - the window's x is read once per R rows - fewer warps in flight)
-    static const int rr = getenv("IK2_COLS_R") ? atoi(getenv("IK2_COLS_R")) : 0;
+    static const int rr = getenv("SAGUARO_IK2_COLS_R") ? atoi(getenv("SAGUARO_IK2_COLS_R")) : 0;
     const int R = rr == 2 || rr == 4 || rr == 8 ? rr : (T <= 2 ? 2 : 4);
     constexpr int WARPS = 4;
     const unsigned g = (unsigned) ((N + WARPS * R - 1) / (WARPS * R));
-#define IK2_COLS(RR, TT) mv_q8p_cols_kernel<WARPS, RR, TT><<<g, WARPS * 32, 0, s>>>(q, d, N, K, x, x_ld, T, y, y_ld)
-#define IK2_COLS_T(RR) \
-    if (T <= 2) IK2_COLS(RR, 2); \
-    else if (T <= 4) IK2_COLS(RR, 4); \
-    else if (T <= 6) IK2_COLS(RR, 6); \
-    else IK2_COLS(RR, 8)
-    if (R == 2) { IK2_COLS_T(2); }
-    else if (R == 4) { IK2_COLS_T(4); }
-    else { IK2_COLS_T(8); }
-#undef IK2_COLS_T
-#undef IK2_COLS
+#define SAGUARO_IK2_COLS(RR, TT) mv_q8p_cols_kernel<WARPS, RR, TT><<<g, WARPS * 32, 0, s>>>(q, d, N, K, x, x_ld, T, y, y_ld)
+#define SAGUARO_IK2_COLS_T(RR) \
+    if (T <= 2) SAGUARO_IK2_COLS(RR, 2); \
+    else if (T <= 4) SAGUARO_IK2_COLS(RR, 4); \
+    else if (T <= 6) SAGUARO_IK2_COLS(RR, 6); \
+    else SAGUARO_IK2_COLS(RR, 8)
+    if (R == 2) { SAGUARO_IK2_COLS_T(2); }
+    else if (R == 4) { SAGUARO_IK2_COLS_T(4); }
+    else { SAGUARO_IK2_COLS_T(8); }
+#undef SAGUARO_IK2_COLS_T
+#undef SAGUARO_IK2_COLS
     check("mv_q8p_cols");
 }
 void experts_gate_up_swiglu_mem(const uint8_t* const* blob, const int* n, const int* tok, const int* row, int G,

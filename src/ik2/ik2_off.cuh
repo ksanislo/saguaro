@@ -1,4 +1,4 @@
-// src/ik2/ik2_off.cuh - maya-ik2's offload token path: a token's routed experts that the VRAM tier does not hold,
+// src/ik2/ik2_off.cuh - saguaro-ik2's offload token path: a token's routed experts that the VRAM tier does not hold,
 // fetched by the GPU itself from pinned host memory into a staging cache in VRAM, with no host step between the
 // router and the experts (so a token stays one CUDA graph, as on the resident path).
 //
@@ -43,7 +43,7 @@ struct OffCount {
     unsigned long long picks, tier, stage, fetched, bytes, cpu;
 };
 
-// ---- the lane-parity mode (IK2_LANE): every expert in ik2_exact.h's arithmetic, so the CPU lane can take misses too
+// ---- the lane-parity mode (SAGUARO_IK2_LANE): every expert in ik2_exact.h's arithmetic, so the CPU lane can take misses too
 
 /// A visit's CPU work, written by the GPU into host memory mapped for it (the lane polls seq); x [C] at kLaneJobX.
 struct LaneJob {

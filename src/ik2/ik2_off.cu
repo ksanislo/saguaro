@@ -1,4 +1,4 @@
-// src/ik2/ik2_off.cu - maya-ik2's offload token path (ik2_off.cuh): the GPU fetch of a token's missing experts.
+// src/ik2/ik2_off.cu - saguaro-ik2's offload token path (ik2_off.cuh): the GPU fetch of a token's missing experts.
 #include "ik2_off.cuh"
 
 #include "ik2_exact.h"

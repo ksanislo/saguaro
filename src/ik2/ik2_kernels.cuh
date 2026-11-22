@@ -1,4 +1,4 @@
-// src/ik2/ik2_kernels.cuh - maya-ik2's kernels: the ops of Inkling 2 (thinkingmachines/Inkling-2-Small) that Maya's
+// src/ik2/ik2_kernels.cuh - saguaro-ik2's kernels: the ops of Inkling 2 (thinkingmachines/Inkling-2-Small) that Maya's
 // other engines do not have - the short convolutions, the attention residuals, the attention's clips, relative bias and
 // sink, the softcapped SwiGLU with the experts' scales - and the decodes of the weights an `inkling2` GGUF holds
 // (NVFP4, Q5_K, Q6_K, Q8_0).  The arithmetic follows ref/inkling2.py (transformers' modeling_inkling2.py), in F32; the
@@ -16,7 +16,7 @@ namespace ik2::k {
 
 /// The current GPU's class for the kernels that differ by architecture: 70 (Volta: its own attention and NVFP4
 /// expert kernels on mma.m8n8k4), 75 (Turing: Ampere's kernels with mma.sync m16n8k8 and no cp.async - not the
-/// prompt's fused attention), 80 (Ampere and newer).  IK2_ARCH=70 / 75 takes a lower class on a newer GPU (tests).
+/// prompt's fused attention), 80 (Ampere and newer).  SAGUARO_IK2_ARCH=70 / 75 takes a lower class on a newer GPU (tests).
 int arch_class();
 
 /// y = x * rsqrt(mean(x^2) + eps) * w per row of D (w null: no weight).  x and y may alias.
@@ -120,7 +120,7 @@ bool attn_flash_available();
 /// AMD, RDNA 3 / 3.5 / 4 (ik2_rdna.inc): the prompt's routed experts of a layer in three launches from their blocks.
 /// Rows: a token's pick each, grouped by expert in expert order; tiles: int4 {expert, first row, rows <= 32, 0} over
 /// them; eptr [E]: an expert's blocks (gate, then up at off_up / down at off_down, as a cache slot holds them).
-/// Can the current GPU take it for these expert types (all NVFP4 or all Q8_0) and widths (IK2_RDNA_MOE=0: no)?
+/// Can the current GPU take it for these expert types (all NVFP4 or all Q8_0) and widths (SAGUARO_IK2_RDNA_MOE=0: no)?
 bool experts_rdna_available(int ty_gate, int ty_up, int ty_down, int C, int F);
 /// h16 [rows][F] = SwiGLU(x16 . gate^T * sg[row], x16 . up^T * su[row]) (softcaps gcap / ucap), x16 [rows][C]
 void experts_rdna_gu(const uint8_t* const* eptr, const int* tiles, int n_tiles, int ty, size_t off_up,
@@ -172,7 +172,7 @@ void moe_combine_f32(const float* y, const int* inv, const float* wt, int T, int
 void moe_combine_conv(const float* y, const int* inv, const float* wt, int K, int C, float* hist, const float* w,
                       const float* res, float* out, cudaStream_t s);
 
-/// Two GPUs (maya-ik2's split): GPU 0's table holds kHeldElsewhere for an expert GPU 1 runs, GPU 1's a null for one it
+/// Two GPUs (saguaro-ik2's split): GPU 0's table holds kHeldElsewhere for an expert GPU 1 runs, GPU 1's a null for one it
 /// does not hold; the token path's expert kernels leave such a pick's row alone.  two_take_rows: the rows of GPU 0's
 /// picks marked kHeldElsewhere (blob [S]) taken from GPU 1's rows (other [S][C], copied over) into y [S][C].
 constexpr uintptr_t kHeldElsewhere = 1;
@@ -543,7 +543,7 @@ void experts_gate_up_swiglu_mem(const uint8_t* const* blob, const int* n, const 
 void experts_down_mem(const uint8_t* const* blob, const int* n, const int* row, int G, int ty_down, size_t off_down,
                       const uint16_t* h, int C, int F, float* y, cudaStream_t s);
 /// experts_block_gu / _down give experts_gate_up_swiglu_mma / experts_down_mma's values to the bit (their warp
-/// splits the same: IK2_EXPERT_MMA_SPLIT 8, _DOWN 4, the defaults).
+/// splits the same: SAGUARO_IK2_EXPERT_MMA_SPLIT 8, _DOWN 4, the defaults).
 bool experts_block_exact();
 
 }  // namespace ik2::k

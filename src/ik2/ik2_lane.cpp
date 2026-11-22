@@ -1,4 +1,4 @@
-// src/ik2/ik2_lane.cpp - maya-ik2's CPU lane (ik2_lane.hpp).  Built without contraction (-ffp-contract=off, MSVC
+// src/ik2/ik2_lane.cpp - saguaro-ik2's CPU lane (ik2_lane.hpp).  Built without contraction (-ffp-contract=off, MSVC
 // /fp:strict): every sum is the fused multiply-add or the rounding ik2_exact.h names, so the rows are the GPU's bits.
 #include "ik2_lane.hpp"
 
@@ -244,7 +244,7 @@ void Server::set_threads(int n) {
 Server::~Server() {
     quit_.store(true);
     if (th_.joinable()) th_.join();
-    if (std::getenv("IK2_LANE_LOG"))
+    if (std::getenv("SAGUARO_IK2_LANE_LOG"))
         for (size_t i = 0; i < hist_.size(); ++i)
             if (hist_[i].n)
                 std::printf("lane jobs of %zu experts: %llu, %.0f us on average, %.0f at most\n", i + 1, hist_[i].n,
@@ -295,7 +295,7 @@ void Server::run(uint32_t seq) {
     compute(layer, e, sg, su, n, (const float*) (job_ + k::kLaneJobX), (float*) (done_ + k::kLaneDoneY));
     const double us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
     const int fmt = L_[(size_t) layer].ty_gu == x::kNVFP4 ? 0 : 1;
-    if (n > 0 && n <= k::kOffMaxK) {   // (IK2_LANE_LOG: a job's time by its size)
+    if (n > 0 && n <= k::kOffMaxK) {   // (SAGUARO_IK2_LANE_LOG: a job's time by its size)
         Hist& hh = hist_[(size_t) n - 1];
         ++hh.n, hh.sum += us, hh.max = std::max(hh.max, us);
     }
