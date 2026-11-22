@@ -1505,6 +1505,9 @@ struct Model::Impl {
     // the experts no member holds to its own GPU (kShareThreads copy a member's pass into its bounce); a shorter one
     // is member 0's alone, the CPU lane or its GPU as on the layer split
     static constexpr int kTpStream = 256;
+    // HY4_TP_SHARE=0: no member streams its share of the experts no member holds - member 0's route (GPU 0 streams, or
+    // the CPU lane) takes a prompt chunk's, as for chunks under kTpStream: the four cards never wait on H2D together
+    const bool tp_share_on = [] { const char* v = std::getenv("HY4_TP_SHARE"); return !v || std::atoi(v) != 0; }();
     static constexpr int kShareThreads = 8;
     // The indexed layers' keys a dense (tensor-core) prompt sub-batch spans at most: beyond, the gathering kernel.
     // Both read the indexer's same picks (the dense one masks every other key out), so the limit moves no pick - only
@@ -6523,7 +6526,7 @@ struct Model::Impl {
             }
             const int* slot = lane_on || l.tpm >= 0 ? l.slot_d : nullptr;
             bool streamed = false;
-            const bool share = l.tpm >= 0 && !l.stream_e.empty() && T >= kTpStream;
+            const bool share = l.tpm >= 0 && !l.stream_e.empty() && T >= kTpStream && tp_share_on;
             if (T > W) {
                 ok = ok && experts_sets(l, gp, T, err, slot);
                 // a prompt chunk's experts not in VRAM: streamed to the GPU, or the CPU lane - by the rates this PC
@@ -8546,7 +8549,7 @@ bool Model::load(const Options& o, std::string& err) {
         //  more has every member stream its share and takes no route, so the chunks that choose are shorter: the
         //  longest of them, more of them - a window is a chunk or two)
         bool tp_share = false;
-        for (const Layer& l : x.lane_layers()) tp_share |= l.partial() && l.tpm >= 0 && !l.stream_e.empty();
+        for (const Layer& l : x.lane_layers()) tp_share |= l.partial() && l.tpm >= 0 && !l.stream_e.empty() && x.tp_share_on;
         const int Rc = tp_share ? std::min(Tc, Impl::kTpStream - 1) : Tc;
         const int r_chunks = (Rc < Tc ? 4 : 1) * (Impl::kRouteWindows + 2);
         std::string plan;
