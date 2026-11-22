@@ -186,12 +186,15 @@ looped model with 8 of 128 experts a token; Apache 2.0) on an engine of its own 
 [unsloth's UD-Q4_K_XL GGUF](https://huggingface.co/unsloth/Inkling-2-Mini-GGUF) (18.3 GB with its vision tower):
 `./setup.sh --model inkling-2-mini`. **The model for one or two 16 GB cards** - the setup recommends it there.
 
-| Cards | Context | Measured on Tesla T4s |
+| Cards | Context | Measured on Tesla T4s (the previous engine; TODO: the v1.1.74-based one) |
 | --- | ---: | --- |
-| One 16 GB card: about a quarter of the experts streamed from RAM | 32K | about 42 tokens/s writing, 640 reading |
-| Two 16 GB cards: every expert in VRAM | 131K | about 52 tokens/s writing, 1130 reading |
+| One 16 GB card: the offload path - the most-used experts in VRAM, the rest in RAM | 32K | about 42 tokens/s writing, 640 reading |
+| Two 16 GB cards: every expert in VRAM across the two | 131K | about 52 tokens/s writing, 1130 reading |
 
-Tool calls, five thinking levels, pictures; one conversation at a time (four more kept aside in RAM).
+It also sets up on NVIDIA cards from 8 GB (V100 and newer; the experts a card does not hold stay in RAM) and on one AMD
+RDNA 3 / 4 GPU that holds every expert of the file (24 GB for UD-Q4_K_XL) - not run here. Tool calls, five thinking
+levels, pictures; one conversation at a time on two cards (several at once where one GPU holds every expert; four
+more kept aside in RAM).
 The install, the settings and the limits: **[INKLING2-MINI.md](INKLING2-MINI.md)**; the engine itself:
 [INKLING2.md](INKLING2.md).
 
