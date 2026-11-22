@@ -3041,11 +3041,37 @@ def pack_stale(pack: Path, shards: list):
     return f"{late[0]} was written after the pack was built" if late else None
 
 
-def stamp_pack(pack: Path, shards: list) -> None:
-    """The model files' sizes and times into the pack (PACK_SOURCES), for pack_stale."""
-    files = [{"name": s.name, "size": s.stat().st_size, "mtime_ns": s.stat().st_mtime_ns} for s in shards]
+GLM_PACK_FORMAT = 1           # tools/iq_pack.py's GLM pack (index v3, --compat-bf16): raised when the engine needs another
+GLM_PACK_INDEX = "# strata pack index v3 "
+
+
+def pack_foreign(pack: Path) -> str | None:
+    """Why the GLM pack in `pack` is not one this setup may take and write into, or None (none there, or this
+    setup's format).  A pack with no record of its model files (PACK_SOURCES) was built by an older Maya / Strata
+    install, one of another index version or a newer format by something else: it is left as it is."""
+    if not (pack / "index.txt").is_file():
+        return None
     try:
-        (pack / PACK_SOURCES).write_text(json.dumps({"files": files}, indent=1), encoding="utf-8")
+        with open(pack / "index.txt", encoding="utf-8") as f:
+            head = f.readline()
+    except (OSError, UnicodeDecodeError):
+        head = ""
+    if not head.startswith(GLM_PACK_INDEX):
+        return "its index is not Saguaro's format (" + (head.strip()[:60] or "unreadable") + ")"
+    if not (pack / PACK_SOURCES).is_file():
+        return "it has no record of the files it was built from (an older Maya or Strata install's)"
+    fmt = read_json(pack / PACK_SOURCES).get("glm_pack_format", GLM_PACK_FORMAT)
+    if not isinstance(fmt, int) or fmt != GLM_PACK_FORMAT:
+        return f"its format {fmt} is not this engine's ({GLM_PACK_FORMAT})"
+    return None
+
+
+def stamp_pack(pack: Path, shards: list, fmt: int | None = None) -> None:
+    """The model files' sizes and times into the pack (PACK_SOURCES), for pack_stale; fmt: a GLM pack's format."""
+    files = [{"name": s.name, "size": s.stat().st_size, "mtime_ns": s.stat().st_mtime_ns} for s in shards]
+    rec = {"files": files, **({"glm_pack_format": fmt} if fmt is not None else {})}
+    try:
+        (pack / PACK_SOURCES).write_text(json.dumps(rec, indent=1), encoding="utf-8")
     except OSError:
         pass
 
@@ -3112,14 +3138,21 @@ def pack_step(a, d: Path, shards: list, llama: Path, quant: str | None = None) -
         return pack
     # the engine finds the GGUF files at <pack>/.. (src/core/glm_model.cu, load_pack): the pack lives in their folder,
     # in pack/ - or pack-<model>/ when pack/ indexes another model of the same folder
+    # - and pack-saguaro-<model>/ beside a foreign one (pack_foreign: never reused, written into or built over)
     pack = d / "pack"
     if pack_source(pack) not in (None, shards[0].name):
         pack = d / f"pack-{quant_of(shards[0])}".lower()
-    if not a.repack and pack_source(pack) == shards[0].name and all((pack / f).exists() for f in PACK_FILES):
+    foreign = pack_foreign(pack)
+    if foreign is not None:
+        new = d / f"pack-saguaro-{quant_of(shards[0])}".lower()
+        warn(f"{pack} is left as it is: {foreign} - this setup's pack goes into {new}")
+        pack = new
+    if not a.repack and pack_source(pack) == shards[0].name and all((pack / f).exists() for f in PACK_FILES) and \
+            pack_foreign(pack) is None:
         why = pack_stale(pack, shards)
         if why is None:
-            if not (pack / PACK_SOURCES).exists():
-                stamp_pack(pack, shards)
+            if read_json(pack / PACK_SOURCES).get("glm_pack_format") is None:   # (an earlier Saguaro setup's)
+                stamp_pack(pack, shards, GLM_PACK_FORMAT)
             ok(f"pack already built: {pack}")
             base_template(pack)
             return pack
@@ -3141,7 +3174,7 @@ def pack_step(a, d: Path, shards: list, llama: Path, quant: str | None = None) -
     missing = [f for f in PACK_FILES if not (pack / f).exists()]
     if missing:
         fail(f"the pack builder did not write {pack / missing[0]}", "the reason is in the messages above")
-    stamp_pack(pack, shards)
+    stamp_pack(pack, shards, GLM_PACK_FORMAT)
     ok(f"pack: {pack}")
     base_template(pack)
     return pack
