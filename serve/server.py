@@ -3853,7 +3853,9 @@ class Service:
                 "parked": {"bytes": parked, **({"tokens": parked_tok} if kbt and parked else {}),
                            **({"conversations": parked_n} if parked_n is not None else {}),
                            **({"budget_bytes": park_budget} if park_budget is not None else {})},
-                "free": max(0, cap - used - parked_tok)}
+                "free": max(0, cap - used - parked_tok),
+                # (QFN turn saves: each place's last saved position and time - main, slotN)
+                **({"turn_saves": dict(getattr(eng, "turn_saves", None) or {})} if getattr(eng, "turn_saves", None) else {})}
 
     def metrics(self, all_requests=False) -> dict:
         """GET /metrics: what the Monitor tab shows - the engine's facts, what it is doing, the last requests, and

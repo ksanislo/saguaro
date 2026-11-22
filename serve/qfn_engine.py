@@ -596,6 +596,10 @@ def session_event_text(f: dict, state: dict | None) -> str | None:
         where = {"exit": "on shutdown", "direct": "straight from the GPU (no RAM to park it)",
                  "background": "in the background"}.get(why, "")
         return f"saved {conv} to disk {where} ({took})".replace("  ", " ")
+    if what == "turn_saved":                            # SAGUARO_TURN_SAVE: where it sits (main / slotN), no park
+        return f"saved {conv} after its turn ({why}): {human_bytes(size)} appended ({ms / 1000:.1f} s, in the background)"
+    if what == "turn_skipped":
+        return f"could not append the turn of {conv} ({why}); its next turn is saved whole"
     if what == "dropped":                               # the parked cache gave RAM back (park_policy.hpp)
         reasons = {"pressure": "the host is short of RAM", "budget": "the live conversations need its room",
                    "idle": "it was idle past the limit",
@@ -973,6 +977,7 @@ class StrataEngine:
     # request's context source for the request line, and one plain line per event in the server's output
     sessions = None
     last_ctx = None
+    turn_saves = None       # {place: {tokens, bytes, ms, at}}: each place's last turn save (rebound whole, never mutated)
 
     def _session_note(self, line: str) -> bool:
         body = line[5:].strip()
@@ -991,6 +996,11 @@ class StrataEngine:
             if self.last_ctx["source"] == "none" and self.last_ctx["prompt"] > 0:   # nothing to bring back in
                 print(f"[saguaro] sessions: new conversation, {self.last_ctx['prompt']:,} tokens to read", flush=True)
             return True
+        if f.get("sess_event") == "turn_saved":         # /metrics: the last saved position and time of each place
+            self.turn_saves = {**(self.turn_saves or {}),
+                               f.get("sess_why", "?"): {"tokens": int(f.get("sess_tokens") or 0),
+                                                        "bytes": int(f.get("sess_bytes") or 0),
+                                                        "ms": float(f.get("sess_ms") or 0), "at": time.time()}}
         msg = session_event_text(f, self.sessions)
         if msg:
             print(f"[saguaro] sessions: {msg}", flush=True)

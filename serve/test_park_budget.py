@@ -62,6 +62,23 @@ class Notes(unittest.TestCase):
         whole = self.text(sess_event="wrote", sess_tokens=149134, sess_bytes=2400 << 20, sess_ms=2700, sess_why="background")
         self.assertIn("in the background", whole)
 
+    def test_turn_saved(self):
+        t = self.text(sess_event="turn_saved", sess_tokens=149134, sess_bytes=310_000_000, sess_ms=420, sess_why="slot4")
+        self.assertEqual(t, "saved a 149,134-token conversation after its turn (slot4): 310 MB appended (0.4 s, in the background)")
+        self.assertIn("saved whole", self.text(sess_event="turn_skipped", sess_tokens=5, sess_bytes=0, sess_ms=0, sess_why="main"))
+
+    def test_turn_saves_reach_metrics(self):
+        eng = QE.StrataEngine.__new__(QE.StrataEngine)
+        for place, n in (("main", 1000), ("slot4", 149134), ("main", 1200)):
+            self.assertTrue(eng._session_note(f"INFO sess_event=turn_saved sess_tokens={n} sess_bytes=5 sess_ms=7 sess_why={place}"))
+        self.assertEqual({k: v["tokens"] for k, v in eng.turn_saves.items()}, {"main": 1200, "slot4": 149134})
+        fake = FakeEngine(batch=8, vram=[gpu_map.parse(park_line())])
+        self.assertNotIn("turn_saves", service(fake)._engine_context([]))      # an engine that reports none
+        fake.turn_saves = eng.turn_saves
+        svc = service(fake)
+        self.assertEqual(svc._engine_context([])["turn_saves"]["slot4"]["tokens"], 149134)
+        svc.metrics()
+
     def test_unknown_event(self):
         self.assertIsNone(self.text(sess_event="something_new", sess_tokens=1, sess_bytes=1, sess_ms=1, sess_why="x"))
 
