@@ -416,41 +416,21 @@ costs 115 expert slots and a resident layer visit: decode 9-11% slower on every 
 requests carry new pictures. Two cards: the server starts the encoder on the config's GPU with the most free
 memory (the second: ~6.9 GiB free at a context of 131,072).
 
-**Install** (into `/opt/llm/saguaro`, the model in `/opt/llm/models/Inkling-2-Mini-UD-Q4_K_XL/`):
+**Install by hand** (the setup does all of this itself; `<saguaro>` = the Saguaro folder, `<models>` = the models
+folder):
 
 1. The tokenizer folder beside the model (writes `<out>/tokenizer/`, 5 files; `--check` round-trips 16 strings):
 
-       /opt/llm/saguaro/.venv/bin/python tools/strata_tokenizer.py \
-           --gguf /opt/llm/models/Inkling-2-Mini-UD-Q4_K_XL/Inkling-2-Mini-UD-Q4_K_XL.gguf \
-           --out /opt/llm/models/Inkling-2-Mini-UD-Q4_K_XL --chat-template tools/ik2/chat_template.jinja --check
+       <saguaro>/.venv/bin/python tools/strata_tokenizer.py \
+           --gguf <models>/Inkling-2-Mini-UD-Q4_K_XL/Inkling-2-Mini-UD-Q4_K_XL.gguf \
+           --out <models>/Inkling-2-Mini-UD-Q4_K_XL --chat-template tools/ik2/chat_template.jinja --check
 
-2. `build-ik2/saguaro-ik2` -> `bin/saguaro-ik2` (its RUNPATH is CUDA 13.1's lib folder: nothing to patch),
-   `build-ik2-vision/build/bin/vision-glm` -> `bin/vision-ik2`, `configs/Inkling-2-Mini-UD-Q4_K_XL*.json` ->
-   `configs/`, and this branch's `serve/` and `tools/` (`maya_quants.py`, `strata_tokenizer.py`,
-   `ik2/chat_template.jinja`). `configs/` must be writable by the server's user (`vision-memory.json`).
-3. The two configs carry one `model_name` and one log file: the one-card profile needs its own of both (its
-   llama-swap id is its `model_name`). `"SAGUARO_IK2_STATS": "1"` in a config's `env` gives the Monitor its VRAM hit.
-4. llama-swap (PROPOSED; not applied - lines marked ASK are not known here):
-
-       "Inkling-2-Mini-UD-Q4_K_XL":            # two T4s (cards 2,3), context 131,072
-         cmd: >
-           /bin/sh -c "cd /opt/llm/saguaro && exec .venv/bin/python serve/server.py
-           --config /opt/llm/saguaro/configs/Inkling-2-Mini-UD-Q4_K_XL.json --port ${PORT}"
-         # ASK: the other Saguaro profiles' wrapper (clock lock / cmdStop unlock, env), copied as they have it
-         ttl: 900
-         unloadTimeout: 60                     # (QUIT saves the open conversations to SAGUARO_IK2_SLOT_DIR first)
-       "Inkling-2-Mini-UD-Q4_K_XL-1card":      # one T4 (card 2), context 32,768
-         cmd: >
-           /bin/sh -c "cd /opt/llm/saguaro && exec .venv/bin/python serve/server.py
-           --config /opt/llm/saguaro/configs/Inkling-2-Mini-UD-Q4_K_XL.1card.json --port ${PORT}"
-         ttl: 900
-         unloadTimeout: 60
-
-       groups:
-         "gpu-models":                         # ASK: the group's name as the live config has it
-           members:
-             - "Inkling-2-Mini-UD-Q4_K_XL"
-             - "Inkling-2-Mini-UD-Q4_K_XL-1card"   # (every id under models: must be here too, or in no group)
-
-   The server takes no `--engine` for a real engine (the config's `exe` picks the driver). A new id also goes into
-   opencode.json, `dsh/profiles/headless/cordis.patch.yml` and Hermes' config when those should offer it.
+2. `build/saguaro-ik2`, the vision encoder (the config's `vision.exe`) and a config: `configs/Inkling-2-Mini-UD-Q4_K_XL.json`
+   (two cards) or `.1card.json` (one) are the measured ones, with their paths relative to the Saguaro folder (the
+   model in `models/`, its state in `var/`); edit them to your folders. The config's folder must be writable by the
+   server's user (`vision-memory.json`).
+3. Each config's `model_name` is the id the API serves; two profiles of one model need their own `model_name` and log
+   file. `"SAGUARO_IK2_STATS": "1"` in a config's `env` gives the Monitor its VRAM hit.
+4. Start it from the Saguaro folder: `.venv/bin/python serve/server.py --config <config> --port 8099`. Under a proxy
+   that starts models on demand (llama-swap and the like), use the same command with the proxy's port and give it a
+   stop timeout of about a minute: on QUIT the engine saves the open conversations to `SAGUARO_IK2_SLOT_DIR` first.

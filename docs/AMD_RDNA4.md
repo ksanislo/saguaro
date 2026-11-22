@@ -1,7 +1,9 @@
 # R9700 / RX 9070: experimental Saguaro HIP
 
-The Linux HIP installer accepts RX 7900 XT/XTX (`gfx1100`) and RX 9070 /
-Radeon AI PRO R9700 (`gfx1201`). It uses one GPU, text input, and system ROCm 7.
+The HIP installer accepts RX 7900 XT/XTX (`gfx1100`) and RX 9070 / 9070 XT /
+Radeon AI PRO R9700 (`gfx1201`), with a system ROCm 7. It runs on one GPU or splits
+the layers over two, and reads pictures. Which models run on AMD today:
+[AMD_SAGUARO.md, "What runs on AMD"](AMD_SAGUARO.md#what-runs-on-amd).
 The shared backend changes come from Strata
 [`d5ea713`](https://github.com/Niko1221/Strata/tree/d5ea7133741e67743c0e886bb426c0ce8d69cf6c).
 The R9700 runs the full model (Maya-S, about 20 tok/s answers and 490-560 tok/s
@@ -23,23 +25,24 @@ lists and architecture feature suffixes. The runtime strips the feature suffix
 and checks exact membership in the compiled list, then requires wave32.
 Its diagnostics print the actual architecture and the compiled targets.
 
-`gfx1151` **builds, untested**. Code is included for later Strix Halo work, but
-setup does not enable that APU here. Unified-memory accounting and hardware
-validation are separate requirements.
+`gfx1151` (Strix Halo / Gorgon Halo) is taken by the setup too, with its
+unified-memory accounting ([AMD_SAGUARO.md](AMD_SAGUARO.md)).
 
-A manual build, using Saguaro's existing pinned llama.cpp checkout:
+A manual build, using Saguaro's existing pinned llama.cpp checkout (the setup's own
+configure is the same with `-DSTRATA_ENABLE_HIP=ON`; the CMake target `maya` builds
+the program `saguaro-glm`):
 
 ```sh
 maya_rocm_root="$(realpath "${ROCM_PATH:-/opt/rocm}")"
 cmake -S . -B build-multi -G Ninja -DCMAKE_BUILD_TYPE=Release \
-  -DMAYA_ENABLE_HIP=ON -DMAYA_ENABLE_CUDA=OFF \
-  -DMAYA_NATIVE_EXPERTS=ON -DMAYA_PREFILL_MMQ=ON \
-  -DMAYA_BUILD_TESTS=OFF \
+  -DSTRATA_ENABLE_HIP=ON -DSTRATA_ENABLE_CUDA=OFF \
+  -DSTRATA_NATIVE_EXPERTS=ON -DSTRATA_PREFILL_MMQ=ON \
+  -DSTRATA_BUILD_TESTS=ON \
   '-DCMAKE_HIP_ARCHITECTURES=gfx1100;gfx1201;gfx1151' \
   -DCMAKE_HIP_COMPILER="$maya_rocm_root/llvm/bin/clang++" \
   -DCMAKE_HIP_COMPILER_ROCM_ROOT="$maya_rocm_root" \
   -DCMAKE_PREFIX_PATH="$maya_rocm_root" \
-  -DMAYA_GGML_DIR="$PWD/third_party/llama.cpp"
+  -DSTRATA_GGML_DIR="$PWD/third_party/llama.cpp"
 cmake --build build-multi --target maya strata-device hip_expert_cache_staging \
   hip_intrinsics hip_handoff hip_glm_handoff hip_glm_prefill_attention iq1_s_parity \
   glm_hc_parity glm_kda_parity glm_ffn_parity glm_dsa_parity glm_layer_parity \

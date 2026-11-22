@@ -120,4 +120,36 @@ a smaller prompt chunk that leaves more VRAM to the experts (32.5).
   memory at the same time. Under tensor parallel a prompt read normally streams the experts that are not in VRAM to
   all four cards at once; with the switch they run on the CPU instead. It costs prompt-read speed (not yet measured;
   estimated up to a quarter), nothing while writing. Add it to the config's `env` only if your PC needs it.
-- AMD, Windows and Mac: not built here.
+- AMD: not run on an AMD GPU yet, so the setup does not offer it there ([AMD_SAGUARO.md](AMD_SAGUARO.md#what-runs-on-amd)).
+  Windows and Mac: not built.
+
+## Running it by hand or under a proxy
+
+The setup's start script does this; by hand, from the Saguaro folder (`<config>` = the setup's
+`maya-hy4-flash-maya-s.json`, or `configs/Hy4-Flash-Maya-S-IQ2_S.json`, the measured 4x T4 config with its paths
+relative to the Saguaro folder - the model in `models/Hy4-Flash-Maya-S-IQ2_S/`, its state in `var/`):
+
+```sh
+sudo nvidia-smi -lgc 1590,1590           # Tesla T4s (above)
+ulimit -l unlimited                      # or a memlock limit large enough for the pinned expert copies
+.venv/bin/python serve/server.py --config <config> --host 127.0.0.1 --port 8099
+```
+
+The pack, if you built the model folder yourself (an index of the GGUF files and the tokenizer, a few MB, no GPU):
+
+```sh
+M=<models folder>/Hy4-Flash-Maya-S-IQ2_S
+.venv/bin/python tools/hy4/pack_gguf.py --model $M --out $M/pack \
+  --files Maya-S/Hy4-Flash-Maya-S-IQ2_S-00001-of-00002.gguf Maya-XS/Hy4-Flash-Maya-XS-IQ2_XXS-00002-of-00002.gguf \
+  --mmproj Maya-XS/mmproj-Hy4-Flash-Maya-XS.gguf --mtp none --drafter none
+```
+
+Under a proxy that starts models on demand (llama-swap and the like), run the same command with the proxy's port and
+give it a stop timeout of a minute or two: the server saves open conversations when it stops. The first start times the
+prompt route on ~57K tokens before it is ready unless `"HY4_MEASURE": "0"` is in the config's `env` - allow for that in
+the proxy's health-check timeout. A good start logs `tensor parallel: every layer over GPUs 0,1,2,3`, `HY4_HOT: tensor
+parallel places the experts in VRAM at the start`, `CPU lane: N of 20992 routed experts in VRAM`, then `READY`.
+
+`HY4_HOT_FILE`'s scores are fixed; to learn them for your own traffic, run a layer-split start (`--tp 0`) with a new
+file path over real use, then point the config at it. `HY4_Q4X=0` keeps the CPU lane on the GGUF's own experts (its
+4-bit copies need AVX2).

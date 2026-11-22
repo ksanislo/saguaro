@@ -1,6 +1,24 @@
 # Experimental Saguaro on RX 7900 XT / XTX, R9700 / RX 9070 and Strix Halo / Gorgon Halo
 
-This branch adds a Linux HIP build and installer path for Saguaro's GLM-5.3-Flash
+## What runs on AMD
+
+The state of this version (keep this table, the setup's `NO_ENGINE` list in `saguaro.py` and the README in step):
+
+| Model | Engine (CMake target) | On AMD (HIP) |
+| --- | --- | --- |
+| GLM-5.3-Flash | `saguaro-glm` (`maya`) | builds and runs (experimental); its GPU self-tests pass on an RX 9070 XT (gfx1201, ROCm 7.1). The quant that fits a 16 GB card + 96 GB of RAM is Maya-XS (73 GB); the setup recommends the largest one that fits VRAM + RAM |
+| Qwen-3.8-Flash-Next (CYBER-FROST) | `saguaro-glm` (`maya`) | builds (the same engine as GLM); about 84 GB of VRAM + RAM |
+| DeepSeek-V4.1-Flash-1017 | `saguaro-ds4` (`maya-ds4`) | has HIP code paths, but does not compile for HIP in this version yet (being fixed) |
+| MiniMax-M3.1-Flash | `saguaro-mm3` (`maya-mm3`) | has HIP code paths, but does not compile for HIP in this version yet (being fixed) |
+| Hy4-Flash | `saguaro-hy4` (`maya-hy4`) | not run on an AMD GPU yet: the setup does not offer it on AMD |
+| Inkling 2 Mini | `saguaro-ik2` | no HIP engine yet: the setup does not offer it on AMD |
+
+`./saguaro.sh --check` on an AMD PC lists the same. Report how a model runs on your card in an
+[issue](https://github.com/ksanislo/saguaro/issues).
+
+## GLM-5.3-Flash on AMD
+
+This is a Linux and Windows HIP build and installer path for Saguaro's GLM-5.3-Flash
 engine on `gfx1100`, `gfx1201` and `gfx1151` (Strix Halo, Gorgon Halo). It uses one GPU, or two supported GPUs that split the
 layers (see [Two GPUs](#two-gpus)), and reads pictures too: setup builds the image encoder for the GPU
 (ggml's HIP backend), started only while a picture is encoded, as on NVIDIA; `--no-vision` leaves it out. The
@@ -194,7 +212,7 @@ Measured on a 128 GB Strix Halo box with ROCm 7.2.2 and manually tuned settings:
 ~210 tok/s for 3-4K-token prompts and ~17.8 tok/s answers, with every expert
 in the GPU pool (288 slots/layer, 12,096 total, ~99.9% hits). These measurements
 precede the automatic sizing change; verify its startup log and repeated
-prompt/answer rounds on the real box. See [tracking issue #6](https://github.com/mw00/project-maya/issues/6).
+prompt/answer rounds on the real box. See Project Maya's [tracking issue #6](https://github.com/mw00/project-maya/issues/6).
 
 **Answers and prompts (v1.1.10).** Where every expert sits in the GPU pool, the APUs answer faster with the same
 text (`SAGUARO_GLM_MTP_DECODE`, on by default on `gfx115x` only). On the Gorgon Halo of [Windows](#windows) (Radeon

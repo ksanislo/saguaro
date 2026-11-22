@@ -24,7 +24,7 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-MODEL = "/opt/llm/models/Inkling-2-Mini-UD-Q4_K_XL/Inkling-2-Mini-UD-Q4_K_XL.gguf"
+MODEL = os.environ.get("SAGUARO_IK2_MODEL") or str(ROOT / "models/Inkling-2-Mini-UD-Q4_K_XL/Inkling-2-Mini-UD-Q4_K_XL.gguf")
 QUESTION = "What is the capital of France? Answer with the city's name only."
 EXPECT = "paris"
 PASSAGE = ("The saguaro grows slowly: a plant ten years old may be no taller than a thumb, and its first arm comes "
