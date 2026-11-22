@@ -184,8 +184,8 @@ def sysfs_card(root: Path, connectors: dict, used_mib: int, device="0x7550", rev
 
 class Reserve(unittest.TestCase):
     """The VRAM a GLM / DeepSeek / MiniMax engine leaves free on an AMD card: 3072 MiB where the desktop may run on
-    it, 1024 on a card with no display connected and next to no VRAM in use (mortar's RX 9070 XT beside an iGPU:
-    Maya-L read prompts token by token with 3072), and on a Linux APU."""
+    it, 512 on a card with no display connected and next to no VRAM in use (mortar's RX 9070 XT beside an iGPU:
+    Maya-L read prompts token by token with 3072), 1024 on a Linux APU."""
 
     def card(self, connectors, used_mib):
         with tempfile.TemporaryDirectory() as d:
@@ -195,7 +195,7 @@ class Reserve(unittest.TestCase):
         g = self.card({"DP-1": "disconnected", "HDMI-A-1": "disconnected", "Writeback-1": "unknown"}, 93)
         self.assertEqual((g["display"], round(g["vram_used_gb"], 2)), (False, 0.09))
         with patch.object(maya, "WIN", False):
-            self.assertEqual(maya.hip_reserve_mib([g]), 1024)
+            self.assertEqual(maya.hip_reserve_mib([g]), 512)
             self.assertIn("no display", maya.hip_reserve_why([g]))
 
     def test_a_connected_display_keeps_3072(self):

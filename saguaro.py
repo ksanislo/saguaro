@@ -989,11 +989,12 @@ def hip_headless(g) -> bool:
 def hip_reserve_mib(gpus) -> int:
     """The VRAM (MiB) an engine on these AMD GPUs leaves free on each: 3072 where the desktop may run on one (it
     allocates after the engine has filled its expert pool); 1024 on a Linux APU (its pool is sized from the RAM it
-    shares; Windows draws its desktop from the APU's carve-out too) and on cards with no display (compute only)."""
+    shares; Windows draws its desktop from the APU's carve-out too); 512 on cards with no display (compute only: only
+    the engine's own late allocations come after the pool, and the engine keeps the margin it measured for them)."""
     if any(hip_unified_memory(g) for g in gpus) and not WIN:
         return 1024
     if not WIN and gpus and all(hip_headless(g) for g in gpus):
-        return 1024
+        return 512
     return 3072
 
 
