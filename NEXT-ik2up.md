@@ -26,3 +26,14 @@ Card runs only through /data/llm/bench/night-queue/queue.txt (IK2_NO_CLAIM=1, ca
   our port: SAGUARO_IK2_KEEP, _KEEP_GB, _SLOT_DIR, _SLOT_MIN, _SLOT_GB, _SLOT_DAYS, _SNAPS, _SNAP_MSG, --user-token.
 - serve/server.py + web (fork, branch saguaro/ik2-up-serve), setup/Models/docs/configs (fork, branch saguaro/ik2-up-setup).
 - AMD 16 GB assessment (offload path is NVIDIA-only upstream).
+
+## Progress 12:20 PST
+- Conversations ported (commit "ik2: conversations kept, saved and resumed..."): our Conv/park/unpark/folder code on
+  upstream's one-conversation loop; snapshots now host memory (par path uses them too); a prompt split at the last
+  user message in both prompt paths (layer-major and chunked); cancel goes back to a snapshot; save at QUIT before
+  _Exit; lend_back before a parked conversation's rows land. Off with --parallel > 1 or KV streaming.
+- AMD 16 GB: engine refusal changed (16 GB card OK when every expert fits; else refused below 22 GB unless
+  SAGUARO_IK2_OFF=1). Unverified on AMD: compile under HIP, IQ3_XXS/IQ4_XS experts on the RDNA resident path, the
+  offload path (ik2_off.cu) on HIP.
+- Queued runs/r2 (conv_check 1 and 2 cards on the conversations build).
+- Forks: saguaro/ik2-up-serve (server/Monitor/tools), saguaro/ik2-up-setup (setup/Models/docs/configs).
