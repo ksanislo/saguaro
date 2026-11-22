@@ -3376,6 +3376,15 @@ def vision_step(a, pc, meta, llama: Path, d: Path, quant: str) -> dict | None:
 
 
 # ------------------------------------------------------------------------------------------------ 8. config + start
+BACKEND_SUFFIX = {"hip": "-hip", "metal": "-metal"}   # (a GLM config's name: maya-<quant><suffix>.json)
+
+
+def glm_config_stem(quant: str) -> str:
+    """maya-<quant>: a quant already named Maya-... is not prefixed twice (maya-s-v2-iq2_xxs, not maya-maya-...)."""
+    q = quant.lower()
+    return q if q.startswith("maya-") else f"maya-{q}"
+
+
 def parse_env(items) -> dict:
     env = {}
     for it in items:
@@ -3539,8 +3548,18 @@ def write_config(a, pc, meta, pack: Path, quant: str, ctx: int, models: Path, vi
         cfg["api_key"] = a.api_key
     if vision:
         cfg["vision"] = vision
-    suffix = {"hip": "-hip", "metal": "-metal"}.get(pc.get("backend"), "")
-    cfg_path = ROOT / f"maya-{quant.lower()}{suffix}.json"
+    suffix = BACKEND_SUFFIX.get(pc.get("backend"), "")
+    cfg_path = ROOT / f"{glm_config_stem(quant)}{suffix}.json"
+    legacy = ROOT / f"maya-{quant.lower()}{suffix}.json"   # (a "Maya-..." quant's name before: maya-maya-...)
+    moved = legacy != cfg_path and legacy.exists() and not cfg_path.exists()
+    if moved:
+        legacy.replace(cfg_path)
+        shared = legacy.with_suffix(".shared-settings.json")
+        if shared.exists() and not cfg_path.with_suffix(".shared-settings.json").exists():
+            shared.replace(cfg_path.with_suffix(".shared-settings.json"))
+        for ext in ("sh", "bat"):
+            (ROOT / f"run-{legacy.stem}.{ext}").unlink(missing_ok=True)
+        ok(f"{legacy.name} (this quant's config before) is now {cfg_path.name}")
     cfg["log"] = str(cfg_path.with_suffix(".log"))
     local = choice[1] if choice and choice[0] == "local" else None   # (choose_model's answer)
     if PROFILE.exists() and profile_fits(pack):
