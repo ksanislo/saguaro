@@ -85,3 +85,12 @@ Card runs only through /data/llm/bench/night-queue/queue.txt (IK2_NO_CLAIM=1, ca
   cache path) vs offload.
 - bq-new (quant, no RESERVE, no WARM -> empty tier): 5.8 tok/s - not a valid arm; r5 repeats with RESERVE 1024.
   ours quant: 44.5 / 41.2 / 36.9, read 569 / 550.
+
+## r5 partial (14:27-14:42 PST, stopped by the queue owner; superseded by runs/r6/r6.sh - shorter, restart-safe)
+- 1 card UD, ctx 32768, 2 loads each: offload (WARM) 20.8 / 27.5 / 22.7 decode, read 697 / 548; upstream's cache path
+  (SAGUARO_IK2_OFF=0) 29.0 / 24.7 / 22.0, read 520 / 437. Neither near ours (42 / 38.5 / 35). Offload stays default.
+- quant, RESERVE 1024, chunk 2048: serve_check 24/24 (log: every expert stays in VRAM); bench load: cache held 3034 of
+  3072 slots -> "resident path off" (chunk 2048's work buffers) - r6 uses chunk 1024 (our quant config's).
+  par_check quant at 32K: not taken (two slots' KV 1.9 GiB) - r6 tries ctx 16384.
+- 2 cards (device fix): t4_check PASS - Paris, repeatable, saguaro; read 2073 tok 613 tok/s; decode 50.4 tok/s (13 tok).
+  KL 2 cards (CLI, forced): new tc 42.4 tok/s, new all-scalar 37.4 tok/s.
