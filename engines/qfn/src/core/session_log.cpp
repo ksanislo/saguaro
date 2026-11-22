@@ -438,7 +438,8 @@ bool open_log(const std::string& path, const SessionFileIdentity& id, bool rw, O
         const uint8_t* b = h + kHeader + (size_t) k * kSlot;
         if (get64(b) != kSlotMagic || get64(b + 56) != session_hash64(b, 56, 1)) continue;
         Slot s{get64(b + 8), get64(b + 16), get64(b + 24), get64(b + 32), get64(b + 40), get64(b + 48)};
-        if (s.off < kData || s.len == 0 || s.len > kMaxMeta || s.off > o.size || s.len > o.size - s.off) continue;
+        if (s.off < kData || s.len == 0 || s.len > kMaxMeta || s.off > o.size || s.len > o.size - s.off ||
+            s.end != s.off + s.len) continue;   // (the next save writes from `end`: it must be this commit's)
         cand[n++] = s;
     }
     if (n == 2 && cand[0].seq < cand[1].seq) std::swap(cand[0], cand[1]);
