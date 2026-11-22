@@ -23,6 +23,7 @@ import zlib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+PORT_TREE = Path("/data/llm/saguaro-ik2port")   # (the picture encoder built for the first port, when this tree has none)
 sys.path.insert(0, str(ROOT / "tools" / "ik2"))
 sys.path.insert(0, str(ROOT / "tools"))
 import bench as B       # noqa: E402
@@ -164,12 +165,15 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--gpus", required=True)
     ap.add_argument("--build", type=Path, default=ROOT / "build-ik2")
-    ap.add_argument("--vision", type=Path, default=ROOT / "build-ik2-vision/build/bin/vision-glm")
-    ap.add_argument("--photo", type=Path, default=ROOT / "build-ik2-vision/llama.cpp/tools/mtmd/test-1.jpeg")
+    vdir = next((d for d in (ROOT / "build-ik2-vision", PORT_TREE / "build-ik2-vision") if d.exists()),
+                ROOT / "build-ik2-vision")
+    ap.add_argument("--vision", type=Path, default=vdir / "build/bin/vision-glm")
+    ap.add_argument("--photo", type=Path, default=vdir / "llama.cpp/tools/mtmd/test-1.jpeg")
     ap.add_argument("--port", type=int, default=18977)
     ap.add_argument("--ctx", type=int, default=32768)
     ap.add_argument("--chunk", type=int, default=1024)
     ap.add_argument("--env", action="append", default=[], help="K=V for the engine (SAGUARO_IK2_ROOM_MB=2048 ...)")
+    ap.add_argument("--arg", action="append", default=[], help="more engine arguments (--arg=--parallel --arg=2)")
     ap.add_argument("--vision-set", action="append", default=[], help="K=V into the config's vision entry (JSON values)")
     ap.add_argument("--out", default=None, help="the folder under <build> (serve-check, serve-check-2 for two cards)")
     ap.add_argument("--model", default=TC.MODEL, help="the GGUF (tokenizer and picture encoder: UD-Q4_K_XL's)")
@@ -183,7 +187,8 @@ def main() -> int:
         tokdir.mkdir(parents=True, exist_ok=True)
         ST.extract(TC.MODEL, str(tokdir), str(ROOT / "tools/ik2/chat_template.jinja"))
     cfg = {"exe": str(a.build / "saguaro-ik2"),
-           "args": ["--model", a.model, "--max-context", str(a.ctx), "--gpus", str(len(gpus)), "--chunk", str(a.chunk)],
+           "args": ["--model", a.model, "--max-context", str(a.ctx), "--gpus", str(len(gpus)), "--chunk", str(a.chunk)]
+           + a.arg,
            "env": dict({"CUDA_DEVICE_ORDER": "PCI_BUS_ID", "SAGUARO_IK2_STATS": "1"},
                        **dict(kv.split("=", 1) for kv in a.env)), "cwd": str(ROOT),
            "tokenizer": str(tokdir / "tokenizer"), "model_name": Path(a.model).stem, "gpu": gpus,
@@ -437,12 +442,16 @@ def main() -> int:
         st, mm = call(port, "/metrics")
         eng, tn = mm.get("engine") or {}, (mm.get("tiers") or {}).get("now") or {}
         hits = [q.get("hit_rate") for q in mm.get("requests") or []]
-        print("monitor facts: experts %s, VRAM slots %s, K/V %s GB at %s; the last answers' VRAM hit %s; tiers %s" %
-              (eng.get("experts"), eng.get("expert_slots"), eng.get("kv_gb"), eng.get("kv_ctx"), hits[:6],
-               {k: tn.get(k) for k in ("vram_hit", "ram_fetch", "vram_used", "ram_used", "vram_gb", "ram_gb")}))
-        res["monitor facts"] = bool(eng.get("experts")) and bool(eng.get("expert_slots")) and bool(eng.get("kv_gb"))
+        print("monitor facts: path %s, experts %s, VRAM slots %s, K/V %s GB at %s; the last answers' VRAM hit %s; "
+              "tiers %s" % (eng.get("path"), eng.get("experts"), eng.get("expert_slots"), eng.get("kv_gb"),
+                            eng.get("kv_ctx"), hits[:6], {k: tn.get(k) for k in ("vram_hit", "ram_fetch", "cpu", "vram_used",
+                                                                                  "ram_used", "vram_gb", "ram_gb", "kv_gb")}))
+        # (v1.1.74's engine: where the experts are and the K / V size in its STAT; the older one's in its start lines)
+        res["monitor facts"] = bool(eng.get("experts")) and bool(eng.get("expert_slots") or tn.get("vram_used")) and \
+            bool(eng.get("kv_gb") or tn.get("kv_gb"))
         res["monitor VRAM hit"] = tn.get("vram_hit") is not None and \
-            (any(x is not None for x in hits) or (eng.get("expert_slots") or 0) >= (eng.get("experts") or 1))
+            (any(x is not None for x in hits) or (eng.get("expert_slots") or 0) >= (eng.get("experts") or 1) or
+             eng.get("path") == "resident")
         st, r = call(port, "/metrics/prometheus", raw=True)
         (work / "metrics_prometheus.txt").write_text(r if isinstance(r, str) else json.dumps(r))
         print("cards before exit:", smi())
