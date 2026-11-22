@@ -1,5 +1,5 @@
 {
- "_": "first-load settings (4x T4): layer split, no drafter. Next: add --dfly2 (about 0.9 GB VRAM), then try --mtp (about 4.2 GB) or --tp auto. See RUN-hy4-first-load.md.",
+ "_": "4x T4: tensor parallel over the four cards, chunk 2048, the experts placed by the learned scores; clocks locked by the start command (llm-gpu-clocks lock). Measured in bench/hy4/RESULTS.md.",
  "exe": "/opt/llm/saguaro/bin/saguaro-hy4",
  "args": [
   "--pack",
@@ -7,11 +7,11 @@
   "--max-context",
   "131072",
   "--tp",
-  "0",
-  "--profile",
-  "/opt/llm/var/Hy4-Flash-Maya-S-IQ2_S/expert-profile.bin",
-  "--profile-out",
-  "/opt/llm/var/Hy4-Flash-Maya-S-IQ2_S/expert-profile.bin"
+  "4",
+  "--chunk",
+  "2048",
+  "--reserve-gb",
+  "0.5"
  ],
  "env": {
   "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
@@ -19,7 +19,8 @@
   "HY4_Q4X_FILE": "/opt/llm/var/Hy4-Flash-Maya-S-IQ2_S/hy4-cpu-lane.txt",
   "HY4_ROUTE_FILE": "/opt/llm/var/Hy4-Flash-Maya-S-IQ2_S/hy4-prompt-route.txt",
   "HY4_DRAFT_FILE": "/opt/llm/var/Hy4-Flash-Maya-S-IQ2_S/hy4-drafting.txt",
-  "HY4_HOT_FILE": "/opt/llm/var/Hy4-Flash-Maya-S-IQ2_S/expert-hot.bin"
+  "HY4_HOT_FILE": "/opt/llm/saguaro/data/hy4-expert-hot-Hy4-Flash-Maya-S.bin",
+  "HY4_HOT": "1"
  },
  "cwd": "/opt/llm/saguaro",
  "tokenizer": "/opt/llm/models/Hy4-Flash-Maya-S-IQ2_S/pack/tokenizer",

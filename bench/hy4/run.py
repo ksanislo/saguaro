@@ -103,11 +103,11 @@ def main():
             st = dict(kv.split("=") for kv in stat.split()[1:]) if stat else {}
             rec = {"label": a.label, "req": name, "prompt": prompt, "reused": reused, "read_tok_s": round(1000.0 * (prompt - reused) / pms, 1) if pms > 0 else 0,
                    "gen": gen, "dec_tok_s": round(1000.0 * gen / dms, 2) if dms > 0 else 0, "why": why, "cpu_exp_tok": st.get("cpu"),
-                   "drafts": st.get("drafts"), "engram_ms": st.get("engram_ms"), "wall_s": round(time.time() - t1, 1), "first": toks[:12], "err": err}
+                   "drafts": st.get("drafts"), "engram_ms": st.get("engram_ms"), "wall_s": round(time.time() - t1, 1), "first": toks[:12], "tok_md5": __import__("hashlib").md5(",".join(map(str, toks)).encode()).hexdigest()[:12], "err": err}
             out.append(rec)
             print(f"{a.label:14s} {name:8s} prompt {prompt:6d} (reused {reused:6d}) read {rec['read_tok_s']:7.1f} tok/s | gen {gen:4d} "
                   f"{rec['dec_tok_s']:6.2f} tok/s {why} cpu_exp/tok {st.get('cpu')} drafts {st.get('drafts')} engram_ms {st.get('engram_ms')}"
-                  f"{' ' + err if err else ''}", flush=True)
+                  f" md5 {rec['tok_md5']}{' ' + err if err else ''}", flush=True)
         p.stdin.write("QUIT\n")
         p.stdin.flush()
         p.wait(timeout=120)
