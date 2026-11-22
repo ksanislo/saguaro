@@ -225,7 +225,7 @@ void SessionDir::flush() {
     std::unique_lock<std::mutex> lk(mu_);
     flushing_ = true;
     cv_.notify_all();
-    cv_.wait(lk, [&] { return jobs_.empty() && writing_ == nullptr; });
+    cv_.wait(lk, [&] { return jobs_.empty() && writing_ == nullptr && turn_jobs_.empty() && !turn_busy_; });
     flushing_ = stop_;
 }
 
@@ -244,6 +244,10 @@ uint64_t SessionDir::bytes() const {
 void SessionDir::writer_loop() {
     std::unique_lock<std::mutex> lk(mu_);
     for (;;) {
+        if (!turn_jobs_.empty()) {   // a turn's save never waits out the delay
+            turn_write(lk);
+            continue;
+        }
         if (jobs_.empty()) {
             if (stop_) return;
             cv_.wait(lk);
@@ -251,7 +255,7 @@ void SessionDir::writer_loop() {
         }
         const auto now = std::chrono::steady_clock::now();
         if (!flushing_ && jobs_.front().due > now) {
-            cv_.wait_until(lk, jobs_.front().due);
+            cv_.wait_until(lk, jobs_.front().due);   // (a turn job's notify wakes it too)
             continue;
         }
         Job job = std::move(jobs_.front());
@@ -324,6 +328,93 @@ void SessionDir::writer_loop() {
     }
 }
 
+void SessionDir::write_turn(SessionTurnJob job) {
+    if (!job.turn || !job.track || job.turn->meta.live.ids.empty()) return;
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        turn_jobs_.push_back(std::move(job));
+    }
+    cv_.notify_all();
+}
+
+void SessionDir::turn_write(std::unique_lock<std::mutex>& lk) {
+    SessionTurnJob j = std::move(turn_jobs_.front());
+    turn_jobs_.pop_front();
+    const SavedConversation& meta = j.turn->meta;
+    const bool delta = j.turn->delta();
+    std::string path, why;
+    auto take = [&](size_t i) { entries_[i].state = State::writing; path = entries_[i].path; };
+    if (delta) {
+        if (j.track->broken.load() || j.track->written_seq.load() != j.base_seq || j.track->path.empty())
+            why = "the turn save before it did not land";
+        else {
+            for (size_t i = 0; i < entries_.size() && path.empty(); ++i)
+                if (entries_[i].path == j.track->path && entries_[i].log && entries_[i].state == State::idle) take(i);
+            if (path.empty()) why = "its file is gone or in use";
+        }
+    } else {
+        // its own file first (the same place's conversation, perhaps rewound far back), else one it supersedes
+        size_t best = entries_.size();
+        for (size_t i = 0; i < entries_.size() && !j.track->path.empty(); ++i)
+            if (entries_[i].path == j.track->path && entries_[i].log && entries_[i].state == State::idle) best = i;
+        for (size_t i = 0; i < entries_.size() && j.track->path.empty(); ++i)
+            if (entries_[i].log && entries_[i].state == State::idle && entries_[i].peek.cvec == meta.cvec &&
+                supersedes(meta.live, meta.checkpoints, entries_[i].peek) &&
+                (best == entries_.size() || entries_[i].seq > entries_[best].seq))
+                best = i;
+        if (best != entries_.size()) take(best);
+    }
+    if (!why.empty()) {
+        j.track->broken = true;
+        say("turn save (" + j.label + ") skipped: " + why + "; the next one is written whole");
+        note_locked("turn_skipped", meta.live.ids.size(), 0, 0, j.label.c_str());
+        cv_.notify_all();
+        return;
+    }
+    const bool extend = !path.empty();
+    if (!extend) path = (fs::path(o_.dir) / random_name(kSessionLogExt)).string();
+    turn_busy_ = true;
+    lk.unlock();
+    SessionWriteOptions wo;
+    wo.deepest_checkpoint_only = true;
+    wo.min_free_bytes = o_.min_free_bytes;
+    wo.progress = [this](uint64_t, uint64_t) { if (o_.write_block) o_.write_block(); };
+    SessionLogStats ls;
+    std::string err;
+    SessionStatus st;
+    const auto t0 = std::chrono::steady_clock::now();
+    const bool ok = session_log_save_turn(path, *j.turn, j.track->commit.load(), id_of(meta), ls, err, wo, &st, o_.log_format);
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    lk.lock();
+    turn_busy_ = false;
+    if (ok) {
+        add_written_locked(path, meta, (size_t) ls.file_bytes, ms / 1000.0, nullptr, nullptr, nullptr, &ls);
+        j.track->path = path;
+        j.track->commit = ls.commit;
+        j.track->written_seq = j.seq;
+        j.track->saved_tokens = (int64_t) meta.live.ids.size();
+        j.track->broken = ls.wants_compact;
+        char b[360];
+        std::snprintf(b, sizeof b, "turn save (%s): %zu tokens, %llu MiB written, %llu MiB already in its file, %llu MiB "
+                      "hashed, %.0f ms in the background; the capture took the serve thread %.0f ms%s", j.label.c_str(),
+                      meta.live.ids.size(), (unsigned long long) (ls.written_bytes >> 20),
+                      (unsigned long long) (ls.reused_bytes >> 20), (unsigned long long) (ls.hashed_bytes >> 20), ms,
+                      j.capture_ms, delta ? "" : " (whole capture)");
+        say(b);
+        if (ls.verify_bad)
+            say("turn save VERIFY: " + std::to_string(ls.verify_bad) + " chunk(s) a delta would have left out differ from the file's");
+        note_locked("turn_saved", meta.live.ids.size(), ls.written_bytes, ms, j.label.c_str());
+        state_locked();
+    } else {
+        for (Entry& e : entries_)
+            if (e.path == path && e.state == State::writing) e.state = State::idle;
+        j.track->broken = true;
+        say("turn save (" + j.label + ") failed: " + err + "; the next one is written whole");
+        note_locked("write_failed", meta.live.ids.size(), 0, ms, "turn");
+    }
+    cv_.notify_all();
+}
+
 void SessionDir::add_written_locked(const std::string& path, const SavedConversation& image, size_t written, double s,
                                     const char* what, const std::vector<ConversationCheckpoint>* chain,
                                     const std::shared_ptr<const SavedConversation>& from, const SessionLogStats* log) {
@@ -348,6 +439,11 @@ void SessionDir::add_written_locked(const std::string& path, const SavedConversa
         } else {
             ++i;
         }
+    }
+    if (what == nullptr) {   // (a turn save says its own line)
+        entries_.push_back(std::move(e));
+        enforce_caps_locked();
+        return;
     }
     char b[280];
     if (log != nullptr && log->appended)

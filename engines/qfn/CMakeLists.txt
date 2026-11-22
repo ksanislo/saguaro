@@ -176,6 +176,12 @@ if(STRATA_BUILD_CONVERSATION_TESTS)
   target_include_directories(park_release_test PRIVATE include)
   target_link_libraries(park_release_test PRIVATE Threads::Threads)
   add_test(NAME park_release_test COMMAND park_release_test)
+  # per-turn saves of a conversation that stays where it is: capture, delta, a request mid-save, a kill
+  add_executable(turn_save_test src/core/turn_save_test.cpp src/core/session_dir.cpp src/core/session_log.cpp
+                 src/core/conversation_file.cpp)
+  target_include_directories(turn_save_test PRIVATE include)
+  target_link_libraries(turn_save_test PRIVATE Threads::Threads)
+  add_test(NAME turn_save_test COMMAND turn_save_test)
 endif()
 
 if(STRATA_HIP_GFX906)

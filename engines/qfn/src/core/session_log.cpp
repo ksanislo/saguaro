@@ -108,10 +108,12 @@ struct Ref {
     uint64_t key = 0, size = 0;
     const uint8_t* flat = nullptr;
     const ConversationBuffer* buf = nullptr;
+    uint64_t from = 0, claim = 0;   // a captured turn: `buf` holds [from, size); see SessionLogKvTail
     template<class Fn> bool visit(uint64_t at, uint64_t n, Fn fn) const {
         if (n == 0) return true;
         if (buf == nullptr) return fn(flat + at, (size_t) n);
-        return buf->visit((size_t) at, (size_t) n, [&](const uint8_t* q, size_t c, size_t) { return fn(q, c); });
+        if (at < from) return false;
+        return buf->visit((size_t) (at - from), (size_t) n, [&](const uint8_t* q, size_t c, size_t) { return fn(q, c); });
     }
 };
 struct Chunk { uint64_t off = UINT64_MAX, hash = 0; };
@@ -152,6 +154,7 @@ std::vector<size_t> picks_of(const SavedConversation& s, bool deepest_only) {
 
 struct ImagePlan {
     const SavedConversation* s = nullptr;
+    const std::vector<SessionLogKvTail>* tails = nullptr;   // a captured turn's K/V (s->kv is empty then)
     std::vector<size_t> pick;
     bool live_from_first = false;
     std::vector<uint8_t> ck_from_first;
@@ -187,7 +190,12 @@ std::vector<Ref> refs_of(const std::vector<ImagePlan>& plan) {
             if (!p.ck_from_first[j]) out.push_back(flat_ref(key_of(i, kCkIds, j, 0), c.ids));
             state_refs(out, i, kCkState, j, c);
         }
-        for (uint64_t l = 0; l < s.kv.size(); ++l) {
+        for (uint64_t l = 0; p.tails != nullptr && l < p.tails->size(); ++l) {
+            const SessionLogKvTail& k = (*p.tails)[l];
+            for (uint64_t part = 0; part < 5; ++part)
+                out.push_back({key_of(i, kKv, l, part), k.size[part], nullptr, &k.bytes[part], k.from[part], k.claim[part]});
+        }
+        for (uint64_t l = 0; p.tails == nullptr && l < s.kv.size(); ++l) {
             const ConversationKv& k = s.kv[l];
             const ConversationBuffer* parts[5] = {&k.k, &k.v, &k.k_scale, &k.v_scale, &k.pooled};
             for (uint64_t part = 0; part < 5; ++part)
@@ -213,6 +221,12 @@ std::vector<uint8_t> meta_of(const std::vector<ImagePlan>& plan, const std::vect
         put_ck_meta(w, s.live, p.live_from_first);
         w.u64(p.pick.size());
         for (size_t j = 0; j < p.pick.size(); ++j) put_ck_meta(w, s.checkpoints[p.pick[j]], p.ck_from_first[j] != 0);
+        if (p.tails != nullptr) {
+            w.u64(p.tails->size());
+            for (const auto& k : *p.tails)
+                for (int64_t v : {int64_t(k.format), k.cells, k.heads, k.head_dim, k.page_size, k.pooled_rows, k.idx_dim}) w.i64(v);
+            continue;
+        }
         w.u64(s.kv.size());
         for (const auto& k : s.kv)
             for (int64_t v : {int64_t(k.format), k.cells, k.heads, k.head_dim, k.page_size, k.pooled_rows, k.idx_dim}) w.i64(v);
@@ -472,9 +486,66 @@ bool free_bytes(const std::string& path, uint64_t& out) {
 
 bool session_log_supported() { return true; }
 
+namespace {
+bool save_core(const std::string& path, const SavedConversation& image, const std::vector<ImagePlan>& plan,
+               uint64_t turn_chunk, uint64_t base, const SessionFileIdentity& id, SessionLogStats& stats,
+               std::string& error, const SessionWriteOptions& options, SessionStatus* status, const SessionLogOptions& log);
+}
 bool session_log_save(const std::string& path, const SavedConversation& image, const SessionFileIdentity& id,
                       SessionLogStats& stats, std::string& error, const SessionWriteOptions& options,
                       SessionStatus* status, const SessionLogOptions& log) {
+    return save_core(path, image, plan_images(image, options.deepest_checkpoint_only), 0, 0, id, stats, error, options,
+                     status, log);
+}
+bool session_log_save_turn(const std::string& path, const SessionLogTurn& turn, uint64_t base,
+                           const SessionFileIdentity& id, SessionLogStats& stats, std::string& error,
+                           const SessionWriteOptions& options, SessionStatus* status, const SessionLogOptions& log) {
+    std::vector<ImagePlan> plan = plan_images(turn.meta, options.deepest_checkpoint_only);
+    if (plan.size() != turn.kv.size()) {
+        if (status) status->error = SessionError::invalid;
+        error = "session log: the captured turn's stages do not line up";
+        return false;
+    }
+    for (size_t i = 0; i < plan.size(); ++i) plan[i].tails = &turn.kv[i];
+    return save_core(path, turn.meta, plan, turn.chunk_bytes, base, id, stats, error, options, status, log);
+}
+bool session_log_capture(SessionLogTurn& out, SavedConversation&& meta, const std::vector<SessionKvSource>& kv,
+                         const std::vector<std::vector<SessionKvSource>>& stage_kv,
+                         const std::vector<std::vector<std::array<uint64_t, 5>>>* unchanged, bool verify,
+                         std::string& error) {
+    out.meta = std::move(meta);
+    out.kv.assign(1 + stage_kv.size(), {});
+    for (size_t i = 0; i < out.kv.size(); ++i) {
+        const std::vector<SessionKvSource>& src = i == 0 ? kv : stage_kv[i - 1];
+        for (size_t l = 0; l < src.size(); ++l) {
+            const SessionKvSource& s = src[l];
+            SessionLogKvTail t;
+            t.format = s.format; t.cells = s.cells; t.heads = s.heads; t.head_dim = s.head_dim;
+            t.page_size = s.page_size; t.pooled_rows = s.pooled_rows; t.idx_dim = s.idx_dim;
+            for (size_t p = 0; p < 5; ++p) {
+                t.size[p] = s.sizes[p];
+                uint64_t keep = unchanged != nullptr && i < unchanged->size() && l < (*unchanged)[i].size() ? (*unchanged)[i][l][p] : 0;
+                keep = std::min<uint64_t>(keep, t.size[p]) / out.chunk_bytes * out.chunk_bytes;
+                if (verify) t.claim[p] = keep; else t.from[p] = keep;
+                const uint64_t from = t.from[p], n = t.size[p] - from;
+                t.bytes[p].resize_for_overwrite((size_t) n);
+                if (n && (!s.read || !t.bytes[p].visit(0, (size_t) n, [&](uint8_t* q, size_t c, size_t at) {
+                        return s.read(p, (size_t) from + at, q, c);
+                    }))) {
+                    error = "session log: reading the K/V failed" + (s.error ? ": " + s.error() : std::string());
+                    return false;
+                }
+            }
+            out.kv[i].push_back(std::move(t));
+        }
+    }
+    return true;
+}
+
+namespace {
+bool save_core(const std::string& path, const SavedConversation& image, const std::vector<ImagePlan>& plan,
+               uint64_t turn_chunk, uint64_t base, const SessionFileIdentity& id, SessionLogStats& stats,
+               std::string& error, const SessionWriteOptions& options, SessionStatus* status, const SessionLogOptions& log) {
     SessionStatus local;
     SessionStatus& st = status ? *status : local;
     st = {};
@@ -483,8 +554,9 @@ bool session_log_save(const std::string& path, const SavedConversation& image, c
     auto fail_errno = [&](const char* what, int e) { return fail(errno_kind(e), std::string(what) + ": " + std::strerror(e)); };
     auto fault = [&](const char* step) { return options.fault ? options.fault(step) : 0; };
     if (image.live.ids.empty()) return fail(SessionError::invalid, "nothing to save");
-    const std::vector<ImagePlan> plan = plan_images(image, options.deepest_checkpoint_only);
     const std::vector<Ref> refs = refs_of(plan);
+    bool delta = false;
+    for (const Ref& r : refs) delta = delta || r.from > 0;
 
     // the file to extend, when there is a readable one of this identity
     Opened old;
@@ -493,7 +565,11 @@ bool session_log_save(const std::string& path, const SavedConversation& image, c
     SessionError ignore_kind;
     bool have = open_log(path, id, true, old, ignore, ignore_kind) &&
                 parse_meta(old.meta, old.chunk, old.slot.off, old_sk, ignore);
-    const uint64_t chunk = have ? old.chunk : std::clamp<uint64_t>(log.chunk_bytes, 4096, 64u << 20);
+    const uint64_t chunk = have ? old.chunk : turn_chunk ? turn_chunk : std::clamp<uint64_t>(log.chunk_bytes, 4096, 64u << 20);
+    const bool on_base = have && base != 0 && old.slot.hash == base;
+    // a delta names chunks it does not hold: only the file at the commit it continues has them
+    if (delta && (!on_base || chunk != turn_chunk))
+        return fail(SessionError::invalid, "the file is not at the commit this turn continues");
 
     // every chunk's hash
     std::vector<Array> arrays(refs.size());
@@ -504,7 +580,12 @@ bool session_log_save(const std::string& path, const SavedConversation& image, c
         arrays[a].key = refs[a].key;
         arrays[a].size = refs[a].size;
         arrays[a].chunks.resize((size_t) chunks_of(refs[a].size, chunk));
-        for (size_t i = 0; i < arrays[a].chunks.size(); ++i) tasks.push_back({(uint32_t) a, (uint32_t) i});
+        for (size_t i = 0; i < arrays[a].chunks.size(); ++i)
+            if ((i + 1) * chunk > refs[a].from) {   // (the chunks before `from` keep the file's hash)
+                if (i * chunk < refs[a].from) return fail(SessionError::invalid, "a captured part does not start on a chunk");
+                tasks.push_back({(uint32_t) a, (uint32_t) i});
+                stats.hashed_bytes += chunk_len(refs[a].size, chunk, i);
+            }
         total += refs[a].size;
     }
     bool stopped = false;
@@ -523,17 +604,28 @@ bool session_log_save(const std::string& path, const SavedConversation& image, c
     std::unordered_map<uint64_t, const Array*> old_by_key;
     if (have)
         for (const Array& a : old_sk.arrays) old_by_key.emplace(a.key, &a);
+    bool base_short = false;
     auto place = [&](bool reuse, uint64_t start, uint64_t& reused) {
         uint64_t cursor = start;
         reused = 0;
-        for (Array& a : arrays) {
+        for (size_t ai = 0; ai < arrays.size(); ++ai) {
+            Array& a = arrays[ai];
+            const Ref& ref = refs[ai];
             const Array* o = nullptr;
             if (reuse)
                 if (const auto it = old_by_key.find(a.key); it != old_by_key.end()) o = it->second;
             for (size_t i = 0; i < a.chunks.size(); ++i) {
                 const uint64_t len = chunk_len(a.size, chunk, i);
-                if (o != nullptr && i < o->chunks.size() && chunk_len(o->size, chunk, i) == len &&
-                    o->chunks[i].hash == a.chunks[i].hash) {
+                const bool in_old = o != nullptr && i < o->chunks.size() && chunk_len(o->size, chunk, i) == len;
+                if ((i + 1) * chunk <= ref.from) {   // not captured: the file's own chunk, or the delta is no good
+                    if (!in_old) { base_short = true; continue; }
+                    a.chunks[i] = o->chunks[i];
+                    reused += len;
+                    continue;
+                }
+                if (on_base && (i + 1) * chunk <= ref.claim && !(in_old && o->chunks[i].hash == a.chunks[i].hash))
+                    ++stats.verify_bad;
+                if (in_old && o->chunks[i].hash == a.chunks[i].hash) {
                     a.chunks[i].off = o->chunks[i].off;
                     reused += len;
                 } else {
@@ -547,11 +639,14 @@ bool session_log_save(const std::string& path, const SavedConversation& image, c
     uint64_t reused = 0;
     uint64_t start = have ? old.slot.end : kData;
     uint64_t data_end = place(have, start, reused);
+    if (base_short) return fail(SessionError::invalid, "the file lacks a chunk this turn left out");
     std::vector<uint8_t> meta = meta_of(plan, arrays);
     if (have) {
         const uint64_t named = total + meta.size();
         const uint64_t garbage = data_end + meta.size() - kData - named;
-        if (garbage > std::max<uint64_t>(log.garbage_min, named / 2)) {
+        if (delta) stats.wants_compact = garbage > std::max<uint64_t>(log.garbage_min, named / 2);
+        else if (garbage > std::max<uint64_t>(log.garbage_min, named / 2)) {
+            stats.verify_bad = 0;
             have = false;
             stats.compacted = true;
             start = kData;
@@ -666,8 +761,10 @@ bool session_log_save(const std::string& path, const SavedConversation& image, c
     stats.reused_bytes = reused;
     stats.garbage_bytes = file_end - kData - slot.named - (commit_off - data_end);   // (less this commit's padding)
     stats.appended = have;
+    stats.commit = slot.hash;
     return true;
 }
+} // namespace
 
 namespace {
 struct Dest {
