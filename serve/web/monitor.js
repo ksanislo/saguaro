@@ -336,6 +336,11 @@ const TIER_SETS = {
     {key: "disk", label: "From SSD", unit: "/tok", digits: 2, tone: "warn", sub: "experts read from the SSD"},
     {key: "promo", label: "Promoted", unit: "/tok", digits: 2, sub: "experts copied into the VRAM cache"},
   ],
+  // Hy4-Flash (saguaro-hy4): the experts its CPU lane computed from RAM and its n-gram table's read time a token
+  hy4: [
+    {key: "cpu", label: "On the CPU", unit: "/tok", digits: 2, tone: "info", sub: "experts the CPU computed from RAM"},
+    {key: "engram_ms", label: "N-gram memory", unit: " ms/tok", digits: 2, sub: "the n-gram table's read time"},
+  ],
   // CYBER-FROST (the maya engine's Qwen path): the CPU computes the experts VRAM does not hold, from RAM or read from the
   // model file; the drafts' windows count too
   qwen: [
@@ -343,11 +348,26 @@ const TIER_SETS = {
     {key: "disk", label: "From SSD", unit: "/tok", digits: 2, tone: "warn", sub: "experts read from the model file"},
   ],
 };
+export const tierSet = (eng) => TIER_SETS[["ds4", "mm3", "qwen", "hy4"].includes(eng && eng.engine_kind) ? eng.engine_kind : "glm"];
+// Inkling 2's engine writes no expert statistics (no STAT lines): the card says where its experts are instead of
+// showing counters that would stay empty
+export function ik2Experts(eng) {
+  const n = +eng.gpus || 1;
+  return n > 1 ? `Every expert is in VRAM, the layers dealt across ${n} GPUs.`
+    : "On one 16 GB card about a quarter of the experts are streamed from RAM as they are routed; a second card (or a 24 GB one) holds them all.";
+}
 function Tiers({t, eng}) {
+  if (eng && eng.engine_kind === "ik2") {
+    return html`<section class="card" aria-label="Where the experts live">
+      <div class="card__head"><span class="card__title">Where the experts live</span>
+        <span class="card__sub">${eng.kv ? `KV cache ${String(eng.kv).toUpperCase()}` : ""}</span></div>
+      <p class="card__note">${ik2Experts(eng)} Inkling 2's engine reports no per-token expert counts yet; the speeds above and each GPU's memory below are measured by the server.</p>
+    </section>`;
+  }
   if (!t || !t.now) return null;
   const ds4 = !!(eng && eng.engine_kind === "ds4"), mm3 = !!(eng && eng.engine_kind === "mm3");
-  const qwen = !!(eng && eng.engine_kind === "qwen");
-  const set = TIER_SETS[ds4 ? "ds4" : mm3 ? "mm3" : qwen ? "qwen" : "glm"];
+  const qwen = !!(eng && eng.engine_kind === "qwen"), hy4 = !!(eng && eng.engine_kind === "hy4");
+  const set = tierSet(eng);
   const n = t.now, h = t.history || {};
   const helper = ds4 && ((n.helper_held || 0) > 0 || (n.helper || 0) > 0 || +eng.helper_allocated_bytes > 0);
   const helperHeld = n.helper_held != null ? n.helper_held : +eng.helper_slots || 0;
@@ -363,7 +383,7 @@ function Tiers({t, eng}) {
                    : "Most experts run on the CPU: more VRAM (or a second GPU) keeps more of them on the card.";
   } else if (!stale && n.disk != null && n.disk >= 3) {
     tip = "Many experts are read from the SSD for every token: more RAM, a smaller model or a shorter context makes answers faster.";
-  } else if (mm3 || qwen) {   // (MiniMax, CYBER-FROST: the CPU computes the experts VRAM does not hold)
+  } else if (mm3 || qwen || hy4) {   // (MiniMax, CYBER-FROST, Hy4-Flash: the CPU computes the experts VRAM does not hold)
     if (!stale && n.vram_hit != null && n.vram_hit < 0.5) tip = "Most experts run on the CPU: more VRAM (or a second GPU) keeps more of them on the card.";
   } else if (!stale && n.vram_hit != null && n.vram_hit < 0.85 && (n.ram_fetch || 0) >= 4) {
     tip = "Most misses come from RAM over PCIe: more VRAM (or a second GPU) keeps more experts on the card.";
@@ -372,13 +392,16 @@ function Tiers({t, eng}) {
   return html`<section class=${`card${stale ? " is-stale" : ""}`} aria-label="Where the experts live">
     <div class="card__head"><span class="card__title">${helper ? "Primary cache and RAM backing" : "Where the experts live"}</span>
       <span class="card__sub">${age == null ? "" : stale ? `last reading ${ago(age)} ago, from the last answer` : `live · ${fmt(total)} routed experts`}</span></div>
-    <div class="tierbar" role="img" aria-label=${`${fmt(pc(vu), 0)}% of the experts in VRAM, ${fmt(pc(ru), 0)}% in ${ds4 ? "RAM" : "pinned RAM"}, ${fmt(pc(disk), 0)}% on the SSD only`}>
+    <div class="tierbar" role="img" aria-label=${hy4 ? `${fmt(pc(vu), 0)}% of the experts in VRAM, ${fmt(pc(ru), 0)}% in RAM, computed on the CPU`
+      : `${fmt(pc(vu), 0)}% of the experts in VRAM, ${fmt(pc(ru), 0)}% in ${ds4 ? "RAM" : "pinned RAM"}, ${fmt(pc(disk), 0)}% on the SSD only`}>
       <span class="tierbar__vram" style=${`flex-grow:${vu}`}></span><span class="tierbar__ram" style=${`flex-grow:${ru}`}></span>
       <span class="tierbar__disk" style=${`flex-grow:${disk}`}></span></div>
-    <div class="legend">
+    ${hy4 ? html`<div class="legend">
+      <span><i class="sw sw--vram"></i>VRAM <b class="num">${fmt(vu)} · ${fmt(pc(vu), 0)}%</b></span>
+      <span><i class="sw sw--ram"></i>RAM, computed on the CPU <b class="num">${fmt(ru)} · ${fmt(pc(ru), 0)}%</b></span></div>` : html`<div class="legend">
       <span><i class="sw sw--vram"></i>${helper ? "Primary VRAM" : "VRAM"} <b class="num">${fmt(vu)} · ${fmt(vramGb, 1)} GB</b></span>
       <span><i class="sw sw--ram"></i>${ds4 ? "RAM" : "Pinned RAM"} <b class="num">${fmt(ru)} · ${fmt(ramGb, 1)} GB</b></span>
-      <span><i class="sw sw--disk"></i>SSD only <b class="num">${fmt(disk)}${diskGb == null ? "" : ` · ${fmt(diskGb, 1)} GB`}</b></span></div>
+      <span><i class="sw sw--disk"></i>SSD only <b class="num">${fmt(disk)}${diskGb == null ? "" : ` · ${fmt(diskGb, 1)} GB`}</b></span></div>`}
     <div class=${`tiles${set.length === 4 ? " tiles--4" : ""}`}>
       ${set.map((x) => {
         const v = n[x.key];

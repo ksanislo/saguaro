@@ -41,7 +41,7 @@ function saidDeleted(x) {
 
 const MONO = "ui-monospace, 'SF Mono', Menlo, Consolas, monospace";
 const titleOf = (m) => `${modelName(m.model)} ${m.quant}`;
-const DRAFTS = {mtp: "MTP", dflash2: "DFlash2", dspark: "DSpark", none: "off"};
+const DRAFTS = {mtp: "MTP", dflash2: "DFlash2", dspark: "DSpark", dfly2: "DFly2", auto: "auto", none: "off"};
 const size = (b) => (b >= 1e8 ? `${fmt(b / 1e9, b < 1e10 ? 1 : 0)} GB` : null);
 const setUpOn = (w) => {
   const d = w ? new Date(String(w).replace(" ", "T")) : null;
@@ -290,6 +290,7 @@ function fieldsOf(m, d) {
     warn=${whole(d.reserve_mib) ? null : "A whole number of MiB, or empty for the default."}>
     <${Num} label="VRAM kept free" value=${d.reserve_mib} ph=${glm ? "700" : "default"} unit="MiB / GPU" on=${(v) => setDraft({reserve_mib: v})}/><//>`;
   if (m.family === "ik2") return ik2Fields(m, d, ch, gpus);
+  if (m.family === "hy4") return hy4Fields(m, d, s, ch, images, gpus);
   if (m.family === "minimax") return mm3Fields(m, d, s, ch, images, gpus);
   if (m.family === "qwen") return qwenFields(m, d, s, ch, gpus);
   if (glm) {
@@ -385,6 +386,50 @@ function ik2Fields(m, d, ch, gpus) {
           onChange=${(v) => setDraft({kv: v})}/><//>`]},
     {label: "Speed", rows: [
       html`<${Row} label="CPU threads" flag="--threads" changed=${ch("cpu_threads")} hint="Empty: the engine picks."
+        warn=${whole(d.cpu_threads) ? null : "A whole number, or empty."}>
+        <${Num} label="CPU threads" value=${d.cpu_threads} ph="auto" unit="threads" on=${(v) => setDraft({cpu_threads: v})}/><//>`]},
+  ];
+}
+
+// Hy4-Flash's (saguaro-hy4: it stops at a flag it does not know, so only its own are offered; one answer at a time).
+// Its latent cache a context token, on each GPU of a tensor-parallel group: 13 layers keep every position - 16.6 KB in
+// F16 rows, 9.6 KB in 8-bit rows (what --kv auto takes under tensor parallel with a CPU lane)
+const HY4_KV_BYTES = 16640, HY4_KV_SMALL_BYTES = 9568;
+const HY4_KV = [{id: "auto", label: "Auto"}, {id: "q8", label: "8-bit"}, {id: "f16", label: "F16"}];
+export function hy4TpOptions(s, d) {
+  const ids = [...new Set(["auto", 0].concat([s.tp, d.tp].filter((t) => t !== "auto" && t != null && t !== "").map(Number))
+    .concat(d.gpus.length >= 2 ? [d.gpus.length] : []))];
+  return ids.map((t) => ({id: t, label: t === "auto" ? "Auto" : t ? String(t) : "Off"}));
+}
+function hy4Fields(m, d, s, ch, images, gpus) {
+  const mtp = m.choices.draft.includes("mtp"), dfly = m.choices.draft.includes("dfly2");
+  return [
+    {label: "Model", rows: [
+      contextRow(m, d, ch, {vram: d.kv === "f16" ? HY4_KV_BYTES : HY4_KV_SMALL_BYTES}, ["kv"]),
+      html`<${Row} label="Drafting" flag=${d.draft === "auto" ? "--drafting auto" : d.draft === "dfly2" ? "--dfly2" : d.draft === "mtp" ? "--mtp" : ""} changed=${ch("draft")}
+        hint=${mtp || dfly ? "A drafter proposes a few tokens for the model to check: the same answers. On four Tesla T4s the MTP block measured no faster and reads prompts slower; Auto measures once on this PC."
+          : "The setup packs no drafter for Hy4-Flash: on four Tesla T4s none was faster than decoding token by token."}>
+        <${Seg} label="Drafting" value=${d.draft} options=${[...(mtp || dfly ? [{id: "auto", label: "Auto"}] : []), ...(mtp ? [{id: "mtp", label: "MTP"}] : []), ...(dfly ? [{id: "dfly2", label: "DFly2"}] : []), {id: "none", label: "Off"}]}
+          onChange=${(v) => setDraft({draft: v})}/><//>`,
+      images,
+      html`<${Row} label="Answers at once" hint="Hy4-Flash answers one request at a time for now, and keeps no saved conversations yet."/>`]},
+    {label: "GPUs and memory", rows: [gpus,
+      html`<${Row} label="Tensor parallel" flag="--tp" changed=${ch("tp")}
+        hint="A group of equal GPUs shares every layer's work: 4 is what four Tesla T4s were measured with. Auto: the engine's own choice. Off splits the layers across the GPUs instead."
+        warn=${typeof d.tp === "number" && d.tp > d.gpus.length ? `A group of ${d.tp} needs at least ${d.tp} GPUs picked.` : null}>
+        <${Seg} label="Tensor parallel" value=${d.tp} options=${hy4TpOptions(s, d)} onChange=${(v) => setDraft({tp: v})}/><//>`,
+      html`<${Row} label="VRAM kept free" flag="--reserve-gb" changed=${ch("reserve_gb")} hint="Per GPU, for the driver and other programs. Empty: the engine's own (0.75 GB); four Tesla T4s run with 0.5."
+        warn=${decimal(d.reserve_gb) ? null : "A number of GB, or empty for the default."}>
+        <${Num} label="VRAM kept free" value=${d.reserve_gb} ph="default" unit="GB / GPU" on=${(v) => setDraft({reserve_gb: v})}/><//>`]},
+    {label: "Prompts and cache", rows: [
+      html`<${Row} label="Prompt chunk" flag="--chunk" changed=${ch("prefill_chunk")} hint="The prompt tokens one pass reads at most: a larger chunk reads faster and leaves less VRAM to the experts. Empty: the engine picks."
+        warn=${whole(d.prefill_chunk) ? null : "A whole number, or empty."}>
+        <${Num} label="Prompt chunk" value=${d.prefill_chunk} ph="auto" unit="tokens" on=${(v) => setDraft({prefill_chunk: v})}/><//>`,
+      html`<${Row} label="KV cache" flag="--kv" changed=${ch("kv")}
+        hint="The latent cache's rows. Auto: F16 where they fit, 8-bit under tensor parallel with experts on the CPU (it changes some tokens, as any change of rounding does on this quant).">
+        <${Seg} label="KV cache" value=${d.kv} options=${HY4_KV} onChange=${(v) => setDraft({kv: v})}/><//>`]},
+    {label: "Speed", rows: [
+      html`<${Row} label="CPU threads" flag="--cpu-threads" changed=${ch("cpu_threads")} hint="The threads that compute the experts VRAM does not hold. Empty: the engine picks."
         warn=${whole(d.cpu_threads) ? null : "A whole number, or empty."}>
         <${Num} label="CPU threads" value=${d.cpu_threads} ph="auto" unit="threads" on=${(v) => setDraft({cpu_threads: v})}/><//>`]},
   ];
@@ -761,13 +806,24 @@ async function cancelPull() {
   loadCatalog();
 }
 
+// what a download needs and how it fits this PC's cards (GET /api/catalog's "needs" / "fit": Hy4-Flash, Inkling 2 Mini)
+export const dlNotes = (c) => [c.needs, c.fit].filter(Boolean);
+// a card's line for a model that runs on a set number of cards and does not do everything yet (describe()'s "needs")
+export function needsLine(m) {
+  const n = m.needs;
+  if (!n) return "";
+  const cards = n.cards ? `Set up for ${n.cards} GPU${n.cards === 1 ? "" : "s"}${n.measured ? " (a layout measured on Tesla T4s)" : " (a layout not measured yet)"}` : "";
+  return [cards, (n.limits || []).join(", ")].filter(Boolean).join(" · ");
+}
 function Download() {
   const C = MS.cat, p = C && C.pull, busy = pulling(p);
   const row = (c) => {
     const mine = p && p.model === c.id && (busy || p.state === "error");
     const pct = mine && p.percent != null ? p.percent : null;
     return html`<div class="mdl-dl" key=${c.id}>
-      <span class="mdl-dl__name"><b>${c.name}</b><span>${c.size_gb ? `about ${fmt(c.size_gb, 0)} GB` : "size shown when it starts"}</span></span>
+      <span class="mdl-dl__name"><b>${c.name}${c.recommended && !c.installed ? html` <span class="pill pill--accent">Recommended for this PC</span>` : null}</b>
+        <span>${c.size_gb ? `about ${fmt(c.size_gb, 0)} GB` : "size shown when it starts"}</span>
+        ${dlNotes(c).map((t) => html`<span>${t}</span>`)}</span>
       ${c.installed ? html`<span class="pill pill--accent">Installed</span>`
         : mine && busy ? html`<button type="button" class="btn btn--ghost btn--sm" onClick=${cancelPull}>Cancel</button>`
         : html`<button type="button" class="btn btn--secondary btn--sm" disabled=${busy} onClick=${() => startPull(c)}><${Icon} name="download" sm/>Download</button>`}
@@ -822,7 +878,7 @@ function Card({m}) {
   const s = m.settings, open = !!MS.details[m.file], editing = MS.edit === m.file, r = MS.restart;
   const stopping = m.running && r && r.why === "switch", restarting = m.running && r && r.why === "settings";
   const loading = r && r.why === "switch" && r.file === m.file;
-  const chips = [["Context", ctxfmt(s.context)], ["Draft", DRAFTS[s.draft] || s.draft], ["GPUs", s.gpus.join(", ") || "–"],
+  const chips = [["Context", ctxfmt(s.context)], ...(s.draft ? [["Draft", DRAFTS[s.draft] || s.draft]] : []), ["GPUs", s.gpus.join(", ") || "–"],
                  ["Images", s.images ? "on" : "off"], ...(s.parallel > 1 ? [["At once", String(s.parallel)]] : [])];
   const about = [m.backend === "hip" ? "HIP" : "CUDA", size(m.size), setUpOn(m.written)].filter(Boolean).join(" · ");
   const facts = [["Config", m.path, true], ["Start script", m.script ? `./${m.script}` : "–", !!m.script], ["Model folder", m.folder || "–", true],
@@ -840,6 +896,7 @@ function Card({m}) {
         : html`<button type="button" class="btn btn--secondary btn--sm" disabled=${!!r} onClick=${() => switchTo(m)}><${Icon} name="swap" sm/>Switch to this</button>`}
     </div>
     <div class="mdl-chips">${chips.map(([k, v]) => html`<span class="mdl-chip"><span>${k}</span><b>${v}</b></span>`)}</div>
+    ${needsLine(m) ? html`<div class="mdl-card__about">${needsLine(m)}</div>` : null}
     ${m.missing && !m.running ? html`<div class="mdl-warn">It can't start: ${m.missing}. Run the setup again to repair it (<code>./saguaro.sh --setup</code>).</div>` : null}
     <div class="mdl-card__foot">
       <span class="mdl-card__file"><code>${m.file}</code><span>·</span><span>${m.running ? "running now" : m.used ? `last used ${relTime(m.used * 1000)}` : ""}</span></span>

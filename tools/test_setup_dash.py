@@ -76,6 +76,19 @@ class Boxes(unittest.TestCase):
         self.assertIn("live · 19,456 routed experts", D.tiers_sub(METRICS).plain)
         self.assertIn("while it writes", text(D.tiers({"engine": {}}, 56)))    # (the mock engine: no tiers)
 
+    def test_hy4_and_inkling_tiers(self):
+        """Hy4-Flash: VRAM and the CPU's RAM from its INFO counts, its two per-token figures; Inkling 2 (no STAT
+        lines): a plain line, not a wait for numbers that never come."""
+        import time as _t
+        m = {"engine": {"engine_kind": "hy4", "experts": 20992, "vram_slots": 14678},
+             "tiers": {"now": {"time": _t.time(), "cpu": 0.86, "engram_ms": 0.41, "vram_hit": 0.946}, "history": {}}}
+        out = text(D.tiers(m, 56))
+        for part in ("14,678", "6,314", "RAM (run on the CPU)", "On the CPU", "N-gram memory"):
+            self.assertIn(part, out)
+        self.assertNotIn("SSD", out)
+        out = text(D.tiers({"engine": {"engine_kind": "ik2", "gpus": 1}}, 56), 200)
+        self.assertIn("Inkling 2's engine reports no expert counts", out)
+
     def test_the_tiers_bar_fits_when_the_tiers_overlap(self):   # (Maya-L on 9 GPUs: 10,813 + 1,571 of 12,096)
         now = {**METRICS["tiers"]["now"], "vram_used": 10813, "ram_used": 1571}
         m = {**METRICS, "engine": {**METRICS["engine"], "experts": 12096}, "tiers": {**METRICS["tiers"], "now": now}}
