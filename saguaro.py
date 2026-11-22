@@ -1432,8 +1432,9 @@ def choose_gpus(a, found, min_cc: int = MIN_CC, family: str = "") -> list:
     pick = choose("Which GPUs?", intro,
                   [(label, "recommended" if i == 0 else None, None) for i, label in enumerate(labels)], 0,
                   a.yes or a.check,
-                  ["(--gpus picks any others, e.g. --gpus 0,2,5; a model with a draft block drafts tokens on two GPUs "
-                   "or more)"] if len(best) > 2 and S.UI is None else [])   # (the plain setup's; not on the screen)
+                  ["(--gpus picks any others, e.g. --gpus 0,2,5" +
+                   ("" if family == "hy4" else "; a model with a draft block drafts tokens on two GPUs or more") + ")"]
+                  if len(best) > 2 and S.UI is None else [])   # (the plain setup's; not on the screen)
     return opts[pick]
 
 
@@ -1521,7 +1522,8 @@ def check_pc(a, family: str = "glm", gguf: bool = False, ds4_quant: str = "exl3"
     archs = sorted({int(g["arch"]) for g in chosen})
     vram = sum(g["vram_gb"] for g in chosen)
     ok("using " + " + ".join(gpu_label(g) for g in chosen) +
-       (f": the model's layers are split across the {len(chosen)}" if len(chosen) > 1 else ""))
+       (f": the model's layers are split across the {len(chosen)}"
+        if len(chosen) > 1 and family not in ("hy4", "ik2") else ""))
     if any(g.get("unified_memory") for g in chosen):
         say("  the GPU's memory is the system's RAM: the engine fills it with the most-used experts and leaves the "
             "rest to the RAM tier and the SSD, so the free RAM at the start is what the pool can take")
@@ -1625,6 +1627,8 @@ def check_pc(a, family: str = "glm", gguf: bool = False, ds4_quant: str = "exl3"
     cpu, avx2, avx512 = S.cpu_info()
     if S.ARM:
         ok(f"CPU: {cpu} (ARM64, {os.cpu_count()} threads; the expert kernels use ggml-cpu's NEON paths)")
+    elif not avx2 and family in ("hy4", "ik2"):        # (their CPU rows have AVX1 forms: built for such Xeons)
+        ok(f"CPU: {cpu} (no AVX2: the engine's AVX1 rows, {os.cpu_count()} threads)")
     elif not avx2:
         warn(f"the CPU ({cpu}) has no AVX2: the engine runs, its CPU expert lane on ggml's own kernels (slower; "
              "on 2x Xeon E5-2660 v2 it still added ~15% to 4-GPU decode). SAGUARO_GLM_CPU_LANE=0 turns it off")
@@ -7223,8 +7227,8 @@ def set_up_hy4(a, prev: dict) -> Path | None:
         ok("no vision tower in this pack: text only")
     cfg_path = write_config_hy4(a, pc, meta, pack, ctx, models, d, quant, lay)   # 8
     if all("T4" in str(g.get("name", "")) for g in pc["gpus"]) and len(pc["gpus"]) > 2:
-        say("  Tesla T4s idle their clocks between a layer's turns: lock them before you start, it doubled the speed "
-            "here -")
+        say("  Tesla T4s idle their clocks while a card waits its turn: lock them before you start (the layer split "
+            "wrote twice as fast locked here, and the speeds above are with them locked) -")
         say("    sudo nvidia-smi -lgc 1590,1590        (undo: sudo nvidia-smi -rgc; the 70 W power cap still applies)")
     return cfg_path
 
@@ -7706,8 +7710,19 @@ def main() -> int:
     if a.check:
         ds4 = a.model == DS4 or bool(a.model_dir) and exl3_folder_family(a.model_dir) is None
         quant = choose_ds4_quant(a, prev) if ds4 else None
-        pc = check_pc(a, "deepseek" if ds4 else "glm", gguf=ds4 and quant != "exl3")
+        fam = "deepseek" if ds4 else {HY4: "hy4", IK2: "ik2"}.get(a.model, "glm")
+        pc = check_pc(a, fam, gguf=ds4 and quant != "exl3")
         say()
+        if fam == "ik2":                               # (what the setup would write for these cards)
+            lay = IK2F.layout(pc["gpus"], len(pc["gpus"]))
+            say(f"{IK2_SHOWN} on these cards - {lay['said']}" + (f": {IK2F.speeds(lay)}" if IK2F.speeds(lay) else "") + ".")
+        elif fam == "hy4":
+            quant = getattr(a, "hy4_quant", None) or HY4_DEFAULT_QUANT
+            lay = HY4F.layout(pc["gpus"], hy4_quant_table(quant).get("plan") or {}, quant)
+            say(f"{Q.shown('hy4', quant)} on these cards - " +
+                (lay["said"] + (f": {HY4F.speeds(lay, quant)}" if HY4F.speeds(lay, quant) else " (not measured)")
+                 if lay["fits"] else f"it does not fit: about {lay['need_gib']:.0f} GB of VRAM are needed beside the "
+                                     f"experts; {IK2_SHOWN} is the model for one or two 16 GB cards") + ".")
         if a.backend == "metal":
             say(f"This Mac can run Saguaro on Metal (experimental). Run {ME} without --check to set it up.")
         elif a.backend == "hip":
