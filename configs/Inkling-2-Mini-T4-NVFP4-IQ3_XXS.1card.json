@@ -15,6 +15,7 @@
  "env": {
   "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
   "SAGUARO_IK2_STATS": "1",
+  "SAGUARO_IK2_RESERVE_MB": "1024",
   "SAGUARO_IK2_SLOT_DIR": "/opt/llm/var/Inkling-2-Mini-T4-NVFP4-IQ3_XXS/sessions"
  },
  "cwd": "/opt/llm/saguaro",

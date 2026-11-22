@@ -5821,7 +5821,10 @@ int main(int argc, char** argv) {
             }
         }
 #endif
-        const size_t reserve = (size_t) 3 << 29;   // (the work buffers and a quarter of a GiB of room: 1.5 GiB)
+        // (the work buffers and a quarter of a GiB of room: 1.5 GiB; SAGUARO_IK2_RESERVE_MB: less where a file's experts
+        //  just miss staying resident - the one-T4 quant at 32K on a 16 GB card)
+        const size_t reserve = getenv("SAGUARO_IK2_RESERVE_MB") ? (size_t) std::atof(getenv("SAGUARO_IK2_RESERVE_MB")) << 20
+                                                                : (size_t) 3 << 29;
         bool fits = exp_b + dense_b + kv_b + reserve <= fr0 && exp_b <= (size_t) (cache_gb * 1073741824.0);
         // KV streaming (g_kv_stream): auto takes it only where the cache alone does not fit beside the dense weights
         // and a half-GiB tier of experts (the offload layout, below), and only where the RAM holds the rows beside its
