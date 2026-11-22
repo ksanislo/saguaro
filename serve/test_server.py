@@ -366,6 +366,8 @@ class GlmThinkingLevels(unittest.TestCase):
         self.assertEqual(self.render(effort="medium"), "[gMASK]E=high<|assistant|><think>")
         self.assertEqual(self.render(effort="xhigh"), "[gMASK]E=max<|assistant|><think>")
         self.assertEqual(self.render(effort="minimal"), "[gMASK]E=low<|assistant|><think></think>")
+        # no_think (Hy4-flash's word for off) is in the shared EFFORT table: every engine accepts it as thinking off
+        self.assertEqual(self.render(effort="no_think"), "[gMASK]E=low<|assistant|><think></think>")
 
     def test_level_names_and_budgets(self):
         from serve.frontend import budget_effort, effort_level
