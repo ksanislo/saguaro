@@ -16,6 +16,13 @@ Build: `build-u2/` (Release, sm_75, NCCL). Card-proof binaries: /data/llm/bench/
   CMakeLists vram_late_test hunk identical; hip_compat/cuda_runtime.h merges cleanly with hy4-up (checked with
   git merge-tree).
 
+## HIP (mortar, RX 9070 XT gfx1201, ROCm 7.1)
+- 90fcee37 pushed as saguaro/test/u2-hip, built in mortar:/storage/llm/saguaro/u2/build-hip (Release, Makefiles,
+  STRATA_PREFILL_MMQ=ON, -j12): saguaro-glm, saguaro-ds4, saguaro-mm3 all compile and link; --help runs. No GPU run.
+- check_hip_compat now also finds inline PTX and missing CUDA headers in what an AMD device pass compiles (each file's
+  #if chain evaluated for gfx1201 / gfx1100); it would have flagged main's ds4_vision names, the mm3 mma.sync and
+  hy4's <cuda_bf16.h>. It cannot see a HIP stub struct missing members (the ds4 elastic pool): only a HIP compile can.
+
 ## Waiting
 - Card proof queued (night-queue): bench/upstream-u2/run.py glm | ds4 | mm3 -> bench/upstream-u2/<eng>/summary.txt,
   results.jsonl, DONE. A = /opt/llm/saguaro/bin/saguaro-<eng>, B = bench/upstream-u2/bin/saguaro-<eng>; A B, then
