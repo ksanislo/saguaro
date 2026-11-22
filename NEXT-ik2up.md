@@ -56,3 +56,18 @@ Card runs only through /data/llm/bench/night-queue/queue.txt (IK2_NO_CLAIM=1, ca
   cublasGemmEx status 13 (EXECUTION_FAILED) line 392, then a hang until the 600 s watchdog. To be re-run with WARM.
 - r1 killed after that (its benches would have measured the empty tier); r2/r3 lines replaced by runs/r4/r4.sh
   (t4_check gated 2-card steps, KL, conv, serve, par, benches; new build with WARM, watchdog 180 s).
+
+## r4 so far (1 card, with WARM)
+- t4_check 1 card PASS: Paris (repeatable), saguaro; read 2073 tok 619 tok/s; 13-token decode 19.5 tok/s (short).
+  Lane: scalar rows 25 ms/expert vs 0.44 ms over the bus -> mode A (no lane): an AVX1 lane form would not pay here.
+- t4_check 2 cards FAIL: cuBLAS status 13 -> found: serve's VRAM-line loop leaves GPU 1 current (use_dev cache), FIXED
+  (commit "ik2 serve on two GPUs: GPU 0 current again..."); 2-card runs requeued as runs/r5 (end of queue).
+- KL 1 card, 2000 forced tokens (kl-*-1gpu.out): new tc vs new all-scalar 7.69e-4 (top-1 99.00%); scalarattn 8.63e-4;
+  scalarexp 8.45e-4 (so ~8e-4 is the floor between any two forms here, not 5.7e-5). Ours: fast0 vs fast 1.10e-3 (98.5%).
+  Cross: ours fast0 vs new tc 1.30e-3 (98.4%), ours fast vs new tc 9.9e-4 (98.8%). Forced decode (CLI): new tc 33.7
+  tok/s, ours fast 35.0 tok/s.
+- AMD (mortar, RX 9070 XT gfx1201, ROCm 7.1): GitHub push was DENIED by the permission system; the branch went over
+  ssh as a git bundle into /storage/llm/saguaro/ik2-up (branch test/ik2-up). HIP build of saguaro-ik2 +
+  ik2_kernels_test: OK (needs -DSTRATA_PREFILL_MMQ=ON -DSTRATA_GGML_DIR=<src>/third_party/llama.cpp offline).
+  ik2_kernels_test on the 9070 XT: 349 ok, 1 FAIL (moe_combine_conv: moe_combine_f32 + conv4_res to the bit).
+  UD-Q4_K_XL downloading to /storage/llm/saguaro/models/Inkling-2-Mini-UD-Q4_K_XL.
