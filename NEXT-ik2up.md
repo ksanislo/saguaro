@@ -46,3 +46,13 @@ Card runs only through /data/llm/bench/night-queue/queue.txt (IK2_NO_CLAIM=1, ca
   Unit tests (8 modules) all OK after both merges.
 - Queued runs/r3 (serve_check 1 card / 2 cards 131072 c8192 / quant, par_check 2 cards / quant / 1 card).
 - Queue still behind a QFN turnsave job (started 12:10).
+
+## r1 results (12:41-12:54 PST), then stopped
+- ik2_kernels_test all passed; ik2_off_test 18 ok (AVX-512/AVX2 forms "not on this CPU", scalar lane checked).
+- t4_check 1 card PASS (Paris, saguaro, repeatable) but 5.7-6.8 tok/s: started WITHOUT SAGUARO_IK2_WARM, so the
+  offload tier was EMPTY ("0 of 3072 experts in VRAM") - every expert fetched each token. Setup writes WARM; configs
+  now set it (/opt/llm/saguaro/data/expert-profile-ik2mini.bin).
+- t4_check 2 cards FAIL: GPU 1 held all 3072 experts, GPU 0's tier empty (no WARM), first prompt pass ->
+  cublasGemmEx status 13 (EXECUTION_FAILED) line 392, then a hang until the 600 s watchdog. To be re-run with WARM.
+- r1 killed after that (its benches would have measured the empty tier); r2/r3 lines replaced by runs/r4/r4.sh
+  (t4_check gated 2-card steps, KL, conv, serve, par, benches; new build with WARM, watchdog 180 s).
