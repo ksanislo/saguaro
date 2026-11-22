@@ -226,6 +226,80 @@ int main() {
         }
         check(compacted && st.garbage_bytes == 0, "a delta rewrote the file whole and it reads back");
     }
+    {   // a reply with a thinking continuation (pm-v2): the slot is saved between the continuation's requests.  Its
+        // file must hold a checkpoint at or before the reply's start: the client's next turn renders that reply again
+        // without its thinking.  The engine now keeps the turn's checkpoint through a fast-lane continuation read and
+        // makes none inside the reply (cont=1); before, the file held no checkpoint (the lane dropped the slot's) or
+        // one inside the reply (the continuation's own turn cut, at the server's note turn).
+        constexpr int32_t kTurn = 7;   // <|im_start|>
+        constexpr size_t kReply = 1990, kThink = 2300, kLive = 2400;
+        Live c;
+        c.turn(0, kLive, 11);
+        for (size_t i = 0; i < kLive; ++i) c.s.live.ids[i] = int32_t(i < kReply ? 1000 + i : 50000 + i);
+        c.s.live.ids[kReply] = kTurn;
+        c.s.live.ids[kThink] = kTurn;   // (the server's note turn inside the reply)
+        auto ck = [&](size_t n) { ConversationCheckpoint k = c.s.live; k.ids.resize(n); k.gdn.assign(20000, uint8_t(n)); return k; };
+        // the next turn's prompt: the history, the reply without its thinking, a new user turn
+        std::vector<int32_t> next(c.s.live.ids.begin(), c.s.live.ids.begin() + kReply + 1);
+        for (int i = 0; i < 40; ++i) next.push_back(70000 + i);
+        next.push_back(kTurn);
+        for (int i = 0; i < 30; ++i) next.push_back(80000 + i);
+        auto save_with = [&](const fs::path& d, const ConversationCheckpoint* pick, int64_t& resumed, size_t& files) {
+            fs::create_directories(d);
+            SessionDir::Options o2 = so;
+            o2.dir = d.string();
+            {
+                SessionDir sd(o2);
+                sd.open();
+                auto tr = std::make_shared<SessionTurnTrack>();
+                for (size_t live_n : {kThink - 50, kThink + 10, kLive}) {   // the continuation's saves, the last at the end
+                    Live at = c;
+                    at.s.live.ids.resize(live_n);
+                    at.s.checkpoints.clear();
+                    if (pick) at.s.checkpoints.assign(1, *pick);
+                    SessionTurnJob j;
+                    j.turn = at.capture(0); j.track = tr; j.seq = ++seq; j.base_seq = j.seq - 1; j.label = "slot2";
+                    sd.write_turn(std::move(j));
+                    sd.flush();
+                }
+            }
+            SessionDir sd(o2);   // killed and started again
+            sd.open();
+            resumed = 0;
+            auto got = sd.fetch(next, {}, false, 0, resumed);
+            if (!got) resumed = 0;
+            files = sd.files();
+        };
+        int64_t resumed = 0;
+        size_t files = 0;
+        save_with(dir / "none", nullptr, resumed, files);
+        check(resumed == 0, "(before: the lane left no checkpoint - the next turn reads it all)");
+        const ConversationCheckpoint inside = ck(kThink);
+        save_with(dir / "inside", &inside, resumed, files);
+        check(resumed == 0, "(before: a checkpoint inside the reply - the same)");
+        const ConversationCheckpoint at_reply = ck(kReply);
+        save_with(dir / "turn", &at_reply, resumed, files);
+        check(files == 1 && resumed == (int64_t) kReply, "the turn's checkpoint resumes the next turn at the reply's start, one file");
+        {   // the turn after that resume (a new place's track) lands on the same file
+            SessionDir::Options o2 = so;
+            o2.dir = (dir / "turn").string();
+            SessionDir sd(o2);
+            sd.open();
+            Live after = c;
+            after.s.live.ids = next;
+            for (int i = 0; i < 60; ++i) after.s.live.ids.push_back(90000 + i);
+            ConversationCheckpoint k = c.s.live;
+            k.ids = next;
+            k.ids.resize(next.size() - 31);
+            after.s.checkpoints.assign(1, k);
+            auto tr = std::make_shared<SessionTurnTrack>();
+            SessionTurnJob j;
+            j.turn = after.capture(0); j.track = tr; j.seq = 1; j.label = "main";
+            sd.write_turn(std::move(j));
+            sd.flush();
+            check(sd.files() == 1, "the resumed conversation's next turn save extends its file (no second file)");
+        }
+    }
     fs::remove_all(dir);
     std::printf("turn_save_test: %d checks passed\n", checks);
     return 0;

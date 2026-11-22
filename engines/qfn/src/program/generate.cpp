@@ -14507,6 +14507,9 @@ int main(int argc, char** argv) {
                 sl.draft_ready = false;
                 sl.ids.clear();
                 sl.lane_ids.clear();
+                for (ConvCheckpoint& c : sl.checks)   // (as before the lane kept them: a read that failed keeps none)
+                    if (ckpt_pool.on()) ckpt_pool.give(std::move(c));
+                sl.checks.clear();
             };
             bool nf = false;
             for (int r = i; r < i + rows; ++r) nf = nf || vk.nonfinite_in(r);
@@ -15736,6 +15739,7 @@ int main(int argc, char** argv) {
                 const float fv = std::strtof(val, nullptr);
                 if (key == "logit_bias") r.bias = true;
                 else if (key == "ckpt") r.ckpt = std::atoi(val) != 0;
+                else if (key == "cont") { if (std::atoi(val) != 0) r.ckpt = false; }   // (no checkpoint: see req_cont)
                 else if (key == "turbo_drop" || key == "turbo_skip") turbo_key(r.turbo, key, val);
                 else if (key == "temperature") temperature = fv;
                 else if (key == "top_p") top_p = fv;
@@ -16636,7 +16640,8 @@ int main(int argc, char** argv) {
             };
             int64_t resume = 0;
             bool from_this = false;
-            if (o.prompt_cache > 0 && !nan_flush && !sl.tainted && !sl.img && sl.cvec == cvec_cached) {
+            const bool same_conv = o.prompt_cache > 0 && !nan_flush && !sl.tainted && !sl.img && sl.cvec == cvec_cached;
+            if (same_conv) {
                 if (sl.cached && pre(sl.ids)) resume = (int64_t) sl.ids.size();
                 for (const ConvCheckpoint& c : sl.checks) {
                     if (!c.imgs.empty() || !pre(c.ids)) continue;
@@ -16695,9 +16700,14 @@ int main(int argc, char** argv) {
                 dr.set_prompt_len(n);
             }
             if (resume <= 0) turn_slot[(size_t) b].reset(); else turn_slot[(size_t) b].begin(resume);   // (the lane read)
-            if (ckpt_pool.on())
-                for (ConvCheckpoint& c : sl.checks) ckpt_pool.give(std::move(c));
+            // the checkpoints this prompt continues stay the slot's: the resume point of its turn saves and parks (a
+            // thinking continuation's lane read used to leave the slot none, so its file could not resume the next turn)
+            std::vector<ConvCheckpoint> lane_kept;
+            for (ConvCheckpoint& c : sl.checks)
+                if (same_conv && c.imgs.empty() && pre(c.ids)) lane_kept.push_back(std::move(c));
+                else if (ckpt_pool.on()) ckpt_pool.give(std::move(c));
             sl = BSlot{};
+            sl.checks = std::move(lane_kept);
             strata::kernels::slot_rope_set(b, nullptr);   // text: the identity
             sl.active = true;
             sl.cache0 = drive.d.cache_hits;   // the request's own expert-cache figures (the tail of its BDONE)
@@ -18644,6 +18654,11 @@ int main(int argc, char** argv) {
             // parked after it.  It still resumes from a checkpoint it matches, and still saves the system-prompt root
             // when that reaches --prompt-cache-root.  Absent = checkpointed as before.
             int req_ckpt = 1;
+            // cont=1: the server's continuation of the reply in progress (a thinking resumed after a quoted end
+            // marker, a turn kept going, a blocked call answered): its prompt holds the server's own turns, so it makes
+            // no checkpoint (one there is inside the reply, which the client's next turn renders without its
+            // thinking), but its session goes on as any request's.
+            bool req_cont = false;
             // pin=N: the first N prompt tokens are a shared read-only prefix (a long document that many short queries
             // follow).  The prompt is read in two parts at N, the checkpoint there is PINNED (retention never evicts it,
             // a parked conversation holding it stays parked) and a later request that resumes from it does not park the
@@ -18675,6 +18690,7 @@ int main(int argc, char** argv) {
                     if (key == "logit_bias") { req_bias_text = tok.substr(eq + 1); req_bias_present = true; }
                     else if (key == "cvec") req_cvec = std::atoi(tok.c_str() + eq + 1);
                     else if (key == "ckpt") req_ckpt = std::atoi(tok.c_str() + eq + 1) != 0;
+                    else if (key == "cont") { req_cont = std::atoi(tok.c_str() + eq + 1) != 0; if (req_cont) req_ckpt = 0; }
                     else if (key == "pin") req_pin = std::max<long long>(0, std::atoll(tok.c_str() + eq + 1));
                     else if (key == "temperature") req_temperature = fv;
                     else if (key == "top_p") req_top_p = fv;
@@ -22089,10 +22105,10 @@ int main(int argc, char** argv) {
                 // (the checkpoints taken while reading it are still good)
                 live.swap(consumed);
                 live_imgs = imgs_below(req_imgs, (int64_t) live.size());
-                live_ok = o.prompt_cache > 0 && req_ckpt;   // ckpt=0: nothing to continue or park (#830)
+                live_ok = o.prompt_cache > 0 && (req_ckpt || req_cont);   // ckpt=0: nothing to continue or park (#830)
                 if (nf_hit) live_ok = false;   // #879 (the next request's start drops the rest)
                 live_prompt_n = live_ok ? n : -1;
-            } else if (!nf_hit && !read_vram && pp_exact && pp_reached > 0 && o.prompt_cache > 0 && req_ckpt &&
+            } else if (!nf_hit && !read_vram && pp_exact && pp_reached > 0 && o.prompt_cache > 0 && (req_ckpt || req_cont) &&
                        pp_reached <= (int64_t) cur.size()) {
                 // #1620: stopped between two windows (or before the first token was read): the session is exactly at
                 // pp_reached, so it stays the live conversation - the next request continues from it or parks it.

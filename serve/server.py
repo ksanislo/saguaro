@@ -5306,12 +5306,15 @@ class Service:
                     also holds the server's own tokens (the call's result or KEEP_NOTE, a steer), which max_new - n
                     does not count: the context's room caps it too (with an unlimited max_new, prepare's room, the
                     engine rejected prompt + max_new + CTX_SLACK > context)."""
+                    nonlocal sampling
                     while True:
                         room = self.engine.max_context - CTX_SLACK - len(seg["prompt"])
                         yield from attempts(seg["prompt"], max(1, min(max_new - n, room)))
                         if seg["next"] is None or cancel.is_set() or self.stopping:
                             return
                         seg["prompt"], seg["next"], seg["ids"] = seg["next"], None, []
+                        # (its prompt holds the server's own turns: the QFN engine keeps no checkpoint inside the reply)
+                        sampling = {**(sampling or {}), "_cont": True}
 
                 def flush():
                     nonlocal sent_call, answered
