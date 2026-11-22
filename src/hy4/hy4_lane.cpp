@@ -972,8 +972,8 @@ bool q4x_memo_put(const std::string& path, const std::string& key, Q4xMemo m) {
         std::ofstream o(tmp, std::ios::trunc);
         if (!o) return false;
         o << "# saguaro-hy4: the CPU lane's 4-bit expert copies, measured on this PC - a line a PC, model and lane kernels\n"
-             "# (key, kept / dropped, an expert run's us with them and without, date); delete a line, or run\n"
-             "# maya --speed-calibration, to measure again\n";
+             "# (key, kept / dropped, an expert run's us with them and without, date); delete a line, or set\n"
+             "# HY4_Q4X_MEASURE=1, to measure again\n";
         for (const std::string& l : keep) o << l << "\n";
         if (!o.flush()) return false;
     }

@@ -526,7 +526,7 @@ struct Model::Impl {
     // drafting on or off, the same answers.  A start places each layer's highest scored experts in VRAM by the scores
     // of `file` (else Options::profile's most routed, else the first ones).  The file is frozen: written only by a
     // start that found none (it learns from its answers, written with the profile after each) or that is asked to
-    // learn (HY4_HOT_LEARN=1; maya --speed-calibration removes the file) - so every start of a PC begins as the one
+    // learn (HY4_HOT_LEARN=1; deleting the file learns it again too) - so every start of a PC begins as the one
     // before and the same requests give the same tokens.  Which experts the GPU computes moves the sums' rounding, so
     // the text differs from without it (measured: no further from the full model).  Off where it has nothing to move
     // (no layer with experts both in VRAM and on the CPU lane); tensor parallel: asked for only (HY4_HOT=1: its start
@@ -4973,8 +4973,8 @@ struct Model::Impl {
     // without wins.  The verdict is remembered on this PC (HY4_Q4X_FILE - the server's data folder - else beside
     // --profile; a line a PC, model and lane-kernel build, hy4_lane's q4x_memo_*): a start that finds it builds the
     // copies untimed (kept) or none at all (dropped: no RAM, no re-coding thread, no probe), and changed lane kernels
-    // are measured again (HY4_Q4X_MEASURE=1 - maya --speed-calibration - measures again too).  The copies give the
-    // file's bits (the lane's output and the greedy ids the same with and without them, Linux and Windows builds); a
+    // are measured again (HY4_Q4X_MEASURE=1 measures again too).  The copies give the file's bits (the lane's output
+    // and the greedy ids the same with and without them, Linux and Windows builds); a
     // prompt chunk's route - streamed to the GPU or the lane, chosen by measured rates - may still move with the
     // lane's speed, as with any other load on the CPU.
     // HY4_Q4X unset or 2: measured as above (or remembered); 1: always, untimed; 0: never; HY4_Q4X_GB: the RAM they
@@ -5240,7 +5240,7 @@ struct Model::Impl {
     // server's data folder - else beside --profile; a line a PC, its GPUs and driver, the model, the layout - every
     // layer's GPU and VRAM experts, the chunk, tensor parallel - the lane kernels' build, whether the lane's 4-bit
     // copies are in use and the GPU fetch's mode), so the same prompt takes the same routes start after start.  Not yet measured here (or
-    // HY4_ROUTE_MEASURE=1 - maya --speed-calibration): the chunks' lane layers take the two routes in turns, each side
+    // HY4_ROUTE_MEASURE=1): the chunks' lane layers take the two routes in turns, each side
     // timed once the lane's experts are warm (the placer done, the 4-bit copies' verdict in), in windows of the lane
     // layers' count of calls a side, until two windows in a row agree within 8 % on each GPU's break-even (lane
     // entries an expert at which both take as long) - then the rates hold for the rest of the run and are written.
@@ -5357,7 +5357,7 @@ struct Model::Impl {
             if (!o) return false;
             o << "# saguaro-hy4: the prompt route's rates, measured on this PC - a line a PC, GPUs, model, layout and lane\n"
                  "# kernels (key, the CPU lane's us an expert-token, each GPU's streaming us a MB, date); delete a line,\n"
-                 "# or run maya --speed-calibration, to measure again\n";
+                 "# or set HY4_ROUTE_MEASURE=1, to measure again\n";
             for (const std::string& l : keep) o << l << "\n";
             if (!o.flush()) return false;
         }
@@ -5512,7 +5512,7 @@ struct Model::Impl {
     // median turn (Model::load) - and the fastest kept, the lane unless another is 3% faster; the verdict remembered
     // for this PC, its GPUs, the model and its VRAM experts (HY4_FETCH_FILE, else beside the 4-bit copies' verdict:
     // the server's data folder's hy4-gpu-fetch.txt; else beside --profile, else the pack); HY4_FETCH_MEASURE=1
-    // (HY4_Q4X_MEASURE=1 too: maya --speed-calibration) measures again.  A lane verdict gives the copies back at once
+    // (HY4_Q4X_MEASURE=1 too) measures again.  A lane verdict gives the copies back at once
     // (fetch_release): that start goes on as the ones after it.  The copies take RAM beyond a headroom of max(4 GiB,
     // a tenth of the RAM) (HY4_FETCH_GB: at most), a layer at a time; a layer whose copy the system does not pin
     // (Windows locks about half the RAM) keeps the CPU lane.  On one NUMA node the CPU lane reads the copies too (the
