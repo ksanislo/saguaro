@@ -35,6 +35,11 @@ Pack (an index of the GGUF files + the tokenizer, 5 MB, seconds, no GPU):
   read back 0.5 s (1.0 s after a restart). Conversations with pictures are not saved. The engine makes the folder.
 - `HY4_VISION_F16=1` (ON since 2026-11-22): the vision tower's GEMMs on FP16 tensor cores (the engine logs "vision:
   GEMMs on FP16 tensor cores"). Picture answers right on both paths; picture prompt 3.1 -> 2.7 s.
+- `SAGUARO_PCIE_SAFE=1` (ON for this box, a host-safety switch, default off elsewhere): under --tp 4 a prompt read
+  streams the experts not in VRAM host->GPU on all four cards together - the pattern behind this box's resets (the
+  2026-11-22 08:10 PST one happened during such a read). With the switch those experts run on the CPU lane instead; no
+  weights cross PCIe after the load. Cost NOT MEASURED yet: estimated 0 to -25% on prompt reads, nothing on decode
+  (NEXT-hy4.md, test T1). Only the partial sums (activations) still go through host memory each layer.
 - `--max-context 131072` stays. 262144 loaded (75% experts in VRAM vs 85%; decode -4..-6%, 10K read -22%) and the host
   RESET during its 60K read (2026-11-22 08:10 PST, cause unknown - NEXT-hy4.md); 524K / 1M not run. No 262K+ run
   without Ken's explicit OK.

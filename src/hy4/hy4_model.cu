@@ -1506,9 +1506,9 @@ struct Model::Impl {
     // the experts no member holds to its own GPU (kShareThreads copy a member's pass into its bounce); a shorter one
     // is member 0's alone, the CPU lane or its GPU as on the layer split
     static constexpr int kTpStream = 256;
-    // SAGUARO_PCIE_SAFE=1 (a host-safety switch for PCs that reset when all cards stream from host memory at once): no
-    // member streams its share of the experts no member holds - member 0's route (GPU 0 streams, or the CPU lane) takes
-    // a prompt chunk's, as for chunks under kTpStream
+    // SAGUARO_PCIE_SAFE=1 (a host-safety switch for PCs that reset when all cards stream weights from host memory at
+    // once): under tensor parallel no expert weights are streamed to any GPU - a prompt chunk's experts no member holds
+    // run on the CPU lane (member 0 waits for it), as a token's do
     const bool tp_share_on = [] { const char* v = std::getenv("SAGUARO_PCIE_SAFE"); return !v || std::atoi(v) == 0; }();
     static constexpr int kShareThreads = 8;
     // The indexed layers' keys a dense (tensor-core) prompt sub-batch spans at most: beyond, the gathering kernel.
@@ -6540,7 +6540,7 @@ struct Model::Impl {
                 if (share) {   // (tensor parallel with the CPU lane: every member its share, to its own GPU)
                     ok = ok && experts_streamed(l, gp, T, err, true);
                     streamed = true;
-                } else if (lane_on && route.any) {
+                } else if (lane_on && route.any && (tp_share_on || tp <= 1)) {   // (SAGUARO_PCIE_SAFE: the lane)
                     int n_ent = 0;
                     std::vector<char> used((size_t) g.n_expert, 0);
                     for (int i = 0; i < T * nu; ++i)
@@ -8507,7 +8507,8 @@ bool Model::load(const Options& o, std::string& err) {
         // (the copies' verdict to come, remembered; the route measured once it is in - or now, nothing before it)
         const bool want_q = x.q4x_adaptive && !x.q4x_decided && !x.q4x_file.empty();
         const bool q_open = x.q4x_adaptive && !x.q4x_decided;
-        const bool want_r = x.route.any && x.route.mode == 0 && !x.route.file.empty() && (want_q || !q_open);
+        const bool want_r = x.route.any && x.route.mode == 0 && !x.route.file.empty() && (want_q || !q_open) &&
+                            (x.tp_share_on || x.tp <= 1);   // (SAGUARO_PCIE_SAFE under tensor parallel: no route, the lane)
         if (!want_q && !want_r) return true;
         const int V = x.g.n_vocab;
         std::vector<int> text;

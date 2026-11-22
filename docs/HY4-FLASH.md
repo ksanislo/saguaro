@@ -116,4 +116,8 @@ a smaller prompt chunk that leaves more VRAM to the experts (32.5).
   divergence of 0.06 and picks the same next token 88% of the time. Any change of rounding order moves this 2-3 bit
   quant by that much - a different chunk size alone does (0.059) - so it is the quant's floor, not a fault of the
   layout.
+- **`SAGUARO_PCIE_SAFE=1`** (off by default): for a PC that resets when all its cards stream weights from host
+  memory at the same time. Under tensor parallel a prompt read normally streams the experts that are not in VRAM to
+  all four cards at once; with the switch they run on the CPU instead. It costs prompt-read speed (not yet measured;
+  estimated up to a quarter), nothing while writing. Add it to the config's `env` only if your PC needs it.
 - AMD, Windows and Mac: not built here.
