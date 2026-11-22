@@ -71,3 +71,17 @@ Card runs only through /data/llm/bench/night-queue/queue.txt (IK2_NO_CLAIM=1, ca
   ik2_kernels_test: OK (needs -DSTRATA_PREFILL_MMQ=ON -DSTRATA_GGML_DIR=<src>/third_party/llama.cpp offline).
   ik2_kernels_test on the 9070 XT: 349 ok, 1 FAIL (moe_combine_conv: moe_combine_f32 + conv4_res to the bit).
   UD-Q4_K_XL downloading to /storage/llm/saguaro/models/Inkling-2-Mini-UD-Q4_K_XL.
+
+## r4 complete (13:33 PST) - 1 card, card 2, ctx 32768, chunk 2048, greedy 256 tokens
+- conv_check 1 card (offload path + KV lending): CONV CHECK PASSED (set aside / back / edit / branch / folder after restart).
+- serve_check 1 card UD: 24/24 PASS (pictures, tools, stops, Monitor); quant 1 card: 24/24 PASS.
+- par_check quant 1 card: --parallel 2 NOT taken - the quant at 32K is not resident under upstream's 1.5 GiB reserve
+  (11.4 + 1.1 + 1.5 KV + 1.5 > 15.5 free): offload 2796/3072. Added SAGUARO_IK2_RESERVE_MB; quant config 1024 (r5 tests).
+- bench (2 loads each, rotated; decode tok/s at ~0 / 8K / 30K, read tok/s at 8K / 30K, first token 51-tok prompt):
+    new (offload path, WARM)   23.7 / 25.8 / 24.1     read 706 / 552    first 0.81 s
+    ours (PIN=0 cache layout)  42.0 / 38.5 / 35.1     read 633 / 620    first 1.60 s
+  => upstream's offload path decodes ~40 % slower on one T4 (static tier, ~5 % of picks fetched each token; ours
+  promotes misses into its cache). Reads: +11 % at 8K, -11 % at 30K. r5 adds new build SAGUARO_IK2_OFF=0 (upstream's
+  cache path) vs offload.
+- bq-new (quant, no RESERVE, no WARM -> empty tier): 5.8 tok/s - not a valid arm; r5 repeats with RESERVE 1024.
+  ours quant: 44.5 / 41.2 / 36.9, read 569 / 550.
