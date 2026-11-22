@@ -37,3 +37,12 @@ Card runs only through /data/llm/bench/night-queue/queue.txt (IK2_NO_CLAIM=1, ca
   offload path (ik2_off.cu) on HIP.
 - Queued runs/r2 (conv_check 1 and 2 cards on the conversations build).
 - Forks: saguaro/ik2-up-serve (server/Monitor/tools), saguaro/ik2-up-setup (setup/Models/docs/configs).
+
+## Progress ~13:15 PST
+- Merged saguaro/ik2-up-serve (server contract: engine STAT/DONE/INFO win, GEN keys temperature/top_p/top_k/seed/spec,
+  VISION_GIB, drafting env, AMD free memory; Monitor ik2 tiers; par_check.py; serve_check/conv_check updated) and
+  saguaro/ik2-up-setup (upstream fit rules in ik2_fit.py, offload layouts, WARM seed profile, drafting rows, Answers at
+  once, docs; AMD 16 GB setup allows the one-T4 quant; T4 numbers marked as previous engine's with TODO rows).
+  Unit tests (8 modules) all OK after both merges.
+- Queued runs/r3 (serve_check 1 card / 2 cards 131072 c8192 / quant, par_check 2 cards / quant / 1 card).
+- Queue still behind a QFN turnsave job (started 12:10).
