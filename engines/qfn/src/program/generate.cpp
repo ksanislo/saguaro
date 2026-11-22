@@ -18929,7 +18929,7 @@ int main(int argc, char** argv) {
                 incoming_live = parked.live;
             }
             // (an image taken back from the session dir's writer and not used here has no file: into the cache with it)
-            if (fetched && fetched_ram && !conversations.put(std::move(*fetched)))
+            if (fetched && fetched_ram && !conversations.put(std::move(*fetched), 0, park_clock()))
                 std::fprintf(stderr, "saguaro serve: conversation cache: could not keep a conversation taken back from "
                                      "the session dir's writer\n");
             fetched.reset();
@@ -18995,7 +18995,8 @@ int main(int argc, char** argv) {
                     incoming.reset();
                     // (our --session-dir: an image read from disk holds views into its file and stays there; only a
                     // parked one goes back to the cache)
-                    if (incoming_src != nullptr && std::string(incoming_src) == "ram" && !conversations.put(std::move(retry)))
+                    if (incoming_src != nullptr && std::string(incoming_src) == "ram" &&
+                        !conversations.put(std::move(retry), 0, park_clock()))
                         std::fprintf(stderr, "saguaro serve: conversation cache: could not return the skipped snapshot\n");
                     err.clear();
                 }
