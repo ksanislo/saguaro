@@ -52,7 +52,8 @@ git clone https://github.com/ksanislo/saguaro.git && cd saguaro
 5. writes `maya-hy4-flash-maya-s.json` and starts the dashboard on `http://127.0.0.1:8080`.
 
 On four equal 16 GB cards the config is the measured one: `--tp 4 --chunk 2048 --reserve-gb 0.5`, a 131K context and
-`HY4_HOT=1`, which places the experts in VRAM by the scores shipped in `data/` for Maya-S. Any other set of cards gets
+`HY4_HOT=1`, which places the experts in VRAM by the scores shipped in `data/` for Maya-S, and `HY4_VISION_F16=1` (the
+vision tower's GEMMs on FP16 tensor cores: a T4 has no BF16 ones). Any other set of cards gets
 the engine's own choices (`--tp auto`, `--chunk auto`) at a 32K context.
 
 **Tesla T4s: lock the GPU clocks before you start.** While a card waits its turn it idles its clock down; with the
@@ -92,7 +93,9 @@ a smaller prompt chunk that leaves more VRAM to the experts (32.5).
 
 - **Thinking:** High (the default) or Off - the two levels the model is made for.
 - **Tool calls**, the OpenAI- and Anthropic-compatible API, streaming and stop, as for the other models.
-- **Pictures:** the vision tower runs in the engine and takes no VRAM of its own. **Not measured on Tesla T4s yet.**
+- **Pictures:** the vision tower runs in the engine and takes no VRAM of its own. On four Tesla T4s a 621-token picture
+  prompt is read in 2.7 s with `HY4_VISION_F16=1` (3.1 s on the BF16 path), and the answers name its shapes, colours
+  and text correctly; a picture already in the conversation is not read again.
 - **Engine settings on the Models page:** context, GPUs, tensor parallel (Auto, Off, or the group's size), the VRAM
   kept free, the prompt chunk, CPU threads, the cache's rows (Auto, 8-bit, F16) and pictures. The engine stops at a
   flag it does not know, so the page writes only these.
@@ -102,7 +105,10 @@ a smaller prompt chunk that leaves more VRAM to the experts (32.5).
 ## Limits
 
 - **One conversation at a time.** A second request waits for the first.
-- **No saved conversations yet:** a restart or a model switch reads the conversation again.
+- **Saved conversations are off unless you name a folder:** add `"HY4_SLOT_DIR": "<folder>"` (and `"HY4_SLOT_GB"`, 64
+  by default) to the config's `env`. A conversation set aside by another, or at a restart or model switch, is then
+  read back instead of read again: 10K tokens saved in 0.3 s (0.36 GB) and read back in 0.5-1.0 s on four T4s.
+  Conversations with pictures are not saved.
 - **No drafter is installed, and no Turbo.** On four Tesla T4s the model's MTP block was no faster (32-34 tok/s against
   32-33) and read prompts 35% slower; the DFly2 drafter does not load under tensor parallel. Both remain by hand
   (`--mtp`, `--dfly2`; the repo has the files).
@@ -110,4 +116,8 @@ a smaller prompt chunk that leaves more VRAM to the experts (32.5).
   divergence of 0.06 and picks the same next token 88% of the time. Any change of rounding order moves this 2-3 bit
   quant by that much - a different chunk size alone does (0.059) - so it is the quant's floor, not a fault of the
   layout.
+- **`SAGUARO_PCIE_SAFE=1`** (off by default): for a PC that resets when all its cards stream weights from host
+  memory at the same time. Under tensor parallel a prompt read normally streams the experts that are not in VRAM to
+  all four cards at once; with the switch they run on the CPU instead. It costs prompt-read speed (not yet measured;
+  estimated up to a quarter), nothing while writing. Add it to the config's `env` only if your PC needs it.
 - AMD, Windows and Mac: not built here.

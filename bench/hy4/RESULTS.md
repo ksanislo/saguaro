@@ -56,3 +56,14 @@ last-bit differences). The floor arms were queued, not run: see NEXT-hy4.md item
 | --tp 4 --kv f16, F32 sums (HY4_TP_F32=1) | 0.0566 | 89.0% | 32.76 |
 Any change of rounding order (chunk size, CPU-lane share) moves this quant by KL ~0.057: that is the floor, and
 tensor parallel (0.056) and 8-bit cache rows (0.058-0.060) sit on it. Nothing to fix; --tp 4 with 8-bit rows stays.
+
+## Phase 3 (2026-11-22, build-hy4b, --tp 4 chunk 2048 reserve 0.5 learned placement, 131K, clocks locked)
+| run | result | decision |
+|---|---|---|
+| saved conversations, --tp 4 (slot_check.py) | ALL PASS: 10K saved 0.3 s (0.36 GB), read back 0.5 s, 1.0 s after a restart | ON (HY4_SLOT_DIR, HY4_SLOT_GB 16) |
+| saved conversations, layer split | PASS with a fixed placement (HY4_HOT=0); the one FAIL was a learning placement moving experts between requests | - |
+| HY4_TP_HEAD_MEMBER=1, 2 ABAB pairs x2 | decode +6.5 / +6.4 / +5% and +5.9 / +6.1 / +4.6% (short / 10K / v1) | md5 differs from off (41 experts fewer in VRAM); exactness test (=2 arm) held |
+| HY4_CREW_PIN=1 / HY4_LANE_SPIN_US=0 vs base-3 | +0.9 / +0.1 / +0.3% and -0.7 / -1.0 / -1.2%, md5 equal | not set |
+| HY4_VISION_F16=1 (server, the test picture, 2 pairs) | picture prompt 3105 -> 2679 ms and 2814 -> 2673 ms; descriptions right on both paths | ON |
+| HY4_TP_EV=all, 1-token windows | member 0's FFN 12.2 ms vs 8.3 on members 1-3 (they wait 5.1 ms at its sum): the CPU lane's experts | lever: residency |
+| --max-context 262144 | 75% experts in VRAM; decode 30.5 / 30.9 (-6 / -4%), 10K read 457 (-22%); the host RESET during the 60K read | 131K stays; 262K+ held |

@@ -13,6 +13,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <cstdio>
 #include <string>
 #include <vector>
 
@@ -146,6 +147,18 @@ public:
     bool resumable(int64_t pos) const;
     /// The positions processed so far (the next forward's pos0 when continuing)
     int64_t end() const;
+    /// A conversation set aside and taken up again (hy4_main's saved conversations): the caches' rows of the first n
+    /// positions - every indexed layer's latent rows and pooled keys, the newest ring of every sliding-window layer's
+    /// and of the indexer's value / gate rows - written from one copy (tensor parallel: member 0's) and read back
+    /// into every copy.  state_save: n = end().  state_load: the first n positions of a file of n_file (n < n_file:
+    /// only where its ring rows still reach the window before n - else false and nothing is touched; a read that
+    /// fails midway leaves an empty state); ids: the conversation's tokens (Engram's history).  The same bytes back in
+    /// the same rows: the next token is the uninterrupted conversation's.  state_ok(): not with KV streaming or a
+    /// drafter loaded.  state_id(): what a file must match.
+    bool state_ok() const;
+    std::string state_id() const;
+    bool state_save(int64_t n, std::FILE* f, std::string& err);
+    bool state_load(int64_t n, std::FILE* f, std::string& err, int64_t n_file, const int* ids);
 
     int vocab() const;
     /// Row r of the last forward's logits: its largest value's index (of equals the lowest - the host's argmax), found
@@ -160,6 +173,8 @@ public:
     int tensor_parallel() const;
     int eos() const;
     const Stats& stats() const;
+    /// a prompt's experts streamed to each GPU since the last call (MB, the passes' and the bounce fills' seconds); ""
+    std::string stream_report();
     std::vector<std::string> info_lines() const;
     /// --room-report's measurement, the server's INFO keys (empty: not asked, or the start did not fit):
     /// "room_rows=f16|q8 room_drafter=0|1 room_streamed=0|1 room_gpus=<PCI bus id>,<free>,<slack>;..." - each GPU's

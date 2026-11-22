@@ -16,8 +16,13 @@ ME = "CLAIM hy4-agent:"
 _lock = None
 
 
+NO_CLAIM = os.environ.get("HY4_NO_CLAIM") == "1"   # (run by a queue that holds the cards' claim itself)
+
+
 def claim(what):
     global _lock
+    if NO_CLAIM:
+        return
     import fcntl
     _lock = open("/tmp/hy4-agent.lock", "w")   # (this agent's own runs: one at a time)
     fcntl.flock(_lock, fcntl.LOCK_EX)
@@ -33,6 +38,8 @@ def claim(what):
 
 
 def release():
+    if NO_CLAIM:
+        return
     if STATUS.exists():
         keep = [l for l in STATUS.read_text().splitlines() if not l.startswith(ME)]
         STATUS.write_text("\n".join(keep) + ("\n" if keep else ""))

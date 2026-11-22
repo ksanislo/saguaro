@@ -5,7 +5,8 @@ saguaro-hy4 keeps everything that is not a routed expert in VRAM (no RAM fallbac
 tools/hy4/download.json says how much, by context), fills the rest with experts and computes the others on the CPU.
 The one layout measured on Tesla T4s (bench/hy4/RESULTS.md) is the setup's for four equal 16 GB cards:
 
-  four cards  --tp 4 --chunk 2048 --reserve-gb 0.5, HY4_HOT=1 (the experts placed by the learned scores), context 131072
+  four cards  --tp 4 --chunk 2048 --reserve-gb 0.5, HY4_HOT=1 (the experts placed by the learned scores),
+              HY4_VISION_F16=1 (the vision tower's GEMMs on FP16 tensor cores: sm_75 has no BF16 ones), context 131072
 
 Any other set of cards gets the engine's own choices (--tp auto, --chunk auto) at a 32K context: it runs, nothing of it
 was measured here.  Nothing in this file touches a GPU."""
@@ -14,6 +15,7 @@ from __future__ import annotations
 MIN_CC = 70                                         # the engine's kernels: V100 on (sm_75 is what runs here)
 T4_GROUP = 4
 T4_ARGS = ["--tp", "4", "--chunk", "2048", "--reserve-gb", "0.5"]
+T4_ENV = {"HY4_HOT": "1", "HY4_VISION_F16": "1"}
 T4_CONTEXT = 131072
 PLAIN_CONTEXT = 32768                               # (the largest context each size's plan lists)
 CONTEXTS = [8192, 32768, 65536, 131072]
@@ -51,7 +53,7 @@ def layout(cards: list, plan: dict, quant: str = "maya-s") -> dict:
     group = equal_group(cards) if len(cards) == T4_GROUP else []
     small = group and float(group[0].get("vram_gb") or 0) < 22
     if small:
-        ctx, args, env = T4_CONTEXT, list(T4_ARGS), {"HY4_HOT": "1"}
+        ctx, args, env = T4_CONTEXT, list(T4_ARGS), dict(T4_ENV)
         said = "four equal cards: tensor parallel over them, the experts placed by the learned scores, a 131K context"
     else:
         ctx, args, env = PLAIN_CONTEXT, [], {}

@@ -160,6 +160,21 @@ __global__ void place_rows_kernel(const float* y, const float* bias, const float
 
 int blocks_for(size_t n) { return (int) std::min<size_t>((n + 255) / 256, 65535); }
 
+#if !defined(STRATA_USE_HIP)
+// HY4_VISION_F16=1 (no BF16 tensor cores before sm_80): a GEMM's BF16 operands to FP16 in place - exact for
+// |v| <= 65504 (FP16 has the longer mantissa), beyond it clamped, below 2^-24 flushed (maya-mm3's tower, the same)
+__global__ void bf16_to_f16_inplace(uint16_t* __restrict__ x, size_t n) {
+    for (size_t i = blockIdx.x * (size_t) blockDim.x + threadIdx.x; i < n; i += (size_t) gridDim.x * blockDim.x) {
+        float v = __uint_as_float((uint32_t) x[i] << 16);
+        if (fabsf(v) > 65504.0f) v = copysignf(65504.0f, v);
+        x[i] = __half_as_ushort(__float2half_rn(v));
+    }
+}
+void to16(const void* x, size_t n, cudaStream_t s) {
+    bf16_to_f16_inplace<<<(int) std::min<size_t>((n + 255) / 256, 4096), 256, 0, s>>>((uint16_t*) x, n);
+}
+#endif
+
 size_t al(size_t n) { return (n + 255) & ~(size_t) 255; }
 
 // A layer's matrices in the file's other types (a quantized mmproj: Q8_0 blocks - an F16 scale and 32 int8 -, F16 where
@@ -265,6 +280,7 @@ struct Vision::Impl {
     size_t host_b = 0, last_b = 0;
     bool last_lent = false;
     bool tf32 = std::getenv("HY4_VISION_F32") == nullptr;   // (attention's products in TF32; =1: plain F32)
+    bool f16 = false;   // (HY4_VISION_F16=1: the BF16 GEMMs on FP16 tensor cores - see to16)
 
     ~Impl() {
         if (dev >= 0) cudaSetDevice(dev);
@@ -347,6 +363,13 @@ struct Vision::Impl {
     // C [rows][ldc] F32 (columns [0, N) of it) = X [rows][K] BF16 . W [N][K]^T BF16
     bool gemm(const uint8_t* W, int N, int K, const bf16_t* X, int rows, float* C, int ldc, std::string& err) {
         const float one = 1.0f, zero = 0.0f;
+#if !defined(STRATA_USE_HIP)
+        if (f16) {   // (W and X made FP16 by their owners: w16 / xr in encode)
+            VB(cublasGemmEx(blas, CUBLAS_OP_T, CUBLAS_OP_N, N, rows, K, &one, W, CUDA_R_16F, K, X, CUDA_R_16F, K, &zero,
+                            C, CUDA_R_32F, ldc, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+            return true;
+        }
+#endif
         VB(cublasGemmEx(blas, CUBLAS_OP_T, CUBLAS_OP_N, N, rows, K, &one, W, CUDA_R_16BF, K, X, CUDA_R_16BF, K, &zero,
                         C, CUDA_R_32F, ldc, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT));
         return true;
@@ -356,6 +379,12 @@ struct Vision::Impl {
         if (!Vision::geometry(pk, g, err)) return false;
         dev = dev_;
         VK(cudaSetDevice(dev));
+#if !defined(STRATA_USE_HIP)
+        if (const char* fv = std::getenv("HY4_VISION_F16"); fv != nullptr && std::atoi(fv) != 0) {
+            f16 = true;
+            std::fprintf(stderr, "saguaro hy4: vision: GEMMs on FP16 tensor cores (BF16 -> FP16, exact in range)\n");
+        }
+#endif
         VK(cudaStreamCreateWithFlags(&s, cudaStreamNonBlocking));
         VK(cudaStreamCreateWithFlags(&cs, cudaStreamNonBlocking));
         for (int b = 0; b < 2; ++b) {
@@ -624,6 +653,15 @@ struct Vision::Impl {
         };
         if (!upload(0) || (ns > 1 && !upload(1))) return false;
         const float one = 1.0f, zero = 0.0f;
+        // (FP16 GEMMs: a stage's matrices once it is in its slot, an input once its kernel wrote it)
+        auto w16 = [&](const uint8_t* W, size_t n) {
+#if !defined(STRATA_USE_HIP)
+            if (f16) to16(W, n, s);
+#else
+            (void) W, (void) n;
+#endif
+        };
+        auto xr = [&](const bf16_t* X, size_t n) { w16((const uint8_t*) X, n); };
         // the patch embedding (F32) onto the resampled positions, + its bias: the residual stream
         VB(cublasSgemm(blas, CUBLAS_OP_T, CUBLAS_OP_N, D, N, P, &one, pv(o_wpatch), P, px, P, &one, h, D));
         const size_t ND = (size_t) N * D;
@@ -641,7 +679,12 @@ struct Vision::Impl {
             if (!acquire(li, sb)) return false;
             const LOff& l = lo[(size_t) li];
             auto lf = [&](size_t o) { return (float*) (sb + o); };
+            w16(sb + l.wqkv, (size_t) 3 * D * D);
+            w16(sb + l.wo, (size_t) D * D);
+            w16(sb + l.w1, (size_t) F * D);
+            w16(sb + l.w2, (size_t) D * F);
             layernorm_kernel<<<N, 256, 0, s>>>(h, lf(l.ln1w), lf(l.ln1b), D, g.eps, x16);
+            xr(x16, (size_t) N * D);
             if (!gemm(sb + l.wqkv, 3 * D, D, x16, N, qkv, 3 * D, err)) return false;
             add_bias_kernel<<<blocks_for((size_t) N * 3 * D), 256, 0, s>>>(qkv, lf(l.bqkv), (size_t) N * 3 * D, 3 * D);
             // S = scale Q K^T for nh heads x qb queries (q, k, v read in place from qkv), softmax, S V
@@ -661,6 +704,7 @@ struct Vision::Impl {
                 }
             }
             to_bf16_kernel<<<blocks_for(ND), 256, 0, s>>>(att, ND, x16);
+            xr(x16, ND);
             if (!gemm(sb + l.wo, D, D, x16, N, att, D, err)) return false;
             residual_kernel<<<blocks_for(ND), 256, 0, s>>>(h, att, lf(l.bo), ND, D);
             // the MLP, rc rows a pass
@@ -668,8 +712,10 @@ struct Vision::Impl {
                 const int nr = std::min(rc, N - r0);
                 float* hr = h + (size_t) r0 * D;
                 layernorm_kernel<<<nr, 256, 0, s>>>(hr, lf(l.ln2w), lf(l.ln2b), D, g.eps, x16);
+                xr(x16, (size_t) nr * D);
                 if (!gemm(sb + l.w1, F, D, x16, nr, big, F, err)) return false;
                 bias_act_kernel<<<blocks_for((size_t) nr * F), 256, 0, s>>>(big, lf(l.b1), (size_t) nr * F, F, 1, x16);
+                xr(x16, (size_t) nr * F);
                 if (!gemm(sb + l.w2, D, F, x16, nr, att, D, err)) return false;
                 residual_kernel<<<blocks_for((size_t) nr * D), 256, 0, s>>>(hr, att, lf(l.b2), (size_t) nr * D, D);
             }
@@ -681,8 +727,9 @@ struct Vision::Impl {
         auto mat = [&](int m, const bf16_t* X, int rws, float* C) -> bool {
             for (; k < ns && st[(size_t) k].mat == m; ++k) {
                 uint8_t* sb = nullptr;
-                if (!acquire(k, sb) ||
-                    !gemm(sb, st[(size_t) k].nc, mat_k[m], X, rws, C + st[(size_t) k].n0, mat_n[m], err) || !done(k))
+                if (!acquire(k, sb)) return false;
+                w16(sb, (size_t) st[(size_t) k].nc * mat_k[m]);
+                if (!gemm(sb, st[(size_t) k].nc, mat_k[m], X, rws, C + st[(size_t) k].n0, mat_n[m], err) || !done(k))
                     return false;
             }
             return true;
@@ -690,9 +737,11 @@ struct Vision::Impl {
         const int ow = gw / g.merge, oh = gh / g.merge, NB = ow * oh, M4 = g.merge * g.merge * D;
         rmsnorm_kernel<<<N, 256, 0, s>>>(h, pv(o_norm), D, g.eps);
         merge_gather_kernel<<<NB, 256, 0, s>>>(h, gw, D, ow, x16);
+        xr(x16, (size_t) NB * M4);
         if (!mat(0, x16, NB, qkv)) return false;   // ([NB][4D] F32: qkv's room, free now)
         bf16_t* g16 = (bf16_t*) att;                // ([NB][4D] BF16: att's room)
         bias_act_kernel<<<blocks_for((size_t) NB * M4), 256, 0, s>>>(qkv, pv(o_b0), (size_t) NB * M4, M4, 2, g16);
+        xr(g16, (size_t) NB * M4);
         if (!mat(1, g16, NB, qkv)) return false;
         const int R = (ow + 1) * oh;
         place_rows_kernel<<<R, 256, 0, s>>>(qkv, pv(o_b2), pv(o_nl), ow, O, out);

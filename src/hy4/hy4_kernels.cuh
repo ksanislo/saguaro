@@ -14,6 +14,12 @@ constexpr int kMaxWin = 16;   // the token / window path's tokens at most (ds4_i
 
 /// int8 rows with an F32 scale a 32 values (ds4_iq's GEMV / expert input): q[r][k], d[r][k / 32]; k % 32 == 0
 void q8_rows(const float* x, size_t ldx, int rows, int k, int8_t* q, float* d, cudaStream_t s);
+// (HY4_FUSE=1) rmsnorm / sigmoid gate / SwiGLU and the next GEMV's int8 rows in one launch (k, n multiples of 32)
+void rms_q8(const float* x, size_t ldx, int rows, int n, const float* w, float eps, float* y, size_t ldy, int8_t* q,
+            float* d, cudaStream_t s);
+void sigmul_q8(float* x, const float* g, int rows, int k, int8_t* q, float* d, cudaStream_t s);
+void swiglu_q8(const float* g, const float* u, size_t ldg, int rows, int n, float* h, size_t ldh, int8_t* q, float* d,
+               cudaStream_t s);
 
 /// ... rows of a [T][H][...] tensor head by head: q row h T + t from x + t ldt + h ldh (k values)
 void q8_heads(const float* x, size_t ldt, size_t ldh, int T, int H, int k, int8_t* q, float* d, cudaStream_t s);
