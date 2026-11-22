@@ -2458,7 +2458,8 @@ static int glm_pack_generate(const Options& o) {
     // the prompt from token i on through the token path, the state saved before snap_at (an identical or extending
     // prompt can reuse it) - after the batched path, only the tokens from there are left
     const auto prep_tail = [&](const std::vector<int32_t>& prompt, size_t i_first, size_t reuse, const char*& finish,
-                               std::chrono::steady_clock::time_point t0, size_t snap_at) -> int {
+                               std::chrono::steady_clock::time_point t0, size_t snap_at,
+                               size_t* stopped = nullptr) -> int {
         std::vector<float> lg;
         bool snapped = false;
         for (size_t i = i_first; i < prompt.size();) {
@@ -2490,7 +2491,11 @@ static int glm_pack_generate(const Options& o) {
                 std::printf("PP %s%zu %zu %.1f %.1f %zu\n", tag.c_str(), i, prompt.size(), ms,
                             (double) (i - reuse) / (ms / 1000.0 + 1e-9), reuse);
             }
-            if (read_stopped()) { finish = "cancel"; break; }
+            if (read_stopped()) {
+                finish = "cancel";
+                if (stopped != nullptr) *stopped = i;
+                break;
+            }
         }
         return 0;
     };
@@ -2501,6 +2506,7 @@ static int glm_pack_generate(const Options& o) {
         //  holds, so a restored read's fresh tokens and ms are its own: same shape as PP's, rid-tagged under multi)
         if (o.serve) std::printf("RESUME %s%zu\n", tag.c_str(), reuse);
         const strata::core::VramMark vram0 = strata::core::vram_mark(vram_devs());   // (the line at the read's end)
+        size_t read_to = prompt.size();   // (where a cancelled read stopped)
         t0 = std::chrono::steady_clock::now();
         gap_mark = t0;   // (SAGUARO_GLM_PREFILL_GAPS: the first gap's stage starts with the read, not the restore)
         gap_count = gap_tok = 0;   // (every read starts its own gap figures: one without gaps must not inherit them)
@@ -2685,6 +2691,7 @@ static int glm_pack_generate(const Options& o) {
                     ckpt_drop_past(0);
                 }
                 finish = "cancel";
+                read_to = at;
                 i_first = prompt.size();
             } else if (!err.empty()) {
                 snap_tokens.clear();
@@ -2693,13 +2700,17 @@ static int glm_pack_generate(const Options& o) {
                 return 1;
             }
         }
-        const int rc = prep_tail(prompt, i_first, reuse, finish, t0, snap_at);
+        const int rc = prep_tail(prompt, i_first, reuse, finish, t0, snap_at, &read_to);
         {   // one line a prompt: the tokens read, the time, and the free VRAM before and after (issues #648, #438)
             const std::string vt = strata::core::vram_mark_text(vram0, strata::core::vram_mark(vram_devs()));
+            const bool cancelled = finish != nullptr && std::strcmp(finish, "cancel") == 0;
             if (!vt.empty())
-                std::fprintf(stderr, "glm vram: prompt %zu tokens read in %.1f s; %s\n",
-                             prompt.size() > reuse ? prompt.size() - reuse : (size_t) 0,
-                             std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(), vt.c_str());
+                std::fprintf(stderr, "glm vram: prompt %zu tokens read in %.1f s%s; %s\n",
+                             read_to > reuse ? read_to - reuse : (size_t) 0,
+                             std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(),
+                             cancelled ? (" (cancelled at token " + std::to_string(read_to) + " of " +
+                                          std::to_string(prompt.size()) + ")").c_str() : "",
+                             vt.c_str());
         }
         return rc;
     };
