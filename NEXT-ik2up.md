@@ -94,3 +94,11 @@ Card runs only through /data/llm/bench/night-queue/queue.txt (IK2_NO_CLAIM=1, ca
   par_check quant at 32K: not taken (two slots' KV 1.9 GiB) - r6 tries ctx 16384.
 - 2 cards (device fix): t4_check PASS - Paris, repeatable, saguaro; read 2073 tok 613 tok/s; decode 50.4 tok/s (13 tok).
   KL 2 cards (CLI, forced): new tc 42.4 tok/s, new all-scalar 37.4 tok/s.
+
+## mortar (RX 9070 XT) - in progress 15:20 PST
+- Link mangonel->mortar ~4 MB/s total (68 ms RTT, shared with HF): quant copying (8 parallel dd|ssh streams, ~1 h),
+  UD + mmproj from HF (curl, resumable) into /opt/llm/models/ on mortar.
+- Engine rebuilt there (HIP, build-hip-ik2, STRATA_GGML_DIR=/storage/llm/saguaro/src/third_party/llama.cpp so it
+  never clones llama.cpp over that link). Runner: /storage/llm/saguaro/amd.sh LABEL MODEL CHUNK [K=V...]
+  (serve_check with vision-glm from /opt/llm/saguaro/build-vision, then bench 300 tokens at ~0 / 8K + 8K read).
+  Plan: quant resident (chunk 1024, SAGUARO_IK2_RESERVE_MB=1024); UD offload on HIP (SAGUARO_IK2_OFF=1, WARM).
