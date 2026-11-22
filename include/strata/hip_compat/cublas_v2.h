@@ -39,6 +39,7 @@
 #define cublasSgemm hipblasSgemm
 #define cublasSgemv hipblasSgemv
 #define cublasSgemmStridedBatched hipblasSgemmStridedBatched
+#define cublasGemmStridedBatchedEx hipblasGemmStridedBatchedEx
 #define cublasHandle_t hipblasHandle_t
 #define cublasSetMathMode hipblasSetMathMode
 #define cublasSetStream hipblasSetStream

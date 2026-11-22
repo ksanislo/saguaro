@@ -120,7 +120,20 @@ a smaller prompt chunk that leaves more VRAM to the experts (32.5).
   memory at the same time. Under tensor parallel a prompt read normally streams the experts that are not in VRAM to
   all four cards at once; with the switch they run on the CPU instead. It costs prompt-read speed (not yet measured;
   estimated up to a quarter), nothing while writing. Add it to the config's `env` only if your PC needs it.
-- AMD: not run on an AMD GPU yet, so the setup does not offer it there ([AMD_SAGUARO.md](AMD_SAGUARO.md#what-runs-on-amd)).
+- **Switches of upstream's tensor-parallel token windows (#1122, all on; `0` turns one off, the same tokens either
+  way):** `HY4_PREFETCH` (the next kernels' dense weights read into each GPU's cache while its partial is out for the
+  sum; measured per GPU at the start, a number forces the bits), `HY4_PF_BLOCKS`, `HY4_PF_ATTN_EARLY`, `HY4_PF_SMALL`,
+  `HY4_PULL_BLOCKS` / `HY4_PUB_BLOCKS` (3), `HY4_TP_SUM_STREAM`, `HY4_Q8_FUSE` (kernels write the next GEMV's int8
+  rows; our `HY4_FUSE` applies only with it off), `HY4_FFN_FORK`, `HY4_EG_EARLY`, `HY4_GEMV56`, `HY4_GEMV_AHEAD`,
+  `HY4_GROUP_PAR2`, `HY4_RMS_AHEAD`, `SAGUARO_IQ_MV_REG` (+ `_MIN`, `_THREADS`), `SAGUARO_IQ_MV56`,
+  `SAGUARO_IQ_NE56`, `SAGUARO_IQ_DN_RW4`, `SAGUARO_IQ_Q8_WIDE`; off: `HY4_MTP_Q4K`, `HY4_LOGIT_HASH` (debugging).
+- **VRAM reserve held for the whole run (#1026):** with `--reserve-gb` given, what a start and its requests allocate
+  after the plan is measured and kept free beside the reserve from the next start on (the pack's `vram-late.txt`);
+  `SAGUARO_HY4_LATE_MB=<MiB>` fixes the figure (`0`: the reserve alone), `SAGUARO_HY4_LATE_FILE` names another file.
+- **Hand-offs between GPUs (layer split, #1100):** a peer copy only where it is offered, the IOMMU does not translate
+  and a test copy arrives right, else through pinned host memory (`HY4_HOST_STAGE=1` always, `HY4_STAGE_MB` its
+  pieces). Tensor parallel turns no peer access on.
+- AMD: compiles for HIP (gfx1201 checked) but has not run on an AMD GPU yet, so the setup does not offer it there ([AMD_SAGUARO.md](AMD_SAGUARO.md#what-runs-on-amd)).
   Windows and Mac: not built.
 
 ## Running it by hand or under a proxy
