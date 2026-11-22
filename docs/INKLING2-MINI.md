@@ -83,7 +83,7 @@ From the web app: **Models › Download a model › Inkling 2 Mini**. The row sa
 start; the download is the same setup, run for you.
 
 Files you already have go in with `./setup.sh --model inkling-2-mini --model-dir /path/to/folder` (the GGUF and
-`mmproj-BF16.gguf` under their published names) or `./saguaro.sh --import-model FOLDER`. A folder with another
+`mmproj-Inkling-2-Mini-BF16.gguf` - or unsloth's `mmproj-BF16.gguf`, the same file - under their published names) or `./saguaro.sh --import-model FOLDER`. A folder with another
 Inkling-2-Mini GGUF and no published one (a quant of your own) is taken as it is, not sha256-checked, and its experts'
 size is read from the file for the fit (e.g. the one-T4 quant on a 16 GB AMD card).
 

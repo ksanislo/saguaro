@@ -100,8 +100,12 @@ class Manifest(unittest.TestCase):
         self.assertEqual(url, f"https://huggingface.co/unsloth/Inkling-2-Mini-GGUF/resolve/{m['revision']}/"
                               "Inkling-2-Mini-UD-Q4_K_XL.gguf")
         v = maya.ik2_vision_model()
-        self.assertEqual(v["files"], {"mmproj-BF16.gguf": 641805760})
-        self.assertTrue(maya.file_url(v, "mmproj-BF16.gguf").endswith(f"/{v['revision']}/mmproj-BF16.gguf"))
+        self.assertEqual(v["files"], {"mmproj-Inkling-2-Mini-BF16.gguf": 641805760})
+        self.assertEqual((v["repo"], v["revision"], v["folder"]),
+                         ("peasantsmith/Inkling-2-Mini-Maya-GGUF", "7ab64bac7090c9f77df551ac0fac98119494a2a5", "vision"))
+        self.assertEqual(maya.file_url(v, "mmproj-Inkling-2-Mini-BF16.gguf"),
+                         "https://huggingface.co/peasantsmith/Inkling-2-Mini-Maya-GGUF/resolve/"
+                         "7ab64bac7090c9f77df551ac0fac98119494a2a5/vision/mmproj-Inkling-2-Mini-BF16.gguf")
 
     def test_drafter_pinned(self):
         m = maya.ik2_drafter_model()
@@ -114,7 +118,7 @@ class Manifest(unittest.TestCase):
         cat = maya.import_catalog(Path("/models"))
         rels = {c["rel"]: c for c in cat}
         self.assertEqual(rels["Inkling-2-Mini/Inkling-2-Mini-UD-Q4_K_XL.gguf"]["size"], 17629759456)
-        self.assertIn("Inkling-2-Mini/mmproj-BF16.gguf", rels)
+        self.assertIn("Inkling-2-Mini/mmproj-Inkling-2-Mini-BF16.gguf", rels)
 
 
 class Fit(unittest.TestCase):
@@ -525,9 +529,51 @@ class Steps(unittest.TestCase):
             self.addCleanup(p.stop)
         with patch.object(maya, "vision_encoder_ready", lambda *a: True):
             v = maya.ik2_vision_step(va(), {}, {}, d, d)
-        self.assertEqual(v, {"exe": str(maya.VEXE), "mmproj": str(d / "mmproj-BF16.gguf"), "gpu": True})
+        self.assertEqual(v, {"exe": str(maya.VEXE), "mmproj": str(d / "mmproj-Inkling-2-Mini-BF16.gguf"), "gpu": True})
         with patch.object(maya, "vision_encoder_ready", lambda *a: False):
             self.assertIsNone(maya.ik2_vision_step(va(), {}, {}, d, d))
+
+    def test_vision_fresh_downloads_from_the_manifest_repo(self):
+        """Nothing on the disk: the download is the manifest's repo, its pinned revision, the vision/ folder."""
+        d, gguf = self.files()
+        va = lambda **kw: args(**dict(dict(rebuild=False, download_model=False, yes=False), **kw))   # noqa: E731
+        seen = []
+
+        def offer(a, what, dd, files, m):
+            seen.append((m["repo"], m["revision"], m["folder"], [f.name for f in files]))
+            files[0].write_bytes(b"x")
+            return True
+        with patch.object(maya, "offer_download", offer), patch.object(maya, "sha256_checked", lambda *a: True), \
+                patch.object(maya, "vision_encoder_ready", lambda *a: True):
+            v = maya.ik2_vision_step(va(), {}, {}, d, d)
+        self.assertEqual(seen, [("peasantsmith/Inkling-2-Mini-Maya-GGUF", "7ab64bac7090c9f77df551ac0fac98119494a2a5",
+                                 "vision", ["mmproj-Inkling-2-Mini-BF16.gguf"])])
+        self.assertEqual(v["mmproj"], str(d / "mmproj-Inkling-2-Mini-BF16.gguf"))
+
+    def test_vision_old_unsloth_name_not_downloaded_again(self):
+        """unsloth's mmproj-BF16.gguf already here (same size and sha256): no download, the config names it; a copy of
+        another sha256 is not taken."""
+        d, gguf = self.files()
+        va = lambda **kw: args(**dict(dict(rebuild=False, download_model=False, yes=False), **kw))   # noqa: E731
+        old = d / "mmproj-BF16.gguf"
+        with open(old, "wb") as fh:
+            fh.truncate(641805760)                     # (a sparse file of the published size)
+        calls = []
+
+        def offer(a, what, dd, files, m):
+            calls.append([f.name for f in files])
+            return False
+        for good in (True, False):
+            calls.clear()
+            with patch.object(maya, "offer_download", offer), patch.object(maya, "sha256_checked", lambda p, w: good), \
+                    patch.object(maya, "vision_encoder_ready", lambda *a: True):
+                v = maya.ik2_vision_step(va(), {}, {}, d, d)
+            if good:
+                self.assertEqual(calls, [])
+                self.assertEqual(v["mmproj"], str(old))
+            else:
+                self.assertEqual(calls, [["mmproj-Inkling-2-Mini-BF16.gguf"]])
+                self.assertIsNone(v)
 
     def test_model_step_checks_the_sha256(self):
         d, gguf = self.files()

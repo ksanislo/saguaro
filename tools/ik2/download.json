@@ -15,16 +15,19 @@
  },
  "gguf": "Inkling-2-Mini-UD-Q4_K_XL.gguf",
  "vision": {
-  "_": "The pictures: unsloth's mmproj of the model's vision tower (llama.cpp's inkling2v projector, BF16), from the same repo and revision, read by the image encoder vision-glm (tools/vision/inkling2v_patch.py) when a picture arrives; not with --no-vision.",
-  "repo": "unsloth/Inkling-2-Mini-GGUF",
-  "revision": "ae9327c5fbc7333116ba32eee78bb5d2bbefae4f",
-  "folder": "",
+  "_": "The pictures: the model's vision tower (llama.cpp's inkling2v projector, BF16) from Maya's own repo - unsloth's conversion byte for byte (their mmproj-BF16.gguf, the same size and sha256; a copy of it already on the disk is used as it is), read by the image encoder vision-glm (tools/vision/inkling2v_patch.py) when a picture arrives; not with --no-vision.",
+  "repo": "peasantsmith/Inkling-2-Mini-Maya-GGUF",
+  "revision": "7ab64bac7090c9f77df551ac0fac98119494a2a5",
+  "folder": "vision",
   "files": {
-   "mmproj-BF16.gguf": [
+   "mmproj-Inkling-2-Mini-BF16.gguf": [
     641805760,
     "2c165c78790e78a3f45a2d1e9e931083e52ee69d45ff2a0dc9c281fdf1a666e7"
    ]
-  }
+  },
+  "legacy_names": [
+   "mmproj-BF16.gguf"
+  ]
  },
  "drafter": {
   "_": "Drafting: thinkingmachines' own drafter of Inkling-2-Mini (mtp.safetensors, a DSpark-style draft model, BF16; Apache 2.0) from the model's repo at a pinned revision, read by saguaro-ik2 --draft; not with --drafting off. With --drafting auto the engine measures once on the PC whether it (or the prompt lookup) makes answers faster, and drafting never changes the answers.",
@@ -40,7 +43,7 @@
   }
  },
  "strata": {
-  "_": "Strata's .strata packs of Inkling-2-Mini (strata-engine/Inkling-2-Mini-Strata, Apache 2.0), read by saguaro-ik2 as they are (src/strata_fmt: every weight exactly as Strata's own decode gives it). Each pack folder holds the pack, the repo's tokenizer.json (the GGUFs' tokenizer, table for table) and config.json; pictures and drafting take UD-Q4_K_XL's mmproj and thinkingmachines' drafter as above. experts_gib: the experts as the engine holds them resident (each expert packed); kl: measured here against SQ-20 (the original weights), 2000 tokens of text (tools/ik2/kl.py, RX 9070 XT); kl_published: Strata's own (their test prompts).",
+  "_": "Strata's .strata packs of Inkling-2-Mini (strata-engine/Inkling-2-Mini-Strata, Apache 2.0), read by saguaro-ik2 as they are (src/strata_fmt: every weight exactly as Strata's own decode gives it). Each pack folder holds the pack, the repo's tokenizer.json (the GGUFs' tokenizer, table for table) and config.json; pictures and drafting take the vision tower and thinkingmachines' drafter as above. experts_gib: the experts as the engine holds them resident (each expert packed); kl: measured here against SQ-20 (the original weights), 2000 tokens of text (tools/ik2/kl.py, RX 9070 XT); kl_published: Strata's own (their test prompts).",
   "repo": "strata-engine/Inkling-2-Mini-Strata",
   "revision": "04996a1e2c45009b6a04f2af126cb6bdb2ba3587",
   "folder": "",
