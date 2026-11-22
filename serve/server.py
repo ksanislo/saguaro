@@ -86,6 +86,15 @@ HY4_ROUTE_FILE = ROOT / "data" / "hy4-prompt-route.txt"
 HY4_DRAFT_FILE = ROOT / "data" / "hy4-drafting.txt"
 HY4_MEASURE_DOCS = ("docs/SETTINGS.md", "README.md")      # (the text its first start measures them on)
 HY4_MEASURE_CHARS = 200_000
+# saguaro-ik2's --drafting auto: this PC's choice (SAGUARO_IK2_DRAFT_FILE) and the requests it is timed on
+IK2_DRAFT_FILE = ROOT / "data" / "ik2-drafting.txt"
+IK2_DRAFT_TOOL = {"type": "function", "function": {
+    "name": "get_weather", "description": "The current weather in a city.",
+    "parameters": {"type": "object", "properties": {"city": {"type": "string", "description": "The city's name."}},
+                   "required": ["city"]}}}
+IK2_DRAFT_QS = ("Explain in a few paragraphs how a refrigerator moves heat out of its inside.",
+                "Write a Python function that returns the n-th Fibonacci number iteratively, with a docstring.",
+                "What is the weather in Paris and in Rome right now? Use the tool for each city.")
 
 
 def hy4_hot_file(cfg: dict) -> Path:
@@ -1205,8 +1214,9 @@ class StrataEngine:
                 pass
 
     def _ik2_done(self, stats):
-        """saguaro-ik2's "decode stats:" with the DONE after it: the answer's hit fields, and the Monitor's reading."""
-        if stats:
+        """saguaro-ik2's "decode stats:" with the DONE after it: the answer's hit fields, and the Monitor's reading.  An
+        engine that says its own path (INFO path=) prints STAT and DONE's hit fields itself: nothing is made up here."""
+        if stats and not self.info.get("path"):
             if stats["lookups"]:
                 self.last.update(stats)
             st = ik2_stat(self.info, self.last)
@@ -1473,7 +1483,7 @@ class StrataEngine:
             hist = self.stat_history = collections.deque(maxlen=120)
         hist.append(st)
 
-    IK2_GEN_KEYS = ("temperature", "top_p", "top_k", "seed", "fast")   # all saguaro-ik2 reads on a GEN line
+    IK2_GEN_KEYS = ("temperature", "top_p", "top_k", "seed", "spec")   # all saguaro-ik2 reads on a GEN line
 
     def gen_keys(self, sampling: dict) -> str:
         """sampling_keys for this engine: saguaro-ik2 gets only the keys it reads (no budget, penalties, Turbo, gt=)."""
@@ -1848,7 +1858,7 @@ class StrataEngine:
         self.progress = None
         self.prefill_tok_s_mean = None
         self._tls.own_pp = None
-        keys = self.sampling_keys(sampling or {}) + f" rid={rid}"
+        keys = self.gen_keys(sampling or {}) + f" rid={rid}"
         head = f"GENI {int(max_new)}{keys} {embeddings}" if embeddings else f"GEN {int(max_new)}{keys}"
         done = False
         try:
@@ -2301,6 +2311,35 @@ def gpu_free_bytes(gpu: int) -> int | None:
         return None
 
 
+def amd_gpu_free_bytes(gpu: int, sysfs: str | None = None, meminfo: str = "/proc/meminfo") -> int | None:
+    """The free memory of AMD GPU `gpu` (HIP's numbering, Linux) now: its VRAM's, as the amdgpu driver says
+    (mem_info_vram_total / _used); on an APU whose memory is the RAM (a carve-out under 8 GiB beside a larger GTT)
+    what MemAvailable leaves beyond the max(8 GiB, 10% of the RAM) the engines keep free.  None when it does not read."""
+    from serve import telemetry   # (its KFD -> render node numbering, as the Monitor reads the cards)
+
+    def num(path):
+        try:
+            with open(path, encoding="utf-8") as f:
+                return int(f.read().strip())
+        except (OSError, ValueError):
+            return None
+    dev = telemetry.amd_device_dir(gpu, sysfs)
+    if not dev:
+        return None
+    total, used = num(os.path.join(dev, "mem_info_vram_total")), num(os.path.join(dev, "mem_info_vram_used"))
+    gtt = num(os.path.join(dev, "mem_info_gtt_total"))
+    if total is not None and total < (8 << 30) and gtt is not None and gtt > total:
+        try:
+            with open(meminfo, encoding="utf-8") as f:
+                kb = {k: int(v.split()[0]) for k, v in (line.split(":", 1) for line in f if ":" in line)
+                      if k in ("MemTotal", "MemAvailable")}
+            margin = max(8 << 30, kb["MemTotal"] * 1024 // 10)
+            return max(0, kb["MemAvailable"] * 1024 - margin)
+        except (OSError, ValueError, KeyError):
+            return None
+    return total - used if total is not None and used is not None else None
+
+
 def vision_footprint(vcfg: dict, env: dict, cache_file: Path, gpu: int) -> tuple[int, int] | None:
     """(image token cap, bytes) for the on-demand vision encoder on THIS machine's first GPU: measured once by
     `vision-glm --measure` (before the model loads, so the GPU is otherwise idle) and cached per encoder file, cap
@@ -2371,6 +2410,41 @@ def engine_args(cfg: dict) -> list[str]:
     return args
 
 
+def ik2_draft_ids(cfg: dict) -> Path | None:
+    """The requests saguaro-ik2 times its --drafting auto on (SAGUARO_IK2_DRAFT_IDS): IK2_DRAFT_QS in the model's own
+    chat template with thinking off (the last with IK2_DRAFT_TOOL offered), a line of token ids each, written once
+    into the data folder.  None: not written - the engine then says it did not measure."""
+    tdir = Path(cfg.get("tokenizer") or "")
+    vocab, tpl = tdir / "vocab.json", tdir / "chat_template.jinja"
+    if not cfg.get("tokenizer") or not vocab.is_file() or not tpl.is_file():
+        return None
+    try:
+        tag = hashlib.md5(vocab.read_bytes() + tpl.read_bytes() + repr(IK2_DRAFT_QS).encode()).hexdigest()[:10]
+    except OSError:
+        return None
+    path = ROOT / "data" / f"ik2-draft-ids-{tag}.txt"
+    if path.is_file():
+        return path
+    try:
+        import strata_tokenizer as ST
+        from serve.frontend import ChatTemplate
+        tok, chat = ST.Tokenizer.from_dir(tdir), ChatTemplate(tpl)
+        lines = []
+        for i, q in enumerate(IK2_DRAFT_QS):
+            tools = [IK2_DRAFT_TOOL] if i == len(IK2_DRAFT_QS) - 1 else None
+            text = chat.render([{"role": "user", "content": q}], tools=tools, enable_thinking=False,
+                               reasoning_effort="none")
+            lines.append(",".join(map(str, tok.encode(text, parse_special=True))))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f"{path.stem}.{os.getpid()}.tmp")
+        tmp.write_text("# saguaro: requests in the model's chat template, a line each - the answers saguaro-ik2's "
+                       "--drafting auto times at its first start on a PC\n" + "\n".join(lines) + "\n", encoding="utf-8")
+        os.replace(tmp, path)
+        return path
+    except Exception:  # noqa: BLE001 - none: the engine drafts without measuring
+        return None
+
+
 def child_env(cfg: dict) -> dict:
     """The engine's environment: the CUDA libraries setup installed (pip's nvidia packages, or the toolkit that
     compiled it) first on the library search path."""
@@ -2395,6 +2469,14 @@ def child_env(cfg: dict) -> dict:
             ids = hy4_measure_ids(cfg)
             if ids is not None:
                 env["HY4_MEASURE_IDS"] = str(ids)
+    # Inkling 2 (--drafting auto): which of no drafting, the prompt lookup and the drafter decodes fastest - measured
+    # once on this PC at the first start, remembered in the data folder (off on Volta / Turing: the engine says so)
+    if models.family(cfg) == "ik2" and "--drafting" in (cfg.get("args") or []):
+        env.setdefault("SAGUARO_IK2_DRAFT_FILE", str(IK2_DRAFT_FILE))
+        if "SAGUARO_IK2_DRAFT_IDS" not in env:
+            ids = ik2_draft_ids(cfg)
+            if ids is not None:
+                env["SAGUARO_IK2_DRAFT_IDS"] = str(ids)
     dirs = [d for d in cfg.get("lib_dirs") or [] if Path(d).is_dir()]
     if dirs:
         var = "PATH" if os.name == "nt" else "LD_LIBRARY_PATH"
@@ -8298,13 +8380,15 @@ def main() -> int:
                 vcfg = dict(vcfg, max_tokens=fp[0])
                 if models.family(cfg) != "ik2":   # (saguaro-ik2 lends no memory: the encoder takes what is free)
                     engine_env = dict(env, SAGUARO_GLM_VISION_LEND_MB=str((fp[1] >> 20) + 1))
+                else:   # (... and its drafting leaves the encoder's room on the GPU free)
+                    engine_env = dict(env, SAGUARO_IK2_VISION_GIB=f"{fp[1] / 2**30:.3f}")
                 print(f"[saguaro] images: the vision encoder needs {fp[1] / 2**30:.2f} GB on this GPU at up to {fp[0]} "
                       "image tokens", flush=True)
         if vcfg and not on_demand:
             print("loading the vision encoder ...", flush=True)
             vision = Vision(vcfg, log=vlog, env=venv)
         print("loading the model (the first start takes a minute or two) ...", flush=True)
-        if len(gpu_list(cfg)) > 1:
+        if len(gpu_list(cfg)) > 1 and models.family(cfg) != "ik2":
             print(f"[saguaro] layer split across GPUs {gpu_list(cfg)} ({cfg.get('layer_split') or 'auto'})", flush=True)
         t0 = time.time()
         engine = StrataEngine(cfg["exe"], engine_args(cfg), cwd=cfg.get("cwd"), log=cfg.get("log"), env=engine_env)
@@ -8351,10 +8435,11 @@ def main() -> int:
                 # arrives - on the GPU when its free memory then holds what the encoder measured, else on the CPU -
                 # and ends once the request's pictures are read
                 need, cards = fp[1], gpu_list(cfg) or [0]
+                free_of = amd_gpu_free_bytes if cfg.get("backend") == "hip" else gpu_free_bytes   # (AMD: sysfs)
                 vision = Vision(vcfg, log=vlog, env=venv, start=False)
-                vision.room = lambda: ik2_vision_gpu(cards, need, gpu_free_bytes)
+                vision.room = lambda: ik2_vision_gpu(cards, need, free_of)
                 vision.cpu_threads = max(1, (os.cpu_count() or 2) // 2)
-                free = {g: (gpu_free_bytes(g) or 0) for g in cards}
+                free = {g: (free_of(g) or 0) for g in cards}
                 print(f"[saguaro] images: the vision encoder starts when a picture arrives - on "
                       f"{'the GPU of ' + ', '.join(map(str, cards)) + ' with the most free memory' if len(cards) > 1 else f'GPU {cards[0]}'}"
                       f" while {need / 2**30:.2f} GB of it is free ("

@@ -2285,6 +2285,44 @@ class VisionRoomOnDemand(unittest.TestCase):
         with mock.patch("serve.server.subprocess.run", return_value=mock.Mock(returncode=9, stdout="")):
             self.assertIsNone(gpu_free_bytes(0))
 
+    def test_amd_free_memory(self):
+        """An AMD GPU's free memory from the amdgpu driver's files (HIP's numbering through KFD); an APU's (a small
+        carve-out beside a larger GTT) is what MemAvailable leaves beyond the max(8 GiB, 10%) kept free."""
+        import tempfile
+        from serve.server import amd_gpu_free_bytes
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            def put(path, text):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(text, encoding="utf-8")
+            nodes = root / "class/kfd/kfd/topology/nodes"
+            put(nodes / "0/properties", "cpu_cores_count 16\nsimd_count 0\ngfx_target_version 0\n")
+            put(nodes / "1/properties", "simd_count 192\ngfx_target_version 110000\ndrm_render_minor 128\n")
+            dev = root / "class/drm/renderD128/device"
+            put(dev / "mem_info_vram_total", str(24 << 30))
+            put(dev / "mem_info_vram_used", str(5 << 30))
+            put(dev / "mem_info_gtt_total", str(16 << 30))
+            meminfo = root / "meminfo"
+            put(meminfo, "MemTotal:       196608000 kB\nMemAvailable:   180000000 kB\n")
+            self.assertEqual(amd_gpu_free_bytes(0, str(root), str(meminfo)), 19 << 30)
+            self.assertIsNone(amd_gpu_free_bytes(1, str(root), str(meminfo)))
+            put(dev / "mem_info_vram_total", str(512 << 20))
+            put(dev / "mem_info_vram_used", str(100 << 20))
+            put(dev / "mem_info_gtt_total", str(180 << 30))
+            self.assertEqual(amd_gpu_free_bytes(0, str(root), str(meminfo)),
+                             180000000 * 1024 - 196608000 * 1024 // 10)
+
+    def test_ik2_drafting_files(self):
+        from unittest import mock
+        from serve.server import child_env, IK2_DRAFT_FILE
+        cfg = {"exe": "saguaro-ik2", "args": ["--model", "/m/Inkling-2-Mini-UD-Q4_K_XL.gguf", "--drafting", "auto"]}
+        with mock.patch("serve.server.models.family", return_value="ik2"):
+            env = child_env(cfg)
+            self.assertEqual(env["SAGUARO_IK2_DRAFT_FILE"], str(IK2_DRAFT_FILE))
+            self.assertNotIn("SAGUARO_IK2_DRAFT_IDS", env)          # (no tokenizer: the engine says it did not measure)
+            self.assertNotIn("SAGUARO_IK2_DRAFT_FILE", child_env(dict(cfg, args=cfg["args"][:2])))
+
 
 class LifecycleEngine(MockEngine):
     """The mock engine with StrataEngine's lifecycle: alive / close (QUIT) / restart, counted."""
@@ -2994,7 +3032,7 @@ class EngineEndTests(unittest.TestCase):
 
 
 class Inkling2Lines(unittest.TestCase):
-    """saguaro-ik2 reads temperature, top_p, top_k, seed and fast on a GEN line, and no PAUSE / WRAP: nothing else goes."""
+    """saguaro-ik2 reads temperature, top_p, top_k, seed and spec on a GEN line, and no PAUSE / WRAP: nothing else goes."""
     EVERY = {"temperature": 0.7, "top_p": 0.9, "top_k": 20, "min_p": 0.05, "seed": 7, "repetition_penalty": 1.1,
              "presence_penalty": 0.5, "_think_budget": 512, "_think_end": 9, "_think_soft": 400, "_think_stops": ",1,2",
              "turbo": {"drop": 2, "skip": "ram"}, "_gen_tail": 3, "logprobs": True, "top_logprobs": 3,
@@ -3017,8 +3055,8 @@ class Inkling2Lines(unittest.TestCase):
         return eng
 
     def test_only_its_own_keys(self):
-        self.assertEqual(self.engine("ik2").gen_keys(self.EVERY), " temperature=0.7 top_p=0.9 top_k=20 seed=7")
-        self.assertEqual(self.engine("ik2").gen_keys({**self.EVERY, "temperature": 0}), " temperature=0")
+        self.assertEqual(self.engine("ik2").gen_keys(self.EVERY), " temperature=0.7 top_p=0.9 top_k=20 seed=7 spec=4")
+        self.assertEqual(self.engine("ik2").gen_keys({**self.EVERY, "temperature": 0}), " temperature=0 spec=4")
         self.assertEqual(self.engine("ik2").gen_keys({}), "")
 
     def test_its_own_top_k(self):
@@ -3103,6 +3141,20 @@ class Inkling2Lines(unittest.TestCase):
         eng, _ = self.lines("ik2", self.STATS)
         self.assertEqual((eng.stat["vram_hit"], eng.stat["ram_fetch"]), (0.9115, 34.0))
         self.assertFalse(hasattr(self.lines("mm3", self.STATS)[0], "stat"))
+
+    def test_an_engine_that_says_its_path_writes_its_own_figures(self):
+        # (v1.1.74's engine: STAT with its tiers while it writes, DONE's hit fields; nothing made up from its other lines)
+        eng = self.lines("ik2", [])[0]
+        eng.info.update(path="offload", experts=3072)
+        for line in ["PP 3 3 12 250.0 0\n", "T 7\n", "T 8\n",
+                     "STAT tok_s=30.0 ms_tok=33.33 active=1 vram_used=2400 ram_used=672 vram_gb=11.50 ram_gb=3.20 "
+                     "vram_hit=0.9500 ram_fetch=4.00 cpu=1.00 disk=0 promo=0 kv_used=5 kv_cap=32768 kv_gb=1.31\n",
+                     "decode stats: 2 tokens, 700 expert hits, 68 misses (0.02 GiB copied)\n",
+                     "DONE 2 3 12.0 40.0 stop 0 0 0 360 384\n"]:
+            eng.lines.put(line)
+        self.assertEqual([t for t in eng.generate([1, 2, 3], 8, {}, threading.Event()) if t is not None], [7, 8])
+        self.assertEqual((eng.last["hits"], eng.last["lookups"]), (360, 384))
+        self.assertEqual((eng.stat["vram_hit"], eng.stat["cpu"], eng.stat["vram_used"]), (0.95, 1.0, 2400))
 
     def test_other_engines_lines_as_they_were(self):
         for kind in (None, "glm-fast", "ds4", "mm3"):
