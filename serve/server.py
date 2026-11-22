@@ -4114,6 +4114,11 @@ class Service:
         kv_room = sum(int(r.get("kv_room") or 0) for r in merged)
         kv_ram_room = max((int(r.get("kv_ram_room") or 0) for r in rows), default=0)
         parked = max((int(r.get("parked") or 0) for r in rows), default=0)
+        # PLAN-qfn-park-budget (QFN): how many conversations are parked and what they may hold now; absent elsewhere
+        parked_n = max((int(r.get("parked_n") or 0) for r in rows), default=0) \
+            if any("parked_n" in r for r in rows) else None
+        park_budget = max((int(r.get("park_budget") or 0) for r in rows), default=0) \
+            if any("park_budget" in r for r in rows) else None
         max_ctx = int(eng.max_context or 0)
         slots = max(int(getattr(eng, "multi", 0) or 0), int(getattr(eng, "batch", 0) or 0), 1)
         pos_cap = max_ctx * slots
@@ -4140,8 +4145,12 @@ class Service:
                              "kv_room": kv_room, "kv_ram_room": kv_ram_room},
                 "used": {"tokens": used, "vram_tokens": vram_pos, "ram_tokens": ram_pos,
                          **({"vram_bytes": int(vram_pos * kbt), "ram_bytes": int(ram_pos * kbt)} if kbt else {})},
-                "parked": {"bytes": parked, **({"tokens": parked_tok} if kbt and parked else {})},
-                "free": max(0, cap - used - parked_tok)}
+                "parked": {"bytes": parked, **({"tokens": parked_tok} if kbt and parked else {}),
+                           **({"conversations": parked_n} if parked_n is not None else {}),
+                           **({"budget_bytes": park_budget} if park_budget is not None else {})},
+                "free": max(0, cap - used - parked_tok),
+                # (QFN turn saves: each place's last saved position and time - main, slotN)
+                **({"turn_saves": dict(getattr(eng, "turn_saves", None) or {})} if getattr(eng, "turn_saves", None) else {})}
 
     def metrics(self, all_requests=False) -> dict:
         """GET /metrics: what the Monitor tab shows - the engine's facts, what it is doing, the last requests, and
@@ -5318,12 +5327,15 @@ class Service:
                     also holds the server's own tokens (the call's result or KEEP_NOTE, a steer), which max_new - n
                     does not count: the context's room caps it too (with an unlimited max_new, prepare's room, the
                     engine rejected prompt + max_new + CTX_SLACK > context)."""
+                    nonlocal sampling
                     while True:
                         room = self.engine.max_context - CTX_SLACK - len(seg["prompt"])
                         yield from attempts(seg["prompt"], max(1, min(max_new - n, room)))
                         if seg["next"] is None or cancel.is_set() or self.stopping:
                             return
                         seg["prompt"], seg["next"], seg["ids"] = seg["next"], None, []
+                        # (its prompt holds the server's own turns: the QFN engine keeps no checkpoint inside the reply)
+                        sampling = {**(sampling or {}), "_cont": True}
 
                 def flush():
                     nonlocal sent_call, answered

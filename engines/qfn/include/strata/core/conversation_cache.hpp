@@ -239,8 +239,15 @@ public:
     };
 
     ConversationCache(size_t budget, size_t slots, int64_t min_tokens = 0)
-        : budget_(budget), slots_(slots), min_tokens_(min_tokens) {}
-    bool enabled() const { return budget_ != 0 && slots_ != 0; }
+        : budget_(budget), slots_(slots), on_(budget != 0), min_tokens_(min_tokens) { budget_live_ = budget; }
+    bool enabled() const { return on_ && slots_ != 0; }
+    /// The budget follows what the live K/V leaves of the shared pool (park_policy.hpp).  It may fall to 0 or under
+    /// what is parked: nothing more is admitted then, and the serve loop releases entries (never from here).
+    void set_budget(size_t bytes) { budget_ = bytes; budget_live_ = bytes; }
+    size_t budget() const { return budget_; }
+    /// The budget and the number of parked conversations as they stand, from another thread (the VRAM lines).
+    size_t budget_live() const { return budget_live_.load(); }
+    size_t size_live() const { return size_live_.load(); }
     /// `--conversation-cache-min-tokens`: whether a conversation of this length is worth one of `slots`.  Every
     /// parked conversation costs a whole slot whatever its length, so a client that interleaves short side requests
     /// with one long conversation spends the cache on the side requests and evicts the long one (oldest first) -
@@ -270,7 +277,7 @@ public:
         reuse_ = {};
         ConversationKvReuse candidate{std::move(kv), tokens, tokens, {}, std::move(ids)};
         for (auto& k : stage_kv) candidate.stages.push_back(ConversationKvReuse{std::move(k), tokens, tokens, {}, {}});
-        if (enabled() && candidate.bytes() <= budget_ - bytes_) reuse_ = std::move(candidate);
+        if (enabled() && bytes_ <= budget_ && candidate.bytes() <= budget_ - bytes_) reuse_ = std::move(candidate);
     }
     void limit_reuse(int64_t first_dirty) {
         reuse_.unchanged_tokens = std::min(reuse_.unchanged_tokens, first_dirty);
@@ -298,6 +305,37 @@ public:
         return enabled() && held <= budget_ && incoming <= budget_ - held &&
                entries_.size() < slots_ && bytes() <= budget_ - held - incoming;
     }
+
+    /// One parked entry, for the release policy (park_policy.hpp); the list is least recently active first.
+    struct Info {
+        uint64_t serial = 0;
+        size_t bytes = 0, tokens = 0;
+        double parked_at = 0.0;   // the caller's clock at put()
+        bool on_disk = false;     // put() was told its session file exists (an image read back from the folder)
+        bool keep = false;        // a pinned shared prefix, or the guarded donor: not released
+    };
+    std::vector<Info> list() const {
+        std::vector<Info> out;
+        out.reserve(entries_.size());
+        for (size_t i = 0; i < entries_.size(); ++i)
+            out.push_back({serials_[i], entries_[i]->bytes(), entries_[i]->live.ids.size(), stamps_[i], disk_[i] != 0,
+                           entries_[i]->pinned() || (guarded_ != 0 && serials_[i] == guarded_)});
+        return out;
+    }
+    std::shared_ptr<const SavedConversation> shared_serial(uint64_t serial) const {
+        const size_t i = index_of(serial);
+        return i == SIZE_MAX ? nullptr : entries_[i];
+    }
+    /// Release one entry (the serve loop's park_tick).  False: gone already, or one that is kept.
+    bool drop(uint64_t serial) {
+        const size_t i = index_of(serial);
+        if (i == SIZE_MAX || entries_[i]->pinned() || (guarded_ != 0 && serials_[i] == guarded_)) return false;
+        bytes_ -= entries_[i]->bytes();
+        erase(i);
+        ++released_;
+        return true;
+    }
+    size_t released() const { return released_; }
 
     // plain (SAGUARO_YARN_ELASTIC): a request that stays at plain RoPE takes a YaRN state only where it goes on with
     // that conversation (its live state or deepest checkpoint) or where the checkpoint saves a long read
@@ -424,6 +462,9 @@ public:
         const size_t n = entries_.size();
         entries_.clear();
         serials_.clear();
+        stamps_.clear();
+        disk_.clear();
+        size_live_ = 0;
         bytes_ = 0;
         reuse_ = {};
         return n;
@@ -469,13 +510,17 @@ public:
         return longest;
     }
 
-    bool put(SavedConversation&& image, size_t held = 0) {
+    /// `now`: the caller's clock (Info::parked_at).  `on_disk`: the image came from its session file.
+    bool put(SavedConversation&& image, size_t held = 0, double now = 0.0, bool on_disk = false) {
         const size_t n = image.bytes();
         if (!enabled() || held > budget_ || n > budget_ - held) return false;   // make_room's refusal, first
         drop_superseded(image.live.ids, image.live.imgs, image.checkpoints, image.cvec);
         if (!make_room(n, held)) return false;
         entries_.push_back(std::make_shared<SavedConversation>(std::move(image)));
         serials_.push_back(next_serial_++);
+        stamps_.push_back(now);
+        disk_.push_back(on_disk ? 1 : 0);
+        size_live_ = entries_.size();
         bytes_ += n;
         return true;
     }
@@ -500,8 +545,15 @@ private:
     void erase(size_t index) {
         entries_.erase(entries_.begin() + (std::ptrdiff_t) index);
         serials_.erase(serials_.begin() + (std::ptrdiff_t) index);
+        stamps_.erase(stamps_.begin() + (std::ptrdiff_t) index);
+        disk_.erase(disk_.begin() + (std::ptrdiff_t) index);
+        size_live_ = entries_.size();
     }
-    size_t budget_ = 0, slots_ = 0, evictions_ = 0, superseded_ = 0, borrowed_ = 0;
+    size_t budget_ = 0, slots_ = 0, evictions_ = 0, superseded_ = 0, borrowed_ = 0, released_ = 0;
+    bool on_ = false;   // a budget was given at the start (enabled() does not flip when the shared pool is full)
+    std::atomic<size_t> budget_live_{0}, size_live_{0};   // read by the beat thread (the VRAM lines)
+    std::deque<double> stamps_;             // entries_[i]: when it was parked
+    std::deque<uint8_t> disk_;              // entries_[i]: known to be on disk when it was put
     // (PLAN-context-panel) an atomic: the parked bytes leave this cache's thread only to be read by the beat
     // thread printing the engine's VRAM lines (parked_bytes_live); everything that changes it runs on its own thread
     std::atomic<size_t> bytes_{0};

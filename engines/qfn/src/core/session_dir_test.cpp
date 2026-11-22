@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -80,6 +81,7 @@ SessionDir::Options opts(const fs::path& d, const SessionFileIdentity& id, int s
     o.id = id;
     o.write_delay = std::chrono::milliseconds(0);
     o.min_free_bytes = 0;
+    o.append = false;   // (these scenarios are about the folder, on v1/v2 files; the appending files have their own below)
     if (std::getenv("SESSION_DIR_TEST_LOG")) o.log = [](const std::string& m) { std::fprintf(stderr, "  [dir] %s\n", m.c_str()); };
     for (int k = 0; k < stages; ++k) o.limits.stages.emplace_back();
     return o;
@@ -398,6 +400,120 @@ int main() {
             check(session_files(d2) == 0 && n == 0, "its write left no file");
         }
         fs::remove_all(d2);
+    }
+    {   // appending files (session_log.hpp): a conversation's next save extends its own file
+        const fs::path d3 = fs::temp_directory_path() / ("strata-sessiondir-test-log-" + std::to_string(
+            std::chrono::steady_clock::now().time_since_epoch().count()));
+        fs::create_directories(d3);
+        auto log_files = [&] {
+            size_t n = 0;
+            for (const auto& e : fs::directory_iterator(d3)) n += e.path().extension() == kSessionLogExt;
+            return n;
+        };
+        // big enough for several chunks: a conversation's K/V grows with it, its start unchanged
+        auto grown = [&](const std::vector<int32_t>& ids, uint8_t seed) {
+            SavedConversation c = conv(ids, seed);
+            c.kv[0].k.resize(ids.size() * 64);
+            c.kv[0].k.visit(0, c.kv[0].k.size(), [&](uint8_t* p, size_t n, size_t at) {
+                for (size_t i = 0; i < n; ++i) p[i] = uint8_t((at + i) * 131u >> 5);
+                return true;
+            });
+            return c;
+        };
+        std::vector<std::string> said;
+        std::mutex said_mu;
+        SessionDir::Options lo = opts(d3, id);
+        lo.append = true;
+        lo.log_format.chunk_bytes = 4096;
+        lo.log = [&](const std::string& m) { std::lock_guard<std::mutex> g(said_mu); said.push_back(m); };
+        auto heard = [&](const char* what) {
+            std::lock_guard<std::mutex> g(said_mu);
+            for (const auto& m : said) if (m.find(what) != std::string::npos) return true;
+            return false;
+        };
+        {   // an old-format file in the folder is indexed, read, and replaced by the conversation's next save
+            SessionDir::Options old = opts(d3, id);
+            SessionDir sd(old);
+            sd.open();
+            sd.write(std::make_shared<SavedConversation>(grown(b, 3)));
+            sd.flush();
+            check(session_files(d3) == 1 && log_files() == 0, "a v1 file, as an older engine left it");
+        }
+        {
+            SessionDir sd(lo);
+            sd.open();
+            check(sd.files() == 1, "an old-format file is indexed beside the appending ones");
+            auto bp = b; bp.push_back(5);
+            int64_t t = 0;
+            auto got = sd.fetch(bp, {}, false, 0, t);
+            check(got && got->live.ids == b, "and read back");
+            auto b2 = b; for (int32_t x : tokens(7000, 300)) b2.push_back(x);
+            auto b2i = std::make_shared<SavedConversation>(grown(b2, 3));
+            sd.write(b2i);
+            sd.flush();
+            check(session_files(d3) == 0 && log_files() == 1 && sd.files() == 1, "its next save is an appending file; the old one goes");
+            check(sd.saved(b2i) == SessionDir::Saved::yes, "the image is on disk");
+
+            auto ai = std::make_shared<SavedConversation>(grown(a, 1));
+            sd.write(ai);
+            sd.flush();
+            check(log_files() == 2 && sd.files() == 2, "another conversation gets its own file");
+            const fs::path a_file = [&] {
+                for (const auto& e : fs::directory_iterator(d3)) {
+                    SessionPeek pk; std::string err;
+                    if (e.path().extension() == kSessionLogExt && session_log_peek(e.path().string(), id, pk, err) &&
+                        pk.live.ids == a) return e.path();
+                }
+                return fs::path();
+            }();
+            const auto size1 = fs::file_size(a_file);
+            auto a2i = std::make_shared<SavedConversation>(grown(a2v, 1));
+            sd.write(a2i);
+            sd.flush();
+            check(log_files() == 2 && sd.files() == 2 && fs::exists(a_file), "the same conversation further on extends its file");
+            check(heard("appended 4500 tokens"), "said as an append");
+            check(fs::file_size(a_file) > size1 && fs::file_size(a_file) < size1 * 3 / 2, "by about what is new");
+            check(sd.saved(a2i) == SessionDir::Saved::yes && sd.saved(ai) == SessionDir::Saved::yes,
+                  "both the newer image and the one its file superseded count as saved");
+            check(sd.saved(std::make_shared<SavedConversation>(grown(tokens(90000, 2000), 9))) == SessionDir::Saved::no,
+                  "an image that was never written does not");
+            auto prompt = a2v; prompt.push_back(77);
+            got = sd.fetch(prompt, {}, false, 0, t);
+            const SavedConversation want = grown(a2v, 1);
+            check(got && got->live.ids == a2v && t == (int64_t) a2v.size() && got->kv[0].k == want.kv[0].k &&
+                      !got->kv[0].k.external() && got->checkpoints.size() == 1, "fetch reads the extended file back whole");
+        }
+        {   // a restart finds the appending files; a damaged one is removed like any unreadable file
+            { std::ofstream bad(d3 / "deadbeefdeadbeef.sessionlog"); bad << "not a session log"; }
+            SessionDir sd(lo);
+            sd.open();
+            check(sd.files() == 2 && log_files() == 2, "the folder is indexed again, the damaged file dropped");
+            auto prompt = a2v; prompt.push_back(77);
+            int64_t t = 0;
+            auto got = sd.fetch(prompt, {}, false, 0, t);
+            check(got && got->live.ids == a2v, "and its conversations come back");
+        }
+        {   // RAM is wanted: a queued write starts at once instead of after its delay
+            SessionDir::Options slow = lo;
+            slow.write_delay = std::chrono::milliseconds(600000);
+            SessionDir sd(slow);
+            sd.open();
+            auto ci = std::make_shared<SavedConversation>(grown(tokens(200000, 3000), 7));
+            sd.write(ci);
+            check(sd.saved(ci) == SessionDir::Saved::queued, "a parked image waits out the delay");
+            check(sd.expedite() == 0, "an image the cache still holds is not moved up by the orphans' call");
+            check(sd.expedite(ci.get()) == 1, "moved up by name");
+            for (int i = 0; i < 500 && sd.saved(ci) != SessionDir::Saved::yes; ++i)
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            check(sd.saved(ci) == SessionDir::Saved::yes && log_files() == 3, "it is on disk without the delay");
+            auto di = std::make_shared<SavedConversation>(grown(tokens(300000, 3000), 8));
+            sd.write(di);
+            di.reset();   // the cache let go of it: only the write queue holds it
+            check(sd.expedite() == 1, "an image only the queue holds is moved up");
+            for (int i = 0; i < 500 && sd.files() != 4; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            check(sd.files() == 4 && log_files() == 4, "and written");
+        }
+        fs::remove_all(d3);
     }
     fs::remove_all(dir);
     std::printf("session_dir_test: %d checks passed\n", checks);
