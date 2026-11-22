@@ -723,9 +723,10 @@ HY4_PACK_FILES = ("hy4.txt", "tensors.txt", "engram.bin", "tokenizer/vocab.json"
 HY4_QUANTS = {k: Q.full_name("hy4", k) for f, k, _, _ in Q.QUANTS if f == "hy4"}   # "maya-s": "Hy4-Flash-Maya-S" ...
 HY4_DEFAULT_QUANT = "maya-s"                       # (the size measured on 4x T4)
 HY4_MODEL_NAME = "hy4-flash"
-# Inkling 2 Mini (thinkingmachines' Inkling-2-Mini, 26B, a looped MoE) on its own engine, build/saguaro-ik2: unsloth's
-# UD-Q4_K_XL GGUF read in place (tools/ik2/download.json) with the model's own chat template; one or two NVIDIA cards
-# from Turing on, Linux - the model for a PC with one or two 16 GB cards (ik2_fit.py)
+# Inkling 2 Mini (thinkingmachines' Inkling-2-Mini, 26B, a looped MoE) on its own engine, build/saguaro-ik2 (upstream
+# Maya v1.1.74's): unsloth's UD-Q4_K_XL GGUF read in place (tools/ik2/download.json) with the model's own chat template;
+# Linux, one or two NVIDIA cards from V100 / Tesla T4 on with 8 GB or more (the experts a card does not hold stay in
+# RAM: the offload path), or one AMD RDNA 3 / 3.5 / 4 GPU that holds every expert of the file (ik2_fit.py)
 IK2 = Q.MODEL["ik2"]                               # "Inkling-2-Mini"
 IK2_SHOWN = Q.SHOWN["ik2"]
 IK2_EXE = BUILD / "saguaro-ik2"
@@ -735,6 +736,7 @@ IK2_TEMPLATE = ROOT / "tools" / "ik2" / "chat_template.jinja"
 IK2_TOKENIZER_TOOLS = ("tools/strata_tokenizer.py", "tools/ik2/chat_template.jinja")
 IK2_DIR = "saguaro-ik2"                            # (in the model's folder: tokenizer/, sources.json)
 IK2_MODEL_NAME = "inkling-2-mini"
+IK2_PROFILE = ROOT / "data" / "expert-profile-ik2mini.bin"   # (the offload path's starting VRAM tier: SAGUARO_IK2_WARM)
 FAMILIES = ("glm", "deepseek", "minimax", "qwen", "hy4", "ik2")
 SHARD_RE = re.compile(r"-(\d{5})-of-(\d{5})\.gguf$")
 
@@ -1389,6 +1391,8 @@ def choose_gpus(a, found, min_cc: int = MIN_CC, family: str = "") -> list:
             fail(f"--gpus takes GPU numbers as nvidia-smi numbers them, e.g. --gpus 0,1, not {a.gpus!r}")
         if family == "ik2" and len(want) > 2:
             fail(f"{IK2_SHOWN} runs on one GPU or two: --gpu 0, or --gpus 0,1")
+        if family == "ik2" and len(want) == 2:         # (the split: the larger card first - it holds the dense weights)
+            want = sorted(want, key=lambda i: -float(byid.get(i, {}).get("vram_gb") or 0))
         if not 1 <= len(want) <= MAX_GPUS or len(set(want)) != len(want):
             fail(f"Saguaro runs on one GPU or splits the model's layers across up to {MAX_GPUS}: --gpu 0, or "
                  "--gpus 0,1,2,3 (each number once)")
@@ -1438,12 +1442,19 @@ def choose_gpus(a, found, min_cc: int = MIN_CC, family: str = "") -> list:
     return opts[pick]
 
 
+def ik2_gpus_asked(a) -> int:
+    """How many GPUs --gpu / --gpus name (0: none named) - Inkling 2 Mini runs on one or two."""
+    if getattr(a, "gpus", None):
+        return len({x.strip() for x in str(a.gpus).split(",") if x.strip()})
+    return 1 if getattr(a, "gpu", None) is not None else 0
+
+
 def choose_ik2_gpus(a, usable: list) -> list:
-    """Inkling 2 Mini's cards: two 16 GB cards (every expert in VRAM) where the PC has them, else one - asked when both
-    are possible (ik2_fit.layout)."""
-    why = IK2F.unsupported("cuda", WIN, usable or [{"arch": 0, "vram_gb": 0}])
+    """Inkling 2 Mini's cards: one where the largest holds every expert, else two where the PC has them (the split:
+    the larger first), else one with the offload path - asked when both are possible (ik2_fit.layout)."""
+    why = IK2F.unsupported("cuda", WIN, 0, usable or [{"arch": 0, "vram_gb": 0}], mem_gb()[0])
     if why:
-        fail(why, f"a card with 16 GB or more of VRAM runs it; {ME} --check lists this PC's")
+        fail(why, f"a card with 8 GB or more of VRAM runs it; {ME} --check lists this PC's")
     best = IK2F.layout(usable)
     one = IK2F.layout(usable, 1)
     if len(best["gpus"]) == 1:
@@ -1474,20 +1485,21 @@ def check_pc(a, family: str = "glm", gguf: bool = False, ds4_quant: str = "exl3"
     if mm3 and WIN and not MM3_ALL_PLATFORMS:
         fail(f"{MM3}'s engine (maya-mm3) runs on Linux only for now (its Windows build is on the way)",
              f"set it up on a Linux PC with an NVIDIA GPU ({mm3_gpus()})")
-    if family in ("hy4", "ik2"):   # (their engines here: CUDA on Linux - said before anything is built or downloaded)
-        why = IK2F.unsupported(a.backend, WIN, []) if family == "ik2" else (
+    if family in ("hy4", "ik2"):   # (said before anything is built or downloaded)
+        why = IK2F.unsupported(a.backend, WIN, ik2_gpus_asked(a), []) if family == "ik2" else (
             f"{HY4_SHOWN} runs on NVIDIA GPUs only for now (no AMD or Mac engine here yet)"
             if a.backend in ("hip", "metal") else
             f"{HY4_SHOWN} runs on Linux only for now (not on Windows yet)" if WIN else None)
         if why:
-            fail(why, "set it up on a Linux PC with NVIDIA GPUs" + (
-                " (Tesla T4 / RTX 20 and newer, 16 GB or more)" if family == "ik2" else " (V100 / T4 and newer)"))
+            fail(why, ("set it up on a Linux PC with NVIDIA GPUs (V100 / Tesla T4 and newer, 8 GB or more) or an AMD "
+                       "RDNA 3 / 4 GPU that holds the model" if family == "ik2" else
+                       "set it up on a Linux PC with NVIDIA GPUs (V100 / T4 and newer)"))
     if a.backend == "hip":
         if ds4 and not gguf:   # (as GLM's and MiniMax's EXL3 quants on AMD: experimental)
             warn(f"{DS4}'s EXL3 quants on AMD are experimental: their kernels pass their tests on AMD GPUs, but the "
                  f"whole model has not been measured on one - Saguaro's GGUF quants (--model deepseek-maya-s / "
                  "deepseek-maya-xs) are the tested way there")
-        return check_hip_pc(a, text_only=not mm3)
+        return check_hip_pc(a, text_only=not (mm3 or family == "ik2"))   # (Inkling 2: pictures on AMD too)
     if a.backend == "metal":
         if family != "glm":
             fail(f"Saguaro's Metal engine runs GLM-5.3-Flash only (no Metal engine for {ds4 and DS4 or mm3 and MM3 or QWEN_SHOWN})",
@@ -1513,17 +1525,27 @@ def check_pc(a, family: str = "glm", gguf: bool = False, ds4_quant: str = "exl3"
         fail("no NVIDIA GPU found (nvidia-smi did not answer)",
              ("install the NVIDIA driver (https://www.nvidia.com/drivers)" if WIN else
               "install the NVIDIA driver (Ubuntu: sudo ubuntu-drivers install)") + f", restart, and run {ME} again")
+    if family == "ik2":                                # (no card new or large enough, or too little RAM: one line first)
+        why = IK2F.unsupported("cuda", WIN, 0, found, mem_gb()[0])
+        if why:
+            fail(why)
     say("  NVIDIA GPUs:")
     for g in found:
         say(f"    {gpu_label(g)} - " + ("can be used" if int(g["arch"]) >= max(min_cc, VALIDATED_CC) else
                                        "can be used (Pascal: experimental)" if int(g["arch"]) >= min_cc else
                                        f"too old (this model needs compute capability {min_cc / 10:.1f} or newer)"))
     chosen = choose_gpus(a, found, min_cc, family)
+    if family == "ik2":                                # (the cards picked: 8 GB or more each)
+        why = IK2F.unsupported("cuda", WIN, len(chosen), chosen, mem_gb()[0])
+        if why:
+            fail(why)
     archs = sorted({int(g["arch"]) for g in chosen})
     vram = sum(g["vram_gb"] for g in chosen)
     ok("using " + " + ".join(gpu_label(g) for g in chosen) +
        (f": the model's layers are split across the {len(chosen)}"
-        if len(chosen) > 1 and family not in ("hy4", "ik2") else ""))
+        if len(chosen) > 1 and family not in ("hy4", "ik2") else
+        ": the experts are split across the two (the first holds the rest)" if len(chosen) > 1 and family == "ik2"
+        else ""))
     if any(g.get("unified_memory") for g in chosen):
         say("  the GPU's memory is the system's RAM: the engine fills it with the most-used experts and leaves the "
             "rest to the RAM tier and the SSD, so the free RAM at the start is what the pool can take")
@@ -3949,7 +3971,17 @@ def speed_calibration(cfg_path: Path, why: str = "") -> bool:
         return False
     if config_family(cfg) == "qwen":                   # (CYBER-FROST: its MTP drafter or none)
         return bool(qwen_draft_calibration(cfg_path) is not None)
-    if config_family(cfg) in ("hy4", "ik2"):
+    if config_family(cfg) == "ik2":                    # (Inkling 2: --drafting auto measures at the engine's start)
+        args = cfg.get("args") or []
+        if "--drafting" in args[:-1] and args[args.index("--drafting") + 1] == "auto":
+            ik2_draft_forget()
+            ok(f"{IK2_SHOWN}: its drafting is measured again at the next start (the engine times no drafting, the "
+               "prompt lookup and the drafter once, before its first answer)")
+            return True
+        warn(f"no speed calibration for {IK2_SHOWN}: drafting is set by hand or off (--drafting on|off; off on Volta "
+             "/ Turing, the offload path and two GPUs)")
+        return False
+    if config_family(cfg) == "hy4":
         warn(f"no speed calibration for {Q.SHOWN[config_family(cfg)]}: the setup installs no drafter for it")
         return False
     if config_family(cfg) in ("deepseek", "minimax"):
@@ -6908,11 +6940,14 @@ def ik2_about() -> str:
     """The setup's model row for Inkling 2 Mini."""
     files = read_json(IK2_MANIFEST).get("files") or {}   # (damaged: the setup says so when it is picked)
     gb = f"{sum(v[0] for v in files.values()) / 1e9:.0f} GB" if files else "about 18 GB"
+    # (TODO: the T4 speeds are the previous engine's - our v1.1.72 port - until the v1.1.74-based one is measured)
     return (f"thinkingmachines' Inkling-2-Mini (26B, a looped MoE: 8 of 128 experts a token) on its own engine, in "
-            f"unsloth's UD-Q4_K_XL GGUF ({gb}); NVIDIA Tesla T4 / RTX 20 and newer, Linux. The model for one or two "
-            "16 GB cards: one Tesla T4 writes about 42 tok/s (a 32K context, a quarter of the experts streamed from "
-            "RAM), two write about 52 tok/s with every expert in VRAM (a 131K context); tool calls, its thinking "
-            "levels, pictures (its vision tower, 0.6 GB), one conversation at a time. Apache 2.0.")
+            f"unsloth's UD-Q4_K_XL GGUF ({gb}); Linux, NVIDIA V100 / Tesla T4 / RTX 20 and newer with 8 GB or more "
+            "(the experts a card does not hold stay in RAM), or an AMD RDNA 3 / 4 GPU that holds every expert. The "
+            "model for one or two 16 GB cards: one Tesla T4 writes about 42 tok/s (a 32K context, part of the experts "
+            "in RAM), two write about 52 tok/s with every expert in VRAM (a 131K context); tool calls, its thinking "
+            "levels, pictures (its vision tower, 0.6 GB), one conversation at a time on two cards (several at once "
+            "where one GPU holds every expert). Apache 2.0.")
 
 
 def link_published(dst: Path, size: int, sha: str, places: list) -> Path | None:
@@ -7268,11 +7303,27 @@ def ik2_dir(a, models: Path, prev: dict) -> Path:
     return models / IK2
 
 
+def ik2_local_gguf(a, d: Path) -> Path | None:
+    """--model-dir with another Inkling 2 Mini GGUF than the published one (a quant of your own, e.g. one whose experts
+    all fit a 16 GB card): that file - the only *.gguf there beside an mmproj, the published one absent - else None."""
+    if not getattr(a, "model_dir", None) or not d.is_dir():
+        return None
+    if (d / ik2_entry()["gguf"]).is_file():
+        return None
+    found = [f for f in sorted(d.glob("*.gguf")) if not f.name.startswith("mmproj")]
+    return found[0] if len(found) == 1 else None
+
+
 def ik2_model_step(a, d: Path) -> Path | None:
     """The model's GGUF in d, downloaded when it is not there (resumable), then checked against its published sha256;
-    None when it was not downloaded."""
+    None when it was not downloaded.  A GGUF of your own in --model-dir (ik2_local_gguf) is taken as it is."""
     name = Q.shown("ik2", Q.IK2_QUANT)
-    step(5, f"the model ({name})")
+    local = ik2_local_gguf(a, d)
+    step(5, f"the model ({local.name if local else name})")
+    if local is not None:
+        ok(f"{local.name}: {local.stat().st_size / 1e9:.1f} GB in {d} (your own file: not the published one, not "
+           "sha256-checked)")
+        return local
     m = ik2_entry()
     files = [d / m["gguf"]]
     if any(file_incomplete(m, f) for f in files) and not offer_download(a, Q.shown("ik2", Q.IK2_QUANT, m["download_gb"]),
@@ -7343,21 +7394,88 @@ def ik2_vision_step(a, pc: dict, meta: dict, llama: Path, d: Path) -> dict | Non
     return {"exe": str(VEXE), "mmproj": str(files[0]), "gpu": True}
 
 
+def ik2_drafter_model() -> dict | None:
+    """The model's drafter as offer_download's form (tools/ik2/download.json's "drafter": thinkingmachines' own
+    mtp.safetensors at a pinned revision), or None when the manifest names none."""
+    man = read_json(IK2_MANIFEST).get("drafter") or {}
+    if not man.get("files") or not man.get("repo") or not man.get("revision"):
+        return None
+    return {"about": f"{IK2_SHOWN}'s drafter (it drafts tokens the model checks: faster answers, the same ones): "
+                     f"thinkingmachines' own ({man.get('license', 'Apache 2.0')})", "format": "safetensors",
+            "repo": man["repo"], "revision": man["revision"], "folder": man.get("folder", ""),
+            "files": {k: v[0] for k, v in man["files"].items()}, "sha256": {k: v[1] for k, v in man["files"].items()},
+            "download_gb": sum(v[0] for v in man["files"].values()) / 1e9}
+
+
+def ik2_drafting(a) -> str:
+    """The engine's --drafting from the setup's --drafting: off / on by hand, else auto (measured once on the PC at
+    the engine's first start)."""
+    how = getattr(a, "drafting", None)
+    return how if how in ("on", "off") else "auto"
+
+
+def ik2_drafter_step(a, d: Path, vram: float, ctx: int, kv: str, experts_gib: float = IK2F.EXPERTS_GIB) -> Path | None:
+    """The drafter beside the GGUF (in d), downloaded when it is not there and sha256-checked, or None: drafting off
+    (--drafting off), or not downloaded - the engine then drafts with the prompt lookup alone.  Where the drafter's
+    room does not fit beside the model at this context the engine leaves it out at its start: said."""
+    how = ik2_drafting(a)
+    if how == "off":
+        ok("drafting: off (--drafting off) - every token from a full model step")
+        return None
+    m = ik2_drafter_model()
+    if m is None:
+        warn(f"{IK2_MANIFEST} names no drafter: drafting with the prompt lookup alone")
+        return None
+    files = [d / n for n in m["files"]]
+    if any(file_incomplete(m, f) for f in files) and not offer_download(a, "the drafter", d, files, m):
+        warn(f"the drafter was not downloaded: drafting with the prompt lookup alone ({ME} --setup asks again)")
+        return None
+    for f in files:
+        if not sha256_checked(f, m["sha256"][f.name]):
+            f.unlink(missing_ok=True)                  # else the next run finds it complete and fails here again
+            fail(f"{f}: the sha256 does not match the published one (the file was removed)", "run the setup again")
+    ok(f"drafting: {how} - {files[0].name} ({m['download_gb']:.1f} GB) and the prompt lookup; "
+       + ("measured once at the engine's first start on this PC, the faster kept - the answers are the same with "
+          "drafting or without" if how == "auto" else "on (--drafting on), not measured"))
+    if not IK2F.draft_fits(vram, ctx, kv, experts_gib):
+        warn(f"at {context_label(ctx)} the drafter's {IK2F.draft_gib(ctx):.1f} GB does not fit beside the model on this "
+             "card: the engine leaves it out (the prompt lookup still drafts) - a smaller context leaves it room")
+    return files[0]
+
+
+def ik2_draft_forget() -> None:
+    """--speed-calibration: saguaro-ik2's drafting measured on this PC (data/ik2-drafting.txt, --drafting auto) is
+    dropped, so its next start measures it again before it is ready."""
+    path = ROOT / "data" / "ik2-drafting.txt"
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        warn(f"{path} could not be removed ({e}): delete it by hand to measure the drafting again")
+
+
 def write_config_ik2(a, pc: dict, meta: dict, gguf: Path, tok: Path, ctx: int, models: Path, d: Path, lay: dict,
-                     vision: dict | None = None) -> Path:
-    """maya-inkling-2-mini.json and its start script: the layout's flags for one card or two (ik2_fit.layout).  A
-    setup again keeps the config before's env, where the server listens and its key; the flags follow the cards
-    chosen now.  saguaro-ik2 stops at a flag it does not know: only its own are written."""
+                     vision: dict | None = None, drafter: Path | None = None) -> Path:
+    """maya-inkling-2-mini.json and its start script: the layout's flags for one card or two (ik2_fit.layout; AMD:
+    ik2_fit.amd_layout), drafting (--drafting auto by default; off where it does not run).  A setup again keeps the
+    config before's env, where the server listens and its key; the flags follow the cards chosen now.  saguaro-ik2
+    stops at a flag it does not know: only its own are written."""
     step(8, "the configuration and the start script")
     port = a.port or 8080
     cfg_path = ROOT / f"{Q.config_stem('ik2', Q.IK2_QUANT)}.json"
     old = read_json(cfg_path)
-    args = ["--model", str(gguf), "--max-context", str(ctx)] + list(lay["args"])
+    how = ik2_drafting(a)
+    args = ["--model", str(gguf), "--max-context", str(ctx)] + list(lay["args"]) + \
+        (["--draft", str(drafter)] if drafter and how != "off" else []) + ["--drafting", how]
     same = [int(i) for i in old.get("gpu") or []] == [int(g["index"]) for g in pc["gpus"]]
     kept = keep_args(old.get("args") or [], args, ("--threads",) + (("--chunk",) if same else ()))
-    inst = {"family": "ik2", "quant": Q.OTHERS[("ik2", Q.IK2_QUANT)], "ik2_quant": Q.IK2_QUANT}
+    inst = {"family": "ik2", "quant": Q.OTHERS[("ik2", Q.IK2_QUANT)], "ik2_quant": Q.IK2_QUANT, "drafting": how}
+    if gguf.name != ik2_entry()["gguf"]:              # (a GGUF of your own: its name, for the page and a setup again)
+        inst["ik2_file"] = gguf.name
     sampling, effort = Q.model_defaults({"installer": inst})
     cfg = {"exe": str(IK2_EXE), "args": args, "cwd": str(ROOT), "tokenizer": str(tok), "model_name": IK2_MODEL_NAME,
+           **({"backend": "hip"} if pc.get("backend") == "hip" else {}),
            "gpu": [g["index"] for g in pc["gpus"]], "sampling": sampling, "reasoning_effort": effort,
            "lib_dirs": meta.get("lib_dirs") or old.get("lib_dirs") or [], "port": port,
            **({"vision": vision} if vision else {})}
@@ -7365,8 +7483,13 @@ def write_config_ik2(a, pc: dict, meta: dict, gguf: Path, tok: Path, ctx: int, m
         if old.get(k) is not None:
             cfg[k] = old[k]
             kept.append(k)
-    env = {**(old.get("env") or {}), **lay["env"], **parse_env(a.env)}
-    for k in IK2F.LAYOUT_ENV - set(lay["env"]):        # (another layout's settings are not kept: a big card, two cards)
+    lay_env = dict(lay["env"])
+    # (a layout whose card does not hold every expert: the offload path's VRAM tier starts from Saguaro's profile of
+    #  the experts Inkling-2-Mini picks most - data/expert-profile-ik2mini.bin)
+    if lay.get("path") not in (None, "resident") and IK2_PROFILE.is_file():
+        lay_env["SAGUARO_IK2_WARM"] = str(IK2_PROFILE)
+    env = {**(old.get("env") or {}), **lay_env}
+    for k in IK2F.LAYOUT_ENV - set(lay_env):          # (another layout's settings are not kept: a big card, two cards)
         env.pop(k, None)
     env.update(parse_env(a.env))                       # (the user's own --env wins)
     if env:
@@ -7386,46 +7509,93 @@ def write_config_ik2(a, pc: dict, meta: dict, gguf: Path, tok: Path, ctx: int, m
     return cfg_path
 
 
+def ik2_amd_room(g: dict) -> float:
+    """The memory an AMD GPU gives saguaro-ik2 (GiB): its VRAM; an APU's is the RAM it shares, less the max(8 GB,
+    10%) the system keeps."""
+    vram = float(g.get("vram_gb") or 0)
+    if hip_unified_memory(g):
+        ram = mem_gb()[0]
+        return max(vram, ram) - max(8.0, 0.1 * ram)
+    return vram
+
+
 def set_up_ik2(a, prev: dict) -> Path | None:
-    """Inkling 2 Mini's steps 1-8: the PC (NVIDIA from Tesla T4 / RTX 20 on, Linux; one card or two), the layout for
-    them and the context, the engine (build/saguaro-ik2), the file (pinned, resumable, sha256-checked), the tokenizer
-    with the model's own template, the pictures (its mmproj and the image encoder), the config."""
+    """Inkling 2 Mini's steps 1-8: the PC (Linux; NVIDIA from V100 / Tesla T4 on with 8 GB or more, one card or two;
+    or one AMD RDNA 3 / 3.5 / 4 GPU that holds every expert of the file), the layout for them and the context, the
+    engine (build/saguaro-ik2), the file (pinned, resumable, sha256-checked - or a GGUF of your own in --model-dir),
+    the drafter where drafting runs, the tokenizer with the model's own template, the pictures, the config."""
     inst = prev.get("installer") or {}
     prev_args = prev.get("args") or []
     prev_ctx = int(prev_args[prev_args.index("--max-context") + 1]) if "--max-context" in prev_args[:-1] else None
     pc = check_pc(a, "ik2")                            # 1
-    lay = IK2F.layout(pc["gpus"], len(pc["gpus"]))
-    if lay is None or len(lay["gpus"]) != len(pc["gpus"]):
-        fail(IK2F.unsupported("cuda", WIN, pc["gpus"]) or
-             f"{IK2_SHOWN} runs on one or two cards of 16 GB or more: one of the cards chosen is smaller",
-             "pick the cards with --gpu N or --gpus A,B")
+    models = (Path(a.models_dir).expanduser().resolve() if a.models_dir else
+              Path(inst["models_dir"]) if inst.get("models_dir") else ROOT.parent / "Maya-data" / "models")
+    d = ik2_dir(a, models, prev)
+    local = ik2_local_gguf(a, d)
+    ex = (IK2F.experts_gib_of(local) if local else None) or IK2F.EXPERTS_GIB
+    amd = pc.get("backend") == "hip"
+    if amd:   # (no offload path on AMD: every expert of the file in the GPU's memory)
+        g = pc["gpus"][0]
+        room = ik2_amd_room(g)
+        why = IK2F.unsupported("hip", WIN, len(pc["gpus"]), [dict(g, vram_gb=room)], experts_gib=ex)
+        if why:
+            fail(why, "a smaller quant of your own: --model-dir FOLDER with its GGUF" if local is None else
+                 "a GPU with more memory")
+        lay = IK2F.amd_layout(dict(g, vram_gb=room), ex)
+    else:
+        lay = IK2F.layout(pc["gpus"], len(pc["gpus"]), experts_gib=ex)
+        if lay is None or len(lay["gpus"]) != len(pc["gpus"]):
+            fail(IK2F.unsupported("cuda", WIN, len(pc["gpus"]), pc["gpus"], mem_gb()[0], ex) or
+                 f"{IK2_SHOWN}: the first card chosen holds every expert alone - the second is not used (one card is "
+                 "faster there)", "pick the cards with --gpu N or --gpus A,B")
     step(2, "your choices")                            # 2
     m = ik2_entry()
-    ok(f"model: {Q.shown('ik2', Q.IK2_QUANT, m['download_gb'])} - thinkingmachines' Inkling-2-Mini in unsloth's GGUF "
-       "(Apache 2.0)")
+    ok(f"model: {local.name + f' (your own file, {ex:.1f} GB of experts)' if local else Q.shown('ik2', Q.IK2_QUANT, m['download_gb'])}"
+       " - thinkingmachines' Inkling-2-Mini (Apache 2.0)")
+    if amd:
+        warn(f"{IK2_SHOWN} on AMD is experimental here: its HIP build is upstream Maya's, not yet run by Saguaro on an "
+             "AMD card - tell us how it goes")
     ok(f"layout: {lay['said']}" + (f" - {IK2F.speeds(lay)}" if IK2F.speeds(lay) else
                                    " (not measured on this kind of card here: tell us your speed)"))
     ctx = choose_context(a, prev_ctx if prev.get("gpu") and len(prev["gpu"]) == len(pc["gpus"]) else None,
                          IK2F.CONTEXTS, lay["context"])
     ok(f"context: {ctx} tokens" + (" (recommended for these cards)" if ctx == lay["context"] else ""))
-    if ctx > lay["context"]:
-        warn(f"at {context_label(ctx)} the cache takes VRAM from the experts: more of them are streamed from RAM and "
-             f"answers get slower ({context_label(lay['context'])} is what was measured)")
-    models = (Path(a.models_dir).expanduser().resolve() if a.models_dir else
-              Path(inst["models_dir"]) if inst.get("models_dir") else ROOT.parent / "Maya-data" / "models")
-    d = ik2_dir(a, models, prev)
+    kv = str(lay["env"].get("SAGUARO_IK2_KV") or (prev.get("env") or {}).get("SAGUARO_IK2_KV") or IK2F.DEFAULT_KV)
+    vram = float(lay["gpus"][0].get("vram_gb") or 0)
+    vram1 = float(lay["gpus"][1].get("vram_gb") or 0) if len(lay["gpus"]) == 2 else 0.0
+    ram = mem_gb()[0]
+    word, line = (IK2F.verdict_two(vram, vram1, ram, ctx, kv, ex) if vram1 else
+                  IK2F.verdict(vram, ram, ctx, kv, amd, ex))
+    if word in ("fast",):
+        ok(f"at {context_label(ctx)}: {line}")
+    else:
+        warn(f"at {context_label(ctx)}: {line}" + (" - it may not start" if word == "tight" else "") +
+             (f" ({context_label(lay['context'])} is what was measured)" if lay.get("measured") and ctx > lay["context"]
+              else ""))
+    if word == "does not fit":
+        fail(line, "a smaller context (--context), or more RAM")
     ok(f"model folder: {d}")
     llama = tools_step(a)                              # 3
     meta = build_step(a, pc, llama, IK2_TARGET)        # 4
     if not IK2_EXE.exists():
         fail(f"the engine was not built ({IK2_EXE})", "the reason is in the build's messages above (saguaro-ik2 "
-             "needs a Tesla T4 / RTX 20 or newer card in the build's GPU list)")
+             + ("needs an RDNA 3 / 3.5 / 4 GPU in the build's list, on Linux)" if amd else
+                "needs a V100 / Tesla T4 / RTX 20 or newer card in the build's GPU list)"))
     gguf = ik2_model_step(a, d)                        # 5
     if gguf is None:
         return None
+    off = IK2F.drafting_off_reason(None if amd else lay["gpus"][0].get("arch"), vram, ctx, kv, amd, ex)
+    if len(lay["gpus"]) == 2:
+        off = "drafting off: on two GPUs it is not checked yet - every token comes from a full model step"
+    if off:                                            # (Volta / Turing, the offload path, two GPUs: no drafter)
+        ok(off)
+        a.drafting = "off"
+        drafter = None
+    else:
+        drafter = ik2_drafter_step(a, d, vram, ctx, kv, ex)
     tok = ik2_tokenizer_step(a, d, gguf)               # 6
     vision = ik2_vision_step(a, pc, meta, llama, d)    # 7
-    return write_config_ik2(a, pc, meta, gguf, tok, ctx, models, d, lay, vision)   # 8
+    return write_config_ik2(a, pc, meta, gguf, tok, ctx, models, d, lay, vision, drafter)   # 8
 
 
 def set_up_and_serve(a, prev: dict) -> tuple | None:
@@ -7616,7 +7786,7 @@ def main() -> int:
                          "then start the model "
                          "(with --no-start: only measure)")
     ap.add_argument("--drafting", choices=("measure", "on", "off"),
-                    help="the drafter (DFlash2 with --draft dflash2, DeepSeek's DSpark): measure = the speed "
+                    help="the drafter (DFlash2 with --draft dflash2, DeepSeek's DSpark, Inkling 2's own): measure = the speed "
                          "calibration keeps it only if it is faster on this PC (the default with --yes; asked "
                          "otherwise), on = draft with it, off = without it - both skip the measuring")
     ap.add_argument("--no-speed-calibration", action="store_true",
@@ -7714,10 +7884,17 @@ def main() -> int:
         pc = check_pc(a, fam, gguf=ds4 and quant != "exl3")
         say()
         if fam == "ik2":                               # (what the setup would write for these cards)
-            lay = IK2F.layout(pc["gpus"], len(pc["gpus"]))
-            if lay is None or len(lay["gpus"]) != len(pc["gpus"]):
-                fail(IK2F.unsupported("cuda", WIN, pc["gpus"]) or f"{IK2_SHOWN} runs on one or two cards of 16 GB or "
-                     "more: one of the cards chosen is smaller", "pick the cards with --gpu N or --gpus A,B")
+            if pc.get("backend") == "hip":
+                g = dict(pc["gpus"][0], vram_gb=ik2_amd_room(pc["gpus"][0]))
+                why = IK2F.unsupported("hip", WIN, len(pc["gpus"]), [g])
+                lay = None if why else IK2F.amd_layout(g)
+            else:
+                why = IK2F.unsupported("cuda", WIN, len(pc["gpus"]), pc["gpus"], mem_gb()[0])
+                lay = IK2F.layout(pc["gpus"], len(pc["gpus"]))
+            if why or lay is None or len(lay["gpus"]) != len(pc["gpus"]):
+                fail(why or f"{IK2_SHOWN}: the first card chosen holds every expert alone - the second is not used",
+                     "pick the cards with --gpu N or --gpus A,B" + ("" if pc.get("backend") != "hip" else
+                                                                    "; a smaller quant of your own: --model-dir"))
             say(f"{IK2_SHOWN} on these cards - {lay['said']}" + (f": {IK2F.speeds(lay)}" if IK2F.speeds(lay) else "") + ".")
         elif fam == "hy4":
             quant = getattr(a, "hy4_quant", None) or HY4_DEFAULT_QUANT

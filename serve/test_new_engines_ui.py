@@ -242,7 +242,7 @@ class Catalog(unittest.TestCase):
                          {"hy4-flash-maya-xs", "hy4-flash-maya-s", "hy4-flash-maya-m", "hy4-flash-maya-l"})
         ik = c["inkling-2-mini"]
         self.assertEqual((ik["family"], ik["name"], ik["size_gb"]), ("ik2", "Inkling 2 Mini · unsloth UD-Q4_K_XL", 18.3))
-        self.assertIn("One or two NVIDIA cards with 16 GB", ik["needs"])
+        self.assertIn("one or two NVIDIA cards with 8 GB", ik["needs"])
         self.assertIn("four 16 GB NVIDIA cards", c["hy4-flash-maya-s"]["needs"])
         self.assertEqual((ik["fit"], ik["recommended"]), ("", False))          # (no card read: nothing claimed)
         self.assertNotIn("needs", c["glm-maya-s"])
@@ -251,7 +251,7 @@ class Catalog(unittest.TestCase):
         c = self.cat([t4()])
         ik = c["inkling-2-mini"]
         self.assertTrue(ik["recommended"])
-        for part in ("one 16 GB card", "quarter of the experts streamed from RAM", "32K context", "42 tok/s", "1x Tesla T4"):
+        for part in ("one 16 GB card", "the others in RAM (the offload path)", "32K context", "42 tok/s", "1x Tesla T4"):
             self.assertIn(part, ik["fit"])
         self.assertFalse(c["hy4-flash-maya-s"]["recommended"])
         self.assertIn("Inkling 2 Mini is the model for this PC", c["hy4-flash-maya-s"]["fit"])
@@ -275,9 +275,10 @@ class Catalog(unittest.TestCase):
         self.assertFalse(self.cat([t4(i) for i in range(4)], 2.0)["hy4-flash-maya-s"]["recommended"])   # (no RAM for it)
 
     def test_a_card_too_small_or_too_old(self):
-        self.assertIn("16 GB of VRAM or more", self.cat([t4(0, 8.0)])["inkling-2-mini"]["fit"])
+        self.assertIn("8 GB of VRAM or more", self.cat([t4(0, 6.0)])["inkling-2-mini"]["fit"])
+        self.assertIn("the offload path", self.cat([t4(0, 8.0)])["inkling-2-mini"]["fit"])
         old = [{"index": 0, "name": "Tesla P40", "vram_gb": 24.0, "arch": "61"}]
-        self.assertIn("compute capability 7.5", self.cat(old)["inkling-2-mini"]["fit"])
+        self.assertIn("compute capability 7.0", self.cat(old)["inkling-2-mini"]["fit"])
 
     def test_installed_and_the_download_command(self):
         with tempfile.TemporaryDirectory() as tmp:

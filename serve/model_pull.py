@@ -98,16 +98,19 @@ def fit_notes(cards: list, ram_gb: float) -> dict:
     import ik2_fit as IK2F
     out = {("hy4", None): {"needs": "Made for four 16 GB NVIDIA cards (Linux); Maya-S takes about 68 GB of VRAM and "
                                     "RAM together. One conversation at a time.", "fit": "", "recommended": False},
-           ("ik2", None): {"needs": "One or two NVIDIA cards with 16 GB or more (Tesla T4 / RTX 20 and newer, Linux). "
-                                    "One conversation at a time.", "fit": "", "recommended": False}}
+           ("ik2", None): {"needs": "Linux: one or two NVIDIA cards with 8 GB or more (V100 / Tesla T4 / RTX 20 and "
+                                    "newer; the experts a card does not hold stay in RAM), or an AMD RDNA 3 / 4 GPU "
+                                    "that holds every expert. Made for one or two 16 GB cards.", "fit": "",
+                           "recommended": False}}
     if not cards:
         return out
     vram = sum(float(g.get("vram_gb") or 0) for g in cards)
     small = all(float(g.get("vram_gb") or 0) < 24 for g in cards)
     lay = IK2F.layout(cards)
     ik2 = out[("ik2", None)]
-    if lay is None:
-        ik2["fit"] = "This PC: " + (IK2F.unsupported("cuda", sys.platform == "win32", cards) or "no card runs it")
+    why = IK2F.unsupported("cuda", sys.platform == "win32", 0, cards, ram_gb)
+    if lay is None or why:
+        ik2["fit"] = "This PC: " + (why or "no card runs it")
     else:
         ik2["fit"] = f"This PC: {lay['said']}" + (f" - {IK2F.speeds(lay)}" if IK2F.speeds(lay) else "")
         ik2["recommended"] = small and len(cards) <= 2
