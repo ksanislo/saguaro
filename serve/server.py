@@ -110,6 +110,23 @@ def hy4_hot_file(cfg: dict) -> Path:
     return ROOT / "data" / f"hy4-expert-hot-{name}.bin"
 
 
+HY4_HOT_SEEDS = ROOT / "data" / "hy4-hot-seed"            # (the scores shipped, a file a size: hy4_hot_seed)
+
+
+def hy4_hot_seed(cfg: dict) -> Path | None:
+    """The HY4_HOT scores shipped for this config's model - data/hy4-hot-seed/hy4-expert-hot-<folder>.bin, the folder's
+    name as hy4_hot_file has it (a layout's folder, Hy4-Flash-Maya-XS-8GB, takes its size's) - for a PC that has no
+    file of its own yet: its first start then places the experts as every start after it.  None: no such set."""
+    name = hy4_hot_file(cfg).name
+    stem = name[len("hy4-expert-hot-"):-len(".bin")]
+    size = re.match(r"(Hy4-Flash-Maya-[A-Za-z0-9]+)-", stem)
+    for s in dict.fromkeys([stem] + ([size.group(1)] if size else [])):
+        p = HY4_HOT_SEEDS / f"hy4-expert-hot-{s}.bin"
+        if p.is_file():
+            return p
+    return None
+
+
 def hy4_measure_ids(cfg: dict) -> Path | None:
     """The text saguaro-hy4 measures this PC's prompt route on at its first start here (HY4_MEASURE_IDS), before it
     says READY: this install's docs in the model's tokens, written once into the data folder.  None: no tokenizer,
@@ -2535,6 +2552,11 @@ def child_env(cfg: dict) -> dict:
         env.setdefault("HY4_ROUTE_FILE", str(HY4_ROUTE_FILE))
         env.setdefault("HY4_DRAFT_FILE", str(HY4_DRAFT_FILE))
         env.setdefault("HY4_HOT_FILE", str(hy4_hot_file(cfg)))
+        # (... and, where this PC has no such file yet, the scores shipped for the model - a first start places the
+        #  experts as every start after it; a file of its own wins)
+        seed = hy4_hot_seed(cfg)
+        if seed is not None:
+            env.setdefault("HY4_HOT_SEED", str(seed))
         if "HY4_MEASURE_IDS" not in env:
             ids = hy4_measure_ids(cfg)
             if ids is not None:

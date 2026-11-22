@@ -478,5 +478,25 @@ class Steps(unittest.TestCase):
         self.assertIn("32 tok/s", text)
 
 
+
+class HotSeed(unittest.TestCase):
+    """The HY4_HOT scores shipped (data/hy4-hot-seed, a file a size, upstream v1.1.75): HY4_HOT_SEED where there is
+    one - a layout's folder takes its size's; none for a model without one."""
+
+    def test_seed(self):
+        import serve.server as SV
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t)
+            seeds = root / "seeds"
+            seeds.mkdir()
+            (seeds / "hy4-expert-hot-Hy4-Flash-Maya-XS.bin").write_bytes(b"HY4HOT1\0")
+            cfg = lambda folder: {"exe": "saguaro-hy4", "args": ["--pack", str(root / folder / "saguaro-hy4")]}   # noqa: E731
+            with patch.object(SV, "HY4_HOT_SEEDS", seeds), patch("serve.server.models.family", return_value="hy4"):
+                self.assertEqual(SV.child_env(cfg("Hy4-Flash-Maya-XS"))["HY4_HOT_SEED"],
+                                 str(seeds / "hy4-expert-hot-Hy4-Flash-Maya-XS.bin"))
+                self.assertEqual(SV.hy4_hot_seed(cfg("Hy4-Flash-Maya-XS-8GB")).name, "hy4-expert-hot-Hy4-Flash-Maya-XS.bin")
+                self.assertIsNone(SV.hy4_hot_seed(cfg("Hy4-Flash-Maya-S")))
+                self.assertNotIn("HY4_HOT_SEED", SV.child_env(cfg("Other")))
+
 if __name__ == "__main__":
     unittest.main()
