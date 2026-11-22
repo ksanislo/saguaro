@@ -169,5 +169,212 @@ class Names(unittest.TestCase):
                 self.assertEqual(maya.load_calibrations(), {"k": 2})
 
 
+def sysfs_card(root: Path, connectors: dict, used_mib: int, device="0x7550", revision="0xc0") -> Path:
+    """A fake /sys/class/drm/renderD*/device: the card's DRM connectors, its VRAM in use and its PCI IDs."""
+    dev = root / "device"
+    for name, status in connectors.items():
+        (dev / "drm" / "card0" / f"card0-{name}").mkdir(parents=True)
+        (dev / "drm" / "card0" / f"card0-{name}" / "status").write_text(status + "\n")
+    dev.mkdir(parents=True, exist_ok=True)
+    (dev / "mem_info_vram_used").write_text(str(used_mib << 20))
+    (dev / "device").write_text(device + "\n")
+    (dev / "revision").write_text(revision + "\n")
+    return dev
+
+
+class Reserve(unittest.TestCase):
+    """The VRAM a GLM / DeepSeek / MiniMax engine leaves free on an AMD card: 3072 MiB where the desktop may run on
+    it, 512 on a card with no display connected and next to no VRAM in use (mortar's RX 9070 XT beside an iGPU:
+    Maya-L read prompts token by token with 3072), 1024 on a Linux APU."""
+
+    def card(self, connectors, used_mib):
+        with tempfile.TemporaryDirectory() as d:
+            return {**rx9070(), **S.drm_display(sysfs_card(Path(d), connectors, used_mib))}
+
+    def test_headless_card(self):
+        g = self.card({"DP-1": "disconnected", "HDMI-A-1": "disconnected", "Writeback-1": "unknown"}, 93)
+        self.assertEqual((g["display"], round(g["vram_used_gb"], 2)), (False, 0.09))
+        with patch.object(maya, "WIN", False):
+            self.assertEqual(maya.hip_reserve_mib([g]), 512)
+            self.assertIn("no display", maya.hip_reserve_why([g]))
+
+    def test_a_connected_display_keeps_3072(self):
+        g = self.card({"DP-1": "connected", "HDMI-A-1": "disconnected"}, 93)
+        with patch.object(maya, "WIN", False):
+            self.assertEqual(maya.hip_reserve_mib([g]), 3072)
+
+    def test_vram_in_use_keeps_3072(self):   # (a compositor drawing on the card through another GPU's outputs)
+        g = self.card({"DP-1": "disconnected"}, 900)
+        with patch.object(maya, "WIN", False):
+            self.assertEqual(maya.hip_reserve_mib([g]), 3072)
+
+    def test_unknown_keeps_3072(self):
+        with patch.object(maya, "WIN", False):
+            self.assertEqual(maya.hip_reserve_mib([rx9070()]), 3072)          # (no sysfs facts)
+            self.assertEqual(maya.hip_reserve_mib([{**rx9070(), "display": False, "vram_used_gb": 0.1},
+                                                   {**rx9070(1), "display": True, "vram_used_gb": 0.1}]), 3072)
+        with patch.object(maya, "WIN", True):
+            self.assertEqual(maya.hip_reserve_mib([{**rx9070(), "display": False, "vram_used_gb": 0.1}]), 3072)
+
+    def test_linux_apu_unchanged(self):
+        with patch.object(maya, "WIN", False):
+            self.assertEqual(maya.hip_reserve_mib([{"arch": "gfx1151", "display": True, "vram_gb": 96}]), 1024)
+
+    def test_card_name_from_the_pci_revision(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(S.amd_pci_name(sysfs_card(Path(d), {}, 0)), "AMD Radeon RX 9070 XT (gfx1201)")
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(S.amd_pci_name(sysfs_card(Path(d), {}, 0, revision="0xc3")), "AMD Radeon RX 9070 (gfx1201)")
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(S.amd_pci_name(sysfs_card(Path(d), {}, 0, device="0x7551")),
+                             "AMD Radeon AI PRO R9700 (gfx1201)")
+        with tempfile.TemporaryDirectory() as d:
+            self.assertIsNone(S.amd_pci_name(sysfs_card(Path(d), {}, 0, device="0x744c")))   # (AMD_NAMES then)
+
+
+class DraftNote(unittest.TestCase):
+    def test_one_discrete_gpu_does_not_draft(self):
+        a = SimpleNamespace(env=[])
+        one = {"backend": "hip", "gpus": [rx9070()]}
+        self.assertTrue(maya.draft_note(a, one, "mtp").startswith("none on one GPU"))
+        self.assertEqual(maya.draft_note(a, {"backend": "hip", "gpus": [rx9070(), rx9070(1)]}, "mtp"), "the MTP block")
+        self.assertEqual(maya.draft_note(a, {"backend": "hip", "gpus": [{"arch": "gfx1151"}]}, "mtp"), "the MTP block")
+        self.assertEqual(maya.draft_note(SimpleNamespace(env=["SAGUARO_GLM_MTP_DECODE=1"]), one, "mtp"), "the MTP block")
+        self.assertIn("DFlash2", maya.draft_note(a, one, "dflash2"))
+
+
+class SourceHash(unittest.TestCase):
+    def test_bytecode_caches_are_not_sources(self):
+        with tempfile.TemporaryDirectory() as d, patch.object(S, "ROOT", Path(d)):
+            (Path(d) / "v").mkdir()
+            (Path(d) / "v" / "a.py").write_text("x = 1\n")
+            before = S.source_hash(("v",))
+            (Path(d) / "v" / "__pycache__").mkdir()
+            (Path(d) / "v" / "__pycache__" / "a.cpython-313.pyc").write_bytes(b"\0" * 16)
+            (Path(d) / "v" / "b.pyc").write_bytes(b"\0")
+            self.assertEqual(S.source_hash(("v",)), before)
+            (Path(d) / "v" / "a.py").write_text("x = 2\n")
+            self.assertNotEqual(S.source_hash(("v",)), before)
+
+
+class VisionFiles(unittest.TestCase):
+    """--yes alone never downloads the vision encoder's files (as the model's); they are found beside the model too."""
+
+    def run_step(self, d: Path, models: Path, **kw):
+        a = SimpleNamespace(no_vision=False, download_model=False, yes=True, rebuild=False, vision_dir=None)
+        a.__dict__.update(kw)
+        fetched = []
+        with patch.object(maya, "ROOT", d / "install"), patch.object(maya, "fetch", lambda u, p, w: fetched.append(p)), \
+                patch.object(maya, "compile_vision", return_value=False), patch.object(maya, "VEXE", d / "none"), \
+                patch.object(maya.S, "UI", None), patch("sys.stdout", new=io.StringIO()):
+            try:
+                v = maya.vision_step(a, {"gpus": []}, {}, d, models / "m", "Maya-L", models)
+            except SystemExit:
+                v = "stopped"
+        return v, fetched
+
+    def test_yes_does_not_download(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            (d / "models" / "m").mkdir(parents=True)
+            self.assertEqual(self.run_step(d, d / "models"), (None, []))
+            v, fetched = self.run_step(d, d / "models", download_model=True)
+            self.assertEqual(len(fetched), 2)
+
+    def test_found_in_the_models_folder_or_vision_dir(self):
+        m = maya.MODELS["Maya-L"]["vision"]
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            (d / "models" / "m").mkdir(parents=True)
+            for k in ("mmproj", "vocab"):
+                (d / "models" / m[k]).write_bytes(b"x")
+            a = SimpleNamespace(vision_dir=None)
+            self.assertEqual(maya.vision_files_dir(a, m, d / "models" / "m", d / "models"), d / "models")
+            self.assertEqual(maya.vision_files_dir(a, m, d / "models" / "m"), d / "models")     # (the folder above)
+            (d / "elsewhere").mkdir()
+            own = SimpleNamespace(vision_dir=str(d / "elsewhere"))
+            self.assertEqual(maya.vision_files_dir(own, m, d / "models" / "m"), (d / "elsewhere").resolve())
+            self.assertEqual(self.run_step(d, d / "models", vision_dir=str(d / "elsewhere")), ("stopped", []))
+            (d / "models" / m["vocab"]).unlink()
+            self.assertEqual(maya.vision_files_dir(a, m, d / "models" / "m", d / "models"),
+                             d / "models" / "m" / "vision")
+
+
+class PackCheck(unittest.TestCase):
+    """A pack an older Maya / Strata install left in the model's folder is never reused or written into."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.d = Path(self.tmp.name)
+        self.shard = self.d / "GLM-5.3-Flash-Maya-L-IQ3_S-00001-of-00004.gguf"
+        self.shard.write_bytes(b"GGUF")
+
+    def make_pack(self, pack: Path, sources: bool, fmt=None, head=maya.GLM_PACK_INDEX + "-- generated by tools/iq_pack.py"):
+        (pack / "tokenizer").mkdir(parents=True, exist_ok=True)
+        for f in maya.PACK_FILES:
+            (pack / f).write_text("x")
+        (pack / "index.txt").write_text(head + " from " + self.shard.name + "\n")
+        (pack / "native_experts.txt").write_text(f"# experts (absolute offsets in {self.shard.name})\n")
+        if sources:
+            maya.stamp_pack(pack, [self.shard], fmt)
+
+    def build(self, repack=False):
+        def fake_iq_pack(cmd, **kw):
+            out = Path(cmd[cmd.index("--out") + 1])
+            self.built.append(out)
+            self.make_pack(out, False)
+        self.built = []
+        with patch.object(maya, "run", fake_iq_pack), patch.object(maya, "check_sha256"), \
+                patch.object(maya, "base_template"), patch("sys.stdout", new=io.StringIO()):
+            return maya.pack_step(SimpleNamespace(repack=repack), self.d, [self.shard], self.d, "Maya-L")
+
+    def test_an_old_installs_pack_is_left_alone(self):
+        old = self.d / "pack"
+        self.make_pack(old, sources=False)
+        before = {p: p.read_bytes() for p in old.rglob("*") if p.is_file()}
+        self.assertIn("no record", maya.pack_foreign(old))
+        pack = self.build()
+        self.assertEqual(pack, self.d / "pack-saguaro-maya-l")
+        self.assertEqual(self.built, [pack])
+        self.assertEqual({p: p.read_bytes() for p in old.rglob("*") if p.is_file()}, before)
+        self.assertEqual(maya.read_json(pack / maya.PACK_SOURCES)["glm_pack_format"], maya.GLM_PACK_FORMAT)
+        self.assertEqual(self.build(), pack)          # (a setup again: the new one is reused, not built again)
+        self.assertEqual(self.built, [])
+        self.assertEqual(self.build(repack=True), pack)   # (--repack builds the new one again, never the old)
+        self.assertEqual(self.built, [pack])
+
+    def test_another_format_is_foreign(self):
+        self.make_pack(self.d / "pack", sources=True, fmt=maya.GLM_PACK_FORMAT + 1)
+        self.assertIn("format", maya.pack_foreign(self.d / "pack"))
+        self.assertEqual(self.build(), self.d / "pack-saguaro-maya-l")
+        p2 = self.d / "p2"
+        self.make_pack(p2, sources=True, head="# strata pack index v2")
+        self.assertIn("not Saguaro's", maya.pack_foreign(p2))
+
+    def test_an_earlier_saguaro_pack_is_reused_and_stamped(self):
+        self.make_pack(self.d / "pack", sources=True)      # (sources.json without the format: before this record)
+        self.assertIsNone(maya.pack_foreign(self.d / "pack"))
+        self.assertEqual(self.build(), self.d / "pack")
+        self.assertEqual(self.built, [])
+        self.assertEqual(maya.read_json(self.d / "pack" / maya.PACK_SOURCES)["glm_pack_format"], maya.GLM_PACK_FORMAT)
+
+
+class ConfigName(unittest.TestCase):
+    def test_no_double_prefix(self):
+        self.assertEqual(maya.glm_config_stem("Maya-S-v2-IQ2_XXS"), "maya-s-v2-iq2_xxs")
+        self.assertEqual(maya.glm_config_stem("GSQ-RCO"), "maya-gsq-rco")
+
+
+class CheckFit(unittest.TestCase):
+    def test_check_says_which_quants_fit(self):
+        with patch.object(maya, "mem_gb", return_value=(92.0, 80.0)):
+            lines = maya.glm_fit_lines([rx9070()])
+        self.assertIn("about 92 GB", lines[0])
+        self.assertIn("Maya-XS-IQ1_S", lines[1])
+        self.assertIn("Maya-L", lines[2])
+        self.assertEqual(maya.glm_fit_lines([]), [])
+
+
 if __name__ == "__main__":
     unittest.main()

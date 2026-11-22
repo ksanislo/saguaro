@@ -977,13 +977,33 @@ def hip_unified_memory(g) -> bool:
         re.search(r"Ryzen AI Max|Radeon(?:\s*\(TM\))?\s+80[4-6]\dS", g.get("name", ""), re.I))
 
 
+HIP_IDLE_VRAM_GB = 0.5    # more in use with no engine running: something (a compositor) draws on the card
+
+
+def hip_headless(g) -> bool:
+    """A discrete AMD GPU no desktop runs on: no display connected to it and next to no VRAM in use (Linux' sysfs;
+    unknown - Windows, or sysfs without the facts - counts as a desktop's)."""
+    return g.get("display") is False and g.get("vram_used_gb", HIP_IDLE_VRAM_GB) < HIP_IDLE_VRAM_GB
+
+
 def hip_reserve_mib(gpus) -> int:
-    """The VRAM (MiB) an engine on these AMD GPUs leaves free on each: the desktop runs on them and allocates after
-    the engine has filled its expert pool - 3072, but 1024 on a Linux APU (its pool is sized from the RAM it shares;
-    Windows draws its desktop from the APU's carve-out too)."""
+    """The VRAM (MiB) an engine on these AMD GPUs leaves free on each: 3072 where the desktop may run on one (it
+    allocates after the engine has filled its expert pool); 1024 on a Linux APU (its pool is sized from the RAM it
+    shares; Windows draws its desktop from the APU's carve-out too); 512 on cards with no display (compute only: only
+    the engine's own late allocations come after the pool, and the engine keeps the margin it measured for them)."""
     if any(hip_unified_memory(g) for g in gpus) and not WIN:
         return 1024
+    if not WIN and gpus and all(hip_headless(g) for g in gpus):
+        return 512
     return 3072
+
+
+def hip_reserve_why(gpus) -> str:
+    if any(hip_unified_memory(g) for g in gpus) and not WIN:
+        return "an APU: its pool is sized from the shared RAM"
+    if not WIN and gpus and all(hip_headless(g) for g in gpus):
+        return "no display is connected to the GPU"
+    return "the desktop may run on the GPU and allocate beside the engine"
 
 
 def hip_clang(root: Path) -> Path | None:
@@ -1767,6 +1787,27 @@ def vram_and_ram(cards: list) -> float:
 GLM_RAM_SPARE_GB = 16                              # the RAM a GLM quant leaves the system (the HIP config's own headroom)
 
 
+def glm_fit_lines(cards: list) -> list:
+    """--check: which GLM-5.3-Flash GGUF quants VRAM + RAM hold whole (less GLM_RAM_SPARE_GB), and the rest, whose
+    experts the engine then reads from the SSD while it answers."""
+    cards = [g for g in cards if g.get("vram_gb")]
+    if not cards:
+        return []
+    room = vram_and_ram(cards) - GLM_RAM_SPARE_GB
+    ggufs = sorted((q for q in MODELS if not is_exl3(q) and q not in MODELS_BY_HAND),
+                   key=lambda q: MODELS[q]["download_gb"])
+    fit = [q for q in ggufs if MODELS[q]["download_gb"] <= room]
+    big = [q for q in ggufs if q not in fit]
+    lines = [f"GLM-5.3-Flash: VRAM + RAM hold about {room:.0f} GB of a model here (the system keeps "
+             f"{GLM_RAM_SPARE_GB} GB)."]
+    if fit:
+        lines.append("  held whole (fastest): " + ", ".join(f"{q} ({MODELS[q]['download_gb']:.0f} GB)" for q in fit))
+    if big:
+        lines.append("  part of the experts from the SSD (slower, the more so the bigger): " +
+                     ", ".join(f"{q} ({MODELS[q]['download_gb']:.0f} GB)" for q in big))
+    return lines
+
+
 def default_models_dir() -> Path:
     """Saguaro-data/models next to this folder, or an earlier setup's Maya-data/models there while only that one exists."""
     new, old = ROOT.parent / "Saguaro-data" / "models", ROOT.parent / "Maya-data" / "models"
@@ -1784,6 +1825,21 @@ def download_dir(models: Path, quant: str) -> Path:
             if all((c / n).exists() for n in names):
                 return c
     return d
+
+
+def draft_note(a, pc: dict, draft: str) -> str:
+    """What the engine does with the drafting choice here: on one GPU it drafts with the MTP block only on an APU that
+    holds every expert (src/core/glm_mtp.cu, mtp_decode_wanted) - elsewhere the verify rows' experts cost more than
+    the drafts save, so it decodes without drafting."""
+    if draft == "dflash2":
+        return "a DFlash2 drafter (downloaded with the model)"
+    gpus = pc.get("gpus") or []
+    forced = any(e.startswith("SAGUARO_GLM_MTP_DECODE=") and e.split("=", 1)[1] not in ("", "0")
+                 for e in getattr(a, "env", None) or [])
+    if pc.get("backend") == "metal" or len(gpus) != 1 or forced or (
+            pc.get("backend") == "hip" and hip_unified_memory(gpus[0])):
+        return "the MTP block"
+    return "none on one GPU (the MTP block pays only where the GPU holds every expert: the engine decodes without it)"
 
 
 def choose_draft(a, pc: dict, inst: dict) -> str:
@@ -3007,11 +3063,37 @@ def pack_stale(pack: Path, shards: list):
     return f"{late[0]} was written after the pack was built" if late else None
 
 
-def stamp_pack(pack: Path, shards: list) -> None:
-    """The model files' sizes and times into the pack (PACK_SOURCES), for pack_stale."""
-    files = [{"name": s.name, "size": s.stat().st_size, "mtime_ns": s.stat().st_mtime_ns} for s in shards]
+GLM_PACK_FORMAT = 1           # tools/iq_pack.py's GLM pack (index v3, --compat-bf16): raised when the engine needs another
+GLM_PACK_INDEX = "# strata pack index v3 "
+
+
+def pack_foreign(pack: Path) -> str | None:
+    """Why the GLM pack in `pack` is not one this setup may take and write into, or None (none there, or this
+    setup's format).  A pack with no record of its model files (PACK_SOURCES) was built by an older Maya / Strata
+    install, one of another index version or a newer format by something else: it is left as it is."""
+    if not (pack / "index.txt").is_file():
+        return None
     try:
-        (pack / PACK_SOURCES).write_text(json.dumps({"files": files}, indent=1), encoding="utf-8")
+        with open(pack / "index.txt", encoding="utf-8") as f:
+            head = f.readline()
+    except (OSError, UnicodeDecodeError):
+        head = ""
+    if not head.startswith(GLM_PACK_INDEX):
+        return "its index is not Saguaro's format (" + (head.strip()[:60] or "unreadable") + ")"
+    if not (pack / PACK_SOURCES).is_file():
+        return "it has no record of the files it was built from (an older Maya or Strata install's)"
+    fmt = read_json(pack / PACK_SOURCES).get("glm_pack_format", GLM_PACK_FORMAT)
+    if not isinstance(fmt, int) or fmt != GLM_PACK_FORMAT:
+        return f"its format {fmt} is not this engine's ({GLM_PACK_FORMAT})"
+    return None
+
+
+def stamp_pack(pack: Path, shards: list, fmt: int | None = None) -> None:
+    """The model files' sizes and times into the pack (PACK_SOURCES), for pack_stale; fmt: a GLM pack's format."""
+    files = [{"name": s.name, "size": s.stat().st_size, "mtime_ns": s.stat().st_mtime_ns} for s in shards]
+    rec = {"files": files, **({"glm_pack_format": fmt} if fmt is not None else {})}
+    try:
+        (pack / PACK_SOURCES).write_text(json.dumps(rec, indent=1), encoding="utf-8")
     except OSError:
         pass
 
@@ -3078,14 +3160,21 @@ def pack_step(a, d: Path, shards: list, llama: Path, quant: str | None = None) -
         return pack
     # the engine finds the GGUF files at <pack>/.. (src/core/glm_model.cu, load_pack): the pack lives in their folder,
     # in pack/ - or pack-<model>/ when pack/ indexes another model of the same folder
+    # - and pack-saguaro-<model>/ beside a foreign one (pack_foreign: never reused, written into or built over)
     pack = d / "pack"
     if pack_source(pack) not in (None, shards[0].name):
         pack = d / f"pack-{quant_of(shards[0])}".lower()
-    if not a.repack and pack_source(pack) == shards[0].name and all((pack / f).exists() for f in PACK_FILES):
+    foreign = pack_foreign(pack)
+    if foreign is not None:
+        new = d / f"pack-saguaro-{quant_of(shards[0])}".lower()
+        warn(f"{pack} is left as it is: {foreign} - this setup's pack goes into {new}")
+        pack = new
+    if not a.repack and pack_source(pack) == shards[0].name and all((pack / f).exists() for f in PACK_FILES) and \
+            pack_foreign(pack) is None:
         why = pack_stale(pack, shards)
         if why is None:
-            if not (pack / PACK_SOURCES).exists():
-                stamp_pack(pack, shards)
+            if read_json(pack / PACK_SOURCES).get("glm_pack_format") is None:   # (an earlier Saguaro setup's)
+                stamp_pack(pack, shards, GLM_PACK_FORMAT)
             ok(f"pack already built: {pack}")
             base_template(pack)
             return pack
@@ -3107,7 +3196,7 @@ def pack_step(a, d: Path, shards: list, llama: Path, quant: str | None = None) -
     missing = [f for f in PACK_FILES if not (pack / f).exists()]
     if missing:
         fail(f"the pack builder did not write {pack / missing[0]}", "the reason is in the messages above")
-    stamp_pack(pack, shards)
+    stamp_pack(pack, shards, GLM_PACK_FORMAT)
     ok(f"pack: {pack}")
     base_template(pack)
     return pack
@@ -3297,7 +3386,20 @@ def compile_vision(pc, meta, llama: Path, src: str) -> bool:
     return VEXE.exists()
 
 
-def vision_step(a, pc, meta, llama: Path, d: Path, quant: str) -> dict | None:
+def vision_files_dir(a, m: dict, d: Path, models: Path | None = None, before: Path | None = None) -> Path:
+    """Where the vision encoder's two files are: --vision-dir; else the first of <model folder>/vision, the folder the
+    config before took them from, the model folder, the folder above it and the models folder that holds both (an
+    earlier install's flat layout); else <model folder>/vision, where they are downloaded to."""
+    if getattr(a, "vision_dir", None):
+        return Path(a.vision_dir).expanduser().resolve()
+    home = d / m["folder"]
+    for c in dict.fromkeys(x for x in (home, before, d, d.parent, models) if x is not None):
+        if all((c / m[k]).is_file() and (c / m[k]).stat().st_size > 0 for k in ("mmproj", "vocab")):
+            return c
+    return home
+
+
+def vision_step(a, pc, meta, llama: Path, d: Path, quant: str, models: Path | None = None) -> dict | None:
     """The config's "vision" entry - the image encoder and its files - or None (images off).  The server starts the
     encoder only while a request's new pictures are encoded, in GPU memory the model lends it, and measures on the
     first start how much that is on this GPU (serve/server.py, vision_footprint).  On a Mac (Metal: one memory, no
@@ -3313,9 +3415,14 @@ def vision_step(a, pc, meta, llama: Path, d: Path, quant: str) -> dict | None:
     if m is None:
         warn(f"no vision files are published for {quant}: the model reads text only")
         return None
-    vd = d / m["folder"]
+    before = read_json(ROOT / f"{glm_config_stem(quant)}{BACKEND_SUFFIX.get(pc.get('backend'), '')}.json").get("vision")
+    was = before.get("mmproj") if isinstance(before, dict) else None
+    vd = vision_files_dir(a, m, d, models, Path(was).parent if was else None)
     files = {k: vd / m[k] for k in ("mmproj", "vocab")}
     missing = [p for p in files.values() if not p.exists() or (m["sha256"].get(p.name) and p.stat().st_size == 0)]
+    if missing and getattr(a, "vision_dir", None):
+        fail(f"--vision-dir {a.vision_dir} lacks " + ", ".join(p.name for p in missing),
+             f"put {m['mmproj']} and {m['vocab']} there, or leave --vision-dir out to download them")
     if missing:
         repo, rev = m.get("repo", spec["repo"]), m.get("revision", spec["revision"])
         src_url = {p: hf_url(repo, rev, m["folder"], p.name) for p in missing}
@@ -3323,8 +3430,11 @@ def vision_step(a, pc, meta, llama: Path, d: Path, quant: str) -> dict | None:
             f"{repo} (folder {m['folder']}/), into {vd}:")
         for p in missing:
             say("    " + shell_join(["curl", "-L", "--fail", "-C", "-", "-o", str(p), src_url[p]]))
-        if not (a.download_model or a.yes) and ask("  Download them now? (y/n)", ["y", "n"], "y", False) != "y":
-            warn(f"not downloaded: the model reads text only ({ME} --setup asks again)")
+        # (--yes alone never downloads: it takes "n" here, as at the model's download)
+        if not a.download_model and ask("  Download them now? (y/n)", ["y", "n"], "n" if a.yes else "y",
+                                        a.yes) != "y":
+            warn(f"not downloaded: the model reads text only ({ME} --setup asks again; --download-model downloads "
+                 "them, --vision-dir <folder> takes them from a folder of yours)")
             return None
         for p in missing:
             fetch(src_url[p], p, m["sha256"].get(p.name))
@@ -3342,6 +3452,15 @@ def vision_step(a, pc, meta, llama: Path, d: Path, quant: str) -> dict | None:
 
 
 # ------------------------------------------------------------------------------------------------ 8. config + start
+BACKEND_SUFFIX = {"hip": "-hip", "metal": "-metal"}   # (a GLM config's name: maya-<quant><suffix>.json)
+
+
+def glm_config_stem(quant: str) -> str:
+    """maya-<quant>: a quant already named Maya-... is not prefixed twice (maya-s-v2-iq2_xxs, not maya-maya-...)."""
+    q = quant.lower()
+    return q if q.startswith("maya-") else f"maya-{q}"
+
+
 def parse_env(items) -> dict:
     env = {}
     for it in items:
@@ -3463,8 +3582,11 @@ def write_config(a, pc, meta, pack: Path, quant: str, ctx: int, models: Path, vi
         cfg["backend"] = "hip"
         # Leave space for the Linux desktop. The engine sizes its prompt chunk from
         # the available prompt-memory budget; forcing 256 here severely slows HIP.
-        hip_env = {"SAGUARO_GLM_RESERVE_MB": str(hip_reserve_mib(pc["gpus"])), "SAGUARO_GLM_RAM_HEADROOM_GB": "16"}
         gpus = pc["gpus"]
+        hip_env = {"SAGUARO_GLM_RESERVE_MB": str(hip_reserve_mib(gpus)), "SAGUARO_GLM_RAM_HEADROOM_GB": "16"}
+        if "SAGUARO_GLM_RESERVE_MB" not in env and getattr(a, "vram_reserve_mib", None) is None:
+            ok(f"VRAM kept free on each GPU: {hip_env['SAGUARO_GLM_RESERVE_MB']} MiB ({hip_reserve_why(gpus)}; "
+               "--env SAGUARO_GLM_RESERVE_MB=<MiB> changes it)")
         if len(gpus) == 1:
             hip_env["SAGUARO_GLM_SPLIT"] = "0"   # two or more cards: the engine picks the split (and drafts with MTP)
         # Larger prompt sub-batches feed the matrix cores much better (7900 XT: ~250 -> ~410 tok/s); they need
@@ -3502,8 +3624,18 @@ def write_config(a, pc, meta, pack: Path, quant: str, ctx: int, models: Path, vi
         cfg["api_key"] = a.api_key
     if vision:
         cfg["vision"] = vision
-    suffix = {"hip": "-hip", "metal": "-metal"}.get(pc.get("backend"), "")
-    cfg_path = ROOT / f"maya-{quant.lower()}{suffix}.json"
+    suffix = BACKEND_SUFFIX.get(pc.get("backend"), "")
+    cfg_path = ROOT / f"{glm_config_stem(quant)}{suffix}.json"
+    legacy = ROOT / f"maya-{quant.lower()}{suffix}.json"   # (a "Maya-..." quant's name before: maya-maya-...)
+    moved = legacy != cfg_path and legacy.exists() and not cfg_path.exists()
+    if moved:
+        legacy.replace(cfg_path)
+        shared = legacy.with_suffix(".shared-settings.json")
+        if shared.exists() and not cfg_path.with_suffix(".shared-settings.json").exists():
+            shared.replace(cfg_path.with_suffix(".shared-settings.json"))
+        for ext in ("sh", "bat"):
+            (ROOT / f"run-{legacy.stem}.{ext}").unlink(missing_ok=True)
+        ok(f"{legacy.name} (this quant's config before) is now {cfg_path.name}")
     cfg["log"] = str(cfg_path.with_suffix(".log"))
     local = choice[1] if choice and choice[0] == "local" else None   # (choose_model's answer)
     if PROFILE.exists() and profile_fits(pack):
@@ -4427,8 +4559,11 @@ def server_command(cfg_path: Path, a) -> tuple:
         say("  Loading takes a few minutes: the engine reads the GGUF files; with less unified memory than the model the")
         say("  experts stream from the SSD while it answers (decode speed is SSD-bound) - the first answers are the slowest.")
     else:
-        say("  Loading takes a few minutes: the engine pins up to all but about 6 GB of the free RAM for its expert tier")
-        say("  (SAGUARO_GLM_RAM_HEADROOM_GB changes the 6) and warms its caches - the first answers are the slowest.")
+        head = (cfg.get("env") or {}).get("SAGUARO_GLM_RAM_HEADROOM_GB") or os.environ.get("SAGUARO_GLM_RAM_HEADROOM_GB")
+        head = head or "6"   # (the engine's own: src/core/glm_fast_path.cu, 16 on an APU)
+        say(f"  Loading takes a few minutes: the engine pins up to all but about {head} GB of the free RAM for its")
+        say(f"  expert tier (SAGUARO_GLM_RAM_HEADROOM_GB changes the {head}) and warms its caches - the first answers are")
+        say("  the slowest.")
     say("  Ctrl+C (or closing this terminal) stops it. Engine log: " + str(cfg.get("log", "")))
     say("  " + "-" * 100)
     return cmd, env, info
@@ -4999,7 +5134,7 @@ def set_up(a, prev: dict) -> Path | None:
     ctx = choose_context(a, prev_ctx, recommended=recommended_context(choice, pc))
     ok(f"context: {ctx} tokens")
     draft = choose_draft(a, pc, inst)
-    ok("drafting: " + ("a DFlash2 drafter (downloaded with the model)" if draft == "dflash2" else "the MTP block"))
+    ok("drafting: " + draft_note(a, pc, draft))
     llama = tools_step(a)                              # 3
     meta = build_step(a, pc, llama)                    # 4
     got = model_step(a, models, choice)                # 5
@@ -5008,7 +5143,7 @@ def set_up(a, prev: dict) -> Path | None:
     d, shards, quant = got
     dflash = drafter_step(models) if draft == "dflash2" else None
     pack = metal_tokenizer_step(a, d, shards, quant) if metal else pack_step(a, d, shards, llama, quant)       # 6
-    vision = vision_step(a, pc, meta, llama, d, quant)  # 7
+    vision = vision_step(a, pc, meta, llama, d, quant, models)  # 7
     cfg_path = write_config(a, pc, meta, pack, quant, ctx, models, vision, choice, dflash, shards[0] if metal else None)   # 8
     if dflash is not None and metal:                   # (the speed calibration is CUDA's: on a Mac the choice is yours)
         ok("DFlash2 drafts on this Mac, not measured against the MTP block (both are exact): "
@@ -5946,8 +6081,7 @@ def write_config_ds4(a, pc: dict, meta: dict, pack: Path, ctx: int, models: Path
     elif hip and "--reserve-mib" not in args[:-1]:
         mib = hip_reserve_mib(pc["gpus"])
         set_arg(args, "--reserve-mib", mib)
-        ok(f"VRAM kept free on each GPU: {mib} MiB (the desktop and other programs on an AMD GPU allocate beside the "
-           "engine; --vram-reserve-mib changes it)")
+        ok(f"VRAM kept free on each GPU: {mib} MiB ({hip_reserve_why(pc['gpus'])}; --vram-reserve-mib changes it)")
     cfg = {"exe": str(DS4_EXE), "args": args, "cwd": str(ROOT), "tokenizer": str(pack / "tokenizer"),
            **({"backend": "hip"} if hip else {}),
            "model_name": DS4_ABL_MODEL_NAME if quant in DS4_ABL else DS4_MODEL_NAME,
@@ -6536,8 +6670,7 @@ def write_config_mm3(a, pc: dict, meta: dict, pack: Path, ctx: int, models: Path
     if hip and "--reserve-gb" not in args[:-1]:   # (as DeepSeek's on AMD: the desktop's allocations beside the engine)
         mib = hip_reserve_mib(pc["gpus"])
         set_arg(args, "--reserve-gb", f"{mib / 1024:.1f}")
-        ok(f"VRAM kept free on each GPU: {mib / 1024:.1f} GB (the desktop and other programs on an AMD GPU allocate "
-           "beside the engine)")
+        ok(f"VRAM kept free on each GPU: {mib / 1024:.1f} GB ({hip_reserve_why(pc['gpus'])})")
     cfg = {"exe": str(MM3_EXE), "args": args, "cwd": str(ROOT), "tokenizer": str(pack / "tokenizer"),
            **({"backend": "hip"} if hip else {}),
            "model_name": MM3_MODEL_NAME, "gpu": [g["index"] for g in pc["gpus"]],
@@ -7698,6 +7831,10 @@ def main() -> int:
                          "and one AMD Ryzen AI Max APU)")
     ap.add_argument("--no-vision", action="store_true", help="text only: no image encoder (saves its build and "
                                                              "its 1.1 GB of files)")
+    ap.add_argument("--vision-dir", metavar="FOLDER",
+                    help="GLM-5.3-Flash: the folder with the vision encoder's files (mmproj-GLM-5.3-Flash-F16.gguf, "
+                         "GLM-5.3-Flash-vocab.gguf) when they are not in <model folder>/vision, the model folder or "
+                         "the folder above it")
     ap.add_argument("--gguf-dir", help="use GLM-5.3-Flash GGUF files you already have: the folder with all of them, "
                                        "or the .gguf file (the first one of a split model) when the folder holds "
                                        "several models; it must be writable - the pack is written inside it "
@@ -7858,6 +7995,9 @@ def main() -> int:
                 (lay["said"] + (f": {HY4F.speeds(lay, quant)}" if HY4F.speeds(lay, quant) else " (not measured)")
                  if lay["fits"] else f"it does not fit: about {lay['need_gib']:.0f} GB of VRAM are needed beside the "
                                      f"experts; {IK2_SHOWN} is the model for one or two 16 GB cards") + ".")
+        if fam == "glm" and a.backend != "metal":
+            for line in glm_fit_lines(pc["gpus"]):
+                say(line)
         if a.backend == "metal":
             say(f"This Mac can run Saguaro on Metal (experimental). Run {ME} without --check to set it up.")
         elif a.backend == "hip":

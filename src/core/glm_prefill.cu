@@ -1292,6 +1292,9 @@ bool Glm5Model::prefill_setup(std::string& err) {
             T = biggest(ring_max);
             if (T == 0 && ring_max > kRingMin) T = biggest(kRingMin);
             if (T == 0) T = biggest(0);
+            // below the 256-token grid before token by token (a short prompt already runs as one 64-token-padded chunk)
+            for (int64_t c = 192; T == 0 && c >= 64; c -= 64)
+                if (c <= ceiling && room(c) >= 0) T = c;
         } else {
             for (int64_t c = ceiling; c >= 256; c /= 2)
                 if (room(c) >= 0) {
@@ -1310,7 +1313,8 @@ bool Glm5Model::prefill_setup(std::string& err) {
     const int64_t T = pick.first;
     if (T == 0) {
         std::fprintf(stderr, "glm prefill: CUDA%d the expert pool (%lld slots a layer) can lend no prompt chunk "
-                             "(--prefill %s) - token by token\n", dev_, (long long) per, mode.c_str());
+                             "(--prefill %s) - token by token (a smaller SAGUARO_GLM_RESERVE_MB leaves it more)\n",
+                     dev_, (long long) per, mode.c_str());
         prefill_destroy();
         return true;
     }
@@ -1504,6 +1508,35 @@ size_t Glm5Model::prefill_trim_prestage(size_t max_borrow) {
     S->pbuf_bytes = (size_t) np * S->gstride;
     S->borrow_bytes = base + ((S->pbuf_bytes + 255u) & ~(size_t) 255u);
     return S->borrow_bytes;
+}
+
+// ... and when even no prestage buffer leaves the loan small enough (the pool came out smaller than prefill_setup sized
+// the chunk for: a late reserve, VRAM taken meanwhile): a smaller chunk, down to 64 tokens, before token by token
+size_t Glm5Model::prefill_trim_chunk(size_t max_borrow) {
+    PrefillState* S = pf_;
+    if (S == nullptr || S->borrow_bytes <= max_borrow) return S ? S->borrow_bytes : 0;
+    const auto borrow = [&](int64_t T) {
+        const auto pu = prefill_bytes_for((size_t) T);
+        Carve c;
+        c.take<uint8_t>(pu.first + pu.second);
+        c.take<uint16_t>((size_t) S->w16_elems);
+        c.take<float>((size_t) S->w32_elems);
+        c.take<uint8_t>(S->ws_bytes);
+        c.take<uint8_t>(S->gbuf_bytes);
+        return c.off;
+    };
+    int64_t T = 0;
+    const int64_t from = S->T > 256 ? (S->T - 1) / 256 * 256 : (S->T - 1) / 64 * 64;
+    for (int64_t c = from; T == 0 && c >= 64; c -= c > 256 ? 256 : 64)
+        if (borrow(c) <= max_borrow) T = c;
+    if (T == 0) return S->borrow_bytes;
+    S->NP = 0;
+    S->pbuf_bytes = 0;
+    const auto pu = prefill_bytes_for((size_t) T);
+    S->arena_bytes = pu.first + pu.second;
+    S->borrow_bytes = borrow(T);
+    prefill_cap((int) T, "what the pool can lend");
+    return pf_ != nullptr ? pf_->borrow_bytes : 0;
 }
 
 bool Glm5Model::prefill_bind(uint8_t* region, size_t bytes, std::string& err) {
