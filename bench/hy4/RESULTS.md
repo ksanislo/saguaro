@@ -47,3 +47,12 @@ KL against layer split F16 (bench/hy4/kld_seed.py, 8 x 512 tokens of the docs, 2
 OPEN: tensor parallel with F16 rows differs from the layer split as much as 8-bit rows do. Not explained yet (the
 prompt chunk's partial sums go through the host in F16 - HY4_TP_F32=1 makes them F32; or this 2-bit quant amplifies
 last-bit differences). The floor arms were queued, not run: see NEXT-hy4.md item 1.
+
+## KL floor arms (2026-11-21 ~18:30 MST, run after the hand-back; vs layer split F16, 2040 positions)
+| Arm | Mean KL | Top-1 same | PPL (ref 31.89) |
+|---|---|---|---|
+| Layer split, half the experts on the CPU lane (--vram-experts 0.5) | 0.0581 | 89.4% | 32.02 |
+| Layer split, --chunk 1024 | 0.0586 | 89.6% | 31.97 |
+| --tp 4 --kv f16, F32 sums (HY4_TP_F32=1) | 0.0566 | 89.0% | 32.76 |
+Any change of rounding order (chunk size, CPU-lane share) moves this quant by KL ~0.057: that is the floor, and
+tensor parallel (0.056) and 8-bit cache rows (0.058-0.060) sit on it. Nothing to fix; --tp 4 with 8-bit rows stays.
