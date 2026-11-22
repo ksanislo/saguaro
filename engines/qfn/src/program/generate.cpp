@@ -19068,12 +19068,16 @@ int main(int argc, char** argv) {
                     strata::program::conv_cache::own_rewind(resume, (int64_t) live.size(), prev_prompt_n, 1024))
                     park_skip = "this request rewinds its own reply (SAGUARO_REWIND_PARK)";
                 if (park_skip == nullptr && slot_solo && live_imgs.empty() && (!from_live || incoming || slot_source >= 0))
-                    for (const BSlot& sl : bs)
+                    for (size_t b = 0; b < bs.size(); ++b) {
+                        const BSlot& sl = bs[b];
+                        // (a copy of it held at the other rope level is not this conversation's cache: park anyway)
                         if ((sl.active || sl.cached) && !sl.partial && !sl.reading && !sl.tainted && !sl.img &&
-                            sl.cvec == cvec_cached && strata::program::conv_cache::held_by_slot(live, sl.ids)) {
+                            sl.cvec == cvec_cached && bslot_ss[0][b]->rope_level == ss.rope_level &&
+                            strata::program::conv_cache::held_by_slot(live, sl.ids)) {
                             park_skip = "a batch slot holds this conversation (SAGUARO_SLOT_SOLO)";
                             break;
                         }
+                    }
                 if (park_skip != nullptr)
                     std::fprintf(stderr, "saguaro serve: conversation cache: the outgoing %zu tokens are not parked: %s\n",
                                  live.size(), park_skip);
