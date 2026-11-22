@@ -1292,6 +1292,9 @@ bool Glm5Model::prefill_setup(std::string& err) {
             T = biggest(ring_max);
             if (T == 0 && ring_max > kRingMin) T = biggest(kRingMin);
             if (T == 0) T = biggest(0);
+            // below the 256-token grid before token by token (a short prompt already runs as one 64-token-padded chunk)
+            for (int64_t c = 192; T == 0 && c >= 64; c -= 64)
+                if (c <= ceiling && room(c) >= 0) T = c;
         } else {
             for (int64_t c = ceiling; c >= 256; c /= 2)
                 if (room(c) >= 0) {
@@ -1310,7 +1313,8 @@ bool Glm5Model::prefill_setup(std::string& err) {
     const int64_t T = pick.first;
     if (T == 0) {
         std::fprintf(stderr, "glm prefill: CUDA%d the expert pool (%lld slots a layer) can lend no prompt chunk "
-                             "(--prefill %s) - token by token\n", dev_, (long long) per, mode.c_str());
+                             "(--prefill %s) - token by token (a smaller SAGUARO_GLM_RESERVE_MB leaves it more)\n",
+                     dev_, (long long) per, mode.c_str());
         prefill_destroy();
         return true;
     }
