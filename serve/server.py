@@ -77,6 +77,8 @@ from serve import ds4_vision, gpu_map, hy4_vision, logctx, loop_guard, mm3_visio
 ENGINE_VISION = (ds4_vision.Vision, mm3_vision.Vision)   # the engines that run their vision tower themselves
 #                                                          (hy4_vision.Vision is an mm3_vision.Vision)
 HY4_TEXT_ONLY = "Hy4-Flash with its pictures off"         # (no vision tower loaded: the errors' name for it)
+# the engines without the live per-request Turbo (saguaro-ik2 stops at its keys, saguaro-hy4 ignores them): exact
+NO_LIVE_TURBO = {"ik2": "Inkling 2", "hy4": "Hy4-Flash"}
 # saguaro-hy4's per-PC files where the config's env names none (child_env): the CPU lane's 4-bit copies' verdict,
 # the prompt route's rates, --drafting auto's choice
 HY4_LANE_FILE = ROOT / "data" / "hy4-cpu-lane.txt"
@@ -2743,7 +2745,7 @@ class Service:
         if not isinstance(req.get("turbo"), dict):
             default = self.turbo_default   # (read once: a concurrent POST /api/turbo/options stores None between two reads and dict(None) is a 500)
             req["turbo"] = dict(default) if default else None
-        if getattr(self, "engine_kind", None) == "ik2":   # (saguaro-ik2 has no Turbo: the request runs exact)
+        if getattr(self, "engine_kind", None) in NO_LIVE_TURBO:   # (no Turbo in these engines: the request runs exact)
             req["turbo"] = None
         bias = logit_bias_of(req.get("logit_bias"), len(getattr(self.tok, "tokens", None) or ()) or None)
         if bias and (getattr(self.engine, "info", None) or {}).get("logit_bias") != 1:
@@ -2825,8 +2827,8 @@ class Service:
         request that carries none of its own runs with (agents included).  It applies at once - no config rewrite,
         no reload - and is kept in a sidecar file for the next start; the engine's run config is not touched."""
         t = turbo_live.normalize_turbo(value)
-        if getattr(self, "engine_kind", None) == "ik2" and turbo_live.turbo_on(t):
-            raise ValueError("Turbo: Inkling 2's engine has none - its requests run exact")
+        if getattr(self, "engine_kind", None) in NO_LIVE_TURBO and turbo_live.turbo_on(t):
+            raise ValueError(f"Turbo: {NO_LIVE_TURBO[self.engine_kind]}'s engine has none - its requests run exact")
         self.turbo_default = turbo_live.turbo_on(t)     # (off, None: the model answers exact unless a request says otherwise)
         if self.turbo_path:
             try:
@@ -6868,7 +6870,8 @@ def make_handler(svc: Service):
                 # what requests without their own `turbo` run with - changes apply at once, no config rewrite
                 if self._authorized():
                     self._json(200, {"turbo": dict(svc.turbo_default) if svc.turbo_default else None,
-                                     **({"supported": False} if getattr(svc, "engine_kind", None) == "ik2" else {})})
+                                     **({"supported": False} if getattr(svc, "engine_kind", None) in NO_LIVE_TURBO
+                                        else {})})
             elif path == "/api/models":
                 # the Models page: the configs the setup wrote, the running one, each one's engine settings
                 if self._authorized():

@@ -110,7 +110,7 @@ export async function setTurbo(on) {
 export function TurboButton() {
   if (S.health && S.health.supervisor) return null;   // (under llama-swap the engine settings are its config)
   const t = S.turbo;
-  if (t.unavailable || t.supported === false) return null;   // (Inkling 2: its engine has no Turbo)
+  if (t.unavailable || t.supported === false) return null;   // (Inkling 2, Hy4-Flash: their engines have no Turbo)
   const tip = t.on ? "Turbo ON: trades quality for maximum speed (greedy decoding, no thinking, expert skipping, aggressive drafting). Click to put your settings back."
                    : "Turbo: trades quality for maximum speed, for benchmarks and playing with the engine. Your own settings come back when you switch it off.";
   return html`<button type="button" class=${`turbo${t.on ? " turbo--on" : ""}${t.busy ? " turbo--busy" : ""}`} aria-pressed=${t.on ? "true" : "false"}

@@ -202,7 +202,7 @@ as an option); the drafter (`--draft`: 2.4-2.7 tokens a step, but verifying 8 co
 
 1. Setup in `maya.py` (download, the RAM / VRAM check, the run config), as Hy4-Flash has - done for Inkling-2-Mini as
    an experimental preview (`maya.py --setup --model inkling-2-mini`: docs/MODELS.md); Inkling-2-Small by hand still.
-2. Several requests at once; the vision tower inside the engine (pictures work through `maya-vision`: section 8).
+2. Several requests at once; the vision tower inside the engine (pictures work through the image encoder `vision-glm`: section 8).
 3. A Maya quant of the experts in the shape of DeepSeek XS (section 5), for 160 GB of host memory.
 
 ## 8. Inkling-2-Mini: the looped model, whole on one 24 GB card
@@ -282,7 +282,7 @@ from the FP16 logits whichever kernels read it (KL 1.9e-3 on the tensor cores, 2
 tokens; FP16 on the tensor cores 2.2e-5) - but any two FP8 runs part within a few tokens: a difference of 1e-5
 flips codes of a 3-bit mantissa.
 
-**Pictures** go through `tools/vision`'s `maya-vision` built against a llama.cpp that has the Inkling 2 tower
+**Pictures** go through `tools/vision`'s image encoder (`vision-glm`) built against a llama.cpp that has the Inkling 2 tower
 (`PROJECTOR_TYPE_INKLING2V`; Maya's own build adds it to the pinned llama.cpp: `tools/vision/inkling2v_patch.py`,
 and needs no text model for it - the config's "vision" entry names none) and unsloth's `mmproj-BF16.gguf`. The
 setup sets them up; the encoder starts when a picture arrives (on the GPU while its free VRAM holds it, else on the
@@ -316,7 +316,7 @@ To run it (one GPU):
     cat > ik2-mini.json <<EOF
     {"exe": "build/saguaro-ik2", "args": ["--model", "Inkling-2-Mini-UD-Q4_K_XL.gguf", "--max-context", "262144"],
      "env": {"SAGUARO_IK2_KV": "fp8"}, "tokenizer": "ik2/tokenizer", "model_name": "inkling-2-mini",
-     "vision": {"exe": "build-vision/bin/maya-vision", "mmproj": "mmproj-BF16.gguf", "gpu": true}}
+     "vision": {"exe": "build-vision/bin/vision-glm", "mmproj": "mmproj-BF16.gguf", "gpu": true}}
     EOF
     python serve/server.py --engine maya --config ik2-mini.json
 

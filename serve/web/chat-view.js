@@ -359,6 +359,7 @@ function TurboMenu({open, close, anchor}) {
   <//>`;
 }
 function TurboChip({menu, setMenu, btn}) {
+  if (S.turboLive === undefined) return null;   // (no live Turbo in this engine - Inkling 2, Hy4-Flash - or an older server)
   const tb = turboOf(S.current), badge = turboBadge(tb);
   return html`<span class="anchor">
     <button type="button" ref=${btn} class=${`think-chip turbo-chip${tb ? " is-on" : ""}${menu ? " is-open" : ""}`}
