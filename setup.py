@@ -799,11 +799,13 @@ ENGINE_SOURCES = ("CMakeLists.txt", "cmake", "src", "include", "third_party/ggml
 
 def source_hash(parts) -> str:
     """A fingerprint of the files a compiled engine is built from, kept in engine/BUILD.json: when a `git pull`
-    changes them, the engine is compiled again (issue #31)."""
+    changes them, the engine is compiled again (issue #31).  Python's bytecode caches are not sources: a setup's own
+    run writes them (tools/vision/__pycache__) and must not make the next one rebuild."""
     h = hashlib.sha256(LLAMA_CPP_COMMIT.encode())
     for part in parts:
         base = ROOT / part
-        for f in [base] if base.is_file() else sorted(x for x in base.rglob("*") if x.is_file()):
+        for f in [base] if base.is_file() else sorted(x for x in base.rglob("*") if x.is_file() and not
+                                                      ("__pycache__" in x.parts or x.suffix == ".pyc")):
             h.update(f.relative_to(ROOT).as_posix().encode() + b"\0" + f.read_bytes().replace(b"\r\n", b"\n"))
     return h.hexdigest()[:16]
 
