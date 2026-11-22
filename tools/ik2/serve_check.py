@@ -170,6 +170,7 @@ def main() -> int:
     ap.add_argument("--env", action="append", default=[], help="K=V for the engine (SAGUARO_IK2_ROOM_MB=2048 ...)")
     ap.add_argument("--vision-set", action="append", default=[], help="K=V into the config's vision entry (JSON values)")
     ap.add_argument("--out", default=None, help="the folder under <build> (serve-check, serve-check-2 for two cards)")
+    ap.add_argument("--model", default=TC.MODEL, help="the GGUF (tokenizer and picture encoder: UD-Q4_K_XL's)")
     a = ap.parse_args()
     gpus = [int(x) for x in a.gpus.split(",")]
     work = a.build / (a.out or ("serve-check" if len(gpus) == 1 else "serve-check-%d" % len(gpus)))
@@ -180,10 +181,10 @@ def main() -> int:
         tokdir.mkdir(parents=True, exist_ok=True)
         ST.extract(TC.MODEL, str(tokdir), str(ROOT / "tools/ik2/chat_template.jinja"))
     cfg = {"exe": str(a.build / "saguaro-ik2"),
-           "args": ["--model", TC.MODEL, "--max-context", str(a.ctx), "--gpus", str(len(gpus)), "--chunk", str(a.chunk)],
+           "args": ["--model", a.model, "--max-context", str(a.ctx), "--gpus", str(len(gpus)), "--chunk", str(a.chunk)],
            "env": dict({"CUDA_DEVICE_ORDER": "PCI_BUS_ID", "SAGUARO_IK2_STATS": "1"},
                        **dict(kv.split("=", 1) for kv in a.env)), "cwd": str(ROOT),
-           "tokenizer": str(tokdir / "tokenizer"), "model_name": "Inkling-2-Mini-UD-Q4_K_XL", "gpu": gpus,
+           "tokenizer": str(tokdir / "tokenizer"), "model_name": Path(a.model).stem, "gpu": gpus,
            "sampling": {"temperature": 1.0, "top_p": 1.0}, "reasoning_effort": "high",
            "log": str(work / "engine.log")}
     if a.vision.exists():
