@@ -17,7 +17,7 @@
 | read chunk, 2 cards ctx 65536 (read2-*, one run each) | c2048 / 4096 / 8192: read 814 / 993 / 1087, decode 42.5-43.2 (all resident at 65536); not measured at 131072 |
 | T4 quant (QUANT-NOTES.md) | KL 1.23e-2 / top-1 94.95 % vs floor 1.9e-3 / 97.75 %; ~+15 % decode in one load each |
 
-Defaults from this: nothing changed yet (no arm is both interleaved and a clean win). Queued on build-ik2c
+Defaults from the overnight runs alone: none (no arm both interleaved and a clean win); set from the final A/Bs below. Queued on build-ik2c
 (build-ik2/night/final/ab.sh): PIN 0/1 x chunk 1024/2048 on 1 card, chunk 2048/4096/8192 on 2 cards at 131072,
 UD-Q4_K_XL vs the T4 quant on 1 card, serve_check on the quant. checks.sh: build-ik2c, t4_check, conv_check, quant load.
 checks.sh RESULT (build-ik2c = 795f6c9f, 2026-11-22 ~10:40 PST): build clean, ik2_cpu_test all passed, t4_check PASSED (kernels,
