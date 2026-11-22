@@ -29,7 +29,8 @@ class Run:
     def __init__(self, a, gpus, tag, env):
         e = TC.env_for(gpus)
         e.update(SAGUARO_IK2_STATS="1", **env)
-        args = ["--model", TC.MODEL, "--serve", "--max-context", str(a.ctx), "--gpus", str(len(gpus)), "--chunk", "1024"]
+        args = ["--model", TC.MODEL, "--serve", "--max-context", str(a.ctx), "--gpus", str(len(gpus)), "--chunk",
+                str(a.chunk)] + a.arg
         self.eng = TC.Engine(a.build / "saguaro-ik2", args, e, a.out / ("engine_%s.log" % tag))
         if self.eng.until(lambda l: l.startswith("READY "), 1800) is None:
             raise RuntimeError("engine did not come up: " + " | ".join(self.eng.lines[-6:]))
@@ -42,7 +43,7 @@ class Run:
         if got is None:
             raise RuntimeError("engine ended: " + " | ".join(self.eng.lines[-6:]))
         d = got[-1].split()
-        notes = [l[6:] for l in got if l.startswith("NOTE ")]
+        notes = [l[5:] for l in got if l.startswith("NOTE ")]
         return dict(toks=[int(l.split()[1]) for l in got if l.startswith("T ")], prompt=int(d[2]), reused=int(d[8]),
                     read_s=float(d[3]) / 1e3, wall=time.time() - t0, notes=notes)
 
@@ -56,9 +57,12 @@ def main() -> int:
     ap.add_argument("--build", type=Path, default=ROOT / "build-ik2b")
     ap.add_argument("--ctx", type=int, default=16384)
     ap.add_argument("--body", type=int, default=3000)
+    ap.add_argument("--chunk", type=int, default=1024)
+    ap.add_argument("--arg", action="append", default=[], help="more engine arguments")
+    ap.add_argument("--out", type=Path, default=None, help="logs and the saved folder (default <build>/conv_check)")
     a = ap.parse_args()
     gpus = [int(x) for x in a.gpus.split(",")]
-    a.out = a.build / "conv_check"
+    a.out = a.out or a.build / "conv_check"
     a.out.mkdir(parents=True, exist_ok=True)
     folder = a.out / "slots"
     shutil.rmtree(folder, ignore_errors=True)

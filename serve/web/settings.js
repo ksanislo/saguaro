@@ -420,7 +420,8 @@ function facts() {
     ["Experts", eng.experts && eng.engine_kind === "hy4"
                 ? `${fmt(eng.experts)} routed; ${+eng.vram_slots >= +eng.experts ? "all of them in VRAM"
                     : `${fmt(+eng.vram_slots || 0)} in VRAM, the others computed on the CPU from RAM`}`
-                : eng.engine_kind === "ik2" ? (+eng.gpus > 1 ? "all in VRAM, the layers dealt across the GPUs" : "in VRAM as far as it holds them, the rest streamed from RAM")
+                : eng.engine_kind === "ik2" ? (eng.path === "resident" || (!eng.path && +eng.gpus > 1) ? (+eng.gpus > 1 ? "all in VRAM, split across the GPUs" : "all in VRAM")
+                    : "the most picked in VRAM, the rest in pinned RAM (fetched by the GPU or computed on the CPU)")
                 : eng.experts ? `${fmt(eng.experts)} routed; room for ${fmt(eng.expert_slots || 0)} in VRAM` +
                  `${eng.ram_slots ? ` and ${fmt(eng.ram_slots)} in RAM` : ""}` +
                  `${+eng.expert_slots + (+eng.ram_slots || 0) >= +eng.experts ? "" : ", the rest read from the SSD"}` : null],
