@@ -164,7 +164,7 @@ void moe_combine(const uint16_t* y, const int* inv, const float* wt, int T, int 
 /// The same two with F32 inputs: gu [n][2 F] F32 (the experts' raw dot products can pass FP16's range: an NVFP4
 /// expert's values are its true ones over its scale) -> h FP16; y [rows][C] F32.
 void swiglu_cap_f32(const float* gu, int n, int F, const float* sg, const float* su, float gcap, float ucap,
-                    uint16_t* h, cudaStream_t s);
+                    uint16_t* h, cudaStream_t s, const uint8_t* mix_up = nullptr);   // (kMIX: the up part, its MACaQ)
 void moe_combine_f32(const float* y, const int* inv, const float* wt, int T, int K, int C, float* out, bool add,
                      cudaStream_t s);
 /// One token's moe_combine_f32 and the conv4_res after it in one launch: out [C] = conv4(sum_k wt[k] y[inv[k]])

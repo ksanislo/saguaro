@@ -29,6 +29,8 @@
 #include "ik2_off.cuh"
 #include "mm3_link.cuh"   // (two GPUs: the copies between them, peer only where tested)
 #include "strata/artifact/gguf_reader.hpp"
+#include "sf_codecs.h"
+#include "strata_inkling.hpp"
 #include "strata/spec/suffix_drafter.hpp"
 #include "../ds4/ds4_watchdog.hpp"   // (--serve's heartbeat rule, maya-ds4's)
 #ifdef STRATA_USE_HIP
@@ -127,12 +129,26 @@ double now() { return std::chrono::duration<double>(std::chrono::steady_clock::n
 
 // ---- the files
 
+void read_into_strided(const std::string& path, uint64_t off, int n_exp, size_t exp_bytes, size_t dst_stride,
+                       uint8_t* dst);
+const strata_fmt::InklingView* g_sv = nullptr;   // a Strata pack (--model X.strata), seen as the GGUF
+
 struct Shards {
     std::vector<std::unique_ptr<strata::GgufFile>> files;
     std::vector<std::string> paths;
     std::map<std::string, std::pair<int, const strata::TensorInfo*>> by_name;
+    std::unique_ptr<strata_fmt::InklingView> sv;
 
     explicit Shards(const std::string& first) {
+        if (strata_fmt::Pack::sniff(first)) {
+            sv.reset(new strata_fmt::InklingView);
+            std::string err;
+            if (!sv->build(first, err)) die(err);
+            g_sv = sv.get();
+            paths.push_back(first);
+            std::printf("saguaro ik2: Strata pack %s\n", sv->summary().c_str());
+            return;
+        }
         std::vector<std::string> ps{first};
         const size_t at = first.find("-00001-of-");
         if (at != std::string::npos) {
@@ -152,10 +168,16 @@ struct Shards {
         }
     }
     const strata::TensorInfo* info(const std::string& n) const {
+        if (sv) return sv->info(n);
         auto it = by_name.find(n);
         return it == by_name.end() ? nullptr : it->second.second;
     }
     const uint8_t* data(const std::string& n) const {
+        if (sv) {
+            const uint8_t* p = sv->data(n);
+            if (!p) die("no tensor data for " + n + " (an expert tensor of a Strata pack: read_experts)");
+            return p;
+        }
         auto it = by_name.find(n);
         if (it == by_name.end()) die("no tensor " + n);
         return files[it->second.first]->tensor_data(*it->second.second);
@@ -166,14 +188,28 @@ struct Shards {
     }
     int file_of(const std::string& n) const { return by_name.at(n).first; }
     double num(const std::string& key) const {
-        const auto* v = files[0]->get(key);
+        const auto* v = get(key);
         if (!v) die("no key " + key);
         return v->num();
     }
-    const strata::MetaValue* get(const std::string& key) const { return files[0]->get(key); }
+    const strata::MetaValue* get(const std::string& key) const { return sv ? sv->get(key) : files[0]->get(key); }
+    std::vector<const strata::TensorInfo*> all() const {
+        std::vector<const strata::TensorInfo*> v;
+        if (sv)
+            for (const auto& t : sv->tensors()) v.push_back(&t);
+        else
+            for (const auto& kv : by_name) v.push_back(kv.second.second);
+        return v;
+    }
+    // experts e0 .. e0 + n - 1 of an expert tensor (exp_bytes each in the file) into dst, dst_stride apart
+    void read_experts(const std::string& n, int e0, int ne, size_t exp_bytes, size_t dst_stride, uint8_t* dst) const {
+        if (sv) return sv->read_experts(n, e0, ne, dst_stride, dst);
+        read_into_strided(paths[file_of(n)], file_offset(n) + (uint64_t) e0 * exp_bytes, ne, exp_bytes, dst_stride, dst);
+    }
 };
 
 size_t tensor_bytes(const strata::TensorInfo& t) {
+    if (t.type == (uint32_t) strata_fmt::kMIX && g_sv) return g_sv->bytes(t.name);
     // (the blocks decoded here first: strata's block_geometry names NVFP4 but has no geometry for it)
     if (k::block_values((int) t.type)) return (size_t) (t.elements() / k::block_values((int) t.type)) * k::block_bytes((int) t.type);
     int e = 0, b = 0;
@@ -2041,14 +2077,16 @@ void run_prefill_moe(const Model& M, Layer& Ly, int l, int T, const uint16_t* xq
             const int cnt_e = W.cnt[e], st_e = W.start[e];
             const uint8_t* sl = X.slot_ptrs[e];
             gather_f16_16_kernel<<<cnt_e, 256, 0, g_s>>>(xin, X.gidx + st_e, cnt_e, C, X.ex16);
-            if (Ly.ty[0] == Ly.ty[1]) {
+            const bool mix = Ly.ty[0] == strata_fmt::kMIX;   // (each role part its own MixHdr: decoded apart)
+            if (Ly.ty[0] == Ly.ty[1] && !mix) {
                 k::decode_f16(Ly.ty[0], sl, (size_t) 2 * F * C, X.w16, g_s);
             } else {
                 k::decode_f16(Ly.ty[0], sl, (size_t) F * C, X.w16, g_s);
                 k::decode_f16(Ly.ty[1], sl + Ly.eb[0], (size_t) F * C, X.w16 + (size_t) F * C, g_s);
             }
             gemm16(X.w16, 2 * F, C, X.ex16, cnt_e, X.gu32, 2 * F);
-            k::swiglu_cap_f32(X.gu32, cnt_e, F, X.sg + st_e, X.su + st_e, c.gate_cap, c.up_cap, X.h16, g_s);
+            k::swiglu_cap_f32(X.gu32, cnt_e, F, X.sg + st_e, X.su + st_e, c.gate_cap, c.up_cap, X.h16, g_s,
+                              mix ? sl + Ly.eb[0] : nullptr);
             k::decode_f16(Ly.ty[2], sl + Ly.eb[0] + Ly.eb[1], (size_t) C * F, X.w16, g_s);
             gemm16(X.w16, C, F, X.h16, cnt_e, X.y32, C);
             scatter_add_rows_kernel<<<cnt_e, 256, 0, g_s>>>(X.y32, X.gidx + st_e, X.wtr + st_e, C, X.tmp, C);
@@ -2197,6 +2235,7 @@ void run_prefill_moe(const Model& M, Layer& Ly, int l, int T, const uint16_t* xq
                 const int cnt_e = W.cnt[e], st_e = W.start[e];
                 const uint8_t* sl = X.slot_ptrs[e];
                 gather_f16_16_kernel<<<cnt_e, 256, 0, g_s>>>(xin, X.gidx + st_e, cnt_e, C, X.ex16);
+                if (Ly.ty[0] == strata_fmt::kMIX) die("a Strata pack across two GPUs: not yet");
                 if (Ly.ty[0] == Ly.ty[1]) {
                     k::decode_f16(Ly.ty[0], sl, (size_t) 2 * Fd * C, X.w16, g_s);
                 } else {
@@ -5787,8 +5826,8 @@ int main(int argc, char** argv) {
     }
     if (n_gpu == 1 && !g_pool) {
         size_t exp_b = 0, dense_b = 0, kv_b = 0;
-        for (const auto& kv : S.by_name) {
-            const auto& t = *kv.second.second;
+        for (const auto* tp : S.all()) {
+            const auto& t = *tp;
             if (!k::block_values((int) t.type)) continue;
             if (t.name.find("_exps.weight") != std::string::npos) exp_b += tensor_bytes(t);
             else if (t.name != "token_embd.weight") dense_b += tensor_bytes(t);
@@ -6288,7 +6327,7 @@ int main(int argc, char** argv) {
     // (the resident path keeps every expert in VRAM, so no pinned host copy is needed: the experts go from where the
     //  files are mapped straight to their slots, and stay in the page cache for the next load - SAGUARO_IK2_HOST=pinned: as
     //  for the other models)
-    const bool host_mmap = getenv("SAGUARO_IK2_HOST") ? std::string(getenv("SAGUARO_IK2_HOST")) == "mmap" : g_fast_want;
+    const bool host_mmap = !S.sv && (getenv("SAGUARO_IK2_HOST") ? std::string(getenv("SAGUARO_IK2_HOST")) == "mmap" : g_fast_want);
     // The offload path pins only the experts the VRAM tier does not hold (owner, v1.1.73): the layers' blocks only
     // reserved here (no RAM), the tier planned on the real free VRAM (EC.init), copied in from where the files are
     // mapped, then the rest read and pinned (below the warm) - an 8 GB card's tier is RAM a 16 GB PC does not need.
@@ -6311,6 +6350,7 @@ int main(int argc, char** argv) {
         !(getenv("SAGUARO_IK2_ALLOC") && std::string(getenv("SAGUARO_IK2_ALLOC")) == "hostalloc"))
         pin_later = g_offs.tab = true;
 #endif
+    if (S.sv) pin_later = false;   // (a Strata pack's experts are re-laid as they are read: no file mapping to copy from)
     if (host_mmap) {
         if (g_pool) die("SAGUARO_IK2_HOST=mmap with the CPU lane");
         if (g_off_want) die("SAGUARO_IK2_HOST=mmap with the offload path (it reads pinned host memory: SAGUARO_IK2_OFF=0)");
@@ -6485,8 +6525,7 @@ int main(int argc, char** argv) {
                     const size_t role_off = J.roles[0] == 0 ? 0 : (J.roles[0] == 1 ? Ly.eb[0] : Ly.eb[0] + Ly.eb[1]);
                     const size_t exp_bytes = tensor_bytes(*S.info(J.name)) / c.E;
                     uint8_t* dst = (uint8_t*) pin.blocks[J.l].ptr + role_off;
-                    read_into_strided(S.paths[S.file_of(J.name)], S.file_offset(J.name), c.E, exp_bytes,
-                                      Ly.slot_bytes, dst);
+                    S.read_experts(J.name, 0, c.E, exp_bytes, Ly.slot_bytes, dst);
                     if (--jobs_left[J.l] == 0) layer_read(J.l);
                 }
             });
@@ -6856,8 +6895,7 @@ int main(int argc, char** argv) {
                         const size_t exp_bytes = tensor_bytes(*S.info(J.name)) / c.E;
                         uint8_t* blk = (uint8_t*) pin.blocks[J.l].ptr;
                         runs_of(J.l, [&](int e0, int n) {
-                            read_into_strided(S.paths[S.file_of(J.name)], S.file_offset(J.name) + (uint64_t) e0 * exp_bytes,
-                                              n, exp_bytes, Ly.slot_bytes, blk + (size_t) e0 * Ly.slot_bytes + role_off);
+                            S.read_experts(J.name, e0, n, exp_bytes, Ly.slot_bytes, blk + (size_t) e0 * Ly.slot_bytes + role_off);
                         });
                         if (--left[J.l]) continue;
                         runs_of(J.l, [&](int e0, int n) {   // (the layer's reads done: its runs pinned, mapped)
