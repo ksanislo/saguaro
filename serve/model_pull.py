@@ -65,15 +65,27 @@ def new_engine_sizes() -> dict:
         return {}
 
 
+_pc: dict = {}
+
+
 def this_pc() -> tuple:
-    """(this PC's NVIDIA cards as the setup reads them, its RAM in GB); ([], 0.0) where they cannot be read."""
+    """(this PC's NVIDIA cards as the setup reads them, its RAM in GB); ([], 0.0) where they cannot be read.  Asked
+    once a minute."""
+    if _pc and time.time() - _pc["at"] < 60:
+        return _pc["cards"], _pc["ram"]
+    cards, ram = _read_pc()
+    _pc.update(at=time.time(), cards=cards, ram=ram)
+    return cards, ram
+
+
+def _read_pc() -> tuple:
     try:
         import setup as SU
         cards = [g for g in SU.gpus() or [] if g.get("vram_gb")]
     except Exception:  # noqa: BLE001 - no NVIDIA tools here
         cards = []
     try:
-        ram = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / 1e9
+        ram = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / 2**30   # (as the setup counts it)
     except (ValueError, OSError, AttributeError):
         ram = 0.0
     return cards, ram
