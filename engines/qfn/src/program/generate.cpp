@@ -13210,7 +13210,25 @@ int main(int argc, char** argv) {
                         if (cudaMemcpy(buf.data(), xc.device_slot(sl) + off, 4096, cudaMemcpyDeviceToHost) != cudaSuccess) { (void) cudaGetLastError(); same = false; break; }
                         same = same && std::memcmp(buf.data(), b + off, 4096) == 0;
                     }
-                    if (!same) { ++bad; if (first < 0) { first = (int64_t) i; first_slot = sl; } }
+                    if (!same) {
+                        ++bad;
+                        if (first < 0) { first = (int64_t) i; first_slot = sl; }
+                        if (bad <= 4) {   // what the slot holds instead: another expert of the layer, zeros, or neither
+                            int64_t is = -1;
+                            bool zero = cudaMemcpy(buf.data(), xc.device_slot(sl), 4096, cudaMemcpyDeviceToHost) == cudaSuccess;
+                            if (zero) {
+                                for (int64_t e2 = 0; e2 < g.n_expert && is < 0; ++e2) {
+                                    const uint8_t* b2 = srcp->blob_stable(l, e2);
+                                    if (b2 != nullptr && std::memcmp(buf.data(), b2, 4096) == 0) is = e2;
+                                }
+                                for (size_t q = 0; q < 4096 && zero; ++q) zero = buf[q] == 0;
+                            }
+                            std::fprintf(stderr, "saguaro xcache verify (%s): CUDA%d slot %d should hold layer %lld expert %lld, holds %s%lld "
+                                                 "(that one's residency: %d)\n", at, v.dev, sl, (long long) l, (long long) e,
+                                         is >= 0 ? "expert " : zero ? "zeros " : "neither expert of the layer nor zeros ", (long long) is,
+                                         is >= 0 ? host_res[(size_t) (l * g.n_expert + is)] : -9);
+                        }
+                    }
                 }
                 char x[200];
                 std::snprintf(x, sizeof x, " CUDA%d: %lld resident, %lld differ (first layer %lld expert %lld slot %lld), %lld slots named twice, %lld too small, lo %lld top %lld;",
@@ -15310,6 +15328,13 @@ int main(int argc, char** argv) {
                 ~LendTime() { acc += std::chrono::duration<double, std::milli>(Clock::now() - t).count(); }
             } lend_time{req_times.lend_ms, t_ln};
             if (!lazy_land(true, e)) return false;   // a slot still landing is not lent again
+            // #879: an adaptive round's swaps still pending (a solo request's last round, applied only at its next
+            // window) target slots the loan may cover; unlanded they are not lent, the prompt path's buffers overwrite
+            // them, and applying them later makes those buffers resident experts.  They land first.
+            static const bool land_pending = [] { const char* v = std::getenv("SAGUARO_LEND_LAND_PENDING"); return v == nullptr || std::atoi(v) != 0; }();
+            std::vector<std::pair<int32_t, int32_t>> pend0;
+            if (!pending.empty()) pend0 = pending;
+            if (land_pending) apply_pending(true);
             const int64_t want_seg = lend_want(tokens);
             // `exact`: a planned segment read on - the loan it was read with (what is left would size another)
             const int64_t want = exact > 0 ? std::min(exact, o.prefill_chunk) : want_seg;
@@ -15377,6 +15402,15 @@ int main(int argc, char** argv) {
                                      "%lld slots, chunk %lld)\n", p.dev < 0 ? 0 : p.dev, (long long) p.sp->stage_cells(),
                                      (long long) (p.cache->slots() - first), (long long) want_p);
                     p.first_now = first;
+                }
+                if (!pend0.empty()) {
+                    int64_t n_in = 0, n_all = 0;
+                    for (const auto& [i, sl] : pend0)
+                        if (i / g.n_expert >= p.lb && i / g.n_expert < p.le) { ++n_all; n_in += sl >= first ? 1 : 0; }
+                    if (n_all > 0)
+                        std::fprintf(stderr, "saguaro serve: CUDA%d: a loan from slot %d met %lld adaptive swap(s) still pending, "
+                                             "%lld into the loan's slots (%s)\n", p.dev < 0 ? 0 : p.dev, (int) first,
+                                     (long long) n_all, (long long) n_in, land_pending ? "landed first" : "NOT landed: SAGUARO_LEND_LAND_PENDING=0");
                 }
                 for (int64_t l = p.lb; l < p.le; ++l)              // THIS participant's layers only
                     for (int64_t ex = 0; ex < g.n_expert; ++ex) {
@@ -15997,7 +16031,9 @@ int main(int argc, char** argv) {
             if (read_n > 0 && !adm_lend_covers(read_n, n)) {   // the loan changes only with no window in flight
                 const auto tf = Clock::now();
                 if (!pipe_drain()) return AdmEnd::fatal;
+                xcache_verify("admission: before the adaptive drain");
                 if (!adapt_tick(true)) { std::printf("ERR an adaptive refill failed\n"); return AdmEnd::fatal; }
+                xcache_verify("admission: before its lend");
                 if (!lend(read_n, e, 0, n)) {
                     std::printf("ERR lending the prompt path its slots failed: %s\n", e.c_str());
                     return AdmEnd::fatal;
@@ -16657,7 +16693,9 @@ int main(int argc, char** argv) {
                 const auto tf = Clock::now();
                 std::string e;
                 if (!pipe_drain()) return false;
+                xcache_verify("admissions: before the adaptive drain");
                 if (!adapt_tick(true)) { std::printf("ERR an adaptive refill failed\n"); return false; }
+                xcache_verify("admissions: before their lend");
                 // (SAGUARO_READ_YIELD: the whole chunk's loan, so a request served while reads are held needs no other;
                 // SAGUARO_SLOT_ADMIT_CHUNK caps it: the slots decoding beside the read keep the rest of the cache)
                 if (!lend(br_lend > 0 ? br_lend : piece, e, br_lend > 0 ? br_lend : cy_on && adm_chunk_cap == 0 ? o.prefill_chunk : 0,
@@ -17878,6 +17916,7 @@ int main(int argc, char** argv) {
             }
             // a command may touch the expert cache (a request lends slots, a K/V growth moves them, a session restore
             // quiesces it): a round of the asynchronous tier that the batch windows left in flight lands first
+            xcache_verify("line: before the adaptive drain");
             if (!adm_direct && !adapt_tick(true)) {
                 std::printf("ERR an adaptive refill failed\n");
                 return 1;
