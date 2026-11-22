@@ -38,7 +38,7 @@ Card runs only through /data/llm/bench/night-queue/queue.txt (IK2_NO_CLAIM=1, ca
 - Queued runs/r2 (conv_check 1 and 2 cards on the conversations build).
 - Forks: saguaro/ik2-up-serve (server/Monitor/tools), saguaro/ik2-up-setup (setup/Models/docs/configs).
 
-## Progress ~13:15 PST
+## Progress 12:33 PST
 - Merged saguaro/ik2-up-serve (server contract: engine STAT/DONE/INFO win, GEN keys temperature/top_p/top_k/seed/spec,
   VISION_GIB, drafting env, AMD free memory; Monitor ik2 tiers; par_check.py; serve_check/conv_check updated) and
   saguaro/ik2-up-setup (upstream fit rules in ik2_fit.py, offload layouts, WARM seed profile, drafting rows, Answers at
