@@ -1703,11 +1703,12 @@ bool Glm5Model::fast_setup(std::string& err) {
             }
         }
         // an on-demand vision encoder on the first GPU (the server sets SAGUARO_GLM_VISION_LEND_MB) borrows the same
-        // tail while it encodes, so the tail there is the larger of the two needs
+        // tail while it encodes, so the tail there is the larger of the two needs.  VLEND runs between requests (the
+        // engine idle, as a prompt runs alone), so the main slots keep the prompt's floor (pool_keep)
         vis_lend_ok_ = false;
         if (const char* v = getenv("SAGUARO_GLM_VISION_LEND_MB"); v != nullptr && dev_ == 0) {
             const size_t vb = (size_t) std::max(0LL, std::atoll(v)) << 20;
-            if (vb > 0 && per - tail_slots(vb) >= g.n_exp_used + gf::kSpares + 8) {
+            if (vb > 0 && per - tail_slots(vb) >= pool_keep(g.n_exp_used)) {
                 k_extra = std::max(k_extra, tail_slots(vb));
                 vis_lend_ok_ = true;
             } else if (vb > 0) {
