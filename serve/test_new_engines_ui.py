@@ -158,7 +158,7 @@ class Hy4Settings(unittest.TestCase):
         pack_files = sum((self.pack / n).stat().st_size for n in ("hy4.txt", "tensors.txt"))
         self.assertEqual(d["size"], 5000 + 7000 + 300 + pack_files)
         self.assertEqual([p.name for p in M.pack_shards(self.pack)], ["trunk.gguf", "ngram.gguf", "mmproj.gguf"])
-        self.assertEqual(d["needs"], {"cards": 4, "measured": False, "limits": [
+        self.assertEqual(d["needs"], {"cards": 4, "measured": None, "limits": [   # (a config written by hand)
             "one conversation at a time", "no saved conversations yet", "pictures not measured on Tesla T4s yet"]})
         shutil.rmtree(self.pack)
         self.assertIn("model files are not on this PC", M.describe(self.p, None)["missing"])
@@ -395,7 +395,9 @@ console.log(JSON.stringify({
   four: opt({tp: 4, gpus: [0, 1, 2, 3]}), two: opt({tp: "auto", gpus: [0, 1]}),
   notes: mp.dlNotes({needs: "N", fit: "F"}), none: mp.dlNotes({}), noFit: mp.dlNotes({needs: "N", fit: ""}),
   line: mp.needsLine({needs: {cards: 4, measured: true, limits: ["one conversation at a time"]}}),
-  one: mp.needsLine({needs: {cards: 1, measured: false, limits: []}}), plain: mp.needsLine({})}));""")
+  one: mp.needsLine({needs: {cards: 1, measured: false, limits: []}}), plain: mp.needsLine({}),
+  byHand: mp.needsLine({needs: {cards: 2, measured: null, limits: []}})}));""")
+        self.assertEqual(got["byHand"], "Set up for 2 GPUs")
         self.assertEqual(got["four"], [["auto", "Auto"], [0, "Off"], [4, "4"]])
         self.assertEqual(got["two"], [["auto", "Auto"], [0, "Off"], [4, "4"], [2, "2"]])
         self.assertEqual((got["notes"], got["none"], got["noFit"]), (["N", "F"], [], ["N"]))

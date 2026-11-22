@@ -812,7 +812,7 @@ export const dlNotes = (c) => [c.needs, c.fit].filter(Boolean);
 export function needsLine(m) {
   const n = m.needs;
   if (!n) return "";
-  const cards = n.cards ? `Set up for ${n.cards} GPU${n.cards === 1 ? "" : "s"}${n.measured ? " (a layout measured on Tesla T4s)" : " (a layout not measured yet)"}` : "";
+  const cards = n.cards ? `Set up for ${n.cards} GPU${n.cards === 1 ? "" : "s"}${n.measured === true ? " (a layout measured on Tesla T4s)" : n.measured === false ? " (a layout not measured yet)" : ""}` : "";
   return [cards, (n.limits || []).join(", ")].filter(Boolean).join(" · ");
 }
 function Download() {

@@ -799,7 +799,8 @@ def missing(cfg: dict) -> str | None:
 
 def needs(cfg: dict) -> dict | None:
     """What the page says a Hy4-Flash or Inkling 2 config runs on and what it does not do yet: {"cards": how many it
-    is set up for, "measured": its layout is one measured on Tesla T4s (the setup's record), "limits": plain lines}."""
+    is set up for, "measured": its layout is one measured on Tesla T4s (the setup's record; None for a config the
+    setup did not write: nothing claimed), "limits": plain lines}."""
     fam = family(cfg)
     if fam not in ("hy4", "ik2"):
         return None
@@ -807,7 +808,9 @@ def needs(cfg: dict) -> dict | None:
     limits = ["one conversation at a time", "no saved conversations yet"]
     if fam == "hy4":
         limits.append("pictures not measured on Tesla T4s yet")
-    return {"cards": len(set(gpus_of(cfg))) or None, "measured": bool(inst.get("measured")), "limits": limits}
+    measured = inst.get("measured")
+    return {"cards": len(set(gpus_of(cfg))) or None, "measured": measured if isinstance(measured, bool) else None,
+            "limits": limits}
 
 
 def describe(path: Path, running: str | None) -> dict:

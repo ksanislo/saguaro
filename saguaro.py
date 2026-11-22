@@ -7715,6 +7715,9 @@ def main() -> int:
         say()
         if fam == "ik2":                               # (what the setup would write for these cards)
             lay = IK2F.layout(pc["gpus"], len(pc["gpus"]))
+            if lay is None or len(lay["gpus"]) != len(pc["gpus"]):
+                fail(IK2F.unsupported("cuda", WIN, pc["gpus"]) or f"{IK2_SHOWN} runs on one or two cards of 16 GB or "
+                     "more: one of the cards chosen is smaller", "pick the cards with --gpu N or --gpus A,B")
             say(f"{IK2_SHOWN} on these cards - {lay['said']}" + (f": {IK2F.speeds(lay)}" if IK2F.speeds(lay) else "") + ".")
         elif fam == "hy4":
             quant = getattr(a, "hy4_quant", None) or HY4_DEFAULT_QUANT
