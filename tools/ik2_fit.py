@@ -4,8 +4,8 @@ and the Models page (serve/model_pull.py) alike.
 saguaro-ik2 runs unsloth's UD-Q4_K_XL (17.6 GB) on one or two NVIDIA cards from Turing (sm_75) on, Linux.  The two
 layouts measured on Tesla T4s (16 GB, NEXT-ik2.md) are the setup's:
 
-  one card    --gpus 1 --chunk 1024, context 32768: about a quarter of the experts are streamed from RAM
-  two cards   --gpus 2 --chunk 2048, context 131072: every expert in VRAM
+  one card    --gpus 1 --chunk 2048 SAGUARO_IK2_PIN=0, context 32768: about a quarter of the experts are streamed from RAM
+  two cards   --gpus 2 --chunk 8192, context 131072: every expert in VRAM
 
 A single card of 22 GB or more holds every expert (upstream Maya's layout, measured there on an RTX 3090, not here):
 the context is then the largest whose cache fits beside the model's 18.3 GiB.  Nothing here touches a GPU."""
@@ -21,8 +21,9 @@ MARGIN_GIB = 0.5
 CONTEXTS = [32768, 65536, 131072, 262144]
 ROOM_MB = 1024                                      # SAGUARO_IK2_ROOM_MB: VRAM left free on a T4-sized card
 THREADS = 8
-# (decode tok/s, read tok/s) measured on Tesla T4s, GPU clocks not pinned, ~1K tokens deep (NEXT-ik2.md)
-MEASURED = {1: (40, 490), 2: (48, 840)}
+LAYOUT_ENV = {"SAGUARO_IK2_ROOM_MB", "SAGUARO_IK2_PIN"}   # (the env keys a layout owns)
+# (decode tok/s, read tok/s) measured on Tesla T4s, GPU clocks not pinned, ~1K tokens deep, read 8-16K (NEXT-ik2.md, 2026-11-22)
+MEASURED = {1: (42, 640), 2: (52, 1130)}
 
 
 def usable(cards: list) -> list:
@@ -48,7 +49,7 @@ def layout(cards: list, want: int = 0, kv: str = "f16") -> dict | None:
     n = want if want in (1, 2) else (1 if big or len(have) < 2 else 2)
     n = min(n, len(have))
     if n == 2:
-        return {"gpus": have[:2], "args": ["--gpus", "2", "--chunk", "2048", "--threads", str(THREADS)],
+        return {"gpus": have[:2], "args": ["--gpus", "2", "--chunk", "8192", "--threads", str(THREADS)],
                 "context": 131072, "env": {"SAGUARO_IK2_ROOM_MB": str(ROOM_MB)}, "resident": True,
                 "measured": all(float(g["vram_gb"]) < BIG_VRAM_GB for g in have[:2]),
                 "said": "two cards: every expert in VRAM, a 131K context"}
@@ -57,8 +58,8 @@ def layout(cards: list, want: int = 0, kv: str = "f16") -> dict | None:
         return {"gpus": have[:1], "args": ["--gpus", "1", "--chunk", "2048", "--threads", str(THREADS)],
                 "context": ctx, "env": {}, "resident": True, "measured": False,
                 "said": "one card of 24 GB or more: every expert in VRAM"}
-    return {"gpus": have[:1], "args": ["--gpus", "1", "--chunk", "1024", "--threads", str(THREADS)],
-            "context": 32768, "env": {"SAGUARO_IK2_ROOM_MB": str(ROOM_MB)}, "resident": False, "measured": True,
+    return {"gpus": have[:1], "args": ["--gpus", "1", "--chunk", "2048", "--threads", str(THREADS)],
+            "context": 32768, "env": {"SAGUARO_IK2_ROOM_MB": str(ROOM_MB), "SAGUARO_IK2_PIN": "0"}, "resident": False, "measured": True,
             "said": "one 16 GB card: about a quarter of the experts streamed from RAM, a 32K context"}
 
 

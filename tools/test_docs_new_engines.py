@@ -58,7 +58,7 @@ class Docs(unittest.TestCase):
     def test_limits_and_licenses_are_said(self):
         for name in ("docs/HY4-FLASH.md", "docs/INKLING2-MINI.md"):
             text = PAGES[name]
-            for part in ("One conversation at a time", "No saved conversations yet", "## Install", "## Speed", "## Limits"):
+            for part in ("One conversation at a time", "## Install", "## Speed", "## Limits"):
                 self.assertIn(part, text, name)
         self.assertIn("Tencent Hy License", PAGES["docs/HY4-FLASH.md"])
         self.assertIn("LICENSE.hy4-flash", PAGES["docs/HY4-FLASH.md"])

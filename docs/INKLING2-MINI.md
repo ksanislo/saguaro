@@ -19,8 +19,8 @@ Back to [the models](MODELS.md) and the [README](../README.md). How the engine w
 
 | Cards | Layout the setup writes | Context | Experts |
 | --- | --- | ---: | --- |
-| One 16 GB card (one Tesla T4) | `--gpus 1 --chunk 1024` | 32K | about three quarters in VRAM, the rest streamed from RAM |
-| Two 16 GB cards (two Tesla T4s) | `--gpus 2 --chunk 2048` | 131K | all in VRAM |
+| One 16 GB card (one Tesla T4) | `--gpus 1 --chunk 2048` and `SAGUARO_IK2_PIN=0` | 32K | about three quarters in VRAM, the rest streamed from RAM |
+| Two 16 GB cards (two Tesla T4s) | `--gpus 2 --chunk 8192` | 131K | all in VRAM |
 | One card of 24 GB or more | `--gpus 1 --chunk 2048` | up to 131K (FP16 cache) | all in VRAM |
 
 The first two were measured here on Tesla T4s. The third is upstream Project Maya's layout (measured there on an
@@ -54,18 +54,18 @@ Files you already have go in with `./setup.sh --model inkling-2-mini --model-dir
 
 ## Speed
 
-Measured on Tesla T4s (16 GB, sm_75) with two Xeon E5-2660 v2, greedy 256-token answers about 1K tokens deep, GPU
-clocks not pinned:
+Measured on Tesla T4s (16 GB, sm_75) with two Xeon E5-2660 v2, greedy 128-256-token answers about 1K tokens deep,
+prompts of 8-16K tokens, GPU clocks not pinned (pinning them measured no gain):
 
 | | 1x Tesla T4, 32K context | 2x Tesla T4, 131K context |
 | --- | ---: | ---: |
-| Writing an answer | about 40 tok/s | about 48 tok/s |
-| Reading a prompt | about 490 tok/s | about 840 tok/s |
+| Writing an answer | about 42 tok/s | about 52 tok/s |
+| Reading a prompt | about 640 tok/s | about 1130 tok/s |
 | Load | 8-10 s | 8-10 s |
-| VRAM | 14.9 GiB | 15.4 + 8.1 GiB |
+| VRAM | 14.9 GiB | 14.9 + 14.3 GiB |
 
-Answers get slower deeper into a context (one card: 37 tok/s at 8-9K). One load each; this box drifts by about a
-tenth between runs.
+Answers get slower deeper into a context: one card 39 tok/s at 8K; two cards 46 at 16K, 40 at 30K and 28 at 125K.
+Two loads of each, interleaved; this box drifts by about a tenth between runs.
 
 ## What it does
 
@@ -81,9 +81,10 @@ tenth between runs.
 ## Limits
 
 - **One conversation at a time.** A second request waits for the first.
-- **No saved conversations yet:** a restart or a model switch reads the conversation again.
+- **Conversations kept:** up to four are set aside in RAM and come back without their prompt read again. They are
+  saved across a restart only when the config's env names a folder (`SAGUARO_IK2_SLOT_DIR`); the setup sets none yet.
 - **No drafter** is set up (the engine's `--draft` is by hand: [INKLING2.md](INKLING2.md)), and there is no Turbo.
-- The Monitor shows its speeds, context and each card's memory; the engine reports no per-token expert counts, so the
-  experts card says where they are instead of counting them.
-- Two cards were loaded at a 131K context, not filled to it; the config leaves 1 GiB of the first card free for that
-  (`SAGUARO_IK2_ROOM_MB`).
+- The Monitor shows its speeds, context and each card's memory; the experts card counts the expert-cache hits after
+  each answer when the config's env has `SAGUARO_IK2_STATS=1`, and otherwise says where the experts are.
+- Two cards were filled to 125K tokens of a 131K context (at `--chunk 2048`; `--chunk 8192` to 16K); the config leaves
+  1 GiB of the first card free for that (`SAGUARO_IK2_ROOM_MB`).

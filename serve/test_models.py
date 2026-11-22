@@ -794,7 +794,7 @@ class Inkling2(unittest.TestCase):
     def test_family_and_settings(self):
         self.assertEqual(M.family(self.cfg), "ik2")
         self.assertEqual(M.settings_of(self.cfg),
-                         {"context": 131072, "gpus": [2, 3], "images": True, "prefill_chunk": 2048,
+                         {"context": 131072, "gpus": [2, 3], "images": True, "prefill_chunk": 8192,
                           "cpu_threads": 8, "kv": "f16",
                           "env": {"CUDA_DEVICE_ORDER": "PCI_BUS_ID", "SAGUARO_IK2_ROOM_MB": "1024",
                                   "SAGUARO_IK2_STATS": "1",
