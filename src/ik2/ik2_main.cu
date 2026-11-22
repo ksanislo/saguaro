@@ -7589,6 +7589,7 @@ int main(int argc, char** argv) {
                             g_two.on && d == 1 ? g_two.bytes : g_dev[d].EC.total_bytes());
             }
             use_dev(0);
+            CU(cudaSetDevice(0));   // (GPU 1 was made current above without use_dev: g_cur still says 0)
             if (g_par > 1) std::printf("READY %d stop multi=%d\n", ctx_s, g_par);
             else std::printf("READY %d stop\n", ctx);
         } else {
