@@ -2401,25 +2401,40 @@ struct Model::Impl {
         head_b += draft_plan_bytes();
         if (own) head_b += (double) scratch_bytes();
         head_tp = false;
+        int lane_head_rows = 0;      // (HY4_TP_HEAD_MEMBER with the CPU lane: the slice the lane's plan counts)
+        double lane_head_b = 0;
         {   // (the head's rows over the members too, where their VRAM holds a share: HY4_TP_HEAD=0: the head's GPU alone)
             const char* e = std::getenv("HY4_TP_HEAD");
             double have = 1e30;
             for (int i : mem) have = std::min(have, free_b[(size_t) i] - (i == head_gpu ? head_b : 0.0));
-            if (ot && ot->type == "BF16" && head_gpu != mem[0] && !(e && std::atoi(e) == 0) &&
+            // (HY4_TP_HEAD_MEMBER=1: also where the head's GPU is member 0 and whatever the head's type - every member
+            //  its quarter of the rows, member 0 the few left over as the head GPU's part; the same logits)
+            const char* hm = std::getenv("HY4_TP_HEAD_MEMBER");
+            const bool on_member = ot && head_gpu == mem[0] && hm && std::atoi(hm) != 0;
+            if (ot && ((ot->type == "BF16" && head_gpu != mem[0]) || on_member) && !(e && std::atoi(e) == 0) &&
                 !std::getenv("HY4_DUMP") && !std::getenv("HY4_INJECT")) {
                 // (the head's GPU: a member's share of the rows - its memory may be faster, but the final state reaches it
                 //  two copies after the members have theirs, and the window ends when the last part is in.
                 //  HY4_TP_HEAD_UNITS: its share in members' shares)
                 const char* hu = std::getenv("HY4_TP_HEAD_UNITS");
                 const int hw = hu ? std::max(1, std::atoi(hu)) : 1;
-                const int ru = g.n_vocab / (N + hw) / 8 * 8;
-                const double slice = (double) ru * g.n_embd * 2 + (double) W * ru * 4 +
+                int ru = g.n_vocab / (N + hw) / 8 * 8;
+                if (on_member) {
+                    ru = g.n_vocab / N / 8 * 8;
+                    if (ru * N >= g.n_vocab) ru -= 8;
+                }
+                const double slice = (on_member ? (double) ot->bytes / g.n_vocab * ru : (double) ru * g.n_embd * 2) +
+                                     (double) W * ru * 4 +
                                      (double) g.hc * g.hc * g.n_embd * 4 + (double) (1u << 20) +
                                      (mtp_counted() ? (double) ru * iq::row_bytes(iq::kQ4_K, g.n_embd) : 0.0);
                 if (ru >= 128 && need + slice <= have) {
                     head_tp = true;
                     head_rows = ru;
                     need += slice;
+                }
+                if (on_member && !head_tp && ru >= 128) {
+                    lane_head_rows = ru;
+                    lane_head_b = slice;
                 }
             }
         }
@@ -2435,6 +2450,11 @@ struct Model::Impl {
                 one += (double) expert_bytes(il) * 1.02;
                 stage = std::max(stage, (double) expert_bytes(il) * kStage);
                 tp_unsplit[(size_t) il] = 1;
+            }
+            if (lane_head_rows > 0) {
+                head_tp = true;
+                head_rows = lane_head_rows;
+                fixed += lane_head_b;
             }
             std::vector<int> cap((size_t) N, 0);
             long long total = 0;
@@ -7964,7 +7984,16 @@ struct Model::Impl {
                 eg_last_s = now_s() - t0;
             });
         }
+        // (HY4_CREW_PIN: a member's thread on its GPU's NUMA node's cores - 1; or one core of them - 2.  Off: wherever)
+        static const int crew_pin = std::getenv("HY4_CREW_PIN") ? std::atoi(std::getenv("HY4_CREW_PIN")) : 0;
         crew->start([&](int m) {
+            static thread_local bool placed = false;
+            if (crew_pin > 0 && !placed && m < N) {
+                placed = true;
+                const std::vector<int> c = node_cpus(gpu_numa_node(G[(size_t) mem[(size_t) m]].dev));
+                if (crew_pin == 1 || c.size() < 8) pin_to(c);
+                else pin_to({c[(size_t) (1 + m) % c.size()]});
+            }
             if (tp_prof) q_in[(size_t) m] = now_s();
             const bool ok2 = m < N ? member_forward(m, ids, T, p0, want, logits_out, v0, xv, errs[(size_t) m])
                                    : helper_forward(m - N, T, v0, errs[(size_t) m]);
@@ -8617,6 +8646,169 @@ bool Model::resumable(int64_t pos) const {
     return ring_holds(pos, m->end, m->ring_lo, m->ring, (int64_t) std::max(m->g.n_swa, m->g.ix_kpool) - 1);
 }
 int64_t Model::end() const { return m->end; }
+
+// ---------------------------------------------------------------- a conversation's caches to a file and back
+namespace {
+constexpr char kStateMagic[8] = {'H', 'Y', '4', 'C', 'O', 'N', 'V', '1'};
+constexpr size_t kStateChunk = (size_t) 32 << 20;
+}  // namespace
+
+bool Model::state_ok() const { return m->kv_res() == 0 && !has_mtp() && !has_dfly2(); }
+
+std::string Model::state_id() const {
+    const Impl& x = *m;
+    char b[200];
+    std::snprintf(b, sizeof b, "hy4 conv1 layers=%d ring=%d row=%zu pool=%zu kpool=%d ixdim=%d embd=%d", x.g.n_layer,
+                  x.ring, x.kv_rb(), x.pool_b(), x.g.ix_kpool, x.g.ix_dim, x.g.n_embd);
+    return b;
+}
+
+bool Model::state_save(int64_t n, std::FILE* f, std::string& err) {
+    Impl& x = *m;
+    if (!state_ok() || n <= 0 || n != x.end) {
+        err = "the caches hold no conversation of that length to save";
+        return false;
+    }
+    const int64_t lo = std::max<int64_t>(x.ring_lo, std::max<int64_t>(0, n - x.ring));
+    const int64_t hd[3] = {n, lo, x.g.n_layer};
+    if (std::fwrite(kStateMagic, 1, 8, f) != 8 || std::fwrite(hd, sizeof hd, 1, f) != 1) {
+        err = "the file";
+        return false;
+    }
+    std::vector<uint8_t> buf(kStateChunk);
+    auto put = [&](const void* src, size_t bytes) -> bool {
+        for (size_t a = 0; a < bytes; a += kStateChunk) {
+            const size_t c = std::min(kStateChunk, bytes - a);
+            if (cudaMemcpy(buf.data(), (const uint8_t*) src + a, c, cudaMemcpyDeviceToHost) != cudaSuccess) {
+                (void) cudaGetLastError();
+                err = "a copy from the GPU";
+                return false;
+            }
+            if (std::fwrite(buf.data(), 1, c, f) != c) {
+                err = "the file";
+                return false;
+            }
+        }
+        return true;
+    };
+    // positions [lo, n) of a ring of `rows` rows, in position order
+    auto put_ring = [&](const void* base, size_t rb, int64_t rows) -> bool {
+        for (int64_t p = lo; p < n;) {
+            const int64_t r0 = p % rows, run = std::min<int64_t>(n - p, rows - r0);
+            if (!put((const uint8_t*) base + (size_t) r0 * rb, (size_t) run * rb)) return false;
+            p += run;
+        }
+        return true;
+    };
+    const size_t rb = x.kv_rb(), D = (size_t) x.g.ix_dim, pb = x.pool_b();
+    const std::vector<Layer>& Ls = x.tp > 1 ? x.TL[0] : x.L;
+    for (int il = 0; il < x.g.n_layer; ++il) {
+        const Layer& l = Ls[(size_t) il];
+        Gpu& gp = x.G[(size_t) l.gpu];
+        if (cudaSetDevice(gp.dev) != cudaSuccess || cudaDeviceSynchronize() != cudaSuccess) {
+            (void) cudaGetLastError();
+            err = "GPU " + std::to_string(gp.dev);
+            return false;
+        }
+        if (l.swa) {
+            if (!put_ring(l.kv, rb, x.ring)) return false;
+        } else if (!put(l.kv, (size_t) n * rb) || !put(l.pooled, (size_t) (n / x.g.ix_kpool) * D * pb) ||
+                   !put_ring(l.ivg, 2 * D * pb, x.ring)) {
+            return false;
+        }
+    }
+    cudaSetDevice(x.G[(size_t) x.head_gpu].dev);
+    return true;
+}
+
+bool Model::state_load(int64_t n, std::FILE* f, std::string& err, int64_t n_file, const int* ids) {
+    Impl& x = *m;
+    char mg[8];
+    int64_t hd[3] = {0, 0, 0};
+    if (!state_ok() || std::fread(mg, 1, 8, f) != 8 || std::memcmp(mg, kStateMagic, 8) != 0 ||
+        std::fread(hd, sizeof hd, 1, f) != 1 || hd[2] != x.g.n_layer || hd[0] != n_file || n <= 0 || n > hd[0] ||
+        n > x.o.max_ctx || hd[1] < 0 || hd[1] > hd[0]) {
+        err = "not a conversation of this model and length";
+        return false;
+    }
+    const int64_t N = hd[0], lo = hd[1], back = (int64_t) std::max(x.g.n_swa, x.g.ix_kpool) - 1;
+    if (N - lo > x.ring || std::max<int64_t>(0, n - back) < lo) {
+        err = "its sliding-window rows do not reach back to that position";
+        return false;
+    }
+    // (from here the caches are written: a failure leaves no conversation)
+    x.end = 0;
+    x.ring_lo = 0;
+    x.mtp_done = 0;
+    x.tokens.clear();
+    std::vector<uint8_t> buf(kStateChunk);
+    const int copies = x.tp > 1 ? x.tp : 1;
+    for (const Gpu& gp : x.G)
+        if (cudaSetDevice(gp.dev) != cudaSuccess || cudaDeviceSynchronize() != cudaSuccess) {
+            (void) cudaGetLastError();
+            err = "GPU " + std::to_string(gp.dev);
+            return false;
+        }
+    // `bytes` of the file into every copy's rows at off (dst(j): copy j's base), then `skip` bytes passed over
+    auto get = [&](const std::function<uint8_t*(int)>& dst, size_t off, size_t bytes, int il) -> bool {
+        for (size_t a = 0; a < bytes; a += kStateChunk) {
+            const size_t c = std::min(kStateChunk, bytes - a);
+            if (std::fread(buf.data(), 1, c, f) != c) {
+                err = "the file is cut short";
+                return false;
+            }
+            for (int j = 0; j < copies; ++j) {
+                const Layer& l = x.tp > 1 ? x.TL[(size_t) j][(size_t) il] : x.L[(size_t) il];
+                if (cudaSetDevice(x.G[(size_t) l.gpu].dev) != cudaSuccess ||
+                    cudaMemcpy(dst(j) + off + a, buf.data(), c, cudaMemcpyHostToDevice) != cudaSuccess) {
+                    (void) cudaGetLastError();
+                    err = "a copy to the GPU";
+                    return false;
+                }
+            }
+        }
+        return true;
+    };
+    auto skip = [&](size_t bytes) -> bool {
+        if (bytes == 0) return true;
+#if defined(_WIN32)
+        if (_fseeki64(f, (long long) bytes, SEEK_CUR) == 0) return true;
+#else
+        if (fseeko(f, (off_t) bytes, SEEK_CUR) == 0) return true;
+#endif
+        err = "the file is cut short";
+        return false;
+    };
+    // positions [lo, n) of the file's [lo, N) into rings of `rows` rows
+    auto get_ring = [&](const std::function<uint8_t*(int)>& dst, size_t rb, int64_t rows, int il) -> bool {
+        for (int64_t p = lo; p < n;) {
+            const int64_t r0 = p % rows, run = std::min<int64_t>(n - p, rows - r0);
+            if (!get(dst, (size_t) r0 * rb, (size_t) run * rb, il)) return false;
+            p += run;
+        }
+        return skip((size_t) (N - std::max(n, lo)) * rb);
+    };
+    const size_t rb = x.kv_rb(), D = (size_t) x.g.ix_dim, pb = x.pool_b();
+    const int64_t KP = x.g.ix_kpool;
+    for (int il = 0; il < x.g.n_layer; ++il) {
+        auto lay = [&](int j) -> const Layer& { return x.tp > 1 ? x.TL[(size_t) j][(size_t) il] : x.L[(size_t) il]; };
+        auto kv = [&](int j) { return (uint8_t*) lay(j).kv; };
+        auto pooled = [&](int j) { return (uint8_t*) lay(j).pooled; };
+        auto ivg = [&](int j) { return (uint8_t*) lay(j).ivg; };
+        if (lay(0).swa) {
+            if (!get_ring(kv, rb, x.ring, il)) return false;
+        } else if (!get(kv, 0, (size_t) n * rb, il) || !skip((size_t) (N - n) * rb) ||
+                   !get(pooled, 0, (size_t) (n / KP) * D * pb, il) || !skip((size_t) (N / KP - n / KP) * D * pb) ||
+                   !get_ring(ivg, 2 * D * pb, x.ring, il)) {
+            return false;
+        }
+    }
+    cudaSetDevice(x.G[(size_t) x.head_gpu].dev);
+    x.end = n;
+    x.ring_lo = lo;
+    x.tokens.assign(ids, ids + n);
+    return true;
+}
 
 bool Model::forward(const int* ids, int n, int64_t pos0, int want, float* logits_out, std::string& err) {
     if (n <= 0) {
