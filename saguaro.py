@@ -3331,7 +3331,20 @@ def compile_vision(pc, meta, llama: Path, src: str) -> bool:
     return VEXE.exists()
 
 
-def vision_step(a, pc, meta, llama: Path, d: Path, quant: str) -> dict | None:
+def vision_files_dir(a, m: dict, d: Path, models: Path | None = None, before: Path | None = None) -> Path:
+    """Where the vision encoder's two files are: --vision-dir; else the first of <model folder>/vision, the folder the
+    config before took them from, the model folder, the folder above it and the models folder that holds both (an
+    earlier install's flat layout); else <model folder>/vision, where they are downloaded to."""
+    if getattr(a, "vision_dir", None):
+        return Path(a.vision_dir).expanduser().resolve()
+    home = d / m["folder"]
+    for c in dict.fromkeys(x for x in (home, before, d, d.parent, models) if x is not None):
+        if all((c / m[k]).is_file() and (c / m[k]).stat().st_size > 0 for k in ("mmproj", "vocab")):
+            return c
+    return home
+
+
+def vision_step(a, pc, meta, llama: Path, d: Path, quant: str, models: Path | None = None) -> dict | None:
     """The config's "vision" entry - the image encoder and its files - or None (images off).  The server starts the
     encoder only while a request's new pictures are encoded, in GPU memory the model lends it, and measures on the
     first start how much that is on this GPU (serve/server.py, vision_footprint).  On a Mac (Metal: one memory, no
@@ -3347,9 +3360,14 @@ def vision_step(a, pc, meta, llama: Path, d: Path, quant: str) -> dict | None:
     if m is None:
         warn(f"no vision files are published for {quant}: the model reads text only")
         return None
-    vd = d / m["folder"]
+    before = read_json(ROOT / f"{glm_config_stem(quant)}{BACKEND_SUFFIX.get(pc.get('backend'), '')}.json").get("vision")
+    was = before.get("mmproj") if isinstance(before, dict) else None
+    vd = vision_files_dir(a, m, d, models, Path(was).parent if was else None)
     files = {k: vd / m[k] for k in ("mmproj", "vocab")}
     missing = [p for p in files.values() if not p.exists() or (m["sha256"].get(p.name) and p.stat().st_size == 0)]
+    if missing and getattr(a, "vision_dir", None):
+        fail(f"--vision-dir {a.vision_dir} lacks " + ", ".join(p.name for p in missing),
+             f"put {m['mmproj']} and {m['vocab']} there, or leave --vision-dir out to download them")
     if missing:
         repo, rev = m.get("repo", spec["repo"]), m.get("revision", spec["revision"])
         src_url = {p: hf_url(repo, rev, m["folder"], p.name) for p in missing}
@@ -3357,8 +3375,11 @@ def vision_step(a, pc, meta, llama: Path, d: Path, quant: str) -> dict | None:
             f"{repo} (folder {m['folder']}/), into {vd}:")
         for p in missing:
             say("    " + shell_join(["curl", "-L", "--fail", "-C", "-", "-o", str(p), src_url[p]]))
-        if not (a.download_model or a.yes) and ask("  Download them now? (y/n)", ["y", "n"], "y", False) != "y":
-            warn(f"not downloaded: the model reads text only ({ME} --setup asks again)")
+        # (--yes alone never downloads: it takes "n" here, as at the model's download)
+        if not a.download_model and ask("  Download them now? (y/n)", ["y", "n"], "n" if a.yes else "y",
+                                        a.yes) != "y":
+            warn(f"not downloaded: the model reads text only ({ME} --setup asks again; --download-model downloads "
+                 "them, --vision-dir <folder> takes them from a folder of yours)")
             return None
         for p in missing:
             fetch(src_url[p], p, m["sha256"].get(p.name))
@@ -5064,7 +5085,7 @@ def set_up(a, prev: dict) -> Path | None:
     d, shards, quant = got
     dflash = drafter_step(models) if draft == "dflash2" else None
     pack = metal_tokenizer_step(a, d, shards, quant) if metal else pack_step(a, d, shards, llama, quant)       # 6
-    vision = vision_step(a, pc, meta, llama, d, quant)  # 7
+    vision = vision_step(a, pc, meta, llama, d, quant, models)  # 7
     cfg_path = write_config(a, pc, meta, pack, quant, ctx, models, vision, choice, dflash, shards[0] if metal else None)   # 8
     if dflash is not None and metal:                   # (the speed calibration is CUDA's: on a Mac the choice is yours)
         ok("DFlash2 drafts on this Mac, not measured against the MTP block (both are exact): "
@@ -7752,6 +7773,10 @@ def main() -> int:
                          "and one AMD Ryzen AI Max APU)")
     ap.add_argument("--no-vision", action="store_true", help="text only: no image encoder (saves its build and "
                                                              "its 1.1 GB of files)")
+    ap.add_argument("--vision-dir", metavar="FOLDER",
+                    help="GLM-5.3-Flash: the folder with the vision encoder's files (mmproj-GLM-5.3-Flash-F16.gguf, "
+                         "GLM-5.3-Flash-vocab.gguf) when they are not in <model folder>/vision, the model folder or "
+                         "the folder above it")
     ap.add_argument("--gguf-dir", help="use GLM-5.3-Flash GGUF files you already have: the folder with all of them, "
                                        "or the .gguf file (the first one of a split model) when the folder holds "
                                        "several models; it must be writable - the pack is written inside it "
