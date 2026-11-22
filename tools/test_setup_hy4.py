@@ -497,6 +497,8 @@ class HotSeed(unittest.TestCase):
                 self.assertEqual(SV.hy4_hot_seed(cfg("Hy4-Flash-Maya-XS-8GB")).name, "hy4-expert-hot-Hy4-Flash-Maya-XS.bin")
                 self.assertIsNone(SV.hy4_hot_seed(cfg("Hy4-Flash-Maya-S")))
                 self.assertNotIn("HY4_HOT_SEED", SV.child_env(cfg("Other")))
+        for size in ("XS", "M"):                               # (shipped)
+            self.assertTrue((ROOT / "data" / "hy4-hot-seed" / f"hy4-expert-hot-Hy4-Flash-Maya-{size}.bin").is_file())
 
 if __name__ == "__main__":
     unittest.main()
