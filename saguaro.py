@@ -2890,7 +2890,7 @@ def offer_download(a, quant: str, d: Path, shards: list, m: dict | None = None) 
              f"accept its terms at https://huggingface.co/{m['repo']}, then set HF_TOKEN (a read token from "
              f"https://huggingface.co/settings/tokens) or run `hf auth login`, and run {ME} again")
     if not a.download_model and ask(f"  Download about {remaining:.0f} GB now with these commands? (y/n)",
-                                    ["y", "n"], "n", False) != "y":
+                                    ["y", "n"], "n", a.yes) != "y":   # (--yes takes the default: no)
         say()
         say(f"Nothing was downloaded. When the files are in place, run {ME} again "
             f"({ME} --download-model downloads them without asking).")
