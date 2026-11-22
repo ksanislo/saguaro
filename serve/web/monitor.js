@@ -341,9 +341,11 @@ const TIER_SETS = {
     {key: "cpu", label: "On the CPU", unit: "/tok", digits: 2, tone: "info", sub: "experts the CPU computed from RAM"},
     {key: "engram_ms", label: "N-gram memory", unit: " ms/tok", digits: 2, sub: "the n-gram table's read time"},
   ],
-  // Inkling 2 (saguaro-ik2): an expert its VRAM cache misses is copied in from pinned RAM; the finished answer's figures
+  // Inkling 2 (saguaro-ik2): every expert in VRAM (the resident path), or a tier of them with the rest in pinned RAM -
+  // fetched over PCIe by the GPU or computed by the CPU lane (the offload path)
   ik2: [
-    {key: "ram_fetch", label: "From RAM", unit: "/tok", digits: 2, tone: "info", sub: "experts copied in from pinned RAM"},
+    {key: "ram_fetch", label: "From RAM", unit: "/tok", digits: 2, tone: "info", sub: "experts the GPU fetched from pinned RAM"},
+    {key: "cpu", label: "On the CPU", unit: "/tok", digits: 2, sub: "experts the CPU lane computed from RAM"},
   ],
   // CYBER-FROST (the maya engine's Qwen path): the CPU computes the experts VRAM does not hold, from RAM or read from the
   // model file; the drafts' windows count too
@@ -353,23 +355,26 @@ const TIER_SETS = {
   ],
 };
 export const tierSet = (eng) => TIER_SETS[["ds4", "mm3", "qwen", "hy4", "ik2"].includes(eng && eng.engine_kind) ? eng.engine_kind : "glm"];
-// Inkling 2's engine writes no STAT lines: the server makes one from a finished answer's "decode stats" (with
-// SAGUARO_IK2_STATS=1); until then the card says where its experts are
+// Inkling 2 before its first STAT (the engine's INFO path=: resident / offload / cache): where its experts are
 export function ik2Experts(eng) {
   const n = +eng.gpus || 1;
+  if (eng.path === "resident") return n > 1 ? `Every expert is in VRAM, split across ${n} GPUs.` : "Every expert is in VRAM on its one GPU.";
+  if (eng.path === "offload") return "The experts tokens pick most are in VRAM; the GPU fetches the others from pinned RAM as they are routed, or the CPU computes them there.";
   if (n === 1 && +eng.experts > 0 && +eng.expert_slots >= +eng.experts) return "Every expert is in VRAM on its one GPU.";
-  return n > 1 ? `Every expert is in VRAM, the layers dealt across ${n} GPUs.`
-    : "On one 16 GB card about a quarter of the experts are streamed from RAM as they are routed; a second card (or a 24 GB one) holds them all.";
+  return n > 1 ? `Every expert is in VRAM, split across ${n} GPUs.`
+    : "On one 16 GB card part of the experts are streamed from RAM as they are routed; a second card (or a 24 GB one) holds them all.";
 }
 function Tiers({t, eng}) {
   if (eng && eng.engine_kind === "ik2" && !(t && t.now)) {
     return html`<section class="card" aria-label="Where the experts live">
       <div class="card__head"><span class="card__title">Where the experts live</span>
         <span class="card__sub">${eng.kv ? `KV cache ${String(eng.kv).toUpperCase()}` : ""}</span></div>
-      <p class="card__note">${ik2Experts(eng)} Expert counts appear after an answer when its config sets SAGUARO_IK2_STATS=1; the speeds above and each GPU's memory below are measured by the server.</p>
+      <p class="card__note">${ik2Experts(eng)} Expert counts appear once the model writes.</p>
     </section>`;
   }
   if (!t || !t.now) return null;
+  // (STAT lines with no expert tiers - an engine's drafting figures alone: nothing to show here)
+  if (eng && eng.engine_kind === "ik2" && t.now.vram_used == null && t.now.ram_used == null) return null;
   const ds4 = !!(eng && eng.engine_kind === "ds4"), mm3 = !!(eng && eng.engine_kind === "mm3");
   const qwen = !!(eng && eng.engine_kind === "qwen"), hy4 = !!(eng && eng.engine_kind === "hy4");
   const set = tierSet(eng);

@@ -336,8 +336,10 @@ class Page(unittest.TestCase):
         self.assertIn('"STAT tok_s=%.2f ms_tok=%.2f vram_hit=%.4f cpu=%.3f"', HY4_SRC)
         self.assertIn('" engram_ms=%.3f\\n"', HY4_SRC)
         ik2 = (ROOT / "src" / "ik2" / "ik2_main.cu").read_text(encoding="utf-8")
-        self.assertIn('"INFO engine=ik2 engine_kind=ik2 model=Inkling-2 kv=%s ctx=%d gpus=%d\\n"', ik2)
-        self.assertNotIn('"STAT ', ik2)                                     # (no expert statistics from this engine)
+        self.assertIn('"INFO engine=ik2 engine_kind=ik2 model=Inkling-2 kv=%s ctx=%d gpus=%d dspark=%d lookup=%d "', ik2)
+        self.assertIn('"drafting=%s experts=%d parallel=%d watchdog_s=%d path=%s\\n"', ik2)
+        self.assertIn('"STAT tok_s=%.1f ms_tok=%.2f active=1 %s%s\\n"', ik2)
+        self.assertIn('"vram_used=%d ram_used=%d vram_gb=%.2f ram_gb=%.2f vram_hit=%.4f ram_fetch=%.2f "', ik2)
 
     def test_monitor_hy4_experts_card(self):
         # the 4x T4 config's first load: 14678 of 20992 routed experts in VRAM (70%)
@@ -357,12 +359,12 @@ console.log(JSON.stringify({{shares: sv.tierShares(n, eng), set: mon.tierSet(eng
         self.assertEqual((got["full"]["vu"], got["full"]["ru"]), (20992, 0))
 
     def test_monitor_ik2_says_where_its_experts_are(self):
-        one = info_of("INFO engine=ik2 engine_kind=ik2 model=Inkling-2 kv=f16 ctx=32768 gpus=1")
-        two = info_of("INFO engine=ik2 engine_kind=ik2 model=Inkling-2 kv=f16 ctx=131072 gpus=2")
+        one = info_of("INFO engine=ik2 engine_kind=ik2 model=Inkling-2 kv=f16 ctx=32768 gpus=1 experts=12288 path=offload")
+        two = info_of("INFO engine=ik2 engine_kind=ik2 model=Inkling-2 kv=f16 ctx=131072 gpus=2 experts=12288 path=resident")
         got = self.node(f"""
 const mon = await import(web + "/monitor.js");
 console.log(JSON.stringify([mon.ik2Experts({json.dumps(one)}), mon.ik2Experts({json.dumps(two)})]));""")
-        self.assertIn("quarter of the experts are streamed from RAM", got[0])
+        self.assertIn("fetches the others from pinned RAM", got[0])
         self.assertIn("Every expert is in VRAM", got[1])
         self.assertIn("2 GPUs", got[1])
 
