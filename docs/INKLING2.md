@@ -375,7 +375,7 @@ gates F32 (0.14 GiB). 16.4 GiB in all - more than one T4's 15.6, so:
 - **One T4**: the experts in pinned host memory (14.7 GiB of RAM), the dense weights kept as the GGUF's blocks
   (automatic under 22 GiB), and what VRAM is left a cache of the experts - about 70-75% of them at a context of
   32,768; a missing expert is copied in when a token picks it. `SAGUARO_IK2_ROOM_MB` sets the VRAM left free beside
-  the cache (2048 by default).
+  the cache (1024 by default on a card under 22 GiB, 2048 on a bigger one).
 - **Two T4s**: expert parallel (automatic for a looped model on `--gpus 2`): every expert in VRAM, GPU 0 with the
   dense weights (FP16) and the K / V cache, GPU 1's share of the experts by the room each card has
   (`SAGUARO_IK2_EP_SPLIT` sets it). A context of 131,072 in FP16 (4.5 GiB of cache) leaves room for every expert.
