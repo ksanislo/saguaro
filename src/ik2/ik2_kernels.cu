@@ -3670,6 +3670,7 @@ __global__ void bf16_to_f16_kernel(const uint16_t* x, size_t n, uint16_t* y) {
     const size_t i = (size_t) blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     const float v = __uint_as_float((uint32_t) x[i] << 16);
+    if (v != v) { y[i] = f2h(v); return; }   // (NaN: fmin/fmax would drop it and clamp to -65504)
     y[i] = f2h(fminf(fmaxf(v, -65504.0f), 65504.0f));
 }
 
