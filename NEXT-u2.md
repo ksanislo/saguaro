@@ -23,10 +23,16 @@ Build: `build-u2/` (Release, sm_75, NCCL). Card-proof binaries: /data/llm/bench/
   #if chain evaluated for gfx1201 / gfx1100); it would have flagged main's ds4_vision names, the mm3 mma.sync and
   hy4's <cuda_bf16.h>. It cannot see a HIP stub struct missing members (the ds4 elastic pool): only a HIP compile can.
 
-## Waiting
-- Card proof queued (night-queue): bench/upstream-u2/run.py glm | ds4 | mm3 -> bench/upstream-u2/<eng>/summary.txt,
-  results.jsonl, DONE. A = /opt/llm/saguaro/bin/saguaro-<eng>, B = bench/upstream-u2/bin/saguaro-<eng>; A B, then
-  A B again when the expert figures differ. Late files go to bench/upstream-u2/<eng>/vram-late-B.txt.
+## Card proof (done 2026-11-22, bench/upstream-u2/<eng>/summary.txt, results.jsonl)
+- GLM: pools identical (1065/1159/1161/1031 slots), VRAM identical, greedy same; decode 17.1 -> 17.4 tok/s (A1/B1).
+  Late figures 160-224 MiB < 572 (default 700 reserve - 128): the pool unchanged. Free once loaded 675-689 MiB.
+- MM3: 1927 of 7296 experts in VRAM both, VRAM identical, greedy same; decode 7.4/7.6 -> 7.6/7.7. Late 224-256 MiB <
+  896: unchanged. Peer copies GPU0<->1 / GPU2<->3 tested peer, cross-socket the driver's copy (as before).
+- DS4 (ABAB): experts in VRAM within the run-to-run jitter (A 1278/1310/1258/1259, B2 1278/1310/1251/1260); late 256
+  MiB < 472: unchanged. Decode B -4..-6% (21.2/21.0 vs 22.5/21.9): B is a new build, so its PCIe-lane times re-timed
+  and came out "lane on" for CUDA2 (1 layer streams, a marginal 2.23 vs 2.33 ms call) where the deployed build's
+  live times say "lane off" on every card - the calibration, not the ported code. Before install: re-time or carry
+  "lane off" (DS4_LANE_CAL), then re-check decode.
 
 ## Open / unverified
 - HIP build not compiled here (no ROCm): HIP paths only checked by check_hip_compat and reading.
