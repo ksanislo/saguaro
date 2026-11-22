@@ -32,7 +32,7 @@ const Row = ({label, sub, children, htmlFor, cls = ""}) => html`<div class=${`se
 
 // the engines by their INFO engine_kind
 const ENGINES = {"glm-fast": "GLM fast path", ds4: "DeepSeek-V4.1 (maya-ds4)", mm3: "MiniMax-M3.1 (maya-mm3)",
-                 ik2: "Inkling 2 (saguaro-ik2)"};
+                 ik2: "Inkling 2 (saguaro-ik2)", hy4: "Hy4-Flash (saguaro-hy4)"};
 
 // ------------------------------------------------------------------ General
 function General() {
@@ -416,10 +416,18 @@ function facts() {
     ["Context", eng.max_context ? `${fmt(eng.max_context)} tokens` : null],
     ["Trained for", eng.trained_context ? `up to ${fmt(eng.trained_context)} tokens` : null],
     ["KV cache", kv],
-    ["Experts", eng.experts ? `${fmt(eng.experts)} routed; room for ${fmt(eng.expert_slots || 0)} in VRAM` +
+    // (saguaro-hy4: the experts in VRAM, the others computed on the CPU from RAM - none read from the SSD)
+    ["Experts", eng.experts && eng.engine_kind === "hy4"
+                ? `${fmt(eng.experts)} routed; ${+eng.vram_slots >= +eng.experts ? "all of them in VRAM"
+                    : `${fmt(+eng.vram_slots || 0)} in VRAM, the others computed on the CPU from RAM`}`
+                : eng.engine_kind === "ik2" ? (+eng.gpus > 1 ? "all in VRAM, the layers dealt across the GPUs" : "in VRAM as far as it holds them, the rest streamed from RAM")
+                : eng.experts ? `${fmt(eng.experts)} routed; room for ${fmt(eng.expert_slots || 0)} in VRAM` +
                  `${eng.ram_slots ? ` and ${fmt(eng.ram_slots)} in RAM` : ""}` +
                  `${+eng.expert_slots + (+eng.ram_slots || 0) >= +eng.experts ? "" : ", the rest read from the SSD"}` : null],
-    ["Speculation", eng.dspark != null
+    ["Speculation", eng.engine_kind === "ik2" ? "off: the setup installs no drafter for Inkling 2"
+                  : eng.engine_kind === "hy4" && !+eng.dspark && !+eng.mtp && !+eng.dfly2 ? "off: no drafter is packed (none was faster on Tesla T4s)"
+                  : eng.engine_kind === "hy4" && +eng.dfly2 ? "DFly2: the model's small drafter proposes a few tokens, the full model checks them"
+                  : eng.dspark != null && !(eng.engine_kind === "hy4" && +eng.mtp)
                   ? (+eng.dspark ? "DSpark: its drafter proposes a few tokens at a time, the full model checks them" +
                                   (m.tiers && m.tiers.now && m.tiers.now.drafts != null ? ` (${fmt(100 * m.tiers.now.drafts)}% of them kept in the last answer)` : "")
                                 : "off (the config's --dspark, or no DSpark drafter in this pack)")

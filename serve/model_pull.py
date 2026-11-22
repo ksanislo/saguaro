@@ -23,9 +23,11 @@ from serve import models  # noqa: E402
 PROGRESS = re.compile(r"([\d.]+) / ([\d.]+) GB(?: \((\d+)%\))?(?: · ([\d.]+) MB/s)?")
 
 
-def catalog(root: Path, glm_sizes: dict | None = None) -> list:
+def catalog(root: Path, glm_sizes: dict | None = None, cards: list | None = None, ram_gb: float | None = None) -> list:
     """The models the setup can download: [{"id" (the setup's --model id), "family", "name" (as users see it),
-    "installed" (a config here runs it), "size_gb" (None when the setup tells it at its start)}]."""
+    "installed" (a config here runs it), "size_gb" (None when the setup tells it at its start)}].  Hy4-Flash's sizes
+    and Inkling 2 Mini also say what they need and how they fit this PC's cards ("needs", "fit", "recommended":
+    fit_notes; cards / ram_gb: this PC's, read here when not given)."""
     have = set()
     for p in models.config_paths(root):
         cfg = models.read(p)
@@ -33,11 +35,93 @@ def catalog(root: Path, glm_sizes: dict | None = None) -> list:
             have.add((Q.family_of(cfg), str(Q.config_key(cfg))))
     sizes = glm_sizes if glm_sizes is not None else _glm_sizes()
     out = []
+    new = new_engine_sizes() if glm_sizes is None else {}   # (sizes given: a caller that reads no table)
+    notes = fit_notes(*((cards, ram_gb or 0.0) if cards is not None else this_pc() if glm_sizes is None else ([], 0.0)))
     for fam, key, _tier, ident in Q.QUANTS:
+        if fam == "hy4" and new and (fam, key) not in new:   # (a size the table does not publish: not offered)
+            continue
         out.append({"id": ident, "family": fam, "name": Q.shown(fam, key), "installed": (fam, key) in have,
-                    "size_gb": sizes.get(key)})
+                    "size_gb": new.get((fam, key)) if fam == "hy4" else sizes.get(key),
+                    **(notes.get((fam, key)) or notes.get((fam, None)) or {})})
     out.append({"id": "cyber-frost", "family": "qwen", "name": Q.shown("qwen", "q5_k_m"),
                 "installed": ("qwen", "q5_k_m") in have, "size_gb": None})
+    out.append({"id": Q.IK2_IDS[0], "family": "ik2", "name": Q.shown("ik2", Q.IK2_QUANT),
+                "installed": ("ik2", Q.IK2_QUANT) in have, "size_gb": new.get(("ik2", Q.IK2_QUANT)),
+                **(notes.get(("ik2", None)) or {})})
+    return out
+
+
+def new_engine_sizes() -> dict:
+    """{(family, key): GB to download} for Hy4-Flash's published sizes (trunk, n-gram table, mmproj) and Inkling 2
+    Mini (its GGUF and mmproj), from the setup's own tables."""
+    try:
+        sys.path.insert(0, str(ROOT))
+        import saguaro as maya                                    # (nothing runs on import)
+        out = {("hy4", k): round(maya.hy4_entry(k)["download_gb"], 1) for k in maya.HY4_QUANTS if maya.hy4_published(k)}
+        vision = maya.ik2_vision_model()
+        out[("ik2", Q.IK2_QUANT)] = round(maya.ik2_entry()["download_gb"] + (vision["download_gb"] if vision else 0), 1)
+        return out
+    except (Exception, SystemExit):  # noqa: BLE001 - a damaged table: the setup says so when the model is picked
+        return {}
+
+
+_pc: dict = {}
+
+
+def this_pc() -> tuple:
+    """(this PC's NVIDIA cards as the setup reads them, its RAM in GB); ([], 0.0) where they cannot be read.  Asked
+    once a minute."""
+    if _pc and time.time() - _pc["at"] < 60:
+        return _pc["cards"], _pc["ram"]
+    cards, ram = _read_pc()
+    _pc.update(at=time.time(), cards=cards, ram=ram)
+    return cards, ram
+
+
+def _read_pc() -> tuple:
+    try:
+        import setup as SU
+        cards = [g for g in SU.gpus() or [] if g.get("vram_gb")]
+    except Exception:  # noqa: BLE001 - no NVIDIA tools here
+        cards = []
+    try:
+        ram = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / 2**30   # (as the setup counts it)
+    except (ValueError, OSError, AttributeError):
+        ram = 0.0
+    return cards, ram
+
+
+def fit_notes(cards: list, ram_gb: float) -> dict:
+    """What Hy4-Flash and Inkling 2 Mini need and how they fit these cards (tools/hy4_fit.py, tools/ik2_fit.py - the
+    setup's own rules): {(family, key or None): {"needs", "fit", "recommended"}}.  "fit" is "" where no card was read."""
+    import hy4_fit as HY4F
+    import ik2_fit as IK2F
+    out = {("hy4", None): {"needs": "Made for four 16 GB NVIDIA cards (Linux); Maya-S takes about 68 GB of VRAM and "
+                                    "RAM together. One conversation at a time.", "fit": "", "recommended": False},
+           ("ik2", None): {"needs": "One or two NVIDIA cards with 16 GB or more (Tesla T4 / RTX 20 and newer, Linux). "
+                                    "One conversation at a time.", "fit": "", "recommended": False}}
+    if not cards:
+        return out
+    vram = sum(float(g.get("vram_gb") or 0) for g in cards)
+    small = all(float(g.get("vram_gb") or 0) < 24 for g in cards)
+    lay = IK2F.layout(cards)
+    ik2 = out[("ik2", None)]
+    if lay is None:
+        ik2["fit"] = "This PC: " + (IK2F.unsupported("cuda", sys.platform == "win32", cards) or "no card runs it")
+    else:
+        ik2["fit"] = f"This PC: {lay['said']}" + (f" - {IK2F.speeds(lay)}" if IK2F.speeds(lay) else "")
+        ik2["recommended"] = small and len(cards) <= 2
+    group = HY4F.equal_group(cards) if len(cards) >= HY4F.T4_GROUP else []
+    hy4 = out[("hy4", None)]
+    if group and small:
+        said = "four equal cards: tensor parallel over them"
+        hy4["fit"] = "This PC: " + said + (" (not enough VRAM and RAM for Maya-S)" if vram + ram_gb < 68 else "")
+        out[("hy4", "maya-s")] = {**hy4, "fit": f"This PC: {said} - about 32 tok/s writing, 590 tok/s reading a "
+                                                "prompt (measured on 4x Tesla T4, GPU clocks locked)",
+                                  "recommended": vram + ram_gb >= 68}
+    else:
+        hy4["fit"] = (f"This PC: {len(cards)} card{'s' if len(cards) != 1 else ''} - it runs with most experts on the "
+                      "CPU (not measured)" + ("; Inkling 2 Mini is the model for this PC" if ik2["recommended"] else ""))
     return out
 
 

@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
-"""Saguaro - set up and start GLM-5.3-Flash, DeepSeek-V4.1-Flash-1017, MiniMax-M3.1-Flash or Qwen-3.8-Flash-Next
-(CYBER-FROST) on your own GPU(s).  Qwen-3.8-Flash-Next (CYBER-FROST): CUDA from V100 on and HIP, Linux and Windows, pictures too.
+"""Saguaro - set up and start GLM-5.3-Flash, DeepSeek-V4.1-Flash-1017, MiniMax-M3.1-Flash, Qwen-3.8-Flash-Next
+(CYBER-FROST), Hy4-Flash or Inkling 2 Mini on your own GPU(s).  Qwen-3.8-Flash-Next (CYBER-FROST): CUDA from V100 on and HIP, Linux and Windows, pictures too.
+Hy4-Flash (--model hy4-flash-maya-s; four cards) and Inkling 2 Mini (--model inkling-2-mini; one or two 16 GB cards):
+NVIDIA on Linux, each on its own engine (build/saguaro-hy4, build/saguaro-ik2) - docs/HY4-FLASH.md, docs/INKLING2-MINI.md.
 GLM-5.3-Flash: CUDA on Linux and Windows (experimental); HIP: experimental gfx1100/gfx1201/gfx1151 (gfx1030: not
 validated), Linux and Windows, text only; Metal: experimental, macOS on Apple Silicon, GLM-5.3-Flash only, text only,
 one conversation at a time.  DeepSeek-V4.1-Flash-1017 and MiniMax-M3.1-Flash: CUDA from V100 on, Linux
@@ -86,6 +88,8 @@ import calibrate_ds4_tp as CAL4  # noqa: E402  DeepSeek's: --tp and the CPU thre
 import calibrate_draft as CD  # noqa: E402  the speed calibration: DFlash2 or the MTP block on this PC
 import calibrate_ds4 as CDS  # noqa: E402  DeepSeek's: the DSpark drafter or none, on this PC
 import calibrate_mm3_prefill as CPF  # noqa: E402  MiniMax's: how this PC reads prompts fastest (chunk, GEMMs)
+import hy4_fit as HY4F  # noqa: E402  Hy4-Flash: the layout for the cards a PC has
+import ik2_fit as IK2F  # noqa: E402  Inkling 2 Mini: one card or two
 
 WIN = S.WIN
 ME = "START-SAGUARO.bat" if WIN else "./saguaro.sh"      # how this is started, for the messages
@@ -705,14 +709,45 @@ QWEN_PROFILE = ROOT / "data" / "expert-profile-qwen.bin"
 # the attention's time the same as FP16's, half its VRAM left to experts)
 QWEN_KV = "int8"
 QWEN_KV_BYTES = 12 * (2 * 2 * 256 + 2 * 2 * 256 // 64 * 2 + 128)
-FAMILIES = ("glm", "deepseek", "minimax", "qwen")
+# Hy4-Flash (Tencent's Hy4-flash, a 512-expert MoE with an n-gram table) on its own engine, build/saguaro-hy4:
+# Project Maya's GGUF quants (tools/hy4/download.json - a size's trunk, the n-gram table every size shares and the
+# vision tower's mmproj), packed by tools/hy4/pack_gguf.py.  NVIDIA on Linux; measured on 4x Tesla T4 (hy4_fit.py)
+HY4 = Q.MODEL["hy4"]                               # "Hy4-Flash" (its id: the installer record, --model)
+HY4_SHOWN = Q.SHOWN["hy4"]
+HY4_EXE = BUILD / "saguaro-hy4"
+HY4_TARGET = "maya-hy4"                            # (the CMake target keeps its old name; the program is saguaro-hy4)
+HY4_MANIFEST = ROOT / "tools" / "hy4" / "download.json"
+HY4_PACK_TOOLS = ("tools/hy4/pack_gguf.py", "tools/ds4/pack_gguf.py", "tools/strata_tokenizer.py")
+HY4_PACK = "saguaro-hy4"                           # (the pack's folder in the model's: hy4.txt, tensors.txt, tokenizer/)
+HY4_PACK_FILES = ("hy4.txt", "tensors.txt", "engram.bin", "tokenizer/vocab.json", "tokenizer/chat_template.jinja")
+HY4_QUANTS = {k: Q.full_name("hy4", k) for f, k, _, _ in Q.QUANTS if f == "hy4"}   # "maya-s": "Hy4-Flash-Maya-S" ...
+HY4_DEFAULT_QUANT = "maya-s"                       # (the size measured on 4x T4)
+HY4_MODEL_NAME = "hy4-flash"
+# Inkling 2 Mini (thinkingmachines' Inkling-2-Mini, 26B, a looped MoE) on its own engine, build/saguaro-ik2: unsloth's
+# UD-Q4_K_XL GGUF read in place (tools/ik2/download.json) with the model's own chat template; one or two NVIDIA cards
+# from Turing on, Linux - the model for a PC with one or two 16 GB cards (ik2_fit.py)
+IK2 = Q.MODEL["ik2"]                               # "Inkling-2-Mini"
+IK2_SHOWN = Q.SHOWN["ik2"]
+IK2_EXE = BUILD / "saguaro-ik2"
+IK2_TARGET = "saguaro-ik2"
+IK2_MANIFEST = ROOT / "tools" / "ik2" / "download.json"
+IK2_TEMPLATE = ROOT / "tools" / "ik2" / "chat_template.jinja"
+IK2_TOKENIZER_TOOLS = ("tools/strata_tokenizer.py", "tools/ik2/chat_template.jinja")
+IK2_DIR = "saguaro-ik2"                            # (in the model's folder: tokenizer/, sources.json)
+IK2_MODEL_NAME = "inkling-2-mini"
+FAMILIES = ("glm", "deepseek", "minimax", "qwen", "hy4", "ik2")
 SHARD_RE = re.compile(r"-(\d{5})-of-(\d{5})\.gguf$")
 
 
 def exe_for_target(target: str) -> Path:
     """The engine binary for a build target name ("maya" or "maya-ds4"; EXE's and DS4_EXE's own stems) - resolved
     fresh on every call since select_build_backend() reassigns EXE/DS4_EXE once the backend (cuda/hip) is known."""
-    return {"maya": EXE, "maya-ds4": DS4_EXE, "maya-mm3": MM3_EXE}[target]
+    return {"maya": EXE, "maya-ds4": DS4_EXE, "maya-mm3": MM3_EXE, HY4_TARGET: HY4_EXE, IK2_TARGET: IK2_EXE}[target]
+
+
+def family_target(family: str) -> str:
+    """The build target of a model family's engine."""
+    return {"deepseek": "maya-ds4", "minimax": "maya-mm3", "hy4": HY4_TARGET, "ik2": IK2_TARGET}.get(family, "maya")
 GLM_ARCHS = ("glm5-next", "glm5next")             # llama.cpp's spelling and unsloth's
 # the expert profile setup passes to every GLM config (tools/make_profile.py --glm):
 # its ranking of every (layer, expert) pair decides each layer's VRAM slots and which experts start there
@@ -914,11 +949,12 @@ def fix_config_names(cfg: dict) -> bool:
 
 def select_build_backend(backend: str) -> None:
     """Separate build folders and stamps prevent reusing a binary from the other backend."""
-    global BUILD, EXE, STAMP, DS4_EXE, MM3_EXE
+    global BUILD, EXE, STAMP, DS4_EXE, MM3_EXE, HY4_EXE, IK2_EXE
     BUILD = ROOT / {"hip": "build-hip", "metal": "build-metal"}.get(backend, "build")
     EXE = BUILD / ("maya-metal" if backend == "metal" else "saguaro-glm.exe" if WIN else "saguaro-glm")
     DS4_EXE = BUILD / ("saguaro-ds4.exe" if WIN else "saguaro-ds4")
     MM3_EXE = BUILD / ("saguaro-mm3.exe" if WIN else "saguaro-mm3")
+    HY4_EXE, IK2_EXE = BUILD / "saguaro-hy4", BUILD / "saguaro-ik2"
     STAMP = BUILD / "MAYA-BUILD.json"
 
 
@@ -1351,6 +1387,8 @@ def choose_gpus(a, found, min_cc: int = MIN_CC, family: str = "") -> list:
             want = [int(x) for x in str(a.gpus).split(",") if x.strip()] if a.gpus else [a.gpu]
         except ValueError:
             fail(f"--gpus takes GPU numbers as nvidia-smi numbers them, e.g. --gpus 0,1, not {a.gpus!r}")
+        if family == "ik2" and len(want) > 2:
+            fail(f"{IK2_SHOWN} runs on one GPU or two: --gpu 0, or --gpus 0,1")
         if not 1 <= len(want) <= MAX_GPUS or len(set(want)) != len(want):
             fail(f"Saguaro runs on one GPU or splits the model's layers across up to {MAX_GPUS}: --gpu 0, or "
                  "--gpus 0,1,2,3 (each number once)")
@@ -1359,6 +1397,8 @@ def choose_gpus(a, found, min_cc: int = MIN_CC, family: str = "") -> list:
                 fail(f"GPU {i} cannot be used" + ("" if i in byid else " (not found)"),
                      "use one of: " + ", ".join(str(g["index"]) for g in usable))
         return [byid[i] for i in want]
+    if family == "ik2":
+        return choose_ik2_gpus(a, usable)
     if not usable:
         fail("none of the GPUs can run this model",
              f"it needs an NVIDIA GPU of compute capability {min_cc / 10:.1f} or newer (" +
@@ -1380,6 +1420,9 @@ def choose_gpus(a, found, min_cc: int = MIN_CC, family: str = "") -> list:
     intro = (["MiniMax-M3.1-Flash runs best on all of them: the GPUs share the layers (or split them in groups where",
               "that measures faster), and the more VRAM, the fewer experts the CPU computes."]
              if family == "minimax" else
+             ["Hy4-Flash runs best on all of them: four equal cards split every layer's work (tensor parallel), and",
+              "the more VRAM, the fewer experts the CPU computes."]
+             if family == "hy4" else
              ["DeepSeek-V4.1-Flash runs best on all of them: pairs of equal GPUs split each of their layers (tensor",
               "parallel), the pairs take the layers in turn, and the more VRAM, the fewer experts the CPU computes."]
              if min_cc >= DS4_MIN_CC else
@@ -1389,9 +1432,27 @@ def choose_gpus(a, found, min_cc: int = MIN_CC, family: str = "") -> list:
     pick = choose("Which GPUs?", intro,
                   [(label, "recommended" if i == 0 else None, None) for i, label in enumerate(labels)], 0,
                   a.yes or a.check,
-                  ["(--gpus picks any others, e.g. --gpus 0,2,5; a model with a draft block drafts tokens on two GPUs "
-                   "or more)"] if len(best) > 2 and S.UI is None else [])   # (the plain setup's; not on the screen)
+                  ["(--gpus picks any others, e.g. --gpus 0,2,5" +
+                   ("" if family == "hy4" else "; a model with a draft block drafts tokens on two GPUs or more") + ")"]
+                  if len(best) > 2 and S.UI is None else [])   # (the plain setup's; not on the screen)
     return opts[pick]
+
+
+def choose_ik2_gpus(a, usable: list) -> list:
+    """Inkling 2 Mini's cards: two 16 GB cards (every expert in VRAM) where the PC has them, else one - asked when both
+    are possible (ik2_fit.layout)."""
+    why = IK2F.unsupported("cuda", WIN, usable or [{"arch": 0, "vram_gb": 0}])
+    if why:
+        fail(why, f"a card with 16 GB or more of VRAM runs it; {ME} --check lists this PC's")
+    best = IK2F.layout(usable)
+    one = IK2F.layout(usable, 1)
+    if len(best["gpus"]) == 1:
+        return best["gpus"]
+    opts = [best, one]
+    rows = [(" + ".join(gpu_label(g) for g in o["gpus"]), "recommended" if i == 0 else None,
+             o["said"] + ("; " + IK2F.speeds(o) if IK2F.speeds(o) else "")) for i, o in enumerate(opts)]
+    pick = choose("Which GPUs?", [f"{IK2_SHOWN} runs on one card or two:"], rows, 0, a.yes or a.check)
+    return opts[pick]["gpus"]
 
 
 def oomd_active() -> bool:
@@ -1413,6 +1474,14 @@ def check_pc(a, family: str = "glm", gguf: bool = False, ds4_quant: str = "exl3"
     if mm3 and WIN and not MM3_ALL_PLATFORMS:
         fail(f"{MM3}'s engine (maya-mm3) runs on Linux only for now (its Windows build is on the way)",
              f"set it up on a Linux PC with an NVIDIA GPU ({mm3_gpus()})")
+    if family in ("hy4", "ik2"):   # (their engines here: CUDA on Linux - said before anything is built or downloaded)
+        why = IK2F.unsupported(a.backend, WIN, []) if family == "ik2" else (
+            f"{HY4_SHOWN} runs on NVIDIA GPUs only for now (no AMD or Mac engine here yet)"
+            if a.backend in ("hip", "metal") else
+            f"{HY4_SHOWN} runs on Linux only for now (not on Windows yet)" if WIN else None)
+        if why:
+            fail(why, "set it up on a Linux PC with NVIDIA GPUs" + (
+                " (Tesla T4 / RTX 20 and newer, 16 GB or more)" if family == "ik2" else " (V100 / T4 and newer)"))
     if a.backend == "hip":
         if ds4 and not gguf:   # (as GLM's and MiniMax's EXL3 quants on AMD: experimental)
             warn(f"{DS4}'s EXL3 quants on AMD are experimental: their kernels pass their tests on AMD GPUs, but the "
@@ -1432,7 +1501,8 @@ def check_pc(a, family: str = "glm", gguf: bool = False, ds4_quant: str = "exl3"
         fail("Saguaro runs on Linux and Windows (and on Apple Silicon: --backend metal)",
              "the engine needs an NVIDIA GPU and CUDA")
     min_cc = ((DS4_GGUF_MIN_CC if gguf else DS4_MIN_CC) if ds4 else (MM3_GGUF_MIN_CC if gguf else mm3_min_cc()) if mm3
-              else QWEN_MIN_CC if family == "qwen" else MIN_CC)
+              else QWEN_MIN_CC if family == "qwen" else HY4F.MIN_CC if family == "hy4"
+              else IK2F.MIN_CC if family == "ik2" else MIN_CC)
     if WIN:
         warn("Windows support is new (experimental): Saguaro is developed and measured on Linux - tell us how it runs")
     if S.is_wsl():
@@ -1452,11 +1522,12 @@ def check_pc(a, family: str = "glm", gguf: bool = False, ds4_quant: str = "exl3"
     archs = sorted({int(g["arch"]) for g in chosen})
     vram = sum(g["vram_gb"] for g in chosen)
     ok("using " + " + ".join(gpu_label(g) for g in chosen) +
-       (f": the model's layers are split across the {len(chosen)}" if len(chosen) > 1 else ""))
+       (f": the model's layers are split across the {len(chosen)}"
+        if len(chosen) > 1 and family not in ("hy4", "ik2") else ""))
     if any(g.get("unified_memory") for g in chosen):
         say("  the GPU's memory is the system's RAM: the engine fills it with the most-used experts and leaves the "
             "rest to the RAM tier and the SSD, so the free RAM at the start is what the pool can take")
-    if vram < 23 and not ds4 and not mm3 and family != "qwen":
+    if vram < 23 and not ds4 and not mm3 and family not in ("qwen", "hy4", "ik2"):
         say(f"  {vram:.0f} GB of VRAM in total: the engine fills it with the most-used experts and serves the rest from "
             "RAM and the SSD - give it a try (more VRAM is faster; tell us your speed)")
     if min(archs) < VALIDATED_CC:
@@ -1556,6 +1627,8 @@ def check_pc(a, family: str = "glm", gguf: bool = False, ds4_quant: str = "exl3"
     cpu, avx2, avx512 = S.cpu_info()
     if S.ARM:
         ok(f"CPU: {cpu} (ARM64, {os.cpu_count()} threads; the expert kernels use ggml-cpu's NEON paths)")
+    elif not avx2 and family in ("hy4", "ik2"):        # (their CPU rows have AVX1 forms: built for such Xeons)
+        ok(f"CPU: {cpu} (no AVX2: the engine's AVX1 rows, {os.cpu_count()} threads)")
     elif not avx2:
         warn(f"the CPU ({cpu}) has no AVX2: the engine runs, its CPU expert lane on ggml's own kernels (slower; "
              "on 2x Xeon E5-2660 v2 it still added ~15% to 4-GPU decode). SAGUARO_GLM_CPU_LANE=0 turns it off")
@@ -1699,7 +1772,7 @@ PARALLEL_FAMILIES = ("glm", "deepseek", "minimax")
 
 def check_parallel(a, family: str) -> None:
     if getattr(a, "parallel", None) is not None and family not in PARALLEL_FAMILIES:
-        model = DS4 if family == "deepseek" else MM3 if family == "minimax" else QWEN_SHOWN
+        model = {"deepseek": DS4, "minimax": MM3, "hy4": HY4_SHOWN, "ik2": IK2_SHOWN}.get(family, QWEN_SHOWN)
         fail(f"--parallel is supported by GLM-5.3-Flash, DeepSeek-V4.1-Flash and MiniMax-M3.1-Flash; {model} serves "
              "one request at a time",
              "remove --parallel; saved conversations do not enable simultaneous decoding")
@@ -1709,17 +1782,19 @@ def choose_family(a, prev: dict) -> str:
     """"glm" or "deepseek": what the options say (--model, --gguf-dir, --draft), else asked - the model set up before
     is the default."""
     if a.model:
-        return "deepseek" if a.model == DS4 else "minimax" if a.model == MM3 else "qwen" if a.model == QWEN else "glm"
+        return {DS4: "deepseek", MM3: "minimax", QWEN: "qwen", HY4: "hy4", IK2: "ik2"}.get(a.model, "glm")
     metal = getattr(a, "backend", None) == "metal"
     if a.gguf_dir or a.draft or (metal and not a.model_dir):     # (Metal runs GLM only: no question)
         return "glm"
     if a.model_dir:                                    # (an EXL3 folder of GLM or MiniMax; else DeepSeek's files)
         return exl3_folder_family(a.model_dir) or "deepseek"
-    default = config_family(prev) if prev else "glm"
     try:
-        have = sum(g["vram_gb"] for g in S.gpus() if g.get("vram_gb")) + mem_gb()[0]
+        cards = [g for g in S.gpus() if g.get("vram_gb")]
+        have = sum(g["vram_gb"] for g in cards) + mem_gb()[0]
     except Exception:  # noqa: BLE001 - no NVIDIA tools: no figure for this PC
-        have = None
+        cards, have = [], None
+    fit = family_fit(cards, mem_gb()[0] if cards else 0.0) if not metal and getattr(a, "backend", None) != "hip" else None
+    default = config_family(prev) if prev else fit or "glm"
     here = f" (this PC: {have:.0f} GB)" if have else ""
     rows = [("GLM-5.3-Flash", None,
              "Z.ai's GLM-5.3-Flash in Saguaro's GGUF quants (GLM-5.3-Flash-Maya-S to -Maya-L, 95-156 GB) or "
@@ -1745,7 +1820,9 @@ def choose_family(a, prev: dict) -> str:
              f"{QWEN_SHOWN}: 180B, 10 of 512 experts a token; Blackfrost-AI's cybersecurity fine-tune of Qwen3.8-Flash-Next "
              "in peasantsmith's GGUF, on Saguaro's own Qwen path; NVIDIA from V100 on or AMD, Linux or Windows; all its "
              f"experts in about {qwen_entry()['memory_gb']:.0f} GB of VRAM and RAM together{here}, with less the others "
-             "read from the SSD; tool calls, its three reasoning efforts, MTP drafting, up to a 256K context; text only.")]
+             "read from the SSD; tool calls, its three reasoning efforts, MTP drafting, up to a 256K context; text only."),
+            (HY4_SHOWN, "recommended for this PC" if fit == "hy4" else "new", hy4_about(here)),
+            (IK2_SHOWN, "recommended for this PC" if fit == "ik2" else "new", ik2_about())]
     pick = choose("Model?", ["Which model to set up:"], rows, FAMILIES.index(default), a.yes)
     return FAMILIES[pick]
 
@@ -2165,8 +2242,10 @@ def refresh_engine(cfg: dict) -> None:
     (the targets share one stamp), so this one is still the old build."""
     meta = read_json(STAMP)
     exe = Path(cfg["exe"]).resolve()
-    target = "maya-ds4" if exe == DS4_EXE.resolve() else "maya-mm3" if exe == MM3_EXE.resolve() else "maya"
-    if not meta or exe not in (EXE.resolve(), DS4_EXE.resolve(), MM3_EXE.resolve()):
+    own = {DS4_EXE.resolve(): "maya-ds4", MM3_EXE.resolve(): "maya-mm3", HY4_EXE.resolve(): HY4_TARGET,
+           IK2_EXE.resolve(): IK2_TARGET, EXE.resolve(): "maya"}
+    target = own.get(exe, "maya")
+    if not meta or exe not in own:
         return
     src = S.source_hash(S.ENGINE_SOURCES)
     if meta.get("src") == src and target in (meta.get("targets") or ["maya"]):
@@ -2415,6 +2494,13 @@ def import_catalog(models: Path) -> list:
     q = tolerant(qwen_entry)
     if q:
         entry(QWEN, QWEN, q)
+    for quant, shown in HY4_QUANTS.items():            # (the n-gram table and the mmproj: into each size's folder)
+        m = tolerant(hy4_entry, quant)
+        if m:
+            entry(shown, shown, m)
+    for m in (tolerant(ik2_entry), tolerant(ik2_vision_model)):
+        if m:
+            entry(IK2, IK2, m)
     return cat
 
 
@@ -2486,10 +2572,10 @@ def import_model(a, folder: str) -> int:
 
 def file_url(m: dict, name: str) -> str:
     """A download's file on Hugging Face: from the model's repo, or the one its "sources" names for it (DeepSeek's
-    Engram tables: DeepSeek's base repo)."""
+    Engram tables: DeepSeek's base repo).  "hub_names": a file whose name on the Hub is not its name here."""
     repo, revision = (m.get("sources") or {}).get(name) or (m["repo"], m["revision"])
     folder = (m.get("source_folders") or {}).get(name, m["folder"]) if name in (m.get("sources") or {}) else m["folder"]
-    return hf_url(repo, revision, folder, name)
+    return hf_url(repo, revision, folder, (m.get("hub_names") or {}).get(name, name))
 
 
 def hf_token() -> str | None:
@@ -2646,7 +2732,7 @@ def offer_download(a, quant: str, d: Path, shards: list, m: dict | None = None) 
     say(f"  {quant}: {m['about']}.")
     say(f"  Source: https://huggingface.co/{m['repo']}" + (f" (folder {m['folder']}/)" if m["folder"] else "") +
         (f" (branch {m['branch']})" if m.get("branch") else "") + "; the files' own license applies.")
-    for repo in dict.fromkeys(r for r, _ in (m.get("sources") or {}).values()):
+    for repo in dict.fromkeys(r for r, _ in (m.get("sources") or {}).values() if r != m["repo"]):
         names = [n for n, (r, _) in m["sources"].items() if r == repo]
         say(f"  And from https://huggingface.co/{repo}: " + ", ".join(names))
     token = hf_token() if m.get("gated") else None
@@ -3044,12 +3130,13 @@ def fetch(url: str, dst: Path, want: str | None) -> None:
 
 
 def compile_vision(pc, meta, llama: Path, src: str) -> bool:
-    """vision-glm: llama.cpp's mtmd at the pinned commit with GLM-5.3-Flash's vision tower added
-    (tools/vision/glm5next_patch.py, idempotent), for the same GPUs and toolkit as the engine."""
+    """vision-glm: llama.cpp's mtmd at the pinned commit with GLM-5.3-Flash's and Inkling 2's vision towers added
+    (tools/vision/glm5next_patch.py, inkling2v_patch.py, idempotent), for the same GPUs and toolkit as the engine."""
     cmake = pick_cmake()
     if cmake is None:
         return False
     run([sys.executable, str(ROOT / "tools" / "vision" / "glm5next_patch.py"), str(llama)])
+    run([sys.executable, str(ROOT / "tools" / "vision" / "inkling2v_patch.py"), str(llama)])
     gen = re.search(r"^CMAKE_GENERATOR:INTERNAL=(.*)$", (VBUILD / "CMakeCache.txt").read_text(errors="replace"), re.M) \
         if (VBUILD / "CMakeCache.txt").exists() else None
     ninja = venv_tool("ninja") or shutil.which("ninja")
@@ -3682,6 +3769,9 @@ def calibrate_config(cfg_path: Path) -> bool:
     if config_family(cfg) == "qwen":      # (the Qwen path sizes its CPU pool and its prompt chunks itself; what can be
         #  measured is its drafter)
         return bool(qwen_draft_calibration(cfg_path) is not None)
+    if config_family(cfg) in ("hy4", "ik2"):   # (their engines measure what they tune at their own first start)
+        ok(f"{Q.SHOWN[config_family(cfg)]}: nothing to tune here - its engine measures this PC at its first start")
+        return False
     if cfg.get("backend") == "hip":
         warn("the tuning measures the CUDA engine's CPU lane (NVIDIA GPUs): the HIP port keeps its own settings")
         return False
@@ -3838,7 +3928,7 @@ def needs_speed_calibration(cfg: dict) -> bool:
     args = cfg.get("args") or []
     if cfg.get("backend") == "metal":                  # (CUDA's measurement: on a Mac MTP or DFlash2 is the user's choice)
         return False
-    if config_family(cfg) == "qwen":                   # (CYBER-FROST: measured at its setup, or --speed-calibration)
+    if config_family(cfg) in ("qwen", "hy4", "ik2"):   # (CYBER-FROST: measured at its setup; Hy4, Inkling: no drafter set up)
         return False
     if config_family(cfg) in ("deepseek", "minimax"):  # (their DSpark drafter: measured once too)
         return CDS.has_drafter(cfg) and "speed_calibration" not in (cfg.get("installer") or {}) and             not (config_family(cfg) == "minimax" and parallel_of(cfg) > 1)   # (maya-mm3 --parallel: no drafting)
@@ -3859,6 +3949,9 @@ def speed_calibration(cfg_path: Path, why: str = "") -> bool:
         return False
     if config_family(cfg) == "qwen":                   # (CYBER-FROST: its MTP drafter or none)
         return bool(qwen_draft_calibration(cfg_path) is not None)
+    if config_family(cfg) in ("hy4", "ik2"):
+        warn(f"no speed calibration for {Q.SHOWN[config_family(cfg)]}: the setup installs no drafter for it")
+        return False
     if config_family(cfg) in ("deepseek", "minimax"):
         return speed_calibration_ds4(cfg_path, cfg, why)
     drafter = drafter_file(cfg)
@@ -4113,9 +4206,11 @@ def server_command(cfg_path: Path, a) -> tuple:
     args = cfg.get("args") or []
     ds4 = config_family(cfg) == "deepseek"
     metal = cfg.get("backend") == "metal"
-    flag = ("--gguf" if metal else "--glm-pack") if config_family(cfg) == "glm" else "--pack"   # (maya-ds4 and maya-mm3: --pack)
+    ik2 = config_family(cfg) == "ik2"                  # (saguaro-ik2 reads its GGUF in place: --model, no pack)
+    flag = ("--gguf" if metal else "--glm-pack") if config_family(cfg) == "glm" else "--model" if ik2 else "--pack"
     pack = Path(args[args.index(flag) + 1]) if flag in args[:-1] else None       # (Metal: the first GGUF file)
-    for p, what in ((Path(cfg.get("exe", "")), "the engine"), (pack, "the model's GGUF file" if metal else "the pack"),
+    for p, what in ((Path(cfg.get("exe", "")), "the engine"),
+                    (pack, "the model's GGUF file" if metal or ik2 else "the pack"),
                     (Path(cfg.get("tokenizer", "")) / "vocab.json", "the tokenizer")):
         if p is None or not p.exists():
             fail(f"{cfg_path.name}: {what} is missing ({p})", f"run {ME} --setup to repair it")
@@ -4206,6 +4301,11 @@ def server_command(cfg_path: Path, a) -> tuple:
     if config_family(cfg) == "minimax":
         say("  Loading takes a few minutes: the engine places the experts in VRAM by how often they are used and keeps")
         say("  the rest in pinned RAM for its CPU lane - the first answers are the slowest.")
+    elif config_family(cfg) == "hy4":
+        say("  The first load reads the model from the SSD (minutes) and measures this PC once before it is ready;")
+        say("  later starts take about half a minute. The n-gram table stays on the SSD.")
+    elif config_family(cfg) == "ik2":
+        say("  Loading takes about ten seconds once the file is in the page cache (the first load reads 18 GB).")
     elif config_family(cfg) == "qwen":
         say("  Loading takes a few minutes: the engine places the most-used experts in VRAM, the next ones in RAM as far")
         say("  as the free RAM goes (SAGUARO_EXPERT_RAM_GB caps it) and reads the rest from the SSD when they are routed.")
@@ -4542,7 +4642,7 @@ BENCH_TOPICS = [
 def bench_exe(cfg: dict) -> Path:
     """Which engine binary a HIP config's --bench should relaunch - config_family(cfg)'s target, through the same
     exe_for_target every build step uses, so this can't drift out of sync with either."""
-    return exe_for_target({"deepseek": "maya-ds4", "minimax": "maya-mm3"}.get(config_family(cfg), "maya"))
+    return exe_for_target(family_target(config_family(cfg)))
 
 
 BENCH_MIN_ANSWER = 64   # an answer shorter than this (the model stopped early) is listed, not in the decode mean (#549)
@@ -4558,6 +4658,19 @@ def bench_chat(family: str, tokenizer_dir: Path):
         path = Path(tokenizer_dir) / "chat_template.jinja"
         tpl = ChatTemplate(path if path.exists() else ROOT / "tools" / "mm3" / "chat_template.jinja")
         return lambda q: tpl.render([{"role": "user", "content": q}], enable_thinking=False)
+    if family == "hy4":        # (the GGUF's own template, in the pack: its thinking off)
+        from serve.frontend import ChatTemplate
+        path = Path(tokenizer_dir) / "chat_template.jinja"
+        if not path.exists():
+            fail(f"the model's chat template is missing ({path})", f"run {ME} --setup --repack to build the pack again")
+        tpl = ChatTemplate(path)
+        return lambda q: tpl.render([{"role": "user", "content": q}], enable_thinking=False)
+    if family == "ik2":        # (Inkling 2: its lowest effort, the answer's text segment opened - the server's off)
+        from serve.frontend import ChatTemplate
+        path = Path(tokenizer_dir) / "chat_template.jinja"
+        tpl = ChatTemplate(path if path.exists() else IK2_TEMPLATE)
+        return lambda q: tpl.render([{"role": "user", "content": q}], reasoning_effort="none",
+                                    enable_thinking=False) + "<|message_model|><|content_text|>"
     if family == "qwen":       # (Qwen's turns, the think block closed: the answer itself)
         return "<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n".format
     return "[gMASK]<sop><|user|>\n{}<|assistant|>\n</think>".format
@@ -4752,6 +4865,10 @@ def set_up(a, prev: dict) -> Path | None:
         return set_up_mm3(a, prev)
     if family == "qwen":
         return set_up_qwen(a, prev)
+    if family == "hy4":
+        return set_up_hy4(a, prev)
+    if family == "ik2":
+        return set_up_ik2(a, prev)
     inst = prev.get("installer") or {}
     prev_args = prev.get("args") or []
     prev_ctx = int(prev_args[prev_args.index("--max-context") + 1]) if "--max-context" in prev_args[:-1] else None
@@ -6761,6 +6878,556 @@ def set_up_qwen(a, prev: dict) -> Path | None:
     return cfg_path
 
 
+# ------------------------------------------------------------------------------------------------ Hy4-Flash, Inkling 2 Mini
+def family_fit(cards: list, ram_gb: float) -> str | None:
+    """The model the setup recommends for a PC's NVIDIA cards when no model was set up before: Hy4-Flash where four
+    equal 16 GB cards and the memory for its Maya-S are there (the layout measured), Inkling 2 Mini on one or two
+    small cards (under 24 GB each); None elsewhere - the model question keeps its usual default."""
+    if not cards or WIN:
+        return None
+    small = all(float(g.get("vram_gb") or 0) < 24 for g in cards)
+    vram = sum(float(g.get("vram_gb") or 0) for g in cards)
+    if small and len(cards) <= 2 and IK2F.usable(cards):
+        return "ik2"
+    if small and len(cards) >= 4 and HY4F.equal_group(cards) and vram + ram_gb >= 68:
+        return "hy4"
+    return None
+
+
+def hy4_about(here: str = "") -> str:
+    """The setup's model row for Hy4-Flash."""
+    return ("Tencent's Hy4-Flash (a 512-expert MoE with an n-gram table, 16 experts a token) on its own engine, in "
+            "Project Maya's GGUF quants (Hy4-Flash-Maya-XS to -Maya-L; Maya-S: 117 GB of files, about 68 GB of VRAM "
+            f"and RAM together{here}); NVIDIA, Linux. Made for four cards: on 4x Tesla T4 Maya-S writes about 32 "
+            "tok/s and reads prompts at about 590 tok/s (GPU clocks locked). Fewer cards run it with most experts on "
+            "the CPU - not measured; tool calls, thinking on or off, one conversation at a time. Tencent Hy License "
+            "(LICENSE.hy4-flash).")
+
+
+def ik2_about() -> str:
+    """The setup's model row for Inkling 2 Mini."""
+    files = read_json(IK2_MANIFEST).get("files") or {}   # (damaged: the setup says so when it is picked)
+    gb = f"{sum(v[0] for v in files.values()) / 1e9:.0f} GB" if files else "about 18 GB"
+    return (f"thinkingmachines' Inkling-2-Mini (26B, a looped MoE: 8 of 128 experts a token) on its own engine, in "
+            f"unsloth's UD-Q4_K_XL GGUF ({gb}); NVIDIA Tesla T4 / RTX 20 and newer, Linux. The model for one or two "
+            "16 GB cards: one Tesla T4 writes about 40 tok/s (a 32K context, a quarter of the experts streamed from "
+            "RAM), two write about 48 tok/s with every expert in VRAM (a 131K context); tool calls, its thinking "
+            "levels, pictures (its vision tower, 0.6 GB), one conversation at a time. Apache 2.0.")
+
+
+def link_published(dst: Path, size: int, sha: str, places: list) -> Path | None:
+    """dst missing and the same published file (its size, then its sha256) whole in one of `places`: hard-linked from
+    it - one copy on the disk, no second download.  The source linked, or None."""
+    if dst.exists():
+        return None
+    for src in dict.fromkeys(Path(p) for p in places):
+        try:
+            if src.resolve() == dst.resolve() or not src.is_file() or src.stat().st_size != size:
+                continue
+            if not sha256_checked(src, sha):
+                continue
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            os.link(src, dst)
+        except OSError:
+            continue
+        seen = read_json(src.parent / VERIFIED).get(src.name)
+        if seen:   # (a hard link: the same size and time - its check still holds)
+            book = read_json(dst.parent / VERIFIED)
+            book[dst.name] = seen
+            try:
+                (dst.parent / VERIFIED).write_text(json.dumps(book, indent=1), encoding="utf-8")
+            except OSError:
+                pass
+        ok(f"{dst.name}: linked from {src.parent} (the same file, one copy)")
+        return src
+    return None
+
+
+def hy4_local_name(rel: str) -> str:
+    """A table file's name in a model folder: its name on the Hub (a ".gguf_file" there is saved as ".gguf")."""
+    name = Path(rel).name
+    return name[:-len("_file")] if name.endswith(".gguf_file") else name
+
+
+def hy4_quant_table(quant: str) -> dict:
+    """tools/hy4/download.json's entry of a size ("maya-s" -> its "Hy4-Flash-Maya-S"); {} for one it does not list."""
+    return (read_json(HY4_MANIFEST).get("quants") or {}).get(HY4_QUANTS.get(quant, "")) or {}
+
+
+def hy4_published(quant: str) -> bool:
+    """Whether a size can be downloaded: the table names the repo's commit, the size's trunk and the n-gram table
+    with their sizes and sha256 (and does not switch it off)."""
+    man, q = read_json(HY4_MANIFEST), hy4_quant_table(quant)
+    files = list((q.get("files") or {}).values()) + list((man.get("ngram") or {}).values())
+    return bool(man.get("repo") and man.get("revision") and q.get("files") and man.get("ngram")) and \
+        q.get("published", True) is not False and \
+        all(isinstance(v, list) and len(v) == 2 and v[0] and v[1] for v in files)
+
+
+def hy4_entry(quant: str, vision: bool = True) -> dict:
+    """A size's download as offer_download reads it: its trunk, the n-gram table every size shares and (vision) the
+    vision tower's mmproj - sizes, sha256, each file's folder of the repo - with "trunk", "ngram", "mmproj" (their
+    names here), "rel" (name -> the file's path in the repo: a folder filled from the repo as it is laid out is read
+    too), "memory_gb", "plan"."""
+    man, q = read_json(HY4_MANIFEST), hy4_quant_table(quant)
+    if not hy4_published(quant):
+        offered = [Q.setup_id("hy4", k) for k in HY4_QUANTS if hy4_published(k)]
+        fail(f"{Q.shown('hy4', quant)} is not in {HY4_MANIFEST.name}" if man.get("quants") else
+             f"{HY4_MANIFEST} is missing or damaged",
+             "the sizes there are: " + ", ".join(offered) if offered else
+             "restore it (git checkout tools/hy4/download.json)")
+    parts = [("trunk", next(iter(q["files"].items()))), ("ngram", next(iter(man["ngram"].items())))]
+    if vision and man.get("vision"):
+        parts.append(("mmproj", next(iter(man["vision"].items()))))
+    m = {"about": f"Project Maya's quant of {HY4} ({q.get('about', 'GGUF')}); "
+                  f"{man.get('license', 'Tencent Hy License')}",
+         "format": "hy4-gguf", "repo": man["repo"], "revision": man["revision"], "folder": "",
+         "files": {}, "sha256": {}, "sources": {}, "source_folders": {}, "hub_names": {}, "rel": {},
+         "memory_gb": float(q.get("memory_gb") or 0), "plan": dict(q.get("plan") or {}),
+         "earlier": {k: list(v) for k, v in (man.get("was") or {}).items()}}
+    for role, (rel, (size, sha)) in parts:
+        name, folder = hy4_local_name(rel), Path(rel).parent.as_posix()
+        m[role] = name
+        m["files"][name], m["sha256"][name], m["rel"][name] = size, sha, rel
+        m["sources"][name] = (man["repo"], man["revision"])
+        m["source_folders"][name] = "" if folder == "." else folder
+        if name != Path(rel).name:
+            m["hub_names"][name] = Path(rel).name
+    m["download_gb"] = sum(m["files"].values()) / 1e9
+    return m
+
+
+def hy4_place(d: Path, m: dict, name: str) -> Path:
+    """Where a size's file is in a model folder: under its name, else where the repo keeps it (a folder downloaded
+    with the repo's own layout, Maya-S/..., is used as it is) - else its name, where the download puts it."""
+    if (d / name).exists() or not (d / m["rel"][name]).exists():
+        return d / name
+    return d / m["rel"][name]
+
+
+def choose_hy4_quant(a, prev: dict) -> str:
+    """--hy4-quant (--model hy4-flash-maya-s), else asked among the published sizes: Maya-S recommended where this
+    PC's memory holds it (the size measured), else the largest that fits."""
+    if getattr(a, "hy4_quant", None):
+        return a.hy4_quant
+    keys = [k for k in HY4_QUANTS if hy4_published(k)]
+    before = (prev.get("installer") or {}).get("hy4_quant")
+    if len(keys) <= 1:
+        return keys[0] if keys else before if before in HY4_QUANTS else HY4_DEFAULT_QUANT
+    try:
+        vram = sum(float(g.get("vram_gb") or 0) for g in S.gpus())
+    except Exception:  # noqa: BLE001 - no NVIDIA tools: step 1 says so
+        vram = 0.0
+    total, _ = mem_gb()
+    sizes = {k: float(hy4_quant_table(k).get("memory_gb") or 0) for k in keys}
+    rec = HY4F.recommended(sizes, vram, total, HY4_DEFAULT_QUANT)
+    order = sorted(keys, key=lambda k: k != rec)
+    default = before if before in order else order[0]
+    rows = []
+    for k in order:
+        gb = hy4_entry(k)["download_gb"]
+        note = "measured on 4x Tesla T4" if k in HY4F.MEASURED else "not measured on Tesla T4s yet"
+        rows.append((Q.shown("hy4", k, gb), "recommended" if k == rec else None,
+                     f"{hy4_quant_table(k).get('about', 'GGUF')}; about {sizes[k]:.0f} GB of VRAM and RAM together; "
+                     + note))
+    pick = choose(f"Which size of {HY4}?", ["Project Maya's GGUF quants of it (the n-gram table, 63 GB, is the same "
+                                            "file for every size):"],
+                  rows, order.index(default), a.yes or getattr(a, "check", False))
+    return order[pick]
+
+
+def hy4_dir(a, models: Path, prev: dict, quant: str) -> Path:
+    """The model's folder: --model-dir, else the folder of this size's setup before, else <models folder>/<size>."""
+    if a.model_dir:
+        return Path(a.model_dir).expanduser().resolve()
+    inst = prev.get("installer") or {}
+    if inst.get("hy4_quant") == quant and inst.get("model_dir") and Path(inst["model_dir"]).is_dir():
+        return Path(inst["model_dir"])
+    return models / HY4_QUANTS[quant]
+
+
+def hy4_places(models: Path, name: str) -> list:
+    """Where another Hy4-Flash setup here may keep the file `name` (the n-gram table and the vision tower are the
+    same files for every size): each size's folder under the models folder and the folders of the Hy4 configs."""
+    dirs = [models / full for full in HY4_QUANTS.values()]
+    for c in configs():
+        cfg = read_json(c)
+        if config_family(cfg) == "hy4" and (cfg.get("installer") or {}).get("model_dir"):
+            dirs.append(Path(cfg["installer"]["model_dir"]))
+    return [x / name for x in dirs]
+
+
+def hy4_model_step(a, d: Path, quant: str, models: Path) -> dict | None:
+    """A size's files in d - {"trunk", "ngram", "mmproj" (None: text only)} as paths - or None when nothing was
+    downloaded.  A file another Hy4 folder here has is hard-linked, not downloaded again; missing ones are downloaded
+    (resumable); each is checked against its published sha256 (once, then remembered)."""
+    name = Q.shown("hy4", quant)
+    step(5, f"the model ({name})")
+    m = hy4_entry(quant, vision=not a.no_vision)
+    files = [hy4_place(d, m, n) for n in m["files"]]
+    for f in files:
+        if not f.exists():
+            was = m["earlier"].get(f.name) or []
+            link_published(f, m["files"][f.name], m["sha256"][f.name],
+                           [d / o for o in was] + [p for n in [f.name] + was for p in hy4_places(models, n)])
+    missing = [f for f in files if file_incomplete(m, f)]
+    if missing and not offer_download(a, Q.shown("hy4", quant, m["download_gb"]), d, files, m):
+        return None
+    for f in files:
+        if not sha256_checked(f, m["sha256"][f.name]):
+            fail(f"{f}: the sha256 does not match the published one - still being downloaded, or damaged",
+                 f"let the download finish, or delete the file and run {ME} --setup --download-model again")
+    ok(f"{name}: {len(files)} files, {sum(f.stat().st_size for f in files) / 1e9:.1f} GB in {d}")
+    say(f"  the n-gram table ({m['files'][m['ngram']] / 1e9:.0f} GB) is read from the SSD page by page while the "
+        "model answers - it is never loaded into RAM")
+    if rotational(d):
+        warn(f"{d} is on a spinning hard disk: the engine reads the n-gram table from it on every token - use an "
+             "NVMe SSD (--models-dir)")
+    by = {f.name: f for f in files}
+    return {"trunk": by[m["trunk"]], "ngram": by[m["ngram"]], "mmproj": by.get(m.get("mmproj"))}
+
+
+def hy4_pack_has_vision(pack: Path) -> bool:
+    """The pack indexes the vision tower (hy4.txt's vision.* keys)."""
+    try:
+        return any(ln.startswith("vision.dim ") for ln in (pack / "hy4.txt").read_text(encoding="utf-8").splitlines())
+    except OSError:
+        return False
+
+
+def hy4_pack_step(a, d: Path, files: dict) -> Path:
+    """tools/hy4/pack_gguf.py's pack in <model folder>/saguaro-hy4: the geometry, where every tensor sits in the GGUF
+    files (read in place), the n-gram table's small parts and the tokenizer with the model's chat template - built
+    again when its tools or the model's files changed.  No drafter is packed (hy4_fit.py: no gain measured on T4s)."""
+    step(6, "the pack (the engine's index of the model files)")
+    pack = d / HY4_PACK
+    tools = S.source_hash(HY4_PACK_TOOLS)
+    vis = files.get("mmproj")
+    every = [files["trunk"], files["ngram"]] + ([vis] if vis is not None else [])
+    if not a.repack and read_json(pack / PACK_SOURCES).get("tools") == tools and \
+            all((pack / f).exists() for f in HY4_PACK_FILES) and pack_stale(pack, every) is None and \
+            hy4_pack_has_vision(pack) == (vis is not None):
+        ok(f"pack already built: {pack}")
+        return pack
+    if not os.access(d, os.W_OK):
+        fail(f"{d} is not writable: the pack is written inside the model's folder",
+             "pass --model-dir with a writable folder")
+    rel = lambda f: f.relative_to(d).as_posix()   # noqa: E731
+    say("  Indexing every tensor of the GGUF files (the weights stay where they are) and the tokenizer ...")
+    run([sys.executable, str(ROOT / "tools" / "hy4" / "pack_gguf.py"), "--model", str(d), "--out", str(pack),
+         "--mmproj", rel(vis) if vis is not None else "none", "--mtp", "none", "--drafter", "none",
+         "--files", rel(files["trunk"]), rel(files["ngram"])])
+    missing = [f for f in HY4_PACK_FILES if not (pack / f).exists()]
+    if missing:
+        fail(f"the pack builder did not write {pack / missing[0]}", "the reason is in the messages above")
+    stamp_pack(pack, every)
+    rec = read_json(pack / PACK_SOURCES)
+    rec["tools"] = tools
+    (pack / PACK_SOURCES).write_text(json.dumps(rec, indent=1), encoding="utf-8")
+    ok(f"pack: {pack}")
+    return pack
+
+
+def write_config_hy4(a, pc: dict, meta: dict, pack: Path, ctx: int, models: Path, d: Path, quant: str,
+                     lay: dict) -> Path:
+    """maya-hy4-flash-maya-s.json and its start script: the layout's flags for these cards (hy4_fit.layout), the
+    model's own sampling and thinking level.  A setup again keeps the flags set by hand on the same cards, the env,
+    where the server listens and its key.  saguaro-hy4 stops at a flag it does not know: only its own are written."""
+    step(8, "the configuration and the start script")
+    port = a.port or 8080
+    cfg_path = ROOT / f"{Q.config_stem('hy4', quant)}.json"
+    old = read_json(cfg_path) if cfg_path.exists() else {}
+    args = ["--pack", str(pack), "--max-context", str(ctx)] + list(lay["args"])
+    same = [int(i) for i in old.get("gpu") or []] == [int(g["index"]) for g in pc["gpus"]]
+    kept = keep_args(old.get("args") or [], args,
+                     ("--cpu-threads", "--kv", "--kv-streaming", "--main-gpu") +
+                     (("--tp", "--chunk", "--reserve-gb", "--vram-experts") if same else ()))
+    if getattr(a, "no_vision", False) and hy4_pack_has_vision(pack):
+        set_arg(args, "--vision", "off")
+    inst = {"family": "hy4", "hy4_quant": quant, "quant": HY4_QUANTS[quant]}
+    sampling, effort = Q.model_defaults({"installer": inst})
+    cfg = {"exe": str(HY4_EXE), "args": args, "cwd": str(ROOT), "tokenizer": str(pack / "tokenizer"),
+           "model_name": HY4_MODEL_NAME, "gpu": [g["index"] for g in pc["gpus"]],
+           "sampling": sampling, "reasoning_effort": effort,
+           "lib_dirs": meta.get("lib_dirs") or old.get("lib_dirs") or [], "port": port}
+    for k in ("host", "api_key", "cors_origins", "mcp_servers"):
+        if old.get(k) is not None:
+            cfg[k] = old[k]
+            kept.append(k)
+    env = {**lay["env"], **(old.get("env") or {})}
+    if not S.cpu_info()[1]:                            # (the CPU lane's 4-bit expert copies need AVX2)
+        env.setdefault("HY4_Q4X", "0")
+    env.update(parse_env(a.env))
+    if env:
+        cfg["env"] = env
+    if a.host:
+        cfg["host"] = a.host
+    if a.api_key:
+        cfg["api_key"] = a.api_key
+    if kept:
+        ok("kept from the config before: " + ", ".join(kept))
+    cfg["log"] = str(cfg_path.with_suffix(".log"))
+    cfg["installer"] = {**inst, "models_dir": str(models), "model_dir": str(d),
+                        "measured": bool(lay.get("measured")), "written": time.strftime("%Y-%m-%d %H:%M")}
+    cfg_path.write_text(json.dumps(cfg, indent=1), encoding="utf-8")
+    ok(f"config: {cfg_path}")
+    ok(f"start script: {write_run_script(cfg_path, port)}")
+    return cfg_path
+
+
+def set_up_hy4(a, prev: dict) -> Path | None:
+    """Hy4-Flash's steps 1-8: the size, the PC (NVIDIA, Linux), the layout for its cards and the context, the engine
+    (build/saguaro-hy4), the files (pinned, resumable, sha256-checked), the pack, the config."""
+    inst = prev.get("installer") or {}
+    prev_args = prev.get("args") or []
+    prev_ctx = int(prev_args[prev_args.index("--max-context") + 1]) if "--max-context" in prev_args[:-1] else None
+    quant = choose_hy4_quant(a, prev)
+    m = hy4_entry(quant, vision=not a.no_vision)
+    name = Q.shown("hy4", quant)
+    pc = check_pc(a, "hy4")                            # 1
+    total, _ = mem_gb()
+    vram = sum(g["vram_gb"] for g in pc["gpus"])
+    step(2, "your choices")                            # 2
+    ok(f"files: {name} ({m['download_gb']:.0f} GB) - Project Maya's quant of Tencent's Hy4-Flash (Tencent Hy License: "
+       "LICENSE.hy4-flash)")
+    lay = HY4F.layout(pc["gpus"], m["plan"], quant)
+    if not lay["fits"]:
+        fail(f"{name} needs about {lay['need_gib']:.0f} GB of VRAM for its attention, head and cache alone (they "
+             f"have no RAM fallback); the cards chosen have {vram:.0f} GB",
+             f"more cards (--gpus), or {IK2_SHOWN} for one or two 16 GB cards: {ME} --setup --model {Q.IK2_IDS[0]}")
+    if vram + total < m["memory_gb"]:
+        warn(f"{vram:.0f} GB of VRAM and {total:.0f} GB of RAM: below the ~{m['memory_gb']:.0f} GB that hold all of "
+             f"{name} - the experts that do not fit are read from the SSD as the page cache allows (slower)")
+    ok(f"layout: {lay['said']}" + (f" - {HY4F.speeds(lay, quant)}" if HY4F.speeds(lay, quant) else
+                                   " (not measured on this kind of PC yet: tell us your speed)"))
+    if len(pc["gpus"]) < HY4F.T4_GROUP:
+        warn(f"{HY4_SHOWN} is made for four cards: on {len(pc['gpus'])} most of its experts run on the CPU. "
+             f"{IK2_SHOWN} is the model for one or two 16 GB cards ({ME} --setup --model {Q.IK2_IDS[0]})")
+    ctx = choose_context(a, prev_ctx, HY4F.CONTEXTS, lay["context"])
+    ok(f"context: {ctx} tokens" + (" (recommended for these cards)" if ctx == lay["context"] else ""))
+    models = (Path(a.models_dir).expanduser().resolve() if a.models_dir else
+              Path(inst["models_dir"]) if inst.get("models_dir") else ROOT.parent / "Maya-data" / "models")
+    d = hy4_dir(a, models, prev, quant)
+    ok(f"model folder: {d}")
+    llama = tools_step(a)                              # 3
+    meta = build_step(a, pc, llama, HY4_TARGET)        # 4
+    if not HY4_EXE.exists():
+        fail(f"the engine was not built ({HY4_EXE})", "the reason is in the build's messages above")
+    files = hy4_model_step(a, d, quant, models)        # 5
+    if files is None:
+        return None
+    pack = hy4_pack_step(a, d, files)                  # 6
+    step(7, "images (the vision tower)")
+    if a.no_vision:
+        ok("pictures: off (--no-vision): the model reads text only")
+    elif hy4_pack_has_vision(pack):
+        ok("pictures: on - the model's vision tower runs in the engine and takes no VRAM of its own (not measured "
+           "on Tesla T4s yet)")
+    else:
+        ok("no vision tower in this pack: text only")
+    cfg_path = write_config_hy4(a, pc, meta, pack, ctx, models, d, quant, lay)   # 8
+    if all("T4" in str(g.get("name", "")) for g in pc["gpus"]) and len(pc["gpus"]) > 2:
+        say("  Tesla T4s idle their clocks while a card waits its turn: lock them before you start (the layer split "
+            "wrote twice as fast locked here, and the speeds above are with them locked) -")
+        say("    sudo nvidia-smi -lgc 1590,1590        (undo: sudo nvidia-smi -rgc; the 70 W power cap still applies)")
+    return cfg_path
+
+
+def ik2_entry() -> dict:
+    """Inkling 2 Mini's download (tools/ik2/download.json: unsloth's UD-Q4_K_XL) as offer_download reads it."""
+    man = read_json(IK2_MANIFEST)
+    if not man.get("files") or not man.get("revision") or man.get("gguf") not in (man.get("files") or {}):
+        fail(f"{IK2_MANIFEST} is missing or damaged", "restore it (git checkout tools/ik2/download.json)")
+    return {"about": f"{IK2_SHOWN} in unsloth's GGUF ({man.get('about', 'UD-Q4_K_XL')}); "
+                     f"{man.get('license', 'Apache 2.0')}",
+            "format": "ik2-gguf", "repo": man["repo"], "revision": man["revision"], "folder": man.get("folder", ""),
+            "files": {k: v[0] for k, v in man["files"].items()}, "sha256": {k: v[1] for k, v in man["files"].items()},
+            "gguf": man["gguf"], "download_gb": sum(v[0] for v in man["files"].values()) / 1e9}
+
+
+def ik2_vision_model() -> dict | None:
+    """The model's vision tower as offer_download reads it (the manifest's "vision": unsloth's mmproj, from the GGUF's
+    repo and revision), or None when the manifest names none."""
+    man = read_json(IK2_MANIFEST).get("vision") or {}
+    if not man.get("files") or not man.get("repo") or not man.get("revision"):
+        return None
+    return {"about": f"{IK2_SHOWN}'s vision tower (it lets the model read pictures): unsloth's mmproj of the model's "
+                     "own tower (BF16)", "format": "mmproj",
+            "repo": man["repo"], "revision": man["revision"], "folder": man.get("folder", ""),
+            "files": {k: v[0] for k, v in man["files"].items()}, "sha256": {k: v[1] for k, v in man["files"].items()},
+            "download_gb": sum(v[0] for v in man["files"].values()) / 1e9}
+
+
+def ik2_dir(a, models: Path, prev: dict) -> Path:
+    """The model's folder: --model-dir, else the folder of the setup before, else <models folder>/Inkling-2-Mini."""
+    if a.model_dir:
+        return Path(a.model_dir).expanduser().resolve()
+    d = (prev.get("installer") or {}).get("model_dir")
+    if d and Path(d).is_dir() and config_family(prev) == "ik2":
+        return Path(d)
+    return models / IK2
+
+
+def ik2_model_step(a, d: Path) -> Path | None:
+    """The model's GGUF in d, downloaded when it is not there (resumable), then checked against its published sha256;
+    None when it was not downloaded."""
+    name = Q.shown("ik2", Q.IK2_QUANT)
+    step(5, f"the model ({name})")
+    m = ik2_entry()
+    files = [d / m["gguf"]]
+    if any(file_incomplete(m, f) for f in files) and not offer_download(a, Q.shown("ik2", Q.IK2_QUANT, m["download_gb"]),
+                                                                        d, files, m):
+        return None
+    for f in files:                                    # (a file that was already there: checked once, then remembered)
+        if not sha256_checked(f, m["sha256"][f.name]):
+            fail(f"{f.name}: the sha256 does not match the published one - still being downloaded, or damaged",
+                 f"let the download finish, or delete the file and run {ME} --setup --download-model again")
+    ok(f"{name}: {sum(f.stat().st_size for f in files) / 1e9:.1f} GB in {d}")
+    if rotational(d):
+        warn(f"{d} is on a spinning hard disk: every start reads the whole model from it - an NVMe SSD starts it in "
+             "seconds (--models-dir)")
+    return files[0]
+
+
+def ik2_tokenizer_step(a, d: Path, gguf: Path) -> Path:
+    """The tokenizer from the GGUF with thinkingmachines' own chat template (the GGUF carries the conversion's, which
+    differs) in <model folder>/saguaro-ik2/tokenizer, round-trip checked; built again when its tools or the GGUF
+    changed."""
+    step(6, "the tokenizer and the chat template")
+    out = d / IK2_DIR
+    tools = S.source_hash(IK2_TOKENIZER_TOOLS)
+    rec = read_json(out / PACK_SOURCES)
+    vocab = out / "tokenizer" / "vocab.json"
+    same = rec.get("tools") == tools and rec.get("gguf") == {"name": gguf.name, "size": gguf.stat().st_size}
+    if not a.repack and same and vocab.exists() and (out / "tokenizer" / "chat_template.jinja").exists():
+        ok(f"tokenizer already exported: {vocab.parent}")
+        return out / "tokenizer"
+    if not os.access(d, os.W_OK):
+        fail(f"{d} is not writable: the tokenizer is written next to the GGUF file",
+             "pass --model-dir with a writable folder")
+    r = run([sys.executable, str(ROOT / "tools" / "strata_tokenizer.py"), "--gguf", str(gguf), "--out", str(out),
+             "--chat-template", str(IK2_TEMPLATE), "--check"], check=False)
+    if r.returncode != 0 or not vocab.exists():
+        fail(f"the tokenizer could not be exported from {gguf.name}", "the reason is in the messages above")
+    # (the files the config runs from, for the Models page's size and its delete: serve/models.py's pack_shards)
+    files = [{"name": gguf.name, "size": gguf.stat().st_size}]
+    (out / PACK_SOURCES).write_text(json.dumps({"tools": tools, "gguf": files[0], "files": files}, indent=1),
+                                    encoding="utf-8")
+    ok(f"tokenizer: {vocab.parent} (thinkingmachines' chat template)")
+    return out / "tokenizer"
+
+
+def ik2_vision_step(a, pc: dict, meta: dict, llama: Path, d: Path) -> dict | None:
+    """Step 7: the config's "vision" entry - the image encoder with the model's mmproj (beside the GGUF) - or None
+    (text only, said why).  The server starts the encoder only while a request's pictures are read."""
+    step(7, "images (the vision encoder)")
+    if a.no_vision:
+        ok("skipped (--no-vision): the model reads text only")
+        return None
+    m = ik2_vision_model()
+    if m is None:
+        warn(f"{IK2_MANIFEST} names no vision tower: the model reads text only")
+        return None
+    files = [d / n for n in m["files"]]
+    if any(file_incomplete(m, f) for f in files) and not offer_download(a, "the vision tower", d, files, m):
+        warn(f"the vision tower was not downloaded: the model reads text only ({ME} --setup asks again)")
+        return None
+    for f in files:
+        if not sha256_checked(f, m["sha256"][f.name]):
+            f.unlink(missing_ok=True)                  # else the next run finds it complete and fails here again
+            fail(f"{f}: the sha256 does not match the published one (the file was removed)", "run the setup again")
+    if not vision_encoder_ready(a, pc, meta, llama):
+        return None
+    ok(f"pictures: ON - the vision encoder {VEXE} with {files[0].name} ({m['download_gb']:.1f} GB on the SSD); it "
+       "starts only when a picture arrives, no VRAM kept for it")
+    return {"exe": str(VEXE), "mmproj": str(files[0]), "gpu": True}
+
+
+def write_config_ik2(a, pc: dict, meta: dict, gguf: Path, tok: Path, ctx: int, models: Path, d: Path, lay: dict,
+                     vision: dict | None = None) -> Path:
+    """maya-inkling-2-mini.json and its start script: the layout's flags for one card or two (ik2_fit.layout).  A
+    setup again keeps the config before's env, where the server listens and its key; the flags follow the cards
+    chosen now.  saguaro-ik2 stops at a flag it does not know: only its own are written."""
+    step(8, "the configuration and the start script")
+    port = a.port or 8080
+    cfg_path = ROOT / f"{Q.config_stem('ik2', Q.IK2_QUANT)}.json"
+    old = read_json(cfg_path)
+    args = ["--model", str(gguf), "--max-context", str(ctx)] + list(lay["args"])
+    same = [int(i) for i in old.get("gpu") or []] == [int(g["index"]) for g in pc["gpus"]]
+    kept = keep_args(old.get("args") or [], args, ("--threads",) + (("--chunk",) if same else ()))
+    inst = {"family": "ik2", "quant": Q.OTHERS[("ik2", Q.IK2_QUANT)], "ik2_quant": Q.IK2_QUANT}
+    sampling, effort = Q.model_defaults({"installer": inst})
+    cfg = {"exe": str(IK2_EXE), "args": args, "cwd": str(ROOT), "tokenizer": str(tok), "model_name": IK2_MODEL_NAME,
+           "gpu": [g["index"] for g in pc["gpus"]], "sampling": sampling, "reasoning_effort": effort,
+           "lib_dirs": meta.get("lib_dirs") or old.get("lib_dirs") or [], "port": port,
+           **({"vision": vision} if vision else {})}
+    for k in ("host", "api_key", "cors_origins", "mcp_servers"):
+        if old.get(k) is not None:
+            cfg[k] = old[k]
+            kept.append(k)
+    env = {**(old.get("env") or {}), **lay["env"], **parse_env(a.env)}
+    if not lay["env"]:                                 # (a big card: the small cards' room is not kept)
+        env.pop("SAGUARO_IK2_ROOM_MB", None)
+        env.update(parse_env(a.env))
+    if env:
+        cfg["env"] = env
+    if a.host:
+        cfg["host"] = a.host
+    if a.api_key:
+        cfg["api_key"] = a.api_key
+    if kept:
+        ok("kept from the config before: " + ", ".join(kept))
+    cfg["log"] = str(cfg_path.with_suffix(".log"))
+    cfg["installer"] = {**inst, "models_dir": str(models), "model_dir": str(d), "cards": len(pc["gpus"]),
+                        "measured": bool(lay.get("measured")), "written": time.strftime("%Y-%m-%d %H:%M")}
+    cfg_path.write_text(json.dumps(cfg, indent=1), encoding="utf-8")
+    ok(f"config: {cfg_path}")
+    ok(f"start script: {write_run_script(cfg_path, port)}")
+    return cfg_path
+
+
+def set_up_ik2(a, prev: dict) -> Path | None:
+    """Inkling 2 Mini's steps 1-8: the PC (NVIDIA from Tesla T4 / RTX 20 on, Linux; one card or two), the layout for
+    them and the context, the engine (build/saguaro-ik2), the file (pinned, resumable, sha256-checked), the tokenizer
+    with the model's own template, the pictures (its mmproj and the image encoder), the config."""
+    inst = prev.get("installer") or {}
+    prev_args = prev.get("args") or []
+    prev_ctx = int(prev_args[prev_args.index("--max-context") + 1]) if "--max-context" in prev_args[:-1] else None
+    pc = check_pc(a, "ik2")                            # 1
+    lay = IK2F.layout(pc["gpus"], len(pc["gpus"]))
+    if lay is None or len(lay["gpus"]) != len(pc["gpus"]):
+        fail(IK2F.unsupported("cuda", WIN, pc["gpus"]) or
+             f"{IK2_SHOWN} runs on one or two cards of 16 GB or more: one of the cards chosen is smaller",
+             "pick the cards with --gpu N or --gpus A,B")
+    step(2, "your choices")                            # 2
+    m = ik2_entry()
+    ok(f"model: {Q.shown('ik2', Q.IK2_QUANT, m['download_gb'])} - thinkingmachines' Inkling-2-Mini in unsloth's GGUF "
+       "(Apache 2.0)")
+    ok(f"layout: {lay['said']}" + (f" - {IK2F.speeds(lay)}" if IK2F.speeds(lay) else
+                                   " (not measured on this kind of card here: tell us your speed)"))
+    ctx = choose_context(a, prev_ctx if prev.get("gpu") and len(prev["gpu"]) == len(pc["gpus"]) else None,
+                         IK2F.CONTEXTS, lay["context"])
+    ok(f"context: {ctx} tokens" + (" (recommended for these cards)" if ctx == lay["context"] else ""))
+    if ctx > lay["context"]:
+        warn(f"at {context_label(ctx)} the cache takes VRAM from the experts: more of them are streamed from RAM and "
+             f"answers get slower ({context_label(lay['context'])} is what was measured)")
+    models = (Path(a.models_dir).expanduser().resolve() if a.models_dir else
+              Path(inst["models_dir"]) if inst.get("models_dir") else ROOT.parent / "Maya-data" / "models")
+    d = ik2_dir(a, models, prev)
+    ok(f"model folder: {d}")
+    llama = tools_step(a)                              # 3
+    meta = build_step(a, pc, llama, IK2_TARGET)        # 4
+    if not IK2_EXE.exists():
+        fail(f"the engine was not built ({IK2_EXE})", "the reason is in the build's messages above (saguaro-ik2 "
+             "needs a Tesla T4 / RTX 20 or newer card in the build's GPU list)")
+    gguf = ik2_model_step(a, d)                        # 5
+    if gguf is None:
+        return None
+    tok = ik2_tokenizer_step(a, d, gguf)               # 6
+    vision = ik2_vision_step(a, pc, meta, llama, d)    # 7
+    return write_config_ik2(a, pc, meta, gguf, tok, ctx, models, d, lay, vision)   # 8
+
+
 def set_up_and_serve(a, prev: dict) -> tuple | None:
     """On the setup's screen: the setup, then Saguaro running on the same screen - its server's output there, Ctrl+C
     stops it.  (The config, the server's exit code or None when it was not started), or None when the model was not
@@ -6789,7 +7456,8 @@ def model_option(a) -> str | None:
     hit = Q.resolve(a.model, list(MODELS))
     if hit is None:
         return (f"--model {a.model}: not a model Saguaro knows - one of " + ", ".join(i for _, _, _, i in Q.QUANTS) +
-                f", {DS4}, {MM3}, cyber-frost = {QWEN_SHOWN}, or a GLM-5.3-Flash download: " + ", ".join(MODELS))
+                f", {DS4}, {MM3}, {HY4}, cyber-frost = {QWEN_SHOWN}, {Q.IK2_IDS[0]} = {IK2_SHOWN}, or a "
+                "GLM-5.3-Flash download: " + ", ".join(MODELS))
     family, key = hit
     if family == "glm":
         a.model = key
@@ -6797,7 +7465,10 @@ def model_option(a) -> str | None:
     if family == "qwen":                                 # (its one GGUF: no quant to choose)
         a.model = QWEN
         return None
-    a.model, flag = (DS4, "ds4_quant") if family == "deepseek" else (MM3, "mm3_quant")
+    if family == "ik2":                                  # (its one file set, unsloth's UD-Q4_K_XL)
+        a.model = IK2
+        return None
+    a.model, flag = {"deepseek": (DS4, "ds4_quant"), "hy4": (HY4, "hy4_quant")}.get(family, (MM3, "mm3_quant"))
     if key is not None:
         given = getattr(a, flag, None)
         if given and given != key:
@@ -6857,7 +7528,8 @@ def main() -> int:
     ap.add_argument("--model", metavar="MODEL",
                     help="which model and files (default: asked): a Saguaro quant - "
                          + ", ".join(i for _, _, _, i in Q.QUANTS) +
-                         f" - or {DS4} / {MM3} (their files asked, or --ds4-quant / --mm3-quant), cyber-frost = {QWEN_SHOWN},"
+                         f" - or {DS4} / {MM3} / {HY4} (their files asked, or --ds4-quant / --mm3-quant / "
+                         f"--hy4-quant), cyber-frost = {QWEN_SHOWN}, {Q.IK2_IDS[0]} = {IK2_SHOWN} (one or two 16 GB cards),"
                          " or a GLM-5.3-Flash "
                          "download by its name (" + ", ".join(MODELS) + "; every name used before still works)")
     ap.add_argument("--model-dir", help=f"use the files you already have of {DS4}, MiniMax or {QWEN_SHOWN}: their "
@@ -6885,6 +7557,9 @@ def main() -> int:
                          "PC), maya-s (gguf-s) = MiniMax-M3.1-Flash-Maya-S (~2.1 bits, ~122 GB) - the GGUFs on NVIDIA "
                          "from V100 on and on AMD; with --model-dir: the files you have (the same as --model "
                          "minimax-maya-xs / minimax-maya-s)")
+    ap.add_argument("--hy4-quant", choices=list(HY4_QUANTS),
+                    help=f"{HY4}'s size: maya-s (experts 2-3 bits, 117 GB of files; measured on 4x Tesla T4), maya-xs "
+                         "(2 bits), maya-m, maya-l - the same as --model hy4-flash-maya-s ...")
     ap.add_argument("--draft", choices=list(DRAFTS),
                     help="how the model drafts: mtp = its MTP block (the default), dflash2 = a DFlash2 drafter "
                          f"(downloads {DFLASH['bytes'] / 1e9:.1f} GB; NVIDIA RTX 30 / A100 and newer, Apple Silicon, "
@@ -7035,8 +7710,22 @@ def main() -> int:
     if a.check:
         ds4 = a.model == DS4 or bool(a.model_dir) and exl3_folder_family(a.model_dir) is None
         quant = choose_ds4_quant(a, prev) if ds4 else None
-        pc = check_pc(a, "deepseek" if ds4 else "glm", gguf=ds4 and quant != "exl3")
+        fam = "deepseek" if ds4 else {HY4: "hy4", IK2: "ik2"}.get(a.model, "glm")
+        pc = check_pc(a, fam, gguf=ds4 and quant != "exl3")
         say()
+        if fam == "ik2":                               # (what the setup would write for these cards)
+            lay = IK2F.layout(pc["gpus"], len(pc["gpus"]))
+            if lay is None or len(lay["gpus"]) != len(pc["gpus"]):
+                fail(IK2F.unsupported("cuda", WIN, pc["gpus"]) or f"{IK2_SHOWN} runs on one or two cards of 16 GB or "
+                     "more: one of the cards chosen is smaller", "pick the cards with --gpu N or --gpus A,B")
+            say(f"{IK2_SHOWN} on these cards - {lay['said']}" + (f": {IK2F.speeds(lay)}" if IK2F.speeds(lay) else "") + ".")
+        elif fam == "hy4":
+            quant = getattr(a, "hy4_quant", None) or HY4_DEFAULT_QUANT
+            lay = HY4F.layout(pc["gpus"], hy4_quant_table(quant).get("plan") or {}, quant)
+            say(f"{Q.shown('hy4', quant)} on these cards - " +
+                (lay["said"] + (f": {HY4F.speeds(lay, quant)}" if HY4F.speeds(lay, quant) else " (not measured)")
+                 if lay["fits"] else f"it does not fit: about {lay['need_gib']:.0f} GB of VRAM are needed beside the "
+                                     f"experts; {IK2_SHOWN} is the model for one or two 16 GB cards") + ".")
         if a.backend == "metal":
             say(f"This Mac can run Saguaro on Metal (experimental). Run {ME} without --check to set it up.")
         elif a.backend == "hip":
