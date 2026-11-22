@@ -1,5 +1,28 @@
 # saguaro-ik2 (Inkling 2 Mini on T4s): what remains, in order
 
+## Overnight results 2026-11-22 (build-ik2/night/*.out; card 2 / cards 2,3; read 2026-11-22 ~08:30 PST)
+
+| check | result |
+| --- | --- |
+| token-path KL (kl-1card.out, kl-2card.out; 2000 forced tokens) | fast vs fast=0: mean 1.86e-3, median 4.9e-4, p99 1.8e-2, top-1 98.15 % (1 and 2 cards alike). Upstream documents 5.7e-5: ours is ~33x that. fast=0 vs fast=0 (and PIN=0 vs default under fast=0): BIT EQUAL. scalar experts (1.57e-3) / all scalar (1.82e-3) are no closer, so the gap is not the tensor-core expert form; next-token agreement 62.75 % vs 62.95 % |
+| build-ik2b (c341f273, conversations) | builds clean (build-ik2b.out; one old unused-function warning) |
+| conv_check (conv_check.out) | PASSED: set aside / back / edit-rewind / saved folder read by a new engine, tokens alike |
+| t4_check on build-ik2b | PASSED: kernels, 1 card, 2 cards (Paris / saguaro; 2-card read 606 tok/s of 2K, decode 56 tok/s) |
+| serve_check 1 card (serve/server.py, build-ik2) | all 24 PASS, incl. pictures (red, scene, photo x2), tool calls, stops, Monitor |
+| 2 cards at depth, ROOM_MB 1024, ctx 131072 (depth2.out) | holds to 125K: decode 49.7 / 45.7 / 40.5 / 28.3 tok/s at ~0 / 8K / 30K / 125K; reads 853 / 812 / 662 tok/s (8K / 30K / 125K). Room rule already the code default (GPU 0 of two: 1024 MiB) |
+| 1 card at depth (depth1.out) | decode 39.7 / 34.6 / 30.0 at ~0 / 8K / 30K; read 500 / 484 tok/s |
+| clock pin (clock*.out, 2 rounds interleaved) | 1 card: locked 39.0 / 32.9, free 37.6 / 34.0 tok/s (short / 8K): opposite signs, noise. 2 cards: 49.6 / 45.3 vs 48.6 / 44.5, read 849 vs 841: +1-2 %, noise. NOT pinned |
+| 1-card layout (layout-*.out, 2 rounds, fixed arm order; fast=1 decode ~1K / ~8.6K, read 8K) | default 39.8 / 34.2 / 495 tok/s; PIN=0 43.0 / 39.2 / 428 (+8 % / +15 % decode, -13.5 % read); PIN=core 39.4 / 35.4 / 477; PIN_KEEP=0.5 38.0 / 34.9 / 477. Only PIN=0 is beyond noise, and it is a TRADE |
+| read chunk, 1 card (read1-*, one run each) | c1024 / 2048 / 4096: read 495 / 707 / 897 tok/s, but expert slots 2487 / 2378 / 2123 and decode after it 37.7 / 32.5 / 25.3: a trade, not interleaved |
+| read chunk, 2 cards ctx 65536 (read2-*, one run each) | c2048 / 4096 / 8192: read 814 / 993 / 1087, decode 42.5-43.2 (all resident at 65536); not measured at 131072 |
+| T4 quant (QUANT-NOTES.md) | KL 1.23e-2 / top-1 94.95 % vs floor 1.9e-3 / 97.75 %; ~+15 % decode in one load each |
+
+Defaults from this: nothing changed yet (no arm is both interleaved and a clean win). Queued on build-ik2c
+(build-ik2/night/final/ab.sh): PIN 0/1 x chunk 1024/2048 on 1 card, chunk 2048/4096/8192 on 2 cards at 131072,
+UD-Q4_K_XL vs the T4 quant on 1 card, serve_check on the quant. checks.sh: build-ik2c, t4_check, conv_check, quant load.
+Done since: serve work committed (f1b33187), row check fixed (702569ea), saguaro/qfn-vram merged (ea21f5d1), quant
+config configs/Inkling-2-Mini-T4-NVFP4-IQ3_XXS.1card.json.
+
 State: branch saguaro/ik2, worktree /data/llm/saguaro-ik2port, build dir build-ik2 (binary = commit 80422cc0's
 engine). Baseline binary of before the token-path work: build-ik2/basebin/saguaro-ik2. Results: build-ik2/bench/*.out.
 Python for every tool: /opt/llm/saguaro/.venv/bin/python -B (system python3 lacks 'regex').
