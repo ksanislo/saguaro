@@ -73,7 +73,7 @@ recommends one for your PC; to pick one yourself, give its setup id: `./setup.sh
 
 GLM, DeepSeek and MiniMax run on NVIDIA from the V100 / RTX 20 on, and on Windows (experimental; see
 [What you need](#what-you-need)); Hy4-Flash on NVIDIA under Linux; Inkling 2 Mini under Linux on NVIDIA from the V100 /
-Tesla T4 on and on one AMD RDNA 3 / 4 GPU of 16 GB or more (experimental; the experts the card does not hold stay in
+Tesla T4 on and on one AMD RDNA 3 / 4 GPU of 12 GB or more (experimental; the experts the card does not hold stay in
 RAM, the offload path). On AMD GPUs (experimental) only some engines build today -
 [the list](docs/AMD_SAGUARO.md#what-runs-on-amd). With no model set up yet, the setup recommends Inkling 2 Mini on one or
 two NVIDIA cards under 24 GB or on one 16-23 GB AMD RDNA 3 / 4 GPU; with four equal 16 GB cards, Hy4-Flash; on other AMD

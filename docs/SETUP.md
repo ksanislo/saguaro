@@ -50,7 +50,7 @@ It first asks which model to set up:
   choices at 32K. [HY4-FLASH.md](HY4-FLASH.md).
 - **Inkling 2 Mini** (`--model inkling-2-mini`) - unsloth's UD-Q4_K_XL GGUF on its own engine (`build/saguaro-ik2`),
   Linux: NVIDIA from the V100 / Tesla T4 on (compute capability 7.0 / 7.5 and newer) with 8 GB or more, one card or two
-  (`--gpu N`, `--gpus A,B`); or one AMD RDNA 3 / 4 GPU of 16 GB or more (experimental, checked on an RX 9070 XT). Where
+  (`--gpu N`, `--gpus A,B`); or one AMD RDNA 3 / 4 GPU of 12 GB or more (experimental, checked on an RX 9070 XT). Where
   a card does not hold every expert the engine takes the offload path (the most-used experts in VRAM, the others pinned
   in RAM). The setup downloads the GGUF and the vision tower (18.3 GB, pinned and sha256-checked,
   `tools/ik2/download.json`), or takes the files you have (`--model-dir`, also a quant of your own such as the one-T4

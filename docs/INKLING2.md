@@ -304,7 +304,7 @@ slope deep in a context is the attention reading the cache: about 16 KB a token 
 (87% of its 900 GB/s; every expert in VRAM at 600K: 86.0 / 80.1 / 58.8 / 44.2 tok/s at 2K / 32K / 256K / 512K).
 KV streaming (`--kv-streaming auto`, the default; `on` / `off`, `--kv-resident N`) is the last resort, where the
 cache alone does not fit beside the dense weights and half a GiB of tier (an 8 / 12 GB card past 256K, a 16 GB one
-at 1M), and on AMD (no offload path yet: every expert stays): the cache of all but N (at least 1) of the eight full
+at 1M), and on an AMD APU (its memory is the RAM: every expert stays): the cache of all but N (at least 1) of the eight full
 visits sits in pinned RAM. A token copies those rows by DMA into a small VRAM ring, a few of the attention kernel's
 blocks a slot, the copies running ahead of the kernels (their partials those of the whole launch); a prompt chunk
 copies a visit's rows into one VRAM staging pair first - the VRAM of one of the N visits (the swing visit: its rows
@@ -441,7 +441,8 @@ GGUF is copied there first; run by hand, the engine keeps them beside the GGUF).
 (`SAGUARO_IK2_EXPERT_MMA=1`: the mma layout). Answers repeat on a GPU (every sum in a fixed order) but are not CUDA's bits.
 The engine refuses an AMD GPU older than RDNA 3 at its start; on an APU (Strix / Gorgon Halo) it counts the RAM the
 system has available, less max(8 GiB, 10%), as the GPU's room. AMD keeps every expert in the GPU's memory where the
-file fits, else it takes the offload path as on NVIDIA (16 GB cards, checked on an RX 9070 XT). Run on a Radeon 8065S (Ubuntu, ROCm 7.1).
+file fits, else it takes the offload path as on NVIDIA, from 12 GB (upstream v1.1.75; 16 GB checked here on an RX 9070 XT,
+upstream ran a Radeon 8065S set as a 12 and a 16 GB card). Run on a Radeon 8065S (Ubuntu, ROCm 7.1).
 
 **Defaults.** Thinking Machines' `generation_config.json`: temperature 1.0 (no top_p, no top_k: 1.0 and off).
 Thinking is the template's `reasoning_effort`, a name or a number in [0.0, 0.99]: `none` 0.0, `minimal` 0.1, `low`

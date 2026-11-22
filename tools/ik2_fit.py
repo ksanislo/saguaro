@@ -6,8 +6,8 @@ where they do not - a card under 24 GB with unsloth's UD-Q4_K_XL, or a context p
 offload path: a tier of the most-used experts in VRAM, the others in pinned RAM, fetched by the GPU (or computed by
 the CPU lane) as tokens pick them.  Two NVIDIA cards: the first alone where it holds every expert, else the split -
 the first on the offload path (dense weights, cache, prompts, its tier), the second with the next experts.  AMD (HIP,
-Linux, one GPU): the same plan - every expert in the GPU's memory where the file fits, else the offload path; a 16 GB
-card keeps 1 GiB beside the experts (SAGUARO_IK2_RESERVE_MB), which plan() counts (AMD_SMALL_CREDIT_GIB).
+Linux, one GPU of 12 GB or more): the same plan - every expert in the GPU's memory where the file fits, else the offload
+path; a card under 20 GB keeps 1 GiB beside the experts (SAGUARO_IK2_RESERVE_MB), which plan() counts (AMD_SMALL_CREDIT_GIB).
 
 The model's sizes are upstream's (an RTX 3090 measured: 18.3 GiB beside the cache at 262,144 with an FP8 cache, 14.7
 GiB of it UD-Q4_K_XL's experts); another file's experts (experts_gib_of: our one-T4 quant holds 11.45 GiB) take their
@@ -42,7 +42,7 @@ TWO_ROOM_GIB = 0.3                                  # the second card's room bes
 ROOM_MB = 1024                                      # SAGUARO_IK2_ROOM_MB: the offload path's room (the engine's default)
 THREADS = 8
 TWO_CONTEXT = 131072                                # two 16 GB cards: every expert in VRAM at this context (measured)
-AMD_MIN_GB = 15.0   # (a 16 GB AMD card as the driver reports it)
+AMD_MIN_GB = 11.0                                   # (a 12 GB AMD card as the driver reports it)
 LAYOUT_ENV = {"SAGUARO_IK2_ROOM_MB", "SAGUARO_IK2_PIN", "SAGUARO_IK2_PIN_KEEP", "SAGUARO_IK2_WARM", "SAGUARO_IK2_RESERVE_MB"}   # (a layout's keys;
                                                     # PIN / PIN_KEEP: the previous engine's, dropped from old configs)
 # (decode tok/s, read tok/s) on Tesla T4s, GPU clocks not pinned, ~50 tokens deep, read 8K / 16K (2026-11-22)
@@ -235,10 +235,11 @@ def recommended_context(vram_gb: float, kv: str = DEFAULT_KV, hip: bool = False,
     return max(fits) if fits else CONTEXTS[0]
 
 
-def amd_unsupported(cards: list, experts_gib: float = EXPERTS_GIB) -> str | None:
+def amd_unsupported(cards: list, experts_gib: float = EXPERTS_GIB, ram_gb: float = 0.0) -> str | None:
     """The AMD half of unsupported(): saguaro-ik2's HIP build (Linux) runs on RDNA 3 / 3.5 / 4 (gfx11 / gfx12) with
-    16 GB or more - every expert in VRAM where the file fits, else the offload path as on NVIDIA (checked on an RX 9070
-    XT, gfx1201).  An APU's memory is the RAM ("unified_memory": its "memory_gb")."""
+    12 GB or more - every expert in VRAM where the file fits, else the offload path as on NVIDIA (checked on an RX 9070
+    XT, gfx1201; 12 GB cards since upstream v1.1.75).  An APU's memory is the RAM ("unified_memory": its "memory_gb").
+    ram_gb: the PC's RAM (0: not read yet)."""
     if not cards:
         return None
     rdna = [g for g in cards if str(g.get("arch") or "").startswith(AMD_ARCHS)]
@@ -248,7 +249,10 @@ def amd_unsupported(cards: list, experts_gib: float = EXPERTS_GIB) -> str | None
                 "by its engine")
     room = max(float(g.get("memory_gb") if g.get("unified_memory") else g.get("vram_gb") or 0) for g in rdna)
     if room < AMD_MIN_GB:
-        return "Inkling 2 Mini on AMD needs one GPU with 16 GB of VRAM or more"
+        return "Inkling 2 Mini on AMD needs one GPU with 12 GB of VRAM or more"
+    if ram_gb and room - MARGIN_GIB < need_gib(CONTEXTS[0], experts_gib=experts_gib) and \
+            ram_gb < plan(room, CONTEXTS[0], hip=True, experts_gib=experts_gib)["ram_gib"]:
+        return too_small_line(ram_gb, room)            # (the experts a card does not hold need the RAM)
     return None
 
 
@@ -265,7 +269,7 @@ def unsupported(backend: str, windows: bool, gpus_asked: int, cards: list, ram_g
     if backend == "hip":
         if gpus_asked > 1:
             return "Inkling 2 Mini on AMD runs on one GPU for now: pick one (--gpu N)"
-        return amd_unsupported(cards, experts_gib)
+        return amd_unsupported(cards, experts_gib, ram_gb)
     if gpus_asked > 2:
         return ("Inkling 2 Mini runs on one or two NVIDIA GPUs for now (three or more are not in it yet): pick one or "
                 "two (--gpu N, --gpus N,M)")

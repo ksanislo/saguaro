@@ -2,7 +2,7 @@
 """Saguaro - set up and start GLM-5.3-Flash, DeepSeek-V4.1-Flash-1017, MiniMax-M3.1-Flash, Qwen-3.8-Flash-Next
 (CYBER-FROST), Hy4-Flash or Inkling 2 Mini on your own GPU(s).  Qwen-3.8-Flash-Next (CYBER-FROST): CUDA from V100 on and HIP, Linux and Windows, pictures too.
 Hy4-Flash (--model hy4-flash-maya-s; four cards): NVIDIA on Linux.  Inkling 2 Mini (--model inkling-2-mini; one or two
-16 GB cards): Linux, NVIDIA from V100 / Tesla T4 on, or one AMD RDNA 3 / 4 GPU of 16 GB or more (the experts the card
+16 GB cards): Linux, NVIDIA from V100 / Tesla T4 on, or one AMD RDNA 3 / 4 GPU of 12 GB or more (the experts the card
 does not hold in RAM: the offload path).  Each on its own engine (build/saguaro-hy4, build/saguaro-ik2) -
 docs/HY4-FLASH.md, docs/INKLING2-MINI.md.
 GLM-5.3-Flash: CUDA on Linux and Windows (experimental); HIP: experimental gfx1100/gfx1201/gfx1151 (gfx1030: not
@@ -729,7 +729,7 @@ HY4_MODEL_NAME = "hy4-flash"
 # Inkling 2 Mini (thinkingmachines' Inkling-2-Mini, 26B, a looped MoE) on its own engine, build/saguaro-ik2 (upstream
 # Maya v1.1.74's): unsloth's UD-Q4_K_XL GGUF read in place (tools/ik2/download.json) with the model's own chat template;
 # Linux, one or two NVIDIA cards from V100 / Tesla T4 on with 8 GB or more (the experts a card does not hold stay in
-# RAM: the offload path), or one AMD RDNA 3 / 3.5 / 4 GPU of 16 GB or more (the same: ik2_fit.py)
+# RAM: the offload path), or one AMD RDNA 3 / 3.5 / 4 GPU of 12 GB or more (the same: ik2_fit.py)
 IK2 = Q.MODEL["ik2"]                               # "Inkling-2-Mini"
 IK2_SHOWN = Q.SHOWN["ik2"]
 IK2_EXE = BUILD / "saguaro-ik2"
@@ -1554,7 +1554,7 @@ def check_pc(a, family: str = "glm", gguf: bool = False, ds4_quant: str = "exl3"
             family_unavailable(family, a.backend)
         if why:
             fail(why, ("it runs on a Linux PC with NVIDIA GPUs (V100 / Tesla T4 and newer, 8 GB or more) or one AMD "
-                       "RDNA 3 / 4 GPU of 16 GB or more" if family == "ik2" else
+                       "RDNA 3 / 4 GPU of 12 GB or more" if family == "ik2" else
                        "it runs on a Linux PC with NVIDIA GPUs (V100 / T4 and newer)"), end=NOT_HERE)
     if a.backend == "hip":
         if ds4 and not gguf:   # (as GLM's and MiniMax's EXL3 quants on AMD: experimental)
@@ -7255,7 +7255,7 @@ def ik2_about() -> str:
     # (TODO: the T4 speeds are the previous engine's - our v1.1.72 port - until the v1.1.74-based one is measured)
     return (f"thinkingmachines' Inkling-2-Mini (26B, a looped MoE: 8 of 128 experts a token) on its own engine, in "
             f"unsloth's UD-Q4_K_XL GGUF ({gb}); Linux, NVIDIA V100 / Tesla T4 / RTX 20 and newer with 8 GB or more "
-            "(the experts a card does not hold stay in RAM), or an AMD RDNA 3 / 4 GPU with 16 GB or more. The "
+            "(the experts a card does not hold stay in RAM), or an AMD RDNA 3 / 4 GPU with 12 GB or more. The "
             "model for one or two 16 GB cards: one Tesla T4 writes about 40 tok/s (a 32K context, part of the experts "
             "in RAM), two write about 51 tok/s with every expert in VRAM (a 131K context); tool calls, its thinking "
             "levels, pictures (its vision tower, 0.6 GB), one conversation at a time on two cards (several at once "
@@ -8017,7 +8017,7 @@ def ik2_amd_room(g: dict) -> float:
 
 def set_up_ik2(a, prev: dict) -> Path | None:
     """Inkling 2 Mini's steps 1-8: the PC (Linux; NVIDIA from V100 / Tesla T4 on with 8 GB or more, one card or two;
-    or one AMD RDNA 3 / 3.5 / 4 GPU of 16 GB or more - the offload path where the file does not fit), the layout for them and the context, the
+    or one AMD RDNA 3 / 3.5 / 4 GPU of 12 GB or more - the offload path where the file does not fit), the layout for them and the context, the
     engine (build/saguaro-ik2), the file (pinned, resumable, sha256-checked - or a GGUF of your own in --model-dir),
     the drafter where drafting runs, the tokenizer with the model's own template, the pictures, the config."""
     inst = prev.get("installer") or {}
@@ -8034,7 +8034,7 @@ def set_up_ik2(a, prev: dict) -> Path | None:
     if amd:   # (every expert in the GPU's memory where the file fits, else the offload path)
         g = pc["gpus"][0]
         room = ik2_amd_room(g)
-        why = IK2F.unsupported("hip", WIN, len(pc["gpus"]), [dict(g, vram_gb=room)], experts_gib=ex)
+        why = IK2F.unsupported("hip", WIN, len(pc["gpus"]), [dict(g, vram_gb=room)], mem_gb()[0], experts_gib=ex)
         if why:
             fail(why, "a smaller quant of your own: --model-dir FOLDER with its GGUF" if local is None else
                  "a GPU with more memory")
@@ -8210,7 +8210,7 @@ def main() -> int:
                     help="which model and files (default: asked): a Saguaro quant - "
                          + ", ".join(i for _, _, _, i in Q.QUANTS) +
                          f" - or {DS4} / {MM3} / {HY4} (their files asked, or --ds4-quant / --mm3-quant / "
-                         f"--hy4-quant), cyber-frost = {QWEN_SHOWN}, {Q.IK2_IDS[0]} = {IK2_SHOWN} (one or two 16 GB NVIDIA cards or a 16 GB+ AMD GPU),"
+                         f"--hy4-quant), cyber-frost = {QWEN_SHOWN}, {Q.IK2_IDS[0]} = {IK2_SHOWN} (one or two 16 GB NVIDIA cards or a 12 GB+ AMD GPU),"
                          " or a GLM-5.3-Flash "
                          "download by its name (" + ", ".join(MODELS) + "; every name used before still works)")
     ap.add_argument("--model-dir", help=f"use the files you already have of {DS4}, MiniMax, {QWEN_SHOWN} or "
@@ -8407,7 +8407,7 @@ def main() -> int:
         if fam == "ik2":                               # (what the setup would write for these cards)
             if pc.get("backend") == "hip":
                 g = dict(pc["gpus"][0], vram_gb=ik2_amd_room(pc["gpus"][0]))
-                why = IK2F.unsupported("hip", WIN, len(pc["gpus"]), [g])
+                why = IK2F.unsupported("hip", WIN, len(pc["gpus"]), [g], mem_gb()[0])
                 lay = None if why else IK2F.amd_layout(g)
             else:
                 why = IK2F.unsupported("cuda", WIN, len(pc["gpus"]), pc["gpus"], mem_gb()[0])

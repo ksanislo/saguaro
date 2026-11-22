@@ -206,10 +206,13 @@ class Fit(unittest.TestCase):
     def test_amd(self):
         """AMD as NVIDIA (checked on an RX 9070 XT): every expert in VRAM where the file fits, else the offload path -
         UD-Q4_K_XL on 16 GB offloads, our one-T4 quant (11.45 GiB) stays resident with 1 GiB kept beside it; RDNA 3 / 4
-        with 16 GB or more, Linux, one GPU."""
+        with 12 GB or more (upstream v1.1.75), Linux, one GPU; under it the RAM must hold the experts the card does not."""
         self.assertIsNone(F.unsupported("hip", False, 1, [amd("gfx1100", 24)]))
         self.assertIsNone(F.unsupported("hip", False, 1, [amd("gfx1201", 15.9)]))
-        self.assertIn("16 GB", F.unsupported("hip", False, 1, [amd("gfx1201", 12)]))
+        self.assertIsNone(F.unsupported("hip", False, 1, [amd("gfx1101", 12)]))
+        self.assertIsNone(F.unsupported("hip", False, 1, [amd("gfx1101", 12)], 32.0))
+        self.assertIn("12 GB", F.unsupported("hip", False, 1, [amd("gfx1102", 8)]))
+        self.assertIn("RAM and VRAM together", F.unsupported("hip", False, 1, [amd("gfx1101", 12)], 8.0))
         self.assertIn("RDNA 3, 3.5 or 4", F.unsupported("hip", False, 0, [amd("gfx1030", 16)]))
         self.assertIn("one GPU", F.unsupported("hip", False, 2, []))
         self.assertIn("Linux only", F.unsupported("hip", True, 0, []))
