@@ -7534,7 +7534,7 @@ def set_up_ik2(a, prev: dict) -> Path | None:
     local = ik2_local_gguf(a, d)
     ex = (IK2F.experts_gib_of(local) if local else None) or IK2F.EXPERTS_GIB
     amd = pc.get("backend") == "hip"
-    if amd:   # (no offload path on AMD: every expert of the file in the GPU's memory)
+    if amd:   # (every expert in the GPU's memory where the file fits, else the offload path)
         g = pc["gpus"][0]
         room = ik2_amd_room(g)
         why = IK2F.unsupported("hip", WIN, len(pc["gpus"]), [dict(g, vram_gb=room)], experts_gib=ex)
@@ -7553,8 +7553,7 @@ def set_up_ik2(a, prev: dict) -> Path | None:
     ok(f"model: {local.name + f' (your own file, {ex:.1f} GB of experts)' if local else Q.shown('ik2', Q.IK2_QUANT, m['download_gb'])}"
        " - thinkingmachines' Inkling-2-Mini (Apache 2.0)")
     if amd:
-        warn(f"{IK2_SHOWN} on AMD is experimental here: its HIP build is upstream Maya's, not yet run by Saguaro on an "
-             "AMD card - tell us how it goes")
+        warn(f"{IK2_SHOWN} on AMD is experimental here: checked on an RX 9070 XT (gfx1201) only - tell us how it goes")
     ok(f"layout: {lay['said']}" + (f" - {IK2F.speeds(lay)}" if IK2F.speeds(lay) else
                                    " (not measured on this kind of card here: tell us your speed)"))
     ctx = choose_context(a, prev_ctx if prev.get("gpu") and len(prev["gpu"]) == len(pc["gpus"]) else None,
