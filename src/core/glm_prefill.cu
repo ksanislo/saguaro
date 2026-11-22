@@ -1510,6 +1510,35 @@ size_t Glm5Model::prefill_trim_prestage(size_t max_borrow) {
     return S->borrow_bytes;
 }
 
+// ... and when even no prestage buffer leaves the loan small enough (the pool came out smaller than prefill_setup sized
+// the chunk for: a late reserve, VRAM taken meanwhile): a smaller chunk, down to 64 tokens, before token by token
+size_t Glm5Model::prefill_trim_chunk(size_t max_borrow) {
+    PrefillState* S = pf_;
+    if (S == nullptr || S->borrow_bytes <= max_borrow) return S ? S->borrow_bytes : 0;
+    const auto borrow = [&](int64_t T) {
+        const auto pu = prefill_bytes_for((size_t) T);
+        Carve c;
+        c.take<uint8_t>(pu.first + pu.second);
+        c.take<uint16_t>((size_t) S->w16_elems);
+        c.take<float>((size_t) S->w32_elems);
+        c.take<uint8_t>(S->ws_bytes);
+        c.take<uint8_t>(S->gbuf_bytes);
+        return c.off;
+    };
+    int64_t T = 0;
+    const int64_t from = S->T > 256 ? (S->T - 1) / 256 * 256 : (S->T - 1) / 64 * 64;
+    for (int64_t c = from; T == 0 && c >= 64; c -= c > 256 ? 256 : 64)
+        if (borrow(c) <= max_borrow) T = c;
+    if (T == 0) return S->borrow_bytes;
+    S->NP = 0;
+    S->pbuf_bytes = 0;
+    const auto pu = prefill_bytes_for((size_t) T);
+    S->arena_bytes = pu.first + pu.second;
+    S->borrow_bytes = borrow(T);
+    prefill_cap((int) T, "what the pool can lend");
+    return pf_ != nullptr ? pf_->borrow_bytes : 0;
+}
+
 bool Glm5Model::prefill_bind(uint8_t* region, size_t bytes, std::string& err) {
     PrefillState* S = pf_;
     if (S == nullptr) return true;

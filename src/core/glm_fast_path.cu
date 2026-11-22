@@ -1693,9 +1693,10 @@ bool Glm5Model::fast_setup(std::string& err) {
             const int k_keep = pool_keep(g.n_exp_used);
             const int k_max = per - k_keep;
             if (k_extra > k_max && k_max > 0) k_extra = tail_slots(prefill_trim_prestage((size_t) k_max * stride_sum));
+            if (k_extra > k_max && k_max > 0) k_extra = tail_slots(prefill_trim_chunk((size_t) k_max * stride_sum));
             // (a prompt runs alone - no decode beside it, unlike the vision encoder's lending below - so its main
             // slots need little more than one route's experts and the spares)
-            if (per - k_extra < k_keep) {
+            if (pf_ != nullptr && per - k_extra < k_keep) {
                 std::fprintf(stderr, "glm prefill: CUDA%d the pool (%d slots/layer) cannot lend %zu MB - token by token\n",
                              dev_, per, prefill_borrow_bytes() >> 20);
                 prefill_destroy();
