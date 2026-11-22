@@ -529,7 +529,7 @@ struct Model::Impl {
     std::vector<double> free0;           // each GPU's free VRAM as the plan first read it (a plan run again: the same)
     // (#1026) the reserve held for the whole run: what each GPU's start and requests allocate after the plan, read from
     // the pack's vram-late.txt by the plan and kept free beside the reserve (src/core/vram_late.hpp;
-    // SAGUARO_HY4_LATE_FILE / SAGUARO_HY4_LATE_MB, else the shared MAYA_VRAM_LATE_*); an integrated GPU (its free
+    // SAGUARO_HY4_LATE_FILE / SAGUARO_HY4_LATE_MB, else the shared SAGUARO_VRAM_LATE_*); an integrated GPU (its free
     // figure is the RAM's) is not measured
     strata::vramlate::Tracker late;
     std::vector<int> late_devs;

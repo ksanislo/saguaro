@@ -72,14 +72,14 @@ inline bool put(const std::string& file, const std::string& key, const std::stri
 /// the file a pack keeps the figures in: `env` (a path, or "none": not kept), else <pack>/vram-late.txt
 inline std::string file_of(const std::string& pack, const char* env) {
     const char* f = env != nullptr ? std::getenv(env) : nullptr;
-    if (f == nullptr) f = std::getenv("MAYA_VRAM_LATE_FILE");
+    if (f == nullptr) f = std::getenv("SAGUARO_VRAM_LATE_FILE");
     if (f != nullptr) return std::string(f) == "none" ? std::string() : std::string(f);
     return pack.empty() ? std::string() : pack + "/vram-late.txt";
 }
-/// a fixed figure in MiB (`env`, else MAYA_VRAM_LATE_MB; 0: the reserve alone), -1: measured
+/// a fixed figure in MiB (`env`, else SAGUARO_VRAM_LATE_MB; 0: the reserve alone), -1: measured
 inline int64_t fixed_of(const char* env) {
     const char* v = env != nullptr ? std::getenv(env) : nullptr;
-    if (v == nullptr) v = std::getenv("MAYA_VRAM_LATE_MB");
+    if (v == nullptr) v = std::getenv("SAGUARO_VRAM_LATE_MB");
     return v == nullptr ? -1 : std::max<int64_t>(0, std::atoll(v));
 }
 
@@ -158,7 +158,7 @@ struct Tracker {
         if (x.g.late > 0)
             std::fprintf(stderr, "%s: CUDA%d keeps %zu MiB free beside the %zu MiB reserve: what this PC's start and "
                                  "requests allocate after the memory plan%s\n", tag.c_str(), dev, x.g.late >> 20,
-                         res >> 20, fixed >= 0 ? " (MAYA_VRAM_LATE_MB)" : " (measured before)");
+                         res >> 20, fixed >= 0 ? " (SAGUARO_VRAM_LATE_MB)" : " (measured before)");
         return x.g.late;
     }
     /// the reserve GPU i's plan ended up keeping (a start that lowered it on a small card)
@@ -184,7 +184,7 @@ struct Tracker {
             std::fprintf(stderr, "%s: WARNING - CUDA%d: %zu MiB free, short of the %zu MiB reserve - the next start keeps "
                                  "%lld MiB free beside it for what the start and the requests allocate after the memory "
                                  "plan%s\n", tag.c_str(), dev, fr >> 20, x.res >> 20, (long long) (s.want >> 20),
-                         file.empty() ? " (not kept: MAYA_VRAM_LATE_FILE=none)" : "");
+                         file.empty() ? " (not kept: SAGUARO_VRAM_LATE_FILE=none)" : "");
         if (loaded && s.short_ && !file.empty()) short_mib = std::max(short_mib, (int) (s.want >> 20));
         if (!file.empty()) put(file, x.key, std::to_string(s.want >> 20));
     }
