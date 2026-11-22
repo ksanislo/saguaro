@@ -199,8 +199,8 @@ class Ik2Installed(unittest.TestCase):
         self.assertEqual(d["contexts"], M.IK2_CONTEXTS)
         self.assertEqual(d["context_range"]["tested"], 131072)
         self.assertEqual(d["needs"], {"cards": 1, "measured": True,
-                                      "limits": ["one conversation at a time", "no saved conversations yet"]})
-        self.assertNotIn("draft", d["settings"])
+                                      "limits": ["several conversations at once only on one GPU that holds every expert"]})
+        self.assertEqual((d["settings"]["draft"], d["settings"]["parallel"]), ("none", 1))
 
     def test_what_is_missing_is_said(self):
         self.vocab.unlink()
