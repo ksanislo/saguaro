@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import os
 import queue
+import shutil
 import subprocess
 import sys
 import threading
@@ -34,6 +35,14 @@ PASSAGE = ("The saguaro grows slowly: a plant ten years old may be no taller tha
 
 def smi(gpus: list[int]) -> dict[int, tuple[int, int]]:
     """{card: (used MiB, total MiB)} of the cards named (PCI order, as CUDA_DEVICE_ORDER=PCI_BUS_ID numbers them)."""
+    if shutil.which("nvidia-smi") is None:   # (AMD: rocm-smi's numbering, HIP_VISIBLE_DEVICES')
+        import json
+        out = subprocess.run(["rocm-smi", "--showmeminfo", "vram", "--json"], capture_output=True, text=True,
+                             check=True).stdout
+        js = json.loads(out)
+        rows = {int(k[4:]): (int(v["VRAM Total Used Memory (B)"]) >> 20, int(v["VRAM Total Memory (B)"]) >> 20)
+                for k, v in js.items() if k.startswith("card")}
+        return {g: rows[g] for g in gpus}
     out = subprocess.run(["nvidia-smi", "--query-gpu=index,memory.used,memory.total", "--format=csv,noheader,nounits"],
                          capture_output=True, text=True, check=True).stdout
     rows = {int(a): (int(b), int(c)) for a, b, c in (l.split(",") for l in out.strip().splitlines())}
@@ -41,7 +50,8 @@ def smi(gpus: list[int]) -> dict[int, tuple[int, int]]:
 
 
 def env_for(gpus: list[int]) -> dict:
-    return dict(os.environ, CUDA_DEVICE_ORDER="PCI_BUS_ID", CUDA_VISIBLE_DEVICES=",".join(map(str, gpus)))
+    ids = ",".join(map(str, gpus))
+    return dict(os.environ, CUDA_DEVICE_ORDER="PCI_BUS_ID", CUDA_VISIBLE_DEVICES=ids, HIP_VISIBLE_DEVICES=ids)
 
 
 def chat_prompt(question: str) -> str:

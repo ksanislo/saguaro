@@ -9,6 +9,7 @@ what each check got is in <build>/serve-check/results.json.
 from __future__ import annotations
 
 import argparse
+import shutil
 import base64
 import json
 import os
@@ -194,6 +195,8 @@ def main() -> int:
            "tokenizer": str(tokdir / "tokenizer"), "model_name": Path(a.model).stem, "gpu": gpus,
            "sampling": {"temperature": 1.0, "top_p": 1.0}, "reasoning_effort": "high",
            "log": str(work / "engine.log")}
+    if shutil.which("nvidia-smi") is None:   # (AMD: the server's HIP paths)
+        cfg["backend"] = "hip"
     if a.vision.exists():
         cfg["vision"] = {"exe": str(a.vision), "mmproj": str(MDIR / "mmproj-BF16.gguf"), "gpu": True}
         for kv in a.vision_set:
