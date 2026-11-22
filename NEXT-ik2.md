@@ -20,6 +20,9 @@
 Defaults from this: nothing changed yet (no arm is both interleaved and a clean win). Queued on build-ik2c
 (build-ik2/night/final/ab.sh): PIN 0/1 x chunk 1024/2048 on 1 card, chunk 2048/4096/8192 on 2 cards at 131072,
 UD-Q4_K_XL vs the T4 quant on 1 card, serve_check on the quant. checks.sh: build-ik2c, t4_check, conv_check, quant load.
+checks.sh RESULT (build-ik2c = 795f6c9f, 2026-11-22 ~10:40 PST): build clean, ik2_cpu_test all passed, t4_check PASSED (kernels,
+1 card, 2 cards), conv_check PASSED, the T4 quant LOADS with the row-check fix (every expert resident, 15.35 GiB, Paris /
+saguaro PASS). build-ik2/night/final/*.out
 Done since: serve work committed (f1b33187), row check fixed (702569ea), saguaro/qfn-vram merged (ea21f5d1), quant
 config configs/Inkling-2-Mini-T4-NVFP4-IQ3_XXS.1card.json.
 
