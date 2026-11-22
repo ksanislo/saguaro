@@ -5,7 +5,7 @@ device queries from #44 (fixed in v1.0.22 by #52).  No ROCm or GPU is needed: it
 
     python tools/check_hip_compat.py [repo]      # exit 1 and the file:line of each unmapped name
 
-Names inside CUDA-only code (#ifndef SAGUARO_USE_HIP, #if !defined(SAGUARO_USE_HIP), the #else of a SAGUARO_USE_HIP
+Names inside CUDA-only code (#ifndef STRATA_USE_HIP, #if !defined(STRATA_USE_HIP), the #else of a STRATA_USE_HIP
 block), comments and string literals are not counted.
 """
 from __future__ import annotations
@@ -56,15 +56,15 @@ def strip_comments_and_strings(text: str) -> str:
 def kind(cond: str) -> str:
     """'hip' when the condition holds only in the HIP build, 'cuda' when only in CUDA's, else 'other'."""
     c = cond.replace(" ", "")
-    if "SAGUARO_USE_HIP" not in c or "||" in c:
+    if "STRATA_USE_HIP" not in c or "||" in c:
         return "other"
-    if "!defined(SAGUARO_USE_HIP)" in c or "!SAGUARO_USE_HIP" in c:
+    if "!defined(STRATA_USE_HIP)" in c or "!STRATA_USE_HIP" in c:
         return "cuda"
     return "hip"
 
 
 def hip_lines(text: str):
-    """(line number, code) for each line the HIP build compiles, as far as SAGUARO_USE_HIP decides."""
+    """(line number, code) for each line the HIP build compiles, as far as STRATA_USE_HIP decides."""
     stack = []          # per open #if: [kind of the condition, in its #else branch]
     for no, line in enumerate(text.split("\n"), 1):
         s = line.strip()
@@ -72,9 +72,9 @@ def hip_lines(text: str):
         if m:
             d, rest = m.group(1), m.group(2)
             if d == "ifdef":
-                stack.append(["hip" if rest.strip() == "SAGUARO_USE_HIP" else "other", False])
+                stack.append(["hip" if rest.strip() == "STRATA_USE_HIP" else "other", False])
             elif d == "ifndef":
-                stack.append(["cuda" if rest.strip() == "SAGUARO_USE_HIP" else "other", False])
+                stack.append(["cuda" if rest.strip() == "STRATA_USE_HIP" else "other", False])
             elif d == "if":
                 stack.append([kind(rest), False])
             elif d == "elif" and stack:
