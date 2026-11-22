@@ -1292,6 +1292,15 @@ class StrataEngine:
             hist = self.stat_history = collections.deque(maxlen=120)
         hist.append(st)
 
+    IK2_GEN_KEYS = ("temperature", "top_p", "top_k", "seed", "fast")   # all saguaro-ik2 reads on a GEN line
+
+    def gen_keys(self, sampling: dict) -> str:
+        """sampling_keys for this engine: saguaro-ik2 gets only the keys it reads (no budget, penalties, Turbo, gt=)."""
+        keys = self.sampling_keys(sampling)
+        if (getattr(self, "info", None) or {}).get("engine_kind") != "ik2":
+            return keys
+        return "".join(" " + w for w in keys.split() if w.partition("=")[0] in self.IK2_GEN_KEYS)
+
     @staticmethod
     def sampling_keys(sampling: dict) -> str:
         keys = ""
@@ -1443,8 +1452,8 @@ class StrataEngine:
         if getattr(self, "_tls", None) is not None:   # (this request's own prompt progress: Service._progress)
             self._tls.own_pp = None
         # an image request takes the same sampling keys as text (#75: it used to decode greedily whatever was asked)
-        head = f"GENI {int(max_new)}{self.sampling_keys(sampling or {})} {embeddings}" if embeddings else \
-            f"GEN {int(max_new)}{self.sampling_keys(sampling or {})}"
+        head = f"GENI {int(max_new)}{self.gen_keys(sampling or {})} {embeddings}" if embeddings else \
+            f"GEN {int(max_new)}{self.gen_keys(sampling or {})}"
         try:
             self.proc.stdin.write(f"{head} {','.join(str(int(t)) for t in ids)}\n")
             self.proc.stdin.flush()
@@ -1622,6 +1631,8 @@ class StrataEngine:
 
     def wrap(self):
         """The server is stopping: a request still thinking closes its reasoning at the next token and answers."""
+        if (getattr(self, "info", None) or {}).get("engine_kind") == "ik2":   # (saguaro-ik2 has no WRAP: not sent)
+            return
         try:
             self.proc.stdin.write("WRAP\n")
             self.proc.stdin.flush()
@@ -2505,6 +2516,8 @@ class Service:
         if not isinstance(req.get("turbo"), dict):
             default = self.turbo_default   # (read once: a concurrent POST /api/turbo/options stores None between two reads and dict(None) is a 500)
             req["turbo"] = dict(default) if default else None
+        if getattr(self, "engine_kind", None) == "ik2":   # (saguaro-ik2 has no Turbo: the request runs exact)
+            req["turbo"] = None
         bias = logit_bias_of(req.get("logit_bias"), len(getattr(self.tok, "tokens", None) or ()) or None)
         if bias and (getattr(self.engine, "info", None) or {}).get("logit_bias") != 1:
             raise ValueError("logit_bias: this engine does not apply token biases - update Saguaro (./saguaro.sh --setup)")
@@ -2585,6 +2598,8 @@ class Service:
         request that carries none of its own runs with (agents included).  It applies at once - no config rewrite,
         no reload - and is kept in a sidecar file for the next start; the engine's run config is not touched."""
         t = turbo_live.normalize_turbo(value)
+        if getattr(self, "engine_kind", None) == "ik2" and turbo_live.turbo_on(t):
+            raise ValueError("Turbo: Inkling 2's engine has none - its requests run exact")
         self.turbo_default = turbo_live.turbo_on(t)     # (off, None: the model answers exact unless a request says otherwise)
         if self.turbo_path:
             try:
@@ -2969,14 +2984,15 @@ class Service:
 
     def think_budget_info(self) -> dict:
         """The dashboard's Thinking budget: tokens (0 = no limit), whether this model has a think block at all."""
-        return {"budget": int(self.think_budget or 0), "supported": self.think_end_id is not None,
+        return {"budget": int(self.think_budget or 0),
+                "supported": self.think_end_id is not None and getattr(self, "engine_kind", None) != "ik2",
                 "saved": bool(self.config_path)}
 
     def set_think_budget(self, value) -> dict:
         """The dashboard's Thinking budget: 0 or 256..262144 tokens.  It applies from the next request (think_budget is
         read per request, no restart) and is saved into the run config - marked as the user's own, so a setup or a
         switch keeps it."""
-        if self.think_end_id is None:
+        if self.think_end_id is None or getattr(self, "engine_kind", None) == "ik2":   # (saguaro-ik2 reads none)
             raise ValueError("this model has no thinking budget")
         n = maya_quants.check_thinking_budget(value)
         self.think_budget = n
@@ -6600,7 +6616,8 @@ def make_handler(svc: Service):
                 # the live per-request Turbo (PLAN-turbo-live): the model's global setting (the control panel's),
                 # what requests without their own `turbo` run with - changes apply at once, no config rewrite
                 if self._authorized():
-                    self._json(200, {"turbo": dict(svc.turbo_default) if svc.turbo_default else None})
+                    self._json(200, {"turbo": dict(svc.turbo_default) if svc.turbo_default else None,
+                                     **({"supported": False} if getattr(svc, "engine_kind", None) == "ik2" else {})})
             elif path == "/api/models":
                 # the Models page: the configs the setup wrote, the running one, each one's engine settings
                 if self._authorized():
@@ -8124,6 +8141,8 @@ def main() -> int:
     svc.think_budget = int(cfg["thinking_budget"] if cfg.get("thinking_budget") is not None else
                            cfg["reasoning_budget_tokens"] if kind == "batch" and cfg.get("reasoning_budget_tokens") else
                            maya_quants.default_thinking_budget(cfg) if kind == "line" else 32768)         if svc.think_end_id is not None else 0
+    if maya_quants.family_of(cfg) == "ik2":             # (saguaro-ik2 closes no thinking at a budget)
+        svc.think_budget = 0
     svc.idle_unload_s = max(0.0, a.idle_unload if a.idle_unload is not None else float(cfg.get("idle_unload_s") or 0))
     if svc.think_budget:
         print(f"[saguaro] thinking budget: {svc.think_budget} tokens (then the answer)", flush=True)

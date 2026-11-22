@@ -277,11 +277,11 @@ function fieldsOf(m, d) {
       : glm && m.backend === "hip" ? "The setup does not build GLM's image encoder for AMD GPUs (HIP) yet: this model reads text only."
       : glm ? "This model was set up without its image encoder: the setup adds it." : "This pack has no vision tower."}>
     <${Switch} label="Images" on=${d.images} disabled=${!m.choices.images && !d.images} onChange=${(v) => setDraft({images: v})}/><//>`;
-  const gpus = html`<${Row} label="GPUs" flag="gpu" changed=${ch("gpus")} hint="The engine splits the model across the GPUs picked. At least one."
+  const gpus = html`<${Row} label="GPUs" flag="gpu" changed=${ch("gpus")} hint=${m.family === "ik2" ? "One or two GPUs: the engine deals its layers across them (--gpus)." : "The engine splits the model across the GPUs picked. At least one."}
     below=${html`<div class="mdl-gpus">${(MS.data.gpus || []).map((g) => {
       const on = d.gpus.includes(g.index);
       return html`<button type="button" role="checkbox" aria-checked=${String(on)} class="mdl-gpu"
-        onClick=${() => { if (on && d.gpus.length === 1) return; setDraft({gpus: on ? d.gpus.filter((x) => x !== g.index) : [...d.gpus, g.index].sort((a, b) => a - b)}); }}>
+        onClick=${() => { if (on && d.gpus.length === 1) return; if (!on && m.family === "ik2" && d.gpus.length >= 2) return; setDraft({gpus: on ? d.gpus.filter((x) => x !== g.index) : [...d.gpus, g.index].sort((a, b) => a - b)}); }}>
         <span class="mdl-gpu__box">${on ? html`<${Icon} name="check" sm/>` : null}</span>
         <span><b>GPU ${g.index}</b><span>${[shortGpu(g.name), g.vram_gb ? `${fmt(g.vram_gb)} GB` : null].filter(Boolean).join(" · ") || "on this PC"}</span></span></button>`;
     })}</div>`}/>`;
@@ -289,6 +289,7 @@ function fieldsOf(m, d) {
     hint=${glm ? "For the driver, the desktop and other programs. Empty: 700 MiB." : "Per GPU, for the driver, the desktop and other programs. Empty: the engine's own."}
     warn=${whole(d.reserve_mib) ? null : "A whole number of MiB, or empty for the default."}>
     <${Num} label="VRAM kept free" value=${d.reserve_mib} ph=${glm ? "700" : "default"} unit="MiB / GPU" on=${(v) => setDraft({reserve_mib: v})}/><//>`;
+  if (m.family === "ik2") return ik2Fields(m, d, ch, gpus);
   if (m.family === "minimax") return mm3Fields(m, d, s, ch, images, gpus);
   if (m.family === "qwen") return qwenFields(m, d, s, ch, gpus);
   if (glm) {
@@ -359,6 +360,33 @@ function fieldsOf(m, d) {
         hint="Where the answer repeats earlier text (code edits, quotes), the words that followed it there are checked as drafts: the same answer, often much faster. Off: --suffix-draft 0.">
         <${Switch} label="Prompt lookup" on=${d.prompt_lookup} onChange=${(v) => setDraft({prompt_lookup: v})}/><//>`,
       draftConf(d, ch, 0.5)].filter(Boolean)},
+  ];
+}
+
+// Inkling 2's (saguaro-ik2: it stops at a flag it does not know, so only its own are offered; one answer at a time)
+const IK2_KV = [{id: "f16", label: "FP16"}, {id: "fp8", label: "FP8"}];
+function ik2Fields(m, d, ch, gpus) {
+  const kvb = engineKvBytes(m, ch, "kv");
+  return [
+    {label: "Model", rows: [
+      contextRow(m, d, ch, !kvb ? {} : {vram: kvb}, ["kv"]),
+      html`<${Row} label="Images" flag="vision" changed=${ch("images")}
+        hint=${m.choices.images ? "Reads images in chats: the image encoder starts when a picture arrives, no VRAM kept for it. Off reads text only."
+          : "This model was set up without its image encoder."}>
+        <${Switch} label="Images" on=${d.images} disabled=${!m.choices.images && !d.images} onChange=${(v) => setDraft({images: v})}/><//>`]},
+    {label: "GPUs and memory", rows: [gpus]},
+    {label: "Prompts and cache", rows: [
+      html`<${Row} label="Prompt chunk" flag="--chunk" changed=${ch("prefill_chunk")} hint="The prompt tokens one pass reads at most. Empty: the engine picks."
+        warn=${whole(d.prefill_chunk) ? null : "A whole number, or empty."}>
+        <${Num} label="Prompt chunk" value=${d.prefill_chunk} ph="auto" unit="tokens" on=${(v) => setDraft({prefill_chunk: v})}/><//>`,
+      html`<${Row} label="KV cache" flag="SAGUARO_IK2_KV" changed=${ch("kv")}
+        hint="The attention cache's format: FP16 is the engine's own, FP8 half the bytes (it changes some tokens).">
+        <${Seg} label="KV cache" value=${d.kv} options=${IK2_KV.map((f) => ({id: f.id, label: f.label}))}
+          onChange=${(v) => setDraft({kv: v})}/><//>`]},
+    {label: "Speed", rows: [
+      html`<${Row} label="CPU threads" flag="--threads" changed=${ch("cpu_threads")} hint="Empty: the engine picks."
+        warn=${whole(d.cpu_threads) ? null : "A whole number, or empty."}>
+        <${Num} label="CPU threads" value=${d.cpu_threads} ph="auto" unit="threads" on=${(v) => setDraft({cpu_threads: v})}/><//>`]},
   ];
 }
 

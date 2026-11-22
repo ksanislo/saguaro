@@ -2975,5 +2975,64 @@ class EngineEndTests(unittest.TestCase):
         self.assertIn("running out of RAM", self.note("saguaro ds4: something else\n", returncode=-9))
 
 
+class Inkling2Lines(unittest.TestCase):
+    """saguaro-ik2 reads temperature, top_p, top_k, seed and fast on a GEN line, and no PAUSE / WRAP: nothing else goes."""
+    EVERY = {"temperature": 0.7, "top_p": 0.9, "top_k": 20, "min_p": 0.05, "seed": 7, "repetition_penalty": 1.1,
+             "presence_penalty": 0.5, "_think_budget": 512, "_think_end": 9, "_think_soft": 400, "_think_stops": ",1,2",
+             "turbo": {"drop": 2, "skip": "ram"}, "_gen_tail": 3, "logprobs": True, "top_logprobs": 3,
+             "logit_bias": {5: -100.0}, "_restore": {"marks": [4], "tail": 8}, "experimental_speed_projection": True,
+             "strata_tune": {"spec": 4, "miss_skip_w": 0.1, "cpu_threads": 4, "suffix_draft": 1}}
+
+    class Pipe:
+        def __init__(self):
+            self.sent = []
+
+        def write(self, s):
+            self.sent.append(s)
+
+        def flush(self):
+            pass
+
+    def engine(self, kind):
+        eng = StrataEngine.__new__(StrataEngine)
+        eng.info = {"engine_kind": kind} if kind else {}
+        return eng
+
+    def test_only_its_own_keys(self):
+        self.assertEqual(self.engine("ik2").gen_keys(self.EVERY), " temperature=0.7 top_p=0.9 top_k=20 seed=7")
+        self.assertEqual(self.engine("ik2").gen_keys({**self.EVERY, "temperature": 0}), " temperature=0")
+        self.assertEqual(self.engine("ik2").gen_keys({}), "")
+
+    def test_other_engines_lines_as_they_were(self):
+        for kind in (None, "glm-fast", "ds4", "mm3"):
+            for s in (self.EVERY, {**self.EVERY, "temperature": 0}, {}):
+                self.assertEqual(self.engine(kind).gen_keys(s), StrataEngine.sampling_keys(s))
+        self.assertIn("turbo_drop=2", self.engine("ds4").gen_keys(self.EVERY).split())
+
+    def test_no_wrap_line(self):
+        for kind, sent in (("ik2", []), ("glm-fast", ["WRAP\n"])):
+            eng = self.engine(kind)
+            eng.proc = type("P", (), {"stdin": self.Pipe()})()
+            eng.wrap()
+            self.assertEqual(eng.proc.stdin.sent, sent)
+
+    def test_a_request_runs_exact_and_has_no_budget(self):
+        tok = ByteTokenizer()
+        svc = Service(MockEngine(tok, "x", max_context=CTX), tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        req = {"messages": [{"role": "user", "content": "hi"}], "turbo": {"drop": 2, "skip": "ram"}}
+        svc.check_request(req)
+        self.assertEqual(req["turbo"], {"drop": 2, "skip": "ram"})          # (another engine: as asked)
+        svc.engine_kind = "ik2"
+        svc.turbo_default = {"drop": 1, "skip": "off"}                      # (a sidecar file from another time)
+        for req in ({"messages": [], "turbo": {"drop": 2, "skip": "ram"}}, {"messages": []}):
+            svc.check_request(req)
+            self.assertIsNone(req["turbo"])
+        with self.assertRaises(ValueError):
+            svc.check_request({"messages": [], "turbo": {"drop": 99}})      # (still checked)
+        self.assertFalse(svc.think_budget_info()["supported"])
+        with self.assertRaises(ValueError):
+            svc.set_think_budget(1024)
+
+
 if __name__ == "__main__":
     unittest.main()
