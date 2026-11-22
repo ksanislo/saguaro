@@ -117,6 +117,27 @@ int main(int argc, char** argv) {
         }
         uint8_t* d = up<uint8_t>(V.data(t.name), V.bytes(t.name));
         check_decode(t.name.c_str(), (int) t.type, d, n, want.data());
+        if (t.shape.size() == 2 && t.shape[0] % 32 == 0 && nt % 7 == 0) {   // (a sample: the token path's row dots)
+            const int K = (int) t.shape[0], N = (int) t.shape[1];
+            std::vector<float> x(K), y(N);
+            std::mt19937 r2(nt);
+            std::normal_distribution<float> n2(0.0f, 1.0f);
+            for (auto& v : x) v = n2(r2);
+            float* dx = up<float>(x.data(), K);
+            float* dy = nullptr;
+            CK(cudaMalloc(&dy, (size_t) N * 4));
+            k::mv_blocks((int) t.type, d, N, K, dx, dy, 0);
+            CK(cudaDeviceSynchronize());
+            CK(cudaMemcpy(y.data(), dy, (size_t) N * 4, cudaMemcpyDeviceToHost));
+            double mx = 0, md = 0;
+            for (int rr = 0; rr < N; ++rr) {
+                double acc = 0;
+                for (int c = 0; c < K; ++c) acc += (double) want[(size_t) rr * K + c] * x[c];
+                mx = std::max(mx, std::fabs(acc)), md = std::max(md, std::fabs(acc - y[rr]));
+            }
+            if (md > 1e-4 * mx && g_bad++ < 20) std::printf("MV %s: max |dy| %.3g of %.3g\n", t.name.c_str(), md, mx);
+            cudaFree(dx), cudaFree(dy);
+        }
         CK(cudaFree(d));
         ++nt;
     }

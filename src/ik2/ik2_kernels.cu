@@ -2941,6 +2941,72 @@ __device__ __forceinline__ void load_xv8(const float* x, float4 (&xv)[8]) {
 }
 
 // a warp's dot of one row of K values (blocks of `type` from w) with xs (shared, padded: xp), every lane gets it
+// ---- a Strata pack's dense / expert types in the row dots: 32 values (group `it` of the row, xs' layout) at a time
+
+// sum over the 32 values of chunk it: (code - off) * x, as eff * (sum q x - off * sum x)
+__device__ __forceinline__ float sh_chunk_dot(const uint8_t* w, int bits, size_t hbb, int it, const float* x) {
+    const uint8_t* b = w + (size_t) (it >> 2) * hbb;
+    const int q4 = it & 3;   // (which 32 of the half block's 128)
+    const float eff = strata_fmt::sh_eff(b, q4 >> 1);
+    const uint8_t* pl = b + 4;
+    uint32_t lo[4], hi[2] = {0, 0};
+    if (bits <= 3) {
+        lo[0] = *(const uint32_t*) (pl + q4 * 8), lo[1] = *(const uint32_t*) (pl + q4 * 8 + 4);
+        if (bits == 3) hi[0] = *(const uint32_t*) (pl + 32 + q4 * 4);
+    } else {
+#pragma unroll
+        for (int i = 0; i < 4; ++i) lo[i] = *(const uint32_t*) (pl + q4 * 16 + 4 * i);
+        if (bits == 5) hi[0] = *(const uint32_t*) (pl + 64 + q4 * 4);
+        if (bits == 6) hi[0] = *(const uint32_t*) (pl + 64 + q4 * 8), hi[1] = *(const uint32_t*) (pl + 64 + q4 * 8 + 4);
+    }
+    float sq = 0.0f, sx = 0.0f;
+#pragma unroll
+    for (int j = 0; j < 32; ++j) {
+        int q;
+        if (bits <= 3) {
+            q = (lo[j >> 4] >> (2 * (j & 15))) & 3;
+            if (bits == 3) q |= ((hi[0] >> j) & 1) << 2;
+        } else {
+            q = (lo[j >> 3] >> (4 * (j & 7))) & 15;
+            if (bits == 5) q |= ((hi[0] >> j) & 1) << 4;
+            if (bits == 6) q |= ((hi[j >> 4] >> (2 * (j & 15))) & 3) << 4;
+        }
+        const float xv = x[j];
+        sq += (float) q * xv, sx += xv;
+    }
+    return eff * (sq - strata_fmt::sh_offset(bits) * sx);
+}
+__device__ __forceinline__ float q8f_chunk_dot(const uint8_t* w, int it, const float* x) {
+    const uint8_t* b = w + (size_t) it * 36;
+    const float d = __ldg((const float*) b);
+    float a = 0.0f;
+#pragma unroll
+    for (int i = 0; i < 8; ++i) {
+        const uint32_t u = __ldg((const uint32_t*) (b + 4 + 4 * i));
+        a += (float) (int8_t) (u & 0xFF) * x[4 * i] + (float) (int8_t) ((u >> 8) & 0xFF) * x[4 * i + 1] +
+             (float) (int8_t) ((u >> 16) & 0xFF) * x[4 * i + 2] + (float) (int8_t) (u >> 24) * x[4 * i + 3];
+    }
+    return d * a;
+}
+__device__ __forceinline__ float bf16_chunk_dot(const uint8_t* w, int it, const float* x) {
+    const uint32_t* p = (const uint32_t*) (w + (size_t) it * 64);
+    float a = 0.0f;
+#pragma unroll
+    for (int i = 0; i < 16; ++i) {
+        const uint32_t u = __ldg(p + i);
+        a += __uint_as_float(u << 16) * x[2 * i] + __uint_as_float(u & 0xFFFF0000u) * x[2 * i + 1];
+    }
+    return a;
+}
+__device__ __forceinline__ bool sf_chunk_type(int type) {
+    return strata_fmt::is_sh(type) || type == strata_fmt::kQ8F || type == strata_fmt::kBF16;
+}
+__device__ __forceinline__ float sf_chunk_dot(int type, const uint8_t* w, int it, const float* x) {
+    if (type == strata_fmt::kQ8F) return q8f_chunk_dot(w, it, x);
+    if (type == strata_fmt::kBF16) return bf16_chunk_dot(w, it, x);
+    return sh_chunk_dot(w, strata_fmt::sh_bits(type), strata_fmt::block_bytes(type), it, x);
+}
+
 __device__ float row_dot(int type, const uint8_t* w, const float* xs, int K) {
     const int lane = threadIdx.x & 31;
     float acc = 0.0f;
@@ -3060,6 +3126,8 @@ __device__ float row_dot(int type, const uint8_t* w, const float* xs, int K) {
             acc += iq3 ? iq3xxs_sub_dot(w + (size_t) (sb >> 3) * 98, sb & 7, xv)
                        : iq4xs_sub_dot(w + (size_t) (sb >> 3) * 136, sb & 7, xv);
         }
+    } else if (sf_chunk_type(type) && (K & 31) == 0 && ((uintptr_t) w & 3) == 0) {
+        for (int it = lane; it < K / 32; it += 32) acc += sf_chunk_dot(type, w, it, xs + it * 36);
     } else {
         for (int i = lane; i < K; i += 32) acc += decode_value(type, w, (size_t) i) * xs[xp(i)];
     }
@@ -3234,6 +3302,11 @@ __device__ void row_dot_2(int type, const uint8_t* wg, const uint8_t* wu, const 
             const size_t off = (size_t) (sb >> 3) * bb;
             ag += iq3 ? iq3xxs_sub_dot(wg + off, sb & 7, xv) : iq4xs_sub_dot(wg + off, sb & 7, xv);
             au += iq3 ? iq3xxs_sub_dot(wu + off, sb & 7, xv) : iq4xs_sub_dot(wu + off, sb & 7, xv);
+        }
+    } else if (sf_chunk_type(type) && (K & 31) == 0 && (((uintptr_t) wg | (uintptr_t) wu) & 3) == 0) {
+        for (int it = lane; it < K / 32; it += 32) {
+            ag += sf_chunk_dot(type, wg, it, xs + it * 36);
+            au += sf_chunk_dot(type, wu, it, xs + it * 36);
         }
     } else {
         for (int i = lane; i < K; i += 32) {
