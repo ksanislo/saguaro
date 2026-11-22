@@ -5446,6 +5446,7 @@ int main(int argc, char** argv) {
     bool serve = false, serve_maya = true;   // (--serve: Saguaro's engine protocol; --serve-ik2: the @-line one)
     std::vector<int> eos_ids;                 // --eos a,b: the tokens a request ends at (Maya's protocol)
     double cache_gb = 60;
+    int user_token = 200000;    // --user-token: Inkling 2's <|message_user|> (a snapshot where a prompt's last message starts)
     int image_token = 200054;   // --image-token: Inkling 2's <|unused_200054|>, the template's placeholder of a picture
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -5481,6 +5482,7 @@ int main(int argc, char** argv) {
             }
         }
         else if (a == "--image-token") image_token = std::atoi(next().c_str());
+        else if (a == "--user-token") user_token = std::atoi(next().c_str());
         else if (a == "--kv-streaming") {
             const std::string v = next();
             if (v == "auto") g_kv_stream = -1;
@@ -7034,61 +7036,284 @@ int main(int argc, char** argv) {
         // goes back to that point instead of the start. Full-layer KV needs nothing: positions rewrite cleanly.
         struct Snap {
             int pos = -1;
-            int slot = 0;   // (--parallel: the conversation's)
-            std::vector<float*> h;   // [layer * 4 + conv]
-            std::vector<std::vector<uint8_t>> kv_k, kv_v;
+            int slot = 0;              // (--parallel: the conversation's)
+            std::vector<float> h;      // every visit's four conv histories, one after the other
+            std::vector<float> last;   // the logits after its last token (a snapshot at a prompt's end: the same prompt again)
+            std::vector<std::vector<uint8_t>> kv_k, kv_v;   // a windowed visit's last `window` rows
         };
         const size_t kv_elem_b = g_kv_fp8 ? 1 : 2;
-        std::vector<Snap> snaps(8);
-        for (auto& sn : snaps) {
-            sn.kv_k.resize(M.V.size());
-            sn.kv_v.resize(M.V.size());
-            for (size_t l = 0; l < M.V.size(); ++l) {   // (l: a visit)
-                auto& Ly = bind_visit(M, (int) l);
-                use_dev(Ly.dev);
-                const size_t cc[4] = {KD, KD, C, C};
-                for (int i = 0; i < 4; ++i) sn.h.push_back(dalloc<float>(3 * cc[i]));
-                if (Ly.sliding && Ly.kv_cap < ctx) {
-                    const size_t bytes = (size_t) c.window * KD * kv_elem_b;
-                    sn.kv_k[l].resize(bytes);
-                    sn.kv_v[l].resize(bytes);
-                }
-            }
-        }
+        const size_t row_b = (size_t) KD * kv_elem_b;
+        const size_t snap_h = M.V.size() * 3 * (2 * KD + 2 * C);
+        // (SAGUARO_IK2_SNAPS: the points a conversation can go back to without reading again, 8)
+        const int n_snaps = std::max(2, getenv("SAGUARO_IK2_SNAPS") ? std::atoi(getenv("SAGUARO_IK2_SNAPS")) : 8);
+        std::vector<Snap> snaps(n_snaps);
         int snap_next = 0;
+        auto ringed = [&](const Layer& Ly) { return Ly.sliding && Ly.kv_cap < ctx; };
         auto snap_copy = [&](Snap& sn, bool save) {
             const size_t cc[4] = {KD, KD, C, C};
-            const cudaMemcpyKind kv_dir = save ? cudaMemcpyDeviceToHost : cudaMemcpyHostToDevice;
-            const size_t row_b = (size_t) KD * kv_elem_b;
+            const cudaMemcpyKind dir = save ? cudaMemcpyDeviceToHost : cudaMemcpyHostToDevice;
+            if (save) {
+                sn.h.resize(snap_h);
+                sn.kv_k.resize(M.V.size()), sn.kv_v.resize(M.V.size());
+            }
+            size_t ho = 0;
             for (size_t l = 0; l < M.V.size(); ++l) {   // (l: a visit)
                 Layer& Ly = bind_visit(M, (int) l);
                 use_dev(Ly.dev);
                 float* hs[4] = {Ly.h_k, Ly.h_v, Ly.h_attn, Ly.h_mlp};
                 for (int i = 0; i < 4; ++i) {
-                    float* sv = sn.h[l * 4 + i];
-                    CU(cudaMemcpyAsync(save ? sv : hs[i], save ? hs[i] : sv, 3 * cc[i] * 4, cudaMemcpyDeviceToDevice, g_s));
+                    float* sv = sn.h.data() + ho;
+                    ho += 3 * cc[i];
+                    CU(cudaMemcpyAsync(save ? sv : hs[i], save ? hs[i] : sv, 3 * cc[i] * 4, dir, g_s));
                 }
-                if (sn.pos > 0 && Ly.sliding && Ly.kv_cap < ctx) {
+                if (sn.pos > 0 && ringed(Ly)) {
                     const int w = std::min(sn.pos, c.window);
                     const int k_start = sn.pos - w;
                     const int s0 = k_start % Ly.kv_cap;
                     const int n1 = std::min(w, Ly.kv_cap - s0);
                     const int n2 = w - n1;
+                    if (save) sn.kv_k[l].resize((size_t) w * row_b), sn.kv_v[l].resize((size_t) w * row_b);
                     uint8_t* dk = g_kv_fp8 ? Ly.kc8 : (uint8_t*) Ly.kc;
                     uint8_t* dv = g_kv_fp8 ? Ly.vc8 : (uint8_t*) Ly.vc;
                     uint8_t* hk = sn.kv_k[l].data();
                     uint8_t* hv = sn.kv_v[l].data();
                     CU(cudaMemcpyAsync(save ? hk : dk + (size_t) s0 * row_b, save ? dk + (size_t) s0 * row_b : hk,
-                                       (size_t) n1 * row_b, kv_dir, g_s));
+                                       (size_t) n1 * row_b, dir, g_s));
                     CU(cudaMemcpyAsync(save ? hv : dv + (size_t) s0 * row_b, save ? dv + (size_t) s0 * row_b : hv,
-                                       (size_t) n1 * row_b, kv_dir, g_s));
+                                       (size_t) n1 * row_b, dir, g_s));
                     if (n2 > 0) {
                         CU(cudaMemcpyAsync(save ? hk + (size_t) n1 * row_b : dk,
-                                           save ? dk : hk + (size_t) n1 * row_b, (size_t) n2 * row_b, kv_dir, g_s));
+                                           save ? dk : hk + (size_t) n1 * row_b, (size_t) n2 * row_b, dir, g_s));
                         CU(cudaMemcpyAsync(save ? hv + (size_t) n1 * row_b : dv,
-                                           save ? dv : hv + (size_t) n1 * row_b, (size_t) n2 * row_b, kv_dir, g_s));
+                                           save ? dv : hv + (size_t) n1 * row_b, (size_t) n2 * row_b, dir, g_s));
                     }
                 }
+            }
+            for (auto& D : g_dev) CU(cudaStreamSynchronize(D.s));
+        };
+        // ---- conversations kept beside the one in the cache.  The model holds one conversation's state: the K / V
+        // rows of the layers without a window (a row a position), and what a snapshot holds.  A conversation set
+        // aside is those rows and its snapshots in host memory; coming back copies them in - nothing is read again,
+        // and the tokens that follow are the ones an uninterrupted conversation gives (the same bytes).
+        //   SAGUARO_IK2_KEEP (4): conversations kept in host memory (0: none - a new conversation drops the old one);
+        //   SAGUARO_IK2_KEEP_GB (8): their host memory at most; SAGUARO_IK2_SLOT_DIR: a folder they are saved in when
+        //   they leave host memory and when the engine ends, and read back from - across restarts.
+        //   SAGUARO_IK2_SLOT_MIN (1024): tokens a conversation has to be worth saving; SAGUARO_IK2_SLOT_GB (64): the
+        //   folder's size at most (the oldest go first); SAGUARO_IK2_SLOT_DAYS (7): older files are removed at start.
+        struct Conv {
+            std::vector<int> hist;
+            std::vector<uint64_t> sig;
+            std::vector<Snap> snaps;                     // (one at hist.size(): where it was left)
+            std::vector<std::vector<uint8_t>> fk, fv;    // a visit without a window: its rows [0, hist.size())
+            uint64_t used = 0;
+            bool dirty = true;                           // (not in the folder as it is)
+            std::string file;                            // (its file there, if any)
+            bool loaded = true;                          // (false: only the file's head is read - hist, sig, the snapshots' places)
+            std::vector<std::pair<int, bool>> points;    // (a file's snapshots: position, with logits)
+            size_t bytes() const {
+                size_t b = 0;
+                for (const auto& v : fk) b += 2 * v.size();
+                for (const auto& sn : snaps) {
+                    b += sn.h.size() * 4 + sn.last.size() * 4;
+                    for (const auto& v : sn.kv_k) b += 2 * v.size();
+                }
+                return b;
+            }
+        };
+        std::vector<Conv> parked;
+        uint64_t conv_clock = 0;
+        // (one conversation in VRAM, its K / V there: not with --parallel's slots or KV streaming)
+        const bool conv_ok = g_par <= 1 && !g_kv_streaming;
+        const int keep_n = conv_ok ? std::max(0, getenv("SAGUARO_IK2_KEEP") ? std::atoi(getenv("SAGUARO_IK2_KEEP")) : 4) : 0;
+        const double keep_gb = getenv("SAGUARO_IK2_KEEP_GB") ? std::atof(getenv("SAGUARO_IK2_KEEP_GB")) : 8.0;
+        const std::string slot_dir = conv_ok && getenv("SAGUARO_IK2_SLOT_DIR") ? getenv("SAGUARO_IK2_SLOT_DIR") : "";
+        const size_t slot_min = (size_t) std::max(1, getenv("SAGUARO_IK2_SLOT_MIN") ? std::atoi(getenv("SAGUARO_IK2_SLOT_MIN")) : 1024);
+        const double slot_gb = getenv("SAGUARO_IK2_SLOT_GB") ? std::atof(getenv("SAGUARO_IK2_SLOT_GB")) : 64.0;
+        auto say = [&](const std::string& m) {
+            std::fprintf(stderr, "saguaro ik2 sessions: %s\n", m.c_str());
+            if (serve_maya) std::printf("NOTE sessions: %s\n", m.c_str()), std::fflush(stdout);
+        };
+        // (what a saved conversation is good for: this file, this cache format, these shapes)
+        const std::string slot_ident = [&]() {
+            std::error_code ec;
+            return std::filesystem::path(model).filename().string() + "|" +
+                   std::to_string((unsigned long long) std::filesystem::file_size(model, ec)) + "|" +
+                   (g_kv_fp8 ? "fp8" : "f16") + "|" + std::to_string(M.V.size()) + "|" + std::to_string(KD) + "|" +
+                   std::to_string(C) + "|" + std::to_string(c.window) + "|v1";
+        }();
+        constexpr uint64_t kConvMagic = 0x31564e4f43324b49ull;   // "IK2CONV1"
+        bool slot_on = false;
+        // a conversation's file: the head (identity, tokens, pictures' hashes, the snapshots' places), then the
+        // snapshots and the rows; written under a temporary name first
+        auto conv_write = [&](Conv& cv) -> bool {
+            namespace fs = std::filesystem;
+            uint64_t hsh = 1469598103934665603ull;
+            for (int x : cv.hist) hsh = (hsh ^ (uint32_t) x) * 1099511628211ull;
+            char nm[64];
+            std::snprintf(nm, sizeof nm, "conv-%016llx.ik2c", (unsigned long long) hsh);
+            const std::string path = (fs::path(slot_dir) / nm).string(), tmp = path + ".tmp";
+            FILE* f = std::fopen(tmp.c_str(), "wb");
+            if (!f) return false;
+            bool ok = true;
+            auto w = [&](const void* p, size_t n) { ok = ok && (n == 0 || std::fwrite(p, 1, n, f) == n); };
+            auto w64 = [&](uint64_t v) { w(&v, 8); };
+            w64(kConvMagic), w64(slot_ident.size()), w(slot_ident.data(), slot_ident.size());
+            w64(cv.hist.size()), w(cv.hist.data(), cv.hist.size() * 4);
+            w64(cv.sig.size()), w(cv.sig.data(), cv.sig.size() * 8);
+            w64(cv.snaps.size());
+            for (const auto& sn : cv.snaps) w64((uint64_t) sn.pos), w64(sn.last.empty() ? 0 : 1);
+            for (const auto& sn : cv.snaps) {
+                w64(sn.h.size()), w(sn.h.data(), sn.h.size() * 4);
+                w64(sn.last.size()), w(sn.last.data(), sn.last.size() * 4);
+                w64(sn.kv_k.size());
+                for (size_t l = 0; l < sn.kv_k.size(); ++l) {
+                    w64(sn.kv_k[l].size()), w(sn.kv_k[l].data(), sn.kv_k[l].size());
+                    w(sn.kv_v[l].data(), sn.kv_v[l].size());
+                }
+            }
+            w64(cv.fk.size());
+            for (size_t l = 0; l < cv.fk.size(); ++l) {
+                w64(cv.fk[l].size()), w(cv.fk[l].data(), cv.fk[l].size());
+                w(cv.fv[l].data(), cv.fv[l].size());
+            }
+            w64(kConvMagic);
+            ok = (std::fclose(f) == 0) && ok;
+            std::error_code ec;
+            if (!ok) {
+                fs::remove(tmp, ec);
+                return false;
+            }
+            fs::rename(tmp, path, ec);
+            if (ec) return false;
+            if (!cv.file.empty() && cv.file != path) fs::remove(cv.file, ec);   // (its shorter self)
+            cv.file = path, cv.dirty = false;
+            return true;
+        };
+        // head: the tokens and the snapshots' places alone (what a request is matched against)
+        auto conv_read = [&](const std::string& path, Conv& cv, bool head) -> bool {
+            FILE* f = std::fopen(path.c_str(), "rb");
+            if (!f) return false;
+            bool ok = true;
+            auto r = [&](void* p, size_t n) { ok = ok && (n == 0 || std::fread(p, 1, n, f) == n); };
+            auto r64 = [&]() {
+                uint64_t v = 0;
+                r(&v, 8);
+                return v;
+            };
+            const uint64_t lim = 1ull << 34;
+            auto vec = [&](auto& v, uint64_t n) {
+                if (n > lim) ok = false;
+                if (ok) v.resize(n), r(v.data(), n * sizeof(v[0]));
+            };
+            if (r64() != kConvMagic) ok = false;
+            std::string id;
+            vec(id, r64());
+            ok = ok && id == slot_ident;
+            if (ok) vec(cv.hist, r64());
+            if (ok) vec(cv.sig, r64());
+            const uint64_t ns = ok ? r64() : 0;
+            ok = ok && ns <= 4096 && !cv.hist.empty();
+            cv.points.clear();
+            for (uint64_t i = 0; ok && i < ns; ++i) {
+                const uint64_t pos = r64(), hl = r64();
+                cv.points.push_back({(int) pos, hl != 0});
+            }
+            if (ok && !head) {
+                cv.snaps.assign(ns, Snap{});
+                for (uint64_t i = 0; ok && i < ns; ++i) {
+                    Snap& sn = cv.snaps[i];
+                    sn.pos = cv.points[i].first;
+                    vec(sn.h, r64());
+                    vec(sn.last, r64());
+                    const uint64_t nl = r64();
+                    ok = ok && nl <= 65536;
+                    if (ok) sn.kv_k.resize(nl), sn.kv_v.resize(nl);
+                    for (uint64_t l = 0; ok && l < nl; ++l) {
+                        const uint64_t n = r64();
+                        vec(sn.kv_k[l], n), vec(sn.kv_v[l], n);
+                    }
+                    ok = ok && sn.h.size() == snap_h;
+                }
+                const uint64_t nf = ok ? r64() : 0;
+                ok = ok && nf == M.V.size();
+                if (ok) cv.fk.resize(nf), cv.fv.resize(nf);
+                for (uint64_t l = 0; ok && l < nf; ++l) {
+                    const uint64_t n = r64();
+                    vec(cv.fk[l], n), vec(cv.fv[l], n);
+                }
+                ok = ok && r64() == kConvMagic;
+            }
+            std::fclose(f);
+            cv.file = path, cv.dirty = false, cv.loaded = ok && !head;
+            return ok;
+        };
+        auto folder_trim = [&]() {   // the folder under its size: the files not touched longest go
+            namespace fs = std::filesystem;
+            std::error_code ec;
+            std::vector<std::pair<fs::file_time_type, fs::path>> fl;
+            uint64_t tot = 0;
+            for (const auto& de : fs::directory_iterator(slot_dir, ec)) {
+                if (de.path().extension() != ".ik2c") continue;
+                fl.push_back({fs::last_write_time(de.path(), ec), de.path()});
+                tot += (uint64_t) fs::file_size(de.path(), ec);
+            }
+            std::sort(fl.begin(), fl.end());
+            for (size_t i = 0; i < fl.size() && (double) tot > slot_gb * 1073741824.0; ++i) {
+                tot -= (uint64_t) fs::file_size(fl[i].second, ec);
+                fs::remove(fl[i].second, ec);
+                for (size_t j = 0; j < parked.size(); ++j)
+                    if (parked[j].file == fl[i].second.string()) {
+                        if (parked[j].loaded) parked[j].file.clear(), parked[j].dirty = true;
+                        else parked.erase(parked.begin() + (ptrdiff_t) j--);
+                    }
+            }
+        };
+        if (!slot_dir.empty()) {
+            namespace fs = std::filesystem;
+            std::error_code ec;
+            fs::create_directories(slot_dir, ec);
+            if (!fs::is_directory(slot_dir, ec)) {
+                say("folder " + slot_dir + " not usable: conversations are not saved");
+            } else {
+                slot_on = true;
+                const double days = getenv("SAGUARO_IK2_SLOT_DAYS") ? std::atof(getenv("SAGUARO_IK2_SLOT_DAYS")) : 7.0;
+                int n = 0;
+                for (const auto& de : fs::directory_iterator(slot_dir, ec)) {
+                    if (de.path().extension() == ".tmp") {
+                        fs::remove(de.path(), ec);
+                        continue;
+                    }
+                    if (de.path().extension() != ".ik2c") continue;
+                    const double age = std::chrono::duration<double>(fs::file_time_type::clock::now() -
+                                                                     fs::last_write_time(de.path(), ec)).count() / 86400.0;
+                    Conv cv;
+                    if (age > days || !conv_read(de.path().string(), cv, true)) {   // (old, or another model's or format's)
+                        fs::remove(de.path(), ec);
+                        continue;
+                    }
+                    parked.push_back(std::move(cv));
+                    ++n;
+                }
+                folder_trim();
+                say("folder " + slot_dir + ": " + std::to_string(n) + " saved conversation(s)");
+            }
+        }
+        // the rows [0, n) of the visits without a window, to or from host memory
+        auto full_rows = [&](Conv& cv, int n, bool save) {
+            if (save) cv.fk.assign(M.V.size(), {}), cv.fv.assign(M.V.size(), {});
+            else lend_back(M, n + 1);   // (KV lending: the experts lent below n given back before the rows land)
+            for (size_t l = 0; l < M.V.size(); ++l) {
+                Layer& Ly = bind_visit(M, (int) l);
+                if (ringed(Ly)) continue;
+                use_dev(Ly.dev);
+                const size_t b = (size_t) n * row_b;
+                if (save) cv.fk[l].resize(b), cv.fv[l].resize(b);
+                if (cv.fk[l].size() < b) die("a kept conversation's rows are short");
+                uint8_t* dk = g_kv_fp8 ? Ly.kc8 : (uint8_t*) Ly.kc;
+                uint8_t* dv = g_kv_fp8 ? Ly.vc8 : (uint8_t*) Ly.vc;
+                const cudaMemcpyKind dir = save ? cudaMemcpyDeviceToHost : cudaMemcpyHostToDevice;
+                CU(cudaMemcpyAsync(save ? (void*) cv.fk[l].data() : (void*) dk, save ? (void*) dk : (void*) cv.fk[l].data(), b, dir, g_s));
+                CU(cudaMemcpyAsync(save ? (void*) cv.fv[l].data() : (void*) dv, save ? (void*) dv : (void*) cv.fv[l].data(), b, dir, g_s));
             }
             for (auto& D : g_dev) CU(cudaStreamSynchronize(D.s));
         };
@@ -7112,6 +7337,106 @@ int main(int argc, char** argv) {
             hist.clear();
             hist_sig.clear();
             last.clear();
+        };
+        std::string act_file;   // (the folder's file the conversation in the cache came from)
+        auto trim_parked = [&]() {   // the kept conversations within their count and memory: the least recent leave
+            for (;;) {
+                int n = 0, lru = -1;
+                size_t b = 0;
+                for (int j = 0; j < (int) parked.size(); ++j) {
+                    if (!parked[j].loaded) continue;
+                    ++n, b += parked[j].bytes();
+                    if (lru < 0 || parked[j].used < parked[lru].used) lru = j;
+                }
+                if (lru < 0 || (n <= keep_n && (double) b <= keep_gb * 1073741824.0)) return;
+                Conv& cv = parked[lru];
+                bool kept = false;
+                if (slot_on && cv.hist.size() >= slot_min && (!cv.dirty || conv_write(cv))) {   // (its head stays: the file is it)
+                    cv.points.clear();
+                    for (const auto& sn : cv.snaps) cv.points.push_back({sn.pos, !sn.last.empty()});
+                    cv.snaps.clear(), cv.fk.clear(), cv.fv.clear(), cv.snaps.shrink_to_fit();
+                    cv.loaded = false, kept = true;
+                    say("a conversation of " + std::to_string(cv.hist.size()) + " tokens went to the folder");
+                }
+                if (!kept) {
+                    say("a conversation of " + std::to_string(cv.hist.size()) + " tokens was dropped");
+                    parked.erase(parked.begin() + lru);
+                }
+            }
+        };
+        // the conversation in the cache set aside as it stands (a snapshot at its end, its rows); the cache's rows
+        // stay as they are
+        auto park_active = [&]() {
+            if (keep_n <= 0 || hist.size() < 16) return;
+            const double tp = now();
+            bool have_end = false;
+            for (const auto& sn : snaps) have_end = have_end || sn.pos == (int) hist.size();
+            if (!have_end) {
+                Snap& sn = snaps[snap_next];
+                snap_next = (snap_next + 1) % n_snaps;
+                sn.pos = (int) hist.size();
+                sn.last.clear();
+                snap_copy(sn, true);
+            }
+            Conv cv;
+            for (auto& sn : snaps)
+                if (sn.pos >= 0) cv.snaps.push_back(std::move(sn));
+            full_rows(cv, (int) hist.size(), true);
+            cv.hist = hist, cv.sig = hist_sig, cv.used = ++conv_clock, cv.file = act_file;
+            say("a conversation of " + std::to_string(hist.size()) + " tokens set aside (" +
+                std::to_string(cv.bytes() >> 20) + " MiB, " + std::to_string((int) ((now() - tp) * 1e3)) + " ms)");
+            parked.push_back(std::move(cv));
+            snaps.assign(n_snaps, Snap{});
+            snap_next = 0;
+            act_file.clear();
+            trim_parked();
+        };
+        // a kept conversation into the cache: the whole of it (it leaves the kept ones), or its start up to a
+        // snapshot at `upto` (it stays kept: the request goes another way from there)
+        auto unpark = [&](int j, int upto) -> bool {
+            const double tp = now();
+            if (!parked[j].loaded) {
+                Conv cv;
+                if (!conv_read(parked[j].file, cv, false)) {
+                    say("a saved conversation could not be read: " + parked[j].file);
+                    parked.erase(parked.begin() + j);
+                    return false;
+                }
+                cv.used = parked[j].used;
+                parked[j] = std::move(cv);
+            }
+            Conv& cv = parked[j];
+            const bool whole = upto < 0;
+            const int n = whole ? (int) cv.hist.size() : upto;
+            int at = -1;
+            for (int i = 0; i < (int) cv.snaps.size(); ++i)
+                if (cv.snaps[i].pos == n) at = i;
+            if (at < 0) return false;
+            full_rows(cv, n, false);
+            snaps.assign(n_snaps, Snap{});
+            snap_next = 0;
+            if (whole) {   // (its snapshots: the latest ones that fit)
+                std::sort(cv.snaps.begin(), cv.snaps.end(), [](const Snap& x, const Snap& y) { return x.pos > y.pos; });
+                for (size_t i = 0; i < cv.snaps.size() && i < (size_t) n_snaps; ++i) snaps[snap_next++] = std::move(cv.snaps[i]);
+                snap_next %= n_snaps;
+                at = 0;
+                snap_copy(snaps[0], false);
+            } else {
+                snaps[0] = cv.snaps[at];
+                snap_next = 1 % n_snaps;
+                snap_copy(snaps[0], false);
+            }
+            hist.assign(cv.hist.begin(), cv.hist.begin() + n);
+            hist_sig = cv.sig;
+            if (hist_sig.size() > (size_t) n) hist_sig.resize(n);
+            last.clear();
+            act_file = whole ? cv.file : std::string();
+            say(std::string("a conversation of ") + std::to_string(cv.hist.size()) + " tokens " +
+                (whole ? "back in the cache" : "taken up to token " + std::to_string(n)) + " (" +
+                std::to_string((int) ((now() - tp) * 1e3)) + " ms)");
+            if (whole) parked.erase(parked.begin() + j);
+            else cv.used = ++conv_clock;
+            return true;
         };
         auto parse_ints = [](const std::string& t) {
             std::vector<int> v;
@@ -7764,6 +8089,64 @@ int main(int argc, char** argv) {
             beat("the request's start (its kept state)");
             if (seed >= 0) rng.seed((uint64_t) seed);
             g_cancel = 0;
+            if (keep_n > 0) {
+                // which conversation the request continues: the one in the cache or a kept one - the one it can go on
+                // from furthest (its shared start, back to a snapshot unless it is all of the conversation)
+                auto reach = [&](const std::vector<int>& h, const std::vector<uint64_t>& sg, const auto& pts, bool act) {
+                    size_t n = 0;
+                    while (n < h.size() && n < ids.size() && h[n] == ids[n] && (n < sg.size() ? sg[n] : 0) == sig[n]) ++n;
+                    if (n == h.size() && (n < ids.size() || (act && !last.empty()))) return (int) n;
+                    int best = 0;
+                    for (const auto& pt : pts)
+                        if (pt.first >= 0 && pt.first <= (int) n && (pt.first < (int) ids.size() || pt.second))
+                            best = std::max(best, pt.first);
+                    return best;
+                };
+                auto points_of = [](const std::vector<Snap>& sv) {
+                    std::vector<std::pair<int, bool>> pts;
+                    for (const auto& sn : sv) pts.push_back({sn.pos, !sn.last.empty()});
+                    return pts;
+                };
+                // a later prompt's end past where the request joins: the conversation goes on elsewhere, so it is kept
+                auto later_turn = [](const auto& pts, int from) {
+                    for (const auto& pt : pts)
+                        if (pt.second && pt.first > from) return true;
+                    return false;
+                };
+                const auto act_pts = points_of(snaps);
+                int r_best = reach(hist, hist_sig, act_pts, true), j_best = -1;
+                for (int j = 0; j < (int) parked.size(); ++j) {
+                    const int r = reach(parked[j].hist, parked[j].sig, parked[j].loaded ? points_of(parked[j].snaps) : parked[j].points, false);
+                    if (r > r_best) r_best = r, j_best = j;
+                }
+                if (r_best == 0) {   // a new conversation
+                    if (!hist.empty()) park_active(), reset();
+                } else if (j_best >= 0) {
+                    const auto pts = parked[j_best].loaded ? points_of(parked[j_best].snaps) : parked[j_best].points;
+                    const bool fork = r_best < (int) parked[j_best].hist.size() && later_turn(pts, r_best);
+                    parked[j_best].used = ++conv_clock;
+                    const std::vector<int> key = parked[j_best].hist;
+                    if (!hist.empty()) park_active();
+                    reset();
+                    int j = -1;   // (setting the other aside may have moved it)
+                    for (int q = 0; q < (int) parked.size(); ++q)
+                        if (parked[q].hist == key) j = q;
+                    if (j >= 0) unpark(j, fork ? r_best : -1);
+                } else if (r_best < (int) hist.size() && later_turn(act_pts, r_best)) {
+                    Snap cp;   // back past a later turn: the conversation as it is stays kept, this one goes on from the snapshot
+                    for (const auto& sn : snaps)
+                        if (sn.pos == r_best) cp = sn;
+                    const std::vector<int> h0(hist.begin(), hist.begin() + r_best);
+                    std::vector<uint64_t> s0 = hist_sig;
+                    if (s0.size() > (size_t) r_best) s0.resize(r_best);
+                    park_active();
+                    reset();
+                    hist = h0, hist_sig = s0;
+                    snaps[0] = std::move(cp);
+                    snap_next = 1 % n_snaps;
+                    snap_copy(snaps[0], false);
+                }
+            }
             // (drafting for this request: spec=1 asks for none; the prompt lookup's history its tokens; the Monitor's
             //  figures - STAT draft_acc / draft_off, DONE's kept and offered - this request's drafts)
             const bool req_spec = spec_on && spec_key != 1;
@@ -7829,51 +8212,91 @@ int main(int argc, char** argv) {
             if (L < ids.size()) {
                 const int T_sup = g_dev[0].W.T_sup;
                 const int sub_chunk = std::min(g_dev[0].W.Tm, 512);
-                if (T_sup > 0 && (n_gpu == 1 || dual()) && (int) (ids.size() - L) > 64) {
-                    BigScratch bs;
-                    const int T_pass = big_begin(M, g_dev[0].W, dev_cache(0), (int) (ids.size() - L), (int) ids.size(), bs);
-                    for (size_t p0 = L; p0 < ids.size(); p0 += T_pass) {
-                        beat("a prompt pass (the layer-major path)");
-                        if (g_cancel) {   // (a prompt half run: nothing of it is kept)
-                            cancelled = true;
+                // where the prompt's last message starts (past what is kept, with a turn before it): a snapshot
+                // there, so that message edited or asked again reads only itself (SAGUARO_IK2_SNAP_MSG=0: none)
+                size_t p_ms = 0;
+                if (keep_n > 0 && !(getenv("SAGUARO_IK2_SNAP_MSG") && !std::atoi(getenv("SAGUARO_IK2_SNAP_MSG"))) && !drafter)
+                    for (size_t i = ids.size(); i-- > L + 1;)
+                        if (ids[i] == user_token) {
+                            if (i >= L + 64 && ids.size() - i >= 8) p_ms = i;
                             break;
                         }
-                        const int n = (int) std::min<size_t>(T_pass, ids.size() - p0);
-                        const bool last_c = p0 + n == ids.size();
-                        std::vector<float> lo;
-                        forward_prefill_sup(M, ids.data() + p0, n, (int) p0, sub_chunk,
-                                            last_c ? OutMode::kLogits : OutMode::kNone, lo, nullptr, t_exp);
-                        if (last_c) last = std::move(lo);
-                        if (serve_maya) {   // (read, total, ms, tok/s, reused)
-                            const double ms = (now() - t0) * 1e3;
-                            std::printf("PP %zu %zu %.0f %.1f %d\n", p0 + n, ids.size(), ms,
-                                        (p0 + n - L) / std::max(1e-3, ms / 1e3), (int) L);
-                            std::fflush(stdout);
+                for (size_t s0 = L; s0 < ids.size() && !cancelled;) {   // (a segment: up to p_ms, then the rest)
+                    const size_t s1 = p_ms > s0 ? p_ms : ids.size();
+                    if (T_sup > 0 && (n_gpu == 1 || dual()) && (int) (s1 - s0) > 64) {
+                        BigScratch bs;
+                        const int T_pass = big_begin(M, g_dev[0].W, dev_cache(0), (int) (s1 - s0), (int) s1, bs);
+                        for (size_t p0 = s0; p0 < s1; p0 += T_pass) {
+                            beat("a prompt pass (the layer-major path)");
+                            if (g_cancel) {   // (a prompt half run: back to a snapshot it kept)
+                                cancelled = true;
+                                break;
+                            }
+                            const int n = (int) std::min<size_t>(T_pass, s1 - p0);
+                            const bool last_c = p0 + n == ids.size();
+                            std::vector<float> lo;
+                            forward_prefill_sup(M, ids.data() + p0, n, (int) p0, sub_chunk,
+                                                last_c ? OutMode::kLogits : OutMode::kNone, lo, nullptr, t_exp);
+                            if (last_c) last = std::move(lo);
+                            if (serve_maya) {   // (read, total, ms, tok/s, reused)
+                                const double ms = (now() - t0) * 1e3;
+                                std::printf("PP %zu %zu %.0f %.1f %d\n", p0 + n, ids.size(), ms,
+                                            (p0 + n - L) / std::max(1e-3, ms / 1e3), (int) L);
+                                std::fflush(stdout);
+                            }
+                        }
+                        big_end(g_dev[0].W, dev_cache(0), bs);
+                    } else {
+                        for (size_t p0 = s0; p0 < s1; p0 += chunk) {
+                            beat("a prompt pass");
+                            if (g_cancel) {
+                                cancelled = true;
+                                break;
+                            }
+                            const int n = (int) std::min<size_t>(chunk, s1 - p0);
+                            const bool last_c = p0 + n == ids.size();
+                            std::vector<float> lo;
+                            forward(M, ids.data() + p0, n, (int) p0, false, last_c ? OutMode::kLogits : OutMode::kNone,
+                                    std::string(), lo, nullptr, t_exp);
+                            if (last_c) last = std::move(lo);
+                            if (serve_maya) {
+                                const double ms = (now() - t0) * 1e3;
+                                std::printf("PP %zu %zu %.0f %.1f %d\n", p0 + n, ids.size(), ms,
+                                            (p0 + n - L) / std::max(1e-3, ms / 1e3), (int) L);
+                                std::fflush(stdout);
+                            }
+                            if (drafter) {   // (the drafter's context for these positions, from their taps)
+                                ik2::draft::write_context(drafter, g_taps, g_taps_ld, 0, n, (int) p0);
+                                if (last_c) ik2::draft::set_f_rnn(drafter, g_taps, g_taps_ld, n - 1);
+                            }
                         }
                     }
-                    big_end(g_dev[0].W, dev_cache(0), bs);
-                } else {
-                    for (size_t p0 = L; p0 < ids.size(); p0 += chunk) {
-                        beat("a prompt pass");
-                        if (g_cancel) {   // (a prompt half run: nothing of it is kept)
-                            cancelled = true;
-                            break;
-                        }
-                        const int n = (int) std::min<size_t>(chunk, ids.size() - p0);
-                        const bool last_c = p0 + n == ids.size();
-                        std::vector<float> lo;
-                        forward(M, ids.data() + p0, n, (int) p0, false, last_c ? OutMode::kLogits : OutMode::kNone,
-                                std::string(), lo, nullptr, t_exp);
-                        if (last_c) last = std::move(lo);
-                        if (drafter) {   // (the drafter's context for these positions, from their taps)
-                            ik2::draft::write_context(drafter, g_taps, g_taps_ld, 0, n, (int) p0);
-                            if (last_c) ik2::draft::set_f_rnn(drafter, g_taps, g_taps_ld, n - 1);
-                        }
+                    if (!cancelled && s1 == p_ms) {
+                        Snap& sn = snaps[snap_next];
+                        snap_next = (snap_next + 1) % n_snaps;
+                        sn.pos = (int) p_ms, sn.slot = 0;
+                        sn.last.clear();
+                        snap_copy(sn, true);
                     }
+                    s0 = s1;
                 }
             }
-            if (cancelled) {
-                reset();
+            if (cancelled) {   // (back to the latest snapshot the request kept, else nothing is kept)
+                int best = -1;
+                for (int i = 0; i < n_snaps; ++i)
+                    if (snaps[i].pos >= 0 && snaps[i].pos <= (int) ids.size() && (best < 0 || snaps[i].pos > snaps[best].pos))
+                        best = i;
+                if (best >= 0 && snaps[best].pos > 0 && snaps[best].pos < (int) ids.size()) {
+                    const int sp = snaps[best].pos;
+                    snap_copy(snaps[best], false);
+                    for (auto& sn : snaps)
+                        if (sn.pos > sp) sn.pos = -1;
+                    hist.assign(ids.begin(), ids.begin() + sp);
+                    hist_sig.assign(sig.begin(), sig.begin() + sp);
+                    last.clear();
+                } else {
+                    reset();
+                }
                 if (serve_maya) std::printf("DONE 0 %zu %.1f 0 cancel 0 0 %d 0 0\n", ids.size(), (now() - t0) * 1e3, cached);
                 else std::printf("@END cancelled %zu %d %.3f %.3f\n", ids.size(), cached, now() - t0, 0.0);
                 std::fflush(stdout);
@@ -7886,7 +8309,8 @@ int main(int argc, char** argv) {
                 hist_sig = sig;
                 Snap& sn = snaps[snap_next];
                 snap_next = (snap_next + 1) % (int) snaps.size();
-                sn.pos = (int) hist.size();
+                sn.pos = (int) hist.size(), sn.slot = 0;
+                sn.last = last;
                 snap_copy(sn, true);
             }
             const double t1 = now();
@@ -8061,6 +8485,14 @@ int main(int argc, char** argv) {
             std::fflush(stdout);
             busy = false;
             g_wd_busy = false;
+        }
+        if (slot_on) {   // the engine ends: the conversations worth it go to the folder
+            park_active();
+            int n = 0;
+            for (auto& cv : parked)
+                if (cv.loaded && cv.dirty && cv.hist.size() >= slot_min && conv_write(cv)) ++n;
+            folder_trim();
+            say(std::to_string(n) + " conversation(s) saved");
         }
         g_offs.lane.reset();   // (the CPU lane's thread polls mapped memory: stopped before the driver goes)
         std::fflush(stdout);
