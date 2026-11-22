@@ -10449,9 +10449,10 @@ int main(int argc, char** argv) {
                 strata::core::SavedConversation meta;
                 std::vector<strata::core::SessionKvSource> sources;
                 std::vector<std::vector<strata::core::SessionKvSource>> stage_sources;
-                // the draft K/V where a parked image keeps it: the last stage's (or the only one's)
+                // the draft K/V where a parked image keeps it: the first stage's with mtp_first, else the last
+                // stage's (or the only one's) - park_body's draft0
                 if (!strata::core::conversation_snapshot_sources(meta, sources, view, park_ss(f, 0), g,
-                        use_mtp && n_st == 0 ? park_draft(f) : nullptr, e)) {
+                        use_mtp && (n_st == 0 || mtp_first) ? park_draft(f) : nullptr, e)) {
                     std::fprintf(stderr, "saguaro serve: session dir: turn save skipped (%s)\n", e.c_str());
                     return false;
                 }
@@ -10462,7 +10463,7 @@ int main(int argc, char** argv) {
                     strata::core::SavedConversation part;
                     std::vector<strata::core::SessionKvSource> ps;
                     if (!strata::core::conversation_snapshot_sources(part, ps, view_k, park_ss(f, k + 1), g,
-                            use_mtp && k + 1 == n_st ? park_draft(f) : nullptr, e)) {
+                            use_mtp && !mtp_first && k + 1 == n_st ? park_draft(f) : nullptr, e)) {
                         std::fprintf(stderr, "saguaro serve: session dir: turn save skipped (stage CUDA%d: %s)\n", dev,
                                      e.c_str());
                         return false;
@@ -10501,8 +10502,9 @@ int main(int argc, char** argv) {
                     return out;
                 };
                 std::vector<std::vector<std::array<uint64_t, 5>>> keep;
-                keep.push_back(keep_of(sources, use_mtp && n_st == 0));
-                for (size_t k = 0; k < n_st; ++k) keep.push_back(keep_of(stage_sources[k], use_mtp && k + 1 == n_st));
+                keep.push_back(keep_of(sources, use_mtp && (n_st == 0 || mtp_first)));
+                for (size_t k = 0; k < n_st; ++k)
+                    keep.push_back(keep_of(stage_sources[k], use_mtp && !mtp_first && k + 1 == n_st));
                 auto turn = std::make_shared<strata::core::SessionLogTurn>();
                 if (!strata::core::session_log_capture(*turn, std::move(meta), sources, stage_sources, &keep, turn_save_verify, e)) {
                     std::fprintf(stderr, "saguaro serve: session dir: turn save skipped (%s)\n", e.c_str());
