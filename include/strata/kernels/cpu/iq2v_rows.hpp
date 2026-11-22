@@ -1,5 +1,5 @@
 // include/strata/kernels/cpu/iq2v_rows.hpp - the CPU lane's second-generation IQ2_XXS / IQ2_S rows (iq2v_rows.cpp):
-// ggml-cpu's vec_dot to the bit, each form for the CPUs that run it (the caller checks: src/ds4/ds4_iq_cpu.cpp).
+// ggml-cpu's vec_dot to the bit, each form for the CPUs that run it (the caller checks: src/hy4/ds4/ds4_iq_cpu.cpp).
 #pragma once
 
 #include <cstddef>

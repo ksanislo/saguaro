@@ -1,6 +1,7 @@
 // include/strata/kernels/cpu/iq3v_rows.hpp - the CPU lane's second-generation IQ3_XXS and IQ4_XS rows and the rows of
-// its 4-bit IQ2_XXS copies (Q4X, src/ds4/ds4_iq_cpu.cpp) (iq3v_rows.cpp): ggml-cpu's vec_dot to the bit, each form for
-// the CPUs that run it (the caller checks each against ggml-cpu's dot and times it: src/ds4/ds4_iq_cpu.cpp own()).
+// its 4-bit IQ2_XXS copies (Q4X, src/hy4/ds4/ds4_iq_cpu.cpp) (iq3v_rows.cpp): ggml-cpu's vec_dot to the bit, each form
+// for the CPUs that run it (the caller checks each against ggml-cpu's dot and times it: src/hy4/ds4/ds4_iq_cpu.cpp
+// own()).
 #pragma once
 
 #include <cstddef>
