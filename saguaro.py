@@ -977,13 +977,32 @@ def hip_unified_memory(g) -> bool:
         re.search(r"Ryzen AI Max|Radeon(?:\s*\(TM\))?\s+80[4-6]\dS", g.get("name", ""), re.I))
 
 
+HIP_IDLE_VRAM_GB = 0.5    # more in use with no engine running: something (a compositor) draws on the card
+
+
+def hip_headless(g) -> bool:
+    """A discrete AMD GPU no desktop runs on: no display connected to it and next to no VRAM in use (Linux' sysfs;
+    unknown - Windows, or sysfs without the facts - counts as a desktop's)."""
+    return g.get("display") is False and g.get("vram_used_gb", HIP_IDLE_VRAM_GB) < HIP_IDLE_VRAM_GB
+
+
 def hip_reserve_mib(gpus) -> int:
-    """The VRAM (MiB) an engine on these AMD GPUs leaves free on each: the desktop runs on them and allocates after
-    the engine has filled its expert pool - 3072, but 1024 on a Linux APU (its pool is sized from the RAM it shares;
-    Windows draws its desktop from the APU's carve-out too)."""
+    """The VRAM (MiB) an engine on these AMD GPUs leaves free on each: 3072 where the desktop may run on one (it
+    allocates after the engine has filled its expert pool); 1024 on a Linux APU (its pool is sized from the RAM it
+    shares; Windows draws its desktop from the APU's carve-out too) and on cards with no display (compute only)."""
     if any(hip_unified_memory(g) for g in gpus) and not WIN:
         return 1024
+    if not WIN and gpus and all(hip_headless(g) for g in gpus):
+        return 1024
     return 3072
+
+
+def hip_reserve_why(gpus) -> str:
+    if any(hip_unified_memory(g) for g in gpus) and not WIN:
+        return "an APU: its pool is sized from the shared RAM"
+    if not WIN and gpus and all(hip_headless(g) for g in gpus):
+        return "no display is connected to the GPU"
+    return "the desktop may run on the GPU and allocate beside the engine"
 
 
 def hip_clang(root: Path) -> Path | None:
@@ -3463,8 +3482,11 @@ def write_config(a, pc, meta, pack: Path, quant: str, ctx: int, models: Path, vi
         cfg["backend"] = "hip"
         # Leave space for the Linux desktop. The engine sizes its prompt chunk from
         # the available prompt-memory budget; forcing 256 here severely slows HIP.
-        hip_env = {"SAGUARO_GLM_RESERVE_MB": str(hip_reserve_mib(pc["gpus"])), "SAGUARO_GLM_RAM_HEADROOM_GB": "16"}
         gpus = pc["gpus"]
+        hip_env = {"SAGUARO_GLM_RESERVE_MB": str(hip_reserve_mib(gpus)), "SAGUARO_GLM_RAM_HEADROOM_GB": "16"}
+        if "SAGUARO_GLM_RESERVE_MB" not in env and getattr(a, "vram_reserve_mib", None) is None:
+            ok(f"VRAM kept free on each GPU: {hip_env['SAGUARO_GLM_RESERVE_MB']} MiB ({hip_reserve_why(gpus)}; "
+               "--env SAGUARO_GLM_RESERVE_MB=<MiB> changes it)")
         if len(gpus) == 1:
             hip_env["SAGUARO_GLM_SPLIT"] = "0"   # two or more cards: the engine picks the split (and drafts with MTP)
         # Larger prompt sub-batches feed the matrix cores much better (7900 XT: ~250 -> ~410 tok/s); they need
@@ -5946,8 +5968,7 @@ def write_config_ds4(a, pc: dict, meta: dict, pack: Path, ctx: int, models: Path
     elif hip and "--reserve-mib" not in args[:-1]:
         mib = hip_reserve_mib(pc["gpus"])
         set_arg(args, "--reserve-mib", mib)
-        ok(f"VRAM kept free on each GPU: {mib} MiB (the desktop and other programs on an AMD GPU allocate beside the "
-           "engine; --vram-reserve-mib changes it)")
+        ok(f"VRAM kept free on each GPU: {mib} MiB ({hip_reserve_why(pc['gpus'])}; --vram-reserve-mib changes it)")
     cfg = {"exe": str(DS4_EXE), "args": args, "cwd": str(ROOT), "tokenizer": str(pack / "tokenizer"),
            **({"backend": "hip"} if hip else {}),
            "model_name": DS4_ABL_MODEL_NAME if quant in DS4_ABL else DS4_MODEL_NAME,
@@ -6536,8 +6557,7 @@ def write_config_mm3(a, pc: dict, meta: dict, pack: Path, ctx: int, models: Path
     if hip and "--reserve-gb" not in args[:-1]:   # (as DeepSeek's on AMD: the desktop's allocations beside the engine)
         mib = hip_reserve_mib(pc["gpus"])
         set_arg(args, "--reserve-gb", f"{mib / 1024:.1f}")
-        ok(f"VRAM kept free on each GPU: {mib / 1024:.1f} GB (the desktop and other programs on an AMD GPU allocate "
-           "beside the engine)")
+        ok(f"VRAM kept free on each GPU: {mib / 1024:.1f} GB ({hip_reserve_why(pc['gpus'])})")
     cfg = {"exe": str(MM3_EXE), "args": args, "cwd": str(ROOT), "tokenizer": str(pack / "tokenizer"),
            **({"backend": "hip"} if hip else {}),
            "model_name": MM3_MODEL_NAME, "gpu": [g["index"] for g in pc["gpus"]],

@@ -741,11 +741,49 @@ def amd_gpus(hipinfo=None):
             name = (dev / "product_name").read_text().strip() or f"AMD Radeon ({arch})"
         except OSError:
             name = f"AMD Radeon ({arch})"
-        if name == f"AMD Radeon ({arch})" and arch in AMD_NAMES:
-            name = AMD_NAMES[arch]
-        found.append({"index": len(found), "name": name, "vram_gb": vram, "arch": arch, "driver": "amdgpu",
-                      "vendor": "amd"})
+        if name == f"AMD Radeon ({arch})":
+            name = amd_pci_name(dev) or AMD_NAMES.get(arch, name)
+        g = {"index": len(found), "name": name, "vram_gb": vram, "arch": arch, "driver": "amdgpu", "vendor": "amd"}
+        g.update(drm_display(dev))
+        found.append(g)
     return found
+
+
+# Navi 48's device ID is shared: the PCI revision tells the boards apart
+AMD_PCI_NAMES = {("0x7550", "0xc0"): "AMD Radeon RX 9070 XT", ("0x7550", "0xc3"): "AMD Radeon RX 9070",
+                 ("0x7551", None): "AMD Radeon AI PRO R9700"}
+
+
+def amd_pci_name(dev: Path) -> str | None:
+    try:
+        did, rev = ((dev / f).read_text().strip().lower() for f in ("device", "revision"))
+    except OSError:
+        return None
+    name = AMD_PCI_NAMES.get((did, rev)) or AMD_PCI_NAMES.get((did, None))
+    return name and f"{name} ({amd_arch_of(did)})"
+
+
+def amd_arch_of(did: str) -> str:
+    return AMD_DEVICE_ARCHS.get(did.lower().removeprefix("0x"), "unknown")
+
+
+def drm_display(dev: Path) -> dict:
+    """Whether the desktop can be on this GPU: a connected display output (sysfs' DRM connectors), and the VRAM
+    already in use (a compositor's buffers) -> {"display": bool, "vram_used_gb": float}; {} when sysfs has neither."""
+    info = {}
+    states = []
+    for c in dev.glob("drm/card*/card*-*/status"):
+        try:
+            states.append(c.read_text().strip())
+        except OSError:
+            pass
+    if states:
+        info["display"] = "connected" in states
+    try:
+        info["vram_used_gb"] = int((dev / "mem_info_vram_used").read_text()) / 2 ** 30
+    except (OSError, ValueError):
+        pass
+    return info
 
 
 # ------------------------------------------------------------------------------------------------ the engine
