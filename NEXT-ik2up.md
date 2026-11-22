@@ -119,3 +119,7 @@ Card runs only through /data/llm/bench/night-queue/queue.txt (IK2_NO_CLAIM=1, ca
 - First numbers: mortar quant resident 81.7 / 73.2 tok/s decode (short / 8K), 8K read 1138 tok/s, 20/20 serve checks;
   mangonel 1 T4 UD offload 23.7 / 25.8 / 24.1 vs our port 42.0 / 38.5 / 35.1 (decode -40 %), reads ~equal;
   2 T4s PASS after a device-current fix (50 tok/s short decode).
+- (a) UD-Q4_K_XL on the OFFLOAD PATH on HIP (SAGUARO_IK2_OFF=1, WARM seed profile, chunk 2048, ctx 32768): WORKS.
+  2348 of 3072 experts in VRAM (10.6 GiB), VRAM 15.4-15.6 GiB; serve_check 22/22 PASS incl. pictures (red, scene).
+  decode 300 tok: 58.2 tok/s short, 59.4 at 8K; read 8K 1718 tok/s (4.69 s); first token 0.49 s.
+  Lane (Zen 5 AVX-512): 61 us/expert on the CPU vs 87 us over the bus, but decode mode A (no lane) was faster.
