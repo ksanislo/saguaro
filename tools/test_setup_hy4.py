@@ -142,7 +142,7 @@ class Fit(unittest.TestCase):
     def test_four_t4s_as_measured(self):
         lay = F.layout([t4(i) for i in range(4)], self.PLAN, "maya-s")
         self.assertEqual(lay["args"], ["--tp", "4", "--chunk", "2048", "--reserve-gb", "0.5"])
-        self.assertEqual(lay["env"], {"HY4_HOT": "1"})
+        self.assertEqual(lay["env"], {"HY4_HOT": "1", "HY4_VISION_F16": "1"})
         self.assertEqual((lay["context"], lay["measured"], lay["fits"]), (131072, True, True))
         self.assertIn("32 tok/s", F.speeds(lay, "maya-s"))
         self.assertIn("590 tok/s", F.speeds(lay, "maya-s"))
@@ -155,7 +155,8 @@ class Fit(unittest.TestCase):
         cfg = json.loads((ROOT / "configs" / "Hy4-Flash-Maya-S-IQ2_S.json").read_text(encoding="utf-8"))
         lay = F.layout([t4(i) for i in range(4)], self.PLAN, "maya-s")
         self.assertEqual(cfg["args"][2:], ["--max-context", str(lay["context"])] + lay["args"])
-        self.assertEqual(cfg["env"]["HY4_HOT"], lay["env"]["HY4_HOT"])
+        for k, v in lay["env"].items():
+            self.assertEqual(cfg["env"][k], v, k)
 
     def test_other_cards_get_the_engines_own_choices(self):
         for cards in ([t4()], [t4(0), t4(1)], [t4(i) for i in range(3)], [t4(i, 24.0, "86", "RTX 3090") for i in range(4)],
@@ -377,7 +378,7 @@ class Steps(unittest.TestCase):
         self.assertEqual(cfg["exe"], str(maya.HY4_EXE))
         self.assertEqual(cfg["args"], ["--pack", str(pack), "--max-context", "131072", "--tp", "4", "--chunk", "2048",
                                        "--reserve-gb", "0.5"])
-        self.assertEqual(cfg["env"], {"HY4_HOT": "1", "HY4_Q4X": "0"})      # (no AVX2 here: the 4-bit copies off)
+        self.assertEqual(cfg["env"], {"HY4_HOT": "1", "HY4_VISION_F16": "1", "HY4_Q4X": "0"})      # (no AVX2 here: the 4-bit copies off)
         self.assertEqual((cfg["gpu"], cfg["tokenizer"], cfg["model_name"]),
                          ([0, 1, 2, 3], str(pack / "tokenizer"), "hy4-flash"))
         self.assertEqual((cfg["sampling"], cfg["reasoning_effort"]), ({"temperature": 0.9, "top_p": 1.0}, "high"))

@@ -20,7 +20,10 @@
   "HY4_ROUTE_FILE": "/opt/llm/var/Hy4-Flash-Maya-S-IQ2_S/hy4-prompt-route.txt",
   "HY4_DRAFT_FILE": "/opt/llm/var/Hy4-Flash-Maya-S-IQ2_S/hy4-drafting.txt",
   "HY4_HOT_FILE": "/opt/llm/saguaro/data/hy4-expert-hot-Hy4-Flash-Maya-S.bin",
-  "HY4_HOT": "1"
+  "HY4_HOT": "1",
+  "HY4_SLOT_DIR": "/opt/llm/var/Hy4-Flash-Maya-S-IQ2_S/sessions",
+  "HY4_SLOT_GB": "16",
+  "HY4_VISION_F16": "1"
  },
  "cwd": "/opt/llm/saguaro",
  "tokenizer": "/opt/llm/models/Hy4-Flash-Maya-S-IQ2_S/pack/tokenizer",
