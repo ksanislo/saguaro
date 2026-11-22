@@ -1,66 +1,333 @@
-"""tools/ik2_fit.py - Inkling 2 Mini on saguaro-ik2: the layout for the cards a PC has, for the setup (saguaro.py)
-and the Models page (serve/model_pull.py) alike.
+"""tools/ik2_fit.py - Inkling 2 Mini on saguaro-ik2: what fits on a PC's cards, for the setup (saguaro.py) and the
+Models page (serve/models.py, serve/model_pull.py) alike.  Nothing here touches a GPU.
 
-saguaro-ik2 runs unsloth's UD-Q4_K_XL (17.6 GB) on one or two NVIDIA cards from Turing (sm_75) on, Linux.  The two
-layouts measured on Tesla T4s (16 GB, NEXT-ik2.md) are the setup's:
+saguaro-ik2 (upstream Maya v1.1.74's engine) keeps every expert in VRAM where they fit (the resident token path);
+where they do not - a card under 24 GB with unsloth's UD-Q4_K_XL, or a context past what one holds - it takes the
+offload path: a tier of the most-used experts in VRAM, the others in pinned RAM, fetched by the GPU (or computed by
+the CPU lane) as tokens pick them.  Two NVIDIA cards: the first alone where it holds every expert, else the split -
+the first on the offload path (dense weights, cache, prompts, its tier), the second with the next experts.  AMD (HIP,
+Linux): no offload path - every expert stays in the GPU's memory and the cache streams where it does not fit.
 
-  one card    --gpus 1 --chunk 2048 SAGUARO_IK2_PIN=0, context 32768: about a quarter of the experts are streamed from RAM
-  two cards   --gpus 2 --chunk 8192, context 131072: every expert in VRAM
-
-A single card of 22 GB or more holds every expert (upstream Maya's layout, measured there on an RTX 3090, not here):
-the context is then the largest whose cache fits beside the model's 18.3 GiB.  Nothing here touches a GPU."""
+The model's sizes are upstream's (an RTX 3090 measured: 18.3 GiB beside the cache at 262,144 with an FP8 cache, 14.7
+GiB of it UD-Q4_K_XL's experts); another file's experts (experts_gib_of: our one-T4 quant holds 11.45 GiB) take their
+place.  The layouts' speeds were measured on Tesla T4s (16 GB, NEXT-ik2.md)."""
 from __future__ import annotations
 
+import os
+
 GIB = 1 << 30
-MIN_CC = 75                                         # the engine's kernels: Turing's tensor cores on
-MIN_VRAM_GB = 14.5                                  # a "16 GB" card (a T4 reports 15-16); less does not hold the dense parts
-BIG_VRAM_GB = 22.0                                  # a "24 GB" card: the whole model on it
-BASE_GIB = 18.3                                     # one big card: the weights, the windowed layers' cache, the scratch
-KV_BYTES = {"fp8": 16384, "f16": 32768}             # the cache of a context token (SAGUARO_IK2_KV; f16 the engine's own)
-MARGIN_GIB = 0.5
-CONTEXTS = [32768, 65536, 131072, 262144]
-ROOM_MB = 1024                                      # SAGUARO_IK2_ROOM_MB: VRAM left free on a T4-sized card
+BASE_GIB = 18.3                                     # the model's weights, the windowed layers' cache, the scratch
+EXPERTS_GIB = 14.7                                  # the routed experts (UD-Q4_K_XL) - of BASE_GIB
+DENSE_GIB = BASE_GIB - EXPERTS_GIB                  # the rest, whatever file's experts beside it
+OFF_ROOM_GIB = 1.2                                  # the offload path's room for prompts and its staging slots
+HOST_GIB = 1.5                                      # the engine's RAM beside the experts (embedding rows, buffers)
+OFF_HOST_GIB = 0.5                                  # the offload path's RAM beside the experts it pins
+OS_GIB = 1.5                                        # the system's and the server's RAM beside the engine ("tight" under)
+KV_BYTES = {"fp8": 16384, "f16": 32768}             # the cache of a context token (SAGUARO_IK2_KV)
+MARGIN_GIB = 0.5                                    # the driver's and the desktop's share of the card
+CONTEXTS = [32768, 65536, 131072, 262144, 524288, 1048576]   # up to the trained 1,048,576
+RECOMMEND_MAX = 262144                              # the largest context the setup recommends by itself
+FULL_VISITS = 8                                     # the visits of the layers without a window: KV_BYTES / 8 each
+SCRATCH_TOKEN_BYTES = 1152                          # the attention's scratch a context token past 262,144
+RING_OF_VISIT = 0.1                                 # the tokens' copy ring beside a full visit (KV streaming)
+STREAM_HOST_GIB = 4.0                               # the RAM the engine leaves the system beside the streamed rows
+OFF_TIER_MIN_GIB = 0.5                              # an offload layout streams only where its cache leaves the tier less
+DEFAULT_KV = "f16"                                  # the engine's own (the T4 layouts were measured with it)
+MIN_VRAM_GB = 7.0                                   # the engine's own floor (an "8 GB" card)
+MIN_TOTAL_GB = 24.0                                 # RAM + VRAM that hold the model, as the refusal says it
+MIN_CC = 70                                         # the engine's kernels: Volta on (Turing: m16n8k8, Volta: m8n8k4)
+AMD_ARCHS = ("gfx11", "gfx12")                      # AMD: RDNA 3 / 3.5 / 4 - the matrix-core prompt kernels (HIP)
+TWO_ROOM_GIB = 0.3                                  # the second card's room beside its experts
+ROOM_MB = 1024                                      # SAGUARO_IK2_ROOM_MB: the offload path's room (the engine's default)
 THREADS = 8
-LAYOUT_ENV = {"SAGUARO_IK2_ROOM_MB", "SAGUARO_IK2_PIN"}   # (the env keys a layout owns)
-# (decode tok/s, read tok/s) measured on Tesla T4s, GPU clocks not pinned, ~1K tokens deep, read 8-16K (NEXT-ik2.md, 2026-11-22)
+TWO_CONTEXT = 131072                                # two 16 GB cards: every expert in VRAM at this context (measured)
+LAYOUT_ENV = {"SAGUARO_IK2_ROOM_MB", "SAGUARO_IK2_PIN", "SAGUARO_IK2_PIN_KEEP", "SAGUARO_IK2_WARM"}   # (a layout's keys;
+                                                    # PIN / PIN_KEEP: the previous engine's, dropped from old configs)
+# (decode tok/s, read tok/s) on Tesla T4s, GPU clocks not pinned, ~1K tokens deep, read 8-16K - measured on the
+# PREVIOUS engine (our v1.1.72 port, NEXT-ik2.md 2026-11-22).  TODO: the v1.1.74-based engine's figures.
 MEASURED = {1: (42, 640), 2: (52, 1130)}
 
 
+def experts_gib_of(path) -> float | None:
+    """GiB of a GGUF's routed experts (its *_exps tensors, from the header's offsets), or None where it does not
+    read.  UD-Q4_K_XL: 14.71; our Inkling-2-Mini-T4-NVFP4-IQ3_XXS: 11.45."""
+    try:
+        import gguf_reader as G
+        f = G.GGUFFile(path)
+        ts = sorted(f.tensors, key=lambda t: t.offset)
+        end = os.path.getsize(path) - f.data_start
+        return sum((ts[i + 1].offset if i + 1 < len(ts) else end) - t.offset
+                   for i, t in enumerate(ts) if "_exps" in t.name) / GIB
+    except (ImportError, OSError, ValueError, KeyError, IndexError):
+        return None
+
+
+def need_gib(ctx: int, kv: str = DEFAULT_KV, experts_gib: float = EXPERTS_GIB) -> float:
+    """GiB of the card the engine takes at this context with every expert in VRAM."""
+    return DENSE_GIB + experts_gib + ctx * KV_BYTES.get(kv, KV_BYTES["f16"]) / GIB
+
+
+def plan(vram_gb: float, ctx: int, kv: str = DEFAULT_KV, hip: bool = False, experts_gib: float = EXPERTS_GIB) -> dict:
+    """What this card holds at `ctx`: {"resident": every expert in VRAM, "need_gib", "layout": "resident" or
+    "offload", "tier_gib": the experts' GiB the card keeps, "ram_gib": the engine's RAM, "kv_streamed": the cache of
+    some full-attention visits in RAM, "kv_ram_gib"}.  Where the model and the cache do not fit together the experts
+    leave the card first (the offload path, the cache in VRAM); the cache streams only where it alone does not fit
+    beside the dense weights and a tier of OFF_TIER_MIN_GIB.  AMD (hip: no offload path): every expert stays, the
+    cache streams.  A card whose VRAM is not known (0): resident - the engine measures at its start."""
+    ex = float(experts_gib)
+    if not vram_gb:
+        return {"resident": True, "need_gib": None, "layout": "resident", "tier_gib": ex, "ram_gib": HOST_GIB,
+                "kv_streamed": False, "kv_ram_gib": 0.0}
+    room = float(vram_gb) - MARGIN_GIB
+    need = need_gib(ctx, kv, ex)
+    if room >= need:
+        return {"resident": True, "need_gib": need, "layout": "resident", "tier_gib": ex, "ram_gib": HOST_GIB,
+                "kv_streamed": False, "kv_ram_gib": 0.0}
+    kv_gib = ctx * KV_BYTES.get(kv, KV_BYTES["f16"]) / GIB
+    vis = kv_gib / FULL_VISITS
+    base = DENSE_GIB + ex + max(0, ctx - 262144) * SCRATCH_TOKEN_BYTES / GIB
+    ring = vis * RING_OF_VISIT
+    n_res = min(FULL_VISITS, int((room - base - ring) // vis)) if room >= base + ring + vis else -1
+    if hip and n_res >= 1:
+        kv_ram = round((FULL_VISITS - n_res + 1) * vis, 1)
+        return {"resident": True, "need_gib": round(base + n_res * vis + ring, 1), "layout": "resident",
+                "tier_gib": ex, "ram_gib": round(HOST_GIB + kv_ram + STREAM_HOST_GIB, 1),
+                "kv_streamed": True, "kv_ram_gib": kv_ram}
+    dense = base - ex
+    tier = room - dense - kv_gib - OFF_ROOM_GIB
+    kv_ram = 0.0
+    if tier < OFF_TIER_MIN_GIB:
+        n_res = max(1, min(FULL_VISITS, int((room - dense - OFF_ROOM_GIB - OFF_TIER_MIN_GIB - ring) // vis)))
+        kv_ram = (FULL_VISITS - n_res + 1) * vis
+        tier = room - dense - n_res * vis - ring - OFF_ROOM_GIB
+    tier = round(max(0.0, min(ex, tier)), 1)
+    return {"resident": False, "need_gib": need, "layout": "offload", "tier_gib": tier,
+            "ram_gib": round(ex - tier + OFF_HOST_GIB + (kv_ram + STREAM_HOST_GIB if kv_ram else 0.0), 1),
+            "kv_streamed": kv_ram > 0, "kv_ram_gib": round(kv_ram, 1)}
+
+
+def plan_two(vram0_gb: float, vram1_gb: float, ctx: int, kv: str = DEFAULT_KV, experts_gib: float = EXPERTS_GIB) -> dict:
+    """Two NVIDIA cards (saguaro-ik2 --gpus 2, the larger first): the first alone where it holds every expert, else
+    the split.  plan()'s keys plus "gpus" (1 or 2), "layout" "resident" / "split" (every expert on the two cards) /
+    "split+ram", "gpu1_gib" (the second card's experts)."""
+    p0 = plan(vram0_gb, ctx, kv, experts_gib=experts_gib)
+    if p0["resident"]:
+        return dict(p0, gpus=1, gpu1_gib=0.0)
+    ex = float(experts_gib)
+    g1 = round(max(0.0, min(ex - p0["tier_gib"], float(vram1_gb or 0) - MARGIN_GIB - TWO_ROOM_GIB)), 1)
+    return dict(p0, gpus=2, gpu1_gib=g1, layout="split" if p0["tier_gib"] + g1 >= ex - 0.05 else "split+ram")
+
+
+def too_small_line(ram_gb: float, vram_gb: float, need: float | None = None) -> str:
+    need = plan(vram_gb, CONTEXTS[0])["ram_gib"] if need is None else need
+    return (f"Inkling 2 Mini needs about {MIN_TOTAL_GB:.0f} GB of RAM and VRAM together to hold the model: about "
+            f"{need:.0f} GB of RAM with this {vram_gb:.0f} GB card (this PC has {ram_gb:.0f} GB of RAM)")
+
+
+def verdict(vram_gb: float, ram_gb: float, ctx: int, kv: str = DEFAULT_KV, hip: bool = False,
+            experts_gib: float = EXPERTS_GIB) -> tuple:
+    """(word, line) for the setup and the Models page: "fast" (every expert in VRAM), "streamed" (every expert in
+    VRAM, part of the cache in RAM), "runs" (the offload path), "tight" (the offload path, with less RAM beside what it
+    takes than the system needs), "does not fit".  ram_gb 0: not known."""
+    ex = float(experts_gib)
+    p = plan(vram_gb, ctx, kv, hip, ex)
+    if ram_gb and ram_gb < p["ram_gib"] and p["kv_streamed"]:
+        return "does not fit", (f"at this context the cache keeps about {p['kv_ram_gib']:.0f} GB in RAM (KV "
+                                f"streaming): about {p['ram_gib']:.0f} GB of RAM in all, this PC has {ram_gb:.0f} GB - "
+                                "a smaller context")
+    if p["resident"] and p["kv_streamed"]:
+        return "streamed", (f"every expert in VRAM; about {p['kv_ram_gib']:.1f} GB of the cache in RAM (KV streaming), "
+                            "read over the bus at every token - slower the deeper a chat goes")
+    if p["resident"]:
+        return "fast", "every expert in VRAM"
+    if ram_gb and ram_gb < p["ram_gib"]:
+        return "does not fit", too_small_line(ram_gb, vram_gb, p["ram_gib"])
+    share = 100.0 * p["tier_gib"] / ex
+    line = (f"about {p['tier_gib']:.1f} of the experts' {ex:.1f} GB on the card ({share:.0f}%), the other "
+            f"{ex - p['tier_gib']:.1f} GB pinned in RAM - slower than with every expert in VRAM")
+    line += (f"; about {p['kv_ram_gib']:.0f} GB of the cache in RAM too (KV streaming)" if p["kv_streamed"]
+             else "; the whole cache stays on the card")
+    if ram_gb and ram_gb < p["ram_gib"] + OS_GIB:
+        return "tight", line + f"; it takes about {p['ram_gib']:.0f} GB of RAM, this PC has {ram_gb:.0f} GB"
+    return "runs", line
+
+
+def verdict_two(vram0_gb: float, vram1_gb: float, ram_gb: float, ctx: int, kv: str = DEFAULT_KV,
+                experts_gib: float = EXPERTS_GIB) -> tuple:
+    """verdict() for two cards (plan_two)."""
+    ex = float(experts_gib)
+    p = plan_two(vram0_gb, vram1_gb, ctx, kv, ex)
+    if p["gpus"] == 1:
+        return verdict(vram0_gb, ram_gb, ctx, kv, experts_gib=ex)
+    if ram_gb and ram_gb < p["ram_gib"]:
+        return "does not fit", too_small_line(ram_gb, vram0_gb, p["ram_gib"])
+    held = p["tier_gib"] + p["gpu1_gib"]
+    if p["layout"] == "split":
+        word, line = "fast", (f"every expert in VRAM across the two cards (about {p['tier_gib']:.1f} GB on the first, "
+                              f"{p['gpu1_gib']:.1f} GB on the second)")
+    else:
+        word, line = "runs", (f"about {held:.1f} of the experts' {ex:.1f} GB on the two cards ({100.0 * held / ex:.0f}%"
+                              f"), the other {ex - held:.1f} GB pinned in RAM - slower than with every expert in VRAM")
+    if ram_gb and ram_gb < p["ram_gib"] + OS_GIB:
+        return "tight", line + f"; it takes about {p['ram_gib']:.0f} GB of RAM, this PC has {ram_gb:.0f} GB"
+    return word, line
+
+
+DRAFT_BASE_GIB = 0.88                               # the drafter (mtp.safetensors 0.59 GiB, its fold, rings, taps)
+DRAFT_TOKEN_BYTES = 4864                            # its layer without a window's context 4 KiB a token + scratch
+
+
+def draft_gib(ctx: int) -> float:
+    """GiB the drafter takes beside the model at `ctx` (saguaro-ik2's draft_room)."""
+    return DRAFT_BASE_GIB + ctx * DRAFT_TOKEN_BYTES / GIB
+
+
+def draft_fits(vram_gb: float, ctx: int, kv: str = DEFAULT_KV, experts_gib: float = EXPERTS_GIB) -> bool:
+    """Whether the drafter's room fits beside the model at `ctx` with every expert in VRAM (else the engine leaves it
+    out at its start).  VRAM not known: True."""
+    if not vram_gb:
+        return True
+    return plan(vram_gb, ctx, kv, experts_gib=experts_gib)["resident"] and \
+        float(vram_gb) - MARGIN_GIB >= need_gib(ctx, kv, experts_gib) + draft_gib(ctx)
+
+
+def drafting_off_reason(arch, vram_gb: float, ctx: int, kv: str = DEFAULT_KV, hip: bool = False,
+                        experts_gib: float = EXPERTS_GIB) -> str | None:
+    """Why drafting is off on this card (one line), or None: NVIDIA Volta / Turing (the drafter's window needs sm_80)
+    and the offload path run without it; NVIDIA sm_80+ with every expert in VRAM and AMD keep it."""
+    if hip:
+        return None
+    try:
+        cc = int(arch)
+    except (TypeError, ValueError):
+        cc = 0
+    if 0 < cc < 80:
+        return "drafting off: this GPU (Volta / Turing) has no drafting for this model - every token comes from a full model step"
+    if vram_gb and not plan(vram_gb, ctx, kv, experts_gib=experts_gib)["resident"]:
+        return ("drafting off: the card does not hold every expert at this context (the offload path), where drafting "
+                "does not run - a smaller context or a bigger card brings it back")
+    return None
+
+
+def recommended_context(vram_gb: float, kv: str = DEFAULT_KV, hip: bool = False,
+                        experts_gib: float = EXPERTS_GIB) -> int:
+    """The largest of CONTEXTS (up to RECOMMEND_MAX) whose cache leaves every expert in VRAM, else the smallest."""
+    fits = [c for c in CONTEXTS if c <= RECOMMEND_MAX and plan(vram_gb, c, kv, hip, experts_gib)["resident"]
+            and not plan(vram_gb, c, kv, hip, experts_gib)["kv_streamed"]]
+    return max(fits) if fits else CONTEXTS[0]
+
+
+def amd_unsupported(cards: list, experts_gib: float = EXPERTS_GIB) -> str | None:
+    """The AMD half of unsupported(): saguaro-ik2's HIP build (Linux) runs on RDNA 3 / 3.5 / 4 (gfx11 / gfx12) with
+    every expert of the file in the GPU's memory (no offload path on AMD) and the cache streamed where it does not fit
+    beside them - so the card must hold the dense weights, the file's experts and one full-attention visit's cache at
+    the smallest context.  UD-Q4_K_XL (14.7 GiB of experts): a 24 GB card; our one-T4 quant (11.45 GiB): a 16 GB card.
+    An APU's memory is the RAM ("unified_memory": its "memory_gb")."""
+    if not cards:
+        return None
+    rdna = [g for g in cards if str(g.get("arch") or "").startswith(AMD_ARCHS)]
+    if not rdna:
+        return ("Inkling 2 Mini on AMD needs a Radeon RX 7000 / 9000, a Radeon PRO W7000 / AI PRO R9700 or a Ryzen AI "
+                "Max (Strix / Gorgon Halo) GPU - RDNA 3, 3.5 or 4 (gfx11 / gfx12); older AMD GPUs are not supported "
+                "by its engine")
+    room = max(float(g.get("memory_gb") if g.get("unified_memory") else g.get("vram_gb") or 0) for g in rdna)
+    if not plan(room, CONTEXTS[0], "fp8", True, experts_gib)["resident"]:
+        need = DENSE_GIB + float(experts_gib) + CONTEXTS[0] * KV_BYTES["fp8"] / GIB / FULL_VISITS + MARGIN_GIB
+        return (f"Inkling 2 Mini on AMD keeps every expert in the GPU's memory: this file's {float(experts_gib):.1f} "
+                f"GB of experts need one AMD GPU with about {need:.0f} GB of VRAM or more (a Ryzen AI Max APU: that "
+                "much memory free for it) - a smaller quant's experts fit a smaller card")
+    return None
+
+
+def unsupported(backend: str, windows: bool, gpus_asked: int, cards: list, ram_gb: float = 0.0,
+                experts_gib: float = EXPERTS_GIB) -> str | None:
+    """Why this PC cannot run Inkling 2 Mini, in one plain line, or None (said before anything is built or
+    downloaded).  backend: cuda / hip / metal; gpus_asked: how many GPUs --gpu / --gpus named (0: none named); cards:
+    the GPUs the model would pick from (NVIDIA: {"arch", "vram_gb"}; AMD: amd_unsupported's) - empty when not read
+    yet; ram_gb: the PC's RAM (0: not read yet; the offload path pins what the card does not keep)."""
+    if backend == "metal":
+        return "Inkling 2 Mini runs on NVIDIA and AMD GPUs only for now (no Mac engine yet)"
+    if windows:
+        return "Inkling 2 Mini runs on Linux only for now (its engine is not built on Windows here yet)"
+    if backend == "hip":
+        if gpus_asked > 1:
+            return "Inkling 2 Mini on AMD runs on one GPU for now: pick one (--gpu N)"
+        return amd_unsupported(cards, experts_gib)
+    if gpus_asked > 2:
+        return ("Inkling 2 Mini runs on one or two NVIDIA GPUs for now (three or more are not in it yet): pick one or "
+                "two (--gpu N, --gpus N,M)")
+    if cards:
+        new = [g for g in cards if int(g.get("arch") or 0) >= MIN_CC]
+        if not new:
+            return ("Inkling 2 Mini needs an NVIDIA V100 / Tesla T4 / RTX 20 or newer GPU (compute capability 7.0 or "
+                    "newer) - older cards are not supported by its engine")
+        vram = max(float(g.get("vram_gb") or 0) for g in new)
+        if vram < MIN_VRAM_GB:
+            return "Inkling 2 Mini needs one NVIDIA GPU with 8 GB of VRAM or more"
+        if gpus_asked == 2 and min(float(g.get("vram_gb") or 0) for g in cards) < MIN_VRAM_GB:
+            return "Inkling 2 Mini on two GPUs needs 8 GB of VRAM or more on each of them (or one GPU: --gpu N)"
+        if ram_gb and vram - MARGIN_GIB < need_gib(CONTEXTS[0], experts_gib=experts_gib) and \
+                ram_gb < plan(vram, CONTEXTS[0], experts_gib=experts_gib)["ram_gib"]:
+            return too_small_line(ram_gb, vram)
+    return None
+
+
+# ------------------------------------------------------------------ the setup's layouts (NVIDIA)
 def usable(cards: list) -> list:
-    """The cards saguaro-ik2 can use ({"arch", "vram_gb"}, nvidia-smi's), the largest first."""
+    """The NVIDIA cards saguaro-ik2 can use ({"arch", "vram_gb"}, nvidia-smi's), the largest first."""
     ok = [g for g in cards if int(g.get("arch") or 0) >= MIN_CC and float(g.get("vram_gb") or 0) >= MIN_VRAM_GB]
     return sorted(ok, key=lambda g: (-round(float(g["vram_gb"])), g.get("index", 0)))
 
 
-def big_context(vram_gb: float, kv: str = "f16") -> int:
-    """One big card: the largest of CONTEXTS whose cache leaves every expert in VRAM, else the smallest."""
-    fits = [c for c in CONTEXTS if BASE_GIB + c * KV_BYTES.get(kv, KV_BYTES["f16"]) / GIB <= vram_gb - MARGIN_GIB]
-    return max(fits) if fits else CONTEXTS[0]
+def big_context(vram_gb: float, kv: str = DEFAULT_KV) -> int:
+    """One card that holds every expert: the largest of CONTEXTS (up to RECOMMEND_MAX) whose cache leaves them all in
+    VRAM, else the smallest."""
+    return recommended_context(vram_gb, kv)
 
 
-def layout(cards: list, want: int = 0, kv: str = "f16") -> dict | None:
-    """The layout for these cards: {"gpus": the cards it runs on, "args": saguaro-ik2's flags beside --model and
-    --max-context, "context", "env", "resident": every expert in VRAM, "measured": on T4s here, "said": one plain
-    line}.  want: 1 or 2 cards asked for (0: the best this PC has).  None: no card can run it (unsupported says why)."""
+def _t4_sized(g: dict) -> bool:
+    return 14.5 <= float(g.get("vram_gb") or 0) < 22.0
+
+
+def layout(cards: list, want: int = 0, kv: str = DEFAULT_KV, experts_gib: float = EXPERTS_GIB) -> dict | None:
+    """The layout for these NVIDIA cards: {"gpus": the cards it runs on, "args": saguaro-ik2's flags beside --model
+    and --max-context, "context", "env", "resident": every expert in VRAM, "path": "resident" / "offload" / "split" /
+    "split+ram", "measured": on T4s here, "said": one plain line}.  want: 1 or 2 cards asked for (0: the best this PC
+    has - one where the largest holds every expert, else two).  None: no card can run it (unsupported says why)."""
     have = usable(cards)
     if not have:
         return None
-    big = float(have[0]["vram_gb"]) >= BIG_VRAM_GB
-    n = want if want in (1, 2) else (1 if big or len(have) < 2 else 2)
+    v0 = float(have[0]["vram_gb"])
+    p1 = plan(v0, CONTEXTS[0], kv, experts_gib=experts_gib)
+    n = want if want in (1, 2) else (1 if p1["resident"] or len(have) < 2 else 2)
     n = min(n, len(have))
     if n == 2:
-        return {"gpus": have[:2], "args": ["--gpus", "2", "--chunk", "8192", "--threads", str(THREADS)],
-                "context": 131072, "env": {"SAGUARO_IK2_ROOM_MB": str(ROOM_MB)}, "resident": True,
-                "measured": all(float(g["vram_gb"]) < BIG_VRAM_GB for g in have[:2]),
-                "said": "two cards: every expert in VRAM, a 131K context"}
-    if big:
-        ctx = big_context(float(have[0]["vram_gb"]), kv)
+        v1 = float(have[1]["vram_gb"])
+        fits = [c for c in CONTEXTS if c <= TWO_CONTEXT and plan_two(v0, v1, c, kv, experts_gib)["layout"] == "split"]
+        ctx = max(fits) if fits else CONTEXTS[0]
+        p = plan_two(v0, v1, ctx, kv, experts_gib)
+        if p["gpus"] == 1:   # (the first card holds every expert there: the second is not used)
+            n = 1
+        else:
+            t4s = all(_t4_sized(g) for g in have[:2])
+            return {"gpus": have[:2], "args": ["--gpus", "2", "--chunk", "8192", "--threads", str(THREADS)],
+                    "context": ctx, "env": {"SAGUARO_IK2_ROOM_MB": str(ROOM_MB)} if t4s else {},
+                    "resident": p["layout"] == "split", "path": p["layout"],
+                    "measured": t4s and p["layout"] == "split" and ctx == TWO_CONTEXT,
+                    "said": ("two cards: every expert in VRAM across them" if p["layout"] == "split" else
+                             "two cards: most experts in VRAM across them, the rest in RAM") +
+                            f", a {round(ctx / 1000) if ctx >= 100000 else ctx // 1024}K context"}
+    if p1["resident"]:
+        ctx = big_context(v0, kv) if experts_gib == EXPERTS_GIB else recommended_context(v0, kv, False, experts_gib)
         return {"gpus": have[:1], "args": ["--gpus", "1", "--chunk", "2048", "--threads", str(THREADS)],
-                "context": ctx, "env": {}, "resident": True, "measured": False,
-                "said": "one card of 24 GB or more: every expert in VRAM"}
+                "context": ctx, "env": {}, "resident": True, "path": "resident", "measured": False,
+                "said": "one card: every expert in VRAM"}
+    t4 = _t4_sized(have[0])
     return {"gpus": have[:1], "args": ["--gpus", "1", "--chunk", "2048", "--threads", str(THREADS)],
-            "context": 32768, "env": {"SAGUARO_IK2_ROOM_MB": str(ROOM_MB), "SAGUARO_IK2_PIN": "0"}, "resident": False, "measured": True,
-            "said": "one 16 GB card: about a quarter of the experts streamed from RAM, a 32K context"}
+            "context": CONTEXTS[0], "env": {"SAGUARO_IK2_ROOM_MB": str(ROOM_MB)} if t4 else {}, "resident": False,
+            "path": "offload", "measured": t4,
+            "said": f"one {'16 GB ' if t4 else ''}card: the most-used experts in VRAM, the others in RAM (the offload "
+                    "path), a 32K context"}
 
 
 def speeds(lay: dict) -> str:
@@ -71,16 +338,11 @@ def speeds(lay: dict) -> str:
     return f"about {dec} tok/s writing, {read} tok/s reading a prompt (measured on {len(lay['gpus'])}x Tesla T4)"
 
 
-def unsupported(backend: str, windows: bool, cards: list) -> str | None:
-    """Why this PC cannot run Inkling 2 Mini, in one plain line, or None.  cards: the NVIDIA GPUs it would pick from -
-    empty when they are not read yet (nothing said about them then)."""
-    if backend in ("hip", "metal"):
-        return "Inkling 2 Mini runs on NVIDIA GPUs only for now (no AMD or Mac engine yet)"
-    if windows:
-        return "Inkling 2 Mini runs on Linux only for now (not on Windows yet)"
-    if cards and not usable(cards):
-        if not [g for g in cards if int(g.get("arch") or 0) >= MIN_CC]:
-            return ("Inkling 2 Mini needs an NVIDIA GPU of compute capability 7.5 or newer (Tesla T4 / RTX 20 and "
-                    "newer)")
-        return "Inkling 2 Mini needs an NVIDIA GPU with 16 GB of VRAM or more (two of them hold the whole model)"
-    return None
+def amd_layout(card: dict, experts_gib: float = EXPERTS_GIB) -> dict:
+    """One AMD GPU (HIP, Linux; card: its "vram_gb" = the memory it gives the engine): every expert of the file in
+    its memory, the FP8 cache (half the bytes), the largest context (up to RECOMMEND_MAX) that keeps the cache there
+    too - else the smallest, part of its cache streamed.  amd_unsupported has said it holds them."""
+    ctx = recommended_context(float(card.get("vram_gb") or 0), "fp8", True, experts_gib)
+    return {"gpus": [card], "args": ["--gpus", "1", "--chunk", "2048", "--threads", str(THREADS)], "context": ctx,
+            "env": {"SAGUARO_IK2_KV": "fp8"}, "resident": True, "path": "resident", "measured": False,
+            "said": "one AMD GPU: every expert in its memory (no offload path on AMD)"}

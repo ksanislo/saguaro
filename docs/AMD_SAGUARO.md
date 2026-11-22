@@ -202,6 +202,17 @@ text (`SAGUARO_GLM_MTP_DECODE`, on by default on `gfx115x` only). On the Gorgon 
 3K- and 8K-token prompts, against 18.4-19.7 without it; 3K- and 8K-token prompts read at 271 and 278 tokens/s
 (the fused prompt experts and the `wmma2` attention, both on by default on `gfx1151`).
 
+## Inkling 2 Mini (experimental)
+
+`./saguaro.sh --setup --backend hip --model inkling-2-mini` (Linux). Its engine (`saguaro-ik2`, upstream Maya v1.1.74's
+HIP build) keeps every expert in the GPU's memory - AMD has no offload path - so the card must hold the dense weights
+and the file's experts: an RDNA 3 / 3.5 / 4 GPU (gfx11 / gfx12) with 24 GB for unsloth's UD-Q4_K_XL, or a Strix Halo /
+Gorgon Halo (its memory is the RAM, less max(8 GB, 10%)). A 16 GB card (RX 9070 XT, gfx1201) runs a quant whose experts
+fit - our one-T4 quant (11.45 GiB of experts): `--model-dir` with that GGUF; the setup reads the experts' size from the
+file and writes the FP8 cache. Upstream ran it on a Radeon 8065S (Gorgon Halo, ROCm 7.1); Saguaro has not run it on
+AMD yet. To verify on an RX 9070 XT: the HIP build, the engine's start rule for a 16 GB card, the IQ3_XXS / IQ4_XS
+experts on the RDNA resident path, drafting and pictures. [INKLING2.md](INKLING2.md) has the engine's AMD paths.
+
 ## Instinct MI300X / MI325X
 
 AMD Instinct MI300X / MI325X (`gfx942`, CDNA3) is accepted as experimental, on one GPU. Like the MI100 it is a wave64
