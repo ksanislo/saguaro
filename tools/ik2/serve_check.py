@@ -186,7 +186,8 @@ def main() -> int:
     if not (tokdir / "tokenizer" / "tokenizer.json").exists():
         import strata_tokenizer as ST
         tokdir.mkdir(parents=True, exist_ok=True)
-        ST.extract(TC.MODEL, str(tokdir), str(ROOT / "tools/ik2/chat_template.jinja"))
+        src = TC.MODEL if Path(TC.MODEL).exists() else a.model   # (a PC with only the other GGUF: the same vocabulary)
+        ST.extract(src, str(tokdir), str(ROOT / "tools/ik2/chat_template.jinja"))
     cfg = {"exe": str(a.build / "saguaro-ik2"),
            "args": ["--model", a.model, "--max-context", str(a.ctx), "--gpus", str(len(gpus)), "--chunk", str(a.chunk)]
            + a.arg,
