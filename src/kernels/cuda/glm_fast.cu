@@ -6771,7 +6771,7 @@ void moe_cpu_wait_rows(const CpuWaitRows& w, int n, int n_embd, cudaStream_t s) 
 #if defined(STRATA_USE_HIP)
 namespace {
 // Limit automatic dispatch to the measured decode geometry and RDNA3/3.5
-// targets (plus opt-in gfx906 when allow_gfx906 is set via STRATA_GLM_GU22_TUNED=1).
+// targets (plus opt-in gfx906 when allow_gfx906 is set via SAGUARO_GLM_GU22_TUNED=1).
 // RDNA4 and all other shapes retain the original expert kernels.
 bool rdna3_expert_device(bool allow_gfx1151 = true, bool allow_gfx906 = false) {
     static const bool legacy = [] {

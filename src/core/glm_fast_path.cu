@@ -1599,11 +1599,11 @@ bool Glm5Model::fast_setup(std::string& err) {
             }
         }
 #endif
-        if (const char* cap = getenv("MAYA_GLM_POOL_GB")) {
+        if (const char* cap = getenv("SAGUARO_GLM_POOL_GB")) {
             avail = std::min(avail, (size_t) (std::atof(cap) * 1073741824.0));
             room_u = std::min(room_u, (size_t) (std::atof(cap) * 1073741824.0));
         }
-        // MAYA_GLM_VRAM_GB=<n>: behave like a card with n GB - the cap counts everything this process already
+        // SAGUARO_GLM_VRAM_GB=<n>: behave like a card with n GB - the cap counts everything this process already
         // holds on the device (context, dense weights, state, arenas), so the pool gets what such a card would have
         if (const char* vc = getenv("SAGUARO_GLM_VRAM_GB")) {
             const size_t cap = (size_t) (std::atof(vc) * 1073741824.0);
@@ -1666,7 +1666,7 @@ bool Glm5Model::fast_setup(std::string& err) {
         // the headroom and the reserve) holds the complete pool it takes it as well (unified_complete_pool) - before,
         // its pool was the experts' bytes exactly, so every prompt borrowed slots that held experts (and a small
         // model's pool could lend nothing: token by token); short of that room it still is.
-        // MAYA_GLM_COMPLETE_POOL=0: the capped pool (A/B); on by default on every GPU (complete_pool_on, #474).
+        // SAGUARO_GLM_COMPLETE_POOL=0: the capped pool (A/B); on by default on every GPU (complete_pool_on, #474).
         {
             int k_full = pf_ != nullptr ? tail_slots(prefill_borrow_bytes()) : 0;
             if (const char* v = getenv("SAGUARO_GLM_VISION_LEND_MB"); v != nullptr && dev_ == 0)
@@ -2474,7 +2474,7 @@ bool Glm5Model::fast_setup_finish(std::string& err) {
     cudaSetDevice(dev_);
     if (!fast_cpu_lane_setup(err)) return false;   // keep the existing CPU pool/calibration for batched prefill
     if (n_parts_ == 1 && split_next_ == nullptr) (void) slot_bounce();   // AMD: at start-up (a split's: at its first switch)
-    if (const char* h = getenv("MAYA_GLM_EXPERT_HELPER"); h != nullptr && h[0] != '\0')
+    if (const char* h = getenv("SAGUARO_GLM_EXPERT_HELPER"); h != nullptr && h[0] != '\0')
         if (!fast_helper_setup(err)) return false;
     F->svc = std::thread([this] { fast_service(); });
     const std::vector<int> svc_cpus = cpu_list_env("SAGUARO_GLM_SVC_CPUS" + std::to_string(dev_));
@@ -8071,7 +8071,7 @@ void Glm5Model::pool_check(size_t floor_b, size_t slot_b, size_t all_b) {
                                          "VRAM %lld ms after it was freed\n", dev_, (double) have / 1073741824.0, ms);
                 else
                     std::fprintf(stderr, "glm fast: CUDA%d WARNING the expert pool's check: %.2f GB of its %.2f GB "
-                                         "still read as in use %lld ms after it was freed (MAYA_GLM_POOL_CHECK=0 skips "
+                                         "still read as in use %lld ms after it was freed (SAGUARO_GLM_POOL_CHECK=0 skips "
                                          "the check)\n", dev_, (double) (free_b - now) / 1073741824.0,
                                  (double) have / 1073741824.0, ms);
             }

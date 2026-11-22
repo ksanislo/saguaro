@@ -34,10 +34,10 @@ class HipSetupTests(unittest.TestCase):
             patch.object(maya, "STAMP", self.root / "build/MAYA-BUILD.json"),
             patch.object(maya, "WIN", False),
             # a Linux PC on any test host (Windows' own HIP setup: WindowsHipSetupTests): the platform check reads
-            # sys.platform beside WIN, and MAYA_SH keeps main() from re-starting itself through ./maya.sh (/bin/sh)
+            # sys.platform beside WIN, and SAGUARO_SH keeps main() from re-starting itself through ./maya.sh (/bin/sh)
             # when the tests run on a Python outside a venv
             patch.object(maya.sys, "platform", "linux"),
-            patch.dict(os.environ, {"ROCM_PATH": str(self.rocm), "MAYA_SH": "1"}),
+            patch.dict(os.environ, {"ROCM_PATH": str(self.rocm), "SAGUARO_SH": "1"}),
             patch.object(maya.S, "amd_gpus", return_value=self.gpus),
             patch.object(maya.S, "gpus", side_effect=AssertionError("HIP must not query NVIDIA")),
             patch.object(maya.S, "is_wsl", return_value=False),

@@ -2224,12 +2224,12 @@ struct Model::Impl {
     std::vector<std::array<uint8_t*, kMaxNH>> ram_part;   // slot -> its parts
     std::vector<std::array<size_t, 4>> cp_lay;       // layer -> part offsets of gate, up, down rows; a part's bytes
     std::vector<int> copy_spare;                      // layer -> its spare slot (-1: none)
-    // MAYA_DS4_COPY_SWAP=1 (copy mode, opt-in; read as STRATA_DS4_COPY_SWAP, DS4_COPY_SWAP too): the copies follow the routes, as the RAM tier's do. DISK_SKIP_W never computes
+    // SAGUARO_DS4_COPY_SWAP=1 (copy mode, opt-in; read as STRATA_DS4_COPY_SWAP, DS4_COPY_SWAP too): the copies follow the routes, as the RAM tier's do. DISK_SKIP_W never computes
     // an expert it leaves out, so its pages never come off the SSD and it is left out wherever it is picked light, all
     // through a conversation; but its heat counts those picks too. A layer's hottest expert read from the files takes
-    // the place of its coldest copy when it beats it by MAYA_DS4_COPY_SWAP_MARGIN x + 1 (1.25): read by a thread of its own
+    // the place of its coldest copy when it beats it by SAGUARO_DS4_COPY_SWAP_MARGIN x + 1 (1.25): read by a thread of its own
     // into the layer's free slot, switched between windows, the coldest's slot then the free one. One move at a time,
-    // at most one every MAYA_DS4_COPY_SWAP_EVERY tokens (8). The copies keep their RAM (a slot a layer more), so nothing else
+    // at most one every SAGUARO_DS4_COPY_SWAP_EVERY tokens (8). The copies keep their RAM (a slot a layer more), so nothing else
     // leaves the page cache for them. (The idea: Abyss's RAM fill for its disk tail skip - zephel01/Abyss v1.3.46,
     // issue #8 there.)
     static const char* cs_env(const char* name) {   // SAGUARO_DS4_<name> first, else the DS4_<name> itself
@@ -3918,7 +3918,7 @@ struct Model::Impl {
         // each start measures its own and keeps them to itself (a pack that must not change: a run's own store instead)
         const char* lt_store = std::getenv("SAGUARO_DS4_LT_STORE");
         if (lt_store == nullptr) lt_store = std::getenv("DS4_LT_STORE");
-        lt::set_store(lt_store != nullptr ? lt_store : (o.pack + "/lt-picks.txt").c_str(), "MAYA_DS4_LT_STORE");
+        lt::set_store(lt_store != nullptr ? lt_store : (o.pack + "/lt-picks.txt").c_str(), "SAGUARO_DS4_LT_STORE");
         g.from(pk);
         if (g.dim == 0 || g.nl == 0 || (int) g.ratios.size() < g.nl) {
             err = o.pack + "/ds4.txt: incomplete geometry";

@@ -877,7 +877,7 @@ did.
 
 An expert it leaves out is never computed, so its pages never come off the SSD: where the RAM copies
 (`--mmap-experts off`) do not hold every expert, one that is picked light again and again is left out all through a
-conversation. `MAYA_DS4_COPY_SWAP=1` lets the copies follow the routes, as the RAM tier's do: between answers' tokens a
+conversation. `SAGUARO_DS4_COPY_SWAP=1` lets the copies follow the routes, as the RAM tier's do: between answers' tokens a
 layer's hottest expert read from the files (its heat counts the left-out picks too) takes the place of its coldest
 copy, read by a thread of its own into a free slot the layer keeps (one expert a layer more RAM, ~0.44 GB on Maya-S).
 The copies keep their RAM, so nothing else leaves the page cache for them. The same answers' arithmetic: it changes only
@@ -889,9 +889,9 @@ left out in the second half; after a 4,096-token answer, 6 prompts' KL against n
 
 | Setting | Default | |
 | --- | --- | --- |
-| `MAYA_DS4_COPY_SWAP` | off (0) | `1` (copy mode: `--mmap-experts off`): a layer's hottest expert read from the files takes the place of its coldest copy; nothing to do where the copies hold every expert |
-| `MAYA_DS4_COPY_SWAP_MARGIN` | 1.25 | a move when the hot one's heat is above the cold one's x this + 1 |
-| `MAYA_DS4_COPY_SWAP_EVERY` | 8 | at most one move every this many tokens (one at a time); 4 or 2 left out no fewer on the PC above and were slower |
+| `SAGUARO_DS4_COPY_SWAP` | off (0) | `1` (copy mode: `--mmap-experts off`): a layer's hottest expert read from the files takes the place of its coldest copy; nothing to do where the copies hold every expert |
+| `SAGUARO_DS4_COPY_SWAP_MARGIN` | 1.25 | a move when the hot one's heat is above the cold one's x this + 1 |
+| `SAGUARO_DS4_COPY_SWAP_EVERY` | 8 | at most one move every this many tokens (one at a time); 4 or 2 left out no fewer on the PC above and were slower |
 
 With `SAGUARO_DS4_DISK_SKIP_W` set, the engine log gets a line every 512 decoded tokens: the experts a token left out and
 the copy swaps (`ds4: DISK_SKIP: ...`).
@@ -925,7 +925,7 @@ measured yet, so it is off by default. It applies to a GGUF's experts read in pl
 `SAGUARO_DS4_RAM_TIER=1`. The engine log says what it took (`ds4: RAM store ...`) and, after a decode, how a token's
 experts came (`RAM store: ...`; STAT lines: `store_hit=`, `store_miss=`, `store_wait_ms=`).
 
-The `DS4_STORE_*` settings go in a config's `"env"`, or as `MAYA_DS4_STORE_*` in the settings.
+The `DS4_STORE_*` settings go in a config's `"env"`, or as `SAGUARO_DS4_STORE_*` in the settings.
 
 | Setting | Default | |
 | --- | --- | --- |
@@ -1374,10 +1374,10 @@ model's files (each read again, so those prompts are not timed); a difference fa
 | --- | --- | --- |
 | `SAGUARO_DS4_FLOW_HELPER` | off | `1`: a prompt's streamed experts the helper's pool holds copied out of it instead of read from the files (the same bytes) |
 | `SAGUARO_DS4_FLOW_HELPER_CHECK` | 0 | N: the load's first N prompts compare every expert copied out of the pool with the model's files; a difference fails the prompt |
-| `SAGUARO_DS4_HELPER_RECENT` | 0 (off) | N (up to 64): N slots a layer in the helper's pool (inside `SAGUARO_DS4_HELPER_GB`, carved first) for the CPU lane's experts the layer used lately - one used `MAYA_DS4_HELPER_RECENT_NEED` times in the layer's last `MAYA_DS4_HELPER_RECENT_WIN` decode steps is copied in, the least recently used goes; such an expert is summed on the helper, so the answers can differ in the last bits |
-| `MAYA_DS4_HELPER_RECENT_NEED` | 2 | its uses in the window that bring an expert to a recent slot (1-64, at most `_WIN`) |
-| `MAYA_DS4_HELPER_RECENT_WIN` | 8 | the decode steps a layer's uses are counted over (1-64) |
-| `MAYA_DS4_HELPER_RECENT_FILLS` | 2 | new recent slots a layer a step at most (1-16) |
+| `SAGUARO_DS4_HELPER_RECENT` | 0 (off) | N (up to 64): N slots a layer in the helper's pool (inside `SAGUARO_DS4_HELPER_GB`, carved first) for the CPU lane's experts the layer used lately - one used `SAGUARO_DS4_HELPER_RECENT_NEED` times in the layer's last `SAGUARO_DS4_HELPER_RECENT_WIN` decode steps is copied in, the least recently used goes; such an expert is summed on the helper, so the answers can differ in the last bits |
+| `SAGUARO_DS4_HELPER_RECENT_NEED` | 2 | its uses in the window that bring an expert to a recent slot (1-64, at most `_WIN`) |
+| `SAGUARO_DS4_HELPER_RECENT_WIN` | 8 | the decode steps a layer's uses are counted over (1-64) |
+| `SAGUARO_DS4_HELPER_RECENT_FILLS` | 2 | new recent slots a layer a step at most (1-16) |
 
 ## DeepSeek: where the measured hipBLASLt picks are kept (AMD)
 
@@ -1853,7 +1853,7 @@ Setup and debugging variables:
 | `SAGUARO_MM3_LT_STORE` | the pack's `lt-picks.txt` | where hipBLASLt's measured kernels are kept |
 | `SAGUARO_MM3_LANE_FREE` | `2` | without `--cpu-threads`, on a CPU without SMT siblings free (a VM's vCPUs, a CPU without SMT): the cores the CPU lane leaves to the engine's other threads and the OS; `0`: every core, as before |
 | `SAGUARO_MM3_PROF` | off | debugging: `1` each forward's GPU time by part (events), `2` the same with the host waiting at each part (AMD), and the DSpark proposals' parts |
-| `MAYA_MM3_MIN_CC` | - | testing only: `70` lets the setup take GPUs before RTX 30 / A100 (a V100), with a warning |
+| `SAGUARO_MM3_MIN_CC` | - | testing only: `70` lets the setup take GPUs before RTX 30 / A100 (a V100), with a warning |
 | `SAGUARO_MM3_IQ_Q8K` | `1` | GGUF quants: the routed experts' inputs rounded as the CPU lane rounds them (a scale every 256 values), so an expert gives the same sums on the GPU and the CPU; `0`: a scale every 32 |
 | `MM3_TIMING`, `MM3_CONF`, `MM3_LANE_PROF`, `MM3_MISS_STATS`, `MM3_TP_PROF`, `MM3_TP_TRACE`, `MM3_NSYS` | off | debugging: the engine prints timings, the drafts' confidences, the CPU lane's and tensor parallel's profiles |
 | `MM3_PROMOTE` | - | debugging: the expert cache's promotion rule with `--tp` (`threshold,pending,decay`) |
@@ -1973,4 +1973,4 @@ untested and refused unless this is set when the setup or `--check` runs (in the
 
 | Variable | Default | What it does |
 |---|---|---|
-| `MAYA_HIP_ALLOW_ROCM6` | unset (ROCm 6 refused) | `1`: the setup goes on with a ROCm 6.x, with a warning (untested: the build or the engine may fail); the build then takes hipBLAS 2's `HIPBLAS_V2` API and leaves out `hipblasSetWorkspace`, which hipBLAS 2 does not have |
+| `SAGUARO_HIP_ALLOW_ROCM6` | unset (ROCm 6 refused) | `1`: the setup goes on with a ROCm 6.x, with a warning (untested: the build or the engine may fail); the build then takes hipBLAS 2's `HIPBLAS_V2` API and leaves out `hipblasSetWorkspace`, which hipBLAS 2 does not have |

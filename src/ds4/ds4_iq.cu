@@ -1938,7 +1938,7 @@ void set_persist(int on) { g_persist_set.store(on < 0 ? -1 : on != 0 ? 1 : 0, st
 #if defined(STRATA_USE_HIP) && !defined(MAYA_DS4_IQ_ONLY)
 // Prompt expert sets through the existing GLM MMQ path (HIP, opt-in).
 // The same q8_1/MMA path the GLM prompt uses (strata::prefill::mmq): the packed expert is read once, activations are
-// rounded to q8_1, and the products run on int8 tensor cores.  Opt-in (MAYA_DS4_EXPERT_MMQ=1), sets of at least 32 rows;
+// rounded to q8_1, and the products run on int8 tensor cores.  Opt-in (SAGUARO_DS4_EXPERT_MMQ=1), sets of at least 32 rows;
 // smaller sets, unsupported shapes/types and allocation failure keep the FP32 tiled kernel above.  MMQ launches a kernel a
 // matrix an expert, so an IQ1_S set's experts of few rows stay on the light kernels and the tiles (mmq_min_rows).
 namespace {

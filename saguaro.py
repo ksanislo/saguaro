@@ -626,12 +626,12 @@ MM3_PACK_TOOLS = ("tools/mm3/pack.py", "tools/mm3/st.py", "tools/strata_tokenize
 MM3_DIR = "MiniMax-M3.1-Flash-EXL3-3.5bpw"
 # Where its EXL3 quant is offered: everywhere DeepSeek's EXL3 runs (NVIDIA from V100, cc 7.0 = DS4_MIN_CC; Linux and
 # Windows) once maya-mm3 builds and runs there - MM3_ALL_PLATFORMS, the one switch.  Until then: Linux, RTX 30 / A100 or
-# newer (validated on sm_86 and sm_120); MAYA_MM3_MIN_CC=70 takes a V100 for testing.  AMD (HIP): too, as GLM's EXL3
+# newer (validated on sm_86 and sm_120); SAGUARO_MM3_MIN_CC=70 takes a V100 for testing.  AMD (HIP): too, as GLM's EXL3
 # quants there - maya-mm3's EXL3 kernels take the shared exl3.cu's HIP paths.
 MM3_ALL_PLATFORMS = True
 MM3_MIN_CC = 70                                    # (with MM3_ALL_PLATFORMS: DeepSeek's EXL3 reach)
 MM3_MIN_CC_NOW = 80                                # (until then)
-MM3_TEST_CC_ENV = "MAYA_MM3_MIN_CC"                # (testing only: 70 lets the setup take a V100 - see mm3_min_cc)
+MM3_TEST_CC_ENV = "SAGUARO_MM3_MIN_CC"                # (testing only: 70 lets the setup take a V100 - see mm3_min_cc)
 # Context: the model's own reach is 1M positions (config.json's max_position_embeddings).  With KV streaming (the
 # setup's default) every position's K / V sits in pinned RAM - per token, by the cache's format (maya-mm3 --kv-cache;
 # 60 layers x 4 KV heads x 128 dims x K and V, plus the scales) - and a ring of the newest 32K positions in VRAM; the
@@ -1260,7 +1260,7 @@ def check_hip_pc(a, installed=False, text_only=True) -> dict:
     if not avx2:
         # as on CUDA (#32): the CPU expert lane falls back to ggml's own kernels (src/kernels/cpu/expert_layout.cpp)
         warn(f"the CPU ({cpu}) has no AVX2: the engine runs, its CPU expert lane on ggml's own kernels (slower). "
-             "MAYA_GLM_CPU_LANE=0 turns it off")
+             "SAGUARO_GLM_CPU_LANE=0 turns it off")
     total, avail = mem_gb()
     split = f"{len(chosen)} GPUs (layer split)" if len(chosen) > 1 else "one GPU"
     ok(f"using {' + '.join(gpu_label(g) for g in chosen)}; HIP, {split}" +
@@ -6045,7 +6045,7 @@ def set_up_ds4(a, prev: dict) -> Path | None:
 def mm3_min_cc() -> int:
     """The GPUs maya-mm3's setup takes: DeepSeek's EXL3 reach (MM3_MIN_CC, V100 on) once MM3_ALL_PLATFORMS is on;
     until then RTX 30 / A100 or newer (MM3_MIN_CC_NOW), or - for testing, opt-in - from the compute capability
-    MAYA_MM3_MIN_CC names (70: V100 on - the engine's portable kernels before sm_80)."""
+    SAGUARO_MM3_MIN_CC names (70: V100 on - the engine's portable kernels before sm_80)."""
     if MM3_ALL_PLATFORMS:
         return MM3_MIN_CC
     v = os.environ.get(MM3_TEST_CC_ENV, "").strip()
