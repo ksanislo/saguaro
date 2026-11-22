@@ -438,7 +438,7 @@ memory (the second: ~6.9 GiB free at a context of 131,072).
            --config /opt/llm/saguaro/configs/Inkling-2-Mini-UD-Q4_K_XL.json --port ${PORT}"
          # ASK: the other Saguaro profiles' wrapper (clock lock / cmdStop unlock, env), copied as they have it
          ttl: 900
-         unloadTimeout: 60                     # (the engine ends 0.5 s after QUIT; no conversations saved yet)
+         unloadTimeout: 60                     # (QUIT saves the open conversations to SAGUARO_IK2_SLOT_DIR first)
        "Inkling-2-Mini-UD-Q4_K_XL-1card":      # one T4 (card 2), context 32,768
          cmd: >
            /bin/sh -c "cd /opt/llm/saguaro && exec .venv/bin/python serve/server.py
