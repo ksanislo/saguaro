@@ -1,6 +1,17 @@
 #pragma once
+// hipBLAS 2.x (ROCm 6.x) keeps the hipDataType / hipblasComputeType_t GemmEx API behind HIPBLAS_V2 (ROCm 7 has it)
+#if defined(__has_include)
+#if __has_include(<hipblas/hipblas-version.h>)
+#include <hipblas/hipblas-version.h>
+#endif
+#endif
+#if defined(hipblasVersionMajor) && hipblasVersionMajor < 3 && !defined(HIPBLAS_V2)
+#define HIPBLAS_V2
+#endif
 #include <hipblas/hipblas.h>
 #define CUBLAS_COMPUTE_32F HIPBLAS_COMPUTE_32F
+#define CUBLAS_COMPUTE_32F_FAST_TF32 HIPBLAS_COMPUTE_32F
+#define cublasComputeType_t hipblasComputeType_t
 #define CUBLAS_DEFAULT_MATH HIPBLAS_DEFAULT_MATH
 // cuBLAS' pedantic mode keeps F32 GEMMs in F32 (no TF32); hipBLAS' default math already does (XF32 is opt-in), and
 // HIPBLAS_DEFAULT_MATH exists in every hipBLAS the build supports.
@@ -20,8 +31,17 @@
 #define cublasGemmEx hipblasGemmEx
 #define cublasSgemm hipblasSgemm
 #define cublasSgemmStridedBatched hipblasSgemmStridedBatched
+#define cublasGemmStridedBatchedEx hipblasGemmStridedBatchedEx
 #define cublasHandle_t hipblasHandle_t
 #define cublasSetMathMode hipblasSetMathMode
 #define cublasSetStream hipblasSetStream
+#if defined(hipblasVersionMajor) && hipblasVersionMajor < 3
+// hipBLAS 2.x has no hipblasSetWorkspace: rocBLAS sizes its own
+static inline hipblasStatus_t strata_hipblas_set_workspace_noop(hipblasHandle_t, void*, size_t) {
+    return HIPBLAS_STATUS_SUCCESS;
+}
+#define cublasSetWorkspace strata_hipblas_set_workspace_noop
+#else
 #define cublasSetWorkspace hipblasSetWorkspace
+#endif
 #define cublasStatus_t hipblasStatus_t
