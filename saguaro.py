@@ -4537,8 +4537,11 @@ def server_command(cfg_path: Path, a) -> tuple:
         say("  Loading takes a few minutes: the engine reads the GGUF files; with less unified memory than the model the")
         say("  experts stream from the SSD while it answers (decode speed is SSD-bound) - the first answers are the slowest.")
     else:
-        say("  Loading takes a few minutes: the engine pins up to all but about 6 GB of the free RAM for its expert tier")
-        say("  (SAGUARO_GLM_RAM_HEADROOM_GB changes the 6) and warms its caches - the first answers are the slowest.")
+        head = (cfg.get("env") or {}).get("SAGUARO_GLM_RAM_HEADROOM_GB") or os.environ.get("SAGUARO_GLM_RAM_HEADROOM_GB")
+        head = head or "6"   # (the engine's own: src/core/glm_fast_path.cu, 16 on an APU)
+        say(f"  Loading takes a few minutes: the engine pins up to all but about {head} GB of the free RAM for its")
+        say(f"  expert tier (SAGUARO_GLM_RAM_HEADROOM_GB changes the {head}) and warms its caches - the first answers are")
+        say("  the slowest.")
     say("  Ctrl+C (or closing this terminal) stops it. Engine log: " + str(cfg.get("log", "")))
     say("  " + "-" * 100)
     return cmd, env, info
