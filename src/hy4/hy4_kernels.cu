@@ -85,6 +85,49 @@ __global__ void q8_kernel(const float* __restrict__ x, size_t ldx, int k, int8_t
     if (lane == 0) d[(size_t) r * (k / 32) + b] = sc;
 }
 
+// HY4_FUSE=1: an elementwise step and the next GEMV's int8 rows in one launch - the same values written (y / x / h)
+// and the same rows as the step then q8_kernel
+__device__ __forceinline__ void q8_group(float v, int r, int k, int b, int lane, int8_t* q, float* d) {
+    const float am = warp_max(fabsf(v));
+    const float sc = am / 127.0f;
+    q[(size_t) r * k + (size_t) b * 32 + lane] = (int8_t) (am > 0.0f ? __float2int_rn(v / sc) : 0);
+    if (lane == 0) d[(size_t) r * (k / 32) + b] = sc;
+}
+__global__ void rms_q8_kernel(const float* __restrict__ x, size_t ldx, int n, const float* __restrict__ w, float eps,
+                              float* __restrict__ y, size_t ldy, int8_t* __restrict__ q, float* __restrict__ d) {
+    const float* xr = x + (size_t) blockIdx.x * ldx;
+    float ss = 0.0f;
+    for (int i = threadIdx.x; i < n; i += blockDim.x) ss += xr[i] * xr[i];
+    ss = block_sum(ss);
+    const float r = 1.0f / sqrtf(ss / (float) n + eps);
+    float* yr = y + (size_t) blockIdx.x * ldy;
+    const int lane = threadIdx.x & 31, nw = blockDim.x >> 5;
+    for (int b = threadIdx.x >> 5; b * 32 < n; b += nw) {
+        const int i = b * 32 + lane;
+        const float v = xr[i] * r * (w ? w[i] : 1.0f);
+        yr[i] = v;
+        q8_group(v, blockIdx.x, n, b, lane, q, d);
+    }
+}
+__global__ void sigmul_q8_kernel(float* __restrict__ x, const float* __restrict__ g, int k, int8_t* __restrict__ q,
+                                 float* __restrict__ d) {
+    const int r = blockIdx.y, b = blockIdx.x * 8 + (threadIdx.x >> 5), lane = threadIdx.x & 31;
+    if (b * 32 >= k) return;
+    const size_t i = (size_t) r * k + (size_t) b * 32 + lane;
+    x[i] *= sigmoidf_(g[i]);
+    q8_group(x[i], r, k, b, lane, q, d);
+}
+__global__ void swiglu_q8_kernel(const float* __restrict__ g, const float* __restrict__ u, size_t ldg, int n,
+                                 float* __restrict__ h, size_t ldh, int8_t* __restrict__ q, float* __restrict__ d) {
+    const int r = blockIdx.y, b = blockIdx.x * 8 + (threadIdx.x >> 5), lane = threadIdx.x & 31;
+    if (b * 32 >= n) return;
+    const size_t c = (size_t) b * 32 + lane;
+    const float gv = g[r * ldg + c];
+    const float v = gv / (1.0f + expf(-gv)) * u[r * ldg + c];
+    h[r * ldh + c] = v;
+    q8_group(v, r, n, b, lane, q, d);
+}
+
 __global__ void q8_heads_kernel(const float* __restrict__ x, size_t ldt, size_t ldh, int T, int k,
                                 int8_t* __restrict__ q, float* __restrict__ d) {
     const int r = blockIdx.y, h = r / T, t = r % T, b = blockIdx.x * 8 + (threadIdx.x >> 5), lane = threadIdx.x & 31;
@@ -2168,6 +2211,23 @@ void q8_rows(const float* x, size_t ldx, int rows, int k, int8_t* q, float* d, c
     if (rows <= 0) return;
     q8_kernel<<<dim3((unsigned) ((k / 32 + 7) / 8), (unsigned) rows), 256, 0, s>>>(x, ldx, k, q, d);
     check("q8_rows");
+}
+void rms_q8(const float* x, size_t ldx, int rows, int n, const float* w, float eps, float* y, size_t ldy, int8_t* q,
+            float* d, cudaStream_t s) {
+    if (rows <= 0) return;
+    rms_q8_kernel<<<rows, 256, 0, s>>>(x, ldx, n, w, eps, y, ldy, q, d);
+    check("rms_q8");
+}
+void sigmul_q8(float* x, const float* g, int rows, int k, int8_t* q, float* d, cudaStream_t s) {
+    if (rows <= 0) return;
+    sigmul_q8_kernel<<<dim3((unsigned) ((k / 32 + 7) / 8), (unsigned) rows), 256, 0, s>>>(x, g, k, q, d);
+    check("sigmul_q8");
+}
+void swiglu_q8(const float* g, const float* u, size_t ldg, int rows, int n, float* h, size_t ldh, int8_t* q, float* d,
+               cudaStream_t s) {
+    if (rows <= 0) return;
+    swiglu_q8_kernel<<<dim3((unsigned) ((n / 32 + 7) / 8), (unsigned) rows), 256, 0, s>>>(g, u, ldg, n, h, ldh, q, d);
+    check("swiglu_q8");
 }
 void q8_heads(const float* x, size_t ldt, size_t ldh, int T, int H, int k, int8_t* q, float* d, cudaStream_t s) {
     if (T <= 0 || H <= 0) return;

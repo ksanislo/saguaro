@@ -564,6 +564,31 @@ struct Model::Impl {
     std::vector<int> mem;
     std::vector<std::vector<Layer>> TL;
     float *tp_part = nullptr, *tp_sum = nullptr, *tp_xo = nullptr;
+    // HY4_TP_PART_NODES=1: each member's slice of the partials in its own GPU's NUMA node (registered, not
+    // cudaHostAlloc'd: freed by unregister + munmap) - no member's copies cross the socket link, the sums' reads do
+    std::vector<std::pair<void*, size_t>> tp_reg;
+    // a mapped buffer of n slices of `slice` bytes, slice j's pages on nodes[j]; nullptr: not possible here
+    void* host_split(size_t slice, const std::vector<int>& nodes) {
+        int can = 0;
+        if (cudaDeviceGetAttribute(&can, cudaDevAttrCanUseHostPointerForRegisteredMem, 0) != cudaSuccess || !can ||
+            slice % 4096 != 0)
+            return nullptr;
+        const size_t bytes = slice * nodes.size();
+        void* p = mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (p == MAP_FAILED) return nullptr;
+        for (size_t j = 0; j < nodes.size(); ++j) {
+            const bool b = bind_memory_to(nodes[j]);
+            std::memset((char*) p + j * slice, 0, slice);
+            if (b) unbind_memory();
+        }
+        if (cudaHostRegister(p, bytes, cudaHostRegisterMapped | cudaHostRegisterPortable) != cudaSuccess) {
+            cudaGetLastError();
+            munmap(p, bytes);
+            return nullptr;
+        }
+        tp_reg.emplace_back(p, bytes);
+        return p;
+    }
     unsigned *tp_fout = nullptr, *tp_fin = nullptr, *tp_fx = nullptr;
     // the output head over the members and the head's GPU (the plan's choice: head_tp): member j the vocabulary's rows
     // [j head_rows, (j + 1) head_rows), the head's GPU the rest (its share its memory's speed against a member's); each
@@ -875,7 +900,12 @@ struct Model::Impl {
                         (void*) tp_route, (void*) tp_froute, (void*) tp_bout, (void*) tp_bin, (void*) tp_route2,
                         (void*) tp_froute2, (void*) tp_part16, (void*) tp_sum16, (void*) tp_pscale, (void*) tp_sscale,
                         (void*) tp_ixw, (void*) tp_ixf})
-            if (p) cudaFreeHost(p);
+            if (p && std::none_of(tp_reg.begin(), tp_reg.end(), [p](const auto& r) { return r.first == p; }))
+                cudaFreeHost(p);
+        for (const auto& [p, b] : tp_reg) {
+            cudaHostUnregister(p);
+            munmap(p, b);
+        }
     }
 
     // ------------------------------------------------------------ loading
@@ -2588,8 +2618,21 @@ struct Model::Impl {
                 best = c;
                 node = nd;
             }
+        std::vector<int> part_nodes;   // (HY4_TP_PART_NODES=1: members' slices on their GPUs' nodes, helpers' on the sums')
+        if (const char* pn = std::getenv("HY4_TP_PART_NODES"); pn && std::atoi(pn) != 0) {
+            for (int j = 0; j < tp; ++j) part_nodes.push_back(gpu_numa_node(G[(size_t) mem[(size_t) j]].dev));
+            for (int h = 0; h < H; ++h) part_nodes.push_back(node);
+            for (int& nd : part_nodes)
+                if (nd < 0) nd = node;
+            tp_part = (float*) host_split(sizeof(float) * tp_stride(), part_nodes);
+            if (f16_sums) tp_part16 = (uint16_t*) host_split(sizeof(uint16_t) * T * E, part_nodes);
+            if (!tp_part || (f16_sums && !tp_part16)) {
+                err = "HY4_TP_PART_NODES: the partials could not be placed by node (registered host memory)";
+                return false;
+            }
+        }
         const bool bound = bind_memory_to(node);
-        CK(cudaHostAlloc(&tp_part, sizeof(float) * (size_t) (tp + H) * tp_stride(), fl));
+        if (!tp_part) CK(cudaHostAlloc(&tp_part, sizeof(float) * (size_t) (tp + H) * tp_stride(), fl));
         CK(cudaHostAlloc(&tp_route, sizeof(float) * T * (size_t) (g.n_lat + 32), fl));
         CK(cudaHostAlloc(&tp_froute, sizeof(unsigned) * kLine, fl));
         std::memset(tp_froute, 0, sizeof(unsigned) * kLine);
@@ -2598,7 +2641,7 @@ struct Model::Impl {
         std::memset(tp_froute2, 0, sizeof(unsigned) * kLine);
         CK(cudaHostAlloc(&tp_sum, sizeof(float) * tp_stride(), fl));
         if (f16_sums) {
-            CK(cudaHostAlloc(&tp_part16, sizeof(uint16_t) * (size_t) (tp + H) * T * E, fl));
+            if (!tp_part16) CK(cudaHostAlloc(&tp_part16, sizeof(uint16_t) * (size_t) (tp + H) * T * E, fl));
             CK(cudaHostAlloc(&tp_sum16, sizeof(uint16_t) * T * E, fl));
             CK(cudaHostAlloc(&tp_pscale, sizeof(float) * (size_t) (tp + H) * T, fl));
             CK(cudaHostAlloc(&tp_sscale, sizeof(float) * T, fl));
@@ -2672,8 +2715,16 @@ struct Model::Impl {
         {
             const int pn = Lane::node_of_page(tp_part);
             char nb[200];
-            std::snprintf(nb, sizeof nb, "INFO tensor parallel: the partials' pinned memory on NUMA node %d (%s)", pn,
-                          bound ? "bound" : "not bound");
+            if (!part_nodes.empty()) {
+                std::string where;
+                for (int j = 0; j < tp; ++j)
+                    where += (j ? "," : "") +
+                             std::to_string(Lane::node_of_page((char*) tp_part + (size_t) j * sizeof(float) * tp_stride()));
+                std::snprintf(nb, sizeof nb, "INFO tensor parallel: each member's partials on its GPU's NUMA node (%s), "
+                              "the sums on node %d (HY4_TP_PART_NODES)", where.c_str(), node);
+            } else
+                std::snprintf(nb, sizeof nb, "INFO tensor parallel: the partials' pinned memory on NUMA node %d (%s)", pn,
+                              bound ? "bound" : "not bound");
             info.push_back(nb);
         }
         summer = std::make_unique<Summer>(helpers, cpus);
@@ -4235,6 +4286,13 @@ struct Model::Impl {
             return true;
         }
         k::q8_rows(x, ldx, T, M.k, gp.xq, gp.xd, gp.s);
+        return mv_q8(gp, M, T, y, ldy, alpha);
+    }
+    // (HY4_FUSE) M's GEMV on int8 rows already in gp.xq / gp.xd; fusable: mm would take that path for x
+    bool fusable(const Mat& M, int T, int k) const {
+        return fuse && T <= W && M.type != kF32 && M.type != kBF16 && M.k == k && k % 32 == 0;
+    }
+    bool mv_q8(Gpu& gp, const Mat& M, int T, float* y, size_t ldy, float alpha = 1.0f) {
         iq::MvJob j;
         j.w = M.w;
         j.ld = M.ld;
@@ -4633,7 +4691,9 @@ struct Model::Impl {
                       : mm_multi(gp, {{&l.q_a, gp.qa, (size_t) g.q_lora}, {&l.kv_a, gp.kvr, (size_t) KR},
                                       {&l.gate, gp.g, (size_t) H * g.v_mla}}, gp.xa, E, T);
         }
-        k::rmsnorm(gp.qa, g.q_lora, T, g.q_lora, l.q_a_norm, g.eps, gp.qr, g.q_lora, s);
+        const bool fq = fusable(l.q_b, T, g.q_lora);
+        if (fq) k::rms_q8(gp.qa, g.q_lora, T, g.q_lora, l.q_a_norm, g.eps, gp.qr, g.q_lora, gp.xq, gp.xd, s);
+        else k::rmsnorm(gp.qa, g.q_lora, T, g.q_lora, l.q_a_norm, g.eps, gp.qr, g.q_lora, s);
         dbg("q_resid", l.il, gp, gp.qr, T, g.q_lora);
         if (inject) ref_cmp("q_resid", l.il, gp, gp.qr, (size_t) T * g.q_lora, T);
         // (a token window's indexer on its own stream from here - HY4_IX_FORK=0: in line.  Both chains are short kernels,
@@ -4644,7 +4704,8 @@ struct Model::Impl {
             CK(cudaEventRecord(gp.evf, s));
             CK(cudaStreamWaitEvent(gp.s4, gp.evf, 0));
         }
-        ok = ok && mm(gp, l.q_b, gp.qr, g.q_lora, T, gp.q, (size_t) H * g.k_mla);
+        ok = ok && (fq ? mv_q8(gp, l.q_b, T, gp.q, (size_t) H * g.k_mla)
+                       : mm(gp, l.q_b, gp.qr, g.q_lora, T, gp.q, (size_t) H * g.k_mla));
         part(gp, "attn: q_a, kv_a, gate, q_b", T);
         if (!afork)
             k::kv_store(gp.kvr, T, KL, R, l.kv_a_norm, g.eps, gp.pos, l.base, l.kv, l.res > 0 ? l.res : l.ring, s, kv_q8,
@@ -4918,9 +4979,12 @@ struct Model::Impl {
         part(gp, "attn: v_b", T);
         dbg("attn_kqv", l.il, gp, gp.ob, T, (size_t) H * g.v_mla);
         if (inject) ref_cmp("attn_kqv", l.il, gp, gp.ob, (size_t) T * H * g.v_mla, T);
-        k::sigmoid_mul(gp.ob, gp.g, (size_t) T * H * g.v_mla, s);
-        dbg("attn_gated", l.il, gp, gp.ob, T, (size_t) H * g.v_mla);
-        ok = ok && mm(gp, l.wo, gp.ob, (size_t) H * g.v_mla, T, gp.y, E);
+        const int ko = H * g.v_mla;
+        const bool fo = fusable(l.wo, T, ko);
+        if (fo) k::sigmul_q8(gp.ob, gp.g, T, ko, gp.xq, gp.xd, s);
+        else k::sigmoid_mul(gp.ob, gp.g, (size_t) T * ko, s);
+        dbg("attn_gated", l.il, gp, gp.ob, T, (size_t) ko);
+        ok = ok && (fo ? mv_q8(gp, l.wo, T, gp.y, E) : mm(gp, l.wo, gp.ob, (size_t) ko, T, gp.y, E));
         part(gp, "attn: gate and output", T);
         if (!ok) err = "layer " + std::to_string(l.il) + ": a GEMV the kernels do not take";
         return ok;
@@ -6534,8 +6598,13 @@ struct Model::Impl {
             if (inject) ref_cmp("ffn_moe_out", l.il, gp, gp.latout, (size_t) T * lat, T);
             if (l.tpm >= 0 && model_sum) {   // (HY4_TP_MODEL_SUM=1: each member's own up-projection, summed after)
                 ok = ok && mm(gp, l.rup, gp.latout, lat, T, gp.y, E);
-                k::swiglu(gp.gu, gp.gu + (size_t) T * sf, sf, T, sf, gp.hd, sf, s);
-                ok = ok && mm(gp, l.sh_down, gp.hd, sf, T, gp.cur, E);
+                if (fusable(l.sh_down, T, sf)) {
+                    k::swiglu_q8(gp.gu, gp.gu + (size_t) T * sf, sf, T, sf, gp.hd, sf, gp.xq, gp.xd, s);
+                    ok = ok && mv_q8(gp, l.sh_down, T, gp.cur, E);
+                } else {
+                    k::swiglu(gp.gu, gp.gu + (size_t) T * sf, sf, T, sf, gp.hd, sf, s);
+                    ok = ok && mm(gp, l.sh_down, gp.hd, sf, T, gp.cur, E);
+                }
                 k::add(gp.y, gp.cur, (size_t) T * E, s);
                 mark(l.tpm, gp, l.il, 4);
                 if (ok) all_reduce(l.tpm, gp, gp.y, (size_t) T * E, v);
@@ -6545,8 +6614,13 @@ struct Model::Impl {
             }
             if (l.tpm >= 0) {   // (tensor parallel: [the experts' latent sum | the shared expert's] summed, then up)
                 float* sh = gp.latout + (size_t) T * lat;
-                k::swiglu(gp.gu, gp.gu + (size_t) T * sf, sf, T, sf, gp.hd, sf, s);
-                ok = ok && mm(gp, l.sh_down, gp.hd, sf, T, sh, E);
+                if (fusable(l.sh_down, T, sf)) {
+                    k::swiglu_q8(gp.gu, gp.gu + (size_t) T * sf, sf, T, sf, gp.hd, sf, gp.xq, gp.xd, s);
+                    ok = ok && mv_q8(gp, l.sh_down, T, sh, E);
+                } else {
+                    k::swiglu(gp.gu, gp.gu + (size_t) T * sf, sf, T, sf, gp.hd, sf, s);
+                    ok = ok && mm(gp, l.sh_down, gp.hd, sf, T, sh, E);
+                }
                 mark(l.tpm, gp, l.il, 4);
                 if (ok) all_reduce(l.tpm, gp, gp.latout, (size_t) T * (lat + E), v, false);
                 mark(l.tpm, gp, l.il, 5);
@@ -7650,6 +7724,8 @@ struct Model::Impl {
     // ffn_routed_up first: a third less to send than [the latent sum | the shared expert's], the same projections
     // (HY4_TP_LATENT_SUM=1: the latent sum, projected after)
     const bool model_sum = std::getenv("HY4_TP_LATENT_SUM") == nullptr;
+    // HY4_FUSE=1: the q_b / wo / shared-down GEMVs' int8 rows made in the step before them (k::rms_q8 and the like)
+    const bool fuse = [] { const char* v = std::getenv("HY4_FUSE"); return v && std::atoi(v) != 0; }();
     const bool check_tp = std::getenv("HY4_TP_CHECK") != nullptr;
     // (debugging only - the answers are no longer the model's: HY4_TP_SKIP_SUM the host adds nothing, HY4_TP_SKIP_COPY
     //  a chunk's partials and sums are not copied, only their counters - each bounds what that part costs)
