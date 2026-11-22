@@ -22238,8 +22238,15 @@ int main(int argc, char** argv) {
             // holds: turn_tick).  After the reply's last commit has landed; a stopped reply that kept its conversation too.
             if (sdir && turn_save_on && live_ok && !live.empty()) {
                 bool in_slot = false;
-                for (const BSlot& sl : bs)
-                    in_slot = in_slot || ((sl.active || sl.cached) && strata::program::conv_cache::held_by_slot(live, sl.ids));
+                for (size_t b = 0; b < bs.size(); ++b) {
+                    const BSlot& sl = bs[b];
+                    // turn_tick's own conditions: a holder it would refuse (tainted, mid read, ...) must not leave
+                    // this turn unsaved on both sides for a tick
+                    if (sl.cached && !sl.active && !sl.reading && !sl.partial && !sl.img && !sl.tainted &&
+                        (int) b != admit_slot && !adm_queued[b] && !adm_paused[b] && adm_reading != (int) b &&
+                        adm_stop_of[b] == nullptr && strata::program::conv_cache::held_by_slot(live, sl.ids))
+                        in_slot = true;
+                }
                 std::string te;
                 if (!in_slot && ver.wait_commit(te)) (void) turn_capture(ParkFrom{live, live_imgs, checks, cvec_cached, -1}, turn_main, "main");
             }
