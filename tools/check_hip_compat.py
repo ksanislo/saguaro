@@ -91,7 +91,7 @@ def hip_lines(text: str):
 
 def unmapped(repo: Path) -> list:
     """[(file, line, name)] for every name the HIP build compiles without a mapping."""
-    compat = repo / "include" / "strata" / "hip_compat"
+    compat = repo / "include" / "maya" / "hip_compat"
     have = mapped_names(compat)
     found = []
     for top in ("src", "include", "tests"):
@@ -208,7 +208,7 @@ def ptx_in_hip(repo: Path) -> list:
 def missing_headers(repo: Path) -> list:
     """[(file, line, header)] for each CUDA header an AMD device pass includes that include/maya/hip_compat/ lacks
     (the engines' sources, as ptx_in_hip)"""
-    compat = repo / "include" / "strata" / "hip_compat"
+    compat = repo / "include" / "maya" / "hip_compat"
     have = {h.name for h in compat.glob("*")}
     found = set()
     for top in ("src", "include"):

@@ -42,6 +42,7 @@ KEEP_LOWER = re.compile(r"^(fmt|pack|inkling|kq|kq_tab|fmt_test|fmt_gpu_test|ref
 R_INC = re.compile(r"\binclude/" + OLD + r"(?=[/\s\"'`)\]>;:,]|$)", re.M)
 R_DIR = re.compile(r"(?<![\w.-])(?<!tools/)(?<!docs/)" + OLD + r"/(?=(core|kernels|spec|platform|artifact|prefill|program|plan|ngram|hip_compat)/)")
 R_HDR = re.compile(r"([\"<])" + OLD + r"/")
+R_PYP = re.compile(r"([\"'])include\1 / ([\"'])" + OLD + r"\2")   # Python's "include" / "strata" path pieces
 R_NS = re.compile(r"\b" + OLD + r"(?=::)")
 R_NSD = re.compile(r"\bnamespace " + OLD + r"\b")
 R_UP = re.compile(r"(?:\b|(?<=-D)|(?<=/D))" + UP + r"_([A-Z0-9][A-Z0-9_]*)\b")
@@ -89,6 +90,7 @@ def rename(text: str, path: Path) -> str:
     def one(t, up=True):
         t = R_INC.sub("include/" + NEW, t)
         t = R_HDR.sub(lambda m: m.group(1) + NEW + "/", t)
+        t = R_PYP.sub(lambda m: f"{m.group(1)}include{m.group(1)} / {m.group(2)}{NEW}{m.group(2)}", t)
         t = R_NS.sub(NEW, t)
         t = R_NSD.sub("namespace " + NEW, t)
         t = R_DIR.sub(NEW + "/", t)

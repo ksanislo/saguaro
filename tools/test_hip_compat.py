@@ -24,7 +24,7 @@ class HipCompat(unittest.TestCase):
     def test_the_check_sees_what_it_must(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
-            compat = root / "include" / "strata" / "hip_compat"
+            compat = root / "include" / "maya" / "hip_compat"
             compat.mkdir(parents=True)
             (compat / "cuda_runtime.h").write_text("#define cudaMalloc hipMalloc\n#define cudaFree hipFree\n")
             (root / "src").mkdir()
@@ -48,11 +48,19 @@ class HipCompat(unittest.TestCase):
         self.assertEqual(C.ptx_in_hip(REPO), [], "inline PTX an AMD device pass compiles: guard it")
         self.assertEqual(C.missing_headers(REPO), [], "CUDA headers include/maya/hip_compat/ lacks")
 
+    def test_glm_dsa_prompt_gemms_are_mapped(self):
+        # the glm-dsa prompt path (src/core/glm_prefill_dsa.cu) builds on HIP: its absorbed MLA products are
+        # strided-batched GemmEx calls, mapped like Maya's own GemmEx
+        have = C.mapped_names(REPO / "include" / "maya" / "hip_compat")
+        for name in ("cublasGemmStridedBatchedEx", "cublasGemmEx", "cublasSgemmStridedBatched", "CUBLAS_COMPUTE_32F",
+                     "CUBLAS_GEMM_DEFAULT_TENSOR_OP", "CUDA_R_16F", "CUDA_R_32F"):
+            self.assertIn(name, have)
+
     def test_ptx_and_headers_seen_where_compiled(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
-            (root / "include" / "strata" / "hip_compat").mkdir(parents=True)
-            (root / "include" / "strata" / "hip_compat" / "cuda_fp16.h").write_text("")
+            (root / "include" / "maya" / "hip_compat").mkdir(parents=True)
+            (root / "include" / "maya" / "hip_compat" / "cuda_fp16.h").write_text("")
             (root / "src").mkdir()
             (root / "src" / "k.cu").write_text(
                 "#include <cuda_fp16.h>\n"                                   # 1: mapped
