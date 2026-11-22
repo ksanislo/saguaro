@@ -258,17 +258,16 @@ bool bf16_as_f16(uint16_t b, uint16_t& h) {
     if (sh > 10 || (k & ((1u << sh) - 1))) return false;
     return h = (uint16_t) (sign | k >> sh), true;
 }
-// a matrix the BF16 GEMMs take: FP16 on a GPU before sm_80 when that is exact
+// a matrix the BF16 GEMMs take: FP16 on a GPU before sm_80, which needs it exact (cuBLAS there rejects BF16)
 uint16_t* up16w(Drafter* d, std::vector<uint16_t> v) {
     if (d->f16) {
         std::vector<uint16_t> h(v.size());
         bool exact = true;
         for (size_t i = 0; i < v.size() && exact; ++i) exact = bf16_as_f16(v[i], h[i]);
-        if (exact) {
-            uint16_t* p = up16(d, h);
-            d->w16.push_back(p);
-            return p;
-        }
+        if (!exact) throw std::runtime_error("drafter: the draft weights are not FP16-exact, which a GPU before sm_80 needs");
+        uint16_t* p = up16(d, h);
+        d->w16.push_back(p);
+        return p;
     }
     return up16(d, v);
 }
