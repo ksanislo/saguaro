@@ -1,5 +1,11 @@
 # saguaro-ik2 (Inkling 2 Mini on T4s): what remains, in order
 
+STATE 2026-11-22 ~11:45 PST: branch merge-ready (MERGE-NOTES.md; contains saguaro/qfn-vram bf362ace, 363 tests OK).
+Ken: single-card setups FUNCTIONAL only, deeper tuning deferred. Still queued (night-queue): kl-forms (token path, tensor-core
+vs scalar forms, like-for-like with upstream's 5.7e-5) -> build-ik2/night/final/kl-forms.out; serve_check 2 cards at
+131072 / chunk 8192 with pictures -> build-ik2/night/final/serve_check-2card-c8192.out. Read both; if the 2-card
+picture check fails, go back to --chunk 4096 in configs/Inkling-2-Mini-UD-Q4_K_XL.json and tools/ik2_fit.py.
+
 ## Overnight results 2026-11-22 (build-ik2/night/*.out; card 2 / cards 2,3; read 2026-11-22 ~08:30 PST)
 
 | check | result |

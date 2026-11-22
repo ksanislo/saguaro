@@ -1,7 +1,8 @@
 # saguaro/ik2: merge notes (2026-11-22)
 
 Branch `saguaro/ik2` (worktree /data/llm/saguaro-ik2port), merged with `saguaro/qfn-vram` at ea21f5d1 (one conflict,
-serve/web/monitor.js, resolved keeping both sides). Since the last merge of this branch (d5d2ed84):
+serve/web/monitor.js, resolved keeping both sides) and again at bf362ace (e8276ce2, clean): the branch contains
+saguaro/qfn-vram's tip, so merging it back is a fast-forward. Since the last merge of this branch (d5d2ed84):
 
 - **Engine:** conversations kept beside the one in the cache (up to 4 in RAM, `SAGUARO_IK2_KEEP` / `_KEEP_GB`), saved to
   and read back from `SAGUARO_IK2_SLOT_DIR` across restarts, rewind to a message's snapshot (c341f273); an expert
@@ -16,7 +17,8 @@ serve/web/monitor.js, resolved keeping both sides). Since the last merge of this
   `--chunk 8192`; the repo configs and the setup's layouts (tools/ik2_fit.py) alike; the setup drops a layout's env keys
   (`SAGUARO_IK2_ROOM_MB`, `SAGUARO_IK2_PIN`) when the cards change. Repo configs also set `SAGUARO_IK2_STATS=1` and
   `SAGUARO_IK2_SLOT_DIR=/opt/llm/var/<model>/sessions`.
-- **Docs:** INKLING2.md section 10 (served on the T4s, install steps, proposed llama-swap blocks), INKLING2-MINI.md,
+- **Docs:** INKLING2-MINI.md "Tuning on your hardware" (chunk, pinned layers, room, the one-T4 quant, as measured on
+  T4s; sm_75+, 24 GB cards need none of it); INKLING2.md section 10 (served on the T4s, install steps, proposed llama-swap blocks), INKLING2-MINI.md,
   MODELS.md, README, CHANGELOG with the new speeds and the kept conversations.
 - **Tools:** serve_check.py `--model`, and no CLAIM line under IK2_NO_CLAIM.
 
@@ -24,7 +26,7 @@ serve/web/monitor.js, resolved keeping both sides). Since the last merge of this
 
 - `/opt/llm/saguaro/.venv/bin/python -m unittest serve.test_inkling2_frontend serve.test_new_engines_ui
   serve.test_models serve.test_server` (+ tools.test_setup_ik2, tools.test_docs_new_engines, tools.test_setup_hy4,
-  tools.test_setup_dash, tools.test_maya_quants): 363 tests OK (21 skipped) at 9764be93.
+  tools.test_setup_dash, tools.test_maya_quants): 363 tests OK (21 skipped) at e8276ce2 (after the bf362ace merge).
 - On the cards (build-ik2c = 795f6c9f; the later commits touch no engine source): ik2_cpu_test passed; t4_check PASSED
   (kernels, 1 card, 2 cards); conv_check PASSED (set aside / back / edit / saved folder read by a new engine, tokens
   alike); the T4 quant loads and answers (t4_check 1 card); serve_check all PASS on 1 card with UD-Q4_K_XL (overnight)
@@ -32,8 +34,10 @@ serve/web/monitor.js, resolved keeping both sides). Since the last merge of this
 
 ## Not verified
 
+- Single-card setups are judged FUNCTIONAL (Ken 11-22): the 1-card defaults come from one A/B round, deeper tuning
+  deferred.
 - Two cards at `--chunk 8192` past a 16K prompt (125K was filled at chunk 2048 only); the picture encoder there
-  (serve_check at 131072 / 8192: see NEXT-ik2.md for its result).
+  (serve_check at 131072 / 8192 is queued: build-ik2/night/final/serve_check-2card-c8192.out).
 - Saved conversations through serve/server.py and llama-swap (only the engine-level conv_check); the setup writes no
   SLOT_DIR or STATS yet.
 - The token path's KL against the cache path (1.86e-3 mean) is not upstream's 5.7e-5 figure (theirs is tensor-core vs
