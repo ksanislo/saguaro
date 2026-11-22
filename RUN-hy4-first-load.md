@@ -30,8 +30,14 @@ Pack (an index of the GGUF files + the tokenizer, 5 MB, seconds, no GPU):
   (`--tp 0`) on a NEW file path over real traffic, then copy it.
 - `--kv auto`: takes 8-bit cache rows by itself under tensor parallel with the CPU lane.
 - `HY4_Q4X=0`: the CPU lane's 4-bit expert copies need AVX2.
-- `HY4_SLOT_DIR` (engines from the saved-conversations commit on): conversations set aside when another chat comes
-  and at unload, read back when a request continues one. `HY4_SLOT_GB` caps the folder (the box's NVMe is tight).
+- `HY4_SLOT_DIR` + `HY4_SLOT_GB 16` (ON since 2026-11-22; slot check on --tp 4 all PASS): conversations set aside
+  when another chat comes and at unload, read back when a request continues one - 10K tokens: saved 0.3 s (0.36 GB),
+  read back 0.5 s (1.0 s after a restart). Conversations with pictures are not saved. The engine makes the folder.
+- `HY4_VISION_F16=1` (ON since 2026-11-22): the vision tower's GEMMs on FP16 tensor cores (the engine logs "vision:
+  GEMMs on FP16 tensor cores"). Picture answers right on both paths; picture prompt 3.1 -> 2.7 s.
+- `--max-context 131072` stays. 262144 loaded (75% experts in VRAM vs 85%; decode -4..-6%, 10K read -22%) and the host
+  RESET during its 60K read (2026-11-22 08:10 PST, cause unknown - NEXT-hy4.md); 524K / 1M not run. No 262K+ run
+  without Ken's explicit OK.
 - No drafter: `--mtp` gives no decode gain under tensor parallel here and costs reads; `--dfly2` cannot load on this layout.
 - THE CLOCK LOCK IS REQUIRED: without `llm-gpu-clocks lock` decode is 7.6 tok/s instead of 32.
 
@@ -72,4 +78,6 @@ in VRAM (85%)`, `INFO saguaro-hy4: Hy4-flash, 42 layers ... loaded in N s`, then
 - Thinking: on (high) or off; `reasoning_effort: "none"` turns it off.
 - Tensor parallel's answers differ from the layer split's in the last bits, and this 2-bit quant amplifies that to a KL
   of ~0.057 between any two layouts / chunk sizes (RESULTS.md's KL table); each layout repeats its own answers.
-- Pictures: the vision tower runs BF16 / FP32 GEMMs without tensor cores on sm_75 (src/hy4/hy4_vision.cu:350, :652).
+- Pictures: with HY4_VISION_F16=1 the tower's GEMMs run on FP16 tensor cores; its attention stays FP32/TF32
+  (src/hy4/hy4_vision.cu) - the next step if pictures are still slow. Measured through the server: a chat, then one
+  picture (621 tokens) 10.0 s wall incl. 200 tokens of answer.
