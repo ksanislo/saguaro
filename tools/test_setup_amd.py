@@ -366,5 +366,15 @@ class ConfigName(unittest.TestCase):
         self.assertEqual(maya.glm_config_stem("GSQ-RCO"), "maya-gsq-rco")
 
 
+class CheckFit(unittest.TestCase):
+    def test_check_says_which_quants_fit(self):
+        with patch.object(maya, "mem_gb", return_value=(92.0, 80.0)):
+            lines = maya.glm_fit_lines([rx9070()])
+        self.assertIn("about 92 GB", lines[0])
+        self.assertIn("Maya-XS-IQ1_S", lines[1])
+        self.assertIn("Maya-L", lines[2])
+        self.assertEqual(maya.glm_fit_lines([]), [])
+
+
 if __name__ == "__main__":
     unittest.main()

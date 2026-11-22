@@ -1786,6 +1786,27 @@ def vram_and_ram(cards: list) -> float:
 GLM_RAM_SPARE_GB = 16                              # the RAM a GLM quant leaves the system (the HIP config's own headroom)
 
 
+def glm_fit_lines(cards: list) -> list:
+    """--check: which GLM-5.3-Flash GGUF quants VRAM + RAM hold whole (less GLM_RAM_SPARE_GB), and the rest, whose
+    experts the engine then reads from the SSD while it answers."""
+    cards = [g for g in cards if g.get("vram_gb")]
+    if not cards:
+        return []
+    room = vram_and_ram(cards) - GLM_RAM_SPARE_GB
+    ggufs = sorted((q for q in MODELS if not is_exl3(q) and q not in MODELS_BY_HAND),
+                   key=lambda q: MODELS[q]["download_gb"])
+    fit = [q for q in ggufs if MODELS[q]["download_gb"] <= room]
+    big = [q for q in ggufs if q not in fit]
+    lines = [f"GLM-5.3-Flash: VRAM + RAM hold about {room:.0f} GB of a model here (the system keeps "
+             f"{GLM_RAM_SPARE_GB} GB)."]
+    if fit:
+        lines.append("  held whole (fastest): " + ", ".join(f"{q} ({MODELS[q]['download_gb']:.0f} GB)" for q in fit))
+    if big:
+        lines.append("  part of the experts from the SSD (slower, the more so the bigger): " +
+                     ", ".join(f"{q} ({MODELS[q]['download_gb']:.0f} GB)" for q in big))
+    return lines
+
+
 def default_models_dir() -> Path:
     """Saguaro-data/models next to this folder, or an earlier setup's Maya-data/models there while only that one exists."""
     new, old = ROOT.parent / "Saguaro-data" / "models", ROOT.parent / "Maya-data" / "models"
@@ -7973,6 +7994,9 @@ def main() -> int:
                 (lay["said"] + (f": {HY4F.speeds(lay, quant)}" if HY4F.speeds(lay, quant) else " (not measured)")
                  if lay["fits"] else f"it does not fit: about {lay['need_gib']:.0f} GB of VRAM are needed beside the "
                                      f"experts; {IK2_SHOWN} is the model for one or two 16 GB cards") + ".")
+        if fam == "glm" and a.backend != "metal":
+            for line in glm_fit_lines(pc["gpus"]):
+                say(line)
         if a.backend == "metal":
             say(f"This Mac can run Saguaro on Metal (experimental). Run {ME} without --check to set it up.")
         elif a.backend == "hip":
