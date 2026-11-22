@@ -46,7 +46,8 @@ int main() {
         for (int p = 0; p < n; ++p) {
             uint8_t* r = keys.data() + (size_t) p * RB;
             for (int b = 0; b < HD / 2; ++b) r[b] = (uint8_t) (code(rng) | (code(rng) << 4));
-            for (int b = 0; b < HD / 32; ++b) r[HD / 2 + b] = (uint8_t) cbyte(rng);
+            for (int b = 0; b < HD / 32; ++b)
+                r[HD / 2 + b] = (uint8_t) (cs.edge && code(rng) < 4 ? code(rng) % 3 : cbyte(rng));
         }
         std::vector<float> q((size_t) T * H * HD), w((size_t) T * 64);
         for (size_t i = 0; i < q.size(); i += 32) {   // (a 32's codes times its power of two: quant 3's grid)

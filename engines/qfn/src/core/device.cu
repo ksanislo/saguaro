@@ -293,7 +293,7 @@ DeviceInfo device_info(int ordinal) {
     // to a machine with an older card and would otherwise silently take whatever path the driver chose.  The HIP
     // backend checks the card against the architectures the binary was compiled for (and wave32).
 #if defined(STRATA_HIP_GFX906)
-    // AMD gfx906 (the STRATA_HIP_GFX906 compat build, not SAGUARO_USE_HIP): the build targets one gfx arch
+    // AMD gfx906 (the STRATA_HIP_GFX906 compat build, not STRATA_USE_HIP): the build targets one gfx arch
     // (CMAKE_HIP_ARCHITECTURES, wave64); a card of another arch fails at the first kernel launch with
     // hipErrorInvalidDeviceFunction.  gcnArchName says which it is.
     {

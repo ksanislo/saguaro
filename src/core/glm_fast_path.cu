@@ -16,6 +16,7 @@
 // slot while it is overwritten: the device is parked in that layer's wait kernel, the layer's
 // resident experts are excluded, and every other layer's slots are untouched.
 #include "glm_fast_state.hpp"
+#include "vram_late.hpp"   // (#1026: the reserve held for the whole run)
 #include "strata/core/expert_cache.hpp"
 #include "strata/core/glm_model.hpp"
 #include "strata/kernels/glm_fast.hpp"
@@ -1536,9 +1537,11 @@ bool Glm5Model::fast_setup(std::string& err) {
                          (long long) max_ctx_, (double) state_bytes_ / G,
                          (double) (sc_bytes_ + F->arena_bytes + 8 * sstride) / G, (used - known) / G);
         }
-        // the budget: the free VRAM less the reserve (--vram-reserve-mib), or --expert-cache N's (pool_budget)
+        // the budget: the free VRAM less the reserve (--vram-reserve-mib), or --expert-cache N's (pool_budget), less
+        // what this PC's start and requests allocated after the pool before (#1026: late_read)
         // (elastic contexts: their caches' budget stays free)
         const size_t el_keep = el_budget_ - std::min(el_budget_, el_backed_);
+        late_read(free_b > el_keep ? free_b - el_keep : 0, total_b, floor_b, stride_max);
         pool_b_ = part_budget(free_b > el_keep ? free_b - el_keep : 0, total_b, floor_b, stride_max);
         const size_t reserve = pool_b_.reserve;
         size_t avail = pool_b_.avail;
@@ -1560,6 +1563,7 @@ bool Glm5Model::fast_setup(std::string& err) {
                              dev_, (double) sc / 1048576.0);
             }
         }
+        size_t room_u = 0;   // a unified-memory host: what its RAM leaves for a pool, before the experts' cap
 #if !defined(_WIN32)
         if (F->unified_memory) {
             // Measure after dense/KV/scratch and pinned prompt staging are allocated.  The runtime's free figure counts
@@ -1583,6 +1587,9 @@ bool Glm5Model::fast_setup(std::string& err) {
                 if (Ly.moe) expert_bytes += (size_t) g.n_expert * glmfast::expert_stride(Ly.blob, Ly.gu_type, Ly.d_type);
             }
             if (avail_kb > 0 && expert_bytes > 0) {
+                room_u = glmfast::expert_pool_budget(true, free_b, (size_t) avail_kb * 1024, reserve,
+                                                     (size_t) (head_gb * 1073741824.0), ~size_t{0});
+                if (pf_ != nullptr) room_u -= std::min(room_u, mmq_scratch_reserve());
                 avail = glmfast::expert_pool_budget(true, free_b, (size_t) avail_kb * 1024, reserve,
                                                     (size_t) (head_gb * 1073741824.0), expert_bytes);
                 std::fprintf(stderr, "glm fast: CUDA%d unified memory: MemAvailable %.2f GB, headroom %.2f GB + "
@@ -1592,8 +1599,10 @@ bool Glm5Model::fast_setup(std::string& err) {
             }
         }
 #endif
-        if (const char* cap = getenv("SAGUARO_GLM_POOL_GB"))
+        if (const char* cap = getenv("SAGUARO_GLM_POOL_GB")) {
             avail = std::min(avail, (size_t) (std::atof(cap) * 1073741824.0));
+            room_u = std::min(room_u, (size_t) (std::atof(cap) * 1073741824.0));
+        }
         // SAGUARO_GLM_VRAM_GB=<n>: behave like a card with n GB - the cap counts everything this process already
         // holds on the device (context, dense weights, state, arenas), so the pool gets what such a card would have
         if (const char* vc = getenv("SAGUARO_GLM_VRAM_GB")) {
@@ -1603,8 +1612,10 @@ bool Glm5Model::fast_setup(std::string& err) {
             std::fprintf(stderr, "glm fast: CUDA%d VRAM cap %.1f GB: %.2f GB already in use, %.2f GB left for experts\n",
                          dev_, (double) cap / 1073741824.0, (double) used / 1073741824.0, (double) room / 1073741824.0);
             avail = std::min(avail, room);
+            room_u = std::min(room_u, room);
         }
         if (pool_b_.fixed > 0) avail = std::min(avail, (size_t) pool_b_.fixed * stride_max);   // (an APU's too)
+        if (pool_b_.fixed > 0) room_u = std::min(room_u, (size_t) pool_b_.fixed * stride_max);
         // every layer gets the same number of slots: avail / sum(blob over layers)
         size_t blob_sum = 0;
         for (int il = l0_; il < lt_; ++il)
@@ -1651,18 +1662,29 @@ bool Glm5Model::fast_setup(std::string& err) {
         // experts out (6 GB) and staged ~1900 from the SSD.  Complete, the warm-up loads all of them, a prompt lends
         // only the tail, the decode never misses, the RAM tier is staging only and the CPU lane has nothing to take.
         // Any device whose budget holds it (a discrete card too: the slots past the experts cost only budget nothing
-        // else used); Linux's unified-memory budget is the experts' bytes exactly, so it keeps its own policy there.
+        // else used).  A unified-memory host's budget is RAM's: where the RAM measured above (room_u: MemAvailable less
+        // the headroom and the reserve) holds the complete pool it takes it as well (unified_complete_pool) - before,
+        // its pool was the experts' bytes exactly, so every prompt borrowed slots that held experts (and a small
+        // model's pool could lend nothing: token by token); short of that room it still is.
         // SAGUARO_GLM_COMPLETE_POOL=0: the capped pool (A/B); on by default on every GPU (complete_pool_on, #474).
         {
             int k_full = pf_ != nullptr ? tail_slots(prefill_borrow_bytes()) : 0;
             if (const char* v = getenv("SAGUARO_GLM_VISION_LEND_MB"); v != nullptr && dev_ == 0)
                 k_full = std::max(k_full, tail_slots((size_t) std::max(0LL, std::atoll(v)) << 20));
-            const int full = glmfast::complete_pool_on() && !F->unified_memory
-                                 ? glmfast::complete_pool_slots(avail, stride_sum, g.n_expert, gf::kSpares, k_full)
+            const bool uni = F->unified_memory;
+            const int full = glmfast::complete_pool_on() && (!uni || glmfast::unified_complete_pool())
+                                 ? glmfast::complete_pool_slots(uni ? room_u : avail, stride_sum, g.n_expert,
+                                                                gf::kSpares, k_full)
                                  : 0;
             if (full > 0) {
                 per = full;
                 F->complete = true;
+                if (uni) {
+                    avail = room_u;
+                    std::fprintf(stderr, "glm fast: CUDA%d unified memory: %.2f GB of RAM room holds the complete pool "
+                                         "(every expert, the spares and the prompt path's tail)\n", dev_,
+                                 (double) room_u / 1073741824.0);
+                }
             }
         }
         if (pf_ != nullptr) {
@@ -2451,6 +2473,7 @@ bool Glm5Model::fast_setup_finish(std::string& err) {
     F->lane_pending = false;
     cudaSetDevice(dev_);
     if (!fast_cpu_lane_setup(err)) return false;   // keep the existing CPU pool/calibration for batched prefill
+    if (n_parts_ == 1 && split_next_ == nullptr) (void) slot_bounce();   // AMD: at start-up (a split's: at its first switch)
     if (const char* h = getenv("SAGUARO_GLM_EXPERT_HELPER"); h != nullptr && h[0] != '\0')
         if (!fast_helper_setup(err)) return false;
     F->svc = std::thread([this] { fast_service(); });
@@ -5190,6 +5213,13 @@ void Glm5Model::fast_service() {
             unsigned int* sv = F->pfce_seq_h + (sq % gf::kRingSize);
             *sv = sq;
             cudaMemcpyAsync(F->pf_flag_d, sv, sizeof(unsigned int), cudaMemcpyHostToDevice, F->pfce_stream);
+            // Windows' HIP runtime holds queued work until the host waits on or queries its stream (docs/AMD_MAYA.md,
+            // "Kernel submission"), and nothing else touches this one: without the query the flag never lands and the
+            // next layer's moe_pf_wait spins on it ("token N waiting > 10 s" on an RX 7900 XT).  It returns at once;
+            // "not ready" is not an error and is not left behind for the next check.
+#if defined(STRATA_USE_HIP)
+            if (cudaStreamQuery(F->pfce_stream) == cudaErrorNotReady) cudaGetLastError();
+#endif
         }
         // (the lanes are made at the CPU lane's setup, after this thread started; an EXL3 pack's merged rows with them)
         // A batched rows step's group (SAGUARO_GLM_GROUP_EXPERTS, win_rows) is held the same way and merged on this part's
@@ -7784,8 +7814,94 @@ size_t Glm5Model::mmq_scratch_reserve() {
 Glm5Model::PoolBudget Glm5Model::part_budget(size_t free_b, size_t total_b, size_t floor_b, size_t slot_b) const {
     PoolBudget b = pool_budget(free_b, total_b, part_, floor_b, slot_b, fast_ != nullptr && fast_->unified_memory);
     b.avail = b.avail > pool_short_ ? b.avail - pool_short_ : 0;
+    // (#1026) ... and what this PC's start and requests allocated after the pool before (late_read) - never below the
+    // pool's floor for it: a card that small keeps the pool and says it is short
+    if (late_ > 0 && !b.adapted) b.avail = std::max(b.avail > late_ ? b.avail - late_ : 0, std::min(b.avail, floor_b));
     return b;
 }
+
+// (#1026) the reserve held for the whole run: this part's figure from the pack's vram-late.txt (SAGUARO_GLM_LATE_FILE /
+// SAGUARO_VRAM_LATE_FILE: another file, =none: not kept; SAGUARO_GLM_LATE_MB / SAGUARO_VRAM_LATE_MB=n: n MiB, 0 the reserve
+// alone), before the pool is carved.  The default reserve keeps v1.1.73's pool unless the figure uses it up; a card
+// whose default reserve was lowered for the pool's floor (adapted) keeps it as it is.  A unified-memory APU (its pool
+// is sized from RAM) is not measured.
+void Glm5Model::late_read(size_t free_b, size_t total_b, size_t floor_b, size_t slot_b) {
+    late_on_ = false;
+    late_ = 0;
+    if (fast_ == nullptr || fast_->unified_memory) return;
+    const PoolBudget b = pool_budget(free_b, total_b, part_, floor_b, slot_b, false);
+    cudaDeviceProp pr{};
+    if (cudaGetDeviceProperties(&pr, dev_) != cudaSuccess) (void) cudaGetLastError();
+    char buf[512];
+    const char* ec = getenv("SAGUARO_GLM_EXPERT_CACHE");
+    std::snprintf(buf, sizeof buf, "glm late|%s %x:%x %zu MiB|part %d of %d|pack %s|ctx %lld seqs %d cache %s reserve "
+                  "%zu", pr.name, (unsigned) pr.pciBusID, (unsigned) pr.pciDeviceID, total_b >> 20, part_, n_parts_,
+                  pack_dir_.c_str(), (long long) max_ctx_, seq_count(), ec ? ec : "auto", b.reserve >> 20);
+    late_key_ = buf;
+    late_res_ = b.reserve;
+    late_given_ = b.reserve_given;
+    late_on_ = true;
+    const std::string file = strata::vramlate::file_of(pack_dir_, "SAGUARO_GLM_LATE_FILE");
+    const int64_t fixed = strata::vramlate::fixed_of("SAGUARO_GLM_LATE_MB");
+    if (fixed >= 0) {
+        late_ = (size_t) fixed << 20;
+    } else if (!file.empty()) {
+        const std::string v = strata::vramlate::get(file, late_key_);
+        late_kept_ = v.empty() ? 0 : (size_t) std::max(0LL, std::atoll(v.c_str())) << 20;
+        late_ = b.adapted ? 0 : strata::vramlate::kept_for(late_kept_, b.reserve, b.reserve_given);
+    }
+    // (what the pool can give up above its floor: a pool already there keeps no more free, and its start is not said
+    //  short - a restart would not help)
+    const size_t avail0 = b.avail > pool_short_ ? b.avail - pool_short_ : 0;
+    late_room_ = b.adapted ? 0 : avail0 > floor_b ? avail0 - floor_b : 0;
+    if (late_ > late_room_) {
+        std::fprintf(stderr, "glm fast: CUDA%d the expert pool is at its floor: %zu of the %zu MiB measured can be kept "
+                             "free beside the reserve on this card\n", dev_, late_room_ >> 20, late_ >> 20);
+        late_ = late_room_;
+    }
+    if (late_ > 0)
+        std::fprintf(stderr, "glm fast: CUDA%d keeps %zu MiB free beside the %zu MiB reserve: what this PC's start and "
+                             "requests allocate after the expert pool%s\n", dev_, late_ >> 20, b.reserve >> 20,
+                     fixed >= 0 ? " (SAGUARO_GLM_LATE_MB)" : " (measured before)");
+}
+
+int Glm5Model::late_check_part(bool loaded) {
+    if (!late_on_) return 0;
+    size_t fr = 0, tot = 0;
+    cudaSetDevice(dev_);
+    if (cudaMemGetInfo(&fr, &tot) != cudaSuccess) {
+        (void) cudaGetLastError();
+        return 0;
+    }
+    const size_t res = pool_b_.reserve > 0 ? pool_b_.reserve : late_res_;   // (the reserve the pool was carved with)
+    if (loaded)
+        std::fprintf(stderr, "glm fast: CUDA%d: %zu MiB of VRAM free with everything loaded (the reserve %zu MiB%s)\n",
+                     dev_, fr >> 20, res >> 20,
+                     late_ > 0 ? (", " + std::to_string(late_ >> 20) + " MiB more kept beside it").c_str() : "");
+    if (strata::vramlate::fixed_of("SAGUARO_GLM_LATE_MB") >= 0) return 0;
+    strata::vramlate::Gpu lg{late_, late_kept_, late_fr_min_};
+    const strata::vramlate::Step st = strata::vramlate::check(lg, fr, tot, res, late_given_, late_room_ - std::min(late_room_, late_));
+    late_fr_min_ = lg.fr_min, late_kept_ = lg.kept;
+    if (!st.moved) return 0;
+    const std::string file = strata::vramlate::file_of(pack_dir_, "SAGUARO_GLM_LATE_FILE");
+    if (st.short_)
+        std::fprintf(stderr, "glm fast: WARNING - CUDA%d: %zu MiB free, short of the %zu MiB reserve - the next start "
+                             "keeps %lld MiB free beside it for what the start and the requests allocate after the "
+                             "expert pool%s\n", dev_, fr >> 20, res >> 20, (long long) (st.want >> 20),
+                     file.empty() ? " (SAGUARO_GLM_LATE_FILE=none: not kept)" : "");
+    if (!file.empty()) strata::vramlate::put(file, late_key_, std::to_string(st.want >> 20));
+    return loaded && st.short_ && !file.empty() ? (int) (st.want >> 20) : 0;
+}
+
+int Glm5Model::late_check(bool loaded) {
+    int cur = 0;
+    if (cudaGetDevice(&cur) != cudaSuccess) (void) cudaGetLastError();
+    int short_mib = 0;
+    for (Glm5Model* m = this; m != nullptr; m = m->split_next_.get()) short_mib = std::max(short_mib, m->late_check_part(loaded));
+    cudaSetDevice(cur);
+    return short_mib;
+}
+
 
 // --expert-cache auto: the budget is checked once it is WRITTEN.  Under Windows' WDDM an allocation is resident only
 // once it is touched, and the free figure read before it can be ~1 GB high; a pool sized from it fills the card, and
@@ -7918,6 +8034,49 @@ void Glm5Model::pool_check(size_t floor_b, size_t slot_b, size_t all_b) {
         size_t fr = 0, tot = 0;
         cudaMemGetInfo(&fr, &tot);
         for (void* p : got) cudaFree(p);
+#if defined(STRATA_USE_HIP) && !defined(_WIN32)
+        // (#899) Linux HIP: the frees above can land late - the free VRAM read just after them still counted the
+        // whole budget as in use, and the pool fast_setup sized next found 0 slots a layer (2x RX 9070, the head
+        // part).  Wait until the free figure is back (within 256 MiB of the read before the write; a sync and a tiny
+        // write each 5 ms, at most SAGUARO_GLM_POOL_CHECK_WAIT_MS, default 10000; 0: no wait).  CUDA builds: unchanged.
+        {
+            int wait_ms = 10000;
+            if (const char* v = getenv("SAGUARO_GLM_POOL_CHECK_WAIT_MS")) wait_ms = std::max(0, std::atoi(v));
+            void* probe = nullptr;
+            if (cudaMalloc(&probe, 256) != cudaSuccess) {
+                cudaGetLastError();
+                probe = nullptr;
+            }
+            int polls = 0;
+            const auto t0 = std::chrono::steady_clock::now();
+            const size_t now = glmfast::await_check_frees(
+                free_b, (size_t) 256 << 20, wait_ms / 5,
+                [&] {
+                    cudaDeviceSynchronize();
+                    size_t f = 0, t = 0;
+                    cudaMemGetInfo(&f, &t);
+                    return f;
+                },
+                [&] {
+                    if (probe != nullptr) cudaMemset(probe, 0, 256);   // (a submission retires the queue's old work)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                },
+                polls);
+            if (probe != nullptr) cudaFree(probe);
+            if (polls > 0) {
+                const long long ms = (long long) std::chrono::duration_cast<std::chrono::milliseconds>(
+                                         std::chrono::steady_clock::now() - t0).count();
+                if (now + ((size_t) 256 << 20) >= free_b)
+                    std::fprintf(stderr, "glm fast: CUDA%d the expert pool's check: its %.2f GB came back as free "
+                                         "VRAM %lld ms after it was freed\n", dev_, (double) have / 1073741824.0, ms);
+                else
+                    std::fprintf(stderr, "glm fast: CUDA%d WARNING the expert pool's check: %.2f GB of its %.2f GB "
+                                         "still read as in use %lld ms after it was freed (SAGUARO_GLM_POOL_CHECK=0 skips "
+                                         "the check)\n", dev_, (double) (free_b - now) / 1073741824.0,
+                                 (double) have / 1073741824.0, ms);
+            }
+        }
+#endif
         // SAGUARO_GLM_POOL_CHECK_TEST_MB=N (a test): the free figure read before the budget ran N MiB high, as Windows'
         if (const char* t = getenv("SAGUARO_GLM_POOL_CHECK_TEST_MB")) {
             const size_t hi = (size_t) std::max(0LL, std::atoll(t)) << 20;
@@ -8897,6 +9056,7 @@ bool Glm5Model::ckpt_restore(int slot, std::string& err) {
 // per half the KDA snapshot and the DSA runs in that order.
 namespace {
 constexpr uint64_t kSlotMagic = 0x3254534C4159414Dull;   // "MAYALST2" (v2: the ik / ig ring's open pool only)
+constexpr int64_t kSlotChunk = (int64_t) 16 << 20;   // floats: slot_save / slot_load copy a run this much at a time
 
 // (start, floats) of each DSA cache run a slot of n positions holds on one half, in file order: in the state arena, or a
 // KV-streamed layer's latents in its host copy (kv_host[il])
@@ -9395,6 +9555,32 @@ void Glm5Model::slot_flush() {
                      std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(), w.first, w.second / 1e9);
 }
 std::vector<std::string> Glm5Model::slot_failed_writes() { return slot_writer().failures(); }
+// AMD: slot_save's and slot_load's bounce (kSlotChunk floats), pinned once and kept.  They copied through a 64 MiB
+// vector made for each call instead; on ROCm (7.2.3, gfx1201) the copy leaves part of that pageable memory registered
+// with the driver (an SVM range), so freeing the vector unmaps a range amdgpu still tracks and it stops every GPU queue
+// of the process (kgd2kfd_quiesce_mm) - at every conversation switch, whatever the THP settings.  On gfx1201 such a
+// stop sometimes hangs the MES and the host (ROCm/TheRock #9299, #9861).  nullptr (CUDA builds, or the allocation
+// failed): the vector, as before.
+float* Glm5Model::slot_bounce() {
+#if defined(STRATA_USE_HIP)
+    if (slot_bounce_ == nullptr && !slot_bounce_tried_) {
+        slot_bounce_tried_ = true;
+        if (cudaHostAlloc((void**) &slot_bounce_, (size_t) kSlotChunk * sizeof(float), cudaHostAllocPortable) !=
+            cudaSuccess) {
+            (void) cudaGetLastError();
+            slot_bounce_ = nullptr;
+            std::fprintf(stderr, "glm slots: the pinned bounce (%lld MB) did not allocate - slots copy through pageable "
+                                 "memory, as before\n", (long long) (kSlotChunk * (int64_t) sizeof(float) >> 20));
+        } else {
+            std::fprintf(stderr, "glm slots: pinned bounce %lld MB (AMD: conversation switches free no registered "
+                                 "memory)\n", (long long) (kSlotChunk * (int64_t) sizeof(float) >> 20));
+        }
+    }
+    return slot_bounce_;
+#else
+    return nullptr;
+#endif
+}
 
 uint64_t Glm5Model::slot_save(const std::string& path, std::string& err) {
     std::vector<Glm5Model*> halves;
@@ -9417,6 +9603,7 @@ uint64_t Glm5Model::slot_save(const std::string& path, std::string& err) {
     put(&nh, 4);
     put(&n, 8);
     std::vector<float> buf;
+    float* const bounce = slot_bounce();   // AMD: pinned once (nullptr: buf, as before)
     double t_sync = 0, t_copy = 0, t_write = 0;
     for (Glm5Model* m : halves) {
         const Glm5Geometry& g = m->g_;
@@ -9440,13 +9627,14 @@ uint64_t Glm5Model::slot_save(const std::string& path, std::string& err) {
         if (pool_rows > 0) src.push_back({m->snap_pool_, pool_rows});
         for (const auto& r : runs) src.push_back({r.first, r.second});
         for (const auto& s : src) {
-            constexpr int64_t kChunk = (int64_t) 16 << 20;   // floats
+            constexpr int64_t kChunk = kSlotChunk;   // floats
             for (int64_t at = 0; at < s.second; at += kChunk) {
                 const int64_t c = std::min(kChunk, s.second - at);
-                buf.resize((size_t) c);
+                if (bounce == nullptr) buf.resize((size_t) c);
+                float* const bp = bounce != nullptr ? bounce : buf.data();
                 tq = std::chrono::steady_clock::now();
                 // (Default: a streamed layer's latents are pinned host memory)
-                if (cudaMemcpy(buf.data(), s.first + at, (size_t) c * sizeof(float), cudaMemcpyDefault) !=
+                if (cudaMemcpy(bp, s.first + at, (size_t) c * sizeof(float), cudaMemcpyDefault) !=
                     cudaSuccess) {
                     cudaGetLastError();
                     cudaSetDevice(dev_);
@@ -9455,7 +9643,7 @@ uint64_t Glm5Model::slot_save(const std::string& path, std::string& err) {
                 }
                 const auto tw = std::chrono::steady_clock::now();
                 t_copy += std::chrono::duration<double, std::milli>(tw - tq).count();
-                put(buf.data(), (size_t) c * sizeof(float));
+                put(bp, (size_t) c * sizeof(float));
                 t_write += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tw).count();
             }
         }
@@ -9556,6 +9744,7 @@ bool Glm5Model::slot_load(const std::string& path, int64_t n_pos, std::string& e
         return (int) (std::find(ls.begin(), ls.end(), il) - ls.begin());
     };
     std::vector<float> buf;
+    float* const bounce = slot_bounce();   // AMD: pinned once (nullptr: buf, as before)
     const auto copy_in = [&](Glm5Model* m, float* dst, int64_t floats) -> bool {
         if (fast) {
             const std::streamoff at = f.tellg();
@@ -9564,13 +9753,14 @@ bool Glm5Model::slot_load(const std::string& path, int64_t n_pos, std::string& e
             return (bool) f.seekg((std::streamoff) floats * (std::streamoff) sizeof(float), std::ios::cur);
         }
         cudaSetDevice(m->dev_);
-        constexpr int64_t kChunk = (int64_t) 16 << 20;
+        constexpr int64_t kChunk = kSlotChunk;
         for (int64_t at = 0; at < floats; at += kChunk) {
             const int64_t c = std::min(kChunk, floats - at);
-            buf.resize((size_t) c);
+            if (bounce == nullptr) buf.resize((size_t) c);
+            float* const bp = bounce != nullptr ? bounce : buf.data();
             // (Default: a KV-streamed layer's latents are its pinned host copy)
-            if (!get(buf.data(), (size_t) c * sizeof(float)) ||
-                cudaMemcpy(dst + at, buf.data(), (size_t) c * sizeof(float), cudaMemcpyDefault) != cudaSuccess) {
+            if (!get(bp, (size_t) c * sizeof(float)) ||
+                cudaMemcpy(dst + at, bp, (size_t) c * sizeof(float), cudaMemcpyDefault) != cudaSuccess) {
                 cudaGetLastError();
                 return false;
             }

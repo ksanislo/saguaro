@@ -2527,10 +2527,15 @@ __device__ __forceinline__ uint32_t i8pair(int8_t a, int8_t b) {   // (two int8 
     return *(const uint32_t*) &h;
 }
 __device__ __forceinline__ void mma16816(float* c, const uint32_t* a, uint32_t b0, uint32_t b1) {
+#if defined(STRATA_USE_HIP)   // (NVIDIA's tensor cores only: sparse_attn never launches this kernel on HIP)
+    (void) c, (void) a, (void) b0, (void) b1;
+    __builtin_trap();
+#else
     asm volatile("mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32 {%0,%1,%2,%3}, {%4,%5}, {%6}, {%0,%1,%2,%3};\n"
                  : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3]) : "r"(a[0]), "r"(a[1]), "r"(b0));
     asm volatile("mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32 {%0,%1,%2,%3}, {%4,%5}, {%6}, {%0,%1,%2,%3};\n"
                  : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3]) : "r"(a[2]), "r"(a[3]), "r"(b1));
+#endif
 }
 
 __global__ void __launch_bounds__(kTcWarps * 32) sparse_attn_tc_kernel(const float* q, const int* kept, const int* pos,
@@ -2767,9 +2772,14 @@ void sparse_attn(const float* q, const uint16_t* kc, const uint16_t* vc, const i
     }();
     const bool wide = wide_on && T <= kWideT;
     // (a prompt's queries over int8 K and V, unsplit: the tensor-core kernel - SAGUARO_MM3_ATTN_TC=0: the CUDA cores')
+    // (HIP: the CUDA cores' kernel, as upstream - the tensor-core one is NVIDIA's mma.sync)
     static const bool tc_on = [] {
+#if defined(STRATA_USE_HIP)
+        return false;
+#else
         const char* v = std::getenv("SAGUARO_MM3_ATTN_TC");
         return v == nullptr || std::atoi(v) != 0;
+#endif
     }();
     if (tc_on && !wide && S == 1 && kq.kf == kKvI8 && kq.vf == kKvI8 && Hq == Hkv * kG && blk % kTcKeys == 0) {
         sparse_attn_tc_kernel<<<dim3((unsigned) ((T + kTcWarps - 1) / kTcWarps), (unsigned) Hkv), kTcWarps * 32, 0, s>>>(

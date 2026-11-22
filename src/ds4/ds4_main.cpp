@@ -745,6 +745,8 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
     for (const std::string& l : m.info_lines()) std::printf("%s\n", l.c_str());
     std::printf("INFO logprobs=%d\n", strata::ds4::kTopLogprobs);   // (GEN logprobs=<k>: LP lines, k at most this)
     std::printf("INFO logit_bias=1\n");   // (GEN logit_bias=<id>:<bias>,...: added to the logits of every pick)
+    // (#1026: this start came out short of --reserve-mib - the server starts the engine once more, which keeps it)
+    if (m.reserve_short_mib() > 0) std::printf("INFO reserve_short=%d\n", m.reserve_short_mib());
     if (m.seq_count() > 1)   // (--parallel: n conversations at once, GEN rid=<id>)
         std::printf("READY %lld stop multi=%d\n", (long long) m.max_context(), m.seq_count());
     else
@@ -4427,7 +4429,7 @@ int main(int argc, char** argv) {
         else if (a == "--gpus") {
             for (int g : parse_ids(val("--gpus"))) o.gpus.push_back(g);
         } else if (a == "--max-context") o.max_context = std::atoll(val("--max-context").c_str());
-        else if (a == "--reserve-mib") o.reserve_mib = std::atoll(val("--reserve-mib").c_str());
+        else if (a == "--reserve-mib") o.reserve_mib = std::atoll(val("--reserve-mib").c_str()), o.reserve_given = true;
         else if (a == "--vram-experts") o.vram_experts = std::atof(val("--vram-experts").c_str());
         else if (a == "--cpu-threads") o.cpu_threads = std::atoi(val("--cpu-threads").c_str());
         else if (a == "--expert-profile") o.profile = val("--expert-profile");

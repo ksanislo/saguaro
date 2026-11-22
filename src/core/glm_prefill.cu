@@ -1056,6 +1056,11 @@ static std::pair<int64_t, int64_t> weight_scratch(const Glm5Geometry& g, bool ha
 #if defined(STRATA_USE_HIP)
     if (has_dsa)   // the MLA products' FP16 copy of wk_b / wv_b
         w16 = std::max<int64_t>({w16, (int64_t) g.n_head * g.kv_lora * g.qk_nope, (int64_t) g.n_head * g.v_head * g.kv_lora});
+    // SAGUARO_GLM_PREFILL_BLAS (the FP16 expert path) needs one expert's gate + up in FP16 and a row: 2 x ff x E + E.
+    // Make sure the scratch covers it on models where that exceeds the products above - only when the setting is on
+    // (HIP's default is 0, MMQ only): a default start keeps the scratch, and the pool's slots, as before
+    const char* blas = getenv("SAGUARO_GLM_PREFILL_BLAS");
+    if (blas != nullptr && std::atoi(blas) > 0) w16 = std::max<int64_t>(w16, (int64_t) 2 * g.n_ff_exp * E + E);
 #endif
     return {w16, w32};
 }
@@ -1217,7 +1222,8 @@ bool Glm5Model::prefill_setup(std::string& err) {
     // there, the pool is the capped one - without a prestage buffer).  SAGUARO_GLM_COMPLETE_POOL=0: never (on by
     // default on every GPU: complete_pool_on).
     bool complete = false;
-    if (glmfast::complete_pool_on() && !F->unified_memory && has_moe && stride_sum > 0 &&
+    if (glmfast::complete_pool_on() && (!F->unified_memory || glmfast::unified_complete_pool()) && has_moe &&
+        stride_sum > 0 &&
         ceiling > 0) {
         const auto pu = prefill_bytes_for((size_t) ceiling);
         size_t bufs = pu.first + pu.second + (size_t) w16_elems * 2 + (size_t) w32_elems * 4 + ws_bytes + gbuf + 4096;

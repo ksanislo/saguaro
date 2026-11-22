@@ -1821,6 +1821,178 @@ void bench_moe() {
     cudaFree(d_out);
 }
 
+// the device's plain read of n uint4s from p (the roof the experts' kernels are held to); sink keeps the loads
+__global__ void read_roof_kernel(const uint4* p, size_t n, unsigned* sink) {
+    uint32_t acc = 0u;
+    for (size_t i = blockIdx.x * (size_t) blockDim.x + threadIdx.x; i < n; i += (size_t) gridDim.x * blockDim.x) {
+        const uint4 v = p[i];
+        acc ^= v.x ^ v.y ^ v.z ^ v.w;
+    }
+    if (acc == 0x9e3779b9u) atomicAdd(sink, 1u);
+}
+
+// --bench-win: a verify window's routed experts on one device at DeepSeek-V4.1's geometry (5120 -> 2304 -> 5120,
+// mul1) - win_experts, the kernels the DS4 helper runs for a decode round.  Per case: T tokens, h of a token's 6
+// experts on this device, G distinct experts among them (token t's entry i on expert (t h + i) mod G).  Each call
+// takes the next G of BENCH_WIN_BLOBS copies of one expert (default 48, ~425 MB at K 2: past any cache), and prints
+// the ms a call, the trellis bytes a second against this device's plain read of the same bytes, the same call with
+// every group on one copy ("hot": its bytes from cache, so the kernels' own arithmetic), and a checksum of the
+// outputs' bits (equal before and after a change that keeps the bits).  BENCH_WIN_K2: one K2 (default 4 and 5, as
+// turboderp's 2.25 bpw), BENCH_WIN_ITERS (default 50).
+void bench_win() {
+    const int E = 5120, F = 2304, k = 6;
+    auto env_int = [](const char* n, int d) {
+        const char* v = std::getenv(n);
+        return v != nullptr && *v ? std::atoi(v) : d;
+    };
+    const int iters = std::max(1, env_int("BENCH_WIN_ITERS", 50)), NB = std::max(12, env_int("BENCH_WIN_BLOBS", 48));
+    std::vector<int> k2s = {4, 5};
+    if (env_int("BENCH_WIN_K2", 0) > 0) k2s = {env_int("BENCH_WIN_K2", 0)};
+    struct Case { int T, h, G; };
+    const Case cases[] = {{1, 4, 4}, {3, 4, 8}, {3, 4, 12}, {5, 4, 12}};
+    cudaDeviceProp prop{};
+    int dev = 0, khz = 0;
+    CK(cudaGetDevice(&dev));
+    CK(cudaGetDeviceProperties(&prop, dev));
+    if (cudaDeviceGetAttribute(&khz, cudaDevAttrClockRate, dev) != cudaSuccess) khz = 0;
+    std::printf("  bench win: %s, %d CUs, clock %d MHz, %d copies, %d calls a case\n", prop.name,
+                prop.multiProcessorCount, khz / 1000, NB, iters);
+    unsigned* d_sink = nullptr;
+    CK(cudaMalloc(&d_sink, 4));
+    cudaEvent_t ev0, ev1;
+    CK(cudaEventCreate(&ev0));
+    CK(cudaEventCreate(&ev1));
+    for (const int k2 : k2s) {
+        ex::ExpertLayout lay;
+        lay.cb = 2;
+        size_t at = 0, tr_bytes = 0;
+        for (int r = 0; r < 3; ++r) {
+            const int kk = r < 2 ? E : F, n = r < 2 ? F : E;
+            lay.k2[r] = k2;
+            lay.trellis[r] = at;
+            tr_bytes += ex::trellis_bytes_k2(kk, n, k2);
+            at += (ex::trellis_bytes_k2(kk, n, k2) + 255) / 256 * 256;
+            lay.suh[r] = at;
+            at += (2 * (size_t) kk + 255) / 256 * 256;
+            lay.svh[r] = at;
+            at += (2 * (size_t) n + 255) / 256 * 256;
+        }
+        std::vector<uint8_t> blob(at);
+        for (int r = 0; r < 3; ++r) {
+            const HostMat hm = make_mat(r < 2 ? E : F, r < 2 ? F : E, k2, 2);
+            std::memcpy(&blob[lay.trellis[r]], hm.tr.data(), hm.tr.size() * 4);
+            std::memcpy(&blob[lay.suh[r]], hm.suh.data(), hm.suh.size() * 2);
+            std::memcpy(&blob[lay.svh[r]], hm.svh.data(), hm.svh.size() * 2);
+        }
+        uint8_t* d_all = nullptr;
+        CK(cudaMalloc(&d_all, (size_t) NB * at));
+        CK(cudaMemcpy(d_all, blob.data(), at, cudaMemcpyHostToDevice));
+        for (int b = 1; b < NB; ++b) CK(cudaMemcpy(d_all + (size_t) b * at, d_all, at, cudaMemcpyDeviceToDevice));
+        for (const Case& c : cases) {
+            const int NS = NB / c.G;   // the sets of G copies a call cycles through (set s: copies s G .. s G + G - 1)
+            struct Set { unsigned long long *plan, *gp; int *gs, *ge, *ng; };
+            std::vector<Set> sets;
+            for (int s = 0; s <= NS; ++s) {   // (set NS: every group on copy 0 - the hot call)
+                std::vector<unsigned long long> plan((size_t) c.T * 8, 0ull), gp;
+                std::vector<int> gstart(1, 0), gent;
+                std::vector<std::vector<int>> members;
+                for (int t = 0; t < c.T; ++t)
+                    for (int i = 0; i < c.h; ++i) {
+                        const int g = (t * c.h + i) % c.G;
+                        plan[(size_t) t * 8 + i] = (unsigned long long) (d_all + (s == NS ? 0 : (size_t) (s * c.G + g) * at));
+                    }
+                // the groups by expert in order of first appearance (glmf::moe_win_group), by copy index here: the
+                // hot set's G groups share one address
+                std::vector<int> gid((size_t) c.G, -1);
+                for (int e = 0; e < c.T * 8; ++e) {
+                    if (plan[(size_t) e] == 0ull) continue;
+                    const int g = ((e / 8) * c.h + e % 8) % c.G;
+                    if (gid[(size_t) g] < 0) {
+                        gid[(size_t) g] = (int) gp.size();
+                        gp.push_back(plan[(size_t) e]);
+                        members.emplace_back();
+                    }
+                    members[(size_t) gid[(size_t) g]].push_back(e);
+                }
+                for (auto& mm : members) {
+                    for (int e : mm) gent.push_back(e);
+                    gstart.push_back((int) gent.size());
+                }
+                const std::vector<int> ng = {(int) gp.size()};
+                sets.push_back({dev_copy(plan), dev_copy(gp), dev_copy(gstart), dev_copy(gent), dev_copy(ng)});
+            }
+            std::vector<float> pw((size_t) c.T * 8, 1.0f / k);
+            float* d_pw = dev_copy(pw);
+            float* d_x = dev_copy(rand_x(c.T * E));
+            float *d_h = nullptr, *d_part = nullptr, *d_out = nullptr;
+            CK(cudaMalloc(&d_h, (size_t) c.T * 8 * F * sizeof(float)));
+            CK(cudaMalloc(&d_part, (size_t) c.T * 8 * E * sizeof(float)));
+            CK(cudaMalloc(&d_out, (size_t) c.T * E * sizeof(float)));
+            auto call = [&](const Set& st) {
+                ex::WinArgs w;
+                w.grp_ptr = st.gp;
+                w.grp_start = st.gs;
+                w.grp_ent = st.ge;
+                w.n_groups = st.ng;
+                w.plan_ptr = st.plan;
+                w.plan_w = d_pw;
+                w.x = d_x;
+                w.x_stride = E;
+                w.h = d_h;
+                w.part = d_part;
+                w.out = d_out;
+                w.out_stride = E;
+                w.lay = lay;
+                w.T = c.T;
+                w.k = k;
+                w.n_embd = E;
+                w.n_ff = F;
+                w.limit = 10.0f;
+                if (!ex::win_experts(w, 0)) ++g_fail;
+            };
+            auto timed = [&](auto&& one) {
+                for (int i = 0; i < 3; ++i) one(i);
+                CK(cudaEventRecord(ev0, 0));
+                for (int i = 0; i < iters; ++i) one(i);
+                CK(cudaEventRecord(ev1, 0));
+                CK(cudaEventSynchronize(ev1));
+                float ms = 0.0f;
+                CK(cudaEventElapsedTime(&ms, ev0, ev1));
+                return ms / iters;
+            };
+            const float cold = timed([&](int i) { call(sets[(size_t) (i % NS)]); });
+            const float hot = timed([&](int) { call(sets[(size_t) NS]); });
+            const int roof_blocks = prop.multiProcessorCount * 8;
+            const float roof = timed([&](int i) {
+                read_roof_kernel<<<roof_blocks, 256>>>((const uint4*) (d_all + (size_t) (i % NS) * c.G * at),
+                                                       (size_t) c.G * at / 16, d_sink);
+            });
+            call(sets[0]);
+            CK(cudaDeviceSynchronize());
+            const std::vector<float> o = host_copy(d_out, (size_t) c.T * E);
+            uint64_t hsh = 1469598103934665603ull;
+            for (float v : o) {
+                uint32_t u;
+                std::memcpy(&u, &v, 4);
+                hsh = (hsh ^ u) * 1099511628211ull;
+            }
+            const double bytes = (double) c.G * (double) tr_bytes, gbs = bytes / cold / 1e6,
+                         roof_gbs = (double) c.G * (double) at / roof / 1e6;
+            std::printf("  bench win K%-3s T%d h%d G%2d: %7.3f ms  %6.1f us an expert  %4.0f GB/s = %3.0f %% of the read "
+                        "%4.0f GB/s  hot %7.3f ms (%3.0f %%)  bits %016llx\n",
+                        kname(k2).c_str(), c.T, c.h, c.G, cold, 1000.0 * cold / c.G, gbs, 100.0 * gbs / roof_gbs,
+                        roof_gbs, hot, 100.0 * hot / cold, (unsigned long long) hsh);
+            for (Set& st : sets)
+                for (void* p : {(void*) st.plan, (void*) st.gp, (void*) st.gs, (void*) st.ge, (void*) st.ng}) cudaFree(p);
+            for (void* p : {(void*) d_pw, (void*) d_x, (void*) d_h, (void*) d_part, (void*) d_out}) cudaFree(p);
+        }
+        cudaFree(d_all);
+    }
+    cudaEventDestroy(ev0);
+    cudaEventDestroy(ev1);
+    cudaFree(d_sink);
+}
+
 // --bench-mv: one decode token's dense GEMVs at DeepSeek-V4.1's geometry, 6-bit (K2 12, mul1) as the 3.5 bpw pack's
 // attention and shared expert: us a call, the trellis read rate, and a checksum of the outputs' bits (equal before and
 // after a kernel change that keeps the bits)
@@ -1886,10 +2058,117 @@ void bench_mv() {
     std::printf("  bench mv: %.3f ms a layer's token (x40 for the model)\n", tot_us / 1000.0);
 }
 
+// --bench-set: a prompt chunk's routed experts on one tensor-parallel member at DeepSeek-V4.1's geometry (5120 -> its
+// 1152 of 2304 -> 5120, mul1, K 2 and 2.5 as turboderp's 2.25 bpw): BENCH_SET_EXPERTS (default 16) experts of
+// BENCH_SET_ROWS rows each (default 256: a 16K chunk's 6 of 384), set_gate_up + set_down - the ms a call, the us an
+// expert, and the outputs' bits (equal before and after a change that keeps the bits; EXL3_WMMA_V2 / EXL3_WMMA_ROWS
+// pick the kernels).  BENCH_SET_K2: one K2 (default 4 and 5).
+void bench_set() {
+    auto env_int = [](const char* n, int d) {
+        const char* v = std::getenv(n);
+        return v != nullptr && *v ? std::atoi(v) : d;
+    };
+    const int E = 5120, F = 1152, NE = std::max(1, env_int("BENCH_SET_EXPERTS", 16)),
+              R = std::max(1, env_int("BENCH_SET_ROWS", 256)), iters = 10, T = 4096;
+    std::vector<int> k2s = {4, 5};
+    if (env_int("BENCH_SET_K2", 0) > 0) k2s = {env_int("BENCH_SET_K2", 0)};
+    const char* v2 = std::getenv("EXL3_WMMA_SHAPE");
+    const char* nr = std::getenv("EXL3_WMMA_ROWS");
+    std::printf("  bench set: %d experts x %d rows, EXL3_WMMA_SHAPE=%s EXL3_WMMA_ROWS=%s\n", NE, R, v2 ? v2 : "unset",
+                nr ? nr : "unset");
+    for (const int k2 : k2s) {
+        ex::ExpertLayout lay;
+        lay.cb = 2;
+        size_t at = 0;
+        for (int r = 0; r < 3; ++r) {
+            const int k = r < 2 ? E : F, n = r < 2 ? F : E;
+            lay.k2[r] = k2;
+            lay.trellis[r] = at;
+            at += ex::trellis_bytes_k2(k, n, k2);
+            lay.suh[r] = at;
+            at += 2 * (size_t) k;
+            lay.svh[r] = at;
+            at += 2 * (size_t) n;
+        }
+        const size_t stride = (at + 255) / 256 * 256;
+        std::vector<uint8_t> blob(stride);
+        for (int r = 0; r < 3; ++r) {
+            const HostMat p = make_mat(r < 2 ? E : F, r < 2 ? F : E, k2, 2);
+            std::memcpy(&blob[lay.trellis[r]], p.tr.data(), p.tr.size() * 4);
+            std::memcpy(&blob[lay.suh[r]], p.suh.data(), p.suh.size() * 2);
+            std::memcpy(&blob[lay.svh[r]], p.svh.data(), p.svh.size() * 2);
+        }
+        uint8_t* d_blob = nullptr;
+        CK(cudaMalloc(&d_blob, (size_t) NE * stride));
+        CK(cudaMemcpy(d_blob, blob.data(), stride, cudaMemcpyHostToDevice));
+        for (int e = 1; e < NE; ++e) CK(cudaMemcpy(d_blob + (size_t) e * stride, d_blob, stride, cudaMemcpyDeviceToDevice));
+        std::vector<int> bounds = {0}, row_tok;
+        for (int e = 0; e < NE; ++e) {
+            for (int j = 0; j < R; ++j) row_tok.push_back((e * 7 + j * 13) % T);
+            bounds.push_back((int) row_tok.size());
+        }
+        const int rows = (int) row_tok.size();
+        float* d_x = dev_copy(rand_x(T * E));
+        int* d_bounds = dev_copy(bounds);
+        int* d_rows = dev_copy(row_tok);
+        uint16_t* d_h = nullptr;
+        float* d_out = nullptr;
+        CK(cudaMalloc(&d_h, (size_t) rows * F * 2));
+        CK(cudaMalloc(&d_out, (size_t) rows * E * 4));
+        ex::SetArgs sa;
+        sa.wbase = d_blob;
+        sa.stride = stride;
+        sa.lay = lay;
+        sa.n_exp = NE;
+        sa.bounds = d_bounds;
+        sa.max_rows = R;
+        sa.n_embd = E;
+        sa.n_ff = F;
+        sa.limit = 10.0f;
+        auto run = [&] {
+            ex::set_gate_up(sa, d_x, E, d_rows, d_h, F, 0);
+            ex::set_down(sa, d_h, F, d_out, E, 0);
+        };
+        run();
+        run();
+        cudaEvent_t a, b;
+        CK(cudaEventCreate(&a));
+        CK(cudaEventCreate(&b));
+        CK(cudaEventRecord(a, 0));
+        for (int i = 0; i < iters; ++i) run();
+        CK(cudaEventRecord(b, 0));
+        CK(cudaEventSynchronize(b));
+        float ms = 0.0f;
+        CK(cudaEventElapsedTime(&ms, a, b));
+        ms /= iters;
+        const std::vector<float> o = host_copy(d_out, (size_t) rows * E);
+        uint64_t hsh = 1469598103934665603ull;
+        for (float v : o) {
+            uint32_t u;
+            std::memcpy(&u, &v, 4);
+            hsh = (hsh ^ u) * 1099511628211ull;
+        }
+        std::printf("  bench set K%-3s %2d x %4d rows: %8.3f ms  %7.1f us an expert  %6.0f prompt rows/ms  bits %016llx\n",
+                    kname(k2).c_str(), NE, R, ms, 1000.0 * ms / NE, rows / ms, (unsigned long long) hsh);
+        cudaEventDestroy(a);
+        cudaEventDestroy(b);
+        for (void* p : {(void*) d_blob, (void*) d_x, (void*) d_bounds, (void*) d_rows, (void*) d_h, (void*) d_out})
+            cudaFree(p);
+    }
+}
+
 int main(int argc, char** argv) {
+    if (argc > 1 && std::string(argv[1]) == "--bench-set") {
+        bench_set();
+        return g_fail != 0 || ex::launch_errors() != 0;
+    }
     if (argc > 1 && std::string(argv[1]) == "--bench-mv") {
         bench_mv();
         return 0;
+    }
+    if (argc > 1 && std::string(argv[1]) == "--bench-win") {
+        bench_win();
+        return g_fail != 0;
     }
     if (argc > 1 && std::string(argv[1]) == "--bench") {
         bench_moe();

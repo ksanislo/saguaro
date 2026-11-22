@@ -25,6 +25,7 @@
 #include "ds4_gguf_cpu.hpp"
 #include "ds4_iq.cuh"
 #include "ds4_kernels.cuh"
+#include "ds4_peer_cuda_compat.cuh"  // (the HIP names the peer all-reduce uses, on CUDA)
 #include "ds4_lt.hpp"
 #include "ds4_marks.hpp"
 #include "ds4_markov_q8.hpp"
@@ -32,6 +33,7 @@
 #include "ds4_os.hpp"
 #include "ds4_pcie.cuh"
 #include "ds4_pcie.hpp"
+#include "../core/vram_late.hpp"
 #include "ds4_q6k.cuh"
 #include "ds4_pool.hpp"
 #include "ds4_path_policy.hpp"
@@ -610,6 +612,10 @@ struct Dev {
     cudaEvent_t hc_go = nullptr, hc_done = nullptr;
     unsigned* hc_cnt = nullptr;   // (DS4_HC_MIX_SPLIT) hc_mix_split's counters: kWin for st, then kWin for st2
     size_t free0 = 0, total = 0, weights = 0, experts = 0, caches = 0, scratch = 0;
+    // (#1026) the VRAM this PC's start and requests allocate after the experts' plan (measured, kept in
+    // <pack>/vram-late.txt): kept free beside the reserve, so the reserve is what stays free; late_kept: the file's
+    // figure, fr_min: the least free VRAM this run has seen
+    size_t late = 0, late_kept = 0, fr_min = ~(size_t) 0;
     // (the Monitor's map: the prompt chunks' buffers, out of scratch; of the weights, the copies a group's members
     // each hold of the tensors they do not split - what tensor parallel costs beyond one copy, its members' share)
     size_t prompt = 0, tp_w = 0;
@@ -2136,6 +2142,7 @@ struct Model::Impl {
     // between requests (the serve loop, the CLI's prompt): the switch back on, when the page cache lost most of what
     // the last answer left in it
     void begin_request() {
+        late_check(false);   // (#1026: what the requests before allocated after the plan - their restore points ...)
         if (!disk_skip_auto) return;
         SkipAuto& a = sk_auto;
         ++a.requests;
@@ -2217,12 +2224,12 @@ struct Model::Impl {
     std::vector<std::array<uint8_t*, kMaxNH>> ram_part;   // slot -> its parts
     std::vector<std::array<size_t, 4>> cp_lay;       // layer -> part offsets of gate, up, down rows; a part's bytes
     std::vector<int> copy_spare;                      // layer -> its spare slot (-1: none)
-    // MAYA_DS4_COPY_SWAP=1 (copy mode, opt-in; read as STRATA_DS4_COPY_SWAP, DS4_COPY_SWAP too): the copies follow the routes, as the RAM tier's do. DISK_SKIP_W never computes
+    // SAGUARO_DS4_COPY_SWAP=1 (copy mode, opt-in; read as STRATA_DS4_COPY_SWAP, DS4_COPY_SWAP too): the copies follow the routes, as the RAM tier's do. DISK_SKIP_W never computes
     // an expert it leaves out, so its pages never come off the SSD and it is left out wherever it is picked light, all
     // through a conversation; but its heat counts those picks too. A layer's hottest expert read from the files takes
-    // the place of its coldest copy when it beats it by MAYA_DS4_COPY_SWAP_MARGIN x + 1 (1.25): read by a thread of its own
+    // the place of its coldest copy when it beats it by SAGUARO_DS4_COPY_SWAP_MARGIN x + 1 (1.25): read by a thread of its own
     // into the layer's free slot, switched between windows, the coldest's slot then the free one. One move at a time,
-    // at most one every MAYA_DS4_COPY_SWAP_EVERY tokens (8). The copies keep their RAM (a slot a layer more), so nothing else
+    // at most one every SAGUARO_DS4_COPY_SWAP_EVERY tokens (8). The copies keep their RAM (a slot a layer more), so nothing else
     // leaves the page cache for them. (The idea: Abyss's RAM fill for its disk tail skip - zephel01/Abyss v1.3.46,
     // issue #8 there.)
     static const char* cs_env(const char* name) {   // SAGUARO_DS4_<name> first, else the DS4_<name> itself
@@ -2951,7 +2958,30 @@ struct Model::Impl {
         if (cudaDeviceGetPCIBusId(bus, (int) sizeof(bus), id) != cudaSuccess) return 0;
         std::string b = bus;
         for (char& ch : b) ch = (char) std::tolower((unsigned char) ch);
-        std::error_code ec;
+        // BAR1 from line 2 of the "resource" table (start end flags, in hex - what lspci reports; #798): the size of the
+        // resource1 file is only an mmap handle's and read 256 MiB on a 32 GiB BAR
+        {
+            std::ifstream rt("/sys/bus/pci/devices/" + b + "/resource");
+            std::string line;
+            unsigned long long lo = 0, hi = 0, fl = 0;
+            if (std::getline(rt, line) && std::getline(rt, line) &&
+                std::sscanf(line.c_str(), "%llx %llx %llx", &lo, &hi, &fl) == 3 && lo != 0 && hi != 0 && hi > lo)
+                return (size_t) (hi - lo + 1);
+            // (#809: on AMD the VRAM window is BAR0, a 64-bit BAR whose upper half is line 2 and reads as zeros: the
+            // largest of the six BARs then)
+            if (rt.good() || rt.eof()) {
+                rt.clear();
+                rt.seekg(0);
+                size_t best = 0;
+                for (int i = 0; i < 6 && std::getline(rt, line); ++i) {
+                    lo = hi = fl = 0;
+                    if (std::sscanf(line.c_str(), "%llx %llx %llx", &lo, &hi, &fl) == 3 && lo != 0 && hi > lo)
+                        best = std::max(best, (size_t) (hi - lo + 1));
+                }
+                if (best != 0) return best;
+            }
+        }
+        std::error_code ec;   // (no table, or it does not parse: the file size, as before)
         const auto sz = std::filesystem::file_size("/sys/bus/pci/devices/" + b + "/resource1", ec);
         return ec ? 0 : (size_t) sz;   // (unknown, or not Linux: 0 - the host-mapped rows)
     }
@@ -2963,6 +2993,11 @@ struct Model::Impl {
         // (a member with a small BAR1 - 256 MiB, no ReBAR - takes the copy engines' P2P but not the kernels' loads
         // and stores: ar2_kernel spun forever on a pair of them, whichever side held the buffers, even 64 KB of them)
         bool reach = true;
+#if defined(STRATA_USE_HIP)
+        // (#809: with the BAR read right, AMD cards engage the peer buffers and the first request hangs in ar2_kernel on
+        // a 2x RX 7900 XTX pair; until that is understood they stay host-mapped, as they did while the BAR read as 0)
+        reach = false;
+#endif
         for (int m : G.mem) {
             int can = 0;
             if (bar1_bytes(devs[(size_t) m].id) < ((size_t) 1 << 30)) reach = false;
@@ -2974,7 +3009,7 @@ struct Model::Impl {
             std::string m;
             for (int k : G.mem) m += " CUDA" + std::to_string(devs[(size_t) k].id) + " BAR1 " +
                                      std::to_string(bar1_bytes(devs[(size_t) k].id) >> 20) + " MiB";
-            std::fprintf(stderr, "saguaro ds4: DS4_AR_P2P: the group%s stays host-mapped (BAR1 under 1 GiB, or no peer access)\n", m.c_str());
+            std::fprintf(stderr, "saguaro ds4: DS4_AR_P2P: the group%s stays host-mapped (BAR1 under 1 GiB, no peer access, or AMD)\n", m.c_str());
         }
         if (!reach) return hmap(p, n, err);
         // placed at the load's end (p2p_place): a peer enabled while the load still allocates and calibrates left
@@ -3883,7 +3918,7 @@ struct Model::Impl {
         // each start measures its own and keeps them to itself (a pack that must not change: a run's own store instead)
         const char* lt_store = std::getenv("SAGUARO_DS4_LT_STORE");
         if (lt_store == nullptr) lt_store = std::getenv("DS4_LT_STORE");
-        lt::set_store(lt_store != nullptr ? lt_store : (o.pack + "/lt-picks.txt").c_str());
+        lt::set_store(lt_store != nullptr ? lt_store : (o.pack + "/lt-picks.txt").c_str(), "SAGUARO_DS4_LT_STORE");
         g.from(pk);
         if (g.dim == 0 || g.nl == 0 || (int) g.ratios.size() < g.nl) {
             err = o.pack + "/ds4.txt: incomplete geometry";
@@ -3948,6 +3983,7 @@ struct Model::Impl {
             }
             CK(mem_info(&d.free0, &d.total));
         }
+        late_read();   // (#1026: what this PC's start and requests took after the plan before - kept free beside it)
         // abliteration: the direction read once, a copy on every device (projected out at each hc_post: ablate())
         if (!o.ablate.empty() && !o.vision_only) {
             abl_scale = o.ablate_scale;
@@ -4219,7 +4255,7 @@ struct Model::Impl {
                 (n.find(".ffn.experts.") != std::string::npos ? exp_b : other_b) += (double) kt.second.bytes;
             }
             for (const Dev& d : devs)
-                room += std::max(0.0, (double) d.free0 - (double) ((size_t) o.reserve_mib << 20) -
+                room += std::max(0.0, (double) d.free0 - (double) keep_b(d) -
                                           (prompt_par ? 1.5 : 0.4) * (1 << 30)) *
                         o.vram_experts;
             file_experts = exp_b - std::max(0.0, room - other_b) + (double) ram_margin() > (double) ram_avail();
@@ -4250,7 +4286,7 @@ struct Model::Impl {
                 (n.find(".ffn.experts.") != std::string::npos ? exp_b : other_b) += (double) kt.second.bytes;
             }
             for (const Dev& d : devs)
-                room += std::max(0.0, (double) d.free0 - (double) ((size_t) o.reserve_mib << 20) - 1.5 * (1 << 30)) *
+                room += std::max(0.0, (double) d.free0 - (double) keep_b(d) - 1.5 * (1 << 30)) *
                         o.vram_experts;
             const double cpu_share = exp_b > 0 ? 1.0 - std::min(1.0, std::max(0.0, room - other_b) / exp_b) : 0.0;
             chunk = cpu_share >= 0.4 ? 8192 : 4096;
@@ -4351,14 +4387,14 @@ struct Model::Impl {
             l.dense_bytes = b;
         }
         const size_t head_b = mat_bytes("head") + (size_t) g.vocab * 4 + (16u << 20);
-        const size_t per_dev_fixed = (size_t) o.reserve_mib << 20;
+        // (each device's reserve: keep_b - the asked one plus what this PC's start measured it takes after the plan)
         const size_t kv_per_src_dev = 0;   // counted after the split
         (void) kv_per_src_dev;
         std::vector<double> avail(groups.size(), 0.0);
         double avail_sum = 0;
         for (size_t gi = 0; gi < groups.size(); ++gi) {
             for (int m : groups[gi].mem)
-                avail[gi] += std::max(0.0, (double) devs[(size_t) m].free0 - (double) per_dev_fixed - 400.0 * (1 << 20));
+                avail[gi] += std::max(0.0, (double) devs[(size_t) m].free0 - (double) keep_b(devs[(size_t) m]) - 400.0 * (1 << 20));
             avail_sum += avail[gi];
         }
         double need_sum = (double) head_b;
@@ -4392,7 +4428,7 @@ struct Model::Impl {
                     const int nm = (int) groups[(size_t) gi].mem.size();
                     double mn = 1e300;
                     for (int m : groups[(size_t) gi].mem)
-                        mn = std::min(mn, std::max(0.0, (double) devs[(size_t) m].free0 - (double) per_dev_fixed -
+                        mn = std::min(mn, std::max(0.0, (double) devs[(size_t) m].free0 - (double) keep_b(devs[(size_t) m]) -
                                                             400.0 * (1 << 20) - 1.1 * (1 << 30)));   // (the chunk's buffers)
                     cap[(size_t) gi] = mn * nm;
                 }
@@ -4508,7 +4544,7 @@ struct Model::Impl {
                 }
             }
             const Dev& d = devs[di];
-            const double room = (double) d.free0 - (double) ((size_t) o.reserve_mib << 20);
+            const double room = (double) d.free0 - (double) keep_b(d);
             if (!whole || need <= 0 || need <= room) continue;
             char msg[1024];
             std::snprintf(msg, sizeof msg,
@@ -4780,28 +4816,36 @@ struct Model::Impl {
                 if (!gmap(G, G.arb.pflags, (size_t) G.arb.nm * G.arb.slots * kAr2Blocks * 16, err)) return false;
                 G.arb.ar2 = ar2();
             }
-            // DS4_AR2_DECODE=1 (unset: as before): the decode windows' all-reduces of a group of two (G.ar: the
-            // attention output's and the MoE's, a window's rows) in ar2_kernel too - its exact mode only (1: member 0's
-            // partial plus member 1's, ar_sum_kernel's bits), one launch where xfer_put and ar_sum_kernel were two, the
-            // other's rows read 16 bytes a lane.  Its own progress words: G.arb was copied from G.ar before, so it
-            // shares none of them
-            if (G.ar.nm == 2 && ar2_decode()) {
+            // DS4_AR2_DECODE=1 / 2 (unset: as before): the decode windows' all-reduces of a group of two (G.ar: the
+            // attention output's and the MoE's, a window's rows) in ar2_kernel too, one launch where xfer_put and
+            // ar_sum_kernel were two, the other's rows read 16 bytes a lane.  1: exact (member 0's partial plus member
+            // 1's, ar_sum_kernel's bits); 2: FP16 on the wire, as DS4_AR2=2 (both partials rounded alike, summed in F32
+            // in member order, so the members' copies stay equal; half the bytes over host-mapped rows).  Its own
+            // progress words: G.arb was copied from G.ar before, so it shares none of them
+            if (G.ar.nm == 2 && ar2_decode() > 0) {
                 if (!gmap(G, G.ar.pflags, (size_t) G.ar.nm * G.ar.slots * kAr2Blocks * 16, err)) return false;
-                G.ar.ar2 = 1;
+                G.ar.ar2 = ar2_decode();
             }
         }
         if (ar2() < 0) {
             err = "DS4_AR2 takes 0, 1 or 2";
             return false;
         }
-        if (ar2_decode()) {
+        if (ar2_decode() < 0) {
+            err = "DS4_AR2_DECODE takes 0, 1 or 2";
+            return false;
+        }
+        if (ar2_decode() > 0) {
             std::string on;
             for (const Group& G : groups)
                 if (G.ar.ar2 > 0)
                     for (int m : G.mem) on += (on.empty() ? "CUDA" : ", CUDA") + std::to_string(devs[(size_t) m].id);
             std::fprintf(stderr, "%s%s%s\n", on.empty() ? "saguaro ds4: DS4_AR2_DECODE: no group of two - not used" :
                                                        "saguaro ds4: DS4_AR2_DECODE: the decode windows' all-reduces on ",
-                         on.c_str(), on.empty() ? "" : " in one launch, the other member's rows read 16 bytes a lane; "
+                         on.c_str(), on.empty() ? "" : ar2_decode() == 2 ?
+                                                       " in one launch, the other member's rows read 16 bytes a lane; "
+                                                       "FP16 on the wire (both partials rounded, summed in F32 in member order)" :
+                                                       " in one launch, the other member's rows read 16 bytes a lane; "
                                                        "the sums bit for bit");
         }
         if (ar2() > 0) {
@@ -5028,7 +5072,7 @@ struct Model::Impl {
                 cudaSetDevice(d.id);
                 size_t fr = 0, tot = 0;
                 CK(mem_info(&fr, &tot));
-                room += std::max(0.0, (double) fr - (double) ((size_t) o.reserve_mib << 20)) * o.vram_experts;
+                room += std::max(0.0, (double) fr - (double) keep_b(d)) * o.vram_experts;
             }
             for (const Layer& l : L) all += (double) l.blob * l.n_exp;
             const double need = std::max(0.0, all - room - (double) helper_cap);   // (DS4_HELPER: its pool's)
@@ -5367,6 +5411,7 @@ struct Model::Impl {
         reset();
         blas_warm_start();
         p2p_place();
+        late_check(true);   // (#1026: what the start took after the experts' plan, against the reserve)
         return true;
     }
 
@@ -5443,6 +5488,13 @@ struct Model::Impl {
                               (int) D, c.o16, CUDA_R_16F, (int) D, &zero, c.q, CUDA_R_32F, (int) nc, CUBLAS_COMPUTE_32F,
                               CUBLAS_GEMM_DEFAULT_TENSOR_OP) == CUBLAS_STATUS_SUCCESS;
         }
+#if defined(STRATA_USE_HIP)
+        if (ok && nc >= 128 && nc * R <= qn && prompt_f16(devs[di])) {   // (DS4_PROMPT_F16: its FP16-out kernels too)
+            ok = cublasGemmEx(c.blas, CUBLAS_OP_T, CUBLAS_OP_N, (int) nc, (int) R, (int) D, &one, c.w16, CUDA_R_16F, (int) D,
+                              c.o16, CUDA_R_16F, (int) D, &zero, c.q, CUDA_R_16F, (int) (2 * nc), CUBLAS_COMPUTE_32F,
+                              CUBLAS_GEMM_DEFAULT_TENSOR_OP) == CUBLAS_STATUS_SUCCESS;
+        }
+#endif
         if (ok && nix >= 1 && nix * R <= qn) {   // the indexer's FP16 weights (gemm_f16w's shape)
             ok = cudaMemsetAsync(c.w16, 0, nix * D * 2, s) == cudaSuccess &&
                  cudaMemsetAsync(c.o16, 0, R * D * 2, s) == cudaSuccess &&
@@ -5528,7 +5580,7 @@ struct Model::Impl {
             const double rows = (double) lay_chunk(tc, C, nullptr, 2);
             bool ok = true;
             for (const Dev& d : devs) {
-                const double room = std::max(0.0, (double) d.free0 - (double) ((size_t) o.reserve_mib << 20)) * o.vram_experts -
+                const double room = std::max(0.0, (double) d.free0 - (double) keep_b(d)) * o.vram_experts -
                                     other_b / (double) devs.size() - 0.6e9;
                 ok = ok && rows <= room / 2.0;
             }
@@ -5784,7 +5836,7 @@ struct Model::Impl {
                 size_t fr = 0, tot = 0;
                 CK(mem_info(&fr, &tot));
                 const double room =
-                    std::max(0.0, (double) fr - (double) ((size_t) o.reserve_mib << 20)) * o.vram_experts;
+                    std::max(0.0, (double) fr - (double) keep_b(d)) * o.vram_experts;
                 c.ring_stride = stride;
                 if (rm == nullptr || rm[0] == '\0') {
                     const double link = link_h2d(d);
@@ -6006,6 +6058,35 @@ struct Model::Impl {
         return on;
     }
 
+#if defined(STRATA_USE_HIP)
+    // SAGUARO_DS4_PROMPT_F16=1: the prompt's dense GEMMs FP16 in and FP16 out on gfx103x (RDNA 2), widened in place.  rocBLAS
+    // is tuned there only for FP16 out (37.7 TFLOPS on an RX 6900 XT, rocBLAS 5.6); FP16 in, FP32 out is a generic fallback
+    // (5.6 TFLOPS; both Strata's bench/results/2026-10-04-rdna2-fp16-prompt).  Not bit-identical: each output is rounded to
+    // FP16 before it is widened.  SAGUARO_DS4_PROMPT_F16_CHECK=1 counts outputs past FP16's range and says so after each prompt
+    bool prompt_f16(const Dev& d) const {
+        static const bool on = [] {
+            const char* v = ds4_env("DS4_PROMPT_F16");
+            return v != nullptr && std::atoi(v) != 0;
+        }();
+        if (!on) return false;
+        static std::atomic<signed char> known[64];   // 0: not asked yet, 1: no, 2: yes
+        if (d.id < 0 || d.id >= 64) return false;
+        int v = known[d.id].load(std::memory_order_relaxed);
+        if (v == 0) {
+            cudaDeviceProp prop{};
+            v = cudaGetDeviceProperties(&prop, d.id) == cudaSuccess && std::strncmp(prop.gcnArchName, "gfx103", 6) == 0 ? 2 : 1;
+            known[d.id].store((signed char) v, std::memory_order_relaxed);
+            if (v == 2)
+                std::fprintf(stderr, "saguaro ds4: CUDA%d (%s): the prompt's dense GEMMs FP16 in and out (DS4_PROMPT_F16; not bit-identical)\n",
+                             d.id, prop.gcnArchName);
+        }
+        return v == 2;
+    }
+    static int prompt_f16_check() {
+        static const int on = ds4_env("DS4_PROMPT_F16_CHECK") != nullptr && std::atoi(ds4_env("DS4_PROMPT_F16_CHECK")) != 0;
+        return on;
+    }
+#endif
     // y[r][c] = x16[r] . W[:, c] (+ beta y) for r < rows: W reconstructed to FP16 in whole 128-column blocks, cuBLAS
     bool gemm(Dev& d, Chunk& c, const x3::Mat& m, const uint16_t* x16, int ldx, int rows, float* y, int ldy, float beta,
               std::string& err) {
@@ -6015,6 +6096,20 @@ struct Model::Impl {
             const int nc = std::min(cols, m.n - c0);
             if (m.fmt != 0) gg::rows(nc == m.n ? m : gg::view(m, c0, nc), c.w16, false, cst(d));   // (a GGUF's)
             else x3::reconstruct_rows(nc == m.n ? m : x3::view(m, c0, nc), c.w16, false, cst(d));
+#if defined(STRATA_USE_HIP)
+            if (beta == 0.0f && prompt_f16(d)) {   // (FP16 written at the start of each FP32 row: 2 ldy halves apart)
+                const float one16 = 1.0f;
+                const cublasStatus_t f16 = cublasGemmEx(c.blas, CUBLAS_OP_T, CUBLAS_OP_N, nc, rows, m.k, &one16, c.w16, CUDA_R_16F,
+                                                        m.k, x16, CUDA_R_16F, ldx, &beta, y + c0, CUDA_R_16F, 2 * ldy,
+                                                        CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT_TENSOR_OP);
+                if (f16 != CUBLAS_STATUS_SUCCESS) {
+                    err = "cublasGemmEx (FP16 out): status " + std::to_string((int) f16);
+                    return false;
+                }
+                widen_rows_f16(y + c0, nc, (size_t) ldy, rows, cst(d), prompt_f16_check());
+                continue;
+            }
+#endif
             if (beta == 0.0f && lt::gemm(cst(d), c.w16, nc, m.k, x16, ldx, rows, y + c0, ldy)) continue;   // (AMD)
             const float one = 1.0f;
             const cublasStatus_t st = cublasGemmEx(c.blas, CUBLAS_OP_T, CUBLAS_OP_N, nc, rows, m.k, &one, c.w16, CUDA_R_16F,
@@ -6394,13 +6489,19 @@ struct Model::Impl {
     // much ahead: run_dev_chunks).  An RTX 3090 + eight RTX 5060 Ti, EXL3 3.5
     // bpw, two thirds of the experts on the CPU lane, one chunk of 530 tokens: 4.6-4.9 s -> 3.7-3.8 s, 1,040: about
     // the same, 2,050: 6.0-6.3 -> 6.7 s.  CUDA: chunks up to DS4_SKIP_UNPICKED_ROWS (1536); DS4_SKIP_UNPICKED=1 every
-    // chunk, 0 none (HIP: none unless DS4_SKIP_UNPICKED=1, as before)
+    // chunk, 0 none.  HIP: every chunk where the CPU lane's experts are read in place from the model's files (their
+    // reads, not the wait for a layer's routing, set the pace there: a Radeon 8065S, EXL3 2.9 bpw with 3,942 of 15,744
+    // experts read from the SSD, chunks of 8192 - a chunk streamed all 51 GB of them, picking ~1,100: 5-7 GB now, a 2K
+    // prompt 53.8 -> 210.0 tok/s, 8K 171.7 -> 330.1), else none, as before (kSkipFiles: run_dev_chunks decides).
+    // DS4_SKIP_UNPICKED=alt (tests, one GPU): off and on by turns, a run each - the same logits both ways
+    static constexpr int kSkipFiles = -1;
     static int skip_unpicked_rows() {
         static const int n = [] {
             const char* v = std::getenv("DS4_SKIP_UNPICKED");
+            if (v != nullptr && std::strcmp(v, "alt") == 0) return INT_MIN;
             if (v != nullptr) return std::atoi(v) != 0 ? INT_MAX : 0;
 #if defined(STRATA_USE_HIP)
-            return 0;
+            return kSkipFiles;
 #else
             const char* r = std::getenv("DS4_SKIP_UNPICKED_ROWS");
             return r != nullptr ? std::max(0, std::atoi(r)) : 1536;
@@ -7928,7 +8029,7 @@ struct Model::Impl {
             cudaSetDevice(d.id);
             size_t fr = 0, tot = 0;
             CK(mem_info(&fr, &tot));
-            const double room_e = std::max(0.0, (double) fr - (double) ((size_t) o.reserve_mib << 20)) * o.vram_experts;
+            const double room_e = std::max(0.0, (double) fr - (double) keep_b(d)) * o.vram_experts;
             const size_t need = lay_chunk(c, chunk, nullptr, 2);
             if (!mixed && room_e >= 2.0 * (double) need) continue;   // (the chunk default's bound: at most half the room)
             c.borrow = false;
@@ -7954,7 +8055,7 @@ struct Model::Impl {
                 size_t fr = 0, tot = 0;
                 CK(mem_info(&fr, &tot));
                 const double room_e =
-                    std::max(0.0, (double) fr - (double) ((size_t) o.reserve_mib << 20)) * o.vram_experts;
+                    std::max(0.0, (double) fr - (double) keep_b(d)) * o.vram_experts;
                 lend = lend && room_e >= 2.0 * (double) lay_chunk(*chunks[(size_t) m], chunk, nullptr, 2);
             }
             if (!any || lend) continue;
@@ -8016,7 +8117,7 @@ struct Model::Impl {
                 cudaSetDevice(devs[(size_t) m].id);
                 size_t fr = 0, tot = 0;
                 CK(mem_info(&fr, &tot));
-                mroom.push_back(std::max(0.0, ((double) fr - (double) ((size_t) o.reserve_mib << 20))) * o.vram_experts);
+                mroom.push_back(std::max(0.0, ((double) fr - (double) keep_b(devs[(size_t) m]))) * o.vram_experts);
                 own.push_back(mroom.back());
                 charged = charged || commit_charged(devs[(size_t) m]);
             }
@@ -9275,6 +9376,86 @@ struct Model::Impl {
     // 0 of every pick count streamed) decoded 17-19% slower with it.  At the start it is off when the pack's times file
     // says this GPU's PCIe lane streamed nothing at an earlier start (its "lane off") or the lane is off (DS4_STREAM=0);
     // else on until the load's plan (one_gpu_plan, after the lane's timing) finds that nothing streams
+    // it) takes the free VRAM less the reserve - but the start allocates more after the plan (the prompt path's
+    // GEMM workspaces, the CPU lane's and the light sets' scratch, graphs, a request's restore points ...), and that
+    // came out of the reserve: on an 8 GB card the reserve was gone by the first request, whatever its size, and a
+    // request's small allocations failed.  So what this PC's start and requests take after the plan is measured
+    // (late_check: the least free VRAM once loaded and between requests, against the reserve), kept per GPU, pack, build and settings in <pack>/vram-late.txt (SAGUARO_DS4_LATE_FILE=<file>, =none:
+    // not kept), and kept free beside the reserve from the next start on (keep_b); a start that finds the reserve
+    // short says so, with what the next start keeps free.  SAGUARO_DS4_LATE_MB=<n>: n MiB a GPU instead of the
+    // measured figure (0: the reserve alone, v1.1.72's plan).
+    size_t keep_b(const Dev& d) const { return ((size_t) std::max<int64_t>(0, o.reserve_mib) << 20) + d.late; }
+    int reserve_short_mib = 0;   // (> 0: this start came out short of the reserve; the next keeps this many MiB beside it)
+    std::string late_file() const {
+        const char* f = std::getenv("SAGUARO_DS4_LATE_FILE");
+        return f == nullptr ? o.pack + "/vram-late.txt" : std::string(f) == "none" ? "" : f;
+    }
+    std::string late_key(size_t di) const {
+        return lane_dev_key((int) di) + " | late ctx " + std::to_string(o.max_context) + " seqs " +
+               std::to_string(o.seqs) + " tp " + std::to_string(o.tp) + " chunk " + std::to_string(o.prefill_chunk) +
+               " dspark " + std::to_string((int) o.dspark) + " vision " + std::to_string((int) o.vision) + " share " +
+               std::to_string((int) (o.vram_experts * 1000));
+    }
+    void late_read() {
+        const char* fixed = ds4_env("DS4_LATE_MB");
+        const std::string f = late_file();
+        for (size_t di = 0; di < devs.size(); ++di) {
+            Dev& d = devs[di];
+            if (fixed != nullptr) {
+                d.late = (size_t) std::max(0LL, std::atoll(fixed)) << 20;
+            } else if (!f.empty()) {
+                const std::string v = pcie::cal_get(f, late_key(di));
+                d.late_kept = v.empty() ? 0 : (size_t) std::max(0LL, std::atoll(v.c_str())) << 20;
+                // (the default reserve, not asked for: v1.1.72's plan wherever it holds what the run takes after the
+                //  plan with 128 MiB to spare - only a PC whose default reserve it uses up keeps more free)
+                d.late = vramlate::kept_for(d.late_kept, (size_t) std::max<int64_t>(0, o.reserve_mib) << 20,
+                                            o.reserve_given);
+            }
+            if (d.late > 0)
+                std::fprintf(stderr, "saguaro ds4: CUDA%d keeps %zu MiB free beside the %lld MiB reserve: what this PC's start "
+                                     "and requests allocate after the experts' plan%s\n", d.id, d.late >> 20,
+                             (long long) o.reserve_mib, fixed != nullptr ? " (SAGUARO_DS4_LATE_MB)" : " (measured before)");
+        }
+    }
+    // once loaded (`loaded`) and between requests: the least free VRAM this run has seen against the reserve - the
+    // figure the next start keeps beside it is this start's plus what is short (less what is over), at most a quarter
+    // of the card (not another program's), in steps of 32 MiB; written when it moves by 32 MiB or more, and a reserve
+    // found short is said (once a step)
+    void late_check(bool loaded) {
+        if (ds4_env("DS4_LATE_MB") != nullptr) return;
+        int cur = 0;
+        if (cudaGetDevice(&cur) != cudaSuccess) (void) cudaGetLastError();
+        const std::string f = late_file();
+        const int64_t res = (int64_t) std::max<int64_t>(0, o.reserve_mib) << 20;
+        for (size_t di = 0; di < devs.size(); ++di) {
+            Dev& d = devs[di];
+            size_t fr = 0, tot = 0;
+            if (cudaSetDevice(d.id) != cudaSuccess || mem_info(&fr, &tot) != cudaSuccess) {
+                (void) cudaGetLastError();
+                continue;
+            }
+            if (loaded)
+                std::fprintf(stderr, "saguaro ds4: CUDA%d: %zu MiB of VRAM free with everything loaded (the reserve %lld MiB%s)\n",
+                             d.id, fr >> 20, (long long) (res >> 20),
+                             d.late > 0 ? (", " + std::to_string(d.late >> 20) + " MiB more kept beside it").c_str() : "");
+            vramlate::Gpu lg{d.late, d.late_kept, d.fr_min};   // (the engines' shared step: src/core/vram_late.hpp)
+            const vramlate::Step st = vramlate::check(lg, fr, tot, (size_t) res, o.reserve_given);
+            d.fr_min = lg.fr_min, d.late_kept = lg.kept;
+            if (!st.moved) continue;
+            const int64_t want = st.want;
+            if (st.short_)   // (late_read keeps it)
+                std::fprintf(stderr, "saguaro ds4: WARNING - CUDA%d: %zu MiB free, short of the %lld MiB reserve - the next start "
+                                     "keeps %lld MiB free beside it for what the start and the requests allocate after "
+                                     "the experts' plan%s\n", d.id, fr >> 20, (long long) (res >> 20),
+                             (long long) (want >> 20), f.empty() ? " (SAGUARO_DS4_LATE_FILE=none: not kept)" : "");
+            // (a start found short, the figure kept for the next one: the server starts the engine once more - #1026)
+            if (loaded && !f.empty() && st.short_) reserve_short_mib = std::max(reserve_short_mib, (int) (want >> 20));
+            if (!f.empty())
+                pcie::cal_put(f, late_key(di), std::to_string(want >> 20),
+                              [](const std::string& a, const std::string& b) { return os::replace_file(a, b); });
+        }
+        cudaSetDevice(cur);
+    }
     std::string lane_file() const {   // the PCIe lane's times file ("": none)
         const char* cf = std::getenv("DS4_LANE_CAL");
         return cf == nullptr ? o.pack + "/lane-times.txt" : std::string(cf) == "none" ? "" : cf;
@@ -16988,7 +17169,7 @@ struct Model::Impl {
             CK(cudaSetDevice(d.id));
             size_t fr = 0, tot = 0;
             CK(mem_info(&fr, &tot));
-            const double room = std::max(0.0, (double) fr - (double) ((size_t) o.reserve_mib << 20)) * o.vram_experts;
+            const double room = std::max(0.0, (double) fr - (double) keep_b(d)) * o.vram_experts;
             if (exp_b <= room) continue;   // (every expert of its layers fits)
             if (ln_force.empty() &&
                 pcie::baseline_lane_off(ln_force, pcie::cal_get(ln_file, lane_dev_key((int) di) + " | lane"))) continue;
@@ -18959,7 +19140,7 @@ struct Model::Impl {
     // DS4_AR2=1 / 2 (0 / unset: off): a group of two's chunk all-reduces - the attention output's and the MoE's - in
     // ar2_kernel: the put and the sums pipelined in pieces, the other member's rows read 16 bytes a lane.  1:
     // ar_sum_kernel's sums bit for bit; 2: FP16 on the wire (both partials rounded, summed in F32 in member order).
-    // Decode's all-reduces (G.ar) never take it.  Another value: the load refuses (-1)
+    // Decode's all-reduces (G.ar) take DS4_AR2_DECODE's instead.  Another value: the load refuses (-1)
     static int ar2() {
         static const int v = [] {
             const char* e = ds4_env("DS4_AR2");
@@ -18969,12 +19150,14 @@ struct Model::Impl {
         }();
         return v;
     }
-    static bool ar2_decode() {   // (DS4_AR2_DECODE: see the groups' setup)
-        static const bool on = [] {
+    static int ar2_decode() {   // (DS4_AR2_DECODE 0 / 1 / 2: see the groups' setup; another value -1, the load refuses)
+        static const int v = [] {
             const char* e = ds4_env("DS4_AR2_DECODE");
-            return e != nullptr && std::atoi(e) != 0;
+            if (e == nullptr || *e == 0) return 0;
+            const int x = std::atoi(e);
+            return (x >= 0 && x <= 2 && std::strspn(e, "0123456789") == std::strlen(e)) ? x : -1;
         }();
-        return on;
+        return v;
     }
 #if defined(STRATA_USE_HIP) || defined(DS4_CUDA_PEER_AR)
     // Optional transport scratch is allocated only after expert placement. Failure leaves the
@@ -18996,7 +19179,13 @@ struct Model::Impl {
         }
         int original_device = 0;
         cudaGetDevice(&original_device);
-        const double deadline = now_ms() + 3000.0; // shared by every group, not three seconds per pair
+        // each pair's own measurement budget, from after its setup (DS4_PEER_AR_PROBE_MS, 3000): a slow first pair under
+        // host I/O no longer uses up the others' time
+        static const double probe_ms = [] {
+            const char* e = ds4_env("DS4_PEER_AR_PROBE_MS");
+            const double v = e ? std::atof(e) : 3000.0;
+            return v > 0 ? v : 3000.0;
+        }();
 
         for (Group& G : groups) {
             if (G.mem.size() != 2 || G.arb.nm != 2) continue;
@@ -19005,7 +19194,6 @@ struct Model::Impl {
                 std::fprintf(stderr, "saguaro ds4: peer prefill all-reduce not selected for AR2/flow group\n");
                 continue;
             }
-            if (automatic && now_ms() >= deadline) continue;
             std::array<PeerAr, 2> a{};
             auto release = [&] {
                 for (int m = 0; m < 2; ++m) {
@@ -19018,16 +19206,17 @@ struct Model::Impl {
                 }
             };
             bool ok = G.arb.stride <= size_t(INT_MAX);
+            std::string why = ok ? "" : "chunk too large";
             for (int m = 0; m < 2 && ok; ++m) {
                 Dev& d = devs[(size_t) G.mem[m]];
                 const int peer = devs[(size_t) G.mem[1-m]].id;
                 if (cudaSetDevice(d.id) != cudaSuccess) { ok = false; break; }
                 int capable = 0;
                 ok = hipDeviceCanAccessPeer(&capable, d.id, peer) == hipSuccess && capable;
-                if (!ok) break;
+                if (!ok) { why = "no peer access"; break; }
                 auto status = hipDeviceEnablePeerAccess(peer, 0);
                 ok = status == hipSuccess || status == hipErrorPeerAccessAlreadyEnabled;
-                if (!ok) break;
+                if (!ok) { why = "peer access not enabled"; break; }
                 hipGetLastError(); // consume already-enabled status, if any
                 peer_ar_preload();  // (CUDA lazy loading: load before the first spinning launch)
                 int wall_clock_khz = 0;
@@ -19040,8 +19229,11 @@ struct Model::Impl {
                 // Leave 64 MiB free; never evict experts or resize the expert pool to make tuning fit.
                 const size_t need = (automatic ? 3 : 2) * payload + (64ull << 20) +
                                    2 * kPeerArBlocks * kPeerArFlagStride * sizeof(unsigned);
-                if (hipMemGetInfo(&available, &total) != hipSuccess || available < need ||
-                    (automatic && now_ms() >= deadline)) { ok = false; break; }
+                if (hipMemGetInfo(&available, &total) != hipSuccess || available < need) {
+                    why = "GPU" + std::to_string(d.id) + " has " + std::to_string(available >> 20) + " MiB free, needs " +
+                          std::to_string(need >> 20) + (automatic ? " (auto: + the probe's input row)" : "");
+                    ok = false; break;
+                }
                 a[m].stride = G.arb.stride;
                 // bounded wait for the partner (DS4_PEER_AR_TIMEOUT_S, 60 s): two seconds timed out on a 469K-token prompt on
                 // 8x RTX 3090 - the lead (head, a drafter block, restore points) ran more than 2 s behind its partner at one
@@ -19053,10 +19245,10 @@ struct Model::Impl {
                 }();
                 a[m].timeout_ticks = uint64_t(double(wall_clock_khz) * 1000.0 * peer_timeout_s);
                 ok = hipExtMallocWithFlags((void**) &a[m].recv, 2 * a[m].stride * sizeof(float),
-                                           hipDeviceMallocFinegrained) == hipSuccess &&
+                                           hipDeviceMallocUncached) == hipSuccess &&
                      hipExtMallocWithFlags((void**) &a[m].flags,
                                            2 * kPeerArBlocks * kPeerArFlagStride * sizeof(unsigned),
-                                           hipDeviceMallocFinegrained) == hipSuccess &&
+                                           hipDeviceMallocUncached) == hipSuccess &&
                      hipMalloc((void**) &a[m].error, sizeof(unsigned)) == hipSuccess &&
                      hipMalloc((void**) &a[m].failure, sizeof(PeerArFailure)) == hipSuccess;
                 if (ok) ok = hipMemset(a[m].flags, 0, 2 * kPeerArBlocks * kPeerArFlagStride * sizeof(unsigned)) == hipSuccess &&
@@ -19066,7 +19258,8 @@ struct Model::Impl {
             }
             if (!ok) {
                 release();
-                std::fprintf(stderr, "saguaro ds4: peer prefill all-reduce unavailable; retaining host transport\n");
+                std::fprintf(stderr, "saguaro ds4: peer prefill all-reduce unavailable on GPU%d/GPU%d (%s); retaining host transport\n",
+                             devs[(size_t) G.mem[0]].id, devs[(size_t) G.mem[1]].id, why.empty() ? "setup failed" : why.c_str());
                 continue;
             }
             for (int m = 0; m < 2; ++m) {
@@ -19087,19 +19280,27 @@ struct Model::Impl {
                 }
                 const int ids[2] = {devs[(size_t) G.mem[0]].id, devs[(size_t) G.mem[1]].id};
                 const auto result = calibrate_peer(ids, G.arb, progress ? &ar2_group : nullptr, a.data(),
-                                                   int(G.arb.stride), std::max(0.0, deadline - now_ms()));
+                                                   int(G.arb.stride), probe_ms);
                 const char* selected = result.complete && result.selected == PeerTransport::peer ? "peer" :
                                        result.complete && result.selected == PeerTransport::ar2 ? "ar2" : "host";
                 std::fprintf(stderr, "PEER_AR_AUTO gpu=%d,%d floats=%zu samples=%d host_ms=%.6f ar2_ms=%.6f "
                                      "peer_ms=%.6f selected=%s elapsed_ms=%.1f complete=%d\n",
                              ids[0], ids[1], G.arb.stride, result.samples, result.ms[0], progress ? result.ms[1] : -1.0,
                              result.ms[2], selected, result.elapsed_ms, int(result.complete));
-                if (!result.quiescent || !result.valid) {
-                    // Never start inference or release buffers that a failed probe may still be reading.
-                    if (result.quiescent) { release(); if (progress) hipHostFree(progress); }
+                if (!result.quiescent) {
+                    // Never start inference or release buffers that a probe may still be reading.
                     cudaSetDevice(original_device);
-                    err = "startup transport probe failed validation or did not drain; reload required";
+                    err = "startup transport probe did not drain; reload required";
                     return false;
+                }
+                if (!result.valid || !result.complete) {
+                    // drained: nothing reads the probe's buffers any more and the host rows' flags are reset
+                    std::fprintf(stderr, "saguaro ds4: peer prefill all-reduce probe on GPU%d/GPU%d %s; keeping the host transport\n",
+                                 ids[0], ids[1], !result.valid ? "failed validation"
+                                                               : "did not finish within its budget (DS4_PEER_AR_PROBE_MS)");
+                    release();
+                    if (progress) hipHostFree(progress);
+                    continue;
                 }
                 if (result.complete && result.selected == PeerTransport::ar2) {
                     G.arb = ar2_group;
@@ -20043,9 +20244,17 @@ struct Model::Impl {
         for (const Layer& l0 : L)
             for (int m = 0; m < l0.nm && !l0.mtp; ++m)
                 if (member(l0, m).dev == di) cold += l0.host_list.size(), ++n_l;
-        const bool shallow = skip_unpicked_rows() > 0 && n_l > 0 && (size_t) c.ring_n * 2 * n_l < cold;
+        int sur = skip_unpicked_rows();
+        if (sur == kSkipFiles) sur = file_experts ? INT_MAX : 0;   // (HIP: by where the CPU lane's experts are read)
+        if (sur == INT_MIN) {   // (DS4_SKIP_UNPICKED=alt: a run without, the next with)
+            static std::atomic<unsigned> runs{0};
+            sur = runs.fetch_add(1) % 2 == 1 ? INT_MAX : 0;
+            std::fprintf(stderr, "saguaro ds4: this run's chunks stream %s (DS4_SKIP_UNPICKED=alt)\n",
+                         sur > 0 ? "only the experts their rows picked" : "every CPU-lane expert");
+        }
+        const bool shallow = sur > 0 && n_l > 0 && (size_t) c.ring_n * 2 * n_l < cold;
         S.skip_k.assign((size_t) nk, 0);
-        for (int k = 0; k < nk && !c.flow; ++k) S.skip_k[(size_t) k] = shallow || run.T[(size_t) k] <= skip_unpicked_rows();
+        for (int k = 0; k < nk && !c.flow; ++k) S.skip_k[(size_t) k] = shallow || run.T[(size_t) k] <= sur;
         for (int k = 0; k < nk && !c.flow; ++k)
             for (int il = 0; il < g.nl; ++il) {
                 if (!run.runs(k, il) || run.kv_only(k, il)) continue;   // (a long prompt's skip: no experts there)
@@ -22012,6 +22221,16 @@ struct Model::Impl {
                          now_ms() - rd_end0);
         st.layer_ms += now_ms() - tl;
         eg_stats();
+#if defined(STRATA_USE_HIP)
+        if (prompt_f16_check())   // (DS4_PROMPT_F16_CHECK: FP16's range, on every device)
+            for (Dev& dv : devs) {
+                if (!prompt_f16(dv)) continue;
+                cudaSetDevice(dv.id);
+                CK(cudaStreamSynchronize(dv.st));
+                const unsigned long long bad = widen_bad_take();
+                std::fprintf(stderr, "saguaro ds4: CUDA%d: FP16-out GEMM outputs not finite in this run: %llu\n", dv.id, bad);
+            }
+#endif
         Dev& d = devs[(size_t) head_dev];
         cudaSetDevice(d.id);
         const double th = now_ms();
@@ -24216,6 +24435,7 @@ bool Model::feed_part(const FeedPlan& plan, const int* tokens, int k0, int k1, s
 }
 int Model::prompt_chunk() const { return p_->chunk; }
 int Model::pipeline_stages() const { return std::max(1, (int) p_->groups.size()); }
+int Model::reserve_short_mib() const { return p_->reserve_short_mib; }
 void Model::set_progress(std::function<void(int64_t)> f) { p_->progress = std::move(f); }
 void Model::set_cancel(std::function<bool()> f) { p_->cancel = std::move(f); }
 void Model::set_yield(std::function<bool()> f) { p_->yield_to = std::move(f); }

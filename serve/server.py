@@ -1163,6 +1163,17 @@ class StrataEngine:
             # only after the process is reaped (a busy CI runner saw it alive right after a failed restart)
             self.ended = True
             raise RuntimeError("the engine exited before it was ready" + (f" (see {log})" if log else ""))
+        # (#1026) a start that came out short of its VRAM reserve (INFO reserve_short=<MiB>) - the engine measured
+        # what it allocates after its experts' plan and keeps that free from its next start on: started once more
+        # now, so the first start after an update or a new setting never serves with the reserve used up
+        if self.info.get("reserve_short") and not (env or os.environ).get("SAGUARO_RESERVE_RESTARTED"):
+            print(f"[saguaro] this start came out short of the VRAM reserve: the engine starts once more and keeps "
+                  f"{self.info['reserve_short']} MiB more free beside it (measured on this PC)", flush=True)
+            self.close()
+            if self.log is not subprocess.DEVNULL:
+                self.log.close()
+            self.__init__(exe, args, cwd, log, dict(env if env is not None else os.environ, SAGUARO_RESERVE_RESTARTED="1"))
+            return
         # (from PR #41, midhatn) a locally built engine can sit next to another release's BUILD.json: engines that
         # report their own version (INFO engine=, 0.1.8+) win, the manifest stays the fallback for older ones
         if self.info.get("engine"):
@@ -1176,7 +1187,7 @@ class StrataEngine:
             self._ik2_log(head)
         # the engine's stdout on a thread, so a request can wait with a timeout (heartbeats, cancel checks)
         self.lines: queue.Queue = queue.Queue()
-        threading.Thread(target=self._pump, daemon=True).start()
+        threading.Thread(target=self._pump, args=(self.proc, self.lines), daemon=True).start()
 
     def _context_cost(self, offset: int):
         """What this start's context costs in VRAM, from the GLM engine's own start lines ("CUDA0 VRAM before the
@@ -1250,8 +1261,16 @@ class StrataEngine:
         self.ended = True
         wait_gpu_release(self.proc.pid)
 
-    def _pump(self):
-        for line in self.proc.stdout:
+    def _pump(self, proc=None, lines=None):
+        # This start's process and line queue: a later start (restart) has its own.  An engine's output can close
+        # well after a new one started - GLM's link mode: the AMD GPU's helper program shares the lead's output and
+        # ends a little after it - and that late end must not mark the NEW engine ended (every request then started
+        # the engine again, about a minute each)
+        proc = proc if proc is not None else self.proc
+        lines = lines if lines is not None else self.lines
+        for line in proc.stdout:
+            if proc is not self.proc:                   # replaced: what is left of its output is nobody's
+                continue
             if line.startswith("VRAM "):
                 self._vram_line(line)
                 continue
@@ -1264,9 +1283,11 @@ class StrataEngine:
                 continue
             if self.multi and self._route(line):
                 continue
-            self.lines.put(line)
+            lines.put(line)
+        if proc is not self.proc:                       # an engine already replaced: the running one is not ended
+            return
         self.ended = True                               # its output closed: it is gone, even before the OS says so
-        self.lines.put(None)
+        lines.put(None)
         with self._routes_lock:
             for q in self._routes.values():
                 q.put(None)
@@ -8428,6 +8449,9 @@ def main() -> int:
     svc.gpu_index = (gpu_list(cfg) or [0])[0]           # the Monitor reads the card the engine runs on (issue #51)
     svc.gpu_indices = gpu_list(cfg)                     # ... or every card of a layer split (issue #112)
     svc.backend = cfg.get("backend")                    # the Monitor's GPU reader: sysfs on AMD/HIP, NVML otherwise
+    if cfg.get("backend") == "hip":                      # (Windows: the Monitor finds the engine's cards with its hipInfo)
+        from serve import telemetry
+        telemetry.HIP_BIN_DIRS = [d for d in cfg.get("lib_dirs") or [] if Path(d).is_dir()]
     svc.supervisor = os.environ.get("SAGUARO_SUPERVISOR") or supervisor_name()
     if svc.supervisor:
         print(f"[saguaro] started by {svc.supervisor}: model switching, updates, port and config changes are its own",

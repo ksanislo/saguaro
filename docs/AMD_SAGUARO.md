@@ -8,8 +8,8 @@ The state of this version (keep this table, the setup's `NO_ENGINE` list in `sag
 | --- | --- | --- |
 | GLM-5.3-Flash | `saguaro-glm` (`maya`) | builds and runs (experimental); its GPU self-tests pass on an RX 9070 XT (gfx1201, ROCm 7.1). The quant that fits a 16 GB card + 96 GB of RAM is Maya-XS (73 GB); the setup recommends the largest one that fits VRAM + RAM |
 | Qwen-3.8-Flash-Next (CYBER-FROST) | `saguaro-glm` (`maya`) | builds (the same engine as GLM); about 84 GB of VRAM + RAM |
-| DeepSeek-V4.1-Flash-1017 | `saguaro-ds4` (`maya-ds4`) | has HIP code paths, but does not compile for HIP in this version yet (being fixed) |
-| MiniMax-M3.1-Flash | `saguaro-mm3` (`maya-mm3`) | has HIP code paths, but does not compile for HIP in this version yet (being fixed) |
+| DeepSeek-V4.1-Flash-1017 | `saguaro-ds4` (`maya-ds4`) | compiles for HIP (gfx1201 checked); not yet run on an AMD GPU |
+| MiniMax-M3.1-Flash | `saguaro-mm3` (`maya-mm3`) | compiles for HIP (gfx1201 checked); not yet run on an AMD GPU |
 | Hy4-Flash | `saguaro-hy4` (`maya-hy4`) | not run on an AMD GPU yet: the setup does not offer it on AMD |
 | Inkling 2 Mini | `saguaro-ik2` | no HIP engine yet: the setup does not offer it on AMD |
 
@@ -31,6 +31,13 @@ outside `/opt/rocm`. Versioned LLVM slots, as Gentoo's
 `<root>/lib/llvm/22/bin/clang++`, are accepted too. Everything Saguaro downloads
 goes into the project or its model-data folder; setup does not install system
 packages.
+
+A distribution's own ROCm packages under `/usr` work too, including Debian's and Ubuntu's multiarch layout
+(`/usr/lib/x86_64-linux-gnu/libhipblas.so`, the compiler in `/usr/lib/llvm-<N>/bin`, the device bitcode in
+`/usr/lib/llvm-<N>/lib/clang/<N>/amdgcn/bitcode`). A ROCm older than 7 (Debian's 6.4, hipBLAS 2.x) is untested and
+refused by default; `SAGUARO_HIP_ALLOW_ROCM6=1` lets setup go on with a warning. The build then turns on hipBLAS 2's
+`HIPBLAS_V2` API and skips `hipblasSetWorkspace` (absent before hipBLAS 3). Measured that way on Debian sid
+(ROCm 6.4.3, hipBLAS 2.4) with an MI50 + MI100 layer split and a CPU without AVX2 - see the pull request.
 
 ```sh
 ./saguaro.sh --backend hip --gpu 0 --check
