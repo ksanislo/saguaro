@@ -102,3 +102,10 @@ Card runs only through /data/llm/bench/night-queue/queue.txt (IK2_NO_CLAIM=1, ca
   never clones llama.cpp over that link). Runner: /storage/llm/saguaro/amd.sh LABEL MODEL CHUNK [K=V...]
   (serve_check with vision-glm from /opt/llm/saguaro/build-vision, then bench 300 tokens at ~0 / 8K + 8K read).
   Plan: quant resident (chunk 1024, SAGUARO_IK2_RESERVE_MB=1024); UD offload on HIP (SAGUARO_IK2_OFF=1, WARM).
+
+## mortar results (RX 9070 XT 16 GB gfx1201, ROCm 7.1, HIP build of this branch)
+- (b) T4 quant (NVFP4/IQ3_XXS, 11.4 GiB experts), ctx 32768, chunk 1024, SAGUARO_IK2_RESERVE_MB=1024:
+  RESIDENT (3072 of 3072 experts, path=resident), load 1 s (page cache), VRAM 15.6-15.9 GiB of 15.9.
+  decode 300 tok: 81.7 tok/s at ~50 deep, 73.2 at 8K; read 8K 1138 tok/s (7.07 s); first token 0.42 s (50 tok).
+  serve_check (server.py, no pictures yet - mmproj downloading): 20/20 PASS (chat, thinking, tools, stops, Monitor).
+  ik2_kernels_test: 349 ok, 1 FAIL (moe_combine_conv bit-equality vs moe_combine_f32 + conv4_res) - upstream kernels.
