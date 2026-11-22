@@ -198,7 +198,7 @@ def main() -> int:
            "log": str(work / "engine.log")}
     if shutil.which("nvidia-smi") is None:   # (AMD: the server's HIP paths)
         cfg["backend"] = "hip"
-    if a.vision.exists():
+    if a.vision.exists() and (MDIR / "mmproj-BF16.gguf").exists():
         cfg["vision"] = {"exe": str(a.vision), "mmproj": str(MDIR / "mmproj-BF16.gguf"), "gpu": True}
         for kv in a.vision_set:
             k, v = kv.split("=", 1)
@@ -473,7 +473,7 @@ def main() -> int:
         time.sleep(2)
         try:
             apps = subprocess.run(["nvidia-smi", "--query-compute-apps=pid,used_memory,name", "--format=csv,noheader"],
-                                  capture_output=True, text=True, timeout=30).stdout
+                                  capture_output=True, text=True, timeout=30).stdout if shutil.which("nvidia-smi") else ""
             print("cards after exit:", smi(), "| ours left on them:",
                   [l for l in apps.splitlines() if l.split(",")[0].strip().isdigit() and int(l.split(",")[0]) in mine])
         finally:
