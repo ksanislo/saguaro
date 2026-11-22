@@ -10418,6 +10418,115 @@ int main(int argc, char** argv) {
                 std::fprintf(stderr, "saguaro serve: session dir: spill skipped (allocation failed)\n");
             }
         };
+        // SAGUARO_TURN_SAVE (on): after every turn the conversation is saved where it sits - the main session or a batch
+        // slot - without parking it: its state is captured here (the running state whole, of the K/V only what was
+        // written since the last capture) and appended to its session file by the folder's writer.
+        struct TurnHold {
+            std::shared_ptr<strata::core::SessionTurnTrack> track;
+            uint64_t seq = 0;
+            int64_t tokens = -1;            // the tokens of the last capture
+            int64_t dirty = INT64_MAX;      // the first position written since (INT64_MAX: nothing reported = unknown)
+            std::vector<int32_t> ids;
+            Clock::time_point retry{};
+            void begin(int64_t at) { dirty = std::min(dirty, at); }   // a request goes on in place from `at`
+            void reset() { track.reset(); tokens = -1; dirty = INT64_MAX; ids.clear(); seq = 0; }   // another conversation
+        };
+        TurnHold turn_main;
+        std::vector<TurnHold> turn_slot((size_t) std::max(o.batch, 0));
+        static const bool turn_save_on = [] { const char* v = std::getenv("SAGUARO_TURN_SAVE"); return v == nullptr || std::atoi(v) != 0; }();
+        static const bool turn_save_verify = [] { const char* v = std::getenv("SAGUARO_TURN_SAVE_VERIFY"); return v != nullptr && std::atoi(v) != 0; }();
+        auto turn_capture = [&](const ParkFrom& f, TurnHold& h, const std::string& label) -> bool {
+            if (!sdir || !turn_save_on || f.ids.empty()) return false;
+            const auto t0 = Clock::now();
+            std::string e;
+            try {
+                const size_t n_st = stages.size();
+                std::vector<ConvCheckpoint> disk_checks;
+                if (const ConvCheckpoint* d = strata::core::session_deepest_checkpoint(f.checks)) disk_checks.push_back(*d);
+                strata::core::ConversationCheckpointSplit dcs;
+                if (n_st > 0) dcs = strata::core::conversation_checkpoints_split(std::move(disk_checks), n_st);
+                const strata::core::ConversationView view{f.ids, f.imgs, n_st > 0 ? dcs.stage0 : disk_checks, f.cvec};
+                strata::core::SavedConversation meta;
+                std::vector<strata::core::SessionKvSource> sources;
+                std::vector<std::vector<strata::core::SessionKvSource>> stage_sources;
+                // the draft K/V where a parked image keeps it: the last stage's (or the only one's)
+                if (!strata::core::conversation_snapshot_sources(meta, sources, view, park_ss(f, 0), g,
+                        use_mtp && n_st == 0 ? park_draft(f) : nullptr, e)) {
+                    std::fprintf(stderr, "saguaro serve: session dir: turn save skipped (%s)\n", e.c_str());
+                    return false;
+                }
+                for (size_t k = 0; k < n_st; ++k) {
+                    const int dev = stages[k]->dev;
+                    const strata::core::OnDevice on(dev);
+                    const strata::core::ConversationView view_k{f.ids, f.imgs, dcs.parts[k], f.cvec};
+                    strata::core::SavedConversation part;
+                    std::vector<strata::core::SessionKvSource> ps;
+                    if (!strata::core::conversation_snapshot_sources(part, ps, view_k, park_ss(f, k + 1), g,
+                            use_mtp && k + 1 == n_st ? park_draft(f) : nullptr, e)) {
+                        std::fprintf(stderr, "saguaro serve: session dir: turn save skipped (stage CUDA%d: %s)\n", dev,
+                                     e.c_str());
+                        return false;
+                    }
+                    for (auto& src : ps) {   // read on the stage's GPU
+                        auto inner = std::move(src.read);
+                        src.read = [inner, dev](size_t part_, size_t at, void* dst, size_t n) {
+                            const strata::core::OnDevice on_(dev);
+                            return inner(part_, at, dst, n);
+                        };
+                    }
+                    meta.stage_images.push_back(std::move(part));
+                    stage_sources.push_back(std::move(ps));
+                }
+                // what is known unchanged: positions under both the last capture and everything written since, and
+                // only while this place still holds the tokens it was captured with
+                int64_t same = 0;
+                if (h.track && !h.track->broken.load() && h.tokens >= 0 && h.dirty != INT64_MAX) {
+                    const int64_t lim = std::min<int64_t>({h.tokens, h.dirty, (int64_t) h.ids.size(), (int64_t) f.ids.size()});
+                    while (same < lim && h.ids[(size_t) same] == f.ids[(size_t) same]) ++same;
+                } else {
+                    h.reset();
+                }
+                if (!h.track) h.track = std::make_shared<strata::core::SessionTurnTrack>();
+                const int64_t idx_block = strata::kernels::qsa_real_shapes().idx_block;
+                auto keep_of = [&](const std::vector<strata::core::SessionKvSource>& src, bool draft_last) {
+                    std::vector<std::array<uint64_t, 5>> out(src.size());
+                    for (size_t l = 0; l < src.size(); ++l) {
+                        const auto& k = src[l];
+                        // (the draft layer's ring is not positional: captured whole)
+                        if ((draft_last && l + 1 == src.size()) || k.cells <= 0 || k.page_size <= 0 || k.cells < same) continue;
+                        const uint64_t whole = (uint64_t) (same / k.page_size * k.page_size);
+                        for (size_t part = 0; part < 4; ++part) out[l][part] = k.sizes[part] / (uint64_t) k.cells * whole;
+                        out[l][4] = idx_block > 0 ? (uint64_t) (same / idx_block) * (uint64_t) k.idx_dim * 4 : 0;
+                    }
+                    return out;
+                };
+                std::vector<std::vector<std::array<uint64_t, 5>>> keep;
+                keep.push_back(keep_of(sources, use_mtp && n_st == 0));
+                for (size_t k = 0; k < n_st; ++k) keep.push_back(keep_of(stage_sources[k], use_mtp && k + 1 == n_st));
+                auto turn = std::make_shared<strata::core::SessionLogTurn>();
+                if (!strata::core::session_log_capture(*turn, std::move(meta), sources, stage_sources, &keep, turn_save_verify, e)) {
+                    std::fprintf(stderr, "saguaro serve: session dir: turn save skipped (%s)\n", e.c_str());
+                    h.reset();
+                    return false;
+                }
+                strata::core::SessionTurnJob job;
+                job.turn = std::move(turn);
+                job.track = h.track;
+                job.seq = ++h.seq;
+                job.base_seq = job.seq - 1;
+                job.capture_ms = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
+                job.label = label;
+                h.ids.assign(f.ids.begin(), f.ids.end());
+                h.tokens = (int64_t) f.ids.size();
+                h.dirty = INT64_MAX;
+                sdir->write_turn(std::move(job));
+                return true;
+            } catch (const std::bad_alloc&) {
+                std::fprintf(stderr, "saguaro serve: session dir: turn save skipped (allocation failed)\n");
+                h.reset();
+                return false;
+            }
+        };
         auto spill_current = [&]() {
             if (!sdir || !live_ok || live.empty() || spill_skip_rewind) return;
             spill_from(ParkFrom{live, live_imgs, checks, cvec_cached, -1});
@@ -10603,6 +10712,7 @@ int main(int argc, char** argv) {
                 const size_t snapshot_bytes = image.bytes();
                 const bool stored = conversations.put(std::move(image), held, park_clock());
                 if (stored && sdir) sdir->write(conversations.newest());   // written behind, after its delay
+                if (stored) (f.slot < 0 ? turn_main : turn_slot[(size_t) f.slot]).reset();   // (its file moves on without the track)
                 if (stored) {   // the server's log: a conversation going out, to RAM
                     std::printf("INFO sess_event=parked sess_tokens=%zu sess_bytes=%zu sess_ms=%.0f sess_why=ram\n",
                                 f.ids.size(), snapshot_bytes,
@@ -15054,14 +15164,14 @@ int main(int argc, char** argv) {
             }
         };
         auto persist_slot = [&](int b, bool from_this_slot, const std::vector<int32_t>& next, bool exiting,
-                                const char* why, bool ram = false, bool light = false) -> bool {
+                                const char* why, bool ram = false, bool light = false, bool turn = false) -> bool {
             if (!(sdir || (ram && conversations.enabled())) || b < 0 || b >= (int) bs.size()) return true;
             BSlot& sl = bs[(size_t) b];
             std::vector<const std::vector<int32_t>*> others;   // the slots saved in their turn (at exit: the kept ones)
             for (size_t c = 0; c < bs.size(); ++c)
                 if ((int) c != b && (bs[c].cached || (!exiting && bs[c].active && !bs[c].tainted && !bs[c].img)))
                     others.push_back(&bs[c].ids);
-            if (!strata::program::slot_persist_wanted(sl.cached && !sl.active, from_this_slot, sl.ids, next, others))
+            if (!turn && !strata::program::slot_persist_wanted(sl.cached && !sl.active, from_this_slot, sl.ids, next, others))
                 return true;
             std::string e = !light && pipe_inflight() ? "pipelined groups in flight" : "";
             if (light && (sl.active || sl.reading || !piped_mtp || !stage_serving)) e = "not an idle slot beside served groups";
@@ -15079,11 +15189,12 @@ int main(int argc, char** argv) {
                 if (!(batch_mtp ? slot_mtp[(size_t) b]->idle(e) : mtp.idle(e)) && e.empty()) e = "the drafter is busy";
             }
             if (!e.empty()) {
-                std::fprintf(stderr, "saguaro batch: slot %d's conversation not saved (%s)\n", b, e.c_str());
+                if (!turn) std::fprintf(stderr, "saguaro batch: slot %d's conversation not saved (%s)\n", b, e.c_str());
                 return false;
             }
-            std::fprintf(stderr, "saguaro batch: saving slot %d's conversation (%zu tokens) before %s%s\n", b,
-                         sl.ids.size(), why, light ? " (beside the groups in flight)" : "");
+            if (!turn)
+                std::fprintf(stderr, "saguaro batch: saving slot %d's conversation (%zu tokens) before %s%s\n", b,
+                             sl.ids.size(), why, light ? " (beside the groups in flight)" : "");
             static const std::vector<ImgKey> no_imgs;   // a slot with pictures is never kept
             bool ok = true;
             struct SyncScope {   // (this thread only, for the save)
@@ -15100,12 +15211,14 @@ int main(int argc, char** argv) {
                 }
             } sync_scope(light, &ls);
             try {
-                ok = park_body(ParkFrom{sl.ids, no_imgs, sl.checks, sl.cvec, b}, 0);
+                ok = turn ? turn_capture(ParkFrom{sl.ids, no_imgs, sl.checks, sl.cvec, b}, turn_slot[(size_t) b],
+                                         "slot" + std::to_string(b))
+                          : park_body(ParkFrom{sl.ids, no_imgs, sl.checks, sl.cvec, b}, 0);
             } catch (const std::bad_alloc&) {
                 err = "allocation failed";
                 ok = false;
             }
-            if (!ok) std::fprintf(stderr, "saguaro batch: slot %d's conversation not saved (%s)\n", b, err.c_str());
+            if (!ok && !turn) std::fprintf(stderr, "saguaro batch: slot %d's conversation not saved (%s)\n", b, err.c_str());
             err.clear();
             return ok;
         };
@@ -15929,6 +16042,7 @@ int main(int argc, char** argv) {
                             return refuse(fe.c_str());
                         }
                         fresh = true;
+                        turn_slot[(size_t) b].reset();   // (the slot started over: its file is written whole next)
                     }
                 }
             }
@@ -16317,6 +16431,7 @@ int main(int argc, char** argv) {
                 return AdmEnd::paused;
             }
             std::vector<ConvCheckpoint> grid = slot_grid_settle(sl.checks, j.resume, ids, j.grid_ck);   // SAGUARO_SLOT_GRID
+            if (j.yarn_mv || j.resume <= 0) turn_slot[(size_t) b].reset(); else turn_slot[(size_t) b].begin(j.resume);
             if (ckpt_pool.on())
                 for (ConvCheckpoint& c : sl.checks) ckpt_pool.give(std::move(c));
             sl = BSlot{};
@@ -16493,6 +16608,7 @@ int main(int argc, char** argv) {
                 if (resume > 0) dr.kv_restore(resume);
                 dr.set_prompt_len(n);
             }
+            if (resume <= 0) turn_slot[(size_t) b].reset(); else turn_slot[(size_t) b].begin(resume);   // (the lane read)
             if (ckpt_pool.on())
                 for (ConvCheckpoint& c : sl.checks) ckpt_pool.give(std::move(c));
             sl = BSlot{};
@@ -17006,6 +17122,7 @@ int main(int argc, char** argv) {
                 j.gparts.clear();
                 j.gpart_ok.clear();
                 std::vector<ConvCheckpoint> grid = slot_grid_settle(sl.checks, j.resume, ids, grid_new);
+                if (j.yarn_mv || j.resume <= 0) turn_slot[(size_t) b].reset(); else turn_slot[(size_t) b].begin(j.resume);
                 if (ckpt_pool.on())
                     for (ConvCheckpoint& c : sl.checks) ckpt_pool.give(std::move(c));
                 sl = BSlot{};
@@ -17589,6 +17706,26 @@ int main(int argc, char** argv) {
             }
             if (pressed) (void) strata::core::parked_block_pool_trim(0);   // (dropped entries' blocks: to the OS)
         };
+        // SAGUARO_TURN_SAVE: an idle slot whose conversation moved on since its last capture is saved where it sits
+        // (persist_slot's checks; beside groups in flight only where it can sync its own streams).
+        auto turn_tick = [&]() {
+            if (!sdir || !turn_save_on || bs.empty()) return;
+            if (conc_serving || in_prompt_read || share_live || cy_held_n > 0 || adm_active) return;
+            const bool flying = pipe_inflight();
+            if (flying && !(piped_mtp && stage_serving)) return;
+            const auto now = Clock::now();
+            for (size_t b = 0; b < bs.size(); ++b) {
+                const BSlot& sl = bs[b];
+                TurnHold& h = turn_slot[b];
+                if (sl.active || sl.reading || sl.partial || !sl.cached || sl.img || sl.tainted || (int) b == admit_slot ||
+                    adm_queued[b] || adm_paused[b] || adm_reading == (int) b || adm_stop_of[b] != nullptr || sl.ids.empty())
+                    continue;
+                if (h.tokens == (int64_t) sl.ids.size() && h.ids == sl.ids) continue;   // saved as it stands
+                if (now < h.retry) continue;
+                h.retry = now + std::chrono::milliseconds(500);
+                (void) persist_slot((int) b, false, {}, false, "its turn ended", false, flying, true);
+            }
+        };
         auto eidle_tick = [&]() -> bool {
             if (!eidle_on) return true;
             vlen_consume();   // review 4: a lend the stdin reader took is pending here too (the idle path runs the step)
@@ -17798,6 +17935,7 @@ int main(int argc, char** argv) {
                 if (!try_next_line(line)) {
                     if (!eidle_tick()) return 1;
                     park_tick();
+                    turn_tick();
                     if (!(piped ? pump(true) : batch_step())) return 1;
                     continue;
                 }
@@ -17826,6 +17964,7 @@ int main(int argc, char** argv) {
                 for (;;) {
                     if (!eidle_tick()) return 1;
                     park_tick();
+                    turn_tick();
                     {
                         std::unique_lock<std::mutex> lk(in_mu);
                         in_cv.wait_for(lk, std::chrono::seconds(1), [&] {
@@ -18258,6 +18397,7 @@ int main(int argc, char** argv) {
                         continue;
                     }
                     conversations.take_reuse();   // retained K/V described the outgoing session
+                    turn_main.reset();
                     live_ok = false;
                     // host -> device in synchronous copies of the whole state: one bounded allowance
                     blocking("transfer", bytes);
@@ -18911,9 +19051,15 @@ int main(int argc, char** argv) {
             static const bool rewind_park = [] { const char* v = std::getenv("SAGUARO_REWIND_PARK"); return v != nullptr && std::atoi(v) != 0; }();
             static const bool slot_solo = [] { const char* v = std::getenv("SAGUARO_SLOT_SOLO"); return v == nullptr || std::atoi(v) != 0; }();
             const int64_t prev_prompt_n = std::exchange(live_prompt_n, -1);
+            const int64_t turn_tokens_before = turn_main.tokens;
+            // (turn saves: the same conversation going on in place from `resume`, or another one taking the session)
+            if (!incoming && !borrow && slot_source < 0 && resume > 0 && live_ok) turn_main.begin(resume);
+            else turn_main.reset();
             const char* park_skip = nullptr;
             if (live_ok && !live.empty() && !borrow && !pin_sibling && park_worth) {
+                // (with a session folder: only when the last turn's save was captured - else the park is its save)
                 if (!rewind_park && !from_live && !incoming && slot_source < 0 &&
+                    (!sdir || (turn_save_on && turn_tokens_before == (int64_t) live.size())) &&
                     strata::program::conv_cache::own_rewind(resume, (int64_t) live.size(), prev_prompt_n, 1024))
                     park_skip = "this request rewinds its own reply (SAGUARO_REWIND_PARK)";
                 if (park_skip == nullptr && slot_solo && live_imgs.empty() && (!from_live || incoming || slot_source >= 0))
@@ -19275,6 +19421,7 @@ int main(int argc, char** argv) {
             if (use_mtp) mtp.set_prompt_len(n);
             const int64_t read_from = reread_to > 0 ? 0 : resume;
             conversations.limit_reuse(read_from);
+            turn_main.begin(read_from);
             pp_total = n;
             pp_from = read_from;
             pp_reached = read_from;
@@ -20203,6 +20350,7 @@ int main(int argc, char** argv) {
                                thw != nullptr ? "the solo picture reply" : "the solo reply", e, thw))
                     return false;
                 conversations.limit_reuse(0);
+                turn_main.reset();
                 if (!solo_yarn_rows()) { e = "no VRAM for the YaRN RoPE rows"; return false; }
                 return true;
             };
@@ -20223,6 +20371,7 @@ int main(int argc, char** argv) {
                         return 1;
                     }
                     conversations.limit_reuse(0);   // (a parked image's retained K/V was the plain one)
+                    turn_main.reset();
                 } else if (read_from == 0) {
                     for (auto* u : sx) u->rope_level = want ? 1 : 0;
                 }
@@ -21954,6 +22103,7 @@ int main(int argc, char** argv) {
                         strata::kernels::slot_rope_set(admit_slot, std::move(rr));
                     }
                     const auto tc2 = Clock::now();   // (the slot's old checkpoints freed)
+                    turn_slot[(size_t) admit_slot].reset();   // (copied in from the main session)
                     sl.active = true;
                     sl.cache0 = drive.d.cache_hits;   // the request's own expert-cache figures (the tail of its BDONE)
                     sl.look0 = drive.d.cache_hits + drive.d.cache_admitted + drive.d.cache_refused;
@@ -22080,6 +22230,15 @@ int main(int argc, char** argv) {
                 adm_drain_ms = 0.0;
                 std::fflush(stdout);
                 admit_slot = -1;
+            }
+            // SAGUARO_TURN_SAVE: the main session's conversation as this turn left it (a slot's own save covers one it
+            // holds: turn_tick).  After the reply's last commit has landed; a stopped reply that kept its conversation too.
+            if (sdir && turn_save_on && live_ok && !live.empty()) {
+                bool in_slot = false;
+                for (const BSlot& sl : bs)
+                    in_slot = in_slot || ((sl.active || sl.cached) && strata::program::conv_cache::held_by_slot(live, sl.ids));
+                std::string te;
+                if (!in_slot && ver.wait_commit(te)) (void) turn_capture(ParkFrom{live, live_imgs, checks, cvec_cached, -1}, turn_main, "main");
             }
             if (drive.routing != nullptr) std::fflush(drive.routing);   // the routing trace survives a crash and is watchable mid-session
             const bool lazy_was = !lazy_fly.empty();
