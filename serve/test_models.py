@@ -762,5 +762,128 @@ class DeletePage(Served):
         self.assertEqual(s, 400)
 
 
+# saguaro-ik2 stops at a flag it does not know: all a config of it may carry (--serve is the server's own)
+IK2_VALUE_FLAGS = {"--model", "--max-context", "--ctx", "--cache-gb", "--gpus", "--threads", "--chunk", "--draft",
+                   "--eos", "--image-token", "--dump"}
+IK2_BARE_FLAGS = {"--tokens", "--gen", "--plan"}
+
+
+class Inkling2(unittest.TestCase):
+    """An Inkling 2 config (saguaro-ik2): the page writes only what its engine reads; Turbo is refused."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.p = Path(self.tmp.name) / "maya-inkling-2-mini.json"
+        self.p.write_text((ROOT / "configs" / "Inkling-2-Mini-UD-Q4_K_XL.json").read_text(encoding="utf-8"))
+        self.cfg = M.read(self.p)
+
+    def sound(self, cfg):
+        args, i = [str(a) for a in cfg.get("args") or []], 0
+        while i < len(args):
+            self.assertIn(args[i], IK2_VALUE_FLAGS | IK2_BARE_FLAGS, args)
+            i += 2 if args[i] in IK2_VALUE_FLAGS else 1
+        self.assertEqual(i, len(args), args)
+        for k in cfg.get("env") or {}:
+            self.assertNotRegex(k, r"^SAGUARO_(GLM|MM3|DS4)_")
+        self.assertEqual(M.flag(args, "--gpus"), str(len(M.gpus_of(cfg))))
+        self.assertIn(len(M.gpus_of(cfg)), (1, 2))
+        self.assertNotIn("layer_split", cfg)
+        return cfg
+
+    def test_family_and_settings(self):
+        self.assertEqual(M.family(self.cfg), "ik2")
+        self.assertEqual(M.settings_of(self.cfg),
+                         {"context": 131072, "gpus": [2, 3], "images": True, "prefill_chunk": 2048,
+                          "cpu_threads": 8, "kv": "f16",
+                          "env": {"CUDA_DEVICE_ORDER": "PCI_BUS_ID", "SAGUARO_IK2_ROOM_MB": "1024"}})
+        self.assertEqual(M.choices(self.cfg), {"draft": [], "images": True})
+        self.assertEqual(self.sound(M.apply(self.cfg, M.settings_of(self.cfg))), self.cfg)   # (as it is: nothing moves)
+
+    def test_each_setting(self):
+        for patch, flag, want in (({"context": 65536}, "--max-context", "65536"), ({"gpus": [2]}, "--gpus", "1"),
+                                  ({"gpus": [0, 1]}, "--gpus", "2"), ({"prefill_chunk": 4096}, "--chunk", "4096"),
+                                  ({"prefill_chunk": None}, "--chunk", None), ({"cpu_threads": 16}, "--threads", "16"),
+                                  ({"cpu_threads": None}, "--threads", None), ({"kv": "fp8"}, "--gpus", "2"),
+                                  ({"images": False}, "--gpus", "2"), ({"env": {"SAGUARO_IK2_ROOM_MB": "512"}}, "--gpus", "2")):
+            with self.subTest(patch=patch):
+                new = self.sound(M.apply(self.cfg, patch))
+                self.assertEqual(M.flag(new["args"], flag), want)
+                self.assertEqual(self.sound(M.apply(new, M.settings_of(new))), new)   # (and read back the same)
+        self.assertEqual(M.apply(self.cfg, {"gpus": [3]})["gpu"], [3])
+        fp8 = M.apply(self.cfg, {"kv": "fp8"})
+        self.assertEqual(fp8["env"]["SAGUARO_IK2_KV"], "fp8")
+        self.assertEqual(M.apply(fp8, {"kv": "f16"})["env"]["SAGUARO_IK2_KV"], "f16")
+        self.assertEqual(M.settings_of(M.apply(self.cfg, {"env": {"SAGUARO_IK2_KV": "fp8"}}))["kv"], "fp8")
+        off = M.apply(self.cfg, {"images": False})
+        self.assertEqual((off.get("vision"), off["vision_off"]), (None, self.cfg["vision"]))
+        self.assertEqual(M.apply(off, {"images": True})["vision"], self.cfg["vision"])
+
+    def test_its_other_name_for_the_context(self):
+        cfg = dict(self.cfg, args=["--ctx" if a == "--max-context" else a for a in self.cfg["args"]])
+        self.assertEqual(M.settings_of(cfg)["context"], 131072)
+        new = self.sound(M.apply(cfg, {"context": 32768}))
+        self.assertEqual((M.flag(new["args"], "--ctx"), M.flag(new["args"], "--max-context")), ("32768", None))
+
+    def test_what_its_engine_does_not_read_is_refused(self):
+        for bad in ({"parallel": 2}, {"kv_streaming": True}, {"kv_resident": 4096}, {"reserve_mib": 700}, {"tp": 2},
+                    {"draft": "mtp"}, {"expert_cache": 100}, {"prefill": 512}, {"kv_cache": "int8"}, {"dspark_conf": 0.3},
+                    {"reserve_gb": 1}, {"cache_gb": 2}, {"mmap": "on"}, {"prompt_lookup": True}, {"ram_gb": 8},
+                    {"gpus": [0, 1, 2]}, {"gpus": []}, {"kv": "int8"}, {"context": 0},
+                    {"env": {"SAGUARO_GLM_MISS_SKIP_W": "0.16"}}, {"env": {"SAGUARO_MM3_SLOT_DIR": "/x"}},
+                    {"env": {"SAGUARO_DS4_RAM_SKIP_W": "0.14"}}):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                M.apply(self.cfg, bad)
+        self.assertIn("not a setting of this model", self.raised({"parallel": 2}))
+        self.assertIn("one or two", self.raised({"gpus": [0, 1, 2]}))
+        self.assertIn("SAGUARO_IK2_", self.raised({"env": {"SAGUARO_GLM_KV_RESIDENT": "1"}}))
+
+    def raised(self, patch):
+        with self.assertRaises(ValueError) as e:
+            M.apply(self.cfg, patch)
+        return str(e.exception)
+
+    def test_one_card(self):
+        cfg = json.loads((ROOT / "configs" / "Inkling-2-Mini-UD-Q4_K_XL.1card.json").read_text(encoding="utf-8"))
+        self.assertEqual(self.sound(M.apply(cfg, M.settings_of(cfg))), cfg)
+        two = self.sound(M.apply(cfg, {"gpus": [2, 3]}))
+        self.assertEqual((M.flag(two["args"], "--gpus"), two["env"]["SAGUARO_IK2_ROOM_MB"]), ("2", "1024"))
+
+    def test_saved_and_listed(self):
+        out = M.save(self.p, {"context": 65536, "kv": "fp8"})
+        self.assertTrue(out["changed"])
+        new = self.sound(M.read(self.p))
+        self.assertEqual(new["installer"]["as_set_up"], M.settings_of(self.cfg))
+        self.sound(M.apply(new, new["installer"]["as_set_up"]))            # (the page's Reset)
+        d = M.describe(self.p, None)
+        self.assertEqual((d["family"], d["settings"]["kv"], d["command"]["exe"]), ("ik2", "fp8", "saguaro-ik2"))
+
+    def test_turbo_is_refused(self):
+        self.assertEqual(M.turbo_patch(self.cfg), {})
+        self.assertEqual(M.turbo_info(self.cfg), {"on": False, "family": "ik2", "plan": {}, "env": {}, "supported": False})
+        with self.assertRaises(ValueError) as e:
+            M.turbo_enable(self.p)
+        self.assertIn("Inkling 2", str(e.exception))
+        self.assertEqual(M.read(self.p), self.cfg)                          # (nothing written, no "turbo" note)
+        self.assertFalse(self.p.with_name(self.p.name + ".prev").exists())
+
+    def test_the_server_refuses_turbo_too(self):
+        tok = ByteTokenizer()
+        svc = Service(MockEngine(tok, "x", max_context=4096), tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        svc.config_path, svc.engine_kind = str(self.p), "ik2"
+        self.assertFalse(svc.turbo_info()["supported"])
+        with self.assertRaises(ValueError):
+            svc.set_turbo(True)
+        with self.assertRaises(ValueError):
+            svc.set_turbo_default({"drop": 2, "skip": "ram"})
+        self.assertIsNone(svc.set_turbo_default(None))
+        self.assertEqual(M.read(self.p), self.cfg)
+        out = svc.model_settings(self.p.name, {"cpu_threads": 12}, dry_run=True)
+        self.assertEqual(M.flag(out["command"]["args"], "--threads"), "12")
+        with self.assertRaises(ValueError):
+            svc.model_settings(self.p.name, {"parallel": 2})
+        self.assertEqual(M.read(self.p), self.cfg)
+
+
 if __name__ == "__main__":
     unittest.main()

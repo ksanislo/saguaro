@@ -7,6 +7,8 @@ A config's settings, as the page shows them (None: the engine's own default, or 
   DeepSeek:  parallel, draft ("dspark" | "none"), tp, mmap ("auto" | "on" | "off"), prefill_chunk, cpu_threads
   MiniMax:   parallel, draft ("dspark" | "none"), tp (0: the layers split, no groups), kv_cache, kv_streaming,
              kv_resident, cpu_threads (maya-mm3 stops at a flag it does not know: only its own are written)
+  Inkling 2: prefill_chunk (--chunk), cpu_threads (--threads), kv ("f16" | "fp8": SAGUARO_IK2_KV); one or two GPUs
+             (--gpus kept with them); no reserve, drafter or parallel (saguaro-ik2 stops at a flag it does not know)
   CYBER-FROST (the `maya` engine's Qwen path; its server always loads the MTP drafter - "none" is --mtp-max-t 1):
              draft ("mtp" | "none"), expert_cache, prefill, kv ("fp16" | "int8" |
              "k8v4" | "q4_0"), ram_gb (the experts' RAM tier, SAGUARO_EXPERT_RAM_GB); no images (text only)
@@ -57,6 +59,9 @@ DS4_KEYS = ("context", "images", "gpus", "reserve_mib", "env", "parallel", "draf
 MM3_KEYS = ("context", "images", "gpus", "env", "parallel", "draft", "tp", "kv_cache", "kv_streaming", "kv_resident",
             "cpu_threads", "reserve_gb", "prefill_chunk", "cache_gb", "dspark_conf")
 QWEN_KEYS = ("context", "images", "gpus", "reserve_mib", "env", "draft", "expert_cache", "prefill", "kv", "ram_gb")
+IK2_KEYS = ("context", "images", "gpus", "env", "prefill_chunk", "cpu_threads", "kv")
+IK2_KV = ("f16", "fp8")                                           # saguaro-ik2's SAGUARO_IK2_KV (f16: its own)
+IK2_OTHER_ENV = re.compile(r"^SAGUARO_(?:GLM|MM3|DS4)_")         # another engine's settings: not added to its configs
 
 
 # ------------------------------------------------------------------ the engine's arguments
@@ -103,7 +108,7 @@ def _float(v, default=None):
 
 
 def family(cfg: dict) -> str:
-    """"minimax", "deepseek", "qwen" or "glm" (maya_quants.family_of, as saguaro.py and the server read it)."""
+    """"ik2", "minimax", "deepseek", "qwen" or "glm" (maya_quants.family_of, as saguaro.py and the server read it)."""
     return maya_quants.family_of(cfg)
 
 
@@ -245,6 +250,8 @@ def mm3_pack_has(cfg: dict, key: str) -> bool:
 
 def choices(cfg: dict) -> dict:
     """What this config can be set to beyond what it is: a drafter and an image encoder that exist on this PC."""
+    if family(cfg) == "ik2":                           # (no drafter choice; images: its "vision" entry, on or kept off)
+        return {"draft": [], "images": bool(cfg.get("vision") or cfg.get("vision_off"))}
     if family(cfg) == "minimax":
         return {"draft": ["dspark", "none"] if mm3_pack_has(cfg, "dspark.num_hidden_layers") else ["none"],
                 "images": mm3_pack_has(cfg, "vision.hidden_size")}
@@ -264,6 +271,12 @@ def settings_of(cfg: dict) -> dict:
     args = cfg.get("args") or []
     env = {str(k): str(v) for k, v in (cfg.get("env") or {}).items()}
     out = {"context": _int(flag(args, "--max-context"), 32768), "gpus": gpus_of(cfg), "env": env}
+    if family(cfg) == "ik2":                           # (saguaro-ik2: --ctx is its other name for --max-context)
+        out.update(context=_int(flag(args, "--max-context") or flag(args, "--ctx"), 32768),
+                   images=bool(cfg.get("vision")), prefill_chunk=_int(flag(args, "--chunk")),
+                   cpu_threads=_int(flag(args, "--threads")),
+                   kv="fp8" if env.get("SAGUARO_IK2_KV") in ("fp8", "e4m3") else "f16")
+        return out
     if family(cfg) == "minimax":                       # (maya-mm3's own defaults where the config names none)
         vision, kvs = flag(args, "--vision"), flag(args, "--kv-streaming")
         out.update(images=vision == "on" or (vision is None and mm3_pack_has(cfg, "vision.hidden_size")),
@@ -349,7 +362,7 @@ def apply(cfg: dict, settings: dict) -> dict:
         raise ValueError("the settings must be a JSON object")
     fam = family(cfg)
     ds4 = fam == "deepseek"
-    known = {"minimax": MM3_KEYS, "deepseek": DS4_KEYS, "qwen": QWEN_KEYS}.get(fam, GLM_KEYS)
+    known = {"minimax": MM3_KEYS, "deepseek": DS4_KEYS, "qwen": QWEN_KEYS, "ik2": IK2_KEYS}.get(fam, GLM_KEYS)
     unknown = sorted(set(settings) - set(known))
     if unknown:
         raise ValueError(f"not a setting of this model: {', '.join(unknown)}")
@@ -357,12 +370,16 @@ def apply(cfg: dict, settings: dict) -> dict:
     can = choices(cfg)
     out = copy.deepcopy(cfg)
     args = [str(a) for a in out.get("args") or []]
-    args = set_flag(args, "--max-context", _num(s, "context", 1024, 1048576, "Context size", none_ok=False))
+    # (saguaro-ik2's --ctx: a config that names its context so keeps the one flag)
+    ctx_flag = "--ctx" if fam == "ik2" and "--ctx" in args[:-1] and "--max-context" not in args[:-1] else "--max-context"
+    args = set_flag(args, ctx_flag, _num(s, "context", 1024, 1048576, "Context size", none_ok=False))
 
     gpus = s.get("gpus")
     if not isinstance(gpus, list) or not gpus or not all(isinstance(g, int) and not isinstance(g, bool) and 0 <= g < 64
                                                         for g in gpus):
         raise ValueError("GPUs: pick at least one")
+    if fam == "ik2" and len(set(gpus)) > 2:
+        raise ValueError("GPUs: Inkling 2 runs on one or two")
     if gpus != gpus_of(cfg):
         out["gpu"] = sorted(set(gpus))
 
@@ -376,6 +393,8 @@ def apply(cfg: dict, settings: dict) -> dict:
             continue
         if not ENV_NAME.match(k):
             raise ValueError(f"Environment: {k!r} is not a variable name (letters, digits and _)")
+        if fam == "ik2" and IK2_OTHER_ENV.match(k) and k not in (cfg.get("env") or {}):
+            raise ValueError(f"Environment: {k} is another engine's setting - Inkling 2's are SAGUARO_IK2_*")
         if str(v) == MASK and SECRET.search(k) and k in (cfg.get("env") or {}):
             v = (cfg.get("env") or {})[k]                # (the page's mask of a secret: its value as it was)
         if ENV_LOADER.match(k) and str((cfg.get("env") or {}).get(k)) != str(v):
@@ -387,8 +406,34 @@ def apply(cfg: dict, settings: dict) -> dict:
     else:
         out.pop("env", None)
 
-    reserve = _num(s, "reserve_mib", 0, 65536, "VRAM kept free") if fam != "minimax" else None
-    if fam == "qwen":
+    reserve = _num(s, "reserve_mib", 0, 65536, "VRAM kept free") if fam not in ("minimax", "ik2") else None
+    if fam == "ik2":
+        # (saguaro-ik2 stops at a flag it does not know: --gpus, --chunk, --threads and SAGUARO_IK2_KV are all it gets)
+        n = len(set(gpus))
+        args = set_flag(args, "--gpus", n) if n > 1 or "--gpus" in args[:-1] else args
+        if s.get("images") and not out.get("vision"):
+            if not out.get("vision_off"):
+                raise ValueError("Images: this model was set up without its image encoder")
+            out["vision"] = out.pop("vision_off")
+        elif not s.get("images") and out.get("vision"):
+            out["vision_off"] = out.pop("vision")       # (kept, so Images can be switched on again)
+        for key, name, lo, hi, what in (("prefill_chunk", "--chunk", 16, 65536, "Prompt chunk"),
+                                        ("cpu_threads", "--threads", 1, 512, "CPU threads")):
+            v = _num(s, key, lo, hi, what)
+            args = set_flag(args, name, v) if v is not None else drop_flag(args, name)
+        kv = str(s.get("kv") or "f16")
+        if "kv" not in settings and "env" in settings:  # (only the env row sent: its value is the choice)
+            kv = "fp8" if clean.get("SAGUARO_IK2_KV") in ("fp8", "e4m3") else "f16"
+        if kv not in IK2_KV:
+            raise ValueError("KV cache: " + ", ".join(f.upper() for f in IK2_KV))
+        env2 = dict(out.get("env") or {})
+        if kv != "f16" or "SAGUARO_IK2_KV" in env2:     # (written where it changes; the page's choice over the env row)
+            env2["SAGUARO_IK2_KV"] = kv
+        if env2:
+            out["env"] = env2
+        else:
+            out.pop("env", None)
+    elif fam == "qwen":
         if s.get("draft") not in can["draft"]:
             raise ValueError("Drafting: this pack has no MTP drafter (the setup builds it)" if s.get("draft") == "mtp"
                              else "Drafting: MTP or none")
@@ -751,6 +796,7 @@ TURBO_DSPARK_FAMILIES = ("deepseek", "minimax")
 # The smallest quants (GLM and DeepSeek Maya-XS, experts at 1-2 bits) keep every expert a token routes to: on 3x V100 the
 # cap gained at most 2-6% there, and GLM Maya-XS with 4 of 8 experts invented three.js classes and rambled.
 TURBO_NO_TOPK = ("maya-xs",)
+TURBO_NONE = ("ik2",)                               # no Turbo: saguaro-ik2 has no expert skipping and no drafter choice
 
 
 def turbo_smallest_quant(cfg: dict) -> bool:
@@ -766,6 +812,8 @@ def turbo_patch(cfg: dict) -> dict:
     """The engine settings Turbo changes in `cfg` (only those that differ from what it has now), for apply()."""
     fam, cur, can = family(cfg), settings_of(cfg), choices(cfg)
     patch = {}
+    if fam in TURBO_NONE:
+        return patch
     if fam in TURBO_CONTEXT_FAMILIES and (cur.get("context") or 0) > TURBO_CONTEXT:
         patch["context"] = TURBO_CONTEXT
     if (cur.get("parallel") or 1) > 1:                 # (one answer at a time is the fastest one)
@@ -792,6 +840,8 @@ def turbo_on(cfg: dict) -> bool:
 def turbo_info(cfg: dict) -> dict:
     """What the page needs: whether Turbo is on, and what switching it on would change (before -> after)."""
     cur = settings_of(cfg)
+    if family(cfg) in TURBO_NONE and not turbo_on(cfg):   # ("supported": the page shows no Turbo button)
+        return {"on": False, "family": family(cfg), "plan": {}, "env": {}, "supported": False}
     if turbo_on(cfg):
         return {"on": True, "family": family(cfg), "since": cfg["turbo"].get("since"), "plan": {}}
     patch = turbo_patch(cfg)
@@ -808,6 +858,8 @@ def turbo_enable(path: Path) -> dict:
         raise ValueError(f"{Path(path).name}: not a config Saguaro can read")
     if turbo_on(cfg):
         raise ValueError("Turbo is already on")
+    if family(cfg) in TURBO_NONE:
+        raise ValueError("Turbo: Inkling 2's engine has none (no expert skipping, one answer at a time)")
     cur, patch = settings_of(cfg), turbo_patch(cfg)
     new = apply(cfg, patch)
     new["turbo"] = {"since": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -910,6 +962,8 @@ def runs_from(cfg: dict) -> list:
     found += [Path(inst[k]) for k in ("model_dir", "gguf", "gguf_dir") if isinstance(inst.get(k), str) and inst[k]]
     found += [Path(v) for v in (flag(cfg.get("args") or [], "--dflash"), flag(cfg.get("args") or [], "--mtp"),
                                 cfg.get("tokenizer")) if isinstance(v, str) and v]
+    if family(cfg) == "ik2":                           # (saguaro-ik2 runs from its GGUF itself: no pack)
+        found += [Path(v) for v in (flag(cfg.get("args") or [], "--model"),) if v]
     found += vision_files(cfg)
     return [r for r in map(_res, found) if r is not None]
 
