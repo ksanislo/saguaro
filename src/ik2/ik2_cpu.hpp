@@ -1,7 +1,7 @@
-// src/ik2/ik2_cpu.hpp - saguaro-ik2's CPU lane: a routed expert that is not in VRAM computed where it is, in host
+// src/ik2/ik2_cpu.hpp - maya-ik2's CPU lane: a routed expert that is not in VRAM computed where it is, in host
 // memory, while the GPU runs the experts it holds - instead of waiting for the expert's 18 MB over PCIe.
-// NVFP4 experts only (AVX-512 F / BW, or AVX alone on a CPU without AVX2 / FMA; the weights read as they are stored),
-// a few worker threads sharing an expert's rows.  The arithmetic is ref/inkling2.py's in F32 (the activation not rounded to FP16 as the device's is).
+// NVFP4 experts only (AVX-512 F / BW; the weights read as they are stored), a few worker threads sharing an expert's
+// rows.  The arithmetic is ref/inkling2.py's in F32 (the activation not rounded to FP16 as the device's is).
 #pragma once
 
 #include <atomic>
@@ -16,9 +16,8 @@
 
 namespace ik2::cpu {
 
-/// Whether this CPU (and OS) runs a vector kernel (AVX-512, or AVX); isa(): which ("avx512", "avx", "scalar").
+/// Whether this CPU (and OS) runs the AVX-512 kernels.
 bool available();
-const char* isa();
 
 /// Worker threads taking tasks in order; wait(): until every task posted so far (and the ones they posted) is done.
 class Pool {
@@ -40,8 +39,6 @@ private:
 
 /// out[r - r0] = W[r] . x for rows r0 .. r1 - 1 of an NVFP4 matrix (rows of K values, K % 64 == 0).
 void nvfp4_rows(const uint8_t* W, int K, int r0, int r1, const float* x, float* out);
-/// The same rows by the scalar code whatever the CPU (the tests' second opinion).
-void nvfp4_rows_plain(const uint8_t* W, int K, int r0, int r1, const float* x, float* out);
 
 /// One NVFP4 expert: gate, up [F][C] and down [C][F] blocks, x [C]; y [C] = down . h, h = gcap tanh(g / gcap)
 /// sigmoid(g) ucap tanh(u / ucap), g = (gate . x) sg, u = (up . x) su - the raw sums of down (its scale is the
