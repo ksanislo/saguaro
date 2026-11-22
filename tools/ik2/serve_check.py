@@ -40,6 +40,8 @@ def png(w, h, rgb) -> bytes:
 
 
 def claim(tag: str, gpus) -> str:
+    if B.NO_CLAIM:                                      # (the runner holds the cards: no line, as B.release writes none)
+        return ""
     line = "CLAIM ik2-serve: %s cards %s %s" % (tag, ",".join(map(str, gpus)), time.strftime("%H:%M:%S %Z"))
     with open(B.STATUS, "a") as f:
         f.write(line + "\n")
