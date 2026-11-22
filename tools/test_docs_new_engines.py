@@ -56,11 +56,9 @@ class Docs(unittest.TestCase):
         self.assertIn("nvidia-smi -lgc 1590,1590", PAGES["docs/HY4-FLASH.md"])
 
     def test_limits_and_licenses_are_said(self):
-        saved = {"docs/HY4-FLASH.md": "Saved conversations are off unless you name a folder",
-                 "docs/INKLING2-MINI.md": "No saved conversations yet"}
         for name in ("docs/HY4-FLASH.md", "docs/INKLING2-MINI.md"):
             text = PAGES[name]
-            for part in ("One conversation at a time", saved[name], "## Install", "## Speed", "## Limits"):
+            for part in ("One conversation at a time", "## Install", "## Speed", "## Limits"):
                 self.assertIn(part, text, name)
         self.assertIn("Tencent Hy License", PAGES["docs/HY4-FLASH.md"])
         self.assertIn("LICENSE.hy4-flash", PAGES["docs/HY4-FLASH.md"])

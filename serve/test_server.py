@@ -2248,6 +2248,22 @@ class VisionRoomOnDemand(unittest.TestCase):
         self.assertIsNone(v.proc)                       # (ended: no VRAM kept between requests)
         proc.stdin.write.assert_called_with("QUIT\n")
 
+    def test_on_the_card_with_room(self):
+        # (two cards: the encoder goes to the one with the most free memory - GPU 0 is a number too)
+        from serve.server import ik2_vision_gpu
+        free = {2: 700 << 20, 3: 6900 << 20}
+        self.assertEqual(ik2_vision_gpu([2, 3], 1300 << 20, free.get), 3)
+        self.assertIs(ik2_vision_gpu([2, 3], 7000 << 20, free.get), False)
+        self.assertIs(ik2_vision_gpu([2], 1300 << 20, free.get), False)
+        self.assertEqual(ik2_vision_gpu([0, 1], 1 << 20, {0: 5 << 20, 1: 5 << 20}.get), 0)
+        self.assertIs(ik2_vision_gpu([2, 3], 1300 << 20, lambda g: None), False)      # (nvidia-smi cannot say)
+        for where, shown in ((3, "3"), (0, "0")):
+            v, proc, call = self.start(where)
+            self.assertIn("--gpu", call[0][0])
+            self.assertEqual(call[1]["env"], {"CUDA_VISIBLE_DEVICES": shown})
+            self.assertIs(v.on_gpu, True)
+            self.assertEqual(v.env, {"CUDA_VISIBLE_DEVICES": "2"})         # (the next picture chooses again)
+
     def test_on_the_cpu_otherwise(self):
         v, proc, call = self.start(False)
         self.assertEqual(call[0][0], ["vision-ik2", "--mmproj", "mmproj-BF16.gguf", "--max-tokens", "1024",
@@ -3005,6 +3021,89 @@ class Inkling2Lines(unittest.TestCase):
         self.assertEqual(self.engine("ik2").gen_keys({**self.EVERY, "temperature": 0}), " temperature=0")
         self.assertEqual(self.engine("ik2").gen_keys({}), "")
 
+    def test_its_own_top_k(self):
+        # (its sampler takes up to 1000 candidates and reads 0 as all of them: the other engines' cap of 64 is not sent)
+        for tk, want in ((0, " temperature=1.0"), (20, " temperature=1.0 top_k=20"), (200, " temperature=1.0 top_k=200"),
+                         (5000, " temperature=1.0 top_k=1000")):
+            self.assertEqual(self.engine("ik2").gen_keys({"temperature": 1.0, "top_p": 1.0, "top_k": tk}), want)
+        self.assertEqual(self.engine("mm3").gen_keys({"temperature": 1.0, "top_k": 200}), " temperature=1.0 top_k=64")
+
+    def lines(self, kind, lines):
+        import io
+        import queue
+        from types import SimpleNamespace
+        eng = self.engine(kind)
+        eng.proc = SimpleNamespace(stdin=io.StringIO(), poll=lambda: None)
+        eng.lines, eng.can_stop, eng.multi = queue.Queue(), True, 0
+        for line in lines:
+            eng.lines.put(line)
+        toks = [t for t in eng.generate([1, 2, 3], 8, {"temperature": 1.0, "top_p": 1.0}, threading.Event())
+                if t is not None] if lines else []
+        return eng, toks
+
+    STATS = ["PP 3 3 12 250.0 0\n", "prefill stats: 3 tokens run, 5 expert copies (0.1 GiB) in 0.01 s; experts that ran "
+             "1 / 2 / 3-7 / 8+ tokens: 1 / 2 / 3 / 4\n", "prefill sources: used and cached 1, used and prefetched 2, used "
+             "and copied after the routing 3, prefetched and unused 4\n", "T 7\n", "T 8\n",
+             "decode stats: 2 tokens, 700 expert hits, 68 misses (0.02 GiB copied)\n", "DONE 2 3 12.0 40.0 stop 0 0 0\n"]
+
+    def test_its_stats_lines(self):
+        eng, toks = self.lines("ik2", self.STATS)
+        self.assertEqual(toks, [7, 8])
+        self.assertEqual(eng.proc.stdin.getvalue(), "GEN 8 temperature=1.0 1,2,3\n")
+        self.assertEqual((eng.last["hits"], eng.last["lookups"], eng.last["finish"]), (700, 768, "stop"))
+        self.assertEqual(eng.progress, (3, 3, 0, 12.0))
+        eng, toks = self.lines("ik2", [l for l in self.STATS if "stats" not in l and "sources" not in l])
+        self.assertEqual(toks, [7, 8])
+        self.assertNotIn("hits", eng.last)
+        eng, toks = self.lines("mm3", self.STATS)             # (another engine: the lines are not its protocol)
+        self.assertNotIn("hits", eng.last)
+        # an answer the reader leaves at its stop token: the lines after it are read as the request closes
+        eng = self.lines("ik2", [])[0]
+        for line in self.STATS:
+            eng.lines.put(line)
+        gen = eng.generate([1, 2, 3], 8, {}, threading.Event())
+        self.assertEqual([next(gen), next(gen)], [None, 7])
+        gen.close()
+        self.assertEqual((eng.last["generated"], eng.last["hits"], eng.last["lookups"]), (2, 700, 768))
+        self.assertEqual(eng.stat["vram_hit"], 0.9115)
+
+    LOG1 = ("saguaro ik2: 24 layers (20 sliding), 128 experts (8 a token), width 2304, vocab 200058; 1 shards\n"
+            "kv cache: FP16 (1.31 GiB across 48 layer visits)\n"
+            "experts in pinned (mmap+register) memory: 14.7 GiB; allocating 0.0 s, reading 4.9 s (3.01 GiB/s)\n"
+            "expert cache, GPU 0: 2088 slots across 2 pools (10.0 GiB); load 7.2 s in all\n")
+    LOG2 = LOG1.replace("2088 slots across 2 pools (10.0", "1900 slots across 2 pools (9.1") + \
+        "expert cache, GPU 1: 2641 slots across 2 pools (12.6 GiB); load 6.5 s in all\n"
+
+    def test_its_start_lines_as_facts(self):
+        from serve.server import ik2_log_facts, ik2_stat
+        one = ik2_log_facts(self.LOG1, 32768)
+        self.assertEqual(one, {"experts": 3072, "expert_slots": 2088, "cache_gb": 10.0, "ram_slots": 3072,
+                               "ram_gb": 14.7, "kv_gb": 1.31, "kv_ctx": 32768})
+        two = ik2_log_facts(self.LOG2, 32768)
+        self.assertEqual((two["expert_slots"], two["cache_gb"]), (3072, 21.7))      # (room for every expert)
+        self.assertEqual(ik2_log_facts("nothing of it", 32768), {})
+        last = {"generated": 100, "decode_ms": 5000.0, "hits": 34000, "lookups": 38400}
+        st = ik2_stat(one, last)
+        self.assertEqual((st["tok_s"], st["ms_tok"], st["vram_hit"], st["ram_fetch"]), (20.0, 50.0, 0.8854, 44.0))
+        self.assertEqual((st["vram_used"], st["ram_used"], st["vram_gb"], st["ram_gb"]), (2088, 984, 10.0, 4.7))
+        st = ik2_stat(two, last)
+        self.assertEqual((st["vram_used"], st["ram_used"], st["vram_gb"], st["ram_gb"]), (3072, 0, 14.7, 0.0))
+        self.assertIsNone(ik2_stat(one, {"generated": 0, "decode_ms": 0.0, "hits": 0, "lookups": 0}))
+        # every expert in VRAM (two cards): the answer's tokens asked the cache for none - all of them were there
+        st = ik2_stat(two, {"generated": 100, "decode_ms": 2000.0})
+        self.assertEqual((st["tok_s"], st["vram_hit"], st["ram_fetch"]), (50.0, 1.0, 0.0))
+        self.assertIsNone(ik2_stat(one, {"generated": 100, "decode_ms": 2000.0}))
+        eng = self.lines("ik2", [])[0]
+        eng.info.update(two)
+        for line in [l.replace("700 expert hits, 68 misses", "0 expert hits, 0 misses") for l in self.STATS]:
+            eng.lines.put(line)
+        list(eng.generate([1, 2, 3], 8, {}, threading.Event()))
+        self.assertEqual(eng.stat["vram_hit"], 1.0)
+        self.assertNotIn("hits", eng.last)
+        eng, _ = self.lines("ik2", self.STATS)
+        self.assertEqual((eng.stat["vram_hit"], eng.stat["ram_fetch"]), (0.9115, 34.0))
+        self.assertFalse(hasattr(self.lines("mm3", self.STATS)[0], "stat"))
+
     def test_other_engines_lines_as_they_were(self):
         for kind in (None, "glm-fast", "ds4", "mm3"):
             for s in (self.EVERY, {**self.EVERY, "temperature": 0}, {}):
@@ -3017,6 +3116,19 @@ class Inkling2Lines(unittest.TestCase):
             eng.proc = type("P", (), {"stdin": self.Pipe()})()
             eng.wrap()
             self.assertEqual(eng.proc.stdin.sent, sent)
+
+    def test_quit_closes_its_stdin(self):
+        # (saguaro-ik2 ends after QUIT only once its stdin closes; the other engines' stays open)
+        import io
+        for kind, closed in (("ik2", True), ("glm-fast", False), (None, False)):
+            eng = self.engine(kind)
+            eng.can_stop, eng.lines = True, None
+            eng.proc = type("P", (), {"stdin": io.StringIO(), "poll": lambda s: 0, "pid": 0,
+                                      "stdout": io.StringIO(""), "wait": lambda s, timeout=None: 0})()
+            sent, written = eng.proc.stdin, []
+            sent.write = written.append
+            eng.close()
+            self.assertEqual((written, sent.closed), (["STOP\n", "QUIT\n"], closed), kind)
 
     def test_a_request_runs_exact_and_has_no_budget(self):
         tok = ByteTokenizer()

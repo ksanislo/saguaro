@@ -8,13 +8,16 @@
   "--gpus",
   "1",
   "--chunk",
-  "1024",
+  "2048",
   "--threads",
   "8"
  ],
  "env": {
   "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
-  "SAGUARO_IK2_ROOM_MB": "1024"
+  "SAGUARO_IK2_ROOM_MB": "1024",
+  "SAGUARO_IK2_STATS": "1",
+  "SAGUARO_IK2_SLOT_DIR": "/opt/llm/var/Inkling-2-Mini-UD-Q4_K_XL/sessions",
+  "SAGUARO_IK2_PIN": "0"
  },
  "cwd": "/opt/llm/saguaro",
  "tokenizer": "/opt/llm/models/Inkling-2-Mini-UD-Q4_K_XL/tokenizer",

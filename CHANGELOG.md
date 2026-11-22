@@ -19,6 +19,18 @@ older multi-GPU hardware (NVIDIA Turing T4 - sm_75 tensor cores, Xeon AVX1 CPUs)
 - **Credits:** built on Project Maya ([mw00/project-maya](https://github.com/mw00/project-maya)) and Strata (MIT) -
   see NOTICE.md. Everything below the next section is upstream Project Maya history.
 
+### Inkling 2 Mini: faster layouts, conversations kept (2026-11-22)
+
+- **Faster on Tesla T4s** (interleaved runs, NEXT-ik2.md): one card now reads prompts in chunks of 2048 with one shared
+  expert cache (`--chunk 2048`, `SAGUARO_IK2_PIN=0`): about 42 tokens/s writing (was 39), 39 eight thousand tokens deep
+  (was 34), prompts at about 640 tokens/s (was 497). Two cards read in chunks of 8192 with every expert still in VRAM:
+  about 52 tokens/s writing (was 50) and 1130 reading (was 844).
+- **Conversations kept:** up to four conversations are set aside in RAM and come back without their prompt read again
+  (an edited message goes back to its snapshot); with `SAGUARO_IK2_SLOT_DIR` they are saved to that folder and read
+  back after a restart.
+- **The Monitor** shows Inkling's expert-cache hits after each answer (`SAGUARO_IK2_STATS=1`); a picture's encoder runs
+  on the config's card with the most free memory.
+
 ### Two more engines: Hy4-Flash and Inkling 2 Mini (2026-11-21)
 
 Both are Project Maya v1.1.72's engines, built here for Turing cards (sm_75) and CPUs without AVX2, and set up, listed

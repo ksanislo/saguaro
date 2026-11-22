@@ -105,18 +105,18 @@ class Fit(unittest.TestCase):
     def test_one_t4(self):
         lay = F.layout([t4()])
         self.assertEqual([g["index"] for g in lay["gpus"]], [0])
-        self.assertEqual(lay["args"], ["--gpus", "1", "--chunk", "1024", "--threads", "8"])
+        self.assertEqual(lay["args"], ["--gpus", "1", "--chunk", "2048", "--threads", "8"])
         self.assertEqual((lay["context"], lay["resident"], lay["measured"]), (32768, False, True))
-        self.assertEqual(lay["env"], {"SAGUARO_IK2_ROOM_MB": "1024"})
-        self.assertIn("40 tok/s", F.speeds(lay))
+        self.assertEqual(lay["env"], {"SAGUARO_IK2_ROOM_MB": "1024", "SAGUARO_IK2_PIN": "0"})
+        self.assertIn("42 tok/s", F.speeds(lay))
         self.assertIn("1x Tesla T4", F.speeds(lay))
 
     def test_two_t4s(self):
         lay = F.layout([t4(2), t4(3)])
         self.assertEqual([g["index"] for g in lay["gpus"]], [2, 3])
-        self.assertEqual(lay["args"], ["--gpus", "2", "--chunk", "2048", "--threads", "8"])
+        self.assertEqual(lay["args"], ["--gpus", "2", "--chunk", "8192", "--threads", "8"])
         self.assertEqual((lay["context"], lay["resident"], lay["measured"]), (131072, True, True))
-        self.assertIn("48 tok/s", F.speeds(lay))
+        self.assertIn("52 tok/s", F.speeds(lay))
 
     def test_four_t4s_take_two_and_one_when_asked(self):
         cards = [t4(i) for i in range(4)]
@@ -174,7 +174,7 @@ class Picker(unittest.TestCase):
             self.assertEqual(fam, "ik2", n)
             label, note, about = got["rows"][maya.FAMILIES.index("ik2")]
             self.assertEqual((label, note), ("Inkling 2 Mini", "recommended for this PC"))
-            for part in ("one or two", "16 GB", "40 tok/s", "48 tok/s", "Apache 2.0", "one conversation"):
+            for part in ("one or two", "16 GB", "42 tok/s", "52 tok/s", "Apache 2.0", "one conversation"):
                 self.assertIn(part, about)
 
     def test_four_t4s_get_hy4_and_a_setup_before_wins(self):
@@ -271,9 +271,9 @@ class Steps(unittest.TestCase):
         path, cfg = self.write({"gpus": [t4(2)], "backend": "cuda"}, gguf, tok, 32768, d)
         self.assertEqual(path.name, "maya-inkling-2-mini.json")
         self.assertEqual(cfg["exe"], str(maya.IK2_EXE))
-        self.assertEqual(cfg["args"], ["--model", str(gguf), "--max-context", "32768", "--gpus", "1", "--chunk", "1024",
+        self.assertEqual(cfg["args"], ["--model", str(gguf), "--max-context", "32768", "--gpus", "1", "--chunk", "2048",
                                        "--threads", "8"])
-        self.assertEqual(cfg["env"], {"SAGUARO_IK2_ROOM_MB": "1024"})
+        self.assertEqual(cfg["env"], {"SAGUARO_IK2_ROOM_MB": "1024", "SAGUARO_IK2_PIN": "0"})
         self.assertEqual((cfg["sampling"], cfg["reasoning_effort"]), ({"temperature": 1.0, "top_p": 1.0}, "high"))
         self.assertEqual((cfg["model_name"], cfg["gpu"], cfg["tokenizer"]), ("inkling-2-mini", [2], str(tok)))
         inst = cfg["installer"]
@@ -293,7 +293,7 @@ class Steps(unittest.TestCase):
         path.write_text(json.dumps(cfg), encoding="utf-8")
         v = {"exe": "/b/vision-glm", "mmproj": str(d / "mmproj-BF16.gguf"), "gpu": True}
         path, cfg = self.write({"gpus": [t4(2), t4(3)], "backend": "cuda"}, gguf, tok, 131072, d, v)
-        self.assertEqual(cfg["args"], ["--model", str(gguf), "--max-context", "131072", "--gpus", "2", "--chunk", "2048",
+        self.assertEqual(cfg["args"], ["--model", str(gguf), "--max-context", "131072", "--gpus", "2", "--chunk", "8192",
                                        "--threads", "8"])
         self.assertEqual(cfg["env"], {"SAGUARO_IK2_ROOM_MB": "1024", "MY_VAR": "1"})
         self.assertEqual((cfg["gpu"], cfg["api_key"], cfg["vision"]), ([2, 3], "k", v))

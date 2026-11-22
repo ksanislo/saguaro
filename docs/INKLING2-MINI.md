@@ -19,8 +19,8 @@ Back to [the models](MODELS.md) and the [README](../README.md). How the engine w
 
 | Cards | Layout the setup writes | Context | Experts |
 | --- | --- | ---: | --- |
-| One 16 GB card (one Tesla T4) | `--gpus 1 --chunk 1024` | 32K | about three quarters in VRAM, the rest streamed from RAM |
-| Two 16 GB cards (two Tesla T4s) | `--gpus 2 --chunk 2048` | 131K | all in VRAM |
+| One 16 GB card (one Tesla T4) | `--gpus 1 --chunk 2048` and `SAGUARO_IK2_PIN=0` | 32K | about three quarters in VRAM, the rest streamed from RAM |
+| Two 16 GB cards (two Tesla T4s) | `--gpus 2 --chunk 8192` | 131K | all in VRAM |
 | One card of 24 GB or more | `--gpus 1 --chunk 2048` | up to 131K (FP16 cache) | all in VRAM |
 
 The first two were measured here on Tesla T4s. The third is upstream Project Maya's layout (measured there on an
@@ -54,18 +54,18 @@ Files you already have go in with `./setup.sh --model inkling-2-mini --model-dir
 
 ## Speed
 
-Measured on Tesla T4s (16 GB, sm_75) with two Xeon E5-2660 v2, greedy 256-token answers about 1K tokens deep, GPU
-clocks not pinned:
+Measured on Tesla T4s (16 GB, sm_75) with two Xeon E5-2660 v2, greedy 128-256-token answers about 1K tokens deep,
+prompts of 8-16K tokens, GPU clocks not pinned (pinning them measured no gain):
 
 | | 1x Tesla T4, 32K context | 2x Tesla T4, 131K context |
 | --- | ---: | ---: |
-| Writing an answer | about 40 tok/s | about 48 tok/s |
-| Reading a prompt | about 490 tok/s | about 840 tok/s |
+| Writing an answer | about 42 tok/s | about 52 tok/s |
+| Reading a prompt | about 640 tok/s | about 1130 tok/s |
 | Load | 8-10 s | 8-10 s |
-| VRAM | 14.9 GiB | 15.4 + 8.1 GiB |
+| VRAM | 14.9 GiB | 14.9 + 14.3 GiB |
 
-Answers get slower deeper into a context (one card: 37 tok/s at 8-9K). One load each; this box drifts by about a
-tenth between runs.
+Answers get slower deeper into a context: one card 39 tok/s at 8K; two cards 46 at 16K, 40 at 30K and 28 at 125K.
+Two loads of each, interleaved; this box drifts by about a tenth between runs.
 
 ## What it does
 
@@ -78,12 +78,32 @@ tenth between runs.
   cache's format (FP16, or FP8 for half the bytes) and pictures. The engine stops at a flag it does not know, so the
   page writes only these.
 
+## Tuning on your hardware
+
+`saguaro-ik2` runs on NVIDIA cards from Turing on (compute capability 7.5: Tesla T4, RTX 20 and newer), Linux. A card
+of 24 GB or more keeps the whole model in VRAM and needs none of this; on 16 GB cards four settings matter. Each is a
+flag or an `env` entry in the config (`maya-inkling-2-mini.json`, Models page or by hand); restart the model after a
+change. Measured on Tesla T4s, two loads of each setting, interleaved (decode about 60 / 8K tokens deep, an 8-16K read):
+
+| Setting | What it trades | One T4 | Two T4s |
+| --- | --- | --- | --- |
+| `--chunk N` (prompt chunk) | A larger chunk reads prompts faster but its work buffers take VRAM from the expert cache: on one card, fewer experts stay on the card and answers write slower. | 1024 -> 2048: read 497 -> 712 tok/s, decode 34 -> 31 tok/s at 8K (default pins) | 2048 -> 8192: read 844 -> 1136 tok/s, decode 44 -> 46 (every expert stays in VRAM) |
+| `SAGUARO_IK2_PIN` (pinned layers; one card) | Default: the core layers' experts are pinned on the card and run as one CUDA graph; `0`: one shared cache for every layer. `0` writes faster and, with chunk 2048, reads faster too; a load's first short prompt reads ~0.6 s slower. `core` / `SAGUARO_IK2_PIN_KEEP` measured no better. | default 39 / 34 tok/s, read 497 -> PIN=0 + chunk 2048: 42 / 39 tok/s, read 639 (the setup's default) | (not used: every expert is in VRAM) |
+| `SAGUARO_IK2_ROOM_MB` (VRAM left free) | The rest of the card goes to experts. More room lets the picture encoder run on the GPU (0.8-1.8 s a new picture instead of 2-6 s on the CPU) at the cost of expert slots: 1536 on one T4 made every answer 9-11 % slower. | 1024 (default) | 1024 on the first card (default) |
+| The one-T4 quant (`Inkling-2-Mini-T4-NVFP4-IQ3_XXS`, experimental) | Smaller experts (11.45 GiB: IQ3_XXS gate/up on 8 layers, layers 20-23 re-quantised) so every expert fits on one 16 GB card - faster, at a measurable quality cost: KL 0.012 and the same top token 95.0 % of the time against UD-Q4_K_XL, whose own run-to-run floor is 0.0019 / 97.8 %. Not a setup choice yet. | decode 39 -> 45 tok/s (31 -> 37 at 30K), read 502 -> 572 tok/s | (not needed) |
+
+Pinning the GPU clocks measured no gain. To try a setting on other cards: change one value, restart, and compare a
+long answer's tok/s and a long prompt's read speed against the default, a few times each in turn - a box's speed drifts
+by several percent between runs. On a card between 16 and 24 GB, the engine prints at load how many experts stay in VRAM
+("expert cache ... slots", "resident"); the closer that is to all of them, the less these settings matter.
+
 ## Limits
 
 - **One conversation at a time.** A second request waits for the first.
-- **No saved conversations yet:** a restart or a model switch reads the conversation again.
+- **Conversations kept:** up to four are set aside in RAM and come back without their prompt read again. They are
+  saved across a restart only when the config's env names a folder (`SAGUARO_IK2_SLOT_DIR`); the setup sets none yet.
 - **No drafter** is set up (the engine's `--draft` is by hand: [INKLING2.md](INKLING2.md)), and there is no Turbo.
-- The Monitor shows its speeds, context and each card's memory; the engine reports no per-token expert counts, so the
-  experts card says where they are instead of counting them.
-- Two cards were loaded at a 131K context, not filled to it; the config leaves 1 GiB of the first card free for that
-  (`SAGUARO_IK2_ROOM_MB`).
+- The Monitor shows its speeds, context and each card's memory; the experts card counts the expert-cache hits after
+  each answer when the config's env has `SAGUARO_IK2_STATS=1`, and otherwise says where the experts are.
+- Two cards were filled to 125K tokens of a 131K context (at `--chunk 2048`; `--chunk 8192` to 16K); the config leaves
+  1 GiB of the first card free for that (`SAGUARO_IK2_ROOM_MB`).

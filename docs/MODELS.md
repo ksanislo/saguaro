@@ -188,10 +188,10 @@ looped model with 8 of 128 experts a token; Apache 2.0) on an engine of its own 
 
 | Cards | Context | Measured on Tesla T4s |
 | --- | ---: | --- |
-| One 16 GB card: about a quarter of the experts streamed from RAM | 32K | about 40 tokens/s writing, 490 reading |
-| Two 16 GB cards: every expert in VRAM | 131K | about 48 tokens/s writing, 840 reading |
+| One 16 GB card: about a quarter of the experts streamed from RAM | 32K | about 42 tokens/s writing, 640 reading |
+| Two 16 GB cards: every expert in VRAM | 131K | about 52 tokens/s writing, 1130 reading |
 
-Tool calls, five thinking levels, pictures; one conversation at a time and no saved conversations yet.
+Tool calls, five thinking levels, pictures; one conversation at a time (four more kept aside in RAM).
 The install, the settings and the limits: **[INKLING2-MINI.md](INKLING2-MINI.md)**; the engine itself:
 [INKLING2.md](INKLING2.md).
 

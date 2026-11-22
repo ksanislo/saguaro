@@ -6910,8 +6910,8 @@ def ik2_about() -> str:
     gb = f"{sum(v[0] for v in files.values()) / 1e9:.0f} GB" if files else "about 18 GB"
     return (f"thinkingmachines' Inkling-2-Mini (26B, a looped MoE: 8 of 128 experts a token) on its own engine, in "
             f"unsloth's UD-Q4_K_XL GGUF ({gb}); NVIDIA Tesla T4 / RTX 20 and newer, Linux. The model for one or two "
-            "16 GB cards: one Tesla T4 writes about 40 tok/s (a 32K context, a quarter of the experts streamed from "
-            "RAM), two write about 48 tok/s with every expert in VRAM (a 131K context); tool calls, its thinking "
+            "16 GB cards: one Tesla T4 writes about 42 tok/s (a 32K context, a quarter of the experts streamed from "
+            "RAM), two write about 52 tok/s with every expert in VRAM (a 131K context); tool calls, its thinking "
             "levels, pictures (its vision tower, 0.6 GB), one conversation at a time. Apache 2.0.")
 
 
@@ -7366,9 +7366,9 @@ def write_config_ik2(a, pc: dict, meta: dict, gguf: Path, tok: Path, ctx: int, m
             cfg[k] = old[k]
             kept.append(k)
     env = {**(old.get("env") or {}), **lay["env"], **parse_env(a.env)}
-    if not lay["env"]:                                 # (a big card: the small cards' room is not kept)
-        env.pop("SAGUARO_IK2_ROOM_MB", None)
-        env.update(parse_env(a.env))
+    for k in IK2F.LAYOUT_ENV - set(lay["env"]):        # (another layout's settings are not kept: a big card, two cards)
+        env.pop(k, None)
+    env.update(parse_env(a.env))                       # (the user's own --env wins)
     if env:
         cfg["env"] = env
     if a.host:

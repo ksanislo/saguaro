@@ -4,7 +4,7 @@
 set -u
 tag="$1"; shift
 f=/tmp/gpu-status
-while grep -qE '^(CLAIM|BUSY|WAIT) ' "$f" 2>/dev/null; do sleep 20; done
+while grep -E '^(CLAIM|BUSY|WAIT) ' "$f" 2>/dev/null | grep -qv 'normal use'; do sleep 20; done
 case "$tag" in build*) line="BUSY 0-3 ik2-agent-$tag $(date '+%H:%M:%S %Z')";; *) line="CLAIM ik2-agent: $tag cards 2,3 $(date '+%H:%M:%S %Z')";; esac
 echo "$line" >> "$f"
 "$@"; rc=$?

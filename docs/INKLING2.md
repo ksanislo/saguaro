@@ -390,3 +390,67 @@ CPU lane's rows to the format's definition.
 **Configs**: `configs/Inkling-2-Mini-UD-Q4_K_XL.json` (two cards) and `configs/Inkling-2-Mini-UD-Q4_K_XL.1card.json`.
 The tokenizer folder they name: `python tools/strata_tokenizer.py --gguf FILE --out <model folder> --chat-template
 tools/ik2/chat_template.jinja --check`.
+
+## 10. Saguaro: served on the T4s (checked 2026-11-21), and what an install needs
+
+`tools/ik2/serve_check.py --gpus 2` (one card) and `--gpus 2,3 --ctx 131072 --chunk 2048` (two) run the real engine
+under `serve/server.py` and check: /health, a thinking chat, thinking off, the config's sampling (temperature 1.0)
+against greedy, a streamed answer with its read progress, a tool call and its result turn (whole and streamed), a
+stop while it writes and while it reads a 19.6K prompt, the web app's resumable stream, Anthropic's messages and
+OpenAI's responses, pictures (a colour, a drawn scene, a photo, the photo again), and the Monitor's figures while an
+answer runs. Results in `build-ik2/serve-check*/results.json`.
+
+| UD-Q4_K_XL, FP16 cache | one T4, context 32,768 | two T4s, context 131,072 |
+| --- | --- | --- |
+| Start to /health | 8 s (16-18 s the first time: the encoder is measured) | 12 s (16 s) |
+| VRAM after the load | 14.9 GiB | 14.9 GiB + 8.7 GiB |
+| A short chat: first token / decode | 0.5-0.7 s / 36-38 tok/s | 0.35-0.45 s / 50 tok/s |
+| An 11,900-token prompt: read / decode after it | 23.9 s (499 tok/s) / 32 tok/s | 14.2 s (841 tok/s) / 44 tok/s |
+| Experts in VRAM | 2,487 of 3,072 slots (61% of a long answer's picks hit) | all |
+| A new picture (640 x 480 photo, 240 tokens), before its prompt is read | 5.7 s on the CPU | 1.3 s on the second card |
+
+**Pictures.** The encoder measures 1.29 GB on a T4 (4,096 image tokens; once, kept in `vision-memory.json` beside the
+config). One card: the engine leaves ~1.0 GB free (`SAGUARO_IK2_ROOM_MB` 1024), so the encoder runs on the CPU (AVX
+build: 2-6 s a new picture, none for one seen before). `SAGUARO_IK2_ROOM_MB=1536` puts it on the GPU (0.8-1.8 s) but
+costs 115 expert slots and a resident layer visit: decode 9-11% slower on every answer - not worth it unless most
+requests carry new pictures. Two cards: the server starts the encoder on the config's GPU with the most free
+memory (the second: ~6.9 GiB free at a context of 131,072).
+
+**Install** (into `/opt/llm/saguaro`, the model in `/opt/llm/models/Inkling-2-Mini-UD-Q4_K_XL/`):
+
+1. The tokenizer folder beside the model (writes `<out>/tokenizer/`, 5 files; `--check` round-trips 16 strings):
+
+       /opt/llm/saguaro/.venv/bin/python tools/strata_tokenizer.py \
+           --gguf /opt/llm/models/Inkling-2-Mini-UD-Q4_K_XL/Inkling-2-Mini-UD-Q4_K_XL.gguf \
+           --out /opt/llm/models/Inkling-2-Mini-UD-Q4_K_XL --chat-template tools/ik2/chat_template.jinja --check
+
+2. `build-ik2/saguaro-ik2` -> `bin/saguaro-ik2` (its RUNPATH is CUDA 13.1's lib folder: nothing to patch),
+   `build-ik2-vision/build/bin/vision-glm` -> `bin/vision-ik2`, `configs/Inkling-2-Mini-UD-Q4_K_XL*.json` ->
+   `configs/`, and this branch's `serve/` and `tools/` (`maya_quants.py`, `strata_tokenizer.py`,
+   `ik2/chat_template.jinja`). `configs/` must be writable by the server's user (`vision-memory.json`).
+3. The two configs carry one `model_name` and one log file: the one-card profile needs its own of both (its
+   llama-swap id is its `model_name`). `"SAGUARO_IK2_STATS": "1"` in a config's `env` gives the Monitor its VRAM hit.
+4. llama-swap (PROPOSED; not applied - lines marked ASK are not known here):
+
+       "Inkling-2-Mini-UD-Q4_K_XL":            # two T4s (cards 2,3), context 131,072
+         cmd: >
+           /bin/sh -c "cd /opt/llm/saguaro && exec .venv/bin/python serve/server.py
+           --config /opt/llm/saguaro/configs/Inkling-2-Mini-UD-Q4_K_XL.json --port ${PORT}"
+         # ASK: the other Saguaro profiles' wrapper (clock lock / cmdStop unlock, env), copied as they have it
+         ttl: 900
+         unloadTimeout: 60                     # (QUIT saves the open conversations to SAGUARO_IK2_SLOT_DIR first)
+       "Inkling-2-Mini-UD-Q4_K_XL-1card":      # one T4 (card 2), context 32,768
+         cmd: >
+           /bin/sh -c "cd /opt/llm/saguaro && exec .venv/bin/python serve/server.py
+           --config /opt/llm/saguaro/configs/Inkling-2-Mini-UD-Q4_K_XL.1card.json --port ${PORT}"
+         ttl: 900
+         unloadTimeout: 60
+
+       groups:
+         "gpu-models":                         # ASK: the group's name as the live config has it
+           members:
+             - "Inkling-2-Mini-UD-Q4_K_XL"
+             - "Inkling-2-Mini-UD-Q4_K_XL-1card"   # (every id under models: must be here too, or in no group)
+
+   The server takes no `--engine` for a real engine (the config's `exe` picks the driver). A new id also goes into
+   opencode.json, `dsh/profiles/headless/cordis.patch.yml` and Hermes' config when those should offer it.
