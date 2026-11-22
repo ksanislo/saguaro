@@ -49,6 +49,8 @@ td.log
 /saguaro-report.txt
 /saguaro-bench.txt
 /saguaro-bench.log
+/saguaro-bench-results.txt
+/.bench-builds/
 /build-strata.bat
 /build-maya*.bat
 /build-saguaro*.bat
