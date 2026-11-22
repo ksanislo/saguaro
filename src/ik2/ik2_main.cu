@@ -5055,6 +5055,7 @@ int main(int argc, char** argv) {
                 continue;
             }
             std::vector<int> stops;
+            g_fast_on = true;   // (a request's fast= is only for that request)
             if (serve_maya) {
                 in >> max_new;
                 std::string w;
