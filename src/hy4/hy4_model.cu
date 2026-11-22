@@ -1505,9 +1505,10 @@ struct Model::Impl {
     // the experts no member holds to its own GPU (kShareThreads copy a member's pass into its bounce); a shorter one
     // is member 0's alone, the CPU lane or its GPU as on the layer split
     static constexpr int kTpStream = 256;
-    // HY4_TP_SHARE=0: no member streams its share of the experts no member holds - member 0's route (GPU 0 streams, or
-    // the CPU lane) takes a prompt chunk's, as for chunks under kTpStream: the four cards never wait on H2D together
-    const bool tp_share_on = [] { const char* v = std::getenv("HY4_TP_SHARE"); return !v || std::atoi(v) != 0; }();
+    // SAGUARO_PCIE_SAFE=1 (a host-safety switch for PCs that reset when all cards stream from host memory at once): no
+    // member streams its share of the experts no member holds - member 0's route (GPU 0 streams, or the CPU lane) takes
+    // a prompt chunk's, as for chunks under kTpStream
+    const bool tp_share_on = [] { const char* v = std::getenv("SAGUARO_PCIE_SAFE"); return !v || std::atoi(v) == 0; }();
     static constexpr int kShareThreads = 8;
     // The indexed layers' keys a dense (tensor-core) prompt sub-batch spans at most: beyond, the gathering kernel.
     // Both read the indexer's same picks (the dense one masks every other key out), so the limit moves no pick - only
