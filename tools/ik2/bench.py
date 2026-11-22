@@ -27,7 +27,12 @@ TASK = ("\n\nWrite a detailed, flowing essay of at least 500 words about what th
         "it matters. Do not use lists.")
 
 
+NO_CLAIM = bool(os.environ.get("IK2_NO_CLAIM"))   # (a runner that holds the cards itself: no waiting, no line)
+
+
 def claim(tag: str, gpus) -> str:
+    if NO_CLAIM:
+        return ""
     line = "CLAIM ik2-agent: %s cards %s %s" % (tag, ",".join(map(str, gpus)), time.strftime("%H:%M:%S %Z"))
     with open(STATUS, "a") as f:
         f.write(line + "\n")
@@ -35,6 +40,8 @@ def claim(tag: str, gpus) -> str:
 
 
 def release(line: str):
+    if NO_CLAIM:
+        return
     try:
         keep = [l for l in STATUS.read_text().splitlines() if l != line]
         STATUS.write_text("\n".join(keep) + ("\n" if keep else ""))
@@ -42,13 +49,18 @@ def release(line: str):
         pass
 
 
-def wait_free():
+def wait_free(gpus=(2, 3)):
+    """Until no other agent's line is in /tmp/gpu-status (the standing llama-swap "normal use" note aside) and the
+    cards are empty."""
+    if NO_CLAIM:
+        return
     while True:
         txt = STATUS.read_text() if STATUS.exists() else ""
-        busy = [l for l in txt.splitlines() if l.startswith(("CLAIM", "BUSY", "WAIT"))]   # (our own builds too)
-        if not busy:
+        busy = [l for l in txt.splitlines() if l.startswith(("CLAIM", "BUSY", "WAIT")) and "normal use" not in l]
+        used = [g for g, (u, _) in TC.smi(list(gpus)).items() if u > 500] if not busy else []
+        if not busy and not used:
             return
-        print("waiting on:", busy[0], flush=True)
+        print("waiting on:", busy[0] if busy else "cards %s not empty" % used, flush=True)
         time.sleep(60)
 
 
