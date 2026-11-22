@@ -173,6 +173,8 @@ public:
     int tensor_parallel() const;
     int eos() const;
     const Stats& stats() const;
+    /// a prompt's experts streamed to each GPU since the last call (MB, the passes' and the bounce fills' seconds); ""
+    std::string stream_report();
     std::vector<std::string> info_lines() const;
     /// --room-report's measurement, the server's INFO keys (empty: not asked, or the start did not fit):
     /// "room_rows=f16|q8 room_drafter=0|1 room_streamed=0|1 room_gpus=<PCI bus id>,<free>,<slack>;..." - each GPU's

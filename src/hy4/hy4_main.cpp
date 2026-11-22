@@ -1280,6 +1280,7 @@ int serve(hy4::Model& m, const std::vector<int>& eos, int n_draft, float floor0,
                      r.ids.size(), from, r.ids.size() - from, t1 - t0,
                      t1 > t0 ? 1000.0 * (double) (r.ids.size() - from) / (t1 - t0) : 0.0, produced, t2 - t1,
                      t2 > t1 ? 1000.0 * (double) produced / (t2 - t1) : 0.0);
+        if (const std::string sr = m.stream_report(); !sr.empty()) std::fprintf(stderr, "saguaro hy4 serve: streamed: %s\n", sr.c_str());
     }
     return 0;
 }

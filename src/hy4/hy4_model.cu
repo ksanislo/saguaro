@@ -323,6 +323,7 @@ struct Layer {
 
 struct Gpu {
     int dev = 0;
+    double xs_fill = 0, xs_pass = 0, xs_mb = 0;   // (a prompt's streamed experts: bounce fill s, whole passes s, MB to the GPU)
     int sH = 64, sFF = 0;       // (its scratch's most heads and widest FFN: a tensor-parallel member's share; 0: n_ff)
     double bw = 0;              // its memory's measured GB/s (a copy within it)
     cudaStream_t s = nullptr;
@@ -6389,12 +6390,15 @@ struct Model::Impl {
                 lane->parallel_for(np * 3, copy);
             }
             if (!own_ids) st.stream_ms += (now_s() - tc) * 1e3;
+            gp.xs_fill += now_s() - tc;
+            gp.xs_mb += (double) np * l.blob / 1e6;
             CK(cudaMemcpyAsync(gp.stage, bounce, (size_t) np * l.blob, cudaMemcpyHostToDevice, s));
             for (int e = 0; e < ne; ++e) pmap_h[e] = -1;
             for (int i = 0; i < np; ++i) pmap_h[u[p0 + (size_t) i]] = i;
             CK(cudaMemcpyAsync(gp.pmap, pmap_h, sizeof(int) * ne, cudaMemcpyHostToDevice, s));
             if (!experts_sets(l, gp, T, err, gp.pmap, gp.stage, np, true)) return false;
             CK(cudaStreamSynchronize(s));   // (the bounce and the map are the next pass's)
+            gp.xs_pass += now_s() - tc;
             if (!own_ids) st.streamed += np;
         }
         return true;
@@ -9093,6 +9097,18 @@ void Model::set_images(std::vector<Image> images) {
     m->imgs = std::move(images);
 }
 const Stats& Model::stats() const { return m->st; }
+std::string Model::stream_report() {
+    std::string r;
+    for (Gpu& gp : m->G) {
+        if (gp.xs_pass <= 0) continue;
+        char b[160];
+        std::snprintf(b, sizeof b, "%sGPU %d: %.0f MB in %.2f s of passes (%.2f s filling the bounce)", r.empty() ? "" : "; ",
+                      gp.dev, gp.xs_mb, gp.xs_pass, gp.xs_fill);
+        r += b;
+        gp.xs_fill = gp.xs_pass = gp.xs_mb = 0;
+    }
+    return r;
+}
 std::vector<std::string> Model::info_lines() const { return m->info; }
 std::string Model::room_report() const { return m->room_out; }
 
