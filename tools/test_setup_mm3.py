@@ -42,7 +42,7 @@ class Gate(unittest.TestCase):
                 patch.object(maya, "warn", lambda *a: None), patch.object(maya.S, "is_wsl", return_value=False):
             maya.check_pc(args(backend=backend), "minimax")
 
-    def test_amd_experimental(self):
+    def test_amd(self):
         """AMD: the EXL3 quant goes on to the AMD PC check with an experimental warning (as GLM's EXL3 there), the
         GGUFs without one; neither is refused, and MiniMax's HIP check does not say "text only"."""
         for gguf in (False, True):
@@ -52,9 +52,7 @@ class Gate(unittest.TestCase):
                     patch.object(maya, "check_hip_pc", lambda a, **kw: hip.append(kw) or {"backend": "hip"}):
                 self.assertEqual(maya.check_pc(args(backend="hip"), "minimax", gguf=gguf), {"backend": "hip"})
             self.assertEqual(hip, [{"text_only": False}])
-            self.assertEqual(len(said), 0 if gguf else 1)
-            if not gguf:
-                self.assertIn("experimental", said[0])
+            self.assertEqual(said, [])
 
     def test_amd_quants_offered(self):
         """AMD is offered the EXL3 quant and the published GGUFs, as NVIDIA is (the EXL3 one marked experimental)."""
@@ -75,7 +73,7 @@ class Gate(unittest.TestCase):
             labels = {kind(r[0]): r for r in seen["rows"]}
             self.assertEqual(sorted(labels), ["EXL3", "Maya-S", "Maya-XS"])
             self.assertTrue(all(r[0].startswith("MiniMax M3.1") for r in seen["rows"]))   # (the model's name first)
-            self.assertEqual("experimental on AMD" in labels["EXL3"][2], amd)
+            self.assertNotIn("experimental", labels["EXL3"][2])
             self.assertTrue(all("text only" not in r[2] for r in seen["rows"]))
             # (the recommendation counts the GPUs' memory: 64 + 96 GB on AMD holds Maya-S, 64 + 32 GB Maya-XS)
             rec = [r[0] for r in seen["rows"] if r[1] == "recommended"]
