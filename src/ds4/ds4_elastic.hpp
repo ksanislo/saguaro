@@ -333,8 +333,12 @@ struct Pool {
 };
 #else
 struct Pool {   // (HIP: no virtual memory calls here - init refuses, every conversation's KV allocated whole)
+    // (the members the CUDA pool's callers name, empty: init refuses, so none is ever used on HIP)
     struct Buf {
         int di = 0;
+        uintptr_t va = 0;
+        size_t cap = 0;
+        std::vector<uint64_t> h;
         size_t rb = 0;
         int64_t ratio = 1, max_rows = 0;
         size_t bytes_for(int64_t) const { return 0; }
@@ -356,10 +360,14 @@ struct Pool {   // (HIP: no virtual memory calls here - init refuses, every conv
     bool grow(int, int64_t, size_t& added) { return (added = 0) != 0; }
     size_t release(int) { return 0; }
     size_t held(int) const { return 0; }
+    size_t held_dev(int) const { return 0; }
+    size_t lack(int, int, int64_t) const { return 0; }
     size_t idle_bytes() const { return 0; }
     size_t made_bytes() const { return 0; }
     struct Tail {
+        uintptr_t va = 0;
         size_t bytes = 0;
+        std::vector<uint64_t> h;
     };
     std::vector<Tail> tails;
     std::vector<std::vector<int>> idle;
