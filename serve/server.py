@@ -668,6 +668,62 @@ def lp_attach(tok: LpToken, fields: list[str]) -> LpToken:
     return tok
 
 
+def ik2_decode_stats(line: str) -> dict | None:
+    """saguaro-ik2's "decode stats: N tokens, H expert hits, M misses (..)" (SAGUARO_IK2_STATS=1, before its DONE) as
+    DONE's hit fields: the experts the answer's tokens found in VRAM, of those they asked for."""
+    m = re.match(r"decode stats: \d+ tokens, (\d+) expert hits, (\d+) misses", line)
+    return {"hits": int(m.group(1)), "lookups": int(m.group(1)) + int(m.group(2))} if m else None
+
+
+def ik2_log_facts(text: str, ctx: int) -> dict:
+    """What saguaro-ik2's start lines (its log) say of where the model went, under the names the other engines' INFO
+    lines give them (the Monitor's facts): the routed experts, the VRAM cache's slots over its GPUs and its size, the
+    experts kept in pinned host memory, the K / V cache's size at this context."""
+    out: dict = {}
+    m = re.search(r"saguaro ik2: (\d+) layers.*?, (\d+) experts \(", text)
+    experts = int(m.group(1)) * int(m.group(2)) if m else 0
+    pools = {int(g): (int(n), float(gib)) for g, n, gib in
+             re.findall(r"expert cache, GPU (\d+): (\d+) slots across \d+ pools? \(([\d.]+) GiB\)", text)}
+    if experts:
+        out["experts"] = experts
+        if pools:
+            out["expert_slots"] = min(experts, sum(n for n, _ in pools.values()))
+            out["cache_gb"] = round(sum(g for _, g in pools.values()), 2)
+    m = re.search(r"experts in pinned .*?memory: ([\d.]+) GiB", text)
+    if m and experts:
+        out["ram_slots"], out["ram_gb"] = experts, float(m.group(1))
+    m = re.search(r"kv cache: \S+ \(([\d.]+) GiB", text)
+    if m and ctx > 0:
+        out["kv_gb"], out["kv_ctx"] = float(m.group(1)), int(ctx)
+    return out
+
+
+def ik2_vision_gpu(cards: list, need: int, free_of) -> int | bool:
+    """Where Inkling 2's on-demand image encoder starts: the config's GPU with the most free memory when that holds
+    what the encoder measured (its number, as nvidia-smi numbers them), else False - the CPU."""
+    free, gpu = max(((free_of(g) or 0), -i, g) for i, g in enumerate(cards))[::2]
+    return int(gpu) if free >= need else False
+
+
+def ik2_stat(info: dict, last: dict) -> dict | None:
+    """An answer's figures as the STAT reading the Monitor's "Where the experts live" draws (saguaro-ik2 prints none
+    while it writes: this is the finished answer's, from its DONE and "decode stats:" lines)."""
+    n, ms, look = int(last.get("generated") or 0), float(last.get("decode_ms") or 0), int(last.get("lookups") or 0)
+    experts, slots = int(info.get("experts") or 0), int(info.get("expert_slots") or 0)
+    whole = experts > 0 and slots >= experts            # (every expert in VRAM: its tokens ask the cache for none)
+    if n <= 0 or ms <= 0 or not (look or whole):
+        return None
+    hits = int(last.get("hits") or 0)
+    st = {"tok_s": round(1000.0 * n / ms, 2), "ms_tok": round(ms / n, 2),
+          "vram_hit": round(hits / look, 4) if look else 1.0, "ram_fetch": round((look - hits) / n, 3), "disk": 0.0}
+    if experts and slots:
+        st.update(vram_used=slots, ram_used=experts - slots, disk_gb=0.0)
+        if info.get("ram_gb") and info.get("cache_gb"):
+            st.update(vram_gb=min(float(info["cache_gb"]), float(info["ram_gb"])),
+                      ram_gb=round(max(0.0, float(info["ram_gb"]) - float(info["cache_gb"])), 2))
+    return st
+
+
 def engine_token(field: str) -> int:
     """A T line's id.  Below 0 it is no token: an engine whose sample failed (maya-ds4 before #619, or one an
     update could not rebuild) wrote -1 as one - an error for the request, never an id for the tokenizer and the
@@ -1048,6 +1104,8 @@ class StrataEngine:
         self.spawn = (exe, list(args), cwd, log, env)   # to start it again after it died (issue #27)
         paths = {k: v for k, v in zip(args, args[1:]) if k in ("--native", "--pack")}
         self.model_path = paths.get("--native") or paths.get("--pack", "pack/full")
+        if Path(exe).name.startswith(("saguaro-ik2", "maya-ik2")) and "--model" in args[:-1]:   # (its GGUF: /props)
+            self.model_path = args[args.index("--model") + 1]
         self.log_path = log
         self.log = open(log, "a", encoding="utf-8") if log else subprocess.DEVNULL
         loading = threading.Event()                     # set once READY: the narrator below stops
@@ -1075,9 +1133,12 @@ class StrataEngine:
             self.info["version"] = json.loads((Path(exe).parent / "BUILD.json").read_text()).get("version")
         except (OSError, ValueError):
             self.info["version"] = None
+        head = []                        # its other lines before READY (saguaro-ik2's start lines)
         for line in self.proc.stdout:
             if line.startswith("NOTE "):
                 print("[saguaro] " + line[5:].strip(), flush=True)
+            elif not line.startswith(("INFO ", "VRAM ", "READY")) and len(head) < 400:
+                head.append(line)
             if line.startswith("INFO "):
                 for kv in line.split()[1:]:
                     k, _, v = kv.partition("=")
@@ -1106,6 +1167,11 @@ class StrataEngine:
             self.info["version"] = str(self.info["engine"])
         if log:
             self._context_cost(log_start)
+        if self.info.get("engine_kind") == "ik2":
+            # saguaro-ik2 says where the model went on its stdout, before INFO: the Monitor's facts, and the log's
+            for k, v in ik2_log_facts("".join(head), self.max_context).items():
+                self.info.setdefault(k, v)                # (an engine that says it itself, INFO: its own figure)
+            self._ik2_log(head)
         # the engine's stdout on a thread, so a request can wait with a timeout (heartbeats, cancel checks)
         self.lines: queue.Queue = queue.Queue()
         threading.Thread(target=self._pump, daemon=True).start()
@@ -1126,6 +1192,35 @@ class StrataEngine:
         if per:
             self.info["kv_ctx"] = max(c for c, _ in per.values())
             self.info["kv_gb"] = round(sum(g for _, g in per.values()), 3)
+
+    def _ik2_eof(self):
+        """After QUIT, saguaro-ik2 only: its stdin closed.  Its exit waits for the thread that reads stdin (exit()
+        flushes every stream, and that thread holds stdin's lock inside its read), so it ends at the end of input."""
+        if (getattr(self, "info", None) or {}).get("engine_kind") == "ik2":
+            try:
+                self.proc.stdin.close()
+            except (OSError, ValueError):
+                pass
+
+    def _ik2_done(self, stats):
+        """saguaro-ik2's "decode stats:" with the DONE after it: the answer's hit fields, and the Monitor's reading."""
+        if stats:
+            if stats["lookups"]:
+                self.last.update(stats)
+            st = ik2_stat(self.info, self.last)
+            if st:
+                self._parse_stat("STAT " + " ".join(f"{k}={v}" for k, v in st.items()))
+
+    def _ik2_log(self, lines):
+        """saguaro-ik2's plain stdout lines (its start, a request's stats) into the engine log, where the other
+        engines' are."""
+        log = getattr(self, "log", None)
+        if hasattr(log, "write"):
+            try:
+                log.write("".join(lines))
+                log.flush()
+            except (OSError, ValueError):
+                pass
 
     def set_context(self, n: int):
         """The next start's context: --max-context in the command (restart() runs it)."""
@@ -1383,7 +1478,12 @@ class StrataEngine:
         keys = self.sampling_keys(sampling)
         if (getattr(self, "info", None) or {}).get("engine_kind") != "ik2":
             return keys
-        return "".join(" " + w for w in keys.split() if w.partition("=")[0] in self.IK2_GEN_KEYS)
+        out = [w for w in keys.split() if w.partition("=")[0] in self.IK2_GEN_KEYS]
+        # its own top_k: up to its 1000 candidates, and 0 is "off" (the other engines' cap of 64 is not its)
+        tk = sampling.get("top_k")
+        out = [f"top_k={min(tk, 1000)}" if w.startswith("top_k=") else w for w in out
+               if not (w.startswith("top_k=") and tk < 1)]
+        return "".join(" " + w for w in out)
 
     @staticmethod
     def sampling_keys(sampling: dict) -> str:
@@ -1548,6 +1648,7 @@ class StrataEngine:
         # logprobs: a token is held until its LP line, which the engine writes right after its T line (an engine that
         # writes none for it: the token goes on at the next other line, without them)
         want_lp, lp_wait = logprobs_asked(sampling) is not None, None
+        ik2, ik2_stats = (getattr(self, "info", None) or {}).get("engine_kind") == "ik2", None
         try:
             while True:
                 try:
@@ -1610,12 +1711,16 @@ class StrataEngine:
                     print("[saguaro] " + line[5:].strip(), flush=True)
                 elif line.startswith("DONE"):
                     self._parse_done(line)
+                    self._ik2_done(ik2_stats)
                     done = True
                     return
                 elif line.startswith("ERR"):
                     done = True
                     self._done_after_err()        # (maya-ds4 / maya-mm3 end the request with a DONE after it)
                     raise ValueError(line[4:].strip())
+                elif ik2 and line.startswith(("decode stats:", "prefill stats:", "prefill sources:")):
+                    ik2_stats = ik2_decode_stats(line) or ik2_stats
+                    self._ik2_log([line])
         finally:
             if not done:                                  # the consumer stopped early: stop the engine, drain to DONE
                 if self.can_stop:
@@ -1660,8 +1765,13 @@ class StrataEngine:
                     if line.startswith("ERR"):
                         self._done_after_err()
                         break
+                    if ik2 and line.startswith(("decode stats:", "prefill stats:", "prefill sources:")):
+                        ik2_stats = ik2_decode_stats(line) or ik2_stats   # (an answer that ended at its stop token:
+                        self._ik2_log([line])                             #  its last lines are read here)
+                        continue
                     if line.startswith("DONE"):
                         self._parse_done(line)
+                        self._ik2_done(ik2_stats)
                         if said:
                             print(f"[saguaro] the stopped request ended after {heard - t0:.0f} s", flush=True)
                         break
@@ -1902,6 +2012,7 @@ class StrataEngine:
                 self.proc.stdin.write("STOP\n")         # alone lets it run to max_tokens before the engine ends
             self.proc.stdin.write("QUIT\n")
             self.proc.stdin.flush()
+            self._ik2_eof()
             end = time.monotonic() + wait
             src = getattr(self, "lines", None)          # after start-up the pump thread owns stdout: read its queue
             while self.proc.poll() is None and time.monotonic() < end:
@@ -1966,8 +2077,12 @@ class Vision:
             self.lend()
         args, env = self.args, self.env
         if self.room is not None:
-            self.on_gpu = bool(self.room())
-            print(f"[saguaro] images: reading the pictures on the {'GPU' if self.on_gpu else 'CPU'}", flush=True)
+            where = self.room()                           # (True / False, or the GPU's number: Inkling 2 on two cards)
+            self.on_gpu = where is not False and where is not None
+            if self.on_gpu and where is not True:
+                env = dict(env if env is not None else os.environ, CUDA_VISIBLE_DEVICES=str(int(where)))
+            print("[saguaro] images: reading the pictures on " +
+                  (("the GPU" if where is True else f"GPU {int(where)}") if self.on_gpu else "the CPU"), flush=True)
             if not self.on_gpu:
                 args = [x for x in args if x != "--gpu"] + \
                     (["--threads", str(self.cpu_threads)] if self.cpu_threads and "--threads" not in args else [])
@@ -8232,14 +8347,16 @@ def main() -> int:
                 # Inkling 2 (its engine lends no memory and keeps none for pictures): the encoder starts when a picture
                 # arrives - on the GPU when its free memory then holds what the encoder measured, else on the CPU -
                 # and ends once the request's pictures are read
-                need, gi = fp[1], (gpu_list(cfg) or [0])[0]
+                need, cards = fp[1], gpu_list(cfg) or [0]
                 vision = Vision(vcfg, log=vlog, env=venv, start=False)
-                vision.room = lambda: (gpu_free_bytes(gi) or 0) >= need
+                vision.room = lambda: ik2_vision_gpu(cards, need, gpu_free_bytes)
                 vision.cpu_threads = max(1, (os.cpu_count() or 2) // 2)
-                free = gpu_free_bytes(gi)
-                print(f"[saguaro] images: the vision encoder starts when a picture arrives - on GPU {gi} while "
-                      f"{need / 2**30:.2f} GB of it is free ({(free or 0) / 2**30:.2f} GB now), else on the CPU; "
-                      "no VRAM kept for it", flush=True)
+                free = {g: (gpu_free_bytes(g) or 0) for g in cards}
+                print(f"[saguaro] images: the vision encoder starts when a picture arrives - on "
+                      f"{'the GPU of ' + ', '.join(map(str, cards)) + ' with the most free memory' if len(cards) > 1 else f'GPU {cards[0]}'}"
+                      f" while {need / 2**30:.2f} GB of it is free ("
+                      + ", ".join(f"GPU {g}: {b_ / 2**30:.2f} GB" for g, b_ in free.items()) +
+                      " now), else on the CPU; no VRAM kept for it", flush=True)
             else:   # the model's GPU memory is too small to lend that much (or an engine without lending)
                 print("[saguaro] images: the model cannot lend the vision encoder its GPU memory here - the encoder "
                       "runs on the CPU", flush=True)
