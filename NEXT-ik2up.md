@@ -109,3 +109,13 @@ Card runs only through /data/llm/bench/night-queue/queue.txt (IK2_NO_CLAIM=1, ca
   decode 300 tok: 81.7 tok/s at ~50 deep, 73.2 at 8K; read 8K 1138 tok/s (7.07 s); first token 0.42 s (50 tok).
   serve_check (server.py, no pictures yet - mmproj downloading): 20/20 PASS (chat, thinking, tools, stops, Monitor).
   ik2_kernels_test: 349 ok, 1 FAIL (moe_combine_conv bit-equality vs moe_combine_f32 + conv4_res) - upstream kernels.
+
+## INTERIM STATUS (16:5x MST; I cannot reach the coordinator by message - this file is the status)
+- Built: mangonel build-ik2up (CUDA sm_75); mortar /storage/llm/saguaro/ik2-up/build-hip-ik2 (HIP gfx1201, branch
+  test/ik2-up via git bundle over ssh - the GitHub push was denied by the permission system).
+- Files on mortar /opt/llm/models: UD-Q4_K_XL + mmproj (sha256 match upstream's), T4 quant (sha256 = mangonel's).
+- Running now on mortar: UD-Q4_K_XL offload path on HIP (SAGUARO_IK2_OFF=1 + WARM) serve_check with pictures + bench,
+  then the quant again with pictures. mangonel queue: runs/r6/r6.sh (2-card + quant) at the end of queue.txt.
+- First numbers: mortar quant resident 81.7 / 73.2 tok/s decode (short / 8K), 8K read 1138 tok/s, 20/20 serve checks;
+  mangonel 1 T4 UD offload 23.7 / 25.8 / 24.1 vs our port 42.0 / 38.5 / 35.1 (decode -40 %), reads ~equal;
+  2 T4s PASS after a device-current fix (50 tok/s short decode).
