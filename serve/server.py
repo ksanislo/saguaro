@@ -1332,12 +1332,12 @@ class StrataEngine:
         for line in reversed(tail.splitlines()):
             if "issue #29" in line:
                 return ("The engine stopped itself because it had stopped making progress - a hang it caught. Its log "
-                        "line: " + line.strip() + " - please report it at github.com/mw00/project-maya/issues.")
+                        "line: " + line.strip() + " - please report it at github.com/ksanislo/saguaro/issues.")
             if "a GPU's state is unknown" in line:
                 return ("The engine stopped itself because a GPU took a fault inside a kernel (an illegal address or "
                         "the like), after which that GPU's state is lost; a fresh engine starts with the next request. "
                         "Its log line: " + line.strip() + " - the lines above it name the GPU and the error; please "
-                        "report it at github.com/mw00/project-maya/issues.")
+                        "report it at github.com/ksanislo/saguaro/issues.")
         if getattr(getattr(self, "proc", None), "returncode", None) in (-2, -15):   # (#539: read as a lack of RAM)
             return ("A signal from outside ended it (SIGINT or SIGTERM: Ctrl+C, kill, a service manager), not a lack "
                     "of RAM.")

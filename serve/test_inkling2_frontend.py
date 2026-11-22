@@ -286,7 +286,7 @@ class Serving(unittest.TestCase):
 
 
 class Defaults(unittest.TestCase):
-    CFG = {"exe": "/opt/llm/saguaro/bin/saguaro-ik2", "args": ["--model", "/models/Inkling-2-Mini-UD-Q4_K_XL.gguf",
+    CFG = {"exe": "/saguaro/bin/saguaro-ik2", "args": ["--model", "/models/Inkling-2-Mini-UD-Q4_K_XL.gguf",
                                                                "--max-context", "32768"],
            "model_name": "Inkling-2-Mini-UD-Q4_K_XL"}
 

@@ -94,8 +94,9 @@ def ask(question, choices, default, yes):
     while True:
         try:
             a = input(f"{question} [{default}]: ").strip()
-        except EOFError:
-            return default
+        except EOFError:   # (no terminal, or its input ran out: never install or build on defaults nobody saw)
+            fail(f"no answer to \"{question.strip()}\": the input is not a terminal (or ran out)",
+                 "run it in a terminal to answer its questions, or pass --yes to take every default")
         if not a:
             return default
         if a.lower() in [c.lower() for c in choices]:

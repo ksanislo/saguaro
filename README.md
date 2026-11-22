@@ -14,7 +14,7 @@ AMD and Windows (experimental) · chat, pictures, OpenAI- and Anthropic-compatib
 
 Models this size usually need a datacenter. Saguaro runs them on the hardware you already have:
 **GLM-5.3-Flash**, **DeepSeek-V4.1-Flash-1017**, **MiniMax-M3.1-Flash**, **Qwen3.8-Flash-Next**, **Hy4-Flash** and -
-for a PC with one or two 16 GB cards - **Inkling 2 Mini**. Each model has an engine built for it. It keeps the experts your conversation uses most on the GPU, the next ones in RAM and the rest on
+for a PC with one or two 16 GB NVIDIA cards - **Inkling 2 Mini**. Each model has an engine built for it. It keeps the experts your conversation uses most on the GPU, the next ones in RAM and the rest on
 your NVMe SSD, and moves them as you chat. It measures your GPUs, CPU, RAM and SSD and tunes itself to them. Nothing
 leaves your machine.
 
@@ -71,9 +71,11 @@ recommends one for your PC; to pick one yourself, give its setup id: `./setup.sh
 | **[Hy4-Flash](https://huggingface.co/tencent/Hy4-flash)**<br><sub>Tencent · [Tencent Hy License](LICENSE.hy4-flash) · 220 B · NVIDIA, Linux · one conversation at a time</sub> | **Maya-S** · `hy4-flash-maya-s`<br>Maya-XS · `hy4-flash-maya-xs`<br>Maya-M · `hy4-flash-maya-m`<br>Maya-L · `hy4-flash-maya-l` | 53.0 GB<br>44.8 GB<br>68.4 GB<br>89.5 GB<br>each + one 63.4 GB n-gram table | four 16 GB cards: Maya-S on 4x Tesla T4 writes ~32 tokens/s (measured; the other sizes are not yet) - [docs/HY4-FLASH.md](docs/HY4-FLASH.md) |
 | **[Inkling 2 Mini](https://huggingface.co/thinkingmachines/Inkling-2-Mini)**<br><sub>Thinking Machines · Apache 2.0 · 26 B · NVIDIA T4 / RTX 20 and newer, Linux · reads pictures · one conversation at a time</sub> | unsloth UD-Q4_K_XL · `inkling-2-mini` | 18.3 GB | **one or two 16 GB cards**: ~42 tokens/s on one Tesla T4, ~52 on two (measured) - [docs/INKLING2-MINI.md](docs/INKLING2-MINI.md) |
 
-GLM, DeepSeek and MiniMax run on NVIDIA from the V100 / RTX 20 on, and on AMD and Windows (experimental; see
-[What you need](#what-you-need)); Hy4-Flash and Inkling 2 Mini on NVIDIA under Linux. With one or two cards under
-24 GB and no model set up yet, the setup recommends Inkling 2 Mini; with four equal 16 GB cards, Hy4-Flash. DeepSeek's sizes include its Engram tables. The setup also offers unsloth's GGUF and
+GLM, DeepSeek and MiniMax run on NVIDIA from the V100 / RTX 20 on, and on Windows (experimental; see
+[What you need](#what-you-need)); Hy4-Flash and Inkling 2 Mini on NVIDIA under Linux. On AMD GPUs (experimental) only
+some engines build today - [the list](docs/AMD_SAGUARO.md#what-runs-on-amd). With one or two NVIDIA cards under 24 GB
+and no model set up yet, the setup recommends Inkling 2 Mini; with four equal 16 GB cards, Hy4-Flash; on AMD,
+GLM-5.3-Flash in the largest quant that fits VRAM + RAM. DeepSeek's sizes include its Engram tables. The setup also offers unsloth's GGUF and
 LibertAIDAI's EXL3 quants of DeepSeek, orcarouter's abliterated DeepSeek, Mia-AiLab's EXL3 quant of MiniMax,
 turboderp's EXL3 quants of GLM, and Saguaro's fourth family, **Qwen-3.8-Flash-Next** (CYBER-FROST), as its Q5_K_M GGUF
 on the `saguaro-qfn` engine (from Strata), with pictures
@@ -233,7 +235,7 @@ slowest while the caches fill with what you use.
 
 | | |
 | --- | --- |
-| **GPU** | NVIDIA, compute capability 7.0 or newer (V100, RTX 20 and newer): one, or up to 16 that share the model. More VRAM is faster. Pascal (Tesla P40 / P100, GTX 10) is experimental, not validated yet. **AMD (experimental):** RX 7900 XT / XTX, Radeon AI PRO R9700 / RX 9070, Strix Halo and Gorgon Halo (Radeon 8060S / 8065S); RX 6800 / 6900 and Radeon PRO V620 / W6800 not validated yet; GLM-5.3-Flash and DeepSeek-V4.1-Flash-1017 read pictures there too - [docs/AMD_SAGUARO.md](docs/AMD_SAGUARO.md) |
+| **GPU** | NVIDIA, compute capability 7.0 or newer (V100, RTX 20 and newer): one, or up to 16 that share the model. More VRAM is faster. Pascal (Tesla P40 / P100, GTX 10) is experimental, not validated yet. **AMD (experimental):** RX 7900 XT / XTX, Radeon AI PRO R9700 / RX 9070, Strix Halo and Gorgon Halo (Radeon 8060S / 8065S); RX 6800 / 6900 and Radeon PRO V620 / W6800 not validated yet; which models build for AMD today, with pictures: [docs/AMD_SAGUARO.md](docs/AMD_SAGUARO.md#what-runs-on-amd) |
 | **RAM** | 32 GB runs it. More RAM keeps more experts close and is faster |
 | **Disk** | **A fast NVMe SSD** with room for the model (~100 GB for GLM-5.3 · Maya-S, ~160 GB for GLM-5.3 · Maya-L, ~350 GB for DeepSeek V4.1 · Maya-S, ~470 GB for unsloth's Q8 GGUF of it, ~95 GB for MiniMax M3.1 · Maya-XS, ~200 GB for MiniMax-M3.1-Flash's EXL3 quant) and its picture encoder (1.1 GB). Not a hard disk |
 | **System** | Linux (x86-64; a CPU with AVX2 is best), the NVIDIA driver, CUDA 12.x (CUDA 13 works for RTX 20 and newer, not for the V100 or Pascal), g++, Python 3.10+. Windows 10/11 (experimental): [docs/WINDOWS.md](docs/WINDOWS.md). Not WSL2. AMD: ROCm 7 |
@@ -264,7 +266,7 @@ The setup shows every download before it starts it, builds everything once (20-4
 ## Something went wrong?
 
 Run **`./saguaro.sh --report`** (Windows: `START-SAGUARO.bat --report`) right after a slow answer or an error, and attach the
-`saguaro-report.txt` it writes to a [GitHub issue](https://github.com/mw00/project-maya/issues). It holds your hardware,
+`saguaro-report.txt` it writes to a [GitHub issue](https://github.com/ksanislo/saguaro/issues). It holds your hardware,
 your setup and the engine's speed lines; nothing is sent anywhere by itself. The engine's own log is
 `maya-<model>.log` in the Saguaro folder.
 

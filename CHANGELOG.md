@@ -19,6 +19,22 @@ older multi-GPU hardware (NVIDIA Turing T4 - sm_75 tensor cores, Xeon AVX1 CPUs)
 - **Credits:** built on Project Maya ([mw00/project-maya](https://github.com/mw00/project-maya)) and Strata (MIT) -
   see NOTICE.md. Everything below the next section is upstream Project Maya history.
 
+### A new user's first run, AMD first (2026-11-22)
+
+- **On AMD the setup recommends a model** - GLM-5.3-Flash in the largest quant that fits the GPUs' VRAM and the RAM
+  (a 16 GB RX 9070 XT with 96 GB of RAM: Maya-XS, not Maya-S) - and marks the models with no AMD engine yet (Hy4-Flash,
+  Inkling 2 Mini) with the reason; picking one stops before anything is built, saying so. `--check` lists which
+  models have an AMD engine, and no longer says "text only" for GLM (it reads pictures there).
+  [docs/AMD_SAGUARO.md](docs/AMD_SAGUARO.md#what-runs-on-amd) has the table.
+- **No silent defaults:** without a terminal (a script, a pipe that runs out) a question stops the setup instead of
+  taking its default; `--yes` takes every default as before.
+- **Saguaro's own names:** new downloads go to `../Saguaro-data/models` (an earlier `../Maya-data/models` is used while
+  it is the only one), the speed calibrations to `~/.config/saguaro/calibration.json` (the old file is read until the
+  first save), bug reports and the update check to [ksanislo/saguaro](https://github.com/ksanislo/saguaro), the setup
+  screen's logo and the banner (the git commit and every model).
+- The sample configs in `configs/` use paths relative to the Saguaro folder; the unpublished one-T4 Inkling quant's
+  config is gone. AMD_RDNA4.md's manual build uses the real CMake options (`STRATA_ENABLE_HIP` ...).
+
 ### Inkling 2 Mini: faster layouts, conversations kept (2026-11-22)
 
 - **Faster on Tesla T4s** (interleaved runs, NEXT-ik2.md): one card now reads prompts in chunks of 2048 with one shared

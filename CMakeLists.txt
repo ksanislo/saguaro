@@ -1795,7 +1795,7 @@ endif()
 # saguaro-qfn (the strata target's OUTPUT_NAME - no renaming), libstrata_kq.so + libstrata_kq_tab.so (one set, loaded
 # from the binary's folder).
 option(SAGUARO_QFN "Build the QFN engine (engines/qfn) as saguaro-qfn" OFF)
-set(SAGUARO_QFN_GGML_DIR "/data/llm/strata-main/third_party/llama.cpp" CACHE PATH "the llama.cpp checkout engines/qfn takes ggml from")
+set(SAGUARO_QFN_GGML_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/llama.cpp" CACHE PATH "the llama.cpp checkout engines/qfn takes ggml from")
 if(SAGUARO_QFN AND STRATA_ENABLE_CUDA)
   include(ExternalProject)
   ExternalProject_Add(qfn_engine

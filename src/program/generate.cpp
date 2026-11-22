@@ -356,7 +356,7 @@ struct Options {
 
 void usage() {
     std::fprintf(stderr,
-                 "maya generate --pack DIR --tokens \"1,2,3\" [options]\n"
+                 "saguaro-glm --pack DIR --tokens \"1,2,3\" [options]\n"
                  "\n"
                  "  --pack DIR           the pack directory (default pack/full)\n"
                  "  --glm-pack DIR       a GLM-5.3-Flash pack (M3.1): the verified Glm5Model runner behind the\n"
@@ -6513,7 +6513,7 @@ int main(int argc, char** argv) {
                 std::fprintf(stderr,
                              "saguaro generate: %s declares architecture %s (GLM-5.3-Flash)\n"
                              "saguaro generate: the qwen4exp driver path cannot serve it - run the pack instead:\n"
-                             "saguaro generate:   maya generate --glm-pack <pack_dir> --tokens ... (the verified\n"
+                             "saguaro generate:   saguaro-glm --glm-pack <pack_dir> --tokens ... (the verified\n"
                              "saguaro generate:   Glm5Model runner; docs/GLM5-FLASH.md §9)\n",
                              o.native_preset.c_str(), v->s.c_str());
                 return 2;

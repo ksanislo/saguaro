@@ -4,9 +4,9 @@
 Hy4-Flash (--model hy4-flash-maya-s; four cards) and Inkling 2 Mini (--model inkling-2-mini; one or two 16 GB cards):
 NVIDIA on Linux, each on its own engine (build/saguaro-hy4, build/saguaro-ik2) - docs/HY4-FLASH.md, docs/INKLING2-MINI.md.
 GLM-5.3-Flash: CUDA on Linux and Windows (experimental); HIP: experimental gfx1100/gfx1201/gfx1151 (gfx1030: not
-validated), Linux and Windows, text only; Metal: experimental, macOS on Apple Silicon, GLM-5.3-Flash only, text only,
-one conversation at a time.  DeepSeek-V4.1-Flash-1017 and MiniMax-M3.1-Flash: CUDA from V100 on, Linux
-and Windows; their GGUFs on HIP too (their EXL3 quants: experimental there).
+validated), Linux and Windows, pictures too; Metal: experimental, macOS on Apple Silicon, GLM-5.3-Flash only, text
+only, one conversation at a time.  DeepSeek-V4.1-Flash-1017 and MiniMax-M3.1-Flash: CUDA from V100 on, Linux and
+Windows.  Which engines build for AMD (HIP) in this version: docs/AMD_SAGUARO.md, "What runs on AMD".
 The quants are named model first, then the tier by the experts' bits (XS, S, M, L): --model glm-maya-s,
 deepseek-maya-xs, minimax-maya-xs ... (tools/maya_quants.py); every name used before still works.
 
@@ -52,7 +52,7 @@ The tuning (tools/calibrate_glm.py): decode speed measured with a few splits of 
 experts between the CPU and the PCIe link, with fewer and more CPU threads, and - when part of the model is read from
 the SSD - with smaller disk reads, in one engine run (~10-15 minutes, the model loads first); a setting is kept when
 it is more than 3% faster than the engine's own choice.  The result goes into the config's "env" (SAGUARO_GLM_PCIE_SHARE,
-SAGUARO_GLM_CPU_LANE, SAGUARO_GLM_READ_CHUNKS) and into ~/.config/project-maya/calibration.json for this PC, model and
+SAGUARO_GLM_CPU_LANE, SAGUARO_GLM_READ_CHUNKS) and into ~/.config/saguaro/calibration.json for this PC, model and
 context, so a setup again keeps it.  DeepSeek-V4.1-Flash-1017's (tools/calibrate_ds4_tp.py, ./saguaro.sh --calibrate only):
 decode speed with each --tp that groups the GPUs differently and with fewer CPU threads, an engine start each (~25-40
 minutes on 9 GPUs); a setting is kept when it is more than 5% faster and still reads a long prompt at 60% of the
@@ -736,6 +736,17 @@ IK2_TOKENIZER_TOOLS = ("tools/strata_tokenizer.py", "tools/ik2/chat_template.jin
 IK2_DIR = "saguaro-ik2"                            # (in the model's folder: tokenizer/, sources.json)
 IK2_MODEL_NAME = "inkling-2-mini"
 FAMILIES = ("glm", "deepseek", "minimax", "qwen", "hy4", "ik2")
+FAMILY_SHOWN = {"glm": "GLM-5.3-Flash", "deepseek": DS4, "minimax": MM3, "qwen": QWEN_SHOWN, "hy4": HY4_SHOWN,
+                "ik2": IK2_SHOWN}
+# The models a backend has no engine for in this version (family_unavailable): the model list marks them, the setup
+# stops on them. Take one out when its engine builds and runs there - and update docs/AMD_SAGUARO.md's table with it.
+NO_ENGINE = {
+    "hip": {"hy4": "Hy4-Flash runs on NVIDIA GPUs only for now (its engine has not run on an AMD GPU yet)",
+            "ik2": "Inkling 2 Mini runs on NVIDIA GPUs only for now (no AMD engine yet)"},
+    "metal": {f: "Saguaro's Mac (Metal) engine runs GLM-5.3-Flash only" for f in FAMILIES if f != "glm"},
+}
+NOT_HERE = ("Setup stopped: this model is not supported on this PC's GPU yet - nothing was built or downloaded. "
+            "Another model can be set up here (the list marks the ones that run).")
 SHARD_RE = re.compile(r"-(\d{5})-of-(\d{5})\.gguf$")
 
 
@@ -1264,7 +1275,7 @@ def check_hip_pc(a, installed=False, text_only=True) -> dict:
     if unvalidated:
         warn(f"{', '.join(unvalidated)} (RDNA 2) is experimental: it builds and has the portable kernels, but Saguaro has "
              "not been validated on such a card yet - please report how it goes in an issue "
-             "(https://github.com/mw00/project-maya/issues)")
+             "(https://github.com/ksanislo/saguaro/issues)")
     select_build_backend("hip")
     return {"backend": "hip", "gpus": chosen, "archs": sorted({g["arch"] for g in chosen}), "rocm": str(root),
             **({"rocm_bin": str(bindir)} if WIN else {})}
@@ -1475,19 +1486,17 @@ def check_pc(a, family: str = "glm", gguf: bool = False, ds4_quant: str = "exl3"
         fail(f"{MM3}'s engine (maya-mm3) runs on Linux only for now (its Windows build is on the way)",
              f"set it up on a Linux PC with an NVIDIA GPU ({mm3_gpus()})")
     if family in ("hy4", "ik2"):   # (their engines here: CUDA on Linux - said before anything is built or downloaded)
-        why = IK2F.unsupported(a.backend, WIN, []) if family == "ik2" else (
-            f"{HY4_SHOWN} runs on NVIDIA GPUs only for now (no AMD or Mac engine here yet)"
-            if a.backend in ("hip", "metal") else
-            f"{HY4_SHOWN} runs on Linux only for now (not on Windows yet)" if WIN else None)
+        why = IK2F.unsupported(a.backend, WIN, []) if family == "ik2" else family_unavailable(family, a.backend)
         if why:
-            fail(why, "set it up on a Linux PC with NVIDIA GPUs" + (
-                " (Tesla T4 / RTX 20 and newer, 16 GB or more)" if family == "ik2" else " (V100 / T4 and newer)"))
+            fail(why, "it runs on a Linux PC with NVIDIA GPUs" + (
+                " (Tesla T4 / RTX 20 and newer, 16 GB or more)" if family == "ik2" else " (V100 / T4 and newer)"),
+                 end=NOT_HERE)
     if a.backend == "hip":
         if ds4 and not gguf:   # (as GLM's and MiniMax's EXL3 quants on AMD: experimental)
             warn(f"{DS4}'s EXL3 quants on AMD are experimental: their kernels pass their tests on AMD GPUs, but the "
                  f"whole model has not been measured on one - Saguaro's GGUF quants (--model deepseek-maya-s / "
                  "deepseek-maya-xs) are the tested way there")
-        return check_hip_pc(a, text_only=not mm3)
+        return check_hip_pc(a, text_only=False)   # (every model the setup takes on AMD reads pictures there)
     if a.backend == "metal":
         if family != "glm":
             fail(f"Saguaro's Metal engine runs GLM-5.3-Flash only (no Metal engine for {ds4 and DS4 or mm3 and MM3 or QWEN_SHOWN})",
@@ -1711,6 +1720,29 @@ def hf_name(m: dict, local: Path) -> str:
     return local.name
 
 
+def setup_cards(backend: str | None) -> list:
+    """The GPUs a setup could use, for the model and quant recommendations: NVIDIA's, or on HIP the AMD GPUs its build
+    supports (an iGPU it does not support left out)."""
+    if backend == "hip":
+        return [g for g in S.amd_gpus() if g.get("vram_gb")
+                and g.get("arch") in HIP_ARCHS + HIP_ARCHS_UNVALIDATED + HIP_ARCHS_WAVE64]
+    return [g for g in S.gpus() if g.get("vram_gb")]
+
+
+def vram_and_ram(cards: list) -> float:
+    """GB of VRAM and RAM together (an APU's memory is the RAM: counted once)."""
+    return sum(g["vram_gb"] for g in cards if not hip_unified_memory(g) and not g.get("unified_memory")) + mem_gb()[0]
+
+
+GLM_RAM_SPARE_GB = 16                              # the RAM a GLM quant leaves the system (the HIP config's own headroom)
+
+
+def default_models_dir() -> Path:
+    """Saguaro-data/models next to this folder, or an earlier setup's Maya-data/models there while only that one exists."""
+    new, old = ROOT.parent / "Saguaro-data" / "models", ROOT.parent / "Maya-data" / "models"
+    return old if old.is_dir() and not new.exists() else new
+
+
 def download_dir(models: Path, quant: str) -> Path:
     """A download's folder: <models folder>/<quant> (--models-dir).  Files already there are used where they are:
     in that folder, in <models folder>/glm-5.3-flash-<quant> (an earlier version's downloads), or straight in the
@@ -1788,15 +1820,18 @@ def choose_family(a, prev: dict) -> str:
         return "glm"
     if a.model_dir:                                    # (an EXL3 folder of GLM or MiniMax; else DeepSeek's files)
         return exl3_folder_family(a.model_dir) or "deepseek"
+    backend = getattr(a, "backend", None) or "cuda"
     try:
-        cards = [g for g in S.gpus() if g.get("vram_gb")]
-        have = sum(g["vram_gb"] for g in cards) + mem_gb()[0]
-    except Exception:  # noqa: BLE001 - no NVIDIA tools: no figure for this PC
+        cards = setup_cards(backend)
+        have = vram_and_ram(cards)
+    except Exception:  # noqa: BLE001 - no GPU tools: no figure for this PC
         cards, have = [], None
-    fit = family_fit(cards, mem_gb()[0] if cards else 0.0) if not metal and getattr(a, "backend", None) != "hip" else None
+    fit = family_fit(cards, mem_gb()[0] if cards else 0.0, backend) if not metal else None
     default = config_family(prev) if prev else fit or "glm"
+    if family_unavailable(default, backend):
+        default = "glm"
     here = f" (this PC: {have:.0f} GB)" if have else ""
-    rows = [("GLM-5.3-Flash", None,
+    rows = [("GLM-5.3-Flash", "recommended for this PC" if fit == "glm" else None,
              "Z.ai's GLM-5.3-Flash in Saguaro's GGUF quants (GLM-5.3-Flash-Maya-S to -Maya-L, 95-156 GB) or "
              "turboderp's EXL3 quants: from one GPU up, the experts that do not fit in VRAM from RAM and the SSD; "
              "NVIDIA (AMD: experimental); pictures with its vision encoder."),
@@ -1823,7 +1858,14 @@ def choose_family(a, prev: dict) -> str:
              "read from the SSD; tool calls, its three reasoning efforts, MTP drafting, up to a 256K context; text only."),
             (HY4_SHOWN, "recommended for this PC" if fit == "hy4" else "new", hy4_about(here)),
             (IK2_SHOWN, "recommended for this PC" if fit == "ik2" else "new", ik2_about())]
+    for i, f in enumerate(FAMILIES):   # (a model this PC's GPUs have no engine for: listed, with the reason)
+        why = family_unavailable(f, backend)
+        if why:
+            rows[i] = (rows[i][0], "not on this PC's GPU yet", why + ". " + rows[i][2])
     pick = choose("Model?", ["Which model to set up:"], rows, FAMILIES.index(default), a.yes)
+    why = family_unavailable(FAMILIES[pick], backend)
+    if why:
+        fail(why, f"pick another model: {ME} --setup", end=NOT_HERE)
     return FAMILIES[pick]
 
 
@@ -1849,11 +1891,17 @@ def choose_model(a, models: Path, inst: dict) -> tuple:
             and not (metal and is_exl3(q))]   # (a chosen-by-hand download: only where it is installed; Metal: GGUFs)
     # cards of 24 GB or less: Maya-S24 (its 4-bit attention leaves ~1.5 GB more of the card for experts - decode about
     # 14% faster there), else Maya-S
+    # and where VRAM + RAM (less GLM_RAM_SPARE_GB for the system) cannot hold that one, the largest GGUF quant that fits
     try:
-        cards = [g for g in S.gpus() if g.get("vram_gb")]
-    except Exception:  # noqa: BLE001 - no NVIDIA tools (AMD): no card-based recommendation
-        cards = []
+        cards = setup_cards(getattr(a, "backend", None))
+        room = vram_and_ram(cards) - GLM_RAM_SPARE_GB if cards else None
+    except Exception:  # noqa: BLE001 - no GPU tools: no card-based recommendation
+        cards, room = [], None
     rec = "Maya-S24" if cards and all(g["vram_gb"] <= 24.5 for g in cards) and "Maya-S24" in MODELS else opts[0]
+    if room is not None and MODELS[rec]["download_gb"] > room:
+        fit = [q for q in opts if not is_exl3(q) and MODELS[q]["download_gb"] <= room]
+        rec = max(fit, key=lambda q: MODELS[q]["download_gb"]) if fit else min(
+            (q for q in opts if not is_exl3(q)), key=lambda q: MODELS[q]["download_gb"])
     default = inst["quant"] if inst.get("quant") in MODELS else rec
     rows = []
     for q in opts:
@@ -2516,7 +2564,7 @@ def import_model(a, folder: str) -> int:
     inst = (read_json(have[0]).get("installer") or {}) if have else {}
     models = (Path(a.models_dir).expanduser().resolve() if a.models_dir else
               Path(inst["models_dir"]) if inst.get("models_dir") else
-              Path(inst["data_dir"]) / "models" if inst.get("data_dir") else ROOT.parent / "Maya-data" / "models")
+              Path(inst["data_dir"]) / "models" if inst.get("data_dir") else default_models_dir())
     cat = import_catalog(models)
     say(f"  Looking in {src} for Saguaro's model files (by size and sha256, not by name); they go to {models}")
     got = MI.find(src, cat, progress=say)
@@ -3600,7 +3648,7 @@ def keep_profile(old: list, new: list) -> list:
 
 
 # ------------------------------------------------------------------------------------------------ calibration
-CAL_STORE = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "project-maya" / "calibration.json"
+CAL_STORE = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "saguaro" / "calibration.json"
 
 
 def hardware_key(cfg: dict) -> str:
@@ -3620,10 +3668,14 @@ def hardware_key(cfg: dict) -> str:
 
 
 def load_calibrations() -> dict:
-    try:
-        return json.loads(CAL_STORE.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
+    """The saved calibrations; before the first save here, an earlier version's (~/.config/project-maya)."""
+    old = CAL_STORE.parent.parent / "project-maya" / CAL_STORE.name
+    for p in (CAL_STORE,) + ((old,) if CAL_STORE.parent.name == "saguaro" and not CAL_STORE.exists() else ()):
+        try:
+            return json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            pass
+    return {}
 
 
 def saved_calibration(cfg: dict, any_context=False) -> dict | None:
@@ -4876,10 +4928,10 @@ def set_up(a, prev: dict) -> Path | None:
     metal = pc["backend"] == "metal"
     step(2, "your choices")                            # 2
     # the models folder: --models-dir, else the one set up before (a config from before the option has its data
-    # folder, whose models/ held the downloads), else Maya-data/models next to this folder
+    # folder, whose models/ held the downloads), else Saguaro-data/models next to this folder
     models = (Path(a.models_dir).expanduser().resolve() if a.models_dir else
               Path(inst["models_dir"]) if inst.get("models_dir") else
-              Path(inst["data_dir"]) / "models" if inst.get("data_dir") else ROOT.parent / "Maya-data" / "models")
+              Path(inst["data_dir"]) / "models" if inst.get("data_dir") else default_models_dir())
     choice = choose_model(a, models, inst)
     if choice[0] == "download":
         ok(f"model: {Q.shown('glm', choice[1])}, in {download_dir(models, choice[1])}")
@@ -5901,7 +5953,7 @@ def set_up_ds4(a, prev: dict) -> Path | None:
     ok(f"context: {ctx} tokens" + (" (recommended for this PC's memory)" if ctx == rec else "") +
        (f", for each of {par} conversations at once (--parallel)" if par > 1 else ""))
     models = (Path(a.models_dir).expanduser().resolve() if a.models_dir else
-              Path(inst["models_dir"]) if inst.get("models_dir") else ROOT.parent / "Maya-data" / "models")
+              Path(inst["models_dir"]) if inst.get("models_dir") else default_models_dir())
     d = ds4_dir(a, models, prev, quant)
     ok(f"model folder: {d}")
     llama = tools_step(a, PY_PACKAGES + ["tokenizers"])   # 3 (the pack's Engram token map normalizes with it)
@@ -6505,7 +6557,7 @@ def set_up_mm3(a, prev: dict) -> Path | None:
        (f", for each of {par} conversations at once (--parallel)" if par > 1 else ""))
     mm3_context_notes(ctx, vram, total, fmt, need, par, apu)
     models = (Path(a.models_dir).expanduser().resolve() if a.models_dir else
-              Path(inst["models_dir"]) if inst.get("models_dir") else ROOT.parent / "Maya-data" / "models")
+              Path(inst["models_dir"]) if inst.get("models_dir") else default_models_dir())
     d = mm3_dir(a, models, prev, quant)
     ok(f"model folder: {d}")
     llama = tools_step(a)                              # 3
@@ -6856,7 +6908,7 @@ def set_up_qwen(a, prev: dict) -> Path | None:
     ok(f"context: {ctx} tokens" + (" (recommended for this PC's VRAM)" if ctx == rec else "") +
        f"; its KV cache: {qwen_kv_gb(ctx):.1f} GB of VRAM")
     models = (Path(a.models_dir).expanduser().resolve() if a.models_dir else
-              Path(inst["models_dir"]) if inst.get("models_dir") else ROOT.parent / "Maya-data" / "models")
+              Path(inst["models_dir"]) if inst.get("models_dir") else default_models_dir())
     d = qwen_dir(a, models, prev)
     ok(f"model folder: {d}")
     llama = tools_step(a)                              # 3
@@ -6879,18 +6931,33 @@ def set_up_qwen(a, prev: dict) -> Path | None:
 
 
 # ------------------------------------------------------------------------------------------------ Hy4-Flash, Inkling 2 Mini
-def family_fit(cards: list, ram_gb: float) -> str | None:
-    """The model the setup recommends for a PC's NVIDIA cards when no model was set up before: Hy4-Flash where four
-    equal 16 GB cards and the memory for its Maya-S are there (the layout measured), Inkling 2 Mini on one or two
-    small cards (under 24 GB each); None elsewhere - the model question keeps its usual default."""
-    if not cards or WIN:
+def family_fit(cards: list, ram_gb: float, backend: str = "cuda") -> str | None:
+    """The model the setup recommends for a PC's cards when no model was set up before: Hy4-Flash where four equal
+    16 GB cards and the memory for its Maya-S are there (the layout measured), Inkling 2 Mini on one or two small
+    cards (under 24 GB each) - each only where the backend has its engine (family_unavailable); on AMD otherwise
+    GLM-5.3-Flash where its smallest quant fits in VRAM + RAM; None elsewhere - the model question keeps its usual
+    default."""
+    if not cards:
         return None
     small = all(float(g.get("vram_gb") or 0) < 24 for g in cards)
     vram = sum(float(g.get("vram_gb") or 0) for g in cards)
-    if small and len(cards) <= 2 and IK2F.usable(cards):
+    if not family_unavailable("ik2", backend) and small and len(cards) <= 2 and IK2F.usable(cards):
         return "ik2"
-    if small and len(cards) >= 4 and HY4F.equal_group(cards) and vram + ram_gb >= 68:
+    if (not family_unavailable("hy4", backend) and small and len(cards) >= 4 and HY4F.equal_group(cards)
+            and vram + ram_gb >= 68):
         return "hy4"
+    if backend == "hip" and vram + ram_gb >= min(m["download_gb"] for m in MODELS.values()):
+        return "glm"
+    return None
+
+
+def family_unavailable(family: str, backend: str | None) -> str | None:
+    """Why this PC's backend (cuda / hip / metal) has no engine for a model, in one plain line, or None.  The model
+    list marks such a model and the setup stops on it before anything is built or downloaded."""
+    if family in NO_ENGINE.get(backend or "cuda", {}):
+        return NO_ENGINE[backend][family]
+    if WIN and family in ("hy4", "ik2"):
+        return f"{HY4_SHOWN if family == 'hy4' else IK2_SHOWN} runs on Linux only for now (not on Windows yet)"
     return None
 
 
@@ -7206,7 +7273,7 @@ def set_up_hy4(a, prev: dict) -> Path | None:
     ctx = choose_context(a, prev_ctx, HY4F.CONTEXTS, lay["context"])
     ok(f"context: {ctx} tokens" + (" (recommended for these cards)" if ctx == lay["context"] else ""))
     models = (Path(a.models_dir).expanduser().resolve() if a.models_dir else
-              Path(inst["models_dir"]) if inst.get("models_dir") else ROOT.parent / "Maya-data" / "models")
+              Path(inst["models_dir"]) if inst.get("models_dir") else default_models_dir())
     d = hy4_dir(a, models, prev, quant)
     ok(f"model folder: {d}")
     llama = tools_step(a)                              # 3
@@ -7412,7 +7479,7 @@ def set_up_ik2(a, prev: dict) -> Path | None:
         warn(f"at {context_label(ctx)} the cache takes VRAM from the experts: more of them are streamed from RAM and "
              f"answers get slower ({context_label(lay['context'])} is what was measured)")
     models = (Path(a.models_dir).expanduser().resolve() if a.models_dir else
-              Path(inst["models_dir"]) if inst.get("models_dir") else ROOT.parent / "Maya-data" / "models")
+              Path(inst["models_dir"]) if inst.get("models_dir") else default_models_dir())
     d = ik2_dir(a, models, prev)
     ok(f"model folder: {d}")
     llama = tools_step(a)                              # 3
@@ -7441,6 +7508,13 @@ def set_up_and_serve(a, prev: dict) -> tuple | None:
 # ------------------------------------------------------------------------------------------------ main
 def maya_version() -> str:
     return (HERE / "VERSION").read_text(encoding="utf-8").strip() if (HERE / "VERSION").exists() else "?"
+
+
+def saguaro_version(version: str) -> str:
+    """What the banner calls this version: the git commit of a clone (Saguaro has no releases of its own yet), else
+    the VERSION line it was built from."""
+    r = S.out(["git", "-C", str(HERE), "log", "-1", "--format=%h %cs"]).strip() if (HERE / ".git").exists() else ""
+    return f"{r.split()[0]} ({r.split()[1]})" if len(r.split()) == 2 else f"v{version}"
 
 
 def model_option(a) -> str | None:
@@ -7571,7 +7645,7 @@ def main() -> int:
                                        "several models; it must be writable - the pack is written inside it "
                                        "(without this option the setup lists the ones it finds in ~/models*)")
     ap.add_argument("--models-dir", help="where downloaded models go, each in a folder named after it, e.g. "
-                                         "<DIR>/Maya-L/ (default: Maya-data/models next to this folder); use "
+                                         "<DIR>/Maya-L/ (default: Saguaro-data/models next to this folder); use "
                                          "a fast NVMe SSD with ~100 GB free")
     ap.add_argument("--gpu", type=int, help="run on this one GPU (CUDA: nvidia-smi; HIP: KFD topology order, on Windows hipInfo's)")
     ap.add_argument("--gpus", help=f"split the model's layers across these GPUs (up to {MAX_GPUS}), e.g. 0,1 or "
@@ -7641,7 +7715,8 @@ def main() -> int:
         sys.stdout.flush()
         os.execve("/bin/sh", ["/bin/sh", str(HERE / "saguaro.sh"), *sys.argv[1:]], dict(os.environ, SAGUARO_SH="1"))
     version = maya_version()
-    say(f"Saguaro v{version} - GLM-5.3-Flash, {DS4} or {MM3} on your own GPU(s).")
+    say(f"Saguaro {saguaro_version(version)} - {', '.join(FAMILY_SHOWN[f] for f in FAMILIES[:-1])} or "
+        f"{FAMILY_SHOWN[FAMILIES[-1]]} on your own GPU(s).")
     if a.report:
         return report(version, a.backend, a.config)
     if a.import_model:
@@ -7731,6 +7806,10 @@ def main() -> int:
         elif a.backend == "hip":
             pick = (f"--gpus {','.join(str(g['index']) for g in pc['gpus'])}" if len(pc["gpus"]) > 1
                     else f"--gpu {pc['gpus'][0]['index']}")
+            say("Models with an engine for AMD here: " +
+                ", ".join(FAMILY_SHOWN[f] for f in FAMILIES if not family_unavailable(f, "hip")) +
+                "; not yet: " + ", ".join(FAMILY_SHOWN[f] for f in FAMILIES if family_unavailable(f, "hip")) +
+                " (docs/AMD_SAGUARO.md).")
             say(f"HIP prerequisites found. Run {ME} --backend hip {pick} to try the experimental port.")
         else:
             say(f"This PC can run Saguaro. Run {ME} without --check to set it up.")
