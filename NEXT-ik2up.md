@@ -123,3 +123,14 @@ Card runs only through /data/llm/bench/night-queue/queue.txt (IK2_NO_CLAIM=1, ca
   2348 of 3072 experts in VRAM (10.6 GiB), VRAM 15.4-15.6 GiB; serve_check 22/22 PASS incl. pictures (red, scene).
   decode 300 tok: 58.2 tok/s short, 59.4 at 8K; read 8K 1718 tok/s (4.69 s); first token 0.49 s.
   Lane (Zen 5 AVX-512): 61 us/expert on the CPU vs 87 us over the bus, but decode mode A (no lane) was faster.
+
+## r6 (mangonel, 15:13-15:32 PST, build runs/r5/bin) - all functional checks PASS
+- quant 1 T4 resident (chunk 1024, RESERVE 1024): serve_check 24/24; decode 44.9 / 41.5 / 37.0 (ours 44.5 / 41.2 / 36.9),
+  read 8K / 30K 515 / 429 (ours 569 / 550). --parallel 2 at ctx 16384: PAR CHECK PASSED - both answers = solo, pair
+  47.7 tok/s vs 41.9 solo.
+- 2 T4s ctx 131072 chunk 8192: serve_check 24/24 (pictures incl.); conv_check PASSED; --parallel 2 not taken (split).
+  bench 2 loads each rotated: new decode 52.6 / 46.1 (~0 / 16K), read 16K 834 tok/s, first token 1.07 s;
+  ours 51.7 / 45.4, read 1130, first token 0.66 s. => decode parity (+1-2 %), 16K read -26 % (prompts run on GPU 0
+  alone, GPU 1's experts streamed from host).
+- KL 2 cards: new tc vs scalar 7.69e-4 / 99.00 % (bit-identical to 1 card: the split gives one GPU's answers);
+  ours fast0 vs new tc 1.30e-3 / 98.40 %; ours fast vs new tc 9.36e-4 / 98.80 %.
