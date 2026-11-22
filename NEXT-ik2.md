@@ -23,6 +23,33 @@ UD-Q4_K_XL vs the T4 quant on 1 card, serve_check on the quant. checks.sh: build
 checks.sh RESULT (build-ik2c = 795f6c9f, 2026-11-22 ~10:40 PST): build clean, ik2_cpu_test all passed, t4_check PASSED (kernels,
 1 card, 2 cards), conv_check PASSED, the T4 quant LOADS with the row-check fix (every expert resident, 15.35 GiB, Paris /
 saguaro PASS). build-ik2/night/final/*.out
+
+### Final interleaved A/Bs on build-ik2c (build-ik2/night/final/, 2 loads per arm, order rotated; greedy, clocks free)
+
+1 card, ctx 32768 (p*-r*.out; decode = mean of rep 0/1 of 256 tokens, read = the 8K prompt):
+  arm                 slots   decode ~60   decode ~8K   read 8K    short-prompt first read (58 tok, first request)
+  PIN default c1024   2487    39.2         34.2         497        1.0 s
+  PIN=0 c1024         2296    43.6         39.3         417        1.6-1.7 s
+  PIN default c2048   2378    36.7 *       31.2         712        1.0-1.1 s
+  PIN=0 c2048         2199    42.4         39.0         639        1.6 s
+  (* r1 ended at a stop token after 140 tokens.)  CHOSEN: PIN=0 + chunk 2048: +8 % / +14 % decode, +29 % read.
+  Cost: the first short prompt of a load reads ~0.6 s slower (1.6 vs 1.0 s); follow-up turns of 16-18 tokens 0.47-0.52 s
+  vs 0.42-0.46 s (layout runs).
+2 cards, ctx 131072 (c2-*.out; 128-token answers, 16K prompt): every expert resident at all three chunks
+  chunk   decode ~60   decode 16K   read 16K   VRAM card 2 / 3 MiB
+  2048    50.1         44.2         844        14883 / 8679
+  4096    50.1         44.5         1020       14883 / 10545
+  8192    52.2         45.8         1136       14887 / 14289
+  CHOSEN: 8192 (+35 % read, +4 % decode). Card 3 keeps ~2.0 GiB free: the picture encoder (1.29 GB) should still fit -
+  serve_check at 131072 / 8192 queued (serve_check-2card-c8192.out). Depth past 16K at 8192 not run.
+UD-Q4_K_XL vs the T4 quant on 1 card (q-*.out, rounds UD,T4 / T4,UD; ctx 32768, chunk 1024, default pins):
+                   decode ~56   decode 8K   decode 30K   read 8K   read 30K   first token 56 tok   VRAM
+  UD-Q4_K_XL       39.1         34.0        31.0         502       486        0.96 s               14.9 GiB
+  T4 quant         45.0         41.4        37.3         572       553        0.86 s               15.4 GiB
+                   +15 %        +22 %       +20 %        +14 %     +14 %
+  The quant keeps every expert resident (3072 slots), so PIN / chunk do not act the same way (not swept).
+  Quality: KL 1.23e-2 / top-1 94.95 % vs the floor 1.9e-3 / 97.75 % (QUANT-NOTES.md): stays EXPERIMENTAL.
+  serve_check on the quant (1 card): all 24 PASS incl. pictures (serve_check-quant.out).
 Done since: serve work committed (f1b33187), row check fixed (702569ea), saguaro/qfn-vram merged (ea21f5d1), quant
 config configs/Inkling-2-Mini-T4-NVFP4-IQ3_XXS.1card.json.
 
