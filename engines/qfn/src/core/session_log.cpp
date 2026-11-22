@@ -605,6 +605,8 @@ bool save_core(const std::string& path, const SavedConversation& image, const st
     if (have)
         for (const Array& a : old_sk.arrays) old_by_key.emplace(a.key, &a);
     bool base_short = false;
+    // a whole rewrite of a delta: the chunks it did not capture are copied from the old file (their offsets there)
+    std::vector<std::vector<uint64_t>> copy_from(arrays.size());
     auto place = [&](bool reuse, uint64_t start, uint64_t& reused) {
         uint64_t cursor = start;
         reused = 0;
@@ -612,20 +614,27 @@ bool save_core(const std::string& path, const SavedConversation& image, const st
             Array& a = arrays[ai];
             const Ref& ref = refs[ai];
             const Array* o = nullptr;
-            if (reuse)
-                if (const auto it = old_by_key.find(a.key); it != old_by_key.end()) o = it->second;
+            if (const auto it = old_by_key.find(a.key); it != old_by_key.end()) o = it->second;
+            copy_from[ai].assign(a.chunks.size(), UINT64_MAX);
             for (size_t i = 0; i < a.chunks.size(); ++i) {
                 const uint64_t len = chunk_len(a.size, chunk, i);
                 const bool in_old = o != nullptr && i < o->chunks.size() && chunk_len(o->size, chunk, i) == len;
                 if ((i + 1) * chunk <= ref.from) {   // not captured: the file's own chunk, or the delta is no good
                     if (!in_old) { base_short = true; continue; }
-                    a.chunks[i] = o->chunks[i];
-                    reused += len;
+                    a.chunks[i].hash = o->chunks[i].hash;
+                    if (reuse) {
+                        a.chunks[i].off = o->chunks[i].off;
+                        reused += len;
+                    } else {
+                        copy_from[ai][i] = o->chunks[i].off;
+                        a.chunks[i].off = cursor;
+                        cursor += len;
+                    }
                     continue;
                 }
-                if (on_base && (i + 1) * chunk <= ref.claim && !(in_old && o->chunks[i].hash == a.chunks[i].hash))
+                if (reuse && on_base && (i + 1) * chunk <= ref.claim && !(in_old && o->chunks[i].hash == a.chunks[i].hash))
                     ++stats.verify_bad;
-                if (in_old && o->chunks[i].hash == a.chunks[i].hash) {
+                if (reuse && in_old && o->chunks[i].hash == a.chunks[i].hash) {
                     a.chunks[i].off = o->chunks[i].off;
                     reused += len;
                 } else {
@@ -644,9 +653,7 @@ bool save_core(const std::string& path, const SavedConversation& image, const st
     if (have) {
         const uint64_t named = total + meta.size();
         const uint64_t garbage = data_end + meta.size() - kData - named;
-        if (delta) stats.wants_compact = garbage > std::max<uint64_t>(log.garbage_min, named / 2);
-        else if (garbage > std::max<uint64_t>(log.garbage_min, named / 2)) {
-            stats.verify_bad = 0;
+        if (garbage > std::max<uint64_t>(log.garbage_min, named)) {
             have = false;
             stats.compacted = true;
             start = kData;
@@ -706,6 +713,16 @@ bool save_core(const std::string& path, const SavedConversation& image, const st
         for (size_t i = 0; i < arrays[a].chunks.size(); ++i) {
             const uint64_t off = arrays[a].chunks[i].off;
             if (off < start) continue;   // already in the file
+            if (copy_from[a][i] != UINT64_MAX) {   // from the old file into the new one
+                uint64_t at = copy_from[a][i], n = chunk_len(refs[a].size, chunk, i);
+                while (n) {
+                    const size_t c = (size_t) std::min<uint64_t>(n, kBatch - used);
+                    if (!pread_all(old.f.fd, batch.get() + used, c, at)) return fail_errno("read error", errno);
+                    used += c; at += c; n -= c;
+                    if (used == kBatch && !flush()) return fail_errno("write error", errno);
+                }
+                continue;
+            }
             const bool ok = refs[a].visit(i * chunk, chunk_len(refs[a].size, chunk, i), [&](const uint8_t* p, size_t n) {
                 while (n) {
                     const size_t c = std::min(n, kBatch - used);

@@ -266,7 +266,7 @@ int main() {
         const uint64_t whole = st.file_bytes;
         bool compacted = false;
         uint64_t biggest = 0;
-        for (int turn = 0; turn < 12 && !compacted; ++turn) {
+        for (int turn = 0; turn < 60 && !compacted; ++turn) {
             const SavedConversation r = conv(4000, 6, 0, 3600 + 10 * (size_t) turn);   // rewinds: the tails replaced
             check(session_log_save(path("g"), r, id, st, err, wo, nullptr, small) && reads_as(path("g"), r), "a rewind saved");
             compacted = st.compacted;

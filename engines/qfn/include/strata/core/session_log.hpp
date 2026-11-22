@@ -24,8 +24,9 @@ bool session_log_supported();
 
 struct SessionLogOptions {
     uint64_t chunk_bytes = 256u << 10;    // a new file's chunk size (an existing file keeps its own)
-    // an append that would leave more unnamed bytes than max(garbage_min, half the named ones) rewrites the file
-    uint64_t garbage_min = 256u << 20;
+    // an append that would leave more unnamed bytes than max(garbage_min, the named ones) rewrites the file
+    // (a turn rewrites the running state, ~240 MB: a tighter limit rewrote a 40K-token file every second turn)
+    uint64_t garbage_min = 512u << 20;
     int threads = 0;                      // hashing / reading threads (0: up to 8)
 };
 
@@ -38,7 +39,6 @@ struct SessionLogStats {
     bool compacted = false;       // an existing file was rewritten whole to drop its unnamed bytes
     uint64_t commit = 0;          // the new commit's identity (what a later turn save continues from)
     uint64_t hashed_bytes = 0;    // bytes this save had to hash (a turn save: only what it captured)
-    bool wants_compact = false;   // a turn save left more unnamed bytes than the limit: the next save should be whole
     uint64_t verify_bad = 0;      // SessionLogTurn claims: chunks claimed unchanged whose bytes differ from the file's
 };
 

@@ -359,7 +359,9 @@ void SessionDir::turn_write(std::unique_lock<std::mutex>& lk) {
             if (entries_[i].path == j.track->path && entries_[i].log && entries_[i].state == State::idle) best = i;
         for (size_t i = 0; i < entries_.size() && j.track->path.empty(); ++i)
             if (entries_[i].log && entries_[i].state == State::idle && entries_[i].peek.cvec == meta.cvec &&
-                supersedes(meta.live, meta.checkpoints, entries_[i].peek) &&
+                // (also a file whose deepest checkpoint starts this conversation: the same one after a rewind, when the
+                // chain's copy of that checkpoint is gone - a turn save names only the newest, a restore keeps what it reused)
+                (supersedes(meta.live, meta.checkpoints, entries_[i].peek) || head_prefix(entries_[i].peek.deepest, meta.live)) &&
                 (best == entries_.size() || entries_[i].seq > entries_[best].seq))
                 best = i;
         if (best != entries_.size()) take(best);
@@ -393,7 +395,7 @@ void SessionDir::turn_write(std::unique_lock<std::mutex>& lk) {
         j.track->commit = ls.commit;
         j.track->written_seq = j.seq;
         j.track->saved_tokens = (int64_t) meta.live.ids.size();
-        j.track->broken = ls.wants_compact;
+        j.track->broken = false;
         char b[360];
         std::snprintf(b, sizeof b, "turn save (%s): %zu tokens, %llu MiB written, %llu MiB already in its file, %llu MiB "
                       "hashed, %.0f ms in the background; the capture took the serve thread %.0f ms%s", j.label.c_str(),

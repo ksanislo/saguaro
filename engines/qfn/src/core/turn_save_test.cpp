@@ -201,6 +201,31 @@ int main() {
         check(session_log_save_turn(path, *live.capture(2790), track->commit.load(), id, st, e, wo) && file_is(path, live.s) &&
                   st.hashed_bytes < st.reused_bytes, "the same delta on its own commit lands; most of the file was never read or hashed");
     }
+    {   // a delta that pushes the file past its limit rewrites it, copying what it did not capture from the old file
+        const std::string path = track->path;
+        SessionLogOptions small;
+        small.garbage_min = 1;
+        SessionWriteOptions wo;
+        wo.deepest_checkpoint_only = true;
+        SessionLogStats st;
+        std::string e;
+        bool compacted = false;
+        uint64_t base = 0;
+        {   // (a whole save to know the commit)
+            check(session_log_save_turn(path, *live.capture(0), 0, id, st, e, wo, nullptr, small), "whole");
+            base = st.commit;
+        }
+        for (int i = 0; i < 40 && !compacted; ++i) {
+            const size_t n = live.s.live.ids.size();
+            live.turn(n - 10, n + 50, uint8_t(20 + i));
+            auto t = live.capture(n - 10, i % 2 == 1);   // (every other one as a verify claim)
+            check(session_log_save_turn(path, *t, base, id, st, e, wo, nullptr, small) && file_is(path, live.s), "a turn lands");
+            check(st.verify_bad == 0, "a right claim stays silent, through a rewrite too");
+            base = st.commit;
+            compacted = st.compacted && t->delta();
+        }
+        check(compacted && st.garbage_bytes == 0, "a delta rewrote the file whole and it reads back");
+    }
     fs::remove_all(dir);
     std::printf("turn_save_test: %d checks passed\n", checks);
     return 0;
