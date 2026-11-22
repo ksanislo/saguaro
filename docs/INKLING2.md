@@ -172,7 +172,7 @@ Without it the layers are split between the GPUs.
 - `tools/strata_tokenizer.py` reads the tokenizer under both names unsloth's files give its pre-tokenizer (`gpt-4o`,
   `inkling`): 442 strings against the model's own `tokenizer.json`, all equal, with both files.
 
-To run it (no setup in `maya.py` yet):
+To run it (no setup in `saguaro.py` then):
 
     python tools/strata_tokenizer.py --gguf Inkling-2-Small-UD-Q4_K_XL-00001-of-00009.gguf --out ik2 \
         --chat-template tools/ik2/chat_template.jinja --check
@@ -213,8 +213,8 @@ as an option); the drafter (`--draft`: 2.4-2.7 tokens a step, but verifying 8 co
 
 ## 7. Next
 
-1. Setup in `maya.py` (download, the RAM / VRAM check, the run config), as Hy4-Flash has - done for Inkling-2-Mini as
-   an experimental preview (`maya.py --setup --model inkling-2-mini`: docs/MODELS.md); Inkling-2-Small by hand still.
+1. Setup in `saguaro.py` (download, the RAM / VRAM check, the run config), as Hy4-Flash has - done for Inkling-2-Mini as
+   an experimental preview (`saguaro.py --setup --model inkling-2-mini`: docs/MODELS.md); Inkling-2-Small by hand still.
 2. Several requests at once; the vision tower inside the engine (pictures work through the image encoder `vision-glm`: section 8).
 3. A Maya quant of the experts in the shape of DeepSeek XS (section 5), for 160 GB of host memory.
 
@@ -346,7 +346,7 @@ contributor's figures below were measured that way).
 text's end - edits, quoted code, repeated lines - with no weights; the same window checks them. `--drafting`: **auto**
 (the setup's default) measures once on the PC, before the first answer, which of no drafting, the prompt lookup, the
 drafter and both answers fastest (a chat, a code and a tool-call request, `SAGUARO_IK2_DRAFT_IDS`), and keeps it in
-`data/ik2-drafting.txt` (per GPU, driver, model files, context and cache; `maya --speed-calibration` measures again);
+`data/ik2-drafting.txt` (per GPU, driver, model files, context and cache; `saguaro.py --speed-calibration` measures again);
 **on** drafts with the drafter and the prompt lookup, the controller choosing each step; **off** loads neither. A
 request's `spec=1` asks for no drafting. The drafter takes room only where the start plan stays as it is without it
 (every expert in VRAM, the same context and cache, and not the free VRAM the pictures' encoder would start in on the
