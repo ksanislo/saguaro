@@ -150,6 +150,10 @@ public:
     bool ablate_loaded() const;
     void set_ablate(bool on);
     bool ablating() const;
+    /// (#1026) every GPU's free VRAM against its reserve, once loaded (`loaded`) and before each request: what the
+    /// start and the requests allocate after the experts' residency is kept for the next start (the pack's
+    /// vram-late.txt); > 0: this start came out short - the MiB the next one keeps beside it (the layer split only)
+    int late_check(bool loaded);
     /// PLAN-turbo-live (serve/turbo_live.py): conversation `seq`'s request runs live Turbo on its answer tokens.
     /// drop: the router runs top-k minus N (drops the N lightest picks, renormalises the kept ones, the top-1
     /// always runs).  skip: 1 "ssd" (a pick neither in VRAM nor in a staging slot and not in the RAM pool is left
