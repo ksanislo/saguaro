@@ -2335,6 +2335,15 @@ static int glm_pack_generate(const Options& o) {
     std::vector<DeferredPause> deferred_pauses;
     std::function<void()> gap_reset;
     std::chrono::steady_clock::time_point gap_mark;   // the read's start (after any restore), then each gap's end
+    // this read's decode gaps (SAGUARO_GLM_PREFILL_GAPS; declared here so the PP lines' clock can subtract them: a
+    // read's reported ms is the time it actually ran, not the time the requests beside it spent decoding in it)
+    uint64_t gap_count = 0, gap_tok = 0;
+    double gap_ms = 0.0;
+    const auto read_ms_since = [&](const std::chrono::steady_clock::time_point& t0) {
+        // a read's own running time since t0 (its PP/DONE ms): the decode gaps taken inside it are not read time
+        return std::max(0.0, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count()
+                             - gap_ms);
+    };
     // the GPUs the prompt-read line asks the free VRAM of: the ones the expert pool lives on (empty: every visible one)
     const auto vram_devs = [&]() {
         std::vector<int> d;
@@ -2477,7 +2486,7 @@ static int glm_pack_generate(const Options& o) {
             }
             i += chunk;
             if (o.serve) {
-                const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+                const double ms = read_ms_since(t0);   // (the read's own time: decode gaps taken inside it are out)
                 std::printf("PP %s%zu %zu %.1f %.1f %zu\n", tag.c_str(), i, prompt.size(), ms,
                             (double) (i - reuse) / (ms / 1000.0 + 1e-9), reuse);
             }
@@ -2488,9 +2497,14 @@ static int glm_pack_generate(const Options& o) {
     const auto prep_prompt = [&](const std::vector<int32_t>& prompt, size_t& reuse, const char*& finish,
                                  std::chrono::steady_clock::time_point& t0) -> int {
         reuse = prep_restore(prompt);
+        // (parity 3: the exact read end after a restore - the line before the read says what the state already
+        //  holds, so a restored read's fresh tokens and ms are its own: same shape as PP's, rid-tagged under multi)
+        if (o.serve) std::printf("RESUME %s%zu\n", tag.c_str(), reuse);
         const strata::core::VramMark vram0 = strata::core::vram_mark(vram_devs());   // (the line at the read's end)
         t0 = std::chrono::steady_clock::now();
         gap_mark = t0;   // (SAGUARO_GLM_PREFILL_GAPS: the first gap's stage starts with the read, not the restore)
+        gap_count = gap_tok = 0;   // (every read starts its own gap figures: one without gaps must not inherit them)
+        gap_ms = 0.0;
         // the prompt one CHUNK at a time (PP reports per chunk: the server shows it and counts it as a heartbeat);
         // the state is saved before the generation prompt (snap_at), so an identical or extending prompt can reuse it
         // THE SNAPSHOT'S POSITION: before the prompt's generation prompt (its trailing <|assistant|>, then <think> or
@@ -2525,7 +2539,7 @@ static int glm_pack_generate(const Options& o) {
             const auto pp_line = [&](size_t done) {
                 if (!o.serve) return;
                 std::lock_guard<std::mutex> lk(pp_mu);
-                const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+                const double ms = read_ms_since(t0);   // (the read's own time: no decode gaps in it)
                 std::printf("PP %s%zu %zu %.1f %.1f %zu\n", tag.c_str(), reuse + done, prompt.size(), ms,
                             (double) done / (ms / 1000.0 + 1e-9), reuse);
                 std::fflush(stdout);
@@ -3141,6 +3155,7 @@ static int glm_pack_generate(const Options& o) {
         const char* finish = "length";
         size_t reuse = 0;
         std::chrono::steady_clock::time_point t0, t1;
+        double read_gap_ms = 0.0;   // (the decode gaps inside its read: DONE's prompt_ms is the read's own time)
         uint64_t spec_steps0 = 0, spec_hits0 = 0;
         strata::core::Glm5Model::FastStats st1;
         // SAGUARO_GLM_MULTI_MTP: the NextN block's drafts for the positions after `pending` (made at position
@@ -3375,7 +3390,7 @@ static int glm_pack_generate(const Options& o) {
                 std::snprintf(m, sizeof m, "thinking was repeating a %d-token pattern (%d tokens in): closed, "
                               "answering", per, (int) g.produced);
                 std::fprintf(stderr, "glm loop guard: %s\n", m);
-                std::printf("NOTE %s\n", m);
+                std::printf("NOTE r%d %s\n", g.rid, m);   // (parity 4: a request's own line carries its rid)
                 g.hist.clear();
             }
         } else if (!g.in_think) {
@@ -3394,7 +3409,7 @@ static int glm_pack_generate(const Options& o) {
                                   per, (int) g.produced);
                 }
                 std::fprintf(stderr, "glm loop guard: %s\n", m);
-                std::printf("NOTE %s\n", m);
+                std::printf("NOTE r%d %s\n", g.rid, m);   // (parity 4: a request's own line carries its rid)
                 g.hist.clear();
                 if (g.guard++ > 0) {
                     g.finish = "length";
@@ -3538,7 +3553,9 @@ static int glm_pack_generate(const Options& o) {
             conv_running(-1, g.rid);
             conv.publish("end", t2);
         }
-        const double prompt_ms = std::chrono::duration<double, std::milli>(g.t1 - g.t0).count();
+        // its read's own time: the decode gaps taken inside it (other requests' tokens) are not read time
+        const double prompt_ms = std::max(0.0, std::chrono::duration<double, std::milli>(g.t1 - g.t0).count()
+                                                         - g.read_gap_ms);
         const double decode_ms = std::chrono::duration<double, std::milli>(t2 - g.t1).count();
         const auto st2 = model.fast_stats();
         const uint64_t d_hits = st2.hits - g.st1.hits, d_miss = st2.misses - g.st1.misses;
@@ -3809,10 +3826,8 @@ static int glm_pack_generate(const Options& o) {
     // set below, after multi_step): prompt_between's 0 / 1 / 2
     std::function<int(int)> interleave_round;
     // one decode gap of a prompt being read (SAGUARO_GLM_PREFILL_GAPS; set below, after multi_step): 0 / 1 / 2 as
-    // prompt_between's; gap_mark: the read's start, then each gap's end
+    // prompt_between's; gap_mark / gap_count / gap_tok / gap_ms: the read's own, declared by its PP clock above
     std::function<int()> read_gap;
-    uint64_t gap_count = 0, gap_tok = 0;
-    double gap_ms = 0.0;
     // the last gap's decode round (ms; 0: none yet) - a boundary's gap is due once its budget is half of one
     // (prefill_gap_due; SAGUARO_GLM_PREFILL_GAP_CREDIT=0: every boundary, as before)
     double gap_round_ms = 0.0;
@@ -3822,6 +3837,7 @@ static int glm_pack_generate(const Options& o) {
         // a STOP <rid> during its prompt; a bare STOP stays set and also ends the running requests
         if (admit_stop.exchange(false) || stop_req.load()) g.finish = "cancel";
         g.t1 = std::chrono::steady_clock::now();
+        g.read_gap_ms = gap_ms;   // (the read is over: its gaps are this request's, DONE takes them out)
         if (strata::core::Glm5Model::route_counting()) {
             strata::core::Glm5Model::route_counts(g.rc1);
             strata::core::Glm5Model::route_counts_seq(g.ctx, g.rs1);
@@ -3881,7 +3897,7 @@ static int glm_pack_generate(const Options& o) {
         model.prefill_progress = [&, rtag, rt0, rreuse, rfrom, rtotal](int64_t done, int64_t total) {
             (void) total;
             if (o.serve) {
-                const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - rt0).count();
+                const double ms = read_ms_since(rt0);   // (the read's own time: the gaps this read took are not in it)
                 std::printf("PP %s%zu %zu %.1f %.1f %zu\n", rtag.c_str(), rfrom + (size_t) done, rtotal, ms,
                             (double) (rfrom - rreuse + (size_t) done) / (ms / 1000.0 + 1e-9), rreuse);
                 std::fflush(stdout);
@@ -3964,8 +3980,7 @@ static int glm_pack_generate(const Options& o) {
             } else {
                 from = g.sa;
                 if (o.serve) {
-                    const double ms =
-                        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - g.t0).count();
+                    const double ms = read_ms_since(g.t0);   // (the read's own time: its gaps are not in it)
                     std::printf("PP %s%zu %zu %.1f %.1f %zu\n", tag.c_str(), g.sa, g.prompt.size(), ms,
                                 (double) (g.sa - g.reuse) / (ms / 1000.0 + 1e-9), g.reuse);
                 }
@@ -4261,7 +4276,10 @@ static int glm_pack_generate(const Options& o) {
             // others are decoding: the batched part on the Reader, they go on meanwhile - in segments ending at the
             // marks (the system prompt's end, a divergence point: their shared slots), then before the reply's opening
             g->reuse = prep_restore(g->prompt);
+            if (o.serve) std::printf("RESUME %s%zu\n", tag.c_str(), g->reuse);   // (its own restored base, as prep_prompt's)
             g->t0 = std::chrono::steady_clock::now();
+            gap_count = gap_tok = 0;   // (the Reader's read takes no gaps)
+            gap_ms = 0.0;
             g->sa = snap_pos(g->prompt, req_gt);
             g->div = restore_div;
             g->sys_end = strata::core::system_prompt_end(g->prompt.data(), g->prompt.size(), 154827);   // <|user|>

@@ -72,9 +72,83 @@ from urllib.parse import parse_qs, urlsplit
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT))   # run as a script (run-<model>.bat) as well as a module
-from serve import ds4_vision, gpu_map, logctx, loop_guard, mm3_vision, model_api, model_pull, models, savings, turbo_live  # noqa: E402
+from serve import ds4_vision, gpu_map, hy4_vision, logctx, loop_guard, mm3_vision, model_api, model_pull, models, savings, turbo_live  # noqa: E402
 
 ENGINE_VISION = (ds4_vision.Vision, mm3_vision.Vision)   # the engines that run their vision tower themselves
+#                                                          (hy4_vision.Vision is an mm3_vision.Vision)
+HY4_TEXT_ONLY = "Hy4-Flash with its pictures off"         # (no vision tower loaded: the errors' name for it)
+# the engines without the live per-request Turbo (saguaro-ik2 stops at its keys, saguaro-hy4 ignores them): exact
+NO_LIVE_TURBO = {"ik2": "Inkling 2", "hy4": "Hy4-Flash"}
+# saguaro-hy4's per-PC files where the config's env names none (child_env): the CPU lane's 4-bit copies' verdict,
+# the prompt route's rates, --drafting auto's choice
+HY4_LANE_FILE = ROOT / "data" / "hy4-cpu-lane.txt"
+HY4_ROUTE_FILE = ROOT / "data" / "hy4-prompt-route.txt"
+HY4_DRAFT_FILE = ROOT / "data" / "hy4-drafting.txt"
+HY4_MEASURE_DOCS = ("docs/SETTINGS.md", "README.md")      # (the text its first start measures them on)
+HY4_MEASURE_CHARS = 200_000
+
+
+def hy4_hot_file(cfg: dict) -> Path:
+    """saguaro-hy4's HY4_HOT scores for this config's model (each layer's experts a start places in VRAM): a file a
+    model in the data folder, named by the model's folder."""
+    args = cfg.get("args") or []
+    pack = Path(args[args.index("--pack") + 1]) if "--pack" in args[:-1] else None
+    name = "" if pack is None else pack.parent.name if pack.name in ("saguaro-hy4", "maya-hy4", "pack") else pack.name
+    name = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("._") or "model"
+    return ROOT / "data" / f"hy4-expert-hot-{name}.bin"
+
+
+def hy4_measure_ids(cfg: dict) -> Path | None:
+    """The text saguaro-hy4 measures this PC's prompt route on at its first start here (HY4_MEASURE_IDS), before it
+    says READY: this install's docs in the model's tokens, written once into the data folder.  None: no tokenizer,
+    or the file cannot be written - the engine then measures while it answers."""
+    tdir = Path(cfg.get("tokenizer") or "")
+    vocab = tdir / "vocab.json"
+    if not cfg.get("tokenizer") or not vocab.is_file():
+        return None
+    try:
+        tag = hashlib.md5(vocab.read_bytes()).hexdigest()[:10]
+    except OSError:
+        return None
+    path = ROOT / "data" / f"hy4-measure-ids-{tag}.txt"
+    if path.is_file():
+        return path
+    try:
+        import strata_tokenizer as ST
+        text = ""
+        for name in HY4_MEASURE_DOCS:
+            p = ROOT / name
+            if p.is_file() and len(text) < HY4_MEASURE_CHARS:
+                text += p.read_text(encoding="utf-8", errors="replace")[:HY4_MEASURE_CHARS - len(text)] + "\n\n"
+        ids = ST.Tokenizer.from_dir(tdir).encode(text)
+        if len(ids) < 8192:
+            return None
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f"{path.stem}.{os.getpid()}.tmp")   # (per process: two servers never share the tmp path)
+        tmp.write_text(f"# saguaro: {', '.join(HY4_MEASURE_DOCS)} in the model's tokens ({len(ids)}) - the text "
+                       "saguaro-hy4 measures a PC's prompt route on at its first start there\n" +
+                       ",".join(map(str, ids)) + "\n", encoding="utf-8")
+        os.replace(tmp, path)
+        return path
+    except Exception:  # noqa: BLE001 - no text: the engine measures while it answers
+        return None
+
+
+HY4_PICTURE_NOTE = "[a picture was here; pictures are off on this server, so it was not read]"
+
+
+def hy4_tool_pictures_noted(messages: list) -> list:
+    """Hy4-Flash with no vision tower loaded: the pictures (and videos) in tool results as a short text note, so the
+    agent's turn goes on instead of failing at every retry.  A user's picture is left: the 400 that says why."""
+    out = []
+    for m in messages:
+        c = m.get("content")
+        if m.get("role") == "tool" and isinstance(c, list) and \
+                any(isinstance(i, dict) and i.get("type") in ("image", "video") for i in c):
+            m = {**m, "content": [{"type": "text", "text": HY4_PICTURE_NOTE}
+                                  if isinstance(i, dict) and i.get("type") in ("image", "video") else i for i in c]}
+        out.append(m)
+    return out
 from serve.frontend import (CALL_END, CALL_START, MINIMAX_NS, ChatTemplate, Event, OutputParser,  # noqa: E402
                             EFFORT_WORDS, QWEN_EFFORT, anthropic_to_messages, deepseek_effort_kwargs, deepseek_images,
                             effort_kwargs,
@@ -596,6 +670,62 @@ def lp_attach(tok: LpToken, fields: list[str]) -> LpToken:
     return tok
 
 
+def ik2_decode_stats(line: str) -> dict | None:
+    """saguaro-ik2's "decode stats: N tokens, H expert hits, M misses (..)" (SAGUARO_IK2_STATS=1, before its DONE) as
+    DONE's hit fields: the experts the answer's tokens found in VRAM, of those they asked for."""
+    m = re.match(r"decode stats: \d+ tokens, (\d+) expert hits, (\d+) misses", line)
+    return {"hits": int(m.group(1)), "lookups": int(m.group(1)) + int(m.group(2))} if m else None
+
+
+def ik2_log_facts(text: str, ctx: int) -> dict:
+    """What saguaro-ik2's start lines (its log) say of where the model went, under the names the other engines' INFO
+    lines give them (the Monitor's facts): the routed experts, the VRAM cache's slots over its GPUs and its size, the
+    experts kept in pinned host memory, the K / V cache's size at this context."""
+    out: dict = {}
+    m = re.search(r"saguaro ik2: (\d+) layers.*?, (\d+) experts \(", text)
+    experts = int(m.group(1)) * int(m.group(2)) if m else 0
+    pools = {int(g): (int(n), float(gib)) for g, n, gib in
+             re.findall(r"expert cache, GPU (\d+): (\d+) slots across \d+ pools? \(([\d.]+) GiB\)", text)}
+    if experts:
+        out["experts"] = experts
+        if pools:
+            out["expert_slots"] = min(experts, sum(n for n, _ in pools.values()))
+            out["cache_gb"] = round(sum(g for _, g in pools.values()), 2)
+    m = re.search(r"experts in pinned .*?memory: ([\d.]+) GiB", text)
+    if m and experts:
+        out["ram_slots"], out["ram_gb"] = experts, float(m.group(1))
+    m = re.search(r"kv cache: \S+ \(([\d.]+) GiB", text)
+    if m and ctx > 0:
+        out["kv_gb"], out["kv_ctx"] = float(m.group(1)), int(ctx)
+    return out
+
+
+def ik2_vision_gpu(cards: list, need: int, free_of) -> int | bool:
+    """Where Inkling 2's on-demand image encoder starts: the config's GPU with the most free memory when that holds
+    what the encoder measured (its number, as nvidia-smi numbers them), else False - the CPU."""
+    free, gpu = max(((free_of(g) or 0), -i, g) for i, g in enumerate(cards))[::2]
+    return int(gpu) if free >= need else False
+
+
+def ik2_stat(info: dict, last: dict) -> dict | None:
+    """An answer's figures as the STAT reading the Monitor's "Where the experts live" draws (saguaro-ik2 prints none
+    while it writes: this is the finished answer's, from its DONE and "decode stats:" lines)."""
+    n, ms, look = int(last.get("generated") or 0), float(last.get("decode_ms") or 0), int(last.get("lookups") or 0)
+    experts, slots = int(info.get("experts") or 0), int(info.get("expert_slots") or 0)
+    whole = experts > 0 and slots >= experts            # (every expert in VRAM: its tokens ask the cache for none)
+    if n <= 0 or ms <= 0 or not (look or whole):
+        return None
+    hits = int(last.get("hits") or 0)
+    st = {"tok_s": round(1000.0 * n / ms, 2), "ms_tok": round(ms / n, 2),
+          "vram_hit": round(hits / look, 4) if look else 1.0, "ram_fetch": round((look - hits) / n, 3), "disk": 0.0}
+    if experts and slots:
+        st.update(vram_used=slots, ram_used=experts - slots, disk_gb=0.0)
+        if info.get("ram_gb") and info.get("cache_gb"):
+            st.update(vram_gb=min(float(info["cache_gb"]), float(info["ram_gb"])),
+                      ram_gb=round(max(0.0, float(info["ram_gb"]) - float(info["cache_gb"])), 2))
+    return st
+
+
 def engine_token(field: str) -> int:
     """A T line's id.  Below 0 it is no token: an engine whose sample failed (maya-ds4 before #619, or one an
     update could not rebuild) wrote -1 as one - an error for the request, never an id for the tokenizer and the
@@ -976,6 +1106,8 @@ class StrataEngine:
         self.spawn = (exe, list(args), cwd, log, env)   # to start it again after it died (issue #27)
         paths = {k: v for k, v in zip(args, args[1:]) if k in ("--native", "--pack")}
         self.model_path = paths.get("--native") or paths.get("--pack", "pack/full")
+        if Path(exe).name.startswith(("saguaro-ik2", "maya-ik2")) and "--model" in args[:-1]:   # (its GGUF: /props)
+            self.model_path = args[args.index("--model") + 1]
         self.log_path = log
         self.log = open(log, "a", encoding="utf-8") if log else subprocess.DEVNULL
         loading = threading.Event()                     # set once READY: the narrator below stops
@@ -1003,9 +1135,12 @@ class StrataEngine:
             self.info["version"] = json.loads((Path(exe).parent / "BUILD.json").read_text()).get("version")
         except (OSError, ValueError):
             self.info["version"] = None
+        head = []                        # its other lines before READY (saguaro-ik2's start lines)
         for line in self.proc.stdout:
             if line.startswith("NOTE "):
                 print("[saguaro] " + line[5:].strip(), flush=True)
+            elif not line.startswith(("INFO ", "VRAM ", "READY")) and len(head) < 400:
+                head.append(line)
             if line.startswith("INFO "):
                 for kv in line.split()[1:]:
                     k, _, v = kv.partition("=")
@@ -1034,6 +1169,11 @@ class StrataEngine:
             self.info["version"] = str(self.info["engine"])
         if log:
             self._context_cost(log_start)
+        if self.info.get("engine_kind") == "ik2":
+            # saguaro-ik2 says where the model went on its stdout, before INFO: the Monitor's facts, and the log's
+            for k, v in ik2_log_facts("".join(head), self.max_context).items():
+                self.info.setdefault(k, v)                # (an engine that says it itself, INFO: its own figure)
+            self._ik2_log(head)
         # the engine's stdout on a thread, so a request can wait with a timeout (heartbeats, cancel checks)
         self.lines: queue.Queue = queue.Queue()
         threading.Thread(target=self._pump, daemon=True).start()
@@ -1054,6 +1194,35 @@ class StrataEngine:
         if per:
             self.info["kv_ctx"] = max(c for c, _ in per.values())
             self.info["kv_gb"] = round(sum(g for _, g in per.values()), 3)
+
+    def _ik2_eof(self):
+        """After QUIT, saguaro-ik2 only: its stdin closed.  Its exit waits for the thread that reads stdin (exit()
+        flushes every stream, and that thread holds stdin's lock inside its read), so it ends at the end of input."""
+        if (getattr(self, "info", None) or {}).get("engine_kind") == "ik2":
+            try:
+                self.proc.stdin.close()
+            except (OSError, ValueError):
+                pass
+
+    def _ik2_done(self, stats):
+        """saguaro-ik2's "decode stats:" with the DONE after it: the answer's hit fields, and the Monitor's reading."""
+        if stats:
+            if stats["lookups"]:
+                self.last.update(stats)
+            st = ik2_stat(self.info, self.last)
+            if st:
+                self._parse_stat("STAT " + " ".join(f"{k}={v}" for k, v in st.items()))
+
+    def _ik2_log(self, lines):
+        """saguaro-ik2's plain stdout lines (its start, a request's stats) into the engine log, where the other
+        engines' are."""
+        log = getattr(self, "log", None)
+        if hasattr(log, "write"):
+            try:
+                log.write("".join(lines))
+                log.flush()
+            except (OSError, ValueError):
+                pass
 
     def set_context(self, n: int):
         """The next start's context: --max-context in the command (restart() runs it)."""
@@ -1117,8 +1286,8 @@ class StrataEngine:
     _TAGGED = ("T ", "LP ", "PP ", "DONE ", "ERR ")
 
     def _route(self, line: str) -> bool:
-        """Several conversations at once: a request's own lines (T / LP / PP / DONE / ERR <rid> ...) go to its queue, the
-        engine's (STAT, NOTE) are handled here; True when the line was taken."""
+        """Several conversations at once: a request's own lines (T / LP / PP / RESUME / DONE / ERR <rid> ...) go to its
+        queue, the engine's (STAT, NOTE) are handled here; True when the line was taken."""
         if line.startswith(self._TAGGED):
             f = line.split(None, 2)
             if len(f) >= 2 and f[1].isdigit():
@@ -1133,7 +1302,19 @@ class StrataEngine:
             self._parse_stat(line)
             return True
         if line.startswith("NOTE "):
-            print("[saguaro] " + line[5:].strip(), flush=True)
+            print("[saguaro] " + line[5:].strip(), flush=True)   # (glm tags its loop guard's NOTE with r<rid>: the
+            return True                                          #  printed message says which answer it closed)
+        if line.startswith("RESUME "):
+            # (glm, before a restored read: this many of the prompt's tokens are not read again. The reuse base rides
+            # the PP lines for these engines ("no RESUME base needed", the solo reader), so the line is only taken -
+            # routed to its own request when one is live: it says that read began - and never left for the shared
+            # queue, which in multi mode nothing reads)
+            f = line.split()
+            if len(f) >= 3 and f[1].isdigit():
+                with self._routes_lock:
+                    q = self._routes.get(int(f[1]))
+                if q is not None:
+                    q.put(line)
             return True
         return False
 
@@ -1292,6 +1473,20 @@ class StrataEngine:
             hist = self.stat_history = collections.deque(maxlen=120)
         hist.append(st)
 
+    IK2_GEN_KEYS = ("temperature", "top_p", "top_k", "seed", "fast")   # all saguaro-ik2 reads on a GEN line
+
+    def gen_keys(self, sampling: dict) -> str:
+        """sampling_keys for this engine: saguaro-ik2 gets only the keys it reads (no budget, penalties, Turbo, gt=)."""
+        keys = self.sampling_keys(sampling)
+        if (getattr(self, "info", None) or {}).get("engine_kind") != "ik2":
+            return keys
+        out = [w for w in keys.split() if w.partition("=")[0] in self.IK2_GEN_KEYS]
+        # its own top_k: up to its 1000 candidates, and 0 is "off" (the other engines' cap of 64 is not its)
+        tk = sampling.get("top_k")
+        out = [f"top_k={min(tk, 1000)}" if w.startswith("top_k=") else w for w in out
+               if not (w.startswith("top_k=") and tk < 1)]
+        return "".join(" " + w for w in out)
+
     @staticmethod
     def sampling_keys(sampling: dict) -> str:
         keys = ""
@@ -1443,8 +1638,8 @@ class StrataEngine:
         if getattr(self, "_tls", None) is not None:   # (this request's own prompt progress: Service._progress)
             self._tls.own_pp = None
         # an image request takes the same sampling keys as text (#75: it used to decode greedily whatever was asked)
-        head = f"GENI {int(max_new)}{self.sampling_keys(sampling or {})} {embeddings}" if embeddings else \
-            f"GEN {int(max_new)}{self.sampling_keys(sampling or {})}"
+        head = f"GENI {int(max_new)}{self.gen_keys(sampling or {})} {embeddings}" if embeddings else \
+            f"GEN {int(max_new)}{self.gen_keys(sampling or {})}"
         try:
             self.proc.stdin.write(f"{head} {','.join(str(int(t)) for t in ids)}\n")
             self.proc.stdin.flush()
@@ -1455,6 +1650,7 @@ class StrataEngine:
         # logprobs: a token is held until its LP line, which the engine writes right after its T line (an engine that
         # writes none for it: the token goes on at the next other line, without them)
         want_lp, lp_wait = logprobs_asked(sampling) is not None, None
+        ik2, ik2_stats = (getattr(self, "info", None) or {}).get("engine_kind") == "ik2", None
         try:
             while True:
                 try:
@@ -1517,12 +1713,16 @@ class StrataEngine:
                     print("[saguaro] " + line[5:].strip(), flush=True)
                 elif line.startswith("DONE"):
                     self._parse_done(line)
+                    self._ik2_done(ik2_stats)
                     done = True
                     return
                 elif line.startswith("ERR"):
                     done = True
                     self._done_after_err()        # (maya-ds4 / maya-mm3 end the request with a DONE after it)
                     raise ValueError(line[4:].strip())
+                elif ik2 and line.startswith(("decode stats:", "prefill stats:", "prefill sources:")):
+                    ik2_stats = ik2_decode_stats(line) or ik2_stats
+                    self._ik2_log([line])
         finally:
             if not done:                                  # the consumer stopped early: stop the engine, drain to DONE
                 if self.can_stop:
@@ -1567,8 +1767,13 @@ class StrataEngine:
                     if line.startswith("ERR"):
                         self._done_after_err()
                         break
+                    if ik2 and line.startswith(("decode stats:", "prefill stats:", "prefill sources:")):
+                        ik2_stats = ik2_decode_stats(line) or ik2_stats   # (an answer that ended at its stop token:
+                        self._ik2_log([line])                             #  its last lines are read here)
+                        continue
                     if line.startswith("DONE"):
                         self._parse_done(line)
+                        self._ik2_done(ik2_stats)
                         if said:
                             print(f"[saguaro] the stopped request ended after {heard - t0:.0f} s", flush=True)
                         break
@@ -1622,6 +1827,8 @@ class StrataEngine:
 
     def wrap(self):
         """The server is stopping: a request still thinking closes its reasoning at the next token and answers."""
+        if (getattr(self, "info", None) or {}).get("engine_kind") == "ik2":   # (saguaro-ik2 has no WRAP: not sent)
+            return
         try:
             self.proc.stdin.write("WRAP\n")
             self.proc.stdin.flush()
@@ -1807,6 +2014,7 @@ class StrataEngine:
                 self.proc.stdin.write("STOP\n")         # alone lets it run to max_tokens before the engine ends
             self.proc.stdin.write("QUIT\n")
             self.proc.stdin.flush()
+            self._ik2_eof()
             end = time.monotonic() + wait
             src = getattr(self, "lines", None)          # after start-up the pump thread owns stdout: read its queue
             while self.proc.poll() is None and time.monotonic() < end:
@@ -1840,7 +2048,8 @@ class Vision:
     resident), for a second or two of start-up per request with new pictures."""
 
     def __init__(self, cfg: dict, log=None, env: dict | None = None, start: bool = True):
-        args = [cfg["exe"], "--mmproj", cfg["mmproj"], "--model", cfg["model"]]
+        # (no "model": no text model - Inkling 2's encoder reads its pictures from the mmproj alone)
+        args = [cfg["exe"], "--mmproj", cfg["mmproj"]] + (["--model", cfg["model"]] if cfg.get("model") else [])
         if cfg.get("gpu"):
             args.append("--gpu")
         if cfg.get("threads"):
@@ -1853,6 +2062,11 @@ class Vision:
         self.dir = Path(tempfile.mkdtemp(prefix="saguaro-vision-"))
         self.proc = None
         self.lend = self.reclaim = None   # on demand: callables (the engine's VLEND / VRECLAIM), wired by main()
+        # on demand without lending (Inkling 2): a callable, True when the GPU's free memory holds the encoder now -
+        # it then starts there, else on the CPU (no GPU visible, `cpu_threads`); it ends after the request's pictures
+        self.room = None
+        self.cpu_threads = 0
+        self.on_gpu = None                # (where the last on-demand start ran: True GPU, False CPU)
         self.owed = False                 # the engine's memory is not back yet (a reclaim that kept failing)
         self.lock = threading.RLock()
         self.cache: dict[str, tuple[Path, int]] = {}
@@ -1863,11 +2077,24 @@ class Vision:
         if self.lend is not None:
             self.settle()
             self.lend()
+        args, env = self.args, self.env
+        if self.room is not None:
+            where = self.room()                           # (True / False, or the GPU's number: Inkling 2 on two cards)
+            self.on_gpu = where is not False and where is not None
+            if self.on_gpu and where is not True:
+                env = dict(env if env is not None else os.environ, CUDA_VISIBLE_DEVICES=str(int(where)))
+            print("[saguaro] images: reading the pictures on " +
+                  (("the GPU" if where is True else f"GPU {int(where)}") if self.on_gpu else "the CPU"), flush=True)
+            if not self.on_gpu:
+                args = [x for x in args if x != "--gpu"] + \
+                    (["--threads", str(self.cpu_threads)] if self.cpu_threads and "--threads" not in args else [])
+                env = dict(env if env is not None else os.environ, CUDA_VISIBLE_DEVICES="")
         try:
-            self.proc = subprocess.Popen(self.args + (["--no-warmup"] if self.lend is not None else []),
+            self.proc = subprocess.Popen(args + (["--no-warmup"] if self.lend is not None or self.room is not None
+                                                 else []),
                                          stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                          stderr=self.log or subprocess.DEVNULL, text=True, encoding="utf-8",
-                                         bufsize=1, env=self.env)
+                                         bufsize=1, env=env)
             line = self.proc.stdout.readline()
             if not line.startswith("READY"):
                 raise RuntimeError("the vision encoder did not start: " + line.strip())
@@ -1913,7 +2140,7 @@ class Vision:
             try:
                 yield self
             finally:
-                if self.lend is not None and self.proc is not None:
+                if (self.lend is not None or self.room is not None) and self.proc is not None:
                     self._stop()
 
     @staticmethod
@@ -2064,6 +2291,16 @@ class Vision:
             self.proc.kill()
 
 
+def gpu_free_bytes(gpu: int) -> int | None:
+    """The free memory of NVIDIA GPU `gpu` (nvidia-smi's numbering) now, or None when nvidia-smi cannot say."""
+    try:
+        r = subprocess.run(["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits", "-i", str(gpu)],
+                           capture_output=True, text=True, timeout=20)
+        return int(r.stdout.strip().splitlines()[0]) << 20 if r.returncode == 0 else None
+    except (OSError, subprocess.TimeoutExpired, ValueError, IndexError):
+        return None
+
+
 def vision_footprint(vcfg: dict, env: dict, cache_file: Path, gpu: int) -> tuple[int, int] | None:
     """(image token cap, bytes) for the on-demand vision encoder on THIS machine's first GPU: measured once by
     `vision-glm --measure` (before the model loads, so the GPU is otherwise idle) and cached per encoder file, cap
@@ -2085,8 +2322,9 @@ def vision_footprint(vcfg: dict, env: dict, cache_file: Path, gpu: int) -> tuple
         if not isinstance(m, dict) or not all(isinstance(m.get(k), int) and m[k] > 0 for k in ("bytes", "total")):
             m = None
         if m is None:
-            args = [vcfg["exe"], "--mmproj", vcfg["mmproj"], "--model", vcfg["model"], "--gpu", "--max-tokens", str(cap),
-                    "--measure"] + (["--no-flash-attn"] if vcfg.get("no_flash_attn") else [])
+            args = [vcfg["exe"], "--mmproj", vcfg["mmproj"]] + \
+                (["--model", vcfg["model"]] if vcfg.get("model") else []) + \
+                ["--gpu", "--max-tokens", str(cap), "--measure"] + (["--no-flash-attn"] if vcfg.get("no_flash_attn") else [])
             print(f"[saguaro] images: measuring the vision encoder on this GPU ({cap} image tokens) ...", flush=True)
             try:
                 r = subprocess.run(args, capture_output=True, text=True, timeout=600, env=env)
@@ -2127,7 +2365,8 @@ def engine_args(cfg: dict) -> list[str]:
     """The engine's arguments: the config's, and with several GPUs the layer split across them ("layer_split" in the
     config: "auto" by default, or the first layer of each later GPU's share, e.g. "18" or "16,32")."""
     args = list(cfg["args"])
-    if len(gpu_list(cfg)) > 1 and "--layer-split" not in args:
+    # (saguaro-ik2 deals its layers itself, --gpus: it stops at a flag it does not know)
+    if len(gpu_list(cfg)) > 1 and "--layer-split" not in args and maya_quants.family_of(cfg) != "ik2":
         args += ["--layer-split", str(cfg.get("layer_split") or "auto")]
     return args
 
@@ -2144,6 +2383,18 @@ def child_env(cfg: dict) -> dict:
     # engine settings the config carries (AMD: the GEMM tuning table): each setting has one name (issue #686)
     for k, v in (cfg.get("env") or {}).items():
         env[str(k)] = str(v)
+    # Hy4-flash: what its engine measures once on this PC (the CPU lane's 4-bit copies, the prompt route's rates,
+    # --drafting auto's choice) and HY4_HOT's scores are kept in files - the config's env names them, else the data
+    # folder's; the prompt route is measured before READY on this install's docs (HY4_MEASURE_IDS)
+    if models.family(cfg) == "hy4":
+        env.setdefault("HY4_Q4X_FILE", str(HY4_LANE_FILE))
+        env.setdefault("HY4_ROUTE_FILE", str(HY4_ROUTE_FILE))
+        env.setdefault("HY4_DRAFT_FILE", str(HY4_DRAFT_FILE))
+        env.setdefault("HY4_HOT_FILE", str(hy4_hot_file(cfg)))
+        if "HY4_MEASURE_IDS" not in env:
+            ids = hy4_measure_ids(cfg)
+            if ids is not None:
+                env["HY4_MEASURE_IDS"] = str(ids)
     dirs = [d for d in cfg.get("lib_dirs") or [] if Path(d).is_dir()]
     if dirs:
         var = "PATH" if os.name == "nt" else "LD_LIBRARY_PATH"
@@ -2217,6 +2468,8 @@ def speculation_modes(info: dict, dspark=None, lookup=None) -> list:
         modes.append("DFlash2")
     elif on(info.get("mtp")):
         modes.append("MTP")
+    elif on(info.get("dfly2")):                        # (saguaro-hy4's DFly2 drafter: its INFO dfly2=)
+        modes.append("DFly2")
     lk = lookup if lookup is not None else info.get("lookup")
     if on(lk):
         modes.append("Lookup")
@@ -2441,7 +2694,13 @@ class Service:
                             # DeepSeek-V4.1 ends a turn with its EOS (and would start the next with <｜User｜>)
                             _special_ids("<｜end▁of▁sentence｜>") + _special_ids("<｜User｜>") +
                             # MiniMax-M3.1 with [e~[ (and would start the next turn with ]~b])
-                            _special_ids("[e~[") + _special_ids("]~b]"))
+                            _special_ids("[e~[") + _special_ids("]~b]") +
+                            # Hy4-flash with <｜hy_end:..｜> (and would start the next turn with <｜hy_start:..｜>)
+                            (_special_ids("<｜hy_end%s｜>" % template.hy4_tag) +
+                             _special_ids("<｜hy_start%s｜>" % template.hy4_tag)
+                             if getattr(template, "hy4", False) else []) +
+                            # Inkling 2 with <|content_model_end_sampling|>
+                            _special_ids("<|content_model_end_sampling|>"))
         # DeepSeek's turn openers: where its last user turn starts and its system prompt ends (SAGUARO_DS4_RESTORE_POINTS)
         self.ds_user_id = (_special_ids("<｜User｜>") or [None])[0]
         self.ds_system_id = (_special_ids("<｜System｜>") or [None])[0]
@@ -2455,7 +2714,10 @@ class Service:
         # closed with the template's </think> and the answer follows - GLM at High can plan for 14k+ tokens
         self.think_budget = 0
         # (MiniMax-M3.1 closes its reasoning with </mm:think>; its vocabulary may hold a plain "</think>" too)
-        end = _special_ids("</mm:think>") if getattr(template, "minimax", False) else _special_ids("</think>")
+        # (Hy4-flash with its suffixed </think:..>, which the pack's tokenizer names </think> in what the server reads)
+        end = _special_ids("</mm:think>") if getattr(template, "minimax", False) else \
+            (_special_ids("</think%s>" % template.hy4_tag) or _special_ids("</think>")) \
+            if getattr(template, "hy4", False) else _special_ids("</think>")
         self.think_end_id = end[0] if end else None
         # the tokens the engine itself ends a request at, whatever the server does (see THINK_RESTARTS): a pack
         # tokenizer that names its "eos" (DeepSeek's, MiniMax's: their engines' --eos default) ends there only; the
@@ -2465,6 +2727,13 @@ class Service:
         self.eos_ids = {sid["eos"]} if isinstance(sid.get("eos"), int) else set(self.stop_ids)
         # the special literals that stay text inside a message (frontend.mark_literals): every one the vocabulary has
         self.literals = literal_tags(getattr(tokenizer, "special_tokens", None))
+
+    def text_only(self) -> str | None:
+        """Hy4-Flash while its engine has no vision tower loaded (--vision off, a pack without one, no room for a
+        picture): its name for the errors' words; None for every other model."""
+        if getattr(self, "vision", None) is None and getattr(getattr(self, "template", None), "hy4", False):
+            return HY4_TEXT_ONLY
+        return None
 
     def check_request(self, req: dict) -> None:
         """A request's sampling fields and logit_bias, checked (a ValueError is the 400) and kept in the form the engine
@@ -2476,6 +2745,8 @@ class Service:
         if not isinstance(req.get("turbo"), dict):
             default = self.turbo_default   # (read once: a concurrent POST /api/turbo/options stores None between two reads and dict(None) is a 500)
             req["turbo"] = dict(default) if default else None
+        if getattr(self, "engine_kind", None) in NO_LIVE_TURBO:   # (no Turbo in these engines: the request runs exact)
+            req["turbo"] = None
         bias = logit_bias_of(req.get("logit_bias"), len(getattr(self.tok, "tokens", None) or ()) or None)
         if bias and (getattr(self.engine, "info", None) or {}).get("logit_bias") != 1:
             raise ValueError("logit_bias: this engine does not apply token biases - update Saguaro (./saguaro.sh --setup)")
@@ -2556,6 +2827,8 @@ class Service:
         request that carries none of its own runs with (agents included).  It applies at once - no config rewrite,
         no reload - and is kept in a sidecar file for the next start; the engine's run config is not touched."""
         t = turbo_live.normalize_turbo(value)
+        if getattr(self, "engine_kind", None) in NO_LIVE_TURBO and turbo_live.turbo_on(t):
+            raise ValueError(f"Turbo: {NO_LIVE_TURBO[self.engine_kind]}'s engine has none - its requests run exact")
         self.turbo_default = turbo_live.turbo_on(t)     # (off, None: the model answers exact unless a request says otherwise)
         if self.turbo_path:
             try:
@@ -2940,14 +3213,15 @@ class Service:
 
     def think_budget_info(self) -> dict:
         """The dashboard's Thinking budget: tokens (0 = no limit), whether this model has a think block at all."""
-        return {"budget": int(self.think_budget or 0), "supported": self.think_end_id is not None,
+        return {"budget": int(self.think_budget or 0),
+                "supported": self.think_end_id is not None and getattr(self, "engine_kind", None) != "ik2",
                 "saved": bool(self.config_path)}
 
     def set_think_budget(self, value) -> dict:
         """The dashboard's Thinking budget: 0 or 256..262144 tokens.  It applies from the next request (think_budget is
         read per request, no restart) and is saved into the run config - marked as the user's own, so a setup or a
         switch keeps it."""
-        if self.think_end_id is None:
+        if self.think_end_id is None or getattr(self, "engine_kind", None) == "ik2":   # (saguaro-ik2 reads none)
             raise ValueError("this model has no thinking budget")
         n = maya_quants.check_thinking_budget(value)
         self.think_budget = n
@@ -4127,15 +4401,30 @@ class Service:
                 prefill = "\n\n<｜DSML｜ calls>\n" + (f'<｜DSML｜ invoke name="{force}">\n' if force else "")
             elif getattr(self.template, "minimax", False):
                 prefill = MINIMAX_NS + "<tool_call>\n" + (MINIMAX_NS + f'<invoke name="{force}">' if force else "")
+            elif getattr(self.template, "inkling", False):
+                # Inkling 2: a call is a model message of its own, <|message_model|>NAME<|content_invoke_tool_json|>{..}
+                prefill = "<|message_model|>" + (force + "<|content_invoke_tool_json|>" if force else "")
             else:
                 prefill = CALL_START + (force if glm_calls else "\n" + (f"<function={force}>\n" if force else ""))
+        if not prefill and not tools and getattr(self.template, "inkling", False) and \
+                (kwargs.get("enable_thinking") is False or kwargs.get("reasoning_effort") == "none"):
+            # Inkling 2 has no switch for its thinking, only its effort, and at "none" it still thinks a little: with
+            # thinking off the prompt opens the answer's text segment (with tools the first segment may be a call)
+            kwargs = {**kwargs, "enable_thinking": False}
+            prefill = "<|message_model|><|content_text|>"
         given["_prefill"] = prefill
+        if prefill and getattr(self.template, "hy4", False):
+            # Hy4-flash: GLM's form under its own suffixed tags, inside its <tool_calls:..> wrapper.  The prompt gets
+            # the opening as its template writes it; the parser reads it in GLM's spelling, as it reads the answer
+            given["_prefill"], prefill = CALL_START + (force or ""), self.template.hy4_call_open(force)
         given["_conv_label"] = conv_first_words(asked)   # (the Monitor's conversation rows: its first words)
         given["_blocked"] = self._block_suffixes(blocked, tools, kwargs) if blocked and force is None else None
         if looping and tools and force is None and not loop_guard.answers_user(asked):   # (an answer to the user ends)
             keep = self._keep_suffix(tools, kwargs)
             if keep is not None:                     # (+ what the model said before: stops_short's `seen`)
                 given["_blocked"] = {**(given["_blocked"] or {}), "_keep": keep + (loop_guard.said_before(asked),)}
+        if getattr(self.template, "hy4", False) and getattr(self, "vision", None) is None:
+            messages = hy4_tool_pictures_noted(messages)   # (a tool result's picture: a text note, not a 400)
         ids = self.render_ids(messages, tools, kwargs, prefill)
         # the reply's opening: the tokens the generation prompt (and a thinking-off close or a forced call) adds
         # (not DeepSeek: maya-ds4 has no gt= key, so its prompts skip this second render)
@@ -4152,7 +4441,8 @@ class Service:
         images = (deepseek_images(messages) if getattr(self.template, "deepseek", False)
                   else [src for kind, src in media if kind == "image"])
         if isinstance(self.vision, mm3_vision.Vision) and any(kind == "video" for kind, _ in media):
-            raise ValueError("MiniMax-M3.1 reads pictures, not videos")
+            raise ValueError(("Hy4-flash" if isinstance(self.vision, hy4_vision.Vision) else "MiniMax-M3.1")
+                             + " reads pictures, not videos")
         if images and isinstance(self.vision, ENGINE_VISION):
             # DeepSeek: the engine encodes the pictures itself; each placeholder the template wrote (user text's are
             # plain text, see render_ids) becomes its picture's span, the resized pixels go in the GENI file
@@ -4167,6 +4457,19 @@ class Service:
             self.embeddings.path = self.vision.write(self.vision.dir / f"req-{uuid.uuid4().hex[:12]}.dsi", pics,
                                                      starts)
         elif media:
+            if self.vision is None and getattr(self.template, "hy4", False):
+                # (--vision off, a pack without the mmproj file, or no room for a picture: the engine's start says)
+                raise ValueError(f"{HY4_TEXT_ONLY} reads text only, so it cannot read images or videos: send the "
+                                 "request without them (describe the picture in text instead)")
+            inkling = getattr(self.template, "inkling", False)
+            if self.vision is None and inkling:
+                # Inkling 2's GGUF has no vision tower: the image encoder (the config's "vision" entry) reads pictures
+                raise ValueError(f"{self.model} on saguaro-ik2 reads text only without the image encoder (a \"vision\" "
+                                 "entry in its config: the encoder and the model's mmproj file), so it cannot read "
+                                 "images or videos: send the request without them (describe the picture in text "
+                                 "instead)")
+            if inkling and any(kind == "video" for kind, _ in media):
+                raise ValueError(f"{self.model} reads pictures, not videos")
             if self.vision is None:
                 raise ValueError("this server was started without the vision encoder (run setup again and choose "
                                  "'vision'), so it cannot read images or videos")
@@ -4178,12 +4481,18 @@ class Service:
             glm = "<|begin_of_image|>" in self.template.source
             image_pad, image_start = ("<|image|>", "<|begin_of_image|>") if glm else (IMAGE_PAD, VISION_START)
             video_pad, video_start = ("<|video|>", "<|begin_of_video|>") if glm else ("<|video_pad|>", VISION_START)
+            if inkling:
+                # Inkling 2 writes <|content_image|><|unused_200054|><|end_message|>: the one placeholder becomes the
+                # picture's image tokens (each takes one of the encoder's rows); pictures only
+                image_pad, image_start = "<|unused_200054|>", "<|content_image|>"
             pad = self.tok.encode(image_pad, parse_special=True)[0]
             start = self.tok.encode(image_start, parse_special=True)[0]
-            vp = self.tok.encode(video_pad, parse_special=True)[0]
-            vstart = self.tok.encode(video_start, parse_special=True)[0]
-            # every frame is an independent image: the image's own begin / end markers around its pads
-            iend = self.tok.encode("<|end_of_image|>" if glm else "<|vision_end|>", parse_special=True)[0]
+            vp = vstart = iend = None
+            if not inkling:
+                vp = self.tok.encode(video_pad, parse_special=True)[0]
+                vstart = self.tok.encode(video_start, parse_special=True)[0]
+                # every frame is an independent image: the image's own begin / end markers around its pads
+                iend = self.tok.encode("<|end_of_image|>" if glm else "<|vision_end|>", parse_special=True)[0]
             frame = (start, pad, iend)
             # Encode only while the engine is idle: the engine and the image encoder (a separate process) must not
             # run on the GPU at the same time - an encode during a running request left that request stuck at
@@ -4495,6 +4804,8 @@ class Service:
             # The parser rewrites DSML into CALL_END internally; the prompt and generated token IDs still use
             # the original DSML. Slice after the outer block, not an invoke or a legacy tag inside an argument.
             call_end = f"</{dsml_token}{tool_calls_block_name}>"
+        elif getattr(self.template, "hy4", False):   # (Hy4-flash: the end of its wrapper, after the last call's own)
+            call_end = "</tool_calls%s>" % self.template.hy4_tag
         out = {}
         for key, rep in blocked.items():
             call = {"id": "call_loop_guard", "type": "function",
@@ -4513,7 +4824,7 @@ class Service:
             if not f.startswith(p) or call_end not in p:
                 return None
             out[key] = (rep, self.tok.encode(p[p.rindex(call_end) + len(call_end):] + f[len(p):], parse_special=True),
-                        f.rstrip().endswith("<think>"))
+                        self._opens_thinking(f))
         return out
 
     def _keep_suffix(self, tools, kwargs, note=loop_guard.KEEP_NOTE):
@@ -4539,7 +4850,12 @@ class Service:
         tail = f[f.rindex(mark) + len(mark):]
         if not tail:
             return None
-        return (self.tok.encode(tail, parse_special=True), f.rstrip().endswith("<think>"))
+        return (self.tok.encode(tail, parse_special=True), self._opens_thinking(f))
+
+    def _opens_thinking(self, prompt: str) -> bool:
+        """Whether a rendered prompt ends in an open thinking block (Hy4-flash's is its suffixed <think:..>)."""
+        opens = getattr(self.template, "opens_thinking", None)
+        return bool(opens(prompt)) if callable(opens) else prompt.rstrip().endswith("<think>")
 
     def _collapse(self, messages):
         """A conversation that carries a loop across turns (loop_guard.collapse): its prompt without what the model
@@ -4803,6 +5119,7 @@ class Service:
                                 stream_tools=True, dsml=getattr(self.template, "deepseek", False),
                                 token_only_end=getattr(self.template, "deepseek", False) and self.think_end_id is not None,
                                 minimax=getattr(self.template, "minimax", False),
+                                inkling=getattr(self.template, "inkling", False),
                                 strict_tools=responses, single_tool=single_tool)
         parser = new_parser()
         # calls the loop guard blocks in this answer (prepare, _block_suffixes): {(name, args): (ToolRepeat, ids)}.
@@ -6522,11 +6839,17 @@ def make_handler(svc: Service):
             elif path == "/health":
                 # the run config's recommended settings: the web app's Chat defaults until its user picks their own
                 rec = {k: v for k, v in svc.sampling_defaults.items() if k in ("temperature", "top_p", "top_k", "min_p")}
-                if svc.default_effort:   # (MiniMax's by its own five names, CYBER-FROST's by Qwen's three)
-                    rec["reasoning_effort"] = (effort_name if getattr(svc.template, "minimax", False) else effort_level)(
+                if svc.default_effort:   # (MiniMax's and Inkling's by their own names, CYBER-FROST's by Qwen's three)
+                    named = getattr(svc.template, "minimax", False) or getattr(svc.template, "inkling", False)
+                    rec["reasoning_effort"] = (effort_name if named else effort_level)(
                         svc.default_effort) or svc.default_effort
                     if getattr(svc.template, "forced_thinking", False):
                         rec["reasoning_effort"] = QWEN_EFFORT.get(rec["reasoning_effort"], rec["reasoning_effort"])
+                    if getattr(svc.template, "hy4", False):   # (Hy4-flash: the level it runs at, none / high)
+                        rec["reasoning_effort"] = svc.template.effort_shown(svc.default_effort) or \
+                            rec["reasoning_effort"]
+                # Hy4-flash alone: its two levels (the page offers these and no others)
+                levels = svc.template.thinking_levels() if getattr(svc.template, "hy4", False) else None
                 self._json(200, {"status": "updating" if svc.updater.busy() else
                                            "reloading" if svc.reloading() else "ok",
                                  "max_context": svc.engine.max_context, "model": svc.model,
@@ -6534,6 +6857,7 @@ def make_handler(svc: Service):
                                  "model_label": svc.model_label,   # (the model first: "GLM-5.3 · Maya-S24")
                                  "images": svc.vision is not None, "api_key": bool(svc.api_key), "defaults": rec,
                                  "version": SAGUARO_VERSION, "mcp_tools": bool(svc.mcp), "unloaded": svc.unloaded,
+                                 **({"thinking_levels": levels} if levels else {}),
                                  "capabilities": svc.capabilities(), "supervisor": svc.supervisor})
             elif path == "/api/context":
                 # the dashboard's Context size: the range, the measured cost of the current size, a reload's state
@@ -6554,7 +6878,9 @@ def make_handler(svc: Service):
                 # the live per-request Turbo (PLAN-turbo-live): the model's global setting (the control panel's),
                 # what requests without their own `turbo` run with - changes apply at once, no config rewrite
                 if self._authorized():
-                    self._json(200, {"turbo": dict(svc.turbo_default) if svc.turbo_default else None})
+                    self._json(200, {"turbo": dict(svc.turbo_default) if svc.turbo_default else None,
+                                     **({"supported": False} if getattr(svc, "engine_kind", None) in NO_LIVE_TURBO
+                                        else {})})
             elif path == "/api/models":
                 # the Models page: the configs the setup wrote, the running one, each one's engine settings
                 if self._authorized():
@@ -7979,7 +8305,8 @@ def main() -> int:
                 vcfg, on_demand = dict(vcfg, gpu=False), False
             else:
                 vcfg = dict(vcfg, max_tokens=fp[0])
-                engine_env = dict(env, SAGUARO_GLM_VISION_LEND_MB=str((fp[1] >> 20) + 1))
+                if models.family(cfg) != "ik2":   # (saguaro-ik2 lends no memory: the encoder takes what is free)
+                    engine_env = dict(env, SAGUARO_GLM_VISION_LEND_MB=str((fp[1] >> 20) + 1))
                 print(f"[saguaro] images: the vision encoder needs {fp[1] / 2**30:.2f} GB on this GPU at up to {fp[0]} "
                       "image tokens", flush=True)
         if vcfg and not on_demand:
@@ -8008,6 +8335,14 @@ def main() -> int:
                                        Path(tempfile.mkdtemp(prefix="maya-mm3-pictures-")), Vision.load)
             print(f"[saguaro] images: the model's vision tower runs in the engine, up to {vision.g.max_pixels} pixels "
                   f"({vision.g.max_tokens} tokens) a picture", flush=True)
+        elif vision is None and not vcfg and engine.info.get("vision") == "hy4":
+            # Hy4-flash: the engine's own vision tower (the mmproj file in its pack); the server resizes the pictures
+            vision = hy4_vision.Vision(hy4_vision.Geometry.from_info(engine.info),
+                                       Path(tempfile.mkdtemp(prefix="saguaro-hy4-pictures-")), Vision.load)
+            where = (f"; no VRAM kept for pictures (~{engine.info.get('vision_room_mib')} MiB while one is read, lent "
+                     "by the prompt buffers)" if engine.info.get("vision_room") == "chunk" else "")
+            print(f"[saguaro] images: the model's vision tower runs in the engine, up to {vision.g.max_pixels} pixels "
+                  f"({vision.g.max_tokens} tokens for a square one) a picture{where}", flush=True)
         elif vision is None and not vcfg and engine.info.get("vision") == "off":
             # (DeepSeek-V4.1: its tower did not load - the engine's NOTE line above says why; no pictures offered)
             print("[saguaro] images: OFF - pictures are refused until the vision tower loads (see the line above)",
@@ -8020,6 +8355,20 @@ def main() -> int:
                 vision.reclaim = lambda: engine.command("VRECLAIM", "VRECLAIMED")
                 print(f"[saguaro] images: the vision encoder starts when a picture arrives, in {lent / 2**30:.2f} GB "
                       "the model lends it", flush=True)
+            elif models.family(cfg) == "ik2":
+                # Inkling 2 (its engine lends no memory and keeps none for pictures): the encoder starts when a picture
+                # arrives - on the GPU when its free memory then holds what the encoder measured, else on the CPU -
+                # and ends once the request's pictures are read
+                need, cards = fp[1], gpu_list(cfg) or [0]
+                vision = Vision(vcfg, log=vlog, env=venv, start=False)
+                vision.room = lambda: ik2_vision_gpu(cards, need, gpu_free_bytes)
+                vision.cpu_threads = max(1, (os.cpu_count() or 2) // 2)
+                free = {g: (gpu_free_bytes(g) or 0) for g in cards}
+                print(f"[saguaro] images: the vision encoder starts when a picture arrives - on "
+                      f"{'the GPU of ' + ', '.join(map(str, cards)) + ' with the most free memory' if len(cards) > 1 else f'GPU {cards[0]}'}"
+                      f" while {need / 2**30:.2f} GB of it is free ("
+                      + ", ".join(f"GPU {g}: {b_ / 2**30:.2f} GB" for g, b_ in free.items()) +
+                      " now), else on the CPU; no VRAM kept for it", flush=True)
             else:   # the model's GPU memory is too small to lend that much (or an engine without lending)
                 print("[saguaro] images: the model cannot lend the vision encoder its GPU memory here - the encoder "
                       "runs on the CPU", flush=True)
@@ -8053,17 +8402,22 @@ def main() -> int:
             raise SystemExit(f"[saguaro] config reasoning_effort: {e}")
         svc.default_effort = cfg["reasoning_effort"]
         # (#363: DeepSeek's 1..100 budget is a level of its own - it was shown as "none")
-        level = (effort_name if svc.template.minimax else effort_level)(svc.default_effort) or \
+        level = (effort_name if svc.template.minimax or getattr(svc.template, "inkling", False) else effort_level)(
+            svc.default_effort) or \
             (f"{svc.default_effort} of 100" if type(svc.default_effort) is int
                                                      else "none")
         if getattr(svc.template, "forced_thinking", False):   # (CYBER-FROST: Qwen's words, low / medium / xhigh)
             level = QWEN_EFFORT.get(level, level)
+        if getattr(svc.template, "hy4", False):               # (Hy4-flash: the level it runs at, none / high)
+            level = svc.template.effort_shown(svc.default_effort) or level
         print(f"[saguaro] thinking level when a request names none: {level}"
               f"{'' if level in (svc.default_effort, f'{svc.default_effort} of 100') else f' (the config says {svc.default_effort})'}",
               flush=True)
     svc.think_budget = int(cfg["thinking_budget"] if cfg.get("thinking_budget") is not None else
                            cfg["reasoning_budget_tokens"] if kind == "batch" and cfg.get("reasoning_budget_tokens") else
                            maya_quants.default_thinking_budget(cfg) if kind == "line" else 32768)         if svc.think_end_id is not None else 0
+    if maya_quants.family_of(cfg) == "ik2":             # (saguaro-ik2 closes no thinking at a budget)
+        svc.think_budget = 0
     svc.idle_unload_s = max(0.0, a.idle_unload if a.idle_unload is not None else float(cfg.get("idle_unload_s") or 0))
     if svc.think_budget:
         print(f"[saguaro] thinking budget: {svc.think_budget} tokens (then the answer)", flush=True)

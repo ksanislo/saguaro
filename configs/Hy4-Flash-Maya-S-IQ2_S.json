@@ -1,0 +1,51 @@
+{
+ "_": "4x T4: tensor parallel over the four cards, chunk 2048, the experts placed by the learned scores; clocks locked by the start command (llm-gpu-clocks lock). Measured in bench/hy4/RESULTS.md.",
+ "exe": "/opt/llm/saguaro/bin/saguaro-hy4",
+ "args": [
+  "--pack",
+  "/opt/llm/models/Hy4-Flash-Maya-S-IQ2_S/pack",
+  "--max-context",
+  "131072",
+  "--tp",
+  "4",
+  "--chunk",
+  "2048",
+  "--reserve-gb",
+  "0.5"
+ ],
+ "env": {
+  "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
+  "HY4_Q4X": "0",
+  "HY4_Q4X_FILE": "/opt/llm/var/Hy4-Flash-Maya-S-IQ2_S/hy4-cpu-lane.txt",
+  "HY4_ROUTE_FILE": "/opt/llm/var/Hy4-Flash-Maya-S-IQ2_S/hy4-prompt-route.txt",
+  "HY4_DRAFT_FILE": "/opt/llm/var/Hy4-Flash-Maya-S-IQ2_S/hy4-drafting.txt",
+  "HY4_HOT_FILE": "/opt/llm/saguaro/data/hy4-expert-hot-Hy4-Flash-Maya-S.bin",
+  "HY4_HOT": "1",
+  "HY4_SLOT_DIR": "/opt/llm/var/Hy4-Flash-Maya-S-IQ2_S/sessions",
+  "HY4_SLOT_GB": "16",
+  "HY4_VISION_F16": "1",
+  "SAGUARO_PCIE_SAFE": "1"
+ },
+ "cwd": "/opt/llm/saguaro",
+ "tokenizer": "/opt/llm/models/Hy4-Flash-Maya-S-IQ2_S/pack/tokenizer",
+ "model_name": "Hy4-Flash-Maya-S-IQ2_S",
+ "gpu": [
+  0,
+  1,
+  2,
+  3
+ ],
+ "sampling": {
+  "temperature": 0.9,
+  "top_p": 1.0
+ },
+ "reasoning_effort": "high",
+ "host": "127.0.0.1",
+ "log": "/data/llm/logs/maya/Hy4-Flash-Maya-S-IQ2_S.log",
+ "installer": {
+  "family": "hy4",
+  "quant": "Hy4-Flash-Maya-S",
+  "hy4_quant": "maya-s",
+  "model_dir": "/opt/llm/models/Hy4-Flash-Maya-S-IQ2_S"
+ }
+}

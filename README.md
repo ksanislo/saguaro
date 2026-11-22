@@ -1,7 +1,7 @@
 <h1 align="center">Saguaro</h1> 
 
-<p align="center"><b>GLM-5.3-Flash (321 B), DeepSeek-V4.1-Flash-1017 (748 B), MiniMax-M3.1-Flash (428 B) and
-Qwen3.8-Flash-Next on your own GPUs</b><br>
+<p align="center"><b>GLM-5.3-Flash (321 B), DeepSeek-V4.1-Flash-1017 (748 B), MiniMax-M3.1-Flash (428 B),
+Qwen3.8-Flash-Next, Hy4-Flash (220 B) and Inkling 2 Mini (26 B) on your own GPUs</b><br>
 private and fast · one server and one web UI for every engine · several chats at once · up to 16 GPUs ·
 AMD and Windows (experimental) · chat, pictures, OpenAI- and Anthropic-compatible API</p> 
 
@@ -12,9 +12,9 @@ AMD and Windows (experimental) · chat, pictures, OpenAI- and Anthropic-compatib
 <a href="https://huggingface.co/peasantsmith/MiniMax-M3.1-Flash-Maya-GGUF"><img src="https://raw.githubusercontent.com/mw00/project-maya/badges/minimax.svg" alt="MiniMax-M3.1-Flash Maya downloads"></a>
 </p> 
 
-Models this size usually need a datacenter. Saguaro runs four of them on the hardware you already have:
-**GLM-5.3-Flash**, **DeepSeek-V4.1-Flash-1017**, **MiniMax-M3.1-Flash** and **Qwen3.8-Flash-Next**. Each model has an
-engine built for it. It keeps the experts your conversation uses most on the GPU, the next ones in RAM and the rest on
+Models this size usually need a datacenter. Saguaro runs them on the hardware you already have:
+**GLM-5.3-Flash**, **DeepSeek-V4.1-Flash-1017**, **MiniMax-M3.1-Flash**, **Qwen3.8-Flash-Next**, **Hy4-Flash** and -
+for a PC with one or two 16 GB cards - **Inkling 2 Mini**. Each model has an engine built for it. It keeps the experts your conversation uses most on the GPU, the next ones in RAM and the rest on
 your NVMe SSD, and moves them as you chat. It measures your GPUs, CPU, RAM and SSD and tunes itself to them. Nothing
 leaves your machine.
 
@@ -22,8 +22,10 @@ Saguaro unites [Project Maya](https://github.com/mw00/project-maya)'s engines an
 (one server, one dashboard, model switching from the page) and tunes the whole thing for older multi-GPU boxes -
 NVIDIA Turing (Tesla T4, sm_75 tensor cores) and Xeon CPUs without AVX2 - see [NOTICE.md](NOTICE.md).
 
-- **One server, one web UI, four model families:** all four engines behind the same dashboard, monitor and API; the
+- **One server, one web UI, six model families:** every engine behind the same dashboard, monitor and API; the
   Models page switches between them.
+- **A model for small PCs:** [Inkling 2 Mini](docs/INKLING2-MINI.md) writes about 40 tokens/s on one Tesla T4 and 48
+  on two; [Hy4-Flash](docs/HY4-FLASH.md) about 32 on four (measured, the T4s' clocks locked for Hy4).
 - **Several chats at once:** up to 8 answered together with GLM-5.3-Flash, DeepSeek-V4.1-Flash and MiniMax-M3.1-Flash -
   for agents that run several sessions, or several people on one PC.
 - **Elastic VRAM:** the expert tiers stretch over every card, RAM and the SSD - the setup measures them and picks the
@@ -66,9 +68,12 @@ recommends one for your PC; to pick one yourself, give its setup id: `./setup.sh
 | | Maya-XS · `deepseek-maya-xs` | 277 GB | the whole model in a 128 GB PC's memory (the Engram tables stay on the SSD) |
 | **[MiniMax-M3.1-Flash](https://huggingface.co/MiniMaxAI/MiniMax-M3.1-Flash)**<br><sub>MiniMax · [MiniMax Community License](LICENSE.minimax-m31) · 428 B, 23 B active · up to 1M context</sub> | Maya-XS · `minimax-maya-xs` | 93 GB | the whole model in a 128 GB PC's memory |
 | | Maya-S · `minimax-maya-s` | 122 GB | closer to the original |
+| **[Hy4-Flash](https://huggingface.co/tencent/Hy4-flash)**<br><sub>Tencent · [Tencent Hy License](LICENSE.hy4-flash) · 220 B · NVIDIA, Linux · one conversation at a time</sub> | **Maya-S** · `hy4-flash-maya-s`<br>Maya-XS · `hy4-flash-maya-xs`<br>Maya-M · `hy4-flash-maya-m`<br>Maya-L · `hy4-flash-maya-l` | 53.0 GB<br>44.8 GB<br>68.4 GB<br>89.5 GB<br>each + one 63.4 GB n-gram table | four 16 GB cards: Maya-S on 4x Tesla T4 writes ~32 tokens/s (measured; the other sizes are not yet) - [docs/HY4-FLASH.md](docs/HY4-FLASH.md) |
+| **[Inkling 2 Mini](https://huggingface.co/thinkingmachines/Inkling-2-Mini)**<br><sub>Thinking Machines · Apache 2.0 · 26 B · NVIDIA T4 / RTX 20 and newer, Linux · reads pictures · one conversation at a time</sub> | unsloth UD-Q4_K_XL · `inkling-2-mini` | 18.3 GB | **one or two 16 GB cards**: ~42 tokens/s on one Tesla T4, ~52 on two (measured) - [docs/INKLING2-MINI.md](docs/INKLING2-MINI.md) |
 
-All of them run on NVIDIA from the V100 / RTX 20 on, and on AMD and Windows (experimental; see
-[What you need](#what-you-need)). DeepSeek's sizes include its Engram tables. The setup also offers unsloth's GGUF and
+GLM, DeepSeek and MiniMax run on NVIDIA from the V100 / RTX 20 on, and on AMD and Windows (experimental; see
+[What you need](#what-you-need)); Hy4-Flash and Inkling 2 Mini on NVIDIA under Linux. With one or two cards under
+24 GB and no model set up yet, the setup recommends Inkling 2 Mini; with four equal 16 GB cards, Hy4-Flash. DeepSeek's sizes include its Engram tables. The setup also offers unsloth's GGUF and
 LibertAIDAI's EXL3 quants of DeepSeek, orcarouter's abliterated DeepSeek, Mia-AiLab's EXL3 quant of MiniMax,
 turboderp's EXL3 quants of GLM, and Saguaro's fourth family, **Qwen-3.8-Flash-Next** (CYBER-FROST), as its Q5_K_M GGUF
 on the `saguaro-qfn` engine (from Strata), with pictures
@@ -319,6 +324,10 @@ Speed reports, bug reports and pull requests are welcome: [CONTRIBUTING.md](CONT
   [Qwen3.8-Flash-Next](https://huggingface.co/Qwen) by the Qwen team (CYBER-FROST's GGUF by peasantsmith): Qwen
   Community License 1.0 ([LICENSE.qwen-community-1.0](LICENSE.qwen-community-1.0)); MiniMax M3.1 under its Community
   License ([LICENSE.minimax-m31](LICENSE.minimax-m31)).
+  [Hy4-Flash](https://huggingface.co/tencent/Hy4-flash) by Tencent (its GGUF quants by peasantsmith): Tencent Hy
+  License ([LICENSE.hy4-flash](LICENSE.hy4-flash)); [Inkling 2 Mini](https://huggingface.co/thinkingmachines/Inkling-2-Mini)
+  by Thinking Machines ([unsloth's GGUF](https://huggingface.co/unsloth/Inkling-2-Mini-GGUF)): Apache 2.0. Their
+  engines, `saguaro-hy4` and `saguaro-ik2`, are Project Maya's (v1.1.72), built here for Turing cards and AVX1 CPUs.
 - The dashboard's font: Outfit (SIL Open Font License 1.1, `serve/web/fonts/OFL.txt`); its icons:
   [Lucide](https://lucide.dev) (ISC License, `serve/web/LICENSE.lucide.txt`); its UI library:
   [Preact](https://preactjs.com) (MIT License) with [htm](https://github.com/developit/htm) (Apache License 2.0),

@@ -17,7 +17,48 @@ older multi-GPU hardware (NVIDIA Turing T4 - sm_75 tensor cores, Xeon AVX1 CPUs)
   `maya-mm3`, `maya-qfn`), the quant names (Maya-XS to Maya-L), the config, log, report and storage file names
   (`maya-<model>.json`, `maya-report.txt`, the `maya.*` browser keys), session formats and this version line.
 - **Credits:** built on Project Maya ([mw00/project-maya](https://github.com/mw00/project-maya)) and Strata (MIT) -
-  see NOTICE.md. Everything below is upstream Project Maya history.
+  see NOTICE.md. Everything below the next section is upstream Project Maya history.
+
+### Inkling 2 Mini: faster layouts, conversations kept (2026-11-22)
+
+- **Faster on Tesla T4s** (interleaved runs, NEXT-ik2.md): one card now reads prompts in chunks of 2048 with one shared
+  expert cache (`--chunk 2048`, `SAGUARO_IK2_PIN=0`): about 42 tokens/s writing (was 39), 39 eight thousand tokens deep
+  (was 34), prompts at about 640 tokens/s (was 497). Two cards read in chunks of 8192 with every expert still in VRAM:
+  about 52 tokens/s writing (was 50) and 1130 reading (was 844).
+- **Conversations kept:** up to four conversations are set aside in RAM and come back without their prompt read again
+  (an edited message goes back to its snapshot); with `SAGUARO_IK2_SLOT_DIR` they are saved to that folder and read
+  back after a restart.
+- **The Monitor** shows Inkling's expert-cache hits after each answer (`SAGUARO_IK2_STATS=1`); a picture's encoder runs
+  on the config's card with the most free memory.
+
+### Two more engines: Hy4-Flash and Inkling 2 Mini (2026-11-21)
+
+Both are Project Maya v1.1.72's engines, built here for Turing cards (sm_75) and CPUs without AVX2, and set up, listed
+and monitored like every other model.
+
+- **Inkling 2 Mini** (`saguaro-ik2`; Thinking Machines, 26 B, Apache 2.0; unsloth's UD-Q4_K_XL, 18.3 GB with its vision
+  tower): the model for **one or two 16 GB cards**. `./setup.sh --model inkling-2-mini` downloads it (resumable,
+  sha256-checked), writes its tokenizer folder with the model's own chat template and the config for the cards present.
+  Measured on Tesla T4s: one card (32K context, about a quarter of the experts streamed from RAM) writes about 40
+  tokens/s and reads prompts at about 490; two cards (131K context, every expert in VRAM) about 48 and 840. Tool calls,
+  five thinking levels, pictures. One conversation at a time; no saved conversations, drafter or Turbo yet.
+  [docs/INKLING2-MINI.md](docs/INKLING2-MINI.md).
+- **Hy4-Flash** (`saguaro-hy4`; Tencent, 220 B, Tencent Hy License; Project Maya's GGUF quants Maya-XS to Maya-L with
+  one shared 63 GB n-gram table): made for **four cards**. `./setup.sh --model hy4-flash-maya-s` downloads it (117 GB),
+  builds its pack and writes the config. Measured with Maya-S on 4x Tesla T4, GPU clocks locked: about 32 tokens/s
+  writing, about 590 reading (tensor parallel over the four cards, the experts placed by learned scores, a 131K
+  context). Tool calls, thinking on or off. One conversation at a time; no saved conversations, drafter or Turbo yet;
+  pictures not measured on Tesla T4s. [docs/HY4-FLASH.md](docs/HY4-FLASH.md).
+- **The setup recommends by the cards:** with no model set up yet, one or two cards under 24 GB get Inkling 2 Mini as
+  the recommended model, four equal 16 GB cards Hy4-Flash; Hy4 on fewer cards says that Inkling is the model for that
+  PC, and refuses with the reason where its non-expert parts do not fit in VRAM.
+- **Models page:** both models in the download list with their sizes, what each needs and how it fits this PC's cards;
+  a Hy4 config's engine settings write only flags its engine reads (it was given GLM's before, which would have
+  stopped the engine at start); an Inkling config can be switched to, shows its size and is deleted with its files.
+- **Monitor:** Hy4's experts card shows the experts in VRAM and those the CPU computes, the experts a token took from
+  the CPU and the n-gram table's read time; Inkling's says where its experts are (its engine writes no statistics).
+- **Turbo:** neither engine has expert skipping, so the Turbo button and the per-chat bolt are hidden for both and
+  their requests run exact (Hy4's engine ignored the live Turbo keys silently before).
 
 ## [UNRELEASED]
 

@@ -2,12 +2,16 @@
 
 Saguaro runs three quant families, each on an engine built for it; its fourth model family is Qwen-3.8-Flash-Next
 (CYBER-FROST) on the `saguaro-qfn` engine (`engines/qfn`, from Strata) - [its settings](SETTINGS.md#qwen-38-flash-next-cyber-frost).
+Two more models have a page of their own: [Hy4-Flash](HY4-FLASH.md) (four cards) and
+[Inkling 2 Mini](INKLING2-MINI.md) (one or two 16 GB cards).
 This page has each one's files, what they need and what is special about it. Back to the [README](../README.md).
 
 - [How the quants are named](#how-the-quants-are-named)
 - [GLM-5.3-Flash](#glm-53-flash)
 - [DeepSeek-V4.1-Flash-1017](#deepseek-v41-flash-1017)
 - [MiniMax-M3.1-Flash](#minimax-m31-flash)
+- [Hy4-Flash](#hy4-flash)
+- [Inkling 2 Mini](#inkling-2-mini)
 - [Community quants of GLM-5.3-Flash](#community-quants-of-glm-53-flash)
 
 ## How the quants are named
@@ -159,6 +163,37 @@ pictures and drafting, on NVIDIA and AMD alike.
   own numbers in the monitor.
 
 Its engine settings: [SETTINGS.md](SETTINGS.md#minimax-m31-flash).
+
+## Hy4-Flash
+
+**[Hy4-Flash](https://huggingface.co/tencent/Hy4-flash)** (Tencent; 220 B parameters, 512 experts a layer of which 16
+run a token, an n-gram table read from the SSD; the [Tencent Hy License](../LICENSE.hy4-flash)) on an engine of its own
+(`saguaro-hy4`), in Project Maya's GGUF quants: `./setup.sh --model hy4-flash-maya-s`.
+
+| Files | Size | Runs on |
+| --- | ---: | --- |
+| **[Hy4-Flash · Maya-S](https://huggingface.co/peasantsmith/Hy4-Flash-Maya-GGUF)** (`hy4-flash-maya-s`): the experts in 2-3 bits | 53.0 GB + the 63.4 GB n-gram table | NVIDIA, Linux; measured on 4x Tesla T4: about 32 tokens/s writing, 590 reading (GPU clocks locked) |
+| Maya-XS, Maya-M, Maya-L (`hy4-flash-maya-xs` / `-m` / `-l`) | 44.8 / 68.4 / 89.5 GB + the same table | the same engine; not measured here yet |
+
+One conversation at a time, no saved conversations yet, no drafter set up, pictures not measured on Tesla T4s yet.
+What it needs, the install on four cards, the clock lock for Tesla T4s and the measurements:
+**[HY4-FLASH.md](HY4-FLASH.md)**.
+
+## Inkling 2 Mini
+
+**[Inkling 2 Mini](https://huggingface.co/thinkingmachines/Inkling-2-Mini)** (Thinking Machines; 26 B parameters, a
+looped model with 8 of 128 experts a token; Apache 2.0) on an engine of its own (`saguaro-ik2`), from
+[unsloth's UD-Q4_K_XL GGUF](https://huggingface.co/unsloth/Inkling-2-Mini-GGUF) (18.3 GB with its vision tower):
+`./setup.sh --model inkling-2-mini`. **The model for one or two 16 GB cards** - the setup recommends it there.
+
+| Cards | Context | Measured on Tesla T4s |
+| --- | ---: | --- |
+| One 16 GB card: about a quarter of the experts streamed from RAM | 32K | about 42 tokens/s writing, 640 reading |
+| Two 16 GB cards: every expert in VRAM | 131K | about 52 tokens/s writing, 1130 reading |
+
+Tool calls, five thinking levels, pictures; one conversation at a time (four more kept aside in RAM).
+The install, the settings and the limits: **[INKLING2-MINI.md](INKLING2-MINI.md)**; the engine itself:
+[INKLING2.md](INKLING2.md).
 
 ## Community quants of GLM-5.3-Flash
 

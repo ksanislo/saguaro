@@ -1,0 +1,40 @@
+{
+ "exe": "/opt/llm/saguaro/bin/saguaro-ik2",
+ "args": [
+  "--model",
+  "/opt/llm/models/Inkling-2-Mini-UD-Q4_K_XL/Inkling-2-Mini-UD-Q4_K_XL.gguf",
+  "--max-context",
+  "131072",
+  "--gpus",
+  "2",
+  "--chunk",
+  "8192",
+  "--threads",
+  "8"
+ ],
+ "env": {
+  "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
+  "SAGUARO_IK2_ROOM_MB": "1024",
+  "SAGUARO_IK2_STATS": "1",
+  "SAGUARO_IK2_SLOT_DIR": "/opt/llm/var/Inkling-2-Mini-UD-Q4_K_XL/sessions"
+ },
+ "cwd": "/opt/llm/saguaro",
+ "tokenizer": "/opt/llm/models/Inkling-2-Mini-UD-Q4_K_XL/tokenizer",
+ "model_name": "Inkling-2-Mini-UD-Q4_K_XL",
+ "gpu": [
+  2,
+  3
+ ],
+ "sampling": {
+  "temperature": 1.0,
+  "top_p": 1.0
+ },
+ "reasoning_effort": "high",
+ "vision": {
+  "exe": "/opt/llm/saguaro/bin/vision-ik2",
+  "mmproj": "/opt/llm/models/Inkling-2-Mini-UD-Q4_K_XL/mmproj-BF16.gguf",
+  "gpu": true
+ },
+ "host": "127.0.0.1",
+ "log": "/data/llm/logs/maya/Inkling-2-Mini-UD-Q4_K_XL.log"
+}

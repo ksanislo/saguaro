@@ -41,6 +41,18 @@ It first asks which model to set up:
   `tensor parallel 2 -> 1`, as with the Saguaro quants) - before v1.1.17 those ran every prompt in windows of 16 tokens,
   an order of magnitude slower on long prompts (a community measurement, 7x RTX 3090, Maya-S read in place: 32K tokens
   99 tokens/s in windows, 1010 in chunks). The GGUFs have no DSpark drafter and no vision tower.
+- **Hy4-Flash** (`--model hy4-flash-maya-s`, or `hy4-flash` to be asked the size; `--hy4-quant maya-xs|maya-s|maya-m|maya-l`)
+  - Project Maya's GGUF quants of Tencent's model on its own engine (`build/saguaro-hy4`): NVIDIA, Linux. The setup
+  downloads the size's trunk, the n-gram table every size shares (63 GB, linked from another size's folder when one has
+  it) and the vision tower - pinned and sha256-checked, `tools/hy4/download.json` - builds the pack
+  (`tools/hy4/pack_gguf.py`) and writes the config for the cards chosen: four equal 16 GB cards get the layout measured
+  on 4x Tesla T4 (`--tp 4 --chunk 2048 --reserve-gb 0.5`, a 131K context, `HY4_HOT=1`), any other set the engine's own
+  choices at 32K. [HY4-FLASH.md](HY4-FLASH.md).
+- **Inkling 2 Mini** (`--model inkling-2-mini`) - unsloth's UD-Q4_K_XL GGUF on its own engine (`build/saguaro-ik2`):
+  NVIDIA Tesla T4 / RTX 20 and newer with 16 GB or more, Linux, one card or two (`--gpu N`, `--gpus A,B`). The setup
+  downloads the GGUF and the vision tower (18.3 GB, pinned and sha256-checked, `tools/ik2/download.json`), writes the
+  tokenizer folder with the model's own chat template and the config for one card (32K context) or two (131K). It is
+  the model the setup recommends on a PC with one or two cards under 24 GB. [INKLING2-MINI.md](INKLING2-MINI.md).
 - **MiniMax-M3.1-Flash** (experimental; `--model MiniMax-M3.1-Flash`) - [Mia-AiLab's EXL3 quant at 3.5 bits](https://huggingface.co/Mia-AiLab/MiniMax-M3.1-Flash-EXL3-EAQ-v1-3.5-bpw)
   (197 GB with MiniMax's DSpark drafter; every file pinned and checked, `tools/mm3/download.json`) on its own engine
   (`build/saguaro-mm3`): NVIDIA from V100 on, Linux and Windows; AMD experimental (as GLM's EXL3 quants there: the

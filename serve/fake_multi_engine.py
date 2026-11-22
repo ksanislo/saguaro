@@ -6,6 +6,9 @@ FAKE_MULTI_INTERLEAVE=<n> (SAGUARO_GLM_PREFILL_INTERLEAVE's line pattern): a pro
 each, while the requests already running decode a token each between two pieces; one prompt is read at a time (later
 ones queue), and a STOP for the one being read ends it with no token.  A GEN with logprobs=<n> gets an LP line after
 each T line: logprob -0.25 * (the token's place % 4), then the token and n - 1 others (id + 1, + 2, ...) each 1 lower.
+FAKE_PARITY_LINES=1 (serve/test_parity_output.py): the lines the real engines add for the parity contract ride too -
+`RESUME <rid> <reused>` before a prompt is read (the base its PP lines count from) and a loop-guard `NOTE r<rid> ...`
+at an answer's end (the request's own, rid-tagged).
 
     serve/fake_multi_engine.py --serve <n>        (StrataEngine starts it as it starts `strata`)
 """
@@ -18,6 +21,7 @@ import time
 
 n = int(sys.argv[-1]) if len(sys.argv) > 1 and sys.argv[-1].isdigit() else 2
 piece = int(os.environ.get("FAKE_MULTI_INTERLEAVE", "0") or 0)
+parity = bool(os.environ.get("FAKE_PARITY_LINES"))
 lock = threading.Lock()
 active: dict[int, dict] = {}
 reading: list[int] = []                               # FAKE_MULTI_INTERLEAVE: prompts to read, the first being read
@@ -54,7 +58,11 @@ def reader():
                                "lp": int(keys["logprobs"]) if "logprobs" in keys else -1}
                 if piece > 0:
                     reading.append(rid)
+                    if parity:
+                        out(f"RESUME {rid} 0")
                     continue
+            if parity:
+                out(f"RESUME {rid} 0")
             out(f"PP {rid} {len(ids)} {len(ids)} 1.0 1000.0")
     quit_.set()
 
@@ -99,6 +107,9 @@ while not quit_.is_set():
             stopped = rid in stops
             stops.discard(rid)
             if stopped or not r["left"]:
+                if parity:
+                    out(f"NOTE r{rid} the answer was repeating a 2-token pattern ({r['n']} tokens in): the turn was "
+                        "ended there")
                 out(f"DONE {rid} {r['n']} {r['total']} 0.0 1.0 {'cancel' if stopped else 'length'} 0 0 0")   # (prompt: its own)
                 del active[rid]
                 continue
