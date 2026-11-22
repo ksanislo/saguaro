@@ -122,7 +122,7 @@ def hy4_measure_ids(cfg: dict) -> Path | None:
         if len(ids) < 8192:
             return None
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
+        tmp = path.with_name(f"{path.stem}.{os.getpid()}.tmp")   # (per process: two servers never share the tmp path)
         tmp.write_text(f"# saguaro: {', '.join(HY4_MEASURE_DOCS)} in the model's tokens ({len(ids)}) - the text "
                        "saguaro-hy4 measures a PC's prompt route on at its first start there\n" +
                        ",".join(map(str, ids)) + "\n", encoding="utf-8")
