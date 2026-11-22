@@ -2462,7 +2462,7 @@ struct Model::Impl {
                                      (double) g.hc * g.hc * g.n_embd * 4 + (double) (1u << 20) +
                                      (mtp_counted() ? (double) ru * iq::row_bytes(iq::kQ4_K, g.n_embd) : 0.0);
                 if (ru >= 128 && need + slice <= have) {
-                    head_tp = true;
+                    head_tp = !(on_member && std::atoi(hm) == 2);   // (=2: its VRAM planned, the head on GPU 0 - a test arm)
                     head_rows = ru;
                     need += slice;
                 }
