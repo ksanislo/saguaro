@@ -13179,6 +13179,68 @@ int main(int argc, char** argv) {
                          (long long) (v.lo + (xc.slots() - v.top)), (long long) xc.slots());
             return true;
         };
+        // SAGUARO_XCACHE_VERIFY=1 (debug): every expert the residency table places in a VRAM slot is compared with its
+        // source blob (first and last 4 KiB), and slots named by two experts are counted; one line when the result changes.
+        static const bool xc_verify_on = [] { const char* v = std::getenv("SAGUARO_XCACHE_VERIFY"); return v != nullptr && std::atoi(v) != 0; }();
+        std::string xc_verify_last;
+        auto xcache_verify = [&](const char* at) {
+            if (!xc_verify_on || gv.empty()) return;
+            const auto& lay = strata::kernels::cpu::expert_layout();
+            std::string all;
+            for (const Give& v : gv) {
+                strata::core::ExpertCache& xc = *v.cache;
+                const strata::core::OnDevice on(v.dev);
+                if (strata::core::device_sync() != cudaSuccess) return;
+                std::vector<int32_t> owner((size_t) xc.slots(), -1);
+                std::vector<uint8_t> buf(4096);
+                int64_t n = 0, bad = 0, twice = 0, small = 0, first = -1, first_slot = -1;
+                for (size_t i = (size_t) v.lb * (size_t) g.n_expert; i < (size_t) v.le * (size_t) g.n_expert; ++i) {
+                    const int32_t sl = host_res[i];
+                    if (sl < 0 || sl >= xc.slots()) continue;
+                    ++n;
+                    if (owner[(size_t) sl] >= 0) ++twice;
+                    owner[(size_t) sl] = (int32_t) i;
+                    const int64_t l = (int64_t) i / g.n_expert, e = (int64_t) i % g.n_expert;
+                    const uint64_t bytes = lay.blob_bytes(l);
+                    if (xc.slot_room(sl) < bytes) ++small;
+                    const uint8_t* b = srcp->blob_stable(l, e);
+                    if (b == nullptr || bytes < 8192) continue;
+                    bool same = true;
+                    for (const uint64_t off : {(uint64_t) 0, bytes - 4096}) {
+                        if (cudaMemcpy(buf.data(), xc.device_slot(sl) + off, 4096, cudaMemcpyDeviceToHost) != cudaSuccess) { (void) cudaGetLastError(); same = false; break; }
+                        same = same && std::memcmp(buf.data(), b + off, 4096) == 0;
+                    }
+                    if (!same) {
+                        ++bad;
+                        if (first < 0) { first = (int64_t) i; first_slot = sl; }
+                        if (bad <= 4) {   // what the slot holds instead: another expert of the layer, zeros, or neither
+                            int64_t is = -1;
+                            bool zero = cudaMemcpy(buf.data(), xc.device_slot(sl), 4096, cudaMemcpyDeviceToHost) == cudaSuccess;
+                            if (zero) {
+                                for (int64_t e2 = 0; e2 < g.n_expert && is < 0; ++e2) {
+                                    const uint8_t* b2 = srcp->blob_stable(l, e2);
+                                    if (b2 != nullptr && std::memcmp(buf.data(), b2, 4096) == 0) is = e2;
+                                }
+                                for (size_t q = 0; q < 4096 && zero; ++q) zero = buf[q] == 0;
+                            }
+                            std::fprintf(stderr, "saguaro xcache verify (%s): CUDA%d slot %d should hold layer %lld expert %lld, holds %s%lld "
+                                                 "(that one's residency: %d)\n", at, v.dev, sl, (long long) l, (long long) e,
+                                         is >= 0 ? "expert " : zero ? "zeros " : "neither expert of the layer nor zeros ", (long long) is,
+                                         is >= 0 ? host_res[(size_t) (l * g.n_expert + is)] : -9);
+                        }
+                    }
+                }
+                char x[200];
+                std::snprintf(x, sizeof x, " CUDA%d: %lld resident, %lld differ (first layer %lld expert %lld slot %lld), %lld slots named twice, %lld too small, lo %lld top %lld;",
+                              v.dev, (long long) n, (long long) bad, (long long) (first < 0 ? -1 : first / g.n_expert),
+                              (long long) (first < 0 ? -1 : first % g.n_expert), (long long) first_slot, (long long) twice,
+                              (long long) small, (long long) v.lo, (long long) v.top);
+                all += x;
+            }
+            if (all == xc_verify_last) return;
+            xc_verify_last = all;
+            std::fprintf(stderr, "saguaro xcache verify (%s):%s\n", at, all.c_str());
+        };
         // slot b's sessions on every stage backed for `need` cells - whole steps past it, else just `need`.  `trim` gives
         // back first what that does not need: only with no window in flight.  `quiet(k)`: card k may give now.
         // 0: backed; 1: no memory; 2: card k's cache could give but is busy (try again when it is quiet)
@@ -13462,6 +13524,7 @@ int main(int argc, char** argv) {
         };
         // an admission into slot b (everything drained): it is trimmed to its new conversation and backed for it; when the
         // budget is short, idle slots give their memory back and drop the conversations they keep (parked reads last)
+        std::function<void(int, const char*)> kv_check_hook;   // SAGUARO_KV_VERIFY (debug; set below)
         std::function<void(int, const char*)> slot_drop_save;   // --session-dir: a kept conversation saved before it is dropped
         auto slot_admit_fit = [&](int b, int64_t upto, std::string& e) -> bool {
             if (!eslots_on) return true;
@@ -15265,6 +15328,13 @@ int main(int argc, char** argv) {
                 ~LendTime() { acc += std::chrono::duration<double, std::milli>(Clock::now() - t).count(); }
             } lend_time{req_times.lend_ms, t_ln};
             if (!lazy_land(true, e)) return false;   // a slot still landing is not lent again
+            // #879: an adaptive round's swaps still pending (a solo request's last round, applied only at its next
+            // window) target slots the loan may cover; unlanded they are not lent, the prompt path's buffers overwrite
+            // them, and applying them later makes those buffers resident experts.  They land first.
+            static const bool land_pending = [] { const char* v = std::getenv("SAGUARO_LEND_LAND_PENDING"); return v == nullptr || std::atoi(v) != 0; }();
+            std::vector<std::pair<int32_t, int32_t>> pend0;
+            if (!pending.empty()) pend0 = pending;
+            if (land_pending) apply_pending(true);
             const int64_t want_seg = lend_want(tokens);
             // `exact`: a planned segment read on - the loan it was read with (what is left would size another)
             const int64_t want = exact > 0 ? std::min(exact, o.prefill_chunk) : want_seg;
@@ -15332,6 +15402,15 @@ int main(int argc, char** argv) {
                                      "%lld slots, chunk %lld)\n", p.dev < 0 ? 0 : p.dev, (long long) p.sp->stage_cells(),
                                      (long long) (p.cache->slots() - first), (long long) want_p);
                     p.first_now = first;
+                }
+                if (!pend0.empty()) {
+                    int64_t n_in = 0, n_all = 0;
+                    for (const auto& [i, sl] : pend0)
+                        if (i / g.n_expert >= p.lb && i / g.n_expert < p.le) { ++n_all; n_in += sl >= first ? 1 : 0; }
+                    if (n_all > 0)
+                        std::fprintf(stderr, "saguaro serve: CUDA%d: a loan from slot %d met %lld adaptive swap(s) still pending, "
+                                             "%lld into the loan's slots (%s)\n", p.dev < 0 ? 0 : p.dev, (int) first,
+                                     (long long) n_all, (long long) n_in, land_pending ? "landed first" : "NOT landed: SAGUARO_LEND_LAND_PENDING=0");
                 }
                 for (int64_t l = p.lb; l < p.le; ++l)              // THIS participant's layers only
                     for (int64_t ex = 0; ex < g.n_expert; ++ex) {
@@ -15793,6 +15872,7 @@ int main(int argc, char** argv) {
             BSlot& sl = bs[(size_t) b];
             j.n = (int64_t) j.r.ids.size();
             const int64_t n = j.n;
+            if (kv_check_hook) kv_check_hook(b, "direct admission");
             auto refuse = [&](const char* why) {
                 std::fprintf(stderr, "saguaro batch: slot %d: the admission is refused: %s\n", b, why);
                 std::printf("BRE %d %s\n", b, why);
@@ -15951,7 +16031,9 @@ int main(int argc, char** argv) {
             if (read_n > 0 && !adm_lend_covers(read_n, n)) {   // the loan changes only with no window in flight
                 const auto tf = Clock::now();
                 if (!pipe_drain()) return AdmEnd::fatal;
+                xcache_verify("admission: before the adaptive drain");
                 if (!adapt_tick(true)) { std::printf("ERR an adaptive refill failed\n"); return AdmEnd::fatal; }
+                xcache_verify("admission: before its lend");
                 if (!lend(read_n, e, 0, n)) {
                     std::printf("ERR lending the prompt path its slots failed: %s\n", e.c_str());
                     return AdmEnd::fatal;
@@ -16611,7 +16693,9 @@ int main(int argc, char** argv) {
                 const auto tf = Clock::now();
                 std::string e;
                 if (!pipe_drain()) return false;
+                xcache_verify("admissions: before the adaptive drain");
                 if (!adapt_tick(true)) { std::printf("ERR an adaptive refill failed\n"); return false; }
+                xcache_verify("admissions: before their lend");
                 // (SAGUARO_READ_YIELD: the whole chunk's loan, so a request served while reads are held needs no other;
                 // SAGUARO_SLOT_ADMIT_CHUNK caps it: the slots decoding beside the read keep the rest of the cache)
                 if (!lend(br_lend > 0 ? br_lend : piece, e, br_lend > 0 ? br_lend : cy_on && adm_chunk_cap == 0 ? o.prefill_chunk : 0,
@@ -17446,6 +17530,80 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "saguaro batch: SAGUARO_ELASTIC_IDLE: a slot idle for %.0f s parks its conversation (%s) and "
                                  "gives its VRAM back to the expert cache\n", eidle_s,
                          sdir ? "RAM, --session-dir" : conversations.enabled() ? "RAM only" : "nowhere: it is dropped");
+        // SAGUARO_KV_VERIFY=1 (debug): a fingerprint of a place's K/V (every stage and layer, the positions under `upto`
+        // that later turns do not rewrite) taken when it goes idle and compared before its next use: names the place
+        // whose stored K/V changed while nothing of its own ran.
+        static const bool kv_verify_on = [] { const char* v = std::getenv("SAGUARO_KV_VERIFY"); return v != nullptr && std::atoi(v) != 0; }();
+        struct KvPrint { int64_t upto = 0; size_t tokens = 0; std::vector<uint64_t> fp; };
+        KvPrint kvp_main;
+        std::vector<KvPrint> kvp_slot(bs.size());
+        auto kv_fingerprint = [&](int slot, int64_t upto) -> std::vector<uint64_t> {   // slot -1: the main session
+            std::vector<uint64_t> out;
+            const int64_t idx_block = strata::kernels::qsa_real_shapes().idx_block;
+            std::vector<uint8_t> buf(8u << 20);
+            for (size_t k = 0; k < 1 + stages.size(); ++k) {
+                strata::core::SessionState& u = slot >= 0 ? *bslot_ss[k][(size_t) slot] : k == 0 ? ss : stages[k - 1]->ss;
+                const strata::core::OnDevice on_k(k == 0 ? 0 : stages[k - 1]->dev);
+                (void) strata::core::device_sync();
+                for (int64_t j = 0; j < u.qsa_alloc; ++j) {
+                    strata::core::SessionKvSource src;
+                    std::string e;
+                    if (!strata::core::conversation_kv_source(src, u.qsa_states[u.qsa_ord0 + j], g, upto, true, e)) { out.push_back(0); continue; }
+                    for (size_t part = 0; part < 5; ++part) {
+                        size_t n = src.sizes[part];
+                        if (part == 4) n = std::min<size_t>(n, idx_block > 0 ? (size_t) (upto / idx_block) * (size_t) src.idx_dim * 4 : 0);
+                        strata::core::SessionHasher h(part);
+                        for (size_t at = 0; at < n; at += buf.size()) {
+                            const size_t c = std::min(buf.size(), n - at);
+                            if (!src.read(part, at, buf.data(), c)) break;
+                            h.update(buf.data(), c);
+                        }
+                        out.push_back(h.digest());
+                    }
+                }
+            }
+            return out;
+        };
+        auto kv_print_take = [&](int slot, const std::vector<int32_t>& ids) {
+            if (!kv_verify_on || ids.size() < 8192) return;
+            KvPrint& p = slot >= 0 ? kvp_slot[(size_t) slot] : kvp_main;
+            if (p.tokens == ids.size() && !p.fp.empty()) return;
+            p.tokens = ids.size();
+            p.upto = (int64_t) (ids.size() - 4096) / 256 * 256;
+            p.fp = kv_fingerprint(slot, p.upto);
+            std::fprintf(stderr, "saguaro kv verify: %s holds %zu tokens: fingerprint of its first %lld taken\n",
+                         slot >= 0 ? ("slot " + std::to_string(slot)).c_str() : "main", ids.size(), (long long) p.upto);
+        };
+        auto kv_print_check = [&](int slot, const std::vector<int32_t>& ids, const char* at) {
+            if (!kv_verify_on) return;
+            KvPrint& p = slot >= 0 ? kvp_slot[(size_t) slot] : kvp_main;
+            if (p.fp.empty() || p.tokens != ids.size()) return;
+            const std::vector<uint64_t> now = kv_fingerprint(slot, p.upto);
+            size_t bad = 0, first = SIZE_MAX;
+            for (size_t i = 0; i < now.size() && i < p.fp.size(); ++i)
+                if (now[i] != p.fp[i]) { ++bad; if (first == SIZE_MAX) first = i; }
+            if (bad == 0 && std::strcmp(at, "tick") == 0) return;
+            if (bad != 0) p.fp = now;   // (said once per change)
+            std::fprintf(stderr, "saguaro kv verify (%s): %s, %zu tokens: %zu of %zu K/V arrays under %lld CHANGED since it went idle%s\n",
+                         at, slot >= 0 ? ("slot " + std::to_string(slot)).c_str() : "main", ids.size(), bad, now.size(),
+                         (long long) p.upto, bad ? (" (first: array " + std::to_string(first / 5) + " part " + std::to_string(first % 5) + ")").c_str() : "");
+        };
+        auto kv_verify_tick = [&]() {   // (idle slots: taken once the pipeline is quiet)
+            if (!kv_verify_on || conc_serving || in_prompt_read || share_live || cy_held_n > 0 || adm_active || pipe_inflight()) return;
+            for (size_t b = 0; b < bs.size(); ++b)
+                if (!bs[b].active && !bs[b].reading && !bs[b].partial && bs[b].cached && !adm_queued[b]) kv_print_take((int) b, bs[b].ids);
+            static Clock::time_point last{};
+            if (Clock::now() - last < std::chrono::seconds(2)) return;
+            last = Clock::now();
+            for (size_t b = 0; b < bs.size(); ++b)
+                if (!bs[b].active && !bs[b].reading && !bs[b].partial && bs[b].cached && !adm_queued[b]) kv_print_check((int) b, bs[b].ids, "tick");
+            if (live_ok && !batch_on()) kv_print_check(-1, live, "tick");
+        };
+        if (kv_verify_on)
+            kv_check_hook = [&](int slot, const char* at) {
+                if (slot >= 0) { if (bs[(size_t) slot].cached && !bs[(size_t) slot].active) kv_print_check(slot, bs[(size_t) slot].ids, at); }
+                else if (live_ok) kv_print_check(-1, live, at);
+            };
         auto eidle_tick = [&]() -> bool {
             if (!eidle_on) return true;
             vlen_consume();   // review 4: a lend the stdin reader took is pending here too (the idle path runs the step)
@@ -17606,6 +17764,10 @@ int main(int argc, char** argv) {
             line_drain_ms = 0.0;
             vlen_consume();   // review 4: a lend / reclaim the stdin reader took off stdin is pending state from here
             bool adm_direct = false;   // SAGUARO_SLOT_ADMIT: this BGEN is read beside the slots (adm_run)
+            if (xc_verify_on && !in_prompt_read && lazy_fly.empty()) {   // (debug: at most twice a second)
+                static Clock::time_point xv_last{};
+                if (Clock::now() - xv_last > std::chrono::milliseconds(500)) { xcache_verify("loop"); xv_last = Clock::now(); }
+            }
             // SAGUARO_READ_YIELD: held reads go on unless a text request the old way waits first (at most
             // SAGUARO_READ_YIELD_LINES in a row); a held read a BSTOP reached ends first
             if (cy_on && !cy_held.empty()) {
@@ -17653,6 +17815,7 @@ int main(int argc, char** argv) {
             if (batch_on() || (piped && pipe_inflight())) {
                 if (!try_next_line(line)) {
                     if (!eidle_tick()) return 1;
+                    kv_verify_tick();
                     if (!(piped ? pump(true) : batch_step())) return 1;
                     continue;
                 }
@@ -17680,6 +17843,7 @@ int main(int argc, char** argv) {
                 bool got = false;    // and at every line (a request that follows another at once: its boundary)
                 for (;;) {
                     if (!eidle_tick()) return 1;
+                    kv_verify_tick();
                     {
                         std::unique_lock<std::mutex> lk(in_mu);
                         in_cv.wait_for(lk, std::chrono::seconds(1), [&] {
@@ -17752,6 +17916,7 @@ int main(int argc, char** argv) {
             }
             // a command may touch the expert cache (a request lends slots, a K/V growth moves them, a session restore
             // quiesces it): a round of the asynchronous tier that the batch windows left in flight lands first
+            xcache_verify("line: before the adaptive drain");
             if (!adm_direct && !adapt_tick(true)) {
                 std::printf("ERR an adaptive refill failed\n");
                 return 1;
@@ -18489,6 +18654,7 @@ int main(int argc, char** argv) {
                              n_checks == 1 ? "" : "s", n_parked, n_parked == 1 ? "" : "s", n_slots,
                              n_slots == 1 ? "" : "s", n_running, n_running == 1 ? "" : "s");
             }
+            if (kv_check_hook) kv_check_hook(-1, "request start");
             int64_t resume = 0;
             bool from_live = false;
             // SAGUARO_YARN_ELASTIC: a request that stays plain resumes a YaRN state only where it goes on with that
@@ -21915,6 +22081,8 @@ int main(int argc, char** argv) {
                 std::printf("ERR %s\n", err.c_str());
                 return 1;
             }
+            xcache_verify("request end");
+            if (kv_verify_on && live_ok) { std::string te; if (ver.wait_commit(te)) kv_print_take(-1, live); }
             if (trace && o.batch <= 0) {   // SAGUARO_TRACE: where a request's prompt time went (ms)
                 const double ck = req_times.sync_ms + req_times.save_ms + req_times.evict_ms;
                 std::fprintf(stderr, "saguaro trace: request: prompt %.1f = before the read %.1f + lend %.1f + batched %.1f + "
