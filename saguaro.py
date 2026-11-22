@@ -1805,6 +1805,21 @@ def download_dir(models: Path, quant: str) -> Path:
     return d
 
 
+def draft_note(a, pc: dict, draft: str) -> str:
+    """What the engine does with the drafting choice here: on one GPU it drafts with the MTP block only on an APU that
+    holds every expert (src/core/glm_mtp.cu, mtp_decode_wanted) - elsewhere the verify rows' experts cost more than
+    the drafts save, so it decodes without drafting."""
+    if draft == "dflash2":
+        return "a DFlash2 drafter (downloaded with the model)"
+    gpus = pc.get("gpus") or []
+    forced = any(e.startswith("SAGUARO_GLM_MTP_DECODE=") and e.split("=", 1)[1] not in ("", "0")
+                 for e in getattr(a, "env", None) or [])
+    if pc.get("backend") == "metal" or len(gpus) != 1 or forced or (
+            pc.get("backend") == "hip" and hip_unified_memory(gpus[0])):
+        return "the MTP block"
+    return "none on one GPU (the MTP block pays only where the GPU holds every expert: the engine decodes without it)"
+
+
 def choose_draft(a, pc: dict, inst: dict) -> str:
     """"mtp" (the model's own MTP block; the default) or "dflash2" (a DFlash2 drafter, downloaded in step 5): --draft,
     else asked - the earlier setup's answer is the default.  AMD (HIP) setups keep MTP, except one Ryzen AI Max APU
@@ -5021,7 +5036,7 @@ def set_up(a, prev: dict) -> Path | None:
     ctx = choose_context(a, prev_ctx, recommended=recommended_context(choice, pc))
     ok(f"context: {ctx} tokens")
     draft = choose_draft(a, pc, inst)
-    ok("drafting: " + ("a DFlash2 drafter (downloaded with the model)" if draft == "dflash2" else "the MTP block"))
+    ok("drafting: " + draft_note(a, pc, draft))
     llama = tools_step(a)                              # 3
     meta = build_step(a, pc, llama)                    # 4
     got = model_step(a, models, choice)                # 5
