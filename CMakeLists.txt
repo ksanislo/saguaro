@@ -256,6 +256,16 @@ if(STRATA_BUILD_TESTS)
   add_executable(ds4_ablate_test tests/ds4_ablate_test.cpp)
   target_link_libraries(ds4_ablate_test PRIVATE strata_artifact)
   add_test(NAME ds4_ablate_test COMMAND ds4_ablate_test)
+  # saguaro-hy4's --kv auto and its pictures' room: what is tried, in which order (src/hy4/hy4_plan.hpp; no GPU)
+  add_executable(hy4_plan_test tests/hy4_plan_test.cpp)
+  add_test(NAME hy4_plan_test COMMAND hy4_plan_test)
+  # saguaro-hy4's HY4_EG_POPULATE: a mapping's pages walked (src/mm3/mm3_os.hpp; no GPU)
+  add_executable(hy4_populate_test tests/hy4_populate_test.cpp)
+  target_include_directories(hy4_populate_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+  add_test(NAME hy4_populate_test COMMAND hy4_populate_test)
+  # saguaro-hy4's rings after rewinds: a resume only where its window's rows are still held (src/hy4/hy4_ring.hpp)
+  add_executable(hy4_ring_test tests/hy4_ring_test.cpp)
+  add_test(NAME hy4_ring_test COMMAND hy4_ring_test)
 endif()
 # maya-ds4's Engram reader: a batch read ahead (a prompt's next part's rows) waits behind the others, every read the
 # file's bytes (src/ds4/ds4_engram_io.hpp; a file in the temp folder, host code only)
@@ -803,6 +813,62 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
     if(STRATA_ENABLE_HIP AND STRATA_HIPBLASLT_AVAILABLE)   # (the prompt path's dense GEMMs on AMD: ds4_lt.cu, measured)
       set_source_files_properties(src/ds4/ds4_lt.cu PROPERTIES COMPILE_DEFINITIONS STRATA_HIPBLASLT_AVAILABLE=1)
       target_link_libraries(maya-mm3 PRIVATE roc::hipblaslt)
+    endif()
+    # Tencent's Hy4-flash (a GGUF set, tools/hy4/pack_gguf.py): its own engine (src/hy4) on the ggml block-type kernels
+    # and CPU rows of src/hy4/ds4 (upstream Maya v1.1.72's src/ds4/ds4_iq* + our AVX1 rows; the other engines keep
+    # src/ds4's) and saguaro-mm3's OS helpers
+    if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
+      set(_hy4_iq_sources src/hy4/ds4/ds4_iq.cu src/hy4/ds4/ds4_lt.cu)
+      set(_hy4_iq_cpu_sources src/hy4/ds4/ds4_iq_cpu.cpp src/hy4/ds4/ds4_gguf_cpu.cpp)
+      add_executable(maya-hy4 src/hy4/hy4_main.cpp src/hy4/hy4_model.cu src/hy4/hy4_vision.cu src/hy4/hy4_kernels.cu
+                              src/hy4/hy4_lane.cpp src/hy4/hy4_tp.cpp ${_hy4_iq_sources} ${_hy4_iq_cpu_sources})
+      set_target_properties(maya-hy4 PROPERTIES OUTPUT_NAME saguaro-hy4)   # the program's name (the target keeps its old one)
+      if(STRATA_ENABLE_HIP AND STRATA_HIPBLASLT_AVAILABLE)
+        set_source_files_properties(src/hy4/ds4/ds4_lt.cu PROPERTIES COMPILE_DEFINITIONS STRATA_HIPBLASLT_AVAILABLE=1)
+        target_link_libraries(maya-hy4 PRIVATE roc::hipblaslt)
+      endif()
+      # (src/hy4/ds4 before src/ds4: the copies' own headers first, the unchanged ones from src/ds4)
+      target_include_directories(maya-hy4 PRIVATE ${_strata_gpu_include_directories} include src/hy4 src/hy4/ds4 src/ds4
+                                                  src/mm3 third_party/ggml)
+      target_link_libraries(maya-hy4 PRIVATE strata_kernels_cpu ${_strata_gpu_runtime_target} ${_strata_gpu_blas_target}
+                                             Threads::Threads)
+      target_compile_definitions(maya-hy4 PRIVATE MAYA_DS4_IQ_ONLY DS4_IQ_MIN_FORMS)
+      # the CPU lane kernels' build: a hash of their sources (the engine remembers per PC whether its 4-bit expert
+      # copies pay, by this too)
+      file(GLOB _hy4_lane_src src/hy4/hy4_lane.cpp src/hy4/hy4_lane.hpp src/hy4/ds4/ds4_iq_cpu.* src/ds4/ds4_iq512_kern.inc
+           src/kernels/cpu/iq*.cpp src/kernels/cpu/iq*.inc include/strata/kernels/cpu/iq*.hpp
+           include/strata/kernels/cpu/iq*.inc)
+      list(SORT _hy4_lane_src)
+      set(_hy4_lane_sum "")
+      foreach(_f IN LISTS _hy4_lane_src)
+        file(MD5 "${_f}" _h)
+        string(APPEND _hy4_lane_sum "${_h}")
+      endforeach()
+      string(MD5 _hy4_lane_sum "${_hy4_lane_sum}")
+      string(SUBSTRING "${_hy4_lane_sum}" 0 12 _hy4_lane_sum)
+      set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${_hy4_lane_src})
+      set_property(SOURCE src/hy4/hy4_lane.cpp APPEND PROPERTY COMPILE_DEFINITIONS HY4_LANE_KERNELS=k${_hy4_lane_sum})
+      # the CPU lane alone (no GPU, no model): a call's time / GB/s by expert format and a hash of its outputs
+      add_executable(hy4_lane_bench EXCLUDE_FROM_ALL tests/hy4_lane_bench.cpp src/hy4/hy4_lane.cpp ${_hy4_iq_cpu_sources})
+      target_include_directories(hy4_lane_bench PRIVATE include src/hy4 src/hy4/ds4 src/ds4 third_party/ggml)
+      target_link_libraries(hy4_lane_bench PRIVATE strata_kernels_cpu Threads::Threads)
+      target_compile_definitions(hy4_lane_bench PRIVATE MAYA_DS4_IQ_ONLY DS4_IQ_MIN_FORMS)
+      if(STRATA_BUILD_TESTS)
+        # the routed experts (no model): token, window and prompt forms against per-matrix GEMVs (GPU)
+        add_executable(hy4_experts_test tests/hy4_experts_test.cu src/hy4/hy4_kernels.cu src/hy4/hy4_lane.cpp
+                                        src/hy4/ds4/ds4_iq.cu ${_hy4_iq_cpu_sources})
+        target_include_directories(hy4_experts_test PRIVATE ${_strata_gpu_include_directories} include src/hy4
+                                                           src/hy4/ds4 src/ds4 third_party/ggml)
+        target_link_libraries(hy4_experts_test PRIVATE strata_kernels_cpu ${_strata_gpu_runtime_target})
+        target_compile_definitions(hy4_experts_test PRIVATE MAYA_DS4_IQ_ONLY DS4_IQ_MIN_FORMS)
+        add_test(NAME hy4_experts_test COMMAND hy4_experts_test)
+        set_tests_properties(hy4_experts_test PROPERTIES TIMEOUT 300)
+        # the engine's own kernels (no model) against double-precision host references (GPU)
+        add_executable(hy4_kernels_test tests/hy4_kernels_test.cu src/hy4/hy4_kernels.cu)
+        target_include_directories(hy4_kernels_test PRIVATE ${_strata_gpu_include_directories} include src/hy4)
+        target_link_libraries(hy4_kernels_test PRIVATE ${_strata_gpu_runtime_target})
+        add_test(NAME hy4_kernels_test COMMAND hy4_kernels_test)
+      endif()
     endif()
     if(STRATA_BUILD_TESTS)
       # maya-mm3's EXL3 kernels against the scalar CPU reference (random matrices, no model): exl3_test's cases with
@@ -1389,7 +1455,8 @@ if(STRATA_NATIVE_EXPERTS)
   if(STRATA_CPU_X86)
     target_sources(strata_kernels_cpu PRIVATE src/kernels/cpu/native_expert.cpp src/kernels/cpu/iq_avx512.cpp
                                              src/kernels/cpu/iq_avx2.cpp src/kernels/cpu/kq_avx512.cpp src/kernels/cpu/iq_avx1.cpp
-                                             src/kernels/cpu/iq_avx512_one.cpp)
+                                             src/kernels/cpu/iq_avx512_one.cpp src/kernels/cpu/iq2v_rows.cpp
+                                             src/kernels/cpu/iq3v_rows.cpp)
   else()
     target_sources(strata_kernels_cpu PRIVATE src/kernels/cpu/native_expert.cpp)
   endif()
@@ -1400,7 +1467,13 @@ if(STRATA_NATIVE_EXPERTS)
     # Match the non-MSVC no-contraction mode: IQ1_M's subnormal-scale parity checks need it too.
     set_source_files_properties(src/kernels/cpu/iq_avx2.cpp PROPERTIES COMPILE_OPTIONS "/arch:AVX2;/fp:strict")
     set_source_files_properties(src/kernels/cpu/iq_avx512_one.cpp PROPERTIES COMPILE_OPTIONS "/arch:AVX512")
+    set_source_files_properties(src/kernels/cpu/iq2v_rows.cpp PROPERTIES COMPILE_OPTIONS "/arch:AVX2;/fp:strict")
+    set_source_files_properties(src/kernels/cpu/iq3v_rows.cpp PROPERTIES COMPILE_OPTIONS "/arch:AVX2;/fp:strict")
   elseif(STRATA_CPU_X86)
+    # (the second-generation IQ2 / IQ3 rows: each function's instruction set its own, no contraction; run only
+    #  where the caller's CPU check says so - saguaro-hy4's src/hy4/ds4/ds4_iq_cpu.cpp)
+    set_source_files_properties(src/kernels/cpu/iq2v_rows.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+    set_source_files_properties(src/kernels/cpu/iq3v_rows.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
     # (no VNNI / VBMI needed - cpu_avx512bw_ok() is enough to run them; no FP contraction: their sums must take
     # ggml-cpu's float steps exactly, see iq_avx512.cpp)
     set_source_files_properties(src/kernels/cpu/iq_avx512.cpp PROPERTIES COMPILE_OPTIONS

@@ -72,9 +72,81 @@ from urllib.parse import parse_qs, urlsplit
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT))   # run as a script (run-<model>.bat) as well as a module
-from serve import ds4_vision, gpu_map, logctx, loop_guard, mm3_vision, model_api, model_pull, models, savings, turbo_live  # noqa: E402
+from serve import ds4_vision, gpu_map, hy4_vision, logctx, loop_guard, mm3_vision, model_api, model_pull, models, savings, turbo_live  # noqa: E402
 
 ENGINE_VISION = (ds4_vision.Vision, mm3_vision.Vision)   # the engines that run their vision tower themselves
+#                                                          (hy4_vision.Vision is an mm3_vision.Vision)
+HY4_TEXT_ONLY = "Hy4-Flash with its pictures off"         # (no vision tower loaded: the errors' name for it)
+# saguaro-hy4's per-PC files where the config's env names none (child_env): the CPU lane's 4-bit copies' verdict,
+# the prompt route's rates, --drafting auto's choice
+HY4_LANE_FILE = ROOT / "data" / "hy4-cpu-lane.txt"
+HY4_ROUTE_FILE = ROOT / "data" / "hy4-prompt-route.txt"
+HY4_DRAFT_FILE = ROOT / "data" / "hy4-drafting.txt"
+HY4_MEASURE_DOCS = ("docs/SETTINGS.md", "README.md")      # (the text its first start measures them on)
+HY4_MEASURE_CHARS = 200_000
+
+
+def hy4_hot_file(cfg: dict) -> Path:
+    """saguaro-hy4's HY4_HOT scores for this config's model (each layer's experts a start places in VRAM): a file a
+    model in the data folder, named by the model's folder."""
+    args = cfg.get("args") or []
+    pack = Path(args[args.index("--pack") + 1]) if "--pack" in args[:-1] else None
+    name = "" if pack is None else pack.parent.name if pack.name in ("saguaro-hy4", "maya-hy4", "pack") else pack.name
+    name = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("._") or "model"
+    return ROOT / "data" / f"hy4-expert-hot-{name}.bin"
+
+
+def hy4_measure_ids(cfg: dict) -> Path | None:
+    """The text saguaro-hy4 measures this PC's prompt route on at its first start here (HY4_MEASURE_IDS), before it
+    says READY: this install's docs in the model's tokens, written once into the data folder.  None: no tokenizer,
+    or the file cannot be written - the engine then measures while it answers."""
+    tdir = Path(cfg.get("tokenizer") or "")
+    vocab = tdir / "vocab.json"
+    if not cfg.get("tokenizer") or not vocab.is_file():
+        return None
+    try:
+        tag = hashlib.md5(vocab.read_bytes()).hexdigest()[:10]
+    except OSError:
+        return None
+    path = ROOT / "data" / f"hy4-measure-ids-{tag}.txt"
+    if path.is_file():
+        return path
+    try:
+        import strata_tokenizer as ST
+        text = ""
+        for name in HY4_MEASURE_DOCS:
+            p = ROOT / name
+            if p.is_file() and len(text) < HY4_MEASURE_CHARS:
+                text += p.read_text(encoding="utf-8", errors="replace")[:HY4_MEASURE_CHARS - len(text)] + "\n\n"
+        ids = ST.Tokenizer.from_dir(tdir).encode(text)
+        if len(ids) < 8192:
+            return None
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f"{path.stem}.{os.getpid()}.tmp")   # (per process: two servers never share the tmp path)
+        tmp.write_text(f"# saguaro: {', '.join(HY4_MEASURE_DOCS)} in the model's tokens ({len(ids)}) - the text "
+                       "saguaro-hy4 measures a PC's prompt route on at its first start there\n" +
+                       ",".join(map(str, ids)) + "\n", encoding="utf-8")
+        os.replace(tmp, path)
+        return path
+    except Exception:  # noqa: BLE001 - no text: the engine measures while it answers
+        return None
+
+
+HY4_PICTURE_NOTE = "[a picture was here; pictures are off on this server, so it was not read]"
+
+
+def hy4_tool_pictures_noted(messages: list) -> list:
+    """Hy4-Flash with no vision tower loaded: the pictures (and videos) in tool results as a short text note, so the
+    agent's turn goes on instead of failing at every retry.  A user's picture is left: the 400 that says why."""
+    out = []
+    for m in messages:
+        c = m.get("content")
+        if m.get("role") == "tool" and isinstance(c, list) and \
+                any(isinstance(i, dict) and i.get("type") in ("image", "video") for i in c):
+            m = {**m, "content": [{"type": "text", "text": HY4_PICTURE_NOTE}
+                                  if isinstance(i, dict) and i.get("type") in ("image", "video") else i for i in c]}
+        out.append(m)
+    return out
 from serve.frontend import (CALL_END, CALL_START, MINIMAX_NS, ChatTemplate, Event, OutputParser,  # noqa: E402
                             EFFORT_WORDS, QWEN_EFFORT, anthropic_to_messages, deepseek_effort_kwargs, deepseek_images,
                             effort_kwargs,
@@ -2156,6 +2228,18 @@ def child_env(cfg: dict) -> dict:
     # engine settings the config carries (AMD: the GEMM tuning table): each setting has one name (issue #686)
     for k, v in (cfg.get("env") or {}).items():
         env[str(k)] = str(v)
+    # Hy4-flash: what its engine measures once on this PC (the CPU lane's 4-bit copies, the prompt route's rates,
+    # --drafting auto's choice) and HY4_HOT's scores are kept in files - the config's env names them, else the data
+    # folder's; the prompt route is measured before READY on this install's docs (HY4_MEASURE_IDS)
+    if models.family(cfg) == "hy4":
+        env.setdefault("HY4_Q4X_FILE", str(HY4_LANE_FILE))
+        env.setdefault("HY4_ROUTE_FILE", str(HY4_ROUTE_FILE))
+        env.setdefault("HY4_DRAFT_FILE", str(HY4_DRAFT_FILE))
+        env.setdefault("HY4_HOT_FILE", str(hy4_hot_file(cfg)))
+        if "HY4_MEASURE_IDS" not in env:
+            ids = hy4_measure_ids(cfg)
+            if ids is not None:
+                env["HY4_MEASURE_IDS"] = str(ids)
     dirs = [d for d in cfg.get("lib_dirs") or [] if Path(d).is_dir()]
     if dirs:
         var = "PATH" if os.name == "nt" else "LD_LIBRARY_PATH"
@@ -2229,6 +2313,8 @@ def speculation_modes(info: dict, dspark=None, lookup=None) -> list:
         modes.append("DFlash2")
     elif on(info.get("mtp")):
         modes.append("MTP")
+    elif on(info.get("dfly2")):                        # (saguaro-hy4's DFly2 drafter: its INFO dfly2=)
+        modes.append("DFly2")
     lk = lookup if lookup is not None else info.get("lookup")
     if on(lk):
         modes.append("Lookup")
@@ -2453,7 +2539,11 @@ class Service:
                             # DeepSeek-V4.1 ends a turn with its EOS (and would start the next with <｜User｜>)
                             _special_ids("<｜end▁of▁sentence｜>") + _special_ids("<｜User｜>") +
                             # MiniMax-M3.1 with [e~[ (and would start the next turn with ]~b])
-                            _special_ids("[e~[") + _special_ids("]~b]"))
+                            _special_ids("[e~[") + _special_ids("]~b]") +
+                            # Hy4-flash with <｜hy_end:..｜> (and would start the next turn with <｜hy_start:..｜>)
+                            (_special_ids("<｜hy_end%s｜>" % template.hy4_tag) +
+                             _special_ids("<｜hy_start%s｜>" % template.hy4_tag)
+                             if getattr(template, "hy4", False) else []))
         # DeepSeek's turn openers: where its last user turn starts and its system prompt ends (SAGUARO_DS4_RESTORE_POINTS)
         self.ds_user_id = (_special_ids("<｜User｜>") or [None])[0]
         self.ds_system_id = (_special_ids("<｜System｜>") or [None])[0]
@@ -2467,7 +2557,10 @@ class Service:
         # closed with the template's </think> and the answer follows - GLM at High can plan for 14k+ tokens
         self.think_budget = 0
         # (MiniMax-M3.1 closes its reasoning with </mm:think>; its vocabulary may hold a plain "</think>" too)
-        end = _special_ids("</mm:think>") if getattr(template, "minimax", False) else _special_ids("</think>")
+        # (Hy4-flash with its suffixed </think:..>, which the pack's tokenizer names </think> in what the server reads)
+        end = _special_ids("</mm:think>") if getattr(template, "minimax", False) else \
+            (_special_ids("</think%s>" % template.hy4_tag) or _special_ids("</think>")) \
+            if getattr(template, "hy4", False) else _special_ids("</think>")
         self.think_end_id = end[0] if end else None
         # the tokens the engine itself ends a request at, whatever the server does (see THINK_RESTARTS): a pack
         # tokenizer that names its "eos" (DeepSeek's, MiniMax's: their engines' --eos default) ends there only; the
@@ -2477,6 +2570,13 @@ class Service:
         self.eos_ids = {sid["eos"]} if isinstance(sid.get("eos"), int) else set(self.stop_ids)
         # the special literals that stay text inside a message (frontend.mark_literals): every one the vocabulary has
         self.literals = literal_tags(getattr(tokenizer, "special_tokens", None))
+
+    def text_only(self) -> str | None:
+        """Hy4-Flash while its engine has no vision tower loaded (--vision off, a pack without one, no room for a
+        picture): its name for the errors' words; None for every other model."""
+        if getattr(self, "vision", None) is None and getattr(getattr(self, "template", None), "hy4", False):
+            return HY4_TEXT_ONLY
+        return None
 
     def check_request(self, req: dict) -> None:
         """A request's sampling fields and logit_bias, checked (a ValueError is the 400) and kept in the form the engine
@@ -4133,12 +4233,18 @@ class Service:
             else:
                 prefill = CALL_START + (force if glm_calls else "\n" + (f"<function={force}>\n" if force else ""))
         given["_prefill"] = prefill
+        if prefill and getattr(self.template, "hy4", False):
+            # Hy4-flash: GLM's form under its own suffixed tags, inside its <tool_calls:..> wrapper.  The prompt gets
+            # the opening as its template writes it; the parser reads it in GLM's spelling, as it reads the answer
+            given["_prefill"], prefill = CALL_START + (force or ""), self.template.hy4_call_open(force)
         given["_conv_label"] = conv_first_words(asked)   # (the Monitor's conversation rows: its first words)
         given["_blocked"] = self._block_suffixes(blocked, tools, kwargs) if blocked and force is None else None
         if looping and tools and force is None and not loop_guard.answers_user(asked):   # (an answer to the user ends)
             keep = self._keep_suffix(tools, kwargs)
             if keep is not None:                     # (+ what the model said before: stops_short's `seen`)
                 given["_blocked"] = {**(given["_blocked"] or {}), "_keep": keep + (loop_guard.said_before(asked),)}
+        if getattr(self.template, "hy4", False) and getattr(self, "vision", None) is None:
+            messages = hy4_tool_pictures_noted(messages)   # (a tool result's picture: a text note, not a 400)
         ids = self.render_ids(messages, tools, kwargs, prefill)
         # the reply's opening: the tokens the generation prompt (and a thinking-off close or a forced call) adds
         # (not DeepSeek: maya-ds4 has no gt= key, so its prompts skip this second render)
@@ -4155,7 +4261,8 @@ class Service:
         images = (deepseek_images(messages) if getattr(self.template, "deepseek", False)
                   else [src for kind, src in media if kind == "image"])
         if isinstance(self.vision, mm3_vision.Vision) and any(kind == "video" for kind, _ in media):
-            raise ValueError("MiniMax-M3.1 reads pictures, not videos")
+            raise ValueError(("Hy4-flash" if isinstance(self.vision, hy4_vision.Vision) else "MiniMax-M3.1")
+                             + " reads pictures, not videos")
         if images and isinstance(self.vision, ENGINE_VISION):
             # DeepSeek: the engine encodes the pictures itself; each placeholder the template wrote (user text's are
             # plain text, see render_ids) becomes its picture's span, the resized pixels go in the GENI file
@@ -4170,6 +4277,10 @@ class Service:
             self.embeddings.path = self.vision.write(self.vision.dir / f"req-{uuid.uuid4().hex[:12]}.dsi", pics,
                                                      starts)
         elif media:
+            if self.vision is None and getattr(self.template, "hy4", False):
+                # (--vision off, a pack without the mmproj file, or no room for a picture: the engine's start says)
+                raise ValueError(f"{HY4_TEXT_ONLY} reads text only, so it cannot read images or videos: send the "
+                                 "request without them (describe the picture in text instead)")
             if self.vision is None:
                 raise ValueError("this server was started without the vision encoder (run setup again and choose "
                                  "'vision'), so it cannot read images or videos")
@@ -4498,6 +4609,8 @@ class Service:
             # The parser rewrites DSML into CALL_END internally; the prompt and generated token IDs still use
             # the original DSML. Slice after the outer block, not an invoke or a legacy tag inside an argument.
             call_end = f"</{dsml_token}{tool_calls_block_name}>"
+        elif getattr(self.template, "hy4", False):   # (Hy4-flash: the end of its wrapper, after the last call's own)
+            call_end = "</tool_calls%s>" % self.template.hy4_tag
         out = {}
         for key, rep in blocked.items():
             call = {"id": "call_loop_guard", "type": "function",
@@ -4516,7 +4629,7 @@ class Service:
             if not f.startswith(p) or call_end not in p:
                 return None
             out[key] = (rep, self.tok.encode(p[p.rindex(call_end) + len(call_end):] + f[len(p):], parse_special=True),
-                        f.rstrip().endswith("<think>"))
+                        self._opens_thinking(f))
         return out
 
     def _keep_suffix(self, tools, kwargs, note=loop_guard.KEEP_NOTE):
@@ -4542,7 +4655,12 @@ class Service:
         tail = f[f.rindex(mark) + len(mark):]
         if not tail:
             return None
-        return (self.tok.encode(tail, parse_special=True), f.rstrip().endswith("<think>"))
+        return (self.tok.encode(tail, parse_special=True), self._opens_thinking(f))
+
+    def _opens_thinking(self, prompt: str) -> bool:
+        """Whether a rendered prompt ends in an open thinking block (Hy4-flash's is its suffixed <think:..>)."""
+        opens = getattr(self.template, "opens_thinking", None)
+        return bool(opens(prompt)) if callable(opens) else prompt.rstrip().endswith("<think>")
 
     def _collapse(self, messages):
         """A conversation that carries a loop across turns (loop_guard.collapse): its prompt without what the model
@@ -6530,6 +6648,11 @@ def make_handler(svc: Service):
                         svc.default_effort) or svc.default_effort
                     if getattr(svc.template, "forced_thinking", False):
                         rec["reasoning_effort"] = QWEN_EFFORT.get(rec["reasoning_effort"], rec["reasoning_effort"])
+                    if getattr(svc.template, "hy4", False):   # (Hy4-flash: the level it runs at, none / high)
+                        rec["reasoning_effort"] = svc.template.effort_shown(svc.default_effort) or \
+                            rec["reasoning_effort"]
+                # Hy4-flash alone: its two levels (the page offers these and no others)
+                levels = svc.template.thinking_levels() if getattr(svc.template, "hy4", False) else None
                 self._json(200, {"status": "updating" if svc.updater.busy() else
                                            "reloading" if svc.reloading() else "ok",
                                  "max_context": svc.engine.max_context, "model": svc.model,
@@ -6537,6 +6660,7 @@ def make_handler(svc: Service):
                                  "model_label": svc.model_label,   # (the model first: "GLM-5.3 · Maya-S24")
                                  "images": svc.vision is not None, "api_key": bool(svc.api_key), "defaults": rec,
                                  "version": SAGUARO_VERSION, "mcp_tools": bool(svc.mcp), "unloaded": svc.unloaded,
+                                 **({"thinking_levels": levels} if levels else {}),
                                  "capabilities": svc.capabilities(), "supervisor": svc.supervisor})
             elif path == "/api/context":
                 # the dashboard's Context size: the range, the measured cost of the current size, a reload's state
@@ -8011,6 +8135,14 @@ def main() -> int:
                                        Path(tempfile.mkdtemp(prefix="maya-mm3-pictures-")), Vision.load)
             print(f"[saguaro] images: the model's vision tower runs in the engine, up to {vision.g.max_pixels} pixels "
                   f"({vision.g.max_tokens} tokens) a picture", flush=True)
+        elif vision is None and not vcfg and engine.info.get("vision") == "hy4":
+            # Hy4-flash: the engine's own vision tower (the mmproj file in its pack); the server resizes the pictures
+            vision = hy4_vision.Vision(hy4_vision.Geometry.from_info(engine.info),
+                                       Path(tempfile.mkdtemp(prefix="saguaro-hy4-pictures-")), Vision.load)
+            where = (f"; no VRAM kept for pictures (~{engine.info.get('vision_room_mib')} MiB while one is read, lent "
+                     "by the prompt buffers)" if engine.info.get("vision_room") == "chunk" else "")
+            print(f"[saguaro] images: the model's vision tower runs in the engine, up to {vision.g.max_pixels} pixels "
+                  f"({vision.g.max_tokens} tokens for a square one) a picture{where}", flush=True)
         elif vision is None and not vcfg and engine.info.get("vision") == "off":
             # (DeepSeek-V4.1: its tower did not load - the engine's NOTE line above says why; no pictures offered)
             print("[saguaro] images: OFF - pictures are refused until the vision tower loads (see the line above)",
@@ -8061,6 +8193,8 @@ def main() -> int:
                                                      else "none")
         if getattr(svc.template, "forced_thinking", False):   # (CYBER-FROST: Qwen's words, low / medium / xhigh)
             level = QWEN_EFFORT.get(level, level)
+        if getattr(svc.template, "hy4", False):               # (Hy4-flash: the level it runs at, none / high)
+            level = svc.template.effort_shown(svc.default_effort) or level
         print(f"[saguaro] thinking level when a request names none: {level}"
               f"{'' if level in (svc.default_effort, f'{svc.default_effort} of 100') else f' (the config says {svc.default_effort})'}",
               flush=True)
