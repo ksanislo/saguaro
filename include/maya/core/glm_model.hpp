@@ -252,7 +252,7 @@ public:
     std::vector<int> layer_slots() const;
     std::vector<int> layer_usable_slots() const;   // ... at most the elastic pool's mapped slots (it gives some to contexts)
     std::vector<size_t> layer_blob() const;   // each layer's expert bytes (0: no routed experts on a card)
-    /// MAYA_GLM_CONV_*: the serve loop's allocation flags [kRcLayers][kRcExperts] (1 in it, 2 a floor, bits 2-7 its level),
+    /// SAGUARO_GLM_CONV_*: the serve loop's allocation flags [kRcLayers][kRcExperts] (1 in it, 2 a floor, bits 2-7 its level),
     /// the OPEN conversations besides the running ones, the preload counters (issued up, issued down, landed up, landed bytes)
     static void conv_publish(const std::vector<uint8_t>& flags);
     static void conv_others_set(int n);

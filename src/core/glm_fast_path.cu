@@ -164,7 +164,7 @@ static const LiveHold& live_hold() {
 static int64_t live_now() {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
-// MAYA_GLM_CONV_*: the serve loop's VRAM allocation over the live conversations, [kRcLayers][kRcExperts]: bit 0 in
+// SAGUARO_GLM_CONV_*: the serve loop's VRAM allocation over the live conversations, [kRcLayers][kRcExperts]: bit 0 in
 // it, bit 1 an open conversation's floor, bits 2-7 its score level (victims go lowest level first, preloads highest first)
 static std::atomic<uint8_t> g_conv_flag[glmfast::kRcLayers * glmfast::kRcExperts];
 static std::atomic<bool> g_conv_held_any{false}, g_conv_tgt_any{false};

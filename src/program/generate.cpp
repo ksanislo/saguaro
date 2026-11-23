@@ -3145,7 +3145,7 @@ static int glm_pack_generate(const Options& o) {
         std::vector<uint32_t> rc0, rc1;
         std::vector<uint32_t> rs1, rs_tl;   // ... its own sequence's decode counts at its first token / the last timeline line
         bool rc_shared = false;
-        int conv = -1;   // MAYA_GLM_CONV_*: its conversation
+        int conv = -1;   // SAGUARO_GLM_CONV_*: its conversation
         uint64_t pf0[4] = {0, 0, 0, 0};   // ... the preload counters at its admission
         std::chrono::steady_clock::time_point ta;
         bool in_think = false;
@@ -3325,7 +3325,7 @@ static int glm_pack_generate(const Options& o) {
     };
     // one written token of a request: its T line, the loop guard and the thinking budget (as run_request's
     // on_token), the stop conditions.  false: the request ends here (g.finish says why)
-    // MAYA_GLM_CONV_*: every TICK_S while decoding - each scheduler round and each written token (a solo stint is one
+    // SAGUARO_GLM_CONV_*: every TICK_S while decoding - each scheduler round and each written token (a solo stint is one
     // round of up to 4096 tokens): the shares, the open windows' expiry, the allocation
     const auto conv_tick = [&] {
         if (!conv.on && !conv.open_only) return;

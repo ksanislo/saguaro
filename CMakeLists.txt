@@ -476,7 +476,7 @@ if(MAYA_ENABLE_CUDA OR MAYA_ENABLE_HIP)
     target_link_libraries(glm_rows_kernels_test PRIVATE maya_kernels ${_maya_gpu_runtime_target})
     add_test(NAME glm_rows_kernels_test COMMAND glm_rows_kernels_test)
     set_tests_properties(glm_rows_kernels_test PROPERTIES TIMEOUT 120)
-    # the rows' DSA attention in one launch (MAYA_GLM_ROWS_ATTN) against mla() a row, resident and streamed caches
+    # the rows' DSA attention in one launch (SAGUARO_GLM_ROWS_ATTN) against mla() a row, resident and streamed caches
     add_executable(glm_rows_attn_test tests/glm_rows_attn_test.cu)
     target_link_libraries(glm_rows_attn_test PRIVATE maya_kernels ${_maya_gpu_runtime_target})
     add_test(NAME glm_rows_attn_test COMMAND glm_rows_attn_test)

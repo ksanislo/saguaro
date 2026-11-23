@@ -8301,7 +8301,7 @@ def _qfn_engine_class():
                 yield t
 
         def _admission_wait(self, slot, cancel, live):
-            """MAYA_SLOT_ADMIT: the admission reads beside the decoding slots, on its own lines: BRP <slot>
+            """SAGUARO_SLOT_ADMIT: the admission reads beside the decoding slots, on its own lines: BRP <slot>
             <done> <total> <ms> <tok/s> [new_read=<n> read_ms=<ms>] steps its progress, BRA <slot> 1 prompt=N
             reused=R read_ms=M the engine's own figures.  The queue view below feeds both into the engine-total
             read rate - with the per-request fields (PLAN-qfn-per-request-read-stats) it takes them straight:
