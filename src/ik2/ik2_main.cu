@@ -8464,6 +8464,10 @@ int main(int argc, char** argv) {
     }
     if (tpN > 1) {   // the members' state in the main model's visits too (the serving's snapshots and resets)
         g_tp_down.clear(), g_tp_down.shrink_to_fit();
+        for (int m = 0; m < tpN; ++m)   // (the re-blocked down columns are gone: nothing may read them again)
+            for (Layer& Ly : g_tpm[m]->L) Ly.host[2] = nullptr, Ly.stride[2] = 0;
+        // (copies: the token and prompt paths bind each member's own V, the serving's state goes through these - a
+        //  change that rebinds visits, as --parallel's bind_slot does, must update both)
         for (int m = 1; m < tpN; ++m)
             for (Visit Vi : g_tpm[m]->V) Vi.mem = m, M.V.push_back(Vi);
         tp_init(M, chunk);
