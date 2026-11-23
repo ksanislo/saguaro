@@ -1,6 +1,7 @@
 // src/ik2/ik2_kernels.cu - saguaro-ik2's kernels (the interface and the conventions: ik2_kernels.cuh).
 #include "ik2_kernels.cuh"
 #include "ik2_iq_tables.h"
+#include "sf_codecs.h"   // (Strata packs: src/strata_fmt)
 
 #include <cuda_fp16.h>
 #ifndef STRATA_USE_HIP
@@ -19,6 +20,18 @@
 #include <cstring>
 
 namespace ik2::k {
+
+// a kMIX layer's role part (a Strata pack's experts of several codecs): the expert's own type, rows and row bytes from
+// its MixHdr; the up part's MACaQ scales s[F] (h[r] is divided by s[r]: Strata's activation scale before down)
+__device__ __forceinline__ void mix_role(const uint8_t* part, int& ty, const uint8_t*& w, size_t& rb, const uint16_t** mq) {
+    const strata_fmt::MixHdr h = *(const strata_fmt::MixHdr*) part;
+    ty = h.type, w = part + sizeof(strata_fmt::MixHdr), rb = h.rb;
+    if (mq) *mq = h.aux_off ? (const uint16_t*) (part + h.aux_off) : nullptr;
+}
+__device__ __forceinline__ float mix_inv(const uint16_t* mq, int r) {
+    return strata_fmt::div_rn(1.0f, strata_fmt::f16_bits(mq[r]));
+}
+
 namespace {
 
 void check(const char* what) {
@@ -2479,13 +2492,15 @@ __global__ void moe_combine_kernel(const uint16_t* y, const int* inv, const floa
 }
 
 __global__ void swiglu_cap_f32_kernel(const float* gu, int n, int F, const float* sg, const float* su, float gcap,
-                                      float ucap, uint16_t* h) {
+                                      float ucap, uint16_t* h, const uint8_t* mix_up) {
     const size_t i = (size_t) blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= (size_t) n * F) return;
     const size_t r = i / F, c = i % F;
     const float g = gu[r * 2 * F + c] * sg[r];
     const float u = gu[r * 2 * F + F + c] * su[r];
-    h[i] = f2h(gcap * tanhf(g / gcap) * (1.0f / (1.0f + expf(-g))) * ucap * tanhf(u / ucap));
+    const float a = gcap * tanhf(g / gcap) * (1.0f / (1.0f + expf(-g))) * ucap * tanhf(u / ucap);
+    const strata_fmt::MixHdr* mh = (const strata_fmt::MixHdr*) mix_up;
+    h[i] = mh && mh->aux_off ? f2h(a * mix_inv((const uint16_t*) (mix_up + mh->aux_off), (int) c)) : f2h(a);
 }
 
 // one token's moe_combine_f32 and the conv4_res after it in one launch: out = conv(sum_k wt[k] y[inv[k]]) + res
@@ -2735,6 +2750,12 @@ __host__ __device__ __forceinline__ uint32_t iq_signs8(uint32_t s7) {
 }
 
 __host__ __device__ inline float decode_value(int type, const uint8_t* blocks, size_t v) {
+    if (type >= strata_fmt::kQ8F || type == strata_fmt::kBF16) {   // (a Strata pack's types; kMIX: a role part)
+        if (type != strata_fmt::kMIX) return strata_fmt::value(type, blocks, v);
+        strata_fmt::MixHdr h;
+        memcpy(&h, blocks, sizeof h);
+        return h.type == kNVFP4 ? decode_value(kNVFP4, blocks + sizeof h, v) : strata_fmt::value(h.type, blocks + sizeof h, v);
+    }
     if (type == kNVFP4) {
         const int8_t kv[16] = {0, 1, 2, 3, 4, 6, 8, 12, 0, -1, -2, -3, -4, -6, -8, -12};
         const uint8_t* b = blocks + (v / 64) * 36;
@@ -2920,6 +2941,92 @@ __device__ __forceinline__ void load_xv8(const float* x, float4 (&xv)[8]) {
 }
 
 // a warp's dot of one row of K values (blocks of `type` from w) with xs (shared, padded: xp), every lane gets it
+// ---- a Strata pack's dense / expert types in the row dots: 32 values (group `it` of the row, xs' layout) at a time
+
+// sum over the 32 values of chunk it: (code - off) * x, as eff * (sum q x - off * sum x)
+__device__ __forceinline__ float sh_chunk_dot(const uint8_t* w, int bits, size_t hbb, int it, const float* x) {
+    const uint8_t* b = w + (size_t) (it >> 2) * hbb;
+    const int q4 = it & 3;   // (which 32 of the half block's 128)
+    const float eff = strata_fmt::sh_eff(b, q4 >> 1);
+    const uint8_t* pl = b + 4;
+    uint32_t lo[4], hi[2] = {0, 0};
+    if (bits <= 3) {
+        lo[0] = *(const uint32_t*) (pl + q4 * 8), lo[1] = *(const uint32_t*) (pl + q4 * 8 + 4);
+        if (bits == 3) hi[0] = *(const uint32_t*) (pl + 32 + q4 * 4);
+    } else {
+#pragma unroll
+        for (int i = 0; i < 4; ++i) lo[i] = *(const uint32_t*) (pl + q4 * 16 + 4 * i);
+        if (bits == 5) hi[0] = *(const uint32_t*) (pl + 64 + q4 * 4);
+        if (bits == 6) hi[0] = *(const uint32_t*) (pl + 64 + q4 * 8), hi[1] = *(const uint32_t*) (pl + 64 + q4 * 8 + 4);
+    }
+    // (q - (2^(b-1) - 0.5)) = (2 q - (2^b - 1)) / 2: an odd integer a value, one product each
+    const int odd = (1 << bits) - 1;
+    float acc = 0.0f;
+#pragma unroll
+    for (int j = 0; j < 32; ++j) {
+        int q;
+        if (bits <= 3) {
+            q = (lo[j >> 4] >> (2 * (j & 15))) & 3;
+            if (bits == 3) q |= ((hi[0] >> j) & 1) << 2;
+        } else {
+            q = (lo[j >> 3] >> (4 * (j & 7))) & 15;
+            if (bits == 5) q |= ((hi[0] >> j) & 1) << 4;
+            if (bits == 6) q |= ((hi[j >> 4] >> (2 * (j & 15))) & 3) << 4;
+        }
+        acc += (float) (2 * q - odd) * x[j];
+    }
+    return 0.5f * eff * acc;
+}
+__device__ __forceinline__ float q8f_chunk_dot(const uint8_t* w, int it, const float* x) {
+    const uint8_t* b = w + (size_t) it * 36;
+    const float d = __ldg((const float*) b);
+    float a = 0.0f;
+#pragma unroll
+    for (int i = 0; i < 8; ++i) {
+        const uint32_t u = __ldg((const uint32_t*) (b + 4 + 4 * i));
+        a += (float) (int8_t) (u & 0xFF) * x[4 * i] + (float) (int8_t) ((u >> 8) & 0xFF) * x[4 * i + 1] +
+             (float) (int8_t) ((u >> 16) & 0xFF) * x[4 * i + 2] + (float) (int8_t) (u >> 24) * x[4 * i + 3];
+    }
+    return d * a;
+}
+__device__ __forceinline__ float bf16_chunk_dot(const uint8_t* w, int it, const float* x) {
+    const uint32_t* p = (const uint32_t*) (w + (size_t) it * 64);
+    float a = 0.0f;
+#pragma unroll
+    for (int i = 0; i < 16; ++i) {
+        const uint32_t u = __ldg(p + i);
+        a += __uint_as_float(u << 16) * x[2 * i] + __uint_as_float(u & 0xFFFF0000u) * x[2 * i + 1];
+    }
+    return a;
+}
+__device__ __forceinline__ float mx8_chunk_dot(const uint8_t* w, int it, const float* x) {
+    const uint8_t* b = w + (size_t) it * 36;
+    const uint32_t hdr = __ldg((const uint32_t*) b);
+    float a = 0.0f;
+#pragma unroll
+    for (int i = 0; i < 8; ++i) {
+        const uint32_t u = __ldg((const uint32_t*) (b + 4 + 4 * i));
+#pragma unroll
+        for (int j = 0; j < 4; ++j) a += strata_fmt::e4m3((uint8_t) (u >> (8 * j))) * x[4 * i + j];
+    }
+    return strata_fmt::ue8m0((uint8_t) (hdr & 0xFF)) * a;
+}
+__device__ __forceinline__ bool sf_chunk_type(int type) {
+    return strata_fmt::is_sh(type) || type == strata_fmt::kQ8F || type == strata_fmt::kBF16 || type == strata_fmt::kMX8B;
+}
+__device__ __forceinline__ float sf_chunk_dot(int type, const uint8_t* w, int it, const float* x) {
+    if (type == strata_fmt::kQ8F) return q8f_chunk_dot(w, it, x);
+    if (type == strata_fmt::kMX8B) return mx8_chunk_dot(w, it, x);
+    if (type == strata_fmt::kBF16) return bf16_chunk_dot(w, it, x);
+    switch (type) {   // (the width a constant in each: the code extraction folds)
+    case strata_fmt::kSH2: return sh_chunk_dot(w, 2, 36, it, x);
+    case strata_fmt::kSH3: return sh_chunk_dot(w, 3, 52, it, x);
+    case strata_fmt::kSH4: return sh_chunk_dot(w, 4, 68, it, x);
+    case strata_fmt::kSH5: return sh_chunk_dot(w, 5, 84, it, x);
+    default: return sh_chunk_dot(w, 6, 100, it, x);
+    }
+}
+
 __device__ float row_dot(int type, const uint8_t* w, const float* xs, int K) {
     const int lane = threadIdx.x & 31;
     float acc = 0.0f;
@@ -3039,6 +3146,8 @@ __device__ float row_dot(int type, const uint8_t* w, const float* xs, int K) {
             acc += iq3 ? iq3xxs_sub_dot(w + (size_t) (sb >> 3) * 98, sb & 7, xv)
                        : iq4xs_sub_dot(w + (size_t) (sb >> 3) * 136, sb & 7, xv);
         }
+    } else if (sf_chunk_type(type) && (K & 31) == 0 && ((uintptr_t) w & 3) == 0) {
+        for (int it = lane; it < K / 32; it += 32) acc += sf_chunk_dot(type, w, it, xs + it * 36);
     } else {
         for (int i = lane; i < K; i += 32) acc += decode_value(type, w, (size_t) i) * xs[xp(i)];
     }
@@ -3213,6 +3322,11 @@ __device__ void row_dot_2(int type, const uint8_t* wg, const uint8_t* wu, const 
             const size_t off = (size_t) (sb >> 3) * bb;
             ag += iq3 ? iq3xxs_sub_dot(wg + off, sb & 7, xv) : iq4xs_sub_dot(wg + off, sb & 7, xv);
             au += iq3 ? iq3xxs_sub_dot(wu + off, sb & 7, xv) : iq4xs_sub_dot(wu + off, sb & 7, xv);
+        }
+    } else if (sf_chunk_type(type) && (K & 31) == 0 && (((uintptr_t) wg | (uintptr_t) wu) & 3) == 0) {
+        for (int it = lane; it < K / 32; it += 32) {
+            ag += sf_chunk_dot(type, wg, it, xs + it * 36);
+            au += sf_chunk_dot(type, wu, it, xs + it * 36);
         }
     } else {
         for (int i = lane; i < K; i += 32) {
@@ -3490,7 +3604,10 @@ __global__ void experts_gate_up_swiglu_kernel(const uint8_t* const* blob, const 
     load_xs_f32(x + (size_t) tok[s] * C, C, xs);
     __syncthreads();
     const int warp = threadIdx.x >> 5;
-    const uint8_t* bl = blob[s];
+    const uint8_t* bg = blob[s];
+    const uint8_t* bu = bg + eb0;
+    const uint16_t* mq = nullptr;
+    if (ty_gate == strata_fmt::kMIX) mix_role(bg, ty_gate, bg, rb_gate, nullptr), mix_role(bu, ty_up, bu, rb_up, &mq);
     const float sgs = sg ? sg[s] : 1.0f;
     const float sus = su ? su[s] : 1.0f;
     for (int j = 0; j < ROWS; ++j) {
@@ -3498,15 +3615,15 @@ __global__ void experts_gate_up_swiglu_kernel(const uint8_t* const* blob, const 
         if (r >= F) break;
         float vg, vu;
         if (ty_gate == ty_up) {
-            row_dot_pair(ty_gate, bl + (size_t) r * rb_gate, bl + eb0 + (size_t) r * rb_up, xs, C, vg, vu);
+            row_dot_pair(ty_gate, bg + (size_t) r * rb_gate, bu + (size_t) r * rb_up, xs, C, vg, vu);
         } else {
-            vg = row_dot(ty_gate, bl + (size_t) r * rb_gate, xs, C);
-            vu = row_dot(ty_up, bl + eb0 + (size_t) r * rb_up, xs, C);
+            vg = row_dot(ty_gate, bg + (size_t) r * rb_gate, xs, C);
+            vu = row_dot(ty_up, bu + (size_t) r * rb_up, xs, C);
         }
         if ((threadIdx.x & 31) == 0) {
             const float g = vg * sgs, u = vu * sus;
-            h[(size_t) (orow ? orow[s] : s) * h_ld + r] =
-                f2h(gcap * tanhf(g / gcap) * (1.0f / (1.0f + expf(-g))) * ucap * tanhf(u / ucap));
+            const float a = gcap * tanhf(g / gcap) * (1.0f / (1.0f + expf(-g))) * ucap * tanhf(u / ucap);
+            h[(size_t) (orow ? orow[s] : s) * h_ld + r] = mq ? f2h(a * mix_inv(mq, r)) : f2h(a);
         }
     }
 }
@@ -3521,6 +3638,7 @@ __global__ void experts_down_kernel(const uint8_t* const* blob, int ty_down, siz
     __syncthreads();
     const int warp = threadIdx.x >> 5;
     const uint8_t* w = blob[s] + off_down;
+    if (ty_down == strata_fmt::kMIX) mix_role(w, ty_down, w, rb_down, nullptr);
     for (int j = 0; j < ROWS;) {
         const int row = (blockIdx.x * WARPS + warp) * ROWS + j;
         if (row >= C) break;
@@ -3989,7 +4107,8 @@ __device__ __forceinline__ void experts_gate_up_swiglu_g_run(const uint8_t* bl, 
                                                              int ng, int ty_gate, int ty_up, size_t eb0,
                                                              const float* x, int C, int F, size_t rb_gate,
                                                              size_t rb_up, const float* sg, const float* su,
-                                                             float gcap, float ucap, uint16_t* h) {
+                                                             float gcap, float ucap, uint16_t* h,
+                                                             const uint16_t* mq = nullptr) {
     const float* xs[N_CAP];
 #pragma unroll
     for (int t = 0; t < N_CAP; ++t) xs[t] = x + (size_t) tok_g[t < ng ? t : 0] * C;
@@ -4010,7 +4129,8 @@ __device__ __forceinline__ void experts_gate_up_swiglu_g_run(const uint8_t* bl, 
                 const int ro = orow_g[t];
                 const float g = og[t] * (sg ? sg[ro] : 1.0f);
                 const float u = ou[t] * (su ? su[ro] : 1.0f);
-                h[(size_t) ro * F + r] = f2h(gcap * tanhf(g / gcap) * (1.0f / (1.0f + expf(-g))) * ucap * tanhf(u / ucap));
+                const float a = gcap * tanhf(g / gcap) * (1.0f / (1.0f + expf(-g))) * ucap * tanhf(u / ucap);
+                h[(size_t) ro * F + r] = mq ? f2h(a * mix_inv(mq, r)) : f2h(a);
             }
         }
     }
@@ -4059,20 +4179,26 @@ __global__ void experts_gate_up_swiglu_g_kernel(const uint8_t* const* blob, cons
     const int g = blockIdx.y, ng = n[g];
     if (ng <= 0) return;
     const uint8_t* bl = blob[g];
+    const uint16_t* mq = nullptr;
+    if (ty_gate == strata_fmt::kMIX) {
+        const uint8_t *bg, *bu;
+        mix_role(bl, ty_gate, bg, rb_gate, nullptr), mix_role(bl + eb0, ty_up, bu, rb_up, &mq);
+        bl = bg, eb0 = (size_t) (bu - bg);
+    }
     const int* tok_g = tok + g * kGroupMax;
     const int* orow_g = orow + g * kGroupMax;
     if (ng == 1)
         experts_gate_up_swiglu_g_run<1>(bl, tok_g, orow_g, ng, ty_gate, ty_up, eb0, x, C, F, rb_gate, rb_up, sg, su,
-                                        gcap, ucap, h);
+                                        gcap, ucap, h, mq);
     else if (ng == 2)
         experts_gate_up_swiglu_g_run<2>(bl, tok_g, orow_g, ng, ty_gate, ty_up, eb0, x, C, F, rb_gate, rb_up, sg, su,
-                                        gcap, ucap, h);
+                                        gcap, ucap, h, mq);
     else if (ng <= 4)
         experts_gate_up_swiglu_g_run<4>(bl, tok_g, orow_g, ng, ty_gate, ty_up, eb0, x, C, F, rb_gate, rb_up, sg, su,
-                                        gcap, ucap, h);
+                                        gcap, ucap, h, mq);
     else
         experts_gate_up_swiglu_g_run<kGroupMax>(bl, tok_g, orow_g, ng, ty_gate, ty_up, eb0, x, C, F, rb_gate, rb_up,
-                                                sg, su, gcap, ucap, h);
+                                                sg, su, gcap, ucap, h, mq);
 }
 
 __global__ void experts_down_g_kernel(const uint8_t* const* blob, const int* n, const int* orow, int ty_down,
@@ -4080,6 +4206,7 @@ __global__ void experts_down_g_kernel(const uint8_t* const* blob, const int* n, 
     const int g = blockIdx.y, ng = n[g];
     if (ng <= 0) return;
     const uint8_t* w = blob[g] + off_down;
+    if (ty_down == strata_fmt::kMIX) mix_role(w, ty_down, w, rb_down, nullptr);
     const int* orow_g = orow + g * kGroupMax;
     if (ng == 1)
         experts_down_g_run<1>(w, orow_g, ng, ty_down, h, C, F, rb_down, y);
@@ -4981,6 +5108,40 @@ __global__ void decode_f16_k_kernel(int type, const uint8_t* blocks, size_t nblk
     }
 }
 
+// a Strata pack's types (and kMIX parts) to FP16, 16 values a thread: each value as decode_value gives it
+__global__ void decode_f16_sf_kernel(int type, const uint8_t* blocks, size_t n16, uint16_t* out) {
+    const size_t c = (size_t) blockIdx.x * blockDim.x + threadIdx.x;
+    if (c >= n16) return;
+    if (type == strata_fmt::kMIX) {
+        const strata_fmt::MixHdr h = *(const strata_fmt::MixHdr*) blocks;
+        type = h.type, blocks += sizeof(strata_fmt::MixHdr);
+    }
+    float v[16];
+    if (type == kNVFP4) {
+        const uint8_t* b = blocks + (c >> 2) * 36;
+        const int sub = (int) (c & 3);
+        const float d = ue4m3((uint8_t) (*(const uint32_t*) b >> (8 * sub)));
+        const uint32_t q0 = *(const uint32_t*) (b + 4 + sub * 8), q1 = *(const uint32_t*) (b + 8 + sub * 8);
+        const float2 w[8] = {e2m1_pair_lo(q0), e2m1_pair_lo(q0 >> 16), e2m1_pair_lo(q1), e2m1_pair_lo(q1 >> 16),
+                             e2m1_pair_hi(q0), e2m1_pair_hi(q0 >> 16), e2m1_pair_hi(q1), e2m1_pair_hi(q1 >> 16)};
+#pragma unroll
+        for (int i = 0; i < 8; ++i) v[2 * i] = w[i].x * d, v[2 * i + 1] = w[i].y * d;
+    } else if (strata_fmt::is_sh(type)) {
+        const int bits = strata_fmt::sh_bits(type);
+        const uint8_t* b = blocks + (c >> 3) * strata_fmt::block_bytes(type);
+        const int i0 = (int) (c & 7) * 16;
+        const float eff = strata_fmt::sh_eff(b, i0 >> 6), off = strata_fmt::sh_offset(bits);
+#pragma unroll
+        for (int i = 0; i < 16; ++i) v[i] = __fmul_rn((float) strata_fmt::sh_code(b, bits, i0 + i) - off, eff);
+    } else {
+#pragma unroll
+        for (int i = 0; i < 16; ++i) v[i] = strata_fmt::value(type, blocks, c * 16 + i);
+    }
+    uint4* o = (uint4*) (out + c * 16);
+    o[0] = make_uint4(f2_to_u32(v[0], v[1]), f2_to_u32(v[2], v[3]), f2_to_u32(v[4], v[5]), f2_to_u32(v[6], v[7]));
+    o[1] = make_uint4(f2_to_u32(v[8], v[9]), f2_to_u32(v[10], v[11]), f2_to_u32(v[12], v[13]), f2_to_u32(v[14], v[15]));
+}
+
 __global__ void decode_f16_kernel(int type, const uint8_t* blocks, size_t n, uint16_t* out) {
     const size_t i = (size_t) blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) out[i] = f2h(decode_value(type, blocks, i));
@@ -5641,7 +5802,10 @@ __global__ void experts_gate_up_swiglu_mem_kernel(const uint8_t* const* blob, co
     const int grp = blockIdx.y, n = n_g[grp];
     if (n <= 0) return;
     const int warp = threadIdx.x >> 5;
-    const uint8_t* bl = blob[grp];
+    const uint8_t* bg = blob[grp];
+    const uint8_t* bu = bg + eb0;
+    const uint16_t* mq = nullptr;
+    if (ty_gate == strata_fmt::kMIX) mix_role(bg, ty_gate, bg, rb_gate, nullptr), mix_role(bu, ty_up, bu, rb_up, &mq);
     for (int m = 0; m < n; ++m) {
         const int slot = row_g[grp * kGroupMax + m];
         if (m) __syncthreads();
@@ -5654,14 +5818,15 @@ __global__ void experts_gate_up_swiglu_mem_kernel(const uint8_t* const* blob, co
             if (r >= F) break;
             float vg, vu;
             if (ty_gate == ty_up) {
-                row_dot_pair(ty_gate, bl + (size_t) r * rb_gate, bl + eb0 + (size_t) r * rb_up, xs, C, vg, vu);
+                row_dot_pair(ty_gate, bg + (size_t) r * rb_gate, bu + (size_t) r * rb_up, xs, C, vg, vu);
             } else {
-                vg = row_dot(ty_gate, bl + (size_t) r * rb_gate, xs, C);
-                vu = row_dot(ty_up, bl + eb0 + (size_t) r * rb_up, xs, C);
+                vg = row_dot(ty_gate, bg + (size_t) r * rb_gate, xs, C);
+                vu = row_dot(ty_up, bu + (size_t) r * rb_up, xs, C);
             }
             if ((threadIdx.x & 31) == 0) {
                 const float g = vg * sgs, u = vu * sus;
-                h[(size_t) slot * F + r] = f2h(gcap * tanhf(g / gcap) * (1.0f / (1.0f + expf(-g))) * ucap * tanhf(u / ucap));
+                const float a = gcap * tanhf(g / gcap) * (1.0f / (1.0f + expf(-g))) * ucap * tanhf(u / ucap);
+                h[(size_t) slot * F + r] = mq ? f2h(a * mix_inv(mq, r)) : f2h(a);
             }
         }
     }
@@ -5675,6 +5840,7 @@ __global__ void experts_down_mem_kernel(const uint8_t* const* blob, const int* n
     if (n <= 0) return;
     const int warp = threadIdx.x >> 5;
     const uint8_t* w = blob[grp] + off_down;
+    if (ty_down == strata_fmt::kMIX) mix_role(w, ty_down, w, rb_down, nullptr);
     for (int m = 0; m < n; ++m) {
         const int slot = row_g[grp * kGroupMax + m];
         if (m) __syncthreads();
@@ -6214,9 +6380,9 @@ void moe_combine(const uint16_t* y, const int* inv, const float* wt, int T, int 
 }
 
 void swiglu_cap_f32(const float* gu, int n, int F, const float* sg, const float* su, float gcap, float ucap,
-                    uint16_t* h, cudaStream_t s) {
+                    uint16_t* h, cudaStream_t s, const uint8_t* mix_up) {
     if (n <= 0) return;
-    swiglu_cap_f32_kernel<<<grid((size_t) n * F), kBlk, 0, s>>>(gu, n, F, sg, su, gcap, ucap, h);
+    swiglu_cap_f32_kernel<<<grid((size_t) n * F), kBlk, 0, s>>>(gu, n, F, sg, su, gcap, ucap, h, mix_up);
     check("swiglu_cap_f32");
 }
 void moe_combine_f32(const float* y, const int* inv, const float* wt, int T, int K, int C, float* out, bool add,
@@ -6424,10 +6590,13 @@ void argmax_gemv_f16(const uint16_t* W, int ld, const float* x, const float* bas
 }
 
 int block_values(int type) {
+    if (type == strata_fmt::kMIX) return 1;   // (its rows: each expert's own type, MixHdr)
+    if (strata_fmt::block_values(type)) return strata_fmt::block_values(type);
     return type == kNVFP4 ? 64 : type == kQ8_0 ? 32
          : type == kQ5_K || type == kQ6_K || type == kIQ3_XXS || type == kIQ4_XS ? 256 : 0;
 }
 size_t block_bytes(int type) {
+    if (strata_fmt::block_values(type)) return strata_fmt::block_bytes(type);
     return type == kNVFP4 ? 36 : type == kQ8_0 ? 34 : type == kQ5_K ? 176 : type == kQ6_K ? 210
          : type == kIQ3_XXS ? 98 : type == kIQ4_XS ? 136 : 0;
 }
@@ -6900,6 +7069,12 @@ void decode_f16(int type, const uint8_t* blocks, size_t n, uint16_t* out, cudaSt
     if ((type == kQ5_K || type == kQ6_K) && n % 256 == 0) {
         decode_f16_k_kernel<<<grid(n / 256, kBlk / 32), kBlk, 0, s>>>(type, blocks, n / 256, out);
         check("decode_f16_k");
+        return;
+    }
+    if ((type >= strata_fmt::kQ8F || type == strata_fmt::kBF16) && n % 16 == 0 && (((uintptr_t) out & 15) == 0) &&
+        (((uintptr_t) blocks & 3) == 0)) {
+        decode_f16_sf_kernel<<<grid(n / 16), kBlk, 0, s>>>(type, blocks, n / 16, out);
+        check("decode_f16_sf");
         return;
     }
     decode_f16_kernel<<<grid(n), kBlk, 0, s>>>(type, blocks, n, out);

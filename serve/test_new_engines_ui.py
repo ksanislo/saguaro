@@ -250,7 +250,8 @@ class Catalog(unittest.TestCase):
     def test_one_t4_gets_inkling_recommended(self):
         c = self.cat([t4()])
         ik = c["inkling-2-mini"]
-        self.assertTrue(ik["recommended"])
+        self.assertTrue(ik["recommended"])                  # (UD-Q4_K_XL: the closest to the original on a T4)
+        self.assertFalse(c["inkling-2-mini-sq-15"]["recommended"])
         for part in ("one 16 GB card", "the others in RAM (the offload path)", "32K context", "24 tok/s", "1x Tesla T4"):
             self.assertIn(part, ik["fit"])
         self.assertFalse(c["hy4-flash-maya-s"]["recommended"])
@@ -272,8 +273,9 @@ class Catalog(unittest.TestCase):
         self.assertIn("16 GB", self.cat([dict(xt, vram_gb=12.0)])["inkling-2-mini"]["fit"])
 
     def test_two_t4s(self):
-        ik = self.cat([t4(0), t4(1)])["inkling-2-mini"]
-        self.assertTrue(ik["recommended"])
+        c = self.cat([t4(0), t4(1)])
+        ik = c["inkling-2-mini"]
+        self.assertTrue(c["inkling-2-mini-sq-20"]["recommended"])   # (the original weights: every expert on the two)
         for part in ("two cards: every expert in VRAM", "131K context", "52 tok/s", "830 tok/s", "2x Tesla T4"):
             self.assertIn(part, ik["fit"])
 

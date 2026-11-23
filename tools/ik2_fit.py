@@ -56,9 +56,24 @@ AMD_RESERVE_UNDER_GB = 20.0                         # an AMD card under this kee
 AMD_SMALL_CREDIT_GIB = 1.0
 
 
+def subprocess_error():
+    import subprocess
+    return subprocess.SubprocessError
+
+
 def experts_gib_of(path) -> float | None:
     """GiB of a GGUF's routed experts (its *_exps tensors, from the header's offsets), or None where it does not
-    read.  UD-Q4_K_XL: 14.71; our Inkling-2-Mini-T4-NVFP4-IQ3_XXS: 11.45."""
+    read.  UD-Q4_K_XL: 14.71; our Inkling-2-Mini-T4-NVFP4-IQ3_XXS: 11.45.  A Strata pack: its experts as saguaro-ik2
+    holds them (tools/strata/strata_pack.py: SQ-20 14.95, SQ-15 13.03, SQ-10 10.45)."""
+    try:
+        with open(path, "rb") as fh:
+            if fh.read(8) == b"STRATA\x00\x01":
+                import sys as _sys
+                _sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "strata"))
+                import strata_pack as SP
+                return SP.inkling_expert_bytes(SP.Pack(path)) / GIB
+    except (OSError, ValueError, KeyError, ImportError, subprocess_error()):
+        return None
     try:
         import gguf_reader as G
         f = G.GGUFFile(path)

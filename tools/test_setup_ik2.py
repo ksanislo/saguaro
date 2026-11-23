@@ -604,8 +604,8 @@ class Steps(unittest.TestCase):
                   patch.object(maya, "mem_gb", return_value=(96.0, 80.0)), patch.object(maya, "WIN", False),
                   patch.object(maya, "choose_context", lambda a, prev, opts, rec: rec),
                   patch.object(maya, "offer_download", side_effect=AssertionError("no drafter download")),
-                  patch.object(maya, "write_config_ik2", lambda a, *r: seen.update(drafting=a.drafting, lay=r[7],
-                                                                                    drafter=r[9]))]
+                  patch.object(maya, "write_config_ik2", lambda a, *r, **k: seen.update(drafting=a.drafting, lay=r[7],
+                                                                                         drafter=r[9]))]
         for p in common:
             p.start()
             self.addCleanup(p.stop)
@@ -648,18 +648,68 @@ class Steps(unittest.TestCase):
         pc = {"gpus": [t4(2), t4(3)], "backend": "cuda", "archs": [75]}
         seen = {}
 
-        def write(a, pc_, meta, gguf_, tok_, ctx, models, d_, lay, vision=None, drafter=None, prev=None):
+        def write(a, pc_, meta, gguf_, tok_, ctx, models, d_, lay, vision=None, drafter=None, prev=None, **k):
             seen.update(ctx=ctx, lay=lay, vision=vision, d=d_, drafting=a.drafting, drafter=drafter)
             return self.root / "cfg.json"
         with patch.object(maya, "check_pc", lambda a, fam: pc), patch.object(maya, "tools_step", lambda a: self.root), \
                 patch.object(maya, "build_step", lambda a, pc_, llama, target: {"target": target}), \
-                patch.object(maya, "IK2_EXE", gguf), patch.object(maya, "ik2_model_step", lambda a, d_: gguf), \
+                patch.object(maya, "IK2_EXE", gguf), patch.object(maya, "ik2_model_step", lambda a, d_, q=None: gguf), \
                 patch.object(maya, "ik2_tokenizer_step", lambda a, d_, g: tok), \
                 patch.object(maya, "ik2_vision_step", lambda *x: None), patch.object(maya, "write_config_ik2", write):
-            got = maya.set_up_ik2(args(models_dir=str(self.root / "models")), {})
+            got = maya.set_up_ik2(args(models_dir=str(self.root / "models"), ik2_quant="ud-q4_k_xl"), {})
         self.assertEqual(got, self.root / "cfg.json")
         self.assertEqual((seen["ctx"], seen["lay"]["args"][:2], seen["d"]), (131072, ["--gpus", "2"], d))
         self.assertEqual((seen["drafting"], seen["drafter"]), ("off", None))   # (two GPUs, Turing: drafting off)
+
+
+class StrataPacks(unittest.TestCase):
+    """Strata's packs of Inkling-2-Mini beside UD-Q4_K_XL: names, the table, the pick for the cards, a pack folder."""
+
+    def test_names(self):
+        for name, key in (("inkling-2-mini-sq-15", "strata-sq-15"), ("Inkling-2-Mini-Strata-SQ-20", "strata-sq-20"),
+                          ("strata-sq-10", "strata-sq-10")):
+            self.assertEqual(Q.resolve(name), ("ik2", key), name)
+        self.assertEqual(Q.config_stem("ik2", "strata-sq-15"), "maya-inkling-2-mini-sq-15")
+        self.assertEqual(maya.ik2_config_path(Path("Inkling-2-Mini-SQ-15.strata")).name,
+                         "maya-inkling-2-mini-sq-15.json")   # (a pack: its own config, as the Models page names it)
+        self.assertEqual(Q.shown("ik2", "strata-sq-15"), "Inkling 2 Mini · Strata SQ-15")
+
+    def test_table(self):
+        for k in Q.IK2_QUANTS[1:]:
+            m = maya.ik2_entry(k)
+            self.assertEqual(m["format"], "ik2-strata")
+            self.assertTrue(m["gguf"].endswith(".strata"))
+            self.assertIn("tokenizer.json", m["files"])
+            self.assertEqual(set(m["files"]), set(m["sha256"]))
+            self.assertTrue(all(len(h) == 64 for h in m["sha256"].values()))
+        self.assertEqual(maya.ik2_entry("strata-sq-15")["files"]["Inkling-2-Mini-SQ-15.strata"], 14348316672)
+
+    def test_recommended(self):
+        rec = lambda v, n=1: maya.ik2_recommend([t4(i, v) for i in range(n)], False)   # noqa: E731
+        self.assertEqual(rec(11.0), "strata-sq-10")    # (12 GB: Strata's 12 GB pack)
+        self.assertEqual(rec(15.0), "ud-q4_k_xl")      # (a T4: the offload path either way; UD the closest there)
+        self.assertEqual(rec(23.5), "strata-sq-20")    # (24 GB: the original weights, every expert on the card)
+        self.assertEqual(rec(15.0, 2), "strata-sq-20")  # (two T4s: every expert across them)
+
+    def test_pack_folder(self):
+        with tempfile.TemporaryDirectory() as t:
+            d = Path(t)
+            (d / "Inkling-2-Mini-SQ-15.strata").write_bytes(b"STRATA\x00\x01")
+            a = args(model_dir=str(d))
+            self.assertEqual(maya.ik2_pack_in(d), "strata-sq-15")
+            self.assertEqual(maya.choose_ik2_quant(a, {}, [t4()], False), "strata-sq-15")
+            self.assertIsNone(maya.ik2_local_gguf(a, d))   # (not taken for a GGUF of your own, nor UD offered)
+
+    def test_pieces(self):
+        with tempfile.TemporaryDirectory() as t:
+            f = Path(t) / "big.strata"
+            self.assertIsNone(maya.piece_paths(f, 10 << 20))
+            ps = maya.piece_paths(f, 14348316672)
+            self.assertEqual(len(ps), maya.DL_PIECES)
+            self.assertEqual((ps[0][1], ps[-1][2]), (0, 14348316672 - 1))
+            self.assertTrue(all(ps[i][2] + 1 == ps[i + 1][1] for i in range(len(ps) - 1)))
+            f.write_bytes(b"x")                        # (a single stream already started: kept as one)
+            self.assertIsNone(maya.piece_paths(f, 14348316672))
 
 
 if __name__ == "__main__":
