@@ -279,6 +279,8 @@ struct Layer {
     const uint8_t* fh[3] = {nullptr, nullptr, nullptr};
     size_t fstride[3] = {0, 0, 0};
     std::vector<float> scale[3];                   // empty: 1
+    // a Strata pack's kMIX layer: each expert packed - its bytes (under slot_bytes) and its up / down parts' offsets
+    std::vector<uint32_t> xb, mxu, mxd;
     // a looped core's layer: its later passes' message gates by module (0 q's, 1 k's, 2 v's, 3 the MoE's) -
     // down [rank][2 C], forget and gain [rank][C] - and the four messages' queries [4][C] in that order (F32)
     float *lp_down[4] = {}, *lp_forget[4] = {}, *lp_gain[4] = {}, *lp_query = nullptr;
@@ -923,7 +925,15 @@ struct ExpertCache {
     int n_layers = 0, E = 0;
     std::vector<Pool> pools;
     std::vector<int> layer_pool;       // layer l -> pool index (-1 if on another GPU)
-    std::vector<int> loc;              // l * E + e -> slot in pools[layer_pool[l]], or -1
+    std::vector<int> loc;              // l * E + e -> slot in pools[pool_of(l * E + e)], or -1
+    std::vector<int> xpool;            // l * E + e -> its pool where the experts' sizes differ (init_packed); empty: the layer's
+    int pool_of(int idx) const { return xpool.empty() ? layer_pool[idx / E] : xpool[idx]; }
+    uint8_t* where(int idx) const {    // an expert's slot in VRAM, or null
+        const int s = loc[idx];
+        if (s < 0) return nullptr;
+        const Pool& P = pools[pool_of(idx)];
+        return P.data + (size_t) s * P.slot_bytes;
+    }
     std::vector<uint64_t> ghost_at;    // l * E + e -> ghost_seq when evicted in decode (0: none)
     int last_handle = -1;
     bool scan = false;   // a long prefill's pass (evict_scan; SAGUARO_IK2_SCAN=0: off)
@@ -1065,6 +1075,48 @@ struct ExpertCache {
         die("expert cache: no slot free");
     }
 
+    // Every expert resident, each in a pool of its own size (a Strata pack's packed kMIX experts: an expert's bytes
+    // rounded to 256, its pool's slot): false (nothing set up) where they do not all fit in budget - init() then.
+    bool init_packed(const std::vector<Layer>& L, int n_layers_in, int E_in, size_t budget) {
+        n_layers = n_layers_in, E = E_in;
+        std::map<size_t, std::vector<int>> by_sb;
+        size_t need = 0;
+        for (int l = 0; l < n_layers; ++l)
+            for (int e = 0; e < E; ++e) {
+                const size_t b = L[l].xb.empty() ? L[l].eb[0] + L[l].eb[1] + L[l].eb[2] : L[l].xb[e];
+                const size_t sb = (b + 255) / 256 * 256;
+                by_sb[sb].push_back(l * E + e), need += sb;
+            }
+        if (need > budget) return false;
+        layer_pool.assign(n_layers, -1);
+        loc.assign((size_t) n_layers * E, -1);
+        ghost_at.assign((size_t) n_layers * E, 0);
+        xpool.assign((size_t) n_layers * E, -1);
+        for (auto& kv : by_sb) {
+            Pool P;
+            P.slot_bytes = kv.first;
+            P.n_slots = (int) kv.second.size();
+            P.n_layers = P.n_slots / E;   // (whole layers: every expert has its slot - the resident check)
+            for (int idx : kv.second) xpool[idx] = (int) pools.size();
+            pools.push_back(std::move(P));
+        }
+        for (int l = 0; l < n_layers; ++l) layer_pool[l] = xpool[(size_t) l * E];
+        for (auto& P : pools) {
+            P.prob_cap = std::max(1, P.n_slots / 5);
+            P.data = dalloc<uint8_t>((size_t) P.n_slots * P.slot_bytes);
+            P.owner.assign(P.n_slots, -1);
+            P.used.assign(P.n_slots, 0);
+            P.sseq.assign(P.n_slots, 0);
+            P.qid.assign(P.n_slots, 0);
+            P.freq.assign(P.n_slots, 0);
+            P.prev.assign(P.n_slots, -1);
+            P.next.assign(P.n_slots, -1);
+            for (int s = 0; s < P.n_slots - 1; ++s) P.next[s] = s + 1;
+            P.free_head = P.n_slots > 0 ? 0 : -1;
+            P.n_active = P.n_slots;
+        }
+        return true;
+    }
     void init(const std::vector<Layer>& L, int dev, int n_layers_in, int E_in, size_t budget,
               const std::vector<double>* value = nullptr, int core0 = 0, int core1 = 0, int n_pass = 1) {
         n_layers = n_layers_in;
@@ -1239,7 +1291,7 @@ struct ExpertCache {
         if (!st) st = g_s;
         if (missed) *missed = false;
         const int idx = l * E + e;
-        const int p = layer_pool[l];
+        const int p = pool_of(idx);
         Pool& P = pools[p];
         if (loc[idx] >= 0) {
             const int s = loc[idx];
@@ -1330,9 +1382,10 @@ struct ExpertCache {
             }
             return;
         }
-        if (Ly.host_contig) {
-            CU(cudaMemcpyAsync(dst, Ly.host[0] + (size_t) e * Ly.slot_bytes, Ly.slot_bytes, cudaMemcpyHostToDevice, st));
-            bytes_up += Ly.slot_bytes;
+        if (Ly.host_contig) {   // (a packed kMIX expert: its own bytes, at its slot's start)
+            const size_t b = Ly.xb.empty() ? Ly.slot_bytes : Ly.xb[e];
+            CU(cudaMemcpyAsync(dst, Ly.host[0] + (size_t) e * Ly.slot_bytes, b, cudaMemcpyHostToDevice, st));
+            bytes_up += b;
             return;
         }
         size_t off = 0;
@@ -2285,17 +2338,19 @@ void run_prefill_moe(const Model& M, Layer& Ly, int l, int T, const uint16_t* xq
                 return;
             }
             gather_f16_16_kernel<<<cnt_e, 256, 0, g_s>>>(xin, X.gidx + st_e, cnt_e, C, X.ex16);
-            const bool mix = Ly.ty[0] == strata_fmt::kMIX;   // (each role part its own MixHdr: decoded apart)
+            const bool mix = Ly.ty[0] == strata_fmt::kMIX;   // (a packed expert: each part its own MixHdr)
+            const uint8_t* up = mix ? sl + Ly.mxu[e] : sl + Ly.eb[0];
+            const uint8_t* dn = mix ? sl + Ly.mxd[e] : sl + Ly.eb[0] + Ly.eb[1];
             if (Ly.ty[0] == Ly.ty[1] && !mix) {
                 k::decode_f16(Ly.ty[0], sl, (size_t) 2 * F * C, X.w16, g_s);
             } else {
                 k::decode_f16(Ly.ty[0], sl, (size_t) F * C, X.w16, g_s);
-                k::decode_f16(Ly.ty[1], sl + Ly.eb[0], (size_t) F * C, X.w16 + (size_t) F * C, g_s);
+                k::decode_f16(Ly.ty[1], up, (size_t) F * C, X.w16 + (size_t) F * C, g_s);
             }
             gemm16(X.w16, 2 * F, C, X.ex16, cnt_e, X.gu32, 2 * F);
             k::swiglu_cap_f32(X.gu32, cnt_e, F, X.sg + st_e, X.su + st_e, c.gate_cap, c.up_cap, X.h16, g_s,
-                              mix ? sl + Ly.eb[0] : nullptr);
-            k::decode_f16(Ly.ty[2], sl + Ly.eb[0] + Ly.eb[1], (size_t) C * F, X.w16, g_s);
+                              mix ? up : nullptr);
+            k::decode_f16(Ly.ty[2], dn, (size_t) C * F, X.w16, g_s);
             gemm16(X.w16, C, F, X.h16, cnt_e, X.y32, C);
             scatter_add_rows_kernel<<<cnt_e, 256, 0, g_s>>>(X.y32, X.gidx + st_e, X.wtr + st_e, C, X.tmp, C);
         };
@@ -6252,6 +6307,7 @@ int main(int argc, char** argv) {
                 kv_b += (l >= c.core0 && l < c.core1 ? c.n_pass : 1) * cap * c.KV * c.D * (g_kv_fp8 ? 1 : 2) * 2;
             }
         }
+        if (S.sv) exp_b = S.sv->compact_bytes();   // (a pack held resident: each expert packed - init_packed)
         g_dense_bytes = dense_b, g_exp_bytes = exp_b;
         size_t fr0 = 0, tot0 = 0;
         CU(cudaMemGetInfo(&fr0, &tot0));
@@ -6628,6 +6684,14 @@ int main(int argc, char** argv) {
                 Ly.eb[r] = per / nr;
                 Ly.stride[r] = per;
                 Ly.scale[r] = sc;
+            }
+            if (S.sv && ti->type == (uint32_t) strata_fmt::kMIX && pr.first != "down") {   // (packed experts)
+                Ly.xb.resize(c.E), Ly.mxu.resize(c.E), Ly.mxd.resize(c.E);
+                for (int e = 0; e < c.E; ++e) {
+                    size_t u, dn, b;
+                    S.sv->mix_layout(l, e, u, dn, b);
+                    Ly.xb[e] = (uint32_t) b, Ly.mxu[e] = (uint32_t) u, Ly.mxd[e] = (uint32_t) dn;
+                }
             }
             host_total += tensor_bytes(*ti);
             exp_jobs.push_back({l, n, pr.second});
@@ -7308,7 +7372,10 @@ int main(int argc, char** argv) {
                     off_value.assign(cnt.begin(), cnt.end());
                 std::fclose(in);
             }
-    EC.init(M.L, dual() ? -1 : d, c.n_layer, c.E, budget, off_value.empty() ? nullptr : &off_value, c.core0, c.core1, c.n_pass);
+    // (a Strata pack whose experts all stay in VRAM: each expert packed in a pool of its own size)
+    const bool packed = S.sv && !g_off_want && !dual() && !g_tp && EC.init_packed(M.L, c.n_layer, c.E, budget);
+    if (!packed)
+        EC.init(M.L, dual() ? -1 : d, c.n_layer, c.E, budget, off_value.empty() ? nullptr : &off_value, c.core0, c.core1, c.n_pass);
     if (g_off_want && d == 0) g_lend.value = off_value;
     std::printf("expert cache, GPU %d: %d slots across %zu pools (%.1f GiB); load %.1f s in all\n", d, EC.total_slots(),
                 EC.pools.size(), EC.total_bytes() / 1073741824.0, now() - t_start);
@@ -7616,9 +7683,8 @@ int main(int argc, char** argv) {
             ++EC.tick;
             for (int l = 0; l < c.n_layer; ++l) {
                 Layer& Ly = M.L[l];
-                const auto& P = EC.pools[EC.layer_pool[l]];
                 std::vector<const uint8_t*> tab(c.E);
-                for (int e = 0; e < c.E; ++e) tab[e] = P.data + (size_t) EC.loc[(size_t) l * c.E + e] * P.slot_bytes;
+                for (int e = 0; e < c.E; ++e) tab[e] = EC.where(l * c.E + e);
                 Ly.tab_blob = dalloc<const uint8_t*>(c.E);
                 CU(cudaMemcpy(Ly.tab_blob, tab.data(), (size_t) c.E * sizeof(void*), cudaMemcpyHostToDevice));
                 Ly.tab_h = tab;

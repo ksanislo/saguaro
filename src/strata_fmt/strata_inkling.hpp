@@ -40,6 +40,16 @@ public:
     const uint16_t* macaq(int l, int e) const;
     const PackExpert& expert(int l, int e) const { return pack_.experts()[layers_[l].dir[e]]; }
     int layer_type(int l) const { return layers_[l].type; }
+    // expert e of layer l as the engine holds it: its bytes (a kMIX expert packed: under its layer's slot), and a kMIX
+    // expert's up / down part offsets
+    size_t expert_bytes(int l, int e) const;
+    void mix_layout(int l, int e, size_t& up, size_t& dn, size_t& bytes) const;
+    size_t compact_bytes() const {
+        size_t t = 0;
+        for (size_t l = 0; l < layers_.size(); ++l)
+            for (int e = 0; e < E_; ++e) t += expert_bytes((int) l, e);
+        return t;
+    }
     bool source(const std::string& name, std::string& pack_name, int& transform) const;
 
 private:

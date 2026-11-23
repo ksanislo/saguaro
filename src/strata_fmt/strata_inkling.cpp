@@ -355,14 +355,39 @@ const uint16_t* InklingView::macaq(int l, int e) const {
     return (pe.dn_code >= kS2_K && pe.dn_code <= kS6_K) ? (const uint16_t*) pack_.body(pe) : nullptr;
 }
 
-// expert e's role part (0 gate_up, 1 down) as the engine holds it
+// a kMIX expert's packed layout: the up part's and the down part's offsets, its bytes
+void InklingView::mix_layout(int l, int e, size_t& up, size_t& dn, size_t& bytes) const {
+    const PackExpert& pe = pack_.experts()[layers_[l].dir[e]];
+    const size_t rg = row_bytes(pe.gu_code, C_), rd = row_bytes(pe.dn_code, F_);
+    const bool mq = pe.dn_code >= kS2_K && pe.dn_code <= kS6_K;
+    up = align16(sizeof(MixHdr) + (size_t) F_ * rg);
+    dn = align16(up + sizeof(MixHdr) + (size_t) F_ * rg + (mq ? 2 * (size_t) F_ : 0));
+    bytes = align16(dn + sizeof(MixHdr) + (size_t) C_ * rd);
+}
+
+size_t InklingView::expert_bytes(int l, int e) const {
+    const ExpLayer& L = layers_[l];
+    if (L.type != kMIX) return L.gu_bytes + L.dn_bytes;
+    size_t up, dn, b;
+    mix_layout(l, e, up, dn, b);
+    return b;
+}
+
+// expert e's role part (0 gate_up, 1 down) as the engine holds it; a kMIX expert whole with its gate_up (packed: its
+// down part where the gate part's header says), nothing with its down
 void InklingView::fill_expert(int l, int role, int e, uint8_t* dst) const {
     const ExpLayer& L = layers_[l];
     const PackExpert& pe = pack_.experts()[L.dir[e]];
     const uint8_t* body = pack_.body(pe);
     const int C = C_, F = F_;
+    size_t up = 0, dn = 0, xb = 0;
+    if (L.type == kMIX) {
+        if (role == 1) return;
+        mix_layout(l, e, up, dn, xb);
+        std::memset(dst, 0, xb);
+    }
     if (role == 0) {
-        std::memset(dst, 0, L.gu_bytes);
+        if (L.type != kMIX) std::memset(dst, 0, L.gu_bytes);
         const int code = pe.gu_code;
         // Strata's gate_up rows interleave (2 j gate, 2 j + 1 up); ours: gate's F rows, then up's
         const size_t rb = row_bytes(code, C);
@@ -372,12 +397,13 @@ void InklingView::fill_expert(int l, int role, int e, uint8_t* dst) const {
                 MixHdr hd{};
                 hd.type = (uint8_t) (code == kSF4 ? kNVFP4 : code == kMX8 ? kMX8B : 200 + code);
                 hd.rb = (uint32_t) rb;
+                if (h == 0) hd.next = (uint32_t) up, hd.aux_off = (uint32_t) dn;
                 if (h == 1 && pe.dn_code >= kS2_K && pe.dn_code <= kS6_K) {
-                    hd.aux_off = (uint32_t) (sizeof(MixHdr) + (size_t) F * L.rb_gu);
-                    std::memcpy(dst + L.part_gu + hd.aux_off, body, 2 * (size_t) F);   // MACaQ s[F] FP16
+                    hd.aux_off = (uint32_t) (sizeof(MixHdr) + (size_t) F * rb);
+                    std::memcpy(dst + up + hd.aux_off, body, 2 * (size_t) F);   // MACaQ s[F] FP16
                 }
-                std::memcpy(dst + h * L.part_gu, &hd, sizeof hd);
-                rows[h] = dst + h * L.part_gu + sizeof(MixHdr);
+                std::memcpy(dst + (h ? up : 0), &hd, sizeof hd);
+                rows[h] = dst + (h ? up : 0) + sizeof(MixHdr);
             }
         } else {
             rows[0] = dst, rows[1] = dst + (size_t) F * rb;
@@ -396,28 +422,30 @@ void InklingView::fill_expert(int l, int role, int e, uint8_t* dst) const {
             const size_t srow = (size_t) C / 256 * sk_sb_bytes(code);
             for (int r = 0; r < 2 * F; ++r) sk_run_to_sh(sk + (size_t) r * srow, code, (size_t) C, rows[r & 1] + (size_t) (r >> 1) * rb);
         }
+        if (L.type != kMIX) return;
+        dst += dn;   // (a kMIX expert: its down part now)
     } else {
         std::memset(dst, 0, L.dn_bytes);
-        const int code = pe.dn_code;
-        const size_t rb = row_bytes(code, F);
-        uint8_t* rows = dst;
-        if (L.type == kMIX) {
-            MixHdr hd{};
-            hd.type = (uint8_t) (code == kSF4 ? kNVFP4 : code == kMX8 ? kMX8B : 200 + code);
-            hd.rb = (uint32_t) rb;
-            std::memcpy(dst, &hd, sizeof hd);
-            rows = dst + sizeof(MixHdr);
-        }
-        const uint8_t* src = body + pe.dn_off;
-        if (code == kSF4) {
-            const uint8_t* sc = src + (size_t) C * (F / 2);
-            for (int r = 0; r < C; ++r) sf4_row_to_nvfp4(src + (size_t) r * (F / 2), sc + (size_t) r * (F / 16), F, rows + (size_t) r * rb);
-        } else if (code == kMX8) {
-            const uint8_t* sc = src + (size_t) C * F;
-            for (int r = 0; r < C; ++r) mx8_row_to_blocks(src + (size_t) r * F, sc + (size_t) r * (F / 32), F, rows + (size_t) r * rb);
-        } else {
-            sk_run_to_sh(src, code, (size_t) C * F, rows);   // (Strata's paired rows = the flat [C][F] run)
-        }
+    }
+    const int code = pe.dn_code;
+    const size_t rb = row_bytes(code, F);
+    uint8_t* rows = dst;
+    if (L.type == kMIX) {
+        MixHdr hd{};
+        hd.type = (uint8_t) (code == kSF4 ? kNVFP4 : code == kMX8 ? kMX8B : 200 + code);
+        hd.rb = (uint32_t) rb;
+        std::memcpy(dst, &hd, sizeof hd);
+        rows = dst + sizeof(MixHdr);
+    }
+    const uint8_t* src = body + pe.dn_off;
+    if (code == kSF4) {
+        const uint8_t* sc = src + (size_t) C * (F / 2);
+        for (int r = 0; r < C; ++r) sf4_row_to_nvfp4(src + (size_t) r * (F / 2), sc + (size_t) r * (F / 16), F, rows + (size_t) r * rb);
+    } else if (code == kMX8) {
+        const uint8_t* sc = src + (size_t) C * F;
+        for (int r = 0; r < C; ++r) mx8_row_to_blocks(src + (size_t) r * F, sc + (size_t) r * (F / 32), F, rows + (size_t) r * rb);
+    } else {
+        sk_run_to_sh(src, code, (size_t) C * F, rows);   // (Strata's paired rows = the flat [C][F] run)
     }
 }
 

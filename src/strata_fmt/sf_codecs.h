@@ -33,14 +33,16 @@ SF_HD size_t block_bytes(int t) {
     return is_sh(t) ? 4 + 16 * (size_t) sh_bits(t) : (t == kQ8F || t == kMX8B) ? 36 : t == kBF16 ? 64 : 0;
 }
 
-// a kMIX role part: this header, the rows (rb bytes each, blocks of `type`), then aux (the up part: the expert's MACaQ
-// scales s[F] as FP16 - the activation h[j] is divided by s[j] before the down product; aux_off 0: none)
+// a kMIX expert: three parts, each this header then its rows (rb bytes each, blocks of `type`), packed - an expert as
+// small as its own codecs make it.  The gate part (at the expert's start): next = the up part's offset, aux_off = the
+// down part's.  The up part: aux_off = its MACaQ scales s[F] as FP16 (from the part; 0: none) - the activation h[j]
+// is divided by s[j] before the down product.  The down part: no aux.
 struct MixHdr {
     uint8_t type;
     uint8_t pad[3];
     uint32_t rb;
     uint32_t aux_off;
-    uint32_t pad2;
+    uint32_t next;
 };
 static_assert(sizeof(MixHdr) == 16, "MixHdr");
 

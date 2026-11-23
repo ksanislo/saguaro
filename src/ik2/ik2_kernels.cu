@@ -33,6 +33,13 @@ __device__ __forceinline__ void mix_role(const uint8_t* part, int& ty, const uin
     ty = h.type, w = part + sizeof(strata_fmt::MixHdr), rb = h.rb;
     if (mq) *mq = h.aux_off ? (const uint16_t*) (part + h.aux_off) : nullptr;
 }
+// a kMIX expert (packed): its up part and its down part, from the gate part's header at the expert's start
+__device__ __forceinline__ const uint8_t* mix_up_of(const uint8_t* base) {
+    return base + ((const strata_fmt::MixHdr*) base)->next;
+}
+__device__ __forceinline__ const uint8_t* mix_dn_of(const uint8_t* base) {
+    return base + ((const strata_fmt::MixHdr*) base)->aux_off;
+}
 __device__ __forceinline__ float mix_inv(const uint16_t* mq, int r) {
     return strata_fmt::div_rn(1.0f, strata_fmt::f16_bits(mq[r]));
 }
@@ -3837,7 +3844,8 @@ __global__ void experts_gate_up_swiglu_kernel(const uint8_t* const* blob, const 
     const uint8_t* bg = blob[s];
     const uint8_t* bu = bg + eb0;
     const uint16_t* mq = nullptr;
-    if (SF_MIX && ty_gate == strata_fmt::kMIX) mix_role(bg, ty_gate, bg, rb_gate, nullptr), mix_role(bu, ty_up, bu, rb_up, &mq);
+    if (SF_MIX && ty_gate == strata_fmt::kMIX)
+        bu = mix_up_of(bg), mix_role(bg, ty_gate, bg, rb_gate, nullptr), mix_role(bu, ty_up, bu, rb_up, &mq);
     const float sgs = sg ? sg[s] : 1.0f;
     const float sus = su ? su[s] : 1.0f;
     for (int j = 0; j < ROWS; ++j) {
@@ -3869,7 +3877,7 @@ __global__ void experts_down_kernel(const uint8_t* const* blob, int ty_down, siz
     __syncthreads();
     const int warp = threadIdx.x >> 5;
     const uint8_t* w = blob[s] + off_down;
-    if (SF_MIX && ty_down == strata_fmt::kMIX) mix_role(w, ty_down, w, rb_down, nullptr);
+    if (SF_MIX && ty_down == strata_fmt::kMIX) mix_role(mix_dn_of(w - off_down), ty_down, w, rb_down, nullptr);
     for (int j = 0; j < ROWS;) {
         const int row = (blockIdx.x * WARPS + warp) * ROWS + j;
         if (row >= C) break;
@@ -4414,7 +4422,7 @@ __global__ void experts_gate_up_swiglu_g_kernel(const uint8_t* const* blob, cons
     const uint16_t* mq = nullptr;
     if (SF_MIX && ty_gate == strata_fmt::kMIX) {
         const uint8_t *bg, *bu;
-        mix_role(bl, ty_gate, bg, rb_gate, nullptr), mix_role(bl + eb0, ty_up, bu, rb_up, &mq);
+        mix_role(bl, ty_gate, bg, rb_gate, nullptr), mix_role(mix_up_of(bl), ty_up, bu, rb_up, &mq);
         bl = bg, eb0 = (size_t) (bu - bg);
     }
     const int* tok_g = tok + g * kGroupMax;
@@ -4438,7 +4446,7 @@ __global__ void experts_down_g_kernel(const uint8_t* const* blob, const int* n, 
     const int g = blockIdx.y, ng = n[g];
     if (ng <= 0) return;
     const uint8_t* w = blob[g] + off_down;
-    if (SF_MIX && ty_down == strata_fmt::kMIX) mix_role(w, ty_down, w, rb_down, nullptr);
+    if (SF_MIX && ty_down == strata_fmt::kMIX) mix_role(mix_dn_of(w - off_down), ty_down, w, rb_down, nullptr);
     const int* orow_g = orow + g * kGroupMax;
     if (ng == 1)
         experts_down_g_run<1>(w, orow_g, orow_g, ng, ty_down, h, C, F, rb_down, y);
@@ -6037,7 +6045,8 @@ __global__ void experts_gate_up_swiglu_mem_kernel(const uint8_t* const* blob, co
     const uint8_t* bg = blob[grp];
     const uint8_t* bu = bg + eb0;
     const uint16_t* mq = nullptr;
-    if (SF_MIX && ty_gate == strata_fmt::kMIX) mix_role(bg, ty_gate, bg, rb_gate, nullptr), mix_role(bu, ty_up, bu, rb_up, &mq);
+    if (SF_MIX && ty_gate == strata_fmt::kMIX)
+        bu = mix_up_of(bg), mix_role(bg, ty_gate, bg, rb_gate, nullptr), mix_role(bu, ty_up, bu, rb_up, &mq);
     for (int m = 0; m < n; ++m) {
         const int slot = row_g[grp * kGroupMax + m];
         if (m) __syncthreads();
@@ -6072,7 +6081,7 @@ __global__ void experts_down_mem_kernel(const uint8_t* const* blob, const int* n
     if (n <= 0) return;
     const int warp = threadIdx.x >> 5;
     const uint8_t* w = blob[grp] + off_down;
-    if (SF_MIX && ty_down == strata_fmt::kMIX) mix_role(w, ty_down, w, rb_down, nullptr);
+    if (SF_MIX && ty_down == strata_fmt::kMIX) mix_role(mix_dn_of(w - off_down), ty_down, w, rb_down, nullptr);
     for (int m = 0; m < n; ++m) {
         const int slot = row_g[grp * kGroupMax + m];
         if (m) __syncthreads();
