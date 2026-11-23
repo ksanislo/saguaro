@@ -223,7 +223,7 @@ bool host_to16(uint16_t* w, size_t n, size_t& flushed) {
         std::memcpy(&v, &u, 4);
         const __half hv = __float2half_rn(v);
         if (v != 0.0f && __half2float(hv) == 0.0f) ++flushed;
-        w[i] = __half_as_ushort(hv);
+        std::memcpy(&w[i], &hv, 2);   // (__half_as_ushort is device-only in CUDA 12.0)
     }
     return true;
 }

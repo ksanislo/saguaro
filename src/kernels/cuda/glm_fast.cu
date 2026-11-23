@@ -6722,7 +6722,7 @@ __global__ void moe_pf_wait_kernel(const unsigned int* need, const unsigned int*
     if (n == 0u) return;
     for (long long i = 0; i < (1ll << 27); ++i) {
         if ((int) (*(volatile const unsigned int*) flag - n) >= 0) return;
-#if !defined(STRATA_USE_HIP)
+#if !defined(STRATA_USE_HIP) && (!defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 700)   // (no __nanosleep below Volta)
         __nanosleep(200);
 #endif
     }
