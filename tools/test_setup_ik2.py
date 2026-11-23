@@ -670,6 +670,8 @@ class StrataPacks(unittest.TestCase):
                           ("strata-sq-10", "strata-sq-10")):
             self.assertEqual(Q.resolve(name), ("ik2", key), name)
         self.assertEqual(Q.config_stem("ik2", "strata-sq-15"), "maya-inkling-2-mini-sq-15")
+        self.assertEqual(maya.ik2_config_path(Path("Inkling-2-Mini-SQ-15.strata")).name,
+                         "maya-inkling-2-mini-sq-15.json")   # (a pack: its own config, as the Models page names it)
         self.assertEqual(Q.shown("ik2", "strata-sq-15"), "Inkling 2 Mini · Strata SQ-15")
 
     def test_table(self):
