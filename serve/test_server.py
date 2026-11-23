@@ -10,6 +10,7 @@ import os
 import random
 import string
 import sys
+import io
 import threading
 import time
 import unittest
@@ -2323,6 +2324,45 @@ class VisionRoomOnDemand(unittest.TestCase):
             self.assertNotIn("SAGUARO_IK2_DRAFT_IDS", env)          # (no tokenizer: the engine says it did not measure)
             self.assertNotIn("SAGUARO_IK2_DRAFT_FILE", child_env(dict(cfg, args=cfg["args"][:2])))
 
+    def test_ik2_run_files_stay_out_of_the_model_folder_and_git(self):
+        """The drafting requests and AMD's GEMM picks go to the install's var/ (not data/ in git, not the model
+        folder); an lt-picks.txt an older version left beside the GGUF is taken over."""
+        import tempfile
+        from unittest import mock
+        import serve.server as S
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            (d / "m").mkdir()
+            gguf = d / "m" / "Inkling-2-Mini-UD-Q4_K_XL.gguf"
+            (d / "m" / "lt-picks.txt").write_text("old picks\n", encoding="utf-8")
+            tok = d / "tok"
+            tok.mkdir()
+            (tok / "vocab.json").write_text("{}", encoding="utf-8")
+            (tok / "chat_template.jinja").write_text("x", encoding="utf-8")
+            cfg = {"exe": "saguaro-ik2", "backend": "hip", "tokenizer": str(tok),
+                   "args": ["--model", str(gguf), "--drafting", "auto"]}
+
+            class Tok:
+                def encode(self, text, parse_special=False):
+                    return [1, 2]
+
+            class Chat:
+                def __init__(self, _):
+                    pass
+
+                def render(self, *a, **k):
+                    return "x"
+            with mock.patch.object(S, "VAR_DIR", d / "var"), \
+                    mock.patch("serve.server.models.family", return_value="ik2"), \
+                    mock.patch("strata_tokenizer.Tokenizer.from_dir", return_value=Tok()), \
+                    mock.patch("serve.frontend.ChatTemplate", Chat):
+                env = S.child_env(cfg)
+            self.assertEqual(Path(env["SAGUARO_IK2_DRAFT_IDS"]).parent, d / "var")
+            lt = Path(env["SAGUARO_IK2_LT_STORE"])
+            self.assertEqual((lt.parent, lt.read_text(encoding="utf-8")), (d / "var", "old picks\n"))
+        ignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
+        self.assertIn("/var/", ignore)
+
 
 class LifecycleEngine(MockEngine):
     """The mock engine with StrataEngine's lifecycle: alive / close (QUIT) / restart, counted."""
@@ -3004,6 +3044,54 @@ class EngineEndTests(unittest.TestCase):
         self.assertIn("a GPU took a fault inside a kernel", n)
         self.assertIn("the engine ends (exit 3)", n)
         self.assertNotIn("RAM", n)
+
+    def test_a_gpu_out_of_memory_in_a_request_is_said_as_such(self):
+        """saguaro-ik2 (mortar, 2026-11-22): a cudaMalloc out of memory in a 10K prompt ends the request with an ERR
+        and the engine with exit 4 - not "running out of RAM"; Saguaro's own stall watchdog is not RAM either."""
+        n = self.note("saguaro ik2: cudaMalloc(&p, ...): out of memory (src/ik2/ik2_main.cu:380)\n"
+                      "saguaro ik2 serve: the GPU ran out of memory during this request (a smaller --chunk, context "
+                      "or prompt needs less; the engine starts again for the next request)\n", returncode=4)
+        self.assertIn("ran out of GPU memory", n)
+        self.assertNotIn("RAM", n)
+        from types import SimpleNamespace
+        e = StrataEngine.__new__(StrataEngine)
+        e.log_path, e.proc, e.stalled = None, SimpleNamespace(returncode=-9), True
+        self.assertIn("stopped making progress", e.death_note())
+        self.assertNotIn("RAM", e.death_note())
+
+    def test_the_engines_err_reaches_the_request(self):
+        """An ERR line (saguaro-ik2's out of memory: a blank line, ERR, DONE, then its exit) fails that request with
+        the engine's words; the DONE after it is taken (not left for the next request)."""
+        import queue
+        e = StrataEngine.__new__(StrataEngine)
+        e.lines, e.info, e.can_stop, e.multi = queue.Queue(), {"engine_kind": "ik2"}, True, 0
+        e.proc = type("P", (), {"stdin": io.StringIO(), "poll": lambda self: None})()
+        for line in ("", "ERR the GPU ran out of memory during this request (a smaller --chunk, context or prompt "
+                     "needs less; the engine starts again for the next request)", "DONE 0 0 0 0 cancel 0 0 0 0 0", None):
+            e.lines.put(line)
+        with self.assertRaises(ValueError) as c:
+            list(e.generate([1, 2, 3], 10, {}, threading.Event()))
+        self.assertIn("ran out of memory", str(c.exception))
+        self.assertIsNone(e.lines.get_nowait())          # (the DONE was taken; the engine's end is next)
+
+    def test_a_stop_after_the_engine_ended_is_quiet(self):
+        """Ctrl+C reaches the engine too: QUIT then finds its stdin closed - not "did not end within 50 s"."""
+        import contextlib
+        from types import SimpleNamespace
+
+        class Gone:
+            def write(self, _):
+                raise BrokenPipeError(32, "Broken pipe")
+
+            def flush(self):
+                pass
+        e = StrataEngine.__new__(StrataEngine)
+        e.can_stop, e.info, e.lines = True, {}, None
+        e.proc = SimpleNamespace(stdin=Gone(), poll=lambda: 0, kill=lambda: None)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            e.close()
+        self.assertNotIn("did not end within", out.getvalue())
 
     def test_end_ahead_of_done_marks_the_engine_ended_before_the_request_ends(self):
         import io

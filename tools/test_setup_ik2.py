@@ -194,7 +194,7 @@ class Fit(unittest.TestCase):
         self.assertIn("Volta", F.drafting_off_reason("75", 24, 65536, "fp8"))
         self.assertIn("offload", F.drafting_off_reason("86", 8, 65536, "fp8"))
         self.assertIsNone(F.drafting_off_reason("86", 24, 65536, "fp8"))
-        self.assertIn("offload", F.drafting_off_reason("gfx1201", 16, 32768, "fp8", hip=True))
+        self.assertIn("offload", F.drafting_off_reason("gfx1201", 16, 32768, "fp8", hip=True))   # (UD-Q4_K_XL)
         self.assertIsNone(F.drafting_off_reason("gfx1100", 24, 32768, "fp8", hip=True))
         self.assertTrue(F.draft_fits(24, 131072, "fp8"))
         self.assertFalse(F.draft_fits(24, 262144, "fp8"))
@@ -214,6 +214,24 @@ class Fit(unittest.TestCase):
         q = F.amd_layout(amd("gfx1201", 15.9), 11.45)
         self.assertEqual((q["path"], q["args"][3]), ("resident", "1024"))
         self.assertEqual(F.amd_layout(amd("gfx1100", 24))["env"], {})
+
+    def test_amd_one_source(self):
+        """amd_layout, verdict and drafting_off_reason agree (all plan()'s): the one-T4 quant on a 16 GB AMD card is
+        resident in each - no "84 % on the card" or "offload path" beside "every expert in its memory"; the RX 9070 XT
+        layouts are the measured ones; drafting runs where an AMD card holds every expert."""
+        for vram, ex in ((15.9, 14.7), (15.9, 11.45), (24.0, 14.7), (24.0, 11.45), (16.0, 13.5)):
+            lay = F.amd_layout(amd("gfx1201", vram), ex)
+            word, _ = F.verdict(vram, 92, 32768, F.DEFAULT_KV, True, ex)
+            off = F.drafting_off_reason(None, vram, 32768, F.DEFAULT_KV, True, ex)
+            self.assertEqual(lay["resident"], word == "fast", (vram, ex))
+            self.assertEqual(lay["resident"], off is None, (vram, ex))
+            self.assertEqual(lay["args"][3], "1024" if lay["resident"] else "2048")
+        self.assertIn("RX 9070 XT", F.speeds(F.amd_layout(amd("gfx1201", 15.9))))
+        self.assertIn("83 tok/s", F.speeds(F.amd_layout(amd("gfx1201", 15.9), 11.45)))
+        self.assertEqual(F.speeds(F.amd_layout(amd("gfx1100", 24))), "")   # (not measured there)
+        self.assertIsNone(F.drafting_off_reason(None, 24, 32768, F.DEFAULT_KV, True))
+        self.assertTrue(F.draft_fits(24, 32768, F.DEFAULT_KV, F.EXPERTS_GIB, True))
+        self.assertFalse(F.draft_fits(15.9, 32768, F.DEFAULT_KV, 11.45, True))
 
     def test_the_flags_are_the_engines_own(self):
         """saguaro-ik2 stops at a flag it does not know: every flag a layout writes is one its parser reads."""
@@ -400,6 +418,46 @@ class Steps(unittest.TestCase):
         path, cfg = self.write({"gpus": [t4(2), t4(3)], "backend": "cuda"}, gguf, tok, 131072, d)
         self.assertEqual(cfg["args"][cfg["args"].index("--chunk") + 1], "4096")
 
+    def write_amd(self, gguf, tok, d, ex):
+        pc = {"gpus": [amd("gfx1201", 15.9)], "backend": "hip"}
+        with patch.object(maya, "ROOT", self.root), \
+                patch.object(maya, "write_run_script", lambda p, port: p.with_name("run-" + p.stem + ".sh")):
+            path = maya.write_config_ik2(args(backend="hip", drafting="off"), pc, {}, gguf, tok, 32768,
+                                         self.root / "models", d, F.amd_layout(pc["gpus"][0], ex))
+        return path, json.loads(path.read_text(encoding="utf-8"))
+
+    def test_a_quant_switch_follows_the_layout(self):
+        """The setup again with another quant on the same card (mortar, 2026-11-22): UD-Q4_K_XL (--chunk 2048) -> the
+        one-T4 quant (1024: a kept 2048 ran the card out of memory on a 10K prompt) -> UD-Q4_K_XL (2048); a --chunk the
+        user changed stays; a config from an older setup (no layout_args) gets the layout's, said."""
+        d, gguf = self.files()
+        tok = self.tok(d)
+        chunk = lambda cfg: cfg["args"][cfg["args"].index("--chunk") + 1]   # noqa: E731
+        path, cfg = self.write_amd(gguf, tok, d, 14.7)
+        self.assertEqual((chunk(cfg), cfg["installer"]["layout_args"][3]), ("2048", "2048"))
+        path, cfg = self.write_amd(gguf, tok, d, 11.45)
+        self.assertEqual(chunk(cfg), "1024")
+        path, cfg = self.write_amd(gguf, tok, d, 14.7)
+        self.assertEqual(chunk(cfg), "2048")
+        cfg["args"][cfg["args"].index("--chunk") + 1] = "512"          # (by hand: stays)
+        path.write_text(json.dumps(cfg), encoding="utf-8")
+        path, cfg = self.write_amd(gguf, tok, d, 11.45)
+        self.assertEqual(chunk(cfg), "512")
+        cfg["args"][cfg["args"].index("--chunk") + 1] = "2048"         # (an older setup's config: worked out again)
+        del cfg["installer"]["layout_args"]
+        path.write_text(json.dumps(cfg), encoding="utf-8")
+        said = []
+        with patch.object(maya, "ok", lambda m: said.append(m)):
+            path, cfg = self.write_amd(gguf, tok, d, 11.45)
+        self.assertEqual(chunk(cfg), "1024")
+        self.assertTrue(any("worked out again" in m for m in said), said)
+        # (the Models page's record of what the setup wrote counts as layout_args)
+        cfg["args"][cfg["args"].index("--chunk") + 1] = "4096"
+        cfg["installer"] = {"as_set_up": {"prefill_chunk": 1024, "cpu_threads": 8}}
+        path.write_text(json.dumps(cfg), encoding="utf-8")
+        path, cfg = self.write_amd(gguf, tok, d, 14.7)
+        self.assertEqual(chunk(cfg), "4096")
+
     def test_vision_step(self):
         d, gguf = self.files()
         va = lambda **kw: args(**dict(dict(rebuild=False, download_model=False, yes=False), **kw))   # noqa: E731
@@ -477,7 +535,8 @@ class Steps(unittest.TestCase):
 
     def test_set_up_on_a_16_gb_amd_card(self):
         """An RX 9070 XT (16 GB, gfx1201) with a GGUF of your own whose experts fit (our one-T4 quant): resident with
-        1 GiB kept beside the experts; drafting off (the setup's sums are the offload path's at 16 GB)."""
+        1 GiB kept beside the experts and --chunk 1024, as the engine runs it; drafting not turned off (the resident
+        path), but the drafter's room does not fit at 32K, so it is not downloaded (the prompt lookup drafts)."""
         d = self.root / "own"
         d.mkdir()
         own = d / "x.gguf"
@@ -489,16 +548,25 @@ class Steps(unittest.TestCase):
                   stub("ik2_tokenizer_step", d), stub("ik2_vision_step", None), patch.object(maya, "IK2_EXE", own),
                   patch.object(maya, "mem_gb", return_value=(96.0, 80.0)), patch.object(maya, "WIN", False),
                   patch.object(maya, "choose_context", lambda a, prev, opts, rec: rec),
-                  patch.object(maya, "ik2_drafter_step", lambda *a, **k: d / "mtp.safetensors"),
+                  patch.object(maya, "offer_download", side_effect=AssertionError("no drafter download")),
                   patch.object(maya, "write_config_ik2", lambda a, *r: seen.update(drafting=a.drafting, lay=r[7],
                                                                                     drafter=r[-1]))]
         for p in common:
             p.start()
             self.addCleanup(p.stop)
-        with patch.object(F, "experts_gib_of", lambda path: 11.45):
+        said = []
+        with patch.object(F, "experts_gib_of", lambda path: 11.45), \
+                patch.object(maya, "ok", lambda m: said.append(m)), patch.object(maya, "warn", lambda m: said.append(m)):
             maya.set_up_ik2(args(backend="hip", model_dir=str(d)), {})
-        self.assertEqual((seen["lay"]["env"], seen["lay"]["path"], seen["drafting"], seen["drafter"]),
-                         ({"SAGUARO_IK2_RESERVE_MB": "1024"}, "resident", "off", None))
+        self.assertEqual((seen["lay"]["env"], seen["lay"]["path"], seen["lay"]["args"][3], seen["drafter"]),
+                         ({"SAGUARO_IK2_RESERVE_MB": "1024"}, "resident", "1024", None))
+        self.assertNotEqual(seen["drafting"], "off")
+        text = "\n".join(said)
+        self.assertIn("every expert in its memory", text)
+        self.assertIn("measured on an RX 9070 XT", text)
+        self.assertIn("does not fit beside the model", text)
+        for wrong in ("offload path", "pinned in RAM", "not measured on this kind of card"):
+            self.assertNotIn(wrong, text)
 
     def test_bench_prompt(self):
         p = maya.bench_chat("ik2", self.root)("Hello?")

@@ -54,6 +54,7 @@ import os
 import queue
 import socket
 import re
+import shutil
 import subprocess
 import struct
 import sys
@@ -88,6 +89,8 @@ HY4_MEASURE_DOCS = ("docs/SETTINGS.md", "README.md")      # (the text its first 
 HY4_MEASURE_CHARS = 200_000
 # saguaro-ik2's --drafting auto: this PC's choice (SAGUARO_IK2_DRAFT_FILE) and the requests it is timed on
 IK2_DRAFT_FILE = ROOT / "data" / "ik2-drafting.txt"
+# what the engines write while they run (not in git): saguaro-ik2's drafting requests, its AMD GEMM picks
+VAR_DIR = ROOT / "var"
 IK2_DRAFT_TOOL = {"type": "function", "function": {
     "name": "get_weather", "description": "The current weather in a city.",
     "parameters": {"type": "object", "properties": {"city": {"type": "string", "description": "The city's name."}},
@@ -162,7 +165,7 @@ from serve.frontend import (CALL_END, CALL_START, MINIMAX_NS, ChatTemplate, Even
                             EFFORT_WORDS, QWEN_EFFORT, anthropic_to_messages, deepseek_effort_kwargs, deepseek_images,
                             effort_kwargs,
                             effort_level, effort_name, literal_tags, mark_literals, media_of, openai_to_messages,
-                            unmark_literals)
+                            unmark_literals, INK_CALL, INK_END, INK_EOS, INK_MODEL, INK_OTHER_TEXT, INK_TEXT)
 from serve.mcp import McpCancelled, hub_from_config  # noqa: E402
 from serve.responses import (ResponseStore, input_items, input_page, normalize_request,  # noqa: E402
                              new_response, response_collect, response_events)
@@ -1351,7 +1354,8 @@ class StrataEngine:
 
     def death_note(self) -> str:
         """Why the engine most likely ended, from the end of its log: its own watchdog (issue #29), a GPU's fault it
-        caught after a request (exit 3), else RAM."""
+        caught after a request (exit 3), a GPU out of memory in a request
+        (saguaro-ik2: exit 4), Saguaro's stall watchdog, else RAM."""
         tail = ""
         try:
             with open(self.log_path, "rb") as f:
@@ -1364,11 +1368,19 @@ class StrataEngine:
             if "issue #29" in line:
                 return ("The engine stopped itself because it had stopped making progress - a hang it caught. Its log "
                         "line: " + line.strip() + " - please report it at github.com/ksanislo/saguaro/issues.")
+            if "ran out of memory during this request" in line:
+                return ("The engine ran out of GPU memory during the request and ended (its GPU state is not known "
+                        "after that); a fresh engine starts with the next request. A smaller --chunk, context or prompt "
+                        "needs less memory. Its log line: " + line.strip())
             if "a GPU's state is unknown" in line:
                 return ("The engine stopped itself because a GPU took a fault inside a kernel (an illegal address or "
                         "the like), after which that GPU's state is lost; a fresh engine starts with the next request. "
                         "Its log line: " + line.strip() + " - the lines above it name the GPU and the error; please "
                         "report it at github.com/ksanislo/saguaro/issues.")
+        if getattr(self, "stalled", False):         # (Saguaro's own stall watchdog ended it: _end)
+            return ("Saguaro ended it because it had stopped making progress (no output and no CPU, disk or GPU work); "
+                    "the lines at the end of its log say where it was - please report it at "
+                    "github.com/ksanislo/saguaro/issues.")
         if getattr(getattr(self, "proc", None), "returncode", None) in (-2, -15):   # (#539: read as a lack of RAM)
             return ("A signal from outside ended it (SIGINT or SIGTERM: Ctrl+C, kill, a service manager), not a lack "
                     "of RAM.")
@@ -1413,7 +1425,7 @@ class StrataEngine:
     def _end(self, why: str):
         """End a stuck engine now; the next request starts it again (Service.run)."""
         print(f"[saguaro] {why}", flush=True)
-        self.ended = True
+        self.ended = self.stalled = True
         try:
             self.proc.kill()
             self.proc.wait(timeout=20)
@@ -1446,7 +1458,7 @@ class StrataEngine:
         # trigger, the silent wait the bug).
         rids, routes, routes_lock, sent = self._rids, self._routes, self._routes_lock, self._sent
         ctx = self.max_context
-        self.ended = False
+        self.ended = self.stalled = False
         try:
             self.__init__(*self.spawn)
         except Exception:
@@ -2061,9 +2073,13 @@ class StrataEngine:
                 if line.startswith("NOTE "):
                     print("[saguaro] " + line[5:].strip(), flush=True)
             self.proc.wait(timeout=max(0.1, end - time.monotonic()))
-        except Exception:
+        except subprocess.TimeoutExpired:
             print(f"[saguaro] the engine did not end within {wait:.0f} s: stopped", flush=True)
             self.proc.kill()
+        except Exception as e:  # noqa: BLE001 - its stdin gone (it had ended already: Ctrl+C reaches it too) or the like
+            if self.proc.poll() is None:
+                print(f"[saguaro] the engine could not be told to stop ({type(e).__name__}): stopped", flush=True)
+                self.proc.kill()
 
 
 class Vision:
@@ -2443,7 +2459,7 @@ def ik2_draft_ids(cfg: dict) -> Path | None:
         tag = hashlib.md5(vocab.read_bytes() + tpl.read_bytes() + repr(IK2_DRAFT_QS).encode()).hexdigest()[:10]
     except OSError:
         return None
-    path = ROOT / "data" / f"ik2-draft-ids-{tag}.txt"
+    path = VAR_DIR / f"ik2-draft-ids-{tag}.txt"
     if path.is_file():
         return path
     try:
@@ -2464,6 +2480,25 @@ def ik2_draft_ids(cfg: dict) -> Path | None:
         return path
     except Exception:  # noqa: BLE001 - none: the engine drafts without measuring
         return None
+
+
+def ik2_lt_store(cfg: dict) -> Path | None:
+    """saguaro-ik2's measured hipBLASLt picks (AMD, SAGUARO_IK2_LT_STORE): var/<GGUF's name>-lt-picks.txt, so the
+    model folder is not written at run time; an lt-picks.txt an earlier version left beside the GGUF is copied in
+    first.  None: no var folder (the engine then keeps them beside the GGUF, as before)."""
+    args = cfg.get("args") or []
+    if "--model" not in args[:-1]:
+        return None
+    gguf = Path(args[args.index("--model") + 1])
+    path = VAR_DIR / f"{gguf.stem}-lt-picks.txt"
+    try:
+        VAR_DIR.mkdir(parents=True, exist_ok=True)
+        old = gguf.parent / "lt-picks.txt"
+        if not path.exists() and old.is_file():
+            shutil.copyfile(old, path)
+    except OSError:
+        return None
+    return path
 
 
 def child_env(cfg: dict) -> dict:
@@ -2498,6 +2533,10 @@ def child_env(cfg: dict) -> dict:
             ids = ik2_draft_ids(cfg)
             if ids is not None:
                 env["SAGUARO_IK2_DRAFT_IDS"] = str(ids)
+    if models.family(cfg) == "ik2" and cfg.get("backend") == "hip" and "SAGUARO_IK2_LT_STORE" not in env:
+        lt = ik2_lt_store(cfg)
+        if lt is not None:
+            env["SAGUARO_IK2_LT_STORE"] = str(lt)
     dirs = [d for d in cfg.get("lib_dirs") or [] if Path(d).is_dir()]
     if dirs:
         var = "PATH" if os.name == "nt" else "LD_LIBRARY_PATH"
@@ -2822,6 +2861,13 @@ class Service:
             (_special_ids("</think%s>" % template.hy4_tag) or _special_ids("</think>")) \
             if getattr(template, "hy4", False) else _special_ids("</think>")
         self.think_end_id = end[0] if end else None
+        # Inkling 2 leaves its reasoning at segment marks, not </think>: <|end_message|><|message_model|><|content_text|>
+        # opens the answer (the close Service.run puts there for a tiny max_tokens); its other marks end it too
+        ink = getattr(template, "inkling", False)
+        close = [i for m in (INK_END, INK_MODEL, INK_TEXT) for i in _special_ids(m)] if ink else []
+        self.ink_close = close if len(close) == 3 else None
+        self.ink_marks = [i for m in (INK_TEXT, INK_CALL, INK_END, INK_EOS) + INK_OTHER_TEXT
+                          for i in _special_ids(m)] if ink else []
         # the tokens the engine itself ends a request at, whatever the server does (see THINK_RESTARTS): a pack
         # tokenizer that names its "eos" (DeepSeek's, MiniMax's: their engines' --eos default) ends there only; the
         # GLM/Qwen engine ends at every turn-end token of its vocabulary (GLM: <|endoftext|>, <|user|>,
@@ -5034,6 +5080,9 @@ class Service:
         # reasoning, the first token that ends one is followed by the end of the thinking - this call stops there and
         # the next goes on with it (the engine's own close, its think_budget, comes later, for reasoning with none)
         soft, think_end = (sampling or {}).get("_think_soft"), (sampling or {}).get("_think_end")
+        hard = (sampling or {}).get("_think_hard")      # (no engine close: here at the latest - Inkling 2)
+        close = list((sampling or {}).get("_think_close") or [think_end])   # (what closes it: Inkling 2's three marks)
+        leaves = set((sampling or {}).get("_think_marks") or ())   # (other tokens that end the reasoning)
         soft_text = self._guard_piece() if isinstance(soft, int) and isinstance(think_end, int) else None
         tail_text = ""
         read_s = fair_read_seconds() if getattr(self.engine, "multi", 0) else 0.0
@@ -5070,11 +5119,13 @@ class Service:
                         continue
                     produced.append(t)
                     if soft_text is not None:
-                        if t == think_end:
+                        if t == think_end or t in leaves:
                             soft_text = None            # (closed: by the model, or the engine's budget)
                         else:
                             tail_text = (tail_text + (soft_text(t) or ""))[-16:]
-                            if len(produced) >= soft and think_boundary(tail_text) and len(produced) < max_new - 1:
+                            if len(produced) >= soft and (think_boundary(tail_text) or
+                                                          isinstance(hard, int) and len(produced) >= hard) \
+                                    and len(produced) < max_new - len(close):
                                 closed = True
                     if guard is not None:
                         got += 1
@@ -5111,14 +5162,15 @@ class Service:
                 if fresh is not None and fresh is not last0:
                     segments.append(fresh)
             if closed:                                  # the budget, at a sentence's or line's end: the thinking ends
-                produced.append(think_end)
+                produced.extend(close)
                 sent = len(produced)
                 soft_text = None
-                yield think_end
+                yield from close
                 if guard is not None:
                     guard.thinking_closed(produced)
-                print(f"[saguaro] thinking reached its budget ({soft} tokens): closed at the end of a sentence or line, "
-                      f"{len(produced) - 1 - soft} tokens later; answering", flush=True)
+                print(f"[saguaro] thinking reached its budget ({soft} tokens): closed "
+                      f"{'at the end of a sentence or line, ' if think_boundary(tail_text) else ''}"
+                      f"{len(produced) - len(close) - soft} tokens later; answering", flush=True)
                 if cancel.is_set() or self.stopping:
                     break
                 cur, left = list(ids) + produced, max_new - len(produced)
@@ -5360,6 +5412,16 @@ class Service:
                     grace = max(0, min(THINK_GRACE, room))
                     if grace > 0:
                         soft, think_budget = think_budget, think_budget + grace
+                if bool(thinking) and self.ink_close and max_new and int(max_new) <= THINK_TINY_LIMIT:
+                    # Inkling 2 (saguaro-ik2 closes no thinking itself): the same reserve for the answer as above -
+                    # the server closes the reasoning at a sentence's or line's end past it, at the latest halfway
+                    # through what is left, and the answer follows
+                    reserve_floor = max(0, int(os.environ.get("SAGUARO_GLM_THINK_RESERVE", "1024") or 1024))
+                    reserve = max(int(max_new) // 4, min(reserve_floor, max(1, int(max_new) // 2)))
+                    ink_soft = max(1, int(max_new) - reserve - 1)
+                    sampling = {**(sampling or {}), "_think_soft": ink_soft, "_think_end": self.ink_close[-1],
+                                "_think_close": self.ink_close, "_think_marks": self.ink_marks,
+                                "_think_hard": ink_soft + max(0, (int(max_new) - ink_soft - 3) // 2)}
                 if budgeted:
                     sampling = {**(sampling or {}), "_think_budget": think_budget, "_think_end": self.think_end_id}
                     if soft is not None:
@@ -5515,7 +5577,8 @@ class Service:
                                 if answered and thinks and self.think_end_id is not None:
                                     ids_k, thinks = [*ids_k, self.think_end_id], False
                                     sampling = {k: v for k, v in (sampling or {}).items()
-                                                if k not in ("_think_budget", "_think_soft", "_think_end", "_think_stops")}
+                                                if k not in ("_think_budget", "_think_soft", "_think_end", "_think_stops",
+                                                             "_think_hard", "_think_marks", "_think_close")}
                                 steer = self.tok.encode(loop_guard.keep_steer(kept)) if thinks else []
                                 seg["next"] = list(seg["prompt"]) + seg["ids"] + ids_k + steer
                                 sampling = loop_guard.block_sampling(sampling, kept)

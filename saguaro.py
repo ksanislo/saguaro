@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Saguaro - set up and start GLM-5.3-Flash, DeepSeek-V4.1-Flash-1017, MiniMax-M3.1-Flash, Qwen-3.8-Flash-Next
 (CYBER-FROST), Hy4-Flash or Inkling 2 Mini on your own GPU(s).  Qwen-3.8-Flash-Next (CYBER-FROST): CUDA from V100 on and HIP, Linux and Windows, pictures too.
-Hy4-Flash (--model hy4-flash-maya-s; four cards) and Inkling 2 Mini (--model inkling-2-mini; one or two 16 GB cards):
-NVIDIA on Linux, each on its own engine (build/saguaro-hy4, build/saguaro-ik2) - docs/HY4-FLASH.md, docs/INKLING2-MINI.md.
+Hy4-Flash (--model hy4-flash-maya-s; four cards): NVIDIA on Linux.  Inkling 2 Mini (--model inkling-2-mini; one or two
+16 GB cards): Linux, NVIDIA from V100 / Tesla T4 on, or one AMD RDNA 3 / 4 GPU of 16 GB or more (the experts the card
+does not hold in RAM: the offload path).  Each on its own engine (build/saguaro-hy4, build/saguaro-ik2) -
+docs/HY4-FLASH.md, docs/INKLING2-MINI.md.
 GLM-5.3-Flash: CUDA on Linux and Windows (experimental); HIP: experimental gfx1100/gfx1201/gfx1151 (gfx1030: not
 validated), Linux and Windows, pictures too; Metal: experimental, macOS on Apple Silicon, GLM-5.3-Flash only, text
 only, one conversation at a time.  DeepSeek-V4.1-Flash-1017 and MiniMax-M3.1-Flash: CUDA from V100 on, Linux and
@@ -727,7 +729,7 @@ HY4_MODEL_NAME = "hy4-flash"
 # Inkling 2 Mini (thinkingmachines' Inkling-2-Mini, 26B, a looped MoE) on its own engine, build/saguaro-ik2 (upstream
 # Maya v1.1.74's): unsloth's UD-Q4_K_XL GGUF read in place (tools/ik2/download.json) with the model's own chat template;
 # Linux, one or two NVIDIA cards from V100 / Tesla T4 on with 8 GB or more (the experts a card does not hold stay in
-# RAM: the offload path), or one AMD RDNA 3 / 3.5 / 4 GPU that holds every expert of the file (ik2_fit.py)
+# RAM: the offload path), or one AMD RDNA 3 / 3.5 / 4 GPU of 16 GB or more (the same: ik2_fit.py)
 IK2 = Q.MODEL["ik2"]                               # "Inkling-2-Mini"
 IK2_SHOWN = Q.SHOWN["ik2"]
 IK2_EXE = BUILD / "saguaro-ik2"
@@ -7673,13 +7675,19 @@ def ik2_drafting(a) -> str:
     return how if how in ("on", "off") else "auto"
 
 
-def ik2_drafter_step(a, d: Path, vram: float, ctx: int, kv: str, experts_gib: float = IK2F.EXPERTS_GIB) -> Path | None:
+def ik2_drafter_step(a, d: Path, vram: float, ctx: int, kv: str, experts_gib: float = IK2F.EXPERTS_GIB,
+                     hip: bool = False) -> Path | None:
     """The drafter beside the GGUF (in d), downloaded when it is not there and sha256-checked, or None: drafting off
-    (--drafting off), or not downloaded - the engine then drafts with the prompt lookup alone.  Where the drafter's
-    room does not fit beside the model at this context the engine leaves it out at its start: said."""
+    (--drafting off), its room does not fit beside the model at this context (ik2_fit.draft_fits: not downloaded, the
+    engine would leave it out), or not downloaded - the engine then drafts with the prompt lookup alone."""
     how = ik2_drafting(a)
     if how == "off":
         ok("drafting: off (--drafting off) - every token from a full model step")
+        return None
+    if not IK2F.draft_fits(vram, ctx, kv, experts_gib, hip):
+        ok(f"drafting: {how}, with the prompt lookup alone - at {context_label(ctx)} the drafter's "
+           f"{IK2F.draft_gib(ctx):.1f} GB does not fit beside the model on this card (not downloaded; a smaller "
+           "context or a bigger card leaves it room)")
         return None
     m = ik2_drafter_model()
     if m is None:
@@ -7696,9 +7704,6 @@ def ik2_drafter_step(a, d: Path, vram: float, ctx: int, kv: str, experts_gib: fl
     ok(f"drafting: {how} - {files[0].name} ({m['download_gb']:.1f} GB) and the prompt lookup; "
        + ("measured once at the engine's first start on this PC, the faster kept - the answers are the same with "
           "drafting or without" if how == "auto" else "on (--drafting on), not measured"))
-    if not IK2F.draft_fits(vram, ctx, kv, experts_gib):
-        warn(f"at {context_label(ctx)} the drafter's {IK2F.draft_gib(ctx):.1f} GB does not fit beside the model on this "
-             "card: the engine leaves it out (the prompt lookup still drafts) - a smaller context leaves it room")
     return files[0]
 
 
@@ -7714,12 +7719,35 @@ def ik2_draft_forget() -> None:
         warn(f"{path} could not be removed ({e}): delete it by hand to measure the drafting again")
 
 
+IK2_LAYOUT_FLAGS = ("--chunk", "--threads")           # (the layout's flags a user may change: ik2_user_flags)
+
+
+def ik2_user_flags(old: dict) -> tuple:
+    """The layout flags the config before has as the user set them (by hand or on the Models page): those whose value
+    differs from what the setup wrote there (installer.layout_args, else the Models page's as_set_up).  Every other
+    layout flag follows the layout worked out now - a --chunk of another quant or card is not carried over.  A
+    config that says neither (an older setup's): none - all are worked out again, and the setup says so."""
+    args, inst = old.get("args") or [], old.get("installer") or {}
+    wrote = inst.get("layout_args")
+    if wrote is None and isinstance(inst.get("as_set_up"), dict):
+        s = inst["as_set_up"]
+        wrote = [x for f, k in (("--chunk", "prefill_chunk"), ("--threads", "cpu_threads")) if s.get(k) is not None
+                 for x in (f, str(s[k]))]
+    if wrote is None:
+        if any(f in args[:-1] for f in IK2_LAYOUT_FLAGS):
+            ok("the layout's flags (" + ", ".join(IK2_LAYOUT_FLAGS) + ") are worked out again for these cards and this "
+               "file - the config before does not say which of them you set yourself")
+        return ()
+    return tuple(f for f in IK2_LAYOUT_FLAGS if f in args[:-1] and str(flag_value(args, f)) != str(flag_value(wrote, f)))
+
+
 def write_config_ik2(a, pc: dict, meta: dict, gguf: Path, tok: Path, ctx: int, models: Path, d: Path, lay: dict,
                      vision: dict | None = None, drafter: Path | None = None) -> Path:
     """maya-inkling-2-mini.json and its start script: the layout's flags for one card or two (ik2_fit.layout; AMD:
     ik2_fit.amd_layout), drafting (--drafting auto by default; off where it does not run).  A setup again keeps the
     config before's env, where the server listens and its key; the flags follow the cards chosen now.  saguaro-ik2
-    stops at a flag it does not know: only its own are written."""
+    stops at a flag it does not know: only its own are written.  The layout's flags (--chunk ...) follow the layout
+    worked out now, except those the user changed (ik2_user_flags)."""
     step(8, "the configuration and the start script")
     port = a.port or 8080
     cfg_path = ROOT / f"{Q.config_stem('ik2', Q.IK2_QUANT)}.json"
@@ -7728,7 +7756,7 @@ def write_config_ik2(a, pc: dict, meta: dict, gguf: Path, tok: Path, ctx: int, m
     args = ["--model", str(gguf), "--max-context", str(ctx)] + list(lay["args"]) + \
         (["--draft", str(drafter)] if drafter and how != "off" else []) + ["--drafting", how]
     same = [int(i) for i in old.get("gpu") or []] == [int(g["index"]) for g in pc["gpus"]]
-    kept = keep_args(old.get("args") or [], args, ("--threads",) + (("--chunk",) if same else ()))
+    kept = keep_args(old.get("args") or [], args, tuple(f for f in ik2_user_flags(old) if same or f != "--chunk"))
     inst = {"family": "ik2", "quant": Q.OTHERS[("ik2", Q.IK2_QUANT)], "ik2_quant": Q.IK2_QUANT, "drafting": how}
     if gguf.name != ik2_entry()["gguf"]:              # (a GGUF of your own: its name, for the page and a setup again)
         inst["ik2_file"] = gguf.name
@@ -7761,7 +7789,8 @@ def write_config_ik2(a, pc: dict, meta: dict, gguf: Path, tok: Path, ctx: int, m
         ok("kept from the config before: " + ", ".join(kept))
     cfg["log"] = str(cfg_path.with_suffix(".log"))
     cfg["installer"] = {**inst, "models_dir": str(models), "model_dir": str(d), "cards": len(pc["gpus"]),
-                        "measured": bool(lay.get("measured")), "written": time.strftime("%Y-%m-%d %H:%M")}
+                        "measured": bool(lay.get("measured")), "layout_args": list(lay["args"]),
+                        "written": time.strftime("%Y-%m-%d %H:%M")}
     cfg_path.write_text(json.dumps(cfg, indent=1), encoding="utf-8")
     ok(f"config: {cfg_path}")
     ok(f"start script: {write_run_script(cfg_path, port)}")
@@ -7780,7 +7809,7 @@ def ik2_amd_room(g: dict) -> float:
 
 def set_up_ik2(a, prev: dict) -> Path | None:
     """Inkling 2 Mini's steps 1-8: the PC (Linux; NVIDIA from V100 / Tesla T4 on with 8 GB or more, one card or two;
-    or one AMD RDNA 3 / 3.5 / 4 GPU that holds every expert of the file), the layout for them and the context, the
+    or one AMD RDNA 3 / 3.5 / 4 GPU of 16 GB or more - the offload path where the file does not fit), the layout for them and the context, the
     engine (build/saguaro-ik2), the file (pinned, resumable, sha256-checked - or a GGUF of your own in --model-dir),
     the drafter where drafting runs, the tokenizer with the model's own template, the pictures, the config."""
     inst = prev.get("installer") or {}
@@ -7814,7 +7843,7 @@ def set_up_ik2(a, prev: dict) -> Path | None:
     if amd:
         warn(f"{IK2_SHOWN} on AMD is experimental here: checked on an RX 9070 XT (gfx1201) only - tell us how it goes")
     ok(f"layout: {lay['said']}" + (f" - {IK2F.speeds(lay)}" if IK2F.speeds(lay) else
-                                   " (not measured on this kind of card here: tell us your speed)"))
+                                   " (this layout is not measured on this kind of card here: tell us your speed)"))
     ctx = choose_context(a, prev_ctx if prev.get("gpu") and len(prev["gpu"]) == len(pc["gpus"]) else None,
                          IK2F.CONTEXTS, lay["context"])
     ok(f"context: {ctx} tokens" + (" (recommended for these cards)" if ctx == lay["context"] else ""))
@@ -7850,7 +7879,7 @@ def set_up_ik2(a, prev: dict) -> Path | None:
         a.drafting = "off"
         drafter = None
     else:
-        drafter = ik2_drafter_step(a, d, vram, ctx, kv, ex)
+        drafter = ik2_drafter_step(a, d, vram, ctx, kv, ex, amd)
     tok = ik2_tokenizer_step(a, d, gguf)               # 6
     vision = ik2_vision_step(a, pc, meta, llama, d)    # 7
     return write_config_ik2(a, pc, meta, gguf, tok, ctx, models, d, lay, vision, drafter)   # 8
@@ -7964,15 +7993,17 @@ def main() -> int:
                     help="which model and files (default: asked): a Saguaro quant - "
                          + ", ".join(i for _, _, _, i in Q.QUANTS) +
                          f" - or {DS4} / {MM3} / {HY4} (their files asked, or --ds4-quant / --mm3-quant / "
-                         f"--hy4-quant), cyber-frost = {QWEN_SHOWN}, {Q.IK2_IDS[0]} = {IK2_SHOWN} (one or two 16 GB cards),"
+                         f"--hy4-quant), cyber-frost = {QWEN_SHOWN}, {Q.IK2_IDS[0]} = {IK2_SHOWN} (one or two 16 GB NVIDIA cards or a 16 GB+ AMD GPU),"
                          " or a GLM-5.3-Flash "
                          "download by its name (" + ", ".join(MODELS) + "; every name used before still works)")
-    ap.add_argument("--model-dir", help=f"use the files you already have of {DS4}, MiniMax or {QWEN_SHOWN}: their "
-                                        "folder (a GGUF's shards, or the EXL3 quant's files and the Engram shards 47 / "
-                                        "48 of DeepSeek's repo), or an EXL3 folder of GLM-5.3-Flash or "
-                                        "MiniMax-M3.1-Flash at any bit rate (whole by its own index; its own sampling "
-                                        "and chat template are used); it must be writable - the pack is written inside "
-                                        "it")
+    ap.add_argument("--model-dir", help=f"use the files you already have of {DS4}, MiniMax, {QWEN_SHOWN} or "
+                                        f"{IK2_SHOWN}: their folder (a GGUF's shards, or the EXL3 quant's files and "
+                                        "the Engram shards 47 / 48 of DeepSeek's repo; Inkling: its GGUF - unsloth's "
+                                        "UD-Q4_K_XL or a quant of your own such as the one-T4 quant - and "
+                                        "mmproj-BF16.gguf), or an EXL3 folder of GLM-5.3-Flash or MiniMax-M3.1-Flash at "
+                                        "any bit rate (whole by its own index; its own sampling and chat template are "
+                                        "used); it must be writable - the pack (Inkling: the tokenizer folder) is "
+                                        "written inside it")
     ap.add_argument("--ds4-quant", choices=list(DS4_QUANTS) + [DS4_ABL_ALIAS],
                     help=f"{DS4}'s files: maya-s = Saguaro's quant (the experts in 2-3 bits; the default once "
                          "published; maya-m: 3.4 bits, once published; maya-xs: ~1.6 bits, with its own "

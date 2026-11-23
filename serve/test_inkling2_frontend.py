@@ -81,7 +81,7 @@ def service(*scripts):
 
 def answer(svc, req):
     msgs, tools, kw = openai_to_messages(req)
-    ids, thinking, max_new = svc.prepare(msgs, tools, kw, 500)
+    ids, thinking, max_new = svc.prepare(msgs, tools, kw, req.get("max_tokens", 500))
     sampling = {k: kw.get(k) for k in ("_prefill", "_blocked", "_think_resume")}
     events, done = [], None
     for kind, x in svc.run(ids, thinking, tools, max_new, sampling, threading.Event()):
@@ -275,6 +275,25 @@ class Serving(unittest.TestCase):
             self.assertEqual(ids.count(pad), 5)
             self.assertEqual(len(svc.vision.seen), 1)
             self.assertEqual(Path(svc.embeddings.path).read_bytes(), b"ROWS")
+
+    def test_a_tiny_max_tokens_still_answers(self):
+        """max_tokens 100 with thinking on (an Anthropic /v1/messages default): as the other engines' budget does for
+        a limit of THINK_TINY_LIMIT or less, the reasoning is closed with room left and the answer follows - not a
+        thinking block alone (mortar, 2026-11-22).  saguaro-ik2 closes nothing itself: the server puts <|content_text|>."""
+        long = " ".join(f"w{i}" for i in range(150))     # (no sentence end: closed at the latest point)
+        svc, eng, tok = service(MODEL + THINK + long, "Paris." + END)
+        got = answer(svc, {"messages": ASK, "max_tokens": 100})
+        self.assertEqual(got["content"], "Paris.")
+        self.assertTrue(got["reasoning"].startswith("w0 w1"))
+        self.assertEqual(len(eng.prompts), 2)
+        self.assertEqual(eng.prompts[1][-3:], [tok.special_tokens[m] for m in (END, MODEL, TEXT)])
+        self.assertLessEqual(got["done"]["completion_tokens"], 100)
+        svc, eng, _ = service(MODEL + THINK + "Short. Done here." + END + MODEL + TEXT + "Paris." + END)
+        got = answer(svc, {"messages": ASK, "max_tokens": 100})   # (closed by the model in time: one call)
+        self.assertEqual((got["content"], len(eng.prompts)), ("Paris.", 1))
+        svc, eng, _ = service(MODEL + THINK + long, "Paris." + END)
+        answer(svc, {"messages": ASK, "max_tokens": 4096})          # (a large limit: the reasoning is left alone)
+        self.assertEqual(len(eng.prompts), 1)
 
     def test_bias_is_refused_and_logprobs_left_out(self):   # (an engine whose INFO names neither)
         svc, _, _ = service("x")

@@ -256,6 +256,21 @@ class Catalog(unittest.TestCase):
         self.assertFalse(c["hy4-flash-maya-s"]["recommended"])
         self.assertIn("Inkling 2 Mini is the model for this PC", c["hy4-flash-maya-s"]["fit"])
 
+    def test_one_rx_9070_xt(self):
+        """AMD (the setup's own choice, mortar 2026-11-22): one 16 GB RDNA 4 GPU is Inkling 2 Mini's - the offload
+        path, measured; the iGPU beside it is not counted; Hy4-Flash does not run on AMD."""
+        xt = {"index": 0, "name": "AMD Radeon RX 9070 XT", "vram_gb": 15.9, "arch": "gfx1201", "vendor": "amd"}
+        igpu = {"index": 1, "name": "AMD Radeon (gfx1036)", "vram_gb": 2.0, "arch": "gfx1036", "vendor": "amd"}
+        c = self.cat([xt, igpu], 92.0)
+        ik = c["inkling-2-mini"]
+        self.assertTrue(ik["recommended"])
+        for part in ("one AMD GPU", "the offload path", "60 tok/s", "RX 9070 XT"):
+            self.assertIn(part, ik["fit"])
+        self.assertIn("one AMD RDNA 3 / 4 GPU with 16 GB or more", ik["needs"])
+        self.assertNotIn("holds every expert", ik["needs"])
+        self.assertIn("NVIDIA GPUs only", c["hy4-flash-maya-s"]["fit"])
+        self.assertIn("16 GB", self.cat([dict(xt, vram_gb=12.0)])["inkling-2-mini"]["fit"])
+
     def test_two_t4s(self):
         ik = self.cat([t4(0), t4(1)])["inkling-2-mini"]
         self.assertTrue(ik["recommended"])
