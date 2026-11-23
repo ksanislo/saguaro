@@ -4746,19 +4746,40 @@ struct SpecCtl {
     double SL = 2, FL = 1;
     uint64_t l_steps = 0, l_drafted = 0, l_accepted = 0;
     bool use_model = true, use_lookup = true;   // (the sources this start runs: --drafting's choice)
+    // SAGUARO_IK2_LOOKUP_MATCH=1: the lookup judged by the match behind its proposal - its acceptance kept per match
+    // length (3-4, 5-7, 8-15, 16+ tokens; long matches are copies: a high prior), its windows' cost by the verify
+    // alone (cv: a drafter window's drafting taken out), its own widest window (SAGUARO_IK2_LOOKUP_WIDTH, 8)
+    bool lk_match = getenv("SAGUARO_IK2_LOOKUP_MATCH") && atoi(getenv("SAGUARO_IK2_LOOKUP_MATCH"));
+    int lk_wmax = getenv("SAGUARO_IK2_LOOKUP_WIDTH") ? std::clamp(atoi(getenv("SAGUARO_IK2_LOOKUP_WIDTH")), 2, kBlockMax)
+                                                     : kBlockMax;
+    double SLb[4] = {1, 2, 4, 9}, FLb[4] = {2, 2, 1, 1}, cv[kBlockMax + 1] = {};
+    bool cv_seen[kBlockMax + 1] = {};
+    int lk_len = 0, lk_bucket = 0;
+    static int bucket_of(int len) { return len >= 16 ? 3 : len >= 8 ? 2 : len >= 5 ? 1 : 0; }
+    double verify_cost(int b) const { return cv_seen[b] ? cv[b] : c[b]; }
+    void took_verify(int B, double t) {   // (a window's verify seconds, whichever drafted)
+        cv[B] = cv_seen[B] ? 0.8 * cv[B] + 0.2 * t : t, cv_seen[B] = true;
+    }
     int pick(int room, int k, int& B) {
         const int bmax = std::min(wmax, room);
         B = 1;
-        if (bmax < 2) return 0;
+        if (lk_match && std::min(lk_wmax, room) >= 2 && use_lookup && k > 0) {   // (the lookup's own cap)
+        } else if (bmax < 2) {
+            return 0;
+        }
         int src = 0;
         double vb = 1.0 / c_plain;
         if (use_lookup && k > 0) {
-            const double a = std::min(0.98, (SL + 0.5) / (SL + FL + 1.0));
-            for (int b = 2; b <= std::min(bmax, k + 1); ++b) {
-                const double e = (1.0 - std::pow(a, b)) / (1.0 - a), v = e / c[b];
+            lk_bucket = bucket_of(lk_len);
+            const double a = lk_match ? std::min(0.98, (SLb[lk_bucket] + 0.5) / (SLb[lk_bucket] + FLb[lk_bucket] + 1.0))
+                                      : std::min(0.98, (SL + 0.5) / (SL + FL + 1.0));
+            const int lb = lk_match ? std::min(lk_wmax, room) : bmax;
+            for (int b = 2; b <= std::min(lb, k + 1); ++b) {
+                const double e = (1.0 - std::pow(a, b)) / (1.0 - a), v = e / (lk_match ? verify_cost(b) : c[b]);
                 if (v > vb) vb = v, B = b, src = 2;
             }
         }
+        if (bmax < 2) return src;
         if (use_model) {
             const int bm = choose(room);
             if (bm >= 2) {
@@ -4770,7 +4791,8 @@ struct SpecCtl {
         return src;
     }
     void took_lookup(int B, int acc, double t) {
-        c[B] = 0.8 * c[B] + 0.2 * t;
+        if (!lk_match) c[B] = 0.8 * c[B] + 0.2 * t;   // (LOOKUP_MATCH: the drafter's c stays the drafter's; cv has it)
+        if (lk_match) SLb[lk_bucket] = decay * SLb[lk_bucket] + acc, FLb[lk_bucket] = decay * FLb[lk_bucket] + (acc < B - 1 ? 1 : 0);
         SL = decay * SL + acc, FL = decay * FL + (acc < B - 1 ? 1 : 0);
         ++l_steps, l_drafted += B - 1, l_accepted += acc;
         plain_run = 0;
@@ -9970,15 +9992,19 @@ int main(int argc, char** argv) {
                 int32_t ld[kBlockMax];
                 if (req_spec) {
                     const int room = std::min({max_new - i - 1, ctx - (int) hist.size(), req_wmax});
-                    const int k = g_lookup && room >= 2 ? lk.propose(std::min(room, kBlockMax) - 1, ld) : 0;
-                    src = sctl.pick(room, k, B);
+                    const int lroom = sctl.lk_match ? std::min({max_new - i - 1, ctx - (int) hist.size(), sctl.lk_wmax})
+                                                    : room;
+                    const int k = g_lookup && lroom >= 2 ? lk.propose(std::min(lroom, kBlockMax) - 1, ld) : 0;
+                    sctl.lk_len = lk.last_match();
+                    src = sctl.pick(sctl.lk_match ? std::max(room, lroom) : room, k, B);
+                    if (src != 2 && B > room) B = room;
                     if (src == 1 && !drafter) src = 0, B = 1;
                 }
                 if (B >= 2) {
                     SampleCfg sc;
                     sc.temp = temp, sc.top_p = top_p, sc.top_k = top_k, sc.rng = &rng;
                     std::vector<int> next;
-                    const double ts = now();
+                    const double ts = now(), draft_s0 = req_draft_s;
                     int given[kBlockMax];
                     for (int j = 0; j + 1 < B; ++j) given[j] = ld[j];
                     spec_step(M, drafter, tok, (int) hist.size(), B, sc, stops, next, src == 2 ? given : nullptr,
@@ -9986,6 +10012,7 @@ int main(int argc, char** argv) {
                     CU(cudaStreamSynchronize(g_s));
                     const double tw = now() - ts;
                     req_verify_s += tw, ++req_rounds;
+                    sctl.took_verify(B, tw - (req_draft_s - draft_s0));
                     if (src == 2) sctl.took_lookup(B, (int) next.size() - 1, tw);
                     else sctl.took_spec(B, (int) next.size() - 1, tw);
                     hist.push_back(tok);
@@ -10043,7 +10070,12 @@ int main(int argc, char** argv) {
                 for (int j = 0; j < kBlockMax; ++j) std::fprintf(stderr, " %llu", (unsigned long long) sctl.hist[j]);
                 std::fprintf(stderr, "; ms a window by width 2..%d:", kBlockMax);
                 for (int b = 2; b <= kBlockMax; ++b) std::fprintf(stderr, " %.2f", sctl.c[b] * 1e3);
-                std::fprintf(stderr, "; a plain token %.2f ms\n", sctl.c_plain * 1e3);
+                std::fprintf(stderr, "; a plain token %.2f ms; verify ms 2..%d:", sctl.c_plain * 1e3, kBlockMax);
+                for (int b = 2; b <= kBlockMax; ++b) std::fprintf(stderr, " %.2f", sctl.cv_seen[b] ? sctl.cv[b] * 1e3 : 0.0);
+                std::fprintf(stderr, "; lookup acceptance by match 3-4/5-7/8-15/16+:");
+                for (int j = 0; j < 4; ++j)
+                    std::fprintf(stderr, " %.2f", (sctl.SLb[j] + 0.5) / (sctl.SLb[j] + sctl.FLb[j] + 1.0));
+                std::fprintf(stderr, "\n");
             }
             if (serve_maya) stat_line(n_out, now());
             unsigned long long ph1 = 0, pn1 = 0;
