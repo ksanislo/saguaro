@@ -17,7 +17,7 @@ Back to [the models](MODELS.md) and the [README](../README.md). How the engine w
 | --- | --- |
 | **GPU** | One or two NVIDIA cards of 8 GB or more, V100 / Tesla T4 / RTX 20 (compute capability 7.0) and newer; or one AMD RDNA 3 / 3.5 / 4 GPU of 12 GB or more (checked on an RX 9070 XT). Linux. No Mac or Windows engine here. |
 | **RAM** | The experts the card does not hold, pinned, beside the system: about 6 GiB with one 16 GB card, about 13 GiB with an 8 GB one; RAM and VRAM together about 24 GB (no SSD tier: the setup refuses less). |
-| **Disk** | 18.3 GB: the GGUF (17.6 GB) and the vision tower (0.6 GB); 0.6 GB more for the drafter where drafting runs (every expert and the drafter in VRAM: RTX 30 / A100 and newer, an AMD GPU; not on a 16 GB card at 32K). An NVMe SSD loads it in about ten seconds. |
+| **Disk** | 18.3 GB: the GGUF (17.6 GB) and the vision tower (0.6 GB); 0.4 GB more for the drafter (its GGUF; on AMD its mtp.safetensors, 0.6 GB) where drafting runs (every expert and the drafter in VRAM: RTX 30 / A100 and newer, an AMD GPU; not on a 16 GB card at 32K). An NVMe SSD loads it in about ten seconds. |
 
 | Cards | Layout the setup writes | Context | Experts |
 | --- | --- | ---: | --- |

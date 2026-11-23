@@ -108,11 +108,26 @@ class Manifest(unittest.TestCase):
                          "7ab64bac7090c9f77df551ac0fac98119494a2a5/vision/mmproj-Inkling-2-Mini-BF16.gguf")
 
     def test_drafter_pinned(self):
-        m = maya.ik2_drafter_model()
-        self.assertEqual((m["repo"], m["revision"]), ("thinkingmachines/Inkling-2-Mini",
-                                                      "ed40e7da625f594fc9c4990f5f66be24873c22d7"))
-        self.assertEqual(m["files"], {"mtp.safetensors": 635801416})
-        self.assertRegex(m["sha256"]["mtp.safetensors"], r"^[0-9a-f]{64}$")
+        """Drafting: the model's own drafter from Maya's own repo at a pinned revision, folder drafter/, by size and
+        sha256 (the ones docs/INKLING2.md lists) - the GGUF (Q8_0) by default, the manifest's "amd" form on AMD; each
+        form one file."""
+        repo, rev = "peasantsmith/Inkling-2-Mini-Maya-GGUF", "37027719327de5f574684b525ad88fe50c4ff222"
+        doc = (maya.ROOT / "docs" / "INKLING2.md").read_text(encoding="utf-8")
+        man = json.loads(maya.IK2_MANIFEST.read_text(encoding="utf-8"))["drafter"]
+        for amd_pc, name in ((False, man["default"]), (True, man["amd"])):
+            size, sha = man["files"][name]
+            m = maya.ik2_drafter_model(amd_pc)
+            self.assertEqual((m["repo"], m["revision"], m["folder"]), (repo, rev, "drafter"))
+            self.assertEqual(m["files"], {name: size})
+            self.assertEqual(m["sha256"], {name: sha})
+            self.assertAlmostEqual(m["download_gb"], size / 1e9)
+            self.assertIn(sha, doc)
+            self.assertEqual(maya.file_url(m, name), f"https://huggingface.co/{repo}/resolve/{rev}/drafter/{name}")
+            self.assertEqual(maya.ik2_drafter_model(not amd_pc, name), m)       # (a form by its name)
+        self.assertEqual(man["default"], "dspark-Inkling-2-Mini-Q8_0.gguf")
+        self.assertEqual(man["files"]["dspark-Inkling-2-Mini-Q8_0.gguf"][1],
+                         "2ec78510da837e8fc3be54a14757a0c5fbd2d8d9e85a0d92853fafdf674f3773")
+        self.assertEqual(maya.ik2_drafter_model(), maya.ik2_drafter_model(False))
 
     def test_import_catalog_lists_it(self):
         cat = maya.import_catalog(Path("/models"))
@@ -623,7 +638,62 @@ class Steps(unittest.TestCase):
         with patch.object(maya, "offer_download", lambda *a, **k: False):
             self.assertIsNone(maya.ik2_drafter_step(va(), d, 24, 65536, "fp8"))
         with patch.object(maya, "file_incomplete", lambda *a: None), patch.object(maya, "sha256_checked", lambda *a: True):
-            self.assertEqual(maya.ik2_drafter_step(va(), d, 24, 65536, "fp8"), d / "mtp.safetensors")
+            self.assertEqual(maya.ik2_drafter_step(va(), d, 24, 65536, "fp8"), d / "dspark-Inkling-2-Mini-Q8_0.gguf")
+            amd_form = json.loads(maya.IK2_MANIFEST.read_text(encoding="utf-8"))["drafter"]["amd"]
+            self.assertEqual(maya.ik2_drafter_step(va(), d, 24, 65536, "fp8", hip=True), d / amd_form)
+
+    def drafter_run(self, d, amd_pc=False, good=True, fetched=True):
+        """ik2_drafter_step with the download stubbed: (the file it names, the downloads it asked for as
+        (repo, revision, folder, names))."""
+        va = args(**dict(rebuild=False, download_model=False, yes=False))
+        calls = []
+
+        def offer(a, what, dd, files, m):
+            calls.append((m["repo"], m["revision"], m["folder"], [f.name for f in files]))
+            for f in files if fetched else []:
+                with open(f, "wb") as fh:
+                    fh.truncate(m["files"][f.name])    # (a sparse file of the published size)
+            return fetched
+        with patch.object(maya, "offer_download", offer), patch.object(maya, "sha256_checked", lambda p, w: good), \
+                patch.object(maya, "ok", lambda *a: None), patch.object(maya, "warn", lambda *a: None):
+            return maya.ik2_drafter_step(va, d, 24, 65536, "fp8", hip=amd_pc), calls
+
+    def test_drafter_fresh_from_the_manifest_repo(self):
+        """A model folder without a drafter: one file from the manifest's repo at the pinned revision, folder drafter/
+        - the GGUF on NVIDIA, the "amd" form on AMD."""
+        man = json.loads(maya.IK2_MANIFEST.read_text(encoding="utf-8"))["drafter"]
+        ours = ("peasantsmith/Inkling-2-Mini-Maya-GGUF", "37027719327de5f574684b525ad88fe50c4ff222", "drafter")
+        d, gguf = self.files()
+        for amd_pc, name in ((False, man["default"]), (True, man["amd"])):
+            for f in man["files"]:
+                (d / f).unlink(missing_ok=True)
+            got, calls = self.drafter_run(d, amd_pc)
+            self.assertEqual(calls, [ours + ([name],)])
+            self.assertEqual(got, d / name)
+
+    def test_drafter_already_here_not_downloaded_again(self):
+        """The drafter an earlier setup fetched (thinkingmachines' mtp.safetensors beside the model, the same size and
+        sha256) is used as it is: no download, the config names it; a copy of another sha256 or size is not taken (the
+        GGUF is fetched) and stays on the disk.  With both forms here: the GGUF on NVIDIA."""
+        d, gguf = self.files()
+        old, new = d / "mtp.safetensors", d / "dspark-Inkling-2-Mini-Q8_0.gguf"
+        new.unlink(missing_ok=True)
+        with open(old, "wb") as fh:
+            fh.truncate(635801416)
+        got, calls = self.drafter_run(d)
+        self.assertEqual((got, calls), (old, []))
+        got, calls = self.drafter_run(d, good=False, fetched=False)      # (the size, another sha256: not taken)
+        self.assertEqual((got, [c[3] for c in calls]), (None, [["dspark-Inkling-2-Mini-Q8_0.gguf"]]))
+        self.assertTrue(old.exists())
+        with open(new, "wb") as fh:
+            fh.truncate(402278560)
+        self.assertEqual(self.drafter_run(d), (new, []))                 # (both here: NVIDIA's is the GGUF)
+        new.unlink()
+        with open(old, "wb") as fh:
+            fh.truncate(1000)                                            # (another size: not the drafter)
+        got, calls = self.drafter_run(d, fetched=False)
+        self.assertEqual((got, [c[3] for c in calls]), (None, [["dspark-Inkling-2-Mini-Q8_0.gguf"]]))
+        self.assertTrue(old.exists())
 
     def test_a_gguf_of_your_own(self):
         """--model-dir with another GGUF (our one-T4 quant): taken as it is, no download, no sha256."""
