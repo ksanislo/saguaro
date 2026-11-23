@@ -14,20 +14,20 @@ Back to [the models](MODELS.md) and the [README](../README.md). How the engine w
 
 | | |
 | --- | --- |
-| **GPU** | One or two NVIDIA cards of 8 GB or more, V100 / Tesla T4 / RTX 20 (compute capability 7.0) and newer; or one AMD RDNA 3 / 3.5 / 4 GPU that holds every expert of the file (24 GB for UD-Q4_K_XL; a 16 GB card with a smaller quant of your own). Linux. No Mac or Windows engine here. |
+| **GPU** | One or two NVIDIA cards of 8 GB or more, V100 / Tesla T4 / RTX 20 (compute capability 7.0) and newer; or one AMD RDNA 3 / 3.5 / 4 GPU of 16 GB or more (checked on an RX 9070 XT). Linux. No Mac or Windows engine here. |
 | **RAM** | The experts the card does not hold, pinned, beside the system: about 6 GiB with one 16 GB card, about 13 GiB with an 8 GB one; RAM and VRAM together about 24 GB (no SSD tier: the setup refuses less). |
 | **Disk** | 18.3 GB: the GGUF (17.6 GB) and the vision tower (0.6 GB); 0.6 GB more for the drafter where drafting runs (RTX 30 / A100 and newer holding every expert, AMD). An NVMe SSD loads it in about ten seconds. |
 
 | Cards | Layout the setup writes | Context | Experts |
 | --- | --- | ---: | --- |
-| One 8-16 GB card (one Tesla T4) | `--gpus 1 --chunk 2048`, the seed expert profile (`SAGUARO_IK2_WARM`) | 32K | the offload path: the most-used in VRAM (about 60 % on a T4), the rest in pinned RAM, fetched by the GPU |
+| One 8-16 GB card (one Tesla T4) | `--gpus 1 --chunk 2048`, the seed expert profile (`SAGUARO_IK2_WARM`) | 32K | the offload path: the most-used in VRAM (2,303 of 3,072 on a T4), the rest in pinned RAM, fetched by the GPU |
 | Two 16 GB cards (two Tesla T4s) | `--gpus 2 --chunk 8192` | 131K | the split: all in VRAM across the two cards |
 | One card of 24 GB or more | `--gpus 1 --chunk 2048` | up to 256K (FP16 cache: 128K) | all in VRAM; drafting on RTX 30 / A100 and newer |
-| One AMD RDNA 3 / 4 GPU | `--gpus 1 --chunk 2048`, FP8 cache | what fits beside every expert | all in the GPU's memory (no offload path on AMD) |
+| One 16 GB AMD RDNA 3 / 4 GPU (an RX 9070 XT) | `--gpus 1 --chunk 2048`, the seed profile, `SAGUARO_IK2_RESERVE_MB=1024` | 32K | the offload path as on NVIDIA (the one-T4 quant: all in VRAM, `--chunk 1024`) |
+| One AMD GPU of 24 GB or more | `--gpus 1 --chunk 1024` | up to 128K | all in VRAM |
 
-The first two were measured here on Tesla T4s. The others are upstream Project Maya's layouts (measured there on
-RTX 3090s, V100s and a Radeon 8065S, see [INKLING2.md](INKLING2.md) section 8); they have not been run on this
-project's hardware. Drafting is off on Volta / Turing, on the offload path and on two cards.
+The two T4 rows and the RX 9070 XT row were measured here. The others are upstream Project Maya's layouts (measured
+there on RTX 3090s, V100s and a Radeon 8065S, see [INKLING2.md](INKLING2.md) section 8). Drafting is off on Volta / Turing, on the offload path and on two cards.
 
 ## Install
 
@@ -60,21 +60,24 @@ size is read from the file for the fit (e.g. the one-T4 quant on a 16 GB AMD car
 
 ## Speed
 
-Measured on Tesla T4s (16 GB, sm_75) with two Xeon E5-2660 v2, greedy 128-256-token answers about 1K tokens deep,
-prompts of 8-16K tokens, GPU clocks not pinned (pinning them measured no gain). These figures are the PREVIOUS
-engine's (our v1.1.72 port with its own one-card cache and two-card layer split); the v1.1.74-based engine's are
-still to be measured:
+Measured here 2026-11-22, greedy 256-300-token answers, GPU clocks not pinned. Tesla T4s (16 GB, sm_75, PCIe 3)
+with two Xeon E5-2660 v2: two loads of each, interleaved with the previous engine (our v1.1.72 port); an RX 9070 XT
+(16 GB, gfx1201, PCIe 5) with a Ryzen 7 9800X3D: one load each.
 
-| | 1x Tesla T4, 32K context | 2x Tesla T4, 131K context |
+| Decode at ~50 / 8K / 30K tokens deep, read of an 8K prompt | this engine | previous engine |
 | --- | ---: | ---: |
-| TODO: the v1.1.74-based engine | - | - |
-| Writing an answer | about 42 tok/s | about 52 tok/s |
-| Reading a prompt | about 640 tok/s | about 1130 tok/s |
-| Load | 8-10 s | 8-10 s |
-| VRAM | 14.9 GiB | 14.9 + 14.3 GiB |
+| 1x T4, UD-Q4_K_XL, 32K (offload path) | 23.7 / 25.8 / 24.1 tok/s, read 706 tok/s | 42.0 / 38.5 / 35.1, read 633 |
+| 1x T4, one-T4 quant, 32K (every expert in VRAM) | 44.9 / 41.5 / 37.0, read 515 | 44.5 / 41.2 / 36.9, read 569 |
+| 2x T4, UD-Q4_K_XL, 131K (the split; decode ~50 / 16K, read 16K) | 52.6 / 46.1, read 834 | 51.7 / 45.4, read 1130 |
+| 1x RX 9070 XT, UD-Q4_K_XL, 32K (offload path) | 59.8 / 59.5 / 53.0, read 1697 (30K: 1301) | - |
+| 1x RX 9070 XT, one-T4 quant, 32K (every expert in VRAM) | 83.3 / 73.3 / 66.7, read 1148 (30K: 950) | - |
 
-Answers get slower deeper into a context: one card 39 tok/s at 8K; two cards 46 at 16K, 40 at 30K and 28 at 125K.
-Two loads of each, interleaved; this box drifts by about a tenth between runs.
+On one T4 the offload path writes answers about 40 % slower than the previous engine's adaptive expert cache: its VRAM
+tier is fixed at load (the seed profile), so about 5 % of a token's picks cross PCIe 3 every token. With the one-T4
+quant (every expert resident) the two engines write at the same speed; two answers at once (`--parallel 2`, 16K
+context) give 47.7 tok/s together against 41.9 alone. Two T4s write at the previous speed and read prompts about a
+quarter slower (a prompt runs on the first card alone). Load: 1-10 s from the page cache / NVMe. In short: 1x Tesla T4
+about 24 tok/s writing and about 700 tok/s reading; 2x Tesla T4 about 52 tok/s writing and about 830 tok/s reading.
 
 ## What it does
 
@@ -94,15 +97,16 @@ Two loads of each, interleaved; this box drifts by about a tenth between runs.
 card of 24 GB or more keeps the whole model in VRAM and needs none of this; on 16 GB cards these settings matter. Each
 is a flag or an `env` entry in the config (`maya-inkling-2-mini.json`, Models page or by hand); restart the model after
 a change. Tuned on Tesla T4s, two loads of each setting, interleaved (decode about 60 / 8K tokens deep, an 8-16K read).
-The figures are the PREVIOUS engine's (its one-card cache); on the v1.1.74-based engine the one-card layout is the
-offload path, so the `--chunk` trade on one card is to be measured again (TODO):
+The `--chunk` figures are the previous engine's (its one-card cache); on this engine one T4 runs the offload path and
+the one-card `--chunk` trade is not measured again yet:
 
 | Setting | What it trades | One T4 | Two T4s |
 | --- | --- | --- | --- |
 | `--chunk N` (prompt chunk) | A larger chunk reads prompts faster but its work buffers take VRAM from the experts' tier: on one card, fewer experts stay on the card and answers write slower. | (previous engine) 1024 -> 2048: read 497 -> 712 tok/s, decode 34 -> 31 tok/s at 8K | (previous engine) 2048 -> 8192: read 844 -> 1136 tok/s, decode 44 -> 46 (every expert stays in VRAM) |
 | `SAGUARO_IK2_ROOM_MB` (the offload path's room) | The VRAM the offload path keeps for prompts and its staging slots; the rest of the card is the experts' tier. More room lets the picture encoder run on the GPU (0.8-1.8 s a new picture instead of 2-6 s on the CPU) at the cost of tier: on the previous engine 1536 on one T4 made every answer 9-11 % slower. | 1024 (default) | 1024 on the first card (default) |
 | `SAGUARO_IK2_WARM` (the tier's start) | The experts the tier starts with: the setup writes Saguaro's profile (`data/expert-profile-ik2mini.bin`); a profile of your own use (`SAGUARO_IK2_POP_OUT=FILE` writes one) fits your prompts better. | the setup's default | the setup's default |
-| The one-T4 quant (`Inkling-2-Mini-T4-NVFP4-IQ3_XXS`, experimental) | Smaller experts (11.45 GiB: IQ3_XXS gate/up on 8 layers, layers 20-23 re-quantised) so every expert fits on one 16 GB card - the resident path (and `--parallel`), at a measurable quality cost: KL 0.012 and the same top token 95.0 % of the time against UD-Q4_K_XL, whose own run-to-run floor is 0.0019 / 97.8 %. Not downloadable: `--model-dir` with its file. | (previous engine) decode 39 -> 45 tok/s (31 -> 37 at 30K), read 502 -> 572 tok/s | (not needed) |
+| The one-T4 quant (`Inkling-2-Mini-T4-NVFP4-IQ3_XXS`, experimental) | Smaller experts (11.45 GiB: IQ3_XXS gate/up on 8 layers, layers 20-23 re-quantised) so every expert fits on one 16 GB card - the resident path (and `--parallel`), at a measurable quality cost: KL 0.012 and the same top token 95.0 % of the time against UD-Q4_K_XL, whose own run-to-run floor is 0.0019 / 97.8 %. Not downloadable: `--model-dir` with its file. Needs `--chunk 1024` and `SAGUARO_IK2_RESERVE_MB=1024` to stay resident at 32K. | decode 24 -> 45 tok/s (24 -> 37 at 30K), read 706 -> 515 tok/s | (not needed) |
+| `SAGUARO_IK2_RESERVE_MB` | What the plan keeps free beside every expert (1536 by default); 1024 lets a file that just misses stay resident. | 1024 with the one-T4 quant | - |
 
 Pinning the GPU clocks measured no gain. To try a setting on other cards: change one value, restart, and compare a
 long answer's tok/s and a long prompt's read speed against the default, a few times each in turn - a box's speed drifts

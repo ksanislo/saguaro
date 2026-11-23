@@ -44,9 +44,8 @@ TWO_CONTEXT = 131072                                # two 16 GB cards: every exp
 AMD_MIN_GB = 15.0   # (a 16 GB AMD card as the driver reports it)
 LAYOUT_ENV = {"SAGUARO_IK2_ROOM_MB", "SAGUARO_IK2_PIN", "SAGUARO_IK2_PIN_KEEP", "SAGUARO_IK2_WARM", "SAGUARO_IK2_RESERVE_MB"}   # (a layout's keys;
                                                     # PIN / PIN_KEEP: the previous engine's, dropped from old configs)
-# (decode tok/s, read tok/s) on Tesla T4s, GPU clocks not pinned, ~1K tokens deep, read 8-16K - measured on the
-# PREVIOUS engine (our v1.1.72 port, NEXT-ik2.md 2026-11-22).  TODO: the v1.1.74-based engine's figures.
-MEASURED = {1: (42, 640), 2: (52, 1130)}
+# (decode tok/s, read tok/s) on Tesla T4s, GPU clocks not pinned, ~50 tokens deep, read 8K / 16K (2026-11-22)
+MEASURED = {1: (24, 700), 2: (52, 830)}
 
 
 def experts_gib_of(path) -> float | None:

@@ -19,6 +19,17 @@ older multi-GPU hardware (NVIDIA Turing T4 - sm_75 tensor cores, Xeon AVX1 CPUs)
 - **Credits:** built on Project Maya ([mw00/project-maya](https://github.com/mw00/project-maya)) and Strata (MIT) -
   see NOTICE.md. Everything below the next section is upstream Project Maya history.
 
+### Inkling 2 Mini on upstream Project Maya v1.1.74's engine (2026-11-22)
+
+- **`saguaro-ik2` is upstream's v1.1.74 engine** (Volta / Turing kernels, the offload path for 8-16 GB cards, two
+  GPUs with the experts split, `--parallel`, KV streaming, AMD) with our names and our additions on top: conversations
+  set aside, saved and resumed (`SAGUARO_IK2_SLOT_DIR`), a snapshot at a prompt's last message, AVX-only CPU rows,
+  the row check for 256-value types, `SAGUARO_IK2_RESERVE_MB`, a fix for two GPUs under the server.
+- **AMD:** a 16 GB RDNA 3 / 4 card runs it - the offload path where the file does not fit (an RX 9070 XT: about 59
+  tok/s), every expert resident where it does.
+- **One Tesla T4** now runs the offload path: about 24 tok/s writing (was 42 on our own port's cache); two T4s and the
+  one-T4 quant write as before. Figures in docs/INKLING2-MINI.md.
+
 ### Inkling 2 Mini: faster layouts, conversations kept (2026-11-22)
 
 - **Faster on Tesla T4s** (interleaved runs, NEXT-ik2.md): one card now reads prompts in chunks of 2048 with one shared

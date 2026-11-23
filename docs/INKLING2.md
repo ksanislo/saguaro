@@ -485,12 +485,15 @@ holds the offload path's lane to the GPU's bits.
 The tokenizer folder they name: `python tools/strata_tokenizer.py --gguf FILE --out <model folder> --chat-template
 tools/ik2/chat_template.jinja --check`.
 
-**AMD with 16 GB** (Ken's RX 9070 XT, gfx1201): upstream's AMD path keeps every expert in the GPU's memory (no
-offload path on HIP), so UD-Q4_K_XL wants 24 GB; a GGUF whose experts fit - the one-T4 quant - runs on 16 GB by the
-same sums (`tools/ik2_fit.py` `amd_unsupported`, computed from the file's experts). `saguaro.py --setup --model
-inkling-2-mini --backend hip --model-dir FOLDER` takes such a file (not sha256-checked) and writes the FP8 cache.
-NOT verified on that machine: the HIP build of this tree, the engine's start rule for a 16 GB AMD card, the RDNA
-resident path with IQ3_XXS / IQ4_XS experts, drafting there, the picture encoder on AMD.
+A 16 GB AMD card (an RX 9070 XT, gfx1201, ROCm 7.1), checked 2026-11-22: upstream's AMD path kept every expert
+in VRAM (24 GB for UD-Q4_K_XL); here the offload path runs on AMD as on NVIDIA (it builds for HIP upstream; only its
+gate was NVIDIA-only). UD-Q4_K_XL at 32K: 2,348 of 3,072 experts in VRAM, 59.8 / 59.5 / 53.0 tok/s at ~50 / 8K / 30K,
+an 8K read 1,697 tok/s; the one-T4 quant every expert resident (`--chunk 1024`, `SAGUARO_IK2_RESERVE_MB=1024`):
+83.3 / 73.3 / 66.7 tok/s, 8K read 1,148 tok/s. Both: every serve check (chat, tools, stops, pictures, Monitor) and
+the conversation check (set aside, resumed, saved, read back by a new engine) pass. `ik2_kernels_test` there: 349 ok,
+1 FAIL (`moe_combine_conv` against `moe_combine_f32` + `conv4_res` to the bit - the fused kernel's sums round
+differently under hipcc; upstream's kernels, not changed here). Not checked on AMD: drafting, two AMD GPUs, the CPU
+lane (the decode chose no lane on a Zen 5).
 
 ## 10. Saguaro: served on the T4s (checked 2026-11-21 on the PREVIOUS engine, our v1.1.72 port), and what an install needs
 
@@ -503,7 +506,7 @@ answer runs. Results in `build-ik2/serve-check*/results.json`.
 
 | UD-Q4_K_XL, FP16 cache (previous engine) | one T4, context 32,768 | two T4s, context 131,072 |
 | --- | --- | --- |
-| TODO: the v1.1.74-based engine's figures | - | - |
+| This engine (v1.1.74-based, 2026-11-22): every check passes; bench | 23.7 tok/s decode, 706 tok/s 8K read | 52.6 tok/s decode, 834 tok/s 16K read |
 | Start to /health | 8 s (16-18 s the first time: the encoder is measured) | 12 s (16 s) |
 | VRAM after the load | 14.9 GiB | 14.9 GiB + 8.7 GiB |
 | A short chat: first token / decode | 0.5-0.7 s / 36-38 tok/s | 0.35-0.45 s / 50 tok/s |
