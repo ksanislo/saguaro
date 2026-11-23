@@ -1089,7 +1089,10 @@ struct ExpertCache {
             used += (size_t) pools[p].n_slots * pools[p].slot_bytes;
         }
         if (smart_mode && g_off_dynamic && grps.size() == 2) {
-            const int tail_want = getenv("SAGUARO_IK2_TAIL_SLOTS") ? std::atoi(getenv("SAGUARO_IK2_TAIL_SLOTS")) : 96;
+            // (the tail layers' pool: a fifth of the budget by default - on a Tesla T4 256 slots, decode +12 % / +16 % at
+            //  ~50 / 8K tokens deep against upstream's 96, 384 no better; SAGUARO_IK2_TAIL_SLOTS: a count)
+            const int tail_want = getenv("SAGUARO_IK2_TAIL_SLOTS") ? std::atoi(getenv("SAGUARO_IK2_TAIL_SLOTS"))
+                                                                 : (int) (budget / 5 / std::max<size_t>(1, pools[1].slot_bytes));
             const int t_slots = std::clamp(tail_want, std::min(16, pmax[1]), pmax[1]);
             pools[1].n_slots = t_slots;
             const size_t tb = (size_t) t_slots * pools[1].slot_bytes;
@@ -6286,7 +6289,10 @@ int main(int argc, char** argv) {
         g_fast_want = fits && off_set != 1 && g_dense_q8 && !(getenv("SAGUARO_IK2_FAST") && !std::atoi(getenv("SAGUARO_IK2_FAST")));
         const bool dense_ok = !getenv("SAGUARO_IK2_DENSE") || std::string(getenv("SAGUARO_IK2_DENSE")) == "q8";
         g_off_want = (off_set == 1 || (off_set != 0 && !fits)) && dense_ok;
-        g_off_dynamic = g_off_want && getenv("SAGUARO_IK2_OFF_DYNAMIC") && std::atoi(getenv("SAGUARO_IK2_OFF_DYNAMIC"));
+        // (the dynamic GPU cache: the same bits as the fixed tier (KL 0 over 2000 tokens, T4 and RX 9070 XT), faster
+        //  answers - on by default on one GPU; SAGUARO_IK2_OFF_DYNAMIC=0: the fixed tier, =1 on two GPUs too)
+        const char* dyn_env = getenv("SAGUARO_IK2_OFF_DYNAMIC");
+        g_off_dynamic = g_off_want && (dyn_env && *dyn_env ? std::atoi(dyn_env) != 0 : !g_two.want);
 #ifdef STRATA_USE_HIP   // (AMD: the offload path where the experts do not fit - checked on an RX 9070 XT, gfx1201)
         if (g_off_want && off_set != 1)
             std::printf("NOTE saguaro ik2: AMD - the offload path (checked on RDNA 4, gfx1201; SAGUARO_IK2_OFF=0: the "
