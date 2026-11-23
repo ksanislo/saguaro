@@ -199,7 +199,7 @@ def cmd_run(a):
         env[k] = v
     env.update({"SAGUARO_LOGPOS": str(out / "logpos.tsv"), "SAGUARO_LOGPOS_TOPK": str(TOPK),
                 "SAGUARO_DUMP_FIRST_LOGITS": str(out / "first")})
-    cmd = engine_cmd(cfg, st["short_read"])
+    cmd = engine_cmd(cfg, st["short_read"]) + a.arg
     print("engine:", " ".join(cmd), flush=True)
     print("env:", " ".join(f"{k}={v}" for k, v in sorted(env.items()) if k.startswith(("SAGUARO_", "CUDA_", "HIP_"))), flush=True)
     if a.dry_run:
@@ -242,7 +242,7 @@ def cmd_run(a):
 
     only = set(a.only.split(",")) if a.only else None
     for k, pr in enumerate(st["prompts"]):
-        if only and pr["name"] not in only:
+        if (only and pr["name"] not in only) or a.greedy_only:
             continue
         n0, t1 = nlines(), time.time()
         p.stdin.write("GEN 1 " + ",".join(map(str, pr["ids"])) + "\n")
@@ -489,6 +489,8 @@ def main():
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--only", help="comma list of prompt names (a diagnosis run of some prompts)")
     p.add_argument("--greedy", type=int, default=0, help="then N greedy tokens after each prompt's head (same load)")
+    p.add_argument("--greedy-only", action="store_true", help="only the greedy answers (no scored prompts)")
+    p.add_argument("--arg", action="append", default=[], help="an extra engine argument (repeatable; e.g. --arg=--spec --arg=0)")
     p = sub.add_parser("compare")
     p.add_argument("ref")
     p.add_argument("runs", nargs="+")
