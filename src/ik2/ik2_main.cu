@@ -28,15 +28,15 @@
 #include "ik2_lane.hpp"
 #include "ik2_off.cuh"
 #include "mm3_link.cuh"   // (two GPUs: the copies between them, peer only where tested)
-#include "strata/artifact/gguf_reader.hpp"
+#include "maya/artifact/gguf_reader.hpp"
 #include "sf_codecs.h"
 #include "strata_inkling.hpp"
-#include "strata/spec/suffix_drafter.hpp"
+#include "maya/spec/suffix_drafter.hpp"
 #include "../ds4/ds4_watchdog.hpp"   // (--serve's heartbeat rule, maya-ds4's)
-#ifdef STRATA_USE_HIP
+#ifdef MAYA_USE_HIP
 #include "ds4_lt.hpp"   // (AMD: the prompt's FP16 GEMMs on hipBLASLt, the kernel a shape measured and kept)
 #endif
-#include "strata/kernels/cpu/pool.hpp"
+#include "maya/kernels/cpu/pool.hpp"
 
 #include <cublas_v2.h>
 #include <cuda_fp16.h>
@@ -132,9 +132,9 @@ void read_into_strided(const std::string& path, uint64_t off, int n_exp, size_t 
 const strata_fmt::InklingView* g_sv = nullptr;   // a Strata pack (--model X.strata), seen as the GGUF
 
 struct Shards {
-    std::vector<std::unique_ptr<strata::GgufFile>> files;
+    std::vector<std::unique_ptr<maya::GgufFile>> files;
     std::vector<std::string> paths;
-    std::map<std::string, std::pair<int, const strata::TensorInfo*>> by_name;
+    std::map<std::string, std::pair<int, const maya::TensorInfo*>> by_name;
     std::unique_ptr<strata_fmt::InklingView> sv;
 
     explicit Shards(const std::string& first) {
@@ -160,12 +160,12 @@ struct Shards {
             }
         }
         for (const auto& p : ps) {
-            files.emplace_back(new strata::GgufFile(p));
+            files.emplace_back(new maya::GgufFile(p));
             paths.push_back(p);
             for (const auto& t : files.back()->tensors()) by_name[t.name] = {(int) files.size() - 1, &t};
         }
     }
-    const strata::TensorInfo* info(const std::string& n) const {
+    const maya::TensorInfo* info(const std::string& n) const {
         if (sv) return sv->info(n);
         auto it = by_name.find(n);
         return it == by_name.end() ? nullptr : it->second.second;
@@ -190,9 +190,9 @@ struct Shards {
         if (!v) die("no key " + key);
         return v->num();
     }
-    const strata::MetaValue* get(const std::string& key) const { return sv ? sv->get(key) : files[0]->get(key); }
-    std::vector<const strata::TensorInfo*> all() const {
-        std::vector<const strata::TensorInfo*> v;
+    const maya::MetaValue* get(const std::string& key) const { return sv ? sv->get(key) : files[0]->get(key); }
+    std::vector<const maya::TensorInfo*> all() const {
+        std::vector<const maya::TensorInfo*> v;
         if (sv)
             for (const auto& t : sv->tensors()) v.push_back(&t);
         else
@@ -206,12 +206,12 @@ struct Shards {
     }
 };
 
-size_t tensor_bytes(const strata::TensorInfo& t) {
+size_t tensor_bytes(const maya::TensorInfo& t) {
     if (t.type == (uint32_t) strata_fmt::kMIX && g_sv) return g_sv->bytes(t.name);
     // (the blocks decoded here first: strata's block_geometry names NVFP4 but has no geometry for it)
     if (k::block_values((int) t.type)) return (size_t) (t.elements() / k::block_values((int) t.type)) * k::block_bytes((int) t.type);
     int e = 0, b = 0;
-    if (!strata::block_geometry(t.type, e, b)) die(std::string("type ") + t.type_name() + " of " + t.name);
+    if (!maya::block_geometry(t.type, e, b)) die(std::string("type ") + t.type_name() + " of " + t.name);
     return (size_t) (t.elements() / e) * b;
 }
 
@@ -488,10 +488,10 @@ T* dalloc(size_t n) {
 
 // Y [T][N] (ldy) = X [T][K] FP16 . W [N][K]^T FP16, F32 sums
 void gemm16(const uint16_t* W, int N, int Kd, const uint16_t* X, int T, float* Y, int ldy, float beta = 0.0f) {
-#ifdef STRATA_USE_HIP
+#ifdef MAYA_USE_HIP
     // (AMD: hipBLASLt's kernel for the shape measured once on this GPU and kept in the store - hipBLAS's own pick for
     //  these FP16 shapes on gfx11 is its generic kernel, ~5x slower; fewer than kMinRows rows: hipBLAS)
-    if (beta == 0.0f && strata::ds4::lt::gemm(g_s, W, N, Kd, X, Kd, T, Y, ldy)) return;
+    if (beta == 0.0f && maya::ds4::lt::gemm(g_s, W, N, Kd, X, Kd, T, Y, ldy)) return;
 #endif
     const float one = 1.0f;
     CB(cublasGemmEx(g_blas, CUBLAS_OP_T, CUBLAS_OP_N, N, T, Kd, &one, W, CUDA_R_16F, Kd, X, CUDA_R_16F, Kd, &beta, Y,
@@ -2195,7 +2195,7 @@ void prefetch_layer(Model& M, int l, Work& W, ExpertCache& EC, int T, const Work
     W.pf_layers[pr] = l;
 }
 
-#ifdef STRATA_USE_HIP
+#ifdef MAYA_USE_HIP
 // AMD, one GPU: the grouped prompt experts' buffers (k::experts_rdna_*) - the rows' inputs, hidden and outputs, the
 // tiles and the experts' pointers (their host copies by layer parity, as Work's gidx_h); grown to the largest chunk
 struct RdnaMoe {
@@ -2442,7 +2442,7 @@ void run_prefill_moe(const Model& M, Layer& Ly, int l, int T, const uint16_t* xq
             return;
         }
         const bool pf = X.pf_layers[l % Work::kPfRing] == l;
-#ifdef STRATA_USE_HIP
+#ifdef MAYA_USE_HIP
         if (d < 0 && k::experts_rdna_available(Ly.ty[0], Ly.ty[1], Ly.ty[2], C, F)) {
             // (AMD matrix cores: all the layer's experts in one launch each for gate / up and down, then each token's
             //  picks summed in expert order - so every copy and prefetch they read is waited for first)
@@ -3034,7 +3034,7 @@ void fast_token_launches(Model& M, Work& W, OutMode out_mode) {
         int* rtop = W.route_d;
         float* rw = (float*) (W.route_d + c.K);
         // (NVFP4 experts go through the tensor cores, their input as two FP16 limbs the router's launch writes)
-#ifdef STRATA_USE_HIP   // (AMD: the scalar kernels read the blocks faster than the mma's layouts on the shuffles)
+#ifdef MAYA_USE_HIP   // (AMD: the scalar kernels read the blocks faster than the mma's layouts on the shuffles)
         static const int exp_mma = getenv("SAGUARO_IK2_EXPERT_MMA") ? atoi(getenv("SAGUARO_IK2_EXPERT_MMA")) : 0;
 #else
         static const int exp_mma = getenv("SAGUARO_IK2_EXPERT_MMA") ? atoi(getenv("SAGUARO_IK2_EXPERT_MMA")) : 1;
@@ -3541,7 +3541,7 @@ bool lane_init(Model& M, const std::string& want, int threads) {
         CU(cudaMemGetInfo(&fr, &tot));
         char kb[256];
         std::snprintf(kb, sizeof kb, "%s|%zu MiB|%u logical|%zu physical|%s|lane %d|C %d F %d", p.name, tot >> 20,
-                      std::thread::hardware_concurrency(), strata::kernels::cpu::physical_cores(false).size(),
+                      std::thread::hardware_concurrency(), maya::kernels::cpu::physical_cores(false).size(),
                       ik2::lane::rows_form(), threads, C, F);
         key = kb;
         for (char& ch : key) ch = ch == ' ' ? '_' : ch;
@@ -3563,7 +3563,7 @@ bool lane_init(Model& M, const std::string& want, int threads) {
     if (have) g_offs.lane->set_threads(cal_thr - 1);
     if (threads < 0 && !have) {   // the lane's size: counts below the CPU's cores timed on experts read from memory, the
                          // fastest kept (a smaller one within 5%) - a lane as wide as the CPU loses on a busy PC
-        const int phys = (int) strata::kernels::cpu::physical_cores(false).size();
+        const int phys = (int) maya::kernels::cpu::physical_cores(false).size();
         std::vector<int> cand;
         // (and the logical CPUs but two where there are more: on a small desktop CPU the second thread a core still
         //  adds - Uranus' 6 cores: 29 GB/s on 6 threads, 44 on 12)
@@ -4145,7 +4145,7 @@ void fast_block_launches(Model& M, Work& W, int T, OutMode out_mode) {
                            g_blk.n1, g_blk.tok1, g_blk.row1, g_blk.sg, g_blk.su, g_blk.wt, g_blk.inv, g_s, pp,
                            g_blk.cls, 1);
         // (exact: the token path's choice - NVFP4 on the tensor cores unless SAGUARO_IK2_EXPERT_MMA=0, else the row dots)
-#ifdef STRATA_USE_HIP   // (AMD: the token path's default is the row dots - so is the window's)
+#ifdef MAYA_USE_HIP   // (AMD: the token path's default is the row dots - so is the window's)
         static const int exp_mma = getenv("SAGUARO_IK2_EXPERT_MMA") ? atoi(getenv("SAGUARO_IK2_EXPERT_MMA")) : 0;
 #else
         static const int exp_mma = getenv("SAGUARO_IK2_EXPERT_MMA") ? atoi(getenv("SAGUARO_IK2_EXPERT_MMA")) : 1;
@@ -4329,7 +4329,7 @@ void watchdog_start() {
     const int limit = v && *v ? std::atoi(v) : 600;
     if (limit <= 0) return;
     std::thread([limit] {
-        strata::ds4::StallRule rule;
+        maya::ds4::StallRule rule;
         rule.limit_s = limit;
         const auto t0 = std::chrono::steady_clock::now();
         for (;;) {
@@ -4426,7 +4426,7 @@ void par_launches(Model& M, Work& W, int T, const int* sl, bool cand) {
     k::rms(W.tmp, M.embd_norm, T, C, c.eps, W.h, g_s);
     CU(cudaMemcpyAsync(W.pos, g_parb.pos_h, (size_t) T * 4, cudaMemcpyHostToDevice, g_s));
     auto blk = [&](int i) { return W.blocks + (size_t) i * W.blk_ld * C; };
-#ifdef STRATA_USE_HIP
+#ifdef MAYA_USE_HIP
     static const int exp_mma = getenv("SAGUARO_IK2_EXPERT_MMA") ? atoi(getenv("SAGUARO_IK2_EXPERT_MMA")) : 0;
 #else
     static const int exp_mma = getenv("SAGUARO_IK2_EXPERT_MMA") ? atoi(getenv("SAGUARO_IK2_EXPERT_MMA")) : 1;
@@ -5406,7 +5406,7 @@ void tp_token_launches(OutMode out_mode) {
             k::mv_f16(Ly.router16, c.E, C, W.xq, W.rlog, g_s);
             int* rtop = W.route_d;
             float* rw = (float*) (W.route_d + c.K);
-#ifdef STRATA_USE_HIP
+#ifdef MAYA_USE_HIP
             static const int exp_mma = getenv("SAGUARO_IK2_EXPERT_MMA") ? atoi(getenv("SAGUARO_IK2_EXPERT_MMA")) : 0;
 #else
             static const int exp_mma = getenv("SAGUARO_IK2_EXPERT_MMA") ? atoi(getenv("SAGUARO_IK2_EXPERT_MMA")) : 1;
@@ -6587,7 +6587,7 @@ void embed_row(Model& M, int t, float* raw, float* out) {
 // (the anchor first): each step a plain token or a window of the drafter's or the prompt lookup's drafts (ctl.pick);
 // lk holds the text before the anchor.  The CLI's generation and --drafting auto's trials.
 void decode_greedy(Model& M, ik2::draft::Drafter* drafter, int anchor, int P, int gen, int ctx, SpecCtl& ctl,
-                   strata::spec::SuffixDrafter& lk, std::vector<int>& out, double* t_draft) {
+                   maya::spec::SuffixDrafter& lk, std::vector<int>& out, double* t_draft) {
     double t_exp = 0;
     const SampleCfg sc;
     std::vector<int> next;
@@ -6782,12 +6782,12 @@ void check_preview(int n_gpu, bool serve) {
     };
     const bool force = getenv("SAGUARO_IK2_UNSUPPORTED") && std::atoi(getenv("SAGUARO_IK2_UNSUPPORTED"));
     const std::string run_anyway = " (SAGUARO_IK2_UNSUPPORTED=1 runs it anyway, untested)";
-#if defined(_WIN32) && defined(STRATA_USE_HIP)
+#if defined(_WIN32) && defined(MAYA_USE_HIP)
     if (!force) refuse("Inkling 2 on AMD runs on Linux only, Windows is outside it" + run_anyway);
 #endif
     int nd = 0;
     const cudaError_t e = cudaGetDeviceCount(&nd);
-#ifdef STRATA_USE_HIP
+#ifdef MAYA_USE_HIP
     const char* vendor = "AMD";
 #else
     const char* vendor = "NVIDIA";
@@ -6811,25 +6811,25 @@ void check_preview(int n_gpu, bool serve) {
     if (n_gpu == 2 && old_two && !force)
         refuse("--gpus 2 with SAGUARO_IK2_EP=1 / SAGUARO_IK2_TP=1: the older two-GPU modes are outside the preview (without them: "
                "the two-GPU split)" + run_anyway);
-#ifdef STRATA_USE_HIP   // (the split runs GPU 0 on the offload path, not checked on AMD yet)
+#ifdef MAYA_USE_HIP   // (the split runs GPU 0 on the offload path, not checked on AMD yet)
     if (n_gpu == 2 && !force) refuse("--gpus 2: two AMD GPUs are not in the Inkling 2 preview yet" + run_anyway);
 #endif
     if (n_gpu == 2 && nd < 2)
         refuse("--gpus 2: " + std::to_string(nd) + " GPU visible");
-#ifdef STRATA_USE_HIP
+#ifdef MAYA_USE_HIP
     if (g_tpn > 1 && !force) refuse("--tp: not checked on AMD GPUs yet" + run_anyway);
 #endif
     for (int d = 0; d < std::min(n_gpu, nd); ++d) {
         cudaDeviceProp p{};
         CU(cudaGetDeviceProperties(&p, d));
-#ifdef STRATA_USE_HIP
-        // (AMD, Linux: every arch of this build - include/strata/hip_compat; the device check of the build's arch
+#ifdef MAYA_USE_HIP
+        // (AMD, Linux: every arch of this build - include/maya/hip_compat; the device check of the build's arch
         //  list stops a card it has no code for with a clear line, as the other engines)
         std::string arch = p.gcnArchName;
         arch = arch.substr(0, arch.find(':'));
         const std::string gpu = "GPU " + std::to_string(d) + " (" + p.name + ", " + arch + ")";
-        if ((std::string(",") + STRATA_HIP_ARCHS + ",").find("," + arch + ",") == std::string::npos)
-            refuse("this build has no kernels for " + gpu + ": it is built for " + STRATA_HIP_ARCHS +
+        if ((std::string(",") + MAYA_HIP_ARCHS + ",").find("," + arch + ",") == std::string::npos)
+            refuse("this build has no kernels for " + gpu + ": it is built for " + MAYA_HIP_ARCHS +
                    " (add " + arch + " to CMAKE_HIP_ARCHITECTURES and rebuild)");
         if (arch.rfind("gfx11", 0) != 0 && arch.rfind("gfx12", 0) != 0 && !force)   // (the matrix-core prompt paths)
             refuse(gpu + ": saguaro-ik2 on AMD needs an RDNA 3 / 3.5 / 4 GPU (gfx11 / gfx12)" + run_anyway);
@@ -6844,7 +6844,7 @@ void check_preview(int n_gpu, bool serve) {
         }
 #endif
         CU(cudaSetDevice(d));
-#ifndef STRATA_USE_HIP   // (a kernel of this build for the GPU: none when its arch is not in the list)
+#ifndef MAYA_USE_HIP   // (a kernel of this build for the GPU: none when its arch is not in the list)
         cudaFuncAttributes fa{};
         if (cudaFuncGetAttributes(&fa, unpack_segments_kernel) != cudaSuccess) {
             (void) cudaGetLastError();
@@ -6854,7 +6854,7 @@ void check_preview(int n_gpu, bool serve) {
 #endif
         // (a card that does not hold every expert takes the offload path: a tier of them in VRAM, the rest in RAM;
         //  under 7 GiB - an 8 GB card's - the dense weights, the caches and the smallest tier do not fit beside)
-#ifdef STRATA_USE_HIP   // (AMD: 16 GB and up - every expert resident, or the offload path where they do not fit)
+#ifdef MAYA_USE_HIP   // (AMD: 16 GB and up - every expert resident, or the offload path where they do not fit)
         if (p.totalGlobalMem < (15ull << 30) && !force) {
             char m[64];
             std::snprintf(m, sizeof m, "%.1f GB", (double) p.totalGlobalMem / 1e9);
@@ -6941,7 +6941,7 @@ int main(int argc, char** argv) {
     }
     g_prof = getenv("SAGUARO_IK2_PROF") && std::atoi(getenv("SAGUARO_IK2_PROF"));
     g_flash = !(getenv("SAGUARO_IK2_FLASH") && !std::atoi(getenv("SAGUARO_IK2_FLASH")));
-#ifdef STRATA_USE_HIP
+#ifdef MAYA_USE_HIP
     if (!k::attn_flash_available()) g_flash = false;   // (AMD: the fused prompt attention where its kernel is built)
 #endif
     g_mv = !getenv("SAGUARO_IK2_MV") || std::atoi(getenv("SAGUARO_IK2_MV"));
@@ -6953,7 +6953,7 @@ int main(int argc, char** argv) {
     // (the grouped batch prefill experts: measured faster on an RTX 3070 by PR #1118, 2.8x / 3.5x slower prompt reads on
     //  a Tesla T4 / an RX 9070 XT - on by default from sm_80 on NVIDIA only, below; SAGUARO_IK2_GRP=0/1 decides)
     g_grp = getenv("SAGUARO_IK2_GRP") ? std::atoi(getenv("SAGUARO_IK2_GRP")) != 0 : true;
-#ifdef STRATA_USE_HIP
+#ifdef MAYA_USE_HIP
     if (!getenv("SAGUARO_IK2_GRP")) g_grp = false;
 #endif
     g_dense_q8 = getenv("SAGUARO_IK2_DENSE") && std::string(getenv("SAGUARO_IK2_DENSE")) == "q8";
@@ -6966,7 +6966,7 @@ int main(int argc, char** argv) {
     }
     g_kv_q4_stream = g_kv_q4 && getenv("SAGUARO_IK2_KV_STREAM") && std::atoi(getenv("SAGUARO_IK2_KV_STREAM"));
     if (getenv("SAGUARO_IK2_KV_VRAM_MB")) g_kv_vram_mb = std::max(0, std::atoi(getenv("SAGUARO_IK2_KV_VRAM_MB")));
-#ifdef STRATA_USE_HIP
+#ifdef MAYA_USE_HIP
     if (g_kv_q4) g_flash = false;   // (AMD: the Q4 KV's fused prompt attention does not launch on RDNA - its cuBLAS path)
 #endif
     if (getenv("SAGUARO_IK2_TRACE") && *getenv("SAGUARO_IK2_TRACE")) {
@@ -7016,12 +7016,12 @@ int main(int argc, char** argv) {
         g_two.want = true;
         n_gpu = 1;
     }
-#ifdef STRATA_USE_HIP
+#ifdef MAYA_USE_HIP
     {   // (AMD: the GEMMs' measured kernels - lt-picks.txt beside the GGUF, or SAGUARO_IK2_LT_STORE's file; empty: none kept)
         const char* ls = std::getenv("SAGUARO_IK2_LT_STORE");
         const size_t sl = model.find_last_of('/');
         const std::string dir = sl == std::string::npos ? std::string(".") : model.substr(0, sl);
-        strata::ds4::lt::set_store(ls != nullptr ? ls : (dir + "/lt-picks.txt").c_str(), "SAGUARO_IK2_LT_STORE");
+        maya::ds4::lt::set_store(ls != nullptr ? ls : (dir + "/lt-picks.txt").c_str(), "SAGUARO_IK2_LT_STORE");
     }
 #endif
     // SAGUARO_IK2_VRAM_GB=N (tests): the first GPU as a card of N GiB - the rest of its memory taken now and kept, so every
@@ -7331,7 +7331,7 @@ int main(int argc, char** argv) {
         g_dense_bytes = dense_b, g_exp_bytes = exp_b;
         size_t fr0 = 0, tot0 = 0;
         CU(cudaMemGetInfo(&fr0, &tot0));
-#ifdef STRATA_USE_HIP
+#ifdef MAYA_USE_HIP
         {   // (an AMD APU whose memory is the RAM - Strix / Gorgon Halo on Linux: HIP's free figure is the GTT's, which
             //  can exceed what the RAM has left; the engines keep max(8 GiB, 10% of the RAM) free for the system)
             cudaDeviceProp p{};
@@ -7394,7 +7394,7 @@ int main(int argc, char** argv) {
             // where the cache alone does not fit beside the dense weights and a half-GiB tier.  (Not where the
             // offload path does not run: AMD, SAGUARO_IK2_OFF=0, SAGUARO_IK2_DENSE - there every expert stays and the cache streams.)
             bool off_ok = !getenv("SAGUARO_IK2_DENSE") && !(getenv("SAGUARO_IK2_OFF") && *getenv("SAGUARO_IK2_OFF") && !std::atoi(getenv("SAGUARO_IK2_OFF")));
-#ifdef STRATA_USE_HIP
+#ifdef MAYA_USE_HIP
             off_ok = false;
 #endif
             int host_n = 0, n_res = n_full;
@@ -7481,7 +7481,7 @@ int main(int argc, char** argv) {
         //  answers - on by default on one GPU; SAGUARO_IK2_OFF_DYNAMIC=0: the fixed tier, =1 on two GPUs too)
         const char* dyn_env = getenv("SAGUARO_IK2_OFF_DYNAMIC");
         g_off_dynamic = g_off_want && (dyn_env && *dyn_env ? std::atoi(dyn_env) != 0 : !g_two.want);
-#ifdef STRATA_USE_HIP   // (AMD: the offload path where the experts do not fit - checked on an RX 9070 XT, gfx1201)
+#ifdef MAYA_USE_HIP   // (AMD: the offload path where the experts do not fit - checked on an RX 9070 XT, gfx1201)
         if (g_off_want && off_set != 1)
             std::printf("NOTE saguaro ik2: AMD - the offload path (checked on RDNA 4, gfx1201; SAGUARO_IK2_OFF=0: the "
                         "cache path instead)\n");
@@ -9172,7 +9172,7 @@ int main(int argc, char** argv) {
             for (int vis = 0; vis < (int) M.V.size(); ++vis) {
                 Layer& Ly = bind_visit(M, vis);
                 use_dev(Ly.dev);
-#ifdef STRATA_USE_HIP   // (AMD: on the engine's stream - a plain memset is a device-wide wait there, 192 a request)
+#ifdef MAYA_USE_HIP   // (AMD: on the engine's stream - a plain memset is a device-wide wait there, 192 a request)
                 CU(cudaMemsetAsync(Ly.h_k, 0, 3 * KD * 4, g_s));
                 CU(cudaMemsetAsync(Ly.h_v, 0, 3 * KD * 4, g_s));
                 CU(cudaMemsetAsync(Ly.h_attn, 0, 3 * C * 4, g_s));
@@ -9356,7 +9356,7 @@ int main(int argc, char** argv) {
                         ctl.wmax = getenv("SAGUARO_IK2_DRAFT_WIDTH") ? std::clamp(atoi(getenv("SAGUARO_IK2_DRAFT_WIDTH")), 2, kBlockMax) : kBlockMax;
                         ctl.use_lookup = mode == 1 || mode == 3, ctl.use_model = mode >= 2;
                         if (mode == 0) ctl.wmax = 1;   // (plain tokens only)
-                        strata::spec::SuffixDrafter lk1;
+                        maya::spec::SuffixDrafter lk1;
                         lk1.append(ids.data(), ids.size());
                         std::vector<int> out;
                         const double t0 = now();
@@ -9867,7 +9867,7 @@ int main(int argc, char** argv) {
         sctl.wmax = getenv("SAGUARO_IK2_DRAFT_WIDTH") ? std::clamp(atoi(getenv("SAGUARO_IK2_DRAFT_WIDTH")), 2, kBlockMax) : kBlockMax;
         sctl.adapt = !(getenv("SAGUARO_IK2_DRAFT_ADAPT") && !atoi(getenv("SAGUARO_IK2_DRAFT_ADAPT")));
         sctl.use_model = drafter != nullptr, sctl.use_lookup = g_lookup;
-        static strata::spec::SuffixDrafter lk;   // (the prompt lookup: a request's tokens so far)
+        static maya::spec::SuffixDrafter lk;   // (the prompt lookup: a request's tokens so far)
         while (next_line(line)) {
             std::istringstream in(line);
             std::string cmd, stops_s, ids_s, emb_path;
@@ -10548,7 +10548,7 @@ int main(int argc, char** argv) {
         ctl.wmax = getenv("SAGUARO_IK2_DRAFT_WIDTH") ? std::clamp(atoi(getenv("SAGUARO_IK2_DRAFT_WIDTH")), 2, kBlockMax) : kBlockMax;
         ctl.adapt = !(getenv("SAGUARO_IK2_DRAFT_ADAPT") && !atoi(getenv("SAGUARO_IK2_DRAFT_ADAPT")));
         ctl.use_model = drafter != nullptr, ctl.use_lookup = g_lookup;
-        strata::spec::SuffixDrafter lk;
+        maya::spec::SuffixDrafter lk;
         lk.append(prompt.data(), prompt.size());
         int anchor = first_best, P = (int) prompt.size();
         out.push_back(anchor);

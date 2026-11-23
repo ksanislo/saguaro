@@ -3,12 +3,12 @@
 // take and 1-16 tokens (the AVX1 rows of iq_avx1.cpp on a CPU without AVX2); then GLM's split-base rows with
 // several tokens against the same rows one token at a time (what a verify window computes vs the token path).
 // Synthetic rows (random codes, small normal block scales), Q8_K activations from ggml's quantizer.  CPU only.
-#include "strata/kernels/cpu/expert_layout.hpp"
-#include "strata/kernels/cpu/iq_avx1.hpp"
-#include "strata/kernels/cpu/iq_avx2.hpp"
-#include "strata/kernels/cpu/iq_avx512.hpp"
-#include "strata/kernels/cpu/iq_avx512_one.hpp"
-#include "strata/kernels/cpu/native_expert.hpp"
+#include "maya/kernels/cpu/expert_layout.hpp"
+#include "maya/kernels/cpu/iq_avx1.hpp"
+#include "maya/kernels/cpu/iq_avx2.hpp"
+#include "maya/kernels/cpu/iq_avx512.hpp"
+#include "maya/kernels/cpu/iq_avx512_one.hpp"
+#include "maya/kernels/cpu/native_expert.hpp"
 
 #include "ggml.h"
 #include "ggml-cpu.h"
@@ -24,7 +24,7 @@
 
 namespace {
 
-namespace cpu = strata::kernels::cpu;
+namespace cpu = maya::kernels::cpu;
 using RowsFn = void (*)(int, const uint8_t*, size_t, int, const void* const*, int, float* const*, int, int);
 
 int failures = 0;

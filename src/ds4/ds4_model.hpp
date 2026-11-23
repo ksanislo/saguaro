@@ -22,7 +22,7 @@
 #include <utility>
 #include <vector>
 
-namespace strata::ds4 {
+namespace maya::ds4 {
 
 struct Options {
     std::string pack;                 // <model>/maya-ds4
@@ -424,7 +424,7 @@ public:
     /// INFO / VRAM lines for the server's Monitor.
     std::vector<std::string> info_lines() const;
     /// (PLAN-vram-live) one fingerprint a card of what its VRAM line follows (pure bookkeeping, no device call):
-    /// the serve loop re-prints info_lines' VRAM lines when one moves (strata/program/vram_live.hpp).
+    /// the serve loop re-prints info_lines' VRAM lines when one moves (maya/program/vram_live.hpp).
     std::vector<std::string> vram_live_fp() const;
     /// (PLAN-context-panel, output only) the bytes of conversations parked in RAM outside the slots: the serve loop
     /// publishes them whenever it parks, takes back, spills to disk or drops one, and the VRAM lines carry the
@@ -451,4 +451,4 @@ private:
     std::unique_ptr<Impl> p_;
 };
 
-}  // namespace strata::ds4
+}  // namespace maya::ds4

@@ -126,7 +126,7 @@ class HipSetupTests(unittest.TestCase):
         tables = self.root / "tools/hip"
         tables.mkdir(parents=True)
         for arch in ("gfx1100", "gfx1201"):
-            (tables / f"{arch}-glm-hipblaslt-100202.txt").write_text(f"STRATA_HIPBLASLT_TUNING_V1 {arch} 100202\n")
+            (tables / f"{arch}-glm-hipblaslt-100202.txt").write_text(f"MAYA_HIPBLASLT_TUNING_V1 {arch} 100202\n")
         self.a.gpu = None
         self.a.gpus = "0,1"
         pc = maya.check_pc(self.a)
@@ -155,11 +155,11 @@ class HipSetupTests(unittest.TestCase):
     def test_config_prompt_defaults_and_tuning_table(self):
         tables = self.root / "tools/hip"
         tables.mkdir(parents=True)
-        (tables / "gfx1100-glm-hipblaslt-100202.txt").write_text("STRATA_HIPBLASLT_TUNING_V1 gfx1100 100202\n")
-        (tables / "gfx1201-glm-hipblaslt-100202.txt").write_text("STRATA_HIPBLASLT_TUNING_V1 gfx1201 100202\n")
-        (tables / "gfx1100-glm-hipblaslt-100401.txt").write_text("STRATA_HIPBLASLT_TUNING_V1 gfx1100 100401\n")
+        (tables / "gfx1100-glm-hipblaslt-100202.txt").write_text("MAYA_HIPBLASLT_TUNING_V1 gfx1100 100202\n")
+        (tables / "gfx1201-glm-hipblaslt-100202.txt").write_text("MAYA_HIPBLASLT_TUNING_V1 gfx1201 100202\n")
+        (tables / "gfx1100-glm-hipblaslt-100401.txt").write_text("MAYA_HIPBLASLT_TUNING_V1 gfx1100 100401\n")
         # a second table for one version (another build's solution numbers) comes after that version's own file
-        (tables / "gfx1100-glm-hipblaslt-100401-b.txt").write_text("STRATA_HIPBLASLT_TUNING_V1 gfx1100 100401\n")
+        (tables / "gfx1100-glm-hipblaslt-100401-b.txt").write_text("MAYA_HIPBLASLT_TUNING_V1 gfx1100 100401\n")
         pc = maya.check_pc(self.a)
         self.a.env = ["SAGUARO_GLM_PREFILL_SUB=512"]
         p = maya.write_config(self.a, pc, {"lib_dirs": [str(self.rocm / "lib")]},
@@ -210,7 +210,7 @@ class HipSetupTests(unittest.TestCase):
         tables = self.root / "tools/hip"
         tables.mkdir(parents=True)
         for v in ("100202", "100401"):
-            (tables / f"gfx1100-glm-hipblaslt-{v}.txt").write_text(f"STRATA_HIPBLASLT_TUNING_V1 gfx1100 {v}\n")
+            (tables / f"gfx1100-glm-hipblaslt-{v}.txt").write_text(f"MAYA_HIPBLASLT_TUNING_V1 gfx1100 {v}\n")
         pc = maya.check_pc(self.a)
         for sep in (";", ":"):
             with self.subTest(sep=sep), patch.object(maya.os, "pathsep", sep):
@@ -243,7 +243,7 @@ class HipSetupTests(unittest.TestCase):
         tables = self.root / "tools/hip"
         tables.mkdir(parents=True)
         table = tables / "gfx1151-glm-hipblaslt-100202.txt"
-        table.write_text("STRATA_HIPBLASLT_TUNING_V1 gfx1151 100202\n")
+        table.write_text("MAYA_HIPBLASLT_TUNING_V1 gfx1151 100202\n")
         pc = maya.check_pc(self.a)
         self.assertEqual(pc["gpus"], [self.gpus[3]])
         self.assertTrue(maya.hip_unified_memory(pc["gpus"][0]))
@@ -293,9 +293,9 @@ class HipSetupTests(unittest.TestCase):
                 patch.object(maya, "cmake_steps", return_value=None) as build:
             meta = maya.compile_engine_hip(pc, self.root / "llama", "source-sha")
         conf, _, env, _ = build.call_args.args
-        self.assertIn("-DSTRATA_ENABLE_HIP=ON", conf)
-        self.assertIn("-DSTRATA_ENABLE_CUDA=OFF", conf)
-        self.assertIn("-DSTRATA_PREFILL_MMQ=ON", conf)
+        self.assertIn("-DMAYA_ENABLE_HIP=ON", conf)
+        self.assertIn("-DMAYA_ENABLE_CUDA=OFF", conf)
+        self.assertIn("-DMAYA_PREFILL_MMQ=ON", conf)
         self.assertIn("-DCMAKE_HIP_ARCHITECTURES=gfx1100", conf)     # the chosen card's (#255)
         self.assertEqual(env["ROCM_PATH"], str(self.rocm))
         self.assertEqual(meta["backend"], "hip")
@@ -947,8 +947,8 @@ class WindowsHipSetupTests(unittest.TestCase):
                      f"-DCMAKE_C_COMPILER={root}/lib/llvm/bin/clang.exe",
                      f"-DCMAKE_HIP_COMPILER={root}/lib/llvm/bin/clang++.exe",
                      f"-DCMAKE_HIP_COMPILER_ROCM_ROOT={root}",
-                     "-DSTRATA_ENABLE_HIP=ON", "-DSTRATA_ENABLE_CUDA=OFF", "-DSTRATA_PREFILL_MMQ=ON",
-                     "-DSTRATA_PORTABLE=ON", "-DCMAKE_HIP_ARCHITECTURES=gfx1151"):
+                     "-DMAYA_ENABLE_HIP=ON", "-DMAYA_ENABLE_CUDA=OFF", "-DMAYA_PREFILL_MMQ=ON",
+                     "-DMAYA_PORTABLE=ON", "-DCMAKE_HIP_ARCHITECTURES=gfx1151"):
             self.assertIn(want, conf)
         if " " not in root:
             self.assertIn(f"-DCMAKE_HIP_FLAGS=--rocm-path={root} --rocm-device-lib-path={root}/lib/llvm/amdgcn/bitcode",
@@ -1001,7 +1001,7 @@ class WindowsHipSetupTests(unittest.TestCase):
     def test_windows_apu_config(self):
         tables = self.root / "tools/hip"
         tables.mkdir(parents=True)
-        (tables / "gfx1151-glm-hipblaslt-100202.txt").write_text("STRATA_HIPBLASLT_TUNING_V1 gfx1151 100202\n")
+        (tables / "gfx1151-glm-hipblaslt-100202.txt").write_text("MAYA_HIPBLASLT_TUNING_V1 gfx1151 100202\n")
         with patch.dict(os.environ, {"ROCM_PATH": str(self.rocm)}):
             pc = maya.check_pc(self.a)
         p = maya.write_config(self.a, pc, {"lib_dirs": [str(self.rocm / "bin")]}, self.root / "pack", "Maya-L", 32768,

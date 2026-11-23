@@ -9,13 +9,13 @@
 #include <string>
 #include <vector>
 
-#if !defined(STRATA_USE_HIP)
+#if !defined(MAYA_USE_HIP)
 #include <cuda.h>
 #endif
 
 namespace mm3::vmm {
 
-#if !defined(STRATA_USE_HIP)
+#if !defined(MAYA_USE_HIP)
 struct Api {
     CUresult (*dev_get)(CUdevice*, int) = nullptr;
     CUresult (*attr)(int*, CUdevice_attribute, CUdevice) = nullptr;

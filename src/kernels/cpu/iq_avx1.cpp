@@ -1,5 +1,5 @@
 // src/kernels/cpu/iq_avx1.cpp - GLM's native expert rows on AVX-only CPUs: the shared AVX1 kernels (iq_avx1_kern.inc).
-#include "strata/kernels/cpu/iq_avx1.hpp"
+#include "maya/kernels/cpu/iq_avx1.hpp"
 
 #define GGML_COMMON_DECL_CPP
 #define GGML_COMMON_IMPL_CPP
@@ -14,7 +14,7 @@
 
 #include <cstring>
 
-namespace strata::kernels::cpu {
+namespace maya::kernels::cpu {
 
 #if defined(_MSC_VER) && !defined(__clang__)   // (the kernels set their ISA with GCC / Clang target attributes)
 bool cpu_avx1_only() noexcept { return false; }
@@ -22,7 +22,7 @@ bool iq128_supported(int) noexcept { return false; }
 void iq128_rows(int, const uint8_t*, size_t, int, const void* const*, int, float* const*, int, int) {}
 #else
 namespace {
-#include "strata/kernels/cpu/iq_avx1_kern.inc"
+#include "maya/kernels/cpu/iq_avx1_kern.inc"
 }  // namespace
 
 bool cpu_avx1_only() noexcept {
@@ -76,4 +76,4 @@ void iq128_rows(int ggml_type, const uint8_t* w, size_t row_bytes, int n, const 
 }
 #endif
 
-}  // namespace strata::kernels::cpu
+}  // namespace maya::kernels::cpu

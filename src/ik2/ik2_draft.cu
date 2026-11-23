@@ -1,7 +1,7 @@
 // src/ik2/ik2_draft.cu - saguaro-ik2's drafter (the design: ik2_draft.hpp).
 #include "ik2_draft.hpp"
 #include "ik2_kernels.cuh"
-#include "strata/artifact/gguf_reader.hpp"
+#include "maya/artifact/gguf_reader.hpp"
 
 #include <cuda_fp16.h>
 #include <fcntl.h>
@@ -170,7 +170,7 @@ uint16_t f2bf_host(float f) {   // (round to nearest even: exact for a value tha
 
 struct Src {
     StFile st;                              // mtp.safetensors
-    std::unique_ptr<strata::GgufFile> g;    // or the GGUF
+    std::unique_ptr<maya::GgufFile> g;    // or the GGUF
 };
 
 bool is_gguf(const std::string& path) {
@@ -220,9 +220,9 @@ std::string gguf_name(const std::string& n) {
 }
 
 // the GGUF tensor of a safetensors name, its shape checked (GGUF dims run the other way: [in, out])
-const strata::TensorInfo& g_tensor(const Src& s, const std::string& n, const std::vector<int64_t>& shape) {
+const maya::TensorInfo& g_tensor(const Src& s, const std::string& n, const std::vector<int64_t>& shape) {
     const std::string gn = gguf_name(n);
-    const strata::TensorInfo* t = s.g->find(gn);
+    const maya::TensorInfo* t = s.g->find(gn);
     if (!t) throw std::runtime_error("drafter: no tensor " + gn + " in the GGUF");
     bool same = t->shape.size() == shape.size();
     for (size_t i = 0; same && i < shape.size(); ++i) same = (int64_t) t->shape[shape.size() - 1 - i] == shape[i];
@@ -233,7 +233,7 @@ const strata::TensorInfo& g_tensor(const Src& s, const std::string& n, const std
 // the first dimension (safetensors order) of a tensor
 int64_t src_dim0(const Src& s, const std::string& n) {
     if (s.g) {
-        const strata::TensorInfo* t = s.g->find(gguf_name(n));
+        const maya::TensorInfo* t = s.g->find(gguf_name(n));
         if (!t || t->shape.size() != 2) throw std::runtime_error("drafter: no 2-D " + gguf_name(n));
         return (int64_t) t->shape[1];
     }
@@ -288,7 +288,7 @@ std::vector<uint16_t> src_bf16(const Src& s, const std::string& n, const std::ve
 
 // a GGUF of the drafter: llama.cpp's dflash metadata checked against what this drafter is (a file of another model
 // or another layout stops the load instead of drafting garbage)
-void check_gguf(const strata::GgufFile& g, int C, int layers, int H, int KV, int F, int taps, const std::vector<bool>& local) {
+void check_gguf(const maya::GgufFile& g, int C, int layers, int H, int KV, int F, int taps, const std::vector<bool>& local) {
     auto num = [&](const char* key) -> double {
         const auto* v = g.get(key);
         if (!v || !v->is_num()) throw std::runtime_error(std::string("drafter: the GGUF has no ") + key);
@@ -483,7 +483,7 @@ float* up32f(Drafter* d, const std::vector<float>& f) {
     return p;
 }
 
-#ifndef STRATA_USE_HIP
+#ifndef MAYA_USE_HIP
 // Turing has no BF16 tensor cores and cuBLAS's BF16 GEMM there is slow (~19 ms a T4 draft): the drafter's few rows
 // as plain FMA sums, a warp R rows, the weights read once for the T tokens
 template <int WARPS, int R, int TT>
@@ -552,10 +552,10 @@ __global__ void q8p_f32_kernel(const int8_t* q, const uint16_t* sc, size_t n, fl
 
 // Y [T][N] (ldy) = X [T][K] BF16 . W [N][K]^T BF16, F32 sums
 void gemm_bf(Drafter* d, const uint16_t* W, int N, int K, const uint16_t* X, int T, float* Y, int ldy) {
-#ifndef STRATA_USE_HIP
+#ifndef MAYA_USE_HIP
     if (d->bf16_cols && bf16_cols(W, N, K, X, T, Y, ldy, d->s)) return;
 #endif
-#ifdef STRATA_USE_HIP   // (AMD: the BLAS's kernels for 8 rows read the weights at a fifth of the bus - the drafter's
+#ifdef MAYA_USE_HIP   // (AMD: the BLAS's kernels for 8 rows read the weights at a fifth of the bus - the drafter's
                         //  block on a kernel of ours, the weights read once; the drafts only, never an answer)
     if (k::gemm_bf16_cols(W, N, K, X, T, Y, ldy, d->s)) return;
 #endif
@@ -702,7 +702,7 @@ int context_rows(int ctx) {
 
 Drafter* load(const std::string& path, int C, int ctx, cublasHandle_t blas, cudaStream_t s, bool kv8) {
     Src f;
-    if (is_gguf(path)) f.g = std::make_unique<strata::GgufFile>(path);
+    if (is_gguf(path)) f.g = std::make_unique<maya::GgufFile>(path);
     else f.st = st_open(path);
     auto* d = new Drafter;
     Track track(&d->mem);
@@ -1102,7 +1102,7 @@ void set_head_q8(Drafter* d, const int8_t* q8, const uint16_t* q8d) {
     int dev = 0, major = 0;
     cu(cudaGetDevice(&dev), "cudaGetDevice");
     cu(cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev), "cudaDeviceGetAttribute");
-#ifdef STRATA_USE_HIP
+#ifdef MAYA_USE_HIP
     d->head_tiles = false;        // (AMD: mma.sync is emulated on the shuffles - the row sums read the head once)
 #else
     d->head_tiles = major >= 8;   // (no mma.sync m16n8k16 before Ampere)

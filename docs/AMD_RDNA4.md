@@ -29,20 +29,20 @@ Its diagnostics print the actual architecture and the compiled targets.
 unified-memory accounting ([AMD_SAGUARO.md](AMD_SAGUARO.md)).
 
 A manual build, using Saguaro's existing pinned llama.cpp checkout (the setup's own
-configure is the same with `-DSTRATA_ENABLE_HIP=ON`; the CMake target `maya` builds
+configure is the same with `-DMAYA_ENABLE_HIP=ON`; the CMake target `maya` builds
 the program `saguaro-glm`):
 
 ```sh
 maya_rocm_root="$(realpath "${ROCM_PATH:-/opt/rocm}")"
 cmake -S . -B build-multi -G Ninja -DCMAKE_BUILD_TYPE=Release \
-  -DSTRATA_ENABLE_HIP=ON -DSTRATA_ENABLE_CUDA=OFF \
-  -DSTRATA_NATIVE_EXPERTS=ON -DSTRATA_PREFILL_MMQ=ON \
-  -DSTRATA_BUILD_TESTS=ON \
+  -DMAYA_ENABLE_HIP=ON -DMAYA_ENABLE_CUDA=OFF \
+  -DMAYA_NATIVE_EXPERTS=ON -DMAYA_PREFILL_MMQ=ON \
+  -DMAYA_BUILD_TESTS=ON \
   '-DCMAKE_HIP_ARCHITECTURES=gfx1100;gfx1201;gfx1151' \
   -DCMAKE_HIP_COMPILER="$maya_rocm_root/llvm/bin/clang++" \
   -DCMAKE_HIP_COMPILER_ROCM_ROOT="$maya_rocm_root" \
   -DCMAKE_PREFIX_PATH="$maya_rocm_root" \
-  -DSTRATA_GGML_DIR="$PWD/third_party/llama.cpp"
+  -DMAYA_GGML_DIR="$PWD/third_party/llama.cpp"
 cmake --build build-multi --target maya strata-device hip_expert_cache_staging \
   hip_intrinsics hip_handoff hip_glm_handoff hip_glm_prefill_attention iq1_s_parity \
   glm_hc_parity glm_kda_parity glm_ffn_parity glm_dsa_parity glm_layer_parity \

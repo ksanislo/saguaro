@@ -10,10 +10,10 @@
 //      `ple_layer_xcheck.cpp`.  That file records EVERY intermediate (key, value, gate, gated, normalized,
 //      conv_out, result), so a mismatch can be attributed to a stage instead of guessed at - and the weights
 //      in it were checked to be the artifact's real ones before this test was written.
-#include "strata/kernels/ple.hpp"
-#include "strata/kernels/ngram.hpp"
-#include "strata/kernels/f16_bits.hpp"
-#include "strata/kernels/native_mmvq.hpp"
+#include "maya/kernels/ple.hpp"
+#include "maya/kernels/ngram.hpp"
+#include "maya/kernels/f16_bits.hpp"
+#include "maya/kernels/native_mmvq.hpp"
 #include "ple_oracle_vectors.inc"
 
 #include <cuda_runtime.h>
@@ -27,8 +27,8 @@
 #include <stdexcept>
 #include <vector>
 
-namespace k = strata::kernels;
-namespace o = strata::kernels::ple_oracle;
+namespace k = maya::kernels;
+namespace o = maya::kernels::ple_oracle;
 
 namespace {
 

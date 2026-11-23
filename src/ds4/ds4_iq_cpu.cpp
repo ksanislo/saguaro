@@ -4,8 +4,8 @@
 #include "ds4_gguf_cpu.hpp"
 #include "ds4_cpu_prepare_rows.hpp"
 
-#if defined(STRATA_NATIVE_EXPERTS)
-#include "strata/kernels/cpu/native_expert.hpp"
+#if defined(MAYA_NATIVE_EXPERTS)
+#include "maya/kernels/cpu/native_expert.hpp"
 
 #define GGML_COMMON_DECL_CPP
 #define GGML_COMMON_IMPL_CPP
@@ -43,10 +43,10 @@
 #define IQ_AVX2
 #endif
 
-namespace strata::ds4::gguf {
+namespace maya::ds4::gguf {
 
-#if defined(STRATA_NATIVE_EXPERTS)
-namespace kc = strata::kernels::cpu;
+#if defined(MAYA_NATIVE_EXPERTS)
+namespace kc = maya::kernels::cpu;
 namespace {
 kc::NativeFmt native(const IqCpu& f) {   // (the fields the rows read; no lookups)
     kc::NativeFmt n;
@@ -777,7 +777,7 @@ void iq1s_rows_n(const uint8_t* w, size_t rb, int n, const void* const* act, int
     }
 }
 
-#include "strata/kernels/cpu/iq_avx1_kern.inc"
+#include "maya/kernels/cpu/iq_avx1_kern.inc"
 #endif  // IQ_X86
 
 // out[t][r - r0] for the rows of `type` (an own type only)
@@ -1195,4 +1195,4 @@ bool dense_requant(const uint8_t*, int, int, int, std::vector<uint8_t>&, std::st
 }
 #endif
 
-}  // namespace strata::ds4::gguf
+}  // namespace maya::ds4::gguf

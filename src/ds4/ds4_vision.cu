@@ -22,7 +22,7 @@
 #include <cstdlib>
 #include <cstring>
 
-namespace strata::ds4 {
+namespace maya::ds4 {
 namespace {
 
 #define VK(call)                                                                      \
@@ -441,7 +441,7 @@ bool VisionTower::load(const VisionGeo& g, int device, const Reader& read, std::
     // takes one of the GPU's few hardware queues (GPU_MAX_HW_QUEUES, 4), and two made before the engine's own streams
     // moved those onto shared queues on this GPU - its prompt chunks ~25% slower with the tower loaded, no picture sent.
     // NVIDIA's streams take no such queue: made here, as before, so the handle's VRAM is taken before the plan)
-#if !defined(STRATA_USE_HIP)
+#if !defined(MAYA_USE_HIP)
     if (!make_handles(blas_, st_, cs_, err)) return false;
 #endif
     for (int i = 0; i < 2; ++i) {
@@ -662,4 +662,4 @@ bool VisionTower::run(const uint8_t* rgb, int width, int height, uint8_t* room, 
     return true;
 }
 
-}  // namespace strata::ds4
+}  // namespace maya::ds4

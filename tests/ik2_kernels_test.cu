@@ -1957,7 +1957,7 @@ void test_fp8_kv() {
                 nan_ok &= ((hk[b] & 0x7FFF) > 0x7C00) && ((hv[b] & 0x7FFF) > 0x7C00);
             } else {
                 const uint16_t want_bits = f2h_host(e4m3fn_to_f32_host((uint8_t) b));
-#ifdef STRATA_USE_HIP
+#ifdef MAYA_USE_HIP
                 // (AMD: -0 comes out +0 - the compiler's mixed-precision multiply by the scale; a zero's sign does
                 //  not reach a dot product's value)
                 if (want_bits == 0x8000u) {
@@ -2591,7 +2591,7 @@ void test_round6() {
 
 // One token's NVFP4 experts through the tensor cores against the scalar kernels over the same blocks (every scale
 // byte, the subnormal ones and 0x7F with them): gate | up with the input as two FP16 limbs, down over the FP16 h.
-#ifdef STRATA_USE_HIP
+#ifdef MAYA_USE_HIP
 // AMD: the grouped prompt experts on the matrix cores (ik2_rdna.inc) against double references - rows grouped by
 // expert (37 = a tile of 32 and one of 5, 1, 6), gate / up + SwiGLU (FP16 out), down, each token's picks summed
 void test_experts_rdna() {
@@ -2742,7 +2742,7 @@ void test_experts_mma() {
 // path's to the bit - mv_q8p_cols vs mv_q8p, experts_*_mem vs experts_gate_up_swiglu / experts_down (NVFP4, Q8_0),
 // experts_block_gu / _down vs experts_gate_up_swiglu_mma / experts_down_mma (sm_80 on) - Inkling-2-Mini's sizes.
 void test_window_exact(bool mma) {
-#ifdef STRATA_USE_HIP
+#ifdef MAYA_USE_HIP
     mma = false;   // (AMD: the token path's experts are the row dots - SAGUARO_IK2_EXPERT_MMA's default 0 there)
 #endif
     constexpr int C = 2304, F = 1152, K = 8, E = 24;   // (E 24: a window of 5 picks about 2.6x one token's experts)
@@ -3014,7 +3014,7 @@ void test_q4_kv() {
     int dev_ = 0, maj_ = 0;
     CU(cudaGetDevice(&dev_));
     CU(cudaDeviceGetAttribute(&maj_, cudaDevAttrComputeCapabilityMajor, dev_));
-#ifndef STRATA_USE_HIP
+#ifndef MAYA_USE_HIP
     if (maj_ >= 8) {   // (the engine runs the fused prompt attention from sm_80 on; its Q4 form's shared memory is past sm_75's)
         k::attn_flash_q4(q16, HD, kc4, vc4, 0, H, KV, D, 4, T - 4, sc, dbias, ext, 1 << 30, dsink + (size_t) (T - 4) * H,
                          o_mma, HD, scratch, (size_t) 128 * H * 130 * 8, 2, 0);
@@ -3070,7 +3070,7 @@ int main() {
     test_token_path();
     if (tc) test_experts_mma();
     else std::printf("--   experts_mma: tensor cores (sm_%d class here: the scalar kernels)\n", k::arch_class());
-#ifdef STRATA_USE_HIP
+#ifdef MAYA_USE_HIP
     test_experts_rdna();
 #endif
     if (tc) test_window_exact(p.major >= 8);

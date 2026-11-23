@@ -8,7 +8,7 @@
 #include <utility>
 #include <vector>
 
-namespace strata::prefill::hipblaslt {
+namespace maya::prefill::hipblaslt {
 
 enum class InputType : uint8_t { f16, bf16 };
 
@@ -44,7 +44,7 @@ public:
                 std::string arch;
                 int version = 0;
                 std::string extra;
-                if (!(row >> magic >> arch >> version) || (row >> extra) || magic != "STRATA_HIPBLASLT_TUNING_V1") {
+                if (!(row >> magic >> arch >> version) || (row >> extra) || magic != "MAYA_HIPBLASLT_TUNING_V1") {
                     err = "invalid tuning header at line " + std::to_string(line_number);
                     return false;
                 }
@@ -151,4 +151,4 @@ inline std::vector<std::string> split_table_list(const std::string& list) {
 #endif
 }
 
-}  // namespace strata::prefill::hipblaslt
+}  // namespace maya::prefill::hipblaslt

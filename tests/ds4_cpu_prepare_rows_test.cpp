@@ -5,7 +5,7 @@
 #include <cstdio>
 #include <stdexcept>
 
-namespace gg = strata::ds4::gguf;
+namespace gg = maya::ds4::gguf;
 
 static void require(bool ok, const char* why) {
     if (!ok) throw std::runtime_error(why);

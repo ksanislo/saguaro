@@ -1,7 +1,7 @@
 // src/core/glm_fast_path.cu - the glm5-next FAST decode path (Glm5Model members).
 //
 // The same model as Glm5Model::step_layers (the correctness-first reference, SAGUARO_GLM_SLOW=1), run
-// as ~11 fused launches per layer (strata/kernels/glm_fast.hpp) on a private non-blocking stream per
+// as ~11 fused launches per layer (maya/kernels/glm_fast.hpp) on a private non-blocking stream per
 // device, with NO host synchronisation inside a token except where an expert is missing:
 //
 //   * every weight pointer is resolved once at load (no string lookups per layer per token);
@@ -17,21 +17,21 @@
 // resident experts are excluded, and every other layer's slots are untouched.
 #include "glm_fast_state.hpp"
 #include "vram_late.hpp"   // (#1026: the reserve held for the whole run)
-#include "strata/core/expert_cache.hpp"
-#include "strata/core/glm_model.hpp"
-#include "strata/kernels/glm_fast.hpp"
-#include "strata/kernels/iq_kernels.hpp"
-#include "strata/kernels/cpu/native_expert.hpp"
-#include "strata/kernels/cpu/exl3_cpu.hpp"
-#include "strata/kernels/cpu/exl3_ref.hpp"
-#include "strata/platform/env_switch.hpp"
-#include "strata/platform/idle_gate.hpp"
+#include "maya/core/expert_cache.hpp"
+#include "maya/core/glm_model.hpp"
+#include "maya/kernels/glm_fast.hpp"
+#include "maya/kernels/iq_kernels.hpp"
+#include "maya/kernels/cpu/native_expert.hpp"
+#include "maya/kernels/cpu/exl3_cpu.hpp"
+#include "maya/kernels/cpu/exl3_ref.hpp"
+#include "maya/platform/env_switch.hpp"
+#include "maya/platform/idle_gate.hpp"
 
 #include "ggml.h"
 
 #include <cuda_profiler_api.h>
 #include <cuda_runtime.h>
-#if !defined(STRATA_USE_HIP)
+#if !defined(MAYA_USE_HIP)
 #include <nvtx3/nvToolsExt.h>
 #endif
 
@@ -62,13 +62,13 @@
 #endif
 #include <windows.h>
 #include <psapi.h>
-#if defined(STRATA_USE_HIP)
+#if defined(MAYA_USE_HIP)
 #include <dxgi.h>
 #else
 #include <dxgi1_4.h>
 #endif
-#include "strata/platform/commit.hpp"
-#include "strata/platform/dedicated.hpp"
+#include "maya/platform/commit.hpp"
+#include "maya/platform/dedicated.hpp"
 #endif
 #ifdef __linux__
 #include <sched.h>
@@ -76,12 +76,12 @@
 #include <sys/syscall.h>
 #endif
 
-namespace gf = strata::kernels::glmf;
+namespace gf = maya::kernels::glmf;
 
 // NON_LOCAL is the process's WDDM system-memory budget, not free VRAM.
 // Match CUDA's adapter by LUID; adapter 0 need not be the CUDA device.
 static bool glm_pin_budget(int device, uint64_t& budget, uint64_t& usage) {
-#if defined(_WIN32) && !defined(STRATA_USE_HIP)
+#if defined(_WIN32) && !defined(MAYA_USE_HIP)
     cudaDeviceProp prop{};
     if (cudaGetDeviceProperties(&prop, device) != cudaSuccess) {
         cudaGetLastError();
@@ -122,7 +122,7 @@ static bool glm_pin_budget(int device, uint64_t& budget, uint64_t& usage) {
 // RTX 4070 Ti SUPER / 5070 Ti), and copies alone do not wake it, so a link timed at idle reads 3-8x slower than it
 // runs during decode (Tesla cards keep the link up, so this never showed there).
 static __global__ void glm_link_wake(unsigned long long ns) {
-#if defined(STRATA_USE_HIP)
+#if defined(MAYA_USE_HIP)
     // no PTX %globaltimer on AMD: wall_clock64() is the constant 100 MHz counter (10 ns a tick) on gfx11 / gfx12, and
     // a wake-up spin needs no exact timing (from @boxwrench, #24)
     const long long t0 = wall_clock64();
@@ -138,7 +138,7 @@ static __global__ void glm_link_wake(unsigned long long ns) {
 #endif
 }
 
-namespace strata::core {
+namespace maya::core {
 
 static std::atomic<int> g_live_seqs{1};
 // SAGUARO_GLM_VRAM_EVICT_SOLO_AFTER=<n> | <t>s (=live only): lru only once at most one request has run for n first-part
@@ -164,7 +164,7 @@ static const LiveHold& live_hold() {
 static int64_t live_now() {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
-// STRATA_GLM_CONV_*: the serve loop's VRAM allocation over the live conversations, [kRcLayers][kRcExperts]: bit 0 in
+// MAYA_GLM_CONV_*: the serve loop's VRAM allocation over the live conversations, [kRcLayers][kRcExperts]: bit 0 in
 // it, bit 1 an open conversation's floor, bits 2-7 its score level (victims go lowest level first, preloads highest first)
 static std::atomic<uint8_t> g_conv_flag[glmfast::kRcLayers * glmfast::kRcExperts];
 static std::atomic<bool> g_conv_held_any{false}, g_conv_tgt_any{false};
@@ -1099,7 +1099,7 @@ bool Glm5Model::fast_setup(std::string& err) {
         return false;
     }
     // an EXL3 pack: its kernels' scratch on the compute stream now (a graph capture cannot allocate it)
-    if (exl3_ && !strata::kernels::exl3::prepare(F->cs)) {
+    if (exl3_ && !maya::kernels::exl3::prepare(F->cs)) {
         err = "glm fast: the EXL3 scratch did not allocate";
         return false;
     }
@@ -1186,7 +1186,7 @@ bool Glm5Model::fast_setup(std::string& err) {
             Ly.idx_k = b16("indexer.attn_k.weight");
             Ly.idx_gate = b16("indexer_compressor_gate.weight");
             if (const auto xi = ws_map_.find(P + "indexer.attn_q_b.weight");
-                xi != ws_map_.end() && xi->second.type == strata::kernels::exl3::kTypeEXL3)
+                xi != ws_map_.end() && xi->second.type == maya::kernels::exl3::kTypeEXL3)
                 Ly.idx_q_b_x = xi->second;   // an EXL3 pack quantizes it
             else
                 Ly.idx_q_b = b16("indexer.attn_q_b.weight");
@@ -1207,7 +1207,7 @@ bool Glm5Model::fast_setup(std::string& err) {
             } else if (nl.x_cb >= 0) {
                 // EXL3: the blob is [gate | up | down], a part [trellis | suh | svh]
                 Ly.exl3 = true;
-                Ly.gu_type = Ly.d_type = strata::kernels::exl3::kTypeEXL3;
+                Ly.gu_type = Ly.d_type = maya::kernels::exl3::kTypeEXL3;
                 Ly.gu_bytes = nl.x_part(0);
                 Ly.dn_bytes = nl.x_part(2);
                 Ly.down_off = 2 * Ly.gu_bytes;
@@ -1434,7 +1434,7 @@ bool Glm5Model::fast_setup(std::string& err) {
     // allocatable.  The head group is the parts [0, h) that kda_all walks; h comes from part_/n_parts_ because
     // split_next_ is linked only after every part has loaded.
     if (!dflash_on_ && g_.nextn > 0 && n_parts_ > 1 && part_ < spec_head_parts(n_parts_) &&
-        !strata::platform::env_switch("SAGUARO_GLM_NO_MTP") && !strata::platform::env_switch("SAGUARO_GLM_NO_SPEC") &&
+        !maya::platform::env_switch("SAGUARO_GLM_NO_MTP") && !maya::platform::env_switch("SAGUARO_GLM_NO_SPEC") &&
         !spec_kda_reserve(err))
         return false;
     // ---- the expert pool: per-layer partitions (equal quota per layer within its size class)
@@ -2077,7 +2077,7 @@ bool Glm5Model::fast_setup(std::string& err) {
                 }
                 remaining = total;
                 remaining_layers =
-                    g.n_layers - g.dense_lead + (strata::platform::env_switch("SAGUARO_GLM_NO_MTP") ? 0 : g.nextn);
+                    g.n_layers - g.dense_lead + (maya::platform::env_switch("SAGUARO_GLM_NO_MTP") ? 0 : g.nextn);
             }
             // the last half takes everything left (one device: the NextN block, counted above, is not loaded)
             budget = l1_ >= g.n_layers ? remaining
@@ -2410,7 +2410,7 @@ bool Glm5Model::fast_setup(std::string& err) {
                 }
             if (tier_node >= 0 && seen > 0 && agree) {
                 int host_node = -1;
-#if !defined(STRATA_USE_HIP)
+#if !defined(MAYA_USE_HIP)
                 // cudaDevAttrHostNumaId (134) by its value: CUDA 12.0 and 12.1 do not name it
                 if (cudaDeviceGetAttribute(&host_node, (cudaDeviceAttr) 134, dev_) != cudaSuccess || host_node < 0) {
                     host_node = -1;   // not reported on Volta + 582.78
@@ -2549,11 +2549,11 @@ bool Glm5Model::fast_helper_setup(std::string& err) {
         !glmfast::cuda_ok(cudaMemset(F->cpu_seq_d, 0, 64), "GLM helper sequence reset", err)) return false;
     F->md.cpu_seq = F->cpu_seq_d;
     F->md.cpu_ans = dp;
-    if (F->cpu_fmt.size() != F->L.size()) F->cpu_fmt.assign(F->L.size(), strata::kernels::cpu::NativeFmt{});
+    if (F->cpu_fmt.size() != F->L.size()) F->cpu_fmt.assign(F->L.size(), maya::kernels::cpu::NativeFmt{});
     for (int il = l0_; il < lt_; ++il) {
         const auto& ly = F->L[(size_t) il];
         if (ly.moe && gf::moe_supported(ly.gu_type) && gf::moe_supported(ly.d_type)) {
-            if (!strata::kernels::cpu::native_fmt(ly.gu_type, ly.d_type, g_.n_embd, g_.n_ff_exp,
+            if (!maya::kernels::cpu::native_fmt(ly.gu_type, ly.d_type, g_.n_embd, g_.n_ff_exp,
                                                  F->cpu_fmt[(size_t) il], err)) return false;
         }
     }
@@ -2785,7 +2785,7 @@ struct X3Rows {
 // a merged layer's CPU-lane rows (win_cpu_merged): each token's activation quant, each entry's h quant and rows - the
 // window lanes' (win_lanes_make) and the grouped batched rows' (SAGUARO_GLM_GROUP_EXPERTS, fast_setup)
 void cpu_win_alloc(Glm5Model::FastState* F, const Glm5Geometry& g, bool exl3) {
-    namespace kc = strata::kernels::cpu;
+    namespace kc = maya::kernels::cpu;
     constexpr int kWinMax = Glm5Model::kWinMax;
     auto& C = F->cpu_win;
     if (!C.dn.empty()) return;
@@ -2797,9 +2797,9 @@ void cpu_win_alloc(Glm5Model::FastState* F, const Glm5Geometry& g, bool exl3) {
 }
 
 // matrix r (0 gate, 1 up, 2 down) of an EXL3 expert blob
-strata::kernels::cpu::Exl3Part x3_part(const uint8_t* blob, const strata::kernels::exl3::ExpertLayout& xl, int r,
+maya::kernels::cpu::Exl3Part x3_part(const uint8_t* blob, const maya::kernels::exl3::ExpertLayout& xl, int r,
                                        int E, int FF) {
-    strata::kernels::cpu::Exl3Part p;
+    maya::kernels::cpu::Exl3Part p;
     p.trellis = (const uint32_t*) (blob + xl.trellis[r]);
     p.suh = (const uint16_t*) (blob + xl.suh[r]);
     p.svh = (const uint16_t*) (blob + xl.svh[r]);
@@ -2811,16 +2811,16 @@ strata::kernels::cpu::Exl3Part x3_part(const uint8_t* blob, const strata::kernel
 
 // piece q of matrix r (0 gate, 1 up) for the entries R[0..n) of one expert: their inputs' blocks of that piece (x[i]:
 // entry i's token input) - once a piece, before any of its columns' runs
-void x3_gate_up_prep(const X3Rows* R, const float* const* x, int n, const strata::kernels::cpu::Exl3Part& p, int r,
+void x3_gate_up_prep(const X3Rows* R, const float* const* x, int n, const maya::kernels::cpu::Exl3Part& p, int r,
                      int q) {
-    namespace kc = strata::kernels::cpu;
+    namespace kc = maya::kernels::cpu;
     for (int i = 0; i < n; ++i)
         for (int b = q * (kX3GuIn / 128); b < (q + 1) * (kX3GuIn / 128); ++b)
             R[i].xsb(r)[b] = kc::exl3_cpu_prepare_block(p.suh + b * 128, x[i] + b * 128, R[i].x(r) + b * 128);
 }
 
 // ... then the piece's byte-sum products over the columns [c0, c1), the tile rows decoded once for all n
-void x3_gate_up_rows(const X3Rows* R, int n, const strata::kernels::cpu::Exl3Part& p, int r, int q, int c0, int c1) {
+void x3_gate_up_rows(const X3Rows* R, int n, const maya::kernels::cpu::Exl3Part& p, int r, int q, int c0, int c1) {
     constexpr int kN = Glm5Model::kWinMax;
     const float* xh[kN];
     float* acc[kN];
@@ -2828,12 +2828,12 @@ void x3_gate_up_rows(const X3Rows* R, int n, const strata::kernels::cpu::Exl3Par
         xh[i] = R[i].x(r);
         acc[i] = R[i].gu(r, q);
     }
-    strata::kernels::cpu::exl3_cpu_rows_acc_cols_n(p, xh, n, q * (kX3GuIn / 16), (q + 1) * (kX3GuIn / 16), c0, c1, acc);
+    maya::kernels::cpu::exl3_cpu_rows_acc_cols_n(p, xh, n, q * (kX3GuIn / 16), (q + 1) * (kX3GuIn / 16), c0, c1, acc);
 }
 
 // band b of the gate and up outputs from their pieces, the clamped swiglu, and that block of the down input
-void x3_gate_up_block(const X3Rows& R, const strata::kernels::cpu::Exl3Part* pt, int b, float lim) {
-    namespace kc = strata::kernels::cpu;
+void x3_gate_up_block(const X3Rows& R, const maya::kernels::cpu::Exl3Part* pt, int b, float lim) {
+    namespace kc = maya::kernels::cpu;
     float y[2][128], a[128];
     for (int r = 0; r < 2; ++r) {
         for (int j = 0; j < 128; ++j) a[j] = 0.0f;
@@ -2858,13 +2858,13 @@ void x3_gate_up_block(const X3Rows& R, const strata::kernels::cpu::Exl3Part* pt,
 }
 
 // down piece q's input (gate/up band q) for the entries R[0..n) of one expert - once a piece, before its columns' runs
-void x3_down_prep(const X3Rows* R, int n, const strata::kernels::cpu::Exl3Part* pt, int q, float lim) {
+void x3_down_prep(const X3Rows* R, int n, const maya::kernels::cpu::Exl3Part* pt, int q, float lim) {
     static_assert(kX3DnIn == 128, "a down piece's input is one gate/up band");
     for (int i = 0; i < n; ++i) x3_gate_up_block(R[i], pt, q, lim);
 }
 
 // ... then the piece's byte-sum products over the columns [c0, c1), decoded once for all n
-void x3_down_rows(const X3Rows* R, int n, const strata::kernels::cpu::Exl3Part& pd, int q, int c0, int c1) {
+void x3_down_rows(const X3Rows* R, int n, const maya::kernels::cpu::Exl3Part& pd, int q, int c0, int c1) {
     constexpr int kN = Glm5Model::kWinMax;
     const float* xh[kN];
     float* acc[kN];
@@ -2872,11 +2872,11 @@ void x3_down_rows(const X3Rows* R, int n, const strata::kernels::cpu::Exl3Part& 
         xh[i] = R[i].xd();
         acc[i] = R[i].dp(q);
     }
-    strata::kernels::cpu::exl3_cpu_rows_acc_cols_n(pd, xh, n, q * (kX3DnIn / 16), (q + 1) * (kX3DnIn / 16), c0, c1, acc);
+    maya::kernels::cpu::exl3_cpu_rows_acc_cols_n(pd, xh, n, q * (kX3DnIn / 16), (q + 1) * (kX3DnIn / 16), c0, c1, acc);
 }
 
 // band b of the down output from its pieces
-void x3_down_block(const X3Rows& R, const strata::kernels::cpu::Exl3Part& pd, int b) {
+void x3_down_block(const X3Rows& R, const maya::kernels::cpu::Exl3Part& pd, int b) {
     float a[128];
     for (int j = 0; j < 128; ++j) a[j] = 0.0f;
     for (int q = 0; q < R.FF / kX3DnIn; ++q) {
@@ -2885,7 +2885,7 @@ void x3_down_block(const X3Rows& R, const strata::kernels::cpu::Exl3Part& pd, in
     }
     float s = 0.0f;
     for (int j = 0; j < R.FF / 128; ++j) s += R.xds()[j];
-    strata::kernels::cpu::exl3_cpu_band_out(pd, a, s, b * 128, R.dn() + (size_t) b * 128);
+    maya::kernels::cpu::exl3_cpu_band_out(pd, a, s, b * 128, R.dn() + (size_t) b * 128);
 }
 
 // n experts through their gate/up pieces, down pieces and output bands as ONE batch of jobs in that order: expert i's
@@ -2996,7 +2996,7 @@ void Glm5Model::lane_experts(glmfast::Workers& pool, uint8_t* act, uint8_t* hq, 
     const Glm5Geometry& g = g_;
     const auto& Ly = F->L[(size_t) il];
     const auto& nf = F->cpu_fmt[(size_t) il];
-    namespace kc = strata::kernels::cpu;
+    namespace kc = maya::kernels::cpu;
     const int n_ff = g.n_ff_exp, n_embd = g.n_embd;
     // one job per pool thread: a contiguous run of the call's rows, the experts' gate/up rows end to end (then the
     // down rows likewise), the weighted sum after.  Each thread streams its share in one piece - 2-socket Xeon, 5
@@ -3213,7 +3213,7 @@ void Glm5Model::win_cpu_merged(int il, int nb, const gf::MoeRequest* const* rq, 
     const Glm5Geometry& g = g_;
     const auto& Ly = F->L[(size_t) il];
     const auto& nf = F->cpu_fmt[(size_t) il];
-    namespace kc = strata::kernels::cpu;
+    namespace kc = maya::kernels::cpu;
     const int n_ff = g.n_ff_exp, n_embd = g.n_embd, K = g.n_exp_used;
     auto& C = F->cpu_win;
     constexpr int kMaxE = kWinMax * 8;
@@ -3393,7 +3393,7 @@ void Glm5Model::win_lanes_make(std::shared_ptr<glmfast::Workers> p0, std::shared
                                const std::vector<int>& c0, const std::vector<int>& c1) {
     FastState* F = fast_;
     const Glm5Geometry& g = g_;
-    namespace kc = strata::kernels::cpu;
+    namespace kc = maya::kernels::cpu;
     for (int k = 0; k < 2; ++k) {
         auto* L = new FastState::WinLane();
         L->pool = k == 0 ? p0 : p1;
@@ -3462,7 +3462,7 @@ void Glm5Model::fast_cpu_experts(int il, int ne, const uint8_t* const* blob, con
     const Glm5Geometry& g = g_;
     const auto& Ly = F->L[(size_t) il];
     const auto& nf = F->cpu_fmt[(size_t) il];
-    namespace kc = strata::kernels::cpu;
+    namespace kc = maya::kernels::cpu;
     const int n_ff = g.n_ff_exp, n_embd = g.n_embd;
     lane_experts(*F->cpu_pool, F->cpu_act.data(), F->cpu_hq.data(), F->cpu_ff.data(), F->cpu_dn.data(),
                  F->cpu_x3.data(), il, ne, blob, w, x, out);
@@ -3716,7 +3716,7 @@ bool Glm5Model::fast_cpu_lane_setup(std::string& err) {
         }
     }
     if (threads <= 0 || g.n_embd > 4096 || g.n_exp_used > 8) return true;
-    namespace kc = strata::kernels::cpu;
+    namespace kc = maya::kernels::cpu;
     F->cpu_fmt.assign(F->L.size(), kc::NativeFmt{});
     int il_cal = -1;
     for (int il = l0_; il < lt_; ++il) {
@@ -3726,7 +3726,7 @@ bool Glm5Model::fast_cpu_lane_setup(std::string& err) {
             // EXL3: the CPU kernel takes the mul1 codebook (the others stay on the PCIe lane); n_ff marks the layer
             if (Ly.xl.cb == 2) {
                 auto& f = F->cpu_fmt[(size_t) il];
-                f.gu_type = f.d_type = strata::kernels::exl3::kTypeEXL3;
+                f.gu_type = f.d_type = maya::kernels::exl3::kTypeEXL3;
                 f.n_embd = g.n_embd;
                 f.n_ff = g.n_ff_exp;
                 if (il_cal < 0) il_cal = il;
@@ -3881,7 +3881,7 @@ bool Glm5Model::fast_cpu_lane_setup(std::string& err) {
         }
         std::error_code ec;
         const std::filesystem::path pd = std::filesystem::weakly_canonical(pack_dir_, ec);
-        cal_key = std::string(STRATA_VERSION) + " " + __DATE__ + " " + __TIME__ + " | " + (ec ? pack_dir_ : pd.string()) + " | layer " + std::to_string(il_cal) +
+        cal_key = std::string(MAYA_VERSION) + " " + __DATE__ + " " + __TIME__ + " | " + (ec ? pack_dir_ : pd.string()) + " | layer " + std::to_string(il_cal) +
                   " | " + std::to_string(F->L[(size_t) il_cal].blob) + " B | " + bus + " " + prop.name + " | " +
                   std::to_string(threads) + (shared ? " threads shared" : " threads") + " | " + std::to_string(n_cal);
         if (FILE* cf = std::fopen(calf, "r")) {
@@ -4034,7 +4034,7 @@ bool Glm5Model::fast_cpu_lane_setup(std::string& err) {
     // kernels, the CPU lane, and a double-precision reference from ggml's dequantised rows - and their distances
     if (getenv("SAGUARO_GLM_CPU_LANE_CHECK") != nullptr && F->L[(size_t) il_cal].exl3) {
         // EXL3: the device's kernels, the CPU lane, and the scalar reference (exl3_ref, double sums)
-        namespace x3 = strata::kernels::exl3;
+        namespace x3 = maya::kernels::exl3;
         const int E = g.n_embd, FFE = g.n_ff_exp;
         const auto& Ly = F->L[(size_t) il_cal];
         std::vector<float> xc((size_t) E), og((size_t) E), oc((size_t) E);
@@ -5103,14 +5103,14 @@ void Glm5Model::fast_service() {
     // SAGUARO_GLM_SERVICE_DEEP_S (60; 0 = never) of quiet - a server nobody is talking to - it sleeps on the idle gate
     // for SAGUARO_GLM_SERVICE_DEEP_MS (100) at a time, ~10 wakeups a second instead of 500 (a core's worth of timer
     // interrupts a GPU on a quiet machine, issue #685); the thread that reads the engine's input pokes the gate at
-    // each line, so the next request's first route finds the thread awake (strata/platform/idle_gate.hpp)
+    // each line, so the next request's first route finds the thread awake (maya/platform/idle_gate.hpp)
     static const int kIdleMs = [] {
         const char* v = getenv("SAGUARO_GLM_SERVICE_IDLE_MS");
         return v ? std::max(0, std::atoi(v)) : 200;
     }();
-    static const int kDeepS = strata::platform::idle_env("SAGUARO_GLM_SERVICE_DEEP_S", 60);
-    static const int kDeepMs = std::max(1, strata::platform::idle_env("SAGUARO_GLM_SERVICE_DEEP_MS", 100));
-    strata::platform::IdleGate& gate = strata::platform::idle_gate();
+    static const int kDeepS = maya::platform::idle_env("SAGUARO_GLM_SERVICE_DEEP_S", 60);
+    static const int kDeepMs = std::max(1, maya::platform::idle_env("SAGUARO_GLM_SERVICE_DEEP_MS", 100));
+    maya::platform::IdleGate& gate = maya::platform::idle_gate();
     uint64_t gate_seen = 0;
     auto last_route = std::chrono::steady_clock::now();
     int idle = 0;                        // 0 spinning, 1 short sleeps, 2 long sleeps, 3 the idle gate
@@ -5130,7 +5130,7 @@ void Glm5Model::fast_service() {
         w_n = w_held = 0;
     };
     unsigned int polls = 0;
-#if defined(_WIN32) && defined(STRATA_USE_HIP)
+#if defined(_WIN32) && defined(MAYA_USE_HIP)
     auto last_kick = last_route;
     unsigned int kick_polls = 0;
 #endif
@@ -5145,7 +5145,7 @@ void Glm5Model::fast_service() {
                 F->processed.fetch_add((uint64_t) (sq - next), std::memory_order_release);
                 next = sq;
             } else {
-#if defined(_WIN32) && defined(STRATA_USE_HIP)
+#if defined(_WIN32) && defined(MAYA_USE_HIP)
                 // Windows' HIP runtime submits queued launches only when the host waits on the GPU (Linux submits
                 // each): a route the main thread queued can sit there while this thread waits for it.  After 1 ms
                 // without a route, submit what is queued - cudaStreamQuery does without waiting (not while a graph is
@@ -5219,7 +5219,7 @@ void Glm5Model::fast_service() {
             // "Kernel submission"), and nothing else touches this one: without the query the flag never lands and the
             // next layer's moe_pf_wait spins on it ("token N waiting > 10 s" on an RX 7900 XT).  It returns at once;
             // "not ready" is not an error and is not left behind for the next check.
-#if defined(STRATA_USE_HIP)
+#if defined(MAYA_USE_HIP)
             if (cudaStreamQuery(F->pfce_stream) == cudaErrorNotReady) cudaGetLastError();
 #endif
         }
@@ -7249,7 +7249,7 @@ bool Glm5Model::fast_moe_experts(int il, const MoeIo& io, bool pred, int n_ah, c
                                   g.n_embd};
             if (!gf::mv(&sd, 1, s)) { err = "glm fast: shared expert down"; return false; }
         }
-        strata::kernels::exl3::MoeArgs xa;
+        maya::kernels::exl3::MoeArgs xa;
         xa.plan_ptr = md.plan_ptr;
         xa.plan_w = md.plan_w;
         xa.cpu_part = md.cpu_part;
@@ -7259,9 +7259,9 @@ bool Glm5Model::fast_moe_experts(int il, const MoeIo& io, bool pred, int n_ah, c
         xa.n_embd = g.n_embd;
         xa.n_ff = g.n_ff_exp;
         xa.limit = g.swiglu_exp;
-        strata::kernels::exl3::moe_gate_up(xa, io.x, nullptr, s);
+        maya::kernels::exl3::moe_gate_up(xa, io.x, nullptr, s);
         if (F->prof_on) F->mark("moe_gate_up");
-        strata::kernels::exl3::moe_down(xa, nullptr, Ly.sh_down.q != nullptr ? F->sh_out : nullptr, io.ffn, s);
+        maya::kernels::exl3::moe_down(xa, nullptr, Ly.sh_down.q != nullptr ? F->sh_out : nullptr, io.ffn, s);
         if (F->prof_on) F->mark("moe_down");
     } else {
     // (the shared expert's down rides the gate/up launch: sh_out)
@@ -7702,8 +7702,8 @@ bool Glm5Model::fast_mtp(int64_t p, int32_t next_tok, std::string& err, int step
         return false;
     }
     if (mtp_sample_ != nullptr && F->spec_q != nullptr && step == 0 && !sub)   // speculative sampling (decode_spec)
-        strata::kernels::sample_draft(F->mtp_logits, 1, (int) g.n_vocab, *mtp_sample_,
-                                      (strata::kernels::SpecList*) F->spec_q, F->mtp_tok, s);
+        maya::kernels::sample_draft(F->mtp_logits, 1, (int) g.n_vocab, *mtp_sample_,
+                                      (maya::kernels::SpecList*) F->spec_q, F->mtp_tok, s);
     else
         gf::argmax(F->mtp_logits, n_rows, F->mtp_tok + step, s, sub ? F->mtp_dx_ids : nullptr, F->mtp_dv);
     if (read_back) {
@@ -7718,7 +7718,7 @@ bool Glm5Model::fast_mtp(int64_t p, int32_t next_tok, std::string& err, int step
 // flight on the copy stream every sampled token - and on Windows / HIP lost the prompt after the first token (#6,
 // found by jerem91150).  The stream holds this position's forward and nothing after it (the split's tail drains
 // before it takes its next position), so the logits read are the ones just computed.
-int Glm5Model::fast_sample(strata::kernels::SamplerParams& sp, std::string& err) {
+int Glm5Model::fast_sample(maya::kernels::SamplerParams& sp, std::string& err) {
     FastState* F = fast_;
     cudaSetDevice(dev_);
     pick_tokens(sc_ + sc_logits, 1, sp, nullptr, 0, d_tok_, F->cs);
@@ -7730,14 +7730,14 @@ int Glm5Model::fast_sample(strata::kernels::SamplerParams& sp, std::string& err)
 // Speculative sampling's verify (decode_spec, SAGUARO_GLM_SPEC_SAMPLE=1): this half's logits and the draft its NextN
 // block drew (mtp_tok, the list it was drawn from in spec_q) -> the draft with probability min(1, p/q), else a draw from
 // max(0, p - q); distributed as fast_sample's draw.  Same stream, same read-back as fast_sample.
-int Glm5Model::fast_sample_verify(strata::kernels::SamplerParams& sp, std::string& err) {
+int Glm5Model::fast_sample_verify(maya::kernels::SamplerParams& sp, std::string& err) {
     FastState* F = fast_;
     cudaSetDevice(dev_);
     if (F->spec_q == nullptr) {
         err = "glm sampler (verify): no draft list";
         return -1;
     }
-    strata::kernels::sample_verify(sc_ + sc_logits, 1, (int) g_.n_vocab, sp, (const strata::kernels::SpecList*) F->spec_q,
+    maya::kernels::sample_verify(sc_ + sc_logits, 1, (int) g_.n_vocab, sp, (const maya::kernels::SpecList*) F->spec_q,
                                    F->mtp_tok, d_tok_, F->cs);
     cudaMemcpyAsync(F->tok_h, d_tok_, sizeof(int), cudaMemcpyDeviceToHost, F->cs);
     if (!glmfast::cuda_ok(cudaStreamSynchronize(F->cs), "glm sampler (verify)", err) || !F->route_ok(err)) return -1;
@@ -7843,14 +7843,14 @@ void Glm5Model::late_read(size_t free_b, size_t total_b, size_t floor_b, size_t 
     late_res_ = b.reserve;
     late_given_ = b.reserve_given;
     late_on_ = true;
-    const std::string file = strata::vramlate::file_of(pack_dir_, "SAGUARO_GLM_LATE_FILE");
-    const int64_t fixed = strata::vramlate::fixed_of("SAGUARO_GLM_LATE_MB");
+    const std::string file = maya::vramlate::file_of(pack_dir_, "SAGUARO_GLM_LATE_FILE");
+    const int64_t fixed = maya::vramlate::fixed_of("SAGUARO_GLM_LATE_MB");
     if (fixed >= 0) {
         late_ = (size_t) fixed << 20;
     } else if (!file.empty()) {
-        const std::string v = strata::vramlate::get(file, late_key_);
+        const std::string v = maya::vramlate::get(file, late_key_);
         late_kept_ = v.empty() ? 0 : (size_t) std::max(0LL, std::atoll(v.c_str())) << 20;
-        late_ = b.adapted ? 0 : strata::vramlate::kept_for(late_kept_, b.reserve, b.reserve_given);
+        late_ = b.adapted ? 0 : maya::vramlate::kept_for(late_kept_, b.reserve, b.reserve_given);
     }
     // (what the pool can give up above its floor: a pool already there keeps no more free, and its start is not said
     //  short - a restart would not help)
@@ -7880,18 +7880,18 @@ int Glm5Model::late_check_part(bool loaded) {
         std::fprintf(stderr, "glm fast: CUDA%d: %zu MiB of VRAM free with everything loaded (the reserve %zu MiB%s)\n",
                      dev_, fr >> 20, res >> 20,
                      late_ > 0 ? (", " + std::to_string(late_ >> 20) + " MiB more kept beside it").c_str() : "");
-    if (strata::vramlate::fixed_of("SAGUARO_GLM_LATE_MB") >= 0) return 0;
-    strata::vramlate::Gpu lg{late_, late_kept_, late_fr_min_};
-    const strata::vramlate::Step st = strata::vramlate::check(lg, fr, tot, res, late_given_, late_room_ - std::min(late_room_, late_));
+    if (maya::vramlate::fixed_of("SAGUARO_GLM_LATE_MB") >= 0) return 0;
+    maya::vramlate::Gpu lg{late_, late_kept_, late_fr_min_};
+    const maya::vramlate::Step st = maya::vramlate::check(lg, fr, tot, res, late_given_, late_room_ - std::min(late_room_, late_));
     late_fr_min_ = lg.fr_min, late_kept_ = lg.kept;
     if (!st.moved) return 0;
-    const std::string file = strata::vramlate::file_of(pack_dir_, "SAGUARO_GLM_LATE_FILE");
+    const std::string file = maya::vramlate::file_of(pack_dir_, "SAGUARO_GLM_LATE_FILE");
     if (st.short_)
         std::fprintf(stderr, "glm fast: WARNING - CUDA%d: %zu MiB free, short of the %zu MiB reserve - the next start "
                              "keeps %lld MiB free beside it for what the start and the requests allocate after the "
                              "expert pool%s\n", dev_, fr >> 20, res >> 20, (long long) (st.want >> 20),
                      file.empty() ? " (SAGUARO_GLM_LATE_FILE=none: not kept)" : "");
-    if (!file.empty()) strata::vramlate::put(file, late_key_, std::to_string(st.want >> 20));
+    if (!file.empty()) maya::vramlate::put(file, late_key_, std::to_string(st.want >> 20));
     return loaded && st.short_ && !file.empty() ? (int) (st.want >> 20) : 0;
 }
 
@@ -7917,7 +7917,7 @@ int Glm5Model::late_check(bool loaded) {
 // Nor is a budget beyond all the pool can ever take (all_b: every expert of this part's layers with the spares and a
 // prompt's room): such a pool cannot fill the card, and writing the whole budget - a Windows APU's carve-out, a Radeon
 // 8065S's ~157 GB for Maya-S's ~106 - three times over took a start from ~60 to ~120 s.
-#if defined(STRATA_USE_HIP) && defined(_WIN32)
+#if defined(MAYA_USE_HIP) && defined(_WIN32)
 // The dedicated video memory DXGI reports for the adapter with this HIP device's LUID (an APU: its carve-out), 0 when
 // unknown.  SAGUARO_GLM_APU_DEDICATED_GB=<n> sets it (a test: a smaller carve-out), =0 turns the cap below off.
 static size_t win_dedicated_bytes(int dev) {
@@ -7927,7 +7927,7 @@ static size_t win_dedicated_bytes(int dev) {
         cudaGetLastError();
         return 0;
     }
-    return (size_t) strata::platform::dedicated_bytes(prop.luid);
+    return (size_t) maya::platform::dedicated_bytes(prop.luid);
 }
 #endif
 
@@ -7941,7 +7941,7 @@ void Glm5Model::pool_check(size_t floor_b, size_t slot_b, size_t all_b) {
     // budget went with it and the start failed
     int integrated = 0;
     if (cudaDeviceGetAttribute(&integrated, cudaDevAttrIntegrated, dev_) != cudaSuccess) cudaGetLastError();
-#if defined(STRATA_USE_HIP) && defined(_WIN32)
+#if defined(MAYA_USE_HIP) && defined(_WIN32)
     // ... but it is kept within its DEDICATED memory: HIP's total there is the carve-out plus ~12 GB of shared system
     // memory, and a pool that fills into the shared part pages under Windows - a 96 GB carve-out with v1.1.10's
     // complete pool held 13.1 + 89.5 GB, and 8K-token prompts ran at 62 instead of 159 tok/s (#206).  What is in use
@@ -7972,7 +7972,7 @@ void Glm5Model::pool_check(size_t floor_b, size_t slot_b, size_t all_b) {
         ms.dwLength = sizeof ms;
         if (GlobalMemoryStatusEx(&ms)) {
             // (+ what a page file Windows manages may still grow by: commit_growth)
-            size_t can = (size_t) ms.ullAvailPageFile + (size_t) strata::platform::commit_growth(ms.ullTotalPhys);
+            size_t can = (size_t) ms.ullAvailPageFile + (size_t) maya::platform::commit_growth(ms.ullTotalPhys);
             if (const char* v = getenv("SAGUARO_GLM_COMMIT_CAP_GB")) can = std::min(can, (size_t) (std::atof(v) * 1e9));
             const PoolBudget b2 = part_budget(free_b, total_b, floor_b, slot_b);   // (the dedicated cap's included)
             const auto cap = glmfast::commit_pool_cap(b2.avail, floor_b, all_b, can, (size_t) ms.ullTotalPhys);
@@ -8036,7 +8036,7 @@ void Glm5Model::pool_check(size_t floor_b, size_t slot_b, size_t all_b) {
         size_t fr = 0, tot = 0;
         cudaMemGetInfo(&fr, &tot);
         for (void* p : got) cudaFree(p);
-#if defined(STRATA_USE_HIP) && !defined(_WIN32)
+#if defined(MAYA_USE_HIP) && !defined(_WIN32)
         // (#899) Linux HIP: the frees above can land late - the free VRAM read just after them still counted the
         // whole budget as in use, and the pool fast_setup sized next found 0 slots a layer (2x RX 9070, the head
         // part).  Wait until the free figure is back (within 256 MiB of the read before the write; a sync and a tiny
@@ -8171,7 +8171,7 @@ int Glm5Model::mtp_draft(int32_t next_tok, std::string& err) {
 // position with the real token.  Only the head speculates - the tail, the NextN block and the sampler see confirmed
 // tokens only - so the output is exactly what the token-at-a-time decode would produce for the same samples.
 bool Glm5Model::spec_ready() const {
-    if (fast_ == nullptr || split_next_ == nullptr || strata::platform::env_switch("SAGUARO_GLM_NO_SPEC")) return false;
+    if (fast_ == nullptr || split_next_ == nullptr || maya::platform::env_switch("SAGUARO_GLM_NO_SPEC")) return false;
     const Glm5Model* last = this;
     for (const Glm5Model* m = this; m != nullptr; m = m->split_next_.get()) {
         if (m->fast_ == nullptr) return false;
@@ -8411,8 +8411,8 @@ bool Glm5Model::spec_tail(Glm5Model* head, int64_t p, std::string& err) {
     if (!fast_layers(p, true, err)) return false;
     const auto enqueue_pick = [&](Glm5Model* m, FastState* FL) {
         if (m->mtp_sample_ != nullptr && FL->spec_q != nullptr) {
-            strata::kernels::sample_verify(m->sc_ + m->sc_logits, 1, (int) g.n_vocab, *m->mtp_sample_,
-                                           (const strata::kernels::SpecList*) FL->spec_q, FL->mtp_tok, m->d_tok_,
+            maya::kernels::sample_verify(m->sc_ + m->sc_logits, 1, (int) g.n_vocab, *m->mtp_sample_,
+                                           (const maya::kernels::SpecList*) FL->spec_q, FL->mtp_tok, m->d_tok_,
                                            FL->cs);
             cudaMemcpyAsync(FL->tok_h, m->d_tok_, sizeof(int), cudaMemcpyDeviceToHost, FL->cs);
         } else if (m->mtp_sample_ != nullptr) {
@@ -8475,7 +8475,7 @@ bool Glm5Model::spec_tail(Glm5Model* head, int64_t p, std::string& err) {
     return true;
 }
 
-bool Glm5Model::decode_spec(strata::kernels::SamplerParams& sp, int64_t max_new, const std::function<bool(int)>& emit,
+bool Glm5Model::decode_spec(maya::kernels::SamplerParams& sp, int64_t max_new, const std::function<bool(int)>& emit,
                             int64_t& produced, std::string& err) {
     produced = 0;
     if (!spec_ready()) {
@@ -8557,7 +8557,7 @@ bool Glm5Model::decode_spec(strata::kernels::SamplerParams& sp, int64_t max_new,
     const bool spec_sample = spec_sample_env && !sp.greedy && sp.temperature > 0.0f && sp.penalty_last_n <= 0;
     if (spec_sample && TL->fast_->spec_q == nullptr) {
         cudaSetDevice(TL->dev_);
-        if (cudaMalloc(&TL->fast_->spec_q, sizeof(strata::kernels::SpecList)) != cudaSuccess) {
+        if (cudaMalloc(&TL->fast_->spec_q, sizeof(maya::kernels::SpecList)) != cudaSuccess) {
             cudaGetLastError();
             TL->fast_->spec_q = nullptr;
             cudaSetDevice(dev_);
@@ -8650,7 +8650,7 @@ bool Glm5Model::decode_spec(strata::kernels::SamplerParams& sp, int64_t max_new,
         const auto t = std::chrono::steady_clock::now();
         tp[i] += std::chrono::duration<double, std::milli>(t - tnow).count();
         tnow = t;
-#if !defined(STRATA_USE_HIP)
+#if !defined(MAYA_USE_HIP)
         nvtxRangePop();
         nvtxRangePushA(lap_names[(i + 1) % 6]);
 #endif
@@ -8658,7 +8658,7 @@ bool Glm5Model::decode_spec(strata::kernels::SamplerParams& sp, int64_t max_new,
     // SAGUARO_GLM_NSYS=<from>,<to>: a profiler capture window over those steps (nsys --capture-range=cudaProfilerApi)
     int64_t nsys_from = -1, nsys_to = -1;
     if (const char* ns = getenv("SAGUARO_GLM_NSYS")) std::sscanf(ns, "%lld,%lld", (long long*) &nsys_from, (long long*) &nsys_to);
-#if !defined(STRATA_USE_HIP)
+#if !defined(MAYA_USE_HIP)
     if (sprof) nvtxRangePushA("emit");
 #endif
     for (;;) {
@@ -9564,7 +9564,7 @@ std::vector<std::string> Glm5Model::slot_failed_writes() { return slot_writer().
 // stop sometimes hangs the MES and the host (ROCm/TheRock #9299, #9861).  nullptr (CUDA builds, or the allocation
 // failed): the vector, as before.
 float* Glm5Model::slot_bounce() {
-#if defined(STRATA_USE_HIP)
+#if defined(MAYA_USE_HIP)
     if (slot_bounce_ == nullptr && !slot_bounce_tried_) {
         slot_bounce_tried_ = true;
         if (cudaHostAlloc((void**) &slot_bounce_, (size_t) kSlotChunk * sizeof(float), cudaHostAllocPortable) !=
@@ -10145,4 +10145,4 @@ bool Glm5Model::forward_fast(const std::vector<int32_t>& tokens, std::vector<flo
     return true;
 }
 
-}  // namespace strata::core
+}  // namespace maya::core

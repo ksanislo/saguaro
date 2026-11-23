@@ -13,9 +13,9 @@
 // rewritten when its position is processed again, before any query reads it (a pooled indexer key is built from the
 // cached keys when its pool's last position is processed, and queries read only completed pools).
 #include "glm_fast_state.hpp"
-#include "strata/core/glm_model.hpp"
-#include "strata/kernels/exl3.hpp"
-#include "strata/kernels/glm_fast.hpp"
+#include "maya/core/glm_model.hpp"
+#include "maya/kernels/exl3.hpp"
+#include "maya/kernels/glm_fast.hpp"
 
 #include "ggml.h"
 
@@ -35,9 +35,9 @@
 #include <thread>
 #include <vector>
 
-namespace gf = strata::kernels::glmf;
+namespace gf = maya::kernels::glmf;
 
-namespace strata::core {
+namespace maya::core {
 
 namespace {
 
@@ -58,7 +58,7 @@ struct KdaIn {
     float *proj[3], *fa, *ga, *beta;
 };
 
-#if defined(STRATA_USE_HIP)
+#if defined(MAYA_USE_HIP)
 static bool is_gfx906_device_cached(int dev) {
     if (dev < 0 || dev >= 16) return false;
     static int arch_cache[16] = {};   // 0: unknown, 1: gfx906, -1: other
@@ -413,7 +413,7 @@ void Glm5Model::win_free() {
     if (fast_->rep) cudaFree(fast_->rep);
     fast_->rep = nullptr;
     kda_bak_cur_ = false;
-#if defined(STRATA_USE_HIP)
+#if defined(MAYA_USE_HIP)
     free_gfx906_p2p_buf(dev_);
 #endif
 }
@@ -613,7 +613,7 @@ bool Glm5Model::fast_moe_window(int il, int t0, int T, int part, int gid, std::s
     md.pf_src = F->pf_buf[il & 1];
     md.pf_dst = F->pf_buf[il & 1] + 8;
     md.pf_n = F->pf_n_buf[il & 1];
-    namespace x3 = strata::kernels::exl3;
+    namespace x3 = maya::kernels::exl3;
     const auto x3_args = [&](const gf::MoeDev& m) {
         x3::MoeArgs a;
         a.plan_ptr = m.plan_ptr;
@@ -1049,7 +1049,7 @@ bool Glm5Model::fast_window_layers(int64_t p0, int T, std::string& err) {
 }
 
 bool Glm5Model::window(const int32_t* tokens, int T, int32_t* out, std::string& err,
-                       const strata::kernels::SamplerParams* sp) {
+                       const maya::kernels::SamplerParams* sp) {
     if (fast_ == nullptr || T < 1 || T > kWinMax) {
         err = "glm window: needs the fast path and 1.." + std::to_string(kWinMax) + " tokens";
         return false;
@@ -1131,7 +1131,7 @@ bool Glm5Model::window(const int32_t* tokens, int T, int32_t* out, std::string& 
         auto& WA = tail->fast_->win;
         auto& WB = B->fast_->win;
         const size_t bytes = (size_t) T * hcE * sizeof(float);
-#if defined(STRATA_USE_HIP)
+#if defined(MAYA_USE_HIP)
         if (enable_gfx906_peer_cached(B->dev_, tail->dev_)) {
             cudaSetDevice(tail->dev_);
             cudaEventRecord(WA.ev_hop, tail->fast_->cs);
@@ -1334,7 +1334,7 @@ bool Glm5Model::win_pipe_part(int k, int t, std::string& err) {
     auto& W = F->win;
     const int64_t p = fast_->win.p0 + t;
     const int sl = W.bank * kPipeMax + t;   // this window's slot of token t
-#if defined(STRATA_USE_HIP)
+#if defined(MAYA_USE_HIP)
     const size_t needed_p2p_bytes = (size_t) kPipeSlots * hcE * sizeof(float);
     auto get_p2p_buf = [&](int src_dev, int dst_dev) -> float* {
         if (!enable_gfx906_peer_cached(dst_dev, src_dev)) return nullptr;
@@ -1371,7 +1371,7 @@ bool Glm5Model::win_pipe_part(int k, int t, std::string& err) {
         gf::embed_streams(W.emb + (size_t) sl * E, m->state_, E, F->cs);
     } else {
         cudaStreamWaitEvent(F->cs, prev->fast_->win.ev_tok[sl], 0);
-#if defined(STRATA_USE_HIP)
+#if defined(MAYA_USE_HIP)
         if (float* pbuf = get_p2p_buf(prev->dev_, m->dev_)) {
             cudaMemcpyPeerAsync(m->state_, m->dev_, pbuf + (size_t) sl * hcE, prev->dev_, hcE * sizeof(float), F->cs);
         } else
@@ -1392,7 +1392,7 @@ bool Glm5Model::win_pipe_part(int k, int t, std::string& err) {
     }
     if (m->split_next_) {
         gf::set_skip(nullptr);
-#if defined(STRATA_USE_HIP)
+#if defined(MAYA_USE_HIP)
         if (float* pbuf = get_p2p_buf(m->dev_, m->split_next_->dev_)) {
             cudaMemcpyAsync(pbuf + (size_t) sl * hcE, m->state_, hcE * sizeof(float), cudaMemcpyDeviceToDevice, F->cs);
         } else
@@ -1420,7 +1420,7 @@ bool Glm5Model::win_pipe_part(int k, int t, std::string& err) {
             return false;
         }
         if (W.pick_sampled) {
-            strata::kernels::SamplerParams sp = W.pick_sp;
+            maya::kernels::SamplerParams sp = W.pick_sp;
             sp.counter += (uint64_t) t;
             // (penalties: this window's tokens 1..t before it - pick_tok, written before token t was queued)
             m->pick_tokens(lg, 1, sp, W.pick_tok + (sl - t), t, W.tok + sl, F->cs);
@@ -1486,7 +1486,7 @@ bool Glm5Model::win_head_split(int t, int sl, const float* hx, float* lg, std::s
     if (W.pick_sampled) {
         cudaStreamWaitEvent(F->cs, h->hh_ev_[sl], 0);
         cudaMemcpyAsync(lg + c0, ht_lg_h_ + (size_t) sl * nc, (size_t) nc * sizeof(float), cudaMemcpyHostToDevice, F->cs);
-        strata::kernels::SamplerParams sp = W.pick_sp;
+        maya::kernels::SamplerParams sp = W.pick_sp;
         sp.counter += (uint64_t) t;
         pick_tokens(lg, 1, sp, W.pick_tok + (sl - t), t, W.tok + sl, F->cs);
     } else {
@@ -1567,7 +1567,7 @@ bool Glm5Model::win_pipe_begin_part(bool fresh, std::string& err) {
     return true;
 }
 
-bool Glm5Model::win_pipe_begin(int32_t first, std::string& err, const strata::kernels::SamplerParams* sp,
+bool Glm5Model::win_pipe_begin(int32_t first, std::string& err, const maya::kernels::SamplerParams* sp,
                                bool fresh) {
     const bool hold_last = first < 0;
     if (hold_last) first = -1 - first;
@@ -1830,7 +1830,7 @@ bool Glm5Model::win_pipe_end(int32_t* out, std::string& err) {
 }
 
 bool Glm5Model::window_pipe(const int32_t* tokens, int T, int32_t* out, std::string& err,
-                            const strata::kernels::SamplerParams* sp) {
+                            const maya::kernels::SamplerParams* sp) {
     if (fast_ == nullptr || T < 1 || T > kPipeMax) {
         err = "glm window: needs the fast path and 1.." + std::to_string(kPipeMax) + " tokens";
         return false;
@@ -2022,4 +2022,4 @@ bool Glm5Model::window_commit(int n_keep, std::string& err, bool wait) {
     return true;
 }
 
-}  // namespace strata::core
+}  // namespace maya::core
