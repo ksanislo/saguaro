@@ -7799,6 +7799,7 @@ def write_config_ik2(a, pc: dict, meta: dict, gguf: Path, tok: Path, ctx: int, m
         if same else ()
     kept = keep_args(old.get("args") or [], args, user)
     ik2_fit_user_flags(a, args, lay, ctx)
+    kept = [k for k in kept if str(flag_value(args, k.split()[0])) == k.split()[1]]   # (what the fit changed: not kept)
     old = base
     inst = {"family": "ik2", "quant": Q.OTHERS[("ik2", Q.IK2_QUANT)], "ik2_quant": Q.IK2_QUANT,
             "drafting": flag_value(args, "--drafting") or how}

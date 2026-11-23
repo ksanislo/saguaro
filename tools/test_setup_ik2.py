@@ -477,6 +477,10 @@ class Steps(unittest.TestCase):
             p_q, c_q = self.write_amd(t4q, tok, d, 11.45)
         self.assertEqual(val(c_q, "--chunk"), "1024")
         self.assertTrue(any("--chunk 2048 does not fit" in m for m in said), said)
+        with patch.object(maya, "ok", lambda m: said.append(m)):
+            edit(p_q, chunk="2048")
+            self.write_amd(t4q, tok, d, 11.45)
+        self.assertFalse(any("kept from" in m and "--chunk 2048" in m for m in said), said)
         edit(p_q, chunk="2048")                                      # (asked, and kept on purpose)
         with patch.object(maya, "warn", lambda m: None), patch.object(maya, "choose", lambda *x, **k: 1):
             p_q, c_q = self.write_amd(t4q, tok, d, 11.45, args(backend="hip", yes=False))
