@@ -236,19 +236,23 @@ OFF_ROOM = ("drafting off: at this context the experts' tier has no room for the
 
 
 def drafting_off_reason(arch, vram_gb: float, ctx: int, kv: str = DEFAULT_KV, hip: bool = False,
-                        experts_gib: float = EXPERTS_GIB) -> str | None:
-    """Why drafting is off on this card (one line), or None: NVIDIA Volta (no exact window) / Turing (its window costs
-    more than it keeps) run without it.  The offload path (the card does not hold every expert) drafts where its whole
-    cache stays in VRAM and the experts' tier has the drafter's room (draft_fits): on NVIDIA --drafting auto measures it
-    once on the PC; not on AMD's (it loses there - upstream's auto measures it, we keep it off).  Every expert in VRAM keeps it."""
+                        experts_gib: float = EXPERTS_GIB, gpus2: bool = False) -> str | None:
+    """Why drafting is off on this card (one line), or None.  Every NVIDIA class from Volta drafts - Volta and Turing
+    have their own verify-window kernels since upstream v1.1.75 (on a T4: Ken 11-23, measured +4..+9 %) - Pascal
+    (6.x, scalar kernels) does not.  The offload path (the card does not hold every expert: a small card, or a long
+    context) drafts where its whole cache stays in VRAM and the experts' tier has the drafter's room, on one NVIDIA
+    card and on two (gpus2: the split - its cache whole in VRAM); not on AMD's (measured slower there - upstream's
+    auto measures it, we keep it off).  With every expert in VRAM it is kept.  A VRAM not known is not a reason."""
     try:
         cc = int(arch)
     except (TypeError, ValueError):
         cc = 0
-    if not hip and 0 < cc < 80:
-        return ("drafting off: on this GPU (Volta / Turing) drafting does not pay for this model - every token comes "
-                "from a full model step (on a T4 a verify window costs 1.5-2.3 tokens' time)")
+    if not hip and 0 < cc < 70:
+        return ("drafting off: on this GPU (Pascal) the engine runs its scalar kernels, where a verify window costs "
+                "more than it keeps - every token comes from a full model step")
     if vram_gb and not plan(vram_gb, ctx, kv, hip, experts_gib)["resident"]:
+        if gpus2 and not hip:
+            return None if draft_fits(vram_gb, ctx, kv, experts_gib) else OFF_ROOM
         if plan(vram_gb, ctx, kv, hip, experts_gib)["kv_streamed"]:
             return OFF_CACHE
         if not draft_fits(vram_gb, ctx, kv, experts_gib, hip):

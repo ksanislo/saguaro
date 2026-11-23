@@ -210,7 +210,11 @@ class Fit(unittest.TestCase):
         self.assertEqual(lay["path"], "resident")
 
     def test_drafting(self):
-        self.assertIn("Volta", F.drafting_off_reason("75", 24, 65536, "fp8"))
+        self.assertIsNone(F.drafting_off_reason("75", 24, 65536, "fp8"))       # (Turing drafts: upstream v1.1.75, Ken 11-23)
+        self.assertIsNone(F.drafting_off_reason("70", 32, 65536, "fp8"))       # (Volta: auto measures it)
+        self.assertIn("Pascal", F.drafting_off_reason("61", 24, 65536, "fp8"))
+        self.assertIsNone(F.drafting_off_reason("75", 15.0, 32768, "f16"))      # (a T4, UD-Q4_K_XL: the offload path)
+        self.assertIsNone(F.drafting_off_reason("75", 15.0, 131072, "f16", gpus2=True))   # (two T4s: the split)
         self.assertIn("no room for the drafter", F.drafting_off_reason("86", 8, 65536, "fp8"))
         self.assertIsNone(F.drafting_off_reason("86", 24, 524288, "fp8"))   # (NVIDIA offload: auto measures it)
         self.assertIn("streams", F.drafting_off_reason("86", 16, 1048576, "fp8"))
@@ -780,11 +784,13 @@ class Steps(unittest.TestCase):
                 patch.object(maya, "build_step", lambda a, pc_, llama, target: {"target": target}), \
                 patch.object(maya, "IK2_EXE", gguf), patch.object(maya, "ik2_model_step", lambda a, d_, q=None: gguf), \
                 patch.object(maya, "ik2_tokenizer_step", lambda a, d_, g: tok), \
-                patch.object(maya, "ik2_vision_step", lambda *x: None), patch.object(maya, "write_config_ik2", write):
+                patch.object(maya, "ik2_vision_step", lambda *x: None), patch.object(maya, "write_config_ik2", write), \
+                patch.object(maya, "ik2_drafter_step", lambda *x, **k: d / "dspark-Inkling-2-Mini-Q8_0.gguf"):
             got = maya.set_up_ik2(args(models_dir=str(self.root / "models"), ik2_quant="ud-q4_k_xl"), {})
         self.assertEqual(got, self.root / "cfg.json")
         self.assertEqual((seen["ctx"], seen["lay"]["args"][:2], seen["d"]), (131072, ["--gpus", "2"], d))
-        self.assertEqual((seen["drafting"], seen["drafter"]), ("off", None))   # (two GPUs, Turing: drafting off)
+        self.assertEqual(seen["drafter"], d / "dspark-Inkling-2-Mini-Q8_0.gguf")   # (two T4s: the split drafts)
+        self.assertNotEqual(seen["drafting"], "off")
 
 
 class StrataPacks(unittest.TestCase):

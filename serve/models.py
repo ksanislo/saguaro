@@ -346,15 +346,15 @@ def mm3_pack_has(cfg: dict, key: str) -> bool:
 def choices(cfg: dict) -> dict:
     """What this config can be set to beyond what it is: a drafter and an image encoder that exist on this PC."""
     if family(cfg) == "ik2":                           # (images: its "vision" entry, on or kept off)
-        # (drafting: none where it does not run - Volta / Turing, the offload path, two GPUs; else auto, the drafter by
-        #  hand where the setup downloaded it, none)
+        # (drafting: none where it does not run - Pascal, a streamed cache, no room, AMD's offload path; else auto,
+        #  the drafter by hand where the setup downloaded it, none)
         args, card = cfg.get("args") or [], ik2_card(cfg)
         hip = cfg.get("backend") == "hip"
         off = IK2F.drafting_off_reason(None if hip else card.get("arch"), float(card.get("vram_gb") or 0),
                                        _int(flag(args, "--max-context"), IK2F.CONTEXTS[0]),
                                        (cfg.get("env") or {}).get("SAGUARO_IK2_KV") or IK2F.DEFAULT_KV, hip,
-                                       ik2_experts_gib(cfg)) \
-            or (len(set(gpus_of(cfg))) > 1 and "two GPUs")
+                                       ik2_experts_gib(cfg), len(set(gpus_of(cfg))) > 1) \
+            or (_int(flag(args, "--tp"), 1) > 1 and "tensor parallel")   # (two: the split drafts; --tp has no window)
         return {"draft": ["none"] if off else ["auto"] + (["dspark"] if flag(args, "--draft") else []) + ["none"],
                 "images": bool(cfg.get("vision") or cfg.get("vision_off"))}
     if family(cfg) == "hy4":                           # (the drafters its pack has; images: the pack's mmproj file)
