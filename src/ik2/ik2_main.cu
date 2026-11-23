@@ -4700,6 +4700,7 @@ int spec_pick(const std::vector<std::pair<int, double>>& dist, int draft, std::m
     return accepted ? draft : sample_from(dist, rng, draft);
 }
 
+int g_draft_force = 0;   // SAGUARO_IK2_DRAFT_FORCE: 1 drafting on Turing too, 2 also on the dynamic offload path (tests)
 int g_window_check = 0;                       // SAGUARO_IK2_WINDOW_CHECK: windows still to check against fast_token
 uint64_t g_window_rows = 0, g_window_same = 0;   // (rows checked, rows the same to the bit)
 
@@ -6281,7 +6282,8 @@ int main(int argc, char** argv) {
         g_pa70 = cls == 70 && !(getenv("SAGUARO_IK2_PA70") && !std::atoi(getenv("SAGUARO_IK2_PA70")));
         if (getenv("SAGUARO_IK2_PA70_MIN")) g_pa70_min = std::max(0, std::atoi(getenv("SAGUARO_IK2_PA70_MIN")));
         if (cls < 75) g_block = false;
-        if (cls < 80 && (!draft_path.empty() || g_lookup)) {
+        g_draft_force = getenv("SAGUARO_IK2_DRAFT_FORCE") ? std::atoi(getenv("SAGUARO_IK2_DRAFT_FORCE")) : 0;
+        if (cls < 80 && !(cls == 75 && g_draft_force) && (!draft_path.empty() || g_lookup)) {
             std::printf("NOTE saguaro ik2: drafting off - on this GPU (sm_%d class) the verify window does not have the "
                         "one-token path's kernels yet, so it would change the answers; plain decoding\n", cls);
             std::fflush(stdout);
@@ -6479,7 +6481,7 @@ int main(int argc, char** argv) {
         auto room_ok = [&](size_t need, std::string& why, bool lookup) {
             const size_t use_v = g_off_want ? dense_b + kv_b + reserve : used;   // (offload: the experts are host memory)
             if (g_two.want) why = "on two GPUs it is not checked against plain decoding yet (plain decoding)";
-            else if (!g_fast_want && !(lookup && g_off_dynamic))
+            else if (!g_fast_want && !((lookup || g_draft_force >= 2) && g_off_dynamic))
                 why = "it runs where every expert stays in VRAM (the resident path), not here";
             else if (use_v + need > fr0) why = "its room does not fit beside the model at this context";
             else if (vis > 0 && left >= vis && left - (double) need < vis)
@@ -6493,11 +6495,12 @@ int main(int argc, char** argv) {
             const int head_rows = head ? (int) (head->elements() / c.C) : 201024;
             const size_t need = draft_room(model_drafter ? draft_path : std::string(), ctx, chunk, c, head_rows);
             std::string why;
-            if (room_ok(need, why, !model_drafter)) {
+            if (model_drafter && S.sv) why = "a Strata pack's output head is not one it reads (FP16 or planar Q8_0)";
+            if (why.empty() && room_ok(need, why, !model_drafter)) {
                 std::printf("drafting: %s, %.2f GiB of VRAM beside the model%s\n",
                             model_drafter ? (g_lookup ? "the drafter and the prompt lookup" : "the drafter")
                                           : "the prompt lookup", need / 1073741824.0,
-                            g_off_dynamic && !model_drafter ? " (the tier's budget yields it)"
+                            g_off_dynamic ? " (the tier's budget yields it)"
                                                             : " (the plan as without it)");
                 if (g_off_dynamic && !model_drafter) g_lookup_room = need;
                 break;
@@ -9178,6 +9181,13 @@ int main(int argc, char** argv) {
                              (unsigned long long) sctl.kept(), (unsigned long long) sctl.offered(),
                              (unsigned long long) sctl.l_accepted, (unsigned long long) sctl.l_drafted,
                              (unsigned long long) sctl.plain);
+            if (spec_on && getenv("SAGUARO_IK2_STATS")) {
+                std::fprintf(stderr, "speculative: drafter windows %llu, accepted a window:", (unsigned long long) sctl.steps);
+                for (int j = 0; j < kBlockMax; ++j) std::fprintf(stderr, " %llu", (unsigned long long) sctl.hist[j]);
+                std::fprintf(stderr, "; ms a window by width 2..%d:", kBlockMax);
+                for (int b = 2; b <= kBlockMax; ++b) std::fprintf(stderr, " %.2f", sctl.c[b] * 1e3);
+                std::fprintf(stderr, "; a plain token %.2f ms\n", sctl.c_plain * 1e3);
+            }
             if (serve_maya) stat_line(n_out, now());
             unsigned long long ph1 = 0, pn1 = 0;
             pick_counts(n_out, ph1, pn1);

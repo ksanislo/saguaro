@@ -154,6 +154,7 @@ struct Drafter {
     int n_rows = 0;
     const int8_t* head_q8 = nullptr;      // the target's head as planar Q8_0 (set_head_q8): the base logits through it
     const uint16_t* head_q8d = nullptr;
+    bool bf16_cols = false;               // the BF16 products on bf16_cols (before sm_80; SAGUARO_IK2_DRAFT_BF16_COLS=0: cuBLAS)
     bool head_tiles = true;               // its product on the tensor cores (q8_tile: sm_80 on), else mv_q8p_cols
     int* shortlist = nullptr;
     float* shortlist_scores = nullptr;
@@ -250,8 +251,71 @@ float* up32(Drafter* d, const std::vector<uint16_t>& v) {
     return p;
 }
 
+#ifndef STRATA_USE_HIP
+// Turing has no BF16 tensor cores and cuBLAS's BF16 GEMM there is slow (~19 ms a T4 draft): the drafter's few rows
+// as plain FMA sums, a warp R rows, the weights read once for the T tokens
+template <int WARPS, int R, int TT>
+__global__ void __launch_bounds__(WARPS * 32)
+bf16_cols_kernel(const uint16_t* __restrict__ W, int N, int K, const uint16_t* __restrict__ x, int T,
+                 float* __restrict__ y, int ldy) {
+    const int row0 = (blockIdx.x * WARPS + (threadIdx.x >> 5)) * R, lane = threadIdx.x & 31;
+    if (row0 >= N) return;
+    const uint4* wr[R];
+#pragma unroll
+    for (int i = 0; i < R; ++i) wr[i] = (const uint4*) (W + (size_t) min(row0 + i, N - 1) * K);
+    float acc[R][TT];
+#pragma unroll
+    for (int i = 0; i < R; ++i)
+#pragma unroll
+        for (int t = 0; t < TT; ++t) acc[i][t] = 0.0f;
+    auto lo = [](uint32_t v) { return __uint_as_float(v << 16); };
+    auto hi = [](uint32_t v) { return __uint_as_float(v & 0xFFFF0000u); };
+    for (int c = lane; c < (K >> 3); c += 32) {
+        float wf[R][8];
+#pragma unroll
+        for (int i = 0; i < R; ++i) {
+            const uint4 w = __ldg(wr[i] + c);
+            wf[i][0] = lo(w.x), wf[i][1] = hi(w.x), wf[i][2] = lo(w.y), wf[i][3] = hi(w.y);
+            wf[i][4] = lo(w.z), wf[i][5] = hi(w.z), wf[i][6] = lo(w.w), wf[i][7] = hi(w.w);
+        }
+#pragma unroll
+        for (int t = 0; t < TT; ++t) {
+            if (t >= T) break;
+            const uint4 v = __ldg((const uint4*) (x + (size_t) t * K) + c);
+            const float xf[8] = {lo(v.x), hi(v.x), lo(v.y), hi(v.y), lo(v.z), hi(v.z), lo(v.w), hi(v.w)};
+#pragma unroll
+            for (int i = 0; i < R; ++i)
+#pragma unroll
+                for (int j = 0; j < 8; ++j) acc[i][t] = fmaf(wf[i][j], xf[j], acc[i][t]);
+        }
+    }
+#pragma unroll
+    for (int i = 0; i < R; ++i)
+#pragma unroll
+        for (int t = 0; t < TT; ++t) {
+            if (t >= T) break;
+            float a = acc[i][t];
+#pragma unroll
+            for (int o = 16; o > 0; o >>= 1) a += __shfl_xor_sync(0xffffffffu, a, o);
+            if (lane == 0 && row0 + i < N) y[(size_t) t * ldy + row0 + i] = a;
+        }
+}
+bool bf16_cols(const uint16_t* W, int N, int K, const uint16_t* x, int T, float* y, int ldy, cudaStream_t s) {
+    if (N <= 0 || T <= 0 || T > 8 || K % 8 || ((uintptr_t) W & 15) || ((uintptr_t) x & 15)) return false;
+    constexpr int WARPS = 4, R = 4;
+    const unsigned g = (unsigned) ((N + WARPS * R - 1) / (WARPS * R));
+    if (T == 1) bf16_cols_kernel<WARPS, R, 1><<<g, WARPS * 32, 0, s>>>(W, N, K, x, T, y, ldy);
+    else if (T <= 4) bf16_cols_kernel<WARPS, R, 4><<<g, WARPS * 32, 0, s>>>(W, N, K, x, T, y, ldy);
+    else bf16_cols_kernel<WARPS, R, 8><<<g, WARPS * 32, 0, s>>>(W, N, K, x, T, y, ldy);
+    return cudaGetLastError() == cudaSuccess;
+}
+#endif
+
 // Y [T][N] (ldy) = X [T][K] BF16 . W [N][K]^T BF16, F32 sums
 void gemm_bf(Drafter* d, const uint16_t* W, int N, int K, const uint16_t* X, int T, float* Y, int ldy) {
+#ifndef STRATA_USE_HIP
+    if (d->bf16_cols && bf16_cols(W, N, K, X, T, Y, ldy, d->s)) return;
+#endif
 #ifdef STRATA_USE_HIP   // (AMD: the BLAS's kernels for 8 rows read the weights at a fifth of the bus - the drafter's
                         //  block on a kernel of ours, the weights read once; the drafts only, never an answer)
     if (k::gemm_bf16_cols(W, N, K, X, T, Y, ldy, d->s)) return;
@@ -310,6 +374,13 @@ Drafter* load(const std::string& path, int C, int ctx, cublasHandle_t blas, cuda
     const StFile f = st_open(path);
     auto* d = new Drafter;
     d->C = C, d->ctx = ctx, d->blas = blas, d->s = s;
+    {
+        int dev = 0, major = 0;
+        cudaGetDevice(&dev);
+        cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev);
+        const char* e = std::getenv("SAGUARO_IK2_DRAFT_BF16_COLS");
+        d->bf16_cols = e ? std::atoi(e) != 0 : major < 8;
+    }
     {
         // (SAGUARO_IK2_DRAFT_CTX: the positions the layer without a window sees, the last ones; default the whole context)
         const int want = getenv("SAGUARO_IK2_DRAFT_CTX") ? std::atoi(getenv("SAGUARO_IK2_DRAFT_CTX")) : ctx;
