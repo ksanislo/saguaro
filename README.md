@@ -80,7 +80,7 @@ two NVIDIA cards under 24 GB or on one 16-23 GB AMD RDNA 3 / 4 GPU; with four eq
 PCs, GLM-5.3-Flash in the largest quant that fits VRAM + RAM. DeepSeek's sizes include its Engram tables. The setup also offers unsloth's GGUF and
 LibertAIDAI's EXL3 quants of DeepSeek, orcarouter's abliterated DeepSeek, Mia-AiLab's EXL3 quant of MiniMax,
 turboderp's EXL3 quants of GLM, and Saguaro's fourth family, **Qwen-3.8-Flash-Next** (CYBER-FROST), as its Q5_K_M GGUF
-on the `saguaro-qfn` engine (from Strata), with pictures
+on the GLM engine's own Qwen path (`saguaro-glm`), with pictures
 ([its settings](docs/SETTINGS.md#qwen-38-flash-next-cyber-frost)). **Each model's files, drafters, pictures and options:
 [docs/MODELS.md](docs/MODELS.md).**
 

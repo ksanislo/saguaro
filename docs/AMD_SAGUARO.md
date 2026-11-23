@@ -8,6 +8,7 @@ The state of this version (keep this table, the setup's `NO_ENGINE` list in `sag
 | --- | --- | --- |
 | GLM-5.3-Flash | `saguaro-glm` (`maya`) | builds and runs (experimental); its GPU self-tests pass on an RX 9070 XT (gfx1201, ROCm 7.1). The quant that fits a 16 GB card + 96 GB of RAM is Maya-XS (73 GB); the setup recommends the largest one that fits VRAM + RAM |
 | Qwen-3.8-Flash-Next (CYBER-FROST) | `saguaro-glm` (`maya`) | builds (the same engine as GLM); about 84 GB of VRAM + RAM |
+| Qwen3.8-Flash-Next (unsloth's GGUFs, e.g. UD-Q4_K_XL) | `saguaro-qfn` (`engines/qfn`) | builds and runs (experimental, set up by hand - no setup entry yet) on an RX 9070 XT (gfx1201, ROCm 7.1): UD-Q4_K_XL (111 GB) on one 16 GB card + 96 GB of RAM, the experts the card does not hold in a pinned RAM tier and the rest read from the SSD - [below](#qwen38-flash-next-on-the-saguaro-qfn-engine) |
 | DeepSeek-V4.1-Flash-1017 | `saguaro-ds4` (`maya-ds4`) | compiles for HIP (gfx1201 checked); not yet run on an AMD GPU |
 | MiniMax-M3.1-Flash | `saguaro-mm3` (`maya-mm3`) | compiles for HIP (gfx1201 checked); not yet run on an AMD GPU |
 | Hy4-Flash | `saguaro-hy4` (`maya-hy4`) | not run on an AMD GPU yet: the setup does not offer it on AMD |
@@ -241,6 +242,40 @@ by the GPU). Checked on an RX 9070 XT (16 GB, gfx1201, ROCm 7.1, PCIe 5) with a 
 
 Chat, thinking, tools, stops, pictures, the Monitor and kept conversations pass on both. Not checked on AMD yet:
 drafting, two AMD GPUs, a Strix / Gorgon Halo APU. [INKLING2.md](INKLING2.md) has the engine's AMD paths.
+
+## Qwen3.8-Flash-Next on the saguaro-qfn engine
+
+Experimental, set up by hand (the setup's Qwen family is CYBER-FROST on `saguaro-glm`; it does not offer this engine
+yet). `engines/qfn` (Strata's tree) builds for AMD with its own HIP backend on Saguaro's shared CUDA-to-HIP layer:
+
+```sh
+ROCM=/opt/rocm HIP_ARCHS=gfx1201 tools/qfn/build_hip.sh build-qfn-hip      # the engine + its tests
+HIP_VISIBLE_DEVICES=0 ctest --test-dir build-qfn-hip --output-on-failure
+```
+
+(or `-DSAGUARO_QFN=ON` on the HIP configure: `<build>/qfn/saguaro-qfn`). The model folder is the same as on NVIDIA
+(unsloth's GGUF shards + the pack). On one 16 GB card with 96 GB of RAM, UD-Q4_K_XL (111 GB) runs with
+`--resident-budget-gib 64`: the experts the card does not hold, the hottest by the expert profile, in a page-locked RAM
+copy, the rest read from the model folder on the SSD. Add `SAGUARO_MMQ_KQ=1` (the K-quant experts' prompt kernels) to the
+config's environment. The RDNA4 prompt defaults (GDN, control-vector fusion, chunks up to 16K, matrix-core prompt
+attention) switch on by themselves on gfx12.
+
+Measured on an RX 9070 XT (16 GB, gfx1201, ROCm 7.1) with a Ryzen 7 9800X3D and 96 GB of DDR5, the model on a PCIe 4.0
+NVMe, 64K context, MTP drafting on, 256-token greedy answers to fresh prompts (one load, 2026-11-23):
+
+| prompt | 1K | 4K | 8K | 16K | 32K | 60K |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| prompt read, tok/s | 101 | 387 | 601 | 841 | 744 | 760 |
+| decode, tok/s | 40.8 | 28.3 | 34.4 | 35.3 | 37.9 | 33.8 |
+
+Load 42 s (the 64 GiB RAM tier copied from the NVMe in 23 s). The card holds 2,960 experts (8.7 GiB) next to the
+dense weights, the K/V and the draft head; 53-69% of the decode's experts were in it and every other one in the RAM
+tier, none read from the drive while answering (the 7.7 GiB of experts outside the RAM tier stay in the page cache);
+a prompt read pulls 0.1-0.5 MB per prompt token from the drive.
+
+Correctness against the T4 build (the same five 12-29K-token prompts, 5,150 teacher-forced positions): KL 0.0057, the
+same top token 96.8% of the time (99.8% where the T4 is confident), perplexity 0.2% lower; the T4 against itself is
+bit-identical. Not checked on AMD yet: pictures, several conversations at once, two AMD GPUs, Q8_0.
 
 ## Instinct MI300X / MI325X
 
