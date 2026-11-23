@@ -4816,7 +4816,11 @@ size_t draft_room(const std::string& path, int ctx, int chunk, const Config& c, 
     size_t b = (size_t) c.n_visit * (2 * KD + 2 * C) * (3 + 8) * 4 + ((size_t) 16 << 20);
     if (path.empty()) return b;
     std::ifstream f(path, std::ios::binary | std::ios::ate);
-    const size_t file = f ? (size_t) f.tellg() : ((size_t) 640 << 20);
+    size_t file = f ? (size_t) f.tellg() : ((size_t) 640 << 20);
+#ifndef STRATA_USE_HIP
+    if (getenv("SAGUARO_IK2_DRAFT_Q8") && atoi(getenv("SAGUARO_IK2_DRAFT_Q8")))   // (the layers as Q8_0: ~0.53 of BF16)
+        file = file * 6 / 10;
+#endif
     b += file + (size_t) n_rows * 258 * 2 + (size_t) ctx * (4096 + 768) + (size_t) 4 * 2048 * 8 * 128 * 8 +
          (size_t) 4 * std::max(chunk, 8) * C * 4 + ((size_t) 32 << 20);
     return b;
@@ -9804,7 +9808,11 @@ int main(int argc, char** argv) {
                 // where the prompt's last message starts (past what is kept, with a turn before it): a snapshot
                 // there, so that message edited or asked again reads only itself (SAGUARO_IK2_SNAP_MSG=0: none)
                 size_t p_ms = 0;
-                if (keep_n > 0 && !(getenv("SAGUARO_IK2_SNAP_MSG") && !std::atoi(getenv("SAGUARO_IK2_SNAP_MSG"))) && !drafter)
+                // (with the drafter only under SAGUARO_IK2_DRAFT_SNAP=1: after a restore its windowed layers' rings may
+                //  hold rows of the dropped continuation - the drafts' context only, never an answer's)
+                static const bool draft_snap = getenv("SAGUARO_IK2_DRAFT_SNAP") && std::atoi(getenv("SAGUARO_IK2_DRAFT_SNAP"));
+                if (keep_n > 0 && !(getenv("SAGUARO_IK2_SNAP_MSG") && !std::atoi(getenv("SAGUARO_IK2_SNAP_MSG"))) &&
+                    (!drafter || draft_snap))
                     for (size_t i = ids.size(); i-- > L + 1;)
                         if (ids[i] == user_token) {
                             if (i >= L + 64 && ids.size() - i >= 8) p_ms = i;
