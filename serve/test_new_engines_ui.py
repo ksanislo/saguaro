@@ -275,7 +275,7 @@ class Catalog(unittest.TestCase):
     def test_two_t4s(self):
         c = self.cat([t4(0), t4(1)])
         ik = c["inkling-2-mini"]
-        self.assertTrue(c["inkling-2-mini-sq-20"]["recommended"])   # (the original weights: every expert on the two)
+        self.assertTrue(ik["recommended"])   # (UD-Q4_K_XL's split: packs on two GPUs not proven yet)
         for part in ("two cards: every expert in VRAM", "131K context", "51 tok/s", "1100 tok/s", "2x Tesla T4"):
             self.assertIn(part, ik["fit"])
 

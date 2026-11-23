@@ -7623,6 +7623,7 @@ def ik2_pack_in(d: Path) -> str | None:
     return None
 
 
+IK2_PACKS_TWO_GPUS = False   # (packs on two T4s: right - one card's answers bit for bit - but slower than UD-Q4_K_XL: not picked)
 IK2_KL_FAST = 0.02   # (a file this far from the original is offered for speed, not recommended for it: SQ-10's 0.05)
 
 
@@ -7638,6 +7639,8 @@ def ik2_recommend(cards: list, amd: bool) -> str:
     if not vr or not vr[0]:
         return Q.IK2_QUANT
     ctx = IK2F.CONTEXTS[0]
+    if len(vr) >= 2 and not amd:   # (two cards: UD-Q4_K_XL's split - SQ-20 there measured at half its speed)
+        keys = [k for k in keys if k == Q.IK2_QUANT or IK2_PACKS_TWO_GPUS]
     def resident(k):
         if len(vr) >= 2 and not amd:
             return IK2F.plan_two(vr[0], vr[1], ctx, experts_gib=gib[k])["layout"] in ("resident", "split")

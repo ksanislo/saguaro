@@ -122,7 +122,7 @@ int main(int argc, char** argv) {
         const std::string b = "blk." + std::to_string(l) + ".";
         const std::string ngu = b + "ffn_gate_up_exps.weight", ndn = b + "ffn_down_exps.weight";
         const size_t egu = V.bytes(ngu) / E, edn = V.bytes(ndn) / E;
-        gu.resize(egu), dn.resize(edn);
+        gu.resize(egu + edn), dn.resize(edn);   // (a kMIX expert: packed whole with its gate_up, under the slot)
         const float* sgu = (const float*) V.data(b + "ffn_gate_up_exps.scale");
         const float* sdn = (const float*) V.data(b + "ffn_down_exps.scale");
         const bool mix = V.layer_type(l) == kMIX;
@@ -136,21 +136,20 @@ int main(int argc, char** argv) {
             const uint8_t* part[3];
             int ty[3];
             if (mix) {
-                const size_t pg = egu / 2;
-                for (int h = 0; h < 2; ++h) {
-                    MixHdr hd;
-                    std::memcpy(&hd, gu.data() + h * pg, 16);
-                    ty[h] = hd.type, part[h] = gu.data() + h * pg + 16;
-                    if (h == 1) {
-                        const uint16_t* mq = V.macaq(l, e);
-                        if (mq && (hd.aux_off == 0 || std::memcmp(gu.data() + pg + hd.aux_off, mq, 2 * (size_t) F)))
-                            ++macaq_bad;
-                        if (!mq && hd.aux_off) ++macaq_bad;
-                    }
-                }
-                MixHdr hd;
-                std::memcpy(&hd, dn.data(), 16);
-                ty[2] = hd.type, part[2] = dn.data() + 16;
+                MixHdr hg, hu, hd;
+                std::memcpy(&hg, gu.data(), 16);
+                std::memcpy(&hu, gu.data() + hg.next, 16);
+                std::memcpy(&hd, gu.data() + hg.aux_off, 16);
+                size_t xu, xd, xb;
+                V.mix_layout(l, e, xu, xd, xb);
+                if (hg.next != xu || hg.aux_off != xd || xb > egu + edn) ++macaq_bad;
+                ty[0] = hg.type, part[0] = gu.data() + 16;
+                ty[1] = hu.type, part[1] = gu.data() + hg.next + 16;
+                ty[2] = hd.type, part[2] = gu.data() + hg.aux_off + 16;
+                const uint16_t* mq = V.macaq(l, e);
+                if (mq && (hu.aux_off == 0 || std::memcmp(gu.data() + hg.next + hu.aux_off, mq, 2 * (size_t) F)))
+                    ++macaq_bad;
+                if (!mq && hu.aux_off) ++macaq_bad;
             } else {
                 ty[0] = ty[1] = ty[2] = V.layer_type(l);
                 part[0] = gu.data(), part[1] = gu.data() + egu / 2, part[2] = dn.data();

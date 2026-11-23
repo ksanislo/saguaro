@@ -689,7 +689,7 @@ class StrataPacks(unittest.TestCase):
         self.assertEqual(rec(11.0), "strata-sq-10")    # (12 GB: Strata's 12 GB pack)
         self.assertEqual(rec(15.0), "ud-q4_k_xl")      # (a T4: the offload path either way; UD the closest there)
         self.assertEqual(rec(23.5), "strata-sq-20")    # (24 GB: the original weights, every expert on the card)
-        self.assertEqual(rec(15.0, 2), "strata-sq-20")  # (two T4s: every expert across them)
+        self.assertEqual(rec(15.0, 2), "ud-q4_k_xl")    # (two T4s: UD-Q4_K_XL faster than SQ-20 there)
 
     def test_pack_folder(self):
         with tempfile.TemporaryDirectory() as t:

@@ -43,18 +43,20 @@ CPU, and on a T4 and an RX 9070 XT through the engine's kernels). A pack's folde
 
 | Files | Download | Experts in the engine | KL from the original (here / Strata's) | Same top token | 1x Tesla T4 (32K) | 1x RX 9070 XT (32K) | Picked for |
 | --- | ---: | ---: | ---: | ---: | --- | --- | --- |
-| Strata SQ-20 (`inkling-2-mini-sq-20`) | 19.3 GB | 14.95 GiB | 0 (the original weights) / 0 | 100 % | 15.0 / 18.3 tok/s, read 519 (offload) | 41.0 / 42.8 tok/s, read 1329 (offload) | 24 GB cards and two 16 GB cards (every expert in VRAM) |
-| unsloth UD-Q4_K_XL (`inkling-2-mini`) | 17.6 GB | 14.7 GiB | 0.0041 / - | 97.1 % | 26.3 / 29.4, read 546 (offload) | 58-59, read 1718 (offload) | one 16 GB card (the offload path) |
-| Strata SQ-15 (`inkling-2-mini-sq-15`) | 14.3 GB | 13.0 GiB | 0.0171 / 0.0089 | 93.5 % | 24.7 / 25.6, read 540 (offload) | 56.9 / 53.6, read 1277 (offload) | - (a smaller download than UD at nearly its speed) |
-| Strata SQ-10 (`inkling-2-mini-sq-10`) | 10.5 GB | 10.45 GiB | 0.0795 / 0.0502 | 87.1 % | 33.9 / 31.5, read 544 (every expert in VRAM) | 67.8 / 60.9, read 1247 (every expert in VRAM) | 8-12 GB cards |
+| Strata SQ-20 (`inkling-2-mini-sq-20`) | 19.3 GB | 14.95 GiB | 0 (the original weights) / 0 | 100 % | 24.0 / 23.7 tok/s, read 803 (offload) | 52.5 / 49.2 tok/s, read 1279 (offload) | 24 GB cards (every expert in VRAM) |
+| unsloth UD-Q4_K_XL (`inkling-2-mini`) | 17.6 GB | 14.7 GiB | 0.0041 / - | 97.1 % | 40.3 / 39.0, read 830 (offload) | 71.4 / 65.0, read 1665 (offload) | one or two 16 GB cards |
+| Strata SQ-15 (`inkling-2-mini-sq-15`) | 14.3 GB | 11.5 GiB | 0.0171 / 0.0089 | 93.5 % | 29.1 / 28.1, read 835 (offload) | 62.7 / 57.0, read 1268 (every expert in VRAM) | - (a smaller download) |
+| Strata SQ-10 (`inkling-2-mini-sq-10`) | 10.5 GB | 8.2 GiB | 0.0795 / 0.0502 | 87.1 % | 32.9 / 30.7, read 815 (every expert in VRAM) | 66.6 / 60.7, read 1248 (every expert in VRAM) | 8-12 GB cards |
 
 KL here: against SQ-20 (the original weights), 2,000 tokens of text through `tools/ik2/kl.py` (the same on a T4 and
-the RX 9070 XT to within 0.0004);
-Strata's figures are on their own test prompts. Speeds: decode at ~50 / 8K tokens deep, 8K read, one request,
-GPU clocks not pinned, measured 2026-11-22 (`runs/sf4`, `runs/sfm5`, `runs/sfm6`; the RX 9070 XT's SQ-10 / SQ-15 with
-the faster S_K row dots, `runs/sf5` on the T4). The packs keep each expert in its own codec,
-and the engine still gives every expert of a layer the slot of its widest one - which is why SQ-15 (14.3 GB) does not
-yet stay whole in a 16 GB card's VRAM; per-expert slot sizes are the next step.
+the RX 9070 XT to within 0.0004); Strata's figures are on their own test prompts. Speeds: decode at ~50 / 8K tokens
+deep, 8K read, one request, GPU clocks not pinned, the setup's layouts (the RX 9070 XT's resident packs with `--chunk
+1024` and `SAGUARO_IK2_RESERVE_MB=1024`; without them SQ-15 there runs out of VRAM and slows to ~45 tok/s), measured
+2026-11-22 with the dynamic expert cache (`runs/s3`, mortar `ab-runs/r7`). A pack keeps each expert in its own codec;
+held resident, each expert is packed in a pool of its own size, which is what keeps SQ-15 (11.5 GiB of experts) whole on
+a 16 GB card. On a Tesla T4 that is not faster than the offload path (28.0 / 24.5 tok/s with a 1 GiB reserve): the 3-bit
+experts' row dots are the T4's limit there, not the bus. Two T4s: SQ-20 runs (the same answers as one card, bit for
+bit) at 27.1 / 23.3 tok/s at 131K against UD-Q4_K_XL's 50.5 / 39.8 - the setup keeps UD-Q4_K_XL for two cards.
 
 ## Install
 
