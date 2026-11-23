@@ -6567,6 +6567,7 @@ void check_preview(int n_gpu, bool serve) {
 int main(int argc, char** argv) {
     std::string model, toks, dump, draft_path, drafting;
     int gen = 16, chunk = 2048, ctx = 262144, threads = 8, n_gpu = 1;
+    int chunk_set = 0;   // (--chunk: 1 a number, 2 auto; not given: auto on Pascal)
     bool serve = false, serve_maya = true;   // (--serve: Saguaro's engine protocol; --serve-ik2: the @-line one)
     std::vector<int> eos_ids;                 // --eos a,b: the tokens a request ends at (Maya's protocol)
     double cache_gb = 60;
@@ -6589,7 +6590,11 @@ int main(int argc, char** argv) {
             }
         }
         else if (a == "--gen") gen = std::atoi(next().c_str());
-        else if (a == "--chunk") chunk = std::atoi(next().c_str());
+        else if (a == "--chunk") {   // (auto: the largest of 8192 / 4096 / the given default that keeps every expert in VRAM)
+            const std::string v = next();
+            chunk_set = v == "auto" ? 2 : 1;
+            if (v != "auto") chunk = std::atoi(v.c_str());
+        }
         else if (a == "--ctx" || a == "--max-context") ctx = std::atoi(next().c_str());   // (--max-context: serve/server.py's name)
         else if (a == "--cache-gb") cache_gb = std::atof(next().c_str());
         else if (a == "--threads") threads = std::atoi(next().c_str());
@@ -7179,6 +7184,18 @@ int main(int argc, char** argv) {
                         "cache path instead)\n");
 #endif
         if (g_off_want) g_dense_q8 = true;
+        if ((chunk_set == 2 || (chunk_set == 0 && k::arch_class() == 60)) && g_fast_want && n_gpu == 1 && g_tpn <= 1) {
+            // (a prompt chunk's work buffers: ~0.6 MiB a token, measured on a P40 - 2048 -> 8192 took 3.7 GiB more; the
+            //  larger chunk where every expert stays in VRAM with half a GiB to spare.  P40, the one-T4 quant: an 8K read
+            //  374 -> 451 -> 503 tok/s at 2048 / 4096 / 8192, 30K 276 -> 311 -> 333, decode the same)
+            for (const int c2 : {8192, 4096})
+                if (c2 > chunk && exp_b + dense_b + kv_b + reserve + (size_t) (c2 - chunk) * (640 << 10) + ((size_t) 1 << 29) <= fr0) {
+                    std::printf("prompt chunk: %d (%s; every expert stays in VRAM)\n", c2,
+                                chunk_set == 2 ? "--chunk auto" : "Pascal's default");
+                    chunk = c2;
+                    break;
+                }
+        }
         std::printf("experts %.1f GiB, dense weights %.1f GiB as blocks, K / V cache %.1f GiB, %.1f GiB free: %s\n",
                     exp_b / 1073741824.0, dense_b / 1073741824.0, kv_b / 1073741824.0, fr0 / 1073741824.0,
                     fits && !g_off_want ? "every expert stays in VRAM"
