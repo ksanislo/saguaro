@@ -8,7 +8,10 @@
  "about": "UD-Q4_K_XL: NVFP4 experts in layers 0-19, Q8_0 elsewhere; 26B parameters, 8 of 128 experts a token",
  "vram_gb": 24,
  "files": {
-  "Inkling-2-Mini-UD-Q4_K_XL.gguf": [17629759456, "e62d463c135ffe283df8d94b279a96ca145ac128b52ce854478613045bf4de15"]
+  "Inkling-2-Mini-UD-Q4_K_XL.gguf": [
+   17629759456,
+   "e62d463c135ffe283df8d94b279a96ca145ac128b52ce854478613045bf4de15"
+  ]
  },
  "gguf": "Inkling-2-Mini-UD-Q4_K_XL.gguf",
  "vision": {
@@ -17,7 +20,10 @@
   "revision": "ae9327c5fbc7333116ba32eee78bb5d2bbefae4f",
   "folder": "",
   "files": {
-   "mmproj-BF16.gguf": [641805760, "2c165c78790e78a3f45a2d1e9e931083e52ee69d45ff2a0dc9c281fdf1a666e7"]
+   "mmproj-BF16.gguf": [
+    641805760,
+    "2c165c78790e78a3f45a2d1e9e931083e52ee69d45ff2a0dc9c281fdf1a666e7"
+   ]
   }
  },
  "drafter": {
@@ -27,7 +33,64 @@
   "folder": "",
   "license": "Apache 2.0",
   "files": {
-   "mtp.safetensors": [635801416, "7c3b651317f01f73bcf4e1dceba66ef8b7e1a1eac6bc171e882e690a4b10a1d2"]
+   "mtp.safetensors": [
+    635801416,
+    "7c3b651317f01f73bcf4e1dceba66ef8b7e1a1eac6bc171e882e690a4b10a1d2"
+   ]
   }
- }
+ },
+ "strata": {
+  "_": "Strata's .strata packs of Inkling-2-Mini (strata-engine/Inkling-2-Mini-Strata, Apache 2.0), read by saguaro-ik2 as they are (src/strata_fmt: every weight exactly as Strata's own decode gives it). Each pack folder holds the pack, the repo's tokenizer.json (the GGUFs' tokenizer, table for table) and config.json; pictures and drafting take UD-Q4_K_XL's mmproj and thinkingmachines' drafter as above. experts_gib: the experts as the engine holds them (a layer mixing codecs takes its widest expert's slot for each); kl: measured here against SQ-20 (the original weights), 2000 tokens of text (tools/ik2/kl.py, RX 9070 XT); kl_published: Strata's own (their test prompts).",
+  "repo": "strata-engine/Inkling-2-Mini-Strata",
+  "revision": "04996a1e2c45009b6a04f2af126cb6bdb2ba3587",
+  "folder": "",
+  "license": "Apache 2.0",
+  "common": {
+   "tokenizer.json": [
+    26178678,
+    "7f332727f9a3f093dd452a39cc978e6757627e5dad1b0673aa4e75174f236dd6"
+   ],
+   "config.json": [
+    2722,
+    "a7a349601f0984c4abf999c480ef775d8567d21f5f84b4e8a3e035b44f288dc2"
+   ],
+   "special_tokens_map.json": [
+    529,
+    "c16f44b3594563d82743ddb0417a2be1bfe3e2000dfad2da4b8f32554593e1a0"
+   ]
+  },
+  "packs": {
+   "strata-sq-20": {
+    "name": "Inkling-2-Mini-Strata-SQ-20",
+    "file": "Inkling-2-Mini-SQ-20.strata",
+    "size": 19346685952,
+    "sha256": "0bbfd52344f0dd4779a7807b5f73554a812f24c035e6877b63cd0d499f7e1b97",
+    "experts_gib": 14.95,
+    "kl": 0.0,
+    "about": "SQ-20: the original weights bit for bit (NVFP4 experts in layers 0-19, MXFP8 in 20-23, BF16 elsewhere) - made for 24 GB cards",
+    "kl_published": 0.0
+   },
+   "strata-sq-15": {
+    "name": "Inkling-2-Mini-Strata-SQ-15",
+    "file": "Inkling-2-Mini-SQ-15.strata",
+    "size": 14348316672,
+    "sha256": "2ea32eed533afba257e2cbee7b073dc2c3da80fe55d1d2d794779b5498e30737",
+    "experts_gib": 13.03,
+    "kl": 0.0171,
+    "about": "SQ-15: NVFP4 and 3-5-bit experts chosen per expert, 8-bit dense weights - made for 16 GB cards",
+    "kl_published": 0.0089
+   },
+   "strata-sq-10": {
+    "name": "Inkling-2-Mini-Strata-SQ-10",
+    "file": "Inkling-2-Mini-SQ-10.strata",
+    "size": 10471526400,
+    "sha256": "ac4d452ad03e4930abd9d46f9c5eec22b2f75a1da45a1e49bd24ccd58b065934",
+    "experts_gib": 10.45,
+    "kl": 0.0795,
+    "about": "SQ-10: 2-3-bit experts, 8-bit dense weights - made for 12 GB cards",
+    "kl_published": 0.0502
+   }
+  }
+ },
+ "kl": 0.0041
 }

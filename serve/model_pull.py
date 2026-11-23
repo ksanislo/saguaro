@@ -45,9 +45,12 @@ def catalog(root: Path, glm_sizes: dict | None = None, cards: list | None = None
                     **(notes.get((fam, key)) or notes.get((fam, None)) or {})})
     out.append({"id": "cyber-frost", "family": "qwen", "name": Q.shown("qwen", "q5_k_m"),
                 "installed": ("qwen", "q5_k_m") in have, "size_gb": None})
-    out.append({"id": Q.IK2_IDS[0], "family": "ik2", "name": Q.shown("ik2", Q.IK2_QUANT),
-                "installed": ("ik2", Q.IK2_QUANT) in have, "size_gb": new.get(("ik2", Q.IK2_QUANT)),
-                **(notes.get(("ik2", None)) or {})})
+    for key in Q.IK2_QUANTS:                           # (unsloth's UD-Q4_K_XL, then Strata's packs)
+        if key != Q.IK2_QUANT and new and ("ik2", key) not in new:   # (a pack the table does not publish)
+            continue
+        out.append({"id": Q.ik2_setup_id(key), "family": "ik2", "name": Q.shown("ik2", key),
+                    "installed": ("ik2", key) in have, "size_gb": new.get(("ik2", key)),
+                    **(notes.get(("ik2", None)) or {}), **(notes.get(("ik2", key)) or {})})
     return out
 
 
@@ -59,7 +62,9 @@ def new_engine_sizes() -> dict:
         import saguaro as maya                                    # (nothing runs on import)
         out = {("hy4", k): round(maya.hy4_entry(k)["download_gb"], 1) for k in maya.HY4_QUANTS if maya.hy4_published(k)}
         vision = maya.ik2_vision_model()
-        out[("ik2", Q.IK2_QUANT)] = round(maya.ik2_entry()["download_gb"] + (vision["download_gb"] if vision else 0), 1)
+        for k in Q.IK2_QUANTS:                                    # (each with the pictures' mmproj)
+            if maya.ik2_published(k):
+                out[("ik2", k)] = round(maya.ik2_entry(k)["download_gb"] + (vision["download_gb"] if vision else 0), 1)
         return out
     except (Exception, SystemExit):  # noqa: BLE001 - a damaged table: the setup says so when the model is picked
         return {}
@@ -84,6 +89,12 @@ def _read_pc() -> tuple:
         cards = [g for g in SU.gpus() or [] if g.get("vram_gb")]
     except Exception:  # noqa: BLE001 - no NVIDIA tools here
         cards = []
+    if not cards:                                  # (AMD: the KFD topology's GPUs, "vendor": "amd")
+        try:
+            import setup as SU
+            cards = [g for g in SU.amd_gpus() or [] if g.get("vram_gb")]
+        except Exception:  # noqa: BLE001 - no amdgpu driver here
+            cards = []
     try:
         ram = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / 2**30   # (as the setup counts it)
     except (ValueError, OSError, AttributeError):
@@ -99,24 +110,49 @@ def fit_notes(cards: list, ram_gb: float) -> dict:
     out = {("hy4", None): {"needs": "Made for four 16 GB NVIDIA cards (Linux); Maya-S takes about 68 GB of VRAM and "
                                     "RAM together. One conversation at a time.", "fit": "", "recommended": False},
            ("ik2", None): {"needs": "Linux: one or two NVIDIA cards with 8 GB or more (V100 / Tesla T4 / RTX 20 and "
-                                    "newer; the experts a card does not hold stay in RAM), or an AMD RDNA 3 / 4 GPU "
-                                    "that holds every expert. Made for one or two 16 GB cards.", "fit": "",
+                                    "newer), or one AMD RDNA 3 / 4 GPU with 16 GB or more; the experts a card does not "
+                                    "hold stay in RAM (the offload path). Made for one or two 16 GB cards.", "fit": "",
                            "recommended": False}}
     if not cards:
         return out
+    amd = any(g.get("vendor") == "amd" for g in cards)
+    if amd:                                        # (the setup's AMD choice: one RDNA 3 / 4 GPU of 16 GB or more)
+        cards = [g for g in cards if str(g.get("arch") or "").startswith(IK2F.AMD_ARCHS)] or cards
+        cards = sorted(cards, key=lambda g: -float(g.get("vram_gb") or 0))[:1]
     vram = sum(float(g.get("vram_gb") or 0) for g in cards)
     small = all(float(g.get("vram_gb") or 0) < 24 for g in cards)
-    lay = IK2F.layout(cards)
     ik2 = out[("ik2", None)]
-    why = IK2F.unsupported("cuda", sys.platform == "win32", 0, cards, ram_gb)
+    if amd:
+        why = IK2F.unsupported("hip", sys.platform == "win32", 0, cards, ram_gb)
+        lay = None if why else IK2F.amd_layout(cards[0])
+    else:
+        lay = IK2F.layout(cards)
+        why = IK2F.unsupported("cuda", sys.platform == "win32", 0, cards, ram_gb)
     if lay is None or why:
         ik2["fit"] = "This PC: " + (why or "no card runs it")
     else:
         ik2["fit"] = f"This PC: {lay['said']}" + (f" - {IK2F.speeds(lay)}" if IK2F.speeds(lay) else "")
         ik2["recommended"] = small and len(cards) <= 2
-    group = HY4F.equal_group(cards) if len(cards) >= HY4F.T4_GROUP else []
+        try:   # (each file set: how it fits; the one the setup would pick recommended)
+            sys.path.insert(0, str(ROOT))
+            import saguaro as maya
+            rec = maya.ik2_recommend(cards, amd)
+            for k in Q.IK2_QUANTS:
+                if not maya.ik2_published(k):
+                    continue
+                ex = maya.ik2_entry(k)["experts_gib"]
+                lk = IK2F.amd_layout(cards[0], ex) if amd else IK2F.layout(cards, experts_gib=ex)
+                out[("ik2", k)] = {"recommended": ik2["recommended"] and k == rec}
+                if k != Q.IK2_QUANT and lk:   # (UD-Q4_K_XL keeps the general line: its speeds were measured with it)
+                    out[("ik2", k)]["fit"] = f"This PC: {lk['said']}"
+        except (Exception, SystemExit):  # noqa: BLE001 - the general line stays
+            pass
+    group = HY4F.equal_group(cards) if len(cards) >= HY4F.T4_GROUP and not amd else []
     hy4 = out[("hy4", None)]
-    if group and small:
+    if amd:
+        hy4["fit"] = "This PC: Hy4-Flash runs on NVIDIA GPUs only for now" + (
+            "; Inkling 2 Mini is the model for this PC" if ik2["recommended"] else "")
+    elif group and small:
         said = "four equal cards: tensor parallel over them"
         hy4["fit"] = "This PC: " + said + (" (not enough VRAM and RAM for Maya-S)" if vram + ram_gb < 68 else "")
         out[("hy4", "maya-s")] = {**hy4, "fit": f"This PC: {said} - about 32 tok/s writing, 590 tok/s reading a "

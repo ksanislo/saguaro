@@ -13,6 +13,7 @@ The files already published keep their names (their manifests list them).
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 FAMILIES = ("glm", "deepseek", "minimax", "qwen", "hy4", "ik2")
@@ -141,7 +142,9 @@ OTHERS = {("deepseek", "gguf-q8"): "UD-Q8_K_XL", ("deepseek", "gguf-q4"): "UD-Q4
           ("deepseek", "abliterated-128g"): "orcarouter Abliterated Mix-128G",
           ("deepseek", "abliterated-256g"): "orcarouter Abliterated Mix-256G",
           ("minimax", "exl3"): "EXL3 3.5 bpw", ("qwen", "q5_k_m"): "Q5_K_M",
-          ("ik2", "ud-q4_k_xl"): "unsloth UD-Q4_K_XL"}   # (unsloth's GGUF of Inkling-2-Mini)
+          ("ik2", "ud-q4_k_xl"): "unsloth UD-Q4_K_XL",   # (unsloth's GGUF of Inkling-2-Mini)
+          ("ik2", "strata-sq-20"): "Strata SQ-20", ("ik2", "strata-sq-15"): "Strata SQ-15",
+          ("ik2", "strata-sq-10"): "Strata SQ-10"}   # (Strata's .strata packs of Inkling-2-Mini)
 # CYBER-FROST-3.8-PS: its one GGUF (peasantsmith/CYBER-FROST-3.8-PS-GUFF) - the setup ids it is asked for by
 QWEN_IDS = ("cyber-frost", "cyber-frost-3.8", "cyber-frost-3.8-ps", "cyber-frost-3.8-ps-q5_k_m", "cyber-frost-q5_k_m")
 # --mm3-quant also takes the tier as DeepSeek's --ds4-quant does (maya-xs), beside its first names (gguf-xs)
@@ -149,6 +152,15 @@ MM3_QUANT_ALIASES = {"maya-xs": "gguf-xs", "maya-s": "gguf-s"}
 # Inkling 2 Mini: unsloth's UD-Q4_K_XL, its one file set - the setup ids it is asked for by (the first: the Models page's)
 IK2_IDS = ("inkling-2-mini", "inkling-2-mini-ud-q4_k_xl", "inkling2-mini", "ik2-mini", "ik2")
 IK2_QUANT = "ud-q4_k_xl"
+# ... and Strata's packs of it (tools/ik2/download.json's "strata"): key -> its setup id (the Models page's)
+IK2_STRATA = {"strata-sq-20": "inkling-2-mini-sq-20", "strata-sq-15": "inkling-2-mini-sq-15",
+              "strata-sq-10": "inkling-2-mini-sq-10"}
+IK2_QUANTS = (IK2_QUANT,) + tuple(IK2_STRATA)
+
+
+def ik2_setup_id(key: str | None) -> str:
+    """An Inkling 2 Mini file set's setup id: unsloth's UD-Q4_K_XL "inkling-2-mini", a Strata pack its own."""
+    return IK2_STRATA.get(key or "", IK2_IDS[0])
 
 
 def tier(family: str, key: str | None) -> str | None:
@@ -181,8 +193,8 @@ def config_stem(family: str, key: str | None) -> str | None:
     their run scripts point at them).  MiniMax's GGUFs, new with the scheme, are the first named by it."""
     if family == "qwen":
         return "maya-cyber-frost"
-    if family == "ik2":                                # (Inkling 2 Mini: its one file set)
-        return "maya-inkling-2-mini"
+    if family == "ik2":                                # (Inkling 2 Mini: UD-Q4_K_XL's name kept; a Strata pack its own)
+        return "maya-" + ik2_setup_id(key)
     return f"maya-{setup_id(family, key)}" if family in ("minimax", "hy4") and setup_id(family, key) else None
 
 
@@ -203,6 +215,9 @@ def resolve(name: str, glm_downloads=()) -> tuple | None:
         return "qwen", "q5_k_m"
     if low in IK2_IDS or low == MODEL["ik2"].lower():
         return "ik2", IK2_QUANT
+    for k, i in IK2_STRATA.items():                    # (inkling-2-mini-sq-15, Inkling-2-Mini-SQ-15, strata-sq-15)
+        if low in (i, k, i.replace("inkling-2-mini-", "inkling-2-mini-strata-")):
+            return "ik2", k
     if low == "hy4":                                   # (the model by its short name: its size then asked)
         return "hy4", None
     for f in ("deepseek", "minimax", "qwen", "hy4"):
@@ -254,4 +269,8 @@ def config_label(cfg: dict) -> str | None:
     """What a config runs, as users see it ("GLM-5.3 · Maya-S24"), or None for a config the setup did not write."""
     if not isinstance(cfg.get("installer"), dict):
         return None
+    own = cfg["installer"].get("ik2_file") if family_of(cfg) == "ik2" else None
+    if own:                                            # (an Inkling GGUF of the user's own: its name, each its config)
+        rest = re.sub(r"(?i)^inkling-2-mini-?", "", re.sub(r"(?i)\.gguf$", "", str(own))) or str(own)
+        return f"{SHOWN['ik2']} · {rest}"
     return shown(family_of(cfg), config_key(cfg))

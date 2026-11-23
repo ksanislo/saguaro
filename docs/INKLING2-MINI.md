@@ -4,8 +4,9 @@
 looped mixture of experts: 24 layers of which 12 run three times, 8 of 128 experts a token) is the model for a PC with
 **one or two 16 GB cards**. It runs on its own engine, `saguaro-ik2` (upstream Project Maya v1.1.74's, tuned here on
 Tesla T4s), from
-[unsloth's UD-Q4_K_XL GGUF](https://huggingface.co/unsloth/Inkling-2-Mini-GGUF) read in place. The model and the GGUF
-are **Apache 2.0**.
+[unsloth's UD-Q4_K_XL GGUF](https://huggingface.co/unsloth/Inkling-2-Mini-GGUF) or one of
+[Strata's packs](#the-files-unsloths-gguf-or-stratas-packs), read in place. The model, the GGUF and the packs are
+**Apache 2.0**.
 
 Back to [the models](MODELS.md) and the [README](../README.md). How the engine works, and the measurements behind it:
 [INKLING2.md](INKLING2.md).
@@ -16,18 +17,44 @@ Back to [the models](MODELS.md) and the [README](../README.md). How the engine w
 | --- | --- |
 | **GPU** | One or two NVIDIA cards of 8 GB or more, V100 / Tesla T4 / RTX 20 (compute capability 7.0) and newer; or one AMD RDNA 3 / 3.5 / 4 GPU of 16 GB or more (checked on an RX 9070 XT). Linux. No Mac or Windows engine here. |
 | **RAM** | The experts the card does not hold, pinned, beside the system: about 6 GiB with one 16 GB card, about 13 GiB with an 8 GB one; RAM and VRAM together about 24 GB (no SSD tier: the setup refuses less). |
-| **Disk** | 18.3 GB: the GGUF (17.6 GB) and the vision tower (0.6 GB); 0.6 GB more for the drafter where drafting runs (RTX 30 / A100 and newer holding every expert, AMD). An NVMe SSD loads it in about ten seconds. |
+| **Disk** | 18.3 GB: the GGUF (17.6 GB) and the vision tower (0.6 GB); 0.6 GB more for the drafter where drafting runs (every expert and the drafter in VRAM: RTX 30 / A100 and newer, an AMD GPU; not on a 16 GB card at 32K). An NVMe SSD loads it in about ten seconds. |
 
 | Cards | Layout the setup writes | Context | Experts |
 | --- | --- | ---: | --- |
 | One 8-16 GB card (one Tesla T4) | `--gpus 1 --chunk 2048`, the seed expert profile (`SAGUARO_IK2_WARM`) | 32K | the offload path: the most-used in VRAM (2,303 of 3,072 on a T4), the rest in pinned RAM, fetched by the GPU |
 | Two 16 GB cards (two Tesla T4s) | `--gpus 2 --chunk 8192` | 131K | the split: all in VRAM across the two cards |
 | One card of 24 GB or more | `--gpus 1 --chunk 2048` | up to 256K (FP16 cache: 128K) | all in VRAM; drafting on RTX 30 / A100 and newer |
-| One 16 GB AMD RDNA 3 / 4 GPU (an RX 9070 XT) | `--gpus 1 --chunk 2048`, the seed profile, `SAGUARO_IK2_RESERVE_MB=1024` | 32K | the offload path as on NVIDIA (the one-T4 quant: all in VRAM, `--chunk 1024`) |
+| One 16 GB AMD RDNA 3 / 4 GPU (an RX 9070 XT) | `--gpus 1 --chunk 2048`, the seed profile, `SAGUARO_IK2_RESERVE_MB=1024` | 32K | the offload path as on NVIDIA (the one-T4 quant: all in VRAM, `--chunk 1024`; each GGUF has its own config; the Models page refuses a Prompt chunk past 1024 there) |
 | One AMD GPU of 24 GB or more | `--gpus 1 --chunk 1024` | up to 128K | all in VRAM |
 
 The two T4 rows and the RX 9070 XT row were measured here. The others are upstream Project Maya's layouts (measured
-there on RTX 3090s, V100s and a Radeon 8065S, see [INKLING2.md](INKLING2.md) section 8). Drafting is off on Volta / Turing, on the offload path and on two cards.
+there on RTX 3090s, V100s and a Radeon 8065S, see [INKLING2.md](INKLING2.md) section 8). Drafting is off on Volta / Turing, on the offload path and on two cards; where the drafter's
+room does not fit beside the model (the one-T4 quant on a 16 GB card at 32K) the setup does not fetch it and the prompt
+lookup drafts alone.
+
+## The files: unsloth's GGUF or Strata's packs
+
+The setup offers four sets of the same model and picks the one for your cards (`--ik2-quant` or `--model
+inkling-2-mini-sq-15` chooses): unsloth's UD-Q4_K_XL GGUF, or one of
+[Strata's packs](https://huggingface.co/strata-engine/Inkling-2-Mini-Strata) (`.strata`, Apache 2.0), which
+`saguaro-ik2` reads as they are - every weight exactly as Strata's own decode gives it (checked value by value on the
+CPU, and on a T4 and an RX 9070 XT through the engine's kernels). A pack's folder also holds the repo's
+`tokenizer.json` (the GGUF's tokenizer, table for table); pictures and drafting use the same mmproj and drafter.
+
+| Files | Download | Experts in the engine | KL from the original (here / Strata's) | Same top token | 1x Tesla T4 (32K) | 1x RX 9070 XT (32K) | Picked for |
+| --- | ---: | ---: | ---: | ---: | --- | --- | --- |
+| Strata SQ-20 (`inkling-2-mini-sq-20`) | 19.3 GB | 14.95 GiB | 0 (the original weights) / 0 | 100 % | 15.0 / 18.3 tok/s, read 519 (offload) | 41.0 / 42.8 tok/s, read 1329 (offload) | 24 GB cards and two 16 GB cards (every expert in VRAM) |
+| unsloth UD-Q4_K_XL (`inkling-2-mini`) | 17.6 GB | 14.7 GiB | 0.0041 / - | 97.1 % | 26.3 / 29.4, read 546 (offload) | 58-59, read 1718 (offload) | one 16 GB card (the offload path) |
+| Strata SQ-15 (`inkling-2-mini-sq-15`) | 14.3 GB | 13.0 GiB | 0.0171 / 0.0089 | 93.5 % | 22.9 / 23.6, read 547 (offload) | 56.9 / 53.6, read 1277 (offload) | - (a smaller download than UD at nearly its speed) |
+| Strata SQ-10 (`inkling-2-mini-sq-10`) | 10.5 GB | 10.45 GiB | 0.0795 / 0.0502 | 87.1 % | 26.0 / 24.7, read 537 (every expert in VRAM) | 67.8 / 60.9, read 1247 (every expert in VRAM) | 8-12 GB cards |
+
+KL here: against SQ-20 (the original weights), 2,000 tokens of text through `tools/ik2/kl.py` (the same on a T4 and
+the RX 9070 XT to within 0.0004);
+Strata's figures are on their own test prompts. Speeds: decode at ~50 / 8K tokens deep, 8K read, one request,
+GPU clocks not pinned, measured 2026-11-22 (`runs/sf4`, `runs/sfm5`, `runs/sfm6`; the RX 9070 XT's SQ-10 / SQ-15 with
+the faster S_K row dots, the T4's before them). The packs keep each expert in its own codec,
+and the engine still gives every expert of a layer the slot of its widest one - which is why SQ-15 (14.3 GB) does not
+yet stay whole in a 16 GB card's VRAM; per-expert slot sizes are the next step.
 
 ## Install
 
@@ -77,9 +104,12 @@ of a load answers in 0.8 s instead of 1.6 s. What makes it: the offload path's V
 (upstream PR #1118's Clock-LFU slots, the same bits as a fixed tier - KL 0), the tail layers' pool a fifth of the
 budget, and Turing's fused prompt attention (one K / V tile in shared memory; against cuBLAS's prompt attention KL
 3.5e-3 / the same top token 97 % over 500 tokens after an 8K prompt). Two T4s write and read within 4 % of the
-previous engine; the first short prompt is ~0.5 s slower. In short: 1x Tesla T4
-about 40 tok/s writing and about 840 tok/s reading; 2x Tesla T4 about 51 tok/s writing and about 1100 tok/s reading. Two loads of each, interleaved;
-this box drifts by about a tenth between runs. The one-T4 quant row is from before these changes.
+previous engine; the first short prompt is ~0.5 s slower. With the one-T4 quant two answers at once (`--parallel 2`,
+16K context) give 47.7 tok/s together against 41.9 alone. Two loads of each, interleaved; this box drifts by about a
+tenth between runs. The one-T4 quant rows are from before these changes. In short: 1x Tesla T4 about 40 tok/s
+writing and about 840 tok/s reading; 2x Tesla T4 about 51 tok/s writing and about 1100 tok/s reading; 1x RX 9070 XT
+about 71 tok/s writing and about 1670 tok/s reading (the one-T4 quant: about 83 tok/s writing, about 1150 tok/s
+reading) - what the setup quotes for these layouts.
 
 ## What it does
 
@@ -128,5 +158,7 @@ and, after an answer, how many picks it fetched; the closer the tier is to all o
   drafter and `--drafting auto` measures once whether it pays. No Turbo.
 - The Monitor shows its speeds, context and each card's memory; the experts card counts the expert-cache hits after
   each answer when the config's env has `SAGUARO_IK2_STATS=1`, and otherwise says where the experts are.
+- **Out of GPU memory in a request** (a prompt chunk too big for what the card has left): that request fails with an
+  error saying so, and the engine starts again for the next one (a second or two).
 - Two cards were filled to 125K tokens of a 131K context (at `--chunk 2048`; `--chunk 8192` to 16K); the config leaves
   1 GiB of the first card free for that (`SAGUARO_IK2_ROOM_MB`).

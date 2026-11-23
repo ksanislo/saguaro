@@ -254,7 +254,46 @@ class Tokenizer:
         return tk
 
     @classmethod
+    def from_hf_json(cls, path, pre: str, special: dict | None = None) -> "Tokenizer":
+        """A Hugging Face tokenizer.json (byte-level BPE): its vocab + added tokens (type 3 when special) and merges -
+        for Inkling 2 Mini the same tables as the GGUFs' (checked: every token, every merge, every type)."""
+        hf = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
+        vocab = hf["model"]["vocab"]
+        n = max(list(vocab.values()) + [a["id"] for a in hf.get("added_tokens", [])]) + 1
+        tokens, types = [None] * n, [1] * n
+        for s, i in vocab.items():
+            tokens[i] = s
+        for a in hf.get("added_tokens", []):
+            tokens[a["id"]] = a["content"]
+            types[a["id"]] = 3 if a.get("special") else 4
+        merges = [" ".join(m) if isinstance(m, list) else m for m in hf["model"]["merges"]]
+        return cls(tokens, merges, types, pre, special)
+
+    @classmethod
+    def from_strata(cls, path) -> "Tokenizer":
+        """A Strata .strata pack: the tokenizer.json its Hugging Face repo ships beside it (Inkling 2: the GGUFs' own
+        tables), the ids the pack's config names."""
+        p = pathlib.Path(path)
+        tj = p.parent / "tokenizer.json"
+        if not tj.exists():
+            raise ValueError("%s: a Strata pack carries no tokenizer - put the repo's tokenizer.json beside it" % p)
+        cfg = json.loads((p.parent / "config.json").read_text()) if (p.parent / "config.json").exists() else {}
+        eos = cfg.get("eos_token_id", cfg.get("text_config", {}).get("eos_token_id"))
+        special = {"tokenizer.ggml.eos_token_id": int(eos), "tokenizer.ggml.eot_token_id": int(eos)} \
+            if eos is not None else {}
+        pre = {"inkling2_loop": "inkling2"}.get(cfg.get("model_type", ""), "inkling2")
+        tk = cls.from_hf_json(tj, pre, special)
+        stm = p.parent / "special_tokens_map.json"   # (its pad token: the GGUFs' padding_token_id)
+        pad = json.loads(stm.read_text()).get("pad_token") if stm.exists() else None
+        if isinstance(pad, str) and pad in tk.ids:
+            tk.special_ids["tokenizer.ggml.padding_token_id"] = tk.ids[pad]
+        return tk
+
+    @classmethod
     def from_gguf(cls, path) -> "Tokenizer":
+        with open(path, "rb") as fh:
+            if fh.read(8) == b"STRATA\x00\x01":
+                return cls.from_strata(path)
         sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
         from gguf_reader import GGUFFile
         md = GGUFFile(pathlib.Path(path)).metadata

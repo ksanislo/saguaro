@@ -72,10 +72,12 @@ recommends one for your PC; to pick one yourself, give its setup id: `./setup.sh
 | **[Inkling 2 Mini](https://huggingface.co/thinkingmachines/Inkling-2-Mini)**<br><sub>Thinking Machines · Apache 2.0 · 26 B · NVIDIA T4 / RTX 20 and newer or AMD RDNA 3 / 4 (16 GB), Linux · reads pictures · one conversation at a time</sub> | unsloth UD-Q4_K_XL · `inkling-2-mini` | 18.3 GB | **one or two 16 GB cards**: ~40 tokens/s on one Tesla T4, ~51 on two, ~71 on an RX 9070 XT (measured) - [docs/INKLING2-MINI.md](docs/INKLING2-MINI.md) |
 
 GLM, DeepSeek and MiniMax run on NVIDIA from the V100 / RTX 20 on, and on Windows (experimental; see
-[What you need](#what-you-need)); Hy4-Flash and Inkling 2 Mini on NVIDIA under Linux. On AMD GPUs (experimental) only
-some engines build today - [the list](docs/AMD_SAGUARO.md#what-runs-on-amd). With one or two NVIDIA cards under 24 GB
-and no model set up yet, the setup recommends Inkling 2 Mini; with four equal 16 GB cards, Hy4-Flash; on AMD,
-GLM-5.3-Flash in the largest quant that fits VRAM + RAM. DeepSeek's sizes include its Engram tables. The setup also offers unsloth's GGUF and
+[What you need](#what-you-need)); Hy4-Flash on NVIDIA under Linux; Inkling 2 Mini under Linux on NVIDIA from the V100 /
+Tesla T4 on and on one AMD RDNA 3 / 4 GPU of 16 GB or more (experimental; the experts the card does not hold stay in
+RAM, the offload path). On AMD GPUs (experimental) only some engines build today -
+[the list](docs/AMD_SAGUARO.md#what-runs-on-amd). With no model set up yet, the setup recommends Inkling 2 Mini on one or
+two NVIDIA cards under 24 GB or on one 16-23 GB AMD RDNA 3 / 4 GPU; with four equal 16 GB cards, Hy4-Flash; on other AMD
+PCs, GLM-5.3-Flash in the largest quant that fits VRAM + RAM. DeepSeek's sizes include its Engram tables. The setup also offers unsloth's GGUF and
 LibertAIDAI's EXL3 quants of DeepSeek, orcarouter's abliterated DeepSeek, Mia-AiLab's EXL3 quant of MiniMax,
 turboderp's EXL3 quants of GLM, and Saguaro's fourth family, **Qwen-3.8-Flash-Next** (CYBER-FROST), as its Q5_K_M GGUF
 on the `saguaro-qfn` engine (from Strata), with pictures
@@ -245,8 +247,8 @@ The setup checks all of this, prints the exact command for anything missing, and
 ## Install
 
 Run the two commands in [Quick start](#quick-start) and answer a few questions (Enter takes the recommended choice).
-The setup shows every download before it starts it, builds everything once (20-40 minutes plus the download) and
-**starts the model**. Then open `http://127.0.0.1:8080`. Ctrl+C stops it, and `./setup.sh` starts it again right away.
+The setup shows every download before it starts it, builds everything once (plus the download: GLM-5.3-Flash's
+engine about 20-40 minutes; Inkling 2 Mini's about 4 minutes on a Ryzen 7 9800X3D) and **starts the model**. Then open `http://127.0.0.1:8080`. Ctrl+C stops it, and `./setup.sh` starts it again right away.
 
 - **Windows:** `START-SAGUARO.bat` instead of `./setup.sh` - see [docs/WINDOWS.md](docs/WINDOWS.md).
 - **AMD:** [docs/AMD_SAGUARO.md](docs/AMD_SAGUARO.md).

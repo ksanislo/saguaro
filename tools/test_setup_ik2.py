@@ -194,7 +194,7 @@ class Fit(unittest.TestCase):
         self.assertIn("Volta", F.drafting_off_reason("75", 24, 65536, "fp8"))
         self.assertIn("offload", F.drafting_off_reason("86", 8, 65536, "fp8"))
         self.assertIsNone(F.drafting_off_reason("86", 24, 65536, "fp8"))
-        self.assertIn("offload", F.drafting_off_reason("gfx1201", 16, 32768, "fp8", hip=True))
+        self.assertIn("offload", F.drafting_off_reason("gfx1201", 16, 32768, "fp8", hip=True))   # (UD-Q4_K_XL)
         self.assertIsNone(F.drafting_off_reason("gfx1100", 24, 32768, "fp8", hip=True))
         self.assertTrue(F.draft_fits(24, 131072, "fp8"))
         self.assertFalse(F.draft_fits(24, 262144, "fp8"))
@@ -214,6 +214,24 @@ class Fit(unittest.TestCase):
         q = F.amd_layout(amd("gfx1201", 15.9), 11.45)
         self.assertEqual((q["path"], q["args"][3]), ("resident", "1024"))
         self.assertEqual(F.amd_layout(amd("gfx1100", 24))["env"], {})
+
+    def test_amd_one_source(self):
+        """amd_layout, verdict and drafting_off_reason agree (all plan()'s): the one-T4 quant on a 16 GB AMD card is
+        resident in each - no "84 % on the card" or "offload path" beside "every expert in its memory"; the RX 9070 XT
+        layouts are the measured ones; drafting runs where an AMD card holds every expert."""
+        for vram, ex in ((15.9, 14.7), (15.9, 11.45), (24.0, 14.7), (24.0, 11.45), (16.0, 13.5)):
+            lay = F.amd_layout(amd("gfx1201", vram), ex)
+            word, _ = F.verdict(vram, 92, 32768, F.DEFAULT_KV, True, ex)
+            off = F.drafting_off_reason(None, vram, 32768, F.DEFAULT_KV, True, ex)
+            self.assertEqual(lay["resident"], word == "fast", (vram, ex))
+            self.assertEqual(lay["resident"], off is None, (vram, ex))
+            self.assertEqual(lay["args"][3], "1024" if lay["resident"] else "2048")
+        self.assertIn("RX 9070 XT", F.speeds(F.amd_layout(amd("gfx1201", 15.9))))
+        self.assertIn("83 tok/s", F.speeds(F.amd_layout(amd("gfx1201", 15.9), 11.45)))
+        self.assertEqual(F.speeds(F.amd_layout(amd("gfx1100", 24))), "")   # (not measured there)
+        self.assertIsNone(F.drafting_off_reason(None, 24, 32768, F.DEFAULT_KV, True))
+        self.assertTrue(F.draft_fits(24, 32768, F.DEFAULT_KV, F.EXPERTS_GIB, True))
+        self.assertFalse(F.draft_fits(15.9, 32768, F.DEFAULT_KV, 11.45, True))
 
     def test_the_flags_are_the_engines_own(self):
         """saguaro-ik2 stops at a flag it does not know: every flag a layout writes is one its parser reads."""
@@ -400,6 +418,101 @@ class Steps(unittest.TestCase):
         path, cfg = self.write({"gpus": [t4(2), t4(3)], "backend": "cuda"}, gguf, tok, 131072, d)
         self.assertEqual(cfg["args"][cfg["args"].index("--chunk") + 1], "4096")
 
+    def write_amd(self, gguf, tok, d, ex, a=None):
+        pc = {"gpus": [amd("gfx1201", 15.9)], "backend": "hip"}
+        with patch.object(maya, "ROOT", self.root), \
+                patch.object(maya, "write_run_script", lambda p, port: p.with_name("run-" + p.stem + ".sh")):
+            path = maya.write_config_ik2(a or args(backend="hip"), pc, {}, gguf, tok, 32768,
+                                         self.root / "models", d, F.amd_layout(pc["gpus"][0], ex))
+        return path, json.loads(path.read_text(encoding="utf-8"))
+
+    def test_each_quant_its_own_config_and_layout(self):
+        """Switching quants with the setup (mortar, 2026-11-22: the one-T4 quant kept UD-Q4's --chunk 2048 and a 10K
+        prompt ran the card out of memory): each GGUF its own config, so the Models page switches between them each
+        with its own layout - UD-Q4_K_XL --chunk 2048, the one-T4 quant 1024 - and a setup again recomputes only what
+        the setup chose."""
+        d, ud = self.files()
+        tok = self.tok(d)
+        t4q = d / "Inkling-2-Mini-T4-NVFP4-IQ3_XXS.gguf"
+        t4q.write_bytes(b"GGUF")
+        val = lambda cfg, f: cfg["args"][cfg["args"].index(f) + 1] if f in cfg["args"] else None   # noqa: E731
+        p_ud, c_ud = self.write_amd(ud, tok, d, 14.7)
+        p_q, c_q = self.write_amd(t4q, tok, d, 11.45)
+        self.assertEqual((p_ud.name, p_q.name), ("maya-inkling-2-mini.json", "maya-inkling-2-mini-t4-nvfp4-iq3_xxs.json"))
+        self.assertEqual((val(c_ud, "--chunk"), val(c_q, "--chunk")), ("2048", "1024"))
+        self.assertEqual(json.loads(p_ud.read_text(encoding="utf-8"))["args"], c_ud["args"])   # (untouched)
+        self.assertNotEqual(Q.config_label(c_ud), Q.config_label(c_q))
+        self.assertEqual(c_q["installer"]["setup_args"][:4], ["--gpus", "1", "--chunk", "1024"])
+        p_ud, c_ud = self.write_amd(ud, tok, d, 14.7)
+        self.assertEqual(val(c_ud, "--chunk"), "2048")
+
+    def test_a_setup_again_keeps_what_the_user_chose(self):
+        """What the user set on the Models page (or by hand) stays: CPU threads, drafting, a --chunk that fits,
+        --parallel where one GPU holds every expert; the setup's own choices are recomputed.  A kept --chunk past the
+        layout's fit is said and the fitting one taken (--yes); --parallel where it cannot run is dropped."""
+        d, ud = self.files()
+        tok = self.tok(d)
+        t4q = d / "Inkling-2-Mini-T4-NVFP4-IQ3_XXS.gguf"
+        t4q.write_bytes(b"GGUF")
+        val = lambda cfg, f: cfg["args"][cfg["args"].index(f) + 1] if f in cfg["args"] else None   # noqa: E731
+
+        def edit(path, **flags):
+            cfg = json.loads(path.read_text(encoding="utf-8"))
+            for f, v in flags.items():
+                f = "--" + f.replace("_", "-")
+                if f in cfg["args"]:
+                    cfg["args"][cfg["args"].index(f) + 1] = v
+                else:
+                    cfg["args"] += [f, v]
+            path.write_text(json.dumps(cfg), encoding="utf-8")
+        p_q, c_q = self.write_amd(t4q, tok, d, 11.45)
+        edit(p_q, threads="6", drafting="off", parallel="2", chunk="512")
+        p_q, c_q = self.write_amd(t4q, tok, d, 11.45)
+        self.assertEqual([val(c_q, f) for f in ("--threads", "--drafting", "--parallel", "--chunk")],
+                         ["6", "off", "2", "512"])
+        self.assertEqual(c_q["installer"]["drafting"], "off")
+        edit(p_q, chunk="2048")                                      # (past the fit: a 10K prompt ran out of memory)
+        said = []
+        with patch.object(maya, "warn", lambda m: said.append(m)):
+            p_q, c_q = self.write_amd(t4q, tok, d, 11.45)
+        self.assertEqual(val(c_q, "--chunk"), "1024")
+        self.assertTrue(any("--chunk 2048 does not fit" in m for m in said), said)
+        with patch.object(maya, "ok", lambda m: said.append(m)):
+            edit(p_q, chunk="2048")
+            self.write_amd(t4q, tok, d, 11.45)
+        self.assertFalse(any("kept from" in m and "--chunk 2048" in m for m in said), said)
+        edit(p_q, chunk="2048")                                      # (asked, and kept on purpose)
+        with patch.object(maya, "warn", lambda m: None), patch.object(maya, "choose", lambda *x, **k: 1):
+            p_q, c_q = self.write_amd(t4q, tok, d, 11.45, args(backend="hip", yes=False))
+        self.assertEqual(val(c_q, "--chunk"), "2048")
+        p_ud, c_ud = self.write_amd(ud, tok, d, 14.7)
+        edit(p_ud, parallel="2")                                     # (the offload path: no answers at once)
+        with patch.object(maya, "warn", lambda m: said.append(m)):
+            p_ud, c_ud = self.write_amd(ud, tok, d, 14.7)
+        self.assertIsNone(val(c_ud, "--parallel"))
+        self.assertTrue(any("--parallel 2 dropped" in m for m in said))
+        edit(p_ud, drafting="auto")                                  # (--drafting off from the command line wins)
+        p_ud, c_ud = self.write_amd(ud, tok, d, 14.7, args(backend="hip", drafting="off"))
+        self.assertEqual(val(c_ud, "--drafting"), "off")
+
+    def test_an_older_config_is_worked_out_again(self):
+        d, ud = self.files()
+        tok = self.tok(d)
+        p, cfg = self.write_amd(ud, tok, d, 14.7)
+        cfg["args"][cfg["args"].index("--chunk") + 1] = "1024"      # (an older setup's, no record of what it chose)
+        del cfg["installer"]["setup_args"]
+        p.write_text(json.dumps(cfg), encoding="utf-8")
+        said = []
+        with patch.object(maya, "ok", lambda m: said.append(m)):
+            p, cfg = self.write_amd(ud, tok, d, 14.7)
+        self.assertEqual(cfg["args"][cfg["args"].index("--chunk") + 1], "2048")
+        self.assertTrue(any("worked out again" in m for m in said), said)
+        cfg["args"][cfg["args"].index("--chunk") + 1] = "4096"      # (the Models page's record of the setup's: kept)
+        cfg["installer"] = {"as_set_up": {"prefill_chunk": 2048, "cpu_threads": 8}}
+        p.write_text(json.dumps(cfg), encoding="utf-8")
+        p, cfg = self.write_amd(ud, tok, d, 14.7)
+        self.assertEqual(cfg["args"][cfg["args"].index("--chunk") + 1], "4096")
+
     def test_vision_step(self):
         d, gguf = self.files()
         va = lambda **kw: args(**dict(dict(rebuild=False, download_model=False, yes=False), **kw))   # noqa: E731
@@ -477,7 +590,8 @@ class Steps(unittest.TestCase):
 
     def test_set_up_on_a_16_gb_amd_card(self):
         """An RX 9070 XT (16 GB, gfx1201) with a GGUF of your own whose experts fit (our one-T4 quant): resident with
-        1 GiB kept beside the experts; drafting off (the setup's sums are the offload path's at 16 GB)."""
+        1 GiB kept beside the experts and --chunk 1024, as the engine runs it; drafting not turned off (the resident
+        path), but the drafter's room does not fit at 32K, so it is not downloaded (the prompt lookup drafts)."""
         d = self.root / "own"
         d.mkdir()
         own = d / "x.gguf"
@@ -489,16 +603,25 @@ class Steps(unittest.TestCase):
                   stub("ik2_tokenizer_step", d), stub("ik2_vision_step", None), patch.object(maya, "IK2_EXE", own),
                   patch.object(maya, "mem_gb", return_value=(96.0, 80.0)), patch.object(maya, "WIN", False),
                   patch.object(maya, "choose_context", lambda a, prev, opts, rec: rec),
-                  patch.object(maya, "ik2_drafter_step", lambda *a, **k: d / "mtp.safetensors"),
-                  patch.object(maya, "write_config_ik2", lambda a, *r: seen.update(drafting=a.drafting, lay=r[7],
-                                                                                    drafter=r[-1]))]
+                  patch.object(maya, "offer_download", side_effect=AssertionError("no drafter download")),
+                  patch.object(maya, "write_config_ik2", lambda a, *r, **k: seen.update(drafting=a.drafting, lay=r[7],
+                                                                                         drafter=r[9]))]
         for p in common:
             p.start()
             self.addCleanup(p.stop)
-        with patch.object(F, "experts_gib_of", lambda path: 11.45):
+        said = []
+        with patch.object(F, "experts_gib_of", lambda path: 11.45), \
+                patch.object(maya, "ok", lambda m: said.append(m)), patch.object(maya, "warn", lambda m: said.append(m)):
             maya.set_up_ik2(args(backend="hip", model_dir=str(d)), {})
-        self.assertEqual((seen["lay"]["env"], seen["lay"]["path"], seen["drafting"], seen["drafter"]),
-                         ({"SAGUARO_IK2_RESERVE_MB": "1024"}, "resident", "off", None))
+        self.assertEqual((seen["lay"]["env"], seen["lay"]["path"], seen["lay"]["args"][3], seen["drafter"]),
+                         ({"SAGUARO_IK2_RESERVE_MB": "1024"}, "resident", "1024", None))
+        self.assertNotEqual(seen["drafting"], "off")
+        text = "\n".join(said)
+        self.assertIn("every expert in its memory", text)
+        self.assertIn("measured on an RX 9070 XT", text)
+        self.assertIn("does not fit beside the model", text)
+        for wrong in ("offload path", "pinned in RAM", "not measured on this kind of card"):
+            self.assertNotIn(wrong, text)
 
     def test_bench_prompt(self):
         p = maya.bench_chat("ik2", self.root)("Hello?")
@@ -525,18 +648,68 @@ class Steps(unittest.TestCase):
         pc = {"gpus": [t4(2), t4(3)], "backend": "cuda", "archs": [75]}
         seen = {}
 
-        def write(a, pc_, meta, gguf_, tok_, ctx, models, d_, lay, vision=None, drafter=None):
+        def write(a, pc_, meta, gguf_, tok_, ctx, models, d_, lay, vision=None, drafter=None, prev=None, **k):
             seen.update(ctx=ctx, lay=lay, vision=vision, d=d_, drafting=a.drafting, drafter=drafter)
             return self.root / "cfg.json"
         with patch.object(maya, "check_pc", lambda a, fam: pc), patch.object(maya, "tools_step", lambda a: self.root), \
                 patch.object(maya, "build_step", lambda a, pc_, llama, target: {"target": target}), \
-                patch.object(maya, "IK2_EXE", gguf), patch.object(maya, "ik2_model_step", lambda a, d_: gguf), \
+                patch.object(maya, "IK2_EXE", gguf), patch.object(maya, "ik2_model_step", lambda a, d_, q=None: gguf), \
                 patch.object(maya, "ik2_tokenizer_step", lambda a, d_, g: tok), \
                 patch.object(maya, "ik2_vision_step", lambda *x: None), patch.object(maya, "write_config_ik2", write):
-            got = maya.set_up_ik2(args(models_dir=str(self.root / "models")), {})
+            got = maya.set_up_ik2(args(models_dir=str(self.root / "models"), ik2_quant="ud-q4_k_xl"), {})
         self.assertEqual(got, self.root / "cfg.json")
         self.assertEqual((seen["ctx"], seen["lay"]["args"][:2], seen["d"]), (131072, ["--gpus", "2"], d))
         self.assertEqual((seen["drafting"], seen["drafter"]), ("off", None))   # (two GPUs, Turing: drafting off)
+
+
+class StrataPacks(unittest.TestCase):
+    """Strata's packs of Inkling-2-Mini beside UD-Q4_K_XL: names, the table, the pick for the cards, a pack folder."""
+
+    def test_names(self):
+        for name, key in (("inkling-2-mini-sq-15", "strata-sq-15"), ("Inkling-2-Mini-Strata-SQ-20", "strata-sq-20"),
+                          ("strata-sq-10", "strata-sq-10")):
+            self.assertEqual(Q.resolve(name), ("ik2", key), name)
+        self.assertEqual(Q.config_stem("ik2", "strata-sq-15"), "maya-inkling-2-mini-sq-15")
+        self.assertEqual(maya.ik2_config_path(Path("Inkling-2-Mini-SQ-15.strata")).name,
+                         "maya-inkling-2-mini-sq-15.json")   # (a pack: its own config, as the Models page names it)
+        self.assertEqual(Q.shown("ik2", "strata-sq-15"), "Inkling 2 Mini · Strata SQ-15")
+
+    def test_table(self):
+        for k in Q.IK2_QUANTS[1:]:
+            m = maya.ik2_entry(k)
+            self.assertEqual(m["format"], "ik2-strata")
+            self.assertTrue(m["gguf"].endswith(".strata"))
+            self.assertIn("tokenizer.json", m["files"])
+            self.assertEqual(set(m["files"]), set(m["sha256"]))
+            self.assertTrue(all(len(h) == 64 for h in m["sha256"].values()))
+        self.assertEqual(maya.ik2_entry("strata-sq-15")["files"]["Inkling-2-Mini-SQ-15.strata"], 14348316672)
+
+    def test_recommended(self):
+        rec = lambda v, n=1: maya.ik2_recommend([t4(i, v) for i in range(n)], False)   # noqa: E731
+        self.assertEqual(rec(11.0), "strata-sq-10")    # (12 GB: Strata's 12 GB pack)
+        self.assertEqual(rec(15.0), "ud-q4_k_xl")      # (a T4: the offload path either way; UD the closest there)
+        self.assertEqual(rec(23.5), "strata-sq-20")    # (24 GB: the original weights, every expert on the card)
+        self.assertEqual(rec(15.0, 2), "strata-sq-20")  # (two T4s: every expert across them)
+
+    def test_pack_folder(self):
+        with tempfile.TemporaryDirectory() as t:
+            d = Path(t)
+            (d / "Inkling-2-Mini-SQ-15.strata").write_bytes(b"STRATA\x00\x01")
+            a = args(model_dir=str(d))
+            self.assertEqual(maya.ik2_pack_in(d), "strata-sq-15")
+            self.assertEqual(maya.choose_ik2_quant(a, {}, [t4()], False), "strata-sq-15")
+            self.assertIsNone(maya.ik2_local_gguf(a, d))   # (not taken for a GGUF of your own, nor UD offered)
+
+    def test_pieces(self):
+        with tempfile.TemporaryDirectory() as t:
+            f = Path(t) / "big.strata"
+            self.assertIsNone(maya.piece_paths(f, 10 << 20))
+            ps = maya.piece_paths(f, 14348316672)
+            self.assertEqual(len(ps), maya.DL_PIECES)
+            self.assertEqual((ps[0][1], ps[-1][2]), (0, 14348316672 - 1))
+            self.assertTrue(all(ps[i][2] + 1 == ps[i + 1][1] for i in range(len(ps) - 1)))
+            f.write_bytes(b"x")                        # (a single stream already started: kept as one)
+            self.assertIsNone(maya.piece_paths(f, 14348316672))
 
 
 if __name__ == "__main__":

@@ -6,11 +6,12 @@ where they do not - a card under 24 GB with unsloth's UD-Q4_K_XL, or a context p
 offload path: a tier of the most-used experts in VRAM, the others in pinned RAM, fetched by the GPU (or computed by
 the CPU lane) as tokens pick them.  Two NVIDIA cards: the first alone where it holds every expert, else the split -
 the first on the offload path (dense weights, cache, prompts, its tier), the second with the next experts.  AMD (HIP,
-Linux): no offload path - every expert stays in the GPU's memory and the cache streams where it does not fit.
+Linux, one GPU): the same plan - every expert in the GPU's memory where the file fits, else the offload path; a 16 GB
+card keeps 1 GiB beside the experts (SAGUARO_IK2_RESERVE_MB), which plan() counts (AMD_SMALL_CREDIT_GIB).
 
 The model's sizes are upstream's (an RTX 3090 measured: 18.3 GiB beside the cache at 262,144 with an FP8 cache, 14.7
 GiB of it UD-Q4_K_XL's experts); another file's experts (experts_gib_of: our one-T4 quant holds 11.45 GiB) take their
-place.  The layouts' speeds were measured on Tesla T4s (16 GB, NEXT-ik2.md)."""
+place.  The layouts' speeds were measured on Tesla T4s (16 GB, NEXT-ik2.md) and an RX 9070 XT (docs/INKLING2-MINI.md)."""
 from __future__ import annotations
 
 import os
@@ -46,11 +47,33 @@ LAYOUT_ENV = {"SAGUARO_IK2_ROOM_MB", "SAGUARO_IK2_PIN", "SAGUARO_IK2_PIN_KEEP", 
                                                     # PIN / PIN_KEEP: the previous engine's, dropped from old configs)
 # (decode tok/s, read tok/s) on Tesla T4s, GPU clocks not pinned, ~50 tokens deep, read 8K / 16K (2026-11-22)
 MEASURED = {1: (40, 840), 2: (51, 1100)}
+# ... and on an RX 9070 XT (gfx1201, 16 GB), 32K: UD-Q4_K_XL on the offload path, the one-T4 quant resident (2026-11-22)
+MEASURED_AMD = {"offload": (71, 1670), "resident": (83, 1150)}
+ONE_T4_EXPERTS_GIB = 11.45                          # our Inkling-2-Mini-T4-NVFP4-IQ3_XXS's experts
+AMD_RESERVE_UNDER_GB = 20.0                         # an AMD card under this keeps SAGUARO_IK2_RESERVE_MB=1024 (amd_layout)
+# What that 1 GiB reserve (the engine's default: 1.5) and the 32K scratch (BASE_GIB counts 262K's) leave the plan
+# beside every expert: the one-T4 quant at 32K is resident on an RX 9070 XT, 15.5 of its 15.9 GiB used (measured)
+AMD_SMALL_CREDIT_GIB = 1.0
+
+
+def subprocess_error():
+    import subprocess
+    return subprocess.SubprocessError
 
 
 def experts_gib_of(path) -> float | None:
     """GiB of a GGUF's routed experts (its *_exps tensors, from the header's offsets), or None where it does not
-    read.  UD-Q4_K_XL: 14.71; our Inkling-2-Mini-T4-NVFP4-IQ3_XXS: 11.45."""
+    read.  UD-Q4_K_XL: 14.71; our Inkling-2-Mini-T4-NVFP4-IQ3_XXS: 11.45.  A Strata pack: its experts as saguaro-ik2
+    holds them (tools/strata/strata_pack.py: SQ-20 14.95, SQ-15 13.03, SQ-10 10.45)."""
+    try:
+        with open(path, "rb") as fh:
+            if fh.read(8) == b"STRATA\x00\x01":
+                import sys as _sys
+                _sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "strata"))
+                import strata_pack as SP
+                return SP.inkling_expert_bytes(SP.Pack(path)) / GIB
+    except (OSError, ValueError, KeyError, ImportError, subprocess_error()):
+        return None
     try:
         import gguf_reader as G
         f = G.GGUFFile(path)
@@ -72,12 +95,14 @@ def plan(vram_gb: float, ctx: int, kv: str = DEFAULT_KV, hip: bool = False, expe
     "offload", "tier_gib": the experts' GiB the card keeps, "ram_gib": the engine's RAM, "kv_streamed": the cache of
     some full-attention visits in RAM, "kv_ram_gib"}.  Where the model and the cache do not fit together the experts
     leave the card first (the offload path, the cache in VRAM); the cache streams only where it alone does not fit
-    beside the dense weights and a tier of OFF_TIER_MIN_GIB - on AMD as on NVIDIA (hip: kept for the callers).  A card whose VRAM is not known (0): resident - the engine measures at its start."""
+    beside the dense weights and a tier of OFF_TIER_MIN_GIB - on AMD as on NVIDIA (hip: an AMD card under
+    AMD_RESERVE_UNDER_GB has AMD_SMALL_CREDIT_GIB more room, its layout's smaller reserve).  A card whose VRAM is not
+    known (0): resident - the engine measures at its start."""
     ex = float(experts_gib)
     if not vram_gb:
         return {"resident": True, "need_gib": None, "layout": "resident", "tier_gib": ex, "ram_gib": HOST_GIB,
                 "kv_streamed": False, "kv_ram_gib": 0.0}
-    room = float(vram_gb) - MARGIN_GIB
+    room = float(vram_gb) - MARGIN_GIB + (AMD_SMALL_CREDIT_GIB if hip and float(vram_gb) < AMD_RESERVE_UNDER_GB else 0.0)
     need = need_gib(ctx, kv, ex)
     if room >= need:
         return {"resident": True, "need_gib": need, "layout": "resident", "tier_gib": ex, "ram_gib": HOST_GIB,
@@ -176,13 +201,13 @@ def draft_gib(ctx: int) -> float:
     return DRAFT_BASE_GIB + ctx * DRAFT_TOKEN_BYTES / GIB
 
 
-def draft_fits(vram_gb: float, ctx: int, kv: str = DEFAULT_KV, experts_gib: float = EXPERTS_GIB) -> bool:
+def draft_fits(vram_gb: float, ctx: int, kv: str = DEFAULT_KV, experts_gib: float = EXPERTS_GIB,
+               hip: bool = False) -> bool:
     """Whether the drafter's room fits beside the model at `ctx` with every expert in VRAM (else the engine leaves it
     out at its start).  VRAM not known: True."""
     if not vram_gb:
         return True
-    return plan(vram_gb, ctx, kv, experts_gib=experts_gib)["resident"] and \
-        float(vram_gb) - MARGIN_GIB >= need_gib(ctx, kv, experts_gib) + draft_gib(ctx)
+    return plan(float(vram_gb) - draft_gib(ctx), ctx, kv, hip, experts_gib)["resident"]
 
 
 def drafting_off_reason(arch, vram_gb: float, ctx: int, kv: str = DEFAULT_KV, hip: bool = False,
@@ -195,7 +220,7 @@ def drafting_off_reason(arch, vram_gb: float, ctx: int, kv: str = DEFAULT_KV, hi
         cc = 0
     if not hip and 0 < cc < 80:
         return "drafting off: this GPU (Volta / Turing) has no drafting for this model - every token comes from a full model step"
-    if vram_gb and not plan(vram_gb, ctx, kv, experts_gib=experts_gib)["resident"]:
+    if vram_gb and not plan(vram_gb, ctx, kv, hip, experts_gib)["resident"]:
         return ("drafting off: the card does not hold every expert at this context (the offload path), where drafting "
                 "does not run - a smaller context or a bigger card brings it back")
     return None
@@ -318,24 +343,44 @@ def layout(cards: list, want: int = 0, kv: str = DEFAULT_KV, experts_gib: float 
 
 
 def speeds(lay: dict) -> str:
-    """What a layout measured on Tesla T4s, as one phrase ("" where it was not measured)."""
+    """What a layout measured on Tesla T4s or an RX 9070 XT, as one phrase ("" where it was not measured)."""
     if not lay.get("measured"):
         return ""
+    if lay.get("amd"):
+        dec, read = MEASURED_AMD[lay["path"]]
+        return f"about {dec} tok/s writing, {read} tok/s reading a prompt (measured on an RX 9070 XT)"
     dec, read = MEASURED[len(lay["gpus"])]
     return f"about {dec} tok/s writing, {read} tok/s reading a prompt (measured on {len(lay['gpus'])}x Tesla T4)"
 
 
+def chunk_max(vram_gb: float, ctx: int, kv: str = DEFAULT_KV, hip: bool = False,
+              experts_gib: float = EXPERTS_GIB) -> int | None:
+    """The largest --chunk this card runs at `ctx` without a long prompt running it out of GPU memory, or None (no
+    cap: the offload path plans its tier on what the chunk leaves).  Every expert resident on an AMD card under
+    AMD_RESERVE_UNDER_GB (1 GiB kept beside them): 1024 - on an RX 9070 XT the one-T4 quant at --chunk 2048 kept
+    0.19 GiB free and a 10K prompt ran out of memory, at 1024 a 27K prompt read (2026-11-22)."""
+    if hip and vram_gb and float(vram_gb) < AMD_RESERVE_UNDER_GB and plan(vram_gb, ctx, kv, True, experts_gib)["resident"]:
+        return 1024
+    return None
+
+
 def amd_layout(card: dict, experts_gib: float = EXPERTS_GIB) -> dict:
-    """One AMD GPU (HIP, Linux; card: its "vram_gb" = the memory it gives the engine): every expert in its memory
-    where the file fits, else the offload path (a tier of them, the rest in pinned RAM), 32K and the F16 cache as
-    measured on an RX 9070 XT; a 16 GB card keeps 1 GiB beside the experts (SAGUARO_IK2_RESERVE_MB), which lets our
-    one-T4 quant stay resident.  The engine plans on the card's real free memory either way."""
+    """One AMD GPU (HIP, Linux; card: its "vram_gb" = the memory it gives the engine): plan()'s - every expert in its
+    memory where the file fits, else the offload path (a tier of them, the rest in pinned RAM), 32K and the F16 cache
+    as measured on an RX 9070 XT; a card under AMD_RESERVE_UNDER_GB keeps 1 GiB beside the experts
+    (SAGUARO_IK2_RESERVE_MB), which lets our one-T4 quant stay resident there with --chunk 1024.  The engine plans on
+    the card's real free memory either way."""
     vram = float(card.get("vram_gb") or 0)
-    p = plan(vram, CONTEXTS[0], DEFAULT_KV, True, experts_gib)
-    env = {"SAGUARO_IK2_RESERVE_MB": "1024"} if vram and vram < 20 else {}
-    res = p["resident"] or float(experts_gib) < EXPERTS_GIB - 1   # (a smaller quant: the engine keeps it resident)
+    ex = float(experts_gib)
+    p = plan(vram, CONTEXTS[0], DEFAULT_KV, True, ex)
+    small = bool(vram) and vram < AMD_RESERVE_UNDER_GB
+    env = {"SAGUARO_IK2_RESERVE_MB": "1024"} if small else {}
+    res = p["resident"]
+    xt = str(card.get("arch") or "").startswith("gfx1201") and 15.0 <= vram < 17.0   # (the RX 9070 XT measured)
+    ctx = recommended_context(vram, DEFAULT_KV, True, ex) if res else CONTEXTS[0]
     return {"gpus": [card], "args": ["--gpus", "1", "--chunk", "1024" if res else "2048", "--threads", str(THREADS)],
-            "context": recommended_context(vram, DEFAULT_KV, True, experts_gib) if p["resident"] else CONTEXTS[0],
-            "env": env, "resident": res, "path": "resident" if res else "offload", "measured": False,
+            "context": ctx, "chunk_max": chunk_max(vram, ctx, DEFAULT_KV, True, ex),
+            "env": env, "resident": res, "path": "resident" if res else "offload", "amd": True,
+            "measured": xt and (abs(ex - ONE_T4_EXPERTS_GIB) < 0.1 if res else abs(ex - EXPERTS_GIB) < 0.1),
             "said": "one AMD GPU: every expert in its memory" if res else
                     "one AMD GPU: the most-used experts in VRAM, the others in RAM (the offload path), a 32K context"}

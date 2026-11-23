@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Saguaro - set up and start GLM-5.3-Flash, DeepSeek-V4.1-Flash-1017, MiniMax-M3.1-Flash, Qwen-3.8-Flash-Next
 (CYBER-FROST), Hy4-Flash or Inkling 2 Mini on your own GPU(s).  Qwen-3.8-Flash-Next (CYBER-FROST): CUDA from V100 on and HIP, Linux and Windows, pictures too.
-Hy4-Flash (--model hy4-flash-maya-s; four cards) and Inkling 2 Mini (--model inkling-2-mini; one or two 16 GB cards):
-NVIDIA on Linux, each on its own engine (build/saguaro-hy4, build/saguaro-ik2) - docs/HY4-FLASH.md, docs/INKLING2-MINI.md.
+Hy4-Flash (--model hy4-flash-maya-s; four cards): NVIDIA on Linux.  Inkling 2 Mini (--model inkling-2-mini; one or two
+16 GB cards): Linux, NVIDIA from V100 / Tesla T4 on, or one AMD RDNA 3 / 4 GPU of 16 GB or more (the experts the card
+does not hold in RAM: the offload path).  Each on its own engine (build/saguaro-hy4, build/saguaro-ik2) -
+docs/HY4-FLASH.md, docs/INKLING2-MINI.md.
 GLM-5.3-Flash: CUDA on Linux and Windows (experimental); HIP: experimental gfx1100/gfx1201/gfx1151 (gfx1030: not
 validated), Linux and Windows, pictures too; Metal: experimental, macOS on Apple Silicon, GLM-5.3-Flash only, text
 only, one conversation at a time.  DeepSeek-V4.1-Flash-1017 and MiniMax-M3.1-Flash: CUDA from V100 on, Linux and
@@ -727,7 +729,7 @@ HY4_MODEL_NAME = "hy4-flash"
 # Inkling 2 Mini (thinkingmachines' Inkling-2-Mini, 26B, a looped MoE) on its own engine, build/saguaro-ik2 (upstream
 # Maya v1.1.74's): unsloth's UD-Q4_K_XL GGUF read in place (tools/ik2/download.json) with the model's own chat template;
 # Linux, one or two NVIDIA cards from V100 / Tesla T4 on with 8 GB or more (the experts a card does not hold stay in
-# RAM: the offload path), or one AMD RDNA 3 / 3.5 / 4 GPU that holds every expert of the file (ik2_fit.py)
+# RAM: the offload path), or one AMD RDNA 3 / 3.5 / 4 GPU of 16 GB or more (the same: ik2_fit.py)
 IK2 = Q.MODEL["ik2"]                               # "Inkling-2-Mini"
 IK2_SHOWN = Q.SHOWN["ik2"]
 IK2_EXE = BUILD / "saguaro-ik2"
@@ -2794,15 +2796,49 @@ def curl_drops_auth(curl: str) -> bool:
     return v >= (7, 58)
 
 
+DL_PIECE = 2_000_000_000   # a file larger than this (its size known): fetched as byte ranges at once - one stream from
+DL_PIECES = 8              # Hugging Face's CDN is ~3 MB/s on some lines, 4-8 ranges together several times that
+
+
+def piece_paths(s: Path, want: int | None) -> list | None:
+    """A file fetched in pieces: [(its piece's path, first byte, last byte)], or None for one stream - a small file, a
+    size not known, or one a single stream already started (its bytes kept, resumed where they stop)."""
+    if want is None or want <= DL_PIECE or (s.exists() and not list(s.parent.glob(s.name + ".piece*"))):
+        return None
+    step_ = -(-want // DL_PIECES)
+    return [(s.with_name(f"{s.name}.piece{i}"), i * step_, min(want, (i + 1) * step_) - 1) for i in range(DL_PIECES)]
+
+
+def join_pieces(s: Path, parts: list) -> None:
+    """The pieces into the file, in order, then removed."""
+    tmp = s.with_name(s.name + ".joining")
+    with open(tmp, "wb") as out:
+        for pp, _, _ in parts:
+            with open(pp, "rb") as f:
+                shutil.copyfileobj(f, out, 64 << 20)
+    tmp.replace(s)
+    for pp, _, _ in parts:
+        pp.unlink(missing_ok=True)
+
+
 def fetch_files(m: dict, shards: list, missing: list, urls: dict) -> None:
     """The missing files with curl, DL_JOBS at a time, each resumed where it stopped and run again whenever its
     connection drops or stalls - a download stopped half way (a dropped line, Ctrl+C, a restart) loses nothing: the
-    next run continues every file from its size on disk.  One line says how far the model is.  A gated repo's ("gated"):
-    the token in an Authorization header, read by curl from a file only the user can read (not on its command line)."""
+    next run continues every file from its size on disk.  A large file goes as DL_PIECES byte ranges at once (pieces
+    beside it, each resumed, joined at the end).  One line says how far the model is.  A gated repo's ("gated"): the
+    token in an Authorization header, read by curl from a file only the user can read (not on its command line)."""
     want = {s: (m.get("files") or {}).get(hf_name(m, s)) for s in shards}
+    pieces = {s: piece_paths(s, want[s]) for s in missing}
+    # a job: (file, piece index or -1) - its path on disk, the bytes it should end with, the range it asks for
+    jobs = [(s, i) for s in missing for i in (range(len(pieces[s])) if pieces[s] else [-1])]
+    def job_path(j):
+        return pieces[j[0]][j[1]][0] if j[1] >= 0 else j[0]
+    def job_want(j):
+        return pieces[j[0]][j[1]][2] - pieces[j[0]][j[1]][1] + 1 if j[1] >= 0 else want[j[0]]
+    n_jobs = max(DL_JOBS, DL_PIECES if any(pieces.values()) else 0)
     auth = None
     token = hf_token() if m.get("gated") else None
-    queue, running = list(missing), {}
+    queue, running, outs = list(jobs), {}, {}
     try:   # (from here: whatever happens, the finally removes the token's file)
         if token:
             import tempfile
@@ -2811,51 +2847,68 @@ def fetch_files(m: dict, shards: list, missing: list, urls: dict) -> None:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(f"Authorization: Bearer {token}\n")
         total = sum(want.values()) if all(want.values()) else m.get("download_gb", 0) * 1e9
-        size = lambda s: s.stat().st_size if s.exists() else 0   # noqa: E731
-        stuck, after, start_size = {s: 0 for s in missing}, {s: 0.0 for s in missing}, {}
-        t0, base, last = time.time(), sum(size(s) for s in shards), 0.0
+        size = lambda p: p.stat().st_size if p.exists() else 0   # noqa: E731
+        def on_disk(s):
+            return sum(size(pp) for pp, _, _ in pieces[s]) if pieces.get(s) and not s.exists() else size(s)
+        stuck, after, start_size = {j: 0 for j in jobs}, {j: 0.0 for j in jobs}, {}
+        t0, base, last = time.time(), sum(on_disk(s) if s in pieces else size(s) for s in shards), 0.0
         while queue or running:
             now = time.time()
-            for s in [q for q in queue if after[q] <= now][:max(0, DL_JOBS - len(running))]:
-                queue.remove(s)
-                start_size[s] = size(s)
-                cmd = ["curl", "-sS", "-L", "--fail"] + (["-H", f"@{auth}"] if auth else []) + CURL_RESUME + \
-                    ["-o", str(s), urls[s]]
-                running[s] = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                              stderr=subprocess.PIPE)
+            for j in [q for q in queue if after[q] <= now][:max(0, n_jobs - len(running))]:
+                queue.remove(j)
+                jp = job_path(j)
+                start_size[j] = size(jp)
+                head = ["curl", "-sS", "-L", "--fail"] + (["-H", f"@{auth}"] if auth else [])
+                if j[1] >= 0:   # (a piece: the range from where it stopped, appended)
+                    _, a0, a1 = pieces[j[0]][j[1]]
+                    outs[j] = open(jp, "ab")
+                    cmd = head + CURL_RESUME[2:] + ["-r", f"{a0 + start_size[j]}-{a1}", urls[j[0]]]
+                    running[j] = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=outs[j], stderr=subprocess.PIPE)
+                else:
+                    cmd = head + CURL_RESUME + ["-o", str(jp), urls[j[0]]]
+                    running[j] = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                                  stderr=subprocess.PIPE)
             time.sleep(1)
-            for s, p in list(running.items()):
+            for j, p in list(running.items()):
                 rc = p.poll()
                 if rc is None:
                     continue
-                del running[s]
+                del running[j]
+                if j in outs:
+                    outs.pop(j).close()
                 err = (p.communicate()[1] or b"").decode(errors="replace").strip().splitlines()
-                have = size(s)
-                if want[s] is not None and have > want[s]:   # (more than the file: its tail is wrong - start it over)
-                    s.unlink()
+                jp, w = job_path(j), job_want(j)
+                have = size(jp)
+                if w is not None and have > w:   # (more than the file: its tail is wrong - start it over)
+                    jp.unlink()
                     have = 0
-                if want[s] is None and rc == 0 or want[s] is not None and have == want[s]:
+                if w is None and rc == 0 or w is not None and have == w:
+                    s = j[0]
+                    if j[1] >= 0 and all(size(pp) == b - a + 1 for pp, a, b in pieces[s]):
+                        join_pieces(s, pieces[s])
                     continue
-                stuck[s] = 0 if have > start_size[s] else stuck[s] + 1
-                if stuck[s] >= DL_STUCK:
+                stuck[j] = 0 if have > start_size[j] else stuck[j] + 1
+                if stuck[j] >= DL_STUCK:
                     S.progress()
-                    fail(f"the download of {s.name} keeps stopping without progress "
+                    fail(f"the download of {j[0].name} keeps stopping without progress "
                          f"({err[-1] if err else f'curl exit code {rc}'})",
                          f"check the connection, then run {ME} --download-model again: it continues where it stopped")
-                after[s] = time.time() + min(60, 5 * stuck[s])   # (again at once after progress, slower when stuck)
-                queue.append(s)
+                after[j] = time.time() + min(60, 5 * stuck[j])   # (again at once after progress, slower when stuck)
+                queue.append(j)
             if time.time() - last > 2 or not (queue or running):
                 last = time.time()
-                have = sum(size(s) for s in shards)
+                have = sum(on_disk(s) if s in pieces else size(s) for s in shards)
                 rate = (have - base) / max(1e-3, last - t0)
                 eta = (total - have) / rate if rate > 0 and total > have else 0
                 left = f" · {int(eta // 3600)} h {int(eta % 3600 // 60):02d} min left" if eta else ""
                 share = f" ({100 * have / total:.0f}%)" if total else ""
                 S.progress(f"{have / 1e9:.1f} / {total / 1e9:.1f} GB{share} · {rate / 1e6:.0f} MB/s{left} · "
-                         f"{len(running)} files at once", have / total if total else None)
+                           f"{len(running)} streams at once", have / total if total else None)
     finally:
         for p in running.values():   # (stopped half way: no curl keeps writing behind the setup's back)
             p.terminate()
+        for f in outs.values():
+            f.close()
         if auth is not None:
             auth.unlink(missing_ok=True)
             try:
@@ -7326,7 +7379,7 @@ def choose_hy4_quant(a, prev: dict) -> str:
                      + note))
     pick = choose(f"Which size of {HY4}?", ["Project Maya's GGUF quants of it (the n-gram table, 63 GB, is the same "
                                             "file for every size):"],
-                  rows, order.index(default), a.yes or getattr(a, "check", False))
+                  rows, order.index(default), getattr(a, "yes", False) or getattr(a, "check", False))
     return order[pick]
 
 
@@ -7527,16 +7580,106 @@ def set_up_hy4(a, prev: dict) -> Path | None:
     return cfg_path
 
 
-def ik2_entry() -> dict:
-    """Inkling 2 Mini's download (tools/ik2/download.json: unsloth's UD-Q4_K_XL) as offer_download reads it."""
+def ik2_entry(quant: str | None = None) -> dict:
+    """Inkling 2 Mini's download as offer_download reads it (tools/ik2/download.json): unsloth's UD-Q4_K_XL, or one of
+    Strata's packs (quant strata-sq-*: the pack, the repo's tokenizer.json, config.json and special_tokens_map.json).
+    "gguf": the file the engine's --model names; "experts_gib": its experts as the engine holds them; "kl": the
+    published closeness to the original weights."""
     man = read_json(IK2_MANIFEST)
+    if quant and quant != Q.IK2_QUANT:
+        st = man.get("strata") or {}
+        pk = (st.get("packs") or {}).get(quant)
+        if not pk or not st.get("repo") or not st.get("revision"):
+            fail(f"{IK2_MANIFEST} names no {Q.shown('ik2', quant)}", "restore it (git checkout tools/ik2/download.json)")
+        files = {pk["file"]: [pk["size"], pk["sha256"]], **(st.get("common") or {})}
+        return {"about": f"{IK2_SHOWN} as Strata's {pk['about']}; {st.get('license', 'Apache 2.0')}",
+                "format": "ik2-strata", "repo": st["repo"], "revision": st["revision"], "folder": st.get("folder", ""),
+                "files": {k: v[0] for k, v in files.items()}, "sha256": {k: v[1] for k, v in files.items()},
+                "gguf": pk["file"], "name": pk["name"], "download_gb": sum(v[0] for v in files.values()) / 1e9,
+                "experts_gib": float(pk["experts_gib"]), "kl": pk.get("kl")}
     if not man.get("files") or not man.get("revision") or man.get("gguf") not in (man.get("files") or {}):
         fail(f"{IK2_MANIFEST} is missing or damaged", "restore it (git checkout tools/ik2/download.json)")
     return {"about": f"{IK2_SHOWN} in unsloth's GGUF ({man.get('about', 'UD-Q4_K_XL')}); "
                      f"{man.get('license', 'Apache 2.0')}",
             "format": "ik2-gguf", "repo": man["repo"], "revision": man["revision"], "folder": man.get("folder", ""),
             "files": {k: v[0] for k, v in man["files"].items()}, "sha256": {k: v[1] for k, v in man["files"].items()},
-            "gguf": man["gguf"], "download_gb": sum(v[0] for v in man["files"].values()) / 1e9}
+            "gguf": man["gguf"], "name": man.get("name", f"{IK2}-UD-Q4_K_XL"),
+            "download_gb": sum(v[0] for v in man["files"].values()) / 1e9,
+            "experts_gib": IK2F.EXPERTS_GIB, "kl": man.get("kl")}
+
+
+def ik2_published(quant: str) -> bool:
+    """Whether tools/ik2/download.json offers these files."""
+    if quant == Q.IK2_QUANT:
+        return True
+    return quant in ((read_json(IK2_MANIFEST).get("strata") or {}).get("packs") or {})
+
+
+def ik2_pack_in(d: Path) -> str | None:
+    """The Strata pack in a folder (its quant key), by the published file names; None: none there."""
+    for k in Q.IK2_QUANTS[1:]:
+        if ik2_published(k) and (d / ik2_entry(k)["gguf"]).exists():
+            return k
+    return None
+
+
+IK2_KL_FAST = 0.02   # (a file this far from the original is offered for speed, not recommended for it: SQ-10's 0.05)
+
+
+def ik2_recommend(cards: list, amd: bool) -> str:
+    """The files for these cards: the closest to the original weights among those whose experts all stay in VRAM at
+    32K (and within IK2_KL_FAST of the original); else, on the offload path, unsloth's UD-Q4_K_XL (measured: KL 0.004
+    from the original against SQ-15's 0.017, the same speed on a T4 and an RX 9070 XT); a card under 13 GB the
+    smallest file.  Two NVIDIA cards count together where the split holds every expert."""
+    keys = [k for k in Q.IK2_QUANTS if ik2_published(k)]
+    gib = {k: ik2_entry(k)["experts_gib"] for k in keys}
+    kl = {k: (ik2_entry(k)["kl"] if ik2_entry(k)["kl"] is not None else 1.0) for k in keys}
+    vr = sorted((float(g.get("vram_gb") or 0) for g in cards), reverse=True)
+    if not vr or not vr[0]:
+        return Q.IK2_QUANT
+    ctx = IK2F.CONTEXTS[0]
+    def resident(k):
+        if len(vr) >= 2 and not amd:
+            return IK2F.plan_two(vr[0], vr[1], ctx, experts_gib=gib[k])["layout"] in ("resident", "split")
+        return IK2F.plan(vr[0], ctx, experts_gib=gib[k])["resident"]
+    res = [k for k in keys if resident(k) and kl[k] <= IK2_KL_FAST]
+    if res:
+        return min(res, key=lambda k: (kl[k], gib[k]))
+    if vr[0] < 13:                                     # (a 12 GB card: the smallest, most of it on the card)
+        return min(keys, key=lambda k: gib[k])
+    return Q.IK2_QUANT   # (the offload path: UD-Q4_K_XL measured the closest to the original at the same speed)
+
+
+def choose_ik2_quant(a, prev: dict, cards: list, amd: bool) -> str:
+    """--ik2-quant (or --model inkling-2-mini-sq-15 ...), a Strata pack in --model-dir, else asked among the files
+    published - the one for these cards recommended (ik2_recommend)."""
+    if getattr(a, "ik2_quant", None):
+        return a.ik2_quant
+    if a.model_dir:
+        md = Path(a.model_dir).expanduser()
+        k = ik2_pack_in(md)
+        if k:
+            return k
+        if md.is_dir() and any(not f.name.startswith("mmproj") for f in md.glob("*.gguf")):
+            return Q.IK2_QUANT                         # (a GGUF there: UD-Q4_K_XL, or one of your own)
+    keys = [k for k in Q.IK2_QUANTS if ik2_published(k)]
+    before = (prev.get("installer") or {}).get("ik2_quant")
+    rec = ik2_recommend(cards, amd)
+    order = sorted(keys, key=lambda k: k != rec)
+    default = before if before in order and before != rec and not getattr(a, "yes", False) else order[0]
+    vram = max([float(g.get("vram_gb") or 0) for g in cards] or [0.0])
+    rows = []
+    for k in order:
+        m = ik2_entry(k)
+        word, line = IK2F.verdict(vram, mem_gb()[0], IK2F.CONTEXTS[0], IK2F.DEFAULT_KV, amd, m["experts_gib"])
+        close = ("the original weights" if m["kl"] == 0 else
+                 f"KL {m['kl']:.4f} from the original" if m["kl"] is not None else "")
+        rows.append((Q.shown("ik2", k, m["download_gb"]), "recommended" if k == rec else None,
+                     f"{m['about'].split(';')[0]}; {close}; on your card at 32K: {line}"))
+    pick = choose(f"Which files of {IK2_SHOWN}?", ["unsloth's GGUF or one of Strata's packs (the same model, read "
+                                                   "as published - Strata's exactly as Strata decodes them):"],
+                  rows, order.index(default), a.yes or getattr(a, "check", False))
+    return order[pick]
 
 
 def ik2_vision_model() -> dict | None:
@@ -7552,14 +7695,17 @@ def ik2_vision_model() -> dict | None:
             "download_gb": sum(v[0] for v in man["files"].values()) / 1e9}
 
 
-def ik2_dir(a, models: Path, prev: dict) -> Path:
-    """The model's folder: --model-dir, else the folder of the setup before, else <models folder>/Inkling-2-Mini."""
+def ik2_dir(a, models: Path, prev: dict, quant: str = Q.IK2_QUANT) -> Path:
+    """The model's folder: --model-dir, else the folder of the setup before (the same files), else
+    <models folder>/Inkling-2-Mini (UD-Q4_K_XL) or <models folder>/Inkling-2-Mini-Strata-SQ-15 (a pack)."""
     if a.model_dir:
         return Path(a.model_dir).expanduser().resolve()
-    d = (prev.get("installer") or {}).get("model_dir")
-    if d and Path(d).is_dir() and config_family(prev) == "ik2":
+    inst = prev.get("installer") or {}
+    d = inst.get("model_dir")
+    if d and Path(d).is_dir() and config_family(prev) == "ik2" and \
+            str(inst.get("ik2_quant") or Q.IK2_QUANT) == quant:
         return Path(d)
-    return models / IK2
+    return models / (IK2 if quant == Q.IK2_QUANT else ik2_entry(quant)["name"])
 
 
 def ik2_local_gguf(a, d: Path) -> Path | None:
@@ -7567,25 +7713,26 @@ def ik2_local_gguf(a, d: Path) -> Path | None:
     all fit a 16 GB card): that file - the only *.gguf there beside an mmproj, the published one absent - else None."""
     if not getattr(a, "model_dir", None) or not d.is_dir():
         return None
-    if (d / ik2_entry()["gguf"]).is_file():
+    if (d / ik2_entry()["gguf"]).is_file() or ik2_pack_in(d):   # (the published GGUF, or a Strata pack)
         return None
     found = [f for f in sorted(d.glob("*.gguf")) if not f.name.startswith("mmproj")]
     return found[0] if len(found) == 1 else None
 
 
-def ik2_model_step(a, d: Path) -> Path | None:
-    """The model's GGUF in d, downloaded when it is not there (resumable), then checked against its published sha256;
-    None when it was not downloaded.  A GGUF of your own in --model-dir (ik2_local_gguf) is taken as it is."""
-    name = Q.shown("ik2", Q.IK2_QUANT)
-    local = ik2_local_gguf(a, d)
+def ik2_model_step(a, d: Path, quant: str = Q.IK2_QUANT) -> Path | None:
+    """The model's file in d (UD-Q4_K_XL's GGUF, or a Strata pack with the repo's tokenizer files), downloaded when it
+    is not there (resumable, a large file in byte ranges at once), then checked against its published sha256; None
+    when it was not downloaded.  A GGUF of your own in --model-dir (ik2_local_gguf) is taken as it is."""
+    name = Q.shown("ik2", quant)
+    local = ik2_local_gguf(a, d) if quant == Q.IK2_QUANT else None
     step(5, f"the model ({local.name if local else name})")
     if local is not None:
         ok(f"{local.name}: {local.stat().st_size / 1e9:.1f} GB in {d} (your own file: not the published one, not "
            "sha256-checked)")
         return local
-    m = ik2_entry()
-    files = [d / m["gguf"]]
-    if any(file_incomplete(m, f) for f in files) and not offer_download(a, Q.shown("ik2", Q.IK2_QUANT, m["download_gb"]),
+    m = ik2_entry(quant)
+    files = [d / m["gguf"]] + [d / n for n in m["files"] if n != m["gguf"]]
+    if any(file_incomplete(m, f) for f in files) and not offer_download(a, Q.shown("ik2", quant, m["download_gb"]),
                                                                         d, files, m):
         return None
     for f in files:                                    # (a file that was already there: checked once, then remembered)
@@ -7673,13 +7820,19 @@ def ik2_drafting(a) -> str:
     return how if how in ("on", "off") else "auto"
 
 
-def ik2_drafter_step(a, d: Path, vram: float, ctx: int, kv: str, experts_gib: float = IK2F.EXPERTS_GIB) -> Path | None:
+def ik2_drafter_step(a, d: Path, vram: float, ctx: int, kv: str, experts_gib: float = IK2F.EXPERTS_GIB,
+                     hip: bool = False) -> Path | None:
     """The drafter beside the GGUF (in d), downloaded when it is not there and sha256-checked, or None: drafting off
-    (--drafting off), or not downloaded - the engine then drafts with the prompt lookup alone.  Where the drafter's
-    room does not fit beside the model at this context the engine leaves it out at its start: said."""
+    (--drafting off), its room does not fit beside the model at this context (ik2_fit.draft_fits: not downloaded, the
+    engine would leave it out), or not downloaded - the engine then drafts with the prompt lookup alone."""
     how = ik2_drafting(a)
     if how == "off":
         ok("drafting: off (--drafting off) - every token from a full model step")
+        return None
+    if not IK2F.draft_fits(vram, ctx, kv, experts_gib, hip):
+        ok(f"drafting: {how}, with the prompt lookup alone - at {context_label(ctx)} the drafter's "
+           f"{IK2F.draft_gib(ctx):.1f} GB does not fit beside the model on this card (not downloaded; a smaller "
+           "context or a bigger card leaves it room)")
         return None
     m = ik2_drafter_model()
     if m is None:
@@ -7696,9 +7849,6 @@ def ik2_drafter_step(a, d: Path, vram: float, ctx: int, kv: str, experts_gib: fl
     ok(f"drafting: {how} - {files[0].name} ({m['download_gb']:.1f} GB) and the prompt lookup; "
        + ("measured once at the engine's first start on this PC, the faster kept - the answers are the same with "
           "drafting or without" if how == "auto" else "on (--drafting on), not measured"))
-    if not IK2F.draft_fits(vram, ctx, kv, experts_gib):
-        warn(f"at {context_label(ctx)} the drafter's {IK2F.draft_gib(ctx):.1f} GB does not fit beside the model on this "
-             "card: the engine leaves it out (the prompt lookup still drafts) - a smaller context leaves it room")
     return files[0]
 
 
@@ -7714,23 +7864,92 @@ def ik2_draft_forget() -> None:
         warn(f"{path} could not be removed ({e}): delete it by hand to measure the drafting again")
 
 
+IK2_USER_FLAGS = ("--chunk", "--threads", "--drafting", "--parallel")   # (what the Models page or a hand may set)
+
+
+def ik2_config_path(gguf: Path) -> Path:
+    """Each Inkling 2 Mini file its own config, so the Models page switches between them each with its own layout:
+    maya-inkling-2-mini.json for unsloth's UD-Q4_K_XL, maya-inkling-2-mini-<the rest of its name>.json for another
+    (our one-T4 quant: maya-inkling-2-mini-t4-nvfp4-iq3_xxs.json)."""
+    stem = Q.config_stem("ik2", Q.IK2_QUANT)
+    if gguf.name == ik2_entry()["gguf"]:
+        return ROOT / f"{stem}.json"
+    rest = re.sub(r"[^a-z0-9_.]+", "-", re.sub(r"^inkling-2-mini-?", "", gguf.stem.lower())).strip("-.") or "own"
+    return ROOT / f"{stem}-{rest}.json"
+
+
+def ik2_user_flags(old: dict) -> tuple:
+    """The flags the config before has as the user set them (by hand or on the Models page): those the setup did not
+    write with that value (installer.setup_args, else the Models page's as_set_up) - --parallel always (the setup
+    writes none).  The others follow what is worked out now.  A config that records neither (an older setup's): the
+    layout's are worked out again, said."""
+    args, inst = old.get("args") or [], old.get("installer") or {}
+    wrote = inst.get("setup_args") or inst.get("layout_args")
+    if wrote is None and isinstance(inst.get("as_set_up"), dict):
+        st = inst["as_set_up"]
+        wrote = [x for f, k in (("--chunk", "prefill_chunk"), ("--threads", "cpu_threads")) if st.get(k) is not None
+                 for x in (f, str(st[k]))] + ["--drafting", flag_value(args, "--drafting") or "auto"]
+    if wrote is None:
+        if any(f in args[:-1] for f in ("--chunk", "--threads")):
+            ok("the layout's flags (--chunk, --threads) are worked out again for these cards and this file - the "
+               "config before does not say which of them you set yourself")
+        wrote = [x for f in ("--chunk", "--threads", "--drafting") if f in args[:-1] for x in (f, flag_value(args, f))]
+    return tuple(f for f in IK2_USER_FLAGS if f in args[:-1] and str(flag_value(args, f)) != str(flag_value(wrote, f)))
+
+
+def ik2_fit_user_flags(a, args: list, lay: dict, ctx: int) -> list:
+    """The user's kept flags against the layout worked out now (tools/ik2_fit.py): a --chunk past its chunk_max (a
+    long prompt would run the card out of GPU memory) - the fitting one offered (taken with --yes); --parallel where
+    one GPU does not hold every expert - dropped.  `args` is changed in place; what was said is returned."""
+    said = []
+    cap = lay.get("chunk_max")
+    v = flag_value(args, "--chunk")
+    if cap and v is not None and int(v) > cap:
+        warn(f"your --chunk {v} does not fit this layout at {context_label(ctx)}: every expert stays on the card with "
+             f"little room left, and a long prompt would run it out of GPU memory - --chunk {cap} fits")
+        pick = choose("Prompt chunk?", [], [(f"--chunk {cap}", "fits this card", None),
+                                            (f"keep --chunk {v}", "a long prompt may fail", None)], 0, a.yes)
+        if pick == 0:
+            args[args.index("--chunk") + 1] = str(cap)
+            said.append(f"--chunk {cap} (was {v})")
+    p = flag_value(args, "--parallel")
+    if p is not None and int(p) > 1 and not (lay.get("resident") and len(lay["gpus"]) == 1):
+        i = args.index("--parallel")
+        del args[i:i + 2]
+        warn(f"--parallel {p} dropped: answers at once run only where one GPU holds every expert, not in this layout")
+        said.append("--parallel dropped")
+    return said
+
+
 def write_config_ik2(a, pc: dict, meta: dict, gguf: Path, tok: Path, ctx: int, models: Path, d: Path, lay: dict,
-                     vision: dict | None = None, drafter: Path | None = None) -> Path:
-    """maya-inkling-2-mini.json and its start script: the layout's flags for one card or two (ik2_fit.layout; AMD:
-    ik2_fit.amd_layout), drafting (--drafting auto by default; off where it does not run).  A setup again keeps the
-    config before's env, where the server listens and its key; the flags follow the cards chosen now.  saguaro-ik2
-    stops at a flag it does not know: only its own are written."""
+                     vision: dict | None = None, drafter: Path | None = None, prev: dict | None = None,
+                     quant: str = Q.IK2_QUANT) -> Path:
+    """maya-inkling-2-mini[-<file>].json (each file its own: ik2_config_path) and its start script: the layout's flags
+    for one card or two (ik2_fit.layout; AMD: ik2_fit.amd_layout), drafting (--drafting auto by default; off where it
+    does not run).  A setup again keeps the config before's env, where the server listens and its key (another
+    Inkling config's where this file has none yet); of the flags, only those the user set on the same file and cards
+    (ik2_user_flags), checked against the layout (ik2_fit_user_flags); the setup's own choices are recorded
+    (installer.setup_args).  saguaro-ik2 stops at a flag it does not know: only its own are written."""
     step(8, "the configuration and the start script")
     port = a.port or 8080
-    cfg_path = ROOT / f"{Q.config_stem('ik2', Q.IK2_QUANT)}.json"
+    cfg_path = ik2_config_path(gguf)
     old = read_json(cfg_path)
+    base = old or (prev if config_family(prev or {}) == "ik2" else {}) or {}
     how = ik2_drafting(a)
     args = ["--model", str(gguf), "--max-context", str(ctx)] + list(lay["args"]) + \
         (["--draft", str(drafter)] if drafter and how != "off" else []) + ["--drafting", how]
-    same = [int(i) for i in old.get("gpu") or []] == [int(g["index"]) for g in pc["gpus"]]
-    kept = keep_args(old.get("args") or [], args, ("--threads",) + (("--chunk",) if same else ()))
-    inst = {"family": "ik2", "quant": Q.OTHERS[("ik2", Q.IK2_QUANT)], "ik2_quant": Q.IK2_QUANT, "drafting": how}
-    if gguf.name != ik2_entry()["gguf"]:              # (a GGUF of your own: its name, for the page and a setup again)
+    setup_args = list(lay["args"]) + ["--drafting", how]
+    same = [int(i) for i in old.get("gpu") or []] == [int(g["index"]) for g in pc["gpus"]] and \
+        flag_value(old.get("args") or [], "--model") == str(gguf)
+    user = tuple(f for f in ik2_user_flags(old) if f != "--drafting" or getattr(a, "drafting", None) not in ("on", "off")) \
+        if same else ()
+    kept = keep_args(old.get("args") or [], args, user)
+    ik2_fit_user_flags(a, args, lay, ctx)
+    kept = [k for k in kept if str(flag_value(args, k.split()[0])) == k.split()[1]]   # (what the fit changed: not kept)
+    old = base
+    inst = {"family": "ik2", "quant": Q.OTHERS[("ik2", quant)], "ik2_quant": quant,
+            "drafting": flag_value(args, "--drafting") or how}
+    if gguf.name != ik2_entry(quant)["gguf"]:         # (a GGUF of your own: its name, for the page and a setup again)
         inst["ik2_file"] = gguf.name
     sampling, effort = Q.model_defaults({"installer": inst})
     cfg = {"exe": str(IK2_EXE), "args": args, "cwd": str(ROOT), "tokenizer": str(tok), "model_name": IK2_MODEL_NAME,
@@ -7761,7 +7980,8 @@ def write_config_ik2(a, pc: dict, meta: dict, gguf: Path, tok: Path, ctx: int, m
         ok("kept from the config before: " + ", ".join(kept))
     cfg["log"] = str(cfg_path.with_suffix(".log"))
     cfg["installer"] = {**inst, "models_dir": str(models), "model_dir": str(d), "cards": len(pc["gpus"]),
-                        "measured": bool(lay.get("measured")), "written": time.strftime("%Y-%m-%d %H:%M")}
+                        "measured": bool(lay.get("measured")), "setup_args": setup_args,
+                        "written": time.strftime("%Y-%m-%d %H:%M")}
     cfg_path.write_text(json.dumps(cfg, indent=1), encoding="utf-8")
     ok(f"config: {cfg_path}")
     ok(f"start script: {write_run_script(cfg_path, port)}")
@@ -7780,7 +8000,7 @@ def ik2_amd_room(g: dict) -> float:
 
 def set_up_ik2(a, prev: dict) -> Path | None:
     """Inkling 2 Mini's steps 1-8: the PC (Linux; NVIDIA from V100 / Tesla T4 on with 8 GB or more, one card or two;
-    or one AMD RDNA 3 / 3.5 / 4 GPU that holds every expert of the file), the layout for them and the context, the
+    or one AMD RDNA 3 / 3.5 / 4 GPU of 16 GB or more - the offload path where the file does not fit), the layout for them and the context, the
     engine (build/saguaro-ik2), the file (pinned, resumable, sha256-checked - or a GGUF of your own in --model-dir),
     the drafter where drafting runs, the tokenizer with the model's own template, the pictures, the config."""
     inst = prev.get("installer") or {}
@@ -7789,10 +8009,11 @@ def set_up_ik2(a, prev: dict) -> Path | None:
     pc = check_pc(a, "ik2")                            # 1
     models = (Path(a.models_dir).expanduser().resolve() if a.models_dir else
               Path(inst["models_dir"]) if inst.get("models_dir") else default_models_dir())
-    d = ik2_dir(a, models, prev)
-    local = ik2_local_gguf(a, d)
-    ex = (IK2F.experts_gib_of(local) if local else None) or IK2F.EXPERTS_GIB
     amd = pc.get("backend") == "hip"
+    quant = choose_ik2_quant(a, prev, [dict(g, vram_gb=ik2_amd_room(g)) if amd else g for g in pc["gpus"]], amd)
+    d = ik2_dir(a, models, prev, quant)
+    local = ik2_local_gguf(a, d) if quant == Q.IK2_QUANT else None
+    ex = (IK2F.experts_gib_of(local) if local else None) or ik2_entry(quant)["experts_gib"]
     if amd:   # (every expert in the GPU's memory where the file fits, else the offload path)
         g = pc["gpus"][0]
         room = ik2_amd_room(g)
@@ -7808,13 +8029,13 @@ def set_up_ik2(a, prev: dict) -> Path | None:
                  f"{IK2_SHOWN}: the first card chosen holds every expert alone - the second is not used (one card is "
                  "faster there)", "pick the cards with --gpu N or --gpus A,B")
     step(2, "your choices")                            # 2
-    m = ik2_entry()
-    ok(f"model: {local.name + f' (your own file, {ex:.1f} GB of experts)' if local else Q.shown('ik2', Q.IK2_QUANT, m['download_gb'])}"
+    m = ik2_entry(quant)
+    ok(f"model: {local.name + f' (your own file, {ex:.1f} GB of experts)' if local else Q.shown('ik2', quant, m['download_gb'])}"
        " - thinkingmachines' Inkling-2-Mini (Apache 2.0)")
     if amd:
         warn(f"{IK2_SHOWN} on AMD is experimental here: checked on an RX 9070 XT (gfx1201) only - tell us how it goes")
     ok(f"layout: {lay['said']}" + (f" - {IK2F.speeds(lay)}" if IK2F.speeds(lay) else
-                                   " (not measured on this kind of card here: tell us your speed)"))
+                                   " (this layout is not measured on this kind of card here: tell us your speed)"))
     ctx = choose_context(a, prev_ctx if prev.get("gpu") and len(prev["gpu"]) == len(pc["gpus"]) else None,
                          IK2F.CONTEXTS, lay["context"])
     ok(f"context: {ctx} tokens" + (" (recommended for these cards)" if ctx == lay["context"] else ""))
@@ -7839,7 +8060,7 @@ def set_up_ik2(a, prev: dict) -> Path | None:
         fail(f"the engine was not built ({IK2_EXE})", "the reason is in the build's messages above (saguaro-ik2 "
              + ("needs an RDNA 3 / 3.5 / 4 GPU in the build's list, on Linux)" if amd else
                 "needs a V100 / Tesla T4 / RTX 20 or newer card in the build's GPU list)"))
-    gguf = ik2_model_step(a, d)                        # 5
+    gguf = ik2_model_step(a, d, quant)                 # 5
     if gguf is None:
         return None
     off = IK2F.drafting_off_reason(None if amd else lay["gpus"][0].get("arch"), vram, ctx, kv, amd, ex)
@@ -7850,10 +8071,10 @@ def set_up_ik2(a, prev: dict) -> Path | None:
         a.drafting = "off"
         drafter = None
     else:
-        drafter = ik2_drafter_step(a, d, vram, ctx, kv, ex)
+        drafter = ik2_drafter_step(a, d, vram, ctx, kv, ex, amd)
     tok = ik2_tokenizer_step(a, d, gguf)               # 6
     vision = ik2_vision_step(a, pc, meta, llama, d)    # 7
-    return write_config_ik2(a, pc, meta, gguf, tok, ctx, models, d, lay, vision, drafter)   # 8
+    return write_config_ik2(a, pc, meta, gguf, tok, ctx, models, d, lay, vision, drafter, prev, quant=quant)   # 8
 
 
 def set_up_and_serve(a, prev: dict) -> tuple | None:
@@ -7900,8 +8121,16 @@ def model_option(a) -> str | None:
     if family == "qwen":                                 # (its one GGUF: no quant to choose)
         a.model = QWEN
         return None
-    if family == "ik2":                                  # (its one file set, unsloth's UD-Q4_K_XL)
+    if family == "ik2":                                  # (unsloth's UD-Q4_K_XL or one of Strata's packs)
+        given = getattr(a, "ik2_quant", None)
+        plain = a.model.strip().lower() in (Q.IK2_IDS[0], "inkling2-mini", "ik2-mini", "ik2", IK2.lower())
         a.model = IK2
+        if plain:                                        # (the model by its name: its files asked, or --ik2-quant)
+            return None
+        if given and given != key:
+            return (f"--model {Q.ik2_setup_id(key)} is {Q.shown('ik2', key)}, but --ik2-quant says {given}: give "
+                    "one of them")
+        a.ik2_quant = key
         return None
     a.model, flag = {"deepseek": (DS4, "ds4_quant"), "hy4": (HY4, "hy4_quant")}.get(family, (MM3, "mm3_quant"))
     if key is not None:
@@ -7964,15 +8193,17 @@ def main() -> int:
                     help="which model and files (default: asked): a Saguaro quant - "
                          + ", ".join(i for _, _, _, i in Q.QUANTS) +
                          f" - or {DS4} / {MM3} / {HY4} (their files asked, or --ds4-quant / --mm3-quant / "
-                         f"--hy4-quant), cyber-frost = {QWEN_SHOWN}, {Q.IK2_IDS[0]} = {IK2_SHOWN} (one or two 16 GB cards),"
+                         f"--hy4-quant), cyber-frost = {QWEN_SHOWN}, {Q.IK2_IDS[0]} = {IK2_SHOWN} (one or two 16 GB NVIDIA cards or a 16 GB+ AMD GPU),"
                          " or a GLM-5.3-Flash "
                          "download by its name (" + ", ".join(MODELS) + "; every name used before still works)")
-    ap.add_argument("--model-dir", help=f"use the files you already have of {DS4}, MiniMax or {QWEN_SHOWN}: their "
-                                        "folder (a GGUF's shards, or the EXL3 quant's files and the Engram shards 47 / "
-                                        "48 of DeepSeek's repo), or an EXL3 folder of GLM-5.3-Flash or "
-                                        "MiniMax-M3.1-Flash at any bit rate (whole by its own index; its own sampling "
-                                        "and chat template are used); it must be writable - the pack is written inside "
-                                        "it")
+    ap.add_argument("--model-dir", help=f"use the files you already have of {DS4}, MiniMax, {QWEN_SHOWN} or "
+                                        f"{IK2_SHOWN}: their folder (a GGUF's shards, or the EXL3 quant's files and "
+                                        "the Engram shards 47 / 48 of DeepSeek's repo; Inkling: its GGUF - unsloth's "
+                                        "UD-Q4_K_XL or a quant of your own such as the one-T4 quant - and "
+                                        "mmproj-BF16.gguf), or an EXL3 folder of GLM-5.3-Flash or MiniMax-M3.1-Flash at "
+                                        "any bit rate (whole by its own index; its own sampling and chat template are "
+                                        "used); it must be writable - the pack (Inkling: the tokenizer folder) is "
+                                        "written inside it")
     ap.add_argument("--ds4-quant", choices=list(DS4_QUANTS) + [DS4_ABL_ALIAS],
                     help=f"{DS4}'s files: maya-s = Saguaro's quant (the experts in 2-3 bits; the default once "
                          "published; maya-m: 3.4 bits, once published; maya-xs: ~1.6 bits, with its own "
@@ -7992,6 +8223,10 @@ def main() -> int:
                          "PC), maya-s (gguf-s) = MiniMax-M3.1-Flash-Maya-S (~2.1 bits, ~122 GB) - the GGUFs on NVIDIA "
                          "from V100 on and on AMD; with --model-dir: the files you have (the same as --model "
                          "minimax-maya-xs / minimax-maya-s)")
+    ap.add_argument("--ik2-quant", choices=list(Q.IK2_QUANTS),
+                    help=f"{IK2_SHOWN}'s files: ud-q4_k_xl (unsloth's GGUF), strata-sq-20 (the original weights, 24 GB "
+                         "cards), strata-sq-15 (16 GB cards), strata-sq-10 (12 GB cards) - Strata's packs; the same as "
+                         "--model inkling-2-mini-sq-15 ...; not given: the setup picks what fits your cards")
     ap.add_argument("--hy4-quant", choices=list(HY4_QUANTS),
                     help=f"{HY4}'s size: maya-s (experts 2-3 bits, 117 GB of files; measured on 4x Tesla T4), maya-xs "
                          "(2 bits), maya-m, maya-l - the same as --model hy4-flash-maya-s ...")

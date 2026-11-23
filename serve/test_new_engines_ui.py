@@ -250,15 +250,32 @@ class Catalog(unittest.TestCase):
     def test_one_t4_gets_inkling_recommended(self):
         c = self.cat([t4()])
         ik = c["inkling-2-mini"]
-        self.assertTrue(ik["recommended"])
+        self.assertTrue(ik["recommended"])                  # (UD-Q4_K_XL: the closest to the original on a T4)
+        self.assertFalse(c["inkling-2-mini-sq-15"]["recommended"])
         for part in ("one 16 GB card", "the others in RAM (the offload path)", "32K context", "40 tok/s", "1x Tesla T4"):
             self.assertIn(part, ik["fit"])
         self.assertFalse(c["hy4-flash-maya-s"]["recommended"])
         self.assertIn("Inkling 2 Mini is the model for this PC", c["hy4-flash-maya-s"]["fit"])
 
-    def test_two_t4s(self):
-        ik = self.cat([t4(0), t4(1)])["inkling-2-mini"]
+    def test_one_rx_9070_xt(self):
+        """AMD (the setup's own choice, mortar 2026-11-22): one 16 GB RDNA 4 GPU is Inkling 2 Mini's - the offload
+        path, measured; the iGPU beside it is not counted; Hy4-Flash does not run on AMD."""
+        xt = {"index": 0, "name": "AMD Radeon RX 9070 XT", "vram_gb": 15.9, "arch": "gfx1201", "vendor": "amd"}
+        igpu = {"index": 1, "name": "AMD Radeon (gfx1036)", "vram_gb": 2.0, "arch": "gfx1036", "vendor": "amd"}
+        c = self.cat([xt, igpu], 92.0)
+        ik = c["inkling-2-mini"]
         self.assertTrue(ik["recommended"])
+        for part in ("one AMD GPU", "the offload path", "71 tok/s", "RX 9070 XT"):
+            self.assertIn(part, ik["fit"])
+        self.assertIn("one AMD RDNA 3 / 4 GPU with 16 GB or more", ik["needs"])
+        self.assertNotIn("holds every expert", ik["needs"])
+        self.assertIn("NVIDIA GPUs only", c["hy4-flash-maya-s"]["fit"])
+        self.assertIn("16 GB", self.cat([dict(xt, vram_gb=12.0)])["inkling-2-mini"]["fit"])
+
+    def test_two_t4s(self):
+        c = self.cat([t4(0), t4(1)])
+        ik = c["inkling-2-mini"]
+        self.assertTrue(c["inkling-2-mini-sq-20"]["recommended"])   # (the original weights: every expert on the two)
         for part in ("two cards: every expert in VRAM", "131K context", "51 tok/s", "1100 tok/s", "2x Tesla T4"):
             self.assertIn(part, ik["fit"])
 
