@@ -14,7 +14,7 @@
 
 namespace ik2::k {
 
-constexpr int kOffMaxK = 16;   // routed experts a token (Mini: 8)
+constexpr int kOffMaxK = 64;   // routed experts a token (Mini: 8); the verify window's S = T K picks too (B4)
 
 /// A staging pool (one a slot size): n slots of sb bytes, a tag a slot (layer * E + expert, -1 free), the visit that
 /// last used it (a slot of the running visit is never the victim), and the clock hand.  Device memory throughout.
@@ -103,5 +103,30 @@ void off_fetch_plan(const uint8_t** blob, const int* top, int K, int key0, const
 /// The listed copies (an expert's `bytes` each, bytes % 16 == 0), host-mapped memory to VRAM, 16 bytes a thread at
 /// a time; blocks: the grid.
 void off_fetch_copy(const OffFetch* fl, size_t bytes, int blocks, cudaStream_t s);
+
+/// GPU-side dynamic expert cache pool (SAGUARO_IK2_OFF_DYNAMIC=1): holds all VRAM expert slots for a pool with
+/// O(1) device lookup (loc [n_layer * E]), Second-Chance LFU-Clock eviction (freq, hand), and ghost-list
+/// re-promotion, running inside the token's single CUDA graph with zero host-GPU sync.
+struct OffCache {
+    uint8_t* data = nullptr;       // [n][sb] VRAM expert slots
+    size_t sb = 0;                 // bytes per slot (aligned >= expert size)
+    int n = 0;                     // total slots in this pool
+    int* loc = nullptr;            // shared [n_layer * E] -> slot index in layer's pool, or -1
+    int* owner = nullptr;          // [n] -> key (layer * E + e), or -1 if free
+    uint32_t* used = nullptr;      // [n] -> visit seq (protects current visit's K picks)
+    uint8_t* freq = nullptr;       // [n] -> saturating access frequency [0..max_freq]
+    uint32_t* ghost = nullptr;     // shared [n_layer * E] -> evict_seq when last evicted (0: none)
+    uint32_t* evict_seq = nullptr; // [1] monotonic eviction counter for this pool
+    int* hand = nullptr;           // [1] clock hand in [0..n)
+    int max_freq = 7;              // saturating frequency cap
+    int ghost_win = 0;             // ghost window in evictions
+};
+
+/// Dynamic GPU-side cache lookup + Clock-LFU eviction + fetch list generation (one warp, zero host sync).
+/// Fills blob[0..K-1] with VRAM slot addresses and appends missed experts to fl for off_fetch_copy().
+/// cls (null: none) [K] gets 0 for a resident pick and 1 for a fetched one (the split's mask).
+void off_cache_plan(const uint8_t** blob, const int* top, int K, int key0, const uint8_t* host, size_t hstride,
+                    OffCache dc, OffFetch* fl, OffCount* cnt, uint32_t* heat, int* cls, cudaStream_t s);
+
 
 }  // namespace ik2::k
