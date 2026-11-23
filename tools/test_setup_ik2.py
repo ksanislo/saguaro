@@ -211,12 +211,17 @@ class Fit(unittest.TestCase):
 
     def test_drafting(self):
         self.assertIn("Volta", F.drafting_off_reason("75", 24, 65536, "fp8"))
-        self.assertIn("offload", F.drafting_off_reason("86", 8, 65536, "fp8"))
+        self.assertIn("no room for the drafter", F.drafting_off_reason("86", 8, 65536, "fp8"))
+        self.assertIn("--drafting on", F.drafting_off_reason("86", 24, 524288, "fp8"))   # (NVIDIA offload: by hand)
+        self.assertIn("streams", F.drafting_off_reason("86", 16, 1048576, "fp8"))
         self.assertIsNone(F.drafting_off_reason("86", 24, 65536, "fp8"))
         self.assertIn("offload", F.drafting_off_reason("gfx1201", 16, 32768, "fp8", hip=True))   # (UD-Q4_K_XL)
         self.assertIsNone(F.drafting_off_reason("gfx1100", 24, 32768, "fp8", hip=True))
         self.assertTrue(F.draft_fits(24, 131072, "fp8"))
         self.assertFalse(F.draft_fits(24, 262144, "fp8"))
+        self.assertTrue(F.draft_fits(24, 524288, "fp8"))          # (the offload path: the tier's room)
+        self.assertTrue(F.draft_fits(32, 1048576, "fp8"))         # (... its drafts read the last positions)
+        self.assertFalse(F.draft_fits(16, 1048576, "fp8"))        # (the cache streams)
 
     def test_amd(self):
         """AMD as NVIDIA (checked on an RX 9070 XT): every expert in VRAM where the file fits, else the offload path -

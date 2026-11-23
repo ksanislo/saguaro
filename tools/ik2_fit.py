@@ -201,19 +201,39 @@ def draft_gib(ctx: int) -> float:
     return DRAFT_BASE_GIB + ctx * DRAFT_TOKEN_BYTES / GIB
 
 
+OFF_WIN_STAGE_GIB = 0.7                             # the offload path's verify window: 64 staging slots a slot size
+DRAFT_MIN_ROWS = 65536                              # the fewest context rows the engine plans for the drafter there
+
+
 def draft_fits(vram_gb: float, ctx: int, kv: str = DEFAULT_KV, experts_gib: float = EXPERTS_GIB,
                hip: bool = False) -> bool:
-    """Whether the drafter's room fits beside the model at `ctx` with every expert in VRAM (else the engine leaves it
-    out at its start).  VRAM not known: True."""
+    """Whether the drafter's room fits beside the model at `ctx` (else the engine leaves it out at its start; the
+    prompt lookup still drafts).  Every expert in VRAM: beside them, its context rows FP16, else FP8 (half of them).
+    The offload path with the whole cache in VRAM: the tier gives the drafter's room, at most half of its own - the
+    verify window's staging and at least DRAFT_MIN_ROWS of FP8 context rows (the last positions) with it (upstream
+    v1.1.75).  VRAM not known: True (the engine measures)."""
     if not vram_gb:
         return True
-    return plan(float(vram_gb) - draft_gib(ctx), ctx, kv, hip, experts_gib)["resident"]
+    p = plan(vram_gb, ctx, kv, hip, experts_gib)
+    if p["resident"]:
+        half_rows = ctx * DRAFT_TOKEN_BYTES / GIB / 2
+        return plan(float(vram_gb) - draft_gib(ctx) + half_rows, ctx, kv, hip, experts_gib)["resident"]
+    least = DRAFT_BASE_GIB + OFF_WIN_STAGE_GIB + min(ctx, DRAFT_MIN_ROWS) * DRAFT_TOKEN_BYTES / GIB / 2
+    return not p["kv_streamed"] and (p["tier_gib"] + OFF_ROOM_GIB + MARGIN_GIB) / 2 >= least
+
+
+OFF_CACHE = ("drafting off: at this context part of the cache streams from RAM, where drafting does not run - a "
+             "smaller context or a bigger card brings it back")
+OFF_ROOM = ("drafting off: at this context the experts' tier has no room for the drafter - a smaller context or a "
+            "bigger card brings it back")
 
 
 def drafting_off_reason(arch, vram_gb: float, ctx: int, kv: str = DEFAULT_KV, hip: bool = False,
                         experts_gib: float = EXPERTS_GIB) -> str | None:
-    """Why drafting is off on this card (one line), or None: NVIDIA Volta (no exact window) / Turing (its window costs more than it keeps)
-    and the offload path (NVIDIA or AMD) run without it; every expert in VRAM keeps it."""
+    """Why drafting is off on this card (one line), or None: NVIDIA Volta (no exact window) / Turing (its window costs
+    more than it keeps) run without it.  The offload path (the card does not hold every expert) drafts where its whole
+    cache stays in VRAM and the experts' tier has the drafter's room (draft_fits): on NVIDIA with --drafting on only;
+    not on AMD's (it loses there - upstream's auto measures it, we keep it off).  Every expert in VRAM keeps it."""
     try:
         cc = int(arch)
     except (TypeError, ValueError):
@@ -222,8 +242,15 @@ def drafting_off_reason(arch, vram_gb: float, ctx: int, kv: str = DEFAULT_KV, hi
         return ("drafting off: on this GPU (Volta / Turing) drafting does not pay for this model - every token comes "
                 "from a full model step (on a T4 a verify window costs 1.5-2.3 tokens' time)")
     if vram_gb and not plan(vram_gb, ctx, kv, hip, experts_gib)["resident"]:
-        return ("drafting off: the card does not hold every expert at this context (the offload path), where drafting "
-                "does not run - a smaller context or a bigger card brings it back")
+        if plan(vram_gb, ctx, kv, hip, experts_gib)["kv_streamed"]:
+            return OFF_CACHE
+        if not draft_fits(vram_gb, ctx, kv, experts_gib, hip):
+            return OFF_ROOM
+        if hip:
+            return ("drafting off: on an AMD card's offload path drafting is slower than plain decoding (an RX 9070 XT "
+                    "measured: -1..-12 %) - a context or a file whose experts all fit brings it back")
+        return ("drafting off with --drafting auto: the card does not hold every expert at this context (the "
+                "offload path) - --drafting on drafts there (not measured against plain decoding by auto yet)")
     return None
 
 

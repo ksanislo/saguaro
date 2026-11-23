@@ -367,6 +367,12 @@ GPU - `SAGUARO_IK2_VISION_GIB`, the server's), else it is left out with a NOTE: 
 context with the FP8 cache (`tools/ik2_fit.py` `draft_gib`: 0.88 GiB + 4.75 KiB a token). The Monitor's Speculation
 shows the drafts kept (STAT `draft_acc` / `draft_off`, `draft_ms`, `verify_ms`).
 
+Past what a card holds with every expert (the offload path: a long context, or a card under 24 GB with UD-Q4_K_XL) the
+drafter's room comes from the experts' tier (upstream v1.1.75): at most half of the tier's room, with the verify
+window's staging (0.7 GiB) and at least 65,536 FP8 context rows of the last positions; where part of the cache streams
+from RAM drafting stays off. The setup's `tools/ik2_fit.py` `draft_fits` / `drafting_off_reason` count it the same way
+(and keep drafting off on an AMD card's offload path, where it was measured slower than plain decoding).
+
 Whether a window pays depends on the text: the drafts are taken 1.8 tokens a step in prose, 3 in new code, 4.3 in a
 document's edit. A controller decides each step (`SpecCtl`): a window of B's expected tokens, (1 - a^B) / (1 - a)
 with a the recent acceptance, over its measured time, against a plain token's; after 8 plain tokens it drafts once
