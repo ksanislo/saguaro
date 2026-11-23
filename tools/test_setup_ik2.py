@@ -562,7 +562,7 @@ class StrataPacks(unittest.TestCase):
     def test_recommended(self):
         rec = lambda v, n=1: maya.ik2_recommend([t4(i, v) for i in range(n)], False)   # noqa: E731
         self.assertEqual(rec(11.0), "strata-sq-10")    # (12 GB: Strata's 12 GB pack)
-        self.assertEqual(rec(15.0), "strata-sq-15")    # (a T4: Strata's 16 GB pack, most of its experts on the card)
+        self.assertEqual(rec(15.0), "ud-q4_k_xl")      # (a T4: the offload path either way; UD the closest there)
         self.assertEqual(rec(23.5), "strata-sq-20")    # (24 GB: the original weights, every expert on the card)
         self.assertEqual(rec(15.0, 2), "strata-sq-20")  # (two T4s: every expert across them)
 

@@ -7626,8 +7626,9 @@ IK2_KL_FAST = 0.02   # (a file this far from the original is offered for speed, 
 
 def ik2_recommend(cards: list, amd: bool) -> str:
     """The files for these cards: the closest to the original weights among those whose experts all stay in VRAM at
-    32K (and within IK2_KL_FAST of the original); else the closest among those keeping two thirds of them there;
-    else the smallest.  Two NVIDIA cards count together where the split holds every expert."""
+    32K (and within IK2_KL_FAST of the original); else, on the offload path, unsloth's UD-Q4_K_XL (measured: KL 0.004
+    from the original against SQ-15's 0.017, the same speed on a T4 and an RX 9070 XT); a card under 13 GB the
+    smallest file.  Two NVIDIA cards count together where the split holds every expert."""
     keys = [k for k in Q.IK2_QUANTS if ik2_published(k)]
     gib = {k: ik2_entry(k)["experts_gib"] for k in keys}
     kl = {k: (ik2_entry(k)["kl"] if ik2_entry(k)["kl"] is not None else 1.0) for k in keys}
@@ -7642,10 +7643,9 @@ def ik2_recommend(cards: list, amd: bool) -> str:
     res = [k for k in keys if resident(k) and kl[k] <= IK2_KL_FAST]
     if res:
         return min(res, key=lambda k: (kl[k], gib[k]))
-    good = [k for k in keys if IK2F.plan(vr[0], ctx, experts_gib=gib[k])["tier_gib"] >= gib[k] * 2 / 3]
-    if good:
-        return min(good, key=lambda k: (kl[k], gib[k]))
-    return min(keys, key=lambda k: gib[k])
+    if vr[0] < 13:                                     # (a 12 GB card: the smallest, most of it on the card)
+        return min(keys, key=lambda k: gib[k])
+    return Q.IK2_QUANT   # (the offload path: UD-Q4_K_XL measured the closest to the original at the same speed)
 
 
 def choose_ik2_quant(a, prev: dict, cards: list, amd: bool) -> str:
