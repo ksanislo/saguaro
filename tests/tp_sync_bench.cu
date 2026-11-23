@@ -49,17 +49,29 @@ int main(int argc, char** argv) {
     float *xa, *pa, *ia, *xb, *pb, *ib;
     cudaStream_t sa, sb;
     cudaEvent_t ea, eb, fork;
+    // (the receive buffers and events by a sum's parity, as the engine's: a copy into slot i & 1 follows the other
+    //  member's add of sum i - 2 - one buffer would let the copy overwrite a buffer still being read)
+    float *ia2[2], *ib2[2];
+    cudaEvent_t ea2[2], eb2[2];
     CK(cudaSetDevice(A));
     CK(cudaMalloc(&xa, bytes)); CK(cudaMalloc(&pa, bytes)); CK(cudaMalloc(&ia, bytes));
     CK(cudaMemset(xa, 0, bytes));
     CK(cudaStreamCreateWithFlags(&sa, cudaStreamNonBlocking));
     CK(cudaEventCreateWithFlags(&ea, cudaEventDisableTiming));
+    for (int k = 0; k < 2; ++k) {
+        CK(cudaMalloc(&ia2[k], bytes));
+        CK(cudaEventCreateWithFlags(&ea2[k], cudaEventDisableTiming));
+    }
     CK(cudaEventCreateWithFlags(&fork, cudaEventDisableTiming));
     CK(cudaSetDevice(B));
     CK(cudaMalloc(&xb, bytes)); CK(cudaMalloc(&pb, bytes)); CK(cudaMalloc(&ib, bytes));
     CK(cudaMemset(xb, 0, bytes));
     CK(cudaStreamCreateWithFlags(&sb, cudaStreamNonBlocking));
     CK(cudaEventCreateWithFlags(&eb, cudaEventDisableTiming));
+    for (int k = 0; k < 2; ++k) {
+        CK(cudaMalloc(&ib2[k], bytes));
+        CK(cudaEventCreateWithFlags(&eb2[k], cudaEventDisableTiming));
+    }
     const int th = 256, bl = (C + th - 1) / th;
     double ms = -1;
     if (peer) {
@@ -75,16 +87,16 @@ int main(int argc, char** argv) {
         CK(cudaSetDevice(B));
         work<<<bl, th, 0, sb>>>(xb, C);
         // each member's partial to the other (A's xa -> ib, B's xb -> ia), then both add in the same order
-        CK(cudaMemcpyAsync(ib, xa, bytes, cudaMemcpyDefault, sa));
-        CK(cudaMemcpyAsync(ia, xb, bytes, cudaMemcpyDefault, sb));
-        CK(cudaEventRecord(ea, sa));
-        CK(cudaEventRecord(eb, sb));
-        CK(cudaStreamWaitEvent(sa, eb, 0));
-        CK(cudaStreamWaitEvent(sb, ea, 0));
+        CK(cudaMemcpyAsync(ib2[i & 1], xa, bytes, cudaMemcpyDefault, sa));
+        CK(cudaMemcpyAsync(ia2[i & 1], xb, bytes, cudaMemcpyDefault, sb));
+        CK(cudaEventRecord(ea2[i & 1], sa));
+        CK(cudaEventRecord(eb2[i & 1], sb));
+        CK(cudaStreamWaitEvent(sa, eb2[i & 1], 0));
+        CK(cudaStreamWaitEvent(sb, ea2[i & 1], 0));
         CK(cudaSetDevice(A));
-        add2<<<bl, th, 0, sa>>>(xa, ia, pa, C);
+        add2<<<bl, th, 0, sa>>>(xa, ia2[i & 1], pa, C);
         CK(cudaSetDevice(B));
-        add2<<<bl, th, 0, sb>>>(ib, xb, pb, C);
+        add2<<<bl, th, 0, sb>>>(ib2[i & 1], xb, pb, C);
     }
     CK(cudaEventRecord(eb, sb));
     CK(cudaStreamWaitEvent(sa, eb, 0));
@@ -106,14 +118,14 @@ int main(int argc, char** argv) {
             work<<<bl, th, 0, sa>>>(xa, C);
             CK(cudaSetDevice(B));
             work<<<bl, th, 0, sb>>>(xb, C);
-            CK(cudaMemcpyAsync(ib, xa, bytes, cudaMemcpyDefault, sa));
-            CK(cudaMemcpyAsync(ia, xb, bytes, cudaMemcpyDefault, sb));
-            CK(cudaEventRecord(ea, sa));
-            CK(cudaEventRecord(eb, sb));
-            CK(cudaStreamWaitEvent(sa, eb, 0));
-            CK(cudaStreamWaitEvent(sb, ea, 0));
+            CK(cudaMemcpyAsync(ib2[i & 1], xa, bytes, cudaMemcpyDefault, sa));
+            CK(cudaMemcpyAsync(ia2[i & 1], xb, bytes, cudaMemcpyDefault, sb));
+            CK(cudaEventRecord(ea2[i & 1], sa));
+            CK(cudaEventRecord(eb2[i & 1], sb));
+            CK(cudaStreamWaitEvent(sa, eb2[i & 1], 0));
+            CK(cudaStreamWaitEvent(sb, ea2[i & 1], 0));
             CK(cudaSetDevice(A));
-            add2<<<bl, th, 0, sa>>>(xa, ia, pa, C);
+            add2<<<bl, th, 0, sa>>>(xa, ia2[i & 1], pa, C);
             CK(cudaSetDevice(B));
             add2<<<bl, th, 0, sb>>>(ib, xb, pb, C);
         }

@@ -2,7 +2,7 @@
 """tools/ik2/nsys_token.py - one decode token's GPU time by kind, per card, from an nsys sqlite export of a
 saguaro-ik2 CLI run (nsys profile --cuda-graph-trace=node; nsys export --type sqlite).
 
-    nsys_token.py RUN.sqlite [--tokens N]
+    nsys_token.py RUN.sqlite [--skip N]
 
 The decode tokens are the CUDA graphs' launches (graphId != 0); a token's window is from its first graph kernel to
 the last before the next token. Kinds by kernel name; copies by kind (H2D / D2H / D2D / peer). Idle: a card's window
