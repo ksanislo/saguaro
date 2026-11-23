@@ -333,8 +333,17 @@ int main() {
             // AMD: the tensor-core prompt path is CUDA-only, so it refuses every pool and the old kernel runs
             std::printf("[5/5] qsa_prompt_attn mode 3: PASS (refused on HIP - the old kernel runs)\n");
 #else
-            std::printf("[5/5] qsa_prompt_attn mode 3: FAIL (refused the hybrid pools)\n");
-            g_fail = 1;
+            int dev = 0, cc_major = 0, cc_minor = 0;
+            ck(cudaGetDevice(&dev), "device");
+            ck(cudaDeviceGetAttribute(&cc_major, cudaDevAttrComputeCapabilityMajor, dev), "cc major");
+            ck(cudaDeviceGetAttribute(&cc_minor, cudaDevAttrComputeCapabilityMinor, dev), "cc minor");
+            if (cc_major * 10 + cc_minor < 75) {   // (Pascal / Volta: the tensor-core prompt path refuses by design)
+                std::printf("[5/5] qsa_prompt_attn mode 3: PASS (refused on compute capability %d.%d, below sm_75 - "
+                            "the old kernel runs)\n", cc_major, cc_minor);
+            } else {
+                std::printf("[5/5] qsa_prompt_attn mode 3: FAIL (refused the hybrid pools)\n");
+                g_fail = 1;
+            }
 #endif
         } else {
             k::fwht256_inplace_cuda(d_at4, QH, nullptr);

@@ -6297,10 +6297,10 @@ int arch_class() {
         cudaDeviceGetAttribute(&ma, cudaDevAttrComputeCapabilityMajor, d);
         cudaDeviceGetAttribute(&mi, cudaDevAttrComputeCapabilityMinor, d);
         const int cc = ma * 10 + mi;
-        int c = cc >= 80 ? 80 : cc >= 75 ? 75 : 70;
+        int c = cc >= 80 ? 80 : cc >= 75 ? 75 : cc >= 70 ? 70 : 60;   // (60: Pascal, no tensor cores - the scalar kernels)
         if (const char* e = std::getenv("SAGUARO_IK2_ARCH")) {   // (tests: an older class's kernels on a newer GPU)
             const int f = std::atoi(e);
-            if (f == 70 || f == 75) c = std::min(c, f);
+            if (f == 60 || f == 70 || f == 75) c = std::min(c, f);
         }
         cls[d] = c;
     }
@@ -6873,6 +6873,7 @@ void launch_experts_down(const uint8_t* const* blob, int S, int ty_down, size_t 
 }
 
 bool experts_mma_fits(int ty_gate, int ty_up, int ty_down, int C, int F) {
+    if (arch_class() < 70) return false;   // (Pascal: no tensor cores - the scalar expert kernels)
     return ty_gate == kNVFP4 && ty_up == kNVFP4 && ty_down == kNVFP4 && C % 64 == 0 && F % 64 == 0;
 }
 static int experts_mma_split(bool gate) {

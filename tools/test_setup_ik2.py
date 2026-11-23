@@ -249,14 +249,14 @@ class Fit(unittest.TestCase):
         cases = [("metal", False, 0, [], "NVIDIA and AMD GPUs only"),
                  ("cuda", True, 0, [t4()], "Linux only"),
                  ("cuda", False, 3, [t4()], "one or two NVIDIA GPUs"),
-                 ("cuda", False, 0, [t4(0, 24, "61", "Tesla P40")], "compute capability 7.0"),
+                 ("cuda", False, 0, [t4(0, 12, "52", "Tesla M40")], "compute capability 6.0"),
                  ("cuda", False, 0, [card(6)], "8 GB of VRAM or more"),
                  ("cuda", False, 2, [card(24), card(6, 1)], "8 GB of VRAM or more on each")]
         for backend, win, asked, cards, part in cases:
             why = F.unsupported(backend, win, asked, cards)
             self.assertIn(part, why or "", (backend, win))
             self.assertNotIn("\n", why)
-        for cards in ([t4()], [card(8)], [t4(0, 32, "70", "Tesla V100")], [card(12), t4(1)], []):
+        for cards in ([t4()], [card(8)], [t4(0, 32, "70", "Tesla V100")], [t4(0, 24, "61", "Tesla P40")], [card(12), t4(1)], []):
             self.assertIsNone(F.unsupported("cuda", False, 1, cards))
         self.assertIn("RAM and VRAM together", F.unsupported("cuda", False, 1, [card(8)], ram_gb=12.0))
         self.assertIsNone(F.unsupported("cuda", False, 1, [card(8)], ram_gb=15.4))

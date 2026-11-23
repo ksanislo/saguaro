@@ -36,7 +36,7 @@ OFF_TIER_MIN_GIB = 0.5                              # an offload layout streams 
 DEFAULT_KV = "f16"                                  # the engine's own (the T4 layouts were measured with it)
 MIN_VRAM_GB = 7.0                                   # the engine's own floor (an "8 GB" card)
 MIN_TOTAL_GB = 24.0                                 # RAM + VRAM that hold the model, as the refusal says it
-MIN_CC = 70                                         # the engine's kernels: Volta on (Turing: m16n8k8, Volta: m8n8k4)
+MIN_CC = 60                                         # the engine's kernels: Pascal on (second-class: scalar kernels, no tensor cores; Volta: m8n8k4)
 AMD_ARCHS = ("gfx11", "gfx12")                      # AMD: RDNA 3 / 3.5 / 4 - the matrix-core prompt kernels (HIP)
 TWO_ROOM_GIB = 0.3                                  # the second card's room beside its experts
 ROOM_MB = 1024                                      # SAGUARO_IK2_ROOM_MB: the offload path's room (the engine's default)
@@ -272,8 +272,8 @@ def unsupported(backend: str, windows: bool, gpus_asked: int, cards: list, ram_g
     if cards:
         new = [g for g in cards if int(g.get("arch") or 0) >= MIN_CC]
         if not new:
-            return ("Inkling 2 Mini needs an NVIDIA V100 / Tesla T4 / RTX 20 or newer GPU (compute capability 7.0 or "
-                    "newer) - older cards are not supported by its engine")
+            return ("Inkling 2 Mini needs an NVIDIA Tesla P40 / GTX 10 (Pascal, experimental) or newer GPU (compute "
+                    "capability 6.0 or newer) - older cards are not supported by its engine")
         vram = max(float(g.get("vram_gb") or 0) for g in new)
         if vram < MIN_VRAM_GB:
             return "Inkling 2 Mini needs one NVIDIA GPU with 8 GB of VRAM or more"

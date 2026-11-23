@@ -380,7 +380,9 @@ __global__ void off_lane_wait_kernel(LaneState* ls, const LaneDone* done, int C,
             const uint32_t seq = ls->seq;
             const unsigned long long t0 = globaltimer();
             while (*(const volatile uint32_t*) &done->seq != seq) {
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 700   // (Pascal has no __nanosleep: a plain spin)
                 __nanosleep(256);
+#endif
                 if (globaltimer() - t0 > 20000000000ull) {   // (20 s: the lane is gone - the engine reports it)
                     ls->err = 1;
                     break;

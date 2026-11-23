@@ -122,9 +122,9 @@ which keeps the experts' original bits) is the bar.
 ## 6. Phase 2: the engine, `saguaro-ik2`
 
 `src/ik2/` runs unsloth's GGUFs in place (UD-Q4_K_XL: NVFP4 experts in layers 0-39; UD-Q3_K_XL: IQ3_XXS / IQ4_XS),
-CUDA on Linux, Volta (sm_70) on. Built by CMake beside the other engines (`saguaro-ik2`, and `ik2_kernels_test` with
+CUDA on Linux, Volta (sm_70) on; Pascal (sm_6x) second-class, on the scalar kernels. Built by CMake beside the other engines (`saguaro-ik2`, and `ik2_kernels_test` with
 `STRATA_BUILD_TESTS`); a 90 in `CMAKE_CUDA_ARCHITECTURES` builds sm_90a for the Hopper attention; `all` / `all-major`
-take the compiler's list from sm_70 on. CUDA 12.x for a V100 (CUDA 13 has no sm_70).
+take the compiler's list from sm_60 on. CUDA 12.x for a V100 or a Pascal card (CUDA 13 has no sm_70 / sm_6x).
 
 **Kernels per architecture** (`k::arch_class()`; a fix for one class leaves the others' code as it is):
 
@@ -133,9 +133,10 @@ take the compiler's list from sm_70 on. CUDA 12.x for a V100 (CUDA 13 has no sm_
 | Ampere and newer (sm_80+) | `mma.sync` m16n8k16 | `mma.sync` m16n8k16 | fused (`mma.sync`, `cp.async`; sm_90a: wgmma) | block path |
 | Turing (sm_75) | Ampere's, m16n8k16 as two m16n8k8 | Ampere's, the same | cuBLAS (the fused kernel needs `cp.async` and more shared memory) | block path, exact (checked on a T4); drafting off (a NOTE): a window costs more than the drafts it keeps (section 9) |
 | Volta (sm_70) | its own: `mma.m8n8k4`, 32 keys a warp step | its own: `mma.m8n8k4` | cuBLAS; full layers from 64K keys deep its own `mma.m8n8k4` kernel (keys through shared memory, 8 queries a block; `SAGUARO_IK2_PA70=0`: cuBLAS) | none: drafting off (a NOTE) |
+| Pascal (sm_6x; second-class) | the scalar kernels (`SAGUARO_IK2_ATTN_MMA=0`'s) | the scalar mat-vecs (`SAGUARO_IK2_EXPERT_MMA=0`'s) | cuBLAS (FP16 in, F32 sums) | none: drafting off (a NOTE) |
 
 Each class is exact within itself (the same greedy answers start after start); the classes differ from each other in
-their sums' order, as different kernels do. `SAGUARO_IK2_ARCH=70` / `75` takes an older class's kernels on a newer GPU (tests;
+their sums' order, as different kernels do. `SAGUARO_IK2_ARCH=60` / `70` / `75` takes an older class's kernels on a newer GPU (tests;
 Turing's code only where the build has it - a `75-virtual` build).
 
 **Where the weights sit.** The dense weights (attention, router, head: ~4.7 B) are decoded once to FP16 in VRAM. The
@@ -393,11 +394,11 @@ the rest read and pinned - an 8 GB card's tier is 2.6 GiB of RAM the PC does not
 the offload path (its window runs only where every expert is in VRAM; a NOTE says so).
 
 **The preview.** Inkling-2-Mini comes in as an experimental preview: Linux or Windows, one NVIDIA GPU of 8 GB or more, sm_70
-(Volta: V100) or newer; tested on RTX 3090s (sm_86) and V100s (sm_70); Turing (sm_75) kernel-tested only, Blackwell
+(Volta: V100) or newer, Pascal (sm_6x) second-class; tested on RTX 3090s (sm_86) and V100s (sm_70); a Tesla P40 (sm_61,
+CUDA 12.0: the kernels test and the T4 quant resident, 2026-11-23); Turing (sm_75) kernel-tested only, Blackwell
 (sm_100 / sm_120) compile-checked only; Windows run on an RTX 3050 8 GB (@cobra91's MSVC port, its VRAM as CUDA gets it
 measured by the setup). Elsewhere `saguaro-ik2` stops at the start with one line saying why (under
-`--serve` also as a `NOTE` the server prints): no NVIDIA GPU, a GPU older than sm_70 (Pascal and before: none of the
-tensor-core instructions its kernels use), a build with no kernels for the GPU's arch, less than 7 GiB of VRAM,
+`--serve` also as a `NOTE` the server prints): no NVIDIA GPU, a GPU older than sm_60 (Maxwell and before), a build with no kernels for the GPU's arch, less than 7 GiB of VRAM,
 `--gpus 3` or more, AMD on Windows. `SAGUARO_IK2_UNSUPPORTED=1` runs it anyway where it can run at all: the older two-GPU
 modes (`SAGUARO_IK2_EP=1` or `SAGUARO_IK2_TP=1`, section 6) - untested here.
 
