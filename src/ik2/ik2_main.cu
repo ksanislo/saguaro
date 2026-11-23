@@ -10561,6 +10561,7 @@ int main(int argc, char** argv) {
                 ctl.took_plain(now() - ts);
                 anchor = ag[0], P += 1;
                 out.push_back(anchor);
+        ctl.begin(P);
                 continue;
             }
             int given[kBlockMax];
@@ -10568,7 +10569,6 @@ int main(int argc, char** argv) {
             spec_step(M, drafter, anchor, P, B, sc, std::vector<int>{}, next, src == 2 ? given : nullptr, &t_draft);
             CU(cudaStreamSynchronize(g_s));
             if (src == 2) ctl.took_lookup(B, (int) next.size() - 1, now() - ts);
-        ctl.begin(P);
             else ctl.took_spec(B, (int) next.size() - 1, now() - ts);
             for (int j = 0; j + 1 < (int) next.size(); ++j) lk.append(next[j]);
             for (int j = 0; j < (int) next.size() && (int) out.size() < gen; ++j) out.push_back(next[j]);
