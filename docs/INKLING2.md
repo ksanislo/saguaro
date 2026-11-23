@@ -131,7 +131,7 @@ take the compiler's list from sm_70 on. CUDA 12.x for a V100 (CUDA 13 has no sm_
 | GPU class | One token's attention | NVFP4 experts (one token) | Prompt attention | Verify window (drafting) |
 | --- | --- | --- | --- | --- |
 | Ampere and newer (sm_80+) | `mma.sync` m16n8k16 | `mma.sync` m16n8k16 | fused (`mma.sync`, `cp.async`; sm_90a: wgmma) | block path |
-| Turing (sm_75) | Ampere's, m16n8k16 as two m16n8k8 | Ampere's, the same | cuBLAS (the fused kernel needs `cp.async` and more shared memory) | block path; drafting off (a NOTE) until its window is checked against the token path on a Turing card |
+| Turing (sm_75) | Ampere's, m16n8k16 as two m16n8k8 | Ampere's, the same | cuBLAS (the fused kernel needs `cp.async` and more shared memory) | block path, exact (checked on a T4); drafting off (a NOTE): a window costs more than the drafts it keeps (section 9) |
 | Volta (sm_70) | its own: `mma.m8n8k4`, 32 keys a warp step | its own: `mma.m8n8k4` | cuBLAS; full layers from 64K keys deep its own `mma.m8n8k4` kernel (keys through shared memory, 8 queries a block; `SAGUARO_IK2_PA70=0`: cuBLAS) | none: drafting off (a NOTE) |
 
 Each class is exact within itself (the same greedy answers start after start); the classes differ from each other in
@@ -461,7 +461,31 @@ sm_75 forms, a one-card expert cache, two cards by layers) is replaced by it. Wh
 - an expert tensor's row check by its own row length (`C` for gate / up, `F` for down), so 256-value types load on
   gate_up (our one-T4 quant's IQ3_XXS / IQ4_XS);
 - saved conversations and rewind snapshots in the serve loop (`SAGUARO_IK2_SLOT_DIR`, `SAGUARO_IK2_KEEP`, ...);
-- the serve / Monitor wiring, the setup's layouts and this page's measurements.
+- the serve / Monitor wiring, the setup's layouts and this page's measurements;
+- on AMD the ik2 sources build with `-ffp-contract=on` (clang's default `fast` fused `moe_combine_conv`'s sums unlike
+  the window's kernels, so every window was a few 1e-3 off and drafting - the prompt lookup included - changed greedy
+  answers); the drafter's BF16 products on a kernel of ours before sm_80 (cuBLAS's BF16 on a T4: 13 ms a draft);
+  a Strata pack's drafter left out with a NOTE (its head is not FP16 / planar Q8_0; it used to stop the engine).
+
+**Drafting on the T4s and the RX 9070 XT** (2026-11-22, `SAGUARO_IK2_DRAFT_FORCE=1` lifts the Turing gate, `=2` also
+lets the drafter run on the dynamic offload path - tests only). Greedy, six requests (code, prose, chat) of 400
+tokens, drafting off / on interleaved; every on-run's answers bit-equal to off (window check: every row the one-token
+path's to the bit, on the T4 and, with the build fix above, on the RX 9070 XT):
+
+| Layout | off tok/s | on tok/s | drafts kept | a plain token | a window of 2 / 3 / 4 (incl. drafting) |
+| --- | ---: | ---: | ---: | ---: | --- |
+| T4, UD-Q4_K_XL offload (dynamic cache), the drafter | 40.9 | 37.6 (-8 %; code +1..-7 %, prose / chat -10 %) | 25-70 % | 25-26 ms | 41 / 50 / 60 ms (drafting 7.8 ms) |
+| T4, one-T4 quant resident (32K / 8K) | 44.4 | 43.3 lookup only (-2 %) | - | 23 ms | 53 / 69 / 87 ms (lookup) |
+| RX 9070 XT, one-T4 quant resident 16K, the drafter | 77.5 | 74.2 (-4 %; code2 +10 %) | 30-67 % | 12.9 ms | 22 / 29 / 33 ms (drafting 3 ms) |
+| RX 9070 XT, UD-Q4_K_XL offload, the drafter | 71.5 | 66.6 (-7 %) | 25-70 % | 14.3 ms | 26 / 36 / 35 ms |
+
+Why it does not pay here: the exact window computes each token's products with the one-token path's sums, so on a T4
+it is compute-bound, not bandwidth-bound - nsys, UD offload: a window of 2 is 38 ms of GPU time (experts 23.3, dense
+11.2, attention 2.7) against ~25 ms a token, a window of 4 58 ms; the experts of 2-4 tokens are mostly different ones
+(8 of 128 each), so the window shares little but the dense weights. The drafter cannot sit beside the one-T4 quant on
+one T4 (not even at 8K), nor beside SQ-15 on the RX 9070 XT at 32K; two GPUs have no drafting (the split's window is
+not built). The drafter inside Strata's packs (`dspark.*`, 3 layers in S5_K / Q8_ROW) is the same model as
+`mtp.safetensors` (3 layers, BF16): not read, it would only save the drafting's bytes, not the window.
 
 **Inkling-2-Mini UD-Q4_K_XL's tensors**: experts of layers 0-19 NVFP4 (10.68 GiB), of layers 20-23 Q8_0 (4.03 GiB);
 dense matrices Q8_0 (1.55 GiB, 0.47 of it the embedding, which stays on the host); norms, convs, routers and loop

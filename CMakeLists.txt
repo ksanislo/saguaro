@@ -1032,6 +1032,10 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
     target_link_libraries(saguaro-ik2 PRIVATE ik2_kernels strata_kernels_cpu ${_strata_gpu_blas_target}
                           Threads::Threads strata_spec strata_fmt)
     target_compile_definitions(saguaro-ik2 PRIVATE MAYA_DS4_IQ_ONLY DS4_IQ_MIN_FORMS)
+    if(_ik2_hip)   # (clang's default -ffp-contract=fast fuses moe_combine_conv's sums unlike the window's kernels: drafting changed answers)
+      set_source_files_properties(src/ik2/ik2_kernels.cu src/ik2/ik2_off.cu src/ik2/ik2_main.cu src/ik2/ik2_draft.cu
+                                  PROPERTIES COMPILE_OPTIONS "-ffp-contract=on")
+    endif()
     if(_ik2_hip)   # (the prompt's FP16 GEMMs on hipBLASLt, each shape's kernel measured and kept - ds4_lt.cu)
       target_sources(saguaro-ik2 PRIVATE src/hy4/ds4/ds4_lt.cu)
       if(STRATA_HIPBLASLT_AVAILABLE)
