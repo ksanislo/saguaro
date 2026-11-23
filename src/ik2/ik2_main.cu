@@ -4754,10 +4754,12 @@ struct SpecCtl {
                                                      : kBlockMax;
     double SLb[4] = {1, 2, 4, 9}, FLb[4] = {2, 2, 1, 1}, cv[kBlockMax + 1] = {};
     bool cv_seen[kBlockMax + 1] = {};
+    int cv_n[kBlockMax + 1] = {};   // (a width's first window records its graph: not a cost sample)
     int lk_len = 0, lk_bucket = 0;
     static int bucket_of(int len) { return len >= 16 ? 3 : len >= 8 ? 2 : len >= 5 ? 1 : 0; }
     double verify_cost(int b) const { return cv_seen[b] ? cv[b] : c[b]; }
     void took_verify(int B, double t) {   // (a window's verify seconds, whichever drafted)
+        if (cv_n[B]++ == 0) return;
         cv[B] = cv_seen[B] ? 0.8 * cv[B] + 0.2 * t : t, cv_seen[B] = true;
     }
     int pick(int room, int k, int& B) {
