@@ -69,6 +69,14 @@ inline float e4m3(uint8_t c) {   // sk_codecs.cpp E4M3Table
     else v = (1.0f + (float) m * 0.125f) * std::ldexp(1.0f, e - 7);
     return (c & 0x80) ? -v : v;
 }
+inline float ue8m0(uint8_t e) {   // sk_codecs.cpp ue8m0_to_f32
+    if (e == 0) return 5.877471754111438e-39f;
+    if (e == 255) return 0.0f;
+    uint32_t bits = (uint32_t) e << 23;
+    float f;
+    std::memcpy(&f, &bits, 4);
+    return f;
+}
 constexpr float e2m1[16] = {0, .5f, 1, 1.5f, 2, 3, 4, 6, -0.f, -.5f, -1, -1.5f, -2, -3, -4, -6};
 }  // namespace ref
 

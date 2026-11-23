@@ -2998,11 +2998,24 @@ __device__ __forceinline__ float bf16_chunk_dot(const uint8_t* w, int it, const 
     }
     return a;
 }
+__device__ __forceinline__ float mx8_chunk_dot(const uint8_t* w, int it, const float* x) {
+    const uint8_t* b = w + (size_t) it * 36;
+    const uint32_t hdr = __ldg((const uint32_t*) b);
+    float a = 0.0f;
+#pragma unroll
+    for (int i = 0; i < 8; ++i) {
+        const uint32_t u = __ldg((const uint32_t*) (b + 4 + 4 * i));
+#pragma unroll
+        for (int j = 0; j < 4; ++j) a += strata_fmt::e4m3((uint8_t) (u >> (8 * j))) * x[4 * i + j];
+    }
+    return strata_fmt::ue8m0((uint8_t) (hdr & 0xFF)) * a;
+}
 __device__ __forceinline__ bool sf_chunk_type(int type) {
-    return strata_fmt::is_sh(type) || type == strata_fmt::kQ8F || type == strata_fmt::kBF16;
+    return strata_fmt::is_sh(type) || type == strata_fmt::kQ8F || type == strata_fmt::kBF16 || type == strata_fmt::kMX8B;
 }
 __device__ __forceinline__ float sf_chunk_dot(int type, const uint8_t* w, int it, const float* x) {
     if (type == strata_fmt::kQ8F) return q8f_chunk_dot(w, it, x);
+    if (type == strata_fmt::kMX8B) return mx8_chunk_dot(w, it, x);
     if (type == strata_fmt::kBF16) return bf16_chunk_dot(w, it, x);
     return sh_chunk_dot(w, strata_fmt::sh_bits(type), strata_fmt::block_bytes(type), it, x);
 }

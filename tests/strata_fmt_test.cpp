@@ -115,7 +115,7 @@ int main(int argc, char** argv) {
 
     // experts
     const size_t trunk_checked = g_checked;
-    size_t n_done = 0, n_sf4 = 0, n_sk = 0, scale_bad = 0, macaq_bad = 0;
+    size_t n_done = 0, n_sf4 = 0, n_sk = 0, n_mx8 = 0, scale_bad = 0, macaq_bad = 0;
     std::vector<uint8_t> gu, dn;
     std::vector<float> r(2 * (size_t) F * C), o;
     for (int l = 0; l < L; ++l) {
@@ -152,10 +152,30 @@ int main(int argc, char** argv) {
                 std::memcpy(&hd, dn.data(), 16);
                 ty[2] = hd.type, part[2] = dn.data() + 16;
             } else {
-                ty[0] = ty[1] = ty[2] = kNVFP4;
+                ty[0] = ty[1] = ty[2] = V.layer_type(l);
                 part[0] = gu.data(), part[1] = gu.data() + egu / 2, part[2] = dn.data();
             }
-            if (pe.gu_code == kSF4) {
+            if (pe.gu_code == kMX8) {   // dequant_mx8_row: E4M3 x UE8M0
+                ++n_mx8;
+                if (sgu[e] != 1.0f || sdn[e] != 1.0f) ++scale_bad;
+                const uint8_t* sc = body + (size_t) 2 * F * C;
+                for (int rr = 0; rr < 2 * F; ++rr) {
+                    const uint8_t* rowp = part[rr & 1] + (size_t) (rr >> 1) * (C / 32 * 36);
+                    for (int c = 0; c < C; ++c) {
+                        volatile float want = ref::e4m3(body[(size_t) rr * C + c]) * ref::ue8m0(sc[(size_t) rr * (C / 32) + c / 32]);
+                        expect_eq("mx8 gate_up", b + std::to_string(e), (size_t) rr * C + c, value(ty[rr & 1], rowp, c), want);
+                    }
+                }
+                const uint8_t* dw = body + pe.dn_off;
+                const uint8_t* dsc = dw + (size_t) C * F;
+                for (int rr = 0; rr < C; ++rr) {
+                    const uint8_t* rowp = part[2] + (size_t) rr * (F / 32 * 36);
+                    for (int c = 0; c < F; ++c) {
+                        volatile float want = ref::e4m3(dw[(size_t) rr * F + c]) * ref::ue8m0(dsc[(size_t) rr * (F / 32) + c / 32]);
+                        expect_eq("mx8 down", b + std::to_string(e), (size_t) rr * F + c, value(ty[2], rowp, c), want);
+                    }
+                }
+            } else if (pe.gu_code == kSF4) {
                 ++n_sf4;
                 float h[4];
                 std::memcpy(h, body, 16);
@@ -206,8 +226,8 @@ int main(int argc, char** argv) {
         }
     }
     const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-    std::printf("experts: %zu (%zu SF4, %zu S_K), %zu values checked, scale/type mismatches %zu, MACaQ mismatches %zu\n",
-                n_done, n_sf4, n_sk, g_checked - trunk_checked, scale_bad, macaq_bad);
+    std::printf("experts: %zu (%zu SF4, %zu S_K, %zu MX8), %zu values checked, scale/type mismatches %zu, MACaQ mismatches %zu\n",
+                n_done, n_sf4, n_sk, n_mx8, g_checked - trunk_checked, scale_bad, macaq_bad);
     const bool ok = g_bad == 0 && scale_bad == 0 && macaq_bad == 0;
     std::printf("%s: %zu values, %zu mismatches (%zu SF4 -0 codes read as +0) (%.0f s)\n", ok ? "PASS" : "FAIL", g_checked,
                 g_bad, g_negzero, secs);

@@ -7,6 +7,7 @@
 //               half makes rows of 1152 (Inkling's expert down) whole blocks.
 //   kQ8F        Q8_ROW re-laid: 32 int8 + their row's F32 scale (w = q * s).
 //   kBF16       BF16 (ggml's id) as blocks of 32.
+//   kMX8B       MXFP8 re-laid: a UE8M0 scale byte, 3 pad bytes, 32 F8_E4M3 weights (w = e4m3 x 2^(e - 127)).
 //   kMIX        an expert layer whose experts differ in codec: every role part of an expert starts with a MixHdr.
 #pragma once
 
@@ -23,12 +24,14 @@
 namespace strata_fmt {
 
 constexpr int kBF16 = 30, kNVFP4 = 40, kQ8F = 200, kSH2 = 202, kSH3 = 203, kSH4 = 204, kSH5 = 205, kSH6 = 206,
-              kMIX = 210;
+              kMX8B = 208, kMIX = 210;
 
 SF_HD bool is_sh(int t) { return t >= kSH2 && t <= kSH6; }
 SF_HD int sh_bits(int t) { return t - 200; }
-SF_HD int block_values(int t) { return is_sh(t) ? 128 : (t == kQ8F || t == kBF16) ? 32 : 0; }
-SF_HD size_t block_bytes(int t) { return is_sh(t) ? 4 + 16 * (size_t) sh_bits(t) : t == kQ8F ? 36 : t == kBF16 ? 64 : 0; }
+SF_HD int block_values(int t) { return is_sh(t) ? 128 : (t == kQ8F || t == kBF16 || t == kMX8B) ? 32 : 0; }
+SF_HD size_t block_bytes(int t) {
+    return is_sh(t) ? 4 + 16 * (size_t) sh_bits(t) : (t == kQ8F || t == kMX8B) ? 36 : t == kBF16 ? 64 : 0;
+}
 
 // a kMIX role part: this header, the rows (rb bytes each, blocks of `type`), then aux (the up part: the expert's MACaQ
 // scales s[F] as FP16 - the activation h[j] is divided by s[j] before the down product; aux_off 0: none)
@@ -107,6 +110,28 @@ SF_HD int sh_code(const uint8_t* b, int bits, int i) {
     return q;
 }
 
+// F8_E4M3FN as Strata decodes it (sk_codecs.cpp E4M3Table: 0x7F / 0xFF -> 0), exact
+SF_HD float e4m3(uint8_t c) {
+    const uint32_t e = (c >> 3) & 15u, m = c & 7u;
+    float v;
+    if ((c & 0x7F) == 0x7F) {
+        v = 0.0f;
+    } else if (e == 0) {
+        v = (float) m * 0.001953125f;   // m / 512
+    } else {
+        const uint32_t bits = ((e + 120u) << 23) | (m << 20);
+        std::memcpy(&v, &bits, 4);
+    }
+    return (c & 0x80) ? -v : v;
+}
+// UE8M0 as Strata decodes it (0 -> 2^-127, 255 -> 0)
+SF_HD float ue8m0(uint8_t e) {
+    const uint32_t bits = e == 0 ? 0x00400000u : e == 255 ? 0u : (uint32_t) e << 23;
+    float v;
+    std::memcpy(&v, &bits, 4);
+    return v;
+}
+
 // value v of a run of blocks of type t (one of this file's; not kMIX)
 SF_HD float value(int t, const uint8_t* blocks, size_t v) {
     if (is_sh(t)) {
@@ -120,6 +145,10 @@ SF_HD float value(int t, const uint8_t* blocks, size_t v) {
         float d;
         std::memcpy(&d, b, 4);
         return mul_rn((float) (int8_t) b[4 + (v & 31)], d);
+    }
+    if (t == kMX8B) {
+        const uint8_t* b = blocks + (v >> 5) * 36;
+        return mul_rn(e4m3(b[4 + (v & 31)]), ue8m0(b[0]));
     }
     if (t == kBF16) {
         const uint8_t* b = blocks + v * 2;
@@ -162,6 +191,15 @@ inline void sf4_row_to_nvfp4(const uint8_t* nib, const uint8_t* sc, int cols, ui
             for (int j = 0; j < 8; ++j) v[2 * j] = nib[g * 8 + j] & 15, v[2 * j + 1] = nib[g * 8 + j] >> 4;
             for (int j = 0; j < 8; ++j) o[4 + s * 8 + j] = (uint8_t) (v[j] | (v[j + 8] << 4));
         }
+    }
+}
+
+// one MX8 row (E4M3 weights [cols], then elsewhere UE8M0 scales [cols / 32]) -> kMX8 blocks
+inline void mx8_row_to_blocks(const uint8_t* w, const uint8_t* sc, int cols, uint8_t* out) {
+    for (int b = 0; b < cols / 32; ++b) {
+        uint8_t* o = out + (size_t) b * 36;
+        o[0] = sc[b], o[1] = o[2] = o[3] = 0;
+        std::memcpy(o + 4, w + b * 32, 32);
     }
 }
 

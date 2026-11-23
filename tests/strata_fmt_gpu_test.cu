@@ -179,7 +179,17 @@ int main(int argc, char** argv) {
             std::vector<float> code_scale_gu(2 * (size_t) F * C), code_scale_dn((size_t) C * F);
             double og = 1, od = 1;
             std::vector<double> inv_s(F, 1.0);
-            if (pe.gu_code == kSF4) {
+            if (pe.gu_code == kMX8) {
+                const uint8_t* sc = body + (size_t) 2 * F * C;
+                for (size_t r = 0; r < 2 * (size_t) F; ++r)
+                    for (int c = 0; c < C; ++c)
+                        code_scale_gu[r * C + c] = ref::e4m3(body[r * C + c]) * ref::ue8m0(sc[r * (C / 32) + c / 32]);
+                const uint8_t* dw = body + pe.dn_off;
+                const uint8_t* dsc = dw + (size_t) C * F;
+                for (size_t r = 0; r < (size_t) C; ++r)
+                    for (int c = 0; c < F; ++c)
+                        code_scale_dn[r * F + c] = ref::e4m3(dw[r * F + c]) * ref::ue8m0(dsc[r * (F / 32) + c / 32]);
+            } else if (pe.gu_code == kSF4) {
                 float h4[4];
                 std::memcpy(h4, body, 16);
                 og = h4[0] / h4[1], od = h4[2] / h4[3];
@@ -210,7 +220,7 @@ int main(int argc, char** argv) {
                     wg[r * C + c] = code_scale_gu[(2 * r) * C + c];
                     wu[r * C + c] = code_scale_gu[(2 * r + 1) * C + c];
                 }
-            const int tg = lt == kMIX ? kMIX : kNVFP4;
+            const int tg = lt;
             check_decode("expert gate", tg, ds, (size_t) F * C, wg.data());
             check_decode("expert up", tg, ds + egu / 2, (size_t) F * C, wu.data());
             check_decode("expert down", tg, ds + egu, (size_t) C * F, code_scale_dn.data());

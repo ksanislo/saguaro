@@ -43,6 +43,7 @@ strata::MetaValue mv_arr(const std::vector<strata::MetaValue>& items, strata::Me
 
 size_t row_bytes(int code, int K) {
     if (code == kSF4) return (size_t) K / 64 * 36;
+    if (code == kMX8) return (size_t) K / 32 * 36;
     if (code >= kS2_K && code <= kS6_K) return (size_t) K / 128 * (4 + 16 * (size_t) code);
     return 0;
 }
@@ -265,16 +266,18 @@ bool InklingView::build(const std::string& path, std::string& err) {
         for (int l = 0; l < n_layer; ++l) {
             ExpLayer& L = layers_[l];
             L.dir.assign(E_, -1);
-            bool all_sf4 = true;
+            bool all_sf4 = true, all_mx8 = true;
             for (int r = 0; r < E_; ++r) {
                 const PackExpert& e = dir[(size_t) l * E_ + r];
                 if (e.expert_id >= E_ || L.dir[e.expert_id] >= 0) return err = "expert directory: bad expert id", false;
                 L.dir[e.expert_id] = l * E_ + r;
                 for (int code : {(int) e.gu_code, (int) e.dn_code})
-                    if (code != kSF4 && !(code >= kS2_K && code <= kS6_K))
+                    if (code != kSF4 && code != kMX8 && !(code >= kS2_K && code <= kS6_K))
                         return err = "layer " + std::to_string(l) + ": " + code_name(code) + " experts are not read yet", false;
-                if (e.gu_code == kSF4 && e.dn_code != kSF4) return err = "an SF4 + S_K expert: not read", false;
+                if ((e.gu_code == kSF4 || e.gu_code == kMX8) != (e.dn_code == kSF4 || e.dn_code == kMX8))
+                    return err = "an expert half SF4 / MX8, half S_K: not read", false;
                 all_sf4 = all_sf4 && e.gu_code == kSF4 && e.dn_code == kSF4;
+                all_mx8 = all_mx8 && e.gu_code == kMX8 && e.dn_code == kMX8;
                 L.rb_gu = std::max(L.rb_gu, row_bytes(e.gu_code, C_));
                 L.rb_dn = std::max(L.rb_dn, row_bytes(e.dn_code, F_));
             }
@@ -282,6 +285,10 @@ bool InklingView::build(const std::string& path, std::string& err) {
                 L.type = kNVFP4;
                 L.gu_bytes = 2 * (size_t) F_ * row_bytes(kSF4, C_);
                 L.dn_bytes = (size_t) C_ * row_bytes(kSF4, F_);
+            } else if (all_mx8) {
+                L.type = kMX8B;
+                L.gu_bytes = 2 * (size_t) F_ * row_bytes(kMX8, C_);
+                L.dn_bytes = (size_t) C_ * row_bytes(kMX8, F_);
             } else {
                 L.type = kMIX;
                 L.part_gu = align16(sizeof(MixHdr) + (size_t) F_ * L.rb_gu + 2 * (size_t) F_);
@@ -345,7 +352,7 @@ bool InklingView::source(const std::string& name, std::string& pack_name, int& t
 
 const uint16_t* InklingView::macaq(int l, int e) const {
     const PackExpert& pe = pack_.experts()[layers_[l].dir[e]];
-    return pe.dn_code == kSF4 ? nullptr : (const uint16_t*) pack_.body(pe);
+    return (pe.dn_code >= kS2_K && pe.dn_code <= kS6_K) ? (const uint16_t*) pack_.body(pe) : nullptr;
 }
 
 // expert e's role part (0 gate_up, 1 down) as the engine holds it
@@ -363,9 +370,9 @@ void InklingView::fill_expert(int l, int role, int e, uint8_t* dst) const {
         if (L.type == kMIX) {
             for (int h = 0; h < 2; ++h) {
                 MixHdr hd{};
-                hd.type = (uint8_t) (code == kSF4 ? kNVFP4 : 200 + code);
+                hd.type = (uint8_t) (code == kSF4 ? kNVFP4 : code == kMX8 ? kMX8B : 200 + code);
                 hd.rb = (uint32_t) rb;
-                if (h == 1 && pe.dn_code != kSF4) {
+                if (h == 1 && pe.dn_code >= kS2_K && pe.dn_code <= kS6_K) {
                     hd.aux_off = (uint32_t) (sizeof(MixHdr) + (size_t) F * L.rb_gu);
                     std::memcpy(dst + L.part_gu + hd.aux_off, body, 2 * (size_t) F);   // MACaQ s[F] FP16
                 }
@@ -380,6 +387,10 @@ void InklingView::fill_expert(int l, int role, int e, uint8_t* dst) const {
             const uint8_t* sc = nib + (size_t) 2 * F * (C / 2);
             for (int r = 0; r < 2 * F; ++r)
                 sf4_row_to_nvfp4(nib + (size_t) r * (C / 2), sc + (size_t) r * (C / 16), C, rows[r & 1] + (size_t) (r >> 1) * rb);
+        } else if (code == kMX8) {
+            const uint8_t* sc = body + (size_t) 2 * F * C;
+            for (int r = 0; r < 2 * F; ++r)
+                mx8_row_to_blocks(body + (size_t) r * C, sc + (size_t) r * (C / 32), C, rows[r & 1] + (size_t) (r >> 1) * rb);
         } else {
             const uint8_t* sk = body + 2 * (size_t) F;
             const size_t srow = (size_t) C / 256 * sk_sb_bytes(code);
@@ -392,7 +403,7 @@ void InklingView::fill_expert(int l, int role, int e, uint8_t* dst) const {
         uint8_t* rows = dst;
         if (L.type == kMIX) {
             MixHdr hd{};
-            hd.type = (uint8_t) (code == kSF4 ? kNVFP4 : 200 + code);
+            hd.type = (uint8_t) (code == kSF4 ? kNVFP4 : code == kMX8 ? kMX8B : 200 + code);
             hd.rb = (uint32_t) rb;
             std::memcpy(dst, &hd, sizeof hd);
             rows = dst + sizeof(MixHdr);
@@ -401,6 +412,9 @@ void InklingView::fill_expert(int l, int role, int e, uint8_t* dst) const {
         if (code == kSF4) {
             const uint8_t* sc = src + (size_t) C * (F / 2);
             for (int r = 0; r < C; ++r) sf4_row_to_nvfp4(src + (size_t) r * (F / 2), sc + (size_t) r * (F / 16), F, rows + (size_t) r * rb);
+        } else if (code == kMX8) {
+            const uint8_t* sc = src + (size_t) C * F;
+            for (int r = 0; r < C; ++r) mx8_row_to_blocks(src + (size_t) r * F, sc + (size_t) r * (F / 32), F, rows + (size_t) r * rb);
         } else {
             sk_run_to_sh(src, code, (size_t) C * F, rows);   // (Strata's paired rows = the flat [C][F] run)
         }
