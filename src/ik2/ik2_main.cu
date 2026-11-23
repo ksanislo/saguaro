@@ -7008,7 +7008,7 @@ int main(int argc, char** argv) {
     if (W.T_sup > 0 || dual()) W.xq16_sup = dalloc<uint16_t>(T_buf * C);
     if (!getenv("SAGUARO_IK2_RELB") || std::atoi(getenv("SAGUARO_IK2_RELB"))) {
         W.relb_ext = std::max(c.extent, c.extent_swa);
-        const int rlim = getenv("SAGUARO_IK2_RELB_ROWS") ? std::max(32, std::atoi(getenv("SAGUARO_IK2_RELB_ROWS"))) : 64;
+        const int rlim = getenv("SAGUARO_IK2_RELB_ROWS") ? std::max(32, std::atoi(getenv("SAGUARO_IK2_RELB_ROWS"))) : 256;   // (64: prompt reads -18 % on an RX 9070 XT)
         W.relb_rows = compact_work ? std::min<int>(rlim, (int) Tm) : Work::kRelbRows;
         W.relb = dalloc<float>((size_t) W.relb_rows * c.H * W.relb_ext);
     }
