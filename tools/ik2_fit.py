@@ -338,6 +338,17 @@ def speeds(lay: dict) -> str:
     return f"about {dec} tok/s writing, {read} tok/s reading a prompt (measured on {len(lay['gpus'])}x Tesla T4)"
 
 
+def chunk_max(vram_gb: float, ctx: int, kv: str = DEFAULT_KV, hip: bool = False,
+              experts_gib: float = EXPERTS_GIB) -> int | None:
+    """The largest --chunk this card runs at `ctx` without a long prompt running it out of GPU memory, or None (no
+    cap: the offload path plans its tier on what the chunk leaves).  Every expert resident on an AMD card under
+    AMD_RESERVE_UNDER_GB (1 GiB kept beside them): 1024 - on an RX 9070 XT the one-T4 quant at --chunk 2048 kept
+    0.19 GiB free and a 10K prompt ran out of memory, at 1024 a 27K prompt read (2026-11-22)."""
+    if hip and vram_gb and float(vram_gb) < AMD_RESERVE_UNDER_GB and plan(vram_gb, ctx, kv, True, experts_gib)["resident"]:
+        return 1024
+    return None
+
+
 def amd_layout(card: dict, experts_gib: float = EXPERTS_GIB) -> dict:
     """One AMD GPU (HIP, Linux; card: its "vram_gb" = the memory it gives the engine): plan()'s - every expert in its
     memory where the file fits, else the offload path (a tier of them, the rest in pinned RAM), 32K and the F16 cache
@@ -351,8 +362,9 @@ def amd_layout(card: dict, experts_gib: float = EXPERTS_GIB) -> dict:
     env = {"SAGUARO_IK2_RESERVE_MB": "1024"} if small else {}
     res = p["resident"]
     xt = str(card.get("arch") or "").startswith("gfx1201") and 15.0 <= vram < 17.0   # (the RX 9070 XT measured)
+    ctx = recommended_context(vram, DEFAULT_KV, True, ex) if res else CONTEXTS[0]
     return {"gpus": [card], "args": ["--gpus", "1", "--chunk", "1024" if res else "2048", "--threads", str(THREADS)],
-            "context": recommended_context(vram, DEFAULT_KV, True, ex) if res else CONTEXTS[0],
+            "context": ctx, "chunk_max": chunk_max(vram, ctx, DEFAULT_KV, True, ex),
             "env": env, "resident": res, "path": "resident" if res else "offload", "amd": True,
             "measured": xt and (abs(ex - ONE_T4_EXPERTS_GIB) < 0.1 if res else abs(ex - EXPERTS_GIB) < 0.1),
             "said": "one AMD GPU: every expert in its memory" if res else

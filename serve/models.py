@@ -104,6 +104,13 @@ def ik2_experts_gib(cfg: dict) -> float:
     return _ik2_ex[path]
 
 
+def ik2_chunk_max(cfg: dict, args: list, kv: str) -> int | None:
+    """The largest Prompt chunk an Inkling 2 config's card runs at its context (ik2_fit.chunk_max), or None."""
+    card = ik2_card(cfg)
+    return IK2F.chunk_max(float(card.get("vram_gb") or 0), _int(flag(args, "--max-context"), IK2F.CONTEXTS[0]), kv,
+                          cfg.get("backend") == "hip", ik2_experts_gib(cfg))
+
+
 # ------------------------------------------------------------------ the engine's arguments
 def flag(args: list, name: str, default=None):
     """The value after `name` in the arguments, else `default`."""
@@ -574,6 +581,10 @@ def apply(cfg: dict, settings: dict) -> dict:
             v = _num(s, key, lo, hi, what)
             args = set_flag(args, name, v) if v is not None else drop_flag(args, name)
         kv = str(s.get("kv") or "f16")
+        cap = ik2_chunk_max(cfg, args, kv)             # (the setup's own fit: tools/ik2_fit.py)
+        if cap is not None and _int(flag(args, "--chunk"), 0) > cap:
+            raise ValueError(f"Prompt chunk: at most {cap} here - every expert stays on this card with little room "
+                             "left, and a larger chunk runs it out of GPU memory on a long prompt")
         if "kv" not in settings and "env" in settings:  # (only the env row sent: its value is the choice)
             kv = "fp8" if clean.get("SAGUARO_IK2_KV") in ("fp8", "e4m3") else "f16"
         if kv not in IK2_KV:

@@ -23,7 +23,7 @@ Back to [the models](MODELS.md) and the [README](../README.md). How the engine w
 | One 8-16 GB card (one Tesla T4) | `--gpus 1 --chunk 2048`, the seed expert profile (`SAGUARO_IK2_WARM`) | 32K | the offload path: the most-used in VRAM (2,303 of 3,072 on a T4), the rest in pinned RAM, fetched by the GPU |
 | Two 16 GB cards (two Tesla T4s) | `--gpus 2 --chunk 8192` | 131K | the split: all in VRAM across the two cards |
 | One card of 24 GB or more | `--gpus 1 --chunk 2048` | up to 256K (FP16 cache: 128K) | all in VRAM; drafting on RTX 30 / A100 and newer |
-| One 16 GB AMD RDNA 3 / 4 GPU (an RX 9070 XT) | `--gpus 1 --chunk 2048`, the seed profile, `SAGUARO_IK2_RESERVE_MB=1024` | 32K | the offload path as on NVIDIA (the one-T4 quant: all in VRAM, `--chunk 1024`; a setup run again for another quant writes that quant's `--chunk`) |
+| One 16 GB AMD RDNA 3 / 4 GPU (an RX 9070 XT) | `--gpus 1 --chunk 2048`, the seed profile, `SAGUARO_IK2_RESERVE_MB=1024` | 32K | the offload path as on NVIDIA (the one-T4 quant: all in VRAM, `--chunk 1024`; each GGUF has its own config; the Models page refuses a Prompt chunk past 1024 there) |
 | One AMD GPU of 24 GB or more | `--gpus 1 --chunk 1024` | up to 128K | all in VRAM |
 
 The two T4 rows and the RX 9070 XT row were measured here. The others are upstream Project Maya's layouts (measured

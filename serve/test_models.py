@@ -877,6 +877,28 @@ class Inkling2(unittest.TestCase):
         d = M.describe(self.p, None)
         self.assertEqual((d["family"], d["settings"]["kv"], d["command"]["exe"]), ("ik2", "fp8", "saguaro-ik2"))
 
+    def test_prompt_chunk_is_checked_against_the_fit(self):
+        """The Models page checks Prompt chunk as the setup does (tools/ik2_fit.py chunk_max): the one-T4 quant resident
+        on a 16 GB AMD card takes at most 1024 (2048 ran it out of memory on a 10K prompt); UD-Q4_K_XL's offload
+        path there, or a card the page cannot read, has no cap."""
+        cfg = {"exe": "/s/build-hip/saguaro-ik2", "backend": "hip", "gpu": [0],
+               "args": ["--model", "/m/Inkling-2-Mini-T4-NVFP4-IQ3_XXS.gguf", "--max-context", "32768", "--gpus", "1",
+                        "--chunk", "1024", "--threads", "8", "--drafting", "auto"],
+               "installer": {"family": "ik2", "ik2_file": "Inkling-2-Mini-T4-NVFP4-IQ3_XXS.gguf"}}
+        xt = [{"index": 0, "arch": "gfx1201", "vram_gb": 15.9}]
+        M._ik2_ex["/m/Inkling-2-Mini-T4-NVFP4-IQ3_XXS.gguf"] = 11.45
+        self.addCleanup(M._ik2_ex.pop, "/m/Inkling-2-Mini-T4-NVFP4-IQ3_XXS.gguf", None)
+        with mock.patch.object(M, "machine_gpus", lambda backend: xt):
+            self.assertEqual(M.flag(M.apply(cfg, {"prefill_chunk": 512})["args"], "--chunk"), "512")
+            with self.assertRaises(ValueError) as e:
+                M.apply(cfg, {"prefill_chunk": 2048})
+            self.assertIn("at most 1024", str(e.exception))
+            ud = dict(cfg, args=[a.replace("T4-NVFP4-IQ3_XXS", "UD-Q4_K_XL").replace("auto", "off")
+                                 for a in cfg["args"]], installer={})
+            self.assertEqual(M.flag(M.apply(ud, {"prefill_chunk": 2048})["args"], "--chunk"), "2048")
+        with mock.patch.object(M, "machine_gpus", lambda backend: []):
+            self.assertEqual(M.flag(M.apply(cfg, {"prefill_chunk": 2048})["args"], "--chunk"), "2048")
+
     def test_turbo_is_refused(self):
         self.assertEqual(M.turbo_patch(self.cfg), {})
         self.assertEqual(M.turbo_info(self.cfg), {"on": False, "family": "ik2", "plan": {}, "env": {}, "supported": False})

@@ -55,8 +55,10 @@ It first asks which model to set up:
   in RAM). The setup downloads the GGUF and the vision tower (18.3 GB, pinned and sha256-checked,
   `tools/ik2/download.json`), or takes the files you have (`--model-dir`, also a quant of your own such as the one-T4
   quant), writes the tokenizer folder with the model's own chat template and the config for the layout (one 16 GB card:
-  32K context; two: 131K); a setup run again works the layout's flags (`--chunk`) out again for the file and cards
-  chosen, keeping only those you changed. It is the model the setup recommends on a PC with one or two NVIDIA cards under
+  32K context; two: 131K). Each GGUF gets its own config (`maya-inkling-2-mini.json`, a file of your own
+  `maya-inkling-2-mini-<its name>.json`), so the Models page switches between them each with its own layout; a setup run
+  again works out what the setup chose (`--chunk`, drafting) for the file and cards, and keeps what you set yourself (on
+  the Models page or by hand) - a Prompt chunk that does not fit the card is said, and the fitting one offered. It is the model the setup recommends on a PC with one or two NVIDIA cards under
   24 GB or one 16-23 GB AMD RDNA 3 / 4 GPU. Speeds: [INKLING2-MINI.md](INKLING2-MINI.md).
 - **MiniMax-M3.1-Flash** (experimental; `--model MiniMax-M3.1-Flash`) - [Mia-AiLab's EXL3 quant at 3.5 bits](https://huggingface.co/Mia-AiLab/MiniMax-M3.1-Flash-EXL3-EAQ-v1-3.5-bpw)
   (197 GB with MiniMax's DSpark drafter; every file pinned and checked, `tools/mm3/download.json`) on its own engine

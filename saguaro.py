@@ -7719,45 +7719,89 @@ def ik2_draft_forget() -> None:
         warn(f"{path} could not be removed ({e}): delete it by hand to measure the drafting again")
 
 
-IK2_LAYOUT_FLAGS = ("--chunk", "--threads")           # (the layout's flags a user may change: ik2_user_flags)
+IK2_USER_FLAGS = ("--chunk", "--threads", "--drafting", "--parallel")   # (what the Models page or a hand may set)
+
+
+def ik2_config_path(gguf: Path) -> Path:
+    """Each Inkling 2 Mini file its own config, so the Models page switches between them each with its own layout:
+    maya-inkling-2-mini.json for unsloth's UD-Q4_K_XL, maya-inkling-2-mini-<the rest of its name>.json for another
+    (our one-T4 quant: maya-inkling-2-mini-t4-nvfp4-iq3_xxs.json)."""
+    stem = Q.config_stem("ik2", Q.IK2_QUANT)
+    if gguf.name == ik2_entry()["gguf"]:
+        return ROOT / f"{stem}.json"
+    rest = re.sub(r"[^a-z0-9_.]+", "-", re.sub(r"^inkling-2-mini-?", "", gguf.stem.lower())).strip("-.") or "own"
+    return ROOT / f"{stem}-{rest}.json"
 
 
 def ik2_user_flags(old: dict) -> tuple:
-    """The layout flags the config before has as the user set them (by hand or on the Models page): those whose value
-    differs from what the setup wrote there (installer.layout_args, else the Models page's as_set_up).  Every other
-    layout flag follows the layout worked out now - a --chunk of another quant or card is not carried over.  A
-    config that says neither (an older setup's): none - all are worked out again, and the setup says so."""
+    """The flags the config before has as the user set them (by hand or on the Models page): those the setup did not
+    write with that value (installer.setup_args, else the Models page's as_set_up) - --parallel always (the setup
+    writes none).  The others follow what is worked out now.  A config that records neither (an older setup's): the
+    layout's are worked out again, said."""
     args, inst = old.get("args") or [], old.get("installer") or {}
-    wrote = inst.get("layout_args")
+    wrote = inst.get("setup_args") or inst.get("layout_args")
     if wrote is None and isinstance(inst.get("as_set_up"), dict):
-        s = inst["as_set_up"]
-        wrote = [x for f, k in (("--chunk", "prefill_chunk"), ("--threads", "cpu_threads")) if s.get(k) is not None
-                 for x in (f, str(s[k]))]
+        st = inst["as_set_up"]
+        wrote = [x for f, k in (("--chunk", "prefill_chunk"), ("--threads", "cpu_threads")) if st.get(k) is not None
+                 for x in (f, str(st[k]))] + ["--drafting", flag_value(args, "--drafting") or "auto"]
     if wrote is None:
-        if any(f in args[:-1] for f in IK2_LAYOUT_FLAGS):
-            ok("the layout's flags (" + ", ".join(IK2_LAYOUT_FLAGS) + ") are worked out again for these cards and this "
-               "file - the config before does not say which of them you set yourself")
-        return ()
-    return tuple(f for f in IK2_LAYOUT_FLAGS if f in args[:-1] and str(flag_value(args, f)) != str(flag_value(wrote, f)))
+        if any(f in args[:-1] for f in ("--chunk", "--threads")):
+            ok("the layout's flags (--chunk, --threads) are worked out again for these cards and this file - the "
+               "config before does not say which of them you set yourself")
+        wrote = [x for f in ("--chunk", "--threads", "--drafting") if f in args[:-1] for x in (f, flag_value(args, f))]
+    return tuple(f for f in IK2_USER_FLAGS if f in args[:-1] and str(flag_value(args, f)) != str(flag_value(wrote, f)))
+
+
+def ik2_fit_user_flags(a, args: list, lay: dict, ctx: int) -> list:
+    """The user's kept flags against the layout worked out now (tools/ik2_fit.py): a --chunk past its chunk_max (a
+    long prompt would run the card out of GPU memory) - the fitting one offered (taken with --yes); --parallel where
+    one GPU does not hold every expert - dropped.  `args` is changed in place; what was said is returned."""
+    said = []
+    cap = lay.get("chunk_max")
+    v = flag_value(args, "--chunk")
+    if cap and v is not None and int(v) > cap:
+        warn(f"your --chunk {v} does not fit this layout at {context_label(ctx)}: every expert stays on the card with "
+             f"little room left, and a long prompt would run it out of GPU memory - --chunk {cap} fits")
+        pick = choose("Prompt chunk?", [], [(f"--chunk {cap}", "fits this card", None),
+                                            (f"keep --chunk {v}", "a long prompt may fail", None)], 0, a.yes)
+        if pick == 0:
+            args[args.index("--chunk") + 1] = str(cap)
+            said.append(f"--chunk {cap} (was {v})")
+    p = flag_value(args, "--parallel")
+    if p is not None and int(p) > 1 and not (lay.get("resident") and len(lay["gpus"]) == 1):
+        i = args.index("--parallel")
+        del args[i:i + 2]
+        warn(f"--parallel {p} dropped: answers at once run only where one GPU holds every expert, not in this layout")
+        said.append("--parallel dropped")
+    return said
 
 
 def write_config_ik2(a, pc: dict, meta: dict, gguf: Path, tok: Path, ctx: int, models: Path, d: Path, lay: dict,
-                     vision: dict | None = None, drafter: Path | None = None) -> Path:
-    """maya-inkling-2-mini.json and its start script: the layout's flags for one card or two (ik2_fit.layout; AMD:
-    ik2_fit.amd_layout), drafting (--drafting auto by default; off where it does not run).  A setup again keeps the
-    config before's env, where the server listens and its key; the flags follow the cards chosen now.  saguaro-ik2
-    stops at a flag it does not know: only its own are written.  The layout's flags (--chunk ...) follow the layout
-    worked out now, except those the user changed (ik2_user_flags)."""
+                     vision: dict | None = None, drafter: Path | None = None, prev: dict | None = None) -> Path:
+    """maya-inkling-2-mini[-<file>].json (each file its own: ik2_config_path) and its start script: the layout's flags
+    for one card or two (ik2_fit.layout; AMD: ik2_fit.amd_layout), drafting (--drafting auto by default; off where it
+    does not run).  A setup again keeps the config before's env, where the server listens and its key (another
+    Inkling config's where this file has none yet); of the flags, only those the user set on the same file and cards
+    (ik2_user_flags), checked against the layout (ik2_fit_user_flags); the setup's own choices are recorded
+    (installer.setup_args).  saguaro-ik2 stops at a flag it does not know: only its own are written."""
     step(8, "the configuration and the start script")
     port = a.port or 8080
-    cfg_path = ROOT / f"{Q.config_stem('ik2', Q.IK2_QUANT)}.json"
+    cfg_path = ik2_config_path(gguf)
     old = read_json(cfg_path)
+    base = old or (prev if config_family(prev or {}) == "ik2" else {}) or {}
     how = ik2_drafting(a)
     args = ["--model", str(gguf), "--max-context", str(ctx)] + list(lay["args"]) + \
         (["--draft", str(drafter)] if drafter and how != "off" else []) + ["--drafting", how]
-    same = [int(i) for i in old.get("gpu") or []] == [int(g["index"]) for g in pc["gpus"]]
-    kept = keep_args(old.get("args") or [], args, tuple(f for f in ik2_user_flags(old) if same or f != "--chunk"))
-    inst = {"family": "ik2", "quant": Q.OTHERS[("ik2", Q.IK2_QUANT)], "ik2_quant": Q.IK2_QUANT, "drafting": how}
+    setup_args = list(lay["args"]) + ["--drafting", how]
+    same = [int(i) for i in old.get("gpu") or []] == [int(g["index"]) for g in pc["gpus"]] and \
+        flag_value(old.get("args") or [], "--model") == str(gguf)
+    user = tuple(f for f in ik2_user_flags(old) if f != "--drafting" or getattr(a, "drafting", None) not in ("on", "off")) \
+        if same else ()
+    kept = keep_args(old.get("args") or [], args, user)
+    ik2_fit_user_flags(a, args, lay, ctx)
+    old = base
+    inst = {"family": "ik2", "quant": Q.OTHERS[("ik2", Q.IK2_QUANT)], "ik2_quant": Q.IK2_QUANT,
+            "drafting": flag_value(args, "--drafting") or how}
     if gguf.name != ik2_entry()["gguf"]:              # (a GGUF of your own: its name, for the page and a setup again)
         inst["ik2_file"] = gguf.name
     sampling, effort = Q.model_defaults({"installer": inst})
@@ -7789,7 +7833,7 @@ def write_config_ik2(a, pc: dict, meta: dict, gguf: Path, tok: Path, ctx: int, m
         ok("kept from the config before: " + ", ".join(kept))
     cfg["log"] = str(cfg_path.with_suffix(".log"))
     cfg["installer"] = {**inst, "models_dir": str(models), "model_dir": str(d), "cards": len(pc["gpus"]),
-                        "measured": bool(lay.get("measured")), "layout_args": list(lay["args"]),
+                        "measured": bool(lay.get("measured")), "setup_args": setup_args,
                         "written": time.strftime("%Y-%m-%d %H:%M")}
     cfg_path.write_text(json.dumps(cfg, indent=1), encoding="utf-8")
     ok(f"config: {cfg_path}")
@@ -7882,7 +7926,7 @@ def set_up_ik2(a, prev: dict) -> Path | None:
         drafter = ik2_drafter_step(a, d, vram, ctx, kv, ex, amd)
     tok = ik2_tokenizer_step(a, d, gguf)               # 6
     vision = ik2_vision_step(a, pc, meta, llama, d)    # 7
-    return write_config_ik2(a, pc, meta, gguf, tok, ctx, models, d, lay, vision, drafter)   # 8
+    return write_config_ik2(a, pc, meta, gguf, tok, ctx, models, d, lay, vision, drafter, prev)   # 8
 
 
 def set_up_and_serve(a, prev: dict) -> tuple | None:
