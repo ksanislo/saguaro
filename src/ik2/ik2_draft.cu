@@ -1065,6 +1065,26 @@ void propose(Drafter* d, int anchor, const float* anchor_h, int P, const uint16_
 }
 
 size_t bytes(const Drafter* d) { return d->vram; }
+size_t ring_bytes(const Drafter* d) {
+    size_t b = 0;
+    for (const auto& l : d->L)
+        if (l.kc) b += (size_t) l.cap * d->KV * 128 * 4 * 2;
+    return b;
+}
+void rings_copy(Drafter* d, uint8_t* host, bool save) {
+    size_t o = 0;
+    for (auto& l : d->L) {
+        if (!l.kc) continue;
+        const size_t n = (size_t) l.cap * d->KV * 128 * 4;
+        float* dv[2] = {l.kc, l.vc};
+        for (float* p : dv) {
+            cu(cudaMemcpyAsync(save ? (void*) (host + o) : (void*) p, save ? (const void*) p : (const void*) (host + o), n,
+                               save ? cudaMemcpyDeviceToHost : cudaMemcpyHostToDevice, d->s), "rings_copy");
+            o += n;
+        }
+    }
+    cu(cudaStreamSynchronize(d->s), "rings_copy");
+}
 bool matrices_q8(const Drafter* d) { return d->q8; }
 bool context_fp8(const Drafter* d) { return d->kv8; }
 void destroy(Drafter* d) {

@@ -69,5 +69,9 @@ void set_head_q8(Drafter* d, const int8_t* q8, const uint16_t* q8d);
 void propose_times(double* submit_ms, double* wait_ms);
 /// VRAM it holds, bytes.
 size_t bytes(const Drafter* d);
+/// The windowed layers' context rings (F32 K and V): their bytes, and a copy of them to (save) or from host memory -
+/// a conversation snapshot's, so that going back to it gives the drafter its context as it was there.
+size_t ring_bytes(const Drafter* d);
+void rings_copy(Drafter* d, uint8_t* host, bool save);
 
 }  // namespace ik2::draft

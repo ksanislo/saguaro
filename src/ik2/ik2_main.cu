@@ -8859,7 +8859,11 @@ int main(int argc, char** argv) {
             std::vector<float> last;   // the logits after its last token (a snapshot at a prompt's end: the same prompt again)
             std::vector<std::vector<uint8_t>> kv_k, kv_v;   // a windowed visit's last `window` rows
             std::vector<std::vector<uint8_t>> kv_ks, kv_vs; // (SAGUARO_IK2_KV=q4: their scales)
+            std::vector<uint8_t> dr;   // (SAGUARO_IK2_DRAFT_SNAP_RINGS: the drafter's windowed context rings)
         };
+        // SAGUARO_IK2_DRAFT_SNAP_RINGS=1 (with DRAFT_SNAP): a snapshot keeps the drafter's rings too - a turn read from a
+        // snapshot then drafts from the context a whole read would have given it (not the dropped continuation's rows)
+        const bool snap_rings = drafter && getenv("SAGUARO_IK2_DRAFT_SNAP_RINGS") && std::atoi(getenv("SAGUARO_IK2_DRAFT_SNAP_RINGS"));
         const size_t kv_elem_b = g_kv_fp8 ? 1 : 2;
         const size_t q4_q_row = (size_t) c.KV * 64, q4_s_row = (size_t) c.KV * 8;
         const size_t row_b = g_kv_q4 ? q4_q_row : (size_t) KD * kv_elem_b;
@@ -8926,6 +8930,10 @@ int main(int argc, char** argv) {
                 }
             }
             for (auto& D : g_dev) CU(cudaStreamSynchronize(D.s));
+            if (snap_rings) {
+                if (save) sn.dr.resize(ik2::draft::ring_bytes(drafter));
+                if (sn.dr.size() == ik2::draft::ring_bytes(drafter)) ik2::draft::rings_copy(drafter, sn.dr.data(), save);
+            }
         };
         // ---- conversations kept beside the one in the cache.  The model holds one conversation's state: the K / V
         // rows of the layers without a window (a row a position), and what a snapshot holds.  A conversation set
