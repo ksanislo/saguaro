@@ -4808,6 +4808,8 @@ struct SpecCtl {
     void took_plain(double t) {
         if (fresh_plain > 0) c_plain = fresh_plain == kFreshPlain ? t : std::min(c_plain, t), --fresh_plain;
         else c_plain = 0.9 * c_plain + 0.1 * t;
+        ++plain, ++plain_run;
+    }
     // the plain tokens before a look: `probe`, and where a look's window is measured to cost more than the tokens it
     // gives would in plain, as many as keep the looks to a fiftieth of the time (the gate, below)
     int look_every(int bmax) const {
@@ -4816,10 +4818,17 @@ struct SpecCtl {
         const double over = c[pw] - expect(pw) * c_plain;
         return (int) std::clamp(over / (0.02 * c_plain), (double) probe, 4096.0);
     }
-        ++plain, ++plain_run;
-    }
     void took_spec(int B, int acc, double t) {
         took_width(B, t);
+        measured(B, acc, t);
+        S = decay * S + acc, F = decay * F + (acc < B - 1 ? 1 : 0);
+        for (int j = 0; j + 1 < B && j <= acc; ++j)   // (draft j was reached: the j before it were kept)
+            pn[j] = pos_decay * pn[j] + 1.0, pa[j] = pos_decay * pa[j] + (j < acc ? 1.0 : 0.0);
+        ++steps, drafted += B - 1, accepted += acc, ++hist[acc];
+        plain_run = 0;
+        if (backoff) gap = looked && !pays(kBlockMax) ? std::min(128, gap * 2) : probe;
+        looked = false;
+    }
     // Drafting by its measured speed where the answer is (IK2_DRAFT_GATE=0: without): deep in a long context a
     // window can cost more than the plain tokens it gives (a Radeon 250,000 tokens deep: a window of 2 the time of 4
     // plain tokens), which the looks above then pay again every `probe` tokens.  So the answer's rounds are timed
@@ -4859,15 +4868,6 @@ struct SpecCtl {
             lost = true, ++pauses;
             look = (int) std::clamp(over / (0.02 * c_plain), (double) (wide ? std::max(probe, kPause) : probe), 4096.0);
         }
-    }
-        S = decay * S + acc, F = decay * F + (acc < B - 1 ? 1 : 0);
-        for (int j = 0; j + 1 < B && j <= acc; ++j)   // (draft j was reached: the j before it were kept)
-        measured(B, acc, t);
-            pn[j] = pos_decay * pn[j] + 1.0, pa[j] = pos_decay * pa[j] + (j < acc ? 1.0 : 0.0);
-        ++steps, drafted += B - 1, accepted += acc, ++hist[acc];
-        plain_run = 0;
-        if (backoff) gap = looked && !pays(kBlockMax) ? std::min(128, gap * 2) : probe;
-        looked = false;
     }
     // The prompt lookup's drafts (the tokens after the latest earlier copy of the text's end, k of them): their own
     // acceptance (copied text is kept long or not at all), the same window costs.  pick: a step's source and width
