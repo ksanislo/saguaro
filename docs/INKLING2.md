@@ -20,7 +20,7 @@ yet):
 | MoE | 384 experts, 8 a token, no shared expert, width 2,304; sigmoid router with a selection bias, the weights normalized x 8; SwiGLU with softcaps (gate 4, up 25) |
 | Head | logits softcapped at 30, the first 200,058 of 201,024 rows real |
 | Weights shipped | experts NVFP4 (layers 0-39: e2m1 x e4m3 per 16 x amax / 2688 per expert) and MXFP8 (40-47); the rest BF16 |
-| Extras | a DSpark-style drafter (`mtp.safetensors`, 5 layers: drafting, set up by default); a vision tower |
+| Extras | a DSpark-style drafter (`mtp.safetensors`, or a GGUF of it; 5 layers: drafting, set up by default); a vision tower |
 
 ## 2. The file: llama.cpp's `inkling2` GGUF
 
@@ -304,7 +304,7 @@ slope deep in a context is the attention reading the cache: about 16 KB a token 
 (87% of its 900 GB/s; every expert in VRAM at 600K: 86.0 / 80.1 / 58.8 / 44.2 tok/s at 2K / 32K / 256K / 512K).
 KV streaming (`--kv-streaming auto`, the default; `on` / `off`, `--kv-resident N`) is the last resort, where the
 cache alone does not fit beside the dense weights and half a GiB of tier (an 8 / 12 GB card past 256K, a 16 GB one
-at 1M), and on AMD (no offload path yet: every expert stays): the cache of all but N (at least 1) of the eight full
+at 1M), and on an AMD APU (its memory is the RAM: every expert stays): the cache of all but N (at least 1) of the eight full
 visits sits in pinned RAM. A token copies those rows by DMA into a small VRAM ring, a few of the attention kernel's
 blocks a slot, the copies running ahead of the kernels (their partials those of the whole launch); a prompt chunk
 copies a visit's rows into one VRAM staging pair first - the VRAM of one of the N visits (the swing visit: its rows
@@ -317,7 +317,8 @@ flips codes of a 3-bit mantissa.
 
 **Pictures** go through `tools/vision`'s image encoder (`vision-glm`) built against a llama.cpp that has the Inkling 2 tower
 (`PROJECTOR_TYPE_INKLING2V`; Maya's own build adds it to the pinned llama.cpp: `tools/vision/inkling2v_patch.py`,
-and needs no text model for it - the config's "vision" entry names none) and unsloth's `mmproj-BF16.gguf`. The
+and needs no text model for it - the config's "vision" entry names none) and the model's `mmproj-Inkling-2-Mini-BF16.gguf`
+(Maya's repo; unsloth's `mmproj-BF16.gguf`, the same bytes, works too). The
 setup sets them up; the encoder starts when a picture arrives (on the GPU while its free VRAM holds it, else on the
 CPU) and ends after the request's pictures, so it keeps no VRAM. The server sends the encoder's rows with the request
 (`GENI`), the engine puts them in place of the image tokens (`--image-token`, 200054) without the embedding's norm.
@@ -366,6 +367,12 @@ GPU - `SAGUARO_IK2_VISION_GIB`, the server's), else it is left out with a NOTE: 
 context with the FP8 cache (`tools/ik2_fit.py` `draft_gib`: 0.88 GiB + 4.75 KiB a token). The Monitor's Speculation
 shows the drafts kept (STAT `draft_acc` / `draft_off`, `draft_ms`, `verify_ms`).
 
+Past what a card holds with every expert (the offload path: a long context, or a card under 24 GB with UD-Q4_K_XL) the
+drafter's room comes from the experts' tier (upstream v1.1.75): at most half of the tier's room, with the verify
+window's staging (0.7 GiB) and at least 65,536 FP8 context rows of the last positions; where part of the cache streams
+from RAM drafting stays off. The setup's `tools/ik2_fit.py` `draft_fits` / `drafting_off_reason` count it the same way
+(and keep drafting off on an AMD card's offload path, where it was measured slower than plain decoding).
+
 Whether a window pays depends on the text: the drafts are taken 1.8 tokens a step in prose, 3 in new code, 4.3 in a
 document's edit. A controller decides each step (`SpecCtl`): a window of B's expected tokens, (1 - a^B) / (1 - a)
 with a the recent acceptance, over its measured time, against a plain token's; after 8 plain tokens it drafts once
@@ -381,7 +388,7 @@ To run it (one GPU):
     cat > ik2-mini.json <<EOF
     {"exe": "build/saguaro-ik2", "args": ["--model", "Inkling-2-Mini-UD-Q4_K_XL.gguf", "--max-context", "262144"],
      "env": {"SAGUARO_IK2_KV": "fp8"}, "tokenizer": "ik2/tokenizer", "model_name": "inkling-2-mini",
-     "vision": {"exe": "build-vision/bin/vision-glm", "mmproj": "mmproj-BF16.gguf", "gpu": true}}
+     "vision": {"exe": "build-vision/bin/vision-glm", "mmproj": "mmproj-Inkling-2-Mini-BF16.gguf", "gpu": true}}
     EOF
     python serve/server.py --engine maya --config ik2-mini.json
 
@@ -440,7 +447,8 @@ GGUF is copied there first; run by hand, the engine keeps them beside the GGUF).
 (`SAGUARO_IK2_EXPERT_MMA=1`: the mma layout). Answers repeat on a GPU (every sum in a fixed order) but are not CUDA's bits.
 The engine refuses an AMD GPU older than RDNA 3 at its start; on an APU (Strix / Gorgon Halo) it counts the RAM the
 system has available, less max(8 GiB, 10%), as the GPU's room. AMD keeps every expert in the GPU's memory where the
-file fits, else it takes the offload path as on NVIDIA (16 GB cards, checked on an RX 9070 XT). Run on a Radeon 8065S (Ubuntu, ROCm 7.1).
+file fits, else it takes the offload path as on NVIDIA, from 12 GB (upstream v1.1.75; 16 GB checked here on an RX 9070 XT,
+upstream ran a Radeon 8065S set as a 12 and a 16 GB card). Run on a Radeon 8065S (Ubuntu, ROCm 7.1).
 
 **Defaults.** Thinking Machines' `generation_config.json`: temperature 1.0 (no top_p, no top_k: 1.0 and off).
 Thinking is the template's `reasoning_effort`, a name or a number in [0.0, 0.99]: `none` 0.0, `minimal` 0.1, `low`
@@ -451,8 +459,9 @@ Thinking is the template's `reasoning_effort`, a name or a number in [0.0, 0.99]
 | File | Repository | sha256 |
 |---|---|---|
 | `Inkling-2-Mini-UD-Q4_K_XL.gguf` (17.6 GB) | [unsloth/Inkling-2-Mini-GGUF](https://huggingface.co/unsloth/Inkling-2-Mini-GGUF) | `e62d463c135ffe283df8d94b279a96ca145ac128b52ce854478613045bf4de15` |
-| `mmproj-BF16.gguf` (0.6 GB, pictures) | same | `2c165c78790e78a3f45a2d1e9e931083e52ee69d45ff2a0dc9c281fdf1a666e7` |
-| `mtp.safetensors` (0.6 GB, the drafter: the setup fetches it, not with `--drafting off`) | [thinkingmachines/Inkling-2-Mini](https://huggingface.co/thinkingmachines/Inkling-2-Mini) | `7c3b651317f01f73bcf4e1dceba66ef8b7e1a1eac6bc171e882e690a4b10a1d2` |
+| `mmproj-Inkling-2-Mini-BF16.gguf` (0.6 GB, pictures; unsloth's `mmproj-BF16.gguf` byte for byte, an existing copy is kept) | [peasantsmith/Inkling-2-Mini-Maya-GGUF](https://huggingface.co/peasantsmith/Inkling-2-Mini-Maya-GGUF) (`vision/`) | `2c165c78790e78a3f45a2d1e9e931083e52ee69d45ff2a0dc9c281fdf1a666e7` |
+| `dspark-Inkling-2-Mini-Q8_0.gguf` (0.4 GB, the drafter as a GGUF, Q8_0: the setup fetches it on NVIDIA, not with `--drafting off`; unsloth's file byte for byte) | [peasantsmith/Inkling-2-Mini-Maya-GGUF](https://huggingface.co/peasantsmith/Inkling-2-Mini-Maya-GGUF) (`drafter/`) | `2ec78510da837e8fc3be54a14757a0c5fbd2d8d9e85a0d92853fafdf674f3773` |
+| `mtp.safetensors` (0.6 GB, the same drafter as published, BF16: the setup fetches it on AMD; thinkingmachines' file byte for byte) | [peasantsmith/Inkling-2-Mini-Maya-GGUF](https://huggingface.co/peasantsmith/Inkling-2-Mini-Maya-GGUF) (`drafter/`) | `7c3b651317f01f73bcf4e1dceba66ef8b7e1a1eac6bc171e882e690a4b10a1d2` |
 
 Outside the preview, the older two-GPU mode with a loop runs as expert parallel (`SAGUARO_IK2_EP=1`, its caches filled at the
 start: checked on Windows, an RTX 5080 with an RTX 4060 Ti; refused where the copies between the cards would have to go

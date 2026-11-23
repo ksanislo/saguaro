@@ -194,8 +194,12 @@ looped model with 8 of 128 experts a token; Apache 2.0) on an engine of its own 
 | One RX 9070 XT, the one-T4 quant (every expert in VRAM; experimental, lower quality) | 32K | about 80 tokens/s writing, 1150 reading |
 
 It also sets up on NVIDIA cards from 8 GB (V100 and newer; the experts a card does not hold stay in RAM) and on AMD
-RDNA 3 / 4 GPUs of 16 GB or more. Tool calls, five thinking levels, pictures; one conversation at a time on two cards
-(several at once where one GPU holds every expert; four more kept aside in RAM).
+RDNA 3 / 4 GPUs of 12 GB or more. Tool calls, five thinking levels, pictures; one conversation at a time on two cards
+(several at once where one GPU holds every expert; four more kept aside in RAM). Drafting with the model's own drafter
+(0.4 GB) is on by default with one Tesla T4 and with every expert on an AMD GPU: on a 15-request coding / agent /
+chat mix about +9 % writing speed on one T4 (UD-Q4_K_XL; answers may differ at near-ties), +4..+5 % on one T4 with the
+one-T4 quant and +11 % on an RX 9070 XT with it (the same answers); off on an AMD card that keeps experts in RAM
+(measured slower there) and on two cards.
 The install, the settings and the limits: **[INKLING2-MINI.md](INKLING2-MINI.md)**; the engine itself:
 [INKLING2.md](INKLING2.md).
 

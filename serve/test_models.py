@@ -801,7 +801,9 @@ class Inkling2(unittest.TestCase):
                                   "SAGUARO_IK2_STATS": "1",
                                   "SAGUARO_IK2_WARM": "data/expert-profile-ik2mini.bin",
                                   "SAGUARO_IK2_SLOT_DIR": "var/Inkling-2-Mini-UD-Q4_K_XL/sessions"}})
-        self.assertEqual(M.choices(self.cfg), {"draft": ["none"], "images": True})   # (two GPUs: no drafting)
+        self.assertEqual(M.choices(self.cfg), {"draft": ["none"], "images": True})   # (two GPUs: the engine does not draft yet)
+        tp = dict(self.cfg, args=self.cfg["args"] + ["--tp", "2"])
+        self.assertEqual(M.choices(tp)["draft"], ["none"])                 # (--tp 2: no verify window)
         self.assertEqual(self.sound(M.apply(self.cfg, M.settings_of(self.cfg))), self.cfg)   # (as it is: nothing moves)
 
     def test_each_setting(self):
@@ -825,7 +827,7 @@ class Inkling2(unittest.TestCase):
 
     def test_answers_at_once_and_drafting(self):
         """--parallel N written where it changes (the engine takes it on one GPU holding every expert, else says so);
-        drafting where it runs - an sm_80+ card holding every expert."""
+        drafting where it runs - Volta on, the offload path where its cache stays in VRAM, not Pascal."""
         two = self.sound(M.apply(self.cfg, {"parallel": 2}))
         self.assertEqual(M.flag(two["args"], "--parallel"), "2")
         self.assertEqual(M.settings_of(two)["parallel"], 2)
@@ -835,7 +837,10 @@ class Inkling2(unittest.TestCase):
             self.assertEqual(M.choices(dict(one, args=one["args"][:3] + ["32768"] + one["args"][4:]))["draft"],
                              ["auto", "none"])
         with mock.patch.object(M, "machine_gpus", lambda b="cuda": [{"index": 0, "arch": "75", "vram_gb": 15.0}]):
-            self.assertEqual(M.choices(one)["draft"], ["none"])
+            self.assertEqual(M.choices(dict(one, args=one["args"][:3] + ["32768"] + one["args"][4:]))["draft"],
+                             ["auto", "none"])   # (a T4's offload path drafts: Ken 11-23)
+        with mock.patch.object(M, "machine_gpus", lambda b="cuda": [{"index": 0, "arch": "61", "vram_gb": 24.0}]):
+            self.assertEqual(M.choices(one)["draft"], ["none"])   # (Pascal: no drafting)
 
     def test_its_other_name_for_the_context(self):
         cfg = dict(self.cfg, args=["--ctx" if a == "--max-context" else a for a in self.cfg["args"]])
@@ -853,7 +858,10 @@ class Inkling2(unittest.TestCase):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 M.apply(self.cfg, bad)
         self.assertIn("not a setting of this model", self.raised({"tp": 2}))
-        self.assertIn("Drafting: not on this GPU", self.raised({"draft": "auto"}))
+        tp = dict(self.cfg, args=self.cfg["args"] + ["--tp", "2"])
+        with self.assertRaises(ValueError) as e:
+            M.apply(tp, {"draft": "auto"})
+        self.assertIn("Drafting: not on this GPU", str(e.exception))
         self.assertIn("one or two", self.raised({"gpus": [0, 1, 2]}))
         self.assertIn("SAGUARO_IK2_", self.raised({"env": {"SAGUARO_GLM_KV_RESIDENT": "1"}}))
 
