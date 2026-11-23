@@ -5132,7 +5132,7 @@ int spec_pick(const std::vector<std::pair<int, double>>& dist, int draft, std::m
     return accepted ? draft : sample_from(dist, rng, draft);
 }
 
-int g_draft_force = 0;   // SAGUARO_IK2_DRAFT_FORCE: 1 drafting on Turing too, 2 also on the dynamic offload path (tests)
+int g_draft_force = 0;   // SAGUARO_IK2_DRAFT_FORCE=2: drafting on AMD's offload layout too (off by default there; tests)
 double g_sp_draft = 0, g_sp_block = 0, g_sp_tail = 0;   // SAGUARO_IK2_SPEC_PROF: a step's drafting, window and the rest, s
 uint64_t g_sp_n = 0;
 std::string g_sp_seq;   // (a step's width and kept drafts, "5:4 5:0 ...")
@@ -7674,6 +7674,46 @@ int main(int argc, char** argv) {
                     fits && !g_off_want ? "every expert stays in VRAM"
                     : g_off_want ? "the experts in host memory, a tier of them in VRAM, the rest fetched by the GPU"
                                  : "the experts in host memory, a cache of them in VRAM");
+        // Drafting's defaults by layout (Ken 11-23, logs/saguaro/REPORT-ik2-draft-gain.md; each one set only where the
+        // environment does not name it, so SAGUARO_IK2_<X>=0 / =1 still decides):
+        // - wherever the drafter loads: DRAFT_SNAP (an agent's next turn reads only its new message, answers exact)
+        // - Turing: our BACKOFF controller instead of upstream's gate (the gate pauses on noisy window costs there),
+        //   HEAD_TILES, BLOCK_SPLIT, SNAP_RINGS; resident: the exact window + LOOKUP_MATCH (+4..+5 %, exact); the UD
+        //   dynamic cache: the rounding-level window, BLOCK_EXACT=0 (+8.6 %, KL 5e-5 against the one-token path)
+        // - AMD resident: upstream's gate + LOOKUP_MATCH (+11 %, exact); AMD offload: drafting off (it loses there;
+        //   SAGUARO_IK2_DRAFT_FORCE=2 drafts anyway)
+        if (!draft_path.empty() || g_lookup) {
+            const auto def = [](const char* n, const char* v) {
+                if (getenv(n)) return;
+#ifdef _WIN32
+                _putenv_s(n, v);
+#else
+                setenv(n, v, 0);
+#endif
+            };
+            def("SAGUARO_IK2_DRAFT_SNAP", "1");
+#ifdef MAYA_USE_HIP
+            if (g_off_want && g_draft_force < 2) {
+                std::printf("NOTE saguaro ik2: drafting off - on AMD's offload layout drafting measured slower than "
+                            "plain decoding (SAGUARO_IK2_DRAFT_FORCE=2: drafting anyway)\n");
+                draft_path.clear(), g_lookup = false;
+            } else if (g_fast_want) {
+                def("SAGUARO_IK2_LOOKUP_MATCH", "1");
+            }
+#else
+            if (k::arch_class() == 75) {
+                def("SAGUARO_IK2_DRAFT_GATE", "0");
+                def("SAGUARO_IK2_DRAFT_BACKOFF", "1");
+                def("SAGUARO_IK2_DRAFT_HEAD_TILES", "1");
+                def("SAGUARO_IK2_BLOCK_SPLIT", "1");
+                def("SAGUARO_IK2_DRAFT_SNAP_RINGS", "1");
+                if (g_fast_want) def("SAGUARO_IK2_LOOKUP_MATCH", "1");
+                else if (g_off_dynamic) def("SAGUARO_IK2_BLOCK_EXACT", "0");
+            }
+#endif
+            g_block_exact = !(getenv("SAGUARO_IK2_BLOCK_EXACT") && !std::atoi(getenv("SAGUARO_IK2_BLOCK_EXACT")));
+            g_block_split = getenv("SAGUARO_IK2_BLOCK_SPLIT") && std::atoi(getenv("SAGUARO_IK2_BLOCK_SPLIT"));
+        }
         // Drafting never changes this plan (a loaded drafter takes room only where everything above stays as it is):
         // it runs on the resident path, its room - the drafter's, or the prompt lookup's window records alone - beside
         // the model at this context, and not the room the pictures' encoder would have had on the GPU (SAGUARO_IK2_VISION_GIB,
@@ -7681,11 +7721,11 @@ int main(int argc, char** argv) {
         const size_t used = exp_b + dense_b + kv_b + reserve;
         const double vis = getenv("SAGUARO_IK2_VISION_GIB") ? std::atof(getenv("SAGUARO_IK2_VISION_GIB")) * 1073741824.0 : 0.0;
         const double left = fr0 > used ? (double) (fr0 - used) : 0.0;
-        auto room_ok = [&](size_t need, std::string& why, bool lookup) {
+        auto room_ok = [&](size_t need, std::string& why, bool /*lookup*/) {
             const size_t use_v = g_off_want ? dense_b + kv_b + reserve : used;   // (offload: the experts are host memory)
             if (g_two.want) why = "on two GPUs it is not checked against plain decoding yet (plain decoding)";
-            else if (!g_fast_want && !((lookup || g_draft_force >= 2) && g_off_dynamic))
-                why = "it runs where every expert stays in VRAM (the resident path), not here";
+            else if (!g_fast_want && !g_off_dynamic)   // (the dynamic offload's window: B4, ours)
+                why = "it runs where every expert stays in VRAM or the GPU cache holds the experts, not here";
             else if (use_v + need > fr0) why = "its room does not fit beside the model at this context";
             else if (vis > 0 && left >= vis && left - (double) need < vis)
                 why = "its room would move the pictures' encoder from the GPU to the CPU";
