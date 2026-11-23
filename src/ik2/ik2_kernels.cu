@@ -2959,7 +2959,9 @@ __device__ __forceinline__ float sh_chunk_dot(const uint8_t* w, int bits, size_t
         if (bits == 5) hi[0] = *(const uint32_t*) (pl + 64 + q4 * 4);
         if (bits == 6) hi[0] = *(const uint32_t*) (pl + 64 + q4 * 8), hi[1] = *(const uint32_t*) (pl + 64 + q4 * 8 + 4);
     }
-    float sq = 0.0f, sx = 0.0f;
+    // (q - (2^(b-1) - 0.5)) = (2 q - (2^b - 1)) / 2: an odd integer a value, one product each
+    const int odd = (1 << bits) - 1;
+    float acc = 0.0f;
 #pragma unroll
     for (int j = 0; j < 32; ++j) {
         int q;
@@ -2971,10 +2973,9 @@ __device__ __forceinline__ float sh_chunk_dot(const uint8_t* w, int bits, size_t
             if (bits == 5) q |= ((hi[0] >> j) & 1) << 4;
             if (bits == 6) q |= ((hi[j >> 4] >> (2 * (j & 15))) & 3) << 4;
         }
-        const float xv = x[j];
-        sq += (float) q * xv, sx += xv;
+        acc += (float) (2 * q - odd) * x[j];
     }
-    return eff * (sq - strata_fmt::sh_offset(bits) * sx);
+    return 0.5f * eff * acc;
 }
 __device__ __forceinline__ float q8f_chunk_dot(const uint8_t* w, int it, const float* x) {
     const uint8_t* b = w + (size_t) it * 36;
@@ -3017,7 +3018,13 @@ __device__ __forceinline__ float sf_chunk_dot(int type, const uint8_t* w, int it
     if (type == strata_fmt::kQ8F) return q8f_chunk_dot(w, it, x);
     if (type == strata_fmt::kMX8B) return mx8_chunk_dot(w, it, x);
     if (type == strata_fmt::kBF16) return bf16_chunk_dot(w, it, x);
-    return sh_chunk_dot(w, strata_fmt::sh_bits(type), strata_fmt::block_bytes(type), it, x);
+    switch (type) {   // (the width a constant in each: the code extraction folds)
+    case strata_fmt::kSH2: return sh_chunk_dot(w, 2, 36, it, x);
+    case strata_fmt::kSH3: return sh_chunk_dot(w, 3, 52, it, x);
+    case strata_fmt::kSH4: return sh_chunk_dot(w, 4, 68, it, x);
+    case strata_fmt::kSH5: return sh_chunk_dot(w, 5, 84, it, x);
+    default: return sh_chunk_dot(w, 6, 100, it, x);
+    }
 }
 
 __device__ float row_dot(int type, const uint8_t* w, const float* xs, int K) {
