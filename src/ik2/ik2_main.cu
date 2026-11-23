@@ -244,6 +244,9 @@ struct Mat {
     uint8_t* raw = nullptr;     // SAGUARO_IK2_DENSE=q8: the blocks, one token's products straight over them
     uint16_t* f16 = nullptr;    // else (the default): an FP16 copy, every product a cuBLAS GEMM - measured faster on an
     int type = 0, N = 0, K = 0; // RTX PRO 6000 (16 against 21 ms a token), for 4 GiB more VRAM
+    // a fused matrix whose parts are blocks of different types (a Strata pack: Q8_ROW and BF16 rows) - its parts at
+    // their first rows; every product runs over each in turn
+    std::vector<std::pair<int, Mat>> seg;
 };
 
 struct Layer {
@@ -639,7 +642,7 @@ bool try_load_fused_raw(const Shards& S, const std::vector<MatPart>& parts, int 
         if (!k::block_values((int) t->type) || Kd % k::block_values((int) t->type))
             die(pt.name + ": type " + t->type_name() + " not read here");
         if (ty < 0) ty = (int) t->type;
-        else if (ty != (int) t->type) return false;
+        else if (ty != (int) t->type && !g_sv) return false;
         N_tot += pt.N;
         nb_tot += tensor_bytes(*t);
     }
@@ -647,6 +650,21 @@ bool try_load_fused_raw(const Shards& S, const std::vector<MatPart>& parts, int 
     out.type = ty;
     out.N = N_tot;
     out.K = Kd;
+    bool mixed = false;
+    for (const auto& pt : parts) mixed = mixed || (int) S.info(pt.name)->type != ty;
+    if (mixed) {   // (a Strata pack: each part as its own blocks)
+        int row = 0;
+        for (const auto& pt : parts) {
+            Mat p;
+            p.type = (int) S.info(pt.name)->type, p.N = pt.N, p.K = Kd;
+            const size_t nb = tensor_bytes(*S.info(pt.name));
+            p.raw = dalloc<uint8_t>(nb);
+            CU(cudaMemcpy(p.raw, S.data(pt.name), nb, cudaMemcpyHostToDevice));
+            out.seg.push_back({row, p});
+            row += pt.N;
+        }
+        return true;
+    }
     {
         std::vector<const uint8_t*> ps;
         std::vector<size_t> vs;
@@ -665,12 +683,22 @@ bool try_load_fused_raw(const Shards& S, const std::vector<MatPart>& parts, int 
 
 // one token's product over a dense matrix kept as the GGUF's blocks, or planar
 void mv1(const Mat& m, const float* x, float* y) {
+    if (!m.seg.empty()) {
+        for (const auto& sg : m.seg) mv1(sg.second, x, y + sg.first);
+        return;
+    }
     if (m.q8) k::mv_q8p(m.q8, m.q8d, m.N, m.K, x, y, g_s);
     else k::mv_blocks(m.type, m.raw, m.N, m.K, x, y, g_s);
 }
 // ... with up to two short convs on its rows: the planar Q8 product has them as its epilogue (a launch less each;
 // those rows of y are then not written), any other matrix gets the product and then the convs
 void mv1c(const Mat& m, const float* x, float* y, const k::MvConv& c0, const k::MvConv& c1 = k::MvConv{}) {
+    if (!m.seg.empty()) {
+        mv1(m, x, y);
+        for (const k::MvConv* cv : {&c0, &c1})
+            if (cv->n) k::conv4_res(y + cv->r0, cv->hist, cv->w, cv->dyn, cv->heads, 1, cv->n, cv->res, cv->y, g_s);
+        return;
+    }
     if (m.q8) {
         k::mv_q8p_conv(m.q8, m.q8d, m.N, m.K, x, y, c0, c1, g_s);
         return;
@@ -685,6 +713,10 @@ size_t g_w16_n = 0;          // values it holds
 // Y [T][N] = X [T][K] . W^T: one token straight over the blocks (x32), more through an FP16 decode and a GEMM (x16).
 // A matrix larger than the decode buffer (the head: its few rows of logits) goes a token at a time over its blocks.
 void matmul(const Mat& m, const float* x32, const uint16_t* x16, int T, float* Y, int ldy) {
+    if (!m.seg.empty()) {
+        for (const auto& sg : m.seg) matmul(sg.second, x32, x16, T, Y + sg.first, ldy);
+        return;
+    }
     if (m.f16) {
         gemm16(m.f16, m.N, m.K, x16, T, Y, ldy);
         return;
@@ -1443,6 +1475,14 @@ __global__ void scatter_add_rows_kernel(const float* __restrict__ y, const int* 
 Mat mat_rows(const Mat& m, int r0, int n) {   // the rows [r0, r0 + n) of a matrix
     Mat p = m;
     p.N = n;
+    if (!m.seg.empty()) {
+        p.seg.clear();
+        for (const auto& sg : m.seg) {
+            const int a = std::max(r0, sg.first), b = std::min(r0 + n, sg.first + sg.second.N);
+            if (a < b) p.seg.push_back({a - r0, mat_rows(sg.second, a - sg.first, b - a)});
+        }
+        return p;
+    }
     if (m.f16) p.f16 = m.f16 + (size_t) r0 * m.K;
     else if (m.q8) p.q8 = m.q8 + (size_t) r0 * m.K, p.q8d = m.q8d + (size_t) r0 * (m.K >> 5);
     else p.raw = m.raw + (size_t) r0 * (m.K / k::block_values(m.type)) * k::block_bytes(m.type);
@@ -3388,6 +3428,13 @@ void block_init(Model& M) {
 
 // rows [r0, r0 + n) of a planar Q8_0 matrix times x16 [T][K] (FP16): y [T][ldy] (the tensor cores, q8_tile)
 void tile_rows(const Mat& m, int r0, int n, const uint16_t* x16, int T, float* y, int ldy) {
+    if (!m.seg.empty()) {   // (no planar Q8_0 there: each part's rows a token at a time is exact_rows' work)
+        for (const auto& sg : m.seg) {
+            const int a = std::max(r0, sg.first), b = std::min(r0 + n, sg.first + sg.second.N);
+            if (a < b) tile_rows(sg.second, a - sg.first, b - a, x16, T, y + (a - r0), ldy);
+        }
+        return;
+    }
     if (!m.q8) die("the block path: a dense matrix that is not planar Q8_0");
     k::q8_tile(m.q8 + (size_t) r0 * m.K, m.q8d + (size_t) r0 * (m.K >> 5), n, m.K, x16, T, y, ldy, g_s);
 }
@@ -6962,7 +7009,7 @@ int main(int argc, char** argv) {
                     "failed - SAGUARO_IK2_OFF=0 runs the cache path)");
             g_offs.host[l] = (const uint8_t*) dp;
         }
-        auto blocks = [](const Mat& m) { return m.raw || m.q8; };
+        auto blocks = [](const Mat& m) { return m.raw || m.q8 || !m.seg.empty(); };
         bool raw = blocks(M.out_w);
         for (const auto& Ly : M.L)
             raw = raw && blocks(Ly.wo) && (Ly.sliding ? blocks(Ly.wqkvrg) : (blocks(Ly.wqrg) && blocks(Ly.wk) && blocks(Ly.wv)));
@@ -7027,7 +7074,7 @@ int main(int argc, char** argv) {
                     g_graph ? ", a CUDA graph each" : "");
     }
     if (g_fast_want && d == 0) {   // the resident path: every expert in now, and where each is on the device
-        auto blocks = [](const Mat& m) { return m.raw || m.q8; };   // (kept as the GGUF's blocks, whole or planar)
+        auto blocks = [](const Mat& m) { return m.raw || m.q8 || !m.seg.empty(); };   // (kept as the GGUF's blocks, whole or planar)
         bool all = !EC.pools.empty(), raw = blocks(M.out_w);
         for (const auto& P : EC.pools) all = all && P.n_active >= P.n_layers * c.E;
         for (const auto& Ly : M.L)
