@@ -6658,17 +6658,27 @@ int main(int argc, char** argv) {
     }
     // --tp N: tensor parallel over N GPUs (the visible ones, in order) - each holds 1/N of every layer's heads and
     // experts' width and of the K / V cache, the two partial sums of a layer visit added over peer copies
-    if (g_tpn < 1) die("--tp: 1 or more");
+    auto tp_refuse = [&](const std::string& m) {   // (--serve: the server's NOTE line too)
+        if (serve) std::printf("NOTE saguaro ik2: %s\n", m.c_str()), std::fflush(stdout);
+        die(m);
+    };
+    if (g_tpn < 1 || g_tpn > 8) tp_refuse("--tp: 1 to 8 GPUs");
     if (g_tpn > 1) {
-        if (n_gpu != 1 && n_gpu != g_tpn) die("--tp " + std::to_string(g_tpn) + " with --gpus " + std::to_string(n_gpu));
+        if (n_gpu != 1 && n_gpu != g_tpn) tp_refuse("--tp " + std::to_string(g_tpn) + " with --gpus " + std::to_string(n_gpu));
         n_gpu = g_tpn;
-        if (strata_fmt::Pack::sniff(model)) die("--tp: GGUF files only (a Strata pack's packed experts are not split yet)");
-        const char* bad[] = {"SAGUARO_IK2_EP", "SAGUARO_IK2_TP", "SAGUARO_IK2_CPU", "SAGUARO_IK2_DENSE", "SAGUARO_IK2_OFF"};
+        if (strata_fmt::Pack::sniff(model)) tp_refuse("--tp: GGUF files only (a Strata pack's packed experts are not split yet)");
+        const char* bad[] = {"SAGUARO_IK2_EP", "SAGUARO_IK2_TP", "SAGUARO_IK2_CPU", "SAGUARO_IK2_DENSE", "SAGUARO_IK2_OFF",
+                             "SAGUARO_IK2_TRACE", "SAGUARO_IK2_POP_OUT"};
         for (const char* b : bad)
-            if (getenv(b) && *getenv(b) && std::string(getenv(b)) != "0") die(std::string("--tp with ") + b);
-        if (g_kv_q4) die("--tp with SAGUARO_IK2_KV=q4");
-        if (g_par > 1) die("--tp with --parallel > 1 (not yet)");
-        if (g_kv_stream == 1) die("--tp with --kv-streaming on");
+            if (getenv(b) && *getenv(b) && std::string(getenv(b)) != "0") tp_refuse(std::string("--tp with ") + b);
+        // (the members' slices are read where the file is mapped: the pinned host paths know one model's experts)
+        if (getenv("SAGUARO_IK2_HOST") && std::string(getenv("SAGUARO_IK2_HOST")) != "mmap")
+            tp_refuse("--tp: SAGUARO_IK2_HOST=mmap only");
+        if (getenv("SAGUARO_IK2_FAST") && !std::atoi(getenv("SAGUARO_IK2_FAST")))
+            tp_refuse("--tp with SAGUARO_IK2_FAST=0 (tensor parallel runs on the resident path)");
+        if (g_kv_q4) tp_refuse("--tp with SAGUARO_IK2_KV=q4");
+        if (g_par > 1) tp_refuse("--tp with --parallel > 1 (not yet)");
+        if (g_kv_stream == 1) tp_refuse("--tp with --kv-streaming on");
         g_kv_stream = 0;
         if (!draft_path.empty() || g_lookup) std::printf("NOTE saguaro ik2: drafting off with --tp\n");
         draft_path.clear(), g_lookup = false, drafting = "off";
@@ -7133,7 +7143,7 @@ int main(int argc, char** argv) {
         const bool dense_ok = !getenv("SAGUARO_IK2_DENSE") || std::string(getenv("SAGUARO_IK2_DENSE")) == "q8";
         g_off_want = (off_set == 1 || (off_set != 0 && !fits)) && dense_ok;
         if (g_tpn > 1 && !g_fast_want)
-            die("--tp: a member's share of the experts does not fit in VRAM beside the dense weights and its K / V cache "
+            tp_refuse("--tp: a member's share of the experts does not fit in VRAM beside the dense weights and its K / V cache "
                 "at this context (a smaller --max-context)");
         // (the dynamic GPU cache: the same bits as the fixed tier (KL 0 over 2000 tokens, T4 and RX 9070 XT), faster
         //  answers - on by default on one GPU; SAGUARO_IK2_OFF_DYNAMIC=0: the fixed tier, =1 on two GPUs too)
