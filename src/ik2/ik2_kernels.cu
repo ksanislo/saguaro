@@ -23,6 +23,11 @@ namespace ik2::k {
 
 // a kMIX layer's role part (a Strata pack's experts of several codecs): the expert's own type, rows and row bytes from
 // its MixHdr; the up part's MACaQ scales s[F] (h[r] is divided by s[r]: Strata's activation scale before down)
+#ifdef SAGUARO_IK2_NO_STRATA
+#define SF_MIX 0   // (an A/B build: the pack paths compiled out)
+#else
+#define SF_MIX 1
+#endif
 __device__ __forceinline__ void mix_role(const uint8_t* part, int& ty, const uint8_t*& w, size_t& rb, const uint16_t** mq) {
     const strata_fmt::MixHdr h = *(const strata_fmt::MixHdr*) part;
     ty = h.type, w = part + sizeof(strata_fmt::MixHdr), rb = h.rb;
@@ -2780,13 +2785,12 @@ __host__ __device__ __forceinline__ uint32_t iq_signs8(uint32_t s7) {
 #endif
 }
 
+__host__ __device__ __noinline__ float sf_decode_value(int type, const uint8_t* blocks, size_t v);
 __host__ __device__ inline float decode_value(int type, const uint8_t* blocks, size_t v) {
-    if (type >= strata_fmt::kQ8F || type == strata_fmt::kBF16) {   // (a Strata pack's types; kMIX: a role part)
-        if (type != strata_fmt::kMIX) return strata_fmt::value(type, blocks, v);
-        strata_fmt::MixHdr h;
-        memcpy(&h, blocks, sizeof h);
-        return h.type == kNVFP4 ? decode_value(kNVFP4, blocks + sizeof h, v) : strata_fmt::value(h.type, blocks + sizeof h, v);
-    }
+#ifndef SAGUARO_IK2_NO_STRATA
+    if (type >= strata_fmt::kQ8F || type == strata_fmt::kBF16)   // (a Strata pack's types: out of line, so the GGUF
+        return sf_decode_value(type, blocks, v);                 //  types' code around it does not carry them)
+#endif
     if (type == kNVFP4) {
         const int8_t kv[16] = {0, 1, 2, 3, 4, 6, 8, 12, 0, -1, -2, -3, -4, -6, -8, -12};
         const uint8_t* b = blocks + (v / 64) * 36;
@@ -2884,6 +2888,13 @@ __host__ __device__ inline float decode_value(int type, const uint8_t* blocks, s
         return d * (float) sc * (float) val - mn * (float) m;
     }
     return 0.0f;
+}
+// a Strata pack's types (kMIX: a role part, its header's type) - decode_value's, out of line
+__host__ __device__ __noinline__ float sf_decode_value(int type, const uint8_t* blocks, size_t v) {
+    if (type != strata_fmt::kMIX) return strata_fmt::value(type, blocks, v);
+    strata_fmt::MixHdr h;
+    memcpy(&h, blocks, sizeof h);
+    return h.type == kNVFP4 ? decode_value(kNVFP4, blocks + sizeof h, v) : strata_fmt::value(h.type, blocks + sizeof h, v);
 }
 
 // The input vector in shared memory, padded: value i at xp(i) = (i >> 5) * 36 + (i & 31), so every 16-float
@@ -3109,7 +3120,11 @@ __device__ __forceinline__ float mx8_chunk_dot(const uint8_t* w, int it, const f
     return strata_fmt::ue8m0((uint8_t) (hdr & 0xFF)) * a;
 }
 __device__ __forceinline__ bool sf_chunk_type(int type) {
+#ifdef SAGUARO_IK2_NO_STRATA
+    return false;
+#else
     return strata_fmt::is_sh(type) || type == strata_fmt::kQ8F || type == strata_fmt::kBF16 || type == strata_fmt::kMX8B;
+#endif
 }
 __device__ __forceinline__ float sf_chunk_dot(int type, const uint8_t* w, int it, const float* x) {
     if (type == strata_fmt::kQ8F) return q8f_chunk_dot(w, it, x);
@@ -3122,6 +3137,12 @@ __device__ __forceinline__ float sf_chunk_dot(int type, const uint8_t* w, int it
     case strata_fmt::kSH5: return sh_chunk_dot(w, 5, 84, it, x);
     default: return sh_chunk_dot(w, 6, 100, it, x);
     }
+}
+// a lane's part of a row's dot over a Strata type, out of line (the GGUF types' row dots keep their registers)
+__device__ __noinline__ float sf_row_part(int type, const uint8_t* w, const float* xs, int K, int lane) {
+    float acc = 0.0f;
+    for (int it = lane; it < K / 32; it += 32) acc += sf_chunk_dot(type, w, it, xs + it * 36);
+    return acc;
 }
 
 __device__ float row_dot(int type, const uint8_t* w, const float* xs, int K) {
@@ -3293,7 +3314,7 @@ __device__ float row_dot(int type, const uint8_t* w, const float* xs, int K) {
                        : iq4xs_sub_dot(w + (size_t) (sb >> 3) * 136, sb & 7, xv);
         }
     } else if (sf_chunk_type(type) && (K & 31) == 0 && ((uintptr_t) w & 3) == 0) {
-        for (int it = lane; it < K / 32; it += 32) acc += sf_chunk_dot(type, w, it, xs + it * 36);
+        acc = sf_row_part(type, w, xs, K, lane);
     } else {
         for (int i = lane; i < K; i += 32) acc += decode_value(type, w, (size_t) i) * xs[xp(i)];
     }
@@ -3531,10 +3552,7 @@ __device__ void row_dot_2(int type, const uint8_t* wg, const uint8_t* wu, const 
             au += iq3 ? iq3xxs_sub_dot(wu + off, sb & 7, xv) : iq4xs_sub_dot(wu + off, sb & 7, xv);
         }
     } else if (sf_chunk_type(type) && (K & 31) == 0 && (((uintptr_t) wg | (uintptr_t) wu) & 3) == 0) {
-        for (int it = lane; it < K / 32; it += 32) {
-            ag += sf_chunk_dot(type, wg, it, xs + it * 36);
-            au += sf_chunk_dot(type, wu, it, xs + it * 36);
-        }
+        ag = sf_row_part(type, wg, xs, K, lane), au = sf_row_part(type, wu, xs, K, lane);
     } else {
         for (int i = lane; i < K; i += 32) {
             const float xv = xs[xp(i)];
@@ -3819,7 +3837,7 @@ __global__ void experts_gate_up_swiglu_kernel(const uint8_t* const* blob, const 
     const uint8_t* bg = blob[s];
     const uint8_t* bu = bg + eb0;
     const uint16_t* mq = nullptr;
-    if (ty_gate == strata_fmt::kMIX) mix_role(bg, ty_gate, bg, rb_gate, nullptr), mix_role(bu, ty_up, bu, rb_up, &mq);
+    if (SF_MIX && ty_gate == strata_fmt::kMIX) mix_role(bg, ty_gate, bg, rb_gate, nullptr), mix_role(bu, ty_up, bu, rb_up, &mq);
     const float sgs = sg ? sg[s] : 1.0f;
     const float sus = su ? su[s] : 1.0f;
     for (int j = 0; j < ROWS; ++j) {
@@ -3851,7 +3869,7 @@ __global__ void experts_down_kernel(const uint8_t* const* blob, int ty_down, siz
     __syncthreads();
     const int warp = threadIdx.x >> 5;
     const uint8_t* w = blob[s] + off_down;
-    if (ty_down == strata_fmt::kMIX) mix_role(w, ty_down, w, rb_down, nullptr);
+    if (SF_MIX && ty_down == strata_fmt::kMIX) mix_role(w, ty_down, w, rb_down, nullptr);
     for (int j = 0; j < ROWS;) {
         const int row = (blockIdx.x * WARPS + warp) * ROWS + j;
         if (row >= C) break;
@@ -4394,7 +4412,7 @@ __global__ void experts_gate_up_swiglu_g_kernel(const uint8_t* const* blob, cons
     if (ng <= 0) return;
     const uint8_t* bl = blob[g];
     const uint16_t* mq = nullptr;
-    if (ty_gate == strata_fmt::kMIX) {
+    if (SF_MIX && ty_gate == strata_fmt::kMIX) {
         const uint8_t *bg, *bu;
         mix_role(bl, ty_gate, bg, rb_gate, nullptr), mix_role(bl + eb0, ty_up, bu, rb_up, &mq);
         bl = bg, eb0 = (size_t) (bu - bg);
@@ -4420,7 +4438,7 @@ __global__ void experts_down_g_kernel(const uint8_t* const* blob, const int* n, 
     const int g = blockIdx.y, ng = n[g];
     if (ng <= 0) return;
     const uint8_t* w = blob[g] + off_down;
-    if (ty_down == strata_fmt::kMIX) mix_role(w, ty_down, w, rb_down, nullptr);
+    if (SF_MIX && ty_down == strata_fmt::kMIX) mix_role(w, ty_down, w, rb_down, nullptr);
     const int* orow_g = orow + g * kGroupMax;
     if (ng == 1)
         experts_down_g_run<1>(w, orow_g, orow_g, ng, ty_down, h, C, F, rb_down, y);
@@ -6019,7 +6037,7 @@ __global__ void experts_gate_up_swiglu_mem_kernel(const uint8_t* const* blob, co
     const uint8_t* bg = blob[grp];
     const uint8_t* bu = bg + eb0;
     const uint16_t* mq = nullptr;
-    if (ty_gate == strata_fmt::kMIX) mix_role(bg, ty_gate, bg, rb_gate, nullptr), mix_role(bu, ty_up, bu, rb_up, &mq);
+    if (SF_MIX && ty_gate == strata_fmt::kMIX) mix_role(bg, ty_gate, bg, rb_gate, nullptr), mix_role(bu, ty_up, bu, rb_up, &mq);
     for (int m = 0; m < n; ++m) {
         const int slot = row_g[grp * kGroupMax + m];
         if (m) __syncthreads();
@@ -6054,7 +6072,7 @@ __global__ void experts_down_mem_kernel(const uint8_t* const* blob, const int* n
     if (n <= 0) return;
     const int warp = threadIdx.x >> 5;
     const uint8_t* w = blob[grp] + off_down;
-    if (ty_down == strata_fmt::kMIX) mix_role(w, ty_down, w, rb_down, nullptr);
+    if (SF_MIX && ty_down == strata_fmt::kMIX) mix_role(w, ty_down, w, rb_down, nullptr);
     for (int m = 0; m < n; ++m) {
         const int slot = row_g[grp * kGroupMax + m];
         if (m) __syncthreads();
