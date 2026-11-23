@@ -137,7 +137,13 @@ inline size_t eviction_victim(const uint64_t* stamps, size_t n, int64_t cap, con
 /// their code. A stream and an event cost well under 2 MiB where it was measured (conversation_copy_streams_test prints
 /// it); 64 MiB covers both many times over and is far below the reserves (--vram-reserve-mib 700), so the check can only
 /// fire on a card that is really full.
+#if defined(STRATA_USE_HIP)
+// ROCm 7.1 on an RX 9070 XT: a card's first copy stream + event took 148 MiB (conversation_copy_streams_test; 8 MiB in a few
+// runs) - so on AMD the guard is 192 MiB, still far below the reserve
+constexpr uint64_t kRestoreFirstUseMib = 192;
+#else
 constexpr uint64_t kRestoreFirstUseMib = 64;
+#endif
 
 /// Whether a parked snapshot can be restored without a first-use allocation failing: every card for which the restore
 /// would have to create its copy stream (`stream_ready[i]` false) must have `need_bytes` free. A card that already has a
