@@ -27,6 +27,7 @@ static inline ssize_t pread(int fd, void* buf, size_t count, int64_t offset) {
 #include <cstring>
 #include <map>
 #include <stdexcept>
+#include <unordered_map>
 
 namespace ik2::draft {
 namespace {
@@ -156,6 +157,12 @@ struct Drafter {
     const uint16_t* head_q8d = nullptr;
     bool bf16_cols = false;               // the BF16 products on bf16_cols (before sm_80; SAGUARO_IK2_DRAFT_BF16_COLS=0: cuBLAS)
     bool head_tiles = true;               // its product on the tensor cores (q8_tile: sm_80 on), else mv_q8p_cols
+    // SAGUARO_IK2_DRAFT_Q8=1 (CUDA): the layers' weights as planar Q8_0 on q8_tile - half the bytes a round, the drafts
+    // only (their sums not the BF16 file's: the acceptance may move, never an answer).  key: the q8 values' pointer
+    bool q8 = false;
+    std::unordered_map<const void*, const uint16_t*> q8d;   // (q8 values -> their FP16 block scales)
+    uint16_t* xh = nullptr;                                 // (an FP16 copy of a product's BF16 input)
+    size_t xh_n = 0;
     int* shortlist = nullptr;
     float* shortlist_scores = nullptr;
     cublasHandle_t blas;
@@ -311,8 +318,48 @@ bool bf16_cols(const uint16_t* W, int N, int K, const uint16_t* x, int T, float*
 }
 #endif
 
+__global__ void bf16_to_f16_kernel(const uint16_t* __restrict__ src, size_t n, uint16_t* __restrict__ dst) {
+    const size_t i = (size_t) blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) dst[i] = __half_as_ushort(__float2half(__uint_as_float((uint32_t) src[i] << 16)));
+}
+
+// a BF16 [N][K] matrix as planar Q8_0 on the device (int8 [N][K], FP16 scales [N][K / 32]); its key is the values
+uint16_t* up_q8(Drafter* d, const std::vector<uint16_t>& v, int N, int K) {
+    if (K % 32) throw std::runtime_error("drafter Q8: K not a multiple of 32");
+    std::vector<int8_t> q((size_t) N * K);
+    std::vector<uint16_t> sc((size_t) N * (K / 32));
+    for (size_t b = 0; b < sc.size(); ++b) {
+        const uint16_t* x = v.data() + b * 32;
+        float amax = 0;
+        for (int j = 0; j < 32; ++j) amax = std::max(amax, std::fabs(bf(x[j])));
+        const float dd = amax / 127.0f;
+        const __half hd = __float2half(dd);
+        sc[b] = __half_as_ushort(hd);
+        const float id = dd > 0 ? 1.0f / __half2float(hd) : 0.0f;
+        for (int j = 0; j < 32; ++j)
+            q[b * 32 + j] = (int8_t) std::max(-127.0f, std::min(127.0f, std::nearbyint(bf(x[j]) * id)));
+    }
+    int8_t* dq = dalloc<int8_t>(q.size());
+    uint16_t* ds = dalloc<uint16_t>(sc.size());
+    cu(cudaMemcpy(dq, q.data(), q.size(), cudaMemcpyHostToDevice), "upload q8");
+    cu(cudaMemcpy(ds, sc.data(), sc.size() * 2, cudaMemcpyHostToDevice), "upload q8 scales");
+    d->vram += q.size() + sc.size() * 2;
+    d->q8d[dq] = ds;
+    return (uint16_t*) dq;
+}
+
 // Y [T][N] (ldy) = X [T][K] BF16 . W [N][K]^T BF16, F32 sums
 void gemm_bf(Drafter* d, const uint16_t* W, int N, int K, const uint16_t* X, int T, float* Y, int ldy) {
+    if (d->q8) {   // (SAGUARO_IK2_DRAFT_Q8: a Q8_0 copy of this matrix on the tensor cores)
+        const auto it = d->q8d.find(W);
+        if (it != d->q8d.end()) {
+            const size_t n = (size_t) T * K;
+            if (n > d->xh_n) throw std::runtime_error("drafter Q8: an input larger than its FP16 buffer");
+            bf16_to_f16_kernel<<<(unsigned) ((n + 255) / 256), 256, 0, d->s>>>(X, n, d->xh);
+            k::q8_tile((const int8_t*) W, it->second, N, K, d->xh, T, Y, ldy, d->s);
+            return;
+        }
+    }
 #ifndef STRATA_USE_HIP
     if (d->bf16_cols && bf16_cols(W, N, K, X, T, Y, ldy, d->s)) return;
 #endif
@@ -380,6 +427,10 @@ Drafter* load(const std::string& path, int C, int ctx, cublasHandle_t blas, cuda
         cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev);
         const char* e = std::getenv("SAGUARO_IK2_DRAFT_BF16_COLS");
         d->bf16_cols = e ? std::atoi(e) != 0 : major < 8;
+#ifndef STRATA_USE_HIP
+        d->q8 = std::getenv("SAGUARO_IK2_DRAFT_Q8") && std::atoi(std::getenv("SAGUARO_IK2_DRAFT_Q8")) && major >= 7 &&
+                !(major == 7 && [&] { int mi = 0; cudaDeviceGetAttribute(&mi, cudaDevAttrComputeCapabilityMinor, dev); return mi < 5; }());
+#endif
     }
     {
         // (SAGUARO_IK2_DRAFT_CTX: the positions the layer without a window sees, the last ones; default the whole context)
@@ -426,19 +477,20 @@ Drafter* load(const std::string& path, int C, int ctx, cublasHandle_t blas, cuda
         l.q_norm = up32(d, st_bf16(f, b + "self_attn.q_norm.weight", {128}));
         l.k_norm = up32(d, st_bf16(f, b + "self_attn.k_norm.weight", {128}));
         l.k_norm_ctx = up32(d, st_bf16(f, b + "self_attn.k_norm_ctx.weight", {128}));
-        l.wq = up16(d, st_bf16(f, b + "self_attn.q_proj.weight", {H * 128, C}));
-        l.wk = up16(d, st_bf16(f, b + "self_attn.k_proj.weight", {KV * 128, C}));
-        l.wv = up16(d, st_bf16(f, b + "self_attn.v_proj.weight", {KV * 128, C}));
-        l.wo = up16(d, st_bf16(f, b + "self_attn.o_proj.weight", {C, H * 128}));
-        l.wkc = up16(d, st_bf16(f, b + "self_attn.k_proj_ctx.weight", {KV * 128, C}));
-        l.wvc = up16(d, st_bf16(f, b + "self_attn.v_proj_ctx.weight", {KV * 128, C}));
+        auto upw = [&](const std::vector<uint16_t>& v, int N, int K) { return d->q8 ? up_q8(d, v, N, K) : up16(d, v); };
+        l.wq = upw(st_bf16(f, b + "self_attn.q_proj.weight", {H * 128, C}), H * 128, C);
+        l.wk = upw(st_bf16(f, b + "self_attn.k_proj.weight", {KV * 128, C}), KV * 128, C);
+        l.wv = upw(st_bf16(f, b + "self_attn.v_proj.weight", {KV * 128, C}), KV * 128, C);
+        l.wo = upw(st_bf16(f, b + "self_attn.o_proj.weight", {C, H * 128}), C, H * 128);
+        l.wkc = upw(st_bf16(f, b + "self_attn.k_proj_ctx.weight", {KV * 128, C}), KV * 128, C);
+        l.wvc = upw(st_bf16(f, b + "self_attn.v_proj_ctx.weight", {KV * 128, C}), KV * 128, C);
         {
             auto g = st_bf16(f, b + "mlp.gate_proj.weight", {F, C});
             const auto u = st_bf16(f, b + "mlp.up_proj.weight", {F, C});
             g.insert(g.end(), u.begin(), u.end());   // gate's rows, then up's
-            l.wgu = up16(d, g);
+            l.wgu = upw(g, 2 * F, C);
         }
-        l.wd = up16(d, st_bf16(f, b + "mlp.down_proj.weight", {C, F}));
+        l.wd = upw(st_bf16(f, b + "mlp.down_proj.weight", {C, F}), C, F);
         if (l.local) {   // (a window of 1024: a ring of 2048 rows, F32)
             l.cap = std::min(ctx, 2048);
             l.kc = dalloc<float>((size_t) l.cap * KV * 128);
@@ -462,6 +514,11 @@ Drafter* load(const std::string& path, int C, int ctx, cublasHandle_t blas, cuda
     // work buffers
     const size_t T = kBlock;
     d->x = dalloc<float>(T * C), d->res = dalloc<float>(T * C), d->h = dalloc<float>(T * C);
+    if (d->q8) {   // (the largest product input: write_context's kMixRows rows of C, or a block's rows of F / H * 128)
+        d->xh_n = std::max((size_t) kMixRows * C, T * (size_t) std::max(std::max(d->F, d->H * 128), C));
+        d->xh = dalloc<uint16_t>(d->xh_n);
+        d->vram += d->xh_n * 2;
+    }
     d->q = dalloc<float>(T * H * 128), d->o = dalloc<float>(T * H * 128);
     d->kk = dalloc<float>(std::max<size_t>(T, kMixRows) * KV * 128), d->vv = dalloc<float>(T * KV * 128);
     d->gu = dalloc<float>(T * 2 * F);
