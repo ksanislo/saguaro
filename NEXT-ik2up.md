@@ -134,3 +134,14 @@ Card runs only through /data/llm/bench/night-queue/queue.txt (IK2_NO_CLAIM=1, ca
   alone, GPU 1's experts streamed from host).
 - KL 2 cards: new tc vs scalar 7.69e-4 / 99.00 % (bit-identical to 1 card: the split gives one GPU's answers);
   ours fast0 vs new tc 1.30e-3 / 98.40 %; ours fast vs new tc 9.36e-4 / 98.80 %.
+
+## Final state (2026-11-22 ~17:30 MST)
+- saguaro/ik2-up contains saguaro/qfn-vram de49529d1 (merged; conflicts resolved: relative configs, one-T4 config
+  dropped as main did, Inkling off NO_ENGINE for hip, recommended for one 16-23 GB RDNA card). Unit tests: the 8 asked
+  modules + test_setup_amd / test_setup_dash / test_hip_compat / test_hip_archs / test_tokenizer_inkling: OK.
+- CUDA build-ik2up clean; HIP build on mortar clean; merged HIP binary: serve_check 22/22 incl. pictures, offload by default.
+- AMD defaults now: offload path when the file does not fit (engine + setup), resident otherwise; 16 GB minimum.
+- Before merging to main: drop NEXT-ik2up.md from the tree (main keeps agent notes out of the repo).
+- Open: 1-T4 decode -40 % vs our port (static offload tier; promotion of hot misses would be the fix); 2-T4 prompt read
+  -26 % (prompts on GPU 0 alone); --parallel not taken on two GPUs (upstream's rule); AMD ik2_kernels_test
+  moe_combine_conv bit-equality FAIL (upstream kernel, gfx1201); drafting on AMD unchecked; --plan of our port gone.
