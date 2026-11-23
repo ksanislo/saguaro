@@ -620,6 +620,13 @@ void set_head_q8(Drafter* d, const int8_t* q8, const uint16_t* q8d) {
     d->head_tiles = false;        // (AMD: mma.sync is emulated on the shuffles - the row sums read the head once)
 #else
     d->head_tiles = major >= 8;   // (no mma.sync m16n8k16 before Ampere)
+    // SAGUARO_IK2_DRAFT_HEAD_TILES=1: Turing too (q8_tile runs there as two m16n8k8; the drafts need no exact sums)
+    if (const char* e = std::getenv("SAGUARO_IK2_DRAFT_HEAD_TILES"))
+        if (std::atoi(e) && major == 7) {
+            int minor = 0;
+            cu(cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, dev), "cudaDeviceGetAttribute");
+            if (minor >= 5) d->head_tiles = true;
+        }
 #endif
 }
 

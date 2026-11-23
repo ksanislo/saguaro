@@ -3751,9 +3751,17 @@ struct BlockBufs {
     k::ConvRec* recs = nullptr;  // every visit's four convs (rollback_block)
     int n_recs = 0;
     int *cand_d = nullptr, *cand_h = nullptr;   // kCand: each row's k::cand_topk out, [kBlockMax][2 + 2 kCandCap]
+    // SAGUARO_IK2_BLOCK_SPLIT=1 (the dynamic offload): the plan's class a pick (0 resident, 1 fetched) and the fetched
+    // picks' own group table - the residents' experts run while the copy stream fetches the misses (the token path's split)
+    int* cls = nullptr;
+    const uint8_t** blob1 = nullptr;
+    int *n1 = nullptr, *tok1 = nullptr, *row1 = nullptr;
+    std::vector<cudaEvent_t>* ev = nullptr;   // (the recording's fork events, a pair a visit)
+    std::vector<cudaEvent_t> ev_plain;        // (uncaptured launches')
 };
 BlockBufs g_blk;
-FastGraph g_bgraph[kBlockMax + 1][4];   // by window size and OutMode
+bool g_block_split = false;   // SAGUARO_IK2_BLOCK_SPLIT
+FastGraph g_bgraph[kBlockMax + 1][4];   // by window size and OutMode (ev: BLOCK_SPLIT's fork events)
 
 void block_init(Model& M) {
     if (g_blk.ready) return;
@@ -3769,6 +3777,10 @@ void block_init(Model& M) {
     g_blk.n = dalloc<int>(S), g_blk.inv = dalloc<int>(S);
     g_blk.tok = dalloc<int>((size_t) S * k::kGroupMax), g_blk.row = dalloc<int>((size_t) S * k::kGroupMax);
     g_blk.sg = dalloc<float>(S), g_blk.su = dalloc<float>(S), g_blk.wt = dalloc<float>(S);
+    if (g_block_split) {
+        g_blk.cls = dalloc<int>(S), g_blk.blob1 = dalloc<const uint8_t*>(S), g_blk.n1 = dalloc<int>(S);
+        g_blk.tok1 = dalloc<int>((size_t) S * k::kGroupMax), g_blk.row1 = dalloc<int>((size_t) S * k::kGroupMax);
+    }
     if (c.n_pass > 1) g_blk.lp_msg = dalloc<float>((size_t) (c.core1 - c.core0) * 4 * kBlockMax * C);
     std::vector<k::ConvRec> recs;
     for (auto& Vi : M.V) {
@@ -4063,45 +4075,68 @@ void fast_block_launches(Model& M, Work& W, int T, OutMode out_mode) {
         float* rw = (float*) (W.route_d + S);
         k::route_rows(W.rlog, Ly.probs_b, T, c.E, c.K, c.route_scale, rtop, rw, g_s);
         const uint8_t* const* pp = nullptr;
+        const bool split = g_off_dynamic && g_block_split;
         if (g_off_dynamic) {   // (B4: the window's picks through the tier - the plan resolves every pick's blob (the
             // tier's slot for a hit, an admission slot for a miss) and lists the misses for one fetch copy; the
             // group table then points each group at its leader pick's resolved slot)
             const auto& dc = g_offs.dcache[g_dev[0].EC.layer_pool[l]];
             k::off_cache_plan(g_blk.blob_pp, rtop, S, l * c.E, g_offs.host[l], Ly.slot_bytes, dc, g_offs.fl,
-                              g_offs.cnt, g_offs.heat, nullptr, g_s);
-            k::off_fetch_copy(g_offs.fl, Ly.slot_bytes, g_offs.blocks, g_s);
+                              g_offs.cnt, g_offs.heat, split ? g_blk.cls : nullptr, g_s);
+            if (split) {   // (the misses on the copy stream; the residents' experts below meanwhile)
+                auto& ev = *g_blk.ev;
+                CU(cudaEventRecord(ev[2 * vis], g_s));
+                CU(cudaStreamWaitEvent(g_cs, ev[2 * vis]));
+                k::off_fetch_copy(g_offs.fl, Ly.slot_bytes, g_offs.blocks, g_cs);
+                CU(cudaEventRecord(ev[2 * vis + 1], g_cs));
+            } else {
+                k::off_fetch_copy(g_offs.fl, Ly.slot_bytes, g_offs.blocks, g_s);
+            }
             pp = g_blk.blob_pp;
         }
         k::group_route(rtop, rw, S, c.K, Ly.tab_blob, Ly.tab_sc[0], Ly.tab_sc[1], Ly.tab_sc[2], g_blk.blob, g_blk.n,
-                       g_blk.tok, g_blk.row, g_blk.sg, g_blk.su, g_blk.wt, g_blk.inv, g_s, pp);
+                       g_blk.tok, g_blk.row, g_blk.sg, g_blk.su, g_blk.wt, g_blk.inv, g_s, pp,
+                       split ? g_blk.cls : nullptr, 0);
+        if (split)   // (the fetched picks' groups: their own table)
+            k::group_route(rtop, rw, S, c.K, Ly.tab_blob, Ly.tab_sc[0], Ly.tab_sc[1], Ly.tab_sc[2], g_blk.blob1,
+                           g_blk.n1, g_blk.tok1, g_blk.row1, g_blk.sg, g_blk.su, g_blk.wt, g_blk.inv, g_s, pp,
+                           g_blk.cls, 1);
         // (exact: the token path's choice - NVFP4 on the tensor cores unless SAGUARO_IK2_EXPERT_MMA=0, else the row dots)
 #ifdef STRATA_USE_HIP   // (AMD: the token path's default is the row dots - so is the window's)
         static const int exp_mma = getenv("SAGUARO_IK2_EXPERT_MMA") ? atoi(getenv("SAGUARO_IK2_EXPERT_MMA")) : 0;
 #else
         static const int exp_mma = getenv("SAGUARO_IK2_EXPERT_MMA") ? atoi(getenv("SAGUARO_IK2_EXPERT_MMA")) : 1;
 #endif
-        if (ex && !(exp_mma && k::experts_mma_fits(Ly.ty[0], Ly.ty[1], Ly.ty[2], C, c.F))) {
-            k::experts_gate_up_swiglu_mem(g_blk.blob, g_blk.n, g_blk.tok, g_blk.row, S, Ly.ty[0], Ly.ty[1], Ly.eb[0],
-                                          W.xq, C, c.F, g_blk.sg, g_blk.su, c.gate_cap, c.up_cap, W.h16, g_s);
-            k::experts_down_mem(g_blk.blob, g_blk.n, g_blk.row, S, Ly.ty[2], Ly.eb[0] + Ly.eb[1], W.h16, C, c.F, W.y32,
-                                g_s);
-        } else if (k::experts_mma_fits(Ly.ty[0], Ly.ty[1], Ly.ty[2], C, c.F)) {
-            uint16_t* limbs = (uint16_t*) W.gu32;
-            k::f16_limbs_rows(W.xq, T, C, limbs, g_s);
-            k::experts_block_gu(g_blk.blob, g_blk.n, g_blk.tok, g_blk.row, S, T, Ly.eb[0], C, c.F, limbs, g_blk.sg,
-                                g_blk.su, c.gate_cap, c.up_cap, W.h16, g_s);
-            k::experts_block_down(g_blk.blob, g_blk.n, g_blk.row, S, Ly.eb[0] + Ly.eb[1], C, c.F, W.h16, W.y32, g_s);
-        } else if (Ly.ty[0] == k::kQ8_0 && Ly.ty[1] == k::kQ8_0 && Ly.ty[2] == k::kQ8_0 && C % 32 == 0 && c.F % 32 == 0) {
-            uint16_t* limbs = (uint16_t*) W.gu32;
-            k::f16_limbs_rows(W.xq, T, C, limbs, g_s);
-            k::experts_block_gu_q8(g_blk.blob, g_blk.n, g_blk.tok, g_blk.row, S, T, Ly.eb[0], C, c.F, limbs, g_blk.sg,
-                                   g_blk.su, c.gate_cap, c.up_cap, W.h16, g_s);
-            k::experts_block_down_q8(g_blk.blob, g_blk.n, g_blk.row, S, Ly.eb[0] + Ly.eb[1], C, c.F, W.h16, W.y32, g_s);
-        } else {
-            k::experts_gate_up_swiglu_g(g_blk.blob, g_blk.n, g_blk.tok, g_blk.row, S, Ly.ty[0], Ly.ty[1], Ly.eb[0], W.xq,
-                                        C, c.F, g_blk.sg, g_blk.su, c.gate_cap, c.up_cap, W.h16, g_s);
-            k::experts_down_g(g_blk.blob, g_blk.n, g_blk.row, S, Ly.ty[2], Ly.eb[0] + Ly.eb[1], W.h16, C, c.F, W.y32,
-                              g_s);
+        const bool limbs_on = !(ex && !(exp_mma && k::experts_mma_fits(Ly.ty[0], Ly.ty[1], Ly.ty[2], C, c.F))) &&
+                              (k::experts_mma_fits(Ly.ty[0], Ly.ty[1], Ly.ty[2], C, c.F) ||
+                               (Ly.ty[0] == k::kQ8_0 && Ly.ty[1] == k::kQ8_0 && Ly.ty[2] == k::kQ8_0 && C % 32 == 0 &&
+                                c.F % 32 == 0));
+        uint16_t* limbs = (uint16_t*) W.gu32;
+        if (limbs_on) k::f16_limbs_rows(W.xq, T, C, limbs, g_s);
+        // one group table's experts (each slot's rows its own: the two tables of BLOCK_SPLIT write disjoint slots)
+        auto experts = [&](const uint8_t* const* gb, const int* gn, const int* gt, const int* gr) {
+            if (ex && !(exp_mma && k::experts_mma_fits(Ly.ty[0], Ly.ty[1], Ly.ty[2], C, c.F))) {
+                k::experts_gate_up_swiglu_mem(gb, gn, gt, gr, S, Ly.ty[0], Ly.ty[1], Ly.eb[0], W.xq, C, c.F, g_blk.sg,
+                                              g_blk.su, c.gate_cap, c.up_cap, W.h16, g_s);
+                k::experts_down_mem(gb, gn, gr, S, Ly.ty[2], Ly.eb[0] + Ly.eb[1], W.h16, C, c.F, W.y32, g_s);
+            } else if (k::experts_mma_fits(Ly.ty[0], Ly.ty[1], Ly.ty[2], C, c.F)) {
+                k::experts_block_gu(gb, gn, gt, gr, S, T, Ly.eb[0], C, c.F, limbs, g_blk.sg, g_blk.su, c.gate_cap,
+                                    c.up_cap, W.h16, g_s);
+                k::experts_block_down(gb, gn, gr, S, Ly.eb[0] + Ly.eb[1], C, c.F, W.h16, W.y32, g_s);
+            } else if (Ly.ty[0] == k::kQ8_0 && Ly.ty[1] == k::kQ8_0 && Ly.ty[2] == k::kQ8_0 && C % 32 == 0 &&
+                       c.F % 32 == 0) {
+                k::experts_block_gu_q8(gb, gn, gt, gr, S, T, Ly.eb[0], C, c.F, limbs, g_blk.sg, g_blk.su, c.gate_cap,
+                                       c.up_cap, W.h16, g_s);
+                k::experts_block_down_q8(gb, gn, gr, S, Ly.eb[0] + Ly.eb[1], C, c.F, W.h16, W.y32, g_s);
+            } else {
+                k::experts_gate_up_swiglu_g(gb, gn, gt, gr, S, Ly.ty[0], Ly.ty[1], Ly.eb[0], W.xq, C, c.F, g_blk.sg,
+                                            g_blk.su, c.gate_cap, c.up_cap, W.h16, g_s);
+                k::experts_down_g(gb, gn, gr, S, Ly.ty[2], Ly.eb[0] + Ly.eb[1], W.h16, C, c.F, W.y32, g_s);
+            }
+        };
+        experts(g_blk.blob, g_blk.n, g_blk.tok, g_blk.row);
+        if (split) {   // (the misses' slots are filled now)
+            CU(cudaStreamWaitEvent(g_s, (*g_blk.ev)[2 * vis + 1]));
+            experts(g_blk.blob1, g_blk.n1, g_blk.tok1, g_blk.row1);
         }
         k::moe_combine_f32(W.y32, g_blk.inv, g_blk.wt, T, c.K, C, W.tmp, false, g_s);
         k::conv_block(W.tmp, C, Ly.h_mlp, Ly.sc_mlp, nullptr, 0, 0, T, C, W.r, C, W.h, C, Ly.rec_old[3], Ly.rec_x[3],
@@ -4152,11 +4187,20 @@ void fast_block(Model& M, const int* tok, int T, int pos0, OutMode out_mode, std
         k::decode_host(M.embd_type, M.embd + (size_t) tok[t] * rb, c.C, g_blk.emb_h + (size_t) t * c.C);
         g_blk.pos_h[t] = pos0 + t;
     }
+    auto mk_ev = [&](std::vector<cudaEvent_t>& ev) {   // (BLOCK_SPLIT's fork events, a pair a visit)
+        if (ev.empty()) {
+            ev.resize(2 * c.n_visit);
+            for (cudaEvent_t& e : ev) CU(cudaEventCreateWithFlags(&e, cudaEventDisableTiming));
+        }
+        g_blk.ev = &ev;
+    };
     if (!g_graph || g_kv_streaming) {   // (the swing visit's rows move between RAM and VRAM: no recorded pointers)
+        if (g_block_split) mk_ev(g_blk.ev_plain);
         fast_block_launches(M, W, T, out_mode);
     } else {
         FastGraph& G = g_bgraph[T][(int) out_mode];
         if (!G.exec) {
+            if (g_block_split) mk_ev(G.ev);
             CU(cudaStreamBeginCapture(g_s, cudaStreamCaptureModeThreadLocal));
             fast_block_launches(M, W, T, out_mode);
             CU(cudaStreamEndCapture(g_s, &G.graph));
@@ -4650,6 +4694,11 @@ struct SpecCtl {
     int plain_run = 0;
     int probe = getenv("SAGUARO_IK2_DRAFT_PROBE") ? atoi(getenv("SAGUARO_IK2_DRAFT_PROBE")) : 8;   // plain tokens before a look
     int probe_w = 4;
+    // SAGUARO_IK2_DRAFT_BACKOFF=1: a look that leaves drafting still a loss doubles the plain run before the next
+    // (up to 128 tokens); a window drafting pays for resets it.  (Off: a look every probe tokens, the old way.)
+    bool backoff = getenv("SAGUARO_IK2_DRAFT_BACKOFF") && atoi(getenv("SAGUARO_IK2_DRAFT_BACKOFF"));
+    int gap = probe;
+    bool looked = false;
     double decay = getenv("SAGUARO_IK2_DRAFT_DECAY") ? atof(getenv("SAGUARO_IK2_DRAFT_DECAY")) : 0.85;
     uint64_t steps = 0, plain = 0, drafted = 0, accepted = 0;
     uint64_t hist[kBlockMax] = {};
@@ -4668,8 +4717,16 @@ struct SpecCtl {
             const double e = (1.0 - std::pow(a, b)) / (1.0 - a), v = e / c[b];
             if (v > vb) vb = v, best = b;
         }
-        if (best == 1 && plain_run >= probe) best = std::min(probe_w, bmax);   // (a look at the acceptance again)
+        looked = false;
+        if (best == 1 && plain_run >= (backoff ? gap : probe))   // (a look at the acceptance again)
+            best = std::min(probe_w, bmax), looked = true;
         return best;
+    }
+    bool pays(int bmax) const {   // (drafting at the current acceptance beats a plain token at some width)
+        const double a = std::min(0.98, (S + 0.5) / (S + F + 1.0));
+        for (int b = 2; b <= std::min(wmax, bmax); ++b)
+            if ((1.0 - std::pow(a, b)) / (1.0 - a) / c[b] > 1.0 / c_plain) return true;
+        return false;
     }
     void took_plain(double t) {
         c_plain = 0.9 * c_plain + 0.1 * t;
@@ -4680,6 +4737,8 @@ struct SpecCtl {
         S = decay * S + acc, F = decay * F + (acc < B - 1 ? 1 : 0);
         ++steps, drafted += B - 1, accepted += acc, ++hist[acc];
         plain_run = 0;
+        if (backoff) gap = looked && !pays(kBlockMax) ? std::min(128, gap * 2) : probe;
+        looked = false;
     }
     // The prompt lookup's drafts (the tokens after the latest earlier copy of the text's end, k of them): their own
     // acceptance (copied text is kept long or not at all), the same window costs.  pick: a step's source and width
@@ -4705,7 +4764,7 @@ struct SpecCtl {
             if (bm >= 2) {
                 const double a = std::min(0.98, (S + 0.5) / (S + F + 1.0));
                 const double v = (1.0 - std::pow(a, bm)) / (1.0 - a) / c[bm];
-                if (src == 0 || v > vb || plain_run >= probe) vb = v, B = bm, src = 1;
+                if (src == 0 || v > vb || plain_run >= (backoff ? gap : probe)) vb = v, B = bm, src = 1;
             }
         }
         return src;
@@ -4755,6 +4814,22 @@ int spec_pick(const std::vector<std::pair<int, double>>& dist, int draft, std::m
 int g_draft_force = 0;   // SAGUARO_IK2_DRAFT_FORCE: 1 drafting on Turing too, 2 also on the dynamic offload path (tests)
 int g_window_check = 0;                       // SAGUARO_IK2_WINDOW_CHECK: windows still to check against fast_token
 uint64_t g_window_rows = 0, g_window_same = 0;   // (rows checked, rows the same to the bit)
+uint64_t g_window_top1 = 0;                       // (rows whose argmax is the one-token path's)
+double g_window_kl = 0, g_window_kl_max = 0;      // (KL(one-token || window) summed over the rows, nats; the largest)
+// KL(p_a || p_b) of two logit rows (softmax over the real vocabulary), nats
+double row_kl(const float* a, const float* b, int n) {
+    float ma = a[0], mb = b[0];
+    for (int v = 1; v < n; ++v) ma = std::max(ma, a[v]), mb = std::max(mb, b[v]);
+    double za = 0, zb = 0;
+    for (int v = 0; v < n; ++v) za += std::exp((double) a[v] - ma), zb += std::exp((double) b[v] - mb);
+    const double la = std::log(za), lb = std::log(zb);
+    double kl = 0;
+    for (int v = 0; v < n; ++v) {
+        const double pa = (double) a[v] - ma - la, pb = (double) b[v] - mb - lb;
+        kl += std::exp(pa) * (pa - pb);
+    }
+    return std::max(0.0, kl);
+}
 
 // One speculative step: the anchor (the last chosen token, not run yet) at position P, B - 1 drafts after it, the B
 // verified as one window.  next: the tokens chosen after the anchor - the accepted drafts and the target's own next
@@ -4787,16 +4862,22 @@ void spec_step(Model& M, ik2::draft::Drafter* drafter, int anchor, int P, int B,
         fast_block(M, tk, B, P, OutMode::kLogits, lb, nullptr);
         block_rollback(0);
         for (int j = 0; j < B; ++j) fast_token(M, tk[j], P + j, OutMode::kLogits, lt, nullptr);
-        int same = 0;
-        double mx = 0;
+        int same = 0, top1 = 0;
+        double mx = 0, klm = 0;
         for (int j = 0; j < B; ++j) {
             const float *a = lb.data() + (size_t) j * c.n_vocab, *b = lt.data() + (size_t) j * c.n_vocab;
             same += !std::memcmp(a, b, (size_t) c.n_vocab * 4);
             for (int v = 0; v < c.n_vocab; ++v) mx = std::max(mx, (double) std::fabs(a[v] - b[v]));
+            top1 += std::max_element(a, a + c.n_vocab) - a == std::max_element(b, b + c.n_vocab) - b;
+            const double kl = row_kl(b, a, c.n_vocab);
+            g_window_kl += kl, klm = std::max(klm, kl);
         }
-        g_window_rows += B, g_window_same += same;
+        g_window_rows += B, g_window_same += same, g_window_top1 += top1;
+        g_window_kl_max = std::max(g_window_kl_max, klm);
         std::fprintf(stderr, "window check: %d tokens at %d, %d of %d rows the one-token path's to the bit "
-                     "(max |dlogit| %.3g)\n", B, P, same, B, mx);
+                     "(max |dlogit| %.3g, KL max %.3g, top-1 %d of %d); so far %llu rows: KL mean %.3g max %.3g, "
+                     "top-1 %.4f\n", B, P, same, B, mx, klm, top1, B, (unsigned long long) g_window_rows,
+                     g_window_kl / g_window_rows, g_window_kl_max, (double) g_window_top1 / g_window_rows);
         block_rollback(0);   // (and the window again: its records and the drafter's taps)
     }
     if (sc.temp <= 0) {
@@ -6959,6 +7040,7 @@ int main(int argc, char** argv) {
     g_block = !(getenv("SAGUARO_IK2_BLOCK") && !std::atoi(getenv("SAGUARO_IK2_BLOCK")));
     g_block_exact = !(getenv("SAGUARO_IK2_BLOCK_EXACT") && !std::atoi(getenv("SAGUARO_IK2_BLOCK_EXACT")));
     g_window_check = getenv("SAGUARO_IK2_WINDOW_CHECK") ? std::atoi(getenv("SAGUARO_IK2_WINDOW_CHECK")) : 0;
+    g_block_split = getenv("SAGUARO_IK2_BLOCK_SPLIT") && std::atoi(getenv("SAGUARO_IK2_BLOCK_SPLIT"));
     if (g_block_exact && !k::experts_block_exact()) {   // (SAGUARO_IK2_EXPERT_MMA_SPLIT* not the defaults: no exact window)
         if (!draft_path.empty())
             std::printf("INFO saguaro ik2: drafting off - SAGUARO_IK2_EXPERT_MMA_SPLIT / _DOWN are not 8 / 4, and the verify "
