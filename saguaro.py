@@ -8544,7 +8544,9 @@ def main() -> int:
     ap.add_argument("--gguf-dir", help="use GLM-5.3-Flash GGUF files you already have: the folder with all of them, "
                                        "or the .gguf file (the first one of a split model) when the folder holds "
                                        "several models; it must be writable - the pack is written inside it "
-                                       "(without this option the setup lists the ones it finds in ~/models*)")
+                                       "(without this option the setup lists the ones it finds in ~/models*); "
+                                       "with --model qwen3.8-flash-next: the folder with that quant's .gguf shards, "
+                                       "used in place and checked (its pack goes in the models folder)")
     ap.add_argument("--models-dir", help="where downloaded models go, each in a folder named after it, e.g. "
                                          "<DIR>/Maya-L/ (default: Saguaro-data/models next to this folder); use "
                                          "a fast NVMe SSD with ~100 GB free")
