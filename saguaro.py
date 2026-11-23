@@ -5018,7 +5018,7 @@ def bench_model_name(cfg: dict) -> str:
         for k in ("--glm-pack", "--pack", "--model"):
             if k in a[:-1]:
                 p = Path(a[a.index(k) + 1])
-                q = (p.parent.name if p.name in ("pack", HY4_PACK, "saguaro-ik2", "maya-hy4", "maya-ik2") or p.suffix == ".gguf" else p.name)
+                q = (p.parent.name if p.name in ("pack", HY4_PACK, "saguaro-ik2") or p.suffix == ".gguf" else p.name)
                 break
     return f"{cfg.get('model_name') or config_family(cfg)} {q or '?'}".strip()
 
