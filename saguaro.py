@@ -7377,7 +7377,7 @@ def choose_hy4_quant(a, prev: dict) -> str:
                      + note))
     pick = choose(f"Which size of {HY4}?", ["Project Maya's GGUF quants of it (the n-gram table, 63 GB, is the same "
                                             "file for every size):"],
-                  rows, order.index(default), a.yes or getattr(a, "check", False))
+                  rows, order.index(default), getattr(a, "yes", False) or getattr(a, "check", False))
     return order[pick]
 
 
@@ -7578,16 +7578,106 @@ def set_up_hy4(a, prev: dict) -> Path | None:
     return cfg_path
 
 
-def ik2_entry() -> dict:
-    """Inkling 2 Mini's download (tools/ik2/download.json: unsloth's UD-Q4_K_XL) as offer_download reads it."""
+def ik2_entry(quant: str | None = None) -> dict:
+    """Inkling 2 Mini's download as offer_download reads it (tools/ik2/download.json): unsloth's UD-Q4_K_XL, or one of
+    Strata's packs (quant strata-sq-*: the pack, the repo's tokenizer.json, config.json and special_tokens_map.json).
+    "gguf": the file the engine's --model names; "experts_gib": its experts as the engine holds them; "kl": the
+    published closeness to the original weights."""
     man = read_json(IK2_MANIFEST)
+    if quant and quant != Q.IK2_QUANT:
+        st = man.get("strata") or {}
+        pk = (st.get("packs") or {}).get(quant)
+        if not pk or not st.get("repo") or not st.get("revision"):
+            fail(f"{IK2_MANIFEST} names no {Q.shown('ik2', quant)}", "restore it (git checkout tools/ik2/download.json)")
+        files = {pk["file"]: [pk["size"], pk["sha256"]], **(st.get("common") or {})}
+        return {"about": f"{IK2_SHOWN} as Strata's {pk['about']}; {st.get('license', 'Apache 2.0')}",
+                "format": "ik2-strata", "repo": st["repo"], "revision": st["revision"], "folder": st.get("folder", ""),
+                "files": {k: v[0] for k, v in files.items()}, "sha256": {k: v[1] for k, v in files.items()},
+                "gguf": pk["file"], "name": pk["name"], "download_gb": sum(v[0] for v in files.values()) / 1e9,
+                "experts_gib": float(pk["experts_gib"]), "kl": pk.get("kl")}
     if not man.get("files") or not man.get("revision") or man.get("gguf") not in (man.get("files") or {}):
         fail(f"{IK2_MANIFEST} is missing or damaged", "restore it (git checkout tools/ik2/download.json)")
     return {"about": f"{IK2_SHOWN} in unsloth's GGUF ({man.get('about', 'UD-Q4_K_XL')}); "
                      f"{man.get('license', 'Apache 2.0')}",
             "format": "ik2-gguf", "repo": man["repo"], "revision": man["revision"], "folder": man.get("folder", ""),
             "files": {k: v[0] for k, v in man["files"].items()}, "sha256": {k: v[1] for k, v in man["files"].items()},
-            "gguf": man["gguf"], "download_gb": sum(v[0] for v in man["files"].values()) / 1e9}
+            "gguf": man["gguf"], "name": man.get("name", f"{IK2}-UD-Q4_K_XL"),
+            "download_gb": sum(v[0] for v in man["files"].values()) / 1e9,
+            "experts_gib": IK2F.EXPERTS_GIB, "kl": man.get("kl")}
+
+
+def ik2_published(quant: str) -> bool:
+    """Whether tools/ik2/download.json offers these files."""
+    if quant == Q.IK2_QUANT:
+        return True
+    return quant in ((read_json(IK2_MANIFEST).get("strata") or {}).get("packs") or {})
+
+
+def ik2_pack_in(d: Path) -> str | None:
+    """The Strata pack in a folder (its quant key), by the published file names; None: none there."""
+    for k in Q.IK2_QUANTS[1:]:
+        if ik2_published(k) and (d / ik2_entry(k)["gguf"]).exists():
+            return k
+    return None
+
+
+IK2_KL_FAST = 0.02   # (a file this far from the original is offered for speed, not recommended for it: SQ-10's 0.05)
+
+
+def ik2_recommend(cards: list, amd: bool) -> str:
+    """The files for these cards: the closest to the original weights among those whose experts all stay in VRAM at
+    32K (and within IK2_KL_FAST of the original); else the closest among those keeping two thirds of them there;
+    else the smallest.  Two NVIDIA cards count together where the split holds every expert."""
+    keys = [k for k in Q.IK2_QUANTS if ik2_published(k)]
+    gib = {k: ik2_entry(k)["experts_gib"] for k in keys}
+    kl = {k: (ik2_entry(k)["kl"] if ik2_entry(k)["kl"] is not None else 1.0) for k in keys}
+    vr = sorted((float(g.get("vram_gb") or 0) for g in cards), reverse=True)
+    if not vr or not vr[0]:
+        return Q.IK2_QUANT
+    ctx = IK2F.CONTEXTS[0]
+    def resident(k):
+        if len(vr) >= 2 and not amd:
+            return IK2F.plan_two(vr[0], vr[1], ctx, experts_gib=gib[k])["layout"] in ("resident", "split")
+        return IK2F.plan(vr[0], ctx, experts_gib=gib[k])["resident"]
+    res = [k for k in keys if resident(k) and kl[k] <= IK2_KL_FAST]
+    if res:
+        return min(res, key=lambda k: (kl[k], gib[k]))
+    good = [k for k in keys if IK2F.plan(vr[0], ctx, experts_gib=gib[k])["tier_gib"] >= gib[k] * 2 / 3]
+    if good:
+        return min(good, key=lambda k: (kl[k], gib[k]))
+    return min(keys, key=lambda k: gib[k])
+
+
+def choose_ik2_quant(a, prev: dict, cards: list, amd: bool) -> str:
+    """--ik2-quant (or --model inkling-2-mini-sq-15 ...), a Strata pack in --model-dir, else asked among the files
+    published - the one for these cards recommended (ik2_recommend)."""
+    if getattr(a, "ik2_quant", None):
+        return a.ik2_quant
+    if a.model_dir:
+        md = Path(a.model_dir).expanduser()
+        k = ik2_pack_in(md)
+        if k:
+            return k
+        if md.is_dir() and any(not f.name.startswith("mmproj") for f in md.glob("*.gguf")):
+            return Q.IK2_QUANT                         # (a GGUF there: UD-Q4_K_XL, or one of your own)
+    keys = [k for k in Q.IK2_QUANTS if ik2_published(k)]
+    before = (prev.get("installer") or {}).get("ik2_quant")
+    rec = ik2_recommend(cards, amd)
+    order = sorted(keys, key=lambda k: k != rec)
+    default = before if before in order and before != rec and not getattr(a, "yes", False) else order[0]
+    vram = max([float(g.get("vram_gb") or 0) for g in cards] or [0.0])
+    rows = []
+    for k in order:
+        m = ik2_entry(k)
+        word, line = IK2F.verdict(vram, mem_gb()[0], IK2F.CONTEXTS[0], IK2F.DEFAULT_KV, amd, m["experts_gib"])
+        close = ("the original weights" if m["kl"] == 0 else
+                 f"KL {m['kl']:.4f} from the original" if m["kl"] is not None else "")
+        rows.append((Q.shown("ik2", k, m["download_gb"]), "recommended" if k == rec else None,
+                     f"{m['about'].split(';')[0]}; {close}; on your card at 32K: {line}"))
+    pick = choose(f"Which files of {IK2_SHOWN}?", ["unsloth's GGUF or one of Strata's packs (the same model, read "
+                                                   "as published - Strata's exactly as Strata decodes them):"],
+                  rows, order.index(default), a.yes or getattr(a, "check", False))
+    return order[pick]
 
 
 def ik2_vision_model() -> dict | None:
@@ -7603,14 +7693,17 @@ def ik2_vision_model() -> dict | None:
             "download_gb": sum(v[0] for v in man["files"].values()) / 1e9}
 
 
-def ik2_dir(a, models: Path, prev: dict) -> Path:
-    """The model's folder: --model-dir, else the folder of the setup before, else <models folder>/Inkling-2-Mini."""
+def ik2_dir(a, models: Path, prev: dict, quant: str = Q.IK2_QUANT) -> Path:
+    """The model's folder: --model-dir, else the folder of the setup before (the same files), else
+    <models folder>/Inkling-2-Mini (UD-Q4_K_XL) or <models folder>/Inkling-2-Mini-Strata-SQ-15 (a pack)."""
     if a.model_dir:
         return Path(a.model_dir).expanduser().resolve()
-    d = (prev.get("installer") or {}).get("model_dir")
-    if d and Path(d).is_dir() and config_family(prev) == "ik2":
+    inst = prev.get("installer") or {}
+    d = inst.get("model_dir")
+    if d and Path(d).is_dir() and config_family(prev) == "ik2" and \
+            str(inst.get("ik2_quant") or Q.IK2_QUANT) == quant:
         return Path(d)
-    return models / IK2
+    return models / (IK2 if quant == Q.IK2_QUANT else ik2_entry(quant)["name"])
 
 
 def ik2_local_gguf(a, d: Path) -> Path | None:
@@ -7618,25 +7711,26 @@ def ik2_local_gguf(a, d: Path) -> Path | None:
     all fit a 16 GB card): that file - the only *.gguf there beside an mmproj, the published one absent - else None."""
     if not getattr(a, "model_dir", None) or not d.is_dir():
         return None
-    if (d / ik2_entry()["gguf"]).is_file():
+    if (d / ik2_entry()["gguf"]).is_file() or ik2_pack_in(d):   # (the published GGUF, or a Strata pack)
         return None
     found = [f for f in sorted(d.glob("*.gguf")) if not f.name.startswith("mmproj")]
     return found[0] if len(found) == 1 else None
 
 
-def ik2_model_step(a, d: Path) -> Path | None:
-    """The model's GGUF in d, downloaded when it is not there (resumable), then checked against its published sha256;
-    None when it was not downloaded.  A GGUF of your own in --model-dir (ik2_local_gguf) is taken as it is."""
-    name = Q.shown("ik2", Q.IK2_QUANT)
-    local = ik2_local_gguf(a, d)
+def ik2_model_step(a, d: Path, quant: str = Q.IK2_QUANT) -> Path | None:
+    """The model's file in d (UD-Q4_K_XL's GGUF, or a Strata pack with the repo's tokenizer files), downloaded when it
+    is not there (resumable, a large file in byte ranges at once), then checked against its published sha256; None
+    when it was not downloaded.  A GGUF of your own in --model-dir (ik2_local_gguf) is taken as it is."""
+    name = Q.shown("ik2", quant)
+    local = ik2_local_gguf(a, d) if quant == Q.IK2_QUANT else None
     step(5, f"the model ({local.name if local else name})")
     if local is not None:
         ok(f"{local.name}: {local.stat().st_size / 1e9:.1f} GB in {d} (your own file: not the published one, not "
            "sha256-checked)")
         return local
-    m = ik2_entry()
-    files = [d / m["gguf"]]
-    if any(file_incomplete(m, f) for f in files) and not offer_download(a, Q.shown("ik2", Q.IK2_QUANT, m["download_gb"]),
+    m = ik2_entry(quant)
+    files = [d / m["gguf"]] + [d / n for n in m["files"] if n != m["gguf"]]
+    if any(file_incomplete(m, f) for f in files) and not offer_download(a, Q.shown("ik2", quant, m["download_gb"]),
                                                                         d, files, m):
         return None
     for f in files:                                    # (a file that was already there: checked once, then remembered)
@@ -7766,22 +7860,22 @@ def ik2_draft_forget() -> None:
 
 
 def write_config_ik2(a, pc: dict, meta: dict, gguf: Path, tok: Path, ctx: int, models: Path, d: Path, lay: dict,
-                     vision: dict | None = None, drafter: Path | None = None) -> Path:
+                     vision: dict | None = None, drafter: Path | None = None, quant: str = Q.IK2_QUANT) -> Path:
     """maya-inkling-2-mini.json and its start script: the layout's flags for one card or two (ik2_fit.layout; AMD:
     ik2_fit.amd_layout), drafting (--drafting auto by default; off where it does not run).  A setup again keeps the
     config before's env, where the server listens and its key; the flags follow the cards chosen now.  saguaro-ik2
     stops at a flag it does not know: only its own are written."""
     step(8, "the configuration and the start script")
     port = a.port or 8080
-    cfg_path = ROOT / f"{Q.config_stem('ik2', Q.IK2_QUANT)}.json"
+    cfg_path = ROOT / f"{Q.config_stem('ik2', quant)}.json"
     old = read_json(cfg_path)
     how = ik2_drafting(a)
     args = ["--model", str(gguf), "--max-context", str(ctx)] + list(lay["args"]) + \
         (["--draft", str(drafter)] if drafter and how != "off" else []) + ["--drafting", how]
     same = [int(i) for i in old.get("gpu") or []] == [int(g["index"]) for g in pc["gpus"]]
     kept = keep_args(old.get("args") or [], args, ("--threads",) + (("--chunk",) if same else ()))
-    inst = {"family": "ik2", "quant": Q.OTHERS[("ik2", Q.IK2_QUANT)], "ik2_quant": Q.IK2_QUANT, "drafting": how}
-    if gguf.name != ik2_entry()["gguf"]:              # (a GGUF of your own: its name, for the page and a setup again)
+    inst = {"family": "ik2", "quant": Q.OTHERS[("ik2", quant)], "ik2_quant": quant, "drafting": how}
+    if gguf.name != ik2_entry(quant)["gguf"]:         # (a GGUF of your own: its name, for the page and a setup again)
         inst["ik2_file"] = gguf.name
     sampling, effort = Q.model_defaults({"installer": inst})
     cfg = {"exe": str(IK2_EXE), "args": args, "cwd": str(ROOT), "tokenizer": str(tok), "model_name": IK2_MODEL_NAME,
@@ -7840,10 +7934,11 @@ def set_up_ik2(a, prev: dict) -> Path | None:
     pc = check_pc(a, "ik2")                            # 1
     models = (Path(a.models_dir).expanduser().resolve() if a.models_dir else
               Path(inst["models_dir"]) if inst.get("models_dir") else default_models_dir())
-    d = ik2_dir(a, models, prev)
-    local = ik2_local_gguf(a, d)
-    ex = (IK2F.experts_gib_of(local) if local else None) or IK2F.EXPERTS_GIB
     amd = pc.get("backend") == "hip"
+    quant = choose_ik2_quant(a, prev, [dict(g, vram_gb=ik2_amd_room(g)) if amd else g for g in pc["gpus"]], amd)
+    d = ik2_dir(a, models, prev, quant)
+    local = ik2_local_gguf(a, d) if quant == Q.IK2_QUANT else None
+    ex = (IK2F.experts_gib_of(local) if local else None) or ik2_entry(quant)["experts_gib"]
     if amd:   # (every expert in the GPU's memory where the file fits, else the offload path)
         g = pc["gpus"][0]
         room = ik2_amd_room(g)
@@ -7859,8 +7954,8 @@ def set_up_ik2(a, prev: dict) -> Path | None:
                  f"{IK2_SHOWN}: the first card chosen holds every expert alone - the second is not used (one card is "
                  "faster there)", "pick the cards with --gpu N or --gpus A,B")
     step(2, "your choices")                            # 2
-    m = ik2_entry()
-    ok(f"model: {local.name + f' (your own file, {ex:.1f} GB of experts)' if local else Q.shown('ik2', Q.IK2_QUANT, m['download_gb'])}"
+    m = ik2_entry(quant)
+    ok(f"model: {local.name + f' (your own file, {ex:.1f} GB of experts)' if local else Q.shown('ik2', quant, m['download_gb'])}"
        " - thinkingmachines' Inkling-2-Mini (Apache 2.0)")
     if amd:
         warn(f"{IK2_SHOWN} on AMD is experimental here: checked on an RX 9070 XT (gfx1201) only - tell us how it goes")
@@ -7890,7 +7985,7 @@ def set_up_ik2(a, prev: dict) -> Path | None:
         fail(f"the engine was not built ({IK2_EXE})", "the reason is in the build's messages above (saguaro-ik2 "
              + ("needs an RDNA 3 / 3.5 / 4 GPU in the build's list, on Linux)" if amd else
                 "needs a V100 / Tesla T4 / RTX 20 or newer card in the build's GPU list)"))
-    gguf = ik2_model_step(a, d)                        # 5
+    gguf = ik2_model_step(a, d, quant)                 # 5
     if gguf is None:
         return None
     off = IK2F.drafting_off_reason(None if amd else lay["gpus"][0].get("arch"), vram, ctx, kv, amd, ex)
@@ -7904,7 +7999,7 @@ def set_up_ik2(a, prev: dict) -> Path | None:
         drafter = ik2_drafter_step(a, d, vram, ctx, kv, ex)
     tok = ik2_tokenizer_step(a, d, gguf)               # 6
     vision = ik2_vision_step(a, pc, meta, llama, d)    # 7
-    return write_config_ik2(a, pc, meta, gguf, tok, ctx, models, d, lay, vision, drafter)   # 8
+    return write_config_ik2(a, pc, meta, gguf, tok, ctx, models, d, lay, vision, drafter, quant=quant)   # 8
 
 
 def set_up_and_serve(a, prev: dict) -> tuple | None:
@@ -7951,8 +8046,16 @@ def model_option(a) -> str | None:
     if family == "qwen":                                 # (its one GGUF: no quant to choose)
         a.model = QWEN
         return None
-    if family == "ik2":                                  # (its one file set, unsloth's UD-Q4_K_XL)
+    if family == "ik2":                                  # (unsloth's UD-Q4_K_XL or one of Strata's packs)
+        given = getattr(a, "ik2_quant", None)
+        plain = a.model.strip().lower() in (Q.IK2_IDS[0], "inkling2-mini", "ik2-mini", "ik2", IK2.lower())
         a.model = IK2
+        if plain:                                        # (the model by its name: its files asked, or --ik2-quant)
+            return None
+        if given and given != key:
+            return (f"--model {Q.ik2_setup_id(key)} is {Q.shown('ik2', key)}, but --ik2-quant says {given}: give "
+                    "one of them")
+        a.ik2_quant = key
         return None
     a.model, flag = {"deepseek": (DS4, "ds4_quant"), "hy4": (HY4, "hy4_quant")}.get(family, (MM3, "mm3_quant"))
     if key is not None:
@@ -8043,6 +8146,10 @@ def main() -> int:
                          "PC), maya-s (gguf-s) = MiniMax-M3.1-Flash-Maya-S (~2.1 bits, ~122 GB) - the GGUFs on NVIDIA "
                          "from V100 on and on AMD; with --model-dir: the files you have (the same as --model "
                          "minimax-maya-xs / minimax-maya-s)")
+    ap.add_argument("--ik2-quant", choices=list(Q.IK2_QUANTS),
+                    help=f"{IK2_SHOWN}'s files: ud-q4_k_xl (unsloth's GGUF), strata-sq-20 (the original weights, 24 GB "
+                         "cards), strata-sq-15 (16 GB cards), strata-sq-10 (12 GB cards) - Strata's packs; the same as "
+                         "--model inkling-2-mini-sq-15 ...; not given: the setup picks what fits your cards")
     ap.add_argument("--hy4-quant", choices=list(HY4_QUANTS),
                     help=f"{HY4}'s size: maya-s (experts 2-3 bits, 117 GB of files; measured on 4x Tesla T4), maya-xs "
                          "(2 bits), maya-m, maya-l - the same as --model hy4-flash-maya-s ...")

@@ -333,7 +333,7 @@ def amd_layout(card: dict, experts_gib: float = EXPERTS_GIB) -> dict:
     vram = float(card.get("vram_gb") or 0)
     p = plan(vram, CONTEXTS[0], DEFAULT_KV, True, experts_gib)
     env = {"SAGUARO_IK2_RESERVE_MB": "1024"} if vram and vram < 20 else {}
-    res = p["resident"] or float(experts_gib) < EXPERTS_GIB - 1   # (a smaller quant: the engine keeps it resident)
+    res = p["resident"] or float(experts_gib) < 11.6   # (our one-T4 quant, 11.45 GiB, SQ-10: the engine keeps them resident)
     return {"gpus": [card], "args": ["--gpus", "1", "--chunk", "1024" if res else "2048", "--threads", str(THREADS)],
             "context": recommended_context(vram, DEFAULT_KV, True, experts_gib) if p["resident"] else CONTEXTS[0],
             "env": env, "resident": res, "path": "resident" if res else "offload", "measured": False,
