@@ -246,7 +246,11 @@ struct Mat {
     int type = 0, N = 0, K = 0; // RTX PRO 6000 (16 against 21 ms a token), for 4 GiB more VRAM
     // a fused matrix whose parts are blocks of different types (a Strata pack: Q8_ROW and BF16 rows) - its parts at
     // their first rows; every product runs over each in turn
-    std::vector<std::pair<int, Mat>> seg;
+    std::vector<struct MatSeg> seg;
+};
+struct MatSeg {
+    int first;    // its first row in the whole
+    Mat second;
 };
 
 struct Layer {
