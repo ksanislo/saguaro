@@ -4841,8 +4841,538 @@ void spec_step(Model& M, ik2::draft::Drafter* drafter, int anchor, int P, int B,
     }
 }
 
+// ---- --tp N: tensor parallel over N GPUs (tp_init at load).  A member holds 1 / N of every layer's heads (their
+// projections, convs, clips, sinks, K / V cache) and of every expert's width; the rest of a layer is the same on all.
+// A layer visit has two sums over the members: the output projection's partials and the MoE's (after each member's
+// combine of its 8 picks' partial rows), [T][C] each.  A member copies its partial into every other member's receive
+// slot (peer copies), then each adds p0 + p1 + .. in member order: the same bits on every member, so the replicated
+// parts (the stream, the norms, the router's picks) stay identical.  Two slots by a sum's parity: a copy into a
+// peer's slot k % 2 follows that peer's add of sum k - 2 (it waited for the peer's copy of sum k - 1, made after it).
+constexpr int kTpMax = 8;
+struct TpParts {
+    const float* p[kTpMax];
+};
+__global__ void tp_sum4_kernel(TpParts s, int N, size_t n4, float4* __restrict__ out) {
+    for (size_t i = blockIdx.x * (size_t) blockDim.x + threadIdx.x; i < n4; i += (size_t) gridDim.x * blockDim.x) {
+        float4 a = ((const float4*) s.p[0])[i];
+        for (int j = 1; j < N; ++j) {
+            const float4 b = ((const float4*) s.p[j])[i];
+            a.x += b.x, a.y += b.y, a.z += b.z, a.w += b.w;
+        }
+        out[i] = a;
+    }
+}
+struct TpMember {
+    float* recv[2][kTpMax] = {};   // [slot][from member]: [Tm][C]
+    cudaEvent_t ev = nullptr;      // (its stream: its partial copied out to every other member)
+    cudaEvent_t fork = nullptr, join = nullptr;
+};
+std::vector<TpMember> g_tpx;
+int g_tp_k = 0;            // the sums of this call so far (their slot: g_tp_k & 1)
+size_t g_tp_cap = 0;       // floats a receive slot holds
+FastGraph g_tpgraph[4];    // a token's launches on every member, by OutMode
+
+void tp_init(Model& M, int chunk) {
+    const int N = g_tpn;
+    if (N > kTpMax) die("--tp: at most " + std::to_string(kTpMax));
+    if (g_stage) die("--tp: the load's staging is still held");
+    g_tpx.assign(N, {});
+    g_tp_cap = (size_t) std::max(chunk, 1) * M.c.C;
+    for (int m = 0; m < N; ++m) {
+        use_dev(m);
+        for (int s = 0; s < 2; ++s)
+            for (int j = 0; j < N; ++j)
+                if (j != m) g_tpx[m].recv[s][j] = dalloc<float>(g_tp_cap);
+        CU(cudaEventCreateWithFlags(&g_tpx[m].ev, cudaEventDisableTiming));
+        CU(cudaEventCreateWithFlags(&g_tpx[m].fork, cudaEventDisableTiming));
+        CU(cudaEventCreateWithFlags(&g_tpx[m].join, cudaEventDisableTiming));
+    }
+    use_dev(0);
+    size_t fr = 0, tot = 0;
+    for (int m = 0; m < N; ++m) {
+        use_dev(m);
+        CU(cudaMemGetInfo(&fr, &tot));
+        std::printf("tensor parallel: GPU %d %.1f GiB free\n", m, fr / 1073741824.0);
+    }
+    use_dev(0);
+}
+// member m (current): its partial x [n] out to the others' receive slots
+void tp_push(int m, const float* x, size_t n) {
+    if (n > g_tp_cap) die("--tp: a sum larger than its receive slot");
+    const int s = g_tp_k & 1;
+    for (int j = 0; j < g_tpn; ++j)
+        if (j != m) CU(cudaMemcpyAsync(g_tpx[j].recv[s][m], x, n * 4, cudaMemcpyDefault, g_s));
+    CU(cudaEventRecord(g_tpx[m].ev, g_s));
+}
+// member m (current): x = the members' partials added in member order (after every member's tp_push of this sum)
+void tp_reduce(int m, float* x, size_t n) {
+    const int s = g_tp_k & 1;
+    TpParts p{};
+    for (int j = 0; j < g_tpn; ++j) {
+        if (j == m) {
+            p.p[j] = x;
+            continue;
+        }
+        CU(cudaStreamWaitEvent(g_s, g_tpx[j].ev, 0));
+        p.p[j] = g_tpx[m].recv[s][j];
+    }
+    const size_t n4 = n / 4;
+    tp_sum4_kernel<<<(unsigned) std::min<size_t>((n4 + 255) / 256, 1024), 256, 0, g_s>>>(p, g_tpn, n4, (float4*) x);
+}
+
+// one token's launches on every member (the embedding row and position in member 0's pinned emb_h / pos_h)
+void tp_token_launches(OutMode out_mode) {
+    const int N = g_tpn;
+    const Config& c = g_tpm[0]->c;
+    const int C = c.C, HD = c.H * c.D, KD = c.KV * c.D, HR = c.H * c.d_rel;
+    const size_t Cb = (size_t) C * 4;
+    const float qk_scale = 1.0f / std::sqrt((float) c.D);
+    const float k_scale = c.qk_clip <= 28.0f ? 16.0f : 1.0f, v_scale = 32.0f;
+    const int P_sl = std::min(128, std::max(1, (c.window + 63) / 64)), P_full = 128;
+    Work& W0 = dev_work(0);
+    g_tp_k = 0;
+    use_dev(0);
+    CU(cudaEventRecord(g_tpx[0].fork, g_s));
+    int nb[kTpMax] = {}, nb_pre[kTpMax] = {}, n_bank[kTpMax] = {};
+    const float* msg[kTpMax] = {};
+    for (int m = 0; m < N; ++m) {
+        use_dev(m);
+        Work& W = dev_work(m);
+        if (m) CU(cudaStreamWaitEvent(g_s, g_tpx[0].fork, 0));
+        CU(cudaMemcpyAsync(W.tmp, W0.emb_h, Cb, cudaMemcpyHostToDevice, g_s));
+        k::rms(W.tmp, g_tpm[m]->embd_norm, 1, C, c.eps, W.h, g_s);
+        CU(cudaMemcpyAsync(W.pos, W0.pos_h, 4, cudaMemcpyHostToDevice, g_s));
+    }
+    for (int vis = 0; vis < c.n_visit; ++vis) {
+        const int l = g_tpm[0]->V[vis].l;
+        const bool first = l % c.block == 0;
+        // the attention: each member its heads, up to its partial of the output projection in W.tmp
+        for (int m = 0; m < N; ++m) {
+            use_dev(m);
+            Model& M = *g_tpm[m];
+            Work& W = dev_work(m);
+            auto blk = [&](int i) { return W.blocks + (size_t) i * W.blk_ld * C; };
+            Layer& Ly = bind_visit(M, vis);
+            msg[m] = nullptr;
+            if (c.n_pass > 1 && l == c.core0) {
+                if (M.V[vis].pass == 0) {
+                    nb_pre[m] = nb[m];
+                    CU(cudaMemcpyAsync(W.lp_pre, W.h, Cb, cudaMemcpyDeviceToDevice, g_s));
+                } else {
+                    n_bank[m] = 0;
+                    for (int i = nb_pre[m] + 1; i < nb[m]; ++i, ++n_bank[m])
+                        CU(cudaMemcpyAsync(W.lp_bank + (size_t) n_bank[m] * C, blk(i), Cb, cudaMemcpyDeviceToDevice, g_s));
+                    CU(cudaMemcpyAsync(W.lp_bank + (size_t) n_bank[m] * C, W.h, Cb, cudaMemcpyDeviceToDevice, g_s));
+                    ++n_bank[m];
+                    CU(cudaMemcpyAsync(W.h, W.lp_pre, Cb, cudaMemcpyDeviceToDevice, g_s));
+                    nb[m] = nb_pre[m];
+                    k::ResStates st{};
+                    for (int i = 0; i < n_bank[m]; ++i) st.st[i] = W.lp_bank + (size_t) i * C;
+                    k::attn_res_jobs(st, n_bank[m], M.lp_query_all, 2, 2 * (c.core1 - c.core0), C, 1e-6f, W.lp_msg_all, g_s);
+                }
+            }
+            if (M.V[vis].pass > 0) msg[m] = W.lp_msg_all + (size_t) (l - c.core0) * 4 * C;
+            float* x3[3] = {W.xq, W.xk, W.xv};
+            const float* nw[3] = {Ly.sliding ? Ly.attn_norm : Ly.q_in_norm, Ly.sliding ? Ly.attn_norm : Ly.k_in_norm,
+                                  Ly.sliding ? Ly.attn_norm : Ly.v_in_norm};
+            bool sep = !Ly.sliding;
+            {
+                k::ResStates st{};
+                for (int i = 0; i < nb[m]; ++i) st.st[i] = blk(i);
+                st.st[nb[m]] = W.h;
+                if (msg[m]) {
+                    k::attn_res(st, nb[m] + 1, Ly.res_score, Ly.n_res_q, 1, C, 1e-6f, W.lp_in, g_s);
+                    k::LoopGate gt[3];
+                    for (int j = 0; j < 3; ++j)
+                        gt[j] = {W.lp_in + (size_t) (Ly.n_res_q == 3 ? j : 0) * C, msg[m] + (size_t) j * C, Ly.lp_down[j],
+                                 Ly.lp_forget[j], Ly.lp_gain[j], x3[j]};
+                    k::loop_gates(gt, 3, 1, C, c.rank, 1e-6f, W.lp_g, g_s);
+                    k::rms_multi(k::RmsJobs{{x3[0], x3[1], x3[2]}, {nw[0], nw[1], nw[2]}, {x3[0], x3[1], x3[2]}}, 3, C,
+                                 c.eps, g_s);
+                    sep = true;
+                } else if (l > 0) {
+                    k::RmsOuts outs{};
+                    uint16_t* y16[3] = {W.x16, W.xk16, W.xv16};
+                    for (int j = 0; j < Ly.n_res_q; ++j) outs.w[j] = nw[j], outs.y16[j] = y16[j], outs.y32[j] = x3[j];
+                    k::attn_res_rms_f16(st, nb[m] + 1, Ly.res_score, Ly.n_res_q, 1, C, 1e-6f, c.eps, outs, g_s);
+                } else {
+                    for (int j = 0; j < (sep ? 3 : 1); ++j) k::rms(W.h, nw[j], 1, C, c.eps, x3[j], g_s);
+                }
+            }
+            float *q_p, *r_p, *gate_p;
+            if (Ly.sliding) {
+                if (Ly.wqkvrg.N == 0) die("--tp: a sliding layer without its fused projection");
+                const Mat& mt = Ly.wqkvrg;   // q | k | v | r | gate
+                q_p = W.qkv, r_p = q_p + HD + 2 * KD, gate_p = r_p + HR;
+                if (!sep) {
+                    mv1c(mt, W.xq, W.qkv, k::MvConv{HD, KD, Ly.h_k, Ly.sc_k, nullptr, 0, nullptr, W.kconv},
+                         k::MvConv{HD + KD, KD, Ly.h_v, Ly.sc_v, nullptr, 0, nullptr, W.vconv});
+                } else if (mt.q8) {
+                    k::mv_q8p_conv(mt.q8, mt.q8d, mt.N, mt.K, W.xq, W.qkv,
+                                   k::MvConv{HD, KD, Ly.h_k, Ly.sc_k, nullptr, 0, nullptr, W.kconv},
+                                   k::MvConv{HD + KD, KD, Ly.h_v, Ly.sc_v, nullptr, 0, nullptr, W.vconv}, g_s,
+                                   k::MvAlt{W.xk, HD, KD}, k::MvAlt{W.xv, HD + KD, KD});
+                } else {
+                    mv1(mat_rows(mt, 0, HD), W.xq, W.qkv);
+                    mv1c(mat_rows(mt, HD, KD), W.xk, q_p + HD, k::MvConv{0, KD, Ly.h_k, Ly.sc_k, nullptr, 0, nullptr, W.kconv});
+                    mv1c(mat_rows(mt, HD + KD, KD), W.xv, q_p + HD + KD,
+                         k::MvConv{0, KD, Ly.h_v, Ly.sc_v, nullptr, 0, nullptr, W.vconv});
+                    mv1(mat_rows(mt, HD + 2 * KD, mt.N - HD - 2 * KD), W.xq, W.qkv + HD + 2 * KD);
+                }
+            } else {
+                if (Ly.wqrg.N == 0) die("--tp: a full layer without its fused projection");
+                mv1(Ly.wqrg, W.xq, W.qkv);   // q | r | gate
+                q_p = W.qkv, r_p = q_p + HD, gate_p = r_p + HR;
+                float *kd_p = W.dyn, *vd_p = W.dyn + (size_t) c.KV * 4;
+                k::mv_f16(Ly.sc_k_dyn16, c.KV * 4, C, W.xk, kd_p, g_s);
+                k::mv_f16(Ly.sc_v_dyn16, c.KV * 4, C, W.xv, vd_p, g_s);
+                mv1c(Ly.wk, W.xk, W.kk, k::MvConv{0, KD, Ly.h_k, Ly.sc_k, kd_p, c.KV, nullptr, W.kconv});
+                mv1c(Ly.wv, W.xv, W.vv, k::MvConv{0, KD, Ly.h_v, Ly.sc_v, vd_p, c.KV, nullptr, W.vconv});
+            }
+            const int extent = Ly.sliding ? c.extent_swa : c.extent;
+            const int window = Ly.sliding ? c.window : (1 << 30);
+            const int P = Ly.sliding ? P_sl : P_full;
+            const bool mma = g_attn_mma == 1 || (g_attn_mma == 2 && !Ly.sliding);
+            const int ring = Ly.sliding ? Ly.kv_cap : 0;
+            const int ns = Ly.sliding ? std::min(g_mma_split, std::max(1, (c.window + 63) / 64)) : g_mma_split;
+            uint16_t* q16 = mma ? W.x16 : nullptr;
+            if (g_kv_fp8) {
+                k::prep_qkv_r_fp8_at(q_p, Ly.q_clip, W.kconv, Ly.kc8, W.vconv, Ly.vc8, r_p, Ly.r_clip, c.H, c.KV, c.D,
+                                     c.d_rel, c.qk_clip, c.rel_clip, c.eps, W.pos, !Ly.sliding, c.alpha, c.n_floor,
+                                     Ly.kv_cap, k_scale, v_scale, q16, g_s, Ly.sink16, W.xq, C, W.sink);
+                if (mma)
+                    k::attn_decode_mma_fp8(q16, r_p, W.sink, Ly.kc8, Ly.vc8, ring, c.H, c.KV, W.pos, 0, ns,
+                                           qk_scale / k_scale, 1.0f / v_scale, Ly.rel_proj, c.d_rel, extent, window,
+                                           W.lg, W.o, gate_p, W.x16, g_s);
+                else
+                    k::attn_decode_fp8_at(q_p, r_p, W.sink, Ly.kc8, Ly.vc8, ring, c.H, c.KV, W.pos, P, qk_scale / k_scale,
+                                          1.0f / v_scale, Ly.rel_proj, c.d_rel, extent, window, W.lg, W.o, g_s);
+            } else {
+                k::prep_qkv_r_f16_at(q_p, Ly.q_clip, W.kconv, Ly.kc, W.vconv, Ly.vc, r_p, Ly.r_clip, c.H, c.KV, c.D,
+                                     c.d_rel, c.qk_clip, c.rel_clip, c.eps, W.pos, !Ly.sliding, c.alpha, c.n_floor,
+                                     Ly.kv_cap, q16, g_s, Ly.sink16, W.xq, C, W.sink);
+                if (mma)
+                    k::attn_decode_mma_f16(q16, r_p, W.sink, Ly.kc, Ly.vc, ring, c.H, c.KV, W.pos, 0, ns, qk_scale,
+                                           Ly.rel_proj, c.d_rel, extent, window, W.lg, W.o, gate_p, W.x16, g_s);
+                else
+                    k::attn_decode_f16_at(q_p, r_p, W.sink, Ly.kc, Ly.vc, ring, c.H, c.KV, W.pos, P, qk_scale,
+                                          Ly.rel_proj, c.d_rel, extent, window, W.lg, W.o, g_s);
+            }
+            if (!mma) k::gate_mul_f16(W.o, gate_p, (size_t) HD, W.x16, true, g_s);
+            if (first) CU(cudaMemcpyAsync(blk(nb[m]), W.h, Cb, cudaMemcpyDeviceToDevice, g_s));
+            mv1(Ly.wo, W.o, W.tmp);
+            tp_push(m, W.tmp, C);
+        }
+        // the sum, its short conv and the stream; the MoE's input, the router (the same picks on every member), each
+        // member's width of the 8 experts, their combine: its partial in W.tmp
+        for (int m = 0; m < N; ++m) {
+            use_dev(m);
+            Model& M = *g_tpm[m];
+            Work& W = dev_work(m);
+            auto blk = [&](int i) { return W.blocks + (size_t) i * W.blk_ld * C; };
+            Layer& Ly = M.L[l];
+            tp_reduce(m, W.tmp, C);
+            k::conv4_res(W.tmp, Ly.h_attn, Ly.sc_attn, nullptr, 0, 1, C, first ? nullptr : W.h, W.r, g_s);
+            if (first) ++nb[m];
+            {
+                k::ResStates st{};
+                for (int i = 0; i < nb[m]; ++i) st.st[i] = blk(i);
+                st.st[nb[m]] = W.r;
+                if (msg[m]) {
+                    k::attn_res(st, nb[m] + 1, Ly.ffn_res_score, 1, 1, C, 1e-6f, W.xq, g_s);
+                    k::loop_gate(W.xq, msg[m] + (size_t) 3 * C, Ly.lp_down[3], Ly.lp_forget[3], Ly.lp_gain[3], 1, C,
+                                 c.rank, 1e-6f, W.lp_g, W.xq, g_s);
+                    k::rms(W.xq, Ly.ffn_norm, 1, C, c.eps, W.xq, g_s);
+                } else {
+                    k::RmsOuts outs{};
+                    outs.w[0] = Ly.ffn_norm, outs.y16[0] = W.x16, outs.y32[0] = W.xq;
+                    k::attn_res_rms_f16(st, nb[m] + 1, Ly.ffn_res_score, 1, 1, C, 1e-6f, c.eps, outs, g_s);
+                }
+            }
+            k::mv_f16(Ly.router16, c.E, C, W.xq, W.rlog, g_s);
+            int* rtop = W.route_d;
+            float* rw = (float*) (W.route_d + c.K);
+#ifdef STRATA_USE_HIP
+            static const int exp_mma = getenv("SAGUARO_IK2_EXPERT_MMA") ? atoi(getenv("SAGUARO_IK2_EXPERT_MMA")) : 0;
+#else
+            static const int exp_mma = getenv("SAGUARO_IK2_EXPERT_MMA") ? atoi(getenv("SAGUARO_IK2_EXPERT_MMA")) : 1;
+#endif
+            const bool exp_tc = exp_mma && k::experts_mma_fits(Ly.ty[0], Ly.ty[1], Ly.ty[2], C, c.F);
+            k::route_token(W.rlog, Ly.probs_b, c.E, c.K, c.route_scale, Ly.tab_blob, Ly.tab_sc[0], Ly.tab_sc[1],
+                           Ly.tab_sc[2], rtop, rw, W.blob, W.tok, W.inv, W.sg, W.su, W.wt, g_s, W.xq, C,
+                           exp_tc ? (uint16_t*) W.gu32 : nullptr);
+            if (exp_tc) {
+                k::experts_gate_up_swiglu_mma(W.blob, c.K, Ly.eb[0], (const uint16_t*) W.gu32, C, c.F, W.sg, W.su,
+                                              c.gate_cap, c.up_cap, W.h16, g_s, nullptr, 0);
+                k::experts_down_mma(W.blob, c.K, Ly.eb[0] + Ly.eb[1], W.h16, C, c.F, W.y32, g_s, nullptr, 0);
+            } else {
+                k::experts_gate_up_swiglu(W.blob, W.tok, c.K, Ly.ty[0], Ly.ty[1], Ly.eb[0], W.xq, C, c.F, W.sg, W.su,
+                                          c.gate_cap, c.up_cap, W.h16, g_s, nullptr, 0);
+                k::experts_down(W.blob, c.K, Ly.ty[2], Ly.eb[0] + Ly.eb[1], W.h16, C, c.F, W.y32, g_s, nullptr, 0);
+            }
+            k::moe_combine_f32(W.y32, W.inv, W.wt, 1, c.K, C, W.tmp, false, g_s);
+            tp_push(m, W.tmp, C);
+        }
+        ++g_tp_k;
+        for (int m = 0; m < N; ++m) {
+            use_dev(m);
+            Work& W = dev_work(m);
+            Layer& Ly = g_tpm[m]->L[l];
+            tp_reduce(m, W.tmp, C);
+            k::conv4_res(W.tmp, Ly.h_mlp, Ly.sc_mlp, nullptr, 0, 1, C, W.r, W.h, g_s);
+        }
+        ++g_tp_k;
+    }
+    for (int m = 1; m < N; ++m) {   // (the members joined back into member 0's stream)
+        use_dev(m);
+        CU(cudaEventRecord(g_tpx[m].join, g_s));
+    }
+    use_dev(0);
+    for (int m = 1; m < N; ++m) CU(cudaStreamWaitEvent(g_s, g_tpx[m].join, 0));
+    if (out_mode == OutMode::kNone) return;
+    Model& M = *g_tpm[0];
+    Work& W = W0;
+    {   // the head, on member 0
+        k::ResStates st{};
+        for (int i = 0; i < nb[0]; ++i) st.st[i] = W.blocks + (size_t) i * W.blk_ld * C;
+        st.st[nb[0]] = W.h;
+        k::RmsOuts outs{};
+        outs.w[0] = M.out_norm, outs.y16[0] = W.x16, outs.y32[0] = W.xq;
+        k::attn_res_rms_f16(st, nb[0] + 1, M.out_res_score, 1, 1, C, 1e-6f, c.eps, outs, g_s);
+        mv1(M.out_w, W.xq, W.logits);
+        if (out_mode == OutMode::kArgmax) {
+            k::argmax_sum(W.logits, nullptr, nullptr, c.n_vocab, W.argmax_d, g_s);
+            CU(cudaMemcpyAsync(W.argmax_h, W.argmax_d, 4, cudaMemcpyDeviceToHost, g_s));
+        } else if (out_mode == OutMode::kCand) {
+            k::softcap(W.logits, (size_t) c.n_rows, c.logit_cap, g_s);
+            k::cand_topk(W.logits, c.n_vocab, -c.logit_cap, c.logit_cap, kCandK, kCandCap, W.cand_part, W.cand_d, g_s);
+            CU(cudaMemcpyAsync(W.cand_h, W.cand_d, (size_t) (2 + 2 * kCandCap) * 4, cudaMemcpyDeviceToHost, g_s));
+        } else {
+            k::softcap(W.logits, (size_t) c.n_rows, c.logit_cap, g_s);
+            CU(cudaMemcpyAsync(W.logits_h, W.logits, (size_t) c.n_vocab * 4, cudaMemcpyDeviceToHost, g_s));
+        }
+    }
+}
+
+void tp_token(int tok, int pos, OutMode out_mode, std::vector<float>& logits_out, std::vector<int>* argmax_out) {
+    Model& M = *g_tpm[0];
+    const Config& c = M.c;
+    Work& W = dev_work(0);
+    const size_t rb = (size_t) c.C / k::block_values(M.embd_type) * k::block_bytes(M.embd_type);
+    k::decode_host(M.embd_type, M.embd + (size_t) tok * rb, c.C, W.emb_h);
+    W.pos_h[0] = pos;
+    use_dev(0);
+    if (!g_graph) {
+        tp_token_launches(out_mode);
+    } else {
+        FastGraph& G = g_tpgraph[(int) out_mode];
+        if (!G.exec) {   // the first token of this kind: every member's launches recorded as one graph
+            CU(cudaStreamBeginCapture(g_s, cudaStreamCaptureModeThreadLocal));
+            tp_token_launches(out_mode);
+            use_dev(0);
+            CU(cudaStreamEndCapture(g_s, &G.graph));
+            CU(cudaGraphInstantiate(&G.exec, G.graph, 0));
+        }
+        CU(cudaGraphLaunch(G.exec, g_s));
+    }
+    use_dev(0);
+    CU(cudaStreamSynchronize(g_s));
+    if (out_mode == OutMode::kArgmax) {
+        argmax_out->assign(1, W.argmax_h[0]);
+    } else if (out_mode == OutMode::kLogits) {
+        logits_out.insert(logits_out.end(), W.logits_h, W.logits_h + c.n_vocab);
+    } else if (out_mode == OutMode::kCand) {
+        if (W.cand_h[0] <= kCandCap) {
+            g_cand.n = W.cand_h[0], g_cand.idx = W.cand_h + 2, g_cand.val = (const float*) (W.cand_h + 2 + kCandCap);
+        } else {
+            CU(cudaMemcpy(W.logits_h, W.logits, (size_t) c.n_vocab * 4, cudaMemcpyDeviceToHost));
+            logits_out.insert(logits_out.end(), W.logits_h, W.logits_h + c.n_vocab);
+            g_cand.n = -1;
+        }
+    }
+}
+
+// a prompt chunk (or a token at a picture's position) on every member: forward()'s visits, the two sums in each
+void tp_forward(const int* tok, int T, int pos0, bool all_logits, OutMode out_mode, std::vector<float>& logits_out,
+                std::vector<int>* argmax_out, double& t_exp) {
+    const int N = g_tpn;
+    Model& M0 = *g_tpm[0];
+    const Config& c = M0.c;
+    const int C = c.C;
+    const size_t TC = (size_t) T * C;
+    if (T == 1 && g_img.at(pos0) < 0) {
+        tp_token(tok[0], pos0, out_mode, logits_out, argmax_out);
+        return;
+    }
+    if (out_mode == OutMode::kCand) out_mode = OutMode::kLogits, g_cand.n = -1;
+    if (T > dev_work(0).Tm) die("--tp: a prompt chunk longer than --chunk");
+    g_tp_k = 0;
+    {
+        Work& W0 = dev_work(0);
+        const size_t rb = (size_t) C / k::block_values(M0.embd_type) * k::block_bytes(M0.embd_type);
+        for (int t = 0; t < T; ++t) k::decode_host(M0.embd_type, M0.embd + (size_t) tok[t] * rb, C, W0.emb_h + (size_t) t * C);
+        for (int t = 0; t < T; ++t) W0.pos_h[t] = pos0 + t;
+        for (int m = 0; m < N; ++m) {
+            use_dev(m);
+            Work& W = dev_work(m);
+            CU(cudaMemcpyAsync(W.tmp, W0.emb_h, TC * 4, cudaMemcpyHostToDevice, g_s));
+            k::rms(W.tmp, g_tpm[m]->embd_norm, T, C, c.eps, W.h, g_s);
+            place_pictures(W.h, T, pos0, C, g_s);
+            CU(cudaMemcpyAsync(W.pos, W0.pos_h, (size_t) T * 4, cudaMemcpyHostToDevice, g_s));
+        }
+    }
+    int nb[kTpMax] = {}, nb_pre[kTpMax] = {}, n_bank[kTpMax] = {};
+    const float* msg[kTpMax] = {};
+    for (int vis = 0; vis < c.n_visit; ++vis) {
+        const int l = M0.V[vis].l;
+        for (int m = 0; m < N; ++m) {
+            use_dev(m);
+            Model& M = *g_tpm[m];
+            Work& W = dev_work(m);
+            auto blk = [&](int i) { return W.blocks + (size_t) i * W.blk_ld * C; };
+            Layer& Ly = bind_visit(M, vis);
+            msg[m] = nullptr;
+            if (c.n_pass > 1 && l == c.core0) {
+                if (M.V[vis].pass == 0) {
+                    nb_pre[m] = nb[m];
+                    CU(cudaMemcpyAsync(W.lp_pre, W.h, TC * 4, cudaMemcpyDeviceToDevice, g_s));
+                } else {
+                    n_bank[m] = 0;
+                    for (int i = nb_pre[m] + 1; i < nb[m]; ++i, ++n_bank[m])
+                        CU(cudaMemcpyAsync(W.lp_bank + (size_t) n_bank[m] * TC, blk(i), TC * 4, cudaMemcpyDeviceToDevice, g_s));
+                    CU(cudaMemcpyAsync(W.lp_bank + (size_t) n_bank[m] * TC, W.h, TC * 4, cudaMemcpyDeviceToDevice, g_s));
+                    ++n_bank[m];
+                    CU(cudaMemcpyAsync(W.h, W.lp_pre, TC * 4, cudaMemcpyDeviceToDevice, g_s));
+                    nb[m] = nb_pre[m];
+                }
+            }
+            if (M.V[vis].pass > 0) {
+                k::ResStates st{};
+                for (int i = 0; i < n_bank[m]; ++i) st.st[i] = W.lp_bank + (size_t) i * TC;
+                k::attn_res(st, n_bank[m], Ly.lp_query, 2, T, C, 1e-6f, W.lp_msg, g_s);
+                k::attn_res(st, n_bank[m], Ly.lp_query + (size_t) 2 * C, 2, T, C, 1e-6f, W.lp_msg + 2 * TC, g_s);
+                msg[m] = W.lp_msg;
+            }
+            g_tp_part = true;
+            run_layer_attn(M, Ly, l, T, pos0, W.h, W.pos, nb[m], 0, W.r, W, msg[m]);
+            g_tp_part = false;
+            tp_push(m, W.tmp, TC);
+        }
+        for (int m = 0; m < N; ++m) {
+            use_dev(m);
+            Model& M = *g_tpm[m];
+            Work& W = dev_work(m);
+            auto blk = [&](int i) { return W.blocks + (size_t) i * W.blk_ld * C; };
+            Layer& Ly = M.L[l];
+            tp_reduce(m, W.tmp, TC);
+            if (l % c.block == 0) {
+                CU(cudaMemcpyAsync(blk(nb[m]), W.h, TC * 4, cudaMemcpyDeviceToDevice, g_s));
+                k::conv4(W.tmp, Ly.h_attn, Ly.sc_attn, nullptr, 0, T, C, W.r, g_s);
+                ++nb[m];
+            } else {
+                k::conv4_res(W.tmp, Ly.h_attn, Ly.sc_attn, nullptr, 0, T, C, W.h, W.r, g_s);
+            }
+            k::ResStates st{};
+            for (int i = 0; i < nb[m]; ++i) st.st[i] = blk(i);
+            st.st[nb[m]] = W.r;
+            if (msg[m]) {
+                k::attn_res(st, nb[m] + 1, Ly.ffn_res_score, 1, T, C, 1e-6f, W.xq, g_s);
+                const k::LoopGate gt{W.xq, msg[m] + (size_t) 3 * TC, Ly.lp_down[3], Ly.lp_forget[3], Ly.lp_gain[3], W.xq};
+                loop_gates_chunk(W, &gt, 1, T, C, c.rank, 1e-6f);
+                k::rms_f16(W.xq, Ly.ffn_norm, T, C, c.eps, W.x16, W.xq, g_s);
+            } else {
+                k::RmsOuts outs{};
+                outs.w[0] = Ly.ffn_norm, outs.y16[0] = W.x16, outs.y32[0] = W.xq;
+                k::attn_res_rms_f16(st, nb[m] + 1, Ly.ffn_res_score, 1, T, C, 1e-6f, c.eps, outs, g_s);
+            }
+            gemm16(Ly.router16, c.E, C, W.x16, T, W.rlog, c.E);
+            const int S = T * c.K;
+            k::route(W.rlog, Ly.probs_b, T, c.E, c.K, c.route_scale, W.route_d, (float*) (W.route_d + S), g_s);
+            CU(cudaMemcpyAsync(W.route_h, W.route_d, (size_t) S * 8, cudaMemcpyDeviceToHost, g_s));
+        }
+        ++g_tp_k;
+        for (int m = 0; m < N; ++m) CU(cudaStreamSynchronize(g_dev[m].s));
+        const double te0 = now();
+        for (int m = 0; m < N; ++m) {
+            use_dev(m);
+            Model& M = *g_tpm[m];
+            Work& W = dev_work(m);
+            Layer& Ly = M.L[l];
+            const int S = T * c.K;
+            const int* top = W.route_h;
+            const float* w = (const float*) (W.route_h + S);
+            if (m == 0) pop_count(l, top, S);
+            if (S <= W.rg_slots && !Ly.tab_h.empty()) {   // (forward()'s short prompt: the experts by groups)
+                const int GM = W.rg_groups;
+                const size_t o_n = (size_t) GM * 8, o_tok = o_n + (size_t) GM * 4, o_row = o_tok + (size_t) GM * k::kGroupMax * 4,
+                             o_sg = o_row + (size_t) GM * k::kGroupMax * 4, o_su = o_sg + (size_t) W.rg_slots * 4,
+                             o_wt = o_su + (size_t) W.rg_slots * 4, o_id = o_wt + (size_t) W.rg_slots * 4;
+                auto** gb = (const uint8_t**) W.rg_h;
+                int *gn = (int*) (W.rg_h + o_n), *gtok = (int*) (W.rg_h + o_tok), *grow = (int*) (W.rg_h + o_row);
+                float *sg = (float*) (W.rg_h + o_sg), *su = (float*) (W.rg_h + o_su), *wt = (float*) (W.rg_h + o_wt);
+                int* id = (int*) (W.rg_h + o_id);
+                if (++W.stamp == 0) {
+                    std::fill(W.seen_stamp.begin(), W.seen_stamp.end(), 0);
+                    std::fill(W.gi_stamp.begin(), W.gi_stamp.end(), 0);
+                    W.stamp = 1;
+                }
+                const uint32_t stp = W.stamp;
+                int G = 0;
+                for (int i = 0; i < S; ++i) {
+                    const int e = top[i];
+                    int g = W.gi_stamp[e] == stp ? W.gi_idx[e] : -1;
+                    if (g < 0 || gn[g] == k::kGroupMax) {
+                        g = G++;
+                        W.gi_stamp[e] = stp, W.gi_idx[e] = g;
+                        gb[g] = Ly.tab_h[e], gn[g] = 0;
+                    }
+                    gtok[(size_t) g * k::kGroupMax + gn[g]] = i / c.K;
+                    grow[(size_t) g * k::kGroupMax + gn[g]] = i;
+                    ++gn[g];
+                    sg[i] = Ly.scale[0].empty() ? 1.0f : Ly.scale[0][e];
+                    su[i] = Ly.scale[1].empty() ? 1.0f : Ly.scale[1][e];
+                    wt[i] = w[i] * (Ly.scale[2].empty() ? 1.0f : Ly.scale[2][e]);
+                    id[i] = i;
+                }
+                CU(cudaMemcpyAsync(W.rg_d, W.rg_h, W.rg_bytes, cudaMemcpyHostToDevice, g_s));
+                k::experts_gate_up_swiglu_g((const uint8_t* const*) W.rg_d, (const int*) (W.rg_d + o_n),
+                                            (const int*) (W.rg_d + o_tok), (const int*) (W.rg_d + o_row), G, Ly.ty[0],
+                                            Ly.ty[1], Ly.eb[0], W.xq, C, c.F, (const float*) (W.rg_d + o_sg),
+                                            (const float*) (W.rg_d + o_su), c.gate_cap, c.up_cap, W.h16, g_s);
+                k::experts_down_g((const uint8_t* const*) W.rg_d, (const int*) (W.rg_d + o_n), (const int*) (W.rg_d + o_row),
+                                  G, Ly.ty[2], Ly.eb[0] + Ly.eb[1], W.h16, C, c.F, W.y32, g_s);
+                k::moe_combine_f32(W.y32, (const int*) (W.rg_d + o_id), (const float*) (W.rg_d + o_wt), T, c.K, C, W.tmp,
+                                   false, g_s);
+            } else {
+                double t_x = 0;
+                g_tp_part = true;
+                run_prefill_moe(M, Ly, l, T, W.x16, top, w, W.r, W.h, W, dev_cache(m), t_x);
+                g_tp_part = false;
+            }
+            tp_push(m, W.tmp, TC);
+        }
+        for (int m = 0; m < N; ++m) {
+            use_dev(m);
+            Work& W = dev_work(m);
+            Layer& Ly = g_tpm[m]->L[l];
+            tp_reduce(m, W.tmp, TC);
+            k::conv4_res(W.tmp, Ly.h_mlp, Ly.sc_mlp, nullptr, 0, T, C, W.r, W.h, g_s);
+        }
+        ++g_tp_k;
+        t_exp += now() - te0;
+    }
+    use_dev(0);
+    run_head(M0, T, all_logits, out_mode, nb[0], dev_work(0).h, dev_work(0), logits_out, argmax_out);
+    for (int m = 1; m < N; ++m) CU(cudaStreamSynchronize(g_dev[m].s));
+}
+
 void forward(Model& M, const int* tok, int T, int pos0, bool all_logits, OutMode out_mode, const std::string& dump,
              std::vector<float>& logits_out, std::vector<int>* argmax_out, double& t_exp) {
+    if (g_tpn > 1) {
+        if (!dump.empty()) die("--tp with --dump");
+        tp_forward(tok, T, pos0, all_logits, out_mode, logits_out, argmax_out, t_exp);
+        return;
+    }
     const Config& c = M.c;
     const int C = c.C;
     lend_check(M, pos0 + T);
@@ -7862,9 +8392,16 @@ int main(int argc, char** argv) {
                         now() - tw, g_graph ? ", a CUDA graph each" : "");
         } else {
             std::printf("resident path off: %s\n", all ? "a dense matrix is not kept as blocks" : "the cache does not hold every expert");
+            if (tpN > 1) die("--tp: GPU " + std::to_string(d) + " does not hold its share of every expert");
         }
     }
     std::fflush(stdout);
+    }
+    if (tpN > 1) {   // the members' state in the main model's visits too (the serving's snapshots and resets)
+        g_tp_down.clear(), g_tp_down.shrink_to_fit();
+        for (int m = 1; m < tpN; ++m)
+            for (Visit Vi : g_tpm[m]->V) Vi.mem = m, M.V.push_back(Vi);
+        tp_init(M, chunk);
     }
     // the caches' counters, summed over the GPUs
     auto ec_sum = [&](auto f) {
