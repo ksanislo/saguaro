@@ -4,8 +4,9 @@
 looped mixture of experts: 24 layers of which 12 run three times, 8 of 128 experts a token) is the model for a PC with
 **one or two 16 GB cards**. It runs on its own engine, `saguaro-ik2` (upstream Project Maya v1.1.74's, tuned here on
 Tesla T4s), from
-[unsloth's UD-Q4_K_XL GGUF](https://huggingface.co/unsloth/Inkling-2-Mini-GGUF) read in place. The model and the GGUF
-are **Apache 2.0**.
+[unsloth's UD-Q4_K_XL GGUF](https://huggingface.co/unsloth/Inkling-2-Mini-GGUF) or one of
+[Strata's packs](#the-files-unsloths-gguf-or-stratas-packs), read in place. The model, the GGUF and the packs are
+**Apache 2.0**.
 
 Back to [the models](MODELS.md) and the [README](../README.md). How the engine works, and the measurements behind it:
 [INKLING2.md](INKLING2.md).
@@ -28,6 +29,28 @@ Back to [the models](MODELS.md) and the [README](../README.md). How the engine w
 
 The two T4 rows and the RX 9070 XT row were measured here. The others are upstream Project Maya's layouts (measured
 there on RTX 3090s, V100s and a Radeon 8065S, see [INKLING2.md](INKLING2.md) section 8). Drafting is off on Volta / Turing, on the offload path and on two cards.
+
+## The files: unsloth's GGUF or Strata's packs
+
+The setup offers four sets of the same model and picks the one for your cards (`--ik2-quant` or `--model
+inkling-2-mini-sq-15` chooses): unsloth's UD-Q4_K_XL GGUF, or one of
+[Strata's packs](https://huggingface.co/strata-engine/Inkling-2-Mini-Strata) (`.strata`, Apache 2.0), which
+`saguaro-ik2` reads as they are - every weight exactly as Strata's own decode gives it (checked value by value on the
+CPU, and on a T4 and an RX 9070 XT through the engine's kernels). A pack's folder also holds the repo's
+`tokenizer.json` (the GGUF's tokenizer, table for table); pictures and drafting use the same mmproj and drafter.
+
+| Files | Download | Experts in the engine | KL from the original (here / Strata's) | Same top token | 1x Tesla T4 (32K) | 1x RX 9070 XT (32K) | Picked for |
+| --- | ---: | ---: | ---: | ---: | --- | --- | --- |
+| Strata SQ-20 (`inkling-2-mini-sq-20`) | 19.3 GB | 14.95 GiB | 0 (the original weights) / 0 | 100 % | 15.0 / 18.3 tok/s, read 519 (offload) | 41.0 / 42.8 tok/s, read 1329 (offload) | 24 GB cards and two 16 GB cards (every expert in VRAM) |
+| unsloth UD-Q4_K_XL (`inkling-2-mini`) | 17.6 GB | 14.7 GiB | 0.0041 / - | 97.1 % | 27.1 / 30.4, read 535 (offload) | 58-59, read 1718 (offload) | one 16 GB card (the offload path) |
+| Strata SQ-15 (`inkling-2-mini-sq-15`) | 14.3 GB | 13.0 GiB | 0.0171 / 0.0089 | 93.5 % | 22.9 / 23.6, read 547 (offload) | 53.6 / 50.3, read 1268 (offload) | - (a smaller download than UD at nearly its speed) |
+| Strata SQ-10 (`inkling-2-mini-sq-10`) | 10.5 GB | 10.45 GiB | 0.0795 / 0.0502 | 87.1 % | 26.0 / 24.7, read 537 (every expert in VRAM) | 56.8 / 52.3, read 1246 (every expert in VRAM) | 8-12 GB cards |
+
+KL here: against SQ-20 (the original weights), 2,000 tokens of text through `tools/ik2/kl.py` on the RX 9070 XT;
+Strata's figures are on their own test prompts. Speeds: decode at ~50 / 8K tokens deep, 8K read, one request,
+GPU clocks not pinned, measured 2026-11-22 (`runs/sf4`, `runs/sfm5`). The packs keep each expert in its own codec,
+and the engine still gives every expert of a layer the slot of its widest one - which is why SQ-15 (14.3 GB) does not
+yet stay whole in a 16 GB card's VRAM; per-expert slot sizes are the next step.
 
 ## Install
 
