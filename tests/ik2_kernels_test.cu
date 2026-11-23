@@ -3002,9 +3002,16 @@ void test_q4_kv() {
                 h_bias[((size_t) qi * H + h) * ext + d] = acc;
             }
     float* dbias = dev(h_bias);
-    k::attn_flash_q4(q16, HD, kc4, vc4, 0, H, KV, D, 4, T - 4, sc, dbias, ext, 1 << 30, dsink + (size_t) (T - 4) * H,
-                     o_mma, HD, scratch, (size_t) 128 * H * 130 * 8, 2, 0);
-    expect("q4_kv attn_flash_q4 vs attn_multi_q4", host(o_mma, 4 * HD), std::vector<double>(vmq4.begin(), vmq4.end()), 3e-3, 3e-3);
+    int dev_ = 0, maj_ = 0;
+    CU(cudaGetDevice(&dev_));
+    CU(cudaDeviceGetAttribute(&maj_, cudaDevAttrComputeCapabilityMajor, dev_));
+#ifndef STRATA_USE_HIP
+    if (maj_ >= 8) {   // (the engine runs the fused prompt attention from sm_80 on; its Q4 form's shared memory is past sm_75's)
+        k::attn_flash_q4(q16, HD, kc4, vc4, 0, H, KV, D, 4, T - 4, sc, dbias, ext, 1 << 30, dsink + (size_t) (T - 4) * H,
+                         o_mma, HD, scratch, (size_t) 128 * H * 130 * 8, 2, 0);
+        expect("q4_kv attn_flash_q4 vs attn_multi_q4", host(o_mma, 4 * HD), std::vector<double>(vmq4.begin(), vmq4.end()), 3e-3, 3e-3);
+    }
+#endif
 
     CU(cudaFreeHost(hkq)); CU(cudaFreeHost(hks)); CU(cudaFreeHost(hvq)); CU(cudaFreeHost(hvs));
     cudaFree(kc4.q); cudaFree(kc4.s); cudaFree(vc4.q); cudaFree(vc4.s);

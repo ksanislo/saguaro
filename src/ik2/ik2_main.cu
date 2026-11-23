@@ -5831,7 +5831,12 @@ int main(int argc, char** argv) {
         const int v = std::atoi(getenv("SAGUARO_IK2_GROUP"));
         g_group_exp = v == 1 || v >= 3, g_group_attn = v >= 2;
     }
-    g_grp = !getenv("SAGUARO_IK2_GRP") || std::atoi(getenv("SAGUARO_IK2_GRP"));
+    // (the grouped batch prefill experts: measured faster on an RTX 3070 by PR #1118, 2.8x / 3.5x slower prompt reads on
+    //  a Tesla T4 / an RX 9070 XT - on by default from sm_80 on NVIDIA only, below; SAGUARO_IK2_GRP=0/1 decides)
+    g_grp = getenv("SAGUARO_IK2_GRP") ? std::atoi(getenv("SAGUARO_IK2_GRP")) != 0 : true;
+#ifdef STRATA_USE_HIP
+    if (!getenv("SAGUARO_IK2_GRP")) g_grp = false;
+#endif
     g_dense_q8 = getenv("SAGUARO_IK2_DENSE") && std::string(getenv("SAGUARO_IK2_DENSE")) == "q8";
     if (getenv("SAGUARO_IK2_KV")) {
         const std::string kv = getenv("SAGUARO_IK2_KV");
@@ -5842,6 +5847,9 @@ int main(int argc, char** argv) {
     }
     g_kv_q4_stream = g_kv_q4 && getenv("SAGUARO_IK2_KV_STREAM") && std::atoi(getenv("SAGUARO_IK2_KV_STREAM"));
     if (getenv("SAGUARO_IK2_KV_VRAM_MB")) g_kv_vram_mb = std::max(0, std::atoi(getenv("SAGUARO_IK2_KV_VRAM_MB")));
+#ifdef STRATA_USE_HIP
+    if (g_kv_q4) g_flash = false;   // (AMD: the Q4 KV's fused prompt attention does not launch on RDNA - its cuBLAS path)
+#endif
     if (getenv("SAGUARO_IK2_TRACE") && *getenv("SAGUARO_IK2_TRACE")) {
         g_trace = std::fopen(getenv("SAGUARO_IK2_TRACE"), "wb");
         if (!g_trace) die(std::string("cannot write ") + getenv("SAGUARO_IK2_TRACE"));
@@ -6102,6 +6110,7 @@ int main(int argc, char** argv) {
         for (int d = 0; d < n_gpu; ++d) use_dev(d), cls = std::min(cls, k::arch_class());
         use_dev(0);
         if (cls < 80) g_flash = false;
+        if (cls < 80 && !getenv("SAGUARO_IK2_GRP")) g_grp = false;   // (the grouped batch prefill: sm_80 on, above)
         g_pa70 = cls == 70 && !(getenv("SAGUARO_IK2_PA70") && !std::atoi(getenv("SAGUARO_IK2_PA70")));
         if (getenv("SAGUARO_IK2_PA70_MIN")) g_pa70_min = std::max(0, std::atoi(getenv("SAGUARO_IK2_PA70_MIN")));
         if (cls < 75) g_block = false;
