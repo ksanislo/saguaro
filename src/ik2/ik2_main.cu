@@ -6284,8 +6284,12 @@ int main(int argc, char** argv) {
         if (cls < 75) g_block = false;
         g_draft_force = getenv("SAGUARO_IK2_DRAFT_FORCE") ? std::atoi(getenv("SAGUARO_IK2_DRAFT_FORCE")) : 0;
         if (cls < 80 && !(cls == 75 && g_draft_force) && (!draft_path.empty() || g_lookup)) {
-            std::printf("NOTE saguaro ik2: drafting off - on this GPU (sm_%d class) the verify window does not have the "
-                        "one-token path's kernels yet, so it would change the answers; plain decoding\n", cls);
+            if (cls == 75)   // (the window is exact here, but a T4's window costs 1.5-2.3x a token: drafting lost 3-13 %)
+                std::printf("NOTE saguaro ik2: drafting off - on Turing a verify window costs more than the drafts it "
+                            "keeps (measured on a T4); plain decoding\n");
+            else
+                std::printf("NOTE saguaro ik2: drafting off - on this GPU (sm_%d class) the verify window does not have "
+                            "the one-token path's kernels yet, so it would change the answers; plain decoding\n", cls);
             std::fflush(stdout);
             draft_path.clear(), g_lookup = false;
         }

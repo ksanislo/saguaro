@@ -212,14 +212,15 @@ def draft_fits(vram_gb: float, ctx: int, kv: str = DEFAULT_KV, experts_gib: floa
 
 def drafting_off_reason(arch, vram_gb: float, ctx: int, kv: str = DEFAULT_KV, hip: bool = False,
                         experts_gib: float = EXPERTS_GIB) -> str | None:
-    """Why drafting is off on this card (one line), or None: NVIDIA Volta / Turing (the drafter's window needs sm_80)
+    """Why drafting is off on this card (one line), or None: NVIDIA Volta (no exact window) / Turing (its window costs more than it keeps)
     and the offload path (NVIDIA or AMD) run without it; every expert in VRAM keeps it."""
     try:
         cc = int(arch)
     except (TypeError, ValueError):
         cc = 0
     if not hip and 0 < cc < 80:
-        return "drafting off: this GPU (Volta / Turing) has no drafting for this model - every token comes from a full model step"
+        return ("drafting off: on this GPU (Volta / Turing) drafting does not pay for this model - every token comes "
+                "from a full model step (on a T4 a verify window costs 1.5-2.3 tokens' time)")
     if vram_gb and not plan(vram_gb, ctx, kv, hip, experts_gib)["resident"]:
         return ("drafting off: the card does not hold every expert at this context (the offload path), where drafting "
                 "does not run - a smaller context or a bigger card brings it back")
