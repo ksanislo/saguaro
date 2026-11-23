@@ -6109,7 +6109,7 @@ int main(int argc, char** argv) {
         int cls = 80;
         for (int d = 0; d < n_gpu; ++d) use_dev(d), cls = std::min(cls, k::arch_class());
         use_dev(0);
-        if (cls < 80) g_flash = false;
+        if (cls < 75) g_flash = false;   // (Turing: the fused prompt attention's one-tile form)
         if (cls < 80 && !getenv("SAGUARO_IK2_GRP")) g_grp = false;   // (the grouped batch prefill: sm_80 on, above)
         g_pa70 = cls == 70 && !(getenv("SAGUARO_IK2_PA70") && !std::atoi(getenv("SAGUARO_IK2_PA70")));
         if (getenv("SAGUARO_IK2_PA70_MIN")) g_pa70_min = std::max(0, std::atoi(getenv("SAGUARO_IK2_PA70_MIN")));

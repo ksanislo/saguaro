@@ -920,6 +920,11 @@ __global__ void attn_probs_bias_f16_kernel(const float* lg, uint16_t* out16, int
 // (max, sum); attn_flash_combine merges the splits and the sink.  The relative bias from the table [Tq * H][extent].
 constexpr int kFaBN = 64, kFaD = 128, kFaLd = kFaD + 8;   // (row pad: conflict-free fragments/ldmatrix)
 constexpr float kLog2e = 1.4426950408889634f;
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800 && !defined(STRATA_USE_HIP)
+#define IK2_SM75 1   // (Turing's prompt attention: one tile, loaded where it is used - no cp.async, 64 KB of smem)
+#else
+#define IK2_SM75 0
+#endif
 
 #ifdef STRATA_USE_HIP
 // AMD: no mma.sync / ldmatrix / cp.async.  These keep their CUDA fragment layouts exactly (a lane's registers hold the
@@ -1126,6 +1131,26 @@ __device__ __forceinline__ void fa_load_tile_raw(uint8_t* Rs, const uint8_t* kc,
         cp_async16(Rs + kFaBN * kFaD + row * kFaD + col, vc + off, ok);
     }
 }
+__device__ __forceinline__ uint4 e4m3x8_h8(uint2 p);
+// (sm_75: an FP8 tile's bytes made FP16 as they are loaded, no raw copy kept)
+template <int NT>
+__device__ __forceinline__ void fa_load_tile_fp8(uint16_t* Ks, uint16_t* Vs, const uint8_t* kc, const uint8_t* vc,
+                                                 int kv_cap, int KD, int g, int kt, int k_end, int tid) {
+#pragma unroll
+    for (int it = 0; it < (kFaBN * kFaD / 16) / NT; ++it) {
+        const int c = it * NT + tid, row = c >> 3, col = (c & 7) * 16;
+        const int kp = kt + row;
+        const bool ok = kp < k_end;
+        const int pr = ok ? (kv_cap > 0 ? kp % kv_cap : kp) : 0;
+        const size_t off = (size_t) pr * KD + (size_t) g * kFaD + col;
+        const uint4 z = make_uint4(0u, 0u, 0u, 0u);
+        const uint4 k8 = ok ? *(const uint4*) (kc + off) : z, v8 = ok ? *(const uint4*) (vc + off) : z;
+        *(uint4*) (Ks + row * kFaLd + col) = ok ? e4m3x8_h8(make_uint2(k8.x, k8.y)) : z;
+        *(uint4*) (Ks + row * kFaLd + col + 8) = ok ? e4m3x8_h8(make_uint2(k8.z, k8.w)) : z;
+        *(uint4*) (Vs + row * kFaLd + col) = ok ? e4m3x8_h8(make_uint2(v8.x, v8.y)) : z;
+        *(uint4*) (Vs + row * kFaLd + col + 8) = ok ? e4m3x8_h8(make_uint2(v8.z, v8.w)) : z;
+    }
+}
 // four E4M3 values as FP16: lo the first two (two halves a register), hi the other two.  A value is sign, 4 bits
 // of exponent, 3 of mantissa, and as FP16 its magnitude is (mag << 7) + 0x2000: with a value the high byte of its
 // half (x = sign 2^15 + mag 2^8) the FP16 is x - mag 2^7 + 0x2000.  A subnormal (exponent 0: under 1/64) is that
@@ -1172,6 +1197,8 @@ __device__ __forceinline__ void fa_tile_from_raw(uint16_t* Ks, uint16_t* Vs, con
 constexpr int kFaBld = 72;   // (a bias row in shared memory; 72: 2-way bank conflicts at most for the float2 reads)
 constexpr int kFaNW = 4;     // warps a block (8: the same speed in a test, and past sm_89/sm_120's shared memory)
 constexpr int kFaSmem = 4 * kFaBN * kFaLd * (int) sizeof(uint16_t) + kFaNW * 16 * kFaBld * (int) sizeof(float);
+// sm_75 (64 KB of shared memory a block, no cp.async): one tile, loaded when it is used, and the bias after it
+constexpr int kFaSmem75 = 2 * kFaBN * kFaLd * (int) sizeof(uint16_t) + kFaNW * 16 * kFaBld * (int) sizeof(float);
 // Hopper (sm_90a) warpgroup MMA: the four warps of a 128-thread block as one warpgroup, 64 rows.
 // D[64 x 64] (+)= A[64 x 16] (registers, the mma.m16n8k16 A fragments of each warp's 16 rows) x B (smem
 // descriptor; tnsp: B stored N-major), F16 in, F32 accumulate; d[j * 4 + i] as mma's C fragment of n8 block j
@@ -1274,11 +1301,12 @@ attn_flash_f16_kernel(const uint16_t* __restrict__ q16, int q_ld, const KVT* __r
                       float2* __restrict__ ml_part) {
     extern __shared__ __align__(16) uint16_t fa_sm[];
     constexpr bool F8 = sizeof(KVT) == 1;        // (FP8: one FP16 tile, and the bytes of two [2][kFaRaw] after it)
+    constexpr bool kAhead = !IK2_SM75;           // (a tile loaded one ahead, two buffers; sm_75: kFaSmem75's layout)
     uint16_t* Ks = fa_sm;                        // [2][kFaBN][kFaLd]
-    uint16_t* Vs = fa_sm + (F8 ? 1 : 2) * kFaBN * kFaLd;   // [2][kFaBN][kFaLd]
+    uint16_t* Vs = fa_sm + (F8 || !kAhead ? 1 : 2) * kFaBN * kFaLd;   // [2][kFaBN][kFaLd]
     uint8_t* Rs = (uint8_t*) (fa_sm + 2 * kFaBN * kFaLd);
     constexpr int kTileLd = WG ? kWgTile : F8 ? 0 : kFaBN * kFaLd;   // (halves from one buffer to the other)
-    float* Bw = (float*) (fa_sm + 4 * kFaBN * kFaLd) + (threadIdx.x >> 5) * 16 * kFaBld;   // this warp's [16][kFaBld]
+    float* Bw = (float*) (fa_sm + (kAhead ? 4 : 2) * kFaBN * kFaLd) + (threadIdx.x >> 5) * 16 * kFaBld;   // this warp's [16][kFaBld]
     if constexpr (WG) {   // [2][kWgTile] each, 1024-byte aligned (the swizzle's atoms), inside the same 68 KB
         uint16_t* a = (uint16_t*) (((uintptr_t) fa_sm + 1023) & ~(uintptr_t) 1023);
         Ks = a, Vs = a + 2 * kWgTile;
@@ -1319,14 +1347,14 @@ attn_flash_f16_kernel(const uint16_t* __restrict__ q16, int q_ld, const KVT* __r
     const float sc = qk_scale * kLog2e;
     const int lo_a = qa - window + 1, lo_b = qb - window + 1;
 
-    if (t0 < t1) {
+    if (kAhead && t0 < t1) {
         if constexpr (WG) fa_load_tile_wg<NW * 32>(Ks, Vs, kc, vc, kv_cap, KD, g, k_lo + t0 * kFaBN, k_hi, tid);
         else if constexpr (F8) fa_load_tile_raw<NW * 32>(Rs, kc, vc, kv_cap, KD, g, k_lo + t0 * kFaBN, k_hi, tid);
         else fa_load_tile<NW * 32>(Ks, Vs, kc, vc, kv_cap, KD, g, k_lo + t0 * kFaBN, k_hi, tid);
         cp_async_commit();
     }
     for (int t = t0; t < t1; ++t) {
-        const int buf = (t - t0) & 1;
+        const int buf = kAhead ? (t - t0) & 1 : 0;
         const int kt = k_lo + t * kFaBN;
         // does this warp's rows see any key of the tile, and is any distance within the bias's extent?
         const bool any = !(kt > qpos0 + wi + 15 || kt + kFaBN - 1 < qpos0 + wi - window + 1) && wi < Tq;
@@ -1346,7 +1374,10 @@ attn_flash_f16_kernel(const uint16_t* __restrict__ q16, int q_ld, const KVT* __r
             }
         }
         cp_async_commit();
-        if (t + 1 < t1) {
+        if constexpr (!kAhead) {   // (this tile, in place: the block is past the last one's reads - the loop's barrier)
+            if constexpr (F8) fa_load_tile_fp8<NW * 32>(Ks, Vs, kc, vc, kv_cap, KD, g, kt, k_hi, tid);
+            else fa_load_tile<NW * 32>(Ks, Vs, kc, vc, kv_cap, KD, g, kt, k_hi, tid);
+        } else if (t + 1 < t1) {
             if constexpr (WG)
                 fa_load_tile_wg<NW * 32>(Ks + (buf ^ 1) * kTileLd, Vs + (buf ^ 1) * kTileLd, kc, vc, kv_cap,
                                          KD, g, k_lo + (t + 1) * kFaBN, k_hi, tid);
@@ -1361,7 +1392,7 @@ attn_flash_f16_kernel(const uint16_t* __restrict__ q16, int q_ld, const KVT* __r
         cp_async_wait<2>();
         if constexpr (WG) fence_proxy_async();   // (the copies visible to the MMA's reads of shared memory)
         __syncthreads();
-        if constexpr (F8) {   // (the tile's bytes are in: FP16 of them)
+        if constexpr (F8 && kAhead) {   // (the tile's bytes are in: FP16 of them)
             fa_tile_from_raw<NW * 32>(Ks, Vs, Rs + buf * kFaRaw, tid);
             __syncthreads();
         }
@@ -1483,7 +1514,7 @@ attn_flash_f16_kernel(const uint16_t* __restrict__ q16, int q_ld, const KVT* __r
                 }
             }
         }
-        if constexpr (!F8) __syncthreads();   // (the buffer is refilled next iteration; FP8's FP16 tile is written
+        if constexpr (!F8 || !kAhead) __syncthreads();   // (the buffer is refilled next iteration; FP8's FP16 tile is written
     }                                         //  past the next iteration's barrier)
     la += __shfl_xor_sync(0xffffffffu, la, 1);
     la += __shfl_xor_sync(0xffffffffu, la, 2);
@@ -6229,17 +6260,22 @@ void attn_flash_launch(const uint16_t* q16, int q_ld, const KVT* kc, const KVT* 
                          ml_part, s);
     return;
 #endif
-    need_class(80, "attn_flash");   // (cp.async, and more shared memory than a Turing SM has)
+    need_class(75, "attn_flash");   // (Turing: one tile in shared memory, loaded where it is used - kFaSmem75)
     static bool attr[16] = {};   // (per device: the attribute is a device's, and the layer split runs on several)
+    static int smem_of[16] = {};
     int dev = 0;
     cudaGetDevice(&dev);
+    int major = 0;
+    if (dev >= 16 || !smem_of[dev]) cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev);
+    const int smem = dev < 16 && smem_of[dev] ? smem_of[dev] : major < 8 ? kFaSmem75 : kFaSmem;
     if (dev < 16 && !attr[dev]) {
-        cudaFuncSetAttribute(attn_flash_f16_kernel<NW, WG, KVT>, cudaFuncAttributeMaxDynamicSharedMemorySize, kFaSmem);
+        cudaFuncSetAttribute(attn_flash_f16_kernel<NW, WG, KVT>, cudaFuncAttributeMaxDynamicSharedMemorySize, smem);
         check("attn_flash (shared memory)");
         attr[dev] = true;
+        smem_of[dev] = smem;
     }
     const dim3 grid((unsigned) ((Tq + 16 * NW - 1) / (16 * NW)), (unsigned) H, (unsigned) n_split);
-    attn_flash_f16_kernel<NW, WG, KVT><<<grid, NW * 32, kFaSmem, s>>>(q16, q_ld, kc, vc, kv_cap, H, KV, Tq, qpos0,
+    attn_flash_f16_kernel<NW, WG, KVT><<<grid, NW * 32, smem, s>>>(q16, q_ld, kc, vc, kv_cap, H, KV, Tq, qpos0,
                                                                      qk_scale, bias, extent, window, n_split, o_part,
                                                                      ml_part);
     check("attn_flash");
