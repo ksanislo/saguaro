@@ -103,13 +103,11 @@ namespace {
 
 namespace k = ik2::k;
 
+[[noreturn]] void cu_fail(cudaError_t e, const char* what, const char* file, int line);
 #define CU(x)                                                                                              \
     do {                                                                                                   \
         cudaError_t e_ = (x);                                                                              \
-        if (e_ != cudaSuccess) {                                                                           \
-            std::fprintf(stderr, "saguaro ik2: %s: %s (%s:%d)\n", #x, cudaGetErrorString(e_), __FILE__, __LINE__); \
-            std::exit(1);                                                                                  \
-        }                                                                                                  \
+        if (e_ != cudaSuccess) cu_fail(e_, #x, __FILE__, __LINE__);                                        \
     } while (0)
 #define CB(x)                                                                                              \
     do {                                                                                                   \
@@ -3798,6 +3796,27 @@ std::atomic<bool> g_wd_busy{false};
 inline void beat(const char* stage) {
     g_wd_stage.store(stage, std::memory_order_relaxed);
     g_beat.fetch_add(1, std::memory_order_relaxed);
+}
+// A CUDA call that fails: at load, the engine ends (exit 1).  During a request (--serve) the request fails with an ERR
+// line the server passes to the client, and the engine ends at once (exit 4: out of GPU memory, 5: another failure) -
+// its GPU state is not known after it and exit() could hang on its threads; the server starts it again.
+bool g_err_one = false;   // the single-stream serve loop (ERR + DONE); --parallel: the exit alone
+[[noreturn]] void cu_fail(cudaError_t e, const char* what, const char* file, int line) {
+    std::fprintf(stderr, "saguaro ik2: %s: %s (%s:%d)\n", what, cudaGetErrorString(e), file, line);
+    if (!g_wd_busy.load()) {
+        std::fflush(stderr);
+        std::exit(1);
+    }
+    const bool oom = e == cudaErrorMemoryAllocation;
+    const std::string m = oom ? "the GPU ran out of memory during this request (a smaller --chunk, context or prompt "
+                                "needs less; the engine starts again for the next request)"
+                              : std::string("the GPU failed during this request (") + cudaGetErrorString(e) +
+                                    "; the engine starts again for the next request)";
+    std::fprintf(stderr, "saguaro ik2 serve: %s\n", m.c_str());
+    std::fflush(stderr);
+    if (g_err_one) std::printf("\nERR %s\nDONE 0 0 0 0 cancel 0 0 0 0 0\n", m.c_str());
+    std::fflush(stdout);
+    std::_Exit(oom ? 4 : 5);
 }
 void watchdog_start() {
     const char* v = getenv("SAGUARO_IK2_WATCHDOG_S");
@@ -7765,6 +7784,7 @@ int main(int argc, char** argv) {
             }
         };
         if (serve_maya) watchdog_start();
+        g_err_one = serve_maya && g_par <= 1;
         if (g_par > 1) {
             // ---- --parallel N: requests tagged rid=<id> ("T <rid> <id>", "PP <rid> ...", "DONE <rid> ...", "ERR <rid>
             // ..."), "STOP <rid>" ends one.  Arrival order: a request takes a free conversation as it comes (the one

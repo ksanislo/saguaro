@@ -423,11 +423,12 @@ written for `mma.sync` / `ldmatrix` / `cp.async` run through AMD versions that k
 hot paths have kernels of their own on RDNA 3 / 3.5 / 4's matrix cores (`src/ik2/ik2_rdna.inc`): a layer's routed
 experts in three launches straight from their blocks (`SAGUARO_IK2_RDNA_MOE=0`: off) and the fused attention in 24 KB of shared
 memory (`SAGUARO_IK2_RDNA_FLASH=0`: off); the other FP16 GEMMs take hipBLASLt's kernel measured once per shape, kept in
-`lt-picks.txt` beside the GGUF (`SAGUARO_IK2_LT_STORE` names another file). Tokens take the scalar expert kernels
+Saguaro's `var/<GGUF name>-lt-picks.txt` (the server sets `SAGUARO_IK2_LT_STORE`; an older `lt-picks.txt` beside the
+GGUF is copied there first; run by hand, the engine keeps them beside the GGUF). Tokens take the scalar expert kernels
 (`SAGUARO_IK2_EXPERT_MMA=1`: the mma layout). Answers repeat on a GPU (every sum in a fixed order) but are not CUDA's bits.
 The engine refuses an AMD GPU older than RDNA 3 at its start; on an APU (Strix / Gorgon Halo) it counts the RAM the
-system has available, less max(8 GiB, 10%), as the GPU's room. AMD keeps every expert in the GPU's memory (24 GB, no
-offload path there yet). Run on a Radeon 8065S (Ubuntu, ROCm 7.1).
+system has available, less max(8 GiB, 10%), as the GPU's room. AMD keeps every expert in the GPU's memory where the
+file fits, else it takes the offload path as on NVIDIA (16 GB cards, checked on an RX 9070 XT). Run on a Radeon 8065S (Ubuntu, ROCm 7.1).
 
 **Defaults.** Thinking Machines' `generation_config.json`: temperature 1.0 (no top_p, no top_k: 1.0 and off).
 Thinking is the template's `reasoning_effort`, a name or a number in [0.0, 0.99]: `none` 0.0, `minimal` 0.1, `low`

@@ -90,6 +90,27 @@ def ik2_card(cfg: dict) -> dict:
                 None) or {}
 
 
+_ik2_ex: dict = {}
+
+
+def ik2_experts_gib(cfg: dict) -> float:
+    """GiB of the experts of an Inkling 2 config's GGUF: a file of the user's own (installer.ik2_file, e.g. our one-T4
+    quant) read from its header once, else UD-Q4_K_XL's - as the setup's fit counts them."""
+    path = flag(cfg.get("args") or [], "--model")
+    if not path or not (cfg.get("installer") or {}).get("ik2_file"):
+        return IK2F.EXPERTS_GIB
+    if path not in _ik2_ex:
+        _ik2_ex[path] = IK2F.experts_gib_of(path) or IK2F.EXPERTS_GIB
+    return _ik2_ex[path]
+
+
+def ik2_chunk_max(cfg: dict, args: list, kv: str) -> int | None:
+    """The largest Prompt chunk an Inkling 2 config's card runs at its context (ik2_fit.chunk_max), or None."""
+    card = ik2_card(cfg)
+    return IK2F.chunk_max(float(card.get("vram_gb") or 0), _int(flag(args, "--max-context"), IK2F.CONTEXTS[0]), kv,
+                          cfg.get("backend") == "hip", ik2_experts_gib(cfg))
+
+
 # ------------------------------------------------------------------ the engine's arguments
 def flag(args: list, name: str, default=None):
     """The value after `name` in the arguments, else `default`."""
@@ -331,7 +352,8 @@ def choices(cfg: dict) -> dict:
         hip = cfg.get("backend") == "hip"
         off = IK2F.drafting_off_reason(None if hip else card.get("arch"), float(card.get("vram_gb") or 0),
                                        _int(flag(args, "--max-context"), IK2F.CONTEXTS[0]),
-                                       (cfg.get("env") or {}).get("SAGUARO_IK2_KV") or IK2F.DEFAULT_KV, hip) \
+                                       (cfg.get("env") or {}).get("SAGUARO_IK2_KV") or IK2F.DEFAULT_KV, hip,
+                                       ik2_experts_gib(cfg)) \
             or (len(set(gpus_of(cfg))) > 1 and "two GPUs")
         return {"draft": ["none"] if off else ["auto"] + (["dspark"] if flag(args, "--draft") else []) + ["none"],
                 "images": bool(cfg.get("vision") or cfg.get("vision_off"))}
@@ -559,6 +581,10 @@ def apply(cfg: dict, settings: dict) -> dict:
             v = _num(s, key, lo, hi, what)
             args = set_flag(args, name, v) if v is not None else drop_flag(args, name)
         kv = str(s.get("kv") or "f16")
+        cap = ik2_chunk_max(cfg, args, kv)             # (the setup's own fit: tools/ik2_fit.py)
+        if cap is not None and _int(flag(args, "--chunk"), 0) > cap:
+            raise ValueError(f"Prompt chunk: at most {cap} here - every expert stays on this card with little room "
+                             "left, and a larger chunk runs it out of GPU memory on a long prompt")
         if "kv" not in settings and "env" in settings:  # (only the env row sent: its value is the choice)
             kv = "fp8" if clean.get("SAGUARO_IK2_KV") in ("fp8", "e4m3") else "f16"
         if kv not in IK2_KV:

@@ -17,18 +17,20 @@ Back to [the models](MODELS.md) and the [README](../README.md). How the engine w
 | --- | --- |
 | **GPU** | One or two NVIDIA cards of 8 GB or more, V100 / Tesla T4 / RTX 20 (compute capability 7.0) and newer; or one AMD RDNA 3 / 3.5 / 4 GPU of 16 GB or more (checked on an RX 9070 XT). Linux. No Mac or Windows engine here. |
 | **RAM** | The experts the card does not hold, pinned, beside the system: about 6 GiB with one 16 GB card, about 13 GiB with an 8 GB one; RAM and VRAM together about 24 GB (no SSD tier: the setup refuses less). |
-| **Disk** | 18.3 GB: the GGUF (17.6 GB) and the vision tower (0.6 GB); 0.6 GB more for the drafter where drafting runs (RTX 30 / A100 and newer holding every expert, AMD). An NVMe SSD loads it in about ten seconds. |
+| **Disk** | 18.3 GB: the GGUF (17.6 GB) and the vision tower (0.6 GB); 0.6 GB more for the drafter where drafting runs (every expert and the drafter in VRAM: RTX 30 / A100 and newer, an AMD GPU; not on a 16 GB card at 32K). An NVMe SSD loads it in about ten seconds. |
 
 | Cards | Layout the setup writes | Context | Experts |
 | --- | --- | ---: | --- |
 | One 8-16 GB card (one Tesla T4) | `--gpus 1 --chunk 2048`, the seed expert profile (`SAGUARO_IK2_WARM`) | 32K | the offload path: the most-used in VRAM (2,303 of 3,072 on a T4), the rest in pinned RAM, fetched by the GPU |
 | Two 16 GB cards (two Tesla T4s) | `--gpus 2 --chunk 8192` | 131K | the split: all in VRAM across the two cards |
 | One card of 24 GB or more | `--gpus 1 --chunk 2048` | up to 256K (FP16 cache: 128K) | all in VRAM; drafting on RTX 30 / A100 and newer |
-| One 16 GB AMD RDNA 3 / 4 GPU (an RX 9070 XT) | `--gpus 1 --chunk 2048`, the seed profile, `SAGUARO_IK2_RESERVE_MB=1024` | 32K | the offload path as on NVIDIA (the one-T4 quant: all in VRAM, `--chunk 1024`) |
+| One 16 GB AMD RDNA 3 / 4 GPU (an RX 9070 XT) | `--gpus 1 --chunk 2048`, the seed profile, `SAGUARO_IK2_RESERVE_MB=1024` | 32K | the offload path as on NVIDIA (the one-T4 quant: all in VRAM, `--chunk 1024`; each GGUF has its own config; the Models page refuses a Prompt chunk past 1024 there) |
 | One AMD GPU of 24 GB or more | `--gpus 1 --chunk 1024` | up to 128K | all in VRAM |
 
 The two T4 rows and the RX 9070 XT row were measured here. The others are upstream Project Maya's layouts (measured
-there on RTX 3090s, V100s and a Radeon 8065S, see [INKLING2.md](INKLING2.md) section 8). Drafting is off on Volta / Turing, on the offload path and on two cards.
+there on RTX 3090s, V100s and a Radeon 8065S, see [INKLING2.md](INKLING2.md) section 8). Drafting is off on Volta / Turing, on the offload path and on two cards; where the drafter's
+room does not fit beside the model (the one-T4 quant on a 16 GB card at 32K) the setup does not fetch it and the prompt
+lookup drafts alone.
 
 ## The files: unsloth's GGUF or Strata's packs
 
@@ -102,7 +104,9 @@ tier is fixed at load (the seed profile), so about 5 % of a token's picks cross 
 quant (every expert resident) the two engines write at the same speed; two answers at once (`--parallel 2`, 16K
 context) give 47.7 tok/s together against 41.9 alone. Two T4s write at the previous speed and read prompts about a
 quarter slower (a prompt runs on the first card alone). Load: 1-10 s from the page cache / NVMe. In short: 1x Tesla T4
-about 24 tok/s writing and about 700 tok/s reading; 2x Tesla T4 about 52 tok/s writing and about 830 tok/s reading.
+about 24 tok/s writing and about 700 tok/s reading; 2x Tesla T4 about 52 tok/s writing and about 830 tok/s reading;
+1x RX 9070 XT about 60 tok/s writing and about 1700 tok/s reading (the one-T4 quant: about 83 tok/s writing, about 1150
+tok/s reading) - what the setup quotes for these layouts.
 
 ## What it does
 
@@ -149,5 +153,7 @@ and, after an answer, how many picks it fetched; the closer the tier is to all o
   drafter and `--drafting auto` measures once whether it pays. No Turbo.
 - The Monitor shows its speeds, context and each card's memory; the experts card counts the expert-cache hits after
   each answer when the config's env has `SAGUARO_IK2_STATS=1`, and otherwise says where the experts are.
+- **Out of GPU memory in a request** (a prompt chunk too big for what the card has left): that request fails with an
+  error saying so, and the engine starts again for the next one (a second or two).
 - Two cards were filled to 125K tokens of a 131K context (at `--chunk 2048`; `--chunk 8192` to 16K); the config leaves
   1 GiB of the first card free for that (`SAGUARO_IK2_ROOM_MB`).

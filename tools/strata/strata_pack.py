@@ -46,7 +46,11 @@ class Pack:
                 raise ValueError(f"section {i} not 4 KiB aligned")
         off, n = self.sections[0][:2]
         raw = self.mm[off:off + n]
-        self.manifest = json.loads(subprocess.run(["zstd", "-dc"], input=raw, capture_output=True, check=True).stdout)
+        try:   # (the zstd program; without it the manifest is not read - inkling_expert_bytes knows Inkling's shape)
+            self.manifest = json.loads(subprocess.run(["zstd", "-dc"], input=raw, capture_output=True,
+                                                      check=True).stdout)
+        except (OSError, subprocess.CalledProcessError, ValueError):
+            self.manifest = {}
         off, n = self.sections[3][:2]
         s3 = self.mm[off:off + n]
         if self.sections[3][4] & 1:   # v1.1: 32 B entries then a u16 VRAM load order
@@ -233,7 +237,8 @@ class InklingExpert:
 def inkling_expert_bytes(pack: Pack) -> int:
     """The experts' bytes as saguaro-ik2 holds them (src/strata_fmt/strata_inkling.cpp's layout: an all-SF4 layer as
     NVFP4, an all-MX8 layer as 36-byte blocks of 32, any other layer each expert in a slot of the layer's widest rows)."""
-    tc = pack.manifest["config"]["text_config"]
+    tc = (pack.manifest.get("config") or {}).get("text_config") or \
+        {"hidden_size": 2304, "intermediate_size": 1152, "n_routed_experts": 128, "num_hidden_layers": 24}
     C, F, E = tc["hidden_size"], tc["intermediate_size"], tc["n_routed_experts"]
 
     def rb(code, K):

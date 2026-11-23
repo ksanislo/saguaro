@@ -13,6 +13,7 @@ The files already published keep their names (their manifests list them).
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 FAMILIES = ("glm", "deepseek", "minimax", "qwen", "hy4", "ik2")
@@ -268,4 +269,8 @@ def config_label(cfg: dict) -> str | None:
     """What a config runs, as users see it ("GLM-5.3 · Maya-S24"), or None for a config the setup did not write."""
     if not isinstance(cfg.get("installer"), dict):
         return None
+    own = cfg["installer"].get("ik2_file") if family_of(cfg) == "ik2" else None
+    if own:                                            # (an Inkling GGUF of the user's own: its name, each its config)
+        rest = re.sub(r"(?i)^inkling-2-mini-?", "", re.sub(r"(?i)\.gguf$", "", str(own))) or str(own)
+        return f"{SHOWN['ik2']} · {rest}"
     return shown(family_of(cfg), config_key(cfg))

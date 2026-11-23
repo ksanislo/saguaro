@@ -65,3 +65,9 @@ build-vision.bat
 *.done
 /third_party/*.zip
 
+# what the engines and the server write while they run
+/var/
+/data/ik2-drafting.txt
+/data/ik2-draft-ids-*.txt
+/data/hy4-*.txt
+/data/hy4-expert-hot-*.bin
