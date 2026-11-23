@@ -279,9 +279,15 @@ class Tokenizer:
             raise ValueError("%s: a Strata pack carries no tokenizer - put the repo's tokenizer.json beside it" % p)
         cfg = json.loads((p.parent / "config.json").read_text()) if (p.parent / "config.json").exists() else {}
         eos = cfg.get("eos_token_id", cfg.get("text_config", {}).get("eos_token_id"))
-        special = {"tokenizer.ggml.eos_token_id": int(eos)} if eos is not None else {}
+        special = {"tokenizer.ggml.eos_token_id": int(eos), "tokenizer.ggml.eot_token_id": int(eos)} \
+            if eos is not None else {}
         pre = {"inkling2_loop": "inkling2"}.get(cfg.get("model_type", ""), "inkling2")
-        return cls.from_hf_json(tj, pre, special)
+        tk = cls.from_hf_json(tj, pre, special)
+        stm = p.parent / "special_tokens_map.json"   # (its pad token: the GGUFs' padding_token_id)
+        pad = json.loads(stm.read_text()).get("pad_token") if stm.exists() else None
+        if isinstance(pad, str) and pad in tk.ids:
+            tk.special_ids["tokenizer.ggml.padding_token_id"] = tk.ids[pad]
+        return tk
 
     @classmethod
     def from_gguf(cls, path) -> "Tokenizer":

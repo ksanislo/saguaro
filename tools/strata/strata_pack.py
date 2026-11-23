@@ -228,3 +228,34 @@ class InklingExpert:
             sq = fp16_to_f32(np.frombuffer(self.body, np.uint16, count=F))
             return w.reshape(C, F), sq
         raise ValueError(f"down code {self.dn}")
+
+
+def inkling_expert_bytes(pack: Pack) -> int:
+    """The experts' bytes as saguaro-ik2 holds them (src/strata_fmt/strata_inkling.cpp's layout: an all-SF4 layer as
+    NVFP4, an all-MX8 layer as 36-byte blocks of 32, any other layer each expert in a slot of the layer's widest rows)."""
+    tc = pack.manifest["config"]["text_config"]
+    C, F, E = tc["hidden_size"], tc["intermediate_size"], tc["n_routed_experts"]
+
+    def rb(code, K):
+        if code == SF4:
+            return K // 64 * 36
+        if code == MX8:
+            return K // 32 * 36
+        return K // 128 * (4 + 16 * code)
+
+    def a16(x):
+        return (x + 15) // 16 * 16
+
+    total = 0
+    for l in range(tc["num_hidden_layers"]):
+        ents = pack.experts[l * E:(l + 1) * E]
+        codes = {(e[1], e[2]) for e in ents}
+        if codes == {(SF4, SF4)} or codes == {(MX8, MX8)}:
+            c = next(iter(codes))[0]
+            per = 2 * F * rb(c, C) + C * rb(c, F)
+        else:
+            gu = max(rb(e[1], C) for e in ents)
+            dn = max(rb(e[2], F) for e in ents)
+            per = 2 * a16(16 + F * gu + 2 * F) + a16(16 + C * dn)
+        total += per * E
+    return total
