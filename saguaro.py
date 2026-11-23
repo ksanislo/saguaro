@@ -7821,7 +7821,7 @@ def ik2_drafter_model(amd: bool = False, name: str | None = None) -> dict | None
     """The model's drafter as offer_download's form (tools/ik2/download.json's "drafter": Inkling-2-Mini's own drafter
     from Maya's own repo at a pinned revision), or None when the manifest names none.  One file of the manifest's two
     forms of it: `name`, else the one the setup fetches - the GGUF (Q8_0, unsloth's conversion: the engine's fastest
-    drafting path, "default"), on AMD the manifest's "amd" form."""
+    drafting path, "default"; on AMD the manifest's "amd" - the GGUF too, measured there as well)."""
     man = read_json(IK2_MANIFEST).get("drafter") or {}
     if not man.get("files") or not man.get("repo") or not man.get("revision"):
         return None
@@ -7840,7 +7840,7 @@ def ik2_drafter_model(amd: bool = False, name: str | None = None) -> dict | None
 def ik2_drafter_here(d: Path, amd: bool = False) -> tuple[Path, dict] | None:
     """A whole copy of the drafter already beside the model (in d), with its form's entry, or None: the form the setup
     fetches on this PC first, else the other one (its size and sha256 the published ones) - what the engine drafts
-    with where this PC's form was not downloaded (an earlier setup's mtp.safetensors on NVIDIA)."""
+    with where this PC's form was not downloaded (an earlier setup's mtp.safetensors)."""
     man = read_json(IK2_MANIFEST).get("drafter") or {}
     first = ik2_drafter_model(amd)
     if first is None:
@@ -7864,7 +7864,7 @@ def ik2_drafting(a) -> str:
 def ik2_drafter_step(a, d: Path, vram: float, ctx: int, kv: str, experts_gib: float = IK2F.EXPERTS_GIB,
                      hip: bool = False) -> Path | None:
     """The drafter beside the GGUF (in d) - the form this PC's engine drafts with best (ik2_drafter_model), downloaded
-    from Maya's repo when it is not there (an earlier setup's mtp.safetensors on NVIDIA stays on the disk, and is what
+    from Maya's repo when it is not there (an earlier setup's mtp.safetensors stays on the disk, and is what
     the engine drafts with where the GGUF was not downloaded) - sha256-checked, or None: drafting off
     (--drafting off), its room does not fit beside the model at this context (ik2_fit.draft_fits: not downloaded, the
     engine would leave it out), or not downloaded - the engine then drafts with the prompt lookup alone."""

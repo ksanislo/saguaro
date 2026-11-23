@@ -201,6 +201,9 @@ def draft_gib(ctx: int) -> float:
     return DRAFT_BASE_GIB + ctx * DRAFT_TOKEN_BYTES / GIB
 
 
+PLAN_DENSE_GIB = 1.1                                # the engine's own sum for the drafter's room (saguaro-ik2's fit
+PLAN_RESERVE_GIB = 1.5                              # block): the experts, the dense weights as blocks, the cache and
+                                                    # its reserve - less than BASE_GIB's measured use
 OFF_WIN_STAGE_GIB = 0.7                             # the offload path's verify window: 64 staging slots a slot size
 DRAFT_MIN_ROWS = 65536                              # the fewest context rows the engine plans for the drafter there
 
@@ -208,16 +211,20 @@ DRAFT_MIN_ROWS = 65536                              # the fewest context rows th
 def draft_fits(vram_gb: float, ctx: int, kv: str = DEFAULT_KV, experts_gib: float = EXPERTS_GIB,
                hip: bool = False) -> bool:
     """Whether the drafter's room fits beside the model at `ctx` (else the engine leaves it out at its start; the
-    prompt lookup still drafts).  Every expert in VRAM: beside them, its context rows FP16, else FP8 (half of them).
+    prompt lookup still drafts).  Every expert in VRAM: the engine's own check - its plan's sum (the experts, the dense
+    weights, the cache, its reserve) and the drafter with FP16 context rows, else FP8 ones (a 24 GB card drafts at
+    262,144 as the engine does).
     The offload path with the whole cache in VRAM: the tier gives the drafter's room, at most half of its own - the
     verify window's staging and at least DRAFT_MIN_ROWS of FP8 context rows (the last positions) with it (upstream
     v1.1.75).  VRAM not known: True (the engine measures)."""
     if not vram_gb:
         return True
     p = plan(vram_gb, ctx, kv, hip, experts_gib)
-    if p["resident"]:
-        half_rows = ctx * DRAFT_TOKEN_BYTES / GIB / 2
-        return plan(float(vram_gb) - draft_gib(ctx) + half_rows, ctx, kv, hip, experts_gib)["resident"]
+    if p["resident"]:    # (the engine's own sum; the drafter's context rows FP16, else FP8: half of them)
+        small = hip and float(vram_gb) < AMD_RESERVE_UNDER_GB   # (amd_layout's SAGUARO_IK2_RESERVE_MB=1024)
+        used = float(experts_gib) + PLAN_DENSE_GIB + ctx * KV_BYTES.get(kv, KV_BYTES["f16"]) / GIB + \
+            (1.0 if small else PLAN_RESERVE_GIB)
+        return float(vram_gb) - MARGIN_GIB >= used + draft_gib(ctx) - ctx * DRAFT_TOKEN_BYTES / GIB / 2
     least = DRAFT_BASE_GIB + OFF_WIN_STAGE_GIB + min(ctx, DRAFT_MIN_ROWS) * DRAFT_TOKEN_BYTES / GIB / 2
     return not p["kv_streamed"] and (p["tier_gib"] + OFF_ROOM_GIB + MARGIN_GIB) / 2 >= least
 
@@ -232,8 +239,8 @@ def drafting_off_reason(arch, vram_gb: float, ctx: int, kv: str = DEFAULT_KV, hi
                         experts_gib: float = EXPERTS_GIB) -> str | None:
     """Why drafting is off on this card (one line), or None: NVIDIA Volta (no exact window) / Turing (its window costs
     more than it keeps) run without it.  The offload path (the card does not hold every expert) drafts where its whole
-    cache stays in VRAM and the experts' tier has the drafter's room (draft_fits): on NVIDIA with --drafting on only;
-    not on AMD's (it loses there - upstream's auto measures it, we keep it off).  Every expert in VRAM keeps it."""
+    cache stays in VRAM and the experts' tier has the drafter's room (draft_fits): on NVIDIA --drafting auto measures it
+    once on the PC; not on AMD's (it loses there - upstream's auto measures it, we keep it off).  Every expert in VRAM keeps it."""
     try:
         cc = int(arch)
     except (TypeError, ValueError):
@@ -249,8 +256,6 @@ def drafting_off_reason(arch, vram_gb: float, ctx: int, kv: str = DEFAULT_KV, hi
         if hip:
             return ("drafting off: on an AMD card's offload path drafting is slower than plain decoding (an RX 9070 XT "
                     "measured: -1..-12 %) - a context or a file whose experts all fit brings it back")
-        return ("drafting off with --drafting auto: the card does not hold every expert at this context (the "
-                "offload path) - --drafting on drafts there (not measured against plain decoding by auto yet)")
     return None
 
 

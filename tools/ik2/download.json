@@ -30,7 +30,7 @@
   ]
  },
  "drafter": {
-  "_": "Drafting: Inkling-2-Mini's own drafter (a DSpark-style draft model; Apache 2.0) from Maya's own repo at a pinned revision, in its two forms, the same drafter in each: unsloth's GGUF of it (llama.cpp's dflash architecture, Q8_0 matrices - their dspark-Inkling-2-Mini-Q8_0.gguf byte for byte), which saguaro-ik2 reads on its fastest drafting path (\"default\": what the setup fetches), and thinkingmachines' mtp.safetensors (BF16, byte for byte), the form measured on AMD (\"amd\": what the setup fetches there). A whole copy of the PC's form already beside the model (the same size and sha256) is not downloaded again; an earlier setup's mtp.safetensors on NVIDIA stays on the disk beside the GGUF the setup then fetches. Read by saguaro-ik2 --draft; not with --drafting off. With --drafting auto the engine measures once on the PC whether it (or the prompt lookup) makes answers faster.",
+  "_": "Drafting: Inkling-2-Mini's own drafter (a DSpark-style draft model; Apache 2.0) from Maya's own repo at a pinned revision, in its two forms, the same drafter in each: unsloth's GGUF of it (llama.cpp's dflash architecture, Q8_0 matrices - their dspark-Inkling-2-Mini-Q8_0.gguf byte for byte), which saguaro-ik2 reads on its fastest drafting path (\"default\" and \"amd\": what the setup fetches, on NVIDIA and on AMD - measured on both), and thinkingmachines' mtp.safetensors (BF16, byte for byte), which earlier setups fetched. A whole copy of the GGUF already beside the model (the same size and sha256) is not downloaded again; an earlier setup's mtp.safetensors stays on the disk beside the GGUF the setup then fetches. Read by saguaro-ik2 --draft; not with --drafting off. With --drafting auto the engine measures once on the PC whether it (or the prompt lookup) makes answers faster.",
   "repo": "peasantsmith/Inkling-2-Mini-Maya-GGUF",
   "revision": "37027719327de5f574684b525ad88fe50c4ff222",
   "folder": "drafter",
@@ -46,7 +46,7 @@
    ]
   },
   "default": "dspark-Inkling-2-Mini-Q8_0.gguf",
-  "amd": "mtp.safetensors"
+  "amd": "dspark-Inkling-2-Mini-Q8_0.gguf"
  },
  "strata": {
   "_": "Strata's .strata packs of Inkling-2-Mini (strata-engine/Inkling-2-Mini-Strata, Apache 2.0), read by saguaro-ik2 as they are (src/strata_fmt: every weight exactly as Strata's own decode gives it). Each pack folder holds the pack, the repo's tokenizer.json (the GGUFs' tokenizer, table for table) and config.json; pictures and drafting take the vision tower and the drafter as above. experts_gib: the experts as the engine holds them resident (each expert packed); kl: measured here against SQ-20 (the original weights), 2000 tokens of text (tools/ik2/kl.py, RX 9070 XT); kl_published: Strata's own (their test prompts).",
