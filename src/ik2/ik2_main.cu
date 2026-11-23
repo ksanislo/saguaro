@@ -5120,23 +5120,41 @@ void tp_token_launches(OutMode out_mode) {
             k::conv4_res(W.tmp, Ly.h_mlp, Ly.sc_mlp, nullptr, 0, 1, C, W.r, W.h, g_s);
         }
     }
-    for (int m = 1; m < N; ++m) {   // (the members joined back into member 0's stream)
+    // the head: each member its rows of the logits (a row's product the same wherever it runs), into member 0's
+    const int Rm = c.n_rows / N;
+    const bool split_head = out_mode != OutMode::kNone && c.n_rows % N == 0 && g_tpm[N - 1]->out_w.N == Rm;
+    for (int m = 1; m < N; ++m) {   // (then the members joined back into member 0's stream)
         use_dev(m);
+        if (split_head) {
+            Model& Mm = *g_tpm[m];
+            Work& W = dev_work(m);
+            k::ResStates st{};
+            for (int i = 0; i < nb[m]; ++i) st.st[i] = W.blocks + (size_t) i * W.blk_ld * C;
+            st.st[nb[m]] = W.h;
+            k::RmsOuts outs{};
+            outs.w[0] = Mm.out_norm, outs.y16[0] = W.x16, outs.y32[0] = W.xq;
+            k::attn_res_rms_f16(st, nb[m] + 1, Mm.out_res_score, 1, 1, C, 1e-6f, c.eps, outs, g_s);
+            mv1(Mm.out_w, W.xq, W.logits);
+            CU(cudaMemcpyAsync(W0.logits + (size_t) m * Rm, W.logits, (size_t) Rm * 4, cudaMemcpyDefault, g_s));
+        }
         CU(cudaEventRecord(g_tpx[m].join, g_s));
     }
     use_dev(0);
-    for (int m = 1; m < N; ++m) CU(cudaStreamWaitEvent(g_s, g_tpx[m].join, 0));
-    if (out_mode == OutMode::kNone) return;
+    if (out_mode == OutMode::kNone) {
+        for (int m = 1; m < N; ++m) CU(cudaStreamWaitEvent(g_s, g_tpx[m].join, 0));
+        return;
+    }
     Model& M = *g_tpm[0];
     Work& W = W0;
-    {   // the head, on member 0
+    {   // the head (member 0: its rows, or all of them)
         k::ResStates st{};
         for (int i = 0; i < nb[0]; ++i) st.st[i] = W.blocks + (size_t) i * W.blk_ld * C;
         st.st[nb[0]] = W.h;
         k::RmsOuts outs{};
         outs.w[0] = M.out_norm, outs.y16[0] = W.x16, outs.y32[0] = W.xq;
         k::attn_res_rms_f16(st, nb[0] + 1, M.out_res_score, 1, 1, C, 1e-6f, c.eps, outs, g_s);
-        mv1(M.out_w, W.xq, W.logits);
+        mv1(split_head ? mat_rows(M.out_w, 0, Rm) : M.out_w, W.xq, W.logits);
+        for (int m = 1; m < N; ++m) CU(cudaStreamWaitEvent(g_s, g_tpx[m].join, 0));
         if (out_mode == OutMode::kArgmax) {
             k::argmax_sum(W.logits, nullptr, nullptr, c.n_vocab, W.argmax_d, g_s);
             CU(cudaMemcpyAsync(W.argmax_h, W.argmax_d, 4, cudaMemcpyDeviceToHost, g_s));
@@ -7495,7 +7513,10 @@ int main(int argc, char** argv) {
     }
     c.n_rows = (int) (S.info("output.weight")->elements() / C);
     M.c.n_rows = c.n_rows;
-    if (tm == 0) M.out_w = load_mat(S, "output.weight", c.n_rows, (int) C);   // (--tp: the head on member 0)
+    // (--tp: the whole head on member 0 - a prompt's logits - and a token's rows of it split over the members:
+    //  member m > 0 holds rows [m R / N, (m + 1) R / N))
+    if (tm == 0) M.out_w = load_mat(S, "output.weight", c.n_rows, (int) C);
+    else if (c.n_rows % tpN == 0) M.out_w = lmat("output.weight", c.n_rows / tpN, (int) C);
     if (g_dense_q8) {   // (a layer's largest; the head's logits go a token at a time over its blocks)
         g_w16_n = (2 * HD + 2 * KD + (size_t) c.H * c.d_rel) * C;
         g_w16 = dalloc<uint16_t>(g_w16_n);
