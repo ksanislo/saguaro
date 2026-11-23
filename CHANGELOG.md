@@ -22,9 +22,9 @@ older multi-GPU hardware (NVIDIA Turing T4 - sm_75 tensor cores, Xeon AVX1 CPUs)
 ### Upstream Project Maya v1.1.75 taken in (2026-11-23)
 
 - **Inkling 2 Mini drafting on by default where it pays** (upstream #1154's GGUF drafter and one-launch exact window,
-  its drafting gate and depth-aware pause, plus our switches): a T4 with the UD-Q4_K_XL expert cache about +9 %
+  its drafting gate and depth-aware pause, plus our switches): a T4 with the UD-Q4_K_XL expert cache about +8 %
   (a rounding-level verify window - answers may differ from plain decoding at near-ties), a T4 holding every expert
-  about +5 % and an RX 9070 XT holding every expert about +11 % (same answers as plain decoding); off on AMD's offload
+  about +4 % and an RX 9070 XT holding every expert about +11 % (same answers as plain decoding); off on AMD's offload
   path, where it loses. Every default has its `SAGUARO_IK2_*` switch. Table: docs/INKLING2.md.
 - **Inkling 2 Mini on AMD cards from 12 GB** (the offload path, Linux) and drafting on Volta; the drafter and the
   picture file come from Project Maya's repo (byte-identical to before; copies already on the disk are kept).
