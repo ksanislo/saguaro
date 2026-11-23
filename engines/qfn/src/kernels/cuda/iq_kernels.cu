@@ -9,6 +9,7 @@
 #include "strata/core/sm120_series.hpp"
 #include "strata/kernels/gfx_arch.hpp"
 #include "strata/kernels/dp4a.hpp"
+#include "strata/kernels/lane_xor.hpp"
 #include "strata/kernels/q8_1_finite.hpp"
 #include "s26_tsum.cuh"
 
@@ -779,9 +780,13 @@ template<> struct Fmt<40> { static constexpr int qk = 64, ipb = 2, step = 4;    
     __device__ static float dot(const void* v, const block_q8_1* y, int kbx, int iqs) { return vec_dot_nvfp4_q8_1(v, y, kbx, iqs); } };
 
 __device__ __forceinline__ float warp_sum(float v) {
+#if defined(STRATA_USE_HIP)
+    return strata_warp_sum_xor(v);   // RDNA: the same pairs in registers, not ds_bpermute (same bits; lane_xor.hpp)
+#else
 #pragma unroll
     for (int o = 16; o > 0; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
     return v;
+#endif
 }
 
 // One row against one q8_1 activation, the whole warp: call k = (block, part) is lane-strided.
