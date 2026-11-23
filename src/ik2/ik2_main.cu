@@ -60,6 +60,7 @@ static inline ssize_t pread(int fd, void* buf, size_t count, int64_t offset) {
 }
 #define posix_fadvise(fd, off, len, adv) ((void)0)
 #define MADV_WILLNEED 0
+#define MADV_DONTNEED 0
 static inline int madvise(void*, size_t, int) { return 0; }
 static inline int munmap(void*, size_t) { return 0; }
 #ifndef SIGUSR1
@@ -7648,6 +7649,16 @@ int main(int argc, char** argv) {
     //  files are mapped straight to their slots, and stay in the page cache for the next load - SAGUARO_IK2_HOST=pinned: as
     //  for the other models)
     const bool host_mmap = !S.sv && (getenv("SAGUARO_IK2_HOST") ? std::string(getenv("SAGUARO_IK2_HOST")) == "mmap" : g_fast_want);
+#if defined(SAGUARO_IK2_PASCAL) && !defined(_WIN32)
+    // (Pascal's PCs - a P40 beside 32 GB of RAM: the experts' pages of the mapped files read ahead a layer at a time
+    //  as the resident path copies it to VRAM, then dropped from this process and the page cache - nothing reads them
+    //  on the host again, and the whole file read ahead at once pushed the PC's other programs into swap;
+    //  SAGUARO_IK2_RELEASE_HOST: 1 also on other GPUs, 0 off)
+    const char* rh_env = getenv("SAGUARO_IK2_RELEASE_HOST");
+    const bool rel_host = host_mmap && tpN == 1 && (rh_env ? std::atoi(rh_env) != 0 : k::arch_class() == 60);
+#else
+    const bool rel_host = false;
+#endif
     // The offload path pins only the experts the VRAM tier does not hold (owner, v1.1.73): the layers' blocks only
     // reserved here (no RAM), the tier planned on the real free VRAM (EC.init), copied in from where the files are
     // mapped, then the rest read and pinned (below the warm) - an 8 GB card's tier is RAM a 16 GB PC does not need.
@@ -7695,7 +7706,7 @@ int main(int argc, char** argv) {
                     Ly.host[2] = d, Ly.stride[2] = Ly.eb[2];
                 }
             }
-            {   // (read ahead: a cold file otherwise comes in a page fault at a time)
+            if (!rel_host) {   // (read ahead: a cold file otherwise comes in a page fault at a time)
                 const size_t pg = 4096, a0 = (size_t) p & ~(pg - 1);
                 ::madvise((void*) a0, (size_t) p - a0 + tensor_bytes(*S.info(J.name)), MADV_WILLNEED);
             }
@@ -8466,10 +8477,40 @@ int main(int argc, char** argv) {
             const double tw = now();
             const uint64_t m0 = EC.misses, b0 = EC.bytes_up;
             int n = 0;
-            for (int l = 0; l < c.n_layer; ++l)
+            size_t rel = 0;
+            std::vector<int> rel_fd(S.paths.size(), -1);
+            // (rel_host: a layer's expert tensors' whole pages - read ahead, or dropped from RAM once in VRAM)
+            auto rel_layer = [&](int l, bool drop) {
+                const size_t pg = 4096;
+                for (const auto& J : exp_jobs) {
+                    if (J.l != l) continue;
+                    const size_t p0 = (size_t) S.data(J.name), p1 = p0 + tensor_bytes(*S.info(J.name));
+                    if (!drop) {
+                        ::madvise((void*) (p0 & ~(pg - 1)), p1 - (p0 & ~(pg - 1)), MADV_WILLNEED);
+                        continue;
+                    }
+                    const size_t a = (p0 + pg - 1) & ~(pg - 1), b = p1 & ~(pg - 1);
+                    if (b <= a) continue;
+                    ::madvise((void*) a, b - a, MADV_DONTNEED);
+                    const int f = S.file_of(J.name);
+                    if (rel_fd[f] < 0) rel_fd[f] = ::open(S.paths[f].c_str(), O_RDONLY);
+                    if (rel_fd[f] >= 0) posix_fadvise(rel_fd[f], (off_t) (S.file_offset(J.name) + (a - p0)), (off_t) (b - a), POSIX_FADV_DONTNEED);
+                    rel += b - a;
+                }
+            };
+            if (rel_host) rel_layer(0, false);
+            for (int l = 0; l < c.n_layer; ++l) {
+                if (rel_host && l + 1 < c.n_layer) rel_layer(l + 1, false);   // (the next layer's pages on their way)
                 for (int e = 0; e < c.E; ++e)
                     if (!EC.has(l, e)) EC.get(M.L[l], l, e, EC.tick, g_cs, nullptr, true, true), ++n;
+                if (rel_host) {
+                    CU(cudaStreamSynchronize(g_cs));
+                    rel_layer(l, true);
+                }
+            }
             CU(cudaStreamSynchronize(g_cs));
+            for (int f : rel_fd)
+                if (f >= 0) ::close(f);
             ++EC.tick;
             for (int l = 0; l < c.n_layer; ++l) {
                 Layer& Ly = M.L[l];
@@ -8485,6 +8526,9 @@ int main(int argc, char** argv) {
             g_fast = true;
             std::printf("resident: every expert in VRAM (%d copied in %.1f s); tokens take the resident path%s\n", n,
                         now() - tw, g_graph ? ", a CUDA graph each" : "");
+            if (rel_host)
+                std::printf("host: the experts' %.1f GiB of the model files released from RAM as they reached VRAM\n",
+                            rel / 1073741824.0);
         } else {
             std::printf("resident path off: %s\n", all ? "a dense matrix is not kept as blocks" : "the cache does not hold every expert");
             if (tpN > 1) die("--tp: GPU " + std::to_string(d) + " does not hold its share of every expert");
