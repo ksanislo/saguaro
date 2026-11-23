@@ -46,6 +46,9 @@ __device__ __forceinline__ float mix_inv(const uint16_t* mq, int r) {
 
 namespace {
 
+// a Strata pack's type (or kMIX): its kernels' PK instantiations
+inline bool sf_any(int t) { return t >= strata_fmt::kQ8F || t == strata_fmt::kBF16; }
+
 void check(const char* what) {
     const cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) {
@@ -2793,11 +2796,11 @@ __host__ __device__ __forceinline__ uint32_t iq_signs8(uint32_t s7) {
 }
 
 __host__ __device__ __noinline__ float sf_decode_value(int type, const uint8_t* blocks, size_t v);
+// PK: a Strata pack's types too (the GGUF types' instantiations carry none of their code)
+template <bool PK = false>
 __host__ __device__ inline float decode_value(int type, const uint8_t* blocks, size_t v) {
-#ifndef SAGUARO_IK2_NO_STRATA
-    if (type >= strata_fmt::kQ8F || type == strata_fmt::kBF16)   // (a Strata pack's types: out of line, so the GGUF
-        return sf_decode_value(type, blocks, v);                 //  types' code around it does not carry them)
-#endif
+    if (PK && (type >= strata_fmt::kQ8F || type == strata_fmt::kBF16))   // (a Strata pack's types: out of line)
+        return sf_decode_value(type, blocks, v);
     if (type == kNVFP4) {
         const int8_t kv[16] = {0, 1, 2, 3, 4, 6, 8, 12, 0, -1, -2, -3, -4, -6, -8, -12};
         const uint8_t* b = blocks + (v / 64) * 36;
@@ -3152,6 +3155,7 @@ __device__ __noinline__ float sf_row_part(int type, const uint8_t* w, const floa
     return acc;
 }
 
+template <bool PK = false>
 __device__ float row_dot(int type, const uint8_t* w, const float* xs, int K) {
     const int lane = threadIdx.x & 31;
     float acc = 0.0f;
@@ -3320,10 +3324,10 @@ __device__ float row_dot(int type, const uint8_t* w, const float* xs, int K) {
             acc += iq3 ? iq3xxs_sub_dot(w + (size_t) (sb >> 3) * 98, sb & 7, xv)
                        : iq4xs_sub_dot(w + (size_t) (sb >> 3) * 136, sb & 7, xv);
         }
-    } else if (sf_chunk_type(type) && (K & 31) == 0 && ((uintptr_t) w & 3) == 0) {
+    } else if (PK && sf_chunk_type(type) && (K & 31) == 0 && ((uintptr_t) w & 3) == 0) {
         acc = sf_row_part(type, w, xs, K, lane);
     } else {
-        for (int i = lane; i < K; i += 32) acc += decode_value(type, w, (size_t) i) * xs[xp(i)];
+        for (int i = lane; i < K; i += 32) acc += decode_value<PK>(type, w, (size_t) i) * xs[xp(i)];
     }
 #pragma unroll
     for (int o = 16; o > 0; o >>= 1) acc += __shfl_xor_sync(0xffffffffu, acc, o);
@@ -3331,6 +3335,7 @@ __device__ float row_dot(int type, const uint8_t* w, const float* xs, int K) {
 }
 
 // Single-pass dot of two weight rows (w0, w1) of the same quant type against xs (reading xs once for both rows).
+template <bool PK = false>
 __device__ void row_dot_2(int type, const uint8_t* wg, const uint8_t* wu, const float* xs, int K, float& og, float& ou) {
     const int lane = threadIdx.x & 31;
     float ag = 0.0f, au = 0.0f;
@@ -3558,13 +3563,13 @@ __device__ void row_dot_2(int type, const uint8_t* wg, const uint8_t* wu, const 
             ag += iq3 ? iq3xxs_sub_dot(wg + off, sb & 7, xv) : iq4xs_sub_dot(wg + off, sb & 7, xv);
             au += iq3 ? iq3xxs_sub_dot(wu + off, sb & 7, xv) : iq4xs_sub_dot(wu + off, sb & 7, xv);
         }
-    } else if (sf_chunk_type(type) && (K & 31) == 0 && (((uintptr_t) wg | (uintptr_t) wu) & 3) == 0) {
+    } else if (PK && sf_chunk_type(type) && (K & 31) == 0 && (((uintptr_t) wg | (uintptr_t) wu) & 3) == 0) {
         ag = sf_row_part(type, wg, xs, K, lane), au = sf_row_part(type, wu, xs, K, lane);
     } else {
         for (int i = lane; i < K; i += 32) {
             const float xv = xs[xp(i)];
-            ag += decode_value(type, wg, (size_t) i) * xv;
-            au += decode_value(type, wu, (size_t) i) * xv;
+            ag += decode_value<PK>(type, wg, (size_t) i) * xv;
+            au += decode_value<PK>(type, wu, (size_t) i) * xv;
         }
     }
 #pragma unroll
@@ -3575,9 +3580,10 @@ __device__ void row_dot_2(int type, const uint8_t* wg, const uint8_t* wu, const 
     og = ag;
     ou = au;
 }
+template <bool PK = false>
 __device__ __forceinline__ void row_dot_pair(int type, const uint8_t* wg, const uint8_t* wu, const float* xs, int K,
                                              float& og, float& ou) {
-    row_dot_2(type, wg, wu, xs, K, og, ou);
+    row_dot_2<PK>(type, wg, wu, xs, K, og, ou);
 }
 
 __device__ __forceinline__ void load_xs_f32(const float* x, int K, float* xs) {
@@ -3810,7 +3816,7 @@ experts_v70_kernel(const uint8_t* const* __restrict__ blob, size_t off, int C, i
     }
 }
 
-template <int WARPS, int ROWS>
+template <int WARPS, int ROWS, bool PK = false>
 __global__ void experts_gate_up_kernel(const uint8_t* const* blob, const int* tok, int ty_gate, int ty_up, size_t eb0,
                                        const float* x, int C, int F, size_t rb_gate, size_t rb_up, float* gu) {
     extern __shared__ float xs[];
@@ -3824,12 +3830,12 @@ __global__ void experts_gate_up_kernel(const uint8_t* const* blob, const int* to
         if (row >= 2 * F) break;
         const bool up = row >= F;
         const int r = up ? row - F : row;
-        const float v = row_dot(up ? ty_up : ty_gate, bl + (up ? eb0 + r * rb_up : r * rb_gate), xs, C);
+        const float v = row_dot<PK>(up ? ty_up : ty_gate, bl + (up ? eb0 + r * rb_up : r * rb_gate), xs, C);
         if ((threadIdx.x & 31) == 0) gu[(size_t) s * 2 * F + row] = v;
     }
 }
 
-template <int WARPS, int ROWS>
+template <int WARPS, int ROWS, bool PK = false>
 __global__ void experts_gate_up_swiglu_kernel(const uint8_t* const* blob, const int* tok, int ty_gate, int ty_up,
                                               size_t eb0, const float* x, int C, int F, size_t rb_gate, size_t rb_up,
                                               const float* sg, const float* su, float gcap, float ucap, uint16_t* h,
@@ -3844,7 +3850,7 @@ __global__ void experts_gate_up_swiglu_kernel(const uint8_t* const* blob, const 
     const uint8_t* bg = blob[s];
     const uint8_t* bu = bg + eb0;
     const uint16_t* mq = nullptr;
-    if (SF_MIX && ty_gate == strata_fmt::kMIX)
+    if (PK && SF_MIX && ty_gate == strata_fmt::kMIX)
         bu = mix_up_of(bg), mix_role(bg, ty_gate, bg, rb_gate, nullptr), mix_role(bu, ty_up, bu, rb_up, &mq);
     const float sgs = sg ? sg[s] : 1.0f;
     const float sus = su ? su[s] : 1.0f;
@@ -3853,20 +3859,20 @@ __global__ void experts_gate_up_swiglu_kernel(const uint8_t* const* blob, const 
         if (r >= F) break;
         float vg, vu;
         if (ty_gate == ty_up) {
-            row_dot_pair(ty_gate, bg + (size_t) r * rb_gate, bu + (size_t) r * rb_up, xs, C, vg, vu);
+            row_dot_pair<PK>(ty_gate, bg + (size_t) r * rb_gate, bu + (size_t) r * rb_up, xs, C, vg, vu);
         } else {
-            vg = row_dot(ty_gate, bg + (size_t) r * rb_gate, xs, C);
-            vu = row_dot(ty_up, bu + (size_t) r * rb_up, xs, C);
+            vg = row_dot<PK>(ty_gate, bg + (size_t) r * rb_gate, xs, C);
+            vu = row_dot<PK>(ty_up, bu + (size_t) r * rb_up, xs, C);
         }
         if ((threadIdx.x & 31) == 0) {
             const float g = vg * sgs, u = vu * sus;
             const float a = gcap * tanhf(g / gcap) * (1.0f / (1.0f + expf(-g))) * ucap * tanhf(u / ucap);
-            h[(size_t) (orow ? orow[s] : s) * h_ld + r] = mq ? f2h(a * mix_inv(mq, r)) : f2h(a);
+            h[(size_t) (orow ? orow[s] : s) * h_ld + r] = PK && mq ? f2h(a * mix_inv(mq, r)) : f2h(a);
         }
     }
 }
 
-template <int WARPS, int ROWS>
+template <int WARPS, int ROWS, bool PK = false>
 __global__ void experts_down_kernel(const uint8_t* const* blob, int ty_down, size_t off_down, const uint16_t* h,
                                     int C, int F, size_t rb_down, float* y, const int* cls, int want) {
     extern __shared__ float xs[];
@@ -3877,20 +3883,20 @@ __global__ void experts_down_kernel(const uint8_t* const* blob, int ty_down, siz
     __syncthreads();
     const int warp = threadIdx.x >> 5;
     const uint8_t* w = blob[s] + off_down;
-    if (SF_MIX && ty_down == strata_fmt::kMIX) mix_role(mix_dn_of(w - off_down), ty_down, w, rb_down, nullptr);
+    if (PK && SF_MIX && ty_down == strata_fmt::kMIX) mix_role(mix_dn_of(w - off_down), ty_down, w, rb_down, nullptr);
     for (int j = 0; j < ROWS;) {
         const int row = (blockIdx.x * WARPS + warp) * ROWS + j;
         if (row >= C) break;
         if (j + 1 < ROWS && row + 1 < C) {
             float v0, v1;
-            row_dot_2(ty_down, w + (size_t) row * rb_down, w + (size_t) (row + 1) * rb_down, xs, F, v0, v1);
+            row_dot_2<PK>(ty_down, w + (size_t) row * rb_down, w + (size_t) (row + 1) * rb_down, xs, F, v0, v1);
             if ((threadIdx.x & 31) == 0) {
                 y[(size_t) s * C + row] = v0;
                 y[(size_t) s * C + row + 1] = v1;
             }
             j += 2;
         } else {
-            const float v = row_dot(ty_down, w + (size_t) row * rb_down, xs, F);
+            const float v = row_dot<PK>(ty_down, w + (size_t) row * rb_down, xs, F);
             if ((threadIdx.x & 31) == 0) y[(size_t) s * C + row] = v;
             j += 1;
         }
@@ -3962,7 +3968,7 @@ __device__ __forceinline__ void unpack_u32_i8(uint32_t q4, float* wv) {
     wv[3] = (float) (int8_t) (q4 >> 24);
 }
 
-template <class X, int N_CAP>
+template <class X, int N_CAP, bool PK = false>
 __device__ void row_dot_multi(int type, const uint8_t* w, const X* const* xs, int n, int K, float* out) {
     const int lane = threadIdx.x & 31;
     float acc[N_CAP];
@@ -4146,7 +4152,7 @@ __device__ void row_dot_multi(int type, const uint8_t* w, const X* const* xs, in
         }
     } else {
         for (int i = lane; i < K; i += 32) {
-            const float wv = decode_value(type, w, (size_t) i);
+            const float wv = decode_value<PK>(type, w, (size_t) i);
 #pragma unroll
             for (int t = 0; t < N_CAP; ++t) {
                 if (t >= n) break;
@@ -4164,7 +4170,7 @@ __device__ void row_dot_multi(int type, const uint8_t* w, const X* const* xs, in
 }
 
 // Single-pass grouped (gate, up) dot of the same quant type against xs[0..n-1] (reading each xs[t] once)
-template <int N_CAP>
+template <int N_CAP, bool PK = false>
 __device__ void row_dot_pair_multi(int type, const uint8_t* wg, const uint8_t* wu, const float* const* xs, int n,
                                    int K, float* og, float* ou) {
     const int lane = threadIdx.x & 31;
@@ -4302,8 +4308,8 @@ __device__ void row_dot_pair_multi(int type, const uint8_t* wg, const uint8_t* w
             }
         }
     } else {
-        row_dot_multi<float, N_CAP>(type, wg, xs, n, K, og);
-        row_dot_multi<float, N_CAP>(type, wu, xs, n, K, ou);
+        row_dot_multi<float, N_CAP, PK>(type, wg, xs, n, K, og);
+        row_dot_multi<float, N_CAP, PK>(type, wu, xs, n, K, ou);
         return;
     }
 #pragma unroll
@@ -4321,7 +4327,7 @@ __device__ void row_dot_pair_multi(int type, const uint8_t* wg, const uint8_t* w
 
 constexpr int kGroupWarps = 4, kGroupRows = 4, kGroupSwigluRows = 2;
 
-template <int N_CAP>
+template <int N_CAP, bool PK = false>
 __device__ __forceinline__ void experts_gate_up_g_run(const uint8_t* bl, const int* tok_g, const int* orow_g,
                                                       int ng, int ty_gate, int ty_up, size_t eb0, const float* x,
                                                       int C, int F, size_t rb_gate, size_t rb_up, float* gu) {
@@ -4335,13 +4341,13 @@ __device__ __forceinline__ void experts_gate_up_g_run(const uint8_t* bl, const i
         if (row >= 2 * F) break;
         const bool up = row >= F;
         const int r = up ? row - F : row;
-        row_dot_multi<float, N_CAP>(up ? ty_up : ty_gate, bl + (up ? eb0 + r * rb_up : r * rb_gate), xs, ng, C, out);
+        row_dot_multi<float, N_CAP, PK>(up ? ty_up : ty_gate, bl + (up ? eb0 + r * rb_up : r * rb_gate), xs, ng, C, out);
         if ((threadIdx.x & 31) == 0)
             for (int t = 0; t < ng; ++t) gu[(size_t) orow_g[t] * 2 * F + row] = out[t];
     }
 }
 
-template <int N_CAP>
+template <int N_CAP, bool PK = false>
 __device__ __forceinline__ void experts_gate_up_swiglu_g_run(const uint8_t* bl, const int* tok_g, const int* orow_g,
                                                              int ng, int ty_gate, int ty_up, size_t eb0,
                                                              const float* x, int C, int F, size_t rb_gate,
@@ -4357,11 +4363,11 @@ __device__ __forceinline__ void experts_gate_up_swiglu_g_run(const uint8_t* bl, 
         const int r = (blockIdx.x * kGroupWarps + warp) * kGroupSwigluRows + j;
         if (r >= F) break;
         if (ty_gate == ty_up) {
-            row_dot_pair_multi<N_CAP>(ty_gate, bl + (size_t) r * rb_gate, bl + eb0 + (size_t) r * rb_up, xs, ng, C,
+            row_dot_pair_multi<N_CAP, PK>(ty_gate, bl + (size_t) r * rb_gate, bl + eb0 + (size_t) r * rb_up, xs, ng, C,
                                       og, ou);
         } else {
-            row_dot_multi<float, N_CAP>(ty_gate, bl + (size_t) r * rb_gate, xs, ng, C, og);
-            row_dot_multi<float, N_CAP>(ty_up, bl + eb0 + (size_t) r * rb_up, xs, ng, C, ou);
+            row_dot_multi<float, N_CAP, PK>(ty_gate, bl + (size_t) r * rb_gate, xs, ng, C, og);
+            row_dot_multi<float, N_CAP, PK>(ty_up, bl + eb0 + (size_t) r * rb_up, xs, ng, C, ou);
         }
         if ((threadIdx.x & 31) == 0) {
             for (int t = 0; t < ng; ++t) {
@@ -4369,13 +4375,13 @@ __device__ __forceinline__ void experts_gate_up_swiglu_g_run(const uint8_t* bl, 
                 const float g = og[t] * (sg ? sg[ro] : 1.0f);
                 const float u = ou[t] * (su ? su[ro] : 1.0f);
                 const float a = gcap * tanhf(g / gcap) * (1.0f / (1.0f + expf(-g))) * ucap * tanhf(u / ucap);
-                h[(size_t) ro * F + r] = mq ? f2h(a * mix_inv(mq, r)) : f2h(a);
+                h[(size_t) ro * F + r] = PK && mq ? f2h(a * mix_inv(mq, r)) : f2h(a);
             }
         }
     }
 }
 
-template <int N_CAP>
+template <int N_CAP, bool PK = false>
 __device__ __forceinline__ void experts_down_g_run(const uint8_t* w, const int* hrow_g, const int* yrow_g, int ng,
                                                    int ty_down, const uint16_t* h, int C, int F, size_t rb_down,
                                                    float* y) {
@@ -4387,13 +4393,14 @@ __device__ __forceinline__ void experts_down_g_run(const uint8_t* w, const int* 
     for (int j = 0; j < kGroupRows; ++j) {
         const int row = (blockIdx.x * kGroupWarps + warp) * kGroupRows + j;
         if (row >= C) break;
-        row_dot_multi<uint16_t, N_CAP>(ty_down, w + row * rb_down, xs, ng, F, out);
+        row_dot_multi<uint16_t, N_CAP, PK>(ty_down, w + row * rb_down, xs, ng, F, out);
         if ((threadIdx.x & 31) == 0)
             for (int t = 0; t < ng; ++t) y[(size_t) yrow_g[t] * C + row] = out[t];
     }
 }
 
 // group g: blob[g], n[g] tokens, their rows of x tok[g][j] and their output rows row[g][j]
+template <bool PK = false>
 __global__ void experts_gate_up_g_kernel(const uint8_t* const* blob, const int* n, const int* tok, const int* orow,
                                          int ty_gate, int ty_up, size_t eb0, const float* x, int C, int F,
                                          size_t rb_gate, size_t rb_up, float* gu) {
@@ -4403,15 +4410,16 @@ __global__ void experts_gate_up_g_kernel(const uint8_t* const* blob, const int* 
     const int* tok_g = tok + g * kGroupMax;
     const int* orow_g = orow + g * kGroupMax;
     if (ng == 1)
-        experts_gate_up_g_run<1>(bl, tok_g, orow_g, ng, ty_gate, ty_up, eb0, x, C, F, rb_gate, rb_up, gu);
+        experts_gate_up_g_run<1, PK>(bl, tok_g, orow_g, ng, ty_gate, ty_up, eb0, x, C, F, rb_gate, rb_up, gu);
     else if (ng == 2)
-        experts_gate_up_g_run<2>(bl, tok_g, orow_g, ng, ty_gate, ty_up, eb0, x, C, F, rb_gate, rb_up, gu);
+        experts_gate_up_g_run<2, PK>(bl, tok_g, orow_g, ng, ty_gate, ty_up, eb0, x, C, F, rb_gate, rb_up, gu);
     else if (ng <= 4)
-        experts_gate_up_g_run<4>(bl, tok_g, orow_g, ng, ty_gate, ty_up, eb0, x, C, F, rb_gate, rb_up, gu);
+        experts_gate_up_g_run<4, PK>(bl, tok_g, orow_g, ng, ty_gate, ty_up, eb0, x, C, F, rb_gate, rb_up, gu);
     else
-        experts_gate_up_g_run<kGroupMax>(bl, tok_g, orow_g, ng, ty_gate, ty_up, eb0, x, C, F, rb_gate, rb_up, gu);
+        experts_gate_up_g_run<kGroupMax, PK>(bl, tok_g, orow_g, ng, ty_gate, ty_up, eb0, x, C, F, rb_gate, rb_up, gu);
 }
 
+template <bool PK = false>
 __global__ void experts_gate_up_swiglu_g_kernel(const uint8_t* const* blob, const int* n, const int* tok,
                                                 const int* orow, int ty_gate, int ty_up, size_t eb0, const float* x,
                                                 int C, int F, size_t rb_gate, size_t rb_up, const float* sg,
@@ -4420,7 +4428,7 @@ __global__ void experts_gate_up_swiglu_g_kernel(const uint8_t* const* blob, cons
     if (ng <= 0) return;
     const uint8_t* bl = blob[g];
     const uint16_t* mq = nullptr;
-    if (SF_MIX && ty_gate == strata_fmt::kMIX) {
+    if (PK && SF_MIX && ty_gate == strata_fmt::kMIX) {
         const uint8_t *bg, *bu;
         mix_role(bl, ty_gate, bg, rb_gate, nullptr), mix_role(mix_up_of(bl), ty_up, bu, rb_up, &mq);
         bl = bg, eb0 = (size_t) (bu - bg);
@@ -4428,34 +4436,35 @@ __global__ void experts_gate_up_swiglu_g_kernel(const uint8_t* const* blob, cons
     const int* tok_g = tok + g * kGroupMax;
     const int* orow_g = orow + g * kGroupMax;
     if (ng == 1)
-        experts_gate_up_swiglu_g_run<1>(bl, tok_g, orow_g, ng, ty_gate, ty_up, eb0, x, C, F, rb_gate, rb_up, sg, su,
+        experts_gate_up_swiglu_g_run<1, PK>(bl, tok_g, orow_g, ng, ty_gate, ty_up, eb0, x, C, F, rb_gate, rb_up, sg, su,
                                         gcap, ucap, h, mq);
     else if (ng == 2)
-        experts_gate_up_swiglu_g_run<2>(bl, tok_g, orow_g, ng, ty_gate, ty_up, eb0, x, C, F, rb_gate, rb_up, sg, su,
+        experts_gate_up_swiglu_g_run<2, PK>(bl, tok_g, orow_g, ng, ty_gate, ty_up, eb0, x, C, F, rb_gate, rb_up, sg, su,
                                         gcap, ucap, h, mq);
     else if (ng <= 4)
-        experts_gate_up_swiglu_g_run<4>(bl, tok_g, orow_g, ng, ty_gate, ty_up, eb0, x, C, F, rb_gate, rb_up, sg, su,
+        experts_gate_up_swiglu_g_run<4, PK>(bl, tok_g, orow_g, ng, ty_gate, ty_up, eb0, x, C, F, rb_gate, rb_up, sg, su,
                                         gcap, ucap, h, mq);
     else
-        experts_gate_up_swiglu_g_run<kGroupMax>(bl, tok_g, orow_g, ng, ty_gate, ty_up, eb0, x, C, F, rb_gate, rb_up,
+        experts_gate_up_swiglu_g_run<kGroupMax, PK>(bl, tok_g, orow_g, ng, ty_gate, ty_up, eb0, x, C, F, rb_gate, rb_up,
                                                 sg, su, gcap, ucap, h, mq);
 }
 
+template <bool PK = false>
 __global__ void experts_down_g_kernel(const uint8_t* const* blob, const int* n, const int* orow, int ty_down,
                                       size_t off_down, const uint16_t* h, int C, int F, size_t rb_down, float* y) {
     const int g = blockIdx.y, ng = n[g];
     if (ng <= 0) return;
     const uint8_t* w = blob[g] + off_down;
-    if (SF_MIX && ty_down == strata_fmt::kMIX) mix_role(mix_dn_of(w - off_down), ty_down, w, rb_down, nullptr);
+    if (PK && SF_MIX && ty_down == strata_fmt::kMIX) mix_role(mix_dn_of(w - off_down), ty_down, w, rb_down, nullptr);
     const int* orow_g = orow + g * kGroupMax;
     if (ng == 1)
-        experts_down_g_run<1>(w, orow_g, orow_g, ng, ty_down, h, C, F, rb_down, y);
+        experts_down_g_run<1, PK>(w, orow_g, orow_g, ng, ty_down, h, C, F, rb_down, y);
     else if (ng == 2)
-        experts_down_g_run<2>(w, orow_g, orow_g, ng, ty_down, h, C, F, rb_down, y);
+        experts_down_g_run<2, PK>(w, orow_g, orow_g, ng, ty_down, h, C, F, rb_down, y);
     else if (ng <= 4)
-        experts_down_g_run<4>(w, orow_g, orow_g, ng, ty_down, h, C, F, rb_down, y);
+        experts_down_g_run<4, PK>(w, orow_g, orow_g, ng, ty_down, h, C, F, rb_down, y);
     else
-        experts_down_g_run<kGroupMax>(w, orow_g, orow_g, ng, ty_down, h, C, F, rb_down, y);
+        experts_down_g_run<kGroupMax, PK>(w, orow_g, orow_g, ng, ty_down, h, C, F, rb_down, y);
 }
 
 // ---- attention decode & multi-query decode (F32, FP16, or FP8 KV cache, optional kv_cap ring buffer)
@@ -4589,7 +4598,7 @@ __global__ void attn_combine_kernel(const float* sink, const float* part, int H,
     out[((size_t) qi * H + h) * 128 + tid] = (o / den) * v_inv_scale;
 }
 
-template <int WARPS, int ROWS>
+template <int WARPS, int ROWS, bool PK = false>
 __global__ void mv_blocks_kernel(int type, const uint8_t* W, int N, int K, size_t rb, const float* x, float* y) {
     extern __shared__ float xs[];
     load_xs_f32(x, K, xs);
@@ -4598,7 +4607,7 @@ __global__ void mv_blocks_kernel(int type, const uint8_t* W, int N, int K, size_
     for (int j = 0; j < ROWS; ++j) {
         const int row = (blockIdx.x * WARPS + warp) * ROWS + j;
         if (row >= N) break;
-        const float v = row_dot(type, W + (size_t) row * rb, xs, K);
+        const float v = row_dot<PK>(type, W + (size_t) row * rb, xs, K);
         if ((threadIdx.x & 31) == 0) y[row] = v;
     }
 }
@@ -5384,11 +5393,11 @@ __global__ void decode_f16_sf_kernel(int type, const uint8_t* blocks, size_t n16
 
 __global__ void decode_f16_kernel(int type, const uint8_t* blocks, size_t n, uint16_t* out) {
     const size_t i = (size_t) blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < n) out[i] = f2h(decode_value(type, blocks, i));
+    if (i < n) out[i] = f2h(decode_value<true>(type, blocks, i));
 }
 __global__ void decode_f32_kernel(int type, const uint8_t* blocks, size_t n, float* out) {
     const size_t i = (size_t) blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < n) out[i] = decode_value(type, blocks, i);
+    if (i < n) out[i] = decode_value<true>(type, blocks, i);
 }
 
 unsigned grid(size_t n, int b = kBlk) { return (unsigned) ((n + b - 1) / b); }
@@ -6033,7 +6042,7 @@ mv_q8p_cols_kernel(const int8_t* __restrict__ q, const uint16_t* __restrict__ d,
 
 // experts_gate_up_swiglu_kernel for group_route's groups: a block's rows for each member in turn (its x in shared
 // memory, the rows' weights read again from the cache), with the one-token kernel's row dots - the same h to the bit
-template <int WARPS, int ROWS>
+template <int WARPS, int ROWS, bool PK = false>
 __global__ void experts_gate_up_swiglu_mem_kernel(const uint8_t* const* blob, const int* n_g, const int* tok_g,
                                                   const int* row_g, int ty_gate, int ty_up, size_t eb0, const float* x,
                                                   int C, int F, size_t rb_gate, size_t rb_up, const float* sg,
@@ -6045,7 +6054,7 @@ __global__ void experts_gate_up_swiglu_mem_kernel(const uint8_t* const* blob, co
     const uint8_t* bg = blob[grp];
     const uint8_t* bu = bg + eb0;
     const uint16_t* mq = nullptr;
-    if (SF_MIX && ty_gate == strata_fmt::kMIX)
+    if (PK && SF_MIX && ty_gate == strata_fmt::kMIX)
         bu = mix_up_of(bg), mix_role(bg, ty_gate, bg, rb_gate, nullptr), mix_role(bu, ty_up, bu, rb_up, &mq);
     for (int m = 0; m < n; ++m) {
         const int slot = row_g[grp * kGroupMax + m];
@@ -6059,21 +6068,21 @@ __global__ void experts_gate_up_swiglu_mem_kernel(const uint8_t* const* blob, co
             if (r >= F) break;
             float vg, vu;
             if (ty_gate == ty_up) {
-                row_dot_pair(ty_gate, bg + (size_t) r * rb_gate, bu + (size_t) r * rb_up, xs, C, vg, vu);
+                row_dot_pair<PK>(ty_gate, bg + (size_t) r * rb_gate, bu + (size_t) r * rb_up, xs, C, vg, vu);
             } else {
-                vg = row_dot(ty_gate, bg + (size_t) r * rb_gate, xs, C);
-                vu = row_dot(ty_up, bu + (size_t) r * rb_up, xs, C);
+                vg = row_dot<PK>(ty_gate, bg + (size_t) r * rb_gate, xs, C);
+                vu = row_dot<PK>(ty_up, bu + (size_t) r * rb_up, xs, C);
             }
             if ((threadIdx.x & 31) == 0) {
                 const float g = vg * sgs, u = vu * sus;
                 const float a = gcap * tanhf(g / gcap) * (1.0f / (1.0f + expf(-g))) * ucap * tanhf(u / ucap);
-                h[(size_t) slot * F + r] = mq ? f2h(a * mix_inv(mq, r)) : f2h(a);
+                h[(size_t) slot * F + r] = PK && mq ? f2h(a * mix_inv(mq, r)) : f2h(a);
             }
         }
     }
 }
 // ... experts_down_kernel's (its rows in pairs through row_dot_2: ROWS even)
-template <int WARPS, int ROWS>
+template <int WARPS, int ROWS, bool PK = false>
 __global__ void experts_down_mem_kernel(const uint8_t* const* blob, const int* n_g, const int* row_g, int ty_down,
                                         size_t off_down, const uint16_t* h, int C, int F, size_t rb_down, float* y) {
     extern __shared__ float xs[];
@@ -6081,7 +6090,7 @@ __global__ void experts_down_mem_kernel(const uint8_t* const* blob, const int* n
     if (n <= 0) return;
     const int warp = threadIdx.x >> 5;
     const uint8_t* w = blob[grp] + off_down;
-    if (SF_MIX && ty_down == strata_fmt::kMIX) mix_role(mix_dn_of(w - off_down), ty_down, w, rb_down, nullptr);
+    if (PK && SF_MIX && ty_down == strata_fmt::kMIX) mix_role(mix_dn_of(w - off_down), ty_down, w, rb_down, nullptr);
     for (int m = 0; m < n; ++m) {
         const int slot = row_g[grp * kGroupMax + m];
         if (m) __syncthreads();
@@ -6092,14 +6101,14 @@ __global__ void experts_down_mem_kernel(const uint8_t* const* blob, const int* n
             if (row >= C) break;
             if (j + 1 < ROWS && row + 1 < C) {
                 float v0, v1;
-                row_dot_2(ty_down, w + (size_t) row * rb_down, w + (size_t) (row + 1) * rb_down, xs, F, v0, v1);
+                row_dot_2<PK>(ty_down, w + (size_t) row * rb_down, w + (size_t) (row + 1) * rb_down, xs, F, v0, v1);
                 if ((threadIdx.x & 31) == 0) {
                     y[(size_t) slot * C + row] = v0;
                     y[(size_t) slot * C + row + 1] = v1;
                 }
                 j += 2;
             } else {
-                const float v = row_dot(ty_down, w + (size_t) row * rb_down, xs, F);
+                const float v = row_dot<PK>(ty_down, w + (size_t) row * rb_down, xs, F);
                 if ((threadIdx.x & 31) == 0) y[(size_t) slot * C + row] = v;
                 j += 1;
             }
@@ -6853,14 +6862,16 @@ template <int WARPS, int ROWS>
 void launch_experts_gate_up(const uint8_t* const* blob, const int* tok, int S, int ty_gate, int ty_up, size_t eb0,
                             const float* x, int C, int F, float* gu, cudaStream_t s) {
     const dim3 g((unsigned) ((2 * F + WARPS * ROWS - 1) / (WARPS * ROWS)), (unsigned) S);
-    experts_gate_up_kernel<WARPS, ROWS><<<g, WARPS * 32, xp_floats(C) * 4, s>>>(
+    if (sf_any(ty_gate)) experts_gate_up_kernel<WARPS, ROWS, true><<<g, WARPS * 32, xp_floats(C) * 4, s>>>(
+        blob, tok, ty_gate, ty_up, eb0, x, C, F, mv_row_bytes(ty_gate, C), mv_row_bytes(ty_up, C), gu); else experts_gate_up_kernel<WARPS, ROWS><<<g, WARPS * 32, xp_floats(C) * 4, s>>>(
         blob, tok, ty_gate, ty_up, eb0, x, C, F, mv_row_bytes(ty_gate, C), mv_row_bytes(ty_up, C), gu);
 }
 template <int WARPS, int ROWS>
 void launch_experts_down(const uint8_t* const* blob, int S, int ty_down, size_t off_down, const uint16_t* h, int C,
                          int F, float* y, const int* cls, int want, cudaStream_t s) {
     const dim3 g((unsigned) ((C + WARPS * ROWS - 1) / (WARPS * ROWS)), (unsigned) S);
-    experts_down_kernel<WARPS, ROWS><<<g, WARPS * 32, xp_floats(F) * 4, s>>>(
+    if (sf_any(ty_down)) experts_down_kernel<WARPS, ROWS, true><<<g, WARPS * 32, xp_floats(F) * 4, s>>>(
+        blob, ty_down, off_down, h, C, F, mv_row_bytes(ty_down, F), y, cls, want); else experts_down_kernel<WARPS, ROWS><<<g, WARPS * 32, xp_floats(F) * 4, s>>>(
         blob, ty_down, off_down, h, C, F, mv_row_bytes(ty_down, F), y, cls, want);
 }
 
@@ -6929,7 +6940,8 @@ void experts_gate_up_g(const uint8_t* const* blob, const int* n, const int* tok,
                        int ty_up, size_t eb0, const float* x, int C, int F, float* gu, cudaStream_t s) {
     if (G <= 0) return;
     const dim3 g((unsigned) ((2 * F + kGroupWarps * kGroupRows - 1) / (kGroupWarps * kGroupRows)), (unsigned) G);
-    experts_gate_up_g_kernel<<<g, kGroupWarps * 32, 0, s>>>(blob, n, tok, row, ty_gate, ty_up, eb0, x, C, F,
+    if (sf_any(ty_gate)) experts_gate_up_g_kernel<true><<<g, kGroupWarps * 32, 0, s>>>(blob, n, tok, row, ty_gate, ty_up, eb0, x, C, F,
+                                                            mv_row_bytes(ty_gate, C), mv_row_bytes(ty_up, C), gu); else experts_gate_up_g_kernel<<<g, kGroupWarps * 32, 0, s>>>(blob, n, tok, row, ty_gate, ty_up, eb0, x, C, F,
                                                             mv_row_bytes(ty_gate, C), mv_row_bytes(ty_up, C), gu);
     check("experts_gate_up_g");
 }
@@ -6937,7 +6949,8 @@ void experts_down_g(const uint8_t* const* blob, const int* n, const int* row, in
                     const uint16_t* h, int C, int F, float* y, cudaStream_t s) {
     if (G <= 0) return;
     const dim3 g((unsigned) ((C + kGroupWarps * kGroupRows - 1) / (kGroupWarps * kGroupRows)), (unsigned) G);
-    experts_down_g_kernel<<<g, kGroupWarps * 32, 0, s>>>(blob, n, row, ty_down, off_down, h, C, F,
+    if (sf_any(ty_down)) experts_down_g_kernel<true><<<g, kGroupWarps * 32, 0, s>>>(blob, n, row, ty_down, off_down, h, C, F,
+                                                         mv_row_bytes(ty_down, F), y); else experts_down_g_kernel<<<g, kGroupWarps * 32, 0, s>>>(blob, n, row, ty_down, off_down, h, C, F,
                                                          mv_row_bytes(ty_down, F), y);
     check("experts_down_g");
 }
@@ -6986,7 +6999,9 @@ void launch_experts_gate_up_swiglu(const uint8_t* const* blob, const int* tok, i
                                    float gcap, float ucap, uint16_t* h, cudaStream_t s, const int* orow = nullptr,
                                    int h_ld = 0, const int* cls = nullptr, int want = 0) {
     const dim3 g((unsigned) ((F + WARPS * ROWS - 1) / (WARPS * ROWS)), (unsigned) S);
-    experts_gate_up_swiglu_kernel<WARPS, ROWS><<<g, WARPS * 32, xp_floats(C) * 4, s>>>(
+    if (sf_any(ty_gate)) experts_gate_up_swiglu_kernel<WARPS, ROWS, true><<<g, WARPS * 32, xp_floats(C) * 4, s>>>(
+        blob, tok, ty_gate, ty_up, eb0, x, C, F, mv_row_bytes(ty_gate, C), mv_row_bytes(ty_up, C), sg, su, gcap,
+        ucap, h, orow, h_ld > 0 ? h_ld : F, cls, want); else experts_gate_up_swiglu_kernel<WARPS, ROWS><<<g, WARPS * 32, xp_floats(C) * 4, s>>>(
         blob, tok, ty_gate, ty_up, eb0, x, C, F, mv_row_bytes(ty_gate, C), mv_row_bytes(ty_up, C), sg, su, gcap,
         ucap, h, orow, h_ld > 0 ? h_ld : F, cls, want);
 }
@@ -7013,7 +7028,9 @@ void experts_gate_up_swiglu_g(const uint8_t* const* blob, const int* n, const in
                               const float* su, float gcap, float ucap, uint16_t* h, cudaStream_t s) {
     if (G <= 0) return;
     const dim3 g((unsigned) ((F + kGroupWarps * kGroupSwigluRows - 1) / (kGroupWarps * kGroupSwigluRows)), (unsigned) G);
-    experts_gate_up_swiglu_g_kernel<<<g, kGroupWarps * 32, 0, s>>>(blob, n, tok, row, ty_gate, ty_up, eb0, x, C, F,
+    if (sf_any(ty_gate)) experts_gate_up_swiglu_g_kernel<true><<<g, kGroupWarps * 32, 0, s>>>(blob, n, tok, row, ty_gate, ty_up, eb0, x, C, F,
+                                                                   mv_row_bytes(ty_gate, C), mv_row_bytes(ty_up, C),
+                                                                   sg, su, gcap, ucap, h); else experts_gate_up_swiglu_g_kernel<<<g, kGroupWarps * 32, 0, s>>>(blob, n, tok, row, ty_gate, ty_up, eb0, x, C, F,
                                                                    mv_row_bytes(ty_gate, C), mv_row_bytes(ty_up, C),
                                                                    sg, su, gcap, ucap, h);
     check("experts_gate_up_swiglu_g");
@@ -7084,7 +7101,8 @@ void attn_multi_fp8(const float* q, const float* r, const float* sink, const uin
 
 template <int WARPS, int ROWS>
 void launch_mv_blocks(int type, const uint8_t* W, int N, int K, const float* x, float* y, cudaStream_t s) {
-    mv_blocks_kernel<WARPS, ROWS><<<(unsigned) ((N + WARPS * ROWS - 1) / (WARPS * ROWS)), WARPS * 32,
+    if (sf_any(type)) mv_blocks_kernel<WARPS, ROWS, true><<<(unsigned) ((N + WARPS * ROWS - 1) / (WARPS * ROWS)), WARPS * 32,
+                                    xp_floats(K) * 4, s>>>(type, W, N, K, mv_row_bytes(type, K), x, y); else mv_blocks_kernel<WARPS, ROWS><<<(unsigned) ((N + WARPS * ROWS - 1) / (WARPS * ROWS)), WARPS * 32,
                                     xp_floats(K) * 4, s>>>(type, W, N, K, mv_row_bytes(type, K), x, y);
 }
 
@@ -7372,7 +7390,7 @@ void decode_f32(int type, const uint8_t* blocks, size_t n, float* out, cudaStrea
     check("decode_f32");
 }
 void decode_host(int type, const uint8_t* blocks, size_t n, float* out) {
-    for (size_t i = 0; i < n; ++i) out[i] = decode_value(type, blocks, i);
+    for (size_t i = 0; i < n; ++i) out[i] = decode_value<true>(type, blocks, i);
 }
 
 
@@ -7582,7 +7600,9 @@ void experts_gate_up_swiglu_mem(const uint8_t* const* blob, const int* n, const 
     if (G <= 0) return;
     constexpr int WARPS = 4, ROWS = 2;
     const dim3 g((unsigned) ((F + WARPS * ROWS - 1) / (WARPS * ROWS)), (unsigned) G);
-    experts_gate_up_swiglu_mem_kernel<WARPS, ROWS><<<g, WARPS * 32, xp_floats(C) * 4, s>>>(
+    if (sf_any(ty_gate)) experts_gate_up_swiglu_mem_kernel<WARPS, ROWS, true><<<g, WARPS * 32, xp_floats(C) * 4, s>>>(
+        blob, n, tok, row, ty_gate, ty_up, eb0, x, C, F, mv_row_bytes(ty_gate, C), mv_row_bytes(ty_up, C), sg, su,
+        gcap, ucap, h); else experts_gate_up_swiglu_mem_kernel<WARPS, ROWS><<<g, WARPS * 32, xp_floats(C) * 4, s>>>(
         blob, n, tok, row, ty_gate, ty_up, eb0, x, C, F, mv_row_bytes(ty_gate, C), mv_row_bytes(ty_up, C), sg, su,
         gcap, ucap, h);
     check("experts_gate_up_swiglu_mem");
@@ -7592,7 +7612,8 @@ void experts_down_mem(const uint8_t* const* blob, const int* n, const int* row, 
     if (G <= 0) return;
     constexpr int WARPS = 4, ROWS = 2;
     const dim3 g((unsigned) ((C + WARPS * ROWS - 1) / (WARPS * ROWS)), (unsigned) G);
-    experts_down_mem_kernel<WARPS, ROWS><<<g, WARPS * 32, xp_floats(F) * 4, s>>>(blob, n, row, ty_down, off_down, h, C,
+    if (sf_any(ty_down)) experts_down_mem_kernel<WARPS, ROWS, true><<<g, WARPS * 32, xp_floats(F) * 4, s>>>(blob, n, row, ty_down, off_down, h, C,
+                                                                                F, mv_row_bytes(ty_down, F), y); else experts_down_mem_kernel<WARPS, ROWS><<<g, WARPS * 32, xp_floats(F) * 4, s>>>(blob, n, row, ty_down, off_down, h, C,
                                                                                 F, mv_row_bytes(ty_down, F), y);
     check("experts_down_mem");
 }
