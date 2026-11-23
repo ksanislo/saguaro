@@ -1172,6 +1172,17 @@ class StrataEngine:
             # only after the process is reaped (a busy CI runner saw it alive right after a failed restart)
             self.ended = True
             raise RuntimeError("the engine exited before it was ready" + (f" (see {log})" if log else ""))
+        # (#1026) a start that came out short of its VRAM reserve (INFO reserve_short=<MiB>) - the engine measured
+        # what it allocates after its experts' plan and keeps that free from its next start on: started once more
+        # now, so the first start after an update or a new setting never serves with the reserve used up
+        if self.info.get("reserve_short") and not (env or os.environ).get("SAGUARO_RESERVE_RESTARTED"):
+            print(f"[saguaro] this start came out short of the VRAM reserve: the engine starts once more and keeps "
+                  f"{self.info['reserve_short']} MiB more free beside it (measured on this PC)", flush=True)
+            self.close()
+            if self.log is not subprocess.DEVNULL:
+                self.log.close()
+            self.__init__(exe, args, cwd, log, dict(env if env is not None else os.environ, SAGUARO_RESERVE_RESTARTED="1"))
+            return
         # (from PR #41, midhatn) a locally built engine can sit next to another release's BUILD.json: engines that
         # report their own version (INFO engine=, 0.1.8+) win, the manifest stays the fallback for older ones
         if self.info.get("engine"):
@@ -1185,7 +1196,7 @@ class StrataEngine:
             self._ik2_log(head)
         # the engine's stdout on a thread, so a request can wait with a timeout (heartbeats, cancel checks)
         self.lines: queue.Queue = queue.Queue()
-        threading.Thread(target=self._pump, daemon=True).start()
+        threading.Thread(target=self._pump, args=(self.proc, self.lines), daemon=True).start()
 
     def _context_cost(self, offset: int):
         """What this start's context costs in VRAM, from the GLM engine's own start lines ("CUDA0 VRAM before the
@@ -1260,8 +1271,16 @@ class StrataEngine:
         self.ended = True
         wait_gpu_release(self.proc.pid)
 
-    def _pump(self):
-        for line in self.proc.stdout:
+    def _pump(self, proc=None, lines=None):
+        # This start's process and line queue: a later start (restart) has its own.  An engine's output can close
+        # well after a new one started - GLM's link mode: the AMD GPU's helper program shares the lead's output and
+        # ends a little after it - and that late end must not mark the NEW engine ended (every request then started
+        # the engine again, about a minute each)
+        proc = proc if proc is not None else self.proc
+        lines = lines if lines is not None else self.lines
+        for line in proc.stdout:
+            if proc is not self.proc:                   # replaced: what is left of its output is nobody's
+                continue
             if line.startswith("VRAM "):
                 self._vram_line(line)
                 continue
@@ -1274,9 +1293,11 @@ class StrataEngine:
                 continue
             if self.multi and self._route(line):
                 continue
-            self.lines.put(line)
+            lines.put(line)
+        if proc is not self.proc:                       # an engine already replaced: the running one is not ended
+            return
         self.ended = True                               # its output closed: it is gone, even before the OS says so
-        self.lines.put(None)
+        lines.put(None)
         with self._routes_lock:
             for q in self._routes.values():
                 q.put(None)
@@ -1342,12 +1363,12 @@ class StrataEngine:
         for line in reversed(tail.splitlines()):
             if "issue #29" in line:
                 return ("The engine stopped itself because it had stopped making progress - a hang it caught. Its log "
-                        "line: " + line.strip() + " - please report it at github.com/mw00/project-maya/issues.")
+                        "line: " + line.strip() + " - please report it at github.com/ksanislo/saguaro/issues.")
             if "a GPU's state is unknown" in line:
                 return ("The engine stopped itself because a GPU took a fault inside a kernel (an illegal address or "
                         "the like), after which that GPU's state is lost; a fresh engine starts with the next request. "
                         "Its log line: " + line.strip() + " - the lines above it name the GPU and the error; please "
-                        "report it at github.com/mw00/project-maya/issues.")
+                        "report it at github.com/ksanislo/saguaro/issues.")
         if getattr(getattr(self, "proc", None), "returncode", None) in (-2, -15):   # (#539: read as a lack of RAM)
             return ("A signal from outside ended it (SIGINT or SIGTERM: Ctrl+C, kill, a service manager), not a lack "
                     "of RAM.")
@@ -4175,6 +4196,11 @@ class Service:
         kv_room = sum(int(r.get("kv_room") or 0) for r in merged)
         kv_ram_room = max((int(r.get("kv_ram_room") or 0) for r in rows), default=0)
         parked = max((int(r.get("parked") or 0) for r in rows), default=0)
+        # PLAN-qfn-park-budget (QFN): how many conversations are parked and what they may hold now; absent elsewhere
+        parked_n = max((int(r.get("parked_n") or 0) for r in rows), default=0) \
+            if any("parked_n" in r for r in rows) else None
+        park_budget = max((int(r.get("park_budget") or 0) for r in rows), default=0) \
+            if any("park_budget" in r for r in rows) else None
         max_ctx = int(eng.max_context or 0)
         slots = max(int(getattr(eng, "multi", 0) or 0), int(getattr(eng, "batch", 0) or 0), 1)
         pos_cap = max_ctx * slots
@@ -4201,8 +4227,12 @@ class Service:
                              "kv_room": kv_room, "kv_ram_room": kv_ram_room},
                 "used": {"tokens": used, "vram_tokens": vram_pos, "ram_tokens": ram_pos,
                          **({"vram_bytes": int(vram_pos * kbt), "ram_bytes": int(ram_pos * kbt)} if kbt else {})},
-                "parked": {"bytes": parked, **({"tokens": parked_tok} if kbt and parked else {})},
-                "free": max(0, cap - used - parked_tok)}
+                "parked": {"bytes": parked, **({"tokens": parked_tok} if kbt and parked else {}),
+                           **({"conversations": parked_n} if parked_n is not None else {}),
+                           **({"budget_bytes": park_budget} if park_budget is not None else {})},
+                "free": max(0, cap - used - parked_tok),
+                # (QFN turn saves: each place's last saved position and time - main, slotN)
+                **({"turn_saves": dict(getattr(eng, "turn_saves", None) or {})} if getattr(eng, "turn_saves", None) else {})}
 
     def metrics(self, all_requests=False) -> dict:
         """GET /metrics: what the Monitor tab shows - the engine's facts, what it is doing, the last requests, and
@@ -5379,12 +5409,15 @@ class Service:
                     also holds the server's own tokens (the call's result or KEEP_NOTE, a steer), which max_new - n
                     does not count: the context's room caps it too (with an unlimited max_new, prepare's room, the
                     engine rejected prompt + max_new + CTX_SLACK > context)."""
+                    nonlocal sampling
                     while True:
                         room = self.engine.max_context - CTX_SLACK - len(seg["prompt"])
                         yield from attempts(seg["prompt"], max(1, min(max_new - n, room)))
                         if seg["next"] is None or cancel.is_set() or self.stopping:
                             return
                         seg["prompt"], seg["next"], seg["ids"] = seg["next"], None, []
+                        # (its prompt holds the server's own turns: the QFN engine keeps no checkpoint inside the reply)
+                        sampling = {**(sampling or {}), "_cont": True}
 
                 def flush():
                     nonlocal sent_call, answered
@@ -8513,6 +8546,9 @@ def main() -> int:
     svc.gpu_index = (gpu_list(cfg) or [0])[0]           # the Monitor reads the card the engine runs on (issue #51)
     svc.gpu_indices = gpu_list(cfg)                     # ... or every card of a layer split (issue #112)
     svc.backend = cfg.get("backend")                    # the Monitor's GPU reader: sysfs on AMD/HIP, NVML otherwise
+    if cfg.get("backend") == "hip":                      # (Windows: the Monitor finds the engine's cards with its hipInfo)
+        from serve import telemetry
+        telemetry.HIP_BIN_DIRS = [d for d in cfg.get("lib_dirs") or [] if Path(d).is_dir()]
     svc.supervisor = os.environ.get("SAGUARO_SUPERVISOR") or supervisor_name()
     if svc.supervisor:
         print(f"[saguaro] started by {svc.supervisor}: model switching, updates, port and config changes are its own",

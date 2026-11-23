@@ -13,7 +13,7 @@ BYTES = ("total", "free", "weights", "kv", "kv_ram", "act", "drafter", "window",
 # engine-wide fields the VRAM lines carry on every card (PLAN-context-panel): the pinned-RAM K/V budget and the
 # bytes of parked conversations are the engine's, not a card's - merge() keeps them as they stand, never adds them
 # (the server's Context panel takes the largest figure a card reports)
-ENGINE_WIDE = ("kv_ram_room", "parked")
+ENGINE_WIDE = ("kv_ram_room", "parked", "parked_n", "park_budget")
 
 
 def parse(line: str) -> dict | None:

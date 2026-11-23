@@ -195,4 +195,22 @@ inline size_t spread_victim(const int64_t* lens, const uint64_t* stamps, size_t 
     return eviction_victim(stamps, n, cap, tail, pinned, root);
 }
 
+/// SAGUARO_REWIND_PARK (0): a request that rewinds the main session's own conversation - it resumes at one of the
+/// chain's checkpoints at or past the end of the last request's prompt, less `slack` (the turn checkpoint sits at
+/// the reply's header) - only rewrites the reply as its client rendered it.  Parking the outgoing state would copy
+/// the whole conversation to keep that stale tail, so it is not parked.  `prev_prompt` < 0: unknown, park.
+inline bool own_rewind(int64_t resume, int64_t live_tokens, int64_t prev_prompt, int64_t slack) {
+    return resume > 0 && prev_prompt > 0 && resume <= live_tokens && resume + slack >= prev_prompt;
+}
+
+/// SAGUARO_SLOT_SOLO: the main session's conversation is a duplicate when a batch slot holds all of it (`slot` starts
+/// with `live`): the slot is its owner and saves it when it gives way, so the main copy is not parked.
+template<class A, class B>
+inline bool held_by_slot(const A& live, const B& slot) {
+    if (live.empty() || slot.size() < live.size()) return false;
+    for (size_t i = 0; i < live.size(); ++i)
+        if ((int64_t) live[i] != (int64_t) slot[i]) return false;
+    return true;
+}
+
 }  // namespace strata::program::conv_cache

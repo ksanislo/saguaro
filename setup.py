@@ -94,8 +94,9 @@ def ask(question, choices, default, yes):
     while True:
         try:
             a = input(f"{question} [{default}]: ").strip()
-        except EOFError:
-            return default
+        except EOFError:   # (no terminal, or its input ran out: never install or build on defaults nobody saw)
+            fail(f"no answer to \"{question.strip()}\": the input is not a terminal (or ran out)",
+                 "run it in a terminal to answer its questions, or pass --yes to take every default")
         if not a:
             return default
         if a.lower() in [c.lower() for c in choices]:
@@ -640,7 +641,7 @@ AMD_NAMES = {"gfx1100": "AMD Radeon RX 7900 series (gfx1100)",
 # Strix Halo / Gorgon Halo APU, Navi 21), else from its name ("AMD Radeon(TM) 8060S Graphics", 8050S, 8065S, ...)
 AMD_DEVICE_ARCHS = {"744c": "gfx1100", "7550": "gfx1201", "7551": "gfx1201", "1586": "gfx1151",
                     "73a1": "gfx1030", "73a3": "gfx1030", "73a5": "gfx1030", "73af": "gfx1030", "73bf": "gfx1030"}
-AMD_NAME_ARCHS = ((r"Radeon(?:\s*\(TM\))?\s+80[4-6]\dS", "gfx1151"), (r"RX\s*7900", "gfx1100"),
+AMD_NAME_ARCHS = ((r"Radeon(?:\s*\(TM\))?\s+80[4-6]\dS", "gfx1151"), (r"RX\s*7900|PRO\s*W7[89]00", "gfx1100"),
                   (r"RX\s*9070|R9700", "gfx1201"),
                   (r"RX\s*6[89][05]0(?:\s*XT)?\b|PRO\s*V620|PRO\s*W6800", "gfx1030"))   # (not the 6800M / 6800S: Navi 22 / 23)
 
@@ -740,11 +741,49 @@ def amd_gpus(hipinfo=None):
             name = (dev / "product_name").read_text().strip() or f"AMD Radeon ({arch})"
         except OSError:
             name = f"AMD Radeon ({arch})"
-        if name == f"AMD Radeon ({arch})" and arch in AMD_NAMES:
-            name = AMD_NAMES[arch]
-        found.append({"index": len(found), "name": name, "vram_gb": vram, "arch": arch, "driver": "amdgpu",
-                      "vendor": "amd"})
+        if name == f"AMD Radeon ({arch})":
+            name = amd_pci_name(dev) or AMD_NAMES.get(arch, name)
+        g = {"index": len(found), "name": name, "vram_gb": vram, "arch": arch, "driver": "amdgpu", "vendor": "amd"}
+        g.update(drm_display(dev))
+        found.append(g)
     return found
+
+
+# Navi 48's device ID is shared: the PCI revision tells the boards apart
+AMD_PCI_NAMES = {("0x7550", "0xc0"): "AMD Radeon RX 9070 XT", ("0x7550", "0xc3"): "AMD Radeon RX 9070",
+                 ("0x7551", None): "AMD Radeon AI PRO R9700"}
+
+
+def amd_pci_name(dev: Path) -> str | None:
+    try:
+        did, rev = ((dev / f).read_text().strip().lower() for f in ("device", "revision"))
+    except OSError:
+        return None
+    name = AMD_PCI_NAMES.get((did, rev)) or AMD_PCI_NAMES.get((did, None))
+    return name and f"{name} ({amd_arch_of(did)})"
+
+
+def amd_arch_of(did: str) -> str:
+    return AMD_DEVICE_ARCHS.get(did.lower().removeprefix("0x"), "unknown")
+
+
+def drm_display(dev: Path) -> dict:
+    """Whether the desktop can be on this GPU: a connected display output (sysfs' DRM connectors), and the VRAM
+    already in use (a compositor's buffers) -> {"display": bool, "vram_used_gb": float}; {} when sysfs has neither."""
+    info = {}
+    states = []
+    for c in dev.glob("drm/card*/card*-*/status"):
+        try:
+            states.append(c.read_text().strip())
+        except OSError:
+            pass
+    if states:
+        info["display"] = "connected" in states
+    try:
+        info["vram_used_gb"] = int((dev / "mem_info_vram_used").read_text()) / 2 ** 30
+    except (OSError, ValueError):
+        pass
+    return info
 
 
 # ------------------------------------------------------------------------------------------------ the engine
@@ -760,11 +799,13 @@ ENGINE_SOURCES = ("CMakeLists.txt", "cmake", "src", "include", "third_party/ggml
 
 def source_hash(parts) -> str:
     """A fingerprint of the files a compiled engine is built from, kept in engine/BUILD.json: when a `git pull`
-    changes them, the engine is compiled again (issue #31)."""
+    changes them, the engine is compiled again (issue #31).  Python's bytecode caches are not sources: a setup's own
+    run writes them (tools/vision/__pycache__) and must not make the next one rebuild."""
     h = hashlib.sha256(LLAMA_CPP_COMMIT.encode())
     for part in parts:
         base = ROOT / part
-        for f in [base] if base.is_file() else sorted(x for x in base.rglob("*") if x.is_file()):
+        for f in [base] if base.is_file() else sorted(x for x in base.rglob("*") if x.is_file() and not
+                                                      ("__pycache__" in x.parts or x.suffix == ".pyc")):
             h.update(f.relative_to(ROOT).as_posix().encode() + b"\0" + f.read_bytes().replace(b"\r\n", b"\n"))
     return h.hexdigest()[:16]
 

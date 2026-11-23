@@ -11,7 +11,7 @@ DeepSeek-V4.1-Flash, MiniMax-M3.1-Flash and Qwen-3.8-Flash-Next are NVIDIA / AMD
 **Status: experimental.** Mac support is a community contribution. Every change is built and unit-tested on GitHub's
 Apple Silicon runners (the `macos` workflow: the engine, its sampler and the small synthetic-model tests), but the
 Saguaro team has no Mac and has not run it with the real model. If you try it on a Mac, please tell us how it went in a
-[GitHub issue](https://github.com/mw00/project-maya/issues): the chip and its unified memory, the model, the speed
+[GitHub issue](https://github.com/ksanislo/saguaro/issues): the chip and its unified memory, the model, the speed
 `./saguaro.sh --bench` prints, and anything that went wrong (`./saguaro.sh --report` collects the details).
 
 ```sh

@@ -398,7 +398,7 @@ class Screen(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(T.describe(["/v/bin/cmake", "--build", "build"]), "Compiling")
 
     def test_the_logo(self):                            # font8x8 in quadrant characters, its rows as wide as each other
-        rows = L.big("maya.")
+        rows = L.big("saguaro.")
         self.assertEqual(len(rows), 3)
         self.assertEqual(len({len(r) for r in rows}), 1)
         self.assertTrue(set("".join(rows)) <= set(L.QUADRANTS))

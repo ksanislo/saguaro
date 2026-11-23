@@ -1373,11 +1373,12 @@ PACK_MARKS = ("sources.json", "tensors.txt", "mm3.txt", "ds4.txt", "native_exper
 
 
 def models_dirs(root: Path) -> list:
-    """The folders the setup downloaded into: each config's, and the setup's own (Maya-data/models beside the project)
+    """The folders the setup downloaded into: each config's, and the setup's own (Saguaro-data/models beside the project,
+    or an earlier setup's Maya-data/models)
     - not the home folder, nor one the project is in."""
     project, home = _res(root), Path.home().resolve()
     found = [_res((read(p).get("installer") or {}).get("models_dir")) for p in config_paths(root)]
-    found.append(_res(Path(root).parent / "Maya-data" / "models"))
+    found += [_res(Path(root).parent / d / "models") for d in ("Saguaro-data", "Maya-data")]
     out = []
     for d in found:
         if d is None or d in out or not d.is_dir() or _within(home, d) or (project and _within(project, d)):

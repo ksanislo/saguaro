@@ -3,7 +3,7 @@
 #include "strata/core/expert_cache.hpp"
 
 // #533's segmented cache uses CUDA's virtual memory management (cuMem*): not on HIP, neither the RDNA backend nor
-// the gfx906 compat build (PR #638), which compiles this file as HIP without SAGUARO_USE_HIP
+// the gfx906 compat build (PR #638), which compiles this file as HIP without STRATA_USE_HIP
 #if defined(STRATA_USE_HIP) || defined(STRATA_HIP_GFX906) || defined(STRATA_GPU_METAL)
 #define STRATA_EC_NO_VMM 1
 #endif

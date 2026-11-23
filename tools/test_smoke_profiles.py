@@ -150,6 +150,29 @@ class CheckModel(unittest.TestCase):
         joined = "; ".join(reasons)
         self.assertIn("unparsable SSE", joined)
 
+    def test_reasoning_only_cut_at_length_passes(self):
+        sse = (b'data: {"choices":[{"delta":{"reasoning_content":"Let me think about one short sentence"}}]}\n\n'
+               b'data: {"choices":[{"delta":{},"finish_reason":"length"}]}\n\ndata: [DONE]\n\n')
+        ok, reasons = sp.check_model("m", "http://h", None, opener=stub_opener(sse, fixture("context-good.json")))
+        self.assertTrue(ok, reasons)
+
+    def test_reasoning_only_stopped_fails(self):
+        sse = (b'data: {"choices":[{"delta":{"reasoning_content":"thinking"}}]}\n\n'
+               b'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n')
+        ok, reasons = sp.check_model("m", "http://h", None, opener=stub_opener(sse, fixture("context-good.json")))
+        self.assertFalse(ok)
+        self.assertIn("empty answer text", "; ".join(reasons))
+
+    def test_default_budget_fits_thinking(self):
+        sent = []
+
+        def opener(req, timeout=None):
+            if req.data:
+                sent.append(json.loads(req.data))
+            return stub_opener(fixture("stream-good.sse"), fixture("context-good.json"))(req, timeout)
+        sp.check_model("m", "http://h", None, opener=opener)
+        self.assertGreaterEqual(sent[0]["max_tokens"], 400)
+
     def test_empty_stream_fails(self):
         ok, reasons = sp.check_model("m", "http://h", None, opener=stub_opener(b"", fixture("context-good.json")))
         self.assertFalse(ok)

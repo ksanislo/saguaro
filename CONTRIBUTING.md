@@ -31,7 +31,7 @@ of its log (the `.log` next to your `maya-*.json`).
   output changes (it can: which expert runs on the CPU or the GPU changes the last bits), say so.
 - **New settings** are `SAGUARO_GLM_*` environment variables, off or at today's behaviour by default unless measured
   better, with a row in [docs/SETTINGS.md](docs/SETTINGS.md).
-- **AMD (HIP) and other backends:** keep NVIDIA's code path unchanged (`#if defined(SAGUARO_USE_HIP)`). We can't test
+- **AMD (HIP) and other backends:** keep NVIDIA's code path unchanged (`#if defined(STRATA_USE_HIP)`). We can't test
   AMD ourselves, so we merge AMD changes on your measurements once NVIDIA builds and behaves the same.
 - **A new CUDA call needs its AMD mapping.** The AMD build compiles the same sources with
   `include/strata/hip_compat/` forced in. A CUDA runtime or cuBLAS name without a `#define` there breaks every AMD build,

@@ -7,6 +7,7 @@ Each request: the prompt's ids file (bench/hy4/make_prompts.py) and the tokens t
 the prompt's read (tokens, tok/s), the decode (tokens, tok/s, the CPU lane's experts a token), the first tokens.
 The engine's stderr goes to --log.  The cards are claimed in /tmp/gpu-status for the run (waits for others' claims)."""
 import argparse, json, os, pathlib, subprocess, sys, time
+CLOCKS = (os.environ.get("SAGUARO_CLOCK_CMD") or "sudo -n llm-gpu-clocks").split()   # a command taking lock / unlock
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 STATUS = pathlib.Path("/tmp/gpu-status")
@@ -57,7 +58,7 @@ def main():
     ap.add_argument("--log")
     ap.add_argument("--env", action="append", default=[])
     ap.add_argument("--json")
-    ap.add_argument("--clock", choices=("lock", "unlock"), help="llm-gpu-clocks, once the cards are claimed")
+    ap.add_argument("--clock", choices=("lock", "unlock"), help="SAGUARO_CLOCK_CMD (default: sudo -n llm-gpu-clocks) lock or unlock, once the cards are claimed")
     ap.add_argument("rest", nargs="*")
     a = ap.parse_args()
     env = dict(os.environ, CUDA_DEVICE_ORDER="PCI_BUS_ID", HY4_Q4X="0", HY4_MEASURE="0")
@@ -67,7 +68,7 @@ def main():
     log = open(a.log or f"/tmp/hy4-{a.label}.log", "w")
     claim(a.label)
     if a.clock:
-        subprocess.run(["sudo", "-n", "/usr/local/sbin/llm-gpu-clocks", a.clock], stdout=subprocess.DEVNULL)
+        subprocess.run(CLOCKS + [a.clock], stdout=subprocess.DEVNULL)
     out = []
     p = None
     try:

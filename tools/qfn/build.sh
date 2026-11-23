@@ -1,15 +1,15 @@
 #!/bin/bash
-# tools/qfn/build.sh <build dir> - the QFN engine (engines/qfn, Strata's tree with its own CMake project) for mangonel:
-# the live QFN build's options (bench/qfn-exact3/build.sh, build-x3b), so the code is the live engine's bit for bit.
+# tools/qfn/build.sh <build dir> - the QFN engine (engines/qfn, Strata's tree with its own CMake project) with the
+# options of the measured T4 build (sm_75, AVX floor).
 # Output: <dir>/saguaro-qfn (the strata target's OUTPUT_NAME; no renaming), libstrata_kq.so + libstrata_kq_tab.so
 # (one set, ABI 2, loaded from the binary's folder). The version string stays Strata's 0.1.49.2 (saved QFN
 # conversations are keyed on it).
 # VISION=1 also builds <dir>-vision/bin/vision-qfn (the strata-vision target's OUTPUT_NAME) from engines/qfn/tools/vision,
 # NATIVE (-DSTRATA_PORTABLE=OFF: its default ON forces AVX2/FMA/F16C/BMI2, which this Ivy Bridge host lacks - review 11-18).
-# (Live keeps the 11-09 vision build for now; this one is not installed.)
 set -eu
 R=$(cd "$(dirname "$0")/../.." && pwd); S=$R/engines/qfn; B=${1:?build dir}
-GGML=${QFN_GGML_DIR:-/data/llm/strata-main/third_party/llama.cpp}   # (3cf03257f, the pin of both trees)
+GGML=${QFN_GGML_DIR:-$R/third_party/llama.cpp}   # (llama.cpp 3cf03257f, the pin of both trees; the setup fetches it there)
+[ -f $GGML/ggml/CMakeLists.txt ] || { echo "no llama.cpp checkout at $GGML: set QFN_GGML_DIR"; exit 1; }
 [ -e $B ] && { echo "$B exists - never rebuild into a dir something may load from; pick a new one"; exit 1; }
 cmake -S $S -B $B -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_COMPILER=/usr/local/cuda-13.1/bin/nvcc \
   -DCMAKE_CUDA_ARCHITECTURES=75 -DSTRATA_ENABLE_CUDA=ON -DSTRATA_ISA_FLOOR=avx -DSTRATA_BUILD_DSV41=ON \

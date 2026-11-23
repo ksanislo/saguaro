@@ -57,6 +57,28 @@ inline bool parked_block_pool_give(void* p) {
     return true;
 }
 
+// Gives pooled blocks back to the allocator until at most `keep_bytes` are held (memory pressure: the pool's pages
+// are RAM nobody counts).  Returns the bytes released.
+inline size_t parked_block_pool_trim(size_t keep_bytes) {
+    ParkedBlockPool& P = parked_block_pool();
+    std::vector<void*> out;
+    {
+        std::lock_guard<std::mutex> lk(P.mu);
+        while (P.held > keep_bytes && !P.free.empty()) {
+            out.push_back(P.free.back());
+            P.free.pop_back();
+            P.held -= ParkedBlockPool::block;
+        }
+    }
+    for (void* p : out) std::allocator<uint8_t>().deallocate(static_cast<uint8_t*>(p), ParkedBlockPool::block);
+    return out.size() * ParkedBlockPool::block;
+}
+inline size_t parked_block_pool_held() {
+    ParkedBlockPool& P = parked_block_pool();
+    std::lock_guard<std::mutex> lk(P.mu);
+    return P.held;
+}
+
 // Snapshot-owned host storage. Appending never relocates existing payloads;
 // only the small segment directory can move. No sharing or copy-on-write is
 // needed because a parked image and its retained active buffers have one owner.

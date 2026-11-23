@@ -47,6 +47,7 @@
 #define cudaErrorStreamCaptureUnsupported hipErrorStreamCaptureUnsupported
 #define cudaError_t hipError_t
 #define cudaEventCreate hipEventCreate
+#define cudaEventBlockingSync hipEventBlockingSync
 #define cudaEventCreateWithFlags hipEventCreateWithFlags
 #define cudaEventDestroy hipEventDestroy
 #define cudaEventDisableTiming hipEventDisableTiming
@@ -109,6 +110,7 @@ inline hipError_t cudaHostAlloc(T** p, size_t bytes, unsigned int flags) {
 #define cudaMemcpyDeviceToDevice hipMemcpyDeviceToDevice
 #define cudaMemcpyDeviceToHost hipMemcpyDeviceToHost
 #define cudaMemcpyHostToDevice hipMemcpyHostToDevice
+#define cudaMemcpyKind hipMemcpyKind
 #define cudaMemset hipMemset
 #define cudaMemsetAsync hipMemsetAsync
 #define cudaPeekAtLastError hipPeekAtLastError
@@ -152,6 +154,7 @@ inline hipError_t cudaGraphInstantiate(hipGraphExec_t* exec, hipGraph_t graph,
 }
 #define __trap() __builtin_trap()   // the compiled-out sm_80 paths (never selected on AMD)
 #define cudaMemcpyToSymbol(symbol, ...) hipMemcpyToSymbol(HIP_SYMBOL(symbol), __VA_ARGS__)
+#define cudaMemcpyToSymbolAsync(symbol, ...) hipMemcpyToSymbolAsync(HIP_SYMBOL(symbol), __VA_ARGS__)
 #define cudaMemcpyFromSymbol(dst, symbol, ...) hipMemcpyFromSymbol(dst, HIP_SYMBOL(symbol), __VA_ARGS__)
 
 #include "intrinsics.hpp"

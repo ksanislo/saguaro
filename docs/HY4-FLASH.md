@@ -120,4 +120,49 @@ a smaller prompt chunk that leaves more VRAM to the experts (32.5).
   memory at the same time. Under tensor parallel a prompt read normally streams the experts that are not in VRAM to
   all four cards at once; with the switch they run on the CPU instead. It costs prompt-read speed (not yet measured;
   estimated up to a quarter), nothing while writing. Add it to the config's `env` only if your PC needs it.
-- AMD, Windows and Mac: not built here.
+- **Switches of upstream's tensor-parallel token windows (#1122, all on; `0` turns one off, the same tokens either
+  way):** `HY4_PREFETCH` (the next kernels' dense weights read into each GPU's cache while its partial is out for the
+  sum; measured per GPU at the start, a number forces the bits), `HY4_PF_BLOCKS`, `HY4_PF_ATTN_EARLY`, `HY4_PF_SMALL`,
+  `HY4_PULL_BLOCKS` / `HY4_PUB_BLOCKS` (3), `HY4_TP_SUM_STREAM`, `HY4_Q8_FUSE` (kernels write the next GEMV's int8
+  rows; our `HY4_FUSE` applies only with it off), `HY4_FFN_FORK`, `HY4_EG_EARLY`, `HY4_GEMV56`, `HY4_GEMV_AHEAD`,
+  `HY4_GROUP_PAR2`, `HY4_RMS_AHEAD`, `SAGUARO_IQ_MV_REG` (+ `_MIN`, `_THREADS`), `SAGUARO_IQ_MV56`,
+  `SAGUARO_IQ_NE56`, `SAGUARO_IQ_DN_RW4`, `SAGUARO_IQ_Q8_WIDE`; off: `HY4_MTP_Q4K`, `HY4_LOGIT_HASH` (debugging).
+- **VRAM reserve held for the whole run (#1026):** with `--reserve-gb` given, what a start and its requests allocate
+  after the plan is measured and kept free beside the reserve from the next start on (the pack's `vram-late.txt`);
+  `SAGUARO_HY4_LATE_MB=<MiB>` fixes the figure (`0`: the reserve alone), `SAGUARO_HY4_LATE_FILE` names another file.
+- **Hand-offs between GPUs (layer split, #1100):** a peer copy only where it is offered, the IOMMU does not translate
+  and a test copy arrives right, else through pinned host memory (`HY4_HOST_STAGE=1` always, `HY4_STAGE_MB` its
+  pieces). Tensor parallel turns no peer access on.
+- AMD: compiles for HIP (gfx1201 checked) but has not run on an AMD GPU yet, so the setup does not offer it there ([AMD_SAGUARO.md](AMD_SAGUARO.md#what-runs-on-amd)).
+  Windows and Mac: not built.
+
+## Running it by hand or under a proxy
+
+The setup's start script does this; by hand, from the Saguaro folder (`<config>` = the setup's
+`maya-hy4-flash-maya-s.json`, or `configs/Hy4-Flash-Maya-S-IQ2_S.json`, the measured 4x T4 config with its paths
+relative to the Saguaro folder - the model in `models/Hy4-Flash-Maya-S-IQ2_S/`, its state in `var/`):
+
+```sh
+sudo nvidia-smi -lgc 1590,1590           # Tesla T4s (above)
+ulimit -l unlimited                      # or a memlock limit large enough for the pinned expert copies
+.venv/bin/python serve/server.py --config <config> --host 127.0.0.1 --port 8099
+```
+
+The pack, if you built the model folder yourself (an index of the GGUF files and the tokenizer, a few MB, no GPU):
+
+```sh
+M=<models folder>/Hy4-Flash-Maya-S-IQ2_S
+.venv/bin/python tools/hy4/pack_gguf.py --model $M --out $M/pack \
+  --files Maya-S/Hy4-Flash-Maya-S-IQ2_S-00001-of-00002.gguf Maya-XS/Hy4-Flash-Maya-XS-IQ2_XXS-00002-of-00002.gguf \
+  --mmproj Maya-XS/mmproj-Hy4-Flash-Maya-XS.gguf --mtp none --drafter none
+```
+
+Under a proxy that starts models on demand (llama-swap and the like), run the same command with the proxy's port and
+give it a stop timeout of a minute or two: the server saves open conversations when it stops. The first start times the
+prompt route on ~57K tokens before it is ready unless `"HY4_MEASURE": "0"` is in the config's `env` - allow for that in
+the proxy's health-check timeout. A good start logs `tensor parallel: every layer over GPUs 0,1,2,3`, `HY4_HOT: tensor
+parallel places the experts in VRAM at the start`, `CPU lane: N of 20992 routed experts in VRAM`, then `READY`.
+
+`HY4_HOT_FILE`'s scores are fixed; to learn them for your own traffic, run a layer-split start (`--tp 0`) with a new
+file path over real use, then point the config at it. `HY4_Q4X=0` keeps the CPU lane on the GGUF's own experts (its
+4-bit copies need AVX2).

@@ -350,6 +350,7 @@ const TIER_SETS = {
   // CYBER-FROST (the maya engine's Qwen path): the CPU computes the experts VRAM does not hold, from RAM or read from the
   // model file; the drafts' windows count too
   qwen: [
+    {key: "promo", label: "Promoted", unit: "/tok", digits: 2, sub: "completed expert moves into VRAM per generated token"},
     {key: "ram_fetch", label: "From RAM", unit: "/tok", digits: 1, tone: "info", sub: "experts the CPU computed from RAM"},
     {key: "disk", label: "From SSD", unit: "/tok", digits: 2, tone: "warn", sub: "experts read from the model file"},
   ],

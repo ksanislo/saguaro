@@ -57,7 +57,8 @@ It first asks which model to set up:
   (197 GB with MiniMax's DSpark drafter; every file pinned and checked, `tools/mm3/download.json`) on its own engine
   (`build/saguaro-mm3`): NVIDIA from V100 on, Linux and Windows; AMD experimental (as GLM's EXL3 quants there: the
   kernels pass their tests on AMD, the whole model has not run on one yet) - on AMD, Saguaro's GGUF quants
-  (`--model minimax-maya-xs` / `minimax-maya-s`: [SETTINGS.md](SETTINGS.md#minimax-m31-flash)) are the tested way.
+  (`--model minimax-maya-xs` / `minimax-maya-s`: [SETTINGS.md](SETTINGS.md#minimax-m31-flash)) are the tested way
+  (whether its engine builds for AMD in this version: [AMD_SAGUARO.md](AMD_SAGUARO.md#what-runs-on-amd)).
   About 250 GB of VRAM
   and RAM hold all of it; with less the setup warns. The same steps with these differences: the contexts are 32K-1M,
   the recommended one the largest (up to 256K) whose KV cache fits beside the model in this PC's VRAM + RAM, its RAM
@@ -188,7 +189,7 @@ WantedBy=multi-user.target
 | `--setup` | set up again (other GPUs, context, model folder) |
 | `--check` | only check the PC |
 | `--gguf-dir DIR` | use GLM-5.3-Flash GGUF files you already have: their folder, or the `.gguf` file (the first one of a split model) when the folder holds several models. The folder must be writable: the pack goes inside it. A GGUF Saguaro does not list (a pruned model such as RCO-152E included: the shipped expert profile is for 288 experts a layer and is left out of any other count) gets its own sampling (`general.sampling.*`) and chat template from the file, else GLM's |
-| `--models-dir DIR` | where downloaded models go, each in a folder named after it - `DIR/Maya-L/` holds that model's GGUF files (default `../Maya-data/models`); put it on the NVMe |
+| `--models-dir DIR` | where downloaded models go, each in a folder named after it - `DIR/Maya-L/` holds that model's GGUF files (default `../Saguaro-data/models`; an earlier setup's `../Maya-data/models` is used while it is the only one there); put it on the NVMe |
 | `--import-model FOLDER` | use model files you downloaded some other way (a download manager, a copy from another PC, a Hugging Face cache): finds Saguaro's published files in FOLDER and its subfolders by size and sha256 - their names do not matter - and moves them into `--models-dir`'s layout (same drive) or copies them (another drive, a cache link: `--copy`; the originals stay). Prints what was found, what is missing and what did not match; files that did not match are never touched, and a file already in place is never replaced. Moved files are recorded as verified |
 | `--copy` | with `--import-model`: copy the files that cannot be moved |
 | `--download-model` | download the model without asking (the commands and size are still printed) |
