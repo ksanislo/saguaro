@@ -4863,8 +4863,25 @@ __global__ void tp_sum4_kernel(TpParts s, int N, size_t n4, float4* __restrict__
         out[i] = a;
     }
 }
+// A token's sums: each member's partial in its own send[k % 2], read by the others in place (peer access) in the add
+// that also runs the short conv after it - no copy between (the same parity rule: a member writes send[s] again only
+// after it waited for the others' partials of sum k + 1, made after their adds of sum k).
+__global__ void tp_sum_conv4_kernel(TpParts s, int N, int C, float* __restrict__ hist, const float* __restrict__ w,
+                                    const float* residual, float* __restrict__ y) {
+    const int c = blockIdx.x * blockDim.x + threadIdx.x;
+    if (c >= C) return;
+    float x = s.p[0][c];
+    for (int j = 1; j < N; ++j) x += s.p[j][c];
+    const float h0 = hist[c], h1 = hist[(size_t) C + c], h2 = hist[(size_t) 2 * C + c];
+    const float* wc = w + (size_t) c * 4;
+    float a = wc[0] * h0 + wc[1] * h1 + wc[2] * h2 + wc[3] * x;
+    if (residual) a += residual[c];
+    y[c] = a;
+    hist[c] = h1, hist[(size_t) C + c] = h2, hist[(size_t) 2 * C + c] = x;
+}
 struct TpMember {
     float* recv[2][kTpMax] = {};   // [slot][from member]: [Tm][C]
+    float* send[2] = {};           // (a token's partials, [C], by slot)
     cudaEvent_t ev[2] = {};        // (its stream, by slot: its partial copied out to every other member)
     cudaEvent_t fork = nullptr, join = nullptr;
 };
@@ -4883,7 +4900,10 @@ void tp_init(Model& M, int chunk) {
         for (int s = 0; s < 2; ++s)
             for (int j = 0; j < N; ++j)
                 if (j != m) g_tpx[m].recv[s][j] = dalloc<float>(g_tp_cap);
-        for (int s = 0; s < 2; ++s) CU(cudaEventCreateWithFlags(&g_tpx[m].ev[s], cudaEventDisableTiming));
+        for (int s = 0; s < 2; ++s) {
+            CU(cudaEventCreateWithFlags(&g_tpx[m].ev[s], cudaEventDisableTiming));
+            g_tpx[m].send[s] = dalloc<float>(M.c.C);
+        }
         CU(cudaEventCreateWithFlags(&g_tpx[m].fork, cudaEventDisableTiming));
         CU(cudaEventCreateWithFlags(&g_tpx[m].join, cudaEventDisableTiming));
     }
@@ -4920,6 +4940,16 @@ void tp_reduce(int m, float* x, size_t n, int k) {
     tp_sum4_kernel<<<(unsigned) std::min<size_t>((n4 + 255) / 256, 1024), 256, 0, g_s>>>(p, g_tpn, n4, (float4*) x);
 }
 
+// a token's sum k on member m (current): every member's send[k % 2] added in member order, then the short conv
+void tp_sum_conv(int m, int k, float* hist, const float* w, const float* residual, float* y, int C) {
+    const int s = k & 1;
+    TpParts p{};
+    for (int j = 0; j < g_tpn; ++j) {
+        if (j != m) CU(cudaStreamWaitEvent(g_s, g_tpx[j].ev[s], 0));
+        p.p[j] = g_tpx[j].send[s];
+    }
+    tp_sum_conv4_kernel<<<(unsigned) ((C + 127) / 128), 128, 0, g_s>>>(p, g_tpn, C, hist, w, residual, y);
+}
 // one token's launches on every member (the embedding row and position in member 0's pinned emb_h / pos_h)
 void tp_token_launches(OutMode out_mode) {
     const int N = g_tpn;
@@ -5059,8 +5089,8 @@ void tp_token_launches(OutMode out_mode) {
             }
             if (!mma) k::gate_mul_f16(W.o, gate_p, (size_t) HD, W.x16, true, g_s);
             if (first) CU(cudaMemcpyAsync(blk(nb[m]), W.h, Cb, cudaMemcpyDeviceToDevice, g_s));
-            mv1(Ly.wo, W.o, W.tmp);
-            tp_push(m, W.tmp, C, 2 * vis);
+            mv1(Ly.wo, W.o, g_tpx[m].send[0]);
+            CU(cudaEventRecord(g_tpx[m].ev[0], g_s));
         }
         // the sum, its short conv and the stream; the MoE's input, the router (the same picks on every member), each
         // member's width of the 8 experts, their combine: its partial in W.tmp
@@ -5070,8 +5100,7 @@ void tp_token_launches(OutMode out_mode) {
             Work& W = dev_work(m);
             auto blk = [&](int i) { return W.blocks + (size_t) i * W.blk_ld * C; };
             Layer& Ly = M.L[l];
-            tp_reduce(m, W.tmp, C, 2 * vis);
-            k::conv4_res(W.tmp, Ly.h_attn, Ly.sc_attn, nullptr, 0, 1, C, first ? nullptr : W.h, W.r, g_s);
+            tp_sum_conv(m, 0, Ly.h_attn, Ly.sc_attn, first ? nullptr : W.h, W.r, C);
             if (first) ++nb[m];
             {
                 k::ResStates st{};
@@ -5109,15 +5138,14 @@ void tp_token_launches(OutMode out_mode) {
                                           c.gate_cap, c.up_cap, W.h16, g_s, nullptr, 0);
                 k::experts_down(W.blob, c.K, Ly.ty[2], Ly.eb[0] + Ly.eb[1], W.h16, C, c.F, W.y32, g_s, nullptr, 0);
             }
-            k::moe_combine_f32(W.y32, W.inv, W.wt, 1, c.K, C, W.tmp, false, g_s);
-            tp_push(m, W.tmp, C, 2 * vis + 1);
+            k::moe_combine_f32(W.y32, W.inv, W.wt, 1, c.K, C, g_tpx[m].send[1], false, g_s);
+            CU(cudaEventRecord(g_tpx[m].ev[1], g_s));
         }
         for (int m = 0; m < N; ++m) {
             use_dev(m);
             Work& W = dev_work(m);
             Layer& Ly = g_tpm[m]->L[l];
-            tp_reduce(m, W.tmp, C, 2 * vis + 1);
-            k::conv4_res(W.tmp, Ly.h_mlp, Ly.sc_mlp, nullptr, 0, 1, C, W.r, W.h, g_s);
+            tp_sum_conv(m, 1, Ly.h_mlp, Ly.sc_mlp, W.r, W.h, C);
         }
     }
     // the head: each member its rows of the logits (a row's product the same wherever it runs), into member 0's
