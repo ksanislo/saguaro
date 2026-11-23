@@ -558,6 +558,8 @@ def error_body(e: Exception, kind: str = "invalid_request_error") -> dict:
     return {"error": err}
 
 
+# saguaro-ik2's ERR after which it ends (a GPU failure in a request: cu_fail), so the server starts a fresh one
+ENGINE_ENDS_AFTER_ERR = "the engine starts again for the next request"
 # the engine's ERR when a route met a NaN or an infinity (Glm5Model::route_ok): it has dropped that conversation's state
 NONFINITE = "non-finite"
 
@@ -1762,6 +1764,8 @@ class StrataEngine:
                 elif line.startswith("ERR"):
                     done = True
                     self._done_after_err()        # (maya-ds4 / maya-mm3 end the request with a DONE after it)
+                    if ENGINE_ENDS_AFTER_ERR in line:
+                        self._wait_end()
                     raise ValueError(line[4:].strip())
                 elif ik2 and line.startswith(("decode stats:", "prefill stats:", "prefill sources:")):
                     ik2_stats = ik2_decode_stats(line) or ik2_stats
@@ -1820,6 +1824,16 @@ class StrataEngine:
                         if said:
                             print(f"[saguaro] the stopped request ended after {heard - t0:.0f} s", flush=True)
                         break
+
+    def _wait_end(self):
+        """An engine that ends after its ERR (saguaro-ik2's GPU failure in a request): its exit awaited here, still
+        holding the request's place, so the next request finds it ended and starts a fresh one (ensure_engine) instead
+        of writing to the one on its way out."""
+        try:
+            self.proc.wait(timeout=15)
+        except (subprocess.TimeoutExpired, OSError, AttributeError):
+            pass
+        self.ended = True
 
     # How long, after an ERR, the reader waits for the DONE that may follow it: maya-ds4 and maya-mm3 print one right
     # after (in the same flush), the GLM engine none for most errors - so a short wait, not DRAIN_S.

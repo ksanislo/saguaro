@@ -3069,10 +3069,16 @@ class EngineEndTests(unittest.TestCase):
         for line in ("", "ERR the GPU ran out of memory during this request (a smaller --chunk, context or prompt "
                      "needs less; the engine starts again for the next request)", "DONE 0 0 0 0 cancel 0 0 0 0 0", None):
             e.lines.put(line)
+        waited = []
+        e.proc.wait = lambda timeout=None: waited.append(timeout)
+        e.ended = False
         with self.assertRaises(ValueError) as c:
             list(e.generate([1, 2, 3], 10, {}, threading.Event()))
         self.assertIn("ran out of memory", str(c.exception))
         self.assertIsNone(e.lines.get_nowait())          # (the DONE was taken; the engine's end is next)
+        # (its exit awaited before the request lets go: the next one starts a fresh engine - on mortar the request
+        #  0.1 s after the OOM wrote to the one on its way out and failed too)
+        self.assertTrue(waited and e.ended)
 
     def test_a_stop_after_the_engine_ended_is_quiet(self):
         """Ctrl+C reaches the engine too: QUIT then finds its stdin closed - not "did not end within 50 s"."""
