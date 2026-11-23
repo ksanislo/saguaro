@@ -41,6 +41,6 @@ Decision (coordinator 11-22): no partial converter; native support. Python tools
   top-1 94.0 %. Decode 24.4 / 23.2 tok/s (~0 / 8K), 8K read 348 tok/s (UD same build 27.1 / 30.4, 535).
 - RX 9070 XT (mortar, HIP, SAGUARO_IK2_OFF=1): gpu test PASS, KL 0.0152 / 94.05 %, 1-card check PASS,
   serve_check 20/20 PASS (runs/sfm4, merged tree), decode 55.9 / 50.5 / 46.3 tok/s at ~0 / 8K / 30K, reads 1275 / 1033.
-- runs/sf3 (T4, fast FP16 decode) queued behind the live QFN model.
+- T4 runs/sf3 (fast FP16 decode): 1-card check PASS, decode 24.9 / 23.8 tok/s, 8K read 553 tok/s (was 348); ik2_kernels_test all passed.
 - Next: per-expert slot classes (kMIX padding: 13.0 GiB vs ~11.6 packed - would make SQ-15 resident on 15-16 GB
   cards); MX8 experts (SQ-20); serve config entry for the pack (tokenizer dir = any Inkling tokenizer).
