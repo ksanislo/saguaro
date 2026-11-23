@@ -15,10 +15,23 @@ Decision (coordinator 11-22): no partial converter; native support. Python tools
   All-SF4 layers -> NVFP4 + .scale (same bytes as UD-Q4_K_XL); else kMIX.
 - tests/strata_fmt_test.cpp: every value vs Strata's scalar CPU decode (ported). Trunk 1.6 G values bit-equal.
 
-## Engine hooks (ik2) - planned
-- Shards: a .strata path -> InklingView (info/data/get/read_experts); read_into_strided call sites -> S.read_experts.
-- k::block_values/bytes/decode_value/decode_f16/decode_host: + strata_fmt types.
-- kMIX: per-expert type resolution in the expert kernels (MixHdr), MACaQ applied to h in the gate_up kernel.
+## Engine hooks (ik2) - the points the ik2-up rebase must keep
+- ik2_main.cu Shards: a .strata path -> InklingView (info/data/get/all/read_experts); g_sv; tensor_bytes(kMIX).
+  The two read_into_strided expert sites -> S.read_experts. host_mmap / pin_later off for a pack.
+- ik2_main.cu Mat::seg (MatSeg): a fused dense matrix of mixed block types; mat_rows/mv1/mv1c/matmul/tile_rows loop
+  the parts; try_load_fused_raw builds them for a pack; the offload path's blocks() check accepts them.
+- ik2_main.cu prompt path run_exp: kMIX decoded part by part, swiglu_cap_f32(..., mix_up) for MACaQ. TP: refused.
+- ik2_kernels.cu: decode_value (strata types + kMIX), block_values/bytes, mix_role/mix_inv at the top of the
+  namespace, kMIX resolution at entry of experts_gate_up_swiglu / down / _g / _mem kernels, row_dot / row_dot_2
+  chunk paths (sf_chunk_dot), swiglu_cap_f32 mix_up.
+- CMake: strata_fmt library (zstd), strata_fmt_test, strata_fmt_gpu_test; ik2_kernels includes src/strata_fmt.
 
-## Status
-- see git log
+## Status (11-22 ~16:10 PST)
+- CPU exactness (strata_fmt_test, all 3072 experts + 646 trunk tensors): PASS, 26.07 G values, 0 mismatches
+  (SF4 E2M1 -0 read as +0 by ggml's table: 423 M codes, same weight). Log /data/llm/logs/saguaro/strata-fmt-test-full.out.
+- GPU (T4, runs/sf1): strata_fmt_gpu_test PASS (trunk 2.03 G values bit-exact, experts exact, token MIX kernels
+  2.7e-4 rel vs double ref). Engine load failed: offload path needs fused dense blocks -> Mat::seg (runs/sf2 queued).
+- mortar: HIP build clean; SQ-15 downloaded + sha ok; runs/sfm1 (gpu test, 1-card, KL, bench) started.
+- MIX padding: slot = the layer's largest expert (SF4 / S5_K) -> 13.0 GiB of experts vs 11.4 GiB packed; on a T4
+  that means the offload path, not resident. Fix = per-expert slot classes in the cache (follow-up, touches the
+  cache pools the rebase moves).
