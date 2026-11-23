@@ -2794,15 +2794,49 @@ def curl_drops_auth(curl: str) -> bool:
     return v >= (7, 58)
 
 
+DL_PIECE = 2_000_000_000   # a file larger than this (its size known): fetched as byte ranges at once - one stream from
+DL_PIECES = 8              # Hugging Face's CDN is ~3 MB/s on some lines, 4-8 ranges together several times that
+
+
+def piece_paths(s: Path, want: int | None) -> list | None:
+    """A file fetched in pieces: [(its piece's path, first byte, last byte)], or None for one stream - a small file, a
+    size not known, or one a single stream already started (its bytes kept, resumed where they stop)."""
+    if want is None or want <= DL_PIECE or (s.exists() and not list(s.parent.glob(s.name + ".piece*"))):
+        return None
+    step_ = -(-want // DL_PIECES)
+    return [(s.with_name(f"{s.name}.piece{i}"), i * step_, min(want, (i + 1) * step_) - 1) for i in range(DL_PIECES)]
+
+
+def join_pieces(s: Path, parts: list) -> None:
+    """The pieces into the file, in order, then removed."""
+    tmp = s.with_name(s.name + ".joining")
+    with open(tmp, "wb") as out:
+        for pp, _, _ in parts:
+            with open(pp, "rb") as f:
+                shutil.copyfileobj(f, out, 64 << 20)
+    tmp.replace(s)
+    for pp, _, _ in parts:
+        pp.unlink(missing_ok=True)
+
+
 def fetch_files(m: dict, shards: list, missing: list, urls: dict) -> None:
     """The missing files with curl, DL_JOBS at a time, each resumed where it stopped and run again whenever its
     connection drops or stalls - a download stopped half way (a dropped line, Ctrl+C, a restart) loses nothing: the
-    next run continues every file from its size on disk.  One line says how far the model is.  A gated repo's ("gated"):
-    the token in an Authorization header, read by curl from a file only the user can read (not on its command line)."""
+    next run continues every file from its size on disk.  A large file goes as DL_PIECES byte ranges at once (pieces
+    beside it, each resumed, joined at the end).  One line says how far the model is.  A gated repo's ("gated"): the
+    token in an Authorization header, read by curl from a file only the user can read (not on its command line)."""
     want = {s: (m.get("files") or {}).get(hf_name(m, s)) for s in shards}
+    pieces = {s: piece_paths(s, want[s]) for s in missing}
+    # a job: (file, piece index or -1) - its path on disk, the bytes it should end with, the range it asks for
+    jobs = [(s, i) for s in missing for i in (range(len(pieces[s])) if pieces[s] else [-1])]
+    def job_path(j):
+        return pieces[j[0]][j[1]][0] if j[1] >= 0 else j[0]
+    def job_want(j):
+        return pieces[j[0]][j[1]][2] - pieces[j[0]][j[1]][1] + 1 if j[1] >= 0 else want[j[0]]
+    n_jobs = max(DL_JOBS, DL_PIECES if any(pieces.values()) else 0)
     auth = None
     token = hf_token() if m.get("gated") else None
-    queue, running = list(missing), {}
+    queue, running, outs = list(jobs), {}, {}
     try:   # (from here: whatever happens, the finally removes the token's file)
         if token:
             import tempfile
@@ -2811,51 +2845,68 @@ def fetch_files(m: dict, shards: list, missing: list, urls: dict) -> None:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(f"Authorization: Bearer {token}\n")
         total = sum(want.values()) if all(want.values()) else m.get("download_gb", 0) * 1e9
-        size = lambda s: s.stat().st_size if s.exists() else 0   # noqa: E731
-        stuck, after, start_size = {s: 0 for s in missing}, {s: 0.0 for s in missing}, {}
-        t0, base, last = time.time(), sum(size(s) for s in shards), 0.0
+        size = lambda p: p.stat().st_size if p.exists() else 0   # noqa: E731
+        def on_disk(s):
+            return sum(size(pp) for pp, _, _ in pieces[s]) if pieces.get(s) and not s.exists() else size(s)
+        stuck, after, start_size = {j: 0 for j in jobs}, {j: 0.0 for j in jobs}, {}
+        t0, base, last = time.time(), sum(on_disk(s) if s in pieces else size(s) for s in shards), 0.0
         while queue or running:
             now = time.time()
-            for s in [q for q in queue if after[q] <= now][:max(0, DL_JOBS - len(running))]:
-                queue.remove(s)
-                start_size[s] = size(s)
-                cmd = ["curl", "-sS", "-L", "--fail"] + (["-H", f"@{auth}"] if auth else []) + CURL_RESUME + \
-                    ["-o", str(s), urls[s]]
-                running[s] = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                              stderr=subprocess.PIPE)
+            for j in [q for q in queue if after[q] <= now][:max(0, n_jobs - len(running))]:
+                queue.remove(j)
+                jp = job_path(j)
+                start_size[j] = size(jp)
+                head = ["curl", "-sS", "-L", "--fail"] + (["-H", f"@{auth}"] if auth else [])
+                if j[1] >= 0:   # (a piece: the range from where it stopped, appended)
+                    _, a0, a1 = pieces[j[0]][j[1]]
+                    outs[j] = open(jp, "ab")
+                    cmd = head + CURL_RESUME[2:] + ["-r", f"{a0 + start_size[j]}-{a1}", urls[j[0]]]
+                    running[j] = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=outs[j], stderr=subprocess.PIPE)
+                else:
+                    cmd = head + CURL_RESUME + ["-o", str(jp), urls[j[0]]]
+                    running[j] = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                                  stderr=subprocess.PIPE)
             time.sleep(1)
-            for s, p in list(running.items()):
+            for j, p in list(running.items()):
                 rc = p.poll()
                 if rc is None:
                     continue
-                del running[s]
+                del running[j]
+                if j in outs:
+                    outs.pop(j).close()
                 err = (p.communicate()[1] or b"").decode(errors="replace").strip().splitlines()
-                have = size(s)
-                if want[s] is not None and have > want[s]:   # (more than the file: its tail is wrong - start it over)
-                    s.unlink()
+                jp, w = job_path(j), job_want(j)
+                have = size(jp)
+                if w is not None and have > w:   # (more than the file: its tail is wrong - start it over)
+                    jp.unlink()
                     have = 0
-                if want[s] is None and rc == 0 or want[s] is not None and have == want[s]:
+                if w is None and rc == 0 or w is not None and have == w:
+                    s = j[0]
+                    if j[1] >= 0 and all(size(pp) == b - a + 1 for pp, a, b in pieces[s]):
+                        join_pieces(s, pieces[s])
                     continue
-                stuck[s] = 0 if have > start_size[s] else stuck[s] + 1
-                if stuck[s] >= DL_STUCK:
+                stuck[j] = 0 if have > start_size[j] else stuck[j] + 1
+                if stuck[j] >= DL_STUCK:
                     S.progress()
-                    fail(f"the download of {s.name} keeps stopping without progress "
+                    fail(f"the download of {j[0].name} keeps stopping without progress "
                          f"({err[-1] if err else f'curl exit code {rc}'})",
                          f"check the connection, then run {ME} --download-model again: it continues where it stopped")
-                after[s] = time.time() + min(60, 5 * stuck[s])   # (again at once after progress, slower when stuck)
-                queue.append(s)
+                after[j] = time.time() + min(60, 5 * stuck[j])   # (again at once after progress, slower when stuck)
+                queue.append(j)
             if time.time() - last > 2 or not (queue or running):
                 last = time.time()
-                have = sum(size(s) for s in shards)
+                have = sum(on_disk(s) if s in pieces else size(s) for s in shards)
                 rate = (have - base) / max(1e-3, last - t0)
                 eta = (total - have) / rate if rate > 0 and total > have else 0
                 left = f" · {int(eta // 3600)} h {int(eta % 3600 // 60):02d} min left" if eta else ""
                 share = f" ({100 * have / total:.0f}%)" if total else ""
                 S.progress(f"{have / 1e9:.1f} / {total / 1e9:.1f} GB{share} · {rate / 1e6:.0f} MB/s{left} · "
-                         f"{len(running)} files at once", have / total if total else None)
+                           f"{len(running)} streams at once", have / total if total else None)
     finally:
         for p in running.values():   # (stopped half way: no curl keeps writing behind the setup's back)
             p.terminate()
+        for f in outs.values():
+            f.close()
         if auth is not None:
             auth.unlink(missing_ok=True)
             try:
