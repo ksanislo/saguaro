@@ -6571,8 +6571,8 @@ int main(int argc, char** argv) {
                     uint16_t* hs = nullptr;
                     CU(cudaHostAlloc(&hq, (size_t) hcap * c.KV * 64, cudaHostAllocMapped | cudaHostAllocPortable));
                     CU(cudaHostAlloc(&hs, (size_t) hcap * c.KV * 4 * sizeof(uint16_t), cudaHostAllocMapped | cudaHostAllocPortable));
-                    CU(cudaHostGetDevicePointer(&kv.q_host, hq, 0));
-                    CU(cudaHostGetDevicePointer(&kv.s_host, hs, 0));
+                    CU(cudaHostGetDevicePointer((void**) &kv.q_host, hq, 0));
+                    CU(cudaHostGetDevicePointer((void**) &kv.s_host, hs, 0));
                 }
             };
             alloc_q4(Vi.kc4);

@@ -2948,10 +2948,10 @@ void test_q4_kv() {
     CU(cudaHostAlloc(&hks, (size_t) hslots * KV * 8, cudaHostAllocMapped));
     CU(cudaHostAlloc(&hvq, (size_t) hslots * KV * 64, cudaHostAllocMapped));
     CU(cudaHostAlloc(&hvs, (size_t) hslots * KV * 8, cudaHostAllocMapped));
-    CU(cudaHostGetDevicePointer(&kc4.q_host, hkq, 0));
-    CU(cudaHostGetDevicePointer(&kc4.s_host, hks, 0));
-    CU(cudaHostGetDevicePointer(&vc4.q_host, hvq, 0));
-    CU(cudaHostGetDevicePointer(&vc4.s_host, hvs, 0));
+    CU(cudaHostGetDevicePointer((void**) &kc4.q_host, hkq, 0));
+    CU(cudaHostGetDevicePointer((void**) &kc4.s_host, hks, 0));
+    CU(cudaHostGetDevicePointer((void**) &vc4.q_host, hvq, 0));
+    CU(cudaHostGetDevicePointer((void**) &vc4.s_host, hvs, 0));
 
     k::prep_qkv_r_f16(dq_f16, nullptr, dk, kc16, dv, vc16, dr_f16, nullptr, T, H, KV, D, d_rel, 22.627f, 8.0f, 1e-6f,
                       nullptr, 0.0f, 8192.0f, 0, 0, 0);
