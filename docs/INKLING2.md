@@ -488,8 +488,20 @@ sm_75 forms, a one-card expert cache, two cards by layers) is replaced by it. Wh
   answers); the drafter's BF16 products on a kernel of ours before sm_80 (cuBLAS's BF16 on a T4: 13 ms a draft);
   a Strata pack's drafter left out with a NOTE (its head is not FP16 / planar Q8_0; it used to stop the engine).
 
-**Drafting on the T4s and the RX 9070 XT** (2026-11-22, `SAGUARO_IK2_DRAFT_FORCE=1` lifts the Turing gate, `=2` also
-lets the drafter run on the dynamic offload path - tests only). Greedy, six requests (code, prose, chat) of 400
+**Drafting defaults by layout** (Ken, 2026-11-23; with upstream v1.1.75's GGUF drafter, its one-launch exact window and
+our switches; logs/saguaro/REPORT-ik2-draft-gain.md). Each is set only where the environment does not name it, so
+`SAGUARO_IK2_<X>=0` / `=1` still decides:
+
+| Layout | Drafting | Switches on by default | Measured (decode, 15-request mix) |
+| --- | --- | --- | --- |
+| T4, UD-Q4_K_XL dynamic cache | on | `BLOCK_EXACT=0` (rounding-level window), `DRAFT_GATE=0` + `DRAFT_BACKOFF`, `DRAFT_SNAP` + `DRAFT_SNAP_RINGS`, `BLOCK_SPLIT`, `DRAFT_HEAD_TILES` | +8.6 %; KL 5.3e-5 vs the one-token path, answers differ at near-ties |
+| T4, one-T4 quant resident | on | exact window, `LOOKUP_MATCH`, `DRAFT_GATE=0` + `DRAFT_BACKOFF`, `DRAFT_SNAP` + `_RINGS`, `BLOCK_SPLIT`, `DRAFT_HEAD_TILES` | +4..+5 %, bit-identical |
+| AMD, every expert resident (RX 9070 XT) | on | upstream's gate, `LOOKUP_MATCH`, `DRAFT_SNAP` | +11 %, bit-identical |
+| AMD offload path | off (`SAGUARO_IK2_DRAFT_FORCE=2`: anyway) | - | -1..-12 % |
+| Ampere and newer, Volta | as upstream (`--drafting auto`), `DRAFT_SNAP` | - | - |
+| Pascal; two GPUs (split); `--tp`; `--parallel 2` | off | - | - |
+
+**Drafting on the T4s and the RX 9070 XT, before v1.1.75's drafting** (2026-11-22, exact window, the BF16 drafter). Greedy, six requests (code, prose, chat) of 400
 tokens, drafting off / on interleaved; every on-run's answers bit-equal to off (window check: every row the one-token
 path's to the bit, on the T4 and, with the build fix above, on the RX 9070 XT):
 
