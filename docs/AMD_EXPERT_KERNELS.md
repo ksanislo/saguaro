@@ -45,10 +45,10 @@ paths. This work does not fuse gate/up and down into one kernel.
 cmake -S . -B build-multi -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_PREFIX_PATH=/opt/rocm-7.2.1 \
   -DCMAKE_HIP_COMPILER=/opt/rocm-7.2.1/llvm/bin/clang++ \
-  -DMAYA_ENABLE_HIP=ON -DMAYA_ENABLE_CUDA=OFF \
-  -DMAYA_PREFILL_MMQ=ON -DMAYA_NATIVE_EXPERTS=ON \
-  -DMAYA_BUILD_TESTS=OFF \
-  -DMAYA_GGML_DIR=/ai/github/project-maya/third_party/llama.cpp \
+  -DSTRATA_ENABLE_HIP=ON -DSTRATA_ENABLE_CUDA=OFF \
+  -DSTRATA_PREFILL_MMQ=ON -DSTRATA_NATIVE_EXPERTS=ON \
+  -DSTRATA_BUILD_TESTS=ON \
+  -DSTRATA_GGML_DIR="$PWD/third_party/llama.cpp" \
   '-DCMAKE_HIP_ARCHITECTURES=gfx1100;gfx1201;gfx1151'
 CCACHE_DIR=/tmp/saguaro-experts-ccache cmake --build build-multi -j 8 \
   --target maya hip_expert_kernel_bench glm_ffn_parity glm_layer_parity \

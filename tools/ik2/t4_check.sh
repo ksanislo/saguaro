@@ -5,7 +5,7 @@ set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 py="${SAGUARO_PYTHON:-}"
 if [ -z "$py" ]; then
-  for c in "$here/../../.venv/bin/python" /opt/llm/saguaro/.venv/bin/python python3; do
+  for c in "$here/../../.venv/bin/python" python3; do
     if "$c" -c 'import regex' 2>/dev/null; then py="$c"; break; fi
   done
 fi

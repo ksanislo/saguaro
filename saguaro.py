@@ -4,9 +4,10 @@
 Hy4-Flash (--model hy4-flash-maya-s; four cards) and Inkling 2 Mini (--model inkling-2-mini; one or two 16 GB cards):
 NVIDIA on Linux, each on its own engine (build/saguaro-hy4, build/saguaro-ik2) - docs/HY4-FLASH.md, docs/INKLING2-MINI.md.
 GLM-5.3-Flash: CUDA on Linux and Windows (experimental); HIP: experimental gfx1100/gfx1201/gfx1151 (gfx1030: not
-validated), Linux and Windows, text only; Metal: experimental, macOS on Apple Silicon, GLM-5.3-Flash only, text only,
-one conversation at a time.  DeepSeek-V4.1-Flash-1017 and MiniMax-M3.1-Flash: CUDA from V100 on, Linux
-and Windows; their GGUFs on HIP too (their EXL3 quants: experimental there).
+validated), Linux and Windows, pictures too; Metal: experimental, macOS on Apple Silicon, GLM-5.3-Flash only, text
+only, one conversation at a time.  DeepSeek-V4.1-Flash-1017 and MiniMax-M3.1-Flash: CUDA from V100 on, Linux and
+Windows; on HIP they build (their GGUFs and EXL3 quants), not yet run on an AMD GPU here.  Which engines build for
+AMD (HIP) in this version: docs/AMD_SAGUARO.md, "What runs on AMD".
 The quants are named model first, then the tier by the experts' bits (XS, S, M, L): --model glm-maya-s,
 deepseek-maya-xs, minimax-maya-xs ... (tools/maya_quants.py); every name used before still works.
 
@@ -36,7 +37,7 @@ no tuning step - it balances its own split):
      (on Windows AMD's ROCm SDK wheels in .venv, offered when they are not there)
   2. asks: which GPUs (one, or several that split the layers), how much context, which model to download (GLM-5.3 ·
      Maya-S, Maya-S24, Maya-M, Maya-M-Derisked or Maya-L; or turboderp's EXL3 quant at 3.05 or 4.05 bits or the
-     self-calibrated one at 4.10, experimental: NVIDIA, and AMD)
+     self-calibrated one at 4.10: NVIDIA from V100, and AMD)
   3. Python packages into .venv, llama.cpp's source at the pinned commit (it lists them and asks first)
   4. compiles the engine (`build/saguaro-glm`, or `build-hip/saguaro-glm`) for your GPU(s): 10-30 minutes, once
   5. the model: GGUF files you already have (--gguf-dir), or a download it shows you first - the exact commands
@@ -52,7 +53,7 @@ The tuning (tools/calibrate_glm.py): decode speed measured with a few splits of 
 experts between the CPU and the PCIe link, with fewer and more CPU threads, and - when part of the model is read from
 the SSD - with smaller disk reads, in one engine run (~10-15 minutes, the model loads first); a setting is kept when
 it is more than 3% faster than the engine's own choice.  The result goes into the config's "env" (SAGUARO_GLM_PCIE_SHARE,
-SAGUARO_GLM_CPU_LANE, SAGUARO_GLM_READ_CHUNKS) and into ~/.config/project-maya/calibration.json for this PC, model and
+SAGUARO_GLM_CPU_LANE, SAGUARO_GLM_READ_CHUNKS) and into ~/.config/saguaro/calibration.json for this PC, model and
 context, so a setup again keeps it.  DeepSeek-V4.1-Flash-1017's (tools/calibrate_ds4_tp.py, ./saguaro.sh --calibrate only):
 decode speed with each --tp that groups the GPUs differently and with fewer CPU threads, an engine start each (~25-40
 minutes on 9 GPUs); a setting is kept when it is more than 5% faster and still reads a long prompt at 60% of the
@@ -269,7 +270,7 @@ MODELS = {
     # downloaded, and how a download is known whole); "revision": the branch's commit the hashes belong to.
     "EXL3-3.05bpw": {
         "about": "turboderp's EXL3 quant at 3.05 bits per weight (exllamav3's trellis format, which the engine reads "
-                 "in place from its safetensors), with the MTP draft block - experimental (NVIDIA; AMD too)",
+                 "in place from its safetensors), with the MTP draft block - NVIDIA from V100, and AMD",
         "format": "exl3", "repo": "turboderp/GLM-5.3-Flash-exl3", "branch": "3.05bpw",
         "revision": "332ab457b709b7ba30dd9a448be5de03b80a7ac9", "folder": "", "download_gb": 125.3,
         "files": {
@@ -352,7 +353,7 @@ MODELS = {
     # tensors are in its shards (3.05bpw has them in kpool_aux.safetensors)
     "EXL3-4.05bpw": {
         "about": "turboderp's EXL3 quant at 4.05 bits per weight (exllamav3's trellis format, which the engine reads "
-                 "in place from its safetensors), with the MTP draft block - experimental (NVIDIA; AMD too)",
+                 "in place from its safetensors), with the MTP draft block - NVIDIA from V100, and AMD",
         "format": "exl3", "repo": "turboderp/GLM-5.3-Flash-exl3", "branch": "4.05bpw",
         "revision": "2a30229e67012798ba9f0cd832bb78abf4c363d5", "folder": "", "download_gb": 165.2,
         "files": {
@@ -443,7 +444,7 @@ MODELS = {
     "EXL3-sc_4.10bpw": {
         "about": "turboderp's self-calibrated EXL3 quant at 4.10 bits per weight (exllamav3's trellis format, which the "
                  "engine reads in place from its safetensors): 4-bit routed experts like EXL3-4.05bpw, 8-bit "
-                 "attention and shared experts, with the MTP draft block - experimental (NVIDIA; AMD too)",
+                 "attention and shared experts, with the MTP draft block - NVIDIA from V100, and AMD",
         "format": "exl3", "repo": "turboderp/GLM-5.3-Flash-exl3", "branch": "sc_4.10bpw",
         "revision": "c6b8ac3f6069173343e253e1cba90536ed2c72dc", "folder": "", "download_gb": 167.8,
         "files": {
@@ -626,12 +627,12 @@ MM3_PACK_TOOLS = ("tools/mm3/pack.py", "tools/mm3/st.py", "tools/strata_tokenize
 MM3_DIR = "MiniMax-M3.1-Flash-EXL3-3.5bpw"
 # Where its EXL3 quant is offered: everywhere DeepSeek's EXL3 runs (NVIDIA from V100, cc 7.0 = DS4_MIN_CC; Linux and
 # Windows) once maya-mm3 builds and runs there - MM3_ALL_PLATFORMS, the one switch.  Until then: Linux, RTX 30 / A100 or
-# newer (validated on sm_86 and sm_120); MAYA_MM3_MIN_CC=70 takes a V100 for testing.  AMD (HIP): experimental, as GLM's
-# EXL3 quants there - maya-mm3's EXL3 kernels take the shared exl3.cu's HIP paths (their tests pass on a Radeon 8065S).
+# newer (validated on sm_86 and sm_120); SAGUARO_MM3_MIN_CC=70 takes a V100 for testing.  AMD (HIP): too, as GLM's EXL3
+# quants there - maya-mm3's EXL3 kernels take the shared exl3.cu's HIP paths.
 MM3_ALL_PLATFORMS = True
 MM3_MIN_CC = 70                                    # (with MM3_ALL_PLATFORMS: DeepSeek's EXL3 reach)
 MM3_MIN_CC_NOW = 80                                # (until then)
-MM3_TEST_CC_ENV = "MAYA_MM3_MIN_CC"                # (testing only: 70 lets the setup take a V100 - see mm3_min_cc)
+MM3_TEST_CC_ENV = "SAGUARO_MM3_MIN_CC"                # (testing only: 70 lets the setup take a V100 - see mm3_min_cc)
 # Context: the model's own reach is 1M positions (config.json's max_position_embeddings).  With KV streaming (the
 # setup's default) every position's K / V sits in pinned RAM - per token, by the cache's format (maya-mm3 --kv-cache;
 # 60 layers x 4 KV heads x 128 dims x K and V, plus the scales) - and a ring of the newest 32K positions in VRAM; the
@@ -738,6 +739,16 @@ IK2_DIR = "saguaro-ik2"                            # (in the model's folder: tok
 IK2_MODEL_NAME = "inkling-2-mini"
 IK2_PROFILE = ROOT / "data" / "expert-profile-ik2mini.bin"   # (the offload path's starting VRAM tier: SAGUARO_IK2_WARM)
 FAMILIES = ("glm", "deepseek", "minimax", "qwen", "hy4", "ik2")
+FAMILY_SHOWN = {"glm": "GLM-5.3-Flash", "deepseek": DS4, "minimax": MM3, "qwen": QWEN_SHOWN, "hy4": HY4_SHOWN,
+                "ik2": IK2_SHOWN}
+# The models a backend has no engine for in this version (family_unavailable): the model list marks them, the setup
+# stops on them. Take one out when its engine builds and runs there - and update docs/AMD_SAGUARO.md's table with it.
+NO_ENGINE = {
+    "hip": {"hy4": "Hy4-Flash runs on NVIDIA GPUs only for now (its engine has not run on an AMD GPU yet)"},
+    "metal": {f: "Saguaro's Mac (Metal) engine runs GLM-5.3-Flash only" for f in FAMILIES if f != "glm"},
+}
+NOT_HERE = ("Setup stopped: this model is not supported on this PC's GPU yet - nothing was built or downloaded. "
+            "Another model can be set up here (the list marks the ones that run).")
 SHARD_RE = re.compile(r"-(\d{5})-of-(\d{5})\.gguf$")
 
 
@@ -967,13 +978,33 @@ def hip_unified_memory(g) -> bool:
         re.search(r"Ryzen AI Max|Radeon(?:\s*\(TM\))?\s+80[4-6]\dS", g.get("name", ""), re.I))
 
 
+HIP_IDLE_VRAM_GB = 0.5    # more in use with no engine running: something (a compositor) draws on the card
+
+
+def hip_headless(g) -> bool:
+    """A discrete AMD GPU no desktop runs on: no display connected to it and next to no VRAM in use (Linux' sysfs;
+    unknown - Windows, or sysfs without the facts - counts as a desktop's)."""
+    return g.get("display") is False and g.get("vram_used_gb", HIP_IDLE_VRAM_GB) < HIP_IDLE_VRAM_GB
+
+
 def hip_reserve_mib(gpus) -> int:
-    """The VRAM (MiB) an engine on these AMD GPUs leaves free on each: the desktop runs on them and allocates after
-    the engine has filled its expert pool - 3072, but 1024 on a Linux APU (its pool is sized from the RAM it shares;
-    Windows draws its desktop from the APU's carve-out too)."""
+    """The VRAM (MiB) an engine on these AMD GPUs leaves free on each: 3072 where the desktop may run on one (it
+    allocates after the engine has filled its expert pool); 1024 on a Linux APU (its pool is sized from the RAM it
+    shares; Windows draws its desktop from the APU's carve-out too); 512 on cards with no display (compute only: only
+    the engine's own late allocations come after the pool, and the engine keeps the margin it measured for them)."""
     if any(hip_unified_memory(g) for g in gpus) and not WIN:
         return 1024
+    if not WIN and gpus and all(hip_headless(g) for g in gpus):
+        return 512
     return 3072
+
+
+def hip_reserve_why(gpus) -> str:
+    if any(hip_unified_memory(g) for g in gpus) and not WIN:
+        return "an APU: its pool is sized from the shared RAM"
+    if not WIN and gpus and all(hip_headless(g) for g in gpus):
+        return "no display is connected to the GPU"
+    return "the desktop may run on the GPU and allocate beside the engine"
 
 
 def hip_clang(root: Path) -> Path | None:
@@ -984,6 +1015,10 @@ def hip_clang(root: Path) -> Path | None:
     slots = sorted((root / "lib" / "llvm").glob(f"*/bin/{exe}"),
                    key=lambda p: [int(x) for x in re.findall(r"\d+", p.parent.parent.name)],
                    reverse=True) if not WIN else []
+    # Debian/Ubuntu's own ROCm packages: hipcc drives the distribution's LLVM, /usr/lib/llvm-<N>/bin
+    slots += sorted((root / "lib").glob(f"llvm-[0-9]*/bin/{exe}"),
+                    key=lambda p: [int(x) for x in re.findall(r"\d+", p.parent.parent.name)],
+                    reverse=True) if not WIN else []
     return next((p for p in (root / "llvm" / "bin" / exe, root / "lib" / "llvm" / "bin" / exe,
                              root / "lib64" / "rocm" / "llvm" / "bin" / exe, *slots, root / "bin" / exe)
                  if p.exists()), None)
@@ -1095,6 +1130,31 @@ def hip_info(bindir) -> str | None:
     return str(p) if p and p.exists() else shutil.which("hipInfo")
 
 
+def installed_hip_info() -> str | None:
+    """hipInfo of a ROCm already installed (ROCM_PATH, HIP_PATH, the newest in C:\\Program Files\\AMD\\ROCm, PATH),
+    only to name the GPUs - not windows_rocm(), whose rocm-sdk init can unpack gigabytes."""
+    base = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "AMD" / "ROCm"
+    roots = [Path(os.environ[k]) for k in ("ROCM_PATH", "HIP_PATH") if os.environ.get(k)] + sorted(
+        base.glob("[0-9]*"), key=lambda p: [int(x) for x in re.findall(r"\d+", p.name)], reverse=True)
+    return next((str(r / "bin" / "hipInfo.exe") for r in roots if (r / "bin" / "hipInfo.exe").exists()),
+                shutil.which("hipInfo"))
+
+
+def first_run_backend() -> str:
+    """The backend of a first run without --backend (nothing set up yet): Metal on a Mac with Apple Silicon, HIP on a
+    PC with an AMD GPU Maya's HIP build takes (check_hip_pc's list, the experimental ones too) and no NVIDIA one, else
+    CUDA.  On Windows the AMD GPUs are named by an installed ROCm's hipInfo first: Windows' adapter table knows the
+    common cards only, and an AMD-only PC whose card it did not know was sent to the CUDA checks, which stop at
+    nvidia-smi (#805)."""
+    if apple_silicon():
+        return "metal"
+    if S.gpus():
+        return "cuda"
+    amd = S.amd_gpus(installed_hip_info()) if WIN else S.amd_gpus()
+    takes = HIP_ARCHS + HIP_ARCHS_UNVALIDATED + HIP_ARCHS_WAVE64
+    return "hip" if any(g["arch"] in takes for g in amd) else "cuda"
+
+
 THEROCK_INDEX = "https://repo.amd.com/rocm/whl-multi-arch/"   # AMD's ROCm for Windows: TheRock's pip wheels
 THEROCK_VERSION = "7.14.1"                                     # 7.14: the first with Gorgon Halo (Ryzen AI Max 400)
 
@@ -1141,7 +1201,7 @@ def vs_2026(vcvars) -> bool:
 
 def check_hip_pc(a, installed=False, text_only=True) -> dict:
     if not WIN and (not sys.platform.startswith("linux") or S.is_wsl()):
-        fail("Saguaro's experimental HIP backend runs on native Linux or Windows")
+        fail("Saguaro's HIP backend runs on native Linux or Windows")
     vcvars = S.find_vcvars(cuda=False) if WIN else None
     if WIN and vcvars is None:      # (before ROCm's download: ROCm's clang needs its headers)
         fail("Visual Studio Build Tools (2022 or 2026) are needed: ROCm's compiler uses their headers and libraries",
@@ -1219,20 +1279,26 @@ def check_hip_pc(a, installed=False, text_only=True) -> dict:
         root = root.resolve()
         clang = hip_clang(root)
         if (clang is None or clang.parent == root / "bin"
-                or not any(list((root / d).glob("libhipblas.so*")) for d in ("lib", "lib64"))):
+                or not any(list((root / d).glob("libhipblas.so*"))
+                           for d in ("lib", "lib64", *(q.relative_to(root) for q in (root / "lib").glob("*-linux-gnu"))))):
             fail("ROCm's HIP compiler and hipBLAS are required", "install ROCm 7, or set ROCM_PATH to its root")
         if tool_version(str(root / "bin/hipcc")) < (7, 0):
-            fail("Saguaro's HIP port requires ROCm 7 or newer")
+            if os.environ.get("SAGUARO_HIP_ALLOW_ROCM6") != "1":
+                fail("Saguaro's HIP port requires ROCm 7 or newer",
+                     "or set SAGUARO_HIP_ALLOW_ROCM6=1 to try a ROCm 6.x (untested, e.g. a distribution's packages)")
+            warn("ROCm older than 7 (SAGUARO_HIP_ALLOW_ROCM6=1): untested, the build or the engine may fail")
         if not shutil.which("c++"):
             fail("a C++ compiler is needed", "Ubuntu/Debian: sudo apt install build-essential")
     cpu, avx2, avx512 = S.cpu_info()
     if not avx2:
-        fail(f"the CPU ({cpu}) needs AVX2 for the expert lane")
+        # as on CUDA (#32): the CPU expert lane falls back to ggml's own kernels (src/kernels/cpu/expert_layout.cpp)
+        warn(f"the CPU ({cpu}) has no AVX2: the engine runs, its CPU expert lane on ggml's own kernels (slower). "
+             "SAGUARO_GLM_CPU_LANE=0 turns it off")
     total, avail = mem_gb()
     split = f"{len(chosen)} GPUs (layer split)" if len(chosen) > 1 else "one GPU"
-    ok(f"using {' + '.join(gpu_label(g) for g in chosen)}; experimental HIP, {split}" +
+    ok(f"using {' + '.join(gpu_label(g) for g in chosen)}; HIP, {split}" +
        (", text only" if text_only else ""))
-    ok(f"ROCm: {root}; CPU: {cpu} ({'AVX-512' if avx512 else 'AVX2'})")
+    ok(f"ROCm: {root}; CPU: {cpu} ({'AVX-512' if avx512 else 'AVX2' if avx2 else 'no AVX2'})")
     ok(f"RAM: {total:.0f} GB, {avail:.0f} GB available now")
     if any(hip_unified_memory(g) for g in chosen) and WIN:
         # Windows gives the APU's GPU a fixed carve-out, which it does not count as RAM: the engine sizes the pool
@@ -1266,7 +1332,7 @@ def check_hip_pc(a, installed=False, text_only=True) -> dict:
     if unvalidated:
         warn(f"{', '.join(unvalidated)} (RDNA 2) is experimental: it builds and has the portable kernels, but Saguaro has "
              "not been validated on such a card yet - please report how it goes in an issue "
-             "(https://github.com/mw00/project-maya/issues)")
+             "(https://github.com/ksanislo/saguaro/issues)")
     select_build_backend("hip")
     return {"backend": "hip", "gpus": chosen, "archs": sorted({g["arch"] for g in chosen}), "rocm": str(root),
             **({"rocm_bin": str(bindir)} if WIN else {})}
@@ -1478,28 +1544,22 @@ def check_pc(a, family: str = "glm", gguf: bool = False, ds4_quant: str = "exl3"
     step(1, "checking this PC")
     ds4 = family == "deepseek"
     mm3 = family == "minimax"
-    if mm3 and a.backend == "hip" and not gguf:   # (as GLM's EXL3 quants on AMD: experimental)
-        warn(f"{MM3}'s EXL3 quant on AMD is experimental: its kernels pass their tests on AMD GPUs, but the whole "
-             f"model has not been run on one yet - Saguaro's GGUF quants (--model minimax-maya-xs / minimax-maya-s) are the tested "
-             "way there")
     if mm3 and WIN and not MM3_ALL_PLATFORMS:
         fail(f"{MM3}'s engine (maya-mm3) runs on Linux only for now (its Windows build is on the way)",
              f"set it up on a Linux PC with an NVIDIA GPU ({mm3_gpus()})")
     if family in ("hy4", "ik2"):   # (said before anything is built or downloaded)
-        why = IK2F.unsupported(a.backend, WIN, ik2_gpus_asked(a), []) if family == "ik2" else (
-            f"{HY4_SHOWN} runs on NVIDIA GPUs only for now (no AMD or Mac engine here yet)"
-            if a.backend in ("hip", "metal") else
-            f"{HY4_SHOWN} runs on Linux only for now (not on Windows yet)" if WIN else None)
+        why = IK2F.unsupported(a.backend, WIN, ik2_gpus_asked(a), []) if family == "ik2" else \
+            family_unavailable(family, a.backend)
         if why:
-            fail(why, ("set it up on a Linux PC with NVIDIA GPUs (V100 / Tesla T4 and newer, 8 GB or more) or an AMD "
-                       "RDNA 3 / 4 GPU that holds the model" if family == "ik2" else
-                       "set it up on a Linux PC with NVIDIA GPUs (V100 / T4 and newer)"))
+            fail(why, ("it runs on a Linux PC with NVIDIA GPUs (V100 / Tesla T4 and newer, 8 GB or more) or one AMD "
+                       "RDNA 3 / 4 GPU of 16 GB or more" if family == "ik2" else
+                       "it runs on a Linux PC with NVIDIA GPUs (V100 / T4 and newer)"), end=NOT_HERE)
     if a.backend == "hip":
         if ds4 and not gguf:   # (as GLM's and MiniMax's EXL3 quants on AMD: experimental)
             warn(f"{DS4}'s EXL3 quants on AMD are experimental: their kernels pass their tests on AMD GPUs, but the "
                  f"whole model has not been measured on one - Saguaro's GGUF quants (--model deepseek-maya-s / "
                  "deepseek-maya-xs) are the tested way there")
-        return check_hip_pc(a, text_only=not (mm3 or family == "ik2"))   # (Inkling 2: pictures on AMD too)
+        return check_hip_pc(a, text_only=False)   # (every model the setup takes on AMD reads pictures there)
     if a.backend == "metal":
         if family != "glm":
             fail(f"Saguaro's Metal engine runs GLM-5.3-Flash only (no Metal engine for {ds4 and DS4 or mm3 and MM3 or QWEN_SHOWN})",
@@ -1515,8 +1575,6 @@ def check_pc(a, family: str = "glm", gguf: bool = False, ds4_quant: str = "exl3"
     min_cc = ((DS4_GGUF_MIN_CC if gguf else DS4_MIN_CC) if ds4 else (MM3_GGUF_MIN_CC if gguf else mm3_min_cc()) if mm3
               else QWEN_MIN_CC if family == "qwen" else HY4F.MIN_CC if family == "hy4"
               else IK2F.MIN_CC if family == "ik2" else MIN_CC)
-    if WIN:
-        warn("Windows support is new (experimental): Saguaro is developed and measured on Linux - tell us how it runs")
     if S.is_wsl():
         warn("this is WSL2, which Saguaro does not support: WSL2's driver pins only about 1 GB of "
              "RAM for the GPU, and Saguaro's RAM tier pins tens of GB. Use a native Linux install.")
@@ -1733,6 +1791,50 @@ def hf_name(m: dict, local: Path) -> str:
     return local.name
 
 
+def setup_cards(backend: str | None) -> list:
+    """The GPUs a setup could use, for the model and quant recommendations: NVIDIA's, or on HIP the AMD GPUs its build
+    supports (an iGPU it does not support left out)."""
+    if backend == "hip":
+        return [g for g in S.amd_gpus() if g.get("vram_gb")
+                and g.get("arch") in HIP_ARCHS + HIP_ARCHS_UNVALIDATED + HIP_ARCHS_WAVE64]
+    return [g for g in S.gpus() if g.get("vram_gb")]
+
+
+def vram_and_ram(cards: list) -> float:
+    """GB of VRAM and RAM together (an APU's memory is the RAM: counted once)."""
+    return sum(g["vram_gb"] for g in cards if not hip_unified_memory(g) and not g.get("unified_memory")) + mem_gb()[0]
+
+
+GLM_RAM_SPARE_GB = 16                              # the RAM a GLM quant leaves the system (the HIP config's own headroom)
+
+
+def glm_fit_lines(cards: list) -> list:
+    """--check: which GLM-5.3-Flash GGUF quants VRAM + RAM hold whole (less GLM_RAM_SPARE_GB), and the rest, whose
+    experts the engine then reads from the SSD while it answers."""
+    cards = [g for g in cards if g.get("vram_gb")]
+    if not cards:
+        return []
+    room = vram_and_ram(cards) - GLM_RAM_SPARE_GB
+    ggufs = sorted((q for q in MODELS if not is_exl3(q) and q not in MODELS_BY_HAND),
+                   key=lambda q: MODELS[q]["download_gb"])
+    fit = [q for q in ggufs if MODELS[q]["download_gb"] <= room]
+    big = [q for q in ggufs if q not in fit]
+    lines = [f"GLM-5.3-Flash: VRAM + RAM hold about {room:.0f} GB of a model here (the system keeps "
+             f"{GLM_RAM_SPARE_GB} GB)."]
+    if fit:
+        lines.append("  held whole (fastest): " + ", ".join(f"{q} ({MODELS[q]['download_gb']:.0f} GB)" for q in fit))
+    if big:
+        lines.append("  part of the experts from the SSD (slower, the more so the bigger): " +
+                     ", ".join(f"{q} ({MODELS[q]['download_gb']:.0f} GB)" for q in big))
+    return lines
+
+
+def default_models_dir() -> Path:
+    """Saguaro-data/models next to this folder, or an earlier setup's Maya-data/models there while only that one exists."""
+    new, old = ROOT.parent / "Saguaro-data" / "models", ROOT.parent / "Maya-data" / "models"
+    return old if old.is_dir() and not new.exists() else new
+
+
 def download_dir(models: Path, quant: str) -> Path:
     """A download's folder: <models folder>/<quant> (--models-dir).  Files already there are used where they are:
     in that folder, in <models folder>/glm-5.3-flash-<quant> (an earlier version's downloads), or straight in the
@@ -1744,6 +1846,21 @@ def download_dir(models: Path, quant: str) -> Path:
             if all((c / n).exists() for n in names):
                 return c
     return d
+
+
+def draft_note(a, pc: dict, draft: str) -> str:
+    """What the engine does with the drafting choice here: on one GPU it drafts with the MTP block only on an APU that
+    holds every expert (src/core/glm_mtp.cu, mtp_decode_wanted) - elsewhere the verify rows' experts cost more than
+    the drafts save, so it decodes without drafting."""
+    if draft == "dflash2":
+        return "a DFlash2 drafter (downloaded with the model)"
+    gpus = pc.get("gpus") or []
+    forced = any(e.startswith("SAGUARO_GLM_MTP_DECODE=") and e.split("=", 1)[1] not in ("", "0")
+                 for e in getattr(a, "env", None) or [])
+    if pc.get("backend") == "metal" or len(gpus) != 1 or forced or (
+            pc.get("backend") == "hip" and hip_unified_memory(gpus[0])):
+        return "the MTP block"
+    return "none on one GPU (the MTP block pays only where the GPU holds every expert: the engine decodes without it)"
 
 
 def choose_draft(a, pc: dict, inst: dict) -> str:
@@ -1810,19 +1927,22 @@ def choose_family(a, prev: dict) -> str:
         return "glm"
     if a.model_dir:                                    # (an EXL3 folder of GLM or MiniMax; else DeepSeek's files)
         return exl3_folder_family(a.model_dir) or "deepseek"
+    backend = getattr(a, "backend", None) or "cuda"
     try:
-        cards = [g for g in S.gpus() if g.get("vram_gb")]
-        have = sum(g["vram_gb"] for g in cards) + mem_gb()[0]
-    except Exception:  # noqa: BLE001 - no NVIDIA tools: no figure for this PC
+        cards = setup_cards(backend)
+        have = vram_and_ram(cards)
+    except Exception:  # noqa: BLE001 - no GPU tools: no figure for this PC
         cards, have = [], None
-    fit = family_fit(cards, mem_gb()[0] if cards else 0.0) if not metal and getattr(a, "backend", None) != "hip" else None
+    fit = family_fit(cards, mem_gb()[0] if cards else 0.0, backend) if not metal else None
     default = config_family(prev) if prev else fit or "glm"
+    if family_unavailable(default, backend):
+        default = "glm"
     here = f" (this PC: {have:.0f} GB)" if have else ""
-    rows = [("GLM-5.3-Flash", None,
+    rows = [("GLM-5.3-Flash", "recommended for this PC" if fit == "glm" else None,
              "Z.ai's GLM-5.3-Flash in Saguaro's GGUF quants (GLM-5.3-Flash-Maya-S to -Maya-L, 95-156 GB) or "
              "turboderp's EXL3 quants: from one GPU up, the experts that do not fit in VRAM from RAM and the SSD; "
-             "NVIDIA (AMD: experimental); pictures with its vision encoder."),
-            (DS4, "experimental",
+             "NVIDIA and AMD; pictures with its vision encoder."),
+            (DS4, None,
              "DeepSeek's DeepSeek-V4.1-Flash-1017 (748B) on its own engine: unsloth's GGUF (UD-Q8_K_XL, 508 GB; "
              "NVIDIA from V100 on or AMD, Linux or Windows), orcarouter's abliterated one (Mix-128G or "
              "Mix-256G, its refusals removed) or LibertAIDAI's EXL3 quants at 2.9 or "
@@ -1845,7 +1965,14 @@ def choose_family(a, prev: dict) -> str:
              "read from the SSD; tool calls, its three reasoning efforts, MTP drafting, up to a 256K context; text only."),
             (HY4_SHOWN, "recommended for this PC" if fit == "hy4" else "new", hy4_about(here)),
             (IK2_SHOWN, "recommended for this PC" if fit == "ik2" else "new", ik2_about())]
+    for i, f in enumerate(FAMILIES):   # (a model this PC's GPUs have no engine for: listed, with the reason)
+        why = family_unavailable(f, backend)
+        if why:
+            rows[i] = (rows[i][0], "not on this PC's GPU yet", why + ". " + rows[i][2])
     pick = choose("Model?", ["Which model to set up:"], rows, FAMILIES.index(default), a.yes)
+    why = family_unavailable(FAMILIES[pick], backend)
+    if why:
+        fail(why, f"pick another model: {ME} --setup", end=NOT_HERE)
     return FAMILIES[pick]
 
 
@@ -1871,11 +1998,17 @@ def choose_model(a, models: Path, inst: dict) -> tuple:
             and not (metal and is_exl3(q))]   # (a chosen-by-hand download: only where it is installed; Metal: GGUFs)
     # cards of 24 GB or less: Maya-S24 (its 4-bit attention leaves ~1.5 GB more of the card for experts - decode about
     # 14% faster there), else Maya-S
+    # and where VRAM + RAM (less GLM_RAM_SPARE_GB for the system) cannot hold that one, the largest GGUF quant that fits
     try:
-        cards = [g for g in S.gpus() if g.get("vram_gb")]
-    except Exception:  # noqa: BLE001 - no NVIDIA tools (AMD): no card-based recommendation
-        cards = []
+        cards = setup_cards(getattr(a, "backend", None))
+        room = vram_and_ram(cards) - GLM_RAM_SPARE_GB if cards else None
+    except Exception:  # noqa: BLE001 - no GPU tools: no card-based recommendation
+        cards, room = [], None
     rec = "Maya-S24" if cards and all(g["vram_gb"] <= 24.5 for g in cards) and "Maya-S24" in MODELS else opts[0]
+    if room is not None and MODELS[rec]["download_gb"] > room:
+        fit = [q for q in opts if not is_exl3(q) and MODELS[q]["download_gb"] <= room]
+        rec = max(fit, key=lambda q: MODELS[q]["download_gb"]) if fit else min(
+            (q for q in opts if not is_exl3(q)), key=lambda q: MODELS[q]["download_gb"])
     default = inst["quant"] if inst.get("quant") in MODELS else rec
     rows = []
     for q in opts:
@@ -1884,7 +2017,7 @@ def choose_model(a, models: Path, inst: dict) -> tuple:
         rows.append((f"{Q.shown('glm', q)}: " + (f"downloaded, in {d}" if have else
                                                  f"download {m['download_gb']:.1f} GB from Hugging Face"),
                      ("recommended for cards of 24 GB or less" if q == "Maya-S24" else "recommended") if q == rec
-                     else "experimental" if is_exl3(q) else None, m["about"]))
+                     else None, m["about"]))
     pick = choose("Which GLM-5.3-Flash?", ["The model to download (GLM-5.3-Flash GGUF files you already have: "
                                            "--gguf-dir <file or folder>):"], rows, opts.index(default), a.yes)
     return "download", opts[pick]
@@ -1948,8 +2081,8 @@ def toolkit_root_defs(nvcc) -> list:
 def compile_engine(archs, gpu_ids, nvcc, host_compiler, llama: Path, src: str, soft=False,
                    target: str = "maya") -> dict | None:
     """cmake configure + build of the `maya` target (DeepSeek: `maya-ds4`) in build/; the exact commands are
-    printed as they run.  soft: a failure warns and returns None (the engine already there keeps working) instead of
-    stopping."""
+    printed as they run.  soft: an update's rebuild (refresh_engine) - a failure stops with the reason and says that
+    the engine from before is not started (#805)."""
     def stop(what):
         msg = f"the engine build stopped while {what} (the reason is above)"
         hint = ("common causes: 'unsupported Microsoft Visual Studio version' - CUDA 12.x needs Visual Studio 2019 or "
@@ -1961,8 +2094,11 @@ def compile_engine(archs, gpu_ids, nvcc, host_compiler, llama: Path, src: str, s
                 "again "
                 "(it continues)")
         if soft:
-            warn(msg + "; starting the engine compiled before")
-            return None
+            # (not the engine compiled before: it is from the older source, and this version's server and config
+            #  start it with settings it may not know or silently ignore - #805, on NVIDIA as on AMD)
+            fail("Maya's NVIDIA engine changed with this update, and " + msg + ": the engine from before does not "
+                 "match this version, so it is not started",
+                 hint + "\n       fix the reason, then start Maya again (it compiles again)")
         fail(msg, hint)
 
     cmake = pick_cmake()
@@ -2138,6 +2274,15 @@ def hip_toolchain(pc: dict) -> tuple:
     env.setdefault("CCACHE_DIR", str(BUILD / ".ccache"))
     if WIN:
         env["HIP_DEVICE_LIB_PATH"] = str(clang.parent.parent / "amdgcn" / "bitcode")
+    elif (clang.parent.parent.parent == root / "lib" and re.fullmatch(r"llvm-\d+", clang.parent.parent.name)
+          and not (root / "amdgcn" / "bitcode").is_dir() and "HIP_DEVICE_LIB_PATH" not in env):
+        # Debian/Ubuntu's rocm-device-libs-<N>: the bitcode sits in the LLVM's clang resource folder
+        # (/usr/lib/llvm-<N>/lib/clang/<N>/amdgcn/bitcode), not under ROCM_PATH, where clang looks with ROCM_PATH set.
+        # Only for that layout's compiler (<root>/lib/llvm-<N>/bin): every other ROCm builds as before
+        found = sorted(clang.parent.parent.glob("lib/clang/*/amdgcn/bitcode"),
+                       key=lambda p: [int(x) for x in re.findall(r"\d+", p.parent.parent.name)])
+        if found:
+            env["HIP_DEVICE_LIB_PATH"] = str(found[-1])
     return root, clang, bindir, env
 
 
@@ -2186,8 +2331,14 @@ def compile_engine_hip(pc: dict, llama: Path, src: str, soft=False, target: str 
     if cmake_steps(conf, [cmake, "--build", str(BUILD), "--target", target, "-j", str(jobs)], env,
                    "build-saguaro-hip.bat", vcvars=vcvars):
         if soft:
-            warn("HIP rebuild failed; starting the previous engine")
-            return None
+            # (not the engine compiled before: it is from the older source, and this version's server and config
+            #  start it with settings it may not know or silently ignore - #805's start failed that way)
+            fail("Maya's AMD engine changed with this update, and compiling it failed: the engine from before does "
+                 "not match this version, so it is not started",
+                 "the compiler's reason is above - fix it, then start Maya again (it compiles again)" +
+                 ("; build-maya-hip.bat > build-hip.txt 2>&1 runs the same build alone and keeps its output"
+                  if WIN else "") +
+                 (" - " + VS2026_HIP_HINT if vs_2026(vcvars) else ""))
         fail("the HIP engine build failed", "see the compiler output above" +
              (" - " + VS2026_HIP_HINT if vs_2026(vcvars) else ""))
     if WIN:
@@ -2205,7 +2356,8 @@ def compile_engine_hip(pc: dict, llama: Path, src: str, soft=False, target: str 
 
 def compile_engine_metal(llama: Path, src: str, soft=False) -> dict | None:
     """`maya-metal` (GLM-5.3-Flash on ggml's Metal backend) in build-metal/; the commands are printed as they run.
-    soft: a failure warns and returns None (the engine compiled before keeps working) instead of stopping."""
+    soft: an update's rebuild (refresh_engine) - a failure stops with the reason and says that the engine from before
+    is not started (#805)."""
     cmake = pick_cmake()
     if cmake is None:
         fail("CMake 3.24 or newer is needed", f"pip installs one into .venv: run {ME} --setup")
@@ -2220,8 +2372,11 @@ def compile_engine_metal(llama: Path, src: str, soft=False) -> dict | None:
     if cmake_steps(conf, [cmake, "--build", str(BUILD), "--target", "maya-metal", "-j", str(os.cpu_count() or 4)],
                    dict(os.environ), ""):
         if soft:
-            warn("the Metal engine's rebuild failed; starting the previous engine")
-            return None
+            # (the engine from before would run under this version's server and config: not started - #805)
+            fail("Maya's Metal engine changed with this update, and compiling it failed: the engine from before does "
+                 "not match this version, so it is not started",
+                 "the compiler's reason is above (no compiler: xcode-select --install) - fix it, then start Maya "
+                 "again (it compiles again)")
         fail("the Metal engine build failed", "see the compiler output above (no compiler: xcode-select --install)")
     meta = {"backend": "metal", "src": src, "llama": str(llama), "version": maya_version(),
             "date": time.strftime("%Y-%m-%d %H:%M"), "targets": ["maya-metal"]}
@@ -2276,8 +2431,11 @@ def refresh_engine(cfg: dict) -> None:
         root = Path(meta.get("rocm") or "/opt/rocm")
         llama = Path(meta.get("llama") or ROOT / "third_party/llama.cpp")
         if hip_clang(root) is None or not (llama / "ggml/CMakeLists.txt").exists():
-            warn("HIP compiler or llama.cpp source is missing; starting the previous engine")
-            return
+            # (the engine from before would run under this version's server and config: not started - #805)
+            fail(f"Maya's AMD engine changed with this update, but the HIP compiler ({root}) or llama.cpp's source "
+                 f"({llama}) it was compiled with is gone: the engine from before does not match this version, so it "
+                 "is not started",
+                 f"{ME} --setup --rebuild finds the compiler and compiles the engine again")
         pc = {"rocm": str(root), "archs": meta["archs"],
               "gpus": [{"index": i} for i in cfg.get("gpu", [0])]}
         if WIN and meta.get("lib_dirs"):
@@ -2287,16 +2445,20 @@ def refresh_engine(cfg: dict) -> None:
     if cfg.get("backend") == "metal":
         llama = Path(meta.get("llama") or ROOT / "third_party/llama.cpp")
         if not (llama / "ggml/CMakeLists.txt").exists():
-            warn("llama.cpp's source is missing; starting the previous engine")
-            return
+            # (the engine from before would run under this version's server and config: not started - #805)
+            fail(f"Maya's Metal engine changed with this update, but llama.cpp's source ({llama}) it was compiled "
+                 "with is gone: the engine from before does not match this version, so it is not started",
+                 f"{ME} --setup --rebuild fetches it and compiles the engine again")
         compile_engine_metal(llama, src, soft=True)
         return
     say("  The engine's source changed since it was compiled (an update): compiling what changed ...")
     nvcc, llama = meta.get("nvcc"), Path(meta.get("llama") or ROOT / "third_party" / "llama.cpp")
     if not nvcc or not Path(nvcc).exists() or not (llama / "ggml" / "CMakeLists.txt").exists():
-        warn("the compiler or llama.cpp's source it was built with is gone: starting the engine compiled before "
-             f"({ME} --setup --rebuild compiles it again)")
-        return
+        # (the engine from before would run under this version's server and config: not started - #805)
+        fail(f"Maya's NVIDIA engine changed with this update, but the CUDA compiler ({nvcc}) or llama.cpp's source "
+             f"({llama}) it was compiled with is gone: the engine from before does not match this version, so it is "
+             "not started",
+             f"{ME} --setup --rebuild finds the compiler and compiles the engine again")
     gpu_ids = meta.get("gpu_ids") or (cfg.get("gpu") if isinstance(cfg.get("gpu"), list) else [0])
     compile_engine(meta["archs"], gpu_ids, nvcc, meta.get("host_compiler"), llama, src, soft=True, target=target)
 
@@ -2538,7 +2700,7 @@ def import_model(a, folder: str) -> int:
     inst = (read_json(have[0]).get("installer") or {}) if have else {}
     models = (Path(a.models_dir).expanduser().resolve() if a.models_dir else
               Path(inst["models_dir"]) if inst.get("models_dir") else
-              Path(inst["data_dir"]) / "models" if inst.get("data_dir") else ROOT.parent / "Maya-data" / "models")
+              Path(inst["data_dir"]) / "models" if inst.get("data_dir") else default_models_dir())
     cat = import_catalog(models)
     say(f"  Looking in {src} for Saguaro's model files (by size and sha256, not by name); they go to {models}")
     got = MI.find(src, cat, progress=say)
@@ -2805,7 +2967,7 @@ def offer_download(a, quant: str, d: Path, shards: list, m: dict | None = None) 
              f"accept its terms at https://huggingface.co/{m['repo']}, then set HF_TOKEN (a read token from "
              f"https://huggingface.co/settings/tokens) or run `hf auth login`, and run {ME} again")
     if not a.download_model and ask(f"  Download about {remaining:.0f} GB now with these commands? (y/n)",
-                                    ["y", "n"], "n", False) != "y":
+                                    ["y", "n"], "n", a.yes) != "y":   # (--yes takes the default: no)
         say()
         say(f"Nothing was downloaded. When the files are in place, run {ME} again "
             f"({ME} --download-model downloads them without asking).")
@@ -2922,11 +3084,37 @@ def pack_stale(pack: Path, shards: list):
     return f"{late[0]} was written after the pack was built" if late else None
 
 
-def stamp_pack(pack: Path, shards: list) -> None:
-    """The model files' sizes and times into the pack (PACK_SOURCES), for pack_stale."""
-    files = [{"name": s.name, "size": s.stat().st_size, "mtime_ns": s.stat().st_mtime_ns} for s in shards]
+GLM_PACK_FORMAT = 1           # tools/iq_pack.py's GLM pack (index v3, --compat-bf16): raised when the engine needs another
+GLM_PACK_INDEX = "# strata pack index v3 "
+
+
+def pack_foreign(pack: Path) -> str | None:
+    """Why the GLM pack in `pack` is not one this setup may take and write into, or None (none there, or this
+    setup's format).  A pack with no record of its model files (PACK_SOURCES) was built by an older Maya / Strata
+    install, one of another index version or a newer format by something else: it is left as it is."""
+    if not (pack / "index.txt").is_file():
+        return None
     try:
-        (pack / PACK_SOURCES).write_text(json.dumps({"files": files}, indent=1), encoding="utf-8")
+        with open(pack / "index.txt", encoding="utf-8") as f:
+            head = f.readline()
+    except (OSError, UnicodeDecodeError):
+        head = ""
+    if not head.startswith(GLM_PACK_INDEX):
+        return "its index is not Saguaro's format (" + (head.strip()[:60] or "unreadable") + ")"
+    if not (pack / PACK_SOURCES).is_file():
+        return "it has no record of the files it was built from (an older Maya or Strata install's)"
+    fmt = read_json(pack / PACK_SOURCES).get("glm_pack_format", GLM_PACK_FORMAT)
+    if not isinstance(fmt, int) or fmt != GLM_PACK_FORMAT:
+        return f"its format {fmt} is not this engine's ({GLM_PACK_FORMAT})"
+    return None
+
+
+def stamp_pack(pack: Path, shards: list, fmt: int | None = None) -> None:
+    """The model files' sizes and times into the pack (PACK_SOURCES), for pack_stale; fmt: a GLM pack's format."""
+    files = [{"name": s.name, "size": s.stat().st_size, "mtime_ns": s.stat().st_mtime_ns} for s in shards]
+    rec = {"files": files, **({"glm_pack_format": fmt} if fmt is not None else {})}
+    try:
+        (pack / PACK_SOURCES).write_text(json.dumps(rec, indent=1), encoding="utf-8")
     except OSError:
         pass
 
@@ -2993,14 +3181,21 @@ def pack_step(a, d: Path, shards: list, llama: Path, quant: str | None = None) -
         return pack
     # the engine finds the GGUF files at <pack>/.. (src/core/glm_model.cu, load_pack): the pack lives in their folder,
     # in pack/ - or pack-<model>/ when pack/ indexes another model of the same folder
+    # - and pack-saguaro-<model>/ beside a foreign one (pack_foreign: never reused, written into or built over)
     pack = d / "pack"
     if pack_source(pack) not in (None, shards[0].name):
         pack = d / f"pack-{quant_of(shards[0])}".lower()
-    if not a.repack and pack_source(pack) == shards[0].name and all((pack / f).exists() for f in PACK_FILES):
+    foreign = pack_foreign(pack)
+    if foreign is not None:
+        new = d / f"pack-saguaro-{quant_of(shards[0])}".lower()
+        warn(f"{pack} is left as it is: {foreign} - this setup's pack goes into {new}")
+        pack = new
+    if not a.repack and pack_source(pack) == shards[0].name and all((pack / f).exists() for f in PACK_FILES) and \
+            pack_foreign(pack) is None:
         why = pack_stale(pack, shards)
         if why is None:
-            if not (pack / PACK_SOURCES).exists():
-                stamp_pack(pack, shards)
+            if read_json(pack / PACK_SOURCES).get("glm_pack_format") is None:   # (an earlier Saguaro setup's)
+                stamp_pack(pack, shards, GLM_PACK_FORMAT)
             ok(f"pack already built: {pack}")
             base_template(pack)
             return pack
@@ -3022,7 +3217,7 @@ def pack_step(a, d: Path, shards: list, llama: Path, quant: str | None = None) -
     missing = [f for f in PACK_FILES if not (pack / f).exists()]
     if missing:
         fail(f"the pack builder did not write {pack / missing[0]}", "the reason is in the messages above")
-    stamp_pack(pack, shards)
+    stamp_pack(pack, shards, GLM_PACK_FORMAT)
     ok(f"pack: {pack}")
     base_template(pack)
     return pack
@@ -3212,7 +3407,20 @@ def compile_vision(pc, meta, llama: Path, src: str) -> bool:
     return VEXE.exists()
 
 
-def vision_step(a, pc, meta, llama: Path, d: Path, quant: str) -> dict | None:
+def vision_files_dir(a, m: dict, d: Path, models: Path | None = None, before: Path | None = None) -> Path:
+    """Where the vision encoder's two files are: --vision-dir; else the first of <model folder>/vision, the folder the
+    config before took them from, the model folder, the folder above it and the models folder that holds both (an
+    earlier install's flat layout); else <model folder>/vision, where they are downloaded to."""
+    if getattr(a, "vision_dir", None):
+        return Path(a.vision_dir).expanduser().resolve()
+    home = d / m["folder"]
+    for c in dict.fromkeys(x for x in (home, before, d, d.parent, models) if x is not None):
+        if all((c / m[k]).is_file() and (c / m[k]).stat().st_size > 0 for k in ("mmproj", "vocab")):
+            return c
+    return home
+
+
+def vision_step(a, pc, meta, llama: Path, d: Path, quant: str, models: Path | None = None) -> dict | None:
     """The config's "vision" entry - the image encoder and its files - or None (images off).  The server starts the
     encoder only while a request's new pictures are encoded, in GPU memory the model lends it, and measures on the
     first start how much that is on this GPU (serve/server.py, vision_footprint).  On a Mac (Metal: one memory, no
@@ -3228,9 +3436,14 @@ def vision_step(a, pc, meta, llama: Path, d: Path, quant: str) -> dict | None:
     if m is None:
         warn(f"no vision files are published for {quant}: the model reads text only")
         return None
-    vd = d / m["folder"]
+    before = read_json(ROOT / f"{glm_config_stem(quant)}{BACKEND_SUFFIX.get(pc.get('backend'), '')}.json").get("vision")
+    was = before.get("mmproj") if isinstance(before, dict) else None
+    vd = vision_files_dir(a, m, d, models, Path(was).parent if was else None)
     files = {k: vd / m[k] for k in ("mmproj", "vocab")}
     missing = [p for p in files.values() if not p.exists() or (m["sha256"].get(p.name) and p.stat().st_size == 0)]
+    if missing and getattr(a, "vision_dir", None):
+        fail(f"--vision-dir {a.vision_dir} lacks " + ", ".join(p.name for p in missing),
+             f"put {m['mmproj']} and {m['vocab']} there, or leave --vision-dir out to download them")
     if missing:
         repo, rev = m.get("repo", spec["repo"]), m.get("revision", spec["revision"])
         src_url = {p: hf_url(repo, rev, m["folder"], p.name) for p in missing}
@@ -3238,8 +3451,11 @@ def vision_step(a, pc, meta, llama: Path, d: Path, quant: str) -> dict | None:
             f"{repo} (folder {m['folder']}/), into {vd}:")
         for p in missing:
             say("    " + shell_join(["curl", "-L", "--fail", "-C", "-", "-o", str(p), src_url[p]]))
-        if not (a.download_model or a.yes) and ask("  Download them now? (y/n)", ["y", "n"], "y", False) != "y":
-            warn(f"not downloaded: the model reads text only ({ME} --setup asks again)")
+        # (--yes alone never downloads: it takes "n" here, as at the model's download)
+        if not a.download_model and ask("  Download them now? (y/n)", ["y", "n"], "n" if a.yes else "y",
+                                        a.yes) != "y":
+            warn(f"not downloaded: the model reads text only ({ME} --setup asks again; --download-model downloads "
+                 "them, --vision-dir <folder> takes them from a folder of yours)")
             return None
         for p in missing:
             fetch(src_url[p], p, m["sha256"].get(p.name))
@@ -3257,6 +3473,15 @@ def vision_step(a, pc, meta, llama: Path, d: Path, quant: str) -> dict | None:
 
 
 # ------------------------------------------------------------------------------------------------ 8. config + start
+BACKEND_SUFFIX = {"hip": "-hip", "metal": "-metal"}   # (a GLM config's name: maya-<quant><suffix>.json)
+
+
+def glm_config_stem(quant: str) -> str:
+    """maya-<quant>: a quant already named Maya-... is not prefixed twice (maya-s-v2-iq2_xxs, not maya-maya-...)."""
+    q = quant.lower()
+    return q if q.startswith("maya-") else f"maya-{q}"
+
+
 def parse_env(items) -> dict:
     env = {}
     for it in items:
@@ -3378,8 +3603,11 @@ def write_config(a, pc, meta, pack: Path, quant: str, ctx: int, models: Path, vi
         cfg["backend"] = "hip"
         # Leave space for the Linux desktop. The engine sizes its prompt chunk from
         # the available prompt-memory budget; forcing 256 here severely slows HIP.
-        hip_env = {"SAGUARO_GLM_RESERVE_MB": str(hip_reserve_mib(pc["gpus"])), "SAGUARO_GLM_RAM_HEADROOM_GB": "16"}
         gpus = pc["gpus"]
+        hip_env = {"SAGUARO_GLM_RESERVE_MB": str(hip_reserve_mib(gpus)), "SAGUARO_GLM_RAM_HEADROOM_GB": "16"}
+        if "SAGUARO_GLM_RESERVE_MB" not in env and getattr(a, "vram_reserve_mib", None) is None:
+            ok(f"VRAM kept free on each GPU: {hip_env['SAGUARO_GLM_RESERVE_MB']} MiB ({hip_reserve_why(gpus)}; "
+               "--env SAGUARO_GLM_RESERVE_MB=<MiB> changes it)")
         if len(gpus) == 1:
             hip_env["SAGUARO_GLM_SPLIT"] = "0"   # two or more cards: the engine picks the split (and drafts with MTP)
         # Larger prompt sub-batches feed the matrix cores much better (7900 XT: ~250 -> ~410 tok/s); they need
@@ -3393,7 +3621,7 @@ def write_config(a, pc, meta, pack: Path, quant: str, ctx: int, models: Path, vi
                 total_ram += sum(g.get("vram_gb", 0) for g in gpus)
             hip_env.update({"SAGUARO_GLM_PREFILL_SUB": "1024",
                             "SAGUARO_GLM_PREFILL_MB": "6144" if total_ram >= 96 else "4096"})
-        elif min(g.get("vram_gb", 0) for g in gpus) >= 20:
+        elif min(g.get("vram_gb", 0) for g in gpus) >= 19.5:   # (an RX 7900 XT reports 19.98)
             hip_env.update({"SAGUARO_GLM_PREFILL_SUB": "1024", "SAGUARO_GLM_PREFILL_MB": "4096"})
         # Pass every available version per architecture: the engine's existing header guard selects the
         # table matching each card and its installed hipBLASLt, or keeps plain hipBLAS when none matches.
@@ -3417,8 +3645,18 @@ def write_config(a, pc, meta, pack: Path, quant: str, ctx: int, models: Path, vi
         cfg["api_key"] = a.api_key
     if vision:
         cfg["vision"] = vision
-    suffix = {"hip": "-hip", "metal": "-metal"}.get(pc.get("backend"), "")
-    cfg_path = ROOT / f"maya-{quant.lower()}{suffix}.json"
+    suffix = BACKEND_SUFFIX.get(pc.get("backend"), "")
+    cfg_path = ROOT / f"{glm_config_stem(quant)}{suffix}.json"
+    legacy = ROOT / f"maya-{quant.lower()}{suffix}.json"   # (a "Maya-..." quant's name before: maya-maya-...)
+    moved = legacy != cfg_path and legacy.exists() and not cfg_path.exists()
+    if moved:
+        legacy.replace(cfg_path)
+        shared = legacy.with_suffix(".shared-settings.json")
+        if shared.exists() and not cfg_path.with_suffix(".shared-settings.json").exists():
+            shared.replace(cfg_path.with_suffix(".shared-settings.json"))
+        for ext in ("sh", "bat"):
+            (ROOT / f"run-{legacy.stem}.{ext}").unlink(missing_ok=True)
+        ok(f"{legacy.name} (this quant's config before) is now {cfg_path.name}")
     cfg["log"] = str(cfg_path.with_suffix(".log"))
     local = choice[1] if choice and choice[0] == "local" else None   # (choose_model's answer)
     if PROFILE.exists() and profile_fits(pack):
@@ -3622,7 +3860,7 @@ def keep_profile(old: list, new: list) -> list:
 
 
 # ------------------------------------------------------------------------------------------------ calibration
-CAL_STORE = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "project-maya" / "calibration.json"
+CAL_STORE = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "saguaro" / "calibration.json"
 
 
 def hardware_key(cfg: dict) -> str:
@@ -3642,10 +3880,14 @@ def hardware_key(cfg: dict) -> str:
 
 
 def load_calibrations() -> dict:
-    try:
-        return json.loads(CAL_STORE.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
+    """The saved calibrations; before the first save here, an earlier version's (~/.config/project-maya)."""
+    old = CAL_STORE.parent.parent / "project-maya" / CAL_STORE.name
+    for p in (CAL_STORE,) + ((old,) if CAL_STORE.parent.name == "saguaro" and not CAL_STORE.exists() else ()):
+        try:
+            return json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            pass
+    return {}
 
 
 def saved_calibration(cfg: dict, any_context=False) -> dict | None:
@@ -4348,8 +4590,11 @@ def server_command(cfg_path: Path, a) -> tuple:
         say("  Loading takes a few minutes: the engine reads the GGUF files; with less unified memory than the model the")
         say("  experts stream from the SSD while it answers (decode speed is SSD-bound) - the first answers are the slowest.")
     else:
-        say("  Loading takes a few minutes: the engine pins up to all but about 6 GB of the free RAM for its expert tier")
-        say("  (SAGUARO_GLM_RAM_HEADROOM_GB changes the 6) and warms its caches - the first answers are the slowest.")
+        head = (cfg.get("env") or {}).get("SAGUARO_GLM_RAM_HEADROOM_GB") or os.environ.get("SAGUARO_GLM_RAM_HEADROOM_GB")
+        head = head or "6"   # (the engine's own: src/core/glm_fast_path.cu, 16 on an APU)
+        say(f"  Loading takes a few minutes: the engine pins up to all but about {head} GB of the free RAM for its")
+        say(f"  expert tier (SAGUARO_GLM_RAM_HEADROOM_GB changes the {head}) and warms its caches - the first answers are")
+        say("  the slowest.")
     say("  Ctrl+C (or closing this terminal) stops it. Engine log: " + str(cfg.get("log", "")))
     say("  " + "-" * 100)
     return cmd, env, info
@@ -4908,10 +5153,10 @@ def set_up(a, prev: dict) -> Path | None:
     metal = pc["backend"] == "metal"
     step(2, "your choices")                            # 2
     # the models folder: --models-dir, else the one set up before (a config from before the option has its data
-    # folder, whose models/ held the downloads), else Maya-data/models next to this folder
+    # folder, whose models/ held the downloads), else Saguaro-data/models next to this folder
     models = (Path(a.models_dir).expanduser().resolve() if a.models_dir else
               Path(inst["models_dir"]) if inst.get("models_dir") else
-              Path(inst["data_dir"]) / "models" if inst.get("data_dir") else ROOT.parent / "Maya-data" / "models")
+              Path(inst["data_dir"]) / "models" if inst.get("data_dir") else default_models_dir())
     choice = choose_model(a, models, inst)
     if choice[0] == "download":
         ok(f"model: {Q.shown('glm', choice[1])}, in {download_dir(models, choice[1])}")
@@ -4920,7 +5165,7 @@ def set_up(a, prev: dict) -> Path | None:
     ctx = choose_context(a, prev_ctx, recommended=recommended_context(choice, pc))
     ok(f"context: {ctx} tokens")
     draft = choose_draft(a, pc, inst)
-    ok("drafting: " + ("a DFlash2 drafter (downloaded with the model)" if draft == "dflash2" else "the MTP block"))
+    ok("drafting: " + draft_note(a, pc, draft))
     llama = tools_step(a)                              # 3
     meta = build_step(a, pc, llama)                    # 4
     got = model_step(a, models, choice)                # 5
@@ -4929,7 +5174,7 @@ def set_up(a, prev: dict) -> Path | None:
     d, shards, quant = got
     dflash = drafter_step(models) if draft == "dflash2" else None
     pack = metal_tokenizer_step(a, d, shards, quant) if metal else pack_step(a, d, shards, llama, quant)       # 6
-    vision = vision_step(a, pc, meta, llama, d, quant)  # 7
+    vision = vision_step(a, pc, meta, llama, d, quant, models)  # 7
     cfg_path = write_config(a, pc, meta, pack, quant, ctx, models, vision, choice, dflash, shards[0] if metal else None)   # 8
     if dflash is not None and metal:                   # (the speed calibration is CUDA's: on a Mac the choice is yours)
         ok("DFlash2 drafts on this Mac, not measured against the MTP block (both are exact): "
@@ -5326,8 +5571,8 @@ def choose_ds4_quant(a, prev: dict) -> str:
         return ds4_abl_recommended(getattr(a, "backend", None) == "hip") if a.ds4_quant == DS4_ABL_ALIAS else a.ds4_quant
     hip = getattr(a, "backend", None) == "hip"
     maya = [k for k in DS4_MAYA if ds4_maya_published(k)]
-    # the EXL3 quants where they run: NVIDIA V100 or newer (compute capability 7.0+), and AMD (experimental, as GLM's
-    # EXL3 quants there) - a PC whose NVIDIA GPUs are all older is not offered them (nvidia-smi silent: offered, the
+    # the EXL3 quants where they run: NVIDIA V100 or newer (compute capability 7.0+), and AMD (as GLM's EXL3 quants
+    # there) - a PC whose NVIDIA GPUs are all older is not offered them (nvidia-smi silent: offered, the
     # PC check says)
     try:
         ccs = [] if hip else [int(g["arch"]) for g in S.gpus()]
@@ -5383,11 +5628,10 @@ def choose_ds4_quant(a, prev: dict) -> str:
     label = {k: (Q.shown("deepseek", k, gb.get(k)), about[k]) for k in DS4_QUANTS}
     pick = choose(f"Which files of {DS4}?", ["The GGUFs run on any NVIDIA GPU from Volta (V100) on and on AMD, whatever "
                                              "the memory: the experts that do not", "fit in VRAM are read from RAM and "
-                                             "the SSD. The EXL3 quants need a V100 or newer (AMD: experimental) and "
+                                             "the SSD. The EXL3 quants need a V100 or newer, or AMD, and "
                                              "~230 / ~280 GB of VRAM + RAM:"],
                   [(label[k][0], "recommended" if k == keys[0] else
-                    "abliterated: fits this PC" if k == abl else
-                    "experimental on AMD" if hip and k in DS4_EXL3 else None, label[k][1]) for k in keys],
+                    "abliterated: fits this PC" if k == abl else None, label[k][1]) for k in keys],
                   keys.index(default), a.yes or a.check)
     return keys[pick]
 
@@ -5868,8 +6112,7 @@ def write_config_ds4(a, pc: dict, meta: dict, pack: Path, ctx: int, models: Path
     elif hip and "--reserve-mib" not in args[:-1]:
         mib = hip_reserve_mib(pc["gpus"])
         set_arg(args, "--reserve-mib", mib)
-        ok(f"VRAM kept free on each GPU: {mib} MiB (the desktop and other programs on an AMD GPU allocate beside the "
-           "engine; --vram-reserve-mib changes it)")
+        ok(f"VRAM kept free on each GPU: {mib} MiB ({hip_reserve_why(pc['gpus'])}; --vram-reserve-mib changes it)")
     cfg = {"exe": str(DS4_EXE), "args": args, "cwd": str(ROOT), "tokenizer": str(pack / "tokenizer"),
            **({"backend": "hip"} if hip else {}),
            "model_name": DS4_ABL_MODEL_NAME if quant in DS4_ABL else DS4_MODEL_NAME,
@@ -5933,7 +6176,7 @@ def set_up_ds4(a, prev: dict) -> Path | None:
     ok(f"context: {ctx} tokens" + (" (recommended for this PC's memory)" if ctx == rec else "") +
        (f", for each of {par} conversations at once (--parallel)" if par > 1 else ""))
     models = (Path(a.models_dir).expanduser().resolve() if a.models_dir else
-              Path(inst["models_dir"]) if inst.get("models_dir") else ROOT.parent / "Maya-data" / "models")
+              Path(inst["models_dir"]) if inst.get("models_dir") else default_models_dir())
     d = ds4_dir(a, models, prev, quant)
     ok(f"model folder: {d}")
     llama = tools_step(a, PY_PACKAGES + ["tokenizers"])   # 3 (the pack's Engram token map normalizes with it)
@@ -6019,7 +6262,7 @@ def set_up_ds4(a, prev: dict) -> Path | None:
 def mm3_min_cc() -> int:
     """The GPUs maya-mm3's setup takes: DeepSeek's EXL3 reach (MM3_MIN_CC, V100 on) once MM3_ALL_PLATFORMS is on;
     until then RTX 30 / A100 or newer (MM3_MIN_CC_NOW), or - for testing, opt-in - from the compute capability
-    MAYA_MM3_MIN_CC names (70: V100 on - the engine's portable kernels before sm_80)."""
+    SAGUARO_MM3_MIN_CC names (70: V100 on - the engine's portable kernels before sm_80)."""
     if MM3_ALL_PLATFORMS:
         return MM3_MIN_CC
     v = os.environ.get(MM3_TEST_CC_ENV, "").strip()
@@ -6183,7 +6426,7 @@ def mm3_memory_gb(quant: str, own: Path | None = None) -> float:
 
 def choose_mm3_quant(a, prev: dict) -> str:
     """--mm3-quant, else the one set up before, else asked among those this PC runs: Saguaro's GGUF quants once published
-    and the EXL3 quant (on AMD: experimental) - by this PC's memory the one recommended."""
+    and the EXL3 quant - by this PC's memory the one recommended."""
     if getattr(a, "mm3_quant", None):
         return a.mm3_quant
     if mm3_own_dir(a, "exl3") is not None:            # --model-dir names an EXL3 folder of your own: its files are the quant
@@ -6203,15 +6446,15 @@ def choose_mm3_quant(a, prev: dict) -> str:
     if len(keys) == 1:
         return keys[0]
     gb = {k: mm3_models()[0]["download_gb"] if k == "exl3" else mm3_gguf_entry(k)["download_gb"] for k in keys}
-    about = {"exl3": f"Mia-AiLab's quant: pictures and DSpark drafting; ~{MM3_MEMORY_GB} GB of VRAM + RAM" + ("; experimental on AMD" if hip else ""),
+    about = {"exl3": f"Mia-AiLab's quant: pictures and DSpark drafting; ~{MM3_MEMORY_GB} GB of VRAM + RAM",
              "gguf-xs": "Saguaro's quant: experts in ~1.6 bits, the whole model in a 128 GB PC's memory",
              "gguf-s": "Saguaro's quant: experts in ~2.1 bits"}
     pics = "; pictures and DSpark drafting (their files, ~4 GB, beside it)"
     label = {k: (Q.shown("minimax", k, gb[k]), about[k] + ("" if k == "exl3" else pics)) for k in keys}
     order = sorted(keys, key=lambda k: k != rec)
     default = before if before in order else rec
-    pick = choose(f"Which files of {MM3}?", ["Saguaro's GGUF quants run on NVIDIA from V100 on and on AMD; the EXL3 quant "
-                                             "on NVIDIA (on AMD: experimental):"],
+    pick = choose(f"Which files of {MM3}?", ["Saguaro's GGUF quants and the EXL3 quant run on NVIDIA from V100 on and "
+                                             "on AMD:"],
                   [(label[k][0], "recommended" if k == rec else None, label[k][1]) for k in order],
                   order.index(default), a.yes or a.check)
     return order[pick]
@@ -6458,8 +6701,7 @@ def write_config_mm3(a, pc: dict, meta: dict, pack: Path, ctx: int, models: Path
     if hip and "--reserve-gb" not in args[:-1]:   # (as DeepSeek's on AMD: the desktop's allocations beside the engine)
         mib = hip_reserve_mib(pc["gpus"])
         set_arg(args, "--reserve-gb", f"{mib / 1024:.1f}")
-        ok(f"VRAM kept free on each GPU: {mib / 1024:.1f} GB (the desktop and other programs on an AMD GPU allocate "
-           "beside the engine)")
+        ok(f"VRAM kept free on each GPU: {mib / 1024:.1f} GB ({hip_reserve_why(pc['gpus'])})")
     cfg = {"exe": str(MM3_EXE), "args": args, "cwd": str(ROOT), "tokenizer": str(pack / "tokenizer"),
            **({"backend": "hip"} if hip else {}),
            "model_name": MM3_MODEL_NAME, "gpu": [g["index"] for g in pc["gpus"]],
@@ -6537,7 +6779,7 @@ def set_up_mm3(a, prev: dict) -> Path | None:
        (f", for each of {par} conversations at once (--parallel)" if par > 1 else ""))
     mm3_context_notes(ctx, vram, total, fmt, need, par, apu)
     models = (Path(a.models_dir).expanduser().resolve() if a.models_dir else
-              Path(inst["models_dir"]) if inst.get("models_dir") else ROOT.parent / "Maya-data" / "models")
+              Path(inst["models_dir"]) if inst.get("models_dir") else default_models_dir())
     d = mm3_dir(a, models, prev, quant)
     ok(f"model folder: {d}")
     llama = tools_step(a)                              # 3
@@ -6888,7 +7130,7 @@ def set_up_qwen(a, prev: dict) -> Path | None:
     ok(f"context: {ctx} tokens" + (" (recommended for this PC's VRAM)" if ctx == rec else "") +
        f"; its KV cache: {qwen_kv_gb(ctx):.1f} GB of VRAM")
     models = (Path(a.models_dir).expanduser().resolve() if a.models_dir else
-              Path(inst["models_dir"]) if inst.get("models_dir") else ROOT.parent / "Maya-data" / "models")
+              Path(inst["models_dir"]) if inst.get("models_dir") else default_models_dir())
     d = qwen_dir(a, models, prev)
     ok(f"model folder: {d}")
     llama = tools_step(a)                              # 3
@@ -6911,18 +7153,35 @@ def set_up_qwen(a, prev: dict) -> Path | None:
 
 
 # ------------------------------------------------------------------------------------------------ Hy4-Flash, Inkling 2 Mini
-def family_fit(cards: list, ram_gb: float) -> str | None:
-    """The model the setup recommends for a PC's NVIDIA cards when no model was set up before: Hy4-Flash where four
-    equal 16 GB cards and the memory for its Maya-S are there (the layout measured), Inkling 2 Mini on one or two
-    small cards (under 24 GB each); None elsewhere - the model question keeps its usual default."""
-    if not cards or WIN:
+def family_fit(cards: list, ram_gb: float, backend: str = "cuda") -> str | None:
+    """The model the setup recommends for a PC's cards when no model was set up before: Hy4-Flash where four equal
+    16 GB cards and the memory for its Maya-S are there (the layout measured), Inkling 2 Mini on one or two small
+    cards (under 24 GB each) - each only where the backend has its engine (family_unavailable); on AMD otherwise
+    GLM-5.3-Flash where its smallest quant fits in VRAM + RAM; None elsewhere - the model question keeps its usual
+    default."""
+    if not cards:
         return None
     small = all(float(g.get("vram_gb") or 0) < 24 for g in cards)
     vram = sum(float(g.get("vram_gb") or 0) for g in cards)
-    if small and len(cards) <= 2 and IK2F.usable(cards):
+    if not family_unavailable("ik2", backend) and small and (
+            IK2F.amd_unsupported(cards[:1]) is None and len(cards) == 1 if backend == "hip"
+            else len(cards) <= 2 and IK2F.usable(cards)):
         return "ik2"
-    if small and len(cards) >= 4 and HY4F.equal_group(cards) and vram + ram_gb >= 68:
+    if (not family_unavailable("hy4", backend) and small and len(cards) >= 4 and HY4F.equal_group(cards)
+            and vram + ram_gb >= 68):
         return "hy4"
+    if backend == "hip" and vram + ram_gb >= min(m["download_gb"] for m in MODELS.values()):
+        return "glm"
+    return None
+
+
+def family_unavailable(family: str, backend: str | None) -> str | None:
+    """Why this PC's backend (cuda / hip / metal) has no engine for a model, in one plain line, or None.  The model
+    list marks such a model and the setup stops on it before anything is built or downloaded."""
+    if family in NO_ENGINE.get(backend or "cuda", {}):
+        return NO_ENGINE[backend][family]
+    if WIN and family in ("hy4", "ik2"):
+        return f"{HY4_SHOWN if family == 'hy4' else IK2_SHOWN} runs on Linux only for now (not on Windows yet)"
     return None
 
 
@@ -6943,8 +7202,8 @@ def ik2_about() -> str:
     # (TODO: the T4 speeds are the previous engine's - our v1.1.72 port - until the v1.1.74-based one is measured)
     return (f"thinkingmachines' Inkling-2-Mini (26B, a looped MoE: 8 of 128 experts a token) on its own engine, in "
             f"unsloth's UD-Q4_K_XL GGUF ({gb}); Linux, NVIDIA V100 / Tesla T4 / RTX 20 and newer with 8 GB or more "
-            "(the experts a card does not hold stay in RAM), or an AMD RDNA 3 / 4 GPU that holds every expert. The "
-            "model for one or two 16 GB cards: one Tesla T4 writes about 42 tok/s (a 32K context, part of the experts "
+            "(the experts a card does not hold stay in RAM), or an AMD RDNA 3 / 4 GPU with 16 GB or more. The "
+            "model for one or two 16 GB cards: one Tesla T4 writes about 24 tok/s (a 32K context, part of the experts "
             "in RAM), two write about 52 tok/s with every expert in VRAM (a 131K context); tool calls, its thinking "
             "levels, pictures (its vision tower, 0.6 GB), one conversation at a time on two cards (several at once "
             "where one GPU holds every expert). Apache 2.0.")
@@ -7241,7 +7500,7 @@ def set_up_hy4(a, prev: dict) -> Path | None:
     ctx = choose_context(a, prev_ctx, HY4F.CONTEXTS, lay["context"])
     ok(f"context: {ctx} tokens" + (" (recommended for these cards)" if ctx == lay["context"] else ""))
     models = (Path(a.models_dir).expanduser().resolve() if a.models_dir else
-              Path(inst["models_dir"]) if inst.get("models_dir") else ROOT.parent / "Maya-data" / "models")
+              Path(inst["models_dir"]) if inst.get("models_dir") else default_models_dir())
     d = hy4_dir(a, models, prev, quant)
     ok(f"model folder: {d}")
     llama = tools_step(a)                              # 3
@@ -7529,12 +7788,12 @@ def set_up_ik2(a, prev: dict) -> Path | None:
     prev_ctx = int(prev_args[prev_args.index("--max-context") + 1]) if "--max-context" in prev_args[:-1] else None
     pc = check_pc(a, "ik2")                            # 1
     models = (Path(a.models_dir).expanduser().resolve() if a.models_dir else
-              Path(inst["models_dir"]) if inst.get("models_dir") else ROOT.parent / "Maya-data" / "models")
+              Path(inst["models_dir"]) if inst.get("models_dir") else default_models_dir())
     d = ik2_dir(a, models, prev)
     local = ik2_local_gguf(a, d)
     ex = (IK2F.experts_gib_of(local) if local else None) or IK2F.EXPERTS_GIB
     amd = pc.get("backend") == "hip"
-    if amd:   # (no offload path on AMD: every expert of the file in the GPU's memory)
+    if amd:   # (every expert in the GPU's memory where the file fits, else the offload path)
         g = pc["gpus"][0]
         room = ik2_amd_room(g)
         why = IK2F.unsupported("hip", WIN, len(pc["gpus"]), [dict(g, vram_gb=room)], experts_gib=ex)
@@ -7553,8 +7812,7 @@ def set_up_ik2(a, prev: dict) -> Path | None:
     ok(f"model: {local.name + f' (your own file, {ex:.1f} GB of experts)' if local else Q.shown('ik2', Q.IK2_QUANT, m['download_gb'])}"
        " - thinkingmachines' Inkling-2-Mini (Apache 2.0)")
     if amd:
-        warn(f"{IK2_SHOWN} on AMD is experimental here: its HIP build is upstream Maya's, not yet run by Saguaro on an "
-             "AMD card - tell us how it goes")
+        warn(f"{IK2_SHOWN} on AMD is experimental here: checked on an RX 9070 XT (gfx1201) only - tell us how it goes")
     ok(f"layout: {lay['said']}" + (f" - {IK2F.speeds(lay)}" if IK2F.speeds(lay) else
                                    " (not measured on this kind of card here: tell us your speed)"))
     ctx = choose_context(a, prev_ctx if prev.get("gpu") and len(prev["gpu"]) == len(pc["gpus"]) else None,
@@ -7611,6 +7869,13 @@ def set_up_and_serve(a, prev: dict) -> tuple | None:
 # ------------------------------------------------------------------------------------------------ main
 def maya_version() -> str:
     return (HERE / "VERSION").read_text(encoding="utf-8").strip() if (HERE / "VERSION").exists() else "?"
+
+
+def saguaro_version(version: str) -> str:
+    """What the banner calls this version: the git commit of a clone (Saguaro has no releases of its own yet), else
+    the VERSION line it was built from."""
+    r = S.out(["git", "-C", str(HERE), "log", "-1", "--format=%h %cs"]).strip() if (HERE / ".git").exists() else ""
+    return f"{r.split()[0]} ({r.split()[1]})" if len(r.split()) == 2 else f"v{version}"
 
 
 def model_option(a) -> str | None:
@@ -7677,7 +7942,7 @@ def main() -> int:
     stop_signals()            # (SIGTERM / SIGHUP stop it as Ctrl+C does: the server it runs with it)
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--backend", choices=["cuda", "hip", "metal"],
-                    help="GPU backend (HIP: experimental gfx1100/gfx1201/gfx1151 on Linux and Windows; Metal: experimental, "
+                    help="GPU backend (HIP: gfx1100/gfx1201/gfx1151 on Linux and Windows; Metal: experimental, "
                          "Apple Silicon Macs, text only; the default on a Mac)")
     ap.add_argument("--setup", action="store_true", help="set up again instead of starting the installed model")
     ap.add_argument("--check", action="store_true", help="only check this PC and exit")
@@ -7715,7 +7980,7 @@ def main() -> int:
                          "(dense weights Q8_0: less VRAM; chosen by hand only, not in the setup's list), gguf-iq1_s / gguf-iq1_m / "
                          "gguf-iq2_xxs / gguf-q2_k_xl / gguf-iq3_xxs / gguf-iq3_s / gguf-q3_k_xl = its smaller UD quants (experts "
                          "1.6-3.5 bits; chosen by hand too), exl3 = LibertAIDAI's EXL3 quant at 2.9 bits, exl3-3.5 = its "
-                         "3.5-bit quant (closer to the original; ~280 GB of VRAM + RAM; both V100 or newer, AMD experimental); "
+                         "3.5-bit quant (closer to the original; ~280 GB of VRAM + RAM; both V100 or newer, or AMD); "
                          "abliterated-128g / abliterated-256g = orcarouter's abliterated model (its refusals removed) "
                          "as its Mix-128G / Mix-256G GGUF (~114 / ~236 GB of VRAM + RAM, with Saguaro's Q6_K n-gram "
                          "tables; a gated repo: HF_TOKEN or `hf auth login`), abliterated = the one that fits this "
@@ -7736,12 +8001,16 @@ def main() -> int:
                          "and one AMD Ryzen AI Max APU)")
     ap.add_argument("--no-vision", action="store_true", help="text only: no image encoder (saves its build and "
                                                              "its 1.1 GB of files)")
+    ap.add_argument("--vision-dir", metavar="FOLDER",
+                    help="GLM-5.3-Flash: the folder with the vision encoder's files (mmproj-GLM-5.3-Flash-F16.gguf, "
+                         "GLM-5.3-Flash-vocab.gguf) when they are not in <model folder>/vision, the model folder or "
+                         "the folder above it")
     ap.add_argument("--gguf-dir", help="use GLM-5.3-Flash GGUF files you already have: the folder with all of them, "
                                        "or the .gguf file (the first one of a split model) when the folder holds "
                                        "several models; it must be writable - the pack is written inside it "
                                        "(without this option the setup lists the ones it finds in ~/models*)")
     ap.add_argument("--models-dir", help="where downloaded models go, each in a folder named after it, e.g. "
-                                         "<DIR>/Maya-L/ (default: Maya-data/models next to this folder); use "
+                                         "<DIR>/Maya-L/ (default: Saguaro-data/models next to this folder); use "
                                          "a fast NVMe SSD with ~100 GB free")
     ap.add_argument("--gpu", type=int, help="run on this one GPU (CUDA: nvidia-smi; HIP: KFD topology order, on Windows hipInfo's)")
     ap.add_argument("--gpus", help=f"split the model's layers across these GPUs (up to {MAX_GPUS}), e.g. 0,1 or "
@@ -7811,7 +8080,8 @@ def main() -> int:
         sys.stdout.flush()
         os.execve("/bin/sh", ["/bin/sh", str(HERE / "saguaro.sh"), *sys.argv[1:]], dict(os.environ, SAGUARO_SH="1"))
     version = maya_version()
-    say(f"Saguaro v{version} - GLM-5.3-Flash, {DS4} or {MM3} on your own GPU(s).")
+    say(f"Saguaro {saguaro_version(version)} - {', '.join(FAMILY_SHOWN[f] for f in FAMILIES[:-1])} or "
+        f"{FAMILY_SHOWN[FAMILIES[-1]]} on your own GPU(s).")
     if a.report:
         return report(version, a.backend, a.config)
     if a.import_model:
@@ -7832,8 +8102,7 @@ def main() -> int:
     else:
         # nothing set up yet (START-SAGUARO.bat / ./saguaro.sh without --backend): Metal on a Mac with Apple Silicon, HIP on
         # a PC with a supported AMD GPU and no NVIDIA one (e.g. Strix Halo)
-        a.backend = ("metal" if apple_silicon() else
-                     "hip" if not S.gpus() and any(g["arch"] in HIP_ARCHS for g in S.amd_gpus()) else "cuda")
+        a.backend = first_run_backend()
     setting_up = a.setup or a.check or a.gguf_dir or a.model or a.model_dir or a.rebuild or a.repack or \
         a.download_model
     if have and not setting_up and (a.calibrate or a.speed_calibration or not a.no_start):
@@ -7903,11 +8172,18 @@ def main() -> int:
                 (lay["said"] + (f": {HY4F.speeds(lay, quant)}" if HY4F.speeds(lay, quant) else " (not measured)")
                  if lay["fits"] else f"it does not fit: about {lay['need_gib']:.0f} GB of VRAM are needed beside the "
                                      f"experts; {IK2_SHOWN} is the model for one or two 16 GB cards") + ".")
+        if fam == "glm" and a.backend != "metal":
+            for line in glm_fit_lines(pc["gpus"]):
+                say(line)
         if a.backend == "metal":
             say(f"This Mac can run Saguaro on Metal (experimental). Run {ME} without --check to set it up.")
         elif a.backend == "hip":
             pick = (f"--gpus {','.join(str(g['index']) for g in pc['gpus'])}" if len(pc["gpus"]) > 1
                     else f"--gpu {pc['gpus'][0]['index']}")
+            say("Models with an engine for AMD here: " +
+                ", ".join(FAMILY_SHOWN[f] for f in FAMILIES if not family_unavailable(f, "hip")) +
+                "; not yet: " + ", ".join(FAMILY_SHOWN[f] for f in FAMILIES if family_unavailable(f, "hip")) +
+                " (docs/AMD_SAGUARO.md).")
             say(f"HIP prerequisites found. Run {ME} --backend hip {pick} to try the experimental port.")
         else:
             say(f"This PC can run Saguaro. Run {ME} without --check to set it up.")

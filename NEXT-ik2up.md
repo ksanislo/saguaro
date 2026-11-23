@@ -102,3 +102,46 @@ Card runs only through /data/llm/bench/night-queue/queue.txt (IK2_NO_CLAIM=1, ca
   never clones llama.cpp over that link). Runner: /storage/llm/saguaro/amd.sh LABEL MODEL CHUNK [K=V...]
   (serve_check with vision-glm from /opt/llm/saguaro/build-vision, then bench 300 tokens at ~0 / 8K + 8K read).
   Plan: quant resident (chunk 1024, SAGUARO_IK2_RESERVE_MB=1024); UD offload on HIP (SAGUARO_IK2_OFF=1, WARM).
+
+## mortar results (RX 9070 XT 16 GB gfx1201, ROCm 7.1, HIP build of this branch)
+- (b) T4 quant (NVFP4/IQ3_XXS, 11.4 GiB experts), ctx 32768, chunk 1024, SAGUARO_IK2_RESERVE_MB=1024:
+  RESIDENT (3072 of 3072 experts, path=resident), load 1 s (page cache), VRAM 15.6-15.9 GiB of 15.9.
+  decode 300 tok: 81.7 tok/s at ~50 deep, 73.2 at 8K; read 8K 1138 tok/s (7.07 s); first token 0.42 s (50 tok).
+  serve_check (server.py, no pictures yet - mmproj downloading): 20/20 PASS (chat, thinking, tools, stops, Monitor).
+  ik2_kernels_test: 349 ok, 1 FAIL (moe_combine_conv bit-equality vs moe_combine_f32 + conv4_res) - upstream kernels.
+
+## INTERIM STATUS (16:5x MST; I cannot reach the coordinator by message - this file is the status)
+- Built: mangonel build-ik2up (CUDA sm_75); mortar /storage/llm/saguaro/ik2-up/build-hip-ik2 (HIP gfx1201, branch
+  test/ik2-up via git bundle over ssh - the GitHub push was denied by the permission system).
+- Files on mortar /opt/llm/models: UD-Q4_K_XL + mmproj (sha256 match upstream's), T4 quant (sha256 = mangonel's).
+- Running now on mortar: UD-Q4_K_XL offload path on HIP (SAGUARO_IK2_OFF=1 + WARM) serve_check with pictures + bench,
+  then the quant again with pictures. mangonel queue: runs/r6/r6.sh (2-card + quant) at the end of queue.txt.
+- First numbers: mortar quant resident 81.7 / 73.2 tok/s decode (short / 8K), 8K read 1138 tok/s, 20/20 serve checks;
+  mangonel 1 T4 UD offload 23.7 / 25.8 / 24.1 vs our port 42.0 / 38.5 / 35.1 (decode -40 %), reads ~equal;
+  2 T4s PASS after a device-current fix (50 tok/s short decode).
+- (a) UD-Q4_K_XL on the OFFLOAD PATH on HIP (SAGUARO_IK2_OFF=1, WARM seed profile, chunk 2048, ctx 32768): WORKS.
+  2348 of 3072 experts in VRAM (10.6 GiB), VRAM 15.4-15.6 GiB; serve_check 22/22 PASS incl. pictures (red, scene).
+  decode 300 tok: 58.2 tok/s short, 59.4 at 8K; read 8K 1718 tok/s (4.69 s); first token 0.49 s.
+  Lane (Zen 5 AVX-512): 61 us/expert on the CPU vs 87 us over the bus, but decode mode A (no lane) was faster.
+
+## r6 (mangonel, 15:13-15:32 PST, build runs/r5/bin) - all functional checks PASS
+- quant 1 T4 resident (chunk 1024, RESERVE 1024): serve_check 24/24; decode 44.9 / 41.5 / 37.0 (ours 44.5 / 41.2 / 36.9),
+  read 8K / 30K 515 / 429 (ours 569 / 550). --parallel 2 at ctx 16384: PAR CHECK PASSED - both answers = solo, pair
+  47.7 tok/s vs 41.9 solo.
+- 2 T4s ctx 131072 chunk 8192: serve_check 24/24 (pictures incl.); conv_check PASSED; --parallel 2 not taken (split).
+  bench 2 loads each rotated: new decode 52.6 / 46.1 (~0 / 16K), read 16K 834 tok/s, first token 1.07 s;
+  ours 51.7 / 45.4, read 1130, first token 0.66 s. => decode parity (+1-2 %), 16K read -26 % (prompts run on GPU 0
+  alone, GPU 1's experts streamed from host).
+- KL 2 cards: new tc vs scalar 7.69e-4 / 99.00 % (bit-identical to 1 card: the split gives one GPU's answers);
+  ours fast0 vs new tc 1.30e-3 / 98.40 %; ours fast vs new tc 9.36e-4 / 98.80 %.
+
+## Final state (2026-11-22 ~17:30 MST)
+- saguaro/ik2-up contains saguaro/qfn-vram de49529d1 (merged; conflicts resolved: relative configs, one-T4 config
+  dropped as main did, Inkling off NO_ENGINE for hip, recommended for one 16-23 GB RDNA card). Unit tests: the 8 asked
+  modules + test_setup_amd / test_setup_dash / test_hip_compat / test_hip_archs / test_tokenizer_inkling: OK.
+- CUDA build-ik2up clean; HIP build on mortar clean; merged HIP binary: serve_check 22/22 incl. pictures, offload by default.
+- AMD defaults now: offload path when the file does not fit (engine + setup), resident otherwise; 16 GB minimum.
+- Before merging to main: drop NEXT-ik2up.md from the tree (main keeps agent notes out of the repo).
+- Open: 1-T4 decode -40 % vs our port (static offload tier; promotion of hot misses would be the fix); 2-T4 prompt read
+  -26 % (prompts on GPU 0 alone); --parallel not taken on two GPUs (upstream's rule); AMD ik2_kernels_test
+  moe_combine_conv bit-equality FAIL (upstream kernel, gfx1201); drafting on AMD unchecked; --plan of our port gone.

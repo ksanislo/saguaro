@@ -34,6 +34,7 @@ ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_BASE = "http://127.0.0.1:8080"
 PROMPT = "Reply with exactly one short sentence."
 FINISH_OK = ("stop", "length", "tool_calls", "end_turn", "content_filter")
+MAX_TOKENS = 400   # a thinking model (QFN) spends a small budget on its reasoning before any answer text
 # the engine's protocol lines, verbatim, if they ever leak into an answer's text (the deploy's symptom: a chat that
 # shows engine bookkeeping - serve/server.py's parser dropped a line, or a new engine print landed on the line stream)
 LEAKS = (("T 0 ", re.compile(r"T \d ")), ("VRAM dev=", re.compile(r"VRAM dev=")),
@@ -134,7 +135,7 @@ def _headers(key: str | None, ct: bool = False) -> dict:
 
 
 def check_model(mid: str, base: str, key: str | None, timeout: float = 600.0,
-                opener=urllib.request.urlopen, prompt: str = PROMPT, max_tokens: int = 24) -> tuple[bool, list[str]]:
+                opener=urllib.request.urlopen, prompt: str = PROMPT, max_tokens: int = MAX_TOKENS) -> tuple[bool, list[str]]:
     """One profile: streamed chat + api/context.  Returns (ok, reasons) - reasons only for what failed."""
     base = base.rstrip("/")
     reasons: list[str] = []
@@ -175,7 +176,8 @@ def check_model(mid: str, base: str, key: str | None, timeout: float = 600.0,
     leaks = sorted(set(find_leaks(text)) | set(find_leaks(think)))
     if leaks:
         reasons.append(f"engine protocol leaked into the answer: {', '.join(leaks)}")
-    if not text.strip():
+    # (a reply cut at max_tokens while still thinking is sane: reasoning text, finish_reason "length")
+    if not text.strip() and not (think.strip() and finishes and finishes[-1] == "length"):
         reasons.append("empty answer text")
     if not finishes:
         reasons.append("no finish_reason in the stream")
@@ -205,7 +207,7 @@ def main(argv=None) -> int:
     ap.add_argument("--key-file", help="file holding the llama-swap API key (never printed)")
     ap.add_argument("--timeout", type=float, default=600.0, help="seconds allowed per model, load included (default 600)")
     ap.add_argument("--prompt", default=PROMPT)
-    ap.add_argument("--max-tokens", type=int, default=24)
+    ap.add_argument("--max-tokens", type=int, default=MAX_TOKENS)
     ap.add_argument("--list", action="store_true", help="print the default model ids and exit")
     args = ap.parse_args(argv)
 

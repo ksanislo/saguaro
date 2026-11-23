@@ -1059,10 +1059,12 @@ class SeqEngine:
 
     def __init__(self, tok, *seqs):
         self.tok, self.max_context, self.prompts = tok, 1 << 20, []
+        self.samplings = []
         self.seqs = seqs
 
     def generate(self, ids, max_new, sampling, cancel, embeddings=None):
         self.prompts.append(list(ids))
+        self.samplings.append(dict(sampling or {}))
         seq = self.seqs[min(len(self.prompts), len(self.seqs)) - 1]
         for t in (seq + self.tok.encode(IM_END, parse_special=True))[:max_new]:
             yield t
@@ -1135,6 +1137,11 @@ class ThinkingMarkers(unittest.TestCase):
         said = svc.tok.decode(eng.prompts[1][len(eng.prompts[0]):])
         self.assertIn(THINK_NOTE, said)                 # (the server's note: go on with the thinking)
         self.assertIn(LG.keep_steer(1), said)
+        # the continuation is marked: the QFN engine keeps no checkpoint inside the reply (cont=1)
+        self.assertEqual([bool(x.get("_cont")) for x in eng.samplings], [False, True])
+        from serve.qfn_engine import StrataEngine
+        self.assertIn(" cont=1", StrataEngine.sampling_keys(eng.samplings[1]))
+        self.assertNotIn("cont=", StrataEngine.sampling_keys(eng.samplings[0]))
 
     def test_the_resume_is_capped(self):
         tok = DeepTok()

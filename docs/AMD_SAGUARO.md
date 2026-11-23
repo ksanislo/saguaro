@@ -1,6 +1,24 @@
 # Experimental Saguaro on RX 7900 XT / XTX, R9700 / RX 9070 and Strix Halo / Gorgon Halo
 
-This branch adds a Linux HIP build and installer path for Saguaro's GLM-5.3-Flash
+## What runs on AMD
+
+The state of this version (keep this table, the setup's `NO_ENGINE` list in `saguaro.py` and the README in step):
+
+| Model | Engine (CMake target) | On AMD (HIP) |
+| --- | --- | --- |
+| GLM-5.3-Flash | `saguaro-glm` (`maya`) | builds and runs (experimental); its GPU self-tests pass on an RX 9070 XT (gfx1201, ROCm 7.1). The quant that fits a 16 GB card + 96 GB of RAM is Maya-XS (73 GB); the setup recommends the largest one that fits VRAM + RAM |
+| Qwen-3.8-Flash-Next (CYBER-FROST) | `saguaro-glm` (`maya`) | builds (the same engine as GLM); about 84 GB of VRAM + RAM |
+| DeepSeek-V4.1-Flash-1017 | `saguaro-ds4` (`maya-ds4`) | compiles for HIP (gfx1201 checked); not yet run on an AMD GPU |
+| MiniMax-M3.1-Flash | `saguaro-mm3` (`maya-mm3`) | compiles for HIP (gfx1201 checked); not yet run on an AMD GPU |
+| Hy4-Flash | `saguaro-hy4` (`maya-hy4`) | not run on an AMD GPU yet: the setup does not offer it on AMD |
+| Inkling 2 Mini | `saguaro-ik2` | builds and runs (experimental) on an RX 9070 XT (gfx1201, ROCm 7.1): UD-Q4_K_XL on the offload path about 59 tok/s, every serve check incl. pictures passes; the setup recommends it for one 16-23 GB RDNA 3 / 4 card |
+
+`./saguaro.sh --check` on an AMD PC lists the same. Report how a model runs on your card in an
+[issue](https://github.com/ksanislo/saguaro/issues).
+
+## GLM-5.3-Flash on AMD
+
+This is a Linux and Windows HIP build and installer path for Saguaro's GLM-5.3-Flash
 engine on `gfx1100`, `gfx1201` and `gfx1151` (Strix Halo, Gorgon Halo). It uses one GPU, or two supported GPUs that split the
 layers (see [Two GPUs](#two-gpus)), and reads pictures too: setup builds the image encoder for the GPU
 (ggml's HIP backend), started only while a picture is encoded, as on NVIDIA; `--no-vision` leaves it out. The
@@ -13,6 +31,13 @@ outside `/opt/rocm`. Versioned LLVM slots, as Gentoo's
 `<root>/lib/llvm/22/bin/clang++`, are accepted too. Everything Saguaro downloads
 goes into the project or its model-data folder; setup does not install system
 packages.
+
+A distribution's own ROCm packages under `/usr` work too, including Debian's and Ubuntu's multiarch layout
+(`/usr/lib/x86_64-linux-gnu/libhipblas.so`, the compiler in `/usr/lib/llvm-<N>/bin`, the device bitcode in
+`/usr/lib/llvm-<N>/lib/clang/<N>/amdgcn/bitcode`). A ROCm older than 7 (Debian's 6.4, hipBLAS 2.x) is untested and
+refused by default; `SAGUARO_HIP_ALLOW_ROCM6=1` lets setup go on with a warning. The build then turns on hipBLAS 2's
+`HIPBLAS_V2` API and skips `hipblasSetWorkspace` (absent before hipBLAS 3). Measured that way on Debian sid
+(ROCm 6.4.3, hipBLAS 2.4) with an MI50 + MI100 layer split and a CPU without AVX2 - see the pull request.
 
 ```sh
 ./saguaro.sh --backend hip --gpu 0 --check
@@ -194,7 +219,7 @@ Measured on a 128 GB Strix Halo box with ROCm 7.2.2 and manually tuned settings:
 ~210 tok/s for 3-4K-token prompts and ~17.8 tok/s answers, with every expert
 in the GPU pool (288 slots/layer, 12,096 total, ~99.9% hits). These measurements
 precede the automatic sizing change; verify its startup log and repeated
-prompt/answer rounds on the real box. See [tracking issue #6](https://github.com/mw00/project-maya/issues/6).
+prompt/answer rounds on the real box. See Project Maya's [tracking issue #6](https://github.com/mw00/project-maya/issues/6).
 
 **Answers and prompts (v1.1.10).** Where every expert sits in the GPU pool, the APUs answer faster with the same
 text (`SAGUARO_GLM_MTP_DECODE`, on by default on `gfx115x` only). On the Gorgon Halo of [Windows](#windows) (Radeon
@@ -205,13 +230,17 @@ text (`SAGUARO_GLM_MTP_DECODE`, on by default on `gfx115x` only). On the Gorgon 
 ## Inkling 2 Mini (experimental)
 
 `./saguaro.sh --setup --backend hip --model inkling-2-mini` (Linux). Its engine (`saguaro-ik2`, upstream Maya v1.1.74's
-HIP build) keeps every expert in the GPU's memory - AMD has no offload path - so the card must hold the dense weights
-and the file's experts: an RDNA 3 / 3.5 / 4 GPU (gfx11 / gfx12) with 24 GB for unsloth's UD-Q4_K_XL, or a Strix Halo /
-Gorgon Halo (its memory is the RAM, less max(8 GB, 10%)). A 16 GB card (RX 9070 XT, gfx1201) runs a quant whose experts
-fit - our one-T4 quant (11.45 GiB of experts): `--model-dir` with that GGUF; the setup reads the experts' size from the
-file and writes the FP8 cache. Upstream ran it on a Radeon 8065S (Gorgon Halo, ROCm 7.1); Saguaro has not run it on
-AMD yet. To verify on an RX 9070 XT: the HIP build, the engine's start rule for a 16 GB card, the IQ3_XXS / IQ4_XS
-experts on the RDNA resident path, drafting and pictures. [INKLING2.md](INKLING2.md) has the engine's AMD paths.
+with Saguaro's additions) runs on an RDNA 3 / 3.5 / 4 GPU (gfx11 / gfx12) of 16 GB or more: every expert in VRAM where
+the file fits, else the offload path as on NVIDIA (the most-used experts in VRAM, the others pinned in RAM and fetched
+by the GPU). Checked on an RX 9070 XT (16 GB, gfx1201, ROCm 7.1, PCIe 5) with a Ryzen 7 9800X3D, 32K context:
+
+| | decode at ~50 / 8K / 30K tokens deep | 8K prompt read |
+| --- | ---: | ---: |
+| unsloth's UD-Q4_K_XL (offload path, 2,348 of 3,072 experts in VRAM) | 59.8 / 59.5 / 53.0 tok/s | 1,697 tok/s |
+| our one-T4 quant (every expert in VRAM; experimental, lower quality: KL 0.012 vs UD-Q4_K_XL) | 83.3 / 73.3 / 66.7 tok/s | 1,148 tok/s |
+
+Chat, thinking, tools, stops, pictures, the Monitor and kept conversations pass on both. Not checked on AMD yet:
+drafting, two AMD GPUs, a Strix / Gorgon Halo APU. [INKLING2.md](INKLING2.md) has the engine's AMD paths.
 
 ## Instinct MI300X / MI325X
 

@@ -41,11 +41,11 @@ TWO_ROOM_GIB = 0.3                                  # the second card's room bes
 ROOM_MB = 1024                                      # SAGUARO_IK2_ROOM_MB: the offload path's room (the engine's default)
 THREADS = 8
 TWO_CONTEXT = 131072                                # two 16 GB cards: every expert in VRAM at this context (measured)
-LAYOUT_ENV = {"SAGUARO_IK2_ROOM_MB", "SAGUARO_IK2_PIN", "SAGUARO_IK2_PIN_KEEP", "SAGUARO_IK2_WARM"}   # (a layout's keys;
+AMD_MIN_GB = 15.0   # (a 16 GB AMD card as the driver reports it)
+LAYOUT_ENV = {"SAGUARO_IK2_ROOM_MB", "SAGUARO_IK2_PIN", "SAGUARO_IK2_PIN_KEEP", "SAGUARO_IK2_WARM", "SAGUARO_IK2_RESERVE_MB"}   # (a layout's keys;
                                                     # PIN / PIN_KEEP: the previous engine's, dropped from old configs)
-# (decode tok/s, read tok/s) on Tesla T4s, GPU clocks not pinned, ~1K tokens deep, read 8-16K - measured on the
-# PREVIOUS engine (our v1.1.72 port, NEXT-ik2.md 2026-11-22).  TODO: the v1.1.74-based engine's figures.
-MEASURED = {1: (42, 640), 2: (52, 1130)}
+# (decode tok/s, read tok/s) on Tesla T4s, GPU clocks not pinned, ~50 tokens deep, read 8K / 16K (2026-11-22)
+MEASURED = {1: (24, 700), 2: (52, 830)}
 
 
 def experts_gib_of(path) -> float | None:
@@ -72,8 +72,7 @@ def plan(vram_gb: float, ctx: int, kv: str = DEFAULT_KV, hip: bool = False, expe
     "offload", "tier_gib": the experts' GiB the card keeps, "ram_gib": the engine's RAM, "kv_streamed": the cache of
     some full-attention visits in RAM, "kv_ram_gib"}.  Where the model and the cache do not fit together the experts
     leave the card first (the offload path, the cache in VRAM); the cache streams only where it alone does not fit
-    beside the dense weights and a tier of OFF_TIER_MIN_GIB.  AMD (hip: no offload path): every expert stays, the
-    cache streams.  A card whose VRAM is not known (0): resident - the engine measures at its start."""
+    beside the dense weights and a tier of OFF_TIER_MIN_GIB - on AMD as on NVIDIA (hip: kept for the callers).  A card whose VRAM is not known (0): resident - the engine measures at its start."""
     ex = float(experts_gib)
     if not vram_gb:
         return {"resident": True, "need_gib": None, "layout": "resident", "tier_gib": ex, "ram_gib": HOST_GIB,
@@ -88,11 +87,6 @@ def plan(vram_gb: float, ctx: int, kv: str = DEFAULT_KV, hip: bool = False, expe
     base = DENSE_GIB + ex + max(0, ctx - 262144) * SCRATCH_TOKEN_BYTES / GIB
     ring = vis * RING_OF_VISIT
     n_res = min(FULL_VISITS, int((room - base - ring) // vis)) if room >= base + ring + vis else -1
-    if hip and n_res >= 1:
-        kv_ram = round((FULL_VISITS - n_res + 1) * vis, 1)
-        return {"resident": True, "need_gib": round(base + n_res * vis + ring, 1), "layout": "resident",
-                "tier_gib": ex, "ram_gib": round(HOST_GIB + kv_ram + STREAM_HOST_GIB, 1),
-                "kv_streamed": True, "kv_ram_gib": kv_ram}
     dense = base - ex
     tier = room - dense - kv_gib - OFF_ROOM_GIB
     kv_ram = 0.0
@@ -194,14 +188,12 @@ def draft_fits(vram_gb: float, ctx: int, kv: str = DEFAULT_KV, experts_gib: floa
 def drafting_off_reason(arch, vram_gb: float, ctx: int, kv: str = DEFAULT_KV, hip: bool = False,
                         experts_gib: float = EXPERTS_GIB) -> str | None:
     """Why drafting is off on this card (one line), or None: NVIDIA Volta / Turing (the drafter's window needs sm_80)
-    and the offload path run without it; NVIDIA sm_80+ with every expert in VRAM and AMD keep it."""
-    if hip:
-        return None
+    and the offload path (NVIDIA or AMD) run without it; every expert in VRAM keeps it."""
     try:
         cc = int(arch)
     except (TypeError, ValueError):
         cc = 0
-    if 0 < cc < 80:
+    if not hip and 0 < cc < 80:
         return "drafting off: this GPU (Volta / Turing) has no drafting for this model - every token comes from a full model step"
     if vram_gb and not plan(vram_gb, ctx, kv, experts_gib=experts_gib)["resident"]:
         return ("drafting off: the card does not hold every expert at this context (the offload path), where drafting "
@@ -219,10 +211,8 @@ def recommended_context(vram_gb: float, kv: str = DEFAULT_KV, hip: bool = False,
 
 def amd_unsupported(cards: list, experts_gib: float = EXPERTS_GIB) -> str | None:
     """The AMD half of unsupported(): saguaro-ik2's HIP build (Linux) runs on RDNA 3 / 3.5 / 4 (gfx11 / gfx12) with
-    every expert of the file in the GPU's memory (no offload path on AMD) and the cache streamed where it does not fit
-    beside them - so the card must hold the dense weights, the file's experts and one full-attention visit's cache at
-    the smallest context.  UD-Q4_K_XL (14.7 GiB of experts): a 24 GB card; our one-T4 quant (11.45 GiB): a 16 GB card.
-    An APU's memory is the RAM ("unified_memory": its "memory_gb")."""
+    16 GB or more - every expert in VRAM where the file fits, else the offload path as on NVIDIA (checked on an RX 9070
+    XT, gfx1201).  An APU's memory is the RAM ("unified_memory": its "memory_gb")."""
     if not cards:
         return None
     rdna = [g for g in cards if str(g.get("arch") or "").startswith(AMD_ARCHS)]
@@ -231,11 +221,8 @@ def amd_unsupported(cards: list, experts_gib: float = EXPERTS_GIB) -> str | None
                 "Max (Strix / Gorgon Halo) GPU - RDNA 3, 3.5 or 4 (gfx11 / gfx12); older AMD GPUs are not supported "
                 "by its engine")
     room = max(float(g.get("memory_gb") if g.get("unified_memory") else g.get("vram_gb") or 0) for g in rdna)
-    if not plan(room, CONTEXTS[0], "fp8", True, experts_gib)["resident"]:
-        need = DENSE_GIB + float(experts_gib) + CONTEXTS[0] * KV_BYTES["fp8"] / GIB / FULL_VISITS + MARGIN_GIB
-        return (f"Inkling 2 Mini on AMD keeps every expert in the GPU's memory: this file's {float(experts_gib):.1f} "
-                f"GB of experts need one AMD GPU with about {need:.0f} GB of VRAM or more (a Ryzen AI Max APU: that "
-                "much memory free for it) - a smaller quant's experts fit a smaller card")
+    if room < AMD_MIN_GB:
+        return "Inkling 2 Mini on AMD needs one GPU with 16 GB of VRAM or more"
     return None
 
 
@@ -339,10 +326,16 @@ def speeds(lay: dict) -> str:
 
 
 def amd_layout(card: dict, experts_gib: float = EXPERTS_GIB) -> dict:
-    """One AMD GPU (HIP, Linux; card: its "vram_gb" = the memory it gives the engine): every expert of the file in
-    its memory, the FP8 cache (half the bytes), the largest context (up to RECOMMEND_MAX) that keeps the cache there
-    too - else the smallest, part of its cache streamed.  amd_unsupported has said it holds them."""
-    ctx = recommended_context(float(card.get("vram_gb") or 0), "fp8", True, experts_gib)
-    return {"gpus": [card], "args": ["--gpus", "1", "--chunk", "2048", "--threads", str(THREADS)], "context": ctx,
-            "env": {"SAGUARO_IK2_KV": "fp8"}, "resident": True, "path": "resident", "measured": False,
-            "said": "one AMD GPU: every expert in its memory (no offload path on AMD)"}
+    """One AMD GPU (HIP, Linux; card: its "vram_gb" = the memory it gives the engine): every expert in its memory
+    where the file fits, else the offload path (a tier of them, the rest in pinned RAM), 32K and the F16 cache as
+    measured on an RX 9070 XT; a 16 GB card keeps 1 GiB beside the experts (SAGUARO_IK2_RESERVE_MB), which lets our
+    one-T4 quant stay resident.  The engine plans on the card's real free memory either way."""
+    vram = float(card.get("vram_gb") or 0)
+    p = plan(vram, CONTEXTS[0], DEFAULT_KV, True, experts_gib)
+    env = {"SAGUARO_IK2_RESERVE_MB": "1024"} if vram and vram < 20 else {}
+    res = p["resident"] or float(experts_gib) < EXPERTS_GIB - 1   # (a smaller quant: the engine keeps it resident)
+    return {"gpus": [card], "args": ["--gpus", "1", "--chunk", "1024" if res else "2048", "--threads", str(THREADS)],
+            "context": recommended_context(vram, DEFAULT_KV, True, experts_gib) if p["resident"] else CONTEXTS[0],
+            "env": env, "resident": res, "path": "resident" if res else "offload", "measured": False,
+            "said": "one AMD GPU: every expert in its memory" if res else
+                    "one AMD GPU: the most-used experts in VRAM, the others in RAM (the offload path), a 32K context"}

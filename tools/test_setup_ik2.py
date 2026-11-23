@@ -125,7 +125,7 @@ class Fit(unittest.TestCase):
         self.assertEqual(lay["args"], ["--gpus", "1", "--chunk", "2048", "--threads", "8"])
         self.assertEqual((lay["context"], lay["resident"], lay["path"], lay["measured"]), (32768, False, "offload", True))
         self.assertEqual(lay["env"], {"SAGUARO_IK2_ROOM_MB": "1024"})
-        self.assertIn("42 tok/s", F.speeds(lay))
+        self.assertIn("24 tok/s", F.speeds(lay))
         self.assertIn("1x Tesla T4", F.speeds(lay))
 
     def test_two_t4s(self):
@@ -165,14 +165,12 @@ class Fit(unittest.TestCase):
 
     def test_upstream_figures(self):
         """Upstream's figures (an RTX 3090, the FP8 cache): 262,144 with every expert in VRAM; the trained million
-        keeps the cache on the card (the experts leave first); AMD streams the cache instead."""
+        keeps the cache on the card (the experts leave first) - on AMD too."""
         self.assertEqual(F.recommended_context(24.0, "fp8"), 262144)
         self.assertTrue(F.plan(24.0, 262144, "fp8")["resident"])
         p = F.plan(24.0, 1048576, "fp8")
         self.assertEqual((p["layout"], p["kv_streamed"]), ("offload", False))
-        h = F.plan(24.0, 1048576, "fp8", hip=True)
-        self.assertTrue(h["resident"] and h["kv_streamed"])
-        self.assertEqual(F.verdict(24.0, 64.0, 1048576, "fp8", hip=True)[0], "streamed")
+        self.assertEqual(F.plan(24.0, 1048576, "fp8", hip=True)["layout"], "offload")
         self.assertEqual(F.plan(0, 262144)["resident"], True)          # (VRAM not read: the engine measures)
 
     def test_plan_two(self):
@@ -196,25 +194,26 @@ class Fit(unittest.TestCase):
         self.assertIn("Volta", F.drafting_off_reason("75", 24, 65536, "fp8"))
         self.assertIn("offload", F.drafting_off_reason("86", 8, 65536, "fp8"))
         self.assertIsNone(F.drafting_off_reason("86", 24, 65536, "fp8"))
-        self.assertIsNone(F.drafting_off_reason("gfx1201", 16, 32768, "fp8", hip=True))
+        self.assertIn("offload", F.drafting_off_reason("gfx1201", 16, 32768, "fp8", hip=True))
+        self.assertIsNone(F.drafting_off_reason("gfx1100", 24, 32768, "fp8", hip=True))
         self.assertTrue(F.draft_fits(24, 131072, "fp8"))
         self.assertFalse(F.draft_fits(24, 262144, "fp8"))
 
     def test_amd(self):
-        """AMD: every expert of the file in the GPU's memory (no offload path there) - UD-Q4_K_XL wants a 24 GB card,
-        a 16 GB RX 9070 XT runs a quant whose experts fit (our one-T4 quant's 11.45 GiB), its cache streamed past what
-        fits; RDNA 3 / 4 only, Linux, one GPU."""
+        """AMD as NVIDIA (checked on an RX 9070 XT): every expert in VRAM where the file fits, else the offload path -
+        UD-Q4_K_XL on 16 GB offloads, our one-T4 quant (11.45 GiB) stays resident with 1 GiB kept beside it; RDNA 3 / 4
+        with 16 GB or more, Linux, one GPU."""
         self.assertIsNone(F.unsupported("hip", False, 1, [amd("gfx1100", 24)]))
-        why = F.unsupported("hip", False, 1, [amd("gfx1201", 15.9)])
-        self.assertIn("keeps every expert", why or "")
-        self.assertIn("smaller quant", why)
-        self.assertIsNone(F.unsupported("hip", False, 1, [amd("gfx1201", 15.9)], experts_gib=11.45))
+        self.assertIsNone(F.unsupported("hip", False, 1, [amd("gfx1201", 15.9)]))
+        self.assertIn("16 GB", F.unsupported("hip", False, 1, [amd("gfx1201", 12)]))
         self.assertIn("RDNA 3, 3.5 or 4", F.unsupported("hip", False, 0, [amd("gfx1030", 16)]))
         self.assertIn("one GPU", F.unsupported("hip", False, 2, []))
         self.assertIn("Linux only", F.unsupported("hip", True, 0, []))
-        lay = F.amd_layout(amd("gfx1201", 15.9), 11.45)
-        self.assertEqual((lay["path"], lay["env"]), ("resident", {"SAGUARO_IK2_KV": "fp8"}))
-        self.assertIn(F.verdict(15.9, 64.0, lay["context"], "fp8", True, 11.45)[0], ("fast", "streamed"))
+        ud = F.amd_layout(amd("gfx1201", 15.9))
+        self.assertEqual((ud["path"], ud["context"], ud["env"]), ("offload", 32768, {"SAGUARO_IK2_RESERVE_MB": "1024"}))
+        q = F.amd_layout(amd("gfx1201", 15.9), 11.45)
+        self.assertEqual((q["path"], q["args"][3]), ("resident", "1024"))
+        self.assertEqual(F.amd_layout(amd("gfx1100", 24))["env"], {})
 
     def test_the_flags_are_the_engines_own(self):
         """saguaro-ik2 stops at a flag it does not know: every flag a layout writes is one its parser reads."""
@@ -265,7 +264,7 @@ class Picker(unittest.TestCase):
             self.assertEqual(fam, "ik2", n)
             label, note, about = got["rows"][maya.FAMILIES.index("ik2")]
             self.assertEqual((label, note), ("Inkling 2 Mini", "recommended for this PC"))
-            for part in ("one or two", "16 GB", "8 GB", "AMD", "42 tok/s", "52 tok/s", "Apache 2.0"):
+            for part in ("one or two", "16 GB", "8 GB", "AMD", "24 tok/s", "52 tok/s", "Apache 2.0"):
                 self.assertIn(part, about)
 
     def test_four_t4s_get_hy4_and_a_setup_before_wins(self):
@@ -477,8 +476,8 @@ class Steps(unittest.TestCase):
             self.assertEqual(maya.ik2_model_step(args(model_dir=str(d)), d), own)
 
     def test_set_up_on_a_16_gb_amd_card(self):
-        """An RX 9070 XT (16 GB, gfx1201): refused with UD-Q4_K_XL (every expert stays on an AMD GPU), set up with a
-        GGUF of your own whose experts fit - the FP8 cache, drafting kept (AMD drafts), "backend": "hip"."""
+        """An RX 9070 XT (16 GB, gfx1201) with a GGUF of your own whose experts fit (our one-T4 quant): resident with
+        1 GiB kept beside the experts; drafting off (the setup's sums are the offload path's at 16 GB)."""
         d = self.root / "own"
         d.mkdir()
         own = d / "x.gguf"
@@ -496,11 +495,10 @@ class Steps(unittest.TestCase):
         for p in common:
             p.start()
             self.addCleanup(p.stop)
-        self.assertIn("keeps every expert", refusal(lambda: maya.set_up_ik2(args(backend="hip"), {})))
         with patch.object(F, "experts_gib_of", lambda path: 11.45):
             maya.set_up_ik2(args(backend="hip", model_dir=str(d)), {})
-        self.assertEqual((seen["lay"]["env"], seen["drafting"], seen["drafter"].name),
-                         ({"SAGUARO_IK2_KV": "fp8"}, None, "mtp.safetensors"))
+        self.assertEqual((seen["lay"]["env"], seen["lay"]["path"], seen["drafting"], seen["drafter"]),
+                         ({"SAGUARO_IK2_RESERVE_MB": "1024"}, "resident", "off", None))
 
     def test_bench_prompt(self):
         p = maya.bench_chat("ik2", self.root)("Hello?")

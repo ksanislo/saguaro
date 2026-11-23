@@ -485,12 +485,15 @@ holds the offload path's lane to the GPU's bits.
 The tokenizer folder they name: `python tools/strata_tokenizer.py --gguf FILE --out <model folder> --chat-template
 tools/ik2/chat_template.jinja --check`.
 
-**AMD with 16 GB** (Ken's RX 9070 XT, gfx1201): upstream's AMD path keeps every expert in the GPU's memory (no
-offload path on HIP), so UD-Q4_K_XL wants 24 GB; a GGUF whose experts fit - the one-T4 quant - runs on 16 GB by the
-same sums (`tools/ik2_fit.py` `amd_unsupported`, computed from the file's experts). `saguaro.py --setup --model
-inkling-2-mini --backend hip --model-dir FOLDER` takes such a file (not sha256-checked) and writes the FP8 cache.
-NOT verified on that machine: the HIP build of this tree, the engine's start rule for a 16 GB AMD card, the RDNA
-resident path with IQ3_XXS / IQ4_XS experts, drafting there, the picture encoder on AMD.
+A 16 GB AMD card (an RX 9070 XT, gfx1201, ROCm 7.1), checked 2026-11-22: upstream's AMD path kept every expert
+in VRAM (24 GB for UD-Q4_K_XL); here the offload path runs on AMD as on NVIDIA (it builds for HIP upstream; only its
+gate was NVIDIA-only). UD-Q4_K_XL at 32K: 2,348 of 3,072 experts in VRAM, 59.8 / 59.5 / 53.0 tok/s at ~50 / 8K / 30K,
+an 8K read 1,697 tok/s; the one-T4 quant every expert resident (`--chunk 1024`, `SAGUARO_IK2_RESERVE_MB=1024`):
+83.3 / 73.3 / 66.7 tok/s, 8K read 1,148 tok/s. Both: every serve check (chat, tools, stops, pictures, Monitor) and
+the conversation check (set aside, resumed, saved, read back by a new engine) pass. `ik2_kernels_test` there: 349 ok,
+1 FAIL (`moe_combine_conv` against `moe_combine_f32` + `conv4_res` to the bit - the fused kernel's sums round
+differently under hipcc; upstream's kernels, not changed here). Not checked on AMD: drafting, two AMD GPUs, the CPU
+lane (the decode chose no lane on a Zen 5).
 
 ## 10. Saguaro: served on the T4s (checked 2026-11-21 on the PREVIOUS engine, our v1.1.72 port), and what an install needs
 
@@ -503,7 +506,7 @@ answer runs. Results in `build-ik2/serve-check*/results.json`.
 
 | UD-Q4_K_XL, FP16 cache (previous engine) | one T4, context 32,768 | two T4s, context 131,072 |
 | --- | --- | --- |
-| TODO: the v1.1.74-based engine's figures | - | - |
+| This engine (v1.1.74-based, 2026-11-22): every check passes; bench | 23.7 tok/s decode, 706 tok/s 8K read | 52.6 tok/s decode, 834 tok/s 16K read |
 | Start to /health | 8 s (16-18 s the first time: the encoder is measured) | 12 s (16 s) |
 | VRAM after the load | 14.9 GiB | 14.9 GiB + 8.7 GiB |
 | A short chat: first token / decode | 0.5-0.7 s / 36-38 tok/s | 0.35-0.45 s / 50 tok/s |
@@ -518,41 +521,21 @@ costs 115 expert slots and a resident layer visit: decode 9-11% slower on every 
 requests carry new pictures. Two cards: the server starts the encoder on the config's GPU with the most free
 memory (the second: ~6.9 GiB free at a context of 131,072).
 
-**Install** (into `/opt/llm/saguaro`, the model in `/opt/llm/models/Inkling-2-Mini-UD-Q4_K_XL/`):
+**Install by hand** (the setup does all of this itself; `<saguaro>` = the Saguaro folder, `<models>` = the models
+folder):
 
 1. The tokenizer folder beside the model (writes `<out>/tokenizer/`, 5 files; `--check` round-trips 16 strings):
 
-       /opt/llm/saguaro/.venv/bin/python tools/strata_tokenizer.py \
-           --gguf /opt/llm/models/Inkling-2-Mini-UD-Q4_K_XL/Inkling-2-Mini-UD-Q4_K_XL.gguf \
-           --out /opt/llm/models/Inkling-2-Mini-UD-Q4_K_XL --chat-template tools/ik2/chat_template.jinja --check
+       <saguaro>/.venv/bin/python tools/strata_tokenizer.py \
+           --gguf <models>/Inkling-2-Mini-UD-Q4_K_XL/Inkling-2-Mini-UD-Q4_K_XL.gguf \
+           --out <models>/Inkling-2-Mini-UD-Q4_K_XL --chat-template tools/ik2/chat_template.jinja --check
 
-2. `build-ik2/saguaro-ik2` -> `bin/saguaro-ik2` (its RUNPATH is CUDA 13.1's lib folder: nothing to patch),
-   `build-ik2-vision/build/bin/vision-glm` -> `bin/vision-ik2`, `configs/Inkling-2-Mini-UD-Q4_K_XL*.json` ->
-   `configs/`, and this branch's `serve/` and `tools/` (`maya_quants.py`, `strata_tokenizer.py`,
-   `ik2/chat_template.jinja`). `configs/` must be writable by the server's user (`vision-memory.json`).
-3. The two configs carry one `model_name` and one log file: the one-card profile needs its own of both (its
-   llama-swap id is its `model_name`). `"SAGUARO_IK2_STATS": "1"` in a config's `env` gives the Monitor its VRAM hit.
-4. llama-swap (PROPOSED; not applied - lines marked ASK are not known here):
-
-       "Inkling-2-Mini-UD-Q4_K_XL":            # two T4s (cards 2,3), context 131,072
-         cmd: >
-           /bin/sh -c "cd /opt/llm/saguaro && exec .venv/bin/python serve/server.py
-           --config /opt/llm/saguaro/configs/Inkling-2-Mini-UD-Q4_K_XL.json --port ${PORT}"
-         # ASK: the other Saguaro profiles' wrapper (clock lock / cmdStop unlock, env), copied as they have it
-         ttl: 900
-         unloadTimeout: 60                     # (QUIT saves the open conversations to SAGUARO_IK2_SLOT_DIR first)
-       "Inkling-2-Mini-UD-Q4_K_XL-1card":      # one T4 (card 2), context 32,768
-         cmd: >
-           /bin/sh -c "cd /opt/llm/saguaro && exec .venv/bin/python serve/server.py
-           --config /opt/llm/saguaro/configs/Inkling-2-Mini-UD-Q4_K_XL.1card.json --port ${PORT}"
-         ttl: 900
-         unloadTimeout: 60
-
-       groups:
-         "gpu-models":                         # ASK: the group's name as the live config has it
-           members:
-             - "Inkling-2-Mini-UD-Q4_K_XL"
-             - "Inkling-2-Mini-UD-Q4_K_XL-1card"   # (every id under models: must be here too, or in no group)
-
-   The server takes no `--engine` for a real engine (the config's `exe` picks the driver). A new id also goes into
-   opencode.json, `dsh/profiles/headless/cordis.patch.yml` and Hermes' config when those should offer it.
+2. `build/saguaro-ik2`, the vision encoder (the config's `vision.exe`) and a config: `configs/Inkling-2-Mini-UD-Q4_K_XL.json`
+   (two cards) or `.1card.json` (one) are the measured ones, with their paths relative to the Saguaro folder (the
+   model in `models/`, its state in `var/`); edit them to your folders. The config's folder must be writable by the
+   server's user (`vision-memory.json`).
+3. Each config's `model_name` is the id the API serves; two profiles of one model need their own `model_name` and log
+   file. `"SAGUARO_IK2_STATS": "1"` in a config's `env` gives the Monitor its VRAM hit.
+4. Start it from the Saguaro folder: `.venv/bin/python serve/server.py --config <config> --port 8099`. Under a proxy
+   that starts models on demand (llama-swap and the like), use the same command with the proxy's port and give it a
+   stop timeout of about a minute: on QUIT the engine saves the open conversations to `SAGUARO_IK2_SLOT_DIR` first.

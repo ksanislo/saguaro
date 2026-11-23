@@ -25,8 +25,8 @@ and measured on Linux; on Windows 11 a user runs Maya-L on an RTX 4090, built wi
    the extracted folder), then check the PC:
 
    ```powershell
-   git clone https://github.com/mw00/project-maya.git
-   cd project-maya
+   git clone https://github.com/ksanislo/saguaro.git
+   cd saguaro
    .\START-SAGUARO.bat --check
    ```
 

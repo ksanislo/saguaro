@@ -667,5 +667,39 @@ int main() {
         check(tiny.put(std::move(p2)), "a pinned one fits an empty cache");
         check(!tiny.put(image({7,8,9})) && tiny.size() == 1, "nothing else fits beside it: parking is refused, the pin stays");
     }
+    {   // the shared pool (park_policy.hpp): the budget moves with the live K/V; entries are released by serial
+        const size_t one = image({1, 2, 3}).bytes();
+        ConversationCache c(one * 4, 8);
+        check(c.put(image({1, 2, 3}), 0, 10.0), "parked: a");
+        check(c.put(image({4, 5, 6}), 0, 20.0, true), "parked: b, read back from its file");
+        check(c.put(image({7, 8, 9}), 0, 30.0), "parked: c");
+        const auto l = c.list();
+        check(l.size() == 3 && l[0].tokens == 3 && l[0].parked_at == 10.0 && !l[0].on_disk && l[1].on_disk &&
+                  l[2].parked_at == 30.0 && l[0].serial < l[1].serial && l[0].bytes == one, "listed oldest first, with their marks");
+        check(c.size_live() == 3 && c.budget_live() == one * 4, "the beat thread's figures follow");
+        c.set_budget(one);   // the live K/V grew: over budget now, but nothing leaves by itself
+        check(c.size() == 3 && c.bytes() == one * 3 && c.budget() == one && c.enabled(), "a smaller budget evicts nothing by itself");
+        check(!c.can_fit(one), "and admits nothing more");
+        check(c.drop(l[1].serial) && c.size() == 2 && c.bytes() == one * 2 && c.released() == 1, "released by serial");
+        check(!c.drop(l[1].serial), "a second release of the same entry does nothing");
+        check(c.shared_serial(l[0].serial) != nullptr && c.shared_serial(l[1].serial) == nullptr, "found by serial while parked");
+        check(c.list().size() == 2 && c.list()[1].parked_at == 30.0, "the marks stay with their entries");
+        c.set_budget(0);     // the live K/V fills the pool
+        check(c.enabled() && !c.put(image({10, 11, 12})), "a full pool refuses a park and keeps the cache on");
+        check(c.size() == 2, "what is parked stays until it is released");
+        c.set_budget(one * 4);
+        check(c.put(image({10, 11, 12}), 0, 40.0) && c.size() == 3, "room again: parked");
+        c.guard(c.list()[0].serial);
+        check(!c.drop(c.list()[0].serial) && c.list()[0].keep, "the guarded donor is not released");
+        c.unguard();
+        SavedConversation pinned = image({20, 21, 22});
+        pinned.checkpoints.emplace_back();
+        pinned.checkpoints.back().ids = {20};
+        pinned.checkpoints.back().pinned = true;
+        c.set_budget(1u << 20);
+        check(c.put(std::move(pinned), 0, 50.0) && c.list().back().keep && !c.drop(c.list().back().serial),
+              "a pinned shared prefix is not released");
+        check(c.clear() == 4 && c.list().empty() && c.size_live() == 0, "clear empties the marks too");
+    }
     std::printf("conversation_cache_test: %d checks passed\n", checks);
 }

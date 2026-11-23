@@ -5513,7 +5513,7 @@ void check_preview(int n_gpu, bool serve) {
 #endif
         // (a card that does not hold every expert takes the offload path: a tier of them in VRAM, the rest in RAM;
         //  under 7 GiB - an 8 GB card's - the dense weights, the caches and the smallest tier do not fit beside)
-#ifdef STRATA_USE_HIP   // (AMD: a 16 GB card runs a file whose experts all fit, e.g. the one-T4 quant - checked at the plan)
+#ifdef STRATA_USE_HIP   // (AMD: 16 GB and up - every expert resident, or the offload path where they do not fit)
         if (p.totalGlobalMem < (15ull << 30) && !force) {
             char m[64];
             std::snprintf(m, sizeof m, "%.1f GB", (double) p.totalGlobalMem / 1e9);
@@ -6030,14 +6030,10 @@ int main(int argc, char** argv) {
         if (fits && !getenv("SAGUARO_IK2_DENSE")) g_dense_q8 = true;
         g_fast_want = fits && off_set != 1 && g_dense_q8 && !(getenv("SAGUARO_IK2_FAST") && !std::atoi(getenv("SAGUARO_IK2_FAST")));
         g_off_want = (off_set == 1 || (off_set != 0 && !fits)) && !getenv("SAGUARO_IK2_DENSE");
-#ifdef STRATA_USE_HIP   // (AMD: the offload path is not checked there yet - every expert in VRAM, or SAGUARO_IK2_OFF=1)
-        if (off_set != 1) g_off_want = false;
-        size_t amd_fr = 0, amd_tot = 0;
-        CU(cudaMemGetInfo(&amd_fr, &amd_tot));
-        if (!fits && off_set != 1 && amd_tot < (22ull << 30) &&   // (24 GB and up: the cache path, as upstream)
-            !(getenv("SAGUARO_IK2_UNSUPPORTED") && std::atoi(getenv("SAGUARO_IK2_UNSUPPORTED"))))
-            die("on AMD every expert has to fit in VRAM (" + std::to_string(exp_b >> 20) + " MiB of experts here): a smaller "
-                "file or context, or SAGUARO_IK2_OFF=1 (the offload path, not checked on AMD yet)");
+#ifdef STRATA_USE_HIP   // (AMD: the offload path where the experts do not fit - checked on an RX 9070 XT, gfx1201)
+        if (g_off_want && off_set != 1)
+            std::printf("NOTE saguaro ik2: AMD - the offload path (checked on RDNA 4, gfx1201; SAGUARO_IK2_OFF=0: the "
+                        "cache path instead)\n");
 #endif
         if (g_off_want) g_dense_q8 = true;
         std::printf("experts %.1f GiB, dense weights %.1f GiB as blocks, K / V cache %.1f GiB, %.1f GiB free: %s\n",

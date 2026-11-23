@@ -186,15 +186,16 @@ looped model with 8 of 128 experts a token; Apache 2.0) on an engine of its own 
 [unsloth's UD-Q4_K_XL GGUF](https://huggingface.co/unsloth/Inkling-2-Mini-GGUF) (18.3 GB with its vision tower):
 `./setup.sh --model inkling-2-mini`. **The model for one or two 16 GB cards** - the setup recommends it there.
 
-| Cards | Context | Measured on Tesla T4s (the previous engine; TODO: the v1.1.74-based one) |
+| Cards | Context | Measured here (2026-11-22) |
 | --- | ---: | --- |
-| One 16 GB card: the offload path - the most-used experts in VRAM, the rest in RAM | 32K | about 42 tokens/s writing, 640 reading |
-| Two 16 GB cards: every expert in VRAM across the two | 131K | about 52 tokens/s writing, 1130 reading |
+| One Tesla T4: the offload path - the most-used experts in VRAM, the rest in RAM | 32K | about 24 tokens/s writing, 700 reading |
+| Two Tesla T4s: every expert in VRAM across the two | 131K | about 52 tokens/s writing, 830 reading |
+| One RX 9070 XT (16 GB, RDNA 4): the offload path | 32K | about 59 tokens/s writing, 1700 reading |
+| One RX 9070 XT, the one-T4 quant (every expert in VRAM; experimental, lower quality) | 32K | about 80 tokens/s writing, 1150 reading |
 
-It also sets up on NVIDIA cards from 8 GB (V100 and newer; the experts a card does not hold stay in RAM) and on one AMD
-RDNA 3 / 4 GPU that holds every expert of the file (24 GB for UD-Q4_K_XL) - not run here. Tool calls, five thinking
-levels, pictures; one conversation at a time on two cards (several at once where one GPU holds every expert; four
-more kept aside in RAM).
+It also sets up on NVIDIA cards from 8 GB (V100 and newer; the experts a card does not hold stay in RAM) and on AMD
+RDNA 3 / 4 GPUs of 16 GB or more. Tool calls, five thinking levels, pictures; one conversation at a time on two cards
+(several at once where one GPU holds every expert; four more kept aside in RAM).
 The install, the settings and the limits: **[INKLING2-MINI.md](INKLING2-MINI.md)**; the engine itself:
 [INKLING2.md](INKLING2.md).
 

@@ -24,7 +24,6 @@ import zlib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-PORT_TREE = Path("/data/llm/saguaro-ik2port")   # (the picture encoder built for the first port, when this tree has none)
 sys.path.insert(0, str(ROOT / "tools" / "ik2"))
 sys.path.insert(0, str(ROOT / "tools"))
 import bench as B       # noqa: E402
@@ -166,8 +165,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--gpus", required=True)
     ap.add_argument("--build", type=Path, default=ROOT / "build-ik2")
-    vdir = next((d for d in (ROOT / "build-ik2-vision", PORT_TREE / "build-ik2-vision") if d.exists()),
-                ROOT / "build-ik2-vision")
+    vdir = Path(os.environ.get("SAGUARO_IK2_VISION_TREE") or ROOT / "build-ik2-vision")
     ap.add_argument("--vision", type=Path, default=vdir / "build/bin/vision-glm")
     ap.add_argument("--photo", type=Path, default=vdir / "llama.cpp/tools/mtmd/test-1.jpeg")
     ap.add_argument("--port", type=int, default=18977)
@@ -198,7 +196,7 @@ def main() -> int:
            "log": str(work / "engine.log")}
     if shutil.which("nvidia-smi") is None:   # (AMD: the server's HIP paths)
         cfg["backend"] = "hip"
-    if a.vision.exists():
+    if a.vision.exists() and (MDIR / "mmproj-BF16.gguf").exists():
         cfg["vision"] = {"exe": str(a.vision), "mmproj": str(MDIR / "mmproj-BF16.gguf"), "gpu": True}
         for kv in a.vision_set:
             k, v = kv.split("=", 1)
@@ -473,7 +471,7 @@ def main() -> int:
         time.sleep(2)
         try:
             apps = subprocess.run(["nvidia-smi", "--query-compute-apps=pid,used_memory,name", "--format=csv,noheader"],
-                                  capture_output=True, text=True, timeout=30).stdout
+                                  capture_output=True, text=True, timeout=30).stdout if shutil.which("nvidia-smi") else ""
             print("cards after exit:", smi(), "| ours left on them:",
                   [l for l in apps.splitlines() if l.split(",")[0].strip().isdigit() and int(l.split(",")[0]) in mine])
         finally:

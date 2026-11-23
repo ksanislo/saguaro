@@ -356,7 +356,7 @@ struct Options {
 
 void usage() {
     std::fprintf(stderr,
-                 "maya generate --pack DIR --tokens \"1,2,3\" [options]\n"
+                 "saguaro-glm --pack DIR --tokens \"1,2,3\" [options]\n"
                  "\n"
                  "  --pack DIR           the pack directory (default pack/full)\n"
                  "  --glm-pack DIR       a GLM-5.3-Flash pack (M3.1): the verified Glm5Model runner behind the\n"
@@ -2458,7 +2458,8 @@ static int glm_pack_generate(const Options& o) {
     // the prompt from token i on through the token path, the state saved before snap_at (an identical or extending
     // prompt can reuse it) - after the batched path, only the tokens from there are left
     const auto prep_tail = [&](const std::vector<int32_t>& prompt, size_t i_first, size_t reuse, const char*& finish,
-                               std::chrono::steady_clock::time_point t0, size_t snap_at) -> int {
+                               std::chrono::steady_clock::time_point t0, size_t snap_at,
+                               size_t* stopped = nullptr) -> int {
         std::vector<float> lg;
         bool snapped = false;
         for (size_t i = i_first; i < prompt.size();) {
@@ -2490,7 +2491,11 @@ static int glm_pack_generate(const Options& o) {
                 std::printf("PP %s%zu %zu %.1f %.1f %zu\n", tag.c_str(), i, prompt.size(), ms,
                             (double) (i - reuse) / (ms / 1000.0 + 1e-9), reuse);
             }
-            if (read_stopped()) { finish = "cancel"; break; }
+            if (read_stopped()) {
+                finish = "cancel";
+                if (stopped != nullptr) *stopped = i;
+                break;
+            }
         }
         return 0;
     };
@@ -2501,6 +2506,7 @@ static int glm_pack_generate(const Options& o) {
         //  holds, so a restored read's fresh tokens and ms are its own: same shape as PP's, rid-tagged under multi)
         if (o.serve) std::printf("RESUME %s%zu\n", tag.c_str(), reuse);
         const strata::core::VramMark vram0 = strata::core::vram_mark(vram_devs());   // (the line at the read's end)
+        size_t read_to = prompt.size();   // (where a cancelled read stopped)
         t0 = std::chrono::steady_clock::now();
         gap_mark = t0;   // (SAGUARO_GLM_PREFILL_GAPS: the first gap's stage starts with the read, not the restore)
         gap_count = gap_tok = 0;   // (every read starts its own gap figures: one without gaps must not inherit them)
@@ -2685,6 +2691,7 @@ static int glm_pack_generate(const Options& o) {
                     ckpt_drop_past(0);
                 }
                 finish = "cancel";
+                read_to = at;
                 i_first = prompt.size();
             } else if (!err.empty()) {
                 snap_tokens.clear();
@@ -2693,13 +2700,17 @@ static int glm_pack_generate(const Options& o) {
                 return 1;
             }
         }
-        const int rc = prep_tail(prompt, i_first, reuse, finish, t0, snap_at);
+        const int rc = prep_tail(prompt, i_first, reuse, finish, t0, snap_at, &read_to);
         {   // one line a prompt: the tokens read, the time, and the free VRAM before and after (issues #648, #438)
             const std::string vt = strata::core::vram_mark_text(vram0, strata::core::vram_mark(vram_devs()));
+            const bool cancelled = finish != nullptr && std::strcmp(finish, "cancel") == 0;
             if (!vt.empty())
-                std::fprintf(stderr, "glm vram: prompt %zu tokens read in %.1f s; %s\n",
-                             prompt.size() > reuse ? prompt.size() - reuse : (size_t) 0,
-                             std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(), vt.c_str());
+                std::fprintf(stderr, "glm vram: prompt %zu tokens read in %.1f s%s; %s\n",
+                             read_to > reuse ? read_to - reuse : (size_t) 0,
+                             std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(),
+                             cancelled ? (" (cancelled at token " + std::to_string(read_to) + " of " +
+                                          std::to_string(prompt.size()) + ")").c_str() : "",
+                             vt.c_str());
         }
         return rc;
     };
@@ -5378,6 +5389,10 @@ static int glm_pack_generate(const Options& o) {
                                      "room\n", (long long) pv.fixed);
         }
     }
+    // (#1026) a start that came out short of its VRAM reserve: the server starts the engine once more, which keeps
+    // what this one measured free beside it
+    if (model.fast())
+        if (const int short_mib = model.late_check(true); short_mib > 0) std::printf("INFO reserve_short=%d\n", short_mib);
     // the serve wire contract (serve/server.py): READY <max_context> [stop] once, then GEN <max_new>
     // [<key>=<value> ...] <id,id,...> lines - the sampling keys are per request and the ids are the LAST
     // token.  "stop" is NOT advertised: a request runs to its end (no mid-request cancel in M3.1).
@@ -5548,6 +5563,7 @@ static int glm_pack_generate(const Options& o) {
             continue;
         }
         if (cmd == "GEN" || cmd == "GENI") {
+            if (model.fast()) (void) model.late_check(false);   // (#1026: what the requests before allocated)
             int64_t max_new = 0;
             ss >> max_new;
             strata::kernels::SamplerParams rq = sp;
@@ -6513,7 +6529,7 @@ int main(int argc, char** argv) {
                 std::fprintf(stderr,
                              "saguaro generate: %s declares architecture %s (GLM-5.3-Flash)\n"
                              "saguaro generate: the qwen4exp driver path cannot serve it - run the pack instead:\n"
-                             "saguaro generate:   maya generate --glm-pack <pack_dir> --tokens ... (the verified\n"
+                             "saguaro generate:   saguaro-glm --glm-pack <pack_dir> --tokens ... (the verified\n"
                              "saguaro generate:   Glm5Model runner; docs/GLM5-FLASH.md §9)\n",
                              o.native_preset.c_str(), v->s.c_str());
                 return 2;
@@ -8488,6 +8504,7 @@ int main(int argc, char** argv) {
         std::vector<std::pair<int32_t, int32_t>> pending;
         cudaEvent_t adapt_ev = nullptr;
         cudaEventCreateWithFlags(&adapt_ev, cudaEventDisableTiming);
+        uint64_t completed_promotions = 0; // advanced only after pending swaps complete
         // a layer split's later stages keep a copy of the residency table on their devices, and swap on their own
         auto res_upload = [&]() {
             if (d_res != nullptr)
@@ -8508,6 +8525,7 @@ int main(int argc, char** argv) {
                 }
             for (auto& st : stages) st->adapt_live = false;
             for (const auto& [i, slot] : pending) host_res[(size_t) i] = slot;
+            completed_promotions += pending.size();
             pending.clear();
             res_upload();
         };
@@ -9466,6 +9484,7 @@ int main(int argc, char** argv) {
             const DecSnap ds0 = dec_snap();
             double dt_run = 0, dt_commit = 0, dt_draft = 0;
             int64_t dec_windows = 0, dec_T = 0;
+            const uint64_t promotions0 = completed_promotions;
             const int64_t decode_hits0 = drive.d.cache_hits;
             const int64_t decode_look0 = drive.d.cache_hits + drive.d.cache_admitted + drive.d.cache_refused;
             const int64_t staged0 = from_gguf ? gguf_src.staged() : 0;
@@ -9580,11 +9599,12 @@ int main(int argc, char** argv) {
                     const int64_t h = drive.d.cache_hits - decode_hits0;
                     const int64_t look = drive.d.cache_hits + drive.d.cache_admitted + drive.d.cache_refused - decode_look0;
                     const int64_t staged = from_gguf ? gguf_src.staged() - staged0 : 0;
-                    std::printf("STAT tok_s=%.2f ms_tok=%.2f vram_hit=%.4f ram_fetch=%.3f disk=%.3f promo=0 "
+                    std::printf("STAT tok_s=%.2f ms_tok=%.2f vram_hit=%.4f ram_fetch=%.3f disk=%.3f promo=%.3f "
                                 "vram_used=%lld vram_slots=%lld ram_used=%lld ram_gb=%.1f vram_gb=%.1f "
                                 "disk_gb=%.1f draft_acc=%lld draft_off=%lld\n",
                                 nt / std::max(1e-9, el), 1000.0 * el / nt, (double) h / (double) std::max<int64_t>(1, look),
                                 (double) std::max<int64_t>(0, look - h - staged) / nt, (double) staged / nt,
+                                (double) (completed_promotions - promotions0) / nt,
                                 (long long) xcache.resident(), (long long) xcache.slots(),
                                 (long long) (from_gguf ? gguf_src.resident_blobs()
                                                        : (int64_t) g.n_layers * g.n_expert - xcache.resident()),

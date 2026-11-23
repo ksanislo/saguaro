@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools" / "ik2"))
 sys.path.insert(0, str(ROOT / "tools"))
 import t4_check as TC   # noqa: E402
+CLOCKS = (os.environ.get("SAGUARO_CLOCK_CMD") or "sudo -n llm-gpu-clocks").split()   # a command taking lock / unlock
 
 MODEL = TC.MODEL
 STATUS = Path("/tmp/gpu-status")
@@ -126,7 +127,7 @@ def main() -> int:
     eng = None
     try:
         if a.lock:
-            subprocess.run(["sudo", "-n", "/usr/local/sbin/llm-gpu-clocks", "lock"], capture_output=True)
+            subprocess.run(CLOCKS + ["lock"], capture_output=True)
         before = TC.smi(gpus)
         if any(u > 500 for u, _ in before.values()):
             print("cards not empty:", before)
@@ -220,7 +221,7 @@ def main() -> int:
         time.sleep(1)
         print("  cards after exit:", {g: u for g, (u, _) in TC.smi(gpus).items()})
         if a.lock:
-            subprocess.run(["sudo", "-n", "/usr/local/sbin/llm-gpu-clocks", "unlock"], capture_output=True)
+            subprocess.run(CLOCKS + ["unlock"], capture_output=True)
         release(line)
     if a.out:
         with open(a.out, "a") as f:

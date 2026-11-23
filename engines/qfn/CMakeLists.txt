@@ -156,10 +156,32 @@ if(STRATA_BUILD_CONVERSATION_TESTS)
   target_include_directories(slot_sizing_test PRIVATE include)
   add_test(NAME slot_sizing_test COMMAND slot_sizing_test)
   find_package(Threads REQUIRED)
-  add_executable(session_dir_test src/core/session_dir_test.cpp src/core/session_dir.cpp src/core/conversation_file.cpp)
+  add_executable(session_dir_test src/core/session_dir_test.cpp src/core/session_dir.cpp src/core/session_log.cpp
+                 src/core/conversation_file.cpp)
   target_include_directories(session_dir_test PRIVATE include)
   target_link_libraries(session_dir_test PRIVATE Threads::Threads)
   add_test(NAME session_dir_test COMMAND session_dir_test)
+  # the appending session file (format v3): appends, rewinds, torn saves, limits, the old format
+  add_executable(session_log_test src/core/session_log_test.cpp src/core/session_log.cpp src/core/conversation_file.cpp)
+  target_include_directories(session_log_test PRIVATE include)
+  target_link_libraries(session_log_test PRIVATE Threads::Threads)
+  add_test(NAME session_log_test COMMAND session_log_test)
+  # the parked conversations' release policy (header-only, CPU)
+  add_executable(park_policy_test src/core/park_policy_test.cpp)
+  target_include_directories(park_policy_test PRIVATE include)
+  add_test(NAME park_policy_test COMMAND park_policy_test)
+  # ... carried out on a real conversation cache and session folder
+  add_executable(park_release_test src/core/park_release_test.cpp src/core/session_dir.cpp src/core/session_log.cpp
+                 src/core/conversation_file.cpp)
+  target_include_directories(park_release_test PRIVATE include)
+  target_link_libraries(park_release_test PRIVATE Threads::Threads)
+  add_test(NAME park_release_test COMMAND park_release_test)
+  # per-turn saves of a conversation that stays where it is: capture, delta, a request mid-save, a kill
+  add_executable(turn_save_test src/core/turn_save_test.cpp src/core/session_dir.cpp src/core/session_log.cpp
+                 src/core/conversation_file.cpp)
+  target_include_directories(turn_save_test PRIVATE include)
+  target_link_libraries(turn_save_test PRIVATE Threads::Threads)
+  add_test(NAME turn_save_test COMMAND turn_save_test)
 endif()
 
 if(STRATA_HIP_GFX906)
@@ -588,7 +610,8 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
     src/core/remote_expert_opt.cu
     src/core/expert_cache.cpp src/core/native_head.cpp src/core/native_dense.cpp src/core/verify.cpp src/core/mtp.cpp src/core/dflash2.cpp
     src/core/conversation_snapshot.cpp src/core/conversation_state.cpp src/core/conversation_memory.cpp src/core/peer_experts.cpp
-    src/core/arch_defaults.cpp src/core/nv_defaults.cpp src/core/vmm.cpp src/core/conversation_file.cpp src/core/session_dir.cpp)
+    src/core/arch_defaults.cpp src/core/nv_defaults.cpp src/core/vmm.cpp src/core/conversation_file.cpp src/core/session_dir.cpp
+    src/core/session_log.cpp)
   target_include_directories(strata_engine PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
   target_link_libraries(strata_engine PUBLIC strata_core strata_kernels strata_kernels_cpu ${_strata_gpu_runtime_target})
   if(STRATA_BUILD_TESTS AND STRATA_ENABLE_CUDA AND NOT STRATA_HIP_GFX906)

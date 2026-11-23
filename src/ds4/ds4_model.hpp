@@ -29,6 +29,7 @@ struct Options {
     int64_t max_context = 32768;
     std::vector<int> gpus;            // empty: every visible GPU
     int64_t reserve_mib = 600;        // VRAM left free on each GPU
+    bool reserve_given = false;       // (--reserve-mib on the command line: held for the whole run - #1026)
     double vram_experts = 1.0;        // the share of the expert budget to use (tests: less, so the CPU lane works)
     // the CPU lane's threads: 0 a thread a physical core, or where the host offers it the performance cores or one
     // NUMA node's cores when measured faster at load; n: at most n, a thread a core
@@ -272,6 +273,8 @@ public:
     int fed() const;   // the tokens the last feed() / feed_mark() took (all of them unless a yield)
     /// A request starts (before its prompt): DISK_SKIP_AUTO may switch back on here, never mid-answer.
     void begin_request();
+    /// (#1026) > 0: this start came out short of --reserve-mib; the next keeps this many MiB beside it (its file)
+    int reserve_short_mib() const;
     /// PLAN-turbo-live (serve/turbo_live.py): conversation `seq`'s request runs live Turbo: drop N runs its
     /// windows' routes as top-k minus N experts (the router drops its N weakest picks and renormalises the kept
     /// ones, ruling over SAGUARO_DS4_RESIDENT_TOPK for its tokens); skip 1 = "ssd" (picks a disk read would serve

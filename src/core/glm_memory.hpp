@@ -89,6 +89,24 @@ inline size_t pool_give_back(size_t asked, size_t have, size_t free_after, size_
     return std::min(give, asked);
 }
 
+// The written budget's frees, back as free VRAM (#899).  On Linux HIP (two RX 9070s) the free figure read right after
+// the check freed its pieces still counted them as in use - the card's free VRAM less the reserve, all of it - so the
+// pool sized next found 0 slots a layer while the split had planned 74.  `read` gives the free VRAM now, `pause` waits
+// a little between reads: the figure is read until it is back within `slack` of `free_before` (the free VRAM read
+// before the budget was written), at most `max_polls` pauses.  Returns the last read; `polls` the pauses it took.
+template <class Read, class Pause>
+inline size_t await_check_frees(size_t free_before, size_t slack, int max_polls, Read&& read, Pause&& pause,
+                                int& polls) {
+    polls = 0;
+    size_t fr = read();
+    while (fr + slack < free_before && polls < max_polls) {
+        pause();
+        ++polls;
+        fr = read();
+    }
+    return fr;
+}
+
 inline bool minimal_ram_tier(bool unified, bool all_experts_fit, bool explicit_budget) {
     return unified && all_experts_fit && !explicit_budget;
 }
@@ -102,6 +120,17 @@ inline bool full_unified_pool(bool unified, int slots, int experts) {
 // prompt path borrows only the tail beyond them, and the decode never misses.
 inline bool complete_pool(int main_slots, int experts, int spares) {
     return main_slots >= experts + spares;
+}
+
+// A unified-memory host's complete pool: its budget is RAM's (MemAvailable less the headroom and the reserve), so where
+// that holds every expert, the spares and the prompt path's tail the pool is the complete one too - short of it, the
+// experts' bytes exactly, as before.  An AMD APU under Linux; CUDA's unified hosts keep the exact pool.
+inline bool unified_complete_pool() {
+#if defined(STRATA_USE_HIP) && !defined(_WIN32)
+    return true;
+#else
+    return false;
+#endif
 }
 
 // The slots a layer gets where the budget (avail bytes; stride_sum: one slot in every MoE layer) holds a complete pool

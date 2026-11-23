@@ -6,6 +6,7 @@
 #pragma once
 
 #include "strata/core/conversation_file.hpp"
+#include "strata/core/session_log.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -22,6 +23,22 @@
 #include <vector>
 
 namespace strata::core {
+
+// The file lineage of one place a live conversation sits in (the main session, a batch slot): what its last turn
+// save left, so the next one may write only what changed.  Written by the folder's writer, read by the serve loop.
+struct SessionTurnTrack {
+    std::atomic<uint64_t> commit{0}, written_seq{0};
+    std::atomic<bool> broken{false};        // a turn save did not land (or its file wants a rewrite): capture whole next
+    std::atomic<int64_t> saved_tokens{-1};
+    std::string path;                       // (the writer's)
+};
+struct SessionTurnJob {
+    std::shared_ptr<SessionLogTurn> turn;
+    std::shared_ptr<SessionTurnTrack> track;
+    uint64_t seq = 0, base_seq = 0;         // this capture, and the one a delta continues
+    double capture_ms = 0.0;                // what the capture cost the serve thread (for the log line)
+    std::string label;                      // "main", "slot 3"
+};
 
 class SessionDir {
 public:
@@ -40,6 +57,10 @@ public:
         size_t preload_files = 0;
         std::chrono::milliseconds write_delay{30000};   // a parked image is written this long after it was parked
         uint64_t min_free_bytes = 4ull << 30;  // a write is refused when the disk would keep less than this free
+        // background writes go to appending files (session_log.hpp): a conversation's next save extends its own file
+        // by what changed instead of writing it whole again.  Off (or unsupported): v1/v2 files, as before.
+        bool append = true;
+        SessionLogOptions log_format;
         std::function<void(const std::string&)> log;
         // machine-readable notes for the server, one line each (no newline): an event
         // ("sess_event=<what> sess_tokens=N sess_bytes=B sess_ms=T sess_why=<why>") and, after every change, the
@@ -71,6 +92,19 @@ public:
     // and waited for until it has stopped, with a watchdog beat each time it moves.  A write already in its flush or
     // publish is waited for to the end (it still reads the image to index the file).
     void claim(const SavedConversation* image);
+    // A turn of a conversation that stays where it is, captured by the caller: written at once, in order, to that
+    // conversation's appending file.  A delta lands only on the file its track names at the commit it continues.
+    void write_turn(SessionTurnJob job);
+    // Whether `image` is safe on disk: written (its file, or a newer file of the same conversation, is in the folder),
+    // or still on its way there.
+    enum class Saved { no, queued, writing, yes };
+    Saved saved(const std::shared_ptr<const SavedConversation>& image) const;
+    // RAM is wanted: `image`'s queued write starts now instead of after write_delay (nullptr: every queued write of an
+    // image only the queue still holds - what the cache already let go of is freed when its write ends).
+    // Returns how many writes were moved up.
+    size_t expedite(const SavedConversation* image = nullptr);
+    // The RAM of images only the writer still holds (queued or being written): it comes back as their writes end.
+    uint64_t orphan_bytes() const;
     // The images the preload has read, for the caller's cache (each file's image once).
     std::vector<SavedConversation> take_preloaded();
     // The on-disk conversation that continues `ids` furthest when it beats `beat` tokens, read now (or waited for
@@ -101,10 +135,12 @@ private:
         return o_.id_yarn.config != 0 && s.live.rope_level == 1 ? o_.id_yarn : o_.id;
     }
 
-    enum class State { idle, loading, preloaded };
+    enum class State { idle, loading, preloaded, writing };   // writing: the writer is extending this file
     struct Entry {
         std::string path;
         SessionPeek peek;
+        bool log = false;                      // an appending file (session_log.hpp)
+        std::weak_ptr<const SavedConversation> image;   // the parked image it was last written from (saved())
         uint64_t seq = 0;                      // recency: higher is newer
         std::chrono::system_clock::time_point used;   // last written or resumed (the file's mtime across restarts)
         State state = State::idle;
@@ -120,7 +156,9 @@ private:
 
     void say(const std::string& m) const;
     void add_written_locked(const std::string& path, const SavedConversation& image, size_t written, double s,
-                            const char* what, const std::vector<ConversationCheckpoint>* chain = nullptr);
+                            const char* what, const std::vector<ConversationCheckpoint>* chain = nullptr,
+                            const std::shared_ptr<const SavedConversation>& from = nullptr,
+                            const SessionLogStats* log = nullptr);
     void writer_loop();
     void preload_loop();
     bool read_file(const std::string& path, SavedConversation& image, std::string& error) const;
@@ -144,6 +182,9 @@ private:
     std::atomic<const SavedConversation*> write_cancel_{nullptr};
     std::vector<Entry> entries_;
     std::deque<Job> jobs_;
+    std::deque<SessionTurnJob> turn_jobs_;
+    bool turn_busy_ = false;
+    void turn_write(std::unique_lock<std::mutex>& lk);
     std::vector<Ready> ready_;
     const SavedConversation* writing_ = nullptr;
     std::shared_ptr<const SavedConversation> writing_img_;   // the running write's image (fetch can take it back)
