@@ -40,7 +40,7 @@ Drafter* load(const std::string& path, int C, int ctx, cublasHandle_t blas, cuda
 void destroy(Drafter* d);
 bool matrices_q8(const Drafter* d);
 bool context_fp8(const Drafter* d);
-/// The rows of the context cache of the layer without a window (IK2_DRAFT_CTX, default ctx).
+/// The rows of the context cache of the layer without a window (SAGUARO_IK2_DRAFT_CTX, default ctx).
 int context_rows(int ctx);
 /// The Markov head's bias folded through the target's output head (FP16 [n_rows][C], on the device).
 void fold(Drafter* d, const uint16_t* lm_f16, int n_rows);

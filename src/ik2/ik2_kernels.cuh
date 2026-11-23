@@ -518,7 +518,7 @@ void draft_attn_dyn_fp8(const float* q, const uint8_t* kc, const uint8_t* vc, co
                         float* out, cudaStream_t s, int cap);
 size_t draft_attn_scratch(int H);
 /// A context of FP8 or FP16 rows goes through the tensor cores (q and the probabilities FP16 there: the drafts
-/// only); IK2_DRAFT_ATTN=scalar, AMD and Volta: the F32 kernels.
+/// only); SAGUARO_IK2_DRAFT_ATTN=scalar, AMD and Volta: the F32 kernels.
 bool draft_attn_mma();
 /// y [n] = E4M3 of x [n] * scale (saturating at +-448).
 void to_e4m3(const float* x, size_t n, float scale, uint8_t* y, cudaStream_t s);

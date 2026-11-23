@@ -369,7 +369,7 @@ struct Drafter {
     std::vector<float> hout_b;      // host, for the fold (the original's BF16 values)
     uint16_t *fold_w = nullptr, *fold_b = nullptr;   // FP16 [R][n_rows], [n_rows]
     // the fold as int8 [R][n_rows], a row's scale apart (fold_sc [R]; xs = latent * fold_sc a draft): half the bytes
-    // a draft reads - fold_w is then gone after the load.  IK2_DRAFT_FOLD=f16: the FP16 table
+    // a draft reads - fold_w is then gone after the load.  SAGUARO_IK2_DRAFT_FOLD=f16: the FP16 table
     int8_t* fold_q = nullptr;
     float *fold_sc = nullptr, *fold_xs = nullptr;
     int n_rows = 0;
@@ -696,7 +696,7 @@ const std::vector<int>& tap_layers() {
 }
 
 int context_rows(int ctx) {
-    // (IK2_DRAFT_CTX: the positions the layer without a window sees, the last ones; default the whole context)
+    // (SAGUARO_IK2_DRAFT_CTX: the positions the layer without a window sees, the last ones; default the whole context)
     const int want = getenv("SAGUARO_IK2_DRAFT_CTX") ? std::atoi(getenv("SAGUARO_IK2_DRAFT_CTX")) : ctx;
     return std::min(ctx, std::max(want, 2048));
 }
@@ -779,7 +779,7 @@ Drafter* load(const std::string& path, int C, int ctx, cublasHandle_t blas, cuda
             l.kc = dalloc<float>((size_t) l.cap * KV * 128);
             l.vc = dalloc<float>((size_t) l.cap * KV * 128);
             d->vram += (size_t) l.cap * KV * 128 * 8;
-        } else if (kv8) {   // (the whole context, or IK2_DRAFT_CTX's last positions: FP8 - 2 KiB a position)
+        } else if (kv8) {   // (the whole context, or SAGUARO_IK2_DRAFT_CTX's last positions: FP8 - 2 KiB a position)
             l.cap = d->cap;
             l.kc8 = dalloc<uint8_t>((size_t) l.cap * KV * 128);
             l.vc8 = dalloc<uint8_t>((size_t) l.cap * KV * 128);
@@ -1035,7 +1035,7 @@ void propose(Drafter* d, int anchor, const float* anchor_h, int P, const uint16_
         std::memcpy(&d->par_h[4], &inv_t, 4);
         if (noise) d->noise_cap = noise->cap;
     }
-    // (IK2_DRAFT_GRAPH=0: its launches one by one.  A drafter of ~75 short launches a step: queueing them took the
+    // (SAGUARO_IK2_DRAFT_GRAPH=0: its launches one by one.  A drafter of ~75 short launches a step: queueing them took the
     //  host 0.75 ms of a 2.7 ms step, the GPU waiting in between; recorded, a step is its kernels' 2.1 ms)
     static const bool graph_on = !(getenv("SAGUARO_IK2_DRAFT_GRAPH") && !atoi(getenv("SAGUARO_IK2_DRAFT_GRAPH")));
     const bool can = graph_on && d->q8 && d->head_q8 && d->head_tiles && !d->shortlist && proposals >= 1 &&

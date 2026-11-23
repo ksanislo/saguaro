@@ -7727,7 +7727,7 @@ void loop_gates(const LoopGate* gt, int n, int T, int C, int R, float eps, float
     for (int j = 0; j < n; ++j)
         a.x[j] = gt[j].x, a.m[j] = gt[j].m, a.D[j] = gt[j].D, a.F[j] = gt[j].F, a.G[j] = gt[j].G, a.y[j] = gt[j].y;
 #ifndef MAYA_USE_HIP
-    static const bool toks = !(getenv("IK2_GATE_TOKS") && !atoi(getenv("IK2_GATE_TOKS")));
+    static const bool toks = !(getenv("SAGUARO_IK2_GATE_TOKS") && !atoi(getenv("SAGUARO_IK2_GATE_TOKS")));
     if (toks && T <= 8 && C == 18 * 128)
         loop_gate_dots_toks_kernel<18><<<dim3((unsigned) R, (unsigned) n), 128, 0, s>>>(a, T, C, R, sc);
     else
@@ -7812,7 +7812,7 @@ static int draft_attn_mma_blocks(int Hkv) {
     }
     return std::clamp(blocks[dev] / std::max(1, Hkv), 1, kDaSplitMax);
 }
-// the drafter's attention on the tensor cores (FP8 / FP16 context rows; IK2_DRAFT_ATTN=scalar: the kernels before);
+// the drafter's attention on the tensor cores (FP8 / FP16 context rows; SAGUARO_IK2_DRAFT_ATTN=scalar: the kernels before);
 // par: a recorded graph's (the position on the device, the keys the span before it).  false: not here.
 template <class KVT>
 static bool draft_attn_mma_launch(const float* q, const KVT* kc, const KVT* vc, int k_lo, int k_hi, const int* par,
@@ -7824,7 +7824,7 @@ static bool draft_attn_mma_launch(const float* q, const KVT* kc, const KVT* vc, 
 #ifdef MAYA_USE_HIP
         return false;   // (AMD: mma16816 is shuffles there - the scalar kernels)
 #else
-        static const bool on = !(getenv("IK2_DRAFT_ATTN") && !std::strcmp(getenv("IK2_DRAFT_ATTN"), "scalar"));
+        static const bool on = !(getenv("SAGUARO_IK2_DRAFT_ATTN") && !std::strcmp(getenv("SAGUARO_IK2_DRAFT_ATTN"), "scalar"));
         if (!on || arch_class() < 75 || H % Hkv || nq * (H / Hkv) > 8 * kDaNT || (cap > 0 && cap < 16) ||
             (((uintptr_t) q | (uintptr_t) kc | (uintptr_t) vc) & 15))
             return false;
@@ -7932,7 +7932,7 @@ bool draft_attn_mma() {
 #ifdef MAYA_USE_HIP
     return false;
 #else
-    return arch_class() >= 75 && !(getenv("IK2_DRAFT_ATTN") && !std::strcmp(getenv("IK2_DRAFT_ATTN"), "scalar"));
+    return arch_class() >= 75 && !(getenv("SAGUARO_IK2_DRAFT_ATTN") && !std::strcmp(getenv("SAGUARO_IK2_DRAFT_ATTN"), "scalar"));
 #endif
 }
 void silu_mul_bf16(const float* gu, int T, int F, uint16_t* out, cudaStream_t s) {
@@ -8511,8 +8511,8 @@ static bool attn_decode_mma_toks_impl(const uint16_t* q16, int q_ld, const float
     const bool rel4 = d_rel % 4 == 0 && (((uintptr_t) r | (uintptr_t) proj) & 15) == 0 && r_ld % 4 == 0;
     // A layer without a sliding window: the tokens' queries on a key's rows read once, where their warps have the
     // same steps (decided on the device from the position: a replayed graph) - and the tokens' own blocks where not,
-    // which do nothing otherwise.  IK2_ATTN_SHARE=0: the tokens' own blocks always.
-    static const bool share_on = !(getenv("IK2_ATTN_SHARE") && !std::atoi(getenv("IK2_ATTN_SHARE")));
+    // which do nothing otherwise.  SAGUARO_IK2_ATTN_SHARE=0: the tokens' own blocks always.
+    static const bool share_on = !(getenv("SAGUARO_IK2_ATTN_SHARE") && !std::atoi(getenv("SAGUARO_IK2_ATTN_SHARE")));
     const int NC = T * (H / Hkv);
     const bool share = share_on && window >= (1 << 30) && kv_cap == 0 && T >= 2 && T <= 8 && NC <= 24;
     if (share) {
@@ -8839,7 +8839,7 @@ void experts_block_down_q8(const uint8_t* const* blob, const int* n, const int* 
 
 bool mv_q8p_cols_alts(int K, int T, const MvAlt& a0, const MvAlt& a1) {
 #ifndef MAYA_USE_HIP
-    static const bool ahead = !(getenv("IK2_COLS_AHEAD") && !atoi(getenv("IK2_COLS_AHEAD")));
+    static const bool ahead = !(getenv("SAGUARO_IK2_COLS_AHEAD") && !atoi(getenv("SAGUARO_IK2_COLS_AHEAD")));
     auto whole = [](const MvAlt& a) { return a.n == 0 || (a.r0 % 16 == 0 && a.n % 16 == 0); };
     return ahead && T >= 2 && T <= 8 && (K == 18 * 128 || K == 24 * 128) && whole(a0) && whole(a1);
 #else
@@ -8859,8 +8859,8 @@ void mv_q8p_cols(const int8_t* q, const uint16_t* d, int N, int K, const float* 
     }
 #ifndef MAYA_USE_HIP
     // (K of 18 or 24 steps of 128 - Inkling 2's widths - and 2 .. 8 tokens: the straight-line kernel, loads ahead;
-    //  IK2_COLS_AHEAD=0: the kernel below)
-    static const bool ahead = !(getenv("IK2_COLS_AHEAD") && !atoi(getenv("IK2_COLS_AHEAD")));
+    //  SAGUARO_IK2_COLS_AHEAD=0: the kernel below)
+    static const bool ahead = !(getenv("SAGUARO_IK2_COLS_AHEAD") && !atoi(getenv("SAGUARO_IK2_COLS_AHEAD")));
     if (ahead && T >= 2 && (K == 18 * 128 || K == 24 * 128)) {
         constexpr int W4 = 4, R4 = 4;
         const unsigned g4 = (unsigned) ((N + W4 * R4 - 1) / (W4 * R4));
