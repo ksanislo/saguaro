@@ -64,20 +64,20 @@ class Picker(unittest.TestCase):
 
     def test_amd_gets_a_recommendation(self):
         fam, got = self.pick([rx9070(), IGPU])
-        self.assertEqual(fam, "glm")
-        self.assertEqual(got["rows"][maya.FAMILIES.index("glm")][1], "recommended for this PC")
+        self.assertEqual(fam, "ik2")   # (one 16 GB RDNA card: Inkling 2 Mini, measured on an RX 9070 XT)
+        self.assertEqual(got["rows"][maya.FAMILIES.index("ik2")][1], "recommended for this PC")
 
     def test_models_without_an_amd_engine_are_marked(self):
         _, got = self.pick([rx9070()])
-        for fam in ("hy4", "ik2"):
+        for fam in ("hy4",):
             label, note, about = got["rows"][maya.FAMILIES.index(fam)]
             self.assertEqual(note, "not on this PC's GPU yet")
             self.assertIn("NVIDIA GPUs only", about)
-        for fam in ("glm", "qwen"):
+        for fam in ("glm", "qwen", "ik2"):
             self.assertNotEqual(got["rows"][maya.FAMILIES.index(fam)][1], "not on this PC's GPU yet")
 
     def test_picking_one_stops_plainly(self):
-        text, stopped = output(lambda: self.pick([rx9070()], answer="ik2"))
+        text, stopped = output(lambda: self.pick([rx9070()], answer="hy4"))
         self.assertTrue(stopped)
         self.assertIn("not supported on this PC's GPU yet", text)
         self.assertNotIn("Fix the item above", text)
@@ -88,8 +88,8 @@ class Picker(unittest.TestCase):
 
     def test_family_fit(self):
         with patch.object(maya, "mem_gb", return_value=(92.0, 86.0)), patch.object(maya, "WIN", False):
-            self.assertEqual(maya.family_fit([rx9070()], 92.0, "hip"), "glm")
-            self.assertIsNone(maya.family_fit([rx9070()], 32.0, "hip"))      # (no GLM quant fits 48 GB)
+            self.assertEqual(maya.family_fit([rx9070()], 92.0, "hip"), "ik2")
+            self.assertEqual(maya.family_fit([rx9070(), rx9070(1)], 92.0, "hip"), "glm")   # (Inkling: one AMD GPU)
             self.assertIsNone(maya.family_fit([], 92.0, "hip"))
             self.assertEqual(maya.family_fit([t4()], 92.0), "ik2")
 
@@ -97,7 +97,7 @@ class Picker(unittest.TestCase):
         with patch.object(maya, "WIN", False):
             self.assertIsNone(maya.family_unavailable("glm", "hip"))
             self.assertIn("NVIDIA GPUs only", maya.family_unavailable("hy4", "hip"))
-            self.assertIn("NVIDIA GPUs only", maya.family_unavailable("ik2", "hip"))
+            self.assertIsNone(maya.family_unavailable("ik2", "hip"))
             self.assertIsNone(maya.family_unavailable("hy4", "cuda"))
             self.assertIn("GLM-5.3-Flash only", maya.family_unavailable("deepseek", "metal"))
         with patch.object(maya, "WIN", True):

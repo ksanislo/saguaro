@@ -764,8 +764,9 @@ class DeletePage(Served):
 
 # saguaro-ik2 stops at a flag it does not know: all a config of it may carry (--serve is the server's own)
 IK2_VALUE_FLAGS = {"--model", "--max-context", "--ctx", "--cache-gb", "--gpus", "--threads", "--chunk", "--draft",
-                   "--eos", "--image-token", "--dump"}
-IK2_BARE_FLAGS = {"--tokens", "--gen", "--plan"}
+                   "--eos", "--image-token", "--dump", "--drafting", "--parallel", "--kv-streaming", "--kv-resident",
+                   "--user-token"}
+IK2_BARE_FLAGS = {"--tokens", "--gen"}
 
 
 class Inkling2(unittest.TestCase):
@@ -795,11 +796,12 @@ class Inkling2(unittest.TestCase):
         self.assertEqual(M.family(self.cfg), "ik2")
         self.assertEqual(M.settings_of(self.cfg),
                          {"context": 131072, "gpus": [2, 3], "images": True, "prefill_chunk": 8192,
-                          "cpu_threads": 8, "kv": "f16",
+                          "cpu_threads": 8, "kv": "f16", "draft": "none", "parallel": 1,
                           "env": {"CUDA_DEVICE_ORDER": "PCI_BUS_ID", "SAGUARO_IK2_ROOM_MB": "1024",
                                   "SAGUARO_IK2_STATS": "1",
+                                  "SAGUARO_IK2_WARM": "data/expert-profile-ik2mini.bin",
                                   "SAGUARO_IK2_SLOT_DIR": "var/Inkling-2-Mini-UD-Q4_K_XL/sessions"}})
-        self.assertEqual(M.choices(self.cfg), {"draft": [], "images": True})
+        self.assertEqual(M.choices(self.cfg), {"draft": ["none"], "images": True})   # (two GPUs: no drafting)
         self.assertEqual(self.sound(M.apply(self.cfg, M.settings_of(self.cfg))), self.cfg)   # (as it is: nothing moves)
 
     def test_each_setting(self):
@@ -821,6 +823,20 @@ class Inkling2(unittest.TestCase):
         self.assertEqual((off.get("vision"), off["vision_off"]), (None, self.cfg["vision"]))
         self.assertEqual(M.apply(off, {"images": True})["vision"], self.cfg["vision"])
 
+    def test_answers_at_once_and_drafting(self):
+        """--parallel N written where it changes (the engine takes it on one GPU holding every expert, else says so);
+        drafting where it runs - an sm_80+ card holding every expert."""
+        two = self.sound(M.apply(self.cfg, {"parallel": 2}))
+        self.assertEqual(M.flag(two["args"], "--parallel"), "2")
+        self.assertEqual(M.settings_of(two)["parallel"], 2)
+        self.assertEqual(M.flag(M.apply(two, {"parallel": 1})["args"], "--parallel"), "1")
+        one = dict(self.cfg, gpu=[0], args=[a if a != "2" else "1" for a in self.cfg["args"]])
+        with mock.patch.object(M, "machine_gpus", lambda b="cuda": [{"index": 0, "arch": "86", "vram_gb": 24.0}]):
+            self.assertEqual(M.choices(dict(one, args=one["args"][:3] + ["32768"] + one["args"][4:]))["draft"],
+                             ["auto", "none"])
+        with mock.patch.object(M, "machine_gpus", lambda b="cuda": [{"index": 0, "arch": "75", "vram_gb": 15.0}]):
+            self.assertEqual(M.choices(one)["draft"], ["none"])
+
     def test_its_other_name_for_the_context(self):
         cfg = dict(self.cfg, args=["--ctx" if a == "--max-context" else a for a in self.cfg["args"]])
         self.assertEqual(M.settings_of(cfg)["context"], 131072)
@@ -828,7 +844,7 @@ class Inkling2(unittest.TestCase):
         self.assertEqual((M.flag(new["args"], "--ctx"), M.flag(new["args"], "--max-context")), ("32768", None))
 
     def test_what_its_engine_does_not_read_is_refused(self):
-        for bad in ({"parallel": 2}, {"kv_streaming": True}, {"kv_resident": 4096}, {"reserve_mib": 700}, {"tp": 2},
+        for bad in ({"parallel": 9}, {"draft": "auto"}, {"kv_streaming": True}, {"kv_resident": 4096}, {"reserve_mib": 700}, {"tp": 2},
                     {"draft": "mtp"}, {"expert_cache": 100}, {"prefill": 512}, {"kv_cache": "int8"}, {"dspark_conf": 0.3},
                     {"reserve_gb": 1}, {"cache_gb": 2}, {"mmap": "on"}, {"prompt_lookup": True}, {"ram_gb": 8},
                     {"gpus": [0, 1, 2]}, {"gpus": []}, {"kv": "int8"}, {"context": 0},
@@ -836,7 +852,8 @@ class Inkling2(unittest.TestCase):
                     {"env": {"SAGUARO_DS4_RAM_SKIP_W": "0.14"}}):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 M.apply(self.cfg, bad)
-        self.assertIn("not a setting of this model", self.raised({"parallel": 2}))
+        self.assertIn("not a setting of this model", self.raised({"tp": 2}))
+        self.assertIn("Drafting: not on this GPU", self.raised({"draft": "auto"}))
         self.assertIn("one or two", self.raised({"gpus": [0, 1, 2]}))
         self.assertIn("SAGUARO_IK2_", self.raised({"env": {"SAGUARO_GLM_KV_RESIDENT": "1"}}))
 
@@ -883,7 +900,7 @@ class Inkling2(unittest.TestCase):
         out = svc.model_settings(self.p.name, {"cpu_threads": 12}, dry_run=True)
         self.assertEqual(M.flag(out["command"]["args"], "--threads"), "12")
         with self.assertRaises(ValueError):
-            svc.model_settings(self.p.name, {"parallel": 2})
+            svc.model_settings(self.p.name, {"tp": 2})
         self.assertEqual(M.read(self.p), self.cfg)
 
 

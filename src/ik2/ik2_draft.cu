@@ -154,6 +154,7 @@ struct Drafter {
     int n_rows = 0;
     const int8_t* head_q8 = nullptr;      // the target's head as planar Q8_0 (set_head_q8): the base logits through it
     const uint16_t* head_q8d = nullptr;
+    bool head_tiles = true;               // its product on the tensor cores (q8_tile: sm_80 on), else mv_q8p_cols
     int* shortlist = nullptr;
     float* shortlist_scores = nullptr;
     cublasHandle_t blas;
@@ -162,11 +163,6 @@ struct Drafter {
     // work
     float *x, *res, *h, *q, *kk, *vv, *o, *gu, *f_rnn, *base, *state, *latent, *proj, *scratch, *mix;
     uint16_t *hb, *hb2, *rnn_in;
-    // before sm_80 (no BF16 tensor cores): the matrices whose every value is exact in FP16 are kept FP16, and a
-    // product with one takes its BF16 input as FP16 (xh)
-    bool f16 = false;
-    std::vector<const uint16_t*> w16;
-    uint16_t* xh = nullptr;
     __half* x16;
     int *pos, *ctx_pos, *toks;
     int* h_out = nullptr;   // pinned host [kBlock - 1]
@@ -245,32 +241,6 @@ uint16_t* up16(Drafter* d, const std::vector<uint16_t>& v) {
     d->vram += v.size() * 2;
     return p;
 }
-// FP16 bits of a BF16 value when FP16 holds it exactly (8 bits of mantissa, in range)
-bool bf16_as_f16(uint16_t b, uint16_t& h) {
-    const uint32_t sign = (uint32_t) (b >> 15) << 15, e = (b >> 7) & 0xFF, m = b & 0x7F;
-    if (e == 0 && m == 0) return h = (uint16_t) sign, true;
-    if (e == 0 || e == 0xFF) return false;   // (a BF16 subnormal is under FP16's; inf / NaN: left to BF16)
-    const int ex = (int) e - 127;
-    if (ex > 15) return false;
-    if (ex >= -14) return h = (uint16_t) (sign | (uint32_t) (ex + 15) << 10 | m << 3), true;
-    const int sh = -14 - ex;   // subnormal: (1.m) 2^ex = k 2^-24, k = (0x80 | m) << 3 >> sh
-    const uint32_t k = (0x80u | m) << 3;
-    if (sh > 10 || (k & ((1u << sh) - 1))) return false;
-    return h = (uint16_t) (sign | k >> sh), true;
-}
-// a matrix the BF16 GEMMs take: FP16 on a GPU before sm_80, which needs it exact (cuBLAS there rejects BF16)
-uint16_t* up16w(Drafter* d, std::vector<uint16_t> v) {
-    if (d->f16) {
-        std::vector<uint16_t> h(v.size());
-        bool exact = true;
-        for (size_t i = 0; i < v.size() && exact; ++i) exact = bf16_as_f16(v[i], h[i]);
-        if (!exact) throw std::runtime_error("drafter: the draft weights are not FP16-exact, which a GPU before sm_80 needs");
-        uint16_t* p = up16(d, h);
-        d->w16.push_back(p);
-        return p;
-    }
-    return up16(d, v);
-}
 float* up32(Drafter* d, const std::vector<uint16_t>& v) {
     std::vector<float> f(v.size());
     for (size_t i = 0; i < v.size(); ++i) f[i] = bf(v[i]);
@@ -282,14 +252,11 @@ float* up32(Drafter* d, const std::vector<uint16_t>& v) {
 
 // Y [T][N] (ldy) = X [T][K] BF16 . W [N][K]^T BF16, F32 sums
 void gemm_bf(Drafter* d, const uint16_t* W, int N, int K, const uint16_t* X, int T, float* Y, int ldy) {
+#ifdef STRATA_USE_HIP   // (AMD: the BLAS's kernels for 8 rows read the weights at a fifth of the bus - the drafter's
+                        //  block on a kernel of ours, the weights read once; the drafts only, never an answer)
+    if (k::gemm_bf16_cols(W, N, K, X, T, Y, ldy, d->s)) return;
+#endif
     const float one = 1.0f, zero = 0.0f;
-    if (std::find(d->w16.begin(), d->w16.end(), W) != d->w16.end()) {
-        k::bf16_to_f16(X, (size_t) T * K, d->xh, d->s);
-        cb(cublasGemmEx(d->blas, CUBLAS_OP_T, CUBLAS_OP_N, N, T, K, &one, W, CUDA_R_16F, K, d->xh, CUDA_R_16F, K, &zero, Y,
-                        CUDA_R_32F, ldy, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT),
-           "gemm_bf (FP16)");
-        return;
-    }
     cb(cublasGemmEx(d->blas, CUBLAS_OP_T, CUBLAS_OP_N, N, T, K, &one, W, CUDA_R_16BF, K, X, CUDA_R_16BF, K, &zero, Y,
                     CUDA_R_32F, ldy, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT),
        "gemm_bf");
@@ -311,7 +278,7 @@ void layer_attn(Drafter* d, DLayer& l, int P, float* out) {
     k::rms(d->kk, l.k_norm, T * d->KV, 128, d->eps, d->kk, d->s);
     k::rope_neox(d->q, T, d->H, d->pos, d->theta, d->s);
     k::rope_neox(d->kk, T, d->KV, d->pos, d->theta, d->s);
-    // Local layers (0, 1, 3, 4) match SGLang inkling2_mtp.py's window_anchor_at_start=True with window=1024:
+    // Local layers (0, 1, 3, 4): a window of 1024 positions anchored at the block's start -
     // every query in the block [P .. P+7] sees context [max(0, P - 1023) .. P-1] plus all 8 block tokens.
     const int k_lo = l.local ? std::max(0, P - 1023) : std::max(0, P - l.cap);
     if (l.kc16)
@@ -343,12 +310,6 @@ Drafter* load(const std::string& path, int C, int ctx, cublasHandle_t blas, cuda
     const StFile f = st_open(path);
     auto* d = new Drafter;
     d->C = C, d->ctx = ctx, d->blas = blas, d->s = s;
-    {
-        int dev = 0, major = 0;
-        cu(cudaGetDevice(&dev), "device");
-        cu(cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev), "device");
-        d->f16 = major < 8 && !(getenv("SAGUARO_IK2_DRAFT_F16") && !std::atoi(getenv("SAGUARO_IK2_DRAFT_F16")));
-    }
     {
         // (SAGUARO_IK2_DRAFT_CTX: the positions the layer without a window sees, the last ones; default the whole context)
         const int want = getenv("SAGUARO_IK2_DRAFT_CTX") ? std::atoi(getenv("SAGUARO_IK2_DRAFT_CTX")) : ctx;
@@ -394,19 +355,19 @@ Drafter* load(const std::string& path, int C, int ctx, cublasHandle_t blas, cuda
         l.q_norm = up32(d, st_bf16(f, b + "self_attn.q_norm.weight", {128}));
         l.k_norm = up32(d, st_bf16(f, b + "self_attn.k_norm.weight", {128}));
         l.k_norm_ctx = up32(d, st_bf16(f, b + "self_attn.k_norm_ctx.weight", {128}));
-        l.wq = up16w(d, st_bf16(f, b + "self_attn.q_proj.weight", {H * 128, C}));
-        l.wk = up16w(d, st_bf16(f, b + "self_attn.k_proj.weight", {KV * 128, C}));
-        l.wv = up16w(d, st_bf16(f, b + "self_attn.v_proj.weight", {KV * 128, C}));
-        l.wo = up16w(d, st_bf16(f, b + "self_attn.o_proj.weight", {C, H * 128}));
-        l.wkc = up16w(d, st_bf16(f, b + "self_attn.k_proj_ctx.weight", {KV * 128, C}));
-        l.wvc = up16w(d, st_bf16(f, b + "self_attn.v_proj_ctx.weight", {KV * 128, C}));
+        l.wq = up16(d, st_bf16(f, b + "self_attn.q_proj.weight", {H * 128, C}));
+        l.wk = up16(d, st_bf16(f, b + "self_attn.k_proj.weight", {KV * 128, C}));
+        l.wv = up16(d, st_bf16(f, b + "self_attn.v_proj.weight", {KV * 128, C}));
+        l.wo = up16(d, st_bf16(f, b + "self_attn.o_proj.weight", {C, H * 128}));
+        l.wkc = up16(d, st_bf16(f, b + "self_attn.k_proj_ctx.weight", {KV * 128, C}));
+        l.wvc = up16(d, st_bf16(f, b + "self_attn.v_proj_ctx.weight", {KV * 128, C}));
         {
             auto g = st_bf16(f, b + "mlp.gate_proj.weight", {F, C});
             const auto u = st_bf16(f, b + "mlp.up_proj.weight", {F, C});
             g.insert(g.end(), u.begin(), u.end());   // gate's rows, then up's
-            l.wgu = up16w(d, g);
+            l.wgu = up16(d, g);
         }
-        l.wd = up16w(d, st_bf16(f, b + "mlp.down_proj.weight", {C, F}));
+        l.wd = up16(d, st_bf16(f, b + "mlp.down_proj.weight", {C, F}));
         if (l.local) {   // (a window of 1024: a ring of 2048 rows, F32)
             l.cap = std::min(ctx, 2048);
             l.kc = dalloc<float>((size_t) l.cap * KV * 128);
@@ -423,7 +384,7 @@ Drafter* load(const std::string& path, int C, int ctx, cublasHandle_t blas, cuda
     d->mask = up32(d, st_bf16(f, "mask_embed", {C}));
     d->mk_dflare = up32(d, st_bf16(f, "markov_head.dflare_norm.weight", {C}));
     d->w1 = up16(d, st_bf16(f, "markov_head.markov_w1.weight", {d->V, R}));
-    d->rnn_w = up16w(d, st_bf16(f, "markov_head.rnn_proj.weight", {3 * R, 2 * R + 2 * C}));
+    d->rnn_w = up16(d, st_bf16(f, "markov_head.rnn_proj.weight", {3 * R, 2 * R + 2 * C}));
     d->rnn_b = up32(d, st_bf16(f, "markov_head.rnn_proj.bias", {3 * R}));
     d->hout_w = st_bf16(f, "markov_head.hidden_out.weight", {C, R});
     d->hout_b = st_bf16(f, "markov_head.hidden_out.bias", {C});
@@ -435,9 +396,6 @@ Drafter* load(const std::string& path, int C, int ctx, cublasHandle_t blas, cuda
     d->gu = dalloc<float>(T * 2 * F);
     d->hb = dalloc<uint16_t>(std::max<size_t>(T * std::max<int64_t>(C, H * 128), (size_t) kMixRows * C));
     d->hb2 = dalloc<uint16_t>(T * F);
-    if (d->f16)
-        d->xh = dalloc<uint16_t>(std::max<size_t>({T * std::max<int64_t>(C, H * 128), (size_t) kMixRows * C, T * F,
-                                                   (size_t) (2 * R + 2 * C)}));
     // (draft_attn's: the logits [H][8][<= cap + T + chunk padding], the chunks' outputs [64][H][8][128], (max, sum))
     d->ctx_tmp = dalloc<float>((size_t) 2 * kMixRows * KV * 128);
     d->scratch = dalloc<float>((size_t) H * 8 * (d->cap + T + 512) + (size_t) 64 * H * 8 * 130);
@@ -548,7 +506,9 @@ void propose(Drafter* d, int anchor, const float* anchor_h, int P, const uint16_
     k::rms(d->res, d->norm, T, C, d->eps, d->h, d->s);   // the draft hidden, rows 1 .. 7 used
     // base logits of rows 1 .. 7 through the target's head
     k::to_f16(d->h + C, (size_t) proposals * C, (uint16_t*) d->x16, d->s);
-    if (d->head_q8)
+    if (d->head_q8 && !d->head_tiles)
+        k::mv_q8p_cols(d->head_q8, d->head_q8d, n_rows, C, d->h + C, C, proposals, d->base, n_rows, d->s);
+    else if (d->head_q8)
         k::q8_tile(d->head_q8, d->head_q8d, n_rows, C, (const uint16_t*) d->x16, proposals, d->base, n_rows, d->s);
     else
         gemm_h(d, lm_f16, n_rows, C, d->x16, proposals, d->base, n_rows);
@@ -556,8 +516,8 @@ void propose(Drafter* d, int anchor, const float* anchor_h, int P, const uint16_
     if (d->shortlist)
         draft_shortlist<<<dim3((n_vocab + 127) / 128, proposals), 128, 0, d->s>>>(
             d->base, n_rows, n_vocab, shortlist_n, d->shortlist);
-    // the Markov head, a token at a time (note: k::rnn_gates keeps state/latent in F32 whereas SGLang mtp.py
-    // rounds intermediate gate/tanh ops to BF16; fused argmax_gemv_f16 reads FP16 fold_w/fold_b + F32 base/latent)
+    // the Markov head, a token at a time (note: k::rnn_gates keeps state/latent in F32, its gate/tanh steps not
+    // rounded to BF16 between them; fused argmax_gemv_f16 reads FP16 fold_w/fold_b + F32 base/latent)
     cu(cudaMemsetAsync(d->state, 0, d->R * 4, d->s), "state");
     for (int t = 0; t < proposals; ++t) {
         k::rnn_inputs(d->state, d->w1, d->toks + t, d->h + (size_t) (t + 1) * C, d->f_rnn, d->R, C, d->rnn_in, d->s);
@@ -580,6 +540,16 @@ void propose(Drafter* d, int anchor, const float* anchor_h, int P, const uint16_
 }
 
 size_t bytes(const Drafter* d) { return d->vram; }
-void set_head_q8(Drafter* d, const int8_t* q8, const uint16_t* q8d) { d->head_q8 = q8, d->head_q8d = q8d; }
+void set_head_q8(Drafter* d, const int8_t* q8, const uint16_t* q8d) {
+    d->head_q8 = q8, d->head_q8d = q8d;
+    int dev = 0, major = 0;
+    cu(cudaGetDevice(&dev), "cudaGetDevice");
+    cu(cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev), "cudaDeviceGetAttribute");
+#ifdef STRATA_USE_HIP
+    d->head_tiles = false;        // (AMD: mma.sync is emulated on the shuffles - the row sums read the head once)
+#else
+    d->head_tiles = major >= 8;   // (no mma.sync m16n8k16 before Ampere)
+#endif
+}
 
 }  // namespace ik2::draft

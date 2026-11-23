@@ -199,8 +199,8 @@ class Ik2Installed(unittest.TestCase):
         self.assertEqual(d["contexts"], M.IK2_CONTEXTS)
         self.assertEqual(d["context_range"]["tested"], 131072)
         self.assertEqual(d["needs"], {"cards": 1, "measured": True,
-                                      "limits": ["one conversation at a time", "no saved conversations yet"]})
-        self.assertNotIn("draft", d["settings"])
+                                      "limits": ["several conversations at once only on one GPU that holds every expert"]})
+        self.assertEqual((d["settings"]["draft"], d["settings"]["parallel"]), ("none", 1))
 
     def test_what_is_missing_is_said(self):
         self.vocab.unlink()
@@ -242,7 +242,7 @@ class Catalog(unittest.TestCase):
                          {"hy4-flash-maya-xs", "hy4-flash-maya-s", "hy4-flash-maya-m", "hy4-flash-maya-l"})
         ik = c["inkling-2-mini"]
         self.assertEqual((ik["family"], ik["name"], ik["size_gb"]), ("ik2", "Inkling 2 Mini · unsloth UD-Q4_K_XL", 18.3))
-        self.assertIn("One or two NVIDIA cards with 16 GB", ik["needs"])
+        self.assertIn("one or two NVIDIA cards with 8 GB", ik["needs"])
         self.assertIn("four 16 GB NVIDIA cards", c["hy4-flash-maya-s"]["needs"])
         self.assertEqual((ik["fit"], ik["recommended"]), ("", False))          # (no card read: nothing claimed)
         self.assertNotIn("needs", c["glm-maya-s"])
@@ -251,7 +251,7 @@ class Catalog(unittest.TestCase):
         c = self.cat([t4()])
         ik = c["inkling-2-mini"]
         self.assertTrue(ik["recommended"])
-        for part in ("one 16 GB card", "quarter of the experts streamed from RAM", "32K context", "42 tok/s", "1x Tesla T4"):
+        for part in ("one 16 GB card", "the others in RAM (the offload path)", "32K context", "24 tok/s", "1x Tesla T4"):
             self.assertIn(part, ik["fit"])
         self.assertFalse(c["hy4-flash-maya-s"]["recommended"])
         self.assertIn("Inkling 2 Mini is the model for this PC", c["hy4-flash-maya-s"]["fit"])
@@ -259,7 +259,7 @@ class Catalog(unittest.TestCase):
     def test_two_t4s(self):
         ik = self.cat([t4(0), t4(1)])["inkling-2-mini"]
         self.assertTrue(ik["recommended"])
-        for part in ("two cards: every expert in VRAM", "131K context", "52 tok/s", "1130 tok/s", "2x Tesla T4"):
+        for part in ("two cards: every expert in VRAM", "131K context", "52 tok/s", "830 tok/s", "2x Tesla T4"):
             self.assertIn(part, ik["fit"])
 
     def test_four_t4s(self):
@@ -275,9 +275,10 @@ class Catalog(unittest.TestCase):
         self.assertFalse(self.cat([t4(i) for i in range(4)], 2.0)["hy4-flash-maya-s"]["recommended"])   # (no RAM for it)
 
     def test_a_card_too_small_or_too_old(self):
-        self.assertIn("16 GB of VRAM or more", self.cat([t4(0, 8.0)])["inkling-2-mini"]["fit"])
+        self.assertIn("8 GB of VRAM or more", self.cat([t4(0, 6.0)])["inkling-2-mini"]["fit"])
+        self.assertIn("the offload path", self.cat([t4(0, 8.0)])["inkling-2-mini"]["fit"])
         old = [{"index": 0, "name": "Tesla P40", "vram_gb": 24.0, "arch": "61"}]
-        self.assertIn("compute capability 7.5", self.cat(old)["inkling-2-mini"]["fit"])
+        self.assertIn("compute capability 7.0", self.cat(old)["inkling-2-mini"]["fit"])
 
     def test_installed_and_the_download_command(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -336,8 +337,10 @@ class Page(unittest.TestCase):
         self.assertIn('"STAT tok_s=%.2f ms_tok=%.2f vram_hit=%.4f cpu=%.3f"', HY4_SRC)
         self.assertIn('" engram_ms=%.3f\\n"', HY4_SRC)
         ik2 = (ROOT / "src" / "ik2" / "ik2_main.cu").read_text(encoding="utf-8")
-        self.assertIn('"INFO engine=ik2 engine_kind=ik2 model=Inkling-2 kv=%s ctx=%d gpus=%d\\n"', ik2)
-        self.assertNotIn('"STAT ', ik2)                                     # (no expert statistics from this engine)
+        self.assertIn('"INFO engine=ik2 engine_kind=ik2 model=Inkling-2 kv=%s ctx=%d gpus=%d dspark=%d lookup=%d "', ik2)
+        self.assertIn('"drafting=%s experts=%d parallel=%d watchdog_s=%d path=%s\\n"', ik2)
+        self.assertIn('"STAT tok_s=%.1f ms_tok=%.2f active=1 %s%s\\n"', ik2)
+        self.assertIn('"vram_used=%d ram_used=%d vram_gb=%.2f ram_gb=%.2f vram_hit=%.4f ram_fetch=%.2f "', ik2)
 
     def test_monitor_hy4_experts_card(self):
         # the 4x T4 config's first load: 14678 of 20992 routed experts in VRAM (70%)
@@ -357,12 +360,12 @@ console.log(JSON.stringify({{shares: sv.tierShares(n, eng), set: mon.tierSet(eng
         self.assertEqual((got["full"]["vu"], got["full"]["ru"]), (20992, 0))
 
     def test_monitor_ik2_says_where_its_experts_are(self):
-        one = info_of("INFO engine=ik2 engine_kind=ik2 model=Inkling-2 kv=f16 ctx=32768 gpus=1")
-        two = info_of("INFO engine=ik2 engine_kind=ik2 model=Inkling-2 kv=f16 ctx=131072 gpus=2")
+        one = info_of("INFO engine=ik2 engine_kind=ik2 model=Inkling-2 kv=f16 ctx=32768 gpus=1 experts=12288 path=offload")
+        two = info_of("INFO engine=ik2 engine_kind=ik2 model=Inkling-2 kv=f16 ctx=131072 gpus=2 experts=12288 path=resident")
         got = self.node(f"""
 const mon = await import(web + "/monitor.js");
 console.log(JSON.stringify([mon.ik2Experts({json.dumps(one)}), mon.ik2Experts({json.dumps(two)})]));""")
-        self.assertIn("quarter of the experts are streamed from RAM", got[0])
+        self.assertIn("fetches the others from pinned RAM", got[0])
         self.assertIn("Every expert is in VRAM", got[1])
         self.assertIn("2 GPUs", got[1])
 

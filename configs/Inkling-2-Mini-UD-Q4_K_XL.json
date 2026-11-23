@@ -16,6 +16,7 @@
   "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
   "SAGUARO_IK2_ROOM_MB": "1024",
   "SAGUARO_IK2_STATS": "1",
+  "SAGUARO_IK2_WARM": "data/expert-profile-ik2mini.bin",
   "SAGUARO_IK2_SLOT_DIR": "var/Inkling-2-Mini-UD-Q4_K_XL/sessions"
  },
  "cwd": ".",

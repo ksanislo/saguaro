@@ -11,7 +11,7 @@ The state of this version (keep this table, the setup's `NO_ENGINE` list in `sag
 | DeepSeek-V4.1-Flash-1017 | `saguaro-ds4` (`maya-ds4`) | compiles for HIP (gfx1201 checked); not yet run on an AMD GPU |
 | MiniMax-M3.1-Flash | `saguaro-mm3` (`maya-mm3`) | compiles for HIP (gfx1201 checked); not yet run on an AMD GPU |
 | Hy4-Flash | `saguaro-hy4` (`maya-hy4`) | not run on an AMD GPU yet: the setup does not offer it on AMD |
-| Inkling 2 Mini | `saguaro-ik2` | no HIP engine yet: the setup does not offer it on AMD |
+| Inkling 2 Mini | `saguaro-ik2` | builds and runs (experimental) on an RX 9070 XT (gfx1201, ROCm 7.1): UD-Q4_K_XL on the offload path about 59 tok/s, every serve check incl. pictures passes; the setup recommends it for one 16-23 GB RDNA 3 / 4 card |
 
 `./saguaro.sh --check` on an AMD PC lists the same. Report how a model runs on your card in an
 [issue](https://github.com/ksanislo/saguaro/issues).
@@ -226,6 +226,21 @@ text (`SAGUARO_GLM_MTP_DECODE`, on by default on `gfx115x` only). On the Gorgon 
 8065S, Maya-S, 32K context), 256-token answers run at 28.4-29.6 tokens/s to short prompts and at 23.2-23.5 after
 3K- and 8K-token prompts, against 18.4-19.7 without it; 3K- and 8K-token prompts read at 271 and 278 tokens/s
 (the fused prompt experts and the `wmma2` attention, both on by default on `gfx1151`).
+
+## Inkling 2 Mini (experimental)
+
+`./saguaro.sh --setup --backend hip --model inkling-2-mini` (Linux). Its engine (`saguaro-ik2`, upstream Maya v1.1.74's
+with Saguaro's additions) runs on an RDNA 3 / 3.5 / 4 GPU (gfx11 / gfx12) of 16 GB or more: every expert in VRAM where
+the file fits, else the offload path as on NVIDIA (the most-used experts in VRAM, the others pinned in RAM and fetched
+by the GPU). Checked on an RX 9070 XT (16 GB, gfx1201, ROCm 7.1, PCIe 5) with a Ryzen 7 9800X3D, 32K context:
+
+| | decode at ~50 / 8K / 30K tokens deep | 8K prompt read |
+| --- | ---: | ---: |
+| unsloth's UD-Q4_K_XL (offload path, 2,348 of 3,072 experts in VRAM) | 59.8 / 59.5 / 53.0 tok/s | 1,697 tok/s |
+| our one-T4 quant (every expert in VRAM; experimental, lower quality: KL 0.012 vs UD-Q4_K_XL) | 83.3 / 73.3 / 66.7 tok/s | 1,148 tok/s |
+
+Chat, thinking, tools, stops, pictures, the Monitor and kept conversations pass on both. Not checked on AMD yet:
+drafting, two AMD GPUs, a Strix / Gorgon Halo APU. [INKLING2.md](INKLING2.md) has the engine's AMD paths.
 
 ## Instinct MI300X / MI325X
 

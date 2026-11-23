@@ -277,7 +277,7 @@ function fieldsOf(m, d) {
       : glm && m.backend === "hip" ? "The setup does not build GLM's image encoder for AMD GPUs (HIP) yet: this model reads text only."
       : glm ? "This model was set up without its image encoder: the setup adds it." : "This pack has no vision tower."}>
     <${Switch} label="Images" on=${d.images} disabled=${!m.choices.images && !d.images} onChange=${(v) => setDraft({images: v})}/><//>`;
-  const gpus = html`<${Row} label="GPUs" flag="gpu" changed=${ch("gpus")} hint=${m.family === "ik2" ? "One or two GPUs: the engine deals its layers across them (--gpus)." : "The engine splits the model across the GPUs picked. At least one."}
+  const gpus = html`<${Row} label="GPUs" flag="gpu" changed=${ch("gpus")} hint=${m.family === "ik2" ? "One or two GPUs: on two, the first holds the dense weights, the cache and the experts it has room for, the second the next experts (--gpus 2); one card that cannot hold every expert keeps the rest in RAM." : "The engine splits the model across the GPUs picked. At least one."}
     below=${html`<div class="mdl-gpus">${(MS.data.gpus || []).map((g) => {
       const on = d.gpus.includes(g.index);
       return html`<button type="button" role="checkbox" aria-checked=${String(on)} class="mdl-gpu"
@@ -364,7 +364,9 @@ function fieldsOf(m, d) {
   ];
 }
 
-// Inkling 2's (saguaro-ik2: it stops at a flag it does not know, so only its own are offered; one answer at a time)
+// Inkling 2's (saguaro-ik2: it stops at a flag it does not know, so only its own are offered). Drafting where it runs
+// (m.choices.draft: "none" alone on Volta / Turing, the offload path and two GPUs); answers at once on one GPU that
+// holds every expert (elsewhere the engine answers one at a time and says so)
 const IK2_KV = [{id: "f16", label: "FP16"}, {id: "fp8", label: "FP8"}];
 function ik2Fields(m, d, ch, gpus) {
   const kvb = engineKvBytes(m, ch, "kv");
@@ -374,7 +376,15 @@ function ik2Fields(m, d, ch, gpus) {
       html`<${Row} label="Images" flag="vision" changed=${ch("images")}
         hint=${m.choices.images ? "Reads images in chats: the image encoder starts when a picture arrives, no VRAM kept for it. Off reads text only."
           : "This model was set up without its image encoder."}>
-        <${Switch} label="Images" on=${d.images} disabled=${!m.choices.images && !d.images} onChange=${(v) => setDraft({images: v})}/><//>`]},
+        <${Switch} label="Images" on=${d.images} disabled=${!m.choices.images && !d.images} onChange=${(v) => setDraft({images: v})}/><//>`,
+      html`<${Row} label="Drafting" flag=${"--drafting " + ({auto: "auto", dspark: "on"}[d.draft] || "off")} changed=${ch("draft")}
+        hint=${m.choices.draft.length < 2 ? "Not on this GPU or layout: Volta / Turing cards, a card that keeps experts in RAM and two GPUs decode without drafting."
+          : "The prompt lookup" + (m.choices.draft.includes("dspark") ? " and the model's own drafter (DSpark)" : "") + " draft tokens the model checks: the same answers, faster where drafts are kept. Auto measures once on this PC which is fastest."}>
+        <${Seg} label="Drafting" value=${d.draft} options=${[...(m.choices.draft.includes("auto") ? [{id: "auto", label: "Auto"}] : []), ...(m.choices.draft.includes("dspark") ? [{id: "dspark", label: "DSpark"}] : []), {id: "none", label: "Off"}]}
+          onChange=${(v) => setDraft({draft: v})}/><//>`,
+      html`<${Row} label="Answers at once" flag="--parallel" changed=${ch("parallel")}
+        hint="Several chats answered together, each with its own cache (the context shared out between them): more tokens a second in all. Only where one GPU holds every expert; elsewhere one at a time. Drafting is off while it is above 1.">
+        <${Stepper} label="Answers at once" value=${d.parallel} min=${1} max=${8} on=${(v) => setDraft({parallel: v})}/><//>`]},
     {label: "GPUs and memory", rows: [gpus]},
     {label: "Prompts and cache", rows: [
       html`<${Row} label="Prompt chunk" flag="--chunk" changed=${ch("prefill_chunk")} hint="The prompt tokens one pass reads at most. Empty: the engine picks."

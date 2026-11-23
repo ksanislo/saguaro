@@ -10,8 +10,9 @@ A config's settings, as the page shows them (None: the engine's own default, or 
   Hy4-Flash (saguaro-hy4 stops at a flag it does not know - only its own are written): draft ("auto" | "mtp" |
              "dfly2" | "none": what its pack has), tp ("auto" | 0: the layers split | the group's size), reserve_gb,
              prefill_chunk (--chunk), cpu_threads, kv ("auto" | "q8" | "f16"); no parallel
-  Inkling 2: prefill_chunk (--chunk), cpu_threads (--threads), kv ("f16" | "fp8": SAGUARO_IK2_KV); one or two GPUs
-             (--gpus kept with them); no reserve, drafter or parallel (saguaro-ik2 stops at a flag it does not know)
+  Inkling 2: prefill_chunk (--chunk), cpu_threads (--threads), kv ("f16" | "fp8": SAGUARO_IK2_KV), draft ("auto" |
+             "dspark" | "none": --drafting), parallel (--parallel: one GPU holding every expert); one or two GPUs
+             (--gpus kept with them); no reserve (saguaro-ik2 stops at a flag it does not know)
   CYBER-FROST (the `maya` engine's Qwen path; its server always loads the MTP drafter - "none" is --mtp-max-t 1):
              draft ("mtp" | "none"), expert_cache, prefill, kv ("fp16" | "int8" |
              "k8v4" | "q4_0"), ram_gb (the experts' RAM tier, SAGUARO_EXPERT_RAM_GB); no images (text only)
@@ -65,13 +66,28 @@ DS4_KEYS = ("context", "images", "gpus", "reserve_mib", "env", "parallel", "draf
 MM3_KEYS = ("context", "images", "gpus", "env", "parallel", "draft", "tp", "kv_cache", "kv_streaming", "kv_resident",
             "cpu_threads", "reserve_gb", "prefill_chunk", "cache_gb", "dspark_conf")
 QWEN_KEYS = ("context", "images", "gpus", "reserve_mib", "env", "draft", "expert_cache", "prefill", "kv", "ram_gb")
-IK2_KEYS = ("context", "images", "gpus", "env", "prefill_chunk", "cpu_threads", "kv")
+IK2_KEYS = ("context", "images", "gpus", "env", "prefill_chunk", "cpu_threads", "kv", "draft", "parallel")
 HY4_KEYS = ("context", "images", "gpus", "env", "draft", "tp", "reserve_gb", "prefill_chunk", "cpu_threads", "kv")
 HY4_KV = ("auto", "q8", "f16")                                    # saguaro-hy4 --kv (the latent cache's rows)
 # what the other engines have and Hy4's does not, said in plain words when a client asks for it
 ONE_AT_A_TIME = {"hy4": "Answers at once: Hy4-Flash answers one request at a time for now"}
 IK2_KV = ("f16", "fp8")                                           # saguaro-ik2's SAGUARO_IK2_KV (f16: its own)
 IK2_OTHER_ENV = re.compile(r"^SAGUARO_(?:GLM|MM3|DS4)_")         # another engine's settings: not added to its configs
+import ik2_fit as IK2F  # noqa: E402  (tools/) where drafting runs: the setup's own rules
+
+
+def ik2_draft_of(args: list) -> str:
+    """Inkling 2's drafting as the page shows it: auto (--drafting auto: measured once on this PC), dspark (--drafting
+    on: the drafter and the prompt lookup, not measured), none."""
+    how = flag(args, "--drafting") or ("on" if flag(args, "--draft") else "off")
+    return {"auto": "auto", "on": "dspark"}.get(how, "none")
+
+
+def ik2_card(cfg: dict) -> dict:
+    """The card an Inkling 2 config runs on first ({"arch", "vram_gb"} as the setup reads them; {} when not known)."""
+    ids = gpus_of(cfg) or [0]
+    return next((g for g in machine_gpus("hip" if cfg.get("backend") == "hip" else "cuda") if g.get("index") == ids[0]),
+                None) or {}
 
 
 # ------------------------------------------------------------------ the engine's arguments
@@ -308,8 +324,17 @@ def mm3_pack_has(cfg: dict, key: str) -> bool:
 
 def choices(cfg: dict) -> dict:
     """What this config can be set to beyond what it is: a drafter and an image encoder that exist on this PC."""
-    if family(cfg) == "ik2":                           # (no drafter choice; images: its "vision" entry, on or kept off)
-        return {"draft": [], "images": bool(cfg.get("vision") or cfg.get("vision_off"))}
+    if family(cfg) == "ik2":                           # (images: its "vision" entry, on or kept off)
+        # (drafting: none where it does not run - Volta / Turing, the offload path, two GPUs; else auto, the drafter by
+        #  hand where the setup downloaded it, none)
+        args, card = cfg.get("args") or [], ik2_card(cfg)
+        hip = cfg.get("backend") == "hip"
+        off = IK2F.drafting_off_reason(None if hip else card.get("arch"), float(card.get("vram_gb") or 0),
+                                       _int(flag(args, "--max-context"), IK2F.CONTEXTS[0]),
+                                       (cfg.get("env") or {}).get("SAGUARO_IK2_KV") or IK2F.DEFAULT_KV, hip) \
+            or (len(set(gpus_of(cfg))) > 1 and "two GPUs")
+        return {"draft": ["none"] if off else ["auto"] + (["dspark"] if flag(args, "--draft") else []) + ["none"],
+                "images": bool(cfg.get("vision") or cfg.get("vision_off"))}
     if family(cfg) == "hy4":                           # (the drafters its pack has; images: the pack's mmproj file)
         drafters = (["mtp"] if hy4_has(cfg, "mtp") else []) + (["dfly2"] if hy4_has(cfg, "dfly2") else [])
         return {"draft": (["auto"] if drafters else []) + drafters + ["none"], "images": hy4_has(cfg, "vision")}
@@ -335,7 +360,8 @@ def settings_of(cfg: dict) -> dict:
     if family(cfg) == "ik2":                           # (saguaro-ik2: --ctx is its other name for --max-context)
         out.update(context=_int(flag(args, "--max-context") or flag(args, "--ctx"), 32768),
                    images=bool(cfg.get("vision")), prefill_chunk=_int(flag(args, "--chunk")),
-                   cpu_threads=_int(flag(args, "--threads")),
+                   cpu_threads=_int(flag(args, "--threads")), draft=ik2_draft_of(args),
+                   parallel=_int(flag(args, "--parallel"), 1),
                    kv="fp8" if env.get("SAGUARO_IK2_KV") in ("fp8", "e4m3") else "f16")
         return out
     if family(cfg) == "hy4":                           # (saguaro-hy4's own defaults where the config names none)
@@ -544,6 +570,18 @@ def apply(cfg: dict, settings: dict) -> dict:
             out["env"] = env2
         else:
             out.pop("env", None)
+        # (drafting: auto, the drafter by hand (dspark: --drafting on) or none; written where it changes)
+        if s.get("draft") not in can["draft"]:
+            raise ValueError("Drafting: not on this GPU or layout (Volta / Turing, the offload path, two GPUs)"
+                             if can["draft"] == ["none"] else
+                             "Drafting: this setup has no drafter (the setup downloads it)" if s.get("draft") == "dspark"
+                             else "Drafting: auto, the drafter (DSpark) or none")
+        if s["draft"] != ik2_draft_of(args):
+            args = set_flag(args, "--drafting", {"auto": "auto", "dspark": "on"}.get(s["draft"], "off"))
+        # (--parallel: n conversations at once where one GPU holds every expert - elsewhere the engine says so and
+        #  answers one at a time; drafting is off while it is above 1)
+        par = _num(s, "parallel", 1, 8, "Answers at once", none_ok=False)
+        args = set_flag(args, "--parallel", par) if par > 1 or "--parallel" in args else args
     elif fam == "qwen":
         if s.get("draft") not in can["draft"]:
             raise ValueError("Drafting: this pack has no MTP drafter (the setup builds it)" if s.get("draft") == "mtp"
@@ -805,9 +843,10 @@ def needs(cfg: dict) -> dict | None:
     if fam not in ("hy4", "ik2"):
         return None
     inst = cfg.get("installer") or {}
-    limits = ["one conversation at a time", "no saved conversations yet"]
     if fam == "hy4":
-        limits.append("pictures not measured on Tesla T4s yet")
+        limits = ["one conversation at a time", "no saved conversations yet", "pictures not measured on Tesla T4s yet"]
+    else:
+        limits = ["several conversations at once only on one GPU that holds every expert"]
     measured = inst.get("measured")
     return {"cards": len(set(gpus_of(cfg))) or None, "measured": measured if isinstance(measured, bool) else None,
             "limits": limits}
@@ -858,7 +897,8 @@ def machine_gpus(backend: str = "cuda") -> list:
     try:
         import setup as SU                              # (the project's setup.py: nvidia-smi / the KFD topology)
         raw = SU.amd_gpus() if backend == "hip" else SU.gpus()
-        found = [{"index": int(g["index"]), "name": g.get("name"), "vram_gb": g.get("vram_gb")} for g in raw or []]
+        found = [{"index": int(g["index"]), "name": g.get("name"), "vram_gb": g.get("vram_gb"),
+                  **({"arch": g["arch"]} if g.get("arch") else {})} for g in raw or []]
     except (ImportError, OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
         found = []
     _gpu_cache[backend] = (now, found)
