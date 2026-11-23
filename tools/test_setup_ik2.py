@@ -671,28 +671,29 @@ class Steps(unittest.TestCase):
             self.assertEqual(calls, [ours + ([name],)])
             self.assertEqual(got, d / name)
 
-    def test_drafter_already_here_not_downloaded_again(self):
-        """The drafter an earlier setup fetched (thinkingmachines' mtp.safetensors beside the model, the same size and
-        sha256) is used as it is: no download, the config names it; a copy of another sha256 or size is not taken (the
-        GGUF is fetched) and stays on the disk.  With both forms here: the GGUF on NVIDIA."""
+    def test_drafter_from_an_earlier_setup(self):
+        """An earlier setup's mtp.safetensors beside the model: on NVIDIA the setup fetches the GGUF (the engine's
+        faster drafting path) and the old file stays on the disk; where the GGUF is not downloaded the engine drafts
+        with the old file (the same size and sha256 - another is not taken).  The PC's own form already here: no
+        download."""
         d, gguf = self.files()
         old, new = d / "mtp.safetensors", d / "dspark-Inkling-2-Mini-Q8_0.gguf"
         new.unlink(missing_ok=True)
         with open(old, "wb") as fh:
             fh.truncate(635801416)
-        got, calls = self.drafter_run(d)
-        self.assertEqual((got, calls), (old, []))
-        got, calls = self.drafter_run(d, good=False, fetched=False)      # (the size, another sha256: not taken)
-        self.assertEqual((got, [c[3] for c in calls]), (None, [["dspark-Inkling-2-Mini-Q8_0.gguf"]]))
-        self.assertTrue(old.exists())
-        with open(new, "wb") as fh:
-            fh.truncate(402278560)
-        self.assertEqual(self.drafter_run(d), (new, []))                 # (both here: NVIDIA's is the GGUF)
+        got, calls = self.drafter_run(d, fetched=False)                  # (NVIDIA, the download declined: the old file)
+        self.assertEqual((got, [c[3] for c in calls]), (old, [[new.name]]))
+        got, calls = self.drafter_run(d, good=False, fetched=False)      # (its size, another sha256: not taken)
+        self.assertEqual((got, [c[3] for c in calls]), (None, [[new.name]]))
+        got, calls = self.drafter_run(d)                                 # (NVIDIA: the GGUF fetched from Maya's repo)
+        self.assertEqual((got, [c[2:] for c in calls]), (new, [("drafter", [new.name])]))
+        self.assertEqual(old.stat().st_size, 635801416)                  # (the old file stays)
+        self.assertEqual(self.drafter_run(d), (new, []))                 # (again: nothing to download)
         new.unlink()
         with open(old, "wb") as fh:
             fh.truncate(1000)                                            # (another size: not the drafter)
         got, calls = self.drafter_run(d, fetched=False)
-        self.assertEqual((got, [c[3] for c in calls]), (None, [["dspark-Inkling-2-Mini-Q8_0.gguf"]]))
+        self.assertEqual((got, [c[3] for c in calls]), (None, [[new.name]]))
         self.assertTrue(old.exists())
 
     def test_a_gguf_of_your_own(self):
