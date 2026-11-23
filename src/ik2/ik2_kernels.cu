@@ -5088,6 +5088,40 @@ __global__ void decode_f16_k_kernel(int type, const uint8_t* blocks, size_t nblk
     }
 }
 
+// a Strata pack's types (and kMIX parts) to FP16, 16 values a thread: each value as decode_value gives it
+__global__ void decode_f16_sf_kernel(int type, const uint8_t* blocks, size_t n16, uint16_t* out) {
+    const size_t c = (size_t) blockIdx.x * blockDim.x + threadIdx.x;
+    if (c >= n16) return;
+    if (type == strata_fmt::kMIX) {
+        const strata_fmt::MixHdr h = *(const strata_fmt::MixHdr*) blocks;
+        type = h.type, blocks += sizeof(strata_fmt::MixHdr);
+    }
+    float v[16];
+    if (type == kNVFP4) {
+        const uint8_t* b = blocks + (c >> 2) * 36;
+        const int sub = (int) (c & 3);
+        const float d = ue4m3((uint8_t) (*(const uint32_t*) b >> (8 * sub)));
+        const uint32_t q0 = *(const uint32_t*) (b + 4 + sub * 8), q1 = *(const uint32_t*) (b + 8 + sub * 8);
+        const float2 w[8] = {e2m1_pair_lo(q0), e2m1_pair_lo(q0 >> 16), e2m1_pair_lo(q1), e2m1_pair_lo(q1 >> 16),
+                             e2m1_pair_hi(q0), e2m1_pair_hi(q0 >> 16), e2m1_pair_hi(q1), e2m1_pair_hi(q1 >> 16)};
+#pragma unroll
+        for (int i = 0; i < 8; ++i) v[2 * i] = w[i].x * d, v[2 * i + 1] = w[i].y * d;
+    } else if (strata_fmt::is_sh(type)) {
+        const int bits = strata_fmt::sh_bits(type);
+        const uint8_t* b = blocks + (c >> 3) * strata_fmt::block_bytes(type);
+        const int i0 = (int) (c & 7) * 16;
+        const float eff = strata_fmt::sh_eff(b, i0 >> 6), off = strata_fmt::sh_offset(bits);
+#pragma unroll
+        for (int i = 0; i < 16; ++i) v[i] = __fmul_rn((float) strata_fmt::sh_code(b, bits, i0 + i) - off, eff);
+    } else {
+#pragma unroll
+        for (int i = 0; i < 16; ++i) v[i] = strata_fmt::value(type, blocks, c * 16 + i);
+    }
+    uint4* o = (uint4*) (out + c * 16);
+    o[0] = make_uint4(f2_to_u32(v[0], v[1]), f2_to_u32(v[2], v[3]), f2_to_u32(v[4], v[5]), f2_to_u32(v[6], v[7]));
+    o[1] = make_uint4(f2_to_u32(v[8], v[9]), f2_to_u32(v[10], v[11]), f2_to_u32(v[12], v[13]), f2_to_u32(v[14], v[15]));
+}
+
 __global__ void decode_f16_kernel(int type, const uint8_t* blocks, size_t n, uint16_t* out) {
     const size_t i = (size_t) blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) out[i] = f2h(decode_value(type, blocks, i));
@@ -7015,6 +7049,12 @@ void decode_f16(int type, const uint8_t* blocks, size_t n, uint16_t* out, cudaSt
     if ((type == kQ5_K || type == kQ6_K) && n % 256 == 0) {
         decode_f16_k_kernel<<<grid(n / 256, kBlk / 32), kBlk, 0, s>>>(type, blocks, n / 256, out);
         check("decode_f16_k");
+        return;
+    }
+    if ((type >= strata_fmt::kQ8F || type == strata_fmt::kBF16) && n % 16 == 0 && (((uintptr_t) out & 15) == 0) &&
+        (((uintptr_t) blocks & 3) == 0)) {
+        decode_f16_sf_kernel<<<grid(n / 16), kBlk, 0, s>>>(type, blocks, n / 16, out);
+        check("decode_f16_sf");
         return;
     }
     decode_f16_kernel<<<grid(n), kBlk, 0, s>>>(type, blocks, n, out);
