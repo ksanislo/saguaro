@@ -15,6 +15,7 @@
 #include <cuda_fp16.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
