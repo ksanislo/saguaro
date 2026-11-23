@@ -95,10 +95,24 @@ void attn_flash_f16(const uint16_t* q16, int q_ld, const uint16_t* kc, const uin
                     cudaStream_t s);
 /// attn_flash_f16 over an FP8 (E4M3) cache: its tiles turned into FP16 as they are loaded; qk_scale with K's scale
 /// folded in, the output times v_inv_scale (as attn_decode_fp8).
+/// INT4 (Q4, group size 32) KV cache descriptor with optional VRAM/mapped-host split for 128K streaming.
+/// Each 128-dim head stores 64 bytes of packed nibbles (low=even, high=odd, signed q+8 in [1,15]) and 4 FP16 scales.
+/// Slots [0 .. vram_cap) live in VRAM (q, s); slots [vram_cap .. kv_cap) live in mapped pinned host RAM (q_host, s_host).
+struct KvQ4 {
+    uint8_t* q = nullptr;
+    uint16_t* s = nullptr;
+    uint8_t* q_host = nullptr;
+    uint16_t* s_host = nullptr;
+    int vram_cap = 0;
+};
+
 void attn_flash_fp8(const uint16_t* q16, int q_ld, const uint8_t* kc, const uint8_t* vc, int kv_cap, int H, int KV,
                     int D, int Tq, int qpos0, float qk_scale, float v_inv_scale, const float* bias, int extent,
                     int window, const float* sink, float* out, int o_ld, float* scratch, size_t scratch_floats,
                     int n_split, cudaStream_t s);
+void attn_flash_q4(const uint16_t* q16, int q_ld, KvQ4 kc, KvQ4 vc, int kv_cap, int H, int KV, int D, int Tq,
+                   int qpos0, float qk_scale, const float* bias, int extent, int window, const float* sink, float* out,
+                   int o_ld, float* scratch, size_t scratch_floats, int n_split, cudaStream_t s);
 /// a split count for attn_flash_f16: Tq queries x H heads against up to nk keys on n_sm SMs
 int attn_flash_splits(int Tq, int H, int nk, int n_sm);
 /// Volta (sm_70): a prompt chunk's attention on a full layer (no window, no ring) on mma.m8n8k4 - q16 [Tq] rows of
@@ -228,11 +242,12 @@ void experts_gate_up(const uint8_t* const* blob, const int* tok, int S, int ty_g
 void to_f16_limbs(const float* x, size_t n, uint16_t* y, cudaStream_t s);
 bool experts_mma_fits(int ty_gate, int ty_up, int ty_down, int C, int F);
 void experts_gate_up_swiglu_mma(const uint8_t* const* blob, int S, size_t eb0, const uint16_t* x16, int C, int F,
-                                const float* sg, const float* su, float gcap, float ucap, uint16_t* h, cudaStream_t s);
+                                const float* sg, const float* su, float gcap, float ucap, uint16_t* h, cudaStream_t s,
+                                const int* cls = nullptr, int want = 0);
 void experts_down_mma(const uint8_t* const* blob, int S, size_t off_down, const uint16_t* h, int C, int F, float* y,
-                      cudaStream_t s);
+                      cudaStream_t s, const int* cls = nullptr, int want = 0);
 void experts_down(const uint8_t* const* blob, int S, int ty_down, size_t off_down, const uint16_t* h, int C, int F,
-                  float* y, cudaStream_t s);
+                  float* y, cudaStream_t s, const int* cls = nullptr, int want = 0);
 
 /// y [N] = W [N][K] . x [K] for a dense matrix as the GGUF holds it (rows of `type` blocks: Q8_0, NVFP4, Q5_K, Q6_K),
 /// a warp a row in a fixed order - one token's products, half the bytes of an FP16 copy for Q8_0.  K <= 8192.
@@ -245,11 +260,17 @@ void experts_gate_up_g(const uint8_t* const* blob, const int* n, const int* tok,
                        int ty_up, size_t eb0, const float* x, int C, int F, float* gu, cudaStream_t s);
 void experts_down_g(const uint8_t* const* blob, const int* n, const int* row, int G, int ty_down, size_t off_down,
                     const uint16_t* h, int C, int F, float* y, cudaStream_t s);
+/// A batch expert's group table on the device (grp_fill_kernel): group g at off gets blob[g] = blob_e,
+/// n[g] = min(8, cnt - 8g), and its members' token gidx[st + m] and output row st + m.
+void grp_fill(const uint8_t* blob_e, int cnt, int st, int off, const int* gidx, const uint8_t** blob, int* n,
+              int* tok, int* row, cudaStream_t s);
+/// fp16 -> fp32 rows (the grouped batch experts' input)
+void to_f32(const uint16_t* x, size_t n, float* y, cudaStream_t s);
 /// Fused gate+up+softcapped-SwiGLU straight to h [S][F] FP16 (or h[row[g*8+t]][F] in _g, where sg/su are also
 /// indexed by row[g*8+t]).  sg, su may be null (scale 1).
 void experts_gate_up_swiglu(const uint8_t* const* blob, const int* tok, int S, int ty_gate, int ty_up, size_t eb0,
                             const float* x, int C, int F, const float* sg, const float* su, float gcap, float ucap,
-                            uint16_t* h, cudaStream_t s);
+                            uint16_t* h, cudaStream_t s, const int* cls = nullptr, int want = 0);
 /// experts_gate_up_swiglu with slot s's F outputs written at h + orow[s] * h_ld (orow null: s; h_ld 0: F) - a tensor-
 /// parallel GPU's half of every row of a wider h
 void experts_gate_up_swiglu_rows(const uint8_t* const* blob, const int* tok, int S, int ty_gate, int ty_up,
@@ -307,6 +328,39 @@ void attn_decode_fp8(const float* q, const float* r, const float* sink, const ui
 void unpack_kv_fp8_to_f16(const uint8_t* kc, const uint8_t* vc, int kv_cap, int k0, int nk, int KD,
                           float k_inv_scale, float v_inv_scale, uint16_t* k_out16, uint16_t* v_out16,
                           cudaStream_t s);
+
+void prep_qkv_r_q4(float* q, const float* q_clip, const float* k_in, KvQ4 kc, const float* v_in, KvQ4 vc, float* r,
+                   const float* r_clip, int T, int H, int KV, int D, int d_rel, float qk_clip, float rel_clip,
+                   float eps, const int* pos, float alpha, float n_floor, int pos0, int kv_cap, cudaStream_t s);
+void attn_multi_q4(const float* q, const float* r, const float* sink, KvQ4 kc, KvQ4 vc, int kv_cap, int nq, int H,
+                   int Hkv, int k0, int nk, int qpos0, float qk_scale, const float* proj, int d_rel, int extent,
+                   int window, float* scratch, float* out, cudaStream_t s);
+void attn_decode_q4(const float* q, const float* r, const float* sink, KvQ4 kc, KvQ4 vc, int kv_cap, int H, int Hkv,
+                    int D, int k0, int nk, int qpos, float qk_scale, const float* proj, int d_rel, int extent,
+                    int window, float* scratch, float* out, cudaStream_t s);
+void unpack_kv_q4_to_f16(KvQ4 kc, KvQ4 vc, int kv_cap, int k0, int nk, int KV, uint16_t* k_out16, uint16_t* v_out16,
+                         cudaStream_t s);
+void prep_qkv_r_q4_at(float* q, const float* q_clip, const float* k_in, KvQ4 kc, const float* v_in, KvQ4 vc, float* r,
+                      const float* r_clip, int H, int KV, int D, int d_rel, float qk_clip, float rel_clip, float eps,
+                      const int* pos, bool log_scale, float alpha, float n_floor, int kv_cap, uint16_t* q16,
+                      cudaStream_t s, const uint16_t* sink_w = nullptr, const float* sink_x = nullptr, int sink_k = 0,
+                      float* sink_y = nullptr);
+void attn_decode_q4_at(const float* q, const float* r, const float* sink, KvQ4 kc, KvQ4 vc, int kv_cap, int H, int Hkv,
+                       const int* pos, int P, float qk_scale, const float* proj, int d_rel, int extent, int window,
+                       float* scratch, float* out, cudaStream_t s);
+void attn_decode_mma_q4(const uint16_t* q16, const float* r, const float* sink, KvQ4 kc, KvQ4 vc, int kv_cap, int H,
+                        int Hkv, const int* pos, int qpos, int n_split, float qk_scale, const float* proj, int d_rel,
+                        int extent, int window, float* scratch, float* out, const float* gate, uint16_t* out16,
+                        cudaStream_t s);
+void attn_block_q4(const uint16_t* q16, const float* r, int r_ld, const float* sink, KvQ4 kc, KvQ4 vc, int kv_cap,
+                   int H, int Hkv, const int* pos, int T, int n_split, float qk_scale, const float* proj, int d_rel,
+                   int extent, int window, float* scratch, float* out, const float* gate, int gate_ld, uint16_t* out16,
+                   cudaStream_t s);
+void prep_qkv_r_q4_block(float* q, int q_ld, const float* q_clip, const float* k_in, KvQ4 kc, const float* v_in,
+                         KvQ4 vc, float* r, int r_ld, const float* r_clip, int T, int H, int KV, int D, int d_rel,
+                         float qk_clip, float rel_clip, float eps, const int* pos, bool log_scale, float alpha,
+                         float n_floor, int kv_cap, uint16_t* q16, cudaStream_t s, const uint16_t* sink_w = nullptr,
+                         const float* sink_x = nullptr, int sink_k = 0, float* sink_y = nullptr);
 
 // ---- the resident token path: every expert in VRAM (found on the device), the position read on the device, so a
 // token needs nothing from the host between its embedding and its logits and its launches replay as one CUDA graph
@@ -448,7 +502,7 @@ void argmax_gemv_f16(const uint16_t* W, int ld, const float* x, const float* bas
 // ---- the weights' decodes (ggml's block types; values exactly ggml's dequantize_row_*, then rounded to the output)
 
 /// ggml type ids of the blocks these decode.
-constexpr int kQ8_0 = 8, kQ5_K = 13, kQ6_K = 14, kIQ3_XXS = 18, kIQ4_XS = 23, kNVFP4 = 40;
+constexpr int kQ5_0 = 6, kQ8_0 = 8, kQ4_K = 12, kQ5_K = 13, kQ6_K = 14, kIQ3_XXS = 18, kIQ4_NL = 20, kIQ4_XS = 23, kNVFP4 = 40;
 /// values a block / bytes a block (0: not one of the above).
 int block_values(int type);
 size_t block_bytes(int type);
@@ -496,7 +550,8 @@ void f16_limbs_rows(const float* x, int T, int C, uint16_t* out, cudaStream_t s)
 /// last group), tok / row [S][kGroupMax], and a slot's sg, su, wt (down's scale folded) and inv (the slot).
 void group_route(const int* top, const float* w, int S, int K, const uint8_t* const* tab, const float* sg_t,
                  const float* su_t, const float* sd_t, const uint8_t** blob, int* n, int* tok, int* row, float* sg,
-                 float* su, float* wt, int* inv, cudaStream_t s);
+                 float* su, float* wt, int* inv, cudaStream_t s, const uint8_t* const* pp = nullptr);
+// (pp: the offload window's per-pick resolved blobs - off_cache_plan's slots - take tab's place as the groups' source)
 /// group_route's groups of NVFP4 experts on the tensor cores: gate | up (the input as f16_limbs_rows' limbs) to
 /// h [slot][F] through the capped SwiGLU; down from h to y [slot][C].  G: the launch's groups (those past the last
 /// return at once); T: the window's tokens (a group's members).

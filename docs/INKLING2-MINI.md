@@ -91,22 +91,25 @@ Measured here 2026-11-22, greedy 256-300-token answers, GPU clocks not pinned. T
 with two Xeon E5-2660 v2: two loads of each, interleaved with the previous engine (our v1.1.72 port); an RX 9070 XT
 (16 GB, gfx1201, PCIe 5) with a Ryzen 7 9800X3D: one load each.
 
-| Decode at ~50 / 8K / 30K tokens deep, read of an 8K prompt | this engine | previous engine |
+| Decode at ~50 / 8K / 30K tokens deep, read of an 8K / 30K prompt | this engine | previous engine (our v1.1.72 port) |
 | --- | ---: | ---: |
-| 1x T4, UD-Q4_K_XL, 32K (offload path) | 23.7 / 25.8 / 24.1 tok/s, read 706 tok/s | 42.0 / 38.5 / 35.1, read 633 |
-| 1x T4, one-T4 quant, 32K (every expert in VRAM) | 44.9 / 41.5 / 37.0, read 515 | 44.5 / 41.2 / 36.9, read 569 |
-| 2x T4, UD-Q4_K_XL, 131K (the split; decode ~50 / 16K, read 16K) | 52.6 / 46.1, read 834 | 51.7 / 45.4, read 1130 |
-| 1x RX 9070 XT, UD-Q4_K_XL, 32K (offload path) | 59.8 / 59.5 / 53.0, read 1697 (30K: 1301) | - |
-| 1x RX 9070 XT, one-T4 quant, 32K (every expert in VRAM) | 83.3 / 73.3 / 66.7, read 1148 (30K: 950) | - |
+| 1x T4, UD-Q4_K_XL, 32K (offload path, dynamic GPU cache) | 40.0 / 39.3 / 35.6 tok/s, read 837 / 791 | 42.8 / 38.5 / 34.9, read 633 / 616 |
+| 1x T4, one-T4 quant, 32K (every expert in VRAM) | 44.9 / 41.5 / 37.0, read 515 / 429 (before the Turing prompt attention) | 44.5 / 41.2 / 36.9, read 569 / 550 |
+| 2x T4, UD-Q4_K_XL, 131K (the split; decode ~50 / 16K, read 16K) | 51.3 / 39.9, read 1102 | 50.4 / 41.6, read 1137 |
+| 1x RX 9070 XT, UD-Q4_K_XL, 32K (offload path, dynamic GPU cache) | 71.2 / 65.2 / 60.5, read 1668 / 1282 | - |
+| 1x RX 9070 XT, one-T4 quant, 32K (every expert in VRAM) | 83.3 / 73.3 / 66.7, read 1148 / 950 | - |
 
-On one T4 the offload path writes answers about 40 % slower than the previous engine's adaptive expert cache: its VRAM
-tier is fixed at load (the seed profile), so about 5 % of a token's picks cross PCIe 3 every token. With the one-T4
-quant (every expert resident) the two engines write at the same speed; two answers at once (`--parallel 2`, 16K
-context) give 47.7 tok/s together against 41.9 alone. Two T4s write at the previous speed and read prompts about a
-quarter slower (a prompt runs on the first card alone). Load: 1-10 s from the page cache / NVMe. In short: 1x Tesla T4
-about 24 tok/s writing and about 700 tok/s reading; 2x Tesla T4 about 52 tok/s writing and about 830 tok/s reading;
-1x RX 9070 XT about 60 tok/s writing and about 1700 tok/s reading (the one-T4 quant: about 83 tok/s writing, about 1150
-tok/s reading) - what the setup quotes for these layouts.
+One T4 writes within a few percent of the previous engine and reads prompts about 30 % faster; the first short prompt
+of a load answers in 0.8 s instead of 1.6 s. What makes it: the offload path's VRAM tier is a cache on the GPU
+(upstream PR #1118's Clock-LFU slots, the same bits as a fixed tier - KL 0), the tail layers' pool a fifth of the
+budget, and Turing's fused prompt attention (one K / V tile in shared memory; against cuBLAS's prompt attention KL
+3.5e-3 / the same top token 97 % over 500 tokens after an 8K prompt). Two T4s write and read within 4 % of the
+previous engine; the first short prompt is ~0.5 s slower. With the one-T4 quant two answers at once (`--parallel 2`,
+16K context) give 47.7 tok/s together against 41.9 alone. Two loads of each, interleaved; this box drifts by about a
+tenth between runs. The one-T4 quant rows are from before these changes. In short: 1x Tesla T4 about 40 tok/s
+writing and about 840 tok/s reading; 2x Tesla T4 about 51 tok/s writing and about 1100 tok/s reading; 1x RX 9070 XT
+about 71 tok/s writing and about 1670 tok/s reading (the one-T4 quant: about 83 tok/s writing, about 1150 tok/s
+reading) - what the setup quotes for these layouts.
 
 ## What it does
 
@@ -133,6 +136,8 @@ the one-card `--chunk` trade is not measured again yet:
 | --- | --- | --- | --- |
 | `--chunk N` (prompt chunk) | A larger chunk reads prompts faster but its work buffers take VRAM from the experts' tier: on one card, fewer experts stay on the card and answers write slower. | (previous engine) 1024 -> 2048: read 497 -> 712 tok/s, decode 34 -> 31 tok/s at 8K | (previous engine) 2048 -> 8192: read 844 -> 1136 tok/s, decode 44 -> 46 (every expert stays in VRAM) |
 | `SAGUARO_IK2_ROOM_MB` (the offload path's room) | The VRAM the offload path keeps for prompts and its staging slots; the rest of the card is the experts' tier. More room lets the picture encoder run on the GPU (0.8-1.8 s a new picture instead of 2-6 s on the CPU) at the cost of tier: on the previous engine 1536 on one T4 made every answer 9-11 % slower. | 1024 (default) | 1024 on the first card (default) |
+| `SAGUARO_IK2_OFF_DYNAMIC` (the offload path's GPU cache) | On by default on one GPU: missed experts take the coldest slots on the GPU (Clock-LFU, inside the token's CUDA graph), the same answers to the bit. `0`: the fixed tier from the profile. | default on: 19.6 -> 40 tok/s | off (the split) |
+| `SAGUARO_IK2_TAIL_SLOTS` | The dynamic cache's pool for the tail layers (20-23, Q8_0, 8.1 MiB an expert): a fifth of the budget by default (about 260 on a T4); 96 measured 12-16 % slower, 384 no faster. | default | - |
 | `SAGUARO_IK2_WARM` (the tier's start) | The experts the tier starts with: the setup writes Saguaro's profile (`data/expert-profile-ik2mini.bin`); a profile of your own use (`SAGUARO_IK2_POP_OUT=FILE` writes one) fits your prompts better. | the setup's default | the setup's default |
 | The one-T4 quant (`Inkling-2-Mini-T4-NVFP4-IQ3_XXS`, experimental) | Smaller experts (11.45 GiB: IQ3_XXS gate/up on 8 layers, layers 20-23 re-quantised) so every expert fits on one 16 GB card - the resident path (and `--parallel`), at a measurable quality cost: KL 0.012 and the same top token 95.0 % of the time against UD-Q4_K_XL, whose own run-to-run floor is 0.0019 / 97.8 %. Not downloadable: `--model-dir` with its file. Needs `--chunk 1024` and `SAGUARO_IK2_RESERVE_MB=1024` to stay resident at 32K. | decode 24 -> 45 tok/s (24 -> 37 at 30K), read 706 -> 515 tok/s | (not needed) |
 | `SAGUARO_IK2_RESERVE_MB` | What the plan keeps free beside every expert (1536 by default); 1024 lets a file that just misses stay resident. | 1024 with the one-T4 quant | - |

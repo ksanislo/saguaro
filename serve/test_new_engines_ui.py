@@ -252,7 +252,7 @@ class Catalog(unittest.TestCase):
         ik = c["inkling-2-mini"]
         self.assertTrue(ik["recommended"])                  # (UD-Q4_K_XL: the closest to the original on a T4)
         self.assertFalse(c["inkling-2-mini-sq-15"]["recommended"])
-        for part in ("one 16 GB card", "the others in RAM (the offload path)", "32K context", "24 tok/s", "1x Tesla T4"):
+        for part in ("one 16 GB card", "the others in RAM (the offload path)", "32K context", "40 tok/s", "1x Tesla T4"):
             self.assertIn(part, ik["fit"])
         self.assertFalse(c["hy4-flash-maya-s"]["recommended"])
         self.assertIn("Inkling 2 Mini is the model for this PC", c["hy4-flash-maya-s"]["fit"])
@@ -265,7 +265,7 @@ class Catalog(unittest.TestCase):
         c = self.cat([xt, igpu], 92.0)
         ik = c["inkling-2-mini"]
         self.assertTrue(ik["recommended"])
-        for part in ("one AMD GPU", "the offload path", "60 tok/s", "RX 9070 XT"):
+        for part in ("one AMD GPU", "the offload path", "71 tok/s", "RX 9070 XT"):
             self.assertIn(part, ik["fit"])
         self.assertIn("one AMD RDNA 3 / 4 GPU with 16 GB or more", ik["needs"])
         self.assertNotIn("holds every expert", ik["needs"])
@@ -276,7 +276,7 @@ class Catalog(unittest.TestCase):
         c = self.cat([t4(0), t4(1)])
         ik = c["inkling-2-mini"]
         self.assertTrue(c["inkling-2-mini-sq-20"]["recommended"])   # (the original weights: every expert on the two)
-        for part in ("two cards: every expert in VRAM", "131K context", "52 tok/s", "830 tok/s", "2x Tesla T4"):
+        for part in ("two cards: every expert in VRAM", "131K context", "51 tok/s", "1100 tok/s", "2x Tesla T4"):
             self.assertIn(part, ik["fit"])
 
     def test_four_t4s(self):

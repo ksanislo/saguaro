@@ -46,9 +46,9 @@ AMD_MIN_GB = 15.0   # (a 16 GB AMD card as the driver reports it)
 LAYOUT_ENV = {"SAGUARO_IK2_ROOM_MB", "SAGUARO_IK2_PIN", "SAGUARO_IK2_PIN_KEEP", "SAGUARO_IK2_WARM", "SAGUARO_IK2_RESERVE_MB"}   # (a layout's keys;
                                                     # PIN / PIN_KEEP: the previous engine's, dropped from old configs)
 # (decode tok/s, read tok/s) on Tesla T4s, GPU clocks not pinned, ~50 tokens deep, read 8K / 16K (2026-11-22)
-MEASURED = {1: (24, 700), 2: (52, 830)}
+MEASURED = {1: (40, 840), 2: (51, 1100)}
 # ... and on an RX 9070 XT (gfx1201, 16 GB), 32K: UD-Q4_K_XL on the offload path, the one-T4 quant resident (2026-11-22)
-MEASURED_AMD = {"offload": (60, 1700), "resident": (83, 1150)}
+MEASURED_AMD = {"offload": (71, 1670), "resident": (83, 1150)}
 ONE_T4_EXPERTS_GIB = 11.45                          # our Inkling-2-Mini-T4-NVFP4-IQ3_XXS's experts
 AMD_RESERVE_UNDER_GB = 20.0                         # an AMD card under this keeps SAGUARO_IK2_RESERVE_MB=1024 (amd_layout)
 # What that 1 GiB reserve (the engine's default: 1.5) and the 32K scratch (BASE_GIB counts 262K's) leave the plan

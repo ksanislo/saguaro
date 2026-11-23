@@ -19,6 +19,17 @@ older multi-GPU hardware (NVIDIA Turing T4 - sm_75 tensor cores, Xeon AVX1 CPUs)
 - **Credits:** built on Project Maya ([mw00/project-maya](https://github.com/mw00/project-maya)) and Strata (MIT) -
   see NOTICE.md. Everything below the next section is upstream Project Maya history.
 
+### Inkling 2 Mini: the T4 speed back, faster on AMD (2026-11-23)
+
+- **The offload path's VRAM tier is a GPU cache now** (upstream PR #1118, ported): experts a token misses take the
+  coldest slots, inside the token's CUDA graph - the same bits as before. One Tesla T4: about 40 tok/s writing (was
+  24), prompts read about 840 tok/s (was 700); an RX 9070 XT about 71 tok/s (was 59). `SAGUARO_IK2_OFF_DYNAMIC=0`:
+  the fixed tier.
+- **Turing reads prompts with the fused attention again** (our one-tile form): two T4s read a 16K prompt at about
+  1100 tok/s (was 830), as our earlier port did, and write about 51 tok/s.
+- From the same PR, opt-in: INT4 KV with host streaming (`SAGUARO_IK2_KV=q4`), more tail quants (Q5_0, Q4_K, IQ4_NL).
+  Its grouped batch prefill runs from sm_80 on NVIDIA only (it read prompts 2.8x slower on a T4).
+
 ### Inkling 2 Mini on upstream Project Maya v1.1.74's engine (2026-11-22)
 
 - **`saguaro-ik2` is upstream's v1.1.74 engine** (Volta / Turing kernels, the offload path for 8-16 GB cards, two

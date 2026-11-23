@@ -24,8 +24,8 @@ NVIDIA Turing (Tesla T4, sm_75 tensor cores) and Xeon CPUs without AVX2 - see [N
 
 - **One server, one web UI, six model families:** every engine behind the same dashboard, monitor and API; the
   Models page switches between them.
-- **A model for small PCs:** [Inkling 2 Mini](docs/INKLING2-MINI.md) writes about 24 tokens/s on one Tesla T4, 52 on two
-  and about 59 on one 16 GB RX 9070 XT; [Hy4-Flash](docs/HY4-FLASH.md) about 32 on four (measured, the T4s' clocks locked for Hy4).
+- **A model for small PCs:** [Inkling 2 Mini](docs/INKLING2-MINI.md) writes about 40 tokens/s on one Tesla T4, 51 on two
+  and about 71 on one 16 GB RX 9070 XT; [Hy4-Flash](docs/HY4-FLASH.md) about 32 on four (measured, the T4s' clocks locked for Hy4).
 - **Several chats at once:** up to 8 answered together with GLM-5.3-Flash, DeepSeek-V4.1-Flash and MiniMax-M3.1-Flash -
   for agents that run several sessions, or several people on one PC.
 - **Elastic VRAM:** the expert tiers stretch over every card, RAM and the SSD - the setup measures them and picks the
@@ -69,7 +69,7 @@ recommends one for your PC; to pick one yourself, give its setup id: `./setup.sh
 | **[MiniMax-M3.1-Flash](https://huggingface.co/MiniMaxAI/MiniMax-M3.1-Flash)**<br><sub>MiniMax · [MiniMax Community License](LICENSE.minimax-m31) · 428 B, 23 B active · up to 1M context</sub> | Maya-XS · `minimax-maya-xs` | 93 GB | the whole model in a 128 GB PC's memory |
 | | Maya-S · `minimax-maya-s` | 122 GB | closer to the original |
 | **[Hy4-Flash](https://huggingface.co/tencent/Hy4-flash)**<br><sub>Tencent · [Tencent Hy License](LICENSE.hy4-flash) · 220 B · NVIDIA, Linux · one conversation at a time</sub> | **Maya-S** · `hy4-flash-maya-s`<br>Maya-XS · `hy4-flash-maya-xs`<br>Maya-M · `hy4-flash-maya-m`<br>Maya-L · `hy4-flash-maya-l` | 53.0 GB<br>44.8 GB<br>68.4 GB<br>89.5 GB<br>each + one 63.4 GB n-gram table | four 16 GB cards: Maya-S on 4x Tesla T4 writes ~32 tokens/s (measured; the other sizes are not yet) - [docs/HY4-FLASH.md](docs/HY4-FLASH.md) |
-| **[Inkling 2 Mini](https://huggingface.co/thinkingmachines/Inkling-2-Mini)**<br><sub>Thinking Machines · Apache 2.0 · 26 B · NVIDIA T4 / RTX 20 and newer or AMD RDNA 3 / 4 (16 GB), Linux · reads pictures · one conversation at a time</sub> | unsloth UD-Q4_K_XL · `inkling-2-mini` | 18.3 GB | **one or two 16 GB cards**: ~24 tokens/s on one Tesla T4, ~52 on two, ~59 on an RX 9070 XT (measured) - [docs/INKLING2-MINI.md](docs/INKLING2-MINI.md) |
+| **[Inkling 2 Mini](https://huggingface.co/thinkingmachines/Inkling-2-Mini)**<br><sub>Thinking Machines · Apache 2.0 · 26 B · NVIDIA T4 / RTX 20 and newer or AMD RDNA 3 / 4 (16 GB), Linux · reads pictures · one conversation at a time</sub> | unsloth UD-Q4_K_XL · `inkling-2-mini` | 18.3 GB | **one or two 16 GB cards**: ~40 tokens/s on one Tesla T4, ~51 on two, ~71 on an RX 9070 XT (measured) - [docs/INKLING2-MINI.md](docs/INKLING2-MINI.md) |
 
 GLM, DeepSeek and MiniMax run on NVIDIA from the V100 / RTX 20 on, and on Windows (experimental; see
 [What you need](#what-you-need)); Hy4-Flash on NVIDIA under Linux; Inkling 2 Mini under Linux on NVIDIA from the V100 /

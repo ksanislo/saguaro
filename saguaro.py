@@ -7256,8 +7256,8 @@ def ik2_about() -> str:
     return (f"thinkingmachines' Inkling-2-Mini (26B, a looped MoE: 8 of 128 experts a token) on its own engine, in "
             f"unsloth's UD-Q4_K_XL GGUF ({gb}); Linux, NVIDIA V100 / Tesla T4 / RTX 20 and newer with 8 GB or more "
             "(the experts a card does not hold stay in RAM), or an AMD RDNA 3 / 4 GPU with 16 GB or more. The "
-            "model for one or two 16 GB cards: one Tesla T4 writes about 24 tok/s (a 32K context, part of the experts "
-            "in RAM), two write about 52 tok/s with every expert in VRAM (a 131K context); tool calls, its thinking "
+            "model for one or two 16 GB cards: one Tesla T4 writes about 40 tok/s (a 32K context, part of the experts "
+            "in RAM), two write about 51 tok/s with every expert in VRAM (a 131K context); tool calls, its thinking "
             "levels, pictures (its vision tower, 0.6 GB), one conversation at a time on two cards (several at once "
             "where one GPU holds every expert). Apache 2.0.")
 

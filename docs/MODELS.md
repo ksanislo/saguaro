@@ -188,9 +188,9 @@ looped model with 8 of 128 experts a token; Apache 2.0) on an engine of its own 
 
 | Cards | Context | Measured here (2026-11-22) |
 | --- | ---: | --- |
-| One Tesla T4: the offload path - the most-used experts in VRAM, the rest in RAM | 32K | about 24 tokens/s writing, 700 reading |
-| Two Tesla T4s: every expert in VRAM across the two | 131K | about 52 tokens/s writing, 830 reading |
-| One RX 9070 XT (16 GB, RDNA 4): the offload path | 32K | about 59 tokens/s writing, 1700 reading |
+| One Tesla T4: the offload path - the most-used experts in VRAM, the rest in RAM | 32K | about 40 tokens/s writing, 840 reading |
+| Two Tesla T4s: every expert in VRAM across the two | 131K | about 51 tokens/s writing, 1100 reading |
+| One RX 9070 XT (16 GB, RDNA 4): the offload path | 32K | about 71 tokens/s writing, 1670 reading |
 | One RX 9070 XT, the one-T4 quant (every expert in VRAM; experimental, lower quality) | 32K | about 80 tokens/s writing, 1150 reading |
 
 It also sets up on NVIDIA cards from 8 GB (V100 and newer; the experts a card does not hold stay in RAM) and on AMD

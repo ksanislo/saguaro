@@ -62,6 +62,7 @@ def main() -> int:
     ap.add_argument("--build", type=Path, default=ROOT / "build-ik2")
     ap.add_argument("--model", default=TC.MODEL)
     ap.add_argument("--n", type=int, default=2000)
+    ap.add_argument("--prompt", type=int, default=32, help="the prompt's tokens before the forced ones (read in passes)")
     ap.add_argument("--start", type=int, default=20000, help="where in the corpus's tokens the text starts")
     ap.add_argument("--ctx", type=int, default=8192)
     ap.add_argument("--arm", action="append", default=[], help="NAME:K=V,K=V (the first is the reference; MODEL=path "
@@ -77,9 +78,10 @@ def main() -> int:
     a.out.mkdir(parents=True, exist_ok=True)
     import strata_tokenizer as ST
     tok = ST.Tokenizer.from_gguf(a.model)
-    ids = tok.encode(B.corpus(), parse_special=False)[a.start:a.start + 32 + a.n]
-    prompt, force = ids[:32], ids[32:]
+    ids = tok.encode(B.corpus(), parse_special=False)[a.start:a.start + a.prompt + a.n]
+    prompt, force = ids[:a.prompt], ids[a.prompt:]
     (a.out / "force.txt").write_text(",".join(map(str, force)))
+    (a.out / "prompt.txt").write_text(",".join(map(str, prompt)))
     files = []
     for arm in a.arm:
         name, _, kv = arm.partition(":")
@@ -98,7 +100,7 @@ def main() -> int:
                     env[k] = v
             t0 = time.time()
             r = subprocess.run([str(a.build / "saguaro-ik2"), "--model", model, "--max-context", str(a.ctx), "--gpus",
-                                str(len(gpus)), "--tokens", ",".join(map(str, prompt)), "--gen", str(a.n)] + a.arg,
+                                str(len(gpus)), "--tokens", "@" + str(a.out / "prompt.txt"), "--gen", str(a.n)] + a.arg,
                                env=env, capture_output=True, text=True)
             tail = [l for l in r.stdout.splitlines() if l.startswith(("forced:", "generation:", "token path", "resident"))]
             print("%s: %.0f s, exit %d; %s" % (name, time.time() - t0, r.returncode, " | ".join(tail)), flush=True)

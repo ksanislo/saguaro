@@ -11,7 +11,7 @@ The state of this version (keep this table, the setup's `NO_ENGINE` list in `sag
 | DeepSeek-V4.1-Flash-1017 | `saguaro-ds4` (`maya-ds4`) | compiles for HIP (gfx1201 checked); not yet run on an AMD GPU |
 | MiniMax-M3.1-Flash | `saguaro-mm3` (`maya-mm3`) | compiles for HIP (gfx1201 checked); not yet run on an AMD GPU |
 | Hy4-Flash | `saguaro-hy4` (`maya-hy4`) | not run on an AMD GPU yet: the setup does not offer it on AMD |
-| Inkling 2 Mini | `saguaro-ik2` | builds and runs (experimental) on an RX 9070 XT (gfx1201, ROCm 7.1): UD-Q4_K_XL on the offload path about 59 tok/s, every serve check incl. pictures passes; the setup recommends it for one 16-23 GB RDNA 3 / 4 card |
+| Inkling 2 Mini | `saguaro-ik2` | builds and runs (experimental) on an RX 9070 XT (gfx1201, ROCm 7.1): UD-Q4_K_XL on the offload path about 71 tok/s, every serve check incl. pictures passes; the setup recommends it for one 16-23 GB RDNA 3 / 4 card |
 
 `./saguaro.sh --check` on an AMD PC lists the same. Report how a model runs on your card in an
 [issue](https://github.com/ksanislo/saguaro/issues).
@@ -236,7 +236,7 @@ by the GPU). Checked on an RX 9070 XT (16 GB, gfx1201, ROCm 7.1, PCIe 5) with a 
 
 | | decode at ~50 / 8K / 30K tokens deep | 8K prompt read |
 | --- | ---: | ---: |
-| unsloth's UD-Q4_K_XL (offload path, 2,348 of 3,072 experts in VRAM) | 59.8 / 59.5 / 53.0 tok/s | 1,697 tok/s |
+| unsloth's UD-Q4_K_XL (offload path, the dynamic GPU cache) | 71.2 / 65.2 / 60.5 tok/s | 1,668 tok/s |
 | our one-T4 quant (every expert in VRAM; experimental, lower quality: KL 0.012 vs UD-Q4_K_XL) | 83.3 / 73.3 / 66.7 tok/s | 1,148 tok/s |
 
 Chat, thinking, tools, stops, pictures, the Monitor and kept conversations pass on both. Not checked on AMD yet:
