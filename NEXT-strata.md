@@ -35,3 +35,12 @@ Decision (coordinator 11-22): no partial converter; native support. Python tools
 - MIX padding: slot = the layer's largest expert (SF4 / S5_K) -> 13.0 GiB of experts vs 11.4 GiB packed; on a T4
   that means the offload path, not resident. Fix = per-expert slot classes in the cache (follow-up, touches the
   cache pools the rebase moves).
+
+## Results 11-22 evening (details: /data/llm/logs/saguaro/STRATA-FORMAT-assessment.md section 6)
+- T4 (runs/sf2): SQ-15 loads and runs on one T4 (offload path, 2504/3072 experts in VRAM). KL vs UD-Q4_K_XL 0.0153,
+  top-1 94.0 %. Decode 24.4 / 23.2 tok/s (~0 / 8K), 8K read 348 tok/s (UD same build 27.1 / 30.4, 535).
+- RX 9070 XT (mortar, HIP, SAGUARO_IK2_OFF=1): gpu test PASS, KL 0.0152 / 94.05 %, 1-card check PASS,
+  serve_check 20/20 PASS (runs/sfm4, merged tree), decode 55.9 / 50.5 / 46.3 tok/s at ~0 / 8K / 30K, reads 1275 / 1033.
+- runs/sf3 (T4, fast FP16 decode) queued behind the live QFN model.
+- Next: per-expert slot classes (kMIX padding: 13.0 GiB vs ~11.6 packed - would make SQ-15 resident on 15-16 GB
+  cards); MX8 experts (SQ-20); serve config entry for the pack (tokenizer dir = any Inkling tokenizer).
