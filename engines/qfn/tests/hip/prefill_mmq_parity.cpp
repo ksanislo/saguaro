@@ -328,8 +328,9 @@ int main(int argc, char ** argv) {
             // activations)
             for (const ggml_type t : {(ggml_type) 145, (ggml_type) 146, (ggml_type) 144}) {
                 if (!supported((int) t)) { std::cout << "type " << (int) t << ": no MMQ instance in this build\n"; continue; }
-                // the pinned ggml (3cf03257) has the overlay's MMQ instances but no host quantizer for them: no reference
-                if (const auto* tr = ggml_get_type_traits(t); !tr || !tr->from_float_ref) {
+                // the pinned ggml (3cf03257) has the overlay's MMQ instances but not the types (ids past GGML_TYPE_COUNT:
+                // no traits, no host quantizer), so no reference here
+                if ((int) t >= (int) GGML_TYPE_COUNT || !ggml_get_type_traits(t) || !ggml_get_type_traits(t)->from_float_ref) {
                     std::cout << "type " << (int) t << ": no host quantizer in this ggml, skipped\n";
                     continue;
                 }
