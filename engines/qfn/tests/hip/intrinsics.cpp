@@ -1,6 +1,6 @@
 // Numerical parity for the CUDA intrinsics supplied by the HIP compatibility layer.
 #include <hip/hip_runtime.h>
-#include "strata/hip_compat/intrinsics.hpp"
+#include "intrinsics.hpp"   // (Saguaro's shared include/strata/hip_compat, on the HIP include path)
 
 #include <cstdint>
 #include <cstdio>

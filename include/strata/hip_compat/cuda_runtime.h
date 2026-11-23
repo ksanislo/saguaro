@@ -1,5 +1,15 @@
 #pragma once
-// Included only by STRATA_ENABLE_HIP builds. CUDA builds use NVIDIA headers.
+// Included only by STRATA_ENABLE_HIP builds. CUDA builds use NVIDIA headers. Shared by every engine's HIP build,
+// engines/qfn's too (its include/strata/hip_compat forwards here).
+#if defined(_WIN32) && defined(STRATA_HIP_WIN_LEAN)
+// (engines/qfn) hip_runtime.h pulls in <windows.h> on Windows: keep its min/max macros and the rarely used APIs out.
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#endif
 #ifdef STRATA_HIP_WAVE64
 // On wave64 cards (gfx908) HIP's own warp-sync builtins would run across the whole 64-lane wavefront and break
 // every kernel's reduction order; disable them and let intrinsics.hpp supply the logical-32-lane-half mapping.
@@ -100,7 +110,17 @@ inline hipError_t cudaHostAlloc(T** p, size_t bytes, unsigned int flags) {
 #define cudaLaunchHostFunc hipLaunchHostFunc
 #define cudaMalloc hipMalloc
 #define cudaMallocHost(...) (::strata::hip_compat::malloc_host(__VA_ARGS__))
+#if defined(_WIN32) && defined(STRATA_HIP_WDDM_MEMINFO)
+// (engines/qfn) Windows: hipMemGetInfo counts this process's own allocations only, so the desktop's and other
+// programs' share of the card is invisible to it; the free figure is lowered by what Windows' video memory budget for
+// this process withholds (engines/qfn/src/core/device.cu; SAGUARO_WDDM_BUDGET=0: hipMemGetInfo as it is).
+namespace strata::hip_compat {
+hipError_t mem_get_info(size_t* free_bytes, size_t* total_bytes);
+}
+#define cudaMemGetInfo ::strata::hip_compat::mem_get_info
+#else
 #define cudaMemGetInfo hipMemGetInfo
+#endif
 #define cudaMemcpy hipMemcpy
 #define cudaMemcpy2D hipMemcpy2D
 #define cudaMemcpy2DAsync hipMemcpy2DAsync
@@ -133,6 +153,23 @@ inline hipError_t cudaHostAlloc(T** p, size_t bytes, unsigned int flags) {
 #define cudaStreamWaitEvent hipStreamWaitEvent
 #define cudaStream_t hipStream_t
 #define cudaSuccess hipSuccess
+// (engines/qfn's names)
+#define cudaFuncAttributePreferredSharedMemoryCarveout hipFuncAttributePreferredSharedMemoryCarveout
+#define cudaHostRegisterDefault hipHostRegisterDefault
+#define cudaHostRegisterReadOnly hipHostRegisterReadOnly
+#define cudaHostAllocWriteCombined hipHostAllocWriteCombined
+#define cudaStreamCaptureMode hipStreamCaptureMode
+#define cudaStreamCaptureModeGlobal hipStreamCaptureModeGlobal
+#define cudaStreamCaptureModeRelaxed hipStreamCaptureModeRelaxed
+#define cudaPointerAttributes hipPointerAttribute_t
+#define cudaPointerGetAttributes hipPointerGetAttributes
+#define cudaMemoryTypeHost hipMemoryTypeHost
+#define cudaMemoryTypeDevice hipMemoryTypeDevice
+#define cudaMemoryTypeManaged hipMemoryTypeManaged
+#define cudaErrorInvalidValue hipErrorInvalidValue
+#define cudaErrorNotSupported hipErrorNotSupported
+#define cudaEventDefault hipEventDefault
+#define cudaGetErrorName hipGetErrorName
 
 namespace strata::hip_compat {
 template <typename T>

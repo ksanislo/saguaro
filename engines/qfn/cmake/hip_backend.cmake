@@ -91,11 +91,21 @@ endif()
 # HIP's link step produces a PIE; make Strata and ggml objects PIC for the ROCm linker.
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-set(STRATA_HIP_COMPAT_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include/strata/hip_compat")
+# The CUDA-to-HIP names are Saguaro's one shared layer (include/strata/hip_compat at the project's top, used by every
+# engine's HIP build); SAGUARO_HIP_COMPAT_DIR points elsewhere for a tree built on its own.
+set(SAGUARO_HIP_COMPAT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../include/strata/hip_compat" CACHE PATH
+    "Saguaro's shared CUDA-to-HIP compat headers")
+get_filename_component(STRATA_HIP_COMPAT_INCLUDE_DIR "${SAGUARO_HIP_COMPAT_DIR}" ABSOLUTE)
+if(NOT EXISTS "${STRATA_HIP_COMPAT_INCLUDE_DIR}/cuda_runtime.h")
+  message(FATAL_ERROR "engines/qfn's HIP build takes Saguaro's include/strata/hip_compat; not found at ${STRATA_HIP_COMPAT_INCLUDE_DIR} "
+                      "(set SAGUARO_HIP_COMPAT_DIR)")
+endif()
 add_library(strata_hip_runtime INTERFACE)
 target_include_directories(strata_hip_runtime BEFORE INTERFACE
   "${STRATA_HIP_COMPAT_INCLUDE_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/include")
-target_compile_definitions(strata_hip_runtime INTERFACE STRATA_USE_HIP=1 "STRATA_HIP_ARCHS=\"${STRATA_HIP_ARCHS}\"")
+# STRATA_HIP_WIN_LEAN / STRATA_HIP_WDDM_MEMINFO: this engine's Windows parts of the shared compat header
+target_compile_definitions(strata_hip_runtime INTERFACE STRATA_USE_HIP=1 "STRATA_HIP_ARCHS=\"${STRATA_HIP_ARCHS}\""
+                           STRATA_HIP_WIN_LEAN=1 STRATA_HIP_WDDM_MEMINFO=1)
 option(STRATA_GFX1012_PORTABLE_DOT "Use the portable signed-byte dot control on gfx1012" OFF)
 if(STRATA_GFX1012_PORTABLE_DOT)
   target_compile_definitions(strata_hip_runtime INTERFACE STRATA_GFX1012_PORTABLE_DOT=1)

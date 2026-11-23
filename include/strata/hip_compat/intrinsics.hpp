@@ -194,4 +194,13 @@ __device__ __forceinline__ unsigned ballot_sync(uint32_t mask, int predicate) {
 #define __nanosleep(cycles) __builtin_amdgcn_s_sleep(1)
 #endif  // STRATA_HIP_WAVE64
 
+// CUDA's streaming load (__ldcs, evict-first) for the int / int4 rows engines/qfn's kernels stage: HIP declares it for
+// __half / __half2 only. A nontemporal load is the same hint on AMD; the value is the plain load's.
+__device__ __forceinline__ int __ldcs(const int* p) { return __builtin_nontemporal_load(p); }
+__device__ __forceinline__ int4 __ldcs(const int4* p) {
+    typedef int strata_v4i __attribute__((ext_vector_type(4)));
+    const strata_v4i v = __builtin_nontemporal_load(reinterpret_cast<const strata_v4i*>(p));
+    return make_int4(v.x, v.y, v.z, v.w);
+}
+
 #endif  // defined(__HIPCC__)
