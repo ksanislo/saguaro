@@ -66,7 +66,7 @@ def main() -> int:
     ap.add_argument("--start", type=int, default=20000, help="where in the corpus's tokens the text starts")
     ap.add_argument("--ctx", type=int, default=8192)
     ap.add_argument("--arm", action="append", default=[], help="NAME:K=V,K=V (the first is the reference; MODEL=path "
-                    "runs that arm on another model file)")
+                    "runs that arm on another model file; TP=N runs it with --tp N)")
     ap.add_argument("--arg", action="append", default=[])
     ap.add_argument("--out", type=Path, default=ROOT / "build-ik2" / "kl")
     ap.add_argument("--keep", action="store_true", help="keep the logits files")
@@ -92,15 +92,18 @@ def main() -> int:
             env = TC.env_for(gpus)
             env.update(SAGUARO_IK2_FORCE=str(a.out / "force.txt"), SAGUARO_IK2_LOGITS_OUT=str(f))
             model = a.model   # (MODEL=path in an arm: that arm's model - a Strata pack against a GGUF)
+            extra = []        # (TP=N in an arm: --tp N, tensor parallel over the arm's GPUs)
             for x in filter(None, kv.split(",")):
                 k, v = x.split("=", 1)
                 if k == "MODEL":
                     model = v
+                elif k == "TP":
+                    extra = ["--tp", v]
                 else:
                     env[k] = v
             t0 = time.time()
             r = subprocess.run([str(a.build / "saguaro-ik2"), "--model", model, "--max-context", str(a.ctx), "--gpus",
-                                str(len(gpus)), "--tokens", "@" + str(a.out / "prompt.txt"), "--gen", str(a.n)] + a.arg,
+                                str(len(gpus)), "--tokens", "@" + str(a.out / "prompt.txt"), "--gen", str(a.n)] + a.arg + extra,
                                env=env, capture_output=True, text=True)
             tail = [l for l in r.stdout.splitlines() if l.startswith(("forced:", "generation:", "token path", "resident"))]
             print("%s: %.0f s, exit %d; %s" % (name, time.time() - t0, r.returncode, " | ".join(tail)), flush=True)

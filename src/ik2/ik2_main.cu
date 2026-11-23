@@ -231,6 +231,8 @@ struct Config {
     int n_visit = 0, n_pass = 1, core0 = 0, core1 = 0, rank = 0;
     float eps, route_scale, qk_clip, rel_clip, alpha, n_floor, gate_cap, up_cap, logit_cap;
     std::vector<bool> sliding;   // by layer
+    // --tp N: H, KV and F above are a member's (the file's divided by tp_n); tp_m: the member
+    int tp_n = 1, tp_m = 0;
 };
 
 // a dense matrix as the GGUF holds it, in VRAM: its blocks [N][K]
@@ -305,6 +307,7 @@ struct Layer {
 struct Visit {
     int l = 0;        // the layer
     int pass = 0;     // the core's pass (0: its first, or a layer outside the core)
+    int mem = 0;      // (--tp: the member whose layer and state it is)
     uint16_t *kc = nullptr, *vc = nullptr;
     uint8_t *kc8 = nullptr, *vc8 = nullptr;
     k::KvQ4 kc4{}, vc4{};
@@ -325,9 +328,13 @@ struct Model {
     int embd_type;
 };
 
+// --tp N: the members' models ([0] the main one, whose V also lists the other members' visits after its own, so
+// that the serving's per-visit state - snapshots, resets, kept conversations - covers every member)
+int g_tpn = 1;
+std::vector<Model*> g_tpm;
 inline Layer& bind_visit(Model& M, int v) {
     const Visit& Vi = M.V[v];
-    Layer& Ly = M.L[Vi.l];
+    Layer& Ly = Vi.mem ? g_tpm[Vi.mem]->L[Vi.l] : M.L[Vi.l];
     Ly.kc = Vi.kc, Ly.vc = Vi.vc, Ly.kc8 = Vi.kc8, Ly.vc8 = Vi.vc8, Ly.kc4 = Vi.kc4, Ly.vc4 = Vi.vc4, Ly.kv_cap = Vi.kv_cap, Ly.kv_host = Vi.kv_host;
     Ly.h_k = Vi.h_k, Ly.h_v = Vi.h_v, Ly.h_attn = Vi.h_attn, Ly.h_mlp = Vi.h_mlp;
     for (int i = 0; i < 4; ++i) Ly.rec_old[i] = Vi.rec_old[i], Ly.rec_x[i] = Vi.rec_x[i];
@@ -570,14 +577,24 @@ bool upload_planar(Mat& m, const std::vector<const uint8_t*>& parts, const std::
     return true;
 }
 
-Mat load_mat(const Shards& S, const std::string& n, int N, int Kd) {
+// (--tp: rows [r0, r0 + N) of a tensor of N_file rows)
+Mat load_mat(const Shards& S, const std::string& n, int N, int Kd, int r0 = 0, int N_file = 0) {
     const auto* t = S.info(n);
     if (!t) die("no tensor " + n);
-    if (t->elements() != (uint64_t) N * Kd) die(n + ": " + std::to_string(t->elements()) + " values");
+    if (t->elements() != (uint64_t) (N_file ? N_file : N) * Kd) die(n + ": " + std::to_string(t->elements()) + " values");
     if (!k::block_values((int) t->type) || Kd % k::block_values((int) t->type))
         die(n + ": type " + t->type_name() + " not read here");
     Mat m;
     m.type = (int) t->type, m.N = N, m.K = Kd;
+    if (N_file) {   // (a member's rows: blocks only)
+        if (!g_dense_q8) die(n + ": a member's rows need the dense weights as blocks");
+        const size_t rb = (size_t) (Kd / k::block_values(m.type)) * k::block_bytes(m.type);
+        const uint8_t* p = S.data(n) + (size_t) r0 * rb;
+        if (upload_planar(m, {p}, {(size_t) N * Kd})) return m;
+        m.raw = dalloc<uint8_t>((size_t) N * rb);
+        CU(cudaMemcpy(m.raw, p, (size_t) N * rb, cudaMemcpyHostToDevice));
+        return m;
+    }
     const size_t nb = tensor_bytes(*t);
     if (g_dense_q8) {
         if (upload_planar(m, {S.data(n)}, {(size_t) N * Kd})) return m;
@@ -593,6 +610,26 @@ Mat load_mat(const Shards& S, const std::string& n, int N, int Kd) {
     m.f16 = dalloc<uint16_t>((size_t) N * Kd);
     k::decode_f16(m.type, g_stage, (size_t) N * Kd, m.f16, g_s);
     CU(cudaStreamSynchronize(g_s));
+    return m;
+}
+
+// --tp: the columns [k0, k0 + kn) of every row of a [N][K_file] matrix of blocks (whole blocks: re-blocked rows of kn)
+Mat load_mat_cols(const Shards& S, const std::string& n, int N, int K_file, int k0, int kn) {
+    const auto* t = S.info(n);
+    if (!t) die("no tensor " + n);
+    if (t->elements() != (uint64_t) N * K_file) die(n + ": " + std::to_string(t->elements()) + " values");
+    const int ty = (int) t->type, bv = k::block_values(ty);
+    if (!bv || K_file % bv || k0 % bv || kn % bv) die(n + ": a member's columns are not whole " + t->type_name() + " blocks");
+    if (!g_dense_q8) die(n + ": a member's columns need the dense weights as blocks");
+    const size_t bb = k::block_bytes(ty), rb = (size_t) (K_file / bv) * bb, ob = (size_t) (kn / bv) * bb;
+    std::vector<uint8_t> h((size_t) N * ob);
+    const uint8_t* p = S.data(n);
+    for (int r = 0; r < N; ++r) std::memcpy(h.data() + (size_t) r * ob, p + (size_t) r * rb + (size_t) (k0 / bv) * bb, ob);
+    Mat m;
+    m.type = ty, m.N = N, m.K = kn;
+    if (upload_planar(m, {h.data()}, {(size_t) N * kn})) return m;
+    m.raw = dalloc<uint8_t>(h.size());
+    CU(cudaMemcpy(m.raw, h.data(), h.size(), cudaMemcpyHostToDevice));
     return m;
 }
 
@@ -656,6 +693,7 @@ struct MatPart {
     std::string name;
     int N = 0;
     std::vector<float> f32;
+    int r0 = 0, N_file = 0;   // (--tp: rows [r0, r0 + N) of a tensor of N_file rows; 0: all of it)
 };
 
 void ensure_stage(size_t nb) {
@@ -703,14 +741,19 @@ bool try_load_fused_raw(const Shards& S, const std::vector<MatPart>& parts, int 
         if (!pt.f32.empty()) return false;
         const auto* t = S.info(pt.name);
         if (!t) die("no tensor " + pt.name);
-        if (t->elements() != (uint64_t) pt.N * Kd) die(pt.name + ": " + std::to_string(t->elements()) + " values");
+        if (t->elements() != (uint64_t) (pt.N_file ? pt.N_file : pt.N) * Kd) die(pt.name + ": " + std::to_string(t->elements()) + " values");
         if (!k::block_values((int) t->type) || Kd % k::block_values((int) t->type))
             die(pt.name + ": type " + t->type_name() + " not read here");
         if (ty < 0) ty = (int) t->type;
         else if (ty != (int) t->type && !g_sv) return false;
         N_tot += pt.N;
-        nb_tot += tensor_bytes(*t);
+        nb_tot += pt.N_file ? (size_t) pt.N * (Kd / k::block_values((int) t->type)) * k::block_bytes((int) t->type)
+                            : tensor_bytes(*t);
     }
+    auto part_p = [&](const MatPart& pt) {   // (a member's rows: from row r0)
+        const int ty_p = (int) S.info(pt.name)->type;
+        return S.data(pt.name) + (size_t) pt.r0 * (Kd / k::block_values(ty_p)) * k::block_bytes(ty_p);
+    };
     out = Mat{};
     out.type = ty;
     out.N = N_tot;
@@ -733,14 +776,16 @@ bool try_load_fused_raw(const Shards& S, const std::vector<MatPart>& parts, int 
     {
         std::vector<const uint8_t*> ps;
         std::vector<size_t> vs;
-        for (const auto& pt : parts) ps.push_back(S.data(pt.name)), vs.push_back((size_t) pt.N * Kd);
+        for (const auto& pt : parts) ps.push_back(part_p(pt)), vs.push_back((size_t) pt.N * Kd);
         if (upload_planar(out, ps, vs)) return true;
     }
     out.raw = dalloc<uint8_t>(nb_tot);
     size_t off = 0;
     for (const auto& pt : parts) {
-        const size_t nb = tensor_bytes(*S.info(pt.name));
-        CU(cudaMemcpy(out.raw + off, S.data(pt.name), nb, cudaMemcpyHostToDevice));
+        const auto* t = S.info(pt.name);
+        const size_t nb = pt.N_file ? (size_t) pt.N * (Kd / k::block_values((int) t->type)) * k::block_bytes((int) t->type)
+                                    : tensor_bytes(*t);
+        CU(cudaMemcpy(out.raw + off, part_p(pt), nb, cudaMemcpyHostToDevice));
         off += nb;
     }
     return true;
@@ -1576,6 +1621,7 @@ struct DevCtx {
     cudaStream_t s = nullptr, cs = nullptr;
     cudaEvent_t ev = nullptr;
     cublasHandle_t blas = nullptr;
+    uint16_t* w16 = nullptr;   // (--tp: this member's g_w16)
     Work W{};
     ExpertCache EC;
 };
@@ -1589,7 +1635,11 @@ void use_dev(int d) {
     CU(cudaSetDevice(d));
     g_cur = d;
     g_s = g_dev[d].s, g_cs = g_dev[d].cs, g_ev = g_dev[d].ev, g_blas = g_dev[d].blas;
+    if (g_tpn > 1) g_w16 = g_dev[d].w16;
 }
+// --tp: a layer's attention and MoE stop at their partial sums in W.tmp (before the short convs): tp_forward
+bool g_tp_part = false;
+std::vector<std::vector<uint8_t>> g_tp_down;   // (--tp, at load: the members' columns of down, re-blocked)
 
 // (kCand: sampling's candidates - the resident token path finds the largest logits on the device, g_cand; any other
 // path gives the logits as kLogits does and leaves g_cand.n at -1)
@@ -2056,6 +2106,7 @@ void run_layer_attn(const Model& M, Layer& Ly, int l, int T, int pos0, const flo
     if (staged) Ly.kc = kc_h, Ly.vc = vc_h, Ly.kc8 = kc8_h, Ly.vc8 = vc8_h;
     k::gate_mul_f16(W.o, gate_p, (size_t) T * HD, W.x16, g_dense_q8 && T == 1, g_s);
     matmul(Ly.wo, W.o, W.x16, T, W.tmp, C);
+    if (g_tp_part) return;
     conv_rec(Ly, 2, W.tmp, Ly.h_attn, T, C);
     if (l % c.block == 0) {
         CU(cudaMemcpyAsync(blk(nb), h_in, TC * 4, cudaMemcpyDeviceToDevice, g_s));
@@ -2552,6 +2603,7 @@ void run_prefill_moe(const Model& M, Layer& Ly, int l, int T, const uint16_t* xq
     }
     g_pf.lap(g_pf.experts, "experts");
     t_exp += now() - te0;
+    if (g_tp_part) return;
     conv_rec(Ly, 3, W.tmp, Ly.h_mlp, T, C);
     k::conv4_res(W.tmp, Ly.h_mlp, Ly.sc_mlp, nullptr, 0, T, C, r_in, h_out, g_s);
 }
@@ -4790,8 +4842,581 @@ void spec_step(Model& M, ik2::draft::Drafter* drafter, int anchor, int P, int B,
     }
 }
 
+// ---- --tp N: tensor parallel over N GPUs (tp_init at load).  A member holds 1 / N of every layer's heads (their
+// projections, convs, clips, sinks, K / V cache) and of every expert's width; the rest of a layer is the same on all.
+// A layer visit has two sums over the members: the output projection's partials and the MoE's (after each member's
+// combine of its 8 picks' partial rows), [T][C] each.  A member copies its partial into every other member's receive
+// slot (peer copies), then each adds p0 + p1 + .. in member order: the same bits on every member, so the replicated
+// parts (the stream, the norms, the router's picks) stay identical.  Two slots (and events) by a sum's parity: a copy
+// into a peer's slot k % 2 follows that peer's add of sum k - 2 (it waited for the peer's copy of sum k - 1, made
+// after it).  A call's sums are numbered from 0 (2 a visit); the streams are synchronized between calls.
+constexpr int kTpMax = 8;
+struct TpParts {
+    const float* p[kTpMax];
+};
+__global__ void tp_sum4_kernel(TpParts s, int N, size_t n4, float4* __restrict__ out) {
+    for (size_t i = blockIdx.x * (size_t) blockDim.x + threadIdx.x; i < n4; i += (size_t) gridDim.x * blockDim.x) {
+        float4 a = ((const float4*) s.p[0])[i];
+        for (int j = 1; j < N; ++j) {
+            const float4 b = ((const float4*) s.p[j])[i];
+            a.x += b.x, a.y += b.y, a.z += b.z, a.w += b.w;
+        }
+        out[i] = a;
+    }
+}
+// A token's sums: each member's partial in its own send[k % 2], read by the others in place (peer access) in the add
+// that also runs the short conv after it - no copy between (the same parity rule: a member writes send[s] again only
+// after it waited for the others' partials of sum k + 1, made after their adds of sum k).
+__global__ void tp_sum_conv4_kernel(TpParts s, int N, int C, float* __restrict__ hist, const float* __restrict__ w,
+                                    const float* residual, float* __restrict__ y) {
+    const int c = blockIdx.x * blockDim.x + threadIdx.x;
+    if (c >= C) return;
+    float x = s.p[0][c];
+    for (int j = 1; j < N; ++j) x += s.p[j][c];
+    const float h0 = hist[c], h1 = hist[(size_t) C + c], h2 = hist[(size_t) 2 * C + c];
+    const float* wc = w + (size_t) c * 4;
+    float a = wc[0] * h0 + wc[1] * h1 + wc[2] * h2 + wc[3] * x;
+    if (residual) a += residual[c];
+    y[c] = a;
+    hist[c] = h1, hist[(size_t) C + c] = h2, hist[(size_t) 2 * C + c] = x;
+}
+struct TpMember {
+    float* recv[2][kTpMax] = {};   // [slot][from member]: [Tm][C]
+    float* send[2] = {};           // (a token's partials, [C], by slot)
+    cudaEvent_t ev[2] = {};        // (its stream, by slot: its partial copied out to every other member)
+    cudaEvent_t fork = nullptr, join = nullptr;
+};
+std::vector<TpMember> g_tpx;
+size_t g_tp_cap = 0;       // floats a receive slot holds
+FastGraph g_tpgraph[4];    // a token's launches on every member, by OutMode
+
+void tp_init(Model& M, int chunk) {
+    const int N = g_tpn;
+    if (N > kTpMax) die("--tp: at most " + std::to_string(kTpMax));
+    if (g_stage) die("--tp: the load's staging is still held");
+    g_tpx.assign(N, {});
+    g_tp_cap = (size_t) std::max(chunk, 1) * M.c.C;
+    for (int m = 0; m < N; ++m) {
+        use_dev(m);
+        for (int s = 0; s < 2; ++s)
+            for (int j = 0; j < N; ++j)
+                if (j != m) g_tpx[m].recv[s][j] = dalloc<float>(g_tp_cap);
+        for (int s = 0; s < 2; ++s) {
+            CU(cudaEventCreateWithFlags(&g_tpx[m].ev[s], cudaEventDisableTiming));
+            g_tpx[m].send[s] = dalloc<float>(M.c.C);
+        }
+        CU(cudaEventCreateWithFlags(&g_tpx[m].fork, cudaEventDisableTiming));
+        CU(cudaEventCreateWithFlags(&g_tpx[m].join, cudaEventDisableTiming));
+    }
+    use_dev(0);
+    size_t fr = 0, tot = 0;
+    for (int m = 0; m < N; ++m) {
+        use_dev(m);
+        CU(cudaMemGetInfo(&fr, &tot));
+        std::printf("tensor parallel: GPU %d %.1f GiB free\n", m, fr / 1073741824.0);
+    }
+    use_dev(0);
+}
+// member m (current): its partial x [n] of sum k (a call's k-th) out to the others' receive slots
+void tp_push(int m, const float* x, size_t n, int k) {
+    if (n > g_tp_cap) die("--tp: a sum larger than its receive slot");
+    const int s = k & 1;
+    for (int j = 0; j < g_tpn; ++j)
+        if (j != m) CU(cudaMemcpyAsync(g_tpx[j].recv[s][m], x, n * 4, cudaMemcpyDefault, g_s));
+    CU(cudaEventRecord(g_tpx[m].ev[s], g_s));
+}
+// member m (current): x = sum k's partials added in member order (after every member's tp_push of it)
+void tp_reduce(int m, float* x, size_t n, int k) {
+    const int s = k & 1;
+    TpParts p{};
+    for (int j = 0; j < g_tpn; ++j) {
+        if (j == m) {
+            p.p[j] = x;
+            continue;
+        }
+        CU(cudaStreamWaitEvent(g_s, g_tpx[j].ev[s], 0));
+        p.p[j] = g_tpx[m].recv[s][j];
+    }
+    const size_t n4 = n / 4;
+    tp_sum4_kernel<<<(unsigned) std::min<size_t>((n4 + 255) / 256, 1024), 256, 0, g_s>>>(p, g_tpn, n4, (float4*) x);
+}
+
+// a token's sum k on member m (current): every member's send[k % 2] added in member order, then the short conv
+void tp_sum_conv(int m, int k, float* hist, const float* w, const float* residual, float* y, int C) {
+    const int s = k & 1;
+    TpParts p{};
+    for (int j = 0; j < g_tpn; ++j) {
+        if (j != m) CU(cudaStreamWaitEvent(g_s, g_tpx[j].ev[s], 0));
+        p.p[j] = g_tpx[j].send[s];
+    }
+    tp_sum_conv4_kernel<<<(unsigned) ((C + 127) / 128), 128, 0, g_s>>>(p, g_tpn, C, hist, w, residual, y);
+}
+// one token's launches on every member (the embedding row and position in member 0's pinned emb_h / pos_h)
+void tp_token_launches(OutMode out_mode) {
+    const int N = g_tpn;
+    const Config& c = g_tpm[0]->c;
+    const int C = c.C, HD = c.H * c.D, KD = c.KV * c.D, HR = c.H * c.d_rel;
+    const size_t Cb = (size_t) C * 4;
+    const float qk_scale = 1.0f / std::sqrt((float) c.D);
+    const float k_scale = c.qk_clip <= 28.0f ? 16.0f : 1.0f, v_scale = 32.0f;
+    const int P_sl = std::min(128, std::max(1, (c.window + 63) / 64)), P_full = 128;
+    Work& W0 = dev_work(0);
+    use_dev(0);
+    CU(cudaEventRecord(g_tpx[0].fork, g_s));
+    int nb[kTpMax] = {}, nb_pre[kTpMax] = {}, n_bank[kTpMax] = {};
+    const float* msg[kTpMax] = {};
+    for (int m = 0; m < N; ++m) {
+        use_dev(m);
+        Work& W = dev_work(m);
+        if (m) CU(cudaStreamWaitEvent(g_s, g_tpx[0].fork, 0));
+        CU(cudaMemcpyAsync(W.tmp, W0.emb_h, Cb, cudaMemcpyHostToDevice, g_s));
+        k::rms(W.tmp, g_tpm[m]->embd_norm, 1, C, c.eps, W.h, g_s);
+        CU(cudaMemcpyAsync(W.pos, W0.pos_h, 4, cudaMemcpyHostToDevice, g_s));
+    }
+    for (int vis = 0; vis < c.n_visit; ++vis) {
+        const int l = g_tpm[0]->V[vis].l;
+        const bool first = l % c.block == 0;
+        // the attention: each member its heads, up to its partial of the output projection in W.tmp
+        for (int m = 0; m < N; ++m) {
+            use_dev(m);
+            Model& M = *g_tpm[m];
+            Work& W = dev_work(m);
+            auto blk = [&](int i) { return W.blocks + (size_t) i * W.blk_ld * C; };
+            Layer& Ly = bind_visit(M, vis);
+            msg[m] = nullptr;
+            if (c.n_pass > 1 && l == c.core0) {
+                if (M.V[vis].pass == 0) {
+                    nb_pre[m] = nb[m];
+                    CU(cudaMemcpyAsync(W.lp_pre, W.h, Cb, cudaMemcpyDeviceToDevice, g_s));
+                } else {
+                    n_bank[m] = 0;
+                    for (int i = nb_pre[m] + 1; i < nb[m]; ++i, ++n_bank[m])
+                        CU(cudaMemcpyAsync(W.lp_bank + (size_t) n_bank[m] * C, blk(i), Cb, cudaMemcpyDeviceToDevice, g_s));
+                    CU(cudaMemcpyAsync(W.lp_bank + (size_t) n_bank[m] * C, W.h, Cb, cudaMemcpyDeviceToDevice, g_s));
+                    ++n_bank[m];
+                    CU(cudaMemcpyAsync(W.h, W.lp_pre, Cb, cudaMemcpyDeviceToDevice, g_s));
+                    nb[m] = nb_pre[m];
+                    k::ResStates st{};
+                    for (int i = 0; i < n_bank[m]; ++i) st.st[i] = W.lp_bank + (size_t) i * C;
+                    k::attn_res_jobs(st, n_bank[m], M.lp_query_all, 2, 2 * (c.core1 - c.core0), C, 1e-6f, W.lp_msg_all, g_s);
+                }
+            }
+            if (M.V[vis].pass > 0) msg[m] = W.lp_msg_all + (size_t) (l - c.core0) * 4 * C;
+            float* x3[3] = {W.xq, W.xk, W.xv};
+            const float* nw[3] = {Ly.sliding ? Ly.attn_norm : Ly.q_in_norm, Ly.sliding ? Ly.attn_norm : Ly.k_in_norm,
+                                  Ly.sliding ? Ly.attn_norm : Ly.v_in_norm};
+            bool sep = !Ly.sliding;
+            {
+                k::ResStates st{};
+                for (int i = 0; i < nb[m]; ++i) st.st[i] = blk(i);
+                st.st[nb[m]] = W.h;
+                if (msg[m]) {
+                    k::attn_res(st, nb[m] + 1, Ly.res_score, Ly.n_res_q, 1, C, 1e-6f, W.lp_in, g_s);
+                    k::LoopGate gt[3];
+                    for (int j = 0; j < 3; ++j)
+                        gt[j] = {W.lp_in + (size_t) (Ly.n_res_q == 3 ? j : 0) * C, msg[m] + (size_t) j * C, Ly.lp_down[j],
+                                 Ly.lp_forget[j], Ly.lp_gain[j], x3[j]};
+                    k::loop_gates(gt, 3, 1, C, c.rank, 1e-6f, W.lp_g, g_s);
+                    k::rms_multi(k::RmsJobs{{x3[0], x3[1], x3[2]}, {nw[0], nw[1], nw[2]}, {x3[0], x3[1], x3[2]}}, 3, C,
+                                 c.eps, g_s);
+                    sep = true;
+                } else if (l > 0) {
+                    k::RmsOuts outs{};
+                    uint16_t* y16[3] = {W.x16, W.xk16, W.xv16};
+                    for (int j = 0; j < Ly.n_res_q; ++j) outs.w[j] = nw[j], outs.y16[j] = y16[j], outs.y32[j] = x3[j];
+                    k::attn_res_rms_f16(st, nb[m] + 1, Ly.res_score, Ly.n_res_q, 1, C, 1e-6f, c.eps, outs, g_s);
+                } else {
+                    for (int j = 0; j < (sep ? 3 : 1); ++j) k::rms(W.h, nw[j], 1, C, c.eps, x3[j], g_s);
+                }
+            }
+            float *q_p, *r_p, *gate_p;
+            if (Ly.sliding) {
+                if (Ly.wqkvrg.N == 0) die("--tp: a sliding layer without its fused projection");
+                const Mat& mt = Ly.wqkvrg;   // q | k | v | r | gate
+                q_p = W.qkv, r_p = q_p + HD + 2 * KD, gate_p = r_p + HR;
+                if (!sep) {
+                    mv1c(mt, W.xq, W.qkv, k::MvConv{HD, KD, Ly.h_k, Ly.sc_k, nullptr, 0, nullptr, W.kconv},
+                         k::MvConv{HD + KD, KD, Ly.h_v, Ly.sc_v, nullptr, 0, nullptr, W.vconv});
+                } else if (mt.q8) {
+                    k::mv_q8p_conv(mt.q8, mt.q8d, mt.N, mt.K, W.xq, W.qkv,
+                                   k::MvConv{HD, KD, Ly.h_k, Ly.sc_k, nullptr, 0, nullptr, W.kconv},
+                                   k::MvConv{HD + KD, KD, Ly.h_v, Ly.sc_v, nullptr, 0, nullptr, W.vconv}, g_s,
+                                   k::MvAlt{W.xk, HD, KD}, k::MvAlt{W.xv, HD + KD, KD});
+                } else {
+                    mv1(mat_rows(mt, 0, HD), W.xq, W.qkv);
+                    mv1c(mat_rows(mt, HD, KD), W.xk, q_p + HD, k::MvConv{0, KD, Ly.h_k, Ly.sc_k, nullptr, 0, nullptr, W.kconv});
+                    mv1c(mat_rows(mt, HD + KD, KD), W.xv, q_p + HD + KD,
+                         k::MvConv{0, KD, Ly.h_v, Ly.sc_v, nullptr, 0, nullptr, W.vconv});
+                    mv1(mat_rows(mt, HD + 2 * KD, mt.N - HD - 2 * KD), W.xq, W.qkv + HD + 2 * KD);
+                }
+            } else {
+                if (Ly.wqrg.N == 0) die("--tp: a full layer without its fused projection");
+                mv1(Ly.wqrg, W.xq, W.qkv);   // q | r | gate
+                q_p = W.qkv, r_p = q_p + HD, gate_p = r_p + HR;
+                float *kd_p = W.dyn, *vd_p = W.dyn + (size_t) c.KV * 4;
+                k::mv_f16(Ly.sc_k_dyn16, c.KV * 4, C, W.xk, kd_p, g_s);
+                k::mv_f16(Ly.sc_v_dyn16, c.KV * 4, C, W.xv, vd_p, g_s);
+                mv1c(Ly.wk, W.xk, W.kk, k::MvConv{0, KD, Ly.h_k, Ly.sc_k, kd_p, c.KV, nullptr, W.kconv});
+                mv1c(Ly.wv, W.xv, W.vv, k::MvConv{0, KD, Ly.h_v, Ly.sc_v, vd_p, c.KV, nullptr, W.vconv});
+            }
+            const int extent = Ly.sliding ? c.extent_swa : c.extent;
+            const int window = Ly.sliding ? c.window : (1 << 30);
+            const int P = Ly.sliding ? P_sl : P_full;
+            const bool mma = g_attn_mma == 1 || (g_attn_mma == 2 && !Ly.sliding);
+            const int ring = Ly.sliding ? Ly.kv_cap : 0;
+            const int ns = Ly.sliding ? std::min(g_mma_split, std::max(1, (c.window + 63) / 64)) : g_mma_split;
+            uint16_t* q16 = mma ? W.x16 : nullptr;
+            if (g_kv_fp8) {
+                k::prep_qkv_r_fp8_at(q_p, Ly.q_clip, W.kconv, Ly.kc8, W.vconv, Ly.vc8, r_p, Ly.r_clip, c.H, c.KV, c.D,
+                                     c.d_rel, c.qk_clip, c.rel_clip, c.eps, W.pos, !Ly.sliding, c.alpha, c.n_floor,
+                                     Ly.kv_cap, k_scale, v_scale, q16, g_s, Ly.sink16, W.xq, C, W.sink);
+                if (mma)
+                    k::attn_decode_mma_fp8(q16, r_p, W.sink, Ly.kc8, Ly.vc8, ring, c.H, c.KV, W.pos, 0, ns,
+                                           qk_scale / k_scale, 1.0f / v_scale, Ly.rel_proj, c.d_rel, extent, window,
+                                           W.lg, W.o, gate_p, W.x16, g_s);
+                else
+                    k::attn_decode_fp8_at(q_p, r_p, W.sink, Ly.kc8, Ly.vc8, ring, c.H, c.KV, W.pos, P, qk_scale / k_scale,
+                                          1.0f / v_scale, Ly.rel_proj, c.d_rel, extent, window, W.lg, W.o, g_s);
+            } else {
+                k::prep_qkv_r_f16_at(q_p, Ly.q_clip, W.kconv, Ly.kc, W.vconv, Ly.vc, r_p, Ly.r_clip, c.H, c.KV, c.D,
+                                     c.d_rel, c.qk_clip, c.rel_clip, c.eps, W.pos, !Ly.sliding, c.alpha, c.n_floor,
+                                     Ly.kv_cap, q16, g_s, Ly.sink16, W.xq, C, W.sink);
+                if (mma)
+                    k::attn_decode_mma_f16(q16, r_p, W.sink, Ly.kc, Ly.vc, ring, c.H, c.KV, W.pos, 0, ns, qk_scale,
+                                           Ly.rel_proj, c.d_rel, extent, window, W.lg, W.o, gate_p, W.x16, g_s);
+                else
+                    k::attn_decode_f16_at(q_p, r_p, W.sink, Ly.kc, Ly.vc, ring, c.H, c.KV, W.pos, P, qk_scale,
+                                          Ly.rel_proj, c.d_rel, extent, window, W.lg, W.o, g_s);
+            }
+            if (!mma) k::gate_mul_f16(W.o, gate_p, (size_t) HD, W.x16, true, g_s);
+            if (first) CU(cudaMemcpyAsync(blk(nb[m]), W.h, Cb, cudaMemcpyDeviceToDevice, g_s));
+            mv1(Ly.wo, W.o, g_tpx[m].send[0]);
+            CU(cudaEventRecord(g_tpx[m].ev[0], g_s));
+        }
+        // the sum, its short conv and the stream; the MoE's input, the router (the same picks on every member), each
+        // member's width of the 8 experts, their combine: its partial in W.tmp
+        for (int m = 0; m < N; ++m) {
+            use_dev(m);
+            Model& M = *g_tpm[m];
+            Work& W = dev_work(m);
+            auto blk = [&](int i) { return W.blocks + (size_t) i * W.blk_ld * C; };
+            Layer& Ly = M.L[l];
+            tp_sum_conv(m, 0, Ly.h_attn, Ly.sc_attn, first ? nullptr : W.h, W.r, C);
+            if (first) ++nb[m];
+            {
+                k::ResStates st{};
+                for (int i = 0; i < nb[m]; ++i) st.st[i] = blk(i);
+                st.st[nb[m]] = W.r;
+                if (msg[m]) {
+                    k::attn_res(st, nb[m] + 1, Ly.ffn_res_score, 1, 1, C, 1e-6f, W.xq, g_s);
+                    k::loop_gate(W.xq, msg[m] + (size_t) 3 * C, Ly.lp_down[3], Ly.lp_forget[3], Ly.lp_gain[3], 1, C,
+                                 c.rank, 1e-6f, W.lp_g, W.xq, g_s);
+                    k::rms(W.xq, Ly.ffn_norm, 1, C, c.eps, W.xq, g_s);
+                } else {
+                    k::RmsOuts outs{};
+                    outs.w[0] = Ly.ffn_norm, outs.y16[0] = W.x16, outs.y32[0] = W.xq;
+                    k::attn_res_rms_f16(st, nb[m] + 1, Ly.ffn_res_score, 1, 1, C, 1e-6f, c.eps, outs, g_s);
+                }
+            }
+            k::mv_f16(Ly.router16, c.E, C, W.xq, W.rlog, g_s);
+            int* rtop = W.route_d;
+            float* rw = (float*) (W.route_d + c.K);
+#ifdef STRATA_USE_HIP
+            static const int exp_mma = getenv("SAGUARO_IK2_EXPERT_MMA") ? atoi(getenv("SAGUARO_IK2_EXPERT_MMA")) : 0;
+#else
+            static const int exp_mma = getenv("SAGUARO_IK2_EXPERT_MMA") ? atoi(getenv("SAGUARO_IK2_EXPERT_MMA")) : 1;
+#endif
+            const bool exp_tc = exp_mma && k::experts_mma_fits(Ly.ty[0], Ly.ty[1], Ly.ty[2], C, c.F);
+            k::route_token(W.rlog, Ly.probs_b, c.E, c.K, c.route_scale, Ly.tab_blob, Ly.tab_sc[0], Ly.tab_sc[1],
+                           Ly.tab_sc[2], rtop, rw, W.blob, W.tok, W.inv, W.sg, W.su, W.wt, g_s, W.xq, C,
+                           exp_tc ? (uint16_t*) W.gu32 : nullptr);
+            if (exp_tc) {
+                k::experts_gate_up_swiglu_mma(W.blob, c.K, Ly.eb[0], (const uint16_t*) W.gu32, C, c.F, W.sg, W.su,
+                                              c.gate_cap, c.up_cap, W.h16, g_s, nullptr, 0);
+                k::experts_down_mma(W.blob, c.K, Ly.eb[0] + Ly.eb[1], W.h16, C, c.F, W.y32, g_s, nullptr, 0);
+            } else {
+                k::experts_gate_up_swiglu(W.blob, W.tok, c.K, Ly.ty[0], Ly.ty[1], Ly.eb[0], W.xq, C, c.F, W.sg, W.su,
+                                          c.gate_cap, c.up_cap, W.h16, g_s, nullptr, 0);
+                k::experts_down(W.blob, c.K, Ly.ty[2], Ly.eb[0] + Ly.eb[1], W.h16, C, c.F, W.y32, g_s, nullptr, 0);
+            }
+            k::moe_combine_f32(W.y32, W.inv, W.wt, 1, c.K, C, g_tpx[m].send[1], false, g_s);
+            CU(cudaEventRecord(g_tpx[m].ev[1], g_s));
+        }
+        for (int m = 0; m < N; ++m) {
+            use_dev(m);
+            Work& W = dev_work(m);
+            Layer& Ly = g_tpm[m]->L[l];
+            tp_sum_conv(m, 1, Ly.h_mlp, Ly.sc_mlp, W.r, W.h, C);
+        }
+    }
+    // the head: each member its rows of the logits (a row's product the same wherever it runs), into member 0's
+    const int Rm = c.n_rows / N;
+    const bool split_head = out_mode != OutMode::kNone && c.n_rows % N == 0 && g_tpm[N - 1]->out_w.N == Rm;
+    for (int m = 1; m < N; ++m) {   // (then the members joined back into member 0's stream)
+        use_dev(m);
+        if (split_head) {
+            Model& Mm = *g_tpm[m];
+            Work& W = dev_work(m);
+            k::ResStates st{};
+            for (int i = 0; i < nb[m]; ++i) st.st[i] = W.blocks + (size_t) i * W.blk_ld * C;
+            st.st[nb[m]] = W.h;
+            k::RmsOuts outs{};
+            outs.w[0] = Mm.out_norm, outs.y16[0] = W.x16, outs.y32[0] = W.xq;
+            k::attn_res_rms_f16(st, nb[m] + 1, Mm.out_res_score, 1, 1, C, 1e-6f, c.eps, outs, g_s);
+            mv1(Mm.out_w, W.xq, W.logits);
+            CU(cudaMemcpyAsync(W0.logits + (size_t) m * Rm, W.logits, (size_t) Rm * 4, cudaMemcpyDefault, g_s));
+        }
+        CU(cudaEventRecord(g_tpx[m].join, g_s));
+    }
+    use_dev(0);
+    if (out_mode == OutMode::kNone) {
+        for (int m = 1; m < N; ++m) CU(cudaStreamWaitEvent(g_s, g_tpx[m].join, 0));
+        return;
+    }
+    Model& M = *g_tpm[0];
+    Work& W = W0;
+    {   // the head (member 0: its rows, or all of them)
+        k::ResStates st{};
+        for (int i = 0; i < nb[0]; ++i) st.st[i] = W.blocks + (size_t) i * W.blk_ld * C;
+        st.st[nb[0]] = W.h;
+        k::RmsOuts outs{};
+        outs.w[0] = M.out_norm, outs.y16[0] = W.x16, outs.y32[0] = W.xq;
+        k::attn_res_rms_f16(st, nb[0] + 1, M.out_res_score, 1, 1, C, 1e-6f, c.eps, outs, g_s);
+        mv1(split_head ? mat_rows(M.out_w, 0, Rm) : M.out_w, W.xq, W.logits);
+        for (int m = 1; m < N; ++m) CU(cudaStreamWaitEvent(g_s, g_tpx[m].join, 0));
+        if (out_mode == OutMode::kArgmax) {
+            k::argmax_sum(W.logits, nullptr, nullptr, c.n_vocab, W.argmax_d, g_s);
+            CU(cudaMemcpyAsync(W.argmax_h, W.argmax_d, 4, cudaMemcpyDeviceToHost, g_s));
+        } else if (out_mode == OutMode::kCand) {
+            k::softcap(W.logits, (size_t) c.n_rows, c.logit_cap, g_s);
+            k::cand_topk(W.logits, c.n_vocab, -c.logit_cap, c.logit_cap, kCandK, kCandCap, W.cand_part, W.cand_d, g_s);
+            CU(cudaMemcpyAsync(W.cand_h, W.cand_d, (size_t) (2 + 2 * kCandCap) * 4, cudaMemcpyDeviceToHost, g_s));
+        } else {
+            k::softcap(W.logits, (size_t) c.n_rows, c.logit_cap, g_s);
+            CU(cudaMemcpyAsync(W.logits_h, W.logits, (size_t) c.n_vocab * 4, cudaMemcpyDeviceToHost, g_s));
+        }
+    }
+}
+
+void tp_token(int tok, int pos, OutMode out_mode, std::vector<float>& logits_out, std::vector<int>* argmax_out) {
+    Model& M = *g_tpm[0];
+    const Config& c = M.c;
+    Work& W = dev_work(0);
+    const size_t rb = (size_t) c.C / k::block_values(M.embd_type) * k::block_bytes(M.embd_type);
+    k::decode_host(M.embd_type, M.embd + (size_t) tok * rb, c.C, W.emb_h);
+    W.pos_h[0] = pos;
+    use_dev(0);
+    if (!g_graph) {
+        tp_token_launches(out_mode);
+    } else {
+        FastGraph& G = g_tpgraph[(int) out_mode];
+        if (!G.exec) {   // the first token of this kind: every member's launches recorded as one graph
+            CU(cudaStreamBeginCapture(g_s, cudaStreamCaptureModeThreadLocal));
+            tp_token_launches(out_mode);
+            use_dev(0);
+            CU(cudaStreamEndCapture(g_s, &G.graph));
+            CU(cudaGraphInstantiate(&G.exec, G.graph, 0));
+        }
+        CU(cudaGraphLaunch(G.exec, g_s));
+    }
+    use_dev(0);
+    CU(cudaStreamSynchronize(g_s));
+    if (out_mode == OutMode::kArgmax) {
+        argmax_out->assign(1, W.argmax_h[0]);
+    } else if (out_mode == OutMode::kLogits) {
+        logits_out.insert(logits_out.end(), W.logits_h, W.logits_h + c.n_vocab);
+    } else if (out_mode == OutMode::kCand) {
+        if (W.cand_h[0] <= kCandCap) {
+            g_cand.n = W.cand_h[0], g_cand.idx = W.cand_h + 2, g_cand.val = (const float*) (W.cand_h + 2 + kCandCap);
+        } else {
+            CU(cudaMemcpy(W.logits_h, W.logits, (size_t) c.n_vocab * 4, cudaMemcpyDeviceToHost));
+            logits_out.insert(logits_out.end(), W.logits_h, W.logits_h + c.n_vocab);
+            g_cand.n = -1;
+        }
+    }
+}
+
+// a prompt chunk (or a token at a picture's position) on every member: forward()'s visits, the two sums in each
+void tp_forward(const int* tok, int T, int pos0, bool all_logits, OutMode out_mode, std::vector<float>& logits_out,
+                std::vector<int>* argmax_out, double& t_exp) {
+    const int N = g_tpn;
+    Model& M0 = *g_tpm[0];
+    const Config& c = M0.c;
+    const int C = c.C;
+    const size_t TC = (size_t) T * C;
+    if (T == 1 && g_img.at(pos0) < 0) {
+        tp_token(tok[0], pos0, out_mode, logits_out, argmax_out);
+        return;
+    }
+    if (out_mode == OutMode::kCand) out_mode = OutMode::kLogits, g_cand.n = -1;
+    if (T > dev_work(0).Tm) die("--tp: a prompt chunk longer than --chunk");
+    {
+        Work& W0 = dev_work(0);
+        const size_t rb = (size_t) C / k::block_values(M0.embd_type) * k::block_bytes(M0.embd_type);
+        for (int t = 0; t < T; ++t) k::decode_host(M0.embd_type, M0.embd + (size_t) tok[t] * rb, C, W0.emb_h + (size_t) t * C);
+        for (int t = 0; t < T; ++t) W0.pos_h[t] = pos0 + t;
+        for (int m = 0; m < N; ++m) {
+            use_dev(m);
+            Work& W = dev_work(m);
+            CU(cudaMemcpyAsync(W.tmp, W0.emb_h, TC * 4, cudaMemcpyHostToDevice, g_s));
+            k::rms(W.tmp, g_tpm[m]->embd_norm, T, C, c.eps, W.h, g_s);
+            place_pictures(W.h, T, pos0, C, g_s);
+            CU(cudaMemcpyAsync(W.pos, W0.pos_h, (size_t) T * 4, cudaMemcpyHostToDevice, g_s));
+        }
+    }
+    int nb[kTpMax] = {}, nb_pre[kTpMax] = {}, n_bank[kTpMax] = {};
+    const float* msg[kTpMax] = {};
+    for (int vis = 0; vis < c.n_visit; ++vis) {
+        const int l = M0.V[vis].l;
+        for (int m = 0; m < N; ++m) {
+            use_dev(m);
+            Model& M = *g_tpm[m];
+            Work& W = dev_work(m);
+            auto blk = [&](int i) { return W.blocks + (size_t) i * W.blk_ld * C; };
+            Layer& Ly = bind_visit(M, vis);
+            msg[m] = nullptr;
+            if (c.n_pass > 1 && l == c.core0) {
+                if (M.V[vis].pass == 0) {
+                    nb_pre[m] = nb[m];
+                    CU(cudaMemcpyAsync(W.lp_pre, W.h, TC * 4, cudaMemcpyDeviceToDevice, g_s));
+                } else {
+                    n_bank[m] = 0;
+                    for (int i = nb_pre[m] + 1; i < nb[m]; ++i, ++n_bank[m])
+                        CU(cudaMemcpyAsync(W.lp_bank + (size_t) n_bank[m] * TC, blk(i), TC * 4, cudaMemcpyDeviceToDevice, g_s));
+                    CU(cudaMemcpyAsync(W.lp_bank + (size_t) n_bank[m] * TC, W.h, TC * 4, cudaMemcpyDeviceToDevice, g_s));
+                    ++n_bank[m];
+                    CU(cudaMemcpyAsync(W.h, W.lp_pre, TC * 4, cudaMemcpyDeviceToDevice, g_s));
+                    nb[m] = nb_pre[m];
+                }
+            }
+            if (M.V[vis].pass > 0) {
+                k::ResStates st{};
+                for (int i = 0; i < n_bank[m]; ++i) st.st[i] = W.lp_bank + (size_t) i * TC;
+                k::attn_res(st, n_bank[m], Ly.lp_query, 2, T, C, 1e-6f, W.lp_msg, g_s);
+                k::attn_res(st, n_bank[m], Ly.lp_query + (size_t) 2 * C, 2, T, C, 1e-6f, W.lp_msg + 2 * TC, g_s);
+                msg[m] = W.lp_msg;
+            }
+            g_tp_part = true;
+            run_layer_attn(M, Ly, l, T, pos0, W.h, W.pos, nb[m], 0, W.r, W, msg[m]);
+            g_tp_part = false;
+            tp_push(m, W.tmp, TC, 2 * vis);
+        }
+        for (int m = 0; m < N; ++m) {
+            use_dev(m);
+            Model& M = *g_tpm[m];
+            Work& W = dev_work(m);
+            auto blk = [&](int i) { return W.blocks + (size_t) i * W.blk_ld * C; };
+            Layer& Ly = M.L[l];
+            tp_reduce(m, W.tmp, TC, 2 * vis);
+            if (l % c.block == 0) {
+                CU(cudaMemcpyAsync(blk(nb[m]), W.h, TC * 4, cudaMemcpyDeviceToDevice, g_s));
+                k::conv4(W.tmp, Ly.h_attn, Ly.sc_attn, nullptr, 0, T, C, W.r, g_s);
+                ++nb[m];
+            } else {
+                k::conv4_res(W.tmp, Ly.h_attn, Ly.sc_attn, nullptr, 0, T, C, W.h, W.r, g_s);
+            }
+            k::ResStates st{};
+            for (int i = 0; i < nb[m]; ++i) st.st[i] = blk(i);
+            st.st[nb[m]] = W.r;
+            if (msg[m]) {
+                k::attn_res(st, nb[m] + 1, Ly.ffn_res_score, 1, T, C, 1e-6f, W.xq, g_s);
+                const k::LoopGate gt{W.xq, msg[m] + (size_t) 3 * TC, Ly.lp_down[3], Ly.lp_forget[3], Ly.lp_gain[3], W.xq};
+                loop_gates_chunk(W, &gt, 1, T, C, c.rank, 1e-6f);
+                k::rms_f16(W.xq, Ly.ffn_norm, T, C, c.eps, W.x16, W.xq, g_s);
+            } else {
+                k::RmsOuts outs{};
+                outs.w[0] = Ly.ffn_norm, outs.y16[0] = W.x16, outs.y32[0] = W.xq;
+                k::attn_res_rms_f16(st, nb[m] + 1, Ly.ffn_res_score, 1, T, C, 1e-6f, c.eps, outs, g_s);
+            }
+            gemm16(Ly.router16, c.E, C, W.x16, T, W.rlog, c.E);
+            const int S = T * c.K;
+            k::route(W.rlog, Ly.probs_b, T, c.E, c.K, c.route_scale, W.route_d, (float*) (W.route_d + S), g_s);
+            CU(cudaMemcpyAsync(W.route_h, W.route_d, (size_t) S * 8, cudaMemcpyDeviceToHost, g_s));
+        }
+        for (int m = 0; m < N; ++m) CU(cudaStreamSynchronize(g_dev[m].s));
+        for (int m = 1; m < N; ++m)   // (the members must pick the same experts: their halves of different ones would add up wrong)
+            if (std::memcmp(dev_work(m).route_h, dev_work(0).route_h, (size_t) T * c.K * 4))
+                die("--tp: GPU " + std::to_string(m) + "'s router picks differ from GPU 0's at visit " + std::to_string(vis));
+        const double te0 = now();
+        for (int m = 0; m < N; ++m) {
+            use_dev(m);
+            Model& M = *g_tpm[m];
+            Work& W = dev_work(m);
+            Layer& Ly = M.L[l];
+            const int S = T * c.K;
+            const int* top = W.route_h;
+            const float* w = (const float*) (W.route_h + S);
+            if (m == 0) pop_count(l, top, S);
+            if (S <= W.rg_slots && !Ly.tab_h.empty()) {   // (forward()'s short prompt: the experts by groups)
+                const int GM = W.rg_groups;
+                const size_t o_n = (size_t) GM * 8, o_tok = o_n + (size_t) GM * 4, o_row = o_tok + (size_t) GM * k::kGroupMax * 4,
+                             o_sg = o_row + (size_t) GM * k::kGroupMax * 4, o_su = o_sg + (size_t) W.rg_slots * 4,
+                             o_wt = o_su + (size_t) W.rg_slots * 4, o_id = o_wt + (size_t) W.rg_slots * 4;
+                auto** gb = (const uint8_t**) W.rg_h;
+                int *gn = (int*) (W.rg_h + o_n), *gtok = (int*) (W.rg_h + o_tok), *grow = (int*) (W.rg_h + o_row);
+                float *sg = (float*) (W.rg_h + o_sg), *su = (float*) (W.rg_h + o_su), *wt = (float*) (W.rg_h + o_wt);
+                int* id = (int*) (W.rg_h + o_id);
+                if (++W.stamp == 0) {
+                    std::fill(W.seen_stamp.begin(), W.seen_stamp.end(), 0);
+                    std::fill(W.gi_stamp.begin(), W.gi_stamp.end(), 0);
+                    W.stamp = 1;
+                }
+                const uint32_t stp = W.stamp;
+                int G = 0;
+                for (int i = 0; i < S; ++i) {
+                    const int e = top[i];
+                    int g = W.gi_stamp[e] == stp ? W.gi_idx[e] : -1;
+                    if (g < 0 || gn[g] == k::kGroupMax) {
+                        g = G++;
+                        W.gi_stamp[e] = stp, W.gi_idx[e] = g;
+                        gb[g] = Ly.tab_h[e], gn[g] = 0;
+                    }
+                    gtok[(size_t) g * k::kGroupMax + gn[g]] = i / c.K;
+                    grow[(size_t) g * k::kGroupMax + gn[g]] = i;
+                    ++gn[g];
+                    sg[i] = Ly.scale[0].empty() ? 1.0f : Ly.scale[0][e];
+                    su[i] = Ly.scale[1].empty() ? 1.0f : Ly.scale[1][e];
+                    wt[i] = w[i] * (Ly.scale[2].empty() ? 1.0f : Ly.scale[2][e]);
+                    id[i] = i;
+                }
+                CU(cudaMemcpyAsync(W.rg_d, W.rg_h, W.rg_bytes, cudaMemcpyHostToDevice, g_s));
+                k::experts_gate_up_swiglu_g((const uint8_t* const*) W.rg_d, (const int*) (W.rg_d + o_n),
+                                            (const int*) (W.rg_d + o_tok), (const int*) (W.rg_d + o_row), G, Ly.ty[0],
+                                            Ly.ty[1], Ly.eb[0], W.xq, C, c.F, (const float*) (W.rg_d + o_sg),
+                                            (const float*) (W.rg_d + o_su), c.gate_cap, c.up_cap, W.h16, g_s);
+                k::experts_down_g((const uint8_t* const*) W.rg_d, (const int*) (W.rg_d + o_n), (const int*) (W.rg_d + o_row),
+                                  G, Ly.ty[2], Ly.eb[0] + Ly.eb[1], W.h16, C, c.F, W.y32, g_s);
+                k::moe_combine_f32(W.y32, (const int*) (W.rg_d + o_id), (const float*) (W.rg_d + o_wt), T, c.K, C, W.tmp,
+                                   false, g_s);
+            } else {
+                double t_x = 0;
+                g_tp_part = true;
+                run_prefill_moe(M, Ly, l, T, W.x16, top, w, W.r, W.h, W, dev_cache(m), t_x);
+                g_tp_part = false;
+            }
+            tp_push(m, W.tmp, TC, 2 * vis + 1);
+        }
+        for (int m = 0; m < N; ++m) {
+            use_dev(m);
+            Work& W = dev_work(m);
+            Layer& Ly = g_tpm[m]->L[l];
+            tp_reduce(m, W.tmp, TC, 2 * vis + 1);
+            k::conv4_res(W.tmp, Ly.h_mlp, Ly.sc_mlp, nullptr, 0, T, C, W.r, W.h, g_s);
+        }
+        t_exp += now() - te0;
+    }
+    use_dev(0);
+    run_head(M0, T, all_logits, out_mode, nb[0], dev_work(0).h, dev_work(0), logits_out, argmax_out);
+    for (int m = 1; m < N; ++m) CU(cudaStreamSynchronize(g_dev[m].s));
+}
+
 void forward(Model& M, const int* tok, int T, int pos0, bool all_logits, OutMode out_mode, const std::string& dump,
              std::vector<float>& logits_out, std::vector<int>* argmax_out, double& t_exp) {
+    if (g_tpn > 1) {
+        if (!dump.empty()) die("--tp with --dump");
+        tp_forward(tok, T, pos0, all_logits, out_mode, logits_out, argmax_out, t_exp);
+        return;
+    }
     const Config& c = M.c;
     const int C = c.C;
     lend_check(M, pos0 + T);
@@ -5863,8 +6488,18 @@ void check_preview(int n_gpu, bool serve) {
     if (e != cudaSuccess || nd < 1)
         refuse(std::string("no ") + vendor + " GPU visible (" + (e != cudaSuccess ? cudaGetErrorString(e) : "0 devices") +
             "): the Inkling 2 preview runs on one " + vendor + " GPU");
-    if (n_gpu < 1 || n_gpu > 2)
+    if (n_gpu < 1 || n_gpu > (g_tpn > 1 ? 8 : 2))
         refuse("--gpus " + std::to_string(n_gpu) + ": Inkling 2 runs on one or two GPUs (three or more are not in it yet)");
+    if (g_tpn > 1 && nd < n_gpu) refuse("--tp " + std::to_string(g_tpn) + ": " + std::to_string(nd) + " GPU(s) visible");
+    for (int d = 1; g_tpn > 1 && d < n_gpu; ++d) {   // (the members' replicated parts - the router's picks - must agree bit for bit)
+        cudaDeviceProp a{}, b{};
+        CU(cudaGetDeviceProperties(&a, 0));
+        CU(cudaGetDeviceProperties(&b, d));
+        if (a.major != b.major || a.minor != b.minor || a.multiProcessorCount != b.multiProcessorCount ||
+            std::string(a.name) != b.name)
+            refuse("--tp: GPU " + std::to_string(d) + " (" + b.name + ") is not of GPU 0's kind (" + a.name +
+                   "): tensor parallel needs identical GPUs");
+    }
     const bool old_two = (getenv("SAGUARO_IK2_EP") && std::atoi(getenv("SAGUARO_IK2_EP"))) || (getenv("SAGUARO_IK2_TP") && std::atoi(getenv("SAGUARO_IK2_TP")));
     if (n_gpu == 2 && old_two && !force)
         refuse("--gpus 2 with SAGUARO_IK2_EP=1 / SAGUARO_IK2_TP=1: the older two-GPU modes are outside the preview (without them: "
@@ -5874,6 +6509,9 @@ void check_preview(int n_gpu, bool serve) {
 #endif
     if (n_gpu == 2 && nd < 2)
         refuse("--gpus 2: " + std::to_string(nd) + " GPU visible");
+#ifdef STRATA_USE_HIP
+    if (g_tpn > 1 && !force) refuse("--tp: not checked on AMD GPUs yet" + run_anyway);
+#endif
     for (int d = 0; d < std::min(n_gpu, nd); ++d) {
         cudaDeviceProp p{};
         CU(cudaGetDeviceProperties(&p, d));
@@ -5951,6 +6589,7 @@ int main(int argc, char** argv) {
         else if (a == "--cache-gb") cache_gb = std::atof(next().c_str());
         else if (a == "--threads") threads = std::atoi(next().c_str());
         else if (a == "--gpus") n_gpu = std::atoi(next().c_str());
+        else if (a == "--tp") g_tpn = std::atoi(next().c_str());
         else if (a == "--draft") draft_path = next();
         else if (a == "--serve") serve = true;
         else if (a == "--serve-ik2") serve = true, serve_maya = false;
@@ -6030,10 +6669,37 @@ int main(int argc, char** argv) {
         while (*p && *p != ',') ++p;
         if (*p == ',') ++p;
     }
+    // --tp N: tensor parallel over N GPUs (the visible ones, in order) - each holds 1/N of every layer's heads and
+    // experts' width and of the K / V cache, the two partial sums of a layer visit added over peer copies
+    auto tp_refuse = [&](const std::string& m) {   // (--serve: the server's NOTE line too)
+        if (serve) std::printf("NOTE saguaro ik2: %s\n", m.c_str()), std::fflush(stdout);
+        die(m);
+    };
+    if (g_tpn < 1 || g_tpn > 8) tp_refuse("--tp: 1 to 8 GPUs");
+    if (g_tpn > 1) {
+        if (n_gpu != 1 && n_gpu != g_tpn) tp_refuse("--tp " + std::to_string(g_tpn) + " with --gpus " + std::to_string(n_gpu));
+        n_gpu = g_tpn;
+        if (strata_fmt::Pack::sniff(model)) tp_refuse("--tp: GGUF files only (a Strata pack's packed experts are not split yet)");
+        const char* bad[] = {"SAGUARO_IK2_EP", "SAGUARO_IK2_TP", "SAGUARO_IK2_CPU", "SAGUARO_IK2_DENSE", "SAGUARO_IK2_OFF",
+                             "SAGUARO_IK2_TRACE", "SAGUARO_IK2_POP_OUT"};
+        for (const char* b : bad)
+            if (getenv(b) && *getenv(b) && std::string(getenv(b)) != "0") tp_refuse(std::string("--tp with ") + b);
+        // (the members' slices are read where the file is mapped: the pinned host paths know one model's experts)
+        if (getenv("SAGUARO_IK2_HOST") && std::string(getenv("SAGUARO_IK2_HOST")) != "mmap")
+            tp_refuse("--tp: SAGUARO_IK2_HOST=mmap only");
+        if (getenv("SAGUARO_IK2_FAST") && !std::atoi(getenv("SAGUARO_IK2_FAST")))
+            tp_refuse("--tp with SAGUARO_IK2_FAST=0 (tensor parallel runs on the resident path)");
+        if (g_kv_q4) tp_refuse("--tp with SAGUARO_IK2_KV=q4");
+        if (g_par > 1) tp_refuse("--tp with --parallel > 1 (not yet)");
+        if (g_kv_stream == 1) tp_refuse("--tp with --kv-streaming on");
+        g_kv_stream = 0;
+        if (!draft_path.empty() || g_lookup) std::printf("NOTE saguaro ik2: drafting off with --tp\n");
+        draft_path.clear(), g_lookup = false, drafting = "off";
+    }
     check_preview(n_gpu, serve);
     // --gpus 2: the split (TwoGpu) - the engine runs as on one GPU (GPU 0), GPU 1 added to the token path at load;
     // SAGUARO_IK2_EP=1 / SAGUARO_IK2_TP=1: the older two-GPU modes on the cache path instead (SAGUARO_IK2_UNSUPPORTED)
-    if (n_gpu == 2 && !(getenv("SAGUARO_IK2_EP") && std::atoi(getenv("SAGUARO_IK2_EP"))) &&
+    if (n_gpu == 2 && g_tpn == 1 && !(getenv("SAGUARO_IK2_EP") && std::atoi(getenv("SAGUARO_IK2_EP"))) &&
         !(getenv("SAGUARO_IK2_TP") && std::atoi(getenv("SAGUARO_IK2_TP")))) {
         g_two.want = true;
         n_gpu = 1;
@@ -6117,6 +6783,15 @@ int main(int argc, char** argv) {
     }
     // (a row of an expert is whole blocks of its type: checked per tensor below; 64 covers NVFP4 and Q8_0)
     if (c.D != 128 || c.H % c.KV || c.C % 64 || c.F % 64) die("unexpected shapes");
+    if (g_tpn > 1) {   // a member's heads (whole query groups), K / V heads and experts' width
+        const int N = g_tpn;
+        if (c.KV % N || c.F % N)
+            die("--tp " + std::to_string(N) + ": " + std::to_string(c.KV) + " K / V heads and an expert width of " +
+                std::to_string(c.F) + " do not divide by " + std::to_string(N));
+        if ((c.H / N) * c.D % 128) die("--tp " + std::to_string(N) + ": a member's output projection is not whole 128-value rows");
+        c.H /= N, c.KV /= N, c.F /= N, c.tp_n = N;
+        std::printf("tensor parallel over %d GPUs: each %d query heads, %d K / V heads, experts %d wide\n", N, c.H, c.KV, c.F);
+    }
     const int n_sliding = (int) std::count(c.sliding.begin(), c.sliding.end(), true);
     std::printf("saguaro ik2: %d layers (%d sliding), %d experts (%d a token), width %d, vocab %d; %zu shards\n",
                 c.n_layer, n_sliding, c.E, c.K, c.C, c.n_vocab, S.files.size());
@@ -6213,6 +6888,30 @@ int main(int argc, char** argv) {
         std::printf("%s over 2 GPUs (peer access %s)\n", g_tp ? "experts tensor-parallel" : "expert parallel",
                     p01 && p10 ? "on" : "off: copies through the host");
     }
+    if (g_tpn > 1) {   // every pair of members a tested peer copy: the sums are copies inside a token's CUDA graph
+        const int N = g_tpn;
+        gpulink::Links lk;
+        std::string err;
+        std::vector<void*> tb(N);
+        std::vector<int> devs(N);
+        std::vector<char> used((size_t) N * N, 1);
+        std::vector<cudaStream_t> sts(N);
+        for (int d = 0; d < N; ++d) {
+            devs[d] = d, used[(size_t) d * N + d] = 0, sts[d] = g_dev[d].s;
+            CU(cudaSetDevice(d));
+            CU(cudaMalloc(&tb[d], (size_t) 4 << 20));
+        }
+        if (!lk.setup(devs, used, tb, (size_t) 4 << 20, sts, false, false, 1, 1, "SAGUARO_IK2_HOST_STAGE", err)) die(err);
+        for (int d = 0; d < N; ++d) {
+            CU(cudaSetDevice(d));
+            CU(cudaFree(tb[d]));
+        }
+        if (!lk.all_peer)
+            die("--tp " + std::to_string(N) + ": every pair of its GPUs needs peer access (" + lk.say +
+                ") - on a PC whose GPUs are peers only in pairs, --tp 2 over one pair (CUDA_VISIBLE_DEVICES)");
+        std::printf("tensor parallel: %s\n", lk.say.c_str());
+        CU(cudaSetDevice(0));
+    }
     use_dev(0);
     g_overlap = !getenv("SAGUARO_IK2_OVERLAP") || std::atoi(getenv("SAGUARO_IK2_OVERLAP"));
     g_events = getenv("SAGUARO_IK2_EVENTS") && std::atoi(getenv("SAGUARO_IK2_EVENTS"));
@@ -6294,7 +6993,7 @@ int main(int argc, char** argv) {
             draft_path.clear(), g_lookup = false;
         }
     }
-    if (n_gpu == 1 && !g_pool) {
+    if ((n_gpu == 1 || g_tpn > 1) && !g_pool) {
         size_t exp_b = 0, dense_b = 0, kv_b = 0;
         for (const auto* tp : S.all()) {
             const auto& t = *tp;
@@ -6314,6 +7013,7 @@ int main(int argc, char** argv) {
             }
         }
         if (S.sv) exp_b = S.sv->compact_bytes();   // (a pack held resident: each expert packed - init_packed)
+        if (g_tpn > 1) exp_b /= g_tpn;            // (a member's share; the dense weights counted whole)
         g_dense_bytes = dense_b, g_exp_bytes = exp_b;
         size_t fr0 = 0, tot0 = 0;
         CU(cudaMemGetInfo(&fr0, &tot0));
@@ -6460,6 +7160,9 @@ int main(int argc, char** argv) {
         g_fast_want = fits && off_set != 1 && g_dense_q8 && !(getenv("SAGUARO_IK2_FAST") && !std::atoi(getenv("SAGUARO_IK2_FAST")));
         const bool dense_ok = !getenv("SAGUARO_IK2_DENSE") || std::string(getenv("SAGUARO_IK2_DENSE")) == "q8";
         g_off_want = (off_set == 1 || (off_set != 0 && !fits)) && dense_ok;
+        if (g_tpn > 1 && !g_fast_want)
+            tp_refuse("--tp: a member's share of the experts does not fit in VRAM beside the dense weights and its K / V cache "
+                "at this context (a smaller --max-context)");
         // (the dynamic GPU cache: the same bits as the fixed tier (KL 0 over 2000 tokens, T4 and RX 9070 XT), faster
         //  answers - on by default on one GPU; SAGUARO_IK2_OFF_DYNAMIC=0: the fixed tier, =1 on two GPUs too)
         const char* dyn_env = getenv("SAGUARO_IK2_OFF_DYNAMIC");
@@ -6524,6 +7227,20 @@ int main(int argc, char** argv) {
     const double t_dense = now();
     const size_t C = c.C, HD = (size_t) c.H * c.D, KD = (size_t) c.KV * c.D;
     M.L.resize(c.n_layer);
+    Model* const M0p = &M;
+    const int tpN = g_tpn;
+    int tm = 0;   // (--tp: the member being loaded - its slices of the file's rows)
+    if (tpN > 1) {
+        g_tpm.assign(tpN, nullptr);
+        g_tpm[0] = &M;
+        for (int m = 1; m < tpN; ++m) g_tpm[m] = new Model;
+    }
+    // a member's part of a host vector of tpN equal parts (all of it without --tp)
+    auto tp_slice = [&](std::vector<float> v) -> std::vector<float> {
+        if (tpN == 1) return v;
+        const size_t n = v.size() / tpN;
+        return std::vector<float>(v.begin() + (size_t) tm * n, v.begin() + (size_t) (tm + 1) * n);
+    };
     // two layouts: llama.cpp PR #32187's (ref/inkling2.py's: the short convs folded, gate and up apart) and unsloth's
     // "GGUF_shard_rewrite" one that llama.cpp's master reads (names of its own, the convs' residual and scale outside
     // their weights, gate and up fused - gate's rows first - with one scale): the second's folded here as it loads
@@ -6542,8 +7259,8 @@ int main(int argc, char** argv) {
         return b + (rw && it != m.end() ? it->second : std::string(old_name));
     };
     // a conv's weights [C'][4] with the residual (tap 3: the current token) and the output scale folded in
-    auto conv_w = [&](const std::string& b, const char* n, size_t Cc, bool dynamic) -> float* {
-        auto w = host_f32(S, nm(b, n), Cc * 4);
+    auto conv_w = [&](const std::string& b, const char* n, size_t Cc, bool dynamic, bool part = false) -> float* {
+        auto w = part ? tp_slice(host_f32(S, nm(b, n), Cc * tpN * 4)) : host_f32(S, nm(b, n), Cc * 4);
         if (rw) {
             const float sc = 1.0f / std::sqrt((float) ((dynamic ? 2 : 1) * 4 + 1));
             for (size_t i = 0; i < Cc; ++i) {
@@ -6554,7 +7271,7 @@ int main(int argc, char** argv) {
         return dev_f32(w);
     };
     auto dyn_host = [&](const std::string& b, const char* n) -> std::vector<float> {
-        auto w = host_f32(S, nm(b, n), (size_t) c.KV * 4 * C);
+        auto w = tp_slice(host_f32(S, nm(b, n), (size_t) c.KV * tpN * 4 * C));
         if (rw)
             for (auto& x : w) x *= 1.0f / std::sqrt(9.0f);
         return w;
@@ -6564,9 +7281,24 @@ int main(int argc, char** argv) {
         int l;
         std::string name;   // a tensor read whole into pinned memory
         std::vector<int> roles;
+        int mem = 0;        // (--tp: the member)
     };
     std::vector<ExpJob> exp_jobs;
     size_t host_total = 0;
+    for (tm = 0; tm < tpN; ++tm) {   // (--tp: each member's model on its GPU; one pass without)
+    Model& M = *(tm ? g_tpm[tm] : M0p);
+    if (tm) M.c = M0p->c, M.c.tp_m = tm, M.L.resize(c.n_layer);
+    if (tpN > 1) use_dev(tm);
+    // a member's rows [tm n, (tm + 1) n) of a matrix of tpN n rows (MatPart), and the same for load_mat
+    auto prt = [&](const std::string& n, int rows) {
+        MatPart p{n, rows, {}};
+        if (tpN > 1) p.r0 = tm * rows, p.N_file = tpN * rows;
+        return p;
+    };
+    auto lmat = [&](const std::string& n, int rows, int Kd) {
+        return tpN > 1 ? load_mat(S, n, rows, Kd, tm * rows, tpN * rows) : load_mat(S, n, rows, Kd);
+    };
+    if (tpN > 1 && !g_dense_q8) die("--tp: the dense weights as blocks only");
     M.embd_norm = load_f32(S, "token_embd_norm.weight", C);   // (on GPU 0, where the embedding rows go)
     std::vector<float> lp_q, lp_kv;   // a looped core's message queries, [2 n_core][C] each
     std::vector<float> lp_all;
@@ -6577,36 +7309,36 @@ int main(int argc, char** argv) {
     for (int l = 0; l < c.n_layer; ++l) {
         Layer& Ly = M.L[l];
         const std::string b = "blk." + std::to_string(l) + ".";
-        Ly.dev = dual() ? 0 : l * n_gpu / c.n_layer;
+        Ly.dev = tpN > 1 ? tm : dual() ? 0 : l * n_gpu / c.n_layer;
         use_dev(Ly.dev);
         Ly.sliding = c.sliding[l];
-        auto sink_v = host_f32(S, b + "attn_sink_proj.weight", (size_t) c.H * C);
+        auto sink_v = tp_slice(host_f32(S, b + "attn_sink_proj.weight", (size_t) c.H * tpN * C));
         if (Ly.sliding) {
             std::vector<MatPart> qkv_parts = {
-                {b + "attn_q.weight", (int) HD, {}},
-                {b + "attn_k.weight", (int) KD, {}},
-                {b + "attn_v.weight", (int) KD, {}},
-                {nm(b, "attn_r.weight"), c.H * c.d_rel, {}},
-                {b + "attn_gate.weight", (int) HD, {}},
+                prt(b + "attn_q.weight", (int) HD),
+                prt(b + "attn_k.weight", (int) KD),
+                prt(b + "attn_v.weight", (int) KD),
+                prt(nm(b, "attn_r.weight"), c.H * c.d_rel),
+                prt(b + "attn_gate.weight", (int) HD),
             };
             if (!g_dense_q8) {
                 qkv_parts.push_back({"", c.H, std::move(sink_v)});
                 Ly.wqkvrg = load_fused_f16(S, qkv_parts, (int) C);
             } else {
                 if (!try_load_fused_raw(S, qkv_parts, (int) C, Ly.wqkvrg)) {
-                    Ly.wq = load_mat(S, b + "attn_q.weight", (int) HD, (int) C);
-                    Ly.wk = load_mat(S, b + "attn_k.weight", (int) KD, (int) C);
-                    Ly.wv = load_mat(S, b + "attn_v.weight", (int) KD, (int) C);
-                    Ly.wr = load_mat(S, nm(b, "attn_r.weight"), c.H * c.d_rel, (int) C);
-                    Ly.wgate = load_mat(S, b + "attn_gate.weight", (int) HD, (int) C);
+                    Ly.wq = lmat(b + "attn_q.weight", (int) HD, (int) C);
+                    Ly.wk = lmat(b + "attn_k.weight", (int) KD, (int) C);
+                    Ly.wv = lmat(b + "attn_v.weight", (int) KD, (int) C);
+                    Ly.wr = lmat(nm(b, "attn_r.weight"), c.H * c.d_rel, (int) C);
+                    Ly.wgate = lmat(b + "attn_gate.weight", (int) HD, (int) C);
                 }
                 Ly.sink16 = dev_f16(sink_v);
             }
         } else {
             std::vector<MatPart> qrg_parts = {
-                {b + "attn_q.weight", (int) HD, {}},
-                {nm(b, "attn_r.weight"), c.H * c.d_rel, {}},
-                {b + "attn_gate.weight", (int) HD, {}},
+                prt(b + "attn_q.weight", (int) HD),
+                prt(nm(b, "attn_r.weight"), c.H * c.d_rel),
+                prt(b + "attn_gate.weight", (int) HD),
             };
             auto kd_v = dyn_host(b, "shortconv_k_dyn.weight");
             auto vd_v = dyn_host(b, "shortconv_v_dyn.weight");
@@ -6619,18 +7351,19 @@ int main(int argc, char** argv) {
                                            (int) C);
             } else {
                 if (!try_load_fused_raw(S, qrg_parts, (int) C, Ly.wqrg)) {
-                    Ly.wq = load_mat(S, b + "attn_q.weight", (int) HD, (int) C);
-                    Ly.wr = load_mat(S, nm(b, "attn_r.weight"), c.H * c.d_rel, (int) C);
-                    Ly.wgate = load_mat(S, b + "attn_gate.weight", (int) HD, (int) C);
+                    Ly.wq = lmat(b + "attn_q.weight", (int) HD, (int) C);
+                    Ly.wr = lmat(nm(b, "attn_r.weight"), c.H * c.d_rel, (int) C);
+                    Ly.wgate = lmat(b + "attn_gate.weight", (int) HD, (int) C);
                 }
-                Ly.wk = load_mat(S, b + "attn_k.weight", (int) KD, (int) C);
-                Ly.wv = load_mat(S, b + "attn_v.weight", (int) KD, (int) C);
+                Ly.wk = lmat(b + "attn_k.weight", (int) KD, (int) C);
+                Ly.wv = lmat(b + "attn_v.weight", (int) KD, (int) C);
                 Ly.sink16 = dev_f16(sink_v);
                 Ly.sc_k_dyn16 = dev_f16(kd_v);
                 Ly.sc_v_dyn16 = dev_f16(vd_v);
             }
         }
-        Ly.wo = load_mat(S, b + "attn_output.weight", (int) C, (int) HD);
+        Ly.wo = tpN > 1 ? load_mat_cols(S, b + "attn_output.weight", (int) C, (int) HD * tpN, tm * (int) HD, (int) HD)
+                        : load_mat(S, b + "attn_output.weight", (int) C, (int) HD);
         Ly.router16 = load_f16(S, b + "ffn_gate_inp.weight", (size_t) c.E * C);
         Ly.probs_b = load_f32(S, b + "exp_probs_b.bias", c.E);
         Ly.ffn_norm = load_f32(S, b + "ffn_norm.weight", C);
@@ -6641,8 +7374,8 @@ int main(int argc, char** argv) {
             Ly.k_in_norm = load_f32(S, nm(b, "attn_k_in_norm.weight"), C);
             Ly.v_in_norm = load_f32(S, nm(b, "attn_v_in_norm.weight"), C);
         }
-        Ly.q_clip = load_f32(S, b + "attn_q_clip.weight", HD);
-        Ly.r_clip = load_f32(S, nm(b, "attn_r_clip.weight"), (size_t) c.H * c.d_rel);
+        Ly.q_clip = dev_f32(tp_slice(host_f32(S, b + "attn_q_clip.weight", HD * tpN)));
+        Ly.r_clip = dev_f32(tp_slice(host_f32(S, nm(b, "attn_r_clip.weight"), (size_t) c.H * tpN * c.d_rel)));
         {   // [extent][d_rel]: PR #32187's attn_rel_proj is [d_rel][extent], the rewrite's attn_rel_bias already this
             const int ext = Ly.sliding ? c.extent_swa : c.extent;
             const auto v = host_f32(S, nm(b, "attn_rel_proj.weight"), (size_t) ext * c.d_rel);
@@ -6663,8 +7396,8 @@ int main(int argc, char** argv) {
             Ly.res_score = load_f32(S, rn, (size_t) Ly.n_res_q * C);
         }
         Ly.ffn_res_score = load_f32(S, nm(b, "ffn_res_score.weight"), C);
-        Ly.sc_k = conv_w(b, "shortconv_k.weight", KD, !Ly.sliding);
-        Ly.sc_v = conv_w(b, "shortconv_v.weight", KD, !Ly.sliding);
+        Ly.sc_k = conv_w(b, "shortconv_k.weight", KD, !Ly.sliding, true);
+        Ly.sc_v = conv_w(b, "shortconv_v.weight", KD, !Ly.sliding, true);
         Ly.sc_attn = conv_w(b, "shortconv_attn.weight", C, false);
         Ly.sc_mlp = conv_w(b, "shortconv_mlp.weight", C, false);
         // the experts: (role tensor, its roles); a fused gate_up is gate's F rows then up's, an expert's 2 F rows
@@ -6676,11 +7409,12 @@ int main(int argc, char** argv) {
             const auto* ti = S.info(n);
             if (!ti) die("no " + n);
             const int nr = (int) pr.second.size();
-            if (ti->elements() != (uint64_t) c.E * c.F * C * nr) die(n + ": shape");
+            if (ti->elements() != (uint64_t) c.E * c.F * tpN * C * nr) die(n + ": shape");
             if (!k::block_values((int) ti->type)) die(n + ": type " + ti->type_name() + " not decoded here");
             if ((int) (pr.first == "down" ? c.F : C) % k::block_values((int) ti->type))   // (a row's length)
-                die(n + ": a row is not whole " + ti->type_name() + " blocks");
-            const size_t per = tensor_bytes(*ti) / c.E;
+                die(n + ": a row is not whole " + ti->type_name() + " blocks" +
+                    (tpN > 1 ? " (--tp " + std::to_string(tpN) + ": a member's expert width " + std::to_string(c.F) + ")" : ""));
+            const size_t per = tensor_bytes(*ti) / c.E;   // (an expert's role tensor, whole; a member's 1 / tpN of it)
             std::vector<float> sc;
             const std::string sn = b + "ffn_" + pr.first + "_exps.scale";
             if (S.info(sn)) sc = host_f32(S, sn, c.E);
@@ -6688,7 +7422,7 @@ int main(int argc, char** argv) {
             for (int i = 0; i < nr; ++i) {
                 const int r = pr.second[i];
                 Ly.ty[r] = (int) ti->type;
-                Ly.eb[r] = per / nr;
+                Ly.eb[r] = per / nr / tpN;
                 Ly.stride[r] = per;
                 Ly.scale[r] = sc;
             }
@@ -6701,7 +7435,7 @@ int main(int argc, char** argv) {
                 }
             }
             host_total += tensor_bytes(*ti);
-            exp_jobs.push_back({l, n, pr.second});
+            exp_jobs.push_back({l, n, pr.second, tm});
         }
         if (c.n_pass > 1 && l >= c.core0 && l < c.core1) {   // the core: its later passes' message gates and queries
             static const char* mod[4] = {"attn", "k", "v", "mlp"};
@@ -6835,16 +7569,24 @@ int main(int argc, char** argv) {
         Vi.h_mlp = dalloc<float>(3 * C);
     }
     c.n_rows = (int) (S.info("output.weight")->elements() / C);
-    M.out_w = load_mat(S, "output.weight", c.n_rows, (int) C);
+    M.c.n_rows = c.n_rows;
+    // (--tp: the whole head on member 0 - a prompt's logits - and a token's rows of it split over the members:
+    //  member m > 0 holds rows [m R / N, (m + 1) R / N))
+    if (tm == 0) M.out_w = load_mat(S, "output.weight", c.n_rows, (int) C);
+    else if (c.n_rows % tpN == 0) M.out_w = lmat("output.weight", c.n_rows / tpN, (int) C);
     if (g_dense_q8) {   // (a layer's largest; the head's logits go a token at a time over its blocks)
         g_w16_n = (2 * HD + 2 * KD + (size_t) c.H * c.d_rel) * C;
         g_w16 = dalloc<uint16_t>(g_w16_n);
+        if (tpN > 1) g_dev[tm].w16 = g_w16;
     }
     M.out_norm = load_f32(S, "output_norm.weight", C);
     M.out_res_score = load_f32(S, rw ? "output_res_query.weight" : "output_res_score.weight", C);
     M.embd = S.data("token_embd.weight");
     M.embd_type = (int) S.info("token_embd.weight")->type;
     if (!k::block_values(M.embd_type)) die("token_embd's type");
+    }   // (the members)
+    tm = 0;
+    if (tpN > 1) use_dev(0);
     if (g_stage) cudaFree(g_stage), g_stage = nullptr, g_stage_bytes = 0;
     {
         size_t kv_vram = 0, kv_host = 0;
@@ -6910,9 +7652,26 @@ int main(int argc, char** argv) {
         if (g_pool) die("SAGUARO_IK2_HOST=mmap with the CPU lane");
         if (g_off_want) die("SAGUARO_IK2_HOST=mmap with the offload path (it reads pinned host memory: SAGUARO_IK2_OFF=0)");
         for (const auto& J : exp_jobs) {
-            Layer& Ly = M.L[J.l];
+            Layer& Ly = (J.mem ? *g_tpm[J.mem] : M).L[J.l];
             const uint8_t* p = S.data(J.name);
-            for (size_t i = 0; i < J.roles.size(); ++i) Ly.host[J.roles[i]] = p + i * Ly.eb[J.roles[i]];
+            for (size_t i = 0; i < J.roles.size(); ++i) {
+                const int r = J.roles[i];
+                if (tpN == 1) {
+                    Ly.host[r] = p + i * Ly.eb[r];
+                } else if (r < 2) {   // (--tp: a member's rows of gate / up, in place)
+                    Ly.host[r] = p + i * (Ly.stride[r] / J.roles.size()) + (size_t) J.mem * Ly.eb[r];
+                } else {              // (... and its columns of down: each row's blocks of them, re-blocked)
+                    const int bv = k::block_values(Ly.ty[2]);
+                    const size_t bb = k::block_bytes(Ly.ty[2]), rb = Ly.stride[2] / C, ob = Ly.eb[2] / C;
+                    if (ob * C != Ly.eb[2] || (size_t) (c.F / bv) * bb != ob) die(J.name + ": a member's columns");
+                    g_tp_down.emplace_back((size_t) c.E * Ly.eb[2]);
+                    uint8_t* d = g_tp_down.back().data();
+                    for (size_t e = 0; e < (size_t) c.E; ++e)
+                        for (size_t row = 0; row < C; ++row)
+                            std::memcpy(d + e * Ly.eb[2] + row * ob, p + e * Ly.stride[2] + row * rb + (size_t) J.mem * ob, ob);
+                    Ly.host[2] = d, Ly.stride[2] = Ly.eb[2];
+                }
+            }
             {   // (read ahead: a cold file otherwise comes in a page fault at a time)
                 const size_t pg = 4096, a0 = (size_t) p & ~(pg - 1);
                 ::madvise((void*) a0, (size_t) p - a0 + tensor_bytes(*S.info(J.name)), MADV_WILLNEED);
@@ -7155,6 +7914,7 @@ int main(int argc, char** argv) {
 
     // the work buffers and the expert cache, a set a GPU
     for (int d = 0; d < n_gpu; ++d) {
+    Model& M = *(tpN > 1 ? g_tpm[d] : M0p);   // (--tp: the member's model)
     use_dev(d);
     CU(cudaMemGetInfo(&fr, &tot));
     Work& W = g_dev[d].W;
@@ -7673,9 +8433,9 @@ int main(int argc, char** argv) {
                     n_tier, c.n_layer * c.E, EC.total_bytes() / 1073741824.0, g_offs.stage.size(), st_b / 1073741824.0,
                     g_graph ? ", a CUDA graph each" : "");
     }
-    if (g_fast_want && d == 0) {   // the resident path: every expert in now, and where each is on the device
+    if (g_fast_want && (d == 0 || tpN > 1)) {   // the resident path: every expert in now, and where each is on the device
         auto blocks = [](const Mat& m) { return m.raw || m.q8 || !m.seg.empty(); };   // (kept as the GGUF's blocks, whole or planar)
-        bool all = !EC.pools.empty(), raw = blocks(M.out_w);
+        bool all = !EC.pools.empty(), raw = d > 0 || blocks(M.out_w);
         for (const auto& P : EC.pools) all = all && P.n_active >= P.n_layers * c.E;
         for (const auto& Ly : M.L)
             raw = raw && blocks(Ly.wo) && (Ly.sliding ? blocks(Ly.wqkvrg) : (blocks(Ly.wqrg) && blocks(Ly.wk) && blocks(Ly.wv)));
@@ -7704,9 +8464,20 @@ int main(int argc, char** argv) {
                         now() - tw, g_graph ? ", a CUDA graph each" : "");
         } else {
             std::printf("resident path off: %s\n", all ? "a dense matrix is not kept as blocks" : "the cache does not hold every expert");
+            if (tpN > 1) die("--tp: GPU " + std::to_string(d) + " does not hold its share of every expert");
         }
     }
     std::fflush(stdout);
+    }
+    if (tpN > 1) {   // the members' state in the main model's visits too (the serving's snapshots and resets)
+        g_tp_down.clear(), g_tp_down.shrink_to_fit();
+        for (int m = 0; m < tpN; ++m)   // (the re-blocked down columns are gone: nothing may read them again)
+            for (Layer& Ly : g_tpm[m]->L) Ly.host[2] = nullptr, Ly.stride[2] = 0;
+        // (copies: the token and prompt paths bind each member's own V, the serving's state goes through these - a
+        //  change that rebinds visits, as --parallel's bind_slot does, must update both)
+        for (int m = 1; m < tpN; ++m)
+            for (Visit Vi : g_tpm[m]->V) Vi.mem = m, M.V.push_back(Vi);
+        tp_init(M, chunk);
     }
     // the caches' counters, summed over the GPUs
     auto ec_sum = [&](auto f) {
@@ -8289,7 +9060,7 @@ int main(int argc, char** argv) {
                 size_t kv_d = d == 0 ? slot_extra : 0;
                 if (!(g_two.on && d == 1))
                     for (const auto& Vi : M.V)
-                        if (M.L[Vi.l].dev == d) kv_d += (size_t) Vi.kv_cap * KD * kv_elem_b * 2;
+                        if ((g_tpn > 1 ? Vi.mem : M.L[Vi.l].dev) == d) kv_d += (size_t) Vi.kv_cap * KD * kv_elem_b * 2;
                 std::printf("VRAM dev=%d pci=%s total=%zu free=%zu weights=%zu kv=%zu pool=%zu\n", d, pci, tot, fr,
                             n_gpu == 1 && d == 0 ? g_dense_bytes : (size_t) 0, kv_d,
                             g_two.on && d == 1 ? g_two.bytes : g_dev[d].EC.total_bytes());
@@ -9224,10 +9995,13 @@ int main(int argc, char** argv) {
     // the prompt
     std::vector<float> logits;
     double t_exp = 0;
+    Model& M0_warm = M;
     // (A3-warmup: cuBLAS loads its FP16-GEMM and FP32-PEDANTIC kernel modules lazily on the first call -
     //  ~0.49 s measured on the first prompt's visit 0; run both classes once outside the timed prompt)
-    {
-        Work& W0 = dev_work(0);
+    for (int wm = 0; wm < g_tpn; ++wm) {   // (--tp: on every member)
+        use_dev(wm);
+        Work& W0 = dev_work(wm);
+        Model& M = *(g_tpn > 1 ? g_tpm[wm] : &M0_warm);
         uint16_t* w16w = dalloc<uint16_t>(32 * 32);
         CU(cudaMemsetAsync(w16w, 0, 32 * 32 * 2, g_s));
         gemm16(w16w, 32, 32, w16w, 1, W0.tmp, 32);
@@ -9240,6 +10014,7 @@ int main(int argc, char** argv) {
                             ext0, CUBLAS_COMPUTE_32F_PEDANTIC, CUBLAS_GEMM_DEFAULT));
         CU(cudaStreamSynchronize(g_s));
     }
+    use_dev(0);
     const double tp = now();
     g_evx_n = 0, g_t0_ok = false;   // (the event timeline measures this prompt alone)
     const bool all = !dump.empty();
