@@ -40,7 +40,7 @@
   }
  },
  "strata": {
-  "_": "Strata's .strata packs of Inkling-2-Mini (strata-engine/Inkling-2-Mini-Strata, Apache 2.0), read by saguaro-ik2 as they are (src/strata_fmt: every weight exactly as Strata's own decode gives it). Each pack folder holds the pack, the repo's tokenizer.json (the GGUFs' tokenizer, table for table) and config.json; pictures and drafting take UD-Q4_K_XL's mmproj and thinkingmachines' drafter as above. experts_gib: the experts as the engine holds them (a layer mixing codecs takes its widest expert's slot for each); kl: measured here against SQ-20 (the original weights), 2000 tokens of text (tools/ik2/kl.py, RX 9070 XT); kl_published: Strata's own (their test prompts).",
+  "_": "Strata's .strata packs of Inkling-2-Mini (strata-engine/Inkling-2-Mini-Strata, Apache 2.0), read by saguaro-ik2 as they are (src/strata_fmt: every weight exactly as Strata's own decode gives it). Each pack folder holds the pack, the repo's tokenizer.json (the GGUFs' tokenizer, table for table) and config.json; pictures and drafting take UD-Q4_K_XL's mmproj and thinkingmachines' drafter as above. experts_gib: the experts as the engine holds them resident (each expert packed); kl: measured here against SQ-20 (the original weights), 2000 tokens of text (tools/ik2/kl.py, RX 9070 XT); kl_published: Strata's own (their test prompts).",
   "repo": "strata-engine/Inkling-2-Mini-Strata",
   "revision": "04996a1e2c45009b6a04f2af126cb6bdb2ba3587",
   "folder": "",
@@ -75,7 +75,7 @@
     "file": "Inkling-2-Mini-SQ-15.strata",
     "size": 14348316672,
     "sha256": "2ea32eed533afba257e2cbee7b073dc2c3da80fe55d1d2d794779b5498e30737",
-    "experts_gib": 13.03,
+    "experts_gib": 11.52,
     "kl": 0.0171,
     "about": "SQ-15: NVFP4 and 3-5-bit experts chosen per expert, 8-bit dense weights - made for 16 GB cards",
     "kl_published": 0.0089
@@ -85,7 +85,7 @@
     "file": "Inkling-2-Mini-SQ-10.strata",
     "size": 10471526400,
     "sha256": "ac4d452ad03e4930abd9d46f9c5eec22b2f75a1da45a1e49bd24ccd58b065934",
-    "experts_gib": 10.45,
+    "experts_gib": 8.18,
     "kl": 0.0795,
     "about": "SQ-10: 2-3-bit experts, 8-bit dense weights - made for 12 GB cards",
     "kl_published": 0.0502

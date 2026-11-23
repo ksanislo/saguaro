@@ -235,8 +235,8 @@ class InklingExpert:
 
 
 def inkling_expert_bytes(pack: Pack) -> int:
-    """The experts' bytes as saguaro-ik2 holds them (src/strata_fmt/strata_inkling.cpp's layout: an all-SF4 layer as
-    NVFP4, an all-MX8 layer as 36-byte blocks of 32, any other layer each expert in a slot of the layer's widest rows)."""
+    """The experts' bytes as saguaro-ik2 holds them resident (src/strata_fmt/strata_inkling.cpp's layout: an all-SF4
+    layer as NVFP4, an all-MX8 layer as 36-byte blocks of 32, any other layer each expert packed)."""
     tc = (pack.manifest.get("config") or {}).get("text_config") or \
         {"hidden_size": 2304, "intermediate_size": 1152, "n_routed_experts": 128, "num_hidden_layers": 24}
     C, F, E = tc["hidden_size"], tc["intermediate_size"], tc["n_routed_experts"]
@@ -258,9 +258,12 @@ def inkling_expert_bytes(pack: Pack) -> int:
         if codes == {(SF4, SF4)} or codes == {(MX8, MX8)}:
             c = next(iter(codes))[0]
             per = 2 * F * rb(c, C) + C * rb(c, F)
-        else:
-            gu = max(rb(e[1], C) for e in ents)
-            dn = max(rb(e[2], F) for e in ents)
-            per = 2 * a16(16 + F * gu + 2 * F) + a16(16 + C * dn)
-        total += per * E
+            total += per * E
+        else:   # (each expert packed: its own parts, its pool's slot rounded to 256 - EC.init_packed)
+            for e in ents:
+                g, d = rb(e[1], C), rb(e[2], F)
+                mq = 2 * F if S2_K <= e[2] <= S6_K else 0
+                up = a16(16 + F * g)
+                dn = a16(up + 16 + F * g + mq)
+                total += (a16(dn + 16 + C * d) + 255) // 256 * 256
     return total

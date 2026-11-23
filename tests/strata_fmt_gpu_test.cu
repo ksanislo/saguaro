@@ -166,7 +166,7 @@ int main(int argc, char** argv) {
         const size_t slot = egu + edn;
         std::vector<uint8_t> host(slot * S);
         for (int i = 0; i < S; ++i) {
-            V.read_experts(ngu, pick[i], 1, egu, host.data() + i * slot);
+            V.read_experts(ngu, pick[i], 1, egu, host.data() + i * slot);   // (kMIX: the expert whole, packed)
             V.read_experts(ndn, pick[i], 1, edn, host.data() + i * slot + egu);
         }
         uint8_t* dev = up<uint8_t>(host.data(), host.size());
@@ -222,8 +222,10 @@ int main(int argc, char** argv) {
                 }
             const int tg = lt;
             check_decode("expert gate", tg, ds, (size_t) F * C, wg.data());
-            check_decode("expert up", tg, ds + egu / 2, (size_t) F * C, wu.data());
-            check_decode("expert down", tg, ds + egu, (size_t) C * F, code_scale_dn.data());
+            size_t xu = egu / 2, xd = egu, xb = 0;
+            if (lt == kMIX) V.mix_layout(l, pick[i], xu, xd, xb);
+            check_decode("expert up", tg, ds + xu, (size_t) F * C, wu.data());
+            check_decode("expert down", tg, ds + xd, (size_t) C * F, code_scale_dn.data());
             for (size_t x = 0; x < wg.size(); ++x) Wg[i][x] = wg[x] * og, Wu[i][x] = wu[x] * og;
             for (size_t r = 0; r < (size_t) C; ++r)
                 for (int c = 0; c < F; ++c) Wd[i][r * F + c] = code_scale_dn[r * F + c] * od * inv_s[c];
