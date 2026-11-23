@@ -125,7 +125,7 @@ class Fit(unittest.TestCase):
         self.assertEqual(lay["args"], ["--gpus", "1", "--chunk", "2048", "--threads", "8"])
         self.assertEqual((lay["context"], lay["resident"], lay["path"], lay["measured"]), (32768, False, "offload", True))
         self.assertEqual(lay["env"], {"SAGUARO_IK2_ROOM_MB": "1024"})
-        self.assertIn("24 tok/s", F.speeds(lay))
+        self.assertIn("40 tok/s", F.speeds(lay))
         self.assertIn("1x Tesla T4", F.speeds(lay))
 
     def test_two_t4s(self):
@@ -134,7 +134,7 @@ class Fit(unittest.TestCase):
         self.assertEqual([g["index"] for g in lay["gpus"]], [2, 3])
         self.assertEqual(lay["args"], ["--gpus", "2", "--chunk", "8192", "--threads", "8"])
         self.assertEqual((lay["context"], lay["resident"], lay["path"], lay["measured"]), (131072, True, "split", True))
-        self.assertIn("52 tok/s", F.speeds(lay))
+        self.assertIn("51 tok/s", F.speeds(lay))
         p = F.plan_two(15.0, 15.0, 131072)
         self.assertEqual((p["gpus"], p["layout"]), (2, "split"))
 
@@ -264,7 +264,7 @@ class Picker(unittest.TestCase):
             self.assertEqual(fam, "ik2", n)
             label, note, about = got["rows"][maya.FAMILIES.index("ik2")]
             self.assertEqual((label, note), ("Inkling 2 Mini", "recommended for this PC"))
-            for part in ("one or two", "16 GB", "8 GB", "AMD", "24 tok/s", "52 tok/s", "Apache 2.0"):
+            for part in ("one or two", "16 GB", "8 GB", "AMD", "40 tok/s", "51 tok/s", "Apache 2.0"):
                 self.assertIn(part, about)
 
     def test_four_t4s_get_hy4_and_a_setup_before_wins(self):

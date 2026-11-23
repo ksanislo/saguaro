@@ -487,8 +487,8 @@ tools/ik2/chat_template.jinja --check`.
 
 A 16 GB AMD card (an RX 9070 XT, gfx1201, ROCm 7.1), checked 2026-11-22: upstream's AMD path kept every expert
 in VRAM (24 GB for UD-Q4_K_XL); here the offload path runs on AMD as on NVIDIA (it builds for HIP upstream; only its
-gate was NVIDIA-only). UD-Q4_K_XL at 32K: 2,348 of 3,072 experts in VRAM, 59.8 / 59.5 / 53.0 tok/s at ~50 / 8K / 30K,
-an 8K read 1,697 tok/s; the one-T4 quant every expert resident (`--chunk 1024`, `SAGUARO_IK2_RESERVE_MB=1024`):
+gate was NVIDIA-only). UD-Q4_K_XL at 32K with the dynamic GPU cache: 71.2 / 65.2 / 60.5 tok/s at ~50 / 8K / 30K, an
+8K read 1,668 tok/s (the fixed tier: 52.4 / 58.1 / 51.2); the one-T4 quant every expert resident (`--chunk 1024`, `SAGUARO_IK2_RESERVE_MB=1024`):
 83.3 / 73.3 / 66.7 tok/s, 8K read 1,148 tok/s. Both: every serve check (chat, tools, stops, pictures, Monitor) and
 the conversation check (set aside, resumed, saved, read back by a new engine) pass. `ik2_kernels_test` there: 349 ok,
 1 FAIL (`moe_combine_conv` against `moe_combine_f32` + `conv4_res` to the bit - the fused kernel's sums round
@@ -506,7 +506,7 @@ answer runs. Results in `build-ik2/serve-check*/results.json`.
 
 | UD-Q4_K_XL, FP16 cache (previous engine) | one T4, context 32,768 | two T4s, context 131,072 |
 | --- | --- | --- |
-| This engine (v1.1.74-based, 2026-11-22): every check passes; bench | 23.7 tok/s decode, 706 tok/s 8K read | 52.6 tok/s decode, 834 tok/s 16K read |
+| This engine (v1.1.74-based + PR #1118's GPU cache + Turing's fused prompt attention): every check passes; bench | 40.0 tok/s decode, 837 tok/s 8K read | 51.3 tok/s decode, 1102 tok/s 16K read |
 | Start to /health | 8 s (16-18 s the first time: the encoder is measured) | 12 s (16 s) |
 | VRAM after the load | 14.9 GiB | 14.9 GiB + 8.7 GiB |
 | A short chat: first token / decode | 0.5-0.7 s / 36-38 tok/s | 0.35-0.45 s / 50 tok/s |

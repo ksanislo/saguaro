@@ -45,7 +45,7 @@ AMD_MIN_GB = 15.0   # (a 16 GB AMD card as the driver reports it)
 LAYOUT_ENV = {"SAGUARO_IK2_ROOM_MB", "SAGUARO_IK2_PIN", "SAGUARO_IK2_PIN_KEEP", "SAGUARO_IK2_WARM", "SAGUARO_IK2_RESERVE_MB"}   # (a layout's keys;
                                                     # PIN / PIN_KEEP: the previous engine's, dropped from old configs)
 # (decode tok/s, read tok/s) on Tesla T4s, GPU clocks not pinned, ~50 tokens deep, read 8K / 16K (2026-11-22)
-MEASURED = {1: (24, 700), 2: (52, 830)}
+MEASURED = {1: (40, 840), 2: (51, 1100)}
 
 
 def experts_gib_of(path) -> float | None:
