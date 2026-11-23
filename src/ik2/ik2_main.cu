@@ -5333,6 +5333,9 @@ void tp_forward(const int* tok, int T, int pos0, bool all_logits, OutMode out_mo
             CU(cudaMemcpyAsync(W.route_h, W.route_d, (size_t) S * 8, cudaMemcpyDeviceToHost, g_s));
         }
         for (int m = 0; m < N; ++m) CU(cudaStreamSynchronize(g_dev[m].s));
+        for (int m = 1; m < N; ++m)   // (the members must pick the same experts: their halves of different ones would add up wrong)
+            if (std::memcmp(dev_work(m).route_h, dev_work(0).route_h, (size_t) T * c.K * 4))
+                die("--tp: GPU " + std::to_string(m) + "'s router picks differ from GPU 0's at visit " + std::to_string(vis));
         const double te0 = now();
         for (int m = 0; m < N; ++m) {
             use_dev(m);
@@ -6487,6 +6490,15 @@ void check_preview(int n_gpu, bool serve) {
     if (n_gpu < 1 || n_gpu > (g_tpn > 1 ? 8 : 2))
         refuse("--gpus " + std::to_string(n_gpu) + ": Inkling 2 runs on one or two GPUs (three or more are not in it yet)");
     if (g_tpn > 1 && nd < n_gpu) refuse("--tp " + std::to_string(g_tpn) + ": " + std::to_string(nd) + " GPU(s) visible");
+    for (int d = 1; g_tpn > 1 && d < n_gpu; ++d) {   // (the members' replicated parts - the router's picks - must agree bit for bit)
+        cudaDeviceProp a{}, b{};
+        CU(cudaGetDeviceProperties(&a, 0));
+        CU(cudaGetDeviceProperties(&b, d));
+        if (a.major != b.major || a.minor != b.minor || a.multiProcessorCount != b.multiProcessorCount ||
+            std::string(a.name) != b.name)
+            refuse("--tp: GPU " + std::to_string(d) + " (" + b.name + ") is not of GPU 0's kind (" + a.name +
+                   "): tensor parallel needs identical GPUs");
+    }
     const bool old_two = (getenv("SAGUARO_IK2_EP") && std::atoi(getenv("SAGUARO_IK2_EP"))) || (getenv("SAGUARO_IK2_TP") && std::atoi(getenv("SAGUARO_IK2_TP")));
     if (n_gpu == 2 && old_two && !force)
         refuse("--gpus 2 with SAGUARO_IK2_EP=1 / SAGUARO_IK2_TP=1: the older two-GPU modes are outside the preview (without them: "
