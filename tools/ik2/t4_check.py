@@ -2,7 +2,7 @@
 """tools/ik2/t4_check.py - saguaro-ik2's card check (Inkling 2 Mini on Tesla T4s, sm_75), unattended.
 
     python3 tools/ik2/t4_check.py --gpus 2,3 [--build build-ik2] [--model FILE.gguf] [--ctx 32768]
-                                  [--skip-kernels] [--skip-1card] [--skip-2card] [--read-tokens 2048]
+                                  [--skip-kernels] [--skip-1card] [--skip-2card] [--read-tokens 2048] [--tp]
 
   1. ik2_kernels_test on the first card: every kernel against a double reference on the CPU (before sm_80 that is the
      m16n8k8 pairs and the in-place tiles of the attention and expert kernels).
@@ -142,7 +142,7 @@ def run_model(a, tok, gpus: list[int], out: Path) -> bool:
                   f"not started (something else lives there)")
             return False
     args = ["--model", a.model, "--serve", "--max-context", str(a.ctx), "--gpus", str(n), "--chunk", str(a.chunk),
-            "--threads", str(a.threads)]
+            "--threads", str(a.threads)] + (["--tp", str(n)] if n > 1 and a.tp else [])
     env = env_for(gpus)
     if n == 1 and a.room_mb:
         env["SAGUARO_IK2_ROOM_MB"] = str(a.room_mb)
@@ -228,6 +228,7 @@ def main() -> int:
     ap.add_argument("--skip-kernels", action="store_true")
     ap.add_argument("--skip-1card", action="store_true")
     ap.add_argument("--skip-2card", action="store_true")
+    ap.add_argument("--tp", action="store_true", help="the 2-card load tensor parallel (--tp 2), not the split")
     a = ap.parse_args()
     gpus = [int(x) for x in a.gpus.split(",") if x.strip()]
     for exe in ("saguaro-ik2", "ik2_kernels_test"):

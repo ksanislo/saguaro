@@ -4846,8 +4846,9 @@ void spec_step(Model& M, ik2::draft::Drafter* drafter, int anchor, int P, int B,
 // A layer visit has two sums over the members: the output projection's partials and the MoE's (after each member's
 // combine of its 8 picks' partial rows), [T][C] each.  A member copies its partial into every other member's receive
 // slot (peer copies), then each adds p0 + p1 + .. in member order: the same bits on every member, so the replicated
-// parts (the stream, the norms, the router's picks) stay identical.  Two slots by a sum's parity: a copy into a
-// peer's slot k % 2 follows that peer's add of sum k - 2 (it waited for the peer's copy of sum k - 1, made after it).
+// parts (the stream, the norms, the router's picks) stay identical.  Two slots (and events) by a sum's parity: a copy
+// into a peer's slot k % 2 follows that peer's add of sum k - 2 (it waited for the peer's copy of sum k - 1, made
+// after it).  A call's sums are numbered from 0 (2 a visit); the streams are synchronized between calls.
 constexpr int kTpMax = 8;
 struct TpParts {
     const float* p[kTpMax];
@@ -4864,11 +4865,10 @@ __global__ void tp_sum4_kernel(TpParts s, int N, size_t n4, float4* __restrict__
 }
 struct TpMember {
     float* recv[2][kTpMax] = {};   // [slot][from member]: [Tm][C]
-    cudaEvent_t ev = nullptr;      // (its stream: its partial copied out to every other member)
+    cudaEvent_t ev[2] = {};        // (its stream, by slot: its partial copied out to every other member)
     cudaEvent_t fork = nullptr, join = nullptr;
 };
 std::vector<TpMember> g_tpx;
-int g_tp_k = 0;            // the sums of this call so far (their slot: g_tp_k & 1)
 size_t g_tp_cap = 0;       // floats a receive slot holds
 FastGraph g_tpgraph[4];    // a token's launches on every member, by OutMode
 
@@ -4883,7 +4883,7 @@ void tp_init(Model& M, int chunk) {
         for (int s = 0; s < 2; ++s)
             for (int j = 0; j < N; ++j)
                 if (j != m) g_tpx[m].recv[s][j] = dalloc<float>(g_tp_cap);
-        CU(cudaEventCreateWithFlags(&g_tpx[m].ev, cudaEventDisableTiming));
+        for (int s = 0; s < 2; ++s) CU(cudaEventCreateWithFlags(&g_tpx[m].ev[s], cudaEventDisableTiming));
         CU(cudaEventCreateWithFlags(&g_tpx[m].fork, cudaEventDisableTiming));
         CU(cudaEventCreateWithFlags(&g_tpx[m].join, cudaEventDisableTiming));
     }
@@ -4896,24 +4896,24 @@ void tp_init(Model& M, int chunk) {
     }
     use_dev(0);
 }
-// member m (current): its partial x [n] out to the others' receive slots
-void tp_push(int m, const float* x, size_t n) {
+// member m (current): its partial x [n] of sum k (a call's k-th) out to the others' receive slots
+void tp_push(int m, const float* x, size_t n, int k) {
     if (n > g_tp_cap) die("--tp: a sum larger than its receive slot");
-    const int s = g_tp_k & 1;
+    const int s = k & 1;
     for (int j = 0; j < g_tpn; ++j)
         if (j != m) CU(cudaMemcpyAsync(g_tpx[j].recv[s][m], x, n * 4, cudaMemcpyDefault, g_s));
-    CU(cudaEventRecord(g_tpx[m].ev, g_s));
+    CU(cudaEventRecord(g_tpx[m].ev[s], g_s));
 }
-// member m (current): x = the members' partials added in member order (after every member's tp_push of this sum)
-void tp_reduce(int m, float* x, size_t n) {
-    const int s = g_tp_k & 1;
+// member m (current): x = sum k's partials added in member order (after every member's tp_push of it)
+void tp_reduce(int m, float* x, size_t n, int k) {
+    const int s = k & 1;
     TpParts p{};
     for (int j = 0; j < g_tpn; ++j) {
         if (j == m) {
             p.p[j] = x;
             continue;
         }
-        CU(cudaStreamWaitEvent(g_s, g_tpx[j].ev, 0));
+        CU(cudaStreamWaitEvent(g_s, g_tpx[j].ev[s], 0));
         p.p[j] = g_tpx[m].recv[s][j];
     }
     const size_t n4 = n / 4;
@@ -4930,7 +4930,6 @@ void tp_token_launches(OutMode out_mode) {
     const float k_scale = c.qk_clip <= 28.0f ? 16.0f : 1.0f, v_scale = 32.0f;
     const int P_sl = std::min(128, std::max(1, (c.window + 63) / 64)), P_full = 128;
     Work& W0 = dev_work(0);
-    g_tp_k = 0;
     use_dev(0);
     CU(cudaEventRecord(g_tpx[0].fork, g_s));
     int nb[kTpMax] = {}, nb_pre[kTpMax] = {}, n_bank[kTpMax] = {};
@@ -5061,7 +5060,7 @@ void tp_token_launches(OutMode out_mode) {
             if (!mma) k::gate_mul_f16(W.o, gate_p, (size_t) HD, W.x16, true, g_s);
             if (first) CU(cudaMemcpyAsync(blk(nb[m]), W.h, Cb, cudaMemcpyDeviceToDevice, g_s));
             mv1(Ly.wo, W.o, W.tmp);
-            tp_push(m, W.tmp, C);
+            tp_push(m, W.tmp, C, 2 * vis);
         }
         // the sum, its short conv and the stream; the MoE's input, the router (the same picks on every member), each
         // member's width of the 8 experts, their combine: its partial in W.tmp
@@ -5071,7 +5070,7 @@ void tp_token_launches(OutMode out_mode) {
             Work& W = dev_work(m);
             auto blk = [&](int i) { return W.blocks + (size_t) i * W.blk_ld * C; };
             Layer& Ly = M.L[l];
-            tp_reduce(m, W.tmp, C);
+            tp_reduce(m, W.tmp, C, 2 * vis);
             k::conv4_res(W.tmp, Ly.h_attn, Ly.sc_attn, nullptr, 0, 1, C, first ? nullptr : W.h, W.r, g_s);
             if (first) ++nb[m];
             {
@@ -5111,17 +5110,15 @@ void tp_token_launches(OutMode out_mode) {
                 k::experts_down(W.blob, c.K, Ly.ty[2], Ly.eb[0] + Ly.eb[1], W.h16, C, c.F, W.y32, g_s, nullptr, 0);
             }
             k::moe_combine_f32(W.y32, W.inv, W.wt, 1, c.K, C, W.tmp, false, g_s);
-            tp_push(m, W.tmp, C);
+            tp_push(m, W.tmp, C, 2 * vis + 1);
         }
-        ++g_tp_k;
         for (int m = 0; m < N; ++m) {
             use_dev(m);
             Work& W = dev_work(m);
             Layer& Ly = g_tpm[m]->L[l];
-            tp_reduce(m, W.tmp, C);
+            tp_reduce(m, W.tmp, C, 2 * vis + 1);
             k::conv4_res(W.tmp, Ly.h_mlp, Ly.sc_mlp, nullptr, 0, 1, C, W.r, W.h, g_s);
         }
-        ++g_tp_k;
     }
     for (int m = 1; m < N; ++m) {   // (the members joined back into member 0's stream)
         use_dev(m);
@@ -5206,7 +5203,6 @@ void tp_forward(const int* tok, int T, int pos0, bool all_logits, OutMode out_mo
     }
     if (out_mode == OutMode::kCand) out_mode = OutMode::kLogits, g_cand.n = -1;
     if (T > dev_work(0).Tm) die("--tp: a prompt chunk longer than --chunk");
-    g_tp_k = 0;
     {
         Work& W0 = dev_work(0);
         const size_t rb = (size_t) C / k::block_values(M0.embd_type) * k::block_bytes(M0.embd_type);
@@ -5256,7 +5252,7 @@ void tp_forward(const int* tok, int T, int pos0, bool all_logits, OutMode out_mo
             g_tp_part = true;
             run_layer_attn(M, Ly, l, T, pos0, W.h, W.pos, nb[m], 0, W.r, W, msg[m]);
             g_tp_part = false;
-            tp_push(m, W.tmp, TC);
+            tp_push(m, W.tmp, TC, 2 * vis);
         }
         for (int m = 0; m < N; ++m) {
             use_dev(m);
@@ -5264,7 +5260,7 @@ void tp_forward(const int* tok, int T, int pos0, bool all_logits, OutMode out_mo
             Work& W = dev_work(m);
             auto blk = [&](int i) { return W.blocks + (size_t) i * W.blk_ld * C; };
             Layer& Ly = M.L[l];
-            tp_reduce(m, W.tmp, TC);
+            tp_reduce(m, W.tmp, TC, 2 * vis);
             if (l % c.block == 0) {
                 CU(cudaMemcpyAsync(blk(nb[m]), W.h, TC * 4, cudaMemcpyDeviceToDevice, g_s));
                 k::conv4(W.tmp, Ly.h_attn, Ly.sc_attn, nullptr, 0, T, C, W.r, g_s);
@@ -5290,7 +5286,6 @@ void tp_forward(const int* tok, int T, int pos0, bool all_logits, OutMode out_mo
             k::route(W.rlog, Ly.probs_b, T, c.E, c.K, c.route_scale, W.route_d, (float*) (W.route_d + S), g_s);
             CU(cudaMemcpyAsync(W.route_h, W.route_d, (size_t) S * 8, cudaMemcpyDeviceToHost, g_s));
         }
-        ++g_tp_k;
         for (int m = 0; m < N; ++m) CU(cudaStreamSynchronize(g_dev[m].s));
         const double te0 = now();
         for (int m = 0; m < N; ++m) {
@@ -5349,16 +5344,15 @@ void tp_forward(const int* tok, int T, int pos0, bool all_logits, OutMode out_mo
                 run_prefill_moe(M, Ly, l, T, W.x16, top, w, W.r, W.h, W, dev_cache(m), t_x);
                 g_tp_part = false;
             }
-            tp_push(m, W.tmp, TC);
+            tp_push(m, W.tmp, TC, 2 * vis + 1);
         }
         for (int m = 0; m < N; ++m) {
             use_dev(m);
             Work& W = dev_work(m);
             Layer& Ly = g_tpm[m]->L[l];
-            tp_reduce(m, W.tmp, TC);
+            tp_reduce(m, W.tmp, TC, 2 * vis + 1);
             k::conv4_res(W.tmp, Ly.h_mlp, Ly.sc_mlp, nullptr, 0, T, C, W.r, W.h, g_s);
         }
-        ++g_tp_k;
         t_exp += now() - te0;
     }
     use_dev(0);
