@@ -3148,12 +3148,6 @@ __device__ __forceinline__ float sf_chunk_dot(int type, const uint8_t* w, int it
     default: return sh_chunk_dot(w, 6, 100, it, x);
     }
 }
-// a lane's part of a row's dot over a Strata type, out of line (the GGUF types' row dots keep their registers)
-__device__ __noinline__ float sf_row_part(int type, const uint8_t* w, const float* xs, int K, int lane) {
-    float acc = 0.0f;
-    for (int it = lane; it < K / 32; it += 32) acc += sf_chunk_dot(type, w, it, xs + it * 36);
-    return acc;
-}
 
 template <bool PK = false>
 __device__ float row_dot(int type, const uint8_t* w, const float* xs, int K) {
@@ -3325,7 +3319,7 @@ __device__ float row_dot(int type, const uint8_t* w, const float* xs, int K) {
                        : iq4xs_sub_dot(w + (size_t) (sb >> 3) * 136, sb & 7, xv);
         }
     } else if (PK && sf_chunk_type(type) && (K & 31) == 0 && ((uintptr_t) w & 3) == 0) {
-        acc = sf_row_part(type, w, xs, K, lane);
+        for (int it = lane; it < K / 32; it += 32) acc += sf_chunk_dot(type, w, it, xs + it * 36);
     } else {
         for (int i = lane; i < K; i += 32) acc += decode_value<PK>(type, w, (size_t) i) * xs[xp(i)];
     }
@@ -3564,7 +3558,10 @@ __device__ void row_dot_2(int type, const uint8_t* wg, const uint8_t* wu, const 
             au += iq3 ? iq3xxs_sub_dot(wu + off, sb & 7, xv) : iq4xs_sub_dot(wu + off, sb & 7, xv);
         }
     } else if (PK && sf_chunk_type(type) && (K & 31) == 0 && (((uintptr_t) wg | (uintptr_t) wu) & 3) == 0) {
-        ag = sf_row_part(type, wg, xs, K, lane), au = sf_row_part(type, wu, xs, K, lane);
+        for (int it = lane; it < K / 32; it += 32) {
+            ag += sf_chunk_dot(type, wg, it, xs + it * 36);
+            au += sf_chunk_dot(type, wu, it, xs + it * 36);
+        }
     } else {
         for (int i = lane; i < K; i += 32) {
             const float xv = xs[xp(i)];
