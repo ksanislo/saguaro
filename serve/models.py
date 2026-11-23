@@ -598,7 +598,7 @@ def apply(cfg: dict, settings: dict) -> dict:
             out.pop("env", None)
         # (drafting: auto, the drafter by hand (dspark: --drafting on) or none; written where it changes)
         if s.get("draft") not in can["draft"]:
-            raise ValueError("Drafting: not on this GPU or layout (Volta / Turing, the offload path, two GPUs)"
+            raise ValueError("Drafting: not on this GPU or layout (Pascal, an AMD card's offload path, a cache partly in RAM, tensor parallel)"
                              if can["draft"] == ["none"] else
                              "Drafting: this setup has no drafter (the setup downloads it)" if s.get("draft") == "dspark"
                              else "Drafting: auto, the drafter (DSpark) or none")
