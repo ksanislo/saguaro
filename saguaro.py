@@ -4273,8 +4273,8 @@ def speed_calibration(cfg_path: Path, why: str = "") -> bool:
             ok(f"{IK2_SHOWN}: its drafting is measured again at the next start (the engine times no drafting, the "
                "prompt lookup and the drafter once, before its first answer)")
             return True
-        warn(f"no speed calibration for {IK2_SHOWN}: drafting is set by hand or off (--drafting on|off; off on Volta "
-             "/ Turing, the offload path and two GPUs)")
+        warn(f"no speed calibration for {IK2_SHOWN}: drafting is on or off, not measured (--drafting on|off; on by "
+             "default on Turing and an AMD GPU holding every expert, off on Pascal, AMD's offload path and two GPUs)")
         return False
     if config_family(cfg) == "hy4":
         warn(f"no speed calibration for {Q.SHOWN[config_family(cfg)]}: the setup installs no drafter for it")
@@ -7854,21 +7854,28 @@ def ik2_drafter_here(d: Path, amd: bool = False) -> tuple[Path, dict] | None:
     return None
 
 
-def ik2_drafting(a) -> str:
-    """The engine's --drafting from the setup's --drafting: off / on by hand, else auto (measured once on the PC at
-    the engine's first start)."""
+def ik2_drafting(a, default: str = "auto") -> str:
+    """The engine's --drafting from the setup's --drafting: off / on by hand, else the layout's default
+    (ik2_fit.default_drafting: on where Ken's defaults say drafting pays - Turing, an AMD GPU holding every expert -
+    else auto, measured once on the PC at the engine's first start)."""
     how = getattr(a, "drafting", None)
-    return how if how in ("on", "off") else "auto"
+    return how if how in ("on", "off") else default
+
+
+def ik2_default_drafting(pc: dict, lay: dict) -> str:
+    """ik2_fit.default_drafting for this layout."""
+    return IK2F.default_drafting((lay["gpus"][0] if lay.get("gpus") else {}).get("arch"), pc.get("backend") == "hip",
+                                 bool(lay.get("resident")), len(lay.get("gpus") or []) == 2)
 
 
 def ik2_drafter_step(a, d: Path, vram: float, ctx: int, kv: str, experts_gib: float = IK2F.EXPERTS_GIB,
-                     hip: bool = False) -> Path | None:
+                     hip: bool = False, default: str = "auto") -> Path | None:
     """The drafter beside the GGUF (in d) - the form this PC's engine drafts with best (ik2_drafter_model), downloaded
     from Maya's repo when it is not there (an earlier setup's mtp.safetensors stays on the disk, and is what
     the engine drafts with where the GGUF was not downloaded) - sha256-checked, or None: drafting off
     (--drafting off), its room does not fit beside the model at this context (ik2_fit.draft_fits: not downloaded, the
     engine would leave it out), or not downloaded - the engine then drafts with the prompt lookup alone."""
-    how = ik2_drafting(a)
+    how = ik2_drafting(a, default)
     if how == "off":
         ok("drafting: off (--drafting off) - every token from a full model step")
         return None
@@ -7896,7 +7903,7 @@ def ik2_drafter_step(a, d: Path, vram: float, ctx: int, kv: str, experts_gib: fl
             fail(f"{f}: the sha256 does not match the published one (the file was removed)", "run the setup again")
     ok(f"drafting: {how} - {files[0].name} ({m['download_gb']:.1f} GB) and the prompt lookup; "
        + ("measured once at the engine's first start on this PC, the faster kept - the answers are the same with "
-          "drafting or without" if how == "auto" else "on (--drafting on), not measured"))
+          "drafting or without" if how == "auto" else "on, not measured"))
     return files[0]
 
 
@@ -7973,8 +7980,8 @@ def write_config_ik2(a, pc: dict, meta: dict, gguf: Path, tok: Path, ctx: int, m
                      vision: dict | None = None, drafter: Path | None = None, prev: dict | None = None,
                      quant: str = Q.IK2_QUANT) -> Path:
     """maya-inkling-2-mini[-<file>].json (each file its own: ik2_config_path) and its start script: the layout's flags
-    for one card or two (ik2_fit.layout; AMD: ik2_fit.amd_layout), drafting (--drafting auto by default; off where it
-    does not run).  A setup again keeps the config before's env, where the server listens and its key (another
+    for one card or two (ik2_fit.layout; AMD: ik2_fit.amd_layout), drafting (ik2_fit.default_drafting: on or auto;
+    off where it does not run).  A setup again keeps the config before's env, where the server listens and its key (another
     Inkling config's where this file has none yet); of the flags, only those the user set on the same file and cards
     (ik2_user_flags), checked against the layout (ik2_fit_user_flags); the setup's own choices are recorded
     (installer.setup_args).  saguaro-ik2 stops at a flag it does not know: only its own are written."""
@@ -7983,7 +7990,7 @@ def write_config_ik2(a, pc: dict, meta: dict, gguf: Path, tok: Path, ctx: int, m
     cfg_path = ik2_config_path(gguf)
     old = read_json(cfg_path)
     base = old or (prev if config_family(prev or {}) == "ik2" else {}) or {}
-    how = ik2_drafting(a)
+    how = ik2_drafting(a, ik2_default_drafting(pc, lay))
     args = ["--model", str(gguf), "--max-context", str(ctx)] + list(lay["args"]) + \
         (["--draft", str(drafter)] if drafter and how != "off" else []) + ["--drafting", how]
     setup_args = list(lay["args"]) + ["--drafting", how]
@@ -8118,7 +8125,7 @@ def set_up_ik2(a, prev: dict) -> Path | None:
         a.drafting = "off"
         drafter = None
     else:
-        drafter = ik2_drafter_step(a, d, vram, ctx, kv, ex, amd)
+        drafter = ik2_drafter_step(a, d, vram, ctx, kv, ex, amd, ik2_default_drafting(pc, lay))
     tok = ik2_tokenizer_step(a, d, gguf)               # 6
     vision = ik2_vision_step(a, pc, meta, llama, d)    # 7
     return write_config_ik2(a, pc, meta, gguf, tok, ctx, models, d, lay, vision, drafter, prev, quant=quant)   # 8

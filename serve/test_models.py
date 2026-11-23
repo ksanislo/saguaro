@@ -801,7 +801,7 @@ class Inkling2(unittest.TestCase):
                                   "SAGUARO_IK2_STATS": "1",
                                   "SAGUARO_IK2_WARM": "data/expert-profile-ik2mini.bin",
                                   "SAGUARO_IK2_SLOT_DIR": "var/Inkling-2-Mini-UD-Q4_K_XL/sessions"}})
-        self.assertEqual(M.choices(self.cfg), {"draft": ["auto", "none"], "images": True})   # (two GPUs: the split drafts)
+        self.assertEqual(M.choices(self.cfg), {"draft": ["none"], "images": True})   # (two GPUs: the engine does not draft yet)
         tp = dict(self.cfg, args=self.cfg["args"] + ["--tp", "2"])
         self.assertEqual(M.choices(tp)["draft"], ["none"])                 # (--tp 2: no verify window)
         self.assertEqual(self.sound(M.apply(self.cfg, M.settings_of(self.cfg))), self.cfg)   # (as it is: nothing moves)
@@ -849,7 +849,7 @@ class Inkling2(unittest.TestCase):
         self.assertEqual((M.flag(new["args"], "--ctx"), M.flag(new["args"], "--max-context")), ("32768", None))
 
     def test_what_its_engine_does_not_read_is_refused(self):
-        for bad in ({"parallel": 9}, {"kv_streaming": True}, {"kv_resident": 4096}, {"reserve_mib": 700}, {"tp": 2},
+        for bad in ({"parallel": 9}, {"draft": "auto"}, {"kv_streaming": True}, {"kv_resident": 4096}, {"reserve_mib": 700}, {"tp": 2},
                     {"draft": "mtp"}, {"expert_cache": 100}, {"prefill": 512}, {"kv_cache": "int8"}, {"dspark_conf": 0.3},
                     {"reserve_gb": 1}, {"cache_gb": 2}, {"mmap": "on"}, {"prompt_lookup": True}, {"ram_gb": 8},
                     {"gpus": [0, 1, 2]}, {"gpus": []}, {"kv": "int8"}, {"context": 0},

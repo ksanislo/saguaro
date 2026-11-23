@@ -354,7 +354,7 @@ def choices(cfg: dict) -> dict:
                                        _int(flag(args, "--max-context"), IK2F.CONTEXTS[0]),
                                        (cfg.get("env") or {}).get("SAGUARO_IK2_KV") or IK2F.DEFAULT_KV, hip,
                                        ik2_experts_gib(cfg), len(set(gpus_of(cfg))) > 1) \
-            or (_int(flag(args, "--tp"), 1) > 1 and "tensor parallel")   # (two: the split drafts; --tp has no window)
+            or (_int(flag(args, "--tp"), 1) > 1 and "tensor parallel")   # (two GPUs, --tp: no drafting yet)
         return {"draft": ["none"] if off else ["auto"] + (["dspark"] if flag(args, "--draft") else []) + ["none"],
                 "images": bool(cfg.get("vision") or cfg.get("vision_off"))}
     if family(cfg) == "hy4":                           # (the drafters its pack has; images: the pack's mmproj file)
@@ -598,7 +598,7 @@ def apply(cfg: dict, settings: dict) -> dict:
             out.pop("env", None)
         # (drafting: auto, the drafter by hand (dspark: --drafting on) or none; written where it changes)
         if s.get("draft") not in can["draft"]:
-            raise ValueError("Drafting: not on this GPU or layout (Pascal, an AMD card's offload path, a cache partly in RAM, tensor parallel)"
+            raise ValueError("Drafting: not on this GPU or layout (Pascal, two GPUs, an AMD card's offload path, a cache partly in RAM, tensor parallel)"
                              if can["draft"] == ["none"] else
                              "Drafting: this setup has no drafter (the setup downloads it)" if s.get("draft") == "dspark"
                              else "Drafting: auto, the drafter (DSpark) or none")

@@ -214,8 +214,45 @@ class Fit(unittest.TestCase):
         self.assertIsNone(F.drafting_off_reason("70", 32, 65536, "fp8"))       # (Volta: auto measures it)
         self.assertIn("Pascal", F.drafting_off_reason("61", 24, 65536, "fp8"))
         self.assertIsNone(F.drafting_off_reason("75", 15.0, 32768, "f16"))      # (a T4, UD-Q4_K_XL: the offload path)
-        self.assertIsNone(F.drafting_off_reason("75", 15.0, 131072, "f16", gpus2=True))   # (two T4s: the split)
-        self.assertIn("no room for the drafter", F.drafting_off_reason("86", 8, 65536, "fp8"))
+        self.assertIn("two GPUs", F.drafting_off_reason("75", 15.0, 131072, "f16", gpus2=True))   # (the split: not yet)
+        self.assertIn("two GPUs", F.drafting_off_reason("86", 24.0, 32768, "f16", gpus2=True))
+
+    def test_default_drafting(self):
+        """Ken's defaults (11-23): --drafting on for a Turing card and an AMD GPU holding every expert; auto (measured
+        once on the PC) on Volta, Ampere and newer and on AMD's other layouts."""
+        self.assertEqual(F.default_drafting("75"), "on")
+        self.assertEqual(F.default_drafting("75", resident=True), "on")
+        self.assertEqual(F.default_drafting("75", gpus2=True), "auto")
+        for arch in ("70", "80", "86", "89", "120", None):
+            self.assertEqual(F.default_drafting(arch), "auto", arch)
+        self.assertEqual(F.default_drafting("gfx1201", hip=True, resident=True), "on")
+        self.assertEqual(F.default_drafting("gfx1201", hip=True, resident=False), "auto")
+
+    def test_the_setup_writes_drafting_on(self):
+        """The setup's --drafting: on for one T4 and an AMD GPU holding every expert, auto on two T4s' split (off there
+        anyway) and on Ampere; the user's --drafting on / off wins."""
+        on = lambda pc, lay, **kw: maya.ik2_drafting(args(**kw), maya.ik2_default_drafting(pc, lay))   # noqa: E731
+        cuda, hip = {"backend": "cuda"}, {"backend": "hip"}
+        self.assertEqual(on(cuda, {"gpus": [t4(0)], "resident": False}), "on")
+        self.assertEqual(on(cuda, {"gpus": [t4(0), t4(1)], "resident": False}), "auto")
+        self.assertEqual(on(cuda, {"gpus": [card(24, arch="86")], "resident": True}), "auto")
+        self.assertEqual(on(hip, {"gpus": [amd("gfx1201", 15.9)], "resident": True}), "on")
+        self.assertEqual(on(hip, {"gpus": [amd("gfx1201", 15.9)], "resident": False}), "auto")
+        self.assertEqual(on(cuda, {"gpus": [t4(0)], "resident": False}, drafting="off"), "off")
+        self.assertEqual(on(cuda, {"gpus": [card(24, arch="86")], "resident": True}, drafting="on"), "on")
+
+    def test_drafter_room_gguf(self):
+        """The GGUF drafter's room (the engine planned 0.64 GiB at 8K, 0.77 at 32K on a T4): the one-T4 quant on an RX
+        9070 XT drafts at 16K (measured there) and, on paper, at 32K (0.14 GiB to spare); mtp.safetensors (BF16) does
+        not at 32K."""
+        self.assertAlmostEqual(F.draft_gib(32768), 0.775, places=3)
+        self.assertAlmostEqual(F.draft_gib(32768, gguf=False) - F.draft_gib(32768), F.DRAFT_BF16_EXTRA_GIB)
+        self.assertTrue(F.draft_fits(15.9, 16384, "f16", 11.45, True))
+        self.assertTrue(F.draft_fits(15.9, 32768, "f16", 11.45, True))
+        self.assertFalse(F.draft_fits(15.9, 32768, "f16", 11.45, True, gguf=False))
+        self.assertTrue(F.draft_fits(15.0, 32768, "f16", 14.7))          # (a T4, UD-Q4_K_XL: the tier's room)
+        self.assertIsNone(F.drafting_off_reason("86", 8, 65536, "fp8"))          # (the GGUF drafter: the tier's room)
+        self.assertIn("no room for the drafter", F.drafting_off_reason("86", 8, 131072, "fp8"))
         self.assertIsNone(F.drafting_off_reason("86", 24, 524288, "fp8"))   # (NVIDIA offload: auto measures it)
         self.assertIn("streams", F.drafting_off_reason("86", 16, 1048576, "fp8"))
         self.assertIsNone(F.drafting_off_reason("86", 24, 65536, "fp8"))
@@ -262,7 +299,7 @@ class Fit(unittest.TestCase):
         self.assertEqual(F.speeds(F.amd_layout(amd("gfx1100", 24))), "")   # (not measured there)
         self.assertIsNone(F.drafting_off_reason(None, 24, 32768, F.DEFAULT_KV, True))
         self.assertTrue(F.draft_fits(24, 32768, F.DEFAULT_KV, F.EXPERTS_GIB, True))
-        self.assertFalse(F.draft_fits(15.9, 32768, F.DEFAULT_KV, 11.45, True))
+        self.assertTrue(F.draft_fits(15.9, 32768, F.DEFAULT_KV, 11.45, True))      # (the GGUF drafter)
 
     def test_the_flags_are_the_engines_own(self):
         """saguaro-ik2 stops at a flag it does not know: every flag a layout writes is one its parser reads."""
@@ -720,7 +757,8 @@ class Steps(unittest.TestCase):
     def test_set_up_on_a_16_gb_amd_card(self):
         """An RX 9070 XT (16 GB, gfx1201) with a GGUF of your own whose experts fit (our one-T4 quant): resident with
         1 GiB kept beside the experts and --chunk 1024, as the engine runs it; drafting not turned off (the resident
-        path), but the drafter's room does not fit at 32K, so it is not downloaded (the prompt lookup drafts)."""
+        path, --drafting on: Ken's default with every expert on an AMD GPU); the GGUF drafter's room fits at 32K on paper
+        (0.14 GiB to spare - the engine measures at its start), so it is fetched."""
         d = self.root / "own"
         d.mkdir()
         own = d / "x.gguf"
@@ -732,7 +770,8 @@ class Steps(unittest.TestCase):
                   stub("ik2_tokenizer_step", d), stub("ik2_vision_step", None), patch.object(maya, "IK2_EXE", own),
                   patch.object(maya, "mem_gb", return_value=(96.0, 80.0)), patch.object(maya, "WIN", False),
                   patch.object(maya, "choose_context", lambda a, prev, opts, rec: rec),
-                  patch.object(maya, "offer_download", side_effect=AssertionError("no drafter download")),
+                  patch.object(maya, "offer_download", lambda a, what, dd, files, m: [f.write_bytes(b"x") for f in files]),
+                  patch.object(maya, "sha256_checked", lambda *a: True),
                   patch.object(maya, "write_config_ik2", lambda a, *r, **k: seen.update(drafting=a.drafting, lay=r[7],
                                                                                          drafter=r[9]))]
         for p in common:
@@ -743,12 +782,12 @@ class Steps(unittest.TestCase):
                 patch.object(maya, "ok", lambda m: said.append(m)), patch.object(maya, "warn", lambda m: said.append(m)):
             maya.set_up_ik2(args(backend="hip", model_dir=str(d)), {})
         self.assertEqual((seen["lay"]["env"], seen["lay"]["path"], seen["lay"]["args"][3], seen["drafter"]),
-                         ({"SAGUARO_IK2_RESERVE_MB": "1024"}, "resident", "1024", None))
+                         ({"SAGUARO_IK2_RESERVE_MB": "1024"}, "resident", "1024", d / "dspark-Inkling-2-Mini-Q8_0.gguf"))
         self.assertNotEqual(seen["drafting"], "off")
         text = "\n".join(said)
         self.assertIn("every expert in its memory", text)
         self.assertIn("measured on an RX 9070 XT", text)
-        self.assertIn("does not fit beside the model", text)
+        self.assertIn("dspark-Inkling-2-Mini-Q8_0.gguf", text)
         for wrong in ("offload path", "pinned in RAM", "not measured on this kind of card"):
             self.assertNotIn(wrong, text)
 
@@ -789,8 +828,7 @@ class Steps(unittest.TestCase):
             got = maya.set_up_ik2(args(models_dir=str(self.root / "models"), ik2_quant="ud-q4_k_xl"), {})
         self.assertEqual(got, self.root / "cfg.json")
         self.assertEqual((seen["ctx"], seen["lay"]["args"][:2], seen["d"]), (131072, ["--gpus", "2"], d))
-        self.assertEqual(seen["drafter"], d / "dspark-Inkling-2-Mini-Q8_0.gguf")   # (two T4s: the split drafts)
-        self.assertNotEqual(seen["drafting"], "off")
+        self.assertEqual((seen["drafting"], seen["drafter"]), ("off", None))   # (two GPUs: the engine does not draft yet)
 
 
 class StrataPacks(unittest.TestCase):

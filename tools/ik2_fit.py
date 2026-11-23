@@ -192,13 +192,20 @@ def verdict_two(vram0_gb: float, vram1_gb: float, ram_gb: float, ctx: int, kv: s
     return word, line
 
 
-DRAFT_BASE_GIB = 0.88                               # the drafter (mtp.safetensors 0.59 GiB, its fold, rings, taps)
-DRAFT_TOKEN_BYTES = 4864                            # its layer without a window's context 4 KiB a token + scratch
+# The drafter's room as saguaro-ik2's draft_room plans it: the file, its fold through the head, its windowed layers'
+# rings, the window's records and buffers, the target's taps; plus its layer without a window's context, FP16 K and V
+# 4 KiB a position (FP8: half).  The GGUF (Q8_0, 0.37 GiB, what the setup fetches): the engine planned 0.64 GiB at 8K
+# (chunk 1024) and 0.77 at 32K (chunk 2048) on a T4 (REPORT-ik2-draft-gain.md runs t6/t7; it used 0.48 / 0.57) -
+# 0.61 GiB beside the context rows at chunk 1024, 0.65 at 2048.  mtp.safetensors (BF16, 0.59 GiB: a fallback) 0.25 more.
+DRAFT_BASE_GIB = 0.65                               # the GGUF drafter, a 2048-token chunk's taps
+DRAFT_BF16_EXTRA_GIB = 0.25                         # mtp.safetensors instead (its BF16 matrices)
+DRAFT_TOKEN_BYTES = 4096                            # its layer without a window's context, FP16 rows a token
 
 
-def draft_gib(ctx: int) -> float:
-    """GiB the drafter takes beside the model at `ctx` (saguaro-ik2's draft_room)."""
-    return DRAFT_BASE_GIB + ctx * DRAFT_TOKEN_BYTES / GIB
+def draft_gib(ctx: int, gguf: bool = True) -> float:
+    """GiB the drafter takes beside the model at `ctx` (saguaro-ik2's draft_room, FP16 context rows): the GGUF, or
+    mtp.safetensors (gguf=False)."""
+    return DRAFT_BASE_GIB + (0.0 if gguf else DRAFT_BF16_EXTRA_GIB) + ctx * DRAFT_TOKEN_BYTES / GIB
 
 
 PLAN_DENSE_GIB = 1.1                                # the engine's own sum for the drafter's room (saguaro-ik2's fit
@@ -209,11 +216,11 @@ DRAFT_MIN_ROWS = 65536                              # the fewest context rows th
 
 
 def draft_fits(vram_gb: float, ctx: int, kv: str = DEFAULT_KV, experts_gib: float = EXPERTS_GIB,
-               hip: bool = False) -> bool:
+               hip: bool = False, gguf: bool = True) -> bool:
     """Whether the drafter's room fits beside the model at `ctx` (else the engine leaves it out at its start; the
     prompt lookup still drafts).  Every expert in VRAM: the engine's own check - its plan's sum (the experts, the dense
-    weights, the cache, its reserve) and the drafter with FP16 context rows, else FP8 ones (a 24 GB card drafts at
-    262,144 as the engine does).
+    weights, the cache, its reserve) and the drafter (gguf: the GGUF the setup fetches, else mtp.safetensors) with
+    FP16 context rows, else FP8 ones (a 24 GB card drafts at 262,144 as the engine does).
     The offload path with the whole cache in VRAM: the tier gives the drafter's room, at most half of its own - the
     verify window's staging and at least DRAFT_MIN_ROWS of FP8 context rows (the last positions) with it (upstream
     v1.1.75).  VRAM not known: True (the engine measures)."""
@@ -224,8 +231,8 @@ def draft_fits(vram_gb: float, ctx: int, kv: str = DEFAULT_KV, experts_gib: floa
         small = hip and float(vram_gb) < AMD_RESERVE_UNDER_GB   # (amd_layout's SAGUARO_IK2_RESERVE_MB=1024)
         used = float(experts_gib) + PLAN_DENSE_GIB + ctx * KV_BYTES.get(kv, KV_BYTES["f16"]) / GIB + \
             (1.0 if small else PLAN_RESERVE_GIB)
-        return float(vram_gb) - MARGIN_GIB >= used + draft_gib(ctx) - ctx * DRAFT_TOKEN_BYTES / GIB / 2
-    least = DRAFT_BASE_GIB + OFF_WIN_STAGE_GIB + min(ctx, DRAFT_MIN_ROWS) * DRAFT_TOKEN_BYTES / GIB / 2
+        return float(vram_gb) - MARGIN_GIB >= used + draft_gib(ctx, gguf) - ctx * DRAFT_TOKEN_BYTES / GIB / 2
+    least = draft_gib(0, gguf) + OFF_WIN_STAGE_GIB + min(ctx, DRAFT_MIN_ROWS) * DRAFT_TOKEN_BYTES / GIB / 2
     return not p["kv_streamed"] and (p["tier_gib"] + OFF_ROOM_GIB + MARGIN_GIB) / 2 >= least
 
 
@@ -241,8 +248,9 @@ def drafting_off_reason(arch, vram_gb: float, ctx: int, kv: str = DEFAULT_KV, hi
     have their own verify-window kernels since upstream v1.1.75 (on a T4: Ken 11-23, measured +4..+9 %) - Pascal
     (6.x, scalar kernels) does not.  The offload path (the card does not hold every expert: a small card, or a long
     context) drafts where its whole cache stays in VRAM and the experts' tier has the drafter's room, on one NVIDIA
-    card and on two (gpus2: the split - its cache whole in VRAM); not on AMD's (measured slower there - upstream's
-    auto measures it, we keep it off).  With every expert in VRAM it is kept.  A VRAM not known is not a reason."""
+    card; not on AMD's (measured slower there - upstream's auto measures it, we keep it off).  Two GPUs (gpus2: the
+    split): off - our engine leaves the drafter out there (not checked against plain decoding yet).  With every
+    expert in VRAM it is kept.  A VRAM not known is not a reason."""
     try:
         cc = int(arch)
     except (TypeError, ValueError):
@@ -250,9 +258,10 @@ def drafting_off_reason(arch, vram_gb: float, ctx: int, kv: str = DEFAULT_KV, hi
     if not hip and 0 < cc < 70:
         return ("drafting off: on this GPU (Pascal) the engine runs its scalar kernels, where a verify window costs "
                 "more than it keeps - every token comes from a full model step")
+    if gpus2 and not hip:
+        return ("drafting off: on two GPUs (the split) the engine does not draft yet - it is not checked against plain "
+                "decoding there")
     if vram_gb and not plan(vram_gb, ctx, kv, hip, experts_gib)["resident"]:
-        if gpus2 and not hip:
-            return None if draft_fits(vram_gb, ctx, kv, experts_gib) else OFF_ROOM
         if plan(vram_gb, ctx, kv, hip, experts_gib)["kv_streamed"]:
             return OFF_CACHE
         if not draft_fits(vram_gb, ctx, kv, experts_gib, hip):
@@ -261,6 +270,20 @@ def drafting_off_reason(arch, vram_gb: float, ctx: int, kv: str = DEFAULT_KV, hi
             return ("drafting off: on an AMD card's offload path drafting is slower than plain decoding (an RX 9070 XT "
                     "measured: -1..-12 %) - a context or a file whose experts all fit brings it back")
     return None
+
+
+def default_drafting(arch, hip: bool = False, resident: bool = False, gpus2: bool = False) -> str:
+    """--drafting as the setup writes it where drafting runs (drafting_off_reason None): "on" where Ken's defaults
+    (11-23, REPORT-ik2-draft-gain.md) say drafting pays whatever one start measures - a Tesla T4 / RTX 20 (Turing,
+    one card: the expert cache or every expert resident) and an AMD GPU holding every expert; else "auto" (upstream's:
+    measured once on the PC - Volta, Ampere and newer)."""
+    try:
+        cc = int(arch)
+    except (TypeError, ValueError):
+        cc = 0
+    if hip:
+        return "on" if resident else "auto"
+    return "on" if cc == 75 and not gpus2 else "auto"
 
 
 def recommended_context(vram_gb: float, kv: str = DEFAULT_KV, hip: bool = False,
