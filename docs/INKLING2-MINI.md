@@ -45,14 +45,14 @@ CPU, and on a T4 and an RX 9070 XT through the engine's kernels). A pack's folde
 | --- | ---: | ---: | ---: | ---: | --- | --- | --- |
 | Strata SQ-20 (`inkling-2-mini-sq-20`) | 19.3 GB | 14.95 GiB | 0 (the original weights) / 0 | 100 % | 15.0 / 18.3 tok/s, read 519 (offload) | 41.0 / 42.8 tok/s, read 1329 (offload) | 24 GB cards and two 16 GB cards (every expert in VRAM) |
 | unsloth UD-Q4_K_XL (`inkling-2-mini`) | 17.6 GB | 14.7 GiB | 0.0041 / - | 97.1 % | 26.3 / 29.4, read 546 (offload) | 58-59, read 1718 (offload) | one 16 GB card (the offload path) |
-| Strata SQ-15 (`inkling-2-mini-sq-15`) | 14.3 GB | 13.0 GiB | 0.0171 / 0.0089 | 93.5 % | 22.9 / 23.6, read 547 (offload) | 56.9 / 53.6, read 1277 (offload) | - (a smaller download than UD at nearly its speed) |
-| Strata SQ-10 (`inkling-2-mini-sq-10`) | 10.5 GB | 10.45 GiB | 0.0795 / 0.0502 | 87.1 % | 26.0 / 24.7, read 537 (every expert in VRAM) | 67.8 / 60.9, read 1247 (every expert in VRAM) | 8-12 GB cards |
+| Strata SQ-15 (`inkling-2-mini-sq-15`) | 14.3 GB | 13.0 GiB | 0.0171 / 0.0089 | 93.5 % | 24.7 / 25.6, read 540 (offload) | 56.9 / 53.6, read 1277 (offload) | - (a smaller download than UD at nearly its speed) |
+| Strata SQ-10 (`inkling-2-mini-sq-10`) | 10.5 GB | 10.45 GiB | 0.0795 / 0.0502 | 87.1 % | 33.9 / 31.5, read 544 (every expert in VRAM) | 67.8 / 60.9, read 1247 (every expert in VRAM) | 8-12 GB cards |
 
 KL here: against SQ-20 (the original weights), 2,000 tokens of text through `tools/ik2/kl.py` (the same on a T4 and
 the RX 9070 XT to within 0.0004);
 Strata's figures are on their own test prompts. Speeds: decode at ~50 / 8K tokens deep, 8K read, one request,
 GPU clocks not pinned, measured 2026-11-22 (`runs/sf4`, `runs/sfm5`, `runs/sfm6`; the RX 9070 XT's SQ-10 / SQ-15 with
-the faster S_K row dots, the T4's before them). The packs keep each expert in its own codec,
+the faster S_K row dots, `runs/sf5` on the T4). The packs keep each expert in its own codec,
 and the engine still gives every expert of a layer the slot of its widest one - which is why SQ-15 (14.3 GB) does not
 yet stay whole in a 16 GB card's VRAM; per-expert slot sizes are the next step.
 
