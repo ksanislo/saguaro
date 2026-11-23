@@ -231,6 +231,8 @@ struct Config {
     int n_visit = 0, n_pass = 1, core0 = 0, core1 = 0, rank = 0;
     float eps, route_scale, qk_clip, rel_clip, alpha, n_floor, gate_cap, up_cap, logit_cap;
     std::vector<bool> sliding;   // by layer
+    // --tp N: H, KV and F above are a member's (the file's divided by tp_n); tp_m: the member
+    int tp_n = 1, tp_m = 0;
 };
 
 // a dense matrix as the GGUF holds it, in VRAM: its blocks [N][K]
@@ -305,6 +307,7 @@ struct Layer {
 struct Visit {
     int l = 0;        // the layer
     int pass = 0;     // the core's pass (0: its first, or a layer outside the core)
+    int mem = 0;      // (--tp: the member whose layer and state it is)
     uint16_t *kc = nullptr, *vc = nullptr;
     uint8_t *kc8 = nullptr, *vc8 = nullptr;
     k::KvQ4 kc4{}, vc4{};
@@ -325,9 +328,13 @@ struct Model {
     int embd_type;
 };
 
+// --tp N: the members' models ([0] the main one, whose V also lists the other members' visits after its own, so
+// that the serving's per-visit state - snapshots, resets, kept conversations - covers every member)
+int g_tpn = 1;
+std::vector<Model*> g_tpm;
 inline Layer& bind_visit(Model& M, int v) {
     const Visit& Vi = M.V[v];
-    Layer& Ly = M.L[Vi.l];
+    Layer& Ly = Vi.mem ? g_tpm[Vi.mem]->L[Vi.l] : M.L[Vi.l];
     Ly.kc = Vi.kc, Ly.vc = Vi.vc, Ly.kc8 = Vi.kc8, Ly.vc8 = Vi.vc8, Ly.kc4 = Vi.kc4, Ly.vc4 = Vi.vc4, Ly.kv_cap = Vi.kv_cap, Ly.kv_host = Vi.kv_host;
     Ly.h_k = Vi.h_k, Ly.h_v = Vi.h_v, Ly.h_attn = Vi.h_attn, Ly.h_mlp = Vi.h_mlp;
     for (int i = 0; i < 4; ++i) Ly.rec_old[i] = Vi.rec_old[i], Ly.rec_x[i] = Vi.rec_x[i];
@@ -570,14 +577,24 @@ bool upload_planar(Mat& m, const std::vector<const uint8_t*>& parts, const std::
     return true;
 }
 
-Mat load_mat(const Shards& S, const std::string& n, int N, int Kd) {
+// (--tp: rows [r0, r0 + N) of a tensor of N_file rows)
+Mat load_mat(const Shards& S, const std::string& n, int N, int Kd, int r0 = 0, int N_file = 0) {
     const auto* t = S.info(n);
     if (!t) die("no tensor " + n);
-    if (t->elements() != (uint64_t) N * Kd) die(n + ": " + std::to_string(t->elements()) + " values");
+    if (t->elements() != (uint64_t) (N_file ? N_file : N) * Kd) die(n + ": " + std::to_string(t->elements()) + " values");
     if (!k::block_values((int) t->type) || Kd % k::block_values((int) t->type))
         die(n + ": type " + t->type_name() + " not read here");
     Mat m;
     m.type = (int) t->type, m.N = N, m.K = Kd;
+    if (N_file) {   // (a member's rows: blocks only)
+        if (!g_dense_q8) die(n + ": a member's rows need the dense weights as blocks");
+        const size_t rb = (size_t) (Kd / k::block_values(m.type)) * k::block_bytes(m.type);
+        const uint8_t* p = S.data(n) + (size_t) r0 * rb;
+        if (upload_planar(m, {p}, {(size_t) N * Kd})) return m;
+        m.raw = dalloc<uint8_t>((size_t) N * rb);
+        CU(cudaMemcpy(m.raw, p, (size_t) N * rb, cudaMemcpyHostToDevice));
+        return m;
+    }
     const size_t nb = tensor_bytes(*t);
     if (g_dense_q8) {
         if (upload_planar(m, {S.data(n)}, {(size_t) N * Kd})) return m;
@@ -593,6 +610,26 @@ Mat load_mat(const Shards& S, const std::string& n, int N, int Kd) {
     m.f16 = dalloc<uint16_t>((size_t) N * Kd);
     k::decode_f16(m.type, g_stage, (size_t) N * Kd, m.f16, g_s);
     CU(cudaStreamSynchronize(g_s));
+    return m;
+}
+
+// --tp: the columns [k0, k0 + kn) of every row of a [N][K_file] matrix of blocks (whole blocks: re-blocked rows of kn)
+Mat load_mat_cols(const Shards& S, const std::string& n, int N, int K_file, int k0, int kn) {
+    const auto* t = S.info(n);
+    if (!t) die("no tensor " + n);
+    if (t->elements() != (uint64_t) N * K_file) die(n + ": " + std::to_string(t->elements()) + " values");
+    const int ty = (int) t->type, bv = k::block_values(ty);
+    if (!bv || K_file % bv || k0 % bv || kn % bv) die(n + ": a member's columns are not whole " + t->type_name() + " blocks");
+    if (!g_dense_q8) die(n + ": a member's columns need the dense weights as blocks");
+    const size_t bb = k::block_bytes(ty), rb = (size_t) (K_file / bv) * bb, ob = (size_t) (kn / bv) * bb;
+    std::vector<uint8_t> h((size_t) N * ob);
+    const uint8_t* p = S.data(n);
+    for (int r = 0; r < N; ++r) std::memcpy(h.data() + (size_t) r * ob, p + (size_t) r * rb + (size_t) (k0 / bv) * bb, ob);
+    Mat m;
+    m.type = ty, m.N = N, m.K = kn;
+    if (upload_planar(m, {h.data()}, {(size_t) N * kn})) return m;
+    m.raw = dalloc<uint8_t>(h.size());
+    CU(cudaMemcpy(m.raw, h.data(), h.size(), cudaMemcpyHostToDevice));
     return m;
 }
 
@@ -656,6 +693,7 @@ struct MatPart {
     std::string name;
     int N = 0;
     std::vector<float> f32;
+    int r0 = 0, N_file = 0;   // (--tp: rows [r0, r0 + N) of a tensor of N_file rows; 0: all of it)
 };
 
 void ensure_stage(size_t nb) {
@@ -703,14 +741,19 @@ bool try_load_fused_raw(const Shards& S, const std::vector<MatPart>& parts, int 
         if (!pt.f32.empty()) return false;
         const auto* t = S.info(pt.name);
         if (!t) die("no tensor " + pt.name);
-        if (t->elements() != (uint64_t) pt.N * Kd) die(pt.name + ": " + std::to_string(t->elements()) + " values");
+        if (t->elements() != (uint64_t) (pt.N_file ? pt.N_file : pt.N) * Kd) die(pt.name + ": " + std::to_string(t->elements()) + " values");
         if (!k::block_values((int) t->type) || Kd % k::block_values((int) t->type))
             die(pt.name + ": type " + t->type_name() + " not read here");
         if (ty < 0) ty = (int) t->type;
         else if (ty != (int) t->type && !g_sv) return false;
         N_tot += pt.N;
-        nb_tot += tensor_bytes(*t);
+        nb_tot += pt.N_file ? (size_t) pt.N * (Kd / k::block_values((int) t->type)) * k::block_bytes((int) t->type)
+                            : tensor_bytes(*t);
     }
+    auto part_p = [&](const MatPart& pt) {   // (a member's rows: from row r0)
+        const int ty_p = (int) S.info(pt.name)->type;
+        return S.data(pt.name) + (size_t) pt.r0 * (Kd / k::block_values(ty_p)) * k::block_bytes(ty_p);
+    };
     out = Mat{};
     out.type = ty;
     out.N = N_tot;
@@ -733,14 +776,16 @@ bool try_load_fused_raw(const Shards& S, const std::vector<MatPart>& parts, int 
     {
         std::vector<const uint8_t*> ps;
         std::vector<size_t> vs;
-        for (const auto& pt : parts) ps.push_back(S.data(pt.name)), vs.push_back((size_t) pt.N * Kd);
+        for (const auto& pt : parts) ps.push_back(part_p(pt)), vs.push_back((size_t) pt.N * Kd);
         if (upload_planar(out, ps, vs)) return true;
     }
     out.raw = dalloc<uint8_t>(nb_tot);
     size_t off = 0;
     for (const auto& pt : parts) {
-        const size_t nb = tensor_bytes(*S.info(pt.name));
-        CU(cudaMemcpy(out.raw + off, S.data(pt.name), nb, cudaMemcpyHostToDevice));
+        const auto* t = S.info(pt.name);
+        const size_t nb = pt.N_file ? (size_t) pt.N * (Kd / k::block_values((int) t->type)) * k::block_bytes((int) t->type)
+                                    : tensor_bytes(*t);
+        CU(cudaMemcpy(out.raw + off, part_p(pt), nb, cudaMemcpyHostToDevice));
         off += nb;
     }
     return true;
@@ -1576,6 +1621,7 @@ struct DevCtx {
     cudaStream_t s = nullptr, cs = nullptr;
     cudaEvent_t ev = nullptr;
     cublasHandle_t blas = nullptr;
+    uint16_t* w16 = nullptr;   // (--tp: this member's g_w16)
     Work W{};
     ExpertCache EC;
 };
@@ -1589,7 +1635,11 @@ void use_dev(int d) {
     CU(cudaSetDevice(d));
     g_cur = d;
     g_s = g_dev[d].s, g_cs = g_dev[d].cs, g_ev = g_dev[d].ev, g_blas = g_dev[d].blas;
+    if (g_tpn > 1) g_w16 = g_dev[d].w16;
 }
+// --tp: a layer's attention and MoE stop at their partial sums in W.tmp (before the short convs): tp_forward
+bool g_tp_part = false;
+std::vector<std::vector<uint8_t>> g_tp_down;   // (--tp, at load: the members' columns of down, re-blocked)
 
 // (kCand: sampling's candidates - the resident token path finds the largest logits on the device, g_cand; any other
 // path gives the logits as kLogits does and leaves g_cand.n at -1)
@@ -2056,6 +2106,7 @@ void run_layer_attn(const Model& M, Layer& Ly, int l, int T, int pos0, const flo
     if (staged) Ly.kc = kc_h, Ly.vc = vc_h, Ly.kc8 = kc8_h, Ly.vc8 = vc8_h;
     k::gate_mul_f16(W.o, gate_p, (size_t) T * HD, W.x16, g_dense_q8 && T == 1, g_s);
     matmul(Ly.wo, W.o, W.x16, T, W.tmp, C);
+    if (g_tp_part) return;
     conv_rec(Ly, 2, W.tmp, Ly.h_attn, T, C);
     if (l % c.block == 0) {
         CU(cudaMemcpyAsync(blk(nb), h_in, TC * 4, cudaMemcpyDeviceToDevice, g_s));
@@ -2552,6 +2603,7 @@ void run_prefill_moe(const Model& M, Layer& Ly, int l, int T, const uint16_t* xq
     }
     g_pf.lap(g_pf.experts, "experts");
     t_exp += now() - te0;
+    if (g_tp_part) return;
     conv_rec(Ly, 3, W.tmp, Ly.h_mlp, T, C);
     k::conv4_res(W.tmp, Ly.h_mlp, Ly.sc_mlp, nullptr, 0, T, C, r_in, h_out, g_s);
 }
@@ -5862,8 +5914,9 @@ void check_preview(int n_gpu, bool serve) {
     if (e != cudaSuccess || nd < 1)
         refuse(std::string("no ") + vendor + " GPU visible (" + (e != cudaSuccess ? cudaGetErrorString(e) : "0 devices") +
             "): the Inkling 2 preview runs on one " + vendor + " GPU");
-    if (n_gpu < 1 || n_gpu > 2)
+    if (n_gpu < 1 || n_gpu > (g_tpn > 1 ? 8 : 2))
         refuse("--gpus " + std::to_string(n_gpu) + ": Inkling 2 runs on one or two GPUs (three or more are not in it yet)");
+    if (g_tpn > 1 && nd < n_gpu) refuse("--tp " + std::to_string(g_tpn) + ": " + std::to_string(nd) + " GPU(s) visible");
     const bool old_two = (getenv("SAGUARO_IK2_EP") && std::atoi(getenv("SAGUARO_IK2_EP"))) || (getenv("SAGUARO_IK2_TP") && std::atoi(getenv("SAGUARO_IK2_TP")));
     if (n_gpu == 2 && old_two && !force)
         refuse("--gpus 2 with SAGUARO_IK2_EP=1 / SAGUARO_IK2_TP=1: the older two-GPU modes are outside the preview (without them: "
@@ -5873,6 +5926,9 @@ void check_preview(int n_gpu, bool serve) {
 #endif
     if (n_gpu == 2 && nd < 2)
         refuse("--gpus 2: " + std::to_string(nd) + " GPU visible");
+#ifdef STRATA_USE_HIP
+    if (g_tpn > 1 && !force) refuse("--tp: not checked on AMD GPUs yet" + run_anyway);
+#endif
     for (int d = 0; d < std::min(n_gpu, nd); ++d) {
         cudaDeviceProp p{};
         CU(cudaGetDeviceProperties(&p, d));
@@ -5950,6 +6006,7 @@ int main(int argc, char** argv) {
         else if (a == "--cache-gb") cache_gb = std::atof(next().c_str());
         else if (a == "--threads") threads = std::atoi(next().c_str());
         else if (a == "--gpus") n_gpu = std::atoi(next().c_str());
+        else if (a == "--tp") g_tpn = std::atoi(next().c_str());
         else if (a == "--draft") draft_path = next();
         else if (a == "--serve") serve = true;
         else if (a == "--serve-ik2") serve = true, serve_maya = false;
@@ -6029,10 +6086,27 @@ int main(int argc, char** argv) {
         while (*p && *p != ',') ++p;
         if (*p == ',') ++p;
     }
+    // --tp N: tensor parallel over N GPUs (the visible ones, in order) - each holds 1/N of every layer's heads and
+    // experts' width and of the K / V cache, the two partial sums of a layer visit added over peer copies
+    if (g_tpn < 1) die("--tp: 1 or more");
+    if (g_tpn > 1) {
+        if (n_gpu != 1 && n_gpu != g_tpn) die("--tp " + std::to_string(g_tpn) + " with --gpus " + std::to_string(n_gpu));
+        n_gpu = g_tpn;
+        if (strata_fmt::Pack::sniff(model)) die("--tp: GGUF files only (a Strata pack's packed experts are not split yet)");
+        const char* bad[] = {"SAGUARO_IK2_EP", "SAGUARO_IK2_TP", "SAGUARO_IK2_CPU", "SAGUARO_IK2_DENSE", "SAGUARO_IK2_OFF"};
+        for (const char* b : bad)
+            if (getenv(b) && *getenv(b) && std::string(getenv(b)) != "0") die(std::string("--tp with ") + b);
+        if (g_kv_q4) die("--tp with SAGUARO_IK2_KV=q4");
+        if (g_par > 1) die("--tp with --parallel > 1 (not yet)");
+        if (g_kv_stream == 1) die("--tp with --kv-streaming on");
+        g_kv_stream = 0;
+        if (!draft_path.empty() || g_lookup) std::printf("NOTE saguaro ik2: drafting off with --tp\n");
+        draft_path.clear(), g_lookup = false, drafting = "off";
+    }
     check_preview(n_gpu, serve);
     // --gpus 2: the split (TwoGpu) - the engine runs as on one GPU (GPU 0), GPU 1 added to the token path at load;
     // SAGUARO_IK2_EP=1 / SAGUARO_IK2_TP=1: the older two-GPU modes on the cache path instead (SAGUARO_IK2_UNSUPPORTED)
-    if (n_gpu == 2 && !(getenv("SAGUARO_IK2_EP") && std::atoi(getenv("SAGUARO_IK2_EP"))) &&
+    if (n_gpu == 2 && g_tpn == 1 && !(getenv("SAGUARO_IK2_EP") && std::atoi(getenv("SAGUARO_IK2_EP"))) &&
         !(getenv("SAGUARO_IK2_TP") && std::atoi(getenv("SAGUARO_IK2_TP")))) {
         g_two.want = true;
         n_gpu = 1;
@@ -6116,6 +6190,15 @@ int main(int argc, char** argv) {
     }
     // (a row of an expert is whole blocks of its type: checked per tensor below; 64 covers NVFP4 and Q8_0)
     if (c.D != 128 || c.H % c.KV || c.C % 64 || c.F % 64) die("unexpected shapes");
+    if (g_tpn > 1) {   // a member's heads (whole query groups), K / V heads and experts' width
+        const int N = g_tpn;
+        if (c.KV % N || c.F % N)
+            die("--tp " + std::to_string(N) + ": " + std::to_string(c.KV) + " K / V heads and an expert width of " +
+                std::to_string(c.F) + " do not divide by " + std::to_string(N));
+        if ((c.H / N) * c.D % 128) die("--tp " + std::to_string(N) + ": a member's output projection is not whole 128-value rows");
+        c.H /= N, c.KV /= N, c.F /= N, c.tp_n = N;
+        std::printf("tensor parallel over %d GPUs: each %d query heads, %d K / V heads, experts %d wide\n", N, c.H, c.KV, c.F);
+    }
     const int n_sliding = (int) std::count(c.sliding.begin(), c.sliding.end(), true);
     std::printf("saguaro ik2: %d layers (%d sliding), %d experts (%d a token), width %d, vocab %d; %zu shards\n",
                 c.n_layer, n_sliding, c.E, c.K, c.C, c.n_vocab, S.files.size());
@@ -6212,6 +6295,30 @@ int main(int argc, char** argv) {
         std::printf("%s over 2 GPUs (peer access %s)\n", g_tp ? "experts tensor-parallel" : "expert parallel",
                     p01 && p10 ? "on" : "off: copies through the host");
     }
+    if (g_tpn > 1) {   // every pair of members a tested peer copy: the sums are copies inside a token's CUDA graph
+        const int N = g_tpn;
+        gpulink::Links lk;
+        std::string err;
+        std::vector<void*> tb(N);
+        std::vector<int> devs(N);
+        std::vector<char> used((size_t) N * N, 1);
+        std::vector<cudaStream_t> sts(N);
+        for (int d = 0; d < N; ++d) {
+            devs[d] = d, used[(size_t) d * N + d] = 0, sts[d] = g_dev[d].s;
+            CU(cudaSetDevice(d));
+            CU(cudaMalloc(&tb[d], (size_t) 4 << 20));
+        }
+        if (!lk.setup(devs, used, tb, (size_t) 4 << 20, sts, false, false, 1, 1, "SAGUARO_IK2_HOST_STAGE", err)) die(err);
+        for (int d = 0; d < N; ++d) {
+            CU(cudaSetDevice(d));
+            CU(cudaFree(tb[d]));
+        }
+        if (!lk.all_peer)
+            die("--tp " + std::to_string(N) + ": every pair of its GPUs needs peer access (" + lk.say +
+                ") - on a PC whose GPUs are peers only in pairs, --tp 2 over one pair (CUDA_VISIBLE_DEVICES)");
+        std::printf("tensor parallel: %s\n", lk.say.c_str());
+        CU(cudaSetDevice(0));
+    }
     use_dev(0);
     g_overlap = !getenv("SAGUARO_IK2_OVERLAP") || std::atoi(getenv("SAGUARO_IK2_OVERLAP"));
     g_events = getenv("SAGUARO_IK2_EVENTS") && std::atoi(getenv("SAGUARO_IK2_EVENTS"));
@@ -6288,7 +6395,7 @@ int main(int argc, char** argv) {
             draft_path.clear(), g_lookup = false;
         }
     }
-    if (n_gpu == 1 && !g_pool) {
+    if ((n_gpu == 1 || g_tpn > 1) && !g_pool) {
         size_t exp_b = 0, dense_b = 0, kv_b = 0;
         for (const auto* tp : S.all()) {
             const auto& t = *tp;
@@ -6308,6 +6415,7 @@ int main(int argc, char** argv) {
             }
         }
         if (S.sv) exp_b = S.sv->compact_bytes();   // (a pack held resident: each expert packed - init_packed)
+        if (g_tpn > 1) exp_b /= g_tpn;            // (a member's share; the dense weights counted whole)
         g_dense_bytes = dense_b, g_exp_bytes = exp_b;
         size_t fr0 = 0, tot0 = 0;
         CU(cudaMemGetInfo(&fr0, &tot0));
@@ -6454,6 +6562,9 @@ int main(int argc, char** argv) {
         g_fast_want = fits && off_set != 1 && g_dense_q8 && !(getenv("SAGUARO_IK2_FAST") && !std::atoi(getenv("SAGUARO_IK2_FAST")));
         const bool dense_ok = !getenv("SAGUARO_IK2_DENSE") || std::string(getenv("SAGUARO_IK2_DENSE")) == "q8";
         g_off_want = (off_set == 1 || (off_set != 0 && !fits)) && dense_ok;
+        if (g_tpn > 1 && !g_fast_want)
+            die("--tp: a member's share of the experts does not fit in VRAM beside the dense weights and its K / V cache "
+                "at this context (a smaller --max-context)");
         // (the dynamic GPU cache: the same bits as the fixed tier (KL 0 over 2000 tokens, T4 and RX 9070 XT), faster
         //  answers - on by default on one GPU; SAGUARO_IK2_OFF_DYNAMIC=0: the fixed tier, =1 on two GPUs too)
         const char* dyn_env = getenv("SAGUARO_IK2_OFF_DYNAMIC");
@@ -6517,6 +6628,20 @@ int main(int argc, char** argv) {
     const double t_dense = now();
     const size_t C = c.C, HD = (size_t) c.H * c.D, KD = (size_t) c.KV * c.D;
     M.L.resize(c.n_layer);
+    Model* const M0p = &M;
+    const int tpN = g_tpn;
+    int tm = 0;   // (--tp: the member being loaded - its slices of the file's rows)
+    if (tpN > 1) {
+        g_tpm.assign(tpN, nullptr);
+        g_tpm[0] = &M;
+        for (int m = 1; m < tpN; ++m) g_tpm[m] = new Model;
+    }
+    // a member's part of a host vector of tpN equal parts (all of it without --tp)
+    auto tp_slice = [&](std::vector<float> v) -> std::vector<float> {
+        if (tpN == 1) return v;
+        const size_t n = v.size() / tpN;
+        return std::vector<float>(v.begin() + (size_t) tm * n, v.begin() + (size_t) (tm + 1) * n);
+    };
     // two layouts: llama.cpp PR #32187's (ref/inkling2.py's: the short convs folded, gate and up apart) and unsloth's
     // "GGUF_shard_rewrite" one that llama.cpp's master reads (names of its own, the convs' residual and scale outside
     // their weights, gate and up fused - gate's rows first - with one scale): the second's folded here as it loads
@@ -6535,8 +6660,8 @@ int main(int argc, char** argv) {
         return b + (rw && it != m.end() ? it->second : std::string(old_name));
     };
     // a conv's weights [C'][4] with the residual (tap 3: the current token) and the output scale folded in
-    auto conv_w = [&](const std::string& b, const char* n, size_t Cc, bool dynamic) -> float* {
-        auto w = host_f32(S, nm(b, n), Cc * 4);
+    auto conv_w = [&](const std::string& b, const char* n, size_t Cc, bool dynamic, bool part = false) -> float* {
+        auto w = part ? tp_slice(host_f32(S, nm(b, n), Cc * tpN * 4)) : host_f32(S, nm(b, n), Cc * 4);
         if (rw) {
             const float sc = 1.0f / std::sqrt((float) ((dynamic ? 2 : 1) * 4 + 1));
             for (size_t i = 0; i < Cc; ++i) {
@@ -6547,7 +6672,7 @@ int main(int argc, char** argv) {
         return dev_f32(w);
     };
     auto dyn_host = [&](const std::string& b, const char* n) -> std::vector<float> {
-        auto w = host_f32(S, nm(b, n), (size_t) c.KV * 4 * C);
+        auto w = tp_slice(host_f32(S, nm(b, n), (size_t) c.KV * tpN * 4 * C));
         if (rw)
             for (auto& x : w) x *= 1.0f / std::sqrt(9.0f);
         return w;
@@ -6557,9 +6682,24 @@ int main(int argc, char** argv) {
         int l;
         std::string name;   // a tensor read whole into pinned memory
         std::vector<int> roles;
+        int mem = 0;        // (--tp: the member)
     };
     std::vector<ExpJob> exp_jobs;
     size_t host_total = 0;
+    for (tm = 0; tm < tpN; ++tm) {   // (--tp: each member's model on its GPU; one pass without)
+    Model& M = *(tm ? g_tpm[tm] : M0p);
+    if (tm) M.c = M0p->c, M.c.tp_m = tm, M.L.resize(c.n_layer);
+    if (tpN > 1) use_dev(tm);
+    // a member's rows [tm n, (tm + 1) n) of a matrix of tpN n rows (MatPart), and the same for load_mat
+    auto prt = [&](const std::string& n, int rows) {
+        MatPart p{n, rows, {}};
+        if (tpN > 1) p.r0 = tm * rows, p.N_file = tpN * rows;
+        return p;
+    };
+    auto lmat = [&](const std::string& n, int rows, int Kd) {
+        return tpN > 1 ? load_mat(S, n, rows, Kd, tm * rows, tpN * rows) : load_mat(S, n, rows, Kd);
+    };
+    if (tpN > 1 && !g_dense_q8) die("--tp: the dense weights as blocks only");
     M.embd_norm = load_f32(S, "token_embd_norm.weight", C);   // (on GPU 0, where the embedding rows go)
     std::vector<float> lp_q, lp_kv;   // a looped core's message queries, [2 n_core][C] each
     std::vector<float> lp_all;
@@ -6570,36 +6710,36 @@ int main(int argc, char** argv) {
     for (int l = 0; l < c.n_layer; ++l) {
         Layer& Ly = M.L[l];
         const std::string b = "blk." + std::to_string(l) + ".";
-        Ly.dev = dual() ? 0 : l * n_gpu / c.n_layer;
+        Ly.dev = tpN > 1 ? tm : dual() ? 0 : l * n_gpu / c.n_layer;
         use_dev(Ly.dev);
         Ly.sliding = c.sliding[l];
-        auto sink_v = host_f32(S, b + "attn_sink_proj.weight", (size_t) c.H * C);
+        auto sink_v = tp_slice(host_f32(S, b + "attn_sink_proj.weight", (size_t) c.H * tpN * C));
         if (Ly.sliding) {
             std::vector<MatPart> qkv_parts = {
-                {b + "attn_q.weight", (int) HD, {}},
-                {b + "attn_k.weight", (int) KD, {}},
-                {b + "attn_v.weight", (int) KD, {}},
-                {nm(b, "attn_r.weight"), c.H * c.d_rel, {}},
-                {b + "attn_gate.weight", (int) HD, {}},
+                prt(b + "attn_q.weight", (int) HD),
+                prt(b + "attn_k.weight", (int) KD),
+                prt(b + "attn_v.weight", (int) KD),
+                prt(nm(b, "attn_r.weight"), c.H * c.d_rel),
+                prt(b + "attn_gate.weight", (int) HD),
             };
             if (!g_dense_q8) {
                 qkv_parts.push_back({"", c.H, std::move(sink_v)});
                 Ly.wqkvrg = load_fused_f16(S, qkv_parts, (int) C);
             } else {
                 if (!try_load_fused_raw(S, qkv_parts, (int) C, Ly.wqkvrg)) {
-                    Ly.wq = load_mat(S, b + "attn_q.weight", (int) HD, (int) C);
-                    Ly.wk = load_mat(S, b + "attn_k.weight", (int) KD, (int) C);
-                    Ly.wv = load_mat(S, b + "attn_v.weight", (int) KD, (int) C);
-                    Ly.wr = load_mat(S, nm(b, "attn_r.weight"), c.H * c.d_rel, (int) C);
-                    Ly.wgate = load_mat(S, b + "attn_gate.weight", (int) HD, (int) C);
+                    Ly.wq = lmat(b + "attn_q.weight", (int) HD, (int) C);
+                    Ly.wk = lmat(b + "attn_k.weight", (int) KD, (int) C);
+                    Ly.wv = lmat(b + "attn_v.weight", (int) KD, (int) C);
+                    Ly.wr = lmat(nm(b, "attn_r.weight"), c.H * c.d_rel, (int) C);
+                    Ly.wgate = lmat(b + "attn_gate.weight", (int) HD, (int) C);
                 }
                 Ly.sink16 = dev_f16(sink_v);
             }
         } else {
             std::vector<MatPart> qrg_parts = {
-                {b + "attn_q.weight", (int) HD, {}},
-                {nm(b, "attn_r.weight"), c.H * c.d_rel, {}},
-                {b + "attn_gate.weight", (int) HD, {}},
+                prt(b + "attn_q.weight", (int) HD),
+                prt(nm(b, "attn_r.weight"), c.H * c.d_rel),
+                prt(b + "attn_gate.weight", (int) HD),
             };
             auto kd_v = dyn_host(b, "shortconv_k_dyn.weight");
             auto vd_v = dyn_host(b, "shortconv_v_dyn.weight");
@@ -6612,18 +6752,19 @@ int main(int argc, char** argv) {
                                            (int) C);
             } else {
                 if (!try_load_fused_raw(S, qrg_parts, (int) C, Ly.wqrg)) {
-                    Ly.wq = load_mat(S, b + "attn_q.weight", (int) HD, (int) C);
-                    Ly.wr = load_mat(S, nm(b, "attn_r.weight"), c.H * c.d_rel, (int) C);
-                    Ly.wgate = load_mat(S, b + "attn_gate.weight", (int) HD, (int) C);
+                    Ly.wq = lmat(b + "attn_q.weight", (int) HD, (int) C);
+                    Ly.wr = lmat(nm(b, "attn_r.weight"), c.H * c.d_rel, (int) C);
+                    Ly.wgate = lmat(b + "attn_gate.weight", (int) HD, (int) C);
                 }
-                Ly.wk = load_mat(S, b + "attn_k.weight", (int) KD, (int) C);
-                Ly.wv = load_mat(S, b + "attn_v.weight", (int) KD, (int) C);
+                Ly.wk = lmat(b + "attn_k.weight", (int) KD, (int) C);
+                Ly.wv = lmat(b + "attn_v.weight", (int) KD, (int) C);
                 Ly.sink16 = dev_f16(sink_v);
                 Ly.sc_k_dyn16 = dev_f16(kd_v);
                 Ly.sc_v_dyn16 = dev_f16(vd_v);
             }
         }
-        Ly.wo = load_mat(S, b + "attn_output.weight", (int) C, (int) HD);
+        Ly.wo = tpN > 1 ? load_mat_cols(S, b + "attn_output.weight", (int) C, (int) HD * tpN, tm * (int) HD, (int) HD)
+                        : load_mat(S, b + "attn_output.weight", (int) C, (int) HD);
         Ly.router16 = load_f16(S, b + "ffn_gate_inp.weight", (size_t) c.E * C);
         Ly.probs_b = load_f32(S, b + "exp_probs_b.bias", c.E);
         Ly.ffn_norm = load_f32(S, b + "ffn_norm.weight", C);
@@ -6634,8 +6775,8 @@ int main(int argc, char** argv) {
             Ly.k_in_norm = load_f32(S, nm(b, "attn_k_in_norm.weight"), C);
             Ly.v_in_norm = load_f32(S, nm(b, "attn_v_in_norm.weight"), C);
         }
-        Ly.q_clip = load_f32(S, b + "attn_q_clip.weight", HD);
-        Ly.r_clip = load_f32(S, nm(b, "attn_r_clip.weight"), (size_t) c.H * c.d_rel);
+        Ly.q_clip = dev_f32(tp_slice(host_f32(S, b + "attn_q_clip.weight", HD * tpN)));
+        Ly.r_clip = dev_f32(tp_slice(host_f32(S, nm(b, "attn_r_clip.weight"), (size_t) c.H * tpN * c.d_rel)));
         {   // [extent][d_rel]: PR #32187's attn_rel_proj is [d_rel][extent], the rewrite's attn_rel_bias already this
             const int ext = Ly.sliding ? c.extent_swa : c.extent;
             const auto v = host_f32(S, nm(b, "attn_rel_proj.weight"), (size_t) ext * c.d_rel);
@@ -6656,8 +6797,8 @@ int main(int argc, char** argv) {
             Ly.res_score = load_f32(S, rn, (size_t) Ly.n_res_q * C);
         }
         Ly.ffn_res_score = load_f32(S, nm(b, "ffn_res_score.weight"), C);
-        Ly.sc_k = conv_w(b, "shortconv_k.weight", KD, !Ly.sliding);
-        Ly.sc_v = conv_w(b, "shortconv_v.weight", KD, !Ly.sliding);
+        Ly.sc_k = conv_w(b, "shortconv_k.weight", KD, !Ly.sliding, true);
+        Ly.sc_v = conv_w(b, "shortconv_v.weight", KD, !Ly.sliding, true);
         Ly.sc_attn = conv_w(b, "shortconv_attn.weight", C, false);
         Ly.sc_mlp = conv_w(b, "shortconv_mlp.weight", C, false);
         // the experts: (role tensor, its roles); a fused gate_up is gate's F rows then up's, an expert's 2 F rows
@@ -6669,11 +6810,12 @@ int main(int argc, char** argv) {
             const auto* ti = S.info(n);
             if (!ti) die("no " + n);
             const int nr = (int) pr.second.size();
-            if (ti->elements() != (uint64_t) c.E * c.F * C * nr) die(n + ": shape");
+            if (ti->elements() != (uint64_t) c.E * c.F * tpN * C * nr) die(n + ": shape");
             if (!k::block_values((int) ti->type)) die(n + ": type " + ti->type_name() + " not decoded here");
             if ((int) (pr.first == "down" ? c.F : C) % k::block_values((int) ti->type))   // (a row's length)
-                die(n + ": a row is not whole " + ti->type_name() + " blocks");
-            const size_t per = tensor_bytes(*ti) / c.E;
+                die(n + ": a row is not whole " + ti->type_name() + " blocks" +
+                    (tpN > 1 ? " (--tp " + std::to_string(tpN) + ": a member's expert width " + std::to_string(c.F) + ")" : ""));
+            const size_t per = tensor_bytes(*ti) / c.E;   // (an expert's role tensor, whole; a member's 1 / tpN of it)
             std::vector<float> sc;
             const std::string sn = b + "ffn_" + pr.first + "_exps.scale";
             if (S.info(sn)) sc = host_f32(S, sn, c.E);
@@ -6681,7 +6823,7 @@ int main(int argc, char** argv) {
             for (int i = 0; i < nr; ++i) {
                 const int r = pr.second[i];
                 Ly.ty[r] = (int) ti->type;
-                Ly.eb[r] = per / nr;
+                Ly.eb[r] = per / nr / tpN;
                 Ly.stride[r] = per;
                 Ly.scale[r] = sc;
             }
@@ -6694,7 +6836,7 @@ int main(int argc, char** argv) {
                 }
             }
             host_total += tensor_bytes(*ti);
-            exp_jobs.push_back({l, n, pr.second});
+            exp_jobs.push_back({l, n, pr.second, tm});
         }
         if (c.n_pass > 1 && l >= c.core0 && l < c.core1) {   // the core: its later passes' message gates and queries
             static const char* mod[4] = {"attn", "k", "v", "mlp"};
@@ -6828,16 +6970,21 @@ int main(int argc, char** argv) {
         Vi.h_mlp = dalloc<float>(3 * C);
     }
     c.n_rows = (int) (S.info("output.weight")->elements() / C);
-    M.out_w = load_mat(S, "output.weight", c.n_rows, (int) C);
+    M.c.n_rows = c.n_rows;
+    if (tm == 0) M.out_w = load_mat(S, "output.weight", c.n_rows, (int) C);   // (--tp: the head on member 0)
     if (g_dense_q8) {   // (a layer's largest; the head's logits go a token at a time over its blocks)
         g_w16_n = (2 * HD + 2 * KD + (size_t) c.H * c.d_rel) * C;
         g_w16 = dalloc<uint16_t>(g_w16_n);
+        if (tpN > 1) g_dev[tm].w16 = g_w16;
     }
     M.out_norm = load_f32(S, "output_norm.weight", C);
     M.out_res_score = load_f32(S, rw ? "output_res_query.weight" : "output_res_score.weight", C);
     M.embd = S.data("token_embd.weight");
     M.embd_type = (int) S.info("token_embd.weight")->type;
     if (!k::block_values(M.embd_type)) die("token_embd's type");
+    }   // (the members)
+    tm = 0;
+    if (tpN > 1) use_dev(0);
     if (g_stage) cudaFree(g_stage), g_stage = nullptr, g_stage_bytes = 0;
     {
         size_t kv_vram = 0, kv_host = 0;
@@ -6903,9 +7050,26 @@ int main(int argc, char** argv) {
         if (g_pool) die("SAGUARO_IK2_HOST=mmap with the CPU lane");
         if (g_off_want) die("SAGUARO_IK2_HOST=mmap with the offload path (it reads pinned host memory: SAGUARO_IK2_OFF=0)");
         for (const auto& J : exp_jobs) {
-            Layer& Ly = M.L[J.l];
+            Layer& Ly = (J.mem ? *g_tpm[J.mem] : M).L[J.l];
             const uint8_t* p = S.data(J.name);
-            for (size_t i = 0; i < J.roles.size(); ++i) Ly.host[J.roles[i]] = p + i * Ly.eb[J.roles[i]];
+            for (size_t i = 0; i < J.roles.size(); ++i) {
+                const int r = J.roles[i];
+                if (tpN == 1) {
+                    Ly.host[r] = p + i * Ly.eb[r];
+                } else if (r < 2) {   // (--tp: a member's rows of gate / up, in place)
+                    Ly.host[r] = p + i * (Ly.stride[r] / J.roles.size()) + (size_t) J.mem * Ly.eb[r];
+                } else {              // (... and its columns of down: each row's blocks of them, re-blocked)
+                    const int bv = k::block_values(Ly.ty[2]);
+                    const size_t bb = k::block_bytes(Ly.ty[2]), rb = Ly.stride[2] / C, ob = Ly.eb[2] / C;
+                    if (ob * C != Ly.eb[2] || (size_t) (c.F / bv) * bb != ob) die(J.name + ": a member's columns");
+                    g_tp_down.emplace_back((size_t) c.E * Ly.eb[2]);
+                    uint8_t* d = g_tp_down.back().data();
+                    for (size_t e = 0; e < (size_t) c.E; ++e)
+                        for (size_t row = 0; row < C; ++row)
+                            std::memcpy(d + e * Ly.eb[2] + row * ob, p + e * Ly.stride[2] + row * rb + (size_t) J.mem * ob, ob);
+                    Ly.host[2] = d, Ly.stride[2] = Ly.eb[2];
+                }
+            }
             {   // (read ahead: a cold file otherwise comes in a page fault at a time)
                 const size_t pg = 4096, a0 = (size_t) p & ~(pg - 1);
                 ::madvise((void*) a0, (size_t) p - a0 + tensor_bytes(*S.info(J.name)), MADV_WILLNEED);
@@ -7148,6 +7312,7 @@ int main(int argc, char** argv) {
 
     // the work buffers and the expert cache, a set a GPU
     for (int d = 0; d < n_gpu; ++d) {
+    Model& M = *(tpN > 1 ? g_tpm[d] : M0p);   // (--tp: the member's model)
     use_dev(d);
     CU(cudaMemGetInfo(&fr, &tot));
     Work& W = g_dev[d].W;
@@ -7666,9 +7831,9 @@ int main(int argc, char** argv) {
                     n_tier, c.n_layer * c.E, EC.total_bytes() / 1073741824.0, g_offs.stage.size(), st_b / 1073741824.0,
                     g_graph ? ", a CUDA graph each" : "");
     }
-    if (g_fast_want && d == 0) {   // the resident path: every expert in now, and where each is on the device
+    if (g_fast_want && (d == 0 || tpN > 1)) {   // the resident path: every expert in now, and where each is on the device
         auto blocks = [](const Mat& m) { return m.raw || m.q8 || !m.seg.empty(); };   // (kept as the GGUF's blocks, whole or planar)
-        bool all = !EC.pools.empty(), raw = blocks(M.out_w);
+        bool all = !EC.pools.empty(), raw = d > 0 || blocks(M.out_w);
         for (const auto& P : EC.pools) all = all && P.n_active >= P.n_layers * c.E;
         for (const auto& Ly : M.L)
             raw = raw && blocks(Ly.wo) && (Ly.sliding ? blocks(Ly.wqkvrg) : (blocks(Ly.wqrg) && blocks(Ly.wk) && blocks(Ly.wv)));
@@ -8282,7 +8447,7 @@ int main(int argc, char** argv) {
                 size_t kv_d = d == 0 ? slot_extra : 0;
                 if (!(g_two.on && d == 1))
                     for (const auto& Vi : M.V)
-                        if (M.L[Vi.l].dev == d) kv_d += (size_t) Vi.kv_cap * KD * kv_elem_b * 2;
+                        if ((g_tpn > 1 ? Vi.mem : M.L[Vi.l].dev) == d) kv_d += (size_t) Vi.kv_cap * KD * kv_elem_b * 2;
                 std::printf("VRAM dev=%d pci=%s total=%zu free=%zu weights=%zu kv=%zu pool=%zu\n", d, pci, tot, fr,
                             n_gpu == 1 && d == 0 ? g_dense_bytes : (size_t) 0, kv_d,
                             g_two.on && d == 1 ? g_two.bytes : g_dev[d].EC.total_bytes());
@@ -9210,10 +9375,13 @@ int main(int argc, char** argv) {
     // the prompt
     std::vector<float> logits;
     double t_exp = 0;
+    Model& M0_warm = M;
     // (A3-warmup: cuBLAS loads its FP16-GEMM and FP32-PEDANTIC kernel modules lazily on the first call -
     //  ~0.49 s measured on the first prompt's visit 0; run both classes once outside the timed prompt)
-    {
-        Work& W0 = dev_work(0);
+    for (int wm = 0; wm < g_tpn; ++wm) {   // (--tp: on every member)
+        use_dev(wm);
+        Work& W0 = dev_work(wm);
+        Model& M = *(g_tpn > 1 ? g_tpm[wm] : &M0_warm);
         uint16_t* w16w = dalloc<uint16_t>(32 * 32);
         CU(cudaMemsetAsync(w16w, 0, 32 * 32 * 2, g_s));
         gemm16(w16w, 32, 32, w16w, 1, W0.tmp, 32);
@@ -9226,6 +9394,7 @@ int main(int argc, char** argv) {
                             ext0, CUBLAS_COMPUTE_32F_PEDANTIC, CUBLAS_GEMM_DEFAULT));
         CU(cudaStreamSynchronize(g_s));
     }
+    use_dev(0);
     const double tp = now();
     g_evx_n = 0, g_t0_ok = false;   // (the event timeline measures this prompt alone)
     const bool all = !dump.empty();
