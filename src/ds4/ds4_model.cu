@@ -10520,7 +10520,7 @@ struct Model::Impl {
         std::vector<uint8_t> h;
         uint64_t v = 0;
         cudaSetDevice(d.id);
-        for (const auto& r : {std::pair<size_t, size_t>{0, lo}, {top, d.tail_bytes}}) {
+        for (const auto& r : {std::pair<size_t, size_t>{0, lo}, std::pair<size_t, size_t>{top, d.tail_bytes}}) {   // (CUDA 12.0: both typed)
             if (r.second <= r.first) continue;
             h.resize(r.second - r.first);
             if (cudaMemcpy(h.data(), d.tail + r.first, h.size(), cudaMemcpyDeviceToHost) != cudaSuccess) {

@@ -6836,7 +6836,12 @@ void check_preview(int n_gpu, bool serve) {
 #else
         const std::string gpu = "GPU " + std::to_string(d) + " (" + p.name + ", sm_" + std::to_string(p.major) +
                                 std::to_string(p.minor) + ")";
-        if (p.major < 7) refuse(gpu + " is too old: saguaro-ik2 needs an NVIDIA GPU of sm_70 (Volta) or newer");
+        if (p.major < 6) refuse(gpu + " is too old: saguaro-ik2 needs an NVIDIA GPU of sm_60 (Pascal) or newer");
+        if (p.major == 6) {   // (Pascal: second-class support - no tensor cores, k::arch_class 60's scalar kernels)
+            std::printf("NOTE saguaro ik2: %s is a Pascal GPU (second-class support): no tensor cores, so a token's "
+                        "attention and experts run on the scalar kernels, prompts on cuBLAS, and drafting is off\n", gpu.c_str());
+            std::fflush(stdout);
+        }
 #endif
         CU(cudaSetDevice(d));
 #ifndef STRATA_USE_HIP   // (a kernel of this build for the GPU: none when its arch is not in the list)
@@ -7289,6 +7294,7 @@ int main(int argc, char** argv) {
         g_pa70 = cls == 70 && !(getenv("SAGUARO_IK2_PA70") && !std::atoi(getenv("SAGUARO_IK2_PA70")));
         if (getenv("SAGUARO_IK2_PA70_MIN")) g_pa70_min = std::max(0, std::atoi(getenv("SAGUARO_IK2_PA70_MIN")));
         if (cls < 75) g_block = false;
+        if (cls < 70) g_attn_mma = 0;   // (Pascal: no tensor cores - a token's attention on the scalar kernels)
         g_draft_force = getenv("SAGUARO_IK2_DRAFT_FORCE") ? std::atoi(getenv("SAGUARO_IK2_DRAFT_FORCE")) : 0;
         if (cls < 80 && !(cls == 75 && g_draft_force) && (!draft_path.empty() || g_lookup)) {
             if (cls == 75)   // (the window is exact here, but a T4's window costs 1.5-2.3x a token: drafting lost 3-13 %)

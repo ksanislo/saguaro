@@ -1155,6 +1155,8 @@ __global__ void __launch_bounds__(kThreads) set_tc_kernel(const SetArgs a) {
     pdl_trigger();
 #if defined(STRATA_USE_HIP) && !DS4_ROCWMMA
     __builtin_trap();   // (a device pass for a card without WMMA: never launched there - tc_ok)
+#elif defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 700
+    __trap();           // (Pascal's device pass: no WMMA - never launched there, tc_ok)
 #else
 #if defined(STRATA_USE_HIP)
     namespace wm = rocwmma;

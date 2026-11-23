@@ -1003,13 +1003,13 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
         set(_ik2_filter OFF)   # (anything else: as CMake gives it)
       elseif(_base STREQUAL "90")
         list(APPEND _ik2_archs "90a")
-      elseif(NOT _base LESS 70)
+      elseif(NOT _base LESS 60)   # (Pascal, second-class: the scalar kernels - k::arch_class 60)
         list(APPEND _ik2_archs "${_a}")
       endif()
     endforeach()
     list(REMOVE_DUPLICATES _ik2_archs)
     if(_ik2_filter AND NOT _ik2_archs)
-      message(STATUS "Saguaro: saguaro-ik2 not built - it needs sm_70 or newer, arch ${_strata_archs}")
+      message(STATUS "Saguaro: saguaro-ik2 not built - it needs sm_60 or newer, arch ${_strata_archs}")
     endif()
   endif()
   # (AMD: HIP on Linux through include/strata/hip_compat as the other engines - RDNA's prompt attention and experts on
@@ -1873,15 +1873,48 @@ option(SAGUARO_QFN "Build the QFN engine (engines/qfn) as saguaro-qfn" OFF)
 set(SAGUARO_QFN_GGML_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/llama.cpp" CACHE PATH "the llama.cpp checkout engines/qfn takes ggml from")
 if(SAGUARO_QFN AND STRATA_ENABLE_CUDA)
   include(ExternalProject)
+  # (Pascal / Volta, second-class: a build for sm_6x / sm_70 only makes engines/qfn's experimental build - its
+  #  STRATA_EXPERIMENTAL_SM60 code paths, CUDA 12.x - for those archs, with this build's generator and compilers;
+  #  any other arch list keeps the live T4 build's options exactly)
+  set(_qfn_gen Ninja)
+  set(_qfn_archs 75)
+  set(_qfn_old)
+  set(_qfn_new OFF)
+  foreach(_a IN LISTS _strata_archs)
+    string(REGEX REPLACE "-.*$" "" _base "${_a}")
+    if(_base MATCHES "^[0-9]+$" AND _base LESS 75)
+      list(APPEND _qfn_old "${_base}")
+    else()
+      set(_qfn_new ON)
+    endif()
+  endforeach()
+  set(_qfn_isa -DSTRATA_ISA_FLOOR=avx)   # (the T4 box's Ivy Bridge)
+  set(_qfn_extra)
+  set(_qfn_build ${CMAKE_COMMAND} --build <BINARY_DIR> --target strata strata_kq strata_kq_tab)
+  if(_qfn_old AND NOT _qfn_new)
+    list(JOIN _qfn_old "$<SEMICOLON>" _qfn_archs)
+    set(_qfn_gen "${CMAKE_GENERATOR}")
+    set(_qfn_isa)   # (this CPU's ISA: engines/qfn's default floor)
+    set(_qfn_extra -DSTRATA_EXPERIMENTAL_SM60=ON -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}
+                   -DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER})
+    if(CMAKE_CUDA_HOST_COMPILER)
+      list(APPEND _qfn_extra -DCMAKE_CUDA_HOST_COMPILER=${CMAKE_CUDA_HOST_COMPILER})
+    endif()
+    message(STATUS "Saguaro: saguaro-qfn for sm_${_qfn_old} (engines/qfn's experimental pre-Turing build)")
+  endif()
+  if(_qfn_gen MATCHES "Makefiles")   # (the outer make's jobserver: `cmake --build` would start a serial make)
+    set(_qfn_build $(MAKE) strata strata_kq strata_kq_tab)
+  endif()
   ExternalProject_Add(qfn_engine
     SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/engines/qfn
     BINARY_DIR ${CMAKE_CURRENT_BINARY_DIR}/qfn
-    CMAKE_GENERATOR Ninja
-    CMAKE_ARGS -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_COMPILER=${CMAKE_CUDA_COMPILER} -DCMAKE_CUDA_ARCHITECTURES=75
-               -DSTRATA_ENABLE_CUDA=ON -DSTRATA_ISA_FLOOR=avx -DSTRATA_BUILD_DSV41=ON -DSTRATA_BUILD_TESTS=ON
+    CMAKE_GENERATOR ${_qfn_gen}
+    CMAKE_ARGS -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_COMPILER=${CMAKE_CUDA_COMPILER} -DCMAKE_CUDA_ARCHITECTURES=${_qfn_archs}
+               -DSTRATA_ENABLE_CUDA=ON ${_qfn_isa} -DSTRATA_BUILD_DSV41=ON -DSTRATA_BUILD_TESTS=ON
                -DSTRATA_BUILD_CONVERSATION_TESTS=ON -DSTRATA_GGML_DIR=${SAGUARO_QFN_GGML_DIR} -DSTRATA_MMQ_TAB=ON
                -DSTRATA_MMQ_TAB_TYPES= "-DSTRATA_MMQ_TAB_KQ_TYPES=q4_k$<SEMICOLON>q5_k$<SEMICOLON>q5_1$<SEMICOLON>q8_0"
-    BUILD_COMMAND ${CMAKE_COMMAND} --build <BINARY_DIR> --target strata strata_kq strata_kq_tab
+               ${_qfn_extra}
+    BUILD_COMMAND ${_qfn_build}
     INSTALL_COMMAND ""          # (its strata target's OUTPUT_NAME is saguaro-qfn: nothing to copy or rename)
     BUILD_ALWAYS ON
     EXCLUDE_FROM_ALL ON)

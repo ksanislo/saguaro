@@ -99,7 +99,12 @@ float h2f_host(uint16_t h) {
     if (e == 31) return m ? NAN : (sign ? -INFINITY : INFINITY);
     return (sign ? -1.0f : 1.0f) * std::ldexp(1.0f + (float) m / 1024.0f, (int) e - 15);
 }
-uint16_t f2h_host(float f) { return (uint16_t) __half_as_ushort(__float2half_rn(f)); }
+uint16_t f2h_host(float f) {   // (memcpy: __half_as_ushort is device-only in CUDA 12.0)
+    const __half h = __float2half_rn(f);
+    uint16_t r;
+    std::memcpy(&r, &h, 2);
+    return r;
+}
 
 // ---------------------------------------------------------------------------------------------------------------
 
@@ -2976,20 +2981,24 @@ void test_q4_kv() {
     uint16_t* q16 = dev_n<uint16_t>((size_t) 4 * HD);
     k::to_f16(dq_q4 + (size_t) (T - 4) * HD, (size_t) 4 * HD, q16, 0);
     float* o_mma = dev_n<float>((size_t) 4 * HD);
+    if (k::arch_class() >= 70) {   // (tensor cores: Volta on - Pascal runs the scalar kernels alone)
     k::attn_decode_mma_q4(q16 + (size_t) 3 * HD, dr_q4 + (size_t) (T - 1) * H * d_rel, dsink + (size_t) (T - 1) * H,
                           kc4, vc4, 0, H, KV, nullptr, T - 1, 2, sc, dproj, d_rel, ext, 1 << 30, scratch, o_mma,
                           nullptr, nullptr, 0);
     expect("q4_kv attn_decode_mma vs scalar q4", host(o_mma, HD), std::vector<double>(vq4.begin(), vq4.end()), 3e-3, 3e-3);
+    }
 
     // 3. Block MMA Q4 (4 tokens) vs multi Q4
     int* pos_d = dev<int>({T - 4});
     k::attn_multi_q4(dq_q4 + (size_t) (T - 4) * HD, dr_q4 + (size_t) (T - 4) * H * d_rel, dsink + (size_t) (T - 4) * H,
                      kc4, vc4, 0, 4, H, KV, 0, T, T - 4, sc, dproj, d_rel, ext, 1 << 30, scratch, o_q4, 0);
+    auto vmq4 = host(o_q4, 4 * HD);
+    if (k::arch_class() >= 75) {   // (the block path's kernels: Turing on)
     k::attn_block_q4(q16, dr_q4 + (size_t) (T - 4) * H * d_rel, H * d_rel, dsink + (size_t) (T - 4) * H,
                      kc4, vc4, 0, H, KV, pos_d, 4, 2, sc, dproj, d_rel, ext, 1 << 30, scratch, o_mma,
                      nullptr, 0, nullptr, 0);
-    auto vmq4 = host(o_q4, 4 * HD);
     expect("q4_kv attn_block_q4 vs attn_multi_q4", host(o_mma, 4 * HD), std::vector<double>(vmq4.begin(), vmq4.end()), 3e-3, 3e-3);
+    }
 
     // 4. FlashAttention Q4 (prefill of last 4 queries) vs multi Q4
     std::vector<float> h_bias((size_t) 4 * H * ext);
@@ -3054,14 +3063,18 @@ int main() {
     if (!k::attn_flash_available()) std::printf("skip attn_flash: not built for this GPU\n");
     else if (k::arch_class() >= 75) test_attn_flash();   // (last: its random data leaves the others' as they were)
     else std::printf("--   attn_flash: Ampere's kernel (sm_%d class here)\n", k::arch_class());
-    test_attn_decode_mma();
+    const bool tc = k::arch_class() >= 70;   // (Pascal, sm_60 class: no tensor cores - the engine runs the scalar kernels)
+    if (tc) test_attn_decode_mma();
+    else std::printf("--   attn_decode_mma: tensor cores (sm_%d class here: the scalar kernels)\n", k::arch_class());
     test_cand_topk();
     test_token_path();
-    test_experts_mma();
+    if (tc) test_experts_mma();
+    else std::printf("--   experts_mma: tensor cores (sm_%d class here: the scalar kernels)\n", k::arch_class());
 #ifdef STRATA_USE_HIP
     test_experts_rdna();
 #endif
-    test_window_exact(p.major >= 8);
+    if (tc) test_window_exact(p.major >= 8);
+    else std::printf("--   window_exact: the block path (sm_%d class here: no verify window)\n", k::arch_class());
     std::printf(g_fail ? "FAILED: %d check(s)\n" : "all passed\n", g_fail);
     return g_fail ? 1 : 0;
 }
