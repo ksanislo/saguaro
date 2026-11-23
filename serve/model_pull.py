@@ -44,7 +44,13 @@ def catalog(root: Path, glm_sizes: dict | None = None, cards: list | None = None
                     "size_gb": new.get((fam, key)) if fam == "hy4" else sizes.get(key),
                     **(notes.get((fam, key)) or notes.get((fam, None)) or {})})
     out.append({"id": "cyber-frost", "family": "qwen", "name": Q.shown("qwen", "q5_k_m"),
-                "installed": ("qwen", "q5_k_m") in have, "size_gb": None})
+                "installed": ("qwen", "q5_k_m") in have, "size_gb": None,
+                "needs": "CYBER-FROST, Blackfrost-AI's fine-tune of Qwen3.8-Flash-Next, on the GLM engine's Qwen path "
+                         "(saguaro-glm): NVIDIA from V100 on or AMD"})
+    pc_cards, pc_ram = (cards, ram_gb or 0.0) if cards is not None else this_pc() if glm_sizes is None else ([], 0.0)
+    for key, entry in qfn_quants().items():              # (Qwen3.8-Flash-Next itself on saguaro-qfn: AMD, experimental)
+        out.append({"id": Q.qfn_setup_id(key), "family": "qwen", "name": Q.shown("qwen", key),
+                    "installed": ("qwen", key) in have, "size_gb": entry["size_gb"], **qfn_fit(entry, pc_cards, pc_ram)})
     for key in Q.IK2_QUANTS:                           # (unsloth's UD-Q4_K_XL, then Strata's packs)
         if key != Q.IK2_QUANT and new and ("ik2", key) not in new:   # (a pack the table does not publish)
             continue
@@ -68,6 +74,37 @@ def new_engine_sizes() -> dict:
         return out
     except (Exception, SystemExit):  # noqa: BLE001 - a damaged table: the setup says so when the model is picked
         return {}
+
+
+def qfn_quants() -> dict:
+    """{quant: {"size_gb", "needs": {vram_gb, ram_gb}, "measured"}} of Qwen3.8-Flash-Next's files (tools/qfn/download.json);
+    {} for a damaged table (the setup says so when the model is picked)."""
+    try:
+        man = json.loads((ROOT / "tools" / "qfn" / "download.json").read_text(encoding="utf-8"))
+        return {k: {"size_gb": round(sum(v[0] for v in q["files"].values()) / 1e9, 1), "needs": q.get("needs") or {},
+                    "measured": q.get("measured")} for k, q in man["quants"].items()}
+    except (OSError, ValueError, KeyError, TypeError):
+        return {}
+
+
+def qfn_fit(entry: dict, cards: list, ram_gb: float) -> dict:
+    """What Qwen3.8-Flash-Next on saguaro-qfn needs and whether this PC's first AMD GPU and RAM give it ("needs", "fit")."""
+    n = entry.get("needs") or {}
+    out = {"needs": "Linux, one AMD RDNA 3 / 4 GPU of 16 GB or more and about 96 GB of RAM (experimental: measured on an "
+                    "RX 9070 XT" + ("" if entry.get("measured") else "; this quant not measured yet") + "); on NVIDIA "
+                    "it is set up by hand"}
+    amd = [g for g in cards if str(g.get("arch", "")).startswith("gfx")]
+    if not cards:
+        return out
+    if not amd:
+        out["fit"] = "This PC: the setup offers it on AMD GPUs only"
+    elif float(amd[0].get("vram_gb") or 0) < float(n.get("vram_gb") or 0):
+        out["fit"] = f"This PC: its GPU has {float(amd[0].get('vram_gb') or 0):.0f} GB - 16 GB or more are needed"
+    elif ram_gb < float(n.get("ram_gb") or 0):
+        out["fit"] = f"This PC: {ram_gb:.0f} GB of RAM - about 96 GB are needed"
+    else:
+        out["fit"] = "This PC: fits (the GPU holds the most-used experts, RAM the next ones, the SSD the rest)"
+    return out
 
 
 _pc: dict = {}

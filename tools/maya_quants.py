@@ -147,6 +147,20 @@ OTHERS = {("deepseek", "gguf-q8"): "UD-Q8_K_XL", ("deepseek", "gguf-q4"): "UD-Q4
           ("ik2", "strata-sq-10"): "Strata SQ-10"}   # (Strata's .strata packs of Inkling-2-Mini)
 # CYBER-FROST-3.8-PS: its one GGUF (peasantsmith/CYBER-FROST-3.8-PS-GUFF) - the setup ids it is asked for by
 QWEN_IDS = ("cyber-frost", "cyber-frost-3.8", "cyber-frost-3.8-ps", "cyber-frost-3.8-ps-q5_k_m", "cyber-frost-q5_k_m")
+# Qwen3.8-Flash-Next itself (unsloth's GGUFs, tools/qfn/download.json) on its own engine, saguaro-qfn (engines/qfn): a
+# "qwen" config as CYBER-FROST's is (the same template, sampling and server path), told apart by its installer record's
+# "qwen_quant" (one of QFN_QUANTS; CYBER-FROST's is "q5_k_m") - and shown by its own name, with the engine's
+QFN_SHOWN = "Qwen3.8-Flash-Next"
+QFN_QUANTS = {"ud-q4_k_xl": "UD-Q4_K_XL", "q8_0": "Q8_0"}
+QFN_ENGINE = "saguaro-qfn"
+# its setup ids (the first of each: the Models page's); the model's name alone is UD-Q4_K_XL, the default
+QFN_IDS = {"qwen3.8-flash-next": "ud-q4_k_xl", "qwen3.8-flash-next-ud-q4_k_xl": "ud-q4_k_xl", "qfn": "ud-q4_k_xl",
+           "qfn-ud-q4_k_xl": "ud-q4_k_xl", "qwen3.8-flash-next-q8_0": "q8_0", "qfn-q8_0": "q8_0"}
+
+
+def qfn_setup_id(key: str) -> str:
+    """A Qwen3.8-Flash-Next quant's setup id (qwen3.8-flash-next-ud-q4_k_xl)."""
+    return "qwen3.8-flash-next-" + key
 # --mm3-quant also takes the tier as DeepSeek's --ds4-quant does (maya-xs), beside its first names (gguf-xs)
 MM3_QUANT_ALIASES = {"maya-xs": "gguf-xs", "maya-s": "gguf-s"}
 # Inkling 2 Mini: unsloth's UD-Q4_K_XL, its one file set - the setup ids it is asked for by (the first: the Models page's)
@@ -182,6 +196,8 @@ def full_name(family: str, key: str | None) -> str | None:
 def shown(family: str, key: str | None = None, gb: float | None = None) -> str:
     """The files as users see them, the model's name first: "MiniMax M3.1 · Maya-XS", with gb "... (93 GB)"; never a
     bare tier.  Files that are not a Maya quant by their own name ("DeepSeek V4.1 · UD-Q8_K_XL"); no key: the model."""
+    if family == "qwen" and key in QFN_QUANTS:        # (the model itself on saguaro-qfn: its own name, not CYBER-FROST)
+        return f"{QFN_SHOWN}{SEP}{QFN_QUANTS[key]} ({QFN_ENGINE})" + (f" ({gb:.0f} GB)" if gb else "")
     name = SHOWN.get(family, family)
     what = tier(family, key) or OTHERS.get((family, key)) or key
     return (name + SEP + what if what else name) + (f" ({gb:.0f} GB)" if gb else "")
@@ -192,7 +208,7 @@ def config_stem(family: str, key: str | None) -> str | None:
     always had (GLM's maya-<download>.json, DeepSeek's maya-ds4.json, MiniMax's EXL3 maya-mm3.json - installs and
     their run scripts point at them).  MiniMax's GGUFs, new with the scheme, are the first named by it."""
     if family == "qwen":
-        return "maya-cyber-frost"
+        return "maya-" + qfn_setup_id(key) if key in QFN_QUANTS else "maya-cyber-frost"
     if family == "ik2":                                # (Inkling 2 Mini: UD-Q4_K_XL's name kept; a Strata pack its own)
         return "maya-" + ik2_setup_id(key)
     return f"maya-{setup_id(family, key)}" if family in ("minimax", "hy4") and setup_id(family, key) else None
@@ -213,6 +229,11 @@ def resolve(name: str, glm_downloads=()) -> tuple | None:
             return "glm", k
     if low in QWEN_IDS:
         return "qwen", "q5_k_m"
+    if low in QFN_IDS:
+        return "qwen", QFN_IDS[low]
+    for k in QFN_QUANTS:                               # (a quant's own file name: Qwen3.8-Flash-Next-UD-Q4_K_XL)
+        if low == f"{QFN_SHOWN}-{QFN_QUANTS[k]}".lower():
+            return "qwen", k
     if low in IK2_IDS or low == MODEL["ik2"].lower():
         return "ik2", IK2_QUANT
     for k, i in IK2_STRATA.items():                    # (inkling-2-mini-sq-15, Inkling-2-Mini-SQ-15, strata-sq-15)
