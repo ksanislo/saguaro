@@ -4949,7 +4949,10 @@ REPORT_LINES = re.compile(r"glm fast:|glm prefill: (?:CUDA|HIP)|glm split|glm st
                           r"^saguaro ds4: (?!copying experts |experts \d+ / |loading \d)|^saguaro ds4 (?:slots|cache):|"
                           r"^(?:prompt|decode): \d+ tokens in |^decode per token:|^decode (?:reads|left out)|^dspark|"
                           # MiniMax's: where the model went (its --serve start) and each answer's prompt / decode speed
-                          r"^saguaro mm3:|^saguaro mm3 serve: (?:prompt|DSpark) ",
+                          r"^saguaro mm3:|^saguaro mm3 serve: (?:prompt|DSpark) |"
+                          # QFN's own speed lines (saguaro-qfn prints them on its stdout: its STAT line is the only
+                          #  place its sustained tok/s appears; the serve/batch lines say what a prompt read cost)
+                          r"^STAT tok_s=|^saguaro serve: prompt chunk|^saguaro batch: ",
                           re.I)
 STAT_DECODE = re.compile(r"glm stat: decode ([\d.]+) ms/tok")
 
@@ -5135,8 +5138,23 @@ BENCH_TOPICS = [
 
 def bench_exe(cfg: dict) -> Path:
     """Which engine binary a HIP config's --bench should relaunch - config_family(cfg)'s target, through the same
-    exe_for_target every build step uses, so this can't drift out of sync with either."""
+    exe_for_target every build step uses, so this can't drift out of sync with either.  A QFN config keeps
+    saguaro-qfn: family_target("qfn") is its own build target, not the GLM engine's "maya"."""
     return exe_for_target(family_target(config_family(cfg)))
+
+
+def bench_start_command(cfg: dict, tok=None) -> tuple:
+    """--bench's engine command and environment: QFN's batch driver started the way its server starts it
+    (serve/server.py's start_qfn -> serve/qfn_engine.py: its engine_args - the config's args, the layer split,
+    --batch from "parallel", --pool-cores, the draft settings - and its child_env; with `tok` its reasoning-effort
+    arguments too), every other family the line driver's command (serve/server.py's engine_args)."""
+    if config_family(cfg) == "qfn":
+        from serve import qfn_engine as QE
+        exe = cfg["exe"] if Path(cfg["exe"]).is_absolute() else str(Path(cfg.get("cwd") or ROOT) / cfg["exe"])
+        effort = (QE.effort_end_args(cfg, exe, tok) or []) if tok is not None else []
+        return [exe, "--serve"] + QE.engine_args(cfg) + effort, QE.child_env(cfg)
+    import serve.server as SV
+    return [cfg["exe"], "--serve"] + SV.engine_args(cfg), SV.child_env(cfg)
 
 
 
@@ -5240,7 +5258,8 @@ def bench(cfg_path: Path, version: str, compare: str | None = None, rounds: int 
         fmt = bench_chat(config_family(cfg), tp)   # (each family's own chat format, thinking off - #416, #549)
         chats = [tok.encode(fmt(q), parse_special=True) for q in BENCH_TOPICS]
         start = lambda c, cmd, env, tag: (cmd, env, c.get("cwd") or str(ROOT), ROOT / f"saguaro-bench{tag}.log")  # noqa
-        here = start(cfg, [cfg["exe"], "--serve"] + SV.engine_args(cfg), SV.child_env(cfg), "")
+        cmd, env = bench_start_command(cfg, tok)      # (QFN's batch driver as its server starts it; the rest: SV's)
+        here = start(cfg, cmd, env, "")
         found = S.amd_gpus() if backend == "hip" else S.gpus()
         if gpus:
             by_index = {g["index"]: g for g in found}
@@ -5272,8 +5291,12 @@ def bench(cfg_path: Path, version: str, compare: str | None = None, rounds: int 
     finally:
         MB.release_locks(locks, note)
     out = ROOT / "saguaro-bench.txt"
-    stats = speed_lines((ROOT / "saguaro-bench.log").read_text(encoding="utf-8", errors="replace").splitlines()) \
-        if (ROOT / "saguaro-bench.log").exists() else []
+    # the engine's own lines: the log (stderr) and, this side alone, what its session read off its stdout too
+    # (QFN prints its STAT speed lines there - the only place its own decode figures appear)
+    engine_out = run["engine_lines"] if not compare else \
+        ((ROOT / "saguaro-bench.log").read_text(encoding="utf-8", errors="replace").splitlines()
+         if (ROOT / "saguaro-bench.log").exists() else [])
+    stats = speed_lines(engine_out)
     out.write_text("\n".join(lines + records + ["", "engine lines:"] +
                              [x.replace(str(Path.home()), "~") for x in stats[-40:]]) + "\n", encoding="utf-8")
     with open(ROOT / MB.RESULTS_FILE, "a", encoding="utf-8") as f:
@@ -5317,7 +5340,7 @@ def bench_compare(cfg, cfg_path, spec, rounds, here, start, chats, prompts, warm
         cmd, env = MB.start_command(other, ocfg, ocfg_file)
     except RuntimeError as e:                     # (an older build without this start code: this build's command)
         warn(f"{e} - starting its engine with this build's command")
-        cmd, env = [ocfg["exe"], "--serve"] + SV.engine_args(ocfg), SV.child_env(ocfg)
+        cmd, env = bench_start_command(ocfg)
     there = start(ocfg, cmd, env, "-other")
     learned = MB.LearnedState(ROOT, cfg, work / "learned-snapshot")
     runs = {"this": [], "other": []}
