@@ -2138,6 +2138,8 @@ config already has. A flag the server sets itself (`--serve`, `--gpu`, `--batch`
 | `"env"` | unset | environment variables added to the engine's environment - the engine's `SAGUARO_*` settings go here (the server's own go in the server's environment) |
 | `"log"` | unset | where the engine's output is written; the picture-elastic folder and `ds4-slots` sit beside it |
 | `"gpu"` | every visible card | the GPU indices to run on (nvidia-smi's numbering; HIP's on AMD); two or more is a layer split unless the args use `--peer-device` |
+| `"hip_ordinal"` | unset | AMD: the ordinal setup recorded for the card (`strata-device --list-devices`); on Windows an integrated Radeon can take ordinal 0 and push the real card to 1, and this wins over `"gpu"` for a one-card config |
+| `"gpu_order"` | unset | `"as_given"`: an auto layer split keeps the config's GPU order instead of putting the faster card last |
 | `"backend"` | detected | which engine package to run: `cuda`, `hip`, `cpu` or `metal` |
 | `"arch"` | `qwen4exp` | the model family: the prompt path, the tool-call forms and the default name (`qwen35moe` is the earlier Qwen3.5 pack) |
 | `"lib_dirs"` | unset | extra folders searched for the engine's shared libraries |

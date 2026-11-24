@@ -23,7 +23,7 @@
     same tokens or changes the sums; the live configs set these through `"env"`;
   - an **engine arguments** table (~44 rows) for what the server actually passes, from
     `generate.cpp`'s `usage()`;
-  - a **config keys** table covering all 82 keys `server.py` reads.
+  - a **config keys** table covering every key `server.py` reads of `config.json`.
 - **Step 3 - settings read nowhere**: `SAGUARO_BATCH_READS_OVERTAKE` and
   `SAGUARO_PARK_STAGING_MIB` appear in `ref/Qwen3.8-Flash-Next-Q8_0.json` and
   `ref/Qwen3.8-Flash-Next-UD-Q4_K_XL.json` (and in this plan), and in **no** code anywhere in the
