@@ -147,6 +147,20 @@ class Fit(unittest.TestCase):
         self.assertIn("40 tok/s", F.speeds(lay))
         self.assertIn("1x Tesla T4", F.speeds(lay))
 
+    def test_pascal_no_chunk(self):
+        """A Tesla P40 (CC 6.1, 24 GB) holds every expert: no --chunk, so the engine's Pascal default (auto: 8192 /
+        4096 where every expert stays in VRAM) applies.  Pascal's offload path and other archs keep --chunk 2048."""
+        p40 = card(24, arch="61", name="Tesla P40")
+        self.assertTrue(F.pascal(p40))
+        lay = F.layout([p40])
+        self.assertEqual(lay["args"], ["--gpus", "1", "--threads", "8"])
+        self.assertEqual((lay["resident"], lay["path"]), (True, "resident"))
+        self.assertEqual(F.layout([card(24, arch="86")])["args"], ["--gpus", "1", "--chunk", "2048", "--threads", "8"])
+        lay = F.layout([card(8, arch="61", name="NVIDIA GeForce GTX 1080")])
+        self.assertEqual((lay["path"], lay["args"]), ("offload", ["--gpus", "1", "--chunk", "2048", "--threads", "8"]))
+        self.assertFalse(F.pascal(t4()))
+        self.assertFalse(F.pascal(card(16, arch="70")))
+
     def test_two_t4s(self):
         """Two T4s: the split, every expert in VRAM across them at 131072 (as measured)."""
         lay = F.layout([t4(2), t4(3)])
@@ -462,6 +476,27 @@ class Steps(unittest.TestCase):
                          ("ik2", Q.IK2_QUANT, 1, True, "off"))
         self.assertEqual(Q.family_of(cfg), "ik2")
         self.assertNotIn("vision", cfg)
+
+    def test_the_config_on_a_p40(self):
+        """Pascal: the config has no --chunk (the engine's auto); one written by the older setup (--chunk 2048, its
+        own choice) loses it on a setup again; one the user set stays."""
+        d, gguf = self.files()
+        tok = self.tok(d)
+        pc = {"gpus": [card(24, index=1, arch="61", name="Tesla P40")], "backend": "cuda"}
+        path, cfg = self.write(pc, gguf, tok, 65536, d, a=args(drafting="off"))
+        self.assertEqual(cfg["args"], ["--model", str(gguf), "--max-context", "65536", "--gpus", "1", "--threads", "8",
+                                       "--drafting", "off"])
+        self.assertEqual(cfg["installer"]["setup_args"], ["--gpus", "1", "--threads", "8", "--drafting", "off"])
+        old = dict(cfg, args=cfg["args"][:6] + ["--chunk", "2048"] + cfg["args"][6:])   # (the older setup's)
+        old["installer"] = dict(cfg["installer"], setup_args=["--gpus", "1", "--chunk", "2048", "--threads", "8",
+                                                              "--drafting", "off"])
+        path.write_text(json.dumps(old), encoding="utf-8")
+        path, cfg = self.write(pc, gguf, tok, 65536, d, a=args(drafting="off"))
+        self.assertNotIn("--chunk", cfg["args"])
+        cfg["args"][6:6] = ["--chunk", "4096"]                                          # (the user's own)
+        path.write_text(json.dumps(cfg), encoding="utf-8")
+        path, cfg = self.write(pc, gguf, tok, 65536, d, a=args(drafting="off"))
+        self.assertEqual(cfg["args"][cfg["args"].index("--chunk") + 1], "4096")
 
     def test_the_config_follows_the_cards(self):
         """Two cards after one: the flags are the two-card layout's (a kept --chunk would be the one card's); the

@@ -361,6 +361,11 @@ def big_context(vram_gb: float, kv: str = DEFAULT_KV) -> int:
     return recommended_context(vram_gb, kv)
 
 
+def pascal(g: dict) -> bool:
+    """A compute capability 6.x card (Tesla P40 / P100, GTX 10)."""
+    return 60 <= int(g.get("arch") or 0) < 70
+
+
 def _t4_sized(g: dict) -> bool:
     return 14.5 <= float(g.get("vram_gb") or 0) < 22.0
 
@@ -395,7 +400,10 @@ def layout(cards: list, want: int = 0, kv: str = DEFAULT_KV, experts_gib: float 
                             f", a {round(ctx / 1000) if ctx >= 100000 else ctx // 1024}K context"}
     if p1["resident"]:
         ctx = big_context(v0, kv) if experts_gib == EXPERTS_GIB else recommended_context(v0, kv, False, experts_gib)
-        return {"gpus": have[:1], "args": ["--gpus", "1", "--chunk", "2048", "--threads", str(THREADS)],
+        # (Pascal: no --chunk - the engine's default there is auto, 8192 / 4096 where every expert stays in VRAM; a P40
+        #  8K read 384 -> 458 tok/s, REPORT-ik2-p40-tuning.md)
+        chunk = [] if pascal(have[0]) else ["--chunk", "2048"]
+        return {"gpus": have[:1], "args": ["--gpus", "1"] + chunk + ["--threads", str(THREADS)],
                 "context": ctx, "env": {}, "resident": True, "path": "resident", "measured": False,
                 "said": "one card: every expert in VRAM"}
     t4 = _t4_sized(have[0])
