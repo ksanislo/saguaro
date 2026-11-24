@@ -120,11 +120,12 @@ def unsupported(cards: list, ram_gb: float) -> str | None:
 
 def layer_split(cards: list, quant: str = "ud-q4_k_xl") -> str | None:
     """The config's "layer_split" for these cards (the FIRST LAYER of each later card; None for one card): the live
-    4x Tesla T4 configs' own values on four equal "16 GB" cards, else the 48 layers shared out evenly."""
+    4x Tesla T4 configs' own values on four "16 GB" cards of compute capability 7.5, else the 48 layers shared out
+    evenly."""
     n = len(cards)
     if n <= 1:
         return None
-    if n == 4 and quant in MEASURED_SPLITS and all(t4_sized(g) for g in cards):
+    if n == 4 and quant in MEASURED_SPLITS and all(t4_sized(g) for g in cards) and sm75_only(cards):
         return MEASURED_SPLITS[quant]
     return ",".join(str(round(LAYERS * i / n)) for i in range(1, n))
 
@@ -158,7 +159,9 @@ def plan(cards: list, ram_gb: float, quant: str = "ud-q4_k_xl") -> dict:
     live = bool(split) and split in set(MEASURED_SPLITS.values())        # a live 4x Tesla T4 config's split
     args = ([] if n <= 1 else
             ["--trim-stage-weights", "--prefill-pipe", MEASURED_PREFILL_PIPE.get(quant, "1") if live else "1"])
-    measured = why is None and (live or (n == 1 and t4_sized(cards[0]) and ram_gb >= 90.0))
+    amd = str((cards[0] if cards else {}).get("arch") or "").startswith("gfx")
+    measured = why is None and ((live and sm75_only(cards)) or
+                                (n == 1 and amd and t4_sized(cards[0]) and ram_gb >= 90.0))
     said = ("no cards named" if not cards else
             f"one card: the experts it holds in VRAM, the next ones in a {budget if budget is not None else 'RAM - 20'} "
             f"GiB RAM tier, the rest from the SSD, a {ctx // 1024}K context" if n <= 1 else

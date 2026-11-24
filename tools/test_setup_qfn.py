@@ -1,7 +1,8 @@
 """tools/test_setup_qfn.py - Qwen3.8-Flash-Next on its own engine (saguaro-qfn) in the setup: its names and setup ids
-(told from CYBER-FROST's), the pinned manifest, the model question (AMD: offered; NVIDIA: listed, not offered), the
-memory it was measured with (refused below it), the RAM tier it gets, the config it writes and the Models page's
-entries.  No GPU, no network.
+(told from CYBER-FROST's), the pinned manifest, the model question (offered on AMD and on NVIDIA, refused on Windows
+and on Mac), the memory it was measured with (refused below it), the RAM tier it gets, the config it writes - AMD's
+as measured, NVIDIA's mirroring the live 4x Tesla T4 configs - the cards it picks, the report's QFN lines, and the
+Models page's entries.  No GPU, no network.
 
     python -m unittest tools.test_setup_qfn -v
 """
@@ -172,6 +173,90 @@ class Config(unittest.TestCase):
             self.assertEqual(cfg["installer"]["family"], "qfn")         # (its own family since the identity split)
             self.assertEqual(Q.family_of(cfg), "qfn")
             self.assertEqual(cfg["sampling"], {"temperature": 1.0, "top_p": 0.95, "top_k": 20})
+
+
+class NvidiaConfig(unittest.TestCase):
+    def test_the_live_t4_settings_on_four_tesla_t4s(self):
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            models, d = t / "models", t / "models" / "Qwen3.8-Flash-Next-UD-Q4_K_XL"
+            files = [t / "gguf" / n for n in maya.qfn_entry("ud-q4_k_xl")["files"]]
+            pc = {"backend": "cuda", "gpus": [{"index": i, "name": "Tesla T4", "vram_gb": 15.0, "arch": "75"}
+                                              for i in range(4)]}
+            with patch.object(maya, "ROOT", t), patch.object(maya, "mem_gb", return_value=(220.0, 200.0)), \
+                    patch.object(maya, "write_run_script", return_value=t / "run.sh"), \
+                    patch("sys.stdout", new=io.StringIO()), patch.object(maya.S, "UI", None):
+                p = maya.write_config_qfn(args(backend="cuda"), pc, {}, "ud-q4_k_xl", files, d / "pack",
+                                          models / "Qwen3.8-Flash-Next-MTP-Lamina", 262144, models, d, {})
+            cfg = json.loads(p.read_text())
+            self.assertEqual(p.name, "maya-qwen3.8-flash-next-ud-q4_k_xl.json")   # (NVIDIA: no -hip suffix)
+            self.assertNotIn("backend", cfg)
+            self.assertEqual(cfg["gpu"], [0, 1, 2, 3])
+            self.assertEqual(cfg["layer_split"], "11,24,36")                      # (the live server's own split)
+            a = cfg["args"]
+            self.assertEqual(a[a.index("--max-context") + 1], "262144")
+            self.assertEqual(a[a.index("--kv-resident") + 1], "32768")
+            self.assertEqual(a[a.index("--resident-budget-gib") + 1], "200")
+            self.assertIn("--trim-stage-weights", a)
+            self.assertEqual(a[a.index("--prefill-pipe") + 1], "1536")
+            self.assertEqual(cfg["env"]["SAGUARO_SM75_PERF"], "1")                # (every card is compute cap 7.5)
+            self.assertEqual(cfg["env"]["SAGUARO_KQL"], "3")
+            self.assertEqual(cfg["env"]["SAGUARO_MMQ_KQ"], "1")
+            import serve.server as SV
+            self.assertEqual(SV.engine_kind(cfg), "batch")
+            self.assertEqual(Q.family_of(cfg), "qfn")
+
+    def test_a_plain_nvidia_card_gets_no_t4_tuning_or_a_split(self):
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            models, d = t / "models", t / "models" / "Qwen3.8-Flash-Next-UD-Q4_K_XL"
+            files = [t / "gguf" / n for n in maya.qfn_entry("ud-q4_k_xl")["files"]]
+            pc = {"backend": "cuda", "gpus": [{"index": 0, "name": "RTX A5000", "vram_gb": 24.0, "arch": "86"}]}
+            with patch.object(maya, "ROOT", t), patch.object(maya, "mem_gb", return_value=(128.0, 100.0)), \
+                    patch.object(maya, "write_run_script", return_value=t / "run.sh"), \
+                    patch("sys.stdout", new=io.StringIO()), patch.object(maya.S, "UI", None):
+                p = maya.write_config_qfn(args(backend="cuda"), pc, {}, "ud-q4_k_xl", files, d / "pack", None,
+                                          65536, models, d, {})
+            cfg = json.loads(p.read_text())
+            self.assertNotIn("layer_split", cfg)
+            for k in cfg["env"]:
+                self.assertFalse(k.startswith("SAGUARO_SM75") or k in ("SAGUARO_KQL", "SAGUARO_BF16_TC"), k)
+            self.assertNotIn("--prefill-pipe", cfg["args"])
+            self.assertEqual(cfg["installer"]["family"], "qfn")
+
+
+class Windows(unittest.TestCase):
+    def test_qfn_is_refused_there_in_one_plain_line(self):
+        with patch.object(maya, "WIN", True):
+            # (engines/qfn builds for CUDA and HIP on Linux only - refused on Windows whichever backend)
+            self.assertIn("not built on Windows", maya.family_unavailable("qfn", "cuda"))
+            self.assertIn("not built on Windows", maya.family_unavailable("qfn", "hip"))
+            out = refusal(lambda: maya.check_pc(args(backend="cuda"), "qfn"))
+        self.assertIn("Linux for now", out)
+        self.assertIsNone(maya.family_unavailable("qfn", "cuda"))      # (Linux: offered)
+
+
+class QfnGpus(unittest.TestCase):
+    def test_four_t4s_all_together_a_big_card_alone(self):
+        four = [{"index": i, "name": "Tesla T4", "vram_gb": 15.0, "arch": "75"} for i in range(4)]
+        with patch.object(maya, "choose", lambda *x, **k: 0), patch.object(maya, "mem_gb", return_value=(220.0, 200.0)), \
+                patch.object(maya, "WIN", False):
+            got = maya.choose_gpus(args(backend="cuda"), four, maya.QF.MIN_CC, "qfn")
+            self.assertEqual([g["index"] for g in got], [0, 1, 2, 3])       # (the split, as the live server runs)
+            big = four + [{"index": 4, "name": "RTX A5000", "vram_gb": 24.0, "arch": "86"}]
+            self.assertEqual([g["index"] for g in maya.choose_gpus(args(backend="cuda"), big, maya.QF.MIN_CC, "qfn")],
+                             [4])                                           # (24 GB alone: no split over the bus)
+            self.assertIn("up to 4 GPUs", refusal(lambda: maya.choose_gpus(args(backend="cuda", gpus="0,1,2,3,4"),
+                                                                           big, maya.QF.MIN_CC, "qfn")))
+
+
+class QfnReport(unittest.TestCase):
+    def test_the_engines_speed_lines_are_picked(self):
+        for line in ("PP 512 512 120 4266.7 new_read=512 read_ms=120.0 rid=3",
+                     "RDONE rid=3 new=512 ms=120.0",
+                     "VRAM dev=0 pci=0000:00:03.0 total=15858 free=900 weights=12000 kv=415 kv_ram=0"):
+            self.assertIsNotNone(maya.REPORT_LINES.search(line), line)
+        self.assertIsNone(maya.REPORT_LINES.search("PP 512 512 120 4266.7"))   # (plain chunk progress)
 
 
 class ModelsPage(unittest.TestCase):
