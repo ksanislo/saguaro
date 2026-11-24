@@ -1094,6 +1094,11 @@ TURBO_ENV = {"glm": {"SAGUARO_GLM_MISS_SKIP_W": "0.16", "SAGUARO_GLM_MISS_SKIP_F
 # the drafter that goes fastest where the pack has it: DSpark (DeepSeek, MiniMax), MTP (Qwen).  GLM keeps the drafter the
 # setup measured for this PC (MTP or DFlash2: which is faster depends on the GPUs).
 TURBO_DRAFT = {"deepseek": "dspark", "minimax": "dspark", "qwen": "mtp", "qfn": "mtp"}
+# Turbo's live half for engines whose engine-side levers are per-request rather than in the config: switching Turbo on
+# (serve/server.py's set_turbo) puts the model's live Turbo (serve/turbo_live.py, the sidecar beside the config) on
+# with these options and restores what it was when Turbo goes off.  QFN has no expert-skipping environment knobs:
+# its lossy speed is turbo_drop / turbo_skip on every request the engine answers without its own Turbo.
+TURBO_LIVE_DEFAULT = {"qfn": {"drop": 1, "skip": "off"}}
 # DSpark's draft confidence floor (default 0.7), lowered so that longer windows are verified
 TURBO_DSPARK_CONF = 0.3
 TURBO_DSPARK_FAMILIES = ("deepseek", "minimax")

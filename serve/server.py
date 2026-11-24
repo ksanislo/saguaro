@@ -2791,6 +2791,7 @@ class Service:
         self.shared_path = None                       # where they are kept between starts (next to the config)
         self.turbo_default = None                     # the model's live Turbo (PLAN-turbo-live): {"drop","skip"} or None
         self.turbo_path = None                        # its sidecar file (the engine config is never touched)
+        self.turbo_live_before = None                 # Turbo on an engine whose half is live (QFN): the default before
         self.fifo = FairLock()
         self.stopping = False            # the server is ending: a request still queued is refused, not started
         self.embeddings = threading.local()           # the current request's image embeddings file (GENI)
@@ -3559,12 +3560,22 @@ class Service:
     def set_turbo(self, on: bool) -> dict:
         """Turbo on or off.  The engine's part (models.turbo_enable / turbo_disable: the context, the expert skipping, the
         drafting, written into the run config) starts Saguaro again as a saved engine setting does, after the request in
-        flight; nothing to restart where the engine already runs so (or without a run config)."""
+        flight; nothing to restart where the engine already runs so (or without a run config).  QFN's lossy half is the
+        live per-request Turbo, not the environment: switching on drafts and puts its live Turbo to its default,
+        switching off restores what it was."""
         if not self.config_path:
             self.turbo_mem = bool(on)
             return self.turbo_info()
         p = Path(self.config_path)
         self._restart_busy()
+        live = models.TURBO_LIVE_DEFAULT.get(models.family(models.read(p)))
+        if live is not None:
+            if on:
+                self.turbo_live_before = dict(self.turbo_default) if self.turbo_default else None
+                self.set_turbo_default(live)
+            else:
+                self.set_turbo_default(self.turbo_live_before)
+                self.turbo_live_before = None
         out = models.turbo_enable(p) if on else models.turbo_disable(p)
         restarts = bool(out["changed"] and os.environ.get("SAGUARO_RESTART_ON_UPDATE"))
         if restarts:
