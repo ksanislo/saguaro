@@ -726,6 +726,7 @@ QFN_TARGET = "saguaro-qfn"
 QFN_MANIFEST = ROOT / "tools" / "qfn" / "download.json"
 QFN_PACK_TOOLS = ("engines/qfn/tools/iq_pack.py", "engines/qfn/tools/strata_tokenizer.py",
                   "engines/qfn/tools/gguf_reader.py")
+QFN_DRAFTER_TOOLS = ("tools/mtp_from_gguf.py", "tools/mtp_rt.py")   # (CYBER-FROST's drafter: from its own NextN block)
 QFN_PROFILE = ROOT / "data" / "expert-profile-qfn.bin"   # (the experts QFN routes most: which start in VRAM and RAM)
 QFN_CONTEXTS = [32768, 65536, 131072, 262144]
 QFN_DEFAULT_CONTEXT = 65536                        # (measured: 64K, prompts up to 60K tokens)
@@ -7317,13 +7318,15 @@ def qfn_manifest() -> dict:
 
 def qfn_entry(quant: str = QFN_DEFAULT_QUANT) -> dict:
     """A Qwen3.8-Flash-Next quant's download as offer_download reads it (tools/qfn/download.json), with its "name" (the
-    model folder's and the config's), "needs" (the VRAM and RAM it was measured to run with) and "measured"."""
+    model folder's and the config's), "needs" (the VRAM and RAM it was measured to run with) and "measured".  A quant
+    from another repo (CYBER-FROST's, in peasantsmith's repo) names its own "repo" and "revision"."""
     man = qfn_manifest()
     q = man["quants"].get(quant)
     if not q:
         fail(f"{QFN_MANIFEST} names no {Q.shown('qfn', quant)}", "restore it (git checkout tools/qfn/download.json)")
     return {"about": f"{Q.QFN_SHOWN} in {q['about']}; {man.get('license', 'the Qwen Community License')}",
-            "format": "qfn-gguf", "repo": man["repo"], "revision": man["revision"], "folder": q["folder"],
+            "format": "qfn-gguf", "repo": q.get("repo") or man["repo"],
+            "revision": q.get("revision") or man["revision"], "folder": q["folder"],
             "files": {k: v[0] for k, v in q["files"].items()}, "sha256": {k: v[1] for k, v in q["files"].items()},
             "download_gb": sum(v[0] for v in q["files"].values()) / 1e9, "name": q["name"],
             "needs": dict(q.get("needs") or {}), "measured": q.get("measured")}
@@ -7345,7 +7348,8 @@ def qfn_about() -> str:
             f"{m['download_gb']:.0f} GB, Q8_0 177 GB) on its own engine, saguaro-qfn (from Strata); AMD: one "
             f"RDNA 3 / 4 GPU of {n.get('vram_gb', 15) + 1:.0f} GB or more with about {n.get('ram_gb', 88) + 8:.0f} GB of RAM - "
             "the experts the GPU does not hold in RAM, the rest read from the SSD; MTP drafting, tool calls, up to a "
-            "256K context; text only. Not CYBER-FROST: the model as Qwen released it.")
+            "256K context; text only. Not CYBER-FROST: the model as Qwen released it (CYBER-FROST-3.8-PS is offered "
+            "as a quant of its own, in the quant list).")
 
 
 def qfn_quant_fit(quant: str, vram: float, ram: float) -> str | None:
@@ -7452,6 +7456,65 @@ def qfn_mtp_step(a, models: Path) -> Path | None:
     return d
 
 
+def qfn_drafter_step(a, pack: Path, files: list, llama: Path) -> Path:
+    """CYBER-FROST's drafter, built from the NextN block inside its own file (tools/mtp_from_gguf.py): experts.bin,
+    dense.bin and dense.txt in <pack>/mtp - the layout saguaro-qfn's --mtp loader reads (engines/qfn/src/core/mtp.cpp).
+    Built again when its tools or the model file changed."""
+    mtp = pack / "mtp"
+    tools = S.source_hash(QFN_DRAFTER_TOOLS)
+    need = ("dense.txt", "dense.bin", "experts.bin")
+    if not a.repack and read_json(mtp / PACK_SOURCES).get("tools") == tools and \
+            all((mtp / f).exists() for f in need) and pack_stale(pack, files) is None:
+        ok(f"drafter already built: {mtp}")
+        return mtp
+    env = dict(os.environ, SAGUARO_GGUF_PY=str(llama / "gguf-py"))
+    say("  The MTP drafter from the model's NextN block (its 512 experts requantized to 2 bits for the drafts; a few "
+        "minutes) ...")
+    run([sys.executable, str(ROOT / "tools" / "mtp_from_gguf.py"), "--gguf", str(files[0]), "--out", str(mtp)],
+        env=env)
+    missing = [f for f in need if not (mtp / f).exists()]
+    if missing:
+        fail(f"the drafter builder did not write {mtp / missing[0]}", "the reason is in the messages above")
+    stamp_pack(mtp, files)
+    rec = read_json(mtp / PACK_SOURCES)
+    rec["tools"] = tools
+    (mtp / PACK_SOURCES).write_text(json.dumps(rec, indent=1), encoding="utf-8")
+    ok(f"MTP drafter: {mtp}")
+    return mtp
+
+
+def qfn_vexe() -> Path:
+    """vision-qfn, QFN's picture reader: beside the engine it serves (this Saguaro build does not compile it yet -
+    REPORT-t7-cyberfrost.md)."""
+    return qfn_exe().parent / ("vision-qfn.exe" if WIN else "vision-qfn")
+
+
+def qfn_vision_step(a, d: Path, gguf: Path) -> dict | None:
+    """CYBER-FROST on saguaro-qfn: the config's "vision" entry - the base model's vision tower (the fine-tune left it
+    byte for byte) as llama.cpp's mmproj, the file the "qwen" setup downloads (tools/qwen/download.json's "vision") -
+    written the way the live QFN configs carry it: vision-qfn, the mmproj, the model file.  None (text only)."""
+    if getattr(a, "no_vision", False):
+        ok("pictures: skipped (--no-vision): the model reads text only")
+        return None
+    m = qwen_vision_model()
+    if m is None:
+        warn(f"{QWEN_MANIFEST} names no vision tower: the model reads text only")
+        return None
+    vd = d / "vision"
+    files = [vd / n for n in m["files"]]
+    if any(file_incomplete(m, f) for f in files) and not offer_download(a, "the vision tower", vd, files, m):
+        warn(f"the vision tower was not downloaded: the model reads text only ({ME} --setup asks again)")
+        return None
+    for f in files:
+        if not sha256_checked(f, m["sha256"][f.name]):
+            f.unlink(missing_ok=True)                  # else the next run finds it complete and fails here again
+            fail(f"{f}: the sha256 does not match the published one (the file was removed)", "run the setup again")
+    ok(f"pictures: ON - {qfn_vexe().name} with {files[0].name} ({m['download_gb']:.1f} GB on the SSD); it starts "
+       "only when a picture arrives")
+    return {"exe": str(qfn_vexe()), "mmproj": str(files[0]), "model": str(gguf), "gpu": True,
+            "max_tokens": 1024, "elastic": True, "elastic_mib": 1536, "elastic_idle_s": 30, "elastic_keep_s": 600}
+
+
 def qfn_ram_budget(ram: float) -> int:
     """The RAM tier (GiB) for a PC with `ram` GiB: all but QFN_RAM_SPARE_GB (measured on 91.7 GiB with an RX 9070 XT: 72
     against 64 answered 32% faster and read prompts 20% faster - nearly every expert the card does not hold in RAM -
@@ -7460,10 +7523,11 @@ def qfn_ram_budget(ram: float) -> int:
 
 
 def write_config_qfn(a, pc: dict, meta: dict, quant: str, files: list, pack: Path, mtp: Path | None, ctx: int,
-                     models: Path, d: Path, prev: dict) -> Path:
-    """maya-qwen3.8-flash-next-<quant>-hip.json and its start script: the engine's AMD settings as measured on an RX
-    9070 XT - one GPU, the RAM tier, MTP drafting, INT8 K/V (32K of it in VRAM), the K-quant prompt kernels; plain RoPE
-    up to 256K (YaRN past it).  A setup again keeps the config before's env, where the server listens and its key."""
+                     models: Path, d: Path, prev: dict, vision: dict | None = None) -> Path:
+    """maya-qwen3.8-flash-next-<quant>-hip.json (maya-cyber-frost-hip.json for CYBER-FROST) and its start script:
+    the engine's AMD settings as measured on an RX 9070 XT - one GPU, the RAM tier, MTP drafting, INT8 K/V (32K of it
+    in VRAM), the K-quant prompt kernels; plain RoPE up to 256K (YaRN past it).  A setup again keeps the config
+    before's env, where the server listens and its key."""
     step(8, "the configuration and the start script")
     port = a.port or 8080
     hip = pc.get("backend") == "hip"
@@ -7482,6 +7546,8 @@ def write_config_qfn(a, pc: dict, meta: dict, quant: str, files: list, pack: Pat
     args += ["--expert-cache", "auto", "--prefill", "auto", "--spec", "3", "--spec-min-p", "0.7"]
     if mtp is not None:
         args += ["--mtp", str(mtp)]
+    if vision:                                         # (pictures: the server adds the engine's --vision too)
+        args.append("--vision")
     args += ["--max-context", str(ctx), "--kv", "int8", "--kv-resident", str(min(ctx, 32768)),
              "--vram-reserve-mib", "700", "--session-dir", str(var / "sessions"),
              "--resident-budget-gib", str(qfn_ram_budget(ram)),
@@ -7493,7 +7559,8 @@ def write_config_qfn(a, pc: dict, meta: dict, quant: str, files: list, pack: Pat
     cfg = {"exe": str(qfn_exe()), "args": args, "env": env, "cwd": str(ROOT / "engines" / "qfn"),
            "tokenizer": str(pack / "tokenizer"), "model_name": name, **({"backend": "hip"} if hip else {}),
            "gpu": [g["index"] for g in pc["gpus"]], "sampling": sampling,
-           "lib_dirs": meta.get("lib_dirs") or old.get("lib_dirs") or [], "port": port}
+           "lib_dirs": meta.get("lib_dirs") or old.get("lib_dirs") or [], "port": port,
+           **({"vision": vision} if vision else {})}
     kept = []
     for k in ("host", "api_key", "cors_origins", "mcp_servers"):
         if old.get(k) is not None:
@@ -7517,7 +7584,8 @@ def write_config_qfn(a, pc: dict, meta: dict, quant: str, files: list, pack: Pat
 def set_up_qfn(a, prev: dict) -> Path | None:
     """Qwen3.8-Flash-Next on saguaro-qfn, steps 1-8: the PC (one AMD RDNA GPU; the quant's measured VRAM and RAM -
     refused below them), the quant and the context, the engine (<build>/qfn/saguaro-qfn), the files (pinned,
-    sha256-checked; --gguf-dir: yours, in place), the pack, the MTP draft layer, the config."""
+    sha256-checked; --gguf-dir: yours, in place), the pack, the MTP draft layer, the config.  CYBER-FROST's quant:
+    step 7 builds the drafter from the NextN block inside its own file and offers the base model's pictures."""
     inst = prev.get("installer") or {}
     prev_args = prev.get("args") or []
     prev_ctx = int(prev_args[prev_args.index("--max-context") + 1]) if "--max-context" in prev_args[:-1] else None
@@ -7552,9 +7620,15 @@ def set_up_qfn(a, prev: dict) -> Path | None:
     if files is None:
         return None
     pack = qfn_pack_step(a, d, files, llama)           # 6
-    step(7, "the MTP draft layer")                     # 7
-    mtp = qfn_mtp_step(a, models)
-    return write_config_qfn(a, pc, meta, quant, files, pack, mtp, ctx, models, d, prev)   # 8
+    vision = None
+    if quant == Q.CYBER_FROST_QUANT:                   # 7: CYBER-FROST carries its own drafter (blk.48) and its pictures
+        step(7, "the MTP drafter (from the file's NextN block) and pictures")
+        mtp = qfn_drafter_step(a, pack, files, llama)
+        vision = qfn_vision_step(a, d, files[0])
+    else:
+        step(7, "the MTP draft layer")                 # 7
+        mtp = qfn_mtp_step(a, models)
+    return write_config_qfn(a, pc, meta, quant, files, pack, mtp, ctx, models, d, prev, vision)   # 8
 
 
 # ------------------------------------------------------------------------------------------------ Hy4-Flash, Inkling 2 Mini

@@ -157,7 +157,10 @@ QWEN_IDS = ("cyber-frost", "cyber-frost-3.8", "cyber-frost-3.8-ps", "cyber-frost
 # as "qfn" too.  Shown by its own name, with the engine's.
 QFN_SHOWN = "Qwen3.8-Flash-Next"
 SHOWN["qfn"] = QFN_SHOWN                           # (the model's name on screen, as SHOWN names the other families)
-QFN_QUANTS = {"ud-q4_k_xl": "UD-Q4_K_XL", "q8_0": "Q8_0"}
+# CYBER-FROST-3.8-PS on saguaro-qfn (QFN-first T7): peasantsmith's one GGUF as a quant of the family (its NextN block
+# inside is the drafter, tools/mtp_from_gguf.py); the old Qwen path's code stays until a later task takes it out
+CYBER_FROST_QUANT = "cyber-frost-q5_k_m"
+QFN_QUANTS = {"ud-q4_k_xl": "UD-Q4_K_XL", "q8_0": "Q8_0", CYBER_FROST_QUANT: "CYBER-FROST-3.8 Q5_K_M"}
 QFN_ENGINE = "saguaro-qfn"
 # its setup ids (the first of each: the Models page's); the model's name alone is UD-Q4_K_XL, the default
 QFN_IDS = {"qwen3.8-flash-next": "ud-q4_k_xl", "qwen3.8-flash-next-ud-q4_k_xl": "ud-q4_k_xl", "qfn": "ud-q4_k_xl",
@@ -214,7 +217,11 @@ def config_stem(family: str, key: str | None) -> str | None:
     always had (GLM's maya-<download>.json, DeepSeek's maya-ds4.json, MiniMax's EXL3 maya-mm3.json - installs and
     their run scripts point at them).  MiniMax's GGUFs, new with the scheme, are the first named by it."""
     if family == "qfn":
-        return "maya-" + qfn_setup_id(key)           # (Qwen3.8-Flash-Next on saguaro-qfn: its own family)
+        # (Qwen3.8-Flash-Next on saguaro-qfn: its own family; CYBER-FROST's config keeps the name it always had -
+        #  installs and their run scripts point at maya-cyber-frost[-hip].json)
+        if key == CYBER_FROST_QUANT:
+            return "maya-cyber-frost"
+        return "maya-" + qfn_setup_id(key)
     if family == "qwen":
         return "maya-" + qfn_setup_id(key) if key in QFN_QUANTS else "maya-cyber-frost"
     if family == "ik2":                                # (Inkling 2 Mini: UD-Q4_K_XL's name kept; a Strata pack its own)
