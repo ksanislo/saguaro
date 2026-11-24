@@ -84,6 +84,7 @@ sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE / "tools"))
 import setup as S  # noqa: E402  Strata's installer: PC checks, pip, llama.cpp, downloads (nothing runs on import)
 from setup import ask, fail, ok, run, say, step, warn  # noqa: E402
+from saguaro_version import saguaro_version  # noqa: E402  the version text: the banner's and the dashboard's About, one function
 import maya_import as MI  # noqa: E402  --import-model: model files downloaded some other way, found by size + sha256
 import maya_quants as Q  # noqa: E402  the quants' names users see (MiniMax M3.1 · Maya-XS) and the older ones as aliases
 import calibrate_glm as CAL  # noqa: E402  the CPU lane's tuning for this PC (./saguaro.sh --calibrate)
@@ -8865,13 +8866,6 @@ def set_up_and_serve(a, prev: dict) -> tuple | None:
 # ------------------------------------------------------------------------------------------------ main
 def maya_version() -> str:
     return (HERE / "VERSION").read_text(encoding="utf-8").strip() if (HERE / "VERSION").exists() else "?"
-
-
-def saguaro_version(version: str) -> str:
-    """What the banner calls this version: the git commit of a clone (Saguaro has no releases of its own yet), else
-    the VERSION line it was built from."""
-    r = S.out(["git", "-C", str(HERE), "log", "-1", "--format=%h %cs"]).strip() if (HERE / ".git").exists() else ""
-    return f"{r.split()[0]} ({r.split()[1]})" if len(r.split()) == 2 else f"v{version}"
 
 
 def model_option(a) -> str | None:

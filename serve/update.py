@@ -16,6 +16,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from saguaro_version import saguaro_version  # the version text the banner uses: a clone names its git commit
+
 ROOT = Path(__file__).resolve().parents[1]
 REPO = "ksanislo/saguaro"
 UPDATE_EXIT = 75                    # the server's exit code that tells saguaro.py: updated, start again (EX_TEMPFAIL)
@@ -64,6 +66,7 @@ class Updater:
     def __init__(self, current: str | None, root: Path = ROOT):
         self.current = current
         self.root = Path(root)
+        self.label = saguaro_version(current or "?", self.root)   # what the page calls this version, as the banner does
         self.lock = threading.Lock()       # one check or one update at a time
         self.latest = None                 # {"version", "url", "summary", "published"}
         self.checked = 0.0
@@ -141,7 +144,8 @@ class Updater:
         newer = self.newer()
         why = self.blocker() if newer else None
         state = dict(self.state) if self.state else None
-        return {"current": self.current, "enabled": self.enabled(), "latest": self.latest, "newer": newer,
+        return {"current": self.current, "current_label": self.label, "enabled": self.enabled(),
+                "latest": self.latest, "newer": newer,
                 "checked": self.checked or None, "error": self.error, "no_releases": self.no_releases,
                 "can_update": newer and why is None,
                 "blocker": why, "state": state,
