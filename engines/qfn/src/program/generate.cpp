@@ -12422,14 +12422,14 @@ int main(int argc, char** argv) {
                                        // conversation for its next turn (the server picks slots by what they hold)
                                        (piped_mtp ? " slot_keep=1" : "")).c_str() : "");
             // the Monitor's "Where the experts live" layout (parity with the maya engines' Qwen path, which names
-            // itself the same way): engine_kind=qwen picks TIER_SETS.qwen (serve/web/monitor.js), and tierShares()
+            // itself the same way): engine_kind=qfn picks TIER_SETS.qfn (serve/web/monitor.js), and tierShares()
             // (serve/web/server.js) reads experts / vram_slots / vram_gb / ram_slots / ram_gb from here and
             // vram_used / ram_used / vram_gb / ram_gb / disk_gb from the STAT lines.  QFN has no SSD tier: every
             // expert lives in RAM (resident or mapped) and the ones VRAM's caches do not hold are computed by the
             // CPU from there, so the STAT lines report disk=0 / disk_gb=0.
             {
                 const int64_t all_experts = (int64_t) g.n_layers * (int64_t) g.n_expert;
-                std::printf("INFO engine_kind=qwen experts=%lld vram_slots=%lld vram_gb=%.1f ram_slots=%lld ram_gb=%.1f\n",
+                std::printf("INFO engine_kind=qfn experts=%lld vram_slots=%lld vram_gb=%.1f ram_slots=%lld ram_gb=%.1f\n",
                             (long long) all_experts, (long long) slots_all, (double) mib_all / 1024.0,
                             (long long) all_experts,
                             (double) (o.mmap_experts ? src.resident_bytes()

@@ -179,8 +179,8 @@ export const THINK_TITLES = {
 // the running model's family, its thinking levels (THINKING, LEVELS: live bindings) and their titles
 export const familyOf = (model = S.health.model) =>
   (/deepseek/i.test(model || "") ? "deepseek" : /minimax/i.test(model || "") ? "minimax"
-    : /cyber-frost|qwen/i.test(model || "") ? "qwen" : /hy4/i.test(model || "") ? "hy4"
-    : /inkling/i.test(model || "") ? "ik2" : "glm");
+    : /cyber-frost|qwen|qfn/i.test(model || "") ? "qwen" : /hy4/i.test(model || "") ? "hy4"
+    : /inkling/i.test(model || "") ? "ik2" : "glm");   // (QFN's "qfn" too: Qwen3.8's three efforts, as CYBER-FROST's)
 export let THINKING = THINK_LEVELS.glm;
 export let LEVELS = [];
 export function setFamily(model) {

@@ -127,8 +127,8 @@ export function relTime(t) {
 // the model family's logo (web/logo-*.svg: lobe-icons' marks, MIT) and its name as people write it:
 // "glm-5.3-flash" -> "GLM 5.3 Flash", "deepseek-v4.1-flash" -> "DeepSeek V4.1 Flash", "qwen3.8-flash-next" -> "Qwen3.8 Flash Next"
 // (CYBER-FROST-3.8-PS, a Qwen3.8-Flash-Next fine-tune: Qwen's mark, its own name as its card writes it)
-const MODEL_LOGOS = [[/glm/i, "glm", true], [/deepseek/i, "deepseek"], [/minimax/i, "minimax"], [/qwen|cyber-frost/i, "qwen"],
-                     [/hy4/i, "hy4"]];
+const MODEL_LOGOS = [[/glm/i, "glm", true], [/deepseek/i, "deepseek"], [/minimax/i, "minimax"],
+                     [/qwen|qfn|cyber-frost/i, "qwen"], [/hy4/i, "hy4"]];   // (Qwen's mark: CYBER-FROST and QFN too)
 export function modelLogo(name) {
   const m = MODEL_LOGOS.find(([re]) => re.test(name || ""));
   return m ? {src: `web/logo-${m[1]}.svg`, mono: !!m[2]} : null;

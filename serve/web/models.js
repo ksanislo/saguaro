@@ -292,7 +292,7 @@ function fieldsOf(m, d) {
   if (m.family === "ik2") return ik2Fields(m, d, ch, gpus);
   if (m.family === "hy4") return hy4Fields(m, d, s, ch, images, gpus);
   if (m.family === "minimax") return mm3Fields(m, d, s, ch, images, gpus);
-  if (m.family === "qwen") return qwenFields(m, d, s, ch, gpus);
+  if (m.family === "qwen" || m.family === "qfn") return qwenFields(m, d, s, ch, gpus);   // (QFN's Engine page: the same fields)
   if (glm) {
     const ec = AutoOr({label: "Expert cache", k: "expert_cache", d, dflt: 1200, unit: "experts", subLabel: "Experts in the first GPU's pool"});
     const pf = AutoOr({label: "Prompt chunk", k: "prefill", d, dflt: 8192, unit: "tokens", subLabel: "Tokens a prompt is read in at a time"});
