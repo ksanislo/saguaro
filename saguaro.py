@@ -728,7 +728,7 @@ QFN_PACK_TOOLS = ("engines/qfn/tools/iq_pack.py", "engines/qfn/tools/strata_toke
 QFN_PROFILE = ROOT / "data" / "expert-profile-qfn.bin"   # (the experts QFN routes most: which start in VRAM and RAM)
 QFN_CONTEXTS = [32768, 65536, 131072, 262144]
 QFN_DEFAULT_CONTEXT = 65536                        # (measured: 64K, prompts up to 60K tokens)
-QFN_RAM_SPARE_GB = 28                              # (RAM left beside the RAM tier: the OS, the server, the page cache)
+QFN_RAM_SPARE_GB = 20                              # (RAM left beside the RAM tier: the OS, the server, the page cache)
 QFN_DEFAULT_QUANT = "ud-q4_k_xl"
 # Hy4-Flash (Tencent's Hy4-flash, a 512-expert MoE with an n-gram table) on its own engine, build/saguaro-hy4:
 # Project Maya's GGUF quants (tools/hy4/download.json - a size's trunk, the n-gram table every size shares and the
@@ -7449,7 +7449,9 @@ def qfn_mtp_step(a, models: Path) -> Path | None:
 
 
 def qfn_ram_budget(ram: float) -> int:
-    """The RAM tier (GiB) for a PC with `ram` GiB: all but QFN_RAM_SPARE_GB (measured: 64 on 91.7 GiB, an RX 9070 XT)."""
+    """The RAM tier (GiB) for a PC with `ram` GiB: all but QFN_RAM_SPARE_GB (measured on 91.7 GiB with an RX 9070 XT: 72
+    against 64 answered 32% faster and read prompts 20% faster - nearly every expert the card does not hold in RAM -
+    with 10.8 GiB of RAM still available; the engine takes no more than those experts)."""
     return max(8, int(ram - QFN_RAM_SPARE_GB))
 
 

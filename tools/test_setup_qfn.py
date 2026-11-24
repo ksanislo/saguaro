@@ -116,7 +116,7 @@ class Offered(unittest.TestCase):
         self.assertIn("96 GB of RAM", out)
 
     def test_ram_tier(self):
-        self.assertEqual(maya.qfn_ram_budget(91.7), 63)
+        self.assertEqual(maya.qfn_ram_budget(91.7), 71)
         self.assertEqual(maya.qfn_ram_budget(20.0), 8)
 
 
@@ -139,7 +139,7 @@ class Config(unittest.TestCase):
             self.assertEqual(SV.engine_kind(cfg), "batch")              # (the server drives it as QFN's engine)
             a = cfg["args"]
             self.assertEqual(a[a.index("--native") + 1], str(files[0]))
-            self.assertEqual(a[a.index("--resident-budget-gib") + 1], "63")
+            self.assertEqual(a[a.index("--resident-budget-gib") + 1], "71")
             self.assertEqual(a[a.index("--max-context") + 1], "65536")
             self.assertIn("--mtp", a)
             self.assertEqual(cfg["env"]["SAGUARO_MMQ_KQ"], "1")

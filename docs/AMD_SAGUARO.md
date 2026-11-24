@@ -258,7 +258,7 @@ refuses with the reason below that:
 It builds `build-hip/qfn/saguaro-qfn` for the card, downloads the files pinned and sha256-checked (or checks yours in
 place), indexes them (the pack, about a minute), downloads the Lamina MTP draft layer (0.8 GB) and writes
 `maya-qwen3.8-flash-next-ud-q4_k_xl-hip.json` with the settings measured on the RX 9070 XT: the experts the card does not
-hold, the hottest by the shipped expert profile, in a page-locked RAM tier of the RAM less 28 GB
+hold, the hottest by the shipped expert profile, in a page-locked RAM tier of the RAM less 20 GB
 (`--resident-budget-gib`), the rest read from the SSD; MTP drafting; INT8 K/V, 32K of it in VRAM; the K-quant prompt
 kernels (`SAGUARO_MMQ_KQ=1`). The RDNA4 prompt defaults (GDN, control-vector fusion, chunks up to 16K, matrix-core prompt
 attention) switch on by themselves on gfx12. To build only the engine and its tests by hand:
