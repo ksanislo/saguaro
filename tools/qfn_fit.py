@@ -162,7 +162,8 @@ def plan(cards: list, ram_gb: float, quant: str = "ud-q4_k_xl") -> dict:
     ones: --trim-stage-weights and --prefill-pipe on a split), "env" (the T4 tuning env where every card is sm_75,
     else {}), "t4", "measured", "said" (one plain line)}.  The cards it lists are the ones handed in - best_gpus()
     picks those, plan() lays them out; nothing is read from the hardware."""
-    why = unsupported(cards, ram_gb)
+    why = (f"Qwen3.8-Flash-Next on saguaro-qfn runs on one GPU of 16 GB or more, or up to {MAX_GROUP} equal ones: "
+           "no cards were named") if not cards else unsupported(cards, ram_gb)
     n = len(cards)
     split = layer_split(cards, quant) if why is None else None
     ctx = DEFAULT_CONTEXT if n <= 1 else SPLIT_CONTEXT

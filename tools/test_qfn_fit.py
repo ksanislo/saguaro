@@ -87,6 +87,13 @@ class TooSmall(unittest.TestCase):
     def test_unknown_vram_is_not_a_refusal(self):
         self.assertTrue(F.plan([gpu(0, 0)], 0)["fits"])            # (the engine measures at its start)
 
+    def test_no_cards_named_is_not_a_fit(self):
+        p = F.plan([], 220.0)                                      # (plan([]) must not claim it fits)
+        self.assertFalse(p["fits"])
+        self.assertIn("no cards were named", p["reason"])
+        self.assertIsNone(p["layer_split"])
+        self.assertEqual(p["env"], {})
+
 
 class FourT4(unittest.TestCase):
     def test_the_live_split_ud_q4_k_xl(self):
@@ -164,9 +171,11 @@ class Cli(unittest.TestCase):
         with redirect_stdout(out):
             self.assertEqual(F.main(["--ram", "220", "16:75", "16:75", "16:75", "16:75"]), 0)
             self.assertEqual(F.main(["--ram", "220", "8"]), 1)
+            self.assertEqual(F.main([]), 1)                        # (no cards named: not a fit either)
         text = out.getvalue()
         self.assertIn("layer_split: 11,24,36", text)
         self.assertIn("does not fit: Qwen3.8-Flash-Next on saguaro-qfn needs GPUs of 16 GB or more", text)
+        self.assertIn("does not fit: Qwen3.8-Flash-Next on saguaro-qfn runs on one GPU of 16 GB or more", text)
 
 
 if __name__ == "__main__":
