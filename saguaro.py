@@ -7635,6 +7635,9 @@ def family_unavailable(family: str, backend: str | None) -> str | None:
     list marks such a model and the setup stops on it before anything is built or downloaded."""
     if family in NO_ENGINE.get(backend or "cuda", {}):
         return NO_ENGINE[backend][family]
+    if WIN and family == "qfn":   # (engines/qfn is not built on Windows: a CUDA/HIP build only)
+        return (f"the setup offers {QFN_SHOWN} on Linux for now (its engine, {Q.QFN_ENGINE}, is not built on "
+                "Windows here yet)")
     if WIN and family in ("hy4", "ik2"):
         return f"{HY4_SHOWN if family == 'hy4' else IK2_SHOWN} runs on Linux only for now (not on Windows yet)"
     return None
