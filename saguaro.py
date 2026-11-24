@@ -2163,6 +2163,8 @@ def compile_engine(archs, gpu_ids, nvcc, host_compiler, llama: Path, src: str, s
              "-DMAYA_ENABLE_CUDA=ON", f"-DCMAKE_CUDA_ARCHITECTURES={cuda_archs}",
              "-DMAYA_NATIVE_EXPERTS=ON", "-DMAYA_BUILD_TESTS=OFF",
              f"-DCMAKE_CUDA_COMPILER={nvcc}", *toolkit_root_defs(nvcc), f"-DMAYA_GGML_DIR={llama}"]
+    if target == QFN_TARGET:   # (engines/qfn, built by the top project for these archs: <build>/qfn/saguaro-qfn)
+        conf += ["-DSAGUARO_QFN=ON", f"-DSAGUARO_QFN_GGML_DIR={llama.as_posix()}"]
     if S.ARM and S.arm_cpu_arch():
         conf.append(f"-DGGML_CPU_ARM_ARCH={S.arm_cpu_arch()}")
     if host_compiler:
