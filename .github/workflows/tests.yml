@@ -51,6 +51,7 @@ jobs:
   # The QFN engine (engines/qfn) compiled for AMD (gfx1201) in AMD's ROCm 7.1 image: a HIP compile break fails here.
   # No GPU on the runner - the HIP parity tests (ctest) run on an AMD card (tools/qfn/build_hip.sh).
   qfn-hip-compile:
+    if: github.event_name == 'workflow_dispatch'   # (manual until Ken decides: a ~20 GB ROCm image a run)
     runs-on: ubuntu-latest
     timeout-minutes: 90
     container: rocm/dev-ubuntu-24.04:7.1-complete
