@@ -377,7 +377,7 @@ class CheckFit(unittest.TestCase):
 
 
 class NoAvx2Message(unittest.TestCase):
-    """The setup's no-AVX2 line (scratch/avx1-table.txt): an ok about the engine's AVX1 rows where its CPU expert lane
+    """The setup's no-AVX2 line: an ok about the engine's AVX1 rows where its CPU expert lane
     has them, a warn that it is slower where it does not (the EXL3 quants of deepseek / minimax).  Neither names an
     env switch: the row width is picked when setup.py builds the engine for this CPU, and SAGUARO_GLM_CPU_LANE /
     SAGUARO_DS4_CPU_LANE are the lane's calibrated thread share, not an instruction choice."""

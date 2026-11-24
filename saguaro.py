@@ -1233,9 +1233,9 @@ def vs_2026(vcvars) -> bool:
 
 
 def cpu_avx1_rows(family: str, gguf: bool = False) -> bool:
-    """Whether the family's CPU expert lane has AVX1 rows (plain AVX: no AVX2 / FMA): the table of
-    scratch/avx1-table.txt.  GLM's native rows, Strata's (qfn), Inkling's and the maya-ds4 GGUF rows (deepseek /
-    minimax from a GGUF quant) all do.  Only the EXL3 quant's lane does not: its rows come from
+    """Whether the family's CPU expert lane has AVX1 rows (plain AVX: no AVX2 / FMA).  GLM's native rows,
+    Strata's (qfn), Inkling's and the maya-ds4 GGUF rows (deepseek / minimax from a GGUF quant) all do.  Only
+    the EXL3 quant's lane does not: its rows come from
     src/kernels/cpu/exl3_cpu.cpp, whose tiers start at scalar, so such a CPU runs it slower."""
     return not (family in ("deepseek", "minimax") and not gguf)
 
@@ -1792,7 +1792,7 @@ def check_pc(a, family: str = "glm", gguf: bool = False, ds4_quant: str = "exl3"
     if S.ARM:
         ok(f"CPU: {cpu} (ARM64, {os.cpu_count()} threads; the expert kernels use ggml-cpu's NEON paths)")
     elif not avx2:
-        note_no_avx2(cpu, family, gguf)        # (the engine's AVX1 rows, or a slower lane: scratch/avx1-table.txt)
+        note_no_avx2(cpu, family, gguf)        # (the engine's AVX1 rows, or a slower lane)
     else:
         ok(f"CPU: {cpu} ({'AVX-512' if avx512 else 'AVX2'}, {os.cpu_count()} threads)")
 
