@@ -11,6 +11,9 @@
 //     real model's seams cover them.)
 #include "../src/ik2/ik2_iq_tables.h"
 #include "../src/ik2/ik2_kernels.cuh"
+#ifdef SAGUARO_IK2_PASCAL
+#include "../src/ik2/ik2_pascal.cuh"
+#endif
 
 #include <cuda_fp16.h>
 
@@ -2959,6 +2962,11 @@ void test_window_exact(bool mma) {
 
 void test_window_launches() {
     const bool mma = k::arch_class() >= 75;   // (Turing on: its window runs Ampere's kernels on its mma16816)
+#ifdef SAGUARO_IK2_PASCAL
+    if (k::pascal::q8_on())   // (Pascal: mv_q8p is ik2_pascal.cu's, the window's mv_q8p_cols not held to it)
+        std::printf("--   mv_q8p_cols = mv_q8p: the verify window (sm_60 class here: drafting off)\n");
+    else
+#endif
     {   // mv_q8p_cols: rows with their own inputs (one launch) against the ranges a launch each; K 3072
         for (int K : {2304, 3072}) {
             const int N = 4112, T = 5;
@@ -3367,6 +3375,158 @@ void test_q4_kv() {
     cudaFree(o_ref); cudaFree(o_q4); cudaFree(q16); cudaFree(o_mma); cudaFree(pos_d); cudaFree(dbias);
 }
 
+#ifdef SAGUARO_IK2_PASCAL
+// Pascal's token-path kernels (src/ik2/ik2_pascal.cu, k::arch_class 60) at Inkling-2-Mini's sizes against a double
+// reference: NVFP4 and Q8_0 experts' gate | up + SwiGLU and down (8 slots, two of them on one blob, a skipped one), the planar
+// Q8_0 product at K 3072 (K 2304 with its convs and inputs: test_token_path's mv_q8p, which runs them here), one
+// token's attention (attn_decode_f16_at) against the generic decode's.
+void test_pascal() {
+    for (const int ty : {k::kNVFP4, k::kQ8_0}) {
+        const char* tn = ty == k::kNVFP4 ? "NVFP4" : "Q8_0";
+        char what[96];
+        constexpr int C = 2304, F = 1152, E = 5, S = 8;
+        const auto g = rand_blocks(ty, (size_t) E * F * C), u = rand_blocks(ty, (size_t) E * F * C),
+                   dn = rand_blocks(ty, (size_t) E * C * F);
+        const size_t eb0 = g.size() / E, eb1 = u.size() / E, eb2 = dn.size() / E, slot = eb0 + eb1 + eb2;
+        std::vector<uint8_t> pool(slot * E);
+        for (int e = 0; e < E; ++e) {
+            std::memcpy(pool.data() + e * slot, g.data() + e * eb0, eb0);
+            std::memcpy(pool.data() + e * slot + eb0, u.data() + e * eb1, eb1);
+            std::memcpy(pool.data() + e * slot + eb0 + eb1, dn.data() + e * eb2, eb2);
+        }
+        uint8_t* dpool = dev(pool);
+        const int pick[S] = {0, 3, 1, 4, 2, 3, -1, 0};   // (-1: a slot the other GPU runs - blob 1, skipped)
+        std::vector<const uint8_t*> blobs(S);
+        for (int s = 0; s < S; ++s) blobs[s] = pick[s] < 0 ? (const uint8_t*) 1 : dpool + pick[s] * slot;
+        const uint8_t** dblobs = dev(blobs);
+        const auto x = fvec((size_t) 2 * C, 2.0f);
+        const std::vector<int> tok = {0, 1, 0, 1, 1, 0, 0, 1};
+        std::vector<float> sg(S), su(S);
+        for (int s = 0; s < S; ++s) sg[s] = 0.3f + 0.05f * s, su[s] = 0.5f - 0.03f * s;
+        float *dx = dev(x), *dsg = dev(sg), *dsu = dev(su);
+        int* dtok = dev(tok);
+        auto* dh = dev_n<uint16_t>((size_t) S * F);
+        auto* dy = dev_n<float>((size_t) S * C);
+        const float gcap = 4.0f, ucap = 25.0f;
+        std::vector<float> wg((size_t) F * C), wu((size_t) F * C), wd((size_t) C * F);
+        const bool took = k::pascal::gate_up_swiglu(dblobs, dtok, S, ty, ty, eb0, dx, C, F, dsg, dsu, gcap,
+                                                    ucap, dh, nullptr, 0, nullptr, 0, 0);
+        std::snprintf(what, sizeof what, "pascal: gate_up_swiglu takes %s", tn);
+        expect_true(what, took);
+        const auto gh = host(dh, (size_t) S * F);
+        std::vector<uint16_t> hin((size_t) S * F);
+        std::vector<double> want_y;
+        std::vector<float> got_y;
+        bool h_ok = true;
+        double h_worst = 0;
+        for (int s = 0; s < S; ++s) {
+            if (pick[s] < 0) continue;
+            const uint8_t* b = pool.data() + pick[s] * slot;
+            k::decode_host(ty, b, (size_t) F * C, wg.data());
+            k::decode_host(ty, b + eb0, (size_t) F * C, wu.data());
+            for (int r = 0; r < F; ++r) {
+                double a = 0, c = 0, aa = 0, ca = 0;
+                for (int i = 0; i < C; ++i) {
+                    const double xv = x[(size_t) tok[s] * C + i];
+                    a += (double) wg[(size_t) r * C + i] * xv, c += (double) wu[(size_t) r * C + i] * xv;
+                    aa += std::fabs(wg[(size_t) r * C + i] * xv), ca += std::fabs(wu[(size_t) r * C + i] * xv);
+                }
+                // (F32 sums of 2304 terms: their error ~ sqrt(n) 2^-24 of the terms' magnitudes - taken through the
+                //  SwiGLU as an interval, plus FP16's rounding of h)
+                auto sw = [&](double gg, double uu) {
+                    return gcap * std::tanh(gg / gcap) / (1.0 + std::exp(-gg)) * ucap * std::tanh(uu / ucap);
+                };
+                const double eg = 8 * std::sqrt((double) C) * 6e-8 * aa * sg[s], eu = 8 * std::sqrt((double) C) * 6e-8 * ca * su[s];
+                const double h0 = sw(a * sg[s], c * su[s]);
+                double dev_max = 0;
+                for (int i = -1; i <= 1; i += 2)
+                    for (int j = -1; j <= 1; j += 2) dev_max = std::max(dev_max, std::fabs(sw(a * sg[s] + i * eg, c * su[s] + j * eu) - h0));
+                const double got = h2f_host(gh[(size_t) s * F + r]), lim = dev_max + 1e-3 * std::fabs(h0) + 1e-4;
+                h_ok &= std::fabs(got - h0) <= lim;
+                h_worst = std::max(h_worst, std::fabs(got - h0) / lim);
+            }
+        }
+        std::printf("%s pascal: gate_up_swiglu %-5s (FP16 h) %d x %d, worst %.2f of the tolerance (F32 sums' error, FP16)\n",
+                    h_ok ? "ok  " : "FAIL", tn, S - 1, F, h_worst);
+        if (!h_ok) ++g_fail;
+        // down on h of our own (FP16 values, the same on both sides)
+        for (auto& v : hin) v = f2h_host(frand(3.0f));
+        CU(cudaMemcpy(dh, hin.data(), hin.size() * 2, cudaMemcpyHostToDevice));
+        std::snprintf(what, sizeof what, "pascal: down takes %s", tn);
+        expect_true(what, k::pascal::down(dblobs, S, ty, eb0 + eb1, dh, C, F, dy, nullptr, 0, 0));
+        const auto gy = host(dy, (size_t) S * C);
+        double scale = 0;
+        for (int s = 0; s < S; ++s) {
+            if (pick[s] < 0) continue;
+            k::decode_host(ty, pool.data() + pick[s] * slot + eb0 + eb1, (size_t) C * F, wd.data());
+            for (int r = 0; r < C; ++r) {
+                double a = 0;
+                for (int i = 0; i < F; ++i) a += (double) wd[(size_t) r * F + i] * h2f_host(hin[(size_t) s * F + i]);
+                want_y.push_back(a), got_y.push_back(gy[(size_t) s * C + r]);
+                scale = std::max(scale, std::fabs(a));
+            }
+        }
+        std::snprintf(what, sizeof what, "pascal: down %s (F32 y)", tn);
+        expect(what, got_y, want_y, 1e-5, 1e-6 * scale);
+        for (void* p : {(void*) dpool, (void*) dblobs, (void*) dx, (void*) dsg, (void*) dsu, (void*) dtok, (void*) dh,
+                        (void*) dy})
+            CU(cudaFree(p));
+    }
+    {   // the planar Q8_0 product at K 3072 (the heads' output), N not a multiple of a block's rows
+        const int N = 2305, K = 3072, nb = K / 32;
+        std::vector<int8_t> q((size_t) N * K);
+        for (auto& v : q) v = (int8_t) ((int) (rng() % 255) - 127);
+        std::vector<uint16_t> d((size_t) N * nb);
+        for (auto& v : d) v = f2h_host(0.001f + 0.01f * std::fabs(frand()));
+        const auto xq = fvec(K, 2.0f);
+        int8_t* dq = dev(q);
+        uint16_t* dd = dev(d);
+        float *dxq = dev(xq), *dyq = dev_n<float>(N);
+        expect_true("pascal: mv_q8p_conv takes K 3072",
+                    k::pascal::mv_q8p_conv(dq, dd, N, K, dxq, dyq, k::MvConv{}, k::MvConv{}, k::MvAlt{}, k::MvAlt{}, 0));
+        std::vector<double> want(N);
+        for (int r = 0; r < N; ++r) {
+            double a = 0;
+            for (int b = 0; b < nb; ++b) {
+                double sb = 0;
+                for (int j = 0; j < 32; ++j) sb += (double) q[(size_t) r * K + b * 32 + j] * xq[b * 32 + j];
+                a += (double) h2f_host(d[(size_t) r * nb + b]) * sb;
+            }
+            want[r] = a;
+        }
+        expect("pascal: mv_q8p K 3072", host(dyq, N), want, 2e-4, 1e-3);
+        for (void* p : {(void*) dq, (void*) dd, (void*) dxq, (void*) dyq}) CU(cudaFree(p));
+    }
+    // one token's attention on the graph's entry (the position on the device): the Pascal split (a block a KV head)
+    // against the generic decode's - a full layer 3001 keys deep and a sliding one (window 1024, a ring of 3072)
+    for (const bool sliding : {false, true}) {
+        const int H = 24, Hkv = 8, D = 128, d_rel = 16, extent = 1024, qpos = 3000;
+        const int window = sliding ? 1024 : (1 << 30), cap = sliding ? 3072 : 0, rows = sliding ? cap : qpos + 1;
+        const int P = sliding ? 16 : 128, k0 = sliding ? qpos - window + 1 : 0;
+        std::vector<uint16_t> kc((size_t) rows * Hkv * D), vc(kc.size());
+        for (auto& v : kc) v = f2h_host(frand(1.0f));
+        for (auto& v : vc) v = f2h_host(frand(1.0f));
+        auto qv = fvec((size_t) H * D, 1.0f), rv = fvec((size_t) H * d_rel, 1.0f), sink = fvec(H, 1.0f);
+        auto proj = fvec((size_t) extent * d_rel, 0.5f);
+        uint16_t *dkc = dev(kc), *dvc = dev(vc);
+        float *dq = dev(qv), *dr = dev(rv), *dsk = dev(sink), *dpj = dev(proj);
+        int* dpos = dev(std::vector<int>{qpos});
+        float *scr = dev_n<float>((size_t) H * 130 * 128), *o1 = dev_n<float>((size_t) H * D), *o2 = dev_n<float>((size_t) H * D);
+        const float qk = 0.0883883f;
+        k::attn_decode_f16_at(dq, dr, dsk, dkc, dvc, cap, H, Hkv, dpos, P, qk, dpj, d_rel, extent, window, scr, o1, 0);
+        k::attn_decode_f16(dq, dr, dsk, dkc, dvc, cap, H, Hkv, D, k0, qpos + 1 - k0, qpos, qk, dpj, d_rel, extent, window,
+                           scr, o2, 0);
+        const auto a1 = host(o1, (size_t) H * D), a2 = host(o2, (size_t) H * D);
+        std::vector<double> want(a2.begin(), a2.end());
+        expect(sliding ? "pascal: attn_decode_f16_at (sliding)" : "pascal: attn_decode_f16_at (full)", a1, want, 1e-4,
+               1e-5);
+        for (void* p : {(void*) dkc, (void*) dvc, (void*) dq, (void*) dr, (void*) dsk, (void*) dpj, (void*) dpos,
+                        (void*) scr, (void*) o1, (void*) o2})
+            CU(cudaFree(p));
+    }
+}
+#endif
+
 int main() {
     int dev_count = 0;
     CU(cudaGetDeviceCount(&dev_count));
@@ -3411,8 +3571,22 @@ int main() {
 #ifdef MAYA_USE_HIP
     test_experts_rdna();
 #endif
-    test_window_exact(p.major >= 7);   // (Volta and Turing: their own tensor-core kernels)
-    test_window_launches();
+#ifdef SAGUARO_IK2_PASCAL
+    if (k::pascal::experts_on() && k::pascal::q8_on() && k::pascal::attn_on()) test_pascal();   // (a real Pascal GPU)
+    else std::printf("--   pascal: the sm_6x kernels (sm_%d, class %d here)\n", p.major * 10 + p.minor, k::arch_class());
+#endif
+#ifdef SAGUARO_IK2_PASCAL
+    // (Pascal: no verify window - drafting off - and the token path's kernels are ik2_pascal.cu's, which the window's
+    //  generic kernels are not held to)
+    if (k::pascal::experts_on()) std::printf("--   window_exact: the verify window (Pascal: drafting off)\n");
+    else
+#endif
+    if (k::arch_class() < 70)   // (the sm_60 class, a Pascal GPU or SAGUARO_IK2_ARCH=60: no verify window - drafting off)
+        std::printf("--   window_exact, window_launches: the verify window (sm_%d class here: drafting off)\n", k::arch_class());
+    else {
+        test_window_exact(p.major >= 7);   // (Volta and Turing: their own tensor-core kernels)
+        test_window_launches();
+    }
     std::printf(g_fail ? "FAILED: %d check(s)\n" : "all passed\n", g_fail);
     return g_fail ? 1 : 0;
 }

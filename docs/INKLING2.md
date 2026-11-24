@@ -133,7 +133,7 @@ take the compiler's list from sm_60 on. CUDA 12.x for a V100 or a Pascal card (C
 | Ampere and newer (sm_80+) | `mma.sync` m16n8k16 | `mma.sync` m16n8k16 | fused (`mma.sync`, `cp.async`; sm_90a: wgmma) | block path |
 | Turing (sm_75) | Ampere's, m16n8k16 as two m16n8k8 | Ampere's, the same | cuBLAS (the fused kernel needs `cp.async` and more shared memory) | block path, exact (checked on a T4); drafting off (a NOTE): a window costs more than the drafts it keeps (section 9) |
 | Volta (sm_70) | its own: `mma.m8n8k4`, 32 keys a warp step | its own: `mma.m8n8k4` | cuBLAS; full layers from 64K keys deep its own `mma.m8n8k4` kernel (keys through shared memory, 8 queries a block; `SAGUARO_IK2_PA70=0`: cuBLAS) | none: drafting off (a NOTE) |
-| Pascal (sm_6x; second-class) | the scalar kernels (`SAGUARO_IK2_ATTN_MMA=0`'s) | the scalar mat-vecs (`SAGUARO_IK2_EXPERT_MMA=0`'s) | cuBLAS (FP16 in, F32 sums) | none: drafting off (a NOTE) |
+| Pascal (sm_6x; second-class) | its own (`src/ik2/ik2_pascal.cu`): a block a KV head and its 3 query heads, F32 (`SAGUARO_IK2_PASCAL_ATTN=0`: the scalar kernel) | its own F32 mat-vecs, NVFP4 and Q8_0 (`SAGUARO_IK2_PASCAL_EXPERTS=0`: the scalar ones); the dense Q8_0 too (`SAGUARO_IK2_PASCAL_Q8=0`) | cuBLAS (FP16 in, F32 sums: faster than its Sgemm at the experts' shapes on CUDA 12.0); chunk 8192 / 4096 where every expert stays in VRAM | none: drafting off (a NOTE) |
 
 Each class is exact within itself (the same greedy answers start after start); the classes differ from each other in
 their sums' order, as different kernels do. `SAGUARO_IK2_ARCH=60` / `70` / `75` takes an older class's kernels on a newer GPU (tests;

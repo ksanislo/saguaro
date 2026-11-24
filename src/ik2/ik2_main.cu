@@ -60,6 +60,7 @@ static inline ssize_t pread(int fd, void* buf, size_t count, int64_t offset) {
 }
 #define posix_fadvise(fd, off, len, adv) ((void)0)
 #define MADV_WILLNEED 0
+#define MADV_DONTNEED 0
 static inline int madvise(void*, size_t, int) { return 0; }
 static inline int munmap(void*, size_t) { return 0; }
 #ifndef SIGUSR1
@@ -7039,6 +7040,7 @@ void check_preview(int n_gpu, bool serve) {
 int main(int argc, char** argv) {
     std::string model, toks, dump, draft_path, drafting;
     int gen = 16, chunk = 2048, ctx = 262144, threads = 8, n_gpu = 1;
+    int chunk_set = 0;   // (--chunk: 1 a number, 2 auto; not given: auto on Pascal)
     bool serve = false, serve_maya = true;   // (--serve: Saguaro's engine protocol; --serve-ik2: the @-line one)
     std::vector<int> eos_ids;                 // --eos a,b: the tokens a request ends at (Maya's protocol)
     double cache_gb = 60;
@@ -7061,7 +7063,11 @@ int main(int argc, char** argv) {
             }
         }
         else if (a == "--gen") gen = std::atoi(next().c_str());
-        else if (a == "--chunk") chunk = std::atoi(next().c_str());
+        else if (a == "--chunk") {   // (auto: the largest of 8192 / 4096 / the given default that keeps every expert in VRAM)
+            const std::string v = next();
+            chunk_set = v == "auto" ? 2 : 1;
+            if (v != "auto") chunk = std::atoi(v.c_str());
+        }
         else if (a == "--ctx" || a == "--max-context") ctx = std::atoi(next().c_str());   // (--max-context: serve/server.py's name)
         else if (a == "--cache-gb") cache_gb = std::atof(next().c_str());
         else if (a == "--threads") threads = std::atoi(next().c_str());
@@ -7669,6 +7675,33 @@ int main(int argc, char** argv) {
                         "cache path instead)\n");
 #endif
         if (g_off_want) g_dense_q8 = true;
+        size_t chunk_extra = 0;   // (the auto chunk's VRAM beyond the plan's: the room checks below count it)
+        if ((chunk_set == 2 || (chunk_set == 0 && k::arch_class() == 60)) && g_fast_want && n_gpu == 1 && g_tpn <= 1) {
+            // (a prompt chunk's work buffers and slot 0's sliding rings: ~0.6 MiB a token, measured on a P40 - 2048 ->
+            //  8192 took 3.7 GiB more; --parallel's other slots each a sliding ring a sliding visit, window + chunk
+            //  rows; the pictures' encoder's room (SAGUARO_IK2_VISION_GIB) kept.  The larger chunk where every expert
+            //  stays in VRAM with half a GiB to spare.  P40, the one-T4 quant: an 8K read 374 -> 451 -> 503 tok/s at
+            //  2048 / 4096 / 8192, 30K 276 -> 311 -> 333, decode the same)
+            size_t slide_vis = 0;
+            for (int l = 0; l < c.n_layer; ++l)
+                if (c.sliding[l]) slide_vis += (l >= c.core0 && l < c.core1) ? (size_t) c.n_pass : 1;
+            const size_t kv_row = (size_t) c.KV * c.D * (g_kv_fp8 ? 1 : 2) * 2;
+            const char* vg = getenv("SAGUARO_IK2_VISION_GIB");
+            const size_t vis_room = vg ? (size_t) (std::max(0.0, std::atof(vg)) * 1073741824.0) : 0;
+            for (const int c2 : {8192, 4096}) {
+                if (c2 <= chunk) continue;
+                const auto ring = [&](int ch) { return (size_t) std::min(ctx, c.window + std::max(ch, ik2::draft::kBlock)); };
+                const size_t par = serve && g_par > 1 ? (size_t) (g_par - 1) * slide_vis * (ring(c2) - ring(chunk)) * kv_row : 0;
+                const size_t extra = (size_t) (c2 - chunk) * (640 << 10) + par;
+                if (exp_b + dense_b + kv_b + reserve + extra + vis_room + ((size_t) 1 << 29) <= fr0) {
+                    std::printf("prompt chunk: %d (%s; every expert stays in VRAM)\n", c2,
+                                chunk_set == 2 ? "--chunk auto" : "Pascal's default");
+                    chunk = c2;
+                    chunk_extra = extra;
+                    break;
+                }
+            }
+        }
         std::printf("experts %.1f GiB, dense weights %.1f GiB as blocks, K / V cache %.1f GiB, %.1f GiB free: %s\n",
                     exp_b / 1073741824.0, dense_b / 1073741824.0, kv_b / 1073741824.0, fr0 / 1073741824.0,
                     fits && !g_off_want ? "every expert stays in VRAM"
@@ -7718,7 +7751,7 @@ int main(int argc, char** argv) {
         // it runs on the resident path, its room - the drafter's, or the prompt lookup's window records alone - beside
         // the model at this context, and not the room the pictures' encoder would have had on the GPU (SAGUARO_IK2_VISION_GIB,
         // the server's: the encoder starts on the GPU when the free VRAM holds it).  Else it is left out, said why.
-        const size_t used = exp_b + dense_b + kv_b + reserve;
+        const size_t used = exp_b + dense_b + kv_b + reserve + chunk_extra;
         const double vis = getenv("SAGUARO_IK2_VISION_GIB") ? std::atof(getenv("SAGUARO_IK2_VISION_GIB")) * 1073741824.0 : 0.0;
         const double left = fr0 > used ? (double) (fr0 - used) : 0.0;
         auto room_ok = [&](size_t need, std::string& why, bool /*lookup*/) {
@@ -8168,6 +8201,16 @@ int main(int argc, char** argv) {
     //  files are mapped straight to their slots, and stay in the page cache for the next load - SAGUARO_IK2_HOST=pinned: as
     //  for the other models)
     const bool host_mmap = !S.sv && (getenv("SAGUARO_IK2_HOST") ? std::string(getenv("SAGUARO_IK2_HOST")) == "mmap" : g_fast_want);
+#if defined(SAGUARO_IK2_PASCAL) && !defined(_WIN32)
+    // (Pascal's PCs - a P40 beside 32 GB of RAM: the experts' pages of the mapped files read ahead a layer at a time
+    //  as the resident path copies it to VRAM, then dropped from this process and the page cache - nothing reads them
+    //  on the host again, and the whole file read ahead at once pushed the PC's other programs into swap;
+    //  SAGUARO_IK2_RELEASE_HOST: 1 also on other GPUs, 0 off)
+    const char* rh_env = getenv("SAGUARO_IK2_RELEASE_HOST");
+    const bool rel_host = host_mmap && tpN == 1 && (rh_env ? std::atoi(rh_env) != 0 : k::arch_class() == 60);
+#else
+    const bool rel_host = false;
+#endif
     // The offload path pins only the experts the VRAM tier does not hold (owner, v1.1.73): the layers' blocks only
     // reserved here (no RAM), the tier planned on the real free VRAM (EC.init), copied in from where the files are
     // mapped, then the rest read and pinned (below the warm) - an 8 GB card's tier is RAM a 16 GB PC does not need.
@@ -8215,7 +8258,7 @@ int main(int argc, char** argv) {
                     Ly.host[2] = d, Ly.stride[2] = Ly.eb[2];
                 }
             }
-            {   // (read ahead: a cold file otherwise comes in a page fault at a time)
+            if (!rel_host) {   // (read ahead: a cold file otherwise comes in a page fault at a time)
                 const size_t pg = 4096, a0 = (size_t) p & ~(pg - 1);
                 ::madvise((void*) a0, (size_t) p - a0 + tensor_bytes(*S.info(J.name)), MADV_WILLNEED);
             }
@@ -9032,10 +9075,40 @@ int main(int argc, char** argv) {
             const double tw = now();
             const uint64_t m0 = EC.misses, b0 = EC.bytes_up;
             int n = 0;
-            for (int l = 0; l < c.n_layer; ++l)
+            size_t rel = 0;
+            std::vector<int> rel_fd(S.paths.size(), -1);
+            // (rel_host: a layer's expert tensors' whole pages - read ahead, or dropped from RAM once in VRAM)
+            auto rel_layer = [&](int l, bool drop) {
+                const size_t pg = 4096;
+                for (const auto& J : exp_jobs) {
+                    if (J.l != l) continue;
+                    const size_t p0 = (size_t) S.data(J.name), p1 = p0 + tensor_bytes(*S.info(J.name));
+                    if (!drop) {
+                        ::madvise((void*) (p0 & ~(pg - 1)), p1 - (p0 & ~(pg - 1)), MADV_WILLNEED);
+                        continue;
+                    }
+                    const size_t a = (p0 + pg - 1) & ~(pg - 1), b = p1 & ~(pg - 1);
+                    if (b <= a) continue;
+                    ::madvise((void*) a, b - a, MADV_DONTNEED);
+                    const int f = S.file_of(J.name);
+                    if (rel_fd[f] < 0) rel_fd[f] = ::open(S.paths[f].c_str(), O_RDONLY);
+                    if (rel_fd[f] >= 0) posix_fadvise(rel_fd[f], (off_t) (S.file_offset(J.name) + (a - p0)), (off_t) (b - a), POSIX_FADV_DONTNEED);
+                    rel += b - a;
+                }
+            };
+            if (rel_host) rel_layer(0, false);
+            for (int l = 0; l < c.n_layer; ++l) {
+                if (rel_host && l + 1 < c.n_layer) rel_layer(l + 1, false);   // (the next layer's pages on their way)
                 for (int e = 0; e < c.E; ++e)
                     if (!EC.has(l, e)) EC.get(M.L[l], l, e, EC.tick, g_cs, nullptr, true, true), ++n;
+                if (rel_host) {
+                    CU(cudaStreamSynchronize(g_cs));
+                    rel_layer(l, true);
+                }
+            }
             CU(cudaStreamSynchronize(g_cs));
+            for (int f : rel_fd)
+                if (f >= 0) ::close(f);
             ++EC.tick;
             for (int l = 0; l < c.n_layer; ++l) {
                 Layer& Ly = M.L[l];
@@ -9051,8 +9124,16 @@ int main(int argc, char** argv) {
             g_fast = true;
             std::printf("resident: every expert in VRAM (%d copied in %.1f s); tokens take the resident path%s\n", n,
                         now() - tw, g_graph ? ", a CUDA graph each" : "");
+            if (rel_host)
+                std::printf("host: the experts' %.1f GiB of the model files released from RAM as they reached VRAM\n",
+                            rel / 1073741824.0);
         } else {
             std::printf("resident path off: %s\n", all ? "a dense matrix is not kept as blocks" : "the cache does not hold every expert");
+            if (rel_host)   // (the read-ahead the release path left to the upload: the whole files' as without it)
+                for (const auto& J : exp_jobs) {
+                    const size_t pg = 4096, p0 = (size_t) S.data(J.name);
+                    ::madvise((void*) (p0 & ~(pg - 1)), p0 - (p0 & ~(pg - 1)) + tensor_bytes(*S.info(J.name)), MADV_WILLNEED);
+                }
             if (tpN > 1) die("--tp: GPU " + std::to_string(d) + " does not hold its share of every expert");
         }
     }

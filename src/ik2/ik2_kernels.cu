@@ -2,6 +2,9 @@
 #include "ik2_kernels.cuh"
 #include "ik2_iq_tables.h"
 #include "sf_codecs.h"   // (Strata packs: src/strata_fmt)
+#ifdef SAGUARO_IK2_PASCAL
+#include "ik2_pascal.cuh"   // (Pascal's token-path kernels: k::arch_class 60)
+#endif
 
 #include <cuda_fp16.h>
 #ifndef MAYA_USE_HIP
@@ -8101,6 +8104,9 @@ void experts_gate_up(const uint8_t* const* blob, const int* tok, int S, int ty_g
 void experts_down(const uint8_t* const* blob, int S, int ty_down, size_t off_down, const uint16_t* h, int C, int F,
                   float* y, cudaStream_t s, const int* cls, int want) {
     if (S <= 0) return;
+#ifdef SAGUARO_IK2_PASCAL
+    if (pascal::experts_on() && pascal::down(blob, S, ty_down, off_down, h, C, F, y, cls, want, s)) return;
+#endif
     if (S <= 4) launch_experts_down<4, 2>(blob, S, ty_down, off_down, h, C, F, y, cls, want, s);
     else launch_experts_down<4, 4>(blob, S, ty_down, off_down, h, C, F, y, cls, want, s);
     check("experts_down");
@@ -8179,6 +8185,11 @@ void experts_gate_up_swiglu_rows(const uint8_t* const* blob, const int* tok, int
                                  size_t eb0, const float* x, int C, int F, const float* sg, const float* su, float gcap,
                                  float ucap, uint16_t* h, const int* orow, int h_ld, cudaStream_t s) {
     if (S <= 0) return;
+#ifdef SAGUARO_IK2_PASCAL
+    if (pascal::experts_on() &&
+        pascal::gate_up_swiglu(blob, tok, S, ty_gate, ty_up, eb0, x, C, F, sg, su, gcap, ucap, h, orow, h_ld, nullptr, 0, s))
+        return;
+#endif
     if (S <= 8) launch_experts_gate_up_swiglu<4, 2>(blob, tok, S, ty_gate, ty_up, eb0, x, C, F, sg, su, gcap, ucap, h, s, orow, h_ld);
     else launch_experts_gate_up_swiglu<4, 4>(blob, tok, S, ty_gate, ty_up, eb0, x, C, F, sg, su, gcap, ucap, h, s, orow, h_ld);
     check("experts_gate_up_swiglu_rows");
@@ -8187,6 +8198,11 @@ void experts_gate_up_swiglu(const uint8_t* const* blob, const int* tok, int S, i
                             const float* x, int C, int F, const float* sg, const float* su, float gcap, float ucap,
                             uint16_t* h, cudaStream_t s, const int* cls, int want) {
     if (S <= 0) return;
+#ifdef SAGUARO_IK2_PASCAL
+    if (pascal::experts_on() &&
+        pascal::gate_up_swiglu(blob, tok, S, ty_gate, ty_up, eb0, x, C, F, sg, su, gcap, ucap, h, nullptr, 0, cls, want, s))
+        return;
+#endif
     if (S <= 8) launch_experts_gate_up_swiglu<4, 2>(blob, tok, S, ty_gate, ty_up, eb0, x, C, F, sg, su, gcap, ucap, h, s, nullptr, 0, cls, want);
     else launch_experts_gate_up_swiglu<4, 4>(blob, tok, S, ty_gate, ty_up, eb0, x, C, F, sg, su, gcap, ucap, h, s, nullptr, 0, cls, want);
     check("experts_gate_up_swiglu");
@@ -8340,6 +8356,9 @@ void mv_q8p_conv(const int8_t* q, const uint16_t* d, int N, int K, const float* 
         std::fprintf(stderr, "ik2::k::mv_q8p: K %d, or q / x not aligned\n", K);
         std::abort();
     }
+#ifdef SAGUARO_IK2_PASCAL
+    if (pascal::q8_on() && pascal::mv_q8p_conv(q, d, N, K, x, y, c0, c1, a0, a1, s)) return;
+#endif
     mv_q8p_kernel<4><<<(unsigned) ((N + 3) / 4), 128, 0, s>>>(q, d, N, K, x, y, c0, c1, a0, a1);
     check("mv_q8p");
 }
@@ -8411,6 +8430,10 @@ void prep_qkv_r_fp8_at(float* q, const float* q_clip, const float* k_in, uint8_t
 void attn_decode_f16_at(const float* q, const float* r, const float* sink, const uint16_t* kc, const uint16_t* vc,
                         int kv_cap, int H, int Hkv, const int* pos, int P, float qk_scale, const float* proj,
                         int d_rel, int extent, int window, float* scratch, float* out, cudaStream_t s) {
+#ifdef SAGUARO_IK2_PASCAL
+    if (!(pascal::attn_on() &&
+          pascal::attn_split_f16(q, r, kc, vc, kv_cap, H, Hkv, pos, P, qk_scale, proj, d_rel, window, extent, scratch, s)))
+#endif
     attn_split_kernel<uint16_t><<<dim3(H, P), 128, 0, s>>>(q, r, kc, vc, kv_cap, H, Hkv, 0, 0, 0, qk_scale, proj,
                                                             d_rel, extent, window, scratch, pos);
     check("attn_decode_f16_at (split)");

@@ -132,9 +132,11 @@ reading) - what the setup quotes for these layouts.
 ## Tuning on your hardware
 
 `saguaro-ik2` runs on NVIDIA cards from Volta on (compute capability 7.0: V100, Tesla T4, RTX 20 and newer), Linux;
-Pascal (Tesla P40 / P100, GTX 10: compute capability 6.x) is second-class - no tensor cores, so it takes the scalar
-kernels (checked on one Tesla P40 24 GB with CUDA 12.0, every expert resident: decode 36 / 32 / 28.5 tok/s at 0 / 8K /
-30K tokens deep, a 8K read 373 tok/s; build with CUDA 12.x and `-DCMAKE_CUDA_ARCHITECTURES=61`). A
+Pascal (Tesla P40 / P100, GTX 10: compute capability 6.x) is second-class - no tensor cores, so it takes FP32
+kernels of its own (`src/ik2/ik2_pascal.cu`; checked on one Tesla P40 24 GB, ECC on, with CUDA 12.0, every expert
+resident, UD-Q4_K_XL: decode 40 / 37 / 33.5 tok/s at 0 / 8K / 30K tokens deep, reads 458 / 315 tok/s at 8K / 30K with
+the prompt chunk Pascal picks, 4096 there; the PC keeps ~2 GB of the model files in RAM; build with CUDA 12.x and
+`-DCMAKE_CUDA_ARCHITECTURES=61`). A
 card of 24 GB or more keeps the whole model in VRAM and needs none of this; on 16 GB cards these settings matter. Each
 is a flag or an `env` entry in the config (`maya-inkling-2-mini.json`, Models page or by hand); restart the model after
 a change. Tuned on Tesla T4s, two loads of each setting, interleaved (decode about 60 / 8K tokens deep, an 8-16K read).
