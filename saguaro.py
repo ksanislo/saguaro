@@ -2020,6 +2020,8 @@ def choose_family(a, prev: dict) -> str:
     if a.model:
         return {DS4: "deepseek", MM3: "minimax", QFN: "qfn", HY4: "hy4", IK2: "ik2"}.get(a.model, "glm")
     metal = getattr(a, "backend", None) == "metal"
+    if a.gguf_dir and prev and setup_family(prev) not in ("glm", None, ""):   # (a setup again of a QFN / other config:
+        return setup_family(prev)                      #  --gguf-dir names that model's files, not GLM's)
     if a.gguf_dir or a.draft or (metal and not a.model_dir):     # (Metal runs GLM only: no question)
         return "glm"
     if a.model_dir:                                    # (an EXL3 folder of GLM or MiniMax; else DeepSeek's files)
@@ -7272,6 +7274,10 @@ def qfn_files_step(a, d: Path, quant: str) -> list | None:
     published sha256.  None when nothing was downloaded."""
     m = qfn_entry(quant)
     src = Path(a.gguf_dir).expanduser().resolve() if getattr(a, "gguf_dir", None) else d
+    was = getattr(a, "qfn_prev_files_dir", None)       # (a setup again: the folder the config's files were in - an
+    if not getattr(a, "gguf_dir", None) and was and Path(was).is_dir() and \
+            not any(file_incomplete(m, Path(was) / n) for n in m["files"]):   # old --gguf-dir, a migrated config's)
+        src = Path(was).expanduser().resolve()
     if src.is_file():
         src = src.parent
     files = [src / n for n in m["files"]]
@@ -7644,6 +7650,9 @@ def set_up_qfn(a, prev: dict) -> Path | None:
     inst = prev.get("installer") or {}
     prev_args = prev.get("args") or []
     prev_ctx = int(prev_args[prev_args.index("--max-context") + 1]) if "--max-context" in prev_args[:-1] else None
+    if not getattr(a, "gpu", None) and not getattr(a, "gpus", None) and len(prev.get("gpu") or []) > 1:
+        a.gpus = ",".join(str(i) for i in prev["gpu"])   # (a setup again: the cards the config ran on, unless told)
+    a.qfn_prev_files_dir = inst.get("files_dir")      # (qfn_files_step: a setup again finds the files there)
     pc = check_pc(a, "qfn")                            # 1
     hip = pc.get("backend") == "hip"
     if hip:
