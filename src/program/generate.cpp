@@ -622,14 +622,6 @@ void start_serve_watchdog(int default_s) {
 }
 
 
-int argmax(const std::vector<float>& v) {
-    int best = 0;
-    for (size_t i = 1; i < v.size(); ++i)
-        if (v[i] > v[best]) best = (int) i;
-    return best;
-}
-
-
 // ================================ the glm5-next pack path (M3.1) ================================
 //
 // A GLM-5.3-Flash pack (tools/iq_pack.py output) runs the VERIFIED runner - Glm5Model, the same
