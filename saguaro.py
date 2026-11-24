@@ -1667,10 +1667,13 @@ def check_pc(a, family: str = "glm", gguf: bool = False, ds4_quant: str = "exl3"
         why = IK2F.unsupported("cuda", WIN, 0, found, mem_gb()[0])
         if why:
             fail(why)
-    if family == "qfn":                                # (v1.2.1-B: cards under the measured 16 GB run, slowly -
-        why = QF.unsupported(found, mem_gb()[0])       #  one plain line with the numbers first, and only for a PC
-        if why:                                        #  that cannot run at all (below the true minimum)
-            fail(why)
+    if family == "qfn":                                        # (v1.2.1-B: cards under the measured 16 GB run,
+        why = QF.unsupported(QF.best_gpus(found) or found,     #  slowly - one plain line with the numbers first,
+                             mem_gb()[0])                      #  and only for a PC that cannot run at all (below
+        if why:                                                #  the true minimum), priced on the cards the picker
+            fail(why)                                          #  would take: a 1 GB display card it would never
+                                                               #  choose cannot refuse the PC - and --gpus is
+                                                               #  guarded on the chosen cards below)
     say("  NVIDIA GPUs:")
     for g in found:
         say(f"    {gpu_label(g)} - " + ("can be used" if int(g["arch"]) >= max(min_cc, VALIDATED_CC) else

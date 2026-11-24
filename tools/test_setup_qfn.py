@@ -919,6 +919,36 @@ class QfnGpus(unittest.TestCase):
         self.assertIn("cannot run with 12 GB of RAM", out)
         self.assertIn("at least about 16 GB", out)
 
+    def test_a_display_card_beside_a_good_one_is_not_a_refusal(self):
+        """Review finding 1: a 4090 plus a 1 GB GT 710 (cc 3.5 - below MIN_CC 61, a card choose_gpus can never
+        take) is a PC the code before this branch set up fine: the pre-guard prices the layout the PICKER would
+        use (best_gpus: the 4090 alone), not one split over every card nvidia-smi lists."""
+        cards = [{"index": 0, "name": "RTX 4090", "vram_gb": 24.0, "arch": "89", "driver": "550"},
+                 {"index": 1, "name": "GeForce GT 710", "vram_gb": 1.0, "arch": "35", "driver": "550"}]
+        out, got = io.StringIO(), []
+        ps = [patch.object(maya.S, "gpus", return_value=cards),
+              patch.object(maya.S, "is_wsl", return_value=False),
+              patch.object(maya.S, "cpu_info", return_value=("CPU", True, True)),
+              patch.object(maya.S, "out", return_value="g++ (test) 13.0"),
+              patch.object(maya, "oomd_active", return_value=False),
+              patch.object(maya, "mem_gb", return_value=(96.0, 80.0)),
+              patch.object(maya, "find_nvcc", return_value=("/usr/local/cuda-12.8/bin/nvcc", (12, 8))),
+              patch.object(maya.shutil, "which", side_effect=lambda c, *r: "/usr/bin/g++" if c == "g++" else None),
+              patch.object(maya, "pick_cmake", return_value=None),
+              patch.object(maya, "select_build_backend", lambda b: None)]
+        for p in ps:
+            p.start()
+        try:
+            with patch("sys.stdout", new=out), patch.object(maya.S, "UI", None):
+                got.append(maya.check_pc(args(backend="cuda"), "qfn"))
+        finally:
+            for p in ps:
+                p.stop()
+        self.assertIsNotNone(got[0])                                    # (the PC sets up: no refusal)
+        self.assertEqual([g["index"] for g in got[0]["gpus"]], [0])     # (the 4090 alone)
+        self.assertNotIn("cannot run", out.getvalue())
+        self.assertIn("too old", out.getvalue())                        # (the GT 710: listed, never chosen)
+
     def test_an_8_gb_pair_is_not_refused_by_the_fit_rule(self):
         """The 8 GB pair the old rule refused in check_pc is a warn row now (test_qfn_fit's matrix): the fit
         guards say nothing about it and the picker takes both cards."""
