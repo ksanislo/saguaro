@@ -284,7 +284,7 @@ vary about 25% in speed from load to load on the same text here.
 
 Correctness against the T4 build (the same five 12-29K-token prompts, 5,150 teacher-forced positions): KL 0.0057, the
 same top token 96.8% of the time (99.8% where the T4 is confident), perplexity 0.2% lower; the T4 against itself is
-bit-identical. MTP drafting does not change the answers on AMD (the same greedy tokens with it on and off). Not checked on AMD yet: pictures, several conversations at once, two AMD GPUs.
+bit-identical. Q8_0 (177 GB) on the same PC: KL 0.0050 against the T4's Q8_0, answers at 14-15 tok/s, prompts read at 73-315 tok/s (70 GB of its experts in RAM, ~50 GB read from the SSD as they are routed). MTP drafting does not change the answers on AMD (the same greedy tokens with it on and off). Not checked on AMD yet: pictures, several conversations at once, two AMD GPUs.
 
 ## Instinct MI300X / MI325X
 

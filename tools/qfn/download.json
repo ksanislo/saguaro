@@ -23,7 +23,7 @@
    "name": "Qwen3.8-Flash-Next-Q8_0",
    "about": "unsloth's Q8_0: every weight in 8 bits, the most accurate quant, 177 GB",
    "needs": {"vram_gb": 15, "ram_gb": 88},
-   "measured": null,
+   "measured": "an RX 9070 XT (16 GB) with 96 GB of RAM: 14-15 tok/s answers, 73-315 tok/s prompt reads (about 50 GB of its experts read from the SSD)",
    "files": {
     "Qwen3.8-Flash-Next-Q8_0-00001-of-00006.gguf": [10946624, "2dabcbb53ca537a7947bc7d20414fd464eeaf4d66d43021b5b2556cc87544ad2"],
     "Qwen3.8-Flash-Next-Q8_0-00002-of-00006.gguf": [682434912, "494ca4ed3dbf97bc28da88af3890b8877b9032f909812d00c0526a9ca5e91d2e"],
