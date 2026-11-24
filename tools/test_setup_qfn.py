@@ -40,18 +40,20 @@ def refusal(fn):
 
 
 class Names(unittest.TestCase):
-    def test_ids_resolve_to_qwen_with_the_quant(self):
-        self.assertEqual(Q.resolve("qwen3.8-flash-next"), ("qwen", "ud-q4_k_xl"))
-        self.assertEqual(Q.resolve("Qwen3.8-Flash-Next-Q8_0"), ("qwen", "q8_0"))
-        self.assertEqual(Q.resolve("qfn"), ("qwen", "ud-q4_k_xl"))
+    def test_ids_resolve_to_qfn_with_the_quant(self):
+        self.assertEqual(Q.resolve("qwen3.8-flash-next"), ("qfn", "ud-q4_k_xl"))
+        self.assertEqual(Q.resolve("Qwen3.8-Flash-Next-Q8_0"), ("qfn", "q8_0"))
+        self.assertEqual(Q.resolve("qfn"), ("qfn", "ud-q4_k_xl"))
+        self.assertEqual(Q.resolve("qfn-q8_0"), ("qfn", "q8_0"))
         self.assertEqual(Q.resolve("cyber-frost"), ("qwen", "q5_k_m"))   # (CYBER-FROST unchanged)
 
     def test_shown_names_the_engine_and_not_cyber_frost(self):
-        s = Q.shown("qwen", "ud-q4_k_xl", 111.3)
+        s = Q.shown("qfn", "ud-q4_k_xl", 111.3)
         self.assertEqual(s, "Qwen3.8-Flash-Next · UD-Q4_K_XL (saguaro-qfn) (111 GB)")
         self.assertNotIn("CYBER-FROST", s)
+        self.assertEqual(Q.shown("qfn", "ud-q4_k_xl"), Q.shown("qwen", "ud-q4_k_xl"))   # (the name is unchanged)
         self.assertIn("CYBER-FROST", Q.shown("qwen", "q5_k_m"))
-        self.assertEqual(Q.config_stem("qwen", "ud-q4_k_xl"), "maya-qwen3.8-flash-next-ud-q4_k_xl")
+        self.assertEqual(Q.config_stem("qfn", "ud-q4_k_xl"), "maya-qwen3.8-flash-next-ud-q4_k_xl")
         self.assertEqual(Q.config_stem("qwen", "q5_k_m"), "maya-cyber-frost")
 
     def test_model_option(self):
@@ -63,12 +65,34 @@ class Names(unittest.TestCase):
         self.assertIsNone(maya.model_option(b))
         self.assertEqual(maya.choose_family(b, {}), "qwen")
 
-    def test_a_setup_config_is_qwen_family_and_told_apart(self):
-        cfg = {"exe": "build-hip/qfn/saguaro-qfn", "installer": {"family": "qwen", "qwen_quant": "ud-q4_k_xl"}}
-        self.assertEqual(Q.family_of(cfg), "qwen")      # (the server's Qwen path: template, sampling)
+    def test_a_setup_config_is_qfn_family_and_told_apart(self):
+        cfg = {"exe": "build-hip/qfn/saguaro-qfn", "installer": {"family": "qfn", "qwen_quant": "ud-q4_k_xl"}}
+        self.assertEqual(Q.family_of(cfg), "qfn")        # (its own family since the identity split)
         self.assertEqual(maya.setup_family(cfg), "qfn")
-        self.assertEqual(maya.setup_family({"installer": {"family": "qwen", "qwen_quant": "q5_k_m"}}), "qwen")
         self.assertEqual(Q.config_label(cfg), "Qwen3.8-Flash-Next · UD-Q4_K_XL (saguaro-qfn)")
+        # the config a release before the split wrote: read as "qfn" too (maya_quants.family_of's migration)
+        old = {"exe": "build-hip/qfn/saguaro-qfn", "installer": {"family": "qwen", "qwen_quant": "ud-q4_k_xl"}}
+        self.assertEqual(Q.family_of(old), "qfn")
+        self.assertEqual(maya.setup_family(old), "qfn")
+        self.assertEqual(Q.config_label(old), "Qwen3.8-Flash-Next · UD-Q4_K_XL (saguaro-qfn)")
+        self.assertEqual(maya.setup_family({"installer": {"family": "qwen", "qwen_quant": "q5_k_m"}}), "qwen")
+        self.assertEqual(Q.family_of({"exe": "/b/maya", "args": ["--pack", "/p", "--ple-gguf", "/g"],
+                                      "installer": {"family": "qwen", "qwen_quant": "q5_k_m"}}), "qwen")
+
+    def test_the_hand_made_configs_the_exe_name_gives_away(self):
+        """The live ones (./ref/Qwen3.8-Flash-Next-Q8_0.json, copied): the installer names family "qwen" and no
+        quant - the exe is all they carry."""
+        cfg = {"exe": "/opt/llm/saguaro/bin/saguaro-qfn", "cwd": "/opt/llm/saguaro/engines/qfn",
+               "args": ["--pack", "/opt/llm/models/Qwen3.8-Flash-Next-Q8_0/pack", "--native",
+                        "/opt/llm/models/Qwen3.8-Flash-Next-Q8_0/Qwen3.8-Flash-Next-Q8_0-00001-of-00006.gguf",
+                        "--spec", "3", "--mtp", "/opt/llm/models/Qwen3.8-Flash-Next-MTP-Lamina",
+                        "--max-context", "1048576", "--kv", "int8", "--vision"],
+               "model_name": "Qwen3.8-Flash-Next-Q8_0", "installer": {"family": "qwen"}}
+        self.assertEqual(Q.family_of(cfg), "qfn")
+        self.assertEqual(maya.is_qfn_config(cfg), True)
+        self.assertEqual(maya.setup_family(cfg), "qfn")
+        self.assertEqual(Q.config_label(cfg), "Qwen3.8-Flash-Next")     # (no quant recorded: the model's name)
+        self.assertEqual(Q.model_defaults(cfg), ({"temperature": 1.0, "top_p": 0.95, "top_k": 20}, "xhigh"))
 
 
 class Manifest(unittest.TestCase):
@@ -145,7 +169,8 @@ class Config(unittest.TestCase):
             self.assertEqual(cfg["env"]["SAGUARO_MMQ_KQ"], "1")
             self.assertEqual((cfg["backend"], cfg["gpu"]), ("hip", [0]))
             self.assertEqual(cfg["installer"]["qwen_quant"], "ud-q4_k_xl")
-            self.assertEqual(Q.family_of(cfg), "qwen")
+            self.assertEqual(cfg["installer"]["family"], "qfn")         # (its own family since the identity split)
+            self.assertEqual(Q.family_of(cfg), "qfn")
             self.assertEqual(cfg["sampling"], {"temperature": 1.0, "top_p": 0.95, "top_k": 20})
 
 
@@ -155,7 +180,7 @@ class ModelsPage(unittest.TestCase):
         amd = [{"index": 0, "arch": "gfx1201", "vram_gb": 15.9, "vendor": "amd"}]
         rows = {e["id"]: e for e in M.catalog(ROOT, glm_sizes={}, cards=amd, ram_gb=91.7)}
         e = rows["qwen3.8-flash-next-ud-q4_k_xl"]
-        self.assertEqual(e["family"], "qwen")
+        self.assertEqual(e["family"], "qfn")           # (its own family since the identity split)
         self.assertIn("saguaro-qfn", e["name"])
         self.assertAlmostEqual(e["size_gb"], 111.3, delta=0.1)
         self.assertIn("fits", e["fit"])

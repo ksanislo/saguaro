@@ -84,6 +84,51 @@ class ModelDefaults(unittest.TestCase):
             self.assertNotEqual(Q.MODEL_DEFAULTS[fam][0]["temperature"], 0)
 
 
+class QfnIdentity(unittest.TestCase):
+    """QFN's own family (QFN-first T1): its ids resolve to ("qfn", quant), its configs read as "qfn" - the ones the
+    setup writes, the ones a release before the split wrote ("qwen" + a QFN quant) and the hand-made ones the exe name
+    gives away - while CYBER-FROST and its ids stay "qwen"."""
+
+    # ./ref/Qwen3.8-Flash-Next-UD-Q4_K_XL.json, copied: the live hand-made config, no quant in its installer record
+    REF_CFG = {"exe": "/opt/llm/saguaro/bin/saguaro-qfn", "cwd": "/opt/llm/saguaro/engines/qfn",
+               "args": ["--pack", "/opt/llm/models/Qwen3.8-Flash-Next-UD-Q4_K_XL/pack", "--native",
+                        "/opt/llm/models/Qwen3.8-Flash-Next-UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf",
+                        "--spec", "3", "--mtp", "/opt/llm/models/Qwen3.8-Flash-Next-MTP-Lamina",
+                        "--max-context", "1048576", "--kv", "int8", "--vision"],
+               "model_name": "Qwen3.8-Flash-Next-UD-Q4_K_XL", "installer": {"family": "qwen"}}
+
+    def test_qfn_ids_resolve_to_their_own_family(self):
+        for i in Q.QFN_IDS:
+            self.assertEqual(Q.resolve(i), ("qfn", Q.QFN_IDS[i]), i)
+        self.assertEqual(Q.resolve("Qwen3.8-Flash-Next-Q8_0"), ("qfn", "q8_0"))   # (the quant file's own name)
+        for i in Q.QWEN_IDS:
+            self.assertEqual(Q.resolve(i), ("qwen", "q5_k_m"), i)                 # (CYBER-FROST unchanged)
+
+    def test_family_of_reads_all_three_config_shapes_as_qfn(self):
+        new = {"exe": "/b/saguaro-qfn", "installer": {"family": "qfn", "qwen_quant": "q8_0"}}
+        old = {"exe": "/b/saguaro-qfn", "installer": {"family": "qwen", "qwen_quant": "q8_0"}}   # (before the split)
+        self.assertEqual(Q.family_of(new), "qfn")
+        self.assertEqual(Q.family_of(old), "qfn")
+        self.assertEqual(Q.family_of(self.REF_CFG), "qfn")           # (installer "qwen", no quant: the exe names it)
+        self.assertEqual(Q.family_of({"exe": "/opt/llm/bin/saguaro-qfn", "args": ["--pack", "/p"]}), "qfn")
+
+    def test_cyber_frost_stays_qwen(self):
+        for cfg in ({"exe": "/b/maya", "args": ["--pack", "/p", "--ple-gguf", "/g"]},
+                    {"exe": "/b/saguaro-glm", "installer": {"family": "qwen", "qwen_quant": "q5_k_m"}},
+                    {"exe": "/b/maya", "installer": {"family": "qwen"}}):
+            self.assertEqual(Q.family_of(cfg), "qwen", str(cfg))
+
+    def test_the_qfn_names_and_defaults(self):
+        cfg = {"exe": "/b/saguaro-qfn", "installer": {"family": "qfn", "qwen_quant": "ud-q4_k_xl"}}
+        self.assertEqual(Q.config_key(cfg), "ud-q4_k_xl")
+        self.assertEqual(Q.config_label(cfg), "Qwen3.8-Flash-Next · UD-Q4_K_XL (saguaro-qfn)")
+        self.assertEqual(Q.shown("qfn", "ud-q4_k_xl"), Q.shown("qwen", "ud-q4_k_xl"))   # (shown as before the split)
+        self.assertEqual(Q.config_stem("qfn", "ud-q4_k_xl"), "maya-qwen3.8-flash-next-ud-q4_k_xl")
+        self.assertEqual(Q.model_defaults(cfg), Q.MODEL_DEFAULTS["qfn"])
+        self.assertEqual(Q.MODEL_DEFAULTS["qfn"], Q.MODEL_DEFAULTS["qwen"])   # (the values QFN got as a "qwen" config)
+        self.assertIsNone(Q.config_key({"exe": "/b/saguaro-qfn"}))            # (hand-made: None for the model itself)
+
+
 class Aliases(unittest.TestCase):
     def test_setup_ids(self):
         for i, (family, key, shown) in IDS.items():
