@@ -25,9 +25,9 @@ namespace ik2::k::pascal {
 
 namespace {
 
-bool env_on(const char* name) {
+bool env_on(const char* name) {   // (unset or empty: on; else on unless it reads as 0 - the engine's atoi convention)
     const char* e = std::getenv(name);
-    return !(e && e[0] == '0' && !e[1]);
+    return !(e && *e && std::atoi(e) == 0);
 }
 
 void check(const char* what) {
@@ -140,7 +140,9 @@ __device__ __forceinline__ float q8_dot4(uint32_t w, float4 x) {
 }
 
 // rows_dot for Q8_0 blocks (34 bytes: FP16 d, 32 int8; a row's blocks 2-byte aligned): RG rows of NB blocks, lane l
-// the blocks l, l + 32, ... - each read as the 9 aligned words around it (all a lane's first), then taken apart
+// the blocks l, l + 32, ... - each read as the 9 aligned words around it (all a lane's first), then taken apart.  (A
+// block at 2 mod 4 ends 2 bytes into its last word: the read never leaves the aligned word holding the block's last
+// byte, so never a page or an allocation - those are 256-byte aligned.)
 template <int NB, int RG>
 __device__ __forceinline__ void rows_dot_q8(const uint8_t* const (&rows)[RG], const float* xs, float (&acc)[RG]) {
     constexpr int NI = RG * NB / 32;
@@ -190,7 +192,7 @@ __global__ void __launch_bounds__(WARPS * 32)
 gate_up_swiglu_q8_kernel(const uint8_t* const* blob, const int* tok, size_t eb0, const float* x, int F, const float* sg,
                          const float* su, float gcap, float ucap, uint16_t* h, const int* orow, int h_ld,
                          const int* cls, int want) {
-    if (IK2P_STUB) return;
+    if (IK2P_STUB) __trap();   // (never launched on sm_70+: pascal_gpu() - a launch there is a bug)
     constexpr int C = NB * 32;
     constexpr size_t RB = (size_t) NB * 34;
     extern __shared__ float4 xs4[];
@@ -220,7 +222,7 @@ template <int NB, int WARPS>
 __global__ void __launch_bounds__(WARPS * 32)
 down_q8_kernel(const uint8_t* const* blob, size_t off_down, const uint16_t* h, int C, float* y, const int* cls,
                int want) {
-    if (IK2P_STUB) return;
+    if (IK2P_STUB) __trap();   // (never launched on sm_70+: pascal_gpu() - a launch there is a bug)
     constexpr int F = NB * 32, RG = 8;
     constexpr size_t RB = (size_t) NB * 34;
     extern __shared__ float4 xs4[];
@@ -251,7 +253,7 @@ __global__ void __launch_bounds__(WARPS * 32)
 gate_up_swiglu_kernel(const uint8_t* const* blob, const int* tok, size_t eb0, const float* x, int F, const float* sg,
                       const float* su, float gcap, float ucap, uint16_t* h, const int* orow, int h_ld, const int* cls,
                       int want) {
-    if (IK2P_STUB) return;
+    if (IK2P_STUB) __trap();   // (never launched on sm_70+: pascal_gpu() - a launch there is a bug)
     constexpr int C = NS * 16;
     constexpr size_t RB = (size_t) NS / 4 * 36;
     extern __shared__ float4 xs4[];
@@ -282,7 +284,7 @@ gate_up_swiglu_kernel(const uint8_t* const* blob, const int* tok, size_t eb0, co
 template <int NS, int WARPS, int GROUPS>
 __global__ void __launch_bounds__(WARPS * 32)
 down_kernel(const uint8_t* const* blob, size_t off_down, const uint16_t* h, int C, float* y, const int* cls, int want) {
-    if (IK2P_STUB) return;
+    if (IK2P_STUB) __trap();   // (never launched on sm_70+: pascal_gpu() - a launch there is a bug)
     constexpr int F = NS * 16, RG = 4;
     constexpr size_t RB = (size_t) NS / 4 * 36;
     extern __shared__ float4 xs4[];
@@ -336,7 +338,7 @@ template <int NI, int WARPS>
 __global__ void __launch_bounds__(WARPS * 32)
 q8p_kernel(const int8_t* __restrict__ q, const uint16_t* __restrict__ d, int N, const float* __restrict__ x, float* y,
            MvConv c0, MvConv c1, MvAlt a0, MvAlt a1) {
-    if (IK2P_STUB) return;
+    if (IK2P_STUB) __trap();   // (never launched on sm_70+: pascal_gpu() - a launch there is a bug)
     constexpr int K = NI * 256;
     const int row = blockIdx.x * WARPS + (threadIdx.x >> 5), lane = threadIdx.x & 31;
     if (row >= N) return;
@@ -380,7 +382,7 @@ template <int NI, int SPLIT>
 __global__ void __launch_bounds__(SPLIT * 64)
 q8p_split_kernel(const int8_t* __restrict__ q, const uint16_t* __restrict__ d, int N, const float* __restrict__ x,
                  float* y, MvConv c0, MvConv c1, MvAlt a0, MvAlt a1) {
-    if (IK2P_STUB) return;
+    if (IK2P_STUB) __trap();   // (never launched on sm_70+: pascal_gpu() - a launch there is a bug)
     constexpr int K = NI * 256, NS = NI / SPLIT;
     static_assert(NI % SPLIT == 0, "a row's steps split evenly");
     __shared__ float part[2][SPLIT];
@@ -421,7 +423,7 @@ template <int G, int WARPS>
 __global__ void __launch_bounds__(WARPS * 32)
 attn_gqa_kernel(const float* q, const float* r, const uint16_t* kc, const uint16_t* vc, int kv_cap, int Hkv,
                 float qk_scale, const float* proj, int d_rel, int extent, int window, float* part, const int* pos_d) {
-    if (IK2P_STUB) return;
+    if (IK2P_STUB) __trap();   // (never launched on sm_70+: pascal_gpu() - a launch there is a bug)
     __shared__ float sm_m[WARPS][G], sm_s[WARPS][G];
     __shared__ __align__(16) float sm_o[WARPS][G][128];
     const int qpos = *pos_d, k0 = window < (1 << 30) ? max(0, qpos - window + 1) : 0, nk = qpos + 1 - k0;
@@ -456,6 +458,7 @@ attn_gqa_kernel(const float* q, const float* r, const uint16_t* kc, const uint16
         const float2 v01 = u32_to_f2(vu.x), v23 = u32_to_f2(vu.y);
 #pragma unroll
         for (int h = 0; h < G; ++h) {
+            if (!(a[h] > -INFINITY)) continue;   // (attn_split_kernel's guard: a key no head may see)
             const float mn = fmaxf(m[h], a[h]);
             const float al = m[h] == -INFINITY ? 0.0f : expf(m[h] - mn), be = expf(a[h] - mn);
             m[h] = mn, sum[h] = sum[h] * al + be;
@@ -502,18 +505,34 @@ static bool q8_experts_on() {   // (SAGUARO_IK2_PASCAL_Q8_EXPERTS=0: Q8_0 expert
     return on;
 }
 
+// (the current device a real Pascal one - compute capability 6.x by its own attributes, not arch_class(), which
+//  SAGUARO_IK2_ARCH=60 lowers on newer GPUs for tests: there the kernels compiled for them are stubs - per device,
+//  as a split may pair a P40 with a newer card)
+static bool pascal_gpu() {
+    static int cc_major[64] = {};
+    int d = 0;
+    cudaGetDevice(&d);
+    if (d < 0 || d >= 64) return false;
+    if (!cc_major[d]) {
+        int ma = 0;
+        cudaDeviceGetAttribute(&ma, cudaDevAttrComputeCapabilityMajor, d);
+        cc_major[d] = ma > 0 ? ma : -1;
+    }
+    return cc_major[d] == 6 && arch_class() == 60;
+}
+
 bool attn_on() {
-    static const bool on = arch_class() == 60 && env_on("SAGUARO_IK2_PASCAL_ATTN");
-    return on;
+    static const bool on = env_on("SAGUARO_IK2_PASCAL_ATTN");
+    return on && pascal_gpu();
 }
 
 bool experts_on() {
-    static const bool on = arch_class() == 60 && env_on("SAGUARO_IK2_PASCAL_EXPERTS");
-    return on;
+    static const bool on = env_on("SAGUARO_IK2_PASCAL_EXPERTS");
+    return on && pascal_gpu();
 }
 bool q8_on() {
-    static const bool on = arch_class() == 60 && env_on("SAGUARO_IK2_PASCAL_Q8");
-    return on;
+    static const bool on = env_on("SAGUARO_IK2_PASCAL_Q8");
+    return on && pascal_gpu();
 }
 bool gate_up_swiglu(const uint8_t* const* blob, const int* tok, int S, int ty_gate, int ty_up, size_t eb0,
                     const float* x, int C, int F, const float* sg, const float* su, float gcap, float ucap, uint16_t* h,

@@ -2963,7 +2963,7 @@ void test_window_exact(bool mma) {
 void test_window_launches() {
     const bool mma = k::arch_class() >= 75;   // (Turing on: its window runs Ampere's kernels on its mma16816)
 #ifdef SAGUARO_IK2_PASCAL
-    if (k::arch_class() == 60)   // (Pascal: mv_q8p is ik2_pascal.cu's, the window's mv_q8p_cols not held to it)
+    if (k::pascal::q8_on())   // (Pascal: mv_q8p is ik2_pascal.cu's, the window's mv_q8p_cols not held to it)
         std::printf("--   mv_q8p_cols = mv_q8p: the verify window (sm_60 class here: drafting off)\n");
     else
 #endif
@@ -3572,13 +3572,13 @@ int main() {
     test_experts_rdna();
 #endif
 #ifdef SAGUARO_IK2_PASCAL
-    if (k::arch_class() == 60) test_pascal();
-    else std::printf("--   pascal: the sm_6x kernels (sm_%d class here)\n", k::arch_class());
+    if (k::pascal::experts_on() && k::pascal::q8_on() && k::pascal::attn_on()) test_pascal();   // (a real Pascal GPU)
+    else std::printf("--   pascal: the sm_6x kernels (sm_%d, class %d here)\n", p.major * 10 + p.minor, k::arch_class());
 #endif
 #ifdef SAGUARO_IK2_PASCAL
     // (Pascal: no verify window - drafting off - and the token path's kernels are ik2_pascal.cu's, which the window's
     //  generic kernels are not held to)
-    if (k::arch_class() == 60) std::printf("--   window_exact: the verify window (sm_60 class here: drafting off)\n");
+    if (k::pascal::experts_on()) std::printf("--   window_exact: the verify window (Pascal: drafting off)\n");
     else
 #endif
     test_window_exact(p.major >= 7);   // (Volta and Turing: their own tensor-core kernels)

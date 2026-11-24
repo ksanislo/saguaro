@@ -7675,17 +7675,32 @@ int main(int argc, char** argv) {
                         "cache path instead)\n");
 #endif
         if (g_off_want) g_dense_q8 = true;
+        size_t chunk_extra = 0;   // (the auto chunk's VRAM beyond the plan's: the room checks below count it)
         if ((chunk_set == 2 || (chunk_set == 0 && k::arch_class() == 60)) && g_fast_want && n_gpu == 1 && g_tpn <= 1) {
-            // (a prompt chunk's work buffers: ~0.6 MiB a token, measured on a P40 - 2048 -> 8192 took 3.7 GiB more; the
-            //  larger chunk where every expert stays in VRAM with half a GiB to spare.  P40, the one-T4 quant: an 8K read
-            //  374 -> 451 -> 503 tok/s at 2048 / 4096 / 8192, 30K 276 -> 311 -> 333, decode the same)
-            for (const int c2 : {8192, 4096})
-                if (c2 > chunk && exp_b + dense_b + kv_b + reserve + (size_t) (c2 - chunk) * (640 << 10) + ((size_t) 1 << 29) <= fr0) {
+            // (a prompt chunk's work buffers and slot 0's sliding rings: ~0.6 MiB a token, measured on a P40 - 2048 ->
+            //  8192 took 3.7 GiB more; --parallel's other slots each a sliding ring a sliding visit, window + chunk
+            //  rows; the pictures' encoder's room (SAGUARO_IK2_VISION_GIB) kept.  The larger chunk where every expert
+            //  stays in VRAM with half a GiB to spare.  P40, the one-T4 quant: an 8K read 374 -> 451 -> 503 tok/s at
+            //  2048 / 4096 / 8192, 30K 276 -> 311 -> 333, decode the same)
+            size_t slide_vis = 0;
+            for (int l = 0; l < c.n_layer; ++l)
+                if (c.sliding[l]) slide_vis += (l >= c.core0 && l < c.core1) ? (size_t) c.n_pass : 1;
+            const size_t kv_row = (size_t) c.KV * c.D * (g_kv_fp8 ? 1 : 2) * 2;
+            const char* vg = getenv("SAGUARO_IK2_VISION_GIB");
+            const size_t vis_room = vg ? (size_t) (std::max(0.0, std::atof(vg)) * 1073741824.0) : 0;
+            for (const int c2 : {8192, 4096}) {
+                if (c2 <= chunk) continue;
+                const auto ring = [&](int ch) { return (size_t) std::min(ctx, c.window + std::max(ch, ik2::draft::kBlock)); };
+                const size_t par = serve && g_par > 1 ? (size_t) (g_par - 1) * slide_vis * (ring(c2) - ring(chunk)) * kv_row : 0;
+                const size_t extra = (size_t) (c2 - chunk) * (640 << 10) + par;
+                if (exp_b + dense_b + kv_b + reserve + extra + vis_room + ((size_t) 1 << 29) <= fr0) {
                     std::printf("prompt chunk: %d (%s; every expert stays in VRAM)\n", c2,
                                 chunk_set == 2 ? "--chunk auto" : "Pascal's default");
                     chunk = c2;
+                    chunk_extra = extra;
                     break;
                 }
+            }
         }
         std::printf("experts %.1f GiB, dense weights %.1f GiB as blocks, K / V cache %.1f GiB, %.1f GiB free: %s\n",
                     exp_b / 1073741824.0, dense_b / 1073741824.0, kv_b / 1073741824.0, fr0 / 1073741824.0,
@@ -7736,7 +7751,7 @@ int main(int argc, char** argv) {
         // it runs on the resident path, its room - the drafter's, or the prompt lookup's window records alone - beside
         // the model at this context, and not the room the pictures' encoder would have had on the GPU (SAGUARO_IK2_VISION_GIB,
         // the server's: the encoder starts on the GPU when the free VRAM holds it).  Else it is left out, said why.
-        const size_t used = exp_b + dense_b + kv_b + reserve;
+        const size_t used = exp_b + dense_b + kv_b + reserve + chunk_extra;
         const double vis = getenv("SAGUARO_IK2_VISION_GIB") ? std::atof(getenv("SAGUARO_IK2_VISION_GIB")) * 1073741824.0 : 0.0;
         const double left = fr0 > used ? (double) (fr0 - used) : 0.0;
         auto room_ok = [&](size_t need, std::string& why, bool /*lookup*/) {
@@ -9114,6 +9129,11 @@ int main(int argc, char** argv) {
                             rel / 1073741824.0);
         } else {
             std::printf("resident path off: %s\n", all ? "a dense matrix is not kept as blocks" : "the cache does not hold every expert");
+            if (rel_host)   // (the read-ahead the release path left to the upload: the whole files' as without it)
+                for (const auto& J : exp_jobs) {
+                    const size_t pg = 4096, p0 = (size_t) S.data(J.name);
+                    ::madvise((void*) (p0 & ~(pg - 1)), p0 - (p0 & ~(pg - 1)) + tensor_bytes(*S.info(J.name)), MADV_WILLNEED);
+                }
             if (tpN > 1) die("--tp: GPU " + std::to_string(d) + " does not hold its share of every expert");
         }
     }
