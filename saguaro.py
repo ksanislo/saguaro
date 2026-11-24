@@ -7391,7 +7391,12 @@ def qfn_vision_step(a, pc: dict, meta: dict, llama: Path, d: Path, files: list) 
     """Step 7: the config's "vision" entry - the picture reader with the model's mmproj and its first GGUF shard
     (opened for the vocabulary only) - or None (text only, said why).  The entry is the live machine's elastic one:
     the server starts the reader only when a picture arrives, on VRAM the engine lends it, and takes the room back
-    while it is idle; the engine gets --vision, which lets picture requests through (serve/server.py start_qfn)."""
+    while it is idle; the engine gets --vision, which lets picture requests through (serve/server.py start_qfn).
+    The lend is not free: the server sends VLEND only after the engine said "INFO vision_lend=1", which it says only
+    when SAGUARO_ELASTIC_SLOTS and SAGUARO_ELASTIC_SLOTS_GIVE are on with --batch slots and a VMM expert cache
+    (engines/qfn/src/program/generate.cpp, the give path); those keys are in qfn_fit's GENERIC_ENV, so a written
+    config has them - without them the reader started into a full card and died on its first allocation
+    (./ref/vision-fail.log)."""
     step(7, "images (the picture reader)")
     if a.no_vision:
         ok("skipped (--no-vision): the model reads text only")
