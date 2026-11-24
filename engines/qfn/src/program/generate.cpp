@@ -12922,14 +12922,20 @@ int main(int argc, char** argv) {
         // the Monitor's STAT line while the batch windows run (the same format the maya engines print and the server's
         // tiers parser reads): at most once a second, over what was decoded since the last line - the engine-wide
         // expert-cache hits / lookups and the MTP drafts the windows offered and kept
+        // the experts the adaptive VRAM tier has promoted into VRAM since the engine started: the asynchronous tier's
+        // `a_swapped` when --adapt-async runs, else the blocking tier's `adapt_nswaps` (the same pick the decode timing
+        // line makes at dt_sw0).  promo= in the STAT line reports how many landed since its last line, per token.
+        const auto promo_now = [&] { return ajob ? a_swapped : adapt_nswaps; };
         int64_t bstat_toks = 0, bstat_off = 0, bstat_acc = 0;
         int64_t bstat_hits0 = drive.d.cache_hits, bstat_toks0 = 0, bstat_off0 = 0, bstat_acc0 = 0;
         int64_t bstat_look0 = drive.d.cache_hits + drive.d.cache_admitted + drive.d.cache_refused;
+        int64_t bstat_promo0 = promo_now();
         Clock::time_point bstat_t1 = Clock::now();
         const auto bstat_reset = [&] {
             bstat_t1 = Clock::now();
             bstat_hits0 = drive.d.cache_hits;
             bstat_look0 = drive.d.cache_hits + drive.d.cache_admitted + drive.d.cache_refused;
+            bstat_promo0 = promo_now();
             bstat_toks0 = bstat_toks; bstat_off0 = bstat_off; bstat_acc0 = bstat_acc;
         };
         const auto batch_stat_line = [&](int active_slots) {
@@ -12960,11 +12966,12 @@ int main(int argc, char** argv) {
             const int64_t all_experts = (int64_t) g.n_layers * (int64_t) g.n_expert;
             const double ram_bytes = (double) (o.mmap_experts ? src.resident_bytes()
                                                               : strata::kernels::cpu::expert_layout().total);
-            std::printf("STAT tok_s=%.2f ms_tok=%.2f vram_hit=%.4f ram_fetch=%.3f disk=0.000 "
+            std::printf("STAT tok_s=%.2f ms_tok=%.2f vram_hit=%.4f ram_fetch=%.3f disk=0.000 promo=%.3f "
                         "vram_used=%lld vram_slots=%lld ram_used=%lld ram_gb=%.1f vram_gb=%.1f disk_gb=0.0 "
                         "draft_acc=%lld draft_off=%lld active=%d\n",
                         n / std::max(1e-9, el), 1000.0 * el / n, (double) h / (double) std::max<int64_t>(1, look),
                         (double) std::max<int64_t>(0, look - h) / n,
+                        (double) std::max<int64_t>(0, promo_now() - bstat_promo0) / n,
                         (long long) v_used, (long long) v_slots,
                         (long long) std::max<int64_t>(0, all_experts - v_used),
                         ram_bytes / 1073741824.0, v_bytes / 1073741824.0,
@@ -21728,6 +21735,9 @@ int main(int argc, char** argv) {
                     std::fprintf(stderr, "saguaro pipeline calibration (p_on decile: on/scored):%s\n", cal.c_str());
                 }
             }
+            // Each solo request's STAT measurement starts fresh here (as a batch request's does when its slot begins):
+            // without it the first line after an idle gap would divide the new request's few tokens by the whole gap.
+            if (o.batch == 0) bstat_reset();
             while (!pl_ran && !cancelled && produced_n < max_new) {
                 int T = use_mtp ? S_mtp : 1;   // no --mtp: one token a round unless a lookup draft fires
                 policy.set_context(p);
@@ -22022,6 +22032,7 @@ int main(int argc, char** argv) {
                 }
                 first_window = false;
                 bool eos = false;
+                const int64_t produced_n0 = produced_n;   // the tokens this window emits: the solo STAT line's denominator
                 for (int i = merged ? a : 0; i <= a && produced_n < max_new && !eos; ++i) {   // (merged: row T-1 only)
                     std::printf("T %d\n", (int) outv[(size_t) i]);
                     strata::core::progress_beat();
@@ -22031,6 +22042,16 @@ int main(int argc, char** argv) {
                     eos = std::find(o.eos_ids.begin(), o.eos_ids.end(), (int64_t) outv[(size_t) i]) != o.eos_ids.end();
                 }
                 std::fflush(stdout);
+                // The solo (parallel 1) engine's tier card: the batch path prints its STAT line from its windows; a
+                // solo engine has none, so the Monitor's "where the experts live" card stays blank.  Feed this window's
+                // tokens/drafts into the same counters and print the same line at the same cadence (once a second,
+                // self-resetting) through the same function.  Solo only: a batch engine drives those counters from
+                // batch_step, so leaving o.batch > 0 alone keeps the two paths from mixing.
+                if (o.batch == 0) {
+                    bstat_toks += produced_n - produced_n0;
+                    if (!merged) { bstat_off += T - 1; bstat_acc += a; }   // (a merged window's rows are prompt tokens)
+                    batch_stat_line(1);   // one active slot (this request)
+                }
                 ++rounds;
                 if (drive.d.fs) drive.d.fs->completed.fetch_add(1, std::memory_order_release);
                 const Clock::time_point tw2 = Clock::now();
