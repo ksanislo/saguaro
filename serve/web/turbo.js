@@ -163,12 +163,12 @@ export function TurboLive() {
     <p class="set-intro">Lossy speed for every request this model answers that does not set its own - the apps, the
       agents and new chats. A chat's own Turbo (the bolt in its message box) wins over this. It applies to the next
       request as it is asked - nothing restarts - and a request without it stays exact when this is off.</p>
-    <div class="set-row"><span><span>On</span><span class="set-row__sub">drop the weakest experts, keep an answer the model still stands behind</span></span>
+    <div class="set-row"><span class="set-row__text"><span class="set-row__label">Live Turbo</span><span class="set-row__sub">drop the weakest experts, keep an answer the model still stands behind</span></span>
       <${Switch} label="Live Turbo for this model" on=${!!t} onChange=${(v) => setTurboLive(v ? {drop: 1, skip: "off"} : null)}/></div>
-    ${t ? html`<div class="set-row"><span><span>Drop experts</span><span class="set-row__sub">per token, the lowest router weights of the 10; the rest carry their share</span></span>
+    ${t ? html`<div class="set-row"><span class="set-row__text"><span class="set-row__label">Drop experts</span><span class="set-row__sub">per token, the lowest router weights of the 10; the rest carry their share</span></span>
       <${Seg} label="Experts dropped" value=${String(t.drop)} onChange=${(v) => on({drop: +v})}
         options=${TURBO_DROPS.map((d) => ({id: String(d), label: `${d}`, title: `run top-10 minus ${d}: the ${d} weakest experts of every token dropped, the kept ones renormalised`}))}/></div>
-      <div class="set-row"><span><span>Skip</span><span class="set-row__sub">an expert the engine would fetch the slow way is dropped instead</span></span>
+      <div class="set-row"><span class="set-row__text"><span class="set-row__label">Skip</span><span class="set-row__sub">an expert the engine would fetch the slow way is dropped instead</span></span>
       <${Seg} label="Skip tier" value=${t.skip || "off"} onChange=${(v) => on({skip: v})}
         options=${TURBO_SKIPS.map((s) => ({id: s.id, label: s.name, title: s.hint}))}/></div>` : null}`;
 }

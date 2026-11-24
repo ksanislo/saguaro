@@ -1063,6 +1063,17 @@ class StrataEngine:
         self.close()
         self.unloaded = True
 
+    def set_context(self, n: int):
+        """The next start's context: --max-context in the command (restart() runs it), the way the other engines'
+        set_context + restart reload the model with a new context (the dashboard's Context size)."""
+        exe, args, cwd, log, env, lazy, cpus = self.spawn
+        args = [str(a) for a in args]
+        if "--max-context" in args[:-1]:
+            args[args.index("--max-context") + 1] = str(int(n))
+        else:
+            args += ["--max-context", str(int(n))]
+        self.spawn = (exe, args, cwd, log, env, lazy, cpus)
+
     RESTART_RETRY_S = 15.0   # between the tries of restart(): a dying engine's VRAM may take a while to come back
 
     @staticmethod

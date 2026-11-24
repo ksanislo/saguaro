@@ -143,6 +143,7 @@ export const CTX_STOPS = [4096, 8192, 16384, 32768, 49152, 65536, 98304, 131072,
 export async function loadCtxInfo() {
   try {
     const r = await fetch("api/context", {headers: headers()});
+    if (r.status === 401) S.conn = "key";              // (a server with an API key: the pages say so, not "no context range")
     S.ctxInfo = r.ok ? await r.json() : null;
   } catch (e) { S.ctxInfo = null; }
   emit();
