@@ -33,7 +33,8 @@ older multi-GPU hardware (NVIDIA Turing T4 - sm_75 tensor cores, Xeon AVX1 CPUs)
   `tools/qfn/download.json`).
 - **Server and pages:** the "qwen" engine kind and its settings fields, Monitor tier set and thinking-level page twin
   are out; the QFN ones cover the model and its quant. (The Qwen3.x template's own reasoning efforts stay: QFN's
-  template is that template.)
+  template is that template.) A Qwen/QFN chat's saved sampling and thinking choices sit under the QFN page's key
+  now: they start from the page's defaults once after this update, and are remembered again from then on.
 - **Docs:** `docs/SETTINGS.md`'s CYBER-FROST section folded into the QFN one as the `cyber-frost` quant; the README,
   `docs/MODELS.md` and `docs/AMD_SAGUARO.md` list it there.
 
