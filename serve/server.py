@@ -3568,6 +3568,7 @@ class Service:
             return self.turbo_info()
         p = Path(self.config_path)
         self._restart_busy()
+        out = models.turbo_enable(p) if on else models.turbo_disable(p)
         live = models.TURBO_LIVE_DEFAULT.get(models.family(models.read(p)))
         if live is not None:
             if on:
@@ -3576,7 +3577,6 @@ class Service:
             else:
                 self.set_turbo_default(self.turbo_live_before)
                 self.turbo_live_before = None
-        out = models.turbo_enable(p) if on else models.turbo_disable(p)
         restarts = bool(out["changed"] and os.environ.get("SAGUARO_RESTART_ON_UPDATE"))
         if restarts:
             self._restart_into(p, "settings")
