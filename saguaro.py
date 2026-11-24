@@ -2746,6 +2746,19 @@ def import_catalog(models: Path) -> list:
     q = tolerant(qwen_entry)
     if q:
         entry(QWEN, QWEN, q)
+    for qk in Q.QFN_QUANTS:                            # (Qwen3.8-Flash-Next on saguaro-qfn: each quant's shards into
+        m = tolerant(qfn_entry, qk)                    #   its folder, the draft layer and the picture tower beside it)
+        if m:
+            entry(m["name"], m["name"], m)
+    mt = tolerant(qfn_mtp_entry)
+    if mt:                                             # (the LICENSE has no published sha256: nothing to match on)
+        entry(mt["name"], mt["name"], {"files": {k: v for k, v in mt["files"].items() if mt["sha256"].get(k)},
+                                       "sha256": {k: v for k, v in mt["sha256"].items() if v}})
+    vv = tolerant(qfn_vision_model)
+    if vv:
+        for m in (tolerant(qfn_entry, qk) for qk in Q.QFN_QUANTS):
+            if m:
+                entry(f"{m['name']}/vision", f"{m['name']}/vision", vv)
     for quant, shown in HY4_QUANTS.items():            # (the n-gram table and the mmproj: into each size's folder)
         m = tolerant(hy4_entry, quant)
         if m:
