@@ -84,6 +84,18 @@ struct HiSpread {
 };
 constexpr HiSpread hi_spread{};
 
+// a 4-bit scale s's 8 int16 lanes 2 s + 1 as one aligned load: _mm_set1_epi16 is a movd and two shuffles, which
+// Sandy / Ivy Bridge issue on one port (the scale-table idea of upstream PR #1204, by PrimusInterParis)
+struct OddScales {
+    alignas(16) int16_t v[16][8];
+    constexpr OddScales() : v{} {
+        for (int c = 0; c < 16; ++c)
+            for (int j = 0; j < 8; ++j) v[c][j] = (int16_t) (2 * c + 1);
+    }
+};
+alignas(64) constexpr OddScales odd_scales{};
+IQ_AVX1 inline __m128i k_odd(unsigned s) { return _mm_load_si128((const __m128i*) odd_scales.v[s]); }   // (s 0 .. 15)
+
 IQ_AVX1 inline __m128i grid_idx(const uint8_t* q, uint64_t hi) {   // eight 16-bit grid indices
     return _mm_unpacklo_epi8(_mm_loadl_epi64((const __m128i*) q), _mm_cvtsi64_si128((long long) hi));
 }
@@ -102,7 +114,7 @@ template <> struct Fmt<16> {   // IQ2_XXS
         const uint32_t w = u32(q + 4);
         s0 = _mm_set_epi64x((long long) even_signs.v[(w >> 7) & 127], (long long) even_signs.v[w & 127]);
         s1 = _mm_set_epi64x((long long) even_signs.v[(w >> 21) & 127], (long long) even_signs.v[(w >> 14) & 127]);
-        c0 = c1 = _mm_set1_epi16((short) (2 * (int) (w >> 28) + 1));
+        c0 = c1 = k_odd(w >> 28);
     }
 };
 
@@ -120,8 +132,8 @@ template <> struct Fmt<17> {   // IQ2_XS
         s0 = _mm_set_epi64x((long long) even_signs.v[q1 >> 9], (long long) even_signs.v[q0 >> 9]);
         s1 = _mm_set_epi64x((long long) even_signs.v[q3 >> 9], (long long) even_signs.v[q2 >> 9]);
         const uint8_t sb = b[66 + c];
-        c0 = _mm_set1_epi16((short) (2 * (sb & 15) + 1));
-        c1 = _mm_set1_epi16((short) (2 * (sb >> 4) + 1));
+        c0 = k_odd(sb & 15);
+        c1 = k_odd(sb >> 4);
     }
 };
 
@@ -138,7 +150,7 @@ template <> struct Fmt<18> {   // IQ3_XXS
         const uint32_t w = u32(b + 2 + 64 + 8 * j + 4 * half);
         s0 = _mm_set_epi64x((long long) even_signs.v[(w >> 7) & 127], (long long) even_signs.v[w & 127]);
         s1 = _mm_set_epi64x((long long) even_signs.v[(w >> 21) & 127], (long long) even_signs.v[(w >> 14) & 127]);
-        c0 = c1 = _mm_set1_epi16((short) (2 * (int) (w >> 28) + 1));
+        c0 = c1 = k_odd(w >> 28);
     }
 };
 
@@ -157,7 +169,7 @@ template <> struct Fmt<21> {   // IQ3_S
         s0 = sgn16(sg, 0);
         s1 = sgn16(sg, 1);
         const uint8_t s = b[106 + j];
-        c0 = c1 = _mm_set1_epi16((short) (2 * (int) (half ? s >> 4 : s & 15) + 1));
+        c0 = c1 = k_odd(half ? s >> 4 : s & 15);
     }
 };
 
@@ -173,8 +185,8 @@ template <> struct Fmt<22> {   // IQ2_S
         s0 = sgn16(sg, 0);
         s1 = sgn16(sg, 1);
         const uint8_t sb = b[74 + 2 * j + half];
-        c0 = _mm_set1_epi16((short) (2 * (sb & 15) + 1));
-        c1 = _mm_set1_epi16((short) (2 * (sb >> 4) + 1));
+        c0 = k_odd(sb & 15);
+        c1 = k_odd(sb >> 4);
     }
 };
 
