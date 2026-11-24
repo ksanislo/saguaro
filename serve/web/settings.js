@@ -90,7 +90,9 @@ function Model() {
         onChange=${(n) => setCtx(stops.indexOf(n))}/>
       ${changed ? html`<div class="callout callout--warn"><span>${warns.join(" ")}</span>
         <button type="button" class="btn btn--primary btn--sm" onClick=${reload}>Reload with ${ctxfmt(v)}</button></div>` : null}
-    </div>` : html`<p class="set-note">This server does not say its context range, so it can't be changed from here.</p>`}
+    </div>` : html`<p class="set-note">${S.conn === "key"
+      ? "API key needed: paste it under Settings › Connect your tools."
+      : "This server does not say its context range, so it can't be changed from here."}</p>`}
     ${!h.supervisor && pi && pi.port && pi.saved ? html`
       <${Row} label="Port" htmlFor="set-port" sub="Where this page and the API listen. A new port starts Saguaro again there, and this page follows.">
         <input id="set-port" class="input input--num" inputmode="numeric" value=${port} onInput=${(ev) => setPort(ev.target.value)}/><//>

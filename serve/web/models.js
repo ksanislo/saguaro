@@ -21,7 +21,7 @@ export async function loadModels() {
     MS.err = null;
     saidDeleted(MS.data.deleted);
   } catch (e) {
-    MS.err = e.message;
+    MS.err = e.status === 401 ? "API key needed: paste it under Settings › Connect your tools." : e.message;
   }
   emit();
   return MS.data;

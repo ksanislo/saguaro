@@ -843,9 +843,12 @@ def command(cfg: dict) -> dict:
 
 # ------------------------------------------------------------------ the list
 def config_paths(root: Path) -> list:
-    """The installed models' configs, the most recently used first (saguaro.py's configs())."""
+    """The installed models' configs, the most recently used first (saguaro.py's configs()).  Beside them the page
+    keeps its own files - <config>.shared-settings.json and a model's live Turbo sidecar <config>.turbo.json:
+    neither is a model."""
     try:
-        found = [p for p in Path(root).glob("maya-*.json") if not p.name.endswith(".shared-settings.json")]
+        found = [p for p in Path(root).glob("maya-*.json")
+                 if not p.name.endswith((".shared-settings.json", ".turbo.json"))]
         return sorted(found, key=lambda p: p.stat().st_mtime, reverse=True)
     except OSError:
         return []
