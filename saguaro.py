@@ -7661,10 +7661,11 @@ def family_fit(cards: list, ram_gb: float, backend: str = "cuda") -> str | None:
 
 
 def family_unavailable(family: str, backend: str | None) -> str | None:
-    """Why this PC's backend (cuda / hip / metal) has no engine for a model, in one plain line, or None.  The model
-    list marks such a model and the setup stops on it before anything is built or downloaded."""
+    """Why this PC's backend (cuda / hip / metal) has no engine for a model, in one plain line, or None (a missing
+    backend is the CUDA default, as every caller's own default treats it).  The model list marks such a model and the
+    setup stops on it before anything is built or downloaded."""
     if family in NO_ENGINE.get(backend or "cuda", {}):
-        return NO_ENGINE[backend][family]
+        return NO_ENGINE[backend or "cuda"][family]
     if WIN and family in ("hy4", "ik2"):
         return f"{HY4_SHOWN if family == 'hy4' else IK2_SHOWN} runs on Linux only for now (not on Windows yet)"
     return None
@@ -8661,10 +8662,14 @@ def migrate_cyber_frost(cfg: dict) -> bool:
     (installer.family "qwen", its "q5_k_m" files, the GLM engine with --ple-gguf) is rewritten as the QFN config of
     the same file - the same model files (its GGUF, the pack folder beside it, the drafter built from its NextN
     block, the same layout QFN's --mtp loader reads) and the same context, port and sampling.  One-time: the
-    rewritten config reads as family "qfn", so none of its conditions is ever met again - idempotent."""
+    rewritten config reads as family "qfn", so none of its conditions is ever met again - idempotent.  Skipped on a
+    backend with no saguaro-qfn engine (NVIDIA, Metal): its config keeps running on the old engine, which stays until
+    that route is decided, rather than being rewritten to an engine --setup then refuses to build there."""
     inst = cfg.get("installer")
     if not isinstance(inst, dict) or inst.get("family") != "qwen" or \
             (inst.get("qwen_quant") or "q5_k_m") != "q5_k_m" or Q.family_of(cfg) != "qwen":
+        return False
+    if family_unavailable("qfn", cfg.get("backend")):   # (no saguaro-qfn here: leave it on the old engine)
         return False
     args = cfg.get("args") or []
 

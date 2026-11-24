@@ -132,6 +132,7 @@ class Offered(unittest.TestCase):
     def test_amd_offers_nvidia_lists_with_the_reason(self):
         self.assertIsNone(maya.family_unavailable("qfn", "hip"))
         self.assertIn("on AMD GPUs", maya.family_unavailable("qfn", "cuda"))
+        self.assertIn("on AMD GPUs", maya.family_unavailable("qfn", None))   # (no backend: the CUDA default)
         self.assertIn("Metal", maya.family_unavailable("qfn", "metal"))
         self.assertIsNone(maya.family_unavailable("qwen", "cuda"))   # (CYBER-FROST still everywhere it was)
 
@@ -331,6 +332,20 @@ class Migration(unittest.TestCase):
                     {"args": ["--max-context", "65536"], "installer": {"family": "qwen"}}):
             # (a Qwen-path config that names no files of the setup: left alone too)
             self.assertFalse(maya.migrate_cyber_frost(json.loads(json.dumps(cfg))), str(cfg))
+
+    def test_left_on_the_old_engine_where_qfn_has_no_engine(self):
+        """An NVIDIA (or Mac) CYBER-FROST config is not rewritten to saguaro-qfn: --setup would refuse to build the
+        engine there, so migrating strands it.  It keeps its old-engine files and runs on saguaro-glm until that
+        route is decided."""
+        for backend in ("cuda", "metal", None):
+            cfg = json.loads(json.dumps(self.OLD))
+            cfg["backend"] = backend
+            if backend is None:
+                cfg.pop("backend")
+            self.assertFalse(maya.migrate_cyber_frost(cfg), str(backend))
+            self.assertEqual(cfg["installer"]["family"], "qwen")            # (untouched)
+            self.assertEqual(cfg["exe"], self.OLD["exe"])                   # (still the GLM engine)
+            self.assertIn("--ple-gguf", cfg["args"])                        # (its Qwen-path arguments stand)
 
 
 class ModelsPage(unittest.TestCase):
