@@ -215,7 +215,7 @@ export function contextFacts(eng = {}, C = {}) {
   if (Array.isArray(sm) && sm.length) {
     const lim = sm.reduce((a, c) => a + (+c.total || 0) + (+c.givable || 0), 0);
     const used = sm.reduce((a, c) => a + Math.max(0, (+c.total || 0) - (+c.free || 0)), 0);
-    if (lim > 0) out.push(`context memory: ${gb(used)} of ${gb(lim, 0)} GB budgeted on its cards`);
+    if (lim > 0) out.push(`context memory: ${gb(used)} of ${gb(lim)} GB budgeted on its cards`);
   }
   const ts = C.turn_saves;
   if (ts && Object.keys(ts).length) {
