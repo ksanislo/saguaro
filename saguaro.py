@@ -1968,16 +1968,17 @@ def setup_family(cfg: dict) -> str:
 
 # the models whose engine answers several requests at once (--parallel): GLM-5.3-Flash's, DeepSeek-V4.1-Flash's
 # (maya-ds4 --parallel: a conversation's state each, their tokens decoded together), MiniMax-M3.1-Flash's (maya-mm3
-# --parallel: a KV cache each in VRAM - no KV streaming, no DSpark)
-PARALLEL_FAMILIES = ("glm", "deepseek", "minimax")
+# --parallel: a KV cache each in VRAM - no KV streaming, no DSpark) and Qwen3.8-Flash-Next's (saguaro-qfn: the config's
+# top-level "parallel": N, which its server turns into the engine's --batch N: up to N conversations decode together)
+PARALLEL_FAMILIES = ("glm", "deepseek", "minimax", "qfn")
 
 
 def check_parallel(a, family: str) -> None:
     if getattr(a, "parallel", None) is not None and family not in PARALLEL_FAMILIES:
         model = {"deepseek": DS4, "minimax": MM3, "hy4": HY4_SHOWN, "ik2": IK2_SHOWN, "qfn": QFN_SHOWN}.get(
             family, QWEN_SHOWN)
-        fail(f"--parallel is supported by GLM-5.3-Flash, DeepSeek-V4.1-Flash and MiniMax-M3.1-Flash; {model} serves "
-             "one request at a time",
+        fail(f"--parallel is supported by GLM-5.3-Flash, DeepSeek-V4.1-Flash, MiniMax-M3.1-Flash and "
+             f"Qwen3.8-Flash-Next; {model} serves one request at a time",
              "remove --parallel; saved conversations do not enable simultaneous decoding")
 
 
@@ -7619,6 +7620,14 @@ def write_config_qfn(a, pc: dict, meta: dict, quant: str, files: list, pack: Pat
            "gpu": [g["index"] for g in pc["gpus"]], "sampling": sampling,
            "lib_dirs": meta.get("lib_dirs") or old.get("lib_dirs") or [], "port": port,
            **({"vision": vision} if vision else {})}
+    # answers at once (serve/qfn_engine.py's parallel_args turns this into the engine's --batch N): off on the one
+    # 16 GB AMD card it was measured on (parallel decoding lost speed there), 2 on several GPUs as the live T4
+    # configs run it; --parallel N says, and a config written before keeps its value
+    par = getattr(a, "parallel", None) or old.get("parallel") or (2 if len(pc["gpus"]) > 1 else 1)
+    if par > 1:
+        cfg["parallel"] = par
+        ok(f"answers at once: {par} (\"parallel\": {par}: its server gives the engine --batch {par}, up to {par} "
+           "conversations decode together)")
     kept = []
     for k in ("host", "api_key", "cors_origins", "mcp_servers"):
         if old.get(k) is not None:
@@ -8799,10 +8808,10 @@ def main() -> int:
                                    "0,1,2,3")
     ap.add_argument("--context", type=int, help=f"context length in tokens (default {DEFAULT_CONTEXT})")
     ap.add_argument("--parallel", type=int, choices=range(1, 9), metavar="N",
-                    help="GLM-5.3-Flash, DeepSeek-V4.1-Flash and MiniMax-M3.1-Flash: answer up to N requests at once "
-                         "(1-8, default 1), kept in the config: they are decoded together, more tokens per second in "
-                         "all; each extra conversation keeps its own context in VRAM, which the expert cache gives "
-                         "up (MiniMax: no KV streaming and no DSpark while N is above 1)")
+                    help="GLM-5.3-Flash, DeepSeek-V4.1-Flash, MiniMax-M3.1-Flash and Qwen3.8-Flash-Next: answer up to "
+                         "N requests at once (1-8, default 1), kept in the config: they are decoded together, more "
+                         "tokens per second in all; each extra conversation keeps its own context in VRAM, which the "
+                         "expert cache gives up (MiniMax: no KV streaming and no DSpark while N is above 1)")
     ap.add_argument("--vram-reserve-mib", type=int, metavar="N",
                     help="VRAM in MiB the expert pool leaves free on each GPU for the driver, the desktop and other "
                          "programs (default 700), kept in the config")
