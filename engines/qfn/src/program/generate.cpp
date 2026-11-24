@@ -1975,7 +1975,7 @@ int32_t* res_pairs_alloc(size_t cap, const std::vector<int>& devs) {
         void* d = nullptr;
         if (cudaHostGetDevicePointer(&d, p, 0) != cudaSuccess || d != p) {
             (void) cudaGetLastError();
-            cudaFreeHost(p);
+            (void) cudaFreeHost(p);
             return nullptr;
         }
     }
@@ -2385,7 +2385,7 @@ double probe_pcie_h2d_gbps(std::string* samples = nullptr) {
     void* d = nullptr;
     if (cudaMallocHost(&h, kBytes) != cudaSuccess) return -1.0;
     if (cudaMalloc(&d, kBytes) != cudaSuccess) {
-        cudaFreeHost(h);
+        (void) cudaFreeHost(h);
         return -1.0;
     }
     std::memset(h, 0, kBytes);   // fault the pages in before timing
@@ -2431,8 +2431,8 @@ double probe_pcie_h2d_gbps(std::string* samples = nullptr) {
         }
     }
     if (!ok) (void) cudaGetLastError();
-    cudaFree(d);
-    cudaFreeHost(h);
+    (void) cudaFree(d);
+    (void) cudaFreeHost(h);
     if (bw > 0.0) g_last_h2d_gbps = bw;
     return bw;
 }
@@ -2676,7 +2676,7 @@ static void prime_hw_queues() {
         ss.push_back(s);
     }
     for (cudaStream_t s : ss) cudaStreamDestroy(s);
-    cudaFree(buf);
+    (void) cudaFree(buf);
     (void) cudaGetLastError();
     std::fprintf(stderr, "saguaro generate: opened %zu GPU queues in a fixed order (SAGUARO_HIP_QUEUE_PRIME=0 turns it off)\n", ss.size());
 }
@@ -5886,8 +5886,8 @@ int main(int argc, char** argv) {
                 void* buf = nullptr;
                 if (cudaMalloc(&buf, bytes) != cudaSuccess ||
                     strata::core::session_init(g, o.max_context, K, buf, *u, lo, hi, slot_kind, rope) == 0) {
-                    cudaGetLastError();
-                    if (buf != nullptr) cudaFree(buf);
+                    (void) cudaGetLastError();
+                    if (buf != nullptr) (void) cudaFree(buf);
                     size_t fb = 0, tb = 0;
                     cudaMemGetInfo(&fb, &tb);
                     std::fprintf(stderr, "saguaro generate: WARNING: --batch %d: slot %d's session does not fit on CUDA%d "
@@ -7980,7 +7980,7 @@ int main(int argc, char** argv) {
         std::printf("  three sum slightly above it because each launch carries the driver's gap.\n");
         strata::core::session_graphs_free(gr);
         strata::core::doorbell_free(db);
-        cudaFree(d_next);
+        (void) cudaFree(d_next);
         return 0;
     }
 
@@ -9794,7 +9794,7 @@ int main(int argc, char** argv) {
             if (why == nullptr) {
                 const strata::core::OnDevice on(r);
                 if (cudaMalloc((void**) &p, bytes) != cudaSuccess || cudaMemset(p, 0, bytes) != cudaSuccess) {
-                    if (p != nullptr) cudaFree(p);
+                    if (p != nullptr) (void) cudaFree(p);
                     p = nullptr;
                     why = "no VRAM for it";
                 }
@@ -11536,7 +11536,7 @@ int main(int argc, char** argv) {
                 v.set_pre_launch(nullptr);
                 for (auto& st : stages) st->ver.set_pre_launch(nullptr);
                 d.dres_check = nullptr;
-                if (pairs != nullptr) cudaFreeHost(pairs);
+                if (pairs != nullptr) (void) cudaFreeHost(pairs);
             }
         } pre_launch_off{ver, stages, drive.d, res_pairs};
         if (drive.d.evict_sync || res_checking) {
@@ -23235,7 +23235,7 @@ int main(int argc, char** argv) {
             ~PreLaunchOff() {
                 v.set_pre_launch(nullptr);
                 d.dres_check = nullptr;
-                if (pairs != nullptr) cudaFreeHost(pairs);
+                if (pairs != nullptr) (void) cudaFreeHost(pairs);
             }
         } pre_launch_off{ver, drive.d, res_pairs};
         if (drive.d.evict_sync || res_checking)
@@ -23876,13 +23876,13 @@ int main(int argc, char** argv) {
     }
     if (layer_dump != nullptr) {
         std::fclose(layer_dump);
-        cudaFreeHost(layer_stage);
+        (void) cudaFreeHost(layer_stage);
         std::printf("%-24s %s (%lld layers + the input x %d streams x %lld per position)\n", "layers dumped",
                     o.dump_layers.c_str(), (long long) g.n_layers, (int) g.hc, (long long) g.n_embd);
     }
     if (half_dump != nullptr) {
         std::fclose(half_dump);
-        cudaFreeHost(half_stage);
+        (void) cudaFreeHost(half_stage);
         std::printf("%-24s %s (%lld layers x %llu per position)\n", "halves dumped", o.dump_halves.c_str(),
                     (long long) g.n_layers, (unsigned long long) half_stride);
     }
@@ -24048,11 +24048,11 @@ int main(int argc, char** argv) {
 
     strata::core::session_graphs_free(gr);
     strata::core::doorbell_free(db);
-    cudaFree(d_next);
-    cudaFree(d_logits);
-    cudaFree(d_emb);
-    cudaFree(d_parts);
-    cudaFree(sbuf);
-    cudaFree(arena);
+    (void) cudaFree(d_next);
+    (void) cudaFree(d_logits);
+    (void) cudaFree(d_emb);
+    (void) cudaFree(d_parts);
+    (void) cudaFree(sbuf);
+    (void) cudaFree(arena);
     return 0;
 }
