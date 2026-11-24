@@ -92,6 +92,8 @@ import calibrate_draft as CD  # noqa: E402  the speed calibration: DFlash2 or th
 import calibrate_ds4 as CDS  # noqa: E402  DeepSeek's: the DSpark drafter or none, on this PC
 import maya_bench as MB  # noqa: E402  --bench: the speed-test standard (one session a round, A/B, the result line)
 import calibrate_mm3_prefill as CPF  # noqa: E402  MiniMax's: how this PC reads prompts fastest (chunk, GEMMs)
+import qfn_calibrate as CQ  # noqa: E402  QFN's: the Lamina drafter measured on and off on this PC
+import calibrate as CALH  # noqa: E402  QFN's engine family: the PCIe share, the draft floor, the CPU workers
 import hy4_fit as HY4F  # noqa: E402  Hy4-Flash: the layout for the cards a PC has
 import ik2_fit as IK2F  # noqa: E402  Inkling 2 Mini: one card or two
 import qfn_fit as QF  # noqa: E402  Qwen3.8-Flash-Next on NVIDIA: the fit, the context and the layer split
@@ -4194,8 +4196,12 @@ def calibrate_config(cfg_path: Path) -> bool:
     if config_family(cfg) == "minimax":   # (maya-mm3 sizes its CPU lane by this PC's cores and its pools by its memory:
         #  what it reads prompts with is measured - the prefill calibration)
         return prefill_calibration(cfg_path, "asked for")
-    if config_family(cfg) in ("qwen", "qfn"):  # (the Qwen path sizes its CPU pool and its prompt chunks itself; what can
-        #  be measured is its drafter.  qfn too: QFN's configs are "qfn" ones now, maya_quants.family_of)
+    if config_family(cfg) == "qfn":            # (QFN: its engine's own hardware tuning on this PC (the PCIe share, the
+        #  draft floor, the CPU workers - tools/calibrate.py, what the old Strata --calibrate measured), then its
+        #  Lamina drafter measured with its drafts on and off)
+        return qfn_calibrate_config(cfg_path)
+    if config_family(cfg) == "qwen":           # (the Qwen path sizes its CPU pool and its prompt chunks itself; what can
+        #  be measured is its drafter)
         return bool(qwen_draft_calibration(cfg_path) is not None)
     if config_family(cfg) in ("hy4", "ik2"):   # (their engines measure what they tune at their own first start)
         ok(f"{Q.SHOWN[config_family(cfg)]}: nothing to tune here - its engine measures this PC at its first start")
@@ -4376,7 +4382,9 @@ def speed_calibration(cfg_path: Path, why: str = "") -> bool:
         warn("no speed calibration on Metal: MTP and DFlash2 are both exact, which is faster here is your choice "
              f"({ME} --setup --draft mtp|dflash2)")
         return False
-    if config_family(cfg) in ("qwen", "qfn"):         # (CYBER-FROST: its MTP drafter or none; QFN's too)
+    if config_family(cfg) == "qfn":                  # (QFN: the Lamina drafter of its --mtp folder, on or off)
+        return bool(qfn_draft_calibration(cfg_path) is not None)
+    if config_family(cfg) == "qwen":                 # (CYBER-FROST: its MTP drafter or none)
         return bool(qwen_draft_calibration(cfg_path) is not None)
     if config_family(cfg) == "ik2":                    # (Inkling 2: --drafting auto measures at the engine's start)
         args = cfg.get("args") or []
@@ -4565,6 +4573,112 @@ def speed_calibration_ds4(cfg_path: Path, cfg: dict, why: str = "") -> bool:
         ok(f"speed calibration: the DSpark drafter is not faster on this PC - {d:.1f} against {o:.1f} tokens/s: "
            "Saguaro decodes without drafting (and its memory holds more of the model)")
     return True
+
+
+# ------------------------------------------------------------------------------------------------ QFN's calibration
+# Qwen3.8-Flash-Next runs on its own engine (engines/qfn, saguaro-qfn), driven by the batch driver
+# (serve/server.py's start_qfn -> serve/qfn_engine.py).  Its drafter is the Lamina MTP layer the config's --mtp
+# names (not CYBER-FROST's <pack>/mtp folder), and its engine takes its own hardware settings through a request's
+# strata_tune (the PCIe share, the draft floor, the CPU worker count) - so its --calibrate / --speed-calibration
+# run QFN's own harnesses through that driver, not CYBER-FROST's MTP check (qwen_draft_calibration).  The engine
+# reads a --prefill-pipe / --pcie-frac too; both are measured here, and no separate PCIe-chunk calibration exists.
+
+
+def qfn_calibrate_config(cfg_path: Path) -> bool:
+    """QFN's --calibrate: the engine's hardware-dependent settings on this PC (the PCIe share, the draft floor, the
+    CPU workers - tools/calibrate.py through the batch driver), then its Lamina drafter measured on and off
+    (qfn_draft_calibration).  The drafter's result (installer.mtp_calibration) and the settings (into the args) both
+    stay in the config.  True if anything was measured, False when nothing was."""
+    tuned_hardware = qfn_hardware_calibration(cfg_path)
+    drafted = qfn_draft_calibration(cfg_path)
+    return tuned_hardware or drafted is not None
+
+
+def qfn_hardware_calibration(cfg_path: Path) -> bool:
+    """QFN's prefill/PCIe/worker tuning (tools/calibrate.py): per-request strata_tune sweeps of the PCIe share and the
+    draft floor on one engine start, then the CPU worker count with a restart each, all measured through QFN's batch
+    driver (start_qfn_engine).  Kept settings go into the config's args (a setting that did not win goes back to the
+    engine's own) and the result into installer.calibration.  False: not measured (GPUs busy, or it did not finish)."""
+    cfg = read_json(cfg_path)
+    busy = busy_gpus(cfg)
+    if busy:
+        warn("the tuning needs the GPU(s) to itself: " + ", ".join(f"GPU {i} has {m} MiB in use" for i, m in busy) +
+             " (a model server still running?) - stop it, then run ./saguaro.sh --calibrate")
+        return False
+    say()
+    say("  Tuning Qwen3.8-Flash-Next for this PC: the output speed is measured with a few PCIe shares and draft")
+    say("  floors (on one engine start), then with fewer CPU workers. About 5-10 minutes; the PC is busy meanwhile.")
+    log = cfg.get("log")
+    since = os.path.getsize(log) if log and os.path.isfile(log) else 0
+    try:
+        res = CALH.run(cfg, say=say, start_engine=CQ.start_qfn_engine(cfg))
+    except Exception as e:                             # never stops a setup or a start: the config's settings stay
+        warn(f"the tuning did not finish ({e}): the config's settings stay")
+        why = CAL.engine_error(log, since)
+        if why:
+            say(f"       the engine said: {why}")
+        return False
+    cfg["args"] = CALH.apply(cfg.get("args") or [], res["settings"])
+    cfg.setdefault("installer", {})["calibration"] = {"date": time.strftime("%Y-%m-%d %H:%M"), "version": maya_version(),
+                                                      "settings": res["settings"], "report": res["report"]}
+    cfg_path.write_text(json.dumps(cfg, indent=1), encoding="utf-8")
+    speed = f" ({res['report']['tok_s']} tok/s)" if res["report"].get("tok_s") else ""
+    if res["settings"]:
+        ok("tuned for this PC: " + ", ".join(f"{k} {v}" for k, v in res["settings"].items()) + speed)
+    else:
+        ok("tuned for this PC: the engine's own settings are already the fastest here" + speed)
+    return True
+
+
+def qfn_draft_calibration(cfg_path: Path) -> bool | None:
+    """QFN's Lamina drafter, measured on this PC: the same answer decoded with its drafts and without them (the engine's
+    own decode rate - the same tokens either way), through the batch driver.  The server always loads the drafter (its
+    --mtp folder); its drafts are turned off with --mtp-max-t 1 (windows of one token, prompt-lookup drafts only), kept
+    only when drafting is faster by more than CQ.MIN_GAIN.  The drafter folder is the config's own --mtp arg, not
+    CYBER-FROST's <pack>/mtp.  True / False: drafting on / off; None: not measured (the reason said)."""
+    cfg = read_json(cfg_path)
+    mtp = CQ.mtp_dir(cfg)
+    if mtp is None:
+        warn("no MTP drafter in the config (--mtp): decoding without it")
+        return None
+    if not CQ.has_drafter(cfg):
+        warn(f"the Lamina draft layer is not on this PC ({mtp}): decoding without it")
+        return None
+    busy = busy_gpus(cfg)
+    if busy:
+        warn("the speed calibration needs the GPU(s) to itself: " +
+             ", ".join(f"GPU {i} has {m} MiB in use" for i, m in busy) +
+             f" (a model server still running?) - it runs at the next start, or: {ME} --speed-calibration")
+        return None
+    say()
+    say("  Measuring the Lamina drafter on this PC: the same answer written with and without it (the model loads twice,")
+    say("  a few minutes; the model reads a document and answers fresh questions about it, the sustained speeds compare)")
+    say("  ...")
+    log = cfg.get("log")
+    since = os.path.getsize(log) if log and os.path.isfile(log) else 0
+    try:
+        res = CQ.run(cfg, say=say)
+    except Exception as e:                             # the config stays as it was
+        warn(f"the drafter could not be measured ({e}): nothing changed - Saguaro keeps its current choice; "
+             f"{ME} --speed-calibration tries again")
+        why = CAL.engine_error(log, since)
+        if why:
+            say(f"       the engine said: {why}")
+        return None
+    o, d = res["off"]["tok_s"], res["on"]["tok_s"]
+    keep = res["keep"] == "on"
+    out = CQ.with_drafting(cfg, keep)
+    out.setdefault("installer", {})["mtp_calibration"] = {"date": time.strftime("%Y-%m-%d %H:%M"), "version": maya_version(),
+                                                          "off": o, "on": d, "kept": "mtp" if keep else "none"}
+    cfg_path.write_text(json.dumps(out, indent=1), encoding="utf-8")
+    say()
+    if keep:
+        ok(f"drafter calibration: the Lamina drafter is faster on this PC - {d:.1f} against {o:.1f} tokens/s "
+           f"(+{res['gain'] * 100:.0f}%): Saguaro drafts with it")
+    else:
+        ok(f"drafter calibration: the Lamina drafter is not faster on this PC - {d:.1f} against {o:.1f} tokens/s: "
+           "Saguaro decodes without drafting")
+    return keep
 
 
 def drafting_choice(a, drafter: str, minutes: str) -> str:
@@ -4903,8 +5017,10 @@ REPORT_LINES = re.compile(r"glm fast:|glm prefill: (?:CUDA|HIP)|glm split|glm st
                           # MiniMax's: where the model went (its --serve start) and each answer's prompt / decode speed
                           r"^saguaro mm3:|^saguaro mm3 serve: (?:prompt|DSpark) |"
                           # QFN's: each prompt read's own figures (PP ... new_read=, per chunk), the read's RDONE
-                          # summary and the per-card VRAM bookkeeping (read by engines/qfn/serve/server.py)
-                          r"^PP \d+ \d+ .*\bnew_read=|^RDONE rid=|^VRAM dev=",
+                          # summary, the per-card VRAM bookkeeping (read by engines/qfn/serve/server.py), its STAT
+                          # line (the only place its sustained tok/s appears) and the serve/batch prompt lines
+                          r"^PP \d+ \d+ .*\bnew_read=|^RDONE rid=|^VRAM dev=|"
+                          r"^STAT tok_s=|^saguaro serve: prompt chunk|^saguaro batch: ",
                           re.I)
 STAT_DECODE = re.compile(r"glm stat: decode ([\d.]+) ms/tok")
 
@@ -5090,8 +5206,23 @@ BENCH_TOPICS = [
 
 def bench_exe(cfg: dict) -> Path:
     """Which engine binary a HIP config's --bench should relaunch - config_family(cfg)'s target, through the same
-    exe_for_target every build step uses, so this can't drift out of sync with either."""
+    exe_for_target every build step uses, so this can't drift out of sync with either.  A QFN config keeps
+    saguaro-qfn: family_target("qfn") is its own build target, not the GLM engine's "maya"."""
     return exe_for_target(family_target(config_family(cfg)))
+
+
+def bench_start_command(cfg: dict, tok=None) -> tuple:
+    """--bench's engine command and environment: QFN's batch driver started the way its server starts it
+    (serve/server.py's start_qfn -> serve/qfn_engine.py: its engine_args - the config's args, the layer split,
+    --batch from "parallel", --pool-cores, the draft settings - and its child_env; with `tok` its reasoning-effort
+    arguments too), every other family the line driver's command (serve/server.py's engine_args)."""
+    if config_family(cfg) == "qfn":
+        from serve import qfn_engine as QE
+        exe = cfg["exe"] if Path(cfg["exe"]).is_absolute() else str(Path(cfg.get("cwd") or ROOT) / cfg["exe"])
+        effort = (QE.effort_end_args(cfg, exe, tok) or []) if tok is not None else []
+        return [exe, "--serve"] + QE.engine_args(cfg) + effort, QE.child_env(cfg)
+    import serve.server as SV
+    return [cfg["exe"], "--serve"] + SV.engine_args(cfg), SV.child_env(cfg)
 
 
 
@@ -5195,7 +5326,8 @@ def bench(cfg_path: Path, version: str, compare: str | None = None, rounds: int 
         fmt = bench_chat(config_family(cfg), tp)   # (each family's own chat format, thinking off - #416, #549)
         chats = [tok.encode(fmt(q), parse_special=True) for q in BENCH_TOPICS]
         start = lambda c, cmd, env, tag: (cmd, env, c.get("cwd") or str(ROOT), ROOT / f"saguaro-bench{tag}.log")  # noqa
-        here = start(cfg, [cfg["exe"], "--serve"] + SV.engine_args(cfg), SV.child_env(cfg), "")
+        cmd, env = bench_start_command(cfg, tok)      # (QFN's batch driver as its server starts it; the rest: SV's)
+        here = start(cfg, cmd, env, "")
         found = S.amd_gpus() if backend == "hip" else S.gpus()
         if gpus:
             by_index = {g["index"]: g for g in found}
@@ -5227,8 +5359,12 @@ def bench(cfg_path: Path, version: str, compare: str | None = None, rounds: int 
     finally:
         MB.release_locks(locks, note)
     out = ROOT / "saguaro-bench.txt"
-    stats = speed_lines((ROOT / "saguaro-bench.log").read_text(encoding="utf-8", errors="replace").splitlines()) \
-        if (ROOT / "saguaro-bench.log").exists() else []
+    # the engine's own lines: the log (stderr) and, this side alone, what its session read off its stdout too
+    # (QFN prints its STAT speed lines there - the only place its own decode figures appear)
+    engine_out = run["engine_lines"] if not compare else \
+        ((ROOT / "saguaro-bench.log").read_text(encoding="utf-8", errors="replace").splitlines()
+         if (ROOT / "saguaro-bench.log").exists() else [])
+    stats = speed_lines(engine_out)
     out.write_text("\n".join(lines + records + ["", "engine lines:"] +
                              [x.replace(str(Path.home()), "~") for x in stats[-40:]]) + "\n", encoding="utf-8")
     with open(ROOT / MB.RESULTS_FILE, "a", encoding="utf-8") as f:
@@ -5272,7 +5408,7 @@ def bench_compare(cfg, cfg_path, spec, rounds, here, start, chats, prompts, warm
         cmd, env = MB.start_command(other, ocfg, ocfg_file)
     except RuntimeError as e:                     # (an older build without this start code: this build's command)
         warn(f"{e} - starting its engine with this build's command")
-        cmd, env = [ocfg["exe"], "--serve"] + SV.engine_args(ocfg), SV.child_env(ocfg)
+        cmd, env = bench_start_command(ocfg)
     there = start(ocfg, cmd, env, "-other")
     learned = MB.LearnedState(ROOT, cfg, work / "learned-snapshot")
     runs = {"this": [], "other": []}
