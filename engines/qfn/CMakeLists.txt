@@ -467,6 +467,7 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
                           src/kernels/cuda/fused_gdn.cu
                           src/kernels/cuda/dequant_bf16.cu
                           src/kernels/cuda/qsa_select.cu
+                          src/kernels/cuda/qsa_pattn.cu
                           src/kernels/cuda/verify_kernels.cu
                           src/kernels/cuda/dflash2.cu
                           src/kernels/cuda/iq_kernels.cu
@@ -495,6 +496,15 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
     add_executable(qsa_prompt_attn_parity src/kernels/qsa_prompt_attn_parity.cpp)
     target_include_directories(qsa_prompt_attn_parity PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
     target_link_libraries(qsa_prompt_attn_parity PRIVATE strata_kernels CUDA::cudart)
+  endif()
+  # upstream #3943: SAGUARO_PATTN_SM60's score and value kernels against the decode kernels' output, bitwise, on random
+  # int8 K/V (GPU, synthetic, no model).  Only in the experimental sm_60 build; it skips (77) without the kernels.
+  if(STRATA_BUILD_TESTS AND STRATA_ENABLE_CUDA AND STRATA_EXPERIMENTAL_SM60)
+    add_executable(qsa_pattn_parity src/kernels/qsa_pattn_parity.cpp)
+    target_include_directories(qsa_pattn_parity PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
+    target_link_libraries(qsa_pattn_parity PRIVATE strata_kernels CUDA::cudart)
+    add_test(NAME qsa_pattn_parity COMMAND qsa_pattn_parity)
+    set_tests_properties(qsa_pattn_parity PROPERTIES SKIP_RETURN_CODE 77)
   endif()
   # #512: the top-k's active-block bound (Turing's dispatch, forced on any card by STRATA_TOPK_ACTIVE_ANY) against
   # the capacity rule, selected ids bitwise

@@ -110,8 +110,15 @@ void native_q8_0_packed_register(const void* gguf_weights, const void* packed, i
 void native_q8_0_packed_unregister(const void* gguf_weights);
 /// SAGUARO_Q8_SM60=1 (opt-in, Pascal GP100): every Q8_0 dense matrix is packed as above whatever its shape, and the
 /// Q8_0 decode GEMVs run a kernel written for compute capability 6.0 (q8_sm60.cuh; not bitwise the exact kernels).
-/// native_q8_0_sm60_pack packs a device matrix here (the head) and owns the copy until native_q8_0_sm60_release.
+/// native_q8_0_sm60_pack packs a device matrix here (the head) and owns the copy until native_q8_0_sm60_release;
+/// native_q8_0_sm60_pack_quiet is the same with no line for a success (the caller sums several up).
 bool native_q8_0_sm60_pack(const void* weights, int n_in, int n_out, const char* what);
+bool native_q8_0_sm60_pack_quiet(const void* weights, int n_in, int n_out, const char* what);
+/// The same for a matrix that nothing but native_mmvq reads (the MTP drafter's draft head subset): where every column
+/// count takes the Pascal kernel and the planes stay 16-byte aligned, they replace the GGUF blocks in the matrix's own
+/// allocation (the same byte count, staged through the host: no second copy); otherwise a packed copy as
+/// native_q8_0_sm60_pack makes. Either way native_q8_0_sm60_release must run before the caller frees the matrix.
+bool native_q8_0_sm60_pack_in_place(void* weights, int n_in, int n_out, const char* what);
 void native_q8_0_sm60_release(const void* weights);
 /// SAGUARO_SM75_Q8G=1 (opt-in, Turing): Q8_0 calls of 2-8 columns with n_out >= SAGUARO_SM75_Q8G_MIN_OUT (2048) run a
 /// warp-per-row kernel on the GGUF layout, activations staged in shared memory; bitwise the default kernel's outputs.

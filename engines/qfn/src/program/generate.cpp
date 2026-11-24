@@ -9172,6 +9172,17 @@ int main(int argc, char** argv) {
                                      "no slot decodes\n", std::getenv("SAGUARO_STAGE_SERVE") ? "s (each stage its own)" : "");
             }
         }
+#if !defined(STRATA_USE_HIP) && !defined(STRATA_HIP_GFX906) && !defined(STRATA_GPU_METAL)
+        // Pascal (cc 6.x), one GPU: the default share covers staged chunks up to 3072 tokens, not 1024 (upstream
+        // c4082ce8c: P100 prompt +25% at 1K, +13% at 2K, 4K+ unchanged); SAGUARO_PREFILL_CPU_SHARE_MAX still wins
+        if (share_pool && stages.empty() && !multi_gpu && share_has_work) {
+            int dev = 0, maj = 0;
+            if (cudaGetDevice(&dev) == cudaSuccess &&
+                cudaDeviceGetAttribute(&maj, cudaDevAttrComputeCapabilityMajor, dev) == cudaSuccess &&
+                strata::cc_major_of(maj) == 6)
+                strata::prefill::Prefill::set_share_default_max(3072);
+        }
+#endif
         strata::prefill::Prefill::arm_cpu_share(share_pool,
                                                 (share_pool && stages.empty() && !multi_gpu && share_has_work) || split_share);
         void* borrow = nullptr;
