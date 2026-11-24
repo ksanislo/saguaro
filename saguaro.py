@@ -7680,7 +7680,17 @@ def set_up_qfn(a, prev: dict) -> Path | None:
     vision = qfn_vision_step(a, pc, meta, llama, d, files)   # 7
     step(8, "the MTP draft layer")                     # 8
     mtp = qfn_mtp_step(a, models)
-    return write_config_qfn(a, pc, meta, quant, files, pack, mtp, ctx, models, d, prev, vision)   # 9
+    cfg_path = write_config_qfn(a, pc, meta, quant, files, pack, mtp, ctx, models, d, prev, vision)   # 9
+    if mtp is not None and ("mtp_calibration" not in (read_json(cfg_path).get("installer") or {}) or a.calibrate):
+        how = drafting_choice(a, "the Lamina MTP draft layer", "10-40")
+        if how == "measure":
+            # (the measuring itself is the drafter calibration, which comes with a later version: drafting stays on
+            #  as written, the default; an earlier choice or a measurement in the config is kept either way)
+            ok("MTP drafting: on (the default) - the measuring which is faster on this PC comes with the drafter "
+               "calibration")
+        else:
+            keep_drafting(cfg_path, how == "on")
+    return cfg_path
 
 
 # ------------------------------------------------------------------------------------------------ Hy4-Flash, Inkling 2 Mini
