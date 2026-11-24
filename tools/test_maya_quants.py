@@ -331,7 +331,7 @@ class OldConfigs(unittest.TestCase):
             (self.root / "maya-mm3-hip.json").write_text(json.dumps(old))
             (self.root / "maya-mm3-hip.shared-settings.json").write_text("{}")
             hip = {"gpus": [{"index": 0}], "backend": "hip"}
-            with patch.object(maya, "hip_reserve_mib", return_value=1024):
+            with patch.object(maya, "gpu_reserve_mib", return_value=1024):
                 p = maya.write_config_mm3(args(), hip, {"lib_dirs": []}, pack, 65536, Path("/m"), pack.parent, "gguf-s")
             self.assertEqual(p.name, "maya-minimax-maya-s-hip.json")
             self.assertFalse((self.root / "maya-mm3-hip.json").exists())

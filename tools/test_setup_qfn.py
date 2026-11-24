@@ -323,7 +323,14 @@ class Drafter(unittest.TestCase):
 
 class Migration(unittest.TestCase):
     """An existing CYBER-FROST config of the old engine (installer "qwen" / "q5_k_m", the GLM engine with
-    --ple-gguf) is rewritten to a saguaro-qfn config of the same file - once: idempotent."""
+    --ple-gguf) is rewritten to a saguaro-qfn config of the same file - once: idempotent.  The class asks no GPU:
+    the cards a migrating config names come from a patched S.gpus / S.amd_gpus ([] unless the test says)."""
+
+    def setUp(self):
+        for name in ("gpus", "amd_gpus"):
+            p = patch.object(maya.S, name, lambda *a: [])
+            p.start()
+            self.addCleanup(p.stop)
 
     OLD = {"exe": "/s/build-hip/saguaro-glm", "backend": "hip",
            "args": ["--pack", "/m/CYBER-FROST-3.8-PS/pack",
@@ -432,7 +439,8 @@ class NvidiaConfig(unittest.TestCase):
             t = Path(t)
             models, d = t / "models", t / "models" / "Qwen3.8-Flash-Next-UD-Q4_K_XL"
             files = [t / "gguf" / n for n in maya.qfn_entry("ud-q4_k_xl")["files"]]
-            pc = {"backend": "cuda", "gpus": [{"index": i, "name": "Tesla T4", "vram_gb": 15.0, "arch": "75"}
+            pc = {"backend": "cuda", "gpus": [{"index": i, "name": "Tesla T4", "vram_gb": 15.0, "arch": "75",
+                                               "display": False}    # (nvidia-smi's display_active: Disabled)
                                               for i in range(4)]}
             with cpu(2, 20), patch.object(maya, "ROOT", t), patch.object(maya, "mem_gb", return_value=(252.0, 240.0)), \
                     patch.object(maya, "write_run_script", return_value=t / "run.sh"), \
@@ -492,6 +500,8 @@ class LiveT4Parity(unittest.TestCase):
       - env SAGUARO_GDN_KEYHEAD: the ref's value is "<removed>" (./ref/live-ud-q4.json:59); the setup writes the
         documented sm_75 opt-in, 1 (prefill/kernels.cu: "SAGUARO_GDN_KEYHEAD=1 also takes it on sm_75");
       - --max-context: the split recommends 262144, the live config was raised to 1048576;
+      - --vram-reserve-mib: the live box was set up before v1.2.1-A and holds 700; a fresh setup writes the
+        display rule's 512 - nvidia-smi's display_active says Disabled on these compute-only T4s;
       - --resident-budget-gib: neither has one (252 GB: the page cache holds the experts);
       - the file paths, the port, the log, the installer block: this machine's, not mangonel's."""
 
@@ -529,7 +539,8 @@ class LiveT4Parity(unittest.TestCase):
     def written(self, t: Path):
         models, d = t / "models", t / "models" / "Qwen3.8-Flash-Next-UD-Q4_K_XL"
         files = [t / "gguf" / n for n in maya.qfn_entry("ud-q4_k_xl")["files"]]
-        pc = {"backend": "cuda", "gpus": [{"index": i, "name": "Tesla T4", "vram_gb": 15.0, "arch": "75"}
+        pc = {"backend": "cuda", "gpus": [{"index": i, "name": "Tesla T4", "vram_gb": 15.0, "arch": "75",
+                                           "display": False}    # (nvidia-smi's display_active: Disabled, the live box)
                                           for i in range(4)]}
         vision = {"exe": "vision-qfn", "mmproj": "mmproj.gguf", "model": str(files[0]), "gpu": True,
                   **maya.QFN_VISION}
@@ -564,11 +575,14 @@ class LiveT4Parity(unittest.TestCase):
         with tempfile.TemporaryDirectory() as t:
             cfg = self.written(Path(t))
 
-        def machine_free(pairs):     # (the paths and --max-context are the intended differences, listed above)
-            return {(f, v) for f, v in pairs if f not in self.PATH_FLAGS and f != "--max-context"}
+        def machine_free(pairs):     # (the paths, --max-context and --vram-reserve-mib are the intended
+            return {(f, v) for f, v in pairs                           #  differences, listed above)
+                    if f not in self.PATH_FLAGS and f not in ("--max-context", "--vram-reserve-mib")}
         self.assertEqual(machine_free(self.flag_pairs(cfg["args"])), machine_free(self.flag_pairs(self.LIVE_ARGS)))
         a = cfg["args"]
         self.assertEqual(a[a.index("--max-context") + 1], "262144")    # (the split's recommendation; live: 1M)
+        self.assertEqual(a[a.index("--vram-reserve-mib") + 1], "512")  # (the display rule: no display on a T4;
+                                                                       #  the live box holds its setup-time 700)
         self.assertNotIn("--resident-budget-gib", a)                   # (252 GB: neither config pins a tier)
         self.assertEqual(a[a.index("--pool-workers") + 1], "19")       # (computed here: 2 x 10 cores minus one)
 
@@ -597,7 +611,8 @@ class Layouts1To4T4(unittest.TestCase):
     SPLIT = {"ud-q4_k_xl": "11,24,36", "q8_0": "10,22,35", "cyber-frost-q5_k_m": "12,24,36"}
 
     def pc(self, n):
-        return {"backend": "cuda", "gpus": [{"index": i, "name": "Tesla T4", "vram_gb": 15.0, "arch": "75"}
+        return {"backend": "cuda", "gpus": [{"index": i, "name": "Tesla T4", "vram_gb": 15.0, "arch": "75",
+                                             "display": False}   # (nvidia-smi's display_active: Disabled, these boxes)
                                             for i in range(n)]}
 
     def written(self, t: Path, n, quant, ram, sockets=1, cores=8, vision=None, **kw):
@@ -682,10 +697,12 @@ class Layouts1To4T4(unittest.TestCase):
         want = {k: v for k, v in LiveT4Parity.LIVE_ENV.items() if k not in ("SAGUARO_BATCH_READS_OVERTAKE",
                                                                             "SAGUARO_PARK_STAGING_MIB")}
         self.assertEqual(cfg["env"], want)
-        machine_free = lambda pairs: {(f, v) for f, v in pairs
-                                      if f not in LiveT4Parity.PATH_FLAGS and f != "--max-context"}
+        machine_free = lambda pairs: {(f, v) for f, v in pairs if f not in LiveT4Parity.PATH_FLAGS
+                                      and f not in ("--max-context", "--vram-reserve-mib")}
         self.assertEqual(machine_free(LiveT4Parity.flag_pairs(cfg["args"])),
                          machine_free(LiveT4Parity.flag_pairs(LiveT4Parity.LIVE_ARGS)))
+        self.assertEqual(cfg["args"][cfg["args"].index("--vram-reserve-mib") + 1], "512")   # (headless T4s: the
+                                                                                            #  display rule; live: 700)
         self.assertNotIn("--resident-budget-gib", cfg["args"])   # (256 GB: the file cache is the tier, as live)
         self.assertEqual(cfg["layer_split"], "11,24,36")
         self.assertEqual(cfg["args"][cfg["args"].index("--prefill-pipe") + 1], "1536")
@@ -711,7 +728,7 @@ class PicturesOnEveryLayout(unittest.TestCase):
     def written(self, t: Path, n, **kw):
         models, d = t / "models", t / "models" / "Qwen3.8-Flash-Next-UD-Q4_K_XL"
         files = [t / "gguf" / nm for nm in maya.qfn_entry("ud-q4_k_xl")["files"]]
-        gpus = [{"index": i, "name": "Tesla T4", "vram_gb": 15.0, "arch": "75"} for i in range(n)]
+        gpus = [{"index": i, "name": "Tesla T4", "vram_gb": 15.0, "arch": "75", "display": False} for i in range(n)]
         with cpu(), patch.object(maya, "ROOT", t), patch.object(maya, "mem_gb", return_value=(252.0, 240.0)), \
                 patch.object(maya, "write_run_script", return_value=t / "run.sh"), \
                 patch("sys.stdout", new=io.StringIO()), patch.object(maya.S, "UI", None):

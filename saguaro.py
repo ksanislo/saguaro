@@ -1015,30 +1015,45 @@ def hip_unified_memory(g) -> bool:
 HIP_IDLE_VRAM_GB = 0.5    # more in use with no engine running: something (a compositor) draws on the card
 
 
-def hip_headless(g) -> bool:
-    """A discrete AMD GPU no desktop runs on: no display connected to it and next to no VRAM in use (Linux' sysfs;
-    unknown - Windows, or sysfs without the facts - counts as a desktop's)."""
-    return g.get("display") is False and g.get("vram_used_gb", HIP_IDLE_VRAM_GB) < HIP_IDLE_VRAM_GB
+def gpu_headless(g) -> bool:
+    """A discrete GPU no desktop runs on: no display on it (Linux' AMD sysfs connectors, nvidia-smi's
+    display_active - NVIDIA says it outright, AMD's sysfs adds next to no VRAM in use, and a card whose facts give
+    no VRAM-used number is one whose display answer alone settles it).  Unknown - Windows' AMD (no sysfs), an
+    NVIDIA card whose display_active the driver cannot say - counts as a desktop's."""
+    return g.get("display") is False and g.get("vram_used_gb", 0.0) < HIP_IDLE_VRAM_GB
 
 
-def hip_reserve_mib(gpus) -> int:
-    """The VRAM (MiB) an engine on these AMD GPUs leaves free on each: 3072 where the desktop may run on one (it
-    allocates after the engine has filled its expert pool); 1024 on a Linux APU (its pool is sized from the RAM it
-    shares; Windows draws its desktop from the APU's carve-out too); 512 on cards with no display (compute only: only
-    the engine's own late allocations come after the pool, and the engine keeps the margin it measured for them)."""
+def gpu_reserve_mib(gpus) -> int:
+    """The VRAM (MiB) an engine on these GPUs leaves free on each, AMD and NVIDIA alike: 3072 where the desktop may
+    run on one (it allocates after the engine has filled its expert pool); 1024 on a Linux AMD APU (its pool is
+    sized from the RAM it shares; Windows draws its desktop from the APU's carve-out too); 512 on cards with no
+    display (compute only: only the engine's own late allocations come after the pool, and the engine keeps the
+    margin it measured for them)."""
     if any(hip_unified_memory(g) for g in gpus) and not WIN:
         return 1024
-    if not WIN and gpus and all(hip_headless(g) for g in gpus):
+    if gpus and all(gpu_headless(g) for g in gpus):
         return 512
     return 3072
 
 
-def hip_reserve_why(gpus) -> str:
+def gpu_reserve_why(gpus) -> str:
     if any(hip_unified_memory(g) for g in gpus) and not WIN:
         return "an APU: its pool is sized from the shared RAM"
-    if not WIN and gpus and all(hip_headless(g) for g in gpus):
+    if gpus and all(gpu_headless(g) for g in gpus):
         return "no display is connected to the GPU"
     return "the desktop may run on the GPU and allocate beside the engine"
+
+
+def gpu_facts(cfg: dict) -> list:
+    """The cards of a stored config, as this PC's tools describe them now (its vendor decides which to ask): the
+    facts the VRAM reserve rule reads.  [] when the PC cannot be asked or holds none of the cards the config
+    names - the rule then keeps the desktop's room, the unknown case."""
+    try:
+        found = S.amd_gpus() if cfg.get("backend") == "hip" else S.gpus()
+    except Exception:
+        return []
+    want = {int(g) for g in cfg.get("gpu") or [] if str(g).lstrip("-").isdigit()}
+    return [g for g in found or [] if g.get("index") in want]
 
 
 def hip_clang(root: Path) -> Path | None:
@@ -3738,8 +3753,9 @@ def write_config(a, pc, meta, pack: Path, quant: str, ctx: int, models: Path, vi
     step(8, "the configuration and the start script")
     port = a.port or 8080
     metal = pc.get("backend") == "metal"
-    # --expert-cache auto: the expert pool takes the VRAM left free less the reserve (--vram-reserve-mib, 700 MiB) and
-    # is checked again once written; a number set by hand caps it at that many experts (a setup again keeps it)
+    # --expert-cache auto: the expert pool takes the VRAM left free less the reserve (--vram-reserve-mib: the setup
+    # writes the display rule's value - 3072 where a desktop may run on a card, 512 where none can; the engine's own
+    # 700 - and it is checked again once written); a number set by hand caps it at that many experts (a setup again keeps it)
     # --prefill auto (as Strata's setup writes it): the engine picks its prompt chunk - the largest its expert pool
     # can lend, up to 8192; a number (`32768`) sets the chunk itself
     cfg = {"exe": str(EXE), "args": ["--glm-pack", str(pack), "--max-context", str(ctx), "--expert-cache", "auto",
@@ -3764,9 +3780,9 @@ def write_config(a, pc, meta, pack: Path, quant: str, ctx: int, models: Path, vi
         # Leave space for the Linux desktop. The engine sizes its prompt chunk from
         # the available prompt-memory budget; forcing 256 here severely slows HIP.
         gpus = pc["gpus"]
-        hip_env = {"SAGUARO_GLM_RESERVE_MB": str(hip_reserve_mib(gpus)), "SAGUARO_GLM_RAM_HEADROOM_GB": "16"}
+        hip_env = {"SAGUARO_GLM_RESERVE_MB": str(gpu_reserve_mib(gpus)), "SAGUARO_GLM_RAM_HEADROOM_GB": "16"}
         if "SAGUARO_GLM_RESERVE_MB" not in env and getattr(a, "vram_reserve_mib", None) is None:
-            ok(f"VRAM kept free on each GPU: {hip_env['SAGUARO_GLM_RESERVE_MB']} MiB ({hip_reserve_why(gpus)}; "
+            ok(f"VRAM kept free on each GPU: {hip_env['SAGUARO_GLM_RESERVE_MB']} MiB ({gpu_reserve_why(gpus)}; "
                "--env SAGUARO_GLM_RESERVE_MB=<MiB> changes it)")
         if len(gpus) == 1:
             hip_env["SAGUARO_GLM_SPLIT"] = "0"   # two or more cards: the engine picks the split (and drafts with MTP)
@@ -3832,6 +3848,12 @@ def write_config(a, pc, meta, pack: Path, quant: str, ctx: int, models: Path, vi
             ok("kept from the config before: " + ", ".join(kept))
     if getattr(a, "parallel", None) and not metal:      # (Metal: one conversation)
         set_arg(cfg["args"], "--parallel", a.parallel)
+    if pc.get("backend") not in ("hip", "metal") and "--vram-reserve-mib" not in cfg["args"][:-1] and \
+            getattr(a, "vram_reserve_mib", None) is None and "SAGUARO_GLM_RESERVE_MB" not in (cfg.get("env") or {}):
+        mib = gpu_reserve_mib(pc["gpus"])                # (the same rule as on AMD: the desktop's room on a card that
+        set_arg(cfg["args"], "--vram-reserve-mib", mib)  #  may drive it, the small margin where none can)
+        ok(f"VRAM kept free beside the expert pool: {mib} MiB ({gpu_reserve_why(pc['gpus'])}; "
+           "--vram-reserve-mib changes it)")
     if getattr(a, "vram_reserve_mib", None) is not None and not metal:   # given now: written, and a later setup keeps it
         set_arg(cfg["args"], "--vram-reserve-mib", a.vram_reserve_mib)
         ok(f"VRAM kept free beside the expert pool: {a.vram_reserve_mib} MiB (--vram-reserve-mib)")
@@ -6469,10 +6491,10 @@ def write_config_ds4(a, pc: dict, meta: dict, pack: Path, ctx: int, models: Path
     if getattr(a, "vram_reserve_mib", None) is not None:   # given now: written, and a later setup keeps it
         set_arg(args, "--reserve-mib", a.vram_reserve_mib)
         ok(f"VRAM kept free on each GPU: {a.vram_reserve_mib} MiB (--vram-reserve-mib)")
-    elif hip and "--reserve-mib" not in args[:-1]:
-        mib = hip_reserve_mib(pc["gpus"])
+    elif "--reserve-mib" not in args[:-1]:   # (every vendor now: a GeForce driving the desktop needed this too)
+        mib = gpu_reserve_mib(pc["gpus"])
         set_arg(args, "--reserve-mib", mib)
-        ok(f"VRAM kept free on each GPU: {mib} MiB ({hip_reserve_why(pc['gpus'])}; --vram-reserve-mib changes it)")
+        ok(f"VRAM kept free on each GPU: {mib} MiB ({gpu_reserve_why(pc['gpus'])}; --vram-reserve-mib changes it)")
     cfg = {"exe": str(DS4_EXE), "args": args, "cwd": str(ROOT), "tokenizer": str(pack / "tokenizer"),
            **({"backend": "hip"} if hip else {}),
            "model_name": DS4_ABL_MODEL_NAME if quant in DS4_ABL else DS4_MODEL_NAME,
@@ -7058,10 +7080,13 @@ def write_config_mm3(a, pc: dict, meta: dict, pack: Path, ctx: int, models: Path
         set_arg(args, "--vision", "off")
     elif mm3_pack_has_vision(pack):
         set_arg(args, "--vision", "on")
-    if hip and "--reserve-gb" not in args[:-1]:   # (as DeepSeek's on AMD: the desktop's allocations beside the engine)
-        mib = hip_reserve_mib(pc["gpus"])
+    if getattr(a, "vram_reserve_mib", None) is not None:   # given now: written, and a later setup keeps it
+        set_arg(args, "--reserve-gb", f"{a.vram_reserve_mib / 1024:.1f}")
+        ok(f"VRAM kept free on each GPU: {a.vram_reserve_mib} MiB (--vram-reserve-mib)")
+    elif "--reserve-gb" not in args[:-1]:   # (as DeepSeek's, every vendor: the desktop's allocations beside the engine)
+        mib = gpu_reserve_mib(pc["gpus"])
         set_arg(args, "--reserve-gb", f"{mib / 1024:.1f}")
-        ok(f"VRAM kept free on each GPU: {mib / 1024:.1f} GB ({hip_reserve_why(pc['gpus'])})")
+        ok(f"VRAM kept free on each GPU: {mib / 1024:.1f} GB ({gpu_reserve_why(pc['gpus'])}; --vram-reserve-mib changes it)")
     cfg = {"exe": str(MM3_EXE), "args": args, "cwd": str(ROOT), "tokenizer": str(pack / "tokenizer"),
            **({"backend": "hip"} if hip else {}),
            "model_name": MM3_MODEL_NAME, "gpu": [g["index"] for g in pc["gpus"]],
@@ -7555,8 +7580,14 @@ def write_config_qfn(a, pc: dict, meta: dict, quant: str, files: list, pack: Pat
     args += ["--expert-cache", "auto", "--prefill", "auto", "--spec", "3", "--spec-min-p", "0.7"]
     if mtp is not None:
         args += ["--mtp", str(mtp)]
+    reserve = getattr(a, "vram_reserve_mib", None)     # (the display rule every vendor instead of 700 everywhere:
+    if reserve is None:                                #  3072 where a desktop may run, 512 where none can,
+        reserve = gpu_reserve_mib(pc["gpus"])          #  and --vram-reserve-mib whenever it was given)
     args += ["--max-context", str(ctx), "--kv", "int8", "--kv-resident", str(min(ctx, 32768)),
-             "--vram-reserve-mib", "700", "--session-dir", str(var / "sessions")]
+             "--vram-reserve-mib", str(reserve), "--session-dir", str(var / "sessions")]
+    ok(f"VRAM kept free on each GPU: {reserve} MiB " +
+       ("(--vram-reserve-mib)" if getattr(a, "vram_reserve_mib", None) is not None else
+        f"({gpu_reserve_why(pc['gpus'])}; --vram-reserve-mib changes it)"))
     if lay["resident_budget_gib"] is not None:         # (a pinned RAM tier: RAM - 20, never more than the model's
                                                        #  own expert bytes; when the page cache holds all of them
                                                        #  with the spare untouched there is no tier and the flag
@@ -8776,8 +8807,11 @@ def migrate_cyber_frost(cfg: dict) -> bool:
         new += ["--mtp", str(mtp)]
     if isinstance(cfg.get("vision"), dict):
         new.append("--vision")
+    # (the reserve it had, if it had one; else the display rule on this PC's cards - the migration rewrites an
+    #  existing PC's config, where the facts can be asked; unknown: the desktop keeps its room)
+    reserve = val("--vram-reserve-mib") or str(gpu_reserve_mib(gpu_facts(cfg)))
     new += ["--max-context", ctx, "--kv", "int8", "--kv-resident", str(min(int(ctx), 32768)),
-            "--vram-reserve-mib", "700", "--resident-budget-gib", str(qfn_ram_budget(mem_gb()[0])),
+            "--vram-reserve-mib", reserve, "--resident-budget-gib", str(qfn_ram_budget(mem_gb()[0])),
             "--rope-scaling", "yarn", "--rope-scale", "4", "--yarn-orig-ctx", "262144"]
     if inst.get("model_dir"):
         new += ["--session-dir", str(Path(inst["model_dir"]) / "var" / "sessions")]

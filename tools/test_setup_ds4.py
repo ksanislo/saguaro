@@ -239,7 +239,9 @@ class Config(unittest.TestCase):
     def test_fresh(self):
         p, c = self.write(args())
         self.assertEqual(p.name, "maya-ds4.json")
-        self.assertEqual(c["args"], ["--pack", str(Path("/m/DS/maya-ds4")), "--max-context", "131072", "--tp", "2"])
+        self.assertEqual(c["args"], ["--pack", str(Path("/m/DS/maya-ds4")), "--max-context", "131072", "--tp", "2",
+                                     "--reserve-mib", "3072"])   # (every vendor now: no display facts here, so the
+                                                                 #  desktop's room: v1.2.1-A)
         self.assertEqual(c["exe"], str(maya.DS4_EXE))
         self.assertEqual(c["tokenizer"], str(Path("/m/DS/maya-ds4/tokenizer")))
         self.assertEqual((c["sampling"], c["reasoning_effort"]), (maya.DS4_SAMPLING, maya.DS4_EFFORT))
@@ -285,7 +287,7 @@ class Config(unittest.TestCase):
     def test_tuned_before_is_used(self):
         self.tuned()
         _, c = self.write(args())
-        self.assertEqual(c["args"][-4:], ["--tp", "8", "--cpu-threads", "33"])
+        self.assertEqual(c["args"][-6:], ["--tp", "8", "--reserve-mib", "3072", "--cpu-threads", "33"])
         self.tuned(threads=None)                       # (the engine's own threads: no flag)
         (self.root / "maya-ds4.json").unlink()         # (a fresh setup: no config before)
         _, c = self.write(args())
@@ -351,8 +353,8 @@ class Config(unittest.TestCase):
             self.assertEqual(reserve(apu), "3072")
         self.assertEqual(reserve(card, vram_reserve_mib=500), "500")  # (asked for)
         self.assertEqual(reserve(card, {"args": ["--reserve-mib", "2000"]}), "2000")   # (kept)
-        p, c = self.write(args())                                     # (NVIDIA: the engine's own 600)
-        self.assertNotIn("--reserve-mib", c["args"])
+        p, c = self.write(args())                        # (NVIDIA too, v1.2.1-A: the same rule on its cards' facts;
+        self.assertEqual(c["args"][c["args"].index("--reserve-mib") + 1], "3072")    #  no facts here: the desktop's 3072)
 
 
 class Calibrate(unittest.TestCase):

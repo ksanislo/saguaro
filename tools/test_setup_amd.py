@@ -183,9 +183,10 @@ def sysfs_card(root: Path, connectors: dict, used_mib: int, device="0x7550", rev
 
 
 class Reserve(unittest.TestCase):
-    """The VRAM a GLM / DeepSeek / MiniMax engine leaves free on an AMD card: 3072 MiB where the desktop may run on
-    it, 512 on a card with no display connected and next to no VRAM in use (mortar's RX 9070 XT beside an iGPU:
-    Maya-L read prompts token by token with 3072), 1024 on a Linux APU."""
+    """The VRAM an engine leaves free on a card - AMD's and NVIDIA's alike, v1.2.1-A: 3072 MiB where the desktop may
+    run on it, 512 on a card with no display connected (AMD's sysfs: and next to no VRAM in use - mortar's RX 9070 XT
+    beside an iGPU: Maya-L read prompts token by token with 3072; NVIDIA's display_active says it outright), 1024 on
+    a Linux AMD APU."""
 
     def card(self, connectors, used_mib):
         with tempfile.TemporaryDirectory() as d:
@@ -195,30 +196,30 @@ class Reserve(unittest.TestCase):
         g = self.card({"DP-1": "disconnected", "HDMI-A-1": "disconnected", "Writeback-1": "unknown"}, 93)
         self.assertEqual((g["display"], round(g["vram_used_gb"], 2)), (False, 0.09))
         with patch.object(maya, "WIN", False):
-            self.assertEqual(maya.hip_reserve_mib([g]), 512)
-            self.assertIn("no display", maya.hip_reserve_why([g]))
+            self.assertEqual(maya.gpu_reserve_mib([g]), 512)
+            self.assertIn("no display", maya.gpu_reserve_why([g]))
 
     def test_a_connected_display_keeps_3072(self):
         g = self.card({"DP-1": "connected", "HDMI-A-1": "disconnected"}, 93)
         with patch.object(maya, "WIN", False):
-            self.assertEqual(maya.hip_reserve_mib([g]), 3072)
+            self.assertEqual(maya.gpu_reserve_mib([g]), 3072)
 
     def test_vram_in_use_keeps_3072(self):   # (a compositor drawing on the card through another GPU's outputs)
         g = self.card({"DP-1": "disconnected"}, 900)
         with patch.object(maya, "WIN", False):
-            self.assertEqual(maya.hip_reserve_mib([g]), 3072)
+            self.assertEqual(maya.gpu_reserve_mib([g]), 3072)
 
     def test_unknown_keeps_3072(self):
         with patch.object(maya, "WIN", False):
-            self.assertEqual(maya.hip_reserve_mib([rx9070()]), 3072)          # (no sysfs facts)
-            self.assertEqual(maya.hip_reserve_mib([{**rx9070(), "display": False, "vram_used_gb": 0.1},
+            self.assertEqual(maya.gpu_reserve_mib([rx9070()]), 3072)          # (no sysfs facts)
+            self.assertEqual(maya.gpu_reserve_mib([{**rx9070(), "display": False, "vram_used_gb": 0.1},
                                                    {**rx9070(1), "display": True, "vram_used_gb": 0.1}]), 3072)
         with patch.object(maya, "WIN", True):
-            self.assertEqual(maya.hip_reserve_mib([{**rx9070(), "display": False, "vram_used_gb": 0.1}]), 3072)
+            self.assertEqual(maya.gpu_reserve_mib([rx9070()]), 3072)          # (Windows' AMD: no sysfs, unknown too)
 
     def test_linux_apu_unchanged(self):
         with patch.object(maya, "WIN", False):
-            self.assertEqual(maya.hip_reserve_mib([{"arch": "gfx1151", "display": True, "vram_gb": 96}]), 1024)
+            self.assertEqual(maya.gpu_reserve_mib([{"arch": "gfx1151", "display": True, "vram_gb": 96}]), 1024)
 
     def test_card_name_from_the_pci_revision(self):
         with tempfile.TemporaryDirectory() as d:
