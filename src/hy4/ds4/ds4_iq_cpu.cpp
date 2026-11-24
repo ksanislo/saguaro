@@ -4,10 +4,10 @@
 #include "ds4_gguf_cpu.hpp"
 #include "ds4_cpu_prepare_rows.hpp"
 
-#if defined(STRATA_NATIVE_EXPERTS)
-#include "strata/kernels/cpu/iq2v_rows.hpp"
-#include "strata/kernels/cpu/iq3v_rows.hpp"
-#include "strata/kernels/cpu/native_expert.hpp"
+#if defined(MAYA_NATIVE_EXPERTS)
+#include "maya/kernels/cpu/iq2v_rows.hpp"
+#include "maya/kernels/cpu/iq3v_rows.hpp"
+#include "maya/kernels/cpu/native_expert.hpp"
 
 #define GGML_COMMON_DECL_CPP
 #define GGML_COMMON_IMPL_CPP
@@ -45,10 +45,10 @@
 #define IQ_AVX2
 #endif
 
-namespace strata::ds4::gguf {
+namespace maya::ds4::gguf {
 
-#if defined(STRATA_NATIVE_EXPERTS)
-namespace kc = strata::kernels::cpu;
+#if defined(MAYA_NATIVE_EXPERTS)
+namespace kc = maya::kernels::cpu;
 namespace {
 kc::NativeFmt native(const IqCpu& f) {   // (the fields the rows read; no lookups)
     kc::NativeFmt n;
@@ -509,7 +509,7 @@ IQ_AVX2 void q4x_rows_avx2(const uint8_t* w, size_t rb, int nb, const block_q8_K
         for (int t = 0; t < NT; ++t) out[t][r - r0] = 0.125f * hsum_ggml(accf[t]);
     }
 }
-// the form's second-generation rows (strata/kernels/cpu/iq3v_rows.hpp) iq_cpu_q4x_ok took: 0 the rows above
+// the form's second-generation rows (maya/kernels/cpu/iq3v_rows.hpp) iq_cpu_q4x_ok took: 0 the rows above
 int g_q4xv = 0;
 // out[t][r - r0] for rows [r0, r1) of the form (rb = q4x_row_bytes(n)), 4 tokens a pass
 void q4x_rows_n(const uint8_t* w, size_t rb, int n, const void* const* act, int nt, float* const* out, int r0, int r1) {
@@ -830,11 +830,11 @@ bool g_iq1m_fma = true;   // IQ1_M's last step one FMA (gcc's build of ggml-cpu)
 #define IQX_POP 1
 #include "ds4_iq512_kern.inc"
 bool g_x512_18 = false;   // IQ3_XXS on these rows rather than the ones above (own())
-// IQ2_XXS's / IQ2_S's second-generation rows (strata/kernels/cpu/iq2v_rows.hpp): the form own() took (0: the rows
+// IQ2_XXS's / IQ2_S's second-generation rows (maya/kernels/cpu/iq2v_rows.hpp): the form own() took (0: the rows
 // above), and whether a call of several tokens takes it on an AVX-512 CPU too (else the native lane's AVX-512 rows)
 int g_iq2v = 0, g_iq2sv = 0;
 bool g_iq2v_multi = false, g_iq2sv_multi = false;
-// IQ3_XXS's / IQ4_XS's second-generation rows (strata/kernels/cpu/iq3v_rows.hpp): the form own() took (0: IQ3_XXS the
+// IQ3_XXS's / IQ4_XS's second-generation rows (maya/kernels/cpu/iq3v_rows.hpp): the form own() took (0: IQ3_XXS the
 // rows above, IQ4_XS the native lane's), and whether a call of several tokens takes it too (else those rows)
 int g_iq3v = 0, g_iq4v = 0;
 bool g_iq3v_multi = false, g_iq4v_multi = false;
@@ -953,7 +953,7 @@ void iq1s_rows_n(const uint8_t* w, size_t rb, int n, const void* const* act, int
     }
 }
 
-#include "strata/kernels/cpu/iq_avx1_kern.inc"
+#include "maya/kernels/cpu/iq_avx1_kern.inc"
 #endif  // IQ_X86
 
 // out[t][r - r0] for the rows of `type` (an own type only)
@@ -1804,4 +1804,4 @@ bool dense_requant(const uint8_t*, int, int, int, std::vector<uint8_t>&, std::st
 }
 #endif
 
-}  // namespace strata::ds4::gguf
+}  // namespace maya::ds4::gguf

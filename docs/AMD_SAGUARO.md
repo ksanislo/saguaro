@@ -230,7 +230,7 @@ text (`SAGUARO_GLM_MTP_DECODE`, on by default on `gfx115x` only). On the Gorgon 
 ## Inkling 2 Mini (experimental)
 
 `./saguaro.sh --setup --backend hip --model inkling-2-mini` (Linux). Its engine (`saguaro-ik2`, upstream Maya v1.1.74's
-with Saguaro's additions) runs on an RDNA 3 / 3.5 / 4 GPU (gfx11 / gfx12) of 16 GB or more: every expert in VRAM where
+with Saguaro's additions) runs on an RDNA 3 / 3.5 / 4 GPU (gfx11 / gfx12) of 12 GB or more: every expert in VRAM where
 the file fits, else the offload path as on NVIDIA (the most-used experts in VRAM, the others pinned in RAM and fetched
 by the GPU). Checked on an RX 9070 XT (16 GB, gfx1201, ROCm 7.1, PCIe 5) with a Ryzen 7 9800X3D, 32K context:
 

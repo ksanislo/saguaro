@@ -7,7 +7,7 @@
 #include <cstddef>
 #include <vector>
 
-namespace strata::ds4 {
+namespace maya::ds4 {
 
 // a group's tail slots a layer: member i's buffers of need[i] bytes (+ 256, the region's alignment) in its tail of k
 // slots of step[i] bytes (its parts of one slot of each of its layers) - the most any member needs, at most max_k (the
@@ -39,4 +39,4 @@ inline int tail_keep(size_t off, size_t u, size_t step, size_t b0, int avail) {
     return keep;
 }
 
-}  // namespace strata::ds4
+}  // namespace maya::ds4

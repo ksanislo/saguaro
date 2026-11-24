@@ -160,7 +160,7 @@ __global__ void place_rows_kernel(const float* y, const float* bias, const float
 
 int blocks_for(size_t n) { return (int) std::min<size_t>((n + 255) / 256, 65535); }
 
-#if !defined(STRATA_USE_HIP)
+#if !defined(MAYA_USE_HIP)
 // HY4_VISION_F16=1 (no BF16 tensor cores before sm_80): a GEMM's BF16 operands to FP16 in place - exact for
 // |v| <= 65504 (FP16 has the longer mantissa), beyond it clamped, below 2^-24 flushed (maya-mm3's tower, the same)
 __global__ void bf16_to_f16_inplace(uint16_t* __restrict__ x, size_t n) {
@@ -363,7 +363,7 @@ struct Vision::Impl {
     // C [rows][ldc] F32 (columns [0, N) of it) = X [rows][K] BF16 . W [N][K]^T BF16
     bool gemm(const uint8_t* W, int N, int K, const bf16_t* X, int rows, float* C, int ldc, std::string& err) {
         const float one = 1.0f, zero = 0.0f;
-#if !defined(STRATA_USE_HIP)
+#if !defined(MAYA_USE_HIP)
         if (f16) {   // (W and X made FP16 by their owners: w16 / xr in encode)
             VB(cublasGemmEx(blas, CUBLAS_OP_T, CUBLAS_OP_N, N, rows, K, &one, W, CUDA_R_16F, K, X, CUDA_R_16F, K, &zero,
                             C, CUDA_R_32F, ldc, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT_TENSOR_OP));
@@ -379,7 +379,7 @@ struct Vision::Impl {
         if (!Vision::geometry(pk, g, err)) return false;
         dev = dev_;
         VK(cudaSetDevice(dev));
-#if !defined(STRATA_USE_HIP)
+#if !defined(MAYA_USE_HIP)
         if (const char* fv = std::getenv("HY4_VISION_F16"); fv != nullptr && std::atoi(fv) != 0) {
             f16 = true;
             std::fprintf(stderr, "saguaro hy4: vision: GEMMs on FP16 tensor cores (BF16 -> FP16, exact in range)\n");
@@ -655,7 +655,7 @@ struct Vision::Impl {
         const float one = 1.0f, zero = 0.0f;
         // (FP16 GEMMs: a stage's matrices once it is in its slot, an input once its kernel wrote it)
         auto w16 = [&](const uint8_t* W, size_t n) {
-#if !defined(STRATA_USE_HIP)
+#if !defined(MAYA_USE_HIP)
             if (f16) to16(W, n, s);
 #else
             (void) W, (void) n;

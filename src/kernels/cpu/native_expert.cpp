@@ -1,13 +1,13 @@
 // src/kernels/cpu/native_expert.cpp - plan v0.3 P6: native (GGUF-form) experts on the CPU through ggml-cpu.
 // See the header.  Nothing here is Strata arithmetic: the activation quantizers and the row dot products are
 // ggml-cpu's, so an IQ expert computes what llama.cpp's CPU backend computes for it.
-#include "strata/kernels/cpu/native_expert.hpp"
-#include "strata/kernels/cpu/expert.hpp"
-#include "strata/kernels/cpu/iq_avx512.hpp"
-#include "strata/kernels/cpu/iq_avx512_one.hpp"
-#include "strata/kernels/cpu/iq_avx2.hpp"
-#include "strata/kernels/cpu/iq_avx1.hpp"
-#include "strata/kernels/cpu/expert_layout.hpp"
+#include "maya/kernels/cpu/native_expert.hpp"
+#include "maya/kernels/cpu/expert.hpp"
+#include "maya/kernels/cpu/iq_avx512.hpp"
+#include "maya/kernels/cpu/iq_avx512_one.hpp"
+#include "maya/kernels/cpu/iq_avx2.hpp"
+#include "maya/kernels/cpu/iq_avx1.hpp"
+#include "maya/kernels/cpu/expert_layout.hpp"
 
 #include "ggml.h"
 #include "ggml-cpu.h"
@@ -21,7 +21,7 @@
 #include <mutex>
 #include <vector>
 
-namespace strata::kernels::cpu {
+namespace maya::kernels::cpu {
 namespace {
 
 const ggml_type_traits_cpu* traits(int type) { return ggml_get_type_traits_cpu((ggml_type) type); }
@@ -394,4 +394,4 @@ void native_down_rows(const NativeFmt& f, const uint8_t* blob, const void* const
     }
 }
 
-}  // namespace strata::kernels::cpu
+}  // namespace maya::kernels::cpu

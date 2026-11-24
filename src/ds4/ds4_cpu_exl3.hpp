@@ -11,7 +11,7 @@
 // which wait for nothing but their own node's step 0: every claimed job runs on some thread, so the batch always ends.
 #pragma once
 
-#include "strata/kernels/cpu/exl3_cpu.hpp"
+#include "maya/kernels/cpu/exl3_cpu.hpp"
 #include "ds4_pool.hpp"
 
 #include <atomic>
@@ -21,7 +21,7 @@
 #include <functional>
 #include <memory>
 
-namespace strata::ds4 {
+namespace maya::ds4 {
 
 /// One expert of a window for n of its tokens: the CPU lane's rows slot0 .. slot0 + n - 1.  src[r]: a GGUF expert's
 /// matrix r in a RAM store slot (--ssd-cache) for this call, else null (where the layer has it)
@@ -52,7 +52,7 @@ struct Exl3Lane {
 template <class Part, class Nodes, class Phase>
 void exl3_experts(const Exl3Lane& c, const float* x, size_t ldx, const LaneEnt* ents, int ne, const Part& part,
                   const Nodes& nodes, const Phase& phase, bool flow) {
-    namespace kc = strata::kernels::cpu;
+    namespace kc = maya::kernels::cpu;
     const int E = c.E, FF = c.FF, NH = c.NH, S = c.slots, FFh = FF / NH, Eh = E / NH, GQ = E / 256, DQ = FF / 128;
     const int GB = FFh / 128, DB = Eh / 128, EB = E / 128, FB = FF / 128;
     const float lim = c.lim;
@@ -195,4 +195,4 @@ void exl3_experts(const Exl3Lane& c, const float* x, size_t ldx, const LaneEnt* 
     nodes(J0 + J1 + J2 + J3, f, -1);
 }
 
-}  // namespace strata::ds4
+}  // namespace maya::ds4

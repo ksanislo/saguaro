@@ -3,7 +3,7 @@
 
 #include <string>
 
-#if defined(__HIPCC__) && defined(STRATA_HIPBLASLT_AVAILABLE)
+#if defined(__HIPCC__) && defined(MAYA_HIPBLASLT_AVAILABLE)
 // (the HIP shim's CUDA shuffle spellings would expand inside hipBLASLt's headers - as src/prefill/gemm.cu)
 #undef __shfl_xor_sync
 #undef __shfl_down_sync
@@ -26,9 +26,9 @@
 #include <vector>
 #endif
 
-namespace strata::ds4::lt {
+namespace maya::ds4::lt {
 
-#if defined(__HIPCC__) && defined(STRATA_HIPBLASLT_AVAILABLE)
+#if defined(__HIPCC__) && defined(MAYA_HIPBLASLT_AVAILABLE)
 namespace {
 
 constexpr size_t kWorkspace = (size_t) 64 << 20;
@@ -243,4 +243,4 @@ bool available() { return false; }
 bool gemm(void*, const uint16_t*, int, int, const uint16_t*, int, int, float*, int) { return false; }
 #endif
 
-}  // namespace strata::ds4::lt
+}  // namespace maya::ds4::lt

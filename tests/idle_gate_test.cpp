@@ -1,6 +1,6 @@
-// The idle gate (include/strata/platform/idle_gate.hpp, #685): an idle engine's service threads sleep on it after a long
+// The idle gate (include/maya/platform/idle_gate.hpp, #685): an idle engine's service threads sleep on it after a long
 // quiet, and a line read from the engine's input wakes them at once.  Host code only: threads and a clock, no GPU.
-#include "strata/platform/idle_gate.hpp"
+#include "maya/platform/idle_gate.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -8,7 +8,7 @@
 #include <thread>
 #include <vector>
 
-using strata::platform::IdleGate;
+using maya::platform::IdleGate;
 using Clock = std::chrono::steady_clock;
 
 static int failures = 0;
@@ -92,7 +92,7 @@ int main() {
     }
     // the deep idle's settings: one that is not set is the fallback
     {
-        check(strata::platform::idle_env("SAGUARO_IDLE_GATE_TEST_UNSET_VARIABLE", 60) == 60, "an unset setting is the fallback");
+        check(maya::platform::idle_env("SAGUARO_IDLE_GATE_TEST_UNSET_VARIABLE", 60) == 60, "an unset setting is the fallback");
     }
     if (failures == 0) std::printf("idle_gate_test: ok\n");
     return failures == 0 ? 0 : 1;

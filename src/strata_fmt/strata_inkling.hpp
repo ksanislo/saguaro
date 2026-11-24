@@ -6,7 +6,7 @@
 //          -> kMIX (each role part: MixHdr, rows of the expert's own type, the MACaQ scales after the up part).
 #pragma once
 
-#include "strata/artifact/gguf_reader.hpp"
+#include "maya/artifact/gguf_reader.hpp"
 #include "strata_pack.hpp"
 
 #include <map>
@@ -21,12 +21,12 @@ public:
     bool build(const std::string& path, std::string& err);
 
     const Pack& pack() const { return pack_; }
-    const strata::MetaValue* get(const std::string& key) const {
+    const maya::MetaValue* get(const std::string& key) const {
         auto it = meta_.find(key);
         return it == meta_.end() ? nullptr : &it->second;
     }
-    const std::vector<strata::TensorInfo>& tensors() const { return tensors_; }
-    const strata::TensorInfo* info(const std::string& name) const;
+    const std::vector<maya::TensorInfo>& tensors() const { return tensors_; }
+    const maya::TensorInfo* info(const std::string& name) const;
     // the host bytes of a trunk tensor (null for an expert tensor: read_experts)
     const uint8_t* data(const std::string& name) const;
     size_t bytes(const std::string& name) const;   // any tensor's (an expert tensor: n_experts x its expert's bytes)
@@ -75,8 +75,8 @@ private:
     void fill_expert(int l, int role, int e, uint8_t* dst) const;
 
     Pack pack_;
-    std::map<std::string, strata::MetaValue> meta_;
-    std::vector<strata::TensorInfo> tensors_;
+    std::map<std::string, maya::MetaValue> meta_;
+    std::vector<maya::TensorInfo> tensors_;
     std::vector<Owned> own_;
     std::map<std::string, size_t> by_name_;
     std::vector<ExpLayer> layers_;

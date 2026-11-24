@@ -19,7 +19,7 @@
 #include <random>
 #include <vector>
 
-using namespace strata::ds4;
+using namespace maya::ds4;
 
 static float fp4h(unsigned c) {   // (fp4v on the host)
     static const float mag[8] = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f};

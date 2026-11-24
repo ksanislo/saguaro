@@ -930,9 +930,10 @@ int serve(hy4::Model& m, const std::vector<int>& eos, int n_draft, float floor0,
     for (const auto& l : m.info_lines()) std::printf("NOTE %s\n", l.c_str());
     const auto& st0 = m.stats();
     std::printf("INFO engine=hy4 engine_kind=hy4 model=Hy4-flash ctx=%lld vram_gb=%.2f dspark=0 mtp=%d experts=%d "
-                "vram_slots=%d\n",
+                "vram_slots=%d expert_slots=%d\n",
                 (long long) m.max_ctx(), st0.vram_gb, m.has_mtp() && n_draft > 0 ? 1 : 0, st0.experts_all,
-                st0.experts_vram);
+                st0.experts_vram, st0.experts_vram);
+    for (const auto& l : m.vram_lines()) std::printf("%s\n", l.c_str());   // (the web app's map of the GPUs)
     if (m.has_dfly2()) std::printf("INFO dfly2=%d draft=%d\n", n_draft > 0 ? 1 : 0, n_draft);
     if (!m.room_report().empty()) std::printf("INFO %s\n", m.room_report().c_str());   // (--room-report)
     if (const hy4::VisionGeo* vg = m.vision())   // (serve/hy4_vision.py's Geometry.from_info)
@@ -1267,8 +1268,10 @@ int serve(hy4::Model& m, const std::vector<int>& eos, int n_draft, float floor0,
         if (spec && d_off > 0) std::fprintf(stderr, "saguaro hy4 serve: %s kept %lld of %lld drafts\n", m.has_dfly2() ? "DFly2" : "MTP", d_acc, d_off);
         stat_line();
         const double t2 = now() * 1e3;
-        std::printf("DONE %lld %zu %.1f %.1f %s %lld %lld %zu 0 0\n", produced, r.ids.size(), t1 - t0, t2 - t1, finish,
-                    d_acc, d_off, from);
+        // (its last two: the routed experts the answer ran in VRAM, of all it ran - the web app's VRAM hit)
+        const long long d_ex = (long long) m.stats().experts - ex0, d_cpu = (long long) m.stats().cpu_experts - cpu0;
+        std::printf("DONE %lld %zu %.1f %.1f %s %lld %lld %zu %lld %lld\n", produced, r.ids.size(), t1 - t0, t2 - t1,
+                    finish, d_acc, d_off, from, std::max(0LL, d_ex - d_cpu), std::max(0LL, d_ex));
         std::fflush(stdout);
         {
             // (HY4_HOT: the routes of the rows a plain decode reads - the prompt's and the answer's tokens but its
@@ -2004,7 +2007,7 @@ int main(int argc, char** argv) {
         o.vision = true;
         o.vision_auto = false;
     }
-#if defined(_WIN32) && defined(STRATA_USE_HIP)
+#if defined(_WIN32) && defined(MAYA_USE_HIP)
     // (first, so a log of a start that fails has it too)
     std::fprintf(stderr, "INFO experimental platform: an AMD GPU under Windows (HIP) - Hy4-Flash has not been tested "
                          "there by Maya's team; please include this log when reporting a problem\n");

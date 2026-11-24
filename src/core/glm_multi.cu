@@ -13,7 +13,7 @@
 // for the oldest sequence's token (multi_take), and issues that sequence's next one right away.
 #include "glm_fast_state.hpp"
 
-#if !defined(STRATA_USE_HIP)
+#if !defined(MAYA_USE_HIP)
 #include <cuda.h>
 #endif
 
@@ -23,10 +23,10 @@
 #include <cstdlib>
 #include <cstring>
 
-namespace strata::core {
+namespace maya::core {
 
 // ---- ELASTIC CONTEXTS: the driver's virtual memory calls, taken from the runtime (no link to libcuda)
-#if !defined(STRATA_USE_HIP)
+#if !defined(MAYA_USE_HIP)
 namespace {
 struct Vmm {
     decltype(&::cuMemAddressReserve) reserve = nullptr;
@@ -123,7 +123,7 @@ struct Glm5Model::Elastic {};
 
 // the elastic expert pool: one reservation, every layer's main slots on a granule boundary, backed one granule a
 // handle so a layer's top can be given up a granule at a time (its last, partly used granule stays)
-#if !defined(STRATA_USE_HIP)
+#if !defined(MAYA_USE_HIP)
 struct Glm5Model::ElPool {
     CUdeviceptr base = 0;
     size_t va = 0, gran = 0;
@@ -447,7 +447,7 @@ static uint64_t el_layout_impl(const Glm5Geometry& g, bool lat_q8, int mtp_il, i
 
 // SAGUARO_GLM_ELASTIC=1 (the fast path, CUDA): a reservation for ctx tokens with its fixed part backed and zeroed
 bool Glm5Model::el_create(int64_t ctx, SeqCtx& c, std::string& err, bool back_fixed) {
-#if defined(STRATA_USE_HIP)
+#if defined(MAYA_USE_HIP)
     (void) ctx;
     (void) c;
     err = "glm elastic: not on HIP";
@@ -496,7 +496,7 @@ bool Glm5Model::el_create(int64_t ctx, SeqCtx& c, std::string& err, bool back_fi
 
 // this part: sequence s's fixed part backed (zeroed) out of the budget - a slot costs nothing until a conversation is in it
 bool Glm5Model::seq_activate(int s, std::string& err) {
-#if defined(STRATA_USE_HIP)
+#if defined(MAYA_USE_HIP)
     (void) s;
     (void) err;
     return true;
@@ -528,7 +528,7 @@ bool Glm5Model::seq_activate(int s, std::string& err) {
 }
 
 bool Glm5Model::seq_active(int s) const {
-#if !defined(STRATA_USE_HIP)
+#if !defined(MAYA_USE_HIP)
     if (s >= 0 && s < (int) el_.size()) return el_[(size_t) s]->fixed_on;
 #else
     (void) s;
@@ -537,7 +537,7 @@ bool Glm5Model::seq_active(int s) const {
 }
 
 bool Glm5Model::seq_holds(int s) const {
-#if !defined(STRATA_USE_HIP)
+#if !defined(MAYA_USE_HIP)
     if (s >= 0 && s < (int) el_.size()) return el_[(size_t) s]->tokens > 0 || (s > 0 && el_[(size_t) s]->fixed_on);
 #else
     (void) s;
@@ -546,7 +546,7 @@ bool Glm5Model::seq_holds(int s) const {
 }
 
 bool Glm5Model::seq_grow(int s, int64_t tokens, std::string& err) {
-#if defined(STRATA_USE_HIP)
+#if defined(MAYA_USE_HIP)
     (void) s;
     (void) tokens;
     (void) err;
@@ -605,7 +605,7 @@ bool Glm5Model::seq_grow_all(int s, int64_t tokens, std::string& err) {
 }
 
 bool Glm5Model::seq_can_grow(int s, int64_t tokens) const {
-#if defined(STRATA_USE_HIP)
+#if defined(MAYA_USE_HIP)
     (void) s;
     (void) tokens;
     return true;
@@ -628,7 +628,7 @@ bool Glm5Model::seq_can_grow(int s, int64_t tokens) const {
 
 // the caller has nothing of s in flight; its state from the context-sized caches on is gone (reset or reload it)
 void Glm5Model::seq_release(int s, bool all) {
-#if !defined(STRATA_USE_HIP)
+#if !defined(MAYA_USE_HIP)
     for (Glm5Model* m = this; m != nullptr; m = m->split_next_.get()) {
         if (m->el_.empty() || s < 0 || s >= (int) m->el_.size()) continue;
         std::lock_guard<std::mutex> lk(m->el_mu_);
@@ -659,7 +659,7 @@ void Glm5Model::seq_release(int s, bool all) {
 }
 
 int64_t Glm5Model::seq_backed(int s) const {
-#if !defined(STRATA_USE_HIP)
+#if !defined(MAYA_USE_HIP)
     if (s >= 0 && s < (int) el_.size()) return el_[(size_t) s]->tokens;
 #else
     (void) s;
@@ -668,7 +668,7 @@ int64_t Glm5Model::seq_backed(int s) const {
 }
 
 void Glm5Model::el_destroy() {
-#if !defined(STRATA_USE_HIP)
+#if !defined(MAYA_USE_HIP)
     if (el_.empty()) return;
     cudaSetDevice(dev_);
     cudaDeviceSynchronize();
@@ -891,7 +891,7 @@ bool Glm5Model::seq_pipe_ready(std::string& err) {
     return true;
 }
 
-bool Glm5Model::multi_issue(int s, int32_t token, const strata::kernels::SamplerParams& sp, std::string& err) {
+bool Glm5Model::multi_issue(int s, int32_t token, const maya::kernels::SamplerParams& sp, std::string& err) {
     if (s < 0 || s >= seq_count() || seq_.empty()) {
         err = "glm multi: no sequence " + std::to_string(s);
         return false;
@@ -991,4 +991,4 @@ bool Glm5Model::multi_boundary(std::string& err) {
     return true;
 }
 
-}  // namespace strata::core
+}  // namespace maya::core

@@ -12,7 +12,7 @@
 
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
-#if !defined(STRATA_USE_HIP)
+#if !defined(MAYA_USE_HIP)
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #endif
@@ -43,9 +43,9 @@ namespace {
 
 // the GEMMs' BF16 inputs: CUDA's type, or on AMD (HIP) its 16 bits as they are (hip_bf16.h's own type clashes with
 // the hip_compat warp functions; hipBLAS reads HIP_R_16BF from the same bits), rounded to nearest even either way
-#if defined(STRATA_USE_HIP)
+#if defined(MAYA_USE_HIP)
 using bf16_t = uint16_t;
-__device__ __forceinline__ bf16_t f2bf(float f) { return strata::ds4::bf16_rn(f); }
+__device__ __forceinline__ bf16_t f2bf(float f) { return maya::ds4::bf16_rn(f); }
 #else
 using bf16_t = __nv_bfloat16;
 __device__ __forceinline__ bf16_t f2bf(float f) { return __float2bfloat16(f); }
@@ -169,7 +169,7 @@ __global__ void softmax_kernel(float* s, int n) {
 
 int blocks_for(size_t n) { return (int) std::min<size_t>((n + 255) / 256, 65535); }
 
-#if !defined(STRATA_USE_HIP)
+#if !defined(MAYA_USE_HIP)
 // Turing (no BF16 tensor cores): a GEMM's BF16 operands to FP16 in place - exact for |v| <= 65504 (FP16 has the longer
 // mantissa); beyond it saturated and counted (g_vis_sat, reported after the picture), below 2^-24 flushed
 __device__ unsigned g_vis_sat = 0;
@@ -306,7 +306,7 @@ struct Vision::Impl {
     // C [rows][ldc] F32 (columns [0, N) of it) = X [rows][K] BF16 . W [N][K]^T BF16
     bool gemm(const uint8_t* W, int N, int K, const bf16_t* X, int rows, float* C, int ldc, std::string& err) {
         const float one = 1.0f, zero = 0.0f;
-#if !defined(STRATA_USE_HIP)
+#if !defined(MAYA_USE_HIP)
         if (f16) {   // (W: this stage's slot, used once; X: made FP16 by xr() after the kernel that wrote it)
             to16(W, (size_t) N * K, s);
             VB(cublasGemmEx(blas, CUBLAS_OP_T, CUBLAS_OP_N, N, rows, K, &one, W, CUDA_R_16F, K, X, CUDA_R_16F, K, &zero,
@@ -322,7 +322,7 @@ struct Vision::Impl {
     bool load(const Pack& pk, int dev_, std::string& err) {
         dev = dev_;
         VK(cudaSetDevice(dev));
-#if !defined(STRATA_USE_HIP)
+#if !defined(MAYA_USE_HIP)
         {
             cudaDeviceProp pr{};
             const char* fv = std::getenv("SAGUARO_MM3_VISION_F16");
@@ -580,12 +580,12 @@ struct Vision::Impl {
         float* pre = fp(y.pre);
         auto pv = [&](size_t o) { return (float*) ((uint8_t*) pre + o); };
         auto xr = [&](const bf16_t* X, size_t n) {   // (a GEMM input just written: FP16 for the FP16 GEMMs)
-#if !defined(STRATA_USE_HIP)
+#if !defined(MAYA_USE_HIP)
             if (f16) to16(X, n, s);
 #endif
             (void) X, (void) n;
         };
-#if !defined(STRATA_USE_HIP)
+#if !defined(MAYA_USE_HIP)
         if (f16) {
             const unsigned z = 0;
             VK(cudaMemcpyToSymbolAsync(g_vis_sat, &z, sizeof z, 0, cudaMemcpyHostToDevice, s));
@@ -694,7 +694,7 @@ struct Vision::Impl {
         VK(cudaMemcpyAsync(rows.data(), out, rows.size() * 4, cudaMemcpyDeviceToHost, s));
         VK(cudaStreamSynchronize(s));
         VK(cudaGetLastError());
-#if !defined(STRATA_USE_HIP)
+#if !defined(MAYA_USE_HIP)
         if (f16) {
             unsigned sat = 0;
             VK(cudaMemcpyFromSymbol(&sat, g_vis_sat, sizeof sat));

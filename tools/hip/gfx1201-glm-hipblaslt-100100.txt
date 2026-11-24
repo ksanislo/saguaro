@@ -1,5 +1,5 @@
 # solution IDs are scoped to this hipBLASLt version and device architecture
-STRATA_HIPBLASLT_TUNING_V1 gfx1201 100100
+MAYA_HIPBLASLT_TUNING_V1 gfx1201 100100
 # GLM FP16 projections; tools/hip/tune_hipblaslt --shapes-file (preset glm + 4096x2048, 2048x4096), T=64-1024, 32 MiB workspace (RX 9070 XT, ROCm 7.1.0); rows kept only where hipBLASLt beat hipblasGemmEx by >= 2%
 f16 8192 4096 8192 1024 59210
 f16 12288 4096 12288 1024 59210

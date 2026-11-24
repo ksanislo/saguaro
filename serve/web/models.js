@@ -365,7 +365,7 @@ function fieldsOf(m, d) {
 }
 
 // Inkling 2's (saguaro-ik2: it stops at a flag it does not know, so only its own are offered). Drafting where it runs
-// (m.choices.draft: "none" alone on Volta / Turing, the offload path and two GPUs); answers at once on one GPU that
+// (m.choices.draft: "none" alone on Pascal, two GPUs, AMD's offload path, a streamed cache, no room, --tp); answers at once on one GPU that
 // holds every expert (elsewhere the engine answers one at a time and says so)
 const IK2_KV = [{id: "f16", label: "FP16"}, {id: "fp8", label: "FP8"}];
 function ik2Fields(m, d, ch, gpus) {
@@ -378,8 +378,8 @@ function ik2Fields(m, d, ch, gpus) {
           : "This model was set up without its image encoder."}>
         <${Switch} label="Images" on=${d.images} disabled=${!m.choices.images && !d.images} onChange=${(v) => setDraft({images: v})}/><//>`,
       html`<${Row} label="Drafting" flag=${"--drafting " + ({auto: "auto", dspark: "on"}[d.draft] || "off")} changed=${ch("draft")}
-        hint=${m.choices.draft.length < 2 ? "Not on this GPU or layout: Volta / Turing cards, a card that keeps experts in RAM and two GPUs decode without drafting."
-          : "The prompt lookup" + (m.choices.draft.includes("dspark") ? " and the model's own drafter (DSpark)" : "") + " draft tokens the model checks: the same answers, faster where drafts are kept. Auto measures once on this PC which is fastest."}>
+        hint=${m.choices.draft.length < 2 ? "Not on this GPU or layout: Pascal cards, two GPUs, an AMD card that keeps experts in RAM, a cache partly in RAM and tensor parallel decode without drafting."
+          : "The prompt lookup" + (m.choices.draft.includes("dspark") ? " and the model's own drafter (DSpark)" : "") + " draft tokens the model checks: faster where drafts are kept (on a Tesla T4 with experts in RAM the window rounds slightly differently, so an answer may differ at a near-tie). Auto measures once on this PC which is fastest."}>
         <${Seg} label="Drafting" value=${d.draft} options=${[...(m.choices.draft.includes("auto") ? [{id: "auto", label: "Auto"}] : []), ...(m.choices.draft.includes("dspark") ? [{id: "dspark", label: "DSpark"}] : []), {id: "none", label: "Off"}]}
           onChange=${(v) => setDraft({draft: v})}/><//>`,
       html`<${Row} label="Answers at once" flag="--parallel" changed=${ch("parallel")}

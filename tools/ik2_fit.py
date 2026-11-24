@@ -6,8 +6,8 @@ where they do not - a card under 24 GB with unsloth's UD-Q4_K_XL, or a context p
 offload path: a tier of the most-used experts in VRAM, the others in pinned RAM, fetched by the GPU (or computed by
 the CPU lane) as tokens pick them.  Two NVIDIA cards: the first alone where it holds every expert, else the split -
 the first on the offload path (dense weights, cache, prompts, its tier), the second with the next experts.  AMD (HIP,
-Linux, one GPU): the same plan - every expert in the GPU's memory where the file fits, else the offload path; a 16 GB
-card keeps 1 GiB beside the experts (SAGUARO_IK2_RESERVE_MB), which plan() counts (AMD_SMALL_CREDIT_GIB).
+Linux, one GPU of 12 GB or more): the same plan - every expert in the GPU's memory where the file fits, else the offload
+path; a card under 20 GB keeps 1 GiB beside the experts (SAGUARO_IK2_RESERVE_MB), which plan() counts (AMD_SMALL_CREDIT_GIB).
 
 The model's sizes are upstream's (an RTX 3090 measured: 18.3 GiB beside the cache at 262,144 with an FP8 cache, 14.7
 GiB of it UD-Q4_K_XL's experts); another file's experts (experts_gib_of: our one-T4 quant holds 11.45 GiB) take their
@@ -42,7 +42,7 @@ TWO_ROOM_GIB = 0.3                                  # the second card's room bes
 ROOM_MB = 1024                                      # SAGUARO_IK2_ROOM_MB: the offload path's room (the engine's default)
 THREADS = 8
 TWO_CONTEXT = 131072                                # two 16 GB cards: every expert in VRAM at this context (measured)
-AMD_MIN_GB = 15.0   # (a 16 GB AMD card as the driver reports it)
+AMD_MIN_GB = 11.0                                   # (a 12 GB AMD card as the driver reports it)
 LAYOUT_ENV = {"SAGUARO_IK2_ROOM_MB", "SAGUARO_IK2_PIN", "SAGUARO_IK2_PIN_KEEP", "SAGUARO_IK2_WARM", "SAGUARO_IK2_RESERVE_MB"}   # (a layout's keys;
                                                     # PIN / PIN_KEEP: the previous engine's, dropped from old configs)
 # (decode tok/s, read tok/s) on Tesla T4s, GPU clocks not pinned, ~50 tokens deep, read 8K / 16K (2026-11-22)
@@ -192,39 +192,98 @@ def verdict_two(vram0_gb: float, vram1_gb: float, ram_gb: float, ctx: int, kv: s
     return word, line
 
 
-DRAFT_BASE_GIB = 0.88                               # the drafter (mtp.safetensors 0.59 GiB, its fold, rings, taps)
-DRAFT_TOKEN_BYTES = 4864                            # its layer without a window's context 4 KiB a token + scratch
+# The drafter's room as saguaro-ik2's draft_room plans it: the file, its fold through the head, its windowed layers'
+# rings, the window's records and buffers, the target's taps; plus its layer without a window's context, FP16 K and V
+# 4 KiB a position (FP8: half).  The GGUF (Q8_0, 0.37 GiB, what the setup fetches): the engine planned 0.64 GiB at 8K
+# (chunk 1024) and 0.77 at 32K (chunk 2048) on a T4 (REPORT-ik2-draft-gain.md runs t6/t7; it used 0.48 / 0.57) -
+# 0.61 GiB beside the context rows at chunk 1024, 0.65 at 2048.  mtp.safetensors (BF16, 0.59 GiB: a fallback) 0.25 more.
+DRAFT_BASE_GIB = 0.65                               # the GGUF drafter, a 2048-token chunk's taps
+DRAFT_BF16_EXTRA_GIB = 0.25                         # mtp.safetensors instead (its BF16 matrices)
+DRAFT_TOKEN_BYTES = 4096                            # its layer without a window's context, FP16 rows a token
 
 
-def draft_gib(ctx: int) -> float:
-    """GiB the drafter takes beside the model at `ctx` (saguaro-ik2's draft_room)."""
-    return DRAFT_BASE_GIB + ctx * DRAFT_TOKEN_BYTES / GIB
+def draft_gib(ctx: int, gguf: bool = True) -> float:
+    """GiB the drafter takes beside the model at `ctx` (saguaro-ik2's draft_room, FP16 context rows): the GGUF, or
+    mtp.safetensors (gguf=False)."""
+    return DRAFT_BASE_GIB + (0.0 if gguf else DRAFT_BF16_EXTRA_GIB) + ctx * DRAFT_TOKEN_BYTES / GIB
+
+
+PLAN_DENSE_GIB = 1.1                                # the engine's own sum for the drafter's room (saguaro-ik2's fit
+PLAN_RESERVE_GIB = 1.5                              # block): the experts, the dense weights as blocks, the cache and
+                                                    # its reserve - less than BASE_GIB's measured use
+OFF_WIN_STAGE_GIB = 0.7                             # the offload path's verify window: 64 staging slots a slot size
+DRAFT_MIN_ROWS = 65536                              # the fewest context rows the engine plans for the drafter there
 
 
 def draft_fits(vram_gb: float, ctx: int, kv: str = DEFAULT_KV, experts_gib: float = EXPERTS_GIB,
-               hip: bool = False) -> bool:
-    """Whether the drafter's room fits beside the model at `ctx` with every expert in VRAM (else the engine leaves it
-    out at its start).  VRAM not known: True."""
+               hip: bool = False, gguf: bool = True) -> bool:
+    """Whether the drafter's room fits beside the model at `ctx` (else the engine leaves it out at its start; the
+    prompt lookup still drafts).  Every expert in VRAM: the engine's own check - its plan's sum (the experts, the dense
+    weights, the cache, its reserve) and the drafter (gguf: the GGUF the setup fetches, else mtp.safetensors) with
+    FP16 context rows, else FP8 ones (a 24 GB card drafts at 262,144 as the engine does).
+    The offload path with the whole cache in VRAM: the tier gives the drafter's room, at most half of its own - the
+    verify window's staging and at least DRAFT_MIN_ROWS of FP8 context rows (the last positions) with it (upstream
+    v1.1.75).  VRAM not known: True (the engine measures)."""
     if not vram_gb:
         return True
-    return plan(float(vram_gb) - draft_gib(ctx), ctx, kv, hip, experts_gib)["resident"]
+    p = plan(vram_gb, ctx, kv, hip, experts_gib)
+    if p["resident"]:    # (the engine's own sum; the drafter's context rows FP16, else FP8: half of them)
+        small = hip and float(vram_gb) < AMD_RESERVE_UNDER_GB   # (amd_layout's SAGUARO_IK2_RESERVE_MB=1024)
+        used = float(experts_gib) + PLAN_DENSE_GIB + ctx * KV_BYTES.get(kv, KV_BYTES["f16"]) / GIB + \
+            (1.0 if small else PLAN_RESERVE_GIB)
+        return float(vram_gb) - MARGIN_GIB >= used + draft_gib(ctx, gguf) - ctx * DRAFT_TOKEN_BYTES / GIB / 2
+    least = draft_gib(0, gguf) + OFF_WIN_STAGE_GIB + min(ctx, DRAFT_MIN_ROWS) * DRAFT_TOKEN_BYTES / GIB / 2
+    return not p["kv_streamed"] and (p["tier_gib"] + OFF_ROOM_GIB + MARGIN_GIB) / 2 >= least
+
+
+OFF_CACHE = ("drafting off: at this context part of the cache streams from RAM, where drafting does not run - a "
+             "smaller context or a bigger card brings it back")
+OFF_ROOM = ("drafting off: at this context the experts' tier has no room for the drafter - a smaller context or a "
+            "bigger card brings it back")
 
 
 def drafting_off_reason(arch, vram_gb: float, ctx: int, kv: str = DEFAULT_KV, hip: bool = False,
-                        experts_gib: float = EXPERTS_GIB) -> str | None:
-    """Why drafting is off on this card (one line), or None: NVIDIA Volta (no exact window) / Turing (its window costs more than it keeps)
-    and the offload path (NVIDIA or AMD) run without it; every expert in VRAM keeps it."""
+                        experts_gib: float = EXPERTS_GIB, gpus2: bool = False) -> str | None:
+    """Why drafting is off on this card (one line), or None.  Every NVIDIA class from Volta drafts - Volta and Turing
+    have their own verify-window kernels since upstream v1.1.75 (on a T4: Ken 11-23, measured +4..+9 %) - Pascal
+    (6.x, scalar kernels) does not.  The offload path (the card does not hold every expert: a small card, or a long
+    context) drafts where its whole cache stays in VRAM and the experts' tier has the drafter's room, on one NVIDIA
+    card; not on AMD's (measured slower there - upstream's auto measures it, we keep it off).  Two GPUs (gpus2: the
+    split): off - our engine leaves the drafter out there (not checked against plain decoding yet).  With every
+    expert in VRAM it is kept.  A VRAM not known is not a reason."""
     try:
         cc = int(arch)
     except (TypeError, ValueError):
         cc = 0
-    if not hip and 0 < cc < 80:
-        return ("drafting off: on this GPU (Volta / Turing) drafting does not pay for this model - every token comes "
-                "from a full model step (on a T4 a verify window costs 1.5-2.3 tokens' time)")
+    if not hip and 0 < cc < 70:
+        return ("drafting off: on this GPU (Pascal) the engine runs its scalar kernels, where a verify window costs "
+                "more than it keeps - every token comes from a full model step")
+    if gpus2 and not hip:
+        return ("drafting off: on two GPUs (the split) the engine does not draft yet - it is not checked against plain "
+                "decoding there")
     if vram_gb and not plan(vram_gb, ctx, kv, hip, experts_gib)["resident"]:
-        return ("drafting off: the card does not hold every expert at this context (the offload path), where drafting "
-                "does not run - a smaller context or a bigger card brings it back")
+        if plan(vram_gb, ctx, kv, hip, experts_gib)["kv_streamed"]:
+            return OFF_CACHE
+        if not draft_fits(vram_gb, ctx, kv, experts_gib, hip):
+            return OFF_ROOM
+        if hip:
+            return ("drafting off: on an AMD card's offload path drafting is slower than plain decoding (an RX 9070 XT "
+                    "measured: -1..-12 %) - a context or a file whose experts all fit brings it back")
     return None
+
+
+def default_drafting(arch, hip: bool = False, resident: bool = False, gpus2: bool = False) -> str:
+    """--drafting as the setup writes it where drafting runs (drafting_off_reason None): "on" where Ken's defaults
+    (11-23, REPORT-ik2-draft-gain.md) say drafting pays whatever one start measures - a Tesla T4 / RTX 20 (Turing,
+    one card: the expert cache or every expert resident) and an AMD GPU holding every expert; else "auto" (upstream's:
+    measured once on the PC - Volta, Ampere and newer)."""
+    try:
+        cc = int(arch)
+    except (TypeError, ValueError):
+        cc = 0
+    if hip:
+        return "on" if resident else "auto"
+    return "on" if cc == 75 and not gpus2 else "auto"
 
 
 def recommended_context(vram_gb: float, kv: str = DEFAULT_KV, hip: bool = False,
@@ -235,10 +294,11 @@ def recommended_context(vram_gb: float, kv: str = DEFAULT_KV, hip: bool = False,
     return max(fits) if fits else CONTEXTS[0]
 
 
-def amd_unsupported(cards: list, experts_gib: float = EXPERTS_GIB) -> str | None:
+def amd_unsupported(cards: list, experts_gib: float = EXPERTS_GIB, ram_gb: float = 0.0) -> str | None:
     """The AMD half of unsupported(): saguaro-ik2's HIP build (Linux) runs on RDNA 3 / 3.5 / 4 (gfx11 / gfx12) with
-    16 GB or more - every expert in VRAM where the file fits, else the offload path as on NVIDIA (checked on an RX 9070
-    XT, gfx1201).  An APU's memory is the RAM ("unified_memory": its "memory_gb")."""
+    12 GB or more - every expert in VRAM where the file fits, else the offload path as on NVIDIA (checked on an RX 9070
+    XT, gfx1201; 12 GB cards since upstream v1.1.75).  An APU's memory is the RAM ("unified_memory": its "memory_gb").
+    ram_gb: the PC's RAM (0: not read yet)."""
     if not cards:
         return None
     rdna = [g for g in cards if str(g.get("arch") or "").startswith(AMD_ARCHS)]
@@ -248,7 +308,10 @@ def amd_unsupported(cards: list, experts_gib: float = EXPERTS_GIB) -> str | None
                 "by its engine")
     room = max(float(g.get("memory_gb") if g.get("unified_memory") else g.get("vram_gb") or 0) for g in rdna)
     if room < AMD_MIN_GB:
-        return "Inkling 2 Mini on AMD needs one GPU with 16 GB of VRAM or more"
+        return "Inkling 2 Mini on AMD needs one GPU with 12 GB of VRAM or more"
+    if ram_gb and room - MARGIN_GIB < need_gib(CONTEXTS[0], experts_gib=experts_gib) and \
+            ram_gb < plan(room, CONTEXTS[0], hip=True, experts_gib=experts_gib)["ram_gib"]:
+        return too_small_line(ram_gb, room)            # (the experts a card does not hold need the RAM)
     return None
 
 
@@ -265,7 +328,7 @@ def unsupported(backend: str, windows: bool, gpus_asked: int, cards: list, ram_g
     if backend == "hip":
         if gpus_asked > 1:
             return "Inkling 2 Mini on AMD runs on one GPU for now: pick one (--gpu N)"
-        return amd_unsupported(cards, experts_gib)
+        return amd_unsupported(cards, experts_gib, ram_gb)
     if gpus_asked > 2:
         return ("Inkling 2 Mini runs on one or two NVIDIA GPUs for now (three or more are not in it yet): pick one or "
                 "two (--gpu N, --gpus N,M)")

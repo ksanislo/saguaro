@@ -13,8 +13,8 @@
 // Both kernels put ONE BLOCK per token over the vocabulary: `sampler_greedy_kernel` is the plain argmax,
 // `sampler_kernel` runs the sampled chain as `top_k` block-argmax rounds followed by the top_p / temperature /
 // draw chain (its header says why the selection must be parallel and why the tie rule keeps the semantics).
-#include "strata/kernels/sampler.hpp"
-#include "strata/kernels/logprobs.hpp"
+#include "maya/kernels/sampler.hpp"
+#include "maya/kernels/logprobs.hpp"
 
 #include <cuda_runtime.h>
 
@@ -25,7 +25,7 @@
 #include <string>
 #include <vector>
 
-namespace strata::kernels {
+namespace maya::kernels {
 namespace {
 
 // Philox 4x32-10, the counter-based generator the phase asks for.  Counter-based matters because it makes the
@@ -586,10 +586,10 @@ void sample_verify(const float* logits, int n_tokens, int n_vocab, const Sampler
 
 // ---- logprobs (logprobs.hpp): DS4's logprob_rows kernel (ds4_kernels.cu), each row also writing its key
 namespace {
-using strata::ds4::LpStride;
-using strata::ds4::lp_before;
-using strata::ds4::lp_penalized;
-using strata::ds4::lse_merge;
+using maya::ds4::LpStride;
+using maya::ds4::lp_before;
+using maya::ds4::lp_penalized;
+using maya::ds4::lse_merge;
 constexpr int kLpThreads = 256;
 
 __global__ void __launch_bounds__(kLpThreads) logprob_rows_kernel(const float* __restrict__ logits, int V,
@@ -740,7 +740,7 @@ std::string logprob_line(LpSink* s, long long rid, int64_t pos, int tok) {
     if (best < 0 || *(volatile int64_t*) &s->keys[best] != key) return "";
     const LogprobRow row = s->rows[best];
     if (row.id != tok) return "";
-    return strata::ds4::lp_line(rid, row);
+    return maya::ds4::lp_line(rid, row);
 }
 
-}  // namespace strata::kernels
+}  // namespace maya::kernels

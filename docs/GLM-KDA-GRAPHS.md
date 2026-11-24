@@ -1,11 +1,28 @@
-# Experimental opt-in KDA layer graphs
+# KDA layer graphs (GLM-5.3-Flash decode)
 
-`SAGUARO_GLM_KDA_GRAPH=1` captures recurrent layers of single-device GLM decode.
-Default is the ordinary direct path. DSA layers remain direct. Split/MTP,
-profiling, dumps, prefetch and lookahead bypass capture. Expert selection, weights,
-quantization and kernel arithmetic are unchanged; graph replay explicitly accounts
-for MoE requests and residual-buffer swaps. CPU-plan/buffer-key changes invalidate
-the corresponding captured graph. Graphs are destroyed before their buffers.
+`SAGUARO_GLM_KDA_GRAPH` captures the recurrent layers of GLM-5.3-Flash's decode as
+CUDA graphs and replays them token after token. Since upstream Maya v1.1.72 (taken
+here with v1.1.75) it is on by default in NVIDIA builds (`0` turns it off; AMD builds
+keep direct launches unless it is `1`; `SAGUARO_GLM_DEFER_CPU` keeps direct launches).
+The DSA layers' attention stays direct, and their FFN side is captured too when
+`SAGUARO_GLM_DSA_FFN_GRAPH` is on (its default). Speculative passes (the spec gate),
+profiling, dumps, prefetch, lookahead, the DFlash2 drafter and a request's `graphs=0`
+bypass capture. Expert selection, weights, quantization and kernel arithmetic are
+unchanged; graph replay explicitly accounts for MoE requests and residual-buffer
+swaps. CPU-plan/buffer-key changes (and a request's `promote_min` / `miss_skip_*`)
+select their own captured graph. A capture that fails falls back to direct launches
+for the engine's life. Graphs are destroyed before their buffers.
+
+## Checks for the default (upstream v1.1.72)
+
+- `tests/glm_pack_graph_test` on GLM-5.3-Flash Maya-S v2, one Tesla V100: PASS, 192
+  full-vocabulary logit rows identical bit for bit with and without graphs (snapshots, reset), and 48
+  steps across CPU-plan changes finite.
+- Greedy answers (three prompts, repeatable mode and stable prompt products, CPU lane off on the V100):
+  the same tokens with graphs on and off, on the V100 (CUDA) and on a Radeon 8065S (HIP, `1`).
+- Decode, default settings: +1% on one V100 that computes most of its RAM-tier experts on the CPU; no
+  change on the Radeon 8065S. #795 measured +8-9% on 3x V100 + RTX 3060. On our 4x Tesla T4 profile:
+  see the v1.1.75 intake's report (logs/saguaro/REPORT-upstream-v1.1.75.md).
 
 ## Measured thinking-Max screens (v1.0.21)
 

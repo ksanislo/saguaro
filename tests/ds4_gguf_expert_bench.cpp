@@ -10,7 +10,7 @@
 // experts (default 64).
 #include "../src/ds4/ds4_gguf_cpu.hpp"
 #include "../src/ds4/ds4_pool.hpp"
-#include "strata/kernels/cpu/native_expert.hpp"
+#include "maya/kernels/cpu/native_expert.hpp"
 
 #include "ggml.h"
 #include "gguf.h"
@@ -27,7 +27,7 @@
 #include <string>
 #include <vector>
 
-namespace gg = strata::ds4::gguf;
+namespace gg = maya::ds4::gguf;
 
 int main(int argc, char** argv) {
     if (argc < 3) {
@@ -118,11 +118,11 @@ int main(int argc, char** argv) {
                 "down %s, native multi-token rows gate/up %s down %s\n", layer, ggml_type_name((ggml_type) ty[0]),
                 ggml_type_name((ggml_type) ty[2]), E, FF, (double) eb / 1e6, n_exp, gg::iq_cpu_own_rows(ty[0]) ? "on" : "off",
                 gg::iq_cpu_own_rows(ty[2]) ? "on" : "off",
-                strata::kernels::cpu::native_multi_rows_exact(ty[0]) ? "on" : "off",
-                strata::kernels::cpu::native_multi_rows_exact(ty[2]) ? "on" : "off");
+                maya::kernels::cpu::native_multi_rows_exact(ty[0]) ? "on" : "off",
+                maya::kernels::cpu::native_multi_rows_exact(ty[2]) ? "on" : "off");
     constexpr int RB = 64;
     for (int nth : counts) {
-        strata::ds4::Pool pool(std::max(0, nth - 1));
+        maya::ds4::Pool pool(std::max(0, nth - 1));
         for (int nt : toks) {
             const int reps = 4 * n_exp;
             double t_gu = 0, t_dn = 0;
