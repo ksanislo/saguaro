@@ -1,9 +1,9 @@
-<h1 align="center">Saguaro</h1> 
+<h1 align="center">Saguaro</h1>
 
 <p align="center"><b>GLM-5.3-Flash (321 B), DeepSeek-V4.1-Flash-1017 (748 B), MiniMax-M3.1-Flash (428 B),
 Qwen3.8-Flash-Next, Hy4-Flash (220 B) and Inkling 2 Mini (26 B) on your own GPUs</b><br>
 private and fast · one server and one web UI for every engine · several chats at once · up to 16 GPUs ·
-AMD and Windows (experimental) · chat, pictures, OpenAI- and Anthropic-compatible API</p> 
+AMD and Windows too · chat, pictures, OpenAI- and Anthropic-compatible API</p>
 
 <p align="center">
 <a href="https://huggingface.co/peasantsmith/GLM-5.3-Flash-Maya-GGUF"><img src="https://raw.githubusercontent.com/mw00/project-maya/badges/glm.svg" alt="GLM-5.3-Flash Maya downloads"></a>
@@ -12,86 +12,83 @@ AMD and Windows (experimental) · chat, pictures, OpenAI- and Anthropic-compatib
 <a href="https://huggingface.co/peasantsmith/MiniMax-M3.1-Flash-Maya-GGUF"><img src="https://raw.githubusercontent.com/mw00/project-maya/badges/minimax.svg" alt="MiniMax-M3.1-Flash Maya downloads"></a>
 </p> 
 
-Models this size usually need a datacenter. Saguaro runs them on the hardware you already have:
-**GLM-5.3-Flash**, **DeepSeek-V4.1-Flash-1017**, **MiniMax-M3.1-Flash**, **Qwen3.8-Flash-Next**, **Hy4-Flash** and -
-for a PC with one or two 16 GB NVIDIA cards - **Inkling 2 Mini**. Each model has an engine built for it. It keeps the experts your conversation uses most on the GPU, the next ones in RAM and the rest on
-your NVMe SSD, and moves them as you chat. It measures your GPUs, CPU, RAM and SSD and tunes itself to them. Nothing
-leaves your machine.
+Models this size usually need a datacenter. Saguaro runs them on the hardware you already have - each model has
+an engine built for it, which keeps the experts your conversation uses most on the GPU, the next ones in RAM and
+the rest on your NVMe SSD, and moves them as you chat. It measures your GPUs, CPU, RAM and SSD and tunes itself
+to them; one server, one dashboard and one API sit in front of every engine. Nothing leaves your machine.
 
-Saguaro unites [Project Maya](https://github.com/mw00/project-maya)'s engines and Strata's Qwen3.8-Flash-Next engine
-(one server, one dashboard, model switching from the page) and tunes the whole thing for older multi-GPU boxes -
-NVIDIA Turing (Tesla T4, sm_75 tensor cores) and Xeon CPUs without AVX2 - see [NOTICE.md](NOTICE.md).
+Saguaro is an independent fork: it unites [Project Maya](https://github.com/mw00/project-maya)'s engines
+(GLM / DeepSeek / MiniMax / Hy4 / Inkling) and Strata's Qwen3.8-Flash-Next engine (`engines/qfn`) - the
+[Credits](#credits) and [NOTICE.md](NOTICE.md) say exactly what comes from where - and tunes the whole thing for
+older multi-GPU boxes: NVIDIA Turing (Tesla T4, sm_75 tensor cores) and Xeon CPUs without AVX2.
 
 - **One server, one web UI, six model families:** every engine behind the same dashboard, monitor and API; the
   Models page switches between them.
-- **A model for small PCs:** [Inkling 2 Mini](docs/INKLING2-MINI.md) writes about 40 tokens/s on one Tesla T4, 51 on two
-  and about 71 on one 16 GB RX 9070 XT; [Hy4-Flash](docs/HY4-FLASH.md) about 32 on four (measured, the T4s' clocks locked for Hy4).
-- **Several chats at once:** up to 8 answered together with GLM-5.3-Flash, DeepSeek-V4.1-Flash and MiniMax-M3.1-Flash -
-  for agents that run several sessions, or several people on one PC.
-- **Elastic VRAM:** the expert tiers stretch over every card, RAM and the SSD - the setup measures them and picks the
-  split; give a model more or less of the pool without touching the model files.
+- **A model for small PCs:** [Inkling 2 Mini](docs/INKLING2-MINI.md) writes about 40 tokens/s on one Tesla T4, 51
+  on two and about 71 on one 16 GB RX 9070 XT; [Hy4-Flash](docs/HY4-FLASH.md) about 32 on four (measured, the
+  T4s' clocks locked for Hy4).
+- **Several chats at once:** up to 8 answered together with GLM-5.3-Flash, DeepSeek-V4.1-Flash,
+  MiniMax-M3.1-Flash and Qwen3.8-Flash-Next - for agents that run several sessions, or several people on one PC.
+- **Elastic VRAM:** the expert tiers stretch over every card, RAM and the SSD - the setup measures them and picks
+  the split; give a model more or less of the pool without touching the model files.
 - **Long context:** up to 1M tokens with GLM-5.3-Flash and DeepSeek-V4.1-Flash on a few consumer cards.
-- **Turing-native kernels:** tensor-core paths written for sm_75 (T4 and RTX 20), with AVX1 CPU lanes for older Xeons -
-  a 4 x Tesla T4 box answers at 20+ tokens/s.
-- **Fast:** up to 149 tokens/s on two RTX 5090s and an RTX 4090, 124 on two H100s, 118 on four RTX 4090s, 81 on one
-  RTX PRO 6000, 30+ on a single RTX 5090. [Real numbers from real users](#how-fast-is-it).
+- **Turing-native kernels:** tensor-core paths written for sm_75 (T4 and RTX 20), with AVX1 CPU lanes for older
+  Xeons - a 4 x Tesla T4 box answers at 20+ tokens/s.
+- **Fast:** up to 149 tokens/s on two RTX 5090s and an RTX 4090, 124 on two H100s, 118 on four RTX 4090s, 81 on
+  one RTX PRO 6000, 30+ on a single RTX 5090. [Real numbers from real users](#how-fast-is-it).
 - **Close to the original:** Saguaro's own quants of GLM-5.3-Flash keep 97.7-99.2% of the FP8 model's zero-shot
-  accuracy; DeepSeek V4.1 · Maya-S picks the same next token as the original 92.6% of the time, MiniMax M3.1 · Maya-S
-  87.6% (the average over its categories).
+  accuracy; DeepSeek V4.1 · Maya-S picks the same next token as the original 92.6% of the time, MiniMax M3.1 ·
+  Maya-S 87.6% (the average over its categories).
 - **Plugs into your tools:** OpenAI- and Anthropic-compatible API with tool calls, ready for coding agents.
-- **Everything in the box:** a chat and a live monitor in the browser, pictures, thinking levels, a one-command setup.
+- **Everything in the box:** a chat and a live monitor in the browser, pictures, thinking levels, a one-command
+  setup.
 
 ## Quick start
 
 ```sh
 git clone https://github.com/ksanislo/saguaro.git && cd saguaro
-./setup.sh
+./saguaro.sh
 ```
 
-The setup asks which model you want, downloads it, builds everything once and **starts the model**. Then open
-`http://127.0.0.1:8080`. Windows: `START-SAGUARO.bat` instead of `./setup.sh`. More in [Install](#install).
+The first run checks the PC, asks which model you want, downloads it, builds everything once and **starts the
+model**. Then open `http://127.0.0.1:8080`. The same command starts it again right away later;
+`./saguaro.sh --setup` sets it up again (another model, other GPUs). `./setup.sh` is the same command. Windows:
+`START-SAGUARO.bat` instead. More in [Install](#install).
 
-## <a name="the-models"></a><a name="deepseek-v41-flash-1017-new"></a><a name="minimax-m31-flash-new"></a>Pick your model
+## <a name="the-models"></a><a name="deepseek-v41-flash-1017-new"></a><a name="minimax-m31-flash-new"></a>Supported models
 
 Every quant is named after its model, then its tier - XS, S, M or L, by how many bits its experts keep. The setup
 recommends one for your PC; to pick one yourself, give its setup id: `./setup.sh --model glm-maya-s24`.
 
-| Model | Quant · setup id | Size | Made for |
-| --- | --- | ---: | --- |
-| **[GLM-5.3-Flash](https://huggingface.co/zai-org/GLM-5.3-Flash)**<br><sub>zai-org · MIT · 321 B, 18 B active · up to 1M context</sub> | **Maya-S** (default) · `glm-maya-s` | 96.5 GB | PCs with a smaller memory pool (RAM and VRAM together) |
-| | Maya-S24 · `glm-maya-s24` | 94.7 GB | cards of 24 GB or less: ~1.5 GB more of the card for experts, decode +14% |
-| | Maya-XS · `glm-maya-xs` | 73.4 GB | PCs with 64 GB of RAM and a 24 GB card, at 128K context |
-| | Maya-M · `glm-maya-m` | 116 GB | a bigger memory pool; calibrated toward tool calls and front-end code |
-| | Maya-M-Derisked · `glm-maya-m-derisked` | 116 GB | Maya-M with a weight edit by [Blackfrost_AI](https://x.com/Blackfrost_AI) that reduces blanket refusals; experimental |
-| | Maya-L · `glm-maya-l` | 156.3 GB | the biggest memory pools; the closest to the original |
-| **[DeepSeek-V4.1-Flash-1017](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017)**<br><sub>DeepSeek · MIT · 748 B</sub> | **Maya-S** (default) · `deepseek-maya-s` | 340 GB | any amount of memory: what VRAM and RAM don't hold is read from the SSD |
-| | Maya-XS · `deepseek-maya-xs` | 277 GB | the whole model in a 128 GB PC's memory (the Engram tables stay on the SSD) |
-| **[MiniMax-M3.1-Flash](https://huggingface.co/MiniMaxAI/MiniMax-M3.1-Flash)**<br><sub>MiniMax · [MiniMax Community License](LICENSE.minimax-m31) · 428 B, 23 B active · up to 1M context</sub> | Maya-XS · `minimax-maya-xs` | 93 GB | the whole model in a 128 GB PC's memory |
-| | Maya-S · `minimax-maya-s` | 122 GB | closer to the original |
-| **[Hy4-Flash](https://huggingface.co/tencent/Hy4-flash)**<br><sub>Tencent · [Tencent Hy License](LICENSE.hy4-flash) · 220 B · NVIDIA, Linux · one conversation at a time</sub> | **Maya-S** · `hy4-flash-maya-s`<br>Maya-XS · `hy4-flash-maya-xs`<br>Maya-M · `hy4-flash-maya-m`<br>Maya-L · `hy4-flash-maya-l` | 53.0 GB<br>44.8 GB<br>68.4 GB<br>89.5 GB<br>each + one 63.4 GB n-gram table | four 16 GB cards: Maya-S on 4x Tesla T4 writes ~32 tokens/s (measured; the other sizes are not yet) - [docs/HY4-FLASH.md](docs/HY4-FLASH.md) |
-| **[Inkling 2 Mini](https://huggingface.co/thinkingmachines/Inkling-2-Mini)**<br><sub>Thinking Machines · Apache 2.0 · 26 B · NVIDIA T4 / RTX 20 and newer or AMD RDNA 3 / 4 (16 GB), Linux · reads pictures · one conversation at a time</sub> | unsloth UD-Q4_K_XL · `inkling-2-mini` | 18.3 GB | **one or two 16 GB cards**: ~40 tokens/s on one Tesla T4, ~51 on two, ~71 on an RX 9070 XT (measured) - [docs/INKLING2-MINI.md](docs/INKLING2-MINI.md) |
+| Model | Engine | Quants (default marked) | Size | Needs | NVIDIA | AMD | Pictures | --model id |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| **[GLM-5.3-Flash](https://huggingface.co/zai-org/GLM-5.3-Flash)**<br><sub>zai-org · MIT · 321 B, 18 B active · up to 1M context</sub> | `saguaro-glm` | **Maya-S** (default) · Maya-S24 · Maya-XS · Maya-M · Maya-M-Derisked · Maya-L · turboderp's EXL3 3.05 / 4.05 bpw | 73.4-156.3 GB (Maya) · 125.3 / 165.2 GB (EXL3) | one GPU or more; the memory pool (VRAM + RAM) picks the tier | V100 / RTX 20 and newer, up to 16 cards | builds and runs; its GPU self-tests pass on an RX 9070 XT | yes | `glm-maya-s` / `-s24` / `-xs` / `-m` / `-m-derisked` / `-l` · `EXL3-3.05bpw` / `EXL3-4.05bpw` |
+| **[DeepSeek-V4.1-Flash-1017](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017)**<br><sub>DeepSeek · MIT · 748 B · up to 1M context</sub> | `saguaro-ds4` | **Maya-S** (default) · Maya-XS · unsloth's GGUFs · LibertAIDAI's EXL3 2.9 / 3.5 bpw · orcarouter's abliterated (`--ds4-quant`) | 277 / 340 GB (Maya, with the Engram tables) | about 230 GB of VRAM + RAM hold it all; with less, the experts that do not fit are read from the SSD | V100 and newer; Linux and Windows | the engine compiles for HIP (gfx1201 checked); it has not run on an AMD GPU yet | yes, with the GGUFs (EXL3: RTX 30 / A100 on) | `deepseek-maya-s` / `-xs` |
+| **[MiniMax-M3.1-Flash](https://huggingface.co/MiniMaxAI/MiniMax-M3.1-Flash)**<br><sub>MiniMax · [MiniMax Community License](LICENSE.minimax-m31) · 428 B, 23 B active · up to 1M context</sub> | `saguaro-mm3` | Maya-XS · Maya-S · Mia-AiLab's EXL3 3.5 bpw (no fixed default: the setup recommends by this PC's memory) | 93 / 122 GB (Maya) · 197 GB (EXL3) | about 250 GB of VRAM + RAM hold it all; the experts that do not fit are computed on the CPU | V100 and newer; Linux and Windows | the engine compiles for HIP (gfx1201 checked); it has not run on an AMD GPU yet | yes | `minimax-maya-xs` / `-s` · `MiniMax-M3.1-Flash` |
+| **[Hy4-Flash](https://huggingface.co/tencent/Hy4-flash)**<br><sub>Tencent · [Tencent Hy License](LICENSE.hy4-flash) · 220 B · one conversation at a time</sub> | `saguaro-hy4` | **Maya-S** (the measured size) · Maya-XS · Maya-M · Maya-L - every size beside one shared 63.4 GB n-gram table | 44.8-89.5 GB + the 63.4 GB table | made for four equal 16 GB cards: Maya-S on 4x Tesla T4 writes ~32 tokens/s (clocks locked) | V100 and newer, Linux; four equal 16 GB cards get the layout measured on 4x Tesla T4 | its engine has not run on an AMD GPU; the setup does not offer it there | not measured yet | `hy4-flash-maya-s` / `-xs` / `-m` / `-l` |
+| **[Inkling 2 Mini](https://huggingface.co/thinkingmachines/Inkling-2-Mini)**<br><sub>Thinking Machines · Apache 2.0 · 26 B · reads pictures</sub> | `saguaro-ik2` | unsloth's UD-Q4_K_XL | 18.3 GB with its vision tower | one or two 16 GB cards: ~40 tokens/s on one Tesla T4, ~51 on two, ~71 on an RX 9070 XT (measured) | NVIDIA from 8 GB cards (V100 / T4 / RTX 20 and newer); one or two cards | builds and runs on RDNA 3 / 4 cards of 12 GB or more (measured on an RX 9070 XT) | yes | `inkling-2-mini` |
+| **[Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next)**<br><sub>Qwen · [Qwen Community License 1.0](LICENSE.qwen-community-1.0) · 125 B, 10 of 512 experts a token · reads pictures</sub> | `saguaro-qfn`<br><sub>Strata's engine</sub> | **UD-Q4_K_XL** (default) · Q8_0 · Blackfrost-AI's CYBER-FROST-3.8 Q5_K_M (its fine-tune, a quant of its own) | 111 / 177 / 112.5 GB | one 16 GB card with ~96 GB of RAM, or up to four equal NVIDIA cards; Linux | V100 and newer; one card of 16 GB+, or up to four equal ones taking the 48 layers in turn | runs on one RDNA 3 / 4 card of 16 GB+ with ~96 GB of RAM (measured on an RX 9070 XT); not built for Windows | yes (the tower's reader is built for your cards; no AMD picture run measured yet) | `qwen3.8-flash-next` / `-q8_0` · `cyber-frost` |
 
-GLM, DeepSeek and MiniMax run on NVIDIA from the V100 / RTX 20 on, and on Windows (experimental; see
-[What you need](#what-you-need)); Hy4-Flash on NVIDIA under Linux; Inkling 2 Mini under Linux on NVIDIA from the V100 /
-Tesla T4 on and on one AMD RDNA 3 / 4 GPU of 12 GB or more (experimental; the experts the card does not hold stay in
-RAM, the offload path). On AMD GPUs (experimental) only some engines build today -
-[the list](docs/AMD_SAGUARO.md#what-runs-on-amd). With no model set up yet, the setup recommends Inkling 2 Mini on one or
-two NVIDIA cards under 24 GB or on one 16-23 GB AMD RDNA 3 / 4 GPU; with four equal 16 GB cards, Hy4-Flash; on other AMD
-PCs, GLM-5.3-Flash in the largest quant that fits VRAM + RAM. DeepSeek's sizes include its Engram tables. The setup also offers unsloth's GGUF and
-LibertAIDAI's EXL3 quants of DeepSeek, orcarouter's abliterated DeepSeek, Mia-AiLab's EXL3 quant of MiniMax,
-turboderp's EXL3 quants of GLM, and the family **Qwen3.8-Flash-Next** - unsloth's UD-Q4_K_XL / Q8_0 and Blackfrost-AI's
-CYBER-FROST fine-tune as a quant of its own (`--model cyber-frost`) - on its own engine, `saguaro-qfn`, on **NVIDIA and
-AMD** under Linux (`--model qwen3.8-flash-next`), with pictures ([its settings](docs/SETTINGS.md#qwen38-flash-next-saguaro-qfn)):
-one GPU of 16 GB+ with ~96 GB of RAM on either vendor, or up to four equal cards on NVIDIA taking the 48 layers in turn
-(the four-card split is the live 4x Tesla T4 server's own; measured on an RX 9070 XT with 96 GB, [AMD](docs/AMD_SAGUARO.md#qwen38-flash-next-on-the-saguaro-qfn-engine), [docs/MODELS.md](docs/MODELS.md#qwen38-flash-next-saguaro-qfn)). **Each model's files, drafters, pictures and options:
-[docs/MODELS.md](docs/MODELS.md).**
+The setup recommends, with no model set up yet: Inkling 2 Mini on one or two NVIDIA cards under 24 GB or one
+16-23 GB AMD RDNA 3 / 4 GPU; Hy4-Flash on four equal 16 GB cards; on other AMD PCs, GLM-5.3-Flash in the largest
+quant that fits VRAM + RAM. For Qwen3.8-Flash-Next the four-card NVIDIA split is the live 4x Tesla T4 server's own;
+`./saguaro.sh --check` prints the layout it would write for your cards, or the reason it does not fit.
+CYBER-FROST-3.8 is Blackfrost-AI's fine-tune of Qwen3.8-Flash-Next, run by the same engine as a quant of its
+own (`--model cyber-frost`; its old ids resolve to it). The setup also offers unsloth's GGUFs and other
+community quants of DeepSeek and MiniMax and turboderp's EXL3 quants of GLM - **each model's files, drafters,
+pictures and options: [docs/MODELS.md](docs/MODELS.md).**
+
+Picking a tier: GLM · Maya-S24 leaves ~1.5 GB more of a 24 GB card for experts (decode +14%) and Maya-XS suits a
+64 GB PC with a 24 GB card at 128K context; Maya-L is the closest to the GLM original (99.2% of its zero-shot
+accuracy). DeepSeek's and MiniMax's Maya-XS sizes hold the whole model in a 128 GB PC's memory (DeepSeek's
+Engram tables stay on the SSD); every name's meaning: [docs/MODELS.md](docs/MODELS.md#how-the-quants-are-named).
 
 ## Quality
 
 Saguaro's quants are made from each model's released weights and measured against the original:
 
-- **GLM-5.3 · Maya quants** keep 97.7-99.2% of the FP8 model's zero-shot accuracy and pick its next token 83-90% of
-  the time (Maya-L: 99.2%, 90%). How they're made and measured: [MAYA-S](bench/results/MAYA-S.md),
+- **GLM-5.3 · Maya quants** keep 97.7-99.2% of the FP8 model's zero-shot accuracy and pick its next token 83-90%
+  of the time (Maya-L: 99.2%, 90%). How they're made and measured: [MAYA-S](bench/results/MAYA-S.md),
   [MAYA-S24](bench/results/MAYA-S24.md), [MAYA-M](bench/results/MAYA-M.md), [MAYA-L](bench/results/MAYA-L.md).
 - **DeepSeek V4.1 · Maya-S** picks the same next token as the original 92.6% of the time.
 - **MiniMax M3.1 · Maya-S** picks it 87.6% of the time (the average over its categories).
@@ -101,8 +98,8 @@ More on each model's card on [Hugging Face](https://huggingface.co/peasantsmith)
 ## How fast is it?
 
 Real machines measured by users (most rows are from Project Maya releases, credited by PR), most with
-`./saguaro.sh --bench` (decode: three greedy 256-token answers; prefill:
-an 8K-token prompt unless the row says otherwise). Share yours: `--bench`, then `--report`, in a
+`./saguaro.sh --bench` (decode: three greedy 256-token answers; prefill: an 8K-token prompt unless the row says
+otherwise). Share yours: `--bench`, then `--report`, in a
 [GitHub issue](https://github.com/ksanislo/saguaro/issues).
 
 <details><summary><b>GLM-5.3-Flash speed benchmarks</b></summary>
@@ -204,19 +201,20 @@ an 8K-token prompt unless the row says otherwise). Share yours: `--bench`, then 
 
 </details>
 
-A token is about ¾ of a word. The speed holds as a conversation grows, and the first answers after a start are the
-slowest while the caches fill with what you use.
+A token is about ¾ of a word. The speed holds as a conversation grows, and the first answers after a start are
+the slowest while the caches fill with what you use.
 
 ## Using it
 
-- **In the browser:** chat (kept in your browser, with search, pins and folders, per-chat instructions and thinking
-  level, edit and regenerate, HTML previews), a live **Monitor** of the model and your hardware (down to what fills
-  each GPU's memory), a context size and port you can change in Settings, and **Models**: every model set up on this
-  machine, switching to another (Saguaro starts again with it) and each one's engine settings (context, GPUs, drafting,
-  images, memory), saved into its `maya-<model>.json`.
-- **Saved:** the sidebar's Saved line adds up what the model's own API (DeepSeek's, Z.ai's, MiniMax's or Tencent's) would have
-  charged for the same tokens - the prompt Saguaro reuses from its cache at the API's cached price, DeepSeek's peak hours
-  at its peak price - kept per model in `token-savings.json`; its prices can be changed in **Settings › Savings**.
+- **In the browser:** chat (kept in your browser, with search, pins and folders, per-chat instructions and
+  thinking level, edit and regenerate, HTML previews), a live **Monitor** of the model and your hardware (down to
+  what fills each GPU's memory), a context size and port you can change in Settings, and **Models**: every model
+  set up on this machine, switching to another (Saguaro starts again with it) and each one's engine settings
+  (context, GPUs, drafting, images, memory), saved into its `maya-<model>.json`.
+- **Saved:** the sidebar's Saved line adds up what the model's own API (DeepSeek's, Z.ai's, MiniMax's or
+  Tencent's) would have charged for the same tokens - the prompt Saguaro reuses from its cache at the API's
+  cached price, DeepSeek's peak hours at its peak price - kept per model in `token-savings.json`; its prices can
+  be changed in **Settings › Savings**.
 - **Your apps and coding agents:** an OpenAI-compatible API at `http://127.0.0.1:8080/v1`, and Anthropic's at
   `http://127.0.0.1:8080/v1/messages` (Claude Code: `ANTHROPIC_BASE_URL=http://127.0.0.1:8080`). Tool calls are
   streamed as the model writes them, and a long prompt's reading progress too when a request asks for it
@@ -226,7 +224,7 @@ slowest while the caches fill with what you use.
   schema-validated output, background tasks with cancellation/replay, and optional shared in-memory history
   (`store:true`, `previous_response_id`). Responses are not stored by default. Options and limits:
   [docs/RESPONSES.md](docs/RESPONSES.md).
-- **Thinking:** Off, Low, High (the default) or Max, in Settings or per request.
+- **Thinking:** Off, Low, High or Max in Settings or per request; each model starts at its card's default.
 - **Pictures:** attach one in the chat, or send image parts through either API.
 - **From another device:** `./saguaro.sh --setup --host 0.0.0.0 --api-key <secret>`. Always set a key.
 - **Tuning:** `./saguaro.sh --calibrate` tunes the engine to your hardware in 10-15 minutes. Every setting:
@@ -239,59 +237,71 @@ slowest while the caches fill with what you use.
 
 | | |
 | --- | --- |
-| **GPU** | NVIDIA, compute capability 7.0 or newer (V100, RTX 20 and newer): one, or up to 16 that share the model. More VRAM is faster. Pascal (Tesla P40 / P100, GTX 10) is experimental, not validated yet. **AMD (experimental):** RX 7900 XT / XTX, Radeon AI PRO R9700 / RX 9070, Strix Halo and Gorgon Halo (Radeon 8060S / 8065S); RX 6800 / 6900 and Radeon PRO V620 / W6800 not validated yet; which models build for AMD today, with pictures: [docs/AMD_SAGUARO.md](docs/AMD_SAGUARO.md#what-runs-on-amd) |
-| **RAM** | 32 GB runs it. More RAM keeps more experts close and is faster |
-| **Disk** | **A fast NVMe SSD** with room for the model (~100 GB for GLM-5.3 · Maya-S, ~160 GB for GLM-5.3 · Maya-L, ~350 GB for DeepSeek V4.1 · Maya-S, ~470 GB for unsloth's Q8 GGUF of it, ~95 GB for MiniMax M3.1 · Maya-XS, ~200 GB for MiniMax-M3.1-Flash's EXL3 quant) and its picture encoder (1.1 GB). Not a hard disk |
-| **System** | Linux (x86-64; a CPU with AVX2 is best), the NVIDIA driver, CUDA 12.x (CUDA 13 works for RTX 20 and newer, not for the V100 or Pascal), g++, Python 3.10+. Windows 10/11 (experimental): [docs/WINDOWS.md](docs/WINDOWS.md). Not WSL2. AMD: ROCm 7 |
+| **GPU - NVIDIA** | compute capability 7.0 or newer, validated from the V100 / RTX 20 on: one card, or up to 16 that share the model; more VRAM is faster. Pascal (Tesla P40 / P100, GTX 10) builds for GLM-5.3-Flash and Inkling 2 Mini with the engine's portable kernels; it is not validated. Qwen3.8-Flash-Next takes one card of 16 GB or more, or up to four equal ones |
+| **GPU - AMD** | RDNA 3 (RX 7900 XT / XTX), RDNA 4 (Radeon AI PRO R9700 / RX 9070) and the Strix Halo / Gorgon Halo APUs (Radeon 8060S / 8065S) with ROCm 7: GLM-5.3-Flash, Qwen3.8-Flash-Next and Inkling 2 Mini build and run there (measured on an RX 9070 XT, gfx1201, ROCm 7.1); the DeepSeek and MiniMax engines compile for HIP and have not run on a card yet; Hy4-Flash is not offered on AMD. RDNA 2 (RX 6800 / 6900, Radeon PRO V620 / W6800) builds with the portable kernels - run once on a PRO V620. Which models build today, with pictures: [docs/AMD_SAGUARO.md](docs/AMD_SAGUARO.md#what-runs-on-amd) |
+| **Windows** | 10 / 11 native (not WSL2): `START-SAGUARO.bat`, with the GLM-5.3-Flash, DeepSeek and MiniMax engines ([docs/WINDOWS.md](docs/WINDOWS.md)); the other engines are Linux only for now. AMD on Windows incl. Strix Halo / Gorgon Halo: [docs/AMD_SAGUARO.md](docs/AMD_SAGUARO.md) |
+| **Mac** | Apple Silicon: `./saguaro.sh --backend metal`, GLM-5.3-Flash only ([docs/METAL.md](docs/METAL.md)); built and unit-tested on GitHub's Macs, not run with the real model by us (we have no Mac) - if you run it, please tell us how it went in an issue |
+| **RAM** | 32 GB runs it. More RAM keeps more experts close and is faster; Qwen3.8-Flash-Next wants about 96 GB beside its 16 GB card |
+| **Disk** | **a fast NVMe SSD** with room for the model (~100 GB for GLM-5.3 · Maya-S, ~160 GB for GLM-5.3 · Maya-L, ~350 GB for DeepSeek V4.1 · Maya-S, ~470 GB for unsloth's Q8 GGUF of it, ~95 GB for MiniMax M3.1 · Maya-XS, ~200 GB for MiniMax-M3.1-Flash's EXL3 quant, 111-177 GB for Qwen3.8-Flash-Next, 44.8-89.5 GB plus a shared 63.4 GB table for Hy4-Flash, 18.3 GB for Inkling 2 Mini) and its picture encoder (1.1 GB). Not a hard disk |
+| **System** | Linux (x86-64; a CPU with AVX2 is best), the NVIDIA driver, CUDA 12.x (CUDA 13 works for RTX 20 and newer, not for the V100 or Pascal), g++, Python 3.10+ |
 
 The setup checks all of this, prints the exact command for anything missing, and installs nothing system-wide.
 
 ## Install
 
-Run the two commands in [Quick start](#quick-start) and answer a few questions (Enter takes the recommended choice).
-The setup shows every download before it starts it, builds everything once (plus the download: GLM-5.3-Flash's
-engine about 20-40 minutes; Inkling 2 Mini's about 4 minutes on a Ryzen 7 9800X3D) and **starts the model**. Then open `http://127.0.0.1:8080`. Ctrl+C stops it, and `./setup.sh` starts it again right away.
+Run the two commands in [Quick start](#quick-start) and answer a few questions (Enter takes the recommended
+choice). The setup shows every download before it starts it and builds everything once (plus the download:
+GLM-5.3-Flash's engine about 20-40 minutes; Inkling 2 Mini's about 4 minutes on a Ryzen 7 9800X3D) and **starts
+the model**. Then open `http://127.0.0.1:8080`. Ctrl+C stops it, and `./setup.sh` starts it again right away.
 
 - **Windows:** `START-SAGUARO.bat` instead of `./setup.sh` - see [docs/WINDOWS.md](docs/WINDOWS.md).
 - **AMD:** [docs/AMD_SAGUARO.md](docs/AMD_SAGUARO.md).
-- **Mac with Apple Silicon (experimental, GLM-5.3-Flash):** `./saguaro.sh --backend metal` - see [docs/METAL.md](docs/METAL.md).
-  Built and unit-tested on GitHub's Macs, not yet tested by us with the real model (we have no Mac): if you run it,
-  please tell us how it went in an issue.
-- **Intel Arc:** not supported by Saguaro's engine; a community report of the Maya-XS DeepSeek GGUFs on llama.cpp's SYCL backend: [docs/INTEL_ARC.md](docs/INTEL_ARC.md).
-- **Updating:** the page's **Settings › About and updates**, or `git pull` then `./setup.sh`. The model isn't downloaded again.
-- **Model files downloaded another way** (a download manager, another PC, a Hugging Face cache): `./saguaro.sh --import-model FOLDER`
-  finds Saguaro's files in FOLDER by size and checksum, whatever they are called, and moves them into place (`--copy` when
-  FOLDER is on another drive; the originals stay). Files that do not match are left alone.
-- **Every option** (GPUs, context, a model folder you already have, remote access, ...): [docs/SETUP.md](docs/SETUP.md).
+- **Intel Arc:** not supported by Saguaro's engine; a community report of the Maya-XS DeepSeek GGUFs on llama.cpp's
+  SYCL backend: [docs/INTEL_ARC.md](docs/INTEL_ARC.md).
+- **Model files downloaded another way** (a download manager, another PC, a Hugging Face cache):
+  `./saguaro.sh --import-model FOLDER` finds Saguaro's files in FOLDER by size and checksum, whatever they are
+  called, and moves them into place (`--copy` when FOLDER is on another drive; the originals stay). Files that do
+  not match are left alone.
+- **Every option** (GPUs, context, a model folder you already have, remote access, ...):
+  [docs/SETUP.md](docs/SETUP.md).
 
-> **The start takes a few minutes:** the engine pins most of the free RAM (all but about 6 GB) for its expert tier,
-> so other programs get little RAM while Saguaro runs.
+> **The start takes a few minutes:** the engine pins most of the free RAM (all but about 6 GB) for its expert
+> tier, so other programs get little RAM while Saguaro runs.
+
+## Updating
+
+The dashboard's **Settings › About and updates** says when a new version is out, and its **Update** button does
+it: Saguaro downloads the new code (git), compiles only the engine files that changed and starts again with the
+same model - the model is not downloaded again, and your settings stay. By hand: `git pull`, then `./setup.sh`.
+Releases: [github.com/ksanislo/saguaro/releases](https://github.com/ksanislo/saguaro/releases).
 
 ## Something went wrong?
 
-Run **`./saguaro.sh --report`** (Windows: `START-SAGUARO.bat --report`) right after a slow answer or an error, and attach the
-`saguaro-report.txt` it writes to a [GitHub issue](https://github.com/ksanislo/saguaro/issues). It holds your hardware,
-your setup and the engine's speed lines; nothing is sent anywhere by itself. The engine's own log is
-`maya-<model>.log` in the Saguaro folder.
+Run **`./saguaro.sh --report`** (Windows: `START-SAGUARO.bat --report`) right after a slow answer or an error,
+and attach the `saguaro-report.txt` it writes to a
+[GitHub issue](https://github.com/ksanislo/saguaro/issues). It holds your hardware, your setup and the engine's
+speed lines; nothing is sent anywhere by itself. The engine's own log is `maya-<model>.log` in the Saguaro folder.
 
-- **The build stops** ("nvcc ... cannot build for these GPUs", "unsupported GNU version", or `cuda_profiler_api.h` /
-  `nvtx3/nvToolsExt.h` missing): [docs/SETUP.md](docs/SETUP.md#if-the-build-fails) has the fix for each.
+- **The build stops** ("nvcc ... cannot build for these GPUs", "unsupported GNU version", or
+  `cuda_profiler_api.h` / `nvtx3/nvToolsExt.h` missing): [docs/SETUP.md](docs/SETUP.md#if-the-build-fails) has
+  the fix for each.
 - **Slow, with the SSD busy all the time:** not enough free RAM for the experts. Close programs or add RAM.
-- **Windows: answers suddenly several times slower:** the card is too full and Windows moves GPU memory to RAM. Leave
-  more of it free: `START-SAGUARO.bat --setup --vram-reserve-mib 2048`
+- **Windows: answers suddenly several times slower:** the card is too full and Windows moves GPU memory to RAM.
+  Leave more of it free: `START-SAGUARO.bat --setup --vram-reserve-mib 2048`
   ([the expert pool's size](docs/SETTINGS.md#the-expert-pools-size)).
 - **Windows on a Strix Halo / Gorgon Halo: other programs run out of memory, or the setup warns about the page
   file:** set the page file to the size the setup prints ([docs/AMD_SAGUARO.md](docs/AMD_SAGUARO.md)).
 - **The download stopped:** run `./saguaro.sh` again; it continues where it stopped.
-- **Port 8080 is in use:** Saguaro is already running, or `--port 8081` starts another one. Settings > Port moves Saguaro to
-  another port for good (it starts again there).
+- **Port 8080 is in use:** Saguaro is already running, or `--port 8081` starts another one. Settings > Port moves
+  Saguaro to another port for good (it starts again there).
 
 ## Support
 
-Saguaro is free and open source, run on a 4 x Tesla T4 box; releases are tested on our own NVIDIA machines before they
-ship (the Mac support only on GitHub's virtual Macs).
+Saguaro is free and open source, run on a 4 x Tesla T4 box; releases are tested on our own NVIDIA machines
+before they ship (the Mac support only on GitHub's virtual Macs).
 
-Speed reports, bug reports and pull requests are welcome: [CONTRIBUTING.md](CONTRIBUTING.md) says what helps most.
+Speed reports, bug reports and pull requests are welcome: [CONTRIBUTING.md](CONTRIBUTING.md) says what helps
+most.
 
 ## Credits
 
@@ -314,7 +324,9 @@ Speed reports, bug reports and pull requests are welcome: [CONTRIBUTING.md](CONT
   authors): the quantization formats, the CPU dot products and the prompt path's MMQ kernels, built from a pinned
   commit (`third_party/ggml/LICENSE`).
 - **EXL3 support** follows [exllamav3](https://github.com/turboderp-org/exllamav3)'s format, codebooks, CPU expert
-  kernel and tensor-core decoding of a tile (MIT License, Copyright (c) 2025 Turboderp; `third_party/exllamav3/LICENSE`). **The DFlash2 drafter's
+  kernel and tensor-core decoding of a tile (MIT License, Copyright (c) 2025 Turboderp;
+  `third_party/exllamav3/LICENSE`).
+  **The DFlash2 drafter's
   forward** follows [beellama.cpp](https://github.com/Anbeeld/beellama.cpp)'s (MIT License, Copyright (c) 2023-2026
   The ggml authors, Anbeeld; `third_party/beellama.cpp/LICENSE`).
 - The models: [GLM-5.3-Flash](https://huggingface.co/zai-org/GLM-5.3-Flash) by zai-org (MIT); the Maya quants and the
@@ -331,8 +343,8 @@ Speed reports, bug reports and pull requests are welcome: [CONTRIBUTING.md](CONT
   Community License 1.0 ([LICENSE.qwen-community-1.0](LICENSE.qwen-community-1.0)); MiniMax M3.1 under its Community
   License ([LICENSE.minimax-m31](LICENSE.minimax-m31)).
   [Hy4-Flash](https://huggingface.co/tencent/Hy4-flash) by Tencent (its GGUF quants by peasantsmith): Tencent Hy
-  License ([LICENSE.hy4-flash](LICENSE.hy4-flash)); [Inkling 2 Mini](https://huggingface.co/thinkingmachines/Inkling-2-Mini)
-  by Thinking Machines ([unsloth's GGUF](https://huggingface.co/unsloth/Inkling-2-Mini-GGUF)): Apache 2.0. Their
+  License ([LICENSE.hy4-flash](LICENSE.hy4-flash));
+  [Inkling 2 Mini](https://huggingface.co/thinkingmachines/Inkling-2-Mini) by Thinking Machines ([unsloth's GGUF](https://huggingface.co/unsloth/Inkling-2-Mini-GGUF)): Apache 2.0. Their
   engines, `saguaro-hy4` and `saguaro-ik2`, are Project Maya's (v1.1.72), built here for Turing cards and AVX1 CPUs.
 - The dashboard's font: Outfit (SIL Open Font License 1.1, `serve/web/fonts/OFL.txt`); its icons:
   [Lucide](https://lucide.dev) (ISC License, `serve/web/LICENSE.lucide.txt`); its UI library:
