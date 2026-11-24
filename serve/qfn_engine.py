@@ -984,7 +984,11 @@ class StrataEngine:
         if body.startswith("sess_json="):
             try:
                 self.sessions = json.loads(body[len("sess_json="):])
-            except ValueError:
+                # /metrics engine info: the folder's saved conversations (files) and bytes on disk - no other engine
+                # keeps state on disk, so its state rides along with the engine's own facts (PLAN-t6b-stats-ui)
+                if isinstance(self.sessions, dict):
+                    self.info["sessions"] = {k: int(self.sessions.get(k) or 0) for k in ("files", "bytes", "max_bytes")}
+            except (ValueError, TypeError, AttributeError):
                 pass
             return True
         if not body.startswith(("sess_event=", "ctx_source=")):

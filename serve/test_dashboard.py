@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import sys
 import tempfile
 import time
@@ -15,11 +16,13 @@ import unittest
 import urllib.error
 import urllib.request
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from serve import gpu_map  # noqa: E402
 from serve.frontend import ChatTemplate  # noqa: E402
 from serve.server import (CONTEXT_MIN, SAGUARO_VERSION, ByteTokenizer, MockEngine, Service, StrataEngine, serve,  # noqa: E402
-                          trained_context_ds4)
+                          speculation_modes, trained_context_ds4)
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -419,6 +422,100 @@ class QfnContext(unittest.TestCase):
         eng.stop(60.0)
         eng.set_context(131072)                    # (before this change: ValueError, the reload always failed)
         self.assertEqual(eng.spawn[1], ["--max-context", "131072"])
+
+
+QFN_CPP = (ROOT / "engines" / "qfn" / "src" / "program" / "generate.cpp").read_text(encoding="utf-8")
+QFN_DRIVER = (ROOT / "engines" / "qfn" / "serve" / "server.py").read_text(encoding="utf-8")
+QFN_GEN = (ROOT / "serve" / "qfn_engine.py").read_text(encoding="utf-8")
+QFN_KBT, QFN_CTX = 12672, 1048576         # a QFN Q8 position's bytes (12 QSA layers x 1056 B), its 1M context
+
+# saguaro-qfn's lines as T6a left them printing (the INFO main line, the engine_kind line, the solo-decode STAT, the
+# elastic-slot HMEM/KMEM notes, and the --session-dir sess_json / turn_saved INFO notes)
+QFN_INFO = ("INFO logit_bias=1 context=1048576 kv=q8_0 kv_resident=65536 kv_bytes_token=12672 expert_slots=16384 "
+            "expert_cache_mib=52000 expert_slots_primary=12288 expert_cache_primary_mib=39000 spec=5 "
+            "mtp_max=5 mtp=1 lookup=64 vram_free_mib=1200 cvec=1 arena_mib=70000 pool_workers=4 pcie_frac=0.62 "
+            "spec_min_p=0.05 conversation_cache_mib=65536 conversation_cache_slots=8 "
+            "conversation_cache_min_free_mib=2048 conversation_cache_min_tokens=4096 tail_role_token=0 "
+            "vram_elastic=0 prefill_cap=8192 prefill_stages=1 stream_all_min=0 prefill_pipe=0 engine=0.1.49.2")
+QFN_KIND = "INFO engine_kind=qfn experts=13824 vram_slots=16384 vram_gb=50.8 ram_slots=0 ram_gb=63.4"
+QFN_STAT = ("STAT tok_s=21.40 ms_tok=46.73 vram_hit=0.9512 ram_fetch=0.487 disk=0.000 promo=0.031 vram_used=4096 "
+            "vram_slots=5120 ram_used=9728 ram_gb=71.2 vram_gb=2.4 disk_gb=0.0 draft_acc=37 draft_off=58 active=1")
+QFN_HMEM = "HMEM 3221225472 6442450944 2 1073741824 2147483648"
+QFN_KMEM = "KMEM 1 0 4294967296 1073741824 536870912"
+QFN_SESS = ('INFO sess_json={"files":2,"bytes":73400320,"max_bytes":1073741824,"max_files":16,"max_age_days":14,'
+            '"conversations":[{"tokens":12345,"bytes":35651584,"last_used":1760000000,"state":"on_disk"}]}')
+QFN_SAVE = "INFO sess_event=turn_saved sess_tokens=12345 sess_bytes=35651584 sess_ms=8.2 sess_why=main"
+QFN_VRAM = (f"VRAM dev=0 pci=0000:01:00.0 total=25296896000 free=751828992 weights=6678575104 kv=665719603 "
+            f"kv_ram={4 * 2**30} act=107374182 drafter=751828992 window=0 pool=15536793108 tail=0 borrow=0 vision=0 "
+            f"slots=1231 ctx={QFN_CTX} layers=0-45 kv_room={600_000 * QFN_KBT} kv_ram_room={400_000 * QFN_KBT} "
+            f"parked={10_000 * QFN_KBT} parked_n=3 park_budget={64 * 2**20}\n")
+
+
+class QfnStatsToMonitor(unittest.TestCase):
+    """T6b: a sample of saguaro-qfn's lines fed to its driver, then to a Service - every field the Monitor reads for
+    a QFN engine (the Speculation name, the tiers' tiles incl. promo, the context RAM and slot memory, the session
+    folder's state, the parked conversations' count and the last turn saves).  No GPU, no process."""
+
+    class FakeProc:
+        def __init__(self, lines):
+            self.stdout = iter(lines)
+
+        def kill(self):
+            pass
+
+    def driver(self, lines):
+        from serve.server import _qfn_engine_class
+        eng = _qfn_engine_class().__new__(_qfn_engine_class())     # (the real driver, its real _pump, a fake engine)
+        eng.info, eng.vram, eng.vlen_lines = {}, [], None
+        eng.lines, eng.slot_q, eng.log = queue.Queue(), [], None
+        eng.proc = self.FakeProc(lines)
+        eng._pump()
+        return eng
+
+    def test_the_lines_are_the_formats_the_engine_prints(self):
+        """The fixtures above are the formats generate.cpp prints (T6a's mtp= and promo= included) and the driver
+        still passes its special lines through into engine.info / the session folder's state."""
+        self.assertIn("mtp_max=%d mtp=%d lookup=%d vram_free_mib=%lld", QFN_CPP)
+        self.assertIn('"STAT tok_s=%.2f ms_tok=%.2f vram_hit=%.4f ram_fetch=%.3f disk=0.000 promo=%.3f "', QFN_CPP)
+        self.assertIn('"INFO engine_kind=qfn experts=%lld vram_slots=%lld vram_gb=%.1f ram_slots=%lld ram_gb=%.1f\\n"',
+                      QFN_CPP)
+        for src in (QFN_DRIVER, QFN_GEN):
+            self.assertIn('self.info["context_ram"] = ram', src)
+            self.assertIn('self.info["slot_memory"] = cards', src)
+            self.assertIn('self.info["sessions"]', src)
+
+    def test_driver_reads_them_into_the_engines_facts(self):
+        eng = self.driver([QFN_INFO, QFN_KIND, QFN_HMEM, QFN_KMEM, QFN_STAT, QFN_SESS, QFN_SAVE])
+        self.assertEqual((eng.info["mtp"], eng.info["lookup"], eng.info["engine_kind"]), (1, 64, "qfn"))
+        self.assertEqual(speculation_modes(eng.info), ["MTP", "Lookup"])     # (the Speculation tile's name)
+        self.assertEqual(eng.info["context_ram"], {"pinned": 3221225472, "whole": 6442450944,
+                                                   "slots": [1073741824, 2147483648]})
+        self.assertEqual(eng.info["slot_memory"], [{"device": 0, "total": 4294967296, "free": 1073741824,
+                                                    "givable": 536870912}])
+        self.assertEqual((eng.stat["promo"], eng.stat["ram_fetch"], eng.stat["disk"]), (0.031, 0.487, 0.0))
+        self.assertEqual((eng.stat["draft_acc"], eng.stat["draft_off"]), (37.0, 58.0))   # (Speculation's figures)
+        self.assertEqual(len(eng.stat_history), 1)
+        self.assertEqual(eng.info["sessions"], {"files": 2, "bytes": 73400320, "max_bytes": 1073741824})
+        self.assertEqual((eng.turn_saves["main"]["tokens"], eng.turn_saves["main"]["bytes"],
+                          eng.turn_saves["main"]["ms"]), (12345, 35651584, 8.2))
+        self.assertIn("at", eng.turn_saves["main"])
+
+    def test_metrics_passes_every_field_the_page_reads(self):
+        eng = self.driver([QFN_INFO, QFN_KIND, QFN_HMEM, QFN_KMEM, QFN_STAT, QFN_SESS, QFN_SAVE])
+        qfn = SimpleNamespace(max_context=QFN_CTX, info=dict(eng.info), vram=[gpu_map.parse(QFN_VRAM)],
+                              multi=0, batch=8, proc=SimpleNamespace(pid=4242), progress=None,
+                              stat=eng.stat, stat_history=list(eng.stat_history), turn_saves=eng.turn_saves)
+        m = Service(qfn, ByteTokenizer(), ChatTemplate(ROOT / "serve/chat_template.jinja")).metrics()
+        json.dumps(m)                                        # (every new field serialises into /metrics)
+        self.assertEqual(m["engine"]["speculation"], ["MTP", "Lookup"])
+        self.assertEqual(m["engine"]["context_ram"]["pinned"], 3221225472)
+        self.assertEqual(m["engine"]["slot_memory"][0]["givable"], 536870912)
+        self.assertEqual(m["engine"]["sessions"], {"files": 2, "bytes": 73400320, "max_bytes": 1073741824})
+        self.assertEqual(m["tiers"]["now"]["promo"], 0.031)  # (the RAM tier's Promoted tile)
+        self.assertEqual(m["tiers"]["history"]["promo"], [0.031])
+        self.assertEqual(m["context"]["parked"]["conversations"], 3)   # (the parked conversations' count)
+        self.assertEqual(m["context"]["parked"]["budget_bytes"], 64 * 2**20)
+        self.assertEqual(m["context"]["turn_saves"]["main"]["tokens"], 12345)   # (the Context card's save line)
 
 
 GB = 2**30
