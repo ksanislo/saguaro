@@ -810,6 +810,22 @@ def model_management_setting(cfg: dict | None, env=None) -> bool:
     return bool(v) if v is not None else True
 
 
+def load_by_name_setting(cfg: dict | None, env=None) -> bool:
+    """Load by name: a chat request whose "model" names another installed config switches to it first, the way the
+    Models page's Switch and llama.cpp's /models/load do, so a client that sends a model id (opencode, Hermes) gets
+    that model, like llama-swap.  OFF unless the run config has "load_by_name": true or SAGUARO_LOAD_BY_NAME says
+    1 / on / true / yes (the environment, when set, wins over the config), and it needs model management on
+    (`model_management_setting`): the switch is model management's own."""
+    on = ("1", "on", "true", "yes")
+    env = os.environ if env is None else env
+    v = env.get("SAGUARO_LOAD_BY_NAME")
+    if v is not None and str(v).strip():
+        want = str(v).strip().lower() in on
+    else:
+        want = bool((cfg or {}).get("load_by_name"))
+    return want and model_management_setting(cfg, env)
+
+
 def loop_guard_setting(cfg: dict | None, env=None) -> bool:
     """The loop guard (serve/loop_guard.py), on unless SAGUARO_LOOP_GUARD says 0 / off / false / no
     or the run config has "loop_guard": false; the environment, when set, wins over the config."""
@@ -8644,6 +8660,10 @@ def main() -> int:
     svc.model_management = model_management_setting(cfg)   # ("model_management": true: llama.cpp's load/unload/sse)
     if svc.model_management:
         print("[saguaro] model management: on (/models/load, /models/unload, /models/sse)", flush=True)
+    svc.load_by_name = load_by_name_setting(cfg)           # ("load_by_name": true, with model management: a chat
+    if svc.load_by_name:                                   #  request naming another installed model switches to it)
+        print("[saguaro] load by name: a chat request whose \"model\" names another installed model switches to it",
+              flush=True)
     svc.loop_guard = loop_guard_setting(cfg)            # (SAGUARO_LOOP_GUARD=0 or "loop_guard": false: off)
     if not svc.loop_guard:
         print("[saguaro] loop guard: off (a request's \"loop_guard\": true turns it on for that request)", flush=True)

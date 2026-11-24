@@ -54,6 +54,31 @@ def find_config(root: Path, name) -> Path | None:
     return None
 
 
+def name_key(v) -> str:
+    """A model name as `match_name` matches it: trimmed, lower case, without a ":latest" tag or a ".json" ending."""
+    return str(v or "").strip().lower().removesuffix(":latest").removesuffix(".json")
+
+
+def match_name(name, entries) -> dict | None:
+    """The installed model a request names, out of a models listing's entries (models.describe() shapes: "file",
+    "model"): the config's own name (its file without .json, with or without ":latest", ".json" or the leading
+    "maya-", case-insensitive, the way find_config takes them) or the model's own name (its config's "model_name",
+    case-insensitive); a config name beats a model name when both match.  None for an empty name or no match.
+    Pure: the entries come in, nothing is read."""
+    want = name_key(name)
+    if not want or want == "maya-":
+        return None
+    for e in entries or ():
+        stem = name_key((e or {}).get("file"))
+        if stem and want in (stem, stem.removeprefix("maya-")):
+            return e
+    for e in entries or ():
+        got = name_key((e or {}).get("model"))
+        if got and got == want:
+            return e
+    return None
+
+
 def _iso(t) -> str:
     return datetime.fromtimestamp(float(t or 0), timezone.utc).isoformat().replace("+00:00", "Z")
 
