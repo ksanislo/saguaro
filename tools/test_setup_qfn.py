@@ -697,7 +697,7 @@ class PicturesOnEveryLayout(unittest.TestCase):
     there are exactly two lend paths: the batch slots' give path (answers at once 2 or more -> --batch N; the
     engine then says "INFO vision_lend=1", generate.cpp:13119-13164, and the server sends VLEND,
     serve/server.py:3105-3139), and the VRAM command on a --vram-elastic expert cache (the config's
-    "vram_elastic": true -> engines/qfn/serve/server.py engine_args:3750-3756; NVIDIA only,
+    "vram_elastic": true -> engines/qfn/serve/server.py engine_args:3762-3768; NVIDIA only,
     expert_cache.cpp:301, and the engine answers VRAM only with it, generate.cpp:12738-12769).  A one-card config
     (parallel 1, no batch slots) writes the second; four T4s keep U6's give-path config unchanged; a server whose
     engine says neither in its INFO refuses a picture plainly instead of starting the encoder onto a full card
@@ -724,7 +724,7 @@ class PicturesOnEveryLayout(unittest.TestCase):
         for kw in ({}, {"parallel": 1}):                     # (the fresh default and a plain --parallel 1)
             with self.subTest(**kw), tempfile.TemporaryDirectory() as t:
                 cfg = self.written(Path(t), 1, **kw)
-                self.assertIs(cfg["vram_elastic"], True)     # (engine_args:3750-3756 turns it into --vram-elastic)
+                self.assertIs(cfg["vram_elastic"], True)     # (engine_args:3762-3768 turns it into --vram-elastic)
                 self.assertEqual(cfg["vision"], self.VISION)
                 self.assertIn("--vision", cfg["args"])
                 self.assertNotIn("parallel", cfg)            # (still one conversation at a time)
