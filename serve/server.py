@@ -6713,6 +6713,51 @@ def make_handler(svc: Service):
             self.wfile.write(body)
             return False
 
+        def _load_by_name(self, req) -> bool:
+            """load by name, for the chat routes that otherwise answer with whatever is loaded: True - the loaded
+            model answers (the setting is off, no model named, the loaded model's own name, or a name that is no
+            installed model, as today).  False - the answer is sent: the request named another installed model,
+            the switch started the way /models/load starts it, and the request is held no further - the switch ends
+            this process (saguaro.py starts the named config again on this port), so the connection cannot outlive
+            it: a 503 with Retry-After says to retry once the new model is up.  A request still running on the
+            current model is never cut short: like every restart, the switch waits for the FIFO to empty."""
+            name = str((req or {}).get("model") or "").strip()
+            if not name or not getattr(svc, "load_by_name", False):
+                return True
+            if model_api.name_key(name) == model_api.name_key(svc.model):
+                return True                                # (the loaded model's own /v1/models id)
+            entries = svc.model_listing()
+            hit = model_api.match_name(name, entries)
+            run = next((m for m in entries if m["running"]), None)
+            if hit is None or run is None or hit["file"] == run["file"]:
+                return True                                # (unknown name, or the loaded model by another name)
+            if not self._mapi_gate(manage=True):
+                return False
+            if not getattr(svc, "model_restart", None):
+                if not os.environ.get("SAGUARO_RESTART_ON_UPDATE"):
+                    self._json(409, {"error": {"type": "invalid_request_error", "message":
+                                               f"{hit['file']} is installed, but this server was not started by "
+                                               "saguaro.sh or START-SAGUARO.bat, so it cannot switch models itself: "
+                                               "start it with that model"}})
+                    return False
+                try:
+                    svc.switch_model(hit["file"])
+                except ValueError as e:
+                    self._json(409, {"error": {"type": "invalid_request_error", "message": str(e)}})
+                    return False
+                print(f"[saguaro] load by name: {run['file']} -> {hit['file']} (requested by a chat)", flush=True)
+            body = json.dumps({"error": {"type": "overloaded_error", "message":
+                                         f"loading model {model_api.public_name(Path(hit['file']))}: Saguaro starts "
+                                         "again with it (a big model takes minutes); retry this request, GET "
+                                         "/v1/models shows when it is loaded"}}).encode()
+            self.send_response(503)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Retry-After", "30")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return False
+
         def _mapi_chat(self, kind: str, req: dict):
             """/api/chat and /api/generate through the same pipeline as /v1/chat/completions."""
             if not self._mapi_gate():
@@ -7322,6 +7367,8 @@ def make_handler(svc: Service):
                     self.end_headers()
                     self.wfile.write(body)
                     return
+                if path in ("/v1/chat/completions", "/v1/responses", "/v1/messages") and not self._load_by_name(req):
+                    return                                 # (the answer went out: a switch started, or it said why not)
                 if path == "/v1/chat/completions":
                     self._openai(req)
                 elif path == "/v1/responses":
