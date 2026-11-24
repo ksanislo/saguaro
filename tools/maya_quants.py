@@ -149,7 +149,8 @@ OTHERS = {("deepseek", "gguf-q8"): "UD-Q8_K_XL", ("deepseek", "gguf-q4"): "UD-Q4
           ("ik2", "ud-q4_k_xl"): "unsloth UD-Q4_K_XL",   # (unsloth's GGUF of Inkling-2-Mini)
           ("ik2", "strata-sq-20"): "Strata SQ-20", ("ik2", "strata-sq-15"): "Strata SQ-15",
           ("ik2", "strata-sq-10"): "Strata SQ-10"}   # (Strata's .strata packs of Inkling-2-Mini)
-# CYBER-FROST-3.8-PS: its one GGUF (peasantsmith/CYBER-FROST-3.8-PS-GUFF) - the setup ids it is asked for by
+# CYBER-FROST-3.8-PS: its one GGUF (peasantsmith/CYBER-FROST-3.8-PS-GUFF) - the setup ids it is asked for by.  Since
+# the move onto saguaro-qfn (QFN-first T7) they resolve to its quant there; every id still works
 QWEN_IDS = ("cyber-frost", "cyber-frost-3.8", "cyber-frost-3.8-ps", "cyber-frost-3.8-ps-q5_k_m", "cyber-frost-q5_k_m")
 # Qwen3.8-Flash-Next itself (unsloth's GGUFs, tools/qfn/download.json) on its own engine, saguaro-qfn (engines/qfn): its
 # own family "qfn" (its own template, sampling and server path beside CYBER-FROST's, which stay "qwen"); older configs
@@ -243,7 +244,7 @@ def resolve(name: str, glm_downloads=()) -> tuple | None:
         if low == k.lower():
             return "glm", k
     if low in QWEN_IDS:
-        return "qwen", "q5_k_m"
+        return "qfn", CYBER_FROST_QUANT              # (CYBER-FROST on saguaro-qfn now - every old id still taken)
     if low in QFN_IDS:
         return "qfn", QFN_IDS[low]                     # (QFN ids are the "qfn" family's; CYBER-FROST's stay "qwen")
     for k in QFN_QUANTS:                               # (a quant's own file name: Qwen3.8-Flash-Next-UD-Q4_K_XL)
