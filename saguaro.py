@@ -7563,6 +7563,16 @@ def write_config_qfn(a, pc: dict, meta: dict, quant: str, files: list, pack: Pat
     return cfg_path
 
 
+def qfn_check_line(quant: str, lay: dict) -> str:
+    """--check's line for what the setup would write for these cards (qfn_fit's plan): the live server's split
+    sentence belongs to a split only - a measured one-card layout (the RX 9070 XT it was measured on) is not the
+    4x Tesla T4 server's."""
+    return (f"{Q.shown('qfn', quant)} on these cards - " +
+            (lay["said"] + (" - the live 4x Tesla T4 server's own split" if lay["layer_split"] and lay["measured"]
+                            else "" if lay["measured"] else " (not measured on these cards yet)")
+             if lay["fits"] else lay["reason"]) + ".")
+
+
 def set_up_qfn(a, prev: dict) -> Path | None:
     """Qwen3.8-Flash-Next on saguaro-qfn, steps 1-8: the PC (AMD: one RDNA GPU; NVIDIA: one card, or up to four
     equal ones taking the layers in turn - qfn_fit; the quant's measured VRAM and RAM - refused below them), the
@@ -8900,10 +8910,7 @@ def main() -> int:
                      "pick one with --gpu N")
             quant = getattr(a, "qfn_quant", None) or QFN_DEFAULT_QUANT
             lay = QF.plan(pc["gpus"], mem_gb()[0], quant)
-            say(f"{Q.shown('qfn', quant)} on these cards - " +
-                (lay["said"] + (" - the live 4x Tesla T4 server's own split" if lay["measured"] else
-                                " (not measured on these cards yet)")
-                 if lay["fits"] else lay["reason"]) + ".")
+            say(qfn_check_line(quant, lay))
         if fam == "glm" and a.backend != "metal":
             for line in glm_fit_lines(pc["gpus"]):
                 say(line)

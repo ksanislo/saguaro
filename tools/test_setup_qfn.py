@@ -225,6 +225,23 @@ class NvidiaConfig(unittest.TestCase):
             self.assertEqual(cfg["installer"]["family"], "qfn")
 
 
+class CheckLine(unittest.TestCase):
+    def test_the_check_line_names_the_t4_split_only_for_a_split(self):
+        t4 = [{"index": i, "name": "Tesla T4", "vram_gb": 15.0, "arch": "75"} for i in range(4)]
+        self.assertIn("the live 4x Tesla T4 server's own split",
+                      maya.qfn_check_line("ud-q4_k_xl", maya.QF.plan(t4, 220.0)))
+        amd = [{"index": 0, "name": "RX 9070 XT", "vram_gb": 15.9, "arch": "gfx1201"}]     # (measured, one card)
+        line = maya.qfn_check_line("ud-q4_k_xl", maya.QF.plan(amd, 91.7))
+        self.assertNotIn("Tesla T4", line)                                                 # (review finding 2)
+        self.assertNotIn("not measured", line)
+        self.assertIn("64K context", line)
+        plain = [{"index": 0, "name": "RTX A5000", "vram_gb": 24.0, "arch": "86"}]
+        self.assertIn("not measured on these cards yet", maya.qfn_check_line("ud-q4_k_xl", maya.QF.plan(plain, 128.0)))
+        self.assertIn("needs GPUs of 16 GB or more",
+                      maya.qfn_check_line("ud-q4_k_xl", maya.QF.plan([{"index": 0, "name": "RTX 4060",
+                                                                       "vram_gb": 8.0, "arch": "89"}], 96.0)))
+
+
 class Windows(unittest.TestCase):
     def test_qfn_is_refused_there_in_one_plain_line(self):
         with patch.object(maya, "WIN", True):
