@@ -1976,3 +1976,222 @@ untested and refused unless this is set when the setup or `--check` runs (in the
 | Variable | Default | What it does |
 |---|---|---|
 | `SAGUARO_HIP_ALLOW_ROCM6` | unset (ROCm 6 refused) | `1`: the setup goes on with a ROCm 6.x, with a warning (untested: the build or the engine may fail); the build then takes hipBLAS 2's `HIPBLAS_V2` API and leaves out `hipblasSetWorkspace`, which hipBLAS 2 does not have |
+
+## Qwen3.8-Flash-Next (saguaro-qfn)
+
+`./saguaro.sh --setup --model qwen3.8-flash-next` sets up Qwen3.8-Flash-Next (unsloth's UD-Q4_K_XL and Q8_0 quants) on
+its own engine, `saguaro-qfn` (the tree in `engines/qfn`), served by its server (`engines/qfn/serve/server.py`). The
+settings sit in three places, and the tables below cover all three: the engine's command-line options go in the config's
+`"args"`, `SAGUARO_*` environment variables go in the config's `"env"` (the engine's) or in the server's own environment,
+and what is neither goes in the config as its own key. The engine reads a few hundred further `SAGUARO_*` switches for
+its kernels, its graphs and its debugging; those are development knobs documented in the engine's source comments, not
+here. Rows that change the model's tokens say so; the rest are exact (the same answers, some faster).
+
+**Environment variables.** Engine ones go in the config's `"env"` block; server ones are read from the environment the
+server itself starts in (the `"env"` block reaches only the engine). `1` turns a switch on, `0` off, unset the default.
+
+| Variable | Default | What it does |
+|---|---|---|
+| `SAGUARO_SLOT_ADMIT` | off (opt-in) | `--batch`: an admission's prompt is read into its slot beside the decoding slots (the engine reports `slot_admit=1` and the server schedules reads around the windows); beside reads the slot drafter's stream takes the highest priority, so the reads never delay the drafts. The same tokens |
+| `SAGUARO_SLOT_ADMIT_MULTI` | off (needs `SLOT_ADMIT`) | more than one queued read runs at once instead of one after the other; the base `READ_YIELD` and `SLOT_ADMIT_CHUNK` build on. The same tokens |
+| `SAGUARO_SLOT_ADMIT_CHUNK` | 0 | a beside-read lends the prompt path at most N tokens of its buffers at a time (0: the prompt path's own chunk); the T4 setups run 4096. The same tokens |
+| `SAGUARO_READ_YIELD` | off (needs `SLOT_ADMIT_MULTI`) | beside-reads go in pieces of `SAGUARO_READ_YIELD_CHUNK` tokens (2048), the one with the least left first (one unfed for `SAGUARO_READ_YIELD_STARVE_S`, 20, goes first), and at a piece boundary they give way to a waiting text request, held in their slots with the loan kept. The same tokens |
+| `SAGUARO_BATCH_READS` | off | one batch carries the experts the SSD reads several queued prompt reads all want: at most `SAGUARO_BATCH_READS_MAX` segments per read (default 4, kept in 2..16). The same tokens |
+| `SAGUARO_BATCH_READS_FAST` | 512 (when batched) | a read of at most N tokens is urgent and takes its share of the next batch at once; `SAGUARO_BATCH_READS_FAST_SHARE` (128), `_CHUNK` (0) and `_SHRINK` (512) are its companion rules. The same tokens |
+| `SAGUARO_BATCH_READS_DECODE_WINDOWS` | 2 (0: off) | while slots decode beside the reads, decoding takes turns: every stage stops taking chunks at its next boundary and the slots decode alone through N windows, one due every `SAGUARO_BATCH_READS_DECODE_SHARE` ratio of read time (0.3), bounded by `_DECODE_MAX_MS` (4000) and `_DECODE_DRAIN_MS` (10000). The same tokens |
+| `SAGUARO_FAST_LANE` | off (needs `SAGUARO_PIPED_MTP`) | a read of at most `SAGUARO_FAST_LANE_MAX` tokens (96) runs through its group's windows as all-kept rows, so a short request decodes from the next window instead of waiting for the prompt path. The same tokens |
+| `SAGUARO_PIPED_MTP` | off | `--batch-mtp` on a pipelined-group split: a group's window carries each live slot's token plus its MTP drafts while at most `SAGUARO_PIPED_MTP_MAX` conversations decode (default 2, 0: never); `SAGUARO_PIPED_MTP_DRAFTS` is drafts per slot and window (default `--spec` - 1). The same tokens |
+| `SAGUARO_ELASTIC_SLOTS` | off (AMD builds: lean) | the batch slots' sessions hold their VRAM as growable pages that fill with the conversation (budget `SAGUARO_ELASTIC_SLOTS_MIB` MiB a card, default 1024; steps `SAGUARO_ELASTIC_SLOTS_STEP` cells, 4096) instead of carving every slot's whole `--max-context` at load. The same tokens |
+| `SAGUARO_ELASTIC_SLOTS_GIVE` | off (with `ELASTIC_SLOTS`) | when a card's slot budget runs short, that card's expert cache gives the slots room from below its prompt loan and takes it back when the slots let go. The same tokens |
+| `SAGUARO_ELASTIC_IDLE` | off (needs `ELASTIC_SLOTS` + `_GIVE`, CUDA) | each slot starts at its first cells plus `SAGUARO_ELASTIC_IDLE_SPARE_MIB` (64) and takes the rest from the expert cache as it grows; a slot idle for `SAGUARO_ELASTIC_IDLE_S` seconds parks its conversation and hands its VRAM back (the engine's `BIDLE` line; the server routes it). The same tokens |
+| `SAGUARO_ELASTIC_IDLE_S` | 120 | the seconds a slot may sit idle before `ELASTIC_IDLE` parks it (the T4 setups run 300) |
+| `SAGUARO_KV_VRAM_ELASTIC` | on | the solo session's VRAM pools and pooled keys grow with its context (`session_vram_fit`) instead of being carved for `--max-context` at load; `0`: off. The same tokens |
+| `SAGUARO_NUMA_PLACE` | off (opt-in) | multi-socket PCs: place the experts' RAM copies and the prompt buffers on the GPU's NUMA node; `bind` also pins the reading threads there. The same tokens |
+| `SAGUARO_NUMA_POOL` | tried where there are 2+ nodes | the CPU expert pool splits its workers across the NUMA nodes; `0` turns the default split-try off (one node: nothing to do). The same tokens |
+| `SAGUARO_PARALLEL_LOAD` | off (Linux only) | `1`: read the experts into the RAM tier at load with `pread` on a thread per NUMA node; `SAGUARO_PARALLEL_LOAD_REGISTER=first\|overlap` orders registering the copies. The same tokens |
+| `SAGUARO_NO_LARGEPAGES` | unset (2 MB pages when the OS gives them) | skip the large-page attempt for the resident pool (Windows `MEM_LARGE_PAGES`, Linux `MAP_HUGE_2MB`) and take 4 KB pages instead - the same-run A/B, different speed. The same tokens |
+| `SAGUARO_SHORT_READS` | off | a layer split's stages take the idle CPU pool too, for staged chunks of at most 3072 tokens, while no slot decodes. The same tokens |
+| `SAGUARO_STAGE_SERVE` | off | each stage of a layer split gets its own CPU expert pool on its GPU's NUMA node and its own Drive; with pipelined groups one pinned thread per stage serves its doorbells. `split`: always the stage's own pool (the earlier form, an A/B). The same tokens |
+| `SAGUARO_P2P_HANDOFF` | off | `1`: a stage boundary whose writer can reach the reader's VRAM hands off peer to peer instead of through host memory; `2`: the prompt path's chunks too (2 buffers of a chunk per boundary). The same bytes |
+| `SAGUARO_SLOT_COPY_DIRECT` | off | an admission copies the session's state GPU-to-GPU across the split's stages instead of the checkpoint image's round trip through host memory (~40-90 ms per admission on a 4-card split). The same bytes |
+| `SAGUARO_SLOT_GRID` | off | a batch slot saves its turn checkpoints in N distance buckets, so a conversation that returns resumes from the nearest one instead of re-reading; needs `--prompt-cache`. The same tokens |
+| `SAGUARO_CACHE_MESSAGE_BOUNDARY` | off | the turn checkpoint an admitted read takes also lands on a message boundary inside the turn, so a resumed conversation picks up at a message edge. The same tokens |
+| `SAGUARO_BATCH_MTP` | off | the same as `--batch-mtp`: every batch slot also verifies one MTP proposal per window (opt-in through the config's `"args"`/`"env"` - the server never adds it itself, it only prints the 8-row note when `"parallel"` exceeds 8) |
+| `SAGUARO_TURN_SAVE` | on | with a `--session-dir`: a conversation's finished turn is appended to its session file in the background without parking it; `0`: only parked conversations are written |
+| `SAGUARO_PARK_FAST` | on | parking a conversation: the K/V buffer grows without the zero fill (the copy is the pages' first touch), the threaded host copies start at 4 MiB instead of 64 and wake on completion, and the prompt checkpoints copy on several threads; `0`: the pre-2026-11-19 path. The same bytes |
+| `SAGUARO_YARN_ELASTIC` | off | with `--rope-scaling yarn`, the native rope and indexer kernels and INT8/K8V4/FP16 K without a rotation: a conversation runs plain RoPE until a request of it passes `--yarn-orig-ctx` tokens (`SAGUARO_YARN_ELASTIC_THR` overrides), then reads the YaRN table - short chats never feel the extension, so their tokens differ from the always-YaRN run's by design |
+| `SAGUARO_API_KEY` | unset (no key; a warning on a network-reachable server) | the keys the server accepts, several comma-separated; the config's `"api_key"` is the same |
+| `SAGUARO_ALLOWED_HOSTS` | unset | extra `Host` names this server answers (the DNS-rebinding check); `"*"` answers any; the config's `"allowed_hosts"` is the same |
+| `SAGUARO_ENGINE_READY_S` | 900 | how long an engine start may take before the server ends it (the next request tries again); 0 waits for ever, as before. The config's `"engine_ready_s"` sets the same |
+| `SAGUARO_VISION_READY_S` / `SAGUARO_VISION_ENCODE_S` | 300 | the picture encoder's start wait and its wait for one picture, same rule |
+| `SAGUARO_ENGINE_STALL_S` | 90 | an engine that prints nothing and moves no bytes of I/O for this long is not slow but frozen: it is ended and the next request starts it again; 0: off; needs psutil |
+| `SAGUARO_START_RETRIES` | 3 | a start that dies at once inside the GPU runtime with none of the engine's lines (ROCm's `hsa_exception` class) is tried again after a short wait; 0: never |
+| `SAGUARO_ADMIT_SHORT_FIRST` | unset (off) | with batch slots, new requests take the control lines (one prompt read at a time) short first: at most N tokens goes before longer ones, and a longer one counts as short once it waited `SAGUARO_ADMIT_MAX_WAIT_S` (30) |
+| `SAGUARO_KEEP_LEFTOVERS` | off | before a start the server ends engines a lost earlier server left holding the GPU and the memory (checked by PID, start time and command line); `1` leaves them alone |
+| `SAGUARO_REQUEST_LINES` | off | `1`: one stdout line per finished request, from the engine's own summary line in its log |
+| `SAGUARO_BATCH_TRACE` | off | the server's own trace: one more line per batch slot step, for reading a stall's queue |
+| `SAGUARO_BATCH_TELEMETRY` | off | the engine prints its per-window batch telemetry; the config's `"batch_telemetry"` is what normally sets this |
+| `SAGUARO_SLOT_KEEP` | on | a conversation with a batch slot keeps it when it goes solo - its next request is routed back to that slot instead of paying a re-read into the main context (the read-stall fix); `0`: solo means the main context again |
+| `SAGUARO_SLOT_SOLO` | on (with `SLOT_KEEP` and slot admit) | a request that is alone runs in the engine's main context and lets the free slot keep its conversation, so the other conversation's one stays put; `0`: off |
+| `SAGUARO_PARALLEL_SOLO` | on | a slot that finds itself alone goes back to the solo path with its MTP drafts (the engine continues it from the slot's cache); `0`: it finishes in the slot |
+| `SAGUARO_REPLY_REUSE` | off | the next turn's prompt keeps the reply's own token ids up to where its text differs, and a thinking budget's stop keeps the tokens generated past it, so neither re-reads the reply |
+| `SAGUARO_BATCH_WRAP_SPILL` | off | the tokens the engine ran past a thinking budget's stop join the wrap-up under `--batch` too, so the continuation extends what the slot holds instead of reading it again; read from the server's environment and from the config's `"env"` alike |
+| `SAGUARO_KEEP_EMPTY_TURNS` | off | a completed assistant turn that is empty goes back into the next prompt as before (by default it is dropped, so the model never sees one as an example) |
+| `SAGUARO_MAX_BODY_MIB` | 256 | the most a request body may hold: larger ones are answered 413 before they are read; 0 or an unreadable value: the default |
+| `SAGUARO_HTTP_BACKLOG` | 256 | the listen backlog (socketserver's own 5 reset early clients in a 30-40 client burst; the requests wait in the server, not the kernel) |
+| `SAGUARO_ENGINE_NICE` | +5 on Linux where the desktop is drawn by a built-in Radeon APU, 0 elsewhere | the nice value the engine starts with, so the compositor competes with its spinning CPU pool; `0`: off (also on any PC without such a chip) |
+| `SAGUARO_LOG_TIME` | on | every line the server and the engine print starts with the date and time, and a request line names its request, conversation and slot; `0`: off; the config's `"log_time"` is the same |
+| `SAGUARO_DEBUG` | off | echo the MCP servers' stderr to the console, and keep every generated id of a request (the raw model text a parse problem ate) |
+| `SAGUARO_DROP_CACHE_ON_EXIT` | off | when the server stops (anywhere but Windows), give the model files' page cache back |
+| `SAGUARO_REPLICA_START` | unset (together) | `"serial"`: start the engines of the config's `"replicas"` one card group at a time, for cards that fail a simultaneous start |
+| `SAGUARO_NO_PRESET` | unset | the start skips applying the active saved tuning - the tuning worker sets it so it measures the configuration it was given; nothing to set by hand |
+| `SAGUARO_OFFLINE` | unset | `1`: no downloads and no proxies, for this process and the children it starts (what `--offline` enforces) |
+| `SAGUARO_TELEMETRY_KEY` | unset | the key that may read `/metrics`; the config's `"telemetry_read_key"` is the same |
+| `SAGUARO_OWNER_ATTEST_KEY` | unset | a one-run key for the launch attestation, consumed (removed from the environment) at start |
+| `SAGUARO_HOME`, `SAGUARO_PROFILE_DIR`, `SAGUARO_INSTALL_DIR`, `SAGUARO_RUNTIME_DIR`, `SAGUARO_STATE_DIR` | the install's own folders | move one of Strata's per-user folders; the file-repair checks treat everything inside one as the user's own |
+| `SAGUARO_COMPONENTS_DIR` / `SAGUARO_ENGINE_BACKEND` | the install's components / the detected GPU's | the folder of engine-component packages; name the backend (cuda, hip, ...) instead of the one the GPU detection picks |
+| `SAGUARO_REQUIRE_SIGNED_COMPONENTS` | off | refuse an unsigned or unverifiable engine package instead of taking it; `SAGUARO_UPDATE_TRUSTED_KEYS` names a file of extra feed public keys (the owner's documented override, said when in effect) |
+| `SAGUARO_NO_ACQUIRE` | off | forbid the auto-acquisition of components and models for the whole process: the missing thing raises with the explicit command that gets it |
+| `SAGUARO_HIPBLASLT_TABLE` | auto | AMD: use the engine package's measured hipBLASLt kernel tables - `off`, `on`, `auto`; the config's `"hipblaslt_table"` is the same; the server resolves the choice and passes the table's path to the engine as `SAGUARO_HIPBLASLT_TUNING` (nobody sets that one by hand) |
+| `SAGUARO_SYCL_BIN` | the launcher's own `build-sycl-aot/strata` | the Intel launcher script is not the engine: the server's feature check reads the real binary this names |
+| `SAGUARO_LIFELINE` / `SAGUARO_RUNTIME_PROFILE` | unset | `watcher`: force the portable lifeline path (tests); the profile name goes into the process record of every child |
+
+**Turing (Tesla T4 / RTX 20, compute capability 7.5) tuning switches.** The Turing kernels of PRs #2069-#2223 were
+measured on an RTX 2080 Ti and a CMP 50HX; with no sm_75 card at the factory none of them turns itself on - a 4x-Turing
+setup switches them on through the config's `"env"`, and they change nothing on any other card. Each keeps its own
+switch even where another one covers it, and the own switch wins over the series in both directions. A row whose sums
+change says so; the others give bitwise the same tokens.
+
+| Variable | Default | What it does |
+|---|---|---|
+| `SAGUARO_SM75_PERF` | off (the series waits to be asked for) | `1`: turn on the bitwise Turing kernel series on a compute-7.5 card (`SAGUARO_EMULATE_CC=75` lets a 75-virtual build on a newer card run it for tests). The same tokens |
+| `SAGUARO_SM75_STACK` | off | opt-in speed stack for sm_75 on Flash-Next's UD-Q4_K_XL / Q8_0 packs: sets `SAGUARO_ADAPT_NOWAIT=1`, `SAGUARO_ADAPT_LAG=2`, `SAGUARO_SIDE_MIXER=2`, `SAGUARO_ATTN_DAILY=1`, `SAGUARO_QSA_ROWS=1`, `SAGUARO_KQ_SPLIT=1`, `SAGUARO_EXPERT_V2K=1` and `SAGUARO_SM75_Q8ROWS1=1` unless you set one yourself (yours wins either way); drop a member with `NAME=0`. The start-up line names what was set. Exact switches, the same tokens |
+| `SAGUARO_SM75_Q8G` | off | Q8_0 GEMVs at 2-8 columns on the Turing row kernel (a workgroup stages the activations in shared memory once, a warp per R rows; lane l's chunk is pass m/4 of the exact kernel): bitwise, on a 7.5 card only. `SAGUARO_SM75_Q8G_ROWS` (2) and `SAGUARO_SM75_Q8G_MIN_OUT` (2048) are its rules |
+| `SAGUARO_KQL` | 0 | the K-quant and Q8_0 experts' rows staged into shared memory before the dots (a warp copies P consecutive rows with 16-byte loads, then runs the per-lane dots and the same butterfly sum): `1` gate/up, `2` down, `3` both; `SAGUARO_KQL_GU_P` / `SAGUARO_KQL_D_P` pick the rows a warp, `SAGUARO_KQL_WARPS` 4 or 8 warps a block. Bitwise the same outputs |
+| `SAGUARO_GDN_KEYHEAD` | off on sm_75 | take the GatedDeltaNet recurrence kernel that sm_80+ use (a chunk walked by 64 blocks, the key head staged) on sm_75 as well, with plain copies instead of `cp.async`; it follows the SM count otherwise. The same bits |
+| `SAGUARO_ARGMAX_ROWS_SM70` | off | a sm_7x card takes sm_8x's one-block greedy argmax in `sample_tokens` too (opt-in, measured on sm_70); sm_90+ have the cluster kernel anyway. The token picked is the same |
+| `SAGUARO_BF16_TC` | the card's default: cuBLAS's BF16 GEMM from sm_75 on, the FP16 tensor-core path on Volta, FP32 below sm_70 | `1`: run the BF16 projections (SSM, router, indexer, HC mix, PLE) through the FP16 tensor cores on a card that would not do so by default - `2` forces the FP16 path anywhere for tests; the tensor-core sums round differently than cuBLAS's BF16 GEMM: it changes the answers |
+| `SAGUARO_BF16_TC_SKIP` | nothing skipped | under `SAGUARO_BF16_TC`, which of `indexer`, `router`, `ssm`, `hc`, `ple` (a comma list; `none`: nothing) keep cuBLAS's BF16 GEMM, so the selections they feed - which experts, which KV blocks - see the default path's sums; `SAGUARO_BF16_TC_SKIP_INDEXER=1` adds the indexer alone |
+| `SAGUARO_MMQ_KQ` | off | the K-quant experts' (Q4_K, Q5_K, Q6_K, Q5_1) prompt products through llama.cpp's MMQ int8 kernels instead of the FP16 dequant path: other rounding, it changes the answers; the kernels come from the `strata_kq` library beside the engine (without it the experts take the FP16 path and the log says so). `SAGUARO_MMQ_KQ_LAYERS=a-b,c` takes only those layers' experts |
+| `SAGUARO_MMQ_DIRECT` | off | with the MMQ K-quant path (and, for the native packs' nine quants, a pointer-table build, `STRATA_MMQ_TAB`): the prompt MMQ reads the resident experts in place in their cache slots instead of through a gathered copy, every tile summed in the same order: bitwise the same as gathering; `2`: the guard layout with today's gather (the bitwise A/B reference). Builds without the pointer-table MMQ say so and ignore it |
+| `SAGUARO_MMQ_KTAIL` | off | the pointer-table MMQ skips a row's padded K tail of zeros (the launcher logs once, on the first product that has the skipped half); the zeros add nothing, the sums are the same |
+| `SAGUARO_MMQ_SWIGLU_Q8` | off | the prompt MMQ fuses SwiGLU into the down product's q8_1 quantize - the intermediate H is rounded per 32 values on its way into the down GEMM: faster, and it changes the answers |
+| `SAGUARO_SELECT_SM75` | off | `1`: compute the sparse-attention block scores with the tiled kernel on compute capability 7.5 and newer - not the warp kernel's bits: the blocks it keeps can differ, so it changes the answers; `SAGUARO_SELECT_SM75_TPC=n` fixes the key tiles per CTA (default: enough CTAs for eight tiles an SM, kept in 1..16; an `n` set by hand runs to 2^20) |
+
+**Engine arguments.** in the config's `"args"`; the setup writes what fits this PC and a setup again keeps what the
+config already has. A flag the server sets itself (`--serve`, `--gpu`, `--batch` from `"parallel"`, `--layer-split` from
+`"layer_split"`) is named here too, since the config can carry it by hand.
+
+| Option | Default | What it does |
+|---|---|---|
+| `--serve` | the server always passes it | the engine reads commands on stdin (GENI requests) instead of generating one `--tokens` prompt |
+| `--gpu LIST` | every visible card | run on these GPUs (comma-separated nvidia-smi / PCI indices); sets `CUDA_VISIBLE_DEVICES` and `CUDA_DEVICE_ORDER` inside the engine |
+| `--pack DIR` | `pack/full` | the pack: the model's index, its small weights and the tokenizer with the chat template |
+| `--native SHARD` | unset | the model's GGUF (the metadata shard, or the shard holding `per_layer_token_embd.weight`), served through the native paths |
+| `--layer-split A,B,C` | the server adds it from `"layer_split"` (`auto`) | an explicit split: the first layer of each later GPU's share - `"24,36,42"` for four cards |
+| `--split-skip-if-fits` | off | an auto split runs on the first card alone when it holds every profiled expert and the KV |
+| `--trim-stage-weights` | off | an explicit split: each GPU loads only its own layers' dense weights |
+| `--max-context N` | 4096 (the setup writes 1048576) | the KV/state capacity, for the engine's own context and for every batch slot |
+| `--kv fp16\|int8\|q4_0\|k8v4` | `fp16` (the setup writes `int8`) | the K/V cache's format: `int8` half the VRAM (the model card's own choice), `k8v4` exact INT8 K plus rotated Q4_0 V, `q4_0` both rotated 4-bit; any of them rounds the attention differently than `fp16` |
+| `--kv-resident N` | 0: all in VRAM (the setup writes 32768) | KV streaming: keep N cells of each attention layer in VRAM (min 20480) and the whole K/V in pinned RAM; the freed VRAM goes to expert slots |
+| `--kv-grow` | off | the K/V takes VRAM only for the cells requests reach and the expert cache keeps the rest, giving slots back as the context grows (one GPU, with `--expert-profile`) |
+| `--expert-cache N\|auto` | 0 (the setup writes `auto`) | expert blobs resident in VRAM; `auto` takes the free VRAM less the reserve |
+| `--vram-reserve-mib N` | 700 | the VRAM left free beside the pool: the driver, the sampler and the allocations that come later |
+| `--vram-reserve-later-mib N` | `--vram-reserve-mib`'s | the same on a split's later GPUs - a card that drives no display needs less |
+| `--expert-profile FILE` | unset | pre-load the VRAM tier in the profile's order (tools/make_profile.py) instead of admitting experts on first use |
+| `--expert-profile-save FILE` | off | save what the adaptive tier learned at QUIT and every `--expert-profile-save-every` minutes (10; 0: QUIT only), so the next start begins from it |
+| `--rope-scaling T` | the model file's rope keys, else none | extend the context past the trained one: `none`, `linear` or `yarn`; fixed at startup (K sits post-RoPE in the cache) |
+| `--rope-scale F` | the model file's factor, else 1 | the extension factor for `linear` / `yarn` |
+| `--yarn-orig-ctx N` | the model's, else 262144 | the trained context the YaRN correction targets (`--yarn-ext-factor`, `--yarn-attn-factor`, `--yarn-beta-fast`, `--yarn-beta-slow` are its knobs) |
+| `--mtp DIR` | unset (the setup writes `<pack>/mtp`) | the MTP draft layer's folder; the server's drafting and every `parallel` setup need it |
+| `--spec N` | the setup's (3 on the T4 configs) | the tokens an MTP window proposes per check (up to 8; `--suffix-draft` lets prompt-lookup drafts grow it) |
+| `--spec-min-p P` | 0.0 (the setup writes 0.5-0.7) | how sure the draft layer must be to extend a window by another guess |
+| `--mtp-max-t M` | 0: `--spec` | cap the windows at M tokens - `1`: drafts off, prompt-lookup drafts only |
+| `--prefill CHUNK\|auto` | unset (the setup writes `auto`) | batched prompt processing in chunks; `auto`: the largest chunk up to 8192 whose buffers the expert cache can lend (`auto:16384`, `auto:32768` or `SAGUARO_PREFILL_AUTO_MAX` allow bigger ones) |
+| `--prefill-pipe R` | 0: off | a layer split: size the prompt chunks so the stages read at once - R is this PC's b/a in tokens (the setup's `--calibrate` measures it); `1` only evens out the buffers' chunk count |
+| `--pcie-frac F` | the model's (0.2 direct for a Q2_0 pack, 0.55 DMA for native packs; a lone GPU refines it in its first decode windows) | the share of the RAM-tier experts computed by the GPU over the PCIe link rather than on the CPU pool |
+| `--pool-workers N` | every physical core but the host's (hybrid CPUs with P-core affinity: P-cores less 1) | the CPU expert pool's worker count |
+| `--pool-cores LIST` | unset | pin the CPU workers to exactly these logical processors (`0,2,4,6`, `2-14:2`, or a list); the config's `"pool_cores"` writes it |
+| `--pool-affinity MODE` | `all` | worker CPU affinity on a hybrid CPU: `auto` (P-cores first, then siblings, then E-cores), `p-cores`, or `measure` (time both at start and take the faster) |
+| `--host-core WHERE` | `first` | the host thread's core: `first`, `last`, or `sibling` (the first core's other hardware thread, so Windows' GPU interrupts on the first logical processor do not hit the spinning host) |
+| `--aux-cpus SET` | `off` | where the neither-pool-nor-host threads run: `auto` (the host core's SMT siblings, then spare cores) or a CPU list |
+| `--prompt-cache N` | 6 | keep N conversation checkpoints between requests (~118 MB of RAM each; 0: read every prompt from the start); `--prompt-cache-every N` also checkpoints every N fresh prompt tokens (16384) |
+| `--conversation-cache-mib N\|auto` | sized from the free RAM, up to 8192 | the RAM budget for parked conversations; `auto`: they share the live K/V's pool of positions and leave when RAM runs short (`SAGUARO_PARK_MIB=auto` wins) |
+| `--conversation-cache-slots N` | 4 (64 with `auto`) | at most N parked conversations |
+| `--conversation-cache-min-tokens N` | 0: park any | park only conversations of at least N tokens, so short side requests do not take the slots a long one needs |
+| `--conversation-cache-min-free-mib N` | 2560 | the RAM floor kept under MemAvailable and the cgroup limit when parking, saving or restoring |
+| `--memory-limit-mib N` | 0: none | the RAM this engine's container may use when it cannot see its cgroup limit (parking keeps its floor under it) |
+| `--session-dir DIR` | unset | keep the parked conversations on disk too, one file each, written in the background 2 s after parking and appended to as the conversation grows; read back when a request continues one |
+| `--batch N` / `--slots N` | 0: off (the server writes `"parallel"` as `--batch`) | up to N requests decode together in batch slots, each slot a full session on its own; `--batch-mtp`: each slot also verifies one MTP proposal per window; `--batch-groups G`: the slots in G groups pipelined through the split's GPUs |
+| `--vram-elastic` | off (the server writes `"vram_elastic"`) | the expert cache in segments (`--vram-segment-mib`, 512), so `POST /v1/vram` can give VRAM to other programs between requests and take it back |
+| `--peer-device N` | unset | a second GPU as an adaptive expert-cache tier over P2P (it also computes its experts' prompt rows); not with `--layer-split` |
+| `--vision` | the server writes it when `"vision"` names an encoder | take images: the engine answers GENI requests whose embeddings come from the picture encoder |
+
+**Config keys.** what the server reads of `config.json` besides `"args"`, `"env"` and `"exe"`.
+
+| Key | Default | What it does |
+|---|---|---|
+| `"exe"` | - | the engine binary; its option strings are read for the feature checks (behind an Intel launcher script, the binary `SAGUARO_SYCL_BIN` names) |
+| `"args"` | - | the engine's command line; the server adds `--serve`, the GPUs, and the flags its own keys below stand for |
+| `"user_args"` | unset | options set by hand that win over the generated ones at every start, so a setup run or the app rewriting `"args"` cannot undo them |
+| `"cwd"` | unset | the engine's working directory; the config's relative paths (profiles, sessions) are read from it |
+| `"env"` | unset | environment variables added to the engine's environment - the engine's `SAGUARO_*` settings go here (the server's own go in the server's environment) |
+| `"log"` | unset | where the engine's output is written; the picture-elastic folder and `ds4-slots` sit beside it |
+| `"gpu"` | every visible card | the GPU indices to run on (nvidia-smi's numbering; HIP's on AMD); two or more is a layer split unless the args use `--peer-device` |
+| `"hip_ordinal"` | unset | AMD: the ordinal setup recorded for the card (`strata-device --list-devices`); on Windows an integrated Radeon can take ordinal 0 and push the real card to 1, and this wins over `"gpu"` for a one-card config |
+| `"gpu_order"` | unset | `"as_given"`: an auto layer split keeps the config's GPU order instead of putting the faster card last |
+| `"backend"` | detected | which engine package to run: `cuda`, `hip`, `cpu` or `metal` |
+| `"arch"` | `qwen4exp` | the model family: the prompt path, the tool-call forms and the default name (`qwen35moe` is the earlier Qwen3.5 pack) |
+| `"lib_dirs"` | unset | extra folders searched for the engine's shared libraries |
+| `"model_name"` | the family's name (`qwen3.8-flash-next` here) | the name the API reports |
+| `"aliases"` | unset | other names this model answers to |
+| `"tokenizer"` | the pack's tokenizer | the folder with the `tokenizer.json` the server encodes prompts with |
+| `"host"` | 127.0.0.1 | the address to listen on (the port comes only from `--port`) |
+| `"api_key"` | unset: no key | the keys the server accepts (comma-separated or a list); empty but present warns |
+| `"allowed_hosts"` | unset | extra `Host` names answered beside the listening address; `"*"`: any (the Host check off) |
+| `"trusted_proxies"` | unset | the proxy networks whose `X-Forwarded-For` may name the client in the logs |
+| `"cors_origins"` | unset | origins allowed CORS on `/v1/*` (a wildcard is said as a warning without an API key) |
+| `"trusted_origins"` | unset | origins counted as Strata's own page for `/settings` and the MCP tools (never a wildcard) |
+| `"max_queue"` | unset: no cap | requests waiting before new ones are refused (0..4096) |
+| `"queue_timeout"` | unset | the seconds a request may wait its turn before it is answered with a timeout |
+| `"idle_unload_s"` | 0: never | unload the model after this many idle seconds; the next request starts the engine again |
+| `"min_free_vram_mib"` | 0: off | the free VRAM that must exist before loading: a full card is waited on a moment, then requests get 503 until it frees |
+| `"parallel"` | 1: one at a time | up to N requests decode together (`--batch N`), more wait their turn; above 8 the server says the batch window's limit and the engine adjusts (with `--batch-mtp` more ride through the eight-row windows) |
+| `"drafting"` | `auto` | which drafter guesses ahead: `auto`, `mtp`, `dflash2` or `off`; a choice that cannot be applied starts the MTP and leaves the reason in `/metrics` (`drafting_note`) |
+| `"layer_split"` | `auto` | `auto`, or the first layer of each later GPU's share - `"24,36,42"` or `[24, 36, 42]` - handed to `--layer-split` |
+| `"split_skip_if_fits"` | false | an auto split runs on the first card alone when it holds every profiled expert and the KV |
+| `"vram_elastic"` | false | the expert cache in segments so `POST /v1/vram` can hand VRAM to other programs and take it back; `"vram_segment_mib"` sizes the segments (512); the vision section's `"elastic"` needs this |
+| `"pool_cores"` | unset | pin the CPU expert workers to these logical processors (`--pool-cores`) |
+| `"reasoning_effort"` | unset (the model decides) | the thinking level a request gets when it names none (the dashboard's Chat defaults write it) |
+| `"reasoning_budget_tokens"` | unset | the thinking budget for every request that names none: reasoning stops there and the answer follows; a request can set its own |
+| `"sampling"` | the model card's defaults | server-level sampling defaults - `temperature`, `top_p`, `top_k`, `min_p`, `seed`, the repeat and presence penalties and their windows (llama.cpp's names for the same fields accepted), plus `"strata_tune"`: per-request engine settings. A request's own fields always win; a bad value refuses to start the server, an unknown key is named at startup and ignored |
+| `"repeat_stop_tokens"` | 256 | a token repeated this many times in a row ends the answer (the broken one-token-forever state); `0`: off |
+| `"reasoning_loop_recovery"` | false | when reasoning repeats whole passages: `true`/`"recover"` keeps every token generated so far and goes on from the same output with the prompt's effort sentence swapped to the low one, `"stop"` ends the reply there, mid-thinking, as `length` |
+| `"reasoning_close_retry"` | false | one retry when the model leaves the think block open (opt-in) |
+| `"answer_room"` | true | when a thinking budget would leave no room to answer, shrink the request's `max_tokens` so an answer fits after the thinking |
+| `"fit_max_tokens"` | true | fit a request's `max_tokens` to the context that remains instead of running into the wall mid-answer |
+| `"tool_call_recovery"` | false | repair common tool-call malformations instead of answering them as text (opt-in) |
+| `"anthropic_thinking"` | `"model"` | the Anthropic endpoint's thinking: `model` lets the model decide as its template does, `on_request` thinks only when the request asks |
+| `"codex_thread_titles"` / `"codex_compaction_cache"` | false | Codex helpers: model-made thread titles / reused compaction summaries (both opt-in) |
+| `"env_to_user"` | false | move the client's `<env>` block from the system message to the front of the first user message, so every session shares one prompt start the disk prefix cache restores (the model still sees the same lines, one turn later) |
+| `"effort_position"` | `"start"` | where the thinking-effort note goes: `"end"` puts it in a trailing system turn the engine checkpoints in front of (needs an engine with `--tail-role-token`) |
+| `"images"` | unset | the image-generation block (set up by `setup --images`): serves `POST /v1/images/generations` beside the model |
+| `"prevent_sleep"` | false | Windows: keep the PC awake while a request runs or waits (refused as a non-bool; ignored elsewhere) |
+| `"lazy_load"` | false | the engine starts, the model loads on the first request |
+| `"engine_ready_s"` | 900 | how long a start may take before READY; big models on slow disks need more (`SAGUARO_ENGINE_READY_S` is the same) |
+| `"engine_silence_s"` | 300 | how long an engine may print nothing inside a request before the server ends it; 0: wait for ever |
+| `"batch_telemetry"` | false | have the engine print its per-window batch telemetry (`SAGUARO_BATCH_TELEMETRY=1` in its environment) |
+| `"event_log"` | unset | a folder of one JSON line per request and conversation event, a file a day; `"event_log_days"` is the retention (30) |
+| `"log_time"` | true | timestamps and the request/conversation tags on every printed line (`SAGUARO_LOG_TIME=0` is the same) |
+| `"api_monitor"` | false | the `/api-monitor` page and `/api/requests`: this server's live requests |
+| `"telemetry_read_key"` | unset | the key allowed to read `/metrics` (`SAGUARO_TELEMETRY_KEY` is the same) |
+| `"open_browser"` | true | `false`: never open a browser, even when the run script passes `--open` |
+| `"replicas"` | unset | N data-parallel replicas: one engine per card group, each with its own log and CPU cores (`"replica_cpus": false` drops the per-replica pinning; `"replica_load_tokens"` is the load the balancer weighs, its own default otherwise) |
+| `"expert_profile_save"` | unset | the path where the engine saves its learned expert profile at QUIT and every `"expert_profile_save_every"` minutes (10; 0: QUIT only); the next start begins from it when it is a profile of this model |
+| `"slot_save_path"` | unset | the engine's slot save/restore folder: conversations can be written to disk and taken back (about 1.2 GB per 63K-token conversation; restore only files this server wrote) |
+| `"before_load"` | unset | a command run before the model first loads (free the GPU, mount the files); `"before_load_timeout_s"` (120), `"before_load_ignore_failure"` (load anyway), `"before_load_strict"` (503 when it fails) |
+| `"vision"` | unset | the picture encoder: `"exe"`, `"mmproj"`, `"model"` (the files it reads), `"gpu"` (true: on its card, with ~700 MiB of the engine's VRAM kept free for it unless the args set `--vram-reserve-mib` themselves; false: on the CPU), `"threads"` (CPU encode), `"max_tokens"` / `"min_tokens"` per picture (the defaults: 1024 on GPU, 300 on CPU; min is mtmd's floor) and `"elastic"` - start with the first picture and stop `elastic_idle_s` (30) without one, `"elastic_mib"` (2048) lent by the engine's expert cache, the weights kept file-cache hot for `"elastic_keep_s"` (600); elastic needs the config's `"vram_elastic"` |
+
+Two switches the running configs still carry are not settings any more and do nothing:
+`SAGUARO_BATCH_READS_OVERTAKE` and `SAGUARO_PARK_STAGING_MIB` are set in some configs' `"env"` but read nowhere in the
+engine or the server - they can be dropped at the next edit.
