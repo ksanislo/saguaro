@@ -1,5 +1,6 @@
 """tools/test_setup_qfn.py - Qwen3.8-Flash-Next on its own engine (saguaro-qfn) in the setup: its names and setup ids
-(told from CYBER-FROST's), the pinned manifest (the model files, the draft layer, the picture tower), the model
+(the old CYBER-FROST ids among them, resolving to its quant), the pinned manifest (the model files, the draft layer,
+the picture tower), the model
 question (offered on AMD and on NVIDIA, refused on Windows and on Mac), the memory it was measured with (refused below
 it), the RAM tier it gets, the config it writes - AMD's as measured, NVIDIA's mirroring the live 4x Tesla T4 configs,
 the vision entry, the drafting choice and the answers-at-once value - the cards it picks, the report's QFN lines, the
@@ -55,12 +56,9 @@ class Names(unittest.TestCase):
         s = Q.shown("qfn", "ud-q4_k_xl", 111.3)
         self.assertEqual(s, "Qwen3.8-Flash-Next · UD-Q4_K_XL (saguaro-qfn) (111 GB)")
         self.assertNotIn("CYBER-FROST", s)
-        self.assertEqual(Q.shown("qfn", "ud-q4_k_xl"), Q.shown("qwen", "ud-q4_k_xl"))   # (the name is unchanged)
-        self.assertIn("CYBER-FROST", Q.shown("qwen", "q5_k_m"))
         self.assertEqual(Q.shown("qfn", "cyber-frost-q5_k_m"), "Qwen3.8-Flash-Next · CYBER-FROST-3.8 Q5_K_M "
                                                                "(saguaro-qfn)")
         self.assertEqual(Q.config_stem("qfn", "ud-q4_k_xl"), "maya-qwen3.8-flash-next-ud-q4_k_xl")
-        self.assertEqual(Q.config_stem("qwen", "q5_k_m"), "maya-cyber-frost")
         self.assertEqual(Q.config_stem("qfn", "cyber-frost-q5_k_m"), "maya-cyber-frost")   # (the name it always had)
 
     def test_model_option(self):
@@ -73,7 +71,7 @@ class Names(unittest.TestCase):
         self.assertEqual((b.model, b.qfn_quant), (maya.QFN, "cyber-frost-q5_k_m"))
         self.assertEqual(maya.choose_family(b, {}), "qfn")        # (CYBER-FROST on saguaro-qfn now)
 
-    def test_a_setup_config_is_qfn_family_and_told_apart(self):
+    def test_a_setup_config_is_qfn_family(self):
         cfg = {"exe": "build-hip/qfn/saguaro-qfn", "installer": {"family": "qfn", "qwen_quant": "ud-q4_k_xl"}}
         self.assertEqual(Q.family_of(cfg), "qfn")        # (its own family since the identity split)
         self.assertEqual(maya.setup_family(cfg), "qfn")
@@ -83,9 +81,10 @@ class Names(unittest.TestCase):
         self.assertEqual(Q.family_of(old), "qfn")
         self.assertEqual(maya.setup_family(old), "qfn")
         self.assertEqual(Q.config_label(old), "Qwen3.8-Flash-Next · UD-Q4_K_XL (saguaro-qfn)")
-        self.assertEqual(maya.setup_family({"installer": {"family": "qwen", "qwen_quant": "q5_k_m"}}), "qwen")
+        # and the old engine's CYBER-FROST one (T8a: its model is this family's quant; migrate_cyber_frost rewrites it)
+        self.assertEqual(maya.setup_family({"installer": {"family": "qwen", "qwen_quant": "q5_k_m"}}), "qfn")
         self.assertEqual(Q.family_of({"exe": "/b/maya", "args": ["--pack", "/p", "--ple-gguf", "/g"],
-                                      "installer": {"family": "qwen", "qwen_quant": "q5_k_m"}}), "qwen")
+                                      "installer": {"family": "qwen", "qwen_quant": "q5_k_m"}}), "qfn")
 
     def test_the_hand_made_configs_the_exe_name_gives_away(self):
         """The live ones (./ref/Qwen3.8-Flash-Next-Q8_0.json, copied): the installer names family "qwen" and no
@@ -132,13 +131,14 @@ class Manifest(unittest.TestCase):
         self.assertTrue(url.endswith("/mmproj-BF16.gguf"), url)
 
     def test_the_cyber_frost_quant(self):
-        """CYBER-FROST as a quant of QFN: the one file, pinned revision, size and sha256 tools/qwen/download.json
-        has - copied exactly - from its own repo."""
-        old = json.loads((ROOT / "tools" / "qwen" / "download.json").read_text())
+        """CYBER-FROST as a quant of QFN: the one file, at the repo, revision, size and sha256 the old
+        tools/qwen/download.json pinned (T8a: that manifest is gone, these values are its copy)."""
         m = maya.qfn_entry(Q.CYBER_FROST_QUANT)
-        self.assertEqual((m["repo"], m["revision"]), (old["repo"], old["revision"]))
-        self.assertEqual(m["files"], {k: v[0] for k, v in old["files"].items()})
-        self.assertEqual(m["sha256"], {k: v[1] for k, v in old["files"].items()})
+        self.assertEqual(m["repo"], "peasantsmith/CYBER-FROST-3.8-PS-GUFF")
+        self.assertEqual(m["revision"], "32867bb9e228afac427c136dd657b34b7c3f0e86")
+        self.assertEqual(m["files"], {"CYBER-FROST-3.8-PS-GUFF-Q5_K_M.gguf": 112534603328})
+        self.assertEqual(m["sha256"], {"CYBER-FROST-3.8-PS-GUFF-Q5_K_M.gguf":
+                                       "1c03787fc8f5b53481213f92689e33f8ad124151e834362295458d6a89dca9c5"})
         self.assertEqual(m["name"], "CYBER-FROST-3.8-PS")
         self.assertEqual(maya.file_url(m, "CYBER-FROST-3.8-PS-GUFF-Q5_K_M.gguf"),
                          "https://huggingface.co/peasantsmith/CYBER-FROST-3.8-PS-GUFF/resolve/"
@@ -151,9 +151,8 @@ class Offered(unittest.TestCase):
         self.assertIsNone(maya.family_unavailable("qfn", "cuda"))    # (NVIDIA too since T2: qfn_fit lays the cards out)
         self.assertIsNone(maya.family_unavailable("qfn", None))      # (no backend: the CUDA default, offered too)
         self.assertIn("Metal", maya.family_unavailable("qfn", "metal"))
-        self.assertIsNone(maya.family_unavailable("qwen", "cuda"))   # (CYBER-FROST still everywhere it was)
 
-    def test_the_model_question_has_both_qwen_rows(self):
+    def test_the_model_question_has_one_qwen_row(self):
         got = {}
 
         def choose(q, intro, rows, default, yes, outro=()):
@@ -162,11 +161,12 @@ class Offered(unittest.TestCase):
         with patch.object(maya, "choose", side_effect=choose), patch.object(maya, "setup_cards", return_value=[]):
             self.assertEqual(maya.choose_family(args(model=None), {}), "qfn")
         labels = [r[0] for r in got["rows"]]
+        self.assertEqual(len(got["rows"]), len(maya.FAMILIES))   # (the old CYBER-FROST row is gone: one Qwen row)
         self.assertIn(maya.QFN_SHOWN, labels)
-        self.assertTrue(any("CYBER-FROST" in l for l in labels))
+        self.assertEqual(sum("Qwen" in l for l in labels), 1)
         about = got["rows"][maya.FAMILIES.index("qfn")][2]
         self.assertIn("saguaro-qfn", about)
-        self.assertIn("Not CYBER-FROST", about)
+        self.assertIn("Not CYBER-FROST", about)                  # (the quant list is where it is offered)
 
     def test_refused_below_the_measured_memory(self):
         self.assertIsNone(maya.qfn_quant_fit("ud-q4_k_xl", 15.9, 91.7))   # (an RX 9070 XT with 96 GB: measured)

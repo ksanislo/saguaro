@@ -2632,8 +2632,8 @@ class Detokenizer:
 
 def speculation_modes(info: dict, dspark=None, lookup=None) -> list:
     """The drafters an engine runs with, for the Monitor's Speculation: DSpark (DeepSeek's server says, MiniMax's engine
-    itself), DFlash2 or MTP (GLM's INFO dflash= / mtp=: its DFlash decode takes the request first, else MTP; CYBER-FROST's
-    mtp=) and the prompt lookup (CYBER-FROST's INFO lookup=, DeepSeek's --suffix-draft).  Empty: drafting is off."""
+    itself), DFlash2 or MTP (GLM's INFO dflash= / mtp=: its DFlash decode takes the request first, else MTP; QFN's
+    mtp=) and the prompt lookup (QFN's INFO lookup=, DeepSeek's --suffix-draft).  Empty: drafting is off."""
     def on(v):
         try:
             return float(v) > 0
