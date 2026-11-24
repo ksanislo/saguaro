@@ -2164,7 +2164,7 @@ config already has. A flag the server sets itself (`--serve`, `--gpu`, `--batch`
 | `"reasoning_budget_tokens"` | unset | the thinking budget for every request that names none: reasoning stops there and the answer follows; a request can set its own |
 | `"sampling"` | the model card's defaults | server-level sampling defaults - `temperature`, `top_p`, `top_k`, `min_p`, `seed`, the repeat and presence penalties and their windows (llama.cpp's names for the same fields accepted), plus `"strata_tune"`: per-request engine settings. A request's own fields always win; a bad value refuses to start the server, an unknown key is named at startup and ignored |
 | `"repeat_stop_tokens"` | 256 | a token repeated this many times in a row ends the answer (the broken one-token-forever state); `0`: off |
-| `"reasoning_loop_recovery"` | false | when reasoning repeats whole passages: `true`/`"recover"` re-runs the tail, `"stop"` closes the thinking block and answers |
+| `"reasoning_loop_recovery"` | false | when reasoning repeats whole passages: `true`/`"recover"` keeps every token generated so far and goes on from the same output with the prompt's effort sentence swapped to the low one, `"stop"` ends the reply there, mid-thinking, as `length` |
 | `"reasoning_close_retry"` | false | one retry when the model leaves the think block open (opt-in) |
 | `"answer_room"` | true | when a thinking budget would leave no room to answer, shrink the request's `max_tokens` so an answer fits after the thinking |
 | `"fit_max_tokens"` | true | fit a request's `max_tokens` to the context that remains instead of running into the wall mid-answer |
