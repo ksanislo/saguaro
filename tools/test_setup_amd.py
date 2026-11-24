@@ -73,7 +73,7 @@ class Picker(unittest.TestCase):
             label, note, about = got["rows"][maya.FAMILIES.index(fam)]
             self.assertEqual(note, "not on this PC's GPU yet")
             self.assertIn("NVIDIA GPUs only", about)
-        for fam in ("glm", "qwen", "ik2"):
+        for fam in ("glm", "qfn", "ik2"):
             self.assertNotEqual(got["rows"][maya.FAMILIES.index(fam)][1], "not on this PC's GPU yet")
 
     def test_picking_one_stops_plainly(self):
@@ -374,6 +374,50 @@ class CheckFit(unittest.TestCase):
         self.assertIn("Maya-XS-IQ1_S", lines[1])
         self.assertIn("Maya-L", lines[2])
         self.assertEqual(maya.glm_fit_lines([]), [])
+
+
+class NoAvx2Message(unittest.TestCase):
+    """The setup's no-AVX2 line: an ok about the engine's AVX1 rows where its CPU expert lane
+    has them, a warn that it is slower where it does not (the EXL3 quants of deepseek / minimax).  Neither names an
+    env switch: the row width is picked when setup.py builds the engine for this CPU, and SAGUARO_GLM_CPU_LANE /
+    SAGUARO_DS4_CPU_LANE are the lane's calibrated thread share, not an instruction choice."""
+
+    AVX1 = ("glm", "qfn", "hy4", "ik2")            # (every quant those families run)
+
+    def line(self, family, gguf=False):
+        text, stopped = output(lambda: maya.note_no_avx2("Xeon E5-2695 v2", family, gguf))
+        self.assertFalse(stopped)
+        return text
+
+    def test_avx1_families_say_the_engine_has_the_rows(self):
+        for fam in self.AVX1:
+            self.assertTrue(maya.cpu_avx1_rows(fam), fam)
+            text = self.line(fam)
+            self.assertIn("[ok]", text)
+            self.assertIn("no AVX2: the engine's AVX1 rows", text)
+            self.assertIn("threads", text)
+
+    def test_ds4_and_mm3_gguf_quants_have_the_rows(self):
+        for fam in ("deepseek", "minimax"):
+            self.assertTrue(maya.cpu_avx1_rows(fam, gguf=True), fam)
+            self.assertIn("AVX1 rows", self.line(fam, gguf=True))
+
+    def test_exl3_quants_warn_slower(self):
+        for fam in ("deepseek", "minimax"):
+            self.assertFalse(maya.cpu_avx1_rows(fam), fam)
+            text = self.line(fam)
+            self.assertIn("[!]", text)                 # (a warn, not an ok)
+            self.assertIn("no AVX1 rows", text)
+            self.assertIn("slower", text)
+            self.assertNotIn("AVX1 rows, ", text)       # (the ok line's phrasing is not used)
+
+    def test_no_env_switch_is_named_in_any_line(self):
+        for fam, gguf in [(f, False) for f in self.AVX1] + [("deepseek", False), ("deepseek", True),
+                                                             ("minimax", False), ("minimax", True)]:
+            text = self.line(fam, gguf)
+            for name in ("SAGUARO_GLM_CPU_LANE", "SAGUARO_DS4_CPU_LANE"):
+                self.assertNotIn(name, text)
+            self.assertNotIn("turns it off", text)
 
 
 if __name__ == "__main__":

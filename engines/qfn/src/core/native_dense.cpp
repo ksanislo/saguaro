@@ -155,6 +155,8 @@ std::vector<uint8_t> q8_0_of_bf16(const uint16_t* x, uint64_t n) {
 bool eligible(const strata::TensorInfo& tensor, bool include_ple_key) {
     const auto& name = tensor.name;
     if (name.rfind("blk.", 0) != 0) return false;
+    // an in-file NextN block past the trunk (CYBER-FROST: blk.48) is not run: its projections stay in the file
+    if (std::strtol(name.c_str() + 4, nullptr, 10) >= strata::core::kCompiledGeometry.n_layers) return false;
     // Match the native PLE kernel: Q2_0, IQ3_XXS, IQ4_XS and Q8_0 (UD-Q4_K_XL). Other keys retain the packed BF16
     // fallback.
     if (name == "blk.1.ple_key.weight")

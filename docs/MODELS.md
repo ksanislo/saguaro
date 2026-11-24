@@ -1,10 +1,11 @@
 # The models
 
-Saguaro runs three quant families, each on an engine built for it; its fourth model family is Qwen-3.8-Flash-Next
-(CYBER-FROST) on the GLM engine's own Qwen path (`saguaro-glm`) - [its settings](SETTINGS.md#qwen-38-flash-next-cyber-frost).
-Qwen3.8-Flash-Next itself (unsloth's UD-Q4_K_XL, Q8_0) runs on its own engine, `saguaro-qfn` (`engines/qfn`, from
-Strata): the setup offers it on one AMD GPU (`--model qwen3.8-flash-next`, measured on an RX 9070 XT with 96 GB of RAM -
-[AMD_SAGUARO.md](AMD_SAGUARO.md#qwen38-flash-next-on-the-saguaro-qfn-engine)); on NVIDIA it is set up by hand for now.
+Saguaro runs four quant families, each on an engine built for it. Qwen3.8-Flash-Next (unsloth's UD-Q4_K_XL, Q8_0, and
+Blackfrost-AI's CYBER-FROST fine-tune as a quant of its own) runs on its own engine, `saguaro-qfn` (`engines/qfn`, from
+Strata): the setup offers it with `--model qwen3.8-flash-next` (`--model cyber-frost` for the fine-tune) on Linux,
+on one AMD RDNA 3 / 4 GPU of 16 GB or more
+(measured on an RX 9070 XT with 96 GB of RAM - [AMD_SAGUARO.md](AMD_SAGUARO.md#qwen38-flash-next-on-the-saguaro-qfn-engine))
+and on NVIDIA on one card of 16 GB or more, or up to four equal ones taking the layers in turn.
 Two more models have a page of their own: [Hy4-Flash](HY4-FLASH.md) (four cards) and
 [Inkling 2 Mini](INKLING2-MINI.md) (one or two 16 GB cards).
 This page has each one's files, what they need and what is special about it. Back to the [README](../README.md).
@@ -15,6 +16,7 @@ This page has each one's files, what they need and what is special about it. Bac
 - [MiniMax-M3.1-Flash](#minimax-m31-flash)
 - [Hy4-Flash](#hy4-flash)
 - [Inkling 2 Mini](#inkling-2-mini)
+- [Qwen3.8-Flash-Next (saguaro-qfn)](#qwen38-flash-next-saguaro-qfn)
 - [Community quants of GLM-5.3-Flash](#community-quants-of-glm-53-flash)
 
 ## How the quants are named
@@ -205,6 +207,44 @@ one-T4 quant and +11 % on an RX 9070 XT with it (the same answers); off on an AM
 (measured slower there) and on two cards.
 The install, the settings and the limits: **[INKLING2-MINI.md](INKLING2-MINI.md)**; the engine itself:
 [INKLING2.md](INKLING2.md).
+
+## Qwen3.8-Flash-Next (saguaro-qfn)
+
+**[Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next)** (Qwen; 125 B parameters, 10 of 512 experts a
+token; the [Qwen Community License 1.0](../LICENSE.qwen-community-1.0)) on an engine of its own (`saguaro-qfn`,
+`engines/qfn`, from Strata), from [unsloth's GGUFs](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF):
+`./setup.sh --model qwen3.8-flash-next`. This is the model as Qwen released it; Blackfrost-AI's CYBER-FROST fine-tune
+is offered as a quant of the same engine (`--model cyber-frost`, every old id still resolving to it).
+
+| Files | Size | Runs on |
+| --- | ---: | --- |
+| unsloth's [UD-Q4_K_XL](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF) (`qwen3.8-flash-next`, the default): the routed experts in Q4_K / Q5_K / Q6_K | 111 GB | Linux: NVIDIA from the V100 on, one GPU of 16 GB or more or up to four equal ones; AMD on one RDNA 3 / 4 GPU of 16 GB or more |
+| unsloth's [Q8_0](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF) (`qwen3.8-flash-next-q8_0`): every weight in 8 bits, the most accurate quant | 177 GB | the same |
+| Blackfrost-AI's CYBER-FROST-3.8 in [peasantsmith's GGUF](https://huggingface.co/peasantsmith/CYBER-FROST-3.8-PS-GUFF) (`cyber-frost`): the fine-tune's one file, its Q5_K experts; the drafter is built from the NextN block inside it | 112.5 GB | the same |
+
+- **What it needs:** about 96 GB of RAM beside the 16 GB card - the experts a card does not hold are cached in a
+  pinned RAM tier of the RAM less 20 GB (`--resident-budget-gib`) and the rest is read from the SSD as tokens route
+  them, so more VRAM and RAM is faster and the files want an NVMe. Contexts 32K-256K (65536 on one card, 262144 on a
+  split: the K/V sits in RAM and only a window of it in VRAM, so a long context costs the cards little). Windows is
+  refused: `saguaro-qfn` is not built there yet.
+- **Several cards (NVIDIA):** up to four equal cards take the 48 layers in turn, each caching its own layers' experts;
+  four "16 GB" sm_75 cards get the live 4x Tesla T4 server's own split and its prompt pipeline. `./saguaro.sh --check`
+  prints the layout it would write for your cards, or the reason it does not fit, and says when a layout is not
+  measured on these cards yet.
+- **Drafting, pictures, several answers at once:** the Lamina MTP draft layer (0.8 GB) is downloaded and drafted with
+  where it measures faster on your PC (`--calibrate`, `--speed-calibration`, `--drafting off`); the model's vision
+  tower (its mmproj, 0.9 GB) is fetched and its reader built for these cards (`--no-vision` leaves it out);
+  `--parallel 4` writes several answers at once - off by default on one 16 GB card, where it measured slower, and 2
+  across several GPUs.
+
+Measured on one RX 9070 XT (16 GB, gfx1201, ROCm 7.1) with a Ryzen 7 9800X3D and 96 GB of DDR5, the config the setup
+writes (64K context, drafting on, a 71 GB RAM tier): 256-token greedy answers at 27.5-40.9 tokens/s and 8K-16K prompts
+read at 524-1,079 tokens/s, a 45 s load. The same PC on Q8_0: answers at 14-15 tokens/s and prompts at 73-315 tokens/s
+(about 50 GB of its experts read from the SSD). The whole table, the load's numbers and the KL against the T4 build:
+[AMD_SAGUARO.md](AMD_SAGUARO.md#qwen38-flash-next-on-the-saguaro-qfn-engine).
+
+Its settings: [SETTINGS.md](SETTINGS.md#qwen38-flash-next-saguaro-qfn); the install:
+[SETUP.md](SETUP.md#what-the-first-run-does).
 
 ## Community quants of GLM-5.3-Flash
 

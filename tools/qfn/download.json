@@ -1,5 +1,5 @@
 {
- "_": "Qwen3.8-Flash-Next on its own engine (saguaro-qfn, engines/qfn): unsloth's GGUF quants of Qwen/Qwen3.8-Flash-Next read in place (engines/qfn/tools/iq_pack.py indexes them: the pack), drafted by the Lamina MTP layer (\"mtp\" below). \"revision\" is the commit the files are pinned at (unsloth re-uploaded the quants on 2026-11-04; the setup's pack, configs and measurements are this revision's) and every file has its sha256: the setup checks it. \"needs\": the memory a quant was measured to run with on one GPU - the experts the GPU does not hold in a RAM tier of the RAM's size less 20 GB, the rest read from the SSD.",
+ "_": "Qwen3.8-Flash-Next on its own engine (saguaro-qfn, engines/qfn): unsloth's GGUF quants of Qwen/Qwen3.8-Flash-Next read in place (engines/qfn/tools/iq_pack.py indexes them: the pack), drafted by the Lamina MTP layer (\"mtp\" below); and CYBER-FROST-3.8-PS (\"cyber-frost-q5_k_m\": Blackfrost-AI's fine-tune in peasantsmith's one GGUF, its repo and commit named in the quant, the drafter built from the NextN block inside the file with tools/mtp_from_gguf.py). \"revision\" is the commit the files are pinned at (unsloth re-uploaded the quants on 2026-11-04; the setup's pack, configs and measurements are this revision's) and every file has its sha256: the setup checks it. \"needs\": the memory a quant was measured to run with on one GPU - the experts the GPU does not hold in a RAM tier of the RAM's size less 20 GB, the rest read from the SSD.",
  "name": "Qwen3.8-Flash-Next",
  "repo": "unsloth/Qwen3.8-Flash-Next-GGUF",
  "revision": "efc50b7c3195a10eebd8d3e32f83b27b2aeb239d",
@@ -31,7 +31,29 @@
     "Qwen3.8-Flash-Next-Q8_0-00004-of-00006.gguf": [49446841216, "bfa634025fabbd2658bf7694bc80b90e571699c768723f844c934c7ef06c691a"],
     "Qwen3.8-Flash-Next-Q8_0-00005-of-00006.gguf": [49668930400, "232a8f14cc0fa4262e7efe8593774b136fe40909e39c7a020342ddaa27259a97"],
     "Qwen3.8-Flash-Next-Q8_0-00006-of-00006.gguf": [34015618784, "538a93bca918064983409a41187ad4c68640f9aced6f29564da8f551bf86d7a5"]
+    }
+   },
+   "cyber-frost-q5_k_m": {
+    "folder": "",
+    "name": "CYBER-FROST-3.8-PS",
+    "repo": "peasantsmith/CYBER-FROST-3.8-PS-GUFF",
+    "revision": "32867bb9e228afac427c136dd657b34b7c3f0e86",
+    "about": "Blackfrost-AI's fine-tune CYBER-FROST-3.8-PS in peasantsmith's GGUF: the routed experts in Q5_K (gate/up) / IQ4_NL (down), the n-gram table IQ4_NL, its MTP (NextN) block inside (blk.48 of a block_count 49, left out of the pack: the drafter is built from it), one file, 180B parameters, 10 of 512 experts a token",
+    "needs": {"vram_gb": 15, "ram_gb": 88},
+    "files": {
+     "CYBER-FROST-3.8-PS-GUFF-Q5_K_M.gguf": [112534603328, "1c03787fc8f5b53481213f92689e33f8ad124151e834362295458d6a89dca9c5"]
+    }
    }
+ },
+ "vision": {
+  "_": "Pictures: the model's vision tower as llama.cpp's mmproj, from unsloth's GGUF repo of Qwen/Qwen3.8-Flash-Next - its mmproj-BF16.gguf, the tower in its own BF16 (the same file the hand-made configs keep as mmproj-Qwen3.8-Flash-Next-BF16.gguf; the setup downloads it under that name). vision-qfn reads it with the model's GGUF opened for its vocabulary only; the encoder stays on the SSD and gets VRAM only while a picture is encoded (the config's elastic vision entry).",
+  "repo": "unsloth/Qwen3.8-Flash-Next-GGUF",
+  "revision": "efc50b7c3195a10eebd8d3e32f83b27b2aeb239d",
+  "files": {
+   "mmproj-Qwen3.8-Flash-Next-BF16.gguf": [907542944, "2e788f8c511d8093c7b43cb87b2fd7e14228340318057f8fb20c86df2efe2355"]
+  },
+  "hub_names": {
+   "mmproj-Qwen3.8-Flash-Next-BF16.gguf": "mmproj-BF16.gguf"
   }
  },
  "mtp": {

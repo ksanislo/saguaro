@@ -146,14 +146,15 @@ export const DEFAULTS = {thinking: "high", temperature: 0.6, top_p: 0.95, top_k:
                          mcp: true, system: "", sys_default: false, thinking_v: 2,
                          repetition_penalty: "", frequency_penalty: "", presence_penalty: ""};
 export const PENALTIES = ["repetition_penalty", "frequency_penalty", "presence_penalty"];
-// CYBER-FROST-3.8-PS (Qwen3.8's template, thinking always on): its three reasoning efforts, low / medium / xhigh
+// Qwen3.8-Flash-Next (Qwen3.8's template, thinking always on - the CYBER-FROST quant too): its three
+// reasoning efforts, low / medium / xhigh
 // Hy4-Flash (Tencent's template): High, or Off (its no_think) - the only two it is made for
 // Inkling 2 (an effort level 0 .. 0.99 by name): Off (effort 0, the server opens the answer's text at once), Low 0.2,
 // Medium 0.7, High 0.9 (its template's default) and Max 0.99
 const THINK_LEVELS = {glm: ["none", "low", "high", "max"], deepseek: ["none", "low", "high", "max"],
-                      minimax: ["none", "auto", "low", "medium", "high", "xhigh", "max"], qwen: ["low", "medium", "xhigh"],
+                      minimax: ["none", "auto", "low", "medium", "high", "xhigh", "max"], qfn: ["low", "medium", "xhigh"],
                       hy4: ["none", "high"], ik2: ["none", "low", "medium", "high", "max"]};
-const THINK_DEFAULT = {glm: "max", deepseek: "high", minimax: "auto", qwen: "xhigh", hy4: "high", ik2: "high"};   // (the run config's level wins: loadHealth)
+const THINK_DEFAULT = {glm: "max", deepseek: "high", minimax: "auto", qfn: "xhigh", hy4: "high", ik2: "high"};   // (the run config's level wins: loadHealth)
 const LEVEL = {none: ["Off", "Answers right away"], auto: ["Auto", "It decides whether to think"], low: ["Low", "A short think"],
                medium: ["Medium", "A moderate think"], high: ["High", "Thinks it through"], xhigh: ["XHigh", "Thinks hard"],
                max: ["Max", "The most thorough, and the longest"]};
@@ -173,14 +174,14 @@ export const THINK_TITLES = {
   ik2: {none: "No thinking: it answers right away (effort 0)", low: "Effort 0.2: a short think",
         medium: "Effort 0.7: a moderate think", high: "Effort 0.9 (its default): thinks it through",
         max: "Effort 0.99: the most thorough, and the longest"},
-  qwen: {low: "Reasoning effort low: a short think", medium: "Reasoning effort medium: thinks it through",
+  qfn: {low: "Reasoning effort low: a short think", medium: "Reasoning effort medium: thinks it through",
          xhigh: "Reasoning effort xhigh (its default): checks its assumptions and alternatives - the most thorough"},
 };
 // the running model's family, its thinking levels (THINKING, LEVELS: live bindings) and their titles
 export const familyOf = (model = S.health.model) =>
   (/deepseek/i.test(model || "") ? "deepseek" : /minimax/i.test(model || "") ? "minimax"
-    : /cyber-frost|qwen/i.test(model || "") ? "qwen" : /hy4/i.test(model || "") ? "hy4"
-    : /inkling/i.test(model || "") ? "ik2" : "glm");
+    : /cyber-frost|qwen|qfn/i.test(model || "") ? "qfn" : /hy4/i.test(model || "") ? "hy4"
+    : /inkling/i.test(model || "") ? "ik2" : "glm");   // (every Qwen3.8 model id, CYBER-FROST's included: the same three efforts)
 export let THINKING = THINK_LEVELS.glm;
 export let LEVELS = [];
 export function setFamily(model) {
@@ -219,7 +220,7 @@ export function levelFor(level) {
   return (NEAREST[level] || []).find((l) => THINKING.includes(l)) || null;
 }
 
-export const prefsKey = () => ({deepseek: "sampling_deepseek", minimax: "sampling_minimax", qwen: "sampling_qwen",
+export const prefsKey = () => ({deepseek: "sampling_deepseek", minimax: "sampling_minimax", qfn: "sampling_qfn",
                                 hy4: "sampling_hy4", ik2: "sampling_ik2"}[familyOf()] || "sampling");
 export let P = null;                     // the running model's chat settings: its defaults, then its user's own choices
 // stored: only what the user chose (a preset, a slider, a level) - the model's own defaults fill the rest, so they apply

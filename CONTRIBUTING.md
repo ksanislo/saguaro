@@ -24,6 +24,14 @@ Name your Saguaro version (`VERSION`, or the commit). Say what you measured and 
 Run `./saguaro.sh --report` right after the failure and attach `saguaro-report.txt`. If the engine stopped, add the end
 of its log (the `.log` next to your `maya-*.json`).
 
+## Upstream (Project Maya) intake
+
+Upstream comes in by content, in batches, not by git merge. **The Maya engine's Qwen path is gone** (T8a/T8b): drop
+every upstream hunk that touches it - the `qwen4exp` driver in `src/program/generate.cpp`, the Qwen-only
+`src/core/{session,mtp,verify,layer,native_dense,native_head}` files, `src/prefill/prefill.cpp`, the ple / qsa / gr /
+gdn / ngram kernels with their parities, and the matching CMake targets - instead of re-adding them. Qwen3.8-Flash-Next
+and its CYBER-FROST quant run on `engines/qfn` (`saguaro-qfn`), which upstream does not have.
+
 ## A pull request
 
 - **Base it on `main`** and keep it to one topic.

@@ -69,6 +69,11 @@ inline bool geometry_from_gguf(const strata::GgufFile& meta, ModelGeometry& g, i
         num("hyper_connection.low_rank", g.hc_lr);
         num("attention.indexer.head_count", g.idx_q_heads);
         num("attention.indexer.key_length", g.idx_key_dim);
+        // an in-file NextN block (CYBER-FROST: blk.48, block_count 49) is not the trunk and is not run (the drafter
+        // comes from its own folder, --mtp): it leaves the layer count only
+        int64_t nextn = 0;
+        num("nextn_predict_layers", nextn);
+        if (nextn > 0 && nextn < block_count) block_count -= nextn;
     }
     g.n_layers = block_count - g.n_mtp_layers;
     g.ssm_conv_channels = 2 * g.ssm_state_size * g.ssm_k_heads + g.ssm_value_dim;

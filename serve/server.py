@@ -810,6 +810,22 @@ def model_management_setting(cfg: dict | None, env=None) -> bool:
     return bool(v) if v is not None else True
 
 
+def load_by_name_setting(cfg: dict | None, env=None) -> bool:
+    """Load by name: a chat request whose "model" names another installed config switches to it first, the way the
+    Models page's Switch and llama.cpp's /models/load do, so a client that sends a model id (opencode, Hermes) gets
+    that model, like llama-swap.  OFF unless the run config has "load_by_name": true or SAGUARO_LOAD_BY_NAME says
+    1 / on / true / yes (the environment, when set, wins over the config), and it needs model management on
+    (`model_management_setting`): the switch is model management's own."""
+    on = ("1", "on", "true", "yes")
+    env = os.environ if env is None else env
+    v = env.get("SAGUARO_LOAD_BY_NAME")
+    if v is not None and str(v).strip():
+        want = str(v).strip().lower() in on
+    else:
+        want = bool((cfg or {}).get("load_by_name"))
+    return want and model_management_setting(cfg, env)
+
+
 def loop_guard_setting(cfg: dict | None, env=None) -> bool:
     """The loop guard (serve/loop_guard.py), on unless SAGUARO_LOOP_GUARD says 0 / off / false / no
     or the run config has "loop_guard": false; the environment, when set, wins over the config."""
@@ -2632,8 +2648,8 @@ class Detokenizer:
 
 def speculation_modes(info: dict, dspark=None, lookup=None) -> list:
     """The drafters an engine runs with, for the Monitor's Speculation: DSpark (DeepSeek's server says, MiniMax's engine
-    itself), DFlash2 or MTP (GLM's INFO dflash= / mtp=: its DFlash decode takes the request first, else MTP; CYBER-FROST's
-    mtp=) and the prompt lookup (CYBER-FROST's INFO lookup=, DeepSeek's --suffix-draft).  Empty: drafting is off."""
+    itself), DFlash2 or MTP (GLM's INFO dflash= / mtp=: its DFlash decode takes the request first, else MTP; QFN's
+    mtp=) and the prompt lookup (QFN's INFO lookup=, DeepSeek's --suffix-draft).  Empty: drafting is off."""
     def on(v):
         try:
             return float(v) > 0
@@ -2791,6 +2807,7 @@ class Service:
         self.shared_path = None                       # where they are kept between starts (next to the config)
         self.turbo_default = None                     # the model's live Turbo (PLAN-turbo-live): {"drop","skip"} or None
         self.turbo_path = None                        # its sidecar file (the engine config is never touched)
+        self.turbo_live_before = None                 # Turbo on an engine whose half is live (QFN): the default before
         self.fifo = FairLock()
         self.stopping = False            # the server is ending: a request still queued is refused, not started
         self.embeddings = threading.local()           # the current request's image embeddings file (GENI)
@@ -3151,6 +3168,14 @@ class Service:
                 room = f"the expert cache did not make room for it ({e}); "
             if self.vision_held:
                 time.sleep(0.2)      # the free-VRAM counter shows the cache's release a moment later
+        if not self.vision_held and hasattr(self.engine, "vision_room") and not self.engine.vision_room():
+            # neither lend path is configured on this engine (no "INFO vision_lend=1" from the give path, no
+            # --vram-elastic behind the VRAM command - its own start facts, serve/qfn_engine's vision_room): the
+            # encoder would start onto a card with nothing to give it, which is how the reader got SIGKILLed
+            # (U6's ./ref/vision-fail.log) - refuse the picture with a plain error instead
+            raise ValueError("this engine lends the picture encoder nothing: no batch slots to give room from "
+                             "and not started with --vram-elastic (its INFO says neither) - run the setup again "
+                             "or add \"vram_elastic\": true")
         v.restart()
         print(f"[saguaro] images: {room}the image encoder started in {time.time() - t0:.1f} s", flush=True)
 
@@ -3559,13 +3584,23 @@ class Service:
     def set_turbo(self, on: bool) -> dict:
         """Turbo on or off.  The engine's part (models.turbo_enable / turbo_disable: the context, the expert skipping, the
         drafting, written into the run config) starts Saguaro again as a saved engine setting does, after the request in
-        flight; nothing to restart where the engine already runs so (or without a run config)."""
+        flight; nothing to restart where the engine already runs so (or without a run config).  QFN's lossy half is the
+        live per-request Turbo, not the environment: switching on drafts and puts its live Turbo to its default,
+        switching off restores what it was."""
         if not self.config_path:
             self.turbo_mem = bool(on)
             return self.turbo_info()
         p = Path(self.config_path)
         self._restart_busy()
         out = models.turbo_enable(p) if on else models.turbo_disable(p)
+        live = models.TURBO_LIVE_DEFAULT.get(models.family(models.read(p)))
+        if live is not None:
+            if on:
+                self.turbo_live_before = dict(self.turbo_default) if self.turbo_default else None
+                self.set_turbo_default(live)
+            else:
+                self.set_turbo_default(self.turbo_live_before)
+                self.turbo_live_before = None
         restarts = bool(out["changed"] and os.environ.get("SAGUARO_RESTART_ON_UPDATE"))
         if restarts:
             self._restart_into(p, "settings")
@@ -6686,6 +6721,51 @@ def make_handler(svc: Service):
             self.wfile.write(body)
             return False
 
+        def _load_by_name(self, req) -> bool:
+            """load by name, for the chat routes that otherwise answer with whatever is loaded: True - the loaded
+            model answers (the setting is off, no model named, the loaded model's own name, or a name that is no
+            installed model, as today).  False - the answer is sent: the request named another installed model,
+            the switch started the way /models/load starts it, and the request is held no further - the switch ends
+            this process (saguaro.py starts the named config again on this port), so the connection cannot outlive
+            it: a 503 with Retry-After says to retry once the new model is up.  A request still running on the
+            current model is never cut short: like every restart, the switch waits for the FIFO to empty."""
+            name = str((req or {}).get("model") or "").strip()
+            if not name or not getattr(svc, "load_by_name", False):
+                return True
+            if model_api.name_key(name) == model_api.name_key(svc.model):
+                return True                                # (the loaded model's own /v1/models id)
+            entries = svc.model_listing()
+            hit = model_api.match_name(name, entries)
+            run = next((m for m in entries if m["running"]), None)
+            if hit is None or run is None or hit["file"] == run["file"]:
+                return True                                # (unknown name, or the loaded model by another name)
+            if not self._mapi_gate(manage=True):
+                return False
+            if not getattr(svc, "model_restart", None):
+                if not os.environ.get("SAGUARO_RESTART_ON_UPDATE"):
+                    self._json(409, {"error": {"type": "invalid_request_error", "message":
+                                               f"{hit['file']} is installed, but this server was not started by "
+                                               "saguaro.sh or START-SAGUARO.bat, so it cannot switch models itself: "
+                                               "start it with that model"}})
+                    return False
+                try:
+                    svc.switch_model(hit["file"])
+                except ValueError as e:
+                    self._json(409, {"error": {"type": "invalid_request_error", "message": str(e)}})
+                    return False
+                print(f"[saguaro] load by name: {run['file']} -> {hit['file']} (requested by a chat)", flush=True)
+            body = json.dumps({"error": {"type": "overloaded_error", "message":
+                                         f"loading model {model_api.public_name(Path(hit['file']))}: Saguaro starts "
+                                         "again with it (a big model takes minutes); retry this request, GET "
+                                         "/v1/models shows when it is loaded"}}).encode()
+            self.send_response(503)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Retry-After", "30")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return False
+
         def _mapi_chat(self, kind: str, req: dict):
             """/api/chat and /api/generate through the same pipeline as /v1/chat/completions."""
             if not self._mapi_gate():
@@ -7045,7 +7125,7 @@ def make_handler(svc: Service):
             elif path == "/health":
                 # the run config's recommended settings: the web app's Chat defaults until its user picks their own
                 rec = {k: v for k, v in svc.sampling_defaults.items() if k in ("temperature", "top_p", "top_k", "min_p")}
-                if svc.default_effort:   # (MiniMax's and Inkling's by their own names, CYBER-FROST's by Qwen's three)
+                if svc.default_effort:   # (MiniMax's and Inkling's by their own names, Qwen3.8's by its three)
                     named = getattr(svc.template, "minimax", False) or getattr(svc.template, "inkling", False)
                     rec["reasoning_effort"] = (effort_name if named else effort_level)(
                         svc.default_effort) or svc.default_effort
@@ -7295,6 +7375,8 @@ def make_handler(svc: Service):
                     self.end_headers()
                     self.wfile.write(body)
                     return
+                if path in ("/v1/chat/completions", "/v1/responses", "/v1/messages") and not self._load_by_name(req):
+                    return                                 # (the answer went out: a switch started, or it said why not)
                 if path == "/v1/chat/completions":
                     self._openai(req)
                 elif path == "/v1/responses":
@@ -8403,8 +8485,8 @@ def _qfn_engine_class():
         def started(self, rids) -> bool:
             return True
 
-        def set_context(self, n: int):
-            raise ValueError("this engine's context is set in its config (--max-context)")
+        # (set_context: the driver's own - it rewrites --max-context in the spawn command and the shared
+        #  _restart_with() starts the engine again with it, as it does for the other engines)
 
         def stop(self, timeout: float = 60.0):
             pass   # (each request stops its own slot - BSTOP - when its consumer goes; no engine-wide STOP)
@@ -8615,7 +8697,7 @@ def main() -> int:
             svc.default_effort) or \
             (f"{svc.default_effort} of 100" if type(svc.default_effort) is int
                                                      else "none")
-        if getattr(svc.template, "forced_thinking", False):   # (CYBER-FROST: Qwen's words, low / medium / xhigh)
+        if getattr(svc.template, "forced_thinking", False):   # (a Qwen3.x template's own words: low / medium / xhigh)
             level = QWEN_EFFORT.get(level, level)
         if getattr(svc.template, "hy4", False):               # (Hy4-flash: the level it runs at, none / high)
             level = svc.template.effort_shown(svc.default_effort) or level
@@ -8633,6 +8715,10 @@ def main() -> int:
     svc.model_management = model_management_setting(cfg)   # ("model_management": true: llama.cpp's load/unload/sse)
     if svc.model_management:
         print("[saguaro] model management: on (/models/load, /models/unload, /models/sse)", flush=True)
+    svc.load_by_name = load_by_name_setting(cfg)           # ("load_by_name": true, with model management: a chat
+    if svc.load_by_name:                                   #  request naming another installed model switches to it)
+        print("[saguaro] load by name: a chat request whose \"model\" names another installed model switches to it",
+              flush=True)
     svc.loop_guard = loop_guard_setting(cfg)            # (SAGUARO_LOOP_GUARD=0 or "loop_guard": false: off)
     if not svc.loop_guard:
         print("[saguaro] loop guard: off (a request's \"loop_guard\": true turns it on for that request)", flush=True)

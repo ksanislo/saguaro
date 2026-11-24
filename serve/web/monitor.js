@@ -200,6 +200,33 @@ function RightNow({m}) {
   </section>`;
 }
 
+// what QFN reports beside the bar (PLAN-t6b-stats-ui): the RAM its HMEM line pinned for the K/V host copies, the
+// context memory its KMEM line budgets on the cards, and each place's last turn save on disk (the engine's
+// sess_event=turn_saved) - from the /metrics fields the driver passes through (m.engine.context_ram,
+// m.engine.slot_memory, m.context.turn_saves).  Pure: a page-logic test can run it.
+export function contextFacts(eng = {}, C = {}) {
+  const out = [];
+  const cr = eng.context_ram;
+  if (cr && +cr.pinned > 0) {
+    const whole = +cr.whole > +cr.pinned ? ` (${gb(+cr.whole)} GB if every slot were full)` : "";
+    out.push(`${gb(+cr.pinned)} GB of RAM pinned for the context's K/V${whole}`);
+  }
+  const sm = eng.slot_memory;
+  if (Array.isArray(sm) && sm.length) {
+    const lim = sm.reduce((a, c) => a + (+c.total || 0) + (+c.givable || 0), 0);
+    const used = sm.reduce((a, c) => a + Math.max(0, (+c.total || 0) - (+c.free || 0)), 0);
+    if (lim > 0) out.push(`context memory: ${gb(used)} of ${gb(lim)} GB budgeted on its cards`);
+  }
+  const ts = C.turn_saves;
+  if (ts && Object.keys(ts).length) {
+    const sz = (b) => (b >= GIB ? `${gb(b, 1)} GB` : `${fmt(b / (2 ** 20))} MB`);
+    out.push("last turn save on disk: " + Object.entries(ts)
+      .map(([p, s]) => `${p} ${kfmt(s.tokens)} tokens, ${sz(+s.bytes || 0)}${s.at ? ` ${ago(Date.now() / 1000 - s.at)} ago` : ""}`)
+      .join(" · "));
+  }
+  return out;
+}
+
 // ------------------------------------------------------------------ the context: the ENGINE's context, aggregate in use over what it can hold
 // every chat in a slot (active or idle-in-slot) of its positions, split into VRAM (inside each chat's VRAM window),
 // RAM (positions streamed to pinned RAM), PARKED (conversations the engine parked in RAM outside a slot) and FREE to
@@ -264,6 +291,7 @@ function ContextCard({m}) {
     const aria = `${fmt(cu.tokens || 0)} of ${fmt(cap.tokens)} tokens in use on the engine`
       + segs.map((s) => `, ${s.label.toLowerCase()} ${nAt(s)}${s.b ? `${s.n != null ? " " : ""}(${GBb(s.b)})` : ""}`).join("")
       + (free ? `, free ${fmt(free)}` : "");
+    const facts = contextFacts(eng, C);   // (QFN's context RAM / slot memory / turn saves: lines beside the bar)
     const enote = (cu.tokens || 0) === 0 && !(pk.bytes > 0)
       ? "No conversation in a slot yet: the context fills as chats go on - every chat in a slot counts here, one that "
         + "the engine parked in RAM apart from them, and one saved on disk not at all."
@@ -276,8 +304,11 @@ function ContextCard({m}) {
       <div class="ctx__track"><div class="ctxbar" role="img" aria-label=${aria}>
         ${segs.map((s) => html`<span class=${`ctxbar__${s.k}`} style=${`flex-grow:${grow(s)}`}></span>`)}
         ${free > 0 ? html`<span style=${`flex-grow:${free}`}></span>` : null}</div></div>
-      <div class="legend">${segs.map((s) => html`<span><i class=${`sw sw--${s.k}`}></i>${s.label} <b class="num">${[nAt(s), s.b ? GBb(s.b) : ""].filter(Boolean).join(" · ")}</b></span>`)}
+      <div class="legend">${segs.map((s) => html`<span><i class=${`sw sw--${s.k}`}></i>${s.label}
+        <b class="num">${[nAt(s), s.b ? GBb(s.b) : "", s.k === "parked" && pk.conversations
+          ? `${fmt(pk.conversations)} conversation${pk.conversations === 1 ? "" : "s"}` : ""].filter(Boolean).join(" · ")}</b></span>`)}
         <span><i class="sw sw--free"></i>Free <b class="num">${fmt(free)}</b></span></div>
+      ${facts.length ? html`<p class="card__note">${facts.join(" · ")}</p>` : null}
       ${cacheTot || manyChats ? html`<div class="ctx__chats">
         ${cacheTot ? html`<p class="ctx__chats__tot num">${fmt(cacheTot.n)} chats: ${cacheTot.all} of K/V, ${cacheTot.vram} in VRAM, ${cacheTot.ram} in RAM</p>` : null}
         ${actChats.map(chatBar)}
@@ -347,15 +378,15 @@ const TIER_SETS = {
     {key: "ram_fetch", label: "From RAM", unit: "/tok", digits: 2, tone: "info", sub: "experts the GPU fetched from pinned RAM"},
     {key: "cpu", label: "On the CPU", unit: "/tok", digits: 2, sub: "experts the CPU lane computed from RAM"},
   ],
-  // CYBER-FROST (the maya engine's Qwen path): the CPU computes the experts VRAM does not hold, from RAM or read from the
-  // model file; the drafts' windows count too
-  qwen: [
+  // Qwen3.8-Flash-Next (saguaro-qfn, INFO engine_kind=qfn): the CPU computes the experts VRAM does not hold, from
+  // RAM or read from the model file; the drafts' windows count too
+  qfn: [
     {key: "promo", label: "Promoted", unit: "/tok", digits: 2, sub: "completed expert moves into VRAM per generated token"},
     {key: "ram_fetch", label: "From RAM", unit: "/tok", digits: 1, tone: "info", sub: "experts the CPU computed from RAM"},
     {key: "disk", label: "From SSD", unit: "/tok", digits: 2, tone: "warn", sub: "experts read from the model file"},
   ],
 };
-export const tierSet = (eng) => TIER_SETS[["ds4", "mm3", "qwen", "hy4", "ik2"].includes(eng && eng.engine_kind) ? eng.engine_kind : "glm"];
+export const tierSet = (eng) => TIER_SETS[["ds4", "mm3", "qfn", "hy4", "ik2"].includes(eng && eng.engine_kind) ? eng.engine_kind : "glm"];
 // Inkling 2 before its first STAT (the engine's INFO path=: resident / offload / cache): where its experts are
 export function ik2Experts(eng) {
   const n = +eng.gpus || 1;
@@ -380,7 +411,7 @@ function Tiers({t, eng}) {
   // (STAT lines with no expert tiers - an engine's drafting figures alone: nothing to show here)
   if (eng && eng.engine_kind === "ik2" && t.now.vram_used == null && t.now.ram_used == null) return null;
   const ds4 = !!(eng && eng.engine_kind === "ds4"), mm3 = !!(eng && eng.engine_kind === "mm3");
-  const qwen = !!(eng && eng.engine_kind === "qwen");
+  const qfn = !!(eng && eng.engine_kind === "qfn");
   const set = tierSet(eng);
   const n = (t && t.now) || {}, h = (t && t.history) || {};
   const helper = ds4 && ((n.helper_held || 0) > 0 || (n.helper || 0) > 0 || +eng.helper_allocated_bytes > 0);
@@ -397,7 +428,8 @@ function Tiers({t, eng}) {
                    : "Most experts run on the CPU: more VRAM (or a second GPU) keeps more of them on the card.";
   } else if (!stale && n.disk != null && n.disk >= 3) {
     tip = "Many experts are read from the SSD for every token: more RAM, a smaller model or a shorter context makes answers faster.";
-  } else if (mm3 || qwen || hy4) {   // (MiniMax, CYBER-FROST, Hy4-Flash: the CPU computes the experts VRAM does not hold)
+  } else if (mm3 || qfn || hy4) {   // (MiniMax, QFN, Hy4-Flash: the CPU computes the experts VRAM
+    //  does not hold)
     if (!stale && n.vram_hit != null && n.vram_hit < 0.5) tip = "Most experts run on the CPU: more VRAM (or a second GPU) keeps more of them on the card.";
   } else if (!stale && n.vram_hit != null && n.vram_hit < 0.85 && (n.ram_fetch || 0) >= 4) {
     tip = "Most misses come from RAM over PCIe: more VRAM (or a second GPU) keeps more experts on the card.";

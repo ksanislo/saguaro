@@ -7,8 +7,7 @@ The state of this version (keep this table, the setup's `NO_ENGINE` list in `sag
 | Model | Engine (CMake target) | On AMD (HIP) |
 | --- | --- | --- |
 | GLM-5.3-Flash | `saguaro-glm` (`maya`) | builds and runs (experimental); its GPU self-tests pass on an RX 9070 XT (gfx1201, ROCm 7.1). The quant that fits a 16 GB card + 96 GB of RAM is Maya-XS (73 GB); the setup recommends the largest one that fits VRAM + RAM |
-| Qwen-3.8-Flash-Next (CYBER-FROST) | `saguaro-glm` (`maya`) | builds (the same engine as GLM); about 84 GB of VRAM + RAM |
-| Qwen3.8-Flash-Next (unsloth's UD-Q4_K_XL / Q8_0) | `saguaro-qfn` (`engines/qfn`) | builds and runs on an RX 9070 XT (gfx1201, ROCm 7.1) with 96 GB of RAM (27-41 tok/s answers, 520-1,080 tok/s 8K-16K prompt reads); the setup offers it (`--model qwen3.8-flash-next`) for one RDNA GPU of 16 GB or more with ~96 GB of RAM: UD-Q4_K_XL (111 GB) with the experts the card does not hold in a pinned RAM tier and the rest read from the SSD - [below](#qwen38-flash-next-on-the-saguaro-qfn-engine) |
+| Qwen3.8-Flash-Next (unsloth's UD-Q4_K_XL / Q8_0; Blackfrost-AI's CYBER-FROST fine-tune as a quant of its own) | `saguaro-qfn` (`engines/qfn`) | builds and runs on an RX 9070 XT (gfx1201, ROCm 7.1) with 96 GB of RAM (27-41 tok/s answers, 520-1,080 tok/s 8K-16K prompt reads); the setup offers it (`--model qwen3.8-flash-next`, `--model cyber-frost` for the fine-tune) for one RDNA GPU of 16 GB or more with ~96 GB of RAM: the experts the card does not hold in a pinned RAM tier and the rest read from the SSD - [below](#qwen38-flash-next-on-the-saguaro-qfn-engine) |
 | DeepSeek-V4.1-Flash-1017 | `saguaro-ds4` (`maya-ds4`) | compiles for HIP (gfx1201 checked); not yet run on an AMD GPU |
 | MiniMax-M3.1-Flash | `saguaro-mm3` (`maya-mm3`) | compiles for HIP (gfx1201 checked); not yet run on an AMD GPU |
 | Hy4-Flash | `saguaro-hy4` (`maya-hy4`) | not run on an AMD GPU yet: the setup does not offer it on AMD |
@@ -245,13 +244,17 @@ drafting, two AMD GPUs, a Strix / Gorgon Halo APU. [INKLING2.md](INKLING2.md) ha
 
 ## Qwen3.8-Flash-Next on the saguaro-qfn engine
 
-Measured on one RX 9070 XT (gfx1201) with 96 GB of RAM (figures below). This is Qwen3.8-Flash-Next as Qwen released it, in unsloth's GGUFs, on its own engine (`saguaro-qfn`,
-`engines/qfn`, from Strata) - not CYBER-FROST, the fine-tune the setup also offers, which runs on `saguaro-glm`'s Qwen
-path. The setup offers it for one AMD RDNA 3 / 4 GPU of 16 GB or more and about 96 GB of RAM (Linux; an APU not yet), and
-refuses with the reason below that:
+Measured on one RX 9070 XT (gfx1201) with 96 GB of RAM (figures below). This is Qwen3.8-Flash-Next as Qwen released it,
+in unsloth's GGUFs, on its own engine (`saguaro-qfn`, `engines/qfn`, from Strata); Blackfrost-AI's CYBER-FROST
+fine-tune is a quant of the same engine (`--model cyber-frost`, [SETTINGS.md](SETTINGS.md#cyber-frost-38-ps-the-cyber-frost-quant)).
+The setup offers it for one AMD RDNA 3 / 4 GPU of 16 GB or more and about 96 GB of RAM (Linux; an APU not yet), and
+refuses with the reason below that. The same model sets up on NVIDIA too - one card of 16 GB or more, or up to four
+equal ones taking the 48 layers in turn - on Linux only: [SETUP.md](SETUP.md#what-the-first-run-does). Its settings are
+in [SETTINGS.md](SETTINGS.md#qwen38-flash-next-saguaro-qfn). The two setup commands:
 
 ```sh
 ./saguaro.sh --setup --backend hip --gpu 0 --model qwen3.8-flash-next            # UD-Q4_K_XL, 111 GB (or ...-q8_0)
+./saguaro.sh --setup --backend hip --gpu 0 --model cyber-frost                   # CYBER-FROST-3.8, 112.5 GB (its NextN block is the drafter)
 ./saguaro.sh --setup --backend hip --gpu 0 --model qwen3.8-flash-next --gguf-dir /path/to/UD-Q4_K_XL   # files you have
 ```
 
@@ -261,7 +264,18 @@ place), indexes them (the pack, about a minute), downloads the Lamina MTP draft 
 hold, the hottest by the shipped expert profile, in a page-locked RAM tier of the RAM less 20 GB
 (`--resident-budget-gib`), the rest read from the SSD; MTP drafting; INT8 K/V, 32K of it in VRAM; the K-quant prompt
 kernels (`SAGUARO_MMQ_KQ=1`). The RDNA4 prompt defaults (GDN, control-vector fusion, chunks up to 16K, matrix-core prompt
-attention) switch on by themselves on gfx12. To build only the engine and its tests by hand:
+attention) switch on by themselves on gfx12.
+
+The same run also fetches the picture tower (the model's mmproj, 0.9 GB, pinned and sha256-checked) and builds its
+reader for the card (`vision-qfn-hip`), which starts when the first picture arrives; `--no-vision` leaves both out. The
+Lamina MTP draft layer (0.8 GB) comes with it and the setup asks whether to draft with it (`--drafting off` / `on`):
+`--calibrate` tunes the PCIe share, the draft floor and the CPU workers for this PC and measures the drafter,
+`--speed-calibration` measures the drafter alone and keeps the faster, and `--bench` benchmarks the model on
+`saguaro-qfn`. Several answers at once (`--parallel 4`) are supported; on this one 16 GB card parallel decoding measured
+slower, so the setup writes no `parallel` for it (2 where a config runs on several GPUs). The Models page has the
+model's own fields: the context (changed live from Settings > Model), the K/V window kept in VRAM
+(`--kv-resident`), the RAM for the experts, answers at once, drafting and pictures; its Turbo button turns drafting on
+and writes one answer at a time. To build only the engine and its tests by hand:
 
 ```sh
 ROCM=/opt/rocm HIP_ARCHS=gfx1201 tools/qfn/build_hip.sh build-qfn-hip
@@ -284,7 +298,7 @@ vary about 25% in speed from load to load on the same text here.
 
 Correctness against the T4 build (the same five 12-29K-token prompts, 5,150 teacher-forced positions): KL 0.0057, the
 same top token 96.8% of the time (99.8% where the T4 is confident), perplexity 0.2% lower; the T4 against itself is
-bit-identical. Q8_0 (177 GB) on the same PC: KL 0.0050 against the T4's Q8_0, answers at 14-15 tok/s, prompts read at 73-315 tok/s (70 GB of its experts in RAM, ~50 GB read from the SSD as they are routed). MTP drafting does not change the answers on AMD (the same greedy tokens with it on and off). Not checked on AMD yet: pictures, several conversations at once, two AMD GPUs.
+bit-identical. Q8_0 (177 GB) on the same PC: KL 0.0050 against the T4's Q8_0, answers at 14-15 tok/s, prompts read at 73-315 tok/s (70 GB of its experts in RAM, ~50 GB read from the SSD as they are routed). MTP drafting does not change the answers on AMD (the same greedy tokens with it on and off). Not checked on AMD yet: pictures (the setup downloads the tower and builds its reader now, but no AMD run of one is measured here) and two AMD GPUs (the setup offers one card there).
 
 ## Instinct MI300X / MI325X
 

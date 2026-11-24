@@ -19,10 +19,13 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "tools")]
 from serve import model_pull, models as M  # noqa: E402
 from serve import server  # noqa: E402
+from serve.test_models import qfn_cfg  # noqa: E402  (the same QFN config shape the Models page tests run against)
 
 HY4_SRC = (ROOT / "src" / "hy4" / "hy4_main.cpp").read_text(encoding="utf-8")
 HY4_FLAGS = set(re.findall(r'a == "(--[a-z0-9-]+)"', HY4_SRC))
 HY4_BARE = {"--mtp", "--dfly2", "--serve", "--top", "--verbose", "--room-report"}
+QFN_SRC = (ROOT / "engines" / "qfn" / "src" / "program" / "generate.cpp").read_text(encoding="utf-8")
+QFN_FLAGS = set(re.findall(r'a == "(--[a-z0-9-]+)"', QFN_SRC))    # every flag saguaro-qfn's parser knows
 
 
 def t4(i=0, gib=16.0):
@@ -167,6 +170,79 @@ class Hy4Settings(unittest.TestCase):
         plan = M.delete_plan(self.root, self.p)
         self.assertEqual((plan["ok"], [i["what"] for i in plan["items"]]), (True, ["folder"]))   # (its own folder, whole)
         self.assertNotIn("outside.gguf", json.dumps(plan))                  # (a path out of the folder: never its own)
+
+
+class QfnSettings(unittest.TestCase):
+    """A QFN config on the Models page: the page reads and writes only what saguaro-qfn itself knows - its engine
+    flags (src/program/generate.cpp's parser) and the config's own "parallel" key - and nothing of the CYBER-FROST
+    path (its ram_gb / SAGUARO_EXPERT_RAM_GB is refused here).  Turbo is supported."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.p = qfn_cfg(self.root)
+        self.cfg = M.read(self.p)
+
+    def sound(self, cfg):
+        """Every argument is a flag saguaro-qfn's parser reads; the other engines' flags are never written."""
+        args = [str(a) for a in cfg["args"]]
+        for a in args:
+            if a.startswith("--"):
+                self.assertIn(a, QFN_FLAGS, args)
+        for bad in ("--parallel", "--tp", "--dspark", "--kv-streaming", "--mmap-experts", "--dflash"):
+            self.assertNotIn(bad, args)
+        return cfg
+
+    def test_family_and_settings(self):
+        self.assertEqual(M.family(self.cfg), "qfn")
+        s = M.settings_of(self.cfg)
+        self.assertEqual(set(s) - {"env"}, set(M.QFN_KEYS) - {"env"})
+        self.assertEqual(s["ram_gib"], 71)                       # (--resident-budget-gib, the setup's tier)
+        self.assertEqual(s["kv_resident"], 32768)                # (--kv-resident, the K/V window in VRAM)
+        self.assertEqual((s["parallel"], s["draft"], s["images"]), (1, "mtp", False))
+        same = self.sound(M.apply(self.cfg, s))                  # (as it is: nothing moves)
+        self.assertEqual(same["args"], self.cfg["args"])
+
+    def test_each_setting_maps_to_its_flag(self):
+        for patch, flag, want in (({"context": 32768}, "--max-context", "32768"),
+                                  ({"ram_gib": 48}, "--resident-budget-gib", "48"),
+                                  ({"ram_gib": None}, "--resident-budget-gib", None),
+                                  ({"kv_resident": 16384}, "--kv-resident", "16384"),
+                                  ({"kv_resident": None}, "--kv-resident", None),
+                                  ({"expert_cache": 4000}, "--expert-cache", "4000"),
+                                  ({"expert_cache": None}, "--expert-cache", "auto"),
+                                  ({"prefill": 1024}, "--prefill", "1024"),
+                                  ({"reserve_mib": 400}, "--vram-reserve-mib", "400"),
+                                  ({"draft": "none"}, "--mtp-max-t", "1"),
+                                  ({"kv": "fp16"}, "--kv", "fp16")):
+            with self.subTest(patch=patch):
+                new = self.sound(M.apply(self.cfg, patch))
+                self.assertEqual(M.flag(new["args"], flag), want)
+                back = M.settings_of(new)                        # (and read back as it was set)
+                for k, v in patch.items():
+                    self.assertEqual(back[k], v, k)
+        self.assertEqual(M.apply(self.cfg, {"gpus": [1]})["gpu"], [1])
+
+    def test_answers_at_once_is_the_configs_key(self):
+        new = self.sound(M.apply(self.cfg, {"parallel": 6}))     # (the driver turns it into the engine's --batch)
+        self.assertEqual((new["parallel"], M.settings_of(new)["parallel"]), (6, 6))
+        self.assertNotIn("--parallel", new["args"])
+        self.assertNotIn("parallel", self.sound(M.apply(new, {"parallel": 1})))
+
+    def test_the_other_families_settings_are_refused(self):
+        for bad in ("ram_gb", "tp", "kv_streaming", "mmap", "dspark_conf", "cpu_threads", "kv_cache", "cache_gb"):
+            with self.assertRaises(ValueError, msg=bad) as e:
+                M.apply(self.cfg, {bad: 1})
+            self.assertIn("not a setting of this model", str(e.exception))
+        with self.assertRaisesRegex(ValueError, "Answers at once"):
+            M.apply(self.cfg, {"parallel": 9})
+
+    def test_turbo_is_supported(self):
+        self.assertEqual(M.TURBO_LIVE_DEFAULT["qfn"], {"drop": 1, "skip": "off"})
+        self.assertEqual(M.TURBO_DRAFT["qfn"], "mtp")
+        info = M.turbo_info(self.cfg)
+        self.assertEqual(info["on"], False)
 
 
 class Ik2Installed(unittest.TestCase):
@@ -379,6 +455,39 @@ console.log(JSON.stringify({{shares: sv.tierShares(n, eng), set: mon.tierSet(eng
         self.assertEqual(got["glm"], ["ram_fetch", "disk", "promo"])        # (the other engines' card as before)
         self.assertEqual((got["full"]["vu"], got["full"]["ru"]), (20992, 0))
 
+    def test_monitor_qfn_stats_and_context_facts(self):
+        """T6b: what the page reads from a QFN engine's passed-through fields - the qfn tier tiles filled by its
+        STAT line (promo= from T6a), Speculation named by its INFO mtp=, and the Context card's QFN lines
+        (contextFacts from engine.context_ram / engine.slot_memory / context.turn_saves)."""
+        self.assertIn("mtp_max=%d mtp=%d lookup=%d vram_free_mib=%lld", QFN_SRC)    # (T6a: INFO says mtp=)
+        self.assertIn('"STAT tok_s=%.2f ms_tok=%.2f vram_hit=%.4f ram_fetch=%.3f disk=0.000 promo=%.3f "',
+                      QFN_SRC)                                                      # (T6a: STAT says promo=)
+        eng = info_of("INFO engine_kind=qfn experts=13824 vram_slots=16384 vram_gb=50.8 ram_slots=0 ram_gb=63.4")
+        stat = {k: float(v) for k, v in info_of(
+            "STAT tok_s=21.40 ms_tok=46.73 vram_hit=0.9512 ram_fetch=0.487 disk=0.000 promo=0.031 vram_used=4096 "
+            "vram_slots=5120 ram_used=9728 ram_gb=71.2 vram_gb=2.4 disk_gb=0.0 draft_acc=37 draft_off=58 active=1"
+        ).items()}
+        got = self.node(f"""
+const sv = await import(web + "/server.js"), mon = await import(web + "/monitor.js");
+const eng = {json.dumps(eng)}, n = {json.dumps(stat)};
+console.log(JSON.stringify({{
+  set: mon.tierSet(eng).map((x) => [x.key, n[x.key]]),
+  shares: sv.tierShares(n, eng),
+  spec: sv.speculationView({{engine: {{speculation: ["MTP"]}},
+                             requests: [{{drafts_offered: n.draft_off, drafts_accepted: n.draft_acc}}]}}),
+  facts: mon.contextFacts(
+    {{context_ram: {{pinned: 3221225472, whole: 6442450944, slots: [1073741824, 2147483648]}},
+     slot_memory: [{{device: 0, total: 4294967296, free: 1073741824, givable: 536870912}}]}},
+    {{turn_saves: {{main: {{tokens: 12345, bytes: 35651584, ms: 8.2, at: Date.now() / 1000 - 42}}}}}}),
+  none: mon.contextFacts({{}}, {{}})}}));""")
+        self.assertEqual(got["set"], [["promo", 0.031], ["ram_fetch", 0.487], ["disk", 0.0]])
+        self.assertEqual((got["shares"]["vu"], got["shares"]["ru"], got["shares"]["total"]), (4096, 9728, 13824))
+        self.assertEqual((got["spec"]["state"], got["spec"]["name"], got["spec"]["short"]), ("kept", "MTP", "64%"))
+        self.assertEqual(got["none"], [])
+        self.assertEqual(got["facts"][0], "3.0 GB of RAM pinned for the context's K/V (6.0 GB if every slot were full)")
+        self.assertEqual(got["facts"][1], "context memory: 3.0 of 4.5 GB budgeted on its cards")
+        self.assertEqual(got["facts"][2], "last turn save on disk: main 12k tokens, 34 MB 42 s ago")
+
     def test_monitor_ik2_says_where_its_experts_are(self):
         one = info_of("INFO engine=ik2 engine_kind=ik2 model=Inkling-2 kv=f16 ctx=32768 gpus=1 experts=12288 path=offload")
         two = info_of("INFO engine=ik2 engine_kind=ik2 model=Inkling-2 kv=f16 ctx=131072 gpus=2 experts=12288 path=resident")
@@ -427,6 +536,28 @@ console.log(JSON.stringify({
         self.assertEqual(got["line"], "Set up for 4 GPUs (a layout measured on Tesla T4s) · one conversation at a time")
         self.assertEqual(got["one"], "Set up for 1 GPU (a layout not measured yet)")
         self.assertEqual(got["plain"], "")
+
+    def test_the_qfn_settings_card_renders(self):
+        """fieldsOf dispatches family "qfn" to qfnFields (models.js) - the card reads its KV list (QFN_KV) and
+        must not throw on a missing declaration (T8a review finding 1: node --check never runs the code)."""
+        got = self.node("""
+const mp = await import(web + "/models.js");
+mp.MS.data = {gpus: []};
+const s = {context: 262144, kv: "int8", kv_resident: 32768, parallel: 1, draft: "mtp", images: true,
+           reserve_mib: 700, ram_gib: null, expert_cache: null, prefill: null, gpus: [0]};
+const m = {family: "qfn", running: false, choices: {draft: ["mtp", "none"], images: true}, settings: s, file: "qfn.json"};
+console.log(JSON.stringify(mp.fieldsOf(m, {...s}).map((g) => g.label)));""")
+        self.assertEqual(got, ["Model", "GPUs and memory", "Prompts and cache"])
+
+    def test_a_server_behind_its_api_key_says_so(self):
+        """/api/context answering 401: the page knows why the context range is missing - Settings says
+        "API key needed", not "this server does not say its context range" (serve/web/server.js' loadCtxInfo)."""
+        got = self.node("""
+globalThis.fetch = async () => ({status: 401, ok: false, json: async () => ({})});
+const sv = await import(web + "/server.js"), st = await import(web + "/state.js");
+await sv.loadCtxInfo();
+console.log(JSON.stringify({conn: st.S.conn, ctx: st.S.ctxInfo === null ? "null" : "data"}));""")
+        self.assertEqual((got["conn"], got["ctx"]), ("key", "null"))
 
     def test_every_page_module_loads(self):
         got = self.node("""

@@ -16,14 +16,14 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-FAMILIES = ("glm", "deepseek", "minimax", "qwen", "hy4", "ik2")
-# ("qwen": CYBER-FROST-3.8-PS, the Qwen3.8-Flash-Next fine-tune - qwen4exp, on the `maya` engine's own Qwen path)
+FAMILIES = ("glm", "deepseek", "minimax", "qfn", "hy4", "ik2")
+# ("qfn": Qwen3.8-Flash-Next on its own engine, saguaro-qfn - its own family since the identity split; CYBER-FROST
+#  -3.8-PS, the fine-tune, is a quant of it since the Qwen path went - its old ids are aliases, QWEN_IDS)
 MODEL = {"glm": "GLM-5.3-Flash", "deepseek": "DeepSeek-V4.1-Flash-1017", "minimax": "MiniMax-M3.1-Flash",
-         "qwen": "CYBER-FROST-3.8-PS", "hy4": "Hy4-Flash", "ik2": "Inkling-2-Mini"}
+         "qfn": "Qwen3.8-Flash-Next", "hy4": "Hy4-Flash", "ik2": "Inkling-2-Mini"}
 SHOWN = {"glm": "GLM-5.3", "deepseek": "DeepSeek V4.1", "minimax": "MiniMax M3.1", "hy4": "Hy4-Flash",
-         "ik2": "Inkling 2 Mini",
-         "qwen": "Qwen-3.8-Flash-Next (CYBER-FROST)"}   # the model's name on screen (the chat header: serve/web/lib.js's
-                                                         # modelName(id, true), "Qwen-3.8-Flash-Next"); its ids stay
+         "ik2": "Inkling 2 Mini"}                   # the model's name on screen (the chat header: serve/web/lib.js's
+                                                    #  modelName(id, true), "Qwen-3.8-Flash-Next"); its ids stay
 SEP = " · "
 
 # Each model's own defaults - what its config gets (the setup, the dashboard's switch to it) and what a config without
@@ -41,9 +41,10 @@ MODEL_DEFAULTS = {
     "minimax": ({"temperature": 1.0, "top_p": 0.95}, "auto"),
     # Hy4-Flash: Tencent's card / generation_config - temperature 0.9, top_p 1.0; its template's High
     "hy4": ({"temperature": 0.9, "top_p": 1.0}, "high"),
-    # CYBER-FROST-3.8-PS: Blackfrost-AI/CYBER-FROST-3.8-BF16 generation_config.json and card - temperature 1.0, top_p
-    # 0.95, top_k 20; thinking on, its template's default effort xhigh
-    "qwen": ({"temperature": 1.0, "top_p": 0.95, "top_k": 20}, "xhigh"),
+    # Qwen3.8-Flash-Next (saguaro-qfn): unsloth's GGUFs carry the model's generation_config - temperature 1.0,
+    # top_p 0.95, top_k 20; thinking on, its template's default effort xhigh (CYBER-FROST's quant too: the
+    # fine-tune's generation_config names the same numbers)
+    "qfn": ({"temperature": 1.0, "top_p": 0.95, "top_k": 20}, "xhigh"),
     # Inkling 2 (saguaro-ik2): its card and files name no sampling, so plain sampling; "auto" its template's own effort
     "ik2": ({"temperature": 1.0, "top_p": 1.0}, "auto"),
     # Inkling 2 Mini as the setup installs it: its generation_config's sampling; "high" its template's default by name
@@ -141,17 +142,22 @@ OTHERS = {("deepseek", "gguf-q8"): "UD-Q8_K_XL", ("deepseek", "gguf-q4"): "UD-Q4
           ("deepseek", "exl3"): "EXL3 2.9 bpw", ("deepseek", "exl3-3.5"): "EXL3 3.5 bpw",
           ("deepseek", "abliterated-128g"): "orcarouter Abliterated Mix-128G",
           ("deepseek", "abliterated-256g"): "orcarouter Abliterated Mix-256G",
-          ("minimax", "exl3"): "EXL3 3.5 bpw", ("qwen", "q5_k_m"): "Q5_K_M",
+          ("minimax", "exl3"): "EXL3 3.5 bpw",
           ("ik2", "ud-q4_k_xl"): "unsloth UD-Q4_K_XL",   # (unsloth's GGUF of Inkling-2-Mini)
           ("ik2", "strata-sq-20"): "Strata SQ-20", ("ik2", "strata-sq-15"): "Strata SQ-15",
           ("ik2", "strata-sq-10"): "Strata SQ-10"}   # (Strata's .strata packs of Inkling-2-Mini)
-# CYBER-FROST-3.8-PS: its one GGUF (peasantsmith/CYBER-FROST-3.8-PS-GUFF) - the setup ids it is asked for by
+# CYBER-FROST-3.8-PS: its one GGUF (peasantsmith/CYBER-FROST-3.8-PS-GUFF) - the setup ids it is asked for by.  Since
+# the move onto saguaro-qfn (QFN-first T7) they resolve to its quant there; every id still works
 QWEN_IDS = ("cyber-frost", "cyber-frost-3.8", "cyber-frost-3.8-ps", "cyber-frost-3.8-ps-q5_k_m", "cyber-frost-q5_k_m")
-# Qwen3.8-Flash-Next itself (unsloth's GGUFs, tools/qfn/download.json) on its own engine, saguaro-qfn (engines/qfn): a
-# "qwen" config as CYBER-FROST's is (the same template, sampling and server path), told apart by its installer record's
-# "qwen_quant" (one of QFN_QUANTS; CYBER-FROST's is "q5_k_m") - and shown by its own name, with the engine's
+# Qwen3.8-Flash-Next itself (unsloth's GGUFs, tools/qfn/download.json) on its own engine, saguaro-qfn (engines/qfn):
+# its own family "qfn".  Older configs say "qwen" - CYBER-FROST's own-engine one too - or name the engine only by
+# their exe: family_of reads every one of them as "qfn".  Shown by its own name, with the engine's.
 QFN_SHOWN = "Qwen3.8-Flash-Next"
-QFN_QUANTS = {"ud-q4_k_xl": "UD-Q4_K_XL", "q8_0": "Q8_0"}
+SHOWN["qfn"] = QFN_SHOWN                           # (the model's name on screen, as SHOWN names the other families)
+# CYBER-FROST-3.8-PS on saguaro-qfn (QFN-first T7): peasantsmith's one GGUF as a quant of the family (its NextN block
+# inside is the drafter, tools/mtp_from_gguf.py)
+CYBER_FROST_QUANT = "cyber-frost-q5_k_m"
+QFN_QUANTS = {"ud-q4_k_xl": "UD-Q4_K_XL", "q8_0": "Q8_0", CYBER_FROST_QUANT: "CYBER-FROST-3.8 Q5_K_M"}
 QFN_ENGINE = "saguaro-qfn"
 # its setup ids (the first of each: the Models page's); the model's name alone is UD-Q4_K_XL, the default
 QFN_IDS = {"qwen3.8-flash-next": "ud-q4_k_xl", "qwen3.8-flash-next-ud-q4_k_xl": "ud-q4_k_xl", "qfn": "ud-q4_k_xl",
@@ -196,7 +202,7 @@ def full_name(family: str, key: str | None) -> str | None:
 def shown(family: str, key: str | None = None, gb: float | None = None) -> str:
     """The files as users see them, the model's name first: "MiniMax M3.1 · Maya-XS", with gb "... (93 GB)"; never a
     bare tier.  Files that are not a Maya quant by their own name ("DeepSeek V4.1 · UD-Q8_K_XL"); no key: the model."""
-    if family == "qwen" and key in QFN_QUANTS:        # (the model itself on saguaro-qfn: its own name, not CYBER-FROST)
+    if key in QFN_QUANTS and family == "qfn":        # (the model itself on saguaro-qfn: its own name, not CYBER-FROST)
         return f"{QFN_SHOWN}{SEP}{QFN_QUANTS[key]} ({QFN_ENGINE})" + (f" ({gb:.0f} GB)" if gb else "")
     name = SHOWN.get(family, family)
     what = tier(family, key) or OTHERS.get((family, key)) or key
@@ -207,8 +213,12 @@ def config_stem(family: str, key: str | None) -> str | None:
     """A Maya quant's config name under the scheme (maya-minimax-maya-xs), or None where the config keeps the name it
     always had (GLM's maya-<download>.json, DeepSeek's maya-ds4.json, MiniMax's EXL3 maya-mm3.json - installs and
     their run scripts point at them).  MiniMax's GGUFs, new with the scheme, are the first named by it."""
-    if family == "qwen":
-        return "maya-" + qfn_setup_id(key) if key in QFN_QUANTS else "maya-cyber-frost"
+    if family == "qfn":
+        # (Qwen3.8-Flash-Next on saguaro-qfn: its own family; CYBER-FROST's config keeps the name it always had -
+        #  installs and their run scripts point at maya-cyber-frost[-hip].json)
+        if key == CYBER_FROST_QUANT:
+            return "maya-cyber-frost"
+        return "maya-" + qfn_setup_id(key)
     if family == "ik2":                                # (Inkling 2 Mini: UD-Q4_K_XL's name kept; a Strata pack its own)
         return "maya-" + ik2_setup_id(key)
     return f"maya-{setup_id(family, key)}" if family in ("minimax", "hy4") and setup_id(family, key) else None
@@ -228,12 +238,12 @@ def resolve(name: str, glm_downloads=()) -> tuple | None:
         if low == k.lower():
             return "glm", k
     if low in QWEN_IDS:
-        return "qwen", "q5_k_m"
+        return "qfn", CYBER_FROST_QUANT              # (CYBER-FROST on saguaro-qfn now - every old id still taken)
     if low in QFN_IDS:
-        return "qwen", QFN_IDS[low]
+        return "qfn", QFN_IDS[low]                     # (the family's own ids: Qwen3.8-Flash-Next, qfn, ...)
     for k in QFN_QUANTS:                               # (a quant's own file name: Qwen3.8-Flash-Next-UD-Q4_K_XL)
         if low == f"{QFN_SHOWN}-{QFN_QUANTS[k]}".lower():
-            return "qwen", k
+            return "qfn", k
     if low in IK2_IDS or low == MODEL["ik2"].lower():
         return "ik2", IK2_QUANT
     for k, i in IK2_STRATA.items():                    # (inkling-2-mini-sq-15, Inkling-2-Mini-SQ-15, strata-sq-15)
@@ -241,16 +251,22 @@ def resolve(name: str, glm_downloads=()) -> tuple | None:
             return "ik2", k
     if low == "hy4":                                   # (the model by its short name: its size then asked)
         return "hy4", None
-    for f in ("deepseek", "minimax", "qwen", "hy4"):
+    for f in ("deepseek", "minimax", "hy4"):
         if low == MODEL[f].lower():
             return f, None
     return None
 
 
 def family_of(cfg: dict) -> str:
-    """"ik2" for an Inkling 2 config (saguaro-ik2), "minimax" for a MiniMax-M3.1-Flash config (saguaro-mm3), "qwen"
-    for CYBER-FROST-3.8-PS (the GLM engine with its n-gram table, --ple-gguf), "deepseek" for a DeepSeek-V4.1-Flash
-    config (the engine's --pack: configs written before the programs got their Saguaro names count too), else "glm"."""
+    """"ik2" for an Inkling 2 config (saguaro-ik2), "minimax" for a MiniMax-M3.1-Flash config (saguaro-mm3), "qfn" for
+    Qwen3.8-Flash-Next on saguaro-qfn (CYBER-FROST's quant too), "deepseek" for a DeepSeek-V4.1-Flash config (the
+    engine's --pack: configs written before the programs got their Saguaro names count too), else "glm".
+
+    QFN is its own family: "qfn" when the installer record says so, and read-time migration for the older ones -
+    every "qwen" family config (the old engine's CYBER-FROST one included: its model runs on saguaro-qfn since
+    T7, and the setup's migrate_cyber_frost rewrites its config; until then it reads as this quant) - and the live
+    hand-made configs, whose installer names no quant: the exe name (ending in saguaro-qfn) is all they carry
+    (./ref/*.json)."""
     inst = cfg.get("installer") or {}
     exe = Path(str(cfg.get("exe", ""))).name
     if inst.get("family") == "hy4" or exe.startswith(("maya-hy4", "saguaro-hy4")):   # (Hy4-flash: its own --pack)
@@ -259,9 +275,13 @@ def family_of(cfg: dict) -> str:
         return "ik2"
     if inst.get("family") == "minimax" or exe.startswith(("maya-mm3", "saguaro-mm3")):
         return "minimax"
+    if inst.get("family") in ("qfn", "qwen"):          # ("qwen": every config of the old path reads as QFN)
+        return "qfn"
     args = cfg.get("args") or []
-    if inst.get("family") == "qwen" or "--ple-gguf" in args[:-1]:
-        return "qwen"
+    if exe.endswith("saguaro-qfn"):                    # (no installer family: the live hand-made configs' exe name)
+        return "qfn"
+    if "--ple-gguf" in args[:-1]:                      # (hand-made old-engine CYBER-FROST config: its model is a QFN one)
+        return "qfn"
     return "deepseek" if inst.get("family") == "deepseek" or "--pack" in args[:-1] or \
         exe.startswith(("maya-ds4", "strata-ds4", "saguaro-ds4")) else "glm"   # (the engine's old names)
 
@@ -277,8 +297,9 @@ def config_key(cfg: dict) -> str | None:
         return inst.get("ds4_quant") or "exl3"
     if fam == "minimax":
         return inst.get("mm3_quant") or "exl3"
-    if fam == "qwen":
-        return inst.get("qwen_quant") or "q5_k_m"
+    if fam == "qfn":
+        q = inst.get("qwen_quant")                     # (a not-yet-migrated CYBER-FROST config says "q5_k_m")
+        return CYBER_FROST_QUANT if q == "q5_k_m" else q
     if fam == "hy4":
         return str(inst.get("hy4_quant") or "maya-s").lower()
     if fam == "ik2":

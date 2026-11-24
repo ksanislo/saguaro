@@ -62,10 +62,9 @@ class ModelDefaults(unittest.TestCase):
         self.assertEqual(Q.MODEL_DEFAULTS["glm"], ({"temperature": 1.0, "top_p": 0.95}, "max"))
         self.assertEqual(Q.MODEL_DEFAULTS["deepseek"], ({"temperature": 1.0, "top_p": 1.0}, "high"))
         self.assertEqual(Q.MODEL_DEFAULTS["minimax"], ({"temperature": 1.0, "top_p": 0.95}, "auto"))
-        self.assertEqual(Q.MODEL_DEFAULTS["qwen"], ({"temperature": 1.0, "top_p": 0.95, "top_k": 20}, "xhigh"))
-        self.assertEqual((maya.QWEN_SAMPLING, maya.QWEN_EFFORT), Q.MODEL_DEFAULTS["qwen"])
+        self.assertEqual(Q.MODEL_DEFAULTS["qfn"], ({"temperature": 1.0, "top_p": 0.95, "top_k": 20}, "xhigh"))
         self.assertEqual(Q.model_defaults({"exe": "/b/maya", "args": ["--pack", "/p", "--ple-gguf", "/g"]}),
-                         ({"temperature": 1.0, "top_p": 0.95, "top_k": 20}, "xhigh"))
+                         ({"temperature": 1.0, "top_p": 0.95, "top_k": 20}, "xhigh"))   # (old-engine config: a QFN one)
 
     def test_the_setup_writes_them(self):
         self.assertEqual((maya.SAMPLING, maya.EFFORT), Q.MODEL_DEFAULTS["glm"])
@@ -82,6 +81,66 @@ class ModelDefaults(unittest.TestCase):
             self.assertEqual((s, e), Q.MODEL_DEFAULTS[fam], fam)
             s["temperature"] = 0                                           # (a copy: the table stays)
             self.assertNotEqual(Q.MODEL_DEFAULTS[fam][0]["temperature"], 0)
+
+
+class QfnIdentity(unittest.TestCase):
+    """QFN's own family (QFN-first T1): its ids resolve to ("qfn", quant), its configs read as "qfn" - the ones the
+    setup writes, the ones a release before the split wrote ("qwen" + a QFN quant) and the hand-made ones the exe name
+    gives away.  CYBER-FROST's ids resolve to its quant on saguaro-qfn (T7); since T8a every config the old engine
+    wrote reads as "qfn" too (its model is the family's CYBER-FROST quant), and the setup's migrate_cyber_frost
+    rewrites the config itself."""
+
+    # ./ref/Qwen3.8-Flash-Next-UD-Q4_K_XL.json, copied: the live hand-made config, no quant in its installer record
+    REF_CFG = {"exe": "/opt/llm/saguaro/bin/saguaro-qfn", "cwd": "/opt/llm/saguaro/engines/qfn",
+               "args": ["--pack", "/opt/llm/models/Qwen3.8-Flash-Next-UD-Q4_K_XL/pack", "--native",
+                        "/opt/llm/models/Qwen3.8-Flash-Next-UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf",
+                        "--spec", "3", "--mtp", "/opt/llm/models/Qwen3.8-Flash-Next-MTP-Lamina",
+                        "--max-context", "1048576", "--kv", "int8", "--vision"],
+               "model_name": "Qwen3.8-Flash-Next-UD-Q4_K_XL", "installer": {"family": "qwen"}}
+
+    def test_qfn_ids_resolve_to_their_own_family(self):
+        for i in Q.QFN_IDS:
+            self.assertEqual(Q.resolve(i), ("qfn", Q.QFN_IDS[i]), i)
+        self.assertEqual(Q.resolve("Qwen3.8-Flash-Next-Q8_0"), ("qfn", "q8_0"))   # (the quant file's own name)
+        for i in Q.QWEN_IDS:                    # (CYBER-FROST on saguaro-qfn since T7: every old id still taken)
+            self.assertEqual(Q.resolve(i), ("qfn", Q.CYBER_FROST_QUANT), i)
+
+    def test_family_of_reads_all_three_config_shapes_as_qfn(self):
+        new = {"exe": "/b/saguaro-qfn", "installer": {"family": "qfn", "qwen_quant": "q8_0"}}
+        old = {"exe": "/b/saguaro-qfn", "installer": {"family": "qwen", "qwen_quant": "q8_0"}}   # (before the split)
+        self.assertEqual(Q.family_of(new), "qfn")
+        self.assertEqual(Q.family_of(old), "qfn")
+        self.assertEqual(Q.family_of(self.REF_CFG), "qfn")           # (installer "qwen", no quant: the exe names it)
+        self.assertEqual(Q.family_of({"exe": "/opt/llm/bin/saguaro-qfn", "args": ["--pack", "/p"]}), "qfn")
+
+    def test_old_cyber_frost_configs_read_as_qfn(self):
+        """The old engine's configs (saguaro-glm, --ple-gguf, the q5_k_m files) read as "qfn" with its CYBER-FROST
+        quant since T8a - the setup's migrate_cyber_frost rewrites the file itself; its ids resolve to the quant too."""
+        for cfg in ({"exe": "/b/maya", "args": ["--pack", "/p", "--ple-gguf", "/g"]},
+                    {"exe": "/b/saguaro-glm", "installer": {"family": "qwen", "qwen_quant": "q5_k_m"}},
+                    {"exe": "/b/maya", "installer": {"family": "qwen"}}):
+            self.assertEqual(Q.family_of(cfg), "qfn", str(cfg))
+        self.assertEqual(Q.config_key({"exe": "/b/saguaro-glm",
+                                       "installer": {"family": "qwen", "qwen_quant": "q5_k_m"}}),
+                         Q.CYBER_FROST_QUANT)                    # (its old "q5_k_m" is this quant's key now)
+        migrated = {"exe": "/b/build-hip/qfn/saguaro-qfn",
+                    "installer": {"family": "qfn", "qwen_quant": Q.CYBER_FROST_QUANT}}
+        self.assertEqual(Q.family_of(migrated), "qfn")
+        self.assertEqual(Q.config_key(migrated), "cyber-frost-q5_k_m")
+
+    def test_the_qfn_names_and_defaults(self):
+        cfg = {"exe": "/b/saguaro-qfn", "installer": {"family": "qfn", "qwen_quant": "ud-q4_k_xl"}}
+        self.assertEqual(Q.config_key(cfg), "ud-q4_k_xl")
+        self.assertEqual(Q.config_label(cfg), "Qwen3.8-Flash-Next · UD-Q4_K_XL (saguaro-qfn)")
+        self.assertEqual(Q.config_stem("qfn", "ud-q4_k_xl"), "maya-qwen3.8-flash-next-ud-q4_k_xl")
+        self.assertEqual(Q.model_defaults(cfg), Q.MODEL_DEFAULTS["qfn"])
+        self.assertIsNone(Q.config_key({"exe": "/b/saguaro-qfn"}))            # (hand-made: None for the model itself)
+        # CYBER-FROST's quant of the family (T7): shown as its own, its config keeps the name it always had
+        cf = {"exe": "/b/qfn/saguaro-qfn", "installer": {"family": "qfn", "qwen_quant": Q.CYBER_FROST_QUANT}}
+        self.assertEqual(Q.shown("qfn", Q.CYBER_FROST_QUANT), "Qwen3.8-Flash-Next · CYBER-FROST-3.8 Q5_K_M "
+                                                              "(saguaro-qfn)")
+        self.assertEqual(Q.config_label(cf), "Qwen3.8-Flash-Next · CYBER-FROST-3.8 Q5_K_M (saguaro-qfn)")
+        self.assertEqual(Q.config_stem("qfn", Q.CYBER_FROST_QUANT), "maya-cyber-frost")   # (the name it always had)
 
 
 class Aliases(unittest.TestCase):

@@ -41,14 +41,21 @@ __device__ __forceinline__ float warp_max(float value) {
     for (int mask = 16; mask; mask >>= 1) value = fmaxf(value, __shfl_xor_sync(0xffffffffu, value, mask, 32));
     return value;
 }
+// PLAN-turbo-live: the picks a row keeps (10 - its request's drop; no table: all 10)
+__device__ __forceinline__ int turbo_keep(const int32_t* drop, int row) {
+    if (drop == nullptr) return 10;
+    const int d = drop[row];
+    return d <= 0 ? 10 : d >= 9 ? 1 : 10 - d;
+}
 __launch_bounds__(256, 1)
 __global__ void route(const float* __restrict__ logits, int32_t* __restrict__ ids,
-                      float* __restrict__ weights) {
+                      float* __restrict__ weights, const int32_t* __restrict__ drop) {
     // Preserve the pinned 32x8 block geometry; only row zero is active here.
     // blockIdx.x = the token (a multi-token launch; 0 for the single one)
     logits += (size_t) blockIdx.x * 512; ids += (size_t) blockIdx.x * 10; weights += (size_t) blockIdx.x * 10;
     if (threadIdx.y != 0) return;
     const int lane = threadIdx.x;
+    const int keep = turbo_keep(drop, (int) blockIdx.x);
     float values[16];
 #pragma unroll
     for (int i = 0; i < 16; ++i) values[i] = logits[lane + i * 32];
@@ -70,6 +77,7 @@ __global__ void route(const float* __restrict__ logits, int32_t* __restrict__ id
         if (__isnanf(values[i])) values[i] = -FLT_MAX;
     }
     float selected = 0.0f, selected_sum = 0.0f;
+    int top1 = 0;
     for (int rank = 0; rank < 10; ++rank) {
         float best = values[0];
         int expert = lane;
@@ -83,26 +91,28 @@ __global__ void route(const float* __restrict__ logits, int32_t* __restrict__ id
             const int other_id = __shfl_xor_sync(0xffffffffu, expert, mask, 32);
             if (other > best || (other == best && other_id < expert)) { best = other; expert = other_id; }
         }
+        if (rank == 0) top1 = expert;
         if ((expert & 31) == lane) {
             values[expert / 32] = -INFINITY;
-            ids[rank] = expert;
+            ids[rank] = rank < keep ? expert : top1;   // Turbo drop: a dropped pick aliases the top-1 at weight 0
             // Deliberately accumulate by WINNING EXPERT lane, not output rank.
             // Multiple selected experts in one lane add in selection order.
-            selected_sum += best;
+            if (rank < keep) selected_sum += best;
         }
         if (rank == lane) selected = best;
     }
     selected_sum = max(warp_sum(selected_sum), 6.103515625e-5f);
     const float inverse_selected_sum = 1.0f / selected_sum;
-    if (lane < 10) weights[lane] = selected * inverse_selected_sum;
+    if (lane < 10) weights[lane] = lane < keep ? selected * inverse_selected_sum : 0.0f;
 }
 __launch_bounds__(256, 1)
 __global__ void route_multi(const float* __restrict__ logits, int32_t* __restrict__ ids,
-                            float* __restrict__ weights, int n_tok) {
+                            float* __restrict__ weights, int n_tok, const int32_t* __restrict__ drop) {
     const int tk = (int) blockIdx.x * 8 + (int) threadIdx.y;
     if (tk >= n_tok) return;
     logits += (size_t) tk * 512; ids += (size_t) tk * 10; weights += (size_t) tk * 10;
     const int lane = threadIdx.x;
+    const int keep = turbo_keep(drop, tk);
     float values[16];
 #pragma unroll
     for (int i = 0; i < 16; ++i) values[i] = logits[lane + i * 32];
@@ -124,6 +134,7 @@ __global__ void route_multi(const float* __restrict__ logits, int32_t* __restric
         if (__isnanf(values[i])) values[i] = -FLT_MAX;
     }
     float selected = 0.0f, selected_sum = 0.0f;
+    int top1 = 0;
     for (int rank = 0; rank < 10; ++rank) {
         float best = values[0];
         int expert = lane;
@@ -137,16 +148,17 @@ __global__ void route_multi(const float* __restrict__ logits, int32_t* __restric
             const int other_id = __shfl_xor_sync(0xffffffffu, expert, mask, 32);
             if (other > best || (other == best && other_id < expert)) { best = other; expert = other_id; }
         }
+        if (rank == 0) top1 = expert;
         if ((expert & 31) == lane) {
             values[expert / 32] = -INFINITY;
-            ids[rank] = expert;
-            selected_sum += best;
+            ids[rank] = rank < keep ? expert : top1;
+            if (rank < keep) selected_sum += best;
         }
         if (rank == lane) selected = best;
     }
     selected_sum = max(warp_sum(selected_sum), 6.103515625e-5f);
     const float inverse_selected_sum = 1.0f / selected_sum;
-    if (lane < 10) weights[lane] = selected * inverse_selected_sum;
+    if (lane < 10) weights[lane] = lane < keep ? selected * inverse_selected_sum : 0.0f;
 }
 // The same contract for other (experts, top-k) shapes - Qwen3.6-35B-A3B's 256 / 8 - one warp per token, n_tok tokens
 // (8 per block).  The 512 / 10 path keeps its own kernels above (the Flash-Next bits), this template is only used
@@ -216,20 +228,44 @@ bool overlap(const void* a, size_t an, const void* b, size_t bn) {
 }
 void native_router_set_enabled(bool value) { enabled.store(value, std::memory_order_relaxed); }
 bool native_router_enabled() { return enabled.load(std::memory_order_relaxed); }
-void native_router_top10(const float* logits, int32_t* ids, float* weights, void* stream) {
+void native_router_top10(const float* logits, int32_t* ids, float* weights, void* stream, const int32_t* drop) {
     if (!stream || !valid(logits, 512 * 4) || !valid(ids, 10 * 4) || !valid(weights, 10 * 4)
         || overlap(logits, 512 * 4, ids, 10 * 4) || overlap(logits, 512 * 4, weights, 10 * 4)
         || overlap(ids, 10 * 4, weights, 10 * 4))
         throw std::invalid_argument("native router requires a stream, aligned spans, and disjoint outputs");
-    route<<<1, dim3(32, 8), 0, static_cast<cudaStream_t>(stream)>>>(logits, ids, weights);
+    route<<<1, dim3(32, 8), 0, static_cast<cudaStream_t>(stream)>>>(logits, ids, weights, drop);
     const auto error = cudaGetLastError();
     if (error != cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
 }
-void native_router_top10_multi(const float* logits, int32_t* ids, float* weights, int n_tok, void* stream) {
+void native_router_top10_multi(const float* logits, int32_t* ids, float* weights, int n_tok, void* stream,
+                               const int32_t* drop) {
     if (!stream || n_tok < 1 || !valid(logits, (size_t) n_tok * 512 * 4) || !valid(ids, (size_t) n_tok * 10 * 4) ||
         !valid(weights, (size_t) n_tok * 10 * 4))
         throw std::invalid_argument("native router (multi) requires a stream and aligned [n,512]/[n,10] buffers");
-    route_multi<<<(unsigned) ((n_tok + 7) / 8), dim3(32, 8), 0, static_cast<cudaStream_t>(stream)>>>(logits, ids, weights, n_tok);
+    route_multi<<<(unsigned) ((n_tok + 7) / 8), dim3(32, 8), 0, static_cast<cudaStream_t>(stream)>>>(logits, ids, weights, n_tok,
+                                                                                                    drop);
+    const auto error = cudaGetLastError();
+    if (error != cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
+}
+namespace {
+__global__ void turbo_drop_k(int32_t* __restrict__ ids, float* __restrict__ w, int n_tok, int k,
+                             const int32_t* __restrict__ drop) {
+    const int t = (int) (blockIdx.x * blockDim.x + threadIdx.x);
+    if (t >= n_tok) return;
+    const int d = drop[t];
+    if (d <= 0) return;
+    const int keep = d >= k ? 1 : k - d;
+    ids += (size_t) t * k; w += (size_t) t * k;
+    float s = 0.0f;
+    for (int i = 0; i < keep; ++i) s += w[i];
+    const float inv = 1.0f / fmaxf(s, 6.103515625e-5f);
+    for (int i = 0; i < keep; ++i) w[i] *= inv;
+    for (int i = keep; i < k; ++i) { ids[i] = ids[0]; w[i] = 0.0f; }
+}
+}
+void turbo_drop_apply(int32_t* ids, float* weights, int n_tok, int k, const int32_t* drop, void* stream) {
+    if (drop == nullptr || n_tok < 1) return;
+    turbo_drop_k<<<(unsigned) ((n_tok + 63) / 64), 64, 0, static_cast<cudaStream_t>(stream)>>>(ids, weights, n_tok, k, drop);
     const auto error = cudaGetLastError();
     if (error != cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
 }

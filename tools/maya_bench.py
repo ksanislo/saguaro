@@ -139,6 +139,13 @@ def drafting_choice(args, env: dict, engine_lines, answers, family: str = "") ->
             said = "MTP" if "glm mtp:" in text else "DFlash2" if "glm dflash" in text else ""
         elif family == "deepseek":
             said = "DSpark" if re.search(r"^dspark", text, re.M) else ""
+        elif family == "qfn":                # (QFN's INFO line: mtp=1 when its --mtp folder loaded the Lamina layer;
+            #  mtp_max=1 when its drafts are off (--mtp-max-t 1: windows of one token, prompt-lookup drafts only);
+            #  no INFO line seen: what the config's args say)
+            if re.search(r"\bmtp=1\b", text):
+                said = "MTP drafts off (--mtp-max-t 1)" if re.search(r"\bmtp_max=1\b", text) else "MTP (Lamina)"
+            elif flag("--mtp"):
+                said = "MTP drafts off (--mtp-max-t 1)" if flag("--mtp-max-t") == "1" else "MTP (Lamina)"
         said = said or "no drafting"
     acc = sum(x["d_acc"] for x in answers)
     off = sum(x["d_off"] for x in answers)
@@ -459,7 +466,8 @@ class Session:
                 continue
             f = reply_fields(line, self.multi)
             if f is None:
-                continue
+                self.lines.append(line.rstrip())   # (the engine's own lines between the answers: its INFO and, from
+                continue                           #  saguaro-qfn, its STAT speed lines - they go to its stdout)
             if f[0] == "ERR":
                 raise RuntimeError("the engine refused a benchmark request: " + " ".join(f[1:]))
             return parse_done(f), toks

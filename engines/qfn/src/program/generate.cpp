@@ -1206,11 +1206,9 @@ void extra_sources_append(const int32_t* t, size_t n) {
     for (auto& src : strata::spec::extra_draft_sources()) src->append(t, n);
 }
 
-// PLAN-turbo-live: the per-request lossy options on the request line: `turbo_drop=N` (run top-k minus N experts:
-// drop the N lowest router weights and renormalise the kept ones) and `turbo_skip=off|ssd|ram` (ssd: drop an
-// expert that would be read from SSD, VRAM and RAM still serve; ram: drop an expert not in VRAM).  Absent = off:
-// the request is exact, the line and its behavior are today's.  Parsed here and stored per slot/sequence; the
-// engine that does not apply one yet says so once, per request, and runs that request exact.
+// PLAN-turbo-live: the per-request lossy options on the request line: `turbo_drop=N` (the reply's decode windows route
+// with the top-k minus N experts, renormalised: SessionState::turbo_drop, native_router.hpp) and `turbo_skip` (not
+// applied by this engine: skip stays off).  Absent = off: the request is exact.
 struct Turbo {
     int drop = 0;     // 0 = off, else 1..9 (the router's k is 10)
     int skip = 0;     // 0 off, 1 ssd, 2 ram
@@ -1221,8 +1219,21 @@ void turbo_key(Turbo& t, const std::string& key, const char* val) {
     if (key == "turbo_drop") t.drop = std::clamp(std::atoi(val), 0, 9);
     else if (key == "turbo_skip") t.skip = std::string(val) == "ram" ? 2 : std::string(val) == "ssd" ? 1 : 0;
 }
-std::string turbo_said(const Turbo& t) {
-    return "turbo drop=" + std::to_string(t.drop) + " skip=" + t.skip_name();
+/// The drop a request's reply routes with: SAGUARO_ROUTE_PRIOR / SAGUARO_ROUTE_RESIDENT re-pick the top-10 after the router,
+/// which would undo it, so with either on the request runs exact (said once).
+int turbo_drop_of(const Turbo& t) {
+    static const bool repick = [] {
+        const char* a = std::getenv("SAGUARO_ROUTE_PRIOR");
+        const char* b = std::getenv("SAGUARO_ROUTE_RESIDENT");
+        return (a && std::atof(a) > 0.0) || (b && std::atof(b) > 0.0);
+    }();
+    if (t.drop > 0 && repick) {
+        static bool said = false;
+        if (!said) std::fprintf(stderr, "saguaro serve: turbo drop is off beside SAGUARO_ROUTE_PRIOR / SAGUARO_ROUTE_RESIDENT\n");
+        said = true;
+        return 0;
+    }
+    return t.drop;
 }
 
 bool parse_i64_list(const char* s, std::vector<int64_t>& out, std::string& err) {
@@ -12390,7 +12401,7 @@ int main(int argc, char** argv) {
             std::printf("INFO logit_bias=1 context=%lld kv=%s kv_resident=%lld kv_bytes_token=%llu%s "
                         "expert_slots=%lld expert_cache_mib=%lld "
                         "expert_slots_primary=%lld expert_cache_primary_mib=%lld spec=%d "
-                        "mtp_max=%d lookup=%d vram_free_mib=%lld cvec=%s arena_mib=%lld pool_workers=%d pcie_frac=%.2f "
+                        "mtp_max=%d mtp=%d lookup=%d vram_free_mib=%lld cvec=%s arena_mib=%lld pool_workers=%d pcie_frac=%.2f "
                         "spec_min_p=%.2f conversation_cache_mib=%lld conversation_cache_slots=%d "
                         "conversation_cache_min_free_mib=%lld conversation_cache_min_tokens=%lld "
                         "tail_role_token=%lld vram_elastic=%d "
@@ -12402,7 +12413,9 @@ int main(int argc, char** argv) {
                                      : std::string()).c_str(),
                         (long long) slots_all, (long long) mib_all,
                         (long long) slots_primary, (long long) mib_primary,
-                        o.spec, o.mtp_max_t,
+                        // mtp= as the maya engines name it (the Monitor's Speculation reads it: on when --mtp loaded the
+                        // drafter, i.e. the same condition as `use_mtp` below); mtp_max= above stays the window cap.
+                        o.spec, o.mtp_max_t, use_mtp ? 1 : 0,
                         o.suffix_draft, (long long) (free_b >> 20), cvec_summary.c_str(),
                         (long long) ((o.mmap_experts ? src.resident_bytes() : strata::kernels::cpu::expert_layout().total) >> 20),
                         pool.workers(), o.pcie_frac,
@@ -12422,14 +12435,14 @@ int main(int argc, char** argv) {
                                        // conversation for its next turn (the server picks slots by what they hold)
                                        (piped_mtp ? " slot_keep=1" : "")).c_str() : "");
             // the Monitor's "Where the experts live" layout (parity with the maya engines' Qwen path, which names
-            // itself the same way): engine_kind=qwen picks TIER_SETS.qwen (serve/web/monitor.js), and tierShares()
+            // itself the same way): engine_kind=qfn picks TIER_SETS.qfn (serve/web/monitor.js), and tierShares()
             // (serve/web/server.js) reads experts / vram_slots / vram_gb / ram_slots / ram_gb from here and
             // vram_used / ram_used / vram_gb / ram_gb / disk_gb from the STAT lines.  QFN has no SSD tier: every
             // expert lives in RAM (resident or mapped) and the ones VRAM's caches do not hold are computed by the
             // CPU from there, so the STAT lines report disk=0 / disk_gb=0.
             {
                 const int64_t all_experts = (int64_t) g.n_layers * (int64_t) g.n_expert;
-                std::printf("INFO engine_kind=qwen experts=%lld vram_slots=%lld vram_gb=%.1f ram_slots=%lld ram_gb=%.1f\n",
+                std::printf("INFO engine_kind=qfn experts=%lld vram_slots=%lld vram_gb=%.1f ram_slots=%lld ram_gb=%.1f\n",
                             (long long) all_experts, (long long) slots_all, (double) mib_all / 1024.0,
                             (long long) all_experts,
                             (double) (o.mmap_experts ? src.resident_bytes()
@@ -12893,6 +12906,11 @@ int main(int argc, char** argv) {
             Turbo turbo;
         };
         std::vector<BSlot> bs((size_t) std::max(o.batch, 0));
+        // PLAN-turbo-live: slot b's rows route with `drop` (every stage's session of the slot; 0: exact)
+        auto slot_turbo = [&](int b, int drop) {
+            for (auto& v : bslot_ss)
+                if (b >= 0 && (size_t) b < v.size() && v[(size_t) b]) v[(size_t) b]->turbo_drop = drop;
+        };
         // an admission beside the slots, at its first token: one line with where its time went
         auto adm_first = [&](int b) {
             BSlot& sl = bs[(size_t) b];
@@ -12920,14 +12938,20 @@ int main(int argc, char** argv) {
         // the Monitor's STAT line while the batch windows run (the same format the maya engines print and the server's
         // tiers parser reads): at most once a second, over what was decoded since the last line - the engine-wide
         // expert-cache hits / lookups and the MTP drafts the windows offered and kept
+        // the experts the adaptive VRAM tier has promoted into VRAM since the engine started: the asynchronous tier's
+        // `a_swapped` when --adapt-async runs, else the blocking tier's `adapt_nswaps` (the same pick the decode timing
+        // line makes at dt_sw0).  promo= in the STAT line reports how many landed since its last line, per token.
+        const auto promo_now = [&] { return ajob ? a_swapped : adapt_nswaps; };
         int64_t bstat_toks = 0, bstat_off = 0, bstat_acc = 0;
         int64_t bstat_hits0 = drive.d.cache_hits, bstat_toks0 = 0, bstat_off0 = 0, bstat_acc0 = 0;
         int64_t bstat_look0 = drive.d.cache_hits + drive.d.cache_admitted + drive.d.cache_refused;
+        int64_t bstat_promo0 = promo_now();
         Clock::time_point bstat_t1 = Clock::now();
         const auto bstat_reset = [&] {
             bstat_t1 = Clock::now();
             bstat_hits0 = drive.d.cache_hits;
             bstat_look0 = drive.d.cache_hits + drive.d.cache_admitted + drive.d.cache_refused;
+            bstat_promo0 = promo_now();
             bstat_toks0 = bstat_toks; bstat_off0 = bstat_off; bstat_acc0 = bstat_acc;
         };
         const auto batch_stat_line = [&](int active_slots) {
@@ -12958,11 +12982,12 @@ int main(int argc, char** argv) {
             const int64_t all_experts = (int64_t) g.n_layers * (int64_t) g.n_expert;
             const double ram_bytes = (double) (o.mmap_experts ? src.resident_bytes()
                                                               : strata::kernels::cpu::expert_layout().total);
-            std::printf("STAT tok_s=%.2f ms_tok=%.2f vram_hit=%.4f ram_fetch=%.3f disk=0.000 "
+            std::printf("STAT tok_s=%.2f ms_tok=%.2f vram_hit=%.4f ram_fetch=%.3f disk=0.000 promo=%.3f "
                         "vram_used=%lld vram_slots=%lld ram_used=%lld ram_gb=%.1f vram_gb=%.1f disk_gb=0.0 "
                         "draft_acc=%lld draft_off=%lld active=%d\n",
                         n / std::max(1e-9, el), 1000.0 * el / n, (double) h / (double) std::max<int64_t>(1, look),
                         (double) std::max<int64_t>(0, look - h) / n,
+                        (double) std::max<int64_t>(0, promo_now() - bstat_promo0) / n,
                         (long long) v_used, (long long) v_slots,
                         (long long) std::max<int64_t>(0, all_experts - v_used),
                         ram_bytes / 1073741824.0, v_bytes / 1073741824.0,
@@ -14545,6 +14570,7 @@ int main(int argc, char** argv) {
             }
             // read: the slot decodes from here as one admitted through the prompt path would
             sl.lane = false;
+            slot_turbo(b, turbo_drop_of(sl.turbo));
             sl.lane_ids.clear();
             sl.lane_ids.shrink_to_fit();
             sl.adm_read_ms = ms;
@@ -16533,9 +16559,7 @@ int main(int argc, char** argv) {
             sl.p = n - 1;
             sl.max_new = j.r.max_new;
             sl.turbo = j.r.turbo;
-            if (!sl.turbo.off())
-                std::fprintf(stderr, "saguaro batch: slot %d: %s asked for - this engine build does not apply it yet; "
-                                     "the request runs exact\n", b, turbo_said(sl.turbo).c_str());
+            slot_turbo(b, turbo_drop_of(sl.turbo));
             sl.t0 = Clock::now();
             sl.ids.assign(ids.begin(), ids.end() - 1);
             sl.cvec = cvec_cached;
@@ -16719,9 +16743,7 @@ int main(int argc, char** argv) {
             sl.ids.assign(sl.lane_ids.begin(), sl.lane_ids.begin() + resume);
             sl.max_new = r.max_new;
             sl.turbo = r.turbo;
-            if (!sl.turbo.off())
-                std::fprintf(stderr, "saguaro batch: slot %d: %s asked for - this engine build does not apply it yet; "
-                                     "the request runs exact\n", b, turbo_said(sl.turbo).c_str());
+            slot_turbo(b, 0);   // (its prompt is read through the windows: exact; the drop starts with its reply)
             sl.t0 = Clock::now();
             sl.cvec = cvec_cached;
             sl.adm_log = true;
@@ -17232,9 +17254,7 @@ int main(int argc, char** argv) {
                 sl.p = n - 1;
                 sl.max_new = j.r.max_new;
                 sl.turbo = j.r.turbo;
-                if (!sl.turbo.off())
-                    std::fprintf(stderr, "saguaro batch: slot %d: %s asked for - this engine build does not apply it yet; "
-                                         "the request runs exact\n", b, turbo_said(sl.turbo).c_str());
+                slot_turbo(b, turbo_drop_of(sl.turbo));
                 sl.t0 = Clock::now();
                 sl.ids.assign(ids.begin(), ids.end() - 1);
                 sl.cvec = cvec_cached;
@@ -18741,9 +18761,9 @@ int main(int argc, char** argv) {
                 std::printf("ERR bad request: %s\n", pe.empty() ? "max_new" : pe.c_str());
                 continue;
             }
-            if (admit_slot < 0 && !req_turbo.off())   // a solo request's own line (a batch slot says it at its admission)
-                std::fprintf(stderr, "saguaro serve: %s asked for - this engine build does not apply it yet; the request "
-                                     "runs exact\n", turbo_said(req_turbo).c_str());
+            if (req_turbo.skip != 0)
+                std::fprintf(stderr, "saguaro serve: turbo skip=%s asked for - this engine applies only drop; skip is off\n",
+                             req_turbo.skip_name());
             const int64_t n = (int64_t) ids.size();
             req_imgs.clear();
             if (geni && !o.vision) { std::printf("ERR this engine was started without --vision\n"); continue; }
@@ -19944,6 +19964,7 @@ int main(int argc, char** argv) {
                     if (can && copy_to_slot(ys, pre, ye)) {
                         BSlot& sl = bs[(size_t) ys];
                         sl = BSlot{};
+                        slot_turbo(ys, 0);
                         sl.ids = std::move(pre);
                         sl.cached = true;
                         sl.partial = true;
@@ -21066,6 +21087,14 @@ int main(int argc, char** argv) {
             const int64_t decode_look0 = drive.d.cache_hits + drive.d.cache_admitted + drive.d.cache_refused;
             const int64_t offload0 = drive.d.offload_entries;   // #588
             pcie_auto.mark(drive.d.ms_run, drive.d.multi_misses);   // the prompt's windows are not the decode's
+            // PLAN-turbo-live: the reply's windows route with this request's drop (every stage's session), off again after
+            struct SoloTurbo {
+                std::vector<strata::core::SessionState*> sx;
+                ~SoloTurbo() { for (auto* u : sx) u->turbo_drop = 0; }
+            } solo_turbo;
+            solo_turbo.sx.push_back(&ss);
+            for (auto& st : stages) solo_turbo.sx.push_back(&st->ss);
+            for (auto* u : solo_turbo.sx) u->turbo_drop = turbo_drop_of(req_turbo);
             if (cancelled) finish = nf_hit ? "nonfinite" : read_vram ? "vram" : "cancel";
             // ======== --pipeline-windows 2: the decode windows with the two cards overlapped ========
             // Stage 0 (the first card) runs window K+1 while stage 1 verifies window K, on the guess that K is accepted
@@ -21726,6 +21755,9 @@ int main(int argc, char** argv) {
                     std::fprintf(stderr, "saguaro pipeline calibration (p_on decile: on/scored):%s\n", cal.c_str());
                 }
             }
+            // Each solo request's STAT measurement starts fresh here (as a batch request's does when its slot begins):
+            // without it the first line after an idle gap would divide the new request's few tokens by the whole gap.
+            if (o.batch == 0) bstat_reset();
             while (!pl_ran && !cancelled && produced_n < max_new) {
                 int T = use_mtp ? S_mtp : 1;   // no --mtp: one token a round unless a lookup draft fires
                 policy.set_context(p);
@@ -22020,6 +22052,7 @@ int main(int argc, char** argv) {
                 }
                 first_window = false;
                 bool eos = false;
+                const int64_t produced_n0 = produced_n;   // the tokens this window emits: the solo STAT line's denominator
                 for (int i = merged ? a : 0; i <= a && produced_n < max_new && !eos; ++i) {   // (merged: row T-1 only)
                     std::printf("T %d\n", (int) outv[(size_t) i]);
                     strata::core::progress_beat();
@@ -22029,6 +22062,16 @@ int main(int argc, char** argv) {
                     eos = std::find(o.eos_ids.begin(), o.eos_ids.end(), (int64_t) outv[(size_t) i]) != o.eos_ids.end();
                 }
                 std::fflush(stdout);
+                // The solo (parallel 1) engine's tier card: the batch path prints its STAT line from its windows; a
+                // solo engine has none, so the Monitor's "where the experts live" card stays blank.  Feed this window's
+                // tokens/drafts into the same counters and print the same line at the same cadence (once a second,
+                // self-resetting) through the same function.  Solo only: a batch engine drives those counters from
+                // batch_step, so leaving o.batch > 0 alone keeps the two paths from mixing.
+                if (o.batch == 0) {
+                    bstat_toks += produced_n - produced_n0;
+                    if (!merged) { bstat_off += T - 1; bstat_acc += a; }   // (a merged window's rows are prompt tokens)
+                    batch_stat_line(1);   // one active slot (this request)
+                }
                 ++rounds;
                 if (drive.d.fs) drive.d.fs->completed.fetch_add(1, std::memory_order_release);
                 const Clock::time_point tw2 = Clock::now();
@@ -22303,9 +22346,7 @@ int main(int argc, char** argv) {
                     sl.produced = 1;
                     sl.max_new = admit_max_new;
                     sl.turbo = req_turbo;
-                    if (!sl.turbo.off())
-                        std::fprintf(stderr, "saguaro batch: slot %d: %s asked for - this engine build does not apply it "
-                                             "yet; the request runs exact\n", admit_slot, turbo_said(sl.turbo).c_str());
+                    slot_turbo(admit_slot, turbo_drop_of(sl.turbo));
                     sl.t0 = Clock::now();
                     sl.ids = live;
                     if (batch_mtp) {

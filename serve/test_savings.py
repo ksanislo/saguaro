@@ -1,6 +1,8 @@
 """serve/test_savings.py - the sidebar's "Saved": each request's tokens counted per model (new prompt, prompt reused
 from the cache, output), kept across starts, and priced at the model's own API (DeepSeek's peak hours at twice its
-price) - against the mock engine, no GPU.
+price) - against the mock engine, no GPU.  And the prices themselves: data/api-prices.json, the newer copy fetched
+from GitHub once a day when the Savings page asks, and the precedence the page's own prices > fetched > file >
+built-ins.  urllib is mocked throughout: nothing here touches the network.
 
     python -m unittest serve.test_savings -v
 """
@@ -9,12 +11,14 @@ from __future__ import annotations
 import calendar
 import json
 import os
+import shutil
 import sys
 import tempfile
 import unittest
 import urllib.error
 import urllib.request
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from serve import savings as SV  # noqa: E402
@@ -66,8 +70,11 @@ class Counting(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.path = Path(self.tmp.name) / SV.FILE
+        self.off = mock.patch.dict(os.environ, {"SAGUARO_UPDATE_CHECK": "0"})    # (a report asks for prices: not here)
+        self.off.start()
 
     def tearDown(self):
+        self.off.stop()
         self.tmp.cleanup()
 
     def test_kept_across_starts_and_per_model(self):
@@ -162,10 +169,13 @@ class Page(unittest.TestCase):
                            ChatTemplate(ROOT / "serve/chat_template.jinja"), model_name="glm-5.3-flash")
         self.tmp = tempfile.TemporaryDirectory()
         self.svc.savings = SV.Ledger(Path(self.tmp.name) / SV.FILE, "maya-maya-m.json", "glm-5.3-flash", "Maya-M")
+        self.off = mock.patch.dict(os.environ, {"SAGUARO_UPDATE_CHECK": "0"})    # (the page reads prices: no fetching in tests)
+        self.off.start()
         self.httpd = serve(self.svc, port=0)
         self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
 
     def tearDown(self):
+        self.off.stop()
         self.httpd.shutdown()
         self.httpd.server_close()
         self.tmp.cleanup()
@@ -214,6 +224,136 @@ class Page(unittest.TestCase):
         self.assertEqual(s, 403)
         s, r = self.req("POST", "/api/savings/reset", {})
         self.assertEqual((s, r["usd"]), (200, 0.0))
+
+
+class PriceFiles(unittest.TestCase):
+    """The default prices: the page's own > a fetched api-prices.json (valid, newer as_of) > data/api-prices.json >
+    the built-ins.  A file that does not check out is ignored with one log line; the fetch runs at most once a day,
+    only when the Savings page asks, and SAGUARO_UPDATE_CHECK=0 keeps it off."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.repo_file = self.tmp / "api-prices.json"                # (in place of the checkout's data/api-prices.json)
+        self.save = self.tmp / "savings"                             # (the ledger's folder: the cache lives here too)
+        self.save.mkdir()
+        self.off = mock.patch.dict(os.environ, {"SAGUARO_UPDATE_CHECK": "0"})    # (no test fetches: each one says "1" itself)
+        self.off.start()
+
+    def tearDown(self):
+        self.off.stop()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    @staticmethod
+    def text(as_of="2026-11", inp=0.99):
+        return json.dumps({"as_of": as_of, "prices":
+                           {"glm-5.3-flash": {"api": "Z.ai", "input": inp, "cached": 0.03, "output": 0.5}}})
+
+    def ledger(self):
+        return SV.Ledger(self.save / SV.FILE, "maya-maya-m.json", "glm-5.3-flash",
+                         prices=SV.PriceBook(self.save, self.repo_file))
+
+    @staticmethod
+    def answered(text):
+        r = mock.MagicMock()
+        r.__enter__.return_value.read.return_value = text.encode()
+        return r
+
+    def test_precedence_page_file_builtins(self):
+        led = self.ledger()
+        self.assertEqual(led.price("glm-5.3-flash")["input"], 0.15)             # (no file yet: the built-ins count)
+        self.repo_file.write_text(self.text())
+        led = self.ledger()
+        self.assertEqual(led.price("glm-5.3-flash")["input"], 0.99)             # (the file on disk beats the built-ins)
+        self.assertEqual(led.report()["prices_as_of"], "2026-11")
+        led.set_price("glm-5.3-flash", {"input": 0.5, "cached": 0.05, "output": 1})
+        self.assertEqual(led.price("glm-5.3-flash")["input"], 0.5)              # (the page beats the file)
+        led.set_price("glm-5.3-flash", None)
+        self.assertEqual(led.price("glm-5.3-flash")["input"], 0.99)             # (back to the file's)
+
+    def test_the_fetch_once_a_day_and_only_a_newer_file_wins(self):
+        self.repo_file.write_text(self.text("2026-10", 0.10))
+        led = self.ledger()
+        with mock.patch.dict(os.environ, {"SAGUARO_UPDATE_CHECK": "1"}), \
+                mock.patch.object(SV.urllib.request, "urlopen", return_value=self.answered(self.text("2026-11", 0.99))) as net:
+            rep = led.report()
+            self.assertEqual(led.price("glm-5.3-flash")["input"], 0.99)         # (fetched beats this folder's own)
+            self.assertEqual(rep["prices_source"], {"from": "github", "as_of": "2026-11"})
+            self.assertEqual(json.loads((self.save / SV.PRICE_FILE).read_text())["as_of"], "2026-11")   # (cached for the next start)
+            req = net.call_args[0][0]
+            self.assertRegex(req.full_url, r"raw\.githubusercontent\.com/[\w.-]+/[\w.-]+/main/data/api-prices\.json$")
+            led.report()                                                        # (once a day, not on every page load)
+            net.assert_called_once()
+
+    def test_a_fetched_copy_that_is_not_newer_does_not_move_the_prices(self):
+        self.repo_file.write_text(self.text("2026-11", 0.99))
+        led = self.ledger()
+        with mock.patch.dict(os.environ, {"SAGUARO_UPDATE_CHECK": "1"}), \
+                mock.patch.object(SV.urllib.request, "urlopen", return_value=self.answered(self.text("2026-10", 0.10))):
+            rep = led.report()
+        self.assertEqual(led.price("glm-5.3-flash")["input"], 0.99)
+        self.assertEqual(rep["prices_source"], {"from": "file", "as_of": "2026-11"})
+
+    def test_yesterdays_cached_copy_is_used_at_the_start(self):
+        self.repo_file.write_text(self.text("2026-10", 0.10))
+        (self.save / SV.PRICE_FILE).write_text(self.text("2026-11", 0.99))
+        self.assertEqual(self.ledger().price("glm-5.3-flash")["input"], 0.99)   # (fetched yesterday, still the newer)
+        (self.save / SV.PRICE_FILE).write_text(self.text("2026-09", 0.07))      # (older than the folder's own: not used)
+        self.assertEqual(self.ledger().price("glm-5.3-flash")["input"], 0.10)
+
+    def test_the_fetch_is_off_when_the_user_said_no_requests(self):
+        self.repo_file.write_text(self.text())
+        led = self.ledger()
+        with mock.patch.object(SV.urllib.request, "urlopen") as net:            # (SAGUARO_UPDATE_CHECK=0 from setUp)
+            rep = led.report()
+        net.assert_not_called()
+        self.assertEqual(led.price("glm-5.3-flash")["input"], 0.99)
+        self.assertEqual(rep["prices_source"], {"from": "file", "as_of": "2026-11"})
+
+    def test_a_network_error_falls_back_to_the_file_and_the_builtins(self):
+        self.repo_file.write_text(self.text("2026-11", 0.99))
+        led = self.ledger()
+        with mock.patch.dict(os.environ, {"SAGUARO_UPDATE_CHECK": "1"}), \
+                mock.patch.object(SV.urllib.request, "urlopen", side_effect=OSError("offline")):
+            rep = led.report()
+        self.assertEqual(led.price("glm-5.3-flash")["input"], 0.99)             # (the disk file counts meanwhile)
+        self.assertEqual(rep["prices_source"], {"from": "file", "as_of": "2026-11"})
+        self.assertIn("offline", led.book.error)
+        led2 = SV.Ledger(self.save / SV.FILE, "k.json", "glm-5.3-flash",
+                         prices=SV.PriceBook(self.save, self.tmp / "no-such-file.json"))   # (and no file at all)
+        with mock.patch.dict(os.environ, {"SAGUARO_UPDATE_CHECK": "1"}), \
+                mock.patch.object(SV.urllib.request, "urlopen", side_effect=urllib.error.URLError("no route")):
+            led2.report()
+        self.assertEqual(led2.price("glm-5.3-flash")["input"], 0.15)            # (the built-ins, again)
+
+    def test_a_bad_price_file_is_ignored_with_one_log_line(self):
+        import io
+        from contextlib import redirect_stdout
+        bad = ["{not json",
+               json.dumps({"prices": {}}),                                        # (no as_of month)
+               json.dumps({"as_of": "2026-11", "prices": {"glm-5.3-flash": {"input": 1, "cached": 0}}}),   # (no output)
+               json.dumps({"as_of": "2026-11", "prices":
+                          {"glm-5.3-flash": {"api": "Z.ai", "input": 1, "cached": 0, "output": 1, "match": "([("}}})]
+        out = io.StringIO()
+        for text in bad:
+            self.repo_file.write_text(text)
+            with redirect_stdout(out):
+                led = self.ledger()
+            self.assertEqual(led.price("glm-5.3-flash")["input"], 0.15, text)   # (the built-ins count)
+        self.assertEqual(out.getvalue().count("ignored"), len(bad))
+
+    def test_fetched_junk_is_ignored_with_one_log_line(self):
+        import io
+        from contextlib import redirect_stdout
+        self.repo_file.write_text(self.text("2026-11", 0.99))
+        led = self.ledger()
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, {"SAGUARO_UPDATE_CHECK": "1"}), \
+                mock.patch.object(SV.urllib.request, "urlopen", return_value=self.answered("<html>not a price file</html>")), \
+                redirect_stdout(out):
+            led.report()
+        self.assertEqual(out.getvalue().count("ignored"), 1)
+        self.assertEqual(led.price("glm-5.3-flash")["input"], 0.99)             # (the disk file still counts)
+        self.assertFalse((self.save / SV.PRICE_FILE).exists())                  # (the good cache is not overwritten)
 
 
 if __name__ == "__main__":
