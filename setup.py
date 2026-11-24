@@ -393,16 +393,25 @@ def _cpuid_avx2() -> bool:
         return False
 
 
+NVIDIA_COLS = "index,name,memory.total,compute_cap,driver_version,pci.bus_id"
+
+
 def gpus():
-    """Every NVIDIA GPU, numbered as nvidia-smi numbers them (by PCI bus, the order the engine is told to use)."""
-    s = out(["nvidia-smi", "--query-gpu=index,name,memory.total,compute_cap,driver_version,pci.bus_id",
-             "--format=csv,noheader,nounits"])
+    """Every NVIDIA GPU, numbered as nvidia-smi numbers them (by PCI bus, the order the engine is told to use).
+    A card whose display_active says Enabled / Disabled gets the fact as "display" (True / False), like the AMD
+    sysfs facts; "[N/A]", "[Not Supported]", a missing field (an nvidia-smi that does not know it) or a failed
+    query is unknown - no key - and counts as a card that may drive the desktop."""
+    s = out(["nvidia-smi", f"--query-gpu={NVIDIA_COLS},display_active", "--format=csv,noheader,nounits"])
+    if not s.strip():                                      # (an old nvidia-smi without the field fails the whole query)
+        s = out(["nvidia-smi", f"--query-gpu={NVIDIA_COLS}", "--format=csv,noheader,nounits"])
     umem = unified_memory_pci_ids()
     integrated = cuda_integrated_pci() if umem else {}     # (only a card that might be unified needs the question)
     found = []
     for line in s.strip().splitlines():
         try:
-            idx, name, mem, cc, drv, bus = [x.strip() for x in line.split(",")]
+            fields = [x.strip() for x in line.split(",")]
+            disp = fields.pop() if len(fields) == 7 else ""
+            idx, name, mem, cc, drv, bus = fields
             key = _pci_key(bus)
             try:
                 vram, reported = float(mem) / 1024.0, True
@@ -414,8 +423,11 @@ def gpus():
             unified = integrated[key] if key in integrated else (key in umem and not reported)
             if not reported:
                 vram = ram_gb() if unified else 0.0
-            found.append({"index": int(idx), "name": name, "vram_gb": vram, "arch": cc.replace(".", ""),
-                          "driver": drv, "pci": bus, "unified_memory": unified})
+            g = {"index": int(idx), "name": name, "vram_gb": vram, "arch": cc.replace(".", ""),
+                 "driver": drv, "pci": bus, "unified_memory": unified}
+            if disp in ("Enabled", "Disabled"):            # ("[N/A]", "[Not Supported]", missing: unknown, no key)
+                g["display"] = disp == "Enabled"
+            found.append(g)
         except ValueError:
             continue
     return found

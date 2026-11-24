@@ -339,6 +339,59 @@ class Config(unittest.TestCase):
         self.assertNotIn("--tp", a)
 
 
+class Reserve(unittest.TestCase):
+    """v1.2.1-A: the --reserve-gb a fresh config writes follows the display rule on both vendors - 3.0 GB where the
+    desktop may run (a connected or unknown display), 0.5 on a card no display runs on, 1.0 on a Linux AMD APU - and
+    the user's --vram-reserve-mib, or the config before's own --reserve-gb, come first."""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.pack = self.root / "MM" / "maya-mm3"
+        self.pack.mkdir(parents=True)
+        (self.pack / "mm3.txt").write_text("hidden_size 6144\nmax_position_embeddings 1048576\n")
+        self.patches = [patch.object(maya, "ROOT", self.root), patch.object(maya, "say", lambda *a: None),
+                        patch.object(maya, "ok", lambda *a: None), patch.object(maya, "step", lambda *a: None)]
+        for p in self.patches:
+            p.start()
+
+    def tearDown(self):
+        for p in self.patches:
+            p.stop()
+
+    def reserve(self, gpus, backend="cuda", old=None, **kw):
+        for name in ("maya-mm3.json", "maya-mm3-hip.json"):
+            (self.root / name).unlink(missing_ok=True)
+        if old is not None:
+            (self.root / ("maya-mm3-hip.json" if backend == "hip" else "maya-mm3.json")).write_text(json.dumps(old))
+        pc = {"backend": backend, "gpus": [dict(g, index=i) for i, g in enumerate(gpus)]}
+        p = maya.write_config_mm3(args(vram_reserve_mib=kw.pop("vram", None)), pc, {"lib_dirs": []}, self.pack,
+                                  131072, Path("/models"), self.pack.parent)
+        a = json.loads(p.read_text())["args"]
+        return a[a.index("--reserve-gb") + 1] if "--reserve-gb" in a else None
+
+    def test_nvidia(self):
+        t4 = {"name": "Tesla T4", "vram_gb": 15.0, "arch": "75"}
+        self.assertEqual(self.reserve([{**t4, "display": True}]), "3.0")    # (a GeForce driving the desktop)
+        self.assertEqual(self.reserve([t4]), "3.0")                         # (display_active unknown)
+        self.assertEqual(self.reserve([{**t4, "display": False},
+                                       {**t4, "display": False}]), "0.5")   # (a headless box, both cards)
+        self.assertEqual(self.reserve([{**t4, "display": False}, {**t4, "display": True}]), "3.0")
+        self.assertEqual(self.reserve([t4], vram=1500), "1.5")              # (--vram-reserve-mib asked for)
+        self.assertEqual(self.reserve([t4], old={"args": ["--reserve-gb", "2.5"]}), "2.5")   # (kept)
+
+    def test_amd(self):
+        card = {"arch": "gfx1100", "name": "Radeon RX 7900 XTX", "vram_gb": 24}
+        apu = {"arch": "gfx1151", "name": "Radeon 8060S", "vram_gb": 96}
+        self.assertEqual(self.reserve([card], backend="hip"), "3.0")        # (no facts: the desktop's room)
+        self.assertEqual(self.reserve([{**card, "display": False, "vram_used_gb": 0.1}], backend="hip"), "0.5")
+        self.assertEqual(self.reserve([{**card, "display": True}], backend="hip"), "3.0")
+        with patch.object(maya, "WIN", False):
+            self.assertEqual(self.reserve([apu], backend="hip"), "1.0")     # (the Linux APU case)
+        with patch.object(maya, "WIN", True):
+            self.assertEqual(self.reserve([apu], backend="hip"), "3.0")     # (its desktop is on the APU too)
+        self.assertEqual(self.reserve([card], backend="hip", vram=2048), "2.0")
+
+
 class Gguf(unittest.TestCase):
     """Saguaro's GGUF quants of MiniMax: the manifest (unpublished: no revision, no sha256), the choice, AMD allowed for
     them (and the EXL3 quant, experimental), the folder and the pack's tool."""
