@@ -73,6 +73,39 @@ def mm3_cfg(d: Path, name="maya-mm3.json", drafter=True, vision=True) -> Path:
     return p
 
 
+QFN_SHARD = "Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf"
+
+
+def qfn_cfg(d: Path, name="maya-qwen3.8-flash-next-ud-q4_k_xl.json", mtp=True, vision=False, **extra) -> Path:
+    """A QFN config as saguaro.py's write_config_qfn writes it (ref/amd-setup-written-qfn.json, in small): the
+    Lamina draft layer beside the models folder, and with `vision` the encoder entry + --vision of a CUDA setup."""
+    folder = d / "Qwen3.8-Flash-Next-UD-Q4_K_XL"
+    pack = folder / "pack"
+    pack.mkdir(parents=True, exist_ok=True)
+    (folder / QFN_SHARD).write_bytes(b"g" * 1000)
+    args = ["--pack", str(pack), "--native", str(folder / QFN_SHARD), "--expert-cache", "auto", "--prefill", "auto",
+            "--spec", "3", "--spec-min-p", "0.7", "--max-context", "65536", "--kv", "int8",
+            "--kv-resident", "32768", "--vram-reserve-mib", "700", "--resident-budget-gib", "71",
+            "--rope-scaling", "yarn", "--rope-scale", "4", "--yarn-orig-ctx", "262144"]
+    if mtp:
+        drafter = d / "Qwen3.8-Flash-Next-MTP-Lamina"
+        drafter.mkdir(exist_ok=True)
+        (drafter / "ggml-model-f16.gguf").write_bytes(b"m" * 500)
+        args += ["--mtp", str(drafter)]
+    cfg = {"exe": "/b/saguaro-qfn", "args": args, "model_name": "Qwen3.8-Flash-Next-UD-Q4_K_XL", "gpu": [0],
+           "port": 8080, "log": str(d / "qfn.log"),
+           "env": {"SAGUARO_NO_LARGEPAGES": "1", "SAGUARO_YARN_ELASTIC": "1", "SAGUARO_MMQ_KQ": "1"},
+           "installer": {"family": "qfn", "qwen_quant": "ud-q4_k_xl", "engine": "saguaro-qfn",
+                         "models_dir": str(d), "written": "2026-11-23 20:20"}, **extra}
+    if vision:
+        cfg["vision"] = {"exe": "/b/vision-qfn", "mmproj": str(d / "mmproj-Qwen3.8-Flash-Next-BF16.gguf"),
+                         "model": str(folder / QFN_SHARD), "gpu": True, "elastic": True}
+        cfg["args"] += ["--vision"]
+    p = d / name
+    p.write_text(json.dumps(cfg, indent=1))
+    return p
+
+
 class Settings(unittest.TestCase):
     """A config's engine arguments as the page's settings, and back."""
 
@@ -345,6 +378,169 @@ class Settings(unittest.TestCase):
                "installer": {"family": "qwen", "quant": "CYBER-FROST-3.8-PS", "qwen_quant": "q5_k_m"}}
         self.assertEqual(M.quant_label(cfg, Path("maya-cyber-frost.json")), "Q5_K_M")
         self.assertEqual(M.maya_quants.config_label(cfg), "Qwen-3.8-Flash-Next (CYBER-FROST) · Q5_K_M")
+
+    def test_qfn_read(self):
+        """A QFN config reads through its own field set: the RAM tier is --resident-budget-gib (not the Qwen path's
+        SAGUARO_EXPERT_RAM_GB), the K/V window in VRAM is --kv-resident, and Answers at once is the config's own
+        "parallel" key."""
+        cfg = M.read(qfn_cfg(self.d))
+        self.assertEqual(M.family(cfg), "qfn")
+        s = M.settings_of(cfg)
+        self.assertEqual(s, {"context": 65536, "gpus": [0], "images": False, "reserve_mib": 700, "env":
+                             {"SAGUARO_NO_LARGEPAGES": "1", "SAGUARO_YARN_ELASTIC": "1", "SAGUARO_MMQ_KQ": "1"},
+                             "parallel": 1, "draft": "mtp", "expert_cache": None, "prefill": None, "kv": "int8",
+                             "kv_resident": 32768, "ram_gib": 71})
+        self.assertEqual(set(s), set(M.QFN_KEYS))
+        self.assertNotIn("ram_gb", M.QFN_KEYS)                    # (SAGUARO_EXPERT_RAM_GB: QFN ignores it)
+        self.assertEqual(M.choices(cfg), {"draft": ["mtp", "none"], "images": False})
+        bare = M.read(qfn_cfg(self.d, "maya-qfn-bare.json", mtp=False))     # (the draft layer was not downloaded)
+        self.assertEqual(M.choices(bare)["draft"], ["none"])
+        self.assertEqual(M.settings_of(bare)["draft"], "none")
+        par = M.read(qfn_cfg(self.d, "maya-qfn-par.json", parallel=8))      # (the config's own key, like mangonel's)
+        self.assertEqual(M.settings_of(par)["parallel"], 8)
+
+    def test_qfn_written_back(self):
+        cfg = M.read(qfn_cfg(self.d))
+        new = M.apply(cfg, {"kv_resident": 16384, "ram_gib": 48, "parallel": 4, "expert_cache": 6000,
+                            "prefill": 2048, "reserve_mib": 512, "kv": "q4_0"})
+        a = new["args"]
+        for f, v in (("--kv-resident", "16384"), ("--resident-budget-gib", "48"), ("--expert-cache", "6000"),
+                     ("--prefill", "2048"), ("--vram-reserve-mib", "512"), ("--kv", "q4_0")):
+            self.assertEqual(M.flag(a, f), v, f)
+        self.assertEqual(new["parallel"], 4)                      # (Answers at once: the config's key ...)
+        self.assertNotIn("--parallel", a)                         # ( ... never an engine flag)
+        self.assertEqual(M.settings_of(new)["ram_gib"], 48)
+        self.assertNotIn("SAGUARO_EXPERT_RAM_GB", new.get("env") or {})
+        self.assertEqual((new["port"], new["log"], new["model_name"]), (8080, str(self.d / "qfn.log"),
+                                                                        "Qwen3.8-Flash-Next-UD-Q4_K_XL"))
+        back = M.apply(new, {"parallel": 1, "kv_resident": None, "ram_gib": None})
+        self.assertNotIn("parallel", back)                        # (1 or absent: the engine answers one at a time)
+        self.assertIsNone(M.flag(back["args"], "--kv-resident"))   # (empty: as much as fits, no flag)
+        self.assertIsNone(M.flag(back["args"], "--resident-budget-gib"))
+        s = M.settings_of(back)
+        self.assertEqual((s["parallel"], s["kv_resident"], s["ram_gib"]), (1, None, None))
+        for bad in ({"ram_gb": 8}, {"tp": 2}, {"kv_streaming": True}, {"parallel": 9}, {"parallel": 0},
+                    {"kv": "k8v5"}, {"kv_resident": 512}, {"ram_gib": 0}):
+            with self.assertRaises(ValueError, msg=bad):
+                M.apply(cfg, bad)
+        with self.assertRaisesRegex(ValueError, "not a setting of this model: ram_gb"):
+            M.apply(cfg, {"ram_gb": 8})      # (the CYBER-FROST RAM knob: QFN reads nothing of it)
+
+    def test_qfn_drafting(self):
+        """Drafting on/off: the config's --mtp args stay (the drafter loads either way) and off is --mtp-max-t 1;
+        without the draft layer on this PC, "mtp" is neither offered nor taken."""
+        cfg = M.read(qfn_cfg(self.d))
+        off = M.apply(cfg, {"draft": "none"})
+        self.assertEqual(M.flag(off["args"], "--mtp-max-t"), "1")
+        self.assertEqual(M.flag(off["args"], "--mtp"), M.flag(cfg["args"], "--mtp"))
+        self.assertEqual(M.settings_of(off)["draft"], "none")
+        on = M.apply(off, {"draft": "mtp"})
+        self.assertIsNone(M.flag(on["args"], "--mtp-max-t"))
+        self.assertEqual(M.settings_of(on)["draft"], "mtp")
+        bare = M.read(qfn_cfg(self.d, "maya-qfn-bare.json", mtp=False))
+        with self.assertRaisesRegex(ValueError, "MTP draft layer"):
+            M.apply(bare, {"draft": "mtp"})
+
+    def test_qfn_images(self):
+        """Images with QFN's vision entry (vision-qfn with the model's mmproj): off keeps the entry as vision_off and
+        takes --vision out of the command; a text-only setup has nothing to switch on."""
+        text_only = M.read(qfn_cfg(self.d))
+        with self.assertRaisesRegex(ValueError, "text only"):
+            M.apply(text_only, {"images": True})
+        vis = M.read(qfn_cfg(self.d, "maya-qfn-vis.json", vision=True))
+        self.assertEqual((M.settings_of(vis)["images"], M.choices(vis)["images"]), (True, True))
+        off = M.apply(vis, {"images": False})
+        self.assertIsNone(off.get("vision"))
+        self.assertEqual(off["vision_off"], vis["vision"])
+        self.assertNotIn("--vision", off["args"])
+        on = M.apply(off, {"images": True})
+        self.assertEqual(on["vision"], vis["vision"])
+        self.assertIn("--vision", on["args"])
+        self.assertFalse((on.get("vision_off") is not None))
+
+    def test_qfn_reset_of_an_old_as_set_up(self):
+        """A config whose installer.as_set_up was written while QFN still shared the CYBER-FROST keys (its ram_gb,
+        none of QFN's own): the page's Reset takes what QFN has and drops what it does not."""
+        p = qfn_cfg(self.d)
+        cfg = json.loads(p.read_text())
+        cfg["installer"]["as_set_up"] = {"context": 32768, "gpus": [0], "env": {}, "images": False,
+                                         "reserve_mib": 700, "draft": "mtp", "expert_cache": None, "prefill": None,
+                                         "kv": "int8", "ram_gb": 40}
+        p.write_text(json.dumps(cfg))
+        setup = M.describe(p, None)["setup"]
+        self.assertNotIn("ram_gb", setup)
+        self.assertEqual(setup["context"], 32768)
+        new = M.apply(M.read(p), setup)                # (the Reset as the page sends it: taken, nothing refused)
+        self.assertEqual(M.flag(new["args"], "--max-context"), "32768")
+
+    def test_the_turbo_sidecar_is_not_a_model(self):
+        """The live Turbo sidecar serve/server.py keeps beside the config (<config minus .json>.turbo.json) matches
+        the maya-*.json glob: it is no more a model than the .shared-settings.json file."""
+        g = glm_cfg(self.d)
+        side = g.with_name(g.stem + ".turbo.json")
+        side.write_text('{"drop": 1, "skip": "off"}')
+        self.assertEqual([p.name for p in M.config_paths(self.d)], [g.name])
+        with mock.patch.object(M, "machine_gpus", return_value=[]):
+            out = M.listing(self.d, None)
+        self.assertEqual([m["file"] for m in out["models"]], [g.name])
+
+
+class QfnTurbo(unittest.TestCase):
+    """QFN's Turbo: in the config it turns the Lamina drafting on and Answers at once back to one (no no-op: QFN has
+    no expert-skipping environment knobs); the engine's lossy half is the live per-request Turbo, so the server puts
+    the model's live Turbo to its default while Turbo is on and restores what it was when Turbo goes off."""
+
+    def setUp(self):
+        os.environ.pop("SAGUARO_RESTART_ON_UPDATE", None)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.d = Path(self.tmp.name)
+        self.p = qfn_cfg(self.d)
+        cfg = json.loads(self.p.read_text())
+        cfg["args"] += ["--mtp-max-t", "1"]            # (drafting off and 8 at once: what Turbo is asked to change)
+        cfg["parallel"] = 8
+        self.p.write_text(json.dumps(cfg))
+        self.before = M.read(self.p)
+
+    def tearDown(self):
+        os.environ.pop("SAGUARO_RESTART_ON_UPDATE", None)
+        self.tmp.cleanup()
+
+    def test_the_patch_is_not_empty(self):
+        cfg = self.before
+        self.assertEqual(M.turbo_patch(cfg), {"parallel": 1, "draft": "mtp"})
+        info = M.turbo_info(cfg)
+        self.assertEqual((info["on"], info["family"], sorted(info["plan"])), (False, "qfn", ["draft", "parallel"]))
+        self.assertEqual(M.turbo_patch(M.apply(cfg, M.turbo_patch(cfg))), {})   # (already Turbo: nothing left to do)
+
+    def test_on_then_off_returns_the_command(self):
+        self.assertTrue(M.turbo_enable(self.p)["changed"])
+        on = M.read(self.p)
+        self.assertTrue(M.turbo_on(on))
+        self.assertEqual(M.settings_of(on)["draft"], "mtp")
+        self.assertNotIn("parallel", on)
+        self.assertTrue(M.turbo_disable(self.p)["changed"])
+        back = M.read(self.p)
+        for k in ("args", "env", "gpu", "parallel", "port"):
+            self.assertEqual(back.get(k), self.before.get(k), k)
+        self.assertNotIn("turbo", back)
+
+    def test_the_server_turns_the_live_turbo_with_it(self):
+        tok = ByteTokenizer()
+        svc = Service(MockEngine(tok, "x", max_context=32768), tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        svc.config_path = str(self.p)
+        svc.turbo_path = str(self.p.with_suffix("")) + ".turbo.json"    # (where main() keeps the live Turbo)
+        self.assertIsNone(svc.turbo_default)
+        out = svc.set_turbo(True)
+        self.assertEqual(out["changed"], True)
+        self.assertEqual(svc.turbo_default, {"drop": 1, "skip": "off"})
+        self.assertEqual(json.loads(Path(svc.turbo_path).read_text()), {"drop": 1, "skip": "off"})
+        self.assertEqual(M.settings_of(M.read(self.p))["draft"], "mtp")
+        svc.set_turbo(False)
+        self.assertIsNone(svc.turbo_default)
+        self.assertFalse(Path(svc.turbo_path).exists())               # (off: the sidecar goes, as any live Turbo off)
+        back = M.read(self.p)
+        self.assertEqual(back["args"], self.before["args"])
+        self.assertEqual(back.get("parallel"), 8)                     # (drafting and the 8 at once back as they were)
 
 
 class Served(unittest.TestCase):

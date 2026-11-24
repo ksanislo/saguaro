@@ -386,6 +386,41 @@ class ContextCost(unittest.TestCase):
         self.assertEqual(eng.spawn[1], ["--glm-pack", "p", "--max-context", "131072"])
 
 
+class QfnContext(unittest.TestCase):
+    """The dashboard's Context size on a running QFN engine: QfnEngine.set_context no longer refuses with
+    "this engine's context is set in its config" (which made every reload fail) - the driver rewrites
+    --max-context in its spawn command, and the shared _restart_with() starts the engine again with it,
+    exactly as the other engines' set_context + restart do."""
+
+    def engine(self, args):
+        from serve.server import _qfn_engine_class
+        cls = _qfn_engine_class()
+        eng = cls.__new__(cls)                     # (the real driver, without starting a process)
+        eng.spawn = ("saguaro-qfn", list(args), None, None, None, False, None)
+        return eng
+
+    def test_set_context_rewrites_the_command(self):
+        eng = self.engine(["--pack", "p", "--max-context", "65536", "--kv", "int8"])
+        eng.set_context(131072)
+        self.assertEqual(eng.spawn[1], ["--pack", "p", "--max-context", "131072", "--kv", "int8"])
+        eng.set_context(262144)                    # (again: replaced in place, never added a second time)
+        self.assertEqual(eng.spawn[1].count("--max-context"), 1)
+
+    def test_a_command_without_the_flag_gets_it(self):
+        eng = self.engine(["--pack", "p"])
+        eng.set_context(32768)
+        self.assertEqual(eng.spawn[1], ["--pack", "p", "--max-context", "32768"])
+
+    def test_the_reload_flow_reaches_it(self):
+        # Service._restart_with: hasattr(engine, "set_context") -> stop, set_context, restart.  QfnEngine.stop is
+        # the known no-op (each request stops its own slot); set_context is the driver's, and restart() re-runs
+        # the spawn command it just rewrote.
+        eng = self.engine(["--max-context", "65536"])
+        eng.stop(60.0)
+        eng.set_context(131072)                    # (before this change: ValueError, the reload always failed)
+        self.assertEqual(eng.spawn[1], ["--max-context", "131072"])
+
+
 GB = 2**30
 # the 3090 alone with EXL3-4.05bpw and DFlash2, as its start measured it (glm fast: CUDA0 VRAM before the expert pool ...)
 LINE = ("VRAM dev=0 pci=0000:01:00.0 total=25296896000 free=751828992 weights=6678575104 kv=665719603 kv_ram=0 "

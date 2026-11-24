@@ -1178,6 +1178,7 @@ def turbo_enable(path: Path) -> dict:
     new["turbo"] = {"since": time.strftime("%Y-%m-%d %H:%M:%S"),
                     "before": {k: cur.get(k) for k in patch},            # (the settings Turbo changed, as they were)
                     "args": list(cfg.get("args") or []), "env": cfg.get("env"),   # (and the command and environment whole)
+                    "parallel": cfg.get("parallel"),   # (... with QFN's Answers-at-once key, a config key like these)
                     "applied": {"args": list(new.get("args") or []), "env": new.get("env")}}
     return _commit(path, cfg, new)
 
@@ -1200,6 +1201,11 @@ def turbo_disable(path: Path) -> dict:
             new["env"] = note["env"]
         else:
             new.pop("env", None)
+        if "parallel" in note:                           # (QFN's Answers at once: a config key Turbo took out)
+            if note["parallel"] is None:
+                new.pop("parallel", None)
+            else:
+                new["parallel"] = note["parallel"]
     else:
         new = apply(cfg, dict(note.get("before") or {}))
     new.pop("turbo", None)
