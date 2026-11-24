@@ -3581,8 +3581,12 @@ int main() {
     if (k::pascal::experts_on()) std::printf("--   window_exact: the verify window (Pascal: drafting off)\n");
     else
 #endif
-    test_window_exact(p.major >= 7);   // (Volta and Turing: their own tensor-core kernels)
-    test_window_launches();
+    if (k::arch_class() < 70)   // (the sm_60 class, a Pascal GPU or SAGUARO_IK2_ARCH=60: no verify window - drafting off)
+        std::printf("--   window_exact, window_launches: the verify window (sm_%d class here: drafting off)\n", k::arch_class());
+    else {
+        test_window_exact(p.major >= 7);   // (Volta and Turing: their own tensor-core kernels)
+        test_window_launches();
+    }
     std::printf(g_fail ? "FAILED: %d check(s)\n" : "all passed\n", g_fail);
     return g_fail ? 1 : 0;
 }
