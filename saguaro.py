@@ -4581,8 +4581,10 @@ def server_command(cfg_path: Path, a) -> tuple:
     if cyber:
         ok(f"{cfg_path.name}: {QWEN_SHOWN} runs on its own engine, {Q.QFN_ENGINE}, now - its context, port, sampling "
            "and model files are kept")
-        fail(f"{cfg_path.name}: its pack and MTP drafter are still the other engine's: saguaro-qfn reads a pack of "
-             "its own", f"run {ME} --setup once to build them (it asks nothing: the files are already there)")
+    if cyber_pack_pending(cfg):                         # (durable, not once-only: keep refusing on a still-foreign
+        fail(f"{cfg_path.name}: its pack and MTP drafter are still the other engine's: saguaro-qfn reads a pack of "   #  pack until --setup rebuilds it - a --check or a hand
+             "its own", f"run {ME} --setup once to build them (it asks nothing: the files are already there)")   #  edit cannot slip past this into a misread)
+
     if getattr(a, "parallel", None):                   # --parallel given at a start: kept in the config
         set_arg(cfg.setdefault("args", []), "--parallel", a.parallel)
         cfg_path.write_text(json.dumps(cfg, indent=1), encoding="utf-8")
@@ -8714,6 +8716,24 @@ def migrate_cyber_frost(cfg: dict) -> bool:
     return True
 
 
+def cyber_pack_pending(cfg: dict):
+    """The pack folder of a CYBER-FROST config now on saguaro-qfn whose pack is still the other engine's - the one the
+    old Qwen path built - so the saguaro-qfn pack and its MTP drafter are not there yet: the engine reads a pack of its
+    own (both say index v3 while the FORM tables and dense.bin differ), so it must not start against this one.  None
+    when the config is not such a CYBER-FROST one, or its pack already names the QFN pack tools (qfn_pack_step built
+    it).  Durable where migrate_cyber_frost's once-only start stop is not: a --check (which rewrites the config but
+    builds nothing) or a hand edit cannot slip a still-foreign pack past it into a misread.  The pack's own record
+    decides, the same tools stamp qfn_pack_step keeps."""
+    inst = cfg.get("installer") or {}
+    if config_family(cfg) != "qfn" or inst.get("qwen_quant") != Q.CYBER_FROST_QUANT:
+        return None
+    args = cfg.get("args") or []
+    pack = Path(args[args.index("--pack") + 1]) if "--pack" in args[:-1] else None
+    if pack is None or read_json(pack / PACK_SOURCES).get("tools") == S.source_hash(QFN_PACK_TOOLS):
+        return None
+    return pack
+
+
 def main() -> int:
     stop_signals()            # (SIGTERM / SIGHUP stop it as Ctrl+C does: the server it runs with it)
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -8939,9 +8959,9 @@ def main() -> int:
     if not have and a.calibrate:
         say("Nothing is set up yet: the setup runs first, then the tuning.")
     prev = read_json(have[0]) if have else {}
-    if migrate_cyber_frost(prev):                      # (CYBER-FROST on saguaro-qfn: the setup goes on with it)
-        have[0].write_text(json.dumps(prev, indent=1), encoding="utf-8")
-        say(f"  The CYBER-FROST config is rewritten for {Q.QFN_ENGINE}: its context, port, sampling and model "
+    if not a.check and migrate_cyber_frost(prev):      # (CYBER-FROST on saguaro-qfn: only when the setup continues -
+        have[0].write_text(json.dumps(prev, indent=1), encoding="utf-8")   #  --check reports and returns, building nothing,
+        say(f"  The CYBER-FROST config is rewritten for {Q.QFN_ENGINE}: its context, port, sampling and model "   #  so it must not rewrite the config here either
             "files are kept; the setup builds the pack and drafter it reads.")
     if a.check:
         ds4 = a.model == DS4 or bool(a.model_dir) and exl3_folder_family(a.model_dir) is None

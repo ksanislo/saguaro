@@ -347,6 +347,27 @@ class Migration(unittest.TestCase):
             self.assertEqual(cfg["exe"], self.OLD["exe"])                   # (still the GLM engine)
             self.assertIn("--ple-gguf", cfg["args"])                        # (its Qwen-path arguments stand)
 
+    def test_pack_still_the_other_engines_blocks_the_start(self):
+        """Finding 2: a CYBER-FROST config now on saguaro-qfn is refused while its pack is still the other engine's -
+        durable, so a --check that rewrote the config (building nothing) or a hand edit cannot start it against a
+        GLM-format pack that only shares the "index v3" header.  It clears once the pack names the QFN pack tools."""
+        with tempfile.TemporaryDirectory() as t:
+            pack = Path(t)
+            cfg = {"backend": "hip", "args": ["--pack", str(pack)],
+                   "installer": {"family": "qfn", "qwen_quant": Q.CYBER_FROST_QUANT}}
+            with patch.object(maya.S, "source_hash", return_value="qfn-tools"):
+                self.assertEqual(maya.cyber_pack_pending(cfg), pack)        # (no sources.json: nothing built here)
+                (pack / maya.PACK_SOURCES).write_text(json.dumps({"tools": "glm-tools"}))
+                self.assertEqual(maya.cyber_pack_pending(cfg), pack)        # (the Qwen path's pack: still refused)
+                (pack / maya.PACK_SOURCES).write_text(json.dumps({"tools": "qfn-tools"}))
+                self.assertIsNone(maya.cyber_pack_pending(cfg))            # (qfn_pack_step built it: it may start)
+                (pack / maya.PACK_SOURCES).write_text(json.dumps({"tools": "glm-tools"}))
+                # (a QFN quant that is not CYBER-FROST, and the old engine, are not this guard's business)
+                self.assertIsNone(maya.cyber_pack_pending({**cfg, "installer": {"family": "qfn",
+                                                                                "qwen_quant": "ud-q4_k_xl"}}))
+                self.assertIsNone(maya.cyber_pack_pending({**cfg, "installer": {"family": "qwen",
+                                                                                "qwen_quant": "q5_k_m"}}))
+
 
 class ModelsPage(unittest.TestCase):
     def test_catalog_entries(self):
