@@ -4708,9 +4708,13 @@ def server_command(cfg_path: Path, a) -> tuple:
         say("  later starts take about half a minute. The n-gram table stays on the SSD.")
     elif config_family(cfg) == "ik2":
         say("  Loading takes about ten seconds once the file is in the page cache (the first load reads 18 GB).")
-    elif config_family(cfg) in ("qwen", "qfn"):
+    elif config_family(cfg) == "qwen":
         say("  Loading takes a few minutes: the engine places the most-used experts in VRAM, the next ones in RAM as far")
         say("  as the free RAM goes (SAGUARO_EXPERT_RAM_GB caps it) and reads the rest from the SSD when they are routed.")
+    elif config_family(cfg) == "qfn":   # (QFN ignores SAGUARO_EXPERT_RAM_GB: its RAM tier is --resident-budget-gib)
+        say("  Loading takes a few minutes: the engine places the most-used experts of its layers in VRAM and the next")
+        say("  ones in a pinned RAM tier (--resident-budget-gib, all but about 20 GB of the RAM); it reads the rest")
+        say("  from the SSD when they are routed.")
     elif ds4:
         say("  Loading takes a few minutes: the engine places the experts in VRAM by how often they are used, copies the")
         say("  rest into RAM for its CPU lane and pins them - the first answers are the slowest.")
@@ -4860,7 +4864,10 @@ REPORT_LINES = re.compile(r"glm fast:|glm prefill: (?:CUDA|HIP)|glm split|glm st
                           r"^saguaro ds4: (?!copying experts |experts \d+ / |loading \d)|^saguaro ds4 (?:slots|cache):|"
                           r"^(?:prompt|decode): \d+ tokens in |^decode per token:|^decode (?:reads|left out)|^dspark|"
                           # MiniMax's: where the model went (its --serve start) and each answer's prompt / decode speed
-                          r"^saguaro mm3:|^saguaro mm3 serve: (?:prompt|DSpark) ",
+                          r"^saguaro mm3:|^saguaro mm3 serve: (?:prompt|DSpark) |"
+                          # QFN's: each prompt read's own figures (PP ... new_read=, per chunk), the read's RDONE
+                          # summary and the per-card VRAM bookkeeping (read by engines/qfn/serve/server.py)
+                          r"^PP \d+ \d+ .*\bnew_read=|^RDONE rid=|^VRAM dev=",
                           re.I)
 STAT_DECODE = re.compile(r"glm stat: decode ([\d.]+) ms/tok")
 
@@ -8857,7 +8864,7 @@ def main() -> int:
     if a.check:
         ds4 = a.model == DS4 or bool(a.model_dir) and exl3_folder_family(a.model_dir) is None
         quant = choose_ds4_quant(a, prev) if ds4 else None
-        fam = "deepseek" if ds4 else {HY4: "hy4", IK2: "ik2"}.get(a.model, "glm")
+        fam = "deepseek" if ds4 else {HY4: "hy4", IK2: "ik2", QFN: "qfn"}.get(a.model, "glm")
         pc = check_pc(a, fam, gguf=ds4 and quant != "exl3")
         say()
         if fam == "ik2":                               # (what the setup would write for these cards)
@@ -8880,6 +8887,16 @@ def main() -> int:
                 (lay["said"] + (f": {HY4F.speeds(lay, quant)}" if HY4F.speeds(lay, quant) else " (not measured)")
                  if lay["fits"] else f"it does not fit: about {lay['need_gib']:.0f} GB of VRAM are needed beside the "
                                      f"experts; {IK2_SHOWN} is the model for one or two 16 GB cards") + ".")
+        elif fam == "qfn":                             # (what the setup would write for these cards - qfn_fit)
+            if pc.get("backend") == "hip" and len(pc["gpus"]) != 1:
+                fail(f"{QFN_SHOWN} runs on one GPU on AMD in this setup ({len(pc['gpus'])} chosen)",
+                     "pick one with --gpu N")
+            quant = getattr(a, "qfn_quant", None) or QFN_DEFAULT_QUANT
+            lay = QF.plan(pc["gpus"], mem_gb()[0], quant)
+            say(f"{Q.shown('qfn', quant)} on these cards - " +
+                (lay["said"] + (" - the live 4x Tesla T4 server's own split" if lay["measured"] else
+                                " (not measured on these cards yet)")
+                 if lay["fits"] else lay["reason"]) + ".")
         if fam == "glm" and a.backend != "metal":
             for line in glm_fit_lines(pc["gpus"]):
                 say(line)
