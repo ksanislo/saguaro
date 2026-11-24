@@ -7572,11 +7572,11 @@ def write_config_qfn(a, pc: dict, meta: dict, quant: str, files: list, pack: Pat
     # the encoder started into a full card anyway is the SIGKILL of ./ref/vision-fail.log (U6 step 4).
     vram_elastic = False
     if vision is not None and par < 2:
-        if hip:
+        if hip or len(pc["gpus"]) > 1:                 # (--vram-elastic is one-GPU only: a split turns it off,
+                                                       #  generate.cpp "a layer split has a cache per GPU")
             warn("pictures: off on this layout - saguaro-qfn lends the picture encoder room either from its batch "
-                 "slots (answers at once: 2 or more) or, on NVIDIA, from a --vram-elastic expert cache, and this "
-                 "one has neither: the model reads text only (--parallel 2 says otherwise, a --setup on several "
-                 "cards brings the pictures back)")
+                 "slots (answers at once: 2 or more) or, on one NVIDIA card, from a --vram-elastic expert cache, "
+                 "and this one has neither: the model reads text only (--parallel 2 brings the pictures back)")
             vision = None
         else:
             vram_elastic = True

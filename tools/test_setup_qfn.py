@@ -739,12 +739,13 @@ class PicturesOnEveryLayout(unittest.TestCase):
                 self.assertEqual(cfg["vision"], self.VISION)
                 self.assertEqual(cfg["env"]["SAGUARO_ELASTIC_SLOTS_GIVE"], "1")   # (GENERIC: the give keys, all)
 
-    def test_a_two_card_setup_at_parallel_one_still_gets_pictures(self):
+    def test_a_two_card_setup_at_parallel_one_reads_text_only(self):
         with tempfile.TemporaryDirectory() as t:
             cfg = self.written(Path(t), 2, parallel=1)
         self.assertNotIn("parallel", cfg)
-        self.assertIs(cfg["vram_elastic"], True)             # (no --batch -> no give path -> the VRAM command)
-        self.assertIn("--vision", cfg["args"])
+        self.assertNotIn("vram_elastic", cfg)                # (--vram-elastic is off on a split: no lend path)
+        self.assertNotIn("vision", cfg)
+        self.assertNotIn("--vision", cfg["args"])
 
     def test_the_engine_driver_says_what_it_can_lend(self):
         from serve import qfn_engine as QE
