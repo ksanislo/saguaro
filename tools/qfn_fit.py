@@ -48,6 +48,48 @@ T4_ENV = {"SAGUARO_SM75_PERF": "1", "SAGUARO_SM75_STACK": "1", "SAGUARO_SM75_Q8G
           "SAGUARO_BF16_TC": "1", "SAGUARO_MMQ_DIRECT": "1", "SAGUARO_MMQ_KTAIL": "1", "SAGUARO_MMQ_SWIGLU_Q8": "1"}
 T4_BF16_TC_SKIP = {"ud-q4_k_xl": "none", "q8_0": "indexer,router,ssm"}
 T4_SELECT_SM75 = {"ud-q4_k_xl": "1"}                # (the live Q8_0 config carries no such key)
+# U6 (the live T4 configs' tuning the setup left out), classified per key in ./scratch/u6-keys.txt with the engine
+# line each one is read at.  GENERIC: a feature that helps any GPU, NVIDIA and AMD alike - the conversation park
+# without the zero fill (conversation_copy.hpp:153, on by default, live records it), the elastic batch slots the
+# expert cache gives room to and takes back (generate.cpp:213-253) - with _GIVE the engine says "vision_lend=1"
+# and lends CUDA0's VRAM to the picture encoder (generate.cpp:13121-13164): this is what pictures need; the slot
+# checkpoint grid and the message-boundary checkpoint (generate.cpp:298, 20516).  Nothing of it does harm without
+# --batch slots (the slot keys just do nothing).
+GENERIC_ENV = {"SAGUARO_PARK_FAST": "1", "SAGUARO_ELASTIC_SLOTS": "1", "SAGUARO_ELASTIC_SLOTS_GIVE": "1",
+               "SAGUARO_ELASTIC_IDLE": "1", "SAGUARO_ELASTIC_IDLE_S": "300", "SAGUARO_SLOT_GRID": "6",
+               "SAGUARO_CACHE_MESSAGE_BOUNDARY": "1"}
+GENERIC_ARGS = ["--conversation-cache-mib", "auto", "--conversation-cache-slots", "auto",
+                "--conversation-cache-min-tokens", "1024"]      # (parked conversations: one RAM pool, 64 of them,
+                                                                #  only from 1024 tokens - generate.cpp:983-1012)
+# T4-ONLY: sm_75 tuning, only where every card is compute capability 7.5 (the T4_ENV gate): the one-block argmax
+# rows the engine takes on sm_7x only with this opt-in (verify_kernels.cu:990), and the GDN prompt recurrence per
+# key head, sm_80+ by default and sm_75 with =1 (prefill/kernels.cu:849).
+T4_ONLY_ENV = {"SAGUARO_ARGMAX_ROWS_SM70": "1", "SAGUARO_GDN_KEYHEAD": "1"}
+# MULTI-GPU: the layer split's pipeline (stage pools, NUMA loads, P2P boundaries, reads beside the batch slots and
+# their shared chunks, pipelined drafts, direct slot copies, the split's CPU read share) - what the live split runs
+# and none of it fires without stages (batch_read.hpp:97: SLOT_ADMIT "not on the pipelined slot groups ... on a
+# layer split"; piped_mtp needs !stages.empty(), generate.cpp:5977; SHORT_READS only where multi_gpu,
+# generate.cpp:9148).  Values are the live configs' own; BATCH_READS_OVERTAKE and PARK_STAGING_MIB are read
+# nowhere and stay out.
+SPLIT_ENV = {"SAGUARO_STAGE_SERVE": "1", "SAGUARO_PARALLEL_LOAD": "1", "SAGUARO_P2P_HANDOFF": "1",
+             "SAGUARO_SLOT_ADMIT": "1", "SAGUARO_SLOT_ADMIT_CHUNK": "4096", "SAGUARO_SLOT_ADMIT_MULTI": "1",
+             "SAGUARO_READ_YIELD": "1", "SAGUARO_READ_YIELD_CHUNK": "4096", "SAGUARO_BATCH_READS": "1",
+             "SAGUARO_BATCH_READS_MAX": "8", "SAGUARO_BATCH_READS_FAST": "512",
+             "SAGUARO_BATCH_READS_FAST_SHRINK": "512", "SAGUARO_BATCH_READS_DECODE_WINDOWS": "0",
+             "SAGUARO_BATCH_READS_DECODE_SHARE": "0.3", "SAGUARO_FAST_LANE": "1", "SAGUARO_FAST_LANE_MAX": "96",
+             "SAGUARO_PIPED_MTP": "1", "SAGUARO_PIPED_MTP_DRAFTS": "2", "SAGUARO_PIPED_MTP_MAX": "4",
+             "SAGUARO_SLOT_COPY_DIRECT": "1", "SAGUARO_SHORT_READS": "1"}
+# the per-quant differences between the two live refs, kept per quant: the Q8_0 box never ran
+# SAGUARO_PARALLEL_LOAD_REGISTER and its server (not the engine: serve/qfn_engine.py:93) collects the wrap spill
+# the UD-Q4 box does not; live-ud-q4 caches prompts at 64 checkpoints, live-q8 runs the default.
+SPLIT_ENV_QUANT = {"ud-q4_k_xl": {"SAGUARO_PARALLEL_LOAD_REGISTER": "overlap"},
+                   "q8_0": {"SAGUARO_BATCH_WRAP_SPILL": "1"}}
+QUANT_ARGS = {"ud-q4_k_xl": ["--prompt-cache", "64"]}
+# TOPOLOGY, computed and only on a multi-socket CPU: the pool's workers default to the host socket's cores
+# (pool.cpp:143,181), so a split spanning sockets names them across both - every physical core bar the one the
+# host spins on (2 x 10-core E5-2660 v2 -> 19, ./ref/live-ud-q4.json) - and the NUMA keys ride with it
+# (numa.cpp:100, pool.cpp:762; one node: nothing to place and no pool to split).
+TOPOLOGY_ENV = {"SAGUARO_NUMA_PLACE": "1", "SAGUARO_NUMA_POOL": "0"}
 SIZES: dict = {}                                      # quant -> GiB, from the manifest (read once)
 
 
@@ -156,12 +198,44 @@ def best_gpus(cards: list) -> list:
     return group or have[:1]
 
 
-def plan(cards: list, ram_gb: float, quant: str = "ud-q4_k_xl") -> dict:
+def layout_env(split: bool, t4: bool, quant: str, cpu: dict | None) -> dict:
+    """The live configs' tuning env for this layout, by class (./scratch/u6-keys.txt): GENERIC on every card;
+    T4-ONLY only where every card is sm_75; MULTI-GPU only on a layer split (its per-quant additions among them);
+    TOPOLOGY only on a multi-socket CPU."""
+    env = dict(GENERIC_ENV)
+    if split:
+        env.update(SPLIT_ENV)
+        env.update(SPLIT_ENV_QUANT.get(quant, {}))
+    if t4:
+        env.update(t4_env(quant))
+        env.update(T4_ONLY_ENV)
+    if multi_socket(cpu):
+        env.update(TOPOLOGY_ENV)
+    return env
+
+
+def multi_socket(cpu: dict | None) -> bool:
+    """True when the CPU's facts (qfn_fit's caller reads them: {"sockets", "cores"}) say more than one package:
+    the NUMA keys and the across-sockets pool workers exist only then; None / unread: no."""
+    return bool(cpu) and int(cpu.get("sockets") or 0) >= 2
+
+
+def pool_workers(cpu: dict | None) -> int | None:
+    """--pool-workers for this CPU: every physical core across the sockets minus the one the host loop spins on
+    (the live box: 2 x 10 cores -> 19); None where the CPU is one socket or was not read."""
+    if not multi_socket(cpu):
+        return None
+    return max(2, int(cpu.get("cores") or 0) - 1)
+
+
+def plan(cards: list, ram_gb: float, quant: str = "ud-q4_k_xl", cpu: dict | None = None) -> dict:
     """The layout for these cards: {"fits", "reason", "gpus", "n_gpus", "layer_split" (None for one card),
     "context" (to recommend), "kv_resident", "resident_budget_gib", "args" (the engine's flags beside the generic
-    ones: --trim-stage-weights and --prefill-pipe on a split), "env" (the T4 tuning env where every card is sm_75,
-    else {}), "t4", "measured", "said" (one plain line)}.  The cards it lists are the ones handed in - best_gpus()
-    picks those, plan() lays them out; nothing is read from the hardware."""
+    ones: the conversation cache every PC gets, the split's --trim-stage-weights and --prefill-pipe, the quant's
+    --prompt-cache, --pool-workers on a multi-socket CPU), "env" (the live configs' tuning by class - see
+    layout_env), "t4", "measured", "said" (one plain line)}.  The cards it lists are the ones handed in -
+    best_gpus() picks those, plan() lays them out; nothing is read from the hardware (the CPU's socket/core counts
+    come in as `cpu` - saguaro.py's qfn_cpu_info reads them from /sys)."""
     why = (f"Qwen3.8-Flash-Next on saguaro-qfn runs on one GPU of 16 GB or more, or up to {MAX_GROUP} equal ones: "
            "no cards were named") if not cards else unsupported(cards, ram_gb)
     n = len(cards)
@@ -172,6 +246,13 @@ def plan(cards: list, ram_gb: float, quant: str = "ud-q4_k_xl") -> dict:
     live = bool(split) and split in set(MEASURED_SPLITS.values())        # a live 4x Tesla T4 config's split
     args = ([] if n <= 1 else
             ["--trim-stage-weights", "--prefill-pipe", MEASURED_PREFILL_PIPE.get(quant, "1") if live else "1"])
+    if why is None:
+        args += GENERIC_ARGS
+        if t4:                                         # (the per-quant args come from the live T4 boxes too)
+            args += QUANT_ARGS.get(quant, [])
+        workers = pool_workers(cpu)
+        if workers:
+            args += ["--pool-workers", str(workers)]
     amd = str((cards[0] if cards else {}).get("arch") or "").startswith("gfx")
     measured = why is None and ((live and sm75_only(cards)) or
                                 (n == 1 and amd and t4_sized(cards[0]) and ram_gb >= 90.0))
@@ -182,8 +263,8 @@ def plan(cards: list, ram_gb: float, quant: str = "ud-q4_k_xl") -> dict:
             f"a {ctx // 1024}K context")
     return {"fits": why is None, "reason": why, "gpus": list(cards), "n_gpus": n, "layer_split": split,
             "context": ctx, "kv_resident": min(ctx, KV_RESIDENT), "resident_budget_gib": budget,
-            "args": args, "env": t4_env(quant) if (t4 and why is None) else {}, "t4": t4,
-            "measured": measured, "said": said}
+            "args": args, "env": layout_env(bool(split), t4 and why is None, quant, cpu) if why is None else {},
+            "t4": t4, "measured": measured, "said": said}
 
 
 def main(argv=None) -> int:
@@ -194,12 +275,14 @@ def main(argv=None) -> int:
     ap.add_argument("cards", nargs="*", help="one card per GPU: VRAM GiB, optionally :compute-capability (16:75)")
     ap.add_argument("--ram", type=float, default=0.0, help="the PC's RAM in GiB (0: not known)")
     ap.add_argument("--quant", default="ud-q4_k_xl", choices=sorted(MEASURED_SPLITS), help="the quant to lay out")
+    ap.add_argument("--sockets", type=int, default=0, help="the CPU's sockets (0: not known)")
+    ap.add_argument("--cores", type=int, default=0, help="the CPU's physical cores across its sockets (0: not known)")
     a = ap.parse_args(argv)
     cards = []
     for i, spec in enumerate(a.cards):
         v, _, cc = spec.partition(":")
         cards.append({"index": i, "name": f"GPU {i}", "vram_gb": float(v), "arch": cc or 0})
-    p = plan(cards, a.ram, a.quant)
+    p = plan(cards, a.ram, a.quant, {"sockets": a.sockets, "cores": a.cores})
     print(f"{a.quant}: {quant_gib(a.quant):.0f} GiB of files")
     print(("fits: " + p["said"]) if p["fits"] else "does not fit: " + p["reason"])
     if p["fits"]:

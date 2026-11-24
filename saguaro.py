@@ -67,6 +67,7 @@ Nothing is installed system-wide: a missing tool is reported with the command th
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import math
 import os
@@ -7458,15 +7459,35 @@ def qfn_ram_budget(ram: float) -> int:
     return max(8, int(ram - QFN_RAM_SPARE_GB))
 
 
+def qfn_cpu_info() -> dict:
+    """The PC's CPU as qfn_fit's plan reads it: {"sockets": the packages, "cores": the physical cores across them} -
+    /sys on Linux (one socket, or a PC without /sys: the TOPOLOGY keys and --pool-workers stay unwritten, the engine
+    keeps its one-socket default)."""
+    if WIN or sys.platform != "linux":
+        return {"sockets": 0, "cores": 0}
+    pkgs, cores = set(), set()
+    for d in glob.glob("/sys/devices/system/cpu/cpu[0-9]*"):
+        try:
+            pkg = Path(d, "topology/physical_package_id").read_text().strip()
+            core = Path(d, "topology/core_id").read_text().strip()
+        except OSError:
+            continue
+        pkgs.add(pkg)
+        cores.add((pkg, core))
+    return {"sockets": len(pkgs), "cores": len(cores)}
+
+
 def write_config_qfn(a, pc: dict, meta: dict, quant: str, files: list, pack: Path, mtp: Path | None, ctx: int,
                      models: Path, d: Path, prev: dict, vision: dict | None = None) -> Path:
     """maya-qwen3.8-flash-next-<quant>[-hip].json (maya-cyber-frost[-hip].json for CYBER-FROST, whose config keeps
     the file name it always had) and its start script: the engine's settings as measured - on AMD on an RX 9070 XT
     (one GPU, the RAM tier, MTP drafting, INT8 K/V with 32K of it in VRAM, the K-quant prompt kernels; plain RoPE up
-    to 256K, YaRN past it), on NVIDIA the live 4x Tesla T4 configs' engine args where they are generic and, for
-    several cards, the layer split qfn_fit lays out; its T4 tuning env goes only where every chosen card is compute
-    capability 7.5; pictures with the elastic vision entry when the reader is there.  A setup again keeps the config
-    before's env, where the server listens and its key."""
+    to 256K, YaRN past it), on NVIDIA the live 4x Tesla T4 configs' tuning by class - qfn_fit's plan: the generic
+    engine and conversation-cache keys everywhere, the T4 env only where every chosen card is compute capability
+    7.5, the split's pipelined-read env and args only with a layer split, and the NUMA keys and --pool-workers only
+    on a multi-socket CPU; pictures with the elastic vision entry when the reader is there (the GENERIC ELASTIC_*
+    keys are what makes the engine lend CUDA0 the encoder's room).  A setup again keeps the config before's env,
+    where the server listens and its key."""
     step(9, "the configuration and the start script")
     port = a.port or 8080
     hip = pc.get("backend") == "hip"
@@ -7479,7 +7500,8 @@ def write_config_qfn(a, pc: dict, meta: dict, quant: str, files: list, pack: Pat
     if not profile.exists() and QFN_PROFILE.is_file():   # (the shipped ranking; the engine adds this PC's to it)
         shutil.copyfile(QFN_PROFILE, profile)
     ram = mem_gb()[0]
-    lay = QF.plan(pc["gpus"], ram, quant)              # (NVIDIA: one card or the layer split; adds nothing on AMD)
+    lay = QF.plan(pc["gpus"], ram, quant, qfn_cpu_info())   # (NVIDIA: one card or the layer split; adds nothing on
+                                                            #  AMD; the CPU's facts drive the TOPOLOGY class)
     args = ["--pack", str(pack), "--native", str(files[0])]
     if profile.exists():
         args += ["--expert-profile", str(profile), "--expert-profile-save", str(profile)]
@@ -7489,13 +7511,17 @@ def write_config_qfn(a, pc: dict, meta: dict, quant: str, files: list, pack: Pat
     args += ["--max-context", str(ctx), "--kv", "int8", "--kv-resident", str(min(ctx, 32768)),
              "--vram-reserve-mib", "700", "--session-dir", str(var / "sessions"),
              "--resident-budget-gib", str(qfn_ram_budget(ram))]
-    if lay["layer_split"]:                             # (a split: each card its own layers' weights, pipelined reads)
-        args += lay["args"]
+    args += lay["args"]                                # (the live configs' tuning by class: the conversation cache
+                                                       #  every PC gets, the split's pipelined reads and stage
+                                                       #  pools, the quant's --prompt-cache, --pool-workers on a
+                                                       #  multi-socket CPU - qfn_fit's plan says which)
     args += ["--rope-scaling", "yarn", "--rope-scale", "4", "--yarn-orig-ctx", "262144"]
     if vision is not None:                             # (pictures: GENI requests, each image's rows at its pad tokens)
         args.append("--vision")
     env = {"SAGUARO_NO_LARGEPAGES": "1", "SAGUARO_YARN_ELASTIC": "1", "SAGUARO_MMQ_KQ": "1",
-           **lay["env"],                               # (the live configs' T4 tuning: only when every card is sm_75)
+           **lay["env"],                               # (by class: GENERIC everywhere, T4 tuning only on all-sm_75
+                                                       #  cards, the split's only on a split, NUMA's only on more
+                                                       #  than one socket - ./scratch/u6-keys.txt has every key)
            **(old.get("env") or {}), **parse_env(a.env)}
     inst = {"family": "qfn", "qwen_quant": quant, "engine": Q.QFN_ENGINE}
     sampling, effort = Q.model_defaults({"installer": inst})
