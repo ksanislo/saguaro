@@ -373,6 +373,19 @@ class Migration(unittest.TestCase):
         self.assertTrue(c["vision"]["exe"].endswith("qfn/vision-qfn"))     # (its pictures on QFN's reader)
         self.assertEqual(Q.config_stem("qfn", Q.config_key(c)), "maya-cyber-frost")  # (same file name)
 
+    def test_the_reserve_is_its_own_or_the_rule(self):
+        """v1.2.1-A: the migration keeps the --vram-reserve-mib the old config had, and writes the display rule of
+        this PC's cards when it had none (the class's patched S.gpus / S.amd_gpus answer for the cards here)."""
+        old = json.loads(json.dumps(self.OLD))
+        old["args"] += ["--vram-reserve-mib", "1234"]
+        self.assertTrue(maya.migrate_cyber_frost(old))
+        self.assertEqual(old["args"][old["args"].index("--vram-reserve-mib") + 1], "1234")   # (kept as it was)
+        self.assertEqual(self.migrated()["args"][self.migrated()["args"].index("--vram-reserve-mib") + 1],
+                         "3072")                                          # (no cards here: the rule's unknown case)
+        with patch.object(maya.S, "amd_gpus", lambda *a: [{"index": 0, "display": False, "vram_used_gb": 0.1}]):
+            self.assertEqual(self.migrated()["args"][self.migrated()["args"].index("--vram-reserve-mib") + 1],
+                             "512")                                       # (the PC's headless card: the rule)
+
     def test_once_only_and_nothing_else(self):
         self.assertFalse(maya.migrate_cyber_frost(self.migrated()))        # (idempotent: the rewrite runs once)
         for cfg in ({}, {"installer": {}},
@@ -431,6 +444,46 @@ class Migration(unittest.TestCase):
                                                                                 "qwen_quant": "ud-q4_k_xl"}}))
                 self.assertIsNone(maya.cyber_pack_pending({**cfg, "installer": {"family": "qwen",
                                                                                 "qwen_quant": "q5_k_m"}}))
+
+
+class ReserveRule(unittest.TestCase):
+    """v1.2.1-A: what --vram-reserve-mib a fresh QFN config writes, per vendor - the display rule (3072 where a
+    desktop may run or the display is unknown, 512 where no card has one, 1024 on a Linux AMD APU) with the user's
+    --vram-reserve-mib above the rule."""
+
+    def written(self, gpus, backend="cuda", ram=252.0, **kw):
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            models, d = t / "models", t / "models" / maya.qfn_entry("ud-q4_k_xl")["name"]
+            files = [t / "gguf" / n for n in maya.qfn_entry("ud-q4_k_xl")["files"]]
+            with cpu(), patch.object(maya, "ROOT", t), patch.object(maya, "WIN", False), \
+                    patch.object(maya, "mem_gb", return_value=(ram, ram - 12.0)), \
+                    patch.object(maya, "write_run_script", return_value=t / "run.sh"), \
+                    patch("sys.stdout", new=io.StringIO()), patch.object(maya.S, "UI", None):
+                p = maya.write_config_qfn(args(backend=backend, **kw),
+                                          {"backend": backend, "gpus": [dict(g, index=i) for i, g in enumerate(gpus)]},
+                                          {}, "ud-q4_k_xl", files, d / "pack", None, 65536, models, d, {})
+            a = json.loads(p.read_text())["args"]
+        return a[a.index("--vram-reserve-mib") + 1]
+
+    def test_nvidia(self):
+        t4 = {"name": "Tesla T4", "vram_gb": 15.0, "arch": "75"}
+        self.assertEqual(self.written([{**t4, "display": True}]), "3072")     # (a GeForce driving the desktop)
+        self.assertEqual(self.written([t4]), "3072")                          # (display_active unknown)
+        self.assertEqual(self.written([{**t4, "display": False}]), "512")     # (no more 700 on a headless card)
+        self.assertEqual(self.written([{**t4, "display": False}, {**t4, "display": False}]), "512")
+        self.assertEqual(self.written([{**t4, "display": False}, {**t4, "display": True}]), "3072")
+        self.assertEqual(self.written([t4], vram_reserve_mib=1234), "1234")   # (asked for: above the rule)
+
+    def test_amd(self):
+        card = {"arch": "gfx1201", "vram_gb": 15.9}
+        self.assertEqual(self.written([card], backend="hip"), "3072")         # (no sysfs facts: the desktop's room)
+        self.assertEqual(self.written([{**card, "display": True}], backend="hip"), "3072")
+        self.assertEqual(self.written([{**card, "display": False, "vram_used_gb": 0.1}], backend="hip"), "512")
+        self.assertEqual(self.written([{**card, "display": False, "vram_used_gb": 0.1}], backend="hip",
+                                      vram_reserve_mib=2048), "2048")
+        apu = {"arch": "gfx1151", "name": "AMD Radeon 8060S", "vram_gb": 96}
+        self.assertEqual(self.written([apu], backend="hip"), "1024")          # (the Linux APU case, unchanged)
 
 
 class NvidiaConfig(unittest.TestCase):

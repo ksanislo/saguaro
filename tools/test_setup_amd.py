@@ -221,6 +221,21 @@ class Reserve(unittest.TestCase):
         with patch.object(maya, "WIN", False):
             self.assertEqual(maya.gpu_reserve_mib([{"arch": "gfx1151", "display": True, "vram_gb": 96}]), 1024)
 
+    def test_nvidia_display_active(self):
+        """v1.2.1-A: the NVIDIA fact (setup.py's gpus() from nvidia-smi's display_active) - Disabled is headless,
+        on Windows too (sysfs' absence is not a question there); Enabled, and unknown - "[N/A]" / "[Not Supported]"
+        / an old nvidia-smi, which leave no "display" key - keep the desktop's room."""
+        t4 = {"name": "Tesla T4", "vram_gb": 15.0, "arch": "75"}
+        for win in (False, True):
+            with self.subTest(WIN=win), patch.object(maya, "WIN", win):
+                self.assertEqual(maya.gpu_reserve_mib([{**t4, "display": False}]), 512)
+                self.assertIn("no display", maya.gpu_reserve_why([{**t4, "display": False}]))
+        with patch.object(maya, "WIN", False):
+            self.assertEqual(maya.gpu_reserve_mib([{**t4, "display": True}]), 3072)
+            self.assertEqual(maya.gpu_reserve_mib([t4]), 3072)               # (no fact: unknown)
+            self.assertEqual(maya.gpu_reserve_mib([{**t4, "display": False},
+                                                   {**t4, "index": 1, "display": True}]), 3072)
+
     def test_card_name_from_the_pci_revision(self):
         with tempfile.TemporaryDirectory() as d:
             self.assertEqual(S.amd_pci_name(sysfs_card(Path(d), {}, 0)), "AMD Radeon RX 9070 XT (gfx1201)")

@@ -334,27 +334,41 @@ class Config(unittest.TestCase):
         self.assertEqual(c["installer"]["ds4_quant"], "gguf-q8")
         self.assertEqual(maya.config_family(c), "deepseek")
 
-    def test_hip_reserve(self):
-        def reserve(gpu, old=None, **kw):
-            (self.root / "maya-ds4-hip.json").unlink(missing_ok=True)   # (a fresh setup, or the one before: `old`)
+    def test_reserve_mib(self):
+        """v1.2.1-A: the VRAM the config keeps free follows the display rule on both vendors - 3072 where the desktop
+        may run (a connected or unknown display), 512 on a card no display runs on, 1024 on a Linux AMD APU - and the
+        user's --vram-reserve-mib, or the config before's own --reserve-mib, come first."""
+        def reserve(gpu, old=None, backend="hip", **kw):
+            for name in ("maya-ds4-hip.json", "maya-ds4.json"):      # (a fresh setup, or the one before: `old`)
+                (self.root / name).unlink(missing_ok=True)
             if old is not None:
-                (self.root / "maya-ds4-hip.json").write_text(json.dumps(old))
-            pc = {"backend": "hip", "gpus": [dict(gpu, index=0)]}
+                (self.root / ("maya-ds4-hip.json" if backend == "hip" else "maya-ds4.json")).write_text(
+                    json.dumps(old))
+            pc = {"backend": backend, "gpus": [dict(gpu, index=0)]}
             p = maya.write_config_ds4(args(**kw), pc, {}, Path("/m/G/maya-ds4"), 65536, Path("/models"), Path("/m/G"),
                                       "maya-s")
             a = json.loads(p.read_text())["args"]
             return a[a.index("--reserve-mib") + 1] if "--reserve-mib" in a else None
         card = {"arch": "gfx1100", "name": "Radeon RX 7900 XTX", "vram_gb": 24}
         apu = {"arch": "gfx1151", "name": "Radeon 8060S", "vram_gb": 96}
+        t4 = {"name": "Tesla T4", "vram_gb": 15.0, "arch": "75"}
         self.assertEqual(reserve(card), "3072")                       # (the desktop allocates beside the engine)
+        self.assertEqual(reserve({**card, "display": True}), "3072")
+        self.assertEqual(reserve({**card, "display": False, "vram_used_gb": 0.1}), "512")
         with patch.object(maya, "WIN", False):
             self.assertEqual(reserve(apu), "1024")
         with patch.object(maya, "WIN", True):
             self.assertEqual(reserve(apu), "3072")
         self.assertEqual(reserve(card, vram_reserve_mib=500), "500")  # (asked for)
         self.assertEqual(reserve(card, {"args": ["--reserve-mib", "2000"]}), "2000")   # (kept)
-        p, c = self.write(args())                        # (NVIDIA too, v1.2.1-A: the same rule on its cards' facts;
-        self.assertEqual(c["args"][c["args"].index("--reserve-mib") + 1], "3072")    #  no facts here: the desktop's 3072)
+        # (v1.2.1-A: NVIDIA the same - a GeForce driving the desktop, a headless T4, an unknown display_active)
+        self.assertEqual(reserve({**t4, "display": True}, backend="cuda"), "3072")
+        self.assertEqual(reserve({**t4, "display": False}, backend="cuda"), "512")
+        self.assertEqual(reserve(t4, backend="cuda"), "3072")         # (no fact: [N/A] / an old nvidia-smi)
+        with patch.object(maya, "WIN", True):                          # (Windows too: nvidia-smi says it outright)
+            self.assertEqual(reserve({**t4, "display": False}, backend="cuda"), "512")
+        self.assertEqual(reserve(t4, backend="cuda", vram_reserve_mib=900), "900")
+        self.assertEqual(reserve(t4, {"args": ["--reserve-mib", "2000"]}, backend="cuda"), "2000")   # (kept)
 
 
 class Calibrate(unittest.TestCase):
