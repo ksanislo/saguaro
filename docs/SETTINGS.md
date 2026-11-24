@@ -46,6 +46,11 @@ as well as the performance cores, or, where it has to stay confined, set `SAGUAR
 lower so a few of its cores stay free. The start log says how many threads each GPU's lane has and what an expert
 costs there (`glm fast: CUDA0 CPU lane: 8 threads, an expert ... ms on the CPU vs ... ms over PCIe`).
 
+`SAGUARO_GLM_CPU_LANE` is a **debug override of a calibrated value**: the count `./saguaro.sh --calibrate` measures for
+this machine (`tools/calibrate_glm.py`, kept only when it beats the engine's own by over 3%). It fixes the lane's
+thread *share* - it does not pick an instruction set, which is chosen at build time when setup.py compiles the engine
+for this CPU; a CPU without AVX2 runs the engine's AVX1 rows, and there is no switch here to change that.
+
 These settings change what the engine chooses (put them in the config with `--env`, or into its `"env"` block):
 
 | Setting | Default | |
@@ -1013,6 +1018,12 @@ makes (several rounds, in turns), and keeps another way only when it is more tha
 an answer, only the speed; the log says what was measured (`ds4: CPU lane: node, 22 threads (measured, ...)`). It
 needs at least 8 experts of one layer on the lane (otherwise the lane hardly runs). Only the CPUs the engine may run
 on are used (`taskset`, a container's cpuset).
+
+`SAGUARO_DS4_CPU_LANE` and `--cpu-threads` are **debug overrides of a measured value**: the engine times the lane's ways
+itself at start (above), and the setup's `./saguaro.sh --calibrate` measures `--cpu-threads` for this machine
+(`tools/calibrate_ds4_tp.py`). Set either and the measuring stops and the value you gave is used. Neither chooses an
+instruction set - that is fixed at build time: a CPU without AVX2 runs the engine's AVX1 rows (its GGUF quants), and
+there is no switch here to change that.
 
 | Setting | Default | |
 | --- | --- | --- |
