@@ -11,7 +11,7 @@ export const Icon = ({name, sm, lg, cls = ""}) => html`
 // the Saguaro mark on its gradient (the only place the gradient is used)
 export const MayaMark = ({size = 28}) => html`
   <span class="maya-mark" style=${`width:${size}px;height:${size}px`} aria-hidden="true"><svg viewBox="0 0 24 24"
-    style=${`width:${Math.round(size * 0.64)}px;height:${Math.round(size * 0.64)}px`}><use href=${`${SPRITE}#i-maya`}/></svg></span>`;
+    style=${`width:${Math.round(size * 0.9)}px;height:${Math.round(size * 0.9)}px`}><use href=${`${SPRITE}#i-maya`}/></svg></span>`;
 
 export function ModelLogo({model, size = 32, cls = ""}) {
   const l = modelLogo(model);
