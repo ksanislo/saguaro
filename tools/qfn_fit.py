@@ -107,6 +107,15 @@ def quant_gib(quant: str) -> float:
     return SIZES.get(quant, 0.0)
 
 
+def manifest_quants() -> list:
+    """Every quant the manifest names (the CLI lays out more than the two measured splits)."""
+    try:
+        with open(MANIFEST, encoding="utf-8") as fh:
+            return sorted((json.load(fh).get("quants") or {})) or sorted(MEASURED_SPLITS)
+    except (OSError, ValueError):
+        return sorted(MEASURED_SPLITS)
+
+
 def resident_budget_gib(ram_gb: float, quant: str | None = None) -> int:
     """--resident-budget-gib for a PC with `ram_gb` GiB of RAM: all but RAM_SPARE_GB (measured on 91.7 GiB: 71
     answered 32% faster than 64 with 10.8 GiB still free; the engine takes no more than the experts), and never
@@ -168,31 +177,61 @@ def equal_group(cards: list, n: int = MAX_GROUP) -> list:
     return best[:n] if len(best) >= 2 else []
 
 
-def unsupported(cards: list, ram_gb: float) -> str | None:
+def unsupported(cards: list, ram_gb: float, quant: str | None = None) -> str | None:
     """Why these cards ({"name", "vram_gb"}) and this RAM cannot run Qwen3.8-Flash-Next on saguaro-qfn, in one
     plain line, or None.  A card whose VRAM is not known (0) is not a refusal (the engine measures at its start);
-    ram_gb 0: not read yet."""
+    ram_gb 0: not read yet.  With the quant known (plan hands it; --check does not have it yet) and its experts
+    over these cards' VRAM and this PC's RAM together, the line says that outright - the SSD would see nearly
+    every token (the one layout that runs with real SSD reads, the Q8_0 box measured with about 50 GB of them on
+    the SSD, still fits by this rule and stays a fit)."""
     for g in cards:
         v = float(g.get("vram_gb") or 0)
         if 0 < v < MIN_VRAM_GB:
             return (f"Qwen3.8-Flash-Next on saguaro-qfn needs GPUs of 16 GB or more: every card of a layout caches "
                     f"the experts of its own layers (this PC's {g.get('name') or 'GPU'}: {v:.0f} GB)")
     if ram_gb and ram_gb < MIN_RAM_GB:
-        return (f"Qwen3.8-Flash-Next needs about 96 GB of RAM (this PC: {ram_gb:.0f} GB): the experts the cards do "
-                "not hold must fit in RAM beside the system, or nearly every token waits on the SSD")
+        why = (f"Qwen3.8-Flash-Next needs about 96 GB of RAM (this PC: {ram_gb:.0f} GB): the experts the cards do "
+               "not hold must fit in RAM beside the system, or nearly every token waits on the SSD")
+        experts = quant_gib(quant) if quant else 0.0
+        room = ram_gb + sum(float(g.get("vram_gb") or 0) for g in cards)
+        if experts and room < experts:
+            why += (f" {quant}: its {experts:.0f} GiB of experts are {experts - room:.0f} GiB more than these "
+                    f"cards' VRAM and this PC's RAM together hold (~{room:.0f} GiB): nearly every token would "
+                    "wait on the SSD - more RAM or more cards, or the smaller quant")
+        return why
     return None
 
 
 def layer_split(cards: list, quant: str = "ud-q4_k_xl") -> str | None:
     """The config's "layer_split" for these cards (the FIRST LAYER of each later card; None for one card): the live
     4x Tesla T4 configs' own values on four "16 GB" cards of compute capability 7.5, else the 48 layers shared out
-    evenly."""
+    in proportion to each card's VRAM (proportional_split)."""
     n = len(cards)
     if n <= 1:
         return None
     if n == 4 and quant in MEASURED_SPLITS and all(t4_sized(g) for g in cards) and sm75_only(cards):
         return MEASURED_SPLITS[quant]
-    return ",".join(str(round(LAYERS * i / n)) for i in range(1, n))
+    return proportional_split(cards)
+
+
+def proportional_split(cards: list) -> str:
+    """The 48 layers across these cards in proportion to their VRAM: a stage caches its own layers' experts in the
+    card's VRAM, so a card with less VRAM takes fewer layers - by count alone the smaller of two unequal cards
+    would get the same layers as the bigger one and more weight than it can hold.  Equal cards get the even split
+    ("24" for two, "16,32" for three, "12,24,36" for four); a card whose VRAM reads 0 counts like the others
+    (nothing to weigh).  Every card gets at least one layer and the bounds strictly rise."""
+    n = len(cards)
+    vram = [float(g.get("vram_gb") or 0) for g in cards]
+    if any(v <= 0 for v in vram):
+        vram = [1.0] * n
+    total = sum(vram) or float(n)
+    out, cum = [], 0.0
+    for i, v in enumerate(vram[:-1]):
+        cum += v
+        b = round(LAYERS * cum / total)
+        b = min(max(b, (out[-1] if out else 0) + 1), LAYERS - (n - 1 - i))
+        out.append(b)
+    return ",".join(str(b) for b in out)
 
 
 def best_gpus(cards: list) -> list:
@@ -248,7 +287,7 @@ def plan(cards: list, ram_gb: float, quant: str = "ud-q4_k_xl", cpu: dict | None
     best_gpus() picks those, plan() lays them out; nothing is read from the hardware (the CPU's socket/core counts
     come in as `cpu` - saguaro.py's qfn_cpu_info reads them from /sys)."""
     why = (f"Qwen3.8-Flash-Next on saguaro-qfn runs on one GPU of 16 GB or more, or up to {MAX_GROUP} equal ones: "
-           "no cards were named") if not cards else unsupported(cards, ram_gb)
+           "no cards were named") if not cards else unsupported(cards, ram_gb, quant)
     n = len(cards)
     split = layer_split(cards, quant) if why is None else None
     ctx = DEFAULT_CONTEXT if n <= 1 else SPLIT_CONTEXT
@@ -256,7 +295,9 @@ def plan(cards: list, ram_gb: float, quant: str = "ud-q4_k_xl", cpu: dict | None
     # --resident-budget-gib: a pinned tier of RAM - 20 (never above the model's expert bytes) only while the page
     # cache cannot hold the experts; when it can, no tier: the file cache is it, as the live 252 GB box runs it.
     budget = resident_budget_gib(ram_gb, quant) if ram_gb and not page_cache_tier(ram_gb, quant) else None
-    live = bool(split) and split in set(MEASURED_SPLITS.values())        # a live 4x Tesla T4 config's split
+    # the live 4x Tesla T4 configs' own splits: four cards, all sm_75, the quant one of them ran - the pipe rate
+    # belongs to THAT layout (a computed split that happened to hit the same bounds on other cards gets "1")
+    live = bool(split) and n == 4 and t4 and split in set(MEASURED_SPLITS.values())
     args = ([] if n <= 1 else
             ["--trim-stage-weights", "--prefill-pipe", MEASURED_PREFILL_PIPE.get(quant, "1") if live else "1"])
     if why is None:
@@ -267,8 +308,7 @@ def plan(cards: list, ram_gb: float, quant: str = "ud-q4_k_xl", cpu: dict | None
         if workers:
             args += ["--pool-workers", str(workers)]
     amd = str((cards[0] if cards else {}).get("arch") or "").startswith("gfx")
-    measured = why is None and ((live and sm75_only(cards)) or
-                                (n == 1 and amd and t4_sized(cards[0]) and ram_gb >= 90.0))
+    measured = why is None and (live or (n == 1 and amd and t4_sized(cards[0]) and ram_gb >= 90.0))
     tier_said = ("the next ones read through the OS file cache, the experts all fitting in RAM"
                  if page_cache_tier(ram_gb, quant) else
                  f"the next ones in a {budget if budget is not None else 'RAM - 20'} GiB RAM tier, the rest from the SSD")
@@ -289,7 +329,7 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Qwen3.8-Flash-Next on saguaro-qfn: the fit and layout for these cards")
     ap.add_argument("cards", nargs="*", help="one card per GPU: VRAM GiB, optionally :compute-capability (16:75)")
     ap.add_argument("--ram", type=float, default=0.0, help="the PC's RAM in GiB (0: not known)")
-    ap.add_argument("--quant", default="ud-q4_k_xl", choices=sorted(MEASURED_SPLITS), help="the quant to lay out")
+    ap.add_argument("--quant", default="ud-q4_k_xl", choices=manifest_quants(), help="the quant to lay out")
     ap.add_argument("--sockets", type=int, default=0, help="the CPU's sockets (0: not known)")
     ap.add_argument("--cores", type=int, default=0, help="the CPU's physical cores across its sockets (0: not known)")
     a = ap.parse_args(argv)

@@ -7542,16 +7542,18 @@ def write_config_qfn(a, pc: dict, meta: dict, quant: str, files: list, pack: Pat
            **(old.get("env") or {}), **parse_env(a.env)}
     inst = {"family": "qfn", "qwen_quant": quant, "engine": Q.QFN_ENGINE}
     sampling, effort = Q.model_defaults({"installer": inst})
+    # answers at once (serve/qfn_engine.py's parallel_args turns this into the engine's --batch N): off on the one
+    # 16 GB AMD card it was measured on (parallel decoding lost speed there - one card stays at parallel 1 even
+    # when the config written before was a several-cards one and carries a value), 2 on several GPUs as the live
+    # T4 configs run it; --parallel N says, and a config written before keeps its value on a several-cards layout
+    par = (getattr(a, "parallel", None) or (old.get("parallel") if len(pc["gpus"]) > 1 else None)
+           or (2 if len(pc["gpus"]) > 1 else 1))
     cfg = {"exe": str(qfn_exe()), "args": args, "env": env, "cwd": str(ROOT / "engines" / "qfn"),
            "tokenizer": str(pack / "tokenizer"), "model_name": name, **({"backend": "hip"} if hip else {}),
            "gpu": [g["index"] for g in pc["gpus"]],
            **({"layer_split": lay["layer_split"]} if lay["layer_split"] else {}), "sampling": sampling,
            "lib_dirs": meta.get("lib_dirs") or old.get("lib_dirs") or [], "port": port,
            **({"vision": vision} if vision else {})}
-    # answers at once (serve/qfn_engine.py's parallel_args turns this into the engine's --batch N): off on the one
-    # 16 GB AMD card it was measured on (parallel decoding lost speed there), 2 on several GPUs as the live T4
-    # configs run it; --parallel N says, and a config written before keeps its value
-    par = getattr(a, "parallel", None) or old.get("parallel") or (2 if len(pc["gpus"]) > 1 else 1)
     if par > 1:
         cfg["parallel"] = par
         ok(f"answers at once: {par} (\"parallel\": {par}: its server gives the engine --batch {par}, up to {par} "

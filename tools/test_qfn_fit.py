@@ -189,6 +189,51 @@ class Topology(unittest.TestCase):
             self.assertTrue(all(b < c for b, c in zip(bounds, bounds[1:])), bounds)
 
 
+class UnequalCards(unittest.TestCase):
+    """U7: the computed split follows each card's VRAM (a smaller card caches less of its layers' experts, so
+    it takes fewer layers), and a split that merely hits the live splits' bounds never borrows their pipe rate."""
+
+    def test_the_split_follows_the_vram(self):
+        self.assertEqual(F.layer_split([gpu(0, 16.0, "86"), gpu(1, 24.0, "86")]), "19")   # 48 x 16/40 rounded
+        self.assertEqual(F.layer_split([gpu(0, 15.0, "86"), gpu(1, 48.0, "86"), gpu(2, 48.0, "86")]), "6,27")
+        self.assertEqual(F.layer_split([gpu(i, 20.0, "86") for i in range(2)]), "24")     # equal: the even split
+        self.assertEqual(F.layer_split([gpu(i, 0.0, "86") for i in range(3)]), "16,32")   # (VRAM unknown: even)
+
+    def test_every_card_keeps_a_layer_and_the_bounds_rise(self):
+        bounds = [int(x) for x in F.layer_split([gpu(0, 15.0, "86"), gpu(1, 96.0, "86")]).split(",")]
+        self.assertEqual(bounds, [6])                                                    # 48 x 15/111 rounded
+        for vs in ((15.0, 15.0, 96.0), (96.0, 15.0, 15.0), (16.0, 64.0, 64.0, 64.0)):
+            s = [int(x) for x in F.layer_split([gpu(i, v, "86") for i, v in enumerate(vs)]).split(",")]
+            self.assertEqual([0] + s + [48], sorted(set([0] + s + [48])))                # strictly rising
+            self.assertTrue(all(a < b for a, b in zip(s, s[1:] + [48])))                 # none without layers
+
+    def test_a_computed_split_never_borrows_the_live_pipe(self):
+        four = [gpu(0, 33.0, "86"), gpu(1, 39.0, "86"), gpu(2, 36.0, "86"), gpu(3, 36.0, "86")]
+        p = F.plan(four, 220.0)                                                          # -> bounds "11,24,36"
+        self.assertEqual(p["layer_split"], "11,24,36")
+        self.assertEqual(p["args"][p["args"].index("--prefill-pipe") + 1], "1")          # (1536 is the T4 box's)
+        self.assertFalse(p["measured"])
+
+
+class RefusalsByName(unittest.TestCase):
+    """The refusals say the quant's own numbers: Q8_0's 175 GiB of experts over a small PC is said outright
+    (and the layout the Q8_0 box was measured on, SSD reads and all, still fits)."""
+
+    def test_the_shortfall_names_the_quant(self):
+        p = F.plan([gpu(i, 15.0, "75", "Tesla T4") for i in range(2)], 64.0, "q8_0")
+        self.assertFalse(p["fits"])
+        self.assertIn("96 GB of RAM", p["reason"])            # (the standing floor line stays)
+        self.assertIn("175 GiB", p["reason"])                 # (this quant's files ... )
+        self.assertIn("~94 GiB", p["reason"])                 # ( ... over what 2x15 + 64 can hold together)
+        self.assertTrue(F.plan([gpu(0, 15.9, "gfx1201")], 91.7, "q8_0")["fits"])   # (the measured Q8_0 AMD box:
+        self.assertIn("96 GB of RAM", F.plan(t4s(4), 60.0, "ud-q4_k_xl")["reason"]) #  SSD reads are no refusal)
+
+    def test_check_pc_without_a_quant_stays_plain(self):
+        p = F.unsupported([gpu(0, 15.9, "gfx1201")], 60.0)    # (no quant known: the plain line only)
+        self.assertIn("96 GB of RAM", p)
+        self.assertNotIn("GiB of experts", p)
+
+
 class Choice(unittest.TestCase):
     def test_big_card_alone_equal_cards_together(self):
         self.assertEqual(F.best_gpus([gpu(0, 24.0, "86")]), [gpu(0, 24.0, "86")])

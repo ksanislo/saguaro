@@ -796,9 +796,14 @@ class Parallel(unittest.TestCase):
             with tempfile.TemporaryDirectory() as t:
                 cfg = written_cfg(Path(t), a, gpus=(gpus[0] if gpus else None))
                 self.assertEqual(cfg.get("parallel"), want, why)
-        with tempfile.TemporaryDirectory() as t:                 # (a setup before wrote 3: a setup again keeps it)
-            written_cfg(Path(t), args(parallel=3))
-            self.assertEqual(written_cfg(Path(t), args())["parallel"], 3)
+        with tempfile.TemporaryDirectory() as t:                 # (a setup before wrote 3 on several GPUs: a
+            written_cfg(Path(t), args(parallel=3), gpus=two)     #  several-GPUs setup again keeps it)
+            self.assertEqual(written_cfg(Path(t), args(), gpus=two)["parallel"], 3)
+        with tempfile.TemporaryDirectory() as t:                 # (U7: a setup that shrinks to ONE card drops it:
+            written_cfg(Path(t), args(parallel=3), gpus=two)     #  parallel decoding on one 16 GB card measured
+            self.assertIsNone(written_cfg(Path(t), args()).get("parallel"))   #  a loss: one card -> parallel 1
+        with tempfile.TemporaryDirectory() as t:                 # (--parallel N still says it on one card)
+            self.assertEqual(written_cfg(Path(t), args(parallel=2))["parallel"], 2)
 
 
 class ImportCatalog(unittest.TestCase):
