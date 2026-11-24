@@ -184,6 +184,12 @@ class Offered(unittest.TestCase):
             self.assertIn(ctx, maya.QFN_CONTEXTS)                  # (choose_context offers only QFN_CONTEXTS)
 
 
+def cpu(sockets=1, cores=8):
+    """A patched qfn_cpu_info: the tests never read the TEST machine's /sys (this repo's own dev box has two
+    sockets; the one-socket default keeps the TOPOLOGY keys out of the configs that should not carry them)."""
+    return patch.object(maya, "qfn_cpu_info", return_value={"sockets": sockets, "cores": cores})
+
+
 class Config(unittest.TestCase):
     def test_the_measured_amd_settings(self):
         with tempfile.TemporaryDirectory() as t:
@@ -191,7 +197,7 @@ class Config(unittest.TestCase):
             models, d = t / "models", t / "models" / "Qwen3.8-Flash-Next-UD-Q4_K_XL"
             files = [t / "gguf" / n for n in maya.qfn_entry("ud-q4_k_xl")["files"]]
             pc = {"backend": "hip", "gpus": [{"index": 0, "arch": "gfx1201", "vram_gb": 15.9}]}
-            with patch.object(maya, "ROOT", t), patch.object(maya, "mem_gb", return_value=(91.7, 80.0)), \
+            with cpu(), patch.object(maya, "ROOT", t), patch.object(maya, "mem_gb", return_value=(91.7, 80.0)), \
                     patch.object(maya, "write_run_script", return_value=t / "run.sh"), \
                     patch("sys.stdout", new=io.StringIO()), patch.object(maya.S, "UI", None):
                 p = maya.write_config_qfn(args(), pc, {"lib_dirs": ["/opt/rocm/lib"]}, "ud-q4_k_xl", files, d / "pack",
@@ -203,7 +209,7 @@ class Config(unittest.TestCase):
             self.assertEqual(SV.engine_kind(cfg), "batch")              # (the server drives it as QFN's engine)
             a = cfg["args"]
             self.assertEqual(a[a.index("--native") + 1], str(files[0]))
-            self.assertEqual(a[a.index("--resident-budget-gib") + 1], "71")
+            self.assertEqual(a[a.index("--resident-budget-gib") + 1], "71")   # (91.7 GB: the tier as measured)
             self.assertEqual(a[a.index("--max-context") + 1], "65536")
             self.assertIn("--mtp", a)
             self.assertEqual(cfg["env"]["SAGUARO_MMQ_KQ"], "1")
@@ -212,6 +218,16 @@ class Config(unittest.TestCase):
             self.assertEqual(cfg["installer"]["family"], "qfn")         # (its own family since the identity split)
             self.assertEqual(Q.family_of(cfg), "qfn")
             self.assertEqual(cfg["sampling"], {"temperature": 1.0, "top_p": 0.95, "top_k": 20})
+            # U6: AMD's config is the measured one plus the GENERIC additions ONLY (no T4 tuning, no split keys,
+            # no NUMA keys on a one-socket CPU), and the conversation cache every serve host gets.
+            self.assertEqual(cfg["env"], {"SAGUARO_NO_LARGEPAGES": "1", "SAGUARO_YARN_ELASTIC": "1",
+                                          "SAGUARO_MMQ_KQ": "1", **maya.QF.GENERIC_ENV})
+            self.assertIn("--conversation-cache-mib", a)                # (auto: the shared park pool)
+            self.assertIn("--conversation-cache-slots", a)              # (auto: 64)
+            self.assertEqual(a[a.index("--conversation-cache-min-tokens") + 1], "1024")
+            self.assertNotIn("--pool-workers", a)                       # (one socket: the engine's own default)
+            self.assertNotIn("--prompt-cache", a)                       # (the live T4 box's per-quant tuning)
+            self.assertNotIn("--trim-stage-weights", a)                 # (one card: no split, no stage keys)
 
     def test_the_cyber_frost_config(self):
         """Its config keeps the name it always had, takes the drafter from inside the pack (the file's own NextN
@@ -225,7 +241,7 @@ class Config(unittest.TestCase):
                       "mmproj": str(d / "vision" / "mmproj-F16.gguf"), "model": str(files[0]), "gpu": True,
                       "max_tokens": 1024, "elastic": True, "elastic_mib": 1536, "elastic_idle_s": 30,
                       "elastic_keep_s": 600}
-            with patch.object(maya, "ROOT", t), patch.object(maya, "mem_gb", return_value=(91.7, 80.0)), \
+            with cpu(), patch.object(maya, "ROOT", t), patch.object(maya, "mem_gb", return_value=(91.7, 80.0)), \
                     patch.object(maya, "write_run_script", return_value=t / "run.sh"), \
                     patch("sys.stdout", new=io.StringIO()), patch.object(maya.S, "UI", None):
                 p = maya.write_config_qfn(args(), pc, {}, Q.CYBER_FROST_QUANT, files, d / "pack",
@@ -416,7 +432,7 @@ class NvidiaConfig(unittest.TestCase):
             files = [t / "gguf" / n for n in maya.qfn_entry("ud-q4_k_xl")["files"]]
             pc = {"backend": "cuda", "gpus": [{"index": i, "name": "Tesla T4", "vram_gb": 15.0, "arch": "75"}
                                               for i in range(4)]}
-            with patch.object(maya, "ROOT", t), patch.object(maya, "mem_gb", return_value=(220.0, 200.0)), \
+            with cpu(2, 20), patch.object(maya, "ROOT", t), patch.object(maya, "mem_gb", return_value=(252.0, 240.0)), \
                     patch.object(maya, "write_run_script", return_value=t / "run.sh"), \
                     patch("sys.stdout", new=io.StringIO()), patch.object(maya.S, "UI", None):
                 p = maya.write_config_qfn(args(backend="cuda"), pc, {}, "ud-q4_k_xl", files, d / "pack",
@@ -429,12 +445,15 @@ class NvidiaConfig(unittest.TestCase):
             a = cfg["args"]
             self.assertEqual(a[a.index("--max-context") + 1], "262144")
             self.assertEqual(a[a.index("--kv-resident") + 1], "32768")
-            self.assertEqual(a[a.index("--resident-budget-gib") + 1], "200")
+            self.assertNotIn("--resident-budget-gib", a)      # (252 GB: the page cache holds the experts, as live)
             self.assertIn("--trim-stage-weights", a)
             self.assertEqual(a[a.index("--prefill-pipe") + 1], "1536")
+            self.assertEqual(a[a.index("--pool-workers") + 1], "19")     # (2 x 10 cores minus the host's)
             self.assertEqual(cfg["env"]["SAGUARO_SM75_PERF"], "1")                # (every card is compute cap 7.5)
             self.assertEqual(cfg["env"]["SAGUARO_KQL"], "3")
             self.assertEqual(cfg["env"]["SAGUARO_MMQ_KQ"], "1")
+            self.assertEqual(cfg["env"]["SAGUARO_ELASTIC_SLOTS_GIVE"], "1")       # (what makes the engine lend the
+                                                                                  #  picture encoder CUDA0's room)
             import serve.server as SV
             self.assertEqual(SV.engine_kind(cfg), "batch")
             self.assertEqual(Q.family_of(cfg), "qfn")
@@ -445,7 +464,7 @@ class NvidiaConfig(unittest.TestCase):
             models, d = t / "models", t / "models" / "Qwen3.8-Flash-Next-UD-Q4_K_XL"
             files = [t / "gguf" / n for n in maya.qfn_entry("ud-q4_k_xl")["files"]]
             pc = {"backend": "cuda", "gpus": [{"index": 0, "name": "RTX A5000", "vram_gb": 24.0, "arch": "86"}]}
-            with patch.object(maya, "ROOT", t), patch.object(maya, "mem_gb", return_value=(128.0, 100.0)), \
+            with cpu(), patch.object(maya, "ROOT", t), patch.object(maya, "mem_gb", return_value=(128.0, 100.0)), \
                     patch.object(maya, "write_run_script", return_value=t / "run.sh"), \
                     patch("sys.stdout", new=io.StringIO()), patch.object(maya.S, "UI", None):
                 p = maya.write_config_qfn(args(backend="cuda"), pc, {}, "ud-q4_k_xl", files, d / "pack", None,
@@ -454,8 +473,113 @@ class NvidiaConfig(unittest.TestCase):
             self.assertNotIn("layer_split", cfg)
             for k in cfg["env"]:
                 self.assertFalse(k.startswith("SAGUARO_SM75") or k in ("SAGUARO_KQL", "SAGUARO_BF16_TC"), k)
+            self.assertNotIn("SAGUARO_SLOT_ADMIT", cfg["env"])         # (no split: the pipelined reads stay out)
+            self.assertNotIn("SAGUARO_NUMA_PLACE", cfg["env"])         # (one socket: no NUMA keys)
+            self.assertNotIn("--pool-workers", cfg["args"])
+            self.assertNotIn("--prompt-cache", cfg["args"])            # (the per-quant args come from the T4 box)
+            self.assertIn("SAGUARO_ELASTIC_SLOTS", cfg["env"])         # (GENERIC: the lend works on one card too)
             self.assertNotIn("--prefill-pipe", cfg["args"])
             self.assertEqual(cfg["installer"]["family"], "qfn")
+
+
+class LiveT4Parity(unittest.TestCase):
+    """U6 step 5: what a fresh `./saguaro.sh --setup --model qwen3.8-flash-next` writes on the live machine's
+    shape (4x Tesla T4, 2-socket 10+10-core CPU, 252 GB) is the live UD-Q4 config (./ref/live-ud-q4.json): the
+    env and args equal bar the paths, the context and these intended differences:
+      - env SAGUARO_BATCH_READS_OVERTAKE, SAGUARO_PARK_STAGING_MIB: read nowhere in engine or server, not written;
+      - env SAGUARO_GDN_KEYHEAD: the ref's value is "<removed>" (./ref/live-ud-q4.json:59); the setup writes the
+        documented sm_75 opt-in, 1 (prefill/kernels.cu: "SAGUARO_GDN_KEYHEAD=1 also takes it on sm_75");
+      - --max-context: the split recommends 262144, the live config was raised to 1048576;
+      - --resident-budget-gib: neither has one (252 GB: the page cache holds the experts);
+      - the file paths, the port, the log, the installer block: this machine's, not mangonel's."""
+
+    LIVE_ENV = {  # (./ref/live-ud-q4.json's env, copied: ref/ is not in the repository)
+        "SAGUARO_NO_LARGEPAGES": "1", "SAGUARO_SM75_PERF": "1", "SAGUARO_SM75_STACK": "1", "SAGUARO_KQL": "3",
+        "SAGUARO_SM75_Q8G": "1", "SAGUARO_GDN_KEYHEAD": "1", "SAGUARO_ARGMAX_ROWS_SM70": "1",
+        "SAGUARO_BF16_TC": "1", "SAGUARO_BF16_TC_SKIP": "none", "SAGUARO_MMQ_KQ": "1", "SAGUARO_STAGE_SERVE": "1",
+        "SAGUARO_NUMA_PLACE": "1", "SAGUARO_PARALLEL_LOAD": "1", "SAGUARO_ELASTIC_SLOTS": "1",
+        "SAGUARO_ELASTIC_SLOTS_GIVE": "1", "SAGUARO_PIPED_MTP": "1", "SAGUARO_PIPED_MTP_DRAFTS": "2",
+        "SAGUARO_SLOT_ADMIT": "1", "SAGUARO_P2P_HANDOFF": "1", "SAGUARO_SLOT_ADMIT_MULTI": "1",
+        "SAGUARO_SHORT_READS": "1", "SAGUARO_READ_YIELD": "1", "SAGUARO_ELASTIC_IDLE": "1",
+        "SAGUARO_SLOT_ADMIT_CHUNK": "4096", "SAGUARO_BATCH_READS": "1", "SAGUARO_BATCH_READS_FAST": "512",
+        "SAGUARO_BATCH_READS_FAST_SHRINK": "512", "SAGUARO_BATCH_READS_DECODE_WINDOWS": "0",
+        "SAGUARO_BATCH_READS_DECODE_SHARE": "0.3", "SAGUARO_BATCH_READS_MAX": "8",
+        "SAGUARO_BATCH_READS_OVERTAKE": "0", "SAGUARO_FAST_LANE": "1", "SAGUARO_FAST_LANE_MAX": "96",
+        "SAGUARO_PARK_STAGING_MIB": "0", "SAGUARO_NUMA_POOL": "0", "SAGUARO_ELASTIC_IDLE_S": "300",
+        "SAGUARO_READ_YIELD_CHUNK": "4096", "SAGUARO_YARN_ELASTIC": "1", "SAGUARO_PIPED_MTP_MAX": "4",
+        "SAGUARO_CACHE_MESSAGE_BOUNDARY": "1", "SAGUARO_SLOT_GRID": "6", "SAGUARO_SLOT_COPY_DIRECT": "1",
+        "SAGUARO_PARK_FAST": "1", "SAGUARO_PARALLEL_LOAD_REGISTER": "overlap", "SAGUARO_SELECT_SM75": "1",
+        "SAGUARO_MMQ_DIRECT": "1", "SAGUARO_MMQ_KTAIL": "1", "SAGUARO_MMQ_SWIGLU_Q8": "1"}
+    LIVE_ARGS = ["--pack", "/opt/llm/models/Qwen3.8-Flash-Next-UD-Q4_K_XL/pack", "--native",
+                 "/opt/llm/models/Qwen3.8-Flash-Next-UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf",
+                 "--expert-profile", "/opt/llm/var/Qwen3.8-Flash-Next-UD-Q4_K_XL/expert-profile.bin",
+                 "--expert-profile-save", "/opt/llm/var/Qwen3.8-Flash-Next-UD-Q4_K_XL/expert-profile.bin",
+                 "--expert-cache", "auto", "--prefill", "auto", "--spec", "3", "--spec-min-p", "0.7", "--mtp",
+                 "/opt/llm/models/Qwen3.8-Flash-Next-MTP-Lamina", "--max-context", "1048576", "--kv", "int8",
+                 "--kv-resident", "32768", "--vision", "--vram-reserve-mib", "700", "--conversation-cache-mib",
+                 "auto", "--conversation-cache-slots", "auto", "--prompt-cache", "64", "--session-dir",
+                 "/opt/llm/var/Qwen3.8-Flash-Next-UD-Q4_K_XL/sessions", "--pool-workers", "19",
+                 "--trim-stage-weights", "--prefill-pipe", "1536", "--conversation-cache-min-tokens", "1024",
+                 "--rope-scaling", "yarn", "--rope-scale", "4", "--yarn-orig-ctx", "262144"]
+    PATH_FLAGS = ("--pack", "--native", "--expert-profile", "--expert-profile-save", "--mtp", "--session-dir")
+    BOOL_FLAGS = ("--vision", "--trim-stage-weights")
+
+    def written(self, t: Path):
+        models, d = t / "models", t / "models" / "Qwen3.8-Flash-Next-UD-Q4_K_XL"
+        files = [t / "gguf" / n for n in maya.qfn_entry("ud-q4_k_xl")["files"]]
+        pc = {"backend": "cuda", "gpus": [{"index": i, "name": "Tesla T4", "vram_gb": 15.0, "arch": "75"}
+                                          for i in range(4)]}
+        vision = {"exe": "vision-qfn", "mmproj": "mmproj.gguf", "model": str(files[0]), "gpu": True,
+                  **maya.QFN_VISION}
+        with cpu(2, 20), patch.object(maya, "ROOT", t), patch.object(maya, "mem_gb", return_value=(252.0, 240.0)), \
+                patch.object(maya, "write_run_script", return_value=t / "run.sh"), \
+                patch("sys.stdout", new=io.StringIO()), patch.object(maya.S, "UI", None):
+            p = maya.write_config_qfn(args(backend="cuda"), pc, {}, "ud-q4_k_xl", files, d / "pack",
+                                      models / "Qwen3.8-Flash-Next-MTP-Lamina", 262144, models, d, {}, vision)
+        return json.loads(p.read_text())
+
+    def flag_pairs(self, argv):
+        out, i = [], 0
+        while i < len(argv):
+            if argv[i] in self.BOOL_FLAGS:
+                out.append((argv[i], None))
+                i += 1
+            else:
+                out.append((argv[i], argv[i + 1]))
+                i += 2
+        return out
+
+    def test_the_written_env_is_the_live_env(self):
+        with tempfile.TemporaryDirectory() as t:
+            cfg = self.written(Path(t))
+        want = {k: v for k, v in self.LIVE_ENV.items() if k not in ("SAGUARO_BATCH_READS_OVERTAKE",
+                                                                    "SAGUARO_PARK_STAGING_MIB")}
+        self.assertEqual(cfg["env"], want)
+        self.assertEqual(cfg["env"]["SAGUARO_GDN_KEYHEAD"], "1")       # ("<removed>" in the ref: see the class note)
+
+    def test_the_written_args_are_the_live_args(self):
+        with tempfile.TemporaryDirectory() as t:
+            cfg = self.written(Path(t))
+
+        def machine_free(pairs):     # (the paths and --max-context are the intended differences, listed above)
+            return {(f, v) for f, v in pairs if f not in self.PATH_FLAGS and f != "--max-context"}
+        self.assertEqual(machine_free(self.flag_pairs(cfg["args"])), machine_free(self.flag_pairs(self.LIVE_ARGS)))
+        a = cfg["args"]
+        self.assertEqual(a[a.index("--max-context") + 1], "262144")    # (the split's recommendation; live: 1M)
+        self.assertNotIn("--resident-budget-gib", a)                   # (252 GB: neither config pins a tier)
+        self.assertEqual(a[a.index("--pool-workers") + 1], "19")       # (computed here: 2 x 10 cores minus one)
+
+    def test_the_ref_copy_still_matches_the_live_file_when_it_is_here(self):
+        """ref/ is a worktree-local folder (git-excluded): when the live file IS present next to the tests, the
+        embedded copy above must be it, save the two dead keys and the removed GDN value."""
+        ref = ROOT / "ref" / "live-ud-q4.json"
+        if not ref.is_file():
+            self.skipTest("ref/ is not in the checkout")
+        live = json.loads(ref.read_text())
+        env = {k: v for k, v in live["env"].items()}
+        env["SAGUARO_GDN_KEYHEAD"] = "1"                               # ("<removed>" -> the documented 1)
+        self.assertEqual(env, self.LIVE_ENV)
+        self.assertEqual(live["args"], self.LIVE_ARGS)
 
 
 class CheckLine(unittest.TestCase):
@@ -542,7 +666,7 @@ def written_cfg(t: Path, a, vision=None, old=None, gpus=None):
     """write_config_qfn's config in a temp folder, the way set_up_qfn hands it everything."""
     models, d = t / "models", t / "models" / "Qwen3.8-Flash-Next-UD-Q4_K_XL"
     files = [t / "gguf" / n for n in maya.qfn_entry("ud-q4_k_xl")["files"]]
-    with patch.object(maya, "ROOT", t), patch.object(maya, "mem_gb", return_value=(91.7, 80.0)), \
+    with cpu(), patch.object(maya, "ROOT", t), patch.object(maya, "mem_gb", return_value=(91.7, 80.0)), \
             patch.object(maya, "write_run_script", return_value=t / "run.sh"), \
             patch("sys.stdout", new=io.StringIO()), patch.object(maya.S, "UI", None):
         p = maya.write_config_qfn(a, pc_hip(gpus), {"lib_dirs": ["/opt/rocm/lib"]}, "ud-q4_k_xl", files, d / "pack",
