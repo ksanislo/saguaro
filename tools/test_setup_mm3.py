@@ -51,7 +51,7 @@ class Gate(unittest.TestCase):
                     patch.object(maya, "warn", said.append), \
                     patch.object(maya, "check_hip_pc", lambda a, **kw: hip.append(kw) or {"backend": "hip"}):
                 self.assertEqual(maya.check_pc(args(backend="hip"), "minimax", gguf=gguf), {"backend": "hip"})
-            self.assertEqual(hip, [{"text_only": False}])
+            self.assertEqual(hip, [{"text_only": False, "family": "minimax", "gguf": gguf}])
             self.assertEqual(said, [])
 
     def test_amd_quants_offered(self):
