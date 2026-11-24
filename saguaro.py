@@ -7212,7 +7212,7 @@ def qfn_entry(quant: str = QFN_DEFAULT_QUANT) -> dict:
     q = man["quants"].get(quant)
     if not q:
         fail(f"{QFN_MANIFEST} names no {Q.shown('qfn', quant)}", "restore it (git checkout tools/qfn/download.json)")
-    return {"about": f"{Q.QFN_SHOWN} in {q['about']}; {man.get('license', 'the Qwen Community License')}",
+    return {"about": f"{Q.QFN_SHOWN} in {q['about']}; {q.get('license') or man.get('license', 'the Qwen Community License')}",   # (a quant from another lab's repo names its own license: the GSQ ones are apache-2.0)
             "format": "qfn-gguf", "repo": q.get("repo") or man["repo"],
             "revision": q.get("revision") or man["revision"], "folder": q["folder"],
             "files": {k: v[0] for k, v in q["files"].items()}, "sha256": {k: v[1] for k, v in q["files"].items()},

@@ -128,6 +128,21 @@ class QfnIdentity(unittest.TestCase):
         self.assertEqual(Q.family_of(migrated), "qfn")
         self.assertEqual(Q.config_key(migrated), "cyber-frost-q5_k_m")
 
+    def test_the_gsq_quant_names_and_setup_ids(self):
+        """U8: the GSQ-RCO quants (test_setup_qfn's GsqQuants pins their manifest): asked for by their setup ids and
+        by their files' own names; the Coder one shown as the code-tuned variant; their setup ids drop the "gsq-" of
+        the key (the repos name the quant as IQ3_S / IQ1_M), the other quants keep the plain key-after-model rule."""
+        for i in Q.QFN_IDS:
+            if Q.QFN_IDS[i] in (Q.GSQ_IQ3_S, Q.GSQ_CODER_IQ1_M):
+                self.assertEqual(Q.resolve(i), ("qfn", Q.QFN_IDS[i]), i)
+        self.assertEqual(Q.resolve("Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S"), ("qfn", "gsq-iq3_s"))
+        self.assertEqual(Q.resolve("Qwen3.8-Flash-Next-GSQ-RCO-IQ1_M"), ("qfn", "gsq-coder-iq1_m"))
+        self.assertEqual(Q.qfn_setup_id("gsq-iq3_s"), "qwen3.8-flash-next-iq3_s")
+        self.assertEqual(Q.qfn_setup_id("gsq-coder-iq1_m"), "qwen3.8-flash-next-coder-iq1_m")
+        self.assertEqual(Q.qfn_setup_id("ud-q4_k_xl"), "qwen3.8-flash-next-ud-q4_k_xl")   # (the rule for the rest)
+        cfg = {"exe": "/b/qfn/saguaro-qfn", "installer": {"family": "qfn", "qwen_quant": Q.GSQ_CODER_IQ1_M}}
+        self.assertEqual(Q.config_label(cfg), "Qwen3.8-Flash-Next · GSQ-RCO Coder IQ1_M (saguaro-qfn)")
+
     def test_the_qfn_names_and_defaults(self):
         cfg = {"exe": "/b/saguaro-qfn", "installer": {"family": "qfn", "qwen_quant": "ud-q4_k_xl"}}
         self.assertEqual(Q.config_key(cfg), "ud-q4_k_xl")

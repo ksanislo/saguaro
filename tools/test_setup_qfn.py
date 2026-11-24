@@ -145,6 +145,89 @@ class Manifest(unittest.TestCase):
                          "32867bb9e228afac427c136dd657b34b7c3f0e86/CYBER-FROST-3.8-PS-GUFF-Q5_K_M.gguf")
 
 
+class GsqQuants(unittest.TestCase):
+    """U8: the two GSQ-RCO quants (IST-DASLab's repos): the manifest pins (repo, revision, folder, sizes, sha256,
+    apache-2.0), the ids and shown names (the Coder one shown as the code-tuned variant), the shard 2 the two files
+    sets share (the PLE table, the same bytes in every GSQ quant), and --gguf-dir taking the files in place."""
+
+    GSQ = {
+        "gsq-iq3_s": ("ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF", "ed59f92082b1e93c0e96d60a8b11aab089b52f09",
+                      "IQ3_S", "Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S", 83.6,
+                      "4c1eb2ceb4915e1192f4f386021897bde56a97f40a0bb78bb86465e0f7d2aca3"),
+        "gsq-coder-iq1_m": ("ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-Coder-GGUF",
+                            "5348543e0147355ac9cbcb031184a3546350988e", "IQ1_M",
+                            "Qwen3.8-Flash-Next-GSQ-RCO-IQ1_M", 58.4,
+                            "e11083ba855e7666b48ea3f2db6a9c3a20c18751a012cc24f948de91b7087fad"),
+    }
+    SHARD2 = "316b46f3a2dbd68c900f43136ab9449f9dcc3725dfd8c794847c204bc161e113"      # the PLE table, both repos
+
+    def test_the_manifest_pins(self):
+        for k, (repo, rev, folder, stem, gb, sha1) in self.GSQ.items():
+            m = maya.qfn_entry(k)
+            self.assertEqual((m["repo"], m["revision"], m["folder"]), (repo, rev, folder), k)   # (their own repos)
+            self.assertEqual(list(m["files"]), [f"{stem}-00001-of-00002.gguf", f"{stem}-00002-of-00002.gguf"], k)
+            self.assertAlmostEqual(m["download_gb"], gb, delta=0.1)
+            self.assertEqual(m["sha256"][f"{stem}-00001-of-00002.gguf"], sha1, k)
+            self.assertEqual(m["needs"], {"vram_gb": 15, "ram_gb": 88}, k)            # (estimated, marked so)
+            self.assertIn("apache-2.0", m["about"], k)                                 # (not the Qwen license)
+            self.assertEqual(maya.file_url(m, f"{stem}-00001-of-00002.gguf"),
+                             f"https://huggingface.co/{repo}/resolve/{rev}/{folder}/{stem}-00001-of-00002.gguf", k)
+
+    def test_the_shared_shard_2(self):
+        """Shard 2 is the PLE table: the same size and sha256 in both GSQ file sets (and in every other GSQ quant
+        those repos publish); shard 1 is what differs."""
+        man = json.loads((ROOT / "tools" / "qfn" / "download.json").read_text())
+        quants = man["quants"]
+        s2 = {k: [v for n, v in quants[k]["files"].items() if n.endswith("-00002-of-00002.gguf")][0]
+              for k in self.GSQ}
+        self.assertEqual(s2["gsq-iq3_s"], s2["gsq-coder-iq1_m"])
+        self.assertEqual(s2["gsq-iq3_s"][1], self.SHARD2)
+        self.assertNotEqual([v for n, v in quants["gsq-iq3_s"]["files"].items()
+                             if n.endswith("-00001-of-00002.gguf")][0],
+                            [v for n, v in quants["gsq-coder-iq1_m"]["files"].items()
+                             if n.endswith("-00001-of-00002.gguf")][0])
+
+    def test_the_ids_shown_names_and_configs(self):
+        self.assertEqual(Q.resolve("qwen3.8-flash-next-iq3_s"), ("qfn", "gsq-iq3_s"))
+        self.assertEqual(Q.resolve("qwen3.8-flash-next-coder-iq1_m"), ("qfn", "gsq-coder-iq1_m"))
+        self.assertEqual(Q.shown("qfn", "gsq-iq3_s"), "Qwen3.8-Flash-Next · GSQ-RCO IQ3_S (saguaro-qfn)")
+        self.assertEqual(Q.shown("qfn", "gsq-coder-iq1_m", 54.4),
+                         "Qwen3.8-Flash-Next · GSQ-RCO Coder IQ1_M (saguaro-qfn) (54 GB)")
+        self.assertIn("Coder", Q.QFN_QUANTS["gsq-coder-iq1_m"])                  # (shown as the code-tuned variant)
+        self.assertIn("code-tuned", maya.qfn_entry("gsq-coder-iq1_m")["about"])   # (... and said in its about)
+        self.assertEqual(Q.config_stem("qfn", "gsq-iq3_s"), "maya-qwen3.8-flash-next-iq3_s")
+        self.assertEqual(Q.config_stem("qfn", "gsq-coder-iq1_m"), "maya-qwen3.8-flash-next-coder-iq1_m")
+
+    def test_gguf_dir_takes_the_files_in_place(self):
+        """The friend's box keeps its GSQ files: --gguf-dir with a quant's two shards is used in place (sizes and
+        sha256 checked against the pins), nothing downloaded - for both quants; a folder missing one shard is refused."""
+        for quant, (_repo, _rev, folder, stem, _gb, _sha) in self.GSQ.items():
+            with self.subTest(quant=quant), tempfile.TemporaryDirectory() as t:
+                src = Path(t) / folder                                    # (IQ3_S / IQ1_M, as on the Hub)
+                src.mkdir()
+                for n, size in maya.qfn_entry(quant)["files"].items():
+                    with (src / n).open("wb") as f:
+                        f.truncate(size)
+                quiet = [patch.object(maya, k, lambda *a, **kw: None) for k in ("ok", "warn", "step")]
+                for q_ in quiet:
+                    q_.start()
+                try:
+                    with patch.object(maya, "sha256_checked", return_value=True), \
+                            patch.object(maya, "rotational", return_value=False), \
+                            patch.object(maya, "offer_download",
+                                         side_effect=AssertionError("downloaded despite --gguf-dir")):
+                        got = maya.qfn_files_step(args(gguf_dir=src), Path(t) / "models", quant)
+                    self.assertEqual([f.name for f in got], list(maya.qfn_entry(quant)["files"]))
+                    self.assertEqual({f.parent for f in got}, {src})       # (in place: nothing copied to models/)
+                    (src / f"{stem}-00002-of-00002.gguf").unlink()         # (a missing shard: refused, named)
+                    out = refusal(lambda: maya.qfn_files_step(args(gguf_dir=src), Path(t) / "models", quant))
+                finally:
+                    for q_ in quiet:
+                        q_.stop()
+                self.assertIn("does not hold all of", out)
+                self.assertIn(f"{stem}-00002-of-00002.gguf", out)
+
+
 class Offered(unittest.TestCase):
     def test_amd_and_nvidia_offer_it_metal_refuses(self):
         self.assertIsNone(maya.family_unavailable("qfn", "hip"))

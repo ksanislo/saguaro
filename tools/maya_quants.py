@@ -157,16 +157,28 @@ SHOWN["qfn"] = QFN_SHOWN                           # (the model's name on screen
 # CYBER-FROST-3.8-PS on saguaro-qfn (QFN-first T7): peasantsmith's one GGUF as a quant of the family (its NextN block
 # inside is the drafter, tools/mtp_from_gguf.py)
 CYBER_FROST_QUANT = "cyber-frost-q5_k_m"
-QFN_QUANTS = {"ud-q4_k_xl": "UD-Q4_K_XL", "q8_0": "Q8_0", CYBER_FROST_QUANT: "CYBER-FROST-3.8 Q5_K_M"}
+# the GSQ-RCO quants (U8): IST-DASLab's re-quantizations in their own repos (the manifest pins them) - IQ3_S, and the
+# Coder repo's IQ1_M, the code-tuned variant (half the experts pruned), shown as such
+GSQ_IQ3_S, GSQ_CODER_IQ1_M = "gsq-iq3_s", "gsq-coder-iq1_m"
+QFN_QUANTS = {"ud-q4_k_xl": "UD-Q4_K_XL", "q8_0": "Q8_0", CYBER_FROST_QUANT: "CYBER-FROST-3.8 Q5_K_M",
+              GSQ_IQ3_S: "GSQ-RCO IQ3_S", GSQ_CODER_IQ1_M: "GSQ-RCO Coder IQ1_M"}
 QFN_ENGINE = "saguaro-qfn"
 # its setup ids (the first of each: the Models page's); the model's name alone is UD-Q4_K_XL, the default
 QFN_IDS = {"qwen3.8-flash-next": "ud-q4_k_xl", "qwen3.8-flash-next-ud-q4_k_xl": "ud-q4_k_xl", "qfn": "ud-q4_k_xl",
-           "qfn-ud-q4_k_xl": "ud-q4_k_xl", "qwen3.8-flash-next-q8_0": "q8_0", "qfn-q8_0": "q8_0"}
+           "qfn-ud-q4_k_xl": "ud-q4_k_xl", "qwen3.8-flash-next-q8_0": "q8_0", "qfn-q8_0": "q8_0",
+           # (the GSQ quants: the ids they are asked for by - and their files' own names)
+           "qwen3.8-flash-next-iq3_s": GSQ_IQ3_S, "qwen3.8-flash-next-gsq-iq3_s": GSQ_IQ3_S,
+           "qwen3.8-flash-next-gsq-rco-iq3_s": GSQ_IQ3_S, "qfn-iq3_s": GSQ_IQ3_S, "qfn-gsq-iq3_s": GSQ_IQ3_S,
+           "qwen3.8-flash-next-coder-iq1_m": GSQ_CODER_IQ1_M, "qwen3.8-flash-next-gsq-coder-iq1_m": GSQ_CODER_IQ1_M,
+           "qwen3.8-flash-next-gsq-rco-iq1_m": GSQ_CODER_IQ1_M, "qfn-coder-iq1_m": GSQ_CODER_IQ1_M,
+           "qfn-gsq-coder-iq1_m": GSQ_CODER_IQ1_M}
+# the GSQ quants' setup ids name the quant as the repos do (no "gsq-" of the key); the others: key after the model's name
+QFN_SETUP_IDS = {GSQ_IQ3_S: "qwen3.8-flash-next-iq3_s", GSQ_CODER_IQ1_M: "qwen3.8-flash-next-coder-iq1_m"}
 
 
 def qfn_setup_id(key: str) -> str:
     """A Qwen3.8-Flash-Next quant's setup id (qwen3.8-flash-next-ud-q4_k_xl)."""
-    return "qwen3.8-flash-next-" + key
+    return QFN_SETUP_IDS.get(key, "qwen3.8-flash-next-" + key)
 # --mm3-quant also takes the tier as DeepSeek's --ds4-quant does (maya-xs), beside its first names (gguf-xs)
 MM3_QUANT_ALIASES = {"maya-xs": "gguf-xs", "maya-s": "gguf-s"}
 # Inkling 2 Mini: unsloth's UD-Q4_K_XL, its one file set - the setup ids it is asked for by (the first: the Models page's)
