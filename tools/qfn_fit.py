@@ -28,7 +28,11 @@ RAM_SPARE_GB = 20                                     # RAM left beside the tier
 MIN_VRAM_GB = 15.0                                    # the COMFORTABLE card (the manifest's "needs": a 16 GB card);
 MIN_RAM_GB = 88.0                                     # ... and RAM: the layout as measured, not the floor (v1.2.1-B:
 #                                                     #  below them the plan is "slow", refused only under its minimum)
-MIN_CC = 70                                           # NVIDIA: the engine builds for Volta and newer
+MIN_CC = 61                                           # NVIDIA, v1.2.1-B: Pascal and newer (a Tesla P40 ran QFN by
+#                                                     #  hand: sm_61, 24 GB, 32 GB RAM, UD-Q4 ~4-5 tok/s) - sm_6x /
+#                                                     #  sm_70 build through engines/qfn's experimental pre-Turing
+#                                                     #  path (STRATA_EXPERIMENTAL_SM60), which needs a CUDA 12.x
+#                                                     #  toolkit: CUDA 13 dropped Pascal (saguaro.py's nvcc_range)
 # v1.2.1-B: the TRUE minimum, measured on one card (mortar Monitor, UD-Q4_K_XL): dense weights 3.9 GB (a layer
 # split shares them by the split), the resident K/V window 2.8 GB at --kv-resident 32768 (it can be smaller),
 # activations 1.4 GB, and the reserve the setup keeps free beside the expert cache (--vram-reserve-mib 700).
