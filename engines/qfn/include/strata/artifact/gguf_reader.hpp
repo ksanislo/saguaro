@@ -709,6 +709,11 @@ inline std::string read_geometry(const GgufFile& f, core::ModelGeometry& g) {
     };
     for (const Key& k : keys)
         if (!read_int(k.key, g.*k.field, k.required)) return err;
+    // an in-file MTP (NextN) block counts in block_count (CYBER-FROST's GGUF: 49 = 48 + 1); the trunk is the rest
+    int64_t nextn = 0;
+    if (const MetaValue* v = f.get(p + "nextn_predict_layers"); v && v->is_num() && v->u > 0) nextn = (int64_t) v->u;
+    if (nextn >= g.n_layers) return p + "nextn_predict_layers is not smaller than block_count";
+    g.n_layers -= nextn;
 
     int64_t value_length = g.head_dim, ff_shexp = g.n_ff;
     if (!read_int("attention.value_length", value_length, false) ||
@@ -747,7 +752,8 @@ inline std::string read_geometry(const GgufFile& f, core::ModelGeometry& g) {
     // The layer split, twice over: the interval, and a ratio per layer that is non-zero (the indexer's pooling
     // block) exactly on the full-attention layers.
     if (const MetaValue* v = f.get(p + "attention.compress_ratios")) {
-        if (v->type != MetaType::ARRAY || v->count != (uint64_t) g.n_layers || v->items.size() != v->count)
+        if (v->type != MetaType::ARRAY || (v->count != (uint64_t) g.n_layers && v->count != (uint64_t) (g.n_layers + nextn)) ||
+            v->items.size() != v->count)
             return p + "attention.compress_ratios must list one entry for each of the " + std::to_string(g.n_layers) +
                    " layers";
         // A list of zeros only is a converter's placeholder, not a layer split (#2396: orcarouter's

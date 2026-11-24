@@ -615,6 +615,15 @@ def main() -> int:
     g = G.GGUFFile(src)
     mm = np.memmap(src, dtype=np.uint8, mode="r")
     model = Model(src)
+    # an in-file MTP (NextN) block (peasantsmith's CYBER-FROST GGUF: blk.48, block_count 49) is not the trunk's: it is
+    # left out of the pack (the drafter is built from it separately), the engine subtracts it from block_count
+    nextn = int(g.metadata.get("qwen4exp.nextn_predict_layers") or 0)
+    if nextn:
+        trunk = int(g.metadata["qwen4exp.block_count"]) - nextn
+        drop = [n for n in model.where if n.startswith("blk.") and int(n.split(".")[1]) >= trunk]
+        for n in drop:
+            del model.where[n]
+        print("NextN: %d tensors of blk.%d+ left out of the pack (the trunk keeps layers 0..%d)" % (len(drop), trunk, trunk - 1))
     if len(model.paths) > 1:
         print("model shards: " + ", ".join(p.name for p in model.paths))
     # ---- the expert table first: a model that cannot be packed is refused before any file of the pack changes
