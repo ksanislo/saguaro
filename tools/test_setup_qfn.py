@@ -538,10 +538,11 @@ class LiveT4Parity(unittest.TestCase):
                                       models / "Qwen3.8-Flash-Next-MTP-Lamina", 262144, models, d, {}, vision)
         return json.loads(p.read_text())
 
-    def flag_pairs(self, argv):
+    @staticmethod
+    def flag_pairs(argv):
         out, i = [], 0
         while i < len(argv):
-            if argv[i] in self.BOOL_FLAGS:
+            if argv[i] in LiveT4Parity.BOOL_FLAGS:
                 out.append((argv[i], None))
                 i += 1
             else:
@@ -580,6 +581,113 @@ class LiveT4Parity(unittest.TestCase):
         env["SAGUARO_GDN_KEYHEAD"] = "1"                               # ("<removed>" -> the documented 1)
         self.assertEqual(env, self.LIVE_ENV)
         self.assertEqual(live["args"], self.LIVE_ARGS)
+
+
+class Layouts1To4T4(unittest.TestCase):
+    """U7 step 3: one case per (1, 2, 3, 4 Tesla T4) x (UD-Q4_K_XL, Q8_0, CYBER-FROST Q5_K_M) x (64, 128, 256 GB
+    RAM), as a fresh setup writes it on a single-socket CPU (no NUMA keys, no --pool-workers): the PC the experts'
+    working set plainly exceeds is refused in one plain line, every other one gets the split, the context, the K/V
+    window, the RAM tier, the answers-at-once value, the pipeline, the class env and the drafting it should - and
+    4x T4 + 256 GB UD-Q4 is U6's pinned live-equivalent config."""
+
+    QUANTS = ["ud-q4_k_xl", "q8_0", "cyber-frost-q5_k_m"]
+    RAMS = [64.0, 128.0, 256.0]
+    SPLIT = {"ud-q4_k_xl": "11,24,36", "q8_0": "10,22,35", "cyber-frost-q5_k_m": "12,24,36"}
+
+    def pc(self, n):
+        return {"backend": "cuda", "gpus": [{"index": i, "name": "Tesla T4", "vram_gb": 15.0, "arch": "75"}
+                                            for i in range(n)]}
+
+    def written(self, t: Path, n, quant, ram, sockets=1, cores=8, vision=None, **kw):
+        models, d = t / "models", t / "models" / maya.qfn_entry(quant)["name"]
+        files = [t / "gguf" / nm for nm in maya.qfn_entry(quant)["files"]]
+        ctx = maya.QF.plan(self.pc(n)["gpus"], ram, quant)["context"]
+        with cpu(sockets, cores), patch.object(maya, "ROOT", t), \
+                patch.object(maya, "mem_gb", return_value=(ram, max(8.0, ram - 12.0))), \
+                patch.object(maya, "write_run_script", return_value=t / "run.sh"), \
+                patch("sys.stdout", new=io.StringIO()), patch.object(maya.S, "UI", None):
+            p = maya.write_config_qfn(args(backend="cuda", **kw), self.pc(n), {}, quant, files, d / "pack",
+                                      d / "pack" / "mtp", ctx, models, d, {}, vision)
+        return json.loads(p.read_text())
+
+    def test_the_refused_pcs_say_so_plainly(self):      # (the 64 GB row: refuse before the config, set_up_qfn:7614)
+        for n, quant in ((n, q) for n in (1, 2, 3, 4) for q in self.QUANTS):
+            with self.subTest(cards=n, quant=quant):
+                lay = maya.QF.plan(self.pc(n)["gpus"], 64.0, quant)
+                self.assertFalse(lay["fits"])
+                self.assertIn("96 GB of RAM", lay["reason"])           # (one plain line, always said)
+                experts, room = maya.QF.quant_gib(quant), 64.0 + 15.0 * n
+                if room < experts:                                     # (and only where the experts really are
+                    self.assertIn("GiB more than these", lay["reason"])  #  over the layout: Q8_0 always, CF up
+                    self.assertIn(f"~{room:.0f} GiB", lay["reason"])     #  to two cards - 45/60 GiB VRAM cover it)
+
+    def test_the_written_configs(self):
+        even = {2: "24", 3: "16,32"}
+        for n, quant, ram in ((n, q, r) for n in (1, 2, 3, 4) for q in self.QUANTS for r in self.RAMS[1:]):
+            with self.subTest(cards=n, quant=quant, ram=ram), tempfile.TemporaryDirectory() as t:
+                cfg = self.written(Path(t), n, quant, ram)
+                a = cfg["args"]
+                self.assertEqual(cfg["gpu"], list(range(n)))
+                self.assertEqual(cfg["installer"]["qwen_quant"], quant)
+                # the split: none on one card, balanced on 2/3 by the 48 layers and the cards' VRAM, the live
+                # server's own values on four T4s (CYBER-FROST never measured: the even split, pipe 1)
+                self.assertEqual(cfg.get("layer_split"), even.get(n) or (self.SPLIT[quant] if n == 4 else None),
+                                 f"{n} {quant}")
+                self.assertEqual(a[a.index("--max-context") + 1], "65536" if n == 1 else "262144")
+                self.assertEqual(a[a.index("--kv-resident") + 1], "32768")
+                # the RAM tier (U6's rule, per quant's bytes): Q8_0 at 128 GB pins 108 GiB, everything else at
+                # 128/256 GB leaves it to the page cache
+                tier = 108 if (quant == "q8_0" and ram == 128.0) else None
+                if tier:
+                    self.assertEqual(a[a.index("--resident-budget-gib") + 1], str(tier), f"{n} {quant} {ram}")
+                else:
+                    self.assertNotIn("--resident-budget-gib", a, f"{n} {quant} {ram}")
+                # answers at once: one card stays at 1 (no key - the loss the one-card box measured), 2 on a split
+                self.assertEqual(cfg.get("parallel"), 2 if n > 1 else None)
+                # the pipeline: the split's own keys; the live pipe rate only on the four T4s that were measured
+                self.assertEqual("--trim-stage-weights" in a, n > 1)
+                if n > 1:
+                    pipe = {"ud-q4_k_xl": "1536", "q8_0": "6144"}.get(quant, "1") if n == 4 else "1"
+                    self.assertEqual(a[a.index("--prefill-pipe") + 1], pipe)
+                # drafting: the draft layer stays in (off only when the person says so)
+                self.assertIn("--mtp", a)
+                self.assertNotIn("--mtp-max-t", a)
+                # the env by class: GENERIC everywhere, the T4 tuning (every card sm_75), the split's on a split,
+                # nothing of a multi-socket CPU on this one
+                self.assertEqual({k: v for k, v in cfg["env"].items() if k in maya.QF.GENERIC_ENV},
+                                 maya.QF.GENERIC_ENV)
+                self.assertEqual("SAGUARO_SM75_PERF" in cfg["env"], True)
+                self.assertEqual("SAGUARO_SLOT_ADMIT" in cfg["env"], n > 1)
+                self.assertEqual("SAGUARO_NUMA_PLACE" in cfg["env"], False)
+                self.assertNotIn("--pool-workers", a)
+                self.assertEqual(cfg["env"].get("SAGUARO_BATCH_WRAP_SPILL"), "1" if (n > 1 and quant == "q8_0")
+                                 else None)
+
+    def test_a_two_socket_cpu_adds_only_the_topology_class(self):
+        with tempfile.TemporaryDirectory() as t:
+            cfg = self.written(Path(t), 2, "ud-q4_k_xl", 256.0, sockets=2, cores=20)
+        self.assertEqual(cfg["env"]["SAGUARO_NUMA_PLACE"], "1")
+        self.assertEqual(cfg["env"]["SAGUARO_NUMA_POOL"], "0")
+        self.assertEqual(cfg["args"][cfg["args"].index("--pool-workers") + 1], "19")
+        self.assertEqual(cfg["layer_split"], "24")          # (the split itself: the CPU does not touch it)
+
+    def test_four_t4s_256_gb_ud_q4_is_the_pinned_live_config(self):
+        """U6 pinned the live UD-Q4 machine's env/args (LiveT4Parity, 252 GB); the same shape at 256 GB
+        (its experts all sit in the page cache either way) writes exactly that."""
+        vision = {"exe": "vision-qfn", "mmproj": "m.gguf", "model": "s.gguf", "gpu": True, **maya.QFN_VISION}
+        with tempfile.TemporaryDirectory() as t:
+            cfg = self.written(Path(t), 4, "ud-q4_k_xl", 256.0, sockets=2, cores=20, vision=vision)
+        want = {k: v for k, v in LiveT4Parity.LIVE_ENV.items() if k not in ("SAGUARO_BATCH_READS_OVERTAKE",
+                                                                            "SAGUARO_PARK_STAGING_MIB")}
+        self.assertEqual(cfg["env"], want)
+        machine_free = lambda pairs: {(f, v) for f, v in pairs
+                                      if f not in LiveT4Parity.PATH_FLAGS and f != "--max-context"}
+        self.assertEqual(machine_free(LiveT4Parity.flag_pairs(cfg["args"])),
+                         machine_free(LiveT4Parity.flag_pairs(LiveT4Parity.LIVE_ARGS)))
+        self.assertNotIn("--resident-budget-gib", cfg["args"])   # (256 GB: the file cache is the tier, as live)
+        self.assertEqual(cfg["layer_split"], "11,24,36")
+        self.assertEqual(cfg["args"][cfg["args"].index("--prefill-pipe") + 1], "1536")
+        self.assertEqual(cfg["parallel"], 2)                     # (fresh: 2; the live box raised it to 8)
 
 
 class CheckLine(unittest.TestCase):
