@@ -1623,8 +1623,9 @@ def check_pc(a, family: str = "glm", gguf: bool = False, ds4_quant: str = "exl3"
         fail(f"{MM3}'s engine (maya-mm3) runs on Linux only for now (its Windows build is on the way)",
              f"set it up on a Linux PC with an NVIDIA GPU ({mm3_gpus()})")
     if family == "qfn" and family_unavailable("qfn", a.backend):   # (said before anything is built or downloaded)
-        fail(family_unavailable("qfn", a.backend), "it runs on a Linux PC with GPUs of 16 GB or more and 96 GB of "
-             "RAM: on AMD one RDNA 3 / 4 GPU, on NVIDIA one card or up to four equal ones splitting the layers",
+        fail(family_unavailable("qfn", a.backend), "it runs on a Linux PC: on AMD one RDNA 3 / 4 GPU, on NVIDIA "
+             "one card or up to four equal ones splitting the layers - the layout it was measured on has 16 GB "
+             "cards and 96 GB of RAM, smaller ones run it too, slowly (most experts read from RAM / the SSD)",
              end=NOT_HERE)
     if family in ("hy4", "ik2"):   # (said before anything is built or downloaded)
         why = IK2F.unsupported(a.backend, WIN, ik2_gpus_asked(a), []) if family == "ik2" else \
@@ -7233,10 +7234,10 @@ def qfn_mtp_entry() -> dict:
 
 def qfn_about() -> str:
     m = qfn_entry()
-    n = m["needs"]
     return (f"Qwen's Qwen3.8-Flash-Next itself (125B, 10 of 512 experts a token) in unsloth's GGUFs (UD-Q4_K_XL "
-            f"{m['download_gb']:.0f} GB, Q8_0 177 GB) on its own engine, saguaro-qfn (from Strata); one GPU of "
-            f"{n.get('vram_gb', 15) + 1:.0f} GB or more with about {n.get('ram_gb', 88) + 8:.0f} GB of RAM: on AMD one RDNA "
+            f"{m['download_gb']:.0f} GB, Q8_0 177 GB) on its own engine, saguaro-qfn (from Strata); one GPU with "
+            "about 96 GB of RAM is the layout it was measured on (16 GB cards; smaller cards and less RAM run it "
+            "too, slowly, and only a PC that cannot hold the model at all is refused): on AMD one RDNA "
             "3 / 4 card (measured on an RX 9070 XT), on NVIDIA one card, or the layers split across up to four equal "
             "ones (the live server: 4x Tesla T4) - the experts the cards do not hold in RAM, the rest read from the "
             "SSD; MTP drafting, tool calls, up to a 256K context; pictures with its vision tower (the reader starts "
@@ -7245,13 +7246,21 @@ def qfn_about() -> str:
 
 
 def qfn_quant_fit(quant: str, vram: float, ram: float) -> str | None:
-    """Why a quant does not fit one GPU of `vram` GiB and `ram` GiB of RAM (its measured "needs"), or None."""
-    n = qfn_entry(quant)["needs"]
-    if vram < float(n.get("vram_gb") or 0):
-        return f"{Q.shown('qfn', quant)} needs a GPU of 16 GB or more (this one: {vram:.0f} GB)"
-    if ram < float(n.get("ram_gb") or 0):
-        return (f"{Q.shown('qfn', quant)} needs about 96 GB of RAM (this PC: {ram:.0f} GB): the experts the GPU does "
-                "not hold must fit in RAM beside the system, or nearly every token waits on the SSD")
+    """Why a quant cannot run at all on one GPU of `vram` GiB and `ram` GiB of RAM (v1.2.1-B's true minimum: the
+    card must hold its share of the dense weights, a minimum resident K/V, the activations and the reserve; the
+    RAM, the dense weights' plus buffers plus the system), in one plain line with the numbers, or None.  A PC
+    under the quant's measured "needs" but over the minimum RUNS - slowly; the layout warns loudly and confirms
+    (set_up_qfn), it does not refuse what can run."""
+    need = QF.card_min_gib([{"vram_gb": vram}], quant)[0]
+    if vram and vram < need:
+        return (f"{Q.shown('qfn', quant)} cannot run on this GPU: its {vram:.0f} GB cannot hold the "
+                f"{need:.1f} GB a card of this layout must: its share of the dense weights and a minimum "
+                f"resident K/V, {QF.ACTIVATIONS_GIB} GB of activations and {QF.RESERVE_GIB:.1f} GB kept free")
+    rmin = QF.ram_min_gib(quant)
+    if ram and ram < rmin:
+        return (f"{Q.shown('qfn', quant)} cannot run with {ram:.0f} GB of RAM: at least about {rmin:.0f} GB - "
+                "the dense weights, the engine's buffers and the system; the experts stream from the GPU's VRAM, "
+                "the RAM tier and the SSD")
     return None
 
 
@@ -7557,8 +7566,16 @@ def write_config_qfn(a, pc: dict, meta: dict, quant: str, files: list, pack: Pat
     args += ["--expert-cache", "auto", "--prefill", "auto", "--spec", "3", "--spec-min-p", "0.7"]
     if mtp is not None:
         args += ["--mtp", str(mtp)]
-    args += ["--max-context", str(ctx), "--kv", "int8", "--kv-resident", str(min(ctx, 32768)),
-             "--vram-reserve-mib", "700", "--session-dir", str(var / "sessions")]
+    slow_draft = bool(lay["slow"]) and mtp is not None and getattr(a, "drafting", None) != "on"
+    if slow_draft:                                     # (v1.2.1-B scale-down: the drafter costs 0.92 GB of the
+        args += ["--mtp-max-t", "1"]                   #  card's VRAM and reads the SSD beside the experts; on a
+        ok("drafting: off on this layout (--mtp-max-t 1) - its 0.9 GB of VRAM and its extra reads buy nothing "
+           "while most experts stream; --drafting on says otherwise")   #  slow layout that room caches far more
+                                                       #  experts instead
+    args += ["--max-context", str(ctx), "--kv", "int8", "--kv-resident", str(min(ctx, lay["kv_resident"])),
+             "--vram-reserve-mib", "700", "--session-dir", str(var / "sessions")]   # (kv_resident: 32768 on the
+                                                                                    #  comfortable layout, 4096
+                                                                                    #  when it is scaled down)
     if lay["resident_budget_gib"] is not None:         # (a pinned RAM tier: RAM - 20, never more than the model's
                                                        #  own expert bytes; when the page cache holds all of them
                                                        #  with the spare untouched there is no tier and the flag
@@ -7634,6 +7651,9 @@ def write_config_qfn(a, pc: dict, meta: dict, quant: str, files: list, pack: Pat
     cfg["log"] = str(cfg_path.with_suffix(".log"))
     cfg["installer"] = {**inst, "quant": Q.QFN_QUANTS[quant], "models_dir": str(models), "model_dir": str(d),
                         "files_dir": str(files[0].parent), "written": time.strftime("%Y-%m-%d %H:%M")}
+    if slow_draft:                                     # (so a start does not measure drafting on a PC that cannot
+        cfg["installer"]["mtp_calibration"] = {"date": time.strftime("%Y-%m-%d %H:%M"),   #  use it: set_up_qfn's
+                                               "skipped": "slow-pc", "kept": "none"}      #  question is skipped)
     cfg_path.write_text(json.dumps(cfg, indent=1), encoding="utf-8")
     ok(f"config: {cfg_path}")
     ok(f"start script: {write_run_script(cfg_path, port)}")
@@ -7643,19 +7663,24 @@ def write_config_qfn(a, pc: dict, meta: dict, quant: str, files: list, pack: Pat
 def qfn_check_line(quant: str, lay: dict) -> str:
     """--check's line for what the setup would write for these cards (qfn_fit's plan): the live server's split
     sentence belongs to a split only - a measured one-card layout (the RX 9070 XT it was measured on) is not the
-    4x Tesla T4 server's."""
+    4x Tesla T4 server's.  A slow layout (v1.2.1-B) is reported with its cause and the scale-down: --check only
+    reports, nobody is asked."""
+    slow = (f" - below the measured layout ({lay['slow_why']}): most experts read from RAM / the SSD, expect "
+            f"slow decode; the setup scales this down: {', '.join(lay['turned_off'])}" if lay["slow"] else "")
     return (f"{Q.shown('qfn', quant)} on these cards - " +
-            (lay["said"] + (" - the live 4x Tesla T4 server's own split" if lay["layer_split"] and lay["measured"]
-                            else "" if lay["measured"] else " (not measured on these cards yet)")
+            (lay["said"] + slow +
+             (" - the live 4x Tesla T4 server's own split" if lay["layer_split"] and lay["measured"]
+              else "" if lay["measured"] else " (not measured on these cards yet)")
              if lay["fits"] else lay["reason"]) + ".")
 
 
 def set_up_qfn(a, prev: dict) -> Path | None:
     """Qwen3.8-Flash-Next on saguaro-qfn, steps 1-9: the PC (AMD: one RDNA GPU; NVIDIA: one card, or up to four
-    equal ones taking the layers in turn - qfn_fit; the quant's measured VRAM and RAM - refused below them), the
-    quant and the context, the engine (<build>/qfn/saguaro-qfn), the files (pinned, sha256-checked; --gguf-dir:
-    yours, in place), the pack, the picture tower, the MTP draft layer, the config.  CYBER-FROST's quant: step 8
-    builds the drafter from the NextN block inside its own file."""
+    equal ones taking the layers in turn - qfn_fit; v1.2.1-B: refused only where it cannot run at all, and a PC
+    between the true minimum and the measured layout gets the scaled-down layout with a loud warning and a
+    confirmation), the quant and the context, the engine (<build>/qfn/saguaro-qfn), the files (pinned,
+    sha256-checked; --gguf-dir: yours, in place), the pack, the picture tower, the MTP draft layer, the config.
+    CYBER-FROST's quant: step 8 builds the drafter from the NextN block inside its own file."""
     inst = prev.get("installer") or {}
     prev_args = prev.get("args") or []
     prev_ctx = int(prev_args[prev_args.index("--max-context") + 1]) if "--max-context" in prev_args[:-1] else None
@@ -7691,6 +7716,18 @@ def set_up_qfn(a, prev: dict) -> Path | None:
         ok(f"layout: {lay['said']}" + (" - the live 4x Tesla T4 server's own split"
                                        if lay["measured"] else " (not measured on these cards yet)"))
         ok(f"the cards hold the most-used experts of their layers, {qfn_ram_said(lay)}")
+    # v1.2.1-B: between the true minimum and the measured layout the setup scales the layout down (the plan
+    # already came scaled: drafting off, a smaller --kv-resident, a context that fits), says plainly what it
+    # turned off and why the decode will be slow, and asks for a loud confirmation (--yes skips the question;
+    # --check never gets here - its line reports the same, qfn_check_line).
+    if lay["slow"]:
+        warn(f"this PC is below the layout {QFN_SHOWN} was measured on: {lay['slow_why']} - most experts read "
+             "from RAM / the SSD: expect slow decode")
+        ok("the setup scales this layout down: " + ", ".join(lay["turned_off"]))
+        if not a.yes and ask("This will probably be very slow. Are you sure? (y/n)", ["y", "n"], "n", False) == "n":
+            fail("stopped: this PC would run this model very slowly",
+                 f"a PC nearer the measured layout (16 GB cards, about 96 GB of RAM), another model, or --yes "
+                 "to set it up as it is")
     ctx = choose_context(a, prev_ctx, QFN_CONTEXTS, QFN_DEFAULT_CONTEXT if hip else lay["context"])
     ok(f"context: {ctx} tokens" + (" (recommended)" if ctx == (QFN_DEFAULT_CONTEXT if hip else lay["context"]) else ""))
     models = (Path(a.models_dir).expanduser().resolve() if a.models_dir else

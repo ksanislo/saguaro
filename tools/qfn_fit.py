@@ -39,8 +39,9 @@ KV_RES_GIB = 2.8                                      # the K/V of --kv-resident
 ACTIVATIONS_GIB = 1.4                                 # the engine's activation buffers (measured there)
 RESERVE_GIB = 700 / 1024                              # kept free beside the expert cache (--vram-reserve-mib)
 RAM_BUFFER_GIB = 4.0                                  # a 32K context's pinned K/V (the 2.8 above) and read staging
-RAM_SYSTEM_GIB = 8.0                                  # the OS, the server and a working page cache
-KV_RESIDENT_MIN = 4096                                # the smallest resident K/V window a layout is laid out with
+RAM_SYSTEM_GIB = 8.0                                   # the OS, the server and a working page cache
+KV_RESIDENT_MIN = 4096                                 # the smallest resident K/V window a layout is laid out with
+SCALED_CONTEXT = 32768                                 # the context a scaled-down layout gets (QFN_CONTEXTS' smallest)
 MAX_GROUP = 4                                         # a layer split runs on up to four cards (the live configs)
 DEFAULT_CONTEXT = 65536                               # one card (measured there: prompts up to 60K tokens)
 SPLIT_CONTEXT = 262144                                # a split: the K/V's RAM is cheap, the cards do not notice
@@ -252,6 +253,33 @@ def unsupported(cards: list, ram_gb: float, quant: str | None = None) -> str | N
     return None
 
 
+def comfortable(cards: list, ram_gb: float) -> bool:
+    """The layout as measured (the rule that refused before v1.2.1-B, now the COMFORTABLE level): every card of
+    MIN_VRAM_GB and MIN_RAM_GB of RAM or more (a fact of 0: not read yet, no complaint).  Between this and the
+    true minimum the plan is a slow one: the setup scales it down, warns loudly and confirms - it does not
+    refuse."""
+    return (all(not float(g.get("vram_gb") or 0) or float(g["vram_gb"]) >= MIN_VRAM_GB for g in cards)
+            and not (ram_gb and ram_gb < MIN_RAM_GB))
+
+
+def slow_why(cards: list, ram_gb: float, quant: str) -> str:
+    """Why a layout between the minimum and the comfortable one decodes slowly, in one plain line: the expected
+    cause the setup warns with ("most experts read from RAM / the SSD").  A quant whose experts are more than
+    these cards' VRAM and this PC's RAM together hold is named with its numbers here - warn, not refuse."""
+    parts = []
+    small = [float(g["vram_gb"]) for g in cards if 0 < float(g.get("vram_gb") or 0) < MIN_VRAM_GB]
+    if small:
+        parts.append(f"its {min(small):.0f} GB card{'s hold' if len(small) > 1 else ' holds'} few of their "
+                     "layers' experts in VRAM (the layout was measured on 16 GB ones)")
+    if ram_gb and ram_gb < MIN_RAM_GB:
+        parts.append(f"{ram_gb:.0f} GB of RAM pins only a thin expert tier (the layout was measured on about 96)")
+    experts, room = quant_gib(quant), ram_gb + sum(float(g.get("vram_gb") or 0) for g in cards)
+    if experts and room and experts > room:
+        parts.append(f"{quant}: its {experts:.0f} GiB of experts are {experts - room:.0f} GiB more than these "
+                     f"cards' VRAM and this PC's RAM together hold (~{room:.0f} GiB)")
+    return ", ".join(parts)
+
+
 def layer_split(cards: list, quant: str = "ud-q4_k_xl") -> str | None:
     """The config's "layer_split" for these cards (the FIRST LAYER of each later card; None for one card): the live
     4x Tesla T4 configs' own values on four "16 GB" cards of compute capability 7.5, else the 48 layers shared out
@@ -333,14 +361,24 @@ def plan(cards: list, ram_gb: float, quant: str = "ud-q4_k_xl", cpu: dict | None
     "context" (to recommend), "kv_resident", "resident_budget_gib", "args" (the engine's flags beside the generic
     ones: the conversation cache every PC gets, the split's --trim-stage-weights and --prefill-pipe, the quant's
     --prompt-cache, --pool-workers on a multi-socket CPU), "env" (the live configs' tuning by class - see
-    layout_env), "t4", "measured", "said" (one plain line)}.  The cards it lists are the ones handed in -
+    layout_env), "t4", "measured", "said" (one plain line) and v1.2.1-B's slow-zone keys: "slow" (fits, but
+    between the true minimum and the comfortable layout - the context and the K/V window come scaled down),
+    "slow_why" (the expected cause in one line: most experts read from RAM / the SSD) and "turned_off" (what the
+    setup scales down: drafting, --kv-resident, the context - and says so).  The cards it lists are the ones
+    handed in -
     best_gpus() picks those, plan() lays them out; nothing is read from the hardware (the CPU's socket/core counts
     come in as `cpu` - saguaro.py's qfn_cpu_info reads them from /sys)."""
     why = (f"Qwen3.8-Flash-Next on saguaro-qfn runs on one GPU of 16 GB or more, or up to {MAX_GROUP} equal ones: "
            "no cards were named") if not cards else unsupported(cards, ram_gb, quant)
+    # v1.2.1-B: between the minimum (unsupported) and the comfortable layout (comfortable) the setup scales the
+    # layout down - drafting off, a smaller --kv-resident, a context that fits - says what it turned off and asks
+    # for a loud confirmation; it does not refuse what can run.
+    slow = why is None and not comfortable(cards, ram_gb)
+    slow_ = slow_why(cards, ram_gb, quant) if slow else None
     n = len(cards)
     split = layer_split(cards, quant) if why is None else None
-    ctx = DEFAULT_CONTEXT if n <= 1 else SPLIT_CONTEXT
+    full_ctx = DEFAULT_CONTEXT if n <= 1 else SPLIT_CONTEXT
+    ctx = SCALED_CONTEXT if slow else full_ctx
     t4 = sm75_only(cards)
     # --resident-budget-gib: a pinned tier of RAM - 20 (never above the model's expert bytes) only while the page
     # cache cannot hold the experts; when it can, no tier: the file cache is it, as the live 252 GB box runs it.
@@ -366,10 +404,16 @@ def plan(cards: list, ram_gb: float, quant: str = "ud-q4_k_xl", cpu: dict | None
             f"one card: the experts it holds in VRAM, {tier_said}, a {ctx // 1024}K context" if n <= 1 else
             f"{n} cards: the {LAYERS} layers split across them ({split}), each caching its own layers' experts, "
             f"a {ctx // 1024}K context")
+    said += " - below the measured layout: expect slow decode" if slow else ""
+    turned = ([f"drafting off (--mtp-max-t 1)",
+               f"--kv-resident {min(ctx, KV_RESIDENT_MIN)} instead of {min(full_ctx, KV_RESIDENT)}",
+               f"a {ctx // 1024}K context instead of {full_ctx // 1024}K"] if slow else [])
     return {"fits": why is None, "reason": why, "gpus": list(cards), "n_gpus": n, "layer_split": split,
-            "context": ctx, "kv_resident": min(ctx, KV_RESIDENT), "resident_budget_gib": budget,
+            "context": ctx, "kv_resident": min(ctx, KV_RESIDENT_MIN if slow else KV_RESIDENT),
+            "resident_budget_gib": budget,
             "args": args, "env": layout_env(bool(split), t4 and why is None, quant, cpu) if why is None else {},
-            "t4": t4, "measured": measured, "said": said}
+            "t4": t4, "measured": measured, "said": said,
+            "slow": slow, "slow_why": slow_, "turned_off": turned}
 
 
 def main(argv=None) -> int:
@@ -390,6 +434,9 @@ def main(argv=None) -> int:
     p = plan(cards, a.ram, a.quant, {"sockets": a.sockets, "cores": a.cores})
     print(f"{a.quant}: {quant_gib(a.quant):.0f} GiB of files")
     print(("fits: " + p["said"]) if p["fits"] else "does not fit: " + p["reason"])
+    if p["fits"] and p["slow"]:
+        print(f"slow: {p['slow_why']}")
+        print("the setup scales down: " + ", ".join(p["turned_off"]))
     if p["fits"]:
         b = p["resident_budget_gib"]
         print(f"context {p['context']}, --kv-resident {p['kv_resident']} ({kv_vram_gib(p['kv_resident']):.1f} GiB "
