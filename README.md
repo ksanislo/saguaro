@@ -241,7 +241,7 @@ the slowest while the caches fill with what you use.
 | **GPU - AMD** | RDNA 3 (RX 7900 XT / XTX), RDNA 4 (Radeon AI PRO R9700 / RX 9070) and the Strix Halo / Gorgon Halo APUs (Radeon 8060S / 8065S) with ROCm 7: GLM-5.3-Flash, Qwen3.8-Flash-Next and Inkling 2 Mini build and run there (measured on an RX 9070 XT, gfx1201, ROCm 7.1); the DeepSeek and MiniMax engines compile for HIP and have not run on a card yet; Hy4-Flash is not offered on AMD. RDNA 2 (RX 6800 / 6900, Radeon PRO V620 / W6800) builds with the portable kernels - run once on a PRO V620. Which models build today, with pictures: [docs/AMD_SAGUARO.md](docs/AMD_SAGUARO.md#what-runs-on-amd) |
 | **Windows** | 10 / 11 native (not WSL2): `START-SAGUARO.bat`, with the GLM-5.3-Flash, DeepSeek and MiniMax engines ([docs/WINDOWS.md](docs/WINDOWS.md)); the other engines are Linux only for now. AMD on Windows incl. Strix Halo / Gorgon Halo: [docs/AMD_SAGUARO.md](docs/AMD_SAGUARO.md) |
 | **Mac** | Apple Silicon: `./saguaro.sh --backend metal`, GLM-5.3-Flash only ([docs/METAL.md](docs/METAL.md)); built and unit-tested on GitHub's Macs, not run with the real model by us (we have no Mac) - if you run it, please tell us how it went in an issue |
-| **RAM** | 32 GB runs it. More RAM keeps more experts close and is faster; Qwen3.8-Flash-Next wants about 96 GB beside its 16 GB card |
+| **RAM** | More RAM keeps more experts close and is faster; Qwen3.8-Flash-Next wants about 96 GB beside its 16 GB card |
 | **Disk** | **a fast NVMe SSD** with room for the model (~100 GB for GLM-5.3 · Maya-S, ~160 GB for GLM-5.3 · Maya-L, ~350 GB for DeepSeek V4.1 · Maya-S, ~470 GB for unsloth's Q8 GGUF of it, ~95 GB for MiniMax M3.1 · Maya-XS, ~200 GB for MiniMax-M3.1-Flash's EXL3 quant, 111-177 GB for Qwen3.8-Flash-Next, 44.8-89.5 GB plus a shared 63.4 GB table for Hy4-Flash, 18.3 GB for Inkling 2 Mini) and its picture encoder (1.1 GB). Not a hard disk |
 | **System** | Linux (x86-64; a CPU with AVX2 is best), the NVIDIA driver, CUDA 12.x (CUDA 13 works for RTX 20 and newer, not for the V100 or Pascal), g++, Python 3.10+ |
 
@@ -251,8 +251,8 @@ The setup checks all of this, prints the exact command for anything missing, and
 
 Run the two commands in [Quick start](#quick-start) and answer a few questions (Enter takes the recommended
 choice). The setup shows every download before it starts it and builds everything once (plus the download:
-GLM-5.3-Flash's engine about 20-40 minutes; Inkling 2 Mini's about 4 minutes on a Ryzen 7 9800X3D) and **starts
-the model**. Then open `http://127.0.0.1:8080`. Ctrl+C stops it, and `./setup.sh` starts it again right away.
+GLM-5.3-Flash's engine about 20-40 minutes) and **starts the model**. Then open `http://127.0.0.1:8080`.
+Ctrl+C stops it, and `./setup.sh` starts it again right away.
 
 - **Windows:** `START-SAGUARO.bat` instead of `./setup.sh` - see [docs/WINDOWS.md](docs/WINDOWS.md).
 - **AMD:** [docs/AMD_SAGUARO.md](docs/AMD_SAGUARO.md).
@@ -344,7 +344,8 @@ most.
   License ([LICENSE.minimax-m31](LICENSE.minimax-m31)).
   [Hy4-Flash](https://huggingface.co/tencent/Hy4-flash) by Tencent (its GGUF quants by peasantsmith): Tencent Hy
   License ([LICENSE.hy4-flash](LICENSE.hy4-flash));
-  [Inkling 2 Mini](https://huggingface.co/thinkingmachines/Inkling-2-Mini) by Thinking Machines ([unsloth's GGUF](https://huggingface.co/unsloth/Inkling-2-Mini-GGUF)): Apache 2.0. Their
+  [Inkling 2 Mini](https://huggingface.co/thinkingmachines/Inkling-2-Mini) by Thinking Machines
+  ([unsloth's GGUF](https://huggingface.co/unsloth/Inkling-2-Mini-GGUF)): Apache 2.0. Their
   engines, `saguaro-hy4` and `saguaro-ik2`, are Project Maya's (v1.1.72), built here for Turing cards and AVX1 CPUs.
 - The dashboard's font: Outfit (SIL Open Font License 1.1, `serve/web/fonts/OFL.txt`); its icons:
   [Lucide](https://lucide.dev) (ISC License, `serve/web/LICENSE.lucide.txt`); its UI library:
