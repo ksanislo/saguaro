@@ -45,7 +45,8 @@ class Names(unittest.TestCase):
         self.assertEqual(Q.resolve("Qwen3.8-Flash-Next-Q8_0"), ("qfn", "q8_0"))
         self.assertEqual(Q.resolve("qfn"), ("qfn", "ud-q4_k_xl"))
         self.assertEqual(Q.resolve("qfn-q8_0"), ("qfn", "q8_0"))
-        self.assertEqual(Q.resolve("cyber-frost"), ("qwen", "q5_k_m"))   # (CYBER-FROST unchanged)
+        for i in Q.QWEN_IDS:                                       # (CYBER-FROST on saguaro-qfn: every id still taken)
+            self.assertEqual(Q.resolve(i), ("qfn", Q.CYBER_FROST_QUANT), i)
 
     def test_shown_names_the_engine_and_not_cyber_frost(self):
         s = Q.shown("qfn", "ud-q4_k_xl", 111.3)
@@ -53,8 +54,11 @@ class Names(unittest.TestCase):
         self.assertNotIn("CYBER-FROST", s)
         self.assertEqual(Q.shown("qfn", "ud-q4_k_xl"), Q.shown("qwen", "ud-q4_k_xl"))   # (the name is unchanged)
         self.assertIn("CYBER-FROST", Q.shown("qwen", "q5_k_m"))
+        self.assertEqual(Q.shown("qfn", "cyber-frost-q5_k_m"), "Qwen3.8-Flash-Next · CYBER-FROST-3.8 Q5_K_M "
+                                                               "(saguaro-qfn)")
         self.assertEqual(Q.config_stem("qfn", "ud-q4_k_xl"), "maya-qwen3.8-flash-next-ud-q4_k_xl")
         self.assertEqual(Q.config_stem("qwen", "q5_k_m"), "maya-cyber-frost")
+        self.assertEqual(Q.config_stem("qfn", "cyber-frost-q5_k_m"), "maya-cyber-frost")   # (the name it always had)
 
     def test_model_option(self):
         a = args(model="qwen3.8-flash-next-q8_0")
@@ -63,7 +67,8 @@ class Names(unittest.TestCase):
         self.assertEqual(maya.choose_family(a, {}), "qfn")
         b = args(model="cyber-frost")
         self.assertIsNone(maya.model_option(b))
-        self.assertEqual(maya.choose_family(b, {}), "qwen")
+        self.assertEqual((b.model, b.qfn_quant), (maya.QFN, "cyber-frost-q5_k_m"))
+        self.assertEqual(maya.choose_family(b, {}), "qfn")        # (CYBER-FROST on saguaro-qfn now)
 
     def test_a_setup_config_is_qfn_family_and_told_apart(self):
         cfg = {"exe": "build-hip/qfn/saguaro-qfn", "installer": {"family": "qfn", "qwen_quant": "ud-q4_k_xl"}}
@@ -108,6 +113,19 @@ class Manifest(unittest.TestCase):
         self.assertAlmostEqual(m["download_gb"], 111.3, delta=0.1)
         self.assertEqual(m["name"], "Qwen3.8-Flash-Next-UD-Q4_K_XL")
         self.assertIn("/resolve/efc50b7c3195", maya.file_url(m, "Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf"))
+
+    def test_the_cyber_frost_quant(self):
+        """CYBER-FROST as a quant of QFN: the one file, pinned revision, size and sha256 tools/qwen/download.json
+        has - copied exactly - from its own repo."""
+        old = json.loads((ROOT / "tools" / "qwen" / "download.json").read_text())
+        m = maya.qfn_entry(Q.CYBER_FROST_QUANT)
+        self.assertEqual((m["repo"], m["revision"]), (old["repo"], old["revision"]))
+        self.assertEqual(m["files"], {k: v[0] for k, v in old["files"].items()})
+        self.assertEqual(m["sha256"], {k: v[1] for k, v in old["files"].items()})
+        self.assertEqual(m["name"], "CYBER-FROST-3.8-PS")
+        self.assertEqual(maya.file_url(m, "CYBER-FROST-3.8-PS-GUFF-Q5_K_M.gguf"),
+                         "https://huggingface.co/peasantsmith/CYBER-FROST-3.8-PS-GUFF/resolve/"
+                         "32867bb9e228afac427c136dd657b34b7c3f0e86/CYBER-FROST-3.8-PS-GUFF-Q5_K_M.gguf")
 
 
 class Offered(unittest.TestCase):
@@ -173,6 +191,147 @@ class Config(unittest.TestCase):
             self.assertEqual(Q.family_of(cfg), "qfn")
             self.assertEqual(cfg["sampling"], {"temperature": 1.0, "top_p": 0.95, "top_k": 20})
 
+    def test_the_cyber_frost_config(self):
+        """Its config keeps the name it always had, takes the drafter from inside the pack (the file's own NextN
+        block) and carries the pictures the way the live QFN configs do."""
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            models, d = t / "models", t / "models" / "CYBER-FROST-3.8-PS"
+            files = [t / "gguf" / n for n in maya.qfn_entry(Q.CYBER_FROST_QUANT)["files"]]
+            pc = {"backend": "hip", "gpus": [{"index": 0, "arch": "gfx1201", "vram_gb": 15.9}]}
+            vision = {"exe": str(maya.qfn_exe().parent / "vision-qfn"),
+                      "mmproj": str(d / "vision" / "mmproj-F16.gguf"), "model": str(files[0]), "gpu": True,
+                      "max_tokens": 1024, "elastic": True, "elastic_mib": 1536, "elastic_idle_s": 30,
+                      "elastic_keep_s": 600}
+            with patch.object(maya, "ROOT", t), patch.object(maya, "mem_gb", return_value=(91.7, 80.0)), \
+                    patch.object(maya, "write_run_script", return_value=t / "run.sh"), \
+                    patch("sys.stdout", new=io.StringIO()), patch.object(maya.S, "UI", None):
+                p = maya.write_config_qfn(args(), pc, {}, Q.CYBER_FROST_QUANT, files, d / "pack",
+                                          d / "pack" / "mtp", 65536, models, d, {}, vision)
+            cfg = json.loads(p.read_text())
+            self.assertEqual(p.name, "maya-cyber-frost-hip.json")
+            a = cfg["args"]
+            self.assertEqual(a[a.index("--native") + 1], str(files[0]))
+            self.assertEqual(a[a.index("--mtp") + 1], str(d / "pack" / "mtp"))
+            self.assertIn("--vision", a)
+            self.assertEqual(cfg["vision"], vision)
+            self.assertEqual(cfg["installer"]["family"], "qfn")
+            self.assertEqual(cfg["installer"]["qwen_quant"], "cyber-frost-q5_k_m")
+            self.assertEqual(Q.family_of(cfg), "qfn")
+            self.assertEqual(cfg["sampling"], {"temperature": 1.0, "top_p": 0.95, "top_k": 20})   # (its own)
+
+
+class Drafter(unittest.TestCase):
+    """CYBER-FROST step 7 on QFN: the drafter built from the file's own NextN block (tools/mtp_from_gguf.py) into
+    <pack>/mtp - dense.txt, dense.bin, experts.bin, the layout saguaro-qfn's --mtp loader reads - kept while its
+    tools and the model file stand; and the pictures step."""
+
+    def built(self, t: Path):
+        mtp = t / "pack" / "mtp"
+        mtp.mkdir(parents=True)
+        for f in ("dense.txt", "dense.bin", "experts.bin"):
+            (mtp / f).write_text("x")
+        (mtp / maya.PACK_SOURCES).write_text(json.dumps({"tools": "same"}))
+        return mtp
+
+    def test_kept_while_unchanged_built_again_when_the_tools_moved(self):
+        quiet = [patch.object(maya, n, lambda *a, **k: None) for n in ("ok", "say", "warn", "step")]
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            mtp = self.built(t)
+            for p in quiet:
+                p.start()
+            try:
+                with patch.object(maya.S, "source_hash", return_value="same"), \
+                        patch.object(maya, "pack_stale", return_value=None), patch.object(maya, "run") as ran:
+                    self.assertEqual(maya.qfn_drafter_step(args(), t / "pack", [t / "m.gguf"], t / "llama"), mtp)
+                    self.assertEqual(ran.call_count, 0)                     # (already built: nothing runs)
+                with patch.object(maya.S, "source_hash", return_value="new"), \
+                        patch.object(maya, "pack_stale", return_value=None), patch.object(maya, "run") as ran, \
+                        patch.object(maya, "stamp_pack"):
+                    self.assertEqual(maya.qfn_drafter_step(args(), t / "pack", [t / "m.gguf"], t / "llama"), mtp)
+                self.assertIn("mtp_from_gguf.py", ran.call_args[0][0][1])   # (built from the file's NextN block)
+            finally:
+                for p in quiet:
+                    p.stop()
+
+    def test_vision_entry(self):
+        """--no-vision and a declined download give text only; the entry is the live QFN configs' shape."""
+        with patch.object(maya, "ok", lambda *x: None):
+            self.assertIsNone(maya.qfn_vision_step(args(no_vision=True), Path("/m"), Path("/m/x.gguf")))
+        with tempfile.TemporaryDirectory() as t:
+            d, g = Path(t), Path(t) / "CYBER-FROST-3.8-PS-GUFF-Q5_K_M.gguf"
+            quiet = [patch.object(maya, n, lambda *x: None) for n in ("ok", "warn")]
+            for p in quiet:
+                p.start()
+            try:
+                with patch.object(maya, "offer_download", lambda *x: False):
+                    self.assertIsNone(maya.qfn_vision_step(args(), d, g))   # (text only, said why)
+                with patch.object(maya, "file_incomplete", lambda *x: None), \
+                        patch.object(maya, "sha256_checked", lambda *x: True):
+                    v = maya.qfn_vision_step(args(), d, g)
+            finally:
+                for p in quiet:
+                    p.stop()
+        self.assertEqual(v, {"exe": str(maya.qfn_vexe()), "mmproj": str(d / "vision" / "mmproj-F16.gguf"),
+                             "model": str(g), "gpu": True, "max_tokens": 1024, "elastic": True,
+                             "elastic_mib": 1536, "elastic_idle_s": 30, "elastic_keep_s": 600})
+
+
+class Migration(unittest.TestCase):
+    """An existing CYBER-FROST config of the old engine (installer "qwen" / "q5_k_m", the GLM engine with
+    --ple-gguf) is rewritten to a saguaro-qfn config of the same file - once: idempotent."""
+
+    OLD = {"exe": "/s/build-hip/saguaro-glm", "backend": "hip",
+           "args": ["--pack", "/m/CYBER-FROST-3.8-PS/pack",
+                    "--native", "/m/CYBER-FROST-3.8-PS/CYBER-FROST-3.8-PS-GUFF-Q5_K_M.gguf",
+                    "--ple-gguf", "/m/CYBER-FROST-3.8-PS/CYBER-FROST-3.8-PS-GUFF-Q5_K_M.gguf",
+                    "--spec", "4", "--prefill", "auto", "--expert-cache", "auto", "--max-context", "131072",
+                    "--kv", "int8", "--expert-profile", "/m/CYBER-FROST-3.8-PS/pack/expert-profile.bin",
+                    "--mtp", "/m/CYBER-FROST-3.8-PS/pack/mtp", "--vision"],
+           "cwd": "/s", "tokenizer": "/m/CYBER-FROST-3.8-PS/pack/tokenizer", "model_name": "cyber-frost-3.8-ps",
+           "gpu": [0], "sampling": {"temperature": 1.0, "top_p": 0.95, "top_k": 20}, "reasoning_effort": "xhigh",
+           "port": 8090,
+           "vision": {"exe": "/s/build-vision/bin/vision-glm", "mmproj": "/m/vision/mmproj-F16.gguf",
+                      "model": "/m/CYBER-FROST-3.8-PS/CYBER-FROST-3.8-PS-GUFF-Q5_K_M.gguf", "gpu": True},
+           "installer": {"family": "qwen", "models_dir": "/m", "quant": "CYBER-FROST-3.8-PS",
+                         "qwen_quant": "q5_k_m", "model_dir": "/m/CYBER-FROST-3.8-PS",
+                         "written": "2026-11-01 10:00"}}
+
+    def migrated(self):
+        cfg = json.loads(json.dumps(self.OLD))
+        self.assertTrue(maya.migrate_cyber_frost(cfg))
+        return cfg
+
+    def test_reads_as_qfn_keeping_files_context_port_and_sampling(self):
+        c = self.migrated()
+        self.assertEqual(Q.family_of(c), "qfn")
+        self.assertEqual(Q.config_key(c), "cyber-frost-q5_k_m")
+        self.assertEqual(Q.config_label(c), "Qwen3.8-Flash-Next · CYBER-FROST-3.8 Q5_K_M (saguaro-qfn)")
+        self.assertTrue(c["exe"].endswith("qfn/saguaro-qfn"))
+        self.assertEqual(c["cwd"], str(maya.ROOT / "engines" / "qfn"))
+        self.assertEqual(c["backend"], "hip")                              # (its PC as it was)
+        a = c["args"]
+        self.assertNotIn("--ple-gguf", a)                                  # (the Qwen path's arguments are gone)
+        self.assertEqual(a[a.index("--pack") + 1], "/m/CYBER-FROST-3.8-PS/pack")     # (its model files kept)
+        self.assertEqual(a[a.index("--native") + 1],
+                         "/m/CYBER-FROST-3.8-PS/CYBER-FROST-3.8-PS-GUFF-Q5_K_M.gguf")
+        self.assertEqual(a[a.index("--mtp") + 1], "/m/CYBER-FROST-3.8-PS/pack/mtp")  # (the NextN drafter's layout)
+        self.assertEqual(a[a.index("--max-context") + 1], "131072")        # (the context as it was)
+        self.assertEqual(c["port"], 8090)                                  # (the port as it was)
+        self.assertEqual(c["sampling"], {"temperature": 1.0, "top_p": 0.95, "top_k": 20})   # (the sampling)
+        self.assertTrue(c["vision"]["exe"].endswith("qfn/vision-qfn"))     # (its pictures on QFN's reader)
+        self.assertEqual(Q.config_stem("qfn", Q.config_key(c)), "maya-cyber-frost")  # (same file name)
+
+    def test_once_only_and_nothing_else(self):
+        self.assertFalse(maya.migrate_cyber_frost(self.migrated()))        # (idempotent: the rewrite runs once)
+        for cfg in ({}, {"installer": {}},
+                    {"installer": {"family": "qfn", "qwen_quant": "cyber-frost-q5_k_m"}},   # (QFN's own as it is)
+                    {"installer": {"family": "minimax", "mm3_quant": "exl3"}},
+                    {"args": ["--max-context", "65536"], "installer": {"family": "qwen"}}):
+            # (a Qwen-path config that names no files of the setup: left alone too)
+            self.assertFalse(maya.migrate_cyber_frost(json.loads(json.dumps(cfg))), str(cfg))
+
 
 class ModelsPage(unittest.TestCase):
     def test_catalog_entries(self):
@@ -187,9 +346,16 @@ class ModelsPage(unittest.TestCase):
         self.assertIn("measured on an RX 9070 XT (gfx1201) with 96 GB of RAM", e["needs"])
         self.assertNotIn("experimental", e["needs"])
         self.assertIn("qwen3.8-flash-next-q8_0", rows)
-        self.assertIn("saguaro-glm", rows["cyber-frost"]["needs"])
+        self.assertNotIn("qwen3.8-flash-next-cyber-frost-q5_k_m", rows)     # (CYBER-FROST is offered once)
+        cf = rows["cyber-frost"]                                            # (and it points at the QFN quant)
+        self.assertEqual(cf["family"], "qfn")
+        self.assertIn("CYBER-FROST-3.8 Q5_K_M", cf["name"])
+        self.assertIn("saguaro-qfn", cf["needs"])
+        self.assertAlmostEqual(cf["size_gb"], 112.5, delta=0.1)
+        self.assertIn("fits", cf["fit"])
         small = {e["id"]: e for e in M.catalog(ROOT, glm_sizes={}, cards=amd, ram_gb=60.0)}
         self.assertIn("96 GB are needed", small["qwen3.8-flash-next-ud-q4_k_xl"]["fit"])
+        self.assertIn("96 GB are needed", small["cyber-frost"]["fit"])
 
 
 if __name__ == "__main__":
