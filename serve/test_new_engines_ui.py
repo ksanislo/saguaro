@@ -537,6 +537,18 @@ console.log(JSON.stringify({
         self.assertEqual(got["one"], "Set up for 1 GPU (a layout not measured yet)")
         self.assertEqual(got["plain"], "")
 
+    def test_the_qfn_settings_card_renders(self):
+        """fieldsOf dispatches family "qfn" to qfnFields (models.js) - the card reads its KV list (QFN_KV) and
+        must not throw on a missing declaration (T8a review finding 1: node --check never runs the code)."""
+        got = self.node("""
+const mp = await import(web + "/models.js");
+mp.MS.data = {gpus: []};
+const s = {context: 262144, kv: "int8", kv_resident: 32768, parallel: 1, draft: "mtp", images: true,
+           reserve_mib: 700, ram_gib: null, expert_cache: null, prefill: null, gpus: [0]};
+const m = {family: "qfn", running: false, choices: {draft: ["mtp", "none"], images: true}, settings: s, file: "qfn.json"};
+console.log(JSON.stringify(mp.fieldsOf(m, {...s}).map((g) => g.label)));""")
+        self.assertEqual(got, ["Model", "GPUs and memory", "Prompts and cache"])
+
     def test_a_server_behind_its_api_key_says_so(self):
         """/api/context answering 401: the page knows why the context range is missing - Settings says
         "API key needed", not "this server does not say its context range" (serve/web/server.js' loadCtxInfo)."""

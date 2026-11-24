@@ -266,7 +266,7 @@ function engineKvBytes(m, ch, ...keys) {
   return m.running && !ch(...keys) ? kvBytesToken() : 0;
 }
 
-function fieldsOf(m, d) {
+export function fieldsOf(m, d) {
   const s = m.settings, ch = (...ks) => ks.some((k) => !same(d[k], s[k])), glm = m.family === "glm";
   const per = Math.max(1, Number(d.parallel) || 1);   // (several answers at once: a cache each)
   const kvb = engineKvBytes(m, ch);                   // (GLM's format comes from the run config, not this draft)
@@ -511,6 +511,8 @@ function mm3Fields(m, d, s, ch, images, gpus) {
 // QFN's (saguaro-qfn, its own engine and family): the experts' RAM tier is the engine's --resident-budget-gib
 // (the CYBER-FROST path's SAGUARO_EXPERT_RAM_GB does nothing here), the K/V window in VRAM is --kv-resident, and
 // several answers at once are the config's own "parallel" key (its driver turns that into the engine's --batch)
+// The KV cache formats to pick from; their bytes of a position come from the engine's INFO (engineKvBytes), not a table here
+const QFN_KV = [{id: "fp16", label: "FP16"}, {id: "int8", label: "INT8"}, {id: "k8v4", label: "K8 V4"}, {id: "q4_0", label: "Q4_0"}];
 function qfnFields(m, d, s, ch, gpus) {
   const mtp = m.choices.draft.includes("mtp");
   const kv = QFN_KV.find((f) => f.id === d.kv) || QFN_KV[0];
