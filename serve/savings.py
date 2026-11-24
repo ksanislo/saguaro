@@ -16,7 +16,12 @@ same file ("prices", by model name) and every total is counted again with them -
 
 The default prices come from data/api-prices.json in this folder: {"as_of": "YYYY-MM", "prices": {model name: an entry}}
 - the same entries the built-in table below holds.  A file that cannot be read or does not check out (check_price) is
-ignored with one log line, and the built-ins are used; a model the file does not name keeps its built-in entry."""
+ignored with one log line, and the built-ins are used; a model the file does not name keeps its built-in entry.
+
+When the Savings page asks, the server fetches the newest copy of that file from GitHub at most once a day (its origin
+repo, raw.githubusercontent.com; a short timeout; the copy is cached in the savings folder and used while it is newer
+than the folder's own), unless SAGUARO_UPDATE_CHECK=0 said no outgoing requests.  The precedence: the page's own
+prices > the fetched file > data/api-prices.json > the built-ins."""
 from __future__ import annotations
 
 import json
@@ -24,6 +29,7 @@ import os
 import re
 import threading
 import time
+import urllib.request
 from pathlib import Path
 
 FILE = "token-savings.json"
@@ -138,13 +144,79 @@ def load_price_file(path: Path) -> dict | None:
 
 class PriceBook:
     """The default prices one Ledger counts with: the page's own (Settings > Savings) beat these, and within these:
-    a fetched api-prices.json (newer than the folder's own) > data/api-prices.json > the built-in REFERENCES."""
+    a fetched api-prices.json (valid and newer as_of than this folder's own) > data/api-prices.json > the built-ins.
+    The fetch happens when the Savings page asks, at most once a day; SAGUARO_UPDATE_CHECK=0 turns it off."""
+
+    FETCH_EVERY = 24 * 3600                   # at most one fetch a day ...
+    RETRY_AFTER = 3600                        # ... and after one that did not work, ask again after this
+    TIMEOUT = 8                               # seconds: a page load never waits on GitHub for longer
 
     def __init__(self, folder: Path | None = None, repo_file: Path = ROOT / "data" / PRICE_FILE):
         self.folder = Path(folder) if folder is not None else None
         self.repo_file = Path(repo_file)
+        self.cache = self.folder / PRICE_FILE if self.folder is not None else None     # the fetched copy, in the ledger's folder
         self.disk = load_price_file(self.repo_file)
         self.fetched: dict | None = None
+        self.lock = threading.Lock()          # one fetch at a time; the network happens outside it
+        self.next_try = 0.0
+        self.error: str | None = None
+        if self.cache is not None:
+            cached = load_price_file(self.cache)                        # last run's copy, if it is there and still newer
+            if cached and self.beats_disk(cached):
+                self.fetched = cached
+            try:
+                self.next_try = self.cache.stat().st_mtime + self.FETCH_EVERY
+            except OSError:
+                pass
+
+    def beats_disk(self, doc: dict) -> bool:
+        return self.disk is None or doc["as_of"] > self.disk["as_of"]
+
+    def url(self) -> str:
+        """The newest copy of the file, from the GitHub repository this folder was cloned from (serve/update.py)."""
+        from serve import update                              # (late import: update.py's repo, no import loop)
+        repo = update.origin_repo(ROOT) if (ROOT / ".git").exists() else update.REPO
+        return f"https://raw.githubusercontent.com/{repo}/main/data/{PRICE_FILE}"
+
+    def refresh(self):
+        """The Savings page asked: fetch the newest copy if a day passed since the last try (nothing else does)."""
+        if self.cache is None or os.environ.get("SAGUARO_UPDATE_CHECK", "1") == "0":
+            return
+        now = time.time()
+        with self.lock:                                       # the claim happens inside the lock, the fetch outside it
+            if now < self.next_try:
+                return
+            self.next_try = now + self.RETRY_AFTER            # (a success moves it to a day ahead)
+        try:
+            req = urllib.request.Request(self.url(), headers={"User-Agent": "saguaro/savings"})
+            with urllib.request.urlopen(req, timeout=self.TIMEOUT) as r:
+                text = r.read().decode("utf-8", "replace")
+        except (OSError, ValueError) as e:                    # offline, a proxy, GitHub's limit: the prices below count
+            self.error = str(getattr(e, "reason", None) or e)
+            return
+        doc, why = parse_price_file(text)
+        if doc is None:                                       # GitHub answered, but not with prices: one log line
+            self.error = why
+            print(f"[saguaro] the prices fetched from GitHub were ignored ({why}): the prices below them stay", flush=True)
+            return
+        try:                                                  # the cache is next to the ledger's file; unwritable: this run still counts
+            tmp = self.cache.with_name(self.cache.name + ".tmp")
+            tmp.write_text(text, encoding="utf-8")
+            os.replace(tmp, self.cache)
+        except OSError:
+            pass
+        with self.lock:
+            self.error = None
+            self.next_try = time.time() + self.FETCH_EVERY
+            self.fetched = doc if self.beats_disk(doc) else None      # (not newer than the folder's own: that one stays)
+
+    def source(self) -> dict:
+        """Where the default prices come from right now, and since which month (the Savings page says it in one line)."""
+        if self.fetched is not None:
+            return {"from": "github", "as_of": self.fetched["as_of"]}
+        if self.disk is not None:
+            return {"from": "file", "as_of": self.disk["as_of"]}
+        return {"from": "built-in", "as_of": PRICES_AS_OF}
 
     def as_of(self) -> str:
         active = self.fetched or self.disk
@@ -294,7 +366,9 @@ class Ledger:
             return {"usd": round(total, 6), "start_usd": round(cost(self.start, self.ref) or 0.0, 6), "priced": priced}
 
     def report(self) -> dict:
-        """The breakdown (GET /api/savings): every model's tokens and dollars, this start's, and the prices."""
+        """The breakdown (GET /api/savings): every model's tokens and dollars, this start's, and the prices.
+        The page asking is also what fetches a newer price file - at most once a day (serve/savings.py's PriceBook)."""
+        self.book.refresh()
         with self.lock:
             models, total, refs = [], 0.0, {}
             for key, m in self.doc["models"].items():
@@ -310,6 +384,7 @@ class Ledger:
             me = self.ref
             start = cost(self.start, me)
             return {"usd": round(total, 6), "since": self.doc.get("since"), "prices_as_of": self.book.as_of(),
+                    "prices_source": self.book.source(),
                     "start": {"model": self.model, "quant": self.quant, "started": self.started,
                               "tokens": tokens(self.start), "usd": None if start is None else round(start, 6)},
                     "models": models,
