@@ -794,7 +794,9 @@ def driver_major(gpu):
         return 0
 
 
-ENGINE_SOURCES = ("CMakeLists.txt", "cmake", "src", "include", "third_party/ggml")
+# (engines/qfn: saguaro-qfn's own tree, built by the top project - a change there compiles it again too)
+ENGINE_SOURCES = ("CMakeLists.txt", "cmake", "src", "include", "third_party/ggml", "engines/qfn/src", "engines/qfn/include",
+                  "engines/qfn/CMakeLists.txt", "engines/qfn/cmake", "engines/qfn/third_party")
 
 
 def source_hash(parts) -> str:

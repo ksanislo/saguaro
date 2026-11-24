@@ -62,7 +62,12 @@ int main() {
         std::printf("conversation_copy_streams_test: the first copy stream + event of the card took %lld KiB of device memory\n",
                     used / 1024);
         // the restore's guard (program/conv_cache.hpp kRestoreFirstUseMib = 64) is 4x this bound
+#if defined(STRATA_USE_HIP)
+        // ROCm (7.1, RX 9070 XT): 148 MiB, now and then 8; the restore guard there is 192 MiB (conv_cache.hpp)
+        check(used <= (160ll << 20), "a card's first copy stream and event take under 160 MiB (HIP)");
+#else
         check(used <= (16ll << 20), "a card's first copy stream and event take under 16 MiB");
+#endif
         bool pooled = false;
         std::thread t2([&] { pooled = copy_stream_ready(0); });
         t2.join();

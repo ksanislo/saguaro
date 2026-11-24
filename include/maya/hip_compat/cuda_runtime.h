@@ -1,5 +1,6 @@
 #pragma once
-// Included only by MAYA_ENABLE_HIP builds. CUDA builds use NVIDIA headers.
+// Included only by MAYA_ENABLE_HIP builds. CUDA builds use NVIDIA headers. Shared by every engine's HIP build,
+// engines/qfn's too (its cmake/hip_backend.cmake force-includes this file between its own hip_qfn_pre/post.h).
 #ifdef MAYA_HIP_WAVE64
 // On wave64 cards (gfx908) HIP's own warp-sync builtins would run across the whole 64-lane wavefront and break
 // every kernel's reduction order; disable them and let intrinsics.hpp supply the logical-32-lane-half mapping.
@@ -133,6 +134,23 @@ inline hipError_t cudaHostAlloc(T** p, size_t bytes, unsigned int flags) {
 #define cudaStreamWaitEvent hipStreamWaitEvent
 #define cudaStream_t hipStream_t
 #define cudaSuccess hipSuccess
+// (engines/qfn's names)
+#define cudaFuncAttributePreferredSharedMemoryCarveout hipFuncAttributePreferredSharedMemoryCarveout
+#define cudaHostRegisterDefault hipHostRegisterDefault
+#define cudaHostRegisterReadOnly hipHostRegisterReadOnly
+#define cudaHostAllocWriteCombined hipHostAllocWriteCombined
+#define cudaStreamCaptureMode hipStreamCaptureMode
+#define cudaStreamCaptureModeGlobal hipStreamCaptureModeGlobal
+#define cudaStreamCaptureModeRelaxed hipStreamCaptureModeRelaxed
+#define cudaPointerAttributes hipPointerAttribute_t
+#define cudaPointerGetAttributes hipPointerGetAttributes
+#define cudaMemoryTypeHost hipMemoryTypeHost
+#define cudaMemoryTypeDevice hipMemoryTypeDevice
+#define cudaMemoryTypeManaged hipMemoryTypeManaged
+#define cudaErrorInvalidValue hipErrorInvalidValue
+#define cudaErrorNotSupported hipErrorNotSupported
+#define cudaEventDefault hipEventDefault
+#define cudaGetErrorName hipGetErrorName
 
 namespace maya::hip_compat {
 template <typename T>

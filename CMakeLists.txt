@@ -1929,4 +1929,23 @@ if(SAGUARO_QFN AND MAYA_ENABLE_CUDA)
     BUILD_ALWAYS ON
     EXCLUDE_FROM_ALL ON)
   add_custom_target(saguaro-qfn DEPENDS qfn_engine)
+elseif(SAGUARO_QFN AND MAYA_ENABLE_HIP)
+  # AMD: the same tree through engines/qfn's own HIP backend (Strata's wave32 RDNA path), for this build's HIP
+  # architectures, compiler and ROCm, with the same ggml checkout. No kq libraries on HIP: the K-quant MMQ stays in the
+  # engine. Part of the default build on HIP, so a HIP compile break shows up in every HIP build.
+  include(ExternalProject)
+  string(REPLACE ";" "$<SEMICOLON>" _saguaro_qfn_hip_archs "${CMAKE_HIP_ARCHITECTURES}")
+  string(REPLACE ";" "$<SEMICOLON>" _saguaro_qfn_prefix "${CMAKE_PREFIX_PATH}")
+  ExternalProject_Add(qfn_engine
+    SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/engines/qfn
+    BINARY_DIR ${CMAKE_CURRENT_BINARY_DIR}/qfn
+    CMAKE_GENERATOR Ninja
+    CMAKE_ARGS -DCMAKE_BUILD_TYPE=Release -DCMAKE_HIP_COMPILER=${CMAKE_HIP_COMPILER}
+               -DCMAKE_HIP_ARCHITECTURES=${_saguaro_qfn_hip_archs} -DCMAKE_PREFIX_PATH=${_saguaro_qfn_prefix}
+               -DSTRATA_ENABLE_HIP=ON -DSTRATA_PREFILL_MMQ=ON -DSTRATA_BUILD_DSV41=ON -DSTRATA_BUILD_TESTS=${MAYA_BUILD_TESTS}
+               -DSTRATA_GGML_DIR=${SAGUARO_QFN_GGML_DIR}
+    BUILD_COMMAND ${CMAKE_COMMAND} --build <BINARY_DIR> --target strata
+    INSTALL_COMMAND ""
+    BUILD_ALWAYS ON)
+  add_custom_target(saguaro-qfn DEPENDS qfn_engine)
 endif()

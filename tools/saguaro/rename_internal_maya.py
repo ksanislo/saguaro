@@ -72,13 +72,15 @@ def up_sub(line: str):
 
 
 def qfn_block(text: str):
-    """the QFN sub-build's lines (after `if(SAGUARO_QFN AND ...)` up to its custom target): engines/qfn's own CMake
-    project keeps its STRATA_ options, so its -D arguments and option names there stay"""
+    """the QFN sub-builds' lines (after `if(SAGUARO_QFN AND ...)` up to the last of their custom targets: the CUDA
+    branch and the HIP one): engines/qfn's own CMake project keeps its STRATA_ options, so its -D arguments and option
+    names there stay"""
     a = text.find("if(SAGUARO_QFN AND")
     if a < 0:
         return None
     a = text.find("\n", a)
-    b = text.find("add_custom_target(saguaro-qfn", a)
+    b = text.rfind("add_custom_target(saguaro-qfn")
+    b = b if b > a else -1
     return (a, b) if b > 0 else None
 
 

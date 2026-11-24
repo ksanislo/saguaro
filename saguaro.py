@@ -713,6 +713,23 @@ QWEN_PROFILE = ROOT / "data" / "expert-profile-qwen.bin"
 # the attention's time the same as FP16's, half its VRAM left to experts)
 QWEN_KV = "int8"
 QWEN_KV_BYTES = 12 * (2 * 2 * 256 + 2 * 2 * 256 // 64 * 2 + 128)
+# Qwen3.8-Flash-Next itself (unsloth's GGUFs: UD-Q4_K_XL, Q8_0 - tools/qfn/download.json, pinned and sha256-checked) on
+# its own engine, saguaro-qfn (engines/qfn, from Strata: the build's <build>/qfn/saguaro-qfn).  The setup offers it on AMD
+# (one RDNA GPU; measured on an RX 9070 XT, gfx1201): the files read in place, indexed by engines/qfn/tools/iq_pack.py
+# (the pack), the experts the GPU does not hold in a page-locked RAM tier (--resident-budget-gib: the RAM less
+# QFN_RAM_SPARE_GB) and the rest read from the SSD, the Lamina MTP layer drafting.  Its configs are "qwen" ones as
+# CYBER-FROST's (template, sampling, server path), told apart by installer.qwen_quant (maya_quants.QFN_QUANTS).
+QFN = Q.QFN_SHOWN                                  # "Qwen3.8-Flash-Next" (its id for --model; the model folder's prefix)
+QFN_SHOWN = f"{Q.QFN_SHOWN} ({Q.QFN_ENGINE})"
+QFN_TARGET = "saguaro-qfn"
+QFN_MANIFEST = ROOT / "tools" / "qfn" / "download.json"
+QFN_PACK_TOOLS = ("engines/qfn/tools/iq_pack.py", "engines/qfn/tools/strata_tokenizer.py",
+                  "engines/qfn/tools/gguf_reader.py")
+QFN_PROFILE = ROOT / "data" / "expert-profile-qfn.bin"   # (the experts QFN routes most: which start in VRAM and RAM)
+QFN_CONTEXTS = [32768, 65536, 131072, 262144]
+QFN_DEFAULT_CONTEXT = 65536                        # (measured: 64K, prompts up to 60K tokens)
+QFN_RAM_SPARE_GB = 20                              # (RAM left beside the RAM tier: the OS, the server, the page cache)
+QFN_DEFAULT_QUANT = "ud-q4_k_xl"
 # Hy4-Flash (Tencent's Hy4-flash, a 512-expert MoE with an n-gram table) on its own engine, build/saguaro-hy4:
 # Project Maya's GGUF quants (tools/hy4/download.json - a size's trunk, the n-gram table every size shares and the
 # vision tower's mmproj), packed by tools/hy4/pack_gguf.py.  NVIDIA on Linux; measured on 4x Tesla T4 (hy4_fit.py)
@@ -741,13 +758,17 @@ IK2_TOKENIZER_TOOLS = ("tools/strata_tokenizer.py", "tools/ik2/chat_template.jin
 IK2_DIR = "saguaro-ik2"                            # (in the model's folder: tokenizer/, sources.json)
 IK2_MODEL_NAME = "inkling-2-mini"
 IK2_PROFILE = ROOT / "data" / "expert-profile-ik2mini.bin"   # (the offload path's starting VRAM tier: SAGUARO_IK2_WARM)
-FAMILIES = ("glm", "deepseek", "minimax", "qwen", "hy4", "ik2")
-FAMILY_SHOWN = {"glm": "GLM-5.3-Flash", "deepseek": DS4, "minimax": MM3, "qwen": QWEN_SHOWN, "hy4": HY4_SHOWN,
+# (the setup's model question; "qfn" is a setup choice only - its configs are "qwen" ones, maya_quants.family_of)
+FAMILIES = ("glm", "deepseek", "minimax", "qwen", "qfn", "hy4", "ik2")
+FAMILY_SHOWN = {"glm": "GLM-5.3-Flash", "deepseek": DS4, "minimax": MM3, "qwen": QWEN_SHOWN, "qfn": QFN_SHOWN,
+                "hy4": HY4_SHOWN,
                 "ik2": IK2_SHOWN}
 # The models a backend has no engine for in this version (family_unavailable): the model list marks them, the setup
 # stops on them. Take one out when its engine builds and runs there - and update docs/AMD_SAGUARO.md's table with it.
 NO_ENGINE = {
     "hip": {"hy4": "Hy4-Flash runs on NVIDIA GPUs only for now (its engine has not run on an AMD GPU yet)"},
+    # (saguaro-qfn on NVIDIA: what mangonel serves, set up by hand - docs/MODELS.md; the setup offers it on AMD)
+    "cuda": {"qfn": f"the setup offers {QFN_SHOWN} on AMD GPUs for now (on NVIDIA it is set up by hand: docs/MODELS.md)"},
     "metal": {f: "Saguaro's Mac (Metal) engine runs GLM-5.3-Flash only" for f in FAMILIES if f != "glm"},
 }
 NOT_HERE = ("Setup stopped: this model is not supported on this PC's GPU yet - nothing was built or downloaded. "
@@ -758,12 +779,19 @@ SHARD_RE = re.compile(r"-(\d{5})-of-(\d{5})\.gguf$")
 def exe_for_target(target: str) -> Path:
     """The engine binary for a build target name ("maya" or "maya-ds4"; EXE's and DS4_EXE's own stems) - resolved
     fresh on every call since select_build_backend() reassigns EXE/DS4_EXE once the backend (cuda/hip) is known."""
-    return {"maya": EXE, "maya-ds4": DS4_EXE, "maya-mm3": MM3_EXE, HY4_TARGET: HY4_EXE, IK2_TARGET: IK2_EXE}[target]
+    return {"maya": EXE, "maya-ds4": DS4_EXE, "maya-mm3": MM3_EXE, HY4_TARGET: HY4_EXE, IK2_TARGET: IK2_EXE,
+            QFN_TARGET: qfn_exe()}[target]
 
 
 def family_target(family: str) -> str:
     """The build target of a model family's engine."""
-    return {"deepseek": "maya-ds4", "minimax": "maya-mm3", "hy4": HY4_TARGET, "ik2": IK2_TARGET}.get(family, "maya")
+    return {"deepseek": "maya-ds4", "minimax": "maya-mm3", "hy4": HY4_TARGET, "ik2": IK2_TARGET,
+            "qfn": QFN_TARGET}.get(family, "maya")
+
+
+def qfn_exe() -> Path:
+    """saguaro-qfn in this backend's build folder (the top project builds engines/qfn as <build>/qfn)."""
+    return BUILD / "qfn" / ("saguaro-qfn.exe" if WIN else "saguaro-qfn")
 GLM_ARCHS = ("glm5-next", "glm5next")             # llama.cpp's spelling and unsloth's
 # the expert profile setup passes to every GLM config (tools/make_profile.py --glm):
 # its ranking of every (layer, expert) pair decides each layer's VRAM slots and which experts start there
@@ -1550,6 +1578,9 @@ def check_pc(a, family: str = "glm", gguf: bool = False, ds4_quant: str = "exl3"
     if mm3 and WIN and not MM3_ALL_PLATFORMS:
         fail(f"{MM3}'s engine (maya-mm3) runs on Linux only for now (its Windows build is on the way)",
              f"set it up on a Linux PC with an NVIDIA GPU ({mm3_gpus()})")
+    if family == "qfn" and family_unavailable("qfn", a.backend):   # (said before anything is built or downloaded)
+        fail(family_unavailable("qfn", a.backend), "it runs on a Linux PC with one AMD RDNA 3 / 4 GPU of 16 GB "
+             "or more and 96 GB of RAM", end=NOT_HERE)
     if family in ("hy4", "ik2"):   # (said before anything is built or downloaded)
         why = IK2F.unsupported(a.backend, WIN, ik2_gpus_asked(a), []) if family == "ik2" else \
             family_unavailable(family, a.backend)
@@ -1906,6 +1937,17 @@ def config_family(cfg: dict) -> str:
     return Q.family_of(cfg)
 
 
+def is_qfn_config(cfg: dict) -> bool:
+    """A config of Qwen3.8-Flash-Next on saguaro-qfn the setup wrote (a "qwen" config whose quant is the model's own)."""
+    return config_family(cfg) == "qwen" and (cfg.get("installer") or {}).get("qwen_quant") in Q.QFN_QUANTS
+
+
+def setup_family(cfg: dict) -> str:
+    """The setup's model choice a config came from: config_family, with Qwen3.8-Flash-Next's own ("qfn") told from
+    CYBER-FROST's."""
+    return "qfn" if is_qfn_config(cfg) else config_family(cfg)
+
+
 # the models whose engine answers several requests at once (--parallel): GLM-5.3-Flash's, DeepSeek-V4.1-Flash's
 # (maya-ds4 --parallel: a conversation's state each, their tokens decoded together), MiniMax-M3.1-Flash's (maya-mm3
 # --parallel: a KV cache each in VRAM - no KV streaming, no DSpark)
@@ -1924,7 +1966,7 @@ def choose_family(a, prev: dict) -> str:
     """"glm" or "deepseek": what the options say (--model, --gguf-dir, --draft), else asked - the model set up before
     is the default."""
     if a.model:
-        return {DS4: "deepseek", MM3: "minimax", QWEN: "qwen", HY4: "hy4", IK2: "ik2"}.get(a.model, "glm")
+        return {DS4: "deepseek", MM3: "minimax", QWEN: "qwen", QFN: "qfn", HY4: "hy4", IK2: "ik2"}.get(a.model, "glm")
     metal = getattr(a, "backend", None) == "metal"
     if a.gguf_dir or a.draft or (metal and not a.model_dir):     # (Metal runs GLM only: no question)
         return "glm"
@@ -1937,7 +1979,7 @@ def choose_family(a, prev: dict) -> str:
     except Exception:  # noqa: BLE001 - no GPU tools: no figure for this PC
         cards, have = [], None
     fit = family_fit(cards, mem_gb()[0] if cards else 0.0, backend) if not metal else None
-    default = config_family(prev) if prev else fit or "glm"
+    default = setup_family(prev) if prev else fit or "glm"
     if family_unavailable(default, backend):
         default = "glm"
     here = f" (this PC: {have:.0f} GB)" if have else ""
@@ -1966,6 +2008,7 @@ def choose_family(a, prev: dict) -> str:
              "in peasantsmith's GGUF, on Saguaro's own Qwen path; NVIDIA from V100 on or AMD, Linux or Windows; all its "
              f"experts in about {qwen_entry()['memory_gb']:.0f} GB of VRAM and RAM together{here}, with less the others "
              "read from the SSD; tool calls, its three reasoning efforts, MTP drafting, up to a 256K context; text only."),
+            (QFN_SHOWN, "new", qfn_about()),
             (HY4_SHOWN, "recommended for this PC" if fit == "hy4" else "new", hy4_about(here)),
             (IK2_SHOWN, "recommended for this PC" if fit == "ik2" else "new", ik2_about())]
     for i, f in enumerate(FAMILIES):   # (a model this PC's GPUs have no engine for: listed, with the reason)
@@ -2326,6 +2369,8 @@ def compile_engine_hip(pc: dict, llama: Path, src: str, soft=False, target: str 
              f"-DCMAKE_HIP_ARCHITECTURES={';'.join(pc['archs'])}",
              f"-DCMAKE_HIP_COMPILER={clang.as_posix()}", f"-DCMAKE_PREFIX_PATH={root.as_posix()}",
              f"-DMAYA_GGML_DIR={llama.as_posix()}"]
+    if target == QFN_TARGET:   # (engines/qfn, built by the top project for these archs: <build>/qfn/saguaro-qfn)
+        conf += ["-DSAGUARO_QFN=ON", f"-DSAGUARO_QFN_GGML_DIR={llama.as_posix()}"]
     if not WIN and root == Path("/usr"):   # a distribution's ROCm: CMake's HIP check looks for hip-lang under this root
         conf.append(f"-DCMAKE_HIP_COMPILER_ROCM_ROOT={root.as_posix()}")
     jobs = max(1, min(4, (os.cpu_count() or 4) // 2))
@@ -2423,7 +2468,7 @@ def refresh_engine(cfg: dict) -> None:
     meta = read_json(STAMP)
     exe = Path(cfg["exe"]).resolve()
     own = {DS4_EXE.resolve(): "maya-ds4", MM3_EXE.resolve(): "maya-mm3", HY4_EXE.resolve(): HY4_TARGET,
-           IK2_EXE.resolve(): IK2_TARGET, EXE.resolve(): "maya"}
+           IK2_EXE.resolve(): IK2_TARGET, qfn_exe().resolve(): QFN_TARGET, EXE.resolve(): "maya"}
     target = own.get(exe, "maya")
     if not meta or exe not in own:
         return
@@ -5237,8 +5282,8 @@ def set_up(a, prev: dict) -> Path | None:
     Flash-1017 (set_up_ds4), each then with the answers of its own setup before."""
     family = choose_family(a, prev)
     check_parallel(a, family)
-    if config_family(prev) != family:
-        prev = next((c for c in map(read_json, configs()) if config_family(c) == family and
+    if setup_family(prev) != family:
+        prev = next((c for c in map(read_json, configs()) if setup_family(c) == family and
                      c.get("backend", "cuda") == a.backend), {})
     if family == "deepseek":
         return set_up_ds4(a, prev)
@@ -5246,6 +5291,8 @@ def set_up(a, prev: dict) -> Path | None:
         return set_up_mm3(a, prev)
     if family == "qwen":
         return set_up_qwen(a, prev)
+    if family == "qfn":
+        return set_up_qfn(a, prev)
     if family == "hy4":
         return set_up_hy4(a, prev)
     if family == "ik2":
@@ -7256,6 +7303,256 @@ def set_up_qwen(a, prev: dict) -> Path | None:
     return cfg_path
 
 
+# ------------------------------------------------------------------------------------------------ Qwen3.8-Flash-Next (saguaro-qfn)
+def qfn_manifest() -> dict:
+    man = read_json(QFN_MANIFEST)
+    if not man.get("quants") or not man.get("revision") or not (man.get("mtp") or {}).get("files"):
+        fail(f"{QFN_MANIFEST} is missing or damaged", "restore it (git checkout tools/qfn/download.json)")
+    return man
+
+
+def qfn_entry(quant: str = QFN_DEFAULT_QUANT) -> dict:
+    """A Qwen3.8-Flash-Next quant's download as offer_download reads it (tools/qfn/download.json), with its "name" (the
+    model folder's and the config's), "needs" (the VRAM and RAM it was measured to run with) and "measured"."""
+    man = qfn_manifest()
+    q = man["quants"].get(quant)
+    if not q:
+        fail(f"{QFN_MANIFEST} names no {Q.shown('qwen', quant)}", "restore it (git checkout tools/qfn/download.json)")
+    return {"about": f"{Q.QFN_SHOWN} in {q['about']}; {man.get('license', 'the Qwen Community License')}",
+            "format": "qfn-gguf", "repo": man["repo"], "revision": man["revision"], "folder": q["folder"],
+            "files": {k: v[0] for k, v in q["files"].items()}, "sha256": {k: v[1] for k, v in q["files"].items()},
+            "download_gb": sum(v[0] for v in q["files"].values()) / 1e9, "name": q["name"],
+            "needs": dict(q.get("needs") or {}), "measured": q.get("measured")}
+
+
+def qfn_mtp_entry() -> dict:
+    """The Lamina draft layer's download (tools/qfn/download.json's "mtp")."""
+    mt = qfn_manifest()["mtp"]
+    return {"about": "the Lamina MTP draft layer of Qwen3.8-Flash-Next (eddoursul; Qwen Community License 1.0)",
+            "format": "qfn-mtp", "repo": mt["repo"], "revision": mt["revision"], "folder": "",
+            "files": {k: v[0] for k, v in mt["files"].items()}, "sha256": {k: v[1] for k, v in mt["files"].items()},
+            "download_gb": sum(v[0] for v in mt["files"].values()) / 1e9, "name": mt["folder_name"]}
+
+
+def qfn_about() -> str:
+    m = qfn_entry()
+    n = m["needs"]
+    return (f"Qwen's Qwen3.8-Flash-Next itself (125B, 10 of 512 experts a token) in unsloth's GGUFs (UD-Q4_K_XL "
+            f"{m['download_gb']:.0f} GB, Q8_0 177 GB) on its own engine, saguaro-qfn (from Strata); AMD: one "
+            f"RDNA 3 / 4 GPU of {n.get('vram_gb', 15) + 1:.0f} GB or more with about {n.get('ram_gb', 88) + 8:.0f} GB of RAM - "
+            "the experts the GPU does not hold in RAM, the rest read from the SSD; MTP drafting, tool calls, up to a "
+            "256K context; text only. Not CYBER-FROST: the model as Qwen released it.")
+
+
+def qfn_quant_fit(quant: str, vram: float, ram: float) -> str | None:
+    """Why a quant does not fit one GPU of `vram` GiB and `ram` GiB of RAM (its measured "needs"), or None."""
+    n = qfn_entry(quant)["needs"]
+    if vram < float(n.get("vram_gb") or 0):
+        return f"{Q.shown('qwen', quant)} needs a GPU of 16 GB or more (this one: {vram:.0f} GB)"
+    if ram < float(n.get("ram_gb") or 0):
+        return (f"{Q.shown('qwen', quant)} needs about 96 GB of RAM (this PC: {ram:.0f} GB): the experts the GPU does "
+                "not hold must fit in RAM beside the system, or nearly every token waits on the SSD")
+    return None
+
+
+def choose_qfn_quant(a, prev: dict, vram: float, ram: float) -> str:
+    """--model's quant, else asked among the ones that fit (UD-Q4_K_XL the default; a quant that does not fit is listed
+    with the reason and refused)."""
+    keys = list(Q.QFN_QUANTS)
+    want = getattr(a, "qfn_quant", None)
+    if not want:
+        before = (prev.get("installer") or {}).get("qwen_quant")
+        rows = []
+        for k in keys:
+            m, why = qfn_entry(k), qfn_quant_fit(k, vram, ram)
+            note = ("does not fit this PC" if why else "recommended" if k == QFN_DEFAULT_QUANT else
+                    "not measured on AMD yet" if not m.get("measured") else None)
+            rows.append((Q.shown("qwen", k, m["download_gb"]), note,
+                         (why + ". " if why else "") + m["about"] + (f". Measured: {m['measured']}" if m.get("measured")
+                                                                     else "")))
+        default = keys.index(before) if before in keys else keys.index(QFN_DEFAULT_QUANT)
+        want = keys[choose("Which quant?", [f"{Q.QFN_SHOWN}'s files:"], rows, default, a.yes)]
+    why = qfn_quant_fit(want, vram, ram)
+    if why:
+        fail(why, "a PC with more RAM / VRAM, or another model")
+    return want
+
+
+def qfn_files_step(a, d: Path, quant: str) -> list | None:
+    """The quant's shards: in --gguf-dir (used in place, checked) or in d (downloaded when missing), each against its
+    published sha256.  None when nothing was downloaded."""
+    m = qfn_entry(quant)
+    src = Path(a.gguf_dir).expanduser().resolve() if getattr(a, "gguf_dir", None) else d
+    if src.is_file():
+        src = src.parent
+    files = [src / n for n in m["files"]]
+    missing = [f for f in files if file_incomplete(m, f)]
+    if missing and src != d:
+        fail(f"{src} does not hold all of {Q.shown('qwen', quant)}'s files ({missing[0].name}: "
+             f"{file_incomplete(m, missing[0])})", "--gguf-dir takes the folder with all its .gguf shards, or leave it "
+             "out to download them")
+    if missing and not offer_download(a, Q.shown("qwen", quant, m["download_gb"]), d, files, m):
+        return None
+    for f in files:
+        if not sha256_checked(f, m["sha256"][f.name]):
+            fail(f"{f.name}: the sha256 does not match the published one - still being downloaded, or damaged",
+                 f"let the download finish, or delete the file and run {ME} --download-model")
+    ok(f"{Q.shown('qwen', quant)}: {sum(f.stat().st_size for f in files) / 1e9:.1f} GB in {src}" +
+       (" (your files, used in place)" if src != d else ""))
+    if rotational(src):
+        warn(f"{src} is on a spinning hard disk: the experts RAM cannot hold are read from it - use an NVMe SSD")
+    return files
+
+
+def qfn_pack_step(a, d: Path, files: list, llama: Path) -> Path:
+    """engines/qfn/tools/iq_pack.py's pack in <model folder>/pack (the index of every tensor, the small weights in the
+    engine's forms, the tokenizer with the model's chat template) - built again when its tools or the files changed."""
+    step(6, "the pack (the engine's index of the model files)")
+    pack = d / "pack"
+    tools = S.source_hash(QFN_PACK_TOOLS)
+    need = ("index.txt", "native_experts.txt", "dense.bin", "tokenizer/vocab.json", "tokenizer/chat_template.jinja")
+    if not a.repack and read_json(pack / PACK_SOURCES).get("tools") == tools and \
+            all((pack / f).exists() for f in need) and pack_stale(pack, files) is None:
+        ok(f"pack already built: {pack}")
+        return pack
+    d.mkdir(parents=True, exist_ok=True)
+    env = dict(os.environ, SAGUARO_GGUF_PY=str(llama / "gguf-py"))
+    say("  Writing the index of every tensor, the small weights (about 1.4 GB) and the tokenizer; the experts stay in "
+        "the GGUF files (a minute) ...")
+    run([sys.executable, str(ROOT / "engines" / "qfn" / "tools" / "iq_pack.py"), "--gguf", str(files[0]), "--out",
+         str(pack), "--compat-bf16"], env=env)
+    missing = [f for f in need if not (pack / f).exists()]
+    if missing:
+        fail(f"the pack builder did not write {pack / missing[0]}", "the reason is in the messages above")
+    stamp_pack(pack, files)
+    rec = read_json(pack / PACK_SOURCES)
+    rec["tools"] = tools
+    (pack / PACK_SOURCES).write_text(json.dumps(rec, indent=1), encoding="utf-8")
+    ok(f"pack: {pack}")
+    return pack
+
+
+def qfn_mtp_step(a, models: Path) -> Path | None:
+    """The Lamina draft layer in <models>/Qwen3.8-Flash-Next-MTP-Lamina (pinned, sha256-checked; 0.8 GB): downloaded
+    with the model's files; None (drafting off) when it was not."""
+    m = qfn_mtp_entry()
+    d = models / m["name"]
+    files = [d / n for n in m["files"]]
+    if any(file_incomplete(m, f) for f in files) and not offer_download(a, "the MTP draft layer", d, files, m):
+        warn("drafting off: the draft layer was not downloaded")
+        return None
+    for f in files:
+        if m["sha256"].get(f.name) and not sha256_checked(f, m["sha256"][f.name]):
+            fail(f"{f}: the sha256 does not match the published one", f"delete it and run {ME} --setup again")
+    ok(f"MTP draft layer: {d}")
+    return d
+
+
+def qfn_ram_budget(ram: float) -> int:
+    """The RAM tier (GiB) for a PC with `ram` GiB: all but QFN_RAM_SPARE_GB (measured on 91.7 GiB with an RX 9070 XT: 72
+    against 64 answered 32% faster and read prompts 20% faster - nearly every expert the card does not hold in RAM -
+    with 10.8 GiB of RAM still available; the engine takes no more than those experts)."""
+    return max(8, int(ram - QFN_RAM_SPARE_GB))
+
+
+def write_config_qfn(a, pc: dict, meta: dict, quant: str, files: list, pack: Path, mtp: Path | None, ctx: int,
+                     models: Path, d: Path, prev: dict) -> Path:
+    """maya-qwen3.8-flash-next-<quant>-hip.json and its start script: the engine's AMD settings as measured on an RX
+    9070 XT - one GPU, the RAM tier, MTP drafting, INT8 K/V (32K of it in VRAM), the K-quant prompt kernels; plain RoPE
+    up to 256K (YaRN past it).  A setup again keeps the config before's env, where the server listens and its key."""
+    step(8, "the configuration and the start script")
+    port = a.port or 8080
+    hip = pc.get("backend") == "hip"
+    cfg_path = ROOT / f"{Q.config_stem('qwen', quant)}{'-hip' if hip else ''}.json"
+    old = read_json(cfg_path) or (prev if is_qfn_config(prev or {}) else {})
+    name = qfn_entry(quant)["name"]
+    var = models / name / "var"
+    (var / "sessions").mkdir(parents=True, exist_ok=True)
+    profile = var / "expert-profile.bin"
+    if not profile.exists() and QFN_PROFILE.is_file():   # (the shipped ranking; the engine adds this PC's to it)
+        shutil.copyfile(QFN_PROFILE, profile)
+    ram = mem_gb()[0]
+    args = ["--pack", str(pack), "--native", str(files[0])]
+    if profile.exists():
+        args += ["--expert-profile", str(profile), "--expert-profile-save", str(profile)]
+    args += ["--expert-cache", "auto", "--prefill", "auto", "--spec", "3", "--spec-min-p", "0.7"]
+    if mtp is not None:
+        args += ["--mtp", str(mtp)]
+    args += ["--max-context", str(ctx), "--kv", "int8", "--kv-resident", str(min(ctx, 32768)),
+             "--vram-reserve-mib", "700", "--session-dir", str(var / "sessions"),
+             "--resident-budget-gib", str(qfn_ram_budget(ram)),
+             "--rope-scaling", "yarn", "--rope-scale", "4", "--yarn-orig-ctx", "262144"]
+    env = {"SAGUARO_NO_LARGEPAGES": "1", "SAGUARO_YARN_ELASTIC": "1", "SAGUARO_MMQ_KQ": "1",
+           **(old.get("env") or {}), **parse_env(a.env)}
+    inst = {"family": "qwen", "qwen_quant": quant, "engine": Q.QFN_ENGINE}
+    sampling, effort = Q.model_defaults({"installer": inst})
+    cfg = {"exe": str(qfn_exe()), "args": args, "env": env, "cwd": str(ROOT / "engines" / "qfn"),
+           "tokenizer": str(pack / "tokenizer"), "model_name": name, **({"backend": "hip"} if hip else {}),
+           "gpu": [g["index"] for g in pc["gpus"]], "sampling": sampling,
+           "lib_dirs": meta.get("lib_dirs") or old.get("lib_dirs") or [], "port": port}
+    kept = []
+    for k in ("host", "api_key", "cors_origins", "mcp_servers"):
+        if old.get(k) is not None:
+            cfg[k] = old[k]
+            kept.append(k)
+    if a.host:
+        cfg["host"] = a.host
+    if a.api_key:
+        cfg["api_key"] = a.api_key
+    if kept:
+        ok("kept from the config before: " + ", ".join(kept))
+    cfg["log"] = str(cfg_path.with_suffix(".log"))
+    cfg["installer"] = {**inst, "quant": Q.QFN_QUANTS[quant], "models_dir": str(models), "model_dir": str(d),
+                        "files_dir": str(files[0].parent), "written": time.strftime("%Y-%m-%d %H:%M")}
+    cfg_path.write_text(json.dumps(cfg, indent=1), encoding="utf-8")
+    ok(f"config: {cfg_path}")
+    ok(f"start script: {write_run_script(cfg_path, port)}")
+    return cfg_path
+
+
+def set_up_qfn(a, prev: dict) -> Path | None:
+    """Qwen3.8-Flash-Next on saguaro-qfn, steps 1-8: the PC (one AMD RDNA GPU; the quant's measured VRAM and RAM -
+    refused below them), the quant and the context, the engine (<build>/qfn/saguaro-qfn), the files (pinned,
+    sha256-checked; --gguf-dir: yours, in place), the pack, the MTP draft layer, the config."""
+    inst = prev.get("installer") or {}
+    prev_args = prev.get("args") or []
+    prev_ctx = int(prev_args[prev_args.index("--max-context") + 1]) if "--max-context" in prev_args[:-1] else None
+    pc = check_pc(a, "qfn")                            # 1
+    if len(pc["gpus"]) != 1:
+        fail(f"{QFN_SHOWN} runs on one GPU in this setup ({len(pc['gpus'])} chosen)", "pick one with --gpu N")
+    g = pc["gpus"][0]
+    if hip_unified_memory(g):
+        fail(f"{QFN_SHOWN} is not set up on an APU (Strix Halo / Gorgon Halo) yet: it was measured on a discrete GPU",
+             "another model, or set it up by hand (docs/AMD_SAGUARO.md)")
+    vram, ram = float(g.get("vram_gb") or 0), mem_gb()[0]
+    step(2, "your choices")                            # 2
+    quant = choose_qfn_quant(a, prev, vram, ram)
+    m = qfn_entry(quant)
+    ok(f"model: {Q.shown('qwen', quant, m['download_gb'])} - Qwen's Qwen3.8-Flash-Next (Qwen Community License 1.0: "
+       "LICENSE.qwen-community-1.0) on its own engine, saguaro-qfn")
+    ok(f"{QFN_SHOWN} on AMD: measured on an RX 9070 XT (gfx1201) with 96 GB of RAM (27-41 tok/s answers, 520-1,080 "
+       "tok/s 8K-16K prompt reads) - tell us how it goes on yours" + ("" if m.get("measured") else f"; {Q.QFN_QUANTS[quant]} is not measured on AMD yet"))
+    ok(f"the GPU holds the most-used experts, {qfn_ram_budget(ram)} GB of RAM the next ones, the SSD the rest")
+    ctx = choose_context(a, prev_ctx, QFN_CONTEXTS, QFN_DEFAULT_CONTEXT)
+    ok(f"context: {ctx} tokens" + (" (recommended)" if ctx == QFN_DEFAULT_CONTEXT else ""))
+    models = (Path(a.models_dir).expanduser().resolve() if a.models_dir else
+              Path(inst["models_dir"]) if inst.get("models_dir") else default_models_dir())
+    d = models / m["name"]
+    ok(f"model folder: {d}")
+    llama = tools_step(a)                              # 3
+    meta = build_step(a, pc, llama, QFN_TARGET)        # 4
+    if not qfn_exe().exists():
+        fail(f"the engine was not built ({qfn_exe()})", "the reason is in the build's messages above")
+    step(5, f"the model ({Q.shown('qwen', quant)})")   # 5
+    files = qfn_files_step(a, d, quant)
+    if files is None:
+        return None
+    pack = qfn_pack_step(a, d, files, llama)           # 6
+    step(7, "the MTP draft layer")                     # 7
+    mtp = qfn_mtp_step(a, models)
+    return write_config_qfn(a, pc, meta, quant, files, pack, mtp, ctx, models, d, prev)   # 8
+
+
 # ------------------------------------------------------------------------------------------------ Hy4-Flash, Inkling 2 Mini
 def family_fit(cards: list, ram_gb: float, backend: str = "cuda") -> str | None:
     """The model the setup recommends for a PC's cards when no model was set up before: Hy4-Flash where four equal
@@ -8223,6 +8520,9 @@ def model_option(a) -> str | None:
     if family == "glm":
         a.model = key
         return None
+    if family == "qwen" and key in Q.QFN_QUANTS:         # (Qwen3.8-Flash-Next itself, on saguaro-qfn: a quant of it)
+        a.model, a.qfn_quant = QFN, key
+        return None
     if family == "qwen":                                 # (its one GGUF: no quant to choose)
         a.model = QWEN
         return None
@@ -8348,7 +8648,9 @@ def main() -> int:
     ap.add_argument("--gguf-dir", help="use GLM-5.3-Flash GGUF files you already have: the folder with all of them, "
                                        "or the .gguf file (the first one of a split model) when the folder holds "
                                        "several models; it must be writable - the pack is written inside it "
-                                       "(without this option the setup lists the ones it finds in ~/models*)")
+                                       "(without this option the setup lists the ones it finds in ~/models*); "
+                                       "with --model qwen3.8-flash-next: the folder with that quant's .gguf shards, "
+                                       "used in place and checked (its pack goes in the models folder)")
     ap.add_argument("--models-dir", help="where downloaded models go, each in a folder named after it, e.g. "
                                          "<DIR>/Maya-L/ (default: Saguaro-data/models next to this folder); use "
                                          "a fast NVMe SSD with ~100 GB free")

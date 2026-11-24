@@ -91,7 +91,15 @@ endif()
 # HIP's link step produces a PIE; make Strata and ggml objects PIC for the ROCm linker.
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-set(STRATA_HIP_COMPAT_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include/strata/hip_compat")
+# The CUDA-to-HIP names are Saguaro's one shared layer (include/maya/hip_compat at the project's top, used by every
+# engine's HIP build); SAGUARO_HIP_COMPAT_DIR points elsewhere for a tree built on its own.
+set(SAGUARO_HIP_COMPAT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../include/maya/hip_compat" CACHE PATH
+    "Saguaro's shared CUDA-to-HIP compat headers")
+get_filename_component(STRATA_HIP_COMPAT_INCLUDE_DIR "${SAGUARO_HIP_COMPAT_DIR}" ABSOLUTE)
+if(NOT EXISTS "${STRATA_HIP_COMPAT_INCLUDE_DIR}/cuda_runtime.h")
+  message(FATAL_ERROR "engines/qfn's HIP build takes Saguaro's include/maya/hip_compat; not found at ${STRATA_HIP_COMPAT_INCLUDE_DIR} "
+                      "(set SAGUARO_HIP_COMPAT_DIR)")
+endif()
 add_library(strata_hip_runtime INTERFACE)
 target_include_directories(strata_hip_runtime BEFORE INTERFACE
   "${STRATA_HIP_COMPAT_INCLUDE_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/include")
@@ -110,15 +118,19 @@ target_link_libraries(strata_hip_runtime INTERFACE hip::host)
 # compiler is ROCm's clang++ too (tools/hip/build_windows.bat: CMake refuses to mix cl.exe with Clang HIP), which takes
 # -include like it does on Linux; an MSVC-style front end (cl / clang-cl) takes /FI instead. Forward slashes, so /FI
 # does not read the path's backslashes as escapes.
+# Saguaro's shared shim sits between this engine's own two (include/strata/hip_qfn_pre.h: lean windows.h;
+# hip_qfn_post.h: the Windows WDDM-budgeted free VRAM).  SHELL: keeps the three -include pairs from being de-duplicated.
+file(TO_CMAKE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/include/strata/hip_qfn_pre.h" _strata_hip_pre)
 file(TO_CMAKE_PATH "${STRATA_HIP_COMPAT_INCLUDE_DIR}/cuda_runtime.h" _strata_hip_force)
-if(MSVC)
-  target_compile_options(strata_hip_runtime INTERFACE "$<$<COMPILE_LANGUAGE:CXX>:/FI${_strata_hip_force}>")
-else()
-  target_compile_options(strata_hip_runtime INTERFACE
-    "$<$<COMPILE_LANGUAGE:CXX>:-include>" "$<$<COMPILE_LANGUAGE:CXX>:${_strata_hip_force}>")
-endif()
-target_compile_options(strata_hip_runtime INTERFACE
-  "$<$<COMPILE_LANGUAGE:HIP>:-include>" "$<$<COMPILE_LANGUAGE:HIP>:${_strata_hip_force}>")
+file(TO_CMAKE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/include/strata/hip_qfn_post.h" _strata_hip_post)
+foreach(_h IN ITEMS "${_strata_hip_pre}" "${_strata_hip_force}" "${_strata_hip_post}")
+  if(MSVC)
+    target_compile_options(strata_hip_runtime INTERFACE "$<$<COMPILE_LANGUAGE:CXX>:/FI${_h}>")
+  else()
+    target_compile_options(strata_hip_runtime INTERFACE "$<$<COMPILE_LANGUAGE:CXX>:SHELL:-include ${_h}>")
+  endif()
+  target_compile_options(strata_hip_runtime INTERFACE "$<$<COMPILE_LANGUAGE:HIP>:SHELL:-include ${_h}>")
+endforeach()
 
 # CMake does not infer HIP from Strata's existing CUDA-shaped .cu suffixes.
 file(GLOB_RECURSE _strata_hip_sources CONFIGURE_DEPENDS

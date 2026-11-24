@@ -9,6 +9,7 @@
 #include "strata/core/sm120_series.hpp"
 #include "strata/kernels/gfx_arch.hpp"
 #include "strata/kernels/dp4a.hpp"
+#include "strata/kernels/lane_xor.hpp"
 #include "strata/kernels/q8_1_finite.hpp"
 #include "s26_tsum.cuh"
 
@@ -779,9 +780,13 @@ template<> struct Fmt<40> { static constexpr int qk = 64, ipb = 2, step = 4;    
     __device__ static float dot(const void* v, const block_q8_1* y, int kbx, int iqs) { return vec_dot_nvfp4_q8_1(v, y, kbx, iqs); } };
 
 __device__ __forceinline__ float warp_sum(float v) {
+#if defined(STRATA_USE_HIP)
+    return strata_warp_sum_xor(v);   // RDNA: the same pairs in registers, not ds_bpermute (same bits; lane_xor.hpp)
+#else
 #pragma unroll
     for (int o = 16; o > 0; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
     return v;
+#endif
 }
 
 // One row against one q8_1 activation, the whole warp: call k = (block, part) is lane-strided.
@@ -1776,15 +1781,15 @@ struct IqGridWords {
 // #778: `__shared__ alignas(16)` does not compile for gfx1030 (HIP); the attribute after the declarator does, but nvcc
 // with MSVC as host does not take it.  Same layout either way.
 #if defined(__HIPCC__)
-#define STRATA_SHARED_ALIGN16_U32(name, ...) __shared__ uint32_t name[__VA_ARGS__] __attribute__((aligned(16)))
+#define STRATA_SHARED_ALIGN16(T, name, ...) __shared__ T name[__VA_ARGS__] __attribute__((aligned(16)))
 #else
-#define STRATA_SHARED_ALIGN16_U32(name, ...) __shared__ alignas(16) uint32_t name[__VA_ARGS__]
+#define STRATA_SHARED_ALIGN16(T, name, ...) __shared__ alignas(16) T name[__VA_ARGS__]
 #endif
 template<int TY, int NC, bool STAGE_GRID = kStageIqGrid<TY>, bool EXACT_N = false>
 __global__ void __launch_bounds__(128) mmvq_multi_kernel(const uint8_t* __restrict__ w, size_t row_bytes,
                                                          const block_q8_1* __restrict__ x, float* __restrict__ y,
                                                          int n_in, int n_out, int ncols) {
-    STRATA_SHARED_ALIGN16_U32(s_grid_buf, IqGridWords<TY, STAGE_GRID>::value);
+    STRATA_SHARED_ALIGN16(uint32_t, s_grid_buf, IqGridWords<TY, STAGE_GRID>::value);
     const uint32_t* s_grid = stage_iq_grid<TY, STAGE_GRID>(s_grid_buf, threadIdx.y * 32 + threadIdx.x, 128);
     const int row = blockIdx.x * 4 + threadIdx.y;
     if (row >= n_out) return;
@@ -1871,7 +1876,7 @@ __global__ void __launch_bounds__(256) native_gu_multi_kernel(const unsigned lon
                                                               float* __restrict__ gate, float* __restrict__ up) {
     const int ng = *n_groups;
     if (blockIdx.y >= ng) return;
-    STRATA_SHARED_ALIGN16_U32(s_grid_buf, IqGridWords<TG, STAGE_GRID>::value);
+    STRATA_SHARED_ALIGN16(uint32_t, s_grid_buf, IqGridWords<TG, STAGE_GRID>::value);
     const uint32_t* s_grid = stage_iq_grid<TG, STAGE_GRID>(s_grid_buf, threadIdx.x, 256);
     const int nb = (int) (L.n_embd / Fmt<TG>::qk), xb = (int) (L.n_embd / 32);
     if constexpr (SUB16 && (TG == 144 || TG == 145)) {
@@ -2136,7 +2141,7 @@ __global__ void __launch_bounds__(256) native_down_multi_kernel(const unsigned l
                                                                 float* __restrict__ out) {
     const int ng = *n_groups;
     if (blockIdx.y >= ng) return;
-    STRATA_SHARED_ALIGN16_U32(s_grid_buf, IqGridWords<TD, STAGE_TQ>::value);   // the trellis codebook on a cc 6.0 card, else 4 unused words
+    STRATA_SHARED_ALIGN16(uint32_t, s_grid_buf, IqGridWords<TD, STAGE_TQ>::value);   // the trellis codebook on a cc 6.0 card, else 4 unused words
     const uint32_t* s_grid = stage_iq_grid<TD, STAGE_TQ>(s_grid_buf, threadIdx.x, 256);
     __shared__ uint32_t s_hq_buf[GRP_NC * 20 * 9];
     const int nb = (int) (L.n_ff / Fmt<TD>::qk), hb = (int) (L.n_ff / 32);
@@ -2475,9 +2480,9 @@ __global__ void __launch_bounds__(256, MINB) expdec_gu_kernel(const unsigned lon
                                                                             float* __restrict__ gate, float* __restrict__ up, int rb) {
     const int ng = *n_groups;
     if (blockIdx.y >= ng) return;
-    __shared__ alignas(16) int4 s_u[ED_NC * 2 * ED_XB];
+    STRATA_SHARED_ALIGN16(int4, s_u, ED_NC * 2 * ED_XB);
     __shared__ float s_ds[ED_NC * ED_XB];
-    STRATA_SHARED_ALIGN16_U32(s_grid_buf, EdGrid<TG>::words);
+    STRATA_SHARED_ALIGN16(uint32_t, s_grid_buf, EdGrid<TG>::words);
     const int tid = threadIdx.x;
     EdGrid<TG>::copy(s_grid_buf, tid);   // visible after the staging's __syncthreads
     const int sw = tid >> 4, t = tid & 15;
@@ -2662,7 +2667,7 @@ __global__ void __launch_bounds__(256, STRATA_EXPDEC_MINB) expdec_down_kernel(co
     if (blockIdx.y >= ng) return;
     constexpr int LANES = TD == 20 ? 8 : 16;
     constexpr int RPP = (256 / LANES) * R;   // rows per pass
-    __shared__ alignas(16) int4 s_u[ED_NC * 2 * ED_HB];
+    STRATA_SHARED_ALIGN16(int4, s_u, ED_NC * 2 * ED_HB);
     __shared__ float s_ds[ED_NC * ED_HB];
     const int tid = threadIdx.x;
     const int sw = tid / LANES, t = tid % LANES;
@@ -2775,7 +2780,7 @@ __global__ void __launch_bounds__(512) native_gu_swiglu_kernel(const unsigned lo
 #endif
     const int ng = *n_groups;
     if ((int) blockIdx.y >= ng) return;
-    STRATA_SHARED_ALIGN16_U32(s_grid_buf, IqGridWords<TG, STAGE_GRID>::value);
+    STRATA_SHARED_ALIGN16(uint32_t, s_grid_buf, IqGridWords<TG, STAGE_GRID>::value);
     const uint32_t* s_grid = stage_iq_grid<TG, STAGE_GRID>(s_grid_buf, threadIdx.x, 512);
     __shared__ float sh[GRP_NC][32];
     const int sw = threadIdx.x >> 4, t = threadIdx.x & 15, warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
