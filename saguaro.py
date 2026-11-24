@@ -8916,6 +8916,15 @@ def main() -> int:
             a.calibrate = a.speed_calibration = False
             if a.no_start:
                 return 0
+        if (a.calibrate or a.speed_calibration) and migrate_cyber_frost(read_json(pick)):   # (on a throwaway read:
+            # a CYBER-FROST config not migrated yet - the migration and the pack build the QFN harness needs both
+            # run in --setup and the start, so driving the harness at this exe with a foreign pack could only fail
+            # to measure, and say the wrong reason)
+            say(f"This CYBER-FROST config is not migrated to {Q.QFN_ENGINE} yet: run {ME} --setup once first - it "
+                "rewrites the config and builds the pack and drafter; the tuning waits for that.")
+            a.calibrate = a.speed_calibration = False
+            if a.no_start:
+                return 0
         # (DeepSeek too: --speed-calibration measures its DSpark drafter against none - speed_calibration_ds4 - and keeps
         #  the faster; it used to stop here with "nothing to tune", so a config the setup wrote with --dspark none until
         #  that measurement could never get it - #393.  --calibrate tunes its --tp and CPU threads)
