@@ -294,7 +294,6 @@ function fieldsOf(m, d) {
   if (m.family === "hy4") return hy4Fields(m, d, s, ch, images, gpus);
   if (m.family === "minimax") return mm3Fields(m, d, s, ch, images, gpus);
   if (m.family === "qfn") return qfnFields(m, d, s, ch, gpus);   // (QFN's own field set: serve/models.py's QFN_KEYS)
-  if (m.family === "qwen") return qwenFields(m, d, s, ch, gpus);
   if (glm) {
     const ec = AutoOr({label: "Expert cache", k: "expert_cache", d, dflt: 1200, unit: "experts", subLabel: "Experts in the first GPU's pool"});
     const pf = AutoOr({label: "Prompt chunk", k: "prefill", d, dflt: 8192, unit: "tokens", subLabel: "Tokens a prompt is read in at a time"});
@@ -509,58 +508,12 @@ function mm3Fields(m, d, s, ch, images, gpus) {
   ];
 }
 
-// CYBER-FROST's (the GLM engine's Qwen path; pictures through vision-glm and the base model's mmproj).  The KV cache
-// formats to pick from; their bytes of a position come from the engine's INFO (engineKvBytes), not from a table here
-const QWEN_KV = [{id: "fp16", label: "FP16"}, {id: "int8", label: "INT8"}, {id: "k8v4", label: "K8 V4"}, {id: "q4_0", label: "Q4_0"}];
-function qwenFields(m, d, s, ch, gpus) {
-  const mtp = m.choices.draft.includes("mtp");
-  const kv = QWEN_KV.find((f) => f.id === d.kv) || QWEN_KV[0];
-  const kvb = engineKvBytes(m, ch, "kv");
-  // the QSA path streams when the engine runs --kv-resident (its INFO's kv_resident): then the cache lives in RAM
-  const qwenWin = m.running && Number(S.ctxInfo && S.ctxInfo.kv_resident) > 0 ? Number(S.ctxInfo.kv_resident) : 0;
-  const ec = AutoOr({label: "Expert cache", k: "expert_cache", d, dflt: 8000, unit: "experts", subLabel: "Experts in the GPU's pool"});
-  const pf = AutoOr({label: "Prompt chunk", k: "prefill", d, dflt: 4096, unit: "tokens", subLabel: "Tokens a prompt is read in at a time"});
-  return [
-    {label: "Model", rows: [
-      contextRow(m, d, ch, !kvb ? {} : qwenWin ? {win: qwenWin, whole: true, ram: kvb} : {vram: kvb}, ["kv"]),
-      html`<${Row} label="Images" flag="vision" changed=${ch("images")}
-        hint=${m.choices.images ? "Reads images in chats: the image encoder starts when a picture arrives, no VRAM kept for it. Off reads text only."
-          : "This model was set up without its image encoder: the setup adds it."}>
-        <${Switch} label="Images" on=${d.images} disabled=${!m.choices.images && !d.images} onChange=${(v) => setDraft({images: v})}/><//>`,
-      html`<${Row} label="Drafting" flag="--mtp-max-t" changed=${ch("draft")}
-        hint=${mtp ? "The model's own MTP block drafts a few tokens for the model to check: the same answer. Off keeps it loaded with its drafts off. The setup measures which is faster on this PC."
-          : "This pack has no MTP drafter: the setup builds it from the model file."}>
-        <${Seg} label="Drafting" value=${d.draft} options=${[...(mtp ? [{id: "mtp", label: "MTP"}] : []), {id: "none", label: "Off"}]}
-          onChange=${(v) => setDraft({draft: v})}/><//>`]},
-    {label: "GPUs and memory", rows: [gpus,
-      html`<${Row} label="VRAM kept free" flag="--vram-reserve-mib" changed=${ch("reserve_mib")}
-        hint="For the driver, the desktop and other programs. Empty: 700 MiB."
-        warn=${whole(d.reserve_mib) ? null : "A whole number of MiB, or empty for the default."}>
-        <${Num} label="VRAM kept free" value=${d.reserve_mib} ph="700" unit="MiB" on=${(v) => setDraft({reserve_mib: v})}/><//>`,
-      html`<${Row} label="Expert cache" flag="--expert-cache" changed=${ch("expert_cache")}
-        hint="Auto takes the VRAM left free, less the reserve. A number caps the GPU's pool at that many experts."
-        below=${ec.below} warn=${whole(d.expert_cache) ? null : "A whole number, or Auto."}>${ec.ctl}<//>`,
-      html`<${Row} label="Experts in RAM" flag="SAGUARO_EXPERT_RAM_GB" changed=${ch("ram_gb")}
-        hint="The experts the GPU does not hold stay in RAM, the most-used first, as far as the free RAM goes; the rest are read from the SSD. A number caps that RAM."
-        warn=${whole(d.ram_gb) ? null : "A whole number of GB, or empty for all the engine can take."}>
-        <${Num} label="Experts in RAM" value=${d.ram_gb} ph="auto" unit="GB" on=${(v) => setDraft({ram_gb: v})}/><//>`]},
-    {label: "Prompts and cache", rows: [
-      html`<${Row} label="Prompt chunk" flag="--prefill" changed=${ch("prefill")}
-        hint="Auto takes the largest chunk the expert pool can lend."
-        below=${pf.below} warn=${whole(d.prefill) ? null : "A whole number, or Auto."}>${pf.ctl}<//>`,
-      html`<${Row} label="KV cache" flag="--kv" changed=${ch("kv")}
-        hint="The attention cache's format: INT8 the setup's (the model card's own), FP16 exact, K8 V4 and Q4_0 smaller - more VRAM for experts at long contexts.">
-        <${Seg} label="KV cache" value=${kv.id} options=${QWEN_KV.map((f) => ({id: f.id, label: f.label}))}
-          onChange=${(v) => setDraft({kv: v})}/><//>`]},
-  ];
-}
-
 // QFN's (saguaro-qfn, its own engine and family): the experts' RAM tier is the engine's --resident-budget-gib
 // (the CYBER-FROST path's SAGUARO_EXPERT_RAM_GB does nothing here), the K/V window in VRAM is --kv-resident, and
 // several answers at once are the config's own "parallel" key (its driver turns that into the engine's --batch)
 function qfnFields(m, d, s, ch, gpus) {
   const mtp = m.choices.draft.includes("mtp");
-  const kv = QWEN_KV.find((f) => f.id === d.kv) || QWEN_KV[0];
+  const kv = QFN_KV.find((f) => f.id === d.kv) || QFN_KV[0];
   const kvb = engineKvBytes(m, ch, "kv");
   const win = Number(d.kv_resident) || 0;   // (the engine keeps this many positions of every layer's K/V in VRAM)
   const ec = AutoOr({label: "Expert cache", k: "expert_cache", d, dflt: 8000, unit: "experts", subLabel: "Experts in the GPU's pool"});
@@ -602,7 +555,7 @@ function qfnFields(m, d, s, ch, gpus) {
         below=${pf.below} warn=${whole(d.prefill) ? null : "A whole number, or Auto."}>${pf.ctl}<//>`,
       html`<${Row} label="KV cache" flag="--kv" changed=${ch("kv")}
         hint="The attention cache's format: INT8 the setup's, FP16 exact, K8 V4 and Q4_0 smaller - more VRAM for experts at long contexts.">
-        <${Seg} label="KV cache" value=${kv.id} options=${QWEN_KV.map((f) => ({id: f.id, label: f.label}))}
+        <${Seg} label="KV cache" value=${kv.id} options=${QFN_KV.map((f) => ({id: f.id, label: f.label}))}
           onChange=${(v) => setDraft({kv: v})}/><//>`]},
   ];
 }

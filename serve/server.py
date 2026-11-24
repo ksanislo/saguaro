@@ -7056,7 +7056,7 @@ def make_handler(svc: Service):
             elif path == "/health":
                 # the run config's recommended settings: the web app's Chat defaults until its user picks their own
                 rec = {k: v for k, v in svc.sampling_defaults.items() if k in ("temperature", "top_p", "top_k", "min_p")}
-                if svc.default_effort:   # (MiniMax's and Inkling's by their own names, CYBER-FROST's by Qwen's three)
+                if svc.default_effort:   # (MiniMax's and Inkling's by their own names, Qwen3.8's by its three)
                     named = getattr(svc.template, "minimax", False) or getattr(svc.template, "inkling", False)
                     rec["reasoning_effort"] = (effort_name if named else effort_level)(
                         svc.default_effort) or svc.default_effort
@@ -8626,7 +8626,7 @@ def main() -> int:
             svc.default_effort) or \
             (f"{svc.default_effort} of 100" if type(svc.default_effort) is int
                                                      else "none")
-        if getattr(svc.template, "forced_thinking", False):   # (CYBER-FROST: Qwen's words, low / medium / xhigh)
+        if getattr(svc.template, "forced_thinking", False):   # (a Qwen3.x template's own words: low / medium / xhigh)
             level = QWEN_EFFORT.get(level, level)
         if getattr(svc.template, "hy4", False):               # (Hy4-flash: the level it runs at, none / high)
             level = svc.template.effort_shown(svc.default_effort) or level

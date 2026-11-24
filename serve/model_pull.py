@@ -46,8 +46,8 @@ def catalog(root: Path, glm_sizes: dict | None = None, cards: list | None = None
     pc_cards, pc_ram = (cards, ram_gb or 0.0) if cards is not None else this_pc() if glm_sizes is None else ([], 0.0)
     cf = qfn_quants().get(Q.CYBER_FROST_QUANT) or {}     # (CYBER-FROST on saguaro-qfn, under the id it always had)
     cf_row = {"id": "cyber-frost", "family": "qfn", "name": Q.shown("qfn", Q.CYBER_FROST_QUANT),
-              "installed": ("qfn", Q.CYBER_FROST_QUANT) in have or ("qwen", "q5_k_m") in have,   # (not yet migrated:
-              "size_gb": cf.get("size_gb"), **qfn_fit(cf, pc_cards, pc_ram)}                      # the old install too)
+              "installed": ("qfn", Q.CYBER_FROST_QUANT) in have,   # (an old install too: family_of/config_key
+              "size_gb": cf.get("size_gb"), **qfn_fit(cf, pc_cards, pc_ram)}   # read its config as this quant)
     cf_row["needs"] = ("CYBER-FROST-3.8, Blackfrost-AI's fine-tune of Qwen3.8-Flash-Next, on its own engine "
                        "saguaro-qfn: " + cf_row["needs"])
     out.append(cf_row)
