@@ -1,8 +1,9 @@
 """tools/test_qfn_fit.py - Qwen3.8-Flash-Next on saguaro-qfn on a PC's cards: the files' sizes from the manifest,
-the K/V the configs keep in VRAM, the RAM tier, one card (Tesla T4, a 24 GB card, an RX 9070 XT) and the four-card
-layer split (the live 4x Tesla T4 configs' own values on their cards, an even split elsewhere), what does not fit,
-the live configs' tuning env by class (GENERIC everywhere, T4-ONLY on all-sm_75 cards, MULTI-GPU on a split,
-TOPOLOGY on a multi-socket CPU) and the CLI.  No GPU, no network.
+the K/V the configs keep in VRAM, the RAM tier (RAM - 20 never above the model's expert bytes, and none at all
+where the page cache holds the experts), one card (Tesla T4, a 24 GB card, an RX 9070 XT) and the four-card layer
+split (the live 4x Tesla T4 configs' own values on their cards, an even split elsewhere), what does not fit, the
+live configs' tuning env by class (GENERIC everywhere, T4-ONLY on all-sm_75 cards, MULTI-GPU on a split, TOPOLOGY
+on a multi-socket CPU) and the CLI.  No GPU, no network.
 
     python -m unittest tools.test_qfn_fit -v
 """
@@ -40,6 +41,12 @@ class Sizes(unittest.TestCase):
         self.assertAlmostEqual(F.kv_vram_gib(32768), 32768 * 12672 / F.GIB, delta=1e-9)     # ~0.4 GiB
         self.assertEqual(F.resident_budget_gib(91.7), 71)                                   # the 96 GB PC's tier
         self.assertEqual(F.resident_budget_gib(20.0), 8)
+        self.assertEqual(F.resident_budget_gib(220.0, "ud-q4_k_xl"), 103)                   # never over the experts
+        self.assertEqual(F.resident_budget_gib(91.7, "q8_0"), 71)                            # (a cap that is no cap)
+        self.assertTrue(F.page_cache_tier(252.0, "ud-q4_k_xl"))                              # the live 252 GB box:
+        self.assertTrue(F.page_cache_tier(252.0, "q8_0"))                                    #  file cache, no tier
+        self.assertFalse(F.page_cache_tier(91.7, "ud-q4_k_xl"))                              # the 96 GB box: tier
+        self.assertFalse(F.page_cache_tier(120.0, "ud-q4_k_xl"))                             # 104 + 20 > 120: tier
 
 
 class OneCard(unittest.TestCase):
@@ -48,7 +55,7 @@ class OneCard(unittest.TestCase):
         self.assertTrue(p["fits"], p["reason"])
         self.assertEqual((p["n_gpus"], p["layer_split"], p["context"]), (1, None, 65536))
         self.assertEqual(p["kv_resident"], 32768)
-        self.assertEqual(p["resident_budget_gib"], 200)
+        self.assertIsNone(p["resident_budget_gib"])                    # (220 GB: the page cache holds the experts)
         self.assertEqual(p["args"], F.GENERIC_ARGS + ["--prompt-cache", "64"])   # (generic + the T4 box's quant)
         self.assertTrue(p["t4"])                                   # sm_75: the live configs' tuning env applies
         self.assertIn("SAGUARO_KQL", p["env"])
@@ -65,7 +72,7 @@ class OneCard(unittest.TestCase):
         self.assertEqual({k for k in p["env"] if k.startswith(("SAGUARO_SM75", "SAGUARO_NUMA", "SAGUARO_SLOT_ADMIT"))},
                          set())                                      # (no T4 tuning, no NUMA keys, no split keys)
         self.assertEqual({k: v for k, v in p["env"].items() if k in F.GENERIC_ENV}, F.GENERIC_ENV)   # GENERIC
-        self.assertIn("108 GiB RAM tier", p["said"])                 # (128 GB of RAM less the 20 GB spare)
+        self.assertIn("OS file cache", p["said"])                    # (128 GB: the experts all fit in RAM, no tier)
 
     def test_a_16_gb_amd_card(self):
         p = F.plan([amd()], 91.7)                                  # (the RX 9070 XT with 96 GB: measured)
@@ -73,7 +80,7 @@ class OneCard(unittest.TestCase):
         self.assertTrue(p["measured"])
         self.assertFalse(p["t4"])
         self.assertEqual(p["env"], F.GENERIC_ENV)                    # (AMD: the GENERIC keys, and only those)
-        self.assertEqual(p["resident_budget_gib"], 71)               # (the tier the RX 9070 XT was measured with)
+        self.assertEqual(p["resident_budget_gib"], 71)               # (91.7 GB: the experts do NOT all fit: tier)
 
 
 class TooSmall(unittest.TestCase):
@@ -115,6 +122,7 @@ class FourT4(unittest.TestCase):
         self.assertIn("SAGUARO_SLOT_ADMIT_MULTI", p["env"])        # (MULTI-GPU: the split's pipelined reads)
         self.assertNotIn("SAGUARO_BATCH_READS_OVERTAKE", p["env"])   # (read nowhere: never written)
         self.assertNotIn("SAGUARO_PARK_STAGING_MIB", p["env"])
+        self.assertEqual(p["resident_budget_gib"], None)           # (220 GB: all experts in the page cache, as live)
 
     def test_the_live_split_q8_0(self):
         p = F.plan(t4s(4), 220.0, "q8_0")

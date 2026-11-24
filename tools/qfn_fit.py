@@ -107,10 +107,21 @@ def quant_gib(quant: str) -> float:
     return SIZES.get(quant, 0.0)
 
 
-def resident_budget_gib(ram_gb: float) -> int:
+def resident_budget_gib(ram_gb: float, quant: str | None = None) -> int:
     """--resident-budget-gib for a PC with `ram_gb` GiB of RAM: all but RAM_SPARE_GB (measured on 91.7 GiB: 71
-    answered 32% faster than 64 with 10.8 GiB still free; the engine takes no more than the experts)."""
-    return max(8, int(ram_gb - RAM_SPARE_GB))
+    answered 32% faster than 64 with 10.8 GiB still free; the engine takes no more than the experts), and never
+    more than the model's own expert bytes (its files, from the manifest)."""
+    tier = max(8, int(ram_gb - RAM_SPARE_GB))
+    experts = quant_gib(quant) if quant else 0.0
+    return min(tier, int(experts)) if experts > 0 else tier
+
+
+def page_cache_tier(ram_gb: float, quant: str) -> bool:
+    """True when the OS page cache can hold every expert with RAM_SPARE_GB still untouched - then no pinned tier is
+    written and the file cache IS the tier, which is what the live 252 GB box runs (./ref/live-*.json carry no
+    --resident-budget-gib); the engine reads the experts through the cache and needs no budget to say so."""
+    experts = quant_gib(quant)
+    return bool(experts) and bool(ram_gb) and experts + RAM_SPARE_GB <= ram_gb
 
 
 def kv_vram_gib(kv_resident: int = KV_RESIDENT) -> float:
@@ -242,7 +253,9 @@ def plan(cards: list, ram_gb: float, quant: str = "ud-q4_k_xl", cpu: dict | None
     split = layer_split(cards, quant) if why is None else None
     ctx = DEFAULT_CONTEXT if n <= 1 else SPLIT_CONTEXT
     t4 = sm75_only(cards)
-    budget = resident_budget_gib(ram_gb) if ram_gb else None
+    # --resident-budget-gib: a pinned tier of RAM - 20 (never above the model's expert bytes) only while the page
+    # cache cannot hold the experts; when it can, no tier: the file cache is it, as the live 252 GB box runs it.
+    budget = resident_budget_gib(ram_gb, quant) if ram_gb and not page_cache_tier(ram_gb, quant) else None
     live = bool(split) and split in set(MEASURED_SPLITS.values())        # a live 4x Tesla T4 config's split
     args = ([] if n <= 1 else
             ["--trim-stage-weights", "--prefill-pipe", MEASURED_PREFILL_PIPE.get(quant, "1") if live else "1"])
@@ -256,9 +269,11 @@ def plan(cards: list, ram_gb: float, quant: str = "ud-q4_k_xl", cpu: dict | None
     amd = str((cards[0] if cards else {}).get("arch") or "").startswith("gfx")
     measured = why is None and ((live and sm75_only(cards)) or
                                 (n == 1 and amd and t4_sized(cards[0]) and ram_gb >= 90.0))
+    tier_said = ("the next ones read through the OS file cache, the experts all fitting in RAM"
+                 if page_cache_tier(ram_gb, quant) else
+                 f"the next ones in a {budget if budget is not None else 'RAM - 20'} GiB RAM tier, the rest from the SSD")
     said = ("no cards named" if not cards else
-            f"one card: the experts it holds in VRAM, the next ones in a {budget if budget is not None else 'RAM - 20'} "
-            f"GiB RAM tier, the rest from the SSD, a {ctx // 1024}K context" if n <= 1 else
+            f"one card: the experts it holds in VRAM, {tier_said}, a {ctx // 1024}K context" if n <= 1 else
             f"{n} cards: the {LAYERS} layers split across them ({split}), each caching its own layers' experts, "
             f"a {ctx // 1024}K context")
     return {"fits": why is None, "reason": why, "gpus": list(cards), "n_gpus": n, "layer_split": split,

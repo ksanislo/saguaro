@@ -7459,6 +7459,14 @@ def qfn_ram_budget(ram: float) -> int:
     return max(8, int(ram - QFN_RAM_SPARE_GB))
 
 
+def qfn_ram_said(lay: dict) -> str:
+    """The tier's phrase in the setup's layout line: the pinned RAM tier and the SSD below it, or the OS file cache
+    when all the experts fit in RAM and no --resident-budget-gib is written (qfn_fit's page_cache_tier)."""
+    b = lay["resident_budget_gib"]
+    return (f"{b} GB of RAM the next ones, the SSD the rest" if b is not None
+            else "the OS file cache the rest (all of them fit in RAM)")
+
+
 def qfn_cpu_info() -> dict:
     """The PC's CPU as qfn_fit's plan reads it: {"sockets": the packages, "cores": the physical cores across them} -
     /sys on Linux (one socket, or a PC without /sys: the TOPOLOGY keys and --pool-workers stay unwritten, the engine
@@ -7509,8 +7517,12 @@ def write_config_qfn(a, pc: dict, meta: dict, quant: str, files: list, pack: Pat
     if mtp is not None:
         args += ["--mtp", str(mtp)]
     args += ["--max-context", str(ctx), "--kv", "int8", "--kv-resident", str(min(ctx, 32768)),
-             "--vram-reserve-mib", "700", "--session-dir", str(var / "sessions"),
-             "--resident-budget-gib", str(qfn_ram_budget(ram))]
+             "--vram-reserve-mib", "700", "--session-dir", str(var / "sessions")]
+    if lay["resident_budget_gib"] is not None:         # (a pinned RAM tier: RAM - 20, never more than the model's
+                                                       #  own expert bytes; when the page cache holds all of them
+                                                       #  with the spare untouched there is no tier and the flag
+                                                       #  stays out, as on the live 252 GB box)
+        args += ["--resident-budget-gib", str(lay["resident_budget_gib"])]
     args += lay["args"]                                # (the live configs' tuning by class: the conversation cache
                                                        #  every PC gets, the split's pipelined reads and stage
                                                        #  pools, the quant's --prompt-cache, --pool-workers on a
@@ -7602,12 +7614,11 @@ def set_up_qfn(a, prev: dict) -> Path | None:
         ok(f"{QFN_SHOWN} on AMD: measured on an RX 9070 XT (gfx1201) with 96 GB of RAM (27-41 tok/s answers, "
            "520-1,080 tok/s 8K-16K prompt reads) - tell us how it goes on yours" +
            ("" if m.get("measured") else f"; {Q.QFN_QUANTS[quant]} is not measured on AMD yet"))
-        ok(f"the GPU holds the most-used experts, {qfn_ram_budget(ram)} GB of RAM the next ones, the SSD the rest")
+        ok(f"the GPU holds the most-used experts, {qfn_ram_said(lay)}")
     else:
         ok(f"layout: {lay['said']}" + (" - the live 4x Tesla T4 server's own split"
                                        if lay["measured"] else " (not measured on these cards yet)"))
-        ok(f"the cards hold the most-used experts of their layers, {lay['resident_budget_gib']} GB of RAM the next "
-           "ones, the SSD the rest")
+        ok(f"the cards hold the most-used experts of their layers, {qfn_ram_said(lay)}")
     ctx = choose_context(a, prev_ctx, QFN_CONTEXTS, QFN_DEFAULT_CONTEXT if hip else lay["context"])
     ok(f"context: {ctx} tokens" + (" (recommended)" if ctx == (QFN_DEFAULT_CONTEXT if hip else lay["context"]) else ""))
     models = (Path(a.models_dir).expanduser().resolve() if a.models_dir else
