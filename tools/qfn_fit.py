@@ -372,8 +372,8 @@ def plan(cards: list, ram_gb: float, quant: str = "ud-q4_k_xl", cpu: dict | None
     handed in -
     best_gpus() picks those, plan() lays them out; nothing is read from the hardware (the CPU's socket/core counts
     come in as `cpu` - saguaro.py's qfn_cpu_info reads them from /sys)."""
-    why = (f"Qwen3.8-Flash-Next on saguaro-qfn runs on one GPU of 16 GB or more, or up to {MAX_GROUP} equal ones: "
-           "no cards were named") if not cards else unsupported(cards, ram_gb, quant)
+    why = ("Qwen3.8-Flash-Next on saguaro-qfn runs on one GPU, or up to " + str(MAX_GROUP) +
+           " equal ones splitting the layers: no cards were named") if not cards else unsupported(cards, ram_gb, quant)
     # v1.2.1-B: between the minimum (unsupported) and the comfortable layout (comfortable) the setup scales the
     # layout down - drafting off, a smaller --kv-resident, a context that fits - says what it turned off and asks
     # for a loud confirmation; it does not refuse what can run.
