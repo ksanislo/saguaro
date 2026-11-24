@@ -1286,12 +1286,6 @@ if(MAYA_ENABLE_CUDA OR MAYA_ENABLE_HIP)
   target_link_libraries(s_gemv_q8k_parity PRIVATE maya_kernels ${_maya_gpu_runtime_target})
   add_test(NAME s_gemv_q8k_parity COMMAND s_gemv_q8k_parity --selftest)
 
-  # Plan v0.3 P7: INT8 KV storage vs a host reference and vs the FP16 path (GPU, synthetic, no model).
-  add_executable(kv_q8_parity src/kernels/kv_q8_parity.cpp)
-  target_include_directories(kv_q8_parity PRIVATE ${_maya_gpu_include_directories})
-  target_link_libraries(kv_q8_parity PRIVATE maya_kernels ${_maya_gpu_runtime_target})
-  add_test(NAME kv_q8_parity COMMAND kv_q8_parity)
-
   # PR #21: Q4_0 KV with Walsh-Hadamard rotation vs a host reference (GPU, synthetic, no model).
   add_executable(kv_q4_parity src/kernels/kv_q4_parity.cpp)
   target_include_directories(kv_q4_parity PRIVATE ${_maya_gpu_include_directories})
