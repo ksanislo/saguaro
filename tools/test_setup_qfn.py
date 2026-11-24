@@ -228,6 +228,139 @@ class GsqQuants(unittest.TestCase):
                 self.assertIn(f"{stem}-00002-of-00002.gguf", out)
 
 
+class PascalBuild(unittest.TestCase):
+    """U8 step 2: the P40 build line. An sm_61 card builds with CUDA 12.x (nvcc_range, test_maya_pascal) and a host
+    g++ that toolkit accepts: NVIDIA's supported-matrix stops CUDA 12.0 - 12.3 at gcc 12, so on a PC whose default
+    g++ is newer the setup tries g++-12 first (the P40's hand-made build used gcc-12 / g++-12 for C, C++ and CUDA's
+    host code alike) and names the package to install when none fits. compile_engine for QFN_TARGET then writes the
+    cmake line; the top CMakeLists turns an all-below-sm_75 arch list into engines/qfn's -DSTRATA_EXPERIMENTAL_SM60=ON."""
+
+    def test_the_cuda_gcc_matrix(self):
+        self.assertEqual(maya.cuda_gcc_max((12, 0)), 12)
+        self.assertEqual(maya.cuda_gcc_max((12, 3)), 12)
+        self.assertEqual(maya.cuda_gcc_max((12, 4)), 13)
+        self.assertEqual(maya.cuda_gcc_max((12, 8)), 14)
+        self.assertIsNone(maya.cuda_gcc_max((13, 0)))         # (no ceiling pinned: the probe tries)
+        self.assertIsNone(maya.cuda_gcc_max(None))
+
+    def test_the_host_order(self):
+        base = [None, "g++-14", "g++-13", "g++-12"]           # (the default g++ first, then installed g++-N)
+        with patch.object(maya, "gcc_major", lambda: 14):
+            self.assertEqual(maya.host_order(base, (12, 0)), ["g++-12", None, "g++-14", "g++-13"])
+            self.assertEqual(maya.host_order(base, (12, 4)), ["g++-13", None, "g++-14", "g++-12"])
+            self.assertEqual(maya.host_order(base, (13, 0)), base)
+        with patch.object(maya, "gcc_major", lambda: 12):
+            self.assertEqual(maya.host_order(base, (12, 0)), base)          # (the default fits: as installed)
+        with patch.object(maya, "gcc_major", lambda: 14):
+            self.assertEqual(maya.host_order([None, "g++-14"], (12, 0)), [None, "g++-14"])   # (nothing fitting)
+
+    def test_the_install_hint_names_the_package(self):
+        with patch.object(maya, "gcc_major", lambda: 14), \
+                patch.object(maya, "gpp_versions", lambda: ["g++-14", "g++-13"]):
+            self.assertIn("sudo apt-get install -y g++-12", maya.missing_gpp_hint([("/usr/bin/nvcc", (12, 0))]))
+        with patch.object(maya, "gcc_major", lambda: 14), patch.object(maya, "gpp_versions", lambda: ["g++-12"]):
+            self.assertEqual(maya.missing_gpp_hint([("/usr/bin/nvcc", (12, 0))]), "")    # (installed: nothing to say)
+
+    def test_toolchain_picks_gpp12_over_the_default_gpp14(self):
+        """The P40 box of the plan: CUDA 12.0's nvcc, default g++ 14, g++-12 installed. The probe starts at g++-12
+        and that pair is taken - the default g++ is not even tried (nvcc would only answer 'unsupported GNU
+        version')."""
+        probes = []
+
+        def fake_run(cmd, **kw):
+            probes.append(cmd)
+            return SimpleNamespace(returncode=0 if any(str(x).endswith("g++-12") for x in cmd) else 1)
+
+        quiet = [patch.object(maya, n, lambda *x, **k: None) for n in ("say", "ok", "warn")]
+        for q_ in quiet:
+            q_.start()
+        try:
+            with patch.object(maya, "nvcc_candidates", lambda: [str(Path(maya.__file__))]), \
+                    patch.object(maya.S, "nvcc_version", lambda c: (12, 0)), \
+                    patch.object(maya, "gcc_major", lambda: 14), \
+                    patch.object(maya, "gpp_versions", lambda: ["g++-14", "g++-13", "g++-12"]), \
+                    patch.object(maya.shutil, "which", lambda n: f"/usr/bin/{n}"), \
+                    patch("subprocess.run", side_effect=fake_run):
+                self.assertEqual(maya.toolchain_for([61], None, None), (str(Path(maya.__file__)), "g++-12"))
+        finally:
+            for q_ in quiet:
+                q_.stop()
+        self.assertIn("/usr/bin/g++-12", probes[0])            # (the first probe already uses it)
+        self.assertEqual(len(probes), 1)                       # (no wasted round on the default g++ or g++-14)
+
+    def test_toolchain_says_which_package_to_install(self):
+        """The same box without g++-12: nothing compiles, and the closing line says to install it."""
+        said = []
+
+        def fake_run(cmd, **kw):
+            return SimpleNamespace(returncode=1)
+
+        quiet = [patch.object(maya, n, lambda *x, **k: None) for n in ("say", "ok")]
+        for q_ in quiet:
+            q_.start()
+        try:
+            with patch.object(maya, "nvcc_candidates", lambda: [str(Path(maya.__file__))]), \
+                    patch.object(maya.S, "nvcc_version", lambda c: (12, 0)), \
+                    patch.object(maya, "gcc_major", lambda: 14), \
+                    patch.object(maya, "gpp_versions", lambda: ["g++-14", "g++-13"]), \
+                    patch.object(maya.shutil, "which", lambda n: f"/usr/bin/{n}"), \
+                    patch.object(maya, "warn", side_effect=lambda *x: said.append(" ".join(map(str, x)))), \
+                    patch("subprocess.run", side_effect=fake_run):
+                nvcc, hc = maya.toolchain_for([61], None, None)
+        finally:
+            for q_ in quiet:
+                q_.stop()
+        self.assertEqual(hc, None)                             # (nothing better than the default to hand)
+        self.assertTrue(any("sudo apt-get install -y g++-12" in s for s in said), said)
+
+    def test_the_p40_qfn_cmake_line(self):
+        """compile_engine for saguaro-qfn on the sm_61 card with CUDA 12.0's nvcc and the g++-12 it takes: arch 61,
+        the QFN target, and one host compiler named for nvcc, C and C++ (the P40 build recipe; engines/qfn's
+        ExternalProject inherits it from the top project)."""
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t)
+            build, stamp = root / "build", root / "build" / "MAYA-BUILD.json"
+            build.mkdir()
+            got = []
+
+            def fake_steps(conf, build_cmd, env, bat, nvcc=None):
+                got.extend([conf, build_cmd])
+                return None
+
+            quiet = [patch.object(maya, n, lambda *x, **k: None) for n in ("say", "ok")]
+            for q_ in quiet:
+                q_.start()
+            try:
+                with patch.object(maya, "BUILD", build), patch.object(maya, "STAMP", stamp), \
+                        patch.object(maya, "pick_cmake", return_value="cmake"), \
+                        patch.object(maya, "cached_generator", return_value=None), \
+                        patch.object(maya, "venv_tool", return_value=None), \
+                        patch.object(maya, "toolkit_root_defs", return_value=[]), \
+                        patch.object(maya, "cuda_lib_dirs", return_value=[]), \
+                        patch.object(maya, "mem_gb", return_value=(31.0, 24.0)), \
+                        patch.object(maya.shutil, "which",
+                                     lambda n: f"/usr/bin/{n}" if n in ("gcc-12", "g++-12") else None), \
+                        patch.object(maya, "cmake_steps", side_effect=fake_steps):
+                    meta = maya.compile_engine([61], [0], "/usr/bin/nvcc", "g++-12", root / "llama", "src-sha",
+                                               target=maya.QFN_TARGET)
+            finally:
+                for q_ in quiet:
+                    q_.stop()
+        conf, build_cmd = got
+        for want in ("-DCMAKE_CUDA_ARCHITECTURES=61", "-DSAGUARO_QFN=ON", "-DCMAKE_CUDA_COMPILER=/usr/bin/nvcc",
+                     "-DCMAKE_CUDA_HOST_COMPILER=/usr/bin/g++-12", "-DCMAKE_C_COMPILER=/usr/bin/gcc-12",
+                     "-DCMAKE_CXX_COMPILER=/usr/bin/g++-12"):
+            self.assertIn(want, conf)
+        self.assertNotIn("-DCUDAToolkit_ROOT=/usr", conf)      # (the distribution's nvcc: CMake's own search)
+        self.assertEqual(build_cmd[build_cmd.index("--target") + 1], maya.QFN_TARGET)
+        self.assertEqual(meta["host_compiler"], "g++-12")
+        # engines/qfn's Pascal switch rides with it: the top CMakeLists gives the external project
+        # STRATA_EXPERIMENTAL_SM60=ON when every arch is below sm_75 (and only then)
+        top = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
+        self.assertIn("if(_qfn_old AND NOT _qfn_new)", top)
+        self.assertIn("-DSTRATA_EXPERIMENTAL_SM60=ON", top)
+
+
 class Offered(unittest.TestCase):
     def test_amd_and_nvidia_offer_it_metal_refuses(self):
         self.assertIsNone(maya.family_unavailable("qfn", "hip"))
