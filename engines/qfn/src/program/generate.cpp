@@ -1206,11 +1206,9 @@ void extra_sources_append(const int32_t* t, size_t n) {
     for (auto& src : strata::spec::extra_draft_sources()) src->append(t, n);
 }
 
-// PLAN-turbo-live: the per-request lossy options on the request line: `turbo_drop=N` (run top-k minus N experts:
-// drop the N lowest router weights and renormalise the kept ones) and `turbo_skip=off|ssd|ram` (ssd: drop an
-// expert that would be read from SSD, VRAM and RAM still serve; ram: drop an expert not in VRAM).  Absent = off:
-// the request is exact, the line and its behavior are today's.  Parsed here and stored per slot/sequence; the
-// engine that does not apply one yet says so once, per request, and runs that request exact.
+// PLAN-turbo-live: the per-request lossy options on the request line: `turbo_drop=N` (the reply's decode windows route
+// with the top-k minus N experts, renormalised: SessionState::turbo_drop, native_router.hpp) and `turbo_skip` (not
+// applied by this engine: skip stays off).  Absent = off: the request is exact.
 struct Turbo {
     int drop = 0;     // 0 = off, else 1..9 (the router's k is 10)
     int skip = 0;     // 0 off, 1 ssd, 2 ram
@@ -1221,8 +1219,21 @@ void turbo_key(Turbo& t, const std::string& key, const char* val) {
     if (key == "turbo_drop") t.drop = std::clamp(std::atoi(val), 0, 9);
     else if (key == "turbo_skip") t.skip = std::string(val) == "ram" ? 2 : std::string(val) == "ssd" ? 1 : 0;
 }
-std::string turbo_said(const Turbo& t) {
-    return "turbo drop=" + std::to_string(t.drop) + " skip=" + t.skip_name();
+/// The drop a request's reply routes with: SAGUARO_ROUTE_PRIOR / SAGUARO_ROUTE_RESIDENT re-pick the top-10 after the router,
+/// which would undo it, so with either on the request runs exact (said once).
+int turbo_drop_of(const Turbo& t) {
+    static const bool repick = [] {
+        const char* a = std::getenv("SAGUARO_ROUTE_PRIOR");
+        const char* b = std::getenv("SAGUARO_ROUTE_RESIDENT");
+        return (a && std::atof(a) > 0.0) || (b && std::atof(b) > 0.0);
+    }();
+    if (t.drop > 0 && repick) {
+        static bool said = false;
+        if (!said) std::fprintf(stderr, "saguaro serve: turbo drop is off beside SAGUARO_ROUTE_PRIOR / SAGUARO_ROUTE_RESIDENT\n");
+        said = true;
+        return 0;
+    }
+    return t.drop;
 }
 
 bool parse_i64_list(const char* s, std::vector<int64_t>& out, std::string& err) {
@@ -12895,6 +12906,11 @@ int main(int argc, char** argv) {
             Turbo turbo;
         };
         std::vector<BSlot> bs((size_t) std::max(o.batch, 0));
+        // PLAN-turbo-live: slot b's rows route with `drop` (every stage's session of the slot; 0: exact)
+        auto slot_turbo = [&](int b, int drop) {
+            for (auto& v : bslot_ss)
+                if (b >= 0 && (size_t) b < v.size() && v[(size_t) b]) v[(size_t) b]->turbo_drop = drop;
+        };
         // an admission beside the slots, at its first token: one line with where its time went
         auto adm_first = [&](int b) {
             BSlot& sl = bs[(size_t) b];
@@ -14554,6 +14570,7 @@ int main(int argc, char** argv) {
             }
             // read: the slot decodes from here as one admitted through the prompt path would
             sl.lane = false;
+            slot_turbo(b, turbo_drop_of(sl.turbo));
             sl.lane_ids.clear();
             sl.lane_ids.shrink_to_fit();
             sl.adm_read_ms = ms;
@@ -16542,9 +16559,7 @@ int main(int argc, char** argv) {
             sl.p = n - 1;
             sl.max_new = j.r.max_new;
             sl.turbo = j.r.turbo;
-            if (!sl.turbo.off())
-                std::fprintf(stderr, "saguaro batch: slot %d: %s asked for - this engine build does not apply it yet; "
-                                     "the request runs exact\n", b, turbo_said(sl.turbo).c_str());
+            slot_turbo(b, turbo_drop_of(sl.turbo));
             sl.t0 = Clock::now();
             sl.ids.assign(ids.begin(), ids.end() - 1);
             sl.cvec = cvec_cached;
@@ -16728,9 +16743,7 @@ int main(int argc, char** argv) {
             sl.ids.assign(sl.lane_ids.begin(), sl.lane_ids.begin() + resume);
             sl.max_new = r.max_new;
             sl.turbo = r.turbo;
-            if (!sl.turbo.off())
-                std::fprintf(stderr, "saguaro batch: slot %d: %s asked for - this engine build does not apply it yet; "
-                                     "the request runs exact\n", b, turbo_said(sl.turbo).c_str());
+            slot_turbo(b, 0);   // (its prompt is read through the windows: exact; the drop starts with its reply)
             sl.t0 = Clock::now();
             sl.cvec = cvec_cached;
             sl.adm_log = true;
@@ -17241,9 +17254,7 @@ int main(int argc, char** argv) {
                 sl.p = n - 1;
                 sl.max_new = j.r.max_new;
                 sl.turbo = j.r.turbo;
-                if (!sl.turbo.off())
-                    std::fprintf(stderr, "saguaro batch: slot %d: %s asked for - this engine build does not apply it yet; "
-                                         "the request runs exact\n", b, turbo_said(sl.turbo).c_str());
+                slot_turbo(b, turbo_drop_of(sl.turbo));
                 sl.t0 = Clock::now();
                 sl.ids.assign(ids.begin(), ids.end() - 1);
                 sl.cvec = cvec_cached;
@@ -18750,9 +18761,9 @@ int main(int argc, char** argv) {
                 std::printf("ERR bad request: %s\n", pe.empty() ? "max_new" : pe.c_str());
                 continue;
             }
-            if (admit_slot < 0 && !req_turbo.off())   // a solo request's own line (a batch slot says it at its admission)
-                std::fprintf(stderr, "saguaro serve: %s asked for - this engine build does not apply it yet; the request "
-                                     "runs exact\n", turbo_said(req_turbo).c_str());
+            if (req_turbo.skip != 0)
+                std::fprintf(stderr, "saguaro serve: turbo skip=%s asked for - this engine applies only drop; skip is off\n",
+                             req_turbo.skip_name());
             const int64_t n = (int64_t) ids.size();
             req_imgs.clear();
             if (geni && !o.vision) { std::printf("ERR this engine was started without --vision\n"); continue; }
@@ -19953,6 +19964,7 @@ int main(int argc, char** argv) {
                     if (can && copy_to_slot(ys, pre, ye)) {
                         BSlot& sl = bs[(size_t) ys];
                         sl = BSlot{};
+                        slot_turbo(ys, 0);
                         sl.ids = std::move(pre);
                         sl.cached = true;
                         sl.partial = true;
@@ -21075,6 +21087,14 @@ int main(int argc, char** argv) {
             const int64_t decode_look0 = drive.d.cache_hits + drive.d.cache_admitted + drive.d.cache_refused;
             const int64_t offload0 = drive.d.offload_entries;   // #588
             pcie_auto.mark(drive.d.ms_run, drive.d.multi_misses);   // the prompt's windows are not the decode's
+            // PLAN-turbo-live: the reply's windows route with this request's drop (every stage's session), off again after
+            struct SoloTurbo {
+                std::vector<strata::core::SessionState*> sx;
+                ~SoloTurbo() { for (auto* u : sx) u->turbo_drop = 0; }
+            } solo_turbo;
+            solo_turbo.sx.push_back(&ss);
+            for (auto& st : stages) solo_turbo.sx.push_back(&st->ss);
+            for (auto* u : solo_turbo.sx) u->turbo_drop = turbo_drop_of(req_turbo);
             if (cancelled) finish = nf_hit ? "nonfinite" : read_vram ? "vram" : "cancel";
             // ======== --pipeline-windows 2: the decode windows with the two cards overlapped ========
             // Stage 0 (the first card) runs window K+1 while stage 1 verifies window K, on the guess that K is accepted
@@ -22326,9 +22346,7 @@ int main(int argc, char** argv) {
                     sl.produced = 1;
                     sl.max_new = admit_max_new;
                     sl.turbo = req_turbo;
-                    if (!sl.turbo.off())
-                        std::fprintf(stderr, "saguaro batch: slot %d: %s asked for - this engine build does not apply it "
-                                             "yet; the request runs exact\n", admit_slot, turbo_said(sl.turbo).c_str());
+                    slot_turbo(admit_slot, turbo_drop_of(sl.turbo));
                     sl.t0 = Clock::now();
                     sl.ids = live;
                     if (batch_mtp) {

@@ -48,9 +48,11 @@ __global__ void combine(const float* __restrict__ parts, const float* __restrict
     if (ZADD) p0 = 0.0f + p0;
     float sum = p0 * weights[0];
     for (int expert = 1; expert < k; ++expert) {
+        const float w = weights[expert];
+        if (w == 0.0f) continue;   // a Turbo-dropped pick: its row is never read (it may hold anything)
         float p = parts[int64_t(expert) * n_embd + col];
         if (ZADD) p = 0.0f + p;
-        sum += p * weights[expert];
+        sum += p * w;
     }
     if constexpr (GATED) {
         // contraction off in this block only: the product is rounded on its own (scale_rows' store), then added
@@ -79,6 +81,7 @@ __global__ void combine_k10_vec4(const float4* __restrict__ parts4, const float*
 #pragma unroll
     for (int expert = 1; expert < 10; ++expert) {
         const float w = __ldg(weights + expert);
+        if (w == 0.0f) continue;   // a Turbo-dropped pick
         const float4 p = parts4[int64_t(expert) * n4 + c4];
         // the documented contract spelled out: the first product rounded, then one FMA per expert in order. Left to the
         // compiler's contraction, a build may fuse a different product (gfx1151: the float4 kernel then differed from the
@@ -124,6 +127,7 @@ __global__ void combine_k10_vec4_hits(const float4* __restrict__ parts4, const f
 #pragma unroll
     for (int expert = 1; expert < 10; ++expert) {
         const float w = __ldg(weights + expert);
+        if (w == 0.0f) continue;   // a Turbo-dropped pick
         float4 p = parts4[int64_t(expert) * n4 + c4];
         if ((mask >> expert) & 1) { const float4 hh = hits4[int64_t(expert) * n4 + c4]; p.x += hh.x; p.y += hh.y; p.z += hh.z; p.w += hh.w; }
         sum.x = fmaf(p.x, w, sum.x);

@@ -65,6 +65,7 @@ struct SessionState {
     /// SAGUARO_YARN_ELASTIC per conversation: the RoPE level its K/V holds (0 plain, 1 YaRN: its rotary positions are
     /// passed offset by kRopeYarnOff).  Checkpoints carry it; a fresh conversation starts at 0.
     int rope_level = 0;
+    int turbo_drop = 0;   // PLAN-turbo-live: this conversation's Turbo drop on its decode windows (0: exact)
     /// SAGUARO_KV_HOST_ELASTIC: a state outside the session whose host copy grows and shrinks with it (the slot's drafter)
     const QsaState* host_follow = nullptr;
     /// The doorbell the host loop polls.  Null until a caller provides one - the engine runs without it, and

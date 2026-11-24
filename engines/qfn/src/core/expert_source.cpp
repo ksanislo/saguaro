@@ -4823,10 +4823,24 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
     pt("begin");
     d.src->begin_layer(d.layers, ids, n_tok * k);
     pt("begun");
+    // PLAN-turbo-live: a request's dropped pick is its row's top-1 again at weight 0 (native_router.hpp): such a repeat
+    // within a token is neither planned, computed, nor counted - its row is zero (a router never repeats a pick)
+    bool tdup[kMaxWindowEntries];
+    const bool any_tdup = n_tok * k <= kMaxWindowEntries && [&] {
+        bool any = false;
+        for (int64_t i = 0; i < n_tok * k; ++i) {
+            tdup[i] = false;
+            for (int64_t j = i - i % k; j < i; ++j)
+                if (ids[j] == ids[i]) { tdup[i] = any = true; break; }
+        }
+        return any;
+    }();
+    auto dropped = [&](int64_t i) { return any_tdup && tdup[i]; };
     std::vector<float>& usage = d.usage_into != nullptr ? *d.usage_into : d.usage;
     if (!usage.empty())
         for (int64_t i = 0; i < n_tok * k; ++i)
-            if (ids[i] >= 0 && ids[i] < d.n_expert) usage[(size_t) d.layers * (size_t) d.n_expert + (size_t) ids[i]] += 1.0f;
+            if (ids[i] >= 0 && ids[i] < d.n_expert && !dropped(i))
+                usage[(size_t) d.layers * (size_t) d.n_expert + (size_t) ids[i]] += 1.0f;
     // ---- plan v0.3 P6: the GPU's share, decided and published FIRST so the GPU starts while the CPU works.
     // Distinct experts in routing order; resident ones and the last pcie_num/256 of the missed ones go to the GPU.
     const int64_t n = n_tok * k;
@@ -4844,9 +4858,10 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
             return false;
         };
         for (int64_t i = 0; i < n; ++i) {
+            if (dropped(i)) { first_of[i] = -1; kind[i] = -3; continue; }
             first_of[i] = i;
             for (int64_t j = 0; j < i; ++j)
-                if (ids[j] == ids[i]) { first_of[i] = first_of[j]; break; }
+                if (ids[j] == ids[i] && !dropped(j)) { first_of[i] = first_of[j]; break; }
             if (first_of[i] == i) {
                 distinct[nd++] = i;
                 const int32_t e = ids[i];
@@ -4965,6 +4980,7 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
     } else {
         for (int64_t i = 0; i < n; ++i) {
             const int32_t e = ids[i];
+            if (dropped(i)) { kind[i] = -3; continue; }
             kind[i] = (e >= 0 && e < d.n_expert && d.host_res != nullptr &&
                        d.host_res[(size_t) d.layers * (size_t) d.n_expert + (size_t) e] >= 0) ? 0
                     : (e >= 0 && e < d.n_expert && d.peer != nullptr && d.peer->has(d.layers, e)) ? 2 : -1;
@@ -5069,6 +5085,10 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
             if (!first_pass && (e < 0 || e >= d.n_expert || kind[i] != -1 || !take(e, want)))
                 continue;   // a later batch: only the CPU entries of the experts that just landed
             if (first_pass && kind[i] == -1 && e >= 0 && e < d.n_expert && !take(e, 0)) continue;   // being read: a later batch
+            if (kind[i] == -3) {            // a Turbo-dropped pick: zero, no work
+                if (first_pass) std::memset(row, 0, (size_t) H * sizeof(float));
+                continue;
+            }
             if (e < 0 || e >= d.n_expert) {
                 d.failed = true;
                 d.fail = "a routed expert id is out of range";

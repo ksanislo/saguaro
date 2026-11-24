@@ -1287,6 +1287,7 @@ __global__ void __launch_bounds__(kResidentPlanMax) resident_plan_kernel(const i
                                      long long blob, int32_t* __restrict__ pl, long long capx, uint32_t* skip,
                                      uint32_t ring, volatile uint32_t* plan_err) {
     __shared__ int32_t s_ids[kResidentPlanMax];
+    __shared__ bool s_drp[kResidentPlanMax];
     __shared__ int32_t s_excl[kResidentPlanMax];
     __shared__ int32_t s_wsum[4];
     __shared__ int s_bad;
@@ -1300,7 +1301,15 @@ __global__ void __launch_bounds__(kResidentPlanMax) resident_plan_kernel(const i
         eid = ids[tid];
         s_ids[tid] = eid;
         slot = (eid >= 0 && eid < n_expert) ? res[eid] : -1;
-        if (slot < 0) atomicOr(&s_bad, 1);
+    }
+    __syncthreads();
+    // PLAN-turbo-live: a pick repeated within its token is a dropped one (the top-1 at weight 0): not planned
+    bool drp = false;
+    if (tid < n) {
+        for (int j = tid - tid % k; j < tid; ++j)
+            if (s_ids[j] == eid) { drp = true; break; }
+        s_drp[tid] = drp;
+        if (!drp && slot < 0) atomicOr(&s_bad, 1);
     }
     __syncthreads();
     if (s_bad) {
@@ -1315,16 +1324,16 @@ __global__ void __launch_bounds__(kResidentPlanMax) resident_plan_kernel(const i
     int first_j = tid;
     int rank_in_group = 0;
     int count_same = 0;
-    if (tid < n) {
+    if (tid < n && !drp) {
         for (int j = 0; j < n; ++j) {
-            if (s_ids[j] == eid) {
+            if (s_ids[j] == eid && !s_drp[j]) {
                 if (j < first_j) first_j = j;
                 if (j < tid) ++rank_in_group;
                 ++count_same;
             }
         }
     }
-    const bool is_first = (tid < n && first_j == tid && slot >= 0);
+    const bool is_first = (tid < n && !drp && first_j == tid && slot >= 0);
     const int my_cnt = is_first ? count_same : 0;
     const int my_pack = (my_cnt << 16) | (is_first ? 1 : 0);
     const int lane = tid & 31;
@@ -1360,7 +1369,7 @@ __global__ void __launch_bounds__(kResidentPlanMax) resident_plan_kernel(const i
         ptr[grp_idx] = (unsigned long long) (cache_base + (slot_off ? (size_t) slot_off[slot] : (size_t) slot * (size_t) blob));
         start[grp_idx] = ent_start;
     }
-    if (tid < n) {
+    if (tid < n && !drp) {
         const int fj_warp = first_j >> 5;
         int fj_tot = s_excl[first_j];
 #pragma unroll
@@ -1372,11 +1381,12 @@ __global__ void __launch_bounds__(kResidentPlanMax) resident_plan_kernel(const i
         tok[out_idx] = tid / k;
     }
     if (tid == 0) {
-        const int groups = (s_wsum[0] + s_wsum[1] + s_wsum[2] + s_wsum[3]) & 0xffff;
-        start[groups] = n;
-        start2[0] = n;
+        const int tot = s_wsum[0] + s_wsum[1] + s_wsum[2] + s_wsum[3];
+        const int groups = tot & 0xffff, entries = tot >> 16;   // (n when nothing is dropped)
+        start[groups] = entries;
+        start2[0] = entries;
         counts[0] = groups;
-        counts[1] = n;
+        counts[1] = entries;
         counts[2] = 0;
         if (skip != nullptr) {
             __threadfence();
