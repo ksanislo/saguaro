@@ -1,11 +1,13 @@
 """serve/test_update.py - About > Updates: the version compare, the release summary, which folders may update themselves,
 and the update itself (a fast-forward to the release's tag, then the server's exit for saguaro.py) - against a throwaway
-git "origin" with two releases, nothing from the network.
+git "origin" with two releases, nothing from the network.  The mocked answers: a newer tag offers the update, a 404 says
+no releases yet, and offline / 403 / 5xx say GitHub could not be reached.
 
     python -m unittest serve.test_update -v
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -13,6 +15,7 @@ import sys
 import tempfile
 import threading
 import unittest
+import urllib.error
 from pathlib import Path
 from unittest import mock
 
@@ -53,9 +56,56 @@ class Pieces(unittest.TestCase):
             info = u.check()
         self.assertIn("GitHub could not be reached", info["error"])
         self.assertFalse(info["newer"])
+        self.assertFalse(info["no_releases"])
         with mock.patch.object(U.urllib.request, "urlopen") as again:
             u.check()                                   # within the retry pause: not asked again
             again.assert_not_called()
+
+    def test_404_means_no_releases_yet_not_an_error(self):
+        u = U.Updater("1.0.17")
+        gone = urllib.error.HTTPError("https://api.github.com/repos/ksanislo/saguaro/releases/latest",
+                                      404, "Not Found", None, None)
+        with mock.patch.object(U.urllib.request, "urlopen", side_effect=gone):
+            info = u.check()                            # GitHub WAS reached: the repo has no releases
+        self.assertIsNone(info["error"])
+        self.assertTrue(info["no_releases"])
+        self.assertIsNone(info["latest"])
+        self.assertFalse(info["newer"])
+        with mock.patch.object(U.urllib.request, "urlopen") as again:
+            u.check()                                   # the usual six hours, not a retry every ten minutes
+            again.assert_not_called()
+
+    def test_rate_limit_and_server_errors_keep_the_error_wording(self):
+        for code, why in ((403, "rate limit exceeded"), (500, "Internal Server Error")):
+            u = U.Updater("1.0.17")
+            err = urllib.error.HTTPError("https://api.github.com/repos/ksanislo/saguaro/releases/latest",
+                                         code, why, None, None)
+            with mock.patch.object(U.urllib.request, "urlopen", side_effect=err):
+                info = u.check()
+            self.assertIn("GitHub could not be reached", info["error"])
+            self.assertFalse(info["no_releases"])
+            self.assertIsNone(info["latest"])
+
+    def test_a_newer_tag_offers_the_update(self):
+        rel = json.dumps({"tag_name": "v1.0.18", "html_url": "https://github.com/ksanislo/saguaro/releases/tag/v1.0.18",
+                          "body": "**Saguaro 1.0.18: the small fixes.**\nUpdate: `git pull`",
+                          "published_at": "2026-11-20T10:00:00Z"}).encode()
+        r = mock.MagicMock()
+        r.__enter__.return_value.read.return_value = rel
+        u = U.Updater("1.0.17")
+        with mock.patch.object(U.urllib.request, "urlopen", return_value=r):
+            info = u.check()
+        self.assertTrue(info["newer"])
+        self.assertIsNone(info["error"])
+        self.assertFalse(info["no_releases"])
+        self.assertEqual(info["latest"]["version"], "1.0.18")
+        self.assertEqual(info["latest"]["tag"], "v1.0.18")
+        self.assertEqual(info["latest"]["summary"], "Saguaro 1.0.18: the small fixes.")
+
+    def test_the_version_named_without_git_is_the_version_line(self):
+        u = U.Updater("1.0.17", root=Path(tempfile.mkdtemp()) / "not-checked-out")
+        self.assertEqual(u.label, "v1.0.17")
+        self.assertEqual(u.info()["current_label"], "v1.0.17")
 
     def test_check_off(self):
         with mock.patch.dict(os.environ, {"SAGUARO_UPDATE_CHECK": "0"}), \
@@ -110,6 +160,11 @@ class Updating(unittest.TestCase):
         self.assertEqual((self.clone / "VERSION").read_text().strip(), "1.0.1")
         svc.close_for_restart.assert_called_once()
         ex.assert_called_once_with(U.UPDATE_EXIT)
+
+    def test_the_page_names_the_clone_by_its_commit(self):
+        label = self.u.info()["current_label"]           # the banner's text, not the VERSION line (U1 step 2)
+        self.assertRegex(label, r"^[0-9a-f]{4,} \(\d{4}-\d{2}-\d{2}\)$")
+        self.assertNotIn("1.0.0", label)
 
     def test_local_changes_block_it(self):
         (self.clone / "VERSION").write_text("mine\n")

@@ -360,12 +360,17 @@ function UpdateCard() {
   } else if (u.error) {
     icon = "warning";
     title = "Couldn't check for updates";
-    text = `${u.error}. Saguaro v${u.current || "?"} is running.`;
+    text = `${u.error}. Saguaro ${u.current_label || `v${u.current || "?"}`} is running.`;
     acts = again("Try again");
+  } else if (u.no_releases) {
+    icon = "info";
+    title = "No releases yet";
+    text = `No Saguaro releases have been published yet; ${u.current_label || `v${u.current || "?"}`} is the newest code you pulled.`;
+    acts = again("Check again");
   } else if (u.latest) {
     tone = "ok"; icon = "check";
     title = "Up to date";
-    text = `v${u.current} is the latest release. Checked on GitHub${when ? ` at ${when}` : ""}.`;
+    text = `${u.current_label || `v${u.current}`} is the latest release. Checked on GitHub${when ? ` at ${when}` : ""}.`;
     acts = again("Check again");
   } else {
     title = "Checking for updates…";
