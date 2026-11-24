@@ -4746,9 +4746,15 @@ def server_command(cfg_path: Path, a) -> tuple:
     if cyber:
         ok(f"{cfg_path.name}: CYBER-FROST runs on its own engine, {Q.QFN_ENGINE}, now - its context, port, sampling "
            "and model files are kept")
-    if cyber_pack_pending(cfg):                         # (durable, not once-only: keep refusing on a still-foreign
-        fail(f"{cfg_path.name}: its pack and MTP drafter are still the other engine's: saguaro-qfn reads a pack of "   #  pack until --setup rebuilds it - a --check or a hand
-             "its own", f"run {ME} --setup once to build them (it asks nothing: the files are already there)")   #  edit cannot slip past this into a misread)
+    if cyber_pack_pending(cfg):                         # (an update moved CYBER-FROST to saguaro-qfn: its pack and
+        say(f"  {cfg_path.name}: building saguaro-qfn's own pack and MTP drafter from the model file already here "
+            "(once, several minutes; nothing is downloaded) ...")   #  drafter are built here, unattended - a boot-time
+        r = subprocess.run([sys.executable, str(HERE / "saguaro.py"), "--setup", "--yes", "--plain", "--no-start",
+                            "--config", str(cfg_path)], stdin=subprocess.DEVNULL)   #  start or the dashboard's update
+        cfg = read_json(cfg_path)                       #  must not stop at a question nobody is there to answer)
+        if r.returncode != 0 or cyber_pack_pending(cfg):   # (durable: a still-foreign pack is never started)
+            fail(f"{cfg_path.name}: its pack and MTP drafter are still the other engine's: saguaro-qfn reads a pack of "
+                 "its own", f"run {ME} --setup once to build them (the files are already there)")
 
     if getattr(a, "parallel", None):                   # --parallel given at a start: kept in the config
         set_arg(cfg.setdefault("args", []), "--parallel", a.parallel)
