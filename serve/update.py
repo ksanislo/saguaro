@@ -2,6 +2,7 @@
 
 The check asks GitHub for the latest release of the repository this folder was cloned from (git's origin; else
 ksanislo/saguaro) - only when the dashboard asks, at most every six hours (SAGUARO_UPDATE_CHECK=0 turns it off).
+A repository without a single release answers 404: that is no error, just "no releases have been published yet".
 Updating fast-forwards the git checkout to that release's tag, then the server ends with UPDATE_EXIT: saguaro.sh /
 START-SAGUARO.bat (saguaro.py) start Saguaro again, which compiles what changed in the engine and loads the model.  A folder
 that can't do that (no git, local changes, a server started some other way) gets the reason and the steps by hand."""
@@ -11,6 +12,7 @@ import re
 import subprocess
 import threading
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -67,6 +69,7 @@ class Updater:
         self.checked = 0.0
         self.next_check = 0.0
         self.error = None
+        self.no_releases = False           # the repository answers 404: no release has been published yet
         self.state = None                  # {"state": "updating" | "failed", "to", "started", "error"}
         self.thread = None
 
@@ -86,6 +89,7 @@ class Updater:
         req = urllib.request.Request(f"https://api.github.com/repos/{repo}/releases/latest",
                                      headers={"Accept": "application/vnd.github+json",
                                               "User-Agent": f"saguaro/{self.current or '?'}"})
+        self.no_releases = False
         try:
             with urllib.request.urlopen(req, timeout=8) as r:
                 rel = json.loads(r.read().decode("utf-8"))
@@ -98,6 +102,16 @@ class Updater:
             self.error = None
             self.checked = time.time()
             self.next_check = self.checked + CHECK_EVERY
+        except urllib.error.HTTPError as e:
+            if e.code == 404:                           # GitHub was reached; the repository has no releases yet
+                self.latest = None                      # a normal state: no error, no retry storm, the usual six hours
+                self.error = None
+                self.no_releases = True
+                self.checked = time.time()
+                self.next_check = self.checked + CHECK_EVERY
+                return
+            self.error = f"GitHub could not be reached ({getattr(e, 'reason', None) or e})"
+            self.next_check = time.time() + RETRY_AFTER
         except (OSError, ValueError) as e:              # offline, GitHub's rate limit, a proxy: say so, ask later
             self.error = f"GitHub could not be reached ({getattr(e, 'reason', None) or e})"
             self.next_check = time.time() + RETRY_AFTER
@@ -128,7 +142,8 @@ class Updater:
         why = self.blocker() if newer else None
         state = dict(self.state) if self.state else None
         return {"current": self.current, "enabled": self.enabled(), "latest": self.latest, "newer": newer,
-                "checked": self.checked or None, "error": self.error, "can_update": newer and why is None,
+                "checked": self.checked or None, "error": self.error, "no_releases": self.no_releases,
+                "can_update": newer and why is None,
                 "blocker": why, "state": state,
                 "by_hand": ("git pull, then start Saguaro again (./setup.sh or START-SAGUARO.bat)" if (self.root / ".git").exists()
                             else "download the new release from GitHub into a new folder")}

@@ -362,6 +362,11 @@ function UpdateCard() {
     title = "Couldn't check for updates";
     text = `${u.error}. Saguaro v${u.current || "?"} is running.`;
     acts = again("Try again");
+  } else if (u.no_releases) {
+    icon = "info";
+    title = "No releases yet";
+    text = "No Saguaro releases have been published yet; this is the newest code you pulled. Nothing to check against.";
+    acts = again("Check again");
   } else if (u.latest) {
     tone = "ok"; icon = "check";
     title = "Up to date";
