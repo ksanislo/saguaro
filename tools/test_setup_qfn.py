@@ -249,6 +249,30 @@ class QfnGpus(unittest.TestCase):
             self.assertIn("up to 4 GPUs", refusal(lambda: maya.choose_gpus(args(backend="cuda", gpus="0,1,2,3,4"),
                                                                            big, maya.QF.MIN_CC, "qfn")))
 
+    def test_cards_under_16_gb_are_refused_in_one_line(self):
+        small = [{"index": i, "name": "GeForce RTX 4060", "vram_gb": 8.0, "arch": "89"} for i in (0, 1)]
+        with patch.object(maya.S, "gpus", return_value=small), patch.object(maya.S, "is_wsl", return_value=False), \
+                patch.object(maya, "mem_gb", return_value=(96.0, 80.0)):
+            out = refusal(lambda: maya.check_pc(args(backend="cuda"), "qfn"))    # (no --gpus: one line, no crash)
+        self.assertIn("needs GPUs of 16 GB or more", out)
+        self.assertIn("RTX 4060", out)
+        with patch.object(maya.S, "gpus", return_value=[{"index": 2, "name": "RTX A5000", "vram_gb": 24.0,
+                                                         "arch": "86"}] + small), \
+                patch.object(maya.S, "is_wsl", return_value=False), patch.object(maya, "mem_gb",
+                                                                                 return_value=(96.0, 80.0)):
+            out = refusal(lambda: maya.check_pc(args(backend="cuda", gpus="1"), "qfn"))   # (--gpus names a small one)
+        self.assertIn("needs GPUs of 16 GB or more", out)
+        with patch.object(maya.S, "gpus", return_value=small), patch.object(maya.S, "is_wsl", return_value=False), \
+                patch.object(maya, "mem_gb", return_value=(96.0, 80.0)):
+            out = refusal(lambda: maya.check_pc(args(backend="cuda", gpus="0,1"), "qfn"))  # (both of them named)
+        self.assertIn("needs GPUs of 16 GB or more", out)
+        with patch.object(maya.S, "gpus", return_value=[{"index": 0, "name": "RTX A5000", "vram_gb": 24.0,
+                                                         "arch": "86"}]), \
+                patch.object(maya.S, "is_wsl", return_value=False), patch.object(maya, "mem_gb",
+                                                                                 return_value=(60.0, 40.0)):
+            out = refusal(lambda: maya.check_pc(args(backend="cuda"), "qfn"))   # (and the RAM for the tier)
+        self.assertIn("96 GB of RAM", out)
+
 
 class QfnReport(unittest.TestCase):
     def test_the_engines_speed_lines_are_picked(self):

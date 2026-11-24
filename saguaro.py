@@ -1574,8 +1574,8 @@ def choose_qfn_gpus(a, usable: list) -> list:
     """Qwen3.8-Flash-Next's cards (NVIDIA): one card of 20 GB or more alone (no split over the bus), else up to
     four equal ones taking the layers in turn (the more cards, the more experts in VRAM - the live server: 4x
     Tesla T4), else the largest one; asked when the PC has both (qfn_fit.best_gpus)."""
-    best = QF.best_gpus(usable)
     big = sorted(usable, key=lambda g: (-round(float(g.get("vram_gb") or 0)), g.get("index", 0)))
+    best = QF.best_gpus(usable) or big[:1]             # (every card under 16 GB: the largest goes to the refusal)
     if len(usable) == 1 or best == big[:1]:
         return best
     opts = [best, big[:1]]
@@ -1645,6 +1645,9 @@ def check_pc(a, family: str = "glm", gguf: bool = False, ds4_quant: str = "exl3"
         why = IK2F.unsupported("cuda", WIN, 0, found, mem_gb()[0])
         if why:
             fail(why)
+    if family == "qfn" and not QF.best_gpus(found):    # (every card under 16 GB: one line first - else the cards
+        fail(QF.unsupported(found, mem_gb()[0]) or     #  chosen below would be an empty list)
+             f"{QFN_SHOWN} needs GPUs of 16 GB or more")
     say("  NVIDIA GPUs:")
     for g in found:
         say(f"    {gpu_label(g)} - " + ("can be used" if int(g["arch"]) >= max(min_cc, VALIDATED_CC) else
@@ -1653,6 +1656,10 @@ def check_pc(a, family: str = "glm", gguf: bool = False, ds4_quant: str = "exl3"
     chosen = choose_gpus(a, found, min_cc, family)
     if family == "ik2":                                # (the cards picked: 8 GB or more each)
         why = IK2F.unsupported("cuda", WIN, len(chosen), chosen, mem_gb()[0])
+        if why:
+            fail(why)
+    if family == "qfn":                                # (the cards picked: 16 GB or more each, the RAM for the tier -
+        why = QF.unsupported(chosen, mem_gb()[0])      #  --gpus can name a small one the picker would not take)
         if why:
             fail(why)
     archs = sorted({int(g["arch"]) for g in chosen})
