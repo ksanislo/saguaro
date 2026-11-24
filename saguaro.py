@@ -4750,7 +4750,8 @@ def server_command(cfg_path: Path, a) -> tuple:
         say(f"  {cfg_path.name}: building saguaro-qfn's own pack and MTP drafter from the model file already here "
             "(once, several minutes; nothing is downloaded) ...")   #  drafter are built here, unattended - a boot-time
         r = subprocess.run([sys.executable, str(HERE / "saguaro.py"), "--setup", "--yes", "--plain", "--no-start",
-                            "--config", str(cfg_path)], stdin=subprocess.DEVNULL)   #  start or the dashboard's update
+                            "--config", str(cfg_path), *(["--port", str(cfg["port"])] if cfg.get("port") else [])],
+                           stdin=subprocess.DEVNULL)   # (its port kept, as the migration promised)   #  start or the dashboard's update
         cfg = read_json(cfg_path)                       #  must not stop at a question nobody is there to answer)
         if r.returncode != 0 or cyber_pack_pending(cfg):   # (durable: a still-foreign pack is never started)
             fail(f"{cfg_path.name}: its pack and MTP drafter are still the other engine's: saguaro-qfn reads a pack of "
