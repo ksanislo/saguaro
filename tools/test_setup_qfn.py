@@ -230,8 +230,10 @@ class Config(unittest.TestCase):
             self.assertNotIn("--trim-stage-weights", a)                 # (one card: no split, no stage keys)
 
     def test_the_cyber_frost_config(self):
-        """Its config keeps the name it always had, takes the drafter from inside the pack (the file's own NextN
-        block) and carries the pictures the way the live QFN configs do."""
+        """Its config keeps the name it always had and takes the drafter from inside the pack (the file's own NextN
+        block); U7: on this one AMD card the pictures are OFF - a single card at parallel 1 has no batch slots to
+        give the encoder room from and --vram-elastic is NVIDIA-only, so the vision entry write_config_qfn is
+        handed does not go into a config whose server could only start the encoder into a full card."""
         with tempfile.TemporaryDirectory() as t:
             t = Path(t)
             models, d = t / "models", t / "models" / "CYBER-FROST-3.8-PS"
@@ -251,8 +253,8 @@ class Config(unittest.TestCase):
             a = cfg["args"]
             self.assertEqual(a[a.index("--native") + 1], str(files[0]))
             self.assertEqual(a[a.index("--mtp") + 1], str(d / "pack" / "mtp"))
-            self.assertIn("--vision", a)
-            self.assertEqual(cfg["vision"], vision)
+            self.assertNotIn("--vision", a)                          # (no lend path on one AMD card: off)
+            self.assertNotIn("vision", cfg)
             self.assertEqual(cfg["installer"]["family"], "qfn")
             self.assertEqual(cfg["installer"]["qwen_quant"], "cyber-frost-q5_k_m")
             self.assertEqual(Q.family_of(cfg), "qfn")
@@ -690,6 +692,118 @@ class Layouts1To4T4(unittest.TestCase):
         self.assertEqual(cfg["parallel"], 2)                     # (fresh: 2; the live box raised it to 8)
 
 
+class PicturesOnEveryLayout(unittest.TestCase):
+    """U7 step 4: pictures on every 1-4 T4 layout.  The elastic encoder starts on VRAM the engine lends it and
+    there are exactly two lend paths: the batch slots' give path (answers at once 2 or more -> --batch N; the
+    engine then says "INFO vision_lend=1", generate.cpp:13119-13164, and the server sends VLEND,
+    serve/server.py:3105-3139), and the VRAM command on a --vram-elastic expert cache (the config's
+    "vram_elastic": true -> engines/qfn/serve/server.py engine_args:3750-3756; NVIDIA only,
+    expert_cache.cpp:301, and the engine answers VRAM only with it, generate.cpp:12738-12769).  A one-card config
+    (parallel 1, no batch slots) writes the second; four T4s keep U6's give-path config unchanged; a server whose
+    engine says neither in its INFO refuses a picture plainly instead of starting the encoder onto a full card
+    (the SIGKILL of U6's ./ref/vision-fail.log)."""
+
+    VISION = {"exe": "vision-qfn", "mmproj": "m.gguf", "model": "s.gguf", "gpu": True}
+
+    def setUp(self):
+        self.VISION = {**self.VISION, **maya.QFN_VISION}
+
+    def written(self, t: Path, n, **kw):
+        models, d = t / "models", t / "models" / "Qwen3.8-Flash-Next-UD-Q4_K_XL"
+        files = [t / "gguf" / nm for nm in maya.qfn_entry("ud-q4_k_xl")["files"]]
+        gpus = [{"index": i, "name": "Tesla T4", "vram_gb": 15.0, "arch": "75"} for i in range(n)]
+        with cpu(), patch.object(maya, "ROOT", t), patch.object(maya, "mem_gb", return_value=(252.0, 240.0)), \
+                patch.object(maya, "write_run_script", return_value=t / "run.sh"), \
+                patch("sys.stdout", new=io.StringIO()), patch.object(maya.S, "UI", None):
+            p = maya.write_config_qfn(args(backend="cuda", **kw), {"backend": "cuda", "gpus": gpus}, {},
+                                      "ud-q4_k_xl", files, d / "pack", models / "MTP", 262144 if n > 1 else 65536,
+                                      models, d, {}, dict(self.VISION))
+        return json.loads(p.read_text())
+
+    def test_one_t4_gets_the_vram_elastic_lend_path(self):
+        for kw in ({}, {"parallel": 1}):                     # (the fresh default and a plain --parallel 1)
+            with self.subTest(**kw), tempfile.TemporaryDirectory() as t:
+                cfg = self.written(Path(t), 1, **kw)
+                self.assertIs(cfg["vram_elastic"], True)     # (engine_args:3750-3756 turns it into --vram-elastic)
+                self.assertEqual(cfg["vision"], self.VISION)
+                self.assertIn("--vision", cfg["args"])
+                self.assertNotIn("parallel", cfg)            # (still one conversation at a time)
+                self.assertNotIn("--vram-elastic", cfg["args"])   # (the flag comes at the start, from the key)
+
+    def test_splits_keep_the_give_path_and_no_vram_elastic(self):
+        for n in (2, 3, 4):
+            with self.subTest(cards=n), tempfile.TemporaryDirectory() as t:
+                cfg = self.written(Path(t), n)
+                self.assertEqual(cfg["parallel"], 2)         # (--batch 2 -> the batch slots the give path needs)
+                self.assertNotIn("vram_elastic", cfg)        # (the give path lends; U6's 4-card config as left)
+                self.assertEqual(cfg["vision"], self.VISION)
+                self.assertEqual(cfg["env"]["SAGUARO_ELASTIC_SLOTS_GIVE"], "1")   # (GENERIC: the give keys, all)
+
+    def test_a_two_card_setup_at_parallel_one_still_gets_pictures(self):
+        with tempfile.TemporaryDirectory() as t:
+            cfg = self.written(Path(t), 2, parallel=1)
+        self.assertNotIn("parallel", cfg)
+        self.assertIs(cfg["vram_elastic"], True)             # (no --batch -> no give path -> the VRAM command)
+        self.assertIn("--vision", cfg["args"])
+
+    def test_the_engine_driver_says_what_it_can_lend(self):
+        from serve import qfn_engine as QE
+        e = QE.StrataEngine.__new__(QE.StrataEngine)
+        for info, want in (({}, False), ({"vram_elastic": 0}, False), ({"vram_elastic": "0"}, False),
+                           ({"vram_elastic": 1}, True), ({"vision_lend": 1}, True), ({"vision_lend": 0}, False),
+                           ({"vram_elastic": 0, "vision_lend": 1}, True)):
+            e.info = info
+            self.assertEqual(e.vision_room(), want, str(info))
+
+    def test_the_server_refuses_a_picture_with_no_lend_path(self):
+        import serve.server as SV
+        from serve import qfn_engine as QE
+
+        class Eng:
+            info = {"vram_elastic": 0}                       # (the engine's own INFO: neither lend path)
+            alive = lambda s: True
+            vision_room = QE.StrataEngine.vision_room        # (the extracted predicate, the real one)
+
+            def vram_reserve(s, mib):                        # (what _vision_up's fallback calls first)
+                raise ValueError("VRAM needs an engine started with --vram-elastic (one NVIDIA GPU, --serve)")
+
+        class EngLends(Eng):
+            info = {"vram_elastic": 1}
+
+            def vram_reserve(s, mib):
+                return {"expert_cache_mib": 8000, "expert_cache_full_mib": 14000}
+
+        class Vis:
+            elastic, elastic_mib, elastic_idle_s = True, 1536, 30.0
+
+            def __init__(self):
+                self.started = False
+
+            def alive(self):
+                return False
+
+            def restart(self):
+                self.started = True
+
+        class Svc:
+            _vision_up, _vision_lends, _engine_ready = SV.Service._vision_up, SV.Service._vision_lends, \
+                SV.Service._engine_ready
+
+            def __init__(self, eng):
+                self.engine, self.vision, self.vision_held = eng, Vis(), False
+
+        with patch("time.sleep", lambda s: None), patch("sys.stdout", new=io.StringIO()):
+            svc = Svc(Eng())
+            with self.assertRaises(ValueError) as got:       # (no room: a plain error, no encoder, no SIGKILL)
+                svc._vision_up()
+            self.assertIn("--vram-elastic", str(got.exception))
+            self.assertFalse(svc.vision.started)
+            svc = Svc(EngLends())
+            svc._vision_up()                                 # (the --vram-elastic path: reserve, then start)
+            self.assertTrue(svc.vision.started)
+            self.assertTrue(svc.vision_held)
+
+
 class CheckLine(unittest.TestCase):
     def test_the_check_line_names_the_t4_split_only_for_a_split(self):
         t4 = [{"index": i, "name": "Tesla T4", "vram_gb": 15.0, "arch": "75"} for i in range(4)]
@@ -813,26 +927,32 @@ class Vision(unittest.TestCase):
             self.assertNotIn("vision", cfg)
             self.assertNotIn("--vision", cfg["args"])
 
-    def test_the_config_gets_the_entry_and_the_vision_arg(self):
+    def test_the_one_amd_card_with_no_lend_path_turns_pictures_off(self):
+        """U7 step 4: write_config_qfn is handed the elastic entry, but a single AMD card at parallel 1 has
+        neither lend path (no --batch slots to give, --vram-elastic is CUDA-only) - the entry and --vision stay
+        out of the config, and the setup says so in one plain line."""
         with tempfile.TemporaryDirectory() as t:
             v = {"exe": "build-vision-qfn/bin/vision-qfn-hip", "mmproj": "m.gguf", "model": "s.gguf", "gpu": True,
                  **maya.QFN_VISION}
-            cfg = written_cfg(Path(t), args(), vision=v)
-            self.assertEqual(cfg["vision"], v)
-            self.assertIn("--vision", cfg["args"])
+            said = []
+            with patch.object(maya, "warn", side_effect=lambda *x: said.append(" ".join(map(str, x)))):
+                cfg = written_cfg(Path(t), args(), vision=v)
+            self.assertNotIn("vision", cfg)
+            self.assertNotIn("--vision", cfg["args"])
+            self.assertTrue(any("pictures: off" in s for s in said), said)
 
 
 class SetupFlow(unittest.TestCase):
     """set_up_qfn with the machine, the build and the downloads stepped around: what the choices write."""
 
-    def flow(self, t: Path, a, vision=None, mtp=True):
+    def flow(self, t: Path, a, vision=None, mtp=True, pc=None):
         eng = t / "build" / "qfn"
         eng.mkdir(parents=True)
         (eng / "saguaro-qfn").write_text("")
         models = t / "models"
         files = [t / "gguf" / n for n in maya.qfn_entry("ud-q4_k_xl")["files"]]
         with patch.object(maya, "ROOT", t), patch.object(maya, "qfn_exe", return_value=eng / "saguaro-qfn"), \
-                patch.object(maya, "check_pc", return_value=pc_hip()), \
+                patch.object(maya, "check_pc", return_value=pc or pc_hip()), \
                 patch.object(maya, "mem_gb", return_value=(91.7, 80.0)), \
                 patch.object(maya, "tools_step", return_value=t / "llama"), \
                 patch.object(maya, "build_step", return_value={"lib_dirs": ["/opt/rocm/lib"]}), \
@@ -848,8 +968,9 @@ class SetupFlow(unittest.TestCase):
     def setup(self, t: Path, **kw):
         vision = kw.pop("_vision", None)
         nomtp = kw.pop("_nomtp", False)
+        pc = kw.pop("_pc", None)
         a = args(qfn_quant="ud-q4_k_xl", context=65536, models_dir=t / "models", **kw)
-        p = self.flow(t, a, vision=vision, mtp=not nomtp)
+        p = self.flow(t, a, vision=vision, mtp=not nomtp, pc=pc)
         return json.loads(p.read_text())
 
     def test_drafting_off_is_the_mtp_max_t_arg(self):
@@ -874,11 +995,17 @@ class SetupFlow(unittest.TestCase):
             self.assertNotIn("mtp_calibration", cfg["installer"])  # (the measurement of T4's step 4 will record it)
 
     def test_the_vision_entry_travels_into_the_config(self):
-        with tempfile.TemporaryDirectory() as t:
+        """... on an NVIDIA one-card layout through its lend path: with no batch slots (parallel 1) the config
+        gets "vram_elastic": true, which is what gives the engine the --vram-elastic expert cache the elastic
+        encoder's room comes from (serve/server.py's _vision_up vram_reserve fallback)."""
+        with tempfile.TemporaryDirectory() as t, tempfile.TemporaryDirectory() as t2:
             v = {"exe": "v", "mmproj": "m.gguf", "model": "s.gguf", "gpu": True, **maya.QFN_VISION}
-            cfg = self.setup(Path(t), drafting="on", _vision=v)
+            cfg = self.setup(Path(t), drafting="on", _vision=v, _pc={"backend": "cuda", "gpus": [
+                {"index": 0, "name": "RTX A5000", "vram_gb": 24.0, "arch": "86"}]})
             self.assertEqual(cfg["vision"], v)
             self.assertIn("--vision", cfg["args"])
+            self.assertIs(cfg["vram_elastic"], True)
+            self.assertNotIn("vram_elastic", self.setup(Path(t2), drafting="on"))    # (text only: nothing to lend)
 
     def test_no_draft_layer_no_question_and_no_mtp(self):
         with tempfile.TemporaryDirectory() as t:

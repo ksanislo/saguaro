@@ -7396,7 +7396,11 @@ def qfn_vision_step(a, pc: dict, meta: dict, llama: Path, d: Path, files: list) 
     when SAGUARO_ELASTIC_SLOTS and SAGUARO_ELASTIC_SLOTS_GIVE are on with --batch slots and a VMM expert cache
     (engines/qfn/src/program/generate.cpp, the give path); those keys are in qfn_fit's GENERIC_ENV, so a written
     config has them - without them the reader started into a full card and died on its first allocation
-    (./ref/vision-fail.log)."""
+    (./ref/vision-fail.log).  --batch slots means answers at once 2 or more: the one-card config (parallel 1) has
+    none, and its encoder gets its room from the other lend path instead - write_config_qfn puts "vram_elastic":
+    true in it, which starts the engine with --vram-elastic (NVIDIA only) so the server's VRAM command keeps the
+    card's elastic_mib free for the reader (serve/server.py's _vision_up); a layout with neither path gets no
+    vision entry at all, in one plain line."""
     step(7, "images (the picture reader)")
     if a.no_vision:
         ok("skipped (--no-vision): the model reads text only")
@@ -7498,9 +7502,10 @@ def write_config_qfn(a, pc: dict, meta: dict, quant: str, files: list, pack: Pat
     to 256K, YaRN past it), on NVIDIA the live 4x Tesla T4 configs' tuning by class - qfn_fit's plan: the generic
     engine and conversation-cache keys everywhere, the T4 env only where every chosen card is compute capability
     7.5, the split's pipelined-read env and args only with a layer split, and the NUMA keys and --pool-workers only
-    on a multi-socket CPU; pictures with the elastic vision entry when the reader is there (the GENERIC ELASTIC_*
-    keys are what makes the engine lend CUDA0 the encoder's room).  A setup again keeps the config before's env,
-    where the server listens and its key."""
+    on a multi-socket CPU; pictures with the elastic vision entry when the reader is there, on one of the two lend
+    paths - the batch slots' give path (answers at once 2 or more) or, on a config without batch slots, the engine's
+    --vram-elastic expert cache ("vram_elastic": true, NVIDIA); with neither, the vision entry stays off and says
+    why.  A setup again keeps the config before's env, where the server listens and its key."""
     step(9, "the configuration and the start script")
     port = a.port or 8080
     hip = pc.get("backend") == "hip"
@@ -7533,6 +7538,35 @@ def write_config_qfn(a, pc: dict, meta: dict, quant: str, files: list, pack: Pat
                                                        #  pools, the quant's --prompt-cache, --pool-workers on a
                                                        #  multi-socket CPU - qfn_fit's plan says which)
     args += ["--rope-scaling", "yarn", "--rope-scale", "4", "--yarn-orig-ctx", "262144"]
+    # answers at once (serve/qfn_engine.py's parallel_args turns this into the engine's --batch N): off on the one
+    # 16 GB AMD card it was measured on (parallel decoding lost speed there - one card stays at parallel 1 even
+    # when the config written before was a several-cards one and carries a value), 2 on several GPUs as the live
+    # T4 configs run it; --parallel N says, and a config written before keeps its value on a several-cards layout
+    par = (getattr(a, "parallel", None) or (old.get("parallel") if len(pc["gpus"]) > 1 else None)
+           or (2 if len(pc["gpus"]) > 1 else 1))
+    # pictures on every layout: the elastic encoder only starts once the engine lends it the card's room, and
+    # there are exactly two lend paths - the give path (the batch slots' room: answers-at-once 2 or more makes
+    # --batch N, and with the GENERIC ELASTIC_* keys the engine then says "INFO vision_lend=1" and takes VLEND -
+    # engines/qfn/src/program/generate.cpp:13119-13164), and the VRAM command (the segmented expert cache of an
+    # engine started with --vram-elastic, which the config's "vram_elastic": true gives it -
+    # engines/qfn/serve/server.py's engine_args; NVIDIA only: expert_cache.cpp "a segmented expert cache is
+    # CUDA-only for now", and the engine answers VRAM only then, generate.cpp:12738-12769).  A one-card config
+    # has no batch slots at parallel 1, so it rides the VRAM-command path; where neither path exists (one AMD
+    # card, which has no --vram-elastic and no --batch at parallel 1) the setup turns pictures off plainly -
+    # the encoder started into a full card anyway is the SIGKILL of ./ref/vision-fail.log (U6 step 4).
+    vram_elastic = False
+    if vision is not None and par < 2:
+        if hip:
+            warn("pictures: off on this layout - saguaro-qfn lends the picture encoder room either from its batch "
+                 "slots (answers at once: 2 or more) or, on NVIDIA, from a --vram-elastic expert cache, and this "
+                 "one has neither: the model reads text only (--parallel 2 says otherwise, a --setup on several "
+                 "cards brings the pictures back)")
+            vision = None
+        else:
+            vram_elastic = True
+            ok(f"pictures: ON - \"vram_elastic\": true: the engine starts with --vram-elastic and its expert "
+               f"cache keeps {QFN_VISION['elastic_mib']} MiB of the card free for the encoder when a picture "
+               "arrives (the give path needs batch slots, which one card at parallel 1 does not have)")
     if vision is not None:                             # (pictures: GENI requests, each image's rows at its pad tokens)
         args.append("--vision")
     env = {"SAGUARO_NO_LARGEPAGES": "1", "SAGUARO_YARN_ELASTIC": "1", "SAGUARO_MMQ_KQ": "1",
@@ -7542,17 +7576,14 @@ def write_config_qfn(a, pc: dict, meta: dict, quant: str, files: list, pack: Pat
            **(old.get("env") or {}), **parse_env(a.env)}
     inst = {"family": "qfn", "qwen_quant": quant, "engine": Q.QFN_ENGINE}
     sampling, effort = Q.model_defaults({"installer": inst})
-    # answers at once (serve/qfn_engine.py's parallel_args turns this into the engine's --batch N): off on the one
-    # 16 GB AMD card it was measured on (parallel decoding lost speed there - one card stays at parallel 1 even
-    # when the config written before was a several-cards one and carries a value), 2 on several GPUs as the live
-    # T4 configs run it; --parallel N says, and a config written before keeps its value on a several-cards layout
-    par = (getattr(a, "parallel", None) or (old.get("parallel") if len(pc["gpus"]) > 1 else None)
-           or (2 if len(pc["gpus"]) > 1 else 1))
     cfg = {"exe": str(qfn_exe()), "args": args, "env": env, "cwd": str(ROOT / "engines" / "qfn"),
            "tokenizer": str(pack / "tokenizer"), "model_name": name, **({"backend": "hip"} if hip else {}),
            "gpu": [g["index"] for g in pc["gpus"]],
            **({"layer_split": lay["layer_split"]} if lay["layer_split"] else {}), "sampling": sampling,
            "lib_dirs": meta.get("lib_dirs") or old.get("lib_dirs") or [], "port": port,
+           **({"vram_elastic": True} if vram_elastic else {}),   # (engine_args -> --vram-elastic: the encoder's
+                                                                 #  room on a card with no batch slots to give
+                                                                 #  it - see the lend-path note above)
            **({"vision": vision} if vision else {})}
     if par > 1:
         cfg["parallel"] = par

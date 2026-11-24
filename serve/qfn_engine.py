@@ -1231,6 +1231,17 @@ class StrataEngine:
             if time.time() > deadline:
                 raise EngineDied("the engine did not answer the VRAM command")
 
+    def vision_room(self) -> bool:
+        """Can this engine lend VRAM to the elastic picture encoder at all?  Two ways, both said in its own start-up
+        facts: the batch setup's give path (the engine printed "INFO vision_lend=1" - the give setup in
+        src/program/generate.cpp, with SAGUARO_ELASTIC_SLOTS/_GIVE, batch slots from --batch and VMM caches), or the
+        segmented expert cache of an engine started with --vram-elastic (its INFO's vram_elastic=1, which is the one
+        condition under which the VRAM command answers, generate.cpp's "#533: VRAM" reader).  The server asks this
+        before starting an elastic encoder: neither fact and there is no room to give - a picture must be refused
+        plainly rather than start the encoder into a full card (the SIGKILL U6's ./ref/vision-fail.log)."""
+        info = getattr(self, "info", None) or {}
+        return str(info.get("vision_lend") or "") == "1" or str(info.get("vram_elastic") or "") == "1"
+
     @staticmethod
     def sampling_keys(sampling: dict) -> str:
         keys = ""

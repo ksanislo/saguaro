@@ -1672,6 +1672,17 @@ class StrataEngine:
             if time.time() > deadline:
                 raise EngineDied("the engine did not answer the VRAM command")
 
+    def vision_room(self) -> bool:
+        """Can this engine lend VRAM to the elastic picture encoder at all?  Two ways, both said in its own start-up
+        facts: the batch setup's give path (the engine printed "INFO vision_lend=1" - the give setup in
+        src/program/generate.cpp, with SAGUARO_ELASTIC_SLOTS/_GIVE, batch slots from --batch and VMM caches), or the
+        segmented expert cache of an engine started with --vram-elastic (its INFO's vram_elastic=1, which is the one
+        condition under which the VRAM command answers, generate.cpp's "#533: VRAM" reader).  The server asks this
+        before starting an elastic encoder: neither fact and there is no room to give - a picture must be refused
+        plainly rather than start the encoder into a full card (the SIGKILL U6's ./ref/vision-fail.log)."""
+        info = getattr(self, "info", None) or {}
+        return str(info.get("vision_lend") or "") == "1" or str(info.get("vram_elastic") or "") == "1"
+
     @staticmethod
     def sampling_keys(sampling: dict) -> str:
         keys = ""
@@ -4837,6 +4848,12 @@ class Service:
                       "it anyway", flush=True)
         if self.vision_held:
             time.sleep(0.2)          # the driver's free-VRAM counter shows the cache's release a moment later
+        if not self.vision_held and hasattr(self.engine, "vision_room") and not self.engine.vision_room():
+            # neither lend path is configured (no give, no --vram-elastic): starting the encoder here would put it
+            # on a card with no room at all - refuse the picture with a plain error instead of watching it die
+            raise ValueError("this engine lends the picture encoder nothing: it has no batch slots to give room "
+                             "from and was not started with --vram-elastic (its INFO says neither) - run the "
+                             "setup again or add \"vram_elastic\": true")
         free0, t0 = self.free_vram_mib(), time.time()
         v.restart()
         free1 = self.free_vram_mib()
