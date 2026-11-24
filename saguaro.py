@@ -717,8 +717,9 @@ QWEN_KV_BYTES = 12 * (2 * 2 * 256 + 2 * 2 * 256 // 64 * 2 + 128)
 # its own engine, saguaro-qfn (engines/qfn, from Strata: the build's <build>/qfn/saguaro-qfn).  The setup offers it on AMD
 # (one RDNA GPU; measured on an RX 9070 XT, gfx1201): the files read in place, indexed by engines/qfn/tools/iq_pack.py
 # (the pack), the experts the GPU does not hold in a page-locked RAM tier (--resident-budget-gib: the RAM less
-# QFN_RAM_SPARE_GB) and the rest read from the SSD, the Lamina MTP layer drafting.  Its configs are "qwen" ones as
-# CYBER-FROST's (template, sampling, server path), told apart by installer.qwen_quant (maya_quants.QFN_QUANTS).
+# QFN_RAM_SPARE_GB) and the rest read from the SSD, the Lamina MTP layer drafting.  Its configs are family "qfn" (their
+# own since the identity split; maya_quants.family_of reads the older "qwen" ones and the hand-made exe-name-only ones
+# as "qfn" too).
 QFN = Q.QFN_SHOWN                                  # "Qwen3.8-Flash-Next" (its id for --model; the model folder's prefix)
 QFN_SHOWN = f"{Q.QFN_SHOWN} ({Q.QFN_ENGINE})"
 QFN_TARGET = "saguaro-qfn"
@@ -758,7 +759,7 @@ IK2_TOKENIZER_TOOLS = ("tools/strata_tokenizer.py", "tools/ik2/chat_template.jin
 IK2_DIR = "saguaro-ik2"                            # (in the model's folder: tokenizer/, sources.json)
 IK2_MODEL_NAME = "inkling-2-mini"
 IK2_PROFILE = ROOT / "data" / "expert-profile-ik2mini.bin"   # (the offload path's starting VRAM tier: SAGUARO_IK2_WARM)
-# (the setup's model question; "qfn" is a setup choice only - its configs are "qwen" ones, maya_quants.family_of)
+# (the setup's model question; "qfn" is a family of its own: maya_quants.family_of reads its configs by it)
 FAMILIES = ("glm", "deepseek", "minimax", "qwen", "qfn", "hy4", "ik2")
 FAMILY_SHOWN = {"glm": "GLM-5.3-Flash", "deepseek": DS4, "minimax": MM3, "qwen": QWEN_SHOWN, "qfn": QFN_SHOWN,
                 "hy4": HY4_SHOWN,
@@ -1938,14 +1939,15 @@ def config_family(cfg: dict) -> str:
 
 
 def is_qfn_config(cfg: dict) -> bool:
-    """A config of Qwen3.8-Flash-Next on saguaro-qfn the setup wrote (a "qwen" config whose quant is the model's own)."""
-    return config_family(cfg) == "qwen" and (cfg.get("installer") or {}).get("qwen_quant") in Q.QFN_QUANTS
+    """A config of Qwen3.8-Flash-Next on saguaro-qfn: family "qfn" (the setup writes it; maya_quants.family_of reads
+    the older "qwen" ones whose quant is the model's own, and the hand-made exe-name-only ones, as "qfn" too)."""
+    return config_family(cfg) == "qfn"
 
 
 def setup_family(cfg: dict) -> str:
-    """The setup's model choice a config came from: config_family, with Qwen3.8-Flash-Next's own ("qfn") told from
-    CYBER-FROST's."""
-    return "qfn" if is_qfn_config(cfg) else config_family(cfg)
+    """The setup's model choice a config came from: config_family, which since the identity split tells Qwen3.8-Flash-
+    Next's own ("qfn") from CYBER-FROST's ("qwen")."""
+    return config_family(cfg)
 
 
 # the models whose engine answers several requests at once (--parallel): GLM-5.3-Flash's, DeepSeek-V4.1-Flash's
@@ -1956,7 +1958,8 @@ PARALLEL_FAMILIES = ("glm", "deepseek", "minimax")
 
 def check_parallel(a, family: str) -> None:
     if getattr(a, "parallel", None) is not None and family not in PARALLEL_FAMILIES:
-        model = {"deepseek": DS4, "minimax": MM3, "hy4": HY4_SHOWN, "ik2": IK2_SHOWN}.get(family, QWEN_SHOWN)
+        model = {"deepseek": DS4, "minimax": MM3, "hy4": HY4_SHOWN, "ik2": IK2_SHOWN, "qfn": QFN_SHOWN}.get(
+            family, QWEN_SHOWN)
         fail(f"--parallel is supported by GLM-5.3-Flash, DeepSeek-V4.1-Flash and MiniMax-M3.1-Flash; {model} serves "
              "one request at a time",
              "remove --parallel; saved conversations do not enable simultaneous decoding")
@@ -4129,8 +4132,8 @@ def calibrate_config(cfg_path: Path) -> bool:
     if config_family(cfg) == "minimax":   # (maya-mm3 sizes its CPU lane by this PC's cores and its pools by its memory:
         #  what it reads prompts with is measured - the prefill calibration)
         return prefill_calibration(cfg_path, "asked for")
-    if config_family(cfg) == "qwen":      # (the Qwen path sizes its CPU pool and its prompt chunks itself; what can be
-        #  measured is its drafter)
+    if config_family(cfg) in ("qwen", "qfn"):  # (the Qwen path sizes its CPU pool and its prompt chunks itself; what can
+        #  be measured is its drafter.  qfn too: QFN's configs are "qfn" ones now, maya_quants.family_of)
         return bool(qwen_draft_calibration(cfg_path) is not None)
     if config_family(cfg) in ("hy4", "ik2"):   # (their engines measure what they tune at their own first start)
         ok(f"{Q.SHOWN[config_family(cfg)]}: nothing to tune here - its engine measures this PC at its first start")
@@ -4291,7 +4294,8 @@ def needs_speed_calibration(cfg: dict) -> bool:
     args = cfg.get("args") or []
     if cfg.get("backend") == "metal":                  # (CUDA's measurement: on a Mac MTP or DFlash2 is the user's choice)
         return False
-    if config_family(cfg) in ("qwen", "hy4", "ik2"):   # (CYBER-FROST: measured at its setup; Hy4, Inkling: no drafter set up)
+    if config_family(cfg) in ("qwen", "qfn", "hy4", "ik2"):   # (CYBER-FROST: measured at its setup; QFN too; Hy4,
+        #  Inkling: no drafter set up)
         return False
     if config_family(cfg) in ("deepseek", "minimax"):  # (their DSpark drafter: measured once too)
         return CDS.has_drafter(cfg) and "speed_calibration" not in (cfg.get("installer") or {}) and             not (config_family(cfg) == "minimax" and parallel_of(cfg) > 1)   # (maya-mm3 --parallel: no drafting)
@@ -4310,7 +4314,7 @@ def speed_calibration(cfg_path: Path, why: str = "") -> bool:
         warn("no speed calibration on Metal: MTP and DFlash2 are both exact, which is faster here is your choice "
              f"({ME} --setup --draft mtp|dflash2)")
         return False
-    if config_family(cfg) == "qwen":                   # (CYBER-FROST: its MTP drafter or none)
+    if config_family(cfg) in ("qwen", "qfn"):         # (CYBER-FROST: its MTP drafter or none; QFN's too)
         return bool(qwen_draft_calibration(cfg_path) is not None)
     if config_family(cfg) == "ik2":                    # (Inkling 2: --drafting auto measures at the engine's start)
         args = cfg.get("args") or []
@@ -4522,7 +4526,7 @@ def keep_drafting(cfg_path: Path, on: bool) -> None:
     measures any time)."""
     cfg = read_json(cfg_path)
     ds4 = config_family(cfg) in ("deepseek", "minimax")   # (DSpark: DeepSeek's and MiniMax's drafter)
-    if config_family(cfg) == "qwen":                       # (CYBER-FROST: the MTP drafter in its pack, or none)
+    if config_family(cfg) in ("qwen", "qfn"):            # (CYBER-FROST: the MTP drafter in its pack, or none; QFN's too)
         args = cfg.get("args") or []
         if "--mtp-max-t" in args[:-1]:
             i = args.index("--mtp-max-t")
@@ -4679,7 +4683,7 @@ def server_command(cfg_path: Path, a) -> tuple:
         say("  later starts take about half a minute. The n-gram table stays on the SSD.")
     elif config_family(cfg) == "ik2":
         say("  Loading takes about ten seconds once the file is in the page cache (the first load reads 18 GB).")
-    elif config_family(cfg) == "qwen":
+    elif config_family(cfg) in ("qwen", "qfn"):
         say("  Loading takes a few minutes: the engine places the most-used experts in VRAM, the next ones in RAM as far")
         say("  as the free RAM goes (SAGUARO_EXPERT_RAM_GB caps it) and reads the rest from the SSD when they are routed.")
     elif ds4:
@@ -5045,7 +5049,7 @@ def bench_chat(family: str, tokenizer_dir: Path):
         tpl = ChatTemplate(path if path.exists() else IK2_TEMPLATE)
         return lambda q: tpl.render([{"role": "user", "content": q}], reasoning_effort="none",
                                     enable_thinking=False) + "<|message_model|><|content_text|>"
-    if family == "qwen":       # (Qwen's turns, the think block closed: the answer itself)
+    if family in ("qwen", "qfn"):   # (Qwen's turns, the think block closed: the answer itself; QFN's template is the same)
         return "<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n".format
     return "[gMASK]<sop><|user|>\n{}<|assistant|>\n</think>".format
 
@@ -7317,7 +7321,7 @@ def qfn_entry(quant: str = QFN_DEFAULT_QUANT) -> dict:
     man = qfn_manifest()
     q = man["quants"].get(quant)
     if not q:
-        fail(f"{QFN_MANIFEST} names no {Q.shown('qwen', quant)}", "restore it (git checkout tools/qfn/download.json)")
+        fail(f"{QFN_MANIFEST} names no {Q.shown('qfn', quant)}", "restore it (git checkout tools/qfn/download.json)")
     return {"about": f"{Q.QFN_SHOWN} in {q['about']}; {man.get('license', 'the Qwen Community License')}",
             "format": "qfn-gguf", "repo": man["repo"], "revision": man["revision"], "folder": q["folder"],
             "files": {k: v[0] for k, v in q["files"].items()}, "sha256": {k: v[1] for k, v in q["files"].items()},
@@ -7348,9 +7352,9 @@ def qfn_quant_fit(quant: str, vram: float, ram: float) -> str | None:
     """Why a quant does not fit one GPU of `vram` GiB and `ram` GiB of RAM (its measured "needs"), or None."""
     n = qfn_entry(quant)["needs"]
     if vram < float(n.get("vram_gb") or 0):
-        return f"{Q.shown('qwen', quant)} needs a GPU of 16 GB or more (this one: {vram:.0f} GB)"
+        return f"{Q.shown('qfn', quant)} needs a GPU of 16 GB or more (this one: {vram:.0f} GB)"
     if ram < float(n.get("ram_gb") or 0):
-        return (f"{Q.shown('qwen', quant)} needs about 96 GB of RAM (this PC: {ram:.0f} GB): the experts the GPU does "
+        return (f"{Q.shown('qfn', quant)} needs about 96 GB of RAM (this PC: {ram:.0f} GB): the experts the GPU does "
                 "not hold must fit in RAM beside the system, or nearly every token waits on the SSD")
     return None
 
@@ -7367,7 +7371,7 @@ def choose_qfn_quant(a, prev: dict, vram: float, ram: float) -> str:
             m, why = qfn_entry(k), qfn_quant_fit(k, vram, ram)
             note = ("does not fit this PC" if why else "recommended" if k == QFN_DEFAULT_QUANT else
                     "not measured on AMD yet" if not m.get("measured") else None)
-            rows.append((Q.shown("qwen", k, m["download_gb"]), note,
+            rows.append((Q.shown("qfn", k, m["download_gb"]), note,
                          (why + ". " if why else "") + m["about"] + (f". Measured: {m['measured']}" if m.get("measured")
                                                                      else "")))
         default = keys.index(before) if before in keys else keys.index(QFN_DEFAULT_QUANT)
@@ -7388,16 +7392,16 @@ def qfn_files_step(a, d: Path, quant: str) -> list | None:
     files = [src / n for n in m["files"]]
     missing = [f for f in files if file_incomplete(m, f)]
     if missing and src != d:
-        fail(f"{src} does not hold all of {Q.shown('qwen', quant)}'s files ({missing[0].name}: "
+        fail(f"{src} does not hold all of {Q.shown('qfn', quant)}'s files ({missing[0].name}: "
              f"{file_incomplete(m, missing[0])})", "--gguf-dir takes the folder with all its .gguf shards, or leave it "
              "out to download them")
-    if missing and not offer_download(a, Q.shown("qwen", quant, m["download_gb"]), d, files, m):
+    if missing and not offer_download(a, Q.shown("qfn", quant, m["download_gb"]), d, files, m):
         return None
     for f in files:
         if not sha256_checked(f, m["sha256"][f.name]):
             fail(f"{f.name}: the sha256 does not match the published one - still being downloaded, or damaged",
                  f"let the download finish, or delete the file and run {ME} --download-model")
-    ok(f"{Q.shown('qwen', quant)}: {sum(f.stat().st_size for f in files) / 1e9:.1f} GB in {src}" +
+    ok(f"{Q.shown('qfn', quant)}: {sum(f.stat().st_size for f in files) / 1e9:.1f} GB in {src}" +
        (" (your files, used in place)" if src != d else ""))
     if rotational(src):
         warn(f"{src} is on a spinning hard disk: the experts RAM cannot hold are read from it - use an NVMe SSD")
@@ -7463,7 +7467,7 @@ def write_config_qfn(a, pc: dict, meta: dict, quant: str, files: list, pack: Pat
     step(8, "the configuration and the start script")
     port = a.port or 8080
     hip = pc.get("backend") == "hip"
-    cfg_path = ROOT / f"{Q.config_stem('qwen', quant)}{'-hip' if hip else ''}.json"
+    cfg_path = ROOT / f"{Q.config_stem('qfn', quant)}{'-hip' if hip else ''}.json"
     old = read_json(cfg_path) or (prev if is_qfn_config(prev or {}) else {})
     name = qfn_entry(quant)["name"]
     var = models / name / "var"
@@ -7484,7 +7488,7 @@ def write_config_qfn(a, pc: dict, meta: dict, quant: str, files: list, pack: Pat
              "--rope-scaling", "yarn", "--rope-scale", "4", "--yarn-orig-ctx", "262144"]
     env = {"SAGUARO_NO_LARGEPAGES": "1", "SAGUARO_YARN_ELASTIC": "1", "SAGUARO_MMQ_KQ": "1",
            **(old.get("env") or {}), **parse_env(a.env)}
-    inst = {"family": "qwen", "qwen_quant": quant, "engine": Q.QFN_ENGINE}
+    inst = {"family": "qfn", "qwen_quant": quant, "engine": Q.QFN_ENGINE}
     sampling, effort = Q.model_defaults({"installer": inst})
     cfg = {"exe": str(qfn_exe()), "args": args, "env": env, "cwd": str(ROOT / "engines" / "qfn"),
            "tokenizer": str(pack / "tokenizer"), "model_name": name, **({"backend": "hip"} if hip else {}),
@@ -7528,7 +7532,7 @@ def set_up_qfn(a, prev: dict) -> Path | None:
     step(2, "your choices")                            # 2
     quant = choose_qfn_quant(a, prev, vram, ram)
     m = qfn_entry(quant)
-    ok(f"model: {Q.shown('qwen', quant, m['download_gb'])} - Qwen's Qwen3.8-Flash-Next (Qwen Community License 1.0: "
+    ok(f"model: {Q.shown('qfn', quant, m['download_gb'])} - Qwen's Qwen3.8-Flash-Next (Qwen Community License 1.0: "
        "LICENSE.qwen-community-1.0) on its own engine, saguaro-qfn")
     ok(f"{QFN_SHOWN} on AMD: measured on an RX 9070 XT (gfx1201) with 96 GB of RAM (27-41 tok/s answers, 520-1,080 "
        "tok/s 8K-16K prompt reads) - tell us how it goes on yours" + ("" if m.get("measured") else f"; {Q.QFN_QUANTS[quant]} is not measured on AMD yet"))
@@ -7543,7 +7547,7 @@ def set_up_qfn(a, prev: dict) -> Path | None:
     meta = build_step(a, pc, llama, QFN_TARGET)        # 4
     if not qfn_exe().exists():
         fail(f"the engine was not built ({qfn_exe()})", "the reason is in the build's messages above")
-    step(5, f"the model ({Q.shown('qwen', quant)})")   # 5
+    step(5, f"the model ({Q.shown('qfn', quant)})")   # 5
     files = qfn_files_step(a, d, quant)
     if files is None:
         return None
@@ -8520,7 +8524,7 @@ def model_option(a) -> str | None:
     if family == "glm":
         a.model = key
         return None
-    if family == "qwen" and key in Q.QFN_QUANTS:         # (Qwen3.8-Flash-Next itself, on saguaro-qfn: a quant of it)
+    if family == "qfn":                                # (Qwen3.8-Flash-Next itself, on saguaro-qfn: a quant of it)
         a.model, a.qfn_quant = QFN, key
         return None
     if family == "qwen":                                 # (its one GGUF: no quant to choose)
