@@ -94,6 +94,7 @@ import maya_bench as MB  # noqa: E402  --bench: the speed-test standard (one ses
 import calibrate_mm3_prefill as CPF  # noqa: E402  MiniMax's: how this PC reads prompts fastest (chunk, GEMMs)
 import hy4_fit as HY4F  # noqa: E402  Hy4-Flash: the layout for the cards a PC has
 import ik2_fit as IK2F  # noqa: E402  Inkling 2 Mini: one card or two
+import qfn_fit as QF  # noqa: E402  Qwen3.8-Flash-Next on NVIDIA: the fit, the context and the layer split
 
 WIN = S.WIN
 ME = "START-SAGUARO.bat" if WIN else "./saguaro.sh"      # how this is started, for the messages
@@ -768,8 +769,8 @@ FAMILY_SHOWN = {"glm": "GLM-5.3-Flash", "deepseek": DS4, "minimax": MM3, "qwen":
 # stops on them. Take one out when its engine builds and runs there - and update docs/AMD_SAGUARO.md's table with it.
 NO_ENGINE = {
     "hip": {"hy4": "Hy4-Flash runs on NVIDIA GPUs only for now (its engine has not run on an AMD GPU yet)"},
-    # (saguaro-qfn on NVIDIA: what mangonel serves, set up by hand - docs/MODELS.md; the setup offers it on AMD)
-    "cuda": {"qfn": f"the setup offers {QFN_SHOWN} on AMD GPUs for now (on NVIDIA it is set up by hand: docs/MODELS.md)"},
+    # (saguaro-qfn runs on NVIDIA too since T2: one card, or the layers split across up to four - qfn_fit; the
+    #  live 4x Tesla T4 server's hand-made configs remain the reference for what the setup writes)
     "metal": {f: "Saguaro's Mac (Metal) engine runs GLM-5.3-Flash only" for f in FAMILIES if f != "glm"},
 }
 NOT_HERE = ("Setup stopped: this model is not supported on this PC's GPU yet - nothing was built or downloaded. "
@@ -1489,6 +1490,9 @@ def choose_gpus(a, found, min_cc: int = MIN_CC, family: str = "") -> list:
             fail(f"--gpus takes GPU numbers as nvidia-smi numbers them, e.g. --gpus 0,1, not {a.gpus!r}")
         if family == "ik2" and len(want) > 2:
             fail(f"{IK2_SHOWN} runs on one GPU or two: --gpu 0, or --gpus 0,1")
+        if family == "qfn" and len(want) > QF.MAX_GROUP:
+            fail(f"{QFN_SHOWN} splits its layers across up to {QF.MAX_GROUP} GPUs (the measured layout: 4x Tesla T4): "
+                 "--gpus 0,1,2,3")
         if family == "ik2" and len(want) == 2:         # (the split: the larger card first - it holds the dense weights)
             want = sorted(want, key=lambda i: -float(byid.get(i, {}).get("vram_gb") or 0))
         if not 1 <= len(want) <= MAX_GPUS or len(set(want)) != len(want):
@@ -1501,6 +1505,8 @@ def choose_gpus(a, found, min_cc: int = MIN_CC, family: str = "") -> list:
         return [byid[i] for i in want]
     if family == "ik2":
         return choose_ik2_gpus(a, usable)
+    if family == "qfn" and usable:
+        return choose_qfn_gpus(a, usable)        # (none usable: the usual refusal below)
     if not usable:
         fail("none of the GPUs can run this model",
              f"it needs an NVIDIA GPU of compute capability {min_cc / 10:.1f} or newer (" +
@@ -1564,6 +1570,22 @@ def choose_ik2_gpus(a, usable: list) -> list:
     return opts[pick]["gpus"]
 
 
+def choose_qfn_gpus(a, usable: list) -> list:
+    """Qwen3.8-Flash-Next's cards (NVIDIA): one card of 20 GB or more alone (no split over the bus), else up to
+    four equal ones taking the layers in turn (the more cards, the more experts in VRAM - the live server: 4x
+    Tesla T4), else the largest one; asked when the PC has both (qfn_fit.best_gpus)."""
+    best = QF.best_gpus(usable)
+    big = sorted(usable, key=lambda g: (-round(float(g.get("vram_gb") or 0)), g.get("index", 0)))
+    if len(usable) == 1 or best == big[:1]:
+        return best
+    opts = [best, big[:1]]
+    rows = [(" + ".join(gpu_label(g) for g in o), "recommended" if i == 0 else None, QF.plan(o, mem_gb()[0])["said"])
+            for i, o in enumerate(opts)]
+    pick = choose("Which GPUs?", [f"{QFN_SHOWN} runs on one GPU, or splits its {QF.LAYERS} layers across up to "
+                                  f"{QF.MAX_GROUP} equal cards:"], rows, 0, a.yes or a.check)
+    return opts[pick]
+
+
 def oomd_active() -> bool:
     """Linux: systemd-oomd runs (stock Ubuntu 22.04 and newer; it ends a session's whole scope when its memory pressure
     stays over 50% for 20 s - a long load's page-cache reclaim can do that, #497)."""
@@ -1580,8 +1602,9 @@ def check_pc(a, family: str = "glm", gguf: bool = False, ds4_quant: str = "exl3"
         fail(f"{MM3}'s engine (maya-mm3) runs on Linux only for now (its Windows build is on the way)",
              f"set it up on a Linux PC with an NVIDIA GPU ({mm3_gpus()})")
     if family == "qfn" and family_unavailable("qfn", a.backend):   # (said before anything is built or downloaded)
-        fail(family_unavailable("qfn", a.backend), "it runs on a Linux PC with one AMD RDNA 3 / 4 GPU of 16 GB "
-             "or more and 96 GB of RAM", end=NOT_HERE)
+        fail(family_unavailable("qfn", a.backend), "it runs on a Linux PC with GPUs of 16 GB or more and 96 GB of "
+             "RAM: on AMD one RDNA 3 / 4 GPU, on NVIDIA one card or up to four equal ones splitting the layers",
+             end=NOT_HERE)
     if family in ("hy4", "ik2"):   # (said before anything is built or downloaded)
         why = IK2F.unsupported(a.backend, WIN, ik2_gpus_asked(a), []) if family == "ik2" else \
             family_unavailable(family, a.backend)
@@ -1609,7 +1632,7 @@ def check_pc(a, family: str = "glm", gguf: bool = False, ds4_quant: str = "exl3"
              "the engine needs an NVIDIA GPU and CUDA")
     min_cc = ((DS4_GGUF_MIN_CC if gguf else DS4_MIN_CC) if ds4 else (MM3_GGUF_MIN_CC if gguf else mm3_min_cc()) if mm3
               else QWEN_MIN_CC if family == "qwen" else HY4F.MIN_CC if family == "hy4"
-              else IK2F.MIN_CC if family == "ik2" else MIN_CC)
+              else IK2F.MIN_CC if family == "ik2" else QF.MIN_CC if family == "qfn" else MIN_CC)
     if S.is_wsl():
         warn("this is WSL2, which Saguaro does not support: WSL2's driver pins only about 1 GB of "
              "RAM for the GPU, and Saguaro's RAM tier pins tens of GB. Use a native Linux install.")
@@ -7344,10 +7367,12 @@ def qfn_about() -> str:
     m = qfn_entry()
     n = m["needs"]
     return (f"Qwen's Qwen3.8-Flash-Next itself (125B, 10 of 512 experts a token) in unsloth's GGUFs (UD-Q4_K_XL "
-            f"{m['download_gb']:.0f} GB, Q8_0 177 GB) on its own engine, saguaro-qfn (from Strata); AMD: one "
-            f"RDNA 3 / 4 GPU of {n.get('vram_gb', 15) + 1:.0f} GB or more with about {n.get('ram_gb', 88) + 8:.0f} GB of RAM - "
-            "the experts the GPU does not hold in RAM, the rest read from the SSD; MTP drafting, tool calls, up to a "
-            "256K context; text only. Not CYBER-FROST: the model as Qwen released it.")
+            f"{m['download_gb']:.0f} GB, Q8_0 177 GB) on its own engine, saguaro-qfn (from Strata); one GPU of "
+            f"{n.get('vram_gb', 15) + 1:.0f} GB or more with about {n.get('ram_gb', 88) + 8:.0f} GB of RAM: on AMD one RDNA "
+            "3 / 4 card (measured on an RX 9070 XT), on NVIDIA one card, or the layers split across up to four equal "
+            "ones (the live server: 4x Tesla T4) - the experts the cards do not hold in RAM, the rest read from the "
+            "SSD; MTP drafting, tool calls, up to a 256K context; text only. Not CYBER-FROST: the model as Qwen "
+            "released it.")
 
 
 def qfn_quant_fit(quant: str, vram: float, ram: float) -> str | None:
@@ -7463,9 +7488,12 @@ def qfn_ram_budget(ram: float) -> int:
 
 def write_config_qfn(a, pc: dict, meta: dict, quant: str, files: list, pack: Path, mtp: Path | None, ctx: int,
                      models: Path, d: Path, prev: dict) -> Path:
-    """maya-qwen3.8-flash-next-<quant>-hip.json and its start script: the engine's AMD settings as measured on an RX
-    9070 XT - one GPU, the RAM tier, MTP drafting, INT8 K/V (32K of it in VRAM), the K-quant prompt kernels; plain RoPE
-    up to 256K (YaRN past it).  A setup again keeps the config before's env, where the server listens and its key."""
+    """maya-qwen3.8-flash-next-<quant>[-hip].json and its start script: the engine's settings as measured - on AMD
+    on an RX 9070 XT (one GPU, the RAM tier, MTP drafting, INT8 K/V with 32K of it in VRAM, the K-quant prompt
+    kernels; plain RoPE up to 256K, YaRN past it), on NVIDIA the live 4x Tesla T4 configs' engine args where they
+    are generic and, for several cards, the layer split qfn_fit lays out; its T4 tuning env goes only where every
+    chosen card is compute capability 7.5.  A setup again keeps the config before's env, where the server listens
+    and its key."""
     step(8, "the configuration and the start script")
     port = a.port or 8080
     hip = pc.get("backend") == "hip"
@@ -7478,6 +7506,7 @@ def write_config_qfn(a, pc: dict, meta: dict, quant: str, files: list, pack: Pat
     if not profile.exists() and QFN_PROFILE.is_file():   # (the shipped ranking; the engine adds this PC's to it)
         shutil.copyfile(QFN_PROFILE, profile)
     ram = mem_gb()[0]
+    lay = QF.plan(pc["gpus"], ram, quant)              # (NVIDIA: one card or the layer split; adds nothing on AMD)
     args = ["--pack", str(pack), "--native", str(files[0])]
     if profile.exists():
         args += ["--expert-profile", str(profile), "--expert-profile-save", str(profile)]
@@ -7486,15 +7515,19 @@ def write_config_qfn(a, pc: dict, meta: dict, quant: str, files: list, pack: Pat
         args += ["--mtp", str(mtp)]
     args += ["--max-context", str(ctx), "--kv", "int8", "--kv-resident", str(min(ctx, 32768)),
              "--vram-reserve-mib", "700", "--session-dir", str(var / "sessions"),
-             "--resident-budget-gib", str(qfn_ram_budget(ram)),
-             "--rope-scaling", "yarn", "--rope-scale", "4", "--yarn-orig-ctx", "262144"]
+             "--resident-budget-gib", str(qfn_ram_budget(ram))]
+    if lay["layer_split"]:                             # (a split: each card its own layers' weights, pipelined reads)
+        args += lay["args"]
+    args += ["--rope-scaling", "yarn", "--rope-scale", "4", "--yarn-orig-ctx", "262144"]
     env = {"SAGUARO_NO_LARGEPAGES": "1", "SAGUARO_YARN_ELASTIC": "1", "SAGUARO_MMQ_KQ": "1",
+           **lay["env"],                               # (the live configs' T4 tuning: only when every card is sm_75)
            **(old.get("env") or {}), **parse_env(a.env)}
     inst = {"family": "qfn", "qwen_quant": quant, "engine": Q.QFN_ENGINE}
     sampling, effort = Q.model_defaults({"installer": inst})
     cfg = {"exe": str(qfn_exe()), "args": args, "env": env, "cwd": str(ROOT / "engines" / "qfn"),
            "tokenizer": str(pack / "tokenizer"), "model_name": name, **({"backend": "hip"} if hip else {}),
-           "gpu": [g["index"] for g in pc["gpus"]], "sampling": sampling,
+           "gpu": [g["index"] for g in pc["gpus"]],
+           **({"layer_split": lay["layer_split"]} if lay["layer_split"] else {}), "sampling": sampling,
            "lib_dirs": meta.get("lib_dirs") or old.get("lib_dirs") or [], "port": port}
     kept = []
     for k in ("host", "api_key", "cors_origins", "mcp_servers"):
@@ -7517,30 +7550,45 @@ def write_config_qfn(a, pc: dict, meta: dict, quant: str, files: list, pack: Pat
 
 
 def set_up_qfn(a, prev: dict) -> Path | None:
-    """Qwen3.8-Flash-Next on saguaro-qfn, steps 1-8: the PC (one AMD RDNA GPU; the quant's measured VRAM and RAM -
-    refused below them), the quant and the context, the engine (<build>/qfn/saguaro-qfn), the files (pinned,
-    sha256-checked; --gguf-dir: yours, in place), the pack, the MTP draft layer, the config."""
+    """Qwen3.8-Flash-Next on saguaro-qfn, steps 1-8: the PC (AMD: one RDNA GPU; NVIDIA: one card, or up to four
+    equal ones taking the layers in turn - qfn_fit; the quant's measured VRAM and RAM - refused below them), the
+    quant and the context, the engine (<build>/qfn/saguaro-qfn), the files (pinned, sha256-checked; --gguf-dir:
+    yours, in place), the pack, the MTP draft layer, the config."""
     inst = prev.get("installer") or {}
     prev_args = prev.get("args") or []
     prev_ctx = int(prev_args[prev_args.index("--max-context") + 1]) if "--max-context" in prev_args[:-1] else None
     pc = check_pc(a, "qfn")                            # 1
-    if len(pc["gpus"]) != 1:
-        fail(f"{QFN_SHOWN} runs on one GPU in this setup ({len(pc['gpus'])} chosen)", "pick one with --gpu N")
-    g = pc["gpus"][0]
-    if hip_unified_memory(g):
-        fail(f"{QFN_SHOWN} is not set up on an APU (Strix Halo / Gorgon Halo) yet: it was measured on a discrete GPU",
-             "another model, or set it up by hand (docs/AMD_SAGUARO.md)")
-    vram, ram = float(g.get("vram_gb") or 0), mem_gb()[0]
+    hip = pc.get("backend") == "hip"
+    if hip:
+        if len(pc["gpus"]) != 1:
+            fail(f"{QFN_SHOWN} runs on one GPU on AMD in this setup ({len(pc['gpus'])} chosen)",
+                 "pick one with --gpu N")
+        g = pc["gpus"][0]
+        if hip_unified_memory(g):
+            fail(f"{QFN_SHOWN} is not set up on an APU (Strix Halo / Gorgon Halo) yet: it was measured on a "
+                 "discrete GPU", "another model, or set it up by hand (docs/AMD_SAGUARO.md)")
     step(2, "your choices")                            # 2
+    vram = min(float(g.get("vram_gb") or 0) for g in pc["gpus"])   # every card caches its own layers' experts
+    ram = mem_gb()[0]
     quant = choose_qfn_quant(a, prev, vram, ram)
     m = qfn_entry(quant)
+    lay = QF.plan(pc["gpus"], ram, quant)
+    if not lay["fits"]:
+        fail(lay["reason"], "a PC with more RAM / VRAM, or another model")
     ok(f"model: {Q.shown('qfn', quant, m['download_gb'])} - Qwen's Qwen3.8-Flash-Next (Qwen Community License 1.0: "
        "LICENSE.qwen-community-1.0) on its own engine, saguaro-qfn")
-    ok(f"{QFN_SHOWN} on AMD: measured on an RX 9070 XT (gfx1201) with 96 GB of RAM (27-41 tok/s answers, 520-1,080 "
-       "tok/s 8K-16K prompt reads) - tell us how it goes on yours" + ("" if m.get("measured") else f"; {Q.QFN_QUANTS[quant]} is not measured on AMD yet"))
-    ok(f"the GPU holds the most-used experts, {qfn_ram_budget(ram)} GB of RAM the next ones, the SSD the rest")
-    ctx = choose_context(a, prev_ctx, QFN_CONTEXTS, QFN_DEFAULT_CONTEXT)
-    ok(f"context: {ctx} tokens" + (" (recommended)" if ctx == QFN_DEFAULT_CONTEXT else ""))
+    if hip:
+        ok(f"{QFN_SHOWN} on AMD: measured on an RX 9070 XT (gfx1201) with 96 GB of RAM (27-41 tok/s answers, "
+           "520-1,080 tok/s 8K-16K prompt reads) - tell us how it goes on yours" +
+           ("" if m.get("measured") else f"; {Q.QFN_QUANTS[quant]} is not measured on AMD yet"))
+        ok(f"the GPU holds the most-used experts, {qfn_ram_budget(ram)} GB of RAM the next ones, the SSD the rest")
+    else:
+        ok(f"layout: {lay['said']}" + (" - the live 4x Tesla T4 server's own split"
+                                       if lay["measured"] else " (not measured on these cards yet)"))
+        ok(f"the cards hold the most-used experts of their layers, {lay['resident_budget_gib']} GB of RAM the next "
+           "ones, the SSD the rest")
+    ctx = choose_context(a, prev_ctx, QFN_CONTEXTS, QFN_DEFAULT_CONTEXT if hip else lay["context"])
+    ok(f"context: {ctx} tokens" + (" (recommended)" if ctx == (QFN_DEFAULT_CONTEXT if hip else lay["context"]) else ""))
     models = (Path(a.models_dir).expanduser().resolve() if a.models_dir else
               Path(inst["models_dir"]) if inst.get("models_dir") else default_models_dir())
     d = models / m["name"]

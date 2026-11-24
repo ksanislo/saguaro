@@ -111,9 +111,9 @@ class Manifest(unittest.TestCase):
 
 
 class Offered(unittest.TestCase):
-    def test_amd_offers_nvidia_lists_with_the_reason(self):
+    def test_amd_and_nvidia_offer_it_metal_refuses(self):
         self.assertIsNone(maya.family_unavailable("qfn", "hip"))
-        self.assertIn("on AMD GPUs", maya.family_unavailable("qfn", "cuda"))
+        self.assertIsNone(maya.family_unavailable("qfn", "cuda"))    # (NVIDIA too since T2: qfn_fit lays the cards out)
         self.assertIn("Metal", maya.family_unavailable("qfn", "metal"))
         self.assertIsNone(maya.family_unavailable("qwen", "cuda"))   # (CYBER-FROST still everywhere it was)
 
