@@ -34,6 +34,17 @@
    }
   }
  },
+ "vision": {
+  "_": "Pictures: the model's vision tower as llama.cpp's mmproj, from unsloth's GGUF repo of Qwen/Qwen3.8-Flash-Next - its mmproj-BF16.gguf, the tower in its own BF16 (the same file the hand-made configs keep as mmproj-Qwen3.8-Flash-Next-BF16.gguf; the setup downloads it under that name). vision-qfn reads it with the model's GGUF opened for its vocabulary only; the encoder stays on the SSD and gets VRAM only while a picture is encoded (the config's elastic vision entry).",
+  "repo": "unsloth/Qwen3.8-Flash-Next-GGUF",
+  "revision": "efc50b7c3195a10eebd8d3e32f83b27b2aeb239d",
+  "files": {
+   "mmproj-Qwen3.8-Flash-Next-BF16.gguf": [907542944, "2e788f8c511d8093c7b43cb87b2fd7e14228340318057f8fb20c86df2efe2355"]
+  },
+  "hub_names": {
+   "mmproj-Qwen3.8-Flash-Next-BF16.gguf": "mmproj-BF16.gguf"
+  }
+ },
  "mtp": {
   "_": "The draft layer: Qwen3.8-Flash-Next's MTP layer in Lamina's runtime format (eddoursul), trained further on UD-Q4_K_XL's and IQ3_S's output; Qwen Community License 1.0 (its LICENSE). --mtp <folder>.",
   "repo": "eddoursul/Lamina-Qwen3.8-Flash-Next-MTP",

@@ -731,6 +731,22 @@ QFN_CONTEXTS = [32768, 65536, 131072, 262144]
 QFN_DEFAULT_CONTEXT = 65536                        # (measured: 64K, prompts up to 60K tokens)
 QFN_RAM_SPARE_GB = 20                              # (RAM left beside the RAM tier: the OS, the server, the page cache)
 QFN_DEFAULT_QUANT = "ud-q4_k_xl"
+QFN_VBUILD = ROOT / "build-vision-qfn"             # QFN's picture reader's build folder (engines/qfn/tools/vision,
+                                                   #  the llama.cpp tree at engines/qfn's pin): beside vision-glm's,
+                                                   #  which is built from tools/vision at the GLM path's pin
+QFN_VSTAMP = QFN_VBUILD / "MAYA-BUILD.json"
+QFN_VISION_SRC = ("engines/qfn/tools/vision",)     # (what its source hash covers)
+# the config's vision entry as the live T4 machine runs it: one picture becomes at most max_tokens image tokens;
+# elastic: the reader stays down until a picture arrives, runs on elastic_mib of VRAM the engine lends it from its
+# expert cache, stops after elastic_idle_s without one and keeps its weights hot in the file cache elastic_keep_s
+# longer, so the next start loads them from RAM (serve/server.py start_qfn, serve/qfn_engine.py Vision)
+QFN_VISION = {"max_tokens": 1024, "elastic": True, "elastic_mib": 1536, "elastic_idle_s": 30, "elastic_keep_s": 600}
+
+
+def qfn_vision_exe(hip: bool) -> Path:
+    """QFN's picture reader: <build-vision-qfn>/bin/vision-qfn - vision-qfn-hip on AMD, where the GPU reader is its
+    own program (engines/qfn/tools/vision/CMakeLists.txt names it so)."""
+    return QFN_VBUILD / "bin" / (("vision-qfn-hip" if hip else "vision-qfn") + (".exe" if WIN else ""))
 # Hy4-Flash (Tencent's Hy4-flash, a 512-expert MoE with an n-gram table) on its own engine, build/saguaro-hy4:
 # Project Maya's GGUF quants (tools/hy4/download.json - a size's trunk, the n-gram table every size shares and the
 # vision tower's mmproj), packed by tools/hy4/pack_gguf.py.  NVIDIA on Linux; measured on 4x Tesla T4 (hy4_fit.py)
@@ -7344,8 +7360,9 @@ def qfn_about() -> str:
     return (f"Qwen's Qwen3.8-Flash-Next itself (125B, 10 of 512 experts a token) in unsloth's GGUFs (UD-Q4_K_XL "
             f"{m['download_gb']:.0f} GB, Q8_0 177 GB) on its own engine, saguaro-qfn (from Strata); AMD: one "
             f"RDNA 3 / 4 GPU of {n.get('vram_gb', 15) + 1:.0f} GB or more with about {n.get('ram_gb', 88) + 8:.0f} GB of RAM - "
-            "the experts the GPU does not hold in RAM, the rest read from the SSD; MTP drafting, tool calls, up to a "
-            "256K context; text only. Not CYBER-FROST: the model as Qwen released it.")
+        "the experts the GPU does not hold in RAM, the rest read from the SSD; MTP drafting, tool calls, up to a "
+        "256K context; pictures with its vision tower (the reader starts when the first one arrives). Not "
+        "CYBER-FROST: the model as Qwen released it.")
 
 
 def qfn_quant_fit(quant: str, vram: float, ram: float) -> str | None:
@@ -7452,6 +7469,110 @@ def qfn_mtp_step(a, models: Path) -> Path | None:
     return d
 
 
+def qfn_vision_model() -> dict | None:
+    """The model's vision tower as offer_download's form (tools/qfn/download.json's "vision": llama.cpp's mmproj of
+    the tower, unsloth's BF16 - the file the hand-made configs keep as mmproj-Qwen3.8-Flash-Next-BF16.gguf, which is
+    its name here too), or None when the manifest names none."""
+    man = read_json(QFN_MANIFEST).get("vision") or {}
+    if not man.get("files") or not man.get("repo") or not man.get("revision"):
+        return None
+    return {"about": f"{QFN_SHOWN}'s vision tower (it lets the model read pictures): llama.cpp's mmproj from "
+                     "unsloth's GGUF repo, the tower in its own BF16", "format": "mmproj",
+            "repo": man["repo"], "revision": man["revision"], "folder": man.get("folder", ""),
+            "hub_names": dict(man.get("hub_names") or {}),
+            "files": {k: v[0] for k, v in man["files"].items()}, "sha256": {k: v[1] for k, v in man["files"].items()},
+            "download_gb": sum(v[0] for v in man["files"].values()) / 1e9}
+
+
+def compile_vision_qfn(pc, meta, llama: Path, src: str) -> bool:
+    """vision-qfn: llama.cpp's mtmd at engines/qfn's pin with Qwen3.8-Flash-Next's tower added
+    (engines/qfn/tools/vision), for the same GPUs and toolkit as the QFN engine - its own build folder, its own
+    stamp: the tree is at another llama.cpp commit than vision-glm's (compile_vision)."""
+    cmake = pick_cmake()
+    if cmake is None:
+        return False
+    hip = pc.get("backend") == "hip"
+    gen = re.search(r"^CMAKE_GENERATOR:INTERNAL=(.*)$",
+                    (QFN_VBUILD / "CMakeCache.txt").read_text(errors="replace"), re.M) \
+        if (QFN_VBUILD / "CMakeCache.txt").exists() else None
+    ninja = venv_tool("ninja") or shutil.which("ninja")
+    conf = [cmake]
+    if ninja and (gen is None or gen.group(1).strip() == "Ninja"):
+        conf += ["-G", "Ninja", f"-DCMAKE_MAKE_PROGRAM={ninja}"]
+    archs = meta.get("archs") or pc.get("archs") or []
+    conf += ["-S", str(ROOT / "engines" / "qfn" / "tools" / "vision"), "-B", str(QFN_VBUILD),
+             "-DCMAKE_BUILD_TYPE=Release", f"-DLLAMA_DIR={llama}", "-DSTRATA_PORTABLE=OFF"]
+    env = vcvars = bindir = None
+    if hip:
+        conf += ["-DSTRATA_VISION_HIP=ON", "-DSTRATA_VISION_HIP_ARCHS=" + ";".join(str(x) for x in archs)]
+        if WIN:                                        # (ROCm's clang for the host code too, in VS's environment,
+                                                       #  as the engine and vision-glm)
+            root, clang, bindir, env = hip_toolchain(pc)
+            conf += [f"-DCMAKE_C_COMPILER={(clang.parent / 'clang.exe').as_posix()}",
+                     f"-DCMAKE_CXX_COMPILER={clang.as_posix()}", f"-DCMAKE_HIP_COMPILER_ROCM_ROOT={root.as_posix()}"]
+            vcvars = S.find_vcvars(cuda=False)
+        else:
+            conf.append("-DCMAKE_EXE_LINKER_FLAGS=-no-pie")   # (ggml-hip's objects: the engine's build says the same)
+        if S.ARM and S.arm_cpu_arch():
+            conf.append(f"-DGGML_CPU_ARM_ARCH={S.arm_cpu_arch()}")
+    else:
+        conf += ["-DSTRATA_VISION_CUDA=ON", "-DCMAKE_CUDA_ARCHITECTURES=" + ";".join(str(x) for x in archs),
+                 f"-DCMAKE_CUDA_COMPILER={meta.get('nvcc') or pc['nvcc']}",
+                 *toolkit_root_defs(meta.get("nvcc") or pc["nvcc"])]
+        if S.ARM and S.arm_cpu_arch():
+            conf.append(f"-DGGML_CPU_ARM_ARCH={S.arm_cpu_arch()}")
+    jobs = max(2, min((os.cpu_count() or 4) // 2, int(mem_gb()[0] // 4) or 2))
+    say("  Compiling QFN's picture reader (llama.cpp's image library with " +
+        ("HIP" if hip else "CUDA") + " kernels: 10-20 minutes, once) ...")
+    if cmake_steps(conf, [cmake, "--build", str(QFN_VBUILD), "--target", "strata-vision", "-j", str(jobs)],
+                   env, "build-vision-qfn.bat", vcvars=vcvars, nvcc=None if hip else meta.get("nvcc") or pc["nvcc"]):
+        return False
+    vexe = qfn_vision_exe(hip)
+    if bindir is not None and vexe.exists():
+        copy_hip_dlls(bindir, vexe.parent)
+    QFN_VSTAMP.write_text(json.dumps({"src": src, "archs": archs, "llama": str(llama), "backend": pc.get("backend"),
+                                      "date": time.strftime("%Y-%m-%d %H:%M")}, indent=1), encoding="utf-8")
+    return vexe.exists()
+
+
+def qfn_vision_step(a, pc: dict, meta: dict, llama: Path, d: Path, files: list) -> dict | None:
+    """Step 7: the config's "vision" entry - the picture reader with the model's mmproj and its first GGUF shard
+    (opened for the vocabulary only) - or None (text only, said why).  The entry is the live machine's elastic one:
+    the server starts the reader only when a picture arrives, on VRAM the engine lends it, and takes the room back
+    while it is idle; the engine gets --vision, which lets picture requests through (serve/server.py start_qfn)."""
+    step(7, "images (the picture reader)")
+    if a.no_vision:
+        ok("skipped (--no-vision): the model reads text only")
+        return None
+    m = qfn_vision_model()
+    if m is None:
+        warn(f"{QFN_MANIFEST} names no vision tower: the model reads text only")
+        return None
+    vd = d / "vision"
+    got = [vd / n for n in m["files"]]
+    if any(file_incomplete(m, f) for f in got) and not offer_download(a, "the vision tower", vd, got, m):
+        warn(f"the vision tower was not downloaded: the model reads text only ({ME} --setup asks again)")
+        return None
+    for f in got:                                      # (offer_download checked the ones it fetched; these too)
+        if not sha256_checked(f, m["sha256"][f.name]):
+            f.unlink(missing_ok=True)                  # else the next run finds it complete and fails here again
+            fail(f"{f}: the sha256 does not match the published one (the file was removed)", "run the setup again")
+    hip = pc.get("backend") == "hip"
+    vexe = qfn_vision_exe(hip)
+    src = S.source_hash(QFN_VISION_SRC)
+    vmeta = read_json(QFN_VSTAMP)
+    if not (vexe.exists() and not a.rebuild and vmeta.get("src") == src and vmeta.get("backend") == pc.get("backend")
+            and set(meta.get("archs") or pc.get("archs") or []) <= set(vmeta.get("archs") or [])):
+        if not compile_vision_qfn(pc, meta, llama, src):
+            warn("QFN's picture reader did not compile (the reason is above): the model reads text only - "
+                 f"{ME} --setup --rebuild tries again")
+            return None
+    ok(f"pictures: ON - {vexe} with {got[0].name} ({m['download_gb']:.1f} GB on the SSD); it starts when the first "
+       f"picture arrives, on {QFN_VISION['elastic_mib']} MiB the engine lends it, and stops "
+       f"{QFN_VISION['elastic_idle_s']:.0f} s after the last one")
+    return {"exe": str(vexe), "mmproj": str(got[0]), "model": str(files[0]), "gpu": True, **QFN_VISION}
+
+
 def qfn_ram_budget(ram: float) -> int:
     """The RAM tier (GiB) for a PC with `ram` GiB: all but QFN_RAM_SPARE_GB (measured on 91.7 GiB with an RX 9070 XT: 72
     against 64 answered 32% faster and read prompts 20% faster - nearly every expert the card does not hold in RAM -
@@ -7460,11 +7581,12 @@ def qfn_ram_budget(ram: float) -> int:
 
 
 def write_config_qfn(a, pc: dict, meta: dict, quant: str, files: list, pack: Path, mtp: Path | None, ctx: int,
-                     models: Path, d: Path, prev: dict) -> Path:
+                     models: Path, d: Path, prev: dict, vision: dict | None = None) -> Path:
     """maya-qwen3.8-flash-next-<quant>-hip.json and its start script: the engine's AMD settings as measured on an RX
     9070 XT - one GPU, the RAM tier, MTP drafting, INT8 K/V (32K of it in VRAM), the K-quant prompt kernels; plain RoPE
-    up to 256K (YaRN past it).  A setup again keeps the config before's env, where the server listens and its key."""
-    step(8, "the configuration and the start script")
+    up to 256K (YaRN past it); pictures with the elastic vision entry when the reader is there.  A setup again keeps
+    the config before's env, where the server listens and its key."""
+    step(9, "the configuration and the start script")
     port = a.port or 8080
     hip = pc.get("backend") == "hip"
     cfg_path = ROOT / f"{Q.config_stem('qfn', quant)}{'-hip' if hip else ''}.json"
@@ -7486,6 +7608,8 @@ def write_config_qfn(a, pc: dict, meta: dict, quant: str, files: list, pack: Pat
              "--vram-reserve-mib", "700", "--session-dir", str(var / "sessions"),
              "--resident-budget-gib", str(qfn_ram_budget(ram)),
              "--rope-scaling", "yarn", "--rope-scale", "4", "--yarn-orig-ctx", "262144"]
+    if vision is not None:                             # (pictures: GENI requests, each image's rows at its pad tokens)
+        args.append("--vision")
     env = {"SAGUARO_NO_LARGEPAGES": "1", "SAGUARO_YARN_ELASTIC": "1", "SAGUARO_MMQ_KQ": "1",
            **(old.get("env") or {}), **parse_env(a.env)}
     inst = {"family": "qfn", "qwen_quant": quant, "engine": Q.QFN_ENGINE}
@@ -7493,7 +7617,8 @@ def write_config_qfn(a, pc: dict, meta: dict, quant: str, files: list, pack: Pat
     cfg = {"exe": str(qfn_exe()), "args": args, "env": env, "cwd": str(ROOT / "engines" / "qfn"),
            "tokenizer": str(pack / "tokenizer"), "model_name": name, **({"backend": "hip"} if hip else {}),
            "gpu": [g["index"] for g in pc["gpus"]], "sampling": sampling,
-           "lib_dirs": meta.get("lib_dirs") or old.get("lib_dirs") or [], "port": port}
+           "lib_dirs": meta.get("lib_dirs") or old.get("lib_dirs") or [], "port": port,
+           **({"vision": vision} if vision else {})}
     kept = []
     for k in ("host", "api_key", "cors_origins", "mcp_servers"):
         if old.get(k) is not None:
@@ -7515,7 +7640,7 @@ def write_config_qfn(a, pc: dict, meta: dict, quant: str, files: list, pack: Pat
 
 
 def set_up_qfn(a, prev: dict) -> Path | None:
-    """Qwen3.8-Flash-Next on saguaro-qfn, steps 1-8: the PC (one AMD RDNA GPU; the quant's measured VRAM and RAM -
+    """Qwen3.8-Flash-Next on saguaro-qfn, steps 1-9: the PC (one AMD RDNA GPU; the quant's measured VRAM and RAM -
     refused below them), the quant and the context, the engine (<build>/qfn/saguaro-qfn), the files (pinned,
     sha256-checked; --gguf-dir: yours, in place), the pack, the MTP draft layer, the config."""
     inst = prev.get("installer") or {}
@@ -7552,9 +7677,10 @@ def set_up_qfn(a, prev: dict) -> Path | None:
     if files is None:
         return None
     pack = qfn_pack_step(a, d, files, llama)           # 6
-    step(7, "the MTP draft layer")                     # 7
+    vision = qfn_vision_step(a, pc, meta, llama, d, files)   # 7
+    step(8, "the MTP draft layer")                     # 8
     mtp = qfn_mtp_step(a, models)
-    return write_config_qfn(a, pc, meta, quant, files, pack, mtp, ctx, models, d, prev)   # 8
+    return write_config_qfn(a, pc, meta, quant, files, pack, mtp, ctx, models, d, prev, vision)   # 9
 
 
 # ------------------------------------------------------------------------------------------------ Hy4-Flash, Inkling 2 Mini
