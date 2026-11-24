@@ -269,17 +269,18 @@ HIP_VISIBLE_DEVICES=0 ctest --test-dir build-qfn-hip --output-on-failure
 ```
 
 Measured on an RX 9070 XT (16 GB, gfx1201, ROCm 7.1) with a Ryzen 7 9800X3D and 96 GB of DDR5, the model on a PCIe 4.0
-NVMe, 64K context, MTP drafting on, 256-token greedy answers to fresh prompts (one load, 2026-11-23):
+NVMe, with the config the setup writes (64K context, MTP drafting on, a 71 GB RAM tier), 256-token greedy answers to
+fresh prompts (one load, 2026-11-23):
 
 | prompt | 1K | 4K | 8K | 16K | 32K | 60K |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| prompt read, tok/s | 101 | 387 | 601 | 841 | 744 | 760 |
-| decode, tok/s | 40.8 | 28.3 | 34.4 | 35.3 | 37.9 | 33.8 |
+| prompt read, tok/s | 116 | 274 | 524 | 1,079 | 805 | 924 |
+| decode, tok/s | 27.5 | 34.3 | 40.9 | 40.5 | 39.8 | 34.9 |
 
-Load 42 s (the 64 GiB RAM tier copied from the NVMe in 23 s). The card holds 2,960 experts (8.7 GiB) next to the
-dense weights, the K/V and the draft head; 53-69% of the decode's experts were in it and every other one in the RAM
-tier, none read from the drive while answering (the 7.7 GiB of experts outside the RAM tier stay in the page cache);
-a prompt read pulls 0.1-0.5 MB per prompt token from the drive.
+Load 45 s. The card holds 2,997 experts (8.8 GiB) next to the dense weights, the K/V and the draft head, the RAM tier
+69.6 GiB - all but 2 GiB of the experts the card does not hold; 53-66% of the decode's experts were in the card and the
+rest in RAM, none read from the drive while answering; a whole prompt read pulled 0.07-0.65 GB from the drive. Answers
+vary about 25% in speed from load to load on the same text here.
 
 Correctness against the T4 build (the same five 12-29K-token prompts, 5,150 teacher-forced positions): KL 0.0057, the
 same top token 96.8% of the time (99.8% where the T4 is confident), perplexity 0.2% lower; the T4 against itself is
