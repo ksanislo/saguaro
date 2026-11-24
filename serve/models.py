@@ -13,10 +13,16 @@ A config's settings, as the page shows them (None: the engine's own default, or 
   Inkling 2: prefill_chunk (--chunk), cpu_threads (--threads), kv ("f16" | "fp8": SAGUARO_IK2_KV), draft ("auto" |
              "dspark" | "none": --drafting), parallel (--parallel: one GPU holding every expert); one or two GPUs
              (--gpus kept with them); no reserve (saguaro-ik2 stops at a flag it does not know)
-  CYBER-FROST (the `maya` engine's Qwen path; its server always loads the MTP drafter - "none" is --mtp-max-t 1):
-             draft ("mtp" | "none"), expert_cache, prefill, kv ("fp16" | "int8" |
-             "k8v4" | "q4_0"), ram_gb (the experts' RAM tier, SAGUARO_EXPERT_RAM_GB); no images (text only)
-apply() writes them back into the config's "args", "env", "gpu" and "vision" - its other keys as they are."""
+   CYBER-FROST (the `maya` engine's Qwen path; its server always loads the MTP drafter - "none" is --mtp-max-t 1):
+              draft ("mtp" | "none"), expert_cache, prefill, kv ("fp16" | "int8" |
+              "k8v4" | "q4_0"), ram_gb (the experts' RAM tier, SAGUARO_EXPERT_RAM_GB); no images (text only)
+   QFN (saguaro-qfn, its own engine and family; SAGUARO_EXPERT_RAM_GB does nothing here): draft ("mtp" | "none":
+              off is --mtp-max-t 1 with --mtp kept), expert_cache, prefill, kv ("fp16" | "int8" | "k8v4" | "q4_0"),
+              kv_resident (--kv-resident: the K/V positions kept in VRAM), ram_gib (the experts' RAM tier,
+              --resident-budget-gib), parallel (the config's own "parallel" key, not an engine flag), images
+              (the engine's --vision with the setup's vision entry)
+apply() writes them back into the config's "args", "env", "gpu", "vision" and "parallel" - its other keys as they
+are; keys the family does not have are refused ("not a setting of this model")."""
 from __future__ import annotations
 
 import copy
@@ -66,6 +72,10 @@ DS4_KEYS = ("context", "images", "gpus", "reserve_mib", "env", "parallel", "draf
 MM3_KEYS = ("context", "images", "gpus", "env", "parallel", "draft", "tp", "kv_cache", "kv_streaming", "kv_resident",
             "cpu_threads", "reserve_gb", "prefill_chunk", "cache_gb", "dspark_conf")
 QWEN_KEYS = ("context", "images", "gpus", "reserve_mib", "env", "draft", "expert_cache", "prefill", "kv", "ram_gb")
+# QFN's own field set (saguaro-qfn): its RAM tier is the engine argument --resident-budget-gib (the Qwen path's
+# SAGUARO_EXPERT_RAM_GB does nothing here), several answers at once are the config's own "parallel" key
+QFN_KEYS = ("context", "images", "gpus", "reserve_mib", "env", "parallel", "draft", "expert_cache", "prefill",
+            "kv", "kv_resident", "ram_gib")
 IK2_KEYS = ("context", "images", "gpus", "env", "prefill_chunk", "cpu_threads", "kv", "draft", "parallel")
 HY4_KEYS = ("context", "images", "gpus", "env", "draft", "tp", "reserve_gb", "prefill_chunk", "cpu_threads", "kv")
 HY4_KV = ("auto", "q8", "f16")                                    # saguaro-hy4 --kv (the latent cache's rows)
@@ -332,6 +342,14 @@ def qwen_mtp(cfg: dict) -> Path | None:
     return None
 
 
+def qfn_mtp(cfg: dict) -> Path | None:
+    """QFN's Lamina draft layer: the folder its config drafts with (--mtp, the setup's download beside the model);
+    None when the config names none or that folder is not on this PC."""
+    p = flag(cfg.get("args") or [], "--mtp")
+    d = Path(p) if p else None
+    return d if d is not None and d.is_dir() else None
+
+
 def mm3_pack_has(cfg: dict, key: str) -> bool:
     """MiniMax's pack indexes `key` (mm3.txt: "dspark.num_hidden_layers" its drafter, "vision.hidden_size" its vision
     tower - saguaro.py's checks)."""
@@ -366,7 +384,11 @@ def choices(cfg: dict) -> dict:
     if family(cfg) == "deepseek":
         return {"draft": ["dspark", "none"] if ds4_has_drafter(cfg) else ["none"],
                 "images": ds4_has_vision(cfg) or "--vision" not in (cfg.get("args") or [])}
-    if family(cfg) in ("qwen", "qfn"):                 # (images: the setup's vision-glm entry, on or kept off)
+    if family(cfg) == "qfn":                           # (images: the engine's --vision, the setup's vision entry)
+        return {"draft": ["mtp", "none"] if qfn_mtp(cfg) is not None else ["none"],
+                "images": bool(cfg.get("vision") or cfg.get("vision_off")
+                               or "--vision" in [str(a) for a in (cfg.get("args") or [])])}
+    if family(cfg) == "qwen":                          # (images: the setup's vision-glm entry, on or kept off)
         return {"draft": ["mtp", "none"] if qwen_mtp(cfg) is not None else ["none"],
                 "images": bool(cfg.get("vision") or cfg.get("vision_off"))}
     f = dflash_file(cfg)
@@ -404,7 +426,17 @@ def settings_of(cfg: dict) -> dict:
                    reserve_gb=_float(flag(args, "--reserve-gb")), prefill_chunk=_int(flag(args, "--chunk")),
                    cache_gb=_float(flag(args, "--cache-gb")), dspark_conf=_float(flag(args, "--dspark-conf")))
         return out
-    if family(cfg) in ("qwen", "qfn"):                 # (QFN's settings beside CYBER-FROST's)
+    if family(cfg) == "qfn":                           # (saguaro-qfn's own fields; see QFN_KEYS)
+        ec, pf = flag(args, "--expert-cache", "auto"), flag(args, "--prefill", "auto")
+        out.update(images=bool(cfg.get("vision")) or "--vision" in [str(a) for a in args],
+                   reserve_mib=_int(flag(args, "--vram-reserve-mib")),
+                   parallel=_int(cfg.get("parallel"), 1),
+                   draft="mtp" if flag(args, "--mtp") and flag(args, "--mtp-max-t") != "1" else "none",
+                   expert_cache=None if ec == "auto" else _int(ec), prefill=None if pf == "auto" else _int(pf),
+                   kv=flag(args, "--kv", "fp16"), kv_resident=_int(flag(args, "--kv-resident")),
+                   ram_gib=_int(flag(args, "--resident-budget-gib")))
+        return out
+    if family(cfg) == "qwen":
         ec, pf = flag(args, "--expert-cache", "auto"), flag(args, "--prefill", "auto")
         ram = env.get("SAGUARO_EXPERT_RAM_GB")
         out.update(images=bool(cfg.get("vision")), reserve_mib=_int(flag(args, "--vram-reserve-mib")),
@@ -478,8 +510,8 @@ def apply(cfg: dict, settings: dict) -> dict:
         raise ValueError("the settings must be a JSON object")
     fam = family(cfg)
     ds4 = fam == "deepseek"
-    known = {"minimax": MM3_KEYS, "deepseek": DS4_KEYS, "qwen": QWEN_KEYS, "qfn": QWEN_KEYS, "ik2": IK2_KEYS,
-             "hy4": HY4_KEYS}.get(fam, GLM_KEYS)   # (QFN's settings are the Qwen path's QWEN_KEYS)
+    known = {"minimax": MM3_KEYS, "deepseek": DS4_KEYS, "qwen": QWEN_KEYS, "qfn": QFN_KEYS, "ik2": IK2_KEYS,
+             "hy4": HY4_KEYS}.get(fam, GLM_KEYS)   # (QFN has its own field set: QFN_KEYS, not CYBER-FROST's QWEN_KEYS)
     if fam in ONE_AT_A_TIME and settings.get("parallel") not in (None, "", 1):
         raise ValueError(ONE_AT_A_TIME[fam])
     if fam in ONE_AT_A_TIME:
@@ -608,7 +640,47 @@ def apply(cfg: dict, settings: dict) -> dict:
         #  answers one at a time; drafting is off while it is above 1)
         par = _num(s, "parallel", 1, 8, "Answers at once", none_ok=False)
         args = set_flag(args, "--parallel", par) if par > 1 or "--parallel" in args else args
-    elif fam in ("qwen", "qfn"):
+    elif fam == "qfn":
+        # (saguaro-qfn's own: the RAM tier is --resident-budget-gib, several answers at once are the config's
+        #  "parallel" key (the driver turns it into --batch), and drafting off is --mtp-max-t 1 with --mtp kept)
+        if s.get("draft") not in can["draft"]:
+            raise ValueError("Drafting: this setup did not download the MTP draft layer (run the setup again)"
+                             if s.get("draft") == "mtp" else "Drafting: MTP or none")
+        if qfn_mtp(cfg) is not None:   # (loaded either way - the drafts are what "none" switches off)
+            args = set_flag(args, "--mtp", qfn_mtp(cfg))
+        if flag(args, "--mtp") is not None:
+            args = drop_flag(args, "--mtp-max-t") if s["draft"] == "mtp" else set_flag(args, "--mtp-max-t", 1)
+        par = _num(s, "parallel", 1, 8, "Answers at once", none_ok=False)
+        if par > 1:
+            out["parallel"] = par
+        else:
+            out.pop("parallel", None)          # (1 or absent: the engine answers one at a time either way)
+        # Images: the engine's bare --vision flag with the config's vision entry (vision-qfn with the model's
+        # mmproj); off keeps the entry as "vision_off", so Images can be switched on again
+        if s.get("images") and not out.get("vision"):
+            if not out.get("vision_off"):
+                raise ValueError("Images: this model runs text only: its image encoder (vision-qfn with the "
+                                 "model's mmproj file) is not set up here")
+            out["vision"] = out.pop("vision_off")
+        elif not s.get("images") and out.get("vision"):
+            out["vision_off"] = out.pop("vision")
+        args = [x for x in args if x != "--vision"] + (["--vision"] if out.get("vision") else [])
+        args = set_flag(args, "--vram-reserve-mib", reserve) if reserve is not None else \
+            drop_flag(args, "--vram-reserve-mib")
+        ec = _num(s, "expert_cache", 1, 1000000, "Expert cache")
+        args = set_flag(args, "--expert-cache", "auto" if ec is None else ec)
+        pf = _num(s, "prefill", 64, 65536, "Prompt chunk")
+        args = set_flag(args, "--prefill", "auto" if pf is None else pf)
+        kv = str(s.get("kv") or "fp16")
+        if kv not in QWEN_KV:
+            raise ValueError("KV cache: " + ", ".join(f.upper() for f in QWEN_KV))
+        args = set_flag(args, "--kv", kv) if kv != "fp16" or "--kv" in args else args
+        kr = _num(s, "kv_resident", 1024, 1048576, "K/V kept in VRAM")
+        args = set_flag(args, "--kv-resident", kr) if kr is not None else drop_flag(args, "--kv-resident")
+        rg = _num(s, "ram_gib", 1, 4096, "RAM for the experts")
+        args = set_flag(args, "--resident-budget-gib", rg) if rg is not None else \
+            drop_flag(args, "--resident-budget-gib")
+    elif fam == "qwen":
         if s.get("draft") not in can["draft"]:
             raise ValueError("Drafting: this pack has no MTP drafter (the setup builds it)" if s.get("draft") == "mtp"
                              else "Drafting: MTP or none")
@@ -892,6 +964,8 @@ def describe(path: Path, running: str | None) -> dict:
         used = None
     cur = shown_settings(cfg)
     setup = dict(inst.get("as_set_up") or cur)
+    if family(cfg) == "qfn":                           # (an as_set_up from before QFN's own field set: its CYBER-
+        setup = {k: v for k, v in setup.items() if k in QFN_KEYS}   # FROST keys (ram_gb!) would be refused on Reset)
     setup["env"] = shown_env(setup.get("env"))
     return {"file": path.name, "path": str(path), "model": cfg.get("model_name") or "", "family": family(cfg),
             "quant": quant_label(cfg, path), "backend": cfg.get("backend") or "cuda", "written": inst.get("written"),
@@ -968,7 +1042,7 @@ def _commit(path: Path, cfg: dict, new: dict) -> dict:
     """`new` written over the config at `path` (`cfg` as it was): its settings before kept beside it (<config>.prev), and
     the first time the page changes it, what the setup wrote (installer.as_set_up).  "changed": the engine's command or
     environment is not what it was - a restart is due (a Turbo marker alone is not one)."""
-    engine = ("args", "env", "gpu", "vision", "vision_off")
+    engine = ("args", "env", "gpu", "vision", "vision_off", "parallel")
     changed = any(new.get(k) != cfg.get(k) for k in engine)
     if new == cfg:
         return {"changed": False}

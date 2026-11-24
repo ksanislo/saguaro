@@ -140,7 +140,8 @@ function closeEditor() {
 }
 
 // the draft as the server takes it: "" -> the default (null), a number typed -> a number
-const NUMS = ["context", "parallel", "reserve_mib", "expert_cache", "prefill", "kv_resident", "tp", "prefill_chunk", "cpu_threads"];
+const NUMS = ["context", "parallel", "reserve_mib", "expert_cache", "prefill", "kv_resident", "ram_gib", "tp",
+              "prefill_chunk", "cpu_threads"];
 const DECS = ["reserve_gb", "cache_gb", "dspark_conf"];   // (a decimal: 0.7, 1.5)
 function toSend(d) {
   const out = {...d};
@@ -292,7 +293,8 @@ function fieldsOf(m, d) {
   if (m.family === "ik2") return ik2Fields(m, d, ch, gpus);
   if (m.family === "hy4") return hy4Fields(m, d, s, ch, images, gpus);
   if (m.family === "minimax") return mm3Fields(m, d, s, ch, images, gpus);
-  if (m.family === "qwen" || m.family === "qfn") return qwenFields(m, d, s, ch, gpus);   // (QFN's Engine page: the same fields)
+  if (m.family === "qfn") return qfnFields(m, d, s, ch, gpus);   // (QFN's own field set: serve/models.py's QFN_KEYS)
+  if (m.family === "qwen") return qwenFields(m, d, s, ch, gpus);
   if (glm) {
     const ec = AutoOr({label: "Expert cache", k: "expert_cache", d, dflt: 1200, unit: "experts", subLabel: "Experts in the first GPU's pool"});
     const pf = AutoOr({label: "Prompt chunk", k: "prefill", d, dflt: 8192, unit: "tokens", subLabel: "Tokens a prompt is read in at a time"});
@@ -548,6 +550,58 @@ function qwenFields(m, d, s, ch, gpus) {
         below=${pf.below} warn=${whole(d.prefill) ? null : "A whole number, or Auto."}>${pf.ctl}<//>`,
       html`<${Row} label="KV cache" flag="--kv" changed=${ch("kv")}
         hint="The attention cache's format: INT8 the setup's (the model card's own), FP16 exact, K8 V4 and Q4_0 smaller - more VRAM for experts at long contexts.">
+        <${Seg} label="KV cache" value=${kv.id} options=${QWEN_KV.map((f) => ({id: f.id, label: f.label}))}
+          onChange=${(v) => setDraft({kv: v})}/><//>`]},
+  ];
+}
+
+// QFN's (saguaro-qfn, its own engine and family): the experts' RAM tier is the engine's --resident-budget-gib
+// (the CYBER-FROST path's SAGUARO_EXPERT_RAM_GB does nothing here), the K/V window in VRAM is --kv-resident, and
+// several answers at once are the config's own "parallel" key (its driver turns that into the engine's --batch)
+function qfnFields(m, d, s, ch, gpus) {
+  const mtp = m.choices.draft.includes("mtp");
+  const kv = QWEN_KV.find((f) => f.id === d.kv) || QWEN_KV[0];
+  const kvb = engineKvBytes(m, ch, "kv");
+  const win = Number(d.kv_resident) || 0;   // (the engine keeps this many positions of every layer's K/V in VRAM)
+  const ec = AutoOr({label: "Expert cache", k: "expert_cache", d, dflt: 8000, unit: "experts", subLabel: "Experts in the GPU's pool"});
+  const pf = AutoOr({label: "Prompt chunk", k: "prefill", d, dflt: 4096, unit: "tokens", subLabel: "Tokens a prompt is read in at a time"});
+  return [
+    {label: "Model", rows: [
+      contextRow(m, d, ch, !kvb ? {} : win ? {win, whole: true, ram: kvb} : {vram: kvb}, ["kv", "kv_resident"]),
+      html`<${Row} label="Answers at once" flag="parallel" changed=${ch("parallel")}
+        hint="Up to 8. The engine decodes that many conversations together in its batch slots; more wait their turn. Each extra conversation takes its share of the K/V room.">
+        <${Stepper} label="Answers at once" value=${d.parallel} min=${1} max=${8} on=${(v) => setDraft({parallel: v})}/><//>`,
+      html`<${Row} label="Drafting" flag="--mtp-max-t" changed=${ch("draft")}
+        hint=${mtp ? "The Lamina MTP layer drafts a few tokens for the model to check: the same answer. Off keeps it loaded with its drafts off."
+          : "This setup did not download the MTP draft layer: the setup adds it."}>
+        <${Seg} label="Drafting" value=${d.draft} options=${[...(mtp ? [{id: "mtp", label: "MTP"}] : []), {id: "none", label: "Off"}]}
+          onChange=${(v) => setDraft({draft: v})}/><//>`,
+      html`<${Row} label="Images" flag="--vision" changed=${ch("images")}
+        hint=${m.choices.images ? "Reads images in chats: the encoder starts when a picture arrives. Off leaves its memory to the experts."
+          : "This model runs text only: its image encoder (vision-qfn with the model's mmproj file) is not set up here."}>
+        <${Switch} label="Images" on=${d.images} disabled=${!m.choices.images && !d.images} onChange=${(v) => setDraft({images: v})}/><//>`]},
+    {label: "GPUs and memory", rows: [gpus,
+      html`<${Row} label="VRAM kept free" flag="--vram-reserve-mib" changed=${ch("reserve_mib")}
+        hint="For the driver, the desktop and other programs. Empty: 700 MiB."
+        warn=${whole(d.reserve_mib) ? null : "A whole number of MiB, or empty for the default."}>
+        <${Num} label="VRAM kept free" value=${d.reserve_mib} ph="700" unit="MiB" on=${(v) => setDraft({reserve_mib: v})}/><//>`,
+      html`<${Row} label="K/V kept in VRAM" flag="--kv-resident" changed=${ch("kv_resident")}
+        hint="The positions of every layer's attention cache the engine keeps in VRAM; the rest lives in RAM. A smaller window leaves the freed VRAM to the experts. Empty: as many as fit."
+        warn=${whole(d.kv_resident) ? null : "A whole number of positions, or empty."}>
+        <${Num} label="K/V kept in VRAM" value=${d.kv_resident} ph="32768" unit="tokens" on=${(v) => setDraft({kv_resident: v})}/><//>`,
+      html`<${Row} label="RAM for the experts" flag="--resident-budget-gib" changed=${ch("ram_gib")}
+        hint="The experts the GPU does not hold are copied into RAM, the most-used first, as far as this; the rest are read from the SSD. Empty: as much as fits beside the rest of the PC."
+        warn=${whole(d.ram_gib) ? null : "A whole number of GiB, or empty."}>
+        <${Num} label="RAM for the experts" value=${d.ram_gib} ph="auto" unit="GiB" on=${(v) => setDraft({ram_gib: v})}/><//>`]},
+    {label: "Prompts and cache", rows: [
+      html`<${Row} label="Expert cache" flag="--expert-cache" changed=${ch("expert_cache")}
+        hint="Auto takes the VRAM left free, less the reserve. A number caps the GPU's pool at that many experts."
+        below=${ec.below} warn=${whole(d.expert_cache) ? null : "A whole number, or Auto."}>${ec.ctl}<//>`,
+      html`<${Row} label="Prompt chunk" flag="--prefill" changed=${ch("prefill")}
+        hint="Auto takes the largest chunk the expert pool can lend."
+        below=${pf.below} warn=${whole(d.prefill) ? null : "A whole number, or Auto."}>${pf.ctl}<//>`,
+      html`<${Row} label="KV cache" flag="--kv" changed=${ch("kv")}
+        hint="The attention cache's format: INT8 the setup's, FP16 exact, K8 V4 and Q4_0 smaller - more VRAM for experts at long contexts.">
         <${Seg} label="KV cache" value=${kv.id} options=${QWEN_KV.map((f) => ({id: f.id, label: f.label}))}
           onChange=${(v) => setDraft({kv: v})}/><//>`]},
   ];
