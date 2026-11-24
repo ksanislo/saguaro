@@ -87,7 +87,8 @@ class ModelDefaults(unittest.TestCase):
 class QfnIdentity(unittest.TestCase):
     """QFN's own family (QFN-first T1): its ids resolve to ("qfn", quant), its configs read as "qfn" - the ones the
     setup writes, the ones a release before the split wrote ("qwen" + a QFN quant) and the hand-made ones the exe name
-    gives away - while CYBER-FROST and its ids stay "qwen"."""
+    gives away.  CYBER-FROST's ids resolve to its quant on saguaro-qfn (T7); configs the old engine wrote read as
+    "qwen" until the setup's migration rewrites them."""
 
     # ./ref/Qwen3.8-Flash-Next-UD-Q4_K_XL.json, copied: the live hand-made config, no quant in its installer record
     REF_CFG = {"exe": "/opt/llm/saguaro/bin/saguaro-qfn", "cwd": "/opt/llm/saguaro/engines/qfn",
@@ -101,8 +102,8 @@ class QfnIdentity(unittest.TestCase):
         for i in Q.QFN_IDS:
             self.assertEqual(Q.resolve(i), ("qfn", Q.QFN_IDS[i]), i)
         self.assertEqual(Q.resolve("Qwen3.8-Flash-Next-Q8_0"), ("qfn", "q8_0"))   # (the quant file's own name)
-        for i in Q.QWEN_IDS:
-            self.assertEqual(Q.resolve(i), ("qwen", "q5_k_m"), i)                 # (CYBER-FROST unchanged)
+        for i in Q.QWEN_IDS:                    # (CYBER-FROST on saguaro-qfn since T7: every old id still taken)
+            self.assertEqual(Q.resolve(i), ("qfn", Q.CYBER_FROST_QUANT), i)
 
     def test_family_of_reads_all_three_config_shapes_as_qfn(self):
         new = {"exe": "/b/saguaro-qfn", "installer": {"family": "qfn", "qwen_quant": "q8_0"}}
@@ -112,11 +113,17 @@ class QfnIdentity(unittest.TestCase):
         self.assertEqual(Q.family_of(self.REF_CFG), "qfn")           # (installer "qwen", no quant: the exe names it)
         self.assertEqual(Q.family_of({"exe": "/opt/llm/bin/saguaro-qfn", "args": ["--pack", "/p"]}), "qfn")
 
-    def test_cyber_frost_stays_qwen(self):
+    def test_cyber_frost_stays_qwen_until_migrated(self):
+        """The old engine's configs (saguaro-glm, --ple-gguf, the q5_k_m files) read as "qwen" - until the setup's
+        one-time migration rewrites them (saguaro.migrate_cyber_frost); its ids resolve to the QFN quant."""
         for cfg in ({"exe": "/b/maya", "args": ["--pack", "/p", "--ple-gguf", "/g"]},
                     {"exe": "/b/saguaro-glm", "installer": {"family": "qwen", "qwen_quant": "q5_k_m"}},
                     {"exe": "/b/maya", "installer": {"family": "qwen"}}):
             self.assertEqual(Q.family_of(cfg), "qwen", str(cfg))
+        migrated = {"exe": "/b/build-hip/qfn/saguaro-qfn",
+                    "installer": {"family": "qfn", "qwen_quant": Q.CYBER_FROST_QUANT}}
+        self.assertEqual(Q.family_of(migrated), "qfn")
+        self.assertEqual(Q.config_key(migrated), "cyber-frost-q5_k_m")
 
     def test_the_qfn_names_and_defaults(self):
         cfg = {"exe": "/b/saguaro-qfn", "installer": {"family": "qfn", "qwen_quant": "ud-q4_k_xl"}}
@@ -127,6 +134,13 @@ class QfnIdentity(unittest.TestCase):
         self.assertEqual(Q.model_defaults(cfg), Q.MODEL_DEFAULTS["qfn"])
         self.assertEqual(Q.MODEL_DEFAULTS["qfn"], Q.MODEL_DEFAULTS["qwen"])   # (the values QFN got as a "qwen" config)
         self.assertIsNone(Q.config_key({"exe": "/b/saguaro-qfn"}))            # (hand-made: None for the model itself)
+        # CYBER-FROST's quant of the family (T7): shown as its own, its config keeps the name it always had
+        cf = {"exe": "/b/qfn/saguaro-qfn", "installer": {"family": "qfn", "qwen_quant": Q.CYBER_FROST_QUANT}}
+        self.assertEqual(Q.shown("qfn", Q.CYBER_FROST_QUANT), "Qwen3.8-Flash-Next · CYBER-FROST-3.8 Q5_K_M "
+                                                              "(saguaro-qfn)")
+        self.assertEqual(Q.config_label(cf), "Qwen3.8-Flash-Next · CYBER-FROST-3.8 Q5_K_M (saguaro-qfn)")
+        self.assertEqual(Q.config_stem("qfn", Q.CYBER_FROST_QUANT), "maya-cyber-frost")
+        self.assertEqual(Q.config_stem("qwen", "q5_k_m"), "maya-cyber-frost")   # (the old path's, same name)
 
 
 class Aliases(unittest.TestCase):

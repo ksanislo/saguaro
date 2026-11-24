@@ -46,8 +46,8 @@ class Names(unittest.TestCase):
 
     def test_ids(self):
         for name in ("cyber-frost", "CYBER-FROST-3.8-PS", "cyber-frost-3.8-ps-q5_k_m", "cyber-frost-3.8",
-                     "cyber-frost-q5_k_m"):   # (every id before the rename is still taken)
-            self.assertEqual(Q.resolve(name), ("qwen", "q5_k_m"), name)
+                     "cyber-frost-q5_k_m"):   # (every id before the rename is still taken - onto saguaro-qfn now)
+            self.assertEqual(Q.resolve(name), ("qfn", "cyber-frost-q5_k_m"), name)
 
     def test_the_ids_stay_the_name_on_screen_changes(self):
         """The rename is the display name only: the folder, the installer record, the model_name the API reports, the
@@ -88,7 +88,8 @@ class Names(unittest.TestCase):
     def test_model_option(self):
         a = type("A", (), {"model": "cyber-frost", "mm3_quant": None})()
         self.assertIsNone(maya.model_option(a))
-        self.assertEqual(a.model, maya.QWEN)
+        self.assertEqual(a.model, maya.QFN)                        # (it is a quant of QFN now)
+        self.assertEqual(a.qfn_quant, "cyber-frost-q5_k_m")
 
 
 class Setup(unittest.TestCase):
