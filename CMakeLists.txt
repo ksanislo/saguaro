@@ -396,40 +396,23 @@ if(MAYA_ENABLE_CUDA OR MAYA_ENABLE_HIP)
                           src/kernels/cuda/s2_gemv_q8.cu
     src/kernels/cuda/s2_expert_grouped.cu
                           src/kernels/cuda/shared_expert.cu
-                          src/kernels/cuda/gr.cu
-                          src/kernels/cuda/gdn.cu
                           src/kernels/cuda/glm_hc.cu
                           src/kernels/cuda/glm_kda.cu
                           src/kernels/cuda/glm_ffn.cu
                           src/kernels/cuda/glm_dsa.cu
-                          src/kernels/cuda/qsa.cu
                           src/kernels/cuda/elementwise.cu
                           src/kernels/cuda/bf16_gemv.cu
                           src/kernels/cuda/native_mmvq.cu
                           src/kernels/cuda/native_bf16.cu
-                          src/kernels/cuda/native_gr_norm.cu
                           src/kernels/cuda/native_moe.cu
-                          src/kernels/cuda/native_gdn.cu
-                          src/kernels/cuda/native_gr_postops.cu
                           src/kernels/cuda/native_router.cu
-                          src/kernels/cuda/native_gdn_preprocess.cu
-                          src/kernels/cuda/native_qsa.cu
                           src/kernels/cuda/native_rope.cu
-                          src/kernels/cuda/native_ple_postops.cu
                           src/kernels/cuda/native_flash_attn.cu
-                          src/kernels/cuda/native_qsa_indexer.cu
-                          src/kernels/cuda/native_qsa_score.cu
-                          src/kernels/cuda/ple.cu
                           src/kernels/cuda/kv_q8.cu
                           src/kernels/cuda/kv_stream.cu
                           src/kernels/cuda/kv_q4.cu
-                          src/kernels/cuda/fused_gr.cu
                           src/kernels/cuda/cvec.cu
-                          src/kernels/cuda/qsa_decode_attn.cu
-                          src/kernels/cuda/qsa_prompt_attn.cu
-                          src/kernels/cuda/fused_gdn.cu
                           src/kernels/cuda/dequant_bf16.cu
-                          src/kernels/cuda/qsa_select.cu
                           src/kernels/cuda/verify_kernels.cu
                           src/kernels/cuda/iq_kernels.cu
                           src/kernels/cuda/glm_fast.cu
@@ -437,8 +420,6 @@ if(MAYA_ENABLE_CUDA OR MAYA_ENABLE_HIP)
                           src/kernels/cuda/exl3.cu
                           src/kernels/cuda/exl3_legacy.cu
                           src/kernels/cuda/glm_kv_stream.cu
-                          src/kernels/ngram.cpp
-                          src/ngram/ple_reader.cpp
                           src/platform/direct_file.cpp)
   target_link_libraries(maya_kernels PUBLIC maya_core maya_artifact)
   if(MAYA_BUILD_TESTS AND (MAYA_ENABLE_CUDA OR MAYA_ENABLE_HIP))
@@ -496,13 +477,6 @@ if(MAYA_ENABLE_CUDA OR MAYA_ENABLE_HIP)
     add_test(NAME dp4a_sm60_test COMMAND dp4a_sm60_test)
     set_tests_properties(dp4a_sm60_test PROPERTIES TIMEOUT 60)
   endif()
-  # perf-review D-1: the tensor-core prompt attention vs the FP32 kernel and FP64 (GPU, synthetic, no model); with
-  # the tests, or alone with -DMAYA_PARITY_PROMPT_ATTN=ON
-  if(MAYA_BUILD_TESTS OR MAYA_PARITY_PROMPT_ATTN)
-    add_executable(qsa_prompt_attn_parity src/kernels/qsa_prompt_attn_parity.cpp)
-    target_include_directories(qsa_prompt_attn_parity PRIVATE ${_maya_gpu_include_directories})
-    target_link_libraries(qsa_prompt_attn_parity PRIVATE maya_kernels ${_maya_gpu_runtime_target})
-  endif()
   # the Volta grouped-WMMA prompt experts (MAYA_PF_WMMA) against a double reference over the same FP16 weights
   # (GPU, synthetic, no model); skips with 77 below sm_70
   if(MAYA_BUILD_TESTS AND MAYA_ENABLE_CUDA)
@@ -519,18 +493,10 @@ if(MAYA_ENABLE_CUDA OR MAYA_ENABLE_HIP)
   # Match the pinned llama.cpp CUDA arithmetic contract for this adapter only.
   if(MAYA_ENABLE_CUDA)
     set_source_files_properties(src/kernels/cuda/native_mmvq.cu src/kernels/cuda/native_bf16.cu
-      src/kernels/cuda/native_gr_norm.cu
       src/kernels/cuda/native_moe.cu
-      src/kernels/cuda/native_gdn.cu
-      src/kernels/cuda/native_gr_postops.cu
       src/kernels/cuda/native_router.cu
-      src/kernels/cuda/native_gdn_preprocess.cu
-      src/kernels/cuda/native_qsa.cu
       src/kernels/cuda/native_rope.cu
-      src/kernels/cuda/native_ple_postops.cu
       src/kernels/cuda/native_flash_attn.cu
-      src/kernels/cuda/native_qsa_indexer.cu
-      src/kernels/cuda/native_qsa_score.cu
       PROPERTIES COMPILE_OPTIONS "--use_fast_math")
   elseif(MAYA_ENABLE_HIP)
     # Keep Q8_K's multiply and magic-bias rounding as separate FP32 operations on HIP; contraction to an
@@ -546,7 +512,7 @@ if(MAYA_ENABLE_CUDA OR MAYA_ENABLE_HIP)
   set(MAYA_ORACLE_BUILD_DIR "" CACHE PATH "Matching existing shared llama.cpp build")
   # This oracle is a CUDA ggml build; do not pull CUDA libraries into a HIP build.
   if(MAYA_ENABLE_CUDA AND MAYA_ORACLE_SOURCE_DIR AND MAYA_ORACLE_BUILD_DIR)
-    foreach(parity IN ITEMS native_mmvq native_bf16 native_shared native_gr_norm native_moe native_gdn native_gr_postops native_router native_gdn_preprocess native_gdn_pipeline native_qsa native_rope native_ple_postops native_flash_attn native_qsa_indexer native_qsa_score)
+    foreach(parity IN ITEMS native_mmvq native_bf16 native_shared native_moe native_router native_rope native_flash_attn)
     add_executable(${parity}_parity bench/micro/${parity}_parity.cpp)
     target_include_directories(${parity}_parity PRIVATE
       "${MAYA_ORACLE_SOURCE_DIR}/ggml/include" ${_maya_gpu_include_directories})
@@ -572,8 +538,8 @@ if(MAYA_ENABLE_CUDA OR MAYA_ENABLE_HIP)
   # already links `maya_core` - putting `gdn_layer` in core would make the two mutually dependent.  A third
   # library is the honest shape of the dependency graph: core knows about devices and weights, kernels know
   # about arithmetic, and this one knows the ORDER the arithmetic happens in.
-  add_library(maya_engine STATIC src/core/layer.cpp src/core/session.cpp src/core/expert_source.cpp src/core/remote_experts.cpp
-    src/core/expert_cache.cpp src/core/native_head.cpp src/core/native_dense.cpp src/core/verify.cpp src/core/mtp.cpp
+  add_library(maya_engine STATIC src/core/expert_source.cpp src/core/remote_experts.cpp
+    src/core/expert_cache.cpp
     src/core/glm_model.cu src/core/glm_fast_path.cu src/core/glm_prefill.cu src/core/glm_multi.cu src/core/glm_rows.cu
     src/core/glm_window.cu src/core/glm_dflash.cu src/core/glm_mtp.cu src/core/glm_mtp_rows.cu)
   target_include_directories(maya_engine PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -644,7 +610,7 @@ if(MAYA_ENABLE_CUDA OR MAYA_ENABLE_HIP)
   # what composes them into a token.  No tokenizer - the prompt arrives as ids - because Gate C1 compares logits
   # against llama.cpp on the SAME ids and a tokenizer on one side of that comparison is a second variable.
   # plan v0.3 P5: batched prompt processing (tensor-core GEMMs through cuBLAS).
-  add_library(maya_prefill STATIC src/prefill/gemm.cu src/prefill/kernels.cu src/prefill/prefill.cpp)
+  add_library(maya_prefill STATIC src/prefill/gemm.cu src/prefill/kernels.cu)
   target_include_directories(maya_prefill PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include ${_maya_gpu_include_directories})
   target_link_libraries(maya_prefill PUBLIC maya_engine ${_maya_gpu_blas_target} ${_maya_gpu_runtime_target})
   if(MAYA_ENABLE_HIP AND MAYA_HIPBLASLT_AVAILABLE)
@@ -1148,18 +1114,6 @@ if(MAYA_ENABLE_CUDA OR MAYA_ENABLE_HIP)
       add_test(NAME hip_glm_prefill_attention COMMAND hip_glm_prefill_attention)
       list(APPEND _maya_hip_tests hip_glm_prefill_attention)
     endif()
-    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/hip/native_qsa_score.cpp")
-      add_executable(hip_native_qsa_score tests/hip/native_qsa_score.cpp)
-      target_link_libraries(hip_native_qsa_score PRIVATE maya_kernels maya_hip_runtime)
-      add_test(NAME hip_native_qsa_score COMMAND hip_native_qsa_score)
-      list(APPEND _maya_hip_tests hip_native_qsa_score)
-    endif()
-    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/hip/prefill_native_batch.cpp")
-      add_executable(hip_prefill_native_batch tests/hip/prefill_native_batch.cpp)
-      target_link_libraries(hip_prefill_native_batch PRIVATE maya_kernels maya_hip_runtime)
-      add_test(NAME hip_prefill_native_batch COMMAND hip_prefill_native_batch)
-      list(APPEND _maya_hip_tests hip_prefill_native_batch)
-    endif()
     if(MAYA_HIPBLASLT_AVAILABLE AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/hip/prefill_hipblaslt_gemm.cpp")
       add_executable(hip_prefill_hipblaslt_gemm tests/hip/prefill_hipblaslt_gemm.cpp)
       target_include_directories(hip_prefill_hipblaslt_gemm PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/prefill")
@@ -1170,9 +1124,6 @@ if(MAYA_ENABLE_CUDA OR MAYA_ENABLE_HIP)
     endif()
     if(_maya_hip_tests)
       set_tests_properties(${_maya_hip_tests} PROPERTIES TIMEOUT 60)
-    endif()
-    if(TARGET hip_prefill_native_batch)
-      set_tests_properties(hip_prefill_native_batch PROPERTIES TIMEOUT 120)
     endif()
     if(TARGET hip_prefill_hipblaslt_gemm)
       set_tests_properties(hip_prefill_hipblaslt_gemm PROPERTIES TIMEOUT 120 SKIP_RETURN_CODE 77)
@@ -1207,11 +1158,6 @@ if(MAYA_ENABLE_CUDA OR MAYA_ENABLE_HIP)
   target_include_directories(shared_expert_parity PRIVATE ${_maya_gpu_include_directories})
   target_link_libraries(shared_expert_parity PRIVATE maya_kernels ${_maya_gpu_runtime_target})
   add_test(NAME shared_expert_parity COMMAND shared_expert_parity --selftest)
-
-  add_executable(gr_parity src/kernels/gr_parity.cpp)
-  target_include_directories(gr_parity PRIVATE ${_maya_gpu_include_directories})
-  target_link_libraries(gr_parity PRIVATE maya_kernels ${_maya_gpu_runtime_target})
-  add_test(NAME gr_parity COMMAND gr_parity --selftest)
 
   add_executable(glm_hc_parity src/kernels/glm_hc_parity.cpp)
   target_include_directories(glm_hc_parity PRIVATE ${_maya_gpu_include_directories})
@@ -1295,11 +1241,6 @@ if(MAYA_ENABLE_CUDA OR MAYA_ENABLE_HIP)
                          FIXTURES_REQUIRED glm5_big_gguf)
   endif()
 
-  add_executable(gdn_parity src/kernels/gdn_parity.cpp)
-  target_include_directories(gdn_parity PRIVATE ${_maya_gpu_include_directories})
-  target_link_libraries(gdn_parity PRIVATE maya_kernels ${_maya_gpu_runtime_target})
-  add_test(NAME gdn_parity COMMAND gdn_parity --selftest)
-
   add_executable(s2_gemv_q8_parity src/kernels/s2_gemv_q8_parity.cpp)
   target_include_directories(s2_gemv_q8_parity PRIVATE ${_maya_gpu_include_directories})
   target_link_libraries(s2_gemv_q8_parity PRIVATE maya_kernels ${_maya_gpu_runtime_target})
@@ -1345,54 +1286,17 @@ if(MAYA_ENABLE_CUDA OR MAYA_ENABLE_HIP)
   target_link_libraries(s_gemv_q8k_parity PRIVATE maya_kernels ${_maya_gpu_runtime_target})
   add_test(NAME s_gemv_q8k_parity COMMAND s_gemv_q8k_parity --selftest)
 
-  add_executable(qsa_parity src/kernels/qsa_parity.cpp)
-  target_include_directories(qsa_parity PRIVATE ${_maya_gpu_include_directories})
-  target_link_libraries(qsa_parity PRIVATE maya_kernels ${_maya_gpu_runtime_target})
-  add_test(NAME qsa_parity COMMAND qsa_parity --selftest)
-
-  # ---- P2.S4: the PLE n-gram hash, the IQ4_NL table read, and the PLE block ----
-  # `ngram.cpp` is host-only but lives in `maya_kernels` because `ple.cu` shares its geometry constants, and
-  # splitting them across two libraries would only add a layer.
-  #
-  # The pack, the original GGUF and the ggml capture are all REQUIRED inputs: this test's oracles are real
-  # artifacts, so the working directory is pinned to the source tree and a missing input is a hard error
-  # INSIDE the test.  A test that passes by finding nothing to compare is the failure mode this project keeps
-  # re-learning.
-  add_executable(ple_parity src/kernels/ple_parity.cpp)
-  target_include_directories(ple_parity PRIVATE ${_maya_gpu_include_directories})
-  target_link_libraries(ple_parity PRIVATE maya_kernels ${_maya_gpu_runtime_target})
-  set(MAYA_PLE_FIXTURE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/bench/micro" CACHE PATH
-      "Directory containing required ple_in.bin and ple_out.bin parity fixtures")
-  add_test(NAME ple_parity COMMAND ple_parity --selftest
-    --in "${MAYA_PLE_FIXTURE_DIR}/ple_in.bin" --out "${MAYA_PLE_FIXTURE_DIR}/ple_out.bin"
-    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
-
   # Plan v0.3 P7: INT8 KV storage vs a host reference and vs the FP16 path (GPU, synthetic, no model).
   add_executable(kv_q8_parity src/kernels/kv_q8_parity.cpp)
   target_include_directories(kv_q8_parity PRIVATE ${_maya_gpu_include_directories})
   target_link_libraries(kv_q8_parity PRIVATE maya_kernels ${_maya_gpu_runtime_target})
   add_test(NAME kv_q8_parity COMMAND kv_q8_parity)
 
-  # KV streaming (docs/kv-streaming-design.md): streamed vs resident attention, bitwise (GPU, synthetic, no model).
-  add_executable(kv_stream_parity src/kernels/kv_stream_parity.cpp)
-  target_include_directories(kv_stream_parity PRIVATE ${_maya_gpu_include_directories})
-  target_link_libraries(kv_stream_parity PRIVATE maya_kernels ${_maya_gpu_runtime_target})
-  add_test(NAME kv_stream_parity COMMAND kv_stream_parity)
-
-  # PR #120: the hybrid K8V4 KV (INT8 K + rotated Q4_0 V) vs host references (GPU, synthetic, no model).
-  add_executable(kv_hybrid_parity src/kernels/kv_hybrid_parity.cpp)
-  target_include_directories(kv_hybrid_parity PRIVATE ${_maya_gpu_include_directories})
-  target_link_libraries(kv_hybrid_parity PRIVATE maya_kernels ${_maya_gpu_runtime_target})
-  add_test(NAME kv_hybrid_parity COMMAND kv_hybrid_parity)
   # PR #21: Q4_0 KV with Walsh-Hadamard rotation vs a host reference (GPU, synthetic, no model).
   add_executable(kv_q4_parity src/kernels/kv_q4_parity.cpp)
   target_include_directories(kv_q4_parity PRIVATE ${_maya_gpu_include_directories})
   target_link_libraries(kv_q4_parity PRIVATE maya_kernels ${_maya_gpu_runtime_target})
   add_test(NAME kv_q4_parity COMMAND kv_q4_parity)
-  add_executable(cvec_parity src/kernels/cvec_parity.cpp)
-  target_include_directories(cvec_parity PRIVATE ${_maya_gpu_include_directories})
-  target_link_libraries(cvec_parity PRIVATE maya_kernels ${_maya_gpu_runtime_target})
-  add_test(NAME cvec_parity COMMAND cvec_parity)
 
   # Plan v0.3 P3: native MMVQ for 1..8 tokens (bitwise selftest + --bench timing); synthetic data, no model.
   if(MAYA_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/bench/micro/native_mmvq_multi.cpp")
@@ -1406,12 +1310,6 @@ if(MAYA_ENABLE_CUDA OR MAYA_ENABLE_HIP)
   add_executable(platform_memory_test src/platform/memory_test.cpp)
   target_link_libraries(platform_memory_test PRIVATE maya_core ${_maya_gpu_runtime_target})
   add_test(NAME platform_memory_test COMMAND platform_memory_test)
-
-  # Plan v0.3 P2: the n-gram table read straight from the SSD. The selftest needs only the CPU and a temp file.
-  add_executable(ple_reader_test src/ngram/ple_reader_test.cpp)
-  target_include_directories(ple_reader_test PRIVATE ${_maya_gpu_include_directories})
-  target_link_libraries(ple_reader_test PRIVATE maya_kernels ${_maya_gpu_runtime_target})
-  add_test(NAME ple_reader_selftest COMMAND ple_reader_test --selftest)
 
   # The GPU test runs ON THE TARGET PC. `--selftest` allocates
   # and writes real VRAM, so a machine without a device fails this test rather than skipping it silently -
@@ -1799,11 +1697,6 @@ if(MAYA_NATIVE_EXPERTS)
     add_executable(hip_prefill_fused_bench EXCLUDE_FROM_ALL tests/hip/prefill_fused_bench.cpp)
     target_include_directories(hip_prefill_fused_bench PRIVATE "${_maya_gg}/include")
     target_link_libraries(hip_prefill_fused_bench PRIVATE maya_prefill maya_kernels)
-  endif()
-  if(MAYA_ENABLE_HIP)
-    # Optional real-model diagnostic: pass the GGUF shard containing the native PLE key.
-    add_executable(hip_ple_iq4 tests/hip/ple_iq4.cpp)
-    target_link_libraries(hip_ple_iq4 PRIVATE maya_kernels maya_hip_runtime ggml-base)
   endif()
   if(MAYA_ENABLE_CUDA OR MAYA_ENABLE_HIP)
     add_executable(native_expert_parity src/kernels/native_expert_parity.cpp)
