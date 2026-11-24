@@ -10,7 +10,7 @@
    "name": "Qwen3.8-Flash-Next-UD-Q4_K_XL",
    "about": "unsloth's UD-Q4_K_XL: the routed experts in Q4_K / Q5_K / Q6_K, 125B parameters, 10 of 512 experts a token",
    "needs": {"vram_gb": 15, "ram_gb": 88},
-   "measured": "an RX 9070 XT (16 GB) with 96 GB of RAM: 28-41 tok/s answers, 600-840 tok/s 8K-16K prompt reads",
+   "measured": "an RX 9070 XT (16 GB) with 96 GB of RAM: 27-41 tok/s answers, 520-1,080 tok/s 8K-16K prompt reads",
    "files": {
     "Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf": [10946624, "4448186216b3af4cc558bbce2c3213f01608f8f8b2e5267a9767971dd3ec8082"],
     "Qwen3.8-Flash-Next-UD-Q4_K_XL-00002-of-00004.gguf": [49859583136, "3f342f1c1580473f1ee94ddd5b28206e8c07a70fa1a366f59d1d6c922919a6c9"],
