@@ -144,6 +144,10 @@ class Offered(unittest.TestCase):
         self.assertEqual(maya.qfn_ram_budget(91.7), 71)
         self.assertEqual(maya.qfn_ram_budget(20.0), 8)
 
+    def test_qfn_fit_contexts_stay_offered_by_the_setup(self):
+        for ctx in (maya.QF.DEFAULT_CONTEXT, maya.QF.SPLIT_CONTEXT):
+            self.assertIn(ctx, maya.QFN_CONTEXTS)                  # (choose_context offers only QFN_CONTEXTS)
+
 
 class Config(unittest.TestCase):
     def test_the_measured_amd_settings(self):

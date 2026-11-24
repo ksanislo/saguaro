@@ -22,18 +22,16 @@ import os
 GIB = 1 << 30
 MANIFEST = os.path.join(os.path.dirname(os.path.abspath(__file__)), "qfn", "download.json")
 KV_BYTES = 12672                                      # K/V bytes a context token, --kv int8 (measured)
-QSA_LAYERS = 12                                       # the attention layers behind it (1,056 B a token each)
 LAYERS = 48                                           # the model's transformer layers (the layer split's reach)
 KV_RESIDENT = 32768                                   # the newest cells of each QSA layer kept in VRAM (the configs)
-KV_RESIDENT_MIN = 20480                               # the engine's own floor for --kv-resident
 RAM_SPARE_GB = 20                                     # RAM left beside the tier: the OS, the server, the page cache
 MIN_VRAM_GB = 15.0                                    # every card of a layout (the manifest's "needs": a 16 GB card)
 MIN_RAM_GB = 88.0                                     # the RAM the tier and the system need (the manifest's "needs")
 MIN_CC = 70                                           # NVIDIA: the engine builds for Volta and newer
 MAX_GROUP = 4                                         # a layer split runs on up to four cards (the live configs)
-CONTEXTS = [32768, 65536, 131072, 262144]             # what the setup offers (the model's reach: 1M, YaRN 4x)
 DEFAULT_CONTEXT = 65536                               # one card (measured there: prompts up to 60K tokens)
 SPLIT_CONTEXT = 262144                                # a split: the K/V's RAM is cheap, the cards do not notice
+# (both must stay among the contexts saguaro.py offers - QFN_CONTEXTS; test_setup_qfn guards it)
 T4_LOW_GB, T4_HIGH_GB = 14.0, 17.0                    # a "16 GB" card as the driver reports it (Tesla T4: 15.0)
 SM75 = 75                                             # compute capability 7.5 (Tesla T4, Quadro RTX 3000)
 # the live 4x Tesla T4 configs' splits (./ref/Qwen3.8-Flash-Next-*.json): first layer of GPU 2, 3 and 4
