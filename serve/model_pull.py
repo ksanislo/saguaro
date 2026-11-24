@@ -49,8 +49,8 @@ def catalog(root: Path, glm_sizes: dict | None = None, cards: list | None = None
                          "(saguaro-glm): NVIDIA from V100 on or AMD"})
     pc_cards, pc_ram = (cards, ram_gb or 0.0) if cards is not None else this_pc() if glm_sizes is None else ([], 0.0)
     for key, entry in qfn_quants().items():              # (Qwen3.8-Flash-Next itself on saguaro-qfn: AMD)
-        out.append({"id": Q.qfn_setup_id(key), "family": "qwen", "name": Q.shown("qwen", key),
-                    "installed": ("qwen", key) in have, "size_gb": entry["size_gb"], **qfn_fit(entry, pc_cards, pc_ram)})
+        out.append({"id": Q.qfn_setup_id(key), "family": "qfn", "name": Q.shown("qfn", key),
+                    "installed": ("qfn", key) in have, "size_gb": entry["size_gb"], **qfn_fit(entry, pc_cards, pc_ram)})
     for key in Q.IK2_QUANTS:                           # (unsloth's UD-Q4_K_XL, then Strata's packs)
         if key != Q.IK2_QUANT and new and ("ik2", key) not in new:   # (a pack the table does not publish)
             continue

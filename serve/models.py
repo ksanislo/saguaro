@@ -155,8 +155,8 @@ def _float(v, default=None):
 
 
 def family(cfg: dict) -> str:
-    """"hy4", "ik2", "minimax", "deepseek", "qwen" or "glm" (maya_quants.family_of, as saguaro.py and the server read
-    it)."""
+    """"hy4", "ik2", "minimax", "deepseek", "qfn", "qwen" or "glm" (maya_quants.family_of, as saguaro.py and the server
+    read it)."""
     return maya_quants.family_of(cfg)
 
 
@@ -366,7 +366,7 @@ def choices(cfg: dict) -> dict:
     if family(cfg) == "deepseek":
         return {"draft": ["dspark", "none"] if ds4_has_drafter(cfg) else ["none"],
                 "images": ds4_has_vision(cfg) or "--vision" not in (cfg.get("args") or [])}
-    if family(cfg) == "qwen":                          # (images: the setup's vision-glm entry, on or kept off)
+    if family(cfg) in ("qwen", "qfn"):                 # (images: the setup's vision-glm entry, on or kept off)
         return {"draft": ["mtp", "none"] if qwen_mtp(cfg) is not None else ["none"],
                 "images": bool(cfg.get("vision") or cfg.get("vision_off"))}
     f = dflash_file(cfg)
@@ -404,7 +404,7 @@ def settings_of(cfg: dict) -> dict:
                    reserve_gb=_float(flag(args, "--reserve-gb")), prefill_chunk=_int(flag(args, "--chunk")),
                    cache_gb=_float(flag(args, "--cache-gb")), dspark_conf=_float(flag(args, "--dspark-conf")))
         return out
-    if family(cfg) == "qwen":
+    if family(cfg) in ("qwen", "qfn"):                 # (QFN's settings beside CYBER-FROST's)
         ec, pf = flag(args, "--expert-cache", "auto"), flag(args, "--prefill", "auto")
         ram = env.get("SAGUARO_EXPERT_RAM_GB")
         out.update(images=bool(cfg.get("vision")), reserve_mib=_int(flag(args, "--vram-reserve-mib")),
@@ -478,8 +478,8 @@ def apply(cfg: dict, settings: dict) -> dict:
         raise ValueError("the settings must be a JSON object")
     fam = family(cfg)
     ds4 = fam == "deepseek"
-    known = {"minimax": MM3_KEYS, "deepseek": DS4_KEYS, "qwen": QWEN_KEYS, "ik2": IK2_KEYS,
-             "hy4": HY4_KEYS}.get(fam, GLM_KEYS)
+    known = {"minimax": MM3_KEYS, "deepseek": DS4_KEYS, "qwen": QWEN_KEYS, "qfn": QWEN_KEYS, "ik2": IK2_KEYS,
+             "hy4": HY4_KEYS}.get(fam, GLM_KEYS)   # (QFN's settings are the Qwen path's QWEN_KEYS)
     if fam in ONE_AT_A_TIME and settings.get("parallel") not in (None, "", 1):
         raise ValueError(ONE_AT_A_TIME[fam])
     if fam in ONE_AT_A_TIME:
@@ -608,7 +608,7 @@ def apply(cfg: dict, settings: dict) -> dict:
         #  answers one at a time; drafting is off while it is above 1)
         par = _num(s, "parallel", 1, 8, "Answers at once", none_ok=False)
         args = set_flag(args, "--parallel", par) if par > 1 or "--parallel" in args else args
-    elif fam == "qwen":
+    elif fam in ("qwen", "qfn"):
         if s.get("draft") not in can["draft"]:
             raise ValueError("Drafting: this pack has no MTP drafter (the setup builds it)" if s.get("draft") == "mtp"
                              else "Drafting: MTP or none")
@@ -903,7 +903,7 @@ def describe(path: Path, running: str | None) -> dict:
             **({"needs": needs(cfg)} if needs(cfg) else {}),
             "settings": cur, "setup": setup, "choices": choices(cfg), "command": command(cfg),
             "contexts": {"deepseek": DS4_CONTEXTS, "minimax": MM3_CONTEXTS, "qwen": QWEN_CONTEXTS,
-                         "hy4": HY4_CONTEXTS, "ik2": IK2_CONTEXTS}.get(family(cfg), CONTEXTS),
+                         "qfn": QWEN_CONTEXTS, "hy4": HY4_CONTEXTS, "ik2": IK2_CONTEXTS}.get(family(cfg), CONTEXTS),
             # (the Engine settings' Context size slider: the same range as Settings > Model's for this model)
             "context_range": context_range(trained_context_of(cfg), cur.get("context"),
                                            {"deepseek": "ds4", "minimax": "mm3", "hy4": "hy4",
@@ -1019,7 +1019,7 @@ TURBO_ENV = {"glm": {"SAGUARO_GLM_MISS_SKIP_W": "0.16", "SAGUARO_GLM_MISS_SKIP_F
              "deepseek": {"SAGUARO_DS4_RAM_SKIP_W": "0.14", "SAGUARO_DS4_DSPARK_CUM": "0.3", "SAGUARO_DS4_RESIDENT_TOPK": "3"}}
 # the drafter that goes fastest where the pack has it: DSpark (DeepSeek, MiniMax), MTP (Qwen).  GLM keeps the drafter the
 # setup measured for this PC (MTP or DFlash2: which is faster depends on the GPUs).
-TURBO_DRAFT = {"deepseek": "dspark", "minimax": "dspark", "qwen": "mtp"}
+TURBO_DRAFT = {"deepseek": "dspark", "minimax": "dspark", "qwen": "mtp", "qfn": "mtp"}
 # DSpark's draft confidence floor (default 0.7), lowered so that longer windows are verified
 TURBO_DSPARK_CONF = 0.3
 TURBO_DSPARK_FAMILIES = ("deepseek", "minimax")
