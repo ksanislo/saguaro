@@ -1,0 +1,34 @@
+{
+ "as_of": "2026-10",
+ "prices": {
+  "deepseek-v4.1-flash": {
+   "api": "DeepSeek",
+   "match": "deepseek[-_.]?v?4\\.1[-_.]?flash|deepseek[-_.]flash",
+   "input": 0.15,
+   "cached": 0.003,
+   "output": 0.6,
+   "peak": 2.0
+  },
+  "glm-5.3-flash": {
+   "api": "Z.ai",
+   "match": "glm[-_.]?5\\.3[-_.]?flash",
+   "input": 0.15,
+   "cached": 0.03,
+   "output": 0.5
+  },
+  "minimax-m3.1-flash": {
+   "api": "MiniMax",
+   "match": "minimax[-_.]?m3\\.1[-_.]?flash",
+   "input": 0.15,
+   "cached": 0.015,
+   "output": 0.6
+  },
+  "hy4-flash": {
+   "api": "Tencent",
+   "match": "(?:^|[/_.-])hy[-_.]?4[-_.]?flash",
+   "input": 0.07,
+   "cached": 0.003,
+   "output": 0.281
+  }
+ }
+}
