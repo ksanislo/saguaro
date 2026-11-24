@@ -1,7 +1,7 @@
 // The register warp sum (include/strata/kernels/lane_xor.hpp) against the shuffle loop it replaces: the same bits in every
 // lane, over random warps of mixed magnitudes and signs (a sum's order of operations is what keeps its bits).
 #include <hip/hip_runtime.h>
-#include "intrinsics.hpp"   // (Saguaro's shared include/strata/hip_compat, on the HIP include path)
+#include "intrinsics.hpp"   // (Saguaro's shared include/maya/hip_compat, on the HIP include path)
 #include "strata/kernels/lane_xor.hpp"
 
 #include <cmath>

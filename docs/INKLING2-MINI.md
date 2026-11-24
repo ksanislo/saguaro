@@ -15,22 +15,26 @@ Back to [the models](MODELS.md) and the [README](../README.md). How the engine w
 
 | | |
 | --- | --- |
-| **GPU** | One or two NVIDIA cards of 8 GB or more, V100 / Tesla T4 / RTX 20 (compute capability 7.0) and newer; or one AMD RDNA 3 / 3.5 / 4 GPU of 16 GB or more (checked on an RX 9070 XT). Linux. No Mac or Windows engine here. |
+| **GPU** | One or two NVIDIA cards of 8 GB or more, V100 / Tesla T4 / RTX 20 (compute capability 7.0) and newer; or one AMD RDNA 3 / 3.5 / 4 GPU of 12 GB or more (checked on an RX 9070 XT). Linux. No Mac or Windows engine here. |
 | **RAM** | The experts the card does not hold, pinned, beside the system: about 6 GiB with one 16 GB card, about 13 GiB with an 8 GB one; RAM and VRAM together about 24 GB (no SSD tier: the setup refuses less). |
-| **Disk** | 18.3 GB: the GGUF (17.6 GB) and the vision tower (0.6 GB); 0.6 GB more for the drafter where drafting runs (every expert and the drafter in VRAM: RTX 30 / A100 and newer, an AMD GPU; not on a 16 GB card at 32K). An NVMe SSD loads it in about ten seconds. |
+| **Disk** | 18.3 GB: the GGUF (17.6 GB) and the vision tower (0.6 GB); 0.4 GB more for the drafter (its GGUF, from Maya's repo) where drafting runs (one NVIDIA card from V100 / Tesla T4 on, the offload path too where the experts' tier leaves it room; an AMD GPU holding every expert). An NVMe SSD loads it in about ten seconds. |
 
 | Cards | Layout the setup writes | Context | Experts |
 | --- | --- | ---: | --- |
 | One 8-16 GB card (one Tesla T4) | `--gpus 1 --chunk 2048`, the seed expert profile (`SAGUARO_IK2_WARM`) | 32K | the offload path: the most-used in VRAM (2,303 of 3,072 on a T4), the rest in pinned RAM, fetched by the GPU |
 | Two 16 GB cards (two Tesla T4s) | `--gpus 2 --chunk 8192` | 131K | the split: all in VRAM across the two cards |
-| One card of 24 GB or more | `--gpus 1 --chunk 2048` | up to 256K (FP16 cache: 128K) | all in VRAM; drafting on RTX 30 / A100 and newer |
+| One card of 24 GB or more | `--gpus 1 --chunk 2048` | up to 256K (FP16 cache: 128K) | all in VRAM; drafting on |
 | One 16 GB AMD RDNA 3 / 4 GPU (an RX 9070 XT) | `--gpus 1 --chunk 2048`, the seed profile, `SAGUARO_IK2_RESERVE_MB=1024` | 32K | the offload path as on NVIDIA (the one-T4 quant: all in VRAM, `--chunk 1024`; each GGUF has its own config; the Models page refuses a Prompt chunk past 1024 there) |
 | One AMD GPU of 24 GB or more | `--gpus 1 --chunk 1024` | up to 128K | all in VRAM |
 
 The two T4 rows and the RX 9070 XT row were measured here. The others are upstream Project Maya's layouts (measured
-there on RTX 3090s, V100s and a Radeon 8065S, see [INKLING2.md](INKLING2.md) section 8). Drafting is off on Volta / Turing, on the offload path and on two cards; where the drafter's
-room does not fit beside the model (the one-T4 quant on a 16 GB card at 32K) the setup does not fetch it and the prompt
-lookup drafts alone.
+there on RTX 3090s, V100s and a Radeon 8065S, see [INKLING2.md](INKLING2.md) section 8). Drafting (Ken 11-23, measured in logs/saguaro/REPORT-ik2-draft-gain.md; the setup writes `--drafting on`): on with one
+T4 - the UD-Q4_K_XL expert cache with the rounding-level verify window (+8.6 %; answers can differ from drafting off at
+near-ties, KL 5e-5), the one-T4 quant resident with the exact window (+4..+5 %, the same answers); on with every expert
+on an AMD GPU (+11 %, the same answers); off on two cards (the engine does not draft on the split yet), on an AMD card's
+offload path (measured slower) and on Pascal. Volta, Ampere and newer: `--drafting auto` (measured once on the PC).
+Where the drafter's room does not fit beside the model the setup does not fetch it and the prompt lookup drafts alone.
+Each of the engine's drafting switches stays a `SAGUARO_IK2_*` setting (INKLING2.md).
 
 ## The files: unsloth's GGUF or Strata's packs
 
@@ -83,7 +87,7 @@ From the web app: **Models › Download a model › Inkling 2 Mini**. The row sa
 start; the download is the same setup, run for you.
 
 Files you already have go in with `./setup.sh --model inkling-2-mini --model-dir /path/to/folder` (the GGUF and
-`mmproj-BF16.gguf` under their published names) or `./saguaro.sh --import-model FOLDER`. A folder with another
+`mmproj-Inkling-2-Mini-BF16.gguf` - or unsloth's `mmproj-BF16.gguf`, the same file - under their published names) or `./saguaro.sh --import-model FOLDER`. A folder with another
 Inkling-2-Mini GGUF and no published one (a quant of your own) is taken as it is, not sha256-checked, and its experts'
 size is read from the file for the fit (e.g. the one-T4 quant on a 16 GB AMD card).
 
@@ -127,7 +131,10 @@ reading) - what the setup quotes for these layouts.
 
 ## Tuning on your hardware
 
-`saguaro-ik2` runs on NVIDIA cards from Volta on (compute capability 7.0: V100, Tesla T4, RTX 20 and newer), Linux. A
+`saguaro-ik2` runs on NVIDIA cards from Volta on (compute capability 7.0: V100, Tesla T4, RTX 20 and newer), Linux;
+Pascal (Tesla P40 / P100, GTX 10: compute capability 6.x) is second-class - no tensor cores, so it takes the scalar
+kernels (checked on one Tesla P40 24 GB with CUDA 12.0, every expert resident: decode 36 / 32 / 28.5 tok/s at 0 / 8K /
+30K tokens deep, a 8K read 373 tok/s; build with CUDA 12.x and `-DCMAKE_CUDA_ARCHITECTURES=61`). A
 card of 24 GB or more keeps the whole model in VRAM and needs none of this; on 16 GB cards these settings matter. Each
 is a flag or an `env` entry in the config (`maya-inkling-2-mini.json`, Models page or by hand); restart the model after
 a change. Tuned on Tesla T4s, two loads of each setting, interleaved (decode about 60 / 8K tokens deep, an 8-16K read).
@@ -156,8 +163,9 @@ and, after an answer, how many picks it fetched; the closer the tier is to all o
   T4).
 - **Conversations kept:** up to four are set aside in RAM and come back without their prompt read again. They are
   saved across a restart only when the config's env names a folder (`SAGUARO_IK2_SLOT_DIR`); the setup sets none yet.
-- **Drafting** is off on Volta / Turing (a T4), on the offload path and on two cards; elsewhere the setup fetches the
-  drafter and `--drafting auto` measures once whether it pays. No Turbo.
+- **Drafting** is on where it was measured to pay (the layouts above: `--drafting on`; off on two cards, an AMD card's
+  offload path and Pascal); elsewhere `--drafting auto` measures once whether it pays on the PC. The setup fetches the
+  drafter (its GGUF, 0.4 GB) where its room fits. `--parallel 2` decodes without it. No Turbo.
 - The Monitor shows its speeds, context and each card's memory; the experts card counts the expert-cache hits after
   each answer when the config's env has `SAGUARO_IK2_STATS=1`, and otherwise says where the experts are.
 - **Out of GPU memory in a request** (a prompt chunk too big for what the card has left): that request fails with an

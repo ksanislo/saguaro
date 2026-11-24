@@ -73,7 +73,7 @@ recommends one for your PC; to pick one yourself, give its setup id: `./setup.sh
 
 GLM, DeepSeek and MiniMax run on NVIDIA from the V100 / RTX 20 on, and on Windows (experimental; see
 [What you need](#what-you-need)); Hy4-Flash on NVIDIA under Linux; Inkling 2 Mini under Linux on NVIDIA from the V100 /
-Tesla T4 on and on one AMD RDNA 3 / 4 GPU of 16 GB or more (experimental; the experts the card does not hold stay in
+Tesla T4 on and on one AMD RDNA 3 / 4 GPU of 12 GB or more (experimental; the experts the card does not hold stay in
 RAM, the offload path). On AMD GPUs (experimental) only some engines build today -
 [the list](docs/AMD_SAGUARO.md#what-runs-on-amd). With no model set up yet, the setup recommends Inkling 2 Mini on one or
 two NVIDIA cards under 24 GB or on one 16-23 GB AMD RDNA 3 / 4 GPU; with four equal 16 GB cards, Hy4-Flash; on other AMD
@@ -213,7 +213,7 @@ slowest while the caches fill with what you use.
   each GPU's memory), a context size and port you can change in Settings, and **Models**: every model set up on this
   machine, switching to another (Saguaro starts again with it) and each one's engine settings (context, GPUs, drafting,
   images, memory), saved into its `maya-<model>.json`.
-- **Saved:** the sidebar's Saved line adds up what the model's own API (DeepSeek's, Z.ai's or MiniMax's) would have
+- **Saved:** the sidebar's Saved line adds up what the model's own API (DeepSeek's, Z.ai's, MiniMax's or Tencent's) would have
   charged for the same tokens - the prompt Saguaro reuses from its cache at the API's cached price, DeepSeek's peak hours
   at its peak price - kept per model in `token-savings.json`; its prices can be changed in **Settings › Savings**.
 - **Your apps and coding agents:** an OpenAI-compatible API at `http://127.0.0.1:8080/v1`, and Anthropic's at

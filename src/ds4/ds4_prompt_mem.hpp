@@ -8,7 +8,7 @@
 #include <cstdlib>
 #include <cstring>
 
-namespace strata::ds4 {
+namespace maya::ds4 {
 
 // a 0 / 1 switch: -1 when it is not set (or empty), else whether it is non-zero
 inline int tri_of(const char* v) { return v == nullptr || *v == 0 ? -1 : std::atoi(v) != 0; }
@@ -90,4 +90,4 @@ inline uint64_t uma_free(uint64_t driver_free, uint64_t total, uint64_t mem_avai
     return std::min(std::max(driver_free, mem_available - headroom), std::max(total, driver_free));
 }
 
-}  // namespace strata::ds4
+}  // namespace maya::ds4

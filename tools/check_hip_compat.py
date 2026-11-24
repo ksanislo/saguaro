@@ -1,11 +1,11 @@
 """tools/check_hip_compat.py - every CUDA runtime / cuBLAS name the AMD (HIP) build compiles must have a mapping in
-include/strata/hip_compat/*.h.  The HIP build compiles the same CUDA-shaped sources with those headers forced in
+include/maya/hip_compat/*.h.  The HIP build compiles the same CUDA-shaped sources with those headers forced in
 (cmake/hip_backend.cmake), so a CUDA call added without its mapping breaks every AMD build - v1.0.21 did, with three
 device queries from #44 (fixed in v1.0.22 by #52).  No ROCm or GPU is needed: it reads the sources.
 
     python tools/check_hip_compat.py [repo]      # exit 1 and the file:line of each unmapped name
 
-Names inside CUDA-only code (#ifndef STRATA_USE_HIP, #if !defined(STRATA_USE_HIP), the #else of a STRATA_USE_HIP
+Names inside CUDA-only code (#ifndef MAYA_USE_HIP, #if !defined(MAYA_USE_HIP), the #else of a MAYA_USE_HIP
 block), comments and string literals are not counted.
 """
 from __future__ import annotations
@@ -56,15 +56,15 @@ def strip_comments_and_strings(text: str) -> str:
 def kind(cond: str) -> str:
     """'hip' when the condition holds only in the HIP build, 'cuda' when only in CUDA's, else 'other'."""
     c = cond.replace(" ", "")
-    if "STRATA_USE_HIP" not in c or "||" in c:
+    if "MAYA_USE_HIP" not in c or "||" in c:
         return "other"
-    if "!defined(STRATA_USE_HIP)" in c or "!STRATA_USE_HIP" in c:
+    if "!defined(MAYA_USE_HIP)" in c or "!MAYA_USE_HIP" in c:
         return "cuda"
     return "hip"
 
 
 def hip_lines(text: str):
-    """(line number, code) for each line the HIP build compiles, as far as STRATA_USE_HIP decides."""
+    """(line number, code) for each line the HIP build compiles, as far as MAYA_USE_HIP decides."""
     stack = []          # per open #if: [kind of the condition, in its #else branch]
     for no, line in enumerate(text.split("\n"), 1):
         s = line.strip()
@@ -72,9 +72,9 @@ def hip_lines(text: str):
         if m:
             d, rest = m.group(1), m.group(2)
             if d == "ifdef":
-                stack.append(["hip" if rest.strip() == "STRATA_USE_HIP" else "other", False])
+                stack.append(["hip" if rest.strip() == "MAYA_USE_HIP" else "other", False])
             elif d == "ifndef":
-                stack.append(["cuda" if rest.strip() == "STRATA_USE_HIP" else "other", False])
+                stack.append(["cuda" if rest.strip() == "MAYA_USE_HIP" else "other", False])
             elif d == "if":
                 stack.append([kind(rest), False])
             elif d == "elif" and stack:
@@ -91,7 +91,7 @@ def hip_lines(text: str):
 
 def unmapped(repo: Path) -> list:
     """[(file, line, name)] for every name the HIP build compiles without a mapping."""
-    compat = repo / "include" / "strata" / "hip_compat"
+    compat = repo / "include" / "maya" / "hip_compat"
     have = mapped_names(compat)
     found = []
     for top in ("src", "include", "tests"):
@@ -128,9 +128,9 @@ def raw_asm_text(lines: list, no: int) -> str:
 
 
 # what an AMD device pass defines (gfx1201: RDNA 4; gfx1100: RDNA 3 - both checked)
-HIP_DEVICE = {"gfx1201": {"STRATA_USE_HIP": "1", "__HIPCC__": "1", "__HIP_DEVICE_COMPILE__": "1", "__HIP__": "1",
+HIP_DEVICE = {"gfx1201": {"MAYA_USE_HIP": "1", "__HIPCC__": "1", "__HIP_DEVICE_COMPILE__": "1", "__HIP__": "1",
                           "__GFX12__": "1", "__gfx1201__": "1", "__AMDGCN__": "1"},
-              "gfx1100": {"STRATA_USE_HIP": "1", "__HIPCC__": "1", "__HIP_DEVICE_COMPILE__": "1", "__HIP__": "1",
+              "gfx1100": {"MAYA_USE_HIP": "1", "__HIPCC__": "1", "__HIP_DEVICE_COMPILE__": "1", "__HIP__": "1",
                           "__GFX11__": "1", "__gfx1100__": "1", "__AMDGCN__": "1"}}
 
 
@@ -206,9 +206,9 @@ def ptx_in_hip(repo: Path) -> list:
 
 
 def missing_headers(repo: Path) -> list:
-    """[(file, line, header)] for each CUDA header an AMD device pass includes that include/strata/hip_compat/ lacks
+    """[(file, line, header)] for each CUDA header an AMD device pass includes that include/maya/hip_compat/ lacks
     (the engines' sources, as ptx_in_hip)"""
-    compat = repo / "include" / "strata" / "hip_compat"
+    compat = repo / "include" / "maya" / "hip_compat"
     have = {h.name for h in compat.glob("*")}
     found = set()
     for top in ("src", "include"):
@@ -234,13 +234,13 @@ def main() -> int:
     repo = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).resolve().parents[1]
     bad = unmapped(repo)
     for f, no, name in bad:
-        print(f"{f}:{no}: {name} has no mapping in include/strata/hip_compat/ (the AMD build will not compile)")
+        print(f"{f}:{no}: {name} has no mapping in include/maya/hip_compat/ (the AMD build will not compile)")
     ptx = ptx_in_hip(repo)
     for f, no in ptx:
-        print(f"{f}:{no}: inline PTX the HIP build compiles - guard it with #if !defined(STRATA_USE_HIP)")
+        print(f"{f}:{no}: inline PTX the HIP build compiles - guard it with #if !defined(MAYA_USE_HIP)")
     hdr = missing_headers(repo)
     for f, no, h in hdr:
-        print(f"{f}:{no}: <{h}> is not in include/strata/hip_compat/ (the AMD build will not find it)")
+        print(f"{f}:{no}: <{h}> is not in include/maya/hip_compat/ (the AMD build will not find it)")
     if not bad and not ptx and not hdr:
         print("hip_compat: every CUDA name and header the HIP build compiles has a mapping, and no inline PTX")
     return 1 if bad or ptx or hdr else 0

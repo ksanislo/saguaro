@@ -1,14 +1,14 @@
-// The engine's start-up line of the GLM settings set in the environment (include/strata/platform/env_report.hpp,
+// The engine's start-up line of the GLM settings set in the environment (include/maya/platform/env_report.hpp,
 // #6): only when one is set, each under its name, and the value used when the engine clamps it.
 // Host code only: a made-up environment table, no GPU.
-#include "strata/platform/env_report.hpp"
+#include "maya/platform/env_report.hpp"
 
 #include <cstdio>
 #include <string>
 #include <vector>
 
-using strata::platform::EnvRange;
-using strata::platform::env_report;
+using maya::platform::EnvRange;
+using maya::platform::env_report;
 
 static int failures = 0;
 
@@ -23,7 +23,7 @@ static void expect(std::vector<const char*> env, const std::string& want) {
 
 int main() {
     // nothing set (other settings, other groups and the old prefixes do not count): no line
-    expect({"PATH=/usr/bin", "STRATA_DS4_X=1", "MAYA_GLM_NOT_A_SETTING=4"}, "");
+    expect({"PATH=/usr/bin", "MAYA_DS4_X=1", "MAYA_GLM_NOT_A_SETTING=4"}, "");
     expect({}, "");
     // set: each under its name, in the order of the setting's name past SAGUARO_
     expect({"SAGUARO_GLM_SLOTS=0", "SAGUARO_GLM_PREFETCH_N=1"}, "glm env: SAGUARO_GLM_PREFETCH_N=1, SAGUARO_GLM_SLOTS=0");

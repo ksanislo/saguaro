@@ -267,10 +267,11 @@ class Catalog(unittest.TestCase):
         self.assertTrue(ik["recommended"])
         for part in ("one AMD GPU", "the offload path", "71 tok/s", "RX 9070 XT"):
             self.assertIn(part, ik["fit"])
-        self.assertIn("one AMD RDNA 3 / 4 GPU with 16 GB or more", ik["needs"])
+        self.assertIn("one AMD RDNA 3 / 4 GPU with 12 GB or more", ik["needs"])
         self.assertNotIn("holds every expert", ik["needs"])
         self.assertIn("NVIDIA GPUs only", c["hy4-flash-maya-s"]["fit"])
-        self.assertIn("16 GB", self.cat([dict(xt, vram_gb=12.0)])["inkling-2-mini"]["fit"])
+        self.assertIn("the offload path", self.cat([dict(xt, vram_gb=12.0)], 92.0)["inkling-2-mini"]["fit"])   # (12 GB on)
+        self.assertIn("12 GB", self.cat([dict(xt, vram_gb=8.0)])["inkling-2-mini"]["fit"])
 
     def test_two_t4s(self):
         c = self.cat([t4(0), t4(1)])
@@ -350,7 +351,7 @@ class Page(unittest.TestCase):
         """The INFO / STAT lines the tests below feed the page are the formats the engines print."""
         self.assertIn('"INFO engine=hy4 engine_kind=hy4 model=Hy4-flash ctx=%lld vram_gb=%.2f dspark=0 mtp=%d experts=%d "',
                       HY4_SRC)
-        self.assertIn('"vram_slots=%d\\n"', HY4_SRC)
+        self.assertIn('"vram_slots=%d expert_slots=%d\\n"', HY4_SRC)   # (upstream 07415b567: INFO says expert_slots too)
         self.assertIn('"STAT tok_s=%.2f ms_tok=%.2f vram_hit=%.4f cpu=%.3f"', HY4_SRC)
         self.assertIn('" engram_ms=%.3f\\n"', HY4_SRC)
         ik2 = (ROOT / "src" / "ik2" / "ik2_main.cu").read_text(encoding="utf-8")

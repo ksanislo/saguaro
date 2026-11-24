@@ -147,13 +147,13 @@ def fit_notes(cards: list, ram_gb: float) -> dict:
     out = {("hy4", None): {"needs": "Made for four 16 GB NVIDIA cards (Linux); Maya-S takes about 68 GB of VRAM and "
                                     "RAM together. One conversation at a time.", "fit": "", "recommended": False},
            ("ik2", None): {"needs": "Linux: one or two NVIDIA cards with 8 GB or more (V100 / Tesla T4 / RTX 20 and "
-                                    "newer), or one AMD RDNA 3 / 4 GPU with 16 GB or more; the experts a card does not "
+                                    "newer), or one AMD RDNA 3 / 4 GPU with 12 GB or more; the experts a card does not "
                                     "hold stay in RAM (the offload path). Made for one or two 16 GB cards.", "fit": "",
                            "recommended": False}}
     if not cards:
         return out
     amd = any(g.get("vendor") == "amd" for g in cards)
-    if amd:                                        # (the setup's AMD choice: one RDNA 3 / 4 GPU of 16 GB or more)
+    if amd:                                        # (the setup's AMD choice: one RDNA 3 / 4 GPU of 12 GB or more)
         cards = [g for g in cards if str(g.get("arch") or "").startswith(IK2F.AMD_ARCHS)] or cards
         cards = sorted(cards, key=lambda g: -float(g.get("vram_gb") or 0))[:1]
     vram = sum(float(g.get("vram_gb") or 0) for g in cards)

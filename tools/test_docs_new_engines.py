@@ -57,22 +57,22 @@ class Docs(unittest.TestCase):
 
     def test_inkling_on_amd_is_said_alike_everywhere(self):
         """README, SETUP, the setup's --help, the web catalog and AMD_SAGUARO.md say what the setup does (mortar,
-        2026-11-22): Inkling 2 Mini runs on NVIDIA and on one AMD RDNA 3 / 4 GPU of 16 GB+ (the offload path), and is
+        2026-11-22): Inkling 2 Mini runs on NVIDIA and on one AMD RDNA 3 / 4 GPU of 12 GB+ (the offload path), and is
         recommended there; the RX 9070 XT speeds quoted are ik2_fit's."""
         flat = lambda t: " ".join(t.split())   # noqa: E731
         readme, setup = flat(PAGES["README.md"]), flat(PAGES["docs/SETUP.md"])
         amd = flat((ROOT / "docs" / "AMD_SAGUARO.md").read_text(encoding="utf-8"))
         self.assertNotIn("Hy4-Flash and Inkling 2 Mini on NVIDIA under Linux", readme)
-        self.assertIn("one AMD RDNA 3 / 4 GPU of 16 GB or more", readme)
+        self.assertIn("one AMD RDNA 3 / 4 GPU of 12 GB or more", readme)
         self.assertIn("16-23 GB AMD RDNA 3 / 4 GPU", readme)
         self.assertIn("16-23 GB RDNA 3 / 4", amd)
         self.assertNotIn("NVIDIA Tesla T4 / RTX 20 and newer with 16 GB or more", setup)
-        self.assertIn("one AMD RDNA 3 / 4 GPU of 16 GB or more", setup)
+        self.assertIn("one AMD RDNA 3 / 4 GPU of 12 GB or more", setup)
         self.assertIn("16-23 GB AMD RDNA 3 / 4 GPU", setup)
         self.assertNotIn("(20-40 minutes plus the download)", readme)
         src = (ROOT / "saguaro.py").read_text(encoding="utf-8")
         head = flat(src[:src.index(chr(34) * 3, src.index(chr(34) * 3) + 3)])
-        self.assertIn("one AMD RDNA 3 / 4 GPU of 16 GB or more", head)
+        self.assertIn("one AMD RDNA 3 / 4 GPU of 12 GB or more", head)
         md = flat(src[src.index('ap.add_argument("--model-dir"'):][:900])
         self.assertIn("{IK2_SHOWN}", md)
         pull = flat((ROOT / "serve" / "model_pull.py").read_text(encoding="utf-8"))

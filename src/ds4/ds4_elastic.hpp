@@ -5,7 +5,7 @@
 #pragma once
 
 #include <cuda_runtime.h>
-#if !defined(STRATA_USE_HIP)
+#if !defined(MAYA_USE_HIP)
 #include <cuda.h>
 #endif
 
@@ -14,9 +14,9 @@
 #include <string>
 #include <vector>
 
-namespace strata::ds4::elastic {
+namespace maya::ds4::elastic {
 
-#if !defined(STRATA_USE_HIP)
+#if !defined(MAYA_USE_HIP)
 struct Vmm {
     decltype(&::cuMemAddressReserve) reserve = nullptr;
     decltype(&::cuMemAddressFree) addr_free = nullptr;
@@ -377,4 +377,4 @@ struct Pool {   // (HIP: no virtual memory calls here - init refuses, every conv
 };
 #endif
 
-}  // namespace strata::ds4::elastic
+}  // namespace maya::ds4::elastic

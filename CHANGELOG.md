@@ -19,6 +19,26 @@ older multi-GPU hardware (NVIDIA Turing T4 - sm_75 tensor cores, Xeon AVX1 CPUs)
 - **Credits:** built on Project Maya ([mw00/project-maya](https://github.com/mw00/project-maya)) and Strata (MIT) -
   see NOTICE.md. Everything below the next section is upstream Project Maya history.
 
+### Upstream Project Maya v1.1.75 taken in (2026-11-23)
+
+- **Inkling 2 Mini drafting on by default where it pays** (upstream #1154's GGUF drafter and one-launch exact window,
+  its drafting gate and depth-aware pause, plus our switches): a T4 with the UD-Q4_K_XL expert cache about +8 %
+  (a rounding-level verify window - answers may differ from plain decoding at near-ties), a T4 holding every expert
+  about +4 % and an RX 9070 XT holding every expert about +11 % (same answers as plain decoding); off on AMD's offload
+  path, where it loses. Every default has its `SAGUARO_IK2_*` switch. Table: docs/INKLING2.md.
+- **Inkling 2 Mini on AMD cards from 12 GB** (the offload path, Linux) and drafting on Volta; the drafter and the
+  picture file come from Project Maya's repo (byte-identical to before; copies already on the disk are kept).
+- **GLM-5.3-Flash:** the decode layers' CUDA graphs on by default on NVIDIA (`SAGUARO_GLM_KDA_GRAPH=0`: off), the
+  pipelined drafting window by default on three or more V100s.
+- **Hy4-Flash:** the shipped expert-use seeds place a first start's experts as later starts do; the Monitor shows the
+  Saved line, VRAM hit and where the experts live from the start (#1127).
+- **`./saguaro.sh --bench`** follows the speed-test standard (quiet-machine check, warm-up, medians), and
+  `--bench --compare <folder|git ref>` compares two builds on the same PC.
+- **Inside:** the engine's internal folders, namespace and build options follow upstream's rename (`include/maya`,
+  `MAYA_*` build options; `-DSTRATA_*` still accepted with a note). Settings stay `SAGUARO_*`.
+- Not taken: GLM "same answers on every start" (needs upstream features our GLM tree does not carry) and GLM tensor
+  parallel (opt-in, every expert in VRAM).
+
 ### Inkling 2 Mini: the T4 speed back, faster on AMD (2026-11-23)
 
 - **The offload path's VRAM tier is a GPU cache now** (upstream PR #1118, ported): experts a token misses take the

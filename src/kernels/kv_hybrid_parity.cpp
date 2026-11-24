@@ -8,12 +8,12 @@
 //   3. the composed gathers bitwise vs the host dequantization of those codes;
 //   4. qsa_decode_attn<3> + output fwht vs a host attention over the SAME dequantized K/V (fp32 math), and
 //      bounded against the fp32-true attention from the unquantized K/V.
-#include "strata/kernels/f16_bits.hpp"
-#include "strata/kernels/kv_q4.hpp"
-#include "strata/kernels/kv_q8.hpp"
-#include "strata/kernels/qsa.hpp"
-#include "strata/kernels/qsa_decode_attn.hpp"
-#include "strata/kernels/qsa_prompt_attn.hpp"
+#include "maya/kernels/f16_bits.hpp"
+#include "maya/kernels/kv_q4.hpp"
+#include "maya/kernels/kv_q8.hpp"
+#include "maya/kernels/qsa.hpp"
+#include "maya/kernels/qsa_decode_attn.hpp"
+#include "maya/kernels/qsa_prompt_attn.hpp"
 
 #include <cuda_runtime.h>
 
@@ -25,7 +25,7 @@
 #include <random>
 #include <vector>
 
-namespace k = strata::kernels;
+namespace k = maya::kernels;
 
 namespace {
 int g_fail = 0;
@@ -329,12 +329,21 @@ int main() {
         float* d_at4 = dalloc<float>((size_t) QH * D);
         const bool took = k::qsa_prompt_attn_batch(d_q, pools, d_ids, d_step, cells, s, d_at4, 1, nullptr);
         if (!took) {
-#if defined(STRATA_USE_HIP)
+#if defined(MAYA_USE_HIP)
             // AMD: the tensor-core prompt path is CUDA-only, so it refuses every pool and the old kernel runs
             std::printf("[5/5] qsa_prompt_attn mode 3: PASS (refused on HIP - the old kernel runs)\n");
 #else
-            std::printf("[5/5] qsa_prompt_attn mode 3: FAIL (refused the hybrid pools)\n");
-            g_fail = 1;
+            int dev = 0, cc_major = 0, cc_minor = 0;
+            ck(cudaGetDevice(&dev), "device");
+            ck(cudaDeviceGetAttribute(&cc_major, cudaDevAttrComputeCapabilityMajor, dev), "cc major");
+            ck(cudaDeviceGetAttribute(&cc_minor, cudaDevAttrComputeCapabilityMinor, dev), "cc minor");
+            if (cc_major * 10 + cc_minor < 75) {   // (Pascal / Volta: the tensor-core prompt path refuses by design)
+                std::printf("[5/5] qsa_prompt_attn mode 3: PASS (refused on compute capability %d.%d, below sm_75 - "
+                            "the old kernel runs)\n", cc_major, cc_minor);
+            } else {
+                std::printf("[5/5] qsa_prompt_attn mode 3: FAIL (refused the hybrid pools)\n");
+                g_fail = 1;
+            }
 #endif
         } else {
             k::fwht256_inplace_cuda(d_at4, QH, nullptr);

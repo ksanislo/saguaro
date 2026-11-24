@@ -14,27 +14,27 @@ namespace strata_fmt {
 
 namespace {
 
-strata::MetaValue mv_u32(uint64_t v) {
-    strata::MetaValue m;
-    m.type = strata::MetaType::U32;
+maya::MetaValue mv_u32(uint64_t v) {
+    maya::MetaValue m;
+    m.type = maya::MetaType::U32;
     m.u = v;
     return m;
 }
-strata::MetaValue mv_f32(double v) {
-    strata::MetaValue m;
-    m.type = strata::MetaType::F32;
+maya::MetaValue mv_f32(double v) {
+    maya::MetaValue m;
+    m.type = maya::MetaType::F32;
     m.f = (double) (float) v;
     return m;
 }
-strata::MetaValue mv_str(const std::string& s) {
-    strata::MetaValue m;
-    m.type = strata::MetaType::STRING;
+maya::MetaValue mv_str(const std::string& s) {
+    maya::MetaValue m;
+    m.type = maya::MetaType::STRING;
     m.s = s;
     return m;
 }
-strata::MetaValue mv_arr(const std::vector<strata::MetaValue>& items, strata::MetaType elem) {
-    strata::MetaValue m;
-    m.type = strata::MetaType::ARRAY;
+maya::MetaValue mv_arr(const std::vector<maya::MetaValue>& items, maya::MetaType elem) {
+    maya::MetaValue m;
+    m.type = maya::MetaType::ARRAY;
     m.elem = elem;
     m.count = items.size();
     m.items = items;
@@ -59,7 +59,7 @@ void sk_run_to_sh(const uint8_t* src, int code, size_t n, uint8_t* dst) {
 
 void InklingView::add(const std::string& name, uint32_t type, std::vector<uint64_t> ne, std::vector<uint8_t> buf,
                       const uint8_t* ptr, size_t nbytes) {
-    strata::TensorInfo t;
+    maya::TensorInfo t;
     t.name = name;
     t.type = type;
     t.shape = std::move(ne);
@@ -196,17 +196,17 @@ bool InklingView::build(const std::string& path, std::string& err) {
             meta_[a + "loop.gate_rank"] = mv_u32(rank);
         }
         {
-            std::vector<strata::MetaValue> pat;
+            std::vector<maya::MetaValue> pat;
             const int nc = core1 - core0;
             for (int v = 0; v < n_visit; ++v) {
                 const int l = (passes == 1 || v < core0) ? v
                             : v < core0 + passes * nc ? core0 + (v - core0) % nc : v - (passes - 1) * nc;
-                strata::MetaValue b;
-                b.type = strata::MetaType::BOOL;
+                maya::MetaValue b;
+                b.type = maya::MetaType::BOOL;
                 b.u = local.count(l) ? 1 : 0;
                 pat.push_back(b);
             }
-            meta_[a + "attention.sliding_window_pattern"] = mv_arr(pat, strata::MetaType::BOOL);
+            meta_[a + "attention.sliding_window_pattern"] = mv_arr(pat, maya::MetaType::BOOL);
         }
         meta_["tokenizer.ggml.eos_token_id"] = mv_u32(m.at("config").at("eos_token_id").i());
         if (m.has("chat_template")) meta_["tokenizer.chat_template"] = mv_str(m.at("chat_template").str());
@@ -326,7 +326,7 @@ bool InklingView::build(const std::string& path, std::string& err) {
     return true;
 }
 
-const strata::TensorInfo* InklingView::info(const std::string& name) const {
+const maya::TensorInfo* InklingView::info(const std::string& name) const {
     auto it = by_name_.find(name);
     return it == by_name_.end() ? nullptr : &tensors_[own_[it->second].idx];
 }

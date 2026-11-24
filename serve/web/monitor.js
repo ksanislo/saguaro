@@ -373,13 +373,16 @@ function Tiers({t, eng}) {
       <p class="card__note">${ik2Experts(eng)} Expert counts appear once the model writes.</p>
     </section>`;
   }
-  if (!t || !t.now) return null;
+  const hy4 = !!(eng && eng.engine_kind === "hy4");
+  // (Hy4-Flash: where its experts live is its start's placement (INFO experts / vram_slots) - shown from the start, before
+  //  an answer's readings; the others' from their STAT lines)
+  if (!(t && t.now) && !(hy4 && +eng.experts > 0)) return null;
   // (STAT lines with no expert tiers - an engine's drafting figures alone: nothing to show here)
   if (eng && eng.engine_kind === "ik2" && t.now.vram_used == null && t.now.ram_used == null) return null;
   const ds4 = !!(eng && eng.engine_kind === "ds4"), mm3 = !!(eng && eng.engine_kind === "mm3");
-  const qwen = !!(eng && eng.engine_kind === "qwen"), hy4 = !!(eng && eng.engine_kind === "hy4");
+  const qwen = !!(eng && eng.engine_kind === "qwen");
   const set = tierSet(eng);
-  const n = t.now, h = t.history || {};
+  const n = (t && t.now) || {}, h = (t && t.history) || {};
   const helper = ds4 && ((n.helper_held || 0) > 0 || (n.helper || 0) > 0 || +eng.helper_allocated_bytes > 0);
   const helperHeld = n.helper_held != null ? n.helper_held : +eng.helper_slots || 0;
   const age = n.time ? Math.max(0, Date.now() / 1000 - n.time) : null;
@@ -402,7 +405,8 @@ function Tiers({t, eng}) {
   const pc = (x) => (100 * x) / total;
   return html`<section class=${`card${stale ? " is-stale" : ""}`} aria-label="Where the experts live">
     <div class="card__head"><span class="card__title">${helper ? "Primary cache and RAM backing" : "Where the experts live"}</span>
-      <span class="card__sub">${age == null ? "" : stale ? `last reading ${ago(age)} ago, from the last answer` : `live · ${fmt(total)} routed experts`}</span></div>
+      <span class="card__sub">${age == null ? (hy4 ? `${fmt(total)} routed experts · no answer yet` : "")
+        : stale ? `last reading ${ago(age)} ago, from the last answer` : `live · ${fmt(total)} routed experts`}</span></div>
     <div class="tierbar" role="img" aria-label=${hy4 ? `${fmt(pc(vu), 0)}% of the experts in VRAM, ${fmt(pc(ru), 0)}% in RAM, computed on the CPU`
       : `${fmt(pc(vu), 0)}% of the experts in VRAM, ${fmt(pc(ru), 0)}% in ${ds4 ? "RAM" : "pinned RAM"}, ${fmt(pc(disk), 0)}% on the SSD only`}>
       <span class="tierbar__vram" style=${`flex-grow:${vu}`}></span><span class="tierbar__ram" style=${`flex-grow:${ru}`}></span>
