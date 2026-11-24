@@ -13,9 +13,15 @@ bool native_router_enabled();
 // computed probabilities select the lower expert index. All spans must be
 // four-byte aligned and outputs disjoint from each other and the input.
 // Requires a nonnull ordered CUDA stream. No allocation or synchronization.
-void native_router_top10(const float* logits, int32_t* ids, float* weights, void* stream);
+// drop (device, per row, nullable): PLAN-turbo-live's per-request drop N - the row keeps its 10-N heaviest picks (the
+// kept weights renormalised as the router does); a dropped pick is written as the row's top-1 id at weight 0
+void native_router_top10(const float* logits, int32_t* ids, float* weights, void* stream, const int32_t* drop = nullptr);
 /// n_tok rows at once (logits [n,512], ids/weights [n,10]); each row exactly as the single call.
-void native_router_top10_multi(const float* logits, int32_t* ids, float* weights, int n_tok, void* stream);
+void native_router_top10_multi(const float* logits, int32_t* ids, float* weights, int n_tok, void* stream,
+                               const int32_t* drop = nullptr);
+// The same drop after any other top-k (ranks in descending weight order): the last drop[row] picks of each row become
+// the row's top-1 at weight 0 and the kept weights are renormalised to their sum (clamped as the router's)
+void turbo_drop_apply(int32_t* ids, float* weights, int n_tok, int k, const int32_t* drop, void* stream);
 /// The same contract for a model family's (experts, top-k): 512 / 10 (Flash-Next: the two calls above, unchanged) and
 /// 256 / 8 (Qwen3.6-35B-A3B).  logits [n_tok, n_expert], ids / weights [n_tok, k].  CUDA / HIP.
 bool native_router_topk_supported(int n_expert, int k);
