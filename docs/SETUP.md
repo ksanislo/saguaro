@@ -87,6 +87,30 @@ It first asks which model to set up:
   sends that token (curl reads it from a file only you can read). It is served as `deepseek-v4.1-flash-abliterated`,
   with DeepSeek's DSpark drafter and vision tower as for unsloth's GGUFs (the drafter only proposes tokens - the model
   checks each one).
+- **Qwen3.8-Flash-Next** (`--model qwen3.8-flash-next`, or `--model qwen3.8-flash-next-q8_0`; `qfn` and
+  `qfn-q8_0` work too) - unsloth's GGUF quants of Qwen's own Qwen3.8-Flash-Next (UD-Q4_K_XL 111 GB, Q8_0 177 GB) on
+  its own engine (`build/qfn/saguaro-qfn`, `engines/qfn`, from Strata): Linux only (Windows is refused with the reason).
+  NVIDIA from the V100 on (compute capability 7.0): one GPU of 16 GB or more, or up to four equal ones taking the 48
+  layers in turn (`--gpus A,B,C,D`; four "16 GB" sm_75 cards get the live 4x Tesla T4 server's own split); AMD: one
+  RDNA 3 / 4 GPU of 16 GB or more, an APU not yet. `--check` prints the layout it would write for your cards, or the
+  reason it does not fit - the 4x Tesla T4 server's split and one RX 9070 XT are what is measured; other layouts get
+  the 48 layers shared out evenly and the engine's own prompt pipeline, and are said to be unmeasured.
+  About 96 GB of RAM either way: the experts a card does
+  not hold go in a pinned RAM tier of the RAM less 20 GB (`--resident-budget-gib`), the rest is read from the SSD;
+  the contexts are 32K-256K (65536 recommended on one card, 262144 on a split). The same steps with these differences:
+  the quant's files come pinned and sha256-checked from `tools/qfn/download.json`, or from the folder you have
+  (`--gguf-dir DIR`; `--import-model FOLDER` finds them in a folder you downloaded yourself), and the pack indexes
+  them in place; the picture tower (its mmproj, 0.9 GB) is fetched and its reader built for these cards
+  (`vision-qfn`, `vision-qfn-hip` on AMD - `--no-vision` leaves both out, the reader starts when the first picture
+  arrives); the Lamina MTP draft layer (0.8 GB) is downloaded and the setup asks whether to draft with it
+  (`--drafting off` / `on`, like the other engines' drafters); the config is
+  `maya-qwen3.8-flash-next-<quant>[-hip].json`, and `--parallel 4` lets several answers be written at once (off by
+  default on one 16 GB card, where it measured slower, and 2 across several GPUs). `--calibrate` tunes the PCIe share,
+  the draft floor and the CPU workers for this PC and measures the drafter, `--speed-calibration` measures the drafter
+  alone and keeps the faster, and `--bench` benchmarks the model - all on `saguaro-qfn`. Its settings:
+  [SETTINGS.md](SETTINGS.md#qwen38-flash-next-saguaro-qfn); what it is and its measured speeds:
+  [MODELS.md](MODELS.md#qwen38-flash-next-saguaro-qfn); the AMD install and its measurements:
+  [AMD_SAGUARO.md](AMD_SAGUARO.md#qwen38-flash-next-on-the-saguaro-qfn-engine).
 
 GLM-5.3-Flash's first run takes 20-40 minutes plus the download:
 
