@@ -200,6 +200,33 @@ function RightNow({m}) {
   </section>`;
 }
 
+// what QFN reports beside the bar (PLAN-t6b-stats-ui): the RAM its HMEM line pinned for the K/V host copies, the
+// context memory its KMEM line budgets on the cards, and each place's last turn save on disk (the engine's
+// sess_event=turn_saved) - from the /metrics fields the driver passes through (m.engine.context_ram,
+// m.engine.slot_memory, m.context.turn_saves).  Pure: a page-logic test can run it.
+export function contextFacts(eng = {}, C = {}) {
+  const out = [];
+  const cr = eng.context_ram;
+  if (cr && +cr.pinned > 0) {
+    const whole = +cr.whole > +cr.pinned ? ` (${gb(+cr.whole)} GB if every slot were full)` : "";
+    out.push(`${gb(+cr.pinned)} GB of RAM pinned for the context's K/V${whole}`);
+  }
+  const sm = eng.slot_memory;
+  if (Array.isArray(sm) && sm.length) {
+    const lim = sm.reduce((a, c) => a + (+c.total || 0) + (+c.givable || 0), 0);
+    const used = sm.reduce((a, c) => a + Math.max(0, (+c.total || 0) - (+c.free || 0)), 0);
+    if (lim > 0) out.push(`context memory: ${gb(used)} of ${gb(lim, 0)} GB budgeted on its cards`);
+  }
+  const ts = C.turn_saves;
+  if (ts && Object.keys(ts).length) {
+    const sz = (b) => (b >= GIB ? `${gb(b, 1)} GB` : `${fmt(b / (2 ** 20))} MB`);
+    out.push("last turn save on disk: " + Object.entries(ts)
+      .map(([p, s]) => `${p} ${kfmt(s.tokens)} tokens, ${sz(+s.bytes || 0)}${s.at ? ` ${ago(Date.now() / 1000 - s.at)} ago` : ""}`)
+      .join(" · "));
+  }
+  return out;
+}
+
 // ------------------------------------------------------------------ the context: the ENGINE's context, aggregate in use over what it can hold
 // every chat in a slot (active or idle-in-slot) of its positions, split into VRAM (inside each chat's VRAM window),
 // RAM (positions streamed to pinned RAM), PARKED (conversations the engine parked in RAM outside a slot) and FREE to
@@ -264,6 +291,7 @@ function ContextCard({m}) {
     const aria = `${fmt(cu.tokens || 0)} of ${fmt(cap.tokens)} tokens in use on the engine`
       + segs.map((s) => `, ${s.label.toLowerCase()} ${nAt(s)}${s.b ? `${s.n != null ? " " : ""}(${GBb(s.b)})` : ""}`).join("")
       + (free ? `, free ${fmt(free)}` : "");
+    const facts = contextFacts(eng, C);   // (QFN's context RAM / slot memory / turn saves: lines beside the bar)
     const enote = (cu.tokens || 0) === 0 && !(pk.bytes > 0)
       ? "No conversation in a slot yet: the context fills as chats go on - every chat in a slot counts here, one that "
         + "the engine parked in RAM apart from them, and one saved on disk not at all."
@@ -276,8 +304,11 @@ function ContextCard({m}) {
       <div class="ctx__track"><div class="ctxbar" role="img" aria-label=${aria}>
         ${segs.map((s) => html`<span class=${`ctxbar__${s.k}`} style=${`flex-grow:${grow(s)}`}></span>`)}
         ${free > 0 ? html`<span style=${`flex-grow:${free}`}></span>` : null}</div></div>
-      <div class="legend">${segs.map((s) => html`<span><i class=${`sw sw--${s.k}`}></i>${s.label} <b class="num">${[nAt(s), s.b ? GBb(s.b) : ""].filter(Boolean).join(" · ")}</b></span>`)}
+      <div class="legend">${segs.map((s) => html`<span><i class=${`sw sw--${s.k}`}></i>${s.label}
+        <b class="num">${[nAt(s), s.b ? GBb(s.b) : "", s.k === "parked" && pk.conversations
+          ? `${fmt(pk.conversations)} conversation${pk.conversations === 1 ? "" : "s"}` : ""].filter(Boolean).join(" · ")}</b></span>`)}
         <span><i class="sw sw--free"></i>Free <b class="num">${fmt(free)}</b></span></div>
+      ${facts.length ? html`<p class="card__note">${facts.join(" · ")}</p>` : null}
       ${cacheTot || manyChats ? html`<div class="ctx__chats">
         ${cacheTot ? html`<p class="ctx__chats__tot num">${fmt(cacheTot.n)} chats: ${cacheTot.all} of K/V, ${cacheTot.vram} in VRAM, ${cacheTot.ram} in RAM</p>` : null}
         ${actChats.map(chatBar)}
