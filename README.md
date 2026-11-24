@@ -82,7 +82,7 @@ LibertAIDAI's EXL3 quants of DeepSeek, orcarouter's abliterated DeepSeek, Mia-Ai
 turboderp's EXL3 quants of GLM, and Saguaro's fourth family, **Qwen-3.8-Flash-Next** (CYBER-FROST), as its Q5_K_M GGUF
 on the GLM engine's own Qwen path (`saguaro-glm`), with pictures
 ([its settings](docs/SETTINGS.md#qwen-38-flash-next-cyber-frost)); and Qwen3.8-Flash-Next itself (unsloth's UD-Q4_K_XL / Q8_0) on its own engine, `saguaro-qfn`, on one AMD GPU of 16 GB+
-with ~96 GB of RAM (experimental: `--model qwen3.8-flash-next`, [AMD](docs/AMD_SAGUARO.md#qwen38-flash-next-on-the-saguaro-qfn-engine)). **Each model's files, drafters, pictures and options:
+with ~96 GB of RAM (`--model qwen3.8-flash-next`; measured on an RX 9070 XT with 96 GB, [AMD](docs/AMD_SAGUARO.md#qwen38-flash-next-on-the-saguaro-qfn-engine)). **Each model's files, drafters, pictures and options:
 [docs/MODELS.md](docs/MODELS.md).**
 
 ## Quality

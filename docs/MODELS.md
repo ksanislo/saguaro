@@ -3,7 +3,7 @@
 Saguaro runs three quant families, each on an engine built for it; its fourth model family is Qwen-3.8-Flash-Next
 (CYBER-FROST) on the GLM engine's own Qwen path (`saguaro-glm`) - [its settings](SETTINGS.md#qwen-38-flash-next-cyber-frost).
 Qwen3.8-Flash-Next itself (unsloth's UD-Q4_K_XL, Q8_0) runs on its own engine, `saguaro-qfn` (`engines/qfn`, from
-Strata): the setup offers it on one AMD GPU (`--model qwen3.8-flash-next`, experimental -
+Strata): the setup offers it on one AMD GPU (`--model qwen3.8-flash-next`, measured on an RX 9070 XT with 96 GB of RAM -
 [AMD_SAGUARO.md](AMD_SAGUARO.md#qwen38-flash-next-on-the-saguaro-qfn-engine)); on NVIDIA it is set up by hand for now.
 Two more models have a page of their own: [Hy4-Flash](HY4-FLASH.md) (four cards) and
 [Inkling 2 Mini](INKLING2-MINI.md) (one or two 16 GB cards).

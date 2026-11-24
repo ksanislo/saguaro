@@ -159,7 +159,8 @@ class ModelsPage(unittest.TestCase):
         self.assertIn("saguaro-qfn", e["name"])
         self.assertAlmostEqual(e["size_gb"], 111.3, delta=0.1)
         self.assertIn("fits", e["fit"])
-        self.assertIn("experimental", e["needs"])
+        self.assertIn("measured on an RX 9070 XT (gfx1201) with 96 GB of RAM", e["needs"])
+        self.assertNotIn("experimental", e["needs"])
         self.assertIn("qwen3.8-flash-next-q8_0", rows)
         self.assertIn("saguaro-glm", rows["cyber-frost"]["needs"])
         small = {e["id"]: e for e in M.catalog(ROOT, glm_sizes={}, cards=amd, ram_gb=60.0)}

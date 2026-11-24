@@ -8,7 +8,7 @@ The state of this version (keep this table, the setup's `NO_ENGINE` list in `sag
 | --- | --- | --- |
 | GLM-5.3-Flash | `saguaro-glm` (`maya`) | builds and runs (experimental); its GPU self-tests pass on an RX 9070 XT (gfx1201, ROCm 7.1). The quant that fits a 16 GB card + 96 GB of RAM is Maya-XS (73 GB); the setup recommends the largest one that fits VRAM + RAM |
 | Qwen-3.8-Flash-Next (CYBER-FROST) | `saguaro-glm` (`maya`) | builds (the same engine as GLM); about 84 GB of VRAM + RAM |
-| Qwen3.8-Flash-Next (unsloth's UD-Q4_K_XL / Q8_0) | `saguaro-qfn` (`engines/qfn`) | builds and runs (experimental) on an RX 9070 XT (gfx1201, ROCm 7.1); the setup offers it (`--model qwen3.8-flash-next`) for one RDNA GPU of 16 GB or more with ~96 GB of RAM: UD-Q4_K_XL (111 GB) with the experts the card does not hold in a pinned RAM tier and the rest read from the SSD - [below](#qwen38-flash-next-on-the-saguaro-qfn-engine) |
+| Qwen3.8-Flash-Next (unsloth's UD-Q4_K_XL / Q8_0) | `saguaro-qfn` (`engines/qfn`) | builds and runs on an RX 9070 XT (gfx1201, ROCm 7.1) with 96 GB of RAM (27-41 tok/s answers, 520-1,080 tok/s 8K-16K prompt reads); the setup offers it (`--model qwen3.8-flash-next`) for one RDNA GPU of 16 GB or more with ~96 GB of RAM: UD-Q4_K_XL (111 GB) with the experts the card does not hold in a pinned RAM tier and the rest read from the SSD - [below](#qwen38-flash-next-on-the-saguaro-qfn-engine) |
 | DeepSeek-V4.1-Flash-1017 | `saguaro-ds4` (`maya-ds4`) | compiles for HIP (gfx1201 checked); not yet run on an AMD GPU |
 | MiniMax-M3.1-Flash | `saguaro-mm3` (`maya-mm3`) | compiles for HIP (gfx1201 checked); not yet run on an AMD GPU |
 | Hy4-Flash | `saguaro-hy4` (`maya-hy4`) | not run on an AMD GPU yet: the setup does not offer it on AMD |
@@ -245,7 +245,7 @@ drafting, two AMD GPUs, a Strix / Gorgon Halo APU. [INKLING2.md](INKLING2.md) ha
 
 ## Qwen3.8-Flash-Next on the saguaro-qfn engine
 
-Experimental. This is Qwen3.8-Flash-Next as Qwen released it, in unsloth's GGUFs, on its own engine (`saguaro-qfn`,
+Measured on one RX 9070 XT (gfx1201) with 96 GB of RAM (figures below). This is Qwen3.8-Flash-Next as Qwen released it, in unsloth's GGUFs, on its own engine (`saguaro-qfn`,
 `engines/qfn`, from Strata) - not CYBER-FROST, the fine-tune the setup also offers, which runs on `saguaro-glm`'s Qwen
 path. The setup offers it for one AMD RDNA 3 / 4 GPU of 16 GB or more and about 96 GB of RAM (Linux; an APU not yet), and
 refuses with the reason below that:

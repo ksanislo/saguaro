@@ -48,7 +48,7 @@ def catalog(root: Path, glm_sizes: dict | None = None, cards: list | None = None
                 "needs": "CYBER-FROST, Blackfrost-AI's fine-tune of Qwen3.8-Flash-Next, on the GLM engine's Qwen path "
                          "(saguaro-glm): NVIDIA from V100 on or AMD"})
     pc_cards, pc_ram = (cards, ram_gb or 0.0) if cards is not None else this_pc() if glm_sizes is None else ([], 0.0)
-    for key, entry in qfn_quants().items():              # (Qwen3.8-Flash-Next itself on saguaro-qfn: AMD, experimental)
+    for key, entry in qfn_quants().items():              # (Qwen3.8-Flash-Next itself on saguaro-qfn: AMD)
         out.append({"id": Q.qfn_setup_id(key), "family": "qwen", "name": Q.shown("qwen", key),
                     "installed": ("qwen", key) in have, "size_gb": entry["size_gb"], **qfn_fit(entry, pc_cards, pc_ram)})
     for key in Q.IK2_QUANTS:                           # (unsloth's UD-Q4_K_XL, then Strata's packs)
@@ -90,8 +90,8 @@ def qfn_quants() -> dict:
 def qfn_fit(entry: dict, cards: list, ram_gb: float) -> dict:
     """What Qwen3.8-Flash-Next on saguaro-qfn needs and whether this PC's first AMD GPU and RAM give it ("needs", "fit")."""
     n = entry.get("needs") or {}
-    out = {"needs": "Linux, one AMD RDNA 3 / 4 GPU of 16 GB or more and about 96 GB of RAM (experimental: measured on an "
-                    "RX 9070 XT" + ("" if entry.get("measured") else "; this quant not measured yet") + "); on NVIDIA "
+    out = {"needs": "Linux, one AMD RDNA 3 / 4 GPU of 16 GB or more and about 96 GB of RAM (measured on an "
+                    "RX 9070 XT (gfx1201) with 96 GB of RAM" + ("" if entry.get("measured") else "; this quant not measured yet") + "); on NVIDIA "
                     "it is set up by hand"}
     amd = [g for g in cards if str(g.get("arch", "")).startswith("gfx")]
     if not cards:

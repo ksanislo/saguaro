@@ -7338,7 +7338,7 @@ def qfn_about() -> str:
     m = qfn_entry()
     n = m["needs"]
     return (f"Qwen's Qwen3.8-Flash-Next itself (125B, 10 of 512 experts a token) in unsloth's GGUFs (UD-Q4_K_XL "
-            f"{m['download_gb']:.0f} GB, Q8_0 177 GB) on its own engine, saguaro-qfn (from Strata); AMD (experimental): one "
+            f"{m['download_gb']:.0f} GB, Q8_0 177 GB) on its own engine, saguaro-qfn (from Strata); AMD: one "
             f"RDNA 3 / 4 GPU of {n.get('vram_gb', 15) + 1:.0f} GB or more with about {n.get('ram_gb', 88) + 8:.0f} GB of RAM - "
             "the experts the GPU does not hold in RAM, the rest read from the SSD; MTP drafting, tool calls, up to a "
             "256K context; text only. Not CYBER-FROST: the model as Qwen released it.")
@@ -7530,8 +7530,8 @@ def set_up_qfn(a, prev: dict) -> Path | None:
     m = qfn_entry(quant)
     ok(f"model: {Q.shown('qwen', quant, m['download_gb'])} - Qwen's Qwen3.8-Flash-Next (Qwen Community License 1.0: "
        "LICENSE.qwen-community-1.0) on its own engine, saguaro-qfn")
-    warn(f"{QFN_SHOWN} on AMD is experimental: measured on an RX 9070 XT (gfx1201) with 96 GB of RAM only - tell us "
-         "how it goes" + ("" if m.get("measured") else f"; {Q.QFN_QUANTS[quant]} is not measured on AMD yet"))
+    ok(f"{QFN_SHOWN} on AMD: measured on an RX 9070 XT (gfx1201) with 96 GB of RAM (27-41 tok/s answers, 520-1,080 "
+       "tok/s 8K-16K prompt reads) - tell us how it goes on yours" + ("" if m.get("measured") else f"; {Q.QFN_QUANTS[quant]} is not measured on AMD yet"))
     ok(f"the GPU holds the most-used experts, {qfn_ram_budget(ram)} GB of RAM the next ones, the SSD the rest")
     ctx = choose_context(a, prev_ctx, QFN_CONTEXTS, QFN_DEFAULT_CONTEXT)
     ok(f"context: {ctx} tokens" + (" (recommended)" if ctx == QFN_DEFAULT_CONTEXT else ""))
