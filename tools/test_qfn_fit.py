@@ -104,6 +104,15 @@ class FourT4(unittest.TestCase):
         self.assertEqual(p["args"][-1], "6144")
         self.assertTrue(p["measured"])
 
+    def test_the_t4_env_follows_the_quant(self):
+        ud = F.plan(t4s(4), 220.0, "ud-q4_k_xl")["env"]            # (./ref/Qwen3.8-Flash-Next-UD-Q4_K_XL.json)
+        q8 = F.plan(t4s(4), 220.0, "q8_0")["env"]                  # (./ref/Qwen3.8-Flash-Next-Q8_0.json)
+        self.assertEqual(ud["SAGUARO_BF16_TC_SKIP"], "none")
+        self.assertEqual(q8["SAGUARO_BF16_TC_SKIP"], "indexer,router,ssm")
+        self.assertEqual(ud["SAGUARO_SELECT_SM75"], "1")
+        self.assertNotIn("SAGUARO_SELECT_SM75", q8)                # (the live Q8_0 box never ran it)
+        self.assertEqual(q8["SAGUARO_KQL"], ud["SAGUARO_KQL"])     # (the shared part stays shared)
+
     def test_equal_but_not_t4_cards_split_evenly(self):
         p = F.plan([gpu(i, 16.0, "86") for i in range(4)], 128.0)
         self.assertEqual(p["layer_split"], "12,24,36")

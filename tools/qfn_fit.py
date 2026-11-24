@@ -43,10 +43,13 @@ MEASURED_SPLITS = {"ud-q4_k_xl": "11,24,36", "q8_0": "10,22,35"}
 MEASURED_PREFILL_PIPE = {"ud-q4_k_xl": "1536", "q8_0": "6144"}
 # the live configs' T4 tuning env (SAGUARO_SM75_*, KQL, BF16_TC*, MMQ_*): write it only where every chosen card is
 # compute capability 7.5 - it is what makes mangonel's T4s fast, and untested elsewhere.  SAGUARO_MMQ_KQ is not
-# part of it: the setup writes it everywhere, AMD included.  BF16_TC_SKIP's value is the UD-Q4_K_XL config's.
+# part of it: the setup writes it everywhere, AMD included.  Two values differ between the live boxes' quants:
+# the Q8_0 box skips the BF16 tensor-core projections of indexer, router and ssm (UD-Q4_K_XL skips nothing) and
+# runs no SAGUARO_SELECT_SM75 (./ref/Qwen3.8-Flash-Next-*.json).
 T4_ENV = {"SAGUARO_SM75_PERF": "1", "SAGUARO_SM75_STACK": "1", "SAGUARO_SM75_Q8G": "1", "SAGUARO_KQL": "3",
-          "SAGUARO_BF16_TC": "1", "SAGUARO_BF16_TC_SKIP": "none", "SAGUARO_SELECT_SM75": "1",
-          "SAGUARO_MMQ_DIRECT": "1", "SAGUARO_MMQ_KTAIL": "1", "SAGUARO_MMQ_SWIGLU_Q8": "1"}
+          "SAGUARO_BF16_TC": "1", "SAGUARO_MMQ_DIRECT": "1", "SAGUARO_MMQ_KTAIL": "1", "SAGUARO_MMQ_SWIGLU_Q8": "1"}
+T4_BF16_TC_SKIP = {"ud-q4_k_xl": "none", "q8_0": "indexer,router,ssm"}
+T4_SELECT_SM75 = {"ud-q4_k_xl": "1"}                # (the live Q8_0 config carries no such key)
 SIZES: dict = {}                                      # quant -> GiB, from the manifest (read once)
 
 
@@ -85,8 +88,19 @@ def _cc(g: dict) -> int:
 
 def sm75_only(cards: list) -> bool:
     """True where every card is compute capability 7.5 (Tesla T4 / Quadro RTX 3000): the gate for the live
-    configs' T4 tuning env (T4_ENV)."""
+    configs' T4 tuning env (t4_env)."""
     return bool(cards) and all(_cc(g) == SM75 for g in cards)
+
+
+def t4_env(quant: str) -> dict:
+    """The live configs' T4 tuning env for `quant`: T4_ENV plus its own BF16_TC_SKIP / SELECT_SM75 (a quant the
+    live boxes never ran gets the shared part alone)."""
+    env = dict(T4_ENV)
+    if quant in T4_BF16_TC_SKIP:
+        env["SAGUARO_BF16_TC_SKIP"] = T4_BF16_TC_SKIP[quant]
+    if quant in T4_SELECT_SM75:
+        env["SAGUARO_SELECT_SM75"] = T4_SELECT_SM75[quant]
+    return env
 
 
 def t4_sized(g: dict) -> bool:
@@ -169,7 +183,7 @@ def plan(cards: list, ram_gb: float, quant: str = "ud-q4_k_xl") -> dict:
             f"a {ctx // 1024}K context")
     return {"fits": why is None, "reason": why, "gpus": list(cards), "n_gpus": n, "layer_split": split,
             "context": ctx, "kv_resident": min(ctx, KV_RESIDENT), "resident_budget_gib": budget,
-            "args": args, "env": dict(T4_ENV) if (t4 and why is None) else {}, "t4": t4,
+            "args": args, "env": t4_env(quant) if (t4 and why is None) else {}, "t4": t4,
             "measured": measured, "said": said}
 
 
