@@ -455,6 +455,39 @@ console.log(JSON.stringify({{shares: sv.tierShares(n, eng), set: mon.tierSet(eng
         self.assertEqual(got["glm"], ["ram_fetch", "disk", "promo"])        # (the other engines' card as before)
         self.assertEqual((got["full"]["vu"], got["full"]["ru"]), (20992, 0))
 
+    def test_monitor_qfn_stats_and_context_facts(self):
+        """T6b: what the page reads from a QFN engine's passed-through fields - the qfn tier tiles filled by its
+        STAT line (promo= from T6a), Speculation named by its INFO mtp=, and the Context card's QFN lines
+        (contextFacts from engine.context_ram / engine.slot_memory / context.turn_saves)."""
+        self.assertIn("mtp_max=%d mtp=%d lookup=%d vram_free_mib=%lld", QFN_SRC)    # (T6a: INFO says mtp=)
+        self.assertIn('"STAT tok_s=%.2f ms_tok=%.2f vram_hit=%.4f ram_fetch=%.3f disk=0.000 promo=%.3f "',
+                      QFN_SRC)                                                      # (T6a: STAT says promo=)
+        eng = info_of("INFO engine_kind=qfn experts=13824 vram_slots=16384 vram_gb=50.8 ram_slots=0 ram_gb=63.4")
+        stat = {k: float(v) for k, v in info_of(
+            "STAT tok_s=21.40 ms_tok=46.73 vram_hit=0.9512 ram_fetch=0.487 disk=0.000 promo=0.031 vram_used=4096 "
+            "vram_slots=5120 ram_used=9728 ram_gb=71.2 vram_gb=2.4 disk_gb=0.0 draft_acc=37 draft_off=58 active=1"
+        ).items()}
+        got = self.node(f"""
+const sv = await import(web + "/server.js"), mon = await import(web + "/monitor.js");
+const eng = {json.dumps(eng)}, n = {json.dumps(stat)};
+console.log(JSON.stringify({{
+  set: mon.tierSet(eng).map((x) => [x.key, n[x.key]]),
+  shares: sv.tierShares(n, eng),
+  spec: sv.speculationView({{engine: {{speculation: ["MTP"]}},
+                             requests: [{{drafts_offered: n.draft_off, drafts_accepted: n.draft_acc}}]}}),
+  facts: mon.contextFacts(
+    {{context_ram: {{pinned: 3221225472, whole: 6442450944, slots: [1073741824, 2147483648]}},
+     slot_memory: [{{device: 0, total: 4294967296, free: 1073741824, givable: 536870912}}]}},
+    {{turn_saves: {{main: {{tokens: 12345, bytes: 35651584, ms: 8.2, at: Date.now() / 1000 - 42}}}}}}),
+  none: mon.contextFacts({{}}, {{}})}}));""")
+        self.assertEqual(got["set"], [["promo", 0.031], ["ram_fetch", 0.487], ["disk", 0.0]])
+        self.assertEqual((got["shares"]["vu"], got["shares"]["ru"], got["shares"]["total"]), (4096, 9728, 13824))
+        self.assertEqual((got["spec"]["state"], got["spec"]["name"], got["spec"]["short"]), ("kept", "MTP", "64%"))
+        self.assertEqual(got["none"], [])
+        self.assertEqual(got["facts"][0], "3.0 GB of RAM pinned for the context's K/V (6.0 GB if every slot were full)")
+        self.assertEqual(got["facts"][1], "context memory: 3.0 of 4.5 GB budgeted on its cards")
+        self.assertEqual(got["facts"][2], "last turn save on disk: main 12k tokens, 34 MB 42 s ago")
+
     def test_monitor_ik2_says_where_its_experts_are(self):
         one = info_of("INFO engine=ik2 engine_kind=ik2 model=Inkling-2 kv=f16 ctx=32768 gpus=1 experts=12288 path=offload")
         two = info_of("INFO engine=ik2 engine_kind=ik2 model=Inkling-2 kv=f16 ctx=131072 gpus=2 experts=12288 path=resident")
