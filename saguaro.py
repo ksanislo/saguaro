@@ -1232,7 +1232,27 @@ def vs_2026(vcvars) -> bool:
     return vcvars is not None and any(p.isdigit() and 18 <= int(p) < 1000 for p in PureWindowsPath(str(vcvars)).parts)
 
 
-def check_hip_pc(a, installed=False, text_only=True) -> dict:
+def cpu_avx1_rows(family: str, gguf: bool = False) -> bool:
+    """Whether the family's CPU expert lane has AVX1 rows (plain AVX: no AVX2 / FMA): the table of
+    scratch/avx1-table.txt.  GLM's native rows, Strata's (qfn), Inkling's and the maya-ds4 GGUF rows (deepseek /
+    minimax from a GGUF quant) all do.  Only the EXL3 quant's lane does not: its rows come from
+    src/kernels/cpu/exl3_cpu.cpp, whose tiers start at scalar, so such a CPU runs it slower."""
+    return not (family in ("deepseek", "minimax") and not gguf)
+
+
+def note_no_avx2(cpu: str, family: str, gguf: bool = False) -> None:
+    """The no-AVX2 line, used by the CUDA and the HIP check alike.  The row width is picked at build time (setup.py
+    compiles each engine for this CPU), so it names no env switch: SAGUARO_GLM_CPU_LANE / SAGUARO_DS4_CPU_LANE are the
+    lane's calibrated *share*, not an instruction choice.  An ok where the engine has AVX1 rows, a warn where it only
+    has scalar ones."""
+    if cpu_avx1_rows(family, gguf):
+        ok(f"CPU: {cpu} (no AVX2: the engine's AVX1 rows, {os.cpu_count()} threads)")
+    else:
+        warn(f"the CPU ({cpu}) has no AVX2: this engine's CPU expert lane has no AVX1 rows for this quant, so it runs "
+             "slower here (the GPUs are unaffected)")
+
+
+def check_hip_pc(a, installed=False, text_only=True, family: str = "glm", gguf: bool = False) -> dict:
     if not WIN and (not sys.platform.startswith("linux") or S.is_wsl()):
         fail("Saguaro's HIP backend runs on native Linux or Windows")
     vcvars = S.find_vcvars(cuda=False) if WIN else None
@@ -1286,7 +1306,7 @@ def check_hip_pc(a, installed=False, text_only=True) -> dict:
         missing = sorted({g["arch"] for g in chosen}) if root is None else rocm_devices_missing(g["arch"] for g in chosen)
         if missing and not installed and (root is None or not getattr(a, "check", False)):   # (--check: says so below)
             install_rocm(a, chosen)
-            return check_hip_pc(a, installed=True)
+            return check_hip_pc(a, installed=True, family=family, gguf=gguf)
         if root is None:
             fail("AMD's ROCm SDK for Windows was not found after its install", f"run {ME} again")
         if missing:
@@ -1324,9 +1344,8 @@ def check_hip_pc(a, installed=False, text_only=True) -> dict:
             fail("a C++ compiler is needed", "Ubuntu/Debian: sudo apt install build-essential")
     cpu, avx2, avx512 = S.cpu_info()
     if not avx2:
-        # as on CUDA (#32): the CPU expert lane falls back to ggml's own kernels (src/kernels/cpu/expert_layout.cpp)
-        warn(f"the CPU ({cpu}) has no AVX2: the engine runs, its CPU expert lane on ggml's own kernels (slower). "
-             "SAGUARO_GLM_CPU_LANE=0 turns it off")
+        # the row width is a build-time fact, not a choice: per family whether its CPU expert rows have AVX1 forms
+        note_no_avx2(cpu, family, gguf)
     total, avail = mem_gb()
     split = f"{len(chosen)} GPUs (layer split)" if len(chosen) > 1 else "one GPU"
     ok(f"using {' + '.join(gpu_label(g) for g in chosen)}; HIP, {split}" +
@@ -1617,7 +1636,7 @@ def check_pc(a, family: str = "glm", gguf: bool = False, ds4_quant: str = "exl3"
             warn(f"{DS4}'s EXL3 quants on AMD are experimental: their kernels pass their tests on AMD GPUs, but the "
                  f"whole model has not been measured on one - Saguaro's GGUF quants (--model deepseek-maya-s / "
                  "deepseek-maya-xs) are the tested way there")
-        return check_hip_pc(a, text_only=False)   # (every model the setup takes on AMD reads pictures there)
+        return check_hip_pc(a, text_only=False, family=family, gguf=gguf)   # (every model the setup takes on AMD reads pictures there)
     if a.backend == "metal":
         if family != "glm":
             fail(f"Saguaro's Metal engine runs GLM-5.3-Flash only (no Metal engine for {ds4 and DS4 or mm3 and MM3 or QFN_SHOWN})",
@@ -1772,11 +1791,8 @@ def check_pc(a, family: str = "glm", gguf: bool = False, ds4_quant: str = "exl3"
     cpu, avx2, avx512 = S.cpu_info()
     if S.ARM:
         ok(f"CPU: {cpu} (ARM64, {os.cpu_count()} threads; the expert kernels use ggml-cpu's NEON paths)")
-    elif not avx2 and family in ("hy4", "ik2"):        # (their CPU rows have AVX1 forms: built for such Xeons)
-        ok(f"CPU: {cpu} (no AVX2: the engine's AVX1 rows, {os.cpu_count()} threads)")
     elif not avx2:
-        warn(f"the CPU ({cpu}) has no AVX2: the engine runs, its CPU expert lane on ggml's own kernels (slower; "
-             "on 2x Xeon E5-2660 v2 it still added ~15% to 4-GPU decode). SAGUARO_GLM_CPU_LANE=0 turns it off")
+        note_no_avx2(cpu, family, gguf)        # (the engine's AVX1 rows, or a slower lane: scratch/avx1-table.txt)
     else:
         ok(f"CPU: {cpu} ({'AVX-512' if avx512 else 'AVX2'}, {os.cpu_count()} threads)")
 
