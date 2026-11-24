@@ -3168,6 +3168,14 @@ class Service:
                 room = f"the expert cache did not make room for it ({e}); "
             if self.vision_held:
                 time.sleep(0.2)      # the free-VRAM counter shows the cache's release a moment later
+        if not self.vision_held and hasattr(self.engine, "vision_room") and not self.engine.vision_room():
+            # neither lend path is configured on this engine (no "INFO vision_lend=1" from the give path, no
+            # --vram-elastic behind the VRAM command - its own start facts, serve/qfn_engine's vision_room): the
+            # encoder would start onto a card with nothing to give it, which is how the reader got SIGKILLed
+            # (U6's ./ref/vision-fail.log) - refuse the picture with a plain error instead
+            raise ValueError("this engine lends the picture encoder nothing: no batch slots to give room from "
+                             "and not started with --vram-elastic (its INFO says neither) - run the setup again "
+                             "or add \"vram_elastic\": true")
         v.restart()
         print(f"[saguaro] images: {room}the image encoder started in {time.time() - t0:.1f} s", flush=True)
 
