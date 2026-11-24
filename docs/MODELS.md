@@ -1,9 +1,9 @@
 # The models
 
-Saguaro runs three quant families, each on an engine built for it; its fourth model family is Qwen-3.8-Flash-Next
-(CYBER-FROST) on the GLM engine's own Qwen path (`saguaro-glm`) - [its settings](SETTINGS.md#qwen-38-flash-next-cyber-frost).
-Qwen3.8-Flash-Next itself (unsloth's UD-Q4_K_XL, Q8_0) runs on its own engine, `saguaro-qfn` (`engines/qfn`, from
-Strata): the setup offers it with `--model qwen3.8-flash-next` on Linux, on one AMD RDNA 3 / 4 GPU of 16 GB or more
+Saguaro runs four quant families, each on an engine built for it. Qwen3.8-Flash-Next (unsloth's UD-Q4_K_XL, Q8_0, and
+Blackfrost-AI's CYBER-FROST fine-tune as a quant of its own) runs on its own engine, `saguaro-qfn` (`engines/qfn`, from
+Strata): the setup offers it with `--model qwen3.8-flash-next` (`--model cyber-frost` for the fine-tune) on Linux,
+on one AMD RDNA 3 / 4 GPU of 16 GB or more
 (measured on an RX 9070 XT with 96 GB of RAM - [AMD_SAGUARO.md](AMD_SAGUARO.md#qwen38-flash-next-on-the-saguaro-qfn-engine))
 and on NVIDIA on one card of 16 GB or more, or up to four equal ones taking the layers in turn.
 Two more models have a page of their own: [Hy4-Flash](HY4-FLASH.md) (four cards) and
@@ -213,13 +213,14 @@ The install, the settings and the limits: **[INKLING2-MINI.md](INKLING2-MINI.md)
 **[Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next)** (Qwen; 125 B parameters, 10 of 512 experts a
 token; the [Qwen Community License 1.0](../LICENSE.qwen-community-1.0)) on an engine of its own (`saguaro-qfn`,
 `engines/qfn`, from Strata), from [unsloth's GGUFs](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF):
-`./setup.sh --model qwen3.8-flash-next`. This is the model as Qwen released it - not CYBER-FROST, the fine-tune on
-`saguaro-glm`'s Qwen path.
+`./setup.sh --model qwen3.8-flash-next`. This is the model as Qwen released it; Blackfrost-AI's CYBER-FROST fine-tune
+is offered as a quant of the same engine (`--model cyber-frost`, every old id still resolving to it).
 
 | Files | Size | Runs on |
 | --- | ---: | --- |
 | unsloth's [UD-Q4_K_XL](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF) (`qwen3.8-flash-next`, the default): the routed experts in Q4_K / Q5_K / Q6_K | 111 GB | Linux: NVIDIA from the V100 on, one GPU of 16 GB or more or up to four equal ones; AMD on one RDNA 3 / 4 GPU of 16 GB or more |
 | unsloth's [Q8_0](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF) (`qwen3.8-flash-next-q8_0`): every weight in 8 bits, the most accurate quant | 177 GB | the same |
+| Blackfrost-AI's CYBER-FROST-3.8 in [peasantsmith's GGUF](https://huggingface.co/peasantsmith/CYBER-FROST-3.8-PS-GUFF) (`cyber-frost`): the fine-tune's one file, its Q5_K experts; the drafter is built from the NextN block inside it | 112.5 GB | the same |
 
 - **What it needs:** about 96 GB of RAM beside the 16 GB card - the experts a card does not hold are cached in a
   pinned RAM tier of the RAM less 20 GB (`--resident-budget-gib`) and the rest is read from the SSD as tokens route

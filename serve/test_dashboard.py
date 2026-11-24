@@ -145,8 +145,8 @@ class Dashboard(unittest.TestCase):
             ({"engine_kind": "glm-fast", "mtp": 1, "dflash": 1}, {}, ["DFlash2"]),      # (DFlash decode takes the request first)
             ({"engine_kind": "glm-fast", "mtp": 0, "dflash": 1}, {}, ["DFlash2"]),
             ({"engine_kind": "glm-fast", "mtp": 0, "dflash": 0}, {}, []),
-            ({"engine_kind": "qwen", "mtp": 1, "lookup": 3}, {}, ["MTP", "Lookup"]),
-            ({"engine_kind": "qwen", "mtp": 0, "lookup": 0}, {}, []),
+            ({"engine_kind": "qfn", "mtp": 1, "lookup": 3}, {}, ["MTP", "Lookup"]),
+            ({"engine_kind": "qfn", "mtp": 0, "lookup": 0}, {}, []),
             ({"engine_kind": "mm3", "dspark": 1}, {}, ["DSpark"]),
             ({"engine_kind": "mm3", "dspark": 0}, {}, []),
             ({"engine_kind": "ds4"}, {"dspark": True, "lookup": True}, ["DSpark", "Lookup"]),

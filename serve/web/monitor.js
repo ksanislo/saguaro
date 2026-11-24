@@ -378,21 +378,15 @@ const TIER_SETS = {
     {key: "ram_fetch", label: "From RAM", unit: "/tok", digits: 2, tone: "info", sub: "experts the GPU fetched from pinned RAM"},
     {key: "cpu", label: "On the CPU", unit: "/tok", digits: 2, sub: "experts the CPU lane computed from RAM"},
   ],
-  // CYBER-FROST (the maya engine's Qwen path): the CPU computes the experts VRAM does not hold, from RAM or read from the
-  // model file; the drafts' windows count too
-  qwen: [
-    {key: "promo", label: "Promoted", unit: "/tok", digits: 2, sub: "completed expert moves into VRAM per generated token"},
-    {key: "ram_fetch", label: "From RAM", unit: "/tok", digits: 1, tone: "info", sub: "experts the CPU computed from RAM"},
-    {key: "disk", label: "From SSD", unit: "/tok", digits: 2, tone: "warn", sub: "experts read from the model file"},
-  ],
-  // Qwen3.8-Flash-Next (saguaro-qfn, INFO engine_kind=qfn): the same layout as CYBER-FROST's Qwen path
+  // Qwen3.8-Flash-Next (saguaro-qfn, INFO engine_kind=qfn): the CPU computes the experts VRAM does not hold, from
+  // RAM or read from the model file; the drafts' windows count too
   qfn: [
     {key: "promo", label: "Promoted", unit: "/tok", digits: 2, sub: "completed expert moves into VRAM per generated token"},
     {key: "ram_fetch", label: "From RAM", unit: "/tok", digits: 1, tone: "info", sub: "experts the CPU computed from RAM"},
     {key: "disk", label: "From SSD", unit: "/tok", digits: 2, tone: "warn", sub: "experts read from the model file"},
   ],
 };
-export const tierSet = (eng) => TIER_SETS[["ds4", "mm3", "qwen", "qfn", "hy4", "ik2"].includes(eng && eng.engine_kind) ? eng.engine_kind : "glm"];
+export const tierSet = (eng) => TIER_SETS[["ds4", "mm3", "qfn", "hy4", "ik2"].includes(eng && eng.engine_kind) ? eng.engine_kind : "glm"];
 // Inkling 2 before its first STAT (the engine's INFO path=: resident / offload / cache): where its experts are
 export function ik2Experts(eng) {
   const n = +eng.gpus || 1;
@@ -417,7 +411,6 @@ function Tiers({t, eng}) {
   // (STAT lines with no expert tiers - an engine's drafting figures alone: nothing to show here)
   if (eng && eng.engine_kind === "ik2" && t.now.vram_used == null && t.now.ram_used == null) return null;
   const ds4 = !!(eng && eng.engine_kind === "ds4"), mm3 = !!(eng && eng.engine_kind === "mm3");
-  const qwen = !!(eng && eng.engine_kind === "qwen");
   const qfn = !!(eng && eng.engine_kind === "qfn");
   const set = tierSet(eng);
   const n = (t && t.now) || {}, h = (t && t.history) || {};
@@ -435,7 +428,7 @@ function Tiers({t, eng}) {
                    : "Most experts run on the CPU: more VRAM (or a second GPU) keeps more of them on the card.";
   } else if (!stale && n.disk != null && n.disk >= 3) {
     tip = "Many experts are read from the SSD for every token: more RAM, a smaller model or a shorter context makes answers faster.";
-  } else if (mm3 || qwen || qfn || hy4) {   // (MiniMax, CYBER-FROST, QFN, Hy4-Flash: the CPU computes the experts VRAM
+  } else if (mm3 || qfn || hy4) {   // (MiniMax, QFN, Hy4-Flash: the CPU computes the experts VRAM
     //  does not hold)
     if (!stale && n.vram_hit != null && n.vram_hit < 0.5) tip = "Most experts run on the CPU: more VRAM (or a second GPU) keeps more of them on the card.";
   } else if (!stale && n.vram_hit != null && n.vram_hit < 0.85 && (n.ram_fetch || 0) >= 4) {

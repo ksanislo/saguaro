@@ -1,6 +1,7 @@
 """tools/test_qfn_calibrate.py - QFN's --calibrate / --speed-calibration / --bench in unit tests with fakes (no GPU,
 no engine, no network): the drafter-path lookup on the config's own --mtp folder, the drafting-on/off calibration
-decision on fake timings, the QFN routing of calibrate_config / speed_calibration (CYBER-FROST's qwen path apart),
+decision on fake timings, the QFN routing of calibrate_config / speed_calibration (the old CYBER-FROST config
+routing there too since T8a),
 the expert-profile copy the calibration measures on, and --bench keeping saguaro-qfn and starting the engine the
 way its server does.
 
@@ -132,37 +133,32 @@ class CalibrationDecision(unittest.TestCase):
 
 
 class SaguaroRouting(unittest.TestCase):
-    """--calibrate / --speed-calibration take the qfn branch to QFN's own check; CYBER-FROST's qwen path is apart."""
+    """--calibrate / --speed-calibration take the qfn branch to QFN's own check - the old CYBER-FROST config too,
+    which reads "qfn" since T8a (its model is the family's quant)."""
 
     def test_calibrate_config_routes_qfn_to_its_own_check(self):
         with tempfile.TemporaryDirectory() as tmp:
             p = write_cfg(tmp, cfg_on(tmp))
-            with patch.object(maya, "qfn_calibrate_config", return_value=True) as qfn, \
-                    patch.object(maya, "qwen_draft_calibration") as qwen:
+            with patch.object(maya, "qfn_calibrate_config", return_value=True) as qfn:
                 self.assertTrue(maya.calibrate_config(p))
                 self.assertTrue(qfn.called)
-        self.assertFalse(qwen.called)
 
-    def test_calibrate_config_leaves_cyber_frost_on_the_qwen_path(self):
+    def test_calibrate_config_routes_old_cyber_frost_to_qfn(self):
         cfg = {"exe": "/b/maya", "args": ["--glm-pack", "/p", "--ple-gguf", "/g"],
                "installer": {"family": "qwen", "qwen_quant": "q5_k_m"}}
         with tempfile.TemporaryDirectory() as tmp:
             p = write_cfg(tmp, cfg)
-            with patch.object(maya, "qwen_draft_calibration", return_value=None) as qwen, \
-                    patch.object(maya, "qfn_calibrate_config") as qfn:
-                self.assertFalse(maya.calibrate_config(p))
-                self.assertTrue(qwen.called)
-        self.assertFalse(qfn.called)
+            with patch.object(maya, "qfn_calibrate_config", return_value=True) as qfn:
+                self.assertTrue(maya.calibrate_config(p))
+                self.assertTrue(qfn.called)
 
     def test_speed_calibration_routes_qfn_to_its_own_check(self):
         with tempfile.TemporaryDirectory() as tmp:
             p = write_cfg(tmp, cfg_on(tmp))
             with patch.object(maya, "qfn_draft_calibration", return_value=True) as qfn, \
-                    patch.object(maya, "qwen_draft_calibration") as qwen, patch("sys.stdout", new=io.StringIO()), \
-                    patch.object(maya.S, "UI", None):
+                    patch("sys.stdout", new=io.StringIO()), patch.object(maya.S, "UI", None):
                 self.assertTrue(maya.speed_calibration(p, "asked for"))
                 self.assertTrue(qfn.called)
-        self.assertFalse(qwen.called)
 
     def test_draft_calibration_keeps_the_faster_side_in_the_config(self):
         with tempfile.TemporaryDirectory() as tmp:

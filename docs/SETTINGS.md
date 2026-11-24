@@ -1875,74 +1875,6 @@ The switch quantizes both the prompt activations and the FP16 SwiGLU intermediat
 This approximate prompt path can change answers; it is off by default. It uses a separate workspace for each
 host thread, device and stream, and keeps the existing path during graph capture.
 
-## Qwen-3.8-Flash-Next (CYBER-FROST)
-
-`./saguaro.sh --setup --model cyber-frost` sets up Qwen-3.8-Flash-Next (CYBER-FROST): peasantsmith's GGUF of Blackfrost-AI's
-CYBER-FROST-3.8 (a fine-tune of
-Qwen3.8-Flash-Next: 512 experts, 10 a token, GatedDeltaNet and sparse-attention layers, an n-gram table, an MTP block;
-the Qwen Community License 1.0, `LICENSE.qwen-community-1.0`). One 112.5 GB file, downloaded from the commit
-`tools/qwen/download.json` pins and checked against its sha256. It runs on the `saguaro-glm` engine's own Qwen path, from the
-file in place: the setup writes `maya-cyber-frost.json` (`maya-cyber-frost-hip.json` on AMD), the pack (the index of
-the file's tensors, its small float weights and the tokenizer with the model's chat template) and the MTP drafter, built
-from the file's NextN block (`tools/mtp_from_gguf.py`, in `<model folder>/pack/mtp`). Pictures: the fine-tune kept the base model's vision
-tower byte for byte, so the setup downloads the base model's mmproj (0.9 GB, pinned and sha256-checked, into
-`<model folder>/vision`) and writes the config's `"vision"` entry and the engine's `--vision`; the image encoder
-(`build-vision/bin/vision-glm`) starts only when a picture arrives, on the first GPU: in VRAM that is free, and where
-that is short the engine gives back as much of its expert cache as the encoder needs (all of it on a small card, and
-then the draft layer's experts too) while the picture is read, then maps it again and refills the same experts (a
-second or so per request with new pictures; text answers and the decode speed stay as they were; NVIDIA, the HIP build
-lends only free VRAM). Only when the GPU cannot spare that much does the encoder run on the
-CPU, and the engine's log says why. `--no-vision`, or Images off on the Models page, reads text only.
-
-**Where the experts live.** The most-used experts go to VRAM (`--expert-cache auto`: the free VRAM less the reserve).
-When this PC's RAM cannot hold all the others, the engine reads them straight from the GGUF: the next-most-used are
-copied into RAM, as many as the available RAM allows less 12% of it (at least 6 GB) for the system and the page cache,
-and the rest are read from the file when they are routed (from the page cache, or the SSD). The 52 GB n-gram table is
-always read from the SSD row by row and never enters RAM. With about 84 GB of VRAM and RAM together every expert stays
-in memory.
-
-**Defaults from the model card**: temperature 1.0, top-p 0.95, top-k 20 (the GGUF's `general.sampling`). Its template
-always thinks; its reasoning effort is the thinking level:
-
-| `reasoning_effort` | The prompt |
-|---|---|
-| `xhigh` (default; the server's `max`) | the template's default: a system note asks for careful reasoning |
-| `medium` (the server's `high`) | no note |
-| `low` | a note asks for brief thinking |
-| `none` | the think block closed at once (`<think>\n\n</think>`, as its Qwen base writes thinking off) |
-
-The prompt is the GGUF's own template, verbatim (`<pack>/tokenizer/chat_template.jinja`): it always adds a fixed
-system prompt of the model's makers ahead of any system message a request sends, and thinking is always on in
-it. Tool calls are Qwen's XML form. A
-thinking budget (`"thinking_budget"` in the config, 32768 by default; 8192 for GLM-5.3-Flash Maya-XS; Settings > Chat defaults > Thinking budget changes it without a restart) closes the think block when it is reached.
-
-**The context.** 32K to 256K (the model's reach). Only the 12 attention layers keep a KV cache, about 14 KB a token in
-INT8 (26 KB in FP16), in VRAM; the setup recommends the largest context whose cache takes at most ~12% of the VRAM.
-
-**Drafting.** The MTP drafter proposes up to three tokens a window; the model checks them, so the answer is the same.
-The setup measures whether it is faster on this PC (it is, by far, where most experts run on the GPU and on code; less
-where most run on the CPU) and keeps it only then; `./saguaro.sh --speed-calibration` measures again.
-
-Engine options, in the config's `"args"`:
-
-| Option | Default | What it does |
-|---|---|---|
-| `--max-context` | the setup's choice | the context, in tokens |
-| `--expert-cache` | `auto` | experts in VRAM: `auto` takes the free VRAM less the reserve; a number caps it |
-| `--vram-reserve-mib` | 700 | VRAM left free for the driver, the desktop and other programs |
-| `--expert-profile` | `<pack>/expert-profile.bin` | the ranking of every (layer, expert) pair: which start in VRAM, then RAM |
-| `--experts-from-gguf` | `auto` | `auto`: the experts from the GGUF (RAM tier, then the file) when the RAM cannot hold them all, else all in RAM; `on` / `off` force it |
-| `--mtp` | `<pack>/mtp` | the MTP drafter's folder - always loaded (the engine's server needs it) |
-| `--mtp-max-t` | the setup's measurement | `1`: the drafter's drafts off (windows of one token, prompt-lookup drafts only) - where drafting does not measure faster; unset: drafts up to `--spec` |
-| `--spec` | 4 | the decode window's tokens (the drafts plus one) |
-| `--prefill` | `auto` | the prompt's chunk: `auto` takes the largest the expert cache can lend |
-| `--kv` | `int8` (the setup) | the KV cache's format: `int8` (the model card's own llama.cpp line runs q8_0 K / V; the attention takes as long as in FP16, with half the VRAM), `fp16` (exact; the engine's default without the flag), `k8v4` (INT8 K, rotated 4-bit V) or `q4_0` |
-
-| Variable | Default | What it does |
-|---|---|---|
-| `SAGUARO_EXPERT_RAM_GB` | unset (what the RAM allows) | caps the experts' RAM tier, in GB (the dashboard's Models page: Experts in RAM) |
-| `SAGUARO_EXPERT_STAGERS` | Linux: the reads at once the model's drive serves fastest (2, 4, 8 or 16, measured in ~1 s at the first start on a drive and kept in `~/.config/project-maya/drive-reads.txt`; `SAGUARO_EXPERT_DRIVE_PROBE=0` skips the measurement); otherwise a quarter of the CPU threads, 2 to 8 | the threads that read a layer's experts from the file while the CPU prepares the layer (their reads overlap); `0`: read one by one when the CPU needs them |
-
 ## HIP EXL3 single-row matrix jobs
 
 HIP automatically uses a smaller EXL3 matrix-vector kernel when every job in a batch has one activation row.
@@ -1980,7 +1912,8 @@ untested and refused unless this is set when the setup or `--check` runs (in the
 
 ## Qwen3.8-Flash-Next (saguaro-qfn)
 
-`./saguaro.sh --setup --model qwen3.8-flash-next` sets up Qwen3.8-Flash-Next (unsloth's UD-Q4_K_XL and Q8_0 quants) on
+`./saguaro.sh --setup --model qwen3.8-flash-next` sets up Qwen3.8-Flash-Next (unsloth's UD-Q4_K_XL and Q8_0 quants,
+and Blackfrost-AI's CYBER-FROST fine-tune as a quant of its own - see the last section) on
 its own engine, `saguaro-qfn` (the tree in `engines/qfn`), served by its server (`engines/qfn/serve/server.py`). The
 settings sit in three places, and the tables below cover all three: the engine's command-line options go in the config's
 `"args"`, `SAGUARO_*` environment variables go in the config's `"env"` (the engine's) or in the server's own environment,
@@ -2196,3 +2129,23 @@ config already has. A flag the server sets itself (`--serve`, `--gpu`, `--batch`
 Two switches the running configs still carry are not settings any more and do nothing:
 `SAGUARO_BATCH_READS_OVERTAKE` and `SAGUARO_PARK_STAGING_MIB` are set in some configs' `"env"` but read nowhere in the
 engine or the server - they can be dropped at the next edit.
+
+### CYBER-FROST-3.8-PS (the `cyber-frost` quant)
+
+`./saguaro.sh --setup --model cyber-frost` (the old ids `cyber-frost`, `cyber-frost-3.8`, `cyber-frost-3.8-ps` and
+their `-q5_k_m` spellings all resolve here) sets up Blackfrost-AI's CYBER-FROST-3.8 - a fine-tune of Qwen3.8-Flash-Next
+(the Qwen Community License 1.0, `LICENSE.qwen-community-1.0`) - as this family's `cyber-frost-q5_k_m` quant:
+peasantsmith's one 112.5 GB GGUF, downloaded from the commit `tools/qfn/download.json` pins and checked against its
+sha256, packed and run by `saguaro-qfn` like every other quant. Its config keeps the name it always had,
+`maya-cyber-frost.json` (`maya-cyber-frost-hip.json` on AMD); a config the old engine's Qwen path wrote is rewritten
+for `saguaro-qfn` once, by the setup or the next start, keeping its context, port, sampling and model files.
+
+* **The drafter** is built from the NextN block inside its own file (`tools/mtp_from_gguf.py`) into
+  `<pack>/mtp`, and the config's `--mtp` names it - the same `--mtp` / `--mtp-max-t` settings as the Lamina layer.
+* **The template** is the model's own: thinking is always on, and the thinking level is its reasoning effort -
+  `xhigh` (default; the server's `max`), `medium` (the server's `high`), `low`; `none` closes the think block at
+  once (`<think>\n\n</think>`, as its Qwen base writes thinking off). Tool calls are Qwen's XML form.
+* **Pictures**: the fine-tune kept the base model's vision tower byte for byte, so the setup downloads the base
+  model's mmproj (0.9 GB, pinned and sha256-checked) and writes the elastic `"vision"` entry above - `vision-qfn`
+  reads it, on every quant of this family.
+* **Defaults from the model card**: temperature 1.0, top-p 0.95, top-k 20 (the GGUF's `general.sampling`).

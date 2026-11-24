@@ -73,7 +73,7 @@ class Picker(unittest.TestCase):
             label, note, about = got["rows"][maya.FAMILIES.index(fam)]
             self.assertEqual(note, "not on this PC's GPU yet")
             self.assertIn("NVIDIA GPUs only", about)
-        for fam in ("glm", "qwen", "ik2"):
+        for fam in ("glm", "qfn", "ik2"):
             self.assertNotEqual(got["rows"][maya.FAMILIES.index(fam)][1], "not on this PC's GPU yet")
 
     def test_picking_one_stops_plainly(self):

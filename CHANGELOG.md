@@ -19,6 +19,25 @@ older multi-GPU hardware (NVIDIA Turing T4 - sm_75 tensor cores, Xeon AVX1 CPUs)
 - **Credits:** built on Project Maya ([mw00/project-maya](https://github.com/mw00/project-maya)) and Strata (MIT) -
   see NOTICE.md. Everything below the next section is upstream Project Maya history.
 
+### The Maya engine's Qwen path is gone - CYBER-FROST is a saguaro-qfn quant (2026-11-24)
+
+- **Engine:** the `qwen4exp` driver is out of `saguaro-glm` - the session, verifier, drafter, PLE/QSA/KV-streaming
+  machinery, their kernels, parities and CMake targets (~26.5K lines). A `saguaro-glm` start without `--glm-pack` now
+  says one line: this model runs on saguaro-qfn.
+- **Setup and tools:** family "qwen" and its `QWEN_*` steps are out of `saguaro.py` and `tools/maya_quants.py`; the
+  model question has one Qwen row. The old ids (`--model cyber-frost`, `cyber-frost-3.8-ps`, ...) resolve to the
+  family's `cyber-frost-q5_k_m` quant on `saguaro-qfn`, and `maya_quants.family_of` reads every config the old path
+  wrote as "qfn" - the old engine's `maya-cyber-frost[-hip].json` is rewritten once for saguaro-qfn at the next setup
+  or start, keeping its context, port, sampling and model files (the setup then builds the pack and drafter it reads).
+  `tools/qwen/download.json` and the unreferenced `data/expert-profile-qwen.bin` are gone (the same file is pinned in
+  `tools/qfn/download.json`).
+- **Server and pages:** the "qwen" engine kind and its settings fields, Monitor tier set and thinking-level page twin
+  are out; the QFN ones cover the model and its quant. (The Qwen3.x template's own reasoning efforts stay: QFN's
+  template is that template.) A Qwen/QFN chat's saved sampling and thinking choices sit under the QFN page's key
+  now: they start from the page's defaults once after this update, and are remembered again from then on.
+- **Docs:** `docs/SETTINGS.md`'s CYBER-FROST section folded into the QFN one as the `cyber-frost` quant; the README,
+  `docs/MODELS.md` and `docs/AMD_SAGUARO.md` list it there.
+
 ### QFN as a first-class engine (2026-11-24)
 
 - **Its own model family:** Qwen3.8-Flash-Next on `saguaro-qfn` is "qfn" now, not CYBER-FROST's "qwen" - the live

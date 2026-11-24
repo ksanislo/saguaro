@@ -79,9 +79,9 @@ RAM, the offload path). On AMD GPUs (experimental) only some engines build today
 two NVIDIA cards under 24 GB or on one 16-23 GB AMD RDNA 3 / 4 GPU; with four equal 16 GB cards, Hy4-Flash; on other AMD
 PCs, GLM-5.3-Flash in the largest quant that fits VRAM + RAM. DeepSeek's sizes include its Engram tables. The setup also offers unsloth's GGUF and
 LibertAIDAI's EXL3 quants of DeepSeek, orcarouter's abliterated DeepSeek, Mia-AiLab's EXL3 quant of MiniMax,
-turboderp's EXL3 quants of GLM, and Saguaro's fourth family, **Qwen-3.8-Flash-Next** (CYBER-FROST), as its Q5_K_M GGUF
-on the GLM engine's own Qwen path (`saguaro-glm`), with pictures
-([its settings](docs/SETTINGS.md#qwen-38-flash-next-cyber-frost)); and Qwen3.8-Flash-Next itself (unsloth's UD-Q4_K_XL / Q8_0) on its own engine, `saguaro-qfn`, on **NVIDIA and AMD** under Linux (`--model qwen3.8-flash-next`):
+turboderp's EXL3 quants of GLM, and the family **Qwen3.8-Flash-Next** - unsloth's UD-Q4_K_XL / Q8_0 and Blackfrost-AI's
+CYBER-FROST fine-tune as a quant of its own (`--model cyber-frost`) - on its own engine, `saguaro-qfn`, on **NVIDIA and
+AMD** under Linux (`--model qwen3.8-flash-next`), with pictures ([its settings](docs/SETTINGS.md#qwen38-flash-next-saguaro-qfn)):
 one GPU of 16 GB+ with ~96 GB of RAM on either vendor, or up to four equal cards on NVIDIA taking the 48 layers in turn
 (the four-card split is the live 4x Tesla T4 server's own; measured on an RX 9070 XT with 96 GB, [AMD](docs/AMD_SAGUARO.md#qwen38-flash-next-on-the-saguaro-qfn-engine), [docs/MODELS.md](docs/MODELS.md#qwen38-flash-next-saguaro-qfn)). **Each model's files, drafters, pictures and options:
 [docs/MODELS.md](docs/MODELS.md).**

@@ -371,13 +371,15 @@ class Settings(unittest.TestCase):
         self.assertEqual(M.apply(cfg, {"context": 131072})["args"][cfg["args"].index("--max-context") + 1], "131072")
         self.assertEqual(M.maya_quants.config_label(cfg), "DeepSeek V4.1 · UD-Q4_K_XL")
 
-    def test_the_qwen_models_label(self):
-        """The CYBER-FROST config's quant shows as Q5_K_M beside the model's name the page writes from model_name; the
-        label the server reports is "Qwen-3.8-Flash-Next (CYBER-FROST) · Q5_K_M"."""
+    def test_the_cyber_frost_config_reads_as_qfn(self):
+        """The old CYBER-FROST config reads through the QFN family since T8a: its quant is the family's
+        cyber-frost one, and the label the page writes names the model and the engine."""
         cfg = {"exe": "/b/maya", "args": ["--pack", "/p", "--ple-gguf", "/g.gguf"], "model_name": "cyber-frost-3.8-ps",
                "installer": {"family": "qwen", "quant": "CYBER-FROST-3.8-PS", "qwen_quant": "q5_k_m"}}
-        self.assertEqual(M.quant_label(cfg, Path("maya-cyber-frost.json")), "Q5_K_M")
-        self.assertEqual(M.maya_quants.config_label(cfg), "Qwen-3.8-Flash-Next (CYBER-FROST) · Q5_K_M")
+        self.assertEqual(M.family(cfg), "qfn")
+        self.assertEqual(M.quant_label(cfg, Path("maya-cyber-frost.json")), "cyber-frost-q5_k_m")
+        self.assertEqual(M.maya_quants.config_label(cfg), "Qwen3.8-Flash-Next · CYBER-FROST-3.8 Q5_K_M "
+                                                          "(saguaro-qfn)")
 
     def test_qfn_read(self):
         """A QFN config reads through its own field set: the RAM tier is --resident-budget-gib (not the Qwen path's
