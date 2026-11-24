@@ -8403,8 +8403,8 @@ def _qfn_engine_class():
         def started(self, rids) -> bool:
             return True
 
-        def set_context(self, n: int):
-            raise ValueError("this engine's context is set in its config (--max-context)")
+        # (set_context: the driver's own - it rewrites --max-context in the spawn command and the shared
+        #  _restart_with() starts the engine again with it, as it does for the other engines)
 
         def stop(self, timeout: float = 60.0):
             pass   # (each request stops its own slot - BSTOP - when its consumer goes; no engine-wide STOP)
