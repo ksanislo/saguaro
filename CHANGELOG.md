@@ -19,6 +19,37 @@ older multi-GPU hardware (NVIDIA Turing T4 - sm_75 tensor cores, Xeon AVX1 CPUs)
 - **Credits:** built on Project Maya ([mw00/project-maya](https://github.com/mw00/project-maya)) and Strata (MIT) -
   see NOTICE.md. Everything below the next section is upstream Project Maya history.
 
+### QFN as a first-class engine (2026-11-24)
+
+- **Its own model family:** Qwen3.8-Flash-Next on `saguaro-qfn` is "qfn" now, not CYBER-FROST's "qwen" - the live
+  hand-made configs are labelled Qwen3.8-Flash-Next instead of CYBER-FROST's `Q5_K_M`, and `--bench` (plain and
+  `--compare`) takes `saguaro-qfn` where it fell through to the GLM binary.
+- **NVIDIA:** the setup offers `--model qwen3.8-flash-next` on NVIDIA from the V100 on (the CUDA build gains
+  `-DSAGUARO_QFN=ON`) - one card of 16 GB or more, or up to four equal ones taking the 48 layers in turn; four "16 GB"
+  sm_75 cards get the live 4x Tesla T4 server's own split with its `--trim-stage-weights --prefill-pipe` and its
+  tuning env. The new `tools/qfn_fit.py` answers fits-or-not with a reason and the layout, `--check` prints that layout
+  for the model (or the reason it does not fit), a PC whose every card is under 16 GB gets a one-line refusal instead
+  of a traceback, and Windows says in one line that the engine is not built there yet.
+- **What the setup now writes:** the picture tower (the model's mmproj, 0.9 GB, pinned and sha256-checked) and its
+  reader built for these cards (`vision-qfn`, `vision-qfn-hip` on AMD; `--no-vision` leaves both out), the drafting
+  question for the Lamina MTP layer (`--drafting off` / `on`), several answers at once (`--parallel`: off by default on
+  one 16 GB card, where it measured slower, 2 across several GPUs), and QFN's files in `--import-model`'s table.
+- **`--calibrate`, `--speed-calibration`, `--bench`:** the tuning measures the PCIe share, the draft floor and the CPU
+  workers through the engine and then the Lamina drafter on against off (`tools/qfn_calibrate.py`, the drafter from the
+  config's own `--mtp` folder), the speed calibration measures the drafter alone and says which it kept, and `--bench`
+  starts QFN the way its server does and reads the speeds from QFN's own lines.
+- **The pages:** QFN's own settings - the context (changed live from Settings > Model), the K/V window kept in VRAM
+  (`--kv-resident`), the RAM for the experts (`--resident-budget-gib`; the GLM path's `ram_gb` is refused for it),
+  answers at once, drafting, images - and the Turbo button, which turns drafting on, writes one answer at a time and
+  puts the model's live Turbo to its smallest drop while it is on. A 401 on the pages now asks for the API key, a
+  model's `*.turbo.json` sidecar is not listed as a model, and the Live Turbo row reads like the other settings rows.
+- **The Monitor:** QFN prints `mtp=1` when its draft layer is loaded, so the Speculation row is no longer blank, and
+  prints its `STAT` line while answering on its own; the new `promo=` fills the Promoted tile.
+- **Docs:** `docs/SETTINGS.md` has the QFN section - its environment variables, the Turing (sm_75) tuning switches,
+  the engine arguments and the config keys; its install is in [docs/SETUP.md](docs/SETUP.md#what-the-first-run-does),
+  its files and measurements in [docs/MODELS.md](docs/MODELS.md#qwen38-flash-next-saguaro-qfn) and
+  [docs/AMD_SAGUARO.md](docs/AMD_SAGUARO.md#qwen38-flash-next-on-the-saguaro-qfn-engine).
+
 ### Upstream Project Maya v1.1.75 taken in (2026-11-23)
 
 - **Inkling 2 Mini drafting on by default where it pays** (upstream #1154's GGUF drafter and one-launch exact window,
