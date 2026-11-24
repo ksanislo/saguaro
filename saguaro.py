@@ -7416,6 +7416,48 @@ def compile_vision_qfn(pc, meta, llama: Path, src: str) -> bool:
     return vexe.exists()
 
 
+def qfn_vision_reuse(m: dict, d: Path) -> list | None:
+    """The tower's files already on this PC, so step 7 needs no download: the mmproj is the base model's, the same
+    file for every QFN quant, so each folder the setup knows is searched for a file with the published size and
+    sha256 - every QFN model folder (its vision subfolder first) and the vision folder each written QFN config
+    reads.  A found file becomes <model folder>/vision's own through a hard link (no second copy of its bytes);
+    one on another filesystem is read where it stands.  None when a file of the tower is nowhere seen whole -
+    the setup downloads its own copies then."""
+    vd = d / "vision"
+    dirs = []
+    for q in Q.QFN_QUANTS:                                       # (the other quants' model folders and the configs')
+        dirs += [d.parent / qfn_entry(q)["name"] / "vision", d.parent / qfn_entry(q)["name"]]
+    for q in Q.QFN_QUANTS:
+        for sfx in ("", "-hip"):
+            stem = Q.config_stem("qfn", q)
+            vis = read_json(ROOT / f"{stem}{sfx}.json").get("vision") if stem else None
+            mm = vis.get("mmproj") if isinstance(vis, dict) else None
+            if mm:
+                dirs.append(Path(mm).parent)
+    out = []
+    for n in m["files"]:
+        own = vd / n
+        if own.is_file() and own.stat().st_size == m["files"][n] and sha256_checked(own, m["sha256"][n]):
+            out.append(own)                                      # (this one is already here whole)
+            continue
+        for c in dict.fromkeys(dirs):
+            f = c / n
+            if f == own or not f.is_file() or f.stat().st_size != m["files"][n] or \
+                    not sha256_checked(f, m["sha256"][n]):
+                continue
+            try:                                                 # (its own name and folder, the bytes shared)
+                vd.mkdir(parents=True, exist_ok=True)
+                own.unlink(missing_ok=True)                      # (a stub of a failed download, at most)
+                os.link(f, own)
+                out.append(own)
+            except OSError:                                      # (another filesystem: the path, not a copy)
+                out.append(f)
+            break
+        else:
+            return None
+    return out
+
+
 def qfn_vision_step(a, pc: dict, meta: dict, llama: Path, d: Path, files: list) -> dict | None:
     """Step 7: the config's "vision" entry - the picture reader with the model's mmproj and its first GGUF shard
     (opened for the vocabulary only) - or None (text only, said why).  The entry is the live machine's elastic one:
@@ -7440,9 +7482,13 @@ def qfn_vision_step(a, pc: dict, meta: dict, llama: Path, d: Path, files: list) 
         return None
     vd = d / "vision"
     got = [vd / n for n in m["files"]]
-    if any(file_incomplete(m, f) for f in got) and not offer_download(a, "the vision tower", vd, got, m):
-        warn(f"the vision tower was not downloaded: the model reads text only ({ME} --setup asks again)")
-        return None
+    if any(file_incomplete(m, f) for f in got):
+        reused = qfn_vision_reuse(m, d)         # (the base model's mmproj: another QFN install may already have it)
+        if reused is None and not offer_download(a, "the vision tower", vd, got, m):
+            warn(f"the vision tower was not downloaded: the model reads text only ({ME} --setup asks again)")
+            return None
+        if reused is not None:
+            got = reused
     for f in got:                                      # (offer_download checked the ones it fetched; these too)
         if not sha256_checked(f, m["sha256"][f.name]):
             f.unlink(missing_ok=True)                  # else the next run finds it complete and fails here again

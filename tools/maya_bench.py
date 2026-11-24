@@ -139,13 +139,17 @@ def drafting_choice(args, env: dict, engine_lines, answers, family: str = "") ->
             said = "MTP" if "glm mtp:" in text else "DFlash2" if "glm dflash" in text else ""
         elif family == "deepseek":
             said = "DSpark" if re.search(r"^dspark", text, re.M) else ""
-        elif family == "qfn":                # (QFN's INFO line: mtp=1 when its --mtp folder loaded the Lamina layer;
+        elif family == "qfn":                # (QFN's INFO line: mtp=1 when its --mtp folder loaded a drafter;
             #  mtp_max=1 when its drafts are off (--mtp-max-t 1: windows of one token, prompt-lookup drafts only);
-            #  no INFO line seen: what the config's args say)
+            #  no INFO line seen: what the config's args say.  Which drafter --mtp names is the folder: CYBER-FROST's
+            #  sits beside its pack as <pack>/mtp (qfn_drafter_step), every other --mtp is the Lamina layer)
+            drafter = ("MTP (from the model's NextN block)"
+                       if flag("--mtp") and flag("--pack") and Path(flag("--mtp")).name == "mtp"
+                       and Path(flag("--mtp")).parent == Path(flag("--pack")) else "MTP (Lamina)")
             if re.search(r"\bmtp=1\b", text):
-                said = "MTP drafts off (--mtp-max-t 1)" if re.search(r"\bmtp_max=1\b", text) else "MTP (Lamina)"
+                said = "MTP drafts off (--mtp-max-t 1)" if re.search(r"\bmtp_max=1\b", text) else drafter
             elif flag("--mtp"):
-                said = "MTP drafts off (--mtp-max-t 1)" if flag("--mtp-max-t") == "1" else "MTP (Lamina)"
+                said = "MTP drafts off (--mtp-max-t 1)" if flag("--mtp-max-t") == "1" else drafter
         said = said or "no drafting"
     acc = sum(x["d_acc"] for x in answers)
     off = sum(x["d_off"] for x in answers)
