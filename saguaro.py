@@ -4571,12 +4571,18 @@ def server_command(cfg_path: Path, a) -> tuple:
     rename_programs()
     renamed = fix_config_names(cfg)                    # (v1.1.16's names: the programs)
     old_env = migrate_env_names(cfg)                   # (a config of the old setting names: rewritten to SAGUARO_*)
-    if renamed or old_env:
+    cyber = migrate_cyber_frost(cfg)                   # (CYBER-FROST moved to saguaro-qfn: its old-engine config)
+    if renamed or old_env or cyber:
         cfg_path.write_text(json.dumps(cfg, indent=1), encoding="utf-8")
     if old_env:
         ok(f"{cfg_path.name}: its settings use the SAGUARO_* names now")
     if renamed:
         ok(f"{cfg_path.name}: the programs use their current names now ({Path(cfg['exe']).name})")
+    if cyber:
+        ok(f"{cfg_path.name}: {QWEN_SHOWN} runs on its own engine, {Q.QFN_ENGINE}, now - its context, port, sampling "
+           "and model files are kept")
+        fail(f"{cfg_path.name}: its pack and MTP drafter are still the other engine's: saguaro-qfn reads a pack of "
+             "its own", f"run {ME} --setup once to build them (it asks nothing: the files are already there)")
     if getattr(a, "parallel", None):                   # --parallel given at a start: kept in the config
         set_arg(cfg.setdefault("args", []), "--parallel", a.parallel)
         cfg_path.write_text(json.dumps(cfg, indent=1), encoding="utf-8")
@@ -8650,6 +8656,59 @@ def migrate_env_names(cfg: dict) -> bool:
     return done
 
 
+def migrate_cyber_frost(cfg: dict) -> bool:
+    """CYBER-FROST now runs on saguaro-qfn (QFN-first T7): the config the old engine's Qwen path wrote
+    (installer.family "qwen", its "q5_k_m" files, the GLM engine with --ple-gguf) is rewritten as the QFN config of
+    the same file - the same model files (its GGUF, the pack folder beside it, the drafter built from its NextN
+    block, the same layout QFN's --mtp loader reads) and the same context, port and sampling.  One-time: the
+    rewritten config reads as family "qfn", so none of its conditions is ever met again - idempotent."""
+    inst = cfg.get("installer")
+    if not isinstance(inst, dict) or inst.get("family") != "qwen" or \
+            (inst.get("qwen_quant") or "q5_k_m") != "q5_k_m" or Q.family_of(cfg) != "qwen":
+        return False
+    args = cfg.get("args") or []
+
+    def val(flag):
+        i = args.index(flag) if flag in args[:-1] else -1
+        return args[i + 1] if i >= 0 else None
+
+    pack, gguf = val("--pack"), val("--native") or val("--ple-gguf")
+    if not pack or not gguf:
+        return False                                   # (a config that names no files of the setup: left alone)
+    ctx = str(val("--max-context") or QFN_DEFAULT_CONTEXT)
+    ctx = ctx if ctx.isdigit() else str(QFN_DEFAULT_CONTEXT)
+    profile, mtp = val("--expert-profile"), val("--mtp")
+    new = ["--pack", str(pack), "--native", str(gguf)]
+    if profile:                                        # (the shipped ranking of the experts; it saves this PC's on top)
+        new += ["--expert-profile", str(profile), "--expert-profile-save", str(profile)]
+    new += ["--expert-cache", "auto", "--prefill", "auto", "--spec", "3", "--spec-min-p", "0.7"]
+    if mtp:                                            # (experts.bin / dense.bin / dense.txt: what --mtp reads)
+        new += ["--mtp", str(mtp)]
+    if isinstance(cfg.get("vision"), dict):
+        new.append("--vision")
+    new += ["--max-context", ctx, "--kv", "int8", "--kv-resident", str(min(int(ctx), 32768)),
+            "--vram-reserve-mib", "700", "--resident-budget-gib", str(qfn_ram_budget(mem_gb()[0])),
+            "--rope-scaling", "yarn", "--rope-scale", "4", "--yarn-orig-ctx", "262144"]
+    if inst.get("model_dir"):
+        new += ["--session-dir", str(Path(inst["model_dir"]) / "var" / "sessions")]
+    cfg["args"] = new
+    build = ROOT / {"hip": "build-hip", "metal": "build-metal"}.get(cfg.get("backend"), "build")
+    cfg["exe"] = str(build / "qfn" / ("saguaro-qfn.exe" if WIN else "saguaro-qfn"))
+    cfg["cwd"] = str(ROOT / "engines" / "qfn")
+    env = {"SAGUARO_NO_LARGEPAGES": "1", "SAGUARO_YARN_ELASTIC": "1", "SAGUARO_MMQ_KQ": "1"}
+    env.update(cfg.get("env") or {})                   # (its settings stay; the ones it never had are added)
+    cfg["env"] = env
+    for key in ("vision", "vision_off"):               # (QFN's picture reader, the same mmproj and model file)
+        v = cfg.get(key)
+        if isinstance(v, dict) and Path(str(v.get("exe", ""))).name.startswith("vision-glm"):
+            v["exe"] = str(build / "qfn" / ("vision-qfn.exe" if WIN else "vision-qfn"))
+    inst.pop("mtp_calibration", None)                  # (the old engine's measurement does not carry over)
+    inst.update({"family": "qfn", "qwen_quant": Q.CYBER_FROST_QUANT, "engine": Q.QFN_ENGINE,
+                 "quant": Q.QFN_QUANTS[Q.CYBER_FROST_QUANT], "files_dir": str(Path(gguf).parent),
+                 "migrated": time.strftime("%Y-%m-%d %H:%M")})
+    return True
+
+
 def main() -> int:
     stop_signals()            # (SIGTERM / SIGHUP stop it as Ctrl+C does: the server it runs with it)
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -8875,6 +8934,10 @@ def main() -> int:
     if not have and a.calibrate:
         say("Nothing is set up yet: the setup runs first, then the tuning.")
     prev = read_json(have[0]) if have else {}
+    if migrate_cyber_frost(prev):                      # (CYBER-FROST on saguaro-qfn: the setup goes on with it)
+        have[0].write_text(json.dumps(prev, indent=1), encoding="utf-8")
+        say(f"  The CYBER-FROST config is rewritten for {Q.QFN_ENGINE}: its context, port, sampling and model "
+            "files are kept; the setup builds the pack and drafter it reads.")
     if a.check:
         ds4 = a.model == DS4 or bool(a.model_dir) and exl3_folder_family(a.model_dir) is None
         quant = choose_ds4_quant(a, prev) if ds4 else None
