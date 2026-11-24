@@ -1,4 +1,5 @@
 """Saguaro's HIP setup regressions; no GPU, network or model downloads required."""
+import io
 import json
 import os
 from pathlib import Path
@@ -97,11 +98,33 @@ class HipSetupTests(unittest.TestCase):
                 pc = maya.check_pc(self.a)
         self.assertEqual(pc["rocm"], str(self.rocm.resolve()))
 
-    def test_cpu_without_avx2_warns_and_goes_on(self) -> None:
-        """As on CUDA (#32): the CPU expert lane falls back to ggml's kernels, setup does not stop."""
-        with patch.object(maya.S, "cpu_info", return_value=("Xeon E5-2695 v2", False, False)):
-            pc = maya.check_pc(self.a)
+    def no_avx2(self, *args, **kw) -> tuple:
+        """The HIP check on a no-AVX2 CPU: the config it returns and what it printed (no env switch named)."""
+        out = io.StringIO()
+        with patch.object(maya.S, "cpu_info", return_value=("Xeon E5-2695 v2", False, False)), \
+                patch.object(maya, "oomd_active", return_value=False), patch("sys.stdout", new=out):
+            pc = maya.check_pc(self.a, *args, **kw)
+        return pc, out.getvalue()
+
+    def test_cpu_without_avx2_is_a_family_fact_not_an_env_switch(self) -> None:
+        """A CPU without AVX2: GLM has AVX1 rows, so the line is an ok about the engine's rows - it names no env
+        switch and does not stop.  The row width is a build-time fact, not something to pick."""
+        pc, text = self.no_avx2()
         self.assertEqual(pc["gpus"], [self.gpus[0]])
+        self.assertIn("no AVX2: the engine's AVX1 rows", text)
+        self.assertNotIn("SAGUARO_GLM_CPU_LANE", text)
+        self.assertNotIn("turns it off", text)
+
+    def test_cpu_without_avx2_warns_only_for_a_lane_without_the_rows(self) -> None:
+        """DeepSeek's EXL3 quant has no AVX1 CPU rows (its lane's rows come from exl3_cpu.cpp), so the line is a warn
+        that it is slower - again naming no env switch, and still not stopping."""
+        pc, text = self.no_avx2("deepseek", False)
+        self.assertTrue(pc["gpus"])
+        self.assertIn("no AVX1 rows", text)
+        self.assertIn("slower", text)
+        self.assertNotIn("SAGUARO_DS4_CPU_LANE", text)
+        self.assertNotIn("SAGUARO_GLM_CPU_LANE", text)
+        self.assertNotIn("turns it off", text)
 
     def test_rdna2_is_experimental_and_compiled_only_when_chosen(self):
         pc = maya.check_pc(self.a)      # the RX 7900 XT: its own architecture only (#255)
