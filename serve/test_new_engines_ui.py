@@ -239,7 +239,7 @@ class QfnSettings(unittest.TestCase):
             M.apply(self.cfg, {"parallel": 9})
 
     def test_turbo_is_supported(self):
-        self.assertEqual(M.TURBO_LIVE_DEFAULT["qfn"], {"drop": 1, "skip": "off"})
+        self.assertEqual(M.TURBO_LIVE_DEFAULT["qfn"], {"drop": 3, "skip": "off"})
         self.assertEqual(M.TURBO_DRAFT["qfn"], "mtp")
         info = M.turbo_info(self.cfg)
         self.assertEqual(info["on"], False)

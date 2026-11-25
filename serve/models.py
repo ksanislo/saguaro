@@ -1040,7 +1040,7 @@ TURBO_DRAFT = {"deepseek": "dspark", "minimax": "dspark", "qfn": "mtp"}
 # (serve/server.py's set_turbo) puts the model's live Turbo (serve/turbo_live.py, the sidecar beside the config) on
 # with these options and restores what it was when Turbo goes off.  QFN has no expert-skipping environment knobs:
 # its lossy speed is turbo_drop / turbo_skip on every request the engine answers without its own Turbo.
-TURBO_LIVE_DEFAULT = {"qfn": {"drop": 1, "skip": "off"}}
+TURBO_LIVE_DEFAULT = {"qfn": {"drop": 3, "skip": "off"}}   # (the button is the maximum-speed mode; skip: the engine has none yet)
 # DSpark's draft confidence floor (default 0.7), lowered so that longer windows are verified
 TURBO_DSPARK_CONF = 0.3
 TURBO_DSPARK_FAMILIES = ("deepseek", "minimax")
