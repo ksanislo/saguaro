@@ -31,7 +31,7 @@ older multi-GPU hardware (NVIDIA Turing T4 - sm_75 tensor cores, Xeon AVX1 CPUs)
 - **DeepSeek:** a turn never ends empty after the thinking, and a call written inside the thinking is read out of it
   (#1206, #1207); a router row with no finite score no longer reads outside its tables (#1114); a pack with no expert
   profile starts from the shipped one and the load says which it read (#1161); the one-a-batch rule has a band at
-  1.1 ms so a link near 1 ms does not flip between starts (`SAGUARO_DS4_RING_FAST_LINK=0`: the old mark, #1143); the
+  1.1 ms so a link near 1 ms does not flip between starts (#1143); the
   TP calibration is not fooled by kept conversations (#1203); a note at start says DS4_STREAM_WIN / DS4_LAND do not
   apply to one AMD GPU (#1120).
 - **Hy4-Flash:** weight read-ahead and packed attention-head rows on by default on AMD gfx1100 (same tokens); tensor
