@@ -296,6 +296,40 @@ class M1FromV1178(unittest.TestCase):
         self.assertEqual(texts2, self.texts)
 
 
+class Paths(unittest.TestCase):
+    """finding 2: --paths applies the skip filter, and the MAYA_* doc prefix counts only under docs/"""
+
+    def test_path_names_and_skips(self):
+        for rel, want in (("maya.py", "saguaro.py"), ("tools/maya.sh", "tools/saguaro.sh"),
+                          ("START-MAYA.bat", "START-SAGUARO.bat"), ("docs/MAYA_GPU.md", "docs/SAGUARO_GPU.md"),
+                          ("docs/deep/MAYA_2.md", "docs/deep/SAGUARO_2.md")):
+            self.assertEqual(ru.path_new(rel), want)
+        for rel in ("scratch/maya.py", "ref/vendor/maya.sh", "third_party/x/START-MAYA.bat",
+                    "build-today/maya.py", "engines/qfn/src/maya.py", "serve/qfn_engine.py", "CHANGELOG.md",
+                    "docs/triage/MAYA_X.md", "MAYA_NOT_A_DOC.md", "src/MAYA_NOT_A_DOC.md",
+                    "docs/notes.md", "src/core/x.cu"):
+            self.assertIsNone(ru.path_new(rel), rel)
+
+    def test_paths_mode_skips_scratch_and_vendored_names(self):
+        """a scratch file named maya.py / MAYA_X.md: --paths prints nothing, and the walk prunes build dirs"""
+        d = ROOT / "scratch" / "p9_paths"
+        d.mkdir(parents=True, exist_ok=True)
+
+        def clean():
+            for p in sorted(d.rglob("*"), reverse=True):
+                p.unlink() if p.is_file() else p.rmdir()
+            d.rmdir()
+        self.addCleanup(clean)
+        (d / "maya.py").write_text("print(1)\n")
+        (d / "MAYA_NOT_A_DOC.md").write_text("x\n")
+        (d / "build-today").mkdir()
+        (d / "build-today" / "maya.sh").write_text("echo\n")
+        got = subprocess.run([sys.executable, "tools/saguaro/rename_upstream.py", "--paths", "scratch/p9_paths"],
+                             cwd=ROOT, capture_output=True, text=True)
+        self.assertEqual(got.returncode, 0, got.stderr[-2000:])
+        self.assertEqual(got.stdout, "")
+
+
 class RealTree(unittest.TestCase):
     def run_tool(self, script):
         got = subprocess.run([sys.executable, "tools/saguaro/" + script, "--check"],

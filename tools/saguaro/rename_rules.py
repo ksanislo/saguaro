@@ -206,7 +206,9 @@ NAME_PATHS = [
     ("START-" + BRAND_OLD.upper() + ".bat", "START-SAGUARO.bat"),
     ("AMD_" + BRAND_OLD.upper() + ".md", "AMD_SAGUARO.md"),
 ]
-NAME_PATH_PREFIXES = [(BRAND_OLD.upper() + "_", "SAGUARO_")]        # docs named MAYA_* go by their SAGUARO_* name
+# docs named MAYA_* go by their SAGUARO_* name - under docs/ only: a MAYA_* file anywhere else is a build flag's
+# note or a vendored name, not one of our docs
+NAME_PATH_PREFIXES = [("docs/", BRAND_OLD.upper() + "_", "SAGUARO_")]
 
 
 # ---- exceptions: names and files that stay (docs/UPSTREAM.md section 2's "explicit exceptions list") ---------------

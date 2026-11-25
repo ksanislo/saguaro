@@ -25,7 +25,8 @@ not fail --check; a renameable use does).
 
 --check writes nothing and exits 1 while a renameable name is left (the intake's gate, like the three tools').
 --diff prints what would change.  --paths prints the PATH renames (old<TAB>new per line: maya.py, maya.sh,
-START-MAYA.bat, the MAYA_* docs, include/strata/) for `git mv`; it changes nothing either.
+START-MAYA.bat, the MAYA_* docs - under docs/ only - include/strata/) for `git mv`; it changes nothing either, and
+the skip filter applies to it too: a vendored, generated or scratch file named maya.py is never suggested.
 Default paths: the whole worktree.  The three older scripts keep working on their own; all four read the one
 rule table, tools/saguaro/rename_rules.py.  See scratch/notes.md and REPORT-rn1-rename-tool.md.
 """
@@ -152,6 +153,43 @@ def plan_tree(files: dict):
     return texts, {r: sorted(set(c)) for r, c in changed.items() if c}, setting_report
 
 
+def path_new(rel: str):
+    """--paths: the `git mv` name for a root-relative path when the name families cover it, else None.
+    Finding 2: the skip filter applies here too (no vendored/scratch/build file named maya.py is ever
+    suggested), and the MAYA_* doc prefix counts only under docs/ (rename_rules.NAME_PATH_PREFIXES)."""
+    if T.internal_skipped(rel):        # the name paths belong to our tree, not to QFN's or the records
+        return None
+    name = rel.rsplit("/", 1)[-1]
+    new = next((n for o, n in T.NAME_PATHS if name == o), None)
+    if new is None:
+        for scope, pre, to in T.NAME_PATH_PREFIXES:
+            if rel.startswith(scope) and name.startswith(pre):
+                new = to + name[len(pre):]
+                break
+    return rel[:len(rel) - len(name)] + new if new else None
+
+
+def paths_mode(roots: list[Path]):
+    """print the PATH renames (old<TAB>new) for `git mv`; the walk prunes the same skip dirs as collect()"""
+    for root in roots:
+        cand = [root] if root.is_file() else []
+        if not cand:
+            for dirpath, dirnames, filenames in os.walk(root):
+                dirnames[:] = [d for d in dirnames if d not in T.SKIP_DIR_NAMES and not T.SKIP_DIR_RE.match(d)]
+                cand += [Path(dirpath) / fn for fn in filenames]
+        for p in sorted(cand):
+            try:
+                rel = p.relative_to(ROOT).as_posix()
+            except ValueError:
+                sys.exit(f"{p}: outside the worktree {ROOT}")
+            new = path_new(rel)
+            if new:
+                print(rel + "\t" + new)
+    for old, new in T.INTERNAL_PATHS:
+        if (ROOT / old).is_dir():
+            print(old + "\t" + new)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--check", action="store_true", help="write nothing; exit 1 while a renameable name is left")
@@ -163,24 +201,7 @@ def main() -> int:
     roots = [Path(x).resolve() for x in (a.paths or [ROOT])]
 
     if a.paths_mode:
-        for root in roots:
-            for p in ([root] if root.is_file() else sorted(root.rglob("*"))):
-                if not p.is_file():
-                    continue
-                try:
-                    rel = p.relative_to(ROOT).as_posix()
-                except ValueError:
-                    sys.exit(f"{p}: outside the worktree {ROOT}")
-                name = p.name
-                new = next((n for o, n in T.NAME_PATHS if name == o), None)
-                if new is None:
-                    pre = next(((pre, to) for pre, to in T.NAME_PATH_PREFIXES if name.startswith(pre)), None)
-                    new = pre[1] + name[len(pre[0]):] if pre else None
-                if new:
-                    print(rel + "\t" + (rel[:len(rel) - len(name)] if "/" in rel else "") + new)
-        for old, new in T.INTERNAL_PATHS:
-            if (ROOT / old).is_dir():
-                print(old + "\t" + new)
+        paths_mode(roots)
         return 0
 
     files = collect(roots)
