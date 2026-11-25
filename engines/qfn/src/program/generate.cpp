@@ -9837,13 +9837,15 @@ int main(int argc, char** argv) {
             g_turbo_ssd = 1;   // every expert byte is in the arena
         vh.d_ram = d_ram;
         int64_t ram_ver = -1;
+        bool ram_mirror_said = false;
         const auto ram_upload = [&]() -> cudaError_t {
             // the RAM-tier mirror follows the compact copy (its membership moves only on this thread, between
-            // windows: the exchange commits and the RAM-adaptive rounds); the version check keeps that free
+            // windows: the exchange commits and the RAM-adaptive rounds); the version check keeps that free.
+            // The mirror is not the window's business: a failed copy is said once and leaves the bar routing
+            // on the last table (as it already does one window deep on the pipelined paths); no request fails
             if (g_turbo_ssd != 2) return cudaSuccess;
             const int64_t v = src.exchanges() + src.ram_adapts();
             if (v == ram_ver) return cudaSuccess;
-            ram_ver = v;
             for (int64_t l = 0; l < g.n_layers; ++l)
                 for (int64_t e = 0; e < g.n_expert; ++e)
                     host_ram[(size_t) (l * g.n_expert + e)] = src.has_resident(l, e) ? 0 : -1;
@@ -9854,6 +9856,14 @@ int main(int argc, char** argv) {
                 const cudaError_t e1 = cudaMemcpy(st->d_ram, host_ram.data(), host_ram.size() * sizeof(int32_t),
                                                   cudaMemcpyHostToDevice);
                 if (r == cudaSuccess) r = e1;
+            }
+            // the version is only banked when the copy landed: a failed one leaves the mirror stale (skip=ssd
+            // then routes on the last table, as on the pipelined windows) and the next upload point retries
+            if (r == cudaSuccess) ram_ver = v;
+            else if (!ram_mirror_said) {
+                ram_mirror_said = true;
+                std::fprintf(stderr, "saguaro serve: the RAM-tier mirror for turbo skip=ssd could not be updated: "
+                                     "skip=ssd routes on the last mirror until a copy lands\n");
             }
             return r;
         };
@@ -11585,8 +11595,9 @@ vs.d_skip_usage = gs.d_skip_usage;
                 const cudaError_t e = res_put(st->d_res);
                 if (r == cudaSuccess) r = e;
             }
-            const cudaError_t rr = ram_upload();   // PLAN-turbo-live: the RAM tier's mirror follows the same windows
-            return r != cudaSuccess ? r : rr;
+            const cudaError_t rr = ram_upload();   // PLAN-turbo-live: the RAM tier's mirror follows the same
+            (void) rr;                             // windows, but its copy is said-once-stale, not this error
+            return r;
         };
         // SAGUARO_SHORT_READS: the prompt path's lent slots copied back on a stream per participant while the reply
         // decodes (refill_lazy in the request); an expert is resident again only once its participant's copies landed
@@ -11691,10 +11702,8 @@ vs.d_skip_usage = gs.d_skip_usage;
         for (auto& st : stages) res_devs.push_back(st->dev);
         int32_t* res_pairs = drive.d.evict_sync ? res_pairs_alloc(kResPatchCap, res_devs) : nullptr;
         auto res_sync = [&](bool check, std::string& e) -> bool {
-            if (ram_upload() != cudaSuccess) {   // PLAN-turbo-live: the RAM tier's mirror for skip=ssd
-                e = "the RAM-tier mirror update failed";
-                return false;
-            }
+            (void) ram_upload();   // PLAN-turbo-live: the RAM tier's mirror for skip=ssd (a failed copy is said
+                                   // once inside ram_upload and never fails the window: it is not its business)
             if (drive.d.res_dirty) {
                 const int64_t n = res_patch_pairs(drive.d.res_dirty_idx, host_res, res_pairs, kResPatchCap);
                 cudaError_t r = cudaSuccess;
