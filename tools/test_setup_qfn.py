@@ -1115,7 +1115,7 @@ class SetupFlow(unittest.TestCase):
     """set_up_qfn with the machine, the build and the downloads stepped around: what the choices write - and,
     v1.2.1-B, what a slow PC gets: the scaled config, the loud warning, the one confirmation question."""
 
-    def flow(self, t: Path, a, vision=None, mtp=True, pc=None, mem=(91.7, 80.0)):
+    def flow(self, t: Path, a, vision=None, mtp=True, pc=None, mem=(91.7, 80.0), out=None):
         eng = t / "build" / "qfn"
         eng.mkdir(parents=True)
         (eng / "saguaro-qfn").write_text("")
@@ -1132,7 +1132,7 @@ class SetupFlow(unittest.TestCase):
                 patch.object(maya, "qfn_mtp_step", return_value=models / "Qwen3.8-Flash-Next-MTP-Lamina" if mtp
                              else None), \
                 patch.object(maya, "write_run_script", return_value=t / "run.sh"), \
-                patch("sys.stdout", new=io.StringIO()), patch.object(maya.S, "UI", None):
+                patch("sys.stdout", new=out or io.StringIO()), patch.object(maya.S, "UI", None):
             return maya.set_up_qfn(a, {})
 
     def setup(self, t: Path, **kw):
@@ -1140,8 +1140,9 @@ class SetupFlow(unittest.TestCase):
         nomtp = kw.pop("_nomtp", False)
         pc = kw.pop("_pc", None)
         mem = kw.pop("_mem", (91.7, 80.0))
+        out = kw.pop("_out", None)
         a = args(qfn_quant="ud-q4_k_xl", context=65536, models_dir=t / "models", **kw)
-        p = self.flow(t, a, vision=vision, mtp=not nomtp, pc=pc, mem=mem)
+        p = self.flow(t, a, vision=vision, mtp=not nomtp, pc=pc, mem=mem, out=out)
         return json.loads(p.read_text())
 
     def test_drafting_off_is_the_mtp_max_t_arg(self):
@@ -1235,10 +1236,24 @@ class SetupFlow(unittest.TestCase):
         self.assertFalse([q for q in asked if "very slow" in q])
 
     def test_drafting_on_overrides_the_scale_down(self):
+        """Review finding 3: with --drafting on the step-2 line says drafting STAYS on - it does not announce a
+        drafting off the flag overrides (and without the flag the scale-down line still says drafting off)."""
+        out = io.StringIO()
         with tempfile.TemporaryDirectory() as t, cpu():
-            cfg = self.setup(Path(t), _mem=(64.0, 50.0), drafting="on")        # (--drafting on says otherwise)
+            cfg = self.setup(Path(t), _mem=(64.0, 50.0), drafting="on", _out=out)   # (--drafting on says otherwise)
         self.assertNotIn("--mtp-max-t", cfg["args"])
         self.assertEqual(cfg["installer"]["mtp_calibration"]["kept"], "mtp")   # (the question's own record)
+        said = [ln for ln in out.getvalue().splitlines() if "scales this layout down" in ln]
+        self.assertEqual(len(said), 1)                                         # (the scale-down line, once)
+        self.assertNotIn("drafting off", said[0])                              # (not announced: it stays on)
+        self.assertIn("drafting stays on: --drafting on says otherwise", said[0])
+        self.assertIn("--kv-resident 4096 instead of 32768", said[0])          # (the rest of the scale-down: said)
+        out2 = io.StringIO()
+        with tempfile.TemporaryDirectory() as t, cpu():
+            self.setup(Path(t), _mem=(64.0, 50.0), _out=out2)                  # (no --drafting: the default)
+        said = [ln for ln in out2.getvalue().splitlines() if "scales this layout down" in ln][0]
+        self.assertIn("drafting off (--mtp-max-t 1)", said)                    # (still scaled down as before)
+        self.assertNotIn("drafting stays on", said)
 
 
 class Parallel(unittest.TestCase):

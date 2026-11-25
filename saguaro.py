@@ -7729,7 +7729,12 @@ def set_up_qfn(a, prev: dict) -> Path | None:
     if lay["slow"]:
         warn(f"this PC is below the layout {QFN_SHOWN} was measured on: {lay['slow_why']} - most experts read "
              "from RAM / the SSD: expect slow decode")
-        ok("the setup scales this layout down: " + ", ".join(lay["turned_off"]))
+        # (finding 3: the line lists what this layout really turns off - --drafting on keeps drafting, the same
+        #  gate write_config_qfn's slow_draft applies - and says so instead of announcing drafting off)
+        keep_draft = getattr(a, "drafting", None) == "on"
+        off = [t for t in lay["turned_off"] if not (keep_draft and t.startswith("drafting off"))]
+        ok("the setup scales this layout down: " + ", ".join(off) +
+           (" (drafting stays on: --drafting on says otherwise)" if keep_draft else ""))
         if not a.yes and ask("This will probably be very slow. Are you sure? (y/n)", ["y", "n"], "n", False) == "n":
             fail("stopped: this PC would run this model very slowly",
                  f"a PC nearer the measured layout (16 GB cards, about 96 GB of RAM), another model, or --yes "
