@@ -1775,6 +1775,24 @@ endif()
 # from the binary's folder).
 option(SAGUARO_QFN "Build the QFN engine (engines/qfn) as saguaro-qfn" OFF)
 set(SAGUARO_QFN_GGML_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/llama.cpp" CACHE PATH "the llama.cpp checkout engines/qfn takes ggml from")
+if(SAGUARO_QFN)
+  # the sub-build's ninja: this build's own when it is made with ninja too, else (a build made with make: one from before
+  # 1.2.1, its generator kept in its build folder) ninja beside this cmake - the setup's, none on PATH - or the PATH's.
+  # Never this build's make program as it is: make handed to a Ninja sub-build ("Ninja 1.3 or newer") failed an update.
+  if(CMAKE_GENERATOR MATCHES "Ninja")
+    set(_qfn_ninja "${CMAKE_MAKE_PROGRAM}")
+  else()
+    get_filename_component(_cmake_dir "${CMAKE_COMMAND}" DIRECTORY)
+    find_program(SAGUARO_QFN_NINJA NAMES ninja ninja-build HINTS "${_cmake_dir}")
+    mark_as_advanced(SAGUARO_QFN_NINJA)
+    set(_qfn_ninja "${SAGUARO_QFN_NINJA}")
+  endif()
+  if(_qfn_ninja)
+    set(_qfn_make "-DCMAKE_MAKE_PROGRAM=${_qfn_ninja}")
+  else()
+    set(_qfn_make)
+  endif()
+endif()
 if(SAGUARO_QFN AND MAYA_ENABLE_CUDA)
   include(ExternalProject)
   # (Pascal / Volta, second-class: a build for sm_6x / sm_70 only makes engines/qfn's experimental build - its
@@ -1809,11 +1827,16 @@ if(SAGUARO_QFN AND MAYA_ENABLE_CUDA)
   if(_qfn_gen MATCHES "Makefiles")   # (the outer make's jobserver: `cmake --build` would start a serial make)
     set(_qfn_build $(MAKE) strata strata_kq strata_kq_tab)
   endif()
+  if(_qfn_gen MATCHES "Ninja")
+    set(_qfn_make_arg ${_qfn_make})
+  else()
+    set(_qfn_make_arg)   # (make finds itself; this build's compilers are in _qfn_extra)
+  endif()
   ExternalProject_Add(qfn_engine
     SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/engines/qfn
     BINARY_DIR ${CMAKE_CURRENT_BINARY_DIR}/qfn
     CMAKE_GENERATOR ${_qfn_gen}
-    CMAKE_ARGS -DCMAKE_BUILD_TYPE=Release -DCMAKE_MAKE_PROGRAM=${CMAKE_MAKE_PROGRAM}   # (the setup's own ninja: none on PATH)
+    CMAKE_ARGS -DCMAKE_BUILD_TYPE=Release ${_qfn_make_arg}
                -DCMAKE_CUDA_COMPILER=${CMAKE_CUDA_COMPILER} -DCMAKE_CUDA_ARCHITECTURES=${_qfn_archs}
                -DSTRATA_ENABLE_CUDA=ON ${_qfn_isa} -DSTRATA_BUILD_DSV41=ON -DSTRATA_BUILD_TESTS=ON
                -DSTRATA_BUILD_CONVERSATION_TESTS=ON -DSTRATA_GGML_DIR=${SAGUARO_QFN_GGML_DIR} -DSTRATA_MMQ_TAB=ON
@@ -1835,7 +1858,7 @@ elseif(SAGUARO_QFN AND MAYA_ENABLE_HIP)
     SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/engines/qfn
     BINARY_DIR ${CMAKE_CURRENT_BINARY_DIR}/qfn
     CMAKE_GENERATOR Ninja
-    CMAKE_ARGS -DCMAKE_BUILD_TYPE=Release -DCMAKE_MAKE_PROGRAM=${CMAKE_MAKE_PROGRAM} -DCMAKE_HIP_COMPILER=${CMAKE_HIP_COMPILER}
+    CMAKE_ARGS -DCMAKE_BUILD_TYPE=Release ${_qfn_make} -DCMAKE_HIP_COMPILER=${CMAKE_HIP_COMPILER}
                -DCMAKE_HIP_ARCHITECTURES=${_saguaro_qfn_hip_archs} -DCMAKE_PREFIX_PATH=${_saguaro_qfn_prefix}
                -DSTRATA_ENABLE_HIP=ON -DSTRATA_PREFILL_MMQ=ON -DSTRATA_BUILD_DSV41=ON -DSTRATA_BUILD_TESTS=${MAYA_BUILD_TESTS}
                -DSTRATA_GGML_DIR=${SAGUARO_QFN_GGML_DIR}
