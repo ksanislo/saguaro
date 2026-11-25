@@ -1822,6 +1822,9 @@ class WebApp(unittest.TestCase):
             (Path(d) / savings.FILE).write_text(json.dumps({"since": 1.0, "models": {
                 "maya-old.json": {"since": 1.0, "model": "deepseek-v4.1-flash", "quant": "UD-Q8_K_XL",
                                   "bands": savings.zero()},        # (an entry counted before the fields existed)
+                "maya-maya-l.json": {"since": 1.0, "model": "glm-5.3-flash", "quant": "Maya-L",
+                                     "name_pretty": "GLM 5.3", "name_quant": "Maya-L",
+                                     "bands": savings.zero()},     # (another config of one model, recorded first)
                 "maya-maya-m.json": {"since": 1.0, "model": "glm-5.3-flash", "quant": "Maya-M",
                                      "bands": savings.zero()}}}), encoding="utf-8")
             led = savings.Ledger(Path(d) / savings.FILE, "maya-maya-m.json", "glm-5.3-flash", "Maya-M",
@@ -1839,9 +1842,11 @@ class WebApp(unittest.TestCase):
         self.assertEqual((r["start"]["model_name_pretty"], r["start"]["model_quant"]), ("GLM 5.3", "Maya-M"))
         priced = {p["model"]: p for p in r["prices"]}
         self.assertEqual(priced["glm-5.3-flash"]["model_name_pretty"], "GLM 5.3")     # (the popover's price rows)
+        self.assertEqual(priced["glm-5.3-flash"]["model_quant"], "Maya-M")   # (this run's own name, not its twin's)
         self.assertNotIn("model_name_pretty", priced["deepseek-v4.1-flash"])
         listed = {p["model"]: p for p in r["price_list"]}           # (Settings > Savings' price cards)
         self.assertEqual(listed["glm-5.3-flash"]["model_name_pretty"], "GLM 5.3")
+        self.assertEqual(listed["glm-5.3-flash"]["model_quant"], "Maya-M")   # (the running config's, as above)
         self.assertNotIn("model_name_pretty", listed["deepseek-v4.1-flash"])
 
     def test_text_file_limit_follows_the_context(self):

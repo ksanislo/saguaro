@@ -335,9 +335,11 @@ class Ledger:
 
     def name_fields(self, model: str | None) -> dict:
         """The page's two name fields for a model counted here ({} when no run recorded them: the page keeps today's
-        text).  Counted under the caller's lock; keyed on nothing new - the entry's model id, as the prices are."""
-        for m in self.doc["models"].values():
-            if m.get("model") == model and m.get("name_pretty"):
+        text).  Counted under the caller's lock; keyed on nothing new - the entry's model id, as the prices are.
+        The running config's entry first: two configs of one model, and this run's name is the page's."""
+        entries = self.doc["models"]
+        for m in [entries.get(self.key)] + [x for k, x in entries.items() if k != self.key]:
+            if m and m.get("model") == model and m.get("name_pretty"):
                 return {"model_name_pretty": m["name_pretty"], "model_quant": m.get("name_quant") or ""}
         return {}
 
