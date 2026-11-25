@@ -383,12 +383,13 @@ def priority_level(value, field="priority") -> int:
 
 
 def priority_age_seconds() -> float:
-    """SAGUARO_PRIORITY_AGE_S (300): a background waiter older than this counts as normal - an agent's queued work
-    waits behind a person's, but not behind an endless stream of them for ever."""
+    """SAGUARO_PRIORITY_AGE_S (0 = off): a background waiter that has waited this many seconds counts as normal.
+    Off by default (Ken's rule): a background request waits as long as a higher-priority one uses or waits for the
+    model, however long - it is never dropped or errored for waiting, only by its client, a stop or a shutdown."""
     try:
-        return max(0.0, float(os.environ.get("SAGUARO_PRIORITY_AGE_S", "300") or 0))
+        return max(0.0, float(os.environ.get("SAGUARO_PRIORITY_AGE_S", "0") or 0))
     except ValueError:
-        return 300.0
+        return 0.0
 
 
 class FairLock:
@@ -439,10 +440,12 @@ class FairLock:
         return self.capacity if units is None else max(1, min(int(units), self.capacity))
 
     def _eff(self, e) -> int:
-        """What priority a waiter counts at now: a background one older than SAGUARO_PRIORITY_AGE_S has aged
-        into normal (an entry from before the priorities is normal)."""
+        """What priority a waiter counts at now: with SAGUARO_PRIORITY_AGE_S > 0 a background one that has waited
+        that long has aged into normal; 0 (the default) = no promotion by waiting (an entry from before the
+        priorities is normal)."""
         p = e[4] if len(e) > 4 else PRIORITY_NORMAL
-        if p == PRIORITY_BACKGROUND and time.monotonic() - e[2] >= priority_age_seconds():
+        age = priority_age_seconds()
+        if p == PRIORITY_BACKGROUND and 0 < age <= time.monotonic() - e[2]:
             return PRIORITY_NORMAL
         return p
 
@@ -5629,9 +5632,19 @@ class Service:
                 print(f"[saguaro] fair slice: {len(produced)} tokens written, the engine goes to the next request "
                       f"({waiting} waiting); this one continues after it", flush=True)
             try:
+                paused_at, noted = time.monotonic(), False
                 while not self.fifo.wait_turn(place, timeout=0.1):
                     if cancel.is_set() or self.stopping:
                         return
+                    if preempt and not noted:
+                        waited = time.monotonic() - paused_at
+                        if waited >= 600:
+                            # R122: a long pause says so once - the request is never ended or promoted for waiting,
+                            # it ends only when its client goes away, asks to stop, or the server stops
+                            noted = True
+                            print(f"[saguaro] priority: a {PRIORITY_NAMES[prio]} "
+                                  f"{'answer' if produced else 'prompt read'} has been paused for "
+                                  f"{int(waited // 60)} min", flush=True)
                     yield None                          # keeps the client's watchdog calm while queued again
                 hold[0] = True
             finally:

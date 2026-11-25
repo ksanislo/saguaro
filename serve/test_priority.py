@@ -20,13 +20,14 @@ import sys
 import threading
 import time
 import unittest
+import unittest.mock
 import urllib.error
 import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from serve.frontend import ChatTemplate  # noqa: E402
-from serve.server import (IM_END, ByteTokenizer, FairLock, MockEngine, Service, serve,  # noqa: E402
+from serve.server import (IM_END, PRIORITY_NAMES, ByteTokenizer, FairLock, MockEngine, Service, serve,  # noqa: E402
                           PRIORITY_BACKGROUND, PRIORITY_HIGH, PRIORITY_NORMAL)
 from serve.test_fair import ROOT, ResumingEngine, PausingEngine  # noqa: E402
 
@@ -179,6 +180,17 @@ class FairLockPriority(Env):
         self.assertTrue(lock.wait_turn(bg, timeout=2))
         lock.release()
 
+    def test_the_aging_setting_is_off_by_default_and_on_above_zero(self):
+        lock = FairLock()
+        bg = lock.enqueue(units=1, priority=PRIORITY_BACKGROUND)
+        time.sleep(0.05)                               # no promotion by waiting at all: the default
+        self.assertEqual(lock._eff(bg), PRIORITY_BACKGROUND)
+        self.assertEqual(lock.waiting(above=PRIORITY_BACKGROUND), 0)      # it never cuts a running background
+        os.environ["SAGUARO_PRIORITY_AGE_S"] = "0.01"                     # set: that long of a wait counts normal
+        self.assertEqual(lock._eff(bg), PRIORITY_NORMAL)
+        self.assertEqual(lock.waiting(above=PRIORITY_BACKGROUND), 1)
+        lock.leave(bg)
+
     def test_a_waiting_normal_holds_back_a_new_one_of_its_own(self):
         lock = FairLock()
         lock.acquire()
@@ -212,7 +224,6 @@ class FairLockPriority(Env):
         self.assertEqual(lock.waiting(above=PRIORITY_NORMAL), 1)         # only the high one cuts a normal runner
         self.assertEqual(lock.waiting(above=PRIORITY_BACKGROUND), 2)     # normal and high both cut a background
         self.assertEqual(lock.highest_waiting(), PRIORITY_HIGH)
-
     def test_a_queued_background_ages_into_normal(self):
         os.environ["SAGUARO_PRIORITY_AGE_S"] = "0.05"
         lock = FairLock()
@@ -332,7 +343,7 @@ class ServicePreempts(Env):
                 self.assertNotIn("priority:", log.getvalue())
 
     def test_a_queued_background_ages_and_the_answer_steps_aside(self):
-        os.environ["SAGUARO_PRIORITY_AGE_S"] = "0"      # a waiting background counts as normal at once
+        os.environ["SAGUARO_PRIORITY_AGE_S"] = "0.02"  # a waiting background counts as normal once it aged
         log = io.StringIO()
         with contextlib.redirect_stdout(log):
             out = self.race(low_prio=PRIORITY_BACKGROUND, high_prio=PRIORITY_BACKGROUND)
@@ -362,6 +373,39 @@ class ServicePreempts(Env):
         self.assertFalse(self.svc.fifo.locked())
         self.assertEqual(self.svc.fifo.waiting(), 0)    # (the line it left)
         self.assertEqual(self.svc.status["queued"], 0)
+
+    def test_a_long_pause_neither_ends_it_nor_promotes_it(self):
+        other = "".join(random.Random(900).choices(string.ascii_letters, k=400))
+        self.engine = ResumingEngine(self.tok, {"long": LONG, "other": other, "short": SHORT}, delay_s=0.003)
+        self.svc.engine = self.engine
+        out, log = {}, io.StringIO()
+        with contextlib.redirect_stdout(log):
+            a = threading.Thread(target=ask, args=(self.svc, "long one", 4096, out, PRIORITY_BACKGROUND))
+            a.start()
+            while self.svc.latest_request not in self.svc.current_requests:
+                time.sleep(0.001)
+            b = threading.Thread(target=ask, args=(self.svc, "other one", 4096, out, PRIORITY_HIGH))
+            b.start()
+            while not any(getattr(s, "paused_for_priority", False) for s in list(self.svc.running)):
+                time.sleep(0.005)
+            self.assertEqual([s.priority for s in self.svc.running if getattr(s, "paused_for_priority", False)],
+                             [PRIORITY_NAMES[PRIORITY_BACKGROUND]])   # it waits: still a background request
+            clock = [time.monotonic()]
+
+            def fake():                                               # a minute of waiting per call: the ten-
+                clock[0] += 60                                        #  minute note comes without the ten minutes
+                return clock[0]
+
+            with unittest.mock.patch("time.monotonic", new=fake):
+                stop = time.time() + 30                               # (the wall clock stays real for the wait)
+                while "has been paused for" not in log.getvalue() and time.time() < stop:
+                    time.sleep(0.02)
+            b.join(60)
+            a.join(60)
+        self.assertIn("priority: a background answer has been paused for", log.getvalue())   # it says so, once
+        self.assertEqual(log.getvalue().count("has been paused for"), 1)
+        self.assertEqual(out["long one"][0], LONG)                    # and it went on to its end: waiting ends
+        self.assertEqual(out["other one"][0], other)                  #   nothing, and promotes nothing
 
     def test_parallel_two_cuts_only_as_many_as_needed(self):
         longs = {f"long {c}": "".join(random.Random(700 + i).choices(string.ascii_letters, k=400))
