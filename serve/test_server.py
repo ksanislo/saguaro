@@ -2641,6 +2641,16 @@ class ModelManagement(unittest.TestCase):
             self.assertEqual(code, 503)                                        # (the chat's retryable 503 stays)
             self.assertIn("starts again with it", out["error"])
 
+    def test_loading_the_running_model_by_its_config_name_answers(self):
+        # (it dropped the connection without a reply: the swap's "it is the one running" was no answer)
+        self.svc.model_management = True
+        self.svc.model_listing = lambda: [{"file": "run.json", "running": True}]
+        with unittest.mock.patch("serve.model_api.find_config", return_value=Path("run.json")):
+            code, out = self.call("POST", "/models/load", {"model": "run"})
+        self.assertEqual((code, out["status"]["value"], out["model"]), (200, "loaded", self.svc.model))
+        with unittest.mock.patch("serve.model_api.find_config", return_value=Path("other.json")):
+            self.assertEqual(self.call("POST", "/models/unload", {"model": "other"})[0], 404)   # (only the running one unloads)
+
     def test_unload_waits_for_a_running_request(self):
         self.svc.model_management = True
         self.assertTrue(self.svc.fifo.acquire(blocking=False))      # (a request holds the engine)

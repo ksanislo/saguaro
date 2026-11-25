@@ -6780,11 +6780,15 @@ def make_handler(svc: Service):
             name = (body or {}).get("model") or svc.model
             if name != svc.model:
                 other = model_api.find_config(svc.models_root(), name)
-                if op == "load" and other is not None:    # another installed model: the swap (a load on request)
+                run = next((m for m in svc.model_listing() if m["running"]), None)
+                if other is not None and run is not None and other.name == run["file"]:
+                    name = svc.model                      # (the running config by its own name: the model below)
+                elif op == "load" and other is not None:  # another installed model: the swap (a load on request)
                     self._mapi_target(name, load=True)
                     return
-                self._json(404, {"error": {"message": "model not found"}})
-                return
+                else:
+                    self._json(404, {"error": {"message": "model not found"}})
+                    return
             if op == "unload":
                 state = svc.unload()
                 if state == "busy":
