@@ -699,7 +699,7 @@ so a new upstream setting is caught automatically; a missed name is a tool bug, 
   hot-flag variables -> `SAGUARO_*` (`tools/maya_bench.py:34`), and the `MAYA_*` names the rename left behind in
   comments (e58d740a3). ref/reports/REPORT-upstream-v1.1.75.md:111-118.
 - **Bare per-engine families stay bare, with the prefix accepted**: the DS4 engine reads each switch as `SAGUARO_DS4_*`
-  first and the plain `DS4_*` second (`ds4_env`, `src/ds4/ds4_model.cu:15715-15718`), so its entries below name the
+  first and the plain `DS4_*` second (`ds4_env`, `src/ds4/ds4_model.cu:15715-15718`), so its entries above name the
   `DS4_*` form the configs write; the HY4 engine reads `HY4_*` directly (e.g. `HY4_HOT_SEED`,
   `src/hy4/hy4_model.cu:6596`), like the other HY4_* settings.
 - **Program and log names**: the engine programs are `saguaro-glm`, `saguaro-ds4`, `saguaro-mm3`, `saguaro-hy4`,
