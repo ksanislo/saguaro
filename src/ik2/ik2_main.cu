@@ -1676,6 +1676,11 @@ void drafter_propose(ik2::draft::Drafter* d, int anchor, const float* anchor_h, 
     CU(cudaStreamWaitEvent(g_drem.s, g_drem.ev_src, 0));
     CU(cudaMemcpyAsync(g_drem.anchor, g_drem.host_anchor, (size_t) g_drem.C * sizeof(float), cudaMemcpyHostToDevice, g_drem.s));
     ik2::draft::propose(d, anchor, g_drem.anchor, P, nullptr, n_rows, n_vocab, out, proposals, noise);
+    CU(cudaEventRecord(g_drem.ev_cp, g_drem.s));   // (as the peer branch above: the drafter's stream has read host_anchor
+                                                   //  and the anchor - today every call site pairs this propose with a
+                                                   //  write_context / set_f_rnn that records it; record it here too, so
+                                                   //  one without a pair cannot reorder two transfers on host_anchor)
+    g_drem.cp_valid = true;
 }
 // the drafter's tap a visit's stream (at its start) is, or -1
 inline int draft_tap(const Config& c, int l, int vis) {
@@ -2395,7 +2400,7 @@ static bool grp_ok(const Layer& Ly) { return grp_one(Ly.ty[0]) && grp_one(Ly.ty[
 
 // (two GPUs, SAGUARO_IK2_PF_GPU1=1: a prompt's experts that GPU 0 lacks run on GPU 1 from its VRAM instead of streaming through
 //  host memory - defined with the two-GPU code below)
-bool pf1_pick(int l, const Config& c, const std::vector<int>& cnt, const ExpertCache& EC, int T, std::vector<char>& skip);
+bool pf1_pick(int l, const Config& c, const std::vector<int>& cnt, const ExpertCache& EC, int T, std::vector<char>& skip, const Layer& Ly);
 void pf1_run(const Model& M, int l, int T, const uint16_t* xq16, const Work& W, const std::vector<char>& skip, const int* gidx,
              const float* sg, const float* su, const float* wtr);
 void pf1_add(Work& W, int T, int C);
@@ -2445,7 +2450,7 @@ void run_prefill_moe(const Model& M, Layer& Ly, int l, int T, const uint16_t* xq
     }
 
     std::vector<char> p1skip;
-    const bool p1 = g_off && !g_ep && !g_tp && pf1_pick(l, c, W.cnt, EC, T, p1skip);
+    const bool p1 = g_off && !g_ep && !g_tp && pf1_pick(l, c, W.cnt, EC, T, p1skip, Ly);
     if (p1) pf1_run(M, l, T, xq16, W, p1skip, gidx, sg, su, wtr);
 
     // the experts on a GPU: d -1 all of them (one GPU), else the ones it owns (SAGUARO_IK2_EP), into X.tmp
@@ -3071,9 +3076,14 @@ bool pf1_peer() {
     return on;
 }
 
-bool pf1_pick(int l, const Config& c, const std::vector<int>& cnt, const ExpertCache& EC, int T, std::vector<char>& skip) {
+bool pf1_pick(int l, const Config& c, const std::vector<int>& cnt, const ExpertCache& EC, int T, std::vector<char>& skip, const Layer& Ly) {
     static const bool en = getenv("SAGUARO_IK2_PF_GPU1") && std::atoi(getenv("SAGUARO_IK2_PF_GPU1"));
     if (!en || !g_two.on || T < 32) return false;
+    // (kMIX - a Strata pack whose experts carry their own types - is refused, not routed: pf1_run decodes the fixed
+    //  three-part layout at Ly.eb's offsets, and a kMIX expert's parts sit under their own MixHdr, so its rows would
+    //  be read at wrong offsets silently. run_exp's "a Strata pack across two GPUs: not yet" sits in its g_tp branch,
+    //  which this prefill path never reaches (p1 requires !g_tp): this refusal is the guard here, not insurance)
+    if (Ly.ty[0] == strata_fmt::kMIX) return false;
     skip.assign(c.E, 0);
     int n = 0;
     for (int e = 0; e < c.E; ++e)
@@ -3088,8 +3098,8 @@ void pf1_run(const Model& M, int l, int T, const uint16_t* xq16, const Work& W, 
     Pf1& P = g_pf1;
     const int C = c.C, F = c.F, S = T * c.K;
     if (T > P.cap) {   // (grow: nothing of the old buffers is in flight - the chunks before it are done)
+        DevScope on(g_two.dev);   // (P.s is GPU 1's stream: some runtime versions reject its sync while GPU 0 is current)
         if (P.s) CU(cudaStreamSynchronize(P.s));
-        DevScope on(g_two.dev);
         for (void* q : {(void*) P.x16, (void*) P.ex16, (void*) P.w16, (void*) P.h16, (void*) P.gu32, (void*) P.y32,
                         (void*) P.tmp, (void*) P.sg, (void*) P.su, (void*) P.wtr, (void*) P.gidx})
             if (q) CU(cudaFree(q));
@@ -9080,8 +9090,26 @@ int main(int argc, char** argv) {
                 const size_t qb = (size_t) c.n_rows * c.C, db = (size_t) c.n_rows * (c.C / 32) * sizeof(uint16_t);
                 R.q8 = dalloc<int8_t>(qb);
                 R.q8d = dalloc<uint16_t>(db / sizeof(uint16_t));
-                CU(cudaMemcpyPeer(R.q8, dg, M.out_w.q8, 0, qb));
-                CU(cudaMemcpyPeer(R.q8d, dg, M.out_w.q8d, 0, db));
+                // (the two GPU link is not up yet at drafter load: two_setup establishes it later, its link test being
+                //  what admits peer copies and its setup what enables peer access - a raw cudaMemcpyPeer here died at
+                //  start on a pair whose access was not enabled then. So the head bounces through pinned host memory,
+                //  as every hand-off of this feature does when the link test fails; the peer branch stays for the
+                //  link being tested before the drafter, pf1_peer()/g_two.link.all_peer being its gate elsewhere)
+                if (g_two.link.all_peer) {
+                    CU(cudaMemcpyPeer(R.q8, dg, M.out_w.q8, 0, qb));
+                    CU(cudaMemcpyPeer(R.q8d, dg, M.out_w.q8d, 0, db));
+                } else {
+                    char* stage = nullptr;
+                    CU(cudaHostAlloc((void**) &stage, qb + db, cudaHostAllocPortable));
+                    {
+                        DevScope g0(0);
+                        CU(cudaMemcpy(stage, M.out_w.q8, qb, cudaMemcpyDeviceToHost));
+                        CU(cudaMemcpy(stage + qb, M.out_w.q8d, db, cudaMemcpyDeviceToHost));
+                    }
+                    CU(cudaMemcpy(R.q8, stage, qb, cudaMemcpyHostToDevice));
+                    CU(cudaMemcpy(R.q8d, stage + qb, db, cudaMemcpyHostToDevice));
+                    CU(cudaFreeHost(stage));
+                }
             }
         }
         for (int kv8 = kv_want == "fp8" ? 1 : 0; kv8 <= (kv_want == "f16" ? 0 : 1) && !drafter; ++kv8) {
