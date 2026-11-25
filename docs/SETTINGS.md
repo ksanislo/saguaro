@@ -233,6 +233,45 @@ These settings change what the engine chooses (put them in the config with `--en
 | `SAGUARO_LOAD_BY_NAME` | off | the server, needs model management on: `1` = a chat request (`/v1/chat/completions`, `/v1/responses`, `/v1/messages`) whose `"model"` names another installed model - its config name or the model's own name, case-insensitive, as `/v1/models` shows them - switches to it the way the Models page's Switch and `/models/load` do (one log line: `[saguaro] load by name: <from> -> <to> (requested by a chat)`), so a client that sends a model id (opencode, Hermes) gets that model, like llama-swap. The request itself gets a 503 with `Retry-After`: the switch ends this server and Saguaro starts again with the named config, so it cannot be answered from here - retry it once `GET /v1/models` shows the new model loaded. A request running on the current model is never cut short: the switch waits for it. Unknown names and the loaded model's own names are answered by the loaded model, as today. Needs the API key from another device, like `/models/load`. As `"load_by_name": true` in the config; `0` turns it back off |
 | `SAGUARO_VIDEO_MAX_FRAMES` | 240 | the server (GLM): the most frames a video may give (read at 4 a second, so 240 = a minute); a longer video is refused before it is decoded, with its length in the message. Every frame takes an image's share of the context. Videos need ffmpeg and ffprobe installed |
 | `SAGUARO_FAIR_READ_S`, `SAGUARO_FAIR_READ_YIELD_S` | 0 (off), 30 | the server, several conversations at once: a prompt the engine has been reading this many seconds while another request waits behind it (sent, nothing heard from it yet) is paused at the engine's next chunk - the engine keeps what it read - and goes on with the rest once the waiting requests have started (at most the yield seconds later). A short turn no longer waits for another chat's whole long read; the read loses a pipeline refill per pause. After upstream PR #144's design |
+| `SAGUARO_PRIORITY_AGE_S` | 300 | the server: a queued background request older than this counts as a normal one (see Request priority below) - an agent's queued work waits behind a person's turns, but not behind an endless stream of them for ever; `0` = it ages at once |
+
+**Request priority** (`priority`). A request can say how long it may hold the queue: the body field `"priority"` -
+`"high"`, `"normal"` (the default, today's behaviour) or `"background"` - or the `X-Saguaro-Priority` header, where
+the body wins when a request sends both; anything else is a 400 that names the field. Every API takes it:
+`/v1/chat/completions`, `/v1/responses`, `/v1/messages`, `/api/chat` and `/api/generate`. The run config's
+`"priority"` is the level a request that says nothing runs at. (OpenAI's `service_tier` is something else and does
+nothing here.) The queue then hands the engine to the highest priority waiting - first come first served inside one
+priority - and nothing else changes while requests all have the same level.
+
+A running answer of a lower priority gives its place up at once when a higher-priority request arrives and no place
+is free: at its next token, the way a fair slice does (PAUSE where the engine can, else
+a cut), and without waiting for `SAGUARO_FAIR_SLICE_S`; when its turn comes back it resumes at exactly the token it
+reached - nothing it had written is generated again, and the thinking budget and the loop guard count from where it
+got to - while it waits with keep-alives to its client. A prompt read is only cut short for engines that keep a
+stopped read alive (QFN's conversation stays live at the token it reached, GLM pauses by its PAUSE); an engine that
+would lose what it read finishes it. A request is never cut for one of its own or a lower priority, and requests
+with images are never cut at all, as today. A background request that has waited `SAGUARO_PRIORITY_AGE_S` seconds
+counts as a normal one from then on. The Monitor shows a small `high` / `background` tag on the running and queued
+rows, and a paused one says "paused for a higher-priority request"; `/metrics` carries `"priority"` and
+`"paused_for_priority"` in its live rows and every finished request's row.
+
+**An agent's alias at background** (llama-swap >= v200 syntax): point the agent at an alias of the same model whose
+params set the field, and its long turns keep the machine warm without holding up a person at the keyboard:
+
+```yaml
+  - id: glm-background
+    # ... the same model as the normal entry ...
+    filters:
+      setParamsByID:
+        "glm-background":
+          priority: background
+```
+
+Every request through that alias then arrives as background: a normal request that lands while one of its answers is
+writing starts at the answer's next token instead of after the whole of it, and the log says so
+(`[saguaro] priority: a background answer paused at 214 tokens for a normal-priority request (1 waiting)`, then
+`[saguaro] priority: the background answer continues`); the agent notices nothing, its answer is the same text, only
+later by one turn's worth of tokens.
 
 **The expert profile** (`data/expert-profile-glm.bin`). At start the engine fills VRAM with the experts a profile ranks
 first. That profile ranks every (layer, expert) pair, and its order also decides how many VRAM slots each layer
