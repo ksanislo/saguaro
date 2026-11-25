@@ -29,7 +29,7 @@ UP = T.UP
 rename = T.rename_internal                         # the per-file rewrite, shared with rename_upstream.py
 
 SKIP_PREFIX = ("engines/qfn/", "tools/qfn/", "serve/qfn_engine.py", "third_party/", "tools/saguaro/", "bench/results/", "ref/")
-SKIP_NAME = re.compile(r"^(CHANGELOG\.md|NOTICE\.md|(PLAN|REPORT|NEXT)-.*\.md)$")
+SKIP_NAME = re.compile(r"^(CHANGELOG\.md|NOTICE\.md|DIVERGENCE\.md|UPSTREAM\.md|(PLAN|REPORT|NEXT)-.*\.md)$")
 TEXT_SUFFIXES = T.INT_TEXT_SUFFIXES
 CMAKE = T.is_cmake
 
