@@ -346,6 +346,11 @@ if(STRATA_BUILD_TESTS)
   target_include_directories(split_rules_test PRIVATE include)
   add_test(NAME split_rules_test COMMAND split_rules_test)
 
+  # PLAN-turbo-live: the skip's request-line value -> kernel bar mapping and its layout gates: header-only, no GPU
+  add_executable(turbo_skip_map_test tests/program/turbo_skip_map_test.cpp)
+  target_include_directories(turbo_skip_map_test PRIVATE include)
+  add_test(NAME turbo_skip_map_test COMMAND turbo_skip_map_test)
+
   # the prompt planner's host-memory model (#2824): header-only, no GPU
   add_executable(prefill_plan_test tests/program/prefill_plan_test.cpp)
   target_include_directories(prefill_plan_test PRIVATE include)

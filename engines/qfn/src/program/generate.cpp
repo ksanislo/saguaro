@@ -18,6 +18,7 @@
 
 #include "strata/platform/memory.hpp"
 #include "strata/platform/numa.hpp"
+#include "strata/program/turbo_skip.hpp"
 #include "strata/core/arch_defaults.hpp"
 #include "strata/core/nv_defaults.hpp"
 #include "strata/kernels/rope.hpp"
@@ -1212,13 +1213,13 @@ void extra_sources_append(const int32_t* t, size_t n) {
 // ssd = anything in neither VRAM nor the RAM tier; the row's top-1 always stays).  Absent = off: the request is exact.
 struct Turbo {
     int drop = 0;     // 0 = off, else 1..9 (the router's k is 10)
-    int skip = 0;     // 0 off, 1 ssd, 2 ram
+    int skip = 0;     // the wire value: 0 off, 1 ssd, 2 ram (strata/program/turbo_skip.hpp; the kernel bar is turbo_skip_of's)
     bool off() const { return drop == 0 && skip == 0; }
     const char* skip_name() const { return skip == 2 ? "ram" : skip == 1 ? "ssd" : "off"; }
 };
 void turbo_key(Turbo& t, const std::string& key, const char* val) {
     if (key == "turbo_drop") t.drop = std::clamp(std::atoi(val), 0, 9);
-    else if (key == "turbo_skip") t.skip = std::string(val) == "ram" ? 2 : std::string(val) == "ssd" ? 1 : 0;
+    else if (key == "turbo_skip") t.skip = strata::program::turbo_skip::wire_of(val);
 }
 /// SAGUARO_ROUTE_PRIOR / SAGUARO_ROUTE_RESIDENT re-pick the top-10 after the router, which would undo a Turbo cut.
 bool turbo_repick_on() {
@@ -1245,24 +1246,26 @@ bool g_turbo_res = false;
 /// fact (plain mmap / page cache: said once, the request runs exact), 1 = the engine holds every expert in RAM
 /// (a no-op, said once), 2 = the resident RAM mode: the compact copy is the tier's fact, mirrored on the device.
 int g_turbo_ssd = 0;
-/// The skip a request's reply routes with: off beside a re-pick or without the residency table; ssd only where
-/// the layout mirrors the RAM tier.  Each refusal said once, and the request runs exact.
+/// The kernel bar a request's reply routes with (strata/program/turbo_skip.hpp: 1 = the wire's ram, 2 = the wire's
+/// ssd - the wire value does NOT ride to the kernels untranslated): off beside a re-pick or without the residency
+/// table; ssd only where the layout mirrors the RAM tier.  Each refusal said once, and the request runs exact.
 int turbo_skip_of(const Turbo& t) {
-    if (t.skip == 0) return 0;
-    if (turbo_repick_on()) {
+    namespace ts = strata::program::turbo_skip;
+    switch (ts::refusal(t.skip, turbo_repick_on(), g_turbo_res, g_turbo_ssd)) {
+    case 1: {
         static bool said = false;
         if (!said) std::fprintf(stderr, "saguaro serve: turbo skip is off beside SAGUARO_ROUTE_PRIOR / SAGUARO_ROUTE_RESIDENT\n");
         said = true;
         return 0;
     }
-    if (!g_turbo_res) {
+    case 2: {
         static bool said = false;
         if (!said) std::fprintf(stderr, "saguaro serve: turbo skip needs the device residency table (the expert cache "
                                         "with its profile): this engine runs the request exact\n");
         said = true;
         return 0;
     }
-    if (t.skip == 2 && g_turbo_ssd != 2) {
+    case 3: {
         static bool said = false;
         if (!said) std::fprintf(stderr, "saguaro serve: turbo skip=ssd: %s - the request runs exact\n",
                                 g_turbo_ssd == 1 ? "this engine holds every expert in RAM, so nothing is read from SSD "
@@ -1272,7 +1275,9 @@ int turbo_skip_of(const Turbo& t) {
         said = true;
         return 0;
     }
-    return t.skip;
+    default:
+        return ts::bar_of(t.skip);
+    }
 }
 
 bool parse_i64_list(const char* s, std::vector<int64_t>& out, std::string& err) {
@@ -13156,7 +13161,7 @@ vs.d_skip_usage = gs.d_skip_usage;
                     unsigned long long c3[3];
                     turbo_take(b + 1, c3);
                     std::fprintf(stderr, "saguaro batch: slot %d: turbo drop=%d skip=%s: %llu picks, %llu dropped, "
-                                         "%llu skipped\n", b, d, s == 2 ? "ram" : s == 1 ? "ssd" : "off",
+                                         "%llu skipped\n", b, d, strata::program::turbo_skip::bar_label(s),
                                  c3[0], c3[1], c3[2]);
                 }
             }
@@ -22756,7 +22761,7 @@ vs.d_skip_usage = gs.d_skip_usage;
                 unsigned long long c3[3];
                 turbo_take(0, c3);
                 std::fprintf(stderr, "saguaro serve: turbo drop=%d skip=%s: %llu picks, %llu dropped, %llu skipped\n",
-                             solo_drop, solo_skip == 2 ? "ram" : solo_skip == 1 ? "ssd" : "off",
+                             solo_drop, strata::program::turbo_skip::bar_label(solo_skip),
                              c3[0], c3[1], c3[2]);
             }
             stage_pool_note();
