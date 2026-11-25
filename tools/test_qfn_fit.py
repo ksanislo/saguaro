@@ -382,6 +382,14 @@ class Facts(unittest.TestCase):
         self.assertEqual({k for k in p["env"] if k.startswith(("SAGUARO_SM75", "SAGUARO_ARGMAX"))
                           or k in ("SAGUARO_KQL", "SAGUARO_GDN_KEYHEAD")}, set())
 
+    def test_pascal_env(self):
+        p40 = gpu(0, 24.0, "61", "Tesla P40")
+        e = F.plan([p40], 220.0, "gsq-iq3_s")["env"]
+        self.assertEqual((e["SAGUARO_Q8_SM60"], e["SAGUARO_MTP_Q8_SM60"], e["SAGUARO_DENSE_F32"]), ("1", "1", "1"))
+        self.assertNotIn("SAGUARO_DENSE_F32", F.plan([p40], 220.0, "ud-q4_k_xl")["env"])   # (measured on IQ3_S only)
+        for cards in ([gpu(0, 15.0, "75", "Tesla T4")], [p40, gpu(1, 15.0, "75", "Tesla T4")]):
+            self.assertNotIn("SAGUARO_Q8_SM60", F.plan(cards, 220.0)["env"])                # (all cards sm_6x only)
+
 
 class PolicyMatrix(unittest.TestCase):
     """The 1.2.1-B plan's matrix, every row judged one of three ways: refused (R: the card or the RAM cannot

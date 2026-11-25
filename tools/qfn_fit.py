@@ -88,6 +88,10 @@ GENERIC_ARGS = ["--conversation-cache-mib", "auto", "--conversation-cache-slots"
 # rows the engine takes on sm_7x only with this opt-in (verify_kernels.cu:990), and the GDN prompt recurrence per
 # key head, sm_80+ by default and sm_75 with =1 (prefill/kernels.cu:849).
 T4_ONLY_ENV = {"SAGUARO_ARGMAX_ROWS_SM70": "1", "SAGUARO_GDN_KEYHEAD": "1"}
+# PASCAL: every card compute capability 6.x (Tesla P40 / P100, GTX 10): the sm_6x Q8 rows for the model and the
+# MTP drafter (proven on a P40: IQ3_S + MTP ~20 tok/s); DENSE_F32 only on IQ3_S, where it was measured exact there.
+PASCAL_ENV = {"SAGUARO_Q8_SM60": "1", "SAGUARO_MTP_Q8_SM60": "1"}
+PASCAL_ENV_QUANT = {"gsq-iq3_s": {"SAGUARO_DENSE_F32": "1"}}
 # MULTI-GPU: the layer split's pipeline (stage pools, NUMA loads, P2P boundaries, reads beside the batch slots and
 # their shared chunks, pipelined drafts, direct slot copies, the split's CPU read share) - what the live split runs
 # and none of it fires without stages (batch_read.hpp:97: SLOT_ADMIT "not on the pipelined slot groups ... on a
@@ -209,6 +213,11 @@ def sm75_only(cards: list) -> bool:
     """True where every card is compute capability 7.5 (Tesla T4 / Quadro RTX 3000): the gate for the live
     configs' T4 tuning env (t4_env)."""
     return bool(cards) and all(_cc(g) == SM75 for g in cards)
+
+
+def pascal_only(cards: list) -> bool:
+    """True where every card is compute capability 6.x: the gate for PASCAL_ENV."""
+    return bool(cards) and all(60 <= _cc(g) < 70 for g in cards)
 
 
 def t4_env(quant: str) -> dict:
@@ -350,7 +359,7 @@ def best_gpus(cards: list) -> list:
     return group or have[:1]
 
 
-def layout_env(split: bool, t4: bool, quant: str, cpu: dict | None) -> dict:
+def layout_env(split: bool, t4: bool, quant: str, cpu: dict | None, pascal: bool = False) -> dict:
     """The live configs' tuning env for this layout, by class (./scratch/u6-keys.txt): GENERIC on every card;
     T4-ONLY only where every card is sm_75; MULTI-GPU only on a layer split (its per-quant additions among them);
     TOPOLOGY only on a multi-socket CPU."""
@@ -361,6 +370,9 @@ def layout_env(split: bool, t4: bool, quant: str, cpu: dict | None) -> dict:
     if t4:
         env.update(t4_env(quant))
         env.update(T4_ONLY_ENV)
+    if pascal:
+        env.update(PASCAL_ENV)
+        env.update(PASCAL_ENV_QUANT.get(quant, {}))
     if multi_socket(cpu):
         env.update(TOPOLOGY_ENV)
     return env
@@ -446,7 +458,7 @@ def plan(cards: list, ram_gb: float, quant: str = "ud-q4_k_xl", cpu: dict | None
     return {"fits": why is None, "reason": why, "gpus": list(cards), "n_gpus": n, "layer_split": split,
             "context": ctx, "kv_resident": min(ctx, KV_RESIDENT_MIN if slow else KV_RESIDENT),
             "resident_budget_gib": budget,
-            "args": args, "env": layout_env(bool(split), t4 and why is None, quant, cpu) if why is None else {},
+            "args": args, "env": layout_env(bool(split), t4 and why is None, quant, cpu, pascal_only(cards)) if why is None else {},
             "t4": t4, "measured": measured, "said": said,
             "slow": slow, "slow_why": slow_, "turned_off": turned}
 
