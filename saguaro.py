@@ -837,13 +837,15 @@ def configs() -> list:
 def migrate_config_names() -> list:
     """1.2.2's name change (C122): the maya-<model>.json configs here become saguaro-<model>.json, once and only
     where the new name is not taken (config_names: a model under both names is the new one; a shadowed old file
-    waits for --setup).  With each config move the files that live beside it: its start scripts (run-<stem>.sh /
-    .bat, their --config line rewritten), the dashboard settings and the live Turbo sidecar the server keeps beside
-    it (<stem>.shared-settings.json, <stem>.turbo.json), the copy before its settings changed (<name>.prev),
-    tools/saguaro/migrate_configs.py's backups (<name>.bak-*), and its engine log (whose path the config's own
-    "log" then follows).  Every move is atomic (os.replace) and only onto a target that is not there; a file that
-    cannot move (a read-only folder) stays under the old name and is said - config_names still finds it, so a
-    failed rename leaves everything working.  Returns the names the configs now have."""
+    waits for --setup).  With each config move the files that live beside it - and only these exact names, so a
+    config beside it (a dot-named variant like maya-2.5.json next to maya-2.json) is never swept as one: its start
+    scripts (run-<stem>.sh / .bat, their --config line rewritten), the dashboard settings and the live Turbo sidecar
+    the server keeps beside it (<stem>.shared-settings.json, <stem>.turbo.json), the copy before its settings
+    changed (<name>.prev), its half-written temp (<name>.tmp), tools/saguaro/migrate_configs.py's backups
+    (<name>.bak-*), and its engine log (whose path the config's own "log" then follows).  Every move is atomic
+    (os.replace) and only onto a target that is not there; a file that cannot move (a read-only folder) stays
+    under the old name and is said - config_names still finds it, so a failed rename leaves everything working.
+    Returns the names the configs now have."""
     moved = []
     for p in sorted(ROOT.glob(CN.OLD + "*.json")):
         if not CN.is_config_name(p.name):
@@ -857,12 +859,17 @@ def migrate_config_names() -> list:
             warn(f"could not rename {p.name} to {target.name} ({e.strerror or e}): the config keeps its old name")
             continue
         moved.append(target.name)
-        for f in sorted(ROOT.iterdir()):               # (its sidecars beside it (<name>.prev, the settings, the
-            if f.name == p.name or f.name == p.stem + ".log" or not (f.name.startswith(p.stem + ".")   #  Turbo one,
-                                        or f.name in (f"run-{p.stem}.sh", f"run-{p.stem}.bat")):        #  backups)
-                continue                               #  its log follows below, where its config's "log" key moves
-            new = (f.with_name(f"run-{target.stem}{f.suffix}") if f.name.startswith("run-")
-                   else f.with_name(target.stem + f.name[len(p.stem):]))
+        for f in sorted(ROOT.iterdir()):               # (its sidecars beside it: the dashboard settings and the live
+            rest = f.name[len(p.stem):] if f.name.startswith(p.stem + ".") else ""   #  Turbo one, the copy before
+            if f.name in (f"run-{p.stem}.sh", f"run-{p.stem}.bat"):                  #  its settings changed, the
+                new = f.with_name(f"run-{target.stem}{f.suffix}")                     #  migrate_configs.py backups;
+            elif rest == ".log" or CN.is_config_name(f.name):      #  its log follows below, where its config's
+                continue                           #  "log" key moves - and a config beside it (a dot-named
+            elif rest in (".turbo.json", ".shared-settings.json",   #  variant like maya-2.5.json) is no sidecar
+                          ".json.prev", ".json.tmp") or rest.startswith(".json.bak-"):
+                new = f.with_name(target.stem + rest)
+            else:
+                continue
             if new.exists():
                 continue
             try:

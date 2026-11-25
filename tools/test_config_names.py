@@ -178,6 +178,45 @@ class Migration(unittest.TestCase):
             with mock.patch.object(maya, "ROOT", d):
                 self.assertEqual([f.name for f in maya.configs()], ["saguaro-maya-m.json"])
 
+    def test_a_neighbouring_config_is_no_sidecar(self):
+        """dot-named variants (maya-2.json beside maya-2.5.json): the first config's rename must not sweep the
+        second's files - both move with their own sidecars, run scripts rewritten, nothing said"""
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            a = cfg_file(d, "maya-2.json")
+            b = cfg_file(d, "maya-2.5.json")
+            (d / "maya-2.turbo.json").write_text('{"for": 2}')
+            (d / "maya-2.5.turbo.json").write_text('{"for": "2.5"}')
+            (d / "run-maya-2.sh").write_text("exec saguaro.py --config " + str(a) + " --port 8080\n")
+            (d / "run-maya-2.5.sh").write_text("exec saguaro.py --config " + str(b) + " --port 8080\n")
+            with mock.patch.object(maya, "ROOT", d), mock.patch.object(maya, "warn") as warn:
+                self.assertEqual(sorted(maya.migrate_config_names()), ["saguaro-2.5.json", "saguaro-2.json"])
+                self.assertEqual(maya.migrate_config_names(), [])              # once: nothing to do again
+                warn.assert_not_called()
+            self.assertEqual(sorted(f.name for f in d.iterdir() if f.is_file()),
+                             ["run-saguaro-2.5.sh", "run-saguaro-2.sh", "saguaro-2.5.json", "saguaro-2.5.turbo.json",
+                              "saguaro-2.json", "saguaro-2.turbo.json"])
+            self.assertEqual(json.loads((d / "saguaro-2.turbo.json").read_text()), {"for": 2})     # each sidecar
+            self.assertEqual(json.loads((d / "saguaro-2.5.turbo.json").read_text()), {"for": "2.5"})   # followed its own
+            self.assertIn("--config " + str(d / "saguaro-2.5.json"), (d / "run-saguaro-2.5.sh").read_text())
+
+    def test_a_neighbour_does_not_drag_a_shadowed_pair_around(self):
+        """maya-2.json beside the pair maya-2.5.json + saguaro-2.5.json: the shadow waits for --setup, and the
+        neighbour's rename must not drag its sidecar into the live model's name"""
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            a = cfg_file(d, "maya-2.json")
+            cfg_file(d, "maya-2.5.json")
+            cfg_file(d, "saguaro-2.5.json")
+            (d / "maya-2.5.turbo.json").write_text('{"the shadow": 1}')
+            (d / "run-maya-2.sh").write_text("exec saguaro.py --config " + str(a) + "\n")
+            with mock.patch.object(maya, "ROOT", d), mock.patch.object(maya, "warn") as warn:
+                self.assertEqual(maya.migrate_config_names(), ["saguaro-2.json"])
+                warn.assert_not_called()
+            self.assertTrue((d / "maya-2.5.json").is_file())              # the shadow waits, untouched, ...
+            self.assertEqual(json.loads((d / "maya-2.5.turbo.json").read_text()), {"the shadow": 1})   #  and its
+            self.assertFalse((d / "saguaro-2.5.turbo.json").exists())     #  sidecar is nobody else's
+
     def test_both_names_the_new_one_and_the_old_stays(self):
         with tempfile.TemporaryDirectory() as tmp:
             d = Path(tmp)
