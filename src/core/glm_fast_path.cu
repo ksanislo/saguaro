@@ -3648,6 +3648,18 @@ static LanePin lane_pin_cpus(int threads, int gpu_node) {
     for (const auto& f : first)
         for (int c : f)
             if (std::find(P.spread.begin(), P.spread.end() - 1, c) == P.spread.end() - 1) P.rest.push_back(c);
+    // every GPU's service threads sit on `rest`: with too few cores left free (a lane as wide as the PC: 20 threads on
+    // 2 x 10 cores leave one, four GPUs share it) the pinned lane is far slower than the OS's own placement (Xeon E5-2660 v2,
+    // 4 x T4: GLM decode 7.1 tok/s pinned, 16.7 not).  SAGUARO_GLM_CPU_PIN=1 pins all the same.
+    const char* pin1 = getenv("SAGUARO_GLM_CPU_PIN");
+    if (P.rest.size() < 4 && !(pin1 != nullptr && std::atoi(pin1) != 0)) {
+        static std::once_flag said;
+        std::call_once(said, [&] {
+            std::fprintf(stderr, "glm fast: CPU lane not pinned: %d threads would leave %d cores for the GPUs' service threads "
+                                 "(SAGUARO_GLM_CPU_PIN=1 pins all the same)\n", threads, (int) P.rest.size());
+        });
+        return LanePin{};
+    }
     const auto* pk = &groups[0];
     for (const auto& g : groups)
         if (g.first == gpu_node) pk = &g;

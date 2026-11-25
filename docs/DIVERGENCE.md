@@ -115,6 +115,9 @@ Biggest first.
     14.8-16.5 tok/s in both arms - and prefetch / lookahead switch them off anyway, and our config enables
     `CONV_PREFETCH` (ref/reports/REPORT-upstream-v1.1.75.md:150-157). Exact either way.
 16. **Not taken, and the near-misses we keep warm.**
+    - The shared CPU-lane pool's NUMA pinning (v1.1.77) stays off when the lane would leave fewer than 4 physical cores free
+      (`lane_pin_cpus`, src/core/glm_fast_path.cu): 20 lane threads on 2 x 10 cores leave one core for four GPUs' service
+      threads; measured 2026-11-25 on 4 x T4: decode 7.1 tok/s pinned, 16.7 not, 16.3 on v1.2.0. `SAGUARO_GLM_CPU_PIN=1` forces it.
     - The FP16 tensor-core prompt path (`STRATA_GLM_FP16TC` on branch pr/glm-fp16tc, not in this tree): reads
       +2.0..2.6 %, n2 -1.7 %, KL at the cap (0.0101 vs off 0.0094, every on-arm below every off-arm), no site carries
       the shift at n=1 - parked (ref/PERF-LEDGER.md:271-281, 540-548).
