@@ -246,8 +246,8 @@ export function savePrefs(patch) {
   store.set(key, {...(store.get(key, {}) || {}), ...patch, prefs_v: 3});
   emit();
 }
-// the model running: its id and its files (the label: "GLM-5.3 · Maya-L") - another one is a model switch
-export const modelId = () => `${S.health.model || ""}|${S.health.model_label || ""}`;
+// the model running: its id, its label and the two name fields (another one is a model switch, whatever the server said)
+export const modelId = () => `${S.health.model || ""}|${S.health.model_label || ""}|${S.health.model_name_pretty || ""}|${S.health.model_quant || ""}`;
 // a model switch (the Models page's, or another model found when the page loads - a setup that changed it): the
 // user's sampling choices and level do not carry over - each model starts at its own standard parameters (the owner,
 // 2026-10-27); within one model they stay, across reloads.  True when it was a switch.

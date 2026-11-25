@@ -41,7 +41,15 @@ export async function loadHealth() {
 // ------------------------------------------------------------------ the live metrics (the Monitor, the status, the meter)
 let fails = 0, keyWarned = false, mcpTick = 0;
 export const reqAll = {on: false};       // the request table: the last 12, or every one the server keeps
+// the engine the metrics name is not the model the page shows: the server started with another config (a switch),
+// and it may not even have gone visibly down - re-read /health and every label follows, the chats staying (item 10:
+// a Q4 used to keep answering under the old Q8's name)
+export function identityChanged(h, eng) {
+  return !!eng && (eng.model != null || eng.model_label != null) &&
+         (eng.model !== h.model || (eng.model_label || "") !== (h.model_label || ""));
+}
 export async function poll() {
+  const was = S.conn;                       // (back from down or key: whatever answers now is read anew)
   try {
     const r = await fetch(reqAll.on ? "metrics?requests=all" : "metrics", {headers: headers()});
     if (r.status === 401) {
@@ -53,6 +61,7 @@ export async function poll() {
       fails = 0;
       const rl = S.metrics.reload;
       if (rl && (rl.state === "waiting" || rl.state === "running")) watchReload();
+      if (was !== "ok" || identityChanged(S.health, S.metrics && S.metrics.engine)) loadHealth();
     } else {
       throw new Error(`HTTP ${r.status}`);
     }
