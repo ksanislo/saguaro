@@ -7847,6 +7847,41 @@ def qfn_ram_said(lay: dict) -> str:
                  "leaves no room to pin one - they stream through the cache)")
 
 
+def memlock_soft_gib():
+    """The soft RLIMIT_MEMLOCK in GiB on Linux - what a process may page-lock (pin): the engine pins its RAM tier
+    with cudaHostRegister / mlock, and a limit under the tier pins less than the plan says, silently (the field case:
+    2x Tesla T4, `ulimit -l` 8 GiB, the 71 GiB tier came up at 8).  RLIM_INFINITY (unlimited) gives inf; an
+    unanswerable limit gives None - unknown: nothing is said; non-Linux: None too (skipped)."""
+    if WIN or not sys.platform.startswith("linux"):
+        return None
+    try:
+        import resource
+        soft = resource.getrlimit(resource.RLIMIT_MEMLOCK)[0]
+    except (ImportError, OSError, ValueError):
+        return None
+    return float("inf") if soft == resource.RLIM_INFINITY else soft / 2**30
+
+
+def memlock_tier_warn(planned_gib) -> None:
+    """One warning when a RAM tier is planned (QFN's --resident-budget-gib; GLM / DS4's pinned CPU-lane tier where
+    the plan knows its size) and the soft RLIMIT_MEMLOCK is lower than it: the limit (GiB, or KiB as `ulimit -l`
+    shows it when it is under 1 GiB), the planned tier, and the two ways to raise it - a systemd unit:
+    LimitMEMLOCK=infinity in its [Service] section, then systemctl daemon-reload and restart the service; a login
+    shell: a "<user> - memlock unlimited" line in /etc/security/limits.conf, then log out and in.  No tier planned,
+    an unknown limit, or a limit at or above the tier: nothing is said."""
+    if planned_gib is None:
+        return
+    soft = memlock_soft_gib()
+    if soft is None or soft >= planned_gib:
+        return
+    limit = f"{soft:.3g} GiB" if soft >= 1 else f"{int(soft * 2**20)} KiB"
+    warn(f"this PC's memory-lock limit (`ulimit -l`) is {limit}, under the {int(planned_gib)} GB pinned RAM tier "
+         f"this plan sets: the engine pins at most about {limit} of it and reads the rest from the SSD, silently "
+         "(fewer experts close, slow answers). Raise it: systemd - LimitMEMLOCK=infinity in the unit's [Service] "
+         "section, then systemctl daemon-reload and restart the service; a login shell - a "
+         '"<user> - memlock unlimited" line in /etc/security/limits.conf, then log out and in')
+
+
 def qfn_cpu_info() -> dict:
     """The PC's CPU as qfn_fit's plan reads it: {"sockets": the packages, "cores": the physical cores across them} -
     /sys on Linux (one socket, or a PC without /sys: the TOPOLOGY keys and --pool-workers stay unwritten, the engine
@@ -8050,6 +8085,8 @@ def set_up_qfn(a, prev: dict) -> Path | None:
         ok(f"layout: {lay['said']}" + (" - the live 4x Tesla T4 server's own split"
                                        if lay["measured"] else " (not measured on these cards yet)"))
         ok(f"the cards hold the most-used experts of their layers, {qfn_ram_said(lay)}")
+    memlock_tier_warn(lay["resident_budget_gib"])        # (P3: a soft RLIMIT_MEMLOCK under the planned tier: one
+                                                         #  warning with the fix - nothing is pinned differently)
     # v1.2.1-B: between the true minimum and the measured layout the setup scales the layout down (the plan
     # already came scaled: drafting off, a smaller --kv-resident, a context that fits), says plainly what it
     # turned off and why the decode will be slow, and asks for a loud confirmation (--yes skips the question;
@@ -9506,6 +9543,8 @@ def main() -> int:
             quant = getattr(a, "qfn_quant", None) or QFN_DEFAULT_QUANT
             lay = QF.plan(pc["gpus"], mem_gb()[0], quant)
             say(qfn_check_line(quant, lay))
+            memlock_tier_warn(lay["resident_budget_gib"])   # (P3: --check says the same thing the setup's fit step
+                                                            #  does: limit, tier, fix - and changes nothing)
         if fam == "glm" and a.backend != "metal":
             for line in glm_fit_lines(pc["gpus"]):
                 say(line)

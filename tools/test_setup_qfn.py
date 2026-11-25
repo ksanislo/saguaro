@@ -5,7 +5,9 @@ question (offered on AMD and on NVIDIA, refused on Windows and on Mac), v1.2.1-B
 the true minimum; between it and the measured layout the setup scales the layout down - drafting off, --kv-resident
 4096, a 32K context - warns what it turned off and why and confirms, --yes skipping the question and --check only
 reporting), Pascal (MIN_CC 61 - a Tesla P40 with a CUDA 12.x toolkit, and only CUDA 13 installed says so plainly),
-the RAM tier it gets, the config it writes - AMD's as measured, NVIDIA's mirroring the live 4x Tesla T4 configs,
+the RAM tier it gets, the memlock soft limit beside a planned RAM tier (P3: one warning with the fix; unlimited,
+unknown and at-or-over-the-tier say nothing), the config it writes - AMD's as measured, NVIDIA's mirroring the live
+4x Tesla T4 configs,
 the vision entry, the drafting choice and the answers-at-once value - the cards it picks, the report's QFN lines, the
 --import-model entries and the Models page's entries.  No GPU, no network.
 
@@ -1166,6 +1168,73 @@ class CheckLine(unittest.TestCase):
         self.assertIn("175 GiB", line)                                       # (the quant's numbers, said)
         self.assertIn("--kv-resident 4096 instead of 32768", line)
         self.assertNotIn("does not fit", line)
+
+
+class Memlock(unittest.TestCase):
+    """P3: the soft RLIMIT_MEMLOCK beside a planned RAM tier (the field case: 2x Tesla T4, `ulimit -l` 8 GiB, the
+    71 GiB tier pinned 8 and said nothing).  One warning - the limit, the planned tier, and the fix - only when the
+    limit is a number under the tier; unlimited, unknown, at/over the tier, or no tier planned: nothing is said."""
+
+    def warned(self, soft, planned):
+        said = []
+        with patch.object(maya, "memlock_soft_gib", lambda: soft), \
+                patch.object(maya, "warn", side_effect=lambda *x: said.append(" ".join(map(str, x)))):
+            maya.memlock_tier_warn(planned)
+        return "\n".join(said)
+
+    def test_a_64_kib_limit_under_a_71_gib_tier_says_so(self):
+        out = self.warned(64 * 1024 / 2**30, 71)                      # (the defaults'-era 64 KiB: named in KiB,
+        self.assertIn("64 KiB", out)                                  #  as `ulimit -l` shows it)
+        self.assertIn("71 GB", out)
+
+    def test_an_8_gib_limit_under_a_71_gib_tier_says_so(self):        # (the field case)
+        out = self.warned(8.0, 71)
+        self.assertIn("8 GiB", out)
+        self.assertIn("71 GB", out)
+
+    def test_unlimited_and_unknown_say_nothing(self):
+        self.assertEqual(self.warned(float("inf"), 71), "")           # (unlimited: fine)
+        self.assertEqual(self.warned(None, 71), "")                   # (unknown: no warning)
+
+    def test_a_limit_at_or_over_the_tier_says_nothing(self):
+        self.assertEqual(self.warned(71.0, 71), "")                   # (exactly the tier: enough to pin it)
+        self.assertEqual(self.warned(80.0, 71), "")
+        self.assertEqual(self.warned(8.0, None), "")                  # (no tier planned: nothing to compare)
+
+    def test_the_wording_once(self):
+        out = self.warned(8.0, 71)
+        self.assertIn("memory-lock limit (`ulimit -l`)", out)         # (the limit, named as the shell shows it)
+        self.assertIn("pinned RAM tier", out)                         # (what is planned)
+        self.assertIn("LimitMEMLOCK=infinity", out)                   # (systemd: the unit line...)
+        self.assertIn("systemctl daemon-reload", out)                 # (... and the reload / restart)
+        self.assertIn('"<user> - memlock unlimited"', out)            # (login shells: the limits.conf line...)
+        self.assertIn("/etc/security/limits.conf, then log out and in", out)   # (... and logging back in)
+
+    def test_the_reader_reads_the_limit_and_maps_unlimited_to_inf(self):
+        """The unpatched reader on Linux: the soft limit in GiB, unlimited as inf (non-Linux: None - skipped)."""
+        if not sys.platform.startswith("linux"):
+            self.skipTest("the reader is Linux-only: non-Linux skips")
+        import resource
+        soft, _ = resource.getrlimit(resource.RLIMIT_MEMLOCK)
+        want = float("inf") if soft == resource.RLIM_INFINITY else soft / 2**30
+        self.assertEqual(maya.memlock_soft_gib(), want)
+
+    def test_the_setup_fit_step_and_check_call_it(self):
+        """set_up_qfn's fit step (step 2, where the plan is made) makes the call: the flow with an 8 GiB limit
+        prints the line, unlimited prints nothing; and main's --check branch carries the same call beside its
+        qfn_check_line."""
+        import inspect
+        with tempfile.TemporaryDirectory() as t, patch.object(maya, "memlock_soft_gib", lambda: 8.0):
+            out = io.StringIO()
+            SetupFlow().setup(Path(t), _out=out)
+        self.assertIn("memory-lock limit (`ulimit -l`) is 8 GiB", out.getvalue())
+        with tempfile.TemporaryDirectory() as t, patch.object(maya, "memlock_soft_gib",
+                                                              lambda: float("inf")):
+            out2 = io.StringIO()
+            SetupFlow().setup(Path(t), _out=out2)
+        self.assertNotIn("memory-lock", out2.getvalue())
+        self.assertIn('memlock_tier_warn(lay["resident_budget_gib"])', inspect.getsource(maya.set_up_qfn))
+        self.assertIn('memlock_tier_warn(lay["resident_budget_gib"])', inspect.getsource(maya.main))
 
 
 class Windows(unittest.TestCase):
