@@ -3152,6 +3152,15 @@ class Service:
                 print(f"[saguaro] could not save the live Turbo setting: {e}", flush=True)
         return dict(self.turbo_default) if self.turbo_default else None
 
+    def turbo_skip_supported(self) -> bool:
+        """PLAN-p5: whether this engine applies the skip half of the live Turbo.  QFN's applies drop only (its
+        request line takes turbo_skip= and says the engine leaves it off), and an engine that gains it says so
+        itself (INFO turbo_skip=1, kept in the driver's facts) - until then the page hides the Skip choice.
+        Every other engine takes skip: the default is true."""
+        if getattr(self, "engine_kind", None) != "qfn":
+            return True
+        return str((getattr(self.engine, "info", None) or {}).get("turbo_skip") or "") == "1"
+
     def with_shared(self, req: dict, api: str) -> dict:
         """The request with the shared thinking level and max tokens filled in where it has none of its own."""
         s = self.shared
@@ -7413,6 +7422,8 @@ def make_handler(svc: Service):
                 # what requests without their own `turbo` run with - changes apply at once, no config rewrite
                 if self._authorized():
                     self._json(200, {"turbo": dict(svc.turbo_default) if svc.turbo_default else None,
+                                     "turbo_skip": svc.turbo_skip_supported(),   # (PLAN-p5: false only where the
+                                     # engine leaves skip off - the page hides the Skip control on that)
                                      **({"supported": False} if getattr(svc, "engine_kind", None) in NO_LIVE_TURBO
                                         else {})})
             elif path == "/api/models":

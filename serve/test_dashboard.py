@@ -1273,6 +1273,60 @@ console.log(JSON.stringify({unloaded, back: {tokens: st.S.ctx.tokens, approx: st
         self.assertTrue(got["back"]["asked"])                       # (back on the card: the real count, once)
         self.assertEqual(got["back"]["tokens"], 1234)
         self.assertFalse(got["back"]["approx"])
+    # every string a rendered tree carries (a vnode's text sits in its props; functions and refs are passed over)
+    WALK = """
+const strs = (v, out = []) => {
+  if (typeof v === "string") out.push(v);
+  else if (Array.isArray(v)) v.forEach((x) => strs(x, out));
+  else if (v && typeof v === "object") {
+    if ("type" in v && "props" in v) strs(v.props, out);
+    else for (const k in v) strs(v[k], out);
+  }
+  return out;
+};"""
+
+    def test_the_ram_skip_carries_its_warning_under_the_row_only_for_ram(self):
+        # Settings > Turbo, live: the rows name the options plainly, and the RAM warning (callout--warn, the
+        # class the page already has for warnings) shows under the Skip row only while RAM is chosen
+        got = self.node(self.WALK + """
+const tb = await import(web + "/turbo.js");
+const at = () => strs(tb.TurboLive());
+st.S.turboLive = {drop: 1, skip: "off"}; const off = at();
+st.S.turboLive = {drop: 1, skip: "ssd"}; const ssd = at();
+st.S.turboLive = {drop: 1, skip: "ram"}; const ram = at();
+console.log(JSON.stringify({off, ssd, ram}));""")
+        warn = "can break answers: only where almost everything is on the card"
+        for name in ("off", "ssd", "ram"):
+            tree = got[name]
+            for wanted in ("Drop experts", "fewer of the 10 routed experts a token, the weakest dropped",
+                           "Skip slow experts", "an expert that would be read from the SSD is left out",
+                           "an expert that is not on the card is left out"):
+                self.assertIn(wanted, tree, f"{name}: {wanted}")
+            self.assertEqual(any("callout--warn" in s for s in tree), name == "ram", name)
+            self.assertEqual(warn in tree, name == "ram", name)
+
+    def test_the_skip_control_hides_where_the_engine_leaves_it_off(self):
+        # PLAN-p5: the server's /api/turbo/options says turbo_skip false (a QFN whose engine applies drop only);
+        # loadTurboLive keeps that in S.turboSkip, and the Skip control disappears - the Settings row and the
+        # chat menu's Skip items - while Drop experts, the toggle and the warning stay as they were
+        got = self.node(self.WALK + """
+const tb = await import(web + "/turbo.js"), cv = await import(web + "/chat-view.js");
+st.S.turboLive = {drop: 1, skip: "ram"};
+st.S.current = {turbo: {drop: 1, skip: "ram"}};
+const menu = () => strs(cv.TurboMenu({open: true, close: () => {}, anchor: {}}));
+const shown = {row: strs(tb.TurboLive()), menu: menu()};
+st.S.turboSkip = false;
+const hidden = {row: strs(tb.TurboLive()), menu: menu()};
+console.log(JSON.stringify({shown, hidden}));""")
+        warn = "can break answers: only where almost everything is on the card"
+        for half in ("row", "menu"):
+            self.assertIn("Skip slow experts", got["shown"][half], half)
+            self.assertIn(warn, got["shown"][half], half)
+            self.assertNotIn("Skip slow experts", got["hidden"][half], half)
+            self.assertNotIn(warn, got["hidden"][half], half)
+            self.assertIn("Drop experts", got["hidden"][half], half)   # (the rest of Turbo stays: nothing is disabled)
+        self.assertIn("skip: SSD", got["shown"]["menu"])               # (the menu's own items go with the row)
+        self.assertNotIn("skip: SSD", got["hidden"]["menu"])
 
 
 if __name__ == "__main__":

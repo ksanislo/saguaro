@@ -9,7 +9,7 @@ import {html} from "./preact.js";
 import {api, esc, store} from "./lib.js";
 import {S, THINKING, P, confirmDialog, emit, loadPrefs, prefsKey, toast} from "./state.js";
 import {loadTime} from "./server.js";
-import {TURBO_DROPS, TURBO_SKIPS, turboEnter, turboLeave} from "./turbo-core.js";
+import {TURBO_DROPS, TURBO_DROP_HINT, TURBO_SKIPS, turboEnter, turboLeave, turboSkipWarn} from "./turbo-core.js";
 import {Seg} from "./ui.js";
 
 S.turbo = {on: false, engine: false, plan: {}, env: {}, restarts: false, busy: false};
@@ -134,12 +134,14 @@ export function TurboButton() {
 // touch no config: unlike Maya's Turbo above there is no restart, and this stays visible under llama-swap.
 
 S.turboLive = undefined;   // until loaded: null = exact (off); {"drop": N, "skip": "off"|"ssd"|"ram"}; still undefined = an older server has none
+S.turboSkip = true;        // PLAN-p5: does this engine apply skip at all (only a QFN whose engine does not report it says false)
 
 export async function loadTurboLive() {
   try {
     const t = await api("api/turbo/options");
+    S.turboSkip = t.turbo_skip !== false;   // (an older server carries no field: shown, the default)
     S.turboLive = t.supported === false ? undefined : t.turbo || null;   // (Inkling 2: none, as an older server)
-  } catch (e) { S.turboLive = undefined; }   // (an older server: no live Turbo)
+  } catch (e) { S.turboLive = undefined; S.turboSkip = true; }   // (an older server: no live Turbo)
   emit();
 }
 
@@ -171,11 +173,12 @@ export function TurboLive() {
     <p class="set-intro">Lossy speed for every request this model answers that does not set its own - the apps, the
       agents and new chats. A chat's own Turbo (the bolt in its message box) wins over this. It applies to the next
       request - nothing restarts. Both off: requests run exact.</p>
-    <div class="set-row"><span class="set-row__text"><span class="set-row__label">Drop experts</span><span class="set-row__sub">per token, the lowest router weights of the 10; the rest carry their share</span></span>
+    <div class="set-row"><span class="set-row__text"><span class="set-row__label">Drop experts</span><span class="set-row__sub">${TURBO_DROP_HINT}</span></span>
       <${Seg} label="Experts dropped" value=${String(t.drop || 0)} onChange=${(v) => set({drop: +v})}
         options=${[{id: "0", label: "off", title: "every expert the router picks is used"},
-                   ...TURBO_DROPS.map((d) => ({id: String(d), label: `${d}`, title: `run top-10 minus ${d}: the ${d} weakest experts of every token dropped, the kept ones renormalised`}))]}/></div>
-    <div class="set-row"><span class="set-row__text"><span class="set-row__label">Skip experts</span><span class="set-row__sub">an expert the engine would fetch the slow way is dropped instead</span></span>
-      <${Seg} label="Skip tier" value=${t.skip || "off"} onChange=${(v) => set({skip: v})}
-        options=${TURBO_SKIPS.map((s) => ({id: s.id, label: s.name, title: s.hint}))}/></div>`;
+                   ...TURBO_DROPS.map((d) => ({id: String(d), label: `${d}`, title: TURBO_DROP_HINT}))]}/></div>
+    ${S.turboSkip === false ? null : html`<div class="set-row"><span class="set-row__text"><span class="set-row__label">Skip slow experts</span><span class="set-row__sub">an expert the engine would fetch the slow way is left out instead</span></span>
+      <${Seg} label="Skip slow experts" value=${t.skip || "off"} onChange=${(v) => set({skip: v})}
+        options=${TURBO_SKIPS.map((s) => ({id: s.id, label: s.name, title: s.hint}))}/></div>
+      ${t.skip === "ram" ? html`<div class="callout callout--warn"><span>${turboSkipWarn("ram")}</span></div>` : null}`}`;
 }
