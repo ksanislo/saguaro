@@ -630,14 +630,17 @@ The things that keep an intake routine (docs/UPSTREAM.md §2) and what our setup
 
 ## Dropped from upstream on purpose (the Maya Qwen path)
 
-**The Qwen path inside saguaro-glm (the "qwen4exp" engine) - kept in our tree, upstream's changes to it are dropped.**
-- What: upstream's Qwen3.8-Flash-Next support lives in the GLM binary as its own engine: the `qwen4exp` driver in
-  `src/program/generate.cpp` (~4.5K of its 10.7K lines) plus the Qwen-only files
+**The Qwen path inside saguaro-glm (the "qwen4exp" engine) - gone from our tree (T8a/T8b); upstream's changes to it
+are dropped at intake.**
+- What: upstream's Qwen3.8-Flash-Next support lived in the GLM binary as its own engine: the `qwen4exp` driver in
+  `src/program/generate.cpp` (~4.5K of its then-10.7K lines) plus the Qwen-only files
   `src/core/{session,mtp,verify,layer,expert_source,native_dense,native_head,remote_experts}.cpp` and
   `src/prefill/prefill.cpp` - about 16K lines, which is Strata v0.1.27, the ancestor of engines/qfn. We serve Qwen on
-  saguaro-qfn instead, so at every intake the upstream hunks in these paths are dropped by path, and our copy stays
-  where it was: the v1.1.50 Qwen path (upstream v1.1.51-v1.1.76 Qwen work was never taken in).
-  ref/reports/REPORT-qwen-engines.md:23, 113-119.
+  saguaro-qfn instead, and the path was removed on 2026-11-24, before this branch's base: the driver out of
+  generate.cpp (37de16bb5 - a non-GLM pack now ends "this model runs on saguaro-qfn"; the file is 5,752 lines), the
+  Qwen-only files, kernels and their tests out of the tree and CMake (730e785d0), and the Python side - family
+  "qwen", the "qwen" engine kind, its web fields and tests - out of setup, tools, server and web (T8a, merged
+  5bf926032). CHANGELOG.md:43-57. ref/reports/REPORT-qwen-engines.md:23, 113-119.
 - Why: on the same CYBER-FROST file and the same card (RX 9070 XT) saguaro-qfn answers 1.2x faster (34.4 vs 28.3
   tok/s solo) and reads 1.4-2.0x faster (16K: 733-1,007 vs 422-428 tok/s; ~55K: 1,058 vs 527 tok/s, first token 50 s
   vs 106 s); the Maya path cannot load unsloth's UD-Q4_K_XL at all (no Q8_0 GPU dequantizer for its embedding) and dies
@@ -645,17 +648,19 @@ The things that keep an intake routine (docs/UPSTREAM.md §2) and what our setup
   ref/reports/REPORT-qwen-engines.md:15-21. Exactness: neither is exact against the other - the two engines disagree
   KL 0.025 / top-1 95.55 % on the same file (rounding, not a defect), and saguaro-qfn on AMD is KL 0.006 from saguaro-qfn
   on the T4s. ref/reports/REPORT-qwen-engines.md:78-82.
-- Where: `src/program/generate.cpp` (the qwen4exp driver), `src/core/session.cpp`, `src/core/mtp.cpp`,
-  `src/core/verify.cpp`, `src/core/layer.cpp`, `src/core/expert_source.cpp`, `src/core/native_dense.cpp`,
-  `src/core/native_head.cpp`, `src/core/remote_experts.cpp`, `src/prefill/prefill.cpp`.
-  Switch and default: **none** - this is not switch-gated. Nothing is deleted yet; the drop happens at intake
-  (path exclusions in `tools/saguaro/rename_internal_maya.py`) and `generate.cpp` is the one file shared with GLM, whose
-  runner upstream already moved out. ref/reports/REPORT-qwen-engines.md:118.
-- Removal (option 1 of that report, recommended to Ken, **his call**) is not done: setup (`saguaro.py`,
-  `tools/maya_quants.py`, the family "qwen"), the server's "qwen" engine kind, ~2-4 h of engine deletion plus a GLM
-  smoke gate, and CYBER-FROST moved onto saguaro-qfn (which needs `engines/qfn/tools/iq_pack.py` and the NextN-block
-  drafter - both already built on branch qfn/in-file-nextn d025b3d9f, not merged).
-  ref/reports/REPORT-qwen-engines.md:143-171.
+- Where: none of those files exist at the top level any more, except the two the GLM build still uses:
+  `src/core/expert_source.cpp` and `src/core/remote_experts.cpp` (730e785d0 keeps them: glm_fast_state.hpp and the HIP
+  GLM helper include them); mrope (rope.cu), router_sigmoid (glm_model.cu), the qsa.hpp / kv_stream.hpp headers and
+  strata-plan stay for the same reason. Where the driver was, `src/program/generate.cpp:5747-5751`, is one exit line.
+  The removed path lives on only inside `engines/qfn/src/` (its own copy of core/ and prefill/).
+  Switch and default: **none** - never switch-gated; the drop is by deletion.
+- Intake: upstream hunks touching the removed paths are dropped, not re-added - the rule is written at
+  CONTRIBUTING.md:29-33 (added with T8a, d8e8faf84); `tools/saguaro/rename_internal_maya.py` carries no per-file
+  exclusion for them (it walks the tree, and the files are simply not there to walk). What is left of the path is the
+  one-way read of old configs: `maya_quants.family_of` reads every old "qwen" config as "qfn" (`saguaro.py:2024`) and
+  `migrate_cyber_frost` rewrites a CYBER-FROST old-engine config into the QFN one (`saguaro.py:8951`, `:706`); the
+  `QWEN_IDS` aliases, the cyber-frost quant key and `QWEN_EFFORT` stay because the QFN template uses them.
+  ref/reports/REPORT-qwen-engines.md:143-171 - the removal plan "if Ken picks option 1" - is what T8a/T8b executed.
 
 **Skipped upstream changes are listed where they belong**: GLM "same answers on every start" (not ported, needs four
 earlier upstream mechanisms and costs reads; see the GLM section) and GLM tensor parallel (opt-in upstream, needs every

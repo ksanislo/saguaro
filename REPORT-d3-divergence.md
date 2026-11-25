@@ -79,10 +79,11 @@ beyond read-only greps. What was verified instead:
 2. **"Whether upstream could take it" is in docs/UPSTREAM.md §3 but not in the plan's entry format**, so no entry has
    that field. A few entries imply it (e.g. upstream's drafting gate being unstable on Turing, PR #1204's rows being
    slower than ours). Add a per-entry "upstream: yes / no / already asked" line, or leave §3's wording narrower?
-3. **The Maya Qwen path is dropped from intakes but not from the tree.** The register records the current state
-   (upstream hunks dropped by path, our copy still v1.1.50's, removal recommended and Ken's call). Should it instead
-   read as a decision - i.e. did Ken pick option 1? - and should the Dropped section name the branch that would do the
-   deletion (qfn/in-file-nextn d025b3d9f, not merged)?
+3. **The Maya Qwen path: no open question - the Dropped section was stale and is corrected.** This branch first wrote
+   the path as "kept in our tree, removal not done", but T8a/T8b (merged 5bf926032, 06e9f21ae - ancestors of the base
+   e6d840db2) had already executed option 1 of REPORT-qwen-engines.md: the driver, the Qwen-only files and the Python
+   side are out of the tree and CHANGELOG.md:43 records the removal. The register now states the post-removal state and
+   the intake rule (CONTRIBUTING.md:29-33).
 4. **"Live" defaults are quoted from the notes, not from a file.** The live configs are outside the repo
    (`/opt/llm/saguaro/configs/...`), so every "live since ..." line comes from `ref/live-stack-notes.md` or
    `ref/ROLLBACK.md`. If a config and those notes disagree, the config wins and the register is wrong. Anything to
