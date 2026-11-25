@@ -15,39 +15,80 @@ export async function loadHealth() {
   if (document.hidden) { healthWait = true; return; }
   if (unloaded()) return;                      // (behind llama-swap /health would load the model: poll re-arms it)
   try {
-    const h = await (await fetch("health")).json();
-    S.health = h;
-    healthSeen = true;
-    // the server's recommended settings for this model (its run config) replace the built-in defaults, and are what the
-    // chat uses until its user picks settings of their own
-    const d = h.defaults || {};
-    setFamily(h.model);                            // (its thinking levels: MiniMax's are not GLM's)
-    if (THINKING.includes(d.reasoning_effort)) DEFAULTS.thinking = d.reasoning_effort;   // (the run config's level)
-    if (d.temperature !== undefined) DEFAULTS.temperature = d.temperature;
-    if (d.top_p !== undefined) DEFAULTS.top_p = d.top_p;
-    if (d.temperature !== undefined || d.top_k !== undefined) DEFAULTS.top_k = d.top_k !== undefined ? d.top_k : 0;
-    if (d.temperature !== undefined || d.min_p !== undefined) DEFAULTS.min_p = d.min_p !== undefined ? d.min_p : 0;
-    const was = P.thinking;                        // (the level the empty chat on screen took from the defaults)
-    const switched = newModelCheck();              // another model than last time: its own standard parameters
-    loadPrefs();                                   // each model keeps its own (DeepSeek's, MiniMax's are not GLM's)
-    // ... made before the model was known: it starts at this model's default, as a change in Settings moves it
-    if (S.current && !S.current.messages.length && (S.current.thinking === was || switched)) {
-      S.current.thinking = P.thinking;
-      S.current.thinkingFor = modelId();
-    }
-    if (switched) toast("info", `${modelLabel(h, {compact: true})}: its own settings`, "A new model starts at its standard " +
-                        "parameters and thinking level; change them in Settings › Chat defaults.", 6000);
-    emit();
-    for (const f of healthHooks.slice()) f();
-    if (h.status === "reloading") watchReload();
-    if (h.status === "updating" && !S.updateWatch) loadUpdate().then((u) => u && u.state && watchUpdate(u.state.to));
+    return await applyHealth(await (await fetch("health")).json());
   } catch (e) {
     if (document.hidden) healthWait = true;                      // (a hidden tab stops the retries; seen again, it resumes)
     else setTimeout(loadHealth, 2000);
   }
 }
+// what a read /health does to the page: the model and its facts, the recommended settings, the reload/update
+// watchers.  (watchStarting hands the day's first 200 straight in, so a page load still asks /health exactly once)
+export async function applyHealth(h) {
+  S.health = h;
+  healthSeen = true;
+  // the server's recommended settings for this model (its run config) replace the built-in defaults, and are what the
+  // chat uses until its user picks settings of their own
+  const d = h.defaults || {};
+  setFamily(h.model);                            // (its thinking levels: MiniMax's are not GLM's)
+  if (THINKING.includes(d.reasoning_effort)) DEFAULTS.thinking = d.reasoning_effort;   // (the run config's level)
+  if (d.temperature !== undefined) DEFAULTS.temperature = d.temperature;
+  if (d.top_p !== undefined) DEFAULTS.top_p = d.top_p;
+  if (d.temperature !== undefined || d.top_k !== undefined) DEFAULTS.top_k = d.top_k !== undefined ? d.top_k : 0;
+  if (d.temperature !== undefined || d.min_p !== undefined) DEFAULTS.min_p = d.min_p !== undefined ? d.min_p : 0;
+  const was = P.thinking;                        // (the level the empty chat on screen took from the defaults)
+  const switched = newModelCheck();              // another model than last time: its own standard parameters
+  loadPrefs();                                   // each model keeps its own (DeepSeek's, MiniMax's are not GLM's)
+  // ... made before the model was known: it starts at this model's default, as a change in Settings moves it
+  if (S.current && !S.current.messages.length && (S.current.thinking === was || switched)) {
+    S.current.thinking = P.thinking;
+    S.current.thinkingFor = modelId();
+  }
+  if (switched) toast("info", `${modelLabel(h, {compact: true})}: its own settings`, "A new model starts at its standard " +
+                      "parameters and thinking level; change them in Settings › Chat defaults.", 6000);
+  emit();
+  for (const f of healthHooks.slice()) f();
+  if (h.status === "reloading") watchReload();
+  if (h.status === "updating" && !S.updateWatch) loadUpdate().then((u) => u && u.state && watchUpdate(u.state.to));
+}
 let healthWait = false;                       // (a health retry stopped by the tab being hidden)
 let healthSeen = false;                       // (/health has answered once: until then poll has no real S.health to compare)
+
+// ------------------------------------------------------------------ starting: the page up before the model loads (#20)
+// The server answers on the port from the first second and its /health says {"status": "loading"} - "failed" with
+// the error when the load died - until the real service takes the port over.  Until then web/starting.js' screen
+// stands on the page and asks /health once a second; the first 200 boots the app, with that health (one /health a
+// page load, as ever).  Today's rules hold on the asking: a hidden tab asks nothing (seen again, it picks the
+// watch up), and behind llama-swap only its /running is asked while the model is off the card - /health would load it.
+let starting = false, startTimer = null, startWait = false, startTick = null;
+
+export async function startingHealth() {
+  // null: keep waiting exactly as shown (nothing answering, or an answer that is not the starting service);
+  // {ready: h}: the real service answers 200 and the app can boot; else the starting body, loading or failed.
+  try {
+    const r = await fetch("health", {cache: "no-store"});
+    if (r.ok) { try { return {ready: await r.json()}; } catch (e) { return null; } }
+    const h = await r.json().catch(() => null);
+    return h && (h.status === "loading" || h.status === "failed") ? h : null;
+  } catch (e) { return null; }
+}
+
+export function watchStarting(onState, onReady) {
+  starting = true;
+  const step = (ms) => { clearTimeout(startTimer); startTimer = setTimeout(tick, ms); };
+  async function tick() {
+    if (!starting) return;
+    if (document.hidden) { startWait = true; return; }           // (asks nothing in the dark)
+    const swap = swapAt();                                       // (the gate first: /health there would load the model)
+    if (swap && (await swapRunning(swap, null)) === false) { step(5000); return; }
+    const h = await startingHealth();
+    if (!starting) return;
+    if (h && h.ready !== undefined) { starting = false; clearTimeout(startTimer); onReady(h.ready); return; }
+    if (h) onState(h);
+    step(1000);
+  }
+  startTick = tick;
+  tick();
+}
 
 // ------------------------------------------------------------------ the live metrics (the Monitor, the status, the meter)
 let fails = 0, keyWarned = false, mcpTick = 0, timer = null, polling = false;
@@ -132,6 +173,7 @@ export async function poll() {
 }
 document.addEventListener("visibilitychange", async () => {
   if (document.hidden) { clearTimeout(timer); return; }           // (hidden: every poll stops, in every setup)
+  if (starting) { startWait = false; if (startTick) startTick(); return; }   // (the starting watch resumes; nothing else runs yet)
   const swap = swapAt();                                          // (the gate first: /health or /metrics would load the model)
   if (swap && (S.health.supervisor === undefined || S.health.supervisor === "llama-swap")) swapReady = await swapRunning(swap, swapReady);
   if (healthWait) { healthWait = false; loadHealth(); }           // (seen again: it picks up at once, and makes up

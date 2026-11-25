@@ -4,7 +4,7 @@
 import {html, render, useEffect, useRef, useState} from "./preact.js";
 import {isPhone} from "./lib.js";
 import {S, applyScheme, applyTheme, closeDialog, emit, useStore} from "./state.js";
-import {loadHealth, loadMcp, loadUpdate, poll, whenHealth} from "./server.js";
+import {applyHealth, loadMcp, loadUpdate, poll, watchStarting, whenHealth} from "./server.js";
 import {cancelEdit, chatView, focusInput, loadChats, newChat, newChatObj, openChat, resumePending, send, stopAnswer,
         updateCtxMeter} from "./chats.js";
 import {DialogHost, Toasts, trapTab} from "./ui.js";
@@ -14,6 +14,7 @@ import {loadTurbo} from "./turbo.js";
 import {SettingsDialog} from "./settings.js";
 import {MonitorPage} from "./monitor.js";
 import {ModelsPage} from "./models.js";
+import {StartingPage} from "./starting.js";
 
 applyTheme();
 applyScheme();
@@ -109,18 +110,26 @@ addEventListener("hashchange", route);
 const startQuestion = new URLSearchParams(location.search).get("q");   // /?q=... starts a chat (a shortcut)
 if (startQuestion) history.replaceState(null, "", location.pathname + location.hash);
 S.current = newChatObj();
-render(html`<${App}/>`, document.getElementById("app"));
-route();
-whenHealth(() => updateCtxMeter());
-loadChats().then(() => { if (S.view === "chat" && !S.settings) focusInput(); return loadHealth(); }).then(loadMcp).then(() => {
-  loadTurbo();                                     // (the Turbo button: on or off)
-  loadUpdate();                                    // (Settings' dot when a new version is out)
-  resumePending();
-  if (startQuestion) {
-    if (S.current.messages.length) openChat(newChatObj());
-    S.draft = startQuestion;
-    send();
-  }
-});
-poll();
+// the page answers on the port before the model does (issue #20): while /health says loading or failed this screen
+// stands on the page, and the first 200 boots the app with that health (one /health a page load, as ever)
+const root = document.getElementById("app");
+render(html`<${StartingPage}/>`, root);
+watchStarting((h) => { S.starting = h; emit(); }, (h) => { S.starting = null; boot(h); });
 window.maya = {S, chatView};   // for a look from the browser's console
+
+function boot(h) {
+  render(html`<${App}/>`, root);
+  route();
+  whenHealth(() => updateCtxMeter());
+  loadChats().then(() => { if (S.view === "chat" && !S.settings) focusInput(); return applyHealth(h); }).then(loadMcp).then(() => {
+    loadTurbo();                                     // (the Turbo button: on or off)
+    loadUpdate();                                    // (Settings' dot when a new version is out)
+    resumePending();
+    if (startQuestion) {
+      if (S.current.messages.length) openChat(newChatObj());
+      S.draft = startQuestion;
+      send();
+    }
+  });
+  poll();
+}
