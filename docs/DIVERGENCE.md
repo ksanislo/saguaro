@@ -329,7 +329,7 @@ The MiniMax-M3.1-Flash engine (saguaro-mm3), our proof-of-concept profile on May
 ## HY4
 
 The Hy4-Flash engine (saguaro-hy4). Installed in the live stack since 11-23 with no profile of its own
-(ref/live-stack-notes.md:29), so almost nothing here is measured.
+(ref/live-stack-notes.md:30), so almost nothing here is measured.
 
 1. **Tensor parallel across a group of cards.** Where: `src/hy4/hy4_tp.cpp` / `hy4_tp.hpp` (the host's side,
    `Options::tp`), the planning and the sums in `Model::Impl::plan()` in `src/hy4/hy4_model.cu`.
