@@ -35,9 +35,9 @@ quant at 2.9 bits, 211 GB, and its two Engram tables from DeepSeek's base repo, 
 its vision tower runs in the engine - a GGUF's comes from DeepSeek's own checkpoint, 0.97 GB, shown and asked first;
 no tuning step - it balances its own split):
 
-  1. checks the PC: NVIDIA GPU(s) of compute capability 7.0+ (6.x, Pascal: not measured yet), driver, CUDA toolkit (nvcc),
-     the C++ compiler (g++; on Windows Visual Studio's Build Tools - 2019/2022 always, 2026 with CUDA 13.2+), CMake,
-     RAM, CPU; HIP checks AMD gfx1100/gfx1201/gfx1151 and ROCm 7 instead
+  1. checks the PC: NVIDIA GPU(s) of compute capability 7.0+ (6.x, Pascal: measured on users' P40 / P100), driver,
+     CUDA toolkit (nvcc), the C++ compiler (g++; on Windows Visual Studio's Build Tools - 2019/2022 always, 2026 with
+     CUDA 13.2+), CMake, RAM, CPU; HIP checks AMD gfx1100/gfx1201/gfx1151 and ROCm 7 instead
      (on Windows AMD's ROCm SDK wheels in .venv, offered when they are not there)
   2. asks: which GPUs (one, or several that split the layers), how much context, which model to download (GLM-5.3 ·
      Maya-S, Maya-S24, Maya-M, Maya-M-Derisked or Maya-L; or turboderp's EXL3 quant at 3.05 or 4.05 bits or the
@@ -115,7 +115,8 @@ VBUILD = ROOT / "build-vision"
 VEXE = VBUILD / "bin" / ("vision-glm.exe" if WIN else "vision-glm")   # the image encoder (llama.cpp's mtmd)
 VSTAMP = VBUILD / "MAYA-BUILD.json"
 MIN_CC = 60                                        # Pascal and newer (the GLM path; see arch_setting) ...
-VALIDATED_CC = 70                                  # ... Volta (V100) and newer measured, Pascal not measured yet (#212)
+VALIDATED_CC = 70                                  # ... Volta (V100) and newer measured here; Pascal measured on
+                                                   # users' P40 / P100 only (#212/#214, #479/#504, README table)
 MAX_GPUS = 16                                      # the layer split's parts at most (glm_model.hpp, kMaxParts)
 HIP_ARCHS = ("gfx1100", "gfx1201", "gfx1151")        # Saguaro also supports Strix Halo (unified memory)
 HIP_ARCHS_UNVALIDATED = ("gfx1030",)               # RDNA 2 (RX 6800 / 6900, Radeon PRO V620 / W6800): run on a Radeon
@@ -1574,7 +1575,7 @@ def choose_gpus(a, found, min_cc: int = MIN_CC, family: str = "") -> list:
     if not usable:
         fail("none of the GPUs can run this model",
              f"it needs an NVIDIA GPU of compute capability {min_cc / 10:.1f} or newer (" +
-              ("V100 and newer; Pascal - Tesla P40 / P100, GTX 10 - is not measured yet)" if min_cc < 80 else
+              ("V100 and newer; Pascal - Tesla P40 / P100, GTX 10 - measured on user cards)" if min_cc < 80 else
               "RTX 30 / A100 and newer)"))
     best = sorted(usable, key=lambda g: (-round(g["vram_gb"]), g["index"]))
     if len(best) == 1:
@@ -1719,7 +1720,7 @@ def check_pc(a, family: str = "glm", gguf: bool = False, ds4_quant: str = "exl3"
     say("  NVIDIA GPUs:")
     for g in found:
         say(f"    {gpu_label(g)} - " + ("can be used" if int(g["arch"]) >= max(min_cc, VALIDATED_CC) else
-                                        "can be used (Pascal: not measured yet)" if int(g["arch"]) >= min_cc else
+                                        "can be used (Pascal: measured on user cards)" if int(g["arch"]) >= min_cc else
                                        f"too old (this model needs compute capability {min_cc / 10:.1f} or newer)"))
     chosen = choose_gpus(a, found, min_cc, family)
     if family == "ik2":                                # (the cards picked: 8 GB or more each)
@@ -1745,8 +1746,9 @@ def check_pc(a, family: str = "glm", gguf: bool = False, ds4_quant: str = "exl3"
             "RAM and the SSD - give it a try (more VRAM is faster; tell us your speed)")
     if min(archs) < VALIDATED_CC:
         warn("Pascal (compute capability 6.x): the engine builds for it with its portable kernels "
-             "(the prompt attention on the F32 cores) and caches global loads in L1 there, but Saguaro has not been "
-             "measured on such a card yet - tell us how it goes in an issue")
+             "(the prompt attention on the F32 cores) and caches global loads in L1 there; it has been measured on "
+             "users' Tesla P40 / P100 cards (README speed table: #212/#214, #479/#504) - tell us how it goes "
+             "on yours in an issue")
     # (v1.2.1-B review finding 4: CMakeLists.txt's qfn_engine rule (1787-1808) takes engines/qfn's experimental
     #  pre-Turing path only when EVERY arch of the list is < 75 - a mixed list keeps _qfn_archs 75, so the build
     #  serves the newer cards and the pre-Turing one gets a binary with no kernel image for it.  The engine's C++
@@ -2219,7 +2221,8 @@ def cached_generator():
 def arch_setting(archs) -> str:
     """CMAKE_CUDA_ARCHITECTURES for these GPUs: the compute capabilities of the cards choose_gpus() took, by name -
     never "native", which also builds for every other card in the PC (a Quadro P400 display card beside V100s: sm_61,
-    which maya-mm3's kernels cannot be compiled for).  CMakeLists.txt takes sm_60 and newer (Pascal: not measured yet)."""
+    which maya-mm3's kernels cannot be compiled for).  CMakeLists.txt takes sm_60 and newer (Pascal: measured on
+    users' cards)."""
     return ";".join(str(x) for x in archs)
 
 
