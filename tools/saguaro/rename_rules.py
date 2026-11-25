@@ -5,7 +5,9 @@ The four rename tools read their patterns from here and hold no duplicated rules
   rename_env.py             the settings family (MAYA_X / STRATA_X -> SAGUARO_X, context proved)
   rename_internal_maya.py   the internal family (upstream v1.1.75's strata -> maya, kept as ours)
   rename_log_prefixes.py    the engine log prefixes ("strata part:" / "ds4:" -> "saguaro ...")
-  rename_upstream.py        ALL of them plus the name families below, as one command
+  rename_upstream.py        ALL of them plus the name families below, as one command - inside engines/qfn only
+                            the settings and prefix passes run (INTERNAL_SKIP_PATHS below): its own tree, its
+                            CMake project and its STRATA_ options stay, as the two old qfn-sweeping scripts have
 
 Name families (the hand renames the M1 intake needed, scratch/notes.md section B):
   NAMES_RULES      the program's and the launcher's names in text: maya.py / maya.sh -> saguaro.py / saguaro.sh,
@@ -149,9 +151,10 @@ LOG_LINE_RULES = [
     (re.compile(r"^(" + LOG_NAME + r")( (?:batch GPU stages|decode GPU stages|KV prefetch|DMA|DBG|Q2_0))", re.M),
      LOG_NEW + r"\2")]
 LOG_CPP_SUFFIXES = {".c", ".h", ".hpp", ".cpp", ".cc", ".cxx", ".cu", ".cuh"}
-# the whole-tree scope of the prefix rules: the engines' sources (rename_log_prefixes.py's default paths;
-# engines/qfn's are skipped here as everywhere else); tests' own banners are not engine logs and are not swept
-LOG_SRC_PATHS = ("src/", "tools/vision/")
+# the whole-tree scope of the prefix rules: the engines' sources, rename_log_prefixes.py's default paths -
+# engines/qfn/src and its vision encoder included (inside that tree the prefix and settings passes are all
+# rename_upstream.py runs); tests' own banners are not engine logs and are not swept
+LOG_SRC_PATHS = ("src/", "tools/vision/", "engines/qfn/src/", "engines/qfn/tools/vision/")
 
 
 # ---- the program's and the launcher's names (the M1 hand renames: b2e85aa52, ef27c2650, fe22cd559, a4a45bd71) ------

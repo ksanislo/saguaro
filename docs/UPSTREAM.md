@@ -19,11 +19,16 @@ branding). Every upstream release is taken in full. Intakes must stay routine: a
   "maya-ds4:", "ds4:" -> "saguaro ..."), the program, launcher and artifact names in text (maya.py ->
   saguaro.py, ./maya.sh -> ./saguaro.sh, START-MAYA.bat, maya-nightly*, the saguaro-* temp-dir prefixes,
   `[maya]` -> `[saguaro]`) and the brand words in user-visible docs ("restart Maya", "Maya checks ..." ->
-  Saguaro). The explicit exceptions stay: credits and upstream URLs, LICENSE texts, vendored dirs, history
-  files, engines/qfn's and the CMake targets' own names (maya, maya-ds4, maya-vision, maya_kernels, maya_mmq,
+  Saguaro). Inside engines/qfn (the QFN port of Strata), tools/qfn and the generated serve/qfn_engine.py the one
+  command runs the union of the two scripts that have always swept them - the settings and the engine-log-prefix
+  passes (a new `MAYA_FOO` setting in a qfn source, a new "strata part:" prefix in a qfn engine log, are caught
+  without being listed) - and nothing else there: the internal, name and brand families stop before that tree, so
+  qfn's sources, its `namespace strata`, its `include/strata` and its CMake project's own STRATA_ options and
+  program names deliberately stay. The explicit exceptions stay: credits and upstream URLs, LICENSE texts, vendored
+  dirs, history files, the CMake targets' own names (maya, maya-ds4, maya-vision, maya_kernels, maya_mmq,
   -DMAYA_* options), the maya-*.json config names, `maya.` browser keys, ds4/hy4 internal names and the
   Maya quant names (Maya-S/M/L/XS/S24). The three earlier scripts (rename_env.py, rename_internal_maya.py,
-  rename_log_prefixes.py) keep working; they read the same table.
+  rename_log_prefixes.py) keep working; they read the same table, the same skip list and the same exception list.
 - An intake uses it on a throwaway branch: check the release tag out -> `rename_upstream.py --paths` for the
   `git mv`s (maya.py, maya.sh, START-MAYA.bat, include/strata/) -> `rename_upstream.py` rewrites the tree ->
   `rename_upstream.py --check` says CHECK OK (it also reports what the exception list keeps, and --diff

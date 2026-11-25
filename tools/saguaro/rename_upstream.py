@@ -14,8 +14,14 @@ merged shows only REAL conflicts:
   logprefix   "strata part:" / "maya-ds4:" / "ds4:" -> "saguaro ..."  (the table of rename_log_prefixes.py)
   names       maya.py -> saguaro.py, maya.sh -> saguaro.sh, START-MAYA.bat, maya-nightly*, the saguaro-*
               temp-dir prefixes, [maya] -> [saguaro], "maya --speed-calibration" -> "saguaro.py ..."
-  brand       "restart Maya" / "Maya checks ..." -> Saguaro in user-visible docs; the credits, "Project Maya",
-              "Maya v1.1.x" and the Maya quant names (Maya-S/M/L/XS/S24) stay (289431642's rule, .md only)
+   brand       "restart Maya" / "Maya checks ..." -> Saguaro in user-visible docs; the credits, "Project Maya",
+               "Maya v1.1.x" and the Maya quant names (Maya-S/M/L/XS/S24) stay (289431642's rule, .md only)
+
+engines/qfn (our Strata/QFN engine), tools/qfn and the generated serve/qfn_engine.py get the settings and the
+engine-log-prefix passes - the union of what rename_env.py and rename_log_prefixes.py have always swept there;
+the internal, names and brand families stop before that tree (its sources and its CMake project keep strata /
+namespace strata / STRATA_X options, and its own program names).  So a new MAYA_FOO setting in a qfn source or
+a new "strata part:" prefix in a qfn engine log is caught by this one command, as it was by the two old ones.
 
 Idempotent: no rule's replacement is ever a rule's match, so a second run changes nothing.  Exception list
 (rename_rules.EXC_PATHS / EXC_TEXT): record texts quoting upstream commands, the maya-*.json config names, the
@@ -61,7 +67,7 @@ def collect(paths: list[Path]) -> dict:
                 rel = p.relative_to(ROOT).as_posix()
             except ValueError:
                 sys.exit(f"{p}: outside the worktree {ROOT}")
-            if T.skipped(rel) or rel.startswith(T.INTERNAL_SKIP_PATHS):   # QFN's tree: see the docstring
+            if T.skipped(rel):
                 continue
             fam = renv.family_of(p)
             if fam is None and p.suffix.lower() not in T.INT_TEXT_SUFFIXES:
@@ -76,8 +82,8 @@ def collect(paths: list[Path]) -> dict:
 def apply_names(text: str, rel: str, fam, explicit: bool) -> tuple[str, list]:
     """the new (M1 hand-rename) families plus the engine log prefixes for one file: (text, families changed)"""
     fams = []
-    if not T.exc_path(rel):
-        masked, hidden = T.mask_exceptions(text, rel)
+    if not T.internal_skipped(rel):      # names/brand/record texts stop at QFN's tree (its sources get only the
+        masked, hidden = T.mask_exceptions(text, rel)   # log-prefix pass below, as rename_log_prefixes.py's scope)
         n = 0
         if fam in T.NAMES_FAM:
             for rx, to in T.NAMES_RULES + T.CMD_RULES:
@@ -131,7 +137,8 @@ def plan_tree(files: dict):
             changed[rel].append(fam)
 
     for rel, (p, fam, text, bom, explicit) in files.items():
-        if p.suffix.lower() in T.INT_TEXT_SUFFIXES and not T.exc_path(rel):
+        # QFN's own tree (rename_rules.INTERNAL_SKIP_PATHS): its CMake project keeps STRATA_, stop before it
+        if p.suffix.lower() in T.INT_TEXT_SUFFIXES and not T.internal_skipped(rel):
             masked, hidden = T.mask_exceptions(texts[rel], rel)   # the exception list's STRATA_ names stay
             t = T.unmask_exceptions(T.rename_internal(masked, p), hidden)   # (their docs and tests too)
             if t != texts[rel]:

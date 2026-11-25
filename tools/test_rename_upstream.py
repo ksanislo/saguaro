@@ -296,6 +296,39 @@ class M1FromV1178(unittest.TestCase):
         self.assertEqual(texts2, self.texts)
 
 
+class EnginesQfn(unittest.TestCase):
+    """finding 3: the one command covers engines/qfn as the union of the old scripts did - the settings and
+    log-prefix passes sweep its sources; the internal / names / brand families stop before that tree"""
+
+    def test_settings_and_prefixes_fire_in_qfn_sources(self):
+        cpp = ('const char* v = std::getenv("MAYA_QFN_NEW_THING");\n'
+               'fprintf(stderr, "strata qfn stage: hi\\n");\n')
+        texts, changed = run(F("engines/qfn/src/core/n.cu", cpp))
+        out = texts["engines/qfn/src/core/n.cu"]
+        self.assertIn('getenv("SAGUARO_QFN_NEW_THING")', out)
+        self.assertIn('"saguaro qfn stage: hi\\n"', out)
+        self.assertEqual(sorted(changed["engines/qfn/src/core/n.cu"]), ["logprefix", "settings"])
+        texts, changed = run(F("engines/qfn/tools/vision/e.cpp", 'fprintf(stderr, "ds4: enc\\n");\n'))
+        self.assertIn('"saguaro ds4: enc\\n"', texts["engines/qfn/tools/vision/e.cpp"])
+
+    def test_the_qfn_tree_itself_stays(self):
+        cpp = ('#include "strata/core.h"\nnamespace strata { void f() { strata::g(); } }\n'
+               'static const char* s = "maya-ds4 build";\n')
+        cmake = 'option(STRATA_QFN_EXPERIMENT "x" OFF)\ntarget_compile_definitions(q PRIVATE STRATA_QFN_X)\n'
+        md = 'run `python maya.py --bench` or `./maya.sh`; restart Maya.\n'
+        texts, changed = run(F("engines/qfn/include/strata/core.h", cpp),
+                             F("engines/qfn/CMakeLists.txt", cmake),
+                             F("engines/qfn/README.md", md),
+                             F("tools/qfn/util.py", 'print("run maya.py --bench")\n'),
+                             F("serve/qfn_engine.py", 'print("[maya] qfn up")\n'))
+        self.assertEqual(changed, {})
+        self.assertEqual(texts["engines/qfn/include/strata/core.h"], cpp)
+        self.assertEqual(texts["engines/qfn/CMakeLists.txt"], cmake)
+        self.assertEqual(texts["engines/qfn/README.md"], md)
+        self.assertEqual(texts["tools/qfn/util.py"], 'print("run maya.py --bench")\n')
+        self.assertEqual(texts["serve/qfn_engine.py"], 'print("[maya] qfn up")\n')
+
+
 class Paths(unittest.TestCase):
     """finding 2: --paths applies the skip filter, and the MAYA_* doc prefix counts only under docs/"""
 
