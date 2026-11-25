@@ -9080,8 +9080,22 @@ int main(int argc, char** argv) {
                 const size_t qb = (size_t) c.n_rows * c.C, db = (size_t) c.n_rows * (c.C / 32) * sizeof(uint16_t);
                 R.q8 = dalloc<int8_t>(qb);
                 R.q8d = dalloc<uint16_t>(db / sizeof(uint16_t));
-                CU(cudaMemcpyPeer(R.q8, dg, M.out_w.q8, 0, qb));
-                CU(cudaMemcpyPeer(R.q8d, dg, M.out_w.q8d, 0, db));
+                // (the two GPU link is not up yet at drafter load: two_setup establishes it later, its link test being
+                //  what admits peer copies and its setup what enables peer access - a raw cudaMemcpyPeer here died at
+                //  start on a pair whose access was not enabled then. So the head bounces through pinned host memory,
+                //  as every hand-off of this feature does when the link test fails; the peer branch stays for the
+                //  link being tested before the drafter, pf1_peer()/g_two.link.all_peer being its gate elsewhere)
+                if (g_two.link.all_peer) {
+                    CU(cudaMemcpyPeer(R.q8, dg, M.out_w.q8, 0, qb));
+                    CU(cudaMemcpyPeer(R.q8d, dg, M.out_w.q8d, 0, db));
+                } else {
+                    char* stage = nullptr;
+                    CU(cudaHostAlloc((void**) &stage, qb + db, cudaHostAllocPortable));
+                    { DevScope g0(0); CU(cudaMemcpy(stage, M.out_w.q8, qb, cudaMemcpyDeviceToHost)); }
+                    CU(cudaMemcpy(R.q8, stage, qb, cudaMemcpyHostToDevice));
+                    CU(cudaMemcpy(R.q8d, stage + qb, db, cudaMemcpyHostToDevice));
+                    CU(cudaFreeHost(stage));
+                }
             }
         }
         for (int kv8 = kv_want == "fp8" ? 1 : 0; kv8 <= (kv_want == "f16" ? 0 : 1) && !drafter; ++kv8) {
