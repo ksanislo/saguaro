@@ -6,8 +6,17 @@ cancels; a seeded sampled request writes the same tokens twice; drafting (spec=1
 """
 import subprocess
 import sys
+import unittest
 
 PROMPT = [1, 2, 3, 4, 5, 6, 7, 8]
+
+
+@unittest.skipUnless(sys.platform == "darwin", "maya-metal --serve: Apple Silicon only")
+class MetalServeScript(unittest.TestCase):
+    """the module is a script, not test cases: the runner reports this skip so it is not an empty module"""
+
+    def test_run_it_directly(self):
+        raise unittest.SkipTest("a script: python tools/test_metal_serve.py MAYA_METAL GGUF")
 
 
 class Engine:
