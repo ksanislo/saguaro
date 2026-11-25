@@ -6728,8 +6728,9 @@ def make_handler(svc: Service):
             loading = model_api.public_name(p) + ":latest"
             if load:    # /models/load asked for the swap: the switch started, so answer 200 (no Retry-After)
                 body = json.dumps({"success": True, "loading": True, "model": loading,
-                                   "message": f"loading model {loading}: Saguaro starts again with it (a big model "
-                                              "takes minutes); GET /api/ps shows when it is loaded"}).encode()
+                                   "message": f"loading model {model_api.public_name(p)}: Saguaro starts again "
+                                              "with it (a big model takes minutes); GET /api/ps shows when it is "
+                                              "loaded"}).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body)))
