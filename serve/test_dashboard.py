@@ -72,6 +72,30 @@ class Dashboard(unittest.TestCase):
         s, _, b = self.req("GET", "/health")
         self.assertEqual(json.loads(b)["version"], SAGUARO_VERSION)
 
+    def test_index_busts_the_favicon_cache_with_the_version(self):
+        s, _, b = self.req("GET", "/")
+        html = b.decode()
+        self.assertEqual(s, 200)
+        self.assertIn(f"web/icon.svg?v={SAGUARO_VERSION}", html)
+        self.assertNotIn("?v=__VERSION__", html)
+
+    def test_index_still_serves_without_the_placeholder_or_the_version(self):
+        """The replace keeps the page working either way: no VERSION (the version is None) yields ?v=, and an
+        index.html without the placeholder is served byte-identical (the replace is a no-op)."""
+        from unittest import mock
+        from serve import server as SV
+        with mock.patch.object(SV, "SAGUARO_VERSION", None):
+            s, _, b = self.req("GET", "/")
+        self.assertEqual(s, 200)
+        self.assertIn(b'href="web/icon.svg?v="', b)                 # (no version after the ?v=)
+        page = Path(self.tmp.name) / "serve" / "web"
+        page.mkdir(parents=True)
+        plain = '<link rel="icon" href="web/icon.svg?v=1.2.1f">'    # (an index.html that carries no placeholder)
+        (page / "index.html").write_text(plain, encoding="utf-8")
+        with mock.patch.object(SV, "ROOT", Path(self.tmp.name)):
+            s, _, b = self.req("GET", "/")
+        self.assertEqual((s, b.decode()), (200, plain))             # (served byte-identical)
+
     def test_context_range(self):
         s, _, b = self.req("GET", "/api/context")
         j = json.loads(b)
@@ -838,6 +862,18 @@ class Offline(unittest.TestCase):
         self.assertTrue((self.WEB / "fonts" / "OFL.txt").is_file())
         index = (self.WEB.parent / "web" / "index.html").read_text(encoding="utf-8")
         self.assertNotIn("fonts.googleapis", index)
+
+    def test_about_shows_only_saguaros_version(self):
+        # the engine's own version is no longer printed to users (About > Version); Saguaro's own stays
+        about = (self.WEB / "settings.js").read_text(encoding="utf-8")
+        self.assertIn("Saguaro v${ver}", about)
+        self.assertNotIn("engine ${eng.version}", about)
+
+    def test_the_index_favicon_version_is_the_placeholder(self):
+        # the favicon's cache-bust version comes from VERSION at serve time: the file carries the placeholder, not a hard-coded one
+        index = (self.WEB / "index.html").read_text(encoding="utf-8")
+        self.assertIn("?v=__VERSION__", index)
+        self.assertNotIn("1.2.1f", index)
 
 
 # the page's own modules in Node (skipped without it), the browser's few globals they touch at load stubbed out

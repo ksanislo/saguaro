@@ -182,8 +182,9 @@ class Api(Served):
             self.assertEqual((s, h["Retry-After"]), (503, "30"))
             self.assertIn("loading", json.loads(body))
             restart.assert_called_once()
-            s, body, _ = self.raw("POST", "/models/load", {"model": other})   # (llama.cpp's load names it too)
-        self.assertEqual(s, 503)
+            s, body, _ = self.raw("POST", "/models/load", {"model": other})   # (the load asked for the switch: it succeeded, so 200)
+        b = json.loads(body)
+        self.assertEqual((s, b["success"], b["loading"], b["model"]), (200, True, True, other + ":latest"))
 
     def test_delete_keeps_what_another_model_runs_from(self):
         l = glm_quant(self.d, "Maya-L")

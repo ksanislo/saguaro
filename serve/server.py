@@ -6722,7 +6722,7 @@ def make_handler(svc: Service):
             if name != svc.model:
                 other = model_api.find_config(svc.models_root(), name)
                 if op == "load" and other is not None:    # another installed model: the swap (a load on request)
-                    self._mapi_target(name)
+                    self._mapi_target(name, load=True)
                     return
                 self._json(404, {"error": {"message": "model not found"}})
                 return
@@ -6877,9 +6877,11 @@ def make_handler(svc: Service):
             self.end_headers()
             self.answer_started = True
 
-        def _mapi_target(self, name) -> bool:
+        def _mapi_target(self, name, load: bool = False) -> bool:
             """The model a chat / generate names: True when it is the one running (or none named); otherwise the answer
-            is sent - 404, or the swap to that installed model (Saguaro starts again with it: a 503 + Retry-After says so)."""
+            is sent - 404, or the swap to that installed model (Saguaro starts again with it: a 503 + Retry-After says so).
+            `load` (the /models/load swap): the switch is what was asked for, so it answers 200 + loading instead of the
+            503 a chat gets (a chat's request cannot be served by the model that is starting)."""
             run = next((m for m in svc.model_listing() if m["running"]), None)
             if not name or run is None:
                 return True
@@ -6901,9 +6903,21 @@ def make_handler(svc: Service):
                 except ValueError as e:
                     self._json(409, {"error": str(e)})
                     return False
+            loading = model_api.public_name(p) + ":latest"
+            if load:    # /models/load asked for the swap: the switch started, so answer 200 (no Retry-After)
+                body = json.dumps({"success": True, "loading": True, "model": loading,
+                                   "message": f"loading model {model_api.public_name(p)}: Saguaro starts again "
+                                              "with it (a big model takes minutes); GET /api/ps shows when it is "
+                                              "loaded"}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return False
             body = json.dumps({"error": f"loading model {model_api.public_name(p)}: Saguaro starts again with it (a big model "
                                         "takes minutes); retry this request, GET /api/ps shows when it is loaded",
-                               "loading": model_api.public_name(p) + ":latest"}).encode()
+                               "loading": loading}).encode()
             self.send_response(503)
             self.send_header("Content-Type", "application/json")
             self.send_header("Retry-After", "30")
@@ -7310,6 +7324,8 @@ def make_handler(svc: Service):
                 return
             if path == "":
                 body = (ROOT / "serve" / "web" / "index.html").read_bytes()
+                # the favicon's cache-bust version comes from VERSION (a no-op when index.html carries no placeholder)
+                body = body.replace(b"?v=__VERSION__", f"?v={SAGUARO_VERSION or ''}".encode())
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))
