@@ -1358,6 +1358,12 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
   target_include_directories(native_multi_parity PRIVATE ${_strata_gpu_include_directories})
   target_link_libraries(native_multi_parity PRIVATE strata_kernels ${_strata_gpu_runtime_target})
   add_test(NAME native_multi_parity COMMAND native_multi_parity)
+  # PLAN-turbo-live: the Turbo skip against its contract - off rows bitwise, all-resident bitwise, none-resident
+  # top-1 only, random residency against a host replay, the counters and the skipped-pick usage; 512x10 and 256x8
+  add_executable(turbo_skip_parity src/kernels/turbo_skip_parity.cpp)
+  target_include_directories(turbo_skip_parity PRIVATE ${_strata_gpu_include_directories})
+  target_link_libraries(turbo_skip_parity PRIVATE strata_kernels ${_strata_gpu_runtime_target})
+  add_test(NAME turbo_skip_parity COMMAND turbo_skip_parity)
   # #783 PR-d: the batched K/V append (INT8, Q4_0, the hybrid fold) against the per-cell appends, memcmp
   add_executable(kv_steps_parity src/kernels/kv_steps_parity.cpp)
   target_include_directories(kv_steps_parity PRIVATE ${_strata_gpu_include_directories})
