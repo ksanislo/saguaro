@@ -25,32 +25,14 @@ import re
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import rename_rules as T                          # the shared rule table (rename_rules.py)
+
 ROOT = Path(__file__).resolve().parents[2]
-NEW = "saguaro"
-OLD_P = ("strata", "maya")                              # split up so scanning this file finds no complete old name
-NAME = "(?:" + "|".join(OLD_P) + ")"                    # "strata" or "maya", not strata_x / strata-x as a whole word
-P = r"[a-z0-9][a-z0-9 ._()#-]*"                         # the part after the engine name, up to the colon or the (
-RULES = [
-    (re.compile(r'(["\'])(' + NAME + r')(?![A-Za-z0-9_-])(?=: )'), r"\1" + NEW),                       # "strata: x"
-    (re.compile(r'(["\'])(' + NAME + r')( ' + P + r')(?=: )'), r"\1" + NEW + r"\3"),                   # "strata part: x"
-    (re.compile(r'(["\'])(' + NAME + r')( ' + P + r')(?= \()'), r"\1" + NEW + r"\3"),                  # "strata part (x"
-    (re.compile(r'(["\'])(' + NAME + r')-([a-z0-9]+)(?=(?:: | [A-Za-z(]))'), r"\1" + NEW + r" \3"),    # "maya-ds4: x"
-    (re.compile(r'(["\'])(ds4)(?=[: ])'), r"\1" + NEW + r" ds4"),                                # "ds4: x", "ds4 x"
-    (re.compile(r'(["\'])(' + NAME + r') (batch GPU stages|decode GPU stages|KV prefetch|DMA|DBG|Q2_0)'),
-     r"\1" + NEW + r" \3"),                                                                      # "strata GPU/DBG ... :"
-    (re.compile(r'(["\'])(' + NAME + r')(?=" \+)'), r"\1" + NEW),                                # "strata " + label
-    (re.compile(r'(["\'])strata-dsv41(?= %s build)'), r"\1" + NEW + " dsv41"),                   # the --version line
-]
-CPP_SUFFIXES = {".c", ".h", ".hpp", ".cpp", ".cc", ".cxx", ".cu", ".cuh"}
-# In files passed explicitly (a test simulating an engine's log, a docstring showing its lines), a line inside a
-# multi-line string starts with the prefix too: the same rules with a line anchor instead of a quote.
-LINE_RULES = [(re.compile(r"^(" + NAME + r")(?![A-Za-z0-9_-])(?=: )", re.M), NEW),
-              (re.compile(r"^(" + NAME + r")( [a-z0-9][a-z0-9 ._()#-]*)(?=: )", re.M), NEW + r"\2"),
-              (re.compile(r"^(" + NAME + r")( [a-z0-9][a-z0-9 ._()#-]*)(?= \()", re.M), NEW + r"\2"),
-              (re.compile(r"^(" + NAME + r")-([a-z0-9]+)(?=(?:: | [A-Za-z(]))", re.M), NEW + r" \2"),
-              (re.compile(r"^(ds4)(?=[: ])", re.M), NEW + r" ds4"),
-              (re.compile(r"^(" + NAME + r")( (?:batch GPU stages|decode GPU stages|KV prefetch|DMA|DBG|Q2_0))", re.M),
-               NEW + r"\2")]
+NEW = T.LOG_NEW
+RULES = T.LOG_RULES                                # the old engine names as log prefixes -> "saguaro ..."
+LINE_RULES = T.LOG_LINE_RULES                      # the same rules line-anchored (multi-line strings)
+CPP_SUFFIXES = T.LOG_CPP_SUFFIXES
 DEFAULT_PATHS = [ROOT / "src", ROOT / "engines" / "qfn" / "src",
                  ROOT / "engines" / "qfn" / "tools" / "vision", ROOT / "tools" / "vision"]
 
