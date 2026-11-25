@@ -3088,8 +3088,8 @@ void pf1_run(const Model& M, int l, int T, const uint16_t* xq16, const Work& W, 
     Pf1& P = g_pf1;
     const int C = c.C, F = c.F, S = T * c.K;
     if (T > P.cap) {   // (grow: nothing of the old buffers is in flight - the chunks before it are done)
+        DevScope on(g_two.dev);   // (P.s is GPU 1's stream: some runtime versions reject its sync while GPU 0 is current)
         if (P.s) CU(cudaStreamSynchronize(P.s));
-        DevScope on(g_two.dev);
         for (void* q : {(void*) P.x16, (void*) P.ex16, (void*) P.w16, (void*) P.h16, (void*) P.gu32, (void*) P.y32,
                         (void*) P.tmp, (void*) P.sg, (void*) P.su, (void*) P.wtr, (void*) P.gidx})
             if (q) CU(cudaFree(q));
