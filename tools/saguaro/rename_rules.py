@@ -248,7 +248,9 @@ SKIP_PATHS = ("ref-configs/", "bench/results/", "engines/qfn/bench/results/", "t
               "tools/test_rename_upstream.py",          # the tool's own tests and its manual must spell the
               "docs/UPSTREAM.md")                       # old names to describe them
 SKIP_NAMES = {"CHANGELOG.md", "NOTICE.md", "DIVERGENCE.md", "UPSTREAM.md"}   # (the register and the intake guide name both sides)
-SKIP_NAME_RE = re.compile(r"^(PLAN|REPORT|NEXT)-.*\.md$|^LICENSE(\.|$)")
+# plans, reports and the review / fix notes written from them quote the old names to describe them: skipped, as
+# the register above
+SKIP_NAME_RE = re.compile(r"^(PLAN|REPORT|NEXT)-.*\.md$|^REVIEW-RESULT.*\.md$|^FIX-REPORT.*\.md$|^LICENSE(\.|$)")
 SKIP_SUFFIXES = {".log", ".jsonl", ".patch", ".orig"}
 
 

@@ -146,6 +146,14 @@ class Names(unittest.TestCase):
         self.assertIn("maya-ds4.json", out)
         self.assertIn("maya-mm3.json", out)
 
+    def test_review_and_fix_notes_are_skipped(self):
+        """the review's and the fix report's own notes quote both name families to describe them: skipped like
+        the PLAN / REPORT notes they are written from"""
+        for rel in ("REVIEW-RESULT.md", "REVIEW-RESULT-c122-config-names.md", "FIX-REPORT.md",
+                    "PLAN-c122-config-names.md", "REPORT-c122-config-names.md", "LICENSE", "LICENSE.md"):
+            self.assertTrue(T.skipped(rel), rel)
+        self.assertFalse(T.skipped("docs/SETUP.md"))
+
     def test_server_log_tag_and_launcher_switch(self):
         out = run(F("serve/s.py", 'print(f"[maya] the GPUs freed")\n'))[0]["serve/s.py"]
         self.assertIn("[saguaro]", out)
