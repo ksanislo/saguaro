@@ -1417,7 +1417,7 @@ class PascalForQfn(unittest.TestCase):
     def test_only_cuda_13_installed_says_pascal_needs_12(self):
         out, pc = self.run_check_pc(("/usr/local/cuda-13.2/bin/nvcc", (13, 2)))
         self.assertIsNone(pc)                                          # (the setup stops there)
-        self.assertIn("can be used (Pascal: experimental)", out)       # (the card itself: seen, second-class)
+        self.assertIn("can be used (Pascal: not measured yet)", out)   # (the card itself: seen, second-class)
         self.assertIn("cannot build for these GPUs", out)
         self.assertIn("CUDA 12.0 or newer but older than 13.0", out)   # ("they need", plainly)
         self.assertIn("CUDA 13 dropped Volta and Pascal", out)
