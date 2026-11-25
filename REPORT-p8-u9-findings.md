@@ -30,9 +30,11 @@ creation, the allocations - keeps exactly the device it had; the nested `DevScop
 `pf1_pick` gained a `const Layer& Ly` parameter (forward declaration, definition, the single call site in
 `run_prefill_moe` where `Ly` was already in scope) and returns false for `Ly.ty[0] == strata_fmt::kMIX`, with
 a comment: `pf1_run` decodes the fixed three-part layout at `Ly.eb`'s offsets, while a kMIX expert's parts sit
-under their own MixHdr - routing one to GPU 1 would decode it at wrong offsets silently. `run_exp` refuses a
-kMIX pack across the GPUs today (`"a Strata pack across two GPUs: not yet"`), so nothing reaches the gap in a
-supported config; now `pf1_pick` refuses it too rather than lean on that.
+under their own MixHdr - routing one to GPU 1 would decode it at wrong offsets silently. `run_exp`'s refusal of a
+kMIX pack across the GPUs (`"a Strata pack across two GPUs: not yet"`) sits in its `g_tp` (tensor-parallel)
+branch, which the PF_GPU1 prefill path never reaches (`p1` requires `!g_tp`), so this `return false` is the real
+guard for the prefill path, not insurance over that die; the token path's `two_send` has no kMIX check of its
+own, out of this plan's scope.
 
 ## 5. drafter_propose's host-staging branch: record ev_cp (commit ba4ac2cd6)
 

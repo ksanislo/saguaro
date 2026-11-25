@@ -3081,8 +3081,8 @@ bool pf1_pick(int l, const Config& c, const std::vector<int>& cnt, const ExpertC
     if (!en || !g_two.on || T < 32) return false;
     // (kMIX - a Strata pack whose experts carry their own types - is refused, not routed: pf1_run decodes the fixed
     //  three-part layout at Ly.eb's offsets, and a kMIX expert's parts sit under their own MixHdr, so its rows would
-    //  be read at wrong offsets silently. run_exp refuses a kMIX pack across the GPUs today, so nothing reaches here
-    //  in a supported config; refuse it here too rather than lean on that)
+    //  be read at wrong offsets silently. run_exp's "a Strata pack across two GPUs: not yet" sits in its g_tp branch,
+    //  which this prefill path never reaches (p1 requires !g_tp): this refusal is the guard here, not insurance)
     if (Ly.ty[0] == strata_fmt::kMIX) return false;
     skip.assign(c.E, 0);
     int n = 0;
