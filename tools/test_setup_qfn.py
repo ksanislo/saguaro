@@ -12,6 +12,7 @@ the vision entry, the drafting choice and the answers-at-once value - the cards 
     python -m unittest tools.test_setup_qfn -v
 """
 from pathlib import Path
+import contextlib
 import io
 import json
 import sys
@@ -366,6 +367,148 @@ class YesAloneNamesDownloadModel(unittest.TestCase):
         self.assertIn("drafting off", said[0])
         self.assertIn("--download-model", said[0])
         self.assertIn("--yes", said[0])
+
+
+def fake_gguf(path: Path, tensors, truncate=0):
+    """A whole little GGUF v3 file: F32 tensors written in the given order after the header
+    (tensors: [(name, [shape], [floats])]); truncate lops the last bytes off (a short file)."""
+    import struct
+
+    def s(b):
+        return struct.pack("<Q", len(b)) + b
+    hdr = bytearray(struct.pack("<IIQQ", 0x46554747, 3, len(tensors), 1))
+    hdr += s(b"general.architecture") + struct.pack("<I", 8) + s(b"qwen35next")   # (the only kv)
+    data = b""
+    offs = []
+    for name, shape, vals in tensors:
+        offs.append(len(data))
+        data += struct.pack(f"<{len(vals)}f", *vals)
+    for (name, shape, _), off in zip(tensors, offs):
+        hdr += s(name.encode()) + struct.pack(f"<I{len(shape)}Q", len(shape), *shape)
+        hdr += struct.pack("<IQ", 0, off)                # type 0 = F32
+    path.write_bytes(bytes(hdr) + b"\0" * (-len(hdr) % 32) + data)   # (the data section starts aligned to 32)
+    if truncate:
+        with open(path, "r+b") as f:
+            f.truncate(f.seek(0, 2) - truncate)
+
+
+class MergedGguf(unittest.TestCase):
+    """v1.2.1-D: --gguf-dir holding ONE merged .gguf (gguf-split --merge, an Ollama blob hard-linked to a name)
+    instead of the pinned shards: accepted when the tensor names, shapes and types match the pinned shards'
+    index and the bytes of a sample of tensors (the first, the last, 8 spread between) match the shards' - and,
+    where the shards are not on the PC at all, on the file's own complete tensor directory, said with "not
+    sha256-checked".  A merged file that differs is refused by what differed."""
+
+    QUANT = "gsq-iq3_s"
+    TS = [("token_embd.weight", [4], [0.0, 1.0, 2.0, 3.0]),
+          ("blk.0.attn_norm.weight", [3], [4.0, 5.0, 6.0]),
+          ("blk.0.ffn_gate_inp.weight", [2, 2], [7.0, 8.0, 9.0, 10.0]),
+          ("blk.47.ffn_exps.7.weight", [5], [11.0, 12.0, 13.0, 14.0, 15.0]),
+          ("output.weight", [6], [16.0, 17.0, 18.0, 19.0, 20.0, 21.0])]
+
+    @contextlib.contextmanager
+    def quiet(self, said=None):
+        olds = dict(warn=lambda *x: None, step=lambda *x: None, say=lambda *x: None,
+                    rotational=lambda *x: False,
+                    offer_download=lambda *x: (_ for _ in ()).throw(AssertionError("downloaded despite --gguf-dir")))
+        if said is not None:
+            olds["ok"] = lambda *x: said.append(" ".join(str(v) for v in x))
+        else:
+            olds["ok"] = lambda *x: None
+        with contextlib.ExitStack() as st:
+            for k, v in olds.items():
+                st.enter_context(patch.object(maya, k, v))
+            yield
+
+    def shards(self, t: Path):
+        """The pinned shard names as whole little GGUFs in t, the five tensors spread over the two files."""
+        parts = {0: (0, 2, 4), 1: (1, 3)}               # (shard 1: embd, router, out; shard 2: norm, expert)
+        for i, name in enumerate(maya.qfn_entry(self.QUANT)["files"]):
+            fake_gguf(t / name, [self.TS[j] for j in parts[i]])
+        return t
+
+    def test_merged_file_accepted_against_the_shards_next_door(self):
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            src, prev = t / "merged", t / "shards"
+            src.mkdir()
+            prev.mkdir()
+            self.shards(prev)
+            fake_gguf(src / "Qwen-merged.gguf", [self.TS[j] for j in (3, 0, 4, 1, 2)])   # (another order: names
+            said = []                                                   #  must decide, not the order in the file)
+            a = args(gguf_dir=src)
+            a.qfn_prev_files_dir = prev              # (the folder the config before read the files from)
+            with self.quiet(said), patch.object(maya, "sha256_checked",
+                                                side_effect=AssertionError("sha256 of a merged file")):
+                got = maya.qfn_files_step(a, t / "models", self.QUANT)
+            self.assertEqual([f.name for f in got], ["Qwen-merged.gguf"])
+            self.assertIn("match the pinned shards' index", said[0])     # (what was checked, said)
+            self.assertIn("sample of 5", said[0])                        # (all five sampled: first, last, 8 spread)
+            self.assertNotIn("not sha256-checked", said[0])
+
+    def test_one_flipped_sample_tensor_refuses_it(self):
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            src, prev = t / "merged", t / "shards"
+            src.mkdir()
+            prev.mkdir()
+            self.shards(prev)
+            ts = [list(x) for x in self.TS]
+            ts[2][2][0] = 99.0                                           # (same names, shapes and types ...)
+            fake_gguf(src / "Qwen-merged.gguf", [self.TS[j][:2] + (tuple(ts[j][2]),) for j in (3, 0, 4, 1, 2)])
+            a = args(gguf_dir=src)
+            a.qfn_prev_files_dir = prev                                  # (the shards are on the PC: the index is)
+            out = refusal(lambda: maya.qfn_files_step(a, t / "models", self.QUANT))
+        self.assertIn("bytes differ", out)
+        self.assertIn("blk.0.ffn_gate_inp.weight", out)
+
+    def test_differing_tensors_refuse_it(self):
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            src, prev = t / "merged", t / "shards"
+            src.mkdir()
+            prev.mkdir()
+            self.shards(prev)
+            fake_gguf(src / "other.gguf", self.TS[:-1])                  # (no output.weight: another model's file)
+            a = args(gguf_dir=src)
+            a.qfn_prev_files_dir = prev
+            out = refusal(lambda: maya.qfn_files_step(a, t / "models", self.QUANT))
+        self.assertIn("its tensors are not the pinned shards'", out)
+        self.assertIn("output.weight", out)
+
+    def test_no_shards_on_the_pc_accepts_it_not_sha256_checked(self):
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            src = t / "merged"
+            src.mkdir()
+            fake_gguf(src / "ollama-blob.gguf", self.TS)
+            said = []
+            with self.quiet(said), patch.object(maya, "sha256_checked",
+                                                side_effect=AssertionError("sha256 of a merged file")):
+                got = maya.qfn_files_step(args(gguf_dir=src), t / "models", self.QUANT)
+            self.assertEqual([f.name for f in got], ["ollama-blob.gguf"])
+            self.assertIn("not sha256-checked", said[0])                 # (said plainly: nothing to compare with)
+            self.assertIn("tensor names, shapes and types", said[0])
+
+    def test_a_truncated_merged_file_refuses_it(self):
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            src = t / "merged"
+            src.mkdir()
+            fake_gguf(src / "half.gguf", self.TS, truncate=8)            # (its tensor bytes no longer reach the end)
+            out = refusal(lambda: maya.qfn_files_step(args(gguf_dir=src), t / "models", self.QUANT))
+        self.assertIn("does not hold", out)
+        self.assertIn("whole", out)
+
+    def test_two_unknown_ggufs_are_the_usual_refusal(self):
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            src = t / "merged"
+            src.mkdir()
+            fake_gguf(src / "a.gguf", self.TS)
+            fake_gguf(src / "b.gguf", self.TS)
+            out = refusal(lambda: maya.qfn_files_step(args(gguf_dir=src), t / "models", self.QUANT))
+        self.assertIn("does not hold all of", out)                       # (nothing to name: the usual line)
 
 
 class PascalBuild(unittest.TestCase):

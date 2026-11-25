@@ -7414,9 +7414,112 @@ def choose_qfn_quant(a, prev: dict, gpus: list, ram: float) -> str:
     return want
 
 
+def gguf_tensor_slice(path: Path, at: int, size: int) -> bytes:
+    """One tensor's bytes, read at its own offset (a merged single file and the pinned shards are read the same
+    way: a GGUF tensor's data starts at the file's data_start plus the tensor's own offset)."""
+    import hashlib
+    with open(path, "rb") as f:
+        f.seek(at)
+        return hashlib.sha256(f.read(size)).hexdigest()
+
+
+def qfn_merged_gguf(a, d: Path, src: Path, m: dict, quant: str):
+    """A merged single-file GGUF standing in for a quant pinned as shards (--gguf-dir, v1.2.1-D): gguf-split
+    --merge, or an Ollama blob hard-linked into the folder, leaves the model as ONE .gguf that is none of the
+    pinned shard names.  The folder's single such file is the candidate.  Its tensor names, shapes and types
+    must be the pinned shards' index; and where that index is on the PC (all pinned shards whole in the same
+    folder, in the folder a written config read them from, or in the model folder), the bytes of a sample of
+    tensors - the first, the last and 8 spread between - must match the shards' too, tensor for tensor.  Where
+    the index is not on disk there is nothing to compare bytes against: the file is then accepted on its own
+    tensor directory (names, shapes, types, and the tensor bytes the directory says reaching the end of the
+    file) and said so plainly with "not sha256-checked" - a merged file matches no published shard sha256.
+    (merged file, one plain line saying what was checked); None when the folder holds no candidate or it does
+    not read as a GGUF (the caller's usual "does not hold all of its files" refusal then applies); a candidate
+    that fails a check is refused here, with what differed."""
+    import hashlib
+    from gguf_reader import GGUFFile
+    names = list(m["files"])
+    if len(names) < 2:                               # (a quant pinned as ONE file: its name is the pin itself)
+        return None
+    try:
+        cands = [f for f in sorted(src.glob("*.gguf")) if f.name not in names]
+    except OSError:
+        return None
+    if len(cands) != 1:                              # (no merged file, or several: the usual refusal)
+        return None
+    merged = cands[0]
+    try:
+        g = GGUFFile(merged)
+    except Exception:                                # noqa: BLE001 - not a GGUF, or a truncated header: refusal
+        return None
+    if not g.tensors:
+        return None
+    table = [(t.name, tuple(t.shape), t.type_name, t.expected_bytes(), t.offset) for t in g.tensors]
+    idx = None
+    where = [src]
+    prev = getattr(a, "qfn_prev_files_dir", None)
+    if prev:
+        where.append(Path(prev))
+    if d not in where:
+        where.append(d)
+    for at in dict.fromkeys(where):
+        sh = [at / n for n in names]
+        if not all(f.is_file() for f in sh):
+            continue
+        try:
+            gs = [GGUFFile(f) for f in sh]
+        except Exception:                            # noqa: BLE001 - a damaged shard: the index is not readable
+            continue
+        idx = {}
+        for f, gg in zip(sh, gs):
+            for t in gg.tensors:
+                idx[t.name] = (f, gg.data_start + t.offset, t.expected_bytes(), tuple(t.shape), t.type_name)
+        break
+    shown = Q.shown("qfn", quant)
+    if idx is None:                                  # (the index is not on disk: names + shapes + types + the
+        why = incomplete(merged)                     #  total tensor bytes, all this file's own - no sha256 of it
+        if why:                                      #  was ever published)
+            fail(f"{merged.name} does not hold {shown} whole: {why}", "the merged file is truncated")
+        return merged, (f"{len(table):,} tensor names, shapes and types read from its own index, its total "
+                        "tensor bytes reaching the end of the file - not sha256-checked: a merged file has no "
+                        "published sha256 and the pinned shards are not on this PC to compare against")
+    mine = {n: (shape, ty) for n, shape, ty, _, _ in table}
+    if set(mine) != set(idx):
+        gone = ", ".join(sorted(set(idx) - set(mine))[:3])
+        extra = ", ".join(sorted(set(mine) - set(idx))[:3])
+        diff = ("missing " + gone if gone else "") + (", " if gone and extra else "") + \
+               ("unknown " + extra if extra else "")
+        fail(f"{merged.name} is not {shown}: its tensors are not the pinned shards' ({diff})",
+             f"--gguf-dir takes the folder holding {shown}")
+    bad = [n for n, (shape, ty) in mine.items() if (idx[n][3], idx[n][4]) != (shape, ty)]
+    if bad:
+        fail(f"{merged.name} is not {shown}: tensor {bad[0]} is "
+             f"{mine[bad[0]][1]} x {'x'.join(str(x) for x in mine[bad[0]][0])}, the pinned shards have "
+             f"{idx[bad[0]][4]} x {'x'.join(str(x) for x in idx[bad[0]][3])}"
+             + (f" ({len(bad)} tensors differ)" if len(bad) > 1 else ""),
+             f"--gguf-dir takes the folder holding {shown}")
+    rows = [r for r in table if r[3]]                # (tensors whose byte count the block geometry pins: those
+    n = len(rows)                                    #  the data sample is drawn from)
+    picks = sorted({0, n - 1, *(round(k * (n - 1) / 9) for k in range(1, 9))}) if n else []
+    for i in picks:
+        name, _, _, size, off = rows[i]
+        ref_f, ref_at, ref_size = idx[name][0], idx[name][1], idx[name][2]
+        if size != ref_size:
+            fail(f"{merged.name} is not {shown}: tensor {name} has {size:,} bytes, the pinned shard has "
+                 f"{ref_size:,}", f"--gguf-dir takes the folder holding {shown}")
+        if size and gguf_tensor_slice(merged, g.data_start + off, size) != \
+                gguf_tensor_slice(ref_f, ref_at, size):
+            fail(f"{merged.name} is not {shown}: tensor {name}'s bytes differ from {ref_f.name}'s",
+                 f"--gguf-dir takes the folder holding {shown}, or leave it out to download the pinned files")
+    return merged, (f"{len(table):,} tensors match the pinned shards' index, and so do the bytes of a sample "
+                    f"of {len(picks)} of them (the first, the last, 8 spread between)")
+
+
 def qfn_files_step(a, d: Path, quant: str) -> list | None:
     """The quant's shards: in --gguf-dir (used in place, checked) or in d (downloaded when missing), each against its
-    published sha256.  None when nothing was downloaded."""
+    published sha256.  None when nothing was downloaded.  A merged single-file GGUF in --gguf-dir (gguf-split
+    --merge, an Ollama blob hard link) stands in for the shards when it checks out against their index
+    (qfn_merged_gguf)."""
     m = qfn_entry(quant)
     src = Path(a.gguf_dir).expanduser().resolve() if getattr(a, "gguf_dir", None) else d
     was = getattr(a, "qfn_prev_files_dir", None)       # (a setup again: the folder the config's files were in - an
@@ -7428,6 +7531,15 @@ def qfn_files_step(a, d: Path, quant: str) -> list | None:
     files = [src / n for n in m["files"]]
     missing = [f for f in files if file_incomplete(m, f)]
     if missing and src != d:
+        merged = qfn_merged_gguf(a, d, src, m, quant)  # (one merged file standing for the pinned shards)
+        if merged is not None:
+            merged, said = merged
+            ok(f"{Q.shown('qfn', quant)}: {merged.stat().st_size / 1e9:.1f} GB in {merged} (your merged single "
+               f"file, used in place: {said})")
+            if rotational(src):
+                warn(f"{src} is on a spinning hard disk: the experts RAM cannot hold are read from it - use an "
+                     "NVMe SSD")
+            return [merged]
         fail(f"{src} does not hold all of {Q.shown('qfn', quant)}'s files ({missing[0].name}: "
              f"{file_incomplete(m, missing[0])})", "--gguf-dir takes the folder with all its .gguf shards, or leave it "
              "out to download them")
