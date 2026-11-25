@@ -81,8 +81,8 @@ function Model() {
   };
   return html`<h3>Model</h3>
     <div class="model-card"><${ModelLogo} model=${h.model} size=${36}/>
-      <span><b>${modelLabel(h, {compact: true})}</b><span>API id: ${h.model}
-        <button type="button" class="btn btn--ghost btn--sm" onClick=${() => copyText(h.model)}><${Icon} name="copy" sm/>Copy</button></span></span></div>
+      <span><b>${modelLabel(h, {compact: true})}</b>${h.model ? html`<span>API id: ${h.model}
+        <button type="button" class="btn btn--ghost btn--sm" onClick=${() => copyText(h.model)}><${Icon} name="copy" sm/>Copy</button></span>` : null}</span></div>
     ${h.supervisor ? html`<p class="set-note">This server runs under ${h.supervisor}: it starts, stops and switches the models,
       and their context sizes, ports and engine settings are its configuration. Pick another model by its id in your app.</p>`
     : c ? html`<div class="set-block">

@@ -45,8 +45,13 @@ export const reqAll = {on: false};       // the request table: the last 12, or e
 // and it may not even have gone visibly down - re-read /health and every label follows, the chats staying (item 10:
 // a Q4 used to keep answering under the old Q8's name)
 export function identityChanged(h, eng) {
-  return !!eng && (eng.model != null || eng.model_label != null) &&
-         (eng.model !== h.model || (eng.model_label || "") !== (h.model_label || ""));
+  if (!eng || (eng.model == null && eng.model_label == null)) return false;   // (an engine that names nothing)
+  if (eng.model !== h.model || (eng.model_label || "") !== (h.model_label || "")) return true;
+  // the two name fields too, in symmetry with modelId(): a name-only change is a new identity - while an old
+  // /metrics that has no such keys says nothing, and never fakes a change (nor an endless re-read)
+  for (const k of ["model_name_pretty", "model_quant"])
+    if (eng[k] !== undefined && (eng[k] || "") !== (h[k] || "")) return true;
+  return false;
 }
 export async function poll() {
   const was = S.conn;                       // (back from down or key: whatever answers now is read anew)
@@ -61,7 +66,8 @@ export async function poll() {
       fails = 0;
       const rl = S.metrics.reload;
       if (rl && (rl.state === "waiting" || rl.state === "running")) watchReload();
-      if (was !== "ok" || identityChanged(S.health, S.metrics && S.metrics.engine)) loadHealth();
+      if (was === "down" || was === "key" || identityChanged(S.health, S.metrics && S.metrics.engine)) loadHealth();
+      // (the first poll from "connecting" asks nothing: app.js' own loadHealth is already on its way)
     } else {
       throw new Error(`HTTP ${r.status}`);
     }

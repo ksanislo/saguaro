@@ -564,6 +564,8 @@ const out = {
   same: sv.identityChanged(old, {model: old.model, model_label: old.model_label}),
   otherModel: sv.identityChanged(old, {model: "glm-5.3-flash", model_label: "GLM-5.3 · Maya-L"}),
   otherLabel: sv.identityChanged(old, {model: old.model, model_label: "Qwen3.8-Flash-Next · UD-Q4_K_XL (saguaro-qfn)"}),
+  quantOnly: sv.identityChanged(old, {model: old.model, model_label: old.model_label,
+                                      model_name_pretty: old.model_name_pretty, model_quant: "UD-Q4_K_XL"}),
   saysNothing: sv.identityChanged(old, {}),
   idOnlyOld: sv.identityChanged({model: "x"}, {model: "x", model_label: null}),
   otherId: sv.identityChanged({model: "x"}, {model: "y", model_label: null}),
