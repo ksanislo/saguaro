@@ -143,9 +143,14 @@ OTHERS = {("deepseek", "gguf-q8"): "UD-Q8_K_XL", ("deepseek", "gguf-q4"): "UD-Q4
           ("deepseek", "abliterated-128g"): "orcarouter Abliterated Mix-128G",
           ("deepseek", "abliterated-256g"): "orcarouter Abliterated Mix-256G",
           ("minimax", "exl3"): "EXL3 3.5 bpw",
-          ("ik2", "ud-q4_k_xl"): "unsloth UD-Q4_K_XL",   # (unsloth's GGUF of Inkling-2-Mini)
-          ("ik2", "strata-sq-20"): "Strata SQ-20", ("ik2", "strata-sq-15"): "Strata SQ-15",
-          ("ik2", "strata-sq-10"): "Strata SQ-10"}   # (Strata's .strata packs of Inkling-2-Mini)
+           ("ik2", "ud-q4_k_xl"): "unsloth UD-Q4_K_XL",   # (unsloth's GGUF of Inkling-2-Mini)
+           ("ik2", "strata-sq-20"): "Strata SQ-20", ("ik2", "strata-sq-15"): "Strata SQ-15",
+           ("ik2", "strata-sq-10"): "Strata SQ-10"}   # (Strata's .strata packs of Inkling-2-Mini)
+# installer keys the setup's quant list never names, whose files have a label of their own: DeepSeek's one old
+# "abliterated" alias (saguaro.py's DS4_ABL_ALIAS - newer installs record abliterated-128g/-256g, OTHERS' two).
+# quant_name and serve/models.py's quant_label read this one map (the model-names review's nit 3: the page's
+# model_quant showed the bare key where the row's quant said "Mix-256G")
+OTHER_QUANTS = {("deepseek", "abliterated"): "Mix-256G"}
 # CYBER-FROST-3.8-PS: its one GGUF (peasantsmith/CYBER-FROST-3.8-PS-GUFF) - the setup ids it is asked for by.  Since
 # the move onto saguaro-qfn (QFN-first T7) they resolve to its quant there; every id still works
 QWEN_IDS = ("cyber-frost", "cyber-frost-3.8", "cyber-frost-3.8-ps", "cyber-frost-3.8-ps-q5_k_m", "cyber-frost-q5_k_m")
@@ -344,11 +349,13 @@ def pretty_name(family: str) -> str:
 
 
 def quant_name(family: str, key: str | None) -> str:
-    """The files' name exactly as named - the Maya tier, the other publishers' names, QFN's quant's own
-    ("Maya-L", "UD-Q4_K_XL", "CYBER-FROST-3.8 Q5_K_M"); never prettified, so "Q8_0" stays "Q8_0"."""
+    """The files' name exactly as named - the Maya tier, the other publishers' names, QFN's quant's own, and
+    OTHER_QUANTS' label for a key off the list ("Maya-L", "UD-Q4_K_XL", "CYBER-FROST-3.8 Q5_K_M", "Mix-256G");
+    never prettified, so "Q8_0" stays "Q8_0"."""
     if family == "qfn" and key in QFN_QUANTS:
         return QFN_QUANTS[key]
-    return str(tier(family, key) or OTHERS.get((family, key)) or key or "")
+    return str(tier(family, key) or OTHERS.get((family, key))
+               or OTHER_QUANTS.get((family, str(key).lower())) or key or "")
 
 
 def display_names(cfg: dict) -> tuple:
