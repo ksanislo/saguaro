@@ -115,6 +115,16 @@ class TrueMinimum(unittest.TestCase):
         self.assertEqual(len(pair), 2)
         self.assertAlmostEqual(F.ram_min_gib("ud-q4_k_xl"), 3.9 + 4.0 + 8.0, delta=0.01)
 
+    def test_the_refusal_prices_the_failing_card(self):
+        """Review finding 4: on an unequal layout the per-card minimums differ by the split's stage bounds, so
+        the line carries THIS card's number and its own share of the layers, not one figure for every card:
+        the 4090 beside the GT 710 serves 46 of the 48 layers (6.2 GB of its own), the GT 710 its 2 (2.3 GB)."""
+        self.assertAlmostEqual(F.card_min_gib([gpu(0, 24.0, "89", "RTX 4090"), gpu(1, 1.0, "35")], "ud-q4_k_xl")
+                               [1], (2 / 48) * (3.9 + 2.8 * 4096 / 32768) + 1.4 + 700 / 1024, delta=0.01)
+        why = F.unsupported([gpu(0, 24.0, "89", "RTX 4090"), gpu(1, 1.0, "35", "GeForce GT 710")], 96.0)
+        self.assertIn("cannot run on this PC's GeForce GT 710: its 1 GB cannot hold the 2.3 GB this card of the "
+                      "layout must (4% of the layers)", why)
+
     def test_too_little_ram_names_the_minimum(self):
         p = F.plan([gpu(0, 24.0, "86")], 12.0)
         self.assertFalse(p["fits"])

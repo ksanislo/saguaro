@@ -245,9 +245,9 @@ def unsupported(cards: list, ram_gb: float, quant: str | None = None) -> str | N
         if 0 < v < m:
             share = (b[i + 1] - b[i]) / LAYERS
             return (f"Qwen3.8-Flash-Next on saguaro-qfn cannot run on this PC's {g.get('name') or 'GPU'}: its "
-                    f"{v:.0f} GB cannot hold the {m:.1f} GB every card of this layout must: its share of the "
-                    f"{dense_gib(q):.1f} GiB of dense weights and of the {kv_resident_gib(KV_RESIDENT_MIN):.2f} "
-                    f"GiB minimum resident K/V ({share * 100:.0f}% of the layers), {ACTIVATIONS_GIB} GB of "
+                    f"{v:.0f} GB cannot hold the {m:.1f} GB this card of the layout must ({share * 100:.0f}% of "
+                    f"the layers): its share of the {dense_gib(q):.1f} GiB of dense weights and of the "
+                    f"{kv_resident_gib(KV_RESIDENT_MIN):.2f} GiB minimum resident K/V, {ACTIVATIONS_GIB} GB of "
                     "activations and " + f"{RESERVE_GIB:.1f} GB kept free beside the expert cache")
     if ram_gb and ram_gb < ram_min_gib(q):
         return (f"Qwen3.8-Flash-Next on saguaro-qfn cannot run with {ram_gb:.0f} GB of RAM: it needs at least "
