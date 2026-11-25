@@ -6,11 +6,11 @@ Hy4-Flash (--model hy4-flash-maya-s; four cards): NVIDIA on Linux.  Inkling 2 Mi
 16 GB cards): Linux, NVIDIA from V100 / Tesla T4 on, or one AMD RDNA 3 / 4 GPU of 12 GB or more (the experts the card
 does not hold in RAM: the offload path).  Each on its own engine (build/saguaro-hy4, build/saguaro-ik2) -
 docs/HY4-FLASH.md, docs/INKLING2-MINI.md.
-GLM-5.3-Flash: CUDA on Linux and Windows (experimental); HIP: experimental gfx1100/gfx1201/gfx1151 (gfx1030: not
-validated), Linux and Windows, pictures too; Metal: experimental, macOS on Apple Silicon, GLM-5.3-Flash only, text
-only, one conversation at a time.  DeepSeek-V4.1-Flash-1017 and MiniMax-M3.1-Flash: CUDA from V100 on, Linux and
-Windows; on HIP they build (their GGUFs and EXL3 quants), not yet run on an AMD GPU here.  Which engines build for
-AMD (HIP) in this version: docs/AMD_SAGUARO.md, "What runs on AMD".
+GLM-5.3-Flash: CUDA on Linux and Windows; HIP: gfx1100/gfx1201/gfx1151 (gfx1030: run on a Radeon PRO V620, on no other
+RDNA 2 card yet), Linux and Windows, pictures too; Metal: macOS on Apple Silicon, GLM-5.3-Flash only, text only, one
+conversation at a time.  DeepSeek-V4.1-Flash-1017 and MiniMax-M3.1-Flash: CUDA from V100 on, Linux and Windows; on HIP
+they build (their GGUFs and EXL3 quants), not yet run on an AMD GPU here.  Which engines build for AMD (HIP) in this
+version: docs/AMD_SAGUARO.md, "What runs on AMD".
 The quants are named model first, then the tier by the experts' bits (XS, S, M, L): --model glm-maya-s,
 deepseek-maya-xs, minimax-maya-xs ... (tools/maya_quants.py); every name used before still works.
 
@@ -117,12 +117,13 @@ MIN_CC = 60                                        # Pascal and newer (the GLM p
 VALIDATED_CC = 70                                  # ... Volta (V100) and newer validated, Pascal second class (#212)
 MAX_GPUS = 16                                      # the layer split's parts at most (glm_model.hpp, kMaxParts)
 HIP_ARCHS = ("gfx1100", "gfx1201", "gfx1151")        # Saguaro also supports Strix Halo (unified memory)
-HIP_ARCHS_UNVALIDATED = ("gfx1030",)               # RDNA 2 (RX 6800 / 6900, Radeon PRO V620 / W6800), experimental: not
-                                                   # validated on a card; no matrix cores, the portable kernels; compiled
-                                                   # only when such a GPU is chosen
+HIP_ARCHS_UNVALIDATED = ("gfx1030",)               # RDNA 2 (RX 6800 / 6900, Radeon PRO V620 / W6800): run on a Radeon
+                                                   # PRO V620 (ROCm 7) only, on no other RDNA 2 card yet; it builds
+                                                   # with the portable kernels; no matrix cores; compiled only when
+                                                   # such a GPU is chosen
 HIP_ARCHS_WAVE64 = ("gfx908", "gfx906", "gfx942", "gfx950")  # CDNA 1 (MI100), Vega 20 (gfx906), CDNA 3 (MI300X / MI325X),
-                                                   # CDNA 4 (MI350X / MI355X): wave64, run through the hip_compat layer's
-                                                   # logical-32-lane half-wavefront warp mapping; experimental
+                                                   # CDNA 4 (MI350X / MI355X): wave64, run through the hip_compat
+                                                   # layer's logical-32-lane half-wavefront warp mapping
 PY_PACKAGES = list(S.PY_PACKAGES)                  # (pillow: pictures in formats other than JPEG/PNG/BMP/GIF)
 CONTEXTS = [8192, 32768, 65536, 131072]
 DEFAULT_CONTEXT = 32768
@@ -137,7 +138,7 @@ SAMPLING, EFFORT = Q.MODEL_DEFAULTS["glm"]        # GLM's own sampling (its gene
 HF = "https://huggingface.co/{repo}/resolve/{revision}/{path}"
 # The models the installer can download: Saguaro's own quants, made from Z.ai's FP8 release (their model card
 # has the measurements against it).
-# Another glm5-next GGUF can be used with --gguf-dir (experimental).  "folder": the files' folder in the repo ("" =
+# Another glm5-next GGUF can be used with --gguf-dir.  "folder": the files' folder in the repo ("" =
 # its top).  "file": the names on Hugging Face, with the quant label its file list groups (and adds up) them by -
 # one label per model; "was": the names they had there before (v1.0.18 and earlier: no label; v1.0.19: Maya-S24 as
 # IQ2_XXS, which Hugging Face added to Maya-S's) - a download under them is used as it is.  "sha256" per file name (the
@@ -232,7 +233,7 @@ MODELS = {
     # it per repo); the vision files are Saguaro's, from the main repo
     "Maya-M-Derisked": {
         "about": "Maya-M-Derisked, Maya-M with a directional weight edit by Blackfrost_AI that reduces blanket "
-                 "refusals: the same IQ2_S quant, files and size, some of its weights changed (experimental)",
+                 "refusals: the same IQ2_S quant, files and size, some of its weights changed",
         "repo": "peasantsmith/GLM-5.3-Flash-Maya-M-Derisked-IQ2_S-GGUF", "revision": "main", "folder": "",
         "file": "GLM-5.3-Flash-Maya-M-Derisked-IQ2_S-{i:05d}-of-{n:05d}.gguf", "shards": 3, "download_gb": 116.0,
         "sha256": {
@@ -1234,7 +1235,7 @@ def installed_hip_info() -> str | None:
 
 def first_run_backend() -> str:
     """The backend of a first run without --backend (nothing set up yet): Metal on a Mac with Apple Silicon, HIP on a
-    PC with an AMD GPU Maya's HIP build takes (check_hip_pc's list, the experimental ones too) and no NVIDIA one, else
+    PC with an AMD GPU Maya's HIP build takes (check_hip_pc's list, the not-measured-yet ones too) and no NVIDIA one, else
     CUDA.  On Windows the AMD GPUs are named by an installed ROCm's hipInfo first: Windows' adapter table knows the
     common cards only, and an AMD-only PC whose card it did not know was sent to the CUDA checks, which stop at
     nvidia-smi (#805)."""
@@ -1330,8 +1331,8 @@ def check_hip_pc(a, installed=False, text_only=True, family: str = "glm", gguf: 
         say(f"    {gpu_label(g)} - " + ("can be used" if g in usable else "not supported by Saguaro's HIP build"))
     if not usable:
         fail("no supported AMD GPU found", "this port targets RX 7900 XT / XTX (gfx1100), RX 9070 / AI PRO R9700 "
-             "(gfx1201), and Strix Halo / Gorgon Halo, Radeon 8050S / 8060S / 8065S (gfx1151); experimental, not "
-             "validated: RX 6800 / 6900, Radeon PRO V620 / W6800 (gfx1030)")
+             "(gfx1201), and Strix Halo / Gorgon Halo, Radeon 8050S / 8060S / 8065S (gfx1151); RX 6800 / 6900 and "
+             "Radeon PRO V620 / W6800 (gfx1030) build too, run on a Radeon PRO V620 - on no other RDNA 2 card yet")
     if WIN and hipinfo and all(g.get("source") == "registry" for g in found):
         warn(f"ROCm's hipInfo sees no AMD GPU (the list above is Windows'): the engine cannot start until it does - "
              f"update AMD's driver (AMD Software: Adrenalin Edition, https://www.amd.com/en/support), restart, and "
@@ -1441,8 +1442,8 @@ def check_hip_pc(a, installed=False, text_only=True, family: str = "glm", gguf: 
         ok("APU / unified memory: the engine sizes the GPU expert pool from available system RAM")
     unvalidated = sorted({g["arch"] for g in chosen if g["arch"] in HIP_ARCHS_UNVALIDATED})
     if unvalidated:
-        warn(f"{', '.join(unvalidated)} (RDNA 2) is experimental: it builds and has the portable kernels, but Saguaro has "
-             "not been validated on such a card yet - please report how it goes in an issue "
+        warn(f"{', '.join(unvalidated)} (RDNA 2) builds and has the portable kernels, and has been run on a Radeon PRO "
+             "V620 (ROCm 7), but on no other RDNA 2 card yet - please report how it goes in an issue "
              "(https://github.com/ksanislo/saguaro/issues)")
     select_build_backend("hip")
     return {"backend": "hip", "gpus": chosen, "archs": sorted({g["arch"] for g in chosen}), "rocm": str(root),
@@ -1461,7 +1462,7 @@ def check_metal_pc(a) -> dict:
     gpu = metal_gpus()[0]
     total, avail = mem_gb()
     ok(f"using {gpu['name']} ({total:.0f} GB unified memory, about {gpu['vram_gb']:.0f} GB of it for the GPU); "
-       "experimental Metal: text only, one conversation at a time")
+       "Metal: text only, one conversation at a time")
     if total < 100:
         warn(f"the model is about 95-100 GB (Maya-S) and this Mac has {total:.0f} GB of unified memory: the routed experts "
              "stream from the SSD while it answers, so decode speed is limited by the SSD (an internal NVMe drive)")
@@ -1775,7 +1776,7 @@ def check_pc(a, family: str = "glm", gguf: bool = False, ds4_quant: str = "exl3"
     #  either class alone, so this is a warning with the way out)
     if family == "qfn" and min(archs) < QF.SM75 <= max(archs):
         warn("these GPUs mix pre-Turing cards (compute capability below 7.5) with newer ones: saguaro-qfn's "
-             "experimental pre-Turing build is made only when EVERY chosen card is older than 7.5 - this mixed "
+             "pre-Turing build (its SM60 path) is made only when EVERY chosen card is older than 7.5 - this mixed "
              "list builds for the newer cards only, and the pre-Turing card would get a binary with no kernel "
              "image for it (run the setup with --gpu N for one class of these cards at a time; the other class "
              "can be set up again later)")
@@ -3329,7 +3330,7 @@ def model_step(a, models: Path, choice: tuple):
     if kind == "exl3":                                 # an EXL3 folder of your own (--model-dir): complete by its own index
         d, quant = what, what.name
         shards = exl3_folder_files(d, ("config.json", "tokenizer.json", "tokenizer_config.json"))
-        warn(f"{quant}: experimental - only {', '.join(MODELS)} has been measured with Saguaro (README.md)")
+        warn(f"{quant}: not measured with Saguaro yet - only {', '.join(MODELS)} has been measured (README.md)")
     elif kind == "local":
         shards, quant, d = shard_set(what), quant_of(what), what.parent
         for s in shards:
@@ -3337,7 +3338,7 @@ def model_step(a, models: Path, choice: tuple):
             if why:
                 fail(f"{s.name}: {why}", f"finish copying or downloading it, then run {ME} again")
         if quant not in MODELS:
-            warn(f"{quant}: experimental - only {', '.join(MODELS)} has been measured with Saguaro (README.md)")
+            warn(f"{quant}: not measured with Saguaro yet - only {', '.join(MODELS)} has been measured (README.md)")
     else:
         quant = what
         m = MODELS[quant]
@@ -9246,7 +9247,7 @@ def set_up_ik2(a, prev: dict) -> Path | None:
     ok(f"model: {local.name + f' (your own file, {ex:.1f} GB of experts)' if local else Q.shown('ik2', quant, m['download_gb'])}"
        " - thinkingmachines' Inkling-2-Mini (Apache 2.0)")
     if amd:
-        warn(f"{IK2_SHOWN} on AMD is experimental here: checked on an RX 9070 XT (gfx1201) only - tell us how it goes")
+        warn(f"{IK2_SHOWN} on AMD: checked on an RX 9070 XT (gfx1201) only, no other AMD card yet - tell us how it goes")
     ok(f"layout: {lay['said']}" + (f" - {IK2F.speeds(lay)}" if IK2F.speeds(lay) else
                                    " (this layout is not measured on this kind of card here: tell us your speed)"))
     ctx = choose_context(a, prev_ctx if prev.get("gpu") and len(prev["gpu"]) == len(pc["gpus"]) else None,
@@ -9458,7 +9459,7 @@ def main() -> int:
     stop_signals()            # (SIGTERM / SIGHUP stop it as Ctrl+C does: the server it runs with it)
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--backend", choices=["cuda", "hip", "metal"],
-                    help="GPU backend (HIP: gfx1100/gfx1201/gfx1151 on Linux and Windows; Metal: experimental, "
+                    help="GPU backend (HIP: gfx1100/gfx1201/gfx1151 on Linux and Windows; Metal: "
                          "Apple Silicon Macs, text only; the default on a Mac)")
     ap.add_argument("--setup", action="store_true", help="set up again instead of starting the installed model")
     ap.add_argument("--check", action="store_true", help="only check this PC and exit")
@@ -9761,7 +9762,7 @@ def main() -> int:
             for line in glm_fit_lines(pc["gpus"]):
                 say(line)
         if a.backend == "metal":
-            say(f"This Mac can run Saguaro on Metal (experimental). Run {ME} without --check to set it up.")
+            say(f"This Mac can run Saguaro on Metal. Run {ME} without --check to set it up.")
         elif a.backend == "hip":
             pick = (f"--gpus {','.join(str(g['index']) for g in pc['gpus'])}" if len(pc["gpus"]) > 1
                     else f"--gpu {pc['gpus'][0]['index']}")
@@ -9769,7 +9770,7 @@ def main() -> int:
                 ", ".join(FAMILY_SHOWN[f] for f in FAMILIES if not family_unavailable(f, "hip")) +
                 "; not yet: " + ", ".join(FAMILY_SHOWN[f] for f in FAMILIES if family_unavailable(f, "hip")) +
                 " (docs/AMD_SAGUARO.md).")
-            say(f"HIP prerequisites found. Run {ME} --backend hip {pick} to try the experimental port.")
+            say(f"HIP prerequisites found. Run {ME} --backend hip {pick} to set Saguaro up on AMD.")
         else:
             say(f"This PC can run Saguaro. Run {ME} without --check to set it up.")
         return 0

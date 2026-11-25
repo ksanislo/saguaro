@@ -153,7 +153,7 @@ and clips; FP16 MMA, and wgmma on Hopper).
 **Decode** is bound by the PCIe link (~47 expert misses a token on the H200). `SAGUARO_IK2_CPU=1` computes a missing
 expert on the CPU when that is sooner than its copy (NVFP4 experts, AVX-512).
 
-**Two GPUs** (`--gpus 2`, outside the preview of section 8: with `SAGUARO_IK2_UNSUPPORTED=1`): `SAGUARO_IK2_EP=1` deals each layer's experts to both by how often they are picked
+**Two GPUs** (`--gpus 2`, outside the setup's path of section 8: with `SAGUARO_IK2_UNSUPPORTED=1`): `SAGUARO_IK2_EP=1` deals each layer's experts to both by how often they are picked
 (`SAGUARO_IK2_EP_SPLIT`, GPU 1's share), each GPU with its own cache and link; attention and the KV cache stay on GPU 0.
 Without it the layers are split between the GPUs.
 
@@ -214,8 +214,8 @@ as an option); the drafter (`--draft`: 2.4-2.7 tokens a step, but verifying 8 co
 
 ## 7. Next
 
-1. Setup in `saguaro.py` (download, the RAM / VRAM check, the run config), as Hy4-Flash has - done for Inkling-2-Mini as
-   an experimental preview (`saguaro.py --setup --model inkling-2-mini`: docs/MODELS.md); Inkling-2-Small by hand still.
+1. Setup in `saguaro.py` (download, the RAM / VRAM check, the run config), as Hy4-Flash has - done for Inkling-2-Mini
+   (`saguaro.py --setup --model inkling-2-mini`: docs/MODELS.md); Inkling-2-Small by hand still.
 2. Several requests at once; the vision tower inside the engine (pictures work through the image encoder `vision-glm`: section 8).
 3. A Maya quant of the experts in the shape of DeepSeek XS (section 5), for 160 GB of host memory.
 
@@ -423,7 +423,7 @@ the rest read and pinned - an 8 GB card's tier is 2.6 GiB of RAM the PC does not
 24 GB, e.g. 16 GB of RAM with an 8 GB card; no SSD tier): the setup refuses less in one line. Drafting stays off on
 the offload path (its window runs only where every expert is in VRAM; a NOTE says so).
 
-**The preview.** Inkling-2-Mini comes in as an experimental preview: Linux or Windows, one NVIDIA GPU of 8 GB or more, sm_70
+**In the setup.** Inkling-2-Mini comes in to the setup: Linux or Windows, one NVIDIA GPU of 8 GB or more, sm_70
 (Volta: V100) or newer, Pascal (sm_6x) second-class; tested on RTX 3090s (sm_86) and V100s (sm_70); a Tesla P40 (sm_61,
 CUDA 12.0: the kernels test and the T4 quant resident, 2026-11-23); Turing (sm_75) kernel-tested only, Blackwell
 (sm_100 / sm_120) compile-checked only; Windows run on an RTX 3050 8 GB (@cobra91's MSVC port, its VRAM as CUDA gets it
@@ -495,7 +495,7 @@ Thinking is the template's `reasoning_effort`, a name or a number in [0.0, 0.99]
 | `dspark-Inkling-2-Mini-Q8_0.gguf` (0.4 GB, the drafter as a GGUF, Q8_0: the setup fetches it on NVIDIA, not with `--drafting off`; unsloth's file byte for byte) | [peasantsmith/Inkling-2-Mini-Maya-GGUF](https://huggingface.co/peasantsmith/Inkling-2-Mini-Maya-GGUF) (`drafter/`) | `2ec78510da837e8fc3be54a14757a0c5fbd2d8d9e85a0d92853fafdf674f3773` |
 | `mtp.safetensors` (0.6 GB, the same drafter as published, BF16: the setup fetches it on AMD; thinkingmachines' file byte for byte) | [peasantsmith/Inkling-2-Mini-Maya-GGUF](https://huggingface.co/peasantsmith/Inkling-2-Mini-Maya-GGUF) (`drafter/`) | `7c3b651317f01f73bcf4e1dceba66ef8b7e1a1eac6bc171e882e690a4b10a1d2` |
 
-Outside the preview, the older two-GPU mode with a loop runs as expert parallel (`SAGUARO_IK2_EP=1`, its caches filled at the
+Outside the setup's path, the older two-GPU mode with a loop runs as expert parallel (`SAGUARO_IK2_EP=1`, its caches filled at the
 start: checked on Windows, an RTX 5080 with an RTX 4060 Ti; refused where the copies between the cards would have to go
 through host memory); the drafter is one GPU's.  Not done: the loop in the layer-major prompt passes (`SAGUARO_IK2_SUP`: off
 for a looped model), a second card for the KV cache (a million tokens is 16 GiB of it), the drafter's own launches
@@ -563,7 +563,8 @@ gates F32 (0.14 GiB). 16.4 GiB in all - more than one T4's 15.6, so:
 - **Two T4s**: the split - the first card on the offload path (dense weights, the K / V cache, every prompt, its tier),
   the second with the next experts: at 131,072 with the FP16 cache every expert is on the two cards
   (`tools/ik2_fit.py` `plan_two`). `--parallel` is not taken on two cards (the engine says so).
-- **The one-T4 quant** (`configs/Inkling-2-Mini-T4-NVFP4-IQ3_XXS.1card.json`, experimental: 11.45 GiB of experts) keeps
+- **The one-T4 quant** (`configs/Inkling-2-Mini-T4-NVFP4-IQ3_XXS.1card.json`: 11.45 GiB of experts, lower quality - KL
+  0.012 against UD-Q4_K_XL) keeps
   every expert resident on one T4 at 32,768 - the resident path, where `--parallel` runs.
 
 **Check on the cards**: `tools/ik2/t4_check.sh --gpus 2,3` runs `ik2_kernels_test` (each kernel against a double

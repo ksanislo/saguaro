@@ -1,8 +1,8 @@
-# Experimental MI50 (gfx906) source-build validation
+# MI50 (gfx906) source-build validation
 
 ## Status
 
-This change adds experimental HIP source-build support for AMD Instinct MI50 (`gfx906`). It does not change Maya's installer. Build commands below assume a fresh source checkout and an existing ROCm installation that supplies `gfx906` rocBLAS/Tensile libraries. The necessary rocBLAS/Tensile support is supplied separately; this change does not rebuild or redistribute it.
+This change adds HIP source-build support for AMD Instinct MI50 (`gfx906`). It does not change Maya's installer. Build commands below assume a fresh source checkout and an existing ROCm installation that supplies `gfx906` rocBLAS/Tensile libraries. The necessary rocBLAS/Tensile support is supplied separately; this change does not rebuild or redistribute it.
 
 The patch is based on Project Maya `10e69a0eb11541004abb24f9fa47147e9002326f` (v1.1.50). Upstream v1.1.50 already includes `gfx906` CMake target registration and `__builtin_amdgcn_sdot4` (via PR #505 `097adc1`) and `defined(__gfx906__)` Wave64 `ds_swizzle` + `quad_perm` attention reductions and `hip_fast_signs` (via PR #529 `9690e37`). Its pinned GGML source is `ggml-org/llama.cpp` commit `3cf03257f219afbe7334045ff7c6a06ac68c627d`; all 1,376 tracked regular files in the GGML subtree matched the pinned tree exactly.
 

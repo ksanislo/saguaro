@@ -1,4 +1,4 @@
-# Experimental Saguaro on RX 7900 XT / XTX, R9700 / RX 9070 and Strix Halo / Gorgon Halo
+# Saguaro on RX 7900 XT / XTX, R9700 / RX 9070 and Strix Halo / Gorgon Halo
 
 ## What runs on AMD
 
@@ -6,12 +6,12 @@ The state of this version (keep this table, the setup's `NO_ENGINE` list in `sag
 
 | Model | Engine (CMake target) | On AMD (HIP) |
 | --- | --- | --- |
-| GLM-5.3-Flash | `saguaro-glm` (`maya`) | builds and runs (experimental); its GPU self-tests pass on an RX 9070 XT (gfx1201, ROCm 7.1). The quant that fits a 16 GB card + 96 GB of RAM is Maya-XS (73 GB); the setup recommends the largest one that fits VRAM + RAM |
+| GLM-5.3-Flash | `saguaro-glm` (`maya`) | builds and runs; its GPU self-tests pass on an RX 9070 XT (gfx1201, ROCm 7.1). The quant that fits a 16 GB card + 96 GB of RAM is Maya-XS (73 GB); the setup recommends the largest one that fits VRAM + RAM |
 | Qwen3.8-Flash-Next (unsloth's UD-Q4_K_XL / Q8_0; Blackfrost-AI's CYBER-FROST fine-tune as a quant of its own) | `saguaro-qfn` (`engines/qfn`) | builds and runs on an RX 9070 XT (gfx1201, ROCm 7.1) with 96 GB of RAM (27-41 tok/s answers, 520-1,080 tok/s 8K-16K prompt reads); the setup offers it (`--model qwen3.8-flash-next`, `--model cyber-frost` for the fine-tune) for one RDNA GPU (the layout it was measured on: 16 GB or more with ~96 GB of RAM; smaller cards and less RAM run it too, slowly - only a PC that cannot hold the model at all is refused): the experts the card does not hold in a pinned RAM tier and the rest read from the SSD - [below](#qwen38-flash-next-on-the-saguaro-qfn-engine) |
 | DeepSeek-V4.1-Flash-1017 | `saguaro-ds4` (`maya-ds4`) | compiles for HIP (gfx1201 checked); not yet run on an AMD GPU |
 | MiniMax-M3.1-Flash | `saguaro-mm3` (`maya-mm3`) | compiles for HIP (gfx1201 checked); not yet run on an AMD GPU |
 | Hy4-Flash | `saguaro-hy4` (`maya-hy4`) | not run on an AMD GPU yet: the setup does not offer it on AMD |
-| Inkling 2 Mini | `saguaro-ik2` | builds and runs (experimental) on an RX 9070 XT (gfx1201, ROCm 7.1): UD-Q4_K_XL on the offload path about 71 tok/s, every serve check incl. pictures passes; the setup recommends it for one 16-23 GB RDNA 3 / 4 card |
+| Inkling 2 Mini | `saguaro-ik2` | builds and runs on an RX 9070 XT (gfx1201, ROCm 7.1): UD-Q4_K_XL on the offload path about 71 tok/s, every serve check incl. pictures passes; the setup recommends it for one 16-23 GB RDNA 3 / 4 card |
 
 `./saguaro.sh --check` on an AMD PC lists the same. Report how a model runs on your card in an
 [issue](https://github.com/ksanislo/saguaro/issues).
@@ -53,8 +53,8 @@ are the kernel KFD topology order shown by `--check`; on the test machine the
 installer accepts `gfx1100`, `gfx1201` and `gfx1151` and compiles the binary for the
 architectures of the chosen cards only (`gfx1100;gfx1201` for that 7900 XT + R9700).
 
-RDNA 2 (`gfx1030`: RX 6800 / 6800 XT / 6900 XT / 6950 XT, Radeon PRO V620 / W6800) is accepted too, as experimental:
-it has been run on a Radeon PRO V620 with ROCm 7 - please report how it goes on other RDNA 2 cards in an issue. These
+RDNA 2 (`gfx1030`: RX 6800 / 6800 XT / 6900 XT / 6950 XT, Radeon PRO V620 / W6800) is accepted too: it has been run
+on a Radeon PRO V620 with ROCm 7, and not on another RDNA 2 card yet - please report how it goes on other RDNA 2 cards in an issue. These
 cards have no matrix cores (WMMA), so the engine uses its portable kernels there (the prompt attention on the F32
 kernel), and a build for RDNA 2 cards alone needs no rocWMMA headers (ROCm 7 no longer ships them). The ROCm
 installation needs its library kernels (hipBLAS) for `gfx1030`.
@@ -161,7 +161,7 @@ v1.0.11, greedy, 256-token answers (median of 10 requests):
 39 back-to-back requests (1.8-4K-token prompts) ran without an error. The default split (the midpoint + 2) measured
 best: moving two or four more layers to the first card did not speed up answers.
 
-### Experimental expert helper
+### Expert helper
 
 `SAGUARO_GLM_EXPERT_HELPER=1` is an opt-in alternative to a layer split: visible GPU 0 keeps every trunk layer,
 attention, state and MTP; visible GPU 1 owns a complementary expert cache. A unified-memory helper reserves slots
@@ -178,7 +178,7 @@ Native GGUF experts only; EXL3 is not supported.
 For physical device 0 = 8060S and 1 = R9700, run the engine with `HIP_VISIBLE_DEVICES=1,0`,
 `SAGUARO_GLM_EXPERT_HELPER=1` and `SAGUARO_GLM_SPLIT=0`. The indices are process-local; the system order is unchanged.
 Keep the normal pack, context, headroom and MTP settings. Unset `SAGUARO_GLM_EXPERT_HELPER` to restore the existing
-behavior. This experimental path does not claim general multi-GPU support or a speedup; measure it on the target
+behavior. This path does not claim general multi-GPU support or a speedup; measure it on the target
 hardware.
 
 #### The helper beside a layer split (two cards and the APU)
@@ -227,7 +227,7 @@ text (`SAGUARO_GLM_MTP_DECODE`, on by default on `gfx115x` only). On the Gorgon 
 3K- and 8K-token prompts, against 18.4-19.7 without it; 3K- and 8K-token prompts read at 271 and 278 tokens/s
 (the fused prompt experts and the `wmma2` attention, both on by default on `gfx1151`).
 
-## Inkling 2 Mini (experimental)
+## Inkling 2 Mini
 
 `./saguaro.sh --setup --backend hip --model inkling-2-mini` (Linux). Its engine (`saguaro-ik2`, upstream Maya v1.1.74's
 with Saguaro's additions) runs on an RDNA 3 / 3.5 / 4 GPU (gfx11 / gfx12) of 12 GB or more: every expert in VRAM where
@@ -237,7 +237,7 @@ by the GPU). Checked on an RX 9070 XT (16 GB, gfx1201, ROCm 7.1, PCIe 5) with a 
 | | decode at ~50 / 8K / 30K tokens deep | 8K prompt read |
 | --- | ---: | ---: |
 | unsloth's UD-Q4_K_XL (offload path, the dynamic GPU cache) | 71.2 / 65.2 / 60.5 tok/s | 1,668 tok/s |
-| our one-T4 quant (every expert in VRAM; experimental, lower quality: KL 0.012 vs UD-Q4_K_XL) | 83.3 / 73.3 / 66.7 tok/s | 1,148 tok/s |
+| our one-T4 quant (every expert in VRAM; lower quality: KL 0.012 vs UD-Q4_K_XL) | 83.3 / 73.3 / 66.7 tok/s | 1,148 tok/s |
 
 Chat, thinking, tools, stops, pictures, the Monitor and kept conversations pass on both. Not checked on AMD yet:
 drafting, two AMD GPUs, a Strix / Gorgon Halo APU. [INKLING2.md](INKLING2.md) has the engine's AMD paths.
@@ -302,8 +302,8 @@ bit-identical. Q8_0 (177 GB) on the same PC: KL 0.0050 against the T4's Q8_0, an
 
 ## Instinct MI300X / MI325X
 
-AMD Instinct MI300X / MI325X (`gfx942`, CDNA3) is accepted as experimental, on one GPU. Like the MI100 it is a wave64
-card and runs through the hip_compat half-wavefront layer.
+AMD Instinct MI300X / MI325X (`gfx942`, CDNA3) is accepted, on one GPU; the MI325X has been benched below, the MI300X itself has not
+been tried yet. Like the MI100 it is a wave64 card and runs through the hip_compat half-wavefront layer.
 
 Install ROCm's development packages for the card first (ROCm 7.14: `amdrocm-core-dev7.14-gfx942` and
 `amdrocm-blas-dev7.14`), then run the setup above without the `SAGUARO_GLM_RAM_GB` override. On an MI325X (256 GB) every

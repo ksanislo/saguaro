@@ -40,14 +40,15 @@ the model's MTP block, which drafts tokens ahead.
 | **GLM-5.3 · Maya-S24** | `glm-maya-s24` | 94.7 GB | cards of 24 GB or less: 4-bit attention leaves ~1.5 GB more of the card for experts, decode +14% | 97.7%; 83% |
 | **GLM-5.3 · Maya-XS** | `glm-maya-xs` | 73.4 GB | PCs with 64 GB of RAM and a 24 GB card, at 128K context (int8 KV cache, thinking budget 8192) | - |
 | **GLM-5.3 · Maya-M** | `glm-maya-m` | 116 GB | a bigger memory pool; more bits where they count, calibrated toward tool calls and front-end code | 97.9%; 86% |
-| **GLM-5.3 · Maya-M-Derisked** | `glm-maya-m-derisked` | 116 GB | Maya-M with a weight edit by [Blackfrost_AI](https://x.com/Blackfrost_AI) that reduces blanket refusals ([its repo](https://huggingface.co/peasantsmith/GLM-5.3-Flash-Maya-M-Derisked-IQ2_S-GGUF)); experimental | not measured yet |
+| **GLM-5.3 · Maya-M-Derisked** | `glm-maya-m-derisked` | 116 GB | Maya-M with a weight edit by [Blackfrost_AI](https://x.com/Blackfrost_AI) that reduces blanket refusals ([its repo](https://huggingface.co/peasantsmith/GLM-5.3-Flash-Maya-M-Derisked-IQ2_S-GGUF)) | not measured yet |
 | **GLM-5.3 · Maya-L** | `glm-maya-l` | 156.3 GB | the biggest memory pools | **99.2%**; 90% |
 
 The setup recommends one for your PC. How they're made and measured: [MAYA-S](../bench/results/MAYA-S.md),
 [MAYA-S24](../bench/results/MAYA-S24.md), [MAYA-M](../bench/results/MAYA-M.md), [MAYA-L](../bench/results/MAYA-L.md). On
 [Hugging Face](https://huggingface.co/peasantsmith/GLM-5.3-Flash-Maya-GGUF).
 
-On AMD, GLM-5.3-Flash reads pictures too (experimental): setup builds its image encoder for the GPU.
+On AMD, GLM-5.3-Flash reads pictures too: setup builds its image encoder for the GPU (no AMD run of one is measured
+here yet - [docs/AMD_SAGUARO.md](AMD_SAGUARO.md)).
 
 ### GLM-5.3-Flash's options
 
@@ -86,7 +87,7 @@ results. See [the prompt format notes](deepseek-prompt-format.md) for API detail
 | unsloth's [UD-IQ1_M GGUF](https://huggingface.co/unsloth/DeepSeek-V4.1-Flash-1017-GGUF) (`--ds4-quant gguf-iq1_m`): for PCs with about 150 GB of VRAM + RAM | 301 GB, with Saguaro's n-gram tables | the same |
 | unsloth's [UD-IQ3_S GGUF](https://huggingface.co/unsloth/DeepSeek-V4.1-Flash-1017-GGUF) (`--ds4-quant gguf-iq3_s`): close to Q8's quality, for PCs with about 270 GB of VRAM + RAM; shares its n-gram tables with Saguaro's quants | 424 GB, with the n-gram tables | the same |
 | unsloth's [UD-Q8_K_XL GGUF](https://huggingface.co/unsloth/DeepSeek-V4.1-Flash-1017-GGUF) (`--ds4-quant gguf-q8`; DeepSeek's own formats): the closest to the original, for PCs with about 310 GB of VRAM + RAM | 467 GB, with Saguaro's n-gram tables | the same |
-| LibertAIDAI's [EXL3 2.9 bpw](https://huggingface.co/LibertAIDAI/DeepSeek-V4.1-Flash-1017-EXL3-2.9bpw) + DeepSeek's Engram tables | 414 GB | NVIDIA from Volta (V100) on; pictures from RTX 30 / A100 on; AMD experimental |
+| LibertAIDAI's [EXL3 2.9 bpw](https://huggingface.co/LibertAIDAI/DeepSeek-V4.1-Flash-1017-EXL3-2.9bpw) + DeepSeek's Engram tables | 414 GB | NVIDIA from Volta (V100) on; pictures from RTX 30 / A100 on; on AMD the kernels pass their tests and the whole model has had a smoke test only |
 | LibertAIDAI's [EXL3 3.5 bpw](https://huggingface.co/LibertAIDAI/DeepSeek-V4.1-Flash-1017-EXL3-3.5bpw) + the same Engram tables (`--ds4-quant exl3-3.5`: closer to the original, ~280 GB of VRAM + RAM) | 461 GB | the same |
 | orcarouter's [Abliterated GGUFs](https://huggingface.co/orcarouter/DeepSeek-V4.1-Flash-1017-abliterated-GGUF), the model with its refusals removed: Mix-128G (`--ds4-quant abliterated-128g`, ~114 GB of VRAM + RAM) or Mix-256G (`abliterated-256g`, ~236 GB); `abliterated` picks the one your PC holds. Their n-gram table is left out and Saguaro's Q6_K tables are read instead (once for both). A gated repo: accept its terms, then `HF_TOKEN` or `hf auth login` | 275 / 397 GB, with the 161 GB of n-gram tables shared with Saguaro's DeepSeek quants (downloaded once) | NVIDIA from Volta (V100) on (AMD not tried yet) |
 
@@ -196,7 +197,7 @@ looped model with 8 of 128 experts a token; Apache 2.0) on an engine of its own 
 | One Tesla T4: the offload path - the most-used experts in VRAM, the rest in RAM | 32K | about 40 tokens/s writing, 840 reading |
 | Two Tesla T4s: every expert in VRAM across the two | 131K | about 51 tokens/s writing, 1100 reading |
 | One RX 9070 XT (16 GB, RDNA 4): the offload path | 32K | about 71 tokens/s writing, 1670 reading |
-| One RX 9070 XT, the one-T4 quant (every expert in VRAM; experimental, lower quality) | 32K | about 80 tokens/s writing, 1150 reading |
+| One RX 9070 XT, the one-T4 quant (every expert in VRAM; lower quality: KL 0.012 vs UD-Q4_K_XL) | 32K | about 80 tokens/s writing, 1150 reading |
 
 It also sets up on NVIDIA cards from 8 GB (V100 and newer; the experts a card does not hold stay in RAM) and on AMD
 RDNA 3 / 4 GPUs of 12 GB or more. Tool calls, five thinking levels, pictures; one conversation at a time on two cards
@@ -252,5 +253,5 @@ These also run on Saguaro:
 
 | Model | Size | How | Notes |
 | --- | ---: | --- | --- |
-| [EXL3 3.05 bpw](https://huggingface.co/turboderp/GLM-5.3-Flash-exl3/tree/3.05bpw) by turboderp | 125.3 GB | in the setup: `--model EXL3-3.05bpw` | experimental; NVIDIA, and AMD |
-| [EXL3 4.05 bpw](https://huggingface.co/turboderp/GLM-5.3-Flash-exl3/tree/4.05bpw) by turboderp | 165.2 GB | in the setup: `--model EXL3-4.05bpw` | experimental; NVIDIA, and AMD |
+| [EXL3 3.05 bpw](https://huggingface.co/turboderp/GLM-5.3-Flash-exl3/tree/3.05bpw) by turboderp | 125.3 GB | in the setup: `--model EXL3-3.05bpw` | NVIDIA, and AMD; tested on Linux, not measured against the FP8 model |
+| [EXL3 4.05 bpw](https://huggingface.co/turboderp/GLM-5.3-Flash-exl3/tree/4.05bpw) by turboderp | 165.2 GB | in the setup: `--model EXL3-4.05bpw` | NVIDIA, and AMD; not measured against the FP8 model |
