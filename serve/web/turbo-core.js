@@ -41,12 +41,19 @@ export const CODING_IDEAS = [
 // changeable mid-conversation (they apply from the next turn).  `chat.turbo` holds {"drop": 0-3, "skip":
 // "off"|"ssd"|"ram"}, or nothing while the chat is exact.  serve/turbo_live.py reads the same shape on the wire.
 
+// the words the Settings rows and the chat menu show (PLAN-p5: name the options plainly, and say out loud what
+// the RAM tier risks); warn: only RAM carries one, the pages show it under the row / in the item hint.
 export const TURBO_DROPS = [1, 2, 3];
+export const TURBO_DROP_HINT = "fewer of the 10 routed experts a token, the weakest dropped";
 export const TURBO_SKIPS = [
   {id: "off", name: "off", hint: "every expert the router picks is used"},
-  {id: "ssd", name: "SSD", hint: "an expert that would come off the SSD is dropped (VRAM and RAM still serve)"},
-  {id: "ram", name: "RAM", hint: "an expert not in VRAM is dropped (VRAM only)"},
+  {id: "ssd", name: "SSD", hint: "an expert that would be read from the SSD is left out"},
+  {id: "ram", name: "RAM", hint: "an expert that is not on the card is left out",
+   warn: "can break answers: only where almost everything is on the card"},
 ];
+
+// the warning a skip level carries ("" for off and SSD)
+export const turboSkipWarn = (skip) => (TURBO_SKIPS.find((s) => s.id === skip) || {}).warn || "";
 
 // the chat's Turbo as the request sends it (null = exact: the field is not sent at all)
 export function turboOfChat(chat) {

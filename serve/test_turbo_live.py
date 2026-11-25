@@ -179,6 +179,22 @@ class PageSide(unittest.TestCase):
         self.assertEqual(r["badge"], "-2 experts · VRAM only")
         self.assertTrue(r["empty"])
 
+    def test_the_options_are_named_plainly(self):
+        """PLAN-p5: the words the rows and the menu show; the warning text exists only for RAM."""
+        r = self.run_js('''console.log(JSON.stringify({
+  drop: T.TURBO_DROP_HINT,
+  words: T.TURBO_SKIPS.map((s) => [s.id, s.name, s.hint, s.warn || ""]),
+  warns: T.TURBO_SKIPS.map((s) => T.turboSkipWarn(s.id))}));''')
+        self.assertEqual(r["drop"], "fewer of the 10 routed experts a token, the weakest dropped")
+        self.assertEqual([w[0] for w in r["words"]], ["off", "ssd", "ram"])
+        self.assertEqual([w[1] for w in r["words"]], ["off", "SSD", "RAM"])
+        self.assertEqual(r["words"][1][2], "an expert that would be read from the SSD is left out")
+        self.assertEqual(r["words"][2][2], "an expert that is not on the card is left out")
+        warn = "can break answers: only where almost everything is on the card"
+        self.assertEqual((r["words"][0][3], r["words"][1][3]), ("", ""))      # (off and SSD carry no warning)
+        self.assertEqual(r["words"][2][3], warn)
+        self.assertEqual(r["warns"], ["", "", warn])                          # (turboSkipWarn: only RAM answers)
+
 
 if __name__ == "__main__":
     unittest.main()

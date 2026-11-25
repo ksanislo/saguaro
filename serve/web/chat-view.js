@@ -10,7 +10,7 @@ import {addFiles, cancelEdit, chatView, ctxMeter, editMessage, focusInput, newCh
 import {markdown, onCodeClick, patchHtml, streamingMarkdown} from "./md.js";
 import {ChatMenuItems, openSettings, setSide, showView, status, usd} from "./sidebar.js";
 import {MS, loadModels} from "./models.js";
-import {CODING_IDEAS, TURBO_DROPS, TURBO_SKIPS, turboBadge, turboChoose, turboToggle} from "./turbo-core.js";
+import {CODING_IDEAS, TURBO_DROPS, TURBO_DROP_HINT, TURBO_SKIPS, turboBadge, turboChoose, turboToggle} from "./turbo-core.js";
 import {Gauge, Icon, Menu, MenuLabel, MenuItem, MenuSep, ModelLogo, useDismiss} from "./ui.js";
 
 // ------------------------------------------------------------------ the header
@@ -351,10 +351,11 @@ function TurboMenu({open, close, anchor}) {
       <span class="switch switch--sm" aria-hidden="true" data-on=${String(!!tb)}><span class="switch__knob"></span></span></button>
     ${tb ? html`<${MenuSep}/>
       <${MenuLabel}>Drop experts<//>
-      ${TURBO_DROPS.map((d) => html`<${MenuItem} label=${`drop ${d} of the 10`} checked=${tb.drop === d}
+      ${TURBO_DROPS.map((d) => html`<${MenuItem} label=${`drop ${d} of the 10`} sub=${TURBO_DROP_HINT} checked=${tb.drop === d}
         onClick=${() => pick("drop", d)}/>`)}
-      <${MenuLabel}>Skip<//>
-      ${TURBO_SKIPS.map((s) => html`<${MenuItem} label=${`skip: ${s.name}`} sub=${s.hint} checked=${(tb.skip || "off") === s.id}
+      <${MenuLabel}>Skip slow experts<//>
+      ${TURBO_SKIPS.map((s) => html`<${MenuItem} label=${`skip: ${s.name}`} checked=${(tb.skip || "off") === s.id}
+        sub=${s.warn ? html`<span>${s.hint} <span class="warn-text">${s.warn}</span></span>` : s.hint}
         onClick=${() => pick("skip", s.id)}/>`)}` : null}
   <//>`;
 }

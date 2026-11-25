@@ -1017,6 +1017,38 @@ console.log(JSON.stringify({tok, none: (() => { st.S.metrics = {}; return sv.kvB
         self.assertTrue(got["line"].startswith("\u2248 0.1 GB of RAM for the context"), got["line"])
         self.assertNotIn("GB", got["noguess"])
 
+    # every string a rendered tree carries (a vnode's text sits in its props; functions and refs are passed over)
+    WALK = """
+const strs = (v, out = []) => {
+  if (typeof v === "string") out.push(v);
+  else if (Array.isArray(v)) v.forEach((x) => strs(x, out));
+  else if (v && typeof v === "object") {
+    if ("type" in v && "props" in v) strs(v.props, out);
+    else for (const k in v) strs(v[k], out);
+  }
+  return out;
+};"""
+
+    def test_the_ram_skip_carries_its_warning_under_the_row_only_for_ram(self):
+        # Settings > Turbo, live: the rows name the options plainly, and the RAM warning (callout--warn, the
+        # class the page already has for warnings) shows under the Skip row only while RAM is chosen
+        got = self.node(self.WALK + """
+const tb = await import(web + "/turbo.js");
+const at = () => strs(tb.TurboLive());
+st.S.turboLive = {drop: 1, skip: "off"}; const off = at();
+st.S.turboLive = {drop: 1, skip: "ssd"}; const ssd = at();
+st.S.turboLive = {drop: 1, skip: "ram"}; const ram = at();
+console.log(JSON.stringify({off, ssd, ram}));""")
+        warn = "can break answers: only where almost everything is on the card"
+        for name in ("off", "ssd", "ram"):
+            tree = got[name]
+            for wanted in ("Drop experts", "fewer of the 10 routed experts a token, the weakest dropped",
+                           "Skip slow experts", "an expert that would be read from the SSD is left out",
+                           "an expert that is not on the card is left out"):
+                self.assertIn(wanted, tree, f"{name}: {wanted}")
+            self.assertEqual(any("callout--warn" in s for s in tree), name == "ram", name)
+            self.assertEqual(warn in tree, name == "ram", name)
+
 
 if __name__ == "__main__":
     unittest.main()
