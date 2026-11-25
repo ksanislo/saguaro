@@ -972,8 +972,8 @@ class StrataEngine:
                         pass
             if line.startswith("BRA "):                # its slot's read ended (or was refused): the heartbeat is stale
                 try:
-                    self.read_live["slots"].pop(int(line.split()[1]), None)
-                except (IndexError, ValueError):
+                    getattr(self, "read_live", {}).get("slots", {}).pop(int(line.split()[1]), None)
+                except (AttributeError, IndexError, ValueError):
                     pass
             if line.startswith(SLOT_LINES) and slot_q:   # --batch: a batch slot's own lines
                 try:
@@ -1216,7 +1216,8 @@ class StrataEngine:
             self.read_done = (int(float(kv["new"])), float(kv["ms"]))
         except (KeyError, ValueError):
             pass
-        self.read_live["solo"] = None    # (U5: this read's heartbeats are over - RDONE carries its final figures)
+        if getattr(self, "read_live", None) is not None:   # (U5: heartbeats over - RDONE carries the final figures)
+            self.read_live["solo"] = None
 
     def _rhb(self, line):
         """`RHB rid=<rid|0> stage=<stage|read> done=<n> new=<n> reused=<n> pass=<i>/<n> ms=<ms> [slot=<b>]`
@@ -1231,6 +1232,9 @@ class StrataEngine:
             done, new, reused, ms = int(kv["done"]), int(kv["new"]), int(kv["reused"]), float(kv["ms"])
         except (KeyError, ValueError):
             return
+        live = getattr(self, "read_live", None)     # (an engine built without __init__: the first line lays it out)
+        if live is None:
+            live = self.read_live = {"solo": None, "slots": {}}
         slot = kv.get("slot")
         try:
             slot = int(slot) if slot else None
@@ -1241,8 +1245,7 @@ class StrataEngine:
                  "t": time.time()}
         pi, slash, pn = kv.get("pass", "").partition("/")
         entry["pass"] = [int(pi), int(pn)] if pi.isdigit() and slash and pn.isdigit() else None
-        prev = (self.read_live["slots"] if slot is not None else {}).get(slot) if slot is not None \
-            else self.read_live["solo"]
+        prev = live["slots"].get(slot) if slot is not None else live["solo"]
         if prev:
             dd, dm = done - prev["done"], ms - prev["ms"]
             entry["rate"] = dd / (dm / 1000.0) if dd > 0 and dm > 0 else prev.get("rate")
