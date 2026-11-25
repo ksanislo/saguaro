@@ -125,6 +125,12 @@ function drafterName(name) {
 const CHAT_STATES = {queued: ["muted", "Queued"], reading: ["info", "Reading"], thinking: ["accent", "Thinking"],
                      writing: ["accent", "Writing"], tool: ["warn", "Tool call"]};
 
+// the request's queue priority (R122): a small tag on its row - high and background only, normal is the run
+// of the mill; a paused one says what it waits for in its detail line ("paused for a higher-priority request")
+const PriorityTag = ({p}) => (p === "high" || p === "background")
+  ? html`<span class=${`badge badge--${p === "high" ? "warn" : "muted"}`}><i class="badge__dot"></i>${p}</span>`
+  : null;
+
 // the "Right now" rows from /metrics' live.chats, pure (a page-logic test can run it): newest-queued first, a
 // summary like "3 writing, 1 reading, 2 waiting", and the first six with the rest counted (+N more)
 export function chatsModel(m) {
@@ -163,8 +169,9 @@ function RightNow({m}) {
         detail = `${fmt(c.generated || 0)}${c.max_tokens ? ` / ${fmt(c.max_tokens)}` : ""} tokens` +
                  `${c.tok_s ? ` · ${fmt(c.tok_s, 1)} tok/s` : ""}${took(c.elapsed_s)}`;
       }
+      if (c.paused_for_priority) detail = `paused for a higher-priority request${detail ? ` · ${detail}` : ""}`;
       return html`<div class=${`now__chat${turboBadge(c.turbo) ? " now__chat--turbo" : ""}`} title=${null}>
-        <span class="now__tags"><${Badge} tone=${tone}>${text}<//><${TurboBadge} turbo=${c.turbo}/></span>
+        <span class="now__tags"><${Badge} tone=${tone}>${text}<//><${PriorityTag} p=${c.priority}/><${TurboBadge} turbo=${c.turbo}/></span>
         <div class="now__chat__body">
           ${pct != null ? html`<div class="bar bar--sm" role="progressbar" data-tone=${ptone} aria-valuenow=${Math.round(pct)}
             aria-valuemin="0" aria-valuemax="100" aria-label=${who}><span style=${`width:${pct}%`}></span></div>` : null}
@@ -198,9 +205,10 @@ function RightNow({m}) {
   }
   const running = live.state !== "idle";
   const one = (live.chats || [])[0];   // one chat: its own Turbo, when it asked for any
+  if (live.paused_for_priority) detail = `paused for a higher-priority request${detail ? ` · ${detail}` : ""}`;
   return html`<section class="card card--side" aria-label="Right now">
     <span class="card__title">Right now</span>
-    <div class="now"><${Badge} tone=${tone}>${label}<//>${one && one.turbo ? html` <${TurboBadge} turbo=${one.turbo}/>` : null}<span class="now__detail num">${detail}</span></div>
+    <div class="now"><${Badge} tone=${tone}>${label}<//><${PriorityTag} p=${one && one.priority}/>${one && one.turbo ? html` <${TurboBadge} turbo=${one.turbo}/>` : null}<span class="now__detail num">${detail}</span></div>
     ${pct != null ? html`<div class="bar" data-tone=${ptone} role="progressbar" aria-valuenow=${Math.round(pct)} aria-valuemin="0" aria-valuemax="100"
       aria-label=${label}><span style=${`width:${pct}%`}></span></div>` : null}
     <dl class="kv">
