@@ -106,7 +106,8 @@ WIN = S.WIN
 ME = "START-SAGUARO.bat" if WIN else "./saguaro.sh"      # how this is started, for the messages
 UPDATE_EXIT = 75                                   # the server's exit after the dashboard updated Saguaro (serve/update.py)
 RESTART_EXIT = 76                                  # ... after it saved a new port: start again on the saved one
-SWITCH_FILE = ".maya-switch.json"                  # ... or the Models page's note: the config to start (serve/models.py)
+SWITCH_FILE = ".saguaro-switch.json"               # ... or the Models page's note: the config to start (serve/models.py);
+#                                                  #  a .maya-switch.json note of before the C122 rename is read too
 ROOT = S.ROOT
 BUILD = ROOT / "build"
 EXE = BUILD / ("saguaro-glm.exe" if WIN else "saguaro-glm")
@@ -5261,11 +5262,13 @@ def after_server(rc: int, a) -> int:
     backend, config = a.backend, getattr(a, "config", None)
     # the Models page: another model to start (a switch), or this one with its new engine settings - the server's
     # note says which config, on the port it listened on (so the page finds it again)
-    note = read_json(ROOT / SWITCH_FILE) if rc == RESTART_EXIT else {}
-    try:
-        (ROOT / SWITCH_FILE).unlink()
-    except OSError:
-        pass
+    notes = CN.note_paths(ROOT, SWITCH_FILE) if rc == RESTART_EXIT else []
+    note = read_json(notes[0]) if notes else {}      # (the 1.2.2 note name first; a .maya-switch.json note of
+    for f in notes:                                  #  before the rename is read too) - read once, neither stays
+        try:
+            f.unlink()
+        except OSError:
+            pass
     why = None
     if note.get("config") and Path(note["config"]).is_file() and time.time() - float(note.get("time") or 0) < 600:
         config, why = Path(note["config"]), note.get("why")

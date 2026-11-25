@@ -39,8 +39,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 import config_names  # noqa: E402  (tools/) the config name family: saguaro-<model>.json, the old maya- one found too
 import maya_quants  # noqa: E402  (tools/) the quants' names users see, and each config's family
 
-SWITCH_FILE = ".maya-switch.json"           # the server's note to saguaro.py: start this config next (a switch)
-DELETE_FILE = ".maya-delete.json"           # ... and to the next server: delete this config (it was the one running)
+# the server's notes: SWITCH_FILE says saguaro.py which config to start next (a switch), DELETE_FILE says the next
+# server to delete a config (it was the one running).  Written under these 1.2.2 names since C122; a note left by
+# a server of before the rename (.maya-switch.json / .maya-delete.json) is still read (config_names.note_paths).
+SWITCH_FILE = ".saguaro-switch.json"
+DELETE_FILE = ".saguaro-delete.json"
 CONTEXTS = [8192, 32768, 65536, 131072]       # the setup's choices (a config's own size is offered too)
 DS4_CONTEXTS = [32768, 65536, 131072, 262144, 524288, 1048576]   # ... for DeepSeek (saguaro.py's DS4_CONTEXTS)
 MM3_CONTEXTS = DS4_CONTEXTS                                       # ... and MiniMax (saguaro.py's MM3_CONTEXTS)

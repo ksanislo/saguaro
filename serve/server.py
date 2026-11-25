@@ -3802,14 +3802,19 @@ class Service:
 
     def finish_delete(self):
         """The model that ran before this start, deleted now that another one runs (the Models page deleted the
-        running one: its note, models.DELETE_FILE, read once).  self.deleted says how it went, for the page."""
-        note_path = self.models_root() / models.DELETE_FILE
+        running one: its note, models.DELETE_FILE, read once - a .maya-delete.json note of before the C122 rename
+        is read too).  self.deleted says how it went, for the page."""
+        notes = config_names.note_paths(self.models_root(), models.DELETE_FILE)
         try:
-            note = json.loads(note_path.read_text(encoding="utf-8"))
-            note_path.unlink()
-        except (OSError, ValueError):
+            note = json.loads(notes[0].read_text(encoding="utf-8"))
+        except (IndexError, OSError, ValueError):
             return
-        p = Path(str(note.get("config") or ""))
+        for f in notes:
+            try:
+                f.unlink()                               # (read once, under either name)
+            except OSError:
+                pass
+        p = config_names.resolve(Path(str(note.get("config") or "")))
         if time.time() - float(note.get("time") or 0) > 900 or not p.is_file() or p.parent != self.models_root():
             return                                       # (stale, gone already, or not one of these configs)
         if self._is_running(p):                          # (the switch did not happen: it runs again)

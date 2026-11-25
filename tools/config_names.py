@@ -81,6 +81,15 @@ def locate(root, stem) -> Path:
     return root / f"{NEW + b}.json"
 
 
+def note_paths(root, name) -> list:
+    """The server's notes to saguaro.py (serve/models.py's SWITCH_FILE / DELETE_FILE): the paths a note can be
+    read from, the new name first - a server from before the 1.2.2 rename wrote .maya-switch.json /
+    .maya-delete.json and can leave one behind mid-restart.  Only the new name is ever written."""
+    n = str(name)
+    names = [n, ".maya-" + n[len(".saguaro-"):] if n.startswith(".saguaro-") else n]
+    return [Path(root) / f for f in dict.fromkeys(names) if (Path(root) / f).is_file()]
+
+
 def resolve(path) -> Path:
     """A config path that no longer exists under its old family name, where the file did move to the new one:
     the new path (--config maya-<model>.json after the rename: the path llama-swap or systemd was given keeps
