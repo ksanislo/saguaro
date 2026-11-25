@@ -186,7 +186,8 @@ class Reserve(unittest.TestCase):
     """The VRAM an engine leaves free on a card - AMD's and NVIDIA's alike, v1.2.1-A: 3072 MiB where the desktop may
     run on it, 512 on a card with no display connected (AMD's sysfs: and next to no VRAM in use - mortar's RX 9070 XT
     beside an iGPU: Maya-L read prompts token by token with 3072; NVIDIA's display_active says it outright), 1024 on
-    a Linux AMD APU."""
+    a Linux AMD APU.  v1.2.1-D: a headless card keeps 1024 when every card is Pascal sm_6x (the P40 warm-up fell to
+    264 MiB free with 512)."""
 
     def card(self, connectors, used_mib):
         with tempfile.TemporaryDirectory() as d:
@@ -235,6 +236,30 @@ class Reserve(unittest.TestCase):
             self.assertEqual(maya.gpu_reserve_mib([t4]), 3072)               # (no fact: unknown)
             self.assertEqual(maya.gpu_reserve_mib([{**t4, "display": False},
                                                    {**t4, "index": 1, "display": True}]), 3072)
+
+    def test_headless_pascal_keeps_1024(self):
+        """v1.2.1-D (the P40 batch): on all-sm_6x headless cards the reserve goes 512 -> 1024 - the warm-up graph
+        captures fell to 264-302 MiB free with 512 and held above 760 with 1024.  The display rule is unchanged
+        (a Pascal card with a desktop keeps 3072), a mixed list keeps the 512, and --vram-reserve-mib still wins
+        above the rule (test_setup_qfn's ReserveRule and the config's own line)."""
+        p40 = {"name": "Tesla P40", "vram_gb": 24.0, "arch": "61", "display": False}
+        p100 = {"name": "Tesla P100", "vram_gb": 16.0, "arch": "60", "display": False}
+        t4 = {"name": "Tesla T4", "vram_gb": 15.0, "arch": "75", "display": False}
+        for win in (False, True):
+            with self.subTest(WIN=win), patch.object(maya, "WIN", win):
+                self.assertEqual(maya.gpu_reserve_mib([p40]), 1024)
+                self.assertEqual(maya.gpu_reserve_mib([p40, p100]), 1024)     # (every card sm_6x)
+                why = maya.gpu_reserve_why([p40])
+                self.assertIn("no display", why)                              # (the rule still said ...)
+                self.assertIn("264", why)                                     # ( ... with its measurement)
+                self.assertEqual(maya.gpu_reserve_mib([p40, t4]), 512)        # (mixed kinds: the 512 as before)
+        with patch.object(maya, "WIN", False):
+            self.assertEqual(maya.gpu_reserve_mib([{**p40, "display": True}]), 3072)   # (display rule unchanged)
+            self.assertEqual(maya.gpu_reserve_mib([{**p40, "display": False},
+                                                   {**p40, "index": 1, "display": True}]), 3072)
+        self.assertTrue(maya.gpu_sm6x([p40, {"arch": 60}]))                   # (the int arch reads too)
+        self.assertFalse(maya.gpu_sm6x([{"arch": "gfx1201"}]))                # (AMD: no)
+        self.assertFalse(maya.gpu_sm6x([]))
 
     def test_card_name_from_the_pci_revision(self):
         with tempfile.TemporaryDirectory() as d:

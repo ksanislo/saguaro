@@ -34,7 +34,7 @@ quant at 2.9 bits, 211 GB, and its two Engram tables from DeepSeek's base repo, 
 its vision tower runs in the engine - a GGUF's comes from DeepSeek's own checkpoint, 0.97 GB, shown and asked first;
 no tuning step - it balances its own split):
 
-  1. checks the PC: NVIDIA GPU(s) of compute capability 7.0+ (6.x, Pascal: experimental), driver, CUDA toolkit (nvcc),
+  1. checks the PC: NVIDIA GPU(s) of compute capability 7.0+ (6.x, Pascal: second class), driver, CUDA toolkit (nvcc),
      the C++ compiler (g++; on Windows Visual Studio's Build Tools - 2019/2022 always, 2026 with CUDA 13.2+), CMake,
      RAM, CPU; HIP checks AMD gfx1100/gfx1201/gfx1151 and ROCm 7 instead
      (on Windows AMD's ROCm SDK wheels in .venv, offered when they are not there)
@@ -114,7 +114,7 @@ VBUILD = ROOT / "build-vision"
 VEXE = VBUILD / "bin" / ("vision-glm.exe" if WIN else "vision-glm")   # the image encoder (llama.cpp's mtmd)
 VSTAMP = VBUILD / "MAYA-BUILD.json"
 MIN_CC = 60                                        # Pascal and newer (the GLM path; see arch_setting) ...
-VALIDATED_CC = 70                                  # ... Volta (V100) and newer validated, Pascal experimental (#212)
+VALIDATED_CC = 70                                  # ... Volta (V100) and newer validated, Pascal second class (#212)
 MAX_GPUS = 16                                      # the layer split's parts at most (glm_model.hpp, kMaxParts)
 HIP_ARCHS = ("gfx1100", "gfx1201", "gfx1151")        # Saguaro also supports Strix Halo (unified memory)
 HIP_ARCHS_UNVALIDATED = ("gfx1030",)               # RDNA 2 (RX 6800 / 6900, Radeon PRO V620 / W6800), experimental: not
@@ -1023,16 +1023,29 @@ def gpu_headless(g) -> bool:
     return g.get("display") is False and g.get("vram_used_gb", 0.0) < HIP_IDLE_VRAM_GB
 
 
+def gpu_sm6x(gpus) -> bool:
+    """True when every GPU here is an NVIDIA compute capability 6.x card (Tesla P40 / P100, GTX 10): the gate
+    for the wider headless reserve (gpu_reserve_mib)."""
+    def cc(g):
+        try:
+            return int(str(g.get("arch") or "0").split(".")[0])
+        except ValueError:
+            return 0
+    return bool(gpus) and all(60 <= cc(g) < 70 for g in gpus)
+
+
 def gpu_reserve_mib(gpus) -> int:
     """The VRAM (MiB) an engine on these GPUs leaves free on each, AMD and NVIDIA alike: 3072 where the desktop may
     run on one (it allocates after the engine has filled its expert pool); 1024 on a Linux AMD APU (its pool is
     sized from the RAM it shares; Windows draws its desktop from the APU's carve-out too); 512 on cards with no
     display (compute only: only the engine's own late allocations come after the pool, and the engine keeps the
-    margin it measured for them)."""
+    margin it measured for them), 1024 on those when every card is Pascal sm_6x - the 2026-11-23 P40 batch: with
+    512 the P40's warm-up graph captures fell to 264-302 MiB free, below the engine's own 512 warning, while runs
+    at 1024 held above 760 MiB."""
     if any(hip_unified_memory(g) for g in gpus) and not WIN:
         return 1024
     if gpus and all(gpu_headless(g) for g in gpus):
-        return 512
+        return 1024 if gpu_sm6x(gpus) else 512
     return 3072
 
 
@@ -1040,6 +1053,9 @@ def gpu_reserve_why(gpus) -> str:
     if any(hip_unified_memory(g) for g in gpus) and not WIN:
         return "an APU: its pool is sized from the shared RAM"
     if gpus and all(gpu_headless(g) for g in gpus):
+        if gpu_sm6x(gpus):
+            return ("no display is connected to the GPU, and these are Pascal (sm_6x) cards: their warm-up "
+                    "graph captures fell to 264 MiB free with a 512 MiB reserve and held above 760 with 1024")
         return "no display is connected to the GPU"
     return "the desktop may run on the GPU and allocate beside the engine"
 
@@ -1572,7 +1588,7 @@ def choose_gpus(a, found, min_cc: int = MIN_CC, family: str = "") -> list:
     if not usable:
         fail("none of the GPUs can run this model",
              f"it needs an NVIDIA GPU of compute capability {min_cc / 10:.1f} or newer (" +
-             ("V100 and newer; Pascal - Tesla P40 / P100, GTX 10 - is experimental)" if min_cc < 80 else
+             ("V100 and newer; Pascal - Tesla P40 / P100, GTX 10 - is second class)" if min_cc < 80 else
               "RTX 30 / A100 and newer)"))
     best = sorted(usable, key=lambda g: (-round(g["vram_gb"]), g["index"]))
     if len(best) == 1:
@@ -1677,10 +1693,11 @@ def check_pc(a, family: str = "glm", gguf: bool = False, ds4_quant: str = "exl3"
                        "RDNA 3 / 4 GPU of 12 GB or more" if family == "ik2" else
                        "it runs on a Linux PC with NVIDIA GPUs (V100 / T4 and newer)"), end=NOT_HERE)
     if a.backend == "hip":
-        if ds4 and not gguf:   # (as GLM's and MiniMax's EXL3 quants on AMD: experimental)
-            warn(f"{DS4}'s EXL3 quants on AMD are experimental: their kernels pass their tests on AMD GPUs, but the "
-                 f"whole model has not been measured on one - Saguaro's GGUF quants (--model deepseek-maya-s / "
-                 "deepseek-maya-xs) are the tested way there")
+        if ds4 and not gguf:   # (v1.2.1-D: no experimental label - what is measured and what is not, plainly;
+                               #  the GGUFs go on to check_hip_pc with no line of theirs, as GLM's and MiniMax's)
+            warn(f"{DS4}'s EXL3 quants on AMD: the kernels pass their tests on AMD GPUs, but the whole model has "
+                 "not been measured on one yet - Saguaro's GGUF quants (--model deepseek-maya-s / "
+                 "deepseek-maya-xs) are the ones measured on AMD")
         return check_hip_pc(a, text_only=False, family=family, gguf=gguf)   # (every model the setup takes on AMD reads pictures there)
     if a.backend == "metal":
         if family != "glm":
@@ -1721,7 +1738,7 @@ def check_pc(a, family: str = "glm", gguf: bool = False, ds4_quant: str = "exl3"
     say("  NVIDIA GPUs:")
     for g in found:
         say(f"    {gpu_label(g)} - " + ("can be used" if int(g["arch"]) >= max(min_cc, VALIDATED_CC) else
-                                       "can be used (Pascal: experimental)" if int(g["arch"]) >= min_cc else
+                                       "can be used (Pascal: second class)" if int(g["arch"]) >= min_cc else
                                        f"too old (this model needs compute capability {min_cc / 10:.1f} or newer)"))
     chosen = choose_gpus(a, found, min_cc, family)
     if family == "ik2":                                # (the cards picked: 8 GB or more each)
@@ -1746,9 +1763,11 @@ def check_pc(a, family: str = "glm", gguf: bool = False, ds4_quant: str = "exl3"
         say(f"  {vram:.0f} GB of VRAM in total: the engine fills it with the most-used experts and serves the rest from "
             "RAM and the SSD - give it a try (more VRAM is faster; tell us your speed)")
     if min(archs) < VALIDATED_CC:
-        warn("Pascal (compute capability 6.x) is experimental: the engine builds for it with its portable kernels "
-             "(the prompt attention on the F32 cores) and caches global loads in L1 there, but Saguaro has not been "
-             "validated on such a card yet - tell us how it goes in an issue")
+        warn("Pascal (compute capability 6.x) is second class: the engine builds for it with its portable kernels "
+             "(the prompt attention on the F32 cores) and caches global loads in L1 there.  Measured on a Tesla "
+             "P40: Inkling 2 Mini reads 8K prompts at about 384-458 tok/s and saguaro-qfn answers at ~4-20 tok/s "
+             "by quant (the GSQ IQ3_S at ~15-16 tok/s with drafting); the engines not named here are not measured "
+             "on a Pascal card yet - tell us how it goes in an issue")
     # (v1.2.1-B review finding 4: CMakeLists.txt's qfn_engine rule (1787-1808) takes engines/qfn's experimental
     #  pre-Turing path only when EVERY arch of the list is < 75 - a mixed list keeps _qfn_archs 75, so the build
     #  serves the newer cards and the pre-Turing one gets a binary with no kernel image for it.  The engine's C++
@@ -2221,7 +2240,7 @@ def cached_generator():
 def arch_setting(archs) -> str:
     """CMAKE_CUDA_ARCHITECTURES for these GPUs: the compute capabilities of the cards choose_gpus() took, by name -
     never "native", which also builds for every other card in the PC (a Quadro P400 display card beside V100s: sm_61,
-    which maya-mm3's kernels cannot be compiled for).  CMakeLists.txt takes sm_60 and newer (Pascal experimental)."""
+    which maya-mm3's kernels cannot be compiled for).  CMakeLists.txt takes sm_60 and newer (Pascal second class)."""
     return ";".join(str(x) for x in archs)
 
 
@@ -7570,9 +7589,112 @@ def choose_qfn_quant(a, prev: dict, gpus: list, ram: float) -> str:
     return want
 
 
+def gguf_tensor_slice(path: Path, at: int, size: int) -> bytes:
+    """One tensor's bytes, read at its own offset (a merged single file and the pinned shards are read the same
+    way: a GGUF tensor's data starts at the file's data_start plus the tensor's own offset)."""
+    import hashlib
+    with open(path, "rb") as f:
+        f.seek(at)
+        return hashlib.sha256(f.read(size)).hexdigest()
+
+
+def qfn_merged_gguf(a, d: Path, src: Path, m: dict, quant: str):
+    """A merged single-file GGUF standing in for a quant pinned as shards (--gguf-dir, v1.2.1-D): gguf-split
+    --merge, or an Ollama blob hard-linked into the folder, leaves the model as ONE .gguf that is none of the
+    pinned shard names.  The folder's single such file is the candidate.  Its tensor names, shapes and types
+    must be the pinned shards' index; and where that index is on the PC (all pinned shards whole in the same
+    folder, in the folder a written config read them from, or in the model folder), the bytes of a sample of
+    tensors - the first, the last and 8 spread between - must match the shards' too, tensor for tensor.  Where
+    the index is not on disk there is nothing to compare bytes against: the file is then accepted on its own
+    tensor directory (names, shapes, types, and the tensor bytes the directory says reaching the end of the
+    file) and said so plainly with "not sha256-checked" - a merged file matches no published shard sha256.
+    (merged file, one plain line saying what was checked); None when the folder holds no candidate or it does
+    not read as a GGUF (the caller's usual "does not hold all of its files" refusal then applies); a candidate
+    that fails a check is refused here, with what differed."""
+    import hashlib
+    from gguf_reader import GGUFFile
+    names = list(m["files"])
+    if len(names) < 2:                               # (a quant pinned as ONE file: its name is the pin itself)
+        return None
+    try:
+        cands = [f for f in sorted(src.glob("*.gguf")) if f.name not in names]
+    except OSError:
+        return None
+    if len(cands) != 1:                              # (no merged file, or several: the usual refusal)
+        return None
+    merged = cands[0]
+    try:
+        g = GGUFFile(merged)
+    except Exception:                                # noqa: BLE001 - not a GGUF, or a truncated header: refusal
+        return None
+    if not g.tensors:
+        return None
+    table = [(t.name, tuple(t.shape), t.type_name, t.expected_bytes(), t.offset) for t in g.tensors]
+    idx = None
+    where = [src]
+    prev = getattr(a, "qfn_prev_files_dir", None)
+    if prev:
+        where.append(Path(prev))
+    if d not in where:
+        where.append(d)
+    for at in dict.fromkeys(where):
+        sh = [at / n for n in names]
+        if not all(f.is_file() for f in sh):
+            continue
+        try:
+            gs = [GGUFFile(f) for f in sh]
+        except Exception:                            # noqa: BLE001 - a damaged shard: the index is not readable
+            continue
+        idx = {}
+        for f, gg in zip(sh, gs):
+            for t in gg.tensors:
+                idx[t.name] = (f, gg.data_start + t.offset, t.expected_bytes(), tuple(t.shape), t.type_name)
+        break
+    shown = Q.shown("qfn", quant)
+    if idx is None:                                  # (the index is not on disk: names + shapes + types + the
+        why = incomplete(merged)                     #  total tensor bytes, all this file's own - no sha256 of it
+        if why:                                      #  was ever published)
+            fail(f"{merged.name} does not hold {shown} whole: {why}", "the merged file is truncated")
+        return merged, (f"{len(table):,} tensor names, shapes and types read from its own index, its total "
+                        "tensor bytes reaching the end of the file - not sha256-checked: a merged file has no "
+                        "published sha256 and the pinned shards are not on this PC to compare against")
+    mine = {n: (shape, ty) for n, shape, ty, _, _ in table}
+    if set(mine) != set(idx):
+        gone = ", ".join(sorted(set(idx) - set(mine))[:3])
+        extra = ", ".join(sorted(set(mine) - set(idx))[:3])
+        diff = ("missing " + gone if gone else "") + (", " if gone and extra else "") + \
+               ("unknown " + extra if extra else "")
+        fail(f"{merged.name} is not {shown}: its tensors are not the pinned shards' ({diff})",
+             f"--gguf-dir takes the folder holding {shown}")
+    bad = [n for n, (shape, ty) in mine.items() if (idx[n][3], idx[n][4]) != (shape, ty)]
+    if bad:
+        fail(f"{merged.name} is not {shown}: tensor {bad[0]} is "
+             f"{mine[bad[0]][1]} x {'x'.join(str(x) for x in mine[bad[0]][0])}, the pinned shards have "
+             f"{idx[bad[0]][4]} x {'x'.join(str(x) for x in idx[bad[0]][3])}"
+             + (f" ({len(bad)} tensors differ)" if len(bad) > 1 else ""),
+             f"--gguf-dir takes the folder holding {shown}")
+    rows = [r for r in table if r[3]]                # (tensors whose byte count the block geometry pins: those
+    n = len(rows)                                    #  the data sample is drawn from)
+    picks = sorted({0, n - 1, *(round(k * (n - 1) / 9) for k in range(1, 9))}) if n else []
+    for i in picks:
+        name, _, _, size, off = rows[i]
+        ref_f, ref_at, ref_size = idx[name][0], idx[name][1], idx[name][2]
+        if size != ref_size:
+            fail(f"{merged.name} is not {shown}: tensor {name} has {size:,} bytes, the pinned shard has "
+                 f"{ref_size:,}", f"--gguf-dir takes the folder holding {shown}")
+        if size and gguf_tensor_slice(merged, g.data_start + off, size) != \
+                gguf_tensor_slice(ref_f, ref_at, size):
+            fail(f"{merged.name} is not {shown}: tensor {name}'s bytes differ from {ref_f.name}'s",
+                 f"--gguf-dir takes the folder holding {shown}, or leave it out to download the pinned files")
+    return merged, (f"{len(table):,} tensors match the pinned shards' index, and so do the bytes of a sample "
+                    f"of {len(picks)} of them (the first, the last, 8 spread between)")
+
+
 def qfn_files_step(a, d: Path, quant: str) -> list | None:
     """The quant's shards: in --gguf-dir (used in place, checked) or in d (downloaded when missing), each against its
-    published sha256.  None when nothing was downloaded."""
+    published sha256.  None when nothing was downloaded.  A merged single-file GGUF in --gguf-dir (gguf-split
+    --merge, an Ollama blob hard link) stands in for the shards when it checks out against their index
+    (qfn_merged_gguf)."""
     m = qfn_entry(quant)
     src = Path(a.gguf_dir).expanduser().resolve() if getattr(a, "gguf_dir", None) else d
     was = getattr(a, "qfn_prev_files_dir", None)       # (a setup again: the folder the config's files were in - an
@@ -7584,6 +7706,15 @@ def qfn_files_step(a, d: Path, quant: str) -> list | None:
     files = [src / n for n in m["files"]]
     missing = [f for f in files if file_incomplete(m, f)]
     if missing and src != d:
+        merged = qfn_merged_gguf(a, d, src, m, quant)  # (one merged file standing for the pinned shards)
+        if merged is not None:
+            merged, said = merged
+            ok(f"{Q.shown('qfn', quant)}: {merged.stat().st_size / 1e9:.1f} GB in {merged} (your merged single "
+               f"file, used in place: {said})")
+            if rotational(src):
+                warn(f"{src} is on a spinning hard disk: the experts RAM cannot hold are read from it - use an "
+                     "NVMe SSD")
+            return [merged]
         fail(f"{src} does not hold all of {Q.shown('qfn', quant)}'s files ({missing[0].name}: "
              f"{file_incomplete(m, missing[0])})", "--gguf-dir takes the folder with all its .gguf shards, or leave it "
              "out to download them")
@@ -7635,7 +7766,8 @@ def qfn_mtp_step(a, models: Path) -> Path | None:
     d = models / m["name"]
     files = [d / n for n in m["files"]]
     if any(file_incomplete(m, f) for f in files) and not offer_download(a, "the MTP draft layer", d, files, m):
-        warn("drafting off: the draft layer was not downloaded")
+        warn("drafting off: the draft layer was not downloaded (--yes answers the download question no; "
+             f"--download-model answers it yes) - {ME} --setup --download-model asks for it again")
         return None
     for f in files:
         if m["sha256"].get(f.name) and not sha256_checked(f, m["sha256"][f.name]):
@@ -7780,7 +7912,8 @@ def qfn_vision_step(a, pc: dict, meta: dict, llama: Path, d: Path, files: list) 
     if any(file_incomplete(m, f) for f in got):
         reused = qfn_vision_reuse(m, d)         # (the base model's mmproj: another QFN install may already have it)
         if reused is None and not offer_download(a, "the vision tower", vd, got, m):
-            warn(f"the vision tower was not downloaded: the model reads text only ({ME} --setup asks again)")
+            warn(f"the vision tower was not downloaded: the model reads text only (--yes answers the download "
+                 f"question no; --download-model answers it yes - {ME} --setup --download-model asks again)")
             return None
         if reused is not None:
             got = reused
@@ -7836,6 +7969,45 @@ def qfn_ram_budget(ram: float) -> int:
     against 64 answered 32% faster and read prompts 20% faster - nearly every expert the card does not hold in RAM -
     with 10.8 GiB of RAM still available; the engine takes no more than those experts)."""
     return max(8, int(ram - QFN_RAM_SPARE_GB))
+
+
+def qfn_profile_shape(path: Path):
+    """An expert profile's (layers, experts a layer) from its header - "STRP", u32 version, u32 layers, u32 experts
+    (engines/qfn/src/core/expert_cache.cpp refuses anything that is not this shape with "a profile for a different
+    artifact") - or None when the file is not there or does not read as a version 1 profile."""
+    import struct
+    try:
+        with open(path, "rb") as f:
+            head = f.read(16)
+        magic, ver, nl, ne = struct.unpack("<4sIII", head)
+    except (OSError, ValueError, struct.error):
+        return None
+    return (nl, ne) if magic == b"STRP" and ver == 1 else None
+
+
+def qfn_expert_shape(pack: Path):
+    """A quant's own (layers, experts a layer) as its pack's index says: the router rows of blk.0.ffn_gate_inp.weight
+    are the experts it keeps (iq_pack.py: "router rows = experts kept - pruned models ship < 512", the Coder's 256
+    of 512) and the blk.N. tensors say its layers.  None when the pack or its index is not there to read."""
+    try:
+        rows, layers = {}, set()
+        with open(pack / "index.txt", encoding="utf-8") as f:
+            for line in f:
+                fl = line.split()
+                if not fl or fl[0].startswith("#"):
+                    continue
+                rows[fl[0]] = fl
+                if fl[0].startswith("blk.") and fl[0].split(".")[1].isdigit():
+                    layers.add(int(fl[0].split(".")[1]))
+    except (OSError, ValueError, IndexError):
+        return None
+    r = rows.get("blk.0.ffn_gate_inp.weight")
+    if not r or len(r) < 9 or not layers:
+        return None
+    try:
+        return (max(layers) + 1, int(r[8]))
+    except ValueError:
+        return None
 
 
 def qfn_ram_said(lay: dict) -> str:
@@ -7921,14 +8093,45 @@ def write_config_qfn(a, pc: dict, meta: dict, quant: str, files: list, pack: Pat
     var = models / name / "var"
     (var / "sessions").mkdir(parents=True, exist_ok=True)
     profile = var / "expert-profile.bin"
-    if not profile.exists() and QFN_PROFILE.is_file():   # (the shipped ranking; the engine adds this PC's to it)
-        shutil.copyfile(QFN_PROFILE, profile)
     ram = mem_gb()[0]
     lay = QF.plan(pc["gpus"], ram, quant, qfn_cpu_info())   # (NVIDIA: one card or the layer split; adds nothing on
                                                             #  AMD; the CPU's facts drive the TOPOLOGY class)
+    # v1.2.1-D fix (f): data/expert-profile-qfn.bin ranks 48 layers x 512 experts, and copying it into every quant's
+    # var/ stopped the Coder (256 experts a layer, half of them pruned) at load with "a profile for a different
+    # artifact".  The shipped ranking is copied only when its shape matches the quant's own - read from the pack's
+    # index, not hard-coded (no index to read: the rule as it was).  With no matching profile the --expert-profile /
+    # --expert-profile-save pair stays out of the config and the engine starts and learns on its own - unless the
+    # layout REQUIRES a static one: the pinned RAM tier (--resident-budget-gib, the low-RAM complement layout) runs
+    # only from a profile of the model's own shape, so there the setup stops with a plain line naming the file that
+    # is missing and how to make one, instead of writing a config that cannot start.
+    shape = qfn_expert_shape(pack)
+    if shape is None:
+        if not profile.exists() and QFN_PROFILE.is_file():   # (the shipped ranking; the engine adds this PC's to it)
+            shutil.copyfile(QFN_PROFILE, profile)
+        profile_ok = profile.exists()
+    else:
+        if not profile.exists() and QFN_PROFILE.is_file() and qfn_profile_shape(QFN_PROFILE) == shape:
+            shutil.copyfile(QFN_PROFILE, profile)            # (the shipped ranking is of this shape)
+        profile_ok = qfn_profile_shape(profile) == shape     # (a file of another artifact stays where it is and
+                                                             #  is not read: the engine would stop at load)
+        if not profile_ok and lay["resident_budget_gib"] is not None:
+            have, shipped = qfn_profile_shape(profile), qfn_profile_shape(QFN_PROFILE)
+            fail(f"{Q.shown('qfn', quant)}: this layout pins its experts in a {lay['resident_budget_gib']} GiB RAM "
+                 f"tier, which needs a static expert profile of this model's shape ({shape[0]} layers x {shape[1]} "
+                 f"experts) - {profile} " +
+                 (f"is a profile for {have[0]} x {have[1]}, a different artifact" if have else "is not there") +
+                 (f", and the shipped {QFN_PROFILE.name} is {shipped[0]} x {shipped[1]}" if shipped else
+                  f", and the shipped {QFN_PROFILE.name} is not here"),
+                 f"make a matching profile first: {sys.executable} tools/make_profile.py --no-base --n-expert "
+                 f"{shape[1]} --out {profile} (a routing trace of yours - a run with --dump-routing - ranks it; "
+                 "--help for the rest) and run the setup again")
     args = ["--pack", str(pack), "--native", str(files[0])]
-    if profile.exists():
+    if profile_ok:
         args += ["--expert-profile", str(profile), "--expert-profile-save", str(profile)]
+    elif shape is not None:
+        ok(f"expert profile: none of this model's {shape[0]} x {shape[1]} shape on the PC, so --expert-profile stays "
+           "out and the engine starts without one and learns as it runs (this layout has no RAM tier, which is the "
+           f"only one that needs a static profile - tools/make_profile.py --no-base --n-expert {shape[1]} writes one)")
     args += ["--expert-cache", "auto", "--prefill", "auto", "--spec", "3", "--spec-min-p", "0.7"]
     if mtp is not None:
         args += ["--mtp", str(mtp)]
@@ -7982,8 +8185,11 @@ def write_config_qfn(a, pc: dict, meta: dict, quant: str, files: list, pack: Pat
             vision = None
         else:
             vram_elastic = True
+            # the loan is the reader's room AND what the engine's own prompt buffers need beside it (a P40 with 1536
+            # alone: 8 MiB left, the engine out of memory on the first picture; 2560 = 1536 + the 1024 reserve ran clean)
+            vision = {**vision, "elastic_mib": QFN_VISION["elastic_mib"] + max(512, min(reserve, 1024))}
             ok(f"pictures: ON - \"vram_elastic\": true: the engine starts with --vram-elastic and its expert "
-               f"cache keeps {QFN_VISION['elastic_mib']} MiB of the card free for the encoder when a picture "
+               f"cache keeps {vision['elastic_mib']} MiB of the card free for the encoder when a picture "
                "arrives (the give path needs batch slots, which one card at parallel 1 does not have)")
     if vision is not None:                             # (pictures: GENI requests, each image's rows at its pad tokens)
         args.append("--vision")
@@ -8096,10 +8302,16 @@ def set_up_qfn(a, prev: dict) -> Path | None:
              "from RAM / the SSD: expect slow decode")
         # (finding 3: the line lists what this layout really turns off - --drafting on keeps drafting, the same
         #  gate write_config_qfn's slow_draft applies - and says so instead of announcing drafting off)
+        #  v1.2.1-D: when --context named a context, the setup writes THAT, not the scaled-down one, so the line
+        #  must not claim "a 32K context instead of 64K" - the context entry drops out and it says the context
+        #  given is kept (Paul's P40 runs --context 262144 on a layout the old rule scaled to 32K).
         keep_draft = getattr(a, "drafting", None) == "on"
-        off = [t for t in lay["turned_off"] if not (keep_draft and t.startswith("drafting off"))]
-        ok("the setup scales this layout down: " + ", ".join(off) +
-           (" (drafting stays on: --drafting on says otherwise)" if keep_draft else ""))
+        given_ctx = getattr(a, "context", None) is not None
+        off = [t for t in lay["turned_off"] if not (keep_draft and t.startswith("drafting off"))
+               and not (given_ctx and " context instead of " in t)]
+        tail = (" (drafting stays on: --drafting on says otherwise)" if keep_draft else "") + \
+               (f" (the context you named with --context {a.context}: kept, not scaled down)" if given_ctx else "")
+        ok("the setup scales this layout down: " + ", ".join(off) + tail)
         if not a.yes and ask("This will probably be very slow. Are you sure? (y/n)", ["y", "n"], "n", False) == "n":
             fail("stopped: this PC would run this model very slowly",
                  f"a PC nearer the measured layout (16 GB cards, about 96 GB of RAM), another model, or --yes "

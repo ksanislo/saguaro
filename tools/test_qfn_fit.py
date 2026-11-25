@@ -206,6 +206,52 @@ class SlowZone(unittest.TestCase):
             self.assertEqual(p["turned_off"], [])
 
 
+class P40MeasurementPoint(unittest.TestCase):
+    """v1.2.1-D: the P40 box - 24 GB of VRAM, 31 GB of RAM, GSQ IQ3_S - measured ~15-16 tok/s at 262144 WITH
+    drafting (ref/REPORT-p40-batch.md item 3): the fit does not call that layout slow, so drafting, the context
+    and the K/V window are not scaled down.  The RAM line of the slow zone is quant-aware: a quant with fewer
+    experts than the measured PC's whole RAM streams little enough on a quarter of that RAM; the big quants on
+    the very same card stay slow, and so does every small card - the matrix's other points stand."""
+
+    P40 = {"index": 0, "name": "Tesla P40", "vram_gb": 24.0, "arch": "61"}
+
+    def test_iq3_s_on_the_p40_gets_the_layout_as_laid_out(self):
+        p = F.plan([dict(self.P40)], 31.0, "gsq-iq3_s")
+        self.assertTrue(p["fits"], p["reason"])
+        self.assertFalse(p["slow"], p["slow_why"])               # (the measured box: not the slow layout)
+        self.assertEqual((p["context"], p["kv_resident"]), (65536, 32768))   # (drafting on, 64K, the full window)
+        self.assertEqual(p["turned_off"], [])
+        self.assertEqual(p["resident_budget_gib"], 11)           # (31 - 20: the tier Paul's configs run at)
+        self.assertNotIn("expect slow decode", p["said"])
+
+    def test_the_coder_quant_too(self):
+        p = F.plan([dict(self.P40)], 31.0, "gsq-coder-iq1_m")    # (54.4 GiB of files: the smallest offer)
+        self.assertTrue(p["fits"], p["reason"])
+        self.assertFalse(p["slow"], p["slow_why"])
+
+    def test_the_big_quants_on_the_same_card_stay_slow(self):
+        for quant in ("ud-q4_k_xl", "q8_0", "cyber-frost-q5_k_m"):
+            for ram in (31.0, 64.0):
+                with self.subTest(quant=quant, ram=ram):
+                    p = F.plan([dict(self.P40)], ram, quant)     # (the matrix's P40 row: unchanged)
+                    self.assertTrue(p["slow"])
+                    self.assertEqual((p["context"], p["kv_resident"]), (32768, 4096))
+                    self.assertIn("drafting off", p["turned_off"])
+                    self.assertIn(f"{ram:.0f} GB of RAM", p["slow_why"])
+
+    def test_a_small_card_is_slow_even_for_a_small_quant(self):
+        p = F.plan([{"index": 0, "name": "RTX 2080 Ti", "vram_gb": 11.0, "arch": "75"}], 31.0, "gsq-iq3_s")
+        self.assertTrue(p["slow"])                               # (the card side of the rule: no waiver there)
+        self.assertIn("11 GB card holds", p["slow_why"])
+
+    def test_comfortable_is_quant_aware(self):
+        self.assertFalse(F.comfortable([dict(self.P40)], 31.0))              # (no quant named: the rule as before)
+        self.assertFalse(F.comfortable([dict(self.P40)], 31.0, "ud-q4_k_xl"))
+        self.assertFalse(F.comfortable([dict(self.P40)], 31.0, "nope"))      # (unread size: no waiver)
+        self.assertTrue(F.comfortable([dict(self.P40)], 31.0, "gsq-iq3_s"))
+        self.assertTrue(F.comfortable([dict(self.P40)], 31.0, "gsq-coder-iq1_m"))
+
+
 class FourT4(unittest.TestCase):
     def test_the_live_split_ud_q4_k_xl(self):
         p = F.plan(t4s(4), 220.0, "ud-q4_k_xl")

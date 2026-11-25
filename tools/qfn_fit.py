@@ -29,7 +29,10 @@ KV_RESIDENT = 32768                                   # the newest cells of each
 RAM_SPARE_GB = 20                                     # RAM left beside the tier: the OS, the server, the page cache
 MIN_VRAM_GB = 15.0                                    # the COMFORTABLE card (the manifest's "needs": a 16 GB card);
 MIN_RAM_GB = 88.0                                     # ... and RAM: the layout as measured, not the floor (v1.2.1-B:
-#                                                     #  below them the plan is "slow", refused only under its minimum)
+#                                                     #  below them the plan is "slow", refused only under its minimum;
+#                                                     #  v1.2.1-D: it is also the expert-size line of the waiver in
+#                                                     #  comfortable(): a quant with fewer experts than this is not
+#                                                     #  called slow by thin RAM alone)
 MIN_CC = 61                                           # NVIDIA, v1.2.1-B: Pascal and newer (a Tesla P40 ran QFN by
 #                                                     #  hand: sm_61, 24 GB, 32 GB RAM, UD-Q4 ~4-5 tok/s) - sm_6x /
 #                                                     #  sm_70 build through engines/qfn's experimental pre-Turing
@@ -273,13 +276,21 @@ def unsupported(cards: list, ram_gb: float, quant: str | None = None) -> str | N
     return None
 
 
-def comfortable(cards: list, ram_gb: float) -> bool:
+def comfortable(cards: list, ram_gb: float, quant: str | None = None) -> bool:
     """The layout as measured (the rule that refused before v1.2.1-B, now the COMFORTABLE level): every card of
     MIN_VRAM_GB and MIN_RAM_GB of RAM or more (a fact of 0: not read yet, no complaint).  Between this and the
     true minimum the plan is a slow one: the setup scales it down, warns loudly and confirms - it does not
-    refuse."""
+    refuse.  v1.2.1-D: the RAM side is quant-aware - the scale-down (drafting off, a 32K context, --kv-resident
+    4096) was tuned on the quants that stream most of their experts, those with MORE experts than the measured
+    PC's whole RAM (UD-Q4_K_XL's 111 GiB, Q8_0's 175, CYBER-FROST's 105); a smaller quant was measured usable
+    on a quarter of that RAM: a 24 GB Tesla P40 with 31 GB of RAM answered GSQ IQ3_S (77.9 GiB of experts) at
+    ~15-16 tok/s over a 262K context WITH drafting (ref/REPORT-p40-batch.md item 3) - the pace of the measured
+    Q8_0 box.  So on a PC below MIN_RAM_GB only a quant whose experts are more than MIN_RAM_GB is slow for the
+    RAM; a smaller one gets the layout as laid out (the card side is unchanged).  No quant, or a manifest that
+    does not read: no waiver, the rule as before."""
     return (all(not float(g.get("vram_gb") or 0) or float(g["vram_gb"]) >= MIN_VRAM_GB for g in cards)
-            and not (ram_gb and ram_gb < MIN_RAM_GB))
+            and (not ram_gb or ram_gb >= MIN_RAM_GB
+                 or bool(quant) and 0.0 < quant_gib(quant) < MIN_RAM_GB))
 
 
 def slow_why(cards: list, ram_gb: float, quant: str) -> str:
@@ -408,8 +419,10 @@ def plan(cards: list, ram_gb: float, quant: str = "ud-q4_k_xl", cpu: dict | None
            " equal ones splitting the layers: no cards were named") if not cards else unsupported(cards, ram_gb, quant)
     # v1.2.1-B: between the minimum (unsupported) and the comfortable layout (comfortable) the setup scales the
     # layout down - drafting off, a smaller --kv-resident, a context that fits - says what it turned off and asks
-    # for a loud confirmation; it does not refuse what can run.
-    slow = why is None and not comfortable(cards, ram_gb)
+    # for a loud confirmation; it does not refuse what can run.  v1.2.1-D: comfortable() now weighs in the quant,
+    # so the same thin-RAM PC reads "slow" for a big streaming quant and "fits as laid out" for a small one (the
+    # P40 box's IQ3_S measured ~15-16 tok/s at 262K with drafting - it is not the scale-down's slow case).
+    slow = why is None and not comfortable(cards, ram_gb, quant)
     slow_ = slow_why(cards, ram_gb, quant) if slow else None
     n = len(cards)
     split = layer_split(cards, quant) if why is None else None
