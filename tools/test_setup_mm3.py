@@ -359,7 +359,8 @@ class Reserve(unittest.TestCase):
             p.stop()
 
     def reserve(self, gpus, backend="cuda", old=None, **kw):
-        for name in ("maya-mm3.json", "maya-mm3-hip.json"):
+        for name in ("maya-mm3.json", "maya-mm3-hip.json",           # (either family: the one before, or fresh)
+                  "saguaro-mm3.json", "saguaro-mm3-hip.json"):
             (self.root / name).unlink(missing_ok=True)
         if old is not None:
             (self.root / ("maya-mm3-hip.json" if backend == "hip" else "maya-mm3.json")).write_text(json.dumps(old))
