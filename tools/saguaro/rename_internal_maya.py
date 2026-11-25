@@ -11,11 +11,12 @@ strata_inkling, .strata), tools/strata/, file names, history files and the renam
 
 Doing what upstream did lets later upstream commits apply as they are.  A branch still written against
 include/strata runs this once before it merges (idempotent; --check exits 1 while anything is left to rename).
+The skips and the exception strings that stay are the shared lists of rename_rules.py (T.internal_skipped,
+T.EXC_TEXT), the same ones rename_upstream.py uses.
 """
 from __future__ import annotations
 
 import argparse
-import re
 import subprocess
 import sys
 from pathlib import Path
@@ -28,8 +29,6 @@ OLD, NEW = T.INT_OLD, T.INT_NEW                    # split in the table, so this
 UP = T.UP
 rename = T.rename_internal                         # the per-file rewrite, shared with rename_upstream.py
 
-SKIP_PREFIX = ("engines/qfn/", "tools/qfn/", "serve/qfn_engine.py", "third_party/", "tools/saguaro/", "bench/results/", "ref/")
-SKIP_NAME = re.compile(r"^(CHANGELOG\.md|NOTICE\.md|DIVERGENCE\.md|UPSTREAM\.md|(PLAN|REPORT|NEXT)-.*\.md)$")
 TEXT_SUFFIXES = T.INT_TEXT_SUFFIXES
 CMAKE = T.is_cmake
 
@@ -37,7 +36,7 @@ CMAKE = T.is_cmake
 def files():
     out = subprocess.run(["git", "ls-files", "-z"], cwd=ROOT, capture_output=True, check=True).stdout.decode()
     for rel in out.split("\0"):
-        if not rel or rel.startswith(SKIP_PREFIX) or SKIP_NAME.match(Path(rel).name):
+        if not rel or T.internal_skipped(rel):
             continue
         p = ROOT / rel
         if p.suffix.lower() not in TEXT_SUFFIXES or not p.is_file() or p.is_symlink():
@@ -61,7 +60,8 @@ def main():
             t = raw.decode("utf-8")
         except (UnicodeDecodeError, OSError):
             continue
-        n = rename(t, p)
+        masked, hidden = T.mask_exceptions(t, rel)      # the exception list's names stay, as in rename_upstream
+        n = T.unmask_exceptions(rename(masked, p), hidden)
         if n != t:
             left += 1
             if a.check:

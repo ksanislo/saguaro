@@ -60,7 +60,7 @@ def collect(paths: list[Path]) -> dict:
                 rel = p.relative_to(ROOT).as_posix()
             except ValueError:
                 sys.exit(f"{p}: outside the worktree {ROOT}")
-            if T.skipped(rel):
+            if T.skipped(rel) or rel.startswith(T.INTERNAL_SKIP_PATHS):   # QFN's tree: see the docstring
                 continue
             fam = renv.family_of(p)
             if fam is None and p.suffix.lower() not in T.INT_TEXT_SUFFIXES:
@@ -72,22 +72,11 @@ def collect(paths: list[Path]) -> dict:
     return out
 
 
-def _mask(text: str, rel: str):
-    """hide one file's exception-list occurrences from the names/cmd rules: (masked text, the hidden strings)"""
-    spans = []
-    for exc_rel, rx in T.EXC_TEXT:
-        if exc_rel == rel:
-            spans += [text[m.start():m.end()] for m in rx.finditer(text)]
-    for i, s in enumerate(spans):
-        text = text.replace(s, f"\x00EXC{i}\x00")
-    return text, spans
-
-
 def apply_names(text: str, rel: str, fam, explicit: bool) -> tuple[str, list]:
     """the new (M1 hand-rename) families plus the engine log prefixes for one file: (text, families changed)"""
     fams = []
-    if not rel.startswith(T.EXC_PATHS):
-        masked, hidden = _mask(text, rel)
+    if not T.exc_path(rel):
+        masked, hidden = T.mask_exceptions(text, rel)
         n = 0
         if fam in T.NAMES_FAM:
             for rx, to in T.NAMES_RULES + T.CMD_RULES:
@@ -106,9 +95,7 @@ def apply_names(text: str, rel: str, fam, explicit: bool) -> tuple[str, list]:
                 b += k
             if b:
                 fams.append("brand")
-        for i, s in enumerate(hidden):
-            masked = masked.replace(f"\x00EXC{i}\x00", s)
-        text = masked
+        text = T.unmask_exceptions(masked, hidden)
     if explicit or (fam == "cpp" and rel.startswith(T.LOG_SRC_PATHS)
                     and Path(rel).suffix.lower() in T.LOG_CPP_SUFFIXES):
         rules = T.LOG_RULES + (T.LOG_LINE_RULES if explicit else [])
@@ -143,11 +130,9 @@ def plan_tree(files: dict):
             changed[rel].append(fam)
 
     for rel, (p, fam, text, bom, explicit) in files.items():
-        if p.suffix.lower() in T.INT_TEXT_SUFFIXES and not rel.startswith(T.EXC_PATHS):
-            masked, hidden = _mask(texts[rel], rel)      # the exception list's STRATA_ names stay (engines/qfn's
-            t = T.rename_internal(masked, p)             # own options, their docs and tests)
-            for i, s in enumerate(hidden):
-                t = t.replace(f"\x00EXC{i}\x00", s)
+        if p.suffix.lower() in T.INT_TEXT_SUFFIXES and not T.exc_path(rel):
+            masked, hidden = T.mask_exceptions(texts[rel], rel)   # the exception list's STRATA_ names stay
+            t = T.unmask_exceptions(T.rename_internal(masked, p), hidden)   # (their docs and tests too)
             if t != texts[rel]:
                 texts[rel] = t
                 bump(rel, "internal")

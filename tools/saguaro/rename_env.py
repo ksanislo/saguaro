@@ -17,9 +17,10 @@ protects e.g. the API-export macro and the build options; skipped words are prin
 Collisions (SAGUARO_X already exists where OLD_X would land) are reported and not renamed.  Both old prefixes on one
 suffix are NOT a collision: the old alias code made them one setting; they merge into one SAGUARO_X (printed).
 
-Excluded: third_party/, .git, build trees, node_modules, binary files, ref-configs/ (migrate_configs.py reports those
-instead), engines/qfn/bench/results/ + *.log/*.jsonl/*.patch (records), CHANGELOG.md and PLAN-*/REPORT-*.md (history),
-and this tool's own folder (it must spell the old prefixes to find them).  Deterministic and idempotent: re-run after
+Excluded: the shared skip list (rename_rules.skipped(): third_party/, .git, build trees, node_modules, ref-configs/
+(migrate_configs.py reports those instead), the results/records dirs, *.log/*.jsonl/*.patch, the history files and
+PLAN/REPORT/NEXT-*.md, ref/ and scratch/, this tool's own folder (it must spell the old prefixes to find them) and
+its test module, whose fixtures are no longer collisions of themselves).  Deterministic and idempotent: re-run after
 merges.  `--check` exits 1 while a renameable use is left.  See REPORT-env-rename.md.
 """
 from __future__ import annotations
@@ -39,11 +40,7 @@ OLD_P = T.OLD_ENV                                  # split up in the table, so s
 NAME = T.NAME
 HAS_SAGUARO = T.HAS_SAGUARO
 
-SKIP_DIR_NAMES = {".git", "third_party", "node_modules", "__pycache__", ".venv", "venv", ".mypy_cache", ".scons"}
-SKIP_DIR_RE = re.compile(r"^(build[^/\\]*|.*-build|cmake-build.*)$", re.I)
-SKIP_PATHS = ("ref-configs/", "bench/results/", "engines/qfn/bench/results/", "tools/saguaro/")
-SKIP_NAME_RE = re.compile(r"^(CHANGELOG\.md|DIVERGENCE\.md|UPSTREAM\.md|(PLAN|REPORT)-.*\.md)$")
-SKIP_SUFFIXES = {".log", ".jsonl", ".patch", ".orig"}
+# the skip lists (history, vendored, records, this folder) are the shared ones in rename_rules.py: T.skipped()
 CONF_SUFFIXES = {".json", ".yaml", ".yml"}
 DOC_SUFFIXES = {".md", ".markdown", ".txt", ".in", ".example"}
 CPP_SUFFIXES = {".c", ".h", ".hpp", ".cpp", ".cc", ".cxx", ".cu", ".cuh", ".hip", ".metal", ".inl", ".inc", ".mm",
@@ -264,7 +261,7 @@ def collect(paths):
         cand = [root] if root.is_file() else []
         if not cand:
             for dirpath, dirnames, filenames in os.walk(root):
-                dirnames[:] = [d for d in dirnames if d not in SKIP_DIR_NAMES and not SKIP_DIR_RE.match(d)]
+                dirnames[:] = [d for d in dirnames if d not in T.SKIP_DIR_NAMES and not T.SKIP_DIR_RE.match(d)]
                 for fn in filenames:
                     cand.append(Path(dirpath) / fn)
         for p in cand:
@@ -272,8 +269,7 @@ def collect(paths):
                 rel = p.relative_to(ROOT).as_posix()
             except ValueError:
                 sys.exit(f"{p}: outside the worktree {ROOT}")
-            if (rel.startswith(SKIP_PATHS) or SKIP_NAME_RE.match(p.name) or p.suffix.lower() in SKIP_SUFFIXES
-                    or SKIP_DIR_RE.match(p.parent.name) or p.parent.name in SKIP_DIR_NAMES):
+            if T.skipped(rel):
                 continue
             fam = family_of(p)
             if fam is None:

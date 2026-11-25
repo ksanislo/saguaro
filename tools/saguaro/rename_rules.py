@@ -229,23 +229,60 @@ EXC_TEXT = [
     ("saguaro.py", re.compile(r"start " + BRAND_OLD + r" again")),
 ]
 
-# every tool skips these (history, vendored, generated, and this folder, which must spell the old names):
+
+def exc_path(rel: str) -> bool:
+    """rel is one of the record texts EXC_PATHS (never rewritten by any family's in-tree pass)"""
+    return rel.startswith(EXC_PATHS)
+
+
+def mask_exceptions(text: str, rel: str):
+    """hide one file's EXC_TEXT occurrences from the rules: (masked text, the hidden strings) - the shared
+    masking rename_upstream.py and rename_internal_maya.py both wrap their internal-family run with"""
+    spans = []
+    for exc_rel, rx in EXC_TEXT:
+        if exc_rel == rel:
+            spans += [text[m.start():m.end()] for m in rx.finditer(text)]
+    for i, s in enumerate(spans):
+        text = text.replace(s, f"\x00EXC{i}\x00")
+    return text, spans
+
+
+def unmask_exceptions(text: str, spans: list) -> str:
+    """put the strings mask_exceptions hid back"""
+    for i, s in enumerate(spans):
+        text = text.replace(f"\x00EXC{i}\x00", s)
+    return text
+
+
+# every family skips these (history, vendored, generated, and this folder, which must spell the old names):
 SKIP_DIR_NAMES = {".git", "third_party", "node_modules", "__pycache__", ".venv", "venv", ".mypy_cache", ".scons"}
 SKIP_DIR_RE = re.compile(r"^(build[^/\\]*|.*-build|cmake-build.*)$", re.I)
 SKIP_PATHS = ("ref-configs/", "bench/results/", "engines/qfn/bench/results/", "tools/saguaro/", "docs/triage/",
-              "engines/qfn/", "tools/qfn/", "ref/", "scratch/", "serve/qfn_engine.py",
-              "tools/test_rename_upstream.py",          # the tool's own tests and its manual must spell the
-              "docs/UPSTREAM.md")                       # old names to describe them
+              "ref/", "scratch/", "tools/test_rename_upstream.py",          # the tool's own tests and its manual
+              "docs/UPSTREAM.md")                                           # must spell the old names
 SKIP_NAMES = {"CHANGELOG.md", "NOTICE.md", "DIVERGENCE.md", "UPSTREAM.md"}   # (the register and the intake guide name both sides)
 SKIP_NAME_RE = re.compile(r"^(PLAN|REPORT|NEXT)-.*\.md$|^LICENSE(\.|$)")
 SKIP_SUFFIXES = {".log", ".jsonl", ".patch", ".orig"}
+
+# the internal family stops before QFN's own tree (its CMake project keeps STRATA_, serve/qfn_engine.py is the
+# extracted copy); the settings and log-prefix families still sweep engines/qfn, as rename_env.py and
+# rename_log_prefixes.py always did
+INTERNAL_SKIP_PATHS = ("engines/qfn/", "tools/qfn/", "serve/qfn_engine.py")
 
 
 def skipped(rel: str) -> bool:
     """rel: a root-relative posix path - True when no rename family may touch it"""
     if rel.startswith(SKIP_PATHS):
         return True
-    name = rel.rsplit("/", 1)[-1]
+    *dirs, name = rel.split("/")
+    for d in dirs:
+        if d in SKIP_DIR_NAMES or SKIP_DIR_RE.match(d):
+            return True
     if name in SKIP_NAMES or SKIP_NAME_RE.match(name):
         return True
     return any(name.lower().endswith(s) for s in SKIP_SUFFIXES)
+
+
+def internal_skipped(rel: str) -> bool:
+    """skipped(rel), plus what only the internal family stops before: QFN's own tree and the EXC_PATHS records"""
+    return skipped(rel) or rel.startswith(INTERNAL_SKIP_PATHS) or exc_path(rel)
