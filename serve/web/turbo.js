@@ -8,7 +8,7 @@
 import {html} from "./preact.js";
 import {api, esc, store} from "./lib.js";
 import {S, THINKING, P, confirmDialog, emit, loadPrefs, prefsKey, toast} from "./state.js";
-import {loadTime} from "./server.js";
+import {loadTime, unloaded} from "./server.js";
 import {TURBO_DROPS, TURBO_DROP_HINT, TURBO_SKIPS, turboEnter, turboLeave, turboSkipWarn} from "./turbo-core.js";
 import {Seg} from "./ui.js";
 
@@ -137,6 +137,7 @@ S.turboLive = undefined;   // until loaded: null = exact (off); {"drop": N, "ski
 S.turboSkip = true;        // PLAN-p5: does this engine apply skip at all (only a QFN whose engine does not report it says false)
 
 export async function loadTurboLive() {
+  if (unloaded()) return;               // (behind llama-swap it would load the model)
   try {
     const t = await api("api/turbo/options");
     S.turboSkip = t.turbo_skip !== false;   // (an older server carries no field: shown, the default)

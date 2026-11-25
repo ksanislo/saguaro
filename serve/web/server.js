@@ -4,8 +4,11 @@ import {api, ctxfmt, esc, fmt, headers, modelLabel} from "./lib.js";
 import {DEFAULTS, P, PENALTIES, S, THINKING, confirmDialog, emit, loadPrefs, modelId, newModelCheck, setFamily, toast} from "./state.js";
 
 // ------------------------------------------------------------------ health: the model and its recommended settings
-let onHealth = () => {};
-export const whenHealth = (f) => { onHealth = f; };
+// whenHealth's subscribers: the meter (app.js) and, while the Settings dialog stands open over a closed gate, its rows.
+// A subscription returns its own removal.
+const healthHooks = [];
+export const whenHealth = (f) => { healthHooks.push(f);
+                                   return () => { const i = healthHooks.indexOf(f); if (i >= 0) healthHooks.splice(i, 1); }; };
 export async function loadHealth() {
   // (a hidden tab asks nothing - but it remembers: seen again, it makes this health up, or a gate closed behind
   //  llama-swap would never learn to open again and the model's facts would never load; a closed gate stays closed)
@@ -34,7 +37,7 @@ export async function loadHealth() {
     if (switched) toast("info", `${modelLabel(h, {compact: true})}: its own settings`, "A new model starts at its standard " +
                         "parameters and thinking level; change them in Settings › Chat defaults.", 6000);
     emit();
-    onHealth();
+    for (const f of healthHooks.slice()) f();
     if (h.status === "reloading") watchReload();
     if (h.status === "updating" && !S.updateWatch) loadUpdate().then((u) => u && u.state && watchUpdate(u.state.to));
   } catch (e) {
@@ -210,6 +213,7 @@ export function kvBytesToken() {
 }
 export const CTX_STOPS = [4096, 8192, 16384, 32768, 49152, 65536, 98304, 131072, 196608, 262144, 393216, 524288, 786432, 1048576];
 export async function loadCtxInfo() {
+  if (unloaded()) return S.ctxInfo;              // (behind llama-swap api/context would load the model)
   try {
     const r = await fetch("api/context", {headers: headers()});
     if (r.status === 401) S.conn = "key";              // (a server with an API key: the pages say so, not "no context range")
@@ -317,6 +321,7 @@ export async function watchReload(to) {
 
 // ------------------------------------------------------------------ the thinking budget (applies at once, no restart)
 export async function loadThinkBudget() {
+  if (unloaded()) return S.thinkBudget;          // (behind llama-swap it would load the model)
   try { S.thinkBudget = await api("api/thinking-budget"); } catch (e) { S.thinkBudget = null; }
   emit();
   return S.thinkBudget;
@@ -343,6 +348,7 @@ export async function saveThinkBudget(text) {
 
 // ------------------------------------------------------------------ the port (Saguaro starts again on it)
 export async function loadPortInfo() {
+  if (unloaded()) return S.portInfo;             // (behind llama-swap api/port would load the model)
   try {
     const r = await fetch("api/port", {headers: headers()});
     S.portInfo = r.ok ? await r.json() : null;
@@ -387,6 +393,8 @@ export async function confirmPort(n) {
 
 // ------------------------------------------------------------------ "Use these for other apps too" (GET/POST /settings)
 export async function loadShared() {
+  if (unloaded()) return;                        // (behind llama-swap settings would load the model; the switch
+                                                 //  just keeps showing this browser's own settings)
   try {
     const r = await fetch("settings", {headers: headers()});
     if (r.ok) { const j = await r.json(); S.shared = {on: !!j.shared, now: j.defaults || null}; emit(); }
@@ -418,6 +426,7 @@ export function syncShared() {
 // the server asks GitHub for the latest release (at most every six hours) and says whether this folder can update itself
 // (a git checkout without local changes, started by saguaro.sh / START-SAGUARO.bat); else the steps by hand
 export async function loadUpdate(force = false) {
+  if (unloaded()) return S.update;               // (behind llama-swap api/update would load the model)
   try {
     const r = await fetch(force ? "api/update?force=1" : "api/update", {headers: headers()});
     S.update = r.ok ? await r.json() : null;

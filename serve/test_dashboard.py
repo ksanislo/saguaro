@@ -1317,6 +1317,97 @@ const strs = (v, out = []) => {
   return out;
 };"""
 
+    def test_opening_settings_while_unloaded_asks_only_running(self):
+        # (the P2 review's L3: Settings' six asks - settings, mcp, api/context, api/port, api/thinking-budget,
+        # api/update - are upstream requests behind llama-swap too, and the dialog's open effect fired them all:
+        # a click that wanted the dialog, not the model. Every loader now refuses while the gate is closed, the
+        # server-backed rows say "unloaded - the next message loads it" (the browser's own settings show all
+        # along), and a dialog still open loads its rows the moment the model is back on the card.)
+        got = self.node(self.WALK + """
+location.pathname = "/upstream/glm-5.3-flash/";
+st.S.health.model = "glm-5.3-flash"; st.S.health.supervisor = "llama-swap";
+document.createElementNS = (ns, t) => el;                        // (enough DOM for preact to render the dialog into)
+document.createTextNode = (s) => ({nodeType: 3, nodeValue: s, data: s});
+const {html, render} = await import(web + "/preact.js");
+const se = await import(web + "/settings.js");
+const log = [];
+let ready = false;
+globalThis.fetch = async (u) => { log.push(u);
+  return {ok: true, status: 200, json: async () => u.endsWith("/running")
+    ? {running: ready ? [{model: "glm-5.3-flash", state: "ready"}] : []}
+    : u === "settings" ? {shared: false, defaults: null}
+    : u === "mcp" ? {servers: [{status: "ready", name: "x", transport: "stdio", tools: [{tool: "t"}]}], tools: 1}
+    : u === "api/context" ? {context: 32768, min: 4096, max: 262144}
+    : u === "api/port" ? {port: 8080, restarts: false, saved: true}
+    : u === "api/thinking-budget" ? {budget: 0, supported: true, saved: true}
+    : u === "api/update" ? {enabled: false, current: "9.9.9"}
+    : u === "health" ? {model: "glm-5.3-flash", supervisor: "llama-swap"} : {model: "glm-5.3-flash", live: {state: "idle"}}}; };
+await sv.poll();                                                // (the model is off the card)
+st.S.settings = "general";
+render(html`<${se.SettingsDialog}/>`, el);                      // (Settings opens over the closed gate)
+await new Promise((ok) => setTimeout(ok, 50));
+const unloaded = {log: log.slice(), note: strs(se.Tools()).some((s) => s.includes("unloaded - the next message loads it"))};
+ready = true;
+await sv.poll();                                                // (back on the card: its health - and its rows with it)
+await new Promise((ok) => setTimeout(ok, 100)); sv.stopPoll();
+console.log(JSON.stringify({unloaded,
+  asked: log.filter((u) => !u.endsWith("/running") && u !== "health" && u !== "metrics"),
+  loaded: st.S.ctxInfo !== null && st.S.portInfo !== null && st.S.thinkBudget !== null && st.S.update !== null
+          && (st.S.mcp.servers || []).length === 1}));""")
+        self.assertEqual(got["unloaded"]["log"], ["/running"])   # (the open dialog asked nothing of the model)
+        self.assertTrue(got["unloaded"]["note"])                 # (Tools says what stands in for the servers)
+        self.assertEqual(sorted(got["asked"]), sorted(["settings", "mcp", "api/context", "api/port",
+                                                       "api/thinking-budget", "api/update"]))   # (ready: all six once)
+        self.assertTrue(got["loaded"])
+
+    def test_the_meter_re_estimates_when_the_chat_changes_while_unloaded(self):
+        # (the P2 review's L4: with the gate closed the meter only re-estimated when it held no figure - so a chat
+        # opened after one the server had counted went on showing that count as "This chat". It re-estimates whenever
+        # the chat or its messages change, still asking nothing of the model, and the exact count asks again once
+        # the model is back on the card.)
+        got = self.node("""
+location.pathname = "/upstream/glm-5.3-flash/";
+st.S.health.model = "glm-5.3-flash"; st.S.health.supervisor = "llama-swap";
+const ch = await import(web + "/chats.js");
+const log = [];
+let ready = true;
+globalThis.fetch = async (u) => { log.push(u);
+  return {ok: true, status: 200, json: async () => u.endsWith("/running")
+    ? {running: ready ? [{model: "glm-5.3-flash", state: "ready"}] : []}
+    : u === "api/tokens" ? {tokens: 1234}
+    : u === "health" ? {model: "glm-5.3-flash", supervisor: "llama-swap"} : {model: "glm-5.3-flash", live: {state: "idle"}}}; };
+const a = ch.newChatObj(), b = ch.newChatObj();
+a.messages.push({role: "user", text: "how are the llamas today"});
+b.messages.push({role: "user", text: "a completely different question about cacti and the desert"});
+st.S.chats = [a, b];
+ch.openChat(a);                                                 // (ready: the server's exact count)
+await new Promise((ok) => setTimeout(ok, 500));
+const exact = {tokens: st.S.ctx.tokens, approx: st.S.ctx.approx};
+ready = false;
+await sv.poll();                                                // (the model is swapped off the card)
+ch.openChat(b);                                                 // (another chat: its own figure, not a's)
+await new Promise((ok) => setTimeout(ok, 50));
+const switched = {tokens: st.S.ctx.tokens, approx: st.S.ctx.approx, why: st.S.ctx.why, log: log.slice()};
+st.S.draft = " and typing a new message"; ch.updateCtxMeter();  // (its messages change: re-estimate again)
+await new Promise((ok) => setTimeout(ok, 50));
+const typed = {tokens: st.S.ctx.tokens, log: log.slice()};
+ready = true;
+await sv.poll();                                                // (back on the card)
+ch.updateCtxMeter();
+await new Promise((ok) => setTimeout(ok, 500)); sv.stopPoll();
+console.log(JSON.stringify({exact, switched, typed,
+                            back: {tokens: st.S.ctx.tokens, approx: st.S.ctx.approx,
+                                   asked: log.filter((u) => u === "api/tokens").length}}));""")
+        self.assertEqual((got["exact"]["tokens"], got["exact"]["approx"]), (1234, False))
+        self.assertEqual(got["switched"]["log"], ["api/tokens", "/running"])     # (the switch asked nothing)
+        self.assertNotEqual(got["switched"]["tokens"], 1234)                     # (not the previous chat's figure)
+        self.assertTrue(got["switched"]["approx"])
+        self.assertEqual(got["typed"]["log"], ["api/tokens", "/running"])        # (typing asks nothing either)
+        self.assertNotEqual(got["typed"]["tokens"], got["switched"]["tokens"])   # (changed messages: a fresh estimate)
+        self.assertEqual(got["back"]["tokens"], 1234)                            # (back on the card: the real count)
+        self.assertFalse(got["back"]["approx"])
+        self.assertEqual(got["back"]["asked"], 2)                                # (once per chat, never while off-card)
+
     def test_the_ram_skip_carries_its_warning_under_the_row_only_for_ram(self):
         # Settings > Turbo, live: the rows name the options plainly, and the RAM warning (callout--warn, the
         # class the page already has for warnings) shows under the Skip row only while RAM is chosen

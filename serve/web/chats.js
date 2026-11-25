@@ -290,10 +290,11 @@ export function updateCtxMeter() {
   const msgs = draftChat();
   if (!msgs.length) { ctxKey = null; S.ctx = {tokens: null, approx: false, why: ""}; emit(); return; }
   if (unloaded()) {                                  // (behind llama-swap api/tokens would load the model as much as
-    if (S.ctx.tokens == null) {                      //  /metrics did - but *browsing* chats, or the health hook, must
-      ctxKey = null;                                 //  keep the "the next message loads it" promise: the local
-      S.ctx = {tokens: estimateTokens(msgs), approx: true, why: "This chat"};   //  estimate stands until the gate opens)
-      emit();
+    const off = "off-card " + JSON.stringify(apiMessages(S.current, msgs, true));   //  /metrics did - but the meter must
+    if (S.ctx.tokens == null || ctxKey !== off) {    //  never show another chat's figure: switching to a chat, or
+      ctxKey = off;                                  //  changing this one's messages, re-estimates locally (the mark
+      S.ctx = {tokens: estimateTokens(msgs), approx: true, why: "This chat"};   //  keeps it clear of the exact count's
+      emit();                                        //  ctxKey, so the real count asks once the gate opens)
     }
     return;
   }

@@ -7,7 +7,8 @@ import {DEFAULTS, LEVELS, P, PENALTIES, PRESETS, S, confirmDialog, copyText, emi
         themeChoice, thinkTitles, toast} from "./state.js";
 import {usd} from "./sidebar.js";
 import {confirmContext, confirmPort, ctxEstimate, ctxHint, ctxStops, fetchReport, loadCtxInfo, loadMcp, loadPortInfo, loadShared,
-        budgetError, loadThinkBudget, saveThinkBudget, loadTime, loadUpdate, saveShared, startUpdate, syncShared} from "./server.js";
+        budgetError, loadThinkBudget, saveThinkBudget, loadTime, loadUpdate, saveShared, startUpdate, syncShared,
+        unloaded, whenHealth} from "./server.js";
 import {chatInstructions, clearBrowser, estimateTokens, updateCtxMeter} from "./chats.js";
 import {codeBlock, onCodeClick} from "./md.js";
 import {TurboButton, TurboLive, loadTurboLive} from "./turbo.js";
@@ -29,6 +30,10 @@ const Row = ({label, sub, children, htmlFor, cls = ""}) => html`<div class=${`se
   <span class="set-row__text">${htmlFor ? html`<label for=${htmlFor}>${label}</label>` : html`<span class="set-row__label">${label}</span>`}
     ${sub ? html`<span class="set-row__sub">${sub}</span>` : null}</span>
   <span class="set-row__ctl">${children}</span></div>`;
+
+// behind llama-swap, with the model off the card (unloaded()), every request under /upstream/ loads it - so the rows
+// whose figures live on the server say what stands in for them until the model is back on its own
+const UNLOADED = "unloaded - the next message loads it";
 
 // the engines by their INFO engine_kind
 const ENGINES = {"glm-fast": "GLM fast path", ds4: "DeepSeek-V4.1 (maya-ds4)", mm3: "MiniMax-M3.1 (maya-mm3)",
@@ -92,6 +97,7 @@ function Model() {
         <button type="button" class="btn btn--primary btn--sm" onClick=${reload}>Reload with ${ctxfmt(v)}</button></div>` : null}
     </div>` : html`<p class="set-note">${S.conn === "key"
       ? "API key needed: paste it under Settings › Connect your tools."
+      : unloaded() ? UNLOADED
       : "This server does not say its context range, so it can't be changed from here."}</p>`}
     ${!h.supervisor && pi && pi.port && pi.saved ? html`
       <${Row} label="Port" htmlFor="set-port" sub="Where this page and the API listen. A new port starts Saguaro again there, and this page follows.">
@@ -148,7 +154,7 @@ function ChatDefaults() {
   const sharedNow = S.shared.on && S.shared.now && Object.keys(S.shared.now).length
     ? "API clients get now: " + Object.entries(S.shared.now).map(([k, v]) => `${names[k] || k} ${v}`).join(", ")
     : "API clients get them for anything they don't set themselves.";
-  useEffect(() => { loadTurboLive(); }, []);
+  useEffect(() => { loadTurboLive(); return unloaded() ? whenHealth(loadTurboLive) : undefined; }, []);
   return html`<div class="set-head"><h3>Chat defaults</h3><${TurboButton}/></div>
     <${TurboLive}/>
     <p class="set-intro">How ${modelLabel(S.health).name} writes new answers. Each model keeps its own.</p>
@@ -212,7 +218,7 @@ function Instructions() {
 // ------------------------------------------------------------------ Tools (MCP)
 const MCP_STATE = {ready: ["ok", "Connected"], starting: ["info", "Starting"], failed: ["danger", "Failed"],
                    stopped: ["warn", "Stopped"], idle: ["muted", "Waiting"]};
-function Tools() {
+export function Tools() {   // (exported for the dashboard's page tests, as the Turbo rows are)
   const servers = S.mcp.servers || [];
   const ready = servers.filter((s) => s.status === "ready" || s.status === "stopped");
   return html`<h3>Tools</h3>
@@ -230,8 +236,9 @@ function Tools() {
           ${s.tools.length ? html`<div class="mcp__tools">${s.tools.map((t) => html`<span class="tag" title=${t.description || ""}>${t.tool}</span>`)}</div>` : null}
         </div>`;
       })}</div>`
-    : html`<p class="set-note">No MCP servers are set up. Add them to the run config (“mcpServers”, as Claude Desktop writes them)
-        or start Saguaro with --mcp-config, and their tools appear here.</p>`}`;
+    : html`<p class="set-note">${unloaded() ? UNLOADED
+        : `No MCP servers are set up. Add them to the run config (“mcpServers”, as Claude Desktop writes them)
+        or start Saguaro with --mcp-config, and their tools appear here.`}</p>`}`;
 }
 
 // ------------------------------------------------------------------ Connect your tools
@@ -320,7 +327,8 @@ function PriceCard({p, src, onSaved}) {
 }
 function Savings() {
   const [r, setR] = useState(null), [err, setErr] = useState("");
-  useEffect(() => { api("api/savings").then(setR).catch((e) => setErr(e.message)); }, []);
+  const ask = () => { if (unloaded()) return; api("api/savings").then(setR).catch((e) => setErr(e.message)); };   // (off the card it would load the model)
+  useEffect(() => { ask(); return unloaded() ? whenHealth(ask) : undefined; }, []);
   const reset = async () => {
     if (!await confirmDialog("Start over from $0?", "<p>Every model's count of tokens and what they would have cost goes back to zero. The prices stay. This cannot be undone.</p>", "Start over", true)) return;
     try { setR(await api("api/savings/reset", {method: "POST", body: {}})); toast("success", "Started over", "Saguaro counts from $0 again."); }
@@ -330,7 +338,7 @@ function Savings() {
   return html`<h3>Savings</h3>
     <p class="set-intro">The sidebar's Saved line: what each model's own API would have charged for the same tokens. Change a price when the API's changes, or give one to a model without it. Saguaro keeps the tokens, so every total is counted again with the new prices.</p>
     ${r && r.prices_source ? html`<p class="set-note">${pricesNote(r.prices_source)}</p>` : null}
-    ${err ? html`<p class="set-note">${err}</p>` : !r ? html`<p class="set-note">Reading the prices…</p>`
+    ${err ? html`<p class="set-note">${err}</p>` : !r ? html`<p class="set-note">${unloaded() ? UNLOADED : "Reading the prices…"}</p>`
       : !(r.price_list || []).length ? html`<p class="set-note">Nothing is counted on this server: it runs without a model config.</p>`
       : html`<div class="prices">${r.price_list.map((p) => html`<${PriceCard} key=${p.model} p=${p} src=${r.prices_source} onSaved=${setR}/>`)}</div>
         <${Row} label="Start over from $0" sub=${`Every model's count of tokens: ${usd(r.usd)} saved${since ? ` since ${since}` : ""}. The prices stay.`}>
@@ -478,14 +486,24 @@ function About() {
 
 // ------------------------------------------------------------------ the dialog
 const BODIES = {general: General, model: Model, savings: Savings, chat: ChatDefaults, instr: Instructions, tools: Tools, connect: Connect, data: Data, about: About};
+
+// the dialog's six asks of the server.  Behind llama-swap each one is an upstream request that loads the model, so every
+// loader refuses while the gate is closed (server.js) - opening Settings over an unloaded model then asks nothing, and
+// the rows say "unloaded - the next message loads it"; the browser's own settings show all along.
+export function loadSettingsRows() {
+  loadShared(); loadMcp(); loadCtxInfo(); loadPortInfo(); loadThinkBudget(); loadUpdate();
+}
+
 export function SettingsDialog() {
   const box = useRef(null), body = useRef(null);
   const sec = BODIES[S.settings] ? S.settings : "general";
   useEffect(() => {
-    loadShared(); loadMcp(); loadCtxInfo(); loadPortInfo(); loadThinkBudget(); loadUpdate();
+    loadSettingsRows();                          // (each guarded: while unloaded the gate asked /running, nothing else)
+    const later = unloaded() ? whenHealth(loadSettingsRows) : null;   // (the gate opens while the dialog stands open:
+                                                                     //  its rows load as the model's facts do)
     const ret = document.activeElement;
     setTimeout(() => { const b = box.current && box.current.querySelector(".set-nav [aria-current=page]"); if (b) b.focus(); }, 0);
-    return () => { if (ret && ret.focus && document.contains(ret)) ret.focus(); };
+    return () => { if (later) later(); if (ret && ret.focus && document.contains(ret)) ret.focus(); };
   }, []);
   useEffect(() => { if (body.current) body.current.scrollTop = 0; }, [sec]);
   const close = () => { S.settings = null; emit(); };
