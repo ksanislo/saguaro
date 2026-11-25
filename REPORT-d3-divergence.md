@@ -35,6 +35,9 @@ report were staged, each by name, never `git add -A`):
     c6a8cc8e3  step 5's name sweep: DS4 item 17's switch names put right
     20e518c7a  step 5: this report
 
+After the review (REVIEW-RESULT.md, e38566f0f) its twelve findings got twelve one-finding commits plus this report's
+own fixes; FIX-REPORT.md maps each finding to its commit.
+
 ## Files
 
 - Added: `docs/DIVERGENCE.md`, `REPORT-d3-divergence.md` (this file).
