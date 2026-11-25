@@ -42,7 +42,9 @@ DELETE_FILE = ".maya-delete.json"           # ... and to the next server: delete
 CONTEXTS = [8192, 32768, 65536, 131072]       # the setup's choices (a config's own size is offered too)
 DS4_CONTEXTS = [32768, 65536, 131072, 262144, 524288, 1048576]   # ... for DeepSeek (saguaro.py's DS4_CONTEXTS)
 MM3_CONTEXTS = DS4_CONTEXTS                                       # ... and MiniMax (saguaro.py's MM3_CONTEXTS)
-QFN_CONTEXTS = [32768, 65536, 131072, 262144]                     # ... and Qwen3.8-Flash-Next on saguaro-qfn
+QFN_CONTEXTS = [32768, 65536, 131072, 262144, 524288, 1048576]   # ... and Qwen3.8-Flash-Next on saguaro-qfn
+                                                                  #  (saguaro.py's QFN_CONTEXTS: past 256K the
+                                                                  #  elastic YaRN's 512K and 1M)
 CONTEXT_MIN = 4096          # the dashboard's Context size: the smallest it offers ...
 CONTEXT_FALLBACK_MAX = 262144   # ... and the largest when the model file does not say what it was trained for
 # the largest context the dashboard offers without an "untested" warning, by engine: maya-ds4 its model's own 1M; the
@@ -51,8 +53,11 @@ CONTEXT_FALLBACK_MAX = 262144   # ... and the largest when the model file does n
 HY4_CONTEXTS = [8192, 32768, 65536, 131072]                       # ... Hy4-Flash (tools/hy4_fit.py's CONTEXTS)
 IK2_CONTEXTS = [32768, 65536, 131072, 262144]                     # ... and Inkling 2 Mini (tools/ik2_fit.py's)
 # (hy4, ik2: the largest context their measured Tesla T4 layouts ran at)
-CONTEXT_TESTED = {"ds4": 1048576, "mm3": 262144, "hy4": 131072, "ik2": 131072}
+CONTEXT_TESTED = {"ds4": 1048576, "mm3": 262144, "hy4": 131072, "ik2": 131072,
+                  "qfn": 1048576}      # (QFN's 1M runs live on mangonel: plain RoPE to 256K, YaRN past it)
 CONTEXT_TESTED_DEFAULT = 262144
+QFN_YARN_ORIG = 262144        # QFN's trained reach: plain RoPE up to here ...
+QFN_YARN_MAX = 1048576        # ... and the elastic YaRN's top: past QFN_YARN_ORIG the slider says "YaRN, extended"
 QFN_KV = ("fp16", "int8", "k8v4", "q4_0")                         # saguaro-qfn's --kv
 MM3_KV = ("bf16", "int8", "fp8", "fp4")                           # maya-mm3 --kv-cache (one format for K and V)
 # files the setup's quant list (tools/maya_quants.py) does not name, by their config's installer key
@@ -288,9 +293,18 @@ def trained_context_of(cfg: dict) -> int | None:
 def context_range(trained: int | None, current: int, engine_kind: str = "") -> dict:
     """The dashboard's Context size slider for one model (Settings > Model for the running one, the Models page's
     Engine settings for each): CONTEXT_MIN up to what the model was trained for (else CONTEXT_FALLBACK_MAX), never
-    below the size it has now; `tested`: past it the page says the size is untested on this engine."""
-    return {"min": CONTEXT_MIN, "max": max(trained or CONTEXT_FALLBACK_MAX, int(current or 0)), "trained": trained,
-            "tested": CONTEXT_TESTED.get(engine_kind, CONTEXT_TESTED_DEFAULT)}
+    below the size it has now; `tested`: past it the page says the size is untested on this engine.  QFN's engine
+    runs elastic YaRN: its top is 1M whatever the files say (the live mangonel box runs it), and the page gets a
+    `yarn_above` mark: sizes past it are the extension, not the trained reach (the slider says "YaRN, extended").
+    The other families are unchanged."""
+    top = max(trained or CONTEXT_FALLBACK_MAX, int(current or 0))
+    if engine_kind == "qfn":
+        top = max(top, QFN_YARN_MAX)
+    out = {"min": CONTEXT_MIN, "max": top, "trained": trained,
+           "tested": CONTEXT_TESTED.get(engine_kind, CONTEXT_TESTED_DEFAULT)}
+    if engine_kind == "qfn":
+        out["yarn_above"] = QFN_YARN_ORIG
+    return out
 
 
 # ------------------------------------------------------------------ what a config can be switched to
@@ -618,6 +632,14 @@ def apply(cfg: dict, settings: dict) -> dict:
     elif fam == "qfn":
         # (saguaro-qfn's own: the RAM tier is --resident-budget-gib, several answers at once are the config's
         #  "parallel" key (the driver turns it into --batch), and drafting off is --mtp-max-t 1 with --mtp kept)
+        # C18: the Context size and the elastic YaRN factor stay in step - past the trained 262144 the extension
+        # reaches max / 262144, so a page that raises the context to 1M gets --rope-scale 4 (512K: 2, 384K: 1.5;
+        # the engine parses the factor as a double, so it is written as computed, never rounded).  At or below
+        # the trained reach, and on a config without the YaRN pair, nothing is touched.
+        yctx = int(str(flag(args, "--max-context") or 0))
+        yorig = int(str(flag(args, "--yarn-orig-ctx") or 0))
+        if yctx > QFN_YARN_ORIG and flag(args, "--rope-scaling") == "yarn" and yorig > 0:
+            args = set_flag(args, "--rope-scale", "%g" % (yctx / yorig))
         if s.get("draft") not in can["draft"]:
             raise ValueError("Drafting: this setup did not download the MTP draft layer (run the setup again)"
                              if s.get("draft") == "mtp" else "Drafting: MTP or none")
@@ -923,7 +945,7 @@ def describe(path: Path, running: str | None) -> dict:
             # (the Engine settings' Context size slider: the same range as Settings > Model's for this model)
             "context_range": context_range(trained_context_of(cfg), cur.get("context"),
                                            {"deepseek": "ds4", "minimax": "mm3", "hy4": "hy4",
-                                            "ik2": "ik2"}.get(family(cfg), ""))}
+                                            "ik2": "ik2", "qfn": "qfn"}.get(family(cfg), ""))}
 
 
 _gpu_cache: dict = {}

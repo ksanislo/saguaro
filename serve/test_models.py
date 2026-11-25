@@ -337,12 +337,21 @@ class Settings(unittest.TestCase):
         # trained for (MiniMax's pack: 1M), else 256K (a GLM GGUF header it cannot read, a DeepSeek pack that does not
         # say), never below the config's own size; untested past 256K except on DeepSeek
         g, ds, mm = glm_cfg(self.d), ds4_cfg(self.d), mm3_cfg(self.d)
+        q = qfn_cfg(self.d)                                        # (C18: QFN's elastic YaRN reach is its own)
         M._trained.clear()
         with mock.patch.object(M, "machine_gpus", return_value=[]):
-            got = {m["family"]: m["context_range"] for m in M.listing(self.d, None)["models"]}
-        self.assertEqual(got["minimax"], {"min": 4096, "max": 1048576, "trained": 1048576, "tested": 262144})
-        self.assertEqual(got["glm"], {"min": 4096, "max": 262144, "trained": None, "tested": 262144})
-        self.assertEqual(got["deepseek"], {"min": 4096, "max": 262144, "trained": None, "tested": 1048576})
+            got = {m["family"]: m for m in M.listing(self.d, None)["models"]}
+        self.assertEqual(got["minimax"]["context_range"],
+                         {"min": 4096, "max": 1048576, "trained": 1048576, "tested": 262144})
+        self.assertEqual(got["glm"]["context_range"], {"min": 4096, "max": 262144, "trained": None,
+                                                       "tested": 262144})
+        self.assertEqual(got["deepseek"]["context_range"], {"min": 4096, "max": 262144, "trained": None,
+                                                            "tested": 1048576})
+        self.assertEqual(got["qfn"]["context_range"],
+                         {"min": 4096, "max": 1048576, "trained": None, "tested": 1048576,
+                          "yarn_above": 262144})                   # (the slider's 1M top and its YaRN mark,
+        self.assertEqual(got["qfn"]["contexts"],                    #  tested: it runs live on mangonel)
+                         [32768, 65536, 131072, 262144, 524288, 1048576])   # (the setup's list)
         cfg = json.loads(ds.read_text())
         cfg["args"][cfg["args"].index("--max-context") + 1] = "524288"
         ds.write_text(json.dumps(cfg))
@@ -427,6 +436,26 @@ class Settings(unittest.TestCase):
                 M.apply(cfg, bad)
         with self.assertRaisesRegex(ValueError, "not a setting of this model: ram_gb"):
             M.apply(cfg, {"ram_gb": 8})      # (the CYBER-FROST RAM knob: QFN reads nothing of it)
+
+    def test_qfn_context_keeps_the_yarn_scale_in_step(self):
+        """C18: a past-256K Context size on the Models page moves --rope-scale with it - the elastic YaRN's
+        factor follows the chosen max (1M: 4, 384K: 1.5 written as computed: the engine parses a double);
+        at or below the trained reach the config keeps the factor it has."""
+        cfg = M.read(qfn_cfg(self.d))
+        cfg["args"][cfg["args"].index("--rope-scale") + 1] = "2"    # (a config a setup wrote for 512K)
+        for ctx, want in ((1048576, "4"), (393216, "1.5"), (524288, "2")):
+            a = M.apply(cfg, {"context": ctx})["args"]
+            self.assertEqual(M.flag(a, "--max-context"), str(ctx))
+            self.assertEqual(M.flag(a, "--rope-scale"), want)
+            self.assertEqual(M.flag(a, "--yarn-orig-ctx"), "262144")
+        self.assertEqual(M.flag(M.apply(cfg, {"context": 65536})["args"], "--rope-scale"), "2")
+        plain = json.loads(json.dumps(cfg))                          # (a config without the YaRN pair: nothing
+        pa = plain["args"]                                           #  is added and nothing moved)
+        i = pa.index("--rope-scaling")
+        plain["args"] = pa[:i] + pa[i + 6:]
+        a = M.apply(plain, {"context": 1048576})["args"]
+        self.assertIsNone(M.flag(a, "--rope-scale"))
+        self.assertEqual(M.flag(a, "--max-context"), "1048576")
 
     def test_qfn_drafting(self):
         """Drafting on/off: the config's --mtp args stay (the drafter loads either way) and off is --mtp-max-t 1;

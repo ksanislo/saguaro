@@ -125,6 +125,24 @@ class Dashboard(unittest.TestCase):
         s, _, _ = self.req("POST", "/api/context", {"max_context": 2097152})   # (past what it was trained for)
         self.assertEqual(s, 400)
 
+    def test_qfn_context_range_is_the_elastic_yarn_reach(self):
+        """C18: for a running saguaro-qfn the Context size is the elastic YaRN's reach: the 1M top, 1M tested (it
+        runs live on mangonel) and the yarn_above mark that says where the trained 256K ends (past it the page
+        says "YaRN, extended"). The cost line's data rides along - the engine's own bytes a token and its pinned
+        K/V - and a reload applies like any context change; nothing past the reach is accepted."""
+        self.engine.info = dict(self.engine.info, engine_kind="qfn", kv_bytes_token=12672, kv_resident=32768)
+        self.engine.vram = [{"kv_ram": 262144 * 12672}]           # (QFN's VRAM line's pinned-cache bytes)
+        s, _, b = self.req("GET", "/api/context")
+        j = json.loads(b)
+        self.assertEqual((j["max"], j["tested"], j["yarn_above"]), (1048576, 1048576, 262144))
+        self.assertEqual(j["kv_bytes_token"], 12672)               # (the server's cost line: the engine's count)
+        self.assertAlmostEqual(j["kv_ram_gb"], 262144 * 12672 / 2**30, places=2)
+        s, _, _ = self.req("POST", "/api/context", {"max_context": 1048576})
+        self.assertEqual(s, 202)
+        self.assertEqual(self.wait_reload()["context"], 1048576)
+        s, _, _ = self.req("POST", "/api/context", {"max_context": 2097152})   # (past the YaRN reach)
+        self.assertEqual(s, 400)
+
     def test_context_reports_the_engines_own_kv_bytes(self):
         """/api/context carries the engine's own K/V bytes (its INFO's kv_bytes_token / kv_ram_bytes) to the page: an
         engine that reports none leaves them null, and the page then shows no size (never a guessed one)."""
@@ -1020,6 +1038,33 @@ console.log(JSON.stringify({tok, none: (() => { st.S.metrics = {}; return sv.kvB
         self.assertEqual(got["none"], 0)
         self.assertTrue(got["line"].startswith("\u2248 0.1 GB of RAM for the context"), got["line"])
         self.assertNotIn("GB", got["noguess"])
+
+    def test_the_yarn_part_of_the_qfn_slider_and_the_servers_cost_line(self):
+        # C18: QFN's context_range says where the trained 256K ends (yarn_above) and runs to the elastic YaRN's
+        # 1M: the slider's stops follow (512K and 1M appear, nothing past 1M), sizes past the trained reach
+        # carry the "YaRN, extended" hint, and the cost line under the slider keeps reading the server's own
+        # pinned-K/V count (context_limits' kv_ram_gb scaled by the engine's bytes a token): 1M ~ 12.4 GiB,
+        # the newest 32K of it on the cards too
+        got = self.node("""
+const r = {min: 4096, max: 1048576, trained: null, tested: 1048576, yarn_above: 262144};
+st.S.ctxInfo = {...r, context: 262144, kv_resident: 32768, kv_ram_gb: (262144 * 12672) / 2 ** 30,
+                ram_free_gb: 60};
+console.log(JSON.stringify({stops: sv.ctxStops(), past: sv.ctxYarn(393216, r), at: sv.ctxYarn(262144, r),
+                            over: sv.ctxYarn(1048576, r),
+                            plain: sv.ctxYarn(393216, {min: 4096, max: 262144}),
+                            est: sv.ctxEstimate(1048576),
+                            line: sv.ctxHint(1048576, {live: true, now: 262144})}));""")
+        self.assertIn(524288, got["stops"])
+        self.assertEqual(got["stops"][-1], 1048576)
+        self.assertEqual(got["past"], "YaRN, extended")
+        self.assertEqual(got["at"], "")                             # (the trained reach itself: no hint)
+        self.assertEqual(got["over"], "YaRN, extended")             # (1M itself is the extension too)
+        self.assertEqual(got["plain"], "")                          # (any other family: unchanged)
+        self.assertTrue(got["est"]["ram"])
+        self.assertAlmostEqual(got["est"]["gb"], 262144 * 12672 / 2**30 * 4, delta=0.05)
+        self.assertTrue(got["line"].startswith("\u2248 12.4 GB of RAM for the context"), got["line"])
+        self.assertIn("kept pinned", got["line"])
+        self.assertIn("32K positions of it also in VRAM", got["line"])
 
     def test_behind_llama_swap_the_page_asks_running_not_the_model(self):
         # under llama-swap EVERY request under /upstream/<id>/ loads the model (and evicts another from the card), so the
