@@ -17,6 +17,7 @@ export async function loadHealth() {
   try {
     const h = await (await fetch("health")).json();
     S.health = h;
+    healthSeen = true;
     // the server's recommended settings for this model (its run config) replace the built-in defaults, and are what the
     // chat uses until its user picks settings of their own
     const d = h.defaults || {};
@@ -46,6 +47,7 @@ export async function loadHealth() {
   }
 }
 let healthWait = false;                       // (a health retry stopped by the tab being hidden)
+let healthSeen = false;                       // (/health has answered once: until then poll has no real S.health to compare)
 
 // ------------------------------------------------------------------ the live metrics (the Monitor, the status, the meter)
 let fails = 0, keyWarned = false, mcpTick = 0, timer = null, polling = false;
@@ -113,8 +115,10 @@ export async function poll() {
         fails = 0;
         const rl = S.metrics.reload;
         if (rl && (rl.state === "waiting" || rl.state === "running")) watchReload();
-        if (!back && (conn === "down" || conn === "key" || identityChanged(S.health, S.metrics && S.metrics.engine))) loadHealth();
-        // (the first poll from "connecting" asks nothing: app.js' own loadHealth is already on its way)
+        if (!back && (conn === "down" || conn === "key" ||
+                      (healthSeen && identityChanged(S.health, S.metrics && S.metrics.engine)))) loadHealth();
+        // (the first poll from "connecting" asks nothing: its S.health is still state.js' placeholder, so the identity
+        //  term waits for healthSeen, and app.js' own loadHealth is already on its way beside this poll)
       } else {
         throw new Error(`HTTP ${r.status}`);
       }

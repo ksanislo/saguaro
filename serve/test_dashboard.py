@@ -1135,6 +1135,31 @@ console.log(JSON.stringify({plain, pathOnly: log.slice(), conn: st.S.conn}));"""
         self.assertEqual(got["pathOnly"], ["metrics", "metrics"])
         self.assertEqual(got["conn"], "ok")
 
+    def test_the_first_poll_of_a_page_load_asks_no_health_of_its_own(self):
+        # (the model-names review's nit 2: app.js starts poll() next to loadChats().then(loadHealth), and the first
+        #  /metrics usually lands first - it names the real engine while S.health is still state.js' placeholder, and
+        #  the identityChanged term fired a second /health on every page load.  The term waits for healthSeen now;
+        #  a real switch after health has been read once still re-reads it)
+        got = self.node("""
+const log = [];
+const eng = {model: "glm-5.3-flash", model_label: "GLM-5.3 · Maya-L",
+             model_name_pretty: "GLM 5.3", model_quant: "Maya-L"};
+globalThis.fetch = async (u) => { log.push(u);
+  return {ok: true, status: 200, json: async () => u === "health" ? eng : {model: eng.model, engine: eng}}; };
+await sv.poll();                                                    // (the page load: only /metrics, the health on its way)
+const load = log.slice();
+await sv.loadHealth();                                              // (app.js' health lands: healthSeen is set now)
+log.length = 0;
+await sv.poll(); sv.stopPoll();                                     // (the engine it names is this one: no re-read)
+const same = log.slice();
+st.S.health = {model: "qwen3.8-flash-next", model_label: "Qwen3.8-Flash-Next · Q8_0 (saguaro-qfn)"};
+log.length = 0;
+await sv.poll(); sv.stopPoll();                                     // (another engine named: /health once more)
+console.log(JSON.stringify({load, same, moved: log.slice()}));""")
+        self.assertEqual(got["load"], ["metrics"])                    # (the placeholder matches no engine: no ask)
+        self.assertEqual(got["same"], ["metrics"])
+        self.assertEqual(got["moved"], ["metrics", "health"])        # (a switch after healthSeen: one re-read, as item 10)
+
     def test_a_running_that_does_not_answer_polls_as_today_while_visible(self):
         # an older llama-swap without /running (404) or a key it refuses (401): the page falls back to today's polling -
         # but only while the tab is visible, and it stops the moment the tab is hidden
