@@ -316,17 +316,30 @@ def proportional_split(cards: list) -> str:
     return ",".join(str(b) for b in out)
 
 
+def _layout_runs(cards: list) -> bool:
+    """True when every card of this proposed layout clears its own minimum (a VRAM of 0: not read, no
+    complaint) - what the equal-group fallback of best_gpus weighs group against single card."""
+    return all(not float(g.get("vram_gb") or 0) or float(g["vram_gb"]) >= m
+               for g, m in zip(cards, card_min_gib(cards)))
+
+
 def best_gpus(cards: list) -> list:
     """The cards the setup takes without being told: one big card alone (it caches its experts without a split
     over the bus), else up to MAX_GROUP equal cards for a split - more cards, more experts in VRAM - else simply
     the largest one (one 16 GB card runs it).  [] for no cards.  v1.2.1-B: no size filter - a card below the
-    comfortable 16 GB is the layout's "slow", not a refusal (unsupported() refuses only under the true minimum)."""
+    comfortable 16 GB is the layout's "slow", not a refusal (unsupported() refuses only under the true
+    minimum).  v1.2.1-B review finding 1: equal_group ranks by count, not size, so beside one comfortable card
+    the "equal group" can be two tiny cards that cannot hold their own share of the split - when the group
+    stands below its own card_min_gib and the largest card alone stands above its single-card minimum, the
+    single card is taken; a pair of tiny cards with nothing better keeps the split, which is what gets refused."""
     have = sorted(cards, key=lambda g: (-round(float(g.get("vram_gb") or 0)), g.get("index", 0)))
     if not have:
         return []
     if float(have[0].get("vram_gb") or 0) >= 20.0 or len(have) == 1:
         return have[:1]
     group = equal_group(have)
+    if group and not _layout_runs(group) and _layout_runs(have[:1]):
+        return have[:1]
     return group or have[:1]
 
 

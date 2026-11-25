@@ -327,6 +327,22 @@ class Choice(unittest.TestCase):
                                                                                     #  refusal - no size filter)
         self.assertEqual(F.best_gpus([]), [])
 
+    def test_a_comfortable_card_beats_a_group_of_tiny_ones(self):
+        """Review finding 1: equal_group ranks by count, not size - an equal pair of tiny cards beside a card
+        that runs the model alone used to be "the group" and refused the PC.  A group that stands below its own
+        split minimum loses to a single card that clears its single-card minimum; groups that run keep the split."""
+        a4000 = gpu(0, 16.0, "86", "RTX A4000")
+        gt710 = [gpu(i, 1.0, "35", "GeForce GT 710") for i in (1, 2)]              # (the 16 GB + 2x 1 GB PC:
+        self.assertEqual([g["index"] for g in F.best_gpus([a4000] + gt710)], [0])  #  the A4000 alone is comfortable)
+        gt1030 = [gpu(i, 4.0, "61", "GeForce GT 1030") for i in (1, 2)]            # (cc >= 61 too: the 4 GB pair
+        self.assertEqual([g["index"] for g in F.best_gpus([gpu(0, 11.0, "75", "RTX 2080 Ti")] + gt1030)],
+                         [0])                                                      #  cannot hold its split)
+        self.assertEqual([g["index"] for g in F.best_gpus(t4s(2, 8.0))], [0, 1])   # (8 GB pair: runs its split)
+        self.assertEqual([g["index"] for g in F.best_gpus(t4s(4))], [0, 1, 2, 3])  # (the groups that run: unchanged)
+        tiny = [gpu(i, 4.0, "89", "GeForce RTX 4060") for i in (0, 1)]             # (nothing better beside them:
+        self.assertEqual([g["index"] for g in F.best_gpus(tiny)], [0, 1])          #  the pair still prices the
+                                                                                   #  refusal of the split)
+
 
 class Facts(unittest.TestCase):
     def test_sm75_gate(self):

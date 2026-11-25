@@ -1668,12 +1668,14 @@ def check_pc(a, family: str = "glm", gguf: bool = False, ds4_quant: str = "exl3"
         if why:
             fail(why)
     if family == "qfn":                                        # (v1.2.1-B: cards under the measured 16 GB run,
-        why = QF.unsupported(QF.best_gpus(found) or found,     #  slowly - one plain line with the numbers first,
-                             mem_gb()[0])                      #  and only for a PC that cannot run at all (below
-        if why:                                                #  the true minimum), priced on the cards the picker
-            fail(why)                                          #  would take: a 1 GB display card it would never
-                                                               #  choose cannot refuse the PC - and --gpus is
-                                                               #  guarded on the chosen cards below)
+        usable = [g for g in found if int(g["arch"]) >= min_cc]  #  slowly - one plain line with the numbers first,
+        why = QF.unsupported(QF.best_gpus(usable) or usable or found,   #  and only for a PC that cannot run at all
+                             mem_gb()[0])                      #  (below the true minimum), priced on the cards the
+        if why:                                                #  picker could take at all: the same cc filter
+            fail(why)                                          #  choose_gpus applies (a card below MIN_CC cannot
+                                                               #  be named by --gpus either) and the layout
+                                                               #  best_gpus would take; --gpus is guarded on the
+                                                               #  chosen cards below)
     say("  NVIDIA GPUs:")
     for g in found:
         say(f"    {gpu_label(g)} - " + ("can be used" if int(g["arch"]) >= max(min_cc, VALIDATED_CC) else
