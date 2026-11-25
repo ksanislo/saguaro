@@ -367,6 +367,30 @@ class MockEngine:
             yield t
 
 
+# R122: the queue priorities (a request's "priority" field, its X-Saguaro-Priority header, the config's
+# "priority"): a person's question steps an agent's long answer aside at once and runs first.  Everything
+# without one is normal, so an old client's order is exactly the plain FIFO it always was.
+PRIORITY_HIGH, PRIORITY_NORMAL, PRIORITY_BACKGROUND = 2, 1, 0
+PRIORITY_NAMES = {PRIORITY_HIGH: "high", PRIORITY_NORMAL: "normal", PRIORITY_BACKGROUND: "background"}
+
+
+def priority_level(value, field="priority") -> int:
+    """One of "high" / "normal" / "background" as its level, or a ValueError naming the field (a 400)."""
+    if isinstance(value, str) and value.strip().lower() in PRIORITY_NAMES.values():
+        return {"high": PRIORITY_HIGH, "normal": PRIORITY_NORMAL, "background": PRIORITY_BACKGROUND}[
+            value.strip().lower()]
+    raise ValueError(f'{field}: "high", "normal" or "background"')
+
+
+def priority_age_seconds() -> float:
+    """SAGUARO_PRIORITY_AGE_S (300): a background waiter older than this counts as normal - an agent's queued work
+    waits behind a person's, but not behind an endless stream of them for ever."""
+    try:
+        return max(0.0, float(os.environ.get("SAGUARO_PRIORITY_AGE_S", "300") or 0))
+    except ValueError:
+        return 300.0
+
+
 class FairLock:
     """The service's FIFO: waiters get the engine in the order they asked (threading.Lock promises no order), and the
     holder can see that someone is waiting (`waiting()`, the fair slices).  acquire/release/with as threading.Lock.
@@ -374,11 +398,17 @@ class FairLock:
     With an engine that runs several conversations at once (READY ... multi=<n>) it has n places: a request takes
     one (`units=1`), and what needs the engine to itself - an image encode, a context reload, an update - takes them
     all (the default, and `with`).  Places go in arrival order: a waiter for all of them holds back the ones behind
-    it, so it is not starved."""
+    it, so it is not starved.
+
+    Entries carry a priority (`enqueue(units, priority)`, `acquire(priority=...)`, high 2 / normal 1 / background 0,
+    normal the default): the highest priority is granted first, FIFO inside one priority, and an all-places waiter
+    holds back the ones behind it of its own or a lower priority - with equal priorities the order is the plain
+    FIFO's, unchanged.  A background waiter older than SAGUARO_PRIORITY_AGE_S counts as normal (aging);
+    `waiting(above=p)` counts the waiters that would step ahead of a runner at level p."""
 
     def __init__(self, capacity: int = 1):
         self._cv = threading.Condition(threading.Lock())
-        self._queue: collections.deque = collections.deque()   # [token, units]
+        self._queue: collections.deque = collections.deque()   # [token, units, asked at, queued again, priority]
         self.capacity = max(1, int(capacity))
         self._used = 0
         self._yields = 0                                       # runners that decided to give their place up (claim_yield)
@@ -408,40 +438,73 @@ class FairLock:
     def _units(self, units):
         return self.capacity if units is None else max(1, min(int(units), self.capacity))
 
-    def acquire(self, blocking: bool = True, timeout: float = -1, units: int | None = None) -> bool:
+    def _eff(self, e) -> int:
+        """What priority a waiter counts at now: a background one older than SAGUARO_PRIORITY_AGE_S has aged
+        into normal (an entry from before the priorities is normal)."""
+        p = e[4] if len(e) > 4 else PRIORITY_NORMAL
+        if p == PRIORITY_BACKGROUND and time.monotonic() - e[2] >= priority_age_seconds():
+            return PRIORITY_NORMAL
+        return p
+
+    def _first(self, me) -> bool:
+        """Whether `me` is the head of the grant order (the highest priority first, FIFO inside one priority):
+        nothing that counts waits ahead of it at its own level or above, and nothing above it waits behind it.
+        Entries in the deque are in arrival order, so a plain FIFO (all one priority) means exactly what the
+        head of the deque meant before."""
+        p = self._eff(me)
+        ahead = True
+        for e in self._queue:
+            if e is me:
+                ahead = False
+                continue
+            q = self._eff(e)
+            if q > p or (q == p and ahead):
+                return False
+        return True
+
+    def acquire(self, blocking: bool = True, timeout: float = -1, units: int | None = None,
+                priority: int | None = None) -> bool:
         k = self._units(units)
+        p = PRIORITY_NORMAL if priority is None else priority
         with self._cv:
-            if not self._queue and self._fits(k):
+            # the fast path only when nobody of an equal or higher priority waits: a new normal request may step
+            # over a queued background one, but never over its own kind or above a high one
+            if self._fits(k) and not any(self._eff(e) >= p for e in self._queue):
                 self._used += k
                 return True
             if not blocking:
                 return False
-        me = self.enqueue(units)
+        me = self.enqueue(units, p)
         if self.wait_turn(me, timeout):
             return True
         self.leave(me)
         return False
 
-    def enqueue(self, units: int | None = None) -> object:
+    def enqueue(self, units: int | None = None, priority: int | None = None) -> object:
         """A place in line (wait_turn waits for it, leave gives it up): a waiter that wakes up now and then (to send
         a heartbeat) keeps its place."""
-        me = [object(), self._units(units), time.monotonic(), False]    # (token, units, asked at: the queue watchdog's age, queued again by a fair slice)
+        me = [object(), self._units(units), time.monotonic(), False,     # (token, units, asked at: the queue watchdog's age, queued again by a fair slice)
+              PRIORITY_NORMAL if priority is None else priority]         # (R122: its place in the grant order)
         with self._cv:
             self._queue.append(me)
         return me
 
-    def claim_yield(self, slice_s: float) -> bool:
+    def claim_yield(self, slice_s: float, above: int | None = None) -> bool:
         """The fair slices' decision, made one runner at a time: True when this runner should give its place up now,
         and then counted until it does (yield_place) or says it did not (unclaim_yield).  Without the count, every
         runner past its slice saw the same waiter and gave up its place for it: with 4 conversations running, one
         short request cut all 4, each to read all it had written again.  The waiters that count are the ones that
         asked for a place (a request that has not run yet), and those a slice put back in line once they have waited
         a slice themselves (long answers still take turns); what they need, less the places free and the runners
-        already on their way out, is how many more runners give up a place."""
+        already on their way out, is how many more runners give up a place.
+
+        `above` (R122): a priority preemption counts only the waiters above that level - a runner is never cut for
+        its own or a lower priority; with it left out (the fair slices) every waiter counts, as before."""
         now = time.monotonic()
         with self._cv:
             need = sum(min(e[1], self.capacity) for e in self._queue
-                       if not (len(e) > 3 and e[3]) or now - e[2] >= slice_s)
+                       if (above is None or self._eff(e) > above)
+                       and (not (len(e) > 3 and e[3]) or now - e[2] >= slice_s))
             free = 0 if self._one and self._used > 0 else self.capacity - self._used
             if need - free - self._yields > 0:
                 self._yields += 1
@@ -452,11 +515,13 @@ class FairLock:
         with self._cv:
             self._yields = max(0, self._yields - 1)
 
-    def yield_place(self, units: int | None = 1) -> object:
+    def yield_place(self, units: int | None = 1, priority: int | None = None) -> object:
         """A runner's place given up, and a place in line behind whoever waits now, in one step (the claim ends with it:
-        the free place is counted from here)."""
+        the free place is counted from here).  It keeps its priority (R122): the resumed request waits with the same
+        claim it had before it gave way, so a high-priority answer cut for a person's question does not land behind
+        the agents' background queue."""
         k = self._units(units)
-        me = [object(), k, time.monotonic(), True]
+        me = [object(), k, time.monotonic(), True, PRIORITY_NORMAL if priority is None else priority]
         with self._cv:
             self._queue.append(me)
             self._used -= min(k, self._used)
@@ -473,7 +538,7 @@ class FairLock:
             while True:
                 if me not in self._queue:
                     return False
-                if self._queue[0] is me and self._fits(min(me[1], self.capacity)):
+                if self._first(me) and self._fits(min(me[1], self.capacity)):
                     self._queue.remove(me)
                     me[1] = min(me[1], self.capacity)
                     self._used += me[1]
@@ -506,8 +571,16 @@ class FairLock:
     def locked(self) -> bool:
         return self._used > 0
 
-    def waiting(self) -> int:
-        return len(self._queue)
+    def waiting(self, above: int | None = None) -> int:
+        """The waiters in line; with `above` (R122), only those of a HIGHER priority than that level - a runner asks
+        this before it even looks at giving its place up."""
+        if above is None:
+            return len(self._queue)
+        return sum(1 for e in self._queue if self._eff(e) > above)
+
+    def highest_waiting(self):
+        """The highest priority waiting (aged), None with an empty line: whose name a preemption logs."""
+        return max((self._eff(e) for e in self._queue), default=None)
 
     def oldest_wait(self) -> float:
         """Seconds the request first in line has been waiting (0 when nobody waits): 0 while it is being served."""
