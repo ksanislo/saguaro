@@ -279,10 +279,10 @@ lines back after it.
 
 ## If the build fails
 
-- **Visual Studio Build Tools are installed but not found (Windows):** Maya checks the Installer's
+- **Visual Studio Build Tools are installed but not found (Windows):** Saguaro checks the Installer's
   `%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe` first. If that copy is missing, it also
   looks for `vswhere.exe` on `PATH`. A [standalone copy](https://github.com/microsoft/vswhere/releases) can locate
-  Build Tools in a custom installation directory; put its folder on `PATH` and restart Maya. The C++ component
+  Build Tools in a custom installation directory; put its folder on `PATH` and restart Saguaro. The C++ component
   and CUDA-compatible Visual Studio version checks still apply.
 - **"nvcc ... cannot build for these GPUs":** Volta needs CUDA 12.x, Blackwell 12.8 or newer. The setup takes the
   newest installed toolkit that fits.
