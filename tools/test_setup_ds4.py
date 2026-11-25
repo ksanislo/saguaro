@@ -248,7 +248,7 @@ class Config(unittest.TestCase):
 
     def test_fresh(self):
         p, c = self.write(args())
-        self.assertEqual(p.name, "maya-ds4.json")
+        self.assertEqual(p.name, "saguaro-ds4.json")
         self.assertEqual(c["args"], ["--pack", str(Path("/m/DS/maya-ds4")), "--max-context", "131072", "--tp", "2",
                                      "--reserve-mib", "3072"])   # (every vendor now: no display facts here, so the
                                                                  #  desktop's room: v1.2.1-A)

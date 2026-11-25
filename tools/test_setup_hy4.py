@@ -374,7 +374,7 @@ class Steps(unittest.TestCase):
 
     def test_the_config_on_four_t4s(self):
         path, cfg, pack = self.write([t4(i) for i in range(4)])
-        self.assertEqual(path.name, "maya-hy4-flash-maya-s.json")
+        self.assertEqual(path.name, "saguaro-hy4-flash-maya-s.json")
         self.assertEqual(cfg["exe"], str(maya.HY4_EXE))
         self.assertEqual(cfg["args"], ["--pack", str(pack), "--max-context", "131072", "--tp", "4", "--chunk", "2048",
                                        "--reserve-gb", "0.5"])

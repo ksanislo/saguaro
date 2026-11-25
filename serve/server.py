@@ -8908,6 +8908,8 @@ def main() -> int:
                          "when it closes - that program ended, however it ended - the server stops as on Ctrl+C "
                          "(on Linux also when its parent process ends)")
     a = ap.parse_args()
+    if a.config:                                         # (--config given as the old name after the 1.2.2 rename:
+        a.config = str(config_names.resolve(Path(a.config)))   #  a path llama-swap or systemd was given keeps working)
     clean_stale_picture_dirs()
     stop = threading.Event()
     stop_signals(stop)                                  # before any engine starts (#1181); ends it if one comes then

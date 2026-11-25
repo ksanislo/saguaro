@@ -328,7 +328,7 @@ class Config(unittest.TestCase):
             self.assertNotIn(k, c["args"])
         self.assertEqual(c["args"][c["args"].index("--kv-cache") + 1], "int8")
         self.assertEqual((c["installer"]["mm3_quant"], c["installer"]["quant"]), ("gguf-xs", "MiniMax-M3.1-Flash-Maya-XS"))
-        self.assertEqual(p.name, "maya-minimax-maya-xs.json")                # (the naming scheme's config)
+        self.assertEqual(p.name, "saguaro-minimax-maya-xs.json")                # (the naming scheme's config)
         # a GGUF pack with the companions' vision tower and draft: pictures on, the draft off until measured
         (self.pack / "mm3.txt").write_text("format gguf\nvision.hidden_size 1280\ndspark.num_hidden_layers 5\n")
         (self.root / "maya-mm3.json").unlink()
