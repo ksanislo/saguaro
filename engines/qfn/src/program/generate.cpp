@@ -1627,6 +1627,7 @@ struct GpuStage {
     int32_t* d_res = nullptr;                            ///< the residency table on its device
     int32_t* d_ram = nullptr;                            ///< the RAM tier's mirror on its device (PLAN-turbo-live skip=ssd; null: no RAM-tier fact)
     float* d_skip_usage = nullptr;                       ///< this card's skipped-pick usage, folded into the tier's counts (PLAN-turbo-live)
+    unsigned long long* d_turbo_stats = nullptr;         ///< [16][3]: per counter bucket, the picks routed / dropped / skipped (PLAN-turbo-live's per-request line)
     strata::core::Verifier ver;
     strata::core::Verifier ver_b;                        ///< --pipeline-windows: the odd windows' verifier
     strata::prefill::Prefill sp;
@@ -9890,6 +9891,46 @@ int main(int argc, char** argv) {
             }
             for (size_t i = 0; i < back.size(); ++i) drive.d.usage[i] += back[i];
         };
+        // PLAN-turbo-live's per-request line: the router counts every decode row with a turbo on into one of 16
+        // buckets on its own card (0 = the solo request, 1+slot for a batch window), as [picks, dropped, skipped].
+        // The bucket is cleared when the request starts and taken when it ends.
+        unsigned long long* d_turbo_stats = nullptr;
+        constexpr size_t kTurboStatsN = 16 * 3;
+        if (cudaMalloc((void**) &d_turbo_stats, kTurboStatsN * sizeof(unsigned long long)) == cudaSuccess &&
+            cudaMemset(d_turbo_stats, 0, kTurboStatsN * sizeof(unsigned long long)) == cudaSuccess) {
+            for (auto& st : stages) {
+                const strata::core::OnDevice on(st->dev);
+                st->d_turbo_stats = nullptr;
+                if (cudaMalloc((void**) &st->d_turbo_stats, kTurboStatsN * sizeof(unsigned long long)) == cudaSuccess &&
+                    cudaMemset(st->d_turbo_stats, 0, kTurboStatsN * sizeof(unsigned long long)) == cudaSuccess)
+                    continue;
+                std::fprintf(stderr, "saguaro serve: the Turbo counters could not be staged on CUDA%d: those "
+                                     "requests will not report a turbo line\n", st->dev);
+            }
+        } else {
+            if (d_turbo_stats != nullptr) (void) cudaFree(d_turbo_stats);
+            d_turbo_stats = nullptr;
+        }
+        vh.turbo_stats = d_turbo_stats;
+        const auto turbo_take = [&](int bucket, unsigned long long* out) {
+            out[0] = out[1] = out[2] = 0;
+            if (d_turbo_stats == nullptr || bucket < 0 || bucket >= 16) return;
+            std::vector<unsigned long long> v(kTurboStatsN);
+            const strata::core::OnDevice on0(ver.device());
+            if (cudaMemcpy(v.data(), d_turbo_stats, kTurboStatsN * sizeof(unsigned long long),
+                           cudaMemcpyDeviceToHost) == cudaSuccess)
+                for (int i = 0; i < 3; ++i) out[i] = v[(size_t) bucket * 3 + i];
+            (void) cudaMemsetAsync(d_turbo_stats + (size_t) bucket * 3, 0, 3 * sizeof(unsigned long long), ver.stream());
+            for (auto& st : stages) {
+                const strata::core::OnDevice on(st->dev);
+                if (st->d_turbo_stats == nullptr) continue;
+                if (cudaMemcpy(v.data(), st->d_turbo_stats, kTurboStatsN * sizeof(unsigned long long),
+                               cudaMemcpyDeviceToHost) == cudaSuccess)
+                    for (int i = 0; i < 3; ++i) out[i] += v[(size_t) bucket * 3 + i];
+                (void) cudaMemsetAsync(st->d_turbo_stats + (size_t) bucket * 3, 0, 3 * sizeof(unsigned long long),
+                                       st->ver.stream());
+            }
+        };
         // Layer split: `ver` runs layers [0, K1) and hands its residual to the next stage's verifier, and so on; the
         // last runs the head.  The hand-offs are mapped pinned memory, portable: a stage on another GPU reads it.
         // (--split-device 0: the second stage on this GPU, sharing its weights, session and cache - the A/B.)
@@ -10032,7 +10073,8 @@ int main(int argc, char** argv) {
                     strata::core::VerifyHits vs;
 vs.d_res = gs.d_res;
 vs.d_ram = gs.d_ram;
-                    vs.d_skip_usage = gs.d_skip_usage;
+vs.d_skip_usage = gs.d_skip_usage;
+                    vs.turbo_stats = gs.d_turbo_stats;
                     vs.h_res = host_res.empty() ? nullptr : host_res.data();
                     vs.cache_base = gs.cache.device_slot(0);
                     vs.blob = thits.blob;
@@ -10091,7 +10133,8 @@ vs.d_ram = gs.d_ram;
                 strata::core::VerifyHits vs;
 vs.d_res = gs.d_res;
 vs.d_ram = gs.d_ram;
-                vs.d_skip_usage = gs.d_skip_usage;
+vs.d_skip_usage = gs.d_skip_usage;
+                vs.turbo_stats = gs.d_turbo_stats;
                 vs.h_res = host_res.empty() ? nullptr : host_res.data();
                 vs.cache_base = gs.cache.device_slot(0);
                 vs.blob = thits.blob;
@@ -13082,6 +13125,7 @@ vs.d_ram = gs.d_ram;
                     v[(size_t) b]->turbo_skip = skip;
                 }
             (void) ram_upload();   // PLAN-turbo-live: the slot's rows may route with skip=ssd: the mirror first
+            if (b >= 0 && (drop != 0 || skip != 0)) { unsigned long long z3[3]; turbo_take(b + 1, z3); }   // the request's own counters
         };
         // an admission beside the slots, at its first token: one line with where its time went
         auto adm_first = [&](int b) {
@@ -13105,6 +13149,17 @@ vs.d_ram = gs.d_ram;
                           (long long) (drive.d.cache_hits - sl.cache0),
                           (long long) (drive.d.cache_hits + drive.d.cache_admitted + drive.d.cache_refused - sl.look0),
                           (long long) sl.draft_acc, (long long) sl.draft_off);
+            // PLAN-turbo-live: one line per request with skip or drop on, on its BDONE (like the solo request's)
+            {
+                const int d = turbo_drop_of(sl.turbo), s = turbo_skip_of(sl.turbo);
+                if (d != 0 || s != 0) {
+                    unsigned long long c3[3];
+                    turbo_take(b + 1, c3);
+                    std::fprintf(stderr, "saguaro batch: slot %d: turbo drop=%d skip=%s: %llu picks, %llu dropped, "
+                                         "%llu skipped\n", b, d, s == 2 ? "ram" : s == 1 ? "ssd" : "off",
+                                 c3[0], c3[1], c3[2]);
+                }
+            }
             return std::string(t);
         };
         // the Monitor's STAT line while the batch windows run (the same format the maya engines print and the server's
@@ -21266,8 +21321,10 @@ vs.d_ram = gs.d_ram;
             } solo_turbo;
             solo_turbo.sx.push_back(&ss);
             for (auto& st : stages) solo_turbo.sx.push_back(&st->ss);
-            for (auto* u : solo_turbo.sx) { u->turbo_drop = turbo_drop_of(req_turbo); u->turbo_skip = turbo_skip_of(req_turbo); }
+            const int solo_drop = turbo_drop_of(req_turbo), solo_skip = turbo_skip_of(req_turbo);
+            for (auto* u : solo_turbo.sx) { u->turbo_drop = solo_drop; u->turbo_skip = solo_skip; }
             (void) ram_upload();   // PLAN-turbo-live: the reply's windows may route with skip=ssd: the mirror first
+            if (solo_drop != 0 || solo_skip != 0) { unsigned long long z3[3]; turbo_take(0, z3); }   // the request's own counters
             if (cancelled) finish = nf_hit ? "nonfinite" : read_vram ? "vram" : "cancel";
             // ======== --pipeline-windows 2: the decode windows with the two cards overlapped ========
             // Stage 0 (the first card) runs window K+1 while stage 1 verifies window K, on the guess that K is accepted
@@ -22693,8 +22750,15 @@ vs.d_ram = gs.d_ram;
                                  "%lld generated in %.0f ms (%.1f tok/s), drafts accepted %lld of %lld, %zu checkpoints%s\n",
                          (long long) n, (long long) resume, read_txt, prompt_ms,
                          prompt_ms > 0 ? 1000.0 * read_n / prompt_ms : 0.0, (long long) produced_n, decode_ms,
-                         decode_ms > 0 ? 1000.0 * produced_n / decode_ms : 0.0, (long long) draft_accepted,
-                         (long long) draft_offered, checks.size(), cancelled ? " (cancelled)" : "");
+                          decode_ms > 0 ? 1000.0 * produced_n / decode_ms : 0.0, (long long) draft_accepted,
+                          (long long) draft_offered, checks.size(), cancelled ? " (cancelled)" : "");
+            if (solo_drop != 0 || solo_skip != 0) {   // PLAN-turbo-live: the request's own counters, one line
+                unsigned long long c3[3];
+                turbo_take(0, c3);
+                std::fprintf(stderr, "saguaro serve: turbo drop=%d skip=%s: %llu picks, %llu dropped, %llu skipped\n",
+                             solo_drop, solo_skip == 2 ? "ram" : solo_skip == 1 ? "ssd" : "off",
+                             c3[0], c3[1], c3[2]);
+            }
             stage_pool_note();
             kmem_note();   // (HMEM: the solo session's host copies may have grown for this request)
             if (serve_adapt_drain_ms >= 1.0)

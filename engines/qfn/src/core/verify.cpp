@@ -775,7 +775,7 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
     // ---- mapped staging
     bool ok = mapped(T * 4, (void**) &h_tok_, (void**) &m_tok_) &&
               mapped(T * strata::kernels::kStepCount * 4, (void**) &h_step_, (void**) &m_step_) &&
-              mapped(T * (NH + NKV + IQ + 5) * 4, (void**) &h_pos_, (void**) &m_pos_) &&
+              mapped(T * (NH + NKV + IQ + 6) * 4, (void**) &h_pos_, (void**) &m_pos_) &&
               mapped((2 + T) * 4 + 16, (void**) &h_commit_, (void**) &m_commit_) &&
               mapped(T * N * 4, (void**) &h_ple_, (void**) &m_ple_) &&
               mapped(T * 4 + 16, (void**) &h_out_, (void**) &m_out_) &&
@@ -872,7 +872,7 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
     // ---- the device arena: the same sequence counted, then carved
     auto carve = [&](Bump& b) {
         tok_ = b.take<int32_t>(T); step_ = b.take<int32_t>(T * strata::kernels::kStepCount);
-        pos_ = b.take<int32_t>(T * (NH + NKV + IQ + 5)); commit_ = b.take<int32_t>(2 + T);
+        pos_ = b.take<int32_t>(T * (NH + NKV + IQ + 6)); commit_ = b.take<int32_t>(2 + T);
         ple_ = b.take<float>(T * N); emb_ = b.take<float>(T * N); R_ = b.take<float>(T * HC * N);
         mixed_ = b.take<float>(T * N); bo_ = b.take<float>(T * N);
         inj_ = b.take<float>(T * HC); inj2_ = b.take<float>(T * HC);
@@ -1198,10 +1198,12 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
     // a batch window with per-slot positions (--vision): the rows' rotary positions, and [t][3] the (t, h, w) of each
     // row's indexer block, staged by stage_batch; the window reads no shared position table then
     const bool row_rope = batch_rec_ && strata::kernels::slot_rope_enabled();
-    // (+ [t] each row's Turbo drop and skip tier past the (t, h, w) table: always copied, a row's request routes with them)
-    copy_i32_from_mapped(pos_, m_pos_, (int64_t) MT * (NH + NKV + IQ + 5), in_s);
+    // (+ [t] each row's Turbo drop, skip tier and counter bucket past the (t, h, w) table: always copied, a row's
+    // request routes with them; the bucket is 0 for a solo window and 1+slot for a batch row)
+    copy_i32_from_mapped(pos_, m_pos_, (int64_t) MT * (NH + NKV + IQ + 6), in_s);
     const int32_t* tdrop = pos_ + MT * (NH + NKV + IQ + 3);
     const int32_t* tskip = pos_ + MT * (NH + NKV + IQ + 4);
+    const int32_t* ttag = pos_ + MT * (NH + NKV + IQ + 5);
     // per-ROW positions of the K rows [t][NKV] and the indexer query rows [t][IQ] (for batched RoPE)
     const int32_t* pos_k = pos_ + MT * NH;
     const int32_t* pos_i = pos_ + MT * (NH + NKV);
@@ -1966,6 +1968,8 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
         trv.res = hits_.d_res != nullptr ? hits_.d_res + l * g.n_expert : nullptr;
         trv.ram = hits_.d_ram != nullptr ? hits_.d_ram + l * g.n_expert : nullptr;
         trv.skip_usage = hits_.d_skip_usage;
+        trv.tag = ttag + tb;
+        trv.stats = hits_.turbo_stats;
         trv.layer = (int32_t) l;
         trv.n_expert = (int32_t) g.n_expert;
         const bool nat = native_router_enabled() && NE == 512 && K == 10;
@@ -1997,7 +2001,7 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                 MoEBuffers mb = ss.moe;
                 mb.logits = logits_ + t * NE; mb.ids = ids_ + t * K; mb.weights = w_ + t * K;
                 strata::kernels::TurboRoute trt = trv;
-                trt.drop = tdrop + t; trt.skip = tskip + t;
+                trt.drop = tdrop + t; trt.skip = tskip + t; trt.tag = ttag + t;
                 if (!moe_route(wt, g, l, K, mb, mixed_ + t * N, cs, err, nullptr, nat ? &trt : nullptr)) return false;
             }
             if (!nat) {
@@ -2769,9 +2773,11 @@ void Verifier::stage_inputs(int T, const int32_t* tokens, int64_t pos0) {
     int32_t* const pi = pk + (size_t) max_t_ * g.n_head_kv;
     int32_t* const td = h_pos_ + (size_t) max_t_ * (g.n_head + g.n_head_kv + g.idx_q_heads + 3);
     int32_t* const ts = td + max_t_;
+    int32_t* const tt = ts + max_t_;
     for (int t = 0; t < T; ++t) {
         td[t] = ss_->turbo_drop;
         ts[t] = ss_->turbo_skip;
+        tt[t] = 0;   // PLAN-turbo-live: the solo request's own counter bucket
         h_tok_[t] = tokens[t];
         qsa_step_fill(h_step_ + t * kStepCount, pos0 + t, s);
         // the rotary position (SAGUARO_YARN_ELASTIC: a YaRN conversation's offset by kRopeYarnOff); the step keeps the cell
@@ -3906,9 +3912,11 @@ bool Verifier::stage_batch(const int* rows, int S, int hbase, const int32_t* tok
     std::shared_ptr<const strata::kernels::SlotRope> rr[kVerifyMaxT];
     int32_t* const td = h_pos_ + (size_t) max_t_ * (g.n_head + g.n_head_kv + g.idx_q_heads + 3);
     int32_t* const ts = td + max_t_;
+    int32_t* const tt = ts + max_t_;
     for (int t = 0; t < S; ++t) {
         td[t] = slots_[(size_t) rows[t]]->turbo_drop;
         ts[t] = slots_[(size_t) rows[t]]->turbo_skip;
+        tt[t] = rows[t] + 1;   // PLAN-turbo-live: each slot counts into its own bucket (0 is the solo request's)
         h_tok_[t] = tokens[t];
         qsa_step_fill(h_step_ + t * kStepCount, pos[t], s);
         int32_t rp = (int32_t) pos[t];
