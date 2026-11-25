@@ -1782,7 +1782,7 @@ v1.1.31.
 
 ## MiniMax-M3.1-Flash
 
-`./saguaro.sh --setup --model MiniMax-M3.1-Flash` writes `maya-mm3.json` (Saguaro's GGUF quants: their own, below) with what fits this PC: the context (below), the
+`./saguaro.sh --setup --model MiniMax-M3.1-Flash` writes `maya-mm3.json` (Project Maya's GGUF quants: their own, below) with what fits this PC: the context (below), the
 model's pictures on, the tensor-parallel groups from the GPU count, and the DSpark drafter only where this PC's speed
 calibration (or your answer at the setup) says drafting is faster. A setup again keeps every engine option listed
 here that the config already has.
@@ -1828,13 +1828,13 @@ Engine options, in the config's `"args"`:
 | `--reserve-gb` | 1.0 (0.3 with `--tp`) | VRAM each GPU keeps free beyond the plan (the dashboard's Models page: VRAM kept free) |
 | `--resident-cap` | as many as fit | routed experts kept in VRAM, a layer at most |
 | `--chunk` | the prefill calibration's (1024 before it) | prompt tokens a forward takes at most; given here, the calibration's is not taken (the dashboard's Models page: Prompt chunk) |
-| `--prefill-gemm` | the prefill calibration's (`blas` before it) | Saguaro's GGUF quants: the prompt's dense matrix products through the BLAS (cuBLAS / hipBLAS) or, on AMD, `hipblaslt` (each shape's fastest kernel timed on this GPU once, kept beside the model in `lt-picks.txt`); `auto`: the calibration's |
+| `--prefill-gemm` | the prefill calibration's (`blas` before it) | Project Maya's GGUF quants: the prompt's dense matrix products through the BLAS (cuBLAS / hipBLAS) or, on AMD, `hipblaslt` (each shape's fastest kernel timed on this GPU once, kept beside the model in `lt-picks.txt`); `auto`: the calibration's |
 | `--no-prefill-tune` | - | the engine's defaults instead of this PC's prefill calibration (`--prefill-tune FILE`: another file than the pack's `prefill-tune.txt`) |
 | `--staging` | 48 | expert staging slots a GPU |
 | `--profile` | `data/expert-profile-mm3.bin` | the routing profile: the most-routed experts are placed in VRAM |
 | `--parallel` | 1 | up to N conversations at once (1-8): a KV cache each (the context the engine fits is for every one of them), a token of each running conversation through the model together - the dense matrices read once for all of them, each conversation's attention over its own cache, so each answer is the one it gets alone (greedy, the CPU lane off). On a layer split the GPUs work as a pipeline, each on a different group of the conversations. Above 1: no DSpark drafting, no KV streaming, and `--tp` runs the layer split |
 
-**Saguaro's GGUF quants.** `./saguaro.sh --setup --model minimax-maya-xs` (or `minimax-maya-s`; before:
+**Project Maya's GGUF quants.** `./saguaro.sh --setup --model minimax-maya-xs` (or `minimax-maya-s`; before:
 `--model MiniMax-M3.1-Flash --mm3-quant gguf-xs`, which still works) sets up Project Maya's own quants instead of the
 EXL3 one: MiniMax M3.1 · Maya-XS (the experts in about 1.6 bits, ~93 GB: the whole model in a 128 GB PC's memory) or
 MiniMax M3.1 · Maya-S (about 2.1 bits, ~122 GB), from
@@ -1852,7 +1852,7 @@ AMD alike. The options above apply, but for `--tp` (the GGUFs run the layer spli
 **The prefill calibration.** How a PC reads prompts fastest depends on its GPU, so it is measured there: the setup
 (step 9), `./saguaro.sh --calibrate` and the first start of a MiniMax config set up before it run the engine once over a
 ~4K-token text (`saguaro-mm3 --calibrate-prefill`, tools/calibrate_mm3_prefill.py) with a few settings - the chunk of
-tokens a step takes and, with Saguaro's GGUF quants on AMD, the matrix products' library - and keep the fastest. A larger
+tokens a step takes and, with Project Maya's GGUF quants on AMD, the matrix products' library - and keep the fastest. A larger
 chunk's buffers take VRAM from the experts: where every expert still fits it is simply taken when faster; where most
 experts stay in RAM (each chunk then copies them over PCIe, so a larger one reads prompts much faster) a second start
 with the default chunk measures the decode too, and the larger chunk is kept only when it reads prompts at least 25%

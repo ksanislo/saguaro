@@ -393,7 +393,7 @@ class Reserve(unittest.TestCase):
 
 
 class Gguf(unittest.TestCase):
-    """Saguaro's GGUF quants of MiniMax: the manifest (unpublished: no revision, no sha256), the choice, AMD allowed for
+    """Project Maya's GGUF quants of MiniMax: the manifest (unpublished: no revision, no sha256), the choice, AMD allowed for
     them (and the EXL3 quant, experimental), the folder and the pack's tool."""
 
     def test_manifest(self):

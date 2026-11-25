@@ -1265,7 +1265,7 @@ class Vision(unittest.TestCase):
 
 
 class MayaQuants(unittest.TestCase):
-    """Saguaro's quants of DeepSeek: offered once download_gguf.json lists their files, downloaded into
+    """Project Maya's quants of DeepSeek: offered once download_gguf.json lists their files, downloaded into
     <...-GGUF>/Maya-S, their Engram tables Maya's own in Q6_K from the same repo into <...-GGUF>/Engram-Q6_K - or
     unsloth's MXFP8 shard of them in <...-GGUF>/Engram, kept while it is whole (a setup before v1.1.17 put it there)."""
 

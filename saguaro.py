@@ -676,7 +676,7 @@ MM3_SAMPLING = Q.MODEL_DEFAULTS["minimax"][0]
 MM3_EFFORT = Q.MODEL_DEFAULTS["minimax"][1]
 MM3_MEMORY_GB = 250                                # VRAM + RAM: 179 GiB of weights, the experts not in VRAM pinned
 MM3_PROFILE = ROOT / "data" / "expert-profile-mm3.bin"
-# ... or Saguaro's own GGUF quants of it (tools/mm3/download_gguf.json, packed by tools/mm3/pack_gguf.py): the routed
+# ... or Project Maya's own GGUF quants of it (tools/mm3/download_gguf.json, packed by tools/mm3/pack_gguf.py): the routed
 # experts in ~1.6 bits (Maya-XS, ~93 GB) or ~2.1 bits (Maya-S, ~122 GB) on maya-ds4's low-bit kernels - NVIDIA from V100
 # on and AMD (HIP), Linux and Windows; pictures and DSpark drafting from the companion files (MM3_COMPANIONS, below).
 # Listed (and offered) once published: until then --model minimax-maya-xs / minimax-maya-s (--mm3-quant gguf-xs /
@@ -2140,7 +2140,7 @@ def choose_family(a, prev: dict) -> str:
              f"3.5 bits (197 GB); NVIDIA {mm3_gpus()}{' on Linux and Windows (Windows: new)' if MM3_ALL_PLATFORMS else ' on Linux'}; about "
              f"{MM3_MEMORY_GB} GB of VRAM and RAM together{here}; the layers split across the GPUs, the experts that "
              "do not fit computed on the CPU; tool calls, MiniMax's thinking levels, pictures, DSpark drafting and "
-             "up to a 1M context" + ("; or Saguaro's own GGUF quants (MiniMax-M3.1-Flash-Maya-XS ~93 GB, -Maya-S ~122 "
+             "up to a 1M context" + ("; or Project Maya's own GGUF quants (MiniMax-M3.1-Flash-Maya-XS ~93 GB, -Maya-S ~122 "
                                      "GB: NVIDIA from V100 on and AMD)"
                                      if any(map(mm3_gguf_published, ("gguf-xs", "gguf-s"))) else "") + "."),
             (QFN_SHOWN, "new", qfn_about()),
@@ -6438,7 +6438,7 @@ def ds4_abl_engram_step(a, d: Path, models: Path) -> Path | None:
 
 
 def ds4_shared_tables(quant: str, d: Path, models: Path, m: dict) -> dict | None:
-    """One copy of the Q6_K n-gram (Engram) tables for unsloth's UD-IQ3_S and Saguaro's quants, whichever is on the disk
+    """One copy of the Q6_K n-gram (Engram) tables for unsloth's UD-IQ3_S and Project Maya's quants, whichever is on the disk
     first (download_gguf.json: unsloth's table shard holds the same bytes as Saguaro's pair of shards, compared in full;
     "tables_as_maya").  Only when the other side's files are whole, by size AND sha256 (never assumed): a UD quant is
     then set up without its table shard (the Saguaro pair is read), a Saguaro quant without its pair (unsloth's shard is
@@ -6821,7 +6821,7 @@ def set_up_ds4(a, prev: dict) -> Path | None:
     gguf = quant not in DS4_EXL3
     pc = check_pc(a, "deepseek", gguf, quant)          # 1
     step(2, "your choices")                            # 2
-    ok(f"files: {Q.shown('deepseek', quant)}" + (" (Saguaro's quant)" if quant in DS4_MAYA else
+    ok(f"files: {Q.shown('deepseek', quant)}" + (" (Project Maya's quant)" if quant in DS4_MAYA else
                                                  " (a gated repo: your Hugging Face token)" if quant in DS4_ABL else
                                                  " (unsloth's GGUF)" if gguf else
                                                  f" (LibertAIDAI's EXL3 quant at {DS4_EXL3[quant]['bits']} bits)"))
@@ -7048,7 +7048,7 @@ def mm3_models() -> tuple:
 
 
 def mm3_gguf_entry(quant: str) -> dict:
-    """Saguaro's GGUF quant of MiniMax (download_gguf.json) as a MODELS entry (offer_download's form): its shards and the
+    """Project Maya's GGUF quant of MiniMax (download_gguf.json) as a MODELS entry (offer_download's form): its shards and the
     dense layers' indexers file, their sizes and sha256 (empty until published), the repo's folder (the tier's:
     Maya-XS), the VRAM + RAM that hold it (memory_gb), and "earlier_names": the names its files had before, in the same
     order."""
@@ -7058,7 +7058,7 @@ def mm3_gguf_entry(quant: str) -> dict:
         fail(f"{MM3_GGUF_MANIFEST} is missing or damaged", "restore it (git checkout tools/mm3/download_gguf.json)")
     files = {Path(k).name: v for k, v in q["files"].items()}
     folder = Path(next(iter(q["files"]))).parent.as_posix()
-    return {"about": f"Saguaro's quant of {MM3} ({q.get('about', 'GGUF')})", "format": "mm3-gguf",
+    return {"about": f"Project Maya's quant of {MM3} ({q.get('about', 'GGUF')})", "format": "mm3-gguf",
             "repo": man["repo"], "revision": man.get("revision") or "", "folder": "" if folder == "." else folder,
             "files": {k: v[0] for k, v in files.items()}, "sha256": {k: v[1] for k, v in files.items()},
             "download_gb": sum(v[0] for v in files.values()) / 1e9, "memory_gb": q.get("memory_gb", MM3_MEMORY_GB),
@@ -7066,7 +7066,7 @@ def mm3_gguf_entry(quant: str) -> dict:
 
 
 def mm3_gguf_published(quant: str) -> bool:
-    """Whether Saguaro's quant has been uploaded: download_gguf.json names the commit and every file's sha256."""
+    """Whether Project Maya's quant has been uploaded: download_gguf.json names the commit and every file's sha256."""
     m = mm3_gguf_entry(quant)
     return bool(m["revision"]) and all(m["sha256"].values())
 
@@ -7131,7 +7131,7 @@ def mm3_dir(a, models: Path, prev: dict, quant: str = "exl3") -> Path:
 
 
 def mm3_gguf_model_step(a, d: Path, quant: str) -> list | None:
-    """Saguaro's GGUF quant's files in d (downloaded once published, when they are not there): the files, or None when
+    """Project Maya's GGUF quant's files in d (downloaded once published, when they are not there): the files, or None when
     nothing was downloaded.  Before it is published: the files already in d (--model-dir), by their sizes.  Files
     under the names they had before (the manifest's "was": made before the naming scheme), whole, are used as they
     are."""
@@ -7436,7 +7436,7 @@ def set_up_mm3(a, prev: dict) -> Path | None:
         warn(f"{vram:.0f} GB of VRAM and {total:.0f} GB of RAM: below the ~{need:.0f} GB that hold all of {name} "
              "(the engine reads what does not fit from the SSD as the page cache allows - slower)")
     step(2, "your choices")                            # 2
-    ok(f"files: {name}" + (" (Saguaro's quant)" if gguf else " (your EXL3 folder)" if own else " (Mia-AiLab's EXL3 quant)"))
+    ok(f"files: {name}" + (" (Project Maya's quant)" if gguf else " (your EXL3 folder)" if own else " (Mia-AiLab's EXL3 quant)"))
     fmt = mm3_kv_format(prev_args)                     # (a setup again keeps the config's --kv-cache)
     par = getattr(a, "parallel", None) or int(flag_value(prev_args, "--parallel") or 1)   # (--parallel: kept)
     apu = apu_kind(pc["gpus"])
@@ -9576,7 +9576,7 @@ def main() -> int:
                                         "used); it must be writable - the pack (Inkling: the tokenizer folder) is "
                                         "written inside it")
     ap.add_argument("--ds4-quant", choices=list(DS4_QUANTS) + [DS4_ABL_ALIAS],
-                    help=f"{DS4}'s files: maya-s = Saguaro's quant (the experts in 2-3 bits; the default once "
+                    help=f"{DS4}'s files: maya-s = Project Maya's quant (the experts in 2-3 bits; the default once "
                          "published; maya-m: 3.4 bits, once published; maya-xs: ~1.6 bits, with its own "
                          "2-bit drafter: the whole model in a 128 GB PC's memory), gguf-q8 = unsloth's UD-Q8_K_XL GGUF, gguf-q4 = its UD-Q4_K_XL "
                          "(dense weights Q8_0: less VRAM; chosen by hand only, not in the setup's list), gguf-iq1_s / gguf-iq1_m / "

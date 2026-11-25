@@ -1,4 +1,4 @@
-"""tools/maya_quants.py - Saguaro's quants by the names users see: the model first, then the tier by its routed experts'
+"""tools/maya_quants.py - Project Maya's quants by the names users see: the model first, then the tier by its routed experts'
 bits, the same meaning for every model - XS ~1.6-1.7, S ~2-2.5, M ~3-3.5, L ~4+ (a rebuild: -v2, -v3).
 
     on screen       "MiniMax M3.1 · Maya-XS"                        shown(family, key), config_label(cfg)
@@ -112,7 +112,7 @@ def check_thinking_budget(value) -> int:
         raise ValueError(f"the thinking budget is 0 (no limit) or {THINK_BUDGET_MIN} to {THINK_BUDGET_MAX} tokens")
     return value
 
-# Saguaro's own quants: (family, the setup's key for it, its tier, its setup id).  The key is what the setup and the
+# Project Maya's own quants: (family, the setup's key for it, its tier, its setup id).  The key is what the setup and the
 # configs' installer records use: a GLM download's MODELS key, a --ds4-quant / --mm3-quant value
 QUANTS = (
     ("glm", "Maya-S-v2-IQ2_XXS", "Maya-S", "glm-maya-s"),

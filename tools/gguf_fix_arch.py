@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """tools/gguf_fix_arch.py - a GLM-5.3-Flash GGUF's architecture as llama.cpp names it.
 
-Saguaro's quants copied "glm5next" (unsloth's early spelling) from the GGUF they were made from; llama.cpp calls the
+Project Maya's quants copied "glm5next" (unsloth's early spelling) from the GGUF they were made from; llama.cpp calls the
 architecture "glm5-next" and does not load the other spelling.  This renames it - `general.architecture` and every
 "glm5next." key - and keeps the header the SAME SIZE: the data section starts at the same byte, so every tensor stays
 where it was, and so do the absolute offsets a Maya pack (pack/native_experts.txt) reads.  The bytes the longer name
