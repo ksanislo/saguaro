@@ -40,7 +40,7 @@ Based on Project Maya v1.1.78.
 - **Setup and docs:** one display reserve rule for NVIDIA and AMD; memlock warning; a docs/DIVERGENCE.md register; the
   README's speed tables brought to v1.1.78's and a "Measured on Saguaro" table; an upstream intake is one rename command.
 - Project Maya v1.1.76 - v1.1.78 taken in (the Maya Qwen path dropped: QFN runs on saguaro-qfn).
-- **Not run on a card in this release:** the Hy4-Flash engine (built and syntax-checked; nothing in it was run).
+- **Not run on a card in this release:** the Hy4-Flash engine (built and syntax-checked; not run on a card).
 
 ### Upstream Project Maya v1.1.76 - v1.1.78 taken in (2026-11-24)
 
