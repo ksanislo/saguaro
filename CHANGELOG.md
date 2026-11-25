@@ -19,6 +19,27 @@ older multi-GPU hardware (NVIDIA Turing T4 - sm_75 tensor cores, Xeon AVX1 CPUs)
 - **Credits:** built on Project Maya ([mw00/project-maya](https://github.com/mw00/project-maya)) and Strata (MIT) -
   see NOTICE.md. Everything below the next section is upstream Project Maya history.
 
+### Qwen3.8-Flash-Next: refuse only what cannot run (2026-11-24)
+
+- **The fit policy:** the QFN setup refuses a PC only when a card cannot hold its share of the dense weights, a
+  minimum 4K resident K/V window, the activations and the reserve - or when RAM cannot hold dense + buffers +
+  system - with the numbers in the refusal line. The old hard cuts (every card under 16 GB, every quant whose
+  experts are over VRAM+RAM, every PC under ~96 GB) are now the comfortable, measured level: between it and the
+  minimum the model RUNS and streams most of its experts from RAM / the SSD.
+- **Slow layouts:** between the minimum and the measured layout the setup scales the layout down itself
+  (drafting off, `--kv-resident 4096`, a 32K context - said out with what it turned off), warns why ("most
+  experts read from RAM / the SSD: expect slow decode") and asks "This will probably be very slow. Are you
+  sure?" - `--yes` skips the question, `--check` only reports, `--drafting on` keeps drafting. A quant whose
+  experts are over VRAM+RAM is warned and confirmed the same, not refused.
+- **Pascal (MIN_CC 61):** a Tesla P40 / GTX 10 card can be set up for QFN through engines/qfn's experimental
+  pre-Turing path (a P40 with 24 GB + 32 GB RAM ran it by hand), which needs a CUDA 12.x toolkit - the setup
+  prefers a fitting 12.x and, with only CUDA 13 installed, says plainly that Volta and Pascal need 12.x.
+  A chosen list mixing pre-Turing with newer cards is warned about (that build serves only the newer ones).
+- **The picker:** a PC gets the layout that can run - two equal tiny cards beside a comfortable card no longer
+  refuse it (the group that cannot hold its own split loses to the single card that can), a comfortable card
+  beside a sub-minimum display card sets up as before this branch, and the Models page words the measured
+  16 GB / 96 GB box as the measured layout, not as a requirement.
+
 ### The Maya engine's Qwen path is gone - CYBER-FROST is a saguaro-qfn quant (2026-11-24)
 
 - **Engine:** the `qwen4exp` driver is out of `saguaro-glm` - the session, verifier, drafter, PLE/QSA/KV-streaming
