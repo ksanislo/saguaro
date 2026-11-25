@@ -225,7 +225,8 @@ write the bare form. Biggest first.
     Switch and default: `--ssd-cache auto` on AMD GGUF configs (upstream default off); the setup rule is commit
     fbbf82c17 on the `saguaro/amd-ds4mm3` lineage - in this tree the flag exists but the setup does not write it, so
     an AMD DeepSeek config is still made by hand. Gain: decode 4.4 -> 11.1-13.2 tok/s on the 9070 XT
-    (ref/reports/REPORT-amd-ds4-mm3.md:58, 150). Exact for the logits that matter: AMD-vs-T4 KL 0.013-0.025 against a
+    (4.4 -> 11.1 at ref/reports/REPORT-amd-ds4-mm3.md:57-58, the 13.2 at :19 and :146). Exact for the logits that
+    matter: AMD-vs-T4 KL 0.013-0.025 against a
     T4 run-to-run floor of 0.009-0.020 (ref/reports/REPORT-amd-ds4-mm3.md:14).
 17. **Measured and not shipped** (so an intake does not re-do them). The switch names below are as the ledger wrote
     them; the arms ran on experiment branches, so most of them are not in this tree (noted where it is not the one
