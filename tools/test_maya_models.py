@@ -428,7 +428,7 @@ class Exl3Download(unittest.TestCase):
 
     def test_the_download_names_the_branch_and_asks(self):
         lines = []
-        args = SimpleNamespace(download_model=False)
+        args = SimpleNamespace(download_model=False, yes=False)   # (offer_download reads a.yes: argparse sets it)
         with tempfile.TemporaryDirectory() as d, \
                 patch.object(maya, "say", side_effect=lambda *a: lines.append(" ".join(map(str, a)))), \
                 patch.object(maya, "rotational", return_value=False), \
