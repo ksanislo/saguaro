@@ -18,6 +18,7 @@
 
 #include "strata/platform/memory.hpp"
 #include "strata/platform/numa.hpp"
+#include "strata/program/turbo_skip.hpp"
 #include "strata/core/arch_defaults.hpp"
 #include "strata/core/nv_defaults.hpp"
 #include "strata/kernels/rope.hpp"
@@ -1207,33 +1208,83 @@ void extra_sources_append(const int32_t* t, size_t n) {
 }
 
 // PLAN-turbo-live: the per-request lossy options on the request line: `turbo_drop=N` (the reply's decode windows route
-// with the top-k minus N experts, renormalised: SessionState::turbo_drop, native_router.hpp) and `turbo_skip` (not
-// applied by this engine: skip stays off).  Absent = off: the request is exact.
+// with the top-k minus N experts, renormalised: SessionState::turbo_drop, native_router.hpp) and `turbo_skip=ssd|ram`
+// (a pick the row's tier leaves out is its top-1 at weight 0 like a dropped one: ram = anything not resident in VRAM,
+// ssd = anything in neither VRAM nor the RAM tier; the row's top-1 always stays).  Absent = off: the request is exact.
 struct Turbo {
     int drop = 0;     // 0 = off, else 1..9 (the router's k is 10)
-    int skip = 0;     // 0 off, 1 ssd, 2 ram
+    int skip = 0;     // the wire value: 0 off, 1 ssd, 2 ram (strata/program/turbo_skip.hpp; the kernel bar is turbo_skip_of's)
     bool off() const { return drop == 0 && skip == 0; }
-    const char* skip_name() const { return skip == 2 ? "ram" : skip == 1 ? "ssd" : "off"; }
 };
 void turbo_key(Turbo& t, const std::string& key, const char* val) {
     if (key == "turbo_drop") t.drop = std::clamp(std::atoi(val), 0, 9);
-    else if (key == "turbo_skip") t.skip = std::string(val) == "ram" ? 2 : std::string(val) == "ssd" ? 1 : 0;
+    else if (key == "turbo_skip") t.skip = strata::program::turbo_skip::wire_of(val);
 }
-/// The drop a request's reply routes with: SAGUARO_ROUTE_PRIOR / SAGUARO_ROUTE_RESIDENT re-pick the top-10 after the router,
-/// which would undo it, so with either on the request runs exact (said once).
-int turbo_drop_of(const Turbo& t) {
+/// SAGUARO_ROUTE_PRIOR / SAGUARO_ROUTE_RESIDENT re-pick the top-10 after the router, which would undo a Turbo cut.
+bool turbo_repick_on() {
     static const bool repick = [] {
         const char* a = std::getenv("SAGUARO_ROUTE_PRIOR");
         const char* b = std::getenv("SAGUARO_ROUTE_RESIDENT");
         return (a && std::atof(a) > 0.0) || (b && std::atof(b) > 0.0);
     }();
-    if (t.drop > 0 && repick) {
+    return repick;
+}
+/// The drop a request's reply routes with (0 with a re-pick on: said once).
+int turbo_drop_of(const Turbo& t) {
+    if (t.drop > 0 && turbo_repick_on()) {
         static bool said = false;
         if (!said) std::fprintf(stderr, "saguaro serve: turbo drop is off beside SAGUARO_ROUTE_PRIOR / SAGUARO_ROUTE_RESIDENT\n");
         said = true;
         return 0;
     }
     return t.drop;
+}
+/// Set once the engine runs with the device residency table the skip reads (main, after the cache's table).
+bool g_turbo_res = false;
+/// What the RAM LAYOUT says about skip=ssd (main, once the expert source is settled): 0 = no reliable RAM-tier
+/// fact (plain mmap / page cache: said once, the request runs exact), 1 = the engine holds every expert in RAM
+/// (a no-op, said once), 2 = the resident RAM mode: the compact copy is the tier's fact, mirrored on the device.
+int g_turbo_ssd = 0;
+/// Is anything asking the kernels to skip right now, and could their skipped-pick counts still sit in the device
+/// usage table?  fold_skip_usage reads them at every adaptive round; with turbo idle there is nothing to read,
+/// and a synchronising D2H per round (that waits on the legacy stream) must not touch a skipping-off engine
+/// (REVIEW-RESULT finding 5).  g_turbo_skip_live: requests routing with a skip bar (a lost decrement only keeps
+/// the fold running as it did before the gate); g_turbo_skip_dirty: set when one starts, cleared by the fold
+/// that drains the table once none is live.
+std::atomic<int64_t> g_turbo_skip_live{0};
+std::atomic<bool> g_turbo_skip_dirty{false};
+/// The kernel bar a request's reply routes with (strata/program/turbo_skip.hpp: 1 = the wire's ram, 2 = the wire's
+/// ssd - the wire value does NOT ride to the kernels untranslated): off beside a re-pick or without the residency
+/// table; ssd only where the layout mirrors the RAM tier.  Each refusal said once, and the request runs exact.
+int turbo_skip_of(const Turbo& t) {
+    namespace ts = strata::program::turbo_skip;
+    switch (ts::refusal(t.skip, turbo_repick_on(), g_turbo_res, g_turbo_ssd)) {
+    case 1: {
+        static bool said = false;
+        if (!said) std::fprintf(stderr, "saguaro serve: turbo skip is off beside SAGUARO_ROUTE_PRIOR / SAGUARO_ROUTE_RESIDENT\n");
+        said = true;
+        return 0;
+    }
+    case 2: {
+        static bool said = false;
+        if (!said) std::fprintf(stderr, "saguaro serve: turbo skip needs the device residency table (the expert cache "
+                                        "with its profile): this engine runs the request exact\n");
+        said = true;
+        return 0;
+    }
+    case 3: {
+        static bool said = false;
+        if (!said) std::fprintf(stderr, "saguaro serve: turbo skip=ssd: %s - the request runs exact\n",
+                                g_turbo_ssd == 1 ? "this engine holds every expert in RAM, so nothing is read from SSD "
+                                                   "(the tier is a no-op)"
+                                                 : "this layout has no reliable RAM-tier fact (plain mmap / page cache): "
+                                                   "the engine will not guess");
+        said = true;
+        return 0;
+    }
+    default:
+        return ts::bar_of(t.skip);
+    }
 }
 
 bool parse_i64_list(const char* s, std::vector<int64_t>& out, std::string& err) {
@@ -1586,6 +1637,9 @@ struct GpuStage {
     strata::core::ExpertCache cache;
     std::vector<std::pair<int32_t, int32_t>> profile;   ///< its layers' share of the profile, hottest first
     int32_t* d_res = nullptr;                            ///< the residency table on its device
+    int32_t* d_ram = nullptr;                            ///< the RAM tier's mirror on its device (PLAN-turbo-live skip=ssd; null: no RAM-tier fact)
+    float* d_skip_usage = nullptr;                       ///< this card's skipped-pick usage, folded into the tier's counts (PLAN-turbo-live)
+    unsigned long long* d_turbo_stats = nullptr;         ///< [16][3]: per counter bucket, the picks routed / dropped / skipped (PLAN-turbo-live's per-request line)
     strata::core::Verifier ver;
     strata::core::Verifier ver_b;                        ///< --pipeline-windows: the odd windows' verifier
     strata::prefill::Prefill sp;
@@ -9755,6 +9809,166 @@ int main(int argc, char** argv) {
         vh.blob = thits.blob;
         vh.slot_off = xcache.slot_offsets();   // E-6: the device plan's pointers
         vh.n_slots = xcache.slots();
+        // PLAN-turbo-live: the skip tiers this engine routes with.  ram is the residency bar and needs the device
+        // table.  ssd adds the RAM tier: the arena holds the whole model in RAM (nothing is read from SSD: a no-op),
+        // the resident RAM mode's compact copy IS the tier's fact (mirrored onto every card, and re-uploaded
+        // whenever the copy moved), and a plain mmap / page-cache layout has no reliable RAM-tier fact to route on.
+        g_turbo_res = thits.d_res != nullptr;
+        std::vector<int32_t> host_ram;
+        int32_t* d_ram = nullptr;
+        if (g_turbo_res && srcp != &arena_src && src.complement_ready()) {
+            int64_t outside = 0;
+            for (int64_t l = 0; l < g.n_layers; ++l)
+                for (int64_t e = 0; e < g.n_expert; ++e) {
+                    const bool held = host_res.size() == (size_t) g.n_layers * (size_t) g.n_expert
+                                          ? host_res[(size_t) (l * g.n_expert + e)] >= 0
+                                          : true;
+                    outside += !held && !src.has_resident(l, e);
+                }
+            if (outside == 0 && std::getenv("SAGUARO_RAM_ADAPT") == nullptr)
+                g_turbo_ssd = 1;   // the copy holds exactly what the GPU does not, and nothing else moves it
+            else if (cudaMalloc((void**) &d_ram, host_res.size() * sizeof(int32_t)) == cudaSuccess) {
+                host_ram.assign(host_res.size(), -1);
+                for (int64_t l = 0; l < g.n_layers; ++l)
+                    for (int64_t e = 0; e < g.n_expert; ++e)
+                        host_ram[(size_t) (l * g.n_expert + e)] = src.has_resident(l, e) ? 0 : -1;
+                cudaError_t r = cudaMemcpy(d_ram, host_ram.data(), host_ram.size() * sizeof(int32_t),
+                                           cudaMemcpyHostToDevice);
+                for (auto& st : stages) {
+                    const strata::core::OnDevice on(st->dev);
+                    if (cudaMalloc((void**) &st->d_ram, host_ram.size() * sizeof(int32_t)) != cudaSuccess) {
+                        r = cudaErrorMemoryAllocation;
+                        continue;
+                    }
+                    const cudaError_t e1 = cudaMemcpy(st->d_ram, host_ram.data(), host_ram.size() * sizeof(int32_t),
+                                                      cudaMemcpyHostToDevice);
+                    if (r == cudaSuccess) r = e1;
+                }
+                if (r == cudaSuccess) g_turbo_ssd = 2;
+                else {
+                    std::fprintf(stderr, "saguaro serve: the RAM-tier mirror for turbo skip=ssd could not be staged: "
+                                         "skip=ssd runs exact\n");
+                    (void) cudaFree(d_ram);
+                    d_ram = nullptr;
+                }
+            } else host_ram.clear();
+        } else if (g_turbo_res && srcp == &arena_src)
+            g_turbo_ssd = 1;   // every expert byte is in the arena
+        vh.d_ram = d_ram;
+        int64_t ram_ver = -1;
+        bool ram_mirror_said = false;
+        const auto ram_upload = [&]() -> cudaError_t {
+            // the RAM-tier mirror follows the compact copy (its membership moves only on this thread, between
+            // windows: the exchange commits and the RAM-adaptive rounds); the version check keeps that free.
+            // The mirror is not the window's business: a failed copy is said once and leaves the bar routing
+            // on the last table (as it already does one window deep on the pipelined paths); no request fails
+            if (g_turbo_ssd != 2) return cudaSuccess;
+            const int64_t v = src.exchanges() + src.ram_adapts();
+            if (v == ram_ver) return cudaSuccess;
+            for (int64_t l = 0; l < g.n_layers; ++l)
+                for (int64_t e = 0; e < g.n_expert; ++e)
+                    host_ram[(size_t) (l * g.n_expert + e)] = src.has_resident(l, e) ? 0 : -1;
+            cudaError_t r = cudaMemcpy(d_ram, host_ram.data(), host_ram.size() * sizeof(int32_t),
+                                       cudaMemcpyHostToDevice);
+            for (auto& st : stages) {
+                const strata::core::OnDevice on(st->dev);
+                const cudaError_t e1 = cudaMemcpy(st->d_ram, host_ram.data(), host_ram.size() * sizeof(int32_t),
+                                                  cudaMemcpyHostToDevice);
+                if (r == cudaSuccess) r = e1;
+            }
+            // the version is only banked when the copy landed: a failed one leaves the mirror stale (skip=ssd
+            // then routes on the last table, as on the pipelined windows) and the next upload point retries
+            if (r == cudaSuccess) ram_ver = v;
+            else if (!ram_mirror_said) {
+                ram_mirror_said = true;
+                std::fprintf(stderr, "saguaro serve: the RAM-tier mirror for turbo skip=ssd could not be updated: "
+                                     "skip=ssd routes on the last mirror until a copy lands\n");
+            }
+            return r;
+        };
+        // PLAN-turbo-live: residency must not freeze with skip on: the router counts every pick a skip left out into
+        // this device table (native_router.hpp's TurboRoute::skip_usage), and the adaptive tier folds it into its
+        // own usage once a round, so hot skipped experts are brought in outside the skipping request's path.
+        float* d_skip_usage = nullptr;
+        if (g_turbo_res && o.adapt_every > 0 && o.adapt_swaps > 0 &&
+            cudaMalloc((void**) &d_skip_usage, (size_t) (g.n_layers * g.n_expert) * sizeof(float)) == cudaSuccess) {
+            if (cudaMemset(d_skip_usage, 0, (size_t) (g.n_layers * g.n_expert) * sizeof(float)) != cudaSuccess)
+                d_skip_usage = nullptr;
+        } else
+            d_skip_usage = nullptr;
+        for (auto& st : stages) {
+            const strata::core::OnDevice on(st->dev);
+            st->d_skip_usage = nullptr;
+            if (d_skip_usage != nullptr &&
+                cudaMalloc((void**) &st->d_skip_usage, (size_t) (g.n_layers * g.n_expert) * sizeof(float)) == cudaSuccess &&
+                cudaMemset(st->d_skip_usage, 0, (size_t) (g.n_layers * g.n_expert) * sizeof(float)) == cudaSuccess)
+                continue;
+            std::fprintf(stderr, "saguaro serve: the skipped-pick usage table could not be staged on CUDA%d: a skipping "
+                                 "request's picks will not teach the adaptive tier\n", st->dev);
+        }
+        vh.d_skip_usage = d_skip_usage;
+        const auto fold_skip_usage = [&]() {
+            if (d_skip_usage == nullptr || drive.d.usage.empty()) return;
+            // fix 5: nothing has routed with skip and nothing may still sit in the table: the zero read (a
+            // synchronising D2H, per stage, on the legacy default stream) is new cost a turbo-off engine
+            // should not pay per adaptive round
+            if (g_turbo_skip_live.load(std::memory_order_relaxed) == 0 &&
+                !g_turbo_skip_dirty.exchange(false, std::memory_order_relaxed)) return;
+            std::vector<float> back(drive.d.usage.size());
+            const strata::core::OnDevice on0(ver.device());
+            if (cudaMemcpy(back.data(), d_skip_usage, back.size() * sizeof(float), cudaMemcpyDeviceToHost) != cudaSuccess)
+                return;
+            (void) cudaMemsetAsync(d_skip_usage, 0, back.size() * sizeof(float), ver.stream());
+            for (auto& st : stages) {
+                const strata::core::OnDevice on(st->dev);
+                std::vector<float> sb(back.size());
+                if (cudaMemcpy(sb.data(), st->d_skip_usage, sb.size() * sizeof(float), cudaMemcpyDeviceToHost) != cudaSuccess)
+                    continue;
+                for (size_t i = 0; i < back.size(); ++i) back[i] += sb[i];
+                (void) cudaMemsetAsync(st->d_skip_usage, 0, sb.size() * sizeof(float), st->ver.stream());
+            }
+            for (size_t i = 0; i < back.size(); ++i) drive.d.usage[i] += back[i];
+        };
+        // PLAN-turbo-live's per-request line: the router counts every decode row with a turbo on into one of 16
+        // buckets on its own card (0 = the solo request, 1+slot for a batch window), as [picks, dropped, skipped].
+        // The bucket is cleared when the request starts and taken when it ends.
+        unsigned long long* d_turbo_stats = nullptr;
+        constexpr size_t kTurboStatsN = 16 * 3;
+        if (cudaMalloc((void**) &d_turbo_stats, kTurboStatsN * sizeof(unsigned long long)) == cudaSuccess &&
+            cudaMemset(d_turbo_stats, 0, kTurboStatsN * sizeof(unsigned long long)) == cudaSuccess) {
+            for (auto& st : stages) {
+                const strata::core::OnDevice on(st->dev);
+                st->d_turbo_stats = nullptr;
+                if (cudaMalloc((void**) &st->d_turbo_stats, kTurboStatsN * sizeof(unsigned long long)) == cudaSuccess &&
+                    cudaMemset(st->d_turbo_stats, 0, kTurboStatsN * sizeof(unsigned long long)) == cudaSuccess)
+                    continue;
+                std::fprintf(stderr, "saguaro serve: the Turbo counters could not be staged on CUDA%d: those "
+                                     "requests will not report a turbo line\n", st->dev);
+            }
+        } else {
+            if (d_turbo_stats != nullptr) (void) cudaFree(d_turbo_stats);
+            d_turbo_stats = nullptr;
+        }
+        vh.turbo_stats = d_turbo_stats;
+        const auto turbo_take = [&](int bucket, unsigned long long* out) {
+            out[0] = out[1] = out[2] = 0;
+            if (d_turbo_stats == nullptr || bucket < 0 || bucket >= 16) return;
+            std::vector<unsigned long long> v(kTurboStatsN);
+            const strata::core::OnDevice on0(ver.device());
+            if (cudaMemcpy(v.data(), d_turbo_stats, kTurboStatsN * sizeof(unsigned long long),
+                           cudaMemcpyDeviceToHost) == cudaSuccess)
+                for (int i = 0; i < 3; ++i) out[i] = v[(size_t) bucket * 3 + i];
+            (void) cudaMemsetAsync(d_turbo_stats + (size_t) bucket * 3, 0, 3 * sizeof(unsigned long long), ver.stream());
+            for (auto& st : stages) {
+                const strata::core::OnDevice on(st->dev);
+                if (st->d_turbo_stats == nullptr) continue;
+                if (cudaMemcpy(v.data(), st->d_turbo_stats, kTurboStatsN * sizeof(unsigned long long),
+                               cudaMemcpyDeviceToHost) == cudaSuccess)
+                    for (int i = 0; i < 3; ++i) out[i] += v[(size_t) bucket * 3 + i];
+                (void) cudaMemsetAsync(st->d_turbo_stats + (size_t) bucket * 3, 0, 3 * sizeof(unsigned long long),
+                                       st->ver.stream());
+            }
+        };
         // Layer split: `ver` runs layers [0, K1) and hands its residual to the next stage's verifier, and so on; the
         // last runs the head.  The hand-offs are mapped pinned memory, portable: a stage on another GPU reads it.
         // (--split-device 0: the second stage on this GPU, sharing its weights, session and cache - the A/B.)
@@ -9895,7 +10109,10 @@ int main(int argc, char** argv) {
                     GpuStage& gs = *stages[(size_t) st - 1];
                     const strata::core::OnDevice on(gs.dev);
                     strata::core::VerifyHits vs;
-                    vs.d_res = gs.d_res;
+vs.d_res = gs.d_res;
+vs.d_ram = gs.d_ram;
+vs.d_skip_usage = gs.d_skip_usage;
+                    vs.turbo_stats = gs.d_turbo_stats;
                     vs.h_res = host_res.empty() ? nullptr : host_res.data();
                     vs.cache_base = gs.cache.device_slot(0);
                     vs.blob = thits.blob;
@@ -9952,7 +10169,10 @@ int main(int argc, char** argv) {
                                    last ? nullptr : hand_b[(size_t) st]);
                 const strata::core::OnDevice on(gs.dev);
                 strata::core::VerifyHits vs;
-                vs.d_res = gs.d_res;
+vs.d_res = gs.d_res;
+vs.d_ram = gs.d_ram;
+vs.d_skip_usage = gs.d_skip_usage;
+                vs.turbo_stats = gs.d_turbo_stats;
                 vs.h_res = host_res.empty() ? nullptr : host_res.data();
                 vs.cache_base = gs.cache.device_slot(0);
                 vs.blob = thits.blob;
@@ -11434,6 +11654,8 @@ int main(int argc, char** argv) {
                 const cudaError_t e = res_put(st->d_res);
                 if (r == cudaSuccess) r = e;
             }
+            const cudaError_t rr = ram_upload();   // PLAN-turbo-live: the RAM tier's mirror follows the same
+            (void) rr;                             // windows, but its copy is said-once-stale, not this error
             return r;
         };
         // SAGUARO_SHORT_READS: the prompt path's lent slots copied back on a stream per participant while the reply
@@ -11539,6 +11761,8 @@ int main(int argc, char** argv) {
         for (auto& st : stages) res_devs.push_back(st->dev);
         int32_t* res_pairs = drive.d.evict_sync ? res_pairs_alloc(kResPatchCap, res_devs) : nullptr;
         auto res_sync = [&](bool check, std::string& e) -> bool {
+            (void) ram_upload();   // PLAN-turbo-live: the RAM tier's mirror for skip=ssd (a failed copy is said
+                                   // once inside ram_upload and never fails the window: it is not its business)
             if (drive.d.res_dirty) {
                 const int64_t n = res_patch_pairs(drive.d.res_dirty_idx, host_res, res_pairs, kResPatchCap);
                 cudaError_t r = cudaSuccess;
@@ -11610,6 +11834,7 @@ int main(int argc, char** argv) {
         auto adapt = [&]() -> bool {
             if (!pending.empty()) return true;   // the previous swaps are still in flight
             if (!lazy_fly.empty()) return true;  // lent slots still landing: their experts are not candidates
+            fold_skip_usage();   // PLAN-turbo-live: what a skipping request asked for counts too (the tier must not freeze)
             if (remote_opt && !remote_opt->adapt(drive.d.usage, host_res, pending, o.adapt_swaps, *srcp)) return false;
             struct Swap { float gain; int32_t layer, in, out; };
             std::vector<Swap> swaps;
@@ -12046,6 +12271,7 @@ int main(int argc, char** argv) {
                     a_last = a_win;
                     ++a_rounds;
                     a_t0 = Clock::now();
+                    fold_skip_usage();   // PLAN-turbo-live: skipped picks count as usage for this round too
                     a_usage = drive.d.usage;
                     a_res = host_res;
                     // #477: the routing counted, as adapt() counts it (--expert-profile-save; else `heat` is empty)
@@ -12455,6 +12681,7 @@ int main(int argc, char** argv) {
             // Monitor says what this engine's cache costs, never a guessed constant
             const int64_t n_qsa_info = g.n_qsa_layers();
             const bool kv_streamed = n_qsa_info > 0 && ss.qsa_states[ss.qsa_primary()].kv_mode == 1;
+            std::printf("INFO turbo_skip=1\n");   // (the page offers Skip: serve/server.py turbo_skip_supported)
             std::printf("INFO logit_bias=1 context=%lld kv=%s kv_resident=%lld kv_bytes_token=%llu%s "
                         "expert_slots=%lld expert_cache_mib=%lld "
                         "expert_slots_primary=%lld expert_cache_primary_mib=%lld spec=%d "
@@ -12992,10 +13219,30 @@ int main(int argc, char** argv) {
             Turbo turbo;
         };
         std::vector<BSlot> bs((size_t) std::max(o.batch, 0));
-        // PLAN-turbo-live: slot b's rows route with `drop` (every stage's session of the slot; 0: exact)
-        auto slot_turbo = [&](int b, int drop) {
+        // fix 5: the slots routing with a skip bar (g_turbo_skip_live's per-slot truth).  Per-slot set/clear:
+        // idempotent, so a request that runs slot_turbo twice, or never reaches its off-call, cannot drift the
+        // count down (and a drift up only keeps the fold running as it did before the gate)
+        std::vector<char> slot_skip_live((size_t) std::max(o.batch, 0), 0);
+        // PLAN-turbo-live: slot b's rows route with `drop` and `skip` (every stage's session of the slot; 0/0: exact)
+        auto slot_turbo = [&](int b, int drop, int skip) {
             for (auto& v : bslot_ss)
-                if (b >= 0 && (size_t) b < v.size() && v[(size_t) b]) v[(size_t) b]->turbo_drop = drop;
+                if (b >= 0 && (size_t) b < v.size() && v[(size_t) b]) {
+                    v[(size_t) b]->turbo_drop = drop;
+                    v[(size_t) b]->turbo_skip = skip;
+                }
+            if (b >= 0 && (size_t) b < slot_skip_live.size()) {
+                char& live = slot_skip_live[(size_t) b];
+                if (skip != 0 && !live) {
+                    live = 1;
+                    g_turbo_skip_dirty.store(true, std::memory_order_relaxed);
+                    g_turbo_skip_live.fetch_add(1, std::memory_order_relaxed);
+                } else if (skip == 0 && live) {
+                    live = 0;
+                    g_turbo_skip_live.fetch_sub(1, std::memory_order_relaxed);
+                }
+            }
+            (void) ram_upload();   // PLAN-turbo-live: the slot's rows may route with skip=ssd: the mirror first
+            if (b >= 0 && (drop != 0 || skip != 0)) { unsigned long long z3[3]; turbo_take(b + 1, z3); }   // the request's own counters
         };
         // an admission beside the slots, at its first token: one line with where its time went
         auto adm_first = [&](int b) {
@@ -13019,6 +13266,17 @@ int main(int argc, char** argv) {
                           (long long) (drive.d.cache_hits - sl.cache0),
                           (long long) (drive.d.cache_hits + drive.d.cache_admitted + drive.d.cache_refused - sl.look0),
                           (long long) sl.draft_acc, (long long) sl.draft_off);
+            // PLAN-turbo-live: one line per request with skip or drop on, on its BDONE (like the solo request's)
+            {
+                const int d = turbo_drop_of(sl.turbo), s = turbo_skip_of(sl.turbo);
+                if (d != 0 || s != 0) {
+                    unsigned long long c3[3];
+                    turbo_take(b + 1, c3);
+                    std::fprintf(stderr, "saguaro batch: slot %d: turbo drop=%d skip=%s: %llu picks, %llu dropped, "
+                                         "%llu skipped\n", b, d, strata::program::turbo_skip::bar_label(s),
+                                 c3[0], c3[1], c3[2]);
+                }
+            }
             return std::string(t);
         };
         // the Monitor's STAT line while the batch windows run (the same format the maya engines print and the server's
@@ -14656,7 +14914,7 @@ int main(int argc, char** argv) {
             }
             // read: the slot decodes from here as one admitted through the prompt path would
             sl.lane = false;
-            slot_turbo(b, turbo_drop_of(sl.turbo));
+            slot_turbo(b, turbo_drop_of(sl.turbo), turbo_skip_of(sl.turbo));
             sl.lane_ids.clear();
             sl.lane_ids.shrink_to_fit();
             sl.adm_read_ms = ms;
@@ -16676,7 +16934,7 @@ int main(int argc, char** argv) {
             sl.p = n - 1;
             sl.max_new = j.r.max_new;
             sl.turbo = j.r.turbo;
-            slot_turbo(b, turbo_drop_of(sl.turbo));
+            slot_turbo(b, turbo_drop_of(sl.turbo), turbo_skip_of(sl.turbo));
             sl.t0 = Clock::now();
             sl.ids.assign(ids.begin(), ids.end() - 1);
             sl.cvec = cvec_cached;
@@ -16860,7 +17118,7 @@ int main(int argc, char** argv) {
             sl.ids.assign(sl.lane_ids.begin(), sl.lane_ids.begin() + resume);
             sl.max_new = r.max_new;
             sl.turbo = r.turbo;
-            slot_turbo(b, 0);   // (its prompt is read through the windows: exact; the drop starts with its reply)
+            slot_turbo(b, 0, 0);   // (its prompt is read through the windows: exact; the drop starts with its reply)
             sl.t0 = Clock::now();
             sl.cvec = cvec_cached;
             sl.adm_log = true;
@@ -17376,7 +17634,7 @@ int main(int argc, char** argv) {
                 sl.p = n - 1;
                 sl.max_new = j.r.max_new;
                 sl.turbo = j.r.turbo;
-                slot_turbo(b, turbo_drop_of(sl.turbo));
+                slot_turbo(b, turbo_drop_of(sl.turbo), turbo_skip_of(sl.turbo));
                 sl.t0 = Clock::now();
                 sl.ids.assign(ids.begin(), ids.end() - 1);
                 sl.cvec = cvec_cached;
@@ -18883,9 +19141,6 @@ int main(int argc, char** argv) {
                 std::printf("ERR bad request: %s\n", pe.empty() ? "max_new" : pe.c_str());
                 continue;
             }
-            if (req_turbo.skip != 0)
-                std::fprintf(stderr, "saguaro serve: turbo skip=%s asked for - this engine applies only drop; skip is off\n",
-                             req_turbo.skip_name());
             const int64_t n = (int64_t) ids.size();
             req_imgs.clear();
             if (geni && !o.vision) { std::printf("ERR this engine was started without --vision\n"); continue; }
@@ -20086,7 +20341,7 @@ int main(int argc, char** argv) {
                     if (can && copy_to_slot(ys, pre, ye)) {
                         BSlot& sl = bs[(size_t) ys];
                         sl = BSlot{};
-                        slot_turbo(ys, 0);
+                        slot_turbo(ys, 0, 0);
                         sl.ids = std::move(pre);
                         sl.cached = true;
                         sl.partial = true;
@@ -21212,14 +21467,24 @@ int main(int argc, char** argv) {
             const int64_t decode_look0 = drive.d.cache_hits + drive.d.cache_admitted + drive.d.cache_refused;
             const int64_t offload0 = drive.d.offload_entries;   // #588
             pcie_auto.mark(drive.d.ms_run, drive.d.multi_misses);   // the prompt's windows are not the decode's
-            // PLAN-turbo-live: the reply's windows route with this request's drop (every stage's session), off again after
+            // PLAN-turbo-live: the reply's windows route with this request's drop and skip (every stage's session), off again after
             struct SoloTurbo {
                 std::vector<strata::core::SessionState*> sx;
-                ~SoloTurbo() { for (auto* u : sx) u->turbo_drop = 0; }
+                ~SoloTurbo() { for (auto* u : sx) { u->turbo_drop = 0; u->turbo_skip = 0; } }
             } solo_turbo;
             solo_turbo.sx.push_back(&ss);
             for (auto& st : stages) solo_turbo.sx.push_back(&st->ss);
-            for (auto* u : solo_turbo.sx) u->turbo_drop = turbo_drop_of(req_turbo);
+            const int solo_drop = turbo_drop_of(req_turbo), solo_skip = turbo_skip_of(req_turbo);
+            for (auto* u : solo_turbo.sx) { u->turbo_drop = solo_drop; u->turbo_skip = solo_skip; }
+            (void) ram_upload();   // PLAN-turbo-live: the reply's windows may route with skip=ssd: the mirror first
+            if (solo_drop != 0 || solo_skip != 0) { unsigned long long z3[3]; turbo_take(0, z3); }   // the request's own counters
+            // fix 5: the solo request's share of g_turbo_skip_live (released at its DONE below)
+            bool solo_skip_live = false;
+            if (solo_skip != 0) {
+                solo_skip_live = true;
+                g_turbo_skip_dirty.store(true, std::memory_order_relaxed);
+                g_turbo_skip_live.fetch_add(1, std::memory_order_relaxed);
+            }
             if (cancelled) finish = nf_hit ? "nonfinite" : read_vram ? "vram" : "cancel";
             // ======== --pipeline-windows 2: the decode windows with the two cards overlapped ========
             // Stage 0 (the first card) runs window K+1 while stage 1 verifies window K, on the guess that K is accepted
@@ -21986,6 +22251,7 @@ int main(int argc, char** argv) {
                 if (ram_adapt_n > 0 && ram_adapt2.on && !first_window && !drive.d.usage.empty() && pending.empty() &&
                     (!ajob || astate == AState::Idle) && src.complement_ready() && !multi_gpu && !peer.valid() &&
                     !remote_opt && o.batch == 0) {
+                    fold_skip_usage();   // PLAN-turbo-live: the RAM tier learns what a skipping request asked for too
                     // 149-prefetch SAGUARO_RAM_ADAPT2=1: install the promotions whose reads have landed (window boundary:
                     // nothing reads the RAM copy now), then stage the next ones, ranked by the stall they are expected to
                     // save per byte: (decayed decode count + the prompt's seed) x the miss's cost (a cold expert costs
@@ -21993,6 +22259,7 @@ int main(int argc, char** argv) {
                     // one is expected to cost; up to SAGUARO_RAM_ADAPT_PER_LAYER pairs a layer.  The reads run on the
                     // source's I/O thread, not here.
                     ram_adapt2.installed += src.ram_install(host_res.data(), g.n_expert);
+                    (void) ram_upload();   // PLAN-turbo-live: the RAM tier's mirror follows (skip=ssd)
                     for (float& x : ram_adapt2.seed) x *= 0.95f;
                     struct Cand { float score; int32_t e; };
                     struct RamSwap2 { float gain; int32_t layer, in, out; };
@@ -22059,6 +22326,7 @@ int main(int argc, char** argv) {
                 if (ram_adapt_n > 0 && !first_window && !drive.d.usage.empty() && pending.empty() &&
                     (!ajob || astate == AState::Idle) && src.complement_ready() && !multi_gpu && !peer.valid() &&
                     !remote_opt && o.batch == 0) {
+                    fold_skip_usage();   // PLAN-turbo-live: the RAM tier learns what a skipping request asked for too
                     constexpr float kRamAdaptRouted = 2.0f, kRamAdaptUnused = 0.5f;
                     struct RamSwap { float gain; int32_t layer, in, out; };
                     std::vector<RamSwap> swaps;
@@ -22078,6 +22346,7 @@ int main(int argc, char** argv) {
                               [](const RamSwap& a, const RamSwap& b) { return a.gain > b.gain; });
                     if ((int) swaps.size() > ram_adapt_n) swaps.resize((size_t) ram_adapt_n);
                     for (const RamSwap& x : swaps) src.replace_resident(x.layer, x.in, x.out);
+                    (void) ram_upload();   // PLAN-turbo-live: the RAM tier's mirror follows (skip=ssd)
                 }
                 if (!adapt_tick(false)) {   // --adapt-async: the round in flight moves on a step when it can
                     std::printf("ERR an adaptive refill failed\n");
@@ -22471,7 +22740,7 @@ int main(int argc, char** argv) {
                     sl.produced = 1;
                     sl.max_new = admit_max_new;
                     sl.turbo = req_turbo;
-                    slot_turbo(admit_slot, turbo_drop_of(sl.turbo));
+                    slot_turbo(admit_slot, turbo_drop_of(sl.turbo), turbo_skip_of(sl.turbo));
                     sl.t0 = Clock::now();
                     sl.ids = live;
                     if (batch_mtp) {
@@ -22641,8 +22910,19 @@ int main(int argc, char** argv) {
                                  "%lld generated in %.0f ms (%.1f tok/s), drafts accepted %lld of %lld, %zu checkpoints%s\n",
                          (long long) n, (long long) resume, read_txt, prompt_ms,
                          prompt_ms > 0 ? 1000.0 * read_n / prompt_ms : 0.0, (long long) produced_n, decode_ms,
-                         decode_ms > 0 ? 1000.0 * produced_n / decode_ms : 0.0, (long long) draft_accepted,
-                         (long long) draft_offered, checks.size(), cancelled ? " (cancelled)" : "");
+                          decode_ms > 0 ? 1000.0 * produced_n / decode_ms : 0.0, (long long) draft_accepted,
+                          (long long) draft_offered, checks.size(), cancelled ? " (cancelled)" : "");
+            if (solo_drop != 0 || solo_skip != 0) {   // PLAN-turbo-live: the request's own counters, one line
+                unsigned long long c3[3];
+                turbo_take(0, c3);
+                std::fprintf(stderr, "saguaro serve: turbo drop=%d skip=%s: %llu picks, %llu dropped, %llu skipped\n",
+                             solo_drop, strata::program::turbo_skip::bar_label(solo_skip),
+                             c3[0], c3[1], c3[2]);
+            }
+            if (solo_skip_live) {   // fix 5: this request no longer routes with a skip bar
+                solo_skip_live = false;
+                g_turbo_skip_live.fetch_sub(1, std::memory_order_relaxed);
+            }
             stage_pool_note();
             kmem_note();   // (HMEM: the solo session's host copies may have grown for this request)
             if (serve_adapt_drain_ms >= 1.0)

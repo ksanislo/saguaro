@@ -69,6 +69,9 @@ using PoolMultiFn = void (*)(void* user, const float* x_f, const int32_t* ids, i
 
 struct VerifyHits {
     const int32_t* d_res = nullptr;      ///< device [n_layers * n_expert] slot or -1
+    const int32_t* d_ram = nullptr;      ///< device [n_layers * n_expert]: the RAM tier's mirror, >= 0 = held (PLAN-turbo-live skip=ssd; null: no RAM-tier fact)
+    float* d_skip_usage = nullptr;       ///< device [n_layers * n_expert]: the router counts the picks skip left out here (PLAN-turbo-live: the tier must still learn what was asked for)
+    unsigned long long* turbo_stats = nullptr;   ///< device [16][3]: per counter bucket, the picks routed / dropped / skipped in the decode windows (PLAN-turbo-live's per-request line)
     const int32_t* h_res = nullptr;      ///< host [n_layers * n_expert] slot or -1 (when all >= 0 in stage: zero-doorbell)
     const uint8_t* cache_base = nullptr; ///< slot 0 of the VRAM expert arena
     const uint64_t* slot_off = nullptr;   ///< E-6: host per-slot offsets when slots differ in size (null: slot * blob)

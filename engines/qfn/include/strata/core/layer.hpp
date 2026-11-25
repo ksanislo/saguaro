@@ -37,6 +37,7 @@
 
 #include "strata/kernels/gr.hpp"
 #include "strata/kernels/kv_stream.hpp"
+#include "strata/kernels/native_router.hpp"
 #include "strata/kernels/ngram.hpp"
 #include "strata/kernels/ple.hpp"
 
@@ -173,9 +174,10 @@ bool moe_layer(const WeightTable& tables, const ModelGeometry& g, int64_t layer,
 
 /// The routing half: bf16 activation, the router GEMV, top-k, and the doorbell publish.  Ends with the ring
 /// rung, so a host that sees it knows `h_x_f`/`h_ids`/`h_weights` are in place.
-/// `drop` (device, one int, nullable): PLAN-turbo-live's per-request drop for this token (native_router.hpp).
+/// `tr` (nullable): PLAN-turbo-live's per-request drop and skip for this token (native_router.hpp's TurboRoute).
 bool moe_route(const WeightTable& tables, const ModelGeometry& g, int64_t layer, int64_t k, const MoEBuffers& b,
-               const float* x, void* stream, std::string& err, const Doorbell* db = nullptr, const int32_t* drop = nullptr);
+               const float* x, void* stream, std::string& err, const Doorbell* db = nullptr,
+               const strata::kernels::TurboRoute* tr = nullptr);
 /// The verify window's n tokens routed at once (see layer.cpp); bitwise per token what `moe_route` gives.
 bool moe_route_window(const WeightTable& tables, const ModelGeometry& g, int64_t layer, int64_t k, const MoEBuffers& b,
                       const float* x, float* logits, int32_t* ids, float* weights, int n, void* stream, std::string& err);

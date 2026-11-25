@@ -47,15 +47,35 @@ __device__ __forceinline__ int turbo_keep(const int32_t* drop, int row) {
     const int d = drop[row];
     return d <= 0 ? 10 : d >= 9 ? 1 : 10 - d;
 }
+// PLAN-turbo-live skip: is `e` served without leaving this card?  bar 1: resident in VRAM; bar 2: resident or
+// held by the RAM tier.  No table: nothing can be left out (the engine would have run the request exact).
+__device__ __forceinline__ bool tier_resident(const TurboRoute& tr, int bar, int e) {
+    if (tr.res == nullptr) return true;
+    if (tr.res[e] >= 0) return true;
+    return bar >= 2 && tr.ram != nullptr && tr.ram[e] >= 0;
+}
+// the per-request counters of one token: [bucket*3] picks, +1 dropped, +2 skipped - only for rows with a turbo on
+__device__ __forceinline__ void turbo_count(const TurboRoute& tr, int row, int n_pick, int n_drop, int n_skip) {
+    if (tr.stats == nullptr) return;
+    if ((tr.drop != nullptr && tr.drop[row] != 0) || (tr.skip != nullptr && tr.skip[row] != 0)) {
+        const int bucket = tr.tag != nullptr ? tr.tag[row] : 0;
+        if (bucket < 0 || bucket >= 16) return;   // the engine hands out 0 (solo) and 1+slot; nothing else
+        atomicAdd(tr.stats + (size_t) bucket * 3 + 0, (unsigned long long) n_pick);
+        atomicAdd(tr.stats + (size_t) bucket * 3 + 1, (unsigned long long) n_drop);
+        atomicAdd(tr.stats + (size_t) bucket * 3 + 2, (unsigned long long) n_skip);
+    }
+}
 __launch_bounds__(256, 1)
 __global__ void route(const float* __restrict__ logits, int32_t* __restrict__ ids,
-                      float* __restrict__ weights, const int32_t* __restrict__ drop) {
+                      float* __restrict__ weights, const TurboRoute tr) {
     // Preserve the pinned 32x8 block geometry; only row zero is active here.
     // blockIdx.x = the token (a multi-token launch; 0 for the single one)
     logits += (size_t) blockIdx.x * 512; ids += (size_t) blockIdx.x * 10; weights += (size_t) blockIdx.x * 10;
     if (threadIdx.y != 0) return;
     const int lane = threadIdx.x;
-    const int keep = turbo_keep(drop, (int) blockIdx.x);
+    const int keep = turbo_keep(tr.drop, (int) blockIdx.x);
+    const int bar = tr.skip != nullptr ? tr.skip[blockIdx.x] : 0;
+    int n_drop = 0, n_skip = 0;
     float values[16];
 #pragma unroll
     for (int i = 0; i < 16; ++i) values[i] = logits[lane + i * 32];
@@ -77,6 +97,7 @@ __global__ void route(const float* __restrict__ logits, int32_t* __restrict__ id
         if (__isnanf(values[i])) values[i] = -FLT_MAX;
     }
     float selected = 0.0f, selected_sum = 0.0f;
+    bool alive_lane = true;
     int top1 = 0;
     for (int rank = 0; rank < 10; ++rank) {
         float best = values[0];
@@ -92,27 +113,42 @@ __global__ void route(const float* __restrict__ logits, int32_t* __restrict__ id
             if (other > best || (other == best && other_id < expert)) { best = other; expert = other_id; }
         }
         if (rank == 0) top1 = expert;
+        // Turbo drop / skip: a pick the row does not run aliases the top-1 at weight 0.  The top-1 itself always
+        // stays (fetched if it must be); bar 0 keeps today's drop-only arithmetic, bit for bit.
+        bool alive = rank < keep;
+        if (alive && rank > 0 && bar != 0 && !tier_resident(tr, bar, expert)) alive = false;
         if ((expert & 31) == lane) {
             values[expert / 32] = -INFINITY;
-            ids[rank] = rank < keep ? expert : top1;   // Turbo drop: a dropped pick aliases the top-1 at weight 0
+            ids[rank] = alive ? expert : top1;
             // Deliberately accumulate by WINNING EXPERT lane, not output rank.
             // Multiple selected experts in one lane add in selection order.
-            if (rank < keep) selected_sum += best;
+            if (alive) selected_sum += best;
         }
-        if (rank == lane) selected = best;
+        if (rank == lane) { selected = best; alive_lane = alive; }
+        if (!alive && rank > 0) {
+            if (rank >= keep) ++n_drop;
+            else {
+                ++n_skip;
+                if (lane == 0 && tr.skip_usage != nullptr && tr.layer >= 0)
+                    atomicAdd(&tr.skip_usage[(size_t) tr.layer * tr.n_expert + expert], 1.0f);
+            }
+        }
     }
     selected_sum = max(warp_sum(selected_sum), 6.103515625e-5f);
     const float inverse_selected_sum = 1.0f / selected_sum;
-    if (lane < 10) weights[lane] = lane < keep ? selected * inverse_selected_sum : 0.0f;
+    if (lane == 0) turbo_count(tr, (int) blockIdx.x, 10, n_drop, n_skip);
+    if (lane < 10) weights[lane] = (lane < keep && alive_lane) ? selected * inverse_selected_sum : 0.0f;
 }
 __launch_bounds__(256, 1)
 __global__ void route_multi(const float* __restrict__ logits, int32_t* __restrict__ ids,
-                            float* __restrict__ weights, int n_tok, const int32_t* __restrict__ drop) {
+                            float* __restrict__ weights, int n_tok, const TurboRoute tr) {
     const int tk = (int) blockIdx.x * 8 + (int) threadIdx.y;
     if (tk >= n_tok) return;
     logits += (size_t) tk * 512; ids += (size_t) tk * 10; weights += (size_t) tk * 10;
     const int lane = threadIdx.x;
-    const int keep = turbo_keep(drop, tk);
+    const int keep = turbo_keep(tr.drop, tk);
+    const int bar = tr.skip != nullptr ? tr.skip[tk] : 0;
+    int n_drop = 0, n_skip = 0;
     float values[16];
 #pragma unroll
     for (int i = 0; i < 16; ++i) values[i] = logits[lane + i * 32];
@@ -134,6 +170,7 @@ __global__ void route_multi(const float* __restrict__ logits, int32_t* __restric
         if (__isnanf(values[i])) values[i] = -FLT_MAX;
     }
     float selected = 0.0f, selected_sum = 0.0f;
+    bool alive_lane = true;
     int top1 = 0;
     for (int rank = 0; rank < 10; ++rank) {
         float best = values[0];
@@ -149,16 +186,27 @@ __global__ void route_multi(const float* __restrict__ logits, int32_t* __restric
             if (other > best || (other == best && other_id < expert)) { best = other; expert = other_id; }
         }
         if (rank == 0) top1 = expert;
+        bool alive = rank < keep;
+        if (alive && rank > 0 && bar != 0 && !tier_resident(tr, bar, expert)) alive = false;
         if ((expert & 31) == lane) {
             values[expert / 32] = -INFINITY;
-            ids[rank] = rank < keep ? expert : top1;
-            if (rank < keep) selected_sum += best;
+            ids[rank] = alive ? expert : top1;
+            if (alive) selected_sum += best;
         }
-        if (rank == lane) selected = best;
+        if (rank == lane) { selected = best; alive_lane = alive; }
+        if (!alive && rank > 0) {
+            if (rank >= keep) ++n_drop;
+            else {
+                ++n_skip;
+                if (lane == 0 && tr.skip_usage != nullptr && tr.layer >= 0)
+                    atomicAdd(&tr.skip_usage[(size_t) tr.layer * tr.n_expert + expert], 1.0f);
+            }
+        }
     }
     selected_sum = max(warp_sum(selected_sum), 6.103515625e-5f);
     const float inverse_selected_sum = 1.0f / selected_sum;
-    if (lane < 10) weights[lane] = lane < keep ? selected * inverse_selected_sum : 0.0f;
+    if (lane == 0) turbo_count(tr, tk, 10, n_drop, n_skip);
+    if (lane < 10) weights[lane] = (lane < keep && alive_lane) ? selected * inverse_selected_sum : 0.0f;
 }
 // The same contract for other (experts, top-k) shapes - Qwen3.6-35B-A3B's 256 / 8 - one warp per token, n_tok tokens
 // (8 per block).  The 512 / 10 path keeps its own kernels above (the Flash-Next bits), this template is only used
@@ -228,44 +276,64 @@ bool overlap(const void* a, size_t an, const void* b, size_t bn) {
 }
 void native_router_set_enabled(bool value) { enabled.store(value, std::memory_order_relaxed); }
 bool native_router_enabled() { return enabled.load(std::memory_order_relaxed); }
-void native_router_top10(const float* logits, int32_t* ids, float* weights, void* stream, const int32_t* drop) {
+void native_router_top10(const float* logits, int32_t* ids, float* weights, void* stream, const TurboRoute* tr) {
     if (!stream || !valid(logits, 512 * 4) || !valid(ids, 10 * 4) || !valid(weights, 10 * 4)
         || overlap(logits, 512 * 4, ids, 10 * 4) || overlap(logits, 512 * 4, weights, 10 * 4)
         || overlap(ids, 10 * 4, weights, 10 * 4))
         throw std::invalid_argument("native router requires a stream, aligned spans, and disjoint outputs");
-    route<<<1, dim3(32, 8), 0, static_cast<cudaStream_t>(stream)>>>(logits, ids, weights, drop);
+    route<<<1, dim3(32, 8), 0, static_cast<cudaStream_t>(stream)>>>(logits, ids, weights, tr != nullptr ? *tr : TurboRoute{});
     const auto error = cudaGetLastError();
     if (error != cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
 }
 void native_router_top10_multi(const float* logits, int32_t* ids, float* weights, int n_tok, void* stream,
-                               const int32_t* drop) {
+                               const TurboRoute* tr) {
     if (!stream || n_tok < 1 || !valid(logits, (size_t) n_tok * 512 * 4) || !valid(ids, (size_t) n_tok * 10 * 4) ||
         !valid(weights, (size_t) n_tok * 10 * 4))
         throw std::invalid_argument("native router (multi) requires a stream and aligned [n,512]/[n,10] buffers");
-    route_multi<<<(unsigned) ((n_tok + 7) / 8), dim3(32, 8), 0, static_cast<cudaStream_t>(stream)>>>(logits, ids, weights, n_tok,
-                                                                                                    drop);
+    route_multi<<<(unsigned) ((n_tok + 7) / 8), dim3(32, 8), 0, static_cast<cudaStream_t>(stream)>>>(
+        logits, ids, weights, n_tok, tr != nullptr ? *tr : TurboRoute{});
     const auto error = cudaGetLastError();
     if (error != cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
 }
 namespace {
-__global__ void turbo_drop_k(int32_t* __restrict__ ids, float* __restrict__ w, int n_tok, int k,
-                             const int32_t* __restrict__ drop) {
+// the drop and the skip after any other top-k.  A pick the row does not run (dropped, or left out by its skip
+// bar) aliases the row's top-1 at weight 0; the kept weights renormalise to their sum as the router's do.  A row
+// with nothing left out keeps the router's bits: no renormalisation of its own (sum(w) != 1 exactly).
+__global__ void turbo_drop_k(int32_t* __restrict__ ids, float* __restrict__ w, int n_tok, int k, const TurboRoute tr) {
     const int t = (int) (blockIdx.x * blockDim.x + threadIdx.x);
     if (t >= n_tok) return;
-    const int d = drop[t];
-    if (d <= 0) return;
-    const int keep = d >= k ? 1 : k - d;
+    const int d = tr.drop != nullptr ? tr.drop[t] : 0;
+    const int bar = tr.skip != nullptr ? tr.skip[t] : 0;
+    if (d <= 0 && bar <= 0) return;
+    const int keep = d >= k ? 1 : (d <= 0 ? k : k - d);
     ids += (size_t) t * k; w += (size_t) t * k;
     float s = 0.0f;
-    for (int i = 0; i < keep; ++i) s += w[i];
+    int n_drop = 0, n_skip = 0;
+    bool any = false;
+    for (int i = 0; i < k; ++i) {
+        bool alive = i < keep && (i == 0 || bar <= 0 || tier_resident(tr, bar, ids[i]));
+        if (alive) { s += w[i]; continue; }
+        any = true;
+        if (i >= keep) ++n_drop;
+        else {
+            ++n_skip;
+            if (tr.skip_usage != nullptr && tr.layer >= 0)
+                atomicAdd(&tr.skip_usage[(size_t) tr.layer * tr.n_expert + ids[i]], 1.0f);
+        }
+    }
+    turbo_count(tr, t, k, n_drop, n_skip);
+    if (!any) return;
     const float inv = 1.0f / fmaxf(s, 6.103515625e-5f);
-    for (int i = 0; i < keep; ++i) w[i] *= inv;
-    for (int i = keep; i < k; ++i) { ids[i] = ids[0]; w[i] = 0.0f; }
+    for (int i = 0; i < k; ++i) {
+        const bool alive = i < keep && (i == 0 || bar <= 0 || tier_resident(tr, bar, ids[i]));
+        if (!alive) { ids[i] = ids[0]; w[i] = 0.0f; }
+        else w[i] *= inv;
+    }
 }
 }
-void turbo_drop_apply(int32_t* ids, float* weights, int n_tok, int k, const int32_t* drop, void* stream) {
-    if (drop == nullptr || n_tok < 1) return;
-    turbo_drop_k<<<(unsigned) ((n_tok + 63) / 64), 64, 0, static_cast<cudaStream_t>(stream)>>>(ids, weights, n_tok, k, drop);
+void turbo_drop_apply(int32_t* ids, float* weights, int n_tok, int k, const TurboRoute& tr, void* stream) {
+    if (n_tok < 1 || (tr.drop == nullptr && tr.skip == nullptr)) return;
+    turbo_drop_k<<<(unsigned) ((n_tok + 63) / 64), 64, 0, static_cast<cudaStream_t>(stream)>>>(ids, weights, n_tok, k, tr);
     const auto error = cudaGetLastError();
     if (error != cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
 }
