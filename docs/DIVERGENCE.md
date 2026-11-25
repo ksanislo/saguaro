@@ -224,8 +224,8 @@ write the bare form. Biggest first.
     Switch and default: `--ssd-cache auto` on AMD GGUF configs (upstream default off); the setup rule is commit
     fbbf82c17 on the `saguaro/amd-ds4mm3` lineage - in this tree the flag exists but the setup does not write it, so
     an AMD DeepSeek config is still made by hand. Gain: decode 4.4 -> 11.1-13.2 tok/s on the 9070 XT
-    (ref/reports/REPORT-amd-ds4mm3.md:58, 150). Exact for the logits that matter: AMD-vs-T4 KL 0.013-0.025 against a
-    T4 run-to-run floor of 0.009-0.020 (ref/reports/REPORT-amd-ds4mm3.md:14).
+    (ref/reports/REPORT-amd-ds4-mm3.md:58, 150). Exact for the logits that matter: AMD-vs-T4 KL 0.013-0.025 against a
+    T4 run-to-run floor of 0.009-0.020 (ref/reports/REPORT-amd-ds4-mm3.md:14).
 17. **Measured and not shipped** (so an intake does not re-do them). The switch names below are as the ledger wrote
     them; the arms ran on experiment branches, so most of them are not in this tree (noted where it is not the one
     that shipped). The 7,7,13,13 layer split (reads -4.2 % but solo
@@ -315,13 +315,13 @@ The MiniMax-M3.1-Flash engine (saguaro-mm3), our proof-of-concept profile on May
     blobs with 8 readers side by side (`SAGUARO_MM3_FILE_READERS`, `SAGUARO_MM3_DIRECT`), and 16 GB of RAM headroom
     instead of a tenth of RAM (`SAGUARO_MM3_RAM_HEADROOM_GB`); all AMD-default, NVIDIA unchanged.
     Gain: swap traffic 27 GB each way -> ~1 GB, a 1K prompt 3.5-7.0 -> 11.9 -> 45 tok/s, decode 0.39-0.60 -> ~4
-    (ref/reports/REPORT-amd-ds4mm3.md:26-58, commit messages 09367e7ed / 6e747b976 / 7e998686d). Prompt logits
+    (ref/reports/REPORT-amd-ds4-mm3.md:26-58, commit messages 09367e7ed / 6e747b976 / 7e998686d). Prompt logits
     bit-identical. The names are quoted from that branch: none of them exists in this tree (checked with
     `grep -rn` over `src/mm3`), which is why they are absent from the list above.
 13. **Open, and a warning for anyone touching MiniMax's router**: its prompt path is rounding-sensitive on every GPU -
     chunk 1024 vs 4096 moves the prompt logits by KL 0.50-0.69 (top-1 71-75 %) from route flips that start at the first
     MoE layer and compound to a 50-71 % different residual stream by layer 30, so KL is not a usable quality bar for
-    this engine; it predicts the text equally well either way (ref/reports/REPORT-amd-ds4mm3.md:118-133).
+    this engine; it predicts the text equally well either way (ref/reports/REPORT-amd-ds4-mm3.md:118-133).
     Nothing here changed it.
 
 ## HY4
@@ -359,7 +359,7 @@ The Hy4-Flash engine (saguaro-hy4). Installed in the live stack since 11-23 with
    ref/reports/REPORT-upstream-v1.1.75.md:81-82) - kept here because it is a per-PC file we ship. Exact.
 6. **Not on AMD, not on Pascal, and one gap the Monitor shows.** `saguaro.py:772` keeps Hy4 out of the AMD picker
    ("its engine has not run on an AMD GPU yet"); it compiles for gfx1201 and would need the same card check DS4 and
-   MM3 got, plus the two memory traps MiniMax hit (ref/reports/REPORT-amd-ds4mm3.md:196-210). On Pascal it needs a
+   MM3 got, plus the two memory traps MiniMax hit (ref/reports/REPORT-amd-ds4-mm3.md:196-210). On Pascal it needs a
    `__nanosleep` guard and WMMA guards in `src/hy4/ds4/ds4_iq.cu` before it builds at all, and the model is 117 GB on
    four cards (ref/reports/REPORT-p40.md:76). Hy4 (and Inkling) never report `kv_bytes_token`, so the Monitor's
    Context bar has no K/V figure for them - true on main too (ref/reports/REPORT-upstream-v1.1.75.md:31-32).
@@ -593,7 +593,7 @@ The things that keep an intake routine (docs/UPSTREAM.md §2) and what our setup
    but no line of this tree's `tools/test_hip_compat.py` or CI refers to it - that wiring is on the
    `saguaro/amd-ds4mm3` lineage, together with the CONTRIBUTING change that makes AMD a supported platform. Reverting
    the 11-22 fixes, the syntax check reported exactly those 12 errors plus MiniMax's `'+f'` asm constraint, which the
-   name scan missed (ref/reports/REPORT-amd-ds4mm3.md:30).
+   name scan missed (ref/reports/REPORT-amd-ds4-mm3.md:30).
 4. **QFN built inside the top project.** Where: `CMakeLists.txt:1787-1808` - `-DSAGUARO_QFN=ON` builds `engines/qfn`
    with this configure's generator, compilers and CPU ISA floor (`-DSTRATA_ISA_FLOOR=avx` for the Ivy Bridge T4 box),
    and takes the pre-Turing path (`STRATA_EXPERIMENTAL_SM60`) only when every arch is < 75 - so a mixed `--gpus` list
