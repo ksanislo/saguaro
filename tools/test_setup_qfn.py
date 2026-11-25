@@ -1653,7 +1653,8 @@ class PascalForQfn(unittest.TestCase):
     def test_only_cuda_13_installed_says_pascal_needs_12(self):
         out, pc = self.run_check_pc(("/usr/local/cuda-13.2/bin/nvcc", (13, 2)))
         self.assertIsNone(pc)                                          # (the setup stops there)
-        self.assertIn("can be used (Pascal: experimental)", out)       # (the card itself: seen, second-class)
+        self.assertIn("can be used (Pascal: second class)", out)       # (the card itself: seen, second class ...)
+        self.assertNotIn("Pascal: experimental", out)                  # ( ... never labelled experimental)
         self.assertIn("cannot build for these GPUs", out)
         self.assertIn("CUDA 12.0 or newer but older than 13.0", out)   # ("they need", plainly)
         self.assertIn("CUDA 13 dropped Volta and Pascal", out)
@@ -1665,6 +1666,11 @@ class PascalForQfn(unittest.TestCase):
         self.assertEqual([g["index"] for g in pc["gpus"]], [0])
         self.assertIn("CUDA toolkit 12.8", out)
         self.assertNotIn("cannot build", out)
+        # v1.2.1-D: the Pascal line states what was measured (and what was not) rather than calling it experimental
+        self.assertNotIn("experimental", out)
+        self.assertIn("Pascal (compute capability 6.x) is second class", out)
+        self.assertIn("Measured on a Tesla P40", out)
+        self.assertIn("not measured on a Pascal card yet", out)
 
     def test_a_mixed_pre_turing_and_newer_list_is_said_plainly(self):
         """Review finding 4: CMakeLists.txt's qfn rule (1787-1808) builds engines/qfn's pre-Turing path only when

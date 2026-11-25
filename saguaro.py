@@ -34,7 +34,7 @@ quant at 2.9 bits, 211 GB, and its two Engram tables from DeepSeek's base repo, 
 its vision tower runs in the engine - a GGUF's comes from DeepSeek's own checkpoint, 0.97 GB, shown and asked first;
 no tuning step - it balances its own split):
 
-  1. checks the PC: NVIDIA GPU(s) of compute capability 7.0+ (6.x, Pascal: experimental), driver, CUDA toolkit (nvcc),
+  1. checks the PC: NVIDIA GPU(s) of compute capability 7.0+ (6.x, Pascal: second class), driver, CUDA toolkit (nvcc),
      the C++ compiler (g++; on Windows Visual Studio's Build Tools - 2019/2022 always, 2026 with CUDA 13.2+), CMake,
      RAM, CPU; HIP checks AMD gfx1100/gfx1201/gfx1151 and ROCm 7 instead
      (on Windows AMD's ROCm SDK wheels in .venv, offered when they are not there)
@@ -114,7 +114,7 @@ VBUILD = ROOT / "build-vision"
 VEXE = VBUILD / "bin" / ("vision-glm.exe" if WIN else "vision-glm")   # the image encoder (llama.cpp's mtmd)
 VSTAMP = VBUILD / "MAYA-BUILD.json"
 MIN_CC = 60                                        # Pascal and newer (the GLM path; see arch_setting) ...
-VALIDATED_CC = 70                                  # ... Volta (V100) and newer validated, Pascal experimental (#212)
+VALIDATED_CC = 70                                  # ... Volta (V100) and newer validated, Pascal second class (#212)
 MAX_GPUS = 16                                      # the layer split's parts at most (glm_model.hpp, kMaxParts)
 HIP_ARCHS = ("gfx1100", "gfx1201", "gfx1151")        # Saguaro also supports Strix Halo (unified memory)
 HIP_ARCHS_UNVALIDATED = ("gfx1030",)               # RDNA 2 (RX 6800 / 6900, Radeon PRO V620 / W6800), experimental: not
@@ -1561,7 +1561,7 @@ def choose_gpus(a, found, min_cc: int = MIN_CC, family: str = "") -> list:
     if not usable:
         fail("none of the GPUs can run this model",
              f"it needs an NVIDIA GPU of compute capability {min_cc / 10:.1f} or newer (" +
-             ("V100 and newer; Pascal - Tesla P40 / P100, GTX 10 - is experimental)" if min_cc < 80 else
+             ("V100 and newer; Pascal - Tesla P40 / P100, GTX 10 - is second class)" if min_cc < 80 else
               "RTX 30 / A100 and newer)"))
     best = sorted(usable, key=lambda g: (-round(g["vram_gb"]), g["index"]))
     if len(best) == 1:
@@ -1666,10 +1666,11 @@ def check_pc(a, family: str = "glm", gguf: bool = False, ds4_quant: str = "exl3"
                        "RDNA 3 / 4 GPU of 12 GB or more" if family == "ik2" else
                        "it runs on a Linux PC with NVIDIA GPUs (V100 / T4 and newer)"), end=NOT_HERE)
     if a.backend == "hip":
-        if ds4 and not gguf:   # (as GLM's and MiniMax's EXL3 quants on AMD: experimental)
-            warn(f"{DS4}'s EXL3 quants on AMD are experimental: their kernels pass their tests on AMD GPUs, but the "
-                 f"whole model has not been measured on one - Saguaro's GGUF quants (--model deepseek-maya-s / "
-                 "deepseek-maya-xs) are the tested way there")
+        if ds4 and not gguf:   # (v1.2.1-D: no experimental label - what is measured and what is not, plainly;
+                               #  the GGUFs go on to check_hip_pc with no line of theirs, as GLM's and MiniMax's)
+            warn(f"{DS4}'s EXL3 quants on AMD: the kernels pass their tests on AMD GPUs, but the whole model has "
+                 "not been measured on one yet - Saguaro's GGUF quants (--model deepseek-maya-s / "
+                 "deepseek-maya-xs) are the ones measured on AMD")
         return check_hip_pc(a, text_only=False, family=family, gguf=gguf)   # (every model the setup takes on AMD reads pictures there)
     if a.backend == "metal":
         if family != "glm":
@@ -1710,7 +1711,7 @@ def check_pc(a, family: str = "glm", gguf: bool = False, ds4_quant: str = "exl3"
     say("  NVIDIA GPUs:")
     for g in found:
         say(f"    {gpu_label(g)} - " + ("can be used" if int(g["arch"]) >= max(min_cc, VALIDATED_CC) else
-                                       "can be used (Pascal: experimental)" if int(g["arch"]) >= min_cc else
+                                       "can be used (Pascal: second class)" if int(g["arch"]) >= min_cc else
                                        f"too old (this model needs compute capability {min_cc / 10:.1f} or newer)"))
     chosen = choose_gpus(a, found, min_cc, family)
     if family == "ik2":                                # (the cards picked: 8 GB or more each)
@@ -1735,9 +1736,11 @@ def check_pc(a, family: str = "glm", gguf: bool = False, ds4_quant: str = "exl3"
         say(f"  {vram:.0f} GB of VRAM in total: the engine fills it with the most-used experts and serves the rest from "
             "RAM and the SSD - give it a try (more VRAM is faster; tell us your speed)")
     if min(archs) < VALIDATED_CC:
-        warn("Pascal (compute capability 6.x) is experimental: the engine builds for it with its portable kernels "
-             "(the prompt attention on the F32 cores) and caches global loads in L1 there, but Saguaro has not been "
-             "validated on such a card yet - tell us how it goes in an issue")
+        warn("Pascal (compute capability 6.x) is second class: the engine builds for it with its portable kernels "
+             "(the prompt attention on the F32 cores) and caches global loads in L1 there.  Measured on a Tesla "
+             "P40: Inkling 2 Mini reads 8K prompts at about 384-458 tok/s and saguaro-qfn answers at ~4-20 tok/s "
+             "by quant (the GSQ IQ3_S at ~15-16 tok/s with drafting); the engines not named here are not measured "
+             "on a Pascal card yet - tell us how it goes in an issue")
     # (v1.2.1-B review finding 4: CMakeLists.txt's qfn_engine rule (1787-1808) takes engines/qfn's experimental
     #  pre-Turing path only when EVERY arch of the list is < 75 - a mixed list keeps _qfn_archs 75, so the build
     #  serves the newer cards and the pre-Turing one gets a binary with no kernel image for it.  The engine's C++
@@ -2210,7 +2213,7 @@ def cached_generator():
 def arch_setting(archs) -> str:
     """CMAKE_CUDA_ARCHITECTURES for these GPUs: the compute capabilities of the cards choose_gpus() took, by name -
     never "native", which also builds for every other card in the PC (a Quadro P400 display card beside V100s: sm_61,
-    which maya-mm3's kernels cannot be compiled for).  CMakeLists.txt takes sm_60 and newer (Pascal experimental)."""
+    which maya-mm3's kernels cannot be compiled for).  CMakeLists.txt takes sm_60 and newer (Pascal second class)."""
     return ";".join(str(x) for x in archs)
 
 

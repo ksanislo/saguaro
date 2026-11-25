@@ -148,8 +148,10 @@ class Quant35(unittest.TestCase):
         self.assertEqual(maya.choose_ds4_quant(args(ds4_quant="exl3-3.5"), {}), "exl3-3.5")
 
     def test_exl3_on_amd(self):
-        """AMD: the EXL3 quants and the GGUFs go on to the AMD PC check without a warning (as GLM's and MiniMax's
-        EXL3 there; v1.1.53); neither is refused."""
+        """AMD: neither the EXL3 quants nor the GGUFs is refused (as GLM's and MiniMax's EXL3 there; v1.1.53).
+        v1.2.1-D: the EXL3 line no longer says 'experimental' / 'not validated' - it states what was measured
+        (the kernels pass their tests on AMD GPUs) and what was not (the whole model, not measured on one yet),
+        and points at the GGUF quants that are; the GGUFs go through with no line of their own."""
         def fail(*a, **kw):
             raise AssertionError(f"refused: {a}")
         for gguf in (False, True):
@@ -158,8 +160,16 @@ class Quant35(unittest.TestCase):
                     patch.object(maya, "warn", said.append), \
                     patch.object(maya, "check_hip_pc", lambda a, **kw: hip.append(kw) or {"backend": "hip"}):
                 self.assertEqual(maya.check_pc(args(backend="hip"), "deepseek", gguf=gguf), {"backend": "hip"})
-            self.assertEqual(len(hip), 1)
-            self.assertEqual(said, [])
+            self.assertEqual(len(hip), 1)                                # (on to the AMD PC check, not refused)
+            if gguf:
+                self.assertEqual(said, [])                              # (the GGUFs: no line, as GLM's)
+            else:
+                self.assertEqual(len(said), 1)
+                self.assertNotIn("experimental", said[0])               # (no label ...)
+                self.assertNotIn("validated", said[0])                  # ( ... and no "not validated")
+                self.assertIn("not been measured on one yet", said[0])  # (what is and is not measured, plainly)
+                self.assertIn("kernels pass their tests", said[0])
+                self.assertIn("deepseek-maya-s", said[0])               # (the GGUFs are the ones measured on AMD)
 
     def test_own_folder_and_config(self):
         models = Path("/models")
