@@ -1676,6 +1676,11 @@ void drafter_propose(ik2::draft::Drafter* d, int anchor, const float* anchor_h, 
     CU(cudaStreamWaitEvent(g_drem.s, g_drem.ev_src, 0));
     CU(cudaMemcpyAsync(g_drem.anchor, g_drem.host_anchor, (size_t) g_drem.C * sizeof(float), cudaMemcpyHostToDevice, g_drem.s));
     ik2::draft::propose(d, anchor, g_drem.anchor, P, nullptr, n_rows, n_vocab, out, proposals, noise);
+    CU(cudaEventRecord(g_drem.ev_cp, g_drem.s));   // (as the peer branch above: the drafter's stream has read host_anchor
+                                                   //  and the anchor - today every call site pairs this propose with a
+                                                   //  write_context / set_f_rnn that records it; record it here too, so
+                                                   //  one without a pair cannot reorder two transfers on host_anchor)
+    g_drem.cp_valid = true;
 }
 // the drafter's tap a visit's stream (at its start) is, or -1
 inline int draft_tap(const Config& c, int l, int vis) {
