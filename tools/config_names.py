@@ -5,7 +5,8 @@ saguaro.py's configs() and its --config path.
 
 The rules (C122):
   - finding: both families, the new name first; a model present under both names is the new one (the old file is
-    shadowed and stays untouched until its rename, which only happens when the target does not exist);
+    shadowed on the list, and the rename at the next start sets it aside as <old name>.shadowed - it must never
+    later be renamed back over a deleted model; it stops being a maya-*.json and nothing loads it);
   - the display name: the file stem without its leading family name;
   - a written config is always named with the new family;
   - a path given as the old name after the rename (llama-swap, systemd, a run script) resolves to the new file:

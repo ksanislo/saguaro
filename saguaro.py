@@ -836,12 +836,13 @@ def configs() -> list:
 
 def migrate_config_names() -> list:
     """1.2.2's name change (C122): the maya-<model>.json configs here become saguaro-<model>.json, once and only
-    where the new name is not taken (config_names: a model under both names is the new one; a shadowed old file
-    waits for --setup).  With each config move the files that live beside it - and only these exact names, so a
-    config beside it (a dot-named variant like maya-2.5.json next to maya-2.json) is never swept as one: its start
-    scripts (run-<stem>.sh / .bat, their --config line rewritten), the dashboard settings and the live Turbo sidecar
-    the server keeps beside it (<stem>.shared-settings.json, <stem>.turbo.json), the copy before its settings
-    changed (<name>.prev), its half-written temp (<name>.tmp), tools/saguaro/migrate_configs.py's backups
+    where the new name is not taken (config_names: a model under both names is the new one - its old file is set
+    aside once as <old name>.shadowed, a name nothing loads, never left where a delete of the model would have it
+    renamed back and resurrect).  With each config move the files that live beside it - and only these exact names,
+    so a config beside it (a dot-named variant like maya-2.5.json next to maya-2.json) is never swept as one: its
+    start scripts (run-<stem>.sh / .bat, their --config line rewritten), the dashboard settings and the live Turbo
+    sidecar the server keeps beside it (<stem>.shared-settings.json, <stem>.turbo.json), the copy before its
+    settings changed (<name>.prev), its half-written temp (<name>.tmp), tools/saguaro/migrate_configs.py's backups
     (<name>.bak-*), and its engine log (whose path the config's own "log" then follows).  Every move is atomic
     (os.replace) and only onto a target that is not there; a file that cannot move (a read-only folder) stays
     under the old name and is said - config_names still finds it, so a failed rename leaves everything working.
@@ -851,8 +852,18 @@ def migrate_config_names() -> list:
         if not CN.is_config_name(p.name):
             continue                                   # (its sidecars move with it, not on their own)
         target = p.with_name(CN.NEW + p.name[len(CN.OLD):])
+        if target.is_file():                           # (both names at once: the new one is the model; the old
+            aside = p.with_name(p.name + ".shadowed")  #  copy must not wait to be renamed back over it once the
+            if not aside.exists():                     #  model is deleted: it goes aside once, under a name
+                try:                                   #  nothing loads (it stops being a maya-*.json)
+                    os.replace(p, aside)
+                    warn(f"{p.name} and {target.name} name the same model: the new one is used, and the old file "
+                         f"is kept beside it as {aside.name}")
+                except OSError as e:
+                    warn(f"could not set {p.name} aside ({e.strerror or e}): it stays, shadowed")
+            continue
         if target.exists():
-            continue                                   # (the new name is there already: it is the model)
+            continue                                   # (not a config under the new name after all: leave it)
         try:
             os.replace(p, target)
         except OSError as e:

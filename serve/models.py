@@ -1431,8 +1431,10 @@ def delete_plan(root: Path, path: Path) -> dict:
 
 def delete(root: Path, path: Path, files: bool = False) -> dict:
     """The config at `path` off the list: it, its start scripts, the settings kept beside it (.prev,
-    .shared-settings.json); with `files`, delete_plan's files first (a file that cannot be deleted keeps the config,
-    and says which).  {"deleted", "freed" (bytes), "drafter_users" (now drafting with MTP)}."""
+    .shared-settings.json), and its old-name shadow if one sits there (a hand-made pair: left, the next start's
+    rename would move it back and resurrect the deleted model); with `files`, delete_plan's files first (a file
+    that cannot be deleted keeps the config, and says which).  {"deleted", "freed" (bytes), "drafter_users"
+    (now drafting with MTP)}."""
     path = Path(path)
     freed, users, errors = 0, [], []
     if files:
@@ -1469,8 +1471,13 @@ def delete(root: Path, path: Path, files: bool = False) -> dict:
                     users.append(name)
         if errors:
             raise OSError("could not delete " + "; ".join(errors) + " - the model stays on the list")
-    for p in (path, path.with_name(f"run-{path.stem}.sh"), path.with_name(f"run-{path.stem}.bat"),
-              path.with_name(path.name + ".prev"), path.with_name(path.stem + ".shared-settings.json")):
+    stale = [path, path.with_name(f"run-{path.stem}.sh"), path.with_name(f"run-{path.stem}.bat"),
+             path.with_name(path.name + ".prev"), path.with_name(path.stem + ".shared-settings.json")]
+    if path.name.startswith(config_names.NEW):         # (its maya- shadow, the other half of a hand-made pair)
+        shadow = path.with_name(config_names.OLD + path.stem[len(config_names.NEW):] + ".json")
+        stale += [shadow, shadow.with_name(f"run-{shadow.stem}.sh"), shadow.with_name(f"run-{shadow.stem}.bat"),
+                  shadow.with_name(shadow.name + ".prev"), shadow.with_name(shadow.stem + ".shared-settings.json")]
+    for p in stale:
         try:
             p.unlink()
         except FileNotFoundError:

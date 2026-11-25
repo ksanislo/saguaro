@@ -146,7 +146,8 @@ class Api(unittest.TestCase):
 
 class Migration(unittest.TestCase):
     """saguaro.py's migrate_config_names (a start and an update run it): once, atomically, sidecars with it, only
-    where the new name is free; a shadowed pair and a failed move leave everything working"""
+    where the new name is free; a shadowed pair goes aside as <old name>.shadowed and a failed move leaves
+    everything working"""
 
     def test_moved_with_its_sidecars(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -201,7 +202,7 @@ class Migration(unittest.TestCase):
             self.assertIn("--config " + str(d / "saguaro-2.5.json"), (d / "run-saguaro-2.5.sh").read_text())
 
     def test_a_neighbour_does_not_drag_a_shadowed_pair_around(self):
-        """maya-2.json beside the pair maya-2.5.json + saguaro-2.5.json: the shadow waits for --setup, and the
+        """maya-2.json beside the pair maya-2.5.json + saguaro-2.5.json: the shadow goes aside and the
         neighbour's rename must not drag its sidecar into the live model's name"""
         with tempfile.TemporaryDirectory() as tmp:
             d = Path(tmp)
@@ -212,23 +213,53 @@ class Migration(unittest.TestCase):
             (d / "run-maya-2.sh").write_text("exec saguaro.py --config " + str(a) + "\n")
             with mock.patch.object(maya, "ROOT", d), mock.patch.object(maya, "warn") as warn:
                 self.assertEqual(maya.migrate_config_names(), ["saguaro-2.json"])
-                warn.assert_not_called()
-            self.assertTrue((d / "maya-2.5.json").is_file())              # the shadow waits, untouched, ...
-            self.assertEqual(json.loads((d / "maya-2.5.turbo.json").read_text()), {"the shadow": 1})   #  and its
-            self.assertFalse((d / "saguaro-2.5.turbo.json").exists())     #  sidecar is nobody else's
+                self.assertEqual(warn.call_count, 1)                           # (only the pair being set aside)
+            self.assertFalse((d / "maya-2.5.json").exists())                   # the shadow went aside, ...
+            self.assertTrue((d / "maya-2.5.json.shadowed").is_file())          #  its sidecar stayed its own:
+            self.assertEqual(json.loads((d / "maya-2.5.turbo.json").read_text()), {"the shadow": 1})   #  nobody
+            self.assertFalse((d / "saguaro-2.5.turbo.json").exists())          #  else's Turbo state
 
-    def test_both_names_the_new_one_and_the_old_stays(self):
+    def test_both_names_the_new_one_and_the_old_goes_aside(self):
+        """a hand-made pair: the new one is the model; the old file is set aside once as maya-shadow.json.shadowed
+        - a name nothing loads - rather than waiting to be renamed back, and kept readable, not lost"""
         with tempfile.TemporaryDirectory() as tmp:
             d = Path(tmp)
             old = cfg_file(d, "maya-shadow.json", model_name="the old one")
             new = cfg_file(d, "saguaro-shadow.json", model_name="the new one")
             os.utime(old)                                                      # the old one even touched last
             with mock.patch.object(maya, "ROOT", d), mock.patch.object(maya, "warn") as warn:
-                self.assertEqual(maya.migrate_config_names(), [])              # target taken: nothing moves
-                warn.assert_not_called()
+                self.assertEqual(maya.migrate_config_names(), [])              # nothing is *renamed*: it goes aside
+                self.assertEqual(warn.call_count, 1)                           # and it is said, once
                 self.assertEqual([f.name for f in maya.configs()], ["saguaro-shadow.json"])
+                self.assertEqual(maya.migrate_config_names(), [])              # once: the aside is no config
+                self.assertEqual(warn.call_count, 1)
+            aside = d / "maya-shadow.json.shadowed"
+            self.assertEqual(json.loads(aside.read_text())["model_name"], "the old one")   # kept, not lost
+            self.assertFalse(old.exists())
+            self.assertEqual(models.config_paths(d), [new])
             self.assertEqual(model_api.find_config(d, "maya-shadow"), new)
-            self.assertEqual(json.loads(old.read_text())["model_name"], "the old one")   # untouched
+            self.assertEqual(CN.resolve(old), new)                             # the old path still starts it
+
+    def test_a_deleted_model_does_not_return_from_its_shadow(self):
+        """the page shows and deletes only the new one of a hand-made pair: its old-name shadow goes with it, so
+        the next start's rename has nothing to move back - the deleted model stays deleted"""
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            old = cfg_file(d, "maya-shadow.json", model_name="the old one")
+            new = cfg_file(d, "saguaro-shadow.json", model_name="the new one")
+            (d / "maya-shadow.shared-settings.json").write_text("{}")
+            (d / "run-maya-shadow.sh").write_text("#!/bin/sh\n")
+            out = models.delete(d, new)
+            self.assertEqual(out["deleted"], "saguaro-shadow.json")
+            self.assertFalse(old.exists())                                     # the shadow went with the model:
+            self.assertFalse((d / "maya-shadow.shared-settings.json").exists())
+            self.assertFalse((d / "run-maya-shadow.sh").exists())
+            self.assertEqual(models.config_paths(d), [])
+            with mock.patch.object(maya, "ROOT", d), mock.patch.object(maya, "warn") as warn:
+                self.assertEqual(maya.migrate_config_names(), [])              # the next start resurrects nothing
+                warn.assert_not_called()
+            self.assertEqual(models.config_paths(d), [])
+            self.assertEqual(list(d.glob("maya-shadow*")), [])
 
     def test_read_only_folder_leaves_everything_working(self):
         if hasattr(os, "geteuid") and os.geteuid() == 0:
