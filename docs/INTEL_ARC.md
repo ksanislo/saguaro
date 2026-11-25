@@ -11,7 +11,7 @@ The Maya-XS DeepSeek-V4.1 GGUFs run on Intel Arc through llama.cpp's SYCL backen
 [ggml-org/llama.cpp#30817](https://github.com/ggml-org/llama.cpp/pull/30817) (closed unmerged on October 27, 2026), after
 a small patch to that pull request's model loader:
 
-- Saguaro's GGUFs store the Engram metadata as `deepseek41.engram.*` with u32 offsets and primes, one Engram table per
+- The Maya GGUFs store the Engram metadata as `deepseek41.engram.*` with u32 offsets and primes, one Engram table per
   layer (`blk.1/14.engram_embd`, with local offsets) and no `hash_layer_count`.
 - That pull request's loader expects `ple.*` keys and one global `per_layer_token_embd`.
 - The patch accepts both layouts; files from the pull request's own converter load as before.

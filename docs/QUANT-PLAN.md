@@ -18,7 +18,7 @@ Two quants of our own, made from the official weights with error-feedback roundi
   4096 x 2048, gate/up/down) plus one shared expert. Attention is 34 KDA (linear) layers and 11 DSA/MLA layers.
   There are mHC 4-stream residuals and one NextN (MTP) layer. Routed experts are 304.4B of the 321B parameters; one
   expert is 25.2M parameters.
-- **The engine's development file** (before Saguaro's own quants): a 1.6-bit GGUF with experts of ~84 GB.
+- **The engine's development file** (before Project Maya's own quants): a 1.6-bit GGUF with experts of ~84 GB.
 
 ## Machines
 

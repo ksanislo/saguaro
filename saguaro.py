@@ -136,7 +136,7 @@ MODEL_NAME = "glm-5.3-flash"
 SAMPLING, EFFORT = Q.MODEL_DEFAULTS["glm"]        # GLM's own sampling (its generation_config) and level (Max) -
 #                                                    the dashboard's and the API's defaults for requests that set none
 HF = "https://huggingface.co/{repo}/resolve/{revision}/{path}"
-# The models the installer can download: Saguaro's own quants, made from Z.ai's FP8 release (their model card
+# The models the installer can download: Project Maya's own quants, made from Z.ai's FP8 release (their model card
 # has the measurements against it).
 # Another glm5-next GGUF can be used with --gguf-dir.  "folder": the files' folder in the repo ("" =
 # its top).  "file": the names on Hugging Face, with the quant label its file list groups (and adds up) them by -
@@ -252,7 +252,7 @@ MODELS = {
                        "GLM-5.3-Flash-vocab.gguf":
                            "8f53cb1bd2e631c14ef413e3284735d9e53f3c508d07a6f609e705b487105912"}}},
     "Maya-L": {
-        "about": "Maya-L, Saguaro's largest quant: error-feedback-rounded IQ3_S gate/up experts, IQ4_XS down "
+        "about": "Maya-L, Project Maya's largest quant: error-feedback-rounded IQ3_S gate/up experts, IQ4_XS down "
                  "projections (Q5_K in the most sensitive layers), Q6_K attention, the MTP draft block, made from "
                  "Z.ai's FP8 release",
         "repo": "peasantsmith/GLM-5.3-Flash-Maya-GGUF", "revision": "main", "folder": "Maya-L",
@@ -573,7 +573,7 @@ DS4_MIN_CC = 70                                    # (V100 on: the experts' kern
 # or Q8_0 (UD-Q4_K_XL), routed experts MXFP4, read in place - the experts VRAM does not hold come from RAM or, through
 # the OS page cache, from the SSD, so it runs whatever the memory; Volta or newer.  The DSpark drafter and the vision
 # tower, which the GGUFs leave out, come from DeepSeek's own checkpoint (download_gguf.json's "drafter" and "vision").
-# Saguaro's own quants of it (download_gguf.json's "maya": Maya-S, the experts in 2-3 bits; Maya-M once published) are
+# Project Maya's own quants of it (download_gguf.json's "maya": Maya-S, the experts in 2-3 bits; Maya-M once published) are
 # each one GGUF split with everything in it, the two Engram tables in Q6_K (made from DeepSeek's released weights).
 # Files of an earlier layout are used as they are when a folder holds them whole (ds4_earlier): v1.1.16's Maya-S (4
 # shards + unsloth's MXFP8 shard of the Engram tables in <...-GGUF>/Engram), unsloth's GGUFs before their re-shard.
@@ -1699,7 +1699,7 @@ def check_pc(a, family: str = "glm", gguf: bool = False, ds4_quant: str = "exl3"
         if ds4 and not gguf:   # (v1.2.1-D: no experimental label - what is measured and what is not, plainly;
                                #  the GGUFs go on to check_hip_pc with no line of theirs, as GLM's and MiniMax's)
             warn(f"{DS4}'s EXL3 quants on AMD: the kernels pass their tests on AMD GPUs, but the whole model has "
-                 "not been measured on one yet - Saguaro's GGUF quants (--model deepseek-maya-s / "
+                 "not been measured on one yet - the Maya GGUF quants (--model deepseek-maya-s / "
                  "deepseek-maya-xs) are the ones measured on AMD")
         return check_hip_pc(a, text_only=False, family=family, gguf=gguf)   # (every model the setup takes on AMD reads pictures there)
     if a.backend == "metal":
@@ -1710,7 +1710,7 @@ def check_pc(a, family: str = "glm", gguf: bool = False, ds4_quant: str = "exl3"
     if ds4 and not gguf and S.ARM:
         # the EXL3 quant's expert kernels are x86 (AVX2/AVX-512): this CPU has neither
         fail(f"{DS4}'s EXL3 quants need the x86 expert kernels (AVX2/AVX-512), which this ARM CPU does not have",
-             f"set up one of Saguaro's GGUF quants instead: {ME} --setup --model deepseek-maya-s (or deepseek-maya-xs)")
+             f"set up one of the Maya GGUF quants instead: {ME} --setup --model deepseek-maya-s (or deepseek-maya-xs)")
     if not (WIN or sys.platform.startswith("linux")):
         fail("Saguaro runs on Linux and Windows (and on Apple Silicon: --backend metal)",
              "the engine needs an NVIDIA GPU and CUDA")
@@ -2124,7 +2124,7 @@ def choose_family(a, prev: dict) -> str:
         default = "glm"
     here = f" (this PC: {have:.0f} GB)" if have else ""
     rows = [("GLM-5.3-Flash", "recommended for this PC" if fit == "glm" else None,
-             "Z.ai's GLM-5.3-Flash in Saguaro's GGUF quants (GLM-5.3-Flash-Maya-S to -Maya-L, 95-156 GB) or "
+             "Z.ai's GLM-5.3-Flash in the Maya GGUF quants (GLM-5.3-Flash-Maya-S to -Maya-L, 95-156 GB) or "
              "turboderp's EXL3 quants: from one GPU up, the experts that do not fit in VRAM from RAM and the SSD; "
              "NVIDIA and AMD; pictures with its vision encoder."),
             (DS4, None,
@@ -5857,7 +5857,7 @@ def set_up(a, prev: dict) -> Path | None:
 
 # ------------------------------------------------------------------------------------------------ DeepSeek-V4.1-Flash
 def ds4_maya_published(quant: str) -> bool:
-    """Whether Saguaro's quant of DeepSeek has its files in download_gguf.json (they are listed once uploaded)."""
+    """Whether Project Maya's quant of DeepSeek has its files in download_gguf.json (they are listed once uploaded)."""
     q = ((read_json(DS4_GGUF_MANIFEST).get("maya") or {}).get("quants") or {}).get(DS4_QUANTS[quant]) or {}
     return bool(q.get("files"))
 
@@ -5885,7 +5885,7 @@ def ds4_gguf_model(quant: str) -> dict:
         if not q.get("files"):
             fail(f"{DS4} {DS4_QUANTS[quant]} is not published yet",
                  f"set up unsloth's GGUF meanwhile: {ME} --setup --model {DS4} --ds4-quant gguf-q8")
-        about, repo, revision = (f"{DS4} {DS4_QUANTS[quant]}, Saguaro's quant ({q.get('about', 'the experts in 2-3 bits')})",
+        about, repo, revision = (f"{DS4} {DS4_QUANTS[quant]}, Project Maya's quant ({q.get('about', 'the experts in 2-3 bits')})",
                                  my["repo"], my["revision"])
     else:
         q = (man.get("quants") or {}).get(DS4_QUANTS[quant]) or {}
@@ -6245,8 +6245,8 @@ def choose_ds4_quant(a, prev: dict) -> str:
             gb[k] = mk["download_gb"] - mk["files"].get(t, 0) / 1e9 + ds4_abl_engram_gb()
     if "exl3-3.5" in keys:
         gb["exl3-3.5"] = ds4_model("exl3-3.5")["download_gb"]
-    about = {"maya-s": "Saguaro's quant: experts in 2-3 bits, the most of it in memory",
-             "maya-m": "Saguaro's quant: experts in 3.4 bits, closer to the original",
+    about = {"maya-s": "Project Maya's quant: experts in 2-3 bits, the most of it in memory",
+             "maya-m": "Project Maya's quant: experts in 3.4 bits, closer to the original",
              "maya-xs": "Saguaro's smallest quant: experts in ~1.6 bits, the whole model in a 128 GB PC's memory",
              "gguf-q8": ("unsloth's GGUF, the closest to the original model (DeepSeek's own formats: dense weights BF16, "
                          "experts MXFP4): KLD 0.047, 96.4% the same top token as the full-precision original (our scorer, "
@@ -7081,7 +7081,7 @@ def mm3_memory_gb(quant: str, own: Path | None = None) -> float:
 
 
 def choose_mm3_quant(a, prev: dict) -> str:
-    """--mm3-quant, else the one set up before, else asked among those this PC runs: Saguaro's GGUF quants once published
+    """--mm3-quant, else the one set up before, else asked among those this PC runs: the Maya GGUF quants once published
     and the EXL3 quant - by this PC's memory the one recommended."""
     if getattr(a, "mm3_quant", None):
         return a.mm3_quant
@@ -7103,13 +7103,13 @@ def choose_mm3_quant(a, prev: dict) -> str:
         return keys[0]
     gb = {k: mm3_models()[0]["download_gb"] if k == "exl3" else mm3_gguf_entry(k)["download_gb"] for k in keys}
     about = {"exl3": f"Mia-AiLab's quant: pictures and DSpark drafting; ~{MM3_MEMORY_GB} GB of VRAM + RAM",
-             "gguf-xs": "Saguaro's quant: experts in ~1.6 bits, the whole model in a 128 GB PC's memory",
-             "gguf-s": "Saguaro's quant: experts in ~2.1 bits"}
+             "gguf-xs": "Project Maya's quant: experts in ~1.6 bits, the whole model in a 128 GB PC's memory",
+             "gguf-s": "Project Maya's quant: experts in ~2.1 bits"}
     pics = "; pictures and DSpark drafting (their files, ~4 GB, beside it)"
     label = {k: (Q.shown("minimax", k, gb[k]), about[k] + ("" if k == "exl3" else pics)) for k in keys}
     order = sorted(keys, key=lambda k: k != rec)
     default = before if before in order else rec
-    pick = choose(f"Which files of {MM3}?", ["Saguaro's GGUF quants and the EXL3 quant run on NVIDIA from V100 on and "
+    pick = choose(f"Which files of {MM3}?", ["the Maya GGUF quants and the EXL3 quant run on NVIDIA from V100 on and "
                                              "on AMD:"],
                   [(label[k][0], "recommended" if k == rec else None, label[k][1]) for k in order],
                   order.index(default), a.yes or a.check)
@@ -7418,7 +7418,7 @@ def mm3_pack_has_vision(pack: Path) -> bool:
 
 
 def set_up_mm3(a, prev: dict) -> Path | None:
-    """MiniMax-M3.1-Flash's steps 1-8: the files (EXL3, or Saguaro's GGUF quants), the PC (NVIDIA - mm3_gpus(); a GGUF also
+    """MiniMax-M3.1-Flash's steps 1-8: the files (EXL3, or the Maya GGUF quants), the PC (NVIDIA - mm3_gpus(); a GGUF also
     AMD; the memory), the context (recommended by this PC's memory), its engine (build/saguaro-mm3), the files, the pack,
     pictures, the config."""
     inst = prev.get("installer") or {}

@@ -66,7 +66,7 @@ for GLM-5.3-Flash; its server and dashboard grew from Strata's too.
 
 ### The model files
 
-- **GLM-5.3-Flash** by zai-org (MIT, Hugging Face) - the released weights Saguaro's quant and the image encoder are made
+- **GLM-5.3-Flash** by zai-org (MIT, Hugging Face) - the released weights Project Maya's quant and the image encoder are made
   from.
 - **Maya-S-v2-IQ2_XXS** - the quant used here: 89.83 GiB across three GGUF shards, packed by `tools/iq_pack.py` into
   `pack/` (the dense weights, the native expert blobs and the tokenizer).
