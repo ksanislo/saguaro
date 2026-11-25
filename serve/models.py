@@ -493,17 +493,19 @@ def _dec(s: dict, key: str, lo: float, hi: float, what: str):
 
 
 def qfn_yarn_follow(args: list) -> list:
-    """The QFN args with --rope-scale kept in step with --max-context: past the trained reach the elastic YaRN
-    extension reaches max / 262144, so a context of 1M needs --rope-scale 4 (512K: 2, 384K: 1.5; the engine
-    parses the factor as a double, so it is written as computed, never rounded).  At or below the trained
-    reach, and on a config without the YaRN pair, the args come back as they are (inside the trained context
-    the elastic engine never reads the YaRN table, so the written factor stays).  One rule for every writer of
-    a QFN context: the Models page (apply), the running server saving a live slider move (server._save_context
-    - a 1M move that saved only --max-context left the next start spawning a context its factor cannot reach,
-    under-scaled and silent), and the driver rewriting its spawn command (engines/qfn/serve/server.py's
-    set_context, whose copy of this rule it matches)."""
+    """The QFN args with --rope-scale kept in step with --max-context: past the config's own --yarn-orig-ctx
+    the elastic YaRN extension reaches max / orig, so a context of 1M needs --rope-scale 4 (512K: 2,
+    384K: 1.5; the engine parses the factor as a double, so it is written as computed, never rounded).  At or
+    below it, and on a config without the YaRN pair, the args come back as they are (inside the trained
+    context the elastic engine never reads the YaRN table, so the written factor stays).  One rule for every
+    writer of a QFN context: the Models page (apply), the running server saving a live slider move
+    (server._save_context - a 1M move that saved only --max-context left the next start spawning a context its
+    factor cannot reach, under-scaled and silent), and the driver rewriting its spawn command
+    (engines/qfn/serve/server.py's set_context, whose copy of this rule it matches - gate on the config's own
+    orig and compute with the same number, review finding 3: the constant gate could hand a hand-edited
+    config a factor under 1, which the engine refuses)."""
     yctx, yorig = _int(flag(args, "--max-context"), 0), _int(flag(args, "--yarn-orig-ctx"), 0)
-    if yctx > QFN_YARN_ORIG and flag(args, "--rope-scaling") == "yarn" and yorig > 0:
+    if yorig > 0 and yctx > yorig and flag(args, "--rope-scaling") == "yarn":
         return set_flag(args, "--rope-scale", "%g" % (yctx / yorig))
     return args
 

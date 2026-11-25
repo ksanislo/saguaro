@@ -449,6 +449,12 @@ class Settings(unittest.TestCase):
             self.assertEqual(M.flag(a, "--rope-scale"), want)
             self.assertEqual(M.flag(a, "--yarn-orig-ctx"), "262144")
         self.assertEqual(M.flag(M.apply(cfg, {"context": 65536})["args"], "--rope-scale"), "2")
+        hand = json.loads(json.dumps(cfg))                          # (a hand-edited --yarn-orig-ctx: the gate is
+        hand["args"][hand["args"].index("--yarn-orig-ctx") + 1] = "524288"   #  the config's own number, the
+        a = M.apply(hand, {"context": 393216})["args"]              #  driver's rule (review finding 3): 384K
+        self.assertEqual(M.flag(a, "--rope-scale"), "2")             #  is inside 512K - nothing moved, where the
+                                                                     #  constant's gate wrote 393216/524288 =
+                                                                     #  0.75, under the engine's own >= 1 check)
         plain = json.loads(json.dumps(cfg))                          # (a config without the YaRN pair: nothing
         pa = plain["args"]                                           #  is added and nothing moved)
         i = pa.index("--rope-scaling")
