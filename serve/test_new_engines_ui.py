@@ -582,6 +582,7 @@ console.log(JSON.stringify({...out, before, after: lib.modelLabel(st.S.health, {
         self.assertFalse(got["same"])
         self.assertTrue(got["otherModel"])
         self.assertTrue(got["otherLabel"])          # (two configs of one model: a quant switch too)
+        self.assertTrue(got["quantOnly"])           # (same id, same label, only the quant field moved: one too)
         self.assertFalse(got["saysNothing"])        # (an engine that names nothing: never a switch)
         self.assertFalse(got["idOnlyOld"])
         self.assertTrue(got["otherId"])

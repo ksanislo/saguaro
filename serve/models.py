@@ -55,8 +55,9 @@ CONTEXT_TESTED = {"ds4": 1048576, "mm3": 262144, "hy4": 131072, "ik2": 131072}
 CONTEXT_TESTED_DEFAULT = 262144
 QFN_KV = ("fp16", "int8", "k8v4", "q4_0")                         # saguaro-qfn's --kv
 MM3_KV = ("bf16", "int8", "fp8", "fp4")                           # maya-mm3 --kv-cache (one format for K and V)
-# files the setup's quant list (tools/maya_quants.py) does not name, by their config's installer key
-OTHER_QUANTS = {("deepseek", "abliterated"): "Mix-256G"}
+# files the setup's quant list does not name, by their config's installer key - since the model-names review's
+# nit 3 the same map maya_quants.quant_name reads, so the page's model_quant and a row's own quant name one map
+OTHER_QUANTS = maya_quants.OTHER_QUANTS
 ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # variables that change which code the engine's process loads or runs (a library preloaded, the program search path):
 # never set or changed from the page - with remote access on, the page is a network client; a config's own are kept

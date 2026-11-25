@@ -192,6 +192,18 @@ class Aliases(unittest.TestCase):
         self.assertEqual(Q.shown("glm", "UD-Q2_K_XL"), "GLM-5.3 · UD-Q2_K_XL")   # (a GGUF of the user's: its name)
         self.assertEqual(Q.shown("deepseek"), "DeepSeek V4.1")
 
+    def test_quant_name_knows_the_other_quants_labels(self):
+        """nit 3: quant_name reads OTHER_QUANTS too - a DeepSeek config installed under the old bare
+        "abliterated" alias (saguaro.py's DS4_ABL_ALIAS) shows "Mix-256G" again, not the key; the tiers and the
+        OTHERS names come first as before, an unknown key still ends as itself."""
+        self.assertEqual(Q.quant_name("deepseek", "abliterated"), "Mix-256G")
+        self.assertEqual(Q.quant_name("deepseek", "abliterated-256g"), "orcarouter Abliterated Mix-256G")
+        self.assertEqual(Q.quant_name("deepseek", "maya-xs"), "Maya-XS")             # (the tier first, as before)
+        self.assertEqual(Q.quant_name("deepseek", "gguf-zz"), "gguf-zz")             # (unknown: the key itself)
+        self.assertEqual(Q.display_names({"exe": "/b/maya-ds4", "args": ["--pack", "/p"],
+                                          "installer": {"family": "deepseek", "ds4_quant": "abliterated"}}),
+                         ("DeepSeek V4.1", "Mix-256G"))   # (what /health, /metrics and the Models rows carry)
+
 
 class ModelOption(unittest.TestCase):
     """--model as typed -> what the setup reads: the old values as before, the new ids to the same."""
