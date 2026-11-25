@@ -405,7 +405,9 @@ function gpuNames(name, count) {
 }
 function facts() {
   const m = S.metrics || {}, eng = m.engine || {}, hw = m.hardware || {}, st = m.hardware_static || {}, storage = m.storage;
-  const ver = eng.saguaro_version || eng.maya_version || S.health.version;
+  // (1.2.1 item 11: only Saguaro's release fields - never an engine-blob field; eng.maya_version, the old metrics'
+  //  name for this one, goes with them and an older server's health.version says the same thing)
+  const ver = eng.saguaro_version || S.health.version;
   const kvPerTok = eng.kv_gb && eng.kv_ctx ? (eng.kv_gb * 1073741824) / eng.kv_ctx : null;
   let kv;
   if (eng.engine_kind === "glm-fast") {
@@ -463,7 +465,7 @@ function facts() {
     ["Model folder", storage ? `${storage.path} · ${gb(storage.free, 0)} GB free of ${gb(storage.total, 0)} GB` : null],
   ].filter((r) => r[1] != null && r[1] !== "");
 }
-function About() {
+export function About() {   // (exported for serve/test_dashboard.py: it walks the section, as the Tools rows are)
   const [log, setLog] = useState(null);
   const copy = async () => {
     try { await copyText(await fetchReport(), true); toast("success", "Report copied", "Paste it into a GitHub issue - read it first."); }
