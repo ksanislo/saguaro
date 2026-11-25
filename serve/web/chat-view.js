@@ -341,7 +341,7 @@ function PlusMenu({open, close, anchor, pickFiles}) {
 // this chat's live Turbo (PLAN-turbo-live): a flame beside the thinking speedometer - the toggle and the options
 // (drop 1/2/3 experts, skip off/SSD/RAM), changeable mid-conversation; the request carries it every turn, so a
 // choice applies from the next turn.  No chat setting = the model's live Turbo (the control panel's) or exact.
-function TurboMenu({open, close, anchor}) {
+export function TurboMenu({open, close, anchor}) {   // (exported for serve/test_dashboard.py: it walks the rendered menu)
   const c = S.current, tb = turboOf(c);
   const pick = (key, value) => { setChatTurbo(turboChoose(c, key, value)); close(); };
   return html`<${Menu} open=${open} onClose=${close} anchor=${anchor} label="Turbo, for this chat" align="left" width=${290} cls="turbo-menu">
@@ -353,10 +353,10 @@ function TurboMenu({open, close, anchor}) {
       <${MenuLabel}>Drop experts<//>
       ${TURBO_DROPS.map((d) => html`<${MenuItem} label=${`drop ${d} of the 10`} sub=${TURBO_DROP_HINT} checked=${tb.drop === d}
         onClick=${() => pick("drop", d)}/>`)}
-      <${MenuLabel}>Skip slow experts<//>
+      ${S.turboSkip === false ? null : html`<${MenuLabel}>Skip slow experts<//>
       ${TURBO_SKIPS.map((s) => html`<${MenuItem} label=${`skip: ${s.name}`} checked=${(tb.skip || "off") === s.id}
         sub=${s.warn ? html`<span>${s.hint} <span class="warn-text">${s.warn}</span></span>` : s.hint}
-        onClick=${() => pick("skip", s.id)}/>`)}` : null}
+        onClick=${() => pick("skip", s.id)}/>`)}`}` : null}
   <//>`;
 }
 function TurboChip({menu, setMenu, btn}) {

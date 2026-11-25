@@ -1049,6 +1049,29 @@ console.log(JSON.stringify({off, ssd, ram}));""")
             self.assertEqual(any("callout--warn" in s for s in tree), name == "ram", name)
             self.assertEqual(warn in tree, name == "ram", name)
 
+    def test_the_skip_control_hides_where_the_engine_leaves_it_off(self):
+        # PLAN-p5: the server's /api/turbo/options says turbo_skip false (a QFN whose engine applies drop only);
+        # loadTurboLive keeps that in S.turboSkip, and the Skip control disappears - the Settings row and the
+        # chat menu's Skip items - while Drop experts, the toggle and the warning stay as they were
+        got = self.node(self.WALK + """
+const tb = await import(web + "/turbo.js"), cv = await import(web + "/chat-view.js");
+st.S.turboLive = {drop: 1, skip: "ram"};
+st.S.current = {turbo: {drop: 1, skip: "ram"}};
+const menu = () => strs(cv.TurboMenu({open: true, close: () => {}, anchor: {}}));
+const shown = {row: strs(tb.TurboLive()), menu: menu()};
+st.S.turboSkip = false;
+const hidden = {row: strs(tb.TurboLive()), menu: menu()};
+console.log(JSON.stringify({shown, hidden}));""")
+        warn = "can break answers: only where almost everything is on the card"
+        for half in ("row", "menu"):
+            self.assertIn("Skip slow experts", got["shown"][half], half)
+            self.assertIn(warn, got["shown"][half], half)
+            self.assertNotIn("Skip slow experts", got["hidden"][half], half)
+            self.assertNotIn(warn, got["hidden"][half], half)
+            self.assertIn("Drop experts", got["hidden"][half], half)   # (the rest of Turbo stays: nothing is disabled)
+        self.assertIn("skip: SSD", got["shown"]["menu"])               # (the menu's own items go with the row)
+        self.assertNotIn("skip: SSD", got["hidden"]["menu"])
+
 
 if __name__ == "__main__":
     unittest.main()

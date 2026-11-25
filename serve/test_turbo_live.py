@@ -89,6 +89,11 @@ class ServerSide(unittest.TestCase):
         cls.httpd.server_close()
         shutil.rmtree(cls.d, ignore_errors=True)
 
+    def get(self, path):
+        import urllib.request
+        with urllib.request.urlopen(self.base + path) as r:
+            return r.status, json.loads(r.read())
+
     def post(self, path, body):
         import urllib.error
         import urllib.request
@@ -132,6 +137,24 @@ class ServerSide(unittest.TestCase):
         self.assertFalse(Path(self.svc.turbo_path).exists())
         self.assertIsNone(self.chat())
         self.assertEqual(self.post("/api/turbo/options", {"turbo": {"skip": "nonsense"}})[0], 400)
+
+    def test_the_page_is_told_when_the_engine_leaves_skip_off(self):
+        # PLAN-p5: /api/turbo/options only, "turbo_skip" (default true): false only for a QFN whose engine
+        # does not report that it applies skip - the page hides the Skip control on that
+        s, out = self.get("/api/turbo/options")
+        self.assertEqual((s, out["turbo_skip"]), (200, True))          # (every engine but QFN: skip applies)
+        self.svc.engine_kind = "qfn"                                   # (QFN's engine: drop only until it says otherwise)
+        try:
+            self.assertFalse(self.get("/api/turbo/options")[1]["turbo_skip"])
+            self.engine.info["turbo_skip"] = 1                         # (the engine reports it: INFO turbo_skip=1)
+            self.assertTrue(self.get("/api/turbo/options")[1]["turbo_skip"])
+            del self.engine.info["turbo_skip"]
+        finally:
+            self.svc.engine_kind = None
+        self.assertTrue(self.get("/api/turbo/options")[1]["turbo_skip"])   # (and the POST body still says only {"turbo": ...})
+        self.assertEqual(self.post("/api/turbo/options", {"turbo": {"drop": 2, "skip": "ssd"}})[1],
+                         {"turbo": {"drop": 2, "skip": "ssd"}})
+        self.post("/api/turbo/options", {"turbo": None})
 
     def test_the_monitor_rows_carry_the_options(self):
         self.chat(turbo={"drop": 2, "skip": "ram"})

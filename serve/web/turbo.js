@@ -134,12 +134,14 @@ export function TurboButton() {
 // touch no config: unlike Maya's Turbo above there is no restart, and this stays visible under llama-swap.
 
 S.turboLive = undefined;   // until loaded: null = exact (off); {"drop": N, "skip": "off"|"ssd"|"ram"}; still undefined = an older server has none
+S.turboSkip = true;        // PLAN-p5: does this engine apply skip at all (only a QFN whose engine does not report it says false)
 
 export async function loadTurboLive() {
   try {
     const t = await api("api/turbo/options");
+    S.turboSkip = t.turbo_skip !== false;   // (an older server carries no field: shown, the default)
     S.turboLive = t.supported === false ? undefined : t.turbo || null;   // (Inkling 2: none, as an older server)
-  } catch (e) { S.turboLive = undefined; }   // (an older server: no live Turbo)
+  } catch (e) { S.turboLive = undefined; S.turboSkip = true; }   // (an older server: no live Turbo)
   emit();
 }
 
@@ -175,8 +177,8 @@ export function TurboLive() {
       <${Seg} label="Experts dropped" value=${String(t.drop || 0)} onChange=${(v) => set({drop: +v})}
         options=${[{id: "0", label: "off", title: "every expert the router picks is used"},
                    ...TURBO_DROPS.map((d) => ({id: String(d), label: `${d}`, title: TURBO_DROP_HINT}))]}/></div>
-    <div class="set-row"><span class="set-row__text"><span class="set-row__label">Skip slow experts</span><span class="set-row__sub">an expert the engine would fetch the slow way is left out instead</span></span>
+    ${S.turboSkip === false ? null : html`<div class="set-row"><span class="set-row__text"><span class="set-row__label">Skip slow experts</span><span class="set-row__sub">an expert the engine would fetch the slow way is left out instead</span></span>
       <${Seg} label="Skip slow experts" value=${t.skip || "off"} onChange=${(v) => set({skip: v})}
         options=${TURBO_SKIPS.map((s) => ({id: s.id, label: s.name, title: s.hint}))}/></div>
-    ${t.skip === "ram" ? html`<div class="callout callout--warn"><span>${turboSkipWarn("ram")}</span></div>` : null}`;
+      ${t.skip === "ram" ? html`<div class="callout callout--warn"><span>${turboSkipWarn("ram")}</span></div>` : null}`}`;
 }
