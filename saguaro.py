@@ -8394,6 +8394,10 @@ def set_up_qfn(a, prev: dict) -> Path | None:
                 and 1 <= was <= 8 else (2 if len(pc["gpus"]) > 1 else 1))
         par = int(ask("Answers at once (1-8)? ", [str(i) for i in range(1, 9)], str(dflt), a.yes))
         a.parallel = par
+        if hip and par > 1:      # (review finding 4: since the question, the answer the measured card lost
+            warn(f"answers at once {par} on the one AMD card: parallel decoding lost speed on the one it was "
+                 "measured on (the RX 9070 XT) - 1 is the measured choice; 2 is what lends the picture encoder "
+                 "its batch slots, which is where a higher answer here pays for itself")
     qfn_context_cost(par, ctx, lay)
     models = (Path(a.models_dir).expanduser().resolve() if a.models_dir else
               Path(inst["models_dir"]) if inst.get("models_dir") else default_models_dir())

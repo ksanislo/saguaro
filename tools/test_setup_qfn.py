@@ -2135,6 +2135,31 @@ class AnswersAtOnceC18(SetupFlow):
         self.assertEqual(asked, [])                                          # (--parallel N: not asked)
         self.assertEqual(cfg["parallel"], 4)
 
+    def test_above_one_on_the_one_amd_card_hears_what_it_measured(self):
+        """Review finding 4: on the one AMD card parallel decoding was measured slower - an answer of 2 reaches
+        the config now that the question asks (until the question, only a deliberate --parallel did), so the
+        answer hears the measurement.  It keeps its 2: that is the one card's picture-encoder lend path."""
+        said = []
+        with tempfile.TemporaryDirectory() as t, \
+                patch.object(maya, "ask", side_effect=lambda q, c, d, y: "2" if "Answers at once" in q else d), \
+                patch.object(maya, "warn", side_effect=lambda *x: said.append(" ".join(map(str, x)))):
+            cfg = self.setup(Path(t), context=65536, yes=False)               # (the flow's card is the AMD one)
+        self.assertEqual(cfg["parallel"], 2)                                  # (the answer stands)
+        self.assertEqual(len([s for s in said if "lost speed" in s]), 1, said)
+
+    def test_parallel_given_on_that_card_is_deliberate_and_untold(self):
+        """"--parallel N says" holds: the AMD card given 2 on the command line is asked nothing and lectured
+        of nothing - the warning belongs to the answer, not to the flag."""
+        def answer(q, ch, dflt, yes):
+            self.assertNotIn("Answers at once", q)
+            return dflt
+        said = []
+        with tempfile.TemporaryDirectory() as t, patch.object(maya, "ask", side_effect=answer), \
+                patch.object(maya, "warn", side_effect=lambda *x: said.append(" ".join(map(str, x)))):
+            cfg = self.setup(Path(t), context=65536, parallel=2, yes=False)
+        self.assertEqual(cfg["parallel"], 2)
+        self.assertEqual([s for s in said if "lost speed" in s], [])
+
     def test_the_combined_cost_line(self):
         """The one line beside the questions: 12.7 KB a token a conversation, context x answers - Ken's
         1M x 2 = about 27 GB, and the newest 32K of each conversation on the cards too."""
