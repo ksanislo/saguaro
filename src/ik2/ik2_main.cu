@@ -2395,7 +2395,7 @@ static bool grp_ok(const Layer& Ly) { return grp_one(Ly.ty[0]) && grp_one(Ly.ty[
 
 // (two GPUs, SAGUARO_IK2_PF_GPU1=1: a prompt's experts that GPU 0 lacks run on GPU 1 from its VRAM instead of streaming through
 //  host memory - defined with the two-GPU code below)
-bool pf1_pick(int l, const Config& c, const std::vector<int>& cnt, const ExpertCache& EC, int T, std::vector<char>& skip);
+bool pf1_pick(int l, const Config& c, const std::vector<int>& cnt, const ExpertCache& EC, int T, std::vector<char>& skip, const Layer& Ly);
 void pf1_run(const Model& M, int l, int T, const uint16_t* xq16, const Work& W, const std::vector<char>& skip, const int* gidx,
              const float* sg, const float* su, const float* wtr);
 void pf1_add(Work& W, int T, int C);
@@ -2445,7 +2445,7 @@ void run_prefill_moe(const Model& M, Layer& Ly, int l, int T, const uint16_t* xq
     }
 
     std::vector<char> p1skip;
-    const bool p1 = g_off && !g_ep && !g_tp && pf1_pick(l, c, W.cnt, EC, T, p1skip);
+    const bool p1 = g_off && !g_ep && !g_tp && pf1_pick(l, c, W.cnt, EC, T, p1skip, Ly);
     if (p1) pf1_run(M, l, T, xq16, W, p1skip, gidx, sg, su, wtr);
 
     // the experts on a GPU: d -1 all of them (one GPU), else the ones it owns (SAGUARO_IK2_EP), into X.tmp
@@ -3071,9 +3071,14 @@ bool pf1_peer() {
     return on;
 }
 
-bool pf1_pick(int l, const Config& c, const std::vector<int>& cnt, const ExpertCache& EC, int T, std::vector<char>& skip) {
+bool pf1_pick(int l, const Config& c, const std::vector<int>& cnt, const ExpertCache& EC, int T, std::vector<char>& skip, const Layer& Ly) {
     static const bool en = getenv("SAGUARO_IK2_PF_GPU1") && std::atoi(getenv("SAGUARO_IK2_PF_GPU1"));
     if (!en || !g_two.on || T < 32) return false;
+    // (kMIX - a Strata pack whose experts carry their own types - is refused, not routed: pf1_run decodes the fixed
+    //  three-part layout at Ly.eb's offsets, and a kMIX expert's parts sit under their own MixHdr, so its rows would
+    //  be read at wrong offsets silently. run_exp refuses a kMIX pack across the GPUs today, so nothing reaches here
+    //  in a supported config; refuse it here too rather than lean on that)
+    if (Ly.ty[0] == strata_fmt::kMIX) return false;
     skip.assign(c.E, 0);
     int n = 0;
     for (int e = 0; e < c.E; ++e)
