@@ -121,8 +121,8 @@ def run(cmd, cwd=None, env=None, check=True, quiet=False, echo=True):
 
 
 def full_build_output() -> bool:
-    """MAYA_BUILD_OUTPUT=full (or --full-build-output): every line of a compile on the screen, as before v1.1.78."""
-    return os.environ.get("MAYA_BUILD_OUTPUT", "").strip().lower() in ("full", "all", "1")
+    """SAGUARO_BUILD_OUTPUT=full (or --full-build-output): every line of a compile on the screen, as before v1.1.78."""
+    return os.environ.get("SAGUARO_BUILD_OUTPUT", "").strip().lower() in ("full", "all", "1")
 
 
 def clock(seconds: float) -> str:
@@ -225,7 +225,7 @@ class BuildLog:
         say(f"  {self.what}: stopped while {stopped} after {took} - the last lines of {self.path}:")
         for text in self.tail:
             say("    " + text)
-        say(f"  (all of it: {self.path}; MAYA_BUILD_OUTPUT=full shows every line as it comes)")
+        say(f"  (all of it: {self.path}; SAGUARO_BUILD_OUTPUT=full shows every line as it comes)")
 
 
 def out(cmd):

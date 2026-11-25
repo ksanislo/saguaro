@@ -17,14 +17,14 @@ int main() {
     CHECK(vl::kept_for(576 * MiB, 700 * MiB, false) == 576 * MiB);
     CHECK(vl::kept_for(320 * MiB, 700 * MiB, true) == 320 * MiB);   // asked for: all of it
 
-    // (#1156) a reserve the SETUP wrote by itself (AMD: MAYA_VRAM_RESERVE_SETUP_MB=<MiB>) is the default one, not asked
+    // (#1156) a reserve the SETUP wrote by itself (AMD: SAGUARO_VRAM_RESERVE_SETUP_MB=<MiB>) is the default one, not asked
     // for: nothing extra kept unless it would be used up; the user's own (another figure, the line 0 or gone) is asked
     {
         auto set = [](const char* v) {
 #ifdef _WIN32
-            _putenv_s("MAYA_VRAM_RESERVE_SETUP_MB", v != nullptr ? v : "");
+            _putenv_s("SAGUARO_VRAM_RESERVE_SETUP_MB", v != nullptr ? v : "");
 #else
-            v != nullptr ? setenv("MAYA_VRAM_RESERVE_SETUP_MB", v, 1) : unsetenv("MAYA_VRAM_RESERVE_SETUP_MB");
+            v != nullptr ? setenv("SAGUARO_VRAM_RESERVE_SETUP_MB", v, 1) : unsetenv("SAGUARO_VRAM_RESERVE_SETUP_MB");
 #endif
         };
         set(nullptr);

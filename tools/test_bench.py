@@ -273,8 +273,8 @@ class BenchStandard(unittest.TestCase):
     def test_a_lock_taken_by_hand(self):
         with tempfile.TemporaryDirectory() as td, patch.object(MB, "LOCK_DIRS", (td,)), \
                 patch.object(MB, "_out", return_value=""), patch.object(MB, "cpu_load_now", return_value=None), \
-                patch.object(MB, "HOT_FLAGS", ()), patch.dict(MB.os.environ, {"MAYA_HOT_FLAG": "", "MAYA_GPU_LOCKS": "",
-                                                                              "MAYA_BENCH_LOCK_OK": ""}):
+                patch.object(MB, "HOT_FLAGS", ()), patch.dict(MB.os.environ, {"SAGUARO_HOT_FLAG": "", "SAGUARO_GPU_LOCKS": "",
+                                                                              "SAGUARO_BENCH_LOCK_OK": ""}):
             lock = Path(td) / "gpu0"
             lock.write_text("mine, by hand\n")
             why = MB.machine_quiet("cuda", [0])                       # (the default: strict)
@@ -283,9 +283,9 @@ class BenchStandard(unittest.TestCase):
             self.assertEqual(MB.wait_quiet("cuda", [0], 0, lambda *a: None, lock_ok=True), [])
             self.assertFalse(MB.lock_ok_asked())
             self.assertTrue(MB.lock_ok_asked(True))
-            with patch.dict(MB.os.environ, {"MAYA_BENCH_LOCK_OK": "1"}):
+            with patch.dict(MB.os.environ, {"SAGUARO_BENCH_LOCK_OK": "1"}):
                 self.assertTrue(MB.lock_ok_asked())
-            with patch.dict(MB.os.environ, {"MAYA_BENCH_LOCK_OK": "0"}):
+            with patch.dict(MB.os.environ, {"SAGUARO_BENCH_LOCK_OK": "0"}):
                 self.assertFalse(MB.lock_ok_asked())
             # (the run takes no lock that is there and releases only its own: the hand-made one stays)
             taken = MB.take_locks("cuda", [0, 1], "bench note", held_ok=True)

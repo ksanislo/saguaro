@@ -4,17 +4,17 @@
     python tools/maya_nightly.py --dry-run              # what it would do: no engine start, nothing written
     python tools/maya_nightly.py --once --only Inkling  # one model
 
-For each model in maya-nightly.json (the machine's own list, not in git):
+For each model in saguaro-nightly.json (the machine's own list, not in git):
   1. quiet check and locks - the machine has to be free (GPU, CPU load, heat flag, the GPU locks and the model's own
      extra locks); a model whose machine stays busy for "wait_min" minutes is skipped with BUSY: nothing is disturbed;
-  2. ./maya.sh --bench --compare <previous release tag> on this checkout (main): exactness first, then speed, with
+  2. ./saguaro.sh --bench --compare <previous release tag> on this checkout (main): exactness first, then speed, with
      the prompts cut from the release's docs (--bench-text-ref: the same prompts every night);
   3. the saved answers (tools/maya_golden.py --check) from the same run's tokens - no second engine start;
-  4. one line appended to maya-nightly-results.txt, and maya-nightly-status.txt rewritten: PASS, or what differs.
+  4. one line appended to saguaro-nightly-results.txt, and saguaro-nightly-status.txt rewritten: PASS, or what differs.
 The night's time budget is printed before the first model (its last run's time, else an estimate) and a model that
 no longer fits is skipped with SKIPPED, so a night never runs into the morning.
 
-maya-nightly.json (docs/RELEASE-CHECKS.md has an example):
+saguaro-nightly.json (docs/RELEASE-CHECKS.md has an example):
   {"base": "auto", "rounds": 2, "wait_min": 2, "slow_pct": 5, "budget_min": 20,
    "models": [{"name": "Inkling", "config": "maya-inkling-2-mini.json", "layout": "1x-v100-resident",
                "locks": ["~/hy4/locks/v100"]}]}
@@ -47,22 +47,22 @@ import maya_bench as MB  # noqa: E402
 import maya_golden as MG  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
-CONFIG = "maya-nightly.json"
-RESULTS = "maya-nightly-results.txt"
-STATUS = "maya-nightly-status.txt"
-RUN_LOCK = "maya-nightly.lock"
+CONFIG = "saguaro-nightly.json"
+RESULTS = "saguaro-nightly-results.txt"
+STATUS = "saguaro-nightly-status.txt"
+RUN_LOCK = "saguaro-nightly.lock"
 DEFAULTS = {"base": "auto", "rounds": 2, "wait_min": 2.0, "slow_pct": 5.0, "budget_min": 20.0, "est_min": 6.0}
 BAD = ("DIFF", "SLOW", "ERROR")          # a model's status words that make the night a FAIL
 
 
 # ------------------------------------------------------------------------------------------------ pure parts
 def load_plan(doc: dict, only=()) -> tuple:
-    """maya-nightly.json -> (settings, models); a model needs a name and a config."""
+    """saguaro-nightly.json -> (settings, models); a model needs a name and a config."""
     st = {k: doc.get(k, v) for k, v in DEFAULTS.items()}
     models = []
     for m in doc.get("models") or []:
         if not m.get("name") or not m.get("config"):
-            raise ValueError("maya-nightly.json: every model needs a name and a config")
+            raise ValueError("saguaro-nightly.json: every model needs a name and a config")
         if only and m["name"].lower() not in [x.lower() for x in only]:
             continue
         models.append(m)
@@ -144,7 +144,7 @@ def result_line(date, machine, m, commit, base, exact, speeds, golden_text, secs
 
 
 def status_text(date, machine, commit, base, rows, total_s: float) -> str:
-    """maya-nightly-status.txt: one headline, then a line a model.  rows: [(name, layout, status, why, secs)]."""
+    """saguaro-nightly-status.txt: one headline, then a line a model.  rows: [(name, layout, status, why, secs)]."""
     ran = [r for r in rows if r[2] not in ("BUSY", "SKIPPED")]
     head = "FAIL" if any(r[2] in BAD for r in rows) else "PASS" if ran and len(ran) == len(rows) else \
         "PARTIAL" if ran else "NOT RUN"
@@ -174,7 +174,7 @@ def base_ref(root: Path, want: str) -> str:
     if tag and git(root, "rev-parse", tag + "^{commit}") == git(root, "rev-parse", "HEAD"):
         tag = git(root, "describe", "--tags", "--abbrev=0", "--match", "v*", "HEAD^") or tag
     if not tag:
-        raise RuntimeError("no release tag found (git describe): give \"base\" in maya-nightly.json")
+        raise RuntimeError("no release tag found (git describe): give \"base\" in saguaro-nightly.json")
     return tag
 
 
@@ -256,15 +256,15 @@ def run_model(root: Path, m: dict, base: str, st: dict, say, bench=run_bench, bu
         why = busy(cfg, m)
     if why:
         return dict(out, status="BUSY", exact="-", why=why[:3], secs=time.time() - t)
-    note = f"maya nightly pid {os.getpid()} on {socket.gethostname()} {time.strftime('%Y-%m-%d %H:%M')} {m['name']}"
+    note = f"saguaro nightly pid {os.getpid()} on {socket.gethostname()} {time.strftime('%Y-%m-%d %H:%M')} {m['name']}"
     mine = []
     try:
         for p in extra_locks(cfg, m):
             Path(p).expanduser().write_text(note + "\n")
             mine.append(Path(p).expanduser())
         # (the run's tokens are kept beside its log: maya_golden --from-tokens can check or capture from them later)
-        tokens_file = root / f"maya-nightly-{MG.slug(m['name'])}.tokens.json"
-        log = root / f"maya-nightly-{MG.slug(m['name'])}.log"
+        tokens_file = root / f"saguaro-nightly-{MG.slug(m['name'])}.tokens.json"
+        log = root / f"saguaro-nightly-{MG.slug(m['name'])}.log"
         first_try = []
         for attempt in (1, 2):
             tokens_file.unlink(missing_ok=True)
@@ -308,7 +308,7 @@ def night(root: Path, doc: dict, say, only=(), dry=False, run=run_model) -> int:
     results = root / RESULTS
     old = results.read_text(encoding="utf-8", errors="replace").splitlines() if results.exists() else []
     rows_plan, total = budget(models, st, old, machine)
-    say(f"maya nightly: {machine}, {commit} against {base}, {len(models)} model(s)")
+    say(f"saguaro nightly: {machine}, {commit} against {base}, {len(models)} model(s)")
     for x in budget_lines(rows_plan, total, st):
         say(x)
     if dry:

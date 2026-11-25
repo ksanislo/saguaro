@@ -38,7 +38,7 @@ for line in sys.stdin:
     kind, source, output = parts
     number = struct.unpack("<I", Path(source).read_bytes()[-4:])[0]
     seen[number] = seen.get(number, 0) + 1
-    with open(os.environ["MAYA_TEST_ENCODER_TRACE"], "a") as trace:
+    with open(os.environ["SAGUARO_TEST_ENCODER_TRACE"], "a") as trace:
         trace.write(json.dumps({"kind": kind, "number": number}) + "\n")
     if 790000 <= number < 790100:
         time.sleep(0.05)
@@ -111,7 +111,7 @@ def main():
     encoder.write_text(ENCODER)
     trace = args.out / 'encoder-calls.jsonl'
     vision = Vision({'exe': sys.executable, 'mmproj': 'unused', 'model': 'unused'}, start=False,
-                    env={**os.environ, 'MAYA_TEST_ENCODER_TRACE': str(trace)})
+                    env={**os.environ, 'SAGUARO_TEST_ENCODER_TRACE': str(trace)})
     vision.args = [sys.executable, '-u', str(encoder)]
     vision._start()
     engine = CheckingEngine(tok, 'ok', max_context=262144)

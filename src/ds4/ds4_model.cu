@@ -9431,9 +9431,9 @@ struct Model::Impl {
                " dspark " + std::to_string((int) o.dspark) + " vision " + std::to_string((int) o.vision) + " share " +
                std::to_string((int) (o.vram_experts * 1000));
     }
-    static const char* late_fixed() {   // (MAYA_DS4_LATE_MB / DS4_LATE_MB, else every engine's MAYA_VRAM_LATE_MB)
+    static const char* late_fixed() {   // (SAGUARO_DS4_LATE_MB / DS4_LATE_MB, else every engine's SAGUARO_VRAM_LATE_MB)
         const char* v = ds4_env("DS4_LATE_MB");
-        return v != nullptr ? v : std::getenv("MAYA_VRAM_LATE_MB");
+        return v != nullptr ? v : std::getenv("SAGUARO_VRAM_LATE_MB");
     }
     void late_read() {
         const char* fixed = late_fixed();

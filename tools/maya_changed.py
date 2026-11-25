@@ -7,8 +7,8 @@ Every changed path is mapped to the engines (and their models) it can reach:
   - a file an engine is built from - the CMake target's sources, the libraries it links and every "#include" from
     there on (read from CMakeLists.txt and the sources, nothing listed by hand) - touches that engine;
   - a file in an engine's own folder (src/ik2 -> Inkling, src/hy4 -> Hy4, src/ds4 -> DeepSeek, src/mm3 -> MiniMax,
-    the GLM / Qwen engine's folders) touches it too, whatever the scan says;
-  - the build files, third_party, the server (serve/), maya.py and the setup, and tools the start imports touch all;
+    Qwen3.8-Flash-Next's engines/qfn folder) touches it too, whatever the scan says;
+  - the build files, third_party, the server (serve/), saguaro.py and the setup, and tools the start imports touch all;
   - a Python or data file named after one model (tools/hy4/..., serve/ds4_vision.py) touches that model;
   - tests, docs and CI files touch no model (the tests themselves are in the plan).
 The plan: FULL for the touched models (docs/RELEASE-CHECKS.md: --bench --compare and the saved answers on every
@@ -31,19 +31,21 @@ ROOT = Path(__file__).resolve().parents[1]
 # engine binary -> (its own source folders, the models it runs)
 ENGINES = {
     "maya": (("src/core", "src/program", "src/kernels", "src/prefill", "src/spec", "src/ngram", "src/plan",
-              "src/platform", "src/artifact"), ("GLM", "Qwen")),
+              "src/platform", "src/artifact"), ("GLM",)),
     "maya-ds4": (("src/ds4",), ("DeepSeek",)),
     "maya-mm3": (("src/mm3",), ("MiniMax",)),
     "maya-hy4": (("src/hy4",), ("Hy4",)),
-    "maya-ik2": (("src/ik2",), ("Inkling",)),
+    "saguaro-ik2": (("src/ik2",), ("Inkling",)),
+    "qfn_engine": (("engines/qfn",), ("Qwen",)),   # (saguaro-qfn: engines/qfn, Strata's own CMake project)
 }
 MODELS = tuple(m for _, ms in ENGINES.values() for m in ms)
 # how a file or folder name names a model: a word starting with one of these (tools/hy4/pack.py,
 # serve/ds4_vision.py, data/expert-profile-ik2mini.bin)
 NAME_TOKENS = (("DeepSeek", ("ds4", "deepseek")), ("MiniMax", ("mm3", "minimax")), ("Hy4", ("hy4",)),
-               ("Inkling", ("ik2", "inkling")), ("Qwen", ("qwen",)), ("GLM", ("glm",)))
+               ("Inkling", ("ik2", "inkling")), ("Qwen", ("qwen", "qfn")), ("GLM", ("glm",)))
 # what every model's start runs through
-ALL_FILES = ("maya.py", "setup.py", "chat.py", "maya.sh", "setup.sh", "START-MAYA.bat", "CMakeLists.txt", "VERSION")
+ALL_FILES = ("saguaro.py", "setup.py", "chat.py", "saguaro.sh", "setup.sh", "START-SAGUARO.bat", "CMakeLists.txt",
+             "VERSION")
 ALL_DIRS = ("cmake/", "third_party/", "serve/", "tools/", "include/", "src/", "data/")
 NO_MODEL_DIRS = ("docs/", "assets/", "ref/", "bench/", "docker/", ".github/")
 # this pipeline's own tools: no engine start reads them
@@ -171,6 +173,9 @@ def classify(path: str, built: dict) -> tuple:
     if p.startswith(NO_MODEL_DIRS) or (("/" not in p) and (name.endswith(".md") or name.startswith("LICENSE")
                                                              or name.startswith("."))):
         return [], "none", []
+    if p.startswith("engines/"):                 # (saguaro-qfn's own tree: its build is the external project's)
+        ms = named_models(p)
+        return (ms or ["Qwen"]), "engine", ["qfn_engine"] if "qfn" in p else []
     if p.startswith(("src/", "include/")):
         engines = [e for e, files in built.items() if p in files]
         engines += [e for e, (dirs, _) in ENGINES.items() if p.startswith(tuple(d + "/" for d in dirs))

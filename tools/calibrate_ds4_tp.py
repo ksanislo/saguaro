@@ -144,7 +144,7 @@ def prompt_ids(cfg: dict) -> tuple[list[list[int]], list[int]]:
 
 def read_rate(eng, ids: list[int]) -> float:
     """tok/s of reading `ids` (one token answered).  0.0 = not measured, never "slow": the engine answered from a
-    conversation it had kept (MAYA_DS4_SLOT_KEEP: 1 new token read in 60 ms was 17 tok/s, #1203), or gave no time."""
+    conversation it had kept (SAGUARO_DS4_SLOT_KEEP: 1 new token read in 60 ms was 17 tok/s, #1203), or gave no time."""
     import threading
     for _ in eng.generate(ids, 1, {"temperature": 0}, threading.Event()):
         pass
@@ -229,12 +229,12 @@ def run(cfg: dict, vram: list[float], say=print, start_engine=None) -> dict:
             return StrataEngine(c["exe"], engine_args(c), cwd=c.get("cwd"), log=c.get("log"), env=child_env(c))
     short, long_ids = prompt_ids(cfg)
     with tempfile.TemporaryDirectory(prefix="maya-calibrate-ds4-") as tmp:
-        # (no conversations kept aside, none read back: with MAYA_DS4_SLOT_KEEP a start took its earlier answer's state
+        # (no conversations kept aside, none read back: with SAGUARO_DS4_SLOT_KEEP a start took its earlier answer's state
         # and read 1 new token, so the long prompt looked slow and the right layout lost (#1203); a throw-away folder
         # too, so the calibration's conversations never push out this PC's own)
         base = {**cfg, "args": CAL.without_writes(list(cfg.get("args") or [])),
-                "env": {**(cfg.get("env") or {}), "MAYA_DS4_SLOT_KEEP": "0",
-                        "MAYA_DS4_SLOT_DIR": str(Path(tmp) / "slots")}}
+                "env": {**(cfg.get("env") or {}), "SAGUARO_DS4_SLOT_KEEP": "0",
+                        "SAGUARO_DS4_SLOT_DIR": str(Path(tmp) / "slots")}}
         return measure(base, vram, short, long_ids, start_engine, say, profile_copy(base["args"], Path(tmp)))
 
 

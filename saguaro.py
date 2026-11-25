@@ -2322,7 +2322,7 @@ def cmake_steps(conf, build, env, bat_name: str, vcvars=None, nvcc=None, what="t
     compiler's environment - the way Strata's setup.py builds there (cmake_build).  `nvcc` says which toolkit the
     CUDA build uses: its release decides whether a VS 2026-only PC is usable (S.find_vcvars).
     The screen gets ONE line for the step (`what`: files done, time so far); the tools' own output goes to `log` in
-    the install folder, whose last lines are printed when the step stops (S.BuildLog).  MAYA_BUILD_OUTPUT=full, or
+    the install folder, whose last lines are printed when the step stops (S.BuildLog).  SAGUARO_BUILD_OUTPUT=full, or
     --full-build-output: every line on the screen as it comes, no log."""
     full = S.full_build_output()
     bat = None
@@ -5580,7 +5580,7 @@ def bench_compare(cfg, cfg_path, spec, rounds, here, start, chats, prompts, warm
     learned = MB.LearnedState(ROOT, cfg, work / "learned-snapshot")
     runs = {"this": [], "other": []}
     try:
-        if "MAYA_GLM_CPU_CAL" in SV.child_env(cfg):
+        if "SAGUARO_GLM_CPU_CAL" in SV.child_env(cfg):
             # GLM times its CPU lane on a build's first start and keeps it, each build under its own compile stamp: a
             # first round that times it live (colder, noisier) differs from the rounds that read it back - and the two
             # builds time apart.  One priming start a build, the other build then reading this one's values, and every
@@ -9187,7 +9187,7 @@ def main() -> int:
     ap.add_argument("--rebuild", action="store_true", help="compile the engine again")
     ap.add_argument("--full-build-output", action="store_true",
                     help="every line of the compilers on the screen (default: one progress line per compile step, "
-                         "the rest in build-engine.log / build-vision.log; MAYA_BUILD_OUTPUT=full does the same)")
+                         "the rest in build-engine.log / build-vision.log; SAGUARO_BUILD_OUTPUT=full does the same)")
     ap.add_argument("--repack", action="store_true", help="build the pack again")
     ap.add_argument("--report", action="store_true", help="write saguaro-report.txt - this PC, the setup and the engine's "
                                                           "speed lines - to attach when you report a problem or a "
@@ -9201,7 +9201,7 @@ def main() -> int:
                                                        "learned files, alternated; exactness first, then the speed")
     ap.add_argument("--bench-rounds", type=int, default=2, help="--bench --compare: rounds a build (default 2)")
     ap.add_argument("--bench-lock-ok", action="store_true", help="--bench: accept a GPU lock that is already held "
-                    "(one you took by hand for this run; also MAYA_BENCH_LOCK_OK=1) - by default a held lock stops "
+                    "(one you took by hand for this run; also SAGUARO_BENCH_LOCK_OK=1) - by default a held lock stops "
                     "the benchmark")
     ap.add_argument("--bench-tokens", type=Path, metavar="FILE", help="--bench: also write every request's greedy "
                     "tokens to this JSON file (tools/maya_golden.py: saved answers)")
@@ -9231,7 +9231,7 @@ def main() -> int:
                                               "for --bench or --report (default: most recently used)")
     a = ap.parse_args()
     if a.full_build_output:
-        os.environ["MAYA_BUILD_OUTPUT"] = "full"
+        os.environ["SAGUARO_BUILD_OUTPUT"] = "full"
     why = model_option(a)
     if why:
         ap.error(why)

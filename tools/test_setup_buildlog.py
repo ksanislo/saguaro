@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """The setup's compile steps print ONE line each: the compilers' output goes to a log in the install folder, whose
-last lines are shown when a step stops (setup.BuildLog, maya.cmake_steps).  MAYA_BUILD_OUTPUT=full: as before."""
+last lines are shown when a step stops (setup.BuildLog, maya.cmake_steps).  SAGUARO_BUILD_OUTPUT=full: as before."""
 import io
 import os
 import sys
@@ -30,7 +30,7 @@ class BuildLogLines(unittest.TestCase):
     def run_steps(self, cmds, env=None):
         with tempfile.TemporaryDirectory() as t, patch.object(maya, "ROOT", Path(t)), patch.object(maya, "WIN", False), \
                 patch.dict(os.environ, env or {}), redirect_stdout(io.StringIO()) as out:
-            os.environ.pop("MAYA_BUILD_OUTPUT", None) if env is None else None
+            os.environ.pop("SAGUARO_BUILD_OUTPUT", None) if env is None else None
             stopped = maya.cmake_steps(cmds[0], cmds[1], None, "", what="the picture reader", log="build-vision.log")
             log = (Path(t) / "build-vision.log")
             return stopped, out.getvalue(), log.read_text(encoding="utf-8") if log.exists() else None, str(log)
@@ -66,7 +66,7 @@ class BuildLogLines(unittest.TestCase):
 
     def test_full_output_as_before(self):
         stopped, shown, log, _ = self.run_steps([py("print('configured')"), py("print('[1/1] Building x.o')")],
-                                                env={"MAYA_BUILD_OUTPUT": "full"})
+                                                env={"SAGUARO_BUILD_OUTPUT": "full"})
         self.assertIsNone(stopped)
         self.assertIsNone(log)
         self.assertIn("  > ", shown)                               # (the commands, echoed as before)

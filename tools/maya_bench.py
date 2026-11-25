@@ -352,9 +352,9 @@ def on_windows() -> bool:
 
 
 def lock_ok_asked(flag: bool = False) -> bool:
-    """--bench-lock-ok, or MAYA_BENCH_LOCK_OK=1: a GPU lock that is already held (taken by hand for this run) is
+    """--bench-lock-ok, or SAGUARO_BENCH_LOCK_OK=1: a GPU lock that is already held (taken by hand for this run) is
     accepted - the run neither takes nor releases it.  Default: strict, a held lock stops the benchmark."""
-    return bool(flag) or os.environ.get("MAYA_BENCH_LOCK_OK", "").strip().lower() in ("1", "true", "yes", "on")
+    return bool(flag) or os.environ.get("SAGUARO_BENCH_LOCK_OK", "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def machine_quiet(backend: str, gpus, lock_note="", lock_ok: bool = False) -> list:

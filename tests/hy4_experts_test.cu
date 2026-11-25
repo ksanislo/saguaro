@@ -515,7 +515,7 @@ void mv_columns(int type, std::mt19937& rng) {
     cudaFree(dd);
 }
 
-// mv_heads's short-row form (MAYA_IQ_MV_RW: heads of at most 16 sub-blocks a row, 2 or 4 rows a warp) against its
+// mv_heads's short-row form (SAGUARO_IQ_MV_RW: heads of at most 16 sub-blocks a row, 2 or 4 rows a warp) against its
 // one-row-a-warp form: the same bits, in the types and row lengths Hy4's attention heads take (and a row count that
 // leaves the one-row form)
 void mv_heads_rows(int type, std::mt19937& rng) {
@@ -591,7 +591,7 @@ void mv_heads_rows(int type, std::mt19937& rng) {
     }
 }
 
-// HY4_MV_BENCH=1: mv_heads's time a launch, rows packed (MAYA_IQ_MV_RW) vs one a warp, in turns, at Hy4's attention
+// HY4_MV_BENCH=1: mv_heads's time a launch, rows packed (SAGUARO_IQ_MV_RW) vs one a warp, in turns, at Hy4's attention
 // head shapes (k_b: k = nope, n = kv_lora; v_b: k = kv_lora, n = v_mla; a tensor-parallel member's heads), with the
 // two forms' outputs compared.  HY4_MV_BENCH_SHAPES="type:k:n:H ..." (type 8 = Q8_0, 6 = Q6_K) replaces the shapes
 void mv_heads_bench() {
@@ -788,7 +788,7 @@ int main() {
                 for (int T : {1, 5}) run_case(tt[0], tt[1], 24, T, rng, F);
     }
     // attention heads' short rows (Q8_0, Q6_K): packed a few a warp or one a warp, the same bits
-    std::printf("  mv_heads short rows packed on this GPU (MAYA_IQ_MV_RW, default on with gfx1100): %s\n",
+    std::printf("  mv_heads short rows packed on this GPU (SAGUARO_IQ_MV_RW, default on with gfx1100): %s\n",
                 iq::mv_rows_on() ? "on" : "off");
     for (int ty : {iq::kQ8_0, iq::kQ6_K}) {
         std::mt19937 rng2(7);

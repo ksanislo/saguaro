@@ -378,14 +378,14 @@ class Config(unittest.TestCase):
             pc = {"backend": "hip", "gpus": [{"arch": "gfx1100", "name": "Radeon RX 7900 XTX", "vram_gb": 24, "index": 0}]}
             p = maya.write_config_ds4(args(**kw), pc, {}, Path("/m/G/maya-ds4"), 65536, Path("/models"), Path("/m/G"),
                                       "maya-s")
-            return (json.loads(p.read_text()).get("env") or {}).get("MAYA_VRAM_RESERVE_SETUP_MB")
+            return (json.loads(p.read_text()).get("env") or {}).get("SAGUARO_VRAM_RESERVE_SETUP_MB")
         self.assertEqual(env(), "3072")                                            # (written by the setup: marked)
         self.assertEqual(env(vram_reserve_mib=3072), "0")                          # (the user's, even the same figure)
         self.assertEqual(env({"args": ["--reserve-mib", "3072"]}), "3072")         # (a v1.1.75 config: the setup's)
         self.assertIsNone(env({"args": ["--reserve-mib", "1024"]}))                # (set by hand: the user's)
-        self.assertEqual(env({"args": ["--reserve-mib", "3072"], "env": {"MAYA_VRAM_RESERVE_SETUP_MB": "0"}}), "0")
+        self.assertEqual(env({"args": ["--reserve-mib", "3072"], "env": {"SAGUARO_VRAM_RESERVE_SETUP_MB": "0"}}), "0")
         p, c = self.write(args(vram_reserve_mib=900))                              # (NVIDIA: no line)
-        self.assertNotIn("MAYA_VRAM_RESERVE_SETUP_MB", c.get("env") or {})
+        self.assertNotIn("SAGUARO_VRAM_RESERVE_SETUP_MB", c.get("env") or {})
 
 
 class Calibrate(unittest.TestCase):

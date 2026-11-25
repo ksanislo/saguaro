@@ -60,7 +60,7 @@ class RealTree(unittest.TestCase):
         b = built()
         for e, main in {"maya": "src/program/generate.cpp", "maya-ds4": "src/ds4/ds4_main.cpp",
                         "maya-mm3": "src/mm3/mm3_main.cpp", "maya-hy4": "src/hy4/hy4_main.cpp",
-                        "maya-ik2": "src/ik2/ik2_main.cu"}.items():
+                        "saguaro-ik2": "src/ik2/ik2_main.cu"}.items():
             self.assertIn(main, b[e], e)
             self.assertGreater(len(b[e]), 20, e)
 
@@ -70,7 +70,7 @@ class RealTree(unittest.TestCase):
         self.assertEqual(C.classify("src/ds4/ds4_model.cu", b)[0], ["DeepSeek"])
         self.assertEqual(C.classify("src/mm3/mm3_main.cpp", b)[0], ["MiniMax"])
         self.assertEqual(C.classify("src/hy4/hy4_main.cpp", b)[0], ["Hy4"])
-        self.assertEqual(C.classify("src/core/glm_model.cu", b)[0], ["GLM", "Qwen"])
+        self.assertEqual(C.classify("src/core/glm_model.cu", b)[0], ["GLM"])
         for e, (dirs, models) in C.ENGINES.items():       # (a new file in an engine's folder: its engine at least)
             got = C.classify(dirs[0] + "/brand_new_file.cpp", b)
             self.assertTrue(set(models) <= set(got[0]) and e in got[2], e)
@@ -79,11 +79,12 @@ class RealTree(unittest.TestCase):
         b = built()
         self.assertEqual(set(C.classify("src/hy4/hy4_lane.cpp", b)[0]), {"Hy4", "Inkling"})    # maya-ik2's CPU lane
         self.assertLessEqual({"DeepSeek", "MiniMax", "Hy4"}, set(C.classify("src/ds4/ds4_os.hpp", b)[0]))
-        self.assertLessEqual({"DeepSeek", "Hy4", "Inkling"}, set(C.classify("src/ds4/ds4_iq_cpu.cpp", b)[0]))
+        # (ours: saguaro-hy4 and saguaro-ik2 build their IQ CPU rows from their own src/hy4/ds4 copy)
+        self.assertLessEqual({"DeepSeek", "MiniMax"}, set(C.classify("src/ds4/ds4_iq_cpu.cpp", b)[0]))
 
     def test_shared_python_and_build_files_touch_all(self):
         b = built()
-        for p in ("serve/server.py", "maya.py", "tools/maya_bench.py", "CMakeLists.txt", "cmake/build_id.cmake",
+        for p in ("serve/server.py", "saguaro.py", "tools/maya_bench.py", "CMakeLists.txt", "cmake/build_id.cmake",
                   "third_party/ggml/x.h", "some/new/place.bin"):
             self.assertEqual(C.classify(p, b)[0], list(C.MODELS), p)
         self.assertEqual(C.classify("CMakeLists.txt", b)[2], list(C.ENGINES))
@@ -109,14 +110,14 @@ class Plan(unittest.TestCase):
     def test_one_engine_change(self):
         pl = C.plan(["src/ik2/ik2_main.cu", "docs/INKLING2.md", "tests/ds4_pcie_test.cpp"], built())
         self.assertEqual(list(pl["full"]), ["Inkling"])
-        self.assertEqual(pl["smoke"], ["GLM", "Qwen", "DeepSeek", "MiniMax", "Hy4"])
-        self.assertEqual(pl["builds"], ["maya-ik2"])
+        self.assertEqual(pl["smoke"], ["GLM", "DeepSeek", "MiniMax", "Hy4", "Qwen"])
+        self.assertEqual(pl["builds"], ["saguaro-ik2"])
         self.assertEqual(pl["cpp_tests"], ["tests/ds4_pcie_test.cpp"])
         self.assertTrue(any("--bench-text-ref" in n for n in pl["notes"]))
         text = "\n".join(C.plan_text(pl, "v1.1.76"))
-        self.assertIn("FULL   Inkling   (maya-ik2): src/ik2/ik2_main.cu", text)
+        self.assertIn("FULL   Inkling   (saguaro-ik2): src/ik2/ik2_main.cu", text)
         self.assertIn("SMOKE  Hy4", text)
-        self.assertIn("build: maya-ik2", text)
+        self.assertIn("build: saguaro-ik2", text)
         self.assertIn("unittest discover -s serve", text)
 
     def test_docs_only_builds_nothing(self):

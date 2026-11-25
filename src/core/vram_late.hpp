@@ -33,10 +33,10 @@ constexpr size_t kCap = (size_t) 1024 << 20;
 inline size_t cap_of(size_t tot) { return std::min(kCap, tot / 4); }
 /// the line every engine prints once a GPU when it keeps more than the reserve free: the reason and the switch
 inline std::string why(bool fixed, bool given) {
-    return fixed ? std::string(" (MAYA_VRAM_LATE_MB)")
+    return fixed ? std::string(" (SAGUARO_VRAM_LATE_MB)")
                  : std::string(" (measured on this PC: the start and the requests allocate that much after the memory "
                                "plan") + (given ? ", so the reserve itself stays free" : ", more than the default reserve holds") +
-                       "; MAYA_VRAM_LATE_MB=0 turns this off)";
+                       "; SAGUARO_VRAM_LATE_MB=0 turns this off)";
 }
 
 /// the file's figure for `key` ("": none); the file: a line a key, "key<TAB>value"
@@ -97,11 +97,11 @@ inline int64_t fixed_of(const char* env) {
 }
 
 /// (#1156) whether a reserve of `res` bytes is the SETUP's own: on an AMD GPU the setup writes a reserve by itself (the
-/// desktop allocates beside the engine) and says so in the config's environment (MAYA_VRAM_RESERVE_SETUP_MB=<MiB>).
+/// desktop allocates beside the engine) and says so in the config's environment (SAGUARO_VRAM_RESERVE_SETUP_MB=<MiB>).
 /// Such a reserve is the default one, not asked for: the default rule holds beside it (kept_for).  A reserve the user
 /// set - another figure, or the setup's line gone / 0 - is asked for
 inline bool setup_wrote(size_t res) {
-    const char* v = std::getenv("MAYA_VRAM_RESERVE_SETUP_MB");
+    const char* v = std::getenv("SAGUARO_VRAM_RESERVE_SETUP_MB");
     if (v == nullptr || !v[0]) return false;
     const long long m = std::atoll(v), d = (m << 20) - (long long) res;
     return m > 0 && std::llabs(d) < ((long long) 2 << 20);

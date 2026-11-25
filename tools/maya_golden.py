@@ -4,7 +4,7 @@
     python tools/maya_golden.py --config maya-<model>.json --check                         # a build against them
     python tools/maya_golden.py --list
 
-A capture runs ./maya.sh --bench once (its quiet-machine check, GPU lock and warm-up included) with --bench-tokens,
+A capture runs ./saguaro.sh --bench once (its quiet-machine check, GPU lock and warm-up included) with --bench-tokens,
 and stores every request's answer - the token ids, their hash and the first words as text - in
 data/golden/<machine>/<model>-<layout>.json: one small file per model and layout, written on the machine that ran it
 (nothing is shipped for a machine that is not ours; the folder is not in git).  --check runs the same requests on the
@@ -200,9 +200,9 @@ def golden_dir(root: Path = ROOT) -> Path:
 
 def bench_command(root: Path, config: Path, tokens_file: Path, text_ref: str = "", compare: str = "",
                   rounds: int = 2, wait_min: float = 10.0, smoke: bool = False) -> list:
-    """The --bench run that writes a tokens file (this Python, this folder's maya.py).  smoke: the short run
+    """The --bench run that writes a tokens file (this Python, this folder's saguaro.py).  smoke: the short run
     (--bench-smoke: two short answers, no 2K / 8K prompts, no other build)."""
-    cmd = [sys.executable, str(root / "maya.py"), "--config", str(config), "--bench", "--bench-tokens",
+    cmd = [sys.executable, str(root / "saguaro.py"), "--config", str(config), "--bench", "--bench-tokens",
            str(tokens_file), "--bench-wait", f"{wait_min:g}"]
     if smoke:
         return cmd + ["--bench-smoke"]

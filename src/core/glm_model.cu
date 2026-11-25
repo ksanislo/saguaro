@@ -2881,7 +2881,7 @@ void maya::core::Glm5Model::pack_release_views() {
     // Linux (#1182): the load's reads left every page of the shards mapped, and they stay charged to the process's
     // memory cgroup for the engine's life (13 GiB for the full GLM-5.3).  The fast path reads experts with pread
     // (fd_direct, else fd), so the mappings go as on Windows; token_embd moves to the heap first.
-    const char* km = getenv("MAYA_GLM_KEEP_MAP");
+    const char* km = getenv("SAGUARO_GLM_KEEP_MAP");
     if (km != nullptr && std::atoi(km) != 0) return;
     for (const Shard& s : pack_shards_)
         if (s.base != nullptr && s.fd < 0) return;

@@ -194,7 +194,7 @@ class Measure(unittest.TestCase):
 
 
 class ReadRate(unittest.TestCase):
-    """#1203: a long prompt taken back from a kept conversation (MAYA_DS4_SLOT_KEEP) is not a reading of the prompt."""
+    """#1203: a long prompt taken back from a kept conversation (SAGUARO_DS4_SLOT_KEEP) is not a reading of the prompt."""
 
     class Eng:
         def __init__(self, last):
@@ -227,8 +227,8 @@ class ReadRate(unittest.TestCase):
         with self.assertRaises(Exception):
             C4.run({"args": ["--pack", "/m", "--tp", "2"], "env": {"X": "1"}}, NINE, say=lambda *a: None, start_engine=start)
         self.assertTrue(seen)
-        self.assertEqual(seen[0]["MAYA_DS4_SLOT_KEEP"], "0")
-        self.assertIn("MAYA_DS4_SLOT_DIR", seen[0])
+        self.assertEqual(seen[0]["SAGUARO_DS4_SLOT_KEEP"], "0")
+        self.assertIn("SAGUARO_DS4_SLOT_DIR", seen[0])
         self.assertEqual(seen[0]["X"], "1")
 
 

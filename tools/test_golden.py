@@ -19,7 +19,7 @@ CFG = {"args": ["--model", "/m/x.gguf", "--max-context", "32768"], "env": {"IK2_
 
 
 def tokens(**over):
-    """A --bench-tokens file as maya.py writes it (short answers)."""
+    """A --bench-tokens file as saguaro.py writes it (short answers)."""
     run = {"warm-up": [5, 6, 7], "decode 1": list(range(100, 140)), "decode 2": list(range(200, 240)),
            "prompt 2K #1": [9], "prompt 8K #1": [11]}
     t = {"machine": "box", "gpus": "Tesla V100-PCIE-32GB", "driver": "595.1", "model": "Inkling-2 Mini UD-Q4_K_XL",
@@ -91,7 +91,7 @@ class Locks(unittest.TestCase):
     def test_two_runs_that_found_it_quiet_together_do_not_both_get_a_gpu(self):
         import os
         from unittest.mock import patch
-        with tempfile.TemporaryDirectory() as d, patch.dict(os.environ, {"MAYA_GPU_LOCKS": d}), \
+        with tempfile.TemporaryDirectory() as d, patch.dict(os.environ, {"SAGUARO_GPU_LOCKS": d}), \
                 patch.object(MB, "LOCK_DIRS", ()):
             a = MB.take_locks("cuda", [0, 1], "run A")
             self.assertEqual([p.name for p in a], ["gpu0", "gpu1"])
