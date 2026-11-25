@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))   # (the tool sits beside this test: importable as tools.test_* too)
 from refresh_ds4_profile import MAX_COUNT, read_counts, refresh
 
 
