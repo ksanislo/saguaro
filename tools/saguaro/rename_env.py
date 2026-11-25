@@ -30,11 +30,14 @@ import re
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import rename_rules as T                          # the shared rule table (rename_rules.py)
+
 ROOT = Path(__file__).resolve().parents[2]
-NEW = "SAGUARO_"
-OLD_P = ("MAYA", "STRATA")                       # split up so scanning this file finds no complete old name
-NAME = re.compile(r"\b(" + "|".join(OLD_P) + r")_([A-Z0-9_]+)\b")
-HAS_SAGUARO = re.compile(r"\b" + "SAGUARO" + r"_([A-Z0-9_]+)\b")
+NEW = T.NEW
+OLD_P = T.OLD_ENV                                  # split up in the table, so scans find no complete old name
+NAME = T.NAME
+HAS_SAGUARO = T.HAS_SAGUARO
 
 SKIP_DIR_NAMES = {".git", "third_party", "node_modules", "__pycache__", ".venv", "venv", ".mypy_cache", ".scons"}
 SKIP_DIR_RE = re.compile(r"^(build[^/\\]*|.*-build|cmake-build.*)$", re.I)
@@ -52,10 +55,8 @@ SHELL_SUFFIXES = {".sh", ".bash", ".zsh", ".bat", ".cmd", ".ps1"}
 SPECIAL_DOC_NAMES = set()
 SHELL_NAMES = {"Dockerfile", "Containerfile"}
 
-# not settings, and not recognised as words automatically because a script or a config spells them anyway: a usage
-# example's placeholder for the metal engine's binary, and the hip build scripts' name for the CMake variable and the
-# C++ macro of that name (cmake/hip_backend.cmake compiles it in - device.cu's #error names the MACRO, not a setting).
-ALLOW = {"MAYA_METAL", "MAYA_USE_HIP", "STRATA_USE_HIP", "STRATA_HIP_ARCHS", "MAYA_HIP_ARCHS", "STRATA_VISION_HIP_ARCHS", "MAYA_VISION_HIP_ARCHS"}
+# the explicit allowlist (words that stay though a script or a config spells them) lives in the shared table
+ALLOW = T.ALLOW
 
 KEYWORD = re.compile(r"[(,{][\s]*\Z")                                    # kwarg / object-key position
 ENV_ACCESS = re.compile(r"[\w$]*(?:env|environ)\??\.\Z", re.I)           # process.env.X, env?.X, baseEnv.X, environ.X
@@ -288,13 +289,10 @@ BARE_NAME = re.compile(r"([\x27\x22])([A-Z][A-Z0-9_]{2,})\1")
 ENV_DIRECT = re.compile(r"(?i)(?:\w*env\w*|environ\.get|environ|getenv\w*|setenv|putenv_s|--env|ENVIRONMENT)[\s]*[\(\[]?\s*$")
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--check", action="store_true", help="change nothing; exit 1 if a renameable setting name is left")
-    ap.add_argument("paths", nargs="*", default=None)
-    a = ap.parse_args()
-    roots = [Path(x).resolve() for x in (a.paths or [ROOT])]
-    files = collect(roots)
+def plan(files: dict):
+    """the whole decision pass over {rel: (path, family, text, bom)} (collect()'s shape, or a caller's own
+    in-memory texts): returns (renames, collisions, allow_hits, kept_words, names, merged, both).  Shared with
+    tools/saguaro/rename_upstream.py, which feeds it the tree after the internal rename."""
     strong, existing, regs = set(), {}, {}
     for rel, (p, fam, text, bom) in files.items():
         reg = regs[rel] = regs_for(fam, text)
@@ -334,6 +332,25 @@ def main() -> int:
         for (s, e, old, suf, ok, where) in oc:
             both.setdefault(suf, set()).add(old.split("_")[0])
     merged = sorted(s for s, ps in both.items() if len(ps) == 2 and ("MAYA_" + s in strong or "STRATA_" + s in strong))
+    return renames, collisions, allow_hits, kept_words, names, merged, both
+
+
+def apply(text: str, oc: list) -> str:
+    """rewrite one file's text at the spans plan() found: OLD_X -> SAGUARO_<suffix>"""
+    out, last = [], 0
+    for (s, e, old, suf) in oc:
+        out.append(text[last:s]); out.append(NEW + suf); last = e
+    out.append(text[last:])
+    return "".join(out)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--check", action="store_true", help="change nothing; exit 1 if a renameable setting name is left")
+    ap.add_argument("paths", nargs="*", default=None)
+    a = ap.parse_args()
+    files = collect([Path(x).resolve() for x in (a.paths or [ROOT])])
+    renames, collisions, allow_hits, kept_words, names, merged, both = plan(files)
 
     print(f"rename_env: {sum(len(v) for v in renames.values())} uses of {len(names)} settings -> SAGUARO_* in "
           f"{len(renames)} files")
@@ -363,11 +380,7 @@ def main() -> int:
     written = 0
     for rel, oc in renames.items():
         p, fam, text, bom = files[rel]
-        out, last = [], 0
-        for (s, e, old, suf) in oc:
-            out.append(text[last:s]); out.append(NEW + suf); last = e
-        out.append(text[last:])
-        p.write_bytes((b"\xef\xbb\xbf" if bom else b"") + "".join(out).encode("utf-8"))
+        p.write_bytes((b"\xef\xbb\xbf" if bom else b"") + apply(text, oc).encode("utf-8"))
         written += 1
     print(f"applied: rewrote {written} files")
     return 0
