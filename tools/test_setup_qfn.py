@@ -1835,7 +1835,7 @@ class SetupFlow(unittest.TestCase):
     """set_up_qfn with the machine, the build and the downloads stepped around: what the choices write - and,
     v1.2.1-B, what a slow PC gets: the scaled config, the loud warning, the one confirmation question."""
 
-    def flow(self, t: Path, a, vision=None, mtp=True, pc=None, mem=(91.7, 80.0), out=None):
+    def flow(self, t: Path, a, vision=None, mtp=True, pc=None, mem=(91.7, 80.0), out=None, prev=None):
         eng = t / "build" / "qfn"
         eng.mkdir(parents=True)
         (eng / "saguaro-qfn").write_text("")
@@ -1853,7 +1853,7 @@ class SetupFlow(unittest.TestCase):
                              else None), \
                 patch.object(maya, "write_run_script", return_value=t / "run.sh"), \
                 patch("sys.stdout", new=out or io.StringIO()), patch.object(maya.S, "UI", None):
-            return maya.set_up_qfn(a, {})
+            return maya.set_up_qfn(a, prev or {})
 
     def setup(self, t: Path, **kw):
         vision = kw.pop("_vision", None)
@@ -1861,9 +1861,10 @@ class SetupFlow(unittest.TestCase):
         pc = kw.pop("_pc", None)
         mem = kw.pop("_mem", (91.7, 80.0))
         out = kw.pop("_out", None)
+        prev = kw.pop("_prev", None)
         kw.setdefault("context", 65536)
         a = args(qfn_quant="ud-q4_k_xl", models_dir=t / "models", **kw)
-        p = self.flow(t, a, vision=vision, mtp=not nomtp, pc=pc, mem=mem, out=out)
+        p = self.flow(t, a, vision=vision, mtp=not nomtp, pc=pc, mem=mem, out=out, prev=prev)
         return json.loads(p.read_text())
 
     def test_drafting_off_is_the_mtp_max_t_arg(self):
@@ -2085,6 +2086,107 @@ class LongContextC18(SetupFlow):
         said = out.getvalue()
         self.assertIn("whole 64K steps", said)
         self.assertIn("524288", said)
+
+
+class AnswersAtOnceC18(SetupFlow):
+    """C18 step 2: the setup asks "answers at once" right after the context - the layout's default pre-set
+    (1 on one card, 2 on a split, a config written before keeps its value on a split), 1 to 8, and a given
+    --parallel N is not asked - and states one combined cost line (context x answers: 1M x 2 = about 27 GB
+    of pinned RAM) with the RAM and memlock cross-checks: warn on a tight box, refuse only what cannot fit."""
+
+    def asked(self, t: Path, **kw):
+        seen = []
+
+        def answer(q, ch, dflt, yes):
+            seen.append((q, tuple(ch), dflt))
+            return dflt
+        with cpu(), patch.object(maya, "ask", side_effect=answer):
+            cfg = self.setup(t, **kw)
+        return cfg, [s for s in seen if "Answers at once" in s[0]]
+
+    def test_the_question_after_the_context(self):
+        with tempfile.TemporaryDirectory() as t:
+            cfg, asked = self.asked(Path(t), context=65536, yes=False)
+        self.assertEqual(len(asked), 1)
+        self.assertEqual(asked[0][1], tuple(str(i) for i in range(1, 9)))    # (1 to 8)
+        self.assertEqual(asked[0][2], "1")                                   # (the one card: 1, as today)
+        self.assertIsNone(cfg.get("parallel"))
+
+    def test_the_split_default_is_two_and_a_config_before_keeps_its_value(self):
+        two = {"backend": "cuda", "gpus": [{"index": 0, "name": "Tesla T4", "vram_gb": 15.0, "arch": "75",
+                                            "display": False},
+                                           {"index": 1, "name": "Tesla T4", "vram_gb": 15.0, "arch": "75",
+                                            "display": False}]}
+        with tempfile.TemporaryDirectory() as t:
+            cfg, asked = self.asked(Path(t), context=65536, yes=False, _pc=two)
+        self.assertEqual(asked[0][2], "2")                                   # (a split: 2, as the live boxes)
+        self.assertEqual(cfg["parallel"], 2)
+        with tempfile.TemporaryDirectory() as t:                             # (a setup again: the value a
+            cfg, asked = self.asked(Path(t), context=65536, yes=False, _pc=two,   #  config wrote before is
+                                    _prev={"parallel": 5})                   #   the default on a split)
+        self.assertEqual(asked[0][2], "5")
+        self.assertEqual(cfg["parallel"], 5)
+
+    def test_parallel_given_is_not_asked(self):
+        with tempfile.TemporaryDirectory() as t:
+            cfg, asked = self.asked(Path(t), context=65536, parallel=4, yes=False)
+        self.assertEqual(asked, [])                                          # (--parallel N: not asked)
+        self.assertEqual(cfg["parallel"], 4)
+
+    def test_the_combined_cost_line(self):
+        """The one line beside the questions: 12.7 KB a token a conversation, context x answers - Ken's
+        1M x 2 = about 27 GB, and the newest 32K of each conversation on the cards too."""
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as t:
+            self.setup(Path(t), context=1048576, parallel=2, _out=out)
+        line = [ln for ln in out.getvalue().splitlines() if "the cost:" in ln]
+        self.assertEqual(len(line), 1)
+        self.assertIn("12.7 KB of K/V a context token a conversation in INT8", line[0])
+        self.assertIn("1M x 2 = about 27 GB", line[0])
+        self.assertIn("32K of each conversation on the cards too", line[0])
+
+    def test_a_ram_poor_box_gets_the_warning_not_a_refusal(self):
+        """64 GB with 1M x 2: about 27 GB of K/V beside the 44 GiB expert tier - warn, and the config is
+        still written (the plan: warn+confirm, not refuse - v1.2.1-B's own rule for the layout)."""
+        said = []
+        with tempfile.TemporaryDirectory() as t, cpu(), \
+                patch.object(maya, "warn", side_effect=lambda *x: said.append(" ".join(map(str, x)))):
+            cfg = self.setup(Path(t), context=1048576, parallel=2, _mem=(64.0, 50.0))
+        warns = [s for s in said if "GB of RAM: the K/V alone pins about 27 GB" in s]
+        self.assertEqual(len(warns), 1, said)
+        self.assertIn("44 GiB expert tier", warns[0])
+        self.assertEqual(cfg["args"][cfg["args"].index("--max-context") + 1], "1048576")
+
+    def test_it_refuses_only_what_cannot_fit(self):
+        """40 GB of RAM and 1M x 4 = about 53 GB of K/V, all of it pinned: the RAM cannot hold it - refuse,
+        and say what would fit."""
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as t, cpu(), self.assertRaises(SystemExit):
+            self.setup(Path(t), context=1048576, parallel=4, _mem=(40.0, 30.0), _out=out)
+        said = out.getvalue()
+        self.assertIn("does not fit", said)
+        self.assertIn("fewer answers at once", said)
+        self.assertIn("768K", said)     # (40 GiB / (12672 B x 4): 768K fits per conversation, 832K would not)
+
+    def test_memlock_between_the_tier_and_the_k_v_warns_once(self):
+        """The 96 GB PC's 71 GiB tier under an 80 GiB memlock: the tier's own warning says nothing, the cost
+        check's does - once - and names the tier plus the K/V (71 + ~12 = 83)."""
+        said = []
+        with tempfile.TemporaryDirectory() as t, cpu(), \
+                patch.object(maya, "memlock_soft_gib", return_value=80.0), \
+                patch.object(maya, "warn", side_effect=lambda *x: said.append(" ".join(map(str, x)))):
+            self.setup(Path(t), context=1048576)
+        warns = [s for s in said if "memory-lock" in s]
+        self.assertEqual(len(warns), 1, said)
+        self.assertIn("83 GB pinned RAM tier", warns[0])
+
+    def test_a_memlock_under_the_tier_is_still_one_warning(self):
+        said = []
+        with tempfile.TemporaryDirectory() as t, cpu(), \
+                patch.object(maya, "memlock_soft_gib", return_value=40.0), \
+                patch.object(maya, "warn", side_effect=lambda *x: said.append(" ".join(map(str, x)))):
+            self.setup(Path(t), context=1048576)
+        self.assertEqual(len([s for s in said if "memory-lock" in s]), 1)     # (the tier's own: not a second)
 
 
 class Parallel(unittest.TestCase):

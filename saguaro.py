@@ -8244,6 +8244,39 @@ def write_config_qfn(a, pc: dict, meta: dict, quant: str, files: list, pack: Pat
     return cfg_path
 
 
+def qfn_context_cost(par: int, ctx: int, lay: dict) -> None:
+    """What the chosen context and the chosen answers at once cost on this PC, in one combined line beside
+    the questions (C18): about 12.7 KB of K/V a context token per conversation at --kv int8 (qfn_fit's
+    measured KV_BYTES) - about 13 GB a conversation at 1M - with the newest --kv-resident window of each
+    conversation on the cards as well and the whole cache pinned RAM, times the answers at once (1M x 2 is
+    about 27 GB).  Cross-checked against the RAM and the memory-lock limit: the plan's tier was warned for
+    before the questions, this adds the K/V on top of it (memlock_tier_warn says nothing when the limit
+    covers it).  Warnings only - no refusal - unless the pinned K/V alone is past this PC's whole RAM,
+    which cannot fit."""
+    par = max(1, int(par or 1))
+    gb_all = ctx * QF.KV_BYTES * par / 1e9
+    ok(f"the cost: about {QF.KV_BYTES / 1e3:.1f} KB of K/V a context token a conversation in INT8 - "
+       f"{context_label(ctx)} x {par} = about {gb_all:.0f} GB of RAM kept pinned (the newest "
+       f"{context_label(min(ctx, lay['kv_resident']))} of each conversation on the cards too)")
+    ram = mem_gb()[0]
+    kv_gib = QF.kv_pinned_gib(ctx, par)
+    tier = lay["resident_budget_gib"] or 0
+    if kv_gib >= ram:
+        fit = max(QFN_CONTEXTS[0], int(ram * 2**30 / (QF.KV_BYTES * par)) // QF.CONTEXT_STEP * QF.CONTEXT_STEP)
+        fail(f"about {gb_all:.0f} GB of pinned K/V for {par} conversation{'s' if par > 1 else ''} of "
+             f"{context_label(ctx)} does not fit: this PC has {ram:.0f} GB of RAM and all of that K/V is "
+             "pinned in it", f"fewer answers at once, or a context of {context_label(fit)} or less")
+    elif tier + kv_gib > ram - QF.RAM_SYSTEM_GIB:
+        warn(f"{ram:.0f} GB of RAM: the K/V alone pins about {gb_all:.0f} GB "
+             + (f"beside the {tier} GiB expert tier " if tier else "beside the experts ")
+             + "- fewer experts stay in RAM (answers slower) and the engine may not start: a smaller context "
+               "or fewer answers at once fits")
+    if ctx > QF.YARN_ORIG_CTX:
+        soft = memlock_soft_gib()
+        if soft is None or soft >= tier:    # (the tier's own warning was given before the questions; this
+            memlock_tier_warn(tier + kv_gib)   #  one covers the K/V on top of it - never the same line twice)
+
+
 def qfn_check_line(quant: str, lay: dict) -> str:
     """--check's line for what the setup would write for these cards (qfn_fit's plan): the live server's split
     sentence belongs to a split only - a measured one-card layout (the RX 9070 XT it was measured on) is not the
@@ -8348,6 +8381,18 @@ def set_up_qfn(a, prev: dict) -> Path | None:
            f"the YaRN table above it: --rope-scale {QF.yarn_scale_text(ctx)} (= {ctx} / {QF.YARN_ORIG_CTX}), "
            "--yarn-orig-ctx " + str(QF.YARN_ORIG_CTX) + "; with the config's SAGUARO_YARN_ELASTIC=1 a conversation "
            "stays on plain RoPE until it passes 256K")
+    # C18 step 2: answers at once right after the context (until now it came from --parallel N, the Models
+    # page or a start flag alone).  The default per layout as today: 1 on one card (parallel decoding lost
+    # speed on the measured 16 GB one), 2 on a split, and a config written before keeps its value on a split;
+    # 1 to 8, and --parallel N given = not asked.  The cost line that follows covers the context x answers.
+    par = getattr(a, "parallel", None)
+    if par is None:
+        was = (prev or {}).get("parallel")
+        dflt = (was if len(pc["gpus"]) > 1 and isinstance(was, int) and not isinstance(was, bool)
+                and 1 <= was <= 8 else (2 if len(pc["gpus"]) > 1 else 1))
+        par = int(ask("Answers at once (1-8)? ", [str(i) for i in range(1, 9)], str(dflt), a.yes))
+        a.parallel = par
+    qfn_context_cost(par, ctx, lay)
     models = (Path(a.models_dir).expanduser().resolve() if a.models_dir else
               Path(inst["models_dir"]) if inst.get("models_dir") else default_models_dir())
     d = models / m["name"]
