@@ -1451,6 +1451,42 @@ console.log(JSON.stringify({shown, hidden}));""")
         self.assertIn("skip: SSD", got["shown"]["menu"])               # (the menu's own items go with the row)
         self.assertNotIn("skip: SSD", got["hidden"]["menu"])
 
+    def test_the_page_shows_no_engine_version_string(self):
+        # (1.2.1 item 11: the engine's own version - QFN's frozen Strata string in its INFO engine=/version=,
+        # stale ones elsewhere - is never a page label.  With every engine-version field of the fake state
+        # carrying "9.9.9-old", the rendered Settings > About, the chat header's model card and the Copy report
+        # say Saguaro's release version and nothing else.  The server keeps sending those fields (other clients,
+        # and the saved conversations' keying depends on the engine string); the page just never renders them.)
+        got = self.node(self.WALK + """
+const cv = await import(web + "/chat-view.js"), se = await import(web + "/settings.js");
+const mo = await import(web + "/models.js");
+mo.MS.data = {models: []};                                            // (the open menu would ask for the Models list)
+const {html, render} = await import(web + "/preact.js");
+document.createElementNS = (ns, t) => el;                             // (the two DOM stubs the other render test adds)
+document.createTextNode = (s) => ({nodeType: 3, nodeValue: s, data: s});
+const old = "9.9.9-old";
+st.S.health = {model: "qwen3.8-flash-next", model_name_pretty: "Qwen3.8 Flash Next", model_quant: "Q8_0",
+               max_context: 1048576, images: false, api_key: false, mcp_tools: false, version: old};
+st.S.metrics = {engine: {model: "qwen3.8-flash-next", engine_kind: "qfn", max_context: 1048576,
+                         version: old, engine: old, maya_version: old, saguaro_version: "1.2.1"}};
+let aboutTree, headTree;                                             // (the sections have hooks: render them and walk
+const about = () => { aboutTree = se.About(); return null; };         //  the trees they return, not fresh calls)
+const head = () => { headTree = cv.ModelMenu({open: true, close: () => {}, anchor: {}}); return null; };
+render(html`<${about}/>`, el);
+render(html`<${head}/>`, el);
+globalThis.fetch = async () => ({ok: true, status: 200, text: async () =>
+  "Saguaro 1.2.1 - report of 2026-11-25 06:00\\n" +
+  "Model: qwen3.8-flash-next (Qwen3.8-Flash-Next \\u00b7 Q8_0 (saguaro-qfn)), context 1048576\\n" +
+  "Engine: arena_mib=70000 engine=" + old + " engine_kind=qfn experts=13824 version=" + old + "\\n"});
+const report = await sv.fetchReport();
+console.log(JSON.stringify({about: strs(aboutTree), head: strs(headTree), report}));""")
+        self.assertNotIn("9.9.9", " ".join(got["about"]))              # (About: no engine string anywhere)
+        self.assertIn("Saguaro v1.2.1", " ".join(got["about"]))        # (the release version: the only one shown)
+        self.assertNotIn("9.9.9", " ".join(got["head"]))               # (the header's card names the model, not a version)
+        self.assertIn("on this machine", " ".join(got["head"]))
+        self.assertNotIn("9.9.9", got["report"])                       # (Copy report: the engine's INFO pairs are out)
+        self.assertIn("Engine: arena_mib=70000 engine_kind=qfn experts=13824", got["report"])  # (... its facts stay)
+
 
 if __name__ == "__main__":
     unittest.main()

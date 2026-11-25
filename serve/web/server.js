@@ -484,8 +484,12 @@ export async function watchUpdate(to) {
 }
 
 // ------------------------------------------------------------------ the troubleshooting report (GET /api/report)
+// (1.2.1 item 11: the report names Saguaro's release version, not the engine's own - the INFO version=/engine=
+//  pairs the server sends on for other clients and the saved conversations' keying (QFN's frozen Strata string,
+//  stale ones elsewhere) come out of the text the page shows and copies.  engine_kind=, the engine's name, stays.)
+const ENGINE_VERSION_FIELDS = /\b(?:engine|version)=\S+ ?/g;
 export async function fetchReport() {
   const r = await fetch("api/report", {headers: headers()});
   if (!r.ok) throw new Error(r.status === 401 ? "this server needs its API key (Settings › Connect your tools)" : `HTTP ${r.status}`);
-  return r.text();
+  return (await r.text()).replace(ENGINE_VERSION_FIELDS, "");
 }

@@ -26,13 +26,15 @@ function Meter() {
     <${MeterRing} c=${c}/>${c.approx ? "≈" : ""}${tokfmt(c.tokens)} / ${ctxfmt(c.max)}</span>`;
 }
 
-function ModelMenu({open, close, anchor}) {
+export function ModelMenu({open, close, anchor}) {   // (exported for serve/test_dashboard.py: it walks the header's card)
   const h = S.health, preset = presetOf(P), c = ctxMeter();
   useEffect(() => { if (open && !MS.data) loadModels(); }, [open]);   // (the Models row says how many are set up)
   const go = (s) => () => { close(); openSettings(s); };
+  // (1.2.1 item 11: no version beside the model in this card: an older server's health.version field carries
+  //  its engine's own string; About is the one place Saguaro's release version is shown)
   return html`<${Menu} open=${open} onClose=${close} anchor=${anchor} label="Model" align="left" cls="model-menu" width=${340}>
     <div class="model-menu__card"><${ModelLogo} model=${h.model} size=${36}/>
-      <span><b>${modelLabel(h, {compact: true})}</b><span>on this machine${h.version ? ` · v${h.version}` : ""}</span></span></div>
+      <span><b>${modelLabel(h, {compact: true})}</b><span>on this machine</span></span></div>
     <${MenuSep}/>
     ${c && isPhone() ? html`<div class="model-menu__meter"><${MeterRing} c=${c}/><span>${c.why}: ${c.approx ? "≈" : ""}${fmt(c.tokens)} of ${fmt(c.max)} tokens</span></div>` : null}
     <button type="button" role="menuitem" class="menu__item" onClick=${go("model")}><span class="menu__label">Context size</span>
