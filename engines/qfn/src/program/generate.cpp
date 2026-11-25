@@ -8230,6 +8230,17 @@ int main(int argc, char** argv) {
     //   a read that ends early (cancel, BYIELD, no VRAM): the exact new tokens for this request's read (the DONE's
     //   prompt - reused, or the clamped count when a cancel stopped it part-way) over its own read time.  The batch
     //   path's equivalent is its `BRA <slot> 1 prompt= reused= read_ms=` line, unchanged.
+    // PLAN-u5-read-heartbeat (the read reports its progress about every second, like decode does - output only,
+    // printed from host points between layer passes / pipe pieces / KV staging passes, at most one line per ~1 s
+    // per reading request, so a one-chunk read, a long first chunk or a read mostly busy staging its K/V from
+    // RAM no longer looks frozen until it ends):
+    //   `RHB rid=<rid|0> stage=<stage|read> done=<new tokens done> new=<new tokens total> reused=<n>
+    //        pass=<i>/<n> ms=<read ms>` - stage: the reused prefix is being copied host->VRAM, read: new tokens
+    //   are being read; done / new count from where THIS read started (never a reused / restored / parked
+    //   prefix); pass is the current host pass (layer pass of the chunk, or piece of the plan between pieces) of
+    //   their total; ms is this request's own read time (the PP lines' read_ms).  The batch path prints
+    //   `rid=0` with an appended `slot=<b>` (its BRP / BRA lines' slot); a batched shared chunk reports each
+    //   reading slot on its own line.
     // The expert-cache slots (from the end of the cache) that hold the prompt path's buffers for a chunk, and the
     // bytes from the first of them to the end.
     // the share of expert bytes the arena could pin (sizes the prompt path's streamed ring and its lend cap)
@@ -10832,6 +10843,33 @@ int main(int argc, char** argv) {
         static long long serve_rid = 0;
         long long pp_rid = 0;
         bool rdone_done = false;   // this request's RDONE (once, at its read's end or before its DONE)
+        // U5 read heartbeat (PLAN-u5-read-heartbeat): while a read runs it reports its progress the way decode
+        // does - at most one line per ~1 s per reading request, printed from the host points between layer
+        // passes / pipe pieces / KV staging passes:
+        //   RHB rid=<rid|0> stage=<stage|read> done=<new tokens done> new=<new tokens total> reused=<n>
+        //       pass=<i>/<n> ms=<read ms>
+        // stage: its K/V prefix is coming in from RAM; read: its new tokens are being read.  ms is this read's
+        // own running time (the read clock above: not the waits between pieces).  Output only - every existing
+        // line stays exactly as it was, and rid=0 lines (the batch path's) carry an appended slot=<b>.
+        std::mutex rhb_mu;
+        Clock::time_point rhb_t{};
+        long long rhb_rid = 0;
+        auto rhb_print = [&](long long rid, const char* stage, long long done, long long newn, long long reused,
+                             long long pass_i, long long pass_n, double ms) {
+            std::lock_guard<std::mutex> lk(rhb_mu);
+            const auto now = Clock::now();
+            if (rhb_rid == rid && std::chrono::duration<double, std::milli>(now - rhb_t).count() < 950.0) return;
+            rhb_rid = rid;
+            rhb_t = now;
+            std::printf("RHB rid=%lld stage=%s done=%lld new=%lld reused=%lld pass=%lld/%lld ms=%.0f\n", rid, stage,
+                        done, newn, reused, pass_i, pass_n, ms);
+            std::fflush(stdout);
+        };
+        auto rhb_solo = [&](const char* stage, int64_t done_abs, long long pass_i, long long pass_n) {
+            if (pp_rid == 0 || pp_total <= pp_from) return;   // nothing of this request is being read (a warm run)
+            rhb_print(pp_rid, stage, (long long) std::max<int64_t>(0, done_abs - pp_from),
+                      (long long) (pp_total - pp_from), (long long) pp_from, pass_i, pass_n, pp_running_ms());
+        };
         // #471: the position the prompt pass has read up to (a chunk's or a window's end): what a request cancelled
         // mid-read reports as read, instead of the whole prompt
         int64_t pp_reached = 0;
@@ -11176,6 +11214,14 @@ int main(int argc, char** argv) {
                 };
             }
         }
+        // U5 read heartbeat: the prompt path's host points between layer passes feed the RHB line of the solo read
+        // in flight (every stage reports; one read runs at a time and the gate above keeps it to ~1 line per s).
+        // The batch slot reads replace these for the time they hold the path (see the admission's swap below).
+        sp.on_layer_pass = [&](int64_t pass, int64_t passes, bool staged, int64_t pos0) {
+            rhb_solo(staged ? "stage" : "read", pos0, (long long) pass, (long long) passes);
+        };
+        for (auto& st : stages)
+            st->sp.on_layer_pass = sp.on_layer_pass;
         drive.d.plan = ver.plan_sink();
         // Foresight swap space (SAGUARO_FS_SLOTS; unset = null and nothing changes)
         std::unique_ptr<strata::core::ForesightSwap> fs_swap;
@@ -16044,8 +16090,28 @@ int main(int argc, char** argv) {
             std::vector<std::shared_ptr<strata::prefill::PromptJob>> pieces;
             double yield_ms = 0.0;
             Clock::time_point t_held{};
+            Clock::time_point rhb_t{};   // U5 read heartbeat: when this read last printed an RHB line
         };
         std::vector<std::unique_ptr<AdmJob>> cy_held;   // SAGUARO_READ_YIELD: reads held at a piece boundary
+        // U5 read heartbeat (PLAN-u5-read-heartbeat), batch side: a slot's read reports itself at most one line
+        // per ~1 s from host points between the layer passes of its pieces:
+        //   RHB rid=0 stage=<stage|read> done=<new tokens done> new=<new tokens total> reused=<n>
+        //       pass=<i>/<n> ms=<read ms> slot=<b>
+        // rid=0 (as in the protocol note): the slot tells which read it is, like its BRP / BRA lines. done and
+        // new count from where THIS read started (never its reused / parked prefix); ms is this read's own time
+        // since it was fed, as on the BRP lines (a read held at a piece boundary prints no lines while held).
+        auto rhb_slot = [&](AdmJob& j, int b, int64_t n, Clock::time_point t_read, int64_t done_abs,
+                            long long pass_i, long long pass_n, bool staged) {
+            const auto now = Clock::now();
+            if (j.rhb_t != Clock::time_point{} &&
+                std::chrono::duration<double, std::milli>(now - j.rhb_t).count() < 950.0) return;
+            j.rhb_t = now;
+            std::printf("RHB rid=0 stage=%s done=%lld new=%lld reused=%lld pass=%lld/%lld ms=%.0f slot=%d\n",
+                        staged ? "stage" : "read", (long long) std::max<int64_t>(0, done_abs - j.resume),
+                        (long long) std::max<int64_t>(0, n - j.resume), (long long) j.resume, pass_i, pass_n,
+                        std::chrono::duration<double, std::milli>(now - t_read).count(), b);
+            std::fflush(stdout);
+        };
         // SAGUARO_SLOT_GRID=N (buckets, 0 = off; 6 keeps at most 12, two per bucket): a batch slot's conversation keeps grid checkpoints
         // every --prompt-cache-every tokens, thinned by distance from its end (slot_grid.hpp), so a request that keeps
         // only a prefix of it (an agent's compaction summary, an older turn rewritten) resumes near its cut.  An
@@ -16311,6 +16377,7 @@ int main(int argc, char** argv) {
             const size_t n_st = stages.size() + 1;
             strata::prefill::Prefill& rep = multi_gpu ? stages.back()->sp : sp;   // the stage that reports a chunk
             std::vector<std::function<bool(int64_t, std::string&)>> old_stage_chunk(n_st);
+            std::vector<std::function<void(int64_t, int64_t, bool, int64_t)>> old_layer_pass(n_st);   // (U5 heartbeat)
             auto old_chunk = std::move(rep.on_chunk);
             auto old_stop = std::move(sp.should_stop);
             auto old_yield = std::move(sp.stop_at_chunk);
@@ -16336,6 +16403,7 @@ int main(int argc, char** argv) {
                 for (size_t k = 0; k < n_st; ++k) {
                     stage_prefill(k).set_session(stage_ss(k));
                     stage_prefill(k).on_stage_chunk = std::move(old_stage_chunk[k]);
+                    stage_prefill(k).on_layer_pass = std::move(old_layer_pass[k]);
                 }
                 rep.on_chunk = std::move(old_chunk);
                 sp.should_stop = std::move(old_stop);
@@ -16347,6 +16415,14 @@ int main(int argc, char** argv) {
             const std::vector<int64_t>& ids = j.r.ids;
             strata::core::MtpDrafter* dr = batch_mtp ? slot_mtp[(size_t) b].get() : nullptr;
             const auto t_read = Clock::now();
+            // U5 read heartbeat: this read's host points between the layer passes (and the KV staging passes)
+            // report the slot's read, ~one RHB line per second (the solo path's callback is put back by undo)
+            for (size_t k = 0; k < n_st; ++k) {
+                old_layer_pass[k] = std::move(stage_prefill(k).on_layer_pass);
+                stage_prefill(k).on_layer_pass = [&, b](int64_t pass, int64_t passes, bool staged, int64_t pos0) {
+                    rhb_slot(j, b, n, t_read, pos0, (long long) pass, (long long) passes, staged);
+                };
+            }
             const int64_t at0 = j.at;
             adm_at.store(j.at);
             // the last stage's chunk: progress, and (--batch-mtp) the slot drafter's K/V from the chunk's final rows
@@ -17100,6 +17176,11 @@ int main(int argc, char** argv) {
                     strata::core::progress_at("reading a prompt into a batch slot, done up to token", done);
                     strata::core::progress_beat();
                     return true;
+                };
+                // U5 read heartbeat: the layer passes of this piece (and their KV staging passes, `staged`)
+                // report its read, ~one RHB line per second (batched chunks call each segment's own callback)
+                pj->on_layer_pass = [&, jp, b, n](int64_t pass, int64_t passes, bool staged, int64_t pos0) {
+                    rhb_slot(*jp, b, n, jp->t_read, pos0, (long long) pass, (long long) passes, staged);
                 };
                 if (j.msg_at > j.resume && z == j.msg_at && (int64_t) jp->mparts.size() == (int64_t) n_st)
                     for (size_t k = 0; k < n_st; ++k)   // stage k's part of the message checkpoint, as it reaches it
@@ -20939,6 +21020,7 @@ int main(int argc, char** argv) {
                 for (int b = 0; b < N; ++b) (void) zero_slot(b);
                 return true;
             };
+            int64_t cut_i = 0;   // U5 read heartbeat: the piece of the read's plan that just finished
             for (const int64_t to : cuts) {
                 if (to <= at) continue;
                 err.clear();
@@ -21012,6 +21094,8 @@ int main(int argc, char** argv) {
                     break;
                 }
                 at = to;
+                ++cut_i;
+                rhb_solo("read", to, (long long) cut_i, (long long) cuts.size());   // U5 read heartbeat
                 if ((to == turn_at || to == root_at || to == message_at || to == pin_at) &&
                     !checkpoint_at(to, nullptr, to == message_at && to != turn_at && to != root_at && to != pin_at)) {   // the tail kind leaves first
                     if (!ckpt_why.empty() || !checkpoint_failure_is_survivable()) {   // #3350: only an unwell GPU ends the request
