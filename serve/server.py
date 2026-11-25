@@ -7386,9 +7386,7 @@ def make_handler(svc: Service):
                     self._json(200, svc.mcp.status() if svc.mcp else {"servers": [], "tools": 0})
                 return
             if path == "":
-                body = (ROOT / "serve" / "web" / "index.html").read_bytes()
-                # the favicon's cache-bust version comes from VERSION (a no-op when index.html carries no placeholder)
-                body = body.replace(b"?v=__VERSION__", f"?v={SAGUARO_VERSION or ''}".encode())
+                body = index_html()
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))
@@ -8200,6 +8198,265 @@ def serve(svc: Service, host="127.0.0.1", port=8095) -> ThreadingHTTPServer:
     return httpd
 
 
+def index_html() -> bytes:
+    """The page itself (serve/web/index.html), the favicon's cache-bust version from VERSION (a no-op when it carries
+    no placeholder).  Both services serve it: the starting one and the real one (issue #20 phase 1)."""
+    body = (ROOT / "serve" / "web" / "index.html").read_bytes()
+    return body.replace(b"?v=__VERSION__", f"?v={SAGUARO_VERSION or ''}".encode())
+
+
+class LoadState:
+    """What the "starting" service answers with while the engine is not there yet (issue #20 phase 1): the model's
+    name, and that the load runs.  main() hands the real Service over on the same socket (take_over); a load that
+    fails says so here instead (fail), and the port keeps answering with it."""
+
+    def __init__(self, model: str, log_path=None, api_key: str = "", supervisor: str | None = None, port=8095,
+                 config_path=None):
+        self.model, self.log_path = model, log_path
+        self.api_key, self.supervisor, self.port = api_key, supervisor, port
+        self.config_path = str(config_path) if config_path else None
+        self.t0 = time.time()
+        self.status, self.error = "loading", None
+        self.failed_seen = threading.Event()      # a /health that told the supervisor about the failure
+
+    def fail(self, error) -> None:
+        """The load failed (issue #20): the standing page shows this, /health says {"status": "failed"} with it."""
+        self.status, self.error = "failed", str(error) or type(error).__name__
+
+    def last_log_line(self) -> str:
+        """The engine log's last line, trimmed - what the loading screen shows while it waits ("" before the
+        engine has written anything, or when this engine keeps no log)."""
+        if not self.log_path:
+            return ""
+        try:
+            with open(self.log_path, "rb") as f:
+                f.seek(0, 2)
+                f.seek(max(0, f.tell() - 65536))
+                text = f.read().decode("utf-8", "replace")
+        except OSError:
+            return ""
+        for line in reversed(text.splitlines()):
+            if line.strip():
+                return line.strip()[:400]
+        return ""
+
+    def health(self) -> dict:
+        # 503 with this body is REQUIRED (issue #20): llama-swap and the other supervisors take a 200 from /health
+        # as ready, and would send requests to a model that is not there yet.  The shape: status, the config's
+        # model name, how long the load has run, and what the engine was last saying.  A failed load adds the error
+        # and, when a different config loaded before, what the page's button would start (never under a supervisor,
+        # which owns starts and switches itself).
+        out = {"status": self.status, "model": self.model, "elapsed_s": int(time.time() - self.t0),
+               "line": self.last_log_line(), "supervisor": self.supervisor}
+        if self.status == "failed":
+            out["error"] = self.error
+            if not self.supervisor:
+                lg = read_last_good()
+                if lg and lg["path"] != self.config_path:
+                    out["last_good"] = lg
+        return out
+
+
+def last_good_note_path() -> Path:
+    """Where "the config that loaded successfully last" is noted: the server's state folder, the one holding
+    models.py's SWITCH_FILE note (saguaro.py's folder, where the maya-*.json configs live)."""
+    return ROOT / models.LAST_GOOD
+
+
+def read_last_good() -> dict | None:
+    """The config path + time a successful load recorded; None when nothing was recorded or that config is gone."""
+    try:
+        note = json.loads(last_good_note_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    p = Path(str(note.get("config") or ""))
+    if not p.is_file():
+        return None
+    return {"config": p.name, "path": str(p), "time": note.get("time")}
+
+
+def write_last_good(config_path, model=None) -> None:
+    """After a successful load (main): remember this config, so the page of a start whose load later fails can
+    offer to start it again."""
+    note = {"config": str(Path(config_path).resolve()), "time": time.time(), "model": model or ""}
+    with contextlib.suppress(OSError):
+        last_good_note_path().write_text(json.dumps(note), encoding="utf-8")
+
+
+def ends_on_failed_load(supervisor, exit_on_fail) -> bool:
+    """When a failed load ENDS the process (issue #20): a supervisor must not wait on a process that will never
+    turn ready (llama-swap retries starts on its own), nor a run that asked for --exit-on-fail; a direct start
+    stands with the page that says what went wrong."""
+    return bool(supervisor) or bool(exit_on_fail)
+
+
+def _restart_after_answer(delay: float = 0.5) -> None:
+    """End this process so saguaro.py starts again with the noted config (its RESTART_EXIT loop): the page's
+    answer still goes out, and the failed engine must not outlive this start."""
+    time.sleep(delay)
+    end_spawned()
+    os._exit(RESTART_EXIT)
+
+
+def start_last_good(state: LoadState) -> dict:
+    """The failed page's button (issue #20): start again with the last config that worked.  The note saguaro.py
+    reads on a RESTART_EXIT (models.SWITCH_FILE) is the same one the Models page's Switch leaves it - so this
+    works when saguaro.py started this server, and only when no supervisor owns the starts."""
+    if state.supervisor:
+        raise ValueError(f"this server runs under {state.supervisor}, which starts, stops and switches the "
+                         "models: change models there (pick another model id), not here")
+    lg = read_last_good()
+    if lg is None:
+        raise ValueError("no last config that worked is known here")
+    if lg["path"] == state.config_path:
+        raise ValueError(f"{lg['config']} is the config this server tried and failed with")
+    if not os.environ.get("SAGUARO_RESTART_ON_UPDATE"):
+        raise ValueError("this server was not started by saguaro.sh or START-SAGUARO.bat, so it cannot start "
+                         f"again by itself: start the one that worked: python saguaro.py --config {lg['path']}")
+    (ROOT / models.SWITCH_FILE).write_text(json.dumps({"config": lg["path"], "port": state.port,
+                                                       "why": "switch", "time": time.time()}), encoding="utf-8")
+    print(f"[saguaro] starting again with {lg['config']} (the last config that worked) ...", flush=True)
+    threading.Thread(target=_restart_after_answer, daemon=True).start()
+    return lg
+
+
+def make_loading_handler(state: LoadState):
+    """The service that answers on the port from the first second of every start (issue #20 phase 1): the page
+    (index, web/*, fonts) and /health while the engine loads, and everything the engine would answer says
+    503 {"error": "the model is loading"} with Retry-After: 5 - requests may not wait unbounded.  The API key, when
+    configured, is checked on everything the real handler checks it on; /health and the page's files stay open."""
+
+    class LoadingHandler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.0"                       # as the real handler: an answer ends the connection
+        timeout = request_timeout()
+
+        def log_message(self, fmt, *args):
+            pass
+
+        def _json(self, code, obj, retry_after=None):
+            body = json.dumps(obj, ensure_ascii=False).encode()
+            self.send_response(code)
+            if retry_after:
+                self.send_header("Retry-After", str(retry_after))
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _authorized(self) -> bool:                      # (the real handler's check, against the config's key)
+            if not state.api_key:
+                return True
+            auth = self.headers.get("Authorization", "")
+            given = auth[7:].strip() if auth.lower().startswith("bearer ") else self.headers.get("x-api-key", "")
+            if given and any(hmac.compare_digest(given.encode(), k.encode()) for k in key_list(state.api_key)):
+                return True
+            self._json(401, {"error": {"type": "authentication_error", "message": "missing or wrong API key"}})
+            return False
+
+        def _loading(self):
+            self._json(503, {"error": "the model is loading"}, retry_after=5)
+
+        def _foreign_page(self) -> bool:                    # (the real handler's CSRF check, without cors_origins:
+            origin = self.headers.get("Origin")             #  there is no config to read them from yet)
+            if not origin or origin.split("://", 1)[-1] == self.headers.get("Host", ""):
+                return False
+            self._json(403, {"error": {"type": "permission_error",
+                                       "message": "requests from other web pages are refused"}})
+            return True
+
+        def _static(self, path) -> bool:
+            """The page's own files - index, /web/ (styles, script, icons, manifest) and the fonts - open, as today.
+            True when this answer was one of them."""
+            if path == "":
+                body, ctype = index_html(), "text/html; charset=utf-8"
+            elif path == "/web":
+                # the manifest's old start_url: the page is one level up, relative (the real handler's redirect)
+                raw = self.path.split("?")[0]
+                self.send_response(302)
+                self.send_header("Location", ("../" if raw.endswith("/") else "./") + self.path[len(raw):])
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return True
+            elif path.startswith("/web/"):
+                name = path[len("/web/"):]
+                types = {".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8",
+                         ".svg": "image/svg+xml", ".webmanifest": "application/manifest+json"}
+                ext = os.path.splitext(name)[1]
+                f = ROOT / "serve" / "web" / name
+                if "/" in name or "\\" in name or ext not in types or not f.is_file():
+                    self._json(404, {"error": {"message": "not found"}})
+                    return True
+                body, ctype = f.read_bytes(), types[ext]
+            elif path.startswith("/fonts/"):
+                name = path[len("/fonts/"):]
+                f = ROOT / "serve" / "web" / "fonts" / name
+                if "/" in name or "\\" in name or not name.endswith(".woff2") or not f.is_file():
+                    self._json(404, {"error": {"message": "not found"}})
+                    return True
+                body, ctype = f.read_bytes(), "font/woff2"
+            else:
+                return False
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return True
+
+        def do_GET(self):
+            path = self.path.split("?")[0].rstrip("/")
+            if self._static(path):
+                return
+            if path == "/health":
+                if state.status == "failed":
+                    state.failed_seen.set()      # (the supervisor has now heard it from us: main() may end)
+                self._json(503, state.health())
+                return
+            if self._authorized():
+                self._loading()
+
+        def do_POST(self):
+            path = self.path.split("?")[0].rstrip("/")
+            if path == "/api/last-good/start":              # (the failed page's button: start with that config)
+                if self._authorized() and not self._foreign_page():
+                    try:
+                        lg = start_last_good(state)
+                    except ValueError as e:
+                        self._json(409, {"error": {"type": "invalid_request_error", "message": str(e)}})
+                        return
+                    self._json(200, {"starting": lg["config"]})
+                return
+            if self._authorized():
+                self._loading()
+
+        def do_DELETE(self):
+            if self._authorized():
+                self._loading()
+
+        def do_OPTIONS(self):
+            self._loading()        # (a preflight while nothing runs: the same "ask again in 5" as its requests)
+
+    return LoadingHandler
+
+
+def serve_loading(state: LoadState, host="127.0.0.1", port=8095) -> ThreadingHTTPServer:
+    """Bind the port before the engine starts, and answer on it from the first second (issue #20 phase 1): every
+    start and restart used to leave the port dead for the minutes the model takes to load."""
+    httpd = Server((host, port), make_loading_handler(state))
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    return httpd
+
+
+def take_over(httpd, svc) -> None:
+    """The real service takes the same listening socket: no gap, no second bind (issue #20 phase 1).  socketserver
+    reads the handler class per connection, so the connection after this line gets the real handler."""
+    svc.start_telemetry()
+    svc.listen = (httpd.server_address[0], httpd.server_address[1])   # (the dashboard's Port setting starts from it)
+    httpd.response_service = svc
+    httpd.RequestHandlerClass = make_handler(svc)
+
+
 SHARED_KEYS = ("reasoning_effort", "temperature", "top_p", "top_k", "seed", "max_tokens", "experimental_speed_projection",
                "repetition_penalty", "frequency_penalty", "presence_penalty")
 
@@ -8911,6 +9168,10 @@ def main() -> int:
                     help="stdin is a pipe from the program that started this server (saguaro.py), open while it runs: "
                          "when it closes - that program ended, however it ended - the server stops as on Ctrl+C "
                          "(on Linux also when its parent process ends)")
+    ap.add_argument("--exit-on-fail", action="store_true",
+                    help="end the process when the model fails to load, instead of keeping the port up with the "
+                         "page that says what went wrong (under a supervisor the process ends on a failed load "
+                         "either way)")
     a = ap.parse_args()
     clean_stale_picture_dirs()
     stop = threading.Event()
@@ -8933,116 +9194,148 @@ def main() -> int:
     if a.gpu is not None:
         cfg["gpu"] = int(a.gpu) if a.gpu.strip().isdigit() else a.gpu
     a.host = a.host or cfg.get("host") or "127.0.0.1"   # issue #26: the run scripts pass no --host, the config can
-    try:                                                # before the minutes of loading: is the port free?
-        Server((a.host, a.port), BaseHTTPRequestHandler).server_close()
+    api_key = a.api_key or cfg.get("api_key", "")
+    supervisor = os.environ.get("SAGUARO_SUPERVISOR") or supervisor_name()
+    # the page answers on this port from the first second of the load (issue #20); this bind doubles as the old
+    # "is the port free" check: a second start stops here, before the minutes of loading
+    load_state = LoadState(cfg.get("model_name", "qwen3.8-flash-next"), log_path=cfg.get("log"),
+                           api_key=api_key, supervisor=supervisor,
+                           config_path=str(Path(a.config).resolve()) if a.config else None)   # (as write_last_good keeps it)
+    try:
+        httpd = serve_loading(load_state, host=a.host, port=a.port)
     except OSError:
         ap.error(f"port {a.port} is already in use - is Saguaro (or another server) already running? "
                  f"Close it, or start this one with a different --port")
+    load_state.port = httpd.server_address[1]
     if cfg.get("tokenizer"):
         a.tokenizer = cfg["tokenizer"]
     tok = ByteTokenizer()
     tpath = Path(a.tokenizer)
     if kind in ("line", "batch") and not (tpath / "vocab.json").exists():
         ap.error(f"the model's tokenizer is missing ({tpath / 'vocab.json'}); run setup again")
-    if (tpath / "vocab.json").exists():
-        import strata_tokenizer as ST
-        tok = ST.Tokenizer.from_dir(tpath)              # with the pack's own pre-tokenizer (GLM: glm4, #27)
-    hub = hub_from_config(cfg, a.mcp_config)            # before the minutes of loading: a bad entry stops here
-    if kind == "line":
-        vision = None
-        env = child_env(cfg)
-        if note := ds4_one_gpu_switch_note(cfg, env):
-            print(note, flush=True)
-        sampling_defaults = sampling_defaults_from_config(cfg)
-        if "sampling" not in cfg:                       # (a config without them: the model's own, not none)
-            sampling_defaults = maya_quants.model_defaults(cfg)[0]
-        if sampling_defaults:
-            pretty = ", ".join(f"{k}={v}" for k, v in sampling_defaults.items())
-            print(f"[saguaro] sampling defaults from the {'config' if 'sampling' in cfg else 'model'}: {pretty}",
-                  flush=True)
-        vcfg_in = cfg.get("vision") or None
-        vlog = (open(cfg["log"], "a", encoding="utf-8") if cfg.get("log") else None) if vcfg_in else None
-        # pictures: the encoder's environment, whether it runs on demand, and the engine's environment (one function,
-        # also the bench's: tools/maya_bench.py start_command)
-        vcfg, venv, on_demand, fp, engine_env = vision_plan(cfg, env, Path(a.config).resolve().with_name("vision-memory.json"))
-        if on_demand:
-            print(f"[saguaro] images: the vision encoder needs {fp[1] / 2**30:.2f} GB on this GPU at up to {fp[0]} "
-                  "image tokens", flush=True)
-        elif vcfg_in and vcfg_in.get("gpu") and vcfg and not vcfg.get("gpu"):
-            print("[saguaro] images: the vision encoder could not be measured on the GPU - it runs on the CPU",
-                  flush=True)
-        if vcfg and not on_demand:
-            print("loading the vision encoder ...", flush=True)
-            vision = Vision(vcfg, log=vlog, env=venv)
-        print("loading the model (the first start takes a minute or two) ...", flush=True)
-        if len(gpu_list(cfg)) > 1 and models.family(cfg) != "ik2":
-            print(f"[saguaro] layer split across GPUs {gpu_list(cfg)} ({cfg.get('layer_split') or 'auto'})", flush=True)
-        t0 = time.time()
-        engine = StrataEngine(cfg["exe"], engine_args(cfg), cwd=cfg.get("cwd"), log=cfg.get("log"), env=engine_env)
-        engine.load_s = round(time.time() - t0, 1)      # (the dashboard's estimate of a reload: this start's time)
-        warn_tight_ram(engine.info.get("arena_mib"))
-        if vision is None and not vcfg and engine.info.get("vision") == "ds4":
-            # DeepSeek-V4.1: the engine's own vision tower (the checkpoint's); the server resizes the pictures
-            vision = ds4_vision.Vision(ds4_vision.Geometry.from_info(engine.info),
-                                       picture_dir("saguaro-ds4-pictures-"), Vision.load)
-            room = engine.info.get("vision_room")
-            where = (f"{engine.info.get('vision_mib')} MiB kept" if room in (None, "resident") else
-                     f"none between pictures, ~{engine.info.get('vision_room_mib')} MiB while one is read, lent by "
-                     + {"chunk": "the prompt buffers", "tail": "expert slots", "free": "free memory"}.get(room, room))
-            print(f"[saguaro] images: the model's vision tower runs in the engine (GPU {engine.info.get('vision_gpu')}: "
-                  f"{where}), up to {vision.g.max_tokens} tokens a picture", flush=True)
-        elif vision is None and not vcfg and engine.info.get("vision") == "hy4":
-            # Hy4-flash: the engine's own vision tower (the mmproj file in its pack); the server resizes the pictures
-            vision = hy4_vision.Vision(hy4_vision.Geometry.from_info(engine.info),
-                                       picture_dir("saguaro-hy4-pictures-"), Vision.load)
-            # (where a picture's room comes from - the engine's `vision_room`: "chunk" = lent by its prompt buffers)
-            where = (f"; no VRAM kept for pictures (~{engine.info.get('vision_room_mib')} MiB while one is read, lent "
-                     "by the prompt buffers)" if engine.info.get("vision_room") == "chunk" else "")
-            print(f"[saguaro] images: the model's vision tower runs in the engine, up to {vision.g.max_pixels} pixels "
-                  f"({vision.g.max_tokens} tokens for a square one) a picture{where}", flush=True)
-        elif vision is None and not vcfg and engine.info.get("vision") == "mm3":
-            # MiniMax-M3.1-Flash: the engine's own vision tower; the server resizes the pictures
-            vision = mm3_vision.Vision(mm3_vision.Geometry.from_info(engine.info),
-                                       picture_dir("saguaro-mm3-pictures-"), Vision.load)
-            print(f"[saguaro] images: the model's vision tower runs in the engine, up to {vision.g.max_pixels} pixels "
-                  f"({vision.g.max_tokens} tokens) a picture", flush=True)
-        elif vision is None and not vcfg and engine.info.get("vision") == "off":
-            # (DeepSeek-V4.1: its tower did not load - the engine's NOTE line above says why; no pictures offered)
-            print("[saguaro] images: OFF - pictures are refused until the vision tower loads (see the line above)",
-                  flush=True)
-        if on_demand:
-            lent = int(engine.info.get("vision_lend") or 0)
-            if lent > 0:
-                vision = Vision(vcfg, log=vlog, env=venv, start=False)
-                vision.lend = lambda: engine.command("VLEND", "VLENT")
-                vision.reclaim = lambda: engine.command("VRECLAIM", "VRECLAIMED")
-                print(f"[saguaro] images: the vision encoder starts when a picture arrives, in {lent / 2**30:.2f} GB "
-                      "the model lends it", flush=True)
-            elif models.family(cfg) == "ik2":
-                # Inkling 2 (its engine lends no memory and keeps none for pictures): the encoder starts when a picture
-                # arrives - on the GPU when its free memory then holds what the encoder measured, else on the CPU -
-                # and ends once the request's pictures are read
-                need, cards = fp[1], gpu_list(cfg) or [0]
-                free_of = amd_gpu_free_bytes if cfg.get("backend") == "hip" else gpu_free_bytes   # (AMD: sysfs)
-                vision = Vision(vcfg, log=vlog, env=venv, start=False)
-                vision.room = lambda: ik2_vision_gpu(cards, need, free_of)
-                vision.cpu_threads = max(1, (os.cpu_count() or 2) // 2)
-                free = {g: (free_of(g) or 0) for g in cards}
-                print(f"[saguaro] images: the vision encoder starts when a picture arrives - on "
-                      f"{'the GPU of ' + ', '.join(map(str, cards)) + ' with the most free memory' if len(cards) > 1 else f'GPU {cards[0]}'}"
-                      f" while {need / 2**30:.2f} GB of it is free ("
-                      + ", ".join(f"GPU {g}: {b_ / 2**30:.2f} GB" for g, b_ in free.items()) +
-                      " now), else on the CPU; no VRAM kept for it", flush=True)
-            else:   # the model's GPU memory is too small to lend that much (or an engine without lending)
-                print("[saguaro] images: the model cannot lend the vision encoder its GPU memory here - the encoder "
-                      "runs on the CPU", flush=True)
-                vision = Vision(dict(vcfg, gpu=False), log=vlog, env=venv)
-    elif kind == "batch":
-        engine, vision, sampling_defaults = start_qfn(cfg, tok)
-    else:
-        engine, vision, sampling_defaults = MockEngine(tok, a.script or [
-            "Thinking about it.</think>\n\nHello from the mock engine."],
-            tok_s=float(os.environ.get("SAGUARO_MOCK_TOK_S") or 0) or None), None, {}
+    try:                                                    # the load (issue #20): if it fails, the port keeps
+        if (tpath / "vocab.json").exists():                 #  answering with the failed page instead of dying
+            import strata_tokenizer as ST
+            tok = ST.Tokenizer.from_dir(tpath)              # with the pack's own pre-tokenizer (GLM: glm4, #27)
+        hub = hub_from_config(cfg, a.mcp_config)            # before the minutes of loading: a bad entry stops here
+        if kind == "line":
+            vision = None
+            env = child_env(cfg)
+            if note := ds4_one_gpu_switch_note(cfg, env):
+                print(note, flush=True)
+            sampling_defaults = sampling_defaults_from_config(cfg)
+            if "sampling" not in cfg:                       # (a config without them: the model's own, not none)
+                sampling_defaults = maya_quants.model_defaults(cfg)[0]
+            if sampling_defaults:
+                pretty = ", ".join(f"{k}={v}" for k, v in sampling_defaults.items())
+                print(f"[saguaro] sampling defaults from the {'config' if 'sampling' in cfg else 'model'}: {pretty}",
+                      flush=True)
+            vcfg_in = cfg.get("vision") or None
+            vlog = (open(cfg["log"], "a", encoding="utf-8") if cfg.get("log") else None) if vcfg_in else None
+            # pictures: the encoder's environment, whether it runs on demand, and the engine's environment (one function,
+            # also the bench's: tools/maya_bench.py start_command)
+            vcfg, venv, on_demand, fp, engine_env = vision_plan(cfg, env, Path(a.config).resolve().with_name("vision-memory.json"))
+            if on_demand:
+                print(f"[saguaro] images: the vision encoder needs {fp[1] / 2**30:.2f} GB on this GPU at up to {fp[0]} "
+                      "image tokens", flush=True)
+            elif vcfg_in and vcfg_in.get("gpu") and vcfg and not vcfg.get("gpu"):
+                print("[saguaro] images: the vision encoder could not be measured on the GPU - it runs on the CPU",
+                      flush=True)
+            if vcfg and not on_demand:
+                print("loading the vision encoder ...", flush=True)
+                vision = Vision(vcfg, log=vlog, env=venv)
+            print("loading the model (the first start takes a minute or two) ...", flush=True)
+            if len(gpu_list(cfg)) > 1 and models.family(cfg) != "ik2":
+                print(f"[saguaro] layer split across GPUs {gpu_list(cfg)} ({cfg.get('layer_split') or 'auto'})", flush=True)
+            t0 = time.time()
+            engine = StrataEngine(cfg["exe"], engine_args(cfg), cwd=cfg.get("cwd"), log=cfg.get("log"), env=engine_env)
+            engine.load_s = round(time.time() - t0, 1)      # (the dashboard's estimate of a reload: this start's time)
+            warn_tight_ram(engine.info.get("arena_mib"))
+            if vision is None and not vcfg and engine.info.get("vision") == "ds4":
+                # DeepSeek-V4.1: the engine's own vision tower (the checkpoint's); the server resizes the pictures
+                vision = ds4_vision.Vision(ds4_vision.Geometry.from_info(engine.info),
+                                           picture_dir("saguaro-ds4-pictures-"), Vision.load)
+                room = engine.info.get("vision_room")
+                where = (f"{engine.info.get('vision_mib')} MiB kept" if room in (None, "resident") else
+                         f"none between pictures, ~{engine.info.get('vision_room_mib')} MiB while one is read, lent by "
+                         + {"chunk": "the prompt buffers", "tail": "expert slots", "free": "free memory"}.get(room, room))
+                print(f"[saguaro] images: the model's vision tower runs in the engine (GPU {engine.info.get('vision_gpu')}: "
+                      f"{where}), up to {vision.g.max_tokens} tokens a picture", flush=True)
+            elif vision is None and not vcfg and engine.info.get("vision") == "hy4":
+                # Hy4-flash: the engine's own vision tower (the mmproj file in its pack); the server resizes the pictures
+                vision = hy4_vision.Vision(hy4_vision.Geometry.from_info(engine.info),
+                                           picture_dir("saguaro-hy4-pictures-"), Vision.load)
+                # (where a picture's room comes from - the engine's `vision_room`: "chunk" = lent by its prompt buffers)
+                where = (f"; no VRAM kept for pictures (~{engine.info.get('vision_room_mib')} MiB while one is read, lent "
+                         "by the prompt buffers)" if engine.info.get("vision_room") == "chunk" else "")
+                print(f"[saguaro] images: the model's vision tower runs in the engine, up to {vision.g.max_pixels} pixels "
+                      f"({vision.g.max_tokens} tokens for a square one) a picture{where}", flush=True)
+            elif vision is None and not vcfg and engine.info.get("vision") == "mm3":
+                # MiniMax-M3.1-Flash: the engine's own vision tower; the server resizes the pictures
+                vision = mm3_vision.Vision(mm3_vision.Geometry.from_info(engine.info),
+                                           picture_dir("saguaro-mm3-pictures-"), Vision.load)
+                print(f"[saguaro] images: the model's vision tower runs in the engine, up to {vision.g.max_pixels} pixels "
+                      f"({vision.g.max_tokens} tokens) a picture", flush=True)
+            elif vision is None and not vcfg and engine.info.get("vision") == "off":
+                # (DeepSeek-V4.1: its tower did not load - the engine's NOTE line above says why; no pictures offered)
+                print("[saguaro] images: OFF - pictures are refused until the vision tower loads (see the line above)",
+                      flush=True)
+            if on_demand:
+                lent = int(engine.info.get("vision_lend") or 0)
+                if lent > 0:
+                    vision = Vision(vcfg, log=vlog, env=venv, start=False)
+                    vision.lend = lambda: engine.command("VLEND", "VLENT")
+                    vision.reclaim = lambda: engine.command("VRECLAIM", "VRECLAIMED")
+                    print(f"[saguaro] images: the vision encoder starts when a picture arrives, in {lent / 2**30:.2f} GB "
+                          "the model lends it", flush=True)
+                elif models.family(cfg) == "ik2":
+                    # Inkling 2 (its engine lends no memory and keeps none for pictures): the encoder starts when a picture
+                    # arrives - on the GPU when its free memory then holds what the encoder measured, else on the CPU -
+                    # and ends once the request's pictures are read
+                    need, cards = fp[1], gpu_list(cfg) or [0]
+                    free_of = amd_gpu_free_bytes if cfg.get("backend") == "hip" else gpu_free_bytes   # (Windows: the Monitor finds the engine's cards with its hipInfo)
+                    vision = Vision(vcfg, log=vlog, env=venv, start=False)
+                    vision.room = lambda: ik2_vision_gpu(cards, need, free_of)
+                    vision.cpu_threads = max(1, (os.cpu_count() or 2) // 2)
+                    free = {g: (free_of(g) or 0) for g in cards}
+                    print(f"[saguaro] images: the vision encoder starts when a picture arrives - on "
+                          f"{'the GPU of ' + ', '.join(map(str, cards)) + ' with the most free memory' if len(cards) > 1 else f'GPU {cards[0]}'}"
+                          f" while {need / 2**30:.2f} GB of it is free ("
+                          + ", ".join(f"GPU {g}: {b_ / 2**30:.2f} GB" for g, b_ in free.items()) +
+                          " now), else on the CPU; no VRAM kept for it", flush=True)
+                else:   # the model's GPU memory is too small to lend that much (or an engine without lending)
+                    print("[saguaro] images: the model cannot lend the vision encoder its GPU memory here - the encoder "
+                          "runs on the CPU", flush=True)
+                    vision = Vision(dict(vcfg, gpu=False), log=vlog, env=venv)
+        elif kind == "batch":
+            engine, vision, sampling_defaults = start_qfn(cfg, tok)
+        else:
+            engine, vision, sampling_defaults = MockEngine(tok, a.script or [
+                "Thinking about it.</think>\n\nHello from the mock engine."],
+                tok_s=float(os.environ.get("SAGUARO_MOCK_TOK_S") or 0) or None), None, {}
+    except Exception as e:                                  # the load failed (issue #20): /health now says
+        load_state.fail(e)                                  #  {"status": "failed", "error": ...}, the page shows it
+        print(f"[saguaro] the model failed to load: {e or type(e).__name__}", flush=True)
+        if ends_on_failed_load(supervisor, a.exit_on_fail):
+            # a supervisor owns the starts: llama-swap retries a start whose process ends, but must not wait on one
+            # that stands with a page it will never look at.  Give its /health poll one sight of the failure (rather
+            # than a bare closed port), but never wait forever for a check that may never come.  With --exit-on-fail
+            # alone nobody polls: end at once.
+            if supervisor:
+                load_state.failed_seen.wait(60)
+            httpd.shutdown()
+            end_spawned()                                   # a half-started engine must not outlive this start
+            return 1
+        here = "127.0.0.1" if a.host in ("0.0.0.0", "", "::") else a.host
+        print(f"[saguaro] the page at http://{here}:{load_state.port}/ says what went wrong; Ctrl+C closes it",
+              flush=True)
+        try:
+            wait_for_stop(stop)                             # the standing failed page (a direct start)
+        except KeyboardInterrupt:
+            pass
+        httpd.shutdown()
+        end_spawned()
+        return 1
     # the model's own chat template (exported with its tokenizer), else the original model's.  A GLM-5.3-Flash pack's
     # copy is the one its GGUF carried (August's): the template zai-org publishes now renders the same prompts and
     # matches tool results to their calls without nested loops (zai-org/GLM-5.3-Flash PR #63: 100 parallel calls
@@ -9095,7 +9388,7 @@ def main() -> int:
     svc.loop_guard = loop_guard_setting(cfg)            # (SAGUARO_LOOP_GUARD=0 or "loop_guard": false: off)
     if not svc.loop_guard:
         print("[saguaro] loop guard: off (a request's \"loop_guard\": true turns it on for that request)", flush=True)
-    svc.api_key = a.api_key or cfg.get("api_key", "")
+    svc.api_key = api_key
     try:
         svc.cors_origins = parse_cors_origins(cfg.get("cors_origins"))
     except ValueError as e:
@@ -9108,7 +9401,7 @@ def main() -> int:
     if cfg.get("backend") == "hip":                      # (Windows: the Monitor finds the engine's cards with its hipInfo)
         from serve import telemetry
         telemetry.HIP_BIN_DIRS = [d for d in cfg.get("lib_dirs") or [] if Path(d).is_dir()]
-    svc.supervisor = os.environ.get("SAGUARO_SUPERVISOR") or supervisor_name()
+    svc.supervisor = supervisor                           # (llama-swap: it owns starts, stops, switches and configs)
     if svc.supervisor:
         print(f"[saguaro] started by {svc.supervisor}: model switching, updates, port and config changes are its own",
               flush=True)
@@ -9168,7 +9461,9 @@ def main() -> int:
               f"chat: {', '.join(hub.servers)}", flush=True)
         hub.start()
         atexit.register(hub.close)                      # the servers Strata started end with it
-    httpd = serve(svc, host=a.host, port=a.port)
+    if a.config:                                           # this config loaded: remember it (issue #20), so the
+        write_last_good(a.config, cfg.get("model_name"))   #  page of a later start that fails can offer it again
+    take_over(httpd, svc)                                  # (the same socket, from the first second to the end)
     svc.start_idle_unload()
     here = "127.0.0.1" if a.host in ("0.0.0.0", "", "::") else a.host
     print(f"ready: http://{here}:{a.port}/v1  (OpenAI: /v1/chat/completions, /v1/responses, Anthropic: /v1/messages, "

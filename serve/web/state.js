@@ -6,6 +6,8 @@ import {store, writeClipboard} from "./lib.js";
 export const S = {
   // what the server says
   health: {model: "maya", images: false, max_context: 0, version: null, api_key: false, mcp_tools: false},
+  starting: null,           // the starting service's /health while the model loads: loading, or failed (issue #20);
+                            // null once the real service answers (null before its first answer too)
   metrics: null,            // GET /metrics, every second
   conn: "connecting",       // "ok", "connecting", "down" (three failed polls), "key" (an API key is needed),
                             // "unloaded" (behind llama-swap: the model is off the card, nothing is polled)

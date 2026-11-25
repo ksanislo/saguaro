@@ -39,6 +39,7 @@ import maya_quants  # noqa: E402  (tools/) the quants' names users see, and each
 
 SWITCH_FILE = ".maya-switch.json"           # the server's note to saguaro.py: start this config next (a switch)
 DELETE_FILE = ".maya-delete.json"           # ... and to the next server: delete this config (it was the one running)
+LAST_GOOD = ".maya-last-good.json"          # what loaded successfully last: a failed load's page offers to start it
 CONTEXTS = [8192, 32768, 65536, 131072]       # the setup's choices (a config's own size is offered too)
 DS4_CONTEXTS = [32768, 65536, 131072, 262144, 524288, 1048576]   # ... for DeepSeek (saguaro.py's DS4_CONTEXTS)
 MM3_CONTEXTS = DS4_CONTEXTS                                       # ... and MiniMax (saguaro.py's MM3_CONTEXTS)

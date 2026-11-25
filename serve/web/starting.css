@@ -1,0 +1,20 @@
+/* serve/web/starting.css - the screen that answers on the port while the model loads (issue #20): centred and
+   quiet, in the app's own colours, so the hand-over to the normal page is one continuous page. */
+.start { min-height: 100vh; min-height: 100dvh; display: flex; align-items: center; justify-content: center;
+         padding: var(--st-s-6); background: var(--st-bg); color: var(--st-ink); }
+.start__card { width: 100%; max-width: 520px; display: grid; gap: var(--st-s-3); justify-items: center;
+               text-align: center; }
+.start__logo { width: 48px; height: 48px; }
+.start__title { font-size: var(--st-fs-xl); font-weight: var(--st-fw-bold); margin: 0; line-height: var(--st-lh-tight); }
+.start__model { color: var(--st-ink-soft); margin: 0; }
+.start__meta { color: var(--st-ink-muted); font-size: var(--st-fs-sm); margin: 0; max-width: 100%;
+               overflow-wrap: anywhere; }
+.start__meta code, .start__error code { font-family: var(--st-font-mono); font-size: var(--st-fs-xs); }
+.start__error { margin: 0; padding: var(--st-s-3) var(--st-s-4); border-radius: var(--st-r-md); width: 100%;
+                box-sizing: border-box; background: var(--st-danger-tint); color: var(--st-danger-text);
+                font-size: var(--st-fs-sm); overflow-wrap: anywhere; }
+.start__hint { color: var(--st-ink-muted); font-size: var(--st-fs-sm); margin: 0; }
+.start__spin { width: 28px; height: 28px; border-radius: 50%; border: 3px solid var(--st-line-strong);
+               border-top-color: var(--st-accent); animation: start-spin .9s linear infinite; }
+@keyframes start-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .start__spin { animation: none; } }

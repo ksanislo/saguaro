@@ -5530,6 +5530,7 @@ def bench(cfg_path: Path, version: str, compare: str | None = None, rounds: int 
     import socket
     if smoke and compare:
         fail("--bench-smoke runs this build alone", "leave --compare out")
+    import urllib.error
     import urllib.request
     cfg = read_json(cfg_path)
     select_build_backend(cfg.get("backend", "cuda"))
@@ -5540,6 +5541,11 @@ def bench(cfg_path: Path, version: str, compare: str | None = None, rounds: int 
         urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=2)
         fail(f"Saguaro is running (port {port}): the benchmark needs the GPU memory it holds",
              "stop it (Ctrl+C in its window), then run --bench again")
+    except urllib.error.HTTPError:
+        # 503 the model is loading: the page is up since the first second and the engine child is already
+        # filling its memory just the same - it holds what the benchmark needs, exactly as when it answers 200
+        fail(f"Saguaro is loading on port {port}: the benchmark needs the GPU memory it is taking",
+             "wait for it (its page says \"loading\") or stop it, then run --bench again")
     except OSError:
         pass
     sys.path.insert(0, str(ROOT))
