@@ -1707,6 +1707,17 @@ def check_pc(a, family: str = "glm", gguf: bool = False, ds4_quant: str = "exl3"
         warn("Pascal (compute capability 6.x) is experimental: the engine builds for it with its portable kernels "
              "(the prompt attention on the F32 cores) and caches global loads in L1 there, but Saguaro has not been "
              "validated on such a card yet - tell us how it goes in an issue")
+    # (v1.2.1-B review finding 4: CMakeLists.txt's qfn_engine rule (1787-1808) takes engines/qfn's experimental
+    #  pre-Turing path only when EVERY arch of the list is < 75 - a mixed list keeps _qfn_archs 75, so the build
+    #  serves the newer cards and the pre-Turing one gets a binary with no kernel image for it.  The engine's C++
+    #  is off-limits to this branch, so check_pc says it plainly; a refusal would strand a PC that runs fine on
+    #  either class alone, so this is a warning with the way out)
+    if family == "qfn" and min(archs) < QF.SM75 <= max(archs):
+        warn("these GPUs mix pre-Turing cards (compute capability below 7.5) with newer ones: saguaro-qfn's "
+             "experimental pre-Turing build is made only when EVERY chosen card is older than 7.5 - this mixed "
+             "list builds for the newer cards only, and the pre-Turing card would get a binary with no kernel "
+             "image for it (run the setup with --gpu N for one class of these cards at a time; the other class "
+             "can be set up again later)")
     problems = []                                      # (what is wrong, how to fix it): all of them at once
 
     nvcc, nv = find_nvcc(archs, a.nvcc)

@@ -116,11 +116,15 @@ Baseline before the work: `test_qfn_fit` 27 / `test_setup_qfn` 52, both green; n
 
 ## Open questions
 
-* **The minimum's constants.** DENSE 3.9 / KV 2.8@32K / activations 1.4 / buffers 4 / system 8 come
+* **The minimum's constants.** DENSE 3.9 / activations 1.4 / buffers 4 / system 8 come
   from the plan's mortar Monitor measurements; the dense weights scale per quant by the files' total
-  size (Q8_0 ~1.7x).  One corner they create: a T4 that reports 14.x GB (ECC state, driver build)
-  is below the comfortable 15 and gets the slow treatment while `t4_sized()` still hands it the
-  live `11,24,36` split - the plan's own 15.0/16.0 rows never hit this.
+  size (Q8_0 ~1.7x).  The resident K/V window is no longer a Monitor figure: the review found the
+  2.8 GiB@32K line contradicted the module's own measured `KV_BYTES` by 7.24x, and the engine's own
+  INFO `kv_bytes_token=` (generate.cpp:12401, 12 QSA layers x 1,056 B at `--kv` int8 = 0.39 GiB at
+  32768 cells) settled it - `kv_resident_gib` now *is* `kv_vram_gib`, one constant.  One corner the
+  constants create: a T4 that reports 14.x GB (ECC state, driver build) is below the comfortable 15
+  and gets the slow treatment while `t4_sized()` still hands it the live `11,24,36` split - the
+  plan's own 15.0/16.0 rows never hit this.
 * **A comfortable row with experts over VRAM+RAM** (e.g. 24 GB card + 128 GB RAM, Q8_0; or the
   measured AMD Q8_0 box) writes no warning, exactly as today: "fits today stays fits" was kept so
   the measured boxes and LiveT4Parity cannot move.  Whether such rows deserve an informational note
@@ -128,7 +132,9 @@ Baseline before the work: `test_qfn_fit` 27 / `test_setup_qfn` 52, both green; n
 * **Mixed Pascal + newer cards**: the top-level CMake builds saguaro-qfn for all-old archs
   (pre-Turing path) or for the new ones - a P40 beside a T4 builds sm_75 only (pre-existing
   engine-build behaviour; "change engine C++" was off-limits).  A single P40, the hand-run box,
-  builds and lays out fine.
+  builds and lays out fine.  `check_pc` now says this plainly for a chosen mixed list (a warning
+  naming the missing kernel image and the `--gpu N` one-class-at-a-time way out) instead of
+  building past the pre-Turing card in silence.
 * **The Models page** (`serve/model_pull.py`) still words QFN's needs as the measured box ("16 GB
   or more and about 96 GB ... 96 GB are needed") - the plan's steps did not name it, so it stayed;
   the setup itself no longer refuses on those numbers.  Worth re-wording in a follow-up.

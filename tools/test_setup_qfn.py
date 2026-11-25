@@ -1026,15 +1026,17 @@ class PascalForQfn(unittest.TestCase):
                 patch.object(maya, "pick_cmake", return_value=None),
                 patch.object(maya, "select_build_backend", lambda b: None)]
 
-    def run_check_pc(self, nvcc):
+    def run_check_pc(self, nvcc, cards=None, a=None):
         out, got = io.StringIO(), []
         ps = self.patches(nvcc)
+        if cards is not None:
+            ps[0] = patch.object(maya.S, "gpus", return_value=cards)
         for p in ps:
             p.start()
         try:
             with patch("sys.stdout", new=out), patch.object(maya.S, "UI", None):
                 try:
-                    got.append(maya.check_pc(args(backend="cuda"), "qfn"))
+                    got.append(maya.check_pc(a or args(backend="cuda"), "qfn"))
                 except SystemExit:
                     pass
         finally:
@@ -1072,6 +1074,22 @@ class PascalForQfn(unittest.TestCase):
         self.assertEqual([g["index"] for g in pc["gpus"]], [0])
         self.assertIn("CUDA toolkit 12.8", out)
         self.assertNotIn("cannot build", out)
+
+    def test_a_mixed_pre_turing_and_newer_list_is_said_plainly(self):
+        """Review finding 4: CMakeLists.txt's qfn rule (1787-1808) builds engines/qfn's pre-Turing path only when
+        EVERY arch is < 75, so a P40 named beside a T4 builds sm_75 only - the P40 would get a binary with no
+        kernel image for it.  check_pc says that plainly (MIN_CC 61 extended this to Pascal; the engine's C++ is
+        off-limits, and the PC runs on either class alone, so it is a warning with the way out, not a refusal)."""
+        cards = [dict(self.P40), {"index": 1, "name": "Tesla T4", "vram_gb": 15.0, "arch": "75", "driver": "550"}]
+        out, pc = self.run_check_pc(("/usr/local/cuda-12.8/bin/nvcc", (12, 8)), cards=cards,
+                                    a=args(backend="cuda", gpus="0,1"))
+        self.assertIsNotNone(pc)                                       # (warned, not refused: either class alone runs)
+        self.assertIn("no kernel image for it", out)                   # (the mixed list, said plainly)
+        self.assertIn("--gpu N for one class", out)
+        out1, pc1 = self.run_check_pc(("/usr/local/cuda-12.8/bin/nvcc", (12, 8)), cards=cards,
+                                      a=args(backend="cuda", gpus="0"))  # (the P40 alone: pre-Turing build, no warn)
+        self.assertIsNotNone(pc1)
+        self.assertNotIn("no kernel image", out1)
 
 
 class QfnReport(unittest.TestCase):
