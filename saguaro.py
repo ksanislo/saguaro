@@ -87,6 +87,7 @@ sys.path.insert(0, str(HERE / "tools"))
 import setup as S  # noqa: E402  Strata's installer: PC checks, pip, llama.cpp, downloads (nothing runs on import)
 from setup import ask, fail, ok, run, say, step, warn  # noqa: E402
 from saguaro_version import saguaro_version  # noqa: E402  the version text: the banner's and the dashboard's About, one function
+import config_names as CN  # noqa: E402  the run configs' name family (saguaro-<model>.json; maya-<model>.json found too)
 import maya_import as MI  # noqa: E402  --import-model: model files downloaded some other way, found by size + sha256
 import maya_quants as Q  # noqa: E402  the quants' names users see (MiniMax M3.1 · Maya-XS) and the older ones as aliases
 import calibrate_glm as CAL  # noqa: E402  the CPU lane's tuning for this PC (./saguaro.sh --calibrate)
@@ -825,10 +826,11 @@ def read_json(path: Path) -> dict:
 
 
 def configs() -> list:
-    """The installed models' configs, the most recently used first - not the dashboard's settings the server keeps
-    beside each (<config>.shared-settings.json), which a restart took for a config of the CUDA backend."""
-    return sorted((p for p in ROOT.glob("maya-*.json") if not p.name.endswith(".shared-settings.json")),
-                  key=lambda p: p.stat().st_mtime, reverse=True)
+    """The installed models' configs, the most recently used first - both name families (config_names: the new
+    saguaro-<model>.json first, the older maya-<model>.json still found, a model under both names is the new one),
+    and not the files the server keeps beside each: its dashboard settings (<config>.shared-settings.json, which a
+    restart once took for a config of the CUDA backend) and the live Turbo sidecar (<config>.turbo.json)."""
+    return sorted(CN.list_configs(ROOT), key=lambda p: p.stat().st_mtime, reverse=True)
 
 
 def zfs_arc_gb(path: str = "/proc/spl/kstat/zfs/arcstats") -> float:

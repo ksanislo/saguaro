@@ -25,7 +25,7 @@ tiers, and the engine works on a copy of this PC's expert usage file (usage_copy
 A setting is kept only when it beats the engine's own by more than MIN_GAIN in an interleaved re-measurement - the
 expert tiers follow the text and the OS adds noise, so single measurements differ by a few percent.
 
-    python tools/calibrate_glm.py maya-<model>.json      # measure and print; ./saguaro.sh --calibrate also saves it
+    python tools/calibrate_glm.py saguaro-<model>.json      # measure and print; ./saguaro.sh --calibrate also saves it
 """
 from __future__ import annotations
 
@@ -461,6 +461,6 @@ def apply(env: dict, settings: dict) -> dict:
 
 if __name__ == "__main__":
     if len(sys.argv) != 2:
-        sys.exit("usage: calibrate_glm.py <maya-*.json>")
+        sys.exit("usage: calibrate_glm.py <saguaro-*.json> (older maya-*.json names work too)")
     res = run(json.loads(Path(sys.argv[1]).read_text(encoding="utf-8-sig")))
     print(json.dumps(res, indent=1))

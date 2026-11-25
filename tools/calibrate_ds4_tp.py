@@ -18,7 +18,7 @@ rates decide together (two starts of one setting differ by a few percent: the ex
 Effective groups come from each GPU's VRAM tp_n field, not --tp: fallback duplicates close before inference and are
 not ranked as different settings. Incomplete grouping telemetry preserves the config's TP rather than guessing.
 
-    python tools/calibrate_ds4_tp.py maya-ds4.json     # measure and print; ./saguaro.sh --calibrate also saves it
+    python tools/calibrate_ds4_tp.py saguaro-ds4.json     # measure and print; ./saguaro.sh --calibrate also saves it
 """
 from __future__ import annotations
 
@@ -345,7 +345,7 @@ def measure(cfg: dict, vram: list[float], short, long_ids, start_engine, say=pri
 if __name__ == "__main__":
     import json
     if len(sys.argv) != 2:
-        sys.exit("usage: calibrate_ds4_tp.py <maya-ds4.json>")
+        sys.exit("usage: calibrate_ds4_tp.py <saguaro-ds4.json> (the older maya-ds4.json works too)")
     import setup as S
     c = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
     found = {g["index"]: g for g in S.gpus() or []}

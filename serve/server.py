@@ -194,6 +194,7 @@ from serve.response_config import ENV_KEYS as RESPONSE_ENV_KEYS, limits_from_env
 from serve.response_jobs import BackgroundJobs, JobError  # noqa: E402
 from serve.response_store import StoreBusy  # noqa: E402
 from serve.update import RESTART_EXIT, Updater  # noqa: E402
+import config_names  # noqa: E402  (tools/) the config name family: saguaro-<model>.json, the old maya- one found too
 import maya_quants  # noqa: E402  (tools/) the quants' names users see (the model first: "GLM-5.3 · Maya-S")
 
 try:                        # Saguaro's release (the dashboard's About; the engine's INFO carries none)
@@ -3658,8 +3659,7 @@ class Service:
     def _model_path(self, name) -> Path:
         name = str(name or "")
         p = self.models_root() / name
-        if (not re.fullmatch(r"maya-[^/\\]+\.json", name) or name.endswith(".shared-settings.json")
-                or not p.is_file()):
+        if (not config_names.is_config_name(name) or not p.is_file()):
             raise ValueError(f"no model config named {name!r} here")
         return p
 

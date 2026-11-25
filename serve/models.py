@@ -1,4 +1,5 @@
-"""serve/models.py - the web app's Models page: the run configs the setup wrote (maya-<model>.json beside saguaro.py), what
+"""serve/models.py - the web app's Models page: the run configs the setup wrote (saguaro-<model>.json beside
+saguaro.py; the older maya-<model>.json name is still found - tools/config_names.py), what
 each one runs with, the engine settings the page changes in them, and a model deleted (delete_plan, delete).
 
 A config's settings, as the page shows them (None: the engine's own default, or "auto"):
@@ -35,6 +36,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+import config_names  # noqa: E402  (tools/) the config name family: saguaro-<model>.json, the old maya- one found too
 import maya_quants  # noqa: E402  (tools/) the quants' names users see, and each config's family
 
 SWITCH_FILE = ".maya-switch.json"           # the server's note to saguaro.py: start this config next (a switch)
@@ -819,13 +821,12 @@ def command(cfg: dict) -> dict:
 
 # ------------------------------------------------------------------ the list
 def config_paths(root: Path) -> list:
-    """The installed models' configs, the most recently used first (saguaro.py's configs()).  Beside them the page
-    keeps its own files - <config>.shared-settings.json and a model's live Turbo sidecar <config>.turbo.json:
-    neither is a model."""
+    """The installed models' configs, the most recently used first (saguaro.py's configs()).  Both name families
+    (tools/config_names.py: saguaro-<model>.json, the older maya-<model>.json still found, a model under both names
+    is the new one); beside them the page keeps its own files - <config>.shared-settings.json and a model's live
+    Turbo sidecar <config>.turbo.json - and neither is a model."""
     try:
-        found = [p for p in Path(root).glob("maya-*.json")
-                 if not p.name.endswith((".shared-settings.json", ".turbo.json"))]
-        return sorted(found, key=lambda p: p.stat().st_mtime, reverse=True)
+        return sorted(config_names.list_configs(root), key=lambda p: p.stat().st_mtime, reverse=True)
     except OSError:
         return []
 
@@ -889,7 +890,7 @@ def quant_label(cfg: dict, path: Path) -> str:
     names, maya_quants); else its installer key, or the config's own name for one the setup did not write."""
     fam, key = family(cfg), maya_quants.config_key(cfg)
     what = maya_quants.tier(fam, key) or maya_quants.OTHERS.get((fam, key)) or OTHER_QUANTS.get((fam, str(key).lower()))
-    return str(what or key or path.stem.removeprefix("maya-").removesuffix("-hip"))
+    return str(what or key or config_names.bare(path.stem).removesuffix("-hip"))
 
 
 def missing(cfg: dict) -> str | None:
