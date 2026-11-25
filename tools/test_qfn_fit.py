@@ -338,7 +338,8 @@ class PolicyMatrix(unittest.TestCase):
     """The 1.2.1-B plan's matrix, every row judged one of three ways: refused (R: the card or the RAM cannot
     hold the model), slow (S: warned + confirmed, the layout scaled down), or fits as laid out today (F).  The
     one row no quant can run on besides the 4 GB cards of TrueMinimum: an 8 GB card under Q8_0 (its ~6.6 GiB of
-    dense weights need 9.0 GB on the card)."""
+    dense weights need 9.0 GB on the card) - its PAIR runs it slow, 5.6 GB a card by the split (review
+    finding 2: the minimum is per card of the layout, not of a card alone)."""
 
     QUANTS = ["ud-q4_k_xl", "q8_0", "cyber-frost-q5_k_m"]
     RAMS = [32.0, 64.0, 96.0, 256.0]                               # (each row's verdict at these RAMs, "S" below
@@ -358,10 +359,12 @@ class PolicyMatrix(unittest.TestCase):
         "RX 7900 XTX": [amd(0, 24.0, "gfx1100", "AMD Radeon RX 7900 XTX (gfx1100)")],
         "RX 9070 XT": [amd(0, 16.0)],
         "8 GB card": [gpu(0, 8.0, "89", "GeForce RTX 4060")],
+        "2x 8 GB": [gpu(0, 8.0, "89", "GeForce RTX 4060"), gpu(1, 8.0, "89", "GeForce RTX 4060")],
         "24 + 16 pair": [gpu(0, 24.0, "86", "RTX A5000"), gpu(1, 16.0, "86", "RTX A4000")],
     }
     EXPECT = dict.fromkeys(CARDS, "SSFF")                          # (the card holds up everywhere: the RAM row)
     EXPECT["2080 Ti 11"] = EXPECT["3060 12"] = EXPECT["8 GB card"] = "SSSS"   # (small cards: slow everywhere)
+    EXPECT["2x 8 GB"] = "SSSS"                                     # (Q8_0 included: 5.6 GB a card by the split)
 
     def test_the_matrix_verdicts(self):
         for label, cards in self.CARDS.items():

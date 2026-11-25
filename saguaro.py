@@ -7248,17 +7248,20 @@ def qfn_about() -> str:
             "offered as a quant of its own, in the quant list).")
 
 
-def qfn_quant_fit(quant: str, vram: float, ram: float) -> str | None:
-    """Why a quant cannot run at all on one GPU of `vram` GiB and `ram` GiB of RAM (v1.2.1-B's true minimum: the
-    card must hold its share of the dense weights, a minimum resident K/V, the activations and the reserve; the
-    RAM, the dense weights' plus buffers plus the system), in one plain line with the numbers, or None.  A PC
-    under the quant's measured "needs" but over the minimum RUNS - slowly; the layout warns loudly and confirms
-    (set_up_qfn), it does not refuse what can run."""
-    need = QF.card_min_gib([{"vram_gb": vram}], quant)[0]
-    if vram and vram < need:
-        return (f"{Q.shown('qfn', quant)} cannot run on this GPU: its {vram:.0f} GB cannot hold the "
-                f"{need:.1f} GB a card of this layout must: its share of the dense weights and a minimum "
-                f"resident K/V, {QF.ACTIVATIONS_GIB} GB of activations and {QF.RESERVE_GIB:.1f} GB kept free")
+def qfn_quant_fit(quant: str, gpus: list, ram: float) -> str | None:
+    """Why a quant cannot run at all on these GPUs (the chosen cards: {"name", "vram_gb"}) and `ram` GiB of RAM,
+    in one plain line with the numbers, or None.  v1.2.1-B's true minimum, priced over the layer split this
+    layout would use (review finding 2): every card must hold its share of the dense weights and a minimum
+    resident K/V by the split - a pair of 8 GB cards runs Q8_0 slowly, each holding its half, where one 8 GB
+    card alone cannot hold it - plus the activations and the reserve; the RAM, the dense weights' plus buffers
+    plus the system.  A PC under the quant's measured "needs" but over the minimum RUNS - slowly; the layout
+    warns loudly and confirms (set_up_qfn), it does not refuse what can run."""
+    for g, need in zip(gpus, QF.card_min_gib(gpus, quant)):
+        v = float(g.get("vram_gb") or 0)
+        if v and v < need:
+            return (f"{Q.shown('qfn', quant)} cannot run on this GPU: its {v:.0f} GB cannot hold the "
+                    f"{need:.1f} GB a card of this layout must: its share of the dense weights and a minimum "
+                    f"resident K/V, {QF.ACTIVATIONS_GIB} GB of activations and {QF.RESERVE_GIB:.1f} GB kept free")
     rmin = QF.ram_min_gib(quant)
     if ram and ram < rmin:
         return (f"{Q.shown('qfn', quant)} cannot run with {ram:.0f} GB of RAM: at least about {rmin:.0f} GB - "
@@ -7267,16 +7270,17 @@ def qfn_quant_fit(quant: str, vram: float, ram: float) -> str | None:
     return None
 
 
-def choose_qfn_quant(a, prev: dict, vram: float, ram: float) -> str:
-    """--model's quant, else asked among the ones that fit (UD-Q4_K_XL the default; a quant that does not fit is listed
-    with the reason and refused)."""
+def choose_qfn_quant(a, prev: dict, gpus: list, ram: float) -> str:
+    """--model's quant, else asked among the ones that fit (UD-Q4_K_XL the default; a quant that does not fit is
+    listed with the reason and refused).  `gpus`: the chosen cards - the fit is every quant's per-card minimum
+    over the split this layout would use (qfn_quant_fit), not the smallest card priced alone."""
     keys = list(Q.QFN_QUANTS)
     want = getattr(a, "qfn_quant", None)
     if not want:
         before = (prev.get("installer") or {}).get("qwen_quant")
         rows = []
         for k in keys:
-            m, why = qfn_entry(k), qfn_quant_fit(k, vram, ram)
+            m, why = qfn_entry(k), qfn_quant_fit(k, gpus, ram)
             note = ("does not fit this PC" if why else "recommended" if k == QFN_DEFAULT_QUANT else
                     "not measured on AMD yet" if not m.get("measured") else None)
             rows.append((Q.shown("qfn", k, m["download_gb"]), note,
@@ -7284,7 +7288,7 @@ def choose_qfn_quant(a, prev: dict, vram: float, ram: float) -> str:
                                                                      else "")))
         default = keys.index(before) if before in keys else keys.index(QFN_DEFAULT_QUANT)
         want = keys[choose("Which quant?", [f"{Q.QFN_SHOWN}'s files:"], rows, default, a.yes)]
-    why = qfn_quant_fit(want, vram, ram)
+    why = qfn_quant_fit(want, gpus, ram)
     if why:
         fail(why, "a PC with more RAM / VRAM, or another model")
     return want
@@ -7701,9 +7705,8 @@ def set_up_qfn(a, prev: dict) -> Path | None:
             fail(f"{QFN_SHOWN} is not set up on an APU (Strix Halo / Gorgon Halo) yet: it was measured on a "
                  "discrete GPU", "another model, or set it up by hand (docs/AMD_SAGUARO.md)")
     step(2, "your choices")                            # 2
-    vram = min(float(g.get("vram_gb") or 0) for g in pc["gpus"])   # every card caches its own layers' experts
-    ram = mem_gb()[0]
-    quant = choose_qfn_quant(a, prev, vram, ram)
+    ram = mem_gb()[0]                                  # (the quant menu: the chosen cards, every one caching its
+    quant = choose_qfn_quant(a, prev, pc["gpus"], ram)  #  own layers' experts - priced over the split, finding 2)
     m = qfn_entry(quant)
     lay = QF.plan(pc["gpus"], ram, quant)
     if not lay["fits"]:
