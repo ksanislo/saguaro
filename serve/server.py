@@ -7375,9 +7375,7 @@ def make_handler(svc: Service):
                     self._json(200, svc.mcp.status() if svc.mcp else {"servers": [], "tools": 0})
                 return
             if path == "":
-                body = (ROOT / "serve" / "web" / "index.html").read_bytes()
-                # the favicon's cache-bust version comes from VERSION (a no-op when index.html carries no placeholder)
-                body = body.replace(b"?v=__VERSION__", f"?v={SAGUARO_VERSION or ''}".encode())
+                body = index_html()
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))
@@ -8189,6 +8187,144 @@ def serve(svc: Service, host="127.0.0.1", port=8095) -> ThreadingHTTPServer:
     return httpd
 
 
+def index_html() -> bytes:
+    """The page itself (serve/web/index.html), the favicon's cache-bust version from VERSION (a no-op when it carries
+    no placeholder).  Both services serve it: the starting one and the real one (issue #20 phase 1)."""
+    body = (ROOT / "serve" / "web" / "index.html").read_bytes()
+    return body.replace(b"?v=__VERSION__", f"?v={SAGUARO_VERSION or ''}".encode())
+
+
+class LoadState:
+    """What the "starting" service answers with while the engine is not there yet (issue #20 phase 1): the model's
+    name, and that the load runs.  main() hands the real Service over on the same socket (take_over)."""
+
+    def __init__(self, model: str, log_path=None, api_key: str = "", supervisor: str | None = None, port=8095):
+        self.model, self.log_path = model, log_path
+        self.api_key, self.supervisor, self.port = api_key, supervisor, port
+        self.t0 = time.time()
+        self.status = "loading"
+
+    def health(self) -> dict:
+        return {"status": self.status, "model": self.model}
+
+
+def make_loading_handler(state: LoadState):
+    """The service that answers on the port from the first second of every start (issue #20 phase 1): the page
+    (index, web/*, fonts) and /health while the engine loads, and everything the engine would answer says
+    503 {"error": "the model is loading"} with Retry-After: 5 - requests may not wait unbounded.  The API key, when
+    configured, is checked on everything the real handler checks it on; /health and the page's files stay open."""
+
+    class LoadingHandler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.0"                       # as the real handler: an answer ends the connection
+        timeout = request_timeout()
+
+        def log_message(self, fmt, *args):
+            pass
+
+        def _json(self, code, obj, retry_after=None):
+            body = json.dumps(obj, ensure_ascii=False).encode()
+            self.send_response(code)
+            if retry_after:
+                self.send_header("Retry-After", str(retry_after))
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _authorized(self) -> bool:                      # (the real handler's check, against the config's key)
+            if not state.api_key:
+                return True
+            auth = self.headers.get("Authorization", "")
+            given = auth[7:].strip() if auth.lower().startswith("bearer ") else self.headers.get("x-api-key", "")
+            if given and any(hmac.compare_digest(given.encode(), k.encode()) for k in key_list(state.api_key)):
+                return True
+            self._json(401, {"error": {"type": "authentication_error", "message": "missing or wrong API key"}})
+            return False
+
+        def _loading(self):
+            self._json(503, {"error": "the model is loading"}, retry_after=5)
+
+        def _static(self, path) -> bool:
+            """The page's own files - index, /web/ (styles, script, icons, manifest) and the fonts - open, as today.
+            True when this answer was one of them."""
+            if path == "":
+                body, ctype = index_html(), "text/html; charset=utf-8"
+            elif path == "/web":
+                # the manifest's old start_url: the page is one level up, relative (the real handler's redirect)
+                raw = self.path.split("?")[0]
+                self.send_response(302)
+                self.send_header("Location", ("../" if raw.endswith("/") else "./") + self.path[len(raw):])
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return True
+            elif path.startswith("/web/"):
+                name = path[len("/web/"):]
+                types = {".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8",
+                         ".svg": "image/svg+xml", ".webmanifest": "application/manifest+json"}
+                ext = os.path.splitext(name)[1]
+                f = ROOT / "serve" / "web" / name
+                if "/" in name or "\\" in name or ext not in types or not f.is_file():
+                    self._json(404, {"error": {"message": "not found"}})
+                    return True
+                body, ctype = f.read_bytes(), types[ext]
+            elif path.startswith("/fonts/"):
+                name = path[len("/fonts/"):]
+                f = ROOT / "serve" / "web" / "fonts" / name
+                if "/" in name or "\\" in name or not name.endswith(".woff2") or not f.is_file():
+                    self._json(404, {"error": {"message": "not found"}})
+                    return True
+                body, ctype = f.read_bytes(), "font/woff2"
+            else:
+                return False
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return True
+
+        def do_GET(self):
+            path = self.path.split("?")[0].rstrip("/")
+            if self._static(path):
+                return
+            if path == "/health":
+                self._json(503, state.health())
+                return
+            if self._authorized():
+                self._loading()
+
+        def do_POST(self):
+            if self._authorized():
+                self._loading()
+
+        def do_DELETE(self):
+            if self._authorized():
+                self._loading()
+
+        def do_OPTIONS(self):
+            self._loading()        # (a preflight while nothing runs: the same "ask again in 5" as its requests)
+
+    return LoadingHandler
+
+
+def serve_loading(state: LoadState, host="127.0.0.1", port=8095) -> ThreadingHTTPServer:
+    """Bind the port before the engine starts, and answer on it from the first second (issue #20 phase 1): every
+    start and restart used to leave the port dead for the minutes the model takes to load."""
+    httpd = Server((host, port), make_loading_handler(state))
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    return httpd
+
+
+def take_over(httpd, svc) -> None:
+    """The real service takes the same listening socket: no gap, no second bind (issue #20 phase 1).  socketserver
+    reads the handler class per connection, so the connection after this line gets the real handler."""
+    svc.start_telemetry()
+    svc.listen = (httpd.server_address[0], httpd.server_address[1])   # (the dashboard's Port setting starts from it)
+    httpd.response_service = svc
+    httpd.RequestHandlerClass = make_handler(svc)
+
+
 SHARED_KEYS = ("reasoning_effort", "temperature", "top_p", "top_k", "seed", "max_tokens", "experimental_speed_projection",
                "repetition_penalty", "frequency_penalty", "presence_penalty")
 
@@ -8922,11 +9058,18 @@ def main() -> int:
     if a.gpu is not None:
         cfg["gpu"] = int(a.gpu) if a.gpu.strip().isdigit() else a.gpu
     a.host = a.host or cfg.get("host") or "127.0.0.1"   # issue #26: the run scripts pass no --host, the config can
-    try:                                                # before the minutes of loading: is the port free?
-        Server((a.host, a.port), BaseHTTPRequestHandler).server_close()
+    api_key = a.api_key or cfg.get("api_key", "")
+    supervisor = os.environ.get("SAGUARO_SUPERVISOR") or supervisor_name()
+    # the page answers on this port from the first second of the load (issue #20); this bind doubles as the old
+    # "is the port free" check: a second start stops here, before the minutes of loading
+    load_state = LoadState(cfg.get("model_name", "qwen3.8-flash-next"), log_path=cfg.get("log"),
+                           api_key=api_key, supervisor=supervisor)
+    try:
+        httpd = serve_loading(load_state, host=a.host, port=a.port)
     except OSError:
         ap.error(f"port {a.port} is already in use - is Saguaro (or another server) already running? "
                  f"Close it, or start this one with a different --port")
+    load_state.port = httpd.server_address[1]
     if cfg.get("tokenizer"):
         a.tokenizer = cfg["tokenizer"]
     tok = ByteTokenizer()
@@ -9084,7 +9227,7 @@ def main() -> int:
     svc.loop_guard = loop_guard_setting(cfg)            # (SAGUARO_LOOP_GUARD=0 or "loop_guard": false: off)
     if not svc.loop_guard:
         print("[saguaro] loop guard: off (a request's \"loop_guard\": true turns it on for that request)", flush=True)
-    svc.api_key = a.api_key or cfg.get("api_key", "")
+    svc.api_key = api_key
     try:
         svc.cors_origins = parse_cors_origins(cfg.get("cors_origins"))
     except ValueError as e:
@@ -9097,7 +9240,7 @@ def main() -> int:
     if cfg.get("backend") == "hip":                      # (Windows: the Monitor finds the engine's cards with its hipInfo)
         from serve import telemetry
         telemetry.HIP_BIN_DIRS = [d for d in cfg.get("lib_dirs") or [] if Path(d).is_dir()]
-    svc.supervisor = os.environ.get("SAGUARO_SUPERVISOR") or supervisor_name()
+    svc.supervisor = supervisor                           # (llama-swap: it owns starts, stops, switches and configs)
     if svc.supervisor:
         print(f"[saguaro] started by {svc.supervisor}: model switching, updates, port and config changes are its own",
               flush=True)
@@ -9157,7 +9300,7 @@ def main() -> int:
               f"chat: {', '.join(hub.servers)}", flush=True)
         hub.start()
         atexit.register(hub.close)                      # the servers Strata started end with it
-    httpd = serve(svc, host=a.host, port=a.port)
+    take_over(httpd, svc)                                  # (the same socket, from the first second to the end)
     svc.start_idle_unload()
     here = "127.0.0.1" if a.host in ("0.0.0.0", "", "::") else a.host
     print(f"ready: http://{here}:{a.port}/v1  (OpenAI: /v1/chat/completions, /v1/responses, Anthropic: /v1/messages, "
