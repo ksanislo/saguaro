@@ -8364,19 +8364,20 @@ def set_up_qfn(a, prev: dict) -> Path | None:
                                 "Past 256K the elastic YaRN extends the model's", "trained 256K to 1M (the cost in "
                                 "pinned RAM is said after the answers-at-once question; --context N",
                                 "allows any whole 64K step up to 1M):"])
-    ok(f"context: {ctx} tokens" + (" (recommended)" if ctx == (QFN_DEFAULT_CONTEXT if hip else lay["context"]) else ""))
     # C18: past the trained 262144 the extension is YaRN (--rope-scaling yarn / --yarn-orig-ctx / --rope-scale,
     # the elastic SAGUARO_YARN_ELASTIC=1 already in the env): 64K steps up to 1M, and --rope-scale follows the
     # chosen max (max / 262144).  The engine parses --rope-scale as a double (engines/qfn generate.cpp: atof into
     # a double, only its >= 1 check), so a fractional factor like 384K's 1.5 is written as computed - never
-    # rounded, and a size that is no whole 64K step (or past 1M) is refused plainly, not fitted.
+    # rounded, and a size that is no whole 64K step (or past 1M) is refused plainly, not fitted - refused before
+    # the line below, so a refused size never gets to say "context: N tokens" first (review nit).
+    if ctx > QF.YARN_ORIG_CTX and (ctx > QF.CONTEXT_MAX or ctx % QF.CONTEXT_STEP):
+        fail(f"{ctx} is not a context {QFN_SHOWN} runs: past {context_label(QF.YARN_ORIG_CTX)} the YaRN "
+             f"extension goes in whole {context_label(QF.CONTEXT_STEP)} steps, up to "
+             f"{context_label(QF.CONTEXT_MAX)}",
+             "--context 524288 (512K) or --context 1048576 (1M), any other whole 64K step up to 1M, "
+             "or 262144 or below")
+    ok(f"context: {ctx} tokens" + (" (recommended)" if ctx == (QFN_DEFAULT_CONTEXT if hip else lay["context"]) else ""))
     if ctx > QF.YARN_ORIG_CTX:
-        if ctx > QF.CONTEXT_MAX or ctx % QF.CONTEXT_STEP:
-            fail(f"{ctx} is not a context {QFN_SHOWN} runs: past {context_label(QF.YARN_ORIG_CTX)} the YaRN "
-                 f"extension goes in whole {context_label(QF.CONTEXT_STEP)} steps, up to "
-                 f"{context_label(QF.CONTEXT_MAX)}",
-                 "--context 524288 (512K) or --context 1048576 (1M), any other whole 64K step up to 1M, "
-                 "or 262144 or below")
         ok(f"past {context_label(QF.YARN_ORIG_CTX)}: YaRN - plain RoPE to {context_label(QF.YARN_ORIG_CTX)}, "
            f"the YaRN table above it: --rope-scale {QF.yarn_scale_text(ctx)} (= {ctx} / {QF.YARN_ORIG_CTX}), "
            "--yarn-orig-ctx " + str(QF.YARN_ORIG_CTX) + "; with the config's SAGUARO_YARN_ELASTIC=1 a conversation "

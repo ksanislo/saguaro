@@ -2078,6 +2078,7 @@ class LongContextC18(SetupFlow):
         said = out.getvalue()
         self.assertIn("whole 64K steps", said)
         self.assertIn("1M", said)
+        self.assertNotIn("context: 2097152 tokens", said)    # (review nit: refused before it is said)
 
     def test_a_part_step_past_256k_is_refused(self):
         out = io.StringIO()
@@ -2086,6 +2087,7 @@ class LongContextC18(SetupFlow):
         said = out.getvalue()
         self.assertIn("whole 64K steps", said)
         self.assertIn("524288", said)
+        self.assertNotIn("context: 300000 tokens", said)     # (review nit: refused before it is said)
 
 
 class AnswersAtOnceC18(SetupFlow):
