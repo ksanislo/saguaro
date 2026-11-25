@@ -323,11 +323,95 @@ The MiniMax-M3.1-Flash engine (saguaro-mm3), our proof-of-concept profile on May
 
 ## HY4
 
-_(step 4)_
+The Hy4-Flash engine (saguaro-hy4). Installed in the live stack since 11-23 with no profile of its own
+(ref/live-stack-notes.md:29), so almost nothing here is measured.
+
+1. **Tensor parallel across a group of cards.** Where: `src/hy4/hy4_tp.cpp` / `hy4_tp.hpp` (the host's side,
+   `Options::tp`), the planning and the sums in `Model::Impl::plan()` in `src/hy4/hy4_model.cu`.
+   Switches and defaults: `--tp N`; the knobs are bare `HY4_TP_*` - `HY4_TP_F32` (default: F16 partial sums,
+   `hy4_model.cu:741`), `HY4_TP_ONE_BLOCK` (:743), `HY4_TP_EXPERTS` (:786), `HY4_TP_LANE` (the group takes the CPU lane
+   only with `=1`, :2163), `HY4_TP_DOWN` (:2092), `HY4_TP_HELPER` (:2558), `HY4_TP_MIXED` (:2505),
+   `HY4_TP_PART_NODES=1` (each member's slice of the partials on its own GPU's NUMA node, :664),
+   `HY4_TP_DRAFT_HEAD` (:1797). Gain: not measured for Hy4 (the live four-T4 pair profile is Inkling's, not Hy4's).
+   Exact within a group (the same terms; `HY4_TP_F32=1` asks for F32 accumulation).
+2. **KV spill: the indexed layers' rows past what RAM holds go to a file beside the pack.** Where:
+   `src/hy4/hy4_spill.hpp`, `Options::kv_spill` (`src/hy4/hy4_model.hpp:61`), `kv_spill_on_plan()`
+   (`src/hy4/hy4_model.cu:1374`) and the auto rule inside `spill_layer()` (`:1458`). Switch and default:
+   `--kv-spill on|off|auto` (auto = on where the RAM does not fit), `--kv-spill-dir` (the pack's directory).
+   Gain: not measured. Exact (the same bytes, a different tier).
+3. **The Engram n-gram table read from the pack and looked up on a side stream.** Where: the table's own format
+   (`engram.bin`, `Engram::engram()` in `src/hy4/hy4_pack.hpp:192`), the kernels `engram_rows()` / `engram_mix()` in
+   `src/hy4/hy4_kernels.cu:3004`/`:3011`, and the gather behind the previous layer's FFN partial
+   (`src/hy4/hy4_model.cu:444`). Switches and defaults: the model's geometry decides; `HY4_ENGRAM_EPS` and `hy4.txt`'s
+   `engram_scales` (`src/hy4/hy4_model.cu:969-976`), `HY4_EG_DUMP=<file>` in tests. Gain: not measured.
+   Exact - with no eps set the norms take the type's machine epsilon, as the release's graph does.
+4. **`SAGUARO_PCIE_SAFE=1`: a host-safety switch.** Why: some PCs reset when all cards stream weights from host memory
+   at once. Where: `tp_share_on` in `src/hy4/hy4_model.cu:1678`. Switch and default: `=1` turns the TP share (and the
+   lane's use of it, `:7065`) off; unset means the fast behaviour. It is in the Hy4 smoke line
+   (`tp4, 131K, SAGUARO_PCIE_SAFE=1`, ref/reports/REPORT-upstream-v1.1.75.md:162). Gain: not measured. Exact.
+5. **Upstream's HOT_SEED taken, our copy shipped.** Where: `hot_init()` (`src/hy4/hy4_model.cu:6558`, the
+   `HY4_HOT_SEED` read at `:6596`) and the seed files `data/hy4-hot-seed/hy4-expert-hot-*.bin`.
+   Switch and default: `HY4_HOT_SEED` names the file; without one for this PC the engine learns its own.
+   Taken from upstream (1823471fb engine part, the seed files via up75-setup,
+   ref/reports/REPORT-upstream-v1.1.75.md:81-82) - kept here because it is a per-PC file we ship. Exact.
+6. **Not on AMD, not on Pascal, and one gap the Monitor shows.** `saguaro.py:772` keeps Hy4 out of the AMD picker
+   ("its engine has not run on an AMD GPU yet"); it compiles for gfx1201 and would need the same card check DS4 and
+   MM3 got, plus the two memory traps MiniMax hit (ref/reports/REPORT-amd-ds4mm3.md:196-210). On Pascal it needs a
+   `__nanosleep` guard and WMMA guards in `src/hy4/ds4/ds4_iq.cu` before it builds at all, and the model is 117 GB on
+   four cards (ref/reports/REPORT-p40.md:76). Hy4 (and Inkling) never report `kv_bytes_token`, so the Monitor's
+   Context bar has no K/V figure for them - true on main too (ref/reports/REPORT-upstream-v1.1.75.md:31-32).
 
 ## IK2
 
-_(step 4)_
+The Inkling 2 Mini engine (saguaro-ik2), our own port; live since 11-23 as the two `--tp 2` Inkling profiles
+(ref/live-stack-notes.md:28). Biggest first.
+
+1. **Drafting made a speed gain: our switches on top of upstream v1.1.75's window.** Why: upstream's drafting alone was
+   flat or negative on our traffic and its gate is unstable on Turing. Where: the defaults block in `main()`,
+   `src/ik2/ik2_main.cu:7727-7744`; the controller's reads at `backoff` :4889, `gate` :4982, `lk_match` :5026; the
+   drafter's head in `set_head_q8()` (`src/ik2/ik2_draft.cu:1099`); the snapshot rings at `snap_rings` :9182.
+   Switch and default: each default is set only where the environment does not set the switch, so
+   `SAGUARO_IK2_<X>=0/1` still wins - T4 anywhere: `SAGUARO_IK2_DRAFT_GATE=0` + `DRAFT_BACKOFF=1`,
+   `DRAFT_HEAD_TILES=1`, `BLOCK_SPLIT=1`, `DRAFT_SNAP=1`, `DRAFT_SNAP_RINGS=1`; plus `LOOKUP_MATCH=1` where every
+   expert is resident and `BLOCK_EXACT=0` (the rounding-level window) on the T4 UD dynamic cache; AMD offload, Pascal,
+   the two-GPU split and `--parallel 2`: drafting off. Gain: T4 UD +8.6 % (agent turns +23..+27 %), T4 resident
+   +4.4 %, RX 9070 XT resident +11.3 %, and -1..-12 % on the AMD offload layout, so off there
+   (ref/PERF-LEDGER.md:877-878, ref/reports/REPORT-ik2-draft-gain.md:22-26). The resident gains are bit-identical;
+   the +8.6 % is answer-changing at near-ties (window KL mean 5.3e-5, top-1 99.73 %).
+2. **Pascal (Tesla P40): our own kernels, and the host memory released.** Why: the generic scalar kernels sit at
+   45-50 % of the P40's bandwidth and ik2 pinned its whole GGUF. Where: `src/ik2/ik2_pascal.cu` / `.cuh` (the gates
+   `expert_layout()`/`env_on()` at :498-534), hooked from `src/ik2/ik2_kernels.cu` and `src/ik2/ik2_main.cu`.
+   Switch and default: `SAGUARO_IK2_PASCAL_EXPERTS`, `_PASCAL_Q8_EXPERTS`, `_PASCAL_Q8`, `_PASCAL_Q8_SPLIT`,
+   `_PASCAL_ATTN` (on for the Pascal arch class, `=0` per path) and `SAGUARO_IK2_RELEASE_HOST` (default on for
+   Pascal); `--chunk auto` is Pascal's default when `--chunk` is not given (8192, else 4096). Gain: decode
+   36.2 / 32.4 / 28.7 -> 40.1 / 37.3 / 33.5 tok/s (0 / 8K / 30K deep, ECC on), `--chunk auto` reads +19 %
+   (8K 384 -> 458), peak RSS 14-17 GB -> 2.2 GB with the same logits (ref/PERF-LEDGER.md:886-888,
+   ref/reports/REPORT-ik2-p40-tuning.md:28-34, 62). Run to run bit-equal; KL vs the T4 reference 2.1e-3, the
+   cross-kernel-class class. The bigger chunk does change answers after long prompts (chunk 2048 vs 4096/8192 alone:
+   4e-3 on the one-T4 quant, 9.5e-3 on UD-Q4, top-1 93.7 %) - recorded as Ken's decision, and `--chunk 2048` restores
+   the old numerics (ref/reports/REPORT-ik2-p40-tuning.md:48).
+3. **Two cards as a pair, with drafting off under `--tp`.** Where: the same `--tp` path as Hy4's; the live profiles run
+   `bin/saguaro-ik2 --tp 2` on one socket pair each, group `inkling-pairs` (ref/live-stack-notes.md:28-29).
+   Switch and default: `--tp 2`; drafting is off there because `tp_forward` is the prompt path (a host sync every
+   visit, no conversation records to roll back). Gain: the two instances together run 138 tok/s
+   (ref/reports/REPORT-ik2-draft-gain.md:116). A verify window under `--tp` is queued (~+17 % on code on paper,
+   ref/reports/REPORT-ik2-draft-gain.md:100-101).
+4. **The drafter we dropped for upstream's.** `SAGUARO_IK2_DRAFT_Q8` (the layers as planar Q8_0 on q8_tile:
+   7.35 -> 5.56 ms a round on UD, 0.62 instead of 0.85 GiB, and it fits beside the one-T4 quant at 8K where the BF16
+   drafter never did) was dropped on the merge in favour of upstream's GGUF Q8_0 drafter, which does the same thing
+   properly (its step recorded as a CUDA graph, the Markov fold int8) - the switch is gone from this tree, so what
+   remains of it is the `SAGUARO_IK2_DRAFT_HEAD_TILES` path (`set_head_q8()`, `src/ik2/ik2_draft.cu:1099`).
+   ref/reports/REPORT-ik2-draft-gain.md:89-95, 124-127. Acceptance unchanged (0.64 vs 0.59).
+5. **AMD, Volta and the offload layout.** Upstream's Inkling-on-AMD commit (bdbc727ba) was merged with our AMD offload
+   path, dynamic expert cache, drafter placement, `--tp` and Pascal spin rather than taken as-is, and upstream's
+   drafting was ported to Volta and Turing (c2ca8a1a6) with our card checks kept (`ik2_kernels_test`: 397 checks on
+   sm_75, 403 on HIP; `SAGUARO_IK2_DRAFT_FORCE=2` drafts anyway on the AMD offload path).
+   ref/reports/REPORT-upstream-v1.1.75.md:79, 88, 128-132, 137, 175. Gain: item 1's numbers.
+6. **Measured and not built**: drafting on Pascal (a window of 2 costs ~48 ms against 26 ms for one token; break-even
+   needs ~85 % acceptance, which only document edits reach, ref/reports/REPORT-ik2-p40-tuning.md:64-68), the 4-card
+   drafter split on the other socket pair (the drafter cannot overlap the verify: its taps and the bonus token come out
+   of round n's, ref/reports/REPORT-ik2-draft-gain.md:108-114), and 8-bit activations in the inexact window (the dense
+   part is not where the window's cost is, ref/reports/REPORT-ik2-draft-gain.md:54-55).
 
 ## QFN
 
@@ -439,11 +523,107 @@ engines/qfn is our own port of Strata (its own CMake project; `serve/qfn_engine.
 
 ## serve + web
 
-_(step 4)_
+One `serve/server.py` for all engines, plus the browser app in `serve/web`.
+
+1. **One server for all six MoE profiles, with QFN's batch driver inside it.** Why: one install, one port, one UI;
+   `--engine qfn` used to exec engines/qfn's own server. Where: `start_qfn()` (`serve/server.py:8193`) and
+   `_qfn_engine_class()` (`:8255`), the engine-kind notes at `:29` and `:38-39`, and the generated
+   `serve/qfn_engine.py` (from `engines/qfn/serve/server.py`, by `tools/saguaro/extract_qfn_engine.py`).
+   Switch and default: `SAGUARO_QFN_SHIM=1` falls back to the old exec-the-other-server shim
+   (ref/live-stack-notes.md:20-25). Gain: no speed change - QFN reads unchanged on the shared server
+   (Q4 35.9K in 21.4-21.5 s, Q8 27.7 s, ref/PERF-LEDGER.md:94). Exact.
+2. **Several chats answering at once from one page, per-chat and engine-total speeds labelled, `/health` advertising
+   `capabilities`.** Where: `serve/web/chats.js` / `chat-view.js`, `Service.capabilities()`
+   (`serve/server.py:2988`), the `/health` line (`serve/server.py:7147`). Switch and default: none.
+   Gain (per chat vs engine total, one chat beside another): GLM 4.0 vs 10.3, DS4 7.5 vs 12.8, QFN Q8 9.3 vs
+   15.6 tok/s (ref/PERF-LEDGER.md:97).
+3. **Fixed on the way: a new web answer no longer cancels the other chats.** Why: the one-at-a-time rule in
+   `jobs_put` took away every other place. Where: `jobs_put()` (`serve/server.py:6243`), called from the web path at
+   `:7698`. Switch and default: none. Gain: not measured (a behaviour fix; the check is
+   `bench/saguaro-one/multichat.py` - every engine streams the other chat during a read and cancels only the asked one,
+   ref/PERF-LEDGER.md:95-96).
+4. **Engines without logprobs answer instead of failing, and QFN's `/metrics` stopped crashing.** Why: clients ask for
+   logprobs unconditionally; QFN and MiniMax report none, and `vram()` was read as a method.
+   Where: the capabilities note at `serve/server.py:2981`. Switch and default: none. Gain: not measured
+   (ref/PERF-LEDGER.md:98-100).
+5. **The Saguaro rebrand, with the old names kept where a rename would break something.** Where: the `[saguaro]` log
+   prefix (`serve/server.py:247`, and the engines' lines via `tools/saguaro/rename_log_prefixes.py`), the desert theme
+   and logo in `serve/web/`. Switch and default: none. Kept on purpose: users' `MAYA_*` / `STRATA_*` setting names, the
+   browser's `maya.*` / `strata.*` keys (`serve/web/chats.js:61`, `:88`) and the quant names
+   (ref/live-stack-notes.md:24-25). Gain: not measured.
+6. **The UI under llama-swap refuses what the supervisor owns.** Why: a page that switched models or rewrote a config
+   fought the process manager. Where: `supervisor_name()` (`serve/server.py:8185`) and `svc.supervisor` (`:8738`).
+   Switch and default: the refusal (409 on switch / update / port / context / Turbo / config writes) is on whenever a
+   supervisor is detected; `SAGUARO_SUPERVISOR=""` says there is none and lifts it (ref/ROLLBACK.md:317-319).
+   Gain: not measured (a safety change).
+7. **The loop guard, and the fair read pause.** Where: `serve/loop_guard.py` (a request's guard, `:163`) and
+   `fair_read_seconds()` / `fair_read_yield_seconds()` (`serve/server.py:536-549`). Switch and default: the guard is on
+   (a repeated block ends the answer with finish `stop`, even with `ignore_eos`); `SAGUARO_FAIR_READ_S` (0 = off) and
+   `SAGUARO_FAIR_READ_YIELD_S` (30). Effect: synthetic long decodes stop early by design, so a test that needs a fixed
+   length must use varied prompts (ref/PERF-LEDGER.md:503-505); a long read pauses for a request waiting behind it.
+   Answer-changing for the guarded answers - which is the point.
+8. **DeepSeek's `gt=` render skipped, and the MiniMax/QFN gaps the one-server work left.** Where: the unified merge's
+   server change (ref/live-stack-notes.md:71), `serve/ds41_encoding.py`. Known: QFN and MiniMax report no logprobs and
+   MiniMax's saved conversations came later (see MM3 item 6), so the Monitor shows nothing for them
+   (ref/PERF-LEDGER.md:100). Gain: not measured.
 
 ## setup/tools
 
-_(step 4)_
+The things that keep an intake routine (docs/UPSTREAM.md §2) and what our setup writes that upstream's does not.
+
+1. **The rename layer, as tools.** Where: `main()` in `tools/saguaro/rename_env.py` (settings by suffix pattern,
+   `--check`), `tools/saguaro/migrate_configs.py` (our configs), `rename_log_prefixes.py:rewrite`, and
+   `rename_internal_maya.py:rename` (the internal `include/strata` -> `include/maya` rename, reproducing upstream's
+   own commit). Switch and default: not runtime - each tool is idempotent and tested, and a missed name is a tool bug
+   fixed in the tool (docs/UPSTREAM.md §2). Gain: not measured per run; the target is an intake of "a few hours, not a
+   rewrite".
+2. **`tools/saguaro/extract_qfn_engine.py`: the QFN server adapter is generated.** Where: `main()`,
+   `tools/saguaro/extract_qfn_engine.py:43`, writing `serve/qfn_engine.py`. Switch and default: none - re-run it after
+   changing QFN's server. `serve/test_dashboard.py` reads the generated file (`:429`), so a stale copy fails a test
+   rather than the live box.
+3. **The AMD compile checks.** Where: `tools/check_hip_compat.py` + its test `tools/test_hip_compat.py` (every CUDA
+   name the HIP build compiles must have a mapping in `include/maya/hip_compat/`; since 90fcee373 it also finds inline
+   PTX and CUDA headers an AMD device pass compiles, evaluating each file's `#if` chain for gfx1201 / gfx1100 - no
+   ROCm or GPU needed), and `tools/hip_syntax_check.py` (`check()` at `:78`: the real thing - every HIP source through
+   ROCm's clang with `-fsyntax-only`, host and device passes, `--arch gfx1201|gfx1100`). In this tree the syntax check
+   is run by hand: its own header (`:12`) says `tools/test_hip_compat.py` runs it when `SAGUARO_HIP_SYNTAX_ROCM` is set,
+   but no line of this tree's `tools/test_hip_compat.py` or CI refers to it - that wiring is on the
+   `saguaro/amd-ds4mm3` lineage, together with the CONTRIBUTING change that makes AMD a supported platform. Reverting
+   the 11-22 fixes, the syntax check reported exactly those 12 errors plus MiniMax's `'+f'` asm constraint, which the
+   name scan missed (ref/reports/REPORT-amd-ds4mm3.md:30).
+4. **QFN built inside the top project.** Where: `CMakeLists.txt:1787-1808` - `-DSAGUARO_QFN=ON` builds `engines/qfn`
+   with this configure's generator, compilers and CPU ISA floor (`-DSTRATA_ISA_FLOOR=avx` for the Ivy Bridge T4 box),
+   and takes the pre-Turing path (`STRATA_EXPERIMENTAL_SM60`) only when every arch is < 75 - so a mixed `--gpus` list
+   warns instead of building a binary with no kernel image for the old card, and the sub-build inherits the setup's
+   ninja (`CMAKE_MAKE_PROGRAM`), which a PC without ninja on PATH needs. Helpers: `tools/qfn/build.sh`,
+   `tools/qfn/build_hip.sh`, the `qfn-hip-compile` CI job (`.github/workflows/tests.yml:53`), `tools/qfn/kl.py` (the
+   quality harness) and `tools/qfn/speed.py`. Gain: not measured (build fixes; the engines' own numbers are in the QFN
+   section).
+5. **The setup's QFN fit: what it refuses, warns about, and scales down.** Where: `plan()` and `best_gpus()` in
+   `tools/qfn_fit.py` (`MIN_CC = 61` at `:33` - Pascal and newer), `resident_budget_gib()` at `:146` with
+   `RAM_SPARE_GB = 20` at `:29`, and `PASCAL_ENV` / `PASCAL_ENV_QUANT` at `:93-94`. Switch and default: the RAM tier is
+   RAM - 20 GiB (measured on 91.7 GiB: 71); on all-sm_6x cards the setup writes `SAGUARO_Q8_SM60=1` +
+   `SAGUARO_MTP_Q8_SM60=1`, and `SAGUARO_DENSE_F32=1` only for GSQ IQ3_S (measured exact there). It refuses only what
+   cannot run, says so with numbers, and warns then scales down (drafting off, `--kv-resident`, 32K) behind a confirm
+   that `--yes` skips. Gain: the RAM tier is decode +32 % / 8K read +20 % (ref/PERF-LEDGER.md:866-867).
+6. **Per-engine setup rules that differ from upstream.** Where: `NO_ENGINE` (`saguaro.py:771`: Hy4 not on AMD, Metal
+   GLM-only, and saguaro-qfn on NVIDIA since T2 - one card, or the layers split across up to four - so the old
+   "set up by hand there" note is out of date); `tools/ik2_fit.py:pascal()` (`:364`) with `layout()` (`:373`) leaving
+   `--chunk` out on Pascal where one card holds every expert (the engine's `auto` then applies; the Models page reads
+   `--chunk` as a number, so a literal `auto` would be dropped at the next save); and `serve/model_pull.py`'s measured
+   AMD figures. Gain: on the P40 that choice is the +19 % read number in the IK2 entry above
+   (ref/reports/REPORT-p40-batch.md:18-30).
+7. **`--bench`, and the tree kept free of our box's paths.** Where: `tools/maya_bench.py` (the lock and hot-flag
+   variables at `:34`; `--bench --compare <folder|git ref>` builds by CMake target) - upstream 3d1b67905 taken with
+   our quiet-machine, warm-up and median rules (ref/reports/REPORT-upstream-v1.1.75.md:86). And the cleanup a fresh
+   user's report asked for: `/opt/llm` and `/data/llm` paths out of `configs/`, `RUN-hy4-first-load.md` gone, the
+   issue links pointed at ksanislo/saguaro (ref/reports/REPORT-mortar-fresh-install.md:138-141, 195-212).
+   Gain: not measured (the fresh-user reports are the test). Still open from those reports, and unfixed here: the AMD
+   VRAM reserve (3072 MiB whether or not a display drives the card - `SAGUARO_GLM_RESERVE_MB=1024` gave Maya-S +9 %
+   decode and Maya-L's reads 5.1 -> 107 tok/s, ref/reports/REPORT-mortar-first-runs.md:78-88), the shipped gfx1201
+   hipBLASLt tuning file not matching ROCm 7.1's 100100 (`:96-99`), `--yes` starting the 1.1 GB vision download without
+   `--download-model` (`:111-115`), and switching Inkling quants carrying the old `--chunk` over
+   (ref/reports/REPORT-mortar-user-install.md:102).
 
 ## Dropped from upstream on purpose (the Maya Qwen path)
 
