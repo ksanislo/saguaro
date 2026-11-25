@@ -2,13 +2,13 @@
 
 Back to the [README](../README.md).
 
-Experimental: GLM-5.3-Flash on a Mac with Apple Silicon, on its GPU through Metal, with the same dashboard and the same
+GLM-5.3-Flash on a Mac with Apple Silicon, on its GPU through Metal, with the same dashboard and the same
 OpenAI- and Anthropic-compatible API as on Linux and Windows (streamed answers, tool calls, thinking levels). It reads
 pictures (`vision-glm`, the image encoder, runs on the GPU too), and it drafts
 with the model's MTP block or the DFlash2 drafter (`--draft dflash2`) when that is faster on the Mac. One conversation at a time;
 DeepSeek-V4.1-Flash, MiniMax-M3.1-Flash and Qwen-3.8-Flash-Next are NVIDIA / AMD only for now.
 
-**Status: experimental.** Mac support is a community contribution. Every change is built and unit-tested on GitHub's
+**Status:** Mac support is a community contribution. Every change is built and unit-tested on GitHub's
 Apple Silicon runners (the `macos` workflow: the engine, its sampler and the small synthetic-model tests), but the
 Saguaro team has no Mac and has not run it with the real model. If you try it on a Mac, please tell us how it went in a
 [GitHub issue](https://github.com/ksanislo/saguaro/issues): the chip and its unified memory, the model, the speed

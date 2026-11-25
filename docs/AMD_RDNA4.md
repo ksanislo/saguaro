@@ -1,4 +1,4 @@
-# R9700 / RX 9070: experimental Saguaro HIP
+# R9700 / RX 9070: Saguaro HIP
 
 The HIP installer accepts RX 7900 XT/XTX (`gfx1100`) and RX 9070 / 9070 XT /
 Radeon AI PRO R9700 (`gfx1201`), with a system ROCm 7. It runs on one GPU or splits

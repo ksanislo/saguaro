@@ -1,4 +1,4 @@
-# Experimental EXL3 overflow expert execution
+# EXL3 overflow expert execution
 
 The helper keeps additional target-model experts on a GPU outside the target TP
 group. When that group misses an expert, the helper executes its resident expert
@@ -48,7 +48,7 @@ Shared mode requires loaded DSpark blocks, TP2, and zero target layers on the
 helper. The loader reserves the requested helper pool before placing the
 drafter, so subsequent memory estimates include that allocation. The example
 uses decimal GB and requires enough remaining VRAM for drafter weights, scratch
-space, context buffers, and the requested reserve. It is an experimental budget,
+space, context buffers, and the requested reserve. It is a starting budget,
 not an automatic recommendation for every model or GPU.
 
 The measured three-R9700 configuration used `target_layers=40`, `helper_gb=20`
