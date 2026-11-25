@@ -2512,6 +2512,23 @@ class ModelManagement(unittest.TestCase):
         self.assertEqual((code, out["status"]["value"], self.engine.restarts, self.engine.running), (200, "loaded", 1, True))
         self.assertEqual(self.first_event()[1]["data"][0]["status"]["value"], "loaded")
 
+    def test_a_load_that_switches_models_answers_200_not_the_chats_503(self):
+        """POST /models/load asked for another installed model: the switch starts and the switch itself succeeded, so it
+        answers 200 + loading (not the retryable 503).  A chat naming that model keeps the 503: its request cannot be
+        served by the model that is starting."""
+        self.svc.model_management = True
+        self.svc.model_listing = lambda: [{"file": "run.json", "running": True}]
+        self.svc.model_restart = {"to": "other.json", "why": "switch", "started": time.time()}   # (the restart is set up)
+        with unittest.mock.patch("serve.model_api.find_config", return_value=Path("other.json")):
+            code, out = self.call("POST", "/models/load", {"model": "other"})
+            self.assertEqual(code, 200)
+            self.assertTrue(out["success"] and out["loading"])
+            self.assertEqual(out["model"], "other:latest")
+            self.assertIn("Saguaro starts again with it", out["message"])
+            code, out = self.call("POST", "/api/generate", {"model": "other", "prompt": "hi"})
+            self.assertEqual(code, 503)                                        # (the chat's retryable 503 stays)
+            self.assertIn("starts again with it", out["error"])
+
     def test_unload_waits_for_a_running_request(self):
         self.svc.model_management = True
         self.assertTrue(self.svc.fifo.acquire(blocking=False))      # (a request holds the engine)
