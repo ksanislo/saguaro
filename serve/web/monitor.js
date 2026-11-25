@@ -152,7 +152,7 @@ function RightNow({m}) {
         detail = `${fmt(c.generated || 0)}${c.max_tokens ? ` / ${fmt(c.max_tokens)}` : ""} tokens` +
                  `${c.tok_s ? ` · ${fmt(c.tok_s, 1)} tok/s` : ""}${took(c.elapsed_s)}`;
       }
-      return html`<div class="now__chat" title=${null}>
+      return html`<div class=${`now__chat${turboBadge(c.turbo) ? " now__chat--turbo" : ""}`} title=${null}>
         <span class="now__tags"><${Badge} tone=${tone}>${text}<//><${TurboBadge} turbo=${c.turbo}/></span>
         <div class="now__chat__body">
           ${pct != null ? html`<div class="bar bar--sm" role="progressbar" data-tone=${ptone} aria-valuenow=${Math.round(pct)}
