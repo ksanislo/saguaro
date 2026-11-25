@@ -288,6 +288,9 @@ class Ledger:
         me.update(model=model, quant=quant)
         if names and names[0]:                         # (the two parts the page names this model with, as /health says
             me["name_pretty"], me["name_quant"] = str(names[0]), str(names[1] or "")
+        else:                                          # (the config says nothing now: no old run's name beside it)
+            me.pop("name_pretty", None)
+            me.pop("name_quant", None)
         for b in BANDS:
             me["bands"].setdefault(b, zero()[b])
         if not isinstance(self.doc.get("prices"), dict):

@@ -1849,6 +1849,23 @@ class WebApp(unittest.TestCase):
         self.assertEqual(listed["glm-5.3-flash"]["model_quant"], "Maya-M")   # (the running config's, as above)
         self.assertNotIn("model_name_pretty", listed["deepseek-v4.1-flash"])
 
+    def test_a_config_that_stopped_naming_clears_the_old_name(self):
+        """a config edited between runs to say nothing (no installer record, blank model_name): the start has no name
+        to record and clears what the previous run left, so no old name sits beside the new model on that Saved row."""
+        import tempfile
+        from serve import savings
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / savings.FILE).write_text(json.dumps({"since": 1.0, "models": {
+                "maya-x.json": {"since": 1.0, "model": "glm-5.3-flash", "quant": "Maya-M",
+                                "name_pretty": "GLM 5.3", "name_quant": "Maya-M",
+                                "bands": savings.zero()}}}), encoding="utf-8")
+            led = savings.Ledger(Path(d) / savings.FILE, "maya-x.json", "glm-5.3-flash", "Maya-S",
+                                 names=(None, None))               # (/health says nothing this time)
+        got = led.doc["models"]["maya-x.json"]
+        self.assertEqual(got["quant"], "Maya-S")
+        self.assertNotIn("name_pretty", got)
+        self.assertNotIn("name_quant", got)
+
     def test_text_file_limit_follows_the_context(self):
         """#635: /health tells the chat page how big a text file the context holds (about 4 bytes a token, 512 KB to
         16 MB); the page reads it instead of a fixed 512 KB."""
