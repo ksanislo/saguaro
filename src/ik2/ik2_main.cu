@@ -49,7 +49,6 @@
 #include <windows.h>
 #include <psapi.h>
 #include <io.h>
-#include <process.h>
 #define O_RDONLY (_O_RDONLY | _O_BINARY)
 #define open _open
 #define close _close
@@ -70,7 +69,6 @@ static inline int munmap(void*, size_t) { return 0; }
 #else
 #include <sys/mman.h>
 #include <unistd.h>
-#include <sys/wait.h>
 #if defined(__linux__)
 #include <sys/syscall.h>
 #endif
@@ -6882,114 +6880,6 @@ int draft_best(const double* tps, double tie) {
     return best;
 }
 
-// The first start where the experts wait in host memory (the offload path): the drafter's room comes out of the
-// experts' VRAM tier, so plain decoding and drafting are two layouts - each is timed on its own, in a short run of
-// this program before this process takes any VRAM (IK2_DRAFT_PART=draft: the drafting layout's sources;
-// plain: --drafting off's layout), a line each in IK2_DRAFT_FILE.part ("<part>\t<key>\t<4 figures>", "skip": nothing
-// to split here), their start lines in IK2_DRAFT_FILE.measure.log.  The start itself then finds the remembered
-// choice, as every later start does - its layout, its tokens, its speed.
-int g_part = 0;   // (1: the drafting layout's run, 2: plain decoding's)
-FILE* g_part_out = nullptr;   // (a part run: the start's own output)
-FILE* part_dup_stdout() {
-#ifdef _WIN32
-    return _fdopen(_dup(_fileno(stdout)), "w");
-#else
-    return fdopen(dup(fileno(stdout)), "w");
-#endif
-}
-std::string draft_part_file() {
-    const char* f = getenv("IK2_DRAFT_FILE");
-    return f && *f ? std::string(f) + ".part" : std::string();
-}
-[[noreturn]] void draft_part_done(const char* part, const std::string& key, const double* tps) {
-    const std::string f = draft_part_file();
-    if (!f.empty()) {
-        if (FILE* out = std::fopen(f.c_str(), "a")) {
-            std::fprintf(out, "%s\t%s\t%.3f %.3f %.3f %.3f\n", part, key.c_str(), tps ? tps[0] : -1.0,
-                         tps ? tps[1] : -1.0, tps ? tps[2] : -1.0, tps ? tps[3] : -1.0);
-            std::fclose(out);
-        }
-    }
-    std::printf("measurement run (%s): done\n", part);
-    std::fflush(stdout);
-    std::fflush(stderr);
-    std::_Exit(0);   // (the driver frees this run's VRAM; nothing of it is kept)
-}
-// the part's line: true with its key and figures
-bool draft_part_read(const char* part, std::string& key, double* tps) {
-    std::ifstream in(draft_part_file());
-    std::string line;
-    bool ok = false;
-    while (std::getline(in, line)) {
-        const size_t t1 = line.find('\t'), t2 = t1 == std::string::npos ? t1 : line.find('\t', t1 + 1);
-        if (t2 == std::string::npos || line.compare(0, t1, part) != 0) continue;
-        double v[4];
-        if (std::sscanf(line.c_str() + t2 + 1, "%lf %lf %lf %lf", &v[0], &v[1], &v[2], &v[3]) != 4) continue;
-        key = line.substr(t1 + 1, t2 - t1 - 1);
-        for (int i = 0; i < 4; ++i) tps[i] = v[i];
-        ok = true;
-    }
-    return ok;
-}
-void env_set(const char* k, const char* v) {
-#ifdef _WIN32
-    _putenv_s(k, v);
-#else
-    if (*v) setenv(k, v, 1);
-    else unsetenv(k);
-#endif
-}
-// this program again with the same arguments and IK2_DRAFT_PART=part, waited for; its exit code (-1: not started)
-int draft_part_run(int argc, char** argv, const char* part) {
-    env_set("IK2_DRAFT_PART", part);
-    int rc = -1;
-#ifdef _WIN32
-    char exe[MAX_PATH + 1] = "";
-    const DWORD n = GetModuleFileNameA(nullptr, exe, MAX_PATH);
-    if (n > 0 && n < MAX_PATH) {
-        auto quote = [](const std::string& a) {   // (the C runtime's rules: \" a quote, the backslashes before one doubled)
-            if (!a.empty() && a.find_first_of(" \t\"") == std::string::npos) return a;
-            std::string q = "\"";
-            size_t bs = 0;
-            for (char ch : a) {
-                if (ch == '\\') {
-                    ++bs;
-                } else if (ch == '"') {
-                    q.append(bs + 1, '\\');
-                    bs = 0;
-                } else {
-                    bs = 0;
-                }
-                q.push_back(ch);
-            }
-            q.append(bs, '\\');
-            return q + "\"";
-        };
-        std::vector<std::string> qs;
-        qs.push_back(quote(exe));
-        for (int i = 1; i < argc; ++i) qs.push_back(quote(argv[i]));
-        std::vector<const char*> av;
-        for (const auto& s : qs) av.push_back(s.c_str());
-        av.push_back(nullptr);
-        rc = (int) _spawnv(_P_WAIT, exe, av.data());
-    }
-#else
-    std::vector<char*> av(argv, argv + argc);
-    av.push_back(nullptr);
-    const pid_t pid = fork();
-    if (pid == 0) {
-        execv("/proc/self/exe", av.data());
-        _exit(127);
-    }
-    if (pid > 0) {
-        int st = 0;
-        if (waitpid(pid, &st, 0) == pid && WIFEXITED(st)) rc = WEXITSTATUS(st);
-    }
-#endif
-    env_set("IK2_DRAFT_PART", "");
-    return rc;
-}
-
 // --check-sampling (no GPU, no model): sampled drafting keeps the distribution - a drafted position's pick (spec_pick:
 // the draft with the model's probability of it, else the distribution without it) against the plain pick
 // (sample_from) of the same distribution, a chi-square of each against the probabilities themselves, on candidate
@@ -7231,17 +7121,6 @@ int main(int argc, char** argv) {
         else die("unknown argument " + a);
     }
     g_depth = getenv("SAGUARO_IK2_DEPTH") ? std::max(0, std::atoi(getenv("SAGUARO_IK2_DEPTH"))) : 0;   // (tests: a long context's speed without its prompt)
-    if (const char* pt = getenv("SAGUARO_IK2_DRAFT_PART"); pt && *pt && serve) {   // (a first start's measurement run)
-        g_part = std::string(pt) == "draft" ? 1 : std::string(pt) == "plain" ? 2 : 0;
-        const std::string pf = draft_part_file();
-        if (!g_part || pf.empty()) die("SAGUARO_IK2_DRAFT_PART: draft or plain, with IK2_DRAFT_FILE");
-        std::fflush(stdout);
-        g_part_out = part_dup_stdout();   // (the start's own output: one line of the draft run)
-        const std::string lf = pf.substr(0, pf.size() - 5) + ".measure.log";
-        if (!std::freopen(lf.c_str(), "a", stdout)) die("cannot write " + lf);
-        std::printf("--- measurement run: %s ---\n", pt);
-        if (g_part == 2) drafting = "off";   // (plain decoding's own layout: nothing of the drafter's planned)
-    }
     if (drafting.empty()) drafting = draft_path.empty() ? "off" : "on";   // (--draft alone: as before, drafting on)
     if (drafting == "off") draft_path.clear();
     g_lookup = drafting != "off" && !(getenv("SAGUARO_IK2_LOOKUP") && !std::atoi(getenv("SAGUARO_IK2_LOOKUP")));
@@ -9818,7 +9697,6 @@ int main(int argc, char** argv) {
                 trial(have[3] ? 3 : have[2] ? 2 : have[1] ? 1 : 0, 24, warm);   // (the windows' graphs made once, untimed)
                 for (int m = 0; m < 4; ++m)
                     if (have[m]) tps[m] = trial(m, gen_n, warm);
-                if (g_part) draft_part_done(g_part == 1 ? "draft" : "plain", draft_key_s, tps);
                 const int best = draft_best(tps, tie);
                 draft_choice = best;
                 draft_remember(draft_key_s, tps, best);
