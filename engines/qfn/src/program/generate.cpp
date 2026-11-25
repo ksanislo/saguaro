@@ -1207,8 +1207,9 @@ void extra_sources_append(const int32_t* t, size_t n) {
 }
 
 // PLAN-turbo-live: the per-request lossy options on the request line: `turbo_drop=N` (the reply's decode windows route
-// with the top-k minus N experts, renormalised: SessionState::turbo_drop, native_router.hpp) and `turbo_skip` (not
-// applied by this engine: skip stays off).  Absent = off: the request is exact.
+// with the top-k minus N experts, renormalised: SessionState::turbo_drop, native_router.hpp) and `turbo_skip=ssd|ram`
+// (a pick the row's tier leaves out is its top-1 at weight 0 like a dropped one: ram = anything not resident in VRAM,
+// ssd = anything in neither VRAM nor the RAM tier; the row's top-1 always stays).  Absent = off: the request is exact.
 struct Turbo {
     int drop = 0;     // 0 = off, else 1..9 (the router's k is 10)
     int skip = 0;     // 0 off, 1 ssd, 2 ram
@@ -1219,21 +1220,54 @@ void turbo_key(Turbo& t, const std::string& key, const char* val) {
     if (key == "turbo_drop") t.drop = std::clamp(std::atoi(val), 0, 9);
     else if (key == "turbo_skip") t.skip = std::string(val) == "ram" ? 2 : std::string(val) == "ssd" ? 1 : 0;
 }
-/// The drop a request's reply routes with: SAGUARO_ROUTE_PRIOR / SAGUARO_ROUTE_RESIDENT re-pick the top-10 after the router,
-/// which would undo it, so with either on the request runs exact (said once).
-int turbo_drop_of(const Turbo& t) {
+/// SAGUARO_ROUTE_PRIOR / SAGUARO_ROUTE_RESIDENT re-pick the top-10 after the router, which would undo a Turbo cut.
+bool turbo_repick_on() {
     static const bool repick = [] {
         const char* a = std::getenv("SAGUARO_ROUTE_PRIOR");
         const char* b = std::getenv("SAGUARO_ROUTE_RESIDENT");
         return (a && std::atof(a) > 0.0) || (b && std::atof(b) > 0.0);
     }();
-    if (t.drop > 0 && repick) {
+    return repick;
+}
+/// The drop a request's reply routes with (0 with a re-pick on: said once).
+int turbo_drop_of(const Turbo& t) {
+    if (t.drop > 0 && turbo_repick_on()) {
         static bool said = false;
         if (!said) std::fprintf(stderr, "saguaro serve: turbo drop is off beside SAGUARO_ROUTE_PRIOR / SAGUARO_ROUTE_RESIDENT\n");
         said = true;
         return 0;
     }
     return t.drop;
+}
+/// Set once the engine runs with the device residency table the skip reads (main, after the cache's table), and
+/// which skip tiers the LAYOUT supports (set once the expert source is settled): 0 none, 1 ram, 2 ram + ssd.
+bool g_turbo_res = false;
+int g_turbo_skip_max = 0;
+/// The skip a request's reply routes with: off beside a re-pick or without the residency table, ssd only where
+/// the layout has a RAM-tier fact; each refusal said once and the request runs exact.
+int turbo_skip_of(const Turbo& t) {
+    if (t.skip == 0) return 0;
+    if (turbo_repick_on()) {
+        static bool said = false;
+        if (!said) std::fprintf(stderr, "saguaro serve: turbo skip is off beside SAGUARO_ROUTE_PRIOR / SAGUARO_ROUTE_RESIDENT\n");
+        said = true;
+        return 0;
+    }
+    if (!g_turbo_res) {
+        static bool said = false;
+        if (!said) std::fprintf(stderr, "saguaro serve: turbo skip needs the device residency table (the expert cache "
+                                        "with its profile): this engine runs the request exact\n");
+        said = true;
+        return 0;
+    }
+    if (t.skip > g_turbo_skip_max) {
+        static bool said = false;
+        if (!said) std::fprintf(stderr, "saguaro serve: turbo skip=%s is not applied by this engine and layout: the "
+                                        "request runs exact\n", t.skip_name());
+        said = true;
+        return 0;
+    }
+    return t.skip;
 }
 
 bool parse_i64_list(const char* s, std::vector<int64_t>& out, std::string& err) {
@@ -9744,6 +9778,10 @@ int main(int argc, char** argv) {
         vh.blob = thits.blob;
         vh.slot_off = xcache.slot_offsets();   // E-6: the device plan's pointers
         vh.n_slots = xcache.slots();
+        // PLAN-turbo-live: the skip tiers this engine routes with.  ram is the residency bar and needs the device
+        // table; which tiers the RAM LAYOUT supports (ssd) is decided with the expert source (see the source setup).
+        g_turbo_res = thits.d_res != nullptr;
+        g_turbo_skip_max = 1;
         // Layer split: `ver` runs layers [0, K1) and hands its residual to the next stage's verifier, and so on; the
         // last runs the head.  The hand-offs are mapped pinned memory, portable: a stage on another GPU reads it.
         // (--split-device 0: the second stage on this GPU, sharing its weights, session and cache - the A/B.)
@@ -12917,10 +12955,13 @@ int main(int argc, char** argv) {
             Turbo turbo;
         };
         std::vector<BSlot> bs((size_t) std::max(o.batch, 0));
-        // PLAN-turbo-live: slot b's rows route with `drop` (every stage's session of the slot; 0: exact)
-        auto slot_turbo = [&](int b, int drop) {
+        // PLAN-turbo-live: slot b's rows route with `drop` and `skip` (every stage's session of the slot; 0/0: exact)
+        auto slot_turbo = [&](int b, int drop, int skip) {
             for (auto& v : bslot_ss)
-                if (b >= 0 && (size_t) b < v.size() && v[(size_t) b]) v[(size_t) b]->turbo_drop = drop;
+                if (b >= 0 && (size_t) b < v.size() && v[(size_t) b]) {
+                    v[(size_t) b]->turbo_drop = drop;
+                    v[(size_t) b]->turbo_skip = skip;
+                }
         };
         // an admission beside the slots, at its first token: one line with where its time went
         auto adm_first = [&](int b) {
@@ -14581,7 +14622,7 @@ int main(int argc, char** argv) {
             }
             // read: the slot decodes from here as one admitted through the prompt path would
             sl.lane = false;
-            slot_turbo(b, turbo_drop_of(sl.turbo));
+            slot_turbo(b, turbo_drop_of(sl.turbo), turbo_skip_of(sl.turbo));
             sl.lane_ids.clear();
             sl.lane_ids.shrink_to_fit();
             sl.adm_read_ms = ms;
@@ -16570,7 +16611,7 @@ int main(int argc, char** argv) {
             sl.p = n - 1;
             sl.max_new = j.r.max_new;
             sl.turbo = j.r.turbo;
-            slot_turbo(b, turbo_drop_of(sl.turbo));
+            slot_turbo(b, turbo_drop_of(sl.turbo), turbo_skip_of(sl.turbo));
             sl.t0 = Clock::now();
             sl.ids.assign(ids.begin(), ids.end() - 1);
             sl.cvec = cvec_cached;
@@ -16754,7 +16795,7 @@ int main(int argc, char** argv) {
             sl.ids.assign(sl.lane_ids.begin(), sl.lane_ids.begin() + resume);
             sl.max_new = r.max_new;
             sl.turbo = r.turbo;
-            slot_turbo(b, 0);   // (its prompt is read through the windows: exact; the drop starts with its reply)
+            slot_turbo(b, 0, 0);   // (its prompt is read through the windows: exact; the drop starts with its reply)
             sl.t0 = Clock::now();
             sl.cvec = cvec_cached;
             sl.adm_log = true;
@@ -17265,7 +17306,7 @@ int main(int argc, char** argv) {
                 sl.p = n - 1;
                 sl.max_new = j.r.max_new;
                 sl.turbo = j.r.turbo;
-                slot_turbo(b, turbo_drop_of(sl.turbo));
+                slot_turbo(b, turbo_drop_of(sl.turbo), turbo_skip_of(sl.turbo));
                 sl.t0 = Clock::now();
                 sl.ids.assign(ids.begin(), ids.end() - 1);
                 sl.cvec = cvec_cached;
@@ -19975,7 +20016,7 @@ int main(int argc, char** argv) {
                     if (can && copy_to_slot(ys, pre, ye)) {
                         BSlot& sl = bs[(size_t) ys];
                         sl = BSlot{};
-                        slot_turbo(ys, 0);
+                        slot_turbo(ys, 0, 0);
                         sl.ids = std::move(pre);
                         sl.cached = true;
                         sl.partial = true;
@@ -21098,14 +21139,14 @@ int main(int argc, char** argv) {
             const int64_t decode_look0 = drive.d.cache_hits + drive.d.cache_admitted + drive.d.cache_refused;
             const int64_t offload0 = drive.d.offload_entries;   // #588
             pcie_auto.mark(drive.d.ms_run, drive.d.multi_misses);   // the prompt's windows are not the decode's
-            // PLAN-turbo-live: the reply's windows route with this request's drop (every stage's session), off again after
+            // PLAN-turbo-live: the reply's windows route with this request's drop and skip (every stage's session), off again after
             struct SoloTurbo {
                 std::vector<strata::core::SessionState*> sx;
-                ~SoloTurbo() { for (auto* u : sx) u->turbo_drop = 0; }
+                ~SoloTurbo() { for (auto* u : sx) { u->turbo_drop = 0; u->turbo_skip = 0; } }
             } solo_turbo;
             solo_turbo.sx.push_back(&ss);
             for (auto& st : stages) solo_turbo.sx.push_back(&st->ss);
-            for (auto* u : solo_turbo.sx) u->turbo_drop = turbo_drop_of(req_turbo);
+            for (auto* u : solo_turbo.sx) { u->turbo_drop = turbo_drop_of(req_turbo); u->turbo_skip = turbo_skip_of(req_turbo); }
             if (cancelled) finish = nf_hit ? "nonfinite" : read_vram ? "vram" : "cancel";
             // ======== --pipeline-windows 2: the decode windows with the two cards overlapped ========
             // Stage 0 (the first card) runs window K+1 while stage 1 verifies window K, on the guess that K is accepted
@@ -22357,7 +22398,7 @@ int main(int argc, char** argv) {
                     sl.produced = 1;
                     sl.max_new = admit_max_new;
                     sl.turbo = req_turbo;
-                    slot_turbo(admit_slot, turbo_drop_of(sl.turbo));
+                    slot_turbo(admit_slot, turbo_drop_of(sl.turbo), turbo_skip_of(sl.turbo));
                     sl.t0 = Clock::now();
                     sl.ids = live;
                     if (batch_mtp) {

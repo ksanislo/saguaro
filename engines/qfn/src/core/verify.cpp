@@ -775,7 +775,7 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
     // ---- mapped staging
     bool ok = mapped(T * 4, (void**) &h_tok_, (void**) &m_tok_) &&
               mapped(T * strata::kernels::kStepCount * 4, (void**) &h_step_, (void**) &m_step_) &&
-              mapped(T * (NH + NKV + IQ + 4) * 4, (void**) &h_pos_, (void**) &m_pos_) &&
+              mapped(T * (NH + NKV + IQ + 5) * 4, (void**) &h_pos_, (void**) &m_pos_) &&
               mapped((2 + T) * 4 + 16, (void**) &h_commit_, (void**) &m_commit_) &&
               mapped(T * N * 4, (void**) &h_ple_, (void**) &m_ple_) &&
               mapped(T * 4 + 16, (void**) &h_out_, (void**) &m_out_) &&
@@ -872,7 +872,7 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
     // ---- the device arena: the same sequence counted, then carved
     auto carve = [&](Bump& b) {
         tok_ = b.take<int32_t>(T); step_ = b.take<int32_t>(T * strata::kernels::kStepCount);
-        pos_ = b.take<int32_t>(T * (NH + NKV + IQ + 4)); commit_ = b.take<int32_t>(2 + T);
+        pos_ = b.take<int32_t>(T * (NH + NKV + IQ + 5)); commit_ = b.take<int32_t>(2 + T);
         ple_ = b.take<float>(T * N); emb_ = b.take<float>(T * N); R_ = b.take<float>(T * HC * N);
         mixed_ = b.take<float>(T * N); bo_ = b.take<float>(T * N);
         inj_ = b.take<float>(T * HC); inj2_ = b.take<float>(T * HC);
@@ -1198,9 +1198,10 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
     // a batch window with per-slot positions (--vision): the rows' rotary positions, and [t][3] the (t, h, w) of each
     // row's indexer block, staged by stage_batch; the window reads no shared position table then
     const bool row_rope = batch_rec_ && strata::kernels::slot_rope_enabled();
-    // (+ [t] each row's Turbo drop past the (t, h, w) table: always copied, a row's request routes with it)
-    copy_i32_from_mapped(pos_, m_pos_, (int64_t) MT * (NH + NKV + IQ + 4), in_s);
+    // (+ [t] each row's Turbo drop and skip tier past the (t, h, w) table: always copied, a row's request routes with them)
+    copy_i32_from_mapped(pos_, m_pos_, (int64_t) MT * (NH + NKV + IQ + 5), in_s);
     const int32_t* tdrop = pos_ + MT * (NH + NKV + IQ + 3);
+    const int32_t* tskip = pos_ + MT * (NH + NKV + IQ + 4);
     // per-ROW positions of the K rows [t][NKV] and the indexer query rows [t][IQ] (for batched RoPE)
     const int32_t* pos_k = pos_ + MT * NH;
     const int32_t* pos_i = pos_ + MT * (NH + NKV);
@@ -1956,7 +1957,17 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
         // move into the combine, gate + up share one launch (all bitwise; resident combine path, 2-8 rows only)
         const WeightRef* w_sgi = lfuse_on(n) && g_lfuse_gate() ? v.get("ffn_gate_inp_shexp.weight") : nullptr;
         bool sg_ready = false;
-        if (dec_batch && n > 1 && w_router != nullptr && native_router_enabled() && NE == 512 && K == 10) {
+        // PLAN-turbo-live: this group's Turbo tables (the window's mapped upload) and this layer's residency row.
+        // Every row off keeps the router's exact bits; a skip with no residency table is inert (the engine runs
+        // such a request exact anyway).
+        strata::kernels::TurboRoute trv;
+        trv.drop = tdrop + tb;
+        trv.skip = tskip + tb;
+        trv.res = hits_.d_res != nullptr ? hits_.d_res + l * g.n_expert : nullptr;
+        trv.layer = (int32_t) l;
+        trv.n_expert = (int32_t) g.n_expert;
+        const bool nat = native_router_enabled() && NE == 512 && K == 10;
+        if (dec_batch && n > 1 && w_router != nullptr && nat) {
             try {
                 if (w_sgi != nullptr)
                     sg_ready = bf16_gemv_fp32_mmvf_multi_aux(mixed_ + tb * N, N, (const uint16_t*) w_router->data,
@@ -1965,7 +1976,7 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                 if (!sg_ready)
                 bf16_gemv_fp32_mmvf_multi(mixed_ + tb * N, N, (const uint16_t*) w_router->data, logits_ + tb * NE, NE, N,
                                           NE, n, cs);
-                native_router_top10_multi(logits_ + tb * NE, ids_ + tb * K, w_ + tb * K, n, cs, tdrop + tb);
+                native_router_top10_multi(logits_ + tb * NE, ids_ + tb * K, w_ + tb * K, n, cs, &trv);
             } catch (const std::exception& e) { err = "verify router: " + std::string(e.what()); return false; }
 #if defined(STRATA_HIP_GFX906)
         } else if (dec_batch) {
@@ -1975,19 +1986,20 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
             if (!moe_route_window(wt, g, l, K, ss.moe, mixed_ + tb * N, logits_ + tb * NE, ids_ + tb * K, w_ + tb * K, n,
                                   cs, err))
                 return false;
-            turbo_drop_apply(ids_ + tb * K, w_ + tb * K, n, (int) K, tdrop + tb, cs);
+            turbo_drop_apply(ids_ + tb * K, w_ + tb * K, n, (int) K, trv, cs);
 #endif
         } else
         {
-            // (the native router applies the drop in its own launch; any other top-k: one drop launch for the rows)
-            const bool nat = native_router_enabled() && NE == 512 && K == 10;
+            // (the native router applies the drop and the skip in its own launch; any other top-k: one launch for the rows)
             for (int t = tb; t < te; ++t) {
                 MoEBuffers mb = ss.moe;
                 mb.logits = logits_ + t * NE; mb.ids = ids_ + t * K; mb.weights = w_ + t * K;
-                if (!moe_route(wt, g, l, K, mb, mixed_ + t * N, cs, err, nullptr, nat ? tdrop + t : nullptr)) return false;
+                strata::kernels::TurboRoute trt = trv;
+                trt.drop = tdrop + t; trt.skip = tskip + t;
+                if (!moe_route(wt, g, l, K, mb, mixed_ + t * N, cs, err, nullptr, nat ? &trt : nullptr)) return false;
             }
             if (!nat) {
-                try { turbo_drop_apply(ids_ + tb * K, w_ + tb * K, n, (int) K, tdrop + tb, cs); }
+                try { turbo_drop_apply(ids_ + tb * K, w_ + tb * K, n, (int) K, trv, cs); }
                 catch (const std::exception& e) { err = "verify router: " + std::string(e.what()); return false; }
             }
         }
@@ -2754,8 +2766,10 @@ void Verifier::stage_inputs(int T, const int32_t* tokens, int64_t pos0) {
     int32_t* const pk = h_pos_ + (size_t) max_t_ * g.n_head;
     int32_t* const pi = pk + (size_t) max_t_ * g.n_head_kv;
     int32_t* const td = h_pos_ + (size_t) max_t_ * (g.n_head + g.n_head_kv + g.idx_q_heads + 3);
+    int32_t* const ts = td + max_t_;
     for (int t = 0; t < T; ++t) {
         td[t] = ss_->turbo_drop;
+        ts[t] = ss_->turbo_skip;
         h_tok_[t] = tokens[t];
         qsa_step_fill(h_step_ + t * kStepCount, pos0 + t, s);
         // the rotary position (SAGUARO_YARN_ELASTIC: a YaRN conversation's offset by kRopeYarnOff); the step keeps the cell
@@ -3889,8 +3903,10 @@ bool Verifier::stage_batch(const int* rows, int S, int hbase, const int32_t* tok
     int32_t* const pthw = h_pos_ + (size_t) max_t_ * (g.n_head + g.n_head_kv + g.idx_q_heads);
     std::shared_ptr<const strata::kernels::SlotRope> rr[kVerifyMaxT];
     int32_t* const td = h_pos_ + (size_t) max_t_ * (g.n_head + g.n_head_kv + g.idx_q_heads + 3);
+    int32_t* const ts = td + max_t_;
     for (int t = 0; t < S; ++t) {
         td[t] = slots_[(size_t) rows[t]]->turbo_drop;
+        ts[t] = slots_[(size_t) rows[t]]->turbo_skip;
         h_tok_[t] = tokens[t];
         qsa_step_fill(h_step_ + t * kStepCount, pos[t], s);
         int32_t rp = (int32_t) pos[t];
