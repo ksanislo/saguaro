@@ -1964,6 +1964,7 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
         trv.drop = tdrop + tb;
         trv.skip = tskip + tb;
         trv.res = hits_.d_res != nullptr ? hits_.d_res + l * g.n_expert : nullptr;
+        trv.ram = hits_.d_ram != nullptr ? hits_.d_ram + l * g.n_expert : nullptr;
         trv.layer = (int32_t) l;
         trv.n_expert = (int32_t) g.n_expert;
         const bool nat = native_router_enabled() && NE == 512 && K == 10;

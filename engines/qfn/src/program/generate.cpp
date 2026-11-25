@@ -1239,12 +1239,14 @@ int turbo_drop_of(const Turbo& t) {
     }
     return t.drop;
 }
-/// Set once the engine runs with the device residency table the skip reads (main, after the cache's table), and
-/// which skip tiers the LAYOUT supports (set once the expert source is settled): 0 none, 1 ram, 2 ram + ssd.
+/// Set once the engine runs with the device residency table the skip reads (main, after the cache's table).
 bool g_turbo_res = false;
-int g_turbo_skip_max = 0;
-/// The skip a request's reply routes with: off beside a re-pick or without the residency table, ssd only where
-/// the layout has a RAM-tier fact; each refusal said once and the request runs exact.
+/// What the RAM LAYOUT says about skip=ssd (main, once the expert source is settled): 0 = no reliable RAM-tier
+/// fact (plain mmap / page cache: said once, the request runs exact), 1 = the engine holds every expert in RAM
+/// (a no-op, said once), 2 = the resident RAM mode: the compact copy is the tier's fact, mirrored on the device.
+int g_turbo_ssd = 0;
+/// The skip a request's reply routes with: off beside a re-pick or without the residency table; ssd only where
+/// the layout mirrors the RAM tier.  Each refusal said once, and the request runs exact.
 int turbo_skip_of(const Turbo& t) {
     if (t.skip == 0) return 0;
     if (turbo_repick_on()) {
@@ -1260,10 +1262,13 @@ int turbo_skip_of(const Turbo& t) {
         said = true;
         return 0;
     }
-    if (t.skip > g_turbo_skip_max) {
+    if (t.skip == 2 && g_turbo_ssd != 2) {
         static bool said = false;
-        if (!said) std::fprintf(stderr, "saguaro serve: turbo skip=%s is not applied by this engine and layout: the "
-                                        "request runs exact\n", t.skip_name());
+        if (!said) std::fprintf(stderr, "saguaro serve: turbo skip=ssd: %s - the request runs exact\n",
+                                g_turbo_ssd == 1 ? "this engine holds every expert in RAM, so nothing is read from SSD "
+                                                   "(the tier is a no-op)"
+                                                 : "this layout has no reliable RAM-tier fact (plain mmap / page cache): "
+                                                   "the engine will not guess");
         said = true;
         return 0;
     }
@@ -1620,6 +1625,7 @@ struct GpuStage {
     strata::core::ExpertCache cache;
     std::vector<std::pair<int32_t, int32_t>> profile;   ///< its layers' share of the profile, hottest first
     int32_t* d_res = nullptr;                            ///< the residency table on its device
+    int32_t* d_ram = nullptr;                            ///< the RAM tier's mirror on its device (PLAN-turbo-live skip=ssd; null: no RAM-tier fact)
     strata::core::Verifier ver;
     strata::core::Verifier ver_b;                        ///< --pipeline-windows: the odd windows' verifier
     strata::prefill::Prefill sp;
@@ -9779,9 +9785,72 @@ int main(int argc, char** argv) {
         vh.slot_off = xcache.slot_offsets();   // E-6: the device plan's pointers
         vh.n_slots = xcache.slots();
         // PLAN-turbo-live: the skip tiers this engine routes with.  ram is the residency bar and needs the device
-        // table; which tiers the RAM LAYOUT supports (ssd) is decided with the expert source (see the source setup).
+        // table.  ssd adds the RAM tier: the arena holds the whole model in RAM (nothing is read from SSD: a no-op),
+        // the resident RAM mode's compact copy IS the tier's fact (mirrored onto every card, and re-uploaded
+        // whenever the copy moved), and a plain mmap / page-cache layout has no reliable RAM-tier fact to route on.
         g_turbo_res = thits.d_res != nullptr;
-        g_turbo_skip_max = 1;
+        std::vector<int32_t> host_ram;
+        int32_t* d_ram = nullptr;
+        if (g_turbo_res && srcp != &arena_src && src.complement_ready()) {
+            int64_t outside = 0;
+            for (int64_t l = 0; l < g.n_layers; ++l)
+                for (int64_t e = 0; e < g.n_expert; ++e) {
+                    const bool held = host_res.size() == (size_t) g.n_layers * (size_t) g.n_expert
+                                          ? host_res[(size_t) (l * g.n_expert + e)] >= 0
+                                          : true;
+                    outside += !held && !src.has_resident(l, e);
+                }
+            if (outside == 0 && std::getenv("SAGUARO_RAM_ADAPT") == nullptr)
+                g_turbo_ssd = 1;   // the copy holds exactly what the GPU does not, and nothing else moves it
+            else if (cudaMalloc((void**) &d_ram, host_res.size() * sizeof(int32_t)) == cudaSuccess) {
+                host_ram.assign(host_res.size(), -1);
+                for (int64_t l = 0; l < g.n_layers; ++l)
+                    for (int64_t e = 0; e < g.n_expert; ++e)
+                        host_ram[(size_t) (l * g.n_expert + e)] = src.has_resident(l, e) ? 0 : -1;
+                cudaError_t r = cudaMemcpy(d_ram, host_ram.data(), host_ram.size() * sizeof(int32_t),
+                                           cudaMemcpyHostToDevice);
+                for (auto& st : stages) {
+                    const strata::core::OnDevice on(st->dev);
+                    if (cudaMalloc((void**) &st->d_ram, host_ram.size() * sizeof(int32_t)) != cudaSuccess) {
+                        r = cudaErrorMemoryAllocation;
+                        continue;
+                    }
+                    const cudaError_t e1 = cudaMemcpy(st->d_ram, host_ram.data(), host_ram.size() * sizeof(int32_t),
+                                                      cudaMemcpyHostToDevice);
+                    if (r == cudaSuccess) r = e1;
+                }
+                if (r == cudaSuccess) g_turbo_ssd = 2;
+                else {
+                    std::fprintf(stderr, "saguaro serve: the RAM-tier mirror for turbo skip=ssd could not be staged: "
+                                         "skip=ssd runs exact\n");
+                    (void) cudaFree(d_ram);
+                    d_ram = nullptr;
+                }
+            } else host_ram.clear();
+        } else if (g_turbo_res && srcp == &arena_src)
+            g_turbo_ssd = 1;   // every expert byte is in the arena
+        vh.d_ram = d_ram;
+        int64_t ram_ver = -1;
+        const auto ram_upload = [&]() -> cudaError_t {
+            // the RAM-tier mirror follows the compact copy (its membership moves only on this thread, between
+            // windows: the exchange commits and the RAM-adaptive rounds); the version check keeps that free
+            if (g_turbo_ssd != 2) return cudaSuccess;
+            const int64_t v = src.exchanges() + src.ram_adapts();
+            if (v == ram_ver) return cudaSuccess;
+            ram_ver = v;
+            for (int64_t l = 0; l < g.n_layers; ++l)
+                for (int64_t e = 0; e < g.n_expert; ++e)
+                    host_ram[(size_t) (l * g.n_expert + e)] = src.has_resident(l, e) ? 0 : -1;
+            cudaError_t r = cudaMemcpy(d_ram, host_ram.data(), host_ram.size() * sizeof(int32_t),
+                                       cudaMemcpyHostToDevice);
+            for (auto& st : stages) {
+                const strata::core::OnDevice on(st->dev);
+                const cudaError_t e1 = cudaMemcpy(st->d_ram, host_ram.data(), host_ram.size() * sizeof(int32_t),
+                                                  cudaMemcpyHostToDevice);
+                if (r == cudaSuccess) r = e1;
+            }
+            return r;
+        };
         // Layer split: `ver` runs layers [0, K1) and hands its residual to the next stage's verifier, and so on; the
         // last runs the head.  The hand-offs are mapped pinned memory, portable: a stage on another GPU reads it.
         // (--split-device 0: the second stage on this GPU, sharing its weights, session and cache - the A/B.)
@@ -9922,7 +9991,8 @@ int main(int argc, char** argv) {
                     GpuStage& gs = *stages[(size_t) st - 1];
                     const strata::core::OnDevice on(gs.dev);
                     strata::core::VerifyHits vs;
-                    vs.d_res = gs.d_res;
+vs.d_res = gs.d_res;
+                    vs.d_ram = gs.d_ram;
                     vs.h_res = host_res.empty() ? nullptr : host_res.data();
                     vs.cache_base = gs.cache.device_slot(0);
                     vs.blob = thits.blob;
@@ -9979,7 +10049,8 @@ int main(int argc, char** argv) {
                                    last ? nullptr : hand_b[(size_t) st]);
                 const strata::core::OnDevice on(gs.dev);
                 strata::core::VerifyHits vs;
-                vs.d_res = gs.d_res;
+vs.d_res = gs.d_res;
+                vs.d_ram = gs.d_ram;
                 vs.h_res = host_res.empty() ? nullptr : host_res.data();
                 vs.cache_base = gs.cache.device_slot(0);
                 vs.blob = thits.blob;
@@ -11426,7 +11497,8 @@ int main(int argc, char** argv) {
                 const cudaError_t e = res_put(st->d_res);
                 if (r == cudaSuccess) r = e;
             }
-            return r;
+            const cudaError_t rr = ram_upload();   // PLAN-turbo-live: the RAM tier's mirror follows the same windows
+            return r != cudaSuccess ? r : rr;
         };
         // SAGUARO_SHORT_READS: the prompt path's lent slots copied back on a stream per participant while the reply
         // decodes (refill_lazy in the request); an expert is resident again only once its participant's copies landed
@@ -11531,6 +11603,10 @@ int main(int argc, char** argv) {
         for (auto& st : stages) res_devs.push_back(st->dev);
         int32_t* res_pairs = drive.d.evict_sync ? res_pairs_alloc(kResPatchCap, res_devs) : nullptr;
         auto res_sync = [&](bool check, std::string& e) -> bool {
+            if (ram_upload() != cudaSuccess) {   // PLAN-turbo-live: the RAM tier's mirror for skip=ssd
+                e = "the RAM-tier mirror update failed";
+                return false;
+            }
             if (drive.d.res_dirty) {
                 const int64_t n = res_patch_pairs(drive.d.res_dirty_idx, host_res, res_pairs, kResPatchCap);
                 cudaError_t r = cudaSuccess;
@@ -12962,6 +13038,7 @@ int main(int argc, char** argv) {
                     v[(size_t) b]->turbo_drop = drop;
                     v[(size_t) b]->turbo_skip = skip;
                 }
+            (void) ram_upload();   // PLAN-turbo-live: the slot's rows may route with skip=ssd: the mirror first
         };
         // an admission beside the slots, at its first token: one line with where its time went
         auto adm_first = [&](int b) {
@@ -21147,6 +21224,7 @@ int main(int argc, char** argv) {
             solo_turbo.sx.push_back(&ss);
             for (auto& st : stages) solo_turbo.sx.push_back(&st->ss);
             for (auto* u : solo_turbo.sx) { u->turbo_drop = turbo_drop_of(req_turbo); u->turbo_skip = turbo_skip_of(req_turbo); }
+            (void) ram_upload();   // PLAN-turbo-live: the reply's windows may route with skip=ssd: the mirror first
             if (cancelled) finish = nf_hit ? "nonfinite" : read_vram ? "vram" : "cancel";
             // ======== --pipeline-windows 2: the decode windows with the two cards overlapped ========
             // Stage 0 (the first card) runs window K+1 while stage 1 verifies window K, on the guess that K is accepted
@@ -21920,6 +21998,7 @@ int main(int argc, char** argv) {
                     // one is expected to cost; up to SAGUARO_RAM_ADAPT_PER_LAYER pairs a layer.  The reads run on the
                     // source's I/O thread, not here.
                     ram_adapt2.installed += src.ram_install(host_res.data(), g.n_expert);
+                    (void) ram_upload();   // PLAN-turbo-live: the RAM tier's mirror follows (skip=ssd)
                     for (float& x : ram_adapt2.seed) x *= 0.95f;
                     struct Cand { float score; int32_t e; };
                     struct RamSwap2 { float gain; int32_t layer, in, out; };
@@ -22005,6 +22084,7 @@ int main(int argc, char** argv) {
                               [](const RamSwap& a, const RamSwap& b) { return a.gain > b.gain; });
                     if ((int) swaps.size() > ram_adapt_n) swaps.resize((size_t) ram_adapt_n);
                     for (const RamSwap& x : swaps) src.replace_resident(x.layer, x.in, x.out);
+                    (void) ram_upload();   // PLAN-turbo-live: the RAM tier's mirror follows (skip=ssd)
                 }
                 if (!adapt_tick(false)) {   // --adapt-async: the round in flight moves on a step when it can
                     std::printf("ERR an adaptive refill failed\n");
