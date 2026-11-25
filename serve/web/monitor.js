@@ -153,8 +153,7 @@ function RightNow({m}) {
                  `${c.tok_s ? ` · ${fmt(c.tok_s, 1)} tok/s` : ""}${took(c.elapsed_s)}`;
       }
       return html`<div class="now__chat" title=${null}>
-        <${Badge} tone=${tone}>${text}<//>
-        <${TurboBadge} turbo=${c.turbo}/>
+        <span class="now__tags"><${Badge} tone=${tone}>${text}<//><${TurboBadge} turbo=${c.turbo}/></span>
         <div class="now__chat__body">
           ${pct != null ? html`<div class="bar bar--sm" role="progressbar" data-tone=${ptone} aria-valuenow=${Math.round(pct)}
             aria-valuemin="0" aria-valuemax="100" aria-label=${who}><span style=${`width:${pct}%`}></span></div>` : null}
