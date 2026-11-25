@@ -367,8 +367,12 @@ function answerMeta(m, n, secs) {
   const s = parts.join(" · ");   // ("Stopped", not "stopped", when nothing comes before it: a stop has no usage)
   return s && s[0].toUpperCase() + s.slice(1);
 }
+// wait out `ms` between reconnects - but in a hidden tab it waits until the tab is SEEN again: behind llama-swap every
+// reconnect under /upstream/ is an upstream request, and the plan asks nothing of a tab nobody looks at (the answer
+// stays on the server meanwhile: strata_resume takes it up from the last chunk, as it does after a reload)
 const sleepOrVisible = (ms) => new Promise((ok) => {
-  const go = () => { document.removeEventListener("visibilitychange", go); clearTimeout(tm); ok(); };
+  const go = () => { if (document.hidden) return;                 // (the dark: nothing asked, it waits for the light)
+                     document.removeEventListener("visibilitychange", go); clearTimeout(tm); ok(); };
   const tm = setTimeout(go, ms);
   document.addEventListener("visibilitychange", go);
 });
