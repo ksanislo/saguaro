@@ -31,7 +31,8 @@ branding). Every upstream release is taken in full. Intakes must stay routine: a
 ## 5. Cadence
 - Each upstream release: intake within a day or two (rename run -> merge -> gates below -> into the next Saguaro release).
 - Open upstream PRs: a triage pass about weekly (take anything supportable for ANY hardware; inexact ones opt-in or
-  KL-checked).
+  KL-checked). Each pass resumes from the last one recorded here: new PRs above its newest number, plus older open
+  PRs updated since its snapshot.
 - QFN (engines/qfn, our own port of Strata): a sweep of upstream Strata about every two weeks; `docs/DIVERGENCE.md`
   records the last swept Strata commit. Exact gains taken, inexact ones opt-in.
 
@@ -42,3 +43,7 @@ branding). Every upstream release is taken in full. Intakes must stay routine: a
   previous release on our T4s (opt-in if it fails our bar). Q8_0 stays exact.
 - Smoke every live profile (mangonel llama-swap, mortar :8080); then it ships in the next Saguaro release.
 
+## 7. Triage log (open upstream PRs)
+| Date | Newest PR checked | Snapshot | PRs | Report |
+|---|---|---|---|---|
+| 2026-11-24 | #1236 | open PRs as of 2026-11-24 ~23:00 UTC | 143 open | `docs/triage/TRIAGE-upstream-prs-20261124.md` |
