@@ -7957,10 +7957,16 @@ def set_up_qfn(a, prev: dict) -> Path | None:
              "from RAM / the SSD: expect slow decode")
         # (finding 3: the line lists what this layout really turns off - --drafting on keeps drafting, the same
         #  gate write_config_qfn's slow_draft applies - and says so instead of announcing drafting off)
+        #  v1.2.1-D: when --context named a context, the setup writes THAT, not the scaled-down one, so the line
+        #  must not claim "a 32K context instead of 64K" - the context entry drops out and it says the context
+        #  given is kept (Paul's P40 runs --context 262144 on a layout the old rule scaled to 32K).
         keep_draft = getattr(a, "drafting", None) == "on"
-        off = [t for t in lay["turned_off"] if not (keep_draft and t.startswith("drafting off"))]
-        ok("the setup scales this layout down: " + ", ".join(off) +
-           (" (drafting stays on: --drafting on says otherwise)" if keep_draft else ""))
+        given_ctx = getattr(a, "context", None) is not None
+        off = [t for t in lay["turned_off"] if not (keep_draft and t.startswith("drafting off"))
+               and not (given_ctx and " context instead of " in t)]
+        tail = (" (drafting stays on: --drafting on says otherwise)" if keep_draft else "") + \
+               (f" (the context you named with --context {a.context}: kept, not scaled down)" if given_ctx else "")
+        ok("the setup scales this layout down: " + ", ".join(off) + tail)
         if not a.yes and ask("This will probably be very slow. Are you sure? (y/n)", ["y", "n"], "n", False) == "n":
             fail("stopped: this PC would run this model very slowly",
                  f"a PC nearer the measured layout (16 GB cards, about 96 GB of RAM), another model, or --yes "

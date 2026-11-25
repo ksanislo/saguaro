@@ -1589,7 +1589,8 @@ class SetupFlow(unittest.TestCase):
         pc = kw.pop("_pc", None)
         mem = kw.pop("_mem", (91.7, 80.0))
         out = kw.pop("_out", None)
-        a = args(qfn_quant="ud-q4_k_xl", context=65536, models_dir=t / "models", **kw)
+        kw.setdefault("context", 65536)
+        a = args(qfn_quant="ud-q4_k_xl", models_dir=t / "models", **kw)
         p = self.flow(t, a, vision=vision, mtp=not nomtp, pc=pc, mem=mem, out=out)
         return json.loads(p.read_text())
 
@@ -1713,6 +1714,20 @@ class SetupFlow(unittest.TestCase):
         self.assertIn("drafting off", said)                                    # (still scaled down as before; the
         self.assertNotIn("--mtp-max-t", said)                                  #  line claims no flag - finding 5)
         self.assertNotIn("drafting stays on", said)
+
+    def test_the_scale_down_line_says_nothing_of_the_context_when_one_was_given(self):
+        """v1.2.1-D: --context named a context, so the written --max-context is that one and the scale-down line
+        must not claim "a 32K context instead of 64K" (the P40's Paul runs --context 262144).  The rest of the
+        scale-down is still said."""
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as t, cpu():
+            cfg = self.setup(Path(t), _mem=(64.0, 50.0), context=262144, _out=out)
+        said = [ln for ln in out.getvalue().splitlines() if "scales this layout down" in ln][0]
+        self.assertNotIn("context instead of", said)
+        self.assertIn("kept, not scaled down", said)
+        self.assertIn("--kv-resident 4096 instead of 32768", said)
+        self.assertIn("drafting off", said)
+        self.assertEqual(cfg["args"][cfg["args"].index("--max-context") + 1], "262144")
 
     def test_a_slow_pc_with_no_drafter_claims_no_flag(self):
         """Review finding 5: turned_off always said "drafting off (--mtp-max-t 1)", but write_config_qfn writes
