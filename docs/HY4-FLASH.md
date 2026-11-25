@@ -122,11 +122,16 @@ a smaller prompt chunk that leaves more VRAM to the experts (32.5).
   estimated up to a quarter), nothing while writing. Add it to the config's `env` only if your PC needs it.
 - **Switches of upstream's tensor-parallel token windows (#1122, all on; `0` turns one off, the same tokens either
   way):** `HY4_PREFETCH` (the next kernels' dense weights read into each GPU's cache while its partial is out for the
-  sum; measured per GPU at the start, a number forces the bits), `HY4_PF_BLOCKS`, `HY4_PF_ATTN_EARLY`, `HY4_PF_SMALL`,
+  sum; measured per GPU at the start, a number forces the bits; AMD: on by default with gfx1100, off with other AMD
+  GPUs, `-1` measures everywhere), `HY4_SUM_PER` (2048: the fewest values of a sum a host thread takes; AMD builds with
+  the CPU lane leave it unset and run a token window's sums on one thread - its helpers would spin on the lane's
+  cores), `HY4_PF_BLOCKS`, `HY4_PF_ATTN_EARLY`, `HY4_PF_SMALL`,
   `HY4_PULL_BLOCKS` / `HY4_PUB_BLOCKS` (3), `HY4_TP_SUM_STREAM`, `HY4_Q8_FUSE` (kernels write the next GEMV's int8
   rows; our `HY4_FUSE` applies only with it off), `HY4_FFN_FORK`, `HY4_EG_EARLY`, `HY4_GEMV56`, `HY4_GEMV_AHEAD`,
   `HY4_GROUP_PAR2`, `HY4_RMS_AHEAD`, `SAGUARO_IQ_MV_REG` (+ `_MIN`, `_THREADS`), `SAGUARO_IQ_MV56`,
-  `SAGUARO_IQ_NE56`, `SAGUARO_IQ_DN_RW4`, `SAGUARO_IQ_Q8_WIDE`; off: `HY4_MTP_Q4K`, `HY4_LOGIT_HASH` (debugging).
+  `SAGUARO_IQ_NE56`, `SAGUARO_IQ_DN_RW4`, `SAGUARO_IQ_Q8_WIDE`,
+  `SAGUARO_IQ_MV_RW` (on with AMD gfx1100: the attention heads' short Q8_0 / Q6_K rows packed 2 or 4 to a warp, the
+  same sums; `0`: one row a warp, `1`: on with any GPU); off: `HY4_MTP_Q4K`, `HY4_LOGIT_HASH` (debugging).
 - **VRAM reserve held for the whole run (#1026):** with `--reserve-gb` given, what a start and its requests allocate
   after the plan is measured and kept free beside the reserve from the next start on (the pack's `vram-late.txt`);
   `SAGUARO_HY4_LATE_MB=<MiB>` fixes the figure (`0`: the reserve alone), `SAGUARO_HY4_LATE_FILE` names another file.

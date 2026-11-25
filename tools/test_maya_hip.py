@@ -306,6 +306,7 @@ class HipSetupTests(unittest.TestCase):
                               self.root / "data", None)
         self.assertEqual(maya.read_json(p)["env"], {
             "SAGUARO_GLM_SPLIT": "0", "SAGUARO_GLM_RESERVE_MB": "3072", "SAGUARO_GLM_RAM_HEADROOM_GB": "16",
+            "SAGUARO_VRAM_RESERVE_SETUP_MB": "3072",   # (#1156: the reserve is the setup's own)
             "SAGUARO_GLM_PREFILL_SUB": "1024", "SAGUARO_GLM_PREFILL_MB": "4096"})
         self.assertFalse(maya.hip_unified_memory(self.gpus[1]))
 

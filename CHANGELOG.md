@@ -17,7 +17,40 @@ older multi-GPU hardware (NVIDIA Turing T4 - sm_75 tensor cores, Xeon AVX1 CPUs)
   `maya-mm3`, `maya-qfn`), the quant names (Maya-XS to Maya-L), the config, log, report and storage file names
   (`maya-<model>.json`, `maya-report.txt`, the `maya.*` browser keys), session formats and this version line.
 - **Credits:** built on Project Maya ([mw00/project-maya](https://github.com/mw00/project-maya)) and Strata (MIT) -
-  see NOTICE.md. Everything below the next section is upstream Project Maya history.
+   see NOTICE.md. Everything below the next section is upstream Project Maya history.
+
+### Upstream Project Maya v1.1.76 - v1.1.78 taken in (2026-11-24)
+
+- **VRAM reserve (#1026, #1156):** the measured extra kept free on top of a reserve never refuses a model, is capped
+  at 1 GiB and says its switch (`SAGUARO_VRAM_LATE_MB=0`: off); a reserve the setup wrote by itself on AMD is the
+  default one. A slow DNS no longer delays the server start (no more host-name lookup at bind).
+- **GLM-5.3-Flash:** the CPU lane's saved timing belongs to the PC, not the build - an update keeps the answers; the
+  lane is pinned over the NUMA nodes on two-socket Linux PCs with 3+ GPUs (`SAGUARO_GLM_CPU_PIN=0`: off); a forced
+  token while the DFlash anchor goes out is what row 0 gives (#1137); INT8 latent records 16 values a load and the
+  DSA_SCORE2 kernel in the decode window; the shard mappings are dropped after the load (#1182, about 6.4 GB less).
+- **DeepSeek:** a turn never ends empty after the thinking, and a call written inside the thinking is read out of it
+  (#1206, #1207); a router row with no finite score no longer reads outside its tables (#1114); a pack with no expert
+  profile starts from the shipped one and the load says which it read (#1161); the one-a-batch rule has a band at
+  1.1 ms so a link near 1 ms does not flip between starts (`SAGUARO_DS4_RING_FAST_LINK=0`: the old mark, #1143); the
+  TP calibration is not fooled by kept conversations (#1203); a note at start says DS4_STREAM_WIN / DS4_LAND do not
+  apply to one AMD GPU (#1120).
+- **Hy4-Flash:** weight read-ahead and packed attention-head rows on by default on AMD gfx1100 (same tokens); tensor
+  parallel with the CPU lane on AMD (#1168); RDNA warp sums in registers instead of ds_bpermute, same bits (#1164).
+- **Inkling 2 Mini:** the first start on a small card times plain decoding on its own full layout (the drafter keeps
+  its room, pictures on or off); a layer split cut inside a looped core carries the loop bank across the GPU hop
+  (#1107); a fatal error ends the engine at once (#1136).
+- **Server:** a stop signal while an engine loads ends the engine too (#1181); the picture folders in the temp
+  directory go with the server and stale ones are cleaned at start (#1180); a malformed messages list gets a plain
+  400; picture embeddings are preserved while a request is prepared (#915).
+- **Setup:** the picture reader compiles only what the models use (fall-back to the full build), each compile step
+  shows one line and the compilers' output goes to `build-engine.log` / `build-vision.log`
+  (`--full-build-output`: as before); Visual Studio is also found through `vswhere` on the PATH (#1128).
+- **Bench and release checks:** `--bench` starts the engine with the server's own environment, `--bench-smoke` is a
+  short check, `--bench --compare` primes one start per build and leaves `data/golden` alone; new
+  `tools/maya_changed.py` (what a release changed -> what to check), `tools/maya_golden.py` (saved expected answers)
+  and `tools/maya_nightly.py` (the unattended nightly check), docs/RELEASE-CHECKS.md.
+- Not taken: the full GLM-5.3's fast-path FFN-width fix and its load-time check (#1200) and the glm_dsa tests - our
+  GLM is GLM-5.3-Flash only.
 
 ### The Maya engine's Qwen path is gone - CYBER-FROST is a saguaro-qfn quant (2026-11-24)
 

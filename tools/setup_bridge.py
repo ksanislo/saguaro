@@ -45,6 +45,15 @@ def describe(cmd: list) -> str:
     return f"Running {Path(cmd[1]).name if name.startswith('python') and len(cmd) > 1 else Path(cmd[0]).name}"
 
 
+def output_text(line: bytes) -> str:
+    """Decode command output bytes to text.  Tries UTF-8 first.  On Windows, falls back to the console's OEM code page
+    (e.g., CP932/Shift-JIS for MSVC cl.exe output) to prevent garbled text."""
+    try:
+        return line.decode("utf-8")
+    except UnicodeDecodeError:
+        return line.decode("oem" if os.name == "nt" else "utf-8", "replace")
+
+
 class LoadWatch:
     """How far the model's start is, from the engine log (read from where it stood when the start began): the warm-up
     of each GPU's expert tiers - the bulk of a start, one GPU after the other - in GB.  `gpus`: the start's, in the
@@ -185,11 +194,13 @@ class Bridge:
         self._note("answer", f"  {question} {pick + 1}) {options[pick][0]}")
         return pick
 
-    def run(self, cmd, cwd=None, env=None, keep=True, parent_pipe=False):
+    def run(self, cmd, cwd=None, env=None, keep=True, parent_pipe=False, sink=None):
         """The command with its output on the screen as it comes (stdin closed: nothing can wait for a key).  keep:
         its output also into the log and the summary (not the server's: it runs for days - "live" on the screen).
         parent_pipe: Saguaro's server - its stdin a pipe from here instead (--parent-pipe: it stops when this process
-        ends, however it ends), and on Windows in a job object that ends it with this process (setup.end_with_me)."""
+        ends, however it ends), and on Windows in a job object that ends it with this process (setup.end_with_me).
+        sink: a compile step - each line goes to it (setup.BuildLog: a log file and one progress line), not to the
+        screen."""
         if not self._here():
             return None
         self.events.put(("run", cmd))
@@ -210,9 +221,15 @@ class Bridge:
                 parts = re.split(rb"(\r\n|\n|\r)", rest[:cut])
                 rest = parts.pop() + rest[cut:]
                 for text, end in zip(parts[::2], parts[1::2]):
-                    self._output(text.decode("utf-8", "replace"), end == b"\r", keep)
+                    if sink is not None:
+                        sink(output_text(text))
+                    else:
+                        self._output(output_text(text), end == b"\r", keep)
             if rest.strip(b"\r\n"):
-                self._output(rest.decode("utf-8", "replace").rstrip("\r\n"), False, keep)
+                if sink is not None:
+                    sink(output_text(rest).rstrip("\r\n"))
+                else:
+                    self._output(output_text(rest).rstrip("\r\n"), False, keep)
         self.proc = None
         self.events.put(("ran", p.returncode))
         if self.stopped.is_set():
