@@ -7,7 +7,8 @@ import {DEFAULTS, LEVELS, P, PENALTIES, PRESETS, S, confirmDialog, copyText, emi
         themeChoice, thinkTitles, toast} from "./state.js";
 import {usd} from "./sidebar.js";
 import {confirmContext, confirmPort, ctxEstimate, ctxHint, ctxStops, fetchReport, loadCtxInfo, loadMcp, loadPortInfo, loadShared,
-        budgetError, loadThinkBudget, saveThinkBudget, loadTime, loadUpdate, saveShared, startUpdate, syncShared} from "./server.js";
+        budgetError, loadThinkBudget, saveThinkBudget, loadTime, loadUpdate, saveShared, startUpdate, syncShared,
+        unloaded, whenHealth} from "./server.js";
 import {chatInstructions, clearBrowser, estimateTokens, updateCtxMeter} from "./chats.js";
 import {codeBlock, onCodeClick} from "./md.js";
 import {TurboButton, TurboLive, loadTurboLive} from "./turbo.js";
@@ -29,6 +30,10 @@ const Row = ({label, sub, children, htmlFor, cls = ""}) => html`<div class=${`se
   <span class="set-row__text">${htmlFor ? html`<label for=${htmlFor}>${label}</label>` : html`<span class="set-row__label">${label}</span>`}
     ${sub ? html`<span class="set-row__sub">${sub}</span>` : null}</span>
   <span class="set-row__ctl">${children}</span></div>`;
+
+// behind llama-swap, with the model off the card (unloaded()), every request under /upstream/ loads it - so the rows
+// whose figures live on the server say what stands in for them until the model is back on its own
+const UNLOADED = "unloaded - the next message loads it";
 
 // the engines by their INFO engine_kind
 const ENGINES = {"glm-fast": "GLM fast path", ds4: "DeepSeek-V4.1 (maya-ds4)", mm3: "MiniMax-M3.1 (maya-mm3)",
@@ -92,6 +97,7 @@ function Model() {
         <button type="button" class="btn btn--primary btn--sm" onClick=${reload}>Reload with ${ctxfmt(v)}</button></div>` : null}
     </div>` : html`<p class="set-note">${S.conn === "key"
       ? "API key needed: paste it under Settings › Connect your tools."
+      : unloaded() ? UNLOADED
       : "This server does not say its context range, so it can't be changed from here."}</p>`}
     ${!h.supervisor && pi && pi.port && pi.saved ? html`
       <${Row} label="Port" htmlFor="set-port" sub="Where this page and the API listen. A new port starts Saguaro again there, and this page follows.">
@@ -212,7 +218,7 @@ function Instructions() {
 // ------------------------------------------------------------------ Tools (MCP)
 const MCP_STATE = {ready: ["ok", "Connected"], starting: ["info", "Starting"], failed: ["danger", "Failed"],
                    stopped: ["warn", "Stopped"], idle: ["muted", "Waiting"]};
-function Tools() {
+export function Tools() {   // (exported for the dashboard's page tests, as the Turbo rows are)
   const servers = S.mcp.servers || [];
   const ready = servers.filter((s) => s.status === "ready" || s.status === "stopped");
   return html`<h3>Tools</h3>
@@ -230,8 +236,9 @@ function Tools() {
           ${s.tools.length ? html`<div class="mcp__tools">${s.tools.map((t) => html`<span class="tag" title=${t.description || ""}>${t.tool}</span>`)}</div>` : null}
         </div>`;
       })}</div>`
-    : html`<p class="set-note">No MCP servers are set up. Add them to the run config (“mcpServers”, as Claude Desktop writes them)
-        or start Saguaro with --mcp-config, and their tools appear here.</p>`}`;
+    : html`<p class="set-note">${unloaded() ? UNLOADED
+        : `No MCP servers are set up. Add them to the run config (“mcpServers”, as Claude Desktop writes them)
+        or start Saguaro with --mcp-config, and their tools appear here.`}</p>`}`;
 }
 
 // ------------------------------------------------------------------ Connect your tools
@@ -478,14 +485,24 @@ function About() {
 
 // ------------------------------------------------------------------ the dialog
 const BODIES = {general: General, model: Model, savings: Savings, chat: ChatDefaults, instr: Instructions, tools: Tools, connect: Connect, data: Data, about: About};
+
+// the dialog's six asks of the server.  Behind llama-swap each one is an upstream request that loads the model, so every
+// loader refuses while the gate is closed (server.js) - opening Settings over an unloaded model then asks nothing, and
+// the rows say "unloaded - the next message loads it"; the browser's own settings show all along.
+export function loadSettingsRows() {
+  loadShared(); loadMcp(); loadCtxInfo(); loadPortInfo(); loadThinkBudget(); loadUpdate();
+}
+
 export function SettingsDialog() {
   const box = useRef(null), body = useRef(null);
   const sec = BODIES[S.settings] ? S.settings : "general";
   useEffect(() => {
-    loadShared(); loadMcp(); loadCtxInfo(); loadPortInfo(); loadThinkBudget(); loadUpdate();
+    loadSettingsRows();                          // (each guarded: while unloaded the gate asked /running, nothing else)
+    const later = unloaded() ? whenHealth(loadSettingsRows) : null;   // (the gate opens while the dialog stands open:
+                                                                     //  its rows load as the model's facts do)
     const ret = document.activeElement;
     setTimeout(() => { const b = box.current && box.current.querySelector(".set-nav [aria-current=page]"); if (b) b.focus(); }, 0);
-    return () => { if (ret && ret.focus && document.contains(ret)) ret.focus(); };
+    return () => { if (later) later(); if (ret && ret.focus && document.contains(ret)) ret.focus(); };
   }, []);
   useEffect(() => { if (body.current) body.current.scrollTop = 0; }, [sec]);
   const close = () => { S.settings = null; emit(); };
