@@ -6,12 +6,11 @@ Hy4-Flash (--model hy4-flash-maya-s; four cards): NVIDIA on Linux.  Inkling 2 Mi
 16 GB cards): Linux, NVIDIA from V100 / Tesla T4 on, or one AMD RDNA 3 / 4 GPU of 12 GB or more (the experts the card
 does not hold in RAM: the offload path).  Each on its own engine (build/saguaro-hy4, build/saguaro-ik2) -
 docs/HY4-FLASH.md, docs/INKLING2-MINI.md.
-GLM-5.3-Flash: CUDA on Linux and Windows; HIP: gfx1100/gfx1201/gfx1151 (gfx1030: run on a Radeon PRO V620 only, not on
-another RDNA 2 card yet), Linux
-and Windows, pictures too; Metal: macOS on Apple Silicon, GLM-5.3-Flash only, text only, one conversation at a
-time.  DeepSeek-V4.1-Flash-1017 and MiniMax-M3.1-Flash: CUDA from V100 on, Linux and Windows; on HIP they build
-(their GGUFs and EXL3 quants), not yet run on an AMD GPU here.  Which engines build for AMD (HIP) in this version:
-docs/AMD_SAGUARO.md, "What runs on AMD".
+GLM-5.3-Flash: CUDA on Linux and Windows; HIP: gfx1100/gfx1201/gfx1151 (gfx1030: run on a Radeon PRO V620, on no other
+RDNA 2 card yet), Linux and Windows, pictures too; Metal: macOS on Apple Silicon, GLM-5.3-Flash only, text only, one
+conversation at a time.  DeepSeek-V4.1-Flash-1017 and MiniMax-M3.1-Flash: CUDA from V100 on, Linux and Windows; on HIP
+they build (their GGUFs and EXL3 quants), not yet run on an AMD GPU here.  Which engines build for AMD (HIP) in this
+version: docs/AMD_SAGUARO.md, "What runs on AMD".
 The quants are named model first, then the tier by the experts' bits (XS, S, M, L): --model glm-maya-s,
 deepseek-maya-xs, minimax-maya-xs ... (tools/maya_quants.py); every name used before still works.
 
@@ -120,12 +119,12 @@ VALIDATED_CC = 70                                  # ... Volta (V100) and newer 
 MAX_GPUS = 16                                      # the layer split's parts at most (glm_model.hpp, kMaxParts)
 HIP_ARCHS = ("gfx1100", "gfx1201", "gfx1151")        # Saguaro also supports Strix Halo (unified memory)
 HIP_ARCHS_UNVALIDATED = ("gfx1030",)               # RDNA 2 (RX 6800 / 6900, Radeon PRO V620 / W6800): run on a Radeon
-                                                    # PRO V620 (ROCm 7) only, not on another card of these; it builds with
-                                                    # the portable kernels; no matrix cores; compiled only when such a
-                                                    # GPU is chosen
+                                                   # PRO V620 (ROCm 7) only, on no other RDNA 2 card yet; it builds
+                                                   # with the portable kernels; no matrix cores; compiled only when
+                                                   # such a GPU is chosen
 HIP_ARCHS_WAVE64 = ("gfx908", "gfx906", "gfx942", "gfx950")  # CDNA 1 (MI100), Vega 20 (gfx906), CDNA 3 (MI300X / MI325X),
-                                                    # CDNA 4 (MI350X / MI355X): wave64, run through the hip_compat layer's
-                                                    # logical-32-lane half-wavefront warp mapping
+                                                   # CDNA 4 (MI350X / MI355X): wave64, run through the hip_compat
+                                                   # layer's logical-32-lane half-wavefront warp mapping
 PY_PACKAGES = list(S.PY_PACKAGES)                  # (pillow: pictures in formats other than JPEG/PNG/BMP/GIF)
 CONTEXTS = [8192, 32768, 65536, 131072]
 DEFAULT_CONTEXT = 32768
@@ -235,7 +234,7 @@ MODELS = {
     # it per repo); the vision files are Saguaro's, from the main repo
     "Maya-M-Derisked": {
         "about": "Maya-M-Derisked, Maya-M with a directional weight edit by Blackfrost_AI that reduces blanket "
-                  "refusals: the same IQ2_S quant, files and size, some of its weights changed",
+                 "refusals: the same IQ2_S quant, files and size, some of its weights changed",
         "repo": "peasantsmith/GLM-5.3-Flash-Maya-M-Derisked-IQ2_S-GGUF", "revision": "main", "folder": "",
         "file": "GLM-5.3-Flash-Maya-M-Derisked-IQ2_S-{i:05d}-of-{n:05d}.gguf", "shards": 3, "download_gb": 116.0,
         "sha256": {
@@ -1317,8 +1316,8 @@ def check_hip_pc(a, installed=False, text_only=True, family: str = "glm", gguf: 
         say(f"    {gpu_label(g)} - " + ("can be used" if g in usable else "not supported by Saguaro's HIP build"))
     if not usable:
         fail("no supported AMD GPU found", "this port targets RX 7900 XT / XTX (gfx1100), RX 9070 / AI PRO R9700 "
-             "(gfx1201), and Strix Halo / Gorgon Halo, Radeon 8050S / 8060S / 8065S (gfx1151); run on a Radeon PRO V620 "
-             "only, not on another card of these: RX 6800 / 6900, Radeon PRO V620 / W6800 (gfx1030)")
+             "(gfx1201), and Strix Halo / Gorgon Halo, Radeon 8050S / 8060S / 8065S (gfx1151); RX 6800 / 6900 and "
+             "Radeon PRO V620 / W6800 (gfx1030) build too, run on a Radeon PRO V620 - on no other RDNA 2 card yet")
     if WIN and hipinfo and all(g.get("source") == "registry" for g in found):
         warn(f"ROCm's hipInfo sees no AMD GPU (the list above is Windows'): the engine cannot start until it does - "
              f"update AMD's driver (AMD Software: Adrenalin Edition, https://www.amd.com/en/support), restart, and "
@@ -1429,7 +1428,7 @@ def check_hip_pc(a, installed=False, text_only=True, family: str = "glm", gguf: 
     unvalidated = sorted({g["arch"] for g in chosen if g["arch"] in HIP_ARCHS_UNVALIDATED})
     if unvalidated:
         warn(f"{', '.join(unvalidated)} (RDNA 2) builds and has the portable kernels, and has been run on a Radeon PRO "
-             "V620 (ROCm 7), but not on another card of these yet - please report how it goes in an issue "
+             "V620 (ROCm 7), but on no other RDNA 2 card yet - please report how it goes in an issue "
              "(https://github.com/ksanislo/saguaro/issues)")
     select_build_backend("hip")
     return {"backend": "hip", "gpus": chosen, "archs": sorted({g["arch"] for g in chosen}), "rocm": str(root),
@@ -1720,7 +1719,7 @@ def check_pc(a, family: str = "glm", gguf: bool = False, ds4_quant: str = "exl3"
     say("  NVIDIA GPUs:")
     for g in found:
         say(f"    {gpu_label(g)} - " + ("can be used" if int(g["arch"]) >= max(min_cc, VALIDATED_CC) else
-                                        "can be used (Pascal: measured on user cards)" if int(g["arch"]) >= min_cc else
+                                       "can be used (Pascal: measured on user cards)" if int(g["arch"]) >= min_cc else
                                        f"too old (this model needs compute capability {min_cc / 10:.1f} or newer)"))
     chosen = choose_gpus(a, found, min_cc, family)
     if family == "ik2":                                # (the cards picked: 8 GB or more each)
