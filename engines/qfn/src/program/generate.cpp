@@ -1215,7 +1215,6 @@ struct Turbo {
     int drop = 0;     // 0 = off, else 1..9 (the router's k is 10)
     int skip = 0;     // the wire value: 0 off, 1 ssd, 2 ram (strata/program/turbo_skip.hpp; the kernel bar is turbo_skip_of's)
     bool off() const { return drop == 0 && skip == 0; }
-    const char* skip_name() const { return skip == 2 ? "ram" : skip == 1 ? "ssd" : "off"; }
 };
 void turbo_key(Turbo& t, const std::string& key, const char* val) {
     if (key == "turbo_drop") t.drop = std::clamp(std::atoi(val), 0, 9);
@@ -18993,9 +18992,6 @@ vs.d_skip_usage = gs.d_skip_usage;
                 std::printf("ERR bad request: %s\n", pe.empty() ? "max_new" : pe.c_str());
                 continue;
             }
-            if (req_turbo.skip != 0)
-                std::fprintf(stderr, "saguaro serve: turbo skip=%s asked for - this engine applies only drop; skip is off\n",
-                             req_turbo.skip_name());
             const int64_t n = (int64_t) ids.size();
             req_imgs.clear();
             if (geni && !o.vision) { std::printf("ERR this engine was started without --vision\n"); continue; }
