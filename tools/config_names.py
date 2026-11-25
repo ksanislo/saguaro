@@ -41,11 +41,6 @@ def bare(stem) -> str:
     return s[len(NEW):] if s.startswith(NEW) else s[len(OLD):] if s.startswith(OLD) else s
 
 
-def write_stem(stem) -> str:
-    """The stem a config of this name is written under now: always the new family."""
-    return NEW + bare(stem)
-
-
 def matches(stem, want) -> bool:
     """The name a request or a page gives (`want`, already trimmed of ":latest" / ".json") names this config stem?
     The whole stem, its display name, or the same name under the other family (an install that asks the API by the

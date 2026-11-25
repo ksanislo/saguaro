@@ -3920,7 +3920,7 @@ def vision_step(a, pc, meta, llama: Path, d: Path, quant: str, models: Path | No
 
 
 # ------------------------------------------------------------------------------------------------ 8. config + start
-BACKEND_SUFFIX = {"hip": "-hip", "metal": "-metal"}   # (a GLM config's name: maya-<quant><suffix>.json)
+BACKEND_SUFFIX = {"hip": "-hip", "metal": "-metal"}   # (a GLM config's name: saguaro-<quant><suffix>.json)
 
 
 def glm_config_stem(quant: str) -> str:
@@ -8189,8 +8189,9 @@ def qfn_cpu_info() -> dict:
 
 def write_config_qfn(a, pc: dict, meta: dict, quant: str, files: list, pack: Path, mtp: Path | None, ctx: int,
                      models: Path, d: Path, prev: dict, vision: dict | None = None) -> Path:
-    """maya-qwen3.8-flash-next-<quant>[-hip].json (maya-cyber-frost[-hip].json for CYBER-FROST, whose config keeps
-    the file name it always had) and its start script: the engine's settings as measured - on AMD on an RX 9070 XT
+    """saguaro-qwen3.8-flash-next-<quant>[-hip].json (saguaro-cyber-frost[-hip].json for CYBER-FROST, whose config
+    keeps the model part of the name it always had) and its start script: the engine's settings as measured - on
+    AMD on an RX 9070 XT
     (one GPU, the RAM tier, MTP drafting, INT8 K/V with 32K of it in VRAM, the K-quant prompt kernels; plain RoPE up
     to 256K, YaRN past it), on NVIDIA the live 4x Tesla T4 configs' tuning by class - qfn_fit's plan: the generic
     engine and conversation-cache keys everywhere, the T4 env only where every chosen card is compute capability

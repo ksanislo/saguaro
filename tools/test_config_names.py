@@ -41,12 +41,10 @@ def cfg_file(d: Path, name: str, **extra) -> Path:
 
 
 class Names(unittest.TestCase):
-    def test_bare_and_write_stem(self):
+    def test_bare(self):
         self.assertEqual(CN.bare("maya-glm-maya-s"), "glm-maya-s")
         self.assertEqual(CN.bare("saguaro-glm-maya-s"), "glm-maya-s")
         self.assertEqual(CN.bare("glm-maya-s"), "glm-maya-s")
-        self.assertEqual(CN.write_stem("maya-ds4"), "saguaro-ds4")
-        self.assertEqual(CN.write_stem("saguaro-ds4"), "saguaro-ds4")
 
     def test_is_config_name(self):
         for name in ("maya-maya-m.json", "saguaro-mm3.json", "saguaro-x.turbo.json.json"):

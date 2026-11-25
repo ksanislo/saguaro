@@ -16,7 +16,7 @@ no longer fits is skipped with SKIPPED, so a night never runs into the morning.
 
 saguaro-nightly.json (docs/RELEASE-CHECKS.md has an example):
   {"base": "auto", "rounds": 2, "wait_min": 2, "slow_pct": 5, "budget_min": 20,
-   "models": [{"name": "Inkling", "config": "maya-inkling-2-mini.json", "layout": "1x-v100-resident",
+   "models": [{"name": "Inkling", "config": "saguaro-inkling-2-mini.json", "layout": "1x-v100-resident",
                "locks": ["~/hy4/locks/v100"]}]}
 "base": "auto" is the newest release tag before this commit.  The config is the one the setup wrote.  "locks": lock
 files of the box the bench does not take itself (it takes gpu<N> / radeon in ~/.maya/locks and ~/hy4/locks).
