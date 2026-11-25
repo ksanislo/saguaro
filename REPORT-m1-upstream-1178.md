@@ -29,7 +29,7 @@ IK2_VISION_GIB out, stale test assertion, buildlog import) -> 02c95f94a rename f
 | CMakeLists.txt | e755da30f's fetch fix in our names: our FetchContent is `maya_llamacpp` everywhere (v1.1.75 decision), upstream's `strata_llamacpp` reverted to it in the two auto-merged `_maya_gg` lines |
 | VERSION | ours (1.2.0) |
 | README.ja / .pt-BR / .zh-CN | deleted-by-us kept (translated READMEs are not ours; 82bb64cad's rows noted) |
-| README.md | our speed tables (5-column format) kept; upstream's three new rows (#1177 RTX 5090 GLM, #1096 4x/5x 4090 DeepSeek) added in our format; the Inkling #1116 table was already ours |
+| README.md | our speed tables (5-column format) kept; upstream's three new rows (#1177 RTX 5090 GLM, #1096 4x/5x 4090 DeepSeek) added in our format; the Inkling #1116 table is new here - the whole "Inkling 2 Mini (experimental preview) speed benchmarks" block was added in our format (main had no such table) |
 | cmake/glm_dsa.d/60-glm-gaps.cmake, src/core/glm_dsa_fast.cu | deleted-by-us kept (no glm_dsa / full GLM-5.3 path; see dropped hunks) |
 | docs/INKLING2.md | upstream's new drafter-room section taken (pictures take no room, #1185) in `SAGUARO_IK2_*` names; the offload paragraph then rewritten to OUR engine's reality (dynamic cache B4, no mode-A/tier-half/split-measure machinery we never took); our AMD-offload-off + `SAGUARO_IK2_DRAFT_FORCE=2` sentence kept; our `draft_gib` figures (0.65 GiB + 4 KiB) kept over upstream's |
 | docs/SETTINGS.md | our settings table kept; upstream's changed rows ported into it in our names: `SAGUARO_GLM_CPU_PIN` (v1.1.77 shared-pool NUMA pin), `SAGUARO_GLM_CPU_CAL` (per-PC timing, `SAGUARO_GLM_CPU_CAL_REDO`, `saguaro.py --speed-calibration`; the SAME_ANSWERS wording our tree doesn't have left out), `SAGUARO_GLM_DSA_SCORE2` (window's tokens too); the new `MAYA_VRAM_LATE_MB` row merged into our section and renamed; the DS4 shipped-profile paragraph extension applied; upstream's deleted block (RDNA2 GEMMs / indexer / Qwen / Hy4 / Inkling / GLM-5.3 tables) stayed deleted - our tree documents Hy4/Inkling elsewhere and has no glm53/Qwen; the two changed HY4 rows (`HY4_SUM_PER`, `HY4_PREFETCH`) plus new `MAYA_IQ_MV_RW` went into docs/HY4-FLASH.md (where our Hy4 switches live) as `SAGUARO_IQ_MV_RW` |
@@ -77,11 +77,13 @@ release checks are not ours. The nightly tools' files are `saguaro-nightly.*` (m
   (we removed the config switch earlier); the deleted block stayed deleted.
 - **Inkling first-start split measurement** (e2e006ffa `IK2_DRAFT_PART` runs + measure.log + `SAGUARO_IK2_DRAFT_SPLIT`):
   it measures upstream's offload tier-window layouts; we draft on the offload path through our dynamic cache and
-  measure the sources in one start (kept from v1.1.75).
+  measure the sources in one start (kept from v1.1.75).  The merge first left the driver-less engine-side helpers
+  (`g_part`, `draft_part_*`) behind with `IK2_DRAFT_FILE`/`IK2_DRAFT_PART` unrenamed; a follow-up commit removed
+  the block, so the drop is now complete.
 - **`MAYA_DS4_RING_FAST_LINK` / slow_bps rule** (d6bac1e5e's second half): our ring rule has no fast-link opt-out;
   only the 1.1 ms band value was taken.
 - **README speed-table reformat + #1177/#1096/#1116 rows** (82bb64cad) and translated-README rows: our table kept, the
-  three English rows added by hand; #1116's Inkling table already present.
+  three English rows added by hand; #1116's Inkling table taken as a NEW block in our format (main had none).
 - **tools/test_maya_rebuild_all.py** change (b822a500d): the test file is deleted in our tree.
 
 ## Settings renamed (plan step 2, b2e85aa52)
@@ -118,7 +120,9 @@ Also restored (upstream carries it, our tree had lost it): the `-prerelease` vsw
 
 - **tools**: 69 modules, 1069 tests. All pass except exactly the plan's known environment failures -
   `tools.test_maya_models` (3 errors: Exl3Download 'yes' attribute - identical to main),
-  `tools.test_refresh_ds4_profile` (module not in our tree - same as main), `tools.test_setup_ds4`
+  `tools.test_refresh_ds4_profile` (ImportError: it imports `refresh_ds4_profile` unqualified, though both
+  `tools/refresh_ds4_profile.py` and the test are in the tree - unchanged by the merge, same as main),
+  `tools.test_setup_ds4`
   (`test_exl3_on_amd` - same as main) - and `tools.test_metal_serve`, which runs none (as on main).
   `tools.test_iq_pack` needs `SAGUARO_GGUF_PY=build-m1/_deps/maya_llamacpp-src/gguf-py` (this worktree has no
   third_party/llama.cpp; with it set, 9/9 pass).
