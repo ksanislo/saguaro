@@ -9101,7 +9101,11 @@ int main(int argc, char** argv) {
                 } else {
                     char* stage = nullptr;
                     CU(cudaHostAlloc((void**) &stage, qb + db, cudaHostAllocPortable));
-                    { DevScope g0(0); CU(cudaMemcpy(stage, M.out_w.q8, qb, cudaMemcpyDeviceToHost)); }
+                    {
+                        DevScope g0(0);
+                        CU(cudaMemcpy(stage, M.out_w.q8, qb, cudaMemcpyDeviceToHost));
+                        CU(cudaMemcpy(stage + qb, M.out_w.q8d, db, cudaMemcpyDeviceToHost));
+                    }
                     CU(cudaMemcpy(R.q8, stage, qb, cudaMemcpyHostToDevice));
                     CU(cudaMemcpy(R.q8d, stage + qb, db, cudaMemcpyHostToDevice));
                     CU(cudaFreeHost(stage));

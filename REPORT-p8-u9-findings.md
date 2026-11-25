@@ -12,8 +12,9 @@ died at start, and where it was, the load bypassed the test the peer-copy rules 
 could not be the gate here: it latches on its first call, and at drafter load `g_two.on` is still false, so
 calling it would pin the whole run to host staging. The copy is now gated on `g_two.link.all_peer` (the
 engine's link test result, false at this point today, kept for a link that is ever tested before the drafter)
-and otherwise bounces through a pinned host staging block (`qb + db`, `cudaHostAllocPortable`: D2H with GPU 0
-current through a `DevScope`, H2D on `dg`, freed right after) - the same way every other hand-off of the
+and otherwise bounces through a pinned host staging block (`qb + db`, `cudaHostAllocPortable`: both D2Hs - the
+`q8` into `stage`, the `q8d` scales into `stage + qb` - with GPU 0 current through a `DevScope`, both H2Ds on
+`dg`, freed right after) - the same way every other hand-off of the
 feature goes when the test fails. Not moved after `two_setup`: the drafter load (and `fold_q8`/`set_head_q8`
 on `R.q8`/`R.q8d`) must precede the cache sizing for the VRAM reasons spelled out above that block.
 
