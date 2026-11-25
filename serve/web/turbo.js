@@ -87,6 +87,11 @@ export async function setTurbo(on) {
       "<li>Apps using the API get a “try again” until it is back.</li></ul>", "Switch Turbo on");
     if (!ok) return;
   }
+  if (!on && t.engine && t.restarts && t.off_restarts) {
+    const ok = await confirmDialog("Switch Turbo off?",
+      `<p>Your engine settings come back, and Saguaro starts again with them, which takes ${esc(loadTime())}.</p>`, "Switch Turbo off");
+    if (!ok) return;
+  }
   S.turbo = {...t, busy: true};
   emit();
   try {

@@ -526,6 +526,37 @@ class QfnTurbo(unittest.TestCase):
             self.assertEqual(back.get(k), self.before.get(k), k)
         self.assertNotIn("turbo", back)
 
+    def test_one_at_a_time_alone_is_held_by_the_server(self):
+        cfg = M.read(self.p)
+        cfg = M.apply(cfg, {"draft": "mtp"})                           # (only "parallel" left for Turbo to change)
+        M.write(self.p, cfg)
+        self.assertEqual(set(M.turbo_patch(cfg)), {"parallel"})
+        self.assertEqual(M.turbo_info(cfg)["plan"], {})
+        tok = ByteTokenizer()
+        svc = Service(MockEngine(tok, "x", max_context=32768), tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        svc.config_path, svc.turbo_path = str(self.p), str(self.p.with_suffix("")) + ".turbo.json"
+        svc.fifo.set_capacity(8)
+        svc.set_turbo_default({"drop": 2, "skip": "off"})
+        self.assertEqual(svc.set_turbo(True)["changed"], False)        # (no restart)
+        on = M.read(self.p)
+        self.assertEqual((on["parallel"], on["args"]), (cfg["parallel"], cfg["args"]))
+        self.assertFalse(M.turbo_info(on)["off_restarts"])
+        self.assertTrue(svc.fifo.acquire(False, units=1))
+        self.assertFalse(svc.fifo.acquire(False, units=1))             # (8 places, one answer at a time)
+        self.assertTrue(svc.fifo.claim_yield(0.0) is False)            # (nobody waits)
+        svc.turbo_live_before = None                                   # (as after a restart: the note keeps it)
+        self.assertEqual(svc.set_turbo(False)["changed"], False)
+        self.assertEqual(svc.turbo_default, {"drop": 2, "skip": "off"})
+        self.assertTrue(svc.fifo.acquire(False, units=1))              # (a flip with one running: the places still add up)
+        svc.fifo.release(units=1), svc.fifo.release(units=1)
+        self.assertFalse(svc.fifo.locked())
+        self.assertNotIn("turbo", M.read(self.p))
+
+    def test_a_turbo_that_restarts_says_so_both_ways(self):
+        self.assertIn("draft", M.turbo_info(M.read(self.p))["plan"])
+        M.turbo_enable(self.p)
+        self.assertTrue(M.turbo_info(M.read(self.p))["off_restarts"])
+
     def test_the_server_turns_the_live_turbo_with_it(self):
         tok = ByteTokenizer()
         svc = Service(MockEngine(tok, "x", max_context=32768), tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))

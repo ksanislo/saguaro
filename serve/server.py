@@ -379,6 +379,16 @@ class FairLock:
         self.capacity = max(1, int(capacity))
         self._used = 0
         self._yields = 0                                       # runners that decided to give their place up (claim_yield)
+        self._one = False                                      # one holder at a time, whatever the capacity (Turbo)
+
+    def set_one(self, on: bool):
+        """One holder at a time while on (places and their sizes stay the capacity's, so a flip mid-run is safe)."""
+        with self._cv:
+            self._one = bool(on)
+            self._cv.notify_all()
+
+    def _fits(self, k: int) -> bool:
+        return self._used + k <= self.capacity and not (self._one and self._used > 0)
 
     def set_capacity(self, n: int):
         with self._cv:
@@ -398,7 +408,7 @@ class FairLock:
     def acquire(self, blocking: bool = True, timeout: float = -1, units: int | None = None) -> bool:
         k = self._units(units)
         with self._cv:
-            if not self._queue and self._used + k <= self.capacity:
+            if not self._queue and self._fits(k):
                 self._used += k
                 return True
             if not blocking:
@@ -429,7 +439,8 @@ class FairLock:
         with self._cv:
             need = sum(min(e[1], self.capacity) for e in self._queue
                        if not (len(e) > 3 and e[3]) or now - e[2] >= slice_s)
-            if need - (self.capacity - self._used) - self._yields > 0:
+            free = 0 if self._one and self._used > 0 else self.capacity - self._used
+            if need - free - self._yields > 0:
                 self._yields += 1
                 return True
             return False
@@ -459,7 +470,7 @@ class FairLock:
             while True:
                 if me not in self._queue:
                     return False
-                if self._queue[0] is me and self._used + min(me[1], self.capacity) <= self.capacity:
+                if self._queue[0] is me and self._fits(min(me[1], self.capacity)):
                     self._queue.remove(me)
                     me[1] = min(me[1], self.capacity)
                     self._used += me[1]
@@ -3592,14 +3603,16 @@ class Service:
             return self.turbo_info()
         p = Path(self.config_path)
         self._restart_busy()
-        out = models.turbo_enable(p) if on else models.turbo_disable(p)
+        was = models.read(p) or {}
+        out = models.turbo_enable(p, self.turbo_default) if on else models.turbo_disable(p)
+        self.fifo.set_one(models.turbo_one_at_a_time(models.read(p) or {}))
         live = models.TURBO_LIVE_DEFAULT.get(models.family(models.read(p)))
         if live is not None:
             if on:
                 self.turbo_live_before = dict(self.turbo_default) if self.turbo_default else None
                 self.set_turbo_default(live)
             else:
-                self.set_turbo_default(self.turbo_live_before)
+                self.set_turbo_default(self.turbo_live_before or (was.get("turbo") or {}).get("live_before"))
                 self.turbo_live_before = None
         restarts = bool(out["changed"] and os.environ.get("SAGUARO_RESTART_ON_UPDATE"))
         if restarts:
@@ -8775,6 +8788,7 @@ def main() -> int:
             svc.shared = {}
         # the model's live Turbo (PLAN-turbo-live): its sidecar file, beside the config but never in it
         svc.turbo_path = str(Path(a.config).with_suffix("")) + ".turbo.json"
+        svc.fifo.set_one(models.turbo_one_at_a_time(cfg))   # (Turbo left on, holding one answer at a time)
         try:
             svc.turbo_default = turbo_live.turbo_on(turbo_live.normalize_turbo(
                 json.loads(Path(svc.turbo_path).read_text(encoding="utf-8"))))

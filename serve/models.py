@@ -1084,6 +1084,16 @@ def turbo_patch(cfg: dict) -> dict:
     return patch
 
 
+def turbo_held(patch: dict) -> bool:
+    """Whether `patch` (turbo_patch's) is only "one answer at a time": the server holds that itself, no restart."""
+    return set(patch) == {"parallel"}
+
+
+def turbo_one_at_a_time(cfg: dict) -> bool:
+    """Whether Turbo is on in `cfg` with one answer at a time held by the server (turbo_held)."""
+    return turbo_on(cfg) and bool(cfg["turbo"].get("one_at_a_time"))
+
+
 def turbo_on(cfg: dict) -> bool:
     return isinstance(cfg.get("turbo"), dict)
 
@@ -1094,14 +1104,18 @@ def turbo_info(cfg: dict) -> dict:
     if family(cfg) in TURBO_NONE and not turbo_on(cfg):   # ("supported": the page shows no Turbo button)
         return {"on": False, "family": family(cfg), "plan": {}, "env": {}, "supported": False}
     if turbo_on(cfg):
-        return {"on": True, "family": family(cfg), "since": cfg["turbo"].get("since"), "plan": {}}
+        n = cfg["turbo"]                                # ("off_restarts": switching off changes the engine's start)
+        back = any((n.get(k) or None) != (cfg.get(k) or None) for k in ("args", "env", "parallel"))
+        return {"on": True, "family": family(cfg), "since": n.get("since"), "plan": {}, "off_restarts": back}
     patch = turbo_patch(cfg)
+    if turbo_held(patch):
+        return {"on": False, "family": family(cfg), "plan": {}, "env": {}, "one_at_a_time": True}
     return {"on": False, "family": family(cfg),
             "plan": {k: {"from": cur.get(k), "to": v} for k, v in patch.items() if k != "env"},
             "env": {k: v for k, v in (patch.get("env") or {}).items() if cur["env"].get(k) != v}}
 
 
-def turbo_enable(path: Path) -> dict:
+def turbo_enable(path: Path, live_before: dict | None = None) -> dict:
     """Turbo on: its settings written into the config at `path`, and the note that undoes them.  "changed": the engine
     must start again."""
     cfg = read(path)
@@ -1113,12 +1127,19 @@ def turbo_enable(path: Path) -> dict:
         raise ValueError(f"Turbo: {'Hy4-Flash' if family(cfg) == 'hy4' else 'Inkling 2'}'s engine has none (no expert "
                          "skipping, one answer at a time)")
     cur, patch = settings_of(cfg), turbo_patch(cfg)
-    new = apply(cfg, patch)
+    held = turbo_held(patch)                           # (the server admits one answer at a time: nothing to start again)
+    if held:
+        patch = {}
+    new = apply(cfg, patch) if patch else copy.deepcopy(cfg)
     new["turbo"] = {"since": time.strftime("%Y-%m-%d %H:%M:%S"),
                     "before": {k: cur.get(k) for k in patch},            # (the settings Turbo changed, as they were)
                     "args": list(cfg.get("args") or []), "env": cfg.get("env"),   # (and the command and environment whole)
                     "parallel": cfg.get("parallel"),   # (... with QFN's Answers-at-once key, a config key like these)
                     "applied": {"args": list(new.get("args") or []), "env": new.get("env")}}
+    if held:
+        new["turbo"]["one_at_a_time"] = True
+    if live_before:
+        new["turbo"]["live_before"] = dict(live_before)   # (the live Turbo as it was: kept across the restart)
     return _commit(path, cfg, new)
 
 
