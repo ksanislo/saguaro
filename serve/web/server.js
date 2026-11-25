@@ -107,8 +107,10 @@ export async function poll() {
   } finally { polling = false; }
 }
 document.addEventListener("visibilitychange", () => {
-  if (document.hidden) clearTimeout(timer);                     // (hidden: every poll stops, in every setup)
-  else { if (healthWait) { healthWait = false; loadHealth(); } poll(); }   // (seen again: it picks up at once)
+  if (document.hidden) { clearTimeout(timer); return; }           // (hidden: every poll stops, in every setup)
+  if (healthWait) { healthWait = false; loadHealth(); }           // (seen again: it picks up at once, and makes up
+  if (mcpWait) { mcpWait = false; loadMcp(); }                    //  any health or mcp retry the dark swallowed)
+  poll();
 });
 
 // ------------------------------------------------------------------ Monitor figures that are computed (unit-tested)
@@ -165,9 +167,10 @@ export function tierShares(n, eng = {}) {
 // ------------------------------------------------------------------ MCP servers (GET /mcp)
 // Tools from the MCP servers in the run config: the chat offers them to the model (opt-in per request, "strata_mcp":
 // true, which only this page sends); Settings lists the servers and what they offer.
-let mcpRetry = null;
+let mcpRetry = null, mcpWait = false;      // (a loadMcp a hidden tab dropped: parked, made up when the tab is seen)
 export async function loadMcp() {
-  if (document.hidden || unloaded()) return;   // (a hidden tab asks nothing; /mcp under llama-swap would load the model)
+  if (document.hidden) { mcpWait = true; return; }   // (asks nothing in the dark; seen again, it picks the chain up)
+  if (unloaded()) return;                            // (behind llama-swap /mcp would load the model)
   try {
     const r = await fetch("mcp", {headers: headers()});
     if (!r.ok) return;

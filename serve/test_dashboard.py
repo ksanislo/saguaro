@@ -1169,6 +1169,26 @@ console.log(JSON.stringify({log, conn: st.S.conn}));""")
         self.assertEqual(got["log"], ["/running", "metrics"])       # (nothing known yet: poll as today)
         self.assertEqual(got["conn"], "ok")
 
+    def test_a_mcp_retry_landing_in_a_hidden_tab_is_made_up_when_seen(self):
+        # (the review's finding 6: the "servers starting" retry chain loadMcp arms every 3 s used to die when its
+        #  timer landed while the tab was hidden - same hole as the health retry, one floor down in the module)
+        got = self.node("""
+const log = [];
+let starting = true;
+globalThis.fetch = async (u) => { log.push(u);
+  return {ok: true, status: 200, json: async () => starting ? {servers: [{status: "starting"}], tools: 0}
+                                                             : {servers: [{status: "ready"}], tools: 2}}; };
+await sv.loadMcp();                                                 // (servers starting: the 3 s retry is armed)
+document.hidden = true; fire("visibilitychange");
+await new Promise((ok) => setTimeout(ok, 3500));                    // (the retry fires in the dark: parked, no ask)
+const whileHidden = log.filter((u) => u === "mcp").length;
+starting = false; document.hidden = false; fire("visibilitychange");   // (seen again: the chain it lost, made up)
+await new Promise((ok) => setTimeout(ok, 50)); sv.stopPoll();
+console.log(JSON.stringify({whileHidden, total: log.filter((u) => u === "mcp").length, tools: st.S.mcp.tools}));""")
+        self.assertEqual(got["whileHidden"], 1)                     # (the dark asked nothing new)
+        self.assertEqual(got["total"], 2)                           # (seen again: the dropped retry ran at last)
+        self.assertEqual(got["tools"], 2)                           # (and the servers' tools are known again)
+
 
 if __name__ == "__main__":
     unittest.main()
