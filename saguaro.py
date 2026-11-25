@@ -6,7 +6,8 @@ Hy4-Flash (--model hy4-flash-maya-s; four cards): NVIDIA on Linux.  Inkling 2 Mi
 16 GB cards): Linux, NVIDIA from V100 / Tesla T4 on, or one AMD RDNA 3 / 4 GPU of 12 GB or more (the experts the card
 does not hold in RAM: the offload path).  Each on its own engine (build/saguaro-hy4, build/saguaro-ik2) -
 docs/HY4-FLASH.md, docs/INKLING2-MINI.md.
-GLM-5.3-Flash: CUDA on Linux and Windows; HIP: gfx1100/gfx1201/gfx1151 (gfx1030: not measured on a card yet), Linux
+GLM-5.3-Flash: CUDA on Linux and Windows; HIP: gfx1100/gfx1201/gfx1151 (gfx1030: run on a Radeon PRO V620 only, not on
+another RDNA 2 card yet), Linux
 and Windows, pictures too; Metal: macOS on Apple Silicon, GLM-5.3-Flash only, text only, one conversation at a
 time.  DeepSeek-V4.1-Flash-1017 and MiniMax-M3.1-Flash: CUDA from V100 on, Linux and Windows; on HIP they build
 (their GGUFs and EXL3 quants), not yet run on an AMD GPU here.  Which engines build for AMD (HIP) in this version:
@@ -117,9 +118,10 @@ MIN_CC = 60                                        # Pascal and newer (the GLM p
 VALIDATED_CC = 70                                  # ... Volta (V100) and newer measured, Pascal not measured yet (#212)
 MAX_GPUS = 16                                      # the layer split's parts at most (glm_model.hpp, kMaxParts)
 HIP_ARCHS = ("gfx1100", "gfx1201", "gfx1151")        # Saguaro also supports Strix Halo (unified memory)
-HIP_ARCHS_UNVALIDATED = ("gfx1030",)               # RDNA 2 (RX 6800 / 6900, Radeon PRO V620 / W6800): not measured on a
-                                                    # card yet, it builds with the portable kernels; no matrix cores;
-                                                    # compiled only when such a GPU is chosen
+HIP_ARCHS_UNVALIDATED = ("gfx1030",)               # RDNA 2 (RX 6800 / 6900, Radeon PRO V620 / W6800): run on a Radeon
+                                                    # PRO V620 (ROCm 7) only, not on another card of these; it builds with
+                                                    # the portable kernels; no matrix cores; compiled only when such a
+                                                    # GPU is chosen
 HIP_ARCHS_WAVE64 = ("gfx908", "gfx906", "gfx942", "gfx950")  # CDNA 1 (MI100), Vega 20 (gfx906), CDNA 3 (MI300X / MI325X),
                                                     # CDNA 4 (MI350X / MI355X): wave64, run through the hip_compat layer's
                                                     # logical-32-lane half-wavefront warp mapping
@@ -1314,8 +1316,8 @@ def check_hip_pc(a, installed=False, text_only=True, family: str = "glm", gguf: 
         say(f"    {gpu_label(g)} - " + ("can be used" if g in usable else "not supported by Saguaro's HIP build"))
     if not usable:
         fail("no supported AMD GPU found", "this port targets RX 7900 XT / XTX (gfx1100), RX 9070 / AI PRO R9700 "
-             "(gfx1201), and Strix Halo / Gorgon Halo, Radeon 8050S / 8060S / 8065S (gfx1151); not measured on a card "
-             "yet: RX 6800 / 6900, Radeon PRO V620 / W6800 (gfx1030)")
+             "(gfx1201), and Strix Halo / Gorgon Halo, Radeon 8050S / 8060S / 8065S (gfx1151); run on a Radeon PRO V620 "
+             "only, not on another card of these: RX 6800 / 6900, Radeon PRO V620 / W6800 (gfx1030)")
     if WIN and hipinfo and all(g.get("source") == "registry" for g in found):
         warn(f"ROCm's hipInfo sees no AMD GPU (the list above is Windows'): the engine cannot start until it does - "
              f"update AMD's driver (AMD Software: Adrenalin Edition, https://www.amd.com/en/support), restart, and "
@@ -1425,8 +1427,8 @@ def check_hip_pc(a, installed=False, text_only=True, family: str = "glm", gguf: 
         ok("APU / unified memory: the engine sizes the GPU expert pool from available system RAM")
     unvalidated = sorted({g["arch"] for g in chosen if g["arch"] in HIP_ARCHS_UNVALIDATED})
     if unvalidated:
-        warn(f"{', '.join(unvalidated)} (RDNA 2) builds and has the portable kernels, but Saguaro has not been measured "
-             "on such a card yet - please report how it goes in an issue "
+        warn(f"{', '.join(unvalidated)} (RDNA 2) builds and has the portable kernels, and has been run on a Radeon PRO "
+             "V620 (ROCm 7), but not on another card of these yet - please report how it goes in an issue "
              "(https://github.com/ksanislo/saguaro/issues)")
     select_build_backend("hip")
     return {"backend": "hip", "gpus": chosen, "archs": sorted({g["arch"] for g in chosen}), "rocm": str(root),
