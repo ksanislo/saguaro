@@ -58,6 +58,14 @@ MAX_GROUP = 4                                         # a layer split runs on up
 DEFAULT_CONTEXT = 65536                               # one card (measured there: prompts up to 60K tokens)
 SPLIT_CONTEXT = 262144                                # a split: the K/V's RAM is cheap, the cards do not notice
 # (both must stay among the contexts saguaro.py offers - QFN_CONTEXTS; test_setup_qfn guards it)
+# C18 - the YaRN extension past the trained context: the engine reads plain RoPE to YARN_ORIG_CTX and the YaRN
+# table past it (SAGUARO_YARN_ELASTIC=1, elastic: short chats never feel it), with --rope-scale reaching
+# CONTEXT_MAX = orig x factor (the live mangonel box runs 1M this way: ./ref, and CONTEXT_TESTED qfn).  The
+# engine's --rope-scale parses a double (src/program/generate.cpp: std::atof into "double rope_scale", its
+# check only demands >= 1), so a fractional factor is written as computed and never rounded up: 384K is 1.5.
+YARN_ORIG_CTX = 262144                                # what the model was trained for: plain RoPE up to here
+CONTEXT_MAX = 1048576                                 # ... and the elastic YaRN reach at factor 4 (1M)
+CONTEXT_STEP = 65536                                  # past 262144 a --context moves in these steps
 T4_LOW_GB, T4_HIGH_GB = 14.0, 17.0                    # a "16 GB" card as the driver reports it (Tesla T4: 15.0)
 SM75 = 75                                             # compute capability 7.5 (Tesla T4, Quadro RTX 3000)
 # the live 4x Tesla T4 configs' splits (./ref/Qwen3.8-Flash-Next-*.json): first layer of GPU 2, 3 and 4
@@ -180,6 +188,30 @@ def kv_resident_gib(cells: int) -> float:
     serves both (v1.2.1-B review finding 2: the engine's own INFO kv_bytes_token= line, not a separate
     measured figure - qsa_kv_bytes_per_cell x the 12 QSA layers, 12,672 B a cell at --kv int8)."""
     return kv_vram_gib(cells)
+
+
+def yarn_scale(n: int) -> float | None:
+    """The YaRN --rope-scale a context `n` past the trained YARN_ORIG_CTX needs: n / 262144 (384K: 1.5,
+    512K: 2, 1M: 4 - the 64K steps fall in quarters, and the engine's parser takes a double, so nothing is
+    rounded). None at or below the trained context: the config keeps its factor, the elastic engine never
+    reads the YaRN table inside 262144."""
+    return n / YARN_ORIG_CTX if n > YARN_ORIG_CTX else None
+
+
+def yarn_scale_text(n: int) -> str:
+    """The --rope-scale value written for a context of `n`: past 262144 the computed factor as it is
+    ("2", "1.5", "4"); at or below it the 4 every config written so far carries (with SAGUARO_YARN_ELASTIC
+    it never fires below the trained context - the 256K configs stay byte-identical)."""
+    scale = yarn_scale(n)
+    return "4" if scale is None else "%g" % scale
+
+
+def kv_pinned_gib(n: int, par: int = 1) -> float:
+    """GiB of pinned RAM the K/V of `par` conversations of `n` tokens each costs at --kv int8: the engine's
+    own KV_BYTES (~12.7 KB a token, measured) times the context times the answers at once - ~13 GB of it a
+    conversation at 1M. The newest --kv-resident cells of each conversation sit on the cards too, but the
+    whole cache is pinned RAM either way."""
+    return n * KV_BYTES * max(1, int(par)) / GIB
 
 
 def stage_bounds(cards: list, quant: str = "ud-q4_k_xl") -> list:

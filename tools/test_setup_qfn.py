@@ -2016,6 +2016,77 @@ class SetupFlow(unittest.TestCase):
         self.assertIn("--kv-resident 4096 instead of 32768", said)
 
 
+class LongContextC18(SetupFlow):
+    """C18 step 1: the context question offers the elastic YaRN sizes past 256K and the config follows:
+    --rope-scale = max / 262144 as the engine parses it (a double: 512K's 2, 1M's 4, 384K's 1.5 - a
+    fractional factor is written as computed, never rounded), --yarn-orig-ctx 262144 and the elastic
+    SAGUARO_YARN_ELASTIC stay, a --context past 1M or no whole 64K step is refused plainly, and a 256K
+    config is written exactly as before."""
+
+    def yarn_tail(self, cfg):
+        a = cfg["args"]
+        return a[a.index("--rope-scaling"):a.index("--rope-scaling") + 6]
+
+    def test_the_512k_config(self):
+        with tempfile.TemporaryDirectory() as t:
+            cfg = self.setup(Path(t), context=524288)
+        a = cfg["args"]
+        self.assertEqual(a[a.index("--max-context") + 1], "524288")
+        self.assertEqual(self.yarn_tail(cfg), ["--rope-scaling", "yarn", "--rope-scale", "2",
+                                               "--yarn-orig-ctx", "262144"])
+        self.assertEqual(cfg["env"]["SAGUARO_YARN_ELASTIC"], "1")          # (the elastic pair, as today)
+        self.assertEqual(a[a.index("--kv-resident") + 1], "32768")         # (the cards' window: unchanged)
+
+    def test_the_1m_config(self):
+        with tempfile.TemporaryDirectory() as t:
+            cfg = self.setup(Path(t), context=1048576)
+        a = cfg["args"]
+        self.assertEqual(a[a.index("--max-context") + 1], "1048576")
+        self.assertEqual(self.yarn_tail(cfg), ["--rope-scaling", "yarn", "--rope-scale", "4",
+                                               "--yarn-orig-ctx", "262144"])   # (the live mangonel line)
+        self.assertEqual(cfg["env"]["SAGUARO_YARN_ELASTIC"], "1")
+
+    def test_a_64k_step_writes_its_fraction_as_computed(self):
+        """The engine's --rope-scale is a double (generate.cpp: atof into a double, its check is only ">= 1"),
+        so 384K gets 1.5 - not rounded up to 2, and not refused."""
+        with tempfile.TemporaryDirectory() as t:
+            cfg = self.setup(Path(t), context=393216)
+        a = cfg["args"]
+        self.assertEqual(a[a.index("--max-context") + 1], "393216")
+        self.assertEqual(a[a.index("--rope-scale") + 1], "1.5")
+
+    def test_256k_writes_what_it_always_wrote(self):
+        """Byte-identity for the recommended default: the 262144 config keeps the args it had before the
+        YaRN sizes joined - --rope-scale 4 among them (the elastic engine never reads the table inside 256K,
+        so the factor there was and stays a formality; the parity classes compare the whole arg lists)."""
+        with tempfile.TemporaryDirectory() as t1, tempfile.TemporaryDirectory() as t2:
+            big = self.setup(Path(t1), context=262144)
+            small = self.setup(Path(t2), context=65536)
+        self.assertEqual(self.yarn_tail(big), ["--rope-scaling", "yarn", "--rope-scale", "4",
+                                               "--yarn-orig-ctx", "262144"])
+        norm = lambda cfg, tmp: [x for x in zip(cfg["args"][::2], cfg["args"][1::2])   # noqa: E731
+                                 if "--max-context" not in x and str(tmp) not in str(x)]
+        self.assertEqual(norm(big, t1), norm(small, t2))   # (the args, bar --max-context and the paths: the
+                                                           #  file was and is that one flag's difference)
+        self.assertEqual(big["args"][big["args"].index("--max-context") + 1], "262144")
+
+    def test_past_1m_is_refused(self):
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as t, self.assertRaises(SystemExit):
+            self.setup(Path(t), context=2097152, _out=out)
+        said = out.getvalue()
+        self.assertIn("whole 64K steps", said)
+        self.assertIn("1M", said)
+
+    def test_a_part_step_past_256k_is_refused(self):
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as t, self.assertRaises(SystemExit):
+            self.setup(Path(t), context=300000, _out=out)
+        said = out.getvalue()
+        self.assertIn("whole 64K steps", said)
+        self.assertIn("524288", said)
+
+
 class Parallel(unittest.TestCase):
     def test_qfn_takes_it_and_the_config_carries_it(self):
         self.assertIsNone(maya.check_parallel(args(parallel=2), "qfn"))   # (no refusal since T3)
