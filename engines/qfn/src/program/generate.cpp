@@ -1626,6 +1626,7 @@ struct GpuStage {
     std::vector<std::pair<int32_t, int32_t>> profile;   ///< its layers' share of the profile, hottest first
     int32_t* d_res = nullptr;                            ///< the residency table on its device
     int32_t* d_ram = nullptr;                            ///< the RAM tier's mirror on its device (PLAN-turbo-live skip=ssd; null: no RAM-tier fact)
+    float* d_skip_usage = nullptr;                       ///< this card's skipped-pick usage, folded into the tier's counts (PLAN-turbo-live)
     strata::core::Verifier ver;
     strata::core::Verifier ver_b;                        ///< --pipeline-windows: the odd windows' verifier
     strata::prefill::Prefill sp;
@@ -9851,6 +9852,44 @@ int main(int argc, char** argv) {
             }
             return r;
         };
+        // PLAN-turbo-live: residency must not freeze with skip on: the router counts every pick a skip left out into
+        // this device table (native_router.hpp's TurboRoute::skip_usage), and the adaptive tier folds it into its
+        // own usage once a round, so hot skipped experts are brought in outside the skipping request's path.
+        float* d_skip_usage = nullptr;
+        if (g_turbo_res && o.adapt_every > 0 && o.adapt_swaps > 0 &&
+            cudaMalloc((void**) &d_skip_usage, (size_t) (g.n_layers * g.n_expert) * sizeof(float)) == cudaSuccess) {
+            if (cudaMemset(d_skip_usage, 0, (size_t) (g.n_layers * g.n_expert) * sizeof(float)) != cudaSuccess)
+                d_skip_usage = nullptr;
+        } else
+            d_skip_usage = nullptr;
+        for (auto& st : stages) {
+            const strata::core::OnDevice on(st->dev);
+            st->d_skip_usage = nullptr;
+            if (d_skip_usage != nullptr &&
+                cudaMalloc((void**) &st->d_skip_usage, (size_t) (g.n_layers * g.n_expert) * sizeof(float)) == cudaSuccess &&
+                cudaMemset(st->d_skip_usage, 0, (size_t) (g.n_layers * g.n_expert) * sizeof(float)) == cudaSuccess)
+                continue;
+            std::fprintf(stderr, "saguaro serve: the skipped-pick usage table could not be staged on CUDA%d: a skipping "
+                                 "request's picks will not teach the adaptive tier\n", st->dev);
+        }
+        vh.d_skip_usage = d_skip_usage;
+        const auto fold_skip_usage = [&]() {
+            if (d_skip_usage == nullptr || drive.d.usage.empty()) return;
+            std::vector<float> back(drive.d.usage.size());
+            const strata::core::OnDevice on0(ver.device());
+            if (cudaMemcpy(back.data(), d_skip_usage, back.size() * sizeof(float), cudaMemcpyDeviceToHost) != cudaSuccess)
+                return;
+            (void) cudaMemsetAsync(d_skip_usage, 0, back.size() * sizeof(float), ver.stream());
+            for (auto& st : stages) {
+                const strata::core::OnDevice on(st->dev);
+                std::vector<float> sb(back.size());
+                if (cudaMemcpy(sb.data(), st->d_skip_usage, sb.size() * sizeof(float), cudaMemcpyDeviceToHost) != cudaSuccess)
+                    continue;
+                for (size_t i = 0; i < back.size(); ++i) back[i] += sb[i];
+                (void) cudaMemsetAsync(st->d_skip_usage, 0, sb.size() * sizeof(float), st->ver.stream());
+            }
+            for (size_t i = 0; i < back.size(); ++i) drive.d.usage[i] += back[i];
+        };
         // Layer split: `ver` runs layers [0, K1) and hands its residual to the next stage's verifier, and so on; the
         // last runs the head.  The hand-offs are mapped pinned memory, portable: a stage on another GPU reads it.
         // (--split-device 0: the second stage on this GPU, sharing its weights, session and cache - the A/B.)
@@ -9992,7 +10031,8 @@ int main(int argc, char** argv) {
                     const strata::core::OnDevice on(gs.dev);
                     strata::core::VerifyHits vs;
 vs.d_res = gs.d_res;
-                    vs.d_ram = gs.d_ram;
+vs.d_ram = gs.d_ram;
+                    vs.d_skip_usage = gs.d_skip_usage;
                     vs.h_res = host_res.empty() ? nullptr : host_res.data();
                     vs.cache_base = gs.cache.device_slot(0);
                     vs.blob = thits.blob;
@@ -10050,7 +10090,8 @@ vs.d_res = gs.d_res;
                 const strata::core::OnDevice on(gs.dev);
                 strata::core::VerifyHits vs;
 vs.d_res = gs.d_res;
-                vs.d_ram = gs.d_ram;
+vs.d_ram = gs.d_ram;
+                vs.d_skip_usage = gs.d_skip_usage;
                 vs.h_res = host_res.empty() ? nullptr : host_res.data();
                 vs.cache_base = gs.cache.device_slot(0);
                 vs.blob = thits.blob;
@@ -11678,6 +11719,7 @@ vs.d_res = gs.d_res;
         auto adapt = [&]() -> bool {
             if (!pending.empty()) return true;   // the previous swaps are still in flight
             if (!lazy_fly.empty()) return true;  // lent slots still landing: their experts are not candidates
+            fold_skip_usage();   // PLAN-turbo-live: what a skipping request asked for counts too (the tier must not freeze)
             if (remote_opt && !remote_opt->adapt(drive.d.usage, host_res, pending, o.adapt_swaps, *srcp)) return false;
             struct Swap { float gain; int32_t layer, in, out; };
             std::vector<Swap> swaps;
@@ -12114,6 +12156,7 @@ vs.d_res = gs.d_res;
                     a_last = a_win;
                     ++a_rounds;
                     a_t0 = Clock::now();
+                    fold_skip_usage();   // PLAN-turbo-live: skipped picks count as usage for this round too
                     a_usage = drive.d.usage;
                     a_res = host_res;
                     // #477: the routing counted, as adapt() counts it (--expert-profile-save; else `heat` is empty)
@@ -21991,6 +22034,7 @@ vs.d_res = gs.d_res;
                 if (ram_adapt_n > 0 && ram_adapt2.on && !first_window && !drive.d.usage.empty() && pending.empty() &&
                     (!ajob || astate == AState::Idle) && src.complement_ready() && !multi_gpu && !peer.valid() &&
                     !remote_opt && o.batch == 0) {
+                    fold_skip_usage();   // PLAN-turbo-live: the RAM tier learns what a skipping request asked for too
                     // 149-prefetch SAGUARO_RAM_ADAPT2=1: install the promotions whose reads have landed (window boundary:
                     // nothing reads the RAM copy now), then stage the next ones, ranked by the stall they are expected to
                     // save per byte: (decayed decode count + the prompt's seed) x the miss's cost (a cold expert costs
@@ -22065,6 +22109,7 @@ vs.d_res = gs.d_res;
                 if (ram_adapt_n > 0 && !first_window && !drive.d.usage.empty() && pending.empty() &&
                     (!ajob || astate == AState::Idle) && src.complement_ready() && !multi_gpu && !peer.valid() &&
                     !remote_opt && o.batch == 0) {
+                    fold_skip_usage();   // PLAN-turbo-live: the RAM tier learns what a skipping request asked for too
                     constexpr float kRamAdaptRouted = 2.0f, kRamAdaptUnused = 0.5f;
                     struct RamSwap { float gain; int32_t layer, in, out; };
                     std::vector<RamSwap> swaps;
