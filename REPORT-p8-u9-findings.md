@@ -41,7 +41,11 @@ own, out of this plan's scope.
 The staged branch now records `g_drem.ev_cp` on `g_drem.s` after the drafter's stream has read `host_anchor` /
 `anchor` and sets `cp_valid = true`, as its peer twin does - today every call site pairs the propose with a
 following `write_context`/`set_f_rnn` that records it; a call site without a pair can no longer reorder two
-transfers on `host_anchor`. The staged branch still has no `cp_valid` wait at its top (the peer branch's first
+transfers on `host_anchor`. One consequence to state plainly: the new snapshot is *newer* than the paired
+`write_context`'s, so the leading wait of the next `drafter_copy_taps` now orders the next copy-down - and the
+next `propose`'s D2H into `host_anchor` - behind the drafter's *propose*, not just its `write_context`. In the
+live pattern (propose, verify, then `write_context`) the draft has long completed by the next copy, so the added
+ordering is near-free, but it is one more on the staged path, not nothing. The staged branch still has no `cp_valid` wait at its top (the peer branch's first
 line): the plan asked only for the record, and adding the wait would change sequencing on every existing
 staged call, so it is left out - noted below.
 
