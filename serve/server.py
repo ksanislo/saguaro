@@ -8204,8 +8204,29 @@ class LoadState:
         self.t0 = time.time()
         self.status = "loading"
 
+    def last_log_line(self) -> str:
+        """The engine log's last line, trimmed - what the loading screen shows while it waits ("" before the
+        engine has written anything, or when this engine keeps no log)."""
+        if not self.log_path:
+            return ""
+        try:
+            with open(self.log_path, "rb") as f:
+                f.seek(0, 2)
+                f.seek(max(0, f.tell() - 65536))
+                text = f.read().decode("utf-8", "replace")
+        except OSError:
+            return ""
+        for line in reversed(text.splitlines()):
+            if line.strip():
+                return line.strip()[:400]
+        return ""
+
     def health(self) -> dict:
-        return {"status": self.status, "model": self.model}
+        # 503 with this body is REQUIRED (issue #20): llama-swap and the other supervisors take a 200 from /health
+        # as ready, and would send requests to a model that is not there yet.  The shape: status, the config's
+        # model name, how long the load has run, and what the engine was last saying.
+        return {"status": self.status, "model": self.model, "elapsed_s": int(time.time() - self.t0),
+                "line": self.last_log_line(), "supervisor": self.supervisor}
 
 
 def make_loading_handler(state: LoadState):
