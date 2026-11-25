@@ -547,9 +547,9 @@ One `serve/server.py` for all engines, plus the browser app in `serve/web`.
    15.6 tok/s (ref/PERF-LEDGER.md:97).
 3. **Fixed on the way: a new web answer no longer cancels the other chats.** Why: the one-at-a-time rule in
    `jobs_put` took away every other place. Where: `jobs_put()` (`serve/server.py:6243`), called from the web path at
-   `:7698`. Switch and default: none. Gain: not measured (a behaviour fix; the check is
-   `bench/saguaro-one/multichat.py` - every engine streams the other chat during a read and cancels only the asked one,
-   ref/PERF-LEDGER.md:95-96).
+    `:7698`. Switch and default: none. Gain: not measured (a behaviour fix; the check was the live box's
+    `bench/saguaro-one/multichat.py`, a script that is not in this repo - every engine streams the other chat during a
+    read and cancels only the asked one, ref/PERF-LEDGER.md:95-96).
 4. **Engines without logprobs answer instead of failing, and QFN's `/metrics` stopped crashing.** Why: clients ask for
    logprobs unconditionally; QFN and MiniMax report none, and `vram()` was read as a method.
    Where: the capabilities note at `serve/server.py:2981`. Switch and default: none. Gain: not measured
