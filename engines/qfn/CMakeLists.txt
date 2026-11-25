@@ -1653,6 +1653,11 @@ if(STRATA_BUILD_TESTS OR STRATA_BUILD_CONVERSATION_TESTS)
   add_executable(slot_grid_test src/program/slot_grid_test.cpp)
   target_include_directories(slot_grid_test PRIVATE include)
   add_test(NAME slot_grid_test COMMAND slot_grid_test)
+  # U5b: the one progress figure of a read on a layer split (header-only, CPU): the cards' out-of-order host
+  # points, the figure never going back, two reads beside each other
+  add_executable(read_progress_test src/program/read_progress_test.cpp)
+  target_include_directories(read_progress_test PRIVATE include)
+  add_test(NAME read_progress_test COMMAND read_progress_test)
   # a layer split's ring override and the lend slots sized with it: the RAM copy must keep every borrowed slot (CPU)
   add_executable(split_ring_test src/program/split_ring_test.cpp)
   target_include_directories(split_ring_test PRIVATE include)

@@ -5431,11 +5431,13 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
             // U5 read heartbeat (PLAN-u5-read-heartbeat, output only): a host point between the layer passes -
             // `staged` says this pass was a KV staging pass (the reused prefix copied host->VRAM).  A batched
             // chunk reports each segment's own read (the reader's job callbacks), as its `on_chunk` does.
+            // U5b: `LB` names the stage (its first layer) - a queued job's callback runs on every stage's
+            // thread, and the engine's shared read-progress counter needs to tell the cards apart.
             if (bat) {
                 for (const PromptJob::Seg& sg : job->segs)
                     if (sg.job->on_layer_pass)
-                        sg.job->on_layer_pass(l - LB, LE - LB, pass_staged, job->pos0 + sg.off);
-            } else if (layer_cb) layer_cb(l - LB, LE - LB, pass_staged, p0);
+                        sg.job->on_layer_pass(l - LB, LE - LB, pass_staged, LB, job->pos0 + sg.off);
+            } else if (layer_cb) layer_cb(l - LB, LE - LB, pass_staged, LB, p0);
         }
         if (!ple_land()) return false;   // a stage that ends before layer 1: the rows land anyway, the next gather starts
         if (issuer.joinable()) {

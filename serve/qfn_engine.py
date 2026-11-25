@@ -1240,7 +1240,9 @@ class StrataEngine:
         copied from RAM into VRAM, `read` while its new tokens are read.  The pump keeps the latest per reader:
         read_live["solo"] for the read on the control lines, read_live["slots"][<slot>] for a read into a batch
         slot.  The live prefill rate is the tokens between two heartbeats over the time between them (None while
-        nothing moved); it stands until the tokens move again.  The old engine prints no such lines."""
+        nothing moved); it stands until the tokens move again.  U5b (PLAN-u5b-split-progress): `done` is a belt -
+        the most it has been in this read, so a split read's recorded beats never go back and the rate never
+        spikes; a new read (other `new` or `rid`) starts over.  The old engine prints no such lines."""
         kv = dict(x.partition("=")[::2] for x in line.split()[1:] if "=" in x)
         try:
             done, new, reused, ms = int(kv["done"]), int(kv["new"]), int(kv["reused"]), float(kv["ms"])
@@ -1254,12 +1256,16 @@ class StrataEngine:
             slot = int(slot) if slot else None
         except ValueError:
             slot = None
+        rid = 0 if slot is not None else (kv.get("rid") or "0")
+        prev = live["slots"].get(slot) if slot is not None else live["solo"]
+        if not (prev and prev["new"] == new and prev["rid"] == rid):
+            prev = None                             # a new read (other new/rid): the belt starts over
+        if prev:
+            done = max(done, prev["done"])          # U5b: the belt over this read's beats so far
         entry = {"stage": kv.get("stage") or "read", "done": done, "new": new, "reused": reused, "ms": ms,
-                 "rate": None, "slot": slot, "rid": 0 if slot is not None else (kv.get("rid") or "0"),
-                 "t": time.time()}
+                 "rate": None, "slot": slot, "rid": rid, "t": time.time()}
         pi, slash, pn = kv.get("pass", "").partition("/")
         entry["pass"] = [int(pi), int(pn)] if pi.isdigit() and slash and pn.isdigit() else None
-        prev = live["slots"].get(slot) if slot is not None else live["solo"]
         if prev:
             dd, dm = done - prev["done"], ms - prev["ms"]
             entry["rate"] = dd / (dm / 1000.0) if dd > 0 and dm > 0 else prev.get("rate")
