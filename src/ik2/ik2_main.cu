@@ -7818,21 +7818,20 @@ int main(int argc, char** argv) {
         if ((chunk_set == 2 || (chunk_set == 0 && k::arch_class() == 60)) && g_fast_want && n_gpu == 1 && g_tpn <= 1) {
             // (a prompt chunk's work buffers and slot 0's sliding rings: ~0.6 MiB a token, measured on a P40 - 2048 ->
             //  8192 took 3.7 GiB more; --parallel's other slots each a sliding ring a sliding visit, window + chunk
-            //  rows; the pictures' encoder's room (SAGUARO_IK2_VISION_GIB) kept.  The larger chunk where every expert
+            //  rows.  The pictures' encoder has no room in this plan (v1.1.78 #1185): nothing to keep.
+            //  The larger chunk where every expert
             //  stays in VRAM with half a GiB to spare.  P40, the one-T4 quant: an 8K read 374 -> 451 -> 503 tok/s at
             //  2048 / 4096 / 8192, 30K 276 -> 311 -> 333, decode the same)
             size_t slide_vis = 0;
             for (int l = 0; l < c.n_layer; ++l)
                 if (c.sliding[l]) slide_vis += (l >= c.core0 && l < c.core1) ? (size_t) c.n_pass : 1;
             const size_t kv_row = (size_t) c.KV * c.D * (g_kv_fp8 ? 1 : 2) * 2;
-            const char* vg = getenv("SAGUARO_IK2_VISION_GIB");
-            const size_t vis_room = vg ? (size_t) (std::max(0.0, std::atof(vg)) * 1073741824.0) : 0;
             for (const int c2 : {8192, 4096}) {
                 if (c2 <= chunk) continue;
                 const auto ring = [&](int ch) { return (size_t) std::min(ctx, c.window + std::max(ch, ik2::draft::kBlock)); };
                 const size_t par = serve && g_par > 1 ? (size_t) (g_par - 1) * slide_vis * (ring(c2) - ring(chunk)) * kv_row : 0;
                 const size_t extra = (size_t) (c2 - chunk) * (640 << 10) + par;
-                if (exp_b + dense_b + kv_b + reserve + extra + vis_room + ((size_t) 1 << 29) <= fr0) {
+                if (exp_b + dense_b + kv_b + reserve + extra + ((size_t) 1 << 29) <= fr0) {
                     std::printf("prompt chunk: %d (%s; every expert stays in VRAM)\n", c2,
                                 chunk_set == 2 ? "--chunk auto" : "Pascal's default");
                     chunk = c2;

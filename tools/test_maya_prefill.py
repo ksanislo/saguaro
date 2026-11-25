@@ -155,7 +155,9 @@ class PrefillConfigTests(unittest.TestCase):
         for gpus in ([0], [0, 1]):
             p, args = self.write(gpus)
             self.assertEqual(args[args.index("--expert-cache") + 1], "auto")
-            self.assertNotIn("--vram-reserve-mib", args)      # the engine's default unless asked for
+            self.assertEqual(args[args.index("--vram-reserve-mib") + 1], "3072")   # (1.2.1-A: the display rule, every
+                                                                                   #  vendor; unknown cards count as
+                                                                                   #  driving the desktop)
             p.unlink()
         p, _ = self.write([0])
         c = maya.read_json(p)
