@@ -1189,6 +1189,41 @@ console.log(JSON.stringify({whileHidden, total: log.filter((u) => u === "mcp").l
         self.assertEqual(got["total"], 2)                           # (seen again: the dropped retry ran at last)
         self.assertEqual(got["tools"], 2)                           # (and the servers' tools are known again)
 
+    def test_browsing_a_chat_behind_llama_swap_asks_no_token_count(self):
+        # (the review's finding 7: the context meter POSTs api/tokens under /upstream/ - an upstream request like
+        #  /metrics - so *opening or typing in* a chat loaded the model and softened the Monitor's "the next
+        #  message loads it".  While unloaded the meter keeps its local estimate; the count asks again once the
+        #  model is back on the card)
+        got = self.node("""
+location.pathname = "/upstream/glm-5.3-flash/";
+st.S.health.model = "glm-5.3-flash"; st.S.health.supervisor = "llama-swap";
+const ch = await import(web + "/chats.js");
+const log = [];
+let ready = false;
+globalThis.fetch = async (u) => { log.push(u);
+  return {ok: true, status: 200, json: async () => u.endsWith("/running")
+    ? {running: ready ? [{model: "glm-5.3-flash", state: "ready"}] : []}
+    : u === "api/tokens" ? {tokens: 1234}
+    : u === "health" ? {model: "glm-5.3-flash", supervisor: "llama-swap"} : {model: "glm-5.3-flash", live: {state: "idle"}}}; };
+await sv.poll();                                                    // (the model is off the card)
+st.S.current = ch.newChatObj();
+st.S.current.messages.push({role: "user", text: "hello there, how are you today"});
+ch.updateCtxMeter();                                                // (opening the chat: the meter wakes)
+await new Promise((ok) => setTimeout(ok, 500));
+const unloaded = {log: log.slice(), tokens: st.S.ctx.tokens, approx: st.S.ctx.approx};
+ready = true;
+await sv.poll();                                                    // (back on the card: health, metrics)
+ch.updateCtxMeter();
+await new Promise((ok) => setTimeout(ok, 500)); sv.stopPoll();
+console.log(JSON.stringify({unloaded, back: {tokens: st.S.ctx.tokens, approx: st.S.ctx.approx,
+                                             asked: log.includes("api/tokens")}}));""")
+        self.assertEqual(got["unloaded"]["log"], ["/running"])      # (browsing the chat asked nothing of the model)
+        self.assertTrue(got["unloaded"]["tokens"] > 0)              # (the meter still says a word: the local estimate)
+        self.assertTrue(got["unloaded"]["approx"])
+        self.assertTrue(got["back"]["asked"])                       # (back on the card: the real count, once)
+        self.assertEqual(got["back"]["tokens"], 1234)
+        self.assertFalse(got["back"]["approx"])
+
 
 if __name__ == "__main__":
     unittest.main()

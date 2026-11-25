@@ -3,7 +3,7 @@
 // attachments, the context meter and the Markdown export.
 import {SPRITE, api, coarse, ctxfmt, db, download, fmt, headers, store, uid} from "./lib.js";
 import {P, PENALTIES, S, confirmDialog, defaultSystem, emit, levelFor, modelId, promptDialog, toast} from "./state.js";
-import {mcpOn} from "./server.js";
+import {mcpOn, unloaded} from "./server.js";
 import {turboOfChat} from "./turbo-core.js";
 
 // ------------------------------------------------------------------ the chats' list
@@ -286,7 +286,16 @@ export function updateCtxMeter() {
   if (liveCtx()) return;
   const msgs = draftChat();
   if (!msgs.length) { ctxKey = null; S.ctx = {tokens: null, approx: false, why: ""}; emit(); return; }
+  if (unloaded()) {                                  // (behind llama-swap api/tokens would load the model as much as
+    if (S.ctx.tokens == null) {                      //  /metrics did - but *browsing* chats, or the health hook, must
+      ctxKey = null;                                 //  keep the "the next message loads it" promise: the local
+      S.ctx = {tokens: estimateTokens(msgs), approx: true, why: "This chat"};   //  estimate stands until the gate opens)
+      emit();
+    }
+    return;
+  }
   ctxTimer = setTimeout(async () => {
+    if (unloaded()) return;                          // (the gate closed while this was pending: do not ask after all)
     const c = S.current;
     const body = {messages: apiMessages(c, msgs, true), reasoning_effort: thinkingOf(c)};
     if (mcpOn()) body.strata_mcp = true;
