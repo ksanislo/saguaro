@@ -3741,7 +3741,7 @@ static std::string cal_rest(const std::string& key) {
     const size_t at = key.find(" | ");
     return at == std::string::npos ? std::string() : key.substr(at + 3);
 }
-// A timing taken again (maya --speed-calibration marks the saved line "redo"; SAGUARO_GLM_CPU_CAL_REDO=1) replaces a
+// A timing taken again (saguaro.py --speed-calibration marks the saved line "redo"; SAGUARO_GLM_CPU_CAL_REDO=1) replaces a
 // saved value only when the new one is clearly FASTER - by more than 25%.  Within 25% it is the same PC measured at
 // another moment, and the plans (so the answers) stay as they are.  A slower one is not the PC's speed either: other
 // work only ever adds time (the calibration keeps its fastest round for the same reason), and where the lane's
