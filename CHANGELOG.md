@@ -36,8 +36,7 @@ older multi-GPU hardware (NVIDIA Turing T4 - sm_75 tensor cores, Xeon AVX1 CPUs)
   apply to one AMD GPU (#1120).
 - **Hy4-Flash:** weight read-ahead and packed attention-head rows on by default on AMD gfx1100 (same tokens); tensor
   parallel with the CPU lane on AMD (#1168); RDNA warp sums in registers instead of ds_bpermute, same bits (#1164).
-- **Inkling 2 Mini:** the first start on a small card times plain decoding on its own full layout (the drafter keeps
-  its room, pictures on or off); a layer split cut inside a looped core carries the loop bank across the GPU hop
+- **Inkling 2 Mini:** the drafter keeps its room on a small card, pictures on or off; a layer split cut inside a looped core carries the loop bank across the GPU hop
   (#1107); a fatal error ends the engine at once (#1136).
 - **Server:** a stop signal while an engine loads ends the engine too (#1181); the picture folders in the temp
   directory go with the server and stale ones are cleaned at start (#1180); a malformed messages list gets a plain

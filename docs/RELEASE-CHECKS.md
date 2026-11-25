@@ -36,7 +36,7 @@ How a path is mapped:
   `include/maya` touches exactly the engines that include it.
 - **An engine's own folder** always touches it: `src/ik2` Inkling, `src/hy4` Hy4, `src/ds4` DeepSeek, `src/mm3`
   MiniMax, and `src/core`, `src/program`, `src/kernels`, `src/prefill`, `src/spec`, `src/ngram`, `src/plan`,
-  `src/platform`, `src/artifact` GLM and Qwen (one engine, `maya`).
+  `src/platform`, `src/artifact` GLM (`saguaro-glm`).
 - **Everything a start runs through** touches all models: `saguaro.py`, the setup, `serve/`, `tools/` (the start imports
   them), `CMakeLists.txt`, `cmake/`, `third_party/`. Only the build files ask for a rebuild.
 - **A Python or data file named after one model** (`tools/hy4/...`, `serve/ds4_vision.py`,

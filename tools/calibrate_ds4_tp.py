@@ -228,7 +228,7 @@ def run(cfg: dict, vram: list[float], say=print, start_engine=None) -> dict:
         def start_engine(c):
             return StrataEngine(c["exe"], engine_args(c), cwd=c.get("cwd"), log=c.get("log"), env=child_env(c))
     short, long_ids = prompt_ids(cfg)
-    with tempfile.TemporaryDirectory(prefix="maya-calibrate-ds4-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="saguaro-calibrate-ds4-") as tmp:
         # (no conversations kept aside, none read back: with SAGUARO_DS4_SLOT_KEEP a start took its earlier answer's state
         # and read 1 new token, so the long prompt looked slow and the right layout lost (#1203); a throw-away folder
         # too, so the calibration's conversations never push out this PC's own)
