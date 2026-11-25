@@ -5291,6 +5291,16 @@ class Service:
                 smp["_think_soft"] = max(1, smp["_think_soft"] - len(produced))
         return smp
 
+    def _read_position(self):
+        """(read, total) of the prompt THIS thread is reading, or None while it reads nothing: the pipe engines' PP
+        lines land in `_tls.pp` (their multi path) and `_tls.own_pp` (solo, and QFN's per-request read - its batch
+        slots report the same on BRP lines); both put the position and the prompt length first.  The fair reads
+        read `_tls.pp` only (multi, where a read can pause with PAUSE); this sees every driver's own read, which is
+        what the priority preemption of a read checks on its ticks (R122)."""
+        tls = getattr(self.engine, "_tls", None)
+        pp = getattr(tls, "pp", None) or (getattr(tls, "own_pp", None) or (None,))[0]
+        return pp[:2] if isinstance(pp, (tuple, list)) and len(pp) >= 2 else None
+
     def _loop_guard_on(self, sampling) -> bool:
         """The loop guard for this request: its own "loop_guard" when it sends one, else the server's."""
         own = (sampling or {}).get("loop_guard")
@@ -5428,6 +5438,12 @@ class Service:
         The caller sees one stream of token ids (None: a heartbeat, also while queued again).  `hold[0]` says
         whether this request holds the FIFO now.  Not for image prompts: their state is never kept in a slot.
 
+        R122: a request of a LOWER priority than someone waiting gives its place up the same way and at once, on the
+        next decode token's tick - and on a read tick (PP/BRP lines) only where the engine keeps a stopped read
+        (PAUSE where it can, QFN's cut where its conversation stays live at the token reached; every other engine's
+        read runs to its end).  The same resumed call: prompt + written tokens, _resumed_sampling, the segments'
+        stats summed, the same streamed text - and it waits with keep-alives, leaving the line if the client goes.
+
         With the loop guard (`guard`, serve/loop_guard.py) every id goes through it and the caller gets only what
         lies before the short tail it holds back (what could still be a loop's repeats, at most HOLD_MAX tokens).  A
         loop restarts the engine the same way, at once and still holding the FIFO: prompt + what is kept (the repeats
@@ -5436,6 +5452,9 @@ class Service:
         engine calls and their sampling are the ones without it."""
         produced, cur, left, smp = [], list(ids), max_new, sampling
         segments = []                                   # each slice's DONE (engine.last), summed at the end
+        prio = request_priority(sampling)               # (R122: this answer gives its place up at once for a waiter
+        preempt = None                                  #  of a higher priority; while it waits, what it waits for)
+        pos = None                                      # (a read cut: where its PP/BRP tick found it)
         sent = 0                                        # produced[:sent] went to the caller (the guard holds the rest)
         # the thinking budget closed at a sentence's or line's end (THINK_GRACE, #613): past `soft` tokens of
         # reasoning, the first token that ends one is followed by the end of the thinking - this call stops there and
@@ -5477,6 +5496,23 @@ class Service:
                                 pausing = True
                                 print(f"[saguaro] fair read: {pp[0]:,} of {pp[1]:,} prompt tokens read, paused for "
                                       f"{len(paused_for)} waiting request(s); the rest after they started", flush=True)
+                        # R122: a read tick and a waiter that outranks this request - give the place up at once, no
+                        # timer, and only for engines that keep a stopped read: GLM by its PAUSE, QFN by its cut
+                        # (the conversation stays live at the token reached, keeps_stopped_read); every other
+                        # engine's read runs to its end rather than lose what it read.
+                        if (prio < PRIORITY_HIGH and t0 is None and not pausing and not emb and not self.stopping
+                                and (getattr(self.engine, "can_pause", False)
+                                     or getattr(self.engine, "keeps_stopped_read", False))):
+                            pos = self._read_position()
+                            if pos and pos[0] < pos[1] and self.fifo.waiting(above=prio) \
+                                    and self.fifo.claim_yield(0.0, above=prio):
+                                claimed, preempt = True, PRIORITY_NAMES[self.fifo.highest_waiting()]
+                                if getattr(self.engine, "can_pause", False):
+                                    self.engine.pause()   # (the state with what it read stays: the rest after)
+                                    pausing = True
+                                else:
+                                    cut = True            # (STOP: gen.close() drains to the DONE, the engine keeps
+                                    break                 #  the conversation at the token it reached)
                         continue
                     produced.append(t)
                     if soft_text is not None:
@@ -5500,6 +5536,20 @@ class Service:
                         break                           # (gen.close(): STOP + drain, still holding the FIFO)
                     if t0 is None:
                         t0 = time.monotonic()
+                    # R122: a waiter that outranks this answer and does not fit - give the place up at once, on this
+                    # token's tick (as a fair slice does: PAUSE where the engine keeps the state, else cut), not on
+                    # the SAGUARO_FAIR_SLICE_S timer; claim_yield's counting cuts only as many runners as needed,
+                    # and only while no place is free.  Never for a waiter of an equal or lower priority.
+                    if (prio < PRIORITY_HIGH and not pausing and not emb and not self.stopping
+                            and len(produced) < max_new and self.fifo.waiting(above=prio)
+                            and self.fifo.claim_yield(0.0, above=prio)):
+                        claimed, preempt = True, PRIORITY_NAMES[self.fifo.highest_waiting()]
+                        if getattr(self.engine, "can_pause", False):
+                            self.engine.pause(keep=len(cur) == len(ids))   # its first slice (as a fair slice's)
+                            pausing = True
+                        else:
+                            cut = True
+                            break
                     if slice_s > 0 and not pausing and not emb and not self.stopping and len(produced) < max_new \
                             and self.fifo.waiting() and time.monotonic() - t0 >= slice_s \
                             and self.fifo.claim_yield(slice_s):     # (one runner a waiter, not every runner)
@@ -5566,10 +5616,18 @@ class Service:
                 self.status["queued"] += 1
                 self._wall_tick()
             waiting = self.fifo.waiting()
-            place = self.fifo.yield_place(units=1)      # in line, and the place free, in one step: behind whoever waits now
+            place = self.fifo.yield_place(units=1, priority=prio)   # in line, and the place free, in one step:
+            #                                     behind whoever waits now - at its own priority, so the resumed
+            #                                     answer keeps its claim against the queue behind it
             hold[0] = False
-            print(f"[saguaro] fair slice: {len(produced)} tokens written, the engine goes to the next request "
-                  f"({waiting} waiting); this one continues after it", flush=True)
+            if preempt:
+                stat.paused_for_priority = True
+                print(f"[saguaro] priority: a {PRIORITY_NAMES[prio]} "
+                      f"{f'answer paused at {len(produced)} tokens' if produced else f'prompt read paused at {pos[0]:,} of {pos[1]:,} prompt tokens'}"
+                      f" for a {preempt}-priority request ({waiting} waiting)", flush=True)
+            else:
+                print(f"[saguaro] fair slice: {len(produced)} tokens written, the engine goes to the next request "
+                      f"({waiting} waiting); this one continues after it", flush=True)
             try:
                 while not self.fifo.wait_turn(place, timeout=0.1):
                     if cancel.is_set() or self.stopping:
@@ -5581,6 +5639,10 @@ class Service:
                     self.fifo.leave(place)
                 with self.status_lock:
                     self.status["queued"] -= 1
+            if preempt:                                 # R122: its turn again - the answer goes on from exactly the
+                stat.paused_for_priority = False        #  token it reached, nothing the engine holds re-read
+                print(f"[saguaro] priority: the {PRIORITY_NAMES[prio]} "
+                      f"{'answer' if produced else 'prompt read'} continues", flush=True)
             with self.status_lock:
                 self.active += 1
                 self.touch_telemetry()
@@ -8753,8 +8815,16 @@ def _qfn_engine_class():
 
     class QfnEngine(QE.StrataEngine):
         """QFN's driver as this server's engine: several conversations at once are its batch slots (the FIFO's places);
-        the fair-slice PAUSE of the GLM engine does not apply (QFN admits and yields slots itself)."""
+        the fair-slice PAUSE of the GLM engine does not apply (QFN admits and yields slots itself).  A STOP is its
+        cut: a stopped request keeps its conversation, so an answer or a half-read prompt continues from the token
+        it reached (see keeps_stopped_read) - which is what lets a priority preemption cut a QFN read."""
         can_pause = False
+        keeps_stopped_read = True      # R122: a stopped (cut) request keeps its conversation LIVE at the token it
+        #  reached, also in the middle of a prompt read, and the next request continues from it or parks it: the
+        #  engine's own, engines/qfn/src/program/generate.cpp #1620 ("stopped between two windows ... it stays the
+        #  live conversation", printed as "cancelled request keeps its conversation: N tokens live") - the solo GEN
+        #  path - and the batch slots' cancelled reads ("slot N: its ... read was cancelled at X of Y tokens"),
+        #  whose next BGEN reuses what was read.  Solo and batch alike.
         vram_reserve = QE.StrataEngine.vram   # the VRAM give-back command; self.vram (below) is the Monitor's lines
 
         def __init__(self, *a, **kw):
