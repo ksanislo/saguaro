@@ -1610,7 +1610,8 @@ def choose_qfn_gpus(a, usable: list) -> list:
     four equal ones taking the layers in turn (the more cards, the more experts in VRAM - the live server: 4x
     Tesla T4), else the largest one; asked when the PC has both (qfn_fit.best_gpus)."""
     big = sorted(usable, key=lambda g: (-round(float(g.get("vram_gb") or 0)), g.get("index", 0)))
-    best = QF.best_gpus(usable) or big[:1]             # (every card under 16 GB: the largest goes to the refusal)
+    best = QF.best_gpus(usable) or big[:1]             # (no size filter: a small card is the layout's "slow",
+                                                       #  unsupported() refused only the ones that cannot run)
     if len(usable) == 1 or best == big[:1]:
         return best
     opts = [best, big[:1]]
@@ -1637,8 +1638,9 @@ def check_pc(a, family: str = "glm", gguf: bool = False, ds4_quant: str = "exl3"
         fail(f"{MM3}'s engine (maya-mm3) runs on Linux only for now (its Windows build is on the way)",
              f"set it up on a Linux PC with an NVIDIA GPU ({mm3_gpus()})")
     if family == "qfn" and family_unavailable("qfn", a.backend):   # (said before anything is built or downloaded)
-        fail(family_unavailable("qfn", a.backend), "it runs on a Linux PC with GPUs of 16 GB or more and 96 GB of "
-             "RAM: on AMD one RDNA 3 / 4 GPU, on NVIDIA one card or up to four equal ones splitting the layers",
+        fail(family_unavailable("qfn", a.backend), "it runs on a Linux PC: on AMD one RDNA 3 / 4 GPU, on NVIDIA "
+             "one card or up to four equal ones splitting the layers - the layout it was measured on has 16 GB "
+             "cards and 96 GB of RAM, smaller ones run it too, slowly (most experts read from RAM / the SSD)",
              end=NOT_HERE)
     if family in ("hy4", "ik2"):   # (said before anything is built or downloaded)
         why = IK2F.unsupported(a.backend, WIN, ik2_gpus_asked(a), []) if family == "ik2" else \
@@ -1680,9 +1682,15 @@ def check_pc(a, family: str = "glm", gguf: bool = False, ds4_quant: str = "exl3"
         why = IK2F.unsupported("cuda", WIN, 0, found, mem_gb()[0])
         if why:
             fail(why)
-    if family == "qfn" and not QF.best_gpus(found):    # (every card under 16 GB: one line first - else the cards
-        fail(QF.unsupported(found, mem_gb()[0]) or     #  chosen below would be an empty list)
-             f"{QFN_SHOWN} needs GPUs of 16 GB or more")
+    if family == "qfn":                                        # (v1.2.1-B: cards under the measured 16 GB run,
+        usable = [g for g in found if int(g["arch"]) >= min_cc]  #  slowly - one plain line with the numbers first,
+        why = QF.unsupported(QF.best_gpus(usable) or usable or found,   #  and only for a PC that cannot run at all
+                             mem_gb()[0])                      #  (below the true minimum), priced on the cards the
+        if why:                                                #  picker could take at all: the same cc filter
+            fail(why)                                          #  choose_gpus applies (a card below MIN_CC cannot
+                                                               #  be named by --gpus either) and the layout
+                                                               #  best_gpus would take; --gpus is guarded on the
+                                                               #  chosen cards below)
     say("  NVIDIA GPUs:")
     for g in found:
         say(f"    {gpu_label(g)} - " + ("can be used" if int(g["arch"]) >= max(min_cc, VALIDATED_CC) else
@@ -1693,8 +1701,8 @@ def check_pc(a, family: str = "glm", gguf: bool = False, ds4_quant: str = "exl3"
         why = IK2F.unsupported("cuda", WIN, len(chosen), chosen, mem_gb()[0])
         if why:
             fail(why)
-    if family == "qfn":                                # (the cards picked: 16 GB or more each, the RAM for the tier -
-        why = QF.unsupported(chosen, mem_gb()[0])      #  --gpus can name a small one the picker would not take)
+    if family == "qfn":                                # (the cards picked: above the true minimum - --gpus can
+        why = QF.unsupported(chosen, mem_gb()[0])      #  name a small card the picker would not take)
         if why:
             fail(why)
     archs = sorted({int(g["arch"]) for g in chosen})
@@ -1714,6 +1722,17 @@ def check_pc(a, family: str = "glm", gguf: bool = False, ds4_quant: str = "exl3"
         warn("Pascal (compute capability 6.x) is experimental: the engine builds for it with its portable kernels "
              "(the prompt attention on the F32 cores) and caches global loads in L1 there, but Saguaro has not been "
              "validated on such a card yet - tell us how it goes in an issue")
+    # (v1.2.1-B review finding 4: CMakeLists.txt's qfn_engine rule (1787-1808) takes engines/qfn's experimental
+    #  pre-Turing path only when EVERY arch of the list is < 75 - a mixed list keeps _qfn_archs 75, so the build
+    #  serves the newer cards and the pre-Turing one gets a binary with no kernel image for it.  The engine's C++
+    #  is off-limits to this branch, so check_pc says it plainly; a refusal would strand a PC that runs fine on
+    #  either class alone, so this is a warning with the way out)
+    if family == "qfn" and min(archs) < QF.SM75 <= max(archs):
+        warn("these GPUs mix pre-Turing cards (compute capability below 7.5) with newer ones: saguaro-qfn's "
+             "experimental pre-Turing build is made only when EVERY chosen card is older than 7.5 - this mixed "
+             "list builds for the newer cards only, and the pre-Turing card would get a binary with no kernel "
+             "image for it (run the setup with --gpu N for one class of these cards at a time; the other class "
+             "can be set up again later)")
     problems = []                                      # (what is wrong, how to fix it): all of them at once
 
     nvcc, nv = find_nvcc(archs, a.nvcc)
@@ -7322,10 +7341,10 @@ def qfn_mtp_entry() -> dict:
 
 def qfn_about() -> str:
     m = qfn_entry()
-    n = m["needs"]
     return (f"Qwen's Qwen3.8-Flash-Next itself (125B, 10 of 512 experts a token) in unsloth's GGUFs (UD-Q4_K_XL "
-            f"{m['download_gb']:.0f} GB, Q8_0 177 GB) on its own engine, saguaro-qfn (from Strata); one GPU of "
-            f"{n.get('vram_gb', 15) + 1:.0f} GB or more with about {n.get('ram_gb', 88) + 8:.0f} GB of RAM: on AMD one RDNA "
+            f"{m['download_gb']:.0f} GB, Q8_0 177 GB) on its own engine, saguaro-qfn (from Strata); one GPU with "
+            "about 96 GB of RAM is the layout it was measured on (16 GB cards; smaller cards and less RAM run it "
+            "too, slowly, and only a PC that cannot hold the model at all is refused): on AMD one RDNA "
             "3 / 4 card (measured on an RX 9070 XT), on NVIDIA one card, or the layers split across up to four equal "
             "ones (the live server: 4x Tesla T4) - the experts the cards do not hold in RAM, the rest read from the "
             "SSD; MTP drafting, tool calls, up to a 256K context; pictures with its vision tower (the reader starts "
@@ -7333,35 +7352,47 @@ def qfn_about() -> str:
             "offered as a quant of its own, in the quant list).")
 
 
-def qfn_quant_fit(quant: str, vram: float, ram: float) -> str | None:
-    """Why a quant does not fit one GPU of `vram` GiB and `ram` GiB of RAM (its measured "needs"), or None."""
-    n = qfn_entry(quant)["needs"]
-    if vram < float(n.get("vram_gb") or 0):
-        return f"{Q.shown('qfn', quant)} needs a GPU of 16 GB or more (this one: {vram:.0f} GB)"
-    if ram < float(n.get("ram_gb") or 0):
-        return (f"{Q.shown('qfn', quant)} needs about 96 GB of RAM (this PC: {ram:.0f} GB): the experts the GPU does "
-                "not hold must fit in RAM beside the system, or nearly every token waits on the SSD")
+def qfn_quant_fit(quant: str, gpus: list, ram: float) -> str | None:
+    """Why a quant cannot run at all on these GPUs (the chosen cards: {"name", "vram_gb"}) and `ram` GiB of RAM,
+    in one plain line with the numbers, or None.  v1.2.1-B's true minimum, priced over the layer split this
+    layout would use (review finding 2): every card must hold its share of the dense weights and a minimum
+    resident K/V by the split - a pair of 8 GB cards runs Q8_0 slowly, each holding its half, where one 8 GB
+    card alone cannot hold it - plus the activations and the reserve; the RAM, the dense weights' plus buffers
+    plus the system.  A PC under the quant's measured "needs" but over the minimum RUNS - slowly; the layout
+    warns loudly and confirms (set_up_qfn), it does not refuse what can run."""
+    for g, need in zip(gpus, QF.card_min_gib(gpus, quant)):
+        v = float(g.get("vram_gb") or 0)
+        if v and v < need:
+            return (f"{Q.shown('qfn', quant)} cannot run on this GPU: its {v:.0f} GB cannot hold the "
+                    f"{need:.1f} GB a card of this layout must: its share of the dense weights and a minimum "
+                    f"resident K/V, {QF.ACTIVATIONS_GIB} GB of activations and {QF.RESERVE_GIB:.1f} GB kept free")
+    rmin = QF.ram_min_gib(quant)
+    if ram and ram < rmin:
+        return (f"{Q.shown('qfn', quant)} cannot run with {ram:.0f} GB of RAM: at least about {rmin:.0f} GB - "
+                "the dense weights, the engine's buffers and the system; the experts stream from the GPU's VRAM, "
+                "the RAM tier and the SSD")
     return None
 
 
-def choose_qfn_quant(a, prev: dict, vram: float, ram: float) -> str:
-    """--model's quant, else asked among the ones that fit (UD-Q4_K_XL the default; a quant that does not fit is listed
-    with the reason and refused)."""
+def choose_qfn_quant(a, prev: dict, gpus: list, ram: float) -> str:
+    """--model's quant, else asked among the ones that fit (UD-Q4_K_XL the default; a quant that does not fit is
+    listed with the reason and refused).  `gpus`: the chosen cards - the fit is every quant's per-card minimum
+    over the split this layout would use (qfn_quant_fit), not the smallest card priced alone."""
     keys = list(Q.QFN_QUANTS)
     want = getattr(a, "qfn_quant", None)
     if not want:
         before = (prev.get("installer") or {}).get("qwen_quant")
         rows = []
         for k in keys:
-            m, why = qfn_entry(k), qfn_quant_fit(k, vram, ram)
-            note = ("does not fit this PC" if why else "recommended" if k == QFN_DEFAULT_QUANT else
+            m, why = qfn_entry(k), qfn_quant_fit(k, gpus, ram)
+            note = ("cannot run on this PC" if why else "recommended" if k == QFN_DEFAULT_QUANT else
                     "not measured on AMD yet" if not m.get("measured") else None)
             rows.append((Q.shown("qfn", k, m["download_gb"]), note,
                          (why + ". " if why else "") + m["about"] + (f". Measured: {m['measured']}" if m.get("measured")
                                                                      else "")))
         default = keys.index(before) if before in keys else keys.index(QFN_DEFAULT_QUANT)
         want = keys[choose("Which quant?", [f"{Q.QFN_SHOWN}'s files:"], rows, default, a.yes)]
-    why = qfn_quant_fit(want, vram, ram)
+    why = qfn_quant_fit(want, gpus, ram)
     if why:
         fail(why, "a PC with more RAM / VRAM, or another model")
     return want
@@ -7640,7 +7671,8 @@ def qfn_ram_said(lay: dict) -> str:
     when all the experts fit in RAM and no --resident-budget-gib is written (qfn_fit's page_cache_tier)."""
     b = lay["resident_budget_gib"]
     return (f"{b} GB of RAM the next ones, the SSD the rest" if b is not None
-            else "the OS file cache the rest (all of them fit in RAM)")
+            else "the OS file cache the rest (no pinned tier: the experts all fit in RAM, or a thin-RAM layout "
+                 "leaves no room to pin one - they stream through the cache)")
 
 
 def qfn_cpu_info() -> dict:
@@ -7693,11 +7725,17 @@ def write_config_qfn(a, pc: dict, meta: dict, quant: str, files: list, pack: Pat
     args += ["--expert-cache", "auto", "--prefill", "auto", "--spec", "3", "--spec-min-p", "0.7"]
     if mtp is not None:
         args += ["--mtp", str(mtp)]
+    slow_draft = bool(lay["slow"]) and mtp is not None and getattr(a, "drafting", None) != "on"
+    if slow_draft:                                     # (v1.2.1-B scale-down: the drafter's 0.9 GB of VRAM caches
+        args += ["--mtp-max-t", "1"]                   #  far more experts on a slow layout)
+        ok("drafting: off on this layout (--mtp-max-t 1) - its 0.9 GB of VRAM and its extra reads buy nothing "
+           "while most experts stream; --drafting on says otherwise")
     reserve = getattr(a, "vram_reserve_mib", None)     # (the display rule every vendor instead of 700 everywhere:
     if reserve is None:                                #  3072 where a desktop may run, 512 where none can,
         reserve = gpu_reserve_mib(pc["gpus"])          #  and --vram-reserve-mib whenever it was given)
-    args += ["--max-context", str(ctx), "--kv", "int8", "--kv-resident", str(min(ctx, 32768)),
-             "--vram-reserve-mib", str(reserve), "--session-dir", str(var / "sessions")]
+    args += ["--max-context", str(ctx), "--kv", "int8", "--kv-resident", str(min(ctx, lay["kv_resident"])),
+             "--vram-reserve-mib", str(reserve), "--session-dir", str(var / "sessions")]   # (kv_resident: 32768
+                                                                                         #  comfortable, 4096 scaled down)
     ok(f"VRAM kept free on each GPU: {reserve} MiB " +
        ("(--vram-reserve-mib)" if getattr(a, "vram_reserve_mib", None) is not None else
         f"({gpu_reserve_why(pc['gpus'])}; --vram-reserve-mib changes it)"))
@@ -7776,6 +7814,9 @@ def write_config_qfn(a, pc: dict, meta: dict, quant: str, files: list, pack: Pat
     cfg["log"] = str(cfg_path.with_suffix(".log"))
     cfg["installer"] = {**inst, "quant": Q.QFN_QUANTS[quant], "models_dir": str(models), "model_dir": str(d),
                         "files_dir": str(files[0].parent), "written": time.strftime("%Y-%m-%d %H:%M")}
+    if slow_draft:                                     # (so a start does not measure drafting on a PC that cannot
+        cfg["installer"]["mtp_calibration"] = {"date": time.strftime("%Y-%m-%d %H:%M"),   #  use it: set_up_qfn's
+                                               "skipped": "slow-pc", "kept": "none"}      #  question is skipped)
     cfg_path.write_text(json.dumps(cfg, indent=1), encoding="utf-8")
     ok(f"config: {cfg_path}")
     ok(f"start script: {write_run_script(cfg_path, port)}")
@@ -7785,19 +7826,24 @@ def write_config_qfn(a, pc: dict, meta: dict, quant: str, files: list, pack: Pat
 def qfn_check_line(quant: str, lay: dict) -> str:
     """--check's line for what the setup would write for these cards (qfn_fit's plan): the live server's split
     sentence belongs to a split only - a measured one-card layout (the RX 9070 XT it was measured on) is not the
-    4x Tesla T4 server's."""
+    4x Tesla T4 server's.  A slow layout (v1.2.1-B) is reported with its cause and the scale-down: --check only
+    reports, nobody is asked."""
+    slow = (f" - below the measured layout ({lay['slow_why']}): most experts read from RAM / the SSD, expect "
+            f"slow decode; the setup scales this down: {', '.join(lay['turned_off'])}" if lay["slow"] else "")
     return (f"{Q.shown('qfn', quant)} on these cards - " +
-            (lay["said"] + (" - the live 4x Tesla T4 server's own split" if lay["layer_split"] and lay["measured"]
-                            else "" if lay["measured"] else " (not measured on these cards yet)")
+            (lay["said"] + slow +
+             (" - the live 4x Tesla T4 server's own split" if lay["layer_split"] and lay["measured"]
+              else "" if lay["measured"] else " (not measured on these cards yet)")
              if lay["fits"] else lay["reason"]) + ".")
 
 
 def set_up_qfn(a, prev: dict) -> Path | None:
     """Qwen3.8-Flash-Next on saguaro-qfn, steps 1-9: the PC (AMD: one RDNA GPU; NVIDIA: one card, or up to four
-    equal ones taking the layers in turn - qfn_fit; the quant's measured VRAM and RAM - refused below them), the
-    quant and the context, the engine (<build>/qfn/saguaro-qfn), the files (pinned, sha256-checked; --gguf-dir:
-    yours, in place), the pack, the picture tower, the MTP draft layer, the config.  CYBER-FROST's quant: step 8
-    builds the drafter from the NextN block inside its own file."""
+    equal ones taking the layers in turn - qfn_fit; v1.2.1-B: refused only where it cannot run at all, and a PC
+    between the true minimum and the measured layout gets the scaled-down layout with a loud warning and a
+    confirmation), the quant and the context, the engine (<build>/qfn/saguaro-qfn), the files (pinned,
+    sha256-checked; --gguf-dir: yours, in place), the pack, the picture tower, the MTP draft layer, the config.
+    CYBER-FROST's quant: step 8 builds the drafter from the NextN block inside its own file."""
     inst = prev.get("installer") or {}
     prev_args = prev.get("args") or []
     prev_ctx = int(prev_args[prev_args.index("--max-context") + 1]) if "--max-context" in prev_args[:-1] else None
@@ -7815,9 +7861,8 @@ def set_up_qfn(a, prev: dict) -> Path | None:
             fail(f"{QFN_SHOWN} is not set up on an APU (Strix Halo / Gorgon Halo) yet: it was measured on a "
                  "discrete GPU", "another model, or set it up by hand (docs/AMD_SAGUARO.md)")
     step(2, "your choices")                            # 2
-    vram = min(float(g.get("vram_gb") or 0) for g in pc["gpus"])   # every card caches its own layers' experts
-    ram = mem_gb()[0]
-    quant = choose_qfn_quant(a, prev, vram, ram)
+    ram = mem_gb()[0]                                  # (the quant menu: the chosen cards, every one caching its
+    quant = choose_qfn_quant(a, prev, pc["gpus"], ram)  #  own layers' experts - priced over the split, finding 2)
     m = qfn_entry(quant)
     lay = QF.plan(pc["gpus"], ram, quant)
     if not lay["fits"]:
@@ -7833,6 +7878,23 @@ def set_up_qfn(a, prev: dict) -> Path | None:
         ok(f"layout: {lay['said']}" + (" - the live 4x Tesla T4 server's own split"
                                        if lay["measured"] else " (not measured on these cards yet)"))
         ok(f"the cards hold the most-used experts of their layers, {qfn_ram_said(lay)}")
+    # v1.2.1-B: between the true minimum and the measured layout the setup scales the layout down (the plan
+    # already came scaled: drafting off, a smaller --kv-resident, a context that fits), says plainly what it
+    # turned off and why the decode will be slow, and asks for a loud confirmation (--yes skips the question;
+    # --check never gets here - its line reports the same, qfn_check_line).
+    if lay["slow"]:
+        warn(f"this PC is below the layout {QFN_SHOWN} was measured on: {lay['slow_why']} - most experts read "
+             "from RAM / the SSD: expect slow decode")
+        # (finding 3: the line lists what this layout really turns off - --drafting on keeps drafting, the same
+        #  gate write_config_qfn's slow_draft applies - and says so instead of announcing drafting off)
+        keep_draft = getattr(a, "drafting", None) == "on"
+        off = [t for t in lay["turned_off"] if not (keep_draft and t.startswith("drafting off"))]
+        ok("the setup scales this layout down: " + ", ".join(off) +
+           (" (drafting stays on: --drafting on says otherwise)" if keep_draft else ""))
+        if not a.yes and ask("This will probably be very slow. Are you sure? (y/n)", ["y", "n"], "n", False) == "n":
+            fail("stopped: this PC would run this model very slowly",
+                 f"a PC nearer the measured layout (16 GB cards, about 96 GB of RAM), another model, or --yes "
+                 "to set it up as it is")
     ctx = choose_context(a, prev_ctx, QFN_CONTEXTS, QFN_DEFAULT_CONTEXT if hip else lay["context"])
     ok(f"context: {ctx} tokens" + (" (recommended)" if ctx == (QFN_DEFAULT_CONTEXT if hip else lay["context"]) else ""))
     models = (Path(a.models_dir).expanduser().resolve() if a.models_dir else

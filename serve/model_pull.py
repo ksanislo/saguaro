@@ -95,18 +95,22 @@ def qfn_quants() -> dict:
 def qfn_fit(entry: dict, cards: list, ram_gb: float) -> dict:
     """What Qwen3.8-Flash-Next on saguaro-qfn needs and whether this PC's first AMD GPU and RAM give it ("needs", "fit")."""
     n = entry.get("needs") or {}
-    out = {"needs": "Linux, one AMD RDNA 3 / 4 GPU of 16 GB or more and about 96 GB of RAM (measured on an "
-                    "RX 9070 XT (gfx1201) with 96 GB of RAM" + ("" if entry.get("measured") else "; this quant not measured yet") + "); on NVIDIA "
-                    "it is set up by hand"}
+    out = {"needs": "Linux, one AMD RDNA 3 / 4 GPU (measured on an "
+                    "RX 9070 XT (gfx1201) with 96 GB of RAM" + ("" if entry.get("measured") else "; this quant not measured yet") + ") - smaller cards "
+                    "and less RAM run it too, slowly (only a PC that cannot hold the model at all is refused); on "
+                    "NVIDIA it is set up by hand"}
     amd = [g for g in cards if str(g.get("arch", "")).startswith("gfx")]
     if not cards:
         return out
     if not amd:
         out["fit"] = "This PC: the setup offers it on AMD GPUs only"
     elif float(amd[0].get("vram_gb") or 0) < float(n.get("vram_gb") or 0):
-        out["fit"] = f"This PC: its GPU has {float(amd[0].get('vram_gb') or 0):.0f} GB - 16 GB or more are needed"
+        # (v1.2.1-B nit: the measured box, not a requirement - v1.2.1-B made these numbers the slow zone)
+        out["fit"] = (f"This PC: its GPU has {float(amd[0].get('vram_gb') or 0):.0f} GB - the layout was measured "
+                      "on 16 GB cards; a smaller card runs it too, slowly")
     elif ram_gb < float(n.get("ram_gb") or 0):
-        out["fit"] = f"This PC: {ram_gb:.0f} GB of RAM - about 96 GB are needed"
+        out["fit"] = (f"This PC: {ram_gb:.0f} GB of RAM - the layout was measured on about 96 GB; less RAM runs "
+                      "it too, slowly")
     else:
         out["fit"] = "This PC: fits (the GPU holds the most-used experts, RAM the next ones, the SSD the rest)"
     return out

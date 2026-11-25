@@ -1,8 +1,11 @@
 """tools/test_setup_qfn.py - Qwen3.8-Flash-Next on its own engine (saguaro-qfn) in the setup: its names and setup ids
 (the old CYBER-FROST ids among them, resolving to its quant), the pinned manifest (the model files, the draft layer,
 the picture tower), the model
-question (offered on AMD and on NVIDIA, refused on Windows and on Mac), the memory it was measured with (refused below
-it), the RAM tier it gets, the config it writes - AMD's as measured, NVIDIA's mirroring the live 4x Tesla T4 configs,
+question (offered on AMD and on NVIDIA, refused on Windows and on Mac), v1.2.1-B's fit policy (refused only under
+the true minimum; between it and the measured layout the setup scales the layout down - drafting off, --kv-resident
+4096, a 32K context - warns what it turned off and why and confirms, --yes skipping the question and --check only
+reporting), Pascal (MIN_CC 61 - a Tesla P40 with a CUDA 12.x toolkit, and only CUDA 13 installed says so plainly),
+the RAM tier it gets, the config it writes - AMD's as measured, NVIDIA's mirroring the live 4x Tesla T4 configs,
 the vision entry, the drafting choice and the answers-at-once value - the cards it picks, the report's QFN lines, the
 --import-model entries and the Models page's entries.  No GPU, no network.
 
@@ -28,7 +31,7 @@ def args(**kw):
                 model_dir=None, models_dir=None, gguf_dir=None, draft=None, backend="hip", yes=True, check=False,
                 port=None, host=None, api_key=None, env=[], no_vision=False, context=None, gpus=None, gpu=None,
                 repack=False, parallel=None, drafting=None, calibrate=False, download_model=False, vision_dir=None,
-                rebuild=False)
+                rebuild=False, nvcc=None, host_compiler=None)
     base.update(kw)
     return SimpleNamespace(**base)
 
@@ -384,20 +387,38 @@ class Offered(unittest.TestCase):
         self.assertIn("saguaro-qfn", about)
         self.assertIn("Not CYBER-FROST", about)                  # (the quant list is where it is offered)
 
-    def test_refused_below_the_measured_memory(self):
-        self.assertIsNone(maya.qfn_quant_fit("ud-q4_k_xl", 15.9, 91.7))   # (an RX 9070 XT with 96 GB: measured)
-        self.assertIn("96 GB of RAM", maya.qfn_quant_fit("ud-q4_k_xl", 15.9, 62.0))
-        self.assertIn("16 GB or more", maya.qfn_quant_fit("ud-q4_k_xl", 11.9, 91.7))
-        out = refusal(lambda: maya.choose_qfn_quant(args(qfn_quant="ud-q4_k_xl"), {}, 15.9, 62.0))
-        self.assertIn("96 GB of RAM", out)
+    def test_refused_only_what_cannot_run(self):
+        """v1.2.1-B: a quant is refused only under its true minimum (6.0 GB on the card at UD-Q4, 8.7 at Q8_0;
+        16-19 GB of RAM) - 62 GB of RAM or an 11.9 GB card RUN, slowly: the layout warns and confirms.
+        Review finding 2: the minimum is per card OF THE SPLIT the layout would use - a pair of 8 GB cards runs
+        Q8_0 slowly (5.4 GB a card), where one 8 GB card alone cannot hold it."""
+        g8 = {"index": 0, "name": "GeForce RTX 4060", "vram_gb": 8.0, "arch": "89"}
+        g16 = {"index": 0, "name": "AMD Radeon RX 9070", "vram_gb": 15.9, "arch": "gfx1201"}
+        pair = [g8, dict(g8, index=1)]
+        self.assertIsNone(maya.qfn_quant_fit("ud-q4_k_xl", [g16], 91.7))   # (an RX 9070 XT with 96 GB: measured)
+        self.assertIsNone(maya.qfn_quant_fit("ud-q4_k_xl", [g16], 62.0))   # (the old "96 GB of RAM" refusal: slow)
+        self.assertIsNone(maya.qfn_quant_fit("ud-q4_k_xl", [{"vram_gb": 11.9}], 91.7))   # (the "16 GB or more")
+        self.assertIsNone(maya.qfn_quant_fit("ud-q4_k_xl", [g8], 91.7))    # (6.0 GB needed: it runs, slowly)
+        self.assertIsNone(maya.qfn_quant_fit("q8_0", pair, 91.7))          # (the 8 GB pair: 5.4 GB a card by the
+                                                           #  split - review finding 2: runs, slowly, not refused)
+        self.assertIn("8 GB cannot hold the 8.7 GB", maya.qfn_quant_fit("q8_0", [g8], 91.7))   # (alone: cannot)
+        self.assertIn("cannot run with 12 GB of RAM",
+                      maya.qfn_quant_fit("cyber-frost-q5_k_m", [g16], 12.0))
+        out = refusal(lambda: maya.choose_qfn_quant(args(qfn_quant="q8_0"), {}, [g8], 91.7))
+        self.assertIn("cannot run on this GPU", out)
+        self.assertIn("8 GB cannot hold the 8.7 GB", out)
+        self.assertEqual(maya.choose_qfn_quant(args(qfn_quant="q8_0"), {}, pair, 91.7), "q8_0")   # (the pair: the
+        self.assertEqual(maya.choose_qfn_quant(args(qfn_quant="ud-q4_k_xl"), {}, [g8], 62.0),     #  menu takes it)
+                         "ud-q4_k_xl")
 
     def test_ram_tier(self):
         self.assertEqual(maya.qfn_ram_budget(91.7), 71)
         self.assertEqual(maya.qfn_ram_budget(20.0), 8)
 
     def test_qfn_fit_contexts_stay_offered_by_the_setup(self):
-        for ctx in (maya.QF.DEFAULT_CONTEXT, maya.QF.SPLIT_CONTEXT):
-            self.assertIn(ctx, maya.QFN_CONTEXTS)                  # (choose_context offers only QFN_CONTEXTS)
+        for ctx in (maya.QF.DEFAULT_CONTEXT, maya.QF.SPLIT_CONTEXT, maya.QF.SCALED_CONTEXT):
+            self.assertIn(ctx, maya.QFN_CONTEXTS)                  # (choose_context offers only QFN_CONTEXTS -
+                                                                   #  including the scaled-down one it recommends)
 
 
 def cpu(sockets=1, cores=8):
@@ -869,14 +890,19 @@ class LiveT4Parity(unittest.TestCase):
 
 
 class Layouts1To4T4(unittest.TestCase):
-    """U7 step 3: one case per (1, 2, 3, 4 Tesla T4) x (UD-Q4_K_XL, Q8_0, CYBER-FROST Q5_K_M) x (64, 128, 256 GB
-    RAM), as a fresh setup writes it on a single-socket CPU (no NUMA keys, no --pool-workers): the PC the experts'
-    working set plainly exceeds is refused in one plain line, every other one gets the split, the context, the K/V
-    window, the RAM tier, the answers-at-once value, the pipeline, the class env and the drafting it should - and
-    4x T4 + 256 GB UD-Q4 is U6's pinned live-equivalent config."""
+    """U7 step 3, judged by the v1.2.1-B policy: one case per (1, 2, 3, 4 Tesla T4) x (UD-Q4_K_XL, Q8_0,
+    CYBER-FROST Q5_K_M) x (32, 64, 96, 256 GB RAM), as a fresh setup writes it on a single-socket CPU (no NUMA
+    keys, no --pool-workers).  The T4s themselves are always the comfortable card (15.0 = ECC on, 16.0 is the
+    other row, in test_qfn_fit's matrix), so the RAM decides: 96 and 256 GB get the layout as laid out - the
+    split, the context, the K/V window, the RAM tier, the answers-at-once value, the pipeline, the class env and
+    the drafting; 32 and 64 GB fit too (v1.2.1-B refused nothing here), slowly: the written config comes scaled
+    down (32K, --kv-resident 4096, drafting off and recorded).  4x T4 + 256 GB UD-Q4 is U6's pinned
+    live-equivalent config.  Nothing of the matrix is refused: 32 GB is over the RAM minimum, the T4 over the
+    card's (8.7 GB even at Q8_0)."""
 
     QUANTS = ["ud-q4_k_xl", "q8_0", "cyber-frost-q5_k_m"]
-    RAMS = [64.0, 128.0, 256.0]
+    RAMS = [32.0, 64.0, 96.0, 256.0]
+    SLOW_RAM = [32.0, 64.0]                                      # (under the comfortable MIN_RAM_GB: warn + confirm)
     SPLIT = {"ud-q4_k_xl": "11,24,36", "q8_0": "10,22,35", "cyber-frost-q5_k_m": "12,24,36"}
 
     def pc(self, n):
@@ -896,20 +922,41 @@ class Layouts1To4T4(unittest.TestCase):
                                       d / "pack" / "mtp", ctx, models, d, {}, vision)
         return json.loads(p.read_text())
 
-    def test_the_refused_pcs_say_so_plainly(self):      # (the 64 GB row: refuse before the config, set_up_qfn:7614)
-        for n, quant in ((n, q) for n in (1, 2, 3, 4) for q in self.QUANTS):
-            with self.subTest(cards=n, quant=quant):
-                lay = maya.QF.plan(self.pc(n)["gpus"], 64.0, quant)
-                self.assertFalse(lay["fits"])
-                self.assertIn("96 GB of RAM", lay["reason"])           # (one plain line, always said)
-                experts, room = maya.QF.quant_gib(quant), 64.0 + 15.0 * n
-                if room < experts:                                     # (and only where the experts really are
-                    self.assertIn("GiB more than these", lay["reason"])  #  over the layout: Q8_0 always, CF up
-                    self.assertIn(f"~{room:.0f} GiB", lay["reason"])     #  to two cards - 45/60 GiB VRAM cover it)
+    def test_the_thin_ram_rows_are_slow_not_refused(self):  # (v1.2.1-B: the old "96 GB of RAM" refusals become
+        for n, quant in ((n, q) for n in (1, 2, 3, 4) for q in self.QUANTS):   #  the warn rows)
+            for ram in self.SLOW_RAM:
+                with self.subTest(cards=n, quant=quant, ram=ram):
+                    lay = maya.QF.plan(self.pc(n)["gpus"], ram, quant)
+                    self.assertTrue(lay["fits"], lay["reason"])
+                    self.assertTrue(lay["slow"])
+                    self.assertIn(f"{ram:.0f} GB of RAM", lay["slow_why"])     # (the thin tier is named)
+                    experts, room = maya.QF.quant_gib(quant), ram + 15.0 * n
+                    if room < experts:                                         # (and only where the experts really
+                        self.assertIn("GiB more than these", lay["slow_why"])  #  are over the layout: Q8_0 always,
+                        self.assertIn(f"~{room:.0f} GiB", lay["slow_why"])     #  CF up to two cards)
+
+    def test_the_slow_rows_write_the_scaled_layout(self):  # (v1.2.1-B: the config is still written for these -
+        for n, quant, ram in ((n, q, r) for n in (1, 2, 3, 4)          #  as it stands today, only scaled down:
+                               for q in self.QUANTS for r in self.SLOW_RAM):   #  32K, --kv-resident 4096, drafting
+            with self.subTest(cards=n, quant=quant, ram=ram), tempfile.TemporaryDirectory() as t:             #  off
+                cfg = self.written(Path(t), n, quant, ram)
+                a = cfg["args"]
+                self.assertEqual(cfg["gpu"], list(range(n)))
+                self.assertEqual(a[a.index("--max-context") + 1], "32768")
+                self.assertEqual(a[a.index("--kv-resident") + 1], "4096")
+                self.assertEqual(a[a.index("--mtp-max-t") + 1], "1")   # (off: said, and recorded, no question)
+                self.assertEqual(cfg["installer"]["mtp_calibration"]["kept"], "none")
+                self.assertEqual(cfg["installer"]["mtp_calibration"]["skipped"], "slow-pc")
+                self.assertIn("--mtp", a)                              # (the layer stays loaded either way)
+                self.assertEqual(a[a.index("--resident-budget-gib") + 1], str(int(ram - 20)))   # (12 / 44 GiB)
+                even = {2: "24", 3: "16,32"}
+                self.assertEqual(cfg.get("layer_split"),
+                                 even.get(n) or (self.SPLIT[quant] if n == 4 else None))
 
     def test_the_written_configs(self):
         even = {2: "24", 3: "16,32"}
-        for n, quant, ram in ((n, q, r) for n in (1, 2, 3, 4) for q in self.QUANTS for r in self.RAMS[1:]):
+        for n, quant, ram in ((n, q, r) for n in (1, 2, 3, 4) for q in self.QUANTS
+                              for r in self.RAMS if r not in self.SLOW_RAM):
             with self.subTest(cards=n, quant=quant, ram=ram), tempfile.TemporaryDirectory() as t:
                 cfg = self.written(Path(t), n, quant, ram)
                 a = cfg["args"]
@@ -921,9 +968,9 @@ class Layouts1To4T4(unittest.TestCase):
                                  f"{n} {quant}")
                 self.assertEqual(a[a.index("--max-context") + 1], "65536" if n == 1 else "262144")
                 self.assertEqual(a[a.index("--kv-resident") + 1], "32768")
-                # the RAM tier (U6's rule, per quant's bytes): Q8_0 at 128 GB pins 108 GiB, everything else at
-                # 128/256 GB leaves it to the page cache
-                tier = 108 if (quant == "q8_0" and ram == 128.0) else None
+                # the RAM tier (U6's rule, per quant's bytes): at 96 GB no quant's experts fit the page cache
+                # beside the 20 GB spare, so all three pin the 76 GiB tier; at 256 GB all leave it to the cache
+                tier = 76 if ram == 96.0 else None
                 if tier:
                     self.assertEqual(a[a.index("--resident-budget-gib") + 1], str(tier), f"{n} {quant} {ram}")
                 else:
@@ -1103,9 +1150,22 @@ class CheckLine(unittest.TestCase):
         self.assertIn("64K context", line)
         plain = [{"index": 0, "name": "RTX A5000", "vram_gb": 24.0, "arch": "86"}]
         self.assertIn("not measured on these cards yet", maya.qfn_check_line("ud-q4_k_xl", maya.QF.plan(plain, 128.0)))
-        self.assertIn("needs GPUs of 16 GB or more",
-                      maya.qfn_check_line("ud-q4_k_xl", maya.QF.plan([{"index": 0, "name": "RTX 4060",
-                                                                       "vram_gb": 8.0, "arch": "89"}], 96.0)))
+        slow = maya.qfn_check_line("ud-q4_k_xl", maya.QF.plan([{"index": 0, "name": "RTX 4060", "vram_gb": 8.0,
+                                                                "arch": "89"}], 96.0))
+        self.assertIn("below the measured layout", slow)               # (v1.2.1-B: --check reports the slow row:
+        self.assertIn("expect slow decode", slow)                      #  the cause, and the scale-down it would
+        self.assertIn("the setup scales this down: drafting off", slow)   #  write - no question; no --mtp-max-t
+        self.assertIn("cannot run on this PC's RTX 4060",
+                      maya.qfn_check_line("q8_0", maya.QF.plan([{"index": 0, "name": "RTX 4060", "vram_gb": 8.0,
+                                                                 "arch": "89"}], 96.0, "q8_0")))
+
+    def test_the_check_line_names_a_thin_ram_row_as_slow(self):
+        t4 = [{"index": i, "name": "Tesla T4", "vram_gb": 15.0, "arch": "75"} for i in range(2)]
+        line = maya.qfn_check_line("q8_0", maya.QF.plan(t4, 64.0, "q8_0"))    # (the plan's own example PC)
+        self.assertIn("below the measured layout", line)
+        self.assertIn("175 GiB", line)                                       # (the quant's numbers, said)
+        self.assertIn("--kv-resident 4096 instead of 32768", line)
+        self.assertNotIn("does not fit", line)
 
 
 class Windows(unittest.TestCase):
@@ -1132,29 +1192,190 @@ class QfnGpus(unittest.TestCase):
             self.assertIn("up to 4 GPUs", refusal(lambda: maya.choose_gpus(args(backend="cuda", gpus="0,1,2,3,4"),
                                                                            big, maya.QF.MIN_CC, "qfn")))
 
-    def test_cards_under_16_gb_are_refused_in_one_line(self):
-        small = [{"index": i, "name": "GeForce RTX 4060", "vram_gb": 8.0, "arch": "89"} for i in (0, 1)]
-        with patch.object(maya.S, "gpus", return_value=small), patch.object(maya.S, "is_wsl", return_value=False), \
+    def test_cards_below_the_minimum_are_refused_in_one_line(self):
+        """v1.2.1-B: only a card that cannot hold the model at all, or RAM under the minimum, stops check_pc -
+        in one plain line carrying the numbers, before anything else is asked."""
+        tiny = [{"index": i, "name": "GeForce RTX 4060", "vram_gb": 4.0, "arch": "89", "driver": "550"}
+                for i in (0, 1)]
+        big = [{"index": 0, "name": "RTX A5000", "vram_gb": 24.0, "arch": "86", "driver": "550"}]
+        with patch.object(maya.S, "gpus", return_value=tiny), patch.object(maya.S, "is_wsl", return_value=False), \
                 patch.object(maya, "mem_gb", return_value=(96.0, 80.0)):
             out = refusal(lambda: maya.check_pc(args(backend="cuda"), "qfn"))    # (no --gpus: one line, no crash)
-        self.assertIn("needs GPUs of 16 GB or more", out)
-        self.assertIn("RTX 4060", out)
-        with patch.object(maya.S, "gpus", return_value=[{"index": 2, "name": "RTX A5000", "vram_gb": 24.0,
-                                                         "arch": "86"}] + small), \
+        # (4.1 GB: the 4060s are equal, so the refusal prices the 2-card split - half the model per card)
+        self.assertIn("cannot run on this PC's GeForce RTX 4060: its 4 GB cannot hold the 4.1 GB", out)
+        self.assertIn("50% of the layers", out)
+        with patch.object(maya.S, "gpus", return_value=big + tiny), \
                 patch.object(maya.S, "is_wsl", return_value=False), patch.object(maya, "mem_gb",
                                                                                  return_value=(96.0, 80.0)):
-            out = refusal(lambda: maya.check_pc(args(backend="cuda", gpus="1"), "qfn"))   # (--gpus names a small one)
-        self.assertIn("needs GPUs of 16 GB or more", out)
-        with patch.object(maya.S, "gpus", return_value=small), patch.object(maya.S, "is_wsl", return_value=False), \
-                patch.object(maya, "mem_gb", return_value=(96.0, 80.0)):
-            out = refusal(lambda: maya.check_pc(args(backend="cuda", gpus="0,1"), "qfn"))  # (both of them named)
-        self.assertIn("needs GPUs of 16 GB or more", out)
-        with patch.object(maya.S, "gpus", return_value=[{"index": 0, "name": "RTX A5000", "vram_gb": 24.0,
-                                                         "arch": "86"}]), \
-                patch.object(maya.S, "is_wsl", return_value=False), patch.object(maya, "mem_gb",
-                                                                                 return_value=(60.0, 40.0)):
-            out = refusal(lambda: maya.check_pc(args(backend="cuda"), "qfn"))   # (and the RAM for the tier)
-        self.assertIn("96 GB of RAM", out)
+            out = refusal(lambda: maya.check_pc(args(backend="cuda", gpus="1"), "qfn"))  # (--gpus names a tiny one)
+        self.assertIn("cannot run on this PC's GeForce RTX 4060", out)
+        with patch.object(maya.S, "gpus", return_value=big), patch.object(maya.S, "is_wsl", return_value=False), \
+                patch.object(maya, "mem_gb", return_value=(12.0, 8.0)):
+            out = refusal(lambda: maya.check_pc(args(backend="cuda"), "qfn"))   # (and RAM under the minimum)
+        self.assertIn("cannot run with 12 GB of RAM", out)
+        self.assertIn("at least about 16 GB", out)
+
+    def test_a_display_card_beside_a_good_one_is_not_a_refusal(self):
+        """Review finding 1: a 4090 plus a 1 GB GT 710 (cc 3.5 - below MIN_CC 61, a card choose_gpus can never
+        take) is a PC the code before this branch set up fine: the pre-guard prices the layout the PICKER would
+        use (best_gpus: the 4090 alone), not one split over every card nvidia-smi lists."""
+        cards = [{"index": 0, "name": "RTX 4090", "vram_gb": 24.0, "arch": "89", "driver": "550"},
+                 {"index": 1, "name": "GeForce GT 710", "vram_gb": 1.0, "arch": "35", "driver": "550"}]
+        out, got = io.StringIO(), []
+        ps = [patch.object(maya.S, "gpus", return_value=cards),
+              patch.object(maya.S, "is_wsl", return_value=False),
+              patch.object(maya.S, "cpu_info", return_value=("CPU", True, True)),
+              patch.object(maya.S, "out", return_value="g++ (test) 13.0"),
+              patch.object(maya, "oomd_active", return_value=False),
+              patch.object(maya, "mem_gb", return_value=(96.0, 80.0)),
+              patch.object(maya, "find_nvcc", return_value=("/usr/local/cuda-12.8/bin/nvcc", (12, 8))),
+              patch.object(maya.shutil, "which", side_effect=lambda c, *r: "/usr/bin/g++" if c == "g++" else None),
+              patch.object(maya, "pick_cmake", return_value=None),
+              patch.object(maya, "select_build_backend", lambda b: None)]
+        for p in ps:
+            p.start()
+        try:
+            with patch("sys.stdout", new=out), patch.object(maya.S, "UI", None):
+                got.append(maya.check_pc(args(backend="cuda"), "qfn"))
+        finally:
+            for p in ps:
+                p.stop()
+        self.assertIsNotNone(got[0])                                    # (the PC sets up: no refusal)
+        self.assertEqual([g["index"] for g in got[0]["gpus"]], [0])     # (the 4090 alone)
+        self.assertNotIn("cannot run", out.getvalue())
+        self.assertIn("too old", out.getvalue())                        # (the GT 710: listed, never chosen)
+
+    def test_a_tiny_equal_pair_beside_a_comfortable_card_is_not_a_refusal(self):
+        """Review finding 1: an equal pair of tiny cards beside a card that runs the model alone - the pre-guard
+        priced best_gpus, which ranked by count and took the pair's split, and it did not apply the cc filter
+        choose_gpus applies.  Both shapes now set the PC up on the comfortable card alone: the GT 710s (cc 3.5,
+        unnameable by --gpus) beside a 16 GB A4000, and a cc-61 GT 1030 pair beside an 11 GB 2080 Ti."""
+        for cards, want in (
+                ([{"index": 0, "name": "RTX A4000", "vram_gb": 16.0, "arch": "86", "driver": "550"},
+                  {"index": 1, "name": "GeForce GT 710", "vram_gb": 1.0, "arch": "35", "driver": "550"},
+                  {"index": 2, "name": "GeForce GT 710", "vram_gb": 1.0, "arch": "35", "driver": "550"}], [0]),
+                ([{"index": 0, "name": "RTX 2080 Ti", "vram_gb": 11.0, "arch": "75", "driver": "550"},
+                  {"index": 1, "name": "GeForce GT 1030", "vram_gb": 4.0, "arch": "61", "driver": "550"},
+                  {"index": 2, "name": "GeForce GT 1030", "vram_gb": 4.0, "arch": "61", "driver": "550"}], [0])):
+            out, got = io.StringIO(), []
+            ps = [patch.object(maya.S, "gpus", return_value=cards),
+                  patch.object(maya.S, "is_wsl", return_value=False),
+                  patch.object(maya.S, "cpu_info", return_value=("CPU", True, True)),
+                  patch.object(maya.S, "out", return_value="g++ (test) 13.0"),
+                  patch.object(maya, "oomd_active", return_value=False),
+                  patch.object(maya, "mem_gb", return_value=(96.0, 80.0)),
+                  patch.object(maya, "find_nvcc", return_value=("/usr/local/cuda-12.8/bin/nvcc", (12, 8))),
+                  patch.object(maya.shutil, "which", side_effect=lambda c, *r: "/usr/bin/g++" if c == "g++" else None),
+                  patch.object(maya, "pick_cmake", return_value=None),
+                  patch.object(maya, "select_build_backend", lambda b: None)]
+            for p in ps:
+                p.start()
+            try:
+                with patch("sys.stdout", new=out), patch.object(maya.S, "UI", None):
+                    got.append(maya.check_pc(args(backend="cuda"), "qfn"))
+            finally:
+                for p in ps:
+                    p.stop()
+            self.assertIsNotNone(got[0], out.getvalue()[-300:])               # (the PC sets up: no refusal)
+            self.assertEqual([g["index"] for g in got[0]["gpus"]], want)      # (the comfortable card alone)
+            self.assertNotIn("cannot run", out.getvalue())
+
+    def test_an_8_gb_pair_is_not_refused_by_the_fit_rule(self):
+        """The 8 GB pair the old rule refused in check_pc is a warn row now (test_qfn_fit's matrix): the fit
+        guards say nothing about it and the picker takes both cards."""
+        small = [{"index": i, "name": "GeForce RTX 4060", "vram_gb": 8.0, "arch": "89"} for i in (0, 1)]
+        self.assertIsNone(maya.QF.unsupported(small, 96.0))
+        self.assertEqual([g["index"] for g in maya.QF.best_gpus(small)], [0, 1])
+        lay = maya.QF.plan(small, 96.0)
+        self.assertTrue(lay["fits"], lay["reason"])
+        self.assertTrue(lay["slow"])
+
+
+class PascalForQfn(unittest.TestCase):
+    """v1.2.1-B step 3: MIN_CC 61 - a Tesla P40 is set up for QFN (24 GB + 32 GB is the hand-run box: warned
+    as slow, never refused).  sm_6x / sm_70 build through engines/qfn's experimental pre-Turing path, which needs
+    a CUDA 12.x toolkit - CUDA 13 dropped them (how the Inkling/GLM path has always handled Pascal): the setup
+    prefers a fitting 12.x and, with only 13 installed, says so plainly.  The sm_75 class rule (U6) keeps the
+    T4 tuning off it."""
+
+    P40 = {"index": 0, "name": "Tesla P40", "vram_gb": 24.0, "arch": "61", "driver": "550"}
+
+    def patches(self, nvcc):
+        return [patch.object(maya.S, "gpus", return_value=[dict(self.P40)]),
+                patch.object(maya.S, "is_wsl", return_value=False),
+                patch.object(maya.S, "cpu_info", return_value=("CPU", True, True)),
+                patch.object(maya.S, "out", return_value="g++ (test) 13.0"),
+                patch.object(maya, "oomd_active", return_value=False),
+                patch.object(maya, "mem_gb", return_value=(32.0, 20.0)),
+                patch.object(maya, "find_nvcc", return_value=nvcc),
+                patch.object(maya.shutil, "which", side_effect=lambda c, *r: "/usr/bin/g++" if c == "g++" else None),
+                patch.object(maya, "pick_cmake", return_value=None),
+                patch.object(maya, "select_build_backend", lambda b: None)]
+
+    def run_check_pc(self, nvcc, cards=None, a=None):
+        out, got = io.StringIO(), []
+        ps = self.patches(nvcc)
+        if cards is not None:
+            ps[0] = patch.object(maya.S, "gpus", return_value=cards)
+        for p in ps:
+            p.start()
+        try:
+            with patch("sys.stdout", new=out), patch.object(maya.S, "UI", None):
+                try:
+                    got.append(maya.check_pc(a or args(backend="cuda"), "qfn"))
+                except SystemExit:
+                    pass
+        finally:
+            for p in ps:
+                p.stop()
+        return out.getvalue(), (got[0] if got else None)
+
+    def test_the_p40_is_usable_and_lays_out_slow(self):
+        self.assertEqual(maya.QF.MIN_CC, 61)
+        lay = maya.QF.plan([dict(self.P40, index=0)], 32.0)
+        self.assertTrue(lay["fits"], lay["reason"])
+        self.assertTrue(lay["slow"])                                   # (32 GB: the warn box, not a refusal)
+        self.assertFalse(lay["t4"])
+        self.assertEqual({k for k in lay["env"] if k.startswith("SAGUARO_SM75")
+                          or k in ("SAGUARO_KQL", "SAGUARO_GDN_KEYHEAD", "SAGUARO_ARGMAX_ROWS_SM70")}, set())
+
+    def test_the_toolkit_rule_prefers_a_fitting_12_x(self):
+        self.assertEqual(maya.nvcc_range([61]), ((12, 0), (13, 0)))    # (CUDA 13 dropped Pascal: hi)
+        self.assertEqual(maya.pick_nvcc([("/c13", (13, 2)), ("/c128", (12, 8))], [61]), ("/c128", (12, 8)))
+        self.assertEqual(maya.pick_nvcc([("/c13", (13, 2))], [61]), ("/c13", (13, 2)))   # (only 13: reported)
+        self.assertIn("Pascal need CUDA 12.x", maya.toolkit_hint([61]))
+
+    def test_only_cuda_13_installed_says_pascal_needs_12(self):
+        out, pc = self.run_check_pc(("/usr/local/cuda-13.2/bin/nvcc", (13, 2)))
+        self.assertIsNone(pc)                                          # (the setup stops there)
+        self.assertIn("can be used (Pascal: experimental)", out)       # (the card itself: seen, second-class)
+        self.assertIn("cannot build for these GPUs", out)
+        self.assertIn("CUDA 12.0 or newer but older than 13.0", out)   # ("they need", plainly)
+        self.assertIn("CUDA 13 dropped Volta and Pascal", out)
+        self.assertIn("Pascal need CUDA 12.x", out)                    # (the hint with the packages to install)
+
+    def test_cuda_12_installed_sets_the_p40_up(self):
+        out, pc = self.run_check_pc(("/usr/local/cuda-12.8/bin/nvcc", (12, 8)))
+        self.assertIsNotNone(pc)                                       # (past the checks: the P40 is chosen)
+        self.assertEqual([g["index"] for g in pc["gpus"]], [0])
+        self.assertIn("CUDA toolkit 12.8", out)
+        self.assertNotIn("cannot build", out)
+
+    def test_a_mixed_pre_turing_and_newer_list_is_said_plainly(self):
+        """Review finding 4: CMakeLists.txt's qfn rule (1787-1808) builds engines/qfn's pre-Turing path only when
+        EVERY arch is < 75, so a P40 named beside a T4 builds sm_75 only - the P40 would get a binary with no
+        kernel image for it.  check_pc says that plainly (MIN_CC 61 extended this to Pascal; the engine's C++ is
+        off-limits, and the PC runs on either class alone, so it is a warning with the way out, not a refusal)."""
+        cards = [dict(self.P40), {"index": 1, "name": "Tesla T4", "vram_gb": 15.0, "arch": "75", "driver": "550"}]
+        out, pc = self.run_check_pc(("/usr/local/cuda-12.8/bin/nvcc", (12, 8)), cards=cards,
+                                    a=args(backend="cuda", gpus="0,1"))
+        self.assertIsNotNone(pc)                                       # (warned, not refused: either class alone runs)
+        self.assertIn("no kernel image for it", out)                   # (the mixed list, said plainly)
+        self.assertIn("--gpu N for one class", out)
+        out1, pc1 = self.run_check_pc(("/usr/local/cuda-12.8/bin/nvcc", (12, 8)), cards=cards,
+                                      a=args(backend="cuda", gpus="0"))  # (the P40 alone: pre-Turing build, no warn)
+        self.assertIsNotNone(pc1)
+        self.assertNotIn("no kernel image", out1)
 
 
 class QfnReport(unittest.TestCase):
@@ -1230,9 +1451,10 @@ class Vision(unittest.TestCase):
 
 
 class SetupFlow(unittest.TestCase):
-    """set_up_qfn with the machine, the build and the downloads stepped around: what the choices write."""
+    """set_up_qfn with the machine, the build and the downloads stepped around: what the choices write - and,
+    v1.2.1-B, what a slow PC gets: the scaled config, the loud warning, the one confirmation question."""
 
-    def flow(self, t: Path, a, vision=None, mtp=True, pc=None):
+    def flow(self, t: Path, a, vision=None, mtp=True, pc=None, mem=(91.7, 80.0), out=None):
         eng = t / "build" / "qfn"
         eng.mkdir(parents=True)
         (eng / "saguaro-qfn").write_text("")
@@ -1240,7 +1462,7 @@ class SetupFlow(unittest.TestCase):
         files = [t / "gguf" / n for n in maya.qfn_entry("ud-q4_k_xl")["files"]]
         with patch.object(maya, "ROOT", t), patch.object(maya, "qfn_exe", return_value=eng / "saguaro-qfn"), \
                 patch.object(maya, "check_pc", return_value=pc or pc_hip()), \
-                patch.object(maya, "mem_gb", return_value=(91.7, 80.0)), \
+                patch.object(maya, "mem_gb", return_value=mem), \
                 patch.object(maya, "tools_step", return_value=t / "llama"), \
                 patch.object(maya, "build_step", return_value={"lib_dirs": ["/opt/rocm/lib"]}), \
                 patch.object(maya, "qfn_files_step", return_value=files), \
@@ -1249,15 +1471,17 @@ class SetupFlow(unittest.TestCase):
                 patch.object(maya, "qfn_mtp_step", return_value=models / "Qwen3.8-Flash-Next-MTP-Lamina" if mtp
                              else None), \
                 patch.object(maya, "write_run_script", return_value=t / "run.sh"), \
-                patch("sys.stdout", new=io.StringIO()), patch.object(maya.S, "UI", None):
+                patch("sys.stdout", new=out or io.StringIO()), patch.object(maya.S, "UI", None):
             return maya.set_up_qfn(a, {})
 
     def setup(self, t: Path, **kw):
         vision = kw.pop("_vision", None)
         nomtp = kw.pop("_nomtp", False)
         pc = kw.pop("_pc", None)
+        mem = kw.pop("_mem", (91.7, 80.0))
+        out = kw.pop("_out", None)
         a = args(qfn_quant="ud-q4_k_xl", context=65536, models_dir=t / "models", **kw)
-        p = self.flow(t, a, vision=vision, mtp=not nomtp, pc=pc)
+        p = self.flow(t, a, vision=vision, mtp=not nomtp, pc=pc, mem=mem, out=out)
         return json.loads(p.read_text())
 
     def test_drafting_off_is_the_mtp_max_t_arg(self):
@@ -1299,6 +1523,101 @@ class SetupFlow(unittest.TestCase):
             cfg = self.setup(Path(t), _nomtp=True)
             self.assertNotIn("--mtp", cfg["args"])
             self.assertNotIn("mtp_calibration", cfg["installer"])
+
+    # v1.2.1-B step 2: a PC between the true minimum and the measured layout gets the loud warning with the
+    # cause, the scale-down said out and recorded in the config, and the confirmation - one question, which
+    # --yes skips and a "no" answers by stopping the setup.
+
+    def test_a_slow_pc_gets_the_scaled_config_and_no_questions_with_yes(self):
+        asked = []
+        with tempfile.TemporaryDirectory() as t, cpu(), \
+                patch.object(maya, "ask", side_effect=lambda q, ch, d, y: asked.append(q) or d):
+            cfg = self.setup(Path(t), _mem=(64.0, 50.0))
+        a = cfg["args"]
+        self.assertEqual(a[a.index("--kv-resident") + 1], "4096")          # (scaled: the plan's window)
+        self.assertEqual(a[a.index("--mtp-max-t") + 1], "1")               # (drafting off)
+        self.assertIn("--mtp", a)
+        self.assertEqual(cfg["installer"]["mtp_calibration"]["kept"], "none")
+        self.assertEqual(cfg["installer"]["mtp_calibration"]["skipped"], "slow-pc")
+        self.assertFalse([q for q in asked if "very slow" in q])           # (--yes skips the confirmation)
+        self.assertFalse([q for q in asked if "m = measure" in q])         # (the drafting question: not asked)
+
+    def test_a_slow_pc_is_asked_once_and_a_no_stops_the_setup(self):
+        asked = []
+
+        def answer(q, ch, dflt, yes):
+            asked.append(q)
+            return "n" if "very slow" in q else dflt
+        with tempfile.TemporaryDirectory() as t, cpu(), patch.object(maya, "ask", side_effect=answer):
+            self.assertRaises(SystemExit, self.setup, Path(t), **{"_mem": (64.0, 50.0), "yes": False})
+        self.assertEqual([q for q in asked if "very slow" in q],
+                         ["This will probably be very slow. Are you sure? (y/n)"])
+
+    def test_a_slow_pc_answered_yes_is_written_scaled_and_drafting_stays_off(self):
+        asked = []
+
+        def answer(q, ch, dflt, yes):
+            asked.append(q)
+            return "y" if "very slow" in q else dflt
+        with tempfile.TemporaryDirectory() as t, cpu(), patch.object(maya, "ask", side_effect=answer):
+            cfg = self.setup(Path(t), **{"_mem": (64.0, 50.0), "yes": False})
+        self.assertEqual(cfg["args"][cfg["args"].index("--mtp-max-t") + 1], "1")   # (measure leaves it off: the
+        self.assertEqual(cfg["installer"]["mtp_calibration"]["skipped"], "slow-pc")  #  slow PC's own choice)
+        self.assertEqual(len([q for q in asked if "very slow" in q]), 1)
+
+    def test_a_measured_pc_is_neither_asked_nor_scaled(self):
+        asked = []
+        with tempfile.TemporaryDirectory() as t, cpu(), \
+                patch.object(maya, "ask", side_effect=lambda q, ch, d, y: asked.append(q) or d):
+            cfg = self.setup(Path(t))                                          # (91.7 GB: comfortable)
+        self.assertEqual(cfg["args"][cfg["args"].index("--kv-resident") + 1], "32768")
+        self.assertNotIn("--mtp-max-t", cfg["args"])
+        self.assertFalse([q for q in asked if "very slow" in q])
+
+    def test_a_16_gb_pc_pins_no_tier_and_streams_through_the_cache(self):
+        """Review finding 3 through the setup: a 16 GB PC clears the RAM minimum by 0.07 GiB - the written layout
+        scales the pinned tier down to nothing instead of pinning 8 GiB beside the ~8 the minimum leaves."""
+        with tempfile.TemporaryDirectory() as t:
+            cfg = self.setup(Path(t), _mem=(16.0, 8.0))
+        a = cfg["args"]
+        self.assertNotIn("--resident-budget-gib", a)               # (no tier: the file cache is it, scaled slow)
+        self.assertEqual(a[a.index("--kv-resident") + 1], "4096")  # (still the scaled layout - the context here
+                                                                   #  is the 65536 the flow itself names)
+
+    def test_drafting_on_overrides_the_scale_down(self):
+        """Review finding 3: with --drafting on the step-2 line says drafting STAYS on - it does not announce a
+        drafting off the flag overrides (and without the flag the scale-down line still says drafting off)."""
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as t, cpu():
+            cfg = self.setup(Path(t), _mem=(64.0, 50.0), drafting="on", _out=out)   # (--drafting on says otherwise)
+        self.assertNotIn("--mtp-max-t", cfg["args"])
+        self.assertEqual(cfg["installer"]["mtp_calibration"]["kept"], "mtp")   # (the question's own record)
+        said = [ln for ln in out.getvalue().splitlines() if "scales this layout down" in ln]
+        self.assertEqual(len(said), 1)                                         # (the scale-down line, once)
+        self.assertNotIn("drafting off", said[0])                              # (not announced: it stays on)
+        self.assertIn("drafting stays on: --drafting on says otherwise", said[0])
+        self.assertIn("--kv-resident 4096 instead of 32768", said[0])          # (the rest of the scale-down: said)
+        out2 = io.StringIO()
+        with tempfile.TemporaryDirectory() as t, cpu():
+            self.setup(Path(t), _mem=(64.0, 50.0), _out=out2)                  # (no --drafting: the default)
+        said = [ln for ln in out2.getvalue().splitlines() if "scales this layout down" in ln][0]
+        self.assertIn("drafting off", said)                                    # (still scaled down as before; the
+        self.assertNotIn("--mtp-max-t", said)                                  #  line claims no flag - finding 5)
+        self.assertNotIn("drafting stays on", said)
+
+    def test_a_slow_pc_with_no_drafter_claims_no_flag(self):
+        """Review finding 5: turned_off always said "drafting off (--mtp-max-t 1)", but write_config_qfn writes
+        that flag only when a drafter exists (saguaro.py:7576) - a slow PC whose draft layer was not downloaded
+        gets the scale-down line without the flag, and a config with neither --mtp nor --mtp-max-t."""
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as t, cpu():
+            cfg = self.setup(Path(t), _mem=(64.0, 50.0), _nomtp=True, _out=out)
+        self.assertNotIn("--mtp", cfg["args"])                    # (no drafter: nothing loaded, nothing capped)
+        self.assertNotIn("--mtp-max-t", cfg["args"])
+        said = [ln for ln in out.getvalue().splitlines() if "scales this layout down" in ln][0]
+        self.assertNotIn("--mtp-max-t", said)                     # (no flag claimed where there is no drafter)
+        self.assertIn("drafting off", said)                       # (still plain and true: nothing drafts here)
+        self.assertIn("--kv-resident 4096 instead of 32768", said)
 
 
 class Parallel(unittest.TestCase):
@@ -1366,8 +1685,10 @@ class ModelsPage(unittest.TestCase):
         self.assertAlmostEqual(cf["size_gb"], 112.5, delta=0.1)
         self.assertIn("fits", cf["fit"])
         small = {e["id"]: e for e in M.catalog(ROOT, glm_sizes={}, cards=amd, ram_gb=60.0)}
-        self.assertIn("96 GB are needed", small["qwen3.8-flash-next-ud-q4_k_xl"]["fit"])
-        self.assertIn("96 GB are needed", small["cyber-frost"]["fit"])
+        self.assertIn("measured on about 96 GB", small["qwen3.8-flash-next-ud-q4_k_xl"]["fit"])   # (v1.2.1-B
+        self.assertIn("runs it too, slowly", small["qwen3.8-flash-next-ud-q4_k_xl"]["fit"])       #  nit: the
+        self.assertIn("measured on about 96 GB", small["cyber-frost"]["fit"])                     #  measured box,
+                                                                                                  #  not a need)
 
 
 if __name__ == "__main__":
