@@ -362,16 +362,28 @@ drafter and both answers fastest (a chat, a code and a tool-call request, `SAGUA
 `data/ik2-drafting.txt` (per GPU, driver, model files, context and cache; `saguaro.py --speed-calibration` measures again);
 **on** drafts with the drafter and the prompt lookup, the controller choosing each step; **off** loads neither. A
 request's `spec=1` asks for no drafting. The drafter takes room only where the start plan stays as it is without it
-(every expert in VRAM, the same context and cache, and not the free VRAM the pictures' encoder would start in on the
-GPU - `SAGUARO_IK2_VISION_GIB`, the server's), else it is left out with a NOTE: on a 24 GB card that is above about 200K tokens of
-context with the FP8 cache (`tools/ik2_fit.py` `draft_gib`: 0.88 GiB + 4.75 KiB a token). The Monitor's Speculation
-shows the drafts kept (STAT `draft_acc` / `draft_off`, `draft_ms`, `verify_ms`).
+(every expert in VRAM, the same context and cache), else it is left out with a NOTE. Pictures take nothing from it:
+the plan is the same with images on or off, and the image encoder runs on the CPU whenever the VRAM free beside the
+model and the drafter does not hold it. It is loaded last before the expert cache and
+what is left is measured: where the context rows of its layer without a window do not fit in FP16 (4 KiB a
+position) they are kept in FP8 (2 KiB; `SAGUARO_IK2_DRAFT_KV=f16|fp8` decides instead), so a 24 GB card keeps the drafter at
+262,144 tokens with the FP8 cache (`tools/ik2_fit.py` `draft_gib`: 0.65 GiB + 4 KiB a token for FP16 rows, half that
+with FP8). The Monitor's Speculation shows the drafts kept (STAT `draft_acc` / `draft_off`, `draft_ms`, `verify_ms`).
 
-Past what a card holds with every expert (the offload path: a long context, or a card under 24 GB with UD-Q4_K_XL) the
-drafter's room comes from the experts' tier (upstream v1.1.75): at most half of the tier's room, with the verify
-window's staging (0.7 GiB) and at least 65,536 FP8 context rows of the last positions; where part of the cache streams
-from RAM drafting stays off. The setup's `tools/ik2_fit.py` `draft_fits` / `drafting_off_reason` count it the same way
-(and keep drafting off on an AMD card's offload path, where it was measured slower than plain decoding).
+Past what a card holds with every expert (the offload path: a long context, or a card under 24 GB with
+UD-Q4_K_XL) the drafter's window runs on the dynamic expert cache (`SAGUARO_IK2_OFF_DYNAMIC`, ours: on by default on
+one GPU): the window's picks go through the tier and its misses are fetched once for all the window's tokens, the
+lookup's records take what the tier's budget yields (the start line says it), and the context, the cache and the
+pictures' room stay as without it. Its context rows are FP16, else FP8 (`SAGUARO_IK2_DRAFT_KV` decides). Where part of
+the cache streams from RAM drafting stays off with a NOTE; on two GPUs (the split) it stays off too - the window is
+not checked there yet. `--drafting auto` measures the sources that loaded in one start, as everywhere. The setup's
+`tools/ik2_fit.py` `draft_fits` / `drafting_off_reason` count it the same way (and keep drafting off on an AMD card's
+offload path, where it was measured slower than plain decoding; `SAGUARO_IK2_DRAFT_FORCE=2` drafts anyway).
+
+Deep in a long context a window can cost more than the plain tokens it gives. The controller times an answer's
+drafting rounds against its plain tokens at the depth the answer is at, and where the rounds give fewer tokens a
+second the answer goes on in plain tokens, with a rare look again (`SAGUARO_IK2_DRAFT_GATE=0`: without). Only the speed
+changes: the tokens are the same with drafting or without.
 
 Whether a window pays depends on the text: the drafts are taken 1.8 tokens a step in prose, 3 in new code, 4.3 in a
 document's edit. A controller decides each step (`SpecCtl`): a window of B's expected tokens, (1 - a^B) / (1 - a)

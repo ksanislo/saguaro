@@ -66,6 +66,14 @@ int main() {
         CHECK(d::ring_slots(6.2 * GB, cmp, 50 * GB, 4) == 4);      // (Gen2 x16: 1.65 ms an expert - one a batch, #609)
         CHECK(d::ring_slots(8.0 * GB, v100, 50 * GB, 4) == 44);    // (0.86 ms an expert: ~10 ms a batch, 11)
         CHECK(d::ring_slots(6.0 * GB, v100, 50 * GB, 4) == 4);     // (1.15 ms an expert: one a batch)
+        const size_t x3full = 13312512;                              // (EXL3 2.9 bpw, a whole expert: 12.7 MB)
+        CHECK(d::ring_slots(12.3 * GB, x3full, 28 * GB, 4) == 28);   // (1.03 ms on PCIe 3 x16: the link-sized batch, 7)
+        CHECK(d::ring_slots(7.9 * GB, x3full, 28 * GB, 4) == 4);     // (under 8 GB/s: one a batch, as before)
+        {   // #1143: 6.4 MB experts on links that read 6.4-6.8 GB/s from one start to the next: one answer for all of them
+            const size_t x3 = 6400000;
+            for (double g = 6.45; g <= 6.81; g += 0.1) CHECK(d::ring_slots(g * GB, x3, 28 * GB, 4) == 40);
+            CHECK(d::ring_slots(5.6 * GB, x3, 28 * GB, 4) == 4);   // (1.14 ms an expert: still one a batch)
+        }
         CHECK(d::ring_slots(25 * GB, l40s, 30 * GB, 4) == 20);     // (PCIe 4 x16, big blobs: 400 MB, as before)
         CHECK(d::ring_slots(11.5 * GB, v100, 1 * GB, 4) == 8);     // (1 GB of room: 62 MB, 2 a batch)
         CHECK(d::ring_slots(11.5 * GB, v100, 0.01 * GB, 4) == 4);  // (at least one a batch)

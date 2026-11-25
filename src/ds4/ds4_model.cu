@@ -615,7 +615,8 @@ struct Dev {
     // (#1026) the VRAM this PC's start and requests allocate after the experts' plan (measured, kept in
     // <pack>/vram-late.txt): kept free beside the reserve, so the reserve is what stays free; late_kept: the file's
     // figure, fr_min: the least free VRAM this run has seen
-    size_t late = 0, late_kept = 0, fr_min = ~(size_t) 0;
+    // late_room: the room the experts' plan had on this GPU at this start - all the figure can still grow by (#1156)
+    size_t late = 0, late_kept = 0, fr_min = ~(size_t) 0, late_room = ~(size_t) 0 >> 2;
     // (the Monitor's map: the prompt chunks' buffers, out of scratch; of the weights, the copies a group's members
     // each hold of the tensors they do not split - what tensor parallel costs beyond one copy, its members' share)
     size_t prompt = 0, tp_w = 0;
@@ -4543,15 +4544,26 @@ struct Model::Impl {
                     last = l.il;
                 }
             }
-            const Dev& d = devs[di];
-            const double room = (double) d.free0 - (double) keep_b(d);
+            Dev& d = devs[di];
+            double room = (double) d.free0 - (double) keep_b(d);
             if (!whole || need <= 0 || need <= room) continue;
+            // (#1156) the measured figure never keeps a model out that the reserve alone lets in (v1.1.73/74 refused
+            //  here once the figure had grown): it gives way, said once, and cannot grow at this start
+            if (d.late > 0) {
+                const double give = std::min((double) d.late, need - room);
+                const size_t left = (size_t) (((double) d.late - give) / (double) vramlate::kStep) * (size_t) vramlate::kStep;
+                std::fprintf(stderr, "saguaro ds4: CUDA%d keeps %zu instead of %zu MiB free beside the %lld MiB reserve: the dense "
+                                     "weights need the room\n", d.id, left >> 20, d.late >> 20, (long long) o.reserve_mib);
+                d.late = left, d.late_room = 0;
+                room = (double) d.free0 - (double) keep_b(d);
+                if (need <= room) continue;
+            }
             char msg[1024];
             std::snprintf(msg, sizeof msg,
                           "CUDA%d has %.2f GB free of %.2f GB, but the dense weights of %s%s need %.2f GB on it "
                           "(attention, shared experts%s): they always stay in VRAM - the CPU lane and --vram-experts "
                           "move only the routed experts. To run it: %s, or more GPUs (the layers are split across "
-                          "them), or close other programs using this GPU",
+                          "them), or close other programs using this GPU%s",
                           d.id, (double) d.free0 / 1e9, (double) d.total / 1e9,
                           first < 0 ? "the drafter"
                                     : ("layers " + std::to_string(first) + "-" + std::to_string(last)).c_str(),
@@ -4561,7 +4573,8 @@ struct Model::Impl {
                                                   std::to_string((int) std::ceil((need + 2.5e9) / 1e9)) +
                                                   " GB of VRAM or more"
                                             : std::string("GPUs with more free VRAM"))
-                              .c_str());
+                              .c_str(),
+                          o.reserve_mib > 0 && need <= (double) d.free0 ? ", or a lower --vram-reserve-mib" : "");
             err = msg;
             return false;
         }
@@ -5050,12 +5063,32 @@ struct Model::Impl {
         }
         prof.assign((size_t) (g.nl + g.n_mtp) * g.n_exp, 0u);
         if (!o.profile.empty()) {
-            std::FILE* f = std::fopen(o.profile.c_str(), "rb");
-            if (f != nullptr) {
+            std::string from = o.profile;
+            std::FILE* f = std::fopen(from.c_str(), "rb");
+            if (f == nullptr && !o.profile_seed.empty()) {   // (the pack has none yet: the shipped one, as setup copies)
+                from = o.profile_seed;
+                f = std::fopen(from.c_str(), "rb");
+            }
+            if (f == nullptr) {
+                std::fprintf(stderr, "saguaro ds4: no expert profile (%s not found): VRAM starts with the experts in their order, "
+                                     "not the most-routed first\n", o.profile.c_str());
+            } else {
                 std::vector<uint32_t> p(prof.size());
                 const size_t n = std::fread(p.data(), 4, p.size(), f);
-                if (n == p.size() || n == (size_t) g.nl * g.n_exp) std::copy(p.begin(), p.begin() + (long) n, prof.begin());
                 std::fclose(f);
+                if (n == p.size() || n == (size_t) g.nl * g.n_exp) {
+                    std::copy(p.begin(), p.begin() + (long) n, prof.begin());
+                    if (from == o.profile)
+                        std::fprintf(stderr, "saguaro ds4: expert profile %s\n", from.c_str());
+                    else
+                        std::fprintf(stderr, "saguaro ds4: expert profile %s (the shipped one: %s does not exist yet%s)\n",
+                                     from.c_str(), o.profile.c_str(),
+                                     o.profile_readonly ? "" : "; what this run learns is saved there if it can be written");
+                } else {
+                    std::fprintf(stderr, "saguaro ds4: expert profile %s ignored: %zu counts, this model takes %zu (%d layers x %d "
+                                         "experts%s)\n", from.c_str(), n, prof.size(), g.nl + g.n_mtp, g.n_exp,
+                                 g.n_mtp > 0 ? ", or the trunk's alone" : "");
+                }
             }
         }
         prof_load = prof;
@@ -8118,6 +8151,8 @@ struct Model::Impl {
                 size_t fr = 0, tot = 0;
                 CK(mem_info(&fr, &tot));
                 mroom.push_back(std::max(0.0, ((double) fr - (double) keep_b(devs[(size_t) m]))) * o.vram_experts);
+                // (#1156: the experts' room is all the figure can still grow by - a plan with none left is not "short")
+                if (devs[(size_t) m].late_room != 0) devs[(size_t) m].late_room = (size_t) mroom.back();
                 own.push_back(mroom.back());
                 charged = charged || commit_charged(devs[(size_t) m]);
             }
@@ -9396,8 +9431,12 @@ struct Model::Impl {
                " dspark " + std::to_string((int) o.dspark) + " vision " + std::to_string((int) o.vision) + " share " +
                std::to_string((int) (o.vram_experts * 1000));
     }
+    static const char* late_fixed() {   // (SAGUARO_DS4_LATE_MB / DS4_LATE_MB, else every engine's SAGUARO_VRAM_LATE_MB)
+        const char* v = ds4_env("DS4_LATE_MB");
+        return v != nullptr ? v : std::getenv("SAGUARO_VRAM_LATE_MB");
+    }
     void late_read() {
-        const char* fixed = ds4_env("DS4_LATE_MB");
+        const char* fixed = late_fixed();
         const std::string f = late_file();
         for (size_t di = 0; di < devs.size(); ++di) {
             Dev& d = devs[di];
@@ -9409,12 +9448,12 @@ struct Model::Impl {
                 // (the default reserve, not asked for: v1.1.72's plan wherever it holds what the run takes after the
                 //  plan with 128 MiB to spare - only a PC whose default reserve it uses up keeps more free)
                 d.late = vramlate::kept_for(d.late_kept, (size_t) std::max<int64_t>(0, o.reserve_mib) << 20,
-                                            o.reserve_given);
+                                            vramlate::asked(o.reserve_given, (size_t) std::max<int64_t>(0, o.reserve_mib) << 20));
             }
             if (d.late > 0)
-                std::fprintf(stderr, "saguaro ds4: CUDA%d keeps %zu MiB free beside the %lld MiB reserve: what this PC's start "
-                                     "and requests allocate after the experts' plan%s\n", d.id, d.late >> 20,
-                             (long long) o.reserve_mib, fixed != nullptr ? " (SAGUARO_DS4_LATE_MB)" : " (measured before)");
+                std::fprintf(stderr, "saguaro ds4: CUDA%d keeps %zu MiB free beside the %lld MiB reserve%s\n", d.id, d.late >> 20,
+                             (long long) o.reserve_mib, vramlate::why(fixed != nullptr,
+                                           vramlate::asked(o.reserve_given, (size_t) std::max<int64_t>(0, o.reserve_mib) << 20)).c_str());
         }
     }
     // once loaded (`loaded`) and between requests: the least free VRAM this run has seen against the reserve - the
@@ -9422,7 +9461,7 @@ struct Model::Impl {
     // of the card (not another program's), in steps of 32 MiB; written when it moves by 32 MiB or more, and a reserve
     // found short is said (once a step)
     void late_check(bool loaded) {
-        if (ds4_env("DS4_LATE_MB") != nullptr) return;
+        if (late_fixed() != nullptr) return;
         int cur = 0;
         if (cudaGetDevice(&cur) != cudaSuccess) (void) cudaGetLastError();
         const std::string f = late_file();
@@ -9439,7 +9478,8 @@ struct Model::Impl {
                              d.id, fr >> 20, (long long) (res >> 20),
                              d.late > 0 ? (", " + std::to_string(d.late >> 20) + " MiB more kept beside it").c_str() : "");
             vramlate::Gpu lg{d.late, d.late_kept, d.fr_min};   // (the engines' shared step: src/core/vram_late.hpp)
-            const vramlate::Step st = vramlate::check(lg, fr, tot, (size_t) res, o.reserve_given);
+            const bool asked = vramlate::asked(o.reserve_given, (size_t) std::max<int64_t>(0, o.reserve_mib) << 20);
+            const vramlate::Step st = vramlate::check(lg, fr, tot, (size_t) res, asked, d.late_room);
             d.fr_min = lg.fr_min, d.late_kept = lg.kept;
             if (!st.moved) continue;
             const int64_t want = st.want;

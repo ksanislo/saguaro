@@ -238,7 +238,6 @@ class Requests(unittest.TestCase):
                 kw = anthropic_to_messages({**base, **req})[2]
                 self.assertEqual(self.rendered(kw), want)
 
-    @unittest.skip("upstream's model API think=false mapping is not in Saguaro's server")
     def test_model_api(self):
         from serve import model_api
         for think, want in ((False, "no_think"), (True, "high"), (None, "high")):

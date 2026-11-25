@@ -42,7 +42,7 @@ no tuning step - it balances its own split):
      Maya-S, Maya-S24, Maya-M, Maya-M-Derisked or Maya-L; or turboderp's EXL3 quant at 3.05 or 4.05 bits or the
      self-calibrated one at 4.10: NVIDIA from V100, and AMD)
   3. Python packages into .venv, llama.cpp's source at the pinned commit (it lists them and asks first)
-  4. compiles the engine (`build/saguaro-glm`, or `build-hip/saguaro-glm`) for your GPU(s): 10-30 minutes, once
+  4. compiles the engine (`build/saguaro-glm`, or `build-hip/saguaro-glm`) for your GPU(s): a few minutes, once
   5. the model: GGUF files you already have (--gguf-dir), or a download it shows you first - the exact commands
      and the size - and starts only after you answer y (or pass --download-model)
   6. builds the pack (the engine's index of the model files) inside the model folder
@@ -1042,6 +1042,33 @@ def gpu_reserve_why(gpus) -> str:
     if gpus and all(gpu_headless(g) for g in gpus):
         return "no display is connected to the GPU"
     return "the desktop may run on the GPU and allocate beside the engine"
+
+
+# (#1156) whose reserve a config's is, for the engines' measured extra beside it (src/core/vram_late.hpp): the MiB the
+# SETUP wrote by itself on an AMD GPU - the engines then keep the default rule (nothing extra kept unless that reserve
+# would be used up) - or "0": set by the user (--vram-reserve-mib), the measured extra is kept on top
+VRAM_RESERVE_SETUP = "SAGUARO_VRAM_RESERVE_SETUP_MB"
+
+
+def mark_reserve(env: dict, mib: int | None, hip: bool = True) -> None:
+    """A config's environment told whose its VRAM reserve is: `mib` the setup's own (AMD), None the user's ("0" on an
+    AMD GPU, where a later setup would else take a kept reserve equal to its own for its own; elsewhere no line)."""
+    for k in [k for k in env if str(k) == VRAM_RESERVE_SETUP]:   # (our settings have one name: no alias mapping)
+        del env[k]
+    if mib is not None or hip:
+        env[VRAM_RESERVE_SETUP] = str(mib) if mib is not None else "0"
+
+
+def mark_kept_reserve(env: dict, kept, per_mib: float, own_mib: int) -> None:
+    """A reserve kept from the config before on an AMD GPU (`kept`: the argument's value, `per_mib` MiB a unit): one
+    equal to the setup's own that no setup has marked yet (a config of v1.1.75 or older, where the setup wrote it
+    unmarked) is the setup's."""
+    try:
+        kept_mib = float(kept) * per_mib
+    except (TypeError, ValueError):
+        return
+    if abs(kept_mib - own_mib) < 2 and VRAM_RESERVE_SETUP not in [str(k) for k in env]:
+        mark_reserve(env, own_mib)
 
 
 def gpu_facts(cfg: dict) -> list:
@@ -2271,8 +2298,7 @@ def compile_engine(archs, gpu_ids, nvcc, host_compiler, llama: Path, src: str, s
     # nvcc takes 2-4 GB per job on the big kernels: half the threads, and no more jobs than RAM / 4 GB
     jobs = max(2, min((os.cpu_count() or 4) // 2, int(mem_gb()[0] // 4) or 2))
     build = [cmake, "--build", str(BUILD), "--target", target, "-j", str(jobs)]
-    say("  Compiling the engine for " + ", ".join(f"sm_{x}" for x in archs) +
-        " (10-30 minutes the first time, a few minutes after an update) ...")
+    say("  Compiling the engine for " + ", ".join(f"sm_{x}" for x in archs) + " (a few minutes) ...")
     stopped = cmake_steps(conf, build, env, "build-saguaro.bat", nvcc=nvcc)
     if stopped:
         return stop(stopped)
@@ -2325,12 +2351,33 @@ def vs_env(env=None) -> dict:
     return env
 
 
-def cmake_steps(conf, build, env, bat_name: str, vcvars=None, nvcc=None) -> str | None:
+def cmake_steps(conf, build, env, bat_name: str, vcvars=None, nvcc=None, what="the engine",
+                log="build-engine.log") -> str | None:
     """CMake's configure, then its build (once more when that stops: it continues where it stopped).  None when both
     worked, else what stopped.  On Windows both run in a .bat that first calls Visual Studio's vcvars64.bat - the
     compiler's environment - the way Strata's setup.py builds there (cmake_build).  `nvcc` says which toolkit the
-    CUDA build uses: its release decides whether a VS 2026-only PC is usable (S.find_vcvars)."""
-    if not WIN:
+    CUDA build uses: its release decides whether a VS 2026-only PC is usable (S.find_vcvars).
+    The screen gets ONE line for the step (`what`: files done, time so far); the tools' own output goes to `log` in
+    the install folder, whose last lines are printed when the step stops (S.BuildLog).  SAGUARO_BUILD_OUTPUT=full, or
+    --full-build-output: every line on the screen as it comes, no log."""
+    full = S.full_build_output()
+    bat = None
+    if WIN:
+        vcvars = vcvars or S.find_vcvars(nvcc=nvcc)
+        if vcvars is None:
+            return "looking for Visual Studio's C++ compiler (the Build Tools with 'Desktop development with C++')"
+        bat = ROOT / bat_name
+        bat.write_text(f'@echo off\r\ncall "{vcvars}" >nul\r\n{cmdline(conf)} || exit /b 3\r\n{cmdline(build)} && exit /b 0'
+                       '\r\necho   (the build stopped - trying it once more: it continues where it stopped)\r\n'
+                       f'{cmdline(build)} || exit /b 4\r\n', encoding="utf-8")
+        env = vs_env(env)
+        if full:
+            say(f"  > {bat}   (Visual Studio's environment, then:)")
+            say("  > " + cmdline(conf))
+            say("  > " + cmdline(build))
+            rc = run(["cmd", "/c", str(bat)], env=env, check=False, echo=False).returncode
+            return None if rc == 0 else "compiling" if rc == 4 else "configuring"
+    if full:
         if run(conf, env=env, check=False).returncode != 0:
             return "configuring"
         if run(build, env=env, check=False).returncode != 0:
@@ -2338,18 +2385,24 @@ def cmake_steps(conf, build, env, bat_name: str, vcvars=None, nvcc=None) -> str 
             if run(build, env=env, check=False).returncode != 0:
                 return "compiling"
         return None
-    vcvars = vcvars or S.find_vcvars(nvcc=nvcc)
-    if vcvars is None:
-        return "looking for Visual Studio's C++ compiler (the Build Tools with 'Desktop development with C++')"
-    bat = ROOT / bat_name
-    bat.write_text(f'@echo off\r\ncall "{vcvars}" >nul\r\n{cmdline(conf)} || exit /b 3\r\n{cmdline(build)} && exit /b 0'
-                   '\r\necho   (the build stopped - trying it once more: it continues where it stopped)\r\n'
-                   f'{cmdline(build)} || exit /b 4\r\n', encoding="utf-8")
-    say(f"  > {bat}   (Visual Studio's environment, then:)")
-    say("  > " + cmdline(conf))
-    say("  > " + cmdline(build))
-    rc = run(["cmd", "/c", str(bat)], env=vs_env(env), check=False, echo=False).returncode
-    return None if rc == 0 else "compiling" if rc == 4 else "configuring"
+    steps = S.BuildLog(ROOT / log, what)
+    stopped = "compiling"
+    try:
+        if bat is not None:
+            steps.file.write(f"> {bat}   (Visual Studio's environment, then:)\n> {cmdline(conf)}\n> {cmdline(build)}\n")
+            rc = steps.run(["cmd", "/c", str(bat)], env=env)
+            stopped = None if rc == 0 else "compiling" if rc == 4 else "configuring"
+        elif steps.run(conf, env=env) != 0:
+            stopped = "configuring"
+        elif steps.run(build, env=env) == 0:
+            stopped = None
+        else:
+            steps.line("  (the build stopped - trying it once more: it continues where it stopped)")
+            if steps.run(build, env=env) == 0:
+                stopped = None
+    finally:
+        steps.close(stopped)
+    return stopped
 
 
 PROBE_CU ="""#include <cmath>
@@ -3653,12 +3706,21 @@ def compile_vision(pc, meta, llama: Path, src: str) -> bool:
         conf.append(f"-DCMAKE_CUDA_HOST_COMPILER={shutil.which(meta['host_compiler']) or meta['host_compiler']}")
     jobs = max(2, min((os.cpu_count() or 4) // 2, int(mem_gb()[0] // 4) or 2))
     say("  Compiling the vision encoder (llama.cpp's image library with ggml's " +
-        ("Metal backend: a minute or two" if metal else ("HIP" if hip else "CUDA") + " kernels: 10-20 minutes") +
+        ("Metal backend: a minute or two" if metal else ("HIP" if hip else "CUDA") + " kernels: a few minutes") +
         ", once) ...")
-    if cmake_steps(conf, [cmake, "--build", str(VBUILD), "--target", "maya-vision", "-j", str(jobs)],
-                   dict(os.environ) if metal else env, "" if metal else "build-vision-glm.bat", vcvars=vcvars,
-                   nvcc=None if metal or hip else meta.get("nvcc") or pc["nvcc"]):
-        return False
+    def steps(more=()) -> bool:
+        return not cmake_steps(conf + list(more), [cmake, "--build", str(VBUILD), "--target", "maya-vision", "-j",
+                                                   str(jobs)],
+                               dict(os.environ) if metal else env, "" if metal else "build-vision-glm.bat",
+                               vcvars=vcvars, nvcc=None if metal or hip else meta.get("nvcc") or pc["nvcc"],
+                               what="the picture reader", log="build-vision.log")
+
+    # only the towers and kernels the models' pictures use are compiled (tools/vision/lean.cmake); should that stop on
+    # some toolchain, all of llama.cpp's image library is, as before v1.1.78 (the build folder then keeps that choice)
+    if not steps():
+        say("  (once more, with all of llama.cpp's image library: -DMAYA_VISION_FULL=ON)")
+        if not steps(["-DMAYA_VISION_FULL=ON"]):
+            return False
     if bindir is not None and VEXE.exists():
         copy_hip_dlls(bindir, VEXE.parent)
     VSTAMP.write_text(json.dumps({"src": src, "archs": archs, "llama": str(llama),
@@ -3865,7 +3927,8 @@ def write_config(a, pc, meta, pack: Path, quant: str, ctx: int, models: Path, vi
         # Leave space for the Linux desktop. The engine sizes its prompt chunk from
         # the available prompt-memory budget; forcing 256 here severely slows HIP.
         gpus = pc["gpus"]
-        hip_env = {"SAGUARO_GLM_RESERVE_MB": str(gpu_reserve_mib(gpus)), "SAGUARO_GLM_RAM_HEADROOM_GB": "16"}
+        hip_env = {"SAGUARO_GLM_RESERVE_MB": str(gpu_reserve_mib(gpus)), "SAGUARO_GLM_RAM_HEADROOM_GB": "16",
+                   VRAM_RESERVE_SETUP: str(gpu_reserve_mib(gpus))}   # (the reserve is the setup's own: #1156)
         if "SAGUARO_GLM_RESERVE_MB" not in env and getattr(a, "vram_reserve_mib", None) is None:
             ok(f"VRAM kept free on each GPU: {hip_env['SAGUARO_GLM_RESERVE_MB']} MiB ({gpu_reserve_why(gpus)}; "
                "--env SAGUARO_GLM_RESERVE_MB=<MiB> changes it)")
@@ -3941,6 +4004,8 @@ def write_config(a, pc, meta, pack: Path, quant: str, ctx: int, models: Path, vi
            "--vram-reserve-mib changes it)")
     if getattr(a, "vram_reserve_mib", None) is not None and not metal:   # given now: written, and a later setup keeps it
         set_arg(cfg["args"], "--vram-reserve-mib", a.vram_reserve_mib)
+        if "env" in cfg:
+            mark_reserve(cfg["env"], None, False)   # (#1156: the user's, not the AMD setup's own)
         ok(f"VRAM kept free beside the expert pool: {a.vram_reserve_mib} MiB (--vram-reserve-mib)")
     for line in prefill_tips(cfg["args"], mem_gb()[0], len(pc["gpus"])):
         ok(line)
@@ -4001,6 +4066,26 @@ def set_arg(args: list, flag: str, value) -> None:
         args[args.index(flag) + 1] = str(value)
     else:
         args += [flag, str(value)]
+
+
+def set_vram_reserve(args: list, family: str, mib: int, backend: str | None = None) -> str | None:
+    """--vram-reserve-mib N (#1026) as the family's engine takes it, written into its arguments (`args` changed in
+    place): GLM-5.3-Flash's `saguaro-glm` and QFN's `saguaro-qfn` --vram-reserve-mib N (MiB), DeepSeek's saguaro-ds4
+    --reserve-mib N (MiB), MiniMax's saguaro-mm3 --reserve-gb (GiB) and Hy4-Flash's saguaro-hy4 --reserve-gb
+    (GB of 10^9 bytes).  The flag and value written, for the setup's line; None where the engine has no such setting
+    (Inkling, the Metal engine)."""
+    if family in ("glm", "qfn") and backend != "metal":
+        flag, value = "--vram-reserve-mib", str(mib)
+    elif family == "deepseek":
+        flag, value = "--reserve-mib", str(mib)
+    elif family == "minimax":
+        flag, value = "--reserve-gb", f"{mib / 1024:.3f}".rstrip("0").rstrip(".")
+    elif family == "hy4":
+        flag, value = "--reserve-gb", f"{mib * 1048576 / 1e9:.3f}".rstrip("0").rstrip(".")
+    else:
+        return None
+    set_arg(args, flag, value)
+    return f"{flag} {value}"
 
 
 def keep_args(old: list, new: list, flags: tuple) -> list:
@@ -5389,12 +5474,37 @@ def bench_config_text(cfg: dict, ctx: int, drafting: str) -> str:
     return " ".join(x for x in (f"{ctx // 1024}K", f"KV {kv}" if kv else "", drafting) if x)
 
 
-def bench(cfg_path: Path, version: str, compare: str | None = None, rounds: int = 2, wait_min: float = 10.0) -> int:
+def bench_prompt_text(ref: str | None = None) -> str:
+    """The text --bench cuts its 2K / 8K prompts from: the README, docs/*.md and bench/results/*.md of this folder -
+    or, with a git ref (--bench-text-ref), of that commit: the same prompts whatever the docs say today (what saved
+    answers and night-to-night speeds need)."""
+    if not ref:
+        return "\n\n".join(p.read_text(encoding="utf-8", errors="replace")
+                           for p in [ROOT / "README.md"] + sorted((ROOT / "docs").glob("*.md")) +
+                           sorted((ROOT / "bench" / "results").glob("*.md")) if p.exists())
+
+    def git(*a):
+        r = subprocess.run(["git", "-C", str(ROOT), *a], capture_output=True)
+        if r.returncode:
+            raise RuntimeError(f"--bench-text-ref {ref}: git {a[0]} failed: "
+                               f"{r.stderr.decode(errors='replace').strip()[-200:]}")
+        return r.stdout.decode("utf-8", errors="replace")
+    names = git("ls-tree", "-r", "--name-only", ref, "--", "README.md", "docs", "bench/results").splitlines()
+    return "\n\n".join(git("show", f"{ref}:{n}") for n in MB.prompt_text_files(names))
+
+
+def bench(cfg_path: Path, version: str, compare: str | None = None, rounds: int = 2, wait_min: float = 10.0,
+          lock_ok: bool = False, tokens_file: Path | None = None, text_ref: str | None = None,
+          smoke: bool = False) -> int:
     """--bench: the speed-test standard (tools/maya_bench.py) on the installed model - a quiet-machine check, one engine
     session with a warm-up answer, 3 answers of 256 tokens and the 2K / 8K prompts 3 times each; medians with min-max,
     what drafting chose, the wall time of each phase and one result line (saguaro-bench-results.txt).  --compare: the same
-    on this build and another, alternated, exactness first.  Writes saguaro-bench.txt (--report includes it)."""
+    on this build and another, alternated, exactness first.  Writes saguaro-bench.txt (--report includes it).
+    smoke (--bench-smoke): two short answers and no 2K / 8K prompts - does the model load and answer (the saved
+    answers and the nightly check use it for a model too large for its box); no result line, never a speed number."""
     import socket
+    if smoke and compare:
+        fail("--bench-smoke runs this build alone", "leave --compare out")
     import urllib.request
     cfg = read_json(cfg_path)
     select_build_backend(cfg.get("backend", "cuda"))
@@ -5419,21 +5529,28 @@ def bench(cfg_path: Path, version: str, compare: str | None = None, rounds: int 
     t_all = time.time()
     step(1, f"benchmark: {cfg_path.name}" + (f" against {compare}" if compare else ""))
     note = f"saguaro --bench pid {os.getpid()} on {socket.gethostname()} {time.strftime('%Y-%m-%d %H:%M')}"
-    why = MB.wait_quiet(backend, gpus, wait_min, say)
+    lock_ok = MB.lock_ok_asked(lock_ok)          # (--bench-lock-ok / SAGUARO_BENCH_LOCK_OK=1: a lock taken by hand)
+    if lock_ok:
+        for p, who in MB.held_locks(MB.lock_names(backend, gpus)):
+            say(f"  using the GPU lock already held ({p}: {who or 'no note'}); it stays as it is")
+    why = MB.wait_quiet(backend, gpus, wait_min, say, lock_ok=lock_ok)
     if why:
         fail("this machine is not quiet enough for a speed number: " + "; ".join(why),
              f"wait for it (or give it longer: {ME} --bench --bench-wait <minutes>), then run --bench again")
     t_quiet = time.time() - t_all
-    locks = MB.take_locks(backend, gpus, note)
+    try:
+        locks = MB.take_locks(backend, gpus, note, held_ok=lock_ok)
+    except RuntimeError as e:                    # (another run that found it quiet in the same second took one first)
+        fail(f"this machine is not quiet enough for a speed number: {e}", "run --bench again")
     try:
         tok = ST.Tokenizer.from_dir(tp)
         ctx = int(args[args.index("--max-context") + 1]) if "--max-context" in args[:-1] else 32768
-        text = "\n\n".join(p.read_text(encoding="utf-8", errors="replace")
-                           for p in [ROOT / "README.md"] + sorted((ROOT / "docs").glob("*.md")) +
-                           sorted((ROOT / "bench" / "results").glob("*.md")) if p.exists())
-        prompts, warm = MB.plan_prompts(tok.encode(text), ctx)
         fmt = bench_chat(config_family(cfg), tp)   # (each family's own chat format, thinking off - #416, #549)
         chats = [tok.encode(fmt(q), parse_special=True) for q in BENCH_TOPICS]
+        if smoke:                                # (the last topic warms up, the first ones are the answers)
+            prompts, warm, chats = {}, chats[-1], chats[:MB.SMOKE_ANSWERS]
+        else:
+            prompts, warm = MB.plan_prompts(tok.encode(bench_prompt_text(text_ref)), ctx)
         start = lambda c, cmd, env, tag: (cmd, env, c.get("cwd") or str(ROOT), ROOT / f"saguaro-bench{tag}.log")  # noqa
         cmd, env = bench_start_command(cfg, tok)      # (QFN's batch driver as its server starts it; the rest: SV's)
         here = start(cfg, cmd, env, "")
@@ -5444,9 +5561,12 @@ def bench(cfg_path: Path, version: str, compare: str | None = None, rounds: int 
         gpu_text, driver = MB.gpu_summary(backend, found)
         base = {"machine": socket.gethostname().split(".")[0], "gpus": gpu_text, "driver": driver,
                 "model": bench_model_name(cfg), "date": time.strftime("%Y-%m-%d")}
+        choices = MB.choice_files(ROOT, cfg) if tokens_file else {}   # (the saved per-PC choices this run starts from)
         if not compare:
             before = MB.learned_listing(ROOT, cfg)
-            run = MB.run_session(here, chats, prompts, warm, "", say)
+            run = MB.run_session(here, chats, prompts, warm, "", say,
+                                 MB.SMOKE_TOKENS if smoke else MB.DECODE_TOKENS)
+            runs = {"this": [run]}
             res = MB.summarize([run], prompts)
             drafting = MB.drafting_choice(args, cfg.get("env") or {}, run["engine_lines"], res["answers"],
                                         config_family(cfg))
@@ -5460,9 +5580,28 @@ def bench(cfg_path: Path, version: str, compare: str | None = None, rounds: int 
                                                   "prompt reuse seen" if run["reused"] else "") if x))
             lines = bench_text(version, cfg_path, cfg, ctx, gpu_text, res, drafting, [run], t_quiet, t_all)
             records = [MB.record_line(rec)]
+            if smoke and any(a["produced"] == 0 for a in run["answers"]):
+                fail("the model answered nothing (0 tokens) in the smoke run",
+                     f"its log: {ROOT / 'maya-bench.log'}")
+            if smoke:                            # (not the standard: no result line, the answers are what it is for)
+                lines = [lines[0].replace(" benchmark, ", " smoke run, ")] + lines[1:3] + [
+                    f"{len(run['answers'])} answers of up to {MB.SMOKE_TOKENS} tokens (greedy, thinking off): " +
+                    ", ".join(f"{a['produced']} tokens" for a in run["answers"]) + " - not a speed number", lines[-1]]
+                records = []
         else:
-            lines, records = bench_compare(cfg, cfg_path, compare, rounds, here, start, chats, prompts, warm, base,
-                                           version, ctx, args, gpu_text, t_quiet, t_all, SV)
+            lines, records, runs = bench_compare(cfg, cfg_path, compare, rounds, here, start, chats, prompts, warm,
+                                                 base, version, ctx, args, gpu_text, t_quiet, t_all, SV)
+        if tokens_file:                          # (--bench-tokens: every request's greedy tokens, for saved answers)
+            first = runs["this"][0]["tokens"]
+            for k, v in MB.choice_files(ROOT, cfg).items():   # (a first start's measurements: part of the state too)
+                choices.setdefault(k, v)
+            Path(tokens_file).write_text(json.dumps(dict(
+                base, config=str(cfg_path), family=config_family(cfg), backend=backend, gpu_index=gpus or [],
+                context=ctx, commit=MB.commit_of(ROOT), version=version, text_ref=text_ref or "",
+                compare=compare or "", smoke=bool(smoke), inputs=MB.input_hashes(chats, prompts, warm),
+                choices=choices,
+                heads={k: tok.decode(v[:MB.HEAD_TOKENS]) for k, v in first.items()},
+                runs={k: [r["tokens"] for r in v] for k, v in runs.items()}, records=records)), encoding="utf-8")
     except RuntimeError as e:                    # (the engine stopped or refused, a build failed: said plainly)
         fail(str(e), "fix that, then run --bench again")
     finally:
@@ -5476,11 +5615,15 @@ def bench(cfg_path: Path, version: str, compare: str | None = None, rounds: int 
     stats = speed_lines(engine_out)
     out.write_text("\n".join(lines + records + ["", "engine lines:"] +
                              [x.replace(str(Path.home()), "~") for x in stats[-40:]]) + "\n", encoding="utf-8")
-    with open(ROOT / MB.RESULTS_FILE, "a", encoding="utf-8") as f:
-        f.write("\n".join(records) + "\n")
+    if records:
+        with open(ROOT / MB.RESULTS_FILE, "a", encoding="utf-8") as f:
+            f.write("\n".join(records) + "\n")
     say()
     for x in lines + [""] + records:
         say("  " + x)
+    if smoke:
+        ok(f"written: {out} - the model loads and answers (a smoke run: no speed number, no result line)")
+        return 0
     ok(f"written: {out} (the result line also in {MB.RESULTS_FILE}) - attach it (with {ME} --report) to a speed "
        "report")
     return 0
@@ -5522,6 +5665,19 @@ def bench_compare(cfg, cfg_path, spec, rounds, here, start, chats, prompts, warm
     learned = MB.LearnedState(ROOT, cfg, work / "learned-snapshot")
     runs = {"this": [], "other": []}
     try:
+        if "SAGUARO_GLM_CPU_CAL" in SV.child_env(cfg):
+            # GLM times its CPU lane on a build's first start and keeps it, each build under its own compile stamp: a
+            # first round that times it live (colder, noisier) differs from the rounds that read it back - and the two
+            # builds time apart.  One priming start a build, the other build then reading this one's values, and every
+            # round starts from that state (the timing is the same in all of them)
+            for side in ("this", "other"):
+                learned.restore(other if side == "other" else None)
+                MB.prime_session(here if side == "this" else there, warm, say, f"[{side}] ")
+                learned.prime_keep(other if side == "other" else ROOT)
+            n = MB.share_timing(ROOT / "data" / MB.CAL_FILE, other / "data" / MB.CAL_FILE)
+            if n:
+                say(f"  the other build's CPU-lane timing set to this build's ({n} line(s))")
+                learned.prime_keep(other)
         for r in range(rounds):
             for side in ("this", "other"):
                 learned.restore(other if side == "other" else None)
@@ -5556,7 +5712,7 @@ def bench_compare(cfg, cfg_path, spec, rounds, here, start, chats, prompts, warm
                      "start on this PC, so a difference between the builds is not proof of an answer change)")
     lines.append(f"wall time all: {time.time() - t_all:.0f} s (quiet check {t_quiet:.0f} s)")
     records.append(MB.compare_line(res["other"], res["this"], names["other"], names["this"], verdict))
-    return lines, records
+    return lines, records, runs
 
 
 # ------------------------------------------------------------------------------------------------ the setup
@@ -6573,12 +6729,18 @@ def write_config_ds4(a, pc: dict, meta: dict, pack: Path, ctx: int, models: Path
         args += ["--vision", "off"]
     if "--dspark" not in args[:-1] and CDS.has_drafter({"args": args}):
         args += ["--dspark", "none"]                   # (until the speed calibration finds that drafting pays here)
+    rmark = None
     if getattr(a, "vram_reserve_mib", None) is not None:   # given now: written, and a later setup keeps it
         set_arg(args, "--reserve-mib", a.vram_reserve_mib)
+        rmark = (mark_reserve, None, bool(hip))
         ok(f"VRAM kept free on each GPU: {a.vram_reserve_mib} MiB (--vram-reserve-mib)")
+    elif "--reserve-mib" in args[:-1] and hip:             # (kept from the config before)
+        rmark = (mark_kept_reserve, args[args.index("--reserve-mib") + 1], 1, gpu_reserve_mib(pc["gpus"]))
     elif "--reserve-mib" not in args[:-1]:   # (every vendor now: a GeForce driving the desktop needed this too)
         mib = gpu_reserve_mib(pc["gpus"])
         set_arg(args, "--reserve-mib", mib)
+        if hip:
+            rmark = (mark_reserve, mib)   # (#1156: the setup's own - the engine keeps the default rule beside it)
         ok(f"VRAM kept free on each GPU: {mib} MiB ({gpu_reserve_why(pc['gpus'])}; --vram-reserve-mib changes it)")
     cfg = {"exe": str(DS4_EXE), "args": args, "cwd": str(ROOT), "tokenizer": str(pack / "tokenizer"),
            **({"backend": "hip"} if hip else {}),
@@ -6591,6 +6753,8 @@ def write_config_ds4(a, pc: dict, meta: dict, pack: Path, ctx: int, models: Path
             cfg[k] = old[k]
             kept.append(k)
     env = {**(old.get("env") or {}), **parse_env(a.env)}
+    if rmark is not None:
+        rmark[0](env, *rmark[1:])
     if env:
         cfg["env"] = env
     if a.host:
@@ -7165,12 +7329,18 @@ def write_config_mm3(a, pc: dict, meta: dict, pack: Path, ctx: int, models: Path
         set_arg(args, "--vision", "off")
     elif mm3_pack_has_vision(pack):
         set_arg(args, "--vision", "on")
+    rmark = None
     if getattr(a, "vram_reserve_mib", None) is not None:   # given now: written, and a later setup keeps it
         set_arg(args, "--reserve-gb", f"{a.vram_reserve_mib / 1024:.1f}")
+        rmark = (mark_reserve, None, bool(hip))
         ok(f"VRAM kept free on each GPU: {a.vram_reserve_mib} MiB (--vram-reserve-mib)")
+    elif "--reserve-gb" in args[:-1] and hip:       # (kept from the config before)
+        rmark = (mark_kept_reserve, args[args.index("--reserve-gb") + 1], 1024, gpu_reserve_mib(pc["gpus"]))
     elif "--reserve-gb" not in args[:-1]:   # (as DeepSeek's, every vendor: the desktop's allocations beside the engine)
         mib = gpu_reserve_mib(pc["gpus"])
         set_arg(args, "--reserve-gb", f"{mib / 1024:.1f}")
+        if hip:
+            rmark = (mark_reserve, mib)   # (#1156: the setup's own - the engine keeps the default rule beside it)
         ok(f"VRAM kept free on each GPU: {mib / 1024:.1f} GB ({gpu_reserve_why(pc['gpus'])}; --vram-reserve-mib changes it)")
     cfg = {"exe": str(MM3_EXE), "args": args, "cwd": str(ROOT), "tokenizer": str(pack / "tokenizer"),
            **({"backend": "hip"} if hip else {}),
@@ -7184,6 +7354,8 @@ def write_config_mm3(a, pc: dict, meta: dict, pack: Path, ctx: int, models: Path
             cfg[k] = old[k]
             kept.append(k)
     env = {**(old.get("env") or {}), **parse_env(a.env)}
+    if rmark is not None:
+        rmark[0](env, *rmark[1:])
     if env:
         cfg["env"] = env
     if a.host:
@@ -8221,6 +8393,11 @@ def write_config_hy4(a, pc: dict, meta: dict, pack: Path, ctx: int, models: Path
                      (("--tp", "--chunk", "--reserve-gb", "--vram-experts") if same else ()))
     if getattr(a, "no_vision", False) and hy4_pack_has_vision(pack):
         set_arg(args, "--vision", "off")
+    rmark = None
+    if getattr(a, "vram_reserve_mib", None) is not None:   # (#1026) given now: written, and a later setup keeps it
+        put = set_vram_reserve(args, "hy4", a.vram_reserve_mib)
+        rmark = (mark_reserve, None, pc.get("backend") == "hip")
+        ok(f"VRAM kept free on each GPU: {a.vram_reserve_mib} MiB (--vram-reserve-mib: {put})")
     inst = {"family": "hy4", "hy4_quant": quant, "quant": HY4_QUANTS[quant]}
     sampling, effort = Q.model_defaults({"installer": inst})
     cfg = {"exe": str(HY4_EXE), "args": args, "cwd": str(ROOT), "tokenizer": str(pack / "tokenizer"),
@@ -8235,6 +8412,8 @@ def write_config_hy4(a, pc: dict, meta: dict, pack: Path, ctx: int, models: Path
     if not S.cpu_info()[1]:                            # (the CPU lane's 4-bit expert copies need AVX2)
         env.setdefault("HY4_Q4X", "0")
     env.update(parse_env(a.env))
+    if rmark is not None:
+        rmark[0](env, *rmark[1:])
     if env:
         cfg["env"] = env
     if a.host:
@@ -9135,6 +9314,9 @@ def main() -> int:
                                             "than your CUDA accepts)")
     ap.add_argument("--llama-dir", help="a llama.cpp checkout at the pinned commit, instead of downloading its source")
     ap.add_argument("--rebuild", action="store_true", help="compile the engine again")
+    ap.add_argument("--full-build-output", action="store_true",
+                    help="every line of the compilers on the screen (default: one progress line per compile step, "
+                         "the rest in build-engine.log / build-vision.log; SAGUARO_BUILD_OUTPUT=full does the same)")
     ap.add_argument("--repack", action="store_true", help="build the pack again")
     ap.add_argument("--report", action="store_true", help="write saguaro-report.txt - this PC, the setup and the engine's "
                                                           "speed lines - to attach when you report a problem or a "
@@ -9147,6 +9329,16 @@ def main() -> int:
                                                        "in .bench-builds) - on the same model files, config and "
                                                        "learned files, alternated; exactness first, then the speed")
     ap.add_argument("--bench-rounds", type=int, default=2, help="--bench --compare: rounds a build (default 2)")
+    ap.add_argument("--bench-lock-ok", action="store_true", help="--bench: accept a GPU lock that is already held "
+                    "(one you took by hand for this run; also SAGUARO_BENCH_LOCK_OK=1) - by default a held lock stops "
+                    "the benchmark")
+    ap.add_argument("--bench-tokens", type=Path, metavar="FILE", help="--bench: also write every request's greedy "
+                    "tokens to this JSON file (tools/maya_golden.py: saved answers)")
+    ap.add_argument("--bench-text-ref", metavar="REF", help="--bench: cut the 2K / 8K prompts from the docs of this "
+                    "git ref instead of today's (the same prompts on every build)")
+    ap.add_argument("--bench-smoke", action="store_true", help="--bench: the short run - two short answers and no "
+                                                               "2K / 8K prompts: does the model load and answer "
+                                                               "(not a speed number, no result line)")
     ap.add_argument("--bench-wait", type=float, default=10.0, help="--bench: minutes to wait for a quiet machine "
                                                                    "before refusing (default 10; 0 = refuse at once)")
     ap.add_argument("--calibrate", action="store_true",
@@ -9167,6 +9359,8 @@ def main() -> int:
     ap.add_argument("--config", type=Path, help="the installed JSON config to start (its run-maya-<model>.sh does), or "
                                               "for --bench or --report (default: most recently used)")
     a = ap.parse_args()
+    if a.full_build_output:
+        os.environ["SAGUARO_BUILD_OUTPUT"] = "full"
     why = model_option(a)
     if why:
         ap.error(why)
@@ -9198,7 +9392,9 @@ def main() -> int:
             have = [p for p in have if read_json(p).get("backend", "cuda") == a.backend]
         if not have:
             fail("Saguaro is not set up here yet", f"run {ME} first")
-        return bench(have[0], version, a.compare, max(1, a.bench_rounds), max(0.0, a.bench_wait))
+        more = {k: v for k, v in (("lock_ok", a.bench_lock_ok), ("tokens_file", a.bench_tokens),
+                                  ("text_ref", a.bench_text_ref), ("smoke", a.bench_smoke)) if v}
+        return bench(have[0], version, a.compare, max(1, a.bench_rounds), max(0.0, a.bench_wait), **more)
 
     have = configs() if a.config is None else [a.config.resolve()]   # (--config: that one, no question)
     if a.backend:
@@ -9227,6 +9423,18 @@ def main() -> int:
                 set_arg(cfg.setdefault("args", []), "--mmap-experts", a.mmap_experts)
                 pick.write_text(json.dumps(cfg, indent=1), encoding="utf-8")
                 ok(f"{pick.name}: --mmap-experts {a.mmap_experts}")
+        if a.vram_reserve_mib is not None:   # (#1026: given on a start too - written into the config, which keeps it)
+            cfg = read_json(pick)
+            put = set_vram_reserve(cfg.setdefault("args", []), config_family(cfg), a.vram_reserve_mib,
+                                   cfg.get("backend"))
+            if put is None:
+                warn("--vram-reserve-mib: this model's engine has no VRAM reserve setting - the start keeps the config "
+                     "as it is")
+            else:
+                if cfg.get("backend") == "hip":   # (#1156: the user's, whatever a setup wrote before)
+                    mark_reserve(cfg.setdefault("env", {}), None)
+                pick.write_text(json.dumps(cfg, indent=1), encoding="utf-8")
+                ok(f"{pick.name}: VRAM kept free on each GPU {a.vram_reserve_mib} MiB ({put})")
         if (a.calibrate or a.speed_calibration) and read_json(pick).get("backend") == "metal":
             ok("the Metal engine has no CPU lane to tune and no drafter to measure: nothing to tune")
             a.calibrate = a.speed_calibration = False

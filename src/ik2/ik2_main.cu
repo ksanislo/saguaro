@@ -103,6 +103,15 @@ static inline int munmap(void*, size_t) { return 0; }
 namespace {
 
 namespace k = ik2::k;
+// A fatal error ends the engine at once: stdout and stderr are flushed, then out WITHOUT std::exit - its flush of every
+// stdio stream takes stdin's lock, which the --serve reader thread holds while it waits for input, and its static
+// destructors may wait on the GPU while our threads still use it (#1136).
+[[noreturn]] inline void fatal_exit() {
+    std::fflush(stdout);
+    std::fflush(stderr);
+    std::_Exit(1);
+}
+
 
 [[noreturn]] void cu_fail(cudaError_t e, const char* what, const char* file, int line);
 #define CU(x)                                                                                              \
@@ -115,13 +124,13 @@ namespace k = ik2::k;
         cublasStatus_t e_ = (x);                                                                           \
         if (e_ != CUBLAS_STATUS_SUCCESS) {                                                                 \
             std::fprintf(stderr, "saguaro ik2: %s: cuBLAS status %d (line %d)\n", #x, (int) e_, __LINE__);    \
-            std::exit(1);                                                                                  \
+            fatal_exit();                                                                                  \
         }                                                                                                  \
     } while (0)
 
 [[noreturn]] void die(const std::string& m) {
     std::fprintf(stderr, "saguaro ik2: %s\n", m.c_str());
-    std::exit(1);
+    fatal_exit();
 }
 
 double now() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
@@ -4785,10 +4794,7 @@ inline void beat(const char* stage) {
 bool g_err_one = false;   // the single-stream serve loop (ERR + DONE); --parallel: the exit alone
 [[noreturn]] void cu_fail(cudaError_t e, const char* what, const char* file, int line) {
     std::fprintf(stderr, "saguaro ik2: %s: %s (%s:%d)\n", what, cudaGetErrorString(e), file, line);
-    if (!g_wd_busy.load()) {
-        std::fflush(stderr);
-        std::exit(1);
-    }
+    if (!g_wd_busy.load()) fatal_exit();
     const bool oom = e == cudaErrorMemoryAllocation;
     const std::string m = oom ? "the GPU ran out of memory during this request (a smaller --chunk, context or prompt "
                                 "needs less; the engine starts again for the next request)"
@@ -6240,6 +6246,10 @@ void forward(Model& M, const int* tok, int T, int pos0, bool all_logits, OutMode
                 CU(cudaMemcpyPeer(Tn.blocks + (size_t) i * Tn.blk_ld * C, Ly.dev, F.blocks + (size_t) i * F.blk_ld * C,
                                   from, TC * 4));
             CU(cudaMemcpyPeer(Tn.pos, Ly.dev, F.pos, from, (size_t) T * 4));
+            // A hop inside a looped core's later pass: the layers over there read their messages from the pass before's
+            // bank, filled on this GPU - it goes along too (#1107). (lp_pre is written and read at core0 only.)
+            if (c.n_pass > 1 && M.V[vis].pass > 0 && n_bank > 0)
+                CU(cudaMemcpyPeer(Tn.lp_bank, Ly.dev, F.lp_bank, from, (size_t) n_bank * TC * 4));
             use_dev(Ly.dev);
             Wp = &dev_work(g_cur);
             ECp = &dev_cache(g_cur);
@@ -7194,6 +7204,14 @@ void draft_remember(const std::string& key, const double* tps, int c) {
     std::remove(f);
     std::rename(tmp.c_str(), f);
 }
+// the fastest of the four figures (-1: not measured); a drafter within `tie` of no drafting: no drafting
+int draft_best(const double* tps, double tie) {
+    int best = 0;
+    for (int m = 1; m < 4; ++m)
+        if (tps[m] > tps[best]) best = m;
+    if (best && tps[best] < tps[0] * (1.0 + tie)) best = 0;   // (no clear gain: no drafting)
+    return best;
+}
 
 // --check-sampling (no GPU, no model): sampled drafting keeps the distribution - a drafted position's pick (spec_pick:
 // the draft with the model's probability of it, else the distribution without it) against the plain pick
@@ -8014,21 +8032,20 @@ int main(int argc, char** argv) {
         if ((chunk_set == 2 || (chunk_set == 0 && k::arch_class() == 60)) && g_fast_want && n_gpu == 1 && g_tpn <= 1) {
             // (a prompt chunk's work buffers and slot 0's sliding rings: ~0.6 MiB a token, measured on a P40 - 2048 ->
             //  8192 took 3.7 GiB more; --parallel's other slots each a sliding ring a sliding visit, window + chunk
-            //  rows; the pictures' encoder's room (SAGUARO_IK2_VISION_GIB) kept.  The larger chunk where every expert
+            //  rows.  The pictures' encoder has no room in this plan (v1.1.78 #1185): nothing to keep.
+            //  The larger chunk where every expert
             //  stays in VRAM with half a GiB to spare.  P40, the one-T4 quant: an 8K read 374 -> 451 -> 503 tok/s at
             //  2048 / 4096 / 8192, 30K 276 -> 311 -> 333, decode the same)
             size_t slide_vis = 0;
             for (int l = 0; l < c.n_layer; ++l)
                 if (c.sliding[l]) slide_vis += (l >= c.core0 && l < c.core1) ? (size_t) c.n_pass : 1;
             const size_t kv_row = (size_t) c.KV * c.D * (g_kv_fp8 ? 1 : 2) * 2;
-            const char* vg = getenv("SAGUARO_IK2_VISION_GIB");
-            const size_t vis_room = vg ? (size_t) (std::max(0.0, std::atof(vg)) * 1073741824.0) : 0;
             for (const int c2 : {8192, 4096}) {
                 if (c2 <= chunk) continue;
                 const auto ring = [&](int ch) { return (size_t) std::min(ctx, c.window + std::max(ch, ik2::draft::kBlock)); };
                 const size_t par = serve && g_par > 1 ? (size_t) (g_par - 1) * slide_vis * (ring(c2) - ring(chunk)) * kv_row : 0;
                 const size_t extra = (size_t) (c2 - chunk) * (640 << 10) + par;
-                if (exp_b + dense_b + kv_b + reserve + extra + vis_room + ((size_t) 1 << 29) <= fr0) {
+                if (exp_b + dense_b + kv_b + reserve + extra + ((size_t) 1 << 29) <= fr0) {
                     std::printf("prompt chunk: %d (%s; every expert stays in VRAM)\n", c2,
                                 chunk_set == 2 ? "--chunk auto" : "Pascal's default");
                     chunk = c2;
@@ -8084,19 +8101,18 @@ int main(int argc, char** argv) {
         }
         // Drafting never changes this plan (a loaded drafter takes room only where everything above stays as it is):
         // it runs on the resident path, its room - the drafter's, or the prompt lookup's window records alone - beside
-        // the model at this context, and not the room the pictures' encoder would have had on the GPU (SAGUARO_IK2_VISION_GIB,
-        // the server's: the encoder starts on the GPU when the free VRAM holds it).  Else it is left out, said why.
+        // the model at this context.  The pictures' encoder has no room in this plan and takes none from the drafter:
+        // the server starts it when a picture arrives, on the GPU only while the VRAM then free holds it beside the
+        // model and the drafter, else on the CPU (v1.1.78 #1185: the plan is the same with pictures on or off).
+        // On our offload layout the dynamic expert cache's window keeps the room (B4: the tier's budget yields it).
+        // Else it is left out, said why.
         const size_t used = exp_b + dense_b + kv_b + reserve + chunk_extra;
-        const double vis = getenv("SAGUARO_IK2_VISION_GIB") ? std::atof(getenv("SAGUARO_IK2_VISION_GIB")) * 1073741824.0 : 0.0;
-        const double left = fr0 > used ? (double) (fr0 - used) : 0.0;
         auto room_ok = [&](size_t need, std::string& why, bool /*lookup*/) {
             const size_t use_v = g_off_want ? dense_b + kv_b + reserve : used;   // (offload: the experts are host memory)
             if (g_two.want) why = "on two GPUs it is not checked against plain decoding yet (plain decoding)";
             else if (!g_fast_want && !g_off_dynamic)   // (the dynamic offload's window: B4, ours)
                 why = "it runs where every expert stays in VRAM or the GPU cache holds the experts, not here";
             else if (use_v + need > fr0) why = "its room does not fit beside the model at this context";
-            else if (vis > 0 && left >= vis && left - (double) need < vis)
-                why = "its room would move the pictures' encoder from the GPU to the CPU";
             return why.empty();
         };
         for (int pass = 0; pass < 2; ++pass) {   // (the drafter, else the prompt lookup alone)
@@ -10054,13 +10070,10 @@ int main(int argc, char** argv) {
                     return made / std::max(1e-9, secs);
                 };
                 double warm = 0, tps[4] = {-1, -1, -1, -1};
-                trial(have[3] ? 3 : have[2] ? 2 : 1, 24, warm);   // (the windows' graphs made once, untimed)
+                trial(have[3] ? 3 : have[2] ? 2 : have[1] ? 1 : 0, 24, warm);   // (the windows' graphs made once, untimed)
                 for (int m = 0; m < 4; ++m)
                     if (have[m]) tps[m] = trial(m, gen_n, warm);
-                int best = 0;
-                for (int m = 1; m < 4; ++m)
-                    if (tps[m] > tps[best]) best = m;
-                if (best && tps[best] < tps[0] * (1.0 + tie)) best = 0;   // (no clear gain: no drafting)
+                const int best = draft_best(tps, tie);
                 draft_choice = best;
                 draft_remember(draft_key_s, tps, best);
                 reset();

@@ -55,6 +55,8 @@ td.log
 /build-maya*.bat
 /build-saguaro*.bat
 /build-vision-glm.bat
+/build-engine.log
+/build-vision.log
 
 # image encoder (setup.py --vision): build output and the generated build script
 build-vision*/
@@ -73,3 +75,15 @@ build-vision.bat
 /data/ik2-draft-ids-*.txt
 /data/hy4-*.txt
 /data/hy4-expert-hot-*.bin
+/data/glm-link-cpu-cal.txt
+/data/hy4-cpu-lane.txt
+/data/hy4-cpu-lane.txt.new
+/data/vram-room.json
+# the nightly check and the saved answers: each machine's own (tools/maya_nightly.py, tools/maya_golden.py)
+/saguaro-nightly.json
+/saguaro-nightly-results.txt
+/saguaro-nightly-status.txt
+/saguaro-nightly.lock
+/saguaro-nightly-*.log
+/saguaro-nightly-*.tokens.json
+/data/golden/
