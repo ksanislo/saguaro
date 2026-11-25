@@ -48,7 +48,7 @@ no tuning step - it balances its own split):
   6. builds the pack (the engine's index of the model files) inside the model folder
   7. images: compiles the vision encoder (`build-vision/bin/vision-glm`) and fetches the model's vision files
      (1.1 GB, shown and asked first like the model; --no-vision skips it)
-  8. writes maya-<model>.json and run-maya-<model>.sh (.bat on Windows) - with the settings tuned for this PC
+  8. writes saguaro-<model>.json and run-saguaro-<model>.sh (.bat on Windows) - with the settings tuned for this PC
      earlier, or it offers the tuning (./saguaro.sh --calibrate does it any time) - and starts the dashboard on
      http://127.0.0.1:8080
 
@@ -5437,7 +5437,8 @@ def report(version: str, backend: str | None = None, cfg_path: Path | None = Non
     add("Engine build", json.dumps({k: stamp.get(k) for k in keys})
         if stamp else "not compiled yet")
     if not have:
-        add("Setup", f"no maya-*.json yet: {ME} has not finished a setup here")
+        add("Setup", f"no config json yet (saguaro-<model>.json, or maya-<model>.json before 1.2.2):"
+             f" {ME} has not finished a setup here")
     for c in have:
         cfg = read_json(c)
         args = cfg.get("args") or []
@@ -6778,7 +6779,8 @@ def ds4_pack_step(a, d: Path, gguf: bool = False, announce: bool = True, engram:
 
 def write_config_ds4(a, pc: dict, meta: dict, pack: Path, ctx: int, models: Path, d: Path,
                      quant: str = "exl3", vision: bool | None = None) -> Path:
-    """maya-ds4.json and run-maya-ds4.sh.  A setup again keeps what the config before says that this one does not
+    """saguaro-ds4.json and run-saguaro-ds4.sh (an install from before 1.2.2: maya-ds4.json, found either way).  A
+    setup again keeps what the config before says that this one does not
     ask: the engine settings below, the thinking level and sampling, where the server listens and its key.  vision:
     whether the engine runs the vision tower (default: the EXL3 quant's own; a GGUF's when its pack has one)."""
     step(8, "the configuration and the start script")
@@ -7353,7 +7355,8 @@ def mm3_pack_step(a, d: Path, files: list, gguf: bool = False, companions: Path 
 
 def write_config_mm3(a, pc: dict, meta: dict, pack: Path, ctx: int, models: Path, d: Path,
                      quant: str = "exl3", own: bool = False) -> Path:
-    """maya-mm3.json and run-maya-mm3.sh (a Saguaro GGUF quant: maya-minimax-maya-xs.json - maya_quants.config_stem).  A
+    """saguaro-mm3.json and run-saguaro-mm3.sh (a Saguaro GGUF quant: saguaro-minimax-maya-xs.json -
+    maya_quants.config_stem; an install from before 1.2.2: the maya- names, found either way).  A
     setup again keeps what the config before says that this one does not ask: the engine settings below, the thinking
     level and sampling, where the server listens and its key - a GGUF quant's first config takes them from the EXL3
     one (they shared maya-mm3.json before the naming scheme; such a config of this quant is moved to its new name)."""
@@ -9229,8 +9232,9 @@ IK2_USER_FLAGS = ("--chunk", "--threads", "--drafting", "--parallel")   # (what 
 
 def ik2_config_path(gguf: Path) -> Path:
     """Each Inkling 2 Mini file its own config, so the Models page switches between them each with its own layout:
-    maya-inkling-2-mini.json for unsloth's UD-Q4_K_XL, maya-inkling-2-mini-<the rest of its name>.json for another
-    (our one-T4 quant: maya-inkling-2-mini-t4-nvfp4-iq3_xxs.json)."""
+    saguaro-inkling-2-mini.json for unsloth's UD-Q4_K_XL, saguaro-inkling-2-mini-<the rest of its name>.json for
+    another (our one-T4 quant: saguaro-inkling-2-mini-t4-nvfp4-iq3_xxs.json); an install from before 1.2.2 keeps
+    its maya- name until a start renames it, and it is found under either name."""
     stem = Q.config_stem("ik2", Q.IK2_QUANT)
     if gguf.name == ik2_entry()["gguf"]:
         return CN.locate(ROOT, stem)
@@ -9753,7 +9757,7 @@ def main() -> int:
                          "otherwise), on = draft with it, off = without it - both skip the measuring")
     ap.add_argument("--no-speed-calibration", action="store_true",
                     help="the same as --drafting on: draft with the drafter without measuring it")
-    ap.add_argument("--config", type=Path, help="the installed JSON config to start (its run-maya-<model>.sh does), or "
+    ap.add_argument("--config", type=Path, help="the installed JSON config to start (its run-saguaro-<model>.sh does), or "
                                               "for --bench or --report (default: most recently used)")
     a = ap.parse_args()
     if a.full_build_output:

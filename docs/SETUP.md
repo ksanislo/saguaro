@@ -22,12 +22,12 @@ It first asks which model to set up:
   slowly - the indexer's work grows with the square of its length); step 5 shows both
   sources and checks every file against its pinned size (and, once downloaded, its sha256: `tools/ds4/download.json`, `download-3.5bpw.json`);
   `--model-dir DIR` uses files you already have; the pack is `DIR/maya-ds4/` (`tools/ds4/pack.py`, about a minute);
-  pictures need nothing more - the model's own vision tower runs in the engine; the config is `maya-ds4.json`, with
+  pictures need nothing more - the model's own vision tower runs in the engine; the config is `saguaro-ds4.json`, with
   tensor parallel across pairs of equal GPUs (`--tp 2`). The engine balances its own layer split; `./saguaro.sh --calibrate`
   (not offered by the setup) measures each `--tp` that groups your GPUs differently and fewer CPU threads, an engine
   start each (about an hour on 9 GPUs), and keeps the fastest answers whose long prompts still read at 60% of the
   config's own `--tp`'s speed; a setting the engine does not start with is left out (`tools/calibrate_ds4_tp.py`; the
-  result goes into `maya-ds4.json` and a setup again keeps it).
+  result goes into `saguaro-ds4.json` and a setup again keeps it).
 
   Or from [unsloth's GGUFs](https://huggingface.co/unsloth/DeepSeek-V4.1-Flash-1017-GGUF) (`--ds4-quant`; the setup asks):
   **UD-Q8_K_XL** (508 GB, the default: dense weights BF16, routed experts MXFP4, the Engram tables FP8 - DeepSeek's own
@@ -55,8 +55,8 @@ It first asks which model to set up:
   in RAM). The setup downloads the GGUF and the vision tower (18.3 GB, pinned and sha256-checked,
   `tools/ik2/download.json`), or takes the files you have (`--model-dir`, also a quant of your own such as the one-T4
   quant), writes the tokenizer folder with the model's own chat template and the config for the layout (one 16 GB card:
-  32K context; two: 131K). Each GGUF gets its own config (`maya-inkling-2-mini.json`, a file of your own
-  `maya-inkling-2-mini-<its name>.json`), so the Models page switches between them each with its own layout; a setup run
+  32K context; two: 131K). Each GGUF gets its own config (`saguaro-inkling-2-mini.json`, a file of your own
+  `saguaro-inkling-2-mini-<its name>.json`), so the Models page switches between them each with its own layout; a setup run
   again works out what the setup chose (`--chunk`, drafting) for the file and cards, and keeps what you set yourself (on
   the Models page or by hand) - a Prompt chunk that does not fit the card is said, and the fitting one offered. It is the model the setup recommends on a PC with one or two NVIDIA cards under
   24 GB or one 16-23 GB AMD RDNA 3 / 4 GPU. Speeds: [INKLING2-MINI.md](INKLING2-MINI.md).
@@ -71,7 +71,7 @@ It first asks which model to set up:
   the recommended one the largest (up to 256K) whose KV cache fits beside the model in this PC's VRAM + RAM, its RAM
   said, with warnings past 256K and when the cache would take the experts' RAM; the pack is `DIR/maya-mm3/`
   (`tools/mm3/pack.py`, Saguaro's own copy of MiniMax's chat template inside it); pictures are on - the model's vision
-  tower runs in the engine (`--no-vision`: off); the config is `maya-mm3.json`, with tensor parallel in groups of 4 or 2
+  tower runs in the engine (`--no-vision`: off); the config is `saguaro-mm3.json`, with tensor parallel in groups of 4 or 2
   where the GPUs make whole groups, KV streaming on, MiniMax's sampling (temperature 1.0, top-p 0.95) and thinking level
   Auto; then the DSpark drafter is measured on this PC (`--drafting` chooses without measuring), as DeepSeek's. Its
   settings: [SETTINGS.md](SETTINGS.md#minimax-m31-flash).
@@ -104,7 +104,7 @@ It first asks which model to set up:
   (`vision-qfn`, `vision-qfn-hip` on AMD - `--no-vision` leaves both out, the reader starts when the first picture
   arrives); the Lamina MTP draft layer (0.8 GB) is downloaded and the setup asks whether to draft with it
   (`--drafting off` / `on`, like the other engines' drafters); the config is
-  `maya-qwen3.8-flash-next-<quant>[-hip].json`, and `--parallel 4` lets several answers be written at once (off by
+  `saguaro-qwen3.8-flash-next-<quant>[-hip].json`, and `--parallel 4` lets several answers be written at once (off by
   default on one 16 GB card, where it measured slower, and 2 across several GPUs). `--calibrate` tunes the PCIe share,
   the draft floor and the CPU workers for this PC and measures the drafter, `--speed-calibration` measures the drafter
   alone and keeps the faster, and `--bench` benchmarks the model - all on `saguaro-qfn`. Its settings:
@@ -131,7 +131,8 @@ GLM-5.3-Flash's first run takes 20-40 minutes plus the download:
    files, and a start refuses it if they change afterwards (`--repack` builds it again);
 7. **pictures**: compiles the image encoder (a few minutes, once) and fetches its files (1.1 GB, shown and asked
    first); `--no-vision` skips it;
-8. writes `maya-<model>.json` and `run-maya-<model>.sh`; with DFlash2 it runs the
+8. writes `saguaro-<model>.json` and `run-saguaro-<model>.sh` (a 1.2.1 install keeps its
+   `maya-` config name until the next start renames it; Saguaro finds either); with DFlash2 it runs the
    [speed calibration](SETTINGS.md#the-speed-calibration) (5-20 minutes: DFlash2 stays only if it is faster on your
    PC); then the settings [tuned for this PC](SETTINGS.md) earlier, or it offers the tuning (about 10-15 minutes;
    `./saguaro.sh --calibrate` any time) - and starts the dashboard.
@@ -162,7 +163,7 @@ not GGUF, and floating-point results can differ from the portable path.
 
 ## Next time, and updating
 
-**Next time**, just run `./setup.sh` again (or the model's `./run-maya-<model>.sh`): it starts right away, nothing is
+**Next time**, just run `./setup.sh` again (or the model's `./run-saguaro-<model>.sh`): it starts right away, nothing is
 downloaded twice, on the same screen - its dashboard shows the Monitor's numbers (the speed, where the experts live, the
 GPUs, the requests), Tab its log. Ctrl+C stops it - and so does any other way of ending `saguaro.py`: `kill`, a
 service manager, closing the terminal or the window, even a crash: the server and the engine end with it (the
@@ -176,7 +177,7 @@ is not downloaded again, and your settings stay. By hand: `git pull`, then `./se
 ## Running Saguaro as a systemd service
 
 Set the model up and start it by hand once first, then let a unit start it at boot. The unit runs the config the setup
-wrote (`maya-<model>.json`, in the Saguaro folder):
+wrote (`saguaro-<model>.json`, in the Saguaro folder):
 
 ```ini
 [Unit]
@@ -187,7 +188,7 @@ Wants=network-online.target
 [Service]
 User=you
 WorkingDirectory=/path/to/saguaro
-ExecStart=/path/to/saguaro/saguaro.sh --config /path/to/saguaro/maya-<model>.json
+ExecStart=/path/to/saguaro/saguaro.sh --config /path/to/saguaro/saguaro-<model>.json
 Restart=on-failure
 RestartSec=30
 TimeoutStartSec=3600
@@ -204,12 +205,12 @@ WantedBy=multi-user.target
   to save its conversations and free the GPUs after the stop signal; give a big model several minutes.
 - **Run the calibration once, by hand, first.** A start measures nothing when nobody is there to wait (a service, a
   pipe, `--yes`): it prints one line naming what it skipped and starts with the engine's defaults. Run the
-  calibrations yourself in a terminal while the service is stopped (`./saguaro.sh --config maya-<model>.json
+  calibrations yourself in a terminal while the service is stopped (`./saguaro.sh --config saguaro-<model>.json
   --speed-calibration --no-start`, and for MiniMax `--calibrate --no-start` too). They load the model a few times and
   keep the answer in the config, so the service starts straight from it afterwards. A terminal start of the same config
   still measures what is missing, as before.
 - **Logs.** The server's output (the same lines a terminal shows) goes to the journal: `journalctl -u saguaro -f`. The
-  engine writes its own log to the file named by `"log"` in the config, `maya-<model>.log` beside it by default.
+  engine writes its own log to the file named by `"log"` in the config, `saguaro-<model>.log` beside it by default.
 - The model needs the whole machine: stop the service before a calibration, a setup or `--check`, and do not start two
   units on the same GPUs.
 
@@ -225,7 +226,7 @@ WantedBy=multi-user.target
 | `--copy` | with `--import-model`: copy the files that cannot be moved |
 | `--download-model` | download the model without asking (the commands and size are still printed) |
 | `--model NAME` | which model and files, without asking. Saguaro's quants by their setup id - the model first, then the tier (XS, S, M, L by the experts' bits): `glm-maya-s`, `glm-maya-s24`, `glm-maya-m`, `glm-maya-m-derisked`, `glm-maya-l`, `deepseek-maya-xs`, `deepseek-maya-s`, `deepseek-maya-m`, `minimax-maya-xs`, `minimax-maya-s` (or the full name, e.g. `MiniMax-M3.1-Flash-Maya-XS`). Or a model, its files asked: `DeepSeek-V4.1-Flash-1017`, `MiniMax-M3.1-Flash`. The names used before still work: `Maya-S-v2-IQ2_XXS` (GLM-5.3 · Maya-S), `Maya-S24`, `Maya-M`, `Maya-M-Derisked`, `Maya-L`, and `EXL3-3.05bpw` / `EXL3-4.05bpw` / `EXL3-sc_4.10bpw` - an EXL3 quant of GLM-5.3-Flash at 3.05 or 4.05 bits per weight, or the self-calibrated one at 4.10 with 8-bit attention and shared experts ([3.05bpw](https://huggingface.co/turboderp/GLM-5.3-Flash-exl3/tree/3.05bpw), 125.3 GB; [4.05bpw](https://huggingface.co/turboderp/GLM-5.3-Flash-exl3/tree/4.05bpw), 165.2 GB; [sc_4.10bpw](https://huggingface.co/turboderp/GLM-5.3-Flash-exl3/tree/sc_4.10bpw), 167.8 GB; all with the MTP block) that the engine reads in place from its safetensors: NVIDIA, and AMD; 3.05bpw tested on Linux, none measured against the FP8 model (`EXL3-sc_4.10bpw` is not in the setup's list: named by hand, or set up before, it works as before) |
-| `--model-dir DIR` | use DeepSeek-V4.1-Flash-1017's files you already have: the folder with a GGUF's shards, or with the EXL3 quant's files and the Engram shards `model-00047-of-00048.safetensors` / `model-00048-of-00048.safetensors` of DeepSeek's repo (it must be writable: the pack goes inside it). Or an EXL3 folder of GLM-5.3-Flash or MiniMax-M3.1-Flash at any bit rate that is not one of the listed downloads (turboderp's other branches, Mia-AiLab's other bit rates): the setup reads the folder's own `config.json` and `model.safetensors.index.json`, checks each file whole by its header, never offers the listed downloads for it, writes a config named after the folder (`maya-<folder>.json`) and uses the folder's own sampling (`generation_config.json`) and chat template (`chat_template.jinja`) - GLM's / MiniMax's where the folder has none. MiniMax: `--model MiniMax-M3.1-Flash --model-dir DIR` is the same |
+| `--model-dir DIR` | use DeepSeek-V4.1-Flash-1017's files you already have: the folder with a GGUF's shards, or with the EXL3 quant's files and the Engram shards `model-00047-of-00048.safetensors` / `model-00048-of-00048.safetensors` of DeepSeek's repo (it must be writable: the pack goes inside it). Or an EXL3 folder of GLM-5.3-Flash or MiniMax-M3.1-Flash at any bit rate that is not one of the listed downloads (turboderp's other branches, Mia-AiLab's other bit rates): the setup reads the folder's own `config.json` and `model.safetensors.index.json`, checks each file whole by its header, never offers the listed downloads for it, writes a config named after the folder (`saguaro-<folder>.json`) and uses the folder's own sampling (`generation_config.json`) and chat template (`chat_template.jinja`) - GLM's / MiniMax's where the folder has none. MiniMax: `--model MiniMax-M3.1-Flash --model-dir DIR` is the same |
 | `--ds4-quant Q` | DeepSeek-V4.1-Flash-1017's files: `maya-s`, `maya-xs` (Saguaro's quants, the same as `--model deepseek-maya-s` / `deepseek-maya-xs`; Maya-S the default), `gguf-q8` (unsloth's UD-Q8_K_XL GGUF), `gguf-q4` (its UD-Q4_K_XL: dense weights Q8_0; not in the setup's list, named by hand), `exl3` (LibertAIDAI's EXL3 quant at 2.9 bits), `exl3-3.5` (its 3.5-bit quant: closer to the original, about 280 GB of VRAM and RAM), `abliterated-128g` / `abliterated-256g` (orcarouter's abliterated model as its Mix-128G / Mix-256G GGUF, with Saguaro's Q6_K n-gram tables; `abliterated`: the one this PC holds; a gated repo: `HF_TOKEN` or `hf auth login`); the EXL3 quants need NVIDIA V100 or newer (pictures: RTX 30 / A100 or newer) and are offered only there, and on AMD (as GLM's EXL3 quants there; [docs/EXL3_HIP.md](EXL3_HIP.md)) |
 | `--mm3-quant Q` | MiniMax-M3.1-Flash's files: `exl3` (Mia-AiLab's EXL3 quant at 3.5 bits, NVIDIA), `maya-xs` or `maya-s` (Saguaro's GGUF quants, the same as `--model minimax-maya-xs` / `minimax-maya-s`; `gguf-xs` / `gguf-s` before) |
 | `--no-vision` | text only: no image encoder (DeepSeek, MiniMax: their vision tower off; Qwen-3.8-Flash-Next: no mmproj download) |
@@ -248,7 +249,7 @@ WantedBy=multi-user.target
 ## Web pages on another address
 
 A browser stops a web page served from another address (a local chat client on `http://127.0.0.1:8090`, say) from
-calling Saguaro's API unless Saguaro allows that page. List the pages in the config, `maya-<model>.json`:
+calling Saguaro's API unless Saguaro allows that page. List the pages in the config, `saguaro-<model>.json`:
 
 ```json
 "cors_origins": ["http://127.0.0.1:8090"]
@@ -261,7 +262,7 @@ Without it nothing changes. A new `--setup` writes the config again: add the lin
 ## Giving the GPU back when idle
 
 To share the PC with other GPU programs (another model server, games), let Saguaro unload the model after a while without
-requests. In the config, `maya-<model>.json`:
+requests. In the config, `saguaro-<model>.json`:
 
 ```json
 "idle_unload_s": 900,

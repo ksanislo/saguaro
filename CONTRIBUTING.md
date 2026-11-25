@@ -22,7 +22,7 @@ Name your Saguaro version (`VERSION`, or the commit). Say what you measured and 
 ## A bug
 
 Run `./saguaro.sh --report` right after the failure and attach `saguaro-report.txt`. If the engine stopped, add the end
-of its log (the `.log` next to your `maya-*.json`).
+of its log (the `.log` next to your `saguaro-*.json`).
 
 ## Upstream (Project Maya) intake
 

@@ -166,7 +166,11 @@ NAMES_FAM = ("doc", "py", "js", "cpp", "cmake", "shell")
 # inside a word), the Windows launcher, the nightly run's files, the saguaro-* temp-dir prefixes (upstream:
 # PICTURE_DIR_PREFIXES ("maya-vision-", "maya-ds4-pictures-", ...) and a test's "maya-vision-http-"), and the
 # server's own log tag.  The CMake target names (maya, maya-ds4, maya-vision, maya_kernels, maya_mmq) and the
-# maya-*.json config file names are NOT matched: they stay as they are.
+# CONCRETE maya-*.json config file names are NOT matched: a running install points at them and they are still
+# found (tools/config_names.py).  C122 (1.2.2): the run configs' family is saguaro-<model>.json now, so the
+# GENERIC placeholder `maya-<model>.json` and the start script named after it DO rename with the family - the
+# rule's replacement is never a rule's match, and the module that explains both families (config_names.py) and
+# the texts that quote the old name on purpose are the EXC_TEXT keeps below.
 NAMES_RULES = [
     (re.compile(r"(?<![\w-])maya\.py\b"), PROG_NEW + ".py"),
     (re.compile(r"(?<![\w-])maya\.sh\b"), PROG_NEW + ".sh"),
@@ -176,6 +180,8 @@ NAMES_RULES = [
     (re.compile(r"(?<![\w-])maya-ds4-pictures-"), PROG_NEW + "-ds4-pictures-"),
     (re.compile(r"(?<![\w-])maya-hy4-pictures-"), PROG_NEW + "-hy4-pictures-"),
     (re.compile(r"(?<![\w-])maya-mm3-pictures-"), PROG_NEW + "-mm3-pictures-"),
+    (re.compile(r"(?<![\w./-])maya-<model>\.json"), PROG_NEW + "-<model>.json"),
+    (re.compile(r"(?<![\w-])run-maya-<model>\.(sh|bat)"), "run-" + PROG_NEW + r"-<model>.\1"),
 ]
 # the server's log tag: main has no `[maya]` in any .py / .js / .md (ef27c2650: the merge's two new lines are
 # the case); only in those text families, where a bracketed lowercase word is always OUR print prefix
@@ -227,6 +233,11 @@ EXC_TEXT = [
     ("src/hy4/hy4_model.cu", re.compile(r"(?<![\w-])maya\.py")),
     ("src/hy4/hy4_main.cpp", re.compile(r"(?<![\w./-])ma" + r"ya(?= --speed-calibration)")),
     ("saguaro.py", re.compile(r"start " + BRAND_OLD + r" again")),
+    # C122: the family rule renames the generic `maya-<model>.json` placeholder; these texts say the older name
+    # on purpose (they are the ones that explain both families are found): kept, and reported by --check
+    ("tools/config_names.py", re.compile(r"maya-<model>\.json")),
+    ("serve/models.py", re.compile(r"maya-<model>\.json")),
+    ("saguaro.py", re.compile(r"maya-<model>\.json")),
 ]
 
 # every tool skips these (history, vendored, generated, and this folder, which must spell the old names):

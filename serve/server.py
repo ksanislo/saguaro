@@ -3619,7 +3619,7 @@ class Service:
 
     def _save_port(self, n: int):
         """"port" in the run config, and --port in Saguaro's start scripts beside it that start this config (setup writes
-        run-maya-<model>.bat / .sh with the port then chosen; a script would otherwise move it back)."""
+        run-saguaro-<model>.sh / .bat with the port then chosen; a script would otherwise move it back)."""
         p = Path(self.config_path)
         cfg = json.loads(p.read_text(encoding="utf-8-sig"))
         cfg["port"] = int(n)
