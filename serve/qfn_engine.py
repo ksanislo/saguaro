@@ -680,6 +680,10 @@ class StrataEngine:
         self.progress_new = None         # PP's new_read=: the request's own tokens read (PLAN-qfn-per-request-read-stats)
         self.progress_read_ms = None     # PP's read_ms=: the time its read has actually run (None: an older engine)
         self.read_done = None            # RDONE's (new, read_ms): the exact figures at the end of a solo read
+        # U5 read heartbeat (PLAN-u5-read-heartbeat): the last RHB line per reader - {"solo": entry|None,
+        # "slots": {slot: entry}}, an entry {stage, done, new, reused, rate, ms, pass, t}.  Consumers treat an
+        # entry older than ~3 s as no heartbeat at all.
+        self.read_live = {"solo": None, "slots": {}}
         self.reused = 0                  # RESUME: prompt tokens not read again (a client takes them out of the work)
         self.silent_note = None
         self.last_err = None
@@ -958,6 +962,19 @@ class StrataEngine:
             if line.startswith("STAT "):              # the batch windows' Monitor line (tiers: vram_hit, the drafts):
                 self._parse_stat(line)                 # the Monitor's, never a request's line
                 continue
+            if line.startswith("RHB "):                # U5 read heartbeat: the live read state (read_live); the
+                self._rhb(line)                        #  reading request itself gets the line too, as its BRP lines
+                if slot_q and " slot=" in line:
+                    try:
+                        slot_q[int(line.rsplit(" slot=", 1)[1].split()[0])].put(line)
+                        continue
+                    except (IndexError, ValueError):
+                        pass
+            if line.startswith("BRA "):                # its slot's read ended (or was refused): the heartbeat is stale
+                try:
+                    getattr(self, "read_live", {}).get("slots", {}).pop(int(line.split()[1]), None)
+                except (AttributeError, IndexError, ValueError):
+                    pass
             if line.startswith(SLOT_LINES) and slot_q:   # --batch: a batch slot's own lines
                 try:
                     slot_q[int(line.split()[1])].put(line)
@@ -1199,6 +1216,49 @@ class StrataEngine:
             self.read_done = (int(float(kv["new"])), float(kv["ms"]))
         except (KeyError, ValueError):
             pass
+        if getattr(self, "read_live", None) is not None:   # (U5: heartbeats over - RDONE carries the final figures)
+            self.read_live["solo"] = None
+
+    def _rhb(self, line):
+        """`RHB rid=<rid|0> stage=<stage|read> done=<n> new=<n> reused=<n> pass=<i>/<n> ms=<ms> [slot=<b>]`
+        (PLAN-u5-read-heartbeat): a reading request reports itself about once a second, from the engine's host
+        points between layer passes / pipe pieces / KV staging passes - `stage` while its reused prefix is being
+        copied from RAM into VRAM, `read` while its new tokens are read.  The pump keeps the latest per reader:
+        read_live["solo"] for the read on the control lines, read_live["slots"][<slot>] for a read into a batch
+        slot.  The live prefill rate is the tokens between two heartbeats over the time between them (None while
+        nothing moved); it stands until the tokens move again.  The old engine prints no such lines."""
+        kv = dict(x.partition("=")[::2] for x in line.split()[1:] if "=" in x)
+        try:
+            done, new, reused, ms = int(kv["done"]), int(kv["new"]), int(kv["reused"]), float(kv["ms"])
+        except (KeyError, ValueError):
+            return
+        live = getattr(self, "read_live", None)     # (an engine built without __init__: the first line lays it out)
+        if live is None:
+            live = self.read_live = {"solo": None, "slots": {}}
+        slot = kv.get("slot")
+        try:
+            slot = int(slot) if slot else None
+        except ValueError:
+            slot = None
+        entry = {"stage": kv.get("stage") or "read", "done": done, "new": new, "reused": reused, "ms": ms,
+                 "rate": None, "slot": slot, "rid": 0 if slot is not None else (kv.get("rid") or "0"),
+                 "t": time.time()}
+        pi, slash, pn = kv.get("pass", "").partition("/")
+        entry["pass"] = [int(pi), int(pn)] if pi.isdigit() and slash and pn.isdigit() else None
+        prev = live["slots"].get(slot) if slot is not None else live["solo"]
+        if prev:
+            dd, dm = done - prev["done"], ms - prev["ms"]
+            entry["rate"] = dd / (dm / 1000.0) if dd > 0 and dm > 0 else prev.get("rate")
+        elif ms > 0 and done > 0:
+            entry["rate"] = done / (ms / 1000.0)      # the read's first heartbeat: its own mean so far
+        if slot is not None:
+            self.read_live["slots"][slot] = entry
+            if len(self.read_live["slots"]) > 64:     # (a lost BRA could leave one behind; fresh ones outlive it)
+                now = time.time()
+                for b in [b for b, v in self.read_live["slots"].items() if now - v["t"] > 60.0]:
+                    self.read_live["slots"].pop(b, None)
+        else:
+            self.read_live["solo"] = entry            # one solo read at a time: a new request's replaces it
 
     def vram(self, reserve_mib: int | None, timeout: float = 120.0) -> dict:
         """#533: `VRAM <reserve_mib>` between requests (the caller holds the service's FIFO): the engine shrinks its
@@ -1381,6 +1441,8 @@ class StrataEngine:
                     self._send("STOP")
                     stopped = True
                 yield None
+            elif line.startswith("RHB "):                # U5 read heartbeat: the pump kept read_live current; a
+                yield None                               #  per-second heartbeat for whoever watches the read
             elif line.startswith("RDONE "):               # the read on the control lines ended (per-request stats)
                 self._rdone(line)
             elif line.startswith("DONE"):
@@ -2181,6 +2243,13 @@ class StrataEngine:
                         "figures": {"generated": 0, "prompt_tokens": n, "prompt_ms": num("read_ms") + num("wait_ms"),
                                     "decode_ms": 0.0, "finish": "length", "reused": reused,
                                     "prompt_read": max(0, n - reused)}}
+            elif line.startswith("RHB "):                    # U5 read heartbeat: the slot's read every ~1 s (the
+                kv = dict(x.partition("=")[::2] for x in f[1:] if "=" in x)   #  pump kept read_live's copy current)
+                try:
+                    live["prompt_read"] = int(kv.get("reused") or 0) + int(kv.get("done") or 0)
+                except ValueError:
+                    pass
+                yield None
             elif line.startswith("BRE "):
                 raise engine_refusal(" ".join(f[2:]) or "the engine refused the admission")
 
@@ -2415,6 +2484,10 @@ class StrataEngine:
                         read_to = self.reused = int(line.split()[1])
                     except (IndexError, ValueError):
                         pass
+                elif line.startswith("RHB "):             # U5 read heartbeat (read_live): the read's per-second
+                    if cancel.is_set():                   #  progress: a keep-alive, and it stops a waiting client's
+                        return                            #  STOP from being missed for a whole second
+                    yield None
                 elif line.startswith("RDONE "):           # the read ended: this request's exact new tokens, its own
                     self._rdone(line)                     #  read time (PLAN-qfn-per-request-read-stats)
                 elif line.startswith("DONE"):

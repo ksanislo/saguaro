@@ -59,7 +59,16 @@ function Throughput({m}) {
   // prefill: live is the engine's TOTAL over the prompt tokens read now (not the reused prefix), every chat reading;
   // while only writing, this request's own figure as before, and when idle the last request's
   const readingN = live.reading_n || 0;
-  const prefill = readingN ? (live.prefill_tok_s || 0)
+  // U5 read heartbeat (PLAN-u5-read-heartbeat): every chat reading reports itself about once a second
+  // (live.read_states): its stage and where its read stands.  When most of the prompt is reused the card shows
+  // "restoring N cached · reading M new" (and the staging stage) instead of a bare rate, so a read mostly busy
+  // staging its K/V from RAM is not a frozen 0 tok/s until it ends.
+  const rstates = live.read_states || [];
+  const rReused = rstates.reduce((s, r) => s + (r.reused || 0), 0);
+  const rNew = rstates.reduce((s, r) => s + (r.new || 0), 0);
+  const rStaging = rstates.some((r) => r.stage === "stage");
+  const mostlyCached = rstates.length > 0 && rReused > rNew;
+  const prefill = readingN ? (mostlyCached && (rStaging || !live.prefill_tok_s) ? null : (live.prefill_tok_s || 0))
     : null;                       // (nothing reads now: no live figure - the last read's rate goes in the label)
   const fresh = tn && tn.time && Date.now() / 1000 - tn.time <= 30;
   const ms = gen && tn && tn.ms_tok ? tn.ms_tok : speed ? 1000 / speed : null;
@@ -80,7 +89,7 @@ function Throughput({m}) {
           <span class="speed__peak num" title=${peak ? `The highest decode speed since Saguaro started: ${fmt(peak.tok_s, 1)} tok/s at ${at(peak)}, ${fmt(peak.tokens)} tokens into the answer. Live speeds and finished answers count, from 32 tokens on.`
               : "The highest decode speed since Saguaro started. Live speeds and finished answers count, from 32 tokens on."}>Peak ${peak ? `${fmt(peak.tok_s, 1)} tok/s` : "–"}</span></div></div>
       <div class="speed" title="Prompt tokens read per second (the prefill), counting only the tokens read - not the ones reused from the conversation cache">
-        <span class="speed__label"><i class="key key--dash"></i>Prefill · ${readingN ? (readingN > 1 ? `engine total, ${readingN} chats reading` : "reading now") : last && last.prefill_tok_s != null ? `not reading · last read ${fmt(last.prefill_tok_s)} tok/s` : "not reading"}</span>
+        <span class="speed__label"><i class="key key--dash"></i>Prefill · ${readingN ? (mostlyCached ? `restoring ${fmt(rReused)} cached · reading ${fmt(rNew)} new${rStaging ? " · staging" : ""}` : readingN > 1 ? `engine total, ${readingN} chats reading` : "reading now") : last && last.prefill_tok_s != null ? `not reading · last read ${fmt(last.prefill_tok_s)} tok/s` : "not reading"}</span>
         <div class="speed__row"><span class="speed__mid num">${prefill == null ? "–" : fmt(prefill)}<small>tok/s</small></span>
           ${/* the peak read beside it, like Decode's: the server keeps it, from 512 tokens read on */ ""}
           <span class="speed__peak num" title=${ppeak ? `The highest prompt read speed since Saguaro started: ${fmt(ppeak.tok_s, 1)} tok/s at ${at(ppeak)}, a read of ${fmt(ppeak.tokens)} tokens. Live read rates and finished reads count, from 512 tokens read on.`
@@ -143,8 +152,10 @@ function RightNow({m}) {
       if (c.state === "reading") {
         ptone = "info";
         if (c.prompt_total) pct = Math.min(100, (100 * (c.prompt_read || 0)) / c.prompt_total);
+        // U5 read heartbeat: what the engine reports about once a second - the stage and done/new of this read
+        const hb = c.read_new != null ? ` · ${c.read_stage === "stage" ? "staging · " : ""}${fmt(c.read_done || 0)} / ${fmt(c.read_new)} new` : "";
         detail = (c.prompt_total ? `${fmt(c.prompt_read)} / ${fmt(c.prompt_total)} prompt tokens`
-                : `${fmt(c.prompt_tokens)} prompt tokens`) + (c.prefill_tok_s ? ` · ${fmt(c.prefill_tok_s)} tok/s` : "") + took(c.elapsed_s);
+                : `${fmt(c.prompt_tokens)} prompt tokens`) + hb + (c.prefill_tok_s ? ` · ${fmt(c.prefill_tok_s)} tok/s` : "") + took(c.elapsed_s);
       } else if (c.state === "queued") {
         detail = `waiting${took(c.elapsed_s)}${c.prompt_tokens ? ` · ${fmt(c.prompt_tokens)} prompt tokens` : ""}`;
       } else {
@@ -176,6 +187,8 @@ function RightNow({m}) {
     label = "Reading"; tone = "info"; ptone = "info";
     if (live.prompt_total) { pct = (100 * live.prompt_read) / live.prompt_total; detail = `${fmt(live.prompt_read)} / ${fmt(live.prompt_total)} prompt tokens`; }
     else detail = `${fmt(live.prompt_tokens)} prompt tokens`;
+    const rs = (live.read_states || [])[0];   // U5 read heartbeat: the stage and done/new, updated every second
+    if (rs && rs.new != null) detail += ` · ${rs.stage === "stage" ? "staging · " : ""}${fmt(rs.done || 0)} / ${fmt(rs.new)} new`;
   } else if (live.state === "generating") {
     label = live.phase ? live.phase[0].toUpperCase() + live.phase.slice(1) : "Writing"; tone = "accent";
     pct = live.max_tokens ? Math.min(100, (100 * live.generated) / live.max_tokens) : null;

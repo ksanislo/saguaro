@@ -61,6 +61,10 @@ struct PromptJob {
     std::vector<core::SessionState*> sessions;
     std::function<bool(const float* R_rows, int64_t T, int64_t pos0, std::string& err)> on_chunk;   ///< the last stage
     std::vector<std::function<bool(int64_t done, std::string& err)>> on_stage_chunk;            ///< per stage (optional)
+    /// U5 read heartbeat (output only): host point between the layer passes of a chunk: `pass`/`passes` the
+    /// pass's index and this stage's layer count, `staged` whether the pass copied this read's K/V prefix from
+    /// RAM into VRAM, `pos0` the chunk's (this segment's) first token position. Changes nothing that is read.
+    std::function<void(int64_t pass, int64_t passes, bool staged, int64_t pos0)> on_layer_pass;
     std::function<bool()> should_stop;
     const float* const* embd_rows = nullptr;
     /// Once: from the last stage's thread when it has read the last chunk, or from the stage that failed.
@@ -324,6 +328,12 @@ public:
     /// earlier stage is a chunk or more ahead of the last one by the time `on_chunk` runs, so this is where a
     /// mid-prompt checkpoint takes each stage's part.  Runs on that stage's thread, with its device current.
     std::function<bool(int64_t done, std::string& err)> on_stage_chunk;
+
+    /// U5 read heartbeat (output only): called between the layer passes of every chunk (on every stage's thread,
+    /// while it reads): `pass`/`passes` the pass's index and this stage's layer count, `staged` whether the pass
+    /// copied this read's K/V prefix from RAM into VRAM, `pos0` the chunk's first token position. Not called for
+    /// queued jobs (`PromptJob::on_layer_pass` is); it changes nothing that is read.
+    std::function<void(int64_t pass, int64_t passes, bool staged, int64_t pos0)> on_layer_pass;
 
     /// Checked before every chunk: true stops the prompt early (`run` returns false with err "cancelled").
     std::function<bool()> should_stop;

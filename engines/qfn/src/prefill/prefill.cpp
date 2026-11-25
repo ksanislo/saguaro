@@ -2935,6 +2935,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
     const auto& stage_cb = !job ? on_stage_chunk : depth < job->on_stage_chunk.size() ? job->on_stage_chunk[depth] : no_stage_cb;
     const auto& chunk_cb = job ? job->on_chunk : on_chunk;
     const auto& stop_cb = job ? job->should_stop : should_stop;
+    const auto& layer_cb = job ? job->on_layer_pass : on_layer_pass;   // U5 read heartbeat (output only)
     const float* const* const embd_rows = job ? job->embd_rows : this->embd_rows;
     for (size_t i = 0; i < std::max<size_t>(1, bsegs.size()); ++i) {
         const core::SessionState& x = bsegs.empty() ? ss : *bsegs[i].ss;
@@ -3540,6 +3541,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                              (long long) p0, (long long) layer, what, ms, cudaGetErrorString(a), cudaGetErrorString(b));
         };
         for (int64_t l = LB; l < LE; ++l) {
+            bool pass_staged = false;   // U5 read heartbeat: this layer pass copied the K/V prefix from RAM
             core::progress_beat();   // the serve watchdog: a prompt chunk of 8192 tokens is still moving
             if (l > LB) pf_step("reading the prompt (batched, step sync): the experts and the rest of layer", l - 1);
             core::progress_at("reading the prompt (batched): layer", l, p0);   // #251: a stall names layer and chunk
@@ -3807,6 +3809,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                             if (kv_ev >= 0) cudaEventRecord(m.kv_ev1[kv_ev], cs);
                             if (kv_ev >= 0) ++m.kv_pairs_run;
                             ++m.kv_passes_run;
+                            pass_staged = true;   // U5 read heartbeat: this pass staged the prefix (output only)
                             const uint64_t blk_bytes = strata::kernels::kv_block_bytes(s, core::qsa_kv_format(st));
                             m.kv_bytes_run += (uint64_t) (p_blocks - from_block) * blk_bytes;
                             if (kv_pass_keep && kv_view.skipped_blocks > 0) {   // the measured win, and the hit
@@ -5422,9 +5425,17 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
 #if defined(STRATA_HAVE_DFLASH2)
                 if (half == 1 && tap_rows > 0 && tap_slot[(size_t) l] >= 0)   // DFlash2: this layer's completed output, mean of the streams
                     strata::kernels::df2_tap_rows(m.R + (size_t) tap_t0 * D, tap_dev_ + (size_t) tap_slot[(size_t) l] * N, (int64_t) tap_layers_.size() * N, N,
-                                                  (int) HC, (int) tap_rows, m.cs);
+                                                   (int) HC, (int) tap_rows, m.cs);
 #endif
             }
+            // U5 read heartbeat (PLAN-u5-read-heartbeat, output only): a host point between the layer passes -
+            // `staged` says this pass was a KV staging pass (the reused prefix copied host->VRAM).  A batched
+            // chunk reports each segment's own read (the reader's job callbacks), as its `on_chunk` does.
+            if (bat) {
+                for (const PromptJob::Seg& sg : job->segs)
+                    if (sg.job->on_layer_pass)
+                        sg.job->on_layer_pass(l - LB, LE - LB, pass_staged, job->pos0 + sg.off);
+            } else if (layer_cb) layer_cb(l - LB, LE - LB, pass_staged, p0);
         }
         if (!ple_land()) return false;   // a stage that ends before layer 1: the rows land anyway, the next gather starts
         if (issuer.joinable()) {

@@ -2844,6 +2844,10 @@ class RequestStat:
         # reader's rate, never wall time since the engine took it
         self.read_eng_n, self.read_eng_ms = 0, None     # live pair (the last progress step's)
         self.read_engine = None                         # the finished read's exact (new tokens, read_ms)
+        # U5 read heartbeat (PLAN-u5-read-heartbeat): the engine's last RHB report of the read in flight - stage
+        # (staging the reused prefix from RAM, or reading new tokens), done/new (new tokens done of total),
+        # reused, the rate over the last heartbeat interval and when it arrived (consumers ignore a stale one)
+        self.read_hb = None
         self.read_cur = None        # its read interval in Service.reads while one runs (closed when the answer starts)
         self.at_engine = False                            # it holds an engine place now (a fair slice lets it go)
         self.engine_t0 = None                             # when the engine took it (the real read time starts here)
@@ -4134,6 +4138,28 @@ class Service:
                 self._note_read_errs = getattr(self, "_note_read_errs", set()) | {type(e).__name__}
                 print(f"[saguaro] read-rate bookkeeping failed ({type(e).__name__}: {e}); the request goes on", flush=True)
 
+    def _note_hb_safe(self, *a):
+        """_note_hb for the drivers' heartbeat hook: a Monitor figure must never fail the request it watches."""
+        try:
+            self._note_hb(*a)
+        except Exception as e:                          # (logged once a kind, the answer goes on)
+            if type(e).__name__ not in getattr(self, "_note_hb_errs", set()):
+                self._note_hb_errs = getattr(self, "_note_hb_errs", set()) | {type(e).__name__}
+                print(f"[saguaro] read-heartbeat bookkeeping failed ({type(e).__name__}: {e}); the request goes on",
+                      flush=True)
+
+    def _note_hb(self, stat, hb):
+        """(a driver's hook, PLAN-u5-read-heartbeat) the engine's own about-once-a-second report of a read in
+        flight: its stage (KV staging from RAM, or new tokens being read), done / new (new tokens done of the
+        total), reused, and its rate over the last heartbeat interval.  It refreshes the chat's live figures
+        every second - a one-chunk read, a long first chunk or a read mostly busy staging its K/V from RAM no
+        longer shows nothing until it ends - and feeds the counted tokens in as a normal read step, so the
+        engine-total window moves per second too.  No step of its own while it stages (done 0: nothing to count)."""
+        stat.read_hb = dict(hb, at=time.time())
+        n = hb.get("done") or 0
+        if n > 0:
+            self._note_read(stat, n, hb.get("rate"), False, False, hb.get("ms"))
+
     def _note_read(self, stat, n_read, tok_s=None, exact=False, prov=False, read_ms=None):
         """A read step of one request: the drivers' PP lines and the batch slots' read counters call this (through
         the hook run() installs on the engine's thread-local) with the prompt tokens IT has read now - the reused
@@ -4281,6 +4307,11 @@ class Service:
             rate = self._own_read_rate(st, now, n_own)
             entry = dict(v, id=st.id, label=st.api, conv=st.conv.id if st.conv else None, state=state,
                          prefill_tok_s=round(max(0.0, rate), 1) if state == "reading" and rate else None)
+            hb = getattr(st, "read_hb", None)          # U5 read heartbeat: the engine's ~1-per-second report of
+            if state == "reading" and hb and now - hb.get("at", 0.0) <= 3.0:   #  the read in flight (a stale one
+                entry["read_stage"] = hb.get("stage")  #  is none: the engine stopped reporting, or went quiet)
+                entry["read_done"], entry["read_new"] = hb.get("done"), hb.get("new")
+                entry["read_reused"] = hb.get("reused")
             used = (st.prompt_tokens or 0) + (st.generated or 0)
             entry["context_used"] = used
             if kbt:
@@ -4508,6 +4539,13 @@ class Service:
                 live["prompt_read"], live["prompt_total"] = rd[-1]["prompt_read"], rd[-1]["prompt_total"]
             elif reading_n == 1 and progress:           # (its PP line has not reached the view yet: the engine's own)
                 live["prompt_read"], live["prompt_total"] = progress[0], progress[1]
+        # U5 read heartbeat (PLAN-u5-read-heartbeat): what the reads in flight report about once a second -
+        # stage (staging the reused prefix from RAM, or reading new tokens), done/new (new tokens done of the
+        # total) and reused.  With most of a prompt reused the Monitor shows "restoring N cached · reading M
+        # new" (and the stage) by these instead of a bare 0 rate while nothing has been read yet.
+        live["read_states"] = [{"stage": c["read_stage"], "done": c.get("read_done"), "new": c.get("read_new"),
+                                "reused": c.get("read_reused")}
+                               for c in chats if c["state"] == "reading" and c.get("read_stage")]
         # several conversations at once: each running one's own figures (Conversations), and the counts summed over them
         live["conversations"], live["ended"] = convs, ended
         running_turns = [c["turn"] for c in convs if c.get("turn")]
@@ -5569,6 +5607,7 @@ class Service:
                         tls.on_read = lambda n, ts=None, ex=False, prov=False, rms=None, st=stat: \
                             self._note_read_safe(st, n, ts, ex, prov, rms)
                         tls.on_read_start = lambda st=stat: self._read_start(st)
+                        tls.on_hb = lambda d, st=stat: self._note_hb_safe(st, d)   # (U5 read heartbeat, RHB lines)
                         tls.read_leg_base = 0                  # (this request's read counting starts from nothing)
                     self.running.add(stat)
                     self.active += 1
@@ -8666,8 +8705,15 @@ def _qfn_engine_class():
             self._tls.own_pp = None
             cb = getattr(self._tls, "on_read", None)     # (engine-total read rate: Service._note_read)
             seen, base = 0, None
+            hb_seen = 0.0                                # (U5 heartbeat: the last solo RHB line's time)
             solo = not int(getattr(self, "batch", 0) or 0)
             for t in super().generate(ids, max_new, sampling, cancel, embeddings):
+                hb = (getattr(self, "read_live", None) or {}).get("solo")   # U5 read heartbeat: the solo read's
+                if hb and (self._reader == me or solo) and hb.get("t", 0.0) > hb_seen:   #  own, once per RHB
+                    hb_seen = hb["t"]                    # line (~1 per s; the line itself wakes this loop)
+                    hcb = getattr(self._tls, "on_hb", None)
+                    if hcb is not None:
+                        hcb(hb)
                 if (self._reader == me or solo) and self.progress:
                     new = getattr(self, "progress_new", None)
                     rms = getattr(self, "progress_read_ms", None)
@@ -8718,6 +8764,8 @@ def _qfn_engine_class():
                 return (yield from super()._admission_wait(slot, cancel, live))
             base = int(getattr(self._tls, "read_leg_base", 0) or 0)   # counted before this admission's leg (legs add up)
             tls = self._tls
+            eng = self                                                 # (U5 heartbeat: read_live, kept by the pump)
+            hb_seen = [0.0]                                            # the last RHB line's time for this slot
 
             class _ReadCounted:
                 def __init__(self, q):
@@ -8732,6 +8780,13 @@ def _qfn_engine_class():
                     if line:
                         f = line.split()
                         try:
+                            if f[:1] == ["RHB"]:      # U5 read heartbeat (PLAN-u5-read-heartbeat): this slot's
+                                entry = (getattr(eng, "read_live", None) or {}).get("slots", {}).get(slot)
+                                if entry is not None and entry.get("t", 0.0) > hb_seen[0]:  # the pump kept read_live
+                                    hb_seen[0] = entry["t"]                                 # current before routing
+                                    hcb = getattr(tls, "on_hb", None)                       #  the line itself
+                                    if hcb is not None:
+                                        hcb({**entry, "done": base + entry["done"]})        # (legs add up, as on BRP)
                             if f[:2] == ["BRP", str(slot)] and len(f) >= 4 and f[2].isdigit() and f[3].isdigit():
                                 kv = dict(x.partition("=")[::2] for x in f[5:] if "=" in x)
                                 rate = float(f[5]) if len(f) >= 6 else None
