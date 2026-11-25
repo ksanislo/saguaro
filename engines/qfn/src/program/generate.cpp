@@ -12754,6 +12754,11 @@ int main(int argc, char** argv) {
         // loan moves down to the end of what is left (a smaller chunk when it no longer fits).  A grow maps them
         // again and puts each slot's expert back (or, when the adaptive tier already brought that one back, the
         // most-routed missing expert of the same layer); the adaptive tier carries on from there.
+        // F1: the resident low-RAM mode (the complement) gives back too.  An evicted expert is in neither the RAM
+        // copy nor the cache, which is the state --resident-budget-gib's file tier is in from the start: the miss
+        // path reads it from the model file (expert_source.cpp's per-expert resident_blob query, ~2107-2170), and
+        // the grow path below reads it back the same way - from the RAM copy where the copy happens to hold it
+        // (a lend-region expert), from the file otherwise.  Same bytes either way, so the answers do not move.
         std::vector<std::pair<int32_t, int32_t>> vram_evicted;   // (residency index, slot) the shrinks took
         const int64_t chunk_full = o.prefill_chunk;              // the loan's chunk with the whole cache
         auto relend = [&]() {   // the prompt path's loan: the end of the slots left, its chunk as large as fits
@@ -12780,15 +12785,14 @@ int main(int argc, char** argv) {
                 e = "VRAM needs an engine started with --vram-elastic (one NVIDIA GPU, --serve)";
                 return false;
             }
-            if (src.complement_ready()) {
-                e = "VRAM: not with the resident low-RAM mode (the cache holds experts RAM does not)";
-                return false;
-            }
             if (peer.valid()) { e = "VRAM: not with --peer-device"; return false; }
             for (const PfPart& p : pf_parts)
                 if (!p.lent.empty()) { e = "VRAM: a prompt's loan is still out"; return false; }
             if (!ver.wait_commit(e)) return false;
             adapt_quiesce();                         // the adaptive tier's swaps in flight land first (async too)
+            if (!lazy_fly.empty() && !lazy_land(true, e)) {   // a lazy refill landing now could set host_res to a slot
+                return false;                         // the shrink is about to take away
+            }
             if (strata::core::device_sync() != cudaSuccess) {
                 e = std::string("VRAM: ") + cudaGetErrorString(cudaGetLastError());
                 return false;
@@ -12813,6 +12817,11 @@ int main(int argc, char** argv) {
                 const int64_t live = xcache.slots();
                 for (size_t i = 0; i < host_res.size(); ++i)
                     if (host_res[i] >= live) {
+                        // the resident low-RAM mode (F1): an evicted expert the RAM copy does not hold is now in
+                        // neither tier, and the miss path reads it from the model file from here on - the state
+                        // --resident-budget-gib's file tier is in from the start (complement_offsets_ keeps its
+                        // kNoCacheComplement, so nothing in the source has to be told); one that the copy does
+                        // hold (a lend-region expert, held in both) reads from RAM, as any other miss would
                         vram_evicted.emplace_back((int32_t) i, host_res[i]);
                         host_res[i] = strata::core::kNotResident;
                     }
@@ -12823,8 +12832,11 @@ int main(int argc, char** argv) {
                 const int64_t live = xcache.slots();
                 std::string ferr;
                 std::vector<std::pair<int32_t, int32_t>> keep_out;
+                std::vector<uint8_t> bounce;   // a file read, when the source has no stable pointer for one
                 for (const auto& [i, slot] : vram_evicted) {
-                    if (slot >= live) { keep_out.emplace_back(i, slot); continue; }
+                    // a failed entry keeps its place in vram_evicted for the next grow, like a slot whose
+                    // segment is not remapped yet - and so do the ones after it, whatever the failure was
+                    if (slot >= live || !e.empty()) { keep_out.emplace_back(i, slot); continue; }
                     const int64_t layer = i / g.n_expert;
                     int64_t pick = i;
                     if (host_res[(size_t) i] >= 0) {   // back already (the adaptive tier): the layer's most-routed miss
@@ -12838,18 +12850,35 @@ int main(int argc, char** argv) {
                         }
                     }
                     if (pick < 0) continue;
+                    const int64_t bytes = (int64_t) strata::kernels::cpu::expert_layout().blob_bytes(layer);
+                    // the resident low-RAM mode (F1): an evicted expert the RAM copy does not hold is read from
+                    // the file here (blob_stable: the mapping or an assembled stage buffer, the bytes the pack
+                    // holds); one the copy holds (the lend region's) is read from it - the same file bytes
                     const uint8_t* b = srcp->blob_stable(layer, pick % g.n_expert);
-                    if (b == nullptr || !xcache.fill_slot_queued(slot, b, ferr,
-                            (int64_t) strata::kernels::cpu::expert_layout().blob_bytes(layer))) {
+                    if (b == nullptr) {   // the file tier with the mapping closed (Windows, SAGUARO_TEST_UNMAP_GGUF):
+                        bounce.resize((size_t) bytes);   // read_direct through a bounce.  Pageable: fill_slot_queued
+                        if (!srcp->copy_blob(layer, pick % g.n_expert, bounce.data())) {   // owns the bytes on return
+                            e = "VRAM: refilling the cache failed: reading the expert failed";
+                            keep_out.emplace_back(i, slot);
+                            continue;
+                        }
+                        b = bounce.data();
+                    }
+                    if (!xcache.fill_slot_queued(slot, b, ferr, bytes)) {
                         e = "VRAM: refilling the cache failed: " + ferr;
-                        return false;
+                        keep_out.emplace_back(i, slot);
+                        continue;
                     }
                     srcp->note_async_read(b, nullptr);   // #1237: the queued copy reads a stage buffer; it is not recycled under it
                     host_res[(size_t) pick] = slot;
                 }
                 vram_evicted.swap(keep_out);
-                if (!xcache.sync_queued(ferr)) { e = "VRAM: " + ferr; return false; }
+                // land what was queued and upload the table before any error goes back: the device's residency
+                // view must not lag the host's (a verify window reads d_res, and a row the host already moved
+                // while the device still says kNotResident would be decoded from the file, not from its slot)
+                if (!xcache.sync_queued(ferr) && e.empty()) e = "VRAM: " + ferr;
                 res_upload();
+                if (!e.empty()) return false;
             }
             relend();
             cudaMemGetInfo(&free_b, &total_b);
