@@ -5918,7 +5918,7 @@ class Service:
                                 yield "event", last
                         if not salvaged:
                             if CALL_START in thought:
-                                print(f"[maya] a tool call written in the thinking was not read out of it"
+                                print(f"[saguaro] a tool call written in the thinking was not read out of it"
                                       f"{' (blocked)' if blocked else ''}: the turn ends with the note", flush=True)
                             # never end empty: an agent client retries an empty turn (the loop guard says its own line)
                             yield "event", Event("content", THINK_STOP_NOTE)
@@ -8050,7 +8050,7 @@ def ds4_one_gpu_switch_note(cfg: dict, env: dict) -> str | None:
     on = [k for k in ("DS4_STREAM_WIN", "DS4_LAND") if str(env.get(k) or "").strip() not in ("", "0")]
     if not on:
         return None
-    return ("[maya] NOTE: " + " and ".join(on) + (" is" if len(on) == 1 else " are") + " set, but the one-GPU decode "
+    return ("[saguaro] NOTE: " + " and ".join(on) + (" is" if len(on) == 1 else " are") + " set, but the one-GPU decode "
             "path they belong to is NVIDIA's: it does not apply to one AMD GPU, where the default is the earlier "
             "decode path (the engine's line says so).  Forced on, they made decode much slower and stalled answers "
             "(#1120).  Remove them (and DS4_STREAM_ZC) from the environment or the config's env to run as designed.")
