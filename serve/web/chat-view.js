@@ -67,7 +67,7 @@ function Header({empty}) {
         <button type="button" class="icon-btn" aria-label="New chat" title="New chat" onClick=${newChat}><${Icon} name="new-chat"/></button>`}
       ${empty ? null : html`<span class="anchor">
         <button type="button" ref=${mBtn} class=${`model-btn${model ? " is-open" : ""}`} aria-haspopup="menu" aria-expanded=${String(model)}
-          title=${S.health.model} onClick=${() => setModel(!model)}>${name}<${Icon} name="chevron" sm/></button>
+          title=${name} onClick=${() => setModel(!model)}>${name}<${Icon} name="chevron" sm/></button>
         <${ModelMenu} open=${model} close=${() => setModel(false)} anchor=${mBtn}/>
       </span>`}
     </div>
@@ -466,7 +466,7 @@ function ModelCard({phone}) {
   return html`<section class="model-card" aria-label="The model">
     <${ModelLogo} model=${h.model} size=${44}/>
     <div class="model-card__text">
-      <div class="model-card__name" role="status"><b title=${h.model || ""}>${name}</b>${pill}</div>
+      <div class="model-card__name" role="status"><b title=${name}>${name}</b>${pill}</div>
       ${facts.length ? html`<div class="model-card__facts num">${facts.map(([k, v]) => html`<span>${k}<b>${v}</b></span>`)}</div>` : null}
     </div>
     <button type="button" class="btn btn--secondary btn--sm" onClick=${() => showView("models")}><${Icon} name="swap" sm/>Switch model</button>

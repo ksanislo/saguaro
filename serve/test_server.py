@@ -1766,6 +1766,10 @@ class WebApp(unittest.TestCase):
         side = (ROOT / "serve/web/sidebar.js").read_text(encoding="utf-8")   # (the sidebar's model card: the one label)
         self.assertIn("modelLabel(S.health, {compact: true})", side)
         self.assertNotIn("S.health.model_label || modelName", side)
+        chat = (ROOT / "serve/web/chat-view.js").read_text(encoding="utf-8")   # (item 9 in the chat too: the header's
+        self.assertNotIn("title=${S.health.model}", chat)                      #  model button and the new chat's card
+        self.assertNotIn("title=${h.model ||", chat)                           #  hover the label, not the API id
+        self.assertIn("title=${name}", chat)                                   # (the sidebar's choice, now everywhere)
 
     def test_the_model_is_named_in_two_parts(self):
         """/health's and /metrics' model_name_pretty and model_quant: the model's display name and its files' name
