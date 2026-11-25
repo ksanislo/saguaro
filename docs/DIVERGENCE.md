@@ -423,11 +423,14 @@ engines/qfn is our own port of Strata (its own CMake project; `serve/qfn_engine.
 `engines/qfn/serve/server.py` by `tools/saguaro/extract_qfn_engine.py`). Biggest first.
 
 1. **The sm_75 exact kernel stack.** Why: the T4s are our live box and upstream's kernels leave 3-4x on the table there.
-   Where: `engines/qfn/src/core/nv_defaults.cpp:nv_default_env` (the umbrella), `kql_bits()` in
-   `src/kernels/cuda/iq_kernels.cu`, `q8g_on()` in `src/kernels/cuda/native_mmvq.cu`, `gdn_keyhead_ok()` and
-   `argmax` rows in `src/prefill/kernels.cu` / `src/kernels/cuda/verify_kernels.cu`.
-   Switch and default: `SAGUARO_SM75_PERF=1` turns the family on with `SAGUARO_SM75_STACK`, `SAGUARO_KQL=3`,
-   `SAGUARO_SM75_Q8G`, `SAGUARO_GDN_KEYHEAD`, `SAGUARO_ARGMAX_ROWS_SM70`; all off without it; live configs set them
+   Where: the umbrella is `strata::sm75_series()` / `sm75_default()` in
+   `engines/qfn/include/strata/core/sm75_series.hpp:24-37` (reads `SAGUARO_SM75_PERF`; each kernel keeps its own
+   switch, which wins in both directions); under it `kql_bits()` in `src/kernels/cuda/iq_kernels.cu`, `q8g_on()` in
+   `src/kernels/cuda/native_mmvq.cu`, `gdn_keyhead_ok()` and `argmax` rows in `src/prefill/kernels.cu` /
+   `src/kernels/cuda/verify_kernels.cu`. `engines/qfn/src/core/nv_defaults.cpp:nv_default_env` is not the umbrella:
+   it only gates the separate `SAGUARO_SM75_STACK` opt-in table for sm_75 (`:37-40`).
+   Switch and default: `SAGUARO_SM75_PERF=1` turns the family on (`SAGUARO_KQL=3`, `SAGUARO_SM75_Q8G`,
+   `SAGUARO_GDN_KEYHEAD`, `SAGUARO_ARGMAX_ROWS_SM70`); all off without it; live configs set them
    (ref/live-stack-notes.md:68). Gain: Q4 ~4x / Q8 ~3.7x faster than llama.cpp (ref/live-stack-notes.md:65). Exact.
 2. **Piped MTP drafting up to 4 decoding conversations, plus a Lamina draft layer.** Why: multi-chat decode.
    Where: `engines/qfn/src/program/generate.cpp:main` (the switch), the MTP layer from `tools/mtp_from_gguf.py`.
