@@ -1075,7 +1075,7 @@ class LiveT4Parity(unittest.TestCase):
       - --vram-reserve-mib: the live box was set up before v1.2.1-A and holds 700; a fresh setup writes the
         display rule's 512 - nvidia-smi's display_active says Disabled on these compute-only T4s;
       - --resident-budget-gib: neither has one (252 GB: the page cache holds the experts);
-      - the file paths, the port, the log, the installer block: this machine's, not mangonel's."""
+      - the file paths, the port, the log, the installer block: this machine's, not the 4 x T4 box's."""
 
     LIVE_ENV = {  # (./ref/live-ud-q4.json's env, copied: ref/ is not in the repository)
         "SAGUARO_NO_LARGEPAGES": "1", "SAGUARO_SM75_PERF": "1", "SAGUARO_SM75_STACK": "1", "SAGUARO_KQL": "3",

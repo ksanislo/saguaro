@@ -66,7 +66,7 @@ MEASURED_SPLITS = {"ud-q4_k_xl": "11,24,36", "q8_0": "10,22,35"}
 # out the stages' chunk counts, which is what an unmeasured PC gets)
 MEASURED_PREFILL_PIPE = {"ud-q4_k_xl": "1536", "q8_0": "6144"}
 # the live configs' T4 tuning env (SAGUARO_SM75_*, KQL, BF16_TC*, MMQ_*): write it only where every chosen card is
-# compute capability 7.5 - it is what makes mangonel's T4s fast, and untested elsewhere.  SAGUARO_MMQ_KQ is not
+# compute capability 7.5 - it is what makes a 4 x T4 box's cards fast, and untested elsewhere.  SAGUARO_MMQ_KQ is not
 # part of it: the setup writes it everywhere, AMD included.  Two values differ between the live boxes' quants:
 # the Q8_0 box skips the BF16 tensor-core projections of indexer, router and ssm (UD-Q4_K_XL skips nothing) and
 # runs no SAGUARO_SELECT_SM75 (./ref/Qwen3.8-Flash-Next-*.json).

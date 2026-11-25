@@ -29,11 +29,11 @@ Biggest first.
    `src/kernels/cuda/glm_fast.cu` (`SAGUARO_GLM_RESIDENT_TOPK` read there) and the per-request path in
    `src/core/glm_window.cu`; the request key comes from `serve/turbo_live.py`.
    Switch and default: per request `"turbo": {"drop": N}` (off); engine-wide `SAGUARO_GLM_RESIDENT_TOPK` default
-   0 = off, 5 in the AMD KL runs (= drop 3-of-8, ref/reports/REPORT-mortar-glm.md:20); decode
+   0 = off, 5 in the AMD KL runs (= drop 3-of-8, ref/reports/REPORT-9070xt-glm.md:20); decode
    only, prompt reads stay exact. Gain (RX 9070 XT): Maya-L +66 % (8.45 -> 13.85 tok/s), Maya-S +29 %
-   (ref/reports/REPORT-mortar-glm.md:27-28). Answer-changing: KL 0.192 (5x the engine's own floor) on Maya-L, and
+   (ref/reports/REPORT-9070xt-glm.md:27-28). Answer-changing: KL 0.192 (5x the engine's own floor) on Maya-L, and
    GPQA-Diamond lost no accuracy (70.7 % vs 66.7 %, p 0.29) but answers loop more (13 -> 21 cut-offs;
-   ref/reports/REPORT-mortar-glm.md:46, 132-149).
+   ref/reports/REPORT-9070xt-glm.md:46, 132-149).
 2. **Per-conversation shadow LRU caches with background expert moves.** Why: a conversation's next turn wants the
    experts its own earlier turns used, which the global LRU drops. Where: `conv_shadow_set()` and
    `Glm5Model::fast_boundary()` in `src/core/glm_fast_path.cu`. Switch and default (the live "sh50" set,
@@ -629,13 +629,13 @@ The things that keep an intake routine (docs/UPSTREAM.md §2) and what our setup
    variables at `:34`; `--bench --compare <folder|git ref>` builds by CMake target) - upstream 3d1b67905 taken with
    our quiet-machine, warm-up and median rules (ref/reports/REPORT-upstream-v1.1.75.md:86). And the cleanup a fresh
    user's report asked for: `/opt/llm` and `/data/llm` paths out of `configs/`, `RUN-hy4-first-load.md` gone, the
-   issue links pointed at ksanislo/saguaro (ref/reports/REPORT-mortar-fresh-install.md:138-141, 195-212).
+   issue links pointed at ksanislo/saguaro (ref/reports/REPORT-9070xt-fresh-install.md:138-141, 195-212).
    Gain: not measured (the fresh-user reports are the test). Still open from those reports, and unfixed here: the AMD
    VRAM reserve (3072 MiB whether or not a display drives the card - `SAGUARO_GLM_RESERVE_MB=1024` gave Maya-S +9 %
-   decode and Maya-L's reads 5.1 -> 107 tok/s, ref/reports/REPORT-mortar-first-runs.md:78-88), the shipped gfx1201
+   decode and Maya-L's reads 5.1 -> 107 tok/s, ref/reports/REPORT-9070xt-first-runs.md:78-88), the shipped gfx1201
    hipBLASLt tuning file not matching ROCm 7.1's 100100 (`:96-99`), `--yes` starting the 1.1 GB vision download without
    `--download-model` (`:111-115`), and switching Inkling quants carrying the old `--chunk` over
-   (ref/reports/REPORT-mortar-user-install.md:102).
+   (ref/reports/REPORT-9070xt-user-install.md:102).
 
 ## Dropped from upstream on purpose (the Maya Qwen path)
 

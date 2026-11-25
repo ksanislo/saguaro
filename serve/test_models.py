@@ -398,7 +398,7 @@ class Settings(unittest.TestCase):
         bare = M.read(qfn_cfg(self.d, "maya-qfn-bare.json", mtp=False))     # (the draft layer was not downloaded)
         self.assertEqual(M.choices(bare)["draft"], ["none"])
         self.assertEqual(M.settings_of(bare)["draft"], "none")
-        par = M.read(qfn_cfg(self.d, "maya-qfn-par.json", parallel=8))      # (the config's own key, like mangonel's)
+        par = M.read(qfn_cfg(self.d, "maya-qfn-par.json", parallel=8))      # (the config's own key, like the 4 x T4 box's)
         self.assertEqual(M.settings_of(par)["parallel"], 8)
 
     def test_qfn_written_back(self):

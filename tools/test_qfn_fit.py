@@ -308,7 +308,7 @@ class Topology(unittest.TestCase):
     """The TOPOLOGY class: NUMA keys and --pool-workers only on a multi-socket CPU, the workers across sockets."""
 
     def test_pool_workers_across_the_sockets(self):
-        two = {"sockets": 2, "cores": 20}                          # (mangonel: 2 x 10-core E5-2660 v2)
+        two = {"sockets": 2, "cores": 20}                          # (2 x 10-core E5-2660 v2)
         self.assertEqual(F.pool_workers(two), 19)                  # (./ref/live-ud-q4.json: --pool-workers 19)
         self.assertIsNone(F.pool_workers({"sockets": 1, "cores": 16}))   # (one socket: the engine's own default)
         self.assertIsNone(F.pool_workers(None))
