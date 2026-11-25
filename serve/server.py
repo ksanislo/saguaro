@@ -614,6 +614,48 @@ def queue_ping_seconds() -> float:
         return QUEUE_PING_S
 
 
+def wait_event_seconds() -> float:
+    """SAGUARO_WAIT_EVENT_S (15): R122 - a stream whose request is queued or paused for a higher priority keeps its
+    ": keep-alive" comments, but once this long goes by without a real event one empty event goes out too (an empty
+    chat.completion.chunk, an Anthropic ping, a response.in_progress): clients that count only events stay. Never
+    text in the answer."""
+    try:
+        return max(0.01, float(os.environ.get("SAGUARO_WAIT_EVENT_S", "") or 15))
+    except ValueError:
+        return 15.0
+
+
+def wait_space_seconds() -> float:
+    """SAGUARO_WAIT_SPACE_S (20): R122 - a non-streaming request that has waited this long (or was paused once by a
+    higher priority) gets its 200 and headers early, and a space every SAGUARO_WAIT_EVENT_S until the JSON: spaces
+    before a JSON body are valid, and an error after the headers cannot change the status any more (the log says so)."""
+    try:
+        return max(0.01, float(os.environ.get("SAGUARO_WAIT_SPACE_S", "") or 20))
+    except ValueError:
+        return 20.0
+
+
+def wait_events(items, empty):
+    """R122: a stream's keep-alive comments (the None items) stay as they are; once SAGUARO_WAIT_EVENT_S goes by
+    without a real event, one empty event follows them - `empty()` builds it, and the answer text is never touched.
+    Closing this closes what it wraps."""
+    last, every = time.monotonic(), wait_event_seconds()
+    try:
+        for c in items:
+            if c is None:
+                yield None
+                if time.monotonic() - last >= every:
+                    yield empty()
+                    last = time.monotonic()
+            else:
+                last = time.monotonic()
+                yield c
+    finally:
+        close = getattr(items, "close", None)
+        if close is not None:
+            close()
+
+
 def fair_slice_seconds() -> float:
     """SAGUARO_FAIR_SLICE_S: a request that has been answering this long while others wait gives the engine to the next
     one and queues again behind them (0, the default: it keeps the engine to the end, as before)."""
@@ -6961,6 +7003,62 @@ def make_handler(svc: Service):
             self.end_headers()
             self.wfile.write(body)
 
+        def _cid_paused(self, req):
+            """R122: is this request the one currently paused for a higher priority? Its answer carries the
+            conversation id, and the live state says whose turn paused."""
+            cid = (req or {}).get("_cid")
+            return bool(cid) and any(getattr(s, "paused_for_priority", False) and getattr(s, "cid", None) == cid
+                                     for s in list(svc.running))
+
+        def _collect_wait(self, make, name: str, cancel, paused=None, code_of=lambda out: 200):
+            """A non-streaming answer collected on a side thread. R122: while it waits for its turn or pauses for a
+            higher priority its client sees nothing at all - once SAGUARO_WAIT_SPACE_S has gone by, or as soon as
+            this request is paused (`paused()`), the 200 and headers go out and a space follows every
+            SAGUARO_WAIT_EVENT_S until the JSON body: spaces before a JSON body are valid, so the client keeps
+            waiting instead of dropping a request that is only waiting. From the headers out an error cannot change
+            the status any more - the log says so once, and the error's JSON then follows as the body."""
+            box = {}
+
+            def work():
+                try:
+                    box["body"] = make()
+                except (ValueError, EngineDied) as e:      # after the headers an error can only ride in the body
+                    box["error"] = e
+            t = threading.Thread(target=work, daemon=True)
+            t.start()
+            deadline = time.monotonic() + wait_space_seconds()
+            while t.is_alive() and time.monotonic() < deadline and not (paused and paused()):
+                t.join(0.05)
+            if not t.is_alive():
+                if "error" in box:
+                    raise box["error"]
+                self._json(code_of(box["body"]), box["body"])
+                return
+            print("[saguaro] " + name + ": the answer is still waiting - the status and headers go out now; "
+                  "an error after this cannot change the status any more", flush=True)
+            self.answer_started = True
+            self.protocol_version = "HTTP/1.1"             # (chunked, so the spaces are a keep-alive body)
+            self.close_connection = True
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Transfer-Encoding", "chunked")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            try:
+                while t.is_alive():
+                    t.join(wait_event_seconds())
+                    if t.is_alive():
+                        self.wfile.write(b"1\r\n \r\n")
+                        self.wfile.flush()
+            except OSError:
+                cancel.set()                               # the client went away: stop the answer
+                return
+            out = ({"error": {"type": "server_error", "message": str(box["error"])}} if "error" in box
+                   else box["body"])
+            data = json.dumps(out, ensure_ascii=False).encode()
+            self.wfile.write(f"{len(data):x}\r\n".encode() + data + b"\r\n0\r\n\r\n")
+            self.wfile.flush()
+
         def _llamacpp_model(self, op: str):
             """llama.cpp's /models/load and /models/unload: Open WebUI's Models page (load / switch)."""
             if not getattr(svc, "model_management", False):
@@ -7284,20 +7382,23 @@ def make_handler(svc: Service):
                 self.wfile.write((json.dumps(ev, ensure_ascii=False) + "\n").encode())
             try:
                 if not oreq.get("stream"):
-                    pieces = [ev for c in chunks for ev in tr.feed(c)]
-                    calls = [c for ev in tr.finish_calls() for c in ev["message"]["tool_calls"]]
-                    last = tr.done()
-                    if kind == "chat":
-                        msg = {"role": "assistant", "content": "".join(p["message"]["content"] for p in pieces)}
-                        think = "".join(p["message"].get("thinking", "") for p in pieces)
-                        if think:
-                            msg["thinking"] = think
-                        if calls:
-                            msg["tool_calls"] = calls
-                        last["message"] = msg
-                    else:
-                        last["response"] = "".join(p["response"] for p in pieces)
-                    self._json(200, last)
+                    def make():
+                        pieces = [ev for c in chunks for ev in tr.feed(c)]
+                        calls = [c for ev in tr.finish_calls() for c in ev["message"]["tool_calls"]]
+                        last = tr.done()
+                        if kind == "chat":
+                            msg = {"role": "assistant",
+                                   "content": "".join(p["message"]["content"] for p in pieces)}
+                            think = "".join(p["message"].get("thinking", "") for p in pieces)
+                            if think:
+                                msg["thinking"] = think
+                            if calls:
+                                msg["tool_calls"] = calls
+                            last["message"] = msg
+                        else:
+                            last["response"] = "".join(p["response"] for p in pieces)
+                        return last
+                    return self._collect_wait(make, f"ollama {kind}", cancel, lambda: self._cid_paused(oreq))
                 else:
                     self._ndjson_start()
                     for c in chunks:
@@ -8072,6 +8173,7 @@ def make_handler(svc: Service):
             sampling = svc.with_shared(sampling, "openai")
             sampling["_api"] = "openai"
             sampling["_responses"] = True
+            sampling["_cid"] = "resp-" + uuid.uuid4().hex[:24]   # (R122: the live state can name this request)
             self._priority_header(sampling)
             svc.check_request(sampling)
             if req.get("background"):
@@ -8087,8 +8189,9 @@ def make_handler(svc: Service):
             events = self._response_work(req, sampling, history, validation, owner, cancel)
             try:
                 if not req.get("stream"):
-                    out = response_collect(events)
-                    return self._json(500 if out["status"] == "failed" else 200, out)
+                    return self._collect_wait(lambda: response_collect(events), "responses", cancel,
+                                              lambda: self._cid_paused(sampling),
+                                              code_of=lambda out: 500 if out["status"] == "failed" else 200)
                 first = next(events)
                 self._sse()
                 for item in itertools.chain([first], events):
@@ -8172,7 +8275,8 @@ def make_handler(svc: Service):
                                {t["name"] for t in extra}) if use_mcp else None
             chunks = openai_chunks(svc, req, ids, thinking, tools, max_new, cancel, run=run)
             if not req.get("stream"):
-                return self._json(200, openai_collect(chunks, logprobs=logprobs_asked(req) is not None))
+                return self._collect_wait(lambda: openai_collect(chunks, logprobs=logprobs_asked(req) is not None),
+                                          "openai", cancel, lambda: self._cid_paused(req))
             if req.get("strata_resume") is True:
                 # the web app: the answer runs on if the connection drops; the page reconnects to it by id
                 first = next(chunks)
@@ -8182,9 +8286,12 @@ def make_handler(svc: Service):
                 self._sse()
                 self._stream_job(job, 0)
                 return
+            empty_chat_chunk = lambda: {"id": req.get("_cid") or "", "object": "chat.completion.chunk",
+                                        "created": int(time.time()), "model": svc.model,
+                                        "choices": [{"index": 0, "delta": {}, "finish_reason": None}]}
             self._sse()
             try:
-                for c in chunks:
+                for c in wait_events(chunks, empty_chat_chunk):
                     if c is None:
                         self.wfile.write(b": keep-alive\n\n")      # an SSE comment: clients ignore it
                     else:
@@ -8264,14 +8371,16 @@ def make_handler(svc: Service):
                 req = {**req, "_gen_tail": kw["_gen_tail"]}
             req = {**req, "_conv_label": kw.get("_conv_label")}   # the Monitor's conversation row: its first words
             _debug_req("anthropic", req, messages, tools, max_new, thinking, len(ids))
+            req = {**req, "_cid": "anth-" + uuid.uuid4().hex[:24]}   # (R122: the live state can name this request)
             cancel = threading.Event()
             watch_client(self, cancel)
             events = anthropic_events(svc, req, ids, thinking, tools, max_new, cancel)
             if not req.get("stream"):
-                return self._json(200, anthropic_collect(events))
+                return self._collect_wait(lambda: anthropic_collect(events), "anthropic", cancel,
+                                          lambda: self._cid_paused(req))
             self._sse()
             try:
-                for item in events:
+                for item in wait_events(events, lambda: ("ping", {"type": "ping"})):
                     if item is None:
                         self.wfile.write(b": keep-alive\n\n")
                     else:
@@ -8324,7 +8433,7 @@ SERVER_ENV = ("SAGUARO_ENGINE_STALL_S", "SAGUARO_REQUEST_QUIET_S", "SAGUARO_DRAI
               "SAGUARO_MAX_BODY_MIB", "SAGUARO_FAIR_SLICE_S", "SAGUARO_FAIR_READ_S", "SAGUARO_FAIR_READ_YIELD_S",
               "SAGUARO_DS4_KEEP_THINKING",
               "SAGUARO_SERVER_LOG", "SAGUARO_GLM_THINK_RESERVE", "SAGUARO_LOOP_GUARD", "SAGUARO_QUEUE_PING_S",
-              "SAGUARO_PRIORITY_AGE_S",
+              "SAGUARO_PRIORITY_AGE_S", "SAGUARO_WAIT_EVENT_S", "SAGUARO_WAIT_SPACE_S",
               "SAGUARO_UPDATE_CHECK", "SAGUARO_PACK_TEMPLATE") + RESPONSE_ENV_KEYS + \
     ("SAGUARO_DS4_RESTORE_POINTS", "SAGUARO_DS4_RESTORE_TAIL")
 

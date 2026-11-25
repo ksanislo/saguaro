@@ -598,6 +598,152 @@ class AcrossThePause(Env):
         self.assertEqual(cut, plain)                   # the same answer, and the same guard actions, across it
 
 
+class WaitKeepAlive(Env):
+    """R122 step 3b: a request that is queued or paused for a higher priority must not let its client's idle
+    timeout kill it. The keep-alive comments stay; once SAGUARO_WAIT_EVENT_S goes by without a real event the
+    streams add one EMPTY event (chat.completions a chunk whose delta is {}, /v1/messages an Anthropic ping,
+    /v1/responses another response.in_progress; the ollama streams nothing), never text - the same request when
+    it runs undisturbed streams exactly the same answer text; non-streaming gets its 200 and headers early and a
+    space before the JSON. Parsed back with the client-side rules."""
+    NAMES = Env.NAMES + ("SAGUARO_QUEUE_PING_S", "SAGUARO_WAIT_EVENT_S", "SAGUARO_WAIT_SPACE_S")
+    WAIT = "".join(random.Random(701).choices(string.ascii_lowercase, k=30))     # short: runs inside the space limit
+
+    def setUp(self):
+        super().setUp()
+        self.tok = ByteTokenizer()
+        os.environ["SAGUARO_QUEUE_PING_S"] = "0.1"
+        os.environ["SAGUARO_WAIT_EVENT_S"] = "0.3"
+        os.environ["SAGUARO_WAIT_SPACE_S"] = "0.3"
+        self.engine = ResumingEngine(self.tok, {"wait": WaitKeepAlive.WAIT, "block": LONG}, delay_s=0.004)
+        self.svc = Service(self.engine, self.tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        self.httpd = serve(self.svc, port=0)
+        self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+
+    def tearDown(self):
+        self.httpd.shutdown()
+        super().tearDown()
+
+    def post(self, path, body):
+        req = urllib.request.Request(self.base + path, data=json.dumps(body).encode(),
+                                     headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=60) as r:
+                return r.status, r.read()
+        except urllib.error.HTTPError as e:
+            return e.code, e.read()
+
+    def stream(self, path, body):
+        req = urllib.request.Request(self.base + path, data=json.dumps(body).encode(),
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return [raw.decode().rstrip("\r\n") for raw in r]
+
+    def blocked(self, make):
+        """Run `make` while the other conversation holds the engine; returns its result."""
+        a = threading.Thread(target=self.post,
+                             args=("/v1/chat/completions", {"model": "m", "stream": False,
+                                                            "messages": [{"role": "user", "content": "block one"}]}))
+        a.start()
+        while not self.svc.current_requests:
+            time.sleep(0.001)
+        time.sleep(0.1)
+        try:
+            return make()
+        finally:
+            a.join(60)
+
+    @staticmethod
+    def sse(lines):
+        """The client's own SSE rules: comments (`:`) dropped, `data:` payloads parsed, per `event:` name."""
+        events, comments, name = [], 0, "message"
+        for line in lines:
+            if line.startswith(":"):
+                comments += 1
+            elif line.startswith("event: "):
+                name = line[7:]
+            elif line.startswith("data: "):
+                if line[6:] == "[DONE]":
+                    break
+                events.append((name, json.loads(line[6:])))
+        return events, comments
+
+    def test_a_queued_chat_stream_gets_empty_chunks_and_no_text(self):
+        body = lambda: {"model": "m", "stream": True, "messages": [{"role": "user", "content": "wait one"}]}
+        plain, _ = self.sse(self.stream("/v1/chat/completions", body()))
+        events, comments = self.blocked(lambda: self.sse(self.stream("/v1/chat/completions", body())))
+        text = lambda evs: "".join(p["choices"][0]["delta"].get("content", "") for _n, p in evs)
+        self.assertEqual(text(events), text(plain))   # the wait changed the answer text in no way
+        empty = [p for _n, p in events if p["choices"][0]["delta"] == {} and p["choices"][0]["finish_reason"] is None]
+        self.assertGreaterEqual(len(empty), 1)        # the empty event: an event, not a comment only
+        self.assertTrue(all(p["id"] == events[0][1]["id"] and p["object"] == "chat.completion.chunk"
+                            for p in empty))          # it belongs to this stream
+        self.assertGreater(comments, 0)               # the keep-alive comments stayed too
+
+    def test_a_queued_anthropic_stream_pings(self):
+        body = lambda: {"model": "m", "max_tokens": 256, "stream": True,
+                        "messages": [{"role": "user", "content": "wait one"}]}
+        text = lambda evs: "".join(p["delta"]["text"] for n, p in evs
+                                   if n == "content_block_delta" and p["delta"].get("type") == "text_delta")
+        plain, _ = self.sse(self.stream("/v1/messages", body()))
+        events, comments = self.blocked(lambda: self.sse(self.stream("/v1/messages", body())))
+        self.assertIn("ping", [n for n, _p in events])    # Anthropic's own ping event, while it waited
+        self.assertEqual(text(events), text(plain))       # nothing of the ping in the answer
+        self.assertGreater(comments, 0)
+
+    def test_a_queued_responses_stream_repeats_in_progress(self):
+        body = lambda: {"model": "m", "input": "wait one", "stream": True}
+        text = lambda evs: "".join(p["delta"] for n, p in evs if n == "response.output_text.delta")
+        plain, _ = self.sse(self.stream("/v1/responses", body()))
+        events, comments = self.blocked(lambda: self.sse(self.stream("/v1/responses", body())))
+        names = [n for n, _p in events]
+        self.assertEqual(names[0], "response.created")
+        self.assertGreaterEqual(names.count("response.in_progress"), 2)   # the keep-alive's, not the start's alone
+        self.assertEqual(text(events), text(plain))
+        self.assertGreater(comments, 0)
+
+    def test_the_ollama_stream_gets_nothing_extra(self):
+        self.svc.model_management = True                 # (/api/chat is gated on model management)
+        body = lambda: {"model": "m", "messages": [{"role": "user", "content": "wait one"}], "stream": True}
+        plain = self.stream("/api/chat", body())
+        waited = self.blocked(lambda: self.stream("/api/chat", body()))
+        norm = lambda lines: [sorted(json.loads(l)) for l in lines if l.strip()]
+        self.assertEqual(norm(waited), norm(plain))    # nothing extra while queued: an empty line breaks ndjson
+
+    def test_a_queued_nonstream_answer_gets_its_headers_early(self):
+        body = {"model": "m", "stream": False, "messages": [{"role": "user", "content": "wait one"}]}
+        plain = json.loads(self.post("/v1/chat/completions", body)[1])
+        log = io.StringIO()
+        with contextlib.redirect_stdout(log):
+            s, out = self.blocked(lambda: self.post("/v1/chat/completions", body))
+        self.assertEqual(s, 200)
+        self.assertTrue(out.startswith(b" "))            # spaces while it waited, valid before the JSON
+        self.assertEqual(json.loads(out)["choices"][0]["message"]["content"],
+                         plain["choices"][0]["message"]["content"])
+        self.assertIn("the status and headers go out now", log.getvalue())
+        self.assertIn("an error after this cannot change the status", log.getvalue())
+
+    def test_a_paused_nonstream_answer_gets_its_headers_at_once(self):
+        os.environ["SAGUARO_WAIT_SPACE_S"] = "30"        # only the pause starts it, not the waiting
+        body = {"model": "m", "stream": False, "priority": "background",
+                "messages": [{"role": "user", "content": "block one"}]}
+        plain = json.loads(self.post("/v1/chat/completions", body)[1])
+        log = io.StringIO()
+        box = {}
+        with contextlib.redirect_stdout(log):
+            a = threading.Thread(target=lambda: box.update(long=self.post("/v1/chat/completions", body)))
+            a.start()
+            while not self.svc.current_requests:
+                time.sleep(0.001)
+            hi = self.post("/v1/chat/completions", {"model": "m", "stream": False, "priority": "high",
+                                                    "messages": [{"role": "user", "content": "wait one"}]})
+            a.join(60)
+        self.assertTrue(box["long"][1].startswith(b" "))          # the answer was cut: the status went out at once
+        self.assertEqual(json.loads(box["long"][1])["choices"][0]["message"]["content"],
+                         plain["choices"][0]["message"]["content"])   # same answer: paused, continued, nothing lost
+        self.assertFalse(hi[1].startswith(b" "))                  # the one that ran needs none of it
+        self.assertIn("the status and headers go out now", log.getvalue())
+
+
 class RequestFields(Env):
     @classmethod
     def setUpClass(cls):

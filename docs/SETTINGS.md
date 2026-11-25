@@ -234,6 +234,7 @@ These settings change what the engine chooses (put them in the config with `--en
 | `SAGUARO_VIDEO_MAX_FRAMES` | 240 | the server (GLM): the most frames a video may give (read at 4 a second, so 240 = a minute); a longer video is refused before it is decoded, with its length in the message. Every frame takes an image's share of the context. Videos need ffmpeg and ffprobe installed |
 | `SAGUARO_FAIR_READ_S`, `SAGUARO_FAIR_READ_YIELD_S` | 0 (off), 30 | the server, several conversations at once: a prompt the engine has been reading this many seconds while another request waits behind it (sent, nothing heard from it yet) is paused at the engine's next chunk - the engine keeps what it read - and goes on with the rest once the waiting requests have started (at most the yield seconds later). A short turn no longer waits for another chat's whole long read; the read loses a pipeline refill per pause. After upstream PR #144's design |
 | `SAGUARO_PRIORITY_AGE_S` | 0 (off) | the server: set above 0: a queued background request that has waited this many seconds counts as a normal one (see Request priority below). Off by default: a background request waits as long as a higher-priority one uses or waits for the model - it is never dropped or errored for waiting |
+| `SAGUARO_WAIT_EVENT_S`, `SAGUARO_WAIT_SPACE_S` | 15, 20 | the server: how a request that is queued or paused for a higher priority keeps its client, which sees nothing of it: after the first many seconds without a real event a stream adds one empty event beside its keep-alive comments (chat completions a chunk whose delta is `{}`, `/v1/messages` an Anthropic `ping`, `/v1/responses` another `response.in_progress`; the ollama-style streams send nothing - an empty line would break them), never text in the answer; a non-streaming request that has waited the second many (or was paused once) gets its 200 and headers and a space every `SAGUARO_WAIT_EVENT_S` until the JSON - spaces before a JSON body are valid, and from the headers out an error cannot change the status any more (it says so in the log once) |
 
 **Request priority** (`priority`). A request can say how long it may hold the queue: the body field `"priority"` -
 `"high"`, `"normal"` (the default, today's behaviour) or `"background"` - or the `X-Saguaro-Priority` header, where
@@ -257,7 +258,10 @@ past ten minutes says so once, `[saguaro] priority: a background answer has been
 `SAGUARO_PRIORITY_AGE_S` set above 0 a background waiter that has waited that long counts as a normal one.
 The Monitor shows a small `high` / `background` tag on the running and queued
 rows, and a paused one says "paused for a higher-priority request"; `/metrics` carries `"priority"` and
-`"paused_for_priority"` in its live rows and every finished request's row.
+`"paused_for_priority"` in its live rows and every finished request's row. While it waits its client sees it as
+alive: the keep-alive comments, and after `SAGUARO_WAIT_EVENT_S` without a real event one empty event too (the
+ollama-style streams send nothing); a non-streaming request that has waited `SAGUARO_WAIT_SPACE_S` or was paused
+once gets its 200 and headers early and a space until the JSON arrives.
 
 **An agent's alias at background** (llama-swap >= v200 syntax): point the agent at an alias of the same model whose
 params set the field, and its long turns keep the machine warm without holding up a person at the keyboard:

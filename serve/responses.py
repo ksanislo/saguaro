@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import time
 import uuid
 
@@ -302,6 +303,16 @@ def response_usage(data, prompt_tokens):
             "output_tokens_details": {"reasoning_tokens": data.get("reasoning_tokens", 0)}}
 
 
+def wait_event_seconds() -> float:
+    """SAGUARO_WAIT_EVENT_S (15): the same setting serve.server's wait_events() uses - read here because the server
+    imports this module, not the other way round: a queued or priority-paused responses stream adds an empty
+    response.in_progress once this long goes by without a real event (R122)."""
+    try:
+        return max(0.01, float(os.environ.get("SAGUARO_WAIT_EVENT_S", "") or 15))
+    except ValueError:
+        return 15.0
+
+
 def response_events(model, req, run, prompt_tokens=0, persist=None, response_id=None, validation=None, cancel=None):
     """Serialize engine events directly, with one item lifecycle and one terminal response event."""
     response = new_response(model, req, response_id)
@@ -324,6 +335,7 @@ def response_events(model, req, run, prompt_tokens=0, persist=None, response_id=
 
     def event(name, **data):
         nonlocal sequence
+        last[0] = time.monotonic()
         out = {"type": name, "sequence_number": sequence, **data}
         sequence += 1
         return name, copy.deepcopy(out)
@@ -369,12 +381,15 @@ def response_events(model, req, run, prompt_tokens=0, persist=None, response_id=
         item["status"] = status
         yield event("response.output_item.done", output_index=index, item=item)
 
+    last = [time.monotonic()]                            # (R122: the wait's empty response.in_progress keeps its own
     try:
         yield event("response.created", response=response)
         yield event("response.in_progress", response=response)
         for kind, data in run:
             if kind == "ping":
                 yield None
+                if time.monotonic() - last[0] >= wait_event_seconds():
+                    yield event("response.in_progress", response=response)   # for clients that count only events
             elif kind == "event":
                 ev = data
                 if incomplete_call:
