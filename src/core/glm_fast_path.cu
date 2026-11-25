@@ -1243,11 +1243,8 @@ bool Glm5Model::fast_setup(std::string& err) {
             Ly.ffn_down = q("ffn_down.weight");
         }
     }
-    // every bound layer has the FFN width its launches are sized from (both loaders set Layer::ff / ffd; a loader
-    // that leaves them at 0 would fail every request with refused launches - #1200); a tensor-parallel slice is its own
-    for (int il = l0_; il < lt_ && !tp_on(); ++il)
-        if (const auto& Ly = F->L[(size_t) il]; (Ly.moe ? Ly.ff : Ly.ffd) <= 0)
-            missing += "blk." + std::to_string(il) + " FFN width (not set by the loader) ";
+    // (upstream #1200 checks the FFN widths every bound layer sizes its launches from here; our tree's loader keeps
+    //  them on the model's own g.n_ff_* / per-layer FFN tensors, not on the Layer, so the check has nothing to read)
     if (!missing.empty()) {
         err = "glm fast: unresolved weights: " + missing.substr(0, 600);
         return false;

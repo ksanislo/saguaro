@@ -11,7 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import maya  # noqa: E402
+import saguaro as maya  # noqa: E402
 import setup as S  # noqa: E402
 
 
