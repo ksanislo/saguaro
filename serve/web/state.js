@@ -253,8 +253,11 @@ export const modelId = () => `${S.health.model || ""}|${S.health.model_label || 
 // 2026-10-27); within one model they stay, across reloads.  True when it was a switch.
 export function newModelCheck() {
   const id = modelId(), was = store.get("model", null);
-  store.set("model", id);
+  store.set("model", id);   // (the new format: this seeds it once, whatever the check says)
   if (!S.health.model || was === null || was === id) return false;
+  // the first page load after the update: what the page before stored is "<id>|<label>" - two parts, this model's
+  // when its id and label are the same: not a switch, its sampling choices and level stay
+  if (was === `${S.health.model || ""}|${S.health.model_label || ""}`) return false;
   let keys = [];                                  // (every model's stored settings: "maya.sampling", "maya.sampling_<family>")
   try { keys = Object.keys(localStorage).filter((k) => k.startsWith("maya.sampling")).map((k) => k.slice(5)); } catch (e) { /* none */ }
   for (const key of new Set([prefsKey(), ...keys])) {

@@ -588,6 +588,38 @@ console.log(JSON.stringify({...out, before, after: lib.modelLabel(st.S.health, {
         self.assertTrue(got["switched"])            # (its own standard parameters, as at a page load)
         self.assertEqual((got["chats"], got["current"]), (1, "c"))
 
+    def test_the_first_load_after_the_update_is_no_switch(self):
+        """the modelId format change must not fake a model switch: what the page before stored is "<id>|<label>", and
+        when the id and the label are still this model's the sampling choices survive and no "its own settings" toast
+        fires; the stored value takes the new four-part format, and a real switch stays one."""
+        got = self.node("""
+const mem = {};
+globalThis.localStorage = {getItem: (k) => (k in mem ? mem[k] : null), setItem: (k, v) => { mem[k] = String(v); },
+                           removeItem: (k) => { delete mem[k]; }};
+const st = await import(web + "/state.js");
+const qfn = {model: "qwen3.8-flash-next", model_label: "Qwen3.8-Flash-Next · Q8_0 (saguaro-qfn)",
+             model_name_pretty: "Qwen3.8 Flash Next", model_quant: "Q8_0"};
+st.S.health = qfn;
+// the old format, stored before the update, with the user's own choices beside it
+mem["maya.model"] = JSON.stringify(`${qfn.model}|${qfn.model_label}`);
+mem["maya.sampling_qfn"] = JSON.stringify({thinking: "low", temperature: 0.3, prefs_v: 3});
+const first = st.newModelCheck();
+const kept = JSON.parse(mem["maya.sampling_qfn"]);
+const seeded = JSON.parse(mem["maya.model"]);
+const again = st.newModelCheck();                  // (the next load of the same model: still no switch)
+mem["maya.model"] = JSON.stringify("glm-5.3-flash|GLM-5.3 · Maya-L");   // (another model really did run here)
+const switched = st.newModelCheck();
+const cleared = JSON.parse(mem["maya.sampling_qfn"]);
+console.log(JSON.stringify({first, kept, seeded, again, switched, cleared}));""")
+        self.assertFalse(got["first"])                                          # (the same model: no fake switch)
+        self.assertEqual((got["kept"]["thinking"], got["kept"]["temperature"]), ("low", 0.3))
+        self.assertEqual(got["seeded"], "qwen3.8-flash-next|Qwen3.8-Flash-Next · Q8_0 (saguaro-qfn)"
+                       + "|Qwen3.8 Flash Next|Q8_0")                             # (the new format, seeded once)
+        self.assertFalse(got["again"])
+        self.assertTrue(got["switched"])                                         # (a real switch: still one)
+        self.assertNotIn("thinking", got["cleared"])                             # (... and its choices do go)
+        self.assertNotIn("temperature", got["cleared"])
+
     def test_a_server_behind_its_api_key_says_so(self):
         """/api/context answering 401: the page knows why the context range is missing - Settings says
         "API key needed", not "this server does not say its context range" (serve/web/server.js' loadCtxInfo)."""
