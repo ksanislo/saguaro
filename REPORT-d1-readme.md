@@ -52,8 +52,9 @@ for Step 1; no empty commits created).
    `README.md#what-you-need`, `#something-went-wrong`, `#how-fast-is-it` -> **all present** in the new README.
 3. `grep experimental README.md` -> **0 matches**; `grep qwen4exp` -> 0; CYBER-FROST appears only as the
    saguaro-qfn quant (table row, note, Credits).
-4. Line-length check: **no prose/markup line over 120 chars** except Markdown table rows and the
-   `<a name="...">` anchor markup (unavoidable: one logical table row per line, and invisible anchors).
+4. Line-length check: **no prose/markup line over 120 chars** except Markdown table rows, the
+   `<a name="...">` anchor markup and the four HF badge `<a href><img>` lines at the top (README.md:9-12, unchanged
+   from base) - unavoidable: one logical table row per line, invisible anchors, one badge per line.
 5. Table well-formedness: models table 8 rows x 9 columns, hardware table 9 rows x 2 columns, uniform pipes.
 
 ## Numbers in the README and their source
