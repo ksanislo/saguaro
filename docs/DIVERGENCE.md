@@ -561,7 +561,7 @@ One `serve/server.py` for all engines, plus the browser app in `serve/web`.
    browser's `maya.*` / `strata.*` keys (`serve/web/chats.js:61`, `:88`) and the quant names
    (ref/live-stack-notes.md:24-25). Gain: not measured.
 6. **The UI under llama-swap refuses what the supervisor owns.** Why: a page that switched models or rewrote a config
-   fought the process manager. Where: `supervisor_name()` (`serve/server.py:8185`) and `svc.supervisor` (`:8738`).
+   fought the process manager. Where: `supervisor_name()` (`serve/server.py:8183`) and `svc.supervisor` (`:8738`).
    Switch and default: the refusal (409 on switch / update / port / context / Turbo / config writes) is on whenever a
    supervisor is detected; `SAGUARO_SUPERVISOR=""` says there is none and lifts it (ref/ROLLBACK.md:317-319).
    Gain: not measured (a safety change).
