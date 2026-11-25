@@ -135,9 +135,11 @@ Baseline before the work: `test_qfn_fit` 27 / `test_setup_qfn` 52, both green; n
   builds and lays out fine.  `check_pc` now says this plainly for a chosen mixed list (a warning
   naming the missing kernel image and the `--gpu N` one-class-at-a-time way out) instead of
   building past the pre-Turing card in silence.
-* **The Models page** (`serve/model_pull.py`) still words QFN's needs as the measured box ("16 GB
-  or more and about 96 GB ... 96 GB are needed") - the plan's steps did not name it, so it stayed;
-  the setup itself no longer refuses on those numbers.  Worth re-wording in a follow-up.
+* **The Models page** (`serve/model_pull.py`) - re-worded with the review: its "needs" line and the
+  two thin-PC verdicts now name the *measured* box ("the layout was measured on ...; smaller cards
+  / less RAM run it too, slowly") instead of "96 GB are needed", and the quant menu's note reads
+  "cannot run on this PC" where it means exactly that (v1.2.1-B made the refusal the true minimum);
+  `docs/AMD_SAGUARO.md` says the same about the AMD row.
 * **Slow splits get 32K** context unconditionally (the plan's "a context that fits"); a split's RAM
   cost is cheaper than one card's, so 64K might survive on some of them - left conservative.
 * The true minimums have not been verified against real cards (no hardware here): the tests prove

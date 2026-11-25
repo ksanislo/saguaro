@@ -1399,8 +1399,10 @@ class ModelsPage(unittest.TestCase):
         self.assertAlmostEqual(cf["size_gb"], 112.5, delta=0.1)
         self.assertIn("fits", cf["fit"])
         small = {e["id"]: e for e in M.catalog(ROOT, glm_sizes={}, cards=amd, ram_gb=60.0)}
-        self.assertIn("96 GB are needed", small["qwen3.8-flash-next-ud-q4_k_xl"]["fit"])
-        self.assertIn("96 GB are needed", small["cyber-frost"]["fit"])
+        self.assertIn("measured on about 96 GB", small["qwen3.8-flash-next-ud-q4_k_xl"]["fit"])   # (v1.2.1-B
+        self.assertIn("runs it too, slowly", small["qwen3.8-flash-next-ud-q4_k_xl"]["fit"])       #  nit: the
+        self.assertIn("measured on about 96 GB", small["cyber-frost"]["fit"])                     #  measured box,
+                                                                                                  #  not a need)
 
 
 if __name__ == "__main__":

@@ -7294,7 +7294,7 @@ def choose_qfn_quant(a, prev: dict, gpus: list, ram: float) -> str:
         rows = []
         for k in keys:
             m, why = qfn_entry(k), qfn_quant_fit(k, gpus, ram)
-            note = ("does not fit this PC" if why else "recommended" if k == QFN_DEFAULT_QUANT else
+            note = ("cannot run on this PC" if why else "recommended" if k == QFN_DEFAULT_QUANT else
                     "not measured on AMD yet" if not m.get("measured") else None)
             rows.append((Q.shown("qfn", k, m["download_gb"]), note,
                          (why + ". " if why else "") + m["about"] + (f". Measured: {m['measured']}" if m.get("measured")
