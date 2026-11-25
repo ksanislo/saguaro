@@ -172,7 +172,7 @@ NAMES_RULES = [
     (re.compile(r"(?<![\w-])maya\.sh\b"), PROG_NEW + ".sh"),
     (re.compile("START-" + BRAND_OLD.upper() + r"\.bat"), "START-SAGUARO.bat"),
     (re.compile(r"(?<![\w-])maya-nightly\b"), PROG_NEW + "-nightly"),
-    (re.compile(r"(?<![\w-])maya-vision-(?=[a-z])"), PROG_NEW + "-vision-"),
+    (re.compile(r"(?<![\w-])maya-vision-"), PROG_NEW + "-vision-"),
     (re.compile(r"(?<![\w-])maya-ds4-pictures-"), PROG_NEW + "-ds4-pictures-"),
     (re.compile(r"(?<![\w-])maya-hy4-pictures-"), PROG_NEW + "-hy4-pictures-"),
     (re.compile(r"(?<![\w-])maya-mm3-pictures-"), PROG_NEW + "-mm3-pictures-"),
@@ -233,7 +233,8 @@ EXC_TEXT = [
 SKIP_DIR_NAMES = {".git", "third_party", "node_modules", "__pycache__", ".venv", "venv", ".mypy_cache", ".scons"}
 SKIP_DIR_RE = re.compile(r"^(build[^/\\]*|.*-build|cmake-build.*)$", re.I)
 SKIP_PATHS = ("ref-configs/", "bench/results/", "engines/qfn/bench/results/", "tools/saguaro/",
-              "engines/qfn/", "tools/qfn/", "ref/", "scratch/", "serve/qfn_engine.py")
+              "engines/qfn/", "tools/qfn/", "ref/", "scratch/", "serve/qfn_engine.py",
+              "tools/test_rename_upstream.py")          # the tool's own tests must spell the old names too
 SKIP_NAMES = {"CHANGELOG.md", "NOTICE.md"}
 SKIP_NAME_RE = re.compile(r"^(PLAN|REPORT|NEXT)-.*\.md$|^LICENSE(\.|$)")
 SKIP_SUFFIXES = {".log", ".jsonl", ".patch", ".orig"}
