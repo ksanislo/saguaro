@@ -7,7 +7,10 @@ import {DEFAULTS, P, PENALTIES, S, THINKING, confirmDialog, emit, loadPrefs, mod
 let onHealth = () => {};
 export const whenHealth = (f) => { onHealth = f; };
 export async function loadHealth() {
-  if (document.hidden || unloaded()) return;   // (a hidden tab asks nothing; behind llama-swap /health would load the model)
+  // (a hidden tab asks nothing - but it remembers: seen again, it makes this health up, or a gate closed behind
+  //  llama-swap would never learn to open again and the model's facts would never load; a closed gate stays closed)
+  if (document.hidden) { healthWait = true; return; }
+  if (unloaded()) return;                      // (behind llama-swap /health would load the model: poll re-arms it)
   try {
     const h = await (await fetch("health")).json();
     S.health = h;

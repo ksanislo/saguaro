@@ -848,8 +848,12 @@ const el = new Proxy({}, {get: (t, k) => (k in t ? t[k] : k === "dataset" || k =
 globalThis.navigator = {platform: "linux", userAgent: "node"};   // (lib.js' MOD: platform or user agent)
 globalThis.matchMedia = () => ({matches: false, addEventListener: noop, addListener: noop});
 globalThis.localStorage = {getItem: () => null, setItem: noop, removeItem: noop};
-globalThis.document = {documentElement: el, body: el, head: el, addEventListener: noop, querySelector: () => null,
-                       createElement: () => el};
+const docL = {};                                                   // (the document's listeners: a test can fire them)
+globalThis.document = {documentElement: el, body: el, head: el, hidden: false,
+                       addEventListener: (k, f) => { (docL[k] = docL[k] || []).push(f); },
+                       removeEventListener: (k, f) => { const a = docL[k] || [], i = a.indexOf(f); if (i >= 0) a.splice(i, 1); },
+                       querySelector: () => null, createElement: () => el};
+globalThis.fire = (k) => { for (const f of (docL[k] || []).slice()) f(); };   // (as the browser fires it on a tab change)
 globalThis.window = globalThis; globalThis.addEventListener = noop;
 globalThis.location = {href: "http://x/", hash: "", search: "", pathname: "/"};
 const web = process.argv[2];
@@ -1083,6 +1087,51 @@ console.log(JSON.stringify({shown, hidden: log.slice(), conn: st.S.conn}));"""
                 self.assertEqual(got["shown"], ["/running", "metrics"])
                 self.assertEqual(got["hidden"], ["/running", "metrics"])   # (nothing new once hidden)
                 self.assertEqual(got["conn"], "ok")
+
+    def test_a_tab_opened_hidden_loads_health_when_it_is_seen(self):
+        # (the review's finding 1: a page opened in a background tab - ctrl-click, "open in new tab", a restored
+        # session - used to lose the boot chain's first health with nothing to retry it: the gate never learned to
+        # close and the model's facts never loaded.  Seen again, the missed health loads and the gate engages)
+        got = self.node("""
+location.pathname = "/upstream/glm-5.3-flash/";
+const log = [];
+globalThis.fetch = async (u) => { log.push(u);
+  return {ok: true, status: 200, json: async () => u.endsWith("/running")
+    ? {running: [{model: "glm-5.3-flash", state: "ready"}]}
+    : {model: "glm-5.3-flash", supervisor: "llama-swap", live: {state: "idle"}}}; };
+document.hidden = true;
+await sv.loadHealth();                                              // (app.js' first health, tab opened hidden)
+const atOpen = log.slice();
+document.hidden = false; fire("visibilitychange");                  // (the user switches to the tab)
+await new Promise((ok) => setTimeout(ok, 50)); sv.stopPoll();
+console.log(JSON.stringify({atOpen, afterShow: log.slice(), supervisor: st.S.health.supervisor || null,
+                            first: log[0] || null}));""")
+        self.assertEqual(got["atOpen"], [])                         # (hidden at open: nothing asked)
+        self.assertEqual(got["first"], "health")                    # (seen again: the health it missed, first)
+        self.assertEqual(got["supervisor"], "llama-swap")           # (the facts loaded: the gate can engage now)
+        self.assertIn("metrics", got["afterShow"])                  # (and the ready model is polled again)
+
+    def test_a_health_retry_landing_in_a_hidden_tab_is_made_up_when_seen(self):
+        # (the review's finding 2: health fails while the server starts, the tab hides before the 2 s retry fires -
+        # the chain used to die there: /health was never asked again.  It must retry the moment the tab is seen)
+        got = self.node("""
+const log = [];
+let down = true;
+globalThis.fetch = async (u) => { log.push(u);
+  if (u === "health" && down) throw new Error("nope");
+  return {ok: true, status: 200, json: async () => ({model: "glm-5.3-flash", live: {state: "idle"}})}; };
+await sv.loadHealth();                                              // (fails: the 2 s retry is armed)
+await new Promise((ok) => setTimeout(ok, 1000));
+document.hidden = true; fire("visibilitychange");
+await new Promise((ok) => setTimeout(ok, 2500));                    // (the retry fires in the dark: nothing asked)
+const whileHidden = log.filter((u) => u === "health").length;
+down = false; document.hidden = false; fire("visibilitychange");    // (seen again: the missed retry happens)
+await new Promise((ok) => setTimeout(ok, 100)); sv.stopPoll();
+console.log(JSON.stringify({whileHidden, total: log.filter((u) => u === "health").length,
+                            loaded: st.S.health.model === "glm-5.3-flash"}));""")
+        self.assertEqual(got["whileHidden"], 1)                     # (only the failed first try; the dark asked nothing)
+        self.assertEqual(got["total"], 2)                           # (seen again: the retry it lost, made up)
+        self.assertTrue(got["loaded"])                              # (and the model's facts are here at last)
 
 
 if __name__ == "__main__":
