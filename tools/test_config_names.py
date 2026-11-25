@@ -1,0 +1,290 @@
+"""tools/test_config_names.py - C122's config name family: a new setup writes saguaro-<model>.json, an old install
+is found, shown, switched, deleted and updated under its maya- name, a model under both names is the new one, the
+sidecars beside a config move with its rename and stay out of its list, a --config path given as the old name
+after the rename still resolves, a rename that cannot happen (a read-only folder) leaves everything working, and
+the server's notes are read under either name and written under the new one.
+
+    python -m unittest tools.test_config_names -v
+"""
+from __future__ import annotations
+
+import json
+import os
+import sys
+import tempfile
+import time
+import unittest
+from types import SimpleNamespace
+from pathlib import Path
+from unittest import mock
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path[:0] = [str(ROOT), str(ROOT / "tools")]
+import config_names as CN  # noqa: E402
+import saguaro as maya  # noqa: E402
+from serve import model_api, models  # noqa: E402
+
+
+def cfg_file(d: Path, name: str, **extra) -> Path:
+    """an installed model's config: a pack beside it so it reads as a real one, its log named the way a setup names it"""
+    pack = d / "GLM-5.3-Flash" / "Maya-M" / "pack"
+    pack.mkdir(parents=True, exist_ok=True)
+    (pack.parent / "shard.gguf").write_bytes(b"x" * 1000)
+    stem = name.removesuffix(".json")
+    cfg = {"exe": "/b/saguaro-glm", "args": ["--glm-pack", str(pack), "--max-context", "131072"],
+           "model_name": "glm-5.3-flash", "gpu": 0, "port": 8080, "log": str(d / (stem + ".log")),
+           "installer": {"models_dir": str(d), "quant": "Maya-M", "draft": "mtp", "written": "2026-11-01 09:00"},
+           **extra}
+    p = d / name
+    p.write_text(json.dumps(cfg, indent=1))
+    return p
+
+
+class Names(unittest.TestCase):
+    def test_bare_and_write_stem(self):
+        self.assertEqual(CN.bare("maya-glm-maya-s"), "glm-maya-s")
+        self.assertEqual(CN.bare("saguaro-glm-maya-s"), "glm-maya-s")
+        self.assertEqual(CN.bare("glm-maya-s"), "glm-maya-s")
+        self.assertEqual(CN.write_stem("maya-ds4"), "saguaro-ds4")
+        self.assertEqual(CN.write_stem("saguaro-ds4"), "saguaro-ds4")
+
+    def test_is_config_name(self):
+        for name in ("maya-maya-m.json", "saguaro-mm3.json", "saguaro-x.turbo.json.json"):
+            self.assertTrue(CN.is_config_name(name), name)
+        for name in ("maya-x.shared-settings.json", "saguaro-x.turbo.json", "run-saguaro-x.sh", ".saguaro-switch.json",
+                     "not-a-config.json", "maya-x.json.prev", ""):
+            self.assertFalse(CN.is_config_name(name), name)
+
+    def test_matches(self):
+        for want in ("saguaro-glm-maya-s", "glm-maya-s", "maya-glm-maya-s"):   # the old name of the moved file works
+            self.assertTrue(CN.matches("saguaro-glm-maya-s", want), want)
+        for want in ("saguaro-glm-maya-s", "glm-maya-s"):
+            self.assertTrue(CN.matches("maya-glm-maya-s", want), want)         # the new name finds an unmoved install
+        for want in ("maya-", "saguaro-", "", "glm-maya-xs", "other"):
+            self.assertFalse(CN.matches("saguaro-glm-maya-s", want), want)
+
+
+class Listing(unittest.TestCase):
+    """both families listed, a model under both names is the new one, the sidecars are not models, and a switch
+    (serve/models.py: its mtime touched) moves it to the front - under either name"""
+
+    def test_both_families_and_shadowing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            old = cfg_file(d, "maya-maya-m.json")
+            new = cfg_file(d, "saguaro-ds4.json")
+            cfg_file(d, "maya-mm3.json")
+            cfg_file(d, "maya-shadow.json")
+            shadow = cfg_file(d, "saguaro-shadow.json")
+            (d / "saguaro-shadow.shared-settings.json").write_text("{}")
+            (d / "maya-maya-m.turbo.json").write_text("{}")
+            (d / "saguaro-ds4.json.prev").write_text("{}")
+            (d / "run-saguaro-ds4.sh").write_text("#!/bin/sh\n")
+            found = {p.name for p in models.config_paths(d)}
+            self.assertEqual(found, {"maya-maya-m.json", "saguaro-ds4.json", "maya-mm3.json", "saguaro-shadow.json"})
+            with mock.patch.object(maya, "ROOT", d):
+                self.assertEqual({p.name for p in maya.configs()}, found)      # saguaro.py's own list: same rules
+            self.assertEqual(CN.locate(d, "maya-shadow"), shadow)              # both names: the new one, ...
+            self.assertEqual(CN.locate(d, "maya-mm3"), d / "maya-mm3.json")    # ... and only the old: the old one
+            self.assertEqual(CN.locate(d, "never-set-up"), d / "saguaro-never-set-up.json")
+
+    def test_switched_order_and_shown_names(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            a = cfg_file(d, "maya-maya-m.json")
+            b = cfg_file(d, "saguaro-ds4.json")
+            self.assertEqual(models.config_paths(d)[0], b)                     # b was written last
+            now = time.time() + 1                                              # (serve/models.py's switch: its mtime touched)
+            os.utime(a, (now, now))
+            self.assertEqual(models.config_paths(d)[0], a)
+            self.assertEqual(models.quant_label({}, Path("maya-maya-m.json")), "maya-m")
+            self.assertEqual(models.quant_label({}, Path("saguaro-maya-m.json")), "maya-m")
+            self.assertEqual(models.quant_label({}, Path("maya-maya-m-hip.json")), "maya-m")
+
+    def test_sidecars_are_not_models_for_saguaro_py(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            cfg_file(d, "maya-ds4.json")
+            (d / "maya-ds4.turbo.json").write_text("{}")                       # (the live Turbo sidecar: not a model,
+            (d / "maya-ds4.shared-settings.json").write_text("{}")             #  as serve/models.py always said)
+            with mock.patch.object(maya, "ROOT", d):
+                self.assertEqual([p.name for p in maya.configs()], ["maya-ds4.json"])
+
+
+class Api(unittest.TestCase):
+    """the model API's names across both families and the rename"""
+
+    def test_find_and_match(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            old = cfg_file(d, "maya-maya-m.json")
+            new = cfg_file(d, "saguaro-ds4.json")
+            cfg_file(d, "maya-shadow.json")
+            shadow = cfg_file(d, "saguaro-shadow.json")
+            self.assertEqual(model_api.find_config(d, "maya-maya-m"), old)
+            self.assertEqual(model_api.find_config(d, "saguaro-maya-m"), old)      # the name of after the move
+            self.assertEqual(model_api.find_config(d, "maya-m"), old)               # and the display name
+            self.assertEqual(model_api.find_config(d, "ds4:latest"), new)
+            self.assertEqual(model_api.find_config(d, "maya-shadow"), shadow)      # a moved file answers the old API
+            self.assertIsNone(model_api.find_config(d, "maya-"))                   # ... never the family name alone
+            entries = [{"file": "saguaro-ds4.json", "model": "deepseek-v4.1-flash"},
+                       {"file": "saguaro-shadow.json", "model": "x"}]
+            self.assertEqual(model_api.match_name("maya-shadow", entries), entries[1])
+            self.assertEqual(model_api.match_name("maya-ds4.json", entries), entries[0])
+            self.assertIsNone(model_api.match_name("saguaro-", entries))
+
+    def test_resolve_after_the_rename(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            gone = d / "maya-maya-m.json"
+            now = cfg_file(d, "saguaro-maya-m.json")
+            self.assertEqual(CN.resolve(gone), now)                            # (--config / llama-swap / systemd)
+            self.assertEqual(CN.resolve(now), now)
+            self.assertEqual(CN.resolve(d / "maya-none.json"), d / "maya-none.json")
+            self.assertEqual(CN.resolve(gone / "sub" / "maya-x.json"), gone / "sub" / "maya-x.json")
+
+
+class Migration(unittest.TestCase):
+    """saguaro.py's migrate_config_names (a start and an update run it): once, atomically, sidecars with it, only
+    where the new name is free; a shadowed pair and a failed move leave everything working"""
+
+    def test_moved_with_its_sidecars(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            p = cfg_file(d, "maya-maya-m.json")
+            (d / "maya-maya-m.log").write_text("a log line\n")
+            (d / "maya-maya-m.shared-settings.json").write_text('{"chat": 1}')
+            (d / "maya-maya-m.turbo.json").write_text('{"turbo": 1}')
+            (d / "maya-maya-m.json.prev").write_text("{}")
+            (d / "maya-maya-m.json.bak-20261101-pre-env-rename").write_text("{}")
+            (d / "run-maya-maya-m.sh").write_text("exec saguaro.py --config " + str(p) + " --port 8080\n")
+            (d / "run-maya-maya-m.bat").write_text("saguaro.py --config " + str(p) + "\n")
+            with mock.patch.object(maya, "ROOT", d), mock.patch.object(maya, "warn") as warn:
+                self.assertEqual(maya.migrate_config_names(), ["saguaro-maya-m.json"])
+                self.assertEqual(maya.migrate_config_names(), [])              # once: nothing to do again
+                warn.assert_not_called()
+            self.assertEqual(sorted(f.name for f in d.iterdir() if f.is_file()),
+                             ["run-saguaro-maya-m.bat", "run-saguaro-maya-m.sh", "saguaro-maya-m.json",
+                              "saguaro-maya-m.json.bak-20261101-pre-env-rename", "saguaro-maya-m.json.prev",
+                              "saguaro-maya-m.log", "saguaro-maya-m.shared-settings.json", "saguaro-maya-m.turbo.json"])
+            self.assertTrue((d / "saguaro-maya-m.log").read_text() == "a log line\n")   # its contents came along
+            self.assertTrue((d / "GLM-5.3-Flash" / "Maya-M" / "shard.gguf").is_file())  # the model files are left
+            moved = d / "saguaro-maya-m.json"
+            self.assertEqual(json.loads(moved.read_text())["log"], str(d / "saguaro-maya-m.log"))   # it follows
+            self.assertIn("saguaro-maya-m.json", (d / "run-saguaro-maya-m.sh").read_text())          # the script too
+            self.assertIn("--config " + str(moved), (d / "run-saguaro-maya-m.sh").read_text())
+            self.assertIn("saguaro-maya-m.json", (d / "run-saguaro-maya-m.bat").read_text())
+            self.assertEqual(CN.resolve(p), moved)                             # the old path still starts it
+            with mock.patch.object(maya, "ROOT", d):
+                self.assertEqual([f.name for f in maya.configs()], ["saguaro-maya-m.json"])
+
+    def test_both_names_the_new_one_and_the_old_stays(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            old = cfg_file(d, "maya-shadow.json", model_name="the old one")
+            new = cfg_file(d, "saguaro-shadow.json", model_name="the new one")
+            os.utime(old)                                                      # the old one even touched last
+            with mock.patch.object(maya, "ROOT", d), mock.patch.object(maya, "warn") as warn:
+                self.assertEqual(maya.migrate_config_names(), [])              # target taken: nothing moves
+                warn.assert_not_called()
+                self.assertEqual([f.name for f in maya.configs()], ["saguaro-shadow.json"])
+            self.assertEqual(model_api.find_config(d, "maya-shadow"), new)
+            self.assertEqual(json.loads(old.read_text())["model_name"], "the old one")   # untouched
+
+    def test_read_only_folder_leaves_everything_working(self):
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            self.skipTest("a read-only folder stops nobody but the owner (running as root)")
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            p = cfg_file(d, "maya-maya-m.json")
+            (d / "run-maya-maya-m.sh").write_text("exec saguaro.py --config " + str(p) + "\n")
+            os.chmod(d, 0o500)
+            try:
+                with mock.patch.object(maya, "ROOT", d), mock.patch.object(maya, "warn"):
+                    self.assertEqual(maya.migrate_config_names(), [])          # said, not raised
+            finally:
+                os.chmod(d, 0o700)
+            self.assertTrue(p.is_file())                                       # still there, still working:
+            with mock.patch.object(maya, "ROOT", d):
+                self.assertEqual([f.name for f in maya.configs()], ["maya-maya-m.json"])
+            self.assertEqual(models.config_paths(d), [p])
+            self.assertEqual(model_api.find_config(d, "maya-m"), p)        # the display name, under the old name
+            self.assertEqual(models.read(p)["model_name"], "glm-5.3-flash")   # still readable
+            os.remove(d / "maya-maya-m.json")                                  # (and deletable again)
+
+    def test_updated_after_the_move(self):
+        """About > Updates: the server ends with UPDATE_EXIT and the new version is started again with the same
+        --config path it was given - the old name of the file this very move renamed, which its main() resolves"""
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            p = cfg_file(d, "maya-maya-m.json")
+            with mock.patch.object(maya, "ROOT", d), mock.patch.object(maya, "warn"):
+                maya.migrate_config_names()
+            moved = d / "saguaro-maya-m.json"
+            a = SimpleNamespace(port=None, host=None, api_key=None, gpu=None, gpus=None, backend="cuda", config=p)
+            with mock.patch.object(maya, "ROOT", d), mock.patch.object(maya, "say"), \
+                    mock.patch.object(maya.os, "execv") as execv:
+                self.assertEqual(maya.after_server(maya.UPDATE_EXIT, a), 0)
+            argv = execv.call_args.args[1]
+            self.assertEqual(argv[argv.index("--config") + 1], str(p))         # the path as it was given, and:
+            self.assertEqual(CN.resolve(Path(argv[argv.index("--config") + 1])), moved)   # the start finds the file
+
+    def test_deleted_after_the_move(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            cfg_file(d, "maya-maya-m.json")
+            (d / "maya-maya-m.shared-settings.json").write_text("{}")
+            (d / "run-maya-maya-m.sh").write_text("#!/bin/sh\n")
+            with mock.patch.object(maya, "ROOT", d), mock.patch.object(maya, "warn"):
+                maya.migrate_config_names()
+            moved = d / "saguaro-maya-m.json"
+            cfg = models.read(moved)
+            models.write(moved, {**cfg, "port": 8090})                         # settings saved into it: as before
+            self.assertEqual(models.read(moved)["port"], 8090)
+            out = models.delete(d, moved)                                      # and it deletes with them
+            self.assertEqual(out["deleted"], "saguaro-maya-m.json")
+            for gone in ("saguaro-maya-m.json", "run-saguaro-maya-m.sh", "saguaro-maya-m.shared-settings.json"):
+                self.assertFalse((d / gone).exists(), gone)
+            self.assertEqual(models.config_paths(d), [])
+
+
+class Notes(unittest.TestCase):
+    """the server's notes: read under either name (the new one first), written under the new one alone"""
+
+    def test_note_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            self.assertEqual(CN.note_paths(d, models.SWITCH_FILE), [])
+            (d / ".maya-switch.json").write_text("{}")
+            self.assertEqual(CN.note_paths(d, models.SWITCH_FILE), [d / ".maya-switch.json"])
+            (d / models.SWITCH_FILE).write_text('{"a": 1}')
+            self.assertEqual(CN.note_paths(d, models.SWITCH_FILE),
+                             [d / ".saguaro-switch.json", d / ".maya-switch.json"])   # the new name first
+            self.assertEqual(CN.note_paths(d, "unrelated.txt"), [])        # only notes that are there
+
+    def test_new_names(self):
+        self.assertEqual(models.SWITCH_FILE, ".saguaro-switch.json")
+        self.assertEqual(models.DELETE_FILE, ".saguaro-delete.json")
+        self.assertEqual(maya.SWITCH_FILE, ".saguaro-switch.json")
+
+    def test_switch_note_after_the_rename(self):
+        """a switch note naming the old path of a config this very start renamed: saguaro.py follows it anyway"""
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            old = cfg_file(d, "maya-maya-m.json", backend="hip")
+            with mock.patch.object(maya, "ROOT", d), mock.patch.object(maya, "warn"):
+                maya.migrate_config_names()
+            moved = d / "saguaro-maya-m.json"
+            (d / ".maya-switch.json").write_text(json.dumps({"config": str(old), "why": "switch", "port": 8123,
+                                                             "time": time.time()}))   # a note of before the rename
+            a = SimpleNamespace(port=8090, host=None, api_key=None, gpu=None, gpus=None, backend="cuda", config=None)
+            with mock.patch.object(maya, "ROOT", d), mock.patch.object(maya, "say"), \
+                    mock.patch.object(maya.os, "execv") as execv:
+                maya.after_server(maya.RESTART_EXIT, a)
+            argv = execv.call_args.args[1]
+            self.assertEqual(argv[argv.index("--config") + 1], str(moved))     # followed, to the moved file
+            self.assertFalse((d / ".maya-switch.json").exists())               # and read once
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -5270,8 +5270,9 @@ def after_server(rc: int, a) -> int:
         except OSError:
             pass
     why = None
-    if note.get("config") and Path(note["config"]).is_file() and time.time() - float(note.get("time") or 0) < 600:
-        config, why = Path(note["config"]), note.get("why")
+    note_cfg = CN.resolve(Path(note["config"])) if note.get("config") else None   # (its path may be the old name
+    if note_cfg is not None and note_cfg.is_file() and time.time() - float(note.get("time") or 0) < 600:          #  of
+        config, why = note_cfg, note.get("why")                                     #  a config just renamed)
         backend = read_json(config).get("backend", "cuda")
         port = note.get("port") or port
     for flag, v in (("--backend", backend), ("--port", port), ("--host", a.host), ("--api-key", a.api_key),
