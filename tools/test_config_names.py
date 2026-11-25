@@ -2,7 +2,7 @@
 is found, shown, switched, deleted and updated under its maya- name, a model under both names is the new one, the
 sidecars beside a config move with its rename and stay out of its list, a --config path given as the old name
 after the rename still resolves, a rename that cannot happen (a read-only folder) leaves everything working, and
-the server's notes are read under either name and written under the new one.
+the server's notes are read under either name, written under the new one and never survive the server.
 
     python -m unittest tools.test_config_names -v
 """
@@ -305,6 +305,21 @@ class Notes(unittest.TestCase):
         self.assertEqual(models.SWITCH_FILE, ".saguaro-switch.json")
         self.assertEqual(models.DELETE_FILE, ".saguaro-delete.json")
         self.assertEqual(maya.SWITCH_FILE, ".saguaro-switch.json")
+
+    def test_a_stray_note_does_not_survive_the_server(self):
+        """a crash between the server writing its switch note and restarting: a leftover of either family goes
+        with the next non-restart exit (as 1.2.1 cleared it) instead of lingering over starts and updates"""
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            a = SimpleNamespace(port=None, host=None, api_key=None, gpu=None, gpus=None, backend="cuda", config=None)
+            for rc in (0, maya.UPDATE_EXIT):                                   # a normal stop and an update
+                (d / ".maya-switch.json").write_text(json.dumps({"why": "switch", "time": time.time()}))
+                (d / models.SWITCH_FILE).write_text(json.dumps({"why": "settings", "time": time.time()}))
+                with mock.patch.object(maya, "ROOT", d), mock.patch.object(maya, "say"), \
+                        mock.patch.object(maya, "WIN", False), mock.patch.object(maya.os, "execv"):
+                    maya.after_server(rc, a)
+                self.assertFalse((d / ".maya-switch.json").exists(), rc)
+                self.assertFalse((d / models.SWITCH_FILE).exists(), rc)
 
     def test_switch_note_after_the_rename(self):
         """a switch note naming the old path of a config this very start renamed: saguaro.py follows it anyway"""

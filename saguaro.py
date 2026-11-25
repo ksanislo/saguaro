@@ -5261,21 +5261,23 @@ def after_server(rc: int, a) -> int:
     """The server ended: its exit code - or About > Updates moved this folder to a new release, and the new version
     starts: its saguaro.py compiles what changed in the engine and loads the same model (the most recently used, so no
     question)."""
+    # the Models page: another model to start (a switch), or this one with its new engine settings - the server's
+    # note says which config, on the port it listened on (so the page finds it again).  Only a restart reads it,
+    # and no note survives the server: a stray one (a crash between the write and the restart) is cleared on
+    # every exit, of either name family, as 1.2.1 cleared it.
+    notes = CN.note_paths(ROOT, SWITCH_FILE)      # (the 1.2.2 note name first; a .maya-switch.json note of
+    note = read_json(notes[0]) if notes and rc == RESTART_EXIT else {}   #  before the rename is read too)
+    for f in notes:
+        try:
+            f.unlink()
+        except OSError:
+            pass
     if rc not in (UPDATE_EXIT, RESTART_EXIT):
         return rc
     again = [sys.executable, str(HERE / "saguaro.py"), "--yes"]
     # (a new port from the dashboard: not this start's --port - the config's, which it saved, applies)
     port = None if rc == RESTART_EXIT else a.port
     backend, config = a.backend, getattr(a, "config", None)
-    # the Models page: another model to start (a switch), or this one with its new engine settings - the server's
-    # note says which config, on the port it listened on (so the page finds it again)
-    notes = CN.note_paths(ROOT, SWITCH_FILE) if rc == RESTART_EXIT else []
-    note = read_json(notes[0]) if notes else {}      # (the 1.2.2 note name first; a .maya-switch.json note of
-    for f in notes:                                  #  before the rename is read too) - read once, neither stays
-        try:
-            f.unlink()
-        except OSError:
-            pass
     why = None
     note_cfg = CN.resolve(Path(note["config"])) if note.get("config") else None   # (its path may be the old name
     if note_cfg is not None and note_cfg.is_file() and time.time() - float(note.get("time") or 0) < 600:          #  of
