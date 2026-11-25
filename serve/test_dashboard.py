@@ -884,8 +884,12 @@ const el = new Proxy({}, {get: (t, k) => (k in t ? t[k] : k === "dataset" || k =
 globalThis.navigator = {platform: "linux", userAgent: "node"};   // (lib.js' MOD: platform or user agent)
 globalThis.matchMedia = () => ({matches: false, addEventListener: noop, addListener: noop});
 globalThis.localStorage = {getItem: () => null, setItem: noop, removeItem: noop};
-globalThis.document = {documentElement: el, body: el, head: el, addEventListener: noop, querySelector: () => null,
-                       createElement: () => el};
+const docL = {};                                                   // (the document's listeners: a test can fire them)
+globalThis.document = {documentElement: el, body: el, head: el, hidden: false,
+                       addEventListener: (k, f) => { (docL[k] = docL[k] || []).push(f); },
+                       removeEventListener: (k, f) => { const a = docL[k] || [], i = a.indexOf(f); if (i >= 0) a.splice(i, 1); },
+                       querySelector: () => null, createElement: () => el};
+globalThis.fire = (k) => { for (const f of (docL[k] || []).slice()) f(); };   // (as the browser fires it on a tab change)
 globalThis.window = globalThis; globalThis.addEventListener = noop;
 globalThis.location = {href: "http://x/", hash: "", search: "", pathname: "/"};
 const web = process.argv[2];
@@ -1016,6 +1020,259 @@ console.log(JSON.stringify({tok, none: (() => { st.S.metrics = {}; return sv.kvB
         self.assertEqual(got["none"], 0)
         self.assertTrue(got["line"].startswith("\u2248 0.1 GB of RAM for the context"), got["line"])
         self.assertNotIn("GB", got["noguess"])
+
+    def test_behind_llama_swap_the_page_asks_running_not_the_model(self):
+        # under llama-swap EVERY request under /upstream/<id>/ loads the model (and evicts another from the card), so the
+        # Monitor's per-second /metrics keeps reloading it: while the model is not "ready" in llama-swap's own /running
+        # (the origin, it loads nothing) the page asks only that - no /metrics, no /health, no /mcp - and the Monitor
+        # shows the quiet unloaded state instead of the model's figures
+        got = self.node("""
+location.pathname = "/upstream/glm-5.3-flash/";
+st.S.health.model = "glm-5.3-flash"; st.S.health.supervisor = "llama-swap";
+const log = [];
+globalThis.fetch = async (u) => { log.push(u);
+  return {ok: true, status: 200, json: async () => u.endsWith("/running")
+    ? {running: [{model: "deepseek-v4.1-flash", state: "ready"}]} : {model: "glm-5.3-flash", live: {state: "idle"}}}; };
+await sv.poll(); sv.stopPoll();
+await sv.loadHealth(); await sv.loadMcp();
+console.log(JSON.stringify({log, conn: st.S.conn, metricsNull: st.S.metrics === null}));""")
+        self.assertEqual(got["log"], ["/running"])                    # (llama-swap's own, at the origin root)
+        self.assertEqual(got["conn"], "unloaded")
+        self.assertTrue(got["metricsNull"])
+
+    def test_running_says_ready_the_page_polls_and_coming_back_reloads_health(self):
+        # ready in /running: /metrics polled as before; and when the model is swapped out and back in, the page notices
+        # (its health, the model's facts, fetched once more as it returns)
+        got = self.node("""
+location.pathname = "/upstream/glm-5.3-flash/";
+st.S.health.model = "glm-5.3-flash"; st.S.health.supervisor = "llama-swap";
+const log = [];
+let ready = false;
+globalThis.fetch = async (u) => { log.push(u);
+  return {ok: true, status: 200, json: async () => u.endsWith("/running")
+    ? {running: ready ? [{model: "glm-5.3-flash", state: "ready"}] : []}
+    : u === "health" ? {model: "glm-5.3-flash", supervisor: "llama-swap"} : {model: "glm-5.3-flash", live: {state: "idle"}}}; };
+await sv.poll();                                                    // (off the card: only /running asked)
+const off = log.slice(), offConn = st.S.conn;
+ready = true;
+await sv.poll(); sv.stopPoll();                                     // (back: its health once, then the metrics again)
+console.log(JSON.stringify({off, offConn, log, conn: st.S.conn, metrics: !!st.S.metrics}));""")
+        self.assertEqual(got["off"], ["/running"])
+        self.assertEqual(got["offConn"], "unloaded")
+        self.assertEqual(got["log"], ["/running", "/running", "health", "metrics"])
+        self.assertEqual(got["conn"], "ok")
+        self.assertTrue(got["metrics"])
+
+    def test_a_hidden_tab_asks_nothing_in_every_setup(self):
+        # a hidden tab stops all polling - plain, and behind llama-swap; visible again it picks up at once
+        got = self.node("""
+const log = [];
+globalThis.fetch = async (u) => { log.push(u);
+  return {ok: true, status: 200, json: async () => u.endsWith("/running")
+    ? {running: [{model: "glm-5.3-flash", state: "ready"}]} : {model: "glm-5.3-flash", live: {state: "idle"}}}; };
+document.hidden = true;
+await sv.poll(); await sv.loadHealth(); await sv.loadMcp();         // (hidden: nothing asked at all)
+const hiddenPlain = log.slice();
+document.hidden = false;
+await sv.poll(); sv.stopPoll();                                     // (seen again: metrics as before)
+const shown = log.slice();
+location.pathname = "/upstream/glm-5.3-flash/";
+st.S.health.model = "glm-5.3-flash"; st.S.health.supervisor = "llama-swap";
+document.hidden = true;
+await sv.poll();                                                    // (behind llama-swap the same: nothing at all)
+console.log(JSON.stringify({hiddenPlain, shown, hiddenSwap: log.slice(), conn: st.S.conn}));""")
+        self.assertEqual(got["hiddenPlain"], [])
+        self.assertEqual(got["shown"], ["metrics"])
+        self.assertEqual(got["hiddenSwap"], ["metrics"])             # (nothing new while hidden, in either setup)
+        self.assertEqual(got["conn"], "ok")
+
+    def test_not_behind_llama_swap_polls_exactly_as_before(self):
+        # no supervisor (the usual single-server setup), or an /upstream/ path without one (another proxy): /metrics
+        # directly, as before - /running is never asked
+        got = self.node("""
+const log = [];
+globalThis.fetch = async (u) => { log.push(u);
+  return {ok: true, status: 200, json: async () => ({model: "glm-5.3-flash", live: {state: "idle"}})}; };
+await sv.poll(); sv.stopPoll();
+const plain = log.slice();
+location.pathname = "/upstream/glm-5.3-flash/";                     // (the path alone is not enough: health said no supervisor)
+st.S.health.supervisor = null;
+await sv.poll(); sv.stopPoll();
+console.log(JSON.stringify({plain, pathOnly: log.slice(), conn: st.S.conn}));""")
+        self.assertEqual(got["plain"], ["metrics"])
+        self.assertEqual(got["pathOnly"], ["metrics", "metrics"])
+        self.assertEqual(got["conn"], "ok")
+
+    def test_a_running_that_does_not_answer_polls_as_today_while_visible(self):
+        # an older llama-swap without /running (404) or a key it refuses (401): the page falls back to today's polling -
+        # but only while the tab is visible, and it stops the moment the tab is hidden
+        body = """
+location.pathname = "/upstream/glm-5.3-flash/";
+st.S.health.model = "glm-5.3-flash"; st.S.health.supervisor = "llama-swap";
+const log = [];
+globalThis.fetch = async (u) => { log.push(u);
+  return u.endsWith("/running") ? {ok: false, status: __CODE__, json: async () => ({})}
+                                : {ok: true, status: 200, json: async () => ({model: "glm-5.3-flash", live: {state: "idle"}})}; };
+await sv.poll(); sv.stopPoll();                                     // (__CODE__: metrics as today, after the failed /running)
+const shown = log.slice();
+document.hidden = true;
+await sv.poll();                                                    // (hidden: nothing at all, /running included)
+console.log(JSON.stringify({shown, hidden: log.slice(), conn: st.S.conn}));"""
+        for code in (404, 401):
+            with self.subTest(code=code):
+                got = self.node(body.replace("__CODE__", str(code)))
+                self.assertEqual(got["shown"], ["/running", "metrics"])
+                self.assertEqual(got["hidden"], ["/running", "metrics"])   # (nothing new once hidden)
+                self.assertEqual(got["conn"], "ok")
+
+    def test_a_tab_opened_hidden_loads_health_when_it_is_seen(self):
+        # (the review's finding 1: a page opened in a background tab - ctrl-click, "open in new tab", a restored
+        # session - used to lose the boot chain's first health with nothing to retry it: the gate never learned to
+        # close and the model's facts never loaded.  Seen again, the missed health loads and the gate engages)
+        got = self.node("""
+location.pathname = "/upstream/glm-5.3-flash/";
+const log = [];
+globalThis.fetch = async (u) => { log.push(u);
+  return {ok: true, status: 200, json: async () => u.endsWith("/running")
+    ? {running: [{model: "glm-5.3-flash", state: "ready"}]}
+    : {model: "glm-5.3-flash", supervisor: "llama-swap", live: {state: "idle"}}}; };
+document.hidden = true;
+await sv.loadHealth();                                              // (app.js' first health, tab opened hidden)
+const atOpen = log.slice();
+document.hidden = false; fire("visibilitychange");                  // (the user switches to the tab)
+await new Promise((ok) => setTimeout(ok, 50)); sv.stopPoll();
+console.log(JSON.stringify({atOpen, afterShow: log.slice(), supervisor: st.S.health.supervisor || null,
+                            first: log[0] || null}));""")
+        self.assertEqual(got["atOpen"], [])                         # (hidden at open: nothing asked)
+        self.assertTrue(got["first"].endswith("/running"))         # (the gate first: /health would load a model)
+        self.assertEqual(got["supervisor"], "llama-swap")           # (the facts loaded: the gate can engage now)
+        self.assertIn("metrics", got["afterShow"])                  # (and the ready model is polled again)
+
+    def test_a_revealed_tab_whose_model_is_swapped_out_asks_only_running(self):
+        got = self.node("""
+location.pathname = "/upstream/glm-5.3-flash/";
+const log = [];
+globalThis.fetch = async (u) => { log.push(u);
+  return {ok: true, status: 200, json: async () => ({running: [{model: "other", state: "ready"}]})}; };
+document.hidden = true;
+await sv.loadHealth();                                              // (tab opened hidden; its health is missed)
+document.hidden = false; fire("visibilitychange");
+await new Promise((ok) => setTimeout(ok, 50)); sv.stopPoll();
+console.log(JSON.stringify({log, conn: st.S.conn}));""")
+        self.assertTrue(got["log"] and all(u.endswith("/running") for u in got["log"]), got["log"])   # (nothing loaded)
+
+    def test_a_health_retry_landing_in_a_hidden_tab_is_made_up_when_seen(self):
+        # (the review's finding 2: health fails while the server starts, the tab hides before the 2 s retry fires -
+        # the chain used to die there: /health was never asked again.  It must retry the moment the tab is seen)
+        got = self.node("""
+const log = [];
+let down = true;
+globalThis.fetch = async (u) => { log.push(u);
+  if (u === "health" && down) throw new Error("nope");
+  return {ok: true, status: 200, json: async () => ({model: "glm-5.3-flash", live: {state: "idle"}})}; };
+await sv.loadHealth();                                              // (fails: the 2 s retry is armed)
+await new Promise((ok) => setTimeout(ok, 1000));
+document.hidden = true; fire("visibilitychange");
+await new Promise((ok) => setTimeout(ok, 2500));                    // (the retry fires in the dark: nothing asked)
+const whileHidden = log.filter((u) => u === "health").length;
+down = false; document.hidden = false; fire("visibilitychange");    // (seen again: the missed retry happens)
+await new Promise((ok) => setTimeout(ok, 100)); sv.stopPoll();
+console.log(JSON.stringify({whileHidden, total: log.filter((u) => u === "health").length,
+                            loaded: st.S.health.model === "glm-5.3-flash"}));""")
+        self.assertEqual(got["whileHidden"], 1)                     # (only the failed first try; the dark asked nothing)
+        self.assertEqual(got["total"], 2)                           # (seen again: the retry it lost, made up)
+        self.assertTrue(got["loaded"])                              # (and the model's facts are here at last)
+
+    def test_a_blip_on_running_keeps_the_gate_as_it_was(self):
+        # (the review's finding 3: /running answering a network error or a 500 is a blip, not "older llama-swap" -
+        #  answering no-gate then would fetch /metrics and load the model straight back.  A blip keeps the last
+        #  answer: a closed gate stays closed; a blip before any answer yet polls as today, visible-only as ever)
+        got = self.node("""
+location.pathname = "/upstream/glm-5.3-flash/";
+st.S.health.model = "glm-5.3-flash"; st.S.health.supervisor = "llama-swap";
+const log = [];
+let blip = false;
+globalThis.fetch = async (u) => { log.push(u);
+  if (u.endsWith("/running") && blip) throw new Error("no route");
+  return {ok: true, status: 200, json: async () => u.endsWith("/running")
+    ? {running: []} : {model: "glm-5.3-flash", live: {state: "idle"}}}; };
+await sv.poll();                                                    // (off the card: the gate closes)
+blip = true;
+await sv.poll();                                                    // (the blip: the closed gate must stay closed)
+blip = false;
+const blipped = log.slice(), blipConn = st.S.conn;
+await sv.poll(); sv.stopPoll();                                     // (and answering again, it behaves as before)
+console.log(JSON.stringify({blipped, blipConn, log, conn: st.S.conn}));""")
+        self.assertEqual(got["blipped"], ["/running", "/running"])  # (the blip asked /running only: no /metrics)
+        self.assertEqual(got["blipConn"], "unloaded")
+        self.assertEqual(got["log"], ["/running", "/running", "/running"])
+        self.assertEqual(got["conn"], "unloaded")
+        got = self.node("""
+location.pathname = "/upstream/glm-5.3-flash/";
+st.S.health.model = "glm-5.3-flash"; st.S.health.supervisor = "llama-swap";
+const log = [];
+globalThis.fetch = async (u) => { log.push(u);
+  return u.endsWith("/running") ? {ok: false, status: 500, json: async () => ({})}
+                                : {ok: true, status: 200, json: async () => ({model: "glm-5.3-flash", live: {state: "idle"}})}; };
+await sv.poll(); sv.stopPoll();                                     // (500 before any answer: no gate to keep, poll on)
+console.log(JSON.stringify({log, conn: st.S.conn}));""")
+        self.assertEqual(got["log"], ["/running", "metrics"])       # (nothing known yet: poll as today)
+        self.assertEqual(got["conn"], "ok")
+
+    def test_a_mcp_retry_landing_in_a_hidden_tab_is_made_up_when_seen(self):
+        # (the review's finding 6: the "servers starting" retry chain loadMcp arms every 3 s used to die when its
+        #  timer landed while the tab was hidden - same hole as the health retry, one floor down in the module)
+        got = self.node("""
+const log = [];
+let starting = true;
+globalThis.fetch = async (u) => { log.push(u);
+  return {ok: true, status: 200, json: async () => starting ? {servers: [{status: "starting"}], tools: 0}
+                                                             : {servers: [{status: "ready"}], tools: 2}}; };
+await sv.loadMcp();                                                 // (servers starting: the 3 s retry is armed)
+document.hidden = true; fire("visibilitychange");
+await new Promise((ok) => setTimeout(ok, 3500));                    // (the retry fires in the dark: parked, no ask)
+const whileHidden = log.filter((u) => u === "mcp").length;
+starting = false; document.hidden = false; fire("visibilitychange");   // (seen again: the chain it lost, made up)
+await new Promise((ok) => setTimeout(ok, 50)); sv.stopPoll();
+console.log(JSON.stringify({whileHidden, total: log.filter((u) => u === "mcp").length, tools: st.S.mcp.tools}));""")
+        self.assertEqual(got["whileHidden"], 1)                     # (the dark asked nothing new)
+        self.assertEqual(got["total"], 2)                           # (seen again: the dropped retry ran at last)
+        self.assertEqual(got["tools"], 2)                           # (and the servers' tools are known again)
+
+    def test_browsing_a_chat_behind_llama_swap_asks_no_token_count(self):
+        # (the review's finding 7: the context meter POSTs api/tokens under /upstream/ - an upstream request like
+        #  /metrics - so *opening or typing in* a chat loaded the model and softened the Monitor's "the next
+        #  message loads it".  While unloaded the meter keeps its local estimate; the count asks again once the
+        #  model is back on the card)
+        got = self.node("""
+location.pathname = "/upstream/glm-5.3-flash/";
+st.S.health.model = "glm-5.3-flash"; st.S.health.supervisor = "llama-swap";
+const ch = await import(web + "/chats.js");
+const log = [];
+let ready = false;
+globalThis.fetch = async (u) => { log.push(u);
+  return {ok: true, status: 200, json: async () => u.endsWith("/running")
+    ? {running: ready ? [{model: "glm-5.3-flash", state: "ready"}] : []}
+    : u === "api/tokens" ? {tokens: 1234}
+    : u === "health" ? {model: "glm-5.3-flash", supervisor: "llama-swap"} : {model: "glm-5.3-flash", live: {state: "idle"}}}; };
+await sv.poll();                                                    // (the model is off the card)
+st.S.current = ch.newChatObj();
+st.S.current.messages.push({role: "user", text: "hello there, how are you today"});
+ch.updateCtxMeter();                                                // (opening the chat: the meter wakes)
+await new Promise((ok) => setTimeout(ok, 500));
+const unloaded = {log: log.slice(), tokens: st.S.ctx.tokens, approx: st.S.ctx.approx};
+ready = true;
+await sv.poll();                                                    // (back on the card: health, metrics)
+ch.updateCtxMeter();
+await new Promise((ok) => setTimeout(ok, 500)); sv.stopPoll();
+console.log(JSON.stringify({unloaded, back: {tokens: st.S.ctx.tokens, approx: st.S.ctx.approx,
+                                             asked: log.includes("api/tokens")}}));""")
+        self.assertEqual(got["unloaded"]["log"], ["/running"])      # (browsing the chat asked nothing of the model)
+        self.assertTrue(got["unloaded"]["tokens"] > 0)              # (the meter still says a word: the local estimate)
+        self.assertTrue(got["unloaded"]["approx"])
+        self.assertTrue(got["back"]["asked"])                       # (back on the card: the real count, once)
+        self.assertEqual(got["back"]["tokens"], 1234)
+        self.assertFalse(got["back"]["approx"])
 
 
 if __name__ == "__main__":

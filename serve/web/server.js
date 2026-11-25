@@ -7,6 +7,10 @@ import {DEFAULTS, P, PENALTIES, S, THINKING, confirmDialog, emit, loadPrefs, mod
 let onHealth = () => {};
 export const whenHealth = (f) => { onHealth = f; };
 export async function loadHealth() {
+  // (a hidden tab asks nothing - but it remembers: seen again, it makes this health up, or a gate closed behind
+  //  llama-swap would never learn to open again and the model's facts would never load; a closed gate stays closed)
+  if (document.hidden) { healthWait = true; return; }
+  if (unloaded()) return;                      // (behind llama-swap /health would load the model: poll re-arms it)
   try {
     const h = await (await fetch("health")).json();
     S.health = h;
@@ -34,36 +38,82 @@ export async function loadHealth() {
     if (h.status === "reloading") watchReload();
     if (h.status === "updating" && !S.updateWatch) loadUpdate().then((u) => u && u.state && watchUpdate(u.state.to));
   } catch (e) {
-    setTimeout(loadHealth, 2000);
+    if (document.hidden) healthWait = true;                      // (a hidden tab stops the retries; seen again, it resumes)
+    else setTimeout(loadHealth, 2000);
   }
 }
+let healthWait = false;                       // (a health retry stopped by the tab being hidden)
 
 // ------------------------------------------------------------------ the live metrics (the Monitor, the status, the meter)
-let fails = 0, keyWarned = false, mcpTick = 0;
+let fails = 0, keyWarned = false, mcpTick = 0, timer = null, polling = false;
 export const reqAll = {on: false};       // the request table: the last 12, or every one the server keeps
-export async function poll() {
+
+// behind llama-swap (the page at /upstream/<id>/, health saying supervisor "llama-swap"), EVERY request under that
+// path LOADS the model - and evicts another one from the card - so one open Monitor tab's per-second /metrics keeps
+// reloading it.  llama-swap's own GET <root>running (the origin two levels up: it loads nothing) says which model is
+// ready; while ours is not, the page asks only that - every 5 s - and the Monitor shows a quiet unloaded state.
+// And in every setup a hidden tab asks nothing at all: visible again, the polls pick up where they stopped.
+const swapAt = () => { const m = (location.pathname || "").match(/^(.*\/)upstream\/([^/]+)/);
+                       return m && {root: m[1], id: decodeURIComponent(m[2])}; };
+let swapReady = null;                    // (true ready, false swapped out (the gate), null: no gate - not behind
+                                         //  llama-swap, or its /running does not answer (404, a key refused): poll as today)
+export const unloaded = () => swapReady === false;
+export const stopPoll = () => clearTimeout(timer);
+
+async function swapRunning(swap, was) {  // llama-swap's {"running": [{model, state}]}: loads nothing itself
   try {
-    const r = await fetch(reqAll.on ? "metrics?requests=all" : "metrics", {headers: headers()});
-    if (r.status === 401) {
-      S.conn = "key";
-      if (!keyWarned) { keyWarned = true; toast("warn", "API key needed", "This server needs a key: add it in Settings › Connect your tools.", 6000); }
-    } else if (r.ok) {
-      S.metrics = await r.json();
-      S.conn = "ok";
-      fails = 0;
-      const rl = S.metrics.reload;
-      if (rl && (rl.state === "waiting" || rl.state === "running")) watchReload();
-    } else {
-      throw new Error(`HTTP ${r.status}`);
-    }
-  } catch (e) {
-    if (++fails >= 3) S.conn = "down";
-  }
-  if (!document.hidden) emit();
-  if ((S.view === "monitor" || S.settings === "tools") && ++mcpTick % 10 === 0) loadMcp();   // (they change rarely: every 10 s)
-  setTimeout(poll, document.hidden ? 5000 : 1000);               // a hidden tab looks five times less often
+    const r = await fetch(`${swap.root}running`, {headers: headers()});
+    // an older llama-swap without /running (404) or a key it refuses (401, 403): poll as today
+    if (r.status === 404 || r.status === 401 || r.status === 403) return null;
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return ((await r.json()).running || []).some((x) => x.model === swap.id && x.state === "ready");
+  } catch (e) { return was; }            // (a blip, not "no gate": one opening the closed gate would load the model back)
 }
-document.addEventListener("visibilitychange", () => { if (!document.hidden) emit(); });
+
+export async function poll() {
+  clearTimeout(timer);
+  if (document.hidden || polling) return;                       // (hidden: nothing asked; one poll at a time)
+  polling = true;
+  try {
+    const swap = swapAt();
+    const was = swapReady;
+    swapReady = swap && (S.health.supervisor === undefined || S.health.supervisor === "llama-swap") ? await swapRunning(swap, was) : null;
+    if (swapReady === false) {
+      if (was !== false) { S.metrics = null; S.conn = "unloaded"; emit(); }   // (the Monitor's quiet unloaded state)
+      timer = setTimeout(poll, 5000);                           // (/running alone, until the model is back on the card)
+      return;
+    }
+    if (was === false && swapReady === true) loadHealth();     // (swapped back in: its model's facts once more)
+    try {
+      const r = await fetch(reqAll.on ? "metrics?requests=all" : "metrics", {headers: headers()});
+      if (r.status === 401) {
+        S.conn = "key";
+        if (!keyWarned) { keyWarned = true; toast("warn", "API key needed", "This server needs a key: add it in Settings › Connect your tools.", 6000); }
+      } else if (r.ok) {
+        S.metrics = await r.json();
+        S.conn = "ok";
+        fails = 0;
+        const rl = S.metrics.reload;
+        if (rl && (rl.state === "waiting" || rl.state === "running")) watchReload();
+      } else {
+        throw new Error(`HTTP ${r.status}`);
+      }
+    } catch (e) {
+      if (++fails >= 3) S.conn = "down";
+    }
+    emit();
+    if ((S.view === "monitor" || S.settings === "tools") && ++mcpTick % 10 === 0) loadMcp();   // (they change rarely: every 10 s)
+    timer = setTimeout(poll, 1000);
+  } finally { polling = false; }
+}
+document.addEventListener("visibilitychange", async () => {
+  if (document.hidden) { clearTimeout(timer); return; }           // (hidden: every poll stops, in every setup)
+  const swap = swapAt();                                          // (the gate first: /health or /metrics would load the model)
+  if (swap && (S.health.supervisor === undefined || S.health.supervisor === "llama-swap")) swapReady = await swapRunning(swap, swapReady);
+  if (healthWait) { healthWait = false; loadHealth(); }           // (seen again: it picks up at once, and makes up
+  if (mcpWait) { mcpWait = false; loadMcp(); }                    //  any health or mcp retry the dark swallowed)
+  poll();
+});
 
 // ------------------------------------------------------------------ Monitor figures that are computed (unit-tested)
 // The Speculation card: which drafters the engine runs with (the server's engine.speculation, empty: none) and how many of
@@ -119,8 +169,10 @@ export function tierShares(n, eng = {}) {
 // ------------------------------------------------------------------ MCP servers (GET /mcp)
 // Tools from the MCP servers in the run config: the chat offers them to the model (opt-in per request, "strata_mcp":
 // true, which only this page sends); Settings lists the servers and what they offer.
-let mcpRetry = null;
+let mcpRetry = null, mcpWait = false;      // (a loadMcp a hidden tab dropped: parked, made up when the tab is seen)
 export async function loadMcp() {
+  if (document.hidden) { mcpWait = true; return; }   // (asks nothing in the dark; seen again, it picks the chain up)
+  if (unloaded()) return;                            // (behind llama-swap /mcp would load the model)
   try {
     const r = await fetch("mcp", {headers: headers()});
     if (!r.ok) return;

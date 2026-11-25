@@ -3,7 +3,7 @@
 // attachments, the context meter and the Markdown export.
 import {SPRITE, api, coarse, ctxfmt, db, download, fmt, headers, store, uid} from "./lib.js";
 import {P, PENALTIES, S, confirmDialog, defaultSystem, emit, levelFor, modelId, promptDialog, toast} from "./state.js";
-import {mcpOn} from "./server.js";
+import {mcpOn, unloaded} from "./server.js";
 import {turboOfChat} from "./turbo-core.js";
 
 // ------------------------------------------------------------------ the chats' list
@@ -286,7 +286,16 @@ export function updateCtxMeter() {
   if (liveCtx()) return;
   const msgs = draftChat();
   if (!msgs.length) { ctxKey = null; S.ctx = {tokens: null, approx: false, why: ""}; emit(); return; }
+  if (unloaded()) {                                  // (behind llama-swap api/tokens would load the model as much as
+    if (S.ctx.tokens == null) {                      //  /metrics did - but *browsing* chats, or the health hook, must
+      ctxKey = null;                                 //  keep the "the next message loads it" promise: the local
+      S.ctx = {tokens: estimateTokens(msgs), approx: true, why: "This chat"};   //  estimate stands until the gate opens)
+      emit();
+    }
+    return;
+  }
   ctxTimer = setTimeout(async () => {
+    if (unloaded()) return;                          // (the gate closed while this was pending: do not ask after all)
     const c = S.current;
     const body = {messages: apiMessages(c, msgs, true), reasoning_effort: thinkingOf(c)};
     if (mcpOn()) body.strata_mcp = true;
@@ -367,8 +376,12 @@ function answerMeta(m, n, secs) {
   const s = parts.join(" · ");   // ("Stopped", not "stopped", when nothing comes before it: a stop has no usage)
   return s && s[0].toUpperCase() + s.slice(1);
 }
+// wait out `ms` between reconnects - but in a hidden tab it waits until the tab is SEEN again: behind llama-swap every
+// reconnect under /upstream/ is an upstream request, and the plan asks nothing of a tab nobody looks at (the answer
+// stays on the server meanwhile: strata_resume takes it up from the last chunk, as it does after a reload)
 const sleepOrVisible = (ms) => new Promise((ok) => {
-  const go = () => { document.removeEventListener("visibilitychange", go); clearTimeout(tm); ok(); };
+  const go = () => { if (document.hidden && unloaded()) return;   // (the dark, the model swapped out: nothing asked, it waits for the light)
+                     document.removeEventListener("visibilitychange", go); clearTimeout(tm); ok(); };
   const tm = setTimeout(go, ms);
   document.addEventListener("visibilitychange", go);
 });

@@ -833,6 +833,7 @@ export function MonitorPage() {
         <${Requests} m=${m}/>`
       : html`<div class="card mon__wait">${S.conn === "down" ? "The server is not reachable. It may be starting, or stopped."
                                         : S.conn === "key" ? "This server needs its API key: add it in Settings › Connect your tools."
+                                        : S.conn === "unloaded" ? "Unloaded - the next message loads it. llama-swap keeps one model on the card."
                                         : "Waiting for the first reading…"}</div>`}
     </div></div>
   </main>`;
