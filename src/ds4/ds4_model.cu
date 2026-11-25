@@ -4552,7 +4552,7 @@ struct Model::Impl {
             if (d.late > 0) {
                 const double give = std::min((double) d.late, need - room);
                 const size_t left = (size_t) (((double) d.late - give) / (double) vramlate::kStep) * (size_t) vramlate::kStep;
-                std::fprintf(stderr, "ds4: CUDA%d keeps %zu instead of %zu MiB free beside the %lld MiB reserve: the dense "
+                std::fprintf(stderr, "saguaro ds4: CUDA%d keeps %zu instead of %zu MiB free beside the %lld MiB reserve: the dense "
                                      "weights need the room\n", d.id, left >> 20, d.late >> 20, (long long) o.reserve_mib);
                 d.late = left, d.late_room = 0;
                 room = (double) d.free0 - (double) keep_b(d);
@@ -5070,7 +5070,7 @@ struct Model::Impl {
                 f = std::fopen(from.c_str(), "rb");
             }
             if (f == nullptr) {
-                std::fprintf(stderr, "ds4: no expert profile (%s not found): VRAM starts with the experts in their order, "
+                std::fprintf(stderr, "saguaro ds4: no expert profile (%s not found): VRAM starts with the experts in their order, "
                                      "not the most-routed first\n", o.profile.c_str());
             } else {
                 std::vector<uint32_t> p(prof.size());
@@ -5079,13 +5079,13 @@ struct Model::Impl {
                 if (n == p.size() || n == (size_t) g.nl * g.n_exp) {
                     std::copy(p.begin(), p.begin() + (long) n, prof.begin());
                     if (from == o.profile)
-                        std::fprintf(stderr, "ds4: expert profile %s\n", from.c_str());
+                        std::fprintf(stderr, "saguaro ds4: expert profile %s\n", from.c_str());
                     else
-                        std::fprintf(stderr, "ds4: expert profile %s (the shipped one: %s does not exist yet%s)\n",
+                        std::fprintf(stderr, "saguaro ds4: expert profile %s (the shipped one: %s does not exist yet%s)\n",
                                      from.c_str(), o.profile.c_str(),
                                      o.profile_readonly ? "" : "; what this run learns is saved there if it can be written");
                 } else {
-                    std::fprintf(stderr, "ds4: expert profile %s ignored: %zu counts, this model takes %zu (%d layers x %d "
+                    std::fprintf(stderr, "saguaro ds4: expert profile %s ignored: %zu counts, this model takes %zu (%d layers x %d "
                                          "experts%s)\n", from.c_str(), n, prof.size(), g.nl + g.n_mtp, g.n_exp,
                                  g.n_mtp > 0 ? ", or the trunk's alone" : "");
                 }
