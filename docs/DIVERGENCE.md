@@ -21,7 +21,109 @@ is the subtree of the live Strata tree 82c389f5e + server 0c800169d (ref/live-st
 
 ## GLM
 
-_(step 4)_
+The upstream GLM-5.3-Flash engine (saguaro-glm) with our parallel-conversation, CPU-lane and VRAM work on top.
+Biggest first.
+
+1. **Turbo: drop N of the routed experts while decoding.** Why: on a card whose experts stream from RAM/SSD the decode
+   is bound by moving experts, not by arithmetic. Where: the engine's `res_k` route limit in
+   `src/kernels/cuda/glm_fast.cu` (`SAGUARO_GLM_RESIDENT_TOPK` read there) and the per-request path in
+   `src/core/glm_window.cu`; the request key comes from `serve/turbo_live.py`.
+   Switch and default: per request `"turbo": {"drop": N}` (off), engine-wide `SAGUARO_GLM_RESIDENT_TOPK=5`; decode
+   only, prompt reads stay exact. Gain (RX 9070 XT): Maya-L +66 % (8.45 -> 13.85 tok/s), Maya-S +29 %
+   (ref/reports/REPORT-mortar-glm.md:27-28). Answer-changing: KL 0.192 (5x the engine's own floor) on Maya-L, and
+   GPQA-Diamond lost no accuracy (70.7 % vs 66.7 %, p 0.29) but answers loop more (13 -> 21 cut-offs;
+   ref/reports/REPORT-mortar-glm.md:46, 132-149).
+2. **Per-conversation shadow LRU caches with background expert moves.** Why: a conversation's next turn wants the
+   experts its own earlier turns used, which the global LRU drops. Where: `conv_shadow_set()` and
+   `Glm5Model::fast_boundary()` in `src/core/glm_fast_path.cu`. Switch and default (the live "sh50" set,
+   ref/ROLLBACK.md:256): `SAGUARO_GLM_CONV_SHADOW=1` with `SAGUARO_GLM_CONV_EXPERTS`,
+   `SAGUARO_GLM_CONV_PREFETCH_RATE=50`, `SAGUARO_GLM_TAB_ZC=1`, all off by default.
+   Gain: solo +12.9 %, the switch (A resuming after B) +4.8 % on its first 256 tokens, beside +1.7 %, n2 +0.9 %,
+   long late -0.1 % (ref/PERF-LEDGER.md:849-852). Answer-changing at the placement level (KL 0.0087 vs a placement
+   reference 0.0105); no dropped compute.
+3. **AVX1 multi-token CPU-lane rows (IQ2_XXS/XS/S, IQ3_XXS/S, Q5_K, IQ4_XS).** Why: our live host has AVX but no AVX2,
+   and ggml's dots waste it. Where: `iq128_rows()` in `src/kernels/cpu/iq_avx1.cpp`, the shared kernels in
+   `include/maya/kernels/cpu/iq_avx1_kern.inc` (also DeepSeek's lane and hy4). Switch and default: on where the CPU is
+   AVX1-only; `SAGUARO_NO_IQ128=1` keeps ggml's dots (`src/kernels/cpu/native_expert.cpp:118`).
+   Gain: ~+10 % (ref/live-stack-notes.md:73). Exact (the 931-case test says 0 differ from ggml's dot).
+4. **Prompt CPU-lane gate 2.0 -> 1.** Why: with the old gate the lane refused prompt experts on PCIe that was only
+   ~1.4x slower than computing them. Where: the `pf_cpu_gate` lambda in `Glm5Model::prefill_half`,
+   `src/core/glm_prefill.cu`. Switch and default: `SAGUARO_GLM_PREFILL_CPU_GATE`, default 2; live 1.
+   Gain: long reads 597 -> 650 tok/s (+8.9 %), J/read -8.6 %, n2 decode flat (ref/PERF-LEDGER.md:39); host energy
+   +-0 % - the lane burns what the cards save (ref/PERF-LEDGER.md:495). Exact (a planning choice).
+5. **RAM-tier row halves (each RAM slot's rows split across the two NUMA nodes).** Where: `numa_pinned()` /
+   `row_halves_of` in `src/core/glm_fast_path.cu`. Switch and default: `SAGUARO_GLM_ROW_HALVES=1`, off by default,
+   on in the live config since 11-03 (ref/ROLLBACK.md:128-132). Gain: +5..10 % decode
+   (ref/live-stack-notes.md:73). Exact.
+6. **Prompt read chunk 4096 (was 2048) and the graded-chunk read ramp OFF.** Why: with a CPU lane the fill/drain
+   bubble at the start and end of a solo read costs more than the smaller chunks save. Where: `prefill_mode()` (the
+   chunk knob) and the ramp in `Glm5Model::prefill_run`, `src/core/glm_prefill.cu`.
+   Switch and default: `SAGUARO_GLM_PREFILL_CHUNK` (live 4096),
+   `SAGUARO_GLM_PREFILL_RAMP=0` + `SAGUARO_GLM_PREFILL_RAMP_MIN=64` (live; ramp on with min 64 is the upstream
+   default). Gain: chunk 4096 -13 % on a 65K read, decode -1 % (noise); ramp off -9 % / -14 % / -24 % at
+   65K / 22K / 11K, paid by a short request landing mid-read waiting 38.8 vs 32.4 s to its first token
+   (ref/PERF-LEDGER.md:210, 247; accepted losses ref/PERF-LEDGER.md:193-194). Exact.
+7. **Even layer split 11,22,33 instead of the auto 14/12/10/9.** Where: `Glm5Model::load_pack_place`,
+   `src/core/glm_model.cu`. Switch and default: `SAGUARO_GLM_SPLIT` (live "12,23,34" since 11-18 with the tail thread;
+   0 forces one part). Gain: 65K read -10 %, decode same, idle even 15-25 % (ref/PERF-LEDGER.md:205). Exact.
+8. **Prestage 64 expert slots on a layer split (off by default there).** Where: the prestage ring in
+   `Glm5Model::prefill_setup`, `src/core/glm_prefill.cu`. Switch and default: `SAGUARO_GLM_PRESTAGE=64`
+   (live; default 0 when the layers are split). Gain: 65K 88.3 vs 92.1 s, 22K 38.7 vs 41.4, 11K 23.3 vs 26.0, solo
+   decode -1.6 % (inside 2 %, and later judged likely noise - the pools are identical at 0 and 64)
+   (ref/PERF-LEDGER.md:245, 192). Exact.
+9. **Load: the RAM arena faulted in by many threads, and the cards' pins unchained.** Where: `arena_par_threads()` /
+   `numa_pinned()` in `src/core/glm_fast_path.cu`. Switch and default: `SAGUARO_GLM_ARENA_PAR=1` (code default off,
+   on in the live config; `SAGUARO_GLM_ARENA_THREADS` for the count). Gain: load 141-157 -> 81 s
+   (ref/PERF-LEDGER.md:418, ref/ROLLBACK.md:28). Exact.
+10. **Slot save/take for all parts at once, through a reused pinned buffer, written in the background.**
+    Where: `slot_fast_on()` and the slot writer in `src/core/glm_fast_path.cu`, the file writes in
+    `src/program/generate.cpp`. Switch and default: `SAGUARO_GLM_SLOT_FAST=1` with `SAGUARO_GLM_SLOT_FAST_PIN_MB`
+    (4096) / `_QUEUE_MB` (8192), off by default, on in the live config (ref/ROLLBACK.md:27).
+    Gain: small saves 115-168 ms -> 7 ms warm, 0.15 GB in 45 ms, ~0.9 s/GB off the switch's time-to-first-token
+    (ref/PERF-LEDGER.md:419-420). Exact (a first try was rolled back for breaking the elastic release, not for the
+    slot path).
+11. **The CPU lane's pool at 20 threads and only on CUDA0/3 for prompts.** Why: the lane saturates past 16 and its
+    copies contend with the cards that stream experts. Where: `Glm5Model::fast_cpu_lane_setup` and
+    `prompt_cpu_dev_ok()` in `src/core/glm_prefill.cu`. Switch and default: `SAGUARO_GLM_CPU_LANE=20` and
+    `SAGUARO_GLM_PREFILL_CPU_DEVS=0,3` (live; all cards and 16 before), timings kept in
+    `/opt/llm/var/<model>/cpu-lane-cal.txt` via `SAGUARO_GLM_CPU_CAL`.
+    Gain: 2-chat decode +2.15 % from 16 -> 20 threads (reads -0.4 %); DEVS=0,3 long reads 654 -> 674 tok/s (+3.1 %),
+    host J -4.1 % (ref/PERF-LEDGER.md:43, 41). Exact.
+12. **Spec decode: the MTP tail enqueued on a second host thread (with split 12,23,34).** Where:
+    `Glm5Model::decode_spec` in `src/core/glm_fast_path.cu`. Switch and default:
+    `SAGUARO_GLM_SPEC_TAIL_THREAD=1` (off by default, on live since 11-18; ref/ROLLBACK.md:257).
+    Gain: solo +2.7 % (under the +3 bar), beside +4.6 %, 65K read -5.4 % at split 11,23,34 - shipped at 12,23,34
+    where reads were fixed (+0.6 %) and the decode gain fell to +1.2 %, on Ken's "ship the small wins that are ready"
+    (ref/PERF-LEDGER.md:317-328). Exact, KL at the floor.
+13. **Several conversations at once with elastic contexts, reads beside a decode, and checkpoints across chats.**
+    Where: `Glm5Model::seq_alloc_arenas` (`src/core/glm_multi.cu`), the elastic budget in `src/program/generate.cpp`,
+    `prefill_begin()` in `src/core/glm_prefill.cu`. Switch and default: `--parallel N` sets
+    `SAGUARO_GLM_SEQS` (+ `SAGUARO_GLM_SEQ_CTX`), `SAGUARO_GLM_ELASTIC=1`,
+    `SAGUARO_GLM_PREFILL_BESIDE=1024`, `SAGUARO_GLM_MULTI_CKPTS=1`; elastic and beside are off under
+    `--kv-streaming` (ref/live-stack-notes.md:73-84). Gain: 8 conversations of up to 262K on four T4s, a prompt read
+    beside running chats; the A/B numbers are in the upstream-intake ledgers, not measured as one change here.
+    Exact per conversation.
+14. **The tier fix (an expert promoted twice) plus a verifier, and the shadow-move audit.** Why: our shadow /
+    `CONV_PREFETCH` moves could make a promoted expert be computed with another expert's weights.
+    Where: `fast_boundary()` in `src/core/glm_fast_path.cu` (c38b9747). Switch and default:
+    `SAGUARO_GLM_TIER_VERIFY=1` is a debug check, off by default (ref/PERF-LEDGER.md:67-68).
+    Gain: no speed claim (a correctness fix); with the verifier on, 0 stale / double / wrong entries on all cards.
+15. **Upstream's GLM decode graphs, pinned OFF on our live profile.** Where: `kda_graph_wanted()` and
+    `src/core/glm_layer_graphs.hpp`. Switch and default: upstream v1.1.75 turns them on by default on NVIDIA; our
+    GLM config sets `SAGUARO_GLM_KDA_GRAPH=0` (ref/live-stack-notes.md:26-27). Gain: measured flat on T4 -
+    14.8-16.5 tok/s in both arms - and prefetch / lookahead switch them off anyway, and our config enables
+    `CONV_PREFETCH` (ref/reports/REPORT-upstream-v1.1.75.md:150-157). Exact either way.
+16. **Not taken, and the near-misses we keep warm.**
+    - The FP16 tensor-core prompt path (`STRATA_GLM_FP16TC` on branch pr/glm-fp16tc, not in this tree): reads
+      +2.0..2.6 %, n2 -1.7 %, KL at the cap (0.0101 vs off 0.0094, every on-arm below every off-arm), no site carries
+      the shift at n=1 - parked (ref/PERF-LEDGER.md:271-281, 540-548).
+    - `SAGUARO_GLM_MULTI_BOUNDARY=8`: n2-n4 +4.0 % but beside -4.5 % and mean TTFT +1.5 % FAIL (ref/PERF-LEDGER.md:836-838).
+    - Upstream's GLM "same answers on every start" was **not ported**: it needs four earlier upstream mechanisms
+      (~a day) and costs prompt reads on every request (upstream measured 2-3 % on 3x V100, ~5 % on a Radeon APU;
+      our cost not measured) for reproducibility, not speed (ref/reports/REPORT-upstream-v1.1.75.md:11-21).
+    - Upstream's GLM tensor parallel was **not taken**: it needs every expert slice in VRAM, which GLM-5.3 does not
+      fit on four T4s, and it is built on glm-dsa code we do not carry
+      (ref/reports/REPORT-upstream-v1.1.75.md:104-105).
 
 ## DS4
 
@@ -41,7 +143,111 @@ _(step 4)_
 
 ## QFN
 
-_(step 2)_
+engines/qfn is our own port of Strata (its own CMake project; `serve/qfn_engine.py` is generated from
+`engines/qfn/serve/server.py` by `tools/saguaro/extract_qfn_engine.py`). Biggest first.
+
+1. **The sm_75 exact kernel stack.** Why: the T4s are our live box and upstream's kernels leave 3-4x on the table there.
+   Where: `engines/qfn/src/core/nv_defaults.cpp:nv_default_env` (the umbrella), `kql_bits()` in
+   `src/kernels/cuda/iq_kernels.cu`, `q8g_on()` in `src/kernels/cuda/native_mmvq.cu`, `gdn_keyhead_ok()` and
+   `argmax` rows in `src/prefill/kernels.cu` / `src/kernels/cuda/verify_kernels.cu`.
+   Switch and default: `SAGUARO_SM75_PERF=1` turns the family on with `SAGUARO_SM75_STACK`, `SAGUARO_KQL=3`,
+   `SAGUARO_SM75_Q8G`, `SAGUARO_GDN_KEYHEAD`, `SAGUARO_ARGMAX_ROWS_SM70`; all off without it; live configs set them
+   (ref/live-stack-notes.md:68). Gain: Q4 ~4x / Q8 ~3.7x faster than llama.cpp (ref/live-stack-notes.md:65). Exact.
+2. **Piped MTP drafting up to 4 decoding conversations, plus a Lamina draft layer.** Why: multi-chat decode.
+   Where: `engines/qfn/src/program/generate.cpp:main` (the switch), the MTP layer from `tools/mtp_from_gguf.py`.
+   Switch and default: `SAGUARO_PIPED_MTP_MAX=4` (engine default 2); live on Q4 and Q8.
+   Gain: 4 chats +29 % (Q4) / +16 % (Q8), Lamina +0..7 % (ref/PERF-LEDGER.md:228). Exact.
+3. **The prompt-MMQ stack: K-quant MMQ + in-place resident experts + K-tail skip + fused SwiGLU/q8_1.**
+   Why: the prompt path gathered every routed expert into group buffers and ran K=640 as 768.
+   Where: `direct_mode()` in `engines/qfn/src/prefill/moe_mmq.cu`, `src/prefill/mmq_kq_loader.cpp`,
+   `src/prefill/moe_mmq_tab.cuh` (KTAIL). Switch and default: `SAGUARO_MMQ_KQ=1`, `SAGUARO_MMQ_DIRECT=1`,
+   `SAGUARO_MMQ_KTAIL=1`, `SAGUARO_MMQ_SWIGLU_Q8=1`, off by default; live on Q4 (all) and Q8 (with
+   `--vram-reserve-mib 689 / -later 687`). Gain: Q4 all reads +2.63 %, solo 99.98 %, n2 100.00 %
+   (ref/PERF-LEDGER.md:583-587); Q8 +1.40 % (ref/PERF-LEDGER.md:756). Exact (KL 0, 0 flips; the tab library is ABI 2,
+   binary + `libstrata_kq.so` + `libstrata_kq_tab.so` are one set).
+4. **The QSA select scorer on Turing tensor cores (FP16 hi/lo).** Why: the FP32 warp scorer is 10 % of a read and the
+   3xTF32 path refuses sm_75. Where: `scores_halve_on()` in `engines/qfn/src/kernels/cuda/qsa_select.cu`.
+   Switch and default: `SAGUARO_SELECT_SM75=1`, default off, **on in the live configs** (shipped 11-11).
+   Gain: reads +3.9 %, J/read -3.7 %, n2 +3.4 %, scorer 3.3x, select stage 12.9 -> 7.9 ms per 8K/256q
+   (ref/PERF-LEDGER.md:36-37, 453). Answer-changing (near-ties): top-1 97.01 %, conf 99.79 %, KL 0.0059, PPL +0.07 %.
+5. **Multi-conversation batch engine, elastic slots and elastic K/V.** Why: upstream serves one conversation; we run
+   1-2 chats at a time on 4 T4s. Where: `host_elastic_on()` in `engines/qfn/src/core/layer.cpp`, the elastic
+   slot/budget code in `src/program/generate.cpp`. Switch and default: `SAGUARO_KV_HOST_ELASTIC` and
+   `SAGUARO_KV_VRAM_ELASTIC` default on with elastic slots, `SAGUARO_ELASTIC_IDLE=1 _S=300` in the configs
+   (ref/ROLLBACK.md:95). Gain: 2 chats +40 % on the live T4 Q4 (ref/reports/REPORT-qwen-engines.md:101). Exact per
+   conversation; batched decode is not bit-identical to solo.
+6. **Conversations persisted to disk, parked in RAM, and a faster park/load.** Why: llama-swap unloads a model between
+   chats, so a resumed conversation must not re-read. Where: `park_fast()` in
+   `engines/qfn/src/core/conversation_copy.hpp`, `SAGUARO_PARALLEL_LOAD_REGISTER` in `src/core/expert_source.cpp`.
+   Switch and default: `--session-dir <dir>` (no default), `SAGUARO_PARK_FAST=1`,
+   `SAGUARO_PARALLEL_LOAD_REGISTER=overlap`; live on both QFN profiles (ref/ROLLBACK.md:45).
+   Gain: park 1.39-1.51 -> 0.97-1.10 s (~0.4 s), warm load ~0.3 s over a 5 s fill (ref/PERF-LEDGER.md:424-425). Exact
+   ("same bytes"; a session saved by an older engine version is not read).
+7. **Elastic YaRN: 1M context, each conversation moved to YaRN only when it passes 262144.** Why: one box serving both
+   short and 1M chats without paying YaRN's accuracy cost on short ones. Where:
+   `engines/qfn/src/program/generate.cpp:main`. Switch and default: `SAGUARO_YARN_ELASTIC=1` with
+   `--rope-scaling yarn --rope-scale 4 --yarn-orig-ctx 262144`; live on Q4 and Q8 (ref/ROLLBACK.md:72-74).
+   Gain: not measured as a speed change (a capability). Answer-changing for the one conversation that crosses the
+   threshold; pictures move with it.
+8. **Batch wrap-spill: what the engine generated past a budget's stop is kept instead of re-read.** Why: a wrapped-up
+   answer's continuation re-read the whole conversation (31.8 s gap on a 22.8K conversation).
+   Where: `serve/qfn_engine.py` (generated; `BATCH_WRAP_SPILL`) from `engines/qfn/serve/server.py`.
+   Switch and default: `SAGUARO_BATCH_WRAP_SPILL=1`, off; live on the Q8_0 profile only (ref/ROLLBACK.md:267).
+   Gain: wrap gap 36.7 s -> 0.97 s, 14/15 continuations clean (ref/PERF-LEDGER.md:759-763). Exact.
+9. **Route tail skip (drop the 7th-9th of 10 routed experts in decode) - measured and left OFF.**
+   Where: `tail_skip_rank()` in `engines/qfn/src/core/expert_source.cpp`. Switch and default:
+   `SAGUARO_ROUTE_TAIL_SKIP=7` to turn on; the engine's own rank-7 default is disabled by `--batch 8`, so live runs
+   with it off (ref/PERF-LEDGER.md:632-635, 688). Gain if on: Q8 solo +13.8 %, Q4 +2.1 % - and KL 0.0110 at parallel 1,
+   several times that in live-shaped batch windows; GPQA-Diamond showed no accuracy difference (178/198 both arms).
+   Closed 11-15 (ref/PERF-LEDGER.md:647-689). Answer-changing.
+10. **The BF16 -> tensor-core prompt path, with a skip list that the KL harness justified.** Why: the T4's cuBLAS runs
+    BF16 without tensor cores. Where: `bf16_path()` in `engines/qfn/src/prefill/gemm.cu`.
+    Switch and default: `SAGUARO_BF16_TC=1` with `SAGUARO_BF16_TC_SKIP=indexer,router,ssm` (live).
+    Gain: the skip list is the cost side - router alone on TC gives top-1 96.91 %, all three 96.58 %, below the 96.24 %
+    bar (ref/PERF-LEDGER.md:451-452). Answer-changing; the skip list stays.
+11. **GDN chunked recurrence ported to Turing - correct, parked by the 70 W cap.** Where: `gdn_conv()` in
+    `engines/qfn/src/prefill/kernels.cu`. Switch and default: `SAGUARO_GDN_CHUNKED_SM75=1`, off.
+    Gain: the kernel 1.74-2.0x and its own phase 13.8 -> 8.3 s per 77K read, the read flat (+0.7 %; 2K +0.61 %,
+    8K +1.2 %) because long reads are power-capped, and short/medium means are under the +2 % bar
+    (ref/PERF-LEDGER.md:283-287, 456-465, 610-613). Answer-changing (FP16 hi/lo, KL 0.0061, top-1 96.78 %).
+12. **CPU expert pool: the per-socket split stayed off; `--pool-workers 19` only on Q4.** Where:
+    `ExpertPool::ExpertPool` in `engines/qfn/src/kernels/cpu/pool.cpp`. Switch and default:
+    `SAGUARO_NUMA_POOL` (auto by placement; `=0` off - live uses the default one-socket pool on Q8).
+    Gain: none - both tries lost: -7..-10 % (10-22) and 2 chats -11 % with `--pool-workers 19` on Q8, where it is noise
+    on Q4, so Q4 keeps 19 workers and Q8 keeps the 9-worker default (ref/PERF-LEDGER.md:859-863).
+13. **RDNA4 (RX 9070 XT): the shared CUDA-to-HIP layer, register warp sums, and the RAM tier sized by the setup.**
+    Where: `include/maya/hip_compat` (QFN's own copy deleted; the CMake path `SAGUARO_HIP_COMPAT_DIR`,
+   `engines/qfn/cmake/hip_backend.cmake:96`, for a tree built alone),
+    `warp_sum()` in `engines/qfn/src/kernels/cuda/iq_kernels.cu`, the arch defaults in
+    `src/core/arch_defaults.cpp`, `resident_budget_gib()` in `tools/qfn_fit.py`.
+    Switch and default: HIP build via `-DSAGUARO_QFN=ON` / `tools/qfn/build_hip.sh`; `--resident-budget-gib` = RAM -
+    20 GiB (`RAM_SPARE_GB = 20`) is the setup's default; the tuned hipBLASLt table is **not** shipped.
+    Gain: RAM tier 72 vs 64 GiB: decode +32 %, 8K read +20 % (ref/PERF-LEDGER.md:866-867); the hipBLASLt table is
+    +12 % on 8K reads but makes two loads differ, and gfx1151's decode table is -13 % on gfx1201
+    (ref/reports/REPORT-qfn-amd.md:169). Exact (the lane_xor warp sums are bit-for-bit; drafting on vs off gives
+    identical greedy tokens).
+14. **Pascal (Tesla P40): exact FP32 dense GEMMs and packed Q8_0 rows, offered by the setup.** Where:
+    `dense_f32_on()` in `engines/qfn/src/prefill/gemm.cu`, the rows in `src/kernels/cuda/native_mmvq.cu`
+    (`q8_sm60.cuh`), the env class in `tools/qfn_fit.py` (`PASCAL_ENV`, `PASCAL_ENV_QUANT`).
+    Switch and default: `SAGUARO_DENSE_F32=1`, `SAGUARO_Q8_SM60=1`, `SAGUARO_MTP_Q8_SM60=1`, all opt-in; the setup
+    writes the two Q8 ones on all-sm_6x PCs and `SAGUARO_DENSE_F32` only on GSQ IQ3_S.
+    Gain: reads +4.9 % (10.5K) / +1.9 % (33.9K) with DENSE_F32 on a P40 (ref/reports/REPORT-p40-batch.md:45-46).
+    Bit-exact: `gemm_f32_parity` 5,201 sizes all bitwise against that cuBLAS 12.0
+    (ref/reports/REPORT-p40-batch.md:34) - re-run it if CUDA changes.
+15. **Turbo: drop is applied, skip is not.** Why: the request-level Turbo (Settings > Turbo) is a GLM feature; the QFN
+    engine parses both. Where: `turbo_key()` and the refusal line in
+    `engines/qfn/src/program/generate.cpp:main`. Switch and default: request keys `turbo_drop=N`
+    (`turbo_drop_apply`, `src/core/verify.cpp`) and `turbo_skip=ssd|ram`, the latter logged as "this engine applies
+    only drop" (generate.cpp:18776). Gain: not measured on QFN. Answer-changing for drop; skip is inert.
+16. **Measured, exact, and left off** (near-misses kept in the ledger for a future pairing):
+    `SAGUARO_SM75_Q8G_ROWS=4` (config-only; 77K reads -0.08 %, solo +0.61 % - no ship, ref/PERF-LEDGER.md:789-791) and
+    the Q8_0 dense row kernels of branch pr/qfn-q8rows-sm75 (0.77x on the 1-column head, ~1 % of decode; the build
+    that carried them was installed 11-18 and rolled back 16:17 on no measurable gain,
+    ref/PERF-LEDGER.md:337-344, 359-379). Two more exact ports live on branches that never merged: the fused
+    up+mix hyper-connection kernel (pr/qfn-upmix-sm75: -0.80 % reads, +0.55 % J/read, ref/PERF-LEDGER.md:764-768) and
+    the PCIe fetch-overlap port (pr/qfn-fetch-overlap: exact, solo behind in 3/3 rotated pairs,
+    ref/PERF-LEDGER.md:617-623). Parked for capacity rather than speed: conversation slots 8 -> 4 (+49 expert slots,
+    n4 +3.6 %, ref/PERF-LEDGER.md:511-517).
 
 ## serve + web
 
