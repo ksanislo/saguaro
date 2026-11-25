@@ -8252,7 +8252,8 @@ def qfn_context_cost(par: int, ctx: int, lay: dict) -> None:
     about 27 GB).  Cross-checked against the RAM and the memory-lock limit: the plan's tier was warned for
     before the questions, this adds the K/V on top of it (memlock_tier_warn says nothing when the limit
     covers it).  Warnings only - no refusal - unless the pinned K/V alone is past this PC's whole RAM,
-    which cannot fit."""
+    which cannot fit.  (Units: the RAM figures are mem_gb's GiB and said as GiB; the cost figures are the
+    decimal GB of the 12.7 KB a token, as the plan states them.)"""
     par = max(1, int(par or 1))
     gb_all = ctx * QF.KV_BYTES * par / 1e9
     ok(f"the cost: about {QF.KV_BYTES / 1e3:.1f} KB of K/V a context token a conversation in INT8 - "
@@ -8264,10 +8265,10 @@ def qfn_context_cost(par: int, ctx: int, lay: dict) -> None:
     if kv_gib >= ram:
         fit = max(QFN_CONTEXTS[0], int(ram * 2**30 / (QF.KV_BYTES * par)) // QF.CONTEXT_STEP * QF.CONTEXT_STEP)
         fail(f"about {gb_all:.0f} GB of pinned K/V for {par} conversation{'s' if par > 1 else ''} of "
-             f"{context_label(ctx)} does not fit: this PC has {ram:.0f} GB of RAM and all of that K/V is "
+             f"{context_label(ctx)} does not fit: this PC has {ram:.0f} GiB of RAM and all of that K/V is "
              "pinned in it", f"fewer answers at once, or a context of {context_label(fit)} or less")
     elif tier + kv_gib > ram - QF.RAM_SYSTEM_GIB:
-        warn(f"{ram:.0f} GB of RAM: the K/V alone pins about {gb_all:.0f} GB "
+        warn(f"{ram:.0f} GiB of RAM: the K/V alone pins about {gb_all:.0f} GB "
              + (f"beside the {tier} GiB expert tier " if tier else "beside the experts ")
              + "- fewer experts stay in RAM (answers slower) and the engine may not start: a smaller context "
                "or fewer answers at once fits")

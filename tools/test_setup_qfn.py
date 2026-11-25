@@ -2154,7 +2154,8 @@ class AnswersAtOnceC18(SetupFlow):
         with tempfile.TemporaryDirectory() as t, cpu(), \
                 patch.object(maya, "warn", side_effect=lambda *x: said.append(" ".join(map(str, x)))):
             cfg = self.setup(Path(t), context=1048576, parallel=2, _mem=(64.0, 50.0))
-        warns = [s for s in said if "GB of RAM: the K/V alone pins about 27 GB" in s]
+        warns = [s for s in said if "GiB of RAM: the K/V alone pins about 27 GB" in s]   # (GiB: mem_gb's unit,
+                                                                                         #  now labelled as such)
         self.assertEqual(len(warns), 1, said)
         self.assertIn("44 GiB expert tier", warns[0])
         self.assertEqual(cfg["args"][cfg["args"].index("--max-context") + 1], "1048576")
