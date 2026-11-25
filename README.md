@@ -25,7 +25,7 @@ older multi-GPU boxes: NVIDIA Turing (Tesla T4, sm_75 tensor cores) and Xeon CPU
 - **One server, one web UI, six model families:** every engine behind the same dashboard, monitor and API; the
   Models page switches between them.
 - **A model for small PCs:** [Inkling 2 Mini](docs/INKLING2-MINI.md) writes about 40 tokens/s on one Tesla T4, 51
-  on two and about 71 on one 16 GB RX 9070 XT; [Hy4-Flash](docs/HY4-FLASH.md) about 32 on four (measured, the
+  on two split by layers (72 with tensor parallel, `--tp 2`) and about 71 on one 16 GB RX 9070 XT; [Hy4-Flash](docs/HY4-FLASH.md) about 32 on four (measured, the
   T4s' clocks locked for Hy4).
 - **Several chats at once:** up to 8 answered together with GLM-5.3-Flash, DeepSeek-V4.1-Flash,
   MiniMax-M3.1-Flash and Qwen3.8-Flash-Next - for agents that run several sessions, or several people on one PC.
@@ -264,13 +264,28 @@ measurements are in [Measured on Saguaro](#measured-on-saguaro).
 
 ### Measured on Saguaro
 
-Our own machines, Saguaro 1.2.1. Decode is the greedy answers' own speed; prompt speed is a prompt's tokens over its whole read.
+Our own machines on Saguaro 1.2.1 (2026-11-25), with `./saguaro.sh --bench`: decode = three greedy 256-token answers, the median
+(range); prefill = a 2K / 8K-token prompt.
 
-| Machine | Model | Decode | Prefill | Notes |
-| --- | --- | ---: | ---: | --- |
-| **4x Tesla T4 16 GB** (PCIe 3.0 x16), 2x Xeon E5-2660 v2, 251 GB RAM | Qwen3.8-Flash-Next UD-Q4_K_XL, 1M context, MTP drafting | 44.5 tokens/s | ~1730 tokens/s (39K) | 8 loads, spread 1 % |
-| same | Inkling 2 Mini UD-Q4_K_XL, two cards each, 131K context | 71.5 tokens/s a pair, 143 both pairs | - | drafting off |
-| same | GLM-5.3-Flash Maya-L IQ3_S, 1M context | 16.5 tokens/s | - | 256-token answers |
+| Machine | Model | Decode (writing the answer) | Prefill (2K / 8K prompt) |
+| --- | --- | ---: | ---: |
+| **4x Tesla T4 16 GB** (PCIe 3.0 x16), 2x Xeon E5-2660 v2, 251 GB RAM | Qwen3.8-Flash-Next UD-Q4_K_XL, 1M context, MTP | **45.4 tokens/s** (44.5-45.7) | 649 / 953 tokens/s |
+| same | Qwen3.8-Flash-Next Q8_0, 1M context, MTP | 26.4 tokens/s (26.4-29.8) | 418 / 632 tokens/s |
+| same | GLM-5.3-Flash Maya-L IQ3_S, 1M context, MTP | 17.3 tokens/s (16.4-17.8) | 145 / 364 tokens/s |
+| **2x Tesla T4 16 GB** (of the same machine) | Inkling 2 Mini UD-Q4_K_XL, tensor parallel 2, 128K context, no drafting | **72.3 tokens/s** (72.1-72.5) | 976 / 1456 tokens/s |
+| **2x Tesla T4 16 GB**, ECC on (15 GB each, simulated) | Qwen3.8-Flash-Next CYBER-FROST-3.8 Q5_K_M, 128K context, MTP (2026-11-24) | 27.4 tokens/s (19.3-30.7) | 422 / 715 tokens/s |
+| **RX 9070 XT 16 GB** (gfx1201, PCIe 5.0), Ryzen 7 9800X3D, 96 GB RAM | Qwen3.8-Flash-Next Q8_0, 256K context, MTP | 15.0 tokens/s (12.7-16.5) | 113 / 418 tokens/s |
+| same | Inkling 2 Mini, the one-T4 quant (every expert in VRAM), 32K context | **75.7 tokens/s** (75.3-78.2) | 1181 / 1129 tokens/s |
+| **Tesla P40 24 GB** (Pascal, PCIe 3.0), 32 GB RAM | Qwen3.8-Flash-Next GSQ-RCO IQ3_S, 256K context, MTP | 17.8 tokens/s (14.1-20.4) | 228 / 411 tokens/s |
+
+Several chats at once on the 4x Tesla T4 machine: total tokens/s while 1, 2 and 4 chats each write about 400 tokens on a similar
+question (our own measurement, prompt reading and queueing included, so one chat reads lower than `--bench`):
+
+| Model | 1 chat | 2 chats | 4 chats |
+| --- | ---: | ---: | ---: |
+| Qwen3.8-Flash-Next UD-Q4_K_XL | 37.3 | 61.1 | **95.0** |
+| Qwen3.8-Flash-Next Q8_0 | 28.3 | 43.5 | 72.0 |
+| GLM-5.3-Flash Maya-L IQ3_S | 15.4 | 20.6 | 29.9 |
 
 A token is about ¾ of a word. The speed holds as a conversation grows, and the first answers after a start are
 the slowest while the caches fill with what you use.
