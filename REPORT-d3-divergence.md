@@ -6,7 +6,7 @@ previous run's mistake is named in the plan and was avoided.
 
 ## What changed
 
-`docs/DIVERGENCE.md` (new, 707 lines / 65 KB after the review fix-ups; 694 lines / 64 KB at step 5): the register
+`docs/DIVERGENCE.md` (new, 708 lines / 65 KB after the review fix-ups; 694 lines / 64 KB at step 5): the register
 docs/UPSTREAM.md §3 asks for, with the ten headings the plan named and 89 numbered entries. Every entry carries the
 specified fields - what, why, where (`file:function`), switch and default, the measured gain with the source line
 that states it (or "not measured"), and exact vs answer-changing - though many entries run past the plan's 2-4 lines
