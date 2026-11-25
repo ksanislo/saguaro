@@ -26,7 +26,10 @@ export function newChatObj() {
 export const thinkingOf = (c = S.current) => {
   if (!c || !c.thinking) return P.thinking;
   const f = c.thinkingFor;
-  if (f && !f.startsWith("|") && S.health.model && f !== modelId()) return P.thinking;
+  // the first page load after modelId() grew: a chat of this model from before stores the two-part "<id>|<label>" -
+  // still this model, so its own level stays (the same tolerance as newModelCheck's)
+  if (f && !f.startsWith("|") && S.health.model && f !== modelId()
+      && f !== `${S.health.model || ""}|${S.health.model_label || ""}`) return P.thinking;
   return levelFor(c.thinking) || P.thinking;
 };
 export function setThinking(level) {

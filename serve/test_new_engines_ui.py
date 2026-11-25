@@ -622,6 +622,27 @@ console.log(JSON.stringify({first, kept, seeded, again, switched, cleared}));"""
         self.assertNotIn("thinking", got["cleared"])                             # (... and its choices do go)
         self.assertNotIn("temperature", got["cleared"])
 
+    def test_a_chat_keeps_its_own_level_after_the_id_grew(self):
+        """the same tolerance in thinkingOf: a chat with messages from before modelId() grew stores the two-part
+        "<id>|<label>"; on the first load after the update the model has not changed, so its own thinking level -
+        not the Settings default - is what goes on the wire; a real switch still takes the default."""
+        got = self.node("""
+const st = await import(web + "/state.js"), ch = await import(web + "/chats.js");
+const qfn = {model: "qwen3.8-flash-next", model_label: "Qwen3.8-Flash-Next · Q8_0 (saguaro-qfn)",
+             model_name_pretty: "Qwen3.8 Flash Next", model_quant: "Q8_0"};
+st.S.health = qfn; st.setFamily(qfn.model);
+const old = {id: "c", messages: [{role: "user", text: "hi"}, {role: "assistant", text: "yo"}],
+             thinking: "low", thinkingFor: `${qfn.model}|${qfn.model_label}`};   // (stored before the update)
+const own = ch.thinkingOf(old);
+const fresh = ch.thinkingOf({...old, thinkingFor: st.modelId()});                // (a chat of the new format)
+st.S.health = {model: "glm-5.3-flash", model_label: "GLM-5.3 · Maya-L",
+               model_name_pretty: "GLM 5.3", model_quant: "Maya-L"};
+const other = ch.thinkingOf(old);                                                // (another model ran: the default)
+console.log(JSON.stringify({own, fresh, other, def: st.P.thinking}));""")
+        self.assertEqual((got["own"], got["fresh"]), ("low", "low"))             # (its own level, not the default)
+        self.assertNotEqual(got["own"], got["def"])
+        self.assertEqual(got["other"], got["def"])                                # (across a switch it does go)
+
     def test_a_server_behind_its_api_key_says_so(self):
         """/api/context answering 401: the page knows why the context range is missing - Settings says
         "API key needed", not "this server does not say its context range" (serve/web/server.js' loadCtxInfo)."""
