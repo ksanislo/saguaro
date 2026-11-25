@@ -981,6 +981,109 @@ console.log(JSON.stringify({tok, none: (() => { st.S.metrics = {}; return sv.kvB
         self.assertTrue(got["line"].startswith("\u2248 0.1 GB of RAM for the context"), got["line"])
         self.assertNotIn("GB", got["noguess"])
 
+    def test_behind_llama_swap_the_page_asks_running_not_the_model(self):
+        # under llama-swap EVERY request under /upstream/<id>/ loads the model (and evicts another from the card), so the
+        # Monitor's per-second /metrics keeps reloading it: while the model is not "ready" in llama-swap's own /running
+        # (the origin, it loads nothing) the page asks only that - no /metrics, no /health, no /mcp - and the Monitor
+        # shows the quiet unloaded state instead of the model's figures
+        got = self.node("""
+location.pathname = "/upstream/glm-5.3-flash/";
+st.S.health.model = "glm-5.3-flash"; st.S.health.supervisor = "llama-swap";
+const log = [];
+globalThis.fetch = async (u) => { log.push(u);
+  return {ok: true, status: 200, json: async () => u.endsWith("/running")
+    ? {running: [{model: "deepseek-v4.1-flash", state: "ready"}]} : {model: "glm-5.3-flash", live: {state: "idle"}}}; };
+await sv.poll(); sv.stopPoll();
+await sv.loadHealth(); await sv.loadMcp();
+console.log(JSON.stringify({log, conn: st.S.conn, metricsNull: st.S.metrics === null}));""")
+        self.assertEqual(got["log"], ["/running"])                    # (llama-swap's own, at the origin root)
+        self.assertEqual(got["conn"], "unloaded")
+        self.assertTrue(got["metricsNull"])
+
+    def test_running_says_ready_the_page_polls_and_coming_back_reloads_health(self):
+        # ready in /running: /metrics polled as before; and when the model is swapped out and back in, the page notices
+        # (its health, the model's facts, fetched once more as it returns)
+        got = self.node("""
+location.pathname = "/upstream/glm-5.3-flash/";
+st.S.health.model = "glm-5.3-flash"; st.S.health.supervisor = "llama-swap";
+const log = [];
+let ready = false;
+globalThis.fetch = async (u) => { log.push(u);
+  return {ok: true, status: 200, json: async () => u.endsWith("/running")
+    ? {running: ready ? [{model: "glm-5.3-flash", state: "ready"}] : []}
+    : u === "health" ? {model: "glm-5.3-flash", supervisor: "llama-swap"} : {model: "glm-5.3-flash", live: {state: "idle"}}}; };
+await sv.poll();                                                    // (off the card: only /running asked)
+const off = log.slice(), offConn = st.S.conn;
+ready = true;
+await sv.poll(); sv.stopPoll();                                     // (back: its health once, then the metrics again)
+console.log(JSON.stringify({off, offConn, log, conn: st.S.conn, metrics: !!st.S.metrics}));""")
+        self.assertEqual(got["off"], ["/running"])
+        self.assertEqual(got["offConn"], "unloaded")
+        self.assertEqual(got["log"], ["/running", "/running", "health", "metrics"])
+        self.assertEqual(got["conn"], "ok")
+        self.assertTrue(got["metrics"])
+
+    def test_a_hidden_tab_asks_nothing_in_every_setup(self):
+        # a hidden tab stops all polling - plain, and behind llama-swap; visible again it picks up at once
+        got = self.node("""
+const log = [];
+globalThis.fetch = async (u) => { log.push(u);
+  return {ok: true, status: 200, json: async () => u.endsWith("/running")
+    ? {running: [{model: "glm-5.3-flash", state: "ready"}]} : {model: "glm-5.3-flash", live: {state: "idle"}}}; };
+document.hidden = true;
+await sv.poll(); await sv.loadHealth(); await sv.loadMcp();         // (hidden: nothing asked at all)
+const hiddenPlain = log.slice();
+document.hidden = false;
+await sv.poll(); sv.stopPoll();                                     // (seen again: metrics as before)
+const shown = log.slice();
+location.pathname = "/upstream/glm-5.3-flash/";
+st.S.health.model = "glm-5.3-flash"; st.S.health.supervisor = "llama-swap";
+document.hidden = true;
+await sv.poll();                                                    // (behind llama-swap the same: nothing at all)
+console.log(JSON.stringify({hiddenPlain, shown, hiddenSwap: log.slice(), conn: st.S.conn}));""")
+        self.assertEqual(got["hiddenPlain"], [])
+        self.assertEqual(got["shown"], ["metrics"])
+        self.assertEqual(got["hiddenSwap"], ["metrics"])             # (nothing new while hidden, in either setup)
+        self.assertEqual(got["conn"], "ok")
+
+    def test_not_behind_llama_swap_polls_exactly_as_before(self):
+        # no supervisor (the usual single-server setup), or an /upstream/ path without one (another proxy): /metrics
+        # directly, as before - /running is never asked
+        got = self.node("""
+const log = [];
+globalThis.fetch = async (u) => { log.push(u);
+  return {ok: true, status: 200, json: async () => ({model: "glm-5.3-flash", live: {state: "idle"}})}; };
+await sv.poll(); sv.stopPoll();
+const plain = log.slice();
+location.pathname = "/upstream/glm-5.3-flash/";                     // (the path alone is not enough: no supervisor)
+await sv.poll(); sv.stopPoll();
+console.log(JSON.stringify({plain, pathOnly: log.slice(), conn: st.S.conn}));""")
+        self.assertEqual(got["plain"], ["metrics"])
+        self.assertEqual(got["pathOnly"], ["metrics", "metrics"])
+        self.assertEqual(got["conn"], "ok")
+
+    def test_a_running_that_does_not_answer_polls_as_today_while_visible(self):
+        # an older llama-swap without /running (404) or a key it refuses (401): the page falls back to today's polling -
+        # but only while the tab is visible, and it stops the moment the tab is hidden
+        body = """
+location.pathname = "/upstream/glm-5.3-flash/";
+st.S.health.model = "glm-5.3-flash"; st.S.health.supervisor = "llama-swap";
+const log = [];
+globalThis.fetch = async (u) => { log.push(u);
+  return u.endsWith("/running") ? {ok: false, status: __CODE__, json: async () => ({})}
+                                : {ok: true, status: 200, json: async () => ({model: "glm-5.3-flash", live: {state: "idle"}})}; };
+await sv.poll(); sv.stopPoll();                                     // (__CODE__: metrics as today, after the failed /running)
+const shown = log.slice();
+document.hidden = true;
+await sv.poll();                                                    // (hidden: nothing at all, /running included)
+console.log(JSON.stringify({shown, hidden: log.slice(), conn: st.S.conn}));"""
+        for code in (404, 401):
+            with self.subTest(code=code):
+                got = self.node(body.replace("__CODE__", str(code)))
+                self.assertEqual(got["shown"], ["/running", "metrics"])
+                self.assertEqual(got["hidden"], ["/running", "metrics"])   # (nothing new once hidden)
+                self.assertEqual(got["conn"], "ok")
+
 
 if __name__ == "__main__":
     unittest.main()
