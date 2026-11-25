@@ -1835,7 +1835,7 @@ class SetupFlow(unittest.TestCase):
     """set_up_qfn with the machine, the build and the downloads stepped around: what the choices write - and,
     v1.2.1-B, what a slow PC gets: the scaled config, the loud warning, the one confirmation question."""
 
-    def flow(self, t: Path, a, vision=None, mtp=True, pc=None, mem=(91.7, 80.0), out=None):
+    def flow(self, t: Path, a, vision=None, mtp=True, pc=None, mem=(91.7, 80.0), out=None, prev=None):
         eng = t / "build" / "qfn"
         eng.mkdir(parents=True)
         (eng / "saguaro-qfn").write_text("")
@@ -1853,7 +1853,7 @@ class SetupFlow(unittest.TestCase):
                              else None), \
                 patch.object(maya, "write_run_script", return_value=t / "run.sh"), \
                 patch("sys.stdout", new=out or io.StringIO()), patch.object(maya.S, "UI", None):
-            return maya.set_up_qfn(a, {})
+            return maya.set_up_qfn(a, prev or {})
 
     def setup(self, t: Path, **kw):
         vision = kw.pop("_vision", None)
@@ -1861,9 +1861,10 @@ class SetupFlow(unittest.TestCase):
         pc = kw.pop("_pc", None)
         mem = kw.pop("_mem", (91.7, 80.0))
         out = kw.pop("_out", None)
+        prev = kw.pop("_prev", None)
         kw.setdefault("context", 65536)
         a = args(qfn_quant="ud-q4_k_xl", models_dir=t / "models", **kw)
-        p = self.flow(t, a, vision=vision, mtp=not nomtp, pc=pc, mem=mem, out=out)
+        p = self.flow(t, a, vision=vision, mtp=not nomtp, pc=pc, mem=mem, out=out, prev=prev)
         return json.loads(p.read_text())
 
     def test_drafting_off_is_the_mtp_max_t_arg(self):
@@ -2014,6 +2015,206 @@ class SetupFlow(unittest.TestCase):
         self.assertNotIn("--mtp-max-t", said)                     # (no flag claimed where there is no drafter)
         self.assertIn("drafting off", said)                       # (still plain and true: nothing drafts here)
         self.assertIn("--kv-resident 4096 instead of 32768", said)
+
+
+class LongContextC18(SetupFlow):
+    """C18 step 1: the context question offers the elastic YaRN sizes past 256K and the config follows:
+    --rope-scale = max / 262144 as the engine parses it (a double: 512K's 2, 1M's 4, 384K's 1.5 - a
+    fractional factor is written as computed, never rounded), --yarn-orig-ctx 262144 and the elastic
+    SAGUARO_YARN_ELASTIC stay, a --context past 1M or no whole 64K step is refused plainly, and a 256K
+    config is written exactly as before."""
+
+    def yarn_tail(self, cfg):
+        a = cfg["args"]
+        return a[a.index("--rope-scaling"):a.index("--rope-scaling") + 6]
+
+    def test_the_512k_config(self):
+        with tempfile.TemporaryDirectory() as t:
+            cfg = self.setup(Path(t), context=524288)
+        a = cfg["args"]
+        self.assertEqual(a[a.index("--max-context") + 1], "524288")
+        self.assertEqual(self.yarn_tail(cfg), ["--rope-scaling", "yarn", "--rope-scale", "2",
+                                               "--yarn-orig-ctx", "262144"])
+        self.assertEqual(cfg["env"]["SAGUARO_YARN_ELASTIC"], "1")          # (the elastic pair, as today)
+        self.assertEqual(a[a.index("--kv-resident") + 1], "32768")         # (the cards' window: unchanged)
+
+    def test_the_1m_config(self):
+        with tempfile.TemporaryDirectory() as t:
+            cfg = self.setup(Path(t), context=1048576)
+        a = cfg["args"]
+        self.assertEqual(a[a.index("--max-context") + 1], "1048576")
+        self.assertEqual(self.yarn_tail(cfg), ["--rope-scaling", "yarn", "--rope-scale", "4",
+                                               "--yarn-orig-ctx", "262144"])   # (the live mangonel line)
+        self.assertEqual(cfg["env"]["SAGUARO_YARN_ELASTIC"], "1")
+
+    def test_a_64k_step_writes_its_fraction_as_computed(self):
+        """The engine's --rope-scale is a double (generate.cpp: atof into a double, its check is only ">= 1"),
+        so 384K gets 1.5 - not rounded up to 2, and not refused."""
+        with tempfile.TemporaryDirectory() as t:
+            cfg = self.setup(Path(t), context=393216)
+        a = cfg["args"]
+        self.assertEqual(a[a.index("--max-context") + 1], "393216")
+        self.assertEqual(a[a.index("--rope-scale") + 1], "1.5")
+
+    def test_256k_writes_what_it_always_wrote(self):
+        """Byte-identity for the recommended default: the 262144 config keeps the args it had before the
+        YaRN sizes joined - --rope-scale 4 among them (the elastic engine never reads the table inside 256K,
+        so the factor there was and stays a formality; the parity classes compare the whole arg lists)."""
+        with tempfile.TemporaryDirectory() as t1, tempfile.TemporaryDirectory() as t2:
+            big = self.setup(Path(t1), context=262144)
+            small = self.setup(Path(t2), context=65536)
+        self.assertEqual(self.yarn_tail(big), ["--rope-scaling", "yarn", "--rope-scale", "4",
+                                               "--yarn-orig-ctx", "262144"])
+        norm = lambda cfg, tmp: [x for x in zip(cfg["args"][::2], cfg["args"][1::2])   # noqa: E731
+                                 if "--max-context" not in x and str(tmp) not in str(x)]
+        self.assertEqual(norm(big, t1), norm(small, t2))   # (the args, bar --max-context and the paths: the
+                                                           #  file was and is that one flag's difference)
+        self.assertEqual(big["args"][big["args"].index("--max-context") + 1], "262144")
+
+    def test_past_1m_is_refused(self):
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as t, self.assertRaises(SystemExit):
+            self.setup(Path(t), context=2097152, _out=out)
+        said = out.getvalue()
+        self.assertIn("whole 64K steps", said)
+        self.assertIn("1M", said)
+        self.assertNotIn("context: 2097152 tokens", said)    # (review nit: refused before it is said)
+
+    def test_a_part_step_past_256k_is_refused(self):
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as t, self.assertRaises(SystemExit):
+            self.setup(Path(t), context=300000, _out=out)
+        said = out.getvalue()
+        self.assertIn("whole 64K steps", said)
+        self.assertIn("524288", said)
+        self.assertNotIn("context: 300000 tokens", said)     # (review nit: refused before it is said)
+
+
+class AnswersAtOnceC18(SetupFlow):
+    """C18 step 2: the setup asks "answers at once" right after the context - the layout's default pre-set
+    (1 on one card, 2 on a split, a config written before keeps its value on a split), 1 to 8, and a given
+    --parallel N is not asked - and states one combined cost line (context x answers: 1M x 2 = about 27 GB
+    of pinned RAM) with the RAM and memlock cross-checks: warn on a tight box, refuse only what cannot fit."""
+
+    def asked(self, t: Path, **kw):
+        seen = []
+
+        def answer(q, ch, dflt, yes):
+            seen.append((q, tuple(ch), dflt))
+            return dflt
+        with cpu(), patch.object(maya, "ask", side_effect=answer):
+            cfg = self.setup(t, **kw)
+        return cfg, [s for s in seen if "Answers at once" in s[0]]
+
+    def test_the_question_after_the_context(self):
+        with tempfile.TemporaryDirectory() as t:
+            cfg, asked = self.asked(Path(t), context=65536, yes=False)
+        self.assertEqual(len(asked), 1)
+        self.assertEqual(asked[0][1], tuple(str(i) for i in range(1, 9)))    # (1 to 8)
+        self.assertEqual(asked[0][2], "1")                                   # (the one card: 1, as today)
+        self.assertIsNone(cfg.get("parallel"))
+
+    def test_the_split_default_is_two_and_a_config_before_keeps_its_value(self):
+        two = {"backend": "cuda", "gpus": [{"index": 0, "name": "Tesla T4", "vram_gb": 15.0, "arch": "75",
+                                            "display": False},
+                                           {"index": 1, "name": "Tesla T4", "vram_gb": 15.0, "arch": "75",
+                                            "display": False}]}
+        with tempfile.TemporaryDirectory() as t:
+            cfg, asked = self.asked(Path(t), context=65536, yes=False, _pc=two)
+        self.assertEqual(asked[0][2], "2")                                   # (a split: 2, as the live boxes)
+        self.assertEqual(cfg["parallel"], 2)
+        with tempfile.TemporaryDirectory() as t:                             # (a setup again: the value a
+            cfg, asked = self.asked(Path(t), context=65536, yes=False, _pc=two,   #  config wrote before is
+                                    _prev={"parallel": 5})                   #   the default on a split)
+        self.assertEqual(asked[0][2], "5")
+        self.assertEqual(cfg["parallel"], 5)
+
+    def test_parallel_given_is_not_asked(self):
+        with tempfile.TemporaryDirectory() as t:
+            cfg, asked = self.asked(Path(t), context=65536, parallel=4, yes=False)
+        self.assertEqual(asked, [])                                          # (--parallel N: not asked)
+        self.assertEqual(cfg["parallel"], 4)
+
+    def test_above_one_on_the_one_amd_card_hears_what_it_measured(self):
+        """Review finding 4: on the one AMD card parallel decoding was measured slower - an answer of 2 reaches
+        the config now that the question asks (until the question, only a deliberate --parallel did), so the
+        answer hears the measurement.  It keeps its 2: that is the one card's picture-encoder lend path."""
+        said = []
+        with tempfile.TemporaryDirectory() as t, \
+                patch.object(maya, "ask", side_effect=lambda q, c, d, y: "2" if "Answers at once" in q else d), \
+                patch.object(maya, "warn", side_effect=lambda *x: said.append(" ".join(map(str, x)))):
+            cfg = self.setup(Path(t), context=65536, yes=False)               # (the flow's card is the AMD one)
+        self.assertEqual(cfg["parallel"], 2)                                  # (the answer stands)
+        self.assertEqual(len([s for s in said if "lost speed" in s]), 1, said)
+
+    def test_parallel_given_on_that_card_is_deliberate_and_untold(self):
+        """"--parallel N says" holds: the AMD card given 2 on the command line is asked nothing and lectured
+        of nothing - the warning belongs to the answer, not to the flag."""
+        def answer(q, ch, dflt, yes):
+            self.assertNotIn("Answers at once", q)
+            return dflt
+        said = []
+        with tempfile.TemporaryDirectory() as t, patch.object(maya, "ask", side_effect=answer), \
+                patch.object(maya, "warn", side_effect=lambda *x: said.append(" ".join(map(str, x)))):
+            cfg = self.setup(Path(t), context=65536, parallel=2, yes=False)
+        self.assertEqual(cfg["parallel"], 2)
+        self.assertEqual([s for s in said if "lost speed" in s], [])
+
+    def test_the_combined_cost_line(self):
+        """The one line beside the questions: 12.7 KB a token a conversation, context x answers - Ken's
+        1M x 2 = about 27 GB, and the newest 32K of each conversation on the cards too."""
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as t:
+            self.setup(Path(t), context=1048576, parallel=2, _out=out)
+        line = [ln for ln in out.getvalue().splitlines() if "the cost:" in ln]
+        self.assertEqual(len(line), 1)
+        self.assertIn("12.7 KB of K/V a context token a conversation in INT8", line[0])
+        self.assertIn("1M x 2 = about 27 GB", line[0])
+        self.assertIn("32K of each conversation on the cards too", line[0])
+
+    def test_a_ram_poor_box_gets_the_warning_not_a_refusal(self):
+        """64 GB with 1M x 2: about 27 GB of K/V beside the 44 GiB expert tier - warn, and the config is
+        still written (the plan: warn+confirm, not refuse - v1.2.1-B's own rule for the layout)."""
+        said = []
+        with tempfile.TemporaryDirectory() as t, cpu(), \
+                patch.object(maya, "warn", side_effect=lambda *x: said.append(" ".join(map(str, x)))):
+            cfg = self.setup(Path(t), context=1048576, parallel=2, _mem=(64.0, 50.0))
+        warns = [s for s in said if "GiB of RAM: the K/V alone pins about 27 GB" in s]   # (GiB: mem_gb's unit,
+                                                                                         #  now labelled as such)
+        self.assertEqual(len(warns), 1, said)
+        self.assertIn("44 GiB expert tier", warns[0])
+        self.assertEqual(cfg["args"][cfg["args"].index("--max-context") + 1], "1048576")
+
+    def test_it_refuses_only_what_cannot_fit(self):
+        """40 GB of RAM and 1M x 4 = about 53 GB of K/V, all of it pinned: the RAM cannot hold it - refuse,
+        and say what would fit."""
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as t, cpu(), self.assertRaises(SystemExit):
+            self.setup(Path(t), context=1048576, parallel=4, _mem=(40.0, 30.0), _out=out)
+        said = out.getvalue()
+        self.assertIn("does not fit", said)
+        self.assertIn("fewer answers at once", said)
+        self.assertIn("768K", said)     # (40 GiB / (12672 B x 4): 768K fits per conversation, 832K would not)
+
+    def test_memlock_between_the_tier_and_the_k_v_warns_once(self):
+        """The 96 GB PC's 71 GiB tier under an 80 GiB memlock: the tier's own warning says nothing, the cost
+        check's does - once - and names the tier plus the K/V (71 + ~12 = 83)."""
+        said = []
+        with tempfile.TemporaryDirectory() as t, cpu(), \
+                patch.object(maya, "memlock_soft_gib", return_value=80.0), \
+                patch.object(maya, "warn", side_effect=lambda *x: said.append(" ".join(map(str, x)))):
+            self.setup(Path(t), context=1048576)
+        warns = [s for s in said if "memory-lock" in s]
+        self.assertEqual(len(warns), 1, said)
+        self.assertIn("83 GB pinned RAM tier", warns[0])
+
+    def test_a_memlock_under_the_tier_is_still_one_warning(self):
+        said = []
+        with tempfile.TemporaryDirectory() as t, cpu(), \
+                patch.object(maya, "memlock_soft_gib", return_value=40.0), \
+                patch.object(maya, "warn", side_effect=lambda *x: said.append(" ".join(map(str, x)))):
+            self.setup(Path(t), context=1048576)
+        self.assertEqual(len([s for s in said if "memory-lock" in s]), 1)     # (the tier's own: not a second)
 
 
 class Parallel(unittest.TestCase):

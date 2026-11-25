@@ -8,7 +8,7 @@ import {api, ctxfmt, esc, fmt, headers, isPhone, modelLabel, relTime} from "./li
 import {S, confirmDialog, copyText, emit, toast} from "./state.js";
 import {newChat} from "./chats.js";
 import {setSide, showView} from "./sidebar.js";
-import {ctxHint, ctxStopsIn, kvBytesToken, loadCtxInfo} from "./server.js";
+import {ctxHint, ctxStopsIn, ctxYarn, kvBytesToken, loadCtxInfo} from "./server.js";
 import {CtxSlider, Icon, ModelLogo, Seg, Switch, trapTab} from "./ui.js";
 
 // the page's own state (beside S: nothing else reads it but the model menu's count)
@@ -254,10 +254,12 @@ function AutoOr({label, k, d, dflt, unit, subLabel}) {
 function contextRow(m, d, ch, cost, keys = [], extra = null) {
   const s = m.settings, r = m.context_range || {min: 4096, max: 262144, tested: 262144};
   const n = Number(d.context), now = Number(s.context), stops = ctxStopsIn(r, now, n);
+  const yarn = ctxYarn(n, r);   // (QFN's elastic YaRN: past the trained context the slider says what extends it)
   const warn = [n !== now && n > r.tested ? `Beyond ${ctxfmt(r.tested)} is untested on this engine.` : null, extra].filter(Boolean).join(" ");
   return html`<${Row} label="Context size" flag="--max-context" changed=${ch("context")} warn=${warn || null}
     below=${html`<${CtxSlider} id=${`mdl-ctx-${m.file}`} label="" value=${n} now=${now} stops=${stops}
-      hint=${ctxHint(n, {live: m.running && !ch(...keys), now, ...cost})} onChange=${(v) => setDraft({context: v})}/>`}/>`;
+      hint=${ctxHint(n, {live: m.running && !ch(...keys), now, ...cost}) + (yarn ? ` · ${yarn}.` : "")}
+      onChange=${(v) => setDraft({context: v})}/>`}/>`;
 }
 
 // the running engine's K/V bytes of one position (its INFO's kv_bytes_token); 0 when this is not the running model

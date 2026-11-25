@@ -1939,6 +1939,17 @@ and what is neither goes in the config as its own key. The engine reads a few hu
 its kernels, its graphs and its debugging; those are development knobs documented in the engine's source comments, not
 here. Rows that change the model's tokens say so; the rest are exact (the same answers, some faster).
 
+**Long contexts.** The setup offers the contexts up to the model's trained 262144, and past it in whole 64K steps to
+1048576 - 512K and 1M - which run on the elastic YaRN: the config carries `--rope-scaling yarn` with
+`--rope-scale` the chosen max over 262144 (1M: 4, 384K: 1.5) beside `--yarn-orig-ctx 262144`, and
+`SAGUARO_YARN_ELASTIC=1` in its `"env"` so a conversation reads plain RoPE until it actually passes the trained
+262144 and only then takes the YaRN table (short chats never feel the extension). Past the trained context the setup
+says what a choice costs: the K/V is ~12.7 KB of pinned RAM a context token a conversation in INT8 - 1M with two
+answers at once is ~27 GB, the newest 32K of each conversation on the cards too (`--kv-resident`) - and a context ×
+answers-at-once whose K/V alone exceeds the RAM is refused. Settings > Model's Context size runs to the same 1M and
+says the same: past 256K each size reads "YaRN, extended" with the pinned-RAM line under it, and a move of the slider
+rewrites `--rope-scale` with the new max.
+
 **Environment variables.** Engine ones go in the config's `"env"` block; server ones are read from the environment the
 server itself starts in (the `"env"` block reaches only the engine). `1` turns a switch on, `0` off, unset the default.
 

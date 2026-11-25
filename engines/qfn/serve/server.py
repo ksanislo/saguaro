@@ -1527,13 +1527,27 @@ class StrataEngine:
 
     def set_context(self, n: int):
         """The next start's context: --max-context in the command (restart() runs it), the way the other engines'
-        set_context + restart reload the model with a new context (the dashboard's Context size)."""
+        set_context + restart reload the model with a new context (the dashboard's Context size).
+
+        C18: with the elastic YaRN the factor follows the new reach - past the config's --yarn-orig-ctx the
+        extension needs --rope-scale = n / orig (1M: 4, 512K: 2, 384K: 1.5; the engine parses --rope-scale as a
+        double, so a fractional factor is written as computed and never rounded), and a slider move from 256K
+        to 1M gets the factor that actually reaches 1M.  At or below orig the written factor stays: inside the
+        trained context the elastic engine never reads the YaRN table."""
         exe, args, cwd, log, env, lazy, cpus = self.spawn
         args = [str(a) for a in args]
         if "--max-context" in args[:-1]:
             args[args.index("--max-context") + 1] = str(int(n))
         else:
             args += ["--max-context", str(int(n))]
+        if ("--rope-scaling" in args[:-1] and args[args.index("--rope-scaling") + 1] == "yarn"
+                and "--yarn-orig-ctx" in args[:-1]):
+            try:
+                orig = int(args[args.index("--yarn-orig-ctx") + 1])
+            except ValueError:
+                orig = 0
+            if orig > 0 and int(n) > orig and "--rope-scale" in args[:-1]:
+                args[args.index("--rope-scale") + 1] = "%g" % (int(n) / orig)
         self.spawn = (exe, args, cwd, log, env, lazy, cpus)
 
     RESTART_RETRY_S = 15.0   # between the tries of restart(): a dying engine's VRAM may take a while to come back

@@ -63,6 +63,35 @@ class Sizes(unittest.TestCase):
         self.assertAlmostEqual(F.kv_resident_gib(32768), 0.39, delta=0.01)                   # ~0.4 GiB, as pinned
 
 
+class YarnAndCost(unittest.TestCase):
+    """C18: what a past-256K context costs and the YaRN factor that reaches it."""
+
+    def test_the_scale_follows_the_chosen_max(self):
+        self.assertIsNone(F.yarn_scale(262144))                    # (inside the trained context: none)
+        self.assertIsNone(F.yarn_scale(65536))
+        self.assertEqual(F.yarn_scale(524288), 2.0)                # (512K: 2)
+        self.assertEqual(F.yarn_scale(1048576), 4.0)               # (1M: 4, what mangonel runs)
+        self.assertEqual(F.yarn_scale(393216), 1.5)                # (384K: 1.5 - the engine's --rope-scale is
+        self.assertEqual(F.yarn_scale(917504), 3.5)                #  parsed as a double: written, never rounded)
+
+    def test_the_scale_as_written(self):
+        self.assertEqual(F.yarn_scale_text(1048576), "4")          # (the live configs' own value)
+        self.assertEqual(F.yarn_scale_text(524288), "2")
+        self.assertEqual(F.yarn_scale_text(393216), "1.5")
+        self.assertEqual(F.yarn_scale_text(327680), "1.25")
+        self.assertEqual(F.yarn_scale_text(262144), "4")           # (the trained reach and below: the 4 every
+        self.assertEqual(F.yarn_scale_text(65536), "4")            #  config written so far carries, unchanged)
+
+    def test_what_a_context_costs(self):
+        """~12.7 KB a token of INT8 K/V per conversation: ~13 GB of pinned RAM a conversation at 1M, and
+        x answers at once (the plan's example: 1M x 2 = about 27 GB)."""
+        self.assertAlmostEqual(F.kv_pinned_gib(1048576), 1048576 * 12672 / F.GIB, delta=1e-9)
+        self.assertAlmostEqual(1048576 * F.KV_BYTES / 1e9, 13.3, delta=0.1)          # ~13 GB, decimal: Ken's line
+        self.assertAlmostEqual(1048576 * F.KV_BYTES * 2 / 1e9, 26.6, delta=0.1)      # 1M x 2: ~27 GB
+        self.assertAlmostEqual(F.kv_pinned_gib(65536), 0.77, delta=0.01)
+        self.assertEqual(F.kv_pinned_gib(65536, 0), F.kv_pinned_gib(65536, 1))       # (never below one answer)
+
+
 class OneCard(unittest.TestCase):
     def test_a_t4_alone(self):
         p = F.plan([gpu(0, 15.0, "75", "Tesla T4")], 220.0)

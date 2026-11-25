@@ -234,6 +234,9 @@ export function ctxStopsIn(r, ...sizes) {
   return [...new Set([...CTX_STOPS.filter((v) => v >= r.min && v <= r.max), ...own])].sort((a, b) => a - b);
 }
 export const ctxStops = () => (S.ctxInfo ? ctxStopsIn(S.ctxInfo, S.ctxInfo.context) : []);
+// a range that says where the trained reach ends (QFN's elastic YaRN: context_range's yarn_above): past it the
+// slider's sizes are the YaRN extension, and the line under the slider says "YaRN, extended" with the cost
+export const ctxYarn = (n, r) => (r && +r.yarn_above > 0 && +n > +r.yarn_above) ? "YaRN, extended" : "";
 // what a context size costs here: the engine's own measurement of the current size, scaled
 export function ctxEstimate(n) {
   const c = S.ctxInfo;

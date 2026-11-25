@@ -714,7 +714,9 @@ QFN_PACK_TOOLS = ("engines/qfn/tools/iq_pack.py", "engines/qfn/tools/strata_toke
                   "engines/qfn/tools/gguf_reader.py")
 QFN_DRAFTER_TOOLS = ("tools/mtp_from_gguf.py", "tools/mtp_rt.py")   # (CYBER-FROST's drafter: from its own NextN block)
 QFN_PROFILE = ROOT / "data" / "expert-profile-qfn.bin"   # (the experts QFN routes most: which start in VRAM and RAM)
-QFN_CONTEXTS = [32768, 65536, 131072, 262144]
+QFN_CONTEXTS = [32768, 65536, 131072, 262144, 524288, 1048576]   # (C18: past 256K the elastic YaRN offers 512K
+                                                                 #  and 1M; --context takes any 64K step up to
+                                                                 #  QF.CONTEXT_MAX, qfn_fit.YARN_ORIG_CTX)
 QFN_DEFAULT_CONTEXT = 65536                        # (measured: 64K, prompts up to 60K tokens)
 QFN_RAM_SPARE_GB = 20                              # (RAM left beside the RAM tier: the OS, the server, the page cache)
 QFN_DEFAULT_QUANT = "ud-q4_k_xl"
@@ -1896,13 +1898,16 @@ def context_label(n: int) -> str:
     return f"{n // 1048576}M" if n % 1048576 == 0 else f"{n // 1024}K"
 
 
-def choose_context(a, prev_ctx, contexts=CONTEXTS, recommended=DEFAULT_CONTEXT) -> int:
+def choose_context(a, prev_ctx, contexts=CONTEXTS, recommended=DEFAULT_CONTEXT, extra=None,
+                   intro=None) -> int:
     if a.context:
         return a.context
     default = prev_ctx if prev_ctx in contexts else recommended
-    pick = choose("Context?", ["Context length = how much text the model sees at once (the chat, files, tool output). "
-                               "A longer one takes", "VRAM from the expert cache, so answers get a little slower:"],
-                  [(f"{context_label(c)} tokens", "recommended" if c == recommended else None, None) for c in contexts],
+    intro = intro or ["Context length = how much text the model sees at once (the chat, files, tool output). "
+                      "A longer one takes", "VRAM from the expert cache, so answers get a little slower:"]
+    pick = choose("Context?", intro,
+                  [(f"{context_label(c)} tokens", "recommended" if c == recommended else (extra or {}).get(c), None)
+                   for c in contexts],
                   contexts.index(default), a.yes)
     return contexts[pick]
 
@@ -8159,7 +8164,10 @@ def write_config_qfn(a, pc: dict, meta: dict, quant: str, files: list, pack: Pat
                                                        #  every PC gets, the split's pipelined reads and stage
                                                        #  pools, the quant's --prompt-cache, --pool-workers on a
                                                        #  multi-socket CPU - qfn_fit's plan says which)
-    args += ["--rope-scaling", "yarn", "--rope-scale", "4", "--yarn-orig-ctx", "262144"]
+    args += ["--rope-scaling", "yarn", "--rope-scale", QF.yarn_scale_text(ctx), "--yarn-orig-ctx",
+             str(QF.YARN_ORIG_CTX)]     # (C18: past 262144 the factor follows the chosen max - 512K: 2, 1M: 4,
+                                        #  384K: 1.5 as computed; inside the trained context the 4 stays as every
+                                        #  config written so far has it, elastic YaRN never reads it there)
     # answers at once (serve/qfn_engine.py's parallel_args turns this into the engine's --batch N): off on the one
     # 16 GB AMD card it was measured on (parallel decoding lost speed there - one card stays at parallel 1 even
     # when the config written before was a several-cards one and carries a value), 2 on several GPUs as the live
@@ -8235,6 +8243,40 @@ def write_config_qfn(a, pc: dict, meta: dict, quant: str, files: list, pack: Pat
     ok(f"config: {cfg_path}")
     ok(f"start script: {write_run_script(cfg_path, port)}")
     return cfg_path
+
+
+def qfn_context_cost(par: int, ctx: int, lay: dict) -> None:
+    """What the chosen context and the chosen answers at once cost on this PC, in one combined line beside
+    the questions (C18): about 12.7 KB of K/V a context token per conversation at --kv int8 (qfn_fit's
+    measured KV_BYTES) - about 13 GB a conversation at 1M - with the newest --kv-resident window of each
+    conversation on the cards as well and the whole cache pinned RAM, times the answers at once (1M x 2 is
+    about 27 GB).  Cross-checked against the RAM and the memory-lock limit: the plan's tier was warned for
+    before the questions, this adds the K/V on top of it (memlock_tier_warn says nothing when the limit
+    covers it).  Warnings only - no refusal - unless the pinned K/V alone is past this PC's whole RAM,
+    which cannot fit.  (Units: the RAM figures are mem_gb's GiB and said as GiB; the cost figures are the
+    decimal GB of the 12.7 KB a token, as the plan states them.)"""
+    par = max(1, int(par or 1))
+    gb_all = ctx * QF.KV_BYTES * par / 1e9
+    ok(f"the cost: about {QF.KV_BYTES / 1e3:.1f} KB of K/V a context token a conversation in INT8 - "
+       f"{context_label(ctx)} x {par} = about {gb_all:.0f} GB of RAM kept pinned (the newest "
+       f"{context_label(min(ctx, lay['kv_resident']))} of each conversation on the cards too)")
+    ram = mem_gb()[0]
+    kv_gib = QF.kv_pinned_gib(ctx, par)
+    tier = lay["resident_budget_gib"] or 0
+    if kv_gib >= ram:
+        fit = max(QFN_CONTEXTS[0], int(ram * 2**30 / (QF.KV_BYTES * par)) // QF.CONTEXT_STEP * QF.CONTEXT_STEP)
+        fail(f"about {gb_all:.0f} GB of pinned K/V for {par} conversation{'s' if par > 1 else ''} of "
+             f"{context_label(ctx)} does not fit: this PC has {ram:.0f} GiB of RAM and all of that K/V is "
+             "pinned in it", f"fewer answers at once, or a context of {context_label(fit)} or less")
+    elif tier + kv_gib > ram - QF.RAM_SYSTEM_GIB:
+        warn(f"{ram:.0f} GiB of RAM: the K/V alone pins about {gb_all:.0f} GB "
+             + (f"beside the {tier} GiB expert tier " if tier else "beside the experts ")
+             + "- fewer experts stay in RAM (answers slower) and the engine may not start: a smaller context "
+               "or fewer answers at once fits")
+    if ctx > QF.YARN_ORIG_CTX:
+        soft = memlock_soft_gib()
+        if soft is None or soft >= tier:    # (the tier's own warning was given before the questions; this
+            memlock_tier_warn(tier + kv_gib)   #  one covers the K/V on top of it - never the same line twice)
 
 
 def qfn_check_line(quant: str, lay: dict) -> str:
@@ -8317,8 +8359,47 @@ def set_up_qfn(a, prev: dict) -> Path | None:
             fail("stopped: this PC would run this model very slowly",
                  f"a PC nearer the measured layout (16 GB cards, about 96 GB of RAM), another model, or --yes "
                  "to set it up as it is")
-    ctx = choose_context(a, prev_ctx, QFN_CONTEXTS, QFN_DEFAULT_CONTEXT if hip else lay["context"])
+    ctx = choose_context(a, prev_ctx, QFN_CONTEXTS, QFN_DEFAULT_CONTEXT if hip else lay["context"],
+                         extra={c: "past 256K (YaRN)" for c in QFN_CONTEXTS if c > QF.YARN_ORIG_CTX},
+                         intro=["Context length = how much text the model sees at once (the chat, files, tool output). "
+                                "A longer one takes", "VRAM from the expert cache, so answers get a little slower. "
+                                "Past 256K the elastic YaRN extends the model's", "trained 256K to 1M (the cost in "
+                                "pinned RAM is said after the answers-at-once question; --context N",
+                                "allows any whole 64K step up to 1M):"])
+    # C18: past the trained 262144 the extension is YaRN (--rope-scaling yarn / --yarn-orig-ctx / --rope-scale,
+    # the elastic SAGUARO_YARN_ELASTIC=1 already in the env): 64K steps up to 1M, and --rope-scale follows the
+    # chosen max (max / 262144).  The engine parses --rope-scale as a double (engines/qfn generate.cpp: atof into
+    # a double, only its >= 1 check), so a fractional factor like 384K's 1.5 is written as computed - never
+    # rounded, and a size that is no whole 64K step (or past 1M) is refused plainly, not fitted - refused before
+    # the line below, so a refused size never gets to say "context: N tokens" first (review nit).
+    if ctx > QF.YARN_ORIG_CTX and (ctx > QF.CONTEXT_MAX or ctx % QF.CONTEXT_STEP):
+        fail(f"{ctx} is not a context {QFN_SHOWN} runs: past {context_label(QF.YARN_ORIG_CTX)} the YaRN "
+             f"extension goes in whole {context_label(QF.CONTEXT_STEP)} steps, up to "
+             f"{context_label(QF.CONTEXT_MAX)}",
+             "--context 524288 (512K) or --context 1048576 (1M), any other whole 64K step up to 1M, "
+             "or 262144 or below")
     ok(f"context: {ctx} tokens" + (" (recommended)" if ctx == (QFN_DEFAULT_CONTEXT if hip else lay["context"]) else ""))
+    if ctx > QF.YARN_ORIG_CTX:
+        ok(f"past {context_label(QF.YARN_ORIG_CTX)}: YaRN - plain RoPE to {context_label(QF.YARN_ORIG_CTX)}, "
+           f"the YaRN table above it: --rope-scale {QF.yarn_scale_text(ctx)} (= {ctx} / {QF.YARN_ORIG_CTX}), "
+           "--yarn-orig-ctx " + str(QF.YARN_ORIG_CTX) + "; with the config's SAGUARO_YARN_ELASTIC=1 a conversation "
+           "stays on plain RoPE until it passes 256K")
+    # C18 step 2: answers at once right after the context (until now it came from --parallel N, the Models
+    # page or a start flag alone).  The default per layout as today: 1 on one card (parallel decoding lost
+    # speed on the measured 16 GB one), 2 on a split, and a config written before keeps its value on a split;
+    # 1 to 8, and --parallel N given = not asked.  The cost line that follows covers the context x answers.
+    par = getattr(a, "parallel", None)
+    if par is None:
+        was = (prev or {}).get("parallel")
+        dflt = (was if len(pc["gpus"]) > 1 and isinstance(was, int) and not isinstance(was, bool)
+                and 1 <= was <= 8 else (2 if len(pc["gpus"]) > 1 else 1))
+        par = int(ask("Answers at once (1-8)? ", [str(i) for i in range(1, 9)], str(dflt), a.yes))
+        a.parallel = par
+        if hip and par > 1:      # (review finding 4: since the question, the answer the measured card lost
+            warn(f"answers at once {par} on the one AMD card: parallel decoding lost speed on the one it was "
+                 "measured on (the RX 9070 XT) - 1 is the measured choice; 2 is what lends the picture encoder "
+                 "its batch slots, which is where a higher answer here pays for itself")
+    qfn_context_cost(par, ctx, lay)
     models = (Path(a.models_dir).expanduser().resolve() if a.models_dir else
               Path(inst["models_dir"]) if inst.get("models_dir") else default_models_dir())
     d = models / m["name"]
@@ -9416,7 +9497,8 @@ def migrate_cyber_frost(cfg: dict) -> bool:
     reserve = val("--vram-reserve-mib") or str(gpu_reserve_mib(gpu_facts(cfg)))
     new += ["--max-context", ctx, "--kv", "int8", "--kv-resident", str(min(int(ctx), 32768)),
             "--vram-reserve-mib", reserve, "--resident-budget-gib", str(qfn_ram_budget(mem_gb()[0])),
-            "--rope-scaling", "yarn", "--rope-scale", "4", "--yarn-orig-ctx", "262144"]
+            "--rope-scaling", "yarn", "--rope-scale", QF.yarn_scale_text(int(ctx)),   # (C18: the factor follows
+            "--yarn-orig-ctx", str(QF.YARN_ORIG_CTX)]                                 #  the context it keeps)
     if inst.get("model_dir"):
         new += ["--session-dir", str(Path(inst["model_dir"]) / "var" / "sessions")]
     cfg["args"] = new
