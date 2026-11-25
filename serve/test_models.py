@@ -350,7 +350,7 @@ class Settings(unittest.TestCase):
         self.assertEqual(got["qfn"]["context_range"],
                          {"min": 4096, "max": 1048576, "trained": None, "tested": 1048576,
                           "yarn_above": 262144})                   # (the slider's 1M top and its YaRN mark,
-        self.assertEqual(got["qfn"]["contexts"],                    #  tested: it runs live on mangonel)
+        self.assertEqual(got["qfn"]["contexts"],                    #  tested: it runs live on a 4 x T4 box)
                          [32768, 65536, 131072, 262144, 524288, 1048576])   # (the setup's list)
         cfg = json.loads(ds.read_text())
         cfg["args"][cfg["args"].index("--max-context") + 1] = "524288"

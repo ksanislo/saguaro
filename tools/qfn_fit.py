@@ -61,7 +61,7 @@ SPLIT_CONTEXT = 262144                                # a split: the K/V's RAM i
 # (both must stay among the contexts saguaro.py offers - QFN_CONTEXTS; test_setup_qfn guards it)
 # C18 - the YaRN extension past the trained context: the engine reads plain RoPE to YARN_ORIG_CTX and the YaRN
 # table past it (SAGUARO_YARN_ELASTIC=1, elastic: short chats never feel it), with --rope-scale reaching
-# CONTEXT_MAX = orig x factor (the live mangonel box runs 1M this way: ./ref, and CONTEXT_TESTED qfn).  The
+# CONTEXT_MAX = orig x factor (the live 4 x T4 box runs 1M this way: ./ref, and CONTEXT_TESTED qfn).  The
 # engine's --rope-scale parses a double (src/program/generate.cpp: std::atof into "double rope_scale", its
 # check only demands >= 1), so a fractional factor is written as computed and never rounded up: 384K is 1.5.
 YARN_ORIG_CTX = 262144                                # what the model was trained for: plain RoPE up to here

@@ -2044,7 +2044,7 @@ class LongContextC18(SetupFlow):
         a = cfg["args"]
         self.assertEqual(a[a.index("--max-context") + 1], "1048576")
         self.assertEqual(self.yarn_tail(cfg), ["--rope-scaling", "yarn", "--rope-scale", "4",
-                                               "--yarn-orig-ctx", "262144"])   # (the live mangonel line)
+                                               "--yarn-orig-ctx", "262144"])   # (the live 4 x T4 box's line)
         self.assertEqual(cfg["env"]["SAGUARO_YARN_ELASTIC"], "1")
 
     def test_a_64k_step_writes_its_fraction_as_computed(self):

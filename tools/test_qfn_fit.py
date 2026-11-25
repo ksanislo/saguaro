@@ -70,7 +70,7 @@ class YarnAndCost(unittest.TestCase):
         self.assertIsNone(F.yarn_scale(262144))                    # (inside the trained context: none)
         self.assertIsNone(F.yarn_scale(65536))
         self.assertEqual(F.yarn_scale(524288), 2.0)                # (512K: 2)
-        self.assertEqual(F.yarn_scale(1048576), 4.0)               # (1M: 4, what mangonel runs)
+        self.assertEqual(F.yarn_scale(1048576), 4.0)               # (1M: 4, what the live 4 x T4 box runs)
         self.assertEqual(F.yarn_scale(393216), 1.5)                # (384K: 1.5 - the engine's --rope-scale is
         self.assertEqual(F.yarn_scale(917504), 3.5)                #  parsed as a double: written, never rounded)
 
