@@ -930,6 +930,26 @@ def loop_guard_setting(cfg: dict | None, env=None) -> bool:
     return str(v).strip().lower() not in off if isinstance(v, str) else v is not False and v != 0
 
 
+def priority_setting(cfg: dict | None):
+    """The run config's "priority" (R122): the queue level a request without its own runs at - "background" makes
+    every request on this server step aside for other clients' normal ones (a llama-swap alias of the same model
+    sets it in its params).  None: normal, as ever; a bad value refuses to start the server."""
+    v = (cfg or {}).get("priority")
+    if v is None:
+        return None
+    try:
+        return priority_level(v)
+    except ValueError as e:
+        raise SystemExit(f"[saguaro] config priority: {e}")
+
+
+def request_priority(sampling) -> int:
+    """The level this request runs at: what Service.check_request put in "_priority" (R122); a caller that never
+    went through it (an older integration, a test) is normal."""
+    p = (sampling or {}).get("_priority")
+    return p if p in (PRIORITY_HIGH, PRIORITY_NORMAL, PRIORITY_BACKGROUND) else PRIORITY_NORMAL
+
+
 def client_stop_strings(req: dict | None) -> list[str]:
     """A request's own stop strings: OpenAI's "stop" (a string or a list) or Anthropic's "stop_sequences" (from
     Strata #454 - they were ignored, so a client that relied on them got text past its marker)."""
@@ -2905,6 +2925,9 @@ class RequestStat:
         self.samples = collections.deque(maxlen=4096)   # the samples inside the window, oldest first
         # what the Monitor shows of this request (several answer at once: each its own, not the shared status's)
         self.phase, self.generated, self.prompt_tokens, self.max_tokens = "waiting", 0, 0, None
+        # R122: its queue priority's name (the Monitor's small tag: high / background, normal shows nothing) and
+        # whether it gave its place up for a request of a higher priority and waits for the engine again
+        self.priority, self.paused_for_priority = None, False
         self.started, self.progress, self.prefill_tok_s = None, None, None
         # the prompt read (the drivers' PP lines / the batch slots' read counters): tokens read so far - what the
         # conversation cache held stays out - the span the server saw them arrive over, and whether another chat
@@ -2943,6 +2966,8 @@ class RequestStat:
             pr = (pr[1], pr[1])                          #  by the first answer step) - once answering, all n are read
         return {"state": "writing" if self.first_token else "reading" if self.started else "waiting",
                 "phase": self.phase, "prompt_tokens": self.prompt_tokens, "generated": self.generated,
+                "priority": self.priority, "paused_for_priority": self.paused_for_priority,   # (R122: the tag, and
+                #  its words while it waits: "paused for a higher-priority request")
                 "max_tokens": self.max_tokens, "prompt_read": pr[0] if pr else None, "prompt_total": pr[1] if pr else None,
                 "prefill_tok_s": self.prefill_tok_s if not self.first_token else None,
                 "prefill_shared": self.read_shared,     # (it read beside another chat: that rate is a shared clock's)
@@ -2985,6 +3010,7 @@ class Service:
         self.fit_max_tokens = fit_max_tokens          # --fit-max-tokens: clamp the output cap instead of 400
         self.sampling_defaults = dict(sampling_defaults or {})   # the run config's `sampling` block
         self.default_effort = None                    # the run config's `reasoning_effort`: a request without one
+        self.priority_default = None                  # the run config's `priority` (R122): None = normal
         self.shared = {}                              # the web app's Chat settings for every client (POST /settings)
         self.shared_path = None                       # where they are kept between starts (next to the config)
         self.turbo_default = None                     # the model's live Turbo (PLAN-turbo-live): {"drop","skip"} or None
@@ -3128,6 +3154,17 @@ class Service:
         line takes, before anything is sent.  A logit_bias needs an engine that applies it (INFO logit_bias=1): an
         older one would answer as if it had none."""
         check_request_sampling(req)
+        # R122: the queue priority.  The body's "priority" ("high" | "normal" | "background", anything else a 400),
+        # else the X-Saguaro-Priority header the handler passed in (the body wins), else the run config's
+        # "priority", else normal.  OpenAI's "service_tier" is NOT this: it names a billing tier and is refused
+        # where the dialect checks it (/v1/responses), it never steps another client's request aside.
+        want, where = req.get("priority"), "priority"
+        if want is None and req.get("_priority_header") is not None:
+            want, where = req.get("_priority_header"), "X-Saguaro-Priority header"
+        if want is not None:
+            req["_priority"] = priority_level(want, where)
+        else:
+            req["_priority"] = self.priority_default if self.priority_default is not None else PRIORITY_NORMAL
         # PLAN-turbo-live: a request without its own Turbo takes the model's live one (the control panel's, no
         # config rewrite); one that says off keeps off - it overrides the global setting for itself
         if not isinstance(req.get("turbo"), dict):
@@ -4379,6 +4416,7 @@ class Service:
         for st in sorted(self.waiting, key=lambda r: r.queued_at or 0.0):
             rows.append({"id": st.id, "cid": getattr(st, "cid", None), "label": st.api, "conv": st.conv.id if st.conv else None,
                          "state": "queued", "phase": None,
+                         "priority": st.priority, "paused_for_priority": st.paused_for_priority,   # (R122)
                          "prompt_tokens": st.prompt_tokens or None, "prompt_read": None, "prompt_total": None,
                          "generated": 0, "max_tokens": st.max_tokens, "tok_s": None, "prefill_tok_s": None,
                          "turbo": dict(st.turbo) if st.turbo else None,
@@ -4594,6 +4632,9 @@ class Service:
             active = self.active
             writing = len(self.current_requests)        # (of the active ones, those past their prompt)
             spec_off = bool(self.current_requests) and all(r.spec_off for r in self.current_requests)
+            prios = {r.priority for r in self.running}  # (R122: the live state says at which priority it runs,
+            priority = prios.pop() if len(self.running) == 1 else None   #  and the Monitor tags high/background)
+            paused = any(r.paused_for_priority for r in self.running)
             now = time.time()
             convs = self._convs_list(now)               # (one entry per conversation: the Monitor's Conversations)
             ended = list(self.ended)
@@ -4606,7 +4647,9 @@ class Service:
         else:
             state = "unloaded" if self.unloaded else "idle"
         live = {"state": state, "queued": s.get("queued", 0), "active": active,   # (answering at once: --parallel)
-                "writing": writing, "spec_off": spec_off,   # (the request(s) running asked for no drafting)
+                 "writing": writing, "spec_off": spec_off,   # (the request(s) running asked for no drafting)
+                 "priority": priority, "paused_for_priority": paused,   # (R122: whose turn this is, and whether an
+                 #  answer is sitting out for one above it - the chats rows carry each request's own)
                 "phase": s.get("phase") if s.get("busy") else None,
                 "prompt_tokens": s.get("prompt_tokens") if s.get("busy") else None,
                 "prompt_read": None, "prompt_total": None, "generated": s.get("generated") if s.get("busy") else None,
@@ -5181,7 +5224,7 @@ class Service:
         return now
 
     @contextlib.contextmanager
-    def _turn(self, hold, cancel=None, units=1):
+    def _turn(self, hold, cancel=None, units=1, priority=None):
         """The engine's turn for one request: the FIFO, given back at the end unless a fair slice already did.  The
         place is taken (and given up) inside the try: an exception while waiting - a FIFO that throws instead of
         waiting - left it in the line for ever, and every request behind it waited for a turn nothing would take."""
@@ -5190,10 +5233,10 @@ class Service:
             if hold[0]:
                 pass                                    # (the turn taken already: _queue_wait's, with keep-alives)
             elif cancel is None:
-                self.fifo.acquire(units=units)
+                self.fifo.acquire(units=units, priority=priority)
                 hold[0] = True
             else:
-                place = self.fifo.enqueue(units=units)
+                place = self.fifo.enqueue(units, priority)
                 while not cancel.is_set():
                     if self.fifo.wait_turn(place, timeout=0.05):
                         hold[0] = True
@@ -5206,7 +5249,7 @@ class Service:
                 hold[0] = False
                 self.fifo.release(units=units)
 
-    def _queue_wait(self, hold, cancel, units=1) -> Iterator[tuple[str, object]]:
+    def _queue_wait(self, hold, cancel, units=1, priority=None) -> Iterator[tuple[str, object]]:
         """A request's wait in the FIFO for its first turn, as ("ping", None) every QUEUE_PING_S - the streams write
         them as SSE comments (": keep-alive"), which every client's parser ignores (#483: a request queued behind a
         long answer sent nothing at all, and a client with a stream-idle timeout gave up on a turn that was only
@@ -5215,7 +5258,7 @@ class Service:
         if cancel is None:                              # (no way to leave the line: _turn waits as before)
             return
         every = queue_ping_seconds()
-        place = self.fifo.enqueue(units=units)
+        place = self.fifo.enqueue(units, priority)
         try:
             last = time.monotonic()
             while not cancel.is_set():
@@ -5656,6 +5699,8 @@ class Service:
         stat.spec_off = request_spec_off(sampling)
         stat.turbo = turbo_live.turbo_of(sampling)      # (the Monitor's Turbo badge shows its options)
         stat.id, stat.api = next(self._req_ids), (sampling or {}).get("_api")
+        prio = request_priority(sampling)               # (R122: its place in the FIFO and the preemption rule)
+        stat.priority = PRIORITY_NAMES[prio]
         stat.cid = (sampling or {}).get("_cid")
         stat.prompt_tokens, stat.max_tokens, stat.queued_at = len(ids), max_new, my_started
         conv_tail = (sampling or {}).get("_gen_tail")   # the reply's opening tokens (prepare's gt=): not the opening
@@ -5668,8 +5713,8 @@ class Service:
         hold = [False, False]                           # holds the FIFO (fair slices let go of it); counts as active
         asked = time.monotonic()
         try:
-            yield from self._queue_wait(hold, cancel)   # (#483: keep-alives while queued; the turn taken there)
-            with self._turn(hold, cancel):
+            yield from self._queue_wait(hold, cancel, priority=prio)   # (#483: keep-alives while queued; the turn
+            with self._turn(hold, cancel, priority=prio):              #  taken there; R122: at its own priority)
                 with self.status_lock:
                     self.status["queued"] -= 1
                     queued = False
@@ -6158,6 +6203,7 @@ class Service:
                         # the drafts offered and kept (the engine's DONE line; None: it reported none)
                         "drafts_offered": last.get("drafts_offered"), "drafts_accepted": last.get("drafts_accepted"),
                         "spec_off": stat.spec_off,
+                        "priority": stat.priority,      # (R122: the level it queued and answered at)
                         "turbo": dict(stat.turbo) if stat.turbo else None,
                         "loop_guard": guards[0].summary() if guards and guards[0].events else None}
                     self.history.append(row)
@@ -7143,6 +7189,7 @@ def make_handler(svc: Service):
             svc.keep_alive_s = ka                               # (the model stays loaded that long after this request)
             oreq = svc.with_shared(oreq, "openai")
             oreq["_api"] = "openai"
+            self._priority_header(oreq)
             svc.check_request(oreq)
             messages, tools, kw = openai_to_messages(oreq, deepseek=getattr(svc.template, "deepseek", False))
             max_new = int(oreq.get("max_tokens") or 0)
@@ -7791,6 +7838,13 @@ def make_handler(svc: Service):
                 return False
             return True
 
+        def _priority_header(self, req: dict):
+            """The X-Saguaro-Priority header onto the request (R122): Service.check_request reads it together with
+            the body's own "priority" - the body wins - and a bad value of either is the 400."""
+            h = self.headers.get("X-Saguaro-Priority")
+            if h is not None:
+                req["_priority_header"] = h
+
         def _context(self):
             # It reloads the model for every client, so only the app's own page may ask for it
             body = self._body()
@@ -7943,6 +7997,7 @@ def make_handler(svc: Service):
             sampling = svc.with_shared(sampling, "openai")
             sampling["_api"] = "openai"
             sampling["_responses"] = True
+            self._priority_header(sampling)
             svc.check_request(sampling)
             if req.get("background"):
                 initial = new_response(svc.model, req, status="queued")
@@ -8013,6 +8068,7 @@ def make_handler(svc: Service):
         def _openai(self, req):
             req = svc.with_shared(req, "openai")
             req["_api"] = "web" if req.get("strata_resume") is True else "openai"   # the Monitor's request table
+            self._priority_header(req)
             svc.check_request(req)                             # a bad sampling field or logit_bias: a 400, now
             messages, tools, kw = openai_to_messages(req, deepseek=getattr(svc.template, "deepseek", False))
             max_req = max_new = int(req.get("max_completion_tokens") or req.get("max_tokens") or 0)   # 0/-1: the rest
@@ -8120,6 +8176,7 @@ def make_handler(svc: Service):
         def _anthropic(self, req):
             req = svc.with_shared(req, "anthropic")
             req["_api"] = "anthropic"
+            self._priority_header(req)
             svc.check_request(req)                             # a bad sampling field: a 400, now
             messages, tools, kw = anthropic_to_messages(req, deepseek=getattr(svc.template, "deepseek", False))
             max_new = int(req.get("max_tokens") or 0)                  # 0/-1: the rest of the context
@@ -8192,6 +8249,7 @@ SERVER_ENV = ("SAGUARO_ENGINE_STALL_S", "SAGUARO_REQUEST_QUIET_S", "SAGUARO_DRAI
               "SAGUARO_MAX_BODY_MIB", "SAGUARO_FAIR_SLICE_S", "SAGUARO_FAIR_READ_S", "SAGUARO_FAIR_READ_YIELD_S",
               "SAGUARO_DS4_KEEP_THINKING",
               "SAGUARO_SERVER_LOG", "SAGUARO_GLM_THINK_RESERVE", "SAGUARO_LOOP_GUARD", "SAGUARO_QUEUE_PING_S",
+              "SAGUARO_PRIORITY_AGE_S",
               "SAGUARO_UPDATE_CHECK", "SAGUARO_PACK_TEMPLATE") + RESPONSE_ENV_KEYS + \
     ("SAGUARO_DS4_RESTORE_POINTS", "SAGUARO_DS4_RESTORE_TAIL")
 
@@ -9168,6 +9226,10 @@ def main() -> int:
     svc.loop_guard = loop_guard_setting(cfg)            # (SAGUARO_LOOP_GUARD=0 or "loop_guard": false: off)
     if not svc.loop_guard:
         print("[saguaro] loop guard: off (a request's \"loop_guard\": true turns it on for that request)", flush=True)
+    svc.priority_default = priority_setting(cfg)        # (R122: "priority": the level a request without one runs at)
+    if svc.priority_default is not None:
+        print(f"[saguaro] request priority when a request names none: {PRIORITY_NAMES[svc.priority_default]}",
+              flush=True)
     svc.api_key = a.api_key or cfg.get("api_key", "")
     try:
         svc.cors_origins = parse_cors_origins(cfg.get("cors_origins"))
