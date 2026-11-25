@@ -111,6 +111,49 @@ class DriverReadLive(unittest.TestCase):
         eng = pump_engine(["RDONE rid=1 new=500 ms=158.0"])
         self.assertFalse(hasattr(eng, "read_live"))      # (no RHB line ever came: the state is never laid out)
 
+    def test_a_split_read_solo_beats_are_a_belt(self):
+        # U5b (PLAN-u5b-split-progress), a 4 x T4 layer split (ref/hb-4xT4.txt): every card's host point printed
+        # its own piece count, so a line printed 14592, 19456, 14592; 34048, 29184 - backwards beats whose next
+        # forward step looked like a rate spike.  The driver's belt: a recorded beat never goes back within the
+        # read, and a backwards line changes neither done nor rate; a new read (other new/rid) starts over.
+        eng = pump_engine([])
+        beats = (0, 4864, 0, 4864, 4864, 14592, 19456, 14592, 19456, 34048, 29184, 34048, 38903)
+        seen, prev_done, prev_rate = [], None, None
+        for i, raw in enumerate(beats):
+            eng._rhb(f"RHB rid=1 stage=read done={raw} new=38910 reused=0 pass=0/1 ms={1000 + i * 1000}")
+            s = eng.read_live["solo"]
+            seen.append(s["done"])
+            if prev_done is not None:
+                self.assertGreaterEqual(s["done"], prev_done)        # the beats never go back
+                if raw < prev_done:                                  # a backwards line (a lagging card won
+                    self.assertEqual(s["done"], prev_done)           #   the beat): the belt holds the figure
+                    self.assertEqual(s["rate"], prev_rate)           #   and the rate is untouched: no spike
+            prev_done, prev_rate = s["done"], s["rate"]
+        self.assertEqual(seen, sorted(seen))
+        self.assertEqual(seen[-1], 38903)
+        eng._rhb("RHB rid=2 stage=read done=100 new=5000 reused=0 pass=0/1 ms=500")   # another read (rid): over
+        self.assertEqual(eng.read_live["solo"]["done"], 100)
+        eng._rhb("RHB rid=2 stage=read done=50 new=9000 reused=0 pass=0/1 ms=1000")    # another read (new): over
+        self.assertEqual(eng.read_live["solo"]["done"], 50)
+
+    def test_a_split_read_slot_beats_are_a_belt(self):
+        # the same belt on a batch slot's read (rid=0): its slot entry only ever moves forward, the rate follows
+        # the forward part - and the BRA that ends the read still clears the entry
+        eng = pump_engine([], slots=(7,))
+        prev_done, prev_rate = None, None
+        for i, raw in enumerate((4864, 0, 4864, 14592, 9728, 19456)):
+            eng._rhb(f"RHB rid=0 stage=read done={raw} new=38910 reused=0 pass=0/1 ms={1000 + i * 1000} slot=7")
+            s = eng.read_live["slots"][7]
+            if prev_done is not None:
+                self.assertGreaterEqual(s["done"], prev_done)
+                if raw < prev_done:
+                    self.assertEqual(s["done"], prev_done)
+                    self.assertEqual(s["rate"], prev_rate)
+            prev_done, prev_rate = s["done"], s["rate"]
+        self.assertEqual(prev_done, 19456)
+        self.assertEqual(prev_rate, 4864.0)     # 19456 over the belt's 14592 in the second between: no 9728 spike
+        # (the BRA that ends a read clears the entry: test_the_slot_line_goes_to_its_queue_and_bra_ends_it)
+
 
 class ReadingEngine:
     """A fake QFN batch read behind the real adapter: what the pump does (parse, then route) happens here by
@@ -274,6 +317,27 @@ class LiveEverySecond(unittest.TestCase):
         self.assertEqual(self.svc.metrics()["live"]["read_states"], [])
         self.assertNotIn("read_stage", self.row())
         self.assertEqual(self.svc._read_counted(stat), 438)
+
+    def test_a_split_read_row_never_goes_back(self):
+        # U5b (PLAN-u5b-split-progress), the 4 x T4 split read (ref/hb-4xT4.txt) behind the real adapter: a line
+        # printed the reading card's own piece count, so the row's figure jumped back (14592 after 19456) and the
+        # next forward step read as a spike.  With the shared figure and the driver's belt the row's read_done only
+        # moves forward, the counted tokens are the forward ones, and the beat's rate stays the true second's step.
+        eng = ReadingEngine(self.svc)
+        stat = self.reading()
+        eng.watch(7, stat)
+        it = eng.wait(7)
+        prev = 0
+        for i, raw in enumerate((4864, 0, 4864, 14592, 9728, 19456)):
+            eng.feed(7, f"RHB rid=0 stage=read done={raw} new=38910 reused=0 pass=0/1 ms={1000 + i * 1000} slot=7")
+            self.assertIsNone(eng.step(it))
+            self.tick()
+            got = self.row()["read_done"]
+            self.assertGreaterEqual(got, prev)                           # the row's beats never go back
+            prev = got
+        self.assertEqual(prev, 19456)
+        self.assertEqual(self.svc._read_counted(stat), 19456)            # only the forward tokens were booked
+        self.assertAlmostEqual(eng.eng.read_live["slots"][7]["rate"], 4864.0, places=1)
 
     def test_a_stale_heartbeat_is_not_shown(self):
         # a read whose last beat is older than three seconds (the engine went quiet, a BRA was lost): the row
