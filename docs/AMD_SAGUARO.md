@@ -302,8 +302,8 @@ bit-identical. Q8_0 (177 GB) on the same PC: KL 0.0050 against the T4's Q8_0, an
 
 ## Instinct MI300X / MI325X
 
-AMD Instinct MI300X / MI325X (`gfx942`, CDNA3) is accepted, on one GPU; its speed is not measured here yet. Like the MI100 it is a wave64
-card and runs through the hip_compat half-wavefront layer.
+AMD Instinct MI300X / MI325X (`gfx942`, CDNA3) is accepted, on one GPU; the MI325X has been benched below, the MI300X itself has not
+been tried yet. Like the MI100 it is a wave64 card and runs through the hip_compat half-wavefront layer.
 
 Install ROCm's development packages for the card first (ROCm 7.14: `amdrocm-core-dev7.14-gfx942` and
 `amdrocm-blas-dev7.14`), then run the setup above without the `SAGUARO_GLM_RAM_GB` override. On an MI325X (256 GB) every
