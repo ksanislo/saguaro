@@ -60,12 +60,14 @@ let swapReady = null;                    // (true ready, false swapped out (the 
 export const unloaded = () => swapReady === false;
 export const stopPoll = () => clearTimeout(timer);
 
-async function swapRunning(swap) {       // llama-swap's {"running": [{model, state}]}: loads nothing itself
+async function swapRunning(swap, was) {  // llama-swap's {"running": [{model, state}]}: loads nothing itself
   try {
     const r = await fetch(`${swap.root}running`, {headers: headers()});
-    if (!r.ok) return null;
+    // an older llama-swap without /running (404) or a key it refuses (401, 403): poll as today
+    if (r.status === 404 || r.status === 401 || r.status === 403) return null;
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
     return ((await r.json()).running || []).some((x) => x.model === swap.id && x.state === "ready");
-  } catch (e) { return null; }           // (an older llama-swap without /running, a key it refuses: poll as today)
+  } catch (e) { return was; }            // (a blip, not "no gate": one opening the closed gate would load the model back)
 }
 
 export async function poll() {
@@ -75,7 +77,7 @@ export async function poll() {
   try {
     const swap = swapAt();
     const was = swapReady;
-    swapReady = swap && S.health.supervisor === "llama-swap" ? await swapRunning(swap) : null;
+    swapReady = swap && S.health.supervisor === "llama-swap" ? await swapRunning(swap, was) : null;
     if (swapReady === false) {
       if (was !== false) { S.metrics = null; S.conn = "unloaded"; emit(); }   // (the Monitor's quiet unloaded state)
       timer = setTimeout(poll, 5000);                           // (/running alone, until the model is back on the card)

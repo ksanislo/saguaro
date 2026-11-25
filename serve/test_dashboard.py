@@ -1133,6 +1133,42 @@ console.log(JSON.stringify({whileHidden, total: log.filter((u) => u === "health"
         self.assertEqual(got["total"], 2)                           # (seen again: the retry it lost, made up)
         self.assertTrue(got["loaded"])                              # (and the model's facts are here at last)
 
+    def test_a_blip_on_running_keeps_the_gate_as_it_was(self):
+        # (the review's finding 3: /running answering a network error or a 500 is a blip, not "older llama-swap" -
+        #  answering no-gate then would fetch /metrics and load the model straight back.  A blip keeps the last
+        #  answer: a closed gate stays closed; a blip before any answer yet polls as today, visible-only as ever)
+        got = self.node("""
+location.pathname = "/upstream/glm-5.3-flash/";
+st.S.health.model = "glm-5.3-flash"; st.S.health.supervisor = "llama-swap";
+const log = [];
+let blip = false;
+globalThis.fetch = async (u) => { log.push(u);
+  if (u.endsWith("/running") && blip) throw new Error("no route");
+  return {ok: true, status: 200, json: async () => u.endsWith("/running")
+    ? {running: []} : {model: "glm-5.3-flash", live: {state: "idle"}}}; };
+await sv.poll();                                                    // (off the card: the gate closes)
+blip = true;
+await sv.poll();                                                    // (the blip: the closed gate must stay closed)
+blip = false;
+const blipped = log.slice(), blipConn = st.S.conn;
+await sv.poll(); sv.stopPoll();                                     // (and answering again, it behaves as before)
+console.log(JSON.stringify({blipped, blipConn, log, conn: st.S.conn}));""")
+        self.assertEqual(got["blipped"], ["/running", "/running"])  # (the blip asked /running only: no /metrics)
+        self.assertEqual(got["blipConn"], "unloaded")
+        self.assertEqual(got["log"], ["/running", "/running", "/running"])
+        self.assertEqual(got["conn"], "unloaded")
+        got = self.node("""
+location.pathname = "/upstream/glm-5.3-flash/";
+st.S.health.model = "glm-5.3-flash"; st.S.health.supervisor = "llama-swap";
+const log = [];
+globalThis.fetch = async (u) => { log.push(u);
+  return u.endsWith("/running") ? {ok: false, status: 500, json: async () => ({})}
+                                : {ok: true, status: 200, json: async () => ({model: "glm-5.3-flash", live: {state: "idle"}})}; };
+await sv.poll(); sv.stopPoll();                                     // (500 before any answer: no gate to keep, poll on)
+console.log(JSON.stringify({log, conn: st.S.conn}));""")
+        self.assertEqual(got["log"], ["/running", "metrics"])       # (nothing known yet: poll as today)
+        self.assertEqual(got["conn"], "ok")
+
 
 if __name__ == "__main__":
     unittest.main()
