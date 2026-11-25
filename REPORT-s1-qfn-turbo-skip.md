@@ -83,14 +83,18 @@ usage table + `fold_skip_usage`, the counter buckets + `turbo_take`, the per-req
    `turbo_skip_parity`; a live A/B of the same prompt with turbo off before/after this change must match token
    for token (the skip-off guarantee), and the server's `serve/test_turbo_live.py` for the wire half.
 
-## Tests run in this session (no GPU on this box; the plan: no GPU runs)
+## Tests run in this session (the plan: no GPU runs — not for lack of GPUs; this box has 4, CUDA 13.1)
 
 - `nvcc -c engines/qfn/src/kernels/cuda/native_router.cu` — compiles (step 2 shape, re-checked after steps 4/5/fix).
 - `g++ -fsyntax-only` (C++20, STRATA_VERSION defined, CUDA headers): `generate.cpp`, `verify.cpp`, `layer.cpp`,
   `mtp.cpp`, `session.cpp`, `turbo_skip_parity.cpp` — all clean; `route_resident_parity.cu` compiles (nvcc);
   `router_chain_bench.cpp` clean.
-- `turbo_skip_parity` is registered in ctest but **was not run** (it needs a GPU; "unit tests only if they need
-  no GPU"). No Python suite applies to these files (no serve/ or tools/ file changed).
+- `turbo_skip_parity` is registered in ctest but **was not run in this session** (it needs a GPU and the rule for
+  this session was no GPU runs; the box does have GPUs — the earlier "no GPU on this box" note was false). The
+  REVIEW-RESULT review then compiled the four ctest modules scoped with nvcc into ./scratch and ran them on GPU,
+  one at a time: `turbo_skip_parity`, `native_multi_parity`, `router_top10_parity`, `route_resident_parity` — all
+  OK. Fix 1 added the host-side `turbo_skip_map_test` (ctest, no GPU), run here and OK.
+  No Python suite applies to these files (no serve/ or tools/ file changed).
 
 ## Risks
 
