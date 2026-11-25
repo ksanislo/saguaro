@@ -2188,6 +2188,23 @@ def toolkit_root_defs(nvcc) -> list:
     return [] if root == Path("/usr") else [f"-DCUDAToolkit_ROOT={root}"]
 
 
+def host_compiler_defs(host_compiler) -> list:
+    """The cmake flags putting a CUDA build on one host compiler: nvcc's (-DCMAKE_CUDA_HOST_COMPILER) and, on a POSIX
+    box, the plain C and C++ on the same one - as the known P40 build (build-qfn.sh: gcc-12 / g++-12 for C, C++ and
+    CUDA's host code).  engines/qfn's ExternalProject inherits these from the top project, and a plain C++ from a
+    newer default g++ linked beside CUDA's older host compiler is what the 'unsupported GNU version' mess hides.
+    Windows: only the CUDA host one, as before (Visual Studio's environment decides the rest)."""
+    if not host_compiler:
+        return []
+    hc = shutil.which(host_compiler) or host_compiler
+    conf = [f"-DCMAKE_CUDA_HOST_COMPILER={hc}"]
+    if not WIN:
+        cc = shutil.which(re.sub(r"g\+\+-", "gcc-", Path(hc).name))
+        if cc:
+            conf += [f"-DCMAKE_C_COMPILER={cc}", f"-DCMAKE_CXX_COMPILER={hc}"]
+    return conf
+
+
 def compile_engine(archs, gpu_ids, nvcc, host_compiler, llama: Path, src: str, soft=False,
                    target: str = "maya") -> dict | None:
     """cmake configure + build of the `maya` target (DeepSeek: `maya-ds4`) in build/; the exact commands are
@@ -2197,8 +2214,9 @@ def compile_engine(archs, gpu_ids, nvcc, host_compiler, llama: Path, src: str, s
         msg = f"the engine build stopped while {what} (the reason is above)"
         hint = ("common causes: 'unsupported Microsoft Visual Studio version' - CUDA 12.x needs Visual Studio 2019 or "
                 "2022 (its Build Tools are enough; only CUDA 13.2 and newer take 2026);" if WIN else
-                "common causes: 'unsupported GNU version' - install an older g++ your CUDA accepts (e.g. g++-13) and run "
-                "again (it is found by itself), or pass --host-compiler g++-13;") + (
+                "common causes: 'unsupported GNU version' - install an older g++ your CUDA accepts (CUDA 12.0 - 12.3 "
+                "take up to g++-12, 12.4 - 12.5 up to g++-13) and run again (it is found by itself), or pass "
+                "--host-compiler g++-N;") + (
                 "\n       'Unsupported gpu architecture compute_70' (or compute_61) - CUDA 13 cannot build for Volta "
                 "or Pascal, install CUDA 12.x;\n       the compiler killed (out of memory) - close programs and run it "
                 "again "
@@ -2228,8 +2246,7 @@ def compile_engine(archs, gpu_ids, nvcc, host_compiler, llama: Path, src: str, s
         conf += ["-DSAGUARO_QFN=ON", f"-DSAGUARO_QFN_GGML_DIR={llama.as_posix()}"]
     if S.ARM and S.arm_cpu_arch():
         conf.append(f"-DGGML_CPU_ARM_ARCH={S.arm_cpu_arch()}")
-    if host_compiler:
-        conf.append(f"-DCMAKE_CUDA_HOST_COMPILER={shutil.which(host_compiler) or host_compiler}")
+    conf += host_compiler_defs(host_compiler)
     # (CMake's compiler checks see only the chosen cards, numbered as nvidia-smi numbers them)
     env = dict(os.environ, CUDA_DEVICE_ORDER="PCI_BUS_ID", CUDA_VISIBLE_DEVICES=",".join(str(i) for i in gpu_ids))
     # nvcc takes 2-4 GB per job on the big kernels: half the threads, and no more jobs than RAM / 4 GB
@@ -2324,18 +2341,69 @@ int main() { std::vector<std::string> v(1); return (int) std::cos(0.0) - 1 + (in
 """
 
 
+def cuda_gcc_max(nv_version) -> int | None:
+    """The newest g++ major a CUDA toolkit compiles with (NVIDIA's supported-matrix): CUDA 12.0 - 12.3 stop at
+    gcc 12 (the Pascal build's CUDA 12.x: Ubuntu 24.04's nvidia-cuda-toolkit beside its g++ 13/14), 12.4 - 12.5 at
+    13, 12.6 and newer at 14.  CUDA 13.x and an unread toolkit: no ceiling pinned here - the probe tries."""
+    if not nv_version:
+        return None
+    major, minor = nv_version
+    if major != 12:
+        return None
+    return 12 if minor <= 3 else (13 if minor <= 5 else 14)
+
+
+def gcc_major() -> int | None:
+    """The major of the default g++ (13/14 on Ubuntu 24.04), or None when it does not run or does not say."""
+    m = re.search(r"\b(\d+)\.", S.out(["g++", "--version"]))
+    return int(m.group(1)) if m else None
+
+
+def gpp_versions() -> list:
+    """The versioned host compilers installed, newest first (g++-14, g++-12 ...): what CUDA's usual installs keep
+    beside the default g++ in /usr/bin and /usr/local/bin."""
+    return sorted({q.name for d in ("/usr/bin", "/usr/local/bin") for q in Path(d).glob("g++-[0-9]*")
+                   if re.fullmatch(r"g\+\+-\d+", q.name)}, key=lambda n: -int(n[4:]))
+
+
+def host_order(base: list, nv_version) -> list:
+    """The host compilers to try for this toolkit, in order: as installed (the default g++ first), except that a
+    toolkit whose matrix (cuda_gcc_max) stops below the PC's default g++ goes straight to the newest installed
+    g++-N it does take: CUDA 12.0 on Ubuntu 24.04 - the P40 build - never compiles with the default g++ 13/14, and
+    trying it only re-prints 'unsupported GNU version'."""
+    cap = cuda_gcc_max(nv_version)
+    if not cap or WIN or None not in base or (gcc_major() or 0) <= cap:
+        return base
+    want = f"g++-{cap}"
+    return [want] + [c for c in base if c != want] if want in base else base
+
+
+def missing_gpp_hint(nvccs) -> str:
+    """The install line for the case the probe cannot work around: every fitting toolkit compiles with a g++ older
+    than the PC's default and none that old is installed (CUDA 12.0 with g++ 12 missing)."""
+    if WIN:
+        return ""
+    cap = next((c for c in (cuda_gcc_max(v) for _nv, v in nvccs) if c), None)
+    if not cap or (gcc_major() or 0) <= cap or f"g++-{cap}" in gpp_versions():
+        return ""
+    return (f" - these toolkits compile with g++ {cap} or older and the default g++ is newer: install it "
+            f"(Ubuntu/Debian: sudo apt-get install -y g++-{cap}), or pass --host-compiler g++-N")
+
+
 def toolchain_for(archs, nvcc_given: str | None, hc_given: str | None) -> tuple:
     """(nvcc, host compiler or None for the default) that compile the engine's kind of CUDA here.  Every installed
     toolkit that can build for these GPUs (newest first; --nvcc alone if given) with the default g++, then each
     installed g++-N (newest first; --host-compiler alone if given), on a small file the way the engine compiles:
     C++20 and the math functions the kernels use.  A toolkit refuses a g++ newer than it supports, and a newer
     glibc's own rsqrtf/sinpi declarations clash with older CUDA headers - nothing but trying tells which pair works
-    on a given system.  On Windows the compiler is Visual Studio's (in its vcvars64.bat environment): only the
-    toolkits are tried."""
+    on a given system.  One rule is known without trying (host_order): NVIDIA's matrix stops CUDA 12.0 - 12.3 at
+    gcc 12, so the P40's CUDA 12.0 on a newer-default-g++ PC takes g++-12 when it is installed, and the closing line
+    says which package to install when it is not.  On Windows the compiler is Visual Studio's (in its
+    vcvars64.bat environment): only the toolkits are tried."""
     import tempfile
 
     if nvcc_given:
-        nvccs = [nvcc_given]
+        nvccs = [(nvcc_given, S.nvcc_version(nvcc_given))]
     else:
         seen, found = set(), []
         for c in nvcc_candidates():
@@ -2343,18 +2411,16 @@ def toolchain_for(archs, nvcc_given: str | None, hc_given: str | None) -> tuple:
                 seen.add(os.path.realpath(c))
                 found.append((c, S.nvcc_version(c)))
         lo, hi = nvcc_range(archs)
-        nvccs = [c for c, v in sorted((f for f in found if f[1]), key=lambda f: f[1], reverse=True)
-                 if v >= lo and (hi is None or v < hi)]
-    hcs = [None] if WIN else [hc_given] if hc_given else [None] + sorted(
-        {q.name for d in ("/usr/bin", "/usr/local/bin") for q in Path(d).glob("g++-[0-9]*")
-         if re.fullmatch(r"g\+\+-\d+", q.name)}, key=lambda n: -int(n[4:]))
+        nvccs = [f for f in sorted((f for f in found if f[1]), key=lambda f: f[1], reverse=True)
+                 if f[1] >= lo and (hi is None or f[1] < hi)]
+    hcs = [None] if WIN else [hc_given] if hc_given else [None] + gpp_versions()
     say("  Finding a CUDA toolkit and C++ compiler that build the engine here ...")
     with tempfile.TemporaryDirectory() as t:
         src = Path(t) / "probe.cu"
         src.write_text(PROBE_CU, encoding="utf-8")
-        for nv in nvccs:
+        for nv, vv in nvccs:
             vcvars = S.find_vcvars(nvcc=nv) if WIN else None   # which VS a toolkit takes is in its release (S.find_vcvars)
-            for c in hcs:
+            for c in host_order(hcs, vv):
                 cmd = [nv, "-std=c++20", "-c", str(src), "-o", str(Path(t) / "probe.o")] + \
                       (["-ccbin", shutil.which(c) or c] if c else [])
                 if vcvars:                             # cl.exe is on PATH only inside Visual Studio's environment
@@ -2366,8 +2432,8 @@ def toolchain_for(archs, nvcc_given: str | None, hc_given: str | None) -> tuple:
                     ok(f"{nv} with " + ("Visual Studio's C++ compiler" if WIN else c or "the default g++"))
                     return nv, c
     warn("no installed CUDA toolkit and C++ compiler pair compiled a test file: the build will show why (" +
-         toolkit_hint(archs) + ")")
-    return (nvccs[0] if nvccs else nvcc_given), hc_given
+         toolkit_hint(archs) + ")" + missing_gpp_hint(nvccs))
+    return (nvccs[0][0] if nvccs else nvcc_given), hc_given
 
 
 def hip_toolchain(pc: dict) -> tuple:
@@ -7237,7 +7303,7 @@ def qfn_entry(quant: str = QFN_DEFAULT_QUANT) -> dict:
     q = man["quants"].get(quant)
     if not q:
         fail(f"{QFN_MANIFEST} names no {Q.shown('qfn', quant)}", "restore it (git checkout tools/qfn/download.json)")
-    return {"about": f"{Q.QFN_SHOWN} in {q['about']}; {man.get('license', 'the Qwen Community License')}",
+    return {"about": f"{Q.QFN_SHOWN} in {q['about']}; {q.get('license') or man.get('license', 'the Qwen Community License')}",   # (a quant from another lab's repo names its own license: the GSQ ones are apache-2.0)
             "format": "qfn-gguf", "repo": q.get("repo") or man["repo"],
             "revision": q.get("revision") or man["revision"], "folder": q["folder"],
             "files": {k: v[0] for k, v in q["files"].items()}, "sha256": {k: v[1] for k, v in q["files"].items()},
@@ -7424,7 +7490,8 @@ def compile_vision_qfn(pc, meta, llama: Path, src: str) -> bool:
     else:
         conf += ["-DSTRATA_VISION_CUDA=ON", "-DCMAKE_CUDA_ARCHITECTURES=" + ";".join(str(x) for x in archs),
                  f"-DCMAKE_CUDA_COMPILER={meta.get('nvcc') or pc['nvcc']}",
-                 *toolkit_root_defs(meta.get("nvcc") or pc["nvcc"])]
+                 *toolkit_root_defs(meta.get("nvcc") or pc["nvcc"]),
+                 *host_compiler_defs(meta.get("host_compiler"))]   # (the engine's host g++ too: CUDA 12.0 on a P40
         if S.ARM and S.arm_cpu_arch():
             conf.append(f"-DGGML_CPU_ARM_ARCH={S.arm_cpu_arch()}")
     jobs = max(2, min((os.cpu_count() or 4) // 2, int(mem_gb()[0] // 4) or 2))

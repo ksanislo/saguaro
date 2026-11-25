@@ -33,6 +33,34 @@
     "Qwen3.8-Flash-Next-Q8_0-00006-of-00006.gguf": [34015618784, "538a93bca918064983409a41187ad4c68640f9aced6f29564da8f551bf86d7a5"]
     }
    },
+   "gsq-iq3_s": {
+    "_": "IST-DASLab's GSQ-RCO quant of the model (their own repo, apache-2.0, the revision pinned below - not unsloth's). needs: estimated from the file sizes like the measured quants do (its 77.9 GiB are smaller than UD-Q4_K_XL's 103.7, the same 96 GB PC runs it; 15 VRAM / 88 RAM, estimated). Shard 2 is the PLE table: the same bytes in every GSQ quant.",
+    "folder": "IQ3_S",
+    "name": "Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S",
+    "repo": "ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF",
+    "revision": "ed59f92082b1e93c0e96d60a8b11aab089b52f09",
+    "license": "apache-2.0 (IST-DASLab's GSQ/RCO quantization)",
+    "about": "IST-DASLab's GSQ-RCO IQ3_S: the model re-quantized with GSQ + RCO (their own repo, apache-2.0), 83.6 GB in two shards - shard 2 is the PLE table, the same bytes in every GSQ quant",
+    "needs": {"vram_gb": 15, "ram_gb": 88},
+    "files": {
+     "Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf": [54817524224, "4c1eb2ceb4915e1192f4f386021897bde56a97f40a0bb78bb86465e0f7d2aca3"],
+     "Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00002-of-00002.gguf": [28800138432, "316b46f3a2dbd68c900f43136ab9449f9dcc3725dfd8c794847c204bc161e113"]
+    }
+   },
+   "gsq-coder-iq1_m": {
+    "_": "IST-DASLab's GSQ-RCO Coder quant (their own repo, apache-2.0, the revision pinned below): the code-tuned variant, half the experts pruned, per its repo. needs: estimated from the file sizes like the measured quants do (54.4 GiB of files, the smallest offer; 15 VRAM / 88 RAM, estimated - the PC gate every saguaro-qfn quant keeps). Shard 2 is the PLE table: the same bytes in every GSQ quant, and this repo also carries the mmproj-BF16.gguf vision tower (907543008 B) beside the IQ1_M folder.",
+    "folder": "IQ1_M",
+    "name": "Qwen3.8-Flash-Next-GSQ-RCO-IQ1_M",
+    "repo": "ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-Coder-GGUF",
+    "revision": "5348543e0147355ac9cbcb031184a3546350988e",
+    "license": "apache-2.0 (IST-DASLab's GSQ/RCO quantization)",
+    "about": "IST-DASLab's GSQ-RCO Coder IQ1_M: the code-tuned GSQ-RCO variant - half of the 512 experts pruned, targeted at code, the model's own words - apache-2.0, 58.4 GB in two shards - shard 2 is the PLE table, the same bytes in every GSQ quant",
+    "needs": {"vram_gb": 15, "ram_gb": 88},
+    "files": {
+     "Qwen3.8-Flash-Next-GSQ-RCO-IQ1_M-00001-of-00002.gguf": [29608446496, "e11083ba855e7666b48ea3f2db6a9c3a20c18751a012cc24f948de91b7087fad"],
+     "Qwen3.8-Flash-Next-GSQ-RCO-IQ1_M-00002-of-00002.gguf": [28800138432, "316b46f3a2dbd68c900f43136ab9449f9dcc3725dfd8c794847c204bc161e113"]
+    }
+   },
    "cyber-frost-q5_k_m": {
     "folder": "",
     "name": "CYBER-FROST-3.8-PS",
