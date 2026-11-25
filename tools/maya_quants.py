@@ -331,8 +331,10 @@ def config_label(cfg: dict) -> str | None:
 
 
 # a quant's own name ending a config's model_name ("Qwen3.8-Flash-Next-UD-Q4_K_XL", "GLM-5.3-Flash-Maya-L"): what
-# display_names says as the quant, taken whole and never prettified - the page never splits a model id itself
-QUANT_SUFFIX = re.compile(r"(?i)-(UD-[A-Z0-9_]+|IQ[0-9]_[A-Z_]+|Q[0-9]_[A-Z]_[A-Z]|Q[0-9]_[A-Z]|Q[0-9]_0"
+# display_names says as the quant, taken whole and never prettified - the page never splits a model id itself.
+# llama.cpp's families too: Q4_K_XL, Q2_K_XS, Q5_K_M, Q8_0 (Q<n> with one or more underscored parts), their UD-
+# re-publishes (UD-Q4_K_XL) and the IQ names (IQ3_S, IQ2_XXS)
+QUANT_SUFFIX = re.compile(r"(?i)-(UD-[A-Z0-9_]+|IQ[0-9]_[A-Z_]+|Q[0-9]_[0-9A-Z]+(?:_[0-9A-Z]+)*"
                           r"|Maya-[A-Za-z0-9-]+|SQ-[0-9]+)$")
 
 

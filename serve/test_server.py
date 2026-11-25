@@ -1784,6 +1784,16 @@ class WebApp(unittest.TestCase):
             # hand-made, no installer record: the model_name, "-" as spaces, a recognised quant suffix as the quant
             ({"exe": "/b/saguaro-qfn", "args": ["x"], "model_name": "Qwen3.8-Flash-Next-UD-Q4_K_XL"},
              ("Qwen3.8 Flash Next", "UD-Q4_K_XL")),
+            # llama.cpp's own K-family names (the K_XS/K_S/M/XL endings), their IQ names, and no quant at all
+            ({"exe": "/b/saguaro-qfn", "args": ["x"], "model_name": "Qwen3.8-Flash-Next-Q4_K_XL"},
+             ("Qwen3.8 Flash Next", "Q4_K_XL")),
+            ({"exe": "/b/saguaro-qfn", "args": ["x"], "model_name": "Qwen3.8-Flash-Next-Q2_K_XS"},
+             ("Qwen3.8 Flash Next", "Q2_K_XS")),
+            ({"exe": "/b/saguaro-qfn", "args": ["x"], "model_name": "Qwen3.8-Flash-Next-IQ3_S"},
+             ("Qwen3.8 Flash Next", "IQ3_S")),
+            ({"exe": "/m/build/maya", "args": ["--glm-pack", "/p"], "model_name": "GLM-5.3-Flash-Maya-L-IQ3_S"},
+             ("GLM 5.3 Flash Maya L", "IQ3_S")),          # (the Maya word stays in the name; the quant is the suffix)
+            ({"exe": "/b/llama", "args": [], "model_name": "gpt-oss-20b"}, ("gpt oss 20b", "")),
             ({"exe": "/b/saguaro-qfn", "args": ["x"], "model_name": "Qwen3.8-Flash-Next"},
              ("Qwen3.8 Flash Next", "")),
             ({"exe": "/m/build/maya-mm3", "args": ["--pack", "/p"], "model_name": "minimax-m3.1-flash"},
