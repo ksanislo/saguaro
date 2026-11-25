@@ -5513,7 +5513,10 @@ class Service:
             # is the answer's, not the reasoning's)
             return OutputParser(thinking=thinking if in_thinking is None else thinking and in_thinking, tools=tools,
                                 stream_tools=True, dsml=getattr(self.template, "deepseek", False),
-                                token_only_end=getattr(self.template, "deepseek", False) and self.think_end_id is not None,
+                                token_only_end=(getattr(self.template, "deepseek", False) or   # (QFN's </think> is
+                                                # its token 248069 at every turn's end: a quote of the tag in the
+                                                # thinking - an agent reading this server's code - is text, not its end)
+                                                getattr(self, "engine_kind", None) == "qfn") and self.think_end_id is not None,
                                 minimax=getattr(self.template, "minimax", False),
                                 inkling=getattr(self.template, "inkling", False),
                                 strict_tools=responses, single_tool=single_tool)

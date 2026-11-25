@@ -1077,7 +1077,7 @@ class ThinkingMarkers(unittest.TestCase):
     (THINK_RESTARTS times).  In the answer it is text too when quoted in code or inside a tool call's body; spelled
     out in ordinary pieces or in plain prose it ends the turn as always."""
 
-    def answer(self, *seqs, tok=None, stop=None, budget=None, token_only_end=False):
+    def answer(self, *seqs, tok=None, stop=None, budget=None, token_only_end=False, kind=None):
         from serve.frontend import openai_to_messages
         tok = tok or DeepTok()
         eng = SeqEngine(tok, *seqs)
@@ -1086,6 +1086,8 @@ class ThinkingMarkers(unittest.TestCase):
             svc.think_budget = budget
         if token_only_end:
             svc.template.deepseek = True
+        if kind:
+            svc.engine_kind = kind
         msgs, tools, kw = openai_to_messages(agent())
         ids, thinking, max_new = svc.prepare(msgs, tools, kw, 2000)
         events, done = [], None
@@ -1124,6 +1126,23 @@ class ThinkingMarkers(unittest.TestCase):
             self.assertIn("ANSWER OK", text)
             self.assertNotIn("</think>", reason)
             self.assertIn("thinking.", reason)
+
+    def test_qfn_a_quoted_end_tag_in_the_thinking_is_text(self):
+        # an agent working on this server's code quotes MockEngine(tok, "</think>\n\nhello") and an open ```python fence in
+        # its thinking: the tag came as ordinary pieces, so the thinking went on into the answer, and the tool call after
+        # the real end stood in the fence's shadow and was never run (2026-11-25).  QFN closes on its token alone.
+        tok = DeepTok()
+        quote = tok.encode('the edit: MockEngine(tok, "</think>\n\nhello")\n```python\nx = 1\n', parse_special=False)
+        end = tok.encode("</think>", parse_special=True)
+        seq = quote + end + tok.encode("\n\nANSWER OK", parse_special=True)
+        for kind in ("qfn", None):
+            svc, eng, text, reason, calls, done = self.answer(seq, tok=tok, kind=kind, budget=0)
+            if kind:
+                self.assertEqual(text.strip(), "ANSWER OK")
+                self.assertIn('"</think>', reason)
+                self.assertIn("```python", reason)
+            else:                                       # (today's text search, the other engines': the quote ends it)
+                self.assertNotEqual(text.strip(), "ANSWER OK")
 
     def test_the_engine_eos_in_the_thinking_resumes_it(self):
         tok = DeepTok()

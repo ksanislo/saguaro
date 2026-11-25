@@ -1308,8 +1308,8 @@ class OutputParser:
         # token_only_end: the vocabulary has the end of thinking as a token (DeepSeek's), so only that token closes the
         # reasoning - the text "</think>" in it does not (a model that quotes the tag while it talks about it, as in
         # the server's own code, would have its reasoning cut there and spill into the answer).  The server closes it
-        # through close_reasoning(), at the token.  A template that spells the end as text (GLM's, Qwen's) keeps the
-        # text search.
+        # through close_reasoning(), at the token.  GLM's
+        # template spells the end as text and keeps the text search; QFN's (Qwen) is closed by its token.
         self.token_only_end = token_only_end
         # DeepSeek-V4.1's tool calls, read as GLM's (DsmlRewriter); MiniMax-M3.1's the same way (MinimaxRewriter):
         # both send JSON values, so the parser takes them without the tools' schemas
