@@ -621,6 +621,26 @@ class Page(Served):
         self.assertEqual((s, b["running"], b["restarts"], len(b["models"])), (200, self.cfg.name, False, 2))
         self.assertTrue(next(m for m in b["models"] if m["file"] == self.cfg.name)["running"])
 
+    def test_rows_carry_the_display_names(self):
+        """Every /api/models row carries the same model_name_pretty / model_quant /health does (maya_quants.
+        display_names of its config), so the Models list names a model as the header does; a hand-made config:
+        the model_name words minus a recognised quant suffix."""
+        import maya_quants
+        hand = self.d / "maya-hand-made.json"
+        hand.write_text(json.dumps({"exe": "/b/saguaro-qfn", "args": ["x"],
+                                    "model_name": "Qwen3.8-Flash-Next-UD-Q4_K_XL"}))
+        s, b = self.req("GET", "/api/models")
+        self.assertEqual(s, 200)
+        rows = {m["file"]: m for m in b["models"]}
+        for p in (self.cfg, self.other, hand):
+            want = maya_quants.display_names(json.loads(p.read_text()))
+            with self.subTest(config=p.name):
+                self.assertEqual((rows[p.name]["model_name_pretty"], rows[p.name]["model_quant"]), want)
+        self.assertEqual((rows[self.cfg.name]["model_name_pretty"], rows[self.cfg.name]["model_quant"]),
+                         ("GLM 5.3", "Maya-M"))          # (the setup's names, as /health says them)
+        self.assertEqual((rows[hand.name]["model_name_pretty"], rows[hand.name]["model_quant"]),
+                         ("Qwen3.8 Flash Next", "UD-Q4_K_XL"))
+
     def test_secrets_in_the_environment_stay_on_this_pc(self):
         """A config's HF_TOKEN / *_API_KEY reach the page masked (as the report leaves them out); a save that sends the
         mask back keeps the value, a new value replaces it."""

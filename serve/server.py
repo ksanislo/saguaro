@@ -8766,7 +8766,9 @@ def main() -> int:
     if a.config:
         svc.config_path = str(Path(a.config).resolve())  # a context change from the dashboard is saved there
         p = Path(svc.config_path)                        # the tokens it serves, and what its API would have charged
-        svc.savings = savings.Ledger(savings.ledger_path(p), p.name, svc.model, models.quant_label(cfg, p))
+        svc.savings = savings.Ledger(savings.ledger_path(p), p.name, svc.model, models.quant_label(cfg, p),
+                                     names=(svc.model_name_pretty, svc.model_quant))   # (/api/savings rows name the
+                                                                                        #  model as /health does)
         threading.Thread(target=svc.finish_delete, daemon=True).start()   # (the model before, if the page deleted it)
     args = [str(x) for x in cfg.get("args") or []]
     flag = next((f for f in ("--glm-pack", "--gguf") if f in args[:-1]), None)   # (Metal: the first GGUF file, no pack)

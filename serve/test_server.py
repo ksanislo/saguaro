@@ -1802,6 +1802,38 @@ class WebApp(unittest.TestCase):
         self.assertEqual((eng["model_name_pretty"], eng["model_quant"]), ("Qwen3.8 Flash Next", "Q8_0"))
         self.assertIsNone(json.loads(self.get("/health")[2])["model_name_pretty"])   # (unsaid: the page's old text)
 
+    def test_savings_rows_carry_the_display_names(self):
+        """/api/savings carries the same model_name_pretty / model_quant as /health (what the Ledger recorded from the
+        config): the Saved rows and the price rows name a model as the header does.  A ledger entry written before
+        the fields keeps the page's old text, and the keys stay the config file names."""
+        import tempfile
+        from serve import savings
+        with tempfile.TemporaryDirectory() as d, unittest.mock.patch.dict(os.environ, {"SAGUARO_UPDATE_CHECK": "0"}):
+            (Path(d) / savings.FILE).write_text(json.dumps({"since": 1.0, "models": {
+                "maya-old.json": {"since": 1.0, "model": "deepseek-v4.1-flash", "quant": "UD-Q8_K_XL",
+                                  "bands": savings.zero()},        # (an entry counted before the fields existed)
+                "maya-maya-m.json": {"since": 1.0, "model": "glm-5.3-flash", "quant": "Maya-M",
+                                     "bands": savings.zero()}}}), encoding="utf-8")
+            led = savings.Ledger(Path(d) / savings.FILE, "maya-maya-m.json", "glm-5.3-flash", "Maya-M",
+                                 names=("GLM 5.3", "Maya-M"))      # (what the start writes: /health's two parts)
+            was = self.svc.savings
+            self.svc.savings = led
+            try:
+                r = json.loads(self.get("/api/savings")[2])
+            finally:
+                self.svc.savings = was
+        rows = {m["key"]: m for m in r["models"]}                   # (keys: still the config file names)
+        self.assertEqual((rows["maya-maya-m.json"]["model_name_pretty"], rows["maya-maya-m.json"]["model_quant"]),
+                         ("GLM 5.3", "Maya-M"))
+        self.assertNotIn("model_name_pretty", rows["maya-old.json"])     # (an old entry: today's text on the page)
+        self.assertEqual((r["start"]["model_name_pretty"], r["start"]["model_quant"]), ("GLM 5.3", "Maya-M"))
+        priced = {p["model"]: p for p in r["prices"]}
+        self.assertEqual(priced["glm-5.3-flash"]["model_name_pretty"], "GLM 5.3")     # (the popover's price rows)
+        self.assertNotIn("model_name_pretty", priced["deepseek-v4.1-flash"])
+        listed = {p["model"]: p for p in r["price_list"]}           # (Settings > Savings' price cards)
+        self.assertEqual(listed["glm-5.3-flash"]["model_name_pretty"], "GLM 5.3")
+        self.assertNotIn("model_name_pretty", listed["deepseek-v4.1-flash"])
+
     def test_text_file_limit_follows_the_context(self):
         """#635: /health tells the chat page how big a text file the context holds (about 4 bytes a token, 512 KB to
         16 MB); the page reads it instead of a fixed 512 KB."""
