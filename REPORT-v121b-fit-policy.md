@@ -107,10 +107,12 @@ plan step. No engine C++ changed; nothing in `serve/qfn_engine.py` or `engines/q
 
 | module | result |
 | --- | --- |
-| `tools.test_qfn_fit` | 34 tests - OK |
-| `tools.test_setup_qfn` | 64 tests - OK (1 skip: `ref/live-ud-q4.json` not in the checkout) |
-| `tools.test_setup_amd` | OK (unchanged) |
-| `tools.test_setup_ik2` | OK (unchanged; present, so run per the plan) |
+| `tools.test_qfn_fit` | 38 tests - OK |
+| `tools.test_setup_qfn` | 69 tests - OK (1 skip: `ref/live-ud-q4.json` not in the checkout) |
+| `tools.test_setup_amd` | 33 tests - OK (unchanged) |
+| `tools.test_setup_ik2` | 54 tests - OK (unchanged; present, so run per the plan) |
+
+(The counts are after the review-fix rounds; FIX-REPORT.md maps each finding to its commit.)
 
 Baseline before the work: `test_qfn_fit` 27 / `test_setup_qfn` 52, both green; nothing else was run.
 
