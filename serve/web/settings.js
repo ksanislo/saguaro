@@ -423,7 +423,7 @@ function facts() {
                                   : gpus.map((g) => `GPU ${g.index}: ${link(g)}`).join(" · "))
              : (hw.gpu_pcie_gen_max || hw.gpu_pcie_gen) ? `Gen${hw.gpu_pcie_gen_max || hw.gpu_pcie_gen}${hw.gpu_pcie_width ? ` x${hw.gpu_pcie_width}` : ""}` : null;
   return [
-    ["Version", ver ? `Saguaro v${ver}${eng.version ? ` · engine ${eng.version}` : ""}` : null],
+    ["Version", ver ? `Saguaro v${ver}` : null],
     ["Model", eng.model || S.health.model],
     ["Engine", eng.engine_kind ? (ENGINES[eng.engine_kind] || eng.engine_kind) : null],
     ["Context", eng.max_context ? `${fmt(eng.max_context)} tokens` : null],

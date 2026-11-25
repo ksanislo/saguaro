@@ -846,6 +846,12 @@ class Offline(unittest.TestCase):
         index = (self.WEB.parent / "web" / "index.html").read_text(encoding="utf-8")
         self.assertNotIn("fonts.googleapis", index)
 
+    def test_about_shows_only_saguaros_version(self):
+        # the engine's own version is no longer printed to users (About > Version); Saguaro's own stays
+        about = (self.WEB / "settings.js").read_text(encoding="utf-8")
+        self.assertIn("Saguaro v${ver}", about)
+        self.assertNotIn("engine ${eng.version}", about)
+
 
 # the page's own modules in Node (skipped without it), the browser's few globals they touch at load stubbed out
 PAGE_STUBS = """
