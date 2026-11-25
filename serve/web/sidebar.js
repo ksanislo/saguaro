@@ -18,6 +18,7 @@ export function status(plain = false) {
   const ctx = S.health.max_context ? `${ctxfmt(S.health.max_context)} context` : "";
   if (S.conn === "down") return {tone: "danger", text: "Server not reachable"};
   if (S.conn === "key") return {tone: "warn", text: "API key needed"};
+  if (S.conn === "unloaded") return {tone: "muted", text: "Unloaded"};   // (behind llama-swap: the next message loads it)
   if (S.updateWatch) return {tone: "info", text: "Updating"};
   if (S.reload) return {tone: "info", text: "Reloading"};
   if (!m) return {tone: "muted", text: "Connecting…"};

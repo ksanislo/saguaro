@@ -7,7 +7,8 @@ export const S = {
   // what the server says
   health: {model: "maya", images: false, max_context: 0, version: null, api_key: false, mcp_tools: false},
   metrics: null,            // GET /metrics, every second
-  conn: "connecting",       // "ok", "connecting", "down" (three failed polls), "key" (an API key is needed)
+  conn: "connecting",       // "ok", "connecting", "down" (three failed polls), "key" (an API key is needed),
+                            // "unloaded" (behind llama-swap: the model is off the card, nothing is polled)
   mcp: {servers: [], tools: 0},
   ctxInfo: null,            // GET /api/context
   portInfo: null,           // GET /api/port
