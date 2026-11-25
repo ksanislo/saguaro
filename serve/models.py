@@ -54,7 +54,7 @@ HY4_CONTEXTS = [8192, 32768, 65536, 131072]                       # ... Hy4-Flas
 IK2_CONTEXTS = [32768, 65536, 131072, 262144]                     # ... and Inkling 2 Mini (tools/ik2_fit.py's)
 # (hy4, ik2: the largest context their measured Tesla T4 layouts ran at)
 CONTEXT_TESTED = {"ds4": 1048576, "mm3": 262144, "hy4": 131072, "ik2": 131072,
-                  "qfn": 1048576}      # (QFN's 1M runs live on mangonel: plain RoPE to 256K, YaRN past it)
+                  "qfn": 1048576}      # (QFN's 1M runs live on a 4 x T4 box: plain RoPE to 256K, YaRN past it)
 CONTEXT_TESTED_DEFAULT = 262144
 QFN_YARN_ORIG = 262144        # QFN's trained reach: plain RoPE up to here ...
 QFN_YARN_MAX = 1048576        # ... and the elastic YaRN's top: past QFN_YARN_ORIG the slider says "YaRN, extended"
@@ -295,7 +295,7 @@ def context_range(trained: int | None, current: int, engine_kind: str = "") -> d
     """The dashboard's Context size slider for one model (Settings > Model for the running one, the Models page's
     Engine settings for each): CONTEXT_MIN up to what the model was trained for (else CONTEXT_FALLBACK_MAX), never
     below the size it has now; `tested`: past it the page says the size is untested on this engine.  QFN's engine
-    runs elastic YaRN: its top is 1M whatever the files say (the live mangonel box runs it), and the page gets a
+    runs elastic YaRN: its top is 1M whatever the files say (a live 4 x T4 box runs it), and the page gets a
     `yarn_above` mark: sizes past it are the extension, not the trained reach (the slider says "YaRN, extended").
     The other families are unchanged."""
     top = max(trained or CONTEXT_FALLBACK_MAX, int(current or 0))

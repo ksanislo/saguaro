@@ -127,7 +127,7 @@ class Dashboard(unittest.TestCase):
 
     def test_qfn_context_range_is_the_elastic_yarn_reach(self):
         """C18: for a running saguaro-qfn the Context size is the elastic YaRN's reach: the 1M top, 1M tested (it
-        runs live on mangonel) and the yarn_above mark that says where the trained 256K ends (past it the page
+        runs live on a 4 x T4 box) and the yarn_above mark that says where the trained 256K ends (past it the page
         says "YaRN, extended"). The cost line's data rides along - the engine's own bytes a token and its pinned
         K/V - and a reload applies like any context change; nothing past the reach is accepted."""
         self.engine.info = dict(self.engine.info, engine_kind="qfn", kv_bytes_token=12672, kv_resident=32768)
