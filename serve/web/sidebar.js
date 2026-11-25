@@ -1,7 +1,7 @@
 // serve/web/sidebar.js - the sidebar (new chat, search, Models, Monitor, Settings; the chats: pinned, in folders, then by day;
 // the model's status and what it saved against its API), a chat's ⋯ menu, and the search dialog.
 import {html, useEffect, useLayoutEffect, useMemo, useRef, useState} from "./preact.js";
-import {MOD, api, ctxfmt, dayGroup, fmt, isPhone, modelName, relTime, store} from "./lib.js";
+import {MOD, api, ctxfmt, dayGroup, fmt, isPhone, modelLabel, relTime, store} from "./lib.js";
 import {S, confirmDialog, emit, toast} from "./state.js";
 import {chatInstructions, chatTitle, deleteChat, exportChat, moveToFolder, newChat, newFolder, openChat, pinChat,
         renameChat, renameFolder, deleteFolder, toggleFolder} from "./chats.js";
@@ -155,22 +155,22 @@ function SavedBody({r, setR, close, sheet}) {
   const nb = (q) => q.replace(/-/g, "‑");          // (a quant is not broken at its hyphens)
   const since = r.since ? new Date(r.since * 1000).toLocaleDateString([], {month: "short", day: "numeric"}) : null;
   const prices = r.prices && r.prices.length ? html`
-    ${r.prices.map((p) => html`<div class="saved-pop__price"><span>${modelName(p.model)} (${p.custom ? "your prices" : p.api})</span><span>${dollars(p.input)} · ${dollars(p.cached)} · ${dollars(p.output)}</span></div>`)}
+    ${r.prices.map((p) => html`<div class="saved-pop__price"><span>${modelLabel(p, {compact: true})} (${p.custom ? "your prices" : p.api})</span><span>${dollars(p.input)} · ${dollars(p.cached)} · ${dollars(p.output)}</span></div>`)}
     <span>${r.prices.some((p) => p.peak) ? "DeepSeek charges twice that at its peak hours (weekdays 01–04 and 06–10 UTC), and Saguaro counts those tokens at that price. " : ""}The prompt Saguaro reads again from its own cache counts at the cached price. Electricity is not counted.</span>` : null;
   const change = () => { close(); openSettings("savings"); };
   return html`
     <div class="saved-pop__head">${sheet ? null : html`<span>Saved, compared with the API</span>`}<b>${usd(r.usd)}</b>
       <span>What ${apis.map((a) => `${a}'s`).join(" and ") || "the model's"} own API${apis.length > 1 ? "s" : ""} would have charged for the same tokens${since ? `, since ${since}` : ""}.</span></div>
-    ${r.start ? html`<div class="saved-pop__start"><span><b>This start</b><span>${modelName(r.start.model)}${r.start.quant ? ` ${r.start.quant}` : ""} · up ${upFor(r.start.started)}</span></span>
+    ${r.start ? html`<div class="saved-pop__start"><span><b>This start</b><span>${modelLabel(r.start, {compact: true})} · up ${upFor(r.start.started)}</span></span>
       <b>${r.start.usd == null ? "–" : usd(r.start.usd)}</b></div>` : null}
     ${r.models && r.models.length ? html`<div class="saved-pop__models"><span class="saved-pop__h">By model</span>
-      ${r.models.map((m) => html`<div class="saved-pop__model" key=${m.key}><${ModelLogo} model=${m.model} size=${sheet ? 36 : 28}/>
+      ${r.models.map((m) => { const l = modelLabel(m); return html`<div class="saved-pop__model" key=${m.key}><${ModelLogo} model=${m.model} size=${sheet ? 36 : 28}/>
         ${sheet   /* (a phone: the quant on a line of its own, the counts shorter) */
-          ? html`<span><b>${modelName(m.model)}</b>${m.quant ? html`<span>${nb(m.quant)}${twin(m) ? ` · ${m.key}` : ""}</span>` : null}
+          ? html`<span><b>${l.name}</b>${l.quant ? html`<span>${nb(l.quant)}${twin(m) ? ` · ${m.key}` : ""}</span>` : null}
               <span>${mtok(m.tokens.input + m.tokens.cached)} read${m.tokens.cached ? ` (${mtok(m.tokens.cached)} cached)` : ""} · ${mtok(m.tokens.output)} written</span></span>`
-          : html`<span><b>${modelName(m.model)}${m.quant ? ` · ${nb(m.quant)}` : ""}</b>
+          : html`<span><b>${nb(l.quant ? `${l.name} (${l.quant})` : l.name)}</b>
               <span>${twin(m) ? `${m.key} · ` : ""}read ${mtok(m.tokens.input + m.tokens.cached)}${m.tokens.cached ? `, ${mtok(m.tokens.cached)} of it cached` : ""} · wrote ${mtok(m.tokens.output)}</span></span>`}
-        <b>${m.usd == null ? "no API price" : usd(m.usd)}</b></div>`)}</div>` : null}
+        <b>${m.usd == null ? "no API price" : usd(m.usd)}</b></div>`; })}</div>` : null}
     ${!prices ? null : sheet
       ? html`<details class="saved-pop__how"><summary>How it is counted<${Icon} name="chevron" sm cls="chev"/></summary>
           <div class="saved-pop__prices"><span class="saved-pop__h">Per 1M tokens: input · cached input · output</span>${prices}</div></details>`
@@ -267,13 +267,14 @@ function SavedLine() {
 
 function StatusCard() {
   const st = status(S.view === "monitor");
-  // the model with its files when the setup wrote the config ("MiniMax M3.1 · Maya-XS": the server's model_label)
-  const name = S.health.model_label || modelName(S.health.model);
+  // the model and its files in one label ("Qwen3.8 Flash Next (Q8_0)": the server's two fields, the quant as named,
+  // nothing of the engine in it - it used to wrap its "· Q8_0 (saguaro-qfn)" onto a second line)
+  const name = modelLabel(S.health, {compact: true});
   return html`<div class="side__foot">
     <${SavedLine}/>
     <button type="button" class="status-card" onClick=${() => showView("monitor")} aria-label=${`${name}, ${st.text}. Open the Monitor`}>
       <${ModelLogo} model=${S.health.model}/>
-      <span class="status-card__text"><b title=${S.health.model}>${name}</b>
+      <span class="status-card__text"><b title=${name}>${name}</b>
         <span class=${`status status--${st.tone}`}><i class="status__dot"></i>${st.text}</span></span>
     </button></div>`;
 }

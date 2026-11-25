@@ -328,3 +328,46 @@ def config_label(cfg: dict) -> str | None:
         rest = re.sub(r"(?i)^inkling-2-mini-?", "", re.sub(r"(?i)\.gguf$", "", str(own))) or str(own)
         return f"{SHOWN['ik2']} · {rest}"
     return shown(family_of(cfg), config_key(cfg))
+
+
+# a quant's own name ending a config's model_name ("Qwen3.8-Flash-Next-UD-Q4_K_XL", "GLM-5.3-Flash-Maya-L"): what
+# display_names says as the quant, taken whole and never prettified - the page never splits a model id itself.
+# llama.cpp's families too: Q4_K_XL, Q2_K_XS, Q5_K_M, Q8_0 (Q<n> with one or more underscored parts), their UD-
+# re-publishes (UD-Q4_K_XL) and the IQ names (IQ3_S, IQ2_XXS)
+QUANT_SUFFIX = re.compile(r"(?i)-(UD-[A-Z0-9_]+|IQ[0-9]_[A-Z_]+|Q[0-9]_[0-9A-Z]+(?:_[0-9A-Z]+)*"
+                          r"|Maya-[A-Za-z0-9-]+|SQ-[0-9]+)$")
+
+
+def pretty_name(family: str) -> str:
+    """The model's name as users see it, dashes as spaces ("Qwen3.8 Flash Next", "GLM 5.3")."""
+    return SHOWN.get(family, family).replace("-", " ")
+
+
+def quant_name(family: str, key: str | None) -> str:
+    """The files' name exactly as named - the Maya tier, the other publishers' names, QFN's quant's own
+    ("Maya-L", "UD-Q4_K_XL", "CYBER-FROST-3.8 Q5_K_M"); never prettified, so "Q8_0" stays "Q8_0"."""
+    if family == "qfn" and key in QFN_QUANTS:
+        return QFN_QUANTS[key]
+    return str(tier(family, key) or OTHERS.get((family, key)) or key or "")
+
+
+def display_names(cfg: dict) -> tuple:
+    """(/health's and /metrics' model_name_pretty and model_quant) - what runs, in two parts, so the page names the
+    model without ever splitting its id: the setup's names from this file and the config's installer record (the
+    family's shown name, the quant exactly as named); for a hand-made config with neither: the model_name with "-"
+    as spaces minus a recognised quant suffix, that suffix or "" as the quant; nothing to say: (None, None)."""
+    inst = cfg.get("installer")
+    if isinstance(inst, dict):
+        fam = family_of(cfg)
+        own = inst.get("ik2_file") if fam == "ik2" else None
+        if own:                                        # (an Inkling GGUF of the user's own: its name as the quant)
+            rest = re.sub(r"(?i)^inkling-2-mini-?", "", re.sub(r"(?i)\.gguf$", "", str(own))) or str(own)
+            return pretty_name(fam), rest
+        key = config_key(cfg)
+        if key is not None:
+            return pretty_name(fam), quant_name(fam, key)
+    name = str(cfg.get("model_name") or "").strip()
+    if not name:
+        return None, None
+    m = QUANT_SUFFIX.search(name)
+    return (name[:m.start()] if m else name).replace("-", " "), m.group(1) if m else ""

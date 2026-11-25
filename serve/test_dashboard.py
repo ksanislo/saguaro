@@ -930,6 +930,38 @@ console.log(JSON.stringify(out));""")
                     self.assertAlmostEqual(pill["width"], 100 / n)      # (one segment wide: not from 0 up to it)
         self.assertEqual(got["glm-5.3-flash"][1][1]["at"], 25)            # Low: the second quarter only
 
+    def test_one_model_label_names_the_model_and_its_files(self):
+        # item 9: the one label every page names a model with - the server's two fields, the quant exactly as named
+        # ("Q8_0", never "Q8 0"); the {name, quant} pair where the quant gets a line of its own; a server without
+        # the fields keeps today's text, and a page row (Models, Saved) carries model + quant
+        got = self.node("""
+const lib = await import(web + "/lib.js");
+const qfn = {model: "qwen3.8-flash-next", model_name_pretty: "Qwen3.8 Flash Next", model_quant: "Q8_0",
+             model_label: "Qwen3.8-Flash-Next · Q8_0 (saguaro-qfn)"};
+console.log(JSON.stringify({
+  qfn: lib.modelLabel(qfn, {compact: true}),
+  two: [lib.modelLabel(qfn).name, lib.modelLabel(qfn).quant],
+  ud: lib.modelLabel({model_name_pretty: "Qwen3.8 Flash Next", model_quant: "UD-Q4_K_XL"}, {compact: true}),
+  maya: lib.modelLabel({model_name_pretty: "GLM 5.3", model_quant: "Maya-L"}, {compact: true}),
+  frost: lib.modelLabel({model_name_pretty: "Qwen3.8 Flash Next", model_quant: "CYBER-FROST-3.8 Q5_K_M"}, {compact: true}),
+  byHand: lib.modelLabel({model: "qwen3.8-flash-next", model_name_pretty: "Qwen3.8 Flash Next",
+                          model_quant: ""}, {compact: true}),
+  row: lib.modelLabel({model: "minimax-m3.1-flash", quant: "Maya-XS"}),
+  oldLabel: lib.modelLabel({model: "minimax-m3.1-flash", model_label: "MiniMax M3.1 · Maya-XS"}, {compact: true}),
+  oldPlain: lib.modelLabel({model: "qwen3.8-flash-next"}, {compact: true}),
+  none: lib.modelLabel({}),
+}));""")
+        self.assertEqual(got["qfn"], "Qwen3.8 Flash Next (Q8_0)")      # ("Q8_0" as named - not "Q8 0")
+        self.assertEqual(got["two"], ["Qwen3.8 Flash Next", "Q8_0"])   # (the Models list: a line of its own)
+        self.assertEqual(got["ud"], "Qwen3.8 Flash Next (UD-Q4_K_XL)")
+        self.assertEqual(got["maya"], "GLM 5.3 (Maya-L)")
+        self.assertEqual(got["frost"], "Qwen3.8 Flash Next (CYBER-FROST-3.8 Q5_K_M)")
+        self.assertEqual(got["byHand"], "Qwen3.8 Flash Next")          # (a hand-made config: no quant to say)
+        self.assertEqual(got["row"], {"name": "MiniMax M3.1 Flash", "quant": "Maya-XS"})
+        self.assertEqual(got["oldLabel"], "MiniMax M3.1 · Maya-XS")    # (an old server: today's text)
+        self.assertEqual(got["oldPlain"], "Qwen3.8 Flash Next")        # (... or the id as words, as before)
+        self.assertEqual(got["none"], {"name": "", "quant": ""})
+
     def test_speculation_says_off_waiting_or_the_acceptance(self):
         # the Monitor's Speculation, three states: off (no drafter, or the request asked for none: "off" in the field and
         # in the figure), drafting on with nothing drafted yet ("-", never a fake 0%), drafting on with drafts (accepted of

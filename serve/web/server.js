@@ -1,6 +1,6 @@
 // serve/web/server.js - what the page asks the server: its health (the model, its defaults), the live metrics every
 // second, the MCP servers, the context size and port (each a restart), the update, the shared settings and the report.
-import {api, ctxfmt, esc, fmt, headers} from "./lib.js";
+import {api, ctxfmt, esc, fmt, headers, modelLabel} from "./lib.js";
 import {DEFAULTS, P, PENALTIES, S, THINKING, confirmDialog, emit, loadPrefs, modelId, newModelCheck, setFamily, toast} from "./state.js";
 
 // ------------------------------------------------------------------ health: the model and its recommended settings
@@ -31,7 +31,7 @@ export async function loadHealth() {
       S.current.thinking = P.thinking;
       S.current.thinkingFor = modelId();
     }
-    if (switched) toast("info", `${h.model_label || h.model}: its own settings`, "A new model starts at its standard " +
+    if (switched) toast("info", `${modelLabel(h, {compact: true})}: its own settings`, "A new model starts at its standard " +
                         "parameters and thinking level; change them in Settings › Chat defaults.", 6000);
     emit();
     onHealth();
@@ -47,6 +47,19 @@ let healthWait = false;                       // (a health retry stopped by the 
 // ------------------------------------------------------------------ the live metrics (the Monitor, the status, the meter)
 let fails = 0, keyWarned = false, mcpTick = 0, timer = null, polling = false;
 export const reqAll = {on: false};       // the request table: the last 12, or every one the server keeps
+
+// the engine the metrics name is not the model the page shows: the server started with another config (a switch),
+// and it may not even have gone visibly down - re-read /health and every label follows, the chats staying (item 10:
+// a Q4 used to keep answering under the old Q8's name)
+export function identityChanged(h, eng) {
+  if (!eng || (eng.model == null && eng.model_label == null)) return false;   // (an engine that names nothing)
+  if (eng.model !== h.model || (eng.model_label || "") !== (h.model_label || "")) return true;
+  // the two name fields too, in symmetry with modelId(): a name-only change is a new identity - while an old
+  // /metrics that has no such keys says nothing, and never fakes a change (nor an endless re-read)
+  for (const k of ["model_name_pretty", "model_quant"])
+    if (eng[k] !== undefined && (eng[k] || "") !== (h[k] || "")) return true;
+  return false;
+}
 
 // behind llama-swap (the page at /upstream/<id>/, health saying supervisor "llama-swap"), EVERY request under that
 // path LOADS the model - and evicts another one from the card - so one open Monitor tab's per-second /metrics keeps
@@ -83,7 +96,9 @@ export async function poll() {
       timer = setTimeout(poll, 5000);                           // (/running alone, until the model is back on the card)
       return;
     }
-    if (was === false && swapReady === true) loadHealth();     // (swapped back in: its model's facts once more)
+    const back = was === false && swapReady === true;
+    if (back) loadHealth();                                    // (swapped back in: its model's facts once more)
+    const conn = S.conn;                                       // (back from down or key: whatever answers now is read anew)
     try {
       const r = await fetch(reqAll.on ? "metrics?requests=all" : "metrics", {headers: headers()});
       if (r.status === 401) {
@@ -95,6 +110,8 @@ export async function poll() {
         fails = 0;
         const rl = S.metrics.reload;
         if (rl && (rl.state === "waiting" || rl.state === "running")) watchReload();
+        if (!back && (conn === "down" || conn === "key" || identityChanged(S.health, S.metrics && S.metrics.engine))) loadHealth();
+        // (the first poll from "connecting" asks nothing: app.js' own loadHealth is already on its way)
       } else {
         throw new Error(`HTTP ${r.status}`);
       }

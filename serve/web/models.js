@@ -4,7 +4,7 @@
 // and deleting one (POST /api/models/delete: off the list, and with its downloaded files if asked; the running one after a
 // switch to another); and the files in the models folders no model uses (POST /api/models/leftovers deletes one).
 import {html, useEffect, useRef, useState} from "./preact.js";
-import {api, ctxfmt, esc, fmt, headers, isPhone, modelName, relTime} from "./lib.js";
+import {api, ctxfmt, esc, fmt, headers, isPhone, modelLabel, relTime} from "./lib.js";
 import {S, confirmDialog, copyText, emit, toast} from "./state.js";
 import {newChat} from "./chats.js";
 import {setSide, showView} from "./sidebar.js";
@@ -35,12 +35,12 @@ function saidDeleted(x) {
     sessionStorage.setItem("maya.deleted", String(x.time));
   } catch (e) { /* (no storage: said again on the next visit) */ }
   if (x.error) toast("error", `${x.file} was not deleted`, x.error, 12000);
-  else MS.gone = {name: x.model ? `${modelName(x.model)} ${x.quant || ""}`.trim() : x.deleted, files: x.files, freed: x.freed,
+  else MS.gone = {name: x.model ? modelLabel(x, {compact: true}) : x.deleted, files: x.files, freed: x.freed,
                   folder: null, users: x.drafter_users || []};
 }
 
 const MONO = "ui-monospace, 'SF Mono', Menlo, Consolas, monospace";
-const titleOf = (m) => `${modelName(m.model)} ${m.quant}`;
+const titleOf = (m) => modelLabel(m, {compact: true});
 const DRAFTS = {mtp: "MTP", dflash2: "DFlash2", dspark: "DSpark", dfly2: "DFly2", auto: "auto", none: "off"};
 const size = (b) => (b >= 1e8 ? `${fmt(b / 1e9, b < 1e10 ? 1 : 0)} GB` : null);
 const setUpOn = (w) => {
@@ -88,7 +88,7 @@ async function switchTo(m) {
         `<code>${esc(m.file)}</code>. That takes a few minutes.</p><ul>` +
         `<li>Your chats stay here. The chat settings start at ${esc(titleOf(m))}'s own standard parameters and thinking ` +
         "level: a model's are not another's.</li>" +
-        `<li>Apps using the API get a “try again” until it is back, then the model name <code>${esc(m.model)}</code>.</li>` +
+        `<li>Apps using the API get a “try again” until it is back; the API id is under Settings › Model.</li>` +
         (S.anyBusy ? "<li>The answer being written finishes first.</li>" : "") + "</ul>"
       : `<p><b>${esc(titleOf(m))}</b> becomes the model Saguaro starts next. This server was not started by saguaro.sh or ` +
         "START-SAGUARO.bat, so it cannot start again by itself: stop it and start Saguaro again.</p>"),
@@ -894,19 +894,19 @@ function Leftovers({L}) {
 
 // ------------------------------------------------------------------ a model's card
 function Card({m}) {
-  const s = m.settings, open = !!MS.details[m.file], editing = MS.edit === m.file, r = MS.restart;
+  const s = m.settings, open = !!MS.details[m.file], editing = MS.edit === m.file, r = MS.restart, l = modelLabel(m);
   const stopping = m.running && r && r.why === "switch", restarting = m.running && r && r.why === "settings";
   const loading = r && r.why === "switch" && r.file === m.file;
   const chips = [["Context", ctxfmt(s.context)], ...(s.draft ? [["Draft", DRAFTS[s.draft] || s.draft]] : []), ["GPUs", s.gpus.join(", ") || "–"],
                  ["Images", s.images ? "on" : "off"], ...(s.parallel > 1 ? [["At once", String(s.parallel)]] : [])];
   const about = [m.backend === "hip" ? "HIP" : "CUDA", size(m.size), setUpOn(m.written)].filter(Boolean).join(" · ");
   const facts = [["Config", m.path, true], ["Start script", m.script ? `./${m.script}` : "–", !!m.script], ["Model folder", m.folder || "–", true],
-                 ["Port", m.port ? String(m.port) : "8080"], ["API model name", m.model, true]];
+                 ["Port", m.port ? String(m.port) : "8080"]];   // (the API id: Settings › Model only, with its copy button)
   return html`<section class=${`card mdl-card${m.running ? " is-running" : ""}${loading ? " is-loading" : ""}`} aria-label=${titleOf(m)}>
     <div class="mdl-card__head">
       <${ModelLogo} model=${m.model} size=${44}/>
-      <span class="mdl-card__name"><span><b>${modelName(m.model)}</b><span class="mdl-badge">${m.quant}</span></span>
-        <span class="mdl-card__about">${about}</span></span>
+      <span class="mdl-card__name"><span><b>${l.name}</b></span>
+        <span class="mdl-card__about">${l.quant ? html`<span class="mdl-badge">${l.quant}</span>` : null}${about ? ` ${about}` : ""}</span></span>
       ${m.running ? html`<span class=${`pill pill--${stopping ? "warn" : restarting || MS.loadBusy ? "info" : MS.data.loaded ? "accent" : "warn"}`} role="status">
           <i class=${`status__dot${stopping || restarting || MS.loadBusy ? " is-pulse" : ""}`}></i>${stopping ? "Stopping…" : restarting ? "Restarting…"
             : MS.loadBusy ? "Loading…" : MS.data.loaded ? "Running" : "Unloaded"}</span>`

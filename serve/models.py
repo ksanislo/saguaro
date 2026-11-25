@@ -909,8 +909,11 @@ def describe(path: Path, running: str | None) -> dict:
     if family(cfg) == "qfn":                           # (an as_set_up from before QFN's own field set: its CYBER-
         setup = {k: v for k, v in setup.items() if k in QFN_KEYS}   # FROST keys (ram_gb!) would be refused on Reset)
     setup["env"] = shown_env(setup.get("env"))
+    name_pretty, name_quant = maya_quants.display_names(cfg)   # (the two parts a page names with, as /health says them:
+                                                               #  the row says the model's name as the header does)
     return {"file": path.name, "path": str(path), "model": cfg.get("model_name") or "", "family": family(cfg),
-            "quant": quant_label(cfg, path), "backend": cfg.get("backend") or "cuda", "written": inst.get("written"),
+            "quant": quant_label(cfg, path), "model_name_pretty": name_pretty, "model_quant": name_quant,
+            "backend": cfg.get("backend") or "cuda", "written": inst.get("written"),
             "used": used, "running": running is not None and str(path.resolve()) == str(Path(running).resolve()),
             "port": cfg.get("port"), "script": script,
             "folder": str(pack.parent) if pack else str(gguf.parent) if gguf else None,

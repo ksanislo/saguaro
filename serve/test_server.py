@@ -1763,8 +1763,108 @@ class WebApp(unittest.TestCase):
             self.svc.model_label = None
         self.assertEqual((health["model_label"], health["model"]), ("MiniMax M3.1 · Maya-XS", self.svc.model))
         self.assertIsNone(json.loads(self.get("/health")[2])["model_label"])   # (a hand-written config: the id)
-        side = (ROOT / "serve/web/sidebar.js").read_text(encoding="utf-8")   # (the sidebar's model card)
-        self.assertIn("S.health.model_label || modelName(S.health.model)", side)
+        side = (ROOT / "serve/web/sidebar.js").read_text(encoding="utf-8")   # (the sidebar's model card: the one label)
+        self.assertIn("modelLabel(S.health, {compact: true})", side)
+        self.assertNotIn("S.health.model_label || modelName", side)
+
+    def test_the_model_is_named_in_two_parts(self):
+        """/health's and /metrics' model_name_pretty and model_quant: the model's display name and its files' name
+        exactly as named ("Qwen3.8 Flash Next", "Q8_0" - never "Q8 0"), from maya_quants and the config's installer
+        record; a hand-made config with neither: the model_name with "-" as spaces minus a recognised quant suffix."""
+        import maya_quants
+        qfn = {"exe": "/b/saguaro-qfn", "args": ["x"], "model_name": "Qwen3.8-Flash-Next-Q8_0",
+               "installer": {"family": "qfn", "qwen_quant": "q8_0", "engine": "saguaro-qfn", "written": "2026-11-01 09:00"}}
+        frost = {"exe": "/b/maya", "args": ["--pack", "/p", "--ple-gguf", "/g.gguf"], "model_name": "cyber-frost-3.8-ps",
+                 "installer": {"family": "qwen", "quant": "CYBER-FROST-3.8-PS", "qwen_quant": "q5_k_m", "written": "x"}}
+        glm = {"exe": "/m/build/maya", "args": ["--glm-pack", "/p"], "model_name": "glm-5.3-flash",
+               "installer": {"quant": "Maya-L", "written": "x"}}
+        for cfg, want in (
+            (qfn, ("Qwen3.8 Flash Next", "Q8_0")), (frost, ("Qwen3.8 Flash Next", "CYBER-FROST-3.8 Q5_K_M")),
+            (glm, ("GLM 5.3", "Maya-L")),
+            # hand-made, no installer record: the model_name, "-" as spaces, a recognised quant suffix as the quant
+            ({"exe": "/b/saguaro-qfn", "args": ["x"], "model_name": "Qwen3.8-Flash-Next-UD-Q4_K_XL"},
+             ("Qwen3.8 Flash Next", "UD-Q4_K_XL")),
+            # llama.cpp's own K-family names (the K_XS/K_S/M/XL endings), their IQ names, and no quant at all
+            ({"exe": "/b/saguaro-qfn", "args": ["x"], "model_name": "Qwen3.8-Flash-Next-Q4_K_XL"},
+             ("Qwen3.8 Flash Next", "Q4_K_XL")),
+            ({"exe": "/b/saguaro-qfn", "args": ["x"], "model_name": "Qwen3.8-Flash-Next-Q2_K_XS"},
+             ("Qwen3.8 Flash Next", "Q2_K_XS")),
+            ({"exe": "/b/saguaro-qfn", "args": ["x"], "model_name": "Qwen3.8-Flash-Next-IQ3_S"},
+             ("Qwen3.8 Flash Next", "IQ3_S")),
+            ({"exe": "/m/build/maya", "args": ["--glm-pack", "/p"], "model_name": "GLM-5.3-Flash-Maya-L-IQ3_S"},
+             ("GLM 5.3 Flash Maya L", "IQ3_S")),          # (the Maya word stays in the name; the quant is the suffix)
+            ({"exe": "/b/llama", "args": [], "model_name": "gpt-oss-20b"}, ("gpt oss 20b", "")),
+            ({"exe": "/b/saguaro-qfn", "args": ["x"], "model_name": "Qwen3.8-Flash-Next"},
+             ("Qwen3.8 Flash Next", "")),
+            ({"exe": "/m/build/maya-mm3", "args": ["--pack", "/p"], "model_name": "minimax-m3.1-flash"},
+             ("minimax m3.1 flash", "")),
+            ({"exe": "/b/x", "args": []}, (None, None)),                                   # (nothing to say)
+        ):
+            with self.subTest(model=cfg.get("model_name")):
+                self.assertEqual(maya_quants.display_names(cfg), want)
+        self.svc.model_name_pretty, self.svc.model_quant = "Qwen3.8 Flash Next", "Q8_0"
+        try:
+            health = json.loads(self.get("/health")[2])
+            eng = json.loads(self.get("/metrics")[2])["engine"]
+        finally:
+            self.svc.model_name_pretty = self.svc.model_quant = None
+        self.assertEqual((health["model_name_pretty"], health["model_quant"]), ("Qwen3.8 Flash Next", "Q8_0"))
+        self.assertEqual((eng["model_name_pretty"], eng["model_quant"]), ("Qwen3.8 Flash Next", "Q8_0"))
+        self.assertIsNone(json.loads(self.get("/health")[2])["model_name_pretty"])   # (unsaid: the page's old text)
+
+    def test_savings_rows_carry_the_display_names(self):
+        """/api/savings carries the same model_name_pretty / model_quant as /health (what the Ledger recorded from the
+        config): the Saved rows and the price rows name a model as the header does.  A ledger entry written before
+        the fields keeps the page's old text, and the keys stay the config file names."""
+        import tempfile
+        from serve import savings
+        with tempfile.TemporaryDirectory() as d, unittest.mock.patch.dict(os.environ, {"SAGUARO_UPDATE_CHECK": "0"}):
+            (Path(d) / savings.FILE).write_text(json.dumps({"since": 1.0, "models": {
+                "maya-old.json": {"since": 1.0, "model": "deepseek-v4.1-flash", "quant": "UD-Q8_K_XL",
+                                  "bands": savings.zero()},        # (an entry counted before the fields existed)
+                "maya-maya-l.json": {"since": 1.0, "model": "glm-5.3-flash", "quant": "Maya-L",
+                                     "name_pretty": "GLM 5.3", "name_quant": "Maya-L",
+                                     "bands": savings.zero()},     # (another config of one model, recorded first)
+                "maya-maya-m.json": {"since": 1.0, "model": "glm-5.3-flash", "quant": "Maya-M",
+                                     "bands": savings.zero()}}}), encoding="utf-8")
+            led = savings.Ledger(Path(d) / savings.FILE, "maya-maya-m.json", "glm-5.3-flash", "Maya-M",
+                                 names=("GLM 5.3", "Maya-M"))      # (what the start writes: /health's two parts)
+            was = self.svc.savings
+            self.svc.savings = led
+            try:
+                r = json.loads(self.get("/api/savings")[2])
+            finally:
+                self.svc.savings = was
+        rows = {m["key"]: m for m in r["models"]}                   # (keys: still the config file names)
+        self.assertEqual((rows["maya-maya-m.json"]["model_name_pretty"], rows["maya-maya-m.json"]["model_quant"]),
+                         ("GLM 5.3", "Maya-M"))
+        self.assertNotIn("model_name_pretty", rows["maya-old.json"])     # (an old entry: today's text on the page)
+        self.assertEqual((r["start"]["model_name_pretty"], r["start"]["model_quant"]), ("GLM 5.3", "Maya-M"))
+        priced = {p["model"]: p for p in r["prices"]}
+        self.assertEqual(priced["glm-5.3-flash"]["model_name_pretty"], "GLM 5.3")     # (the popover's price rows)
+        self.assertEqual(priced["glm-5.3-flash"]["model_quant"], "Maya-M")   # (this run's own name, not its twin's)
+        self.assertNotIn("model_name_pretty", priced["deepseek-v4.1-flash"])
+        listed = {p["model"]: p for p in r["price_list"]}           # (Settings > Savings' price cards)
+        self.assertEqual(listed["glm-5.3-flash"]["model_name_pretty"], "GLM 5.3")
+        self.assertEqual(listed["glm-5.3-flash"]["model_quant"], "Maya-M")   # (the running config's, as above)
+        self.assertNotIn("model_name_pretty", listed["deepseek-v4.1-flash"])
+
+    def test_a_config_that_stopped_naming_clears_the_old_name(self):
+        """a config edited between runs to say nothing (no installer record, blank model_name): the start has no name
+        to record and clears what the previous run left, so no old name sits beside the new model on that Saved row."""
+        import tempfile
+        from serve import savings
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / savings.FILE).write_text(json.dumps({"since": 1.0, "models": {
+                "maya-x.json": {"since": 1.0, "model": "glm-5.3-flash", "quant": "Maya-M",
+                                "name_pretty": "GLM 5.3", "name_quant": "Maya-M",
+                                "bands": savings.zero()}}}), encoding="utf-8")
+            led = savings.Ledger(Path(d) / savings.FILE, "maya-x.json", "glm-5.3-flash", "Maya-S",
+                                 names=(None, None))               # (/health says nothing this time)
+        got = led.doc["models"]["maya-x.json"]
+        self.assertEqual(got["quant"], "Maya-S")
+        self.assertNotIn("name_pretty", got)
+        self.assertNotIn("name_quant", got)
 
     def test_text_file_limit_follows_the_context(self):
         """#635: /health tells the chat page how big a text file the context holds (about 4 bytes a token, 512 KB to

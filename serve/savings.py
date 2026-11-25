@@ -267,9 +267,10 @@ class Ledger:
     """The running model's count (`key`: its config's file name) and the others' from the file; one lock for both."""
 
     def __init__(self, path: Path | None, key: str, model: str, quant: str | None = None,
-                 prices: PriceBook | None = None):
+                 names: tuple | None = None, prices: PriceBook | None = None):
         self.path = Path(path) if path else None
         self.key, self.model, self.quant = key, model, quant
+        self.names = names                    # (/health's two parts (pretty, quant): what the page names the model with)
         self.book = prices if prices is not None else PriceBook(self.path.parent if self.path else None)
         self.lock = threading.Lock()
         self.save_failed = False                      # (one log line for a file that cannot be written, not one per request)
@@ -285,6 +286,11 @@ class Ledger:
                 pass
         me = self.doc["models"].setdefault(key, {"since": time.time(), "bands": zero()})
         me.update(model=model, quant=quant)
+        if names and names[0]:                         # (the two parts the page names this model with, as /health says
+            me["name_pretty"], me["name_quant"] = str(names[0]), str(names[1] or "")
+        else:                                          # (the config says nothing now: no old run's name beside it)
+            me.pop("name_pretty", None)
+            me.pop("name_quant", None)
         for b in BANDS:
             me["bands"].setdefault(b, zero()[b])
         if not isinstance(self.doc.get("prices"), dict):
@@ -326,8 +332,19 @@ class Ledger:
             p, base = self.price(m), self.book.reference(m)
             out.append({"model": m, "api": (p or base or {}).get("api"), "custom": bool(p and p.get("custom")),
                         "running": m == self.model, "default": base,
-                        **({k: p.get(k) for k in (*PRICE_KEYS, "peak")} if p else {k: None for k in (*PRICE_KEYS, "peak")})})
+                        **({k: p.get(k) for k in (*PRICE_KEYS, "peak")} if p else {k: None for k in (*PRICE_KEYS, "peak")}),
+                        **self.name_fields(m)})
         return out
+
+    def name_fields(self, model: str | None) -> dict:
+        """The page's two name fields for a model counted here ({} when no run recorded them: the page keeps today's
+        text).  Counted under the caller's lock; keyed on nothing new - the entry's model id, as the prices are.
+        The running config's entry first: two configs of one model, and this run's name is the page's."""
+        entries = self.doc["models"]
+        for m in [entries.get(self.key)] + [x for k, x in entries.items() if k != self.key]:
+            if m and m.get("model") == model and m.get("name_pretty"):
+                return {"model_name_pretty": m["name_pretty"], "model_quant": m.get("name_quant") or ""}
+        return {}
 
     def add(self, prompt_tokens: int, reused: int, output: int, now: float | None = None):
         """One finished request: `prompt_tokens` in all, `reused` of them from the conversation cache, `output` written."""
@@ -379,16 +396,21 @@ class Ledger:
                     refs[m.get("model")] = ref
                 models.append({"key": key, "model": m.get("model"), "quant": m.get("quant"), "since": m.get("since"),
                                "running": key == self.key, "tokens": tokens(m.get("bands") or {}),
-                               "usd": None if usd is None else round(usd, 6)})
+                               "usd": None if usd is None else round(usd, 6),
+                               **({"model_name_pretty": m["name_pretty"], "model_quant": m.get("name_quant") or ""}
+                                  if m.get("name_pretty") else {})})
             models.sort(key=lambda x: (not x["running"], -(x["usd"] or 0)))
             me = self.ref
             start = cost(self.start, me)
+            mine = self.doc["models"].get(self.key) or {}
             return {"usd": round(total, 6), "since": self.doc.get("since"), "prices_as_of": self.book.as_of(),
                     "prices_source": self.book.source(),
                     "start": {"model": self.model, "quant": self.quant, "started": self.started,
-                              "tokens": tokens(self.start), "usd": None if start is None else round(start, 6)},
+                              "tokens": tokens(self.start), "usd": None if start is None else round(start, 6),
+                              **({"model_name_pretty": mine["name_pretty"], "model_quant": mine.get("name_quant") or ""}
+                                 if mine.get("name_pretty") else {})},
                     "models": models,
-                    "prices": [{"model": k, **v} for k, v in refs.items()] or
+                    "prices": [{**self.name_fields(k), "model": k, **v} for k, v in refs.items()] or
                               ([{"model": self.model, **me}] if me else []),
                     "price_list": self.price_list()}
 
@@ -397,7 +419,9 @@ class Ledger:
         with self.lock:
             self.doc = {"since": time.time(), "prices": self.doc.get("prices", {}),   # (the page's prices stay)
                         "models": {self.key: {"since": time.time(), "bands": zero(),
-                                              "model": self.model, "quant": self.quant}}}
+                                              "model": self.model, "quant": self.quant,
+                                              **({"name_pretty": self.names[0], "name_quant": self.names[1] or ""}
+                                                 if self.names and self.names[0] else {})}}}
             self.start = zero()
             self.started = time.time()
             self._save()

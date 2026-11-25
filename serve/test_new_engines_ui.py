@@ -549,6 +549,100 @@ const m = {family: "qfn", running: false, choices: {draft: ["mtp", "none"], imag
 console.log(JSON.stringify(mp.fieldsOf(m, {...s}).map((g) => g.label)));""")
         self.assertEqual(got, ["Model", "GPUs and memory", "Prompts and cache"])
 
+    def test_an_open_page_follows_a_model_switch(self):
+        """item 10: the server restarts into another config - the page re-reads the identity (on reconnect, or when
+        the metrics name another model than the labels show) and every label changes without a reload; the chat
+        list and the open chat stay."""
+        got = self.node("""
+const mem = {};   // (a localStorage that keeps what the model switch check stores between its calls)
+globalThis.localStorage = {getItem: (k) => (k in mem ? mem[k] : null), setItem: (k, v) => { mem[k] = String(v); },
+                           removeItem: (k) => { delete mem[k]; }};
+const sv = await import(web + "/server.js"), st = await import(web + "/state.js"), lib = await import(web + "/lib.js");
+const old = {model: "qwen3.8-flash-next", model_label: "Qwen3.8-Flash-Next · Q8_0 (saguaro-qfn)",
+             model_name_pretty: "Qwen3.8 Flash Next", model_quant: "Q8_0"};
+const out = {
+  same: sv.identityChanged(old, {model: old.model, model_label: old.model_label}),
+  otherModel: sv.identityChanged(old, {model: "glm-5.3-flash", model_label: "GLM-5.3 · Maya-L"}),
+  otherLabel: sv.identityChanged(old, {model: old.model, model_label: "Qwen3.8-Flash-Next · UD-Q4_K_XL (saguaro-qfn)"}),
+  quantOnly: sv.identityChanged(old, {model: old.model, model_label: old.model_label,
+                                      model_name_pretty: old.model_name_pretty, model_quant: "UD-Q4_K_XL"}),
+  saysNothing: sv.identityChanged(old, {}),
+  idOnlyOld: sv.identityChanged({model: "x"}, {model: "x", model_label: null}),
+  otherId: sv.identityChanged({model: "x"}, {model: "y", model_label: null}),
+};
+// the switch: /health is re-read, the labels of every page follow - and what was open stays open
+st.S.health = old; st.S.chats = [{id: "c", messages: []}]; st.S.current = "c";
+st.newModelCheck();                                          // (the page loaded with this model)
+const before = lib.modelLabel(st.S.health, {compact: true});
+st.S.health = {model: "glm-5.3-flash", model_label: "GLM-5.3 · Maya-L",
+               model_name_pretty: "GLM 5.3", model_quant: "Maya-L"};
+const switched = st.newModelCheck();
+console.log(JSON.stringify({...out, before, after: lib.modelLabel(st.S.health, {compact: true}),
+                            switched, chats: st.S.chats.length, current: st.S.current}));""")
+        self.assertFalse(got["same"])
+        self.assertTrue(got["otherModel"])
+        self.assertTrue(got["otherLabel"])          # (two configs of one model: a quant switch too)
+        self.assertFalse(got["saysNothing"])        # (an engine that names nothing: never a switch)
+        self.assertFalse(got["idOnlyOld"])
+        self.assertTrue(got["otherId"])
+        self.assertEqual(got["before"], "Qwen3.8 Flash Next (Q8_0)")
+        self.assertEqual(got["after"], "GLM 5.3 (Maya-L)")    # (every label re-reads it from S.health)
+        self.assertTrue(got["switched"])            # (its own standard parameters, as at a page load)
+        self.assertEqual((got["chats"], got["current"]), (1, "c"))
+
+    def test_the_first_load_after_the_update_is_no_switch(self):
+        """the modelId format change must not fake a model switch: what the page before stored is "<id>|<label>", and
+        when the id and the label are still this model's the sampling choices survive and no "its own settings" toast
+        fires; the stored value takes the new four-part format, and a real switch stays one."""
+        got = self.node("""
+const mem = {};
+globalThis.localStorage = {getItem: (k) => (k in mem ? mem[k] : null), setItem: (k, v) => { mem[k] = String(v); },
+                           removeItem: (k) => { delete mem[k]; }};
+const st = await import(web + "/state.js");
+const qfn = {model: "qwen3.8-flash-next", model_label: "Qwen3.8-Flash-Next · Q8_0 (saguaro-qfn)",
+             model_name_pretty: "Qwen3.8 Flash Next", model_quant: "Q8_0"};
+st.S.health = qfn;
+// the old format, stored before the update, with the user's own choices beside it
+mem["maya.model"] = JSON.stringify(`${qfn.model}|${qfn.model_label}`);
+mem["maya.sampling_qfn"] = JSON.stringify({thinking: "low", temperature: 0.3, prefs_v: 3});
+const first = st.newModelCheck();
+const kept = JSON.parse(mem["maya.sampling_qfn"]);
+const seeded = JSON.parse(mem["maya.model"]);
+const again = st.newModelCheck();                  // (the next load of the same model: still no switch)
+mem["maya.model"] = JSON.stringify("glm-5.3-flash|GLM-5.3 · Maya-L");   // (another model really did run here)
+const switched = st.newModelCheck();
+const cleared = JSON.parse(mem["maya.sampling_qfn"]);
+console.log(JSON.stringify({first, kept, seeded, again, switched, cleared}));""")
+        self.assertFalse(got["first"])                                          # (the same model: no fake switch)
+        self.assertEqual((got["kept"]["thinking"], got["kept"]["temperature"]), ("low", 0.3))
+        self.assertEqual(got["seeded"], "qwen3.8-flash-next|Qwen3.8-Flash-Next · Q8_0 (saguaro-qfn)"
+                       + "|Qwen3.8 Flash Next|Q8_0")                             # (the new format, seeded once)
+        self.assertFalse(got["again"])
+        self.assertTrue(got["switched"])                                         # (a real switch: still one)
+        self.assertNotIn("thinking", got["cleared"])                             # (... and its choices do go)
+        self.assertNotIn("temperature", got["cleared"])
+
+    def test_a_chat_keeps_its_own_level_after_the_id_grew(self):
+        """the same tolerance in thinkingOf: a chat with messages from before modelId() grew stores the two-part
+        "<id>|<label>"; on the first load after the update the model has not changed, so its own thinking level -
+        not the Settings default - is what goes on the wire; a real switch still takes the default."""
+        got = self.node("""
+const st = await import(web + "/state.js"), ch = await import(web + "/chats.js");
+const qfn = {model: "qwen3.8-flash-next", model_label: "Qwen3.8-Flash-Next · Q8_0 (saguaro-qfn)",
+             model_name_pretty: "Qwen3.8 Flash Next", model_quant: "Q8_0"};
+st.S.health = qfn; st.setFamily(qfn.model);
+const old = {id: "c", messages: [{role: "user", text: "hi"}, {role: "assistant", text: "yo"}],
+             thinking: "low", thinkingFor: `${qfn.model}|${qfn.model_label}`};   // (stored before the update)
+const own = ch.thinkingOf(old);
+const fresh = ch.thinkingOf({...old, thinkingFor: st.modelId()});                // (a chat of the new format)
+st.S.health = {model: "glm-5.3-flash", model_label: "GLM-5.3 · Maya-L",
+               model_name_pretty: "GLM 5.3", model_quant: "Maya-L"};
+const other = ch.thinkingOf(old);                                                // (another model ran: the default)
+console.log(JSON.stringify({own, fresh, other, def: st.P.thinking}));""")
+        self.assertEqual((got["own"], got["fresh"]), ("low", "low"))             # (its own level, not the default)
+        self.assertNotEqual(got["own"], got["def"])
+        self.assertEqual(got["other"], got["def"])                                # (across a switch it does go)
+
     def test_a_server_behind_its_api_key_says_so(self):
         """/api/context answering 401: the page knows why the context range is missing - Settings says
         "API key needed", not "this server does not say its context range" (serve/web/server.js' loadCtxInfo)."""
