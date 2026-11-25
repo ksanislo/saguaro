@@ -21,7 +21,9 @@ import os
 
 GIB = 1 << 30
 MANIFEST = os.path.join(os.path.dirname(os.path.abspath(__file__)), "qfn", "download.json")
-KV_BYTES = 12672                                      # K/V bytes a context token, --kv int8 (measured)
+KV_BYTES = 12672                                      # K/V bytes a context token, --kv int8 (measured: the engine's
+#                                                     #  own INFO kv_bytes_token= line - qsa_kv_bytes_per_cell x its
+#                                                     #  12 QSA layers, engines/qfn/src/program/generate.cpp:12401)
 LAYERS = 48                                           # the model's transformer layers (the layer split's reach)
 KV_RESIDENT = 32768                                   # the newest cells of each QSA layer kept in VRAM (the configs)
 RAM_SPARE_GB = 20                                     # RAM left beside the tier: the OS, the server, the page cache
@@ -34,15 +36,18 @@ MIN_CC = 61                                           # NVIDIA, v1.2.1-B: Pascal
 #                                                     #  path (STRATA_EXPERIMENTAL_SM60), which needs a CUDA 12.x
 #                                                     #  toolkit: CUDA 13 dropped Pascal (saguaro.py's nvcc_range)
 # v1.2.1-B: the TRUE minimum, measured on one card (mortar Monitor, UD-Q4_K_XL): dense weights 3.9 GB (a layer
-# split shares them by the split), the resident K/V window 2.8 GB at --kv-resident 32768 (it can be smaller),
-# activations 1.4 GB, and the reserve the setup keeps free beside the expert cache (--vram-reserve-mib 700).
+# split shares them by the split), the resident K/V window of --kv-resident N (its own bytes: the engine's INFO
+# kv_bytes_token above - 0.39 GiB at 32768 cells, 0.05 GiB at the minimum's 4096, kv_resident_gib; v1.2.1-B
+# review finding 2 settled this one constant against generate.cpp:12401 - the plan's "2.8 GB" Monitor line
+# counted more than the resident window), activations 1.4 GB, and the reserve the setup keeps free beside the
+# expert cache (--vram-reserve-mib 700).
 # The MTP drafter (0.92 GB there) is NOT in the minimum: below the comfortable layout the setup scales down and
 # turns drafting off.
 DENSE_GIB = 3.9                                       # the whole model's dense weights, UD-Q4_K_XL (measured)
-KV_RES_GIB = 2.8                                      # the K/V of --kv-resident 32768 cells in VRAM (measured)
 ACTIVATIONS_GIB = 1.4                                 # the engine's activation buffers (measured there)
 RESERVE_GIB = 700 / 1024                              # kept free beside the expert cache (--vram-reserve-mib)
-RAM_BUFFER_GIB = 4.0                                  # a 32K context's pinned K/V (the 2.8 above) and read staging
+RAM_BUFFER_GIB = 4.0                                  # a 32K context's K/V pinned in RAM (0.4 GiB at --kv int8)
+#                                                     #  and read staging
 RAM_SYSTEM_GIB = 8.0                                   # the OS, the server and a working page cache
 KV_RESIDENT_MIN = 4096                                 # the smallest resident K/V window a layout is laid out with
 SCALED_CONTEXT = 32768                                 # the context a scaled-down layout gets (QFN_CONTEXTS' smallest)
@@ -164,8 +169,10 @@ def dense_gib(quant: str) -> float:
 
 
 def kv_resident_gib(cells: int) -> float:
-    """GiB of VRAM --kv-resident N costs: the measured 2.8 GiB of the 32768-cell window, by cell count."""
-    return KV_RES_GIB * cells / KV_RESIDENT
+    """GiB of VRAM --kv-resident N costs: the same resident K/V window kv_vram_gib lays out - one constant
+    serves both (v1.2.1-B review finding 2: the engine's own INFO kv_bytes_token= line, not a separate
+    measured figure - qsa_kv_bytes_per_cell x the 12 QSA layers, 12,672 B a cell at --kv int8)."""
+    return kv_vram_gib(cells)
 
 
 def stage_bounds(cards: list, quant: str = "ud-q4_k_xl") -> list:

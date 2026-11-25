@@ -172,25 +172,25 @@ class Offered(unittest.TestCase):
         self.assertIn("Not CYBER-FROST", about)                  # (the quant list is where it is offered)
 
     def test_refused_only_what_cannot_run(self):
-        """v1.2.1-B: a quant is refused only under its true minimum (6.3 GB on the card at UD-Q4, 9.0 at Q8_0;
+        """v1.2.1-B: a quant is refused only under its true minimum (6.0 GB on the card at UD-Q4, 8.7 at Q8_0;
         16-19 GB of RAM) - 62 GB of RAM or an 11.9 GB card RUN, slowly: the layout warns and confirms.
         Review finding 2: the minimum is per card OF THE SPLIT the layout would use - a pair of 8 GB cards runs
-        Q8_0 slowly (5.6 GB a card), where one 8 GB card alone cannot hold it."""
+        Q8_0 slowly (5.4 GB a card), where one 8 GB card alone cannot hold it."""
         g8 = {"index": 0, "name": "GeForce RTX 4060", "vram_gb": 8.0, "arch": "89"}
         g16 = {"index": 0, "name": "AMD Radeon RX 9070", "vram_gb": 15.9, "arch": "gfx1201"}
         pair = [g8, dict(g8, index=1)]
         self.assertIsNone(maya.qfn_quant_fit("ud-q4_k_xl", [g16], 91.7))   # (an RX 9070 XT with 96 GB: measured)
         self.assertIsNone(maya.qfn_quant_fit("ud-q4_k_xl", [g16], 62.0))   # (the old "96 GB of RAM" refusal: slow)
         self.assertIsNone(maya.qfn_quant_fit("ud-q4_k_xl", [{"vram_gb": 11.9}], 91.7))   # (the "16 GB or more")
-        self.assertIsNone(maya.qfn_quant_fit("ud-q4_k_xl", [g8], 91.7))    # (6.3 GB needed: it runs, slowly)
-        self.assertIsNone(maya.qfn_quant_fit("q8_0", pair, 91.7))          # (the 8 GB pair: 5.6 GB a card by the
+        self.assertIsNone(maya.qfn_quant_fit("ud-q4_k_xl", [g8], 91.7))    # (6.0 GB needed: it runs, slowly)
+        self.assertIsNone(maya.qfn_quant_fit("q8_0", pair, 91.7))          # (the 8 GB pair: 5.4 GB a card by the
                                                            #  split - review finding 2: runs, slowly, not refused)
-        self.assertIn("8 GB cannot hold the 9.0 GB", maya.qfn_quant_fit("q8_0", [g8], 91.7))   # (alone: cannot)
+        self.assertIn("8 GB cannot hold the 8.7 GB", maya.qfn_quant_fit("q8_0", [g8], 91.7))   # (alone: cannot)
         self.assertIn("cannot run with 12 GB of RAM",
                       maya.qfn_quant_fit("cyber-frost-q5_k_m", [g16], 12.0))
         out = refusal(lambda: maya.choose_qfn_quant(args(qfn_quant="q8_0"), {}, [g8], 91.7))
         self.assertIn("cannot run on this GPU", out)
-        self.assertIn("8 GB cannot hold the 9.0 GB", out)
+        self.assertIn("8 GB cannot hold the 8.7 GB", out)
         self.assertEqual(maya.choose_qfn_quant(args(qfn_quant="q8_0"), {}, pair, 91.7), "q8_0")   # (the pair: the
         self.assertEqual(maya.choose_qfn_quant(args(qfn_quant="ud-q4_k_xl"), {}, [g8], 62.0),     #  menu takes it)
                          "ud-q4_k_xl")
@@ -615,7 +615,7 @@ class Layouts1To4T4(unittest.TestCase):
     the drafting; 32 and 64 GB fit too (v1.2.1-B refused nothing here), slowly: the written config comes scaled
     down (32K, --kv-resident 4096, drafting off and recorded).  4x T4 + 256 GB UD-Q4 is U6's pinned
     live-equivalent config.  Nothing of the matrix is refused: 32 GB is over the RAM minimum, the T4 over the
-    card's (9.0 GB even at Q8_0)."""
+    card's (8.7 GB even at Q8_0)."""
 
     QUANTS = ["ud-q4_k_xl", "q8_0", "cyber-frost-q5_k_m"]
     RAMS = [32.0, 64.0, 96.0, 256.0]
@@ -915,8 +915,8 @@ class QfnGpus(unittest.TestCase):
         with patch.object(maya.S, "gpus", return_value=tiny), patch.object(maya.S, "is_wsl", return_value=False), \
                 patch.object(maya, "mem_gb", return_value=(96.0, 80.0)):
             out = refusal(lambda: maya.check_pc(args(backend="cuda"), "qfn"))    # (no --gpus: one line, no crash)
-        # (4.2 GB: the 4060s are equal, so the refusal prices the 2-card split - half the model per card)
-        self.assertIn("cannot run on this PC's GeForce RTX 4060: its 4 GB cannot hold the 4.2 GB", out)
+        # (4.1 GB: the 4060s are equal, so the refusal prices the 2-card split - half the model per card)
+        self.assertIn("cannot run on this PC's GeForce RTX 4060: its 4 GB cannot hold the 4.1 GB", out)
         self.assertIn("50% of the layers", out)
         with patch.object(maya.S, "gpus", return_value=big + tiny), \
                 patch.object(maya.S, "is_wsl", return_value=False), patch.object(maya, "mem_gb",

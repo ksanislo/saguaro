@@ -54,6 +54,14 @@ class Sizes(unittest.TestCase):
         self.assertFalse(F.page_cache_tier(91.7, "ud-q4_k_xl"))                              # the 96 GB box: tier
         self.assertFalse(F.page_cache_tier(120.0, "ud-q4_k_xl"))                             # 104 + 20 > 120: tier
 
+    def test_the_two_kv_readings_are_one_number(self):
+        """Review finding 2: the per-card minimum and the CLI's line must not read the resident K/V two ways.
+        kv_resident_gib IS kv_vram_gib - the engine's own INFO kv_bytes_token (12 QSA layers x 1,056 B at
+        --kv int8), the same ~0.4 GiB the 32768-cell window has always measured to: no second constant."""
+        for cells in (2048, 4096, 32768, 262144):
+            self.assertEqual(F.kv_resident_gib(cells), F.kv_vram_gib(cells))
+        self.assertAlmostEqual(F.kv_resident_gib(32768), 0.39, delta=0.01)                   # ~0.4 GiB, as pinned
+
 
 class OneCard(unittest.TestCase):
     def test_a_t4_alone(self):
@@ -95,34 +103,34 @@ class TrueMinimum(unittest.TestCase):
     0.7 GB of reserve; RAM: dense + buffers + system.  Below the comfortable 16 GB / 96 GB a PC still RUNS."""
 
     def test_an_8_gb_card_runs_ud_q4_and_refuses_q8(self):
-        p = F.plan([gpu(0, 8.0, "89", "RTX 4060")], 96.0)          # 6.3 GB needed: it runs, slowly
+        p = F.plan([gpu(0, 8.0, "89", "RTX 4060")], 96.0)          # 6.0 GB needed: it runs, slowly
         self.assertTrue(p["fits"], p["reason"])
         self.assertTrue(p["slow"])
-        q8 = F.plan([gpu(0, 8.0, "89", "RTX 4060")], 96.0, "q8_0")     # 9.0 GB needed: it cannot run
+        q8 = F.plan([gpu(0, 8.0, "89", "RTX 4060")], 96.0, "q8_0")     # 8.7 GB needed: it cannot run
         self.assertFalse(q8["fits"])
-        self.assertIn("cannot run on this PC's RTX 4060: its 8 GB cannot hold the 9.0 GB", q8["reason"])
+        self.assertIn("cannot run on this PC's RTX 4060: its 8 GB cannot hold the 8.7 GB", q8["reason"])
         self.assertIsNone(q8["layer_split"])                       # (nothing is laid out over refused cards)
 
     def test_the_min_per_card_numbers(self):
         one = F.card_min_gib([gpu(0, 24.0, "86")], "ud-q4_k_xl")[0]
-        self.assertAlmostEqual(one, 3.9 + 2.8 * 4096 / 32768 + 1.4 + 700 / 1024, delta=0.01)
+        self.assertAlmostEqual(one, 3.9 + F.kv_vram_gib(4096) + 1.4 + 700 / 1024, delta=0.01)
         big = F.card_min_gib([gpu(0, 24.0, "86")], "q8_0")[0]      # (a Q8_0 card holds ~1.7x the dense weights)
         self.assertAlmostEqual(big, 3.9 * F.quant_gib("q8_0") / F.quant_gib("ud-q4_k_xl")
-                               + 2.8 * 4096 / 32768 + 1.4 + 700 / 1024, delta=0.01)
+                               + F.kv_vram_gib(4096) + 1.4 + 700 / 1024, delta=0.01)
         self.assertGreater(big, 8.0)                               # (what refuses the RTX 4060 above)
         pair = F.card_min_gib([gpu(0, 24.0, "86"), gpu(1, 24.0, "86")], "ud-q4_k_xl")
-        self.assertAlmostEqual(pair[0], 0.5 * (3.9 + 2.8 * 4096 / 32768) + 1.4 + 700 / 1024, delta=0.01)
+        self.assertAlmostEqual(pair[0], 0.5 * (3.9 + F.kv_vram_gib(4096)) + 1.4 + 700 / 1024, delta=0.01)
         self.assertEqual(len(pair), 2)
         self.assertAlmostEqual(F.ram_min_gib("ud-q4_k_xl"), 3.9 + 4.0 + 8.0, delta=0.01)
 
     def test_the_refusal_prices_the_failing_card(self):
         """Review finding 4: on an unequal layout the per-card minimums differ by the split's stage bounds, so
         the line carries THIS card's number and its own share of the layers, not one figure for every card:
-        the 4090 beside the GT 710 serves 46 of the 48 layers (6.2 GB of its own), the GT 710 its 2 (2.3 GB)."""
+        the 4090 beside the GT 710 serves 46 of the 48 layers (5.9 GB of its own), the GT 710 its 2 (2.2 GB)."""
         self.assertAlmostEqual(F.card_min_gib([gpu(0, 24.0, "89", "RTX 4090"), gpu(1, 1.0, "35")], "ud-q4_k_xl")
-                               [1], (2 / 48) * (3.9 + 2.8 * 4096 / 32768) + 1.4 + 700 / 1024, delta=0.01)
+                               [1], (2 / 48) * (3.9 + F.kv_vram_gib(4096)) + 1.4 + 700 / 1024, delta=0.01)
         why = F.unsupported([gpu(0, 24.0, "89", "RTX 4090"), gpu(1, 1.0, "35", "GeForce GT 710")], 96.0)
-        self.assertIn("cannot run on this PC's GeForce GT 710: its 1 GB cannot hold the 2.3 GB this card of the "
+        self.assertIn("cannot run on this PC's GeForce GT 710: its 1 GB cannot hold the 2.2 GB this card of the "
                       "layout must (4% of the layers)", why)
 
     def test_too_little_ram_names_the_minimum(self):
@@ -364,7 +372,7 @@ class PolicyMatrix(unittest.TestCase):
     """The 1.2.1-B plan's matrix, every row judged one of three ways: refused (R: the card or the RAM cannot
     hold the model), slow (S: warned + confirmed, the layout scaled down), or fits as laid out today (F).  The
     one row no quant can run on besides the 4 GB cards of TrueMinimum: an 8 GB card under Q8_0 (its ~6.6 GiB of
-    dense weights need 9.0 GB on the card) - its PAIR runs it slow, 5.6 GB a card by the split (review
+    dense weights need 8.7 GB on the card) - its PAIR runs it slow, 5.4 GB a card by the split (review
     finding 2: the minimum is per card of the layout, not of a card alone)."""
 
     QUANTS = ["ud-q4_k_xl", "q8_0", "cyber-frost-q5_k_m"]
@@ -390,7 +398,7 @@ class PolicyMatrix(unittest.TestCase):
     }
     EXPECT = dict.fromkeys(CARDS, "SSFF")                          # (the card holds up everywhere: the RAM row)
     EXPECT["2080 Ti 11"] = EXPECT["3060 12"] = EXPECT["8 GB card"] = "SSSS"   # (small cards: slow everywhere)
-    EXPECT["2x 8 GB"] = "SSSS"                                     # (Q8_0 included: 5.6 GB a card by the split)
+    EXPECT["2x 8 GB"] = "SSSS"                                     # (Q8_0 included: 5.4 GB a card by the split)
 
     def test_the_matrix_verdicts(self):
         for label, cards in self.CARDS.items():
@@ -400,7 +408,7 @@ class PolicyMatrix(unittest.TestCase):
                     with self.subTest(cards=label, ram=ram, quant=quant):
                         want = self.EXPECT[label][i]
                         if quant == "q8_0" and label == "8 GB card":
-                            want = "R"                             # (9.0 GB needed: cannot run)
+                            want = "R"                             # (8.7 GB needed: cannot run)
                         got = "R" if not p["fits"] else "S" if p["slow"] else "F"
                         self.assertEqual(got, want, p["reason"] or p["slow_why"] or p["said"])
                         if want == "S":                            # (the scale-down written, its cause named)
@@ -435,7 +443,7 @@ class Cli(unittest.TestCase):
         self.assertIn("slow: its 8 GB card holds few", text)       # (the warn the setup shows too)
         self.assertIn("the setup scales down: drafting off (--mtp-max-t 1)", text)
         self.assertIn("does not fit: Qwen3.8-Flash-Next on saguaro-qfn cannot run on this PC's GPU 0: its 4 GB "
-                      "cannot hold the 6.3 GB", text)
+                      "cannot hold the 6.0 GB", text)
         self.assertIn("does not fit: Qwen3.8-Flash-Next on saguaro-qfn runs on one GPU, or up to 4 equal ones", text)
 
 
