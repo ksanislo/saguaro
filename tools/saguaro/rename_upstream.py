@@ -14,8 +14,14 @@ merged shows only REAL conflicts:
   logprefix   "strata part:" / "maya-ds4:" / "ds4:" -> "saguaro ..."  (the table of rename_log_prefixes.py)
   names       maya.py -> saguaro.py, maya.sh -> saguaro.sh, START-MAYA.bat, maya-nightly*, the saguaro-*
               temp-dir prefixes, [maya] -> [saguaro], "maya --speed-calibration" -> "saguaro.py ..."
-  brand       "restart Maya" / "Maya checks ..." -> Saguaro in user-visible docs; the credits, "Project Maya",
-              "Maya v1.1.x" and the Maya quant names (Maya-S/M/L/XS/S24) stay (289431642's rule, .md only)
+   brand       "restart Maya" / "Maya checks ..." -> Saguaro in user-visible docs; the credits, "Project Maya",
+               "Maya v1.1.x" and the Maya quant names (Maya-S/M/L/XS/S24) stay (289431642's rule, .md only)
+
+engines/qfn (our Strata/QFN engine), tools/qfn and the generated serve/qfn_engine.py get the settings and the
+engine-log-prefix passes - the union of what rename_env.py and rename_log_prefixes.py have always swept there;
+the internal, names and brand families stop before that tree (its sources and its CMake project keep strata /
+namespace strata / STRATA_X options, and its own program names).  So a new MAYA_FOO setting in a qfn source or
+a new "strata part:" prefix in a qfn engine log is caught by this one command, as it was by the two old ones.
 
 Idempotent: no rule's replacement is ever a rule's match, so a second run changes nothing.  Exception list
 (rename_rules.EXC_PATHS / EXC_TEXT): record texts quoting upstream commands, the maya-*.json config names, the
@@ -25,7 +31,8 @@ not fail --check; a renameable use does).
 
 --check writes nothing and exits 1 while a renameable name is left (the intake's gate, like the three tools').
 --diff prints what would change.  --paths prints the PATH renames (old<TAB>new per line: maya.py, maya.sh,
-START-MAYA.bat, the MAYA_* docs, include/strata/) for `git mv`; it changes nothing either.
+START-MAYA.bat, the MAYA_* docs - under docs/ only - include/strata/) for `git mv`; it changes nothing either, and
+the skip filter applies to it too: a vendored, generated or scratch file named maya.py is never suggested.
 Default paths: the whole worktree.  The three older scripts keep working on their own; all four read the one
 rule table, tools/saguaro/rename_rules.py.  See scratch/notes.md and REPORT-rn1-rename-tool.md.
 """
@@ -72,22 +79,11 @@ def collect(paths: list[Path]) -> dict:
     return out
 
 
-def _mask(text: str, rel: str):
-    """hide one file's exception-list occurrences from the names/cmd rules: (masked text, the hidden strings)"""
-    spans = []
-    for exc_rel, rx in T.EXC_TEXT:
-        if exc_rel == rel:
-            spans += [text[m.start():m.end()] for m in rx.finditer(text)]
-    for i, s in enumerate(spans):
-        text = text.replace(s, f"\x00EXC{i}\x00")
-    return text, spans
-
-
 def apply_names(text: str, rel: str, fam, explicit: bool) -> tuple[str, list]:
     """the new (M1 hand-rename) families plus the engine log prefixes for one file: (text, families changed)"""
     fams = []
-    if not rel.startswith(T.EXC_PATHS):
-        masked, hidden = _mask(text, rel)
+    if not T.internal_skipped(rel):      # names/brand/record texts stop at QFN's tree (its sources get only the
+        masked, hidden = T.mask_exceptions(text, rel)   # log-prefix pass below, as rename_log_prefixes.py's scope)
         n = 0
         if fam in T.NAMES_FAM:
             for rx, to in T.NAMES_RULES + T.CMD_RULES:
@@ -106,9 +102,7 @@ def apply_names(text: str, rel: str, fam, explicit: bool) -> tuple[str, list]:
                 b += k
             if b:
                 fams.append("brand")
-        for i, s in enumerate(hidden):
-            masked = masked.replace(f"\x00EXC{i}\x00", s)
-        text = masked
+        text = T.unmask_exceptions(masked, hidden)
     if explicit or (fam == "cpp" and rel.startswith(T.LOG_SRC_PATHS)
                     and Path(rel).suffix.lower() in T.LOG_CPP_SUFFIXES):
         rules = T.LOG_RULES + (T.LOG_LINE_RULES if explicit else [])
@@ -121,13 +115,16 @@ def apply_names(text: str, rel: str, fam, explicit: bool) -> tuple[str, list]:
     return text, fams
 
 
-def exception_hits(files: dict, texts: dict) -> list:
-    """the stale old-name mentions the exception list keeps (scratch/notes.md C): reported, never rewritten"""
+def exception_hits(files: dict) -> list:
+    """the stale old-name mentions the exception list keeps (scratch/notes.md C): reported, never rewritten.
+    Finding 5: the line numbers are those of the files as they were read (files[rel][2]), not of the planned
+    texts - when --check is red the two can differ, and the report points at the file on disk."""
     hits = []
     for exc_rel, rx in T.EXC_TEXT:
-        if exc_rel in texts:
-            for m in rx.finditer(texts[exc_rel]):
-                line = texts[exc_rel][:m.start()].count("\n") + 1
+        if exc_rel in files:
+            text = files[exc_rel][2]
+            for m in rx.finditer(text):
+                line = text[:m.start()].count("\n") + 1
                 hits.append(f"{exc_rel}:{line}: {m.group(0)}")
     return hits
 
@@ -143,11 +140,10 @@ def plan_tree(files: dict):
             changed[rel].append(fam)
 
     for rel, (p, fam, text, bom, explicit) in files.items():
-        if p.suffix.lower() in T.INT_TEXT_SUFFIXES and not rel.startswith(T.EXC_PATHS):
-            masked, hidden = _mask(texts[rel], rel)      # the exception list's STRATA_ names stay (engines/qfn's
-            t = T.rename_internal(masked, p)             # own options, their docs and tests)
-            for i, s in enumerate(hidden):
-                t = t.replace(f"\x00EXC{i}\x00", s)
+        # QFN's own tree (rename_rules.INTERNAL_SKIP_PATHS): its CMake project keeps STRATA_, stop before it
+        if p.suffix.lower() in T.INT_TEXT_SUFFIXES and not T.internal_skipped(rel):
+            masked, hidden = T.mask_exceptions(texts[rel], rel)   # the exception list's STRATA_ names stay
+            t = T.unmask_exceptions(T.rename_internal(masked, p), hidden)   # (their docs and tests too)
             if t != texts[rel]:
                 texts[rel] = t
                 bump(rel, "internal")
@@ -167,6 +163,43 @@ def plan_tree(files: dict):
     return texts, {r: sorted(set(c)) for r, c in changed.items() if c}, setting_report
 
 
+def path_new(rel: str):
+    """--paths: the `git mv` name for a root-relative path when the name families cover it, else None.
+    Finding 2: the skip filter applies here too (no vendored/scratch/build file named maya.py is ever
+    suggested), and the MAYA_* doc prefix counts only under docs/ (rename_rules.NAME_PATH_PREFIXES)."""
+    if T.internal_skipped(rel):        # the name paths belong to our tree, not to QFN's or the records
+        return None
+    name = rel.rsplit("/", 1)[-1]
+    new = next((n for o, n in T.NAME_PATHS if name == o), None)
+    if new is None:
+        for scope, pre, to in T.NAME_PATH_PREFIXES:
+            if rel.startswith(scope) and name.startswith(pre):
+                new = to + name[len(pre):]
+                break
+    return rel[:len(rel) - len(name)] + new if new else None
+
+
+def paths_mode(roots: list[Path]):
+    """print the PATH renames (old<TAB>new) for `git mv`; the walk prunes the same skip dirs as collect()"""
+    for root in roots:
+        cand = [root] if root.is_file() else []
+        if not cand:
+            for dirpath, dirnames, filenames in os.walk(root):
+                dirnames[:] = [d for d in dirnames if d not in T.SKIP_DIR_NAMES and not T.SKIP_DIR_RE.match(d)]
+                cand += [Path(dirpath) / fn for fn in filenames]
+        for p in sorted(cand):
+            try:
+                rel = p.relative_to(ROOT).as_posix()
+            except ValueError:
+                sys.exit(f"{p}: outside the worktree {ROOT}")
+            new = path_new(rel)
+            if new:
+                print(rel + "\t" + new)
+    for old, new in T.INTERNAL_PATHS:
+        if (ROOT / old).is_dir():
+            print(old + "\t" + new)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--check", action="store_true", help="write nothing; exit 1 while a renameable name is left")
@@ -178,29 +211,12 @@ def main() -> int:
     roots = [Path(x).resolve() for x in (a.paths or [ROOT])]
 
     if a.paths_mode:
-        for root in roots:
-            for p in ([root] if root.is_file() else sorted(root.rglob("*"))):
-                if not p.is_file():
-                    continue
-                try:
-                    rel = p.relative_to(ROOT).as_posix()
-                except ValueError:
-                    sys.exit(f"{p}: outside the worktree {ROOT}")
-                name = p.name
-                new = next((n for o, n in T.NAME_PATHS if name == o), None)
-                if new is None:
-                    pre = next(((pre, to) for pre, to in T.NAME_PATH_PREFIXES if name.startswith(pre)), None)
-                    new = pre[1] + name[len(pre[0]):] if pre else None
-                if new:
-                    print(rel + "\t" + (rel[:len(rel) - len(name)] if "/" in rel else "") + new)
-        for old, new in T.INTERNAL_PATHS:
-            if (ROOT / old).is_dir():
-                print(old + "\t" + new)
+        paths_mode(roots)
         return 0
 
     files = collect(roots)
     texts, changed, rep = plan_tree(files)
-    hits = exception_hits(files, texts)
+    hits = exception_hits(files)
 
     by_fam = {f: 0 for f in FAM_NAME}
     for fams in changed.values():

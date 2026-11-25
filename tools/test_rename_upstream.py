@@ -154,6 +154,45 @@ class Names(unittest.TestCase):
         self.assertEqual(changed, {})
 
 
+class SharedSkipLists(unittest.TestCase):
+    """findings 1: the four tools read ONE skip list and ONE exception list (rename_rules), no private copies"""
+
+    def test_one_skip_list_for_every_tool(self):
+        for rel in ("ref/x/y.md", "scratch/notes.md", "tools/test_rename_upstream.py", "docs/UPSTREAM.md",
+                    "docs/triage/x.md", "engines/qfn/third_party/a/b.md", "build-today/x.cu", "CHANGELOG.md",
+                    "docs/NEXT-step.md", "LICENSE.hy4-flash", "logs/run.log"):
+            self.assertTrue(T.skipped(rel), rel)
+        for rel in ("src/core/x.cu", "docs/SETTINGS.md", "saguaro.py", "tools/qfn_fit.py",
+                    "engines/qfn/src/core/x.cu"):              # engines/qfn stays IN for settings and prefixes
+            self.assertFalse(T.skipped(rel), rel)
+
+    def test_internal_scope_adds_qfn_and_the_record_texts(self):
+        for rel in ("engines/qfn/src/core/x.cu", "engines/qfn/include/strata/x.h", "tools/qfn/kl.py",
+                    "serve/qfn_engine.py", "docs/MI50_VALIDATION.md", "docs/DGX_SPARK.md", "ref/x.md"):
+            self.assertTrue(T.internal_skipped(rel), rel)
+        for rel in ("src/core/x.cu", "saguaro.py", "docs/SETTINGS.md"):
+            self.assertFalse(T.internal_skipped(rel), rel)
+
+    def test_exception_hits_line_up_with_the_file_on_disk(self):
+        """finding 5: exception_hits reads the files as they were collected, not the planned texts - a plan
+        that shifted a file's text cannot make the reported line drift from the file on disk"""
+        rel = "src/hy4/hy4_main.cpp"
+        on_disk = '#include "x"\n// HY4_FETCH_MEASURE=1 or maya --speed-calibration measures\n'
+        files = {rel: [Path(rel), "cpp", on_disk, False, False]}
+        self.assertEqual(ru.exception_hits(files), [rel + ":2: maya"])
+        # the pre-fix report came from the planned texts: a file whose text gained a line reported one lower
+        shifted = {rel: [Path(rel), "cpp", "\n" + on_disk, False, False]}
+        self.assertEqual(ru.exception_hits(shifted), [rel + ":3: maya"])
+
+    def test_exception_mask_round_trip(self):
+        t = 'port = getenv("STRATA_PORTABLE");  // start Maya again\n'
+        m, hid = T.mask_exceptions(t, "saguaro.py")
+        self.assertNotIn("STRATA_PORTABLE", m)
+        self.assertNotIn("Maya", m)
+        self.assertEqual(T.unmask_exceptions(m, hid), t)
+        self.assertEqual(T.mask_exceptions(t, "src/a.cpp")[0], t)     # only the named file's strings are hidden
+
+
 class Brand(unittest.TestCase):
     def test_user_visible_docs(self):
         out = one("Maya checks the Installer's path. Put the folder on PATH and restart Maya.\n", "docs/SETUP.md")
@@ -268,12 +307,98 @@ class M1FromV1178(unittest.TestCase):
         self.assertEqual(texts2, self.texts)
 
 
-class RealTree(unittest.TestCase):
-    def test_check_passes_over_the_worktree(self):
-        got = subprocess.run([sys.executable, "tools/saguaro/rename_upstream.py", "--check"],
+class EnginesQfn(unittest.TestCase):
+    """finding 3: the one command covers engines/qfn as the union of the old scripts did - the settings and
+    log-prefix passes sweep its sources; the internal / names / brand families stop before that tree"""
+
+    def test_settings_and_prefixes_fire_in_qfn_sources(self):
+        cpp = ('const char* v = std::getenv("MAYA_QFN_NEW_THING");\n'
+               'fprintf(stderr, "strata qfn stage: hi\\n");\n')
+        texts, changed = run(F("engines/qfn/src/core/n.cu", cpp))
+        out = texts["engines/qfn/src/core/n.cu"]
+        self.assertIn('getenv("SAGUARO_QFN_NEW_THING")', out)
+        self.assertIn('"saguaro qfn stage: hi\\n"', out)
+        self.assertEqual(sorted(changed["engines/qfn/src/core/n.cu"]), ["logprefix", "settings"])
+        texts, changed = run(F("engines/qfn/tools/vision/e.cpp", 'fprintf(stderr, "ds4: enc\\n");\n'))
+        self.assertIn('"saguaro ds4: enc\\n"', texts["engines/qfn/tools/vision/e.cpp"])
+
+    def test_the_qfn_tree_itself_stays(self):
+        cpp = ('#include "strata/core.h"\nnamespace strata { void f() { strata::g(); } }\n'
+               'static const char* s = "maya-ds4 build";\n')
+        cmake = 'option(STRATA_QFN_EXPERIMENT "x" OFF)\ntarget_compile_definitions(q PRIVATE STRATA_QFN_X)\n'
+        md = 'run `python maya.py --bench` or `./maya.sh`; restart Maya.\n'
+        texts, changed = run(F("engines/qfn/include/strata/core.h", cpp),
+                             F("engines/qfn/CMakeLists.txt", cmake),
+                             F("engines/qfn/README.md", md),
+                             F("tools/qfn/util.py", 'print("run maya.py --bench")\n'),
+                             F("serve/qfn_engine.py", 'print("[maya] qfn up")\n'))
+        self.assertEqual(changed, {})
+        self.assertEqual(texts["engines/qfn/include/strata/core.h"], cpp)
+        self.assertEqual(texts["engines/qfn/CMakeLists.txt"], cmake)
+        self.assertEqual(texts["engines/qfn/README.md"], md)
+        self.assertEqual(texts["tools/qfn/util.py"], 'print("run maya.py --bench")\n')
+        self.assertEqual(texts["serve/qfn_engine.py"], 'print("[maya] qfn up")\n')
+
+
+class Paths(unittest.TestCase):
+    """finding 2: --paths applies the skip filter, and the MAYA_* doc prefix counts only under docs/"""
+
+    def test_path_names_and_skips(self):
+        for rel, want in (("maya.py", "saguaro.py"), ("tools/maya.sh", "tools/saguaro.sh"),
+                          ("START-MAYA.bat", "START-SAGUARO.bat"), ("docs/MAYA_GPU.md", "docs/SAGUARO_GPU.md"),
+                          ("docs/deep/MAYA_2.md", "docs/deep/SAGUARO_2.md")):
+            self.assertEqual(ru.path_new(rel), want)
+        for rel in ("scratch/maya.py", "ref/vendor/maya.sh", "third_party/x/START-MAYA.bat",
+                    "build-today/maya.py", "engines/qfn/src/maya.py", "serve/qfn_engine.py", "CHANGELOG.md",
+                    "docs/triage/MAYA_X.md", "MAYA_NOT_A_DOC.md", "src/MAYA_NOT_A_DOC.md",
+                    "docs/notes.md", "src/core/x.cu"):
+            self.assertIsNone(ru.path_new(rel), rel)
+
+    def test_paths_mode_skips_scratch_and_vendored_names(self):
+        """a scratch file named maya.py / MAYA_X.md: --paths prints nothing, and the walk prunes build dirs"""
+        d = ROOT / "scratch" / "p9_paths"
+        d.mkdir(parents=True, exist_ok=True)
+
+        def clean():
+            for p in sorted(d.rglob("*"), reverse=True):
+                p.unlink() if p.is_file() else p.rmdir()
+            d.rmdir()
+        self.addCleanup(clean)
+        (d / "maya.py").write_text("print(1)\n")
+        (d / "MAYA_NOT_A_DOC.md").write_text("x\n")
+        (d / "build-today").mkdir()
+        (d / "build-today" / "maya.sh").write_text("echo\n")
+        got = subprocess.run([sys.executable, "tools/saguaro/rename_upstream.py", "--paths", "scratch/p9_paths"],
                              cwd=ROOT, capture_output=True, text=True)
-        self.assertEqual(got.returncode, 0, got.stdout[-2000:] + got.stderr[-2000:])
-        self.assertIn("CHECK OK", got.stdout)
+        self.assertEqual(got.returncode, 0, got.stderr[-2000:])
+        self.assertEqual(got.stdout, "")
+
+
+class RealTree(unittest.TestCase):
+    def run_tool(self, script):
+        got = subprocess.run([sys.executable, "tools/saguaro/" + script, "--check"],
+                             cwd=ROOT, capture_output=True, text=True)
+        self.assertEqual(got.returncode, 0, script + "\n" + got.stdout[-2000:] + got.stderr[-2000:])
+        return got.stdout
+
+    def test_check_passes_over_the_worktree(self):
+        self.assertIn("CHECK OK", self.run_tool("rename_upstream.py"))
+
+    def test_internal_tool_check_passes_over_the_worktree(self):
+        """finding 1: rename_internal_maya --check no longer prints the test module, the triage record or the
+        exception-list names as strata residue - it reads the shared skip and exception lists"""
+        out = self.run_tool("rename_internal_maya.py")
+        self.assertNotIn("test_rename_upstream", out)
+        self.assertNotIn("TRIAGE-upstream-prs", out)
+        self.assertNotIn("docs/SETTINGS.md", out)
+
+    def test_env_check_does_not_see_the_test_module_fixture(self):
+        """finding 1 (and nit 4): the fixture settings live in a skipped module, so they are not collisions
+        of themselves; rename_env --check is green by design, not by coincidence"""
+        out = self.run_tool("rename_env.py")
+        self.assertIn("CHECK OK", out)
+        for fixture in ("MAYA_SOMETHING_NEW", "MAYA_DS4_SLOT_KEEP", "STRATA_OLD_THING", "MAYA_BENCH_LOCK_OK"):
+            self.assertNotIn(fixture, out)
 
 
 if __name__ == "__main__":
