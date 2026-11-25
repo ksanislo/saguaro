@@ -1448,6 +1448,31 @@ class PascalForQfn(unittest.TestCase):
         self.assertEqual({k for k in lay["env"] if k.startswith("SAGUARO_SM75")
                           or k in ("SAGUARO_KQL", "SAGUARO_GDN_KEYHEAD", "SAGUARO_ARGMAX_ROWS_SM70")}, set())
 
+    def test_the_headless_p40_writes_1024_as_its_reserve(self):
+        """v1.2.1-D: the written config of a headless Pascal card keeps 1024 MiB free (the warm-up graph captures
+        fell to 264 MiB with 512), the --vram-reserve-mib still wins above the rule, and the ok line says why."""
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            models, d = t / "models", t / "models" / "Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S"
+            files = [t / "gguf" / n for n in maya.qfn_entry("gsq-iq3_s")["files"]]
+            gpus = {"backend": "cuda", "gpus": [dict(self.P40, display=False)]}
+            for kw, want in (({}, "1024"), ({"vram_reserve_mib": 2048}, "2048")):
+                with self.subTest(**kw), tempfile.TemporaryDirectory() as t2:
+                    t2 = Path(t2)
+                    out = io.StringIO()
+                    m2, d2 = t2 / "models", t2 / "models" / "Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S"
+                    f2 = [t2 / "gguf" / n for n in maya.qfn_entry("gsq-iq3_s")["files"]]
+                    with cpu(), patch.object(maya, "ROOT", t2), patch.object(maya, "mem_gb",
+                                                                             return_value=(220.0, 200.0)), \
+                            patch.object(maya, "write_run_script", return_value=t2 / "run.sh"), \
+                            patch("sys.stdout", new=out), patch.object(maya.S, "UI", None):
+                        p = maya.write_config_qfn(args(backend="cuda", **kw), gpus, {}, "gsq-iq3_s", f2,
+                                                  d2 / "pack", None, 65536, m2, d2, {})
+                    a = json.loads(p.read_text())["args"]
+                    self.assertEqual(a[a.index("--vram-reserve-mib") + 1], want)
+                    if not kw:
+                        self.assertIn("264", out.getvalue())             # (the measured reason, said)
+
     def test_the_toolkit_rule_prefers_a_fitting_12_x(self):
         self.assertEqual(maya.nvcc_range([61]), ((12, 0), (13, 0)))    # (CUDA 13 dropped Pascal: hi)
         self.assertEqual(maya.pick_nvcc([("/c13", (13, 2)), ("/c128", (12, 8))], [61]), ("/c128", (12, 8)))

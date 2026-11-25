@@ -1023,16 +1023,29 @@ def gpu_headless(g) -> bool:
     return g.get("display") is False and g.get("vram_used_gb", 0.0) < HIP_IDLE_VRAM_GB
 
 
+def gpu_sm6x(gpus) -> bool:
+    """True when every GPU here is an NVIDIA compute capability 6.x card (Tesla P40 / P100, GTX 10): the gate
+    for the wider headless reserve (gpu_reserve_mib)."""
+    def cc(g):
+        try:
+            return int(str(g.get("arch") or "0").split(".")[0])
+        except ValueError:
+            return 0
+    return bool(gpus) and all(60 <= cc(g) < 70 for g in gpus)
+
+
 def gpu_reserve_mib(gpus) -> int:
     """The VRAM (MiB) an engine on these GPUs leaves free on each, AMD and NVIDIA alike: 3072 where the desktop may
     run on one (it allocates after the engine has filled its expert pool); 1024 on a Linux AMD APU (its pool is
     sized from the RAM it shares; Windows draws its desktop from the APU's carve-out too); 512 on cards with no
     display (compute only: only the engine's own late allocations come after the pool, and the engine keeps the
-    margin it measured for them)."""
+    margin it measured for them), 1024 on those when every card is Pascal sm_6x - the 2026-11-23 P40 batch: with
+    512 the P40's warm-up graph captures fell to 264-302 MiB free, below the engine's own 512 warning, while runs
+    at 1024 held above 760 MiB."""
     if any(hip_unified_memory(g) for g in gpus) and not WIN:
         return 1024
     if gpus and all(gpu_headless(g) for g in gpus):
-        return 512
+        return 1024 if gpu_sm6x(gpus) else 512
     return 3072
 
 
@@ -1040,6 +1053,9 @@ def gpu_reserve_why(gpus) -> str:
     if any(hip_unified_memory(g) for g in gpus) and not WIN:
         return "an APU: its pool is sized from the shared RAM"
     if gpus and all(gpu_headless(g) for g in gpus):
+        if gpu_sm6x(gpus):
+            return ("no display is connected to the GPU, and these are Pascal (sm_6x) cards: their warm-up "
+                    "graph captures fell to 264 MiB free with a 512 MiB reserve and held above 760 with 1024")
         return "no display is connected to the GPU"
     return "the desktop may run on the GPU and allocate beside the engine"
 
