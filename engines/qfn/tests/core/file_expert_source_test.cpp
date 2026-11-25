@@ -338,6 +338,51 @@ void test_split_lend_regions() {
             "an out-of-range lend-region pair was accepted, or a rejected walk touched the plan");
 }
 
+void test_vram_giveback() {
+    using namespace strata::core::detail;
+    // F1 (the VRAM give-back in the resident low-RAM layout), one layer x five experts, 4-byte blobs.
+    // The startup plan: experts 2, 3 and 4 sit in the GPU cache, and the RAM copy holds 0 and 1 (the
+    // budget's) plus 3 twice over - a lend-region expert, held in both tiers.  A `VRAM <reserve>`
+    // shrink evicts the cache's last slots and NEVER touches this table: an evicted expert the copy
+    // does not hold is then exactly what --resident-budget-gib's file tier is from the start, and the
+    // miss path (and the grow path's refill read) resolves it to the file - the bytes the slot held.
+    const size_t b = 4, n = 5;
+    std::vector<uint8_t> file(n * b), ram(3 * b);
+    for (size_t e = 0; e < n; ++e)
+        for (size_t i = 0; i < b; ++i) file[e * b + i] = (uint8_t) (0xA0 + e * 8 + i);
+    for (size_t e : {(size_t) 0, (size_t) 1, (size_t) 3}) {
+        const size_t at = e == 3 ? 2 * b : e * b;   // the lend copy sits at the plan's third place
+        std::copy(file.begin() + (std::ptrdiff_t) (e * b), file.begin() + (std::ptrdiff_t) (e * b + b),
+                  ram.begin() + (std::ptrdiff_t) at);
+    }
+    const std::vector<uint64_t> offsets{0, b, kNoCacheComplement, 2 * b, kNoCacheComplement};
+    const uint8_t* f = file.data();
+    const uint8_t* r = ram.data();
+    // the give-back: expert 2 (a cache expert, no RAM place) and expert 4 (file-tier since the budget)
+    // resolve identically - to the file; there is nothing in the source to tell about the eviction
+    require(cache_complement_blob_or_fallback(2, offsets, r, f + 2 * b) == f + 2 * b,
+            "the shrink left a no-RAM expert off the file fallback");
+    require(cache_complement_blob_or_fallback(4, offsets, r, f + 4 * b) == f + 4 * b, "the file tier moved");
+    // ... and a lend-region expert (held in both tiers) still resolves to its RAM place: the grow path
+    // refills its slot from there - the same bytes the mapping holds
+    require(cache_complement_blob_or_fallback(3, offsets, r, f + 3 * b) == r + 2 * b, "the lend copy was lost");
+    require(std::equal(r + 2 * b, r + 3 * b, f + 3 * b), "the lend copy does not hold the file's bytes");
+    // the adaptive tier cannot corrupt the table through the evicted expert: as an `in` the copy does
+    // not hold, and as an `out` the copy holds already (the lend expert), an exchange is refused -
+    // resident_stage_swaps keeps those swaps un-staged, off the table entirely
+    std::vector<uint64_t> x = offsets;
+    require(!exchange_cache_complement(x, 2, 0), "a no-RAM `in` staged an exchange");
+    require(!exchange_cache_complement(x, 3, 1), "an exchange moved a place onto an expert that has one");
+    require(x == offsets, "a refused exchange touched the table");
+    // a real exchange still follows the bytes after a give-back: (0,1) into a slot, expert 4's evicted
+    // bytes into (0,1)'s place in the copy
+    require(exchange_cache_complement(x, 1, 4) &&
+                x == std::vector<uint64_t>({0, kNoCacheComplement, kNoCacheComplement, 2 * b, b}),
+            "the exchange after a give-back did not move the place");
+    require(cache_complement_blob_or_fallback(4, x, r, f + 4 * b) == r + b, "the evicted expert lost its new place");
+    require(cache_complement_blob_or_fallback(1, x, r, f + 1 * b) == f + 1 * b, "the swapped-in expert stayed in RAM");
+}
+
 void test_resident_exchange() {
     using namespace strata::core;
     using namespace strata::core::detail;
@@ -989,6 +1034,7 @@ int main(int argc, char** argv) {
         test_complement_plan();
         test_resident_lend_region();
         test_split_lend_regions();
+        test_vram_giveback();
         test_resident_exchange();
         test_resident_memory_budget();
         test_pin_pacing();
